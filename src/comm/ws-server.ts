@@ -5,7 +5,8 @@
  * - 在指定端口监听边缘节点连接；
  * - 解析协议信封（protocol.ts），按 type 路由到注入的 MessageHandler；
  * - 把 handler 的返回信封回发给对应边缘连接；
- * - 维护每条连接的会话状态（sessionId / edgeId）。
+ * - 维护每条连接的会话状态（sessionId / edgeId），并登记"已上线的边缘连接"，
+ *   以便云端在收到控制端（如 trigger-like）的指令时，主动把命令推送给边缘。
  *
  * 仅依赖 `ws`，不绑定具体业务逻辑——planner / cache / llm 通过 handler 注入，
  * 便于单测（可不起真实网络，直接调 routeMessage）。
@@ -26,9 +27,24 @@ export interface EdgeSession {
   app?: string;
 }
 
+/**
+ * 边缘推送器：把一个信封下发给已上线的边缘连接。
+ * 控制端（trigger）触发的命令通过它主动推给边缘（而非请求/响应）。
+ */
+export interface EdgePusher {
+  /** 推送给指定 edgeId 的连接；未指定则广播给所有已上线边缘。返回送达连接数。 */
+  pushToEdges(env: Envelope, edgeId?: string): number;
+  /** 当前已上线（完成 hello）的边缘数量 */
+  edgeCount(): number;
+}
+
 /** 消息处理器：收到一个请求信封，产出 0/1 个响应信封 */
 export interface MessageHandler {
-  handle(env: Envelope, session: EdgeSession): Promise<Envelope | null> | Envelope | null;
+  handle(
+    env: Envelope,
+    session: EdgeSession,
+    pusher?: EdgePusher,
+  ): Promise<Envelope | null> | Envelope | null;
 }
 
 export interface WsServerOptions {
@@ -43,14 +59,22 @@ export interface WsServerOptions {
 
 let sessionSeq = 0;
 
+/** 已登记的边缘连接 */
+interface EdgeConn {
+  ws: WebSocket;
+  session: EdgeSession;
+}
+
 /** 边-云 WebSocket 服务端 */
-export class EdgeCloudServer {
+export class EdgeCloudServer implements EdgePusher {
   private wss?: WebSocketServer;
   private readonly port: number;
   private readonly host: string;
   private readonly handler: MessageHandler;
   private readonly clock: () => number;
   private readonly sessionIdGen: () => string;
+  /** 已上线（完成 hello）的边缘连接，按 sessionId 索引 */
+  private readonly edges = new Map<string, EdgeConn>();
 
   constructor(options: WsServerOptions) {
     this.port = options.port ?? 8787;
@@ -77,12 +101,38 @@ export class EdgeCloudServer {
     });
   }
 
+  /** EdgePusher：把命令推给已上线边缘 */
+  pushToEdges(env: Envelope, edgeId?: string): number {
+    const frame = JSON.stringify(env);
+    let sent = 0;
+    for (const conn of this.edges.values()) {
+      if (edgeId && conn.session.edgeId !== edgeId) continue;
+      if (conn.ws.readyState === WebSocket.OPEN) {
+        conn.ws.send(frame);
+        sent++;
+      }
+    }
+    return sent;
+  }
+
+  edgeCount(): number {
+    return this.edges.size;
+  }
+
   private onConnection(ws: WebSocket): void {
     const session: EdgeSession = { sessionId: this.sessionIdGen() };
     ws.on('message', async (data) => {
       const text = typeof data === 'string' ? data : data.toString();
+      // 在握手成功时登记边缘连接，使其可被主动推送
+      const env = parseEnvelope(text);
       const reply = await this.routeMessage(text, session);
+      if (env?.type === 'hello') {
+        this.edges.set(session.sessionId, { ws, session });
+      }
       if (reply) ws.send(JSON.stringify(reply));
+    });
+    ws.on('close', () => {
+      this.edges.delete(session.sessionId);
     });
   }
 
@@ -96,7 +146,7 @@ export class EdgeCloudServer {
       return this.errorEnvelope('bad_envelope', '无法解析的协议帧');
     }
     try {
-      return await this.handler.handle(env, session);
+      return await this.handler.handle(env, session, this);
     } catch (err) {
       return this.errorEnvelope('handler_error', (err as Error).message, env.id);
     }

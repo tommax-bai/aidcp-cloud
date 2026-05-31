@@ -140,3 +140,24 @@ test('未知类型 → error 信封', async () => {
   const res = await h.handle(bogus, session);
   assert.equal(res?.type, 'error');
 });
+
+test('note.content → 路由到 session 编排器，不强制回包', async () => {
+  let received: { title: string } | null = null;
+  const h = new DefaultMessageHandler({
+    planner: new SimplePlanner(),
+    llm: dummyLlm,
+    cache: memStore(),
+    clock: fixedClock,
+    session: { onNote: async (n) => { received = n; return undefined; } },
+  });
+  const res = await h.handle(
+    makeEnvelope('note.content', 'nc1', 1, {
+      noteId: 'x', title: 'T', summary: 'S', likeCount: 100, collectCount: 50,
+    }),
+    session,
+  );
+  // session.onNote returned undefined (no envelope) → fallback browse.next
+  assert.equal(res!.type, 'browse.next');
+  assert.equal(res!.id, 'nc1');
+  assert.equal(received!.title, 'T');
+});

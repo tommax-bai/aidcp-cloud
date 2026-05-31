@@ -54,7 +54,7 @@ export class QwenClient implements LlmClient {
 
   constructor(options: QwenClientOptions = {}) {
     this.apiKey = options.apiKey ?? process.env.DASHSCOPE_API_KEY ?? '';
-    this.model = options.model ?? 'qwen-plus';
+    this.model = options.model ?? 'qwen-turbo';
     this.baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
     this.temperature = options.temperature ?? 0;
     this.timeoutMs = options.timeoutMs ?? 30_000;

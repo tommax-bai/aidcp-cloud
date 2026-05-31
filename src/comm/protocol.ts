@@ -30,6 +30,14 @@ export type MessageType =
   | 'anchor.report' // edge → cloud：上报一次命中/校验结果，驱动反污染晋升
   // —— 执行结果回传（观测/训练用）——
   | 'action.result' // edge → cloud：上报某 actionId 的最终 ActionResult
+  // —— 浏览会话编排（Soul 状态机驱动）——
+  | 'note.content' // edge → cloud：上报一条笔记的标题/摘要/指标，供评估与概念抽取
+  | 'browse.next' // cloud → edge：滚动/滑到下一条笔记
+  | 'search.execute' // cloud → edge：执行一次关键词搜索
+  | 'session.end' // cloud → edge：结束本次浏览会话
+  // —— 发布编排（Publish Agent 驱动）——
+  | 'publish.request' // cloud → edge：请求在浏览器中发布一篇帖子
+  | 'publish.result' // edge → cloud：发布结果回传
   // —— 通用 ——
   | 'error' // 任一方 → 对方：错误信息
   | 'ping'
@@ -154,6 +162,71 @@ export interface ActionResultPayload {
   escalation?: string;
 }
 
+/** 一条笔记的内容投影（edge → cloud），供引擎评估互动与抽取概念。 */
+export interface NoteContentPayload {
+  /** 笔记唯一标识（用于去重/记录来源） */
+  noteId: string;
+  title: string;
+  /** 正文摘要（边缘截取，控制长度） */
+  summary: string;
+  /** 点赞数 */
+  likeCount: number;
+  /** 收藏数 */
+  collectCount: number;
+  /** 可选作者名 */
+  author?: string;
+}
+
+/** 让边缘滑到下一条笔记（cloud → edge）。 */
+export interface BrowseNextPayload {
+  /** 调试说明（为什么继续刷） */
+  reason?: string;
+}
+
+/** 让边缘执行一次搜索（cloud → edge）。 */
+export interface SearchExecutePayload {
+  /** 搜索关键词 */
+  keyword: string;
+  /** 关键词来源策略（观测用） */
+  source?: 'extract_from_liked' | 'random_from_interests' | 'new_concept';
+  /** 本次搜索最多浏览的结果数 */
+  maxResults?: number;
+}
+
+/** 结束本次浏览会话（cloud → edge）。 */
+export interface SessionEndPayload {
+  reason: string;
+  /** 会话汇总统计（观测用） */
+  stats?: {
+    likedCount: number;
+    skippedCount: number;
+    searchCount: number;
+    durationMs: number;
+  };
+}
+
+/** 请求在浏览器中发布一篇帖子（cloud → edge）。 */
+export interface PublishRequestPayload {
+  /** 帖子标题（小红书标题） */
+  title: string;
+  /** 正文（200-500 字） */
+  content: string;
+  /** 话题标签（3-5 个） */
+  tags: string[];
+  /** 可选配图（本任务暂不实现） */
+  images?: string[];
+}
+
+/** 发布结果回传（edge → cloud）。 */
+export interface PublishResultPayload {
+  /** 是否发布成功 */
+  ok: boolean;
+  /** 发布成功后的平台帖子 id */
+  postId?: string;
+  /** 失败原因 */
+  error?: string;
+}
+
 export interface ErrorPayload {
   code: string;
   message: string;
@@ -171,6 +244,12 @@ export interface PayloadMap {
   'anchor.get.result': AnchorGetResultPayload;
   'anchor.report': AnchorReportPayload;
   'action.result': ActionResultPayload;
+  'note.content': NoteContentPayload;
+  'browse.next': BrowseNextPayload;
+  'search.execute': SearchExecutePayload;
+  'session.end': SessionEndPayload;
+  'publish.request': PublishRequestPayload;
+  'publish.result': PublishResultPayload;
   error: ErrorPayload;
   ping: Record<string, never>;
   pong: Record<string, never>;

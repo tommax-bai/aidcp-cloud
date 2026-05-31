@@ -13,6 +13,8 @@ import { QwenClient } from './llm/index.js';
 import { SimplePlanner } from './planner/index.js';
 import { PgAnchorCache } from './cache/index.js';
 import { EdgeCloudServer, DefaultMessageHandler } from './comm/index.js';
+import { loadSoul } from './soul/index.js';
+import { SessionOrchestrator, EngagementDecider, ConceptExtractor } from './orchestrator/index.js';
 
 async function main(): Promise<void> {
   const port = Number(process.env.AIDCP_PORT ?? 8787);
@@ -20,6 +22,7 @@ async function main(): Promise<void> {
   const llm = new QwenClient();
   const planner = new SimplePlanner({ llm });
   const cache = new PgAnchorCache();
+  const soul = loadSoul();
 
   // 建表（幂等）；PG 不可用时打印告警但不阻塞启动协议处理
   try {
@@ -29,7 +32,15 @@ async function main(): Promise<void> {
     console.warn('[aidcp-cloud] PG 初始化失败（缓存相关消息将报错）:', (err as Error).message);
   }
 
-  const handler = new DefaultMessageHandler({ planner, llm, cache });
+  // 会话编排器（Soul 驱动浏览决策）
+  const decider = new EngagementDecider({ soul, llm });
+  const extractor = new ConceptExtractor({ llm });
+  const noopSink = { send: () => {} }; // 决策通过 handler 回包，不需要额外 push
+  const session = new SessionOrchestrator({ soul, decider, extractor, sink: noopSink });
+  session.start();
+  console.log(`[aidcp-cloud] Soul 会话编排器已启动（人设: ${soul.identity.name}）`);
+
+  const handler = new DefaultMessageHandler({ planner, llm, cache, session });
   const server = new EdgeCloudServer({ port, handler });
   await server.start();
   console.log(`[aidcp-cloud] 边-云 WebSocket 服务端已监听 :${port}`);

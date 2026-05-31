@@ -20,8 +20,9 @@ import {
   type AnchorReportPayload,
   type HelloPayload,
   type RemoteElement,
+  type NoteContentPayload,
 } from './protocol.js';
-import type { MessageHandler, EdgeSession } from './ws-server.js';
+import type { MessageHandler, EdgeSession, EdgePusher } from './ws-server.js';
 import type { TaskPlanner } from '../planner/types.js';
 import type { LlmClient } from '../llm/qwen.js';
 
@@ -35,12 +36,17 @@ export interface AnchorStore {
   dropStaged(actionId: string): Promise<void>;
 }
 
+export interface SessionRouter {
+  onNote(note: NoteContentPayload): Promise<unknown>;
+}
+
 export interface HandlerDeps {
   planner: TaskPlanner;
   llm: LlmClient;
   cache: AnchorStore;
   clock?: () => number;
   serverVersion?: string;
+  session?: SessionRouter;
 }
 
 /** 把元素清单渲染成给 LLM 的编号列表（与 edge selector 一致的格式） */
@@ -89,20 +95,43 @@ export class DefaultMessageHandler implements MessageHandler {
     this.serverVersion = deps.serverVersion ?? '0.1.0';
   }
 
-  async handle(env: Envelope, session: EdgeSession): Promise<Envelope | null> {
+  async handle(
+    env: Envelope,
+    session: EdgeSession,
+    pusher?: EdgePusher,
+  ): Promise<Envelope | null> {
     switch (env.type) {
       case 'hello':
         return this.onHello(env, session);
       case 'ping':
         return makeEnvelope('pong', env.id, this.clock(), {});
       case 'plan.request':
-        return this.onPlan(env);
+        return this.onPlan(env, pusher);
       case 'select.request':
         return this.onSelect(env);
       case 'anchor.get':
         return this.onAnchorGet(env);
       case 'anchor.report':
         return this.onAnchorReport(env);
+      case 'note.content':
+        if (this.deps.session) {
+          // 字段映射：edge payload (likes/collects/body) → IncomingNote (likeCount/collectCount/summary)
+          const p = env.payload as Record<string, unknown>;
+          const incomingNote = {
+            noteId: (p.noteId as string) || '',
+            title: (p.title as string) || '',
+            summary: (p.body as string) || (p.summary as string) || '',
+            likeCount: (p.likes as number) ?? (p.likeCount as number) ?? 0,
+            collectCount: (p.collects as number) ?? (p.collectCount as number) ?? 0,
+            author: (p.author as string) || undefined,
+          };
+          const outcome = await this.deps.session.onNote(incomingNote).catch(() => null) as { envelope?: Envelope } | null;
+          if (outcome?.envelope) {
+            // 用请求的 id 回包，让 edge request/response 关联上
+            return { ...outcome.envelope, id: env.id };
+          }
+        }
+        return makeEnvelope('browse.next', env.id, this.clock(), { reason: 'no_session' });
       case 'action.result':
         // 观测类消息：记录即可，不强制回包
         return null;
@@ -124,13 +153,23 @@ export class DefaultMessageHandler implements MessageHandler {
     });
   }
 
-  private async onPlan(env: Envelope): Promise<Envelope> {
+  private async onPlan(env: Envelope, pusher?: EdgePusher): Promise<Envelope> {
     const p = env.payload as PlanRequestPayload;
     const plan = await this.deps.planner.plan({ goal: p.goal, context: p.context });
-    return makeEnvelope('plan.response', env.id, this.clock(), {
+    const response = makeEnvelope('plan.response', env.id, this.clock(), {
       steps: plan.steps,
       reason: plan.reason,
     });
+    // 控制端（如 trigger-like）可要求把命令主动下发给已上线边缘：
+    // context.dispatch === 'edge' 时，把规划结果推给边缘（可选 context.edgeId 定向）。
+    if (pusher && p.context && p.context.dispatch === 'edge' && plan.steps.length > 0) {
+      const sent = pusher.pushToEdges(response, p.context.edgeId);
+      return makeEnvelope('plan.response', env.id, this.clock(), {
+        steps: plan.steps,
+        reason: plan.reason + ';dispatched_to=' + sent,
+      });
+    }
+    return response;
   }
 
   private async onSelect(env: Envelope): Promise<Envelope> {
@@ -199,3 +238,6 @@ export class DefaultMessageHandler implements MessageHandler {
     return null;
   }
 }
+
+
+

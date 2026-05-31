@@ -1,0 +1,198 @@
+/**
+ * Soul 配置加载器：读取 soul.yaml → 校验 → 强类型 Soul。
+ *
+ * - 默认从本模块同目录的 soul.yaml 读取（随源码分发）；
+ * - 解析用自带的极简 YAML 解析器（yaml.ts），不引第三方依赖；
+ * - 严格校验必填字段与类型，缺失/类型错直接抛错（fail-fast，避免运行期人设残缺）。
+ */
+
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+import { parseYaml, type YamlValue } from './yaml.js';
+import type {
+  Soul,
+  SoulIdentity,
+  SoulInterests,
+  EngagementRules,
+  QualityThreshold,
+  BrowsePatterns,
+  BrowseStateDef,
+  StateTransition,
+  SessionLimits,
+  SearchSource,
+} from './types.js';
+
+const SEARCH_SOURCES: SearchSource[] = [
+  'extract_from_liked',
+  'random_from_interests',
+  'new_concept',
+];
+
+function isRecord(v: YamlValue): v is { [k: string]: YamlValue } {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+function reqString(obj: { [k: string]: YamlValue }, key: string, path: string): string {
+  const v = obj[key];
+  if (typeof v !== 'string' || v === '') {
+    throw new Error(`soul 配置缺少字符串字段 ${path}.${key}`);
+  }
+  return v;
+}
+
+function reqNumber(obj: { [k: string]: YamlValue }, key: string, path: string): number {
+  const v = obj[key];
+  if (typeof v !== 'number' || Number.isNaN(v)) {
+    throw new Error(`soul 配置缺少数字字段 ${path}.${key}`);
+  }
+  return v;
+}
+
+function reqStringArray(obj: { [k: string]: YamlValue }, key: string, path: string): string[] {
+  const v = obj[key];
+  if (!Array.isArray(v) || v.some((x) => typeof x !== 'string')) {
+    throw new Error(`soul 配置字段 ${path}.${key} 必须是字符串数组`);
+  }
+  return v as string[];
+}
+
+function reqObject(
+  obj: { [k: string]: YamlValue },
+  key: string,
+  path: string,
+): { [k: string]: YamlValue } {
+  const v = obj[key];
+  if (!isRecord(v)) {
+    throw new Error(`soul 配置字段 ${path}.${key} 必须是对象`);
+  }
+  return v;
+}
+
+function parseIdentity(v: YamlValue): SoulIdentity {
+  if (!isRecord(v)) throw new Error('soul.identity 必须是对象');
+  return {
+    name: reqString(v, 'name', 'identity'),
+    role: reqString(v, 'role', 'identity'),
+    background: reqString(v, 'background', 'identity'),
+    tone: reqString(v, 'tone', 'identity'),
+  };
+}
+
+function parseInterests(v: YamlValue): SoulInterests {
+  if (!isRecord(v)) throw new Error('soul.interests 必须是对象');
+  return {
+    primary: reqStringArray(v, 'primary', 'interests'),
+    secondary: reqStringArray(v, 'secondary', 'interests'),
+    seed_keywords: reqStringArray(v, 'seed_keywords', 'interests'),
+  };
+}
+
+function parseQualityThreshold(v: YamlValue): QualityThreshold {
+  if (!isRecord(v)) throw new Error('soul.engagement_rules.quality_threshold 必须是对象');
+  return {
+    min_likes: reqNumber(v, 'min_likes', 'engagement_rules.quality_threshold'),
+    min_collects: reqNumber(v, 'min_collects', 'engagement_rules.quality_threshold'),
+  };
+}
+
+function parseEngagementRules(v: YamlValue): EngagementRules {
+  if (!isRecord(v)) throw new Error('soul.engagement_rules 必须是对象');
+  return {
+    quality_threshold: parseQualityThreshold(reqObject(v, 'quality_threshold', 'engagement_rules')),
+    like: reqStringArray(v, 'like', 'engagement_rules'),
+    skip: reqStringArray(v, 'skip', 'engagement_rules'),
+    comment_trigger: reqStringArray(v, 'comment_trigger', 'engagement_rules'),
+  };
+}
+
+function parseTransition(v: YamlValue, statePath: string): StateTransition {
+  if (!isRecord(v)) throw new Error(`${statePath} 的 transition 必须是对象`);
+  const t: StateTransition = {
+    trigger: reqString(v, 'trigger', `${statePath}.transition`),
+    to: reqString(v, 'to', `${statePath}.transition`),
+  };
+  const src = v.search_source;
+  if (typeof src === 'string') {
+    if (!SEARCH_SOURCES.includes(src as SearchSource)) {
+      throw new Error(`${statePath} 的 search_source 非法: ${src}`);
+    }
+    t.search_source = src as SearchSource;
+  }
+  return t;
+}
+
+function parseStateDef(name: string, v: YamlValue): BrowseStateDef {
+  if (!isRecord(v)) throw new Error(`soul.browse_patterns.states.${name} 必须是对象`);
+  const transitionsRaw = v.transitions;
+  if (!Array.isArray(transitionsRaw)) {
+    throw new Error(`soul.browse_patterns.states.${name}.transitions 必须是数组`);
+  }
+  const def: BrowseStateDef = {
+    action: reqString(v, 'action', `browse_patterns.states.${name}`),
+    transitions: transitionsRaw.map((t) => parseTransition(t, `states.${name}`)),
+  };
+  if (typeof v.max_results_to_browse === 'number') {
+    def.max_results_to_browse = v.max_results_to_browse;
+  }
+  return def;
+}
+
+function parseSession(v: YamlValue): SessionLimits {
+  if (!isRecord(v)) throw new Error('soul.browse_patterns.session 必须是对象');
+  const cd = v.cooldown_between_actions_sec;
+  if (!Array.isArray(cd) || cd.length !== 2 || typeof cd[0] !== 'number' || typeof cd[1] !== 'number') {
+    throw new Error('soul.browse_patterns.session.cooldown_between_actions_sec 必须是 [min, max] 数字数组');
+  }
+  return {
+    max_duration_min: reqNumber(v, 'max_duration_min', 'browse_patterns.session'),
+    max_likes: reqNumber(v, 'max_likes', 'browse_patterns.session'),
+    max_searches: reqNumber(v, 'max_searches', 'browse_patterns.session'),
+    cooldown_between_actions_sec: [cd[0], cd[1]],
+  };
+}
+
+function parseBrowsePatterns(v: YamlValue): BrowsePatterns {
+  if (!isRecord(v)) throw new Error('soul.browse_patterns 必须是对象');
+  const statesRaw = reqObject(v, 'states', 'browse_patterns');
+  const states: Record<string, BrowseStateDef> = {};
+  for (const [name, def] of Object.entries(statesRaw)) {
+    states[name] = parseStateDef(name, def);
+  }
+  if (Object.keys(states).length === 0) {
+    throw new Error('soul.browse_patterns.states 至少要有一个状态');
+  }
+  return {
+    mode: reqString(v, 'mode', 'browse_patterns'),
+    states,
+    session: parseSession(reqObject(v, 'session', 'browse_patterns')),
+  };
+}
+
+/** 把已解析的 YAML 值校验并装载为强类型 Soul。 */
+export function loadSoulFromValue(value: YamlValue): Soul {
+  if (!isRecord(value)) throw new Error('soul 配置根节点必须是对象');
+  return {
+    identity: parseIdentity(value.identity),
+    interests: parseInterests(value.interests),
+    engagement_rules: parseEngagementRules(value.engagement_rules),
+    browse_patterns: parseBrowsePatterns(value.browse_patterns),
+  };
+}
+
+/** 从 YAML 文本装载 Soul。 */
+export function loadSoulFromYaml(text: string): Soul {
+  return loadSoulFromValue(parseYaml(text));
+}
+
+/** 默认 soul.yaml 路径（与本模块同目录）。 */
+export function defaultSoulPath(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return join(here, 'soul.yaml');
+}
+
+/** 从文件装载 Soul（默认读同目录 soul.yaml）。 */
+export function loadSoul(path: string = defaultSoulPath()): Soul {
+  const text = readFileSync(path, 'utf8');
+  return loadSoulFromYaml(text);
+}

@@ -28,3 +28,24 @@ test('parseEnvelope 对坏数据返回 null', () => {
   assert.equal(parseEnvelope('not json'), null);
   assert.equal(parseEnvelope('{"v":1}'), null, '缺字段不是合法信封');
 });
+
+test('makeEnvelope 构造 publish.request（类型安全 payload）', () => {
+  const env = makeEnvelope('publish.request', 'pub-1', 9, {
+    title: '调 RAG 踩坑',
+    content: '昨天分块切碎了召回一坨',
+    tags: ['RAG', '踩坑'],
+  });
+  assert.equal(env.type, 'publish.request');
+  assert.ok(isEnvelope(env));
+  const round = parseEnvelope(JSON.stringify(env));
+  assert.equal(round?.type, 'publish.request');
+});
+
+test('makeEnvelope 构造 publish.result', () => {
+  const ok = makeEnvelope('publish.result', 'pub-1', 9, { ok: true, postId: 'xhs-123' });
+  assert.equal(ok.type, 'publish.result');
+  const fail = makeEnvelope('publish.result', 'pub-2', 10, { ok: false, error: '页面超时' });
+  const round = parseEnvelope(JSON.stringify(fail));
+  assert.equal(round?.type, 'publish.result');
+  assert.deepEqual(round?.payload, { ok: false, error: '页面超时' });
+});
