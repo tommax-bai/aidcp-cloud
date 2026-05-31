@@ -16,6 +16,7 @@
     "test:feishu": "tsx --env-file=.env src/cli/test-feishu.ts"
   },
   "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.66.0",
     "pg": "^8.13.1",
     "ws": "^8.18.0"
   },

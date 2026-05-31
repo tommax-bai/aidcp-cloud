@@ -3,11 +3,12 @@
  *
  * 环境变量：
  * - AIDCP_PORT        WebSocket 监听端口（默认 8787）
- * - FEISHU_WEBHOOK_PORT 飞书事件接收端口（默认 8788）
  * - DASHSCOPE_API_KEY Qwen API Key
  * - FEISHU_APP_ID / FEISHU_APP_SECRET 飞书自建应用凭证
  * - FEISHU_CHAT_ID    默认推送群 chat_id
  * - PGHOST/PGPORT/... 可覆盖默认 PG 连接（默认 127.0.0.1:5432 aidcp/aidcp）
+ *
+ * 飞书事件接收走官方 SDK 长连接（WSClient），由本端主动连接飞书，无需公网 IP / 回调端口。
  *
  * 运行：npm start
  */
@@ -21,7 +22,7 @@ import { SessionOrchestrator, EngagementDecider, ConceptExtractor } from './orch
 import {
   CommandRouter,
   FeishuMessenger,
-  FeishuWebhookServer,
+  FeishuWsReceiver,
   type CommandActions,
 } from './feishu/index.js';
 
@@ -54,8 +55,7 @@ async function main(): Promise<void> {
   await server.start();
   console.log(`[aidcp-cloud] 边-云 WebSocket 服务端已监听 :${port}`);
 
-  // 飞书事件接收（HTTP，端口与 WS 分开）
-  const feishuPort = Number(process.env.FEISHU_WEBHOOK_PORT ?? 8788);
+  // 飞书事件接收（官方 SDK 长连接，主动连飞书，无需公网 IP / HTTP 端口）
   // MVP：账号启停/查询动作先打桩（后续接云端调度器 → plan.request）
   const actions: CommandActions = {
     status: (accountId) => `账号 \`${accountId}\` 当前状态：normal 🟢（MVP 占位）`,
@@ -68,9 +68,13 @@ async function main(): Promise<void> {
   };
   const commandRouter = new CommandRouter(actions);
   const messenger = new FeishuMessenger();
-  const webhook = new FeishuWebhookServer({ port: feishuPort, commandRouter, messenger });
-  await webhook.start();
-  console.log(`[aidcp-cloud] 飞书事件接收 HTTP 服务端已监听 :${feishuPort}`);
+  const feishuReceiver = new FeishuWsReceiver({ commandRouter, messenger });
+  try {
+    await feishuReceiver.start();
+    console.log('[aidcp-cloud] 飞书事件接收已启动（WSClient 长连接）');
+  } catch (err) {
+    console.warn('[aidcp-cloud] 飞书长连接启动失败（事件接收不可用）:', (err as Error).message);
+  }
 }
 
 main().catch((err) => {
