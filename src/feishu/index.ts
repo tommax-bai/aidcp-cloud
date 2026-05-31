@@ -1,0 +1,11 @@
+/**
+ * 飞书 Bot 模块出口。
+ *
+ * 覆盖：类型定义、token 管理、消息发送、卡片模板、指令解析、事件接收。
+ */
+export * from './types.js';
+export * from './token.js';
+export * from './messenger.js';
+export * from './cards.js';
+export * from './commands.js';
+export * from './webhook.js';
