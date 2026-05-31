@@ -1,0 +1,27 @@
+{
+  "name": "aidcp-cloud",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AIDCP 云端：任务规划（planner）+ 文本 LLM（Qwen HTTP）+ 锚点缓存（PostgreSQL）+ 边-云通信（WebSocket 服务端）。",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test test/**/*.test.ts",
+    "start": "tsx src/server.ts"
+  },
+  "dependencies": {
+    "pg": "^8.13.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.10",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
