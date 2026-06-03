@@ -13,7 +13,6 @@
  * 执行通过注入的 CommandActions 把动作落到云端调度器（这里先打桩为接口）。
  */
 
-import { randomUUID } from 'node:crypto';
 import type { CommandResult, PublishApprovalPayload } from './types.js';
 import { buildPublishApprovalCard } from './cards.js';
 import { FeishuMessenger } from './messenger.js';
@@ -92,6 +91,21 @@ export interface CommandActions {
   resume(accountId: string): Promise<void> | void;
   /** 发送审批测试卡片 */
   publishTest?(): Promise<PublishApprovalPayload> | PublishApprovalPayload;
+}
+
+export interface PublishTestOptions {
+  token?: string;
+}
+
+export function resolvePublishApprovalToken(
+  options: PublishTestOptions = {},
+  generateToken: () => string = globalThis.crypto.randomUUID.bind(globalThis.crypto),
+): string {
+  const explicitToken = options.token?.trim();
+  if (explicitToken) return explicitToken;
+  const envToken = process.env.AIDCP_PUBLISH_APPROVAL_TOKEN?.trim();
+  if (envToken) return envToken;
+  return generateToken();
 }
 
 /** 指令路由器：解析 + 执行，产出指令回执数据 */
@@ -193,7 +207,7 @@ export class CommandRouter {
       content: '这是一条用于联调飞书审批卡片授权链路的测试内容，请点击按钮验证回调与信号文件写入。',
       tags: ['AIDCP', 'PublishTest'],
     };
-    const token = randomUUID();
+    const token = resolvePublishApprovalToken({ token: cmd.args?.[0] });
     await this.messenger.sendApprovalCard(
       targetChatId,
       buildPublishApprovalCard({

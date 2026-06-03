@@ -4,6 +4,7 @@ import {
   CommandRouter,
   DEFAULT_ACCOUNT_ID,
   parseCommand,
+  resolvePublishApprovalToken,
   type CommandActions,
 } from '../src/feishu/commands.js';
 
@@ -45,6 +46,12 @@ test('parseCommand: 多余空白被规整', () => {
 test('parseCommand: publish-test 被识别', () => {
   const cmd = parseCommand('/aidcp publish-test');
   assert.equal(cmd.action, 'publish-test');
+});
+
+test('parseCommand: publish-test 保留显式 token 参数', () => {
+  const cmd = parseCommand('/aidcp publish-test tok-fixed');
+  assert.equal(cmd.action, 'publish-test');
+  assert.deepEqual(cmd.args, ['tok-fixed']);
 });
 
 function makeActions(): { actions: CommandActions; log: string[] } {
@@ -131,4 +138,32 @@ test('CommandRouter: publish-test 发送审批卡片', async () => {
   assert.equal(res.ok, true);
   assert.equal(sent.length, 1);
   assert.match(sent[0], /授权发布/);
+});
+
+test('resolvePublishApprovalToken: 显式参数优先于环境变量', () => {
+  process.env.AIDCP_PUBLISH_APPROVAL_TOKEN = 'env-token';
+  const token = resolvePublishApprovalToken({ token: 'arg-token' }, () => 'generated-token');
+  assert.equal(token, 'arg-token');
+  delete process.env.AIDCP_PUBLISH_APPROVAL_TOKEN;
+});
+
+test('resolvePublishApprovalToken: 环境变量优先于自动生成', () => {
+  process.env.AIDCP_PUBLISH_APPROVAL_TOKEN = 'env-token';
+  const token = resolvePublishApprovalToken({}, () => 'generated-token');
+  assert.equal(token, 'env-token');
+  delete process.env.AIDCP_PUBLISH_APPROVAL_TOKEN;
+});
+
+test('CommandRouter: publish-test 使用显式 token', async () => {
+  const sent: string[] = [];
+  const messenger = {
+    sendApprovalCard: async (_chatId: string, card: unknown) => {
+      sent.push(JSON.stringify(card));
+    },
+  } as unknown as import('../src/feishu/messenger.js').FeishuMessenger;
+  const router = new CommandRouter(makeActions().actions, messenger);
+  const res = await router.handle('/aidcp publish-test tok-fixed', { chatId: 'oc_chat' });
+  assert.equal(res.ok, true);
+  assert.match(res.message, /tok-fixed/);
+  assert.match(sent[0], /tok-fixed/);
 });
