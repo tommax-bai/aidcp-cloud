@@ -18,6 +18,7 @@ import type {
   FeishuCard,
   FeishuField,
   FeishuHeaderTemplate,
+  PublishApprovalCardData,
 } from './types.js';
 
 /** 各账号状态对应的徽标 emoji */
@@ -159,6 +160,74 @@ export function buildCommandResultCard(result: CommandResult): FeishuCard {
           tag: 'lark_md',
           content: `**指令**：\`${result.command}\`${accLine}\n${result.message}`,
         },
+      },
+    ],
+  };
+}
+
+function summarizeContent(content: string, maxLength = 120): string {
+  const normalized = content.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) return normalized || '（无正文）';
+  return `${normalized.slice(0, maxLength - 1)}…`;
+}
+
+function formatTags(tags: string[]): string {
+  if (tags.length === 0) return '（无话题）';
+  return tags.map((tag) => `#${tag}`).join(' ');
+}
+
+export function buildPublishApprovalCard(payload: PublishApprovalCardData): FeishuCard {
+  const summary = summarizeContent(payload.content);
+  const tags = formatTags(payload.tags);
+  const callbackValue = {
+    token: payload.token,
+    payload: {
+      title: payload.title,
+      content: payload.content,
+      tags: payload.tags,
+    },
+  };
+
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      template: 'orange',
+      title: { tag: 'plain_text', content: '待授权发布' },
+    },
+    elements: [
+      {
+        tag: 'div',
+        fields: [
+          {
+            is_short: false,
+            text: { tag: 'lark_md', content: `**标题**\n${payload.title || '（无标题）'}` },
+          },
+          {
+            is_short: false,
+            text: { tag: 'lark_md', content: `**正文摘要**\n${summary}` },
+          },
+          {
+            is_short: false,
+            text: { tag: 'lark_md', content: `**话题**\n${tags}` },
+          },
+        ],
+      },
+      {
+        tag: 'action',
+        actions: [
+          {
+            tag: 'button',
+            text: { tag: 'plain_text', content: '授权发布' },
+            type: 'primary',
+            behaviors: [{ type: 'callback', value: { action: 'approve', ...callbackValue } }],
+          },
+          {
+            tag: 'button',
+            text: { tag: 'plain_text', content: '取消' },
+            type: 'danger',
+            behaviors: [{ type: 'callback', value: { action: 'cancel', ...callbackValue } }],
+          },
+        ],
       },
     ],
   };

@@ -42,6 +42,11 @@ test('parseCommand: 多余空白被规整', () => {
   assert.equal(cmd.accountId, 'acc-03');
 });
 
+test('parseCommand: publish-test 被识别', () => {
+  const cmd = parseCommand('/aidcp publish-test');
+  assert.equal(cmd.action, 'publish-test');
+});
+
 function makeActions(): { actions: CommandActions; log: string[] } {
   const log: string[] = [];
   const actions: CommandActions = {
@@ -102,4 +107,28 @@ test('CommandRouter: 动作抛错时回失败回执', async () => {
   const res = await router.handle('/aidcp status acc-01');
   assert.equal(res.ok, false);
   assert.match(res.message, /调度器不可用/);
+});
+
+test('CommandRouter: publish-test 发送审批卡片', async () => {
+  const sent: string[] = [];
+  const messenger = {
+    sendApprovalCard: async (_chatId: string, card: unknown) => {
+      sent.push(JSON.stringify(card));
+    },
+  } as unknown as import('../src/feishu/messenger.js').FeishuMessenger;
+  const router = new CommandRouter(
+    {
+      ...makeActions().actions,
+      publishTest: () => ({
+        title: '联调标题',
+        content: '联调正文',
+        tags: ['联调'],
+      }),
+    },
+    messenger,
+  );
+  const res = await router.handle('/aidcp publish-test', { chatId: 'oc_chat' });
+  assert.equal(res.ok, true);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /授权发布/);
 });

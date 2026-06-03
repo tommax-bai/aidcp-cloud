@@ -47,6 +47,10 @@ export class FeishuMessenger {
     await this.send(chatId, 'interactive', JSON.stringify(card));
   }
 
+  async sendApprovalCard(chatId: string, card: FeishuCard): Promise<void> {
+    await this.sendCard(chatId, card);
+  }
+
   /** 发送纯文本到群 */
   async sendText(chatId: string, text: string): Promise<void> {
     await this.send(chatId, 'text', JSON.stringify({ text }));

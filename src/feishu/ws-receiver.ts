@@ -11,10 +11,13 @@
  * 业务通过 CommandRouter / FeishuMessenger 注入，消息发送仍走现有 REST messenger.ts。
  */
 
+import { promises as fs } from 'node:fs';
+import { join } from 'node:path';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { CommandRouter } from './commands.js';
 import { FeishuMessenger } from './messenger.js';
 import { buildCommandResultCard } from './cards.js';
+import type { PublishApprovalPayload } from './types.js';
 
 /** im.message.receive_v1 事件中 message 字段的最小形状（与 SDK 类型对齐的子集） */
 export interface FeishuWsMessage {
@@ -37,6 +40,50 @@ export interface FeishuWsReceiverOptions {
   messenger?: FeishuMessenger;
   /** 注入日志（测试用），默认 console */
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
+  /** 注入 fs（测试用） */
+  fsImpl?: Pick<typeof fs, 'writeFile' | 'rm'>;
+}
+
+interface ApprovalActionValue {
+  action?: unknown;
+  token?: unknown;
+  payload?: unknown;
+}
+
+interface ApprovalSignal {
+  token: string;
+  approved: boolean;
+  ts: number;
+  payload: PublishApprovalPayload;
+}
+
+const APPROVAL_SIGNAL_DIR = '/tmp';
+
+function isPublishApprovalPayload(value: unknown): value is PublishApprovalPayload {
+  if (!value || typeof value !== 'object') return false;
+  const payload = value as Record<string, unknown>;
+  return (
+    typeof payload.title === 'string' &&
+    typeof payload.content === 'string' &&
+    Array.isArray(payload.tags) &&
+    payload.tags.every((tag) => typeof tag === 'string')
+  );
+}
+
+export function parseApprovalActionValue(value: unknown):
+  | { action: 'approve' | 'cancel'; token: string; payload: PublishApprovalPayload }
+  | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as ApprovalActionValue;
+  if ((raw.action !== 'approve' && raw.action !== 'cancel') || typeof raw.token !== 'string') {
+    return null;
+  }
+  if (!isPublishApprovalPayload(raw.payload)) return null;
+  return { action: raw.action, token: raw.token, payload: raw.payload };
+}
+
+export function getApprovalSignalPath(token: string): string {
+  return join(APPROVAL_SIGNAL_DIR, `aidcp-publish-approve-${token}.json`);
 }
 
 /**
@@ -60,6 +107,7 @@ export class FeishuWsReceiver {
   private readonly commandRouter: CommandRouter;
   private readonly messenger?: FeishuMessenger;
   private readonly logger: Pick<Console, 'log' | 'warn' | 'error'>;
+  private readonly fsImpl: Pick<typeof fs, 'writeFile' | 'rm'>;
   private wsClient?: lark.WSClient;
 
   constructor(options: FeishuWsReceiverOptions) {
@@ -68,6 +116,7 @@ export class FeishuWsReceiver {
     this.commandRouter = options.commandRouter;
     this.messenger = options.messenger;
     this.logger = options.logger ?? console;
+    this.fsImpl = options.fsImpl ?? fs;
   }
 
   /**
@@ -79,11 +128,48 @@ export class FeishuWsReceiver {
     const text = extractText(message.content);
     if (!text) return;
 
-    const result = await this.commandRouter.handle(text);
+    const result = await this.commandRouter.handle(text, { chatId: message.chat_id });
     if (this.messenger) {
       const card = buildCommandResultCard(result);
       await this.messenger.sendCard(message.chat_id, card);
     }
+  }
+
+  async handleCardAction(value: unknown): Promise<{
+    toast: { type: 'success' | 'error' | 'info'; content: string };
+    card?: { type: 'template'; data: { template_id: string; template_variable: Record<string, string> } };
+  }> {
+    const parsed = parseApprovalActionValue(value);
+    if (!parsed) {
+      return {
+        toast: { type: 'error', content: '审批回调参数无效' },
+      };
+    }
+
+    const signalPath = getApprovalSignalPath(parsed.token);
+    if (parsed.action === 'approve') {
+      const signal: ApprovalSignal = {
+        token: parsed.token,
+        approved: true,
+        ts: Date.now(),
+        payload: parsed.payload,
+      };
+      await this.fsImpl.writeFile(signalPath, JSON.stringify(signal), 'utf8');
+      return {
+        toast: { type: 'success', content: '已授权发布' },
+      };
+    }
+
+    const signal: ApprovalSignal = {
+      token: parsed.token,
+      approved: false,
+      ts: Date.now(),
+      payload: parsed.payload,
+    };
+    await this.fsImpl.writeFile(signalPath, JSON.stringify(signal), 'utf8');
+    return {
+      toast: { type: 'info', content: '已取消发布' },
+    };
   }
 
   /** 构建 EventDispatcher 并注册事件处理器 */
@@ -94,6 +180,16 @@ export class FeishuWsReceiver {
           await this.handleMessage(data.message as FeishuWsMessage);
         } catch (err) {
           this.logger.error('[feishu] 处理消息事件失败:', (err as Error).message);
+        }
+      },
+      'card.action.trigger': async (data: { action?: { value?: unknown } }) => {
+        try {
+          return await this.handleCardAction(data.action?.value);
+        } catch (err) {
+          this.logger.error('[feishu] 处理卡片回调失败:', (err as Error).message);
+          return {
+            toast: { type: 'error', content: '处理审批回调失败' },
+          };
         }
       },
     });

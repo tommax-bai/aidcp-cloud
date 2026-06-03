@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FeishuWsReceiver, extractText } from '../src/feishu/ws-receiver.js';
+import {
+  FeishuWsReceiver,
+  extractText,
+  getApprovalSignalPath,
+  parseApprovalActionValue,
+} from '../src/feishu/ws-receiver.js';
 import { CommandRouter, type CommandActions } from '../src/feishu/commands.js';
 import { FeishuMessenger } from '../src/feishu/messenger.js';
 import { FeishuTokenManager } from '../src/feishu/token.js';
@@ -109,4 +114,65 @@ test('ws-receiver: 缺少凭证时 start 抛错', async () => {
     commandRouter: makeRouter(),
   });
   await assert.rejects(() => receiver.start(), /飞书凭证缺失/);
+});
+
+test('ws-receiver: parseApprovalActionValue 解析 approve/cancel', () => {
+  const parsed = parseApprovalActionValue({
+    action: 'approve',
+    token: 'tok-1',
+    payload: { title: 't', content: 'c', tags: ['x'] },
+  });
+  assert.deepEqual(parsed, {
+    action: 'approve',
+    token: 'tok-1',
+    payload: { title: 't', content: 'c', tags: ['x'] },
+  });
+  assert.equal(parseApprovalActionValue({ action: 'noop' }), null);
+});
+
+test('ws-receiver: approve 写入信号文件', async () => {
+  const writes: Array<{ path: string; content: string }> = [];
+  const receiver = new FeishuWsReceiver({
+    appId: 'a',
+    appSecret: 's',
+    commandRouter: makeRouter(),
+    fsImpl: {
+      writeFile: async (path, content) => {
+        writes.push({ path: String(path), content: String(content) });
+      },
+      rm: async () => {},
+    },
+  });
+  const res = await receiver.handleCardAction({
+    action: 'approve',
+    token: 'tok-approve',
+    payload: { title: '标题', content: '正文', tags: ['话题'] },
+  });
+  assert.equal(res.toast.type, 'success');
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].path, getApprovalSignalPath('tok-approve'));
+  assert.match(writes[0].content, /\"approved\":true/);
+});
+
+test('ws-receiver: cancel 写入 approved=false 信号文件', async () => {
+  const writes: Array<{ path: string; content: string }> = [];
+  const receiver = new FeishuWsReceiver({
+    appId: 'a',
+    appSecret: 's',
+    commandRouter: makeRouter(),
+    fsImpl: {
+      writeFile: async (path, content) => {
+        writes.push({ path: String(path), content: String(content) });
+      },
+      rm: async () => {},
+    },
+  });
+  const res = await receiver.handleCardAction({
+    action: 'cancel',
+    token: 'tok-cancel',
+    payload: { title: '标题', content: '正文', tags: ['话题'] },
+  });
+  assert.equal(res.toast.type, 'info');
+  assert.equal(writes.length, 1);
+  assert.match(writes[0].content, /\"approved\":false/);
 });

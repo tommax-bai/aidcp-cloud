@@ -46,6 +46,11 @@ export interface FeishuButton {
   type?: 'default' | 'primary' | 'danger';
   /** 回调时由飞书原样回传，用于云端识别意图 */
   value?: Record<string, unknown>;
+  /** 新版交互行为定义 */
+  behaviors?: Array<{
+    type: 'callback';
+    value: Record<string, unknown>;
+  }>;
   /** 跳转链接（引导回 Web） */
   url?: string;
 }
@@ -133,6 +138,16 @@ export interface CommandResult {
   message: string;
   /** 相关账号 id */
   accountId?: string;
+}
+
+export interface PublishApprovalPayload {
+  title: string;
+  content: string;
+  tags: string[];
+}
+
+export interface PublishApprovalCardData extends PublishApprovalPayload {
+  token: string;
 }
 
 /* ------------------------------------------------------------------ */

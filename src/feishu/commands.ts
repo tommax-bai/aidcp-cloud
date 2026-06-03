@@ -13,13 +13,16 @@
  * 执行通过注入的 CommandActions 把动作落到云端调度器（这里先打桩为接口）。
  */
 
-import type { CommandResult } from './types.js';
+import { randomUUID } from 'node:crypto';
+import type { CommandResult, PublishApprovalPayload } from './types.js';
+import { buildPublishApprovalCard } from './cards.js';
+import { FeishuMessenger } from './messenger.js';
 
 /** 单账号 MVP 的缺省账号 id */
 export const DEFAULT_ACCOUNT_ID = 'acc-default';
 
 /** 已识别的指令动作 */
-export type CommandAction = 'status' | 'pause' | 'resume' | 'help';
+export type CommandAction = 'status' | 'pause' | 'resume' | 'publish-test' | 'help';
 
 /** 解析后的指令结构 */
 export interface ParsedCommand {
@@ -29,6 +32,7 @@ export interface ParsedCommand {
   raw: string;
   /** help 场景携带的提示原因（如未识别的子命令） */
   hint?: string;
+  args?: string[];
 }
 
 const HELP_TEXT = [
@@ -36,6 +40,7 @@ const HELP_TEXT = [
   '• `/aidcp status [accountId]` — 查账号状态',
   '• `/aidcp pause [accountId]` — 暂停账号',
   '• `/aidcp resume [accountId]` — 恢复账号',
+  '• `/aidcp publish-test` — 发送测试审批卡片',
   '',
   '（单账号 MVP：accountId 可省略，默认作用于唯一账号）',
 ].join('\n');
@@ -58,12 +63,15 @@ export function parseCommand(text: string): ParsedCommand {
 
   const sub = (tokens[1] ?? '').toLowerCase();
   const accountId = tokens[2] ?? DEFAULT_ACCOUNT_ID;
+  const args = tokens.slice(2);
 
   switch (sub) {
     case 'status':
     case 'pause':
     case 'resume':
-      return { action: sub, accountId, raw };
+      return { action: sub, accountId, raw, args };
+    case 'publish-test':
+      return { action: 'publish-test', accountId: DEFAULT_ACCOUNT_ID, raw, args };
     default:
       return {
         action: 'help',
@@ -82,14 +90,20 @@ export interface CommandActions {
   pause(accountId: string): Promise<void> | void;
   /** 恢复账号 */
   resume(accountId: string): Promise<void> | void;
+  /** 发送审批测试卡片 */
+  publishTest?(): Promise<PublishApprovalPayload> | PublishApprovalPayload;
 }
 
 /** 指令路由器：解析 + 执行，产出指令回执数据 */
 export class CommandRouter {
-  constructor(private readonly actions: CommandActions) {}
+  constructor(
+    private readonly actions: CommandActions,
+    private readonly messenger?: FeishuMessenger,
+    private readonly approvalChatId?: string,
+  ) {}
 
   /** 处理一条文本指令，返回回执（CommandResult，交给 cards 渲染卡片） */
-  async handle(text: string): Promise<CommandResult> {
+  async handle(text: string, context?: { chatId?: string }): Promise<CommandResult> {
     const cmd = parseCommand(text);
     switch (cmd.action) {
       case 'status':
@@ -98,6 +112,8 @@ export class CommandRouter {
         return this.runPause(cmd);
       case 'resume':
         return this.runResume(cmd);
+      case 'publish-test':
+        return this.runPublishTest(cmd, context?.chatId);
       case 'help':
       default:
         return {
@@ -152,6 +168,45 @@ export class CommandRouter {
     } catch (err) {
       return this.fail(cmd, '恢复失败', err);
     }
+  }
+
+  private async runPublishTest(cmd: ParsedCommand, chatId?: string): Promise<CommandResult> {
+    if (!this.messenger) {
+      return {
+        command: cmd.raw,
+        ok: false,
+        title: '测试审批卡片发送失败',
+        message: '未配置 FeishuMessenger，无法发送审批卡片。',
+      };
+    }
+    const targetChatId = this.approvalChatId ?? chatId;
+    if (!targetChatId) {
+      return {
+        command: cmd.raw,
+        ok: false,
+        title: '测试审批卡片发送失败',
+        message: '缺少目标 chatId，无法发送审批卡片。',
+      };
+    }
+    const payload = await this.actions.publishTest?.() ?? {
+      title: 'AIDCP 测试发布标题',
+      content: '这是一条用于联调飞书审批卡片授权链路的测试内容，请点击按钮验证回调与信号文件写入。',
+      tags: ['AIDCP', 'PublishTest'],
+    };
+    const token = randomUUID();
+    await this.messenger.sendApprovalCard(
+      targetChatId,
+      buildPublishApprovalCard({
+        token,
+        ...payload,
+      }),
+    );
+    return {
+      command: cmd.raw,
+      ok: true,
+      title: '测试审批卡片已发送',
+      message: `已向会话 \`${targetChatId}\` 发送审批卡片。\n授权 token：\`${token}\``,
+    };
   }
 
   private fail(cmd: ParsedCommand, title: string, err: unknown): CommandResult {

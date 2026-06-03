@@ -4,6 +4,7 @@ import {
   buildAlertCard,
   buildCommandResultCard,
   buildDailySummaryCard,
+  buildPublishApprovalCard,
 } from '../src/feishu/cards.js';
 import type { FeishuButton, FeishuElement } from '../src/feishu/types.js';
 
@@ -111,4 +112,27 @@ test('buildCommandResultCard: 失败用红色', () => {
   });
   assert.equal(card.header?.template, 'red');
   assert.match(card.header?.title.content ?? '', /❌/);
+});
+
+test('buildPublishApprovalCard: 构造新版 callback behaviors', () => {
+  const card = buildPublishApprovalCard({
+    token: 'tok-1',
+    title: '测试标题',
+    content: '这是一段很长的正文内容，用于验证审批卡片摘要与按钮回调载荷。',
+    tags: ['话题A', '话题B'],
+  });
+  assert.equal(card.header?.template, 'orange');
+  const buttons = findAction(card.elements);
+  assert.equal(buttons.length, 2);
+  assert.equal(buttons[0].behaviors?.[0]?.type, 'callback');
+  assert.deepEqual(buttons[0].behaviors?.[0]?.value, {
+    action: 'approve',
+    token: 'tok-1',
+    payload: {
+      title: '测试标题',
+      content: '这是一段很长的正文内容，用于验证审批卡片摘要与按钮回调载荷。',
+      tags: ['话题A', '话题B'],
+    },
+  });
+  assert.equal(buttons[1].behaviors?.[0]?.value.action, 'cancel');
 });
