@@ -1,62 +1,100 @@
 # aidcp-cloud 环境与数据库连接说明
 
-> 关键环境信息落档，防止换开发机后反复搞错。本文记录 aidcp 项目 PostgreSQL 的真实部署位置与连接方式。
-> 注意：当前为**开发环境**，密码明文入档已获确认。**上生产前必须轮换密码，并改为只记凭证存放位置。**
+> 勘察日期：2026-06-04
+> 状态：只读勘察确认
 
-## PostgreSQL 部署位置
+> 关键环境信息必须落档，避免再次沿用已废弃的本地起 cloud + SSH 隧道临时方案。
 
-- **部署在阿里云 ECS**：`121.89.85.150`
-- SSH 登录：`ssh -i ~/codes/isales-4.pem root@121.89.85.150`
-- PostgreSQL 版本：13.23
-- 同一台 PG 上有两个项目库：`isales`（isales 项目）和 `aidcp`（本项目）。两库 owner 各为同名角色，互不影响。**操作 aidcp 时绝不触碰 isales 库。**
+## 当前确认结论
 
-## aidcp 库连接参数
+- `aidcp-cloud` 只部署在云端 ECS：`121.89.85.150`
+- cloud 部署目录：`/opt/aidcp/cloud`
+- PostgreSQL 与 cloud 同机，监听 `127.0.0.1:5432`
+- `aidcp` 数据库与 `aidcp` 角色已就绪
+- cloud 在 ECS 本机直连 PostgreSQL，**不需要 SSH 隧道**
+- 参数权威来源为 ECS 上 `/opt/aidcp/cloud/.env`
+- 文档中只记录键名与凭证存放位置，**绝不记录密码、token、key 明文**
 
-| 参数 | 值 |
-| --- | --- |
-| host | `127.0.0.1`（仅本机回环，见下） |
-| port | `5432` |
-| database | `aidcp` |
-| user | `aidcp` |
-| password | `***REMOVED***`（开发环境，已确认可入档；生产前轮换） |
+## 架构铁律
 
-- 参数权威来源：ECS 上 `/opt/aidcp/cloud/.env`（由 systemd 服务 `/etc/systemd/system/aidcp-cloud.service` 通过 `EnvironmentFile=/opt/aidcp/cloud/.env` 加载）。
+> **cloud 只部署在云端 ECS，本地永不再起 cloud；本地只跑 edge，edge 连接 ECS cloud：`ws://121.89.85.150:8787`。**
 
-## 访问方式：必须走 SSH 隧道（不能公网直连）
+历史教训：
 
-PG 仅监听 `127.0.0.1:5432`（`listen_addresses=localhost`），`pg_hba.conf` 只放行 `127.0.0.1/32`。因此：
+- 曾在本机启动 cloud，误连本机空 PostgreSQL，报错 `role "aidcp" does not exist`
+- 根因不是 ECS 数据库缺失，而是违反了“cloud 仅运行在 ECS、本地只跑 edge”的架构约束
 
-- ❌ 公网直连 `121.89.85.150:5432` 失败（实测错误：`server closed the connection unexpectedly`）。
-- ✅ 必须用 SSH 本地端口转发到 ECS 的 `127.0.0.1:5432`。
+## ECS 上的数据库连接事实
 
-### 本地建隧道（推荐本地端口 15432，避开本机 5432 冲突）
+- PostgreSQL 地址：`127.0.0.1:5432`
+- 数据库名：`aidcp`
+- 角色名：`aidcp`
+- cloud 在 ECS 本机运行时，默认连接参数即为正确目标
 
-```bash
-ssh -i ~/codes/isales-4.pem -f -N -L 15432:127.0.0.1:5432 root@121.89.85.150
-```
+代码侧已确认支持以下覆盖方式：
 
-### cloud 指向隧道
+- `DATABASE_URL`
+- `PGHOST`
+- `PGPORT`
+- `PGUSER`
+- `PGPASSWORD`
+- `PGDATABASE`
 
-aidcp-cloud 代码默认连 `127.0.0.1:5432/aidcp/aidcp`（`src/cache/pg-anchor-cache.ts` 的 `DEFAULT_PG_CONFIG`）。本机开发连 ECS 库时，让连接指向隧道本地端口：
+默认值在当前 ECS 部署上即成立：
 
-- host=`127.0.0.1`、port=`15432`、user=`aidcp`、password=见上、database=`aidcp`
+- host=`127.0.0.1`
+- port=`5432`
+- database=`aidcp`
+- user=`aidcp`
 
-> **重要（已核实）**：`pg-anchor-cache.ts` 的 `PgAnchorCache` **当前没有从环境变量读取连接参数的入口**。`DEFAULT_PG_CONFIG` 把 host/port/user/password/database 全部硬编码（host=127.0.0.1 port=5432，密码即上表值），且 `server.ts` 中 `new PgAnchorCache()` 未传任何 options。`server.ts` 注释虽写"可由 PGHOST/PGPORT/... 覆盖"，但代码并未实现读取。
->
-> **后果**：默认连的是本机 `127.0.0.1:5432`（本机空 PG → 报 `role "aidcp" does not exist`）。要让 cloud 走隧道连 ECS，有两种改法（接入时二选一）：
-> 1. 给 `PgAnchorCache` 加 env 读取入口（PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE 或 DATABASE_URL），再用环境变量指向隧道端口 `127.0.0.1:15432`；或
-> 2. 在 `server.ts` 装配处显式 `new PgAnchorCache({ host, port, user, password, database })` 传入隧道参数。
-> 推荐方案 1（更通用，便于区分本地/隧道/生产）。
+敏感值说明：
 
-## 连通验证（已实测通过）
+- 数据库密码存放于 ECS `/opt/aidcp/cloud/.env`
+- 不入 git，不写入任何仓库文档
 
-经隧道后从本机成功只读连接：
+## 环境变量权威来源
 
-```bash
-PGPASSWORD='***REMOVED***' psql "host=127.0.0.1 port=15432 dbname=aidcp user=aidcp connect_timeout=5" -Atqc "SELECT current_database(), current_user;"
-# 返回: aidcp|aidcp
-```
+ECS 上 `aidcp-cloud` 的权威环境文件为：
 
-## 常见坑
+- `/opt/aidcp/cloud/.env`
 
-- 本机 `.env` 无 PG 覆盖变量时，cloud 会连本机空 PG，启动报 `role "aidcp" does not exist`。真库在 ECS，需先建隧道再让 cloud 指向 `127.0.0.1:15432`。
+已确认包含以下键名：
+
+- `AIDCP_PORT`
+- `DASHSCOPE_API_KEY`
+- `PGHOST`
+- `PGPORT`
+- `PGUSER`
+- `PGPASSWORD`
+- `PGDATABASE`
+- `FEISHU_APP_ID`
+- `FEISHU_APP_SECRET`
+- `FEISHU_CHAT_ID`
+
+说明：
+
+- 所有敏感值仅存放于 ECS `/opt/aidcp/cloud/.env`
+- 文档只保留键名，不记录任何明文值
+
+## 已废弃方案：本地起 cloud + SSH 隧道
+
+> **状态：已废弃，仅供历史本地调试背景参考，不再作为现行方案。**
+
+历史上曾使用以下临时方式：
+
+- 在本机启动 cloud
+- 通过 SSH 隧道把本地端口转发到 ECS 的 `127.0.0.1:5432`
+- 再让本地 cloud 指向 `127.0.0.1:15432`
+
+该方案已纠偏，原因如下：
+
+- 现行架构要求 cloud 固定运行在 ECS
+- ECS 上 cloud 与 PostgreSQL 同机，直连即可
+- 本地只需要运行 edge，并连接 `ws://121.89.85.150:8787`
+
+因此，以下说法均已过时：
+
+- “PG 必须通过 SSH 隧道访问”
+- “cloud 应指向 `127.0.0.1:15432`”
+
+这些内容仅代表历史调试阶段，不再适用于当前部署。
