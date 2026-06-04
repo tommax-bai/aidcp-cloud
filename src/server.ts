@@ -17,7 +17,7 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { QwenClient } from './llm/index.js';
 import { SimplePlanner } from './planner/index.js';
-import { PgAnchorCache } from './cache/index.js';
+import { PgAnchorCache, BotChatStore } from './cache/index.js';
 import {
   EdgeCloudServer,
   DefaultMessageHandler,
@@ -28,6 +28,7 @@ import { loadSoul } from './soul/index.js';
 import { SessionOrchestrator, EngagementDecider, ConceptExtractor } from './orchestrator/index.js';
 import {
   CommandRouter,
+  FeishuBotChatEventHandler,
   FeishuMessenger,
   FeishuWsReceiver,
   type CommandActions,
@@ -60,6 +61,8 @@ async function main(): Promise<void> {
     password: readEnvString('PGPASSWORD'),
   });
   const soul = loadSoul();
+  const botChatStore = new BotChatStore();
+  const botChatEventHandler = new FeishuBotChatEventHandler(botChatStore);
 
   // 建表（幂等）；PG 不可用时打印告警但不阻塞启动协议处理
   try {
@@ -123,7 +126,11 @@ async function main(): Promise<void> {
   debugServer.listen(debugPort, '127.0.0.1', () => {
     console.log(`[aidcp-cloud] TODO(temp) debug publish trigger listening on 127.0.0.1:${debugPort}`);
   });
-  const feishuReceiver = new FeishuWsReceiver({ commandRouter, messenger });
+  const feishuReceiver = new FeishuWsReceiver({
+    commandRouter,
+    messenger,
+    botChatEventHandler,
+  });
   try {
     await feishuReceiver.start();
     console.log('[aidcp-cloud] 飞书事件接收已启动（WSClient 长连接）');

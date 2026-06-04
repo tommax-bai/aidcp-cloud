@@ -209,6 +209,34 @@ export interface FeishuCardActionEvent {
   };
 }
 
+export interface FeishuBotAddedEvent {
+  schema: '2.0';
+  header: FeishuEventHeader & { event_type: 'im.chat.member.bot.added_v1' };
+  event: {
+    chat_id?: string;
+    name?: string;
+    i18n_names?: {
+      zh_cn?: string;
+      en_us?: string;
+      ja_jp?: string;
+    };
+  };
+}
+
+export interface FeishuBotDeletedEvent {
+  schema: '2.0';
+  header: FeishuEventHeader & { event_type: 'im.chat.member.bot.deleted_v1' };
+  event: {
+    chat_id?: string;
+    name?: string;
+    i18n_names?: {
+      zh_cn?: string;
+      en_us?: string;
+      ja_jp?: string;
+    };
+  };
+}
+
 /** 兜底通用事件（其它未细化的 event_type） */
 export interface FeishuGenericEvent {
   schema: '2.0';
@@ -221,4 +249,6 @@ export type FeishuEvent =
   | FeishuChallengeEvent
   | FeishuMessageReceiveEvent
   | FeishuCardActionEvent
+  | FeishuBotAddedEvent
+  | FeishuBotDeletedEvent
   | FeishuGenericEvent;

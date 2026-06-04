@@ -8,4 +8,5 @@ export * from './token.js';
 export * from './messenger.js';
 export * from './cards.js';
 export * from './commands.js';
+export * from './bot-chat-events.js';
 export * from './ws-receiver.js';
