@@ -140,6 +140,32 @@
 
 > 本节记录 2026-06-04 已完成的 ECS 部署准备评估结果，仅作为后续正式更新时的执行依据。
 
+### ECS SSH 连接方式
+
+- 登录命令：`ssh -i ~/codes/isales-4.pem root@121.89.85.150`
+- 注意：默认 SSH key 会被拒绝，必须显式指定 `~/codes/isales-4.pem`
+- 私钥文件位置：`~/codes/isales-4.pem`
+- 私钥权限要求：`600`
+- 文档只记录私钥路径与权限要求，不记录私钥内容
+
+`rsync` 部署示例：
+
+```bash
+rsync -av -e 'ssh -i ~/codes/isales-4.pem' \
+  --exclude '.env' \
+  --exclude 'node_modules' \
+  --exclude '.git' \
+  <本地src/等> \
+  root@121.89.85.150:/opt/aidcp/cloud/
+```
+
+部署后验证清单：
+
+- `journalctl -u aidcp-cloud --no-pager -n 50` 中看到“飞书长连接已建立”
+- `ss -ltnp | grep 8787` 中看到 `0.0.0.0:8787`
+- `systemctl status aidcp-cloud` 显示 `active (running)`
+- `psql -h 127.0.0.1 -U aidcp -d aidcp -c 'select 1;'` 可成功返回结果
+
 ### 1. 备份与回滚准备
 
 已确认 ECS 侧备份已就绪：
