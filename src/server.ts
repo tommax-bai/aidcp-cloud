@@ -102,6 +102,7 @@ async function main(): Promise<void> {
     cache,
     session,
     messenger,
+    botChatStore,
     approvalChatId: process.env.FEISHU_CHAT_ID,
   });
   const server = new EdgeCloudServer({ port, handler });

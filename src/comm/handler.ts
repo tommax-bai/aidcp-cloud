@@ -28,6 +28,7 @@ import type { TaskPlanner } from '../planner/types.js';
 import type { LlmClient } from '../llm/qwen.js';
 import { buildPublishApprovalCard } from '../feishu/cards.js';
 import type { FeishuMessenger } from '../feishu/messenger.js';
+import type { BotChatStore } from '../cache/bot-chat-store.js';
 
 /** 锚点缓存的最小接口（PgAnchorCache 实现它，单测可打桩） */
 export interface AnchorStore {
@@ -48,6 +49,7 @@ export interface HandlerDeps {
   llm: LlmClient;
   cache: AnchorStore;
   messenger?: Pick<FeishuMessenger, 'sendApprovalCard'>;
+  botChatStore?: Pick<BotChatStore, 'getDefaultChat'>;
   approvalChatId?: string;
   logger?: Pick<Console, 'error' | 'warn' | 'log'>;
   clock?: () => number;
@@ -260,11 +262,28 @@ export class DefaultMessageHandler implements MessageHandler {
     ) {
       throw new Error('invalid_publish_approval_request');
     }
-    const chatId = this.deps.approvalChatId ?? process.env.FEISHU_CHAT_ID ?? '';
-    if (!chatId || !this.deps.messenger) {
+    if (!this.deps.messenger) {
       throw new Error('publish_approval_chat_not_configured');
     }
+    const defaultChat = await this.deps.botChatStore?.getDefaultChat();
+    const chatId = defaultChat?.chatId ?? this.deps.approvalChatId ?? process.env.FEISHU_CHAT_ID ?? '';
+    if (!chatId) {
+      const message = '未配置默认审批群：请先在目标飞书群发送 /bind 设为默认审批群，或配置 FEISHU_CHAT_ID 作为兜底。';
+      this.logger.error('[comm] publish.approval_request 缺少目标群:', {
+        requestId: payload.requestId,
+        edgeId: payload.edgeId ?? session.edgeId,
+        hint: message,
+      });
+      throw new Error(message);
+    }
     try {
+      this.logger.log('[comm] publish.approval_request 目标群解析完成:', {
+        requestId: payload.requestId,
+        edgeId: payload.edgeId ?? session.edgeId,
+        chatId,
+        source: defaultChat?.chatId ? 'bot_chats.default' : this.deps.approvalChatId || process.env.FEISHU_CHAT_ID ? 'env.FEISHU_CHAT_ID' : 'none',
+        chatName: defaultChat?.chatName ?? null,
+      });
       await this.deps.messenger.sendApprovalCard(
         chatId,
         buildPublishApprovalCard({

@@ -9,6 +9,8 @@ export interface BotChatRecord {
   chatType: string | null;
 }
 
+export interface DefaultBotChatRecord extends BotChatRecord {}
+
 export interface BotChatStoreOptions {
   pool?: pg.Pool;
 }
@@ -72,6 +74,27 @@ export class BotChatStore {
     } finally {
       client.release();
     }
+  }
+
+  async getDefaultChat(): Promise<DefaultBotChatRecord | null> {
+    const result = await this.pool.query<{
+      chat_id: string;
+      chat_name: string | null;
+      chat_type: string | null;
+    }>(
+      `SELECT chat_id, chat_name, chat_type
+       FROM bot_chats
+       WHERE is_default = true
+         AND status = 'active'
+       LIMIT 1`,
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      chatId: row.chat_id,
+      chatName: row.chat_name,
+      chatType: row.chat_type,
+    };
   }
 
   async close(): Promise<void> {
