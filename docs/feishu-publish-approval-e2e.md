@@ -99,6 +99,15 @@ pnpm start
 
 ## 常见失败排查
 
+## 部署与重启提醒
+
+- 本次修复属于代码变更，部署后必须重启对应进程才能生效，不会热加载。
+- `cloud` 对应提交：`18c6f2b`。
+- 本次修复点：`src/feishu/ws-receiver.ts` 中飞书审批卡回调已改为按 `card.action.trigger` 规范返回 `card: { type: raw, data: ... }` 包装，用于修复 `200672`。
+- 重启对象：`cloud` 进程，监听 `8787/8788`，启动入口为 `src/server.ts`。
+- 启动前提醒：`cloud` 连接 PostgreSQL 前，需先建立 ECS SSH 隧道；否则即使部署了新代码，进程也可能因数据库连接不通而未正确加载。
+- 验证修复前，务必确认当前运行中的 `cloud` 进程是在部署 `18c6f2b` 之后重启拉起的。
+
 ### 1. requestId 不匹配
 
 现象：
