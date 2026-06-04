@@ -21,6 +21,8 @@ import type {
   PublishApprovalCardData,
 } from './types.js';
 
+type PublishApprovalTerminalState = 'approved' | 'cancelled';
+
 /** 各账号状态对应的徽标 emoji */
 const STATUS_BADGE: Record<AccountStatus, string> = {
   normal: '🟢 normal',
@@ -177,8 +179,29 @@ function formatTags(tags: string[]): string {
 }
 
 export function buildPublishApprovalCard(payload: PublishApprovalCardData): FeishuCard {
+  return buildPublishApprovalStateCard(payload, 'pending');
+}
+
+function buildPublishApprovalStateCard(
+  payload: PublishApprovalCardData,
+  state: 'pending' | PublishApprovalTerminalState,
+): FeishuCard {
   const summary = summarizeContent(payload.content);
   const tags = formatTags(payload.tags);
+  const fields: FeishuField[] = [
+    {
+      is_short: false,
+      text: { tag: 'lark_md', content: `**标题**\n${payload.title || '（无标题）'}` },
+    },
+    {
+      is_short: false,
+      text: { tag: 'lark_md', content: `**正文摘要**\n${summary}` },
+    },
+    {
+      is_short: false,
+      text: { tag: 'lark_md', content: `**话题**\n${tags}` },
+    },
+  ];
   const callbackValue = {
     requestId: payload.requestId,
     payload: {
@@ -187,48 +210,65 @@ export function buildPublishApprovalCard(payload: PublishApprovalCardData): Feis
       tags: payload.tags,
     },
   };
+  const terminalText =
+    state === 'approved'
+      ? '**状态**\n✅ 已授权发布'
+      : state === 'cancelled'
+        ? '**状态**\n❌ 已取消发布'
+        : null;
 
-  return {
+  if (terminalText) {
+    fields.push({
+      is_short: false,
+      text: { tag: 'lark_md', content: terminalText },
+    });
+  }
+
+  const card: FeishuCard = {
     config: { wide_screen_mode: true },
     header: {
-      template: 'orange',
-      title: { tag: 'plain_text', content: '待授权发布' },
+      template: state === 'approved' ? 'green' : state === 'cancelled' ? 'grey' : 'orange',
+      title: {
+        tag: 'plain_text',
+        content:
+          state === 'approved' ? '已授权发布' : state === 'cancelled' ? '已取消发布' : '待授权发布',
+      },
     },
     elements: [
       {
         tag: 'div',
-        fields: [
-          {
-            is_short: false,
-            text: { tag: 'lark_md', content: `**标题**\n${payload.title || '（无标题）'}` },
-          },
-          {
-            is_short: false,
-            text: { tag: 'lark_md', content: `**正文摘要**\n${summary}` },
-          },
-          {
-            is_short: false,
-            text: { tag: 'lark_md', content: `**话题**\n${tags}` },
-          },
-        ],
-      },
-      {
-        tag: 'action',
-        actions: [
-          {
-            tag: 'button',
-            text: { tag: 'plain_text', content: '授权发布' },
-            type: 'primary',
-            behaviors: [{ type: 'callback', value: { action: 'approve', ...callbackValue } }],
-          },
-          {
-            tag: 'button',
-            text: { tag: 'plain_text', content: '取消' },
-            type: 'danger',
-            behaviors: [{ type: 'callback', value: { action: 'cancel', ...callbackValue } }],
-          },
-        ],
+        fields,
       },
     ],
   };
+
+  if (state === 'pending') {
+    card.elements.push({
+      tag: 'action',
+      actions: [
+        {
+          tag: 'button',
+          text: { tag: 'plain_text', content: '授权发布' },
+          type: 'primary',
+          behaviors: [{ type: 'callback', value: { action: 'approve', ...callbackValue } }],
+        },
+        {
+          tag: 'button',
+          text: { tag: 'plain_text', content: '取消' },
+          type: 'danger',
+          behaviors: [{ type: 'callback', value: { action: 'cancel', ...callbackValue } }],
+        },
+      ],
+    });
+  }
+
+  return card;
+}
+
+export function buildApprovedPublishApprovalCard(payload: PublishApprovalCardData): FeishuCard {
+  return buildPublishApprovalStateCard(payload, 'approved');
+}
+
+export function buildCancelledPublishApprovalCard(payload: PublishApprovalCardData): FeishuCard {
+  return buildPublishApprovalStateCard(payload, 'cancelled');
 }

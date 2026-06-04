@@ -16,7 +16,11 @@ import { join } from 'node:path';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { CommandRouter } from './commands.js';
 import { FeishuMessenger } from './messenger.js';
-import { buildCommandResultCard } from './cards.js';
+import {
+  buildApprovedPublishApprovalCard,
+  buildCancelledPublishApprovalCard,
+  buildCommandResultCard,
+} from './cards.js';
 import type { PublishApprovalPayload } from './types.js';
 
 /** im.message.receive_v1 事件中 message 字段的最小形状（与 SDK 类型对齐的子集） */
@@ -137,7 +141,7 @@ export class FeishuWsReceiver {
 
   async handleCardAction(value: unknown): Promise<{
     toast: { type: 'success' | 'error' | 'info'; content: string };
-    card?: { type: 'template'; data: { template_id: string; template_variable: Record<string, string> } };
+    card?: unknown;
   }> {
     const parsed = parseApprovalActionValue(value);
     if (!parsed) {
@@ -157,6 +161,10 @@ export class FeishuWsReceiver {
       await this.fsImpl.writeFile(signalPath, JSON.stringify(signal), 'utf8');
       return {
         toast: { type: 'success', content: '已授权发布' },
+        card: buildApprovedPublishApprovalCard({
+          requestId: parsed.requestId,
+          ...parsed.payload,
+        }),
       };
     }
 
@@ -169,6 +177,10 @@ export class FeishuWsReceiver {
     await this.fsImpl.writeFile(signalPath, JSON.stringify(signal), 'utf8');
     return {
       toast: { type: 'info', content: '已取消发布' },
+      card: buildCancelledPublishApprovalCard({
+        requestId: parsed.requestId,
+        ...parsed.payload,
+      }),
     };
   }
 
