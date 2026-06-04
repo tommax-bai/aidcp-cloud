@@ -92,6 +92,7 @@ async function main(): Promise<void> {
     resume: (accountId) => {
       console.log(`[feishu] 收到恢复指令：${accountId}`);
     },
+    bindChat: (record) => botChatStore.setDefault(record),
   };
   const commandRouter = new CommandRouter(actions);
   const messenger = new FeishuMessenger();

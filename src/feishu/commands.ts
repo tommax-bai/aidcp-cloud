@@ -18,6 +18,7 @@
 import type { CommandResult, PublishApprovalPayload } from './types.js';
 import { buildPublishApprovalCard } from './cards.js';
 import { FeishuMessenger } from './messenger.js';
+import type { BotChatRecord } from '../cache/bot-chat-store.js';
 
 /** 单账号 MVP 的缺省账号 id */
 export const DEFAULT_ACCOUNT_ID = 'acc-default';
@@ -88,6 +89,8 @@ export interface CommandActions {
   resume(accountId: string): Promise<void> | void;
   /** 发送审批测试卡片 */
   publishTest?(): Promise<PublishApprovalPayload> | PublishApprovalPayload;
+  /** 绑定当前群为默认审批群 */
+  bindChat?(record: BotChatRecord): Promise<void> | void;
 }
 
 export interface PublishTestOptions {
@@ -223,12 +226,43 @@ export class CommandRouter {
   }
 
   private async runBind(cmd: ParsedCommand, chatId?: string): Promise<CommandResult> {
-    return {
-      command: cmd.raw || '/bind',
-      ok: true,
-      title: '绑定请求已收到',
-      message: `已收到当前群绑定请求${chatId ? `（chatId: \`${chatId}\`）` : ''}，绑群入库逻辑开发中。`,
-    };
+    if (!chatId) {
+      return {
+        command: cmd.raw || '/bind',
+        ok: false,
+        title: '绑定失败',
+        message: '当前消息不在群聊中，或未拿到真实 chat_id，无法绑定默认审批群。',
+      };
+    }
+    if (!this.actions.bindChat) {
+      return {
+        command: cmd.raw || '/bind',
+        ok: false,
+        title: '绑定失败',
+        message: '未配置绑群存储逻辑，无法设置默认审批群。',
+      };
+    }
+    const chatName = cmd.args?.join(' ').trim() || null;
+    try {
+      await this.actions.bindChat({
+        chatId,
+        chatName,
+        chatType: 'group',
+      });
+      return {
+        command: cmd.raw || '/bind',
+        ok: true,
+        title: '默认审批群已更新',
+        message: `当前群已设为默认审批群${chatName ? `：${chatName}` : ''}。\nchat_id：\`${chatId}\``,
+      };
+    } catch (err) {
+      return {
+        command: cmd.raw || '/bind',
+        ok: false,
+        title: '绑定失败',
+        message: (err as Error).message ?? String(err),
+      };
+    }
   }
 
   private fail(cmd: ParsedCommand, title: string, err: unknown): CommandResult {

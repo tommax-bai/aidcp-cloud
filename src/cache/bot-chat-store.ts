@@ -43,6 +43,37 @@ export class BotChatStore {
     );
   }
 
+  async setDefault(record: BotChatRecord): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE bot_chats
+         SET is_default = false,
+             updated_at = now()
+         WHERE is_default = true`,
+      );
+      await client.query(
+        `INSERT INTO bot_chats (chat_id, chat_name, chat_type, is_default, status, bound_at, updated_at)
+         VALUES ($1, $2, $3, true, 'active', now(), now())
+         ON CONFLICT (chat_id) DO UPDATE
+         SET chat_name = EXCLUDED.chat_name,
+             chat_type = EXCLUDED.chat_type,
+             is_default = true,
+             status = 'active',
+             bound_at = now(),
+             updated_at = now()`,
+        [record.chatId, record.chatName, record.chatType],
+      );
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async close(): Promise<void> {
     await this.pool.end();
   }
