@@ -161,10 +161,13 @@ export class FeishuWsReceiver {
       await this.fsImpl.writeFile(signalPath, JSON.stringify(signal), 'utf8');
       return {
         toast: { type: 'success', content: '已授权发布' },
-        card: buildApprovedPublishApprovalCard({
-          requestId: parsed.requestId,
-          ...parsed.payload,
-        }),
+        card: {
+          type: 'raw',
+          data: buildApprovedPublishApprovalCard({
+            requestId: parsed.requestId,
+            ...parsed.payload,
+          }),
+        },
       };
     }
 
@@ -177,10 +180,13 @@ export class FeishuWsReceiver {
     await this.fsImpl.writeFile(signalPath, JSON.stringify(signal), 'utf8');
     return {
       toast: { type: 'info', content: '已取消发布' },
-      card: buildCancelledPublishApprovalCard({
-        requestId: parsed.requestId,
-        ...parsed.payload,
-      }),
+      card: {
+        type: 'raw',
+        data: buildCancelledPublishApprovalCard({
+          requestId: parsed.requestId,
+          ...parsed.payload,
+        }),
+      },
     };
   }
 
