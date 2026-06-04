@@ -17,6 +17,7 @@ import type { RemoteAnchor } from '../comm/protocol.js';
 const { Pool } = pg;
 
 export interface PgAnchorCacheOptions {
+  connectionString?: string;
   host?: string;
   port?: number;
   database?: string;
@@ -36,6 +37,34 @@ export const DEFAULT_PG_CONFIG = {
   user: 'aidcp',
   password: '***REMOVED***',
 };
+
+function readEnvString(name: string): string | undefined {
+  const value = process.env[name];
+  return value && value.trim() ? value : undefined;
+}
+
+function readEnvPort(): number | undefined {
+  const value = readEnvString('PGPORT');
+  if (!value) return undefined;
+  const port = Number(value);
+  return Number.isInteger(port) && port > 0 ? port : undefined;
+}
+
+function resolvePgConfig(options: PgAnchorCacheOptions): pg.PoolConfig {
+  const envConnectionString = readEnvString('DATABASE_URL');
+  const connectionString = options.connectionString ?? envConnectionString;
+  if (connectionString) {
+    return { connectionString };
+  }
+
+  return {
+    host: options.host ?? readEnvString('PGHOST') ?? DEFAULT_PG_CONFIG.host,
+    port: options.port ?? readEnvPort() ?? DEFAULT_PG_CONFIG.port,
+    database: options.database ?? readEnvString('PGDATABASE') ?? DEFAULT_PG_CONFIG.database,
+    user: options.user ?? readEnvString('PGUSER') ?? DEFAULT_PG_CONFIG.user,
+    password: options.password ?? readEnvString('PGPASSWORD') ?? DEFAULT_PG_CONFIG.password,
+  };
+}
 
 export interface PromotionResult {
   promoted: boolean;
@@ -108,15 +137,7 @@ export class PgAnchorCache {
 
   constructor(options: PgAnchorCacheOptions = {}) {
     this.confirmThreshold = Math.max(1, options.confirmThreshold ?? 2);
-    this.pool =
-      options.pool ??
-      new Pool({
-        host: options.host ?? DEFAULT_PG_CONFIG.host,
-        port: options.port ?? DEFAULT_PG_CONFIG.port,
-        database: options.database ?? DEFAULT_PG_CONFIG.database,
-        user: options.user ?? DEFAULT_PG_CONFIG.user,
-        password: options.password ?? DEFAULT_PG_CONFIG.password,
-      });
+    this.pool = options.pool ?? new Pool(resolvePgConfig(options));
   }
 
   /** 初始化表结构（幂等） */

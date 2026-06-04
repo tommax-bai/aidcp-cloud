@@ -33,13 +33,32 @@ import {
   type CommandActions,
 } from './feishu/index.js';
 
+function readEnvString(name: string): string | undefined {
+  const value = process.env[name];
+  return value && value.trim() ? value : undefined;
+}
+
+function readEnvPort(name: string): number | undefined {
+  const value = readEnvString(name);
+  if (!value) return undefined;
+  const port = Number(value);
+  return Number.isInteger(port) && port > 0 ? port : undefined;
+}
+
 async function main(): Promise<void> {
   const port = Number(process.env.AIDCP_PORT ?? 8787);
   const debugPort = Number(process.env.AIDCP_DEBUG_PORT ?? 8788);
 
   const llm = new QwenClient();
   const planner = new SimplePlanner({ llm });
-  const cache = new PgAnchorCache();
+  const cache = new PgAnchorCache({
+    connectionString: readEnvString('DATABASE_URL'),
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
   const soul = loadSoul();
 
   // 建表（幂等）；PG 不可用时打印告警但不阻塞启动协议处理
