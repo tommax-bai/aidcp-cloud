@@ -41,7 +41,12 @@ aidcp-cloud 代码默认连 `127.0.0.1:5432/aidcp/aidcp`（`src/cache/pg-anchor-
 
 - host=`127.0.0.1`、port=`15432`、user=`aidcp`、password=见上、database=`aidcp`
 
-> 注意：核查发现 `pg-anchor-cache.ts` 主要使用默认值 + 构造参数覆盖，需确认是否有从 env（PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE 或 DATABASE_URL）读取的入口；若无 env 读取入口，接入隧道时需在装配处显式传入连接参数。
+> **重要（已核实）**：`pg-anchor-cache.ts` 的 `PgAnchorCache` **当前没有从环境变量读取连接参数的入口**。`DEFAULT_PG_CONFIG` 把 host/port/user/password/database 全部硬编码（host=127.0.0.1 port=5432，密码即上表值），且 `server.ts` 中 `new PgAnchorCache()` 未传任何 options。`server.ts` 注释虽写"可由 PGHOST/PGPORT/... 覆盖"，但代码并未实现读取。
+>
+> **后果**：默认连的是本机 `127.0.0.1:5432`（本机空 PG → 报 `role "aidcp" does not exist`）。要让 cloud 走隧道连 ECS，有两种改法（接入时二选一）：
+> 1. 给 `PgAnchorCache` 加 env 读取入口（PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE 或 DATABASE_URL），再用环境变量指向隧道端口 `127.0.0.1:15432`；或
+> 2. 在 `server.ts` 装配处显式 `new PgAnchorCache({ host, port, user, password, database })` 传入隧道参数。
+> 推荐方案 1（更通用，便于区分本地/隧道/生产）。
 
 ## 连通验证（已实测通过）
 
