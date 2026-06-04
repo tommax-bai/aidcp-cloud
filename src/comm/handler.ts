@@ -265,7 +265,25 @@ export class DefaultMessageHandler implements MessageHandler {
     if (!this.deps.messenger) {
       throw new Error('publish_approval_chat_not_configured');
     }
-    const defaultChat = await this.deps.botChatStore?.getDefaultChat();
+    this.logger.log('[comm] 收到 publish.approval_request:', {
+      requestId: payload.requestId,
+      edgeId: payload.edgeId ?? session.edgeId,
+      sessionId: session.sessionId,
+    });
+    let defaultChat = null;
+    try {
+      defaultChat = await this.deps.botChatStore?.getDefaultChat();
+      this.logger.log('[comm] publish.approval_request 默认群查询完成:', {
+        requestId: payload.requestId,
+        defaultChatId: defaultChat?.chatId ?? null,
+        defaultChatName: defaultChat?.chatName ?? null,
+      });
+    } catch (error) {
+      this.logger.warn('[comm] publish.approval_request 默认群查询失败，回退 FEISHU_CHAT_ID:', {
+        requestId: payload.requestId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
     const chatId = defaultChat?.chatId ?? this.deps.approvalChatId ?? process.env.FEISHU_CHAT_ID ?? '';
     if (!chatId) {
       const message = '未配置默认审批群：请先在目标飞书群发送 /bind 设为默认审批群，或配置 FEISHU_CHAT_ID 作为兜底。';
@@ -293,6 +311,11 @@ export class DefaultMessageHandler implements MessageHandler {
           tags: payload.tags,
         }),
       );
+      this.logger.log('[comm] publish.approval_request 发卡成功:', {
+        requestId: payload.requestId,
+        edgeId: payload.edgeId ?? session.edgeId,
+        chatId,
+      });
     } catch (error) {
       this.logger.error('[comm] publish.approval_request 发卡失败:', {
         requestId: payload.requestId,
