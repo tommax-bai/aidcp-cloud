@@ -136,31 +136,130 @@
 4. 执行 `systemctl restart aidcp-cloud`
 5. 验证服务恢复与 edge 连通
 
+## 部署准备与更新流程
+
+> 本节记录 2026-06-04 已完成的 ECS 部署准备评估结果，仅作为后续正式更新时的执行依据。
+
+### 1. 备份与回滚准备
+
+已确认 ECS 侧备份已就绪：
+
+- 代码备份：`/opt/aidcp/cloud.bak.20260604-1655.tar.gz`
+- 备份体积：约 13M
+- 备份内容说明：不含 `node_modules`
+- `.env` 单独备份：`/opt/aidcp/cloud/.env.bak.20260604`
+- `.env` 备份体积：约 298B
+
+回滚原则：
+
+- 恢复对应代码备份与 `.env` 备份
+- 然后执行 `systemctl restart aidcp-cloud`
+
+### 2. `.env` 关键键核实结果
+
+以下键已确认存在，且要求值非空：
+
+- `DASHSCOPE_API_KEY`
+- `FEISHU_APP_ID`
+- `FEISHU_APP_SECRET`
+- `FEISHU_CHAT_ID`
+- `PGHOST`
+- `PGPORT`
+- `PGUSER`
+- `PGDATABASE`
+
+说明：
+
+- `DASHSCOPE_API_KEY` 已配且非空，真发链路依赖该 key，ECS 当前已具备
+- 文档仅记录“已配/非空”这一事实，不记录任何具体值
+
+### 3. systemd 单元关键字段
+
+已确认 `/etc/systemd/system/aidcp-cloud.service` 关键字段如下：
+
+- `WorkingDirectory=/opt/aidcp/cloud`
+- `EnvironmentFile=/opt/aidcp/cloud/.env`
+- `ExecStart=/usr/bin/npx tsx src/server.ts`
+- `Restart=on-failure`
+- `RestartSec=5`
+
+更新代码后的重启命令：
+
+```bash
+systemctl restart aidcp-cloud
+```
+
+### 4. 更新方式评估
+
+已确认 ECS 运行环境：
+
+- 可访问 npm registry
+- `npm view tsx version` 已成功
+- Node.js 为 `v20.20.2`
+- npm 为 `10.8.2`
+- 未安装 `pnpm`
+- 未安装 `pm2`
+- 未安装 `lsof`
+
+当前重要约束：
+
+- ECS 当前无法访问 GitHub 私库
+- `git@github.com:tommax-bai/aidcp-cloud.git` 的 SSH 方式因缺少凭证被拒绝
+- HTTPS 方式同样因缺少凭证无法拉取
+
+因此，当前推荐更新方式为：
+
+1. 在本地打包最新代码
+2. 使用 `rsync` 上传到 `/opt/aidcp/cloud`
+3. 上传时保留 ECS 原有 `.env`
+4. 在 ECS 上执行 `npm install`
+5. 执行 `systemctl restart aidcp-cloud`
+
+治本方向（TODO）：
+
+- 为 ECS 配置 GitHub deploy key
+- 将部署方式改为 `git clone` / `git pull`
+- 使部署过程具备版本可追溯性
+
 ## 更新与回滚命令草案
 
 > 以下仅为文档草案，供后续正式变更时参考；本次未执行。
 
-### 更新前备份草案
+### 更新流程草案
 
 ```bash
-cp -a /opt/aidcp/cloud /opt/aidcp/cloud.backup-2026-06-04
-```
-
-### 重启草案
-
-```bash
+tar -czf /opt/aidcp/cloud.bak.$(date +%Y%m%d-%H%M).tar.gz -C /opt/aidcp cloud
+rsync -av --delete \
+  --exclude '.env' \
+  --exclude 'node_modules' \
+  ./ /opt/aidcp/cloud/
+cd /opt/aidcp/cloud && npm install
 systemctl restart aidcp-cloud
-systemctl status aidcp-cloud --no-pager
 ```
+
+说明：
+
+- 若沿用已存在备份，也可不重复创建 tar 备份
+- 上传时应覆盖最新代码与依赖声明文件，例如 `src/`、`package.json`、锁文件（若后续仓库采用）
+- 必须保留 ECS 原有 `.env`
 
 ### 回滚草案
 
 ```bash
-rm -rf /opt/aidcp/cloud
-cp -a /opt/aidcp/cloud.backup-2026-06-04 /opt/aidcp/cloud
+tar -xzf /opt/aidcp/cloud.bak.20260604-1655.tar.gz -C /opt/aidcp
+cp -f /opt/aidcp/cloud/.env.bak.20260604 /opt/aidcp/cloud/.env
 systemctl restart aidcp-cloud
-systemctl status aidcp-cloud --no-pager
 ```
+
+### 验证清单
+
+更新或回滚后，应至少完成以下验证：
+
+- `journalctl -u aidcp-cloud` 中看到“飞书长连接已建立”
+- 使用 `ss -tlnp` 确认监听 `0.0.0.0:8787`
+- edge 到 cloud 连通正常
+- 发卡链路正常
+- PostgreSQL 连接正常
 
 ## 明确禁止事项
 
