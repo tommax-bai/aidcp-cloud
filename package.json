@@ -13,7 +13,8 @@
     "test": "tsx --test test/**/*.test.ts",
     "start": "tsx --env-file=.env src/server.ts",
     "trigger:like": "tsx src/cli/trigger-like.ts",
-    "test:feishu": "tsx --env-file=.env src/cli/test-feishu.ts"
+    "test:feishu": "tsx --env-file=.env src/cli/test-feishu.ts",
+    "trigger:publish-temp": "tsx src/cli/trigger-publish-temp.ts"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.66.0",

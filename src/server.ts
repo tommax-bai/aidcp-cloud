@@ -13,10 +13,17 @@
  * 运行：npm start
  */
 
+import http from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { QwenClient } from './llm/index.js';
 import { SimplePlanner } from './planner/index.js';
 import { PgAnchorCache } from './cache/index.js';
-import { EdgeCloudServer, DefaultMessageHandler } from './comm/index.js';
+import {
+  EdgeCloudServer,
+  DefaultMessageHandler,
+  makeEnvelope,
+  type PublishRequestPayload,
+} from './comm/index.js';
 import { loadSoul } from './soul/index.js';
 import { SessionOrchestrator, EngagementDecider, ConceptExtractor } from './orchestrator/index.js';
 import {
@@ -28,6 +35,7 @@ import {
 
 async function main(): Promise<void> {
   const port = Number(process.env.AIDCP_PORT ?? 8787);
+  const debugPort = Number(process.env.AIDCP_DEBUG_PORT ?? 8788);
 
   const llm = new QwenClient();
   const planner = new SimplePlanner({ llm });
@@ -74,6 +82,28 @@ async function main(): Promise<void> {
   const server = new EdgeCloudServer({ port, handler });
   await server.start();
   console.log(`[aidcp-cloud] 边-云 WebSocket 服务端已监听 :${port}`);
+  const debugPayload: PublishRequestPayload = {
+    title: '【测试请忽略】AIDCP 主动审批联调',
+    content: '自动化测试请忽略',
+    tags: ['测试'],
+  };
+  const debugServer = http.createServer((req, res) => {
+    if (req.method !== 'POST' || req.url !== '/debug/publish') {
+      res.statusCode = 404;
+      res.end('not_found');
+      return;
+    }
+    const env = makeEnvelope('publish.request', `temp-publish-${randomUUID()}`, Date.now(), debugPayload);
+    const sent = server.pushToEdges(env);
+    console.log(
+      `[aidcp-cloud] TODO(temp) debug publish trigger sent=${sent} title=${debugPayload.title}`,
+    );
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ ok: sent > 0, sent, payload: debugPayload }));
+  });
+  debugServer.listen(debugPort, '127.0.0.1', () => {
+    console.log(`[aidcp-cloud] TODO(temp) debug publish trigger listening on 127.0.0.1:${debugPort}`);
+  });
   const feishuReceiver = new FeishuWsReceiver({ commandRouter, messenger });
   try {
     await feishuReceiver.start();
