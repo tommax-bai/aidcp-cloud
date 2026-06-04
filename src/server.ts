@@ -15,6 +15,7 @@
 
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
+import * as lark from '@larksuiteoapi/node-sdk';
 import { QwenClient } from './llm/index.js';
 import { SimplePlanner } from './planner/index.js';
 import { PgAnchorCache, BotChatStore } from './cache/index.js';
@@ -31,6 +32,7 @@ import {
   FeishuBotChatEventHandler,
   FeishuMessenger,
   FeishuWsReceiver,
+  buildFeishuEventDispatcher,
   type CommandActions,
 } from './feishu/index.js';
 
@@ -126,13 +128,19 @@ async function main(): Promise<void> {
   debugServer.listen(debugPort, '127.0.0.1', () => {
     console.log(`[aidcp-cloud] TODO(temp) debug publish trigger listening on 127.0.0.1:${debugPort}`);
   });
-  const feishuReceiver = new FeishuWsReceiver({
-    commandRouter,
-    messenger,
-    botChatEventHandler,
-  });
+  const feishuReceiver = new FeishuWsReceiver({ commandRouter, messenger });
   try {
-    await feishuReceiver.start();
+    const wsClient = new lark.WSClient({
+      appId: process.env.FEISHU_APP_ID ?? '',
+      appSecret: process.env.FEISHU_APP_SECRET ?? '',
+      onReady: () => console.log('[aidcp-cloud] 飞书长连接已建立（WSClient onReady）'),
+      onError: (err) => console.error('[aidcp-cloud] 飞书长连接错误:', err.message),
+      onReconnecting: () => console.warn('[aidcp-cloud] 飞书长连接重连中…'),
+      onReconnected: () => console.log('[aidcp-cloud] 飞书长连接已重连'),
+    });
+    await wsClient.start({
+      eventDispatcher: buildFeishuEventDispatcher(feishuReceiver, botChatEventHandler, console),
+    });
     console.log('[aidcp-cloud] 飞书事件接收已启动（WSClient 长连接）');
   } catch (err) {
     console.warn('[aidcp-cloud] 飞书长连接启动失败（事件接收不可用）:', (err as Error).message);
