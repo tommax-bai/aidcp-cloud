@@ -1,10 +1,12 @@
 /**
- * 飞书 /aidcp 指令解析与执行。
+ * 飞书命令解析与执行。
  *
  * MVP 支持结构化命令（product-feishu.md §5）：
- *   /aidcp status [accountId]   查账号状态
- *   /aidcp pause  [accountId]   暂停账号
- *   /aidcp resume [accountId]   恢复账号
+ *   /status [accountId]        查账号状态
+ *   /pause  [accountId]        暂停账号
+ *   /resume [accountId]        恢复账号
+ *   /publish-test [requestId]  发送测试审批卡片
+ *   /bind                      绑定当前群为默认审批群（占位）
  * 未识别 → 返回帮助信息。
  *
  * 单账号 MVP：accountId 可省略，缺省落到唯一账号（DEFAULT_ACCOUNT_ID）。
@@ -21,7 +23,7 @@ import { FeishuMessenger } from './messenger.js';
 export const DEFAULT_ACCOUNT_ID = 'acc-default';
 
 /** 已识别的指令动作 */
-export type CommandAction = 'status' | 'pause' | 'resume' | 'publish-test' | 'help';
+export type CommandAction = 'status' | 'pause' | 'resume' | 'publish-test' | 'bind' | 'help';
 
 /** 解析后的指令结构 */
 export interface ParsedCommand {
@@ -36,10 +38,11 @@ export interface ParsedCommand {
 
 const HELP_TEXT = [
   '可用指令：',
-  '• `/aidcp status [accountId]` — 查账号状态',
-  '• `/aidcp pause [accountId]` — 暂停账号',
-  '• `/aidcp resume [accountId]` — 恢复账号',
-  '• `/aidcp publish-test` — 发送测试审批卡片',
+  '• `/status [accountId]` — 查账号状态',
+  '• `/pause [accountId]` — 暂停账号',
+  '• `/resume [accountId]` — 恢复账号',
+  '• `/publish-test [requestId]` — 发送测试审批卡片',
+  '• `/bind` — 绑定当前群为默认审批群（开发中）',
   '',
   '（单账号 MVP：accountId 可省略，默认作用于唯一账号）',
 ].join('\n');
@@ -48,36 +51,30 @@ const HELP_TEXT = [
  * 解析一条文本指令为结构化命令。
  *
  * 规则：
- * - 必须以 `/aidcp` 前缀开头，否则归为 help；
- * - 子命令仅识别 status/pause/resume，其余归为 help；
- * - 第二个 token 视为 accountId，缺省用 DEFAULT_ACCOUNT_ID。
+ * - 必须直接输入 `/status`、`/pause`、`/resume`、`/publish-test`、`/bind` 之一；
+ * - `/status`、`/pause`、`/resume` 的第二个 token 视为 accountId，缺省用 DEFAULT_ACCOUNT_ID；
+ * - `/publish-test` 的第二个 token 视为 requestId（可省略）；
+ * - 其余输入归为 help。
  */
 export function parseCommand(text: string): ParsedCommand {
   const raw = (text ?? '').trim();
   const tokens = raw.split(/\s+/).filter(Boolean);
+  const command = (tokens[0] ?? '').toLowerCase();
+  const args = tokens.slice(1);
 
-  if (tokens.length === 0 || tokens[0] !== '/aidcp') {
-    return { action: 'help', accountId: DEFAULT_ACCOUNT_ID, raw, hint: '未识别的指令' };
-  }
-
-  const sub = (tokens[1] ?? '').toLowerCase();
-  const accountId = tokens[2] ?? DEFAULT_ACCOUNT_ID;
-  const args = tokens.slice(2);
-
-  switch (sub) {
-    case 'status':
-    case 'pause':
-    case 'resume':
-      return { action: sub, accountId, raw, args };
-    case 'publish-test':
+  switch (command) {
+    case '/status':
+      return { action: 'status', accountId: tokens[1] ?? DEFAULT_ACCOUNT_ID, raw, args };
+    case '/pause':
+      return { action: 'pause', accountId: tokens[1] ?? DEFAULT_ACCOUNT_ID, raw, args };
+    case '/resume':
+      return { action: 'resume', accountId: tokens[1] ?? DEFAULT_ACCOUNT_ID, raw, args };
+    case '/publish-test':
       return { action: 'publish-test', accountId: DEFAULT_ACCOUNT_ID, raw, args };
+    case '/bind':
+      return { action: 'bind', accountId: DEFAULT_ACCOUNT_ID, raw, args };
     default:
-      return {
-        action: 'help',
-        accountId: DEFAULT_ACCOUNT_ID,
-        raw,
-        hint: sub ? `未识别的子命令：${sub}` : '缺少子命令',
-      };
+      return { action: 'help', accountId: DEFAULT_ACCOUNT_ID, raw, hint: '未识别的指令' };
   }
 }
 
@@ -128,10 +125,12 @@ export class CommandRouter {
         return this.runResume(cmd);
       case 'publish-test':
         return this.runPublishTest(cmd, context?.chatId);
+      case 'bind':
+        return this.runBind(cmd, context?.chatId);
       case 'help':
       default:
         return {
-          command: cmd.raw || '/aidcp',
+          command: cmd.raw || '/help',
           ok: false,
           title: '需要帮助',
           message: `${cmd.hint ? cmd.hint + '\n\n' : ''}${HELP_TEXT}`,
@@ -220,6 +219,15 @@ export class CommandRouter {
       ok: true,
       title: '测试审批卡片已发送',
       message: `已向会话 \`${targetChatId}\` 发送审批卡片。\n授权 requestId：\`${requestId}\``,
+    };
+  }
+
+  private async runBind(cmd: ParsedCommand, chatId?: string): Promise<CommandResult> {
+    return {
+      command: cmd.raw || '/bind',
+      ok: true,
+      title: '绑定请求已收到',
+      message: `已收到当前群绑定请求${chatId ? `（chatId: \`${chatId}\`）` : ''}，绑群入库逻辑开发中。`,
     };
   }
 

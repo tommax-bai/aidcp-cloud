@@ -128,7 +128,7 @@ export interface AlertData {
 
 /** 指令回执卡片数据（对应 product-feishu.md §2.2 指令回执） */
 export interface CommandResult {
-  /** 原始指令文本，如 "/aidcp pause acc-01" */
+  /** 原始指令文本，如 "/pause acc-01" */
   command: string;
   /** 执行是否成功 */
   ok: boolean;

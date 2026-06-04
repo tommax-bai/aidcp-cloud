@@ -37,10 +37,10 @@
 export AIDCP_PUBLISH_APPROVAL_REQUEST_ID=req-e2e-001
 ```
 
-cloud 与 edge 都使用同一个值。cloud 的 `/aidcp publish-test` 支持两种取 token 的方式：
+cloud 与 edge 都使用同一个值。cloud 的 `/publish-test` 支持两种取 token 的方式：
 
 1. 优先读取环境变量 `AIDCP_PUBLISH_APPROVAL_REQUEST_ID`
-2. 或在命令里显式传参：`/aidcp publish-test req-e2e-001`
+2. 或在命令里显式传参：`/publish-test req-e2e-001`
 
 若两者都未提供，cloud 才会自动生成 requestId。
 
@@ -76,20 +76,20 @@ pnpm start
 在飞书群里发送以下任一命令：
 
 ```text
-/aidcp publish-test
+/publish-test
 ```
 
 或显式指定 requestId：
 
 ```text
-/aidcp publish-test req-e2e-001
+/publish-test req-e2e-001
 ```
 
 推荐联调时显式带 token，便于肉眼核对。
 
 ## 预期流程
 
-1. cloud 收到 `/aidcp publish-test`
+1. cloud 收到 `/publish-test`
 2. cloud 发送“待授权发布”卡片，卡片内携带 requestId
 3. edge 在真发模式下轮询 `/tmp/aidcp-publish-approve-req-e2e-001.json`
 4. 在飞书点击“授权发布”
