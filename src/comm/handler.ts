@@ -21,10 +21,13 @@ import {
   type HelloPayload,
   type RemoteElement,
   type NoteContentPayload,
+  type PublishApprovalRequestPayload,
 } from './protocol.js';
 import type { MessageHandler, EdgeSession, EdgePusher } from './ws-server.js';
 import type { TaskPlanner } from '../planner/types.js';
 import type { LlmClient } from '../llm/qwen.js';
+import { buildPublishApprovalCard } from '../feishu/cards.js';
+import type { FeishuMessenger } from '../feishu/messenger.js';
 
 /** 锚点缓存的最小接口（PgAnchorCache 实现它，单测可打桩） */
 export interface AnchorStore {
@@ -44,6 +47,9 @@ export interface HandlerDeps {
   planner: TaskPlanner;
   llm: LlmClient;
   cache: AnchorStore;
+  messenger?: Pick<FeishuMessenger, 'sendApprovalCard'>;
+  approvalChatId?: string;
+  logger?: Pick<Console, 'error' | 'warn' | 'log'>;
   clock?: () => number;
   serverVersion?: string;
   session?: SessionRouter;
@@ -89,10 +95,12 @@ export function parseIndex(raw: string): number | null {
 export class DefaultMessageHandler implements MessageHandler {
   private readonly clock: () => number;
   private readonly serverVersion: string;
+  private readonly logger: Pick<Console, 'error' | 'warn' | 'log'>;
 
   constructor(private readonly deps: HandlerDeps) {
     this.clock = deps.clock ?? Date.now;
     this.serverVersion = deps.serverVersion ?? '0.1.0';
+    this.logger = deps.logger ?? console;
   }
 
   async handle(
@@ -132,6 +140,9 @@ export class DefaultMessageHandler implements MessageHandler {
           }
         }
         return makeEnvelope('browse.next', env.id, this.clock(), { reason: 'no_session' });
+      case 'publish.approval_request':
+        await this.onPublishApprovalRequest(env, session);
+        return null;
       case 'action.result':
         // 观测类消息：记录即可，不强制回包
         return null;
@@ -236,6 +247,40 @@ export class DefaultMessageHandler implements MessageHandler {
       }
     }
     return null;
+  }
+
+  private async onPublishApprovalRequest(env: Envelope, session: EdgeSession): Promise<void> {
+    const payload = env.payload as Partial<PublishApprovalRequestPayload>;
+    if (
+      typeof payload.requestId !== 'string' ||
+      typeof payload.title !== 'string' ||
+      typeof payload.content !== 'string' ||
+      !Array.isArray(payload.tags) ||
+      payload.tags.some((tag) => typeof tag !== 'string')
+    ) {
+      throw new Error('invalid_publish_approval_request');
+    }
+    const chatId = this.deps.approvalChatId ?? process.env.FEISHU_CHAT_ID ?? '';
+    if (!chatId || !this.deps.messenger) {
+      throw new Error('publish_approval_chat_not_configured');
+    }
+    try {
+      await this.deps.messenger.sendApprovalCard(
+        chatId,
+        buildPublishApprovalCard({
+          requestId: payload.requestId,
+          title: payload.title,
+          content: payload.content,
+          tags: payload.tags,
+        }),
+      );
+    } catch (error) {
+      this.logger.error('[comm] publish.approval_request 发卡失败:', {
+        requestId: payload.requestId,
+        edgeId: payload.edgeId ?? session.edgeId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 }
 

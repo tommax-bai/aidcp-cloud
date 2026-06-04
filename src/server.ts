@@ -50,11 +50,6 @@ async function main(): Promise<void> {
   session.start();
   console.log(`[aidcp-cloud] Soul 会话编排器已启动（人设: ${soul.identity.name}）`);
 
-  const handler = new DefaultMessageHandler({ planner, llm, cache, session });
-  const server = new EdgeCloudServer({ port, handler });
-  await server.start();
-  console.log(`[aidcp-cloud] 边-云 WebSocket 服务端已监听 :${port}`);
-
   // 飞书事件接收（官方 SDK 长连接，主动连飞书，无需公网 IP / HTTP 端口）
   // MVP：账号启停/查询动作先打桩（后续接云端调度器 → plan.request）
   const actions: CommandActions = {
@@ -68,6 +63,17 @@ async function main(): Promise<void> {
   };
   const commandRouter = new CommandRouter(actions);
   const messenger = new FeishuMessenger();
+  const handler = new DefaultMessageHandler({
+    planner,
+    llm,
+    cache,
+    session,
+    messenger,
+    approvalChatId: process.env.FEISHU_CHAT_ID,
+  });
+  const server = new EdgeCloudServer({ port, handler });
+  await server.start();
+  console.log(`[aidcp-cloud] 边-云 WebSocket 服务端已监听 :${port}`);
   const feishuReceiver = new FeishuWsReceiver({ commandRouter, messenger });
   try {
     await feishuReceiver.start();

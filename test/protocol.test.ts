@@ -41,6 +41,20 @@ test('makeEnvelope 构造 publish.request（类型安全 payload）', () => {
   assert.equal(round?.type, 'publish.request');
 });
 
+test('makeEnvelope 构造 publish.approval_request', () => {
+  const env = makeEnvelope('publish.approval_request', 'apr-1', 9, {
+    requestId: 'req-1',
+    title: '调 RAG 踩坑',
+    content: '昨天分块切碎了召回一坨',
+    tags: ['RAG', '踩坑'],
+    edgeId: 'edge-1',
+  });
+  assert.equal(env.type, 'publish.approval_request');
+  assert.ok(isEnvelope(env));
+  const round = parseEnvelope(JSON.stringify(env));
+  assert.equal(round?.type, 'publish.approval_request');
+});
+
 test('makeEnvelope 构造 publish.result', () => {
   const ok = makeEnvelope('publish.result', 'pub-1', 9, { ok: true, postId: 'xhs-123' });
   assert.equal(ok.type, 'publish.result');

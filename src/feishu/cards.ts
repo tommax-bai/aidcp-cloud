@@ -180,7 +180,7 @@ export function buildPublishApprovalCard(payload: PublishApprovalCardData): Feis
   const summary = summarizeContent(payload.content);
   const tags = formatTags(payload.tags);
   const callbackValue = {
-    token: payload.token,
+    requestId: payload.requestId,
     payload: {
       title: payload.title,
       content: payload.content,

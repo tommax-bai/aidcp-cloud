@@ -46,12 +46,12 @@ export interface FeishuWsReceiverOptions {
 
 interface ApprovalActionValue {
   action?: unknown;
-  token?: unknown;
+  requestId?: unknown;
   payload?: unknown;
 }
 
 interface ApprovalSignal {
-  token: string;
+  requestId: string;
   approved: boolean;
   ts: number;
   payload: PublishApprovalPayload;
@@ -71,19 +71,19 @@ function isPublishApprovalPayload(value: unknown): value is PublishApprovalPaylo
 }
 
 export function parseApprovalActionValue(value: unknown):
-  | { action: 'approve' | 'cancel'; token: string; payload: PublishApprovalPayload }
+  | { action: 'approve' | 'cancel'; requestId: string; payload: PublishApprovalPayload }
   | null {
   if (!value || typeof value !== 'object') return null;
   const raw = value as ApprovalActionValue;
-  if ((raw.action !== 'approve' && raw.action !== 'cancel') || typeof raw.token !== 'string') {
+  if ((raw.action !== 'approve' && raw.action !== 'cancel') || typeof raw.requestId !== 'string') {
     return null;
   }
   if (!isPublishApprovalPayload(raw.payload)) return null;
-  return { action: raw.action, token: raw.token, payload: raw.payload };
+  return { action: raw.action, requestId: raw.requestId, payload: raw.payload };
 }
 
-export function getApprovalSignalPath(token: string): string {
-  return join(APPROVAL_SIGNAL_DIR, `aidcp-publish-approve-${token}.json`);
+export function getApprovalSignalPath(requestId: string): string {
+  return join(APPROVAL_SIGNAL_DIR, `aidcp-publish-approve-${requestId}.json`);
 }
 
 /**
@@ -146,10 +146,10 @@ export class FeishuWsReceiver {
       };
     }
 
-    const signalPath = getApprovalSignalPath(parsed.token);
+    const signalPath = getApprovalSignalPath(parsed.requestId);
     if (parsed.action === 'approve') {
       const signal: ApprovalSignal = {
-        token: parsed.token,
+        requestId: parsed.requestId,
         approved: true,
         ts: Date.now(),
         payload: parsed.payload,
@@ -161,7 +161,7 @@ export class FeishuWsReceiver {
     }
 
     const signal: ApprovalSignal = {
-      token: parsed.token,
+      requestId: parsed.requestId,
       approved: false,
       ts: Date.now(),
       payload: parsed.payload,

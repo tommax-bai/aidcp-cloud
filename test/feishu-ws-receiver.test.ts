@@ -119,12 +119,12 @@ test('ws-receiver: 缺少凭证时 start 抛错', async () => {
 test('ws-receiver: parseApprovalActionValue 解析 approve/cancel', () => {
   const parsed = parseApprovalActionValue({
     action: 'approve',
-    token: 'tok-1',
+    requestId: 'req-1',
     payload: { title: 't', content: 'c', tags: ['x'] },
   });
   assert.deepEqual(parsed, {
     action: 'approve',
-    token: 'tok-1',
+    requestId: 'req-1',
     payload: { title: 't', content: 'c', tags: ['x'] },
   });
   assert.equal(parseApprovalActionValue({ action: 'noop' }), null);
@@ -145,12 +145,12 @@ test('ws-receiver: approve 写入信号文件', async () => {
   });
   const res = await receiver.handleCardAction({
     action: 'approve',
-    token: 'tok-approve',
+    requestId: 'req-approve',
     payload: { title: '标题', content: '正文', tags: ['话题'] },
   });
   assert.equal(res.toast.type, 'success');
   assert.equal(writes.length, 1);
-  assert.equal(writes[0].path, getApprovalSignalPath('tok-approve'));
+  assert.equal(writes[0].path, getApprovalSignalPath('req-approve'));
   assert.match(writes[0].content, /\"approved\":true/);
 });
 
@@ -169,7 +169,7 @@ test('ws-receiver: cancel 写入 approved=false 信号文件', async () => {
   });
   const res = await receiver.handleCardAction({
     action: 'cancel',
-    token: 'tok-cancel',
+    requestId: 'req-cancel',
     payload: { title: '标题', content: '正文', tags: ['话题'] },
   });
   assert.equal(res.toast.type, 'info');

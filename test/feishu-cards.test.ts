@@ -116,7 +116,7 @@ test('buildCommandResultCard: 失败用红色', () => {
 
 test('buildPublishApprovalCard: 构造新版 callback behaviors', () => {
   const card = buildPublishApprovalCard({
-    token: 'tok-1',
+    requestId: 'req-1',
     title: '测试标题',
     content: '这是一段很长的正文内容，用于验证审批卡片摘要与按钮回调载荷。',
     tags: ['话题A', '话题B'],
@@ -127,7 +127,7 @@ test('buildPublishApprovalCard: 构造新版 callback behaviors', () => {
   assert.equal(buttons[0].behaviors?.[0]?.type, 'callback');
   assert.deepEqual(buttons[0].behaviors?.[0]?.value, {
     action: 'approve',
-    token: 'tok-1',
+    requestId: 'req-1',
     payload: {
       title: '测试标题',
       content: '这是一段很长的正文内容，用于验证审批卡片摘要与按钮回调载荷。',

@@ -94,18 +94,18 @@ export interface CommandActions {
 }
 
 export interface PublishTestOptions {
-  token?: string;
+  requestId?: string;
 }
 
-export function resolvePublishApprovalToken(
+export function resolvePublishApprovalRequestId(
   options: PublishTestOptions = {},
-  generateToken: () => string = globalThis.crypto.randomUUID.bind(globalThis.crypto),
+  generateRequestId: () => string = globalThis.crypto.randomUUID.bind(globalThis.crypto),
 ): string {
-  const explicitToken = options.token?.trim();
-  if (explicitToken) return explicitToken;
-  const envToken = process.env.AIDCP_PUBLISH_APPROVAL_TOKEN?.trim();
-  if (envToken) return envToken;
-  return generateToken();
+  const explicitRequestId = options.requestId?.trim();
+  if (explicitRequestId) return explicitRequestId;
+  const envRequestId = process.env.AIDCP_PUBLISH_APPROVAL_REQUEST_ID?.trim();
+  if (envRequestId) return envRequestId;
+  return generateRequestId();
 }
 
 /** 指令路由器：解析 + 执行，产出指令回执数据 */
@@ -207,11 +207,11 @@ export class CommandRouter {
       content: '这是一条用于联调飞书审批卡片授权链路的测试内容，请点击按钮验证回调与信号文件写入。',
       tags: ['AIDCP', 'PublishTest'],
     };
-    const token = resolvePublishApprovalToken({ token: cmd.args?.[0] });
+    const requestId = resolvePublishApprovalRequestId({ requestId: cmd.args?.[0] });
     await this.messenger.sendApprovalCard(
       targetChatId,
       buildPublishApprovalCard({
-        token,
+        requestId,
         ...payload,
       }),
     );
@@ -219,7 +219,7 @@ export class CommandRouter {
       command: cmd.raw,
       ok: true,
       title: '测试审批卡片已发送',
-      message: `已向会话 \`${targetChatId}\` 发送审批卡片。\n授权 token：\`${token}\``,
+      message: `已向会话 \`${targetChatId}\` 发送审批卡片。\n授权 requestId：\`${requestId}\``,
     };
   }
 

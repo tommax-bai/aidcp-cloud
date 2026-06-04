@@ -161,3 +161,33 @@ test('note.content → 路由到 session 编排器，不强制回包', async () 
   assert.equal(res!.id, 'nc1');
   assert.equal(received!.title, 'T');
 });
+
+test('publish.approval_request → 调 sendApprovalCard', async () => {
+  const sent: Array<{ chatId: string; card: unknown }> = [];
+  const h = new DefaultMessageHandler({
+    planner: new SimplePlanner(),
+    llm: dummyLlm,
+    cache: memStore(),
+    clock: fixedClock,
+    messenger: {
+      sendApprovalCard: async (chatId, card) => {
+        sent.push({ chatId, card });
+      },
+    },
+    approvalChatId: 'oc_chat',
+  });
+  const res = await h.handle(
+    makeEnvelope('publish.approval_request', 'apr1', 1, {
+      requestId: 'req-1',
+      title: 'T',
+      content: 'C',
+      tags: ['x'],
+      edgeId: 'edge-1',
+    }),
+    session,
+  );
+  assert.equal(res, null);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].chatId, 'oc_chat');
+  assert.match(JSON.stringify(sent[0].card), /req-1/);
+});

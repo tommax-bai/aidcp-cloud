@@ -36,6 +36,7 @@ export type MessageType =
   | 'search.execute' // cloud → edge：执行一次关键词搜索
   | 'session.end' // cloud → edge：结束本次浏览会话
   // —— 发布编排（Publish Agent 驱动）——
+  | 'publish.approval_request' // edge → cloud：请求发送发布审批卡片
   | 'publish.request' // cloud → edge：请求在浏览器中发布一篇帖子
   | 'publish.result' // edge → cloud：发布结果回传
   // —— 通用 ——
@@ -205,6 +206,20 @@ export interface SessionEndPayload {
   };
 }
 
+/** 请求 cloud 发送发布审批卡片（edge → cloud）。 */
+export interface PublishApprovalRequestPayload {
+  /** 单次发布请求唯一标识 */
+  requestId: string;
+  /** 帖子标题（小红书标题） */
+  title: string;
+  /** 正文（200-500 字） */
+  content: string;
+  /** 话题标签（3-5 个） */
+  tags: string[];
+  /** 可选边缘节点标识（观测用） */
+  edgeId?: string;
+}
+
 /** 请求在浏览器中发布一篇帖子（cloud → edge）。 */
 export interface PublishRequestPayload {
   /** 帖子标题（小红书标题） */
@@ -248,6 +263,7 @@ export interface PayloadMap {
   'browse.next': BrowseNextPayload;
   'search.execute': SearchExecutePayload;
   'session.end': SessionEndPayload;
+  'publish.approval_request': PublishApprovalRequestPayload;
   'publish.request': PublishRequestPayload;
   'publish.result': PublishResultPayload;
   error: ErrorPayload;

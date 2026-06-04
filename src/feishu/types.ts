@@ -147,7 +147,7 @@ export interface PublishApprovalPayload {
 }
 
 export interface PublishApprovalCardData extends PublishApprovalPayload {
-  token: string;
+  requestId: string;
 }
 
 /* ------------------------------------------------------------------ */
