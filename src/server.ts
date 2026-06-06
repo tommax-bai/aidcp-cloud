@@ -26,8 +26,17 @@ import {
   type PublishRequestPayload,
 } from './comm/index.js';
 import { loadSoul } from './soul/index.js';
-import { SessionOrchestrator, EngagementDecider, ConceptExtractor } from './orchestrator/index.js';
+import { SessionOrchestrator } from './orchestrator/index.js';
 import { RiskController } from './risk/index.js';
+import { EventBus } from './event-bus/index.js';
+import { Blackboard, Arbiter } from './blackboard/index.js';
+import {
+  SessionMonitor,
+  FeedScanner,
+  ContentCurator,
+  InteractionAppraiser,
+  CommentReviewer,
+} from './agents/index.js';
 import {
   CommandRouter,
   FeishuBotChatEventHandler,
@@ -120,11 +129,30 @@ async function main(): Promise<void> {
     logger: console,
   });
 
-  // 会话编排器（Soul 驱动浏览决策）
-  const decider = new EngagementDecider({ soul, llm });
-  const extractor = new ConceptExtractor({ llm });
+  // 事件总线 + 黑板 + 仲裁器
+  const eventBus = new EventBus();
+  const blackboard = new Blackboard({ eventBus });
+  const arbiter = new Arbiter();
+
+  // 多 Agent 实例化
+  const agents = [
+    new SessionMonitor({ soul }),
+    new FeedScanner({ soul, llm }),
+    new ContentCurator({ soul, llm }),
+    new InteractionAppraiser({ soul, llm }),
+    new CommentReviewer({ soul, llm }),
+  ];
+
+  // 会话编排器（事件驱动）
   const noopSink = { send: () => {} }; // 决策通过 handler 回包，不需要额外 push
-  const session = new SessionOrchestrator({ soul, decider, extractor, sink: noopSink, publishOrchestrator });
+  const session = new SessionOrchestrator({
+    soul,
+    eventBus,
+    blackboard,
+    agents,
+    arbiter,
+    sink: noopSink,
+  });
   session.start();
   console.log(`[aidcp-cloud] Soul 会话编排器已启动（人设: ${soul.identity.name}）`);
 
@@ -148,11 +176,11 @@ async function main(): Promise<void> {
     planner,
     llm,
     cache,
-    session,
     messenger,
     botChatStore,
     approvalChatId: process.env.FEISHU_CHAT_ID,
     riskController,
+    eventBus,
   });
   const server = new EdgeCloudServer({ port, handler });
   await server.start();

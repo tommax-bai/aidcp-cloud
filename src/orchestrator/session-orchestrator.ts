@@ -31,6 +31,9 @@ import type {
   ManagerDecision,
   ConceptPool,
 } from '../event-bus/types.js';
+
+// 向后兼容：re-export ConceptPool（concept-store / concept-extractor 仍从此路径导入）
+export type { ConceptPool } from '../event-bus/types.js';
 import type { Blackboard } from '../blackboard/index.js';
 import type { Arbiter } from '../blackboard/arbiter.js';
 import type { BaseAgent } from '../agents/types.js';
