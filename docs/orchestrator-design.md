@@ -39,7 +39,19 @@
 1. **会话生命周期管理**：`start()` → 循环 `onNote()` → `end_session`
 2. **数据流串联**：将 edge 上报的笔记内容依次经过互动决策、概念抽取、上下文构建、ManagerAgent 决策
 3. **命令下发**：将 ManagerAgent 决策翻译为协议信封（Envelope），通过 `CommandSink` 下发给 edge
-4. **统计维护**：维护 `SessionStats`（views、likes、collects、searches、durationMs）
+4. **统计维护**：维护 `SessionStats`（见下方完整字段列表）
+
+`SessionStats` 完整字段：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `startedAt` | `number` | 会话开始时间戳 |
+| `durationMs` | `number` | 会话已持续时长 |
+| `views` | `number` | 浏览笔记数 |
+| `likes` | `number` | 点赞数 |
+| `collects` | `number` | 收藏数 |
+| `searches` | `number` | 搜索数 |
+| `follows` | `number` | 关注数（预留，当前未使用） |
 
 生命周期：
 
@@ -211,7 +223,7 @@ session_limits:     # 会话硬上限
   max_likes: 8
   max_collects: 5
   max_searches: 3
-  cooldown_between_actions_sec: [3, 8]  # 动作间随机冷却区间
+  cooldown_between_actions_sec: [3, 8]  # 动作间随机冷却区间（已配置但当前代码逻辑中未使用，预留字段）
 ```
 
 ### 配置项在系统中的使用方式
@@ -221,7 +233,7 @@ session_limits:     # 会话硬上限
 | `identity` | ManagerAgent prompt / EngagementDecider prompt | 定义角色人设 |
 | `interests` | ManagerAgent prompt / EngagementDecider prompt | 驱动内容筛选偏好 |
 | `behavior_guidelines` | ManagerAgent prompt | 定义浏览风格、收藏/点赞标准 |
-| `engagement_rules` | EngagementDecider prompt | like/skip/comment 倾向 |
+| `engagement_rules` | EngagementDecider prompt | like/skip/comment 倾向（**可选字段，当前默认 soul.yaml 未配置**） |
 | `session_limits` | SessionMonitor 角色 / riskStatus 计算 | 硬约束上限 |
 
 ### 如何在 ManagerAgent prompt 中体现
@@ -375,13 +387,15 @@ SessionOrchestrator 内部维护一个轻量级 `riskStatus()` 方法，基于 s
 
 ```typescript
 private riskStatus(): RiskStatus {
+  const maxLikes = soul.session_limits?.max_likes ?? soul.browse_patterns?.session?.max_likes ?? 8;
+  const maxSearches = soul.session_limits?.max_searches ?? soul.browse_patterns?.session?.max_searches ?? 3;
   return {
     status: 'normal',
     quotaLevel: 'normal',
     remainingActionsToday: {
       view: MAX_SAFE_INTEGER,
       like: max(0, maxLikes - stats.likes),
-      collect: max(0, maxCollects - stats.collects),
+      collect: max(0, maxLikes - stats.collects),  // ⚠️ 注意：此处用了 maxLikes 而非 maxCollects，疑似 bug
       search: max(0, maxSearches - stats.searches),
       follow: MAX_SAFE_INTEGER,
     },
@@ -389,6 +403,8 @@ private riskStatus(): RiskStatus {
   };
 }
 ```
+
+> **备注**：当前代码中 `collect` 的剩余配额计算使用的是 `maxLikes`（值为 8）而非 `maxCollects`（值为 5）。这意味着 collect 的实际可用配额上限与 like 一致（8 次），而非 `session_limits.max_collects` 配置的 5 次。这可能是一个需要修复的 bug，也可能是有意为之（让 collect 配额宽松于 like）。目前代码行为如实记录于此。
 
 ### remainingActionsToday 如何影响可用动作
 
@@ -407,7 +423,7 @@ const coldStartNote = ctx.sessionStats.views < 5
   : '';
 ```
 
-这是一条**软约束**（通过 prompt 告知 LLM），配合 ContextBuilder 中的动作过滤形成双重保障。
+这是一条**软约束**（仅通过 prompt 软约束引导），当前未在 `availableActions` 中硬性移除 like/collect 动作。即冷启动阶段的互动限制完全依赖 LLM 遵循 prompt 指令，未设硬性过滤。
 
 ### 预算紧迫时的策略
 
@@ -427,6 +443,117 @@ const coldStartNote = ctx.sessionStats.views < 5
 - 状态机：`normal → warned → restricted → frozen`
 - 点赞率约束：`like/view ≤ 35%`（当日浏览量 ≥ 10 时生效）
 - 信号驱动状态迁移（`light` / `quota_exceeded` / `confirmed` / `fatal` / `recovered`）
+
+### 风控协议消息（Edge ↔ Cloud）
+
+以下消息通过 WebSocket 在 Edge 与 Cloud 之间传递，由 `DefaultMessageHandler`（`src/comm/handler.ts`）处理：
+
+#### `session.budget.request` — Edge 请求会话预算
+
+**用途**：Edge 在会话开始前请求本次会话的预算限制参数。
+
+**payload 结构**（Edge → Cloud）：
+```typescript
+interface SessionBudgetRequestPayload {
+  accountId?: string;   // 可选，指定账号
+}
+```
+
+**响应**：`session.budget`（见下方）
+
+#### `session.budget` — Cloud 下发会话预算响应
+
+**用途**：Cloud 根据当前风控状态计算会话预算并下发给 Edge。
+
+**payload 结构**（Cloud → Edge）：
+```typescript
+interface SessionBudgetPayload {
+  quotaLevel: 'conservative' | 'normal' | 'aggressive';
+  durationMs: number;       // 推荐会话时长（毫秒）
+  maxActions: number;       // 本次会话最大动作数
+  naturalLeaveProbability: number;  // 自然离开概率
+  startedAt: number;        // 会话起始时间戳
+  viewOnly: boolean;        // 是否为只读模式（restricted/frozen 时为 true）
+}
+```
+
+**处理逻辑**：Cloud 调用 `riskController.getState()` 获取当前风控状态，创建 `SessionBudget` 实例生成预算快照，当状态为 `restricted` 或 `frozen` 时设置 `viewOnly: true`。
+
+#### `risk.canDo` — Edge 询问某动作是否可执行
+
+**用途**：Edge 在执行互动动作前，先询问 Cloud 当前风控是否允许。
+
+**payload 结构**（Edge → Cloud）：
+```typescript
+interface RiskCanDoPayload {
+  action: 'view' | 'like' | 'collect' | 'comment' | 'follow' | 'publish';
+  accountId?: string;
+}
+```
+
+**响应**：`risk.canDo.result`（见下方）
+
+#### `risk.canDo.result` — Cloud 回复是否允许
+
+**用途**：Cloud 回复 Edge 该动作是否被风控允许，附带拒绝原因。
+
+**payload 结构**（Cloud → Edge）：
+```typescript
+interface RiskCanDoResultPayload {
+  action: 'view' | 'like' | 'collect' | 'comment' | 'follow' | 'publish';
+  allowed: boolean;     // 是否允许执行
+  reason?: string;      // 拒绝时的原因说明
+}
+```
+
+**处理逻辑**：Cloud 调用 `riskController.explain(action)` 查询配额和状态，返回是否允许及原因。
+
+#### `risk.record` — Edge 上报已执行的动作
+
+**用途**：Edge 在成功执行一个互动动作后，上报给 Cloud 用于更新风控计数。
+
+**payload 结构**（Edge → Cloud）：
+```typescript
+interface RiskRecordPayload {
+  action: 'view' | 'like' | 'collect' | 'comment' | 'follow' | 'publish';
+  accountId?: string;
+}
+```
+
+**响应**：`risk.record.result`（见下方）
+
+#### `risk.record.result` — Cloud 确认记录
+
+**用途**：Cloud 确认已记录该动作，返回是否成功入账。
+
+**payload 结构**（Cloud → Edge）：
+```typescript
+interface RiskRecordResultPayload {
+  action: 'view' | 'like' | 'collect' | 'comment' | 'follow' | 'publish';
+  recorded: boolean;    // 是否成功记录
+  reason?: string;      // 未记录时的原因（如 'denied'）
+}
+```
+
+**处理逻辑**：Cloud 调用 `riskController.record(action)`，若风控拒绝（如配额已满），返回 `recorded: false`。
+
+#### 交互时序
+
+```
+Edge                                Cloud
+ │                                    │
+ │── session.budget.request ─────────▶│
+ │◀──────── session.budget ───────────│  (含 viewOnly/maxActions/durationMs)
+ │                                    │
+ │── risk.canDo {action:'like'} ────▶│
+ │◀──── risk.canDo.result ────────────│  (allowed: true/false)
+ │                                    │
+ │  [执行动作]                         │
+ │                                    │
+ │── risk.record {action:'like'} ───▶│
+ │◀──── risk.record.result ───────────│  (recorded: true/false)
+ │                                    │
+```
 
 ---
 

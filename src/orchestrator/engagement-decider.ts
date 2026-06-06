@@ -2,6 +2,9 @@
  * 互动决策器：给定一条笔记，决定点赞 / 收藏 / 跳过。
  *
  * 模型输出严格解析为 JSON；解析失败/模型出错 → 保守 skip（不误点赞）。
+ *
+ * @deprecated 已被 InteractionAppraiserAgent 替代（见 agents/interaction-appraiser.ts）。
+ * 保留此文件以维持向后兼容，新代码请使用事件驱动架构下的 InteractionAppraiser。
  */
 
 import type { LlmClient } from '../llm/qwen.js';

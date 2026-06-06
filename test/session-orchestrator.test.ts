@@ -30,7 +30,7 @@ const memPersistence: ConceptPersistence = {
 function manager(actionJson: string): ManagerAgent {
   return new ManagerAgent({
     soul,
-    client: { chat: async () => actionJson },
+    client: { complete: async () => actionJson },
   });
 }
 
