@@ -1,13 +1,13 @@
 /**
- * 浏览会话编排器（顶层）：把 Soul + 状态机 + 概念抽取 + 互动决策 + 概念持久化
- * 串成一次"自然刷小红书"的会话。
+ * 浏览会话编排器（顶层）：把 Soul + 内容理解 + ManagerAgent 串成一次
+ * "自然刷小红书"的会话。
  *
  * 数据流（事件驱动，由边缘上报的 note.content 推进）：
  *   edge 上报 note.content
  *     → 互动决策（硬门槛 + Qwen）得到 like/collect/skip
  *     → 概念抽取（Qwen）把新概念并入概念池 + 持久化
- *     → 喂状态机（liked/skipped/browsed + foundNewConcept）
- *     → 状态机产出下一步命令（browse_next / search / end_session）
+ *     → ContextBuilder 汇总页面/会话/风控上下文
+ *     → ManagerAgent 产出下一步命令
  *     → 翻译为协议消息，经 EdgePusher 下发给边缘
  *
  * 设计：编排器不直接依赖网络，命令通过注入的 CommandSink 下发；
@@ -18,17 +18,26 @@
 import { makeEnvelope, type Envelope } from '../comm/protocol.js';
 import type { EdgePusher } from '../comm/ws-server.js';
 import type { Soul } from '../soul/types.js';
-import {
-  BrowseStateMachine,
-  createSession,
-  emptyConceptPool,
-  type BrowseSession,
-  type ConceptPool,
-  type NextCommand,
-  type ActionFeedback,
-} from './state-machine.js';
 import { ConceptExtractor } from './concept-extractor.js';
 import { EngagementDecider, type NoteForDecision } from './engagement-decider.js';
+import {
+  ContextBuilder,
+  ManagerAgent,
+  type ManagerContext,
+  type ManagerDecision,
+  type RiskStatus,
+  type SessionStats,
+} from './manager-agent.js';
+
+export interface ConceptPool {
+  known: string[];
+  candidates: string[];
+  source: Map<string, string>;
+}
+
+export function emptyConceptPool(): ConceptPool {
+  return { known: [], candidates: [], source: new Map() };
+}
 
 /** 概念持久化接口（ConceptStore 实现，测试可打桩） */
 export interface ConceptPersistence {
@@ -66,8 +75,9 @@ export interface NoteOutcome {
   action: 'like' | 'collect' | 'skip';
   reason: string;
   newConcepts: string[];
-  command: NextCommand;
+  command: ManagerDecision;
   envelope: Envelope;
+  context: ManagerContext;
 }
 
 export interface SessionOrchestratorOptions {
@@ -75,6 +85,8 @@ export interface SessionOrchestratorOptions {
   decider: EngagementDecider;
   extractor: ConceptExtractor;
   sink: CommandSink;
+  manager?: ManagerAgent;
+  contextBuilder?: ContextBuilder;
   /** 概念持久化（可选；不传则只用内存概念池） */
   persistence?: ConceptPersistence;
   clock?: () => number;
@@ -87,36 +99,40 @@ export class SessionOrchestrator {
   private readonly soul: Soul;
   private readonly decider: EngagementDecider;
   private readonly extractor: ConceptExtractor;
+  private readonly manager: ManagerAgent;
+  private readonly contextBuilder: ContextBuilder;
   private readonly sink: CommandSink;
   private readonly persistence?: ConceptPersistence;
   private readonly clock: () => number;
-  private readonly rng: () => number;
   private readonly idGen: () => string;
   private seq = 0;
-  private machine!: BrowseStateMachine;
+  private startedAt = 0;
+  private stats!: SessionStats;
+  private pool: ConceptPool = emptyConceptPool();
 
   constructor(options: SessionOrchestratorOptions) {
     this.soul = options.soul;
     this.decider = options.decider;
     this.extractor = options.extractor;
+    this.manager = options.manager ?? new ManagerAgent({ soul: options.soul });
+    this.contextBuilder = options.contextBuilder ?? new ContextBuilder();
     this.sink = options.sink;
     if (options.persistence) this.persistence = options.persistence;
     this.clock = options.clock ?? Date.now;
-    this.rng = options.rng ?? Math.random;
     this.idGen = options.idGen ?? (() => `sess-cmd-${++this.seq}`);
   }
 
   /** 当前会话快照 */
-  get session(): BrowseSession {
-    return this.machine.session;
+  get session(): SessionStats {
+    return this.stats;
   }
 
   get done(): boolean {
-    return this.machine.done;
+    return false;
   }
 
   /**
-   * 启动一次会话：从持久化载入概念池（若有），建状态机。
+   * 启动一次会话：从持久化载入概念池（若有），初始化统计。
    * 不主动下发命令——首条命令由 onNote 的反馈驱动，或调用 kick() 触发首刷。
    */
   async start(): Promise<void> {
@@ -124,28 +140,28 @@ export class SessionOrchestrator {
     if (this.persistence) {
       pool = await this.persistence.loadPool();
     }
-    const session = createSession(this.clock(), pool);
-    const opts: { soul: Soul; clock: () => number; rng: () => number } = {
-      soul: this.soul,
-      clock: this.clock,
-      rng: this.rng,
+    this.pool = pool;
+    this.startedAt = this.clock();
+    this.stats = {
+      startedAt: this.startedAt,
+      durationMs: 0,
+      views: 0,
+      likes: 0,
+      collects: 0,
+      searches: 0,
+      follows: 0,
     };
-    this.machine = new BrowseStateMachine(opts, session);
   }
 
   /** 触发首条 browse_next，让边缘开始刷流 */
   kick(): Envelope {
-    const env = this.toEnvelope({
-      kind: 'browse_next',
-      cooldownSec: 0,
-      reason: 'session_start',
-    });
+    const env = this.toEnvelope({ action: 'browse_next', reason: 'session_start' });
     this.sink.send(env);
     return env;
   }
 
   /**
-   * 处理一条边缘上报的笔记：决策 → 抽概念 → 推进状态机 → 下发下一步命令。
+   * 处理一条边缘上报的笔记：决策 → 抽概念 → ManagerAgent → 下发下一步命令。
    */
   async onNote(note: IncomingNote): Promise<NoteOutcome> {
     console.log(`[soul] 收到笔记: "${note.title}" (likes=${note.likeCount}, collects=${note.collectCount})`);
@@ -159,7 +175,7 @@ export class SessionOrchestrator {
     console.log(`[soul] 决策: ${decision.action} (${decision.reason})`);
 
     // 概念抽取（只对值得看的内容抽，skip 的低质内容不浪费模型）
-    const pool = this.machine.session.conceptPool;
+    const pool = this.pool;
     let newConcepts: string[] = [];
     if (decision.action !== 'skip') {
       const ex = await this.extractor.extract(
@@ -183,20 +199,35 @@ export class SessionOrchestrator {
       await this.persistence.addCandidates(newConcepts, note.title).catch(() => {});
     }
 
-    // 推进状态机
-    const feedback: ActionFeedback = {
-      kind: decision.action === 'skip' ? 'skipped' : 'liked',
-      foundNewConcept: newConcepts.length > 0,
-    };
-    if (decision.action !== 'skip') feedback.topic = note.title;
-    // search 状态下，无论点赞与否都算"浏览了一个结果"
-    if (this.machine.session.state === 'search') feedback.kind = 'browsed';
+    this.stats.views++;
+    if (decision.action === 'like') this.stats.likes++;
+    if (decision.action === 'collect') this.stats.collects++;
+    this.stats.durationMs = this.clock() - this.startedAt;
 
-    const command = this.machine.feed(feedback);
+    const context = this.contextBuilder.build({
+      pageType: 'note',
+      loginState: 'unknown',
+      note: {
+        noteId: note.noteId,
+        title: note.title,
+        content: note.summary ?? '',
+        author: note.author ?? '',
+        likeCount: note.likeCount,
+        collectCount: note.collectCount,
+        isLiked: false,
+        isCollected: false,
+      },
+      sessionStats: this.stats,
+      riskStatus: this.riskStatus(),
+    });
+    const command = await this.manager.decide(context);
 
-    // search 命令需要把关键词写回持久化为 searched
-    if (command.kind === 'search' && this.persistence) {
-      await this.persistence.markSearched(command.keyword).catch(() => {});
+    if (command.action === 'search') {
+      this.stats.searches++;
+      const keyword = command.params?.keyword;
+      if (typeof keyword === 'string' && this.persistence) {
+        await this.persistence.markSearched(keyword).catch(() => {});
+      }
     }
 
     const envelope = this.toEnvelope(command);
@@ -211,29 +242,61 @@ export class SessionOrchestrator {
       newConcepts,
       command,
       envelope,
+      context,
     };
   }
 
-  /** 把状态机命令翻译成协议信封 */
-  private toEnvelope(command: NextCommand): Envelope {
+  private riskStatus(): RiskStatus {
+    const maxLikes = this.soul.session_limits?.max_likes ?? this.soul.browse_patterns?.session?.max_likes ?? 8;
+    const maxSearches = this.soul.session_limits?.max_searches ?? this.soul.browse_patterns?.session?.max_searches ?? 3;
+    return {
+      status: 'normal',
+      quotaLevel: 'normal',
+      remainingActionsToday: {
+        view: Number.MAX_SAFE_INTEGER,
+        like: Math.max(0, maxLikes - this.stats.likes),
+        collect: Math.max(0, maxLikes - this.stats.collects),
+        search: Math.max(0, maxSearches - this.stats.searches),
+        follow: Number.MAX_SAFE_INTEGER,
+      },
+      viewOnly: false,
+    };
+  }
+
+  /** 把 ManagerAgent 命令翻译成协议信封 */
+  private toEnvelope(command: ManagerDecision): Envelope {
     const now = this.clock();
-    switch (command.kind) {
+    switch (command.action) {
       case 'browse_next':
         return makeEnvelope('browse.next', this.idGen(), now, { reason: command.reason });
+      case 'scroll':
+        return makeEnvelope('browse.scroll', this.idGen(), now, { reason: command.reason });
+      case 'open_note':
+        return makeEnvelope('note.open', this.idGen(), now, {
+          noteId: typeof command.params?.noteId === 'string' ? command.params.noteId : undefined,
+          index: typeof command.params?.index === 'number' ? command.params.index : undefined,
+          reason: command.reason,
+        });
+      case 'close_note':
+        return makeEnvelope('note.close', this.idGen(), now, { reason: command.reason });
+      case 'like':
+      case 'collect':
+        return makeEnvelope('browse.next', this.idGen(), now, { reason: command.reason });
       case 'search':
+        const keyword = typeof command.params?.keyword === 'string' ? command.params.keyword : this.soul.interests.seed_keywords[0] ?? '';
         return makeEnvelope('search.execute', this.idGen(), now, {
-          keyword: command.keyword,
-          source: command.source,
-          maxResults: this.soul.browse_patterns.states.search?.max_results_to_browse ?? 3,
+          keyword,
+          source: 'manager',
+          maxResults: this.soul.session_limits?.max_searches ?? this.soul.browse_patterns?.session?.max_searches ?? 3,
         });
       case 'end_session':
         return makeEnvelope('session.end', this.idGen(), now, {
           reason: command.reason,
           stats: {
-            likedCount: this.machine.session.likedCount,
-            skippedCount: this.machine.session.skippedCount,
-            searchCount: this.machine.session.searchCount,
-            durationMs: now - this.machine.session.startedAt,
+            likedCount: this.stats.likes,
+            skippedCount: Math.max(0, this.stats.views - this.stats.likes - this.stats.collects),
+            searchCount: this.stats.searches,
+            durationMs: now - this.startedAt,
           },
         });
     }

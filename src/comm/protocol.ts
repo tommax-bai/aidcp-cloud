@@ -30,9 +30,12 @@ export type MessageType =
   | 'anchor.report' // edge → cloud：上报一次命中/校验结果，驱动反污染晋升
   // —— 执行结果回传（观测/训练用）——
   | 'action.result' // edge → cloud：上报某 actionId 的最终 ActionResult
-  // —— 浏览会话编排（Soul 状态机驱动）——
+  // —— 浏览会话编排（ManagerAgent 驱动）——
   | 'note.content' // edge → cloud：上报一条笔记的标题/摘要/指标，供评估与概念抽取
   | 'browse.next' // cloud → edge：滚动/滑到下一条笔记
+  | 'browse.scroll' // cloud → edge：在当前页面滚动
+  | 'note.open' // cloud → edge：打开一条笔记
+  | 'note.close' // cloud → edge：关闭当前笔记
   | 'search.execute' // cloud → edge：执行一次关键词搜索
   | 'session.end' // cloud → edge：结束本次浏览会话
   // —— 风控预算与互动判定 ——
@@ -191,12 +194,26 @@ export interface BrowseNextPayload {
   reason?: string;
 }
 
+export interface BrowseScrollPayload {
+  reason?: string;
+}
+
+export interface NoteOpenPayload {
+  noteId?: string;
+  index?: number;
+  reason?: string;
+}
+
+export interface NoteClosePayload {
+  reason?: string;
+}
+
 /** 让边缘执行一次搜索（cloud → edge）。 */
 export interface SearchExecutePayload {
   /** 搜索关键词 */
   keyword: string;
   /** 关键词来源策略（观测用） */
-  source?: 'extract_from_liked' | 'random_from_interests' | 'new_concept';
+  source?: 'extract_from_liked' | 'random_from_interests' | 'new_concept' | 'manager';
   /** 本次搜索最多浏览的结果数 */
   maxResults?: number;
 }
@@ -302,6 +319,9 @@ export interface PayloadMap {
   'action.result': ActionResultPayload;
   'note.content': NoteContentPayload;
   'browse.next': BrowseNextPayload;
+  'browse.scroll': BrowseScrollPayload;
+  'note.open': NoteOpenPayload;
+  'note.close': NoteClosePayload;
   'search.execute': SearchExecutePayload;
   'session.end': SessionEndPayload;
   'publish.approval_request': PublishApprovalRequestPayload;

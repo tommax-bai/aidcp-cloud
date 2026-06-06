@@ -1,12 +1,6 @@
 /**
  * 互动决策器：给定一条笔记，决定点赞 / 收藏 / 跳过。
  *
- * 两段式：
- * 1) 硬质量门槛（quality_threshold）：点赞数/收藏数任一不达标直接 skip，
- *    零模型调用，省钱省时（垃圾内容根本不送模型）。
- * 2) 过门槛后，用 Qwen + soul 上下文（兴趣 + 互动规则）判断内容质量与兴趣匹配，
- *    返回结构化决策 { action, reason, newConcepts? }。
- *
  * 模型输出严格解析为 JSON；解析失败/模型出错 → 保守 skip（不误点赞）。
  */
 
@@ -29,26 +23,10 @@ export interface EngageDecision {
   newConcepts?: string[];
 }
 
-/** 硬门槛判定：返回是否通过 + 不通过原因 */
-export function passesQualityGate(
-  note: NoteForDecision,
-  soul: Soul,
-): { pass: boolean; reason: string } {
-  const q = soul.engagement_rules.quality_threshold;
-  if (note.likeCount < q.min_likes) {
-    return { pass: false, reason: `below_min_likes(${note.likeCount}<${q.min_likes})` };
-  }
-  // collectCount=0 可能是卡片上不展示（explore feed 只显示赞数），不作为拦截条件
-  if (note.collectCount > 0 && note.collectCount < q.min_collects) {
-    return { pass: false, reason: `below_min_collects(${note.collectCount}<${q.min_collects})` };
-  }
-  return { pass: true, reason: 'quality_gate_passed' };
-}
-
 /** 构造带 soul 上下文的互动判断提示词 */
 export function buildEngagementPrompt(note: NoteForDecision, soul: Soul): string {
   const { identity, interests, engagement_rules: rules } = soul;
-  return [
+  const lines: string[] = [
     `你是「${identity.name}」，${identity.role}。${identity.background}`,
     `语气风格：${identity.tone}。`,
     '',
@@ -57,11 +35,15 @@ export function buildEngagementPrompt(note: NoteForDecision, soul: Soul): string
     '次要兴趣：',
     ...interests.secondary.map((x) => `- ${x}`),
     '',
-    '你倾向于「点赞」的内容：',
-    ...rules.like.map((x) => `- ${x}`),
-    '你倾向于「跳过」的内容：',
-    ...rules.skip.map((x) => `- ${x}`),
-    '',
+  ];
+  if (rules) {
+    lines.push('你倾向于「点赞」的内容：');
+    lines.push(...rules.like.map((x) => `- ${x}`));
+    lines.push('你倾向于「跳过」的内容：');
+    lines.push(...rules.skip.map((x) => `- ${x}`));
+    lines.push('');
+  }
+  lines.push(
     '下面是一条小红书笔记：',
     `标题：${note.title}`,
     `摘要：${note.summary}`,
@@ -71,7 +53,8 @@ export function buildEngagementPrompt(note: NoteForDecision, soul: Soul): string
     '只输出一个 JSON 对象，不要任何解释或 markdown 代码块：',
     '{"action": "like" | "collect" | "skip", "reason": "简短理由", "newConcepts": ["可选的新概念"]}',
     'action 含义：like=优质且强相关想点赞；collect=值得收藏深读；skip=不相关或低质。',
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 const VALID_ACTIONS = new Set<EngageAction>(['like', 'collect', 'skip']);
@@ -112,12 +95,7 @@ export class EngagementDecider {
 
   /** 决定对一条笔记的互动动作 */
   async decide(note: NoteForDecision): Promise<EngageDecision> {
-    // 1) 硬门槛：不达标直接 skip，不调用模型
-    const gate = passesQualityGate(note, this.options.soul);
-    if (!gate.pass) {
-      return { action: 'skip', reason: gate.reason };
-    }
-    // 2) 过门槛 → 模型判断质量与兴趣匹配
+    // 直接调用模型判断质量与兴趣匹配
     let text: string;
     try {
       text = await this.options.llm.complete(buildEngagementPrompt(note, this.options.soul));

@@ -9,7 +9,7 @@
  */
 
 import type { LlmClient } from '../llm/qwen.js';
-import type { ConceptPool } from './state-machine.js';
+import type { ConceptPool } from './session-orchestrator.js';
 
 export interface ExtractInput {
   title: string;

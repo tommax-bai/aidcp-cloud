@@ -17,7 +17,6 @@ const soul: Soul = {
   identity: { name: '小林', role: 'AI研发', background: '3年', tone: '理性' },
   interests: { primary: ['LLM'], secondary: [], seed_keywords: ['RAG'] },
   engagement_rules: {
-    quality_threshold: { min_likes: 50, min_collects: 20 },
     like: [], skip: [], comment_trigger: [],
   },
   browse_patterns: {

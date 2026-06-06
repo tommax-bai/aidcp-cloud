@@ -23,13 +23,7 @@ export interface SoulInterests {
   seed_keywords: string[];
 }
 
-export interface QualityThreshold {
-  min_likes: number;
-  min_collects: number;
-}
-
 export interface EngagementRules {
-  quality_threshold: QualityThreshold;
   like: string[];
   skip: string[];
   comment_trigger: string[];
@@ -61,6 +55,7 @@ export interface BrowseStateDef {
 export interface SessionLimits {
   max_duration_min: number;
   max_likes: number;
+  max_collects?: number;
   max_searches: number;
   /** 两次动作之间的随机冷却区间 [min, max] 秒 */
   cooldown_between_actions_sec: [number, number];
@@ -72,9 +67,24 @@ export interface BrowsePatterns {
   session: SessionLimits;
 }
 
+export interface BehaviorGuidelines {
+  style: string;
+  privacy: string;
+  collection_principle: string;
+  like_principle: string;
+}
+
 export interface Soul {
+  /** 身份与语气 */
   identity: SoulIdentity;
+  /** 兴趣领域 */
   interests: SoulInterests;
-  engagement_rules: EngagementRules;
-  browse_patterns: BrowsePatterns;
+  /** 传统互动规则（向后兼容，ManagerAgent 中已弱化） */
+  engagement_rules?: EngagementRules;
+  /** 传统浏览状态机（向后兼容） */
+  browse_patterns?: BrowsePatterns;
+  /** 行为习惯偏好（新版 ManagerAgent 使用） */
+  behavior_guidelines?: BehaviorGuidelines;
+  /** 会话硬上限（新版 ManagerAgent 使用） */
+  session_limits?: SessionLimits;
 }

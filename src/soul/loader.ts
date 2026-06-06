@@ -15,12 +15,12 @@ import type {
   SoulIdentity,
   SoulInterests,
   EngagementRules,
-  QualityThreshold,
   BrowsePatterns,
   BrowseStateDef,
   StateTransition,
   SessionLimits,
   SearchSource,
+  BehaviorGuidelines,
 } from './types.js';
 
 const SEARCH_SOURCES: SearchSource[] = [
@@ -88,18 +88,9 @@ function parseInterests(v: YamlValue): SoulInterests {
   };
 }
 
-function parseQualityThreshold(v: YamlValue): QualityThreshold {
-  if (!isRecord(v)) throw new Error('soul.engagement_rules.quality_threshold 必须是对象');
-  return {
-    min_likes: reqNumber(v, 'min_likes', 'engagement_rules.quality_threshold'),
-    min_collects: reqNumber(v, 'min_collects', 'engagement_rules.quality_threshold'),
-  };
-}
-
 function parseEngagementRules(v: YamlValue): EngagementRules {
   if (!isRecord(v)) throw new Error('soul.engagement_rules 必须是对象');
   return {
-    quality_threshold: parseQualityThreshold(reqObject(v, 'quality_threshold', 'engagement_rules')),
     like: reqStringArray(v, 'like', 'engagement_rules'),
     skip: reqStringArray(v, 'skip', 'engagement_rules'),
     comment_trigger: reqStringArray(v, 'comment_trigger', 'engagement_rules'),
@@ -169,14 +160,44 @@ function parseBrowsePatterns(v: YamlValue): BrowsePatterns {
   };
 }
 
+function parseBehaviorGuidelines(v: YamlValue): BehaviorGuidelines {
+  if (!isRecord(v)) throw new Error('soul.behavior_guidelines 必须是对象');
+  return {
+    style: reqString(v, 'style', 'behavior_guidelines'),
+    privacy: reqString(v, 'privacy', 'behavior_guidelines'),
+    collection_principle: reqString(v, 'collection_principle', 'behavior_guidelines'),
+    like_principle: reqString(v, 'like_principle', 'behavior_guidelines'),
+  };
+}
+
+function parseSessionLimits(v: YamlValue): SessionLimits {
+  if (!isRecord(v)) throw new Error('soul.session_limits 必须是对象');
+  const cd = v.cooldown_between_actions_sec;
+  if (!Array.isArray(cd) || cd.length !== 2 || typeof cd[0] !== 'number' || typeof cd[1] !== 'number') {
+    throw new Error('soul.session_limits.cooldown_between_actions_sec 必须是 [min, max] 数字数组');
+  }
+  const limits: SessionLimits = {
+    max_duration_min: reqNumber(v, 'max_duration_min', 'session_limits'),
+    max_likes: reqNumber(v, 'max_likes', 'session_limits'),
+    max_searches: reqNumber(v, 'max_searches', 'session_limits'),
+    cooldown_between_actions_sec: [cd[0], cd[1]],
+  };
+  if (typeof v.max_collects === 'number') {
+    limits.max_collects = v.max_collects;
+  }
+  return limits;
+}
+
 /** 把已解析的 YAML 值校验并装载为强类型 Soul。 */
 export function loadSoulFromValue(value: YamlValue): Soul {
   if (!isRecord(value)) throw new Error('soul 配置根节点必须是对象');
   return {
     identity: parseIdentity(value.identity),
     interests: parseInterests(value.interests),
-    engagement_rules: parseEngagementRules(value.engagement_rules),
-    browse_patterns: parseBrowsePatterns(value.browse_patterns),
+    engagement_rules: value.engagement_rules ? parseEngagementRules(value.engagement_rules) : undefined,
+    browse_patterns: value.browse_patterns ? parseBrowsePatterns(value.browse_patterns) : undefined,
+    behavior_guidelines: value.behavior_guidelines ? parseBehaviorGuidelines(value.behavior_guidelines) : undefined,
+    session_limits: value.session_limits ? parseSessionLimits(value.session_limits) : undefined,
   };
 }
 

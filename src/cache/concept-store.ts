@@ -19,7 +19,7 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from './pg-anchor-cache.js';
-import type { ConceptPool } from '../orchestrator/state-machine.js';
+import type { ConceptPool } from '../orchestrator/session-orchestrator.js';
 
 const { Pool } = pg;
 
