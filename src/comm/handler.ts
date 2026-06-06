@@ -22,6 +22,8 @@ import {
   type RemoteElement,
   type NoteContentPayload,
   type PublishApprovalRequestPayload,
+  type RiskCanDoPayload,
+  type RiskRecordPayload,
 } from './protocol.js';
 import type { MessageHandler, EdgeSession, EdgePusher } from './ws-server.js';
 import type { TaskPlanner } from '../planner/types.js';
@@ -29,6 +31,8 @@ import type { LlmClient } from '../llm/qwen.js';
 import { buildPublishApprovalCard } from '../feishu/cards.js';
 import type { FeishuMessenger } from '../feishu/messenger.js';
 import type { BotChatStore } from '../cache/bot-chat-store.js';
+import { RiskController, SessionBudget } from '../risk/index.js';
+import type { RiskAction } from '../risk/index.js';
 
 /** 锚点缓存的最小接口（PgAnchorCache 实现它，单测可打桩） */
 export interface AnchorStore {
@@ -55,6 +59,7 @@ export interface HandlerDeps {
   clock?: () => number;
   serverVersion?: string;
   session?: SessionRouter;
+  riskController?: RiskController;
 }
 
 /** 把元素清单渲染成给 LLM 的编号列表（与 edge selector 一致的格式） */
@@ -98,11 +103,13 @@ export class DefaultMessageHandler implements MessageHandler {
   private readonly clock: () => number;
   private readonly serverVersion: string;
   private readonly logger: Pick<Console, 'error' | 'warn' | 'log'>;
+  private readonly riskController: RiskController;
 
   constructor(private readonly deps: HandlerDeps) {
     this.clock = deps.clock ?? Date.now;
     this.serverVersion = deps.serverVersion ?? '0.1.0';
     this.logger = deps.logger ?? console;
+    this.riskController = deps.riskController ?? new RiskController();
   }
 
   async handle(
@@ -145,6 +152,12 @@ export class DefaultMessageHandler implements MessageHandler {
       case 'publish.approval_request':
         await this.onPublishApprovalRequest(env, session);
         return null;
+      case 'session.budget.request':
+        return this.onSessionBudgetRequest(env);
+      case 'risk.canDo':
+        return this.onRiskCanDo(env);
+      case 'risk.record':
+        return this.onRiskRecord(env);
       case 'action.result':
         // 观测类消息：记录即可，不强制回包
         return null;
@@ -163,6 +176,37 @@ export class DefaultMessageHandler implements MessageHandler {
     return makeEnvelope('welcome', env.id, this.clock(), {
       sessionId: session.sessionId,
       serverVersion: this.serverVersion,
+    });
+  }
+
+  private onSessionBudgetRequest(env: Envelope): Envelope {
+    const state = this.riskController.getState();
+    const budget = new SessionBudget({ quotaLevel: state.quotaLevel });
+    return makeEnvelope('session.budget', env.id, this.clock(), {
+      ...budget.snapshot(),
+      viewOnly: state.status === 'restricted' || state.status === 'frozen',
+    });
+  }
+
+  private onRiskCanDo(env: Envelope): Envelope {
+    const p = env.payload as RiskCanDoPayload;
+    const action = p.action as RiskAction;
+    const result = this.riskController.explain(action);
+    return makeEnvelope('risk.canDo.result', env.id, this.clock(), {
+      action,
+      allowed: result.allowed,
+      reason: result.reason,
+    });
+  }
+
+  private async onRiskRecord(env: Envelope): Promise<Envelope> {
+    const p = env.payload as RiskRecordPayload;
+    const action = p.action as RiskAction;
+    const recorded = await this.riskController.record(action);
+    return makeEnvelope('risk.record.result', env.id, this.clock(), {
+      action,
+      recorded,
+      reason: recorded ? undefined : 'denied',
     });
   }
 

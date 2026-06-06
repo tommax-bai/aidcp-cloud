@@ -1,0 +1,96 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { DAILY_QUOTAS, RiskController, SlidingWindowCounter, deriveWindowQuotas } from '../src/risk/index.js';
+
+test('三档每日配额符合 risk-control 第 6 节', () => {
+  assert.deepEqual(DAILY_QUOTAS.conservative, { view: 80, like: 20, collect: 10, comment: 3, follow: 5, publish: 1 });
+  assert.deepEqual(DAILY_QUOTAS.normal, { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 });
+  assert.deepEqual(DAILY_QUOTAS.aggressive, { view: 300, like: 100, collect: 50, comment: 15, follow: 30, publish: 2 });
+});
+
+test('滑动窗口按动作分别计数并自动淘汰过期事件', () => {
+  let now = 1_000_000;
+  const counter = new SlidingWindowCounter({ clock: () => now });
+  counter.record('like');
+  counter.record('view');
+  assert.equal(counter.count('like', 'minute'), 1);
+  assert.equal(counter.count('view', 'minute'), 1);
+  assert.equal(counter.count('collect', 'minute'), 0);
+  now += 60_001;
+  assert.equal(counter.count('like', 'minute'), 0);
+  assert.equal(counter.count('like', 'hour'), 1);
+});
+
+test('canDo: 分钟窗口超限返回 false', async () => {
+  const controller = new RiskController({ quotaLevel: 'conservative', minViewsForLikeRatio: 0 });
+  const quota = deriveWindowQuotas('conservative').minute.collect;
+  for (let i = 0; i < quota; i++) assert.equal(await controller.record('collect'), true);
+  assert.equal(controller.canDo('collect'), false);
+});
+
+test('canDo: 小时窗口超限返回 false', async () => {
+  let now = 0;
+  const controller = new RiskController({ quotaLevel: 'conservative', clock: () => now, minViewsForLikeRatio: 0 });
+  const quota = deriveWindowQuotas('conservative').hour.follow;
+  for (let i = 0; i < quota; i++) {
+    assert.equal(await controller.record('follow'), true);
+    now += 61_000;
+  }
+  assert.equal(controller.canDo('follow'), false);
+});
+
+test('canDo: 天窗口超限返回 false', async () => {
+  let now = 0;
+  const controller = new RiskController({ quotaLevel: 'conservative', clock: () => now, minViewsForLikeRatio: 0 });
+  for (let i = 0; i < DAILY_QUOTAS.conservative.comment; i++) {
+    assert.equal(await controller.record('comment'), true);
+    now += 61 * 60_000;
+  }
+  assert.equal(controller.canDo('comment'), false);
+});
+
+test('点赞率 projected like/view 超过 35% 时禁止点赞', async () => {
+  let now = 0;
+  const controller = new RiskController({ quotaLevel: 'aggressive', clock: () => now, minViewsForLikeRatio: 10 });
+  for (let i = 0; i < 20; i++) {
+    assert.equal(await controller.record('view'), true);
+    now += 61_000;
+  }
+  for (let i = 0; i < 3; i++) {
+    assert.equal(await controller.record('like'), true);
+    now += 61_000;
+  }
+  const debugCounter = controller as unknown as { counter: { record(action: 'like', at: number): void } };
+  for (let i = 0; i < 5; i++) debugCounter.counter.record('like', now);
+  assert.equal(controller.canDo('like'), false);
+});
+
+test('点赞率低于 15% 时允许点赞以拉回区间', async () => {
+  let now = 0;
+  const controller = new RiskController({ quotaLevel: 'aggressive', clock: () => now, minViewsForLikeRatio: 10 });
+  for (let i = 0; i < 20; i++) {
+    assert.equal(await controller.record('view'), true);
+    now += 61_000;
+  }
+  assert.equal(controller.canDo('like'), true);
+  assert.equal(await controller.record('like'), true);
+});
+
+test('warned 状态使用 conservative x0.7 且暂停发布', async () => {
+  const controller = new RiskController({ quotaLevel: 'aggressive' });
+  await controller.applySignal({ kind: 'light' });
+  assert.equal(controller.getState().status, 'warned');
+  assert.equal(controller.canDo('publish'), false);
+  assert.equal(controller.effectiveQuotas().day.like, 14);
+});
+
+test('restricted 仅允许浏览，frozen 完全停止', async () => {
+  const controller = new RiskController();
+  await controller.applySignal({ kind: 'confirmed' });
+  assert.equal(controller.getState().status, 'restricted');
+  assert.equal(controller.canDo('view'), true);
+  assert.equal(controller.canDo('like'), false);
+  await controller.applySignal({ kind: 'fatal' });
+  assert.equal(controller.getState().status, 'frozen');
+  assert.equal(controller.canDo('view'), false);
+});

@@ -27,6 +27,7 @@ import {
 } from './comm/index.js';
 import { loadSoul } from './soul/index.js';
 import { SessionOrchestrator, EngagementDecider, ConceptExtractor } from './orchestrator/index.js';
+import { RiskController } from './risk/index.js';
 import {
   CommandRouter,
   FeishuBotChatEventHandler,
@@ -82,6 +83,8 @@ async function main(): Promise<void> {
   session.start();
   console.log(`[aidcp-cloud] Soul 会话编排器已启动（人设: ${soul.identity.name}）`);
 
+  const riskController = new RiskController();
+
   // 飞书事件接收（官方 SDK 长连接，主动连飞书，无需公网 IP / HTTP 端口）
   // MVP：账号启停/查询动作先打桩（后续接云端调度器 → plan.request）
   const actions: CommandActions = {
@@ -104,6 +107,7 @@ async function main(): Promise<void> {
     messenger,
     botChatStore,
     approvalChatId: process.env.FEISHU_CHAT_ID,
+    riskController,
   });
   const server = new EdgeCloudServer({ port, handler });
   await server.start();

@@ -35,6 +35,13 @@ export type MessageType =
   | 'browse.next' // cloud → edge：滚动/滑到下一条笔记
   | 'search.execute' // cloud → edge：执行一次关键词搜索
   | 'session.end' // cloud → edge：结束本次浏览会话
+  // —— 风控预算与互动判定 ——
+  | 'session.budget.request' // edge → cloud：请求本次 browse session 预算
+  | 'session.budget' // cloud → edge：下发本次 browse session 预算
+  | 'risk.canDo' // edge → cloud：互动前请求是否允许执行 action
+  | 'risk.canDo.result' // cloud → edge：allow / deny
+  | 'risk.record' // edge → cloud：互动成功后记录 action
+  | 'risk.record.result' // cloud → edge：记录结果
   // —— 发布编排（Publish Agent 驱动）——
   | 'publish.approval_request' // edge → cloud：请求发送发布审批卡片
   | 'publish.request' // cloud → edge：请求在浏览器中发布一篇帖子
@@ -220,6 +227,40 @@ export interface PublishApprovalRequestPayload {
   edgeId?: string;
 }
 
+export interface SessionBudgetRequestPayload {
+  accountId?: string;
+}
+
+export interface SessionBudgetPayload {
+  durationMs: number;
+  maxActions: number;
+  quotaLevel: 'conservative' | 'normal' | 'aggressive';
+  viewOnly: boolean;
+  startedAt: number;
+}
+
+export interface RiskCanDoPayload {
+  action: 'view' | 'like' | 'collect' | 'comment' | 'follow' | 'publish';
+  accountId?: string;
+}
+
+export interface RiskCanDoResultPayload {
+  action: RiskCanDoPayload['action'];
+  allowed: boolean;
+  reason?: string;
+}
+
+export interface RiskRecordPayload {
+  action: RiskCanDoPayload['action'];
+  accountId?: string;
+}
+
+export interface RiskRecordResultPayload {
+  action: RiskCanDoPayload['action'];
+  recorded: boolean;
+  reason?: string;
+}
+
 /** 请求在浏览器中发布一篇帖子（cloud → edge）。 */
 export interface PublishRequestPayload {
   /** 帖子标题（小红书标题） */
@@ -264,6 +305,12 @@ export interface PayloadMap {
   'search.execute': SearchExecutePayload;
   'session.end': SessionEndPayload;
   'publish.approval_request': PublishApprovalRequestPayload;
+  'session.budget.request': SessionBudgetRequestPayload;
+  'session.budget': SessionBudgetPayload;
+  'risk.canDo': RiskCanDoPayload;
+  'risk.canDo.result': RiskCanDoResultPayload;
+  'risk.record': RiskRecordPayload;
+  'risk.record.result': RiskRecordResultPayload;
   'publish.request': PublishRequestPayload;
   'publish.result': PublishResultPayload;
   error: ErrorPayload;
