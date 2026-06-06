@@ -26,7 +26,7 @@ import {
   type PublishRequestPayload,
 } from './comm/index.js';
 import { loadSoul } from './soul/index.js';
-import { SessionOrchestrator } from './orchestrator/index.js';
+import { SessionOrchestrator, ConceptExtractor } from './orchestrator/index.js';
 import { RiskController } from './risk/index.js';
 import { EventBus } from './event-bus/index.js';
 import { Blackboard, Arbiter } from './blackboard/index.js';
@@ -157,6 +157,30 @@ async function main(): Promise<void> {
   console.log(`[aidcp-cloud] Soul 会话编排器已启动（人设: ${soul.identity.name}）`);
 
   const riskController = new RiskController();
+
+  // ConceptExtractor 订阅互动事件，异步抽取概念
+  const extractor = new ConceptExtractor({ llm });
+  eventBus.on('interaction.occurred', async () => {
+    const state = blackboard.getState();
+    if (state.currentNote) {
+      const result = await extractor.extract(
+        { title: state.currentNote.title, summary: state.currentNote.summary },
+        state.conceptPool,
+        state.currentNote.title,
+      );
+      if (result.newConcepts.length > 0) {
+        eventBus.emit('concept.discovered', { concepts: result.newConcepts, source: state.currentNote.title });
+      }
+    }
+  });
+
+  // RiskController 订阅跨模块事件：互动发生时自动记录
+  eventBus.on('interaction.occurred', (evt) => {
+    riskController.record(evt.action).catch((err) => {
+      console.warn('[aidcp-cloud] RiskController record error:', err);
+    });
+  });
+  console.log('[aidcp-cloud] 事件订阅已建立（ConceptExtractor + RiskController）');
 
   // 飞书事件接收（官方 SDK 长连接，主动连飞书，无需公网 IP / HTTP 端口）
   // MVP：账号启停/查询动作先打桩（后续接云端调度器 → plan.request）

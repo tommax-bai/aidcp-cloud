@@ -3,13 +3,12 @@ import assert from 'node:assert/strict';
 import {
   SessionOrchestrator,
   type CommandSink,
-  type ConceptPersistence,
 } from '../src/orchestrator/index.js';
 import { EventBus } from '../src/event-bus/index.js';
 import { Blackboard, Arbiter } from '../src/blackboard/index.js';
 import { BaseAgent } from '../src/agents/types.js';
 import type { BlackboardState } from '../src/blackboard/types.js';
-import type { AgentDecision, AgentRole, IncomingNote } from '../src/event-bus/types.js';
+import type { AgentDecision, AgentRole } from '../src/event-bus/types.js';
 import { loadSoul } from '../src/soul/index.js';
 import type { Envelope } from '../src/comm/index.js';
 
@@ -20,11 +19,12 @@ function collectSink(): { sink: CommandSink; sent: Envelope[] } {
   return { sink: { send: (e) => sent.push(e) }, sent };
 }
 
-const memPersistence: ConceptPersistence = {
-  loadPool: async () => ({ known: [], candidates: [], source: new Map() }),
-  addCandidates: async (kws) => kws,
+const memPersistence = {
+  loadPool: async () => ({ known: [] as string[], candidates: [] as string[], source: new Map<string, string>() }),
+  addCandidates: async (kws: string[]) => kws,
   markSearched: async () => {},
 };
+void memPersistence; // suppress unused warning
 
 /** 测试用 Agent：始终激活，返回指定动作 */
 class StubAgent extends BaseAgent {
@@ -105,7 +105,7 @@ test('orchestrator: interaction_appraiser 输出 like → stats.likes++ 且 emit
   ];
 
   const interactions: { action: string; noteId: string }[] = [];
-  eventBus.on('interaction.occurred', (data) => interactions.push(data));
+  eventBus.on('interaction.occurred', (data) => { interactions.push(data); });
 
   const orch = new SessionOrchestrator({
     soul,
