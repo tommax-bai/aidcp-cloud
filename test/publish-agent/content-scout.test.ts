@@ -100,7 +100,8 @@ describe('ContentScoutRole', () => {
     role.register(ctx);
     ctx.write('trigger', makeTriggerInput());
 
-    await new Promise(r => setTimeout(r, 200));
+    // executeWithFallback retries 2 times with 500ms+1000ms delay
+    await new Promise(r => setTimeout(r, 2500));
 
     const decision = ctx.get('scoutDecision');
     assert.ok(decision);

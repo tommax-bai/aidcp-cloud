@@ -32,6 +32,7 @@ export type MessageType =
   | 'action.result' // edge → cloud：上报某 actionId 的最终 ActionResult
   // —— 浏览会话编排（ManagerAgent 驱动）——
   | 'note.content' // edge → cloud：上报一条笔记的标题/摘要/指标，供评估与概念抽取
+  | 'note.ack'    // cloud → edge：确认收到笔记，异步处理中
   | 'browse.next' // cloud → edge：滚动/滑到下一条笔记
   | 'browse.scroll' // cloud → edge：在当前页面滚动
   | 'note.open' // cloud → edge：打开一条笔记
@@ -300,6 +301,12 @@ export interface PublishResultPayload {
   error?: string;
 }
 
+/** 确认收到笔记（cloud → edge），异步处理中。 */
+export interface NoteAckPayload {
+  /** 确认收到 */
+  received: boolean;
+}
+
 export interface ErrorPayload {
   code: string;
   message: string;
@@ -318,6 +325,7 @@ export interface PayloadMap {
   'anchor.report': AnchorReportPayload;
   'action.result': ActionResultPayload;
   'note.content': NoteContentPayload;
+  'note.ack': NoteAckPayload;
   'browse.next': BrowseNextPayload;
   'browse.scroll': BrowseScrollPayload;
   'note.open': NoteOpenPayload;

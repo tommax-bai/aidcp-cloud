@@ -19,6 +19,7 @@ import type {
 import type { BlackboardState, BlackboardOptions } from './types.js';
 
 export type { BlackboardState, BlackboardOptions } from './types.js';
+export { Arbiter } from './arbiter.js';
 export type {
   AgentRole,
   AgentDecision,

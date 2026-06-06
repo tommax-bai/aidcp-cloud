@@ -75,6 +75,7 @@ export interface ManagerDecision {
   action: ManagerActionName;
   params?: Record<string, unknown>;
   reason: string;
+  interaction?: 'like' | 'collect';  // 附加互动动作
 }
 
 // 事件映射表
