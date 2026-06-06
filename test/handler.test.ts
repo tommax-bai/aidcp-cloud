@@ -162,6 +162,52 @@ test('note.content → 路由到 session 编排器，不强制回包', async () 
   assert.equal(received!.title, 'T');
 });
 
+test('note.content + eventBus → 返回 note.ack 并 emit note.arrived', async () => {
+  const { EventBus } = await import('../src/event-bus/index.js');
+  const eventBus = new EventBus();
+  const emitted: unknown[] = [];
+  eventBus.on('note.arrived', (data) => { emitted.push(data); });
+
+  const h = new DefaultMessageHandler({
+    planner: new SimplePlanner(),
+    llm: dummyLlm,
+    cache: memStore(),
+    clock: fixedClock,
+    eventBus,
+  });
+  const res = await h.handle(
+    makeEnvelope('note.content', 'nc2', 1, {
+      noteId: 'x2', title: 'EventBus测试', summary: '内容', likeCount: 10, collectCount: 3,
+    }),
+    session,
+  );
+  assert.equal(res!.type, 'note.ack');
+  assert.equal(res!.id, 'nc2');
+  assert.equal((res!.payload as { received: boolean }).received, true);
+  assert.equal(emitted.length, 1);
+  assert.equal((emitted[0] as { note: { title: string } }).note.title, 'EventBus测试');
+});
+
+test('note.content 无 eventBus 时保持向后兼容（走 session.onNote）', async () => {
+  let received: { title: string } | null = null;
+  const h = new DefaultMessageHandler({
+    planner: new SimplePlanner(),
+    llm: dummyLlm,
+    cache: memStore(),
+    clock: fixedClock,
+    session: { onNote: async (n) => { received = n; return undefined; } },
+  });
+  const res = await h.handle(
+    makeEnvelope('note.content', 'nc3', 1, {
+      noteId: 'x3', title: '兼容测试', summary: 'S', likeCount: 0, collectCount: 0,
+    }),
+    session,
+  );
+  // 无 eventBus → 走老路径 → fallback browse.next
+  assert.equal(res!.type, 'browse.next');
+  assert.equal(received!.title, '兼容测试');
+});
+
 test('publish.approval_request → 调 sendApprovalCard', async () => {
   const sent: Array<{ chatId: string; card: unknown }> = [];
   const h = new DefaultMessageHandler({
