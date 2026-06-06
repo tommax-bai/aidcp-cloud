@@ -158,6 +158,7 @@ export class DefaultMessageHandler implements MessageHandler {
         return this.onRiskCanDo(env);
       case 'risk.record':
         return this.onRiskRecord(env);
+      case 'publish.result':
       case 'action.result':
         // 观测类消息：记录即可，不强制回包
         return null;

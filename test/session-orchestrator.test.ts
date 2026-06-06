@@ -4,11 +4,12 @@ import {
   SessionOrchestrator,
   EngagementDecider,
   ConceptExtractor,
-  ManagerAgent,
   ContextBuilder,
   parseManagerDecision,
   type CommandSink,
   type ConceptPersistence,
+  type ManagerDecider,
+  type ManagerDecision,
 } from '../src/orchestrator/index.js';
 import { loadSoul } from '../src/soul/index.js';
 import type { Envelope } from '../src/comm/index.js';
@@ -27,11 +28,9 @@ const memPersistence: ConceptPersistence = {
   markSearched: async () => {},
 };
 
-function manager(actionJson: string): ManagerAgent {
-  return new ManagerAgent({
-    soul,
-    client: { complete: async () => actionJson },
-  });
+function manager(actionJson: string): ManagerDecider {
+  const decision: ManagerDecision = JSON.parse(actionJson);
+  return { decide: async () => decision };
 }
 
 test('manager parser: invalid JSON or unavailable action falls back to browse_next', () => {

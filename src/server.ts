@@ -36,6 +36,18 @@ import {
   buildFeishuEventDispatcher,
   type CommandActions,
 } from './feishu/index.js';
+import { PublishOrchestrator } from './publish-agent/index.js';
+import { WanxiangClient } from './publish-agent/wanxiang-client.js';
+import {
+  ContentScoutRole,
+  ContentCreatorRole,
+  ImageDirectorRole,
+  ContentAssemblerRole,
+  ApprovalGatekeeperRole,
+  PublishExecutorRole,
+} from './publish-agent/roles/index.js';
+import { PostProcessor } from './publish/post-processor.js';
+import { PublishLogStore } from './publish/publisher.js';
 
 function readEnvString(name: string): string | undefined {
   const value = process.env[name];
@@ -75,11 +87,44 @@ async function main(): Promise<void> {
     console.warn('[aidcp-cloud] PG 初始化失败（缓存相关消息将报错）:', (err as Error).message);
   }
 
+  // 发布日志存储（publish_log 表）
+  const publishLogStore = new PublishLogStore({
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
+  try {
+    await publishLogStore.init();
+    console.log('[aidcp-cloud] PublishLogStore 已就绪');
+  } catch (err) {
+    console.warn('[aidcp-cloud] PublishLogStore 初始化失败:', (err as Error).message);
+  }
+
+  // 去 AI 味后处理器
+  const postProcessor = new PostProcessor({
+    rewrite: async (content, flagged) => {
+      const prompt = `请重写以下内容，去除AI味过重的表达（${flagged.join('、')}），保持原意和自然口吾：\n\n${content}`;
+      return llm.complete(prompt);
+    },
+  });
+
+  // 通义万相客户端（图片生成）
+  const wanxiangClient = new WanxiangClient({
+    apiKey: readEnvString('WANXIANG_API_KEY'),
+  });
+
+  // 发布编排器（PublishOrchestrator）
+  const publishOrchestrator = new PublishOrchestrator({
+    logger: console,
+  });
+
   // 会话编排器（Soul 驱动浏览决策）
   const decider = new EngagementDecider({ soul, llm });
   const extractor = new ConceptExtractor({ llm });
   const noopSink = { send: () => {} }; // 决策通过 handler 回包，不需要额外 push
-  const session = new SessionOrchestrator({ soul, decider, extractor, sink: noopSink });
+  const session = new SessionOrchestrator({ soul, decider, extractor, sink: noopSink, publishOrchestrator });
   session.start();
   console.log(`[aidcp-cloud] Soul 会话编排器已启动（人设: ${soul.identity.name}）`);
 
@@ -112,6 +157,37 @@ async function main(): Promise<void> {
   const server = new EdgeCloudServer({ port, handler });
   await server.start();
   console.log(`[aidcp-cloud] 边-云 WebSocket 服务端已监听 :${port}`);
+
+  // 注册发布编排器的 6 个角色（需在 server 启动后，因为 PublishExecutorRole 依赖 server 作为 pusher）
+  publishOrchestrator.registerRole(new ContentScoutRole({ llmClient: llm }));
+  publishOrchestrator.registerRole(new ContentCreatorRole({ llmClient: llm }));
+  publishOrchestrator.registerRole(new ImageDirectorRole({
+    llmClient: llm,
+    imageProvider: wanxiangClient,
+    enableImageGeneration: !!readEnvString('WANXIANG_API_KEY'),
+  }));
+  publishOrchestrator.registerRole(new ContentAssemblerRole({
+    llmClient: llm,
+    postProcessor,
+  }));
+  publishOrchestrator.registerRole(new ApprovalGatekeeperRole({ llmClient: llm }));
+  publishOrchestrator.registerRole(new PublishExecutorRole({
+    store: {
+      async insert(record) {
+        return publishLogStore.insert({
+          title: record.title,
+          content: record.content,
+          sourceConcepts: record.tags,
+          sourceLikedIds: [],
+          status: record.status as 'draft' | 'published' | 'failed' | 'needs_review',
+        });
+      },
+    },
+    pusher: server,
+    messenger,
+    botChatStore,
+  }));
+  console.log(`[aidcp-cloud] PublishOrchestrator 已就绪，角色: ${publishOrchestrator.getRoles().join(', ')}`);
   const debugPayload: PublishRequestPayload = {
     title: '【测试请忽略】AIDCP 主动审批联调',
     content: '自动化测试请忽略',

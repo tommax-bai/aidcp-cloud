@@ -18,12 +18,14 @@
 import { makeEnvelope, type Envelope } from '../comm/protocol.js';
 import type { EdgePusher } from '../comm/ws-server.js';
 import type { Soul } from '../soul/types.js';
+import type { TriggerInput } from '../publish-agent/types.js';
 import { ConceptExtractor } from './concept-extractor.js';
 import { EngagementDecider, type NoteForDecision } from './engagement-decider.js';
 import {
   ContextBuilder,
   ManagerAgent,
   type ManagerContext,
+  type ManagerDecider,
   type ManagerDecision,
   type RiskStatus,
   type SessionStats,
@@ -49,6 +51,11 @@ export interface ConceptPersistence {
 /** 命令下发口：把一条编排命令翻译并送给边缘 */
 export interface CommandSink {
   send(env: Envelope): void;
+}
+
+/** 发布编排器最小接口（PublishOrchestrator 实现，测试可打桩） */
+export interface PublishTriggerLike {
+  trigger(input: TriggerInput): Promise<unknown>;
 }
 
 /** 用 EdgePusher 作为命令下发口（生产用） */
@@ -85,10 +92,14 @@ export interface SessionOrchestratorOptions {
   decider: EngagementDecider;
   extractor: ConceptExtractor;
   sink: CommandSink;
-  manager?: ManagerAgent;
+  manager?: ManagerDecider;
   contextBuilder?: ContextBuilder;
   /** 概念持久化（可选；不传则只用内存概念池） */
   persistence?: ConceptPersistence;
+  /** 发布编排器（可选；注入后概念池达标时自动触发发布流程） */
+  publishOrchestrator?: PublishTriggerLike;
+  /** 触发发布所需的最小候选概念数，默认 3 */
+  publishConceptThreshold?: number;
   clock?: () => number;
   rng?: () => number;
   idGen?: () => string;
@@ -99,16 +110,19 @@ export class SessionOrchestrator {
   private readonly soul: Soul;
   private readonly decider: EngagementDecider;
   private readonly extractor: ConceptExtractor;
-  private readonly manager: ManagerAgent;
+  private readonly manager: ManagerDecider;
   private readonly contextBuilder: ContextBuilder;
   private readonly sink: CommandSink;
   private readonly persistence?: ConceptPersistence;
+  private readonly publishOrchestrator?: PublishTriggerLike;
+  private readonly publishConceptThreshold: number;
   private readonly clock: () => number;
   private readonly idGen: () => string;
   private seq = 0;
   private startedAt = 0;
   private stats!: SessionStats;
   private pool: ConceptPool = emptyConceptPool();
+  private publishTriggered = false;
 
   constructor(options: SessionOrchestratorOptions) {
     this.soul = options.soul;
@@ -118,6 +132,8 @@ export class SessionOrchestrator {
     this.contextBuilder = options.contextBuilder ?? new ContextBuilder();
     this.sink = options.sink;
     if (options.persistence) this.persistence = options.persistence;
+    this.publishOrchestrator = options.publishOrchestrator;
+    this.publishConceptThreshold = options.publishConceptThreshold ?? 3;
     this.clock = options.clock ?? Date.now;
     this.idGen = options.idGen ?? (() => `sess-cmd-${++this.seq}`);
   }
@@ -197,6 +213,36 @@ export class SessionOrchestrator {
     }
     if (newConcepts.length > 0 && this.persistence) {
       await this.persistence.addCandidates(newConcepts, note.title).catch(() => {});
+    }
+
+    // 概念池达标时触发发布编排（每次会话仅触发一次）
+    if (
+      this.publishOrchestrator &&
+      !this.publishTriggered &&
+      pool.candidates.length >= this.publishConceptThreshold
+    ) {
+      this.publishTriggered = true;
+      const triggerInput: TriggerInput = {
+        metrics: {
+          hoursSinceLastPublish: Infinity,
+          newConceptCount: pool.candidates.length,
+          likedSinceLastPublish: this.stats.likes,
+        },
+        generateInput: {
+          concepts: pool.candidates.map((kw) => ({
+            keyword: kw,
+            sourceNote: pool.source.get(kw),
+          })),
+          likedContents: [],
+          soul: this.soul,
+          recentPosts: [],
+        },
+        recentPublished: [],
+      };
+      // 异步触发，不阻塞浏览流程
+      this.publishOrchestrator.trigger(triggerInput).catch((err) => {
+        console.warn('[session] 发布编排触发失败:', (err as Error).message);
+      });
     }
 
     this.stats.views++;

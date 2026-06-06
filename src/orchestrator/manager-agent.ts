@@ -131,13 +131,18 @@ export class ContextBuilder {
   }
 }
 
+/** 供 SessionOrchestrator 注入的决策接口（ManagerAgent 实现，测试可打桩） */
+export interface ManagerDecider {
+  decide(context: ManagerContext): Promise<ManagerDecision>;
+}
+
 export interface ManagerAgentOptions {
   soul: Soul;
   client?: LlmClient;
   timeoutMs?: number;
 }
 
-export class ManagerAgent {
+export class ManagerAgent implements ManagerDecider {
   private readonly orchestrator: AgentOrchestrator;
   private readonly soul: Soul;
 
