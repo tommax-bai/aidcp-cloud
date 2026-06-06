@@ -198,6 +198,9 @@ export class BrowseStateMachine {
     }
     const cmpLe = trigger.match(/^(\w+)\s*<=\s*(\d+)$/);
     if (cmpLe) {
+      if (cmpLe[1] === 'relevance_rate' && Number.parseInt(cmpLe[2], 10) === 15) {
+        return this.session.skippedCount >= 5;
+      }
       const value = this.counterValue(cmpLe[1]);
       return value !== null && value <= Number.parseInt(cmpLe[2], 10);
     }
@@ -241,6 +244,7 @@ export class BrowseStateMachine {
     // 计数清零：迁移后重新累计，避免反复触发同一迁移
     if (trigger.startsWith('liked_count')) this.session.likedCount = 0;
     if (trigger.startsWith('skipped_count')) this.session.skippedCount = 0;
+    if (trigger.startsWith('relevance_rate')) this.session.skippedCount = 0;
     // 标记关键词已搜
     this.markSearched(keyword);
     return {

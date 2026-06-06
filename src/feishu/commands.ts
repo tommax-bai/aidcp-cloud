@@ -39,11 +39,11 @@ export interface ParsedCommand {
 
 const HELP_TEXT = [
   '可用指令：',
-  '• `/status [accountId]` — 查账号状态',
-  '• `/pause [accountId]` — 暂停账号',
-  '• `/resume [accountId]` — 恢复账号',
-  '• `/publish-test [requestId]` — 发送测试审批卡片',
-  '• `/bind` — 绑定当前群为默认审批群（开发中）',
+  '• `/aidcp status [accountId]` — 查账号状态',
+  '• `/aidcp pause [accountId]` — 暂停账号',
+  '• `/aidcp resume [accountId]` — 恢复账号',
+  '• `/aidcp publish-test [requestId]` — 发送测试审批卡片',
+  '• `/aidcp bind` — 绑定当前群为默认审批群（开发中）',
   '',
   '（单账号 MVP：accountId 可省略，默认作用于唯一账号）',
 ].join('\n');
@@ -60,22 +60,25 @@ const HELP_TEXT = [
 export function parseCommand(text: string): ParsedCommand {
   const raw = (text ?? '').trim();
   const tokens = raw.split(/\s+/).filter(Boolean);
-  const command = (tokens[0] ?? '').toLowerCase();
-  const args = tokens.slice(1);
+  const hasAidcpPrefix = (tokens[0] ?? '').toLowerCase() === '/aidcp';
+  const commandIndex = hasAidcpPrefix ? 1 : 0;
+  const commandToken = (tokens[commandIndex] ?? '').toLowerCase();
+  const command = commandToken.startsWith('/') ? commandToken : `/${commandToken}`;
+  const args = tokens.slice(commandIndex + 1);
 
   switch (command) {
     case '/status':
-      return { action: 'status', accountId: tokens[1] ?? DEFAULT_ACCOUNT_ID, raw, args };
+      return { action: 'status', accountId: args[0] ?? DEFAULT_ACCOUNT_ID, raw, args };
     case '/pause':
-      return { action: 'pause', accountId: tokens[1] ?? DEFAULT_ACCOUNT_ID, raw, args };
+      return { action: 'pause', accountId: args[0] ?? DEFAULT_ACCOUNT_ID, raw, args };
     case '/resume':
-      return { action: 'resume', accountId: tokens[1] ?? DEFAULT_ACCOUNT_ID, raw, args };
+      return { action: 'resume', accountId: args[0] ?? DEFAULT_ACCOUNT_ID, raw, args };
     case '/publish-test':
       return { action: 'publish-test', accountId: DEFAULT_ACCOUNT_ID, raw, args };
     case '/bind':
       return { action: 'bind', accountId: DEFAULT_ACCOUNT_ID, raw, args };
     default:
-      return { action: 'help', accountId: DEFAULT_ACCOUNT_ID, raw, hint: '未识别的指令' };
+      return { action: 'help', accountId: DEFAULT_ACCOUNT_ID, raw, hint: '未识别的子命令' };
   }
 }
 
