@@ -4,7 +4,7 @@ import {
   EngagementDecider,
   parseDecision,
   buildEngagementPrompt,
-} from '../src/orchestrator/index.js';
+} from '../src/orchestrator/engagement-decider.js';
 import { loadSoul } from '../src/soul/index.js';
 import type { LlmClient } from '../src/llm/index.js';
 

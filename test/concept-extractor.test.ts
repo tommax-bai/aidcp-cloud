@@ -5,8 +5,12 @@ import {
   parseConcepts,
   mergeConcepts,
   buildExtractPrompt,
-  emptyConceptPool,
-} from '../src/orchestrator/index.js';
+} from '../src/orchestrator/concept-extractor.js';
+import type { ConceptPool } from '../src/event-bus/types.js';
+
+function emptyConceptPool(): ConceptPool {
+  return { known: [], candidates: [], source: new Map() };
+}
 import type { LlmClient } from '../src/llm/index.js';
 
 test('parseConcepts 解析 JSON 数组（容忍围栏/多余文字）', () => {
