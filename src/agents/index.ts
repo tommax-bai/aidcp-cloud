@@ -1,16 +1,8 @@
 /**
- * Agents 统一导出 — 5 个独立 Agent 与基础类型。
+ * Agents 统一导出 — 事件驱动角色系统。
  */
 
-export { BaseAgent } from './types.js';
-export type { BaseAgentOptions } from './types.js';
-export { SessionMonitor } from './session-monitor.js';
-export { FeedScanner } from './feed-scanner.js';
-export { ContentCurator } from './content-curator.js';
-export { InteractionAppraiser } from './interaction-appraiser.js';
-export { CommentReviewer } from './comment-reviewer.js';
-
-// ─── 新架构：事件驱动角色基础设施 ───
+// ─── 事件驱动角色基础设施 ───
 export { BaseRole } from './base-role.js';
 export type { RoleOptions } from './base-role.js';
 export { SessionContext } from './session-context.js';
@@ -44,3 +36,7 @@ export { SearchEvaluator } from './search-evaluator.js';
 export type { SearchEvaluatorOptions } from './search-evaluator.js';
 export { SearchExecutor } from './search-executor.js';
 export type { SearchExecutorOptions } from './search-executor.js';
+
+// ─── Phase 6：会话守护角色（事件驱动版） ───
+export { SessionMonitorRole } from './session-monitor-role.js';
+export type { SessionMonitorRoleOptions } from './session-monitor-role.js';

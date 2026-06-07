@@ -7,6 +7,7 @@ import { makeEnvelope, type RemoteAnchor } from '../src/comm/index.js';
 import { SimplePlanner } from '../src/planner/index.js';
 import type { LlmClient } from '../src/llm/index.js';
 import { EventBus } from '../src/event-bus/index.js';
+import { AccountStateManager } from '../src/account-state.js';
 
 /** 内存版 AnchorStore：复刻反污染晋升语义，供 handler 单测 */
 function memStore(): AnchorStore & { main: Map<string, RemoteAnchor>; staging: Map<string, number> } {
@@ -195,6 +196,85 @@ test('note.content 字段映射：body→summary, likes→likeCount', async () =
 });
 
 
+
+test('note.content 暂停状态 → 返回 ack、不触发 eventBus emit', async () => {
+  const eventBus = new EventBus();
+  const emitted: unknown[] = [];
+  eventBus.on('note.arrived', (data) => { emitted.push(data); });
+
+  const accountState = new AccountStateManager();
+  accountState.pause('acc-default');
+
+  const h = new DefaultMessageHandler({
+    planner: new SimplePlanner(),
+    llm: dummyLlm,
+    cache: memStore(),
+    clock: fixedClock,
+    eventBus,
+    accountState,
+  });
+  const res = await h.handle(
+    makeEnvelope('note.content', 'nc-p1', 1, {
+      noteId: 'x', title: 'Paused', summary: 'S', likeCount: 10, collectCount: 5,
+    }),
+    session,
+  );
+  assert.equal(res!.type, 'note.ack');
+  assert.equal(res!.id, 'nc-p1');
+  assert.equal((res!.payload as { received: boolean }).received, true);
+  assert.equal(emitted.length, 0, '暂停时不应触发 note.arrived 事件');
+});
+
+test('note.content 未暂停状态 → 返回 ack、正常触发 eventBus emit', async () => {
+  const eventBus = new EventBus();
+  const emitted: unknown[] = [];
+  eventBus.on('note.arrived', (data) => { emitted.push(data); });
+
+  const accountState = new AccountStateManager();
+  // 不调用 pause，保持 active
+
+  const h = new DefaultMessageHandler({
+    planner: new SimplePlanner(),
+    llm: dummyLlm,
+    cache: memStore(),
+    clock: fixedClock,
+    eventBus,
+    accountState,
+  });
+  const res = await h.handle(
+    makeEnvelope('note.content', 'nc-a1', 1, {
+      noteId: 'x', title: 'Active', summary: 'S', likeCount: 10, collectCount: 5,
+    }),
+    session,
+  );
+  assert.equal(res!.type, 'note.ack');
+  assert.equal(res!.id, 'nc-a1');
+  assert.equal(emitted.length, 1, '未暂停时应正常触发事件');
+});
+
+test('note.content 未注入 accountState → 正常工作（向后兼容）', async () => {
+  const eventBus = new EventBus();
+  const emitted: unknown[] = [];
+  eventBus.on('note.arrived', (data) => { emitted.push(data); });
+
+  const h = new DefaultMessageHandler({
+    planner: new SimplePlanner(),
+    llm: dummyLlm,
+    cache: memStore(),
+    clock: fixedClock,
+    eventBus,
+    // 不注入 accountState
+  });
+  const res = await h.handle(
+    makeEnvelope('note.content', 'nc-b1', 1, {
+      noteId: 'x', title: 'Compat', summary: 'S', likeCount: 10, collectCount: 5,
+    }),
+    session,
+  );
+  assert.equal(res!.type, 'note.ack');
+  assert.equal(res!.id, 'nc-b1');
+  assert.equal(emitted.length, 1, '无 accountState 时应正常触发事件');
+});
 
 test('publish.approval_request → 调 sendApprovalCard', async () => {
   const sent: Array<{ chatId: string; card: unknown }> = [];

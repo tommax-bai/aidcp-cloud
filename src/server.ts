@@ -25,18 +25,12 @@ import {
   makeEnvelope,
   type PublishRequestPayload,
 } from './comm/index.js';
-import { loadSoul } from './soul/index.js';
-import { SessionOrchestrator, ConceptExtractor } from './orchestrator/index.js';
+
+
 import { RiskController } from './risk/index.js';
 import { EventBus } from './event-bus/index.js';
-import { Blackboard, Arbiter } from './blackboard/index.js';
-import {
-  SessionMonitor,
-  FeedScanner,
-  ContentCurator,
-  InteractionAppraiser,
-  CommentReviewer,
-} from './agents/index.js';
+
+
 import {
   CommandRouter,
   FeishuBotChatEventHandler,
@@ -47,6 +41,7 @@ import {
 } from './feishu/index.js';
 import { PublishOrchestrator } from './publish-agent/index.js';
 import { WanxiangClient } from './publish-agent/wanxiang-client.js';
+import { AccountStateManager } from './account-state.js';
 import {
   ContentScoutRole,
   ContentCreatorRole,
@@ -84,7 +79,7 @@ async function main(): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
-  const soul = loadSoul();
+
   const botChatStore = new BotChatStore();
   const botChatEventHandler = new FeishuBotChatEventHandler(botChatStore);
 
@@ -129,50 +124,11 @@ async function main(): Promise<void> {
     logger: console,
   });
 
-  // 事件总线 + 黑板 + 仲裁器
+  // 事件总线
   const eventBus = new EventBus();
-  const blackboard = new Blackboard({ eventBus });
-  const arbiter = new Arbiter();
-
-  // 多 Agent 实例化
-  const agents = [
-    new SessionMonitor({ soul }),
-    new FeedScanner({ soul, llm }),
-    new ContentCurator({ soul, llm }),
-    new InteractionAppraiser({ soul, llm }),
-    new CommentReviewer({ soul, llm }),
-  ];
-
-  // 会话编排器（事件驱动）
-  const noopSink = { send: () => {} }; // 决策通过 handler 回包，不需要额外 push
-  const session = new SessionOrchestrator({
-    soul,
-    eventBus,
-    blackboard,
-    agents,
-    arbiter,
-    sink: noopSink,
-  });
-  session.start();
-  console.log(`[aidcp-cloud] Soul 会话编排器已启动（人设: ${soul.identity.name}）`);
+  const accountState = new AccountStateManager();
 
   const riskController = new RiskController();
-
-  // ConceptExtractor 订阅互动事件，异步抽取概念
-  const extractor = new ConceptExtractor({ llm });
-  eventBus.on('interaction.occurred', async () => {
-    const state = blackboard.getState();
-    if (state.currentNote) {
-      const result = await extractor.extract(
-        { title: state.currentNote.title, summary: state.currentNote.summary },
-        state.conceptPool,
-        state.currentNote.title,
-      );
-      if (result.newConcepts.length > 0) {
-        eventBus.emit('concept.discovered', { concepts: result.newConcepts, source: state.currentNote.title });
-      }
-    }
-  });
 
   // RiskController 订阅跨模块事件：互动发生时自动记录
   eventBus.on('interaction.occurred', (evt) => {
@@ -180,17 +136,25 @@ async function main(): Promise<void> {
       console.warn('[aidcp-cloud] RiskController record error:', err);
     });
   });
-  console.log('[aidcp-cloud] 事件订阅已建立（ConceptExtractor + RiskController）');
+  console.log('[aidcp-cloud] 事件订阅已建立（RiskController）');
 
   // 飞书事件接收（官方 SDK 长连接，主动连飞书，无需公网 IP / HTTP 端口）
   // MVP：账号启停/查询动作先打桩（后续接云端调度器 → plan.request）
   const actions: CommandActions = {
-    status: (accountId) => `账号 \`${accountId}\` 当前状态：normal 🟢（MVP 占位）`,
+    status: (accountId) => {
+      const state = accountState.getStatus(accountId);
+      const emoji = state.status === 'paused' ? '⏸️' : '🟢';
+      const statusText = state.status === 'paused' ? 'paused' : 'active';
+      const extra = state.pausedAt ? `\n暂停时间：${new Date(state.pausedAt).toLocaleString()}` : '';
+      return `账号 \`${accountId}\` 当前状态：${statusText} ${emoji}${extra}`;
+    },
     pause: (accountId) => {
-      console.log(`[feishu] 收到暂停指令：${accountId}`);
+      accountState.pause(accountId);
+      console.log(`[feishu] 已暂停账号：${accountId}`);
     },
     resume: (accountId) => {
-      console.log(`[feishu] 收到恢复指令：${accountId}`);
+      accountState.resume(accountId);
+      console.log(`[feishu] 已恢复账号：${accountId}`);
     },
     bindChat: (record) => botChatStore.setDefault(record),
   };
@@ -205,6 +169,7 @@ async function main(): Promise<void> {
     approvalChatId: process.env.FEISHU_CHAT_ID,
     riskController,
     eventBus,
+    accountState,
   });
   const server = new EdgeCloudServer({ port, handler });
   await server.start();

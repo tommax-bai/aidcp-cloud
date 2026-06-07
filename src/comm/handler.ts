@@ -33,6 +33,7 @@ import type { FeishuMessenger } from '../feishu/messenger.js';
 import type { BotChatStore } from '../cache/bot-chat-store.js';
 import { RiskController, SessionBudget } from '../risk/index.js';
 import type { RiskAction } from '../risk/index.js';
+import type { AccountStateManager } from '../account-state.js';
 
 /** 锚点缓存的最小接口（PgAnchorCache 实现它，单测可打桩） */
 export interface AnchorStore {
@@ -56,6 +57,7 @@ export interface HandlerDeps {
   serverVersion?: string;
   riskController?: RiskController;
   eventBus: EventBus;
+  accountState?: AccountStateManager;
 }
 
 /** 把元素清单渲染成给 LLM 的编号列表（与 edge selector 一致的格式） */
@@ -137,6 +139,12 @@ export class DefaultMessageHandler implements MessageHandler {
           collectCount: (p.collects as number) ?? (p.collectCount as number) ?? 0,
           author: (p.author as string) || undefined,
         };
+
+        // 暂停检查：已暂停则仅返回 ack，不触发 orchestrator
+        if (this.deps.accountState?.isPaused('acc-default')) {
+          this.logger.log('[comm] 账号已暂停，跳过笔记处理:', incomingNote.title);
+          return makeEnvelope('note.ack', env.id, this.clock(), { received: true });
+        }
 
         // 异步发射事件（fire-and-forget）
         this.deps.eventBus.emit('note.arrived', { note: incomingNote, ts: this.clock() });

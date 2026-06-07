@@ -1,0 +1,362 @@
+/**
+ * Integration tests for RoleDispatcher — 验证6条闭环路径。
+ *
+ * 每个测试用 mock LLM 返回预设结果，验证事件链正确传播并最终回到 feed.entered。
+ */
+
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { RoleDispatcher } from '../../src/orchestrator/role-dispatcher.js';
+import type { EdgeCommand } from '../../src/orchestrator/role-dispatcher.js';
+import type { Soul } from '../../src/soul/types.js';
+import type { EventBus } from '../../src/event-bus/index.js';
+
+const mockSoul: Soul = {
+  identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },
+  interests: { primary: ['AI', 'LLM'], secondary: ['编程', '技术'], seed_keywords: ['GPT', 'Transformer', 'RAG'] },
+  session_limits: { max_duration_min: 10, max_likes: 8, max_collects: 5, max_searches: 3, cooldown_between_actions_sec: [2, 5] as [number, number] },
+};
+
+/** 创建 mock LLM，每次调用使用 setTimeout 模拟真实异步 */
+function createMockLlm(responses: string[]) {
+  let callIndex = 0;
+  return {
+    complete: async (_prompt: string): Promise<string> => {
+      const resp = responses[callIndex] ?? responses[responses.length - 1];
+      callIndex++;
+      return new Promise((resolve) => setTimeout(() => resolve(resp), 5));
+    },
+    get callCount() { return callIndex; },
+  };
+}
+
+/** 等待指定事件触发（带 predicate 过滤和超时） */
+function waitForEvent<T = unknown>(
+  bus: EventBus,
+  event: string,
+  predicate?: (p: T) => boolean,
+  timeoutMs = 5000,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      unsub();
+      reject(new Error(`Timeout (${timeoutMs}ms) waiting for event "${event}"`));
+    }, timeoutMs);
+    const unsub = (bus as any).on(event, (p: T) => {
+      if (!predicate || predicate(p)) {
+        clearTimeout(timer);
+        unsub();
+        resolve(p);
+      }
+    });
+  });
+}
+
+describe('RoleDispatcher Integration', () => {
+
+  // ─── 路径 A: 无价值→翻页 ─────────────────────────────────────
+
+  it('路径A: 无价值卡片 → content.no_valuable → FeedScroller → feed.scrolled → scroll指令', () => {
+    const commands: EdgeCommand[] = [];
+    // LLM won't be called because cards are empty (all visited)
+    const llm = createMockLlm(['{"verdict":"skip","reason":"不相关"}']);
+    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
+    dispatcher.setup();
+
+    // 空卡片列表 → ContentEvaluator 同步 emit content.no_valuable
+    dispatcher.updateVisibleCards([]);
+
+    // startSession → feed.entered → ContentEvaluator(空卡) → content.no_valuable
+    // → FeedScroller scrollOrSearch (count 1..4 emit feed.scrolled, count 5 emit search.needed)
+    // 这些全部同步完成（无 LLM 调用）
+    dispatcher.startSession();
+
+    // 验证：4次 feed.scrolled → 4次 scroll 指令
+    const scrollCmds = commands.filter((c) => c.action === 'scroll' && c.reason === 'feed_scroll');
+    assert.ok(scrollCmds.length >= 4, `应有至少4个scroll指令, 实际=${scrollCmds.length}`);
+
+    dispatcher.endSession();
+  });
+
+  // ─── 路径 B: 搜索链路 ────────────────────────────────────────
+
+  it('路径B: 连续无价值滚动 → search.needed → SearchEvaluator → search.approved → SearchExecutor → feed.entered(search)', async () => {
+    const commands: EdgeCommand[] = [];
+    // ContentEvaluator 5次返回 skip，SearchEvaluator 返回 search
+    const llm = createMockLlm([
+      '{"verdict":"skip","reason":"不相关"}',
+      '{"verdict":"skip","reason":"不相关"}',
+      '{"verdict":"skip","reason":"不相关"}',
+      '{"verdict":"skip","reason":"不相关"}',
+      '{"verdict":"skip","reason":"不相关"}',
+      '{"verdict":"search","keyword":"GPT","reason":"需要搜索新内容"}',
+    ]);
+    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
+    dispatcher.setup();
+
+    // 提供有卡片（LLM 会被调用评估）
+    dispatcher.updateVisibleCards([
+      { index: 0, title: '美食攻略', likeCount: 10, collectCount: 2, noteId: 'food1' },
+    ]);
+
+    // 等待 search_completed 事件（证明搜索链路完整走通）
+    const searchCompletedPromise = waitForEvent(
+      dispatcher.bus,
+      'feed.entered',
+      (p: any) => p.trigger === 'search_completed' && p.pageType === 'search',
+      8000,
+    );
+
+    dispatcher.startSession();
+    await searchCompletedPromise;
+
+    // 验证 search 指令
+    const searchCmd = commands.find((c) => c.action === 'search');
+    assert.ok(searchCmd, '应产出 search 指令');
+    assert.equal((searchCmd!.params as any)?.keyword, 'GPT');
+
+    // 验证有多个 scroll 指令
+    const scrollCmds = commands.filter((c) => c.action === 'scroll');
+    assert.ok(scrollCmds.length >= 4, `应有至少4个scroll指令, 实际=${scrollCmds.length}`);
+
+    dispatcher.endSession();
+  });
+
+  // ─── 路径 C: 有价值→质量差 ────────────────────────────────────
+
+  it('路径C: content.valuable → NoteOpener → note.entered → ContentCurator(reject) → quality.reject → BackToFeed → feed.entered', async () => {
+    const commands: EdgeCommand[] = [];
+    // 第1次 LLM：ContentEvaluator → valuable
+    // 第2次 LLM：ContentCuratorRole → close_note (reject)
+    const llm = createMockLlm([
+      '{"verdict":"valuable","index":0,"reason":"AI技术相关","confidence":0.9}',
+      '{"action":"close_note","reason":"内容空洞无深度","confidence":0.8}',
+    ]);
+    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
+    dispatcher.setup();
+
+    dispatcher.updateVisibleCards([
+      { index: 0, title: 'AI绘画教程', likeCount: 100, collectCount: 50, noteId: 'note_0' },
+    ]);
+    dispatcher.updateNoteData({
+      noteId: 'note_0',
+      title: 'AI绘画教程',
+      content: '标题党文章，无实质内容...',
+      author: '小红',
+      likeCount: 100,
+      collectCount: 50,
+    });
+
+    // 等待 back_to_feed 事件
+    const backToFeedPromise = waitForEvent(
+      dispatcher.bus,
+      'feed.entered',
+      (p: any) => p.trigger === 'back_to_feed',
+      5000,
+    );
+
+    dispatcher.startSession();
+    await backToFeedPromise;
+
+    // 验证 open_note 指令
+    assert.ok(commands.some((c) => c.action === 'open_note'),
+      '应产出 open_note 指令');
+
+    // 验证 back(quality_rejected) 指令
+    assert.ok(commands.some((c) => c.action === 'back' && c.reason === 'quality_rejected'),
+      '应产出 back(quality_rejected) 指令');
+
+    dispatcher.endSession();
+  });
+
+  // ─── 路径 D: 质量好→不互动 ────────────────────────────────────
+
+  it('路径D: quality.pass → DeepReader → reading.done → InteractionAppraiser(skip) → interaction.skipped → BackToFeed → feed.entered', async () => {
+    const commands: EdgeCommand[] = [];
+    // 第1次：ContentEvaluator → valuable
+    // 第2次：ContentCuratorRole → pass
+    // 第3次：InteractionAppraiser → pass（不互动）
+    const llm = createMockLlm([
+      '{"verdict":"valuable","index":0,"reason":"与LLM相关","confidence":0.9}',
+      '{"action":"pass","reason":"内容有料有深度","confidence":0.85}',
+      '{"action":"pass","reason":"还不够惊艳","confidence":0.5}',
+    ]);
+    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
+    dispatcher.setup();
+
+    dispatcher.updateVisibleCards([
+      { index: 0, title: 'LLM最新进展', likeCount: 200, collectCount: 80, noteId: 'note_0' },
+    ]);
+    dispatcher.updateNoteData({
+      noteId: 'note_0',
+      title: 'LLM最新进展',
+      content: '详细的技术分析，包含架构设计与benchmark...',
+      author: '技术猫',
+      likeCount: 200,
+      collectCount: 80,
+    });
+
+    // 等待 back_to_feed
+    const backToFeedPromise = waitForEvent(
+      dispatcher.bus,
+      'feed.entered',
+      (p: any) => p.trigger === 'back_to_feed',
+      5000,
+    );
+
+    dispatcher.startSession();
+    await backToFeedPromise;
+
+    // 验证 open_note 指令
+    assert.ok(commands.some((c) => c.action === 'open_note'),
+      '应产出 open_note 指令');
+
+    // 验证无 like/collect 指令
+    assert.ok(!commands.some((c) => c.action === 'like' || c.action === 'collect'),
+      '不应产出互动指令');
+
+    dispatcher.endSession();
+  });
+
+  // ─── 路径 E: 互动→不去主页 ────────────────────────────────────
+
+  it('路径E: interaction.completed → AuthorEvaluator(skip) → profile.skipped → BackToFeed → feed.entered', async () => {
+    const commands: EdgeCommand[] = [];
+    // 第1次：ContentEvaluator → valuable
+    // 第2次：ContentCuratorRole → pass
+    // 第3次：InteractionAppraiser → like
+    // 第4次：AuthorEvaluator → skip
+    const llm = createMockLlm([
+      '{"verdict":"valuable","index":0,"reason":"与AI相关","confidence":0.9}',
+      '{"action":"pass","reason":"内容优质","confidence":0.9}',
+      '{"action":"like","reason":"有启发","confidence":0.8}',
+      '{"verdict":"skip","reason":"作者方向与兴趣不完全匹配"}',
+    ]);
+    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
+    dispatcher.setup();
+
+    dispatcher.updateVisibleCards([
+      { index: 0, title: 'AI Agent实践', likeCount: 300, collectCount: 100, noteId: 'note_0' },
+    ]);
+    dispatcher.updateNoteData({
+      noteId: 'note_0',
+      title: 'AI Agent实践',
+      content: '深度讲解AI Agent架构...',
+      author: '博主A',
+      authorId: 'author_1',
+      likeCount: 300,
+      collectCount: 100,
+    });
+
+    // 等待 back_to_feed（由 profile.skipped 触发）
+    const backToFeedPromise = waitForEvent(
+      dispatcher.bus,
+      'feed.entered',
+      (p: any) => p.trigger === 'back_to_feed',
+      5000,
+    );
+
+    dispatcher.startSession();
+    await backToFeedPromise;
+
+    // 验证 like 指令
+    assert.ok(commands.some((c) => c.action === 'like'),
+      '应产出 like 指令');
+
+    // 验证无 profile 打开指令
+    const profileOpen = commands.find((c) => c.action === 'open_note' && (c.params as any)?.type === 'profile');
+    assert.ok(!profileOpen, '不应打开 profile');
+
+    dispatcher.endSession();
+  });
+
+  // ─── 路径 F: 完整 Profile 链路 ─────────────────────────────────
+
+  it('路径F: interaction.completed → AuthorEvaluator(visit) → ProfileOpener → ProfileBrowser → FollowAgent → profile.done → BackToFeed → feed.entered', async () => {
+    const commands: EdgeCommand[] = [];
+    // 第1次：ContentEvaluator → valuable
+    // 第2次：ContentCuratorRole → pass
+    // 第3次：InteractionAppraiser → collect
+    // 第4次：AuthorEvaluator → visit
+    // 第5次：FollowAgent → follow
+    const llm = createMockLlm([
+      '{"verdict":"valuable","index":0,"reason":"深度技术文章","confidence":0.95}',
+      '{"action":"pass","reason":"高质量原创内容","confidence":0.9}',
+      '{"action":"collect","reason":"值得反复参考","confidence":0.9}',
+      '{"verdict":"visit","reason":"作者专业度极高","confidence":0.85}',
+      '{"verdict":"follow","reason":"持续优质输出","confidence":0.8}',
+    ]);
+    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
+    dispatcher.setup();
+
+    dispatcher.updateVisibleCards([
+      { index: 0, title: '深度学习实战指南', likeCount: 500, collectCount: 200, noteId: 'note_0' },
+    ]);
+    dispatcher.updateNoteData({
+      noteId: 'note_0',
+      title: '深度学习实战指南',
+      content: '非常优质的深度学习实战文章，包含完整代码和架构图...',
+      author: '大佬博主',
+      authorId: 'author_pro',
+      likeCount: 500,
+      collectCount: 200,
+    });
+    dispatcher.updateProfileData({ postsCount: 50, followersCount: 10000 });
+
+    // 等待 back_to_feed（由 profile.done 触发）
+    const backToFeedPromise = waitForEvent(
+      dispatcher.bus,
+      'feed.entered',
+      (p: any) => p.trigger === 'back_to_feed',
+      5000,
+    );
+
+    dispatcher.startSession();
+    await backToFeedPromise;
+
+    // 验证 open_note 指令
+    assert.ok(commands.some((c) => c.action === 'open_note' && (c.params as any)?.noteId === 'note_0'),
+      '应产出 open_note 指令');
+
+    // 验证 collect 指令
+    assert.ok(commands.some((c) => c.action === 'collect'),
+      '应产出 collect 指令');
+
+    // 验证进入 profile
+    assert.ok(commands.some((c) => c.action === 'open_note' && (c.params as any)?.type === 'profile'),
+      '应产出 profile 打开指令');
+
+    // 验证 follow 指令
+    assert.ok(commands.some((c) => c.action === 'follow'),
+      '应产出 follow 指令');
+
+    // 验证 back(profile_done) 指令
+    assert.ok(commands.some((c) => c.action === 'back' && c.reason === 'profile_done'),
+      '应产出 back(profile_done) 指令');
+
+    dispatcher.endSession();
+  });
+
+  // ─── SessionMonitor 集成测试 ────────────────────────────────
+
+  it('SessionMonitor: 配额耗尽时自动终止会话', () => {
+    const commands: EdgeCommand[] = [];
+    const llm = createMockLlm(['{"verdict":"skip","reason":"不相关"}']);
+    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
+    dispatcher.setup();
+
+    // 手动耗尽所有配额
+    for (let i = 0; i < 10; i++) dispatcher.consumeBudget('like');
+    for (let i = 0; i < 5; i++) dispatcher.consumeBudget('collect');
+    for (let i = 0; i < 5; i++) dispatcher.consumeBudget('search');
+
+    dispatcher.updateVisibleCards([]);
+
+    // startSession → feed.entered → 同步链触发 SessionMonitor checkSession
+    // 检测到 likes=0 && collects=0 && searches=0 → onSessionEnd → endSession
+    dispatcher.startSession();
+
+    // 会话应已终止
+    assert.equal(dispatcher.active, false, '会话应已自动终止');
+  });
+});
