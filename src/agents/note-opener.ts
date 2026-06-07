@@ -37,8 +37,8 @@ export class NoteOpener extends BaseRole {
   // ─── 事件处理 ─────────────────────────────────────────────
 
   private handleContentValuable(payload: ContentValuablePayload): void {
-    // 生成 noteId：优先使用 payload 中的信息，否则基于 index 生成
-    const noteId = `note_${payload.index}`;
+    // 使用真实 noteId（来自 Edge 上报），fallback 到 index 生成
+    const noteId = payload.noteId || `note_${payload.index}`;
 
     // 更新会话上下文
     this.ctx.setCurrentNoteId(noteId);

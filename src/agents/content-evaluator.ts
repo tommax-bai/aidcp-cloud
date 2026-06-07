@@ -2,17 +2,18 @@
  * ContentEvaluator — 内容价值评估角色（LLM）。
  *
  * 职责：在列表页（feed/search）评估当前可见卡片是否值得点击查看。
- * 采用渐进消耗机制：已访问卡片标记无价值，找到有价值卡片则 emit content.valuable，
- * 当前屏全部耗尽则 emit content.no_valuable。
+ * 由 RoleDispatcher 在收到 page.cards.arrived 事件后主动触发 evaluate()。
+ * 已访问卡片自动过滤，找到有价值卡片则 emit content.valuable，
+ * 当前屏全部不值得则 emit content.no_valuable。
  *
- * 消费事件：feed.entered、feed.scrolled、search.scrolled
+ * 触发方式：RoleDispatcher 主动调用 setVisibleCards() + evaluate()
  * 产出事件：content.valuable、content.no_valuable
  */
 
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import { SessionContext } from './session-context.js';
-import type { RoleName, FeedEnteredPayload, FeedScrolledPayload, SearchScrolledPayload } from '../event-bus/types.js';
+import type { RoleName } from '../event-bus/types.js';
 
 export interface VisibleCard {
   index: number;
@@ -22,6 +23,7 @@ export interface VisibleCard {
   collectCount: number;
   coverDesc?: string;
   noteId?: string;
+  isVideo?: boolean;
 }
 
 export class ContentEvaluator extends BaseRole {
@@ -44,30 +46,12 @@ export class ContentEvaluator extends BaseRole {
   }
 
   subscribe(): void {
-    this.unsubscribers.push(
-      this.eventBus.on('feed.entered', (p) => this.handleFeedEntered(p)),
-      this.eventBus.on('feed.scrolled', (p) => this.handleFeedScrolled(p)),
-      this.eventBus.on('search.scrolled', (p) => this.handleSearchScrolled(p)),
-    );
+    // 评估由 RoleDispatcher 主动触发，无需自行订阅事件
   }
 
   unsubscribe(): void {
     for (const unsub of this.unsubscribers) unsub();
     this.unsubscribers = [];
-  }
-
-  // ─── 事件处理 ─────────────────────────────────────────────
-
-  private handleFeedEntered(_payload: FeedEnteredPayload): void {
-    void this.evaluate('feed');
-  }
-
-  private handleFeedScrolled(_payload: FeedScrolledPayload): void {
-    void this.evaluate('feed');
-  }
-
-  private handleSearchScrolled(_payload: SearchScrolledPayload): void {
-    void this.evaluate('search');
   }
 
   // ─── 核心评估 ─────────────────────────────────────────────
@@ -116,6 +100,7 @@ export class ContentEvaluator extends BaseRole {
       const card = candidates[result.index] ?? candidates[0];
       this.emit('content.valuable', {
         index: card.index,
+        noteId: card.noteId,
         title: card.title,
         reason: result.reason,
         confidence: result.confidence,
@@ -138,19 +123,27 @@ export class ContentEvaluator extends BaseRole {
     const interestsStr = [...interests.primary, ...interests.secondary].join('、');
 
     const cardList = cards
-      .map((c, i) => `[${i}] "${c.title}" by ${c.author ?? '未知'} 👍${c.likeCount} ⭐${c.collectCount}${c.coverDesc ? ` (${c.coverDesc})` : ''}`)
+      .map((c, i) => {
+        const videoTag = c.isVideo ? ' [视频]' : '';
+        return `[${i}] "${c.title}"${videoTag} by ${c.author ?? '未知'} 👍${c.likeCount} ⭐${c.collectCount}${c.coverDesc ? ` (${c.coverDesc})` : ''}`;
+      })
       .join('\n');
 
-    return `你是「${identity.name}」，${identity.role}。兴趣：${interestsStr}。
-当前在小红书列表页（${pageType}），从以下可见卡片中选择一个最值得打开的内容。
+    return `你是「${identity.name}」，${identity.role}。
+背景：${identity.background}
+兴趣领域：${interestsStr}
+
+当前在小红书${pageType === 'feed' ? '推荐页' : '搜索结果页'}，请从以下可见卡片中选择一个最值得打开的内容。
 
 可见卡片：
 ${cardList}
 
-筛选策略：
-- 优先选择与你兴趣相关的标题
-- 互动数据太差的（点赞=0 且无收藏）考虑跳过
-- 已经看过的不会出现在列表中
+评估要点：
+1. 标题与你兴趣领域的匹配度是最重要的因素
+2. 互动数据（点赞/收藏）作为参考，但不必硬性要求高互动
+3. 标记为 [视频] 的卡片你可以自主决定是否打开（视频内容也可能有价值）
+4. 已访问的卡片已被过滤，列表中全是未看过的
+5. 综合判断，选出最值得深入了解的一篇
 
 只输出JSON（不要输出其他内容）：
 有价值：{"verdict":"valuable","index":N,"reason":"简短原因","confidence":0.8}

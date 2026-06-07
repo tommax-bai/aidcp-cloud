@@ -23,6 +23,9 @@ import {
   type PublishApprovalRequestPayload,
   type RiskCanDoPayload,
   type RiskRecordPayload,
+  type PageCardsPayload,
+  type NoteDetailPayload,
+  type ActionCompletedPayload,
 } from './protocol.js';
 import type { MessageHandler, EdgeSession, EdgePusher } from './ws-server.js';
 import type { TaskPlanner } from '../planner/types.js';
@@ -160,6 +163,21 @@ export class DefaultMessageHandler implements MessageHandler {
         return this.onRiskCanDo(env);
       case 'risk.record':
         return this.onRiskRecord(env);
+      case 'page.cards': {
+        const { cards } = env.payload as PageCardsPayload;
+        this.deps.eventBus.emit('page.cards.arrived', { cards, ts: this.clock() });
+        return null;
+      }
+      case 'note.detail': {
+        const detail = env.payload as NoteDetailPayload;
+        this.deps.eventBus.emit('note.detail.arrived', { detail, ts: this.clock() });
+        return null;
+      }
+      case 'action.completed': {
+        const result = env.payload as ActionCompletedPayload;
+        this.deps.eventBus.emit('action.completed', { ...result, ts: this.clock() });
+        return null;
+      }
       case 'publish.result':
       case 'action.result':
         // 观测类消息：记录即可，不强制回包

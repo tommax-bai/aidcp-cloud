@@ -56,22 +56,21 @@ describe('RoleDispatcher Integration', () => {
 
   // ─── 路径 A: 无价值→翻页 ─────────────────────────────────────
 
-  it('路径A: 无价值卡片 → content.no_valuable → FeedScroller → feed.scrolled → scroll指令', () => {
+  it('路径A: 无价值卡片 → content.no_valuable → FeedScroller → feed.scrolled → scroll指令', async () => {
     const commands: EdgeCommand[] = [];
-    // LLM won't be called because cards are empty (all visited)
     const llm = createMockLlm(['{"verdict":"skip","reason":"不相关"}']);
     const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
     dispatcher.setup();
-
-    // 空卡片列表 → ContentEvaluator 同步 emit content.no_valuable
-    dispatcher.updateVisibleCards([]);
-
-    // startSession → feed.entered → ContentEvaluator(空卡) → content.no_valuable
-    // → FeedScroller scrollOrSearch (count 1..4 emit feed.scrolled, count 5 emit search.needed)
-    // 这些全部同步完成（无 LLM 调用）
     dispatcher.startSession();
 
-    // 验证：4次 feed.scrolled → 4次 scroll 指令
+    // 模拟 Edge 反馈循环：每次 scroll 指令后 Edge 上报新的空卡片
+    // 第一次触发：空卡片 → content.no_valuable → FeedScroller → feed.scrolled → scroll指令
+    for (let i = 0; i < 4; i++) {
+      dispatcher.bus.emit('page.cards.arrived', { cards: [], ts: Date.now() });
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    // 验证：4次 scroll 指令
     const scrollCmds = commands.filter((c) => c.action === 'scroll' && c.reason === 'feed_scroll');
     assert.ok(scrollCmds.length >= 4, `应有至少4个scroll指令, 实际=${scrollCmds.length}`);
 
@@ -94,12 +93,9 @@ describe('RoleDispatcher Integration', () => {
     const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
     dispatcher.setup();
 
-    // 提供有卡片（LLM 会被调用评估）
-    dispatcher.updateVisibleCards([
-      { index: 0, title: '美食攻略', likeCount: 10, collectCount: 2, noteId: 'food1' },
-    ]);
+    const cards = [{ index: 0, title: '美食攻略', likeCount: 10, collectCount: 2, noteId: 'food1' }];
 
-    // 等待 search_completed 事件（证明搜索链路完整走通）
+    // 等待 search_completed 事件
     const searchCompletedPromise = waitForEvent(
       dispatcher.bus,
       'feed.entered',
@@ -108,6 +104,13 @@ describe('RoleDispatcher Integration', () => {
     );
 
     dispatcher.startSession();
+
+    // 模拟 Edge 反馈循环：5次卡片上报触发评估
+    for (let i = 0; i < 5; i++) {
+      dispatcher.bus.emit('page.cards.arrived', { cards, ts: Date.now() });
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
     await searchCompletedPromise;
 
     // 验证 search 指令
@@ -135,9 +138,6 @@ describe('RoleDispatcher Integration', () => {
     const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
     dispatcher.setup();
 
-    dispatcher.updateVisibleCards([
-      { index: 0, title: 'AI绘画教程', likeCount: 100, collectCount: 50, noteId: 'note_0' },
-    ]);
     dispatcher.updateNoteData({
       noteId: 'note_0',
       title: 'AI绘画教程',
@@ -156,6 +156,13 @@ describe('RoleDispatcher Integration', () => {
     );
 
     dispatcher.startSession();
+
+    // 模拟 Edge 上报卡片，触发评估
+    dispatcher.bus.emit('page.cards.arrived', {
+      cards: [{ index: 0, title: 'AI绘画教程', likeCount: 100, collectCount: 50, noteId: 'note_0' }],
+      ts: Date.now(),
+    });
+
     await backToFeedPromise;
 
     // 验证 open_note 指令
@@ -184,9 +191,6 @@ describe('RoleDispatcher Integration', () => {
     const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
     dispatcher.setup();
 
-    dispatcher.updateVisibleCards([
-      { index: 0, title: 'LLM最新进展', likeCount: 200, collectCount: 80, noteId: 'note_0' },
-    ]);
     dispatcher.updateNoteData({
       noteId: 'note_0',
       title: 'LLM最新进展',
@@ -205,6 +209,13 @@ describe('RoleDispatcher Integration', () => {
     );
 
     dispatcher.startSession();
+
+    // 模拟 Edge 上报卡片
+    dispatcher.bus.emit('page.cards.arrived', {
+      cards: [{ index: 0, title: 'LLM最新进展', likeCount: 200, collectCount: 80, noteId: 'note_0' }],
+      ts: Date.now(),
+    });
+
     await backToFeedPromise;
 
     // 验证 open_note 指令
@@ -235,9 +246,6 @@ describe('RoleDispatcher Integration', () => {
     const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
     dispatcher.setup();
 
-    dispatcher.updateVisibleCards([
-      { index: 0, title: 'AI Agent实践', likeCount: 300, collectCount: 100, noteId: 'note_0' },
-    ]);
     dispatcher.updateNoteData({
       noteId: 'note_0',
       title: 'AI Agent实践',
@@ -257,6 +265,13 @@ describe('RoleDispatcher Integration', () => {
     );
 
     dispatcher.startSession();
+
+    // 模拟 Edge 上报卡片
+    dispatcher.bus.emit('page.cards.arrived', {
+      cards: [{ index: 0, title: 'AI Agent实践', likeCount: 300, collectCount: 100, noteId: 'note_0' }],
+      ts: Date.now(),
+    });
+
     await backToFeedPromise;
 
     // 验证 like 指令
@@ -289,9 +304,6 @@ describe('RoleDispatcher Integration', () => {
     const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
     dispatcher.setup();
 
-    dispatcher.updateVisibleCards([
-      { index: 0, title: '深度学习实战指南', likeCount: 500, collectCount: 200, noteId: 'note_0' },
-    ]);
     dispatcher.updateNoteData({
       noteId: 'note_0',
       title: '深度学习实战指南',
@@ -312,6 +324,13 @@ describe('RoleDispatcher Integration', () => {
     );
 
     dispatcher.startSession();
+
+    // 模拟 Edge 上报卡片
+    dispatcher.bus.emit('page.cards.arrived', {
+      cards: [{ index: 0, title: '深度学习实战指南', likeCount: 500, collectCount: 200, noteId: 'note_0' }],
+      ts: Date.now(),
+    });
+
     await backToFeedPromise;
 
     // 验证 open_note 指令
@@ -344,17 +363,15 @@ describe('RoleDispatcher Integration', () => {
     const llm = createMockLlm(['{"verdict":"skip","reason":"不相关"}']);
     const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
     dispatcher.setup();
+    dispatcher.startSession();
 
     // 手动耗尽所有配额
     for (let i = 0; i < 10; i++) dispatcher.consumeBudget('like');
     for (let i = 0; i < 5; i++) dispatcher.consumeBudget('collect');
     for (let i = 0; i < 5; i++) dispatcher.consumeBudget('search');
 
-    dispatcher.updateVisibleCards([]);
-
-    // startSession → feed.entered → 同步链触发 SessionMonitor checkSession
-    // 检测到 likes=0 && collects=0 && searches=0 → onSessionEnd → endSession
-    dispatcher.startSession();
+    // 触发 action.completed 事件，SessionMonitor 检查配额
+    dispatcher.bus.emit('action.completed', { action: 'scroll', ok: true, ts: Date.now() });
 
     // 会话应已终止
     assert.equal(dispatcher.active, false, '会话应已自动终止');

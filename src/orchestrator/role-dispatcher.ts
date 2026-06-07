@@ -38,10 +38,12 @@ export interface RoleDispatcherOptions {
   llm: { complete(prompt: string): Promise<string> };
   sendCommand: (command: EdgeCommand) => void;
   clock?: () => number;
+  /** 外部事件总线（共享 handler 发射的 Edge 上报事件），缺省创建独立实例 */
+  eventBus?: EventBus;
 }
 
 export interface EdgeCommand {
-  action: 'scroll' | 'open_note' | 'close_note' | 'like' | 'collect' | 'follow' | 'search' | 'back' | 'browse_images' | 'scroll_comments';
+  action: 'scroll' | 'open_note' | 'close_note' | 'like' | 'collect' | 'follow' | 'search' | 'back' | 'browse_images' | 'scroll_comments' | 'session.end';
   params?: Record<string, unknown>;
   reason?: string;
 }
@@ -92,7 +94,7 @@ export class RoleDispatcher {
     this.llm = options.llm;
     this.sendCommand = options.sendCommand;
     this.clock = options.clock ?? Date.now;
-    this.eventBus = new EventBus();
+    this.eventBus = options.eventBus ?? new EventBus();
     this.sessionContext = new SessionContext();
   }
 
@@ -133,7 +135,7 @@ export class RoleDispatcher {
       new NoteOpener(commonOptions, this.sessionContext),
       new BackToFeed(commonOptions, this.sessionContext),
       new DeepReader(commonOptions),
-      new ContentCuratorRole({ ...commonOptions, sessionContext: this.sessionContext, getNoteData }),
+      new ContentCuratorRole({ ...commonOptions, sessionContext: this.sessionContext }),
       new InteractionAppraiserRole({ ...commonOptions, sessionContext: this.sessionContext, getNoteData, getRemainingBudget }),
       new AuthorEvaluator({ ...commonOptions, sessionContext: this.sessionContext, getNoteData }),
       new ProfileOpener(commonOptions),
@@ -156,6 +158,9 @@ export class RoleDispatcher {
 
     // 注册 Edge 指令翻译层
     this.setupCommandTranslation();
+
+    // 订阅 Edge 上报事件
+    this.setupEdgeEventSubscriptions();
   }
 
   /** 启动会话 */
@@ -218,13 +223,8 @@ export class RoleDispatcher {
         this.sendCommand({ action: 'scroll', reason: 'search_scroll' });
       }),
 
-      this.eventBus.on('note.entered', (payload) => {
-        this.sendCommand({ action: 'open_note', params: { noteId: payload.noteId } });
-      }),
-
-      this.eventBus.on('quality.reject', () => {
-        this.sendCommand({ action: 'back', reason: 'quality_rejected' });
-      }),
+      // note.entered 不再发送指令：content.valuable 已经发送了带 index 的 open_note
+      // quality.reject 不再直接发 back：BackToFeed 角色会通过 feed.entered 统一发送
 
       this.eventBus.on('interaction.completed', (payload) => {
         for (const action of payload.actions) {
@@ -242,7 +242,7 @@ export class RoleDispatcher {
           this.sendCommand({ action: 'follow', params: { authorId: payload.authorId } });
           this.consumeBudget('follow');
         }
-        this.sendCommand({ action: 'back', reason: 'profile_done' });
+        // back 指令由 BackToFeed 角色通过 feed.entered 统一发送，此处不再重复
       }),
 
       this.eventBus.on('feed.entered', (payload) => {
@@ -255,6 +255,42 @@ export class RoleDispatcher {
         this.searchedKeywords.push(payload.keyword);
         this.consumeBudget('search');
         this.sendCommand({ action: 'search', params: { keyword: payload.keyword } });
+      }),
+
+      // 角色产出事件 → Edge 指令翻译
+      this.eventBus.on('content.valuable', (payload) => {
+        this.sendCommand({ action: 'open_note', params: { index: payload.index }, reason: payload.reason });
+      }),
+
+      this.eventBus.on('content.no_valuable', () => {
+        this.sendCommand({ action: 'scroll', reason: 'no_valuable_content' });
+      }),
+
+      this.eventBus.on('session.should_end', (payload) => {
+        this.sendCommand({ action: 'session.end', reason: payload.reason });
+        this.endSession(payload.reason);
+      }),
+    );
+  }
+
+  // ─── 内部：Edge 上报事件订阅 ─────────────────────
+
+  private setupEdgeEventSubscriptions(): void {
+    this.commandUnsubscribers.push(
+      // Edge 上报可见卡片 → 更新数据并触发评估
+      this.eventBus.on('page.cards.arrived', (payload) => {
+        this.updateVisibleCards(payload.cards);
+        void this.contentEvaluator?.evaluate(this.sessionContext.sourcePageType);
+      }),
+
+      // Edge 上报笔记详情 → 更新当前笔记数据
+      this.eventBus.on('note.detail.arrived', (payload) => {
+        this.updateNoteData(payload.detail);
+      }),
+
+      // Edge 确认动作完成 → 通知 SessionMonitor
+      this.eventBus.on('action.completed', (payload) => {
+        console.log(`[RoleDispatcher] action.completed: ${payload.action} ok=${payload.ok}`);
       }),
     );
   }

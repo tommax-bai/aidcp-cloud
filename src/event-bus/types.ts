@@ -7,6 +7,27 @@ import type { Envelope } from '../comm/protocol.js';
 // Agent 角色枚举
 export type AgentRole = 'session_monitor' | 'feed_scanner' | 'content_curator' | 'interaction_appraiser' | 'comment_reviewer';
 
+// Edge 上报数据结构
+export interface PageCardsData {
+  index: number;
+  title: string;
+  author?: string;
+  likeCount: number;
+  collectCount: number;
+  coverDesc?: string;
+  noteId?: string;
+}
+
+export interface NoteDetailData {
+  noteId: string;
+  title: string;
+  content: string;
+  author?: string;
+  authorId?: string;
+  likeCount: number;
+  collectCount: number;
+}
+
 // 页面类型
 export type PageType = 'feed' | 'note' | 'search' | 'profile' | 'unknown';
 export type LoginState = 'logged_in' | 'logged_out' | 'unknown';
@@ -90,6 +111,12 @@ export interface EventMap {
   'session.ended': { stats: SessionStats };
   'interaction.occurred': { action: 'like' | 'collect'; noteId: string };
   'concept.discovered': { concepts: string[]; source: string };
+  // Edge 上报事件（handler → RoleDispatcher）
+  'page.cards.arrived': { cards: PageCardsData[]; ts: number };
+  'note.detail.arrived': { detail: NoteDetailData; ts: number };
+  'action.completed': { action: string; ok: boolean; reason?: string; ts: number };
+  // 会话控制事件
+  'session.should_end': { reason: string; ts: number };
 }
 
 // ─── 角色事件系统（新架构） ─────────────────────────────────────
@@ -109,6 +136,7 @@ export interface SearchScrolledPayload {
 
 export interface ContentValuablePayload {
   index: number;
+  noteId?: string;
   title: string;
   reason: string;
   confidence: number;
@@ -247,6 +275,7 @@ export interface RoleEventMap {
   'search.approved': SearchApprovedPayload;
   'search.skipped': SearchSkippedPayload;
   'feed.entered': FeedEnteredPayload;
+  'session.should_end': { reason: string; ts: number };
 }
 
 // 角色名类型

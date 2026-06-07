@@ -29,7 +29,7 @@ describe('ContentEvaluator', () => {
     );
   });
 
-  it('subscribe：正确注册 feed.entered、feed.scrolled、search.scrolled 事件', () => {
+  it('subscribe：主动触发模式，subscribe 为空操作', () => {
     const bus = new EventBus();
     const ctx = new SessionContext();
     const llm = { complete: async () => '{}' };
@@ -37,8 +37,7 @@ describe('ContentEvaluator', () => {
     role.setVisibleCards(sampleCards);
     role.subscribe();
 
-    // 验证订阅了事件（通过触发事件看是否有响应 — 这里直接 emit 不会抛错即可）
-    // 更好的验证在后续 case 中
+    // 新模式下 subscribe 不订阅事件，由 RoleDispatcher 主动调用 evaluate()
     role.unsubscribe();
   });
 
@@ -55,14 +54,12 @@ describe('ContentEvaluator', () => {
     let captured = null as ContentValuablePayload | null;
     bus.on('content.valuable', (p) => { captured = p; });
 
-    // 触发评估
-    bus.emit('feed.entered', { pageType: 'feed', trigger: 'session_start', ts: Date.now() });
-
-    // 等待异步处理完成
-    await new Promise((r) => setTimeout(r, 50));
+    // 直接调用 evaluate（由 RoleDispatcher 触发的方式）
+    await role.evaluate('feed');
 
     assert.ok(captured, 'should emit content.valuable');
     assert.equal(captured!.index, 1);
+    assert.equal(captured!.noteId, 'n2');
     assert.equal(captured!.title, 'LLM最新进展');
     assert.equal(captured!.reason, '与AI技术相关');
     assert.equal(captured!.confidence, 0.9);
@@ -84,9 +81,7 @@ describe('ContentEvaluator', () => {
     let captured = null as ContentNoValuablePayload | null;
     bus.on('content.no_valuable', (p) => { captured = p; });
 
-    bus.emit('feed.scrolled', { pageType: 'feed', scrollCount: 1, ts: Date.now() });
-
-    await new Promise((r) => setTimeout(r, 50));
+    await role.evaluate('feed');
 
     assert.ok(captured, 'should emit content.no_valuable');
     assert.equal(captured!.pageType, 'feed');
@@ -108,9 +103,7 @@ describe('ContentEvaluator', () => {
     let captured = null as ContentNoValuablePayload | null;
     bus.on('content.no_valuable', (p) => { captured = p; });
 
-    bus.emit('search.scrolled', { pageType: 'search', scrollCount: 2, ts: Date.now() });
-
-    await new Promise((r) => setTimeout(r, 50));
+    await role.evaluate('search');
 
     assert.ok(captured, 'should emit content.no_valuable');
     assert.equal(captured!.reason, 'parse_failed');
@@ -131,9 +124,7 @@ describe('ContentEvaluator', () => {
     let captured = null as ContentNoValuablePayload | null;
     bus.on('content.no_valuable', (p) => { captured = p; });
 
-    bus.emit('feed.entered', { pageType: 'feed', trigger: 'back_to_feed', ts: Date.now() });
-
-    await new Promise((r) => setTimeout(r, 50));
+    await role.evaluate('feed');
 
     assert.ok(captured, 'should emit content.no_valuable');
     assert.equal(captured!.reason, 'llm_error');
@@ -159,9 +150,7 @@ describe('ContentEvaluator', () => {
     let captured = null as ContentNoValuablePayload | null;
     bus.on('content.no_valuable', (p) => { captured = p; });
 
-    bus.emit('feed.entered', { pageType: 'feed', trigger: 'session_start', ts: Date.now() });
-
-    await new Promise((r) => setTimeout(r, 50));
+    await role.evaluate('feed');
 
     assert.ok(captured, 'should emit content.no_valuable when all visited');
     assert.equal(captured!.reason, 'all_cards_visited');
@@ -169,7 +158,7 @@ describe('ContentEvaluator', () => {
     role.unsubscribe();
   });
 
-  it('unsubscribe：取消后不再响应事件', async () => {
+  it('unsubscribe：取消后直接调用 evaluate 仍然有效（subscribe 不影响 evaluate）', async () => {
     const bus = new EventBus();
     const ctx = new SessionContext();
     const llm = {
@@ -183,9 +172,8 @@ describe('ContentEvaluator', () => {
     let captured = null as ContentValuablePayload | null;
     bus.on('content.valuable', (p) => { captured = p; });
 
-    bus.emit('feed.entered', { pageType: 'feed', trigger: 'session_start', ts: Date.now() });
-
-    await new Promise((r) => setTimeout(r, 50));
-    assert.equal(captured, null, 'should not emit after unsubscribe');
+    // 直接调用 evaluate 仍然工作（主动触发模式）
+    await role.evaluate('feed');
+    assert.ok(captured, 'evaluate should still work after unsubscribe');
   });
 });

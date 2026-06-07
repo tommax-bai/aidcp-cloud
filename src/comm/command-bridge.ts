@@ -39,6 +39,8 @@ export function edgeCommandToEnvelope(command: EdgeCommand): Envelope {
       return createEnvelope('note.browse_images', command.params ?? {});
     case 'scroll_comments':
       return createEnvelope('note.scroll_comments', command.params ?? {});
+    case 'session.end':
+      return createEnvelope('session.end', { reason: command.reason });
     default:
       throw new Error(`Unknown edge command action: ${(command as EdgeCommand).action}`);
   }

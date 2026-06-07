@@ -23,12 +23,15 @@ import {
   EdgeCloudServer,
   DefaultMessageHandler,
   makeEnvelope,
+  edgeCommandToEnvelope,
   type PublishRequestPayload,
 } from './comm/index.js';
 
 
 import { RiskController } from './risk/index.js';
 import { EventBus } from './event-bus/index.js';
+import { RoleDispatcher } from './orchestrator/index.js';
+import { loadSoul } from './soul/index.js';
 
 
 import {
@@ -174,6 +177,22 @@ async function main(): Promise<void> {
   const server = new EdgeCloudServer({ port, handler });
   await server.start();
   console.log(`[aidcp-cloud] 边-云 WebSocket 服务端已监听 :${port}`);
+
+  // ── RoleDispatcher：事件驱动决策链路 ─────────────────────────────────
+  const soul = loadSoul();
+  const roleDispatcher = new RoleDispatcher({
+    soul,
+    llm,
+    eventBus,
+    sendCommand: (command) => {
+      const envelope = edgeCommandToEnvelope(command);
+      const sent = server.pushToEdges(envelope);
+      console.log(`[RoleDispatcher] sendCommand action=${command.action} sent=${sent}`);
+    },
+  });
+  roleDispatcher.setup();
+  roleDispatcher.startSession();
+  console.log('[aidcp-cloud] RoleDispatcher 已启动，决策链路就绪');
 
   // 注册发布编排器的 6 个角色（需在 server 启动后，因为 PublishExecutorRole 依赖 server 作为 pusher）
   publishOrchestrator.registerRole(new ContentScoutRole({ llmClient: llm }));

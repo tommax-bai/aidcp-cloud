@@ -2,19 +2,18 @@
  * ContentCuratorRole — 详情页内容质量粗筛角色（LLM，事件驱动版）。
  *
  * 职责：评估笔记内容质量，判断是否值得深度阅读。
- * 消费事件：note.entered
+ * 消费事件：note.detail.arrived（Edge 上报笔记详情后触发）
  * 产出事件：quality.pass（质量好）或 quality.reject（质量差）
  *
- * 与旧版 ContentCurator 的区别：
- * - 输入从黑板模式改为事件驱动
- * - 输出从 AgentDecision 改为 emit 角色事件
- * - 通过 getNoteData 函数获取笔记数据
+ * 相比旧版的改进：
+ * - 监听 note.detail.arrived 而非 note.entered，确保有实际数据可评估
+ * - 直接使用 payload 中的笔记数据，无需外部 getNoteData 回调
  */
 
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { SessionContext } from './session-context.js';
-import type { RoleName, NoteEnteredPayload } from '../event-bus/types.js';
+import type { RoleName } from '../event-bus/types.js';
 
 export interface NoteData {
   noteId: string;
@@ -27,23 +26,22 @@ export interface NoteData {
 
 export interface ContentCuratorRoleOptions extends RoleOptions {
   sessionContext: SessionContext;
-  getNoteData: (noteId: string) => NoteData | null;
 }
 
 export class ContentCuratorRole extends BaseRole {
   readonly roleName: RoleName = 'content_curator';
-  private readonly getNoteData: (noteId: string) => NoteData | null;
+  private readonly sessionContext: SessionContext;
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: ContentCuratorRoleOptions) {
     super(options);
     if (!options.llm) throw new Error('ContentCuratorRole 需要 LlmClient');
-    this.getNoteData = options.getNoteData;
+    this.sessionContext = options.sessionContext;
   }
 
   subscribe(): void {
     this.unsubscribers.push(
-      this.eventBus.on('note.entered', (p) => this.onNoteEntered(p)),
+      this.eventBus.on('note.detail.arrived', (p) => this.onNoteDetailArrived(p)),
     );
   }
 
@@ -54,18 +52,9 @@ export class ContentCuratorRole extends BaseRole {
 
   // ─── 事件处理 ─────────────────────────────────────────────
 
-  private async onNoteEntered(payload: NoteEnteredPayload): Promise<void> {
-    const noteData = this.getNoteData(payload.noteId);
-    if (!noteData) {
-      // 无法获取笔记数据，直接 reject
-      this.emit('quality.reject', {
-        noteId: payload.noteId,
-        sourcePageType: payload.sourcePageType,
-        reason: 'note_data_unavailable',
-        ts: Date.now(),
-      });
-      return;
-    }
+  private async onNoteDetailArrived(payload: { detail: NoteData; ts: number }): Promise<void> {
+    const noteData = payload.detail;
+    const sourcePageType = this.sessionContext.sourcePageType;
 
     const prompt = this.buildPrompt(noteData);
     let raw: string;
@@ -73,8 +62,8 @@ export class ContentCuratorRole extends BaseRole {
       raw = await this.llm!.complete(prompt);
     } catch {
       this.emit('quality.reject', {
-        noteId: payload.noteId,
-        sourcePageType: payload.sourcePageType,
+        noteId: noteData.noteId,
+        sourcePageType,
         reason: 'llm_error',
         ts: Date.now(),
       });
@@ -84,8 +73,8 @@ export class ContentCuratorRole extends BaseRole {
     const result = this.parseOutput(raw);
     if (!result) {
       this.emit('quality.reject', {
-        noteId: payload.noteId,
-        sourcePageType: payload.sourcePageType,
+        noteId: noteData.noteId,
+        sourcePageType,
         reason: 'parse_failed',
         ts: Date.now(),
       });
@@ -94,15 +83,15 @@ export class ContentCuratorRole extends BaseRole {
 
     if (result.action === 'pass') {
       this.emit('quality.pass', {
-        noteId: payload.noteId,
-        sourcePageType: payload.sourcePageType,
+        noteId: noteData.noteId,
+        sourcePageType,
         reason: result.reason,
         ts: Date.now(),
       });
     } else {
       this.emit('quality.reject', {
-        noteId: payload.noteId,
-        sourcePageType: payload.sourcePageType,
+        noteId: noteData.noteId,
+        sourcePageType,
         reason: result.reason,
         ts: Date.now(),
       });

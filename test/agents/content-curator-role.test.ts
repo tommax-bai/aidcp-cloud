@@ -31,7 +31,6 @@ describe('ContentCuratorRole', () => {
         eventBus: bus,
         soul: mockSoul,
         sessionContext: ctx,
-        getNoteData: () => null,
       }),
       /需要 LlmClient/,
     );
@@ -40,6 +39,7 @@ describe('ContentCuratorRole', () => {
   it('LLM 返回 pass → emit quality.pass', async () => {
     const bus = new EventBus();
     const ctx = new SessionContext();
+    ctx.setSourcePageType('feed');
     const llm = {
       complete: async () => '{"action":"pass","reason":"内容有具体细节和代码","confidence":0.85}',
     };
@@ -48,14 +48,13 @@ describe('ContentCuratorRole', () => {
       soul: mockSoul,
       llm,
       sessionContext: ctx,
-      getNoteData: (id) => id === 'note_1' ? sampleNote : null,
     });
     role.subscribe();
 
     let captured = null as QualityPassPayload | null;
     bus.on('quality.pass', (p) => { captured = p; });
 
-    bus.emit('note.entered', { noteId: 'note_1', sourcePageType: 'feed', ts: Date.now() });
+    bus.emit('note.detail.arrived', { detail: sampleNote, ts: Date.now() });
 
     await new Promise((r) => setTimeout(r, 50));
 
@@ -70,6 +69,7 @@ describe('ContentCuratorRole', () => {
   it('LLM 返回 close_note → emit quality.reject', async () => {
     const bus = new EventBus();
     const ctx = new SessionContext();
+    ctx.setSourcePageType('search');
     const llm = {
       complete: async () => '{"action":"close_note","reason":"标题党内容空洞","confidence":0.9}',
     };
@@ -78,14 +78,13 @@ describe('ContentCuratorRole', () => {
       soul: mockSoul,
       llm,
       sessionContext: ctx,
-      getNoteData: (id) => id === 'note_1' ? sampleNote : null,
     });
     role.subscribe();
 
     let captured = null as QualityRejectPayload | null;
     bus.on('quality.reject', (p) => { captured = p; });
 
-    bus.emit('note.entered', { noteId: 'note_1', sourcePageType: 'search', ts: Date.now() });
+    bus.emit('note.detail.arrived', { detail: sampleNote, ts: Date.now() });
 
     await new Promise((r) => setTimeout(r, 50));
 
@@ -97,49 +96,23 @@ describe('ContentCuratorRole', () => {
     role.unsubscribe();
   });
 
-  it('笔记数据不可用 → emit quality.reject (note_data_unavailable)', async () => {
-    const bus = new EventBus();
-    const ctx = new SessionContext();
-    const llm = { complete: async () => '{}' };
-    const role = new ContentCuratorRole({
-      eventBus: bus,
-      soul: mockSoul,
-      llm,
-      sessionContext: ctx,
-      getNoteData: () => null,
-    });
-    role.subscribe();
-
-    let captured = null as QualityRejectPayload | null;
-    bus.on('quality.reject', (p) => { captured = p; });
-
-    bus.emit('note.entered', { noteId: 'unknown', sourcePageType: 'feed', ts: Date.now() });
-
-    await new Promise((r) => setTimeout(r, 50));
-
-    assert.ok(captured, 'should emit quality.reject');
-    assert.equal(captured!.reason, 'note_data_unavailable');
-
-    role.unsubscribe();
-  });
-
   it('LLM 抛错 → emit quality.reject (llm_error)', async () => {
     const bus = new EventBus();
     const ctx = new SessionContext();
+    ctx.setSourcePageType('feed');
     const llm = { complete: async () => { throw new Error('timeout'); } };
     const role = new ContentCuratorRole({
       eventBus: bus,
       soul: mockSoul,
       llm,
       sessionContext: ctx,
-      getNoteData: () => sampleNote,
     });
     role.subscribe();
 
     let captured = null as QualityRejectPayload | null;
     bus.on('quality.reject', (p) => { captured = p; });
 
-    bus.emit('note.entered', { noteId: 'note_1', sourcePageType: 'feed', ts: Date.now() });
+    bus.emit('note.detail.arrived', { detail: sampleNote, ts: Date.now() });
 
     await new Promise((r) => setTimeout(r, 50));
 
@@ -152,20 +125,20 @@ describe('ContentCuratorRole', () => {
   it('LLM 返回非法 JSON → emit quality.reject (parse_failed)', async () => {
     const bus = new EventBus();
     const ctx = new SessionContext();
+    ctx.setSourcePageType('feed');
     const llm = { complete: async () => '这不是JSON' };
     const role = new ContentCuratorRole({
       eventBus: bus,
       soul: mockSoul,
       llm,
       sessionContext: ctx,
-      getNoteData: () => sampleNote,
     });
     role.subscribe();
 
     let captured = null as QualityRejectPayload | null;
     bus.on('quality.reject', (p) => { captured = p; });
 
-    bus.emit('note.entered', { noteId: 'note_1', sourcePageType: 'feed', ts: Date.now() });
+    bus.emit('note.detail.arrived', { detail: sampleNote, ts: Date.now() });
 
     await new Promise((r) => setTimeout(r, 50));
 
@@ -175,9 +148,10 @@ describe('ContentCuratorRole', () => {
     role.unsubscribe();
   });
 
-  it('sourcePageType 正确透传', async () => {
+  it('sourcePageType 从 sessionContext 正确读取', async () => {
     const bus = new EventBus();
     const ctx = new SessionContext();
+    ctx.setSourcePageType('search');
     const llm = {
       complete: async () => '{"action":"pass","reason":"好内容","confidence":0.8}',
     };
@@ -186,14 +160,13 @@ describe('ContentCuratorRole', () => {
       soul: mockSoul,
       llm,
       sessionContext: ctx,
-      getNoteData: () => sampleNote,
     });
     role.subscribe();
 
     let captured = null as QualityPassPayload | null;
     bus.on('quality.pass', (p) => { captured = p; });
 
-    bus.emit('note.entered', { noteId: 'note_1', sourcePageType: 'search', ts: Date.now() });
+    bus.emit('note.detail.arrived', { detail: sampleNote, ts: Date.now() });
 
     await new Promise((r) => setTimeout(r, 50));
 
@@ -206,6 +179,7 @@ describe('ContentCuratorRole', () => {
   it('unsubscribe 后不再响应事件', async () => {
     const bus = new EventBus();
     const ctx = new SessionContext();
+    ctx.setSourcePageType('feed');
     const llm = {
       complete: async () => '{"action":"pass","reason":"test","confidence":0.8}',
     };
@@ -214,7 +188,6 @@ describe('ContentCuratorRole', () => {
       soul: mockSoul,
       llm,
       sessionContext: ctx,
-      getNoteData: () => sampleNote,
     });
     role.subscribe();
     role.unsubscribe();
@@ -224,7 +197,7 @@ describe('ContentCuratorRole', () => {
     bus.on('quality.pass', () => { passEmitted = true; });
     bus.on('quality.reject', () => { rejectEmitted = true; });
 
-    bus.emit('note.entered', { noteId: 'note_1', sourcePageType: 'feed', ts: Date.now() });
+    bus.emit('note.detail.arrived', { detail: sampleNote, ts: Date.now() });
 
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(passEmitted, false);
