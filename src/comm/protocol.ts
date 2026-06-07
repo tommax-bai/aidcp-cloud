@@ -11,7 +11,7 @@
  */
 
 /** 协议版本号 */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** 所有消息的类型枚举 */
 export type MessageType =
@@ -50,6 +50,19 @@ export type MessageType =
   | 'publish.approval_request' // edge → cloud：请求发送发布审批卡片
   | 'publish.request' // cloud → edge：请求在浏览器中发布一篇帖子
   | 'publish.result' // edge → cloud：发布结果回传
+  // —— 角色驱动指令（cloud → edge，RoleDispatcher 驱动）——
+  | 'page.scroll'          // 页面滚动
+  | 'interaction.like'     // 点赞
+  | 'interaction.collect'  // 收藏
+  | 'interaction.follow'   // 关注
+  | 'navigation.back'      // 返回上一页
+  | 'note.browse_images'   // 浏览笔记图片
+  | 'note.scroll_comments' // 滚动评论区
+  // —— Edge 上报（edge → cloud，RoleDispatcher 消费）——
+  | 'page.cards'           // Edge 上报当前可见卡片列表
+  | 'note.detail'          // Edge 上报笔记详情
+  | 'profile.detail'       // Edge 上报个人主页数据
+  | 'action.completed'     // Edge 确认 action 执行完成
   // —— 通用 ——
   | 'error' // 任一方 → 对方：错误信息
   | 'ping'
@@ -307,6 +320,76 @@ export interface NoteAckPayload {
   received: boolean;
 }
 
+// —— 角色驱动指令 Payload（cloud → edge）——
+
+export interface PageScrollPayload {
+  reason?: string;  // feed_scroll | search_scroll
+}
+
+export interface InteractionLikePayload {
+  noteId: string;
+  reason?: string;
+}
+
+export interface InteractionCollectPayload {
+  noteId: string;
+  reason?: string;
+}
+
+export interface InteractionFollowPayload {
+  authorId?: string;
+  reason?: string;
+}
+
+export interface NavigationBackPayload {
+  reason?: string;  // quality_rejected | back_to_feed | profile_done
+  targetPage?: 'feed' | 'search';
+}
+
+export interface NoteBrowseImagesPayload {
+  noteId: string;
+}
+
+export interface NoteScrollCommentsPayload {
+  noteId: string;
+}
+
+// —— Edge 上报 Payload（edge → cloud）——
+
+export interface PageCardsPayload {
+  cards: Array<{
+    index: number;
+    title: string;
+    author?: string;
+    likeCount: number;
+    collectCount: number;
+    coverDesc?: string;
+    noteId?: string;
+  }>;
+}
+
+export interface NoteDetailPayload {
+  noteId: string;
+  title: string;
+  content: string;
+  author?: string;
+  authorId?: string;
+  likeCount: number;
+  collectCount: number;
+}
+
+export interface ProfileDetailPayload {
+  authorId: string;
+  postsCount: number;
+  followersCount: number;
+}
+
+export interface ActionCompletedPayload {
+  action: string;
+  ok: boolean;
+  reason?: string;
+}
+
 export interface ErrorPayload {
   code: string;
   message: string;
@@ -341,6 +424,19 @@ export interface PayloadMap {
   'risk.record.result': RiskRecordResultPayload;
   'publish.request': PublishRequestPayload;
   'publish.result': PublishResultPayload;
+  // 角色驱动指令
+  'page.scroll': PageScrollPayload;
+  'interaction.like': InteractionLikePayload;
+  'interaction.collect': InteractionCollectPayload;
+  'interaction.follow': InteractionFollowPayload;
+  'navigation.back': NavigationBackPayload;
+  'note.browse_images': NoteBrowseImagesPayload;
+  'note.scroll_comments': NoteScrollCommentsPayload;
+  // Edge 上报
+  'page.cards': PageCardsPayload;
+  'note.detail': NoteDetailPayload;
+  'profile.detail': ProfileDetailPayload;
+  'action.completed': ActionCompletedPayload;
   error: ErrorPayload;
   ping: Record<string, never>;
   pong: Record<string, never>;
