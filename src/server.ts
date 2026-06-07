@@ -55,8 +55,8 @@ import {
   ApprovalGatekeeperRole,
   PublishExecutorRole,
 } from './publish-agent/roles/index.js';
-import { PostProcessor } from './publish/post-processor.js';
-import { PublishLogStore } from './publish/publisher.js';
+import { PostProcessor } from './publish-agent/post-processor.js';
+import { PublishLogStore } from './publish-agent/publish-log-store.js';
 
 function readEnvString(name: string): string | undefined {
   const value = process.env[name];

@@ -3,10 +3,13 @@
  * fire-and-forget 语义，handler 异常不阻塞其他订阅者。
  */
 
-import type { EventMap } from './types.js';
+import type { EventMap, RoleEventMap } from './types.js';
 
 export type { EventMap } from './types.js';
 export * from './types.js';
+
+// 合并事件映射：同时支持旧的 EventMap 和新的 RoleEventMap
+type AllEventMap = EventMap & RoleEventMap;
 
 type Handler<T = unknown> = (data: T) => void | Promise<void>;
 type WildcardHandler = (event: string, data: unknown) => void;
@@ -18,7 +21,7 @@ export class EventBus {
   /**
    * 订阅事件，返回取消订阅函数。
    */
-  on<K extends keyof EventMap>(event: K, handler: Handler<EventMap[K]>): () => void {
+  on<K extends keyof AllEventMap>(event: K, handler: Handler<AllEventMap[K]>): () => void {
     const key = event as string;
     if (!this.handlers.has(key)) {
       this.handlers.set(key, new Set());
@@ -31,8 +34,8 @@ export class EventBus {
   /**
    * 一次性订阅，触发后自动取消。
    */
-  once<K extends keyof EventMap>(event: K, handler: Handler<EventMap[K]>): () => void {
-    const wrapper: Handler<EventMap[K]> = (data) => {
+  once<K extends keyof AllEventMap>(event: K, handler: Handler<AllEventMap[K]>): () => void {
+    const wrapper: Handler<AllEventMap[K]> = (data) => {
       unsub();
       return handler(data);
     };
@@ -43,7 +46,7 @@ export class EventBus {
   /**
    * 手动取消订阅。
    */
-  off<K extends keyof EventMap>(event: K, handler: Handler<EventMap[K]>): void {
+  off<K extends keyof AllEventMap>(event: K, handler: Handler<AllEventMap[K]>): void {
     const set = this.handlers.get(event as string);
     if (set) {
       set.delete(handler as Handler);
@@ -53,7 +56,7 @@ export class EventBus {
   /**
    * 同步触发事件（fire-and-forget）。handler 的 Promise 被忽略，抛错不影响其他 handler。
    */
-  emit<K extends keyof EventMap>(event: K, data: EventMap[K]): void {
+  emit<K extends keyof AllEventMap>(event: K, data: AllEventMap[K]): void {
     const key = event as string;
     const set = this.handlers.get(key);
     if (set) {
@@ -78,7 +81,7 @@ export class EventBus {
   /**
    * 异步触发事件，等待所有 handler resolve。
    */
-  async emitAsync<K extends keyof EventMap>(event: K, data: EventMap[K]): Promise<void> {
+  async emitAsync<K extends keyof AllEventMap>(event: K, data: AllEventMap[K]): Promise<void> {
     const key = event as string;
     const set = this.handlers.get(key);
     const promises: Promise<void>[] = [];

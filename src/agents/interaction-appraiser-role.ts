@@ -1,0 +1,191 @@
+/**
+ * InteractionAppraiserRole — 互动评估与执行角色（LLM，事件驱动版）。
+ *
+ * 职责：评估并执行互动（点赞/收藏）。
+ * 消费事件：reading.done
+ * 产出事件：interaction.completed（执行了互动）或 interaction.skipped（不互动）
+ *
+ * 与旧版 InteractionAppraiser 的区别：
+ * - 输入从黑板模式改为事件驱动
+ * - 输出从 AgentDecision 改为 emit 角色事件
+ * - actions 字段为数组，支持同时 like+collect
+ */
+
+import { BaseRole } from './base-role.js';
+import type { RoleOptions } from './base-role.js';
+import type { SessionContext } from './session-context.js';
+import type { NoteData } from './content-curator-role.js';
+import type { RoleName, ReadingDonePayload } from '../event-bus/types.js';
+
+export interface InteractionAppraiserRoleOptions extends RoleOptions {
+  sessionContext: SessionContext;
+  getNoteData: (noteId: string) => NoteData | null;
+  getRemainingBudget: () => { likes: number; collects: number };
+}
+
+export class InteractionAppraiserRole extends BaseRole {
+  readonly roleName: RoleName = 'interaction_appraiser';
+  private readonly getNoteData: (noteId: string) => NoteData | null;
+  private readonly getRemainingBudget: () => { likes: number; collects: number };
+  private unsubscribers: (() => void)[] = [];
+
+  constructor(options: InteractionAppraiserRoleOptions) {
+    super(options);
+    if (!options.llm) throw new Error('InteractionAppraiserRole 需要 LlmClient');
+    this.getNoteData = options.getNoteData;
+    this.getRemainingBudget = options.getRemainingBudget;
+  }
+
+  subscribe(): void {
+    this.unsubscribers.push(
+      this.eventBus.on('reading.done', (p) => this.onReadingDone(p)),
+    );
+  }
+
+  unsubscribe(): void {
+    for (const unsub of this.unsubscribers) unsub();
+    this.unsubscribers = [];
+  }
+
+  // ─── 事件处理 ─────────────────────────────────────────────
+
+  private async onReadingDone(payload: ReadingDonePayload): Promise<void> {
+    const budget = this.getRemainingBudget();
+
+    // 无预算可用，直接 skip
+    if (budget.likes <= 0 && budget.collects <= 0) {
+      this.emit('interaction.skipped', {
+        noteId: payload.noteId,
+        sourcePageType: payload.sourcePageType,
+        reason: 'no_budget',
+        ts: Date.now(),
+      });
+      return;
+    }
+
+    const noteData = this.getNoteData(payload.noteId);
+    if (!noteData) {
+      this.emit('interaction.skipped', {
+        noteId: payload.noteId,
+        sourcePageType: payload.sourcePageType,
+        reason: 'note_data_unavailable',
+        ts: Date.now(),
+      });
+      return;
+    }
+
+    const prompt = this.buildPrompt(noteData, budget);
+    let raw: string;
+    try {
+      raw = await this.llm!.complete(prompt);
+    } catch {
+      this.emit('interaction.skipped', {
+        noteId: payload.noteId,
+        sourcePageType: payload.sourcePageType,
+        reason: 'llm_error',
+        ts: Date.now(),
+      });
+      return;
+    }
+
+    const result = this.parseOutput(raw, budget);
+    if (!result || result.actions.length === 0) {
+      this.emit('interaction.skipped', {
+        noteId: payload.noteId,
+        sourcePageType: payload.sourcePageType,
+        reason: result?.reason ?? 'parse_failed',
+        ts: Date.now(),
+      });
+      return;
+    }
+
+    this.emit('interaction.completed', {
+      noteId: payload.noteId,
+      sourcePageType: payload.sourcePageType,
+      actions: result.actions,
+      ts: Date.now(),
+    });
+  }
+
+  // ─── Prompt 构建 ───────────────────────────────────────────
+
+  private buildPrompt(note: NoteData, budget: { likes: number; collects: number }): string {
+    const { identity, interests, behavior_guidelines: bg } = this.soul;
+    const collectionPrinciple = bg?.collection_principle ?? '值得反复参考、可直接落地执行';
+    const likePrinciple = bg?.like_principle ?? '学到了新东西或观点受启发';
+    const interestsStr = [...interests.primary, ...interests.secondary].join('、');
+
+    return `你是「${identity.name}」，${identity.role}。${identity.background}
+语气：${identity.tone}
+
+你的兴趣：${interestsStr}
+收藏标准：${collectionPrinciple}
+点赞标准：${likePrinciple}
+
+当前笔记：
+标题：${note.title}
+内容：${note.content}
+点赞数：${note.likeCount}，收藏数：${note.collectCount}
+
+剩余预算：like=${budget.likes}，collect=${budget.collects}
+
+决策逻辑：
+- collect：内容值得反复查看、有实操步骤、代码/配置、架构图等可复用知识（更稀有更谨慎）
+- like：内容有启发但不需反复参考
+- both：既值得点赞也值得收藏（非常优质）
+- pass：不够格互动
+
+只输出JSON：{"action":"like","reason":"简短原因","confidence":0.8}
+或：{"action":"collect","reason":"简短原因","confidence":0.9}
+或：{"action":"both","reason":"简短原因","confidence":0.9}
+或：{"action":"pass","reason":"简短原因","confidence":0.5}`;
+  }
+
+  // ─── 输出解析 ───────────────────────────────────────────────
+
+  private parseOutput(raw: string, budget: { likes: number; collects: number }): AppraiserResult | null {
+    const start = raw.indexOf('{');
+    const end = raw.lastIndexOf('}');
+    if (start < 0 || end <= start) return null;
+
+    let obj: unknown;
+    try {
+      obj = JSON.parse(raw.slice(start, end + 1));
+    } catch {
+      return null;
+    }
+
+    if (!obj || typeof obj !== 'object') return null;
+    const o = obj as Record<string, unknown>;
+
+    const validActions = new Set(['like', 'collect', 'both', 'pass']);
+    if (typeof o.action !== 'string' || !validActions.has(o.action)) {
+      return null;
+    }
+
+    const reason = typeof o.reason === 'string' ? o.reason : 'interaction_decided';
+    const action = o.action as 'like' | 'collect' | 'both' | 'pass';
+
+    // 根据预算过滤可执行的 actions
+    const actions: ('like' | 'collect')[] = [];
+
+    if (action === 'like' && budget.likes > 0) {
+      actions.push('like');
+    } else if (action === 'collect' && budget.collects > 0) {
+      actions.push('collect');
+    } else if (action === 'both') {
+      if (budget.likes > 0) actions.push('like');
+      if (budget.collects > 0) actions.push('collect');
+    }
+    // action === 'pass' → actions 为空
+
+    return { actions, reason };
+  }
+}
+
+// ─── 内部类型 ─────────────────────────────────────────────────
+
+interface AppraiserResult {
+  actions: ('like' | 'collect')[];
+  reason: string;
+}

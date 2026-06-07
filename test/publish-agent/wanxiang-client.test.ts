@@ -6,7 +6,7 @@ const silentLogger = { log() {}, warn() {}, error() {} };
 
 function mockFetch(responses: Array<{ ok: boolean; status?: number; json?: () => Promise<any>; text?: () => Promise<string> }>) {
   let callIndex = 0;
-  return async (url: string | URL | Request, init?: RequestInit) => {
+  return async (_url: string | URL | Request, _init?: RequestInit) => {
     const resp = responses[callIndex++] ?? responses[responses.length - 1];
     return {
       ok: resp.ok,

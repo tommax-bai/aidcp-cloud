@@ -1,16 +1,19 @@
 # aidcp-cloud
 
-AIDCP 云端：**ManagerAgent 浏览会话编排 + 任务规划 + 文本 LLM + 锚点主缓存 + 边-云通信 + 飞书集成 + 内容发布**。
+AIDCP 云端：**事件驱动多 Agent 浏览会话编排 + 任务规划 + 文本 LLM + 锚点主缓存 + 边-云通信 + 飞书集成 + 内容发布**。
 
 边缘端（[`aidcp-edge`](../aidcp-edge)）负责把动作落到真实浏览器；云端负责"想"——
-以 Soul 人设驱动 ManagerAgent 动态角色链，编排浏览会话全生命周期（浏览 → 互动决策 → 概念抽取 → 搜索拓展），
+以 Soul 人设驱动 5 个独立 Agent（通过 EventBus + Blackboard + Arbiter 协作），编排浏览会话全生命周期（浏览 → 内容评估 → 互动决策 → 概念抽取 → 搜索拓展），
 同时维护风控预算、锚点缓存、飞书运营通知与内容发布审批。
 
 ## 模块
 
 | 目录 | 职责 |
 | --- | --- |
-| `src/orchestrator/` | 浏览会话编排：`SessionOrchestrator` 管理会话生命周期，`ManagerAgent` 动态角色链驱动决策，`EngagementDecider` 互动决策，`ConceptExtractor` 概念抽取。 |
+| `src/orchestrator/` | 浏览会话编排：`SessionOrchestrator` 管理会话生命周期（事件驱动 + 黑板 + 多 Agent 并行 + 仲裁器），`ConceptExtractor` 概念抽取。 |
+| `src/agents/` | 5 个独立 Agent：`SessionMonitor`（会话监控）、`FeedScanner`（信息流筛选）、`ContentCurator`（内容质量评估）、`InteractionAppraiser`（互动决策）、`CommentReviewer`（评论审查，预留）。 |
+| `src/blackboard/` | 黑板（Agent 间共享状态）+ 仲裁器（`Arbiter`，合并多 Agent 决策为最终命令）。 |
+| `src/event-bus/` | 内存事件总线（typed EventEmitter），模块间解耦异步通信，定义所有领域类型。 |
 | `src/soul/` | Soul 人设与行为规则加载（`soul.yaml` → 身份/兴趣/行为准则/会话上限），为所有智能决策提供人格化上下文。 |
 | `src/risk/` | 风控与会话预算管理：`RiskController` 状态机 + 滑窗计数 + 频率限制 + 冷启动规划，约束可用动作配额。 |
 | `src/feishu/` | 飞书集成：卡片消息构建、运营命令路由（状态/暂停/恢复）、Bot 群事件接收（官方 SDK 长连接）。 |
@@ -23,20 +26,21 @@ AIDCP 云端：**ManagerAgent 浏览会话编排 + 任务规划 + 文本 LLM + �
 
 ## 浏览会话编排
 
-系统核心采用 **ManagerAgent 模式**，由 `SessionOrchestrator` + `ManagerAgent` 驱动一次完整的浏览会话：
+系统核心采用**事件驱动 + 黑板 + 多 Agent 并行 + 仲裁器**模式：
 
-1. **SessionOrchestrator** — 管理浏览会话生命周期（启动 → 循环处理笔记 → 结束），协调各组件协作。
-2. **ManagerAgent 动态角色链** — 根据当前页面类型激活不同角色：
-   - `SessionMonitor`（始终活跃）：监控会话时长与预算；
+1. **SessionOrchestrator** — 管理浏览会话生命周期，订阅 EventBus `note.arrived` 事件，协调黑板、Agent、仲裁器协作。
+2. **5 个独立 Agent**（并行 decide，通过 Blackboard 共享上下文）：
+   - `SessionMonitor`（每轮必激活）：会话时长与预算监控，超限时 veto 否决；
    - `FeedScanner`（列表页）：从 Feed/搜索结果中筛选值得打开的卡片；
-   - `ContentCurator`（详情页）：评估笔记内容质量（原创性、深度、数据支撑）；
-   - `InteractionAppraiser`（详情页，ContentCurator 通过后）：决定 like / collect / 跳过。
-3. **EngagementDecider** — 对单条笔记做互动决策（硬门槛 + Qwen 模型评估）。
-4. **ConceptExtractor** — 从优质内容中抽取新概念，扩展兴趣探索边界。
-5. **Soul** — 以 `soul.yaml` 定义人设（身份/兴趣/行为准则/会话上限），驱动所有智能决策的人格化表达。
+   - `ContentCurator`（详情页）：评估笔记内容质量，质量差时 gate 阻断互动 Agent；
+   - `InteractionAppraiser`（详情页）：综合笔记内容与预算决定 like / collect / pass；
+   - `CommentReviewer`（预留）：评论区质量审查。
+3. **Arbiter（仲裁器）** — 纯逻辑合并所有 Agent 决策（veto > gate > confidence 排序 > fallback）。
+4. **ConceptExtractor** — 订阅 `interaction.occurred` 事件，从优质内容中异步抽取新概念。
+5. **Soul** — 以 `soul.yaml` 定义人设（身份/兴趣/行为准则/会话上限），驱动所有 Agent 的人格化表达。
 6. **风控预算** — `RiskController` 通过状态机 + 滑窗计数约束每日/每会话可用动作配额，防止异常行为。
 
-数据流：边缘上报 `note.content` → 互动决策 → 概念抽取 → ContextBuilder 汇总上下文 → ManagerAgent 产出下一步命令 → 翻译为协议消息下发给边缘。
+数据流：边缘上报 `note.content` → handler.ts emit `note.arrived` → SessionOrchestrator 写入黑板 → Agent 并行决策 → Arbiter 仲裁 → 翻译为协议消息下发给边缘。
 
 ## 运行
 

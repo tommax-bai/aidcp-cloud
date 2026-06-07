@@ -4,11 +4,67 @@
  * 为 ContentScout / ContentCreator / ImageDirector / ContentAssembler / ApprovalGatekeeper
  * 五个角色分别构建 prompt，每个 prompt 严格要求 JSON 输出格式。
  *
- * 复用 src/publish/prompts.ts 的人设规则、禁用词和鼓励风格。
+ * 人设规则、禁用词和鼓励风格均内联定义于本文件。
  */
 
 import type { TriggerInput, ScoutDecision, CreatedContent, AssembledContent } from './types.js';
-import { BANNED_PHRASES, ENCOURAGED_STYLE, FEW_SHOT_EXAMPLES, NEGATIVE_EXAMPLES } from '../publish/prompts.js';
+
+/**
+ * 禁用词/句式列表（negative list）。
+ * 后处理与 prompt 共用同一份，保证生成约束与检测口径一致。
+ */
+export const BANNED_PHRASES: string[] = [
+  '首先',
+  '其次',
+  '最后',
+  '总结来说',
+  '值得一提的是',
+  '不得不说',
+  '众所周知',
+  '让我们一起来看看',
+  '让我们一起',
+  '接下来我将',
+  '接下来我会',
+  '总的来说',
+  '综上所述',
+  '各有优劣',
+  '各有千秋',
+];
+
+/** 鼓励的写作风格（写进 prompt，正向引导）。 */
+export const ENCOURAGED_STYLE: string[] = [
+  '口语化、允许不完整句子',
+  '穿插个人经历（"昨天调 bug 发现..."、"试了三种方案..."）',
+  '工程师视角的吐槽/自嘲',
+  '直接抛观点，不要铺垫',
+  '有明确立场，不要"各有优劣"的和稀泥',
+  '偶尔用 "..." 省略号表达思考',
+];
+
+/** 模拟的真人高赞技术帖范文（few-shot，体现人味）。 */
+export const FEW_SHOT_EXAMPLES: string[] = [
+  `RAG 不是万能药，别再无脑上向量库了
+折腾了俩礼拜，公司知识库问答终于上线。一开始我也是跟风 embedding + 向量检索一把梭，结果召回一坨，用户问"报销流程"它给我返回个"差旅政策第三版废止通知"...
+后来发现问题根本不在模型，是文档切块切得太碎，一段话被劈成三块，语义全断了。改成按标题分块 + 重叠窗口，召回立马正常。
+所以说工具链谁都会搭，真正吃功夫的是数据预处理这种脏活。别迷信花活。`,
+  `vLLM 部署踩坑记录，省得你们再熬夜
+显存 24G 想跑 14B 模型，OOM 到怀疑人生。试了量化、试了 tensor parallel，最后发现是 max_model_len 默认拉满到 32k 把 KV cache 撑爆了。
+调到 8k 直接起来了，吞吐还涨了。
+文档里这条藏得贼深...建议官方写大点。反正我是踩完了，你们直接抄作业。`,
+  `聊聊我为什么不爱用 LangChain
+不是说它不好，封装是真全。但调试是真痛苦，报错栈套八层，定位个问题像考古。
+小项目我现在直接裸写 prompt + 自己管上下文，可控多了。框架这东西，团队大、要标准化的时候上才划算，个人玩具反而是负担。
+当然你要快速出 demo 那确实香，看场景吧。`,
+  `今天被一个 prompt 细节坑惨了
+同样的指令，加一句"请一步步思考"准确率从 60 飙到 85。我之前一直觉得这是玄学，今天 A/B 测完是真信了。
+模型这玩意有时候不是能力问题，是你没给它台阶下。`,
+];
+
+/** 典型 AI 输出反例（negative examples，明确标注"不要这样写"）。 */
+export const NEGATIVE_EXAMPLES: string[] = [
+  `众所周知，RAG（检索增强生成）是当前大模型领域的重要技术。首先，它能够有效缓解幻觉问题；其次，它可以引入外部知识；最后，它降低了微调成本。总的来说，RAG 是一项值得关注的技术！`,
+  `值得一提的是，vLLM 是一个高性能推理框架。让我们一起来看看它的优势：第一，它支持 PagedAttention；第二，它吞吐量高；第三，它易于部署。综上所述，vLLM 各有优劣，建议大家根据需求选择。`,
+];
 
 // ─── ContentScout ────────────────────────────────────────────────────────────
 

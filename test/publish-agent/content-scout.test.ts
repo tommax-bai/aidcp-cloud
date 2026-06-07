@@ -32,10 +32,8 @@ function makeTriggerInput(): TriggerInput {
 
 describe('ContentScoutRole', () => {
   test('mock LLM 返回有效 JSON → 正确解析 ScoutDecision', async () => {
-    let capturedMessages: QwenChatMessage[] = [];
     const fakeLlm = {
-      chat: async (messages: QwenChatMessage[]) => {
-        capturedMessages = messages;
+      chat: async (_messages: QwenChatMessage[]) => {
         return JSON.stringify({
           shouldPublish: true,
           publishDirection: 'RAG 检索优化',
@@ -44,7 +42,7 @@ describe('ContentScoutRole', () => {
           reason: '素材充足',
         });
       },
-      complete: async (prompt: string) => '',
+      complete: async (_prompt: string) => '',
     };
 
     const role = new ContentScoutRole({ llmClient: fakeLlm as any, clock, logger: silentLogger });

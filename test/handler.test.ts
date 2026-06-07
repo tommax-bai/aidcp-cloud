@@ -6,6 +6,7 @@ import type { EdgeSession } from '../src/comm/ws-server.js';
 import { makeEnvelope, type RemoteAnchor } from '../src/comm/index.js';
 import { SimplePlanner } from '../src/planner/index.js';
 import type { LlmClient } from '../src/llm/index.js';
+import { EventBus } from '../src/event-bus/index.js';
 
 /** 内存版 AnchorStore：复刻反污染晋升语义，供 handler 单测 */
 function memStore(): AnchorStore & { main: Map<string, RemoteAnchor>; staging: Map<string, number> } {
@@ -50,6 +51,7 @@ function makeHandler(llm: LlmClient, store: AnchorStore) {
     llm,
     cache: store,
     clock: fixedClock,
+    eventBus: new EventBus(),
   });
 }
 
@@ -141,29 +143,7 @@ test('未知类型 → error 信封', async () => {
   assert.equal(res?.type, 'error');
 });
 
-test('note.content → 路由到 session 编排器，不强制回包', async () => {
-  let received: { title: string } | null = null;
-  const h = new DefaultMessageHandler({
-    planner: new SimplePlanner(),
-    llm: dummyLlm,
-    cache: memStore(),
-    clock: fixedClock,
-    session: { onNote: async (n) => { received = n; return undefined; } },
-  });
-  const res = await h.handle(
-    makeEnvelope('note.content', 'nc1', 1, {
-      noteId: 'x', title: 'T', summary: 'S', likeCount: 100, collectCount: 50,
-    }),
-    session,
-  );
-  // session.onNote returned undefined (no envelope) → fallback browse.next
-  assert.equal(res!.type, 'browse.next');
-  assert.equal(res!.id, 'nc1');
-  assert.equal(received!.title, 'T');
-});
-
-test('note.content + eventBus → 返回 note.ack 并 emit note.arrived', async () => {
-  const { EventBus } = await import('../src/event-bus/index.js');
+test('note.content → 通过 EventBus 发射 note.arrived 并返回 note.ack', async () => {
   const eventBus = new EventBus();
   const emitted: unknown[] = [];
   eventBus.on('note.arrived', (data) => { emitted.push(data); });
@@ -176,37 +156,45 @@ test('note.content + eventBus → 返回 note.ack 并 emit note.arrived', async 
     eventBus,
   });
   const res = await h.handle(
-    makeEnvelope('note.content', 'nc2', 1, {
-      noteId: 'x2', title: 'EventBus测试', summary: '内容', likeCount: 10, collectCount: 3,
+    makeEnvelope('note.content', 'nc1', 1, {
+      noteId: 'x', title: 'T', summary: 'S', likeCount: 100, collectCount: 50,
     }),
     session,
   );
   assert.equal(res!.type, 'note.ack');
-  assert.equal(res!.id, 'nc2');
+  assert.equal(res!.id, 'nc1');
   assert.equal((res!.payload as { received: boolean }).received, true);
   assert.equal(emitted.length, 1);
-  assert.equal((emitted[0] as { note: { title: string } }).note.title, 'EventBus测试');
+  assert.equal((emitted[0] as { note: { title: string } }).note.title, 'T');
 });
 
-test('note.content 无 eventBus 时保持向后兼容（走 session.onNote）', async () => {
-  let received: { title: string } | null = null;
+test('note.content 字段映射：body→summary, likes→likeCount', async () => {
+  const eventBus = new EventBus();
+  const emitted: unknown[] = [];
+  eventBus.on('note.arrived', (data) => { emitted.push(data); });
+
   const h = new DefaultMessageHandler({
     planner: new SimplePlanner(),
     llm: dummyLlm,
     cache: memStore(),
     clock: fixedClock,
-    session: { onNote: async (n) => { received = n; return undefined; } },
+    eventBus,
   });
   const res = await h.handle(
-    makeEnvelope('note.content', 'nc3', 1, {
-      noteId: 'x3', title: '兼容测试', summary: 'S', likeCount: 0, collectCount: 0,
-    }),
+    { v: 1, type: 'note.content', id: 'nc2', ts: 1, payload: {
+      noteId: 'x2', title: 'EventBus测试', body: '内容正文', likes: 10, collects: 3,
+    }},
     session,
   );
-  // 无 eventBus → 走老路径 → fallback browse.next
-  assert.equal(res!.type, 'browse.next');
-  assert.equal(received!.title, '兼容测试');
+  assert.equal(res!.type, 'note.ack');
+  assert.equal(res!.id, 'nc2');
+  const note = (emitted[0] as { note: { summary: string; likeCount: number; collectCount: number } }).note;
+  assert.equal(note.summary, '内容正文');
+  assert.equal(note.likeCount, 10);
+  assert.equal(note.collectCount, 3);
 });
+
+
 
 test('publish.approval_request → 调 sendApprovalCard', async () => {
   const sent: Array<{ chatId: string; card: unknown }> = [];
@@ -215,6 +203,7 @@ test('publish.approval_request → 调 sendApprovalCard', async () => {
     llm: dummyLlm,
     cache: memStore(),
     clock: fixedClock,
+    eventBus: new EventBus(),
     messenger: {
       sendApprovalCard: async (chatId, card) => {
         sent.push({ chatId, card });

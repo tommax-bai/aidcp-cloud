@@ -55,7 +55,7 @@ describe('ImageDirectorRole', () => {
       complete: async () => '',
     };
     const fakeImageProvider = {
-      generate: async (prompt: string, style?: string) => ({ url: 'https://example.com/generated.png', taskId: 'task-1' }),
+      generate: async (_prompt: string, _style?: string) => ({ url: 'https://example.com/generated.png', taskId: 'task-1' }),
     };
 
     const role = new ImageDirectorRole({

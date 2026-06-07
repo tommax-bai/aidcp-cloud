@@ -6,7 +6,17 @@
  * - Agent 产出事件：由各角色 Agent 处理后写回（如 session.verdict、content.verdict、interaction.decision）
  */
 
-import type { SessionStats, RiskStatus, VisibleCard } from './manager-agent.js';
+import type { SessionStats, RiskStatus } from '../event-bus/types.js';
+
+export interface VisibleCard {
+  index?: number;
+  noteId?: string;
+  title?: string;
+  summary?: string;
+  author?: string;
+  likeCount?: number;
+  collectCount?: number;
+}
 
 /** 事件流中的一条事件 */
 export interface OrchestratorEvent<T = unknown> {

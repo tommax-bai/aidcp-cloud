@@ -20,7 +20,6 @@ import {
   type AnchorReportPayload,
   type HelloPayload,
   type RemoteElement,
-  type NoteContentPayload,
   type PublishApprovalRequestPayload,
   type RiskCanDoPayload,
   type RiskRecordPayload,
@@ -45,10 +44,6 @@ export interface AnchorStore {
   dropStaged(actionId: string): Promise<void>;
 }
 
-export interface SessionRouter {
-  onNote(note: NoteContentPayload): Promise<unknown>;
-}
-
 export interface HandlerDeps {
   planner: TaskPlanner;
   llm: LlmClient;
@@ -59,9 +54,8 @@ export interface HandlerDeps {
   logger?: Pick<Console, 'error' | 'warn' | 'log'>;
   clock?: () => number;
   serverVersion?: string;
-  session?: SessionRouter;
   riskController?: RiskController;
-  eventBus?: EventBus;
+  eventBus: EventBus;
 }
 
 /** 把元素清单渲染成给 LLM 的编号列表（与 edge selector 一致的格式） */
@@ -144,23 +138,10 @@ export class DefaultMessageHandler implements MessageHandler {
           author: (p.author as string) || undefined,
         };
 
-        // 如果有 EventBus，使用异步推送模式
-        if (this.deps.eventBus) {
-          // 异步发射事件（不 await，fire-and-forget）
-          this.deps.eventBus.emit('note.arrived', { note: incomingNote, ts: this.clock() });
-          // 立即返回 ack
-          return makeEnvelope('note.ack', env.id, this.clock(), { received: true });
-        }
-
-        // 向后兼容：无 EventBus 时走老路径（session.onNote 同步模式）
-        if (this.deps.session) {
-          const outcome = await this.deps.session.onNote(incomingNote).catch(() => null) as { envelope?: Envelope } | null;
-          if (outcome?.envelope) {
-            // 用请求的 id 回包，让 edge request/response 关联上
-            return { ...outcome.envelope, id: env.id };
-          }
-        }
-        return makeEnvelope('browse.next', env.id, this.clock(), { reason: 'no_session' });
+        // 异步发射事件（fire-and-forget）
+        this.deps.eventBus.emit('note.arrived', { note: incomingNote, ts: this.clock() });
+        // 立即返回 ack
+        return makeEnvelope('note.ack', env.id, this.clock(), { received: true });
       }
       case 'publish.approval_request':
         await this.onPublishApprovalRequest(env, session);

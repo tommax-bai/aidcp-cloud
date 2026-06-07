@@ -5,7 +5,7 @@ import type { PipelineContext } from '../pipeline-context.js';
 import { buildAssemblerPrompt } from '../prompts.js';
 import { executeWithFallback } from '../retry-strategy.js';
 import type { QwenClient } from '../../llm/qwen.js';
-import type { PostProcessResult } from '../../publish/types.js';
+import type { PostProcessResult } from '../types.js';
 
 export interface PostProcessorLike {
   process(content: string): Promise<PostProcessResult>;

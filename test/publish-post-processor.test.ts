@@ -4,8 +4,8 @@ import {
   PostProcessor,
   detectBannedPhrases,
   aiScoreFromHits,
-  BANNED_PHRASES,
-} from '../src/publish/index.js';
+} from '../src/publish-agent/post-processor.js';
+import { BANNED_PHRASES } from '../src/publish-agent/prompts.js';
 
 test('detectBannedPhrases 命中禁用词', () => {
   const hits = detectBannedPhrases('首先我们来看，其次还有，综上所述就这样');

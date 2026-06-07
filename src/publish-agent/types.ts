@@ -1,5 +1,60 @@
 import type { Soul } from '../soul/types.js';
 
+// ─── 从 publish/types.ts 迁移的类型 ────────────────────────────────────────────
+
+/** 一个已积累的技术概念（concepts 表的投影）。 */
+export interface Concept {
+  /** 概念关键词 */
+  keyword: string;
+  /** 来源笔记标题（可空） */
+  sourceNote?: string;
+  /** 发现时间（毫秒时间戳，可空） */
+  discoveredAt?: number;
+}
+
+/** 一条点赞过的笔记摘要（供生成内容时引用真实细节）。 */
+export interface LikedNote {
+  /** 点赞记录 id（用于回填 source_liked_ids） */
+  id: number;
+  /** 笔记标题 */
+  title: string;
+  /** 正文摘要 */
+  summary: string;
+  /** 作者（可空） */
+  author?: string;
+}
+
+/** 去 AI 味后处理结果。 */
+export interface PostProcessResult {
+  /** 处理后的正文（可能被重写） */
+  content: string;
+  /** 0-1，AI 味浓度评分（命中禁用词越多越高） */
+  aiScore: number;
+  /** 是否触发了重写 */
+  rewritten: boolean;
+  /** 命中的禁用词/句式 */
+  flaggedPhrases: string[];
+}
+
+/** 发布记录状态。 */
+export type PublishStatus = 'draft' | 'published' | 'failed' | 'needs_review';
+
+/** 一条发布记录（publish_log 表的投影）。 */
+export interface PublishRecord {
+  id?: number;
+  title: string | null;
+  content: string;
+  /** 引用的概念关键词 */
+  sourceConcepts: string[];
+  /** 引用的点赞内容 id */
+  sourceLikedIds: number[];
+  status: PublishStatus;
+  /** 发布成功后回填的平台帖子 id */
+  platformPostId?: string | null;
+}
+
+// ─── 管道角色类型 ──────────────────────────────────────────────────────────────
+
 /** 触发器输入度量 */
 export interface TriggerInput {
   metrics: {
