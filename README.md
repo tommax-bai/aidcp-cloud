@@ -1,55 +1,59 @@
 # aidcp-cloud
 
-AIDCP 云端：**事件驱动多 Agent 浏览会话编排 + 任务规划 + 文本 LLM + 锚点主缓存 + 边-云通信 + 飞书集成 + 内容发布**。
+AIDCP 云端：**事件驱动多 Agent 浏览会话编排 + 任务规划 + 文本 LLM + 锚点主缓存 + 风控状态机 + 边-云通信 + 飞书集成 + 内容发布**。
 
 边缘端（[`aidcp-edge`](../aidcp-edge)）负责把动作落到真实浏览器；云端负责"想"——
-以 Soul 人设驱动 5 个独立 Agent（通过 EventBus + Blackboard + Arbiter 协作），编排浏览会话全生命周期（浏览 → 内容评估 → 互动决策 → 概念抽取 → 搜索拓展），
-同时维护风控预算、锚点缓存、飞书运营通知与内容发布审批。
+以 Soul 人设驱动 `RoleDispatcher` 注册的 **15 个角色**（通过进程内 `EventBus` 解耦协作），
+逐动作编排浏览会话全生命周期（列表评估 → 开卡 → 质量关卡 → 互动决策 → 主页/关注 → 搜索拓展 → 返回续刷），
+同时维护风控预算与状态机、锚点缓存、飞书运营通知与内容发布审批。
+
+> **架构提示**：早期为"单体 `Planner → PlanStep[]` 单线规划 + Blackboard + Arbiter 仲裁"。
+> 现已重构为**事件驱动多 Agent**：角色各自 `subscribe` EventBus、产出语义事件，由
+> `command-bridge` 翻译为[协议 v2](../aidcp/docs/protocol.md) 指令下发边缘。
+> 旧的 `session-orchestrator`/`state-machine`/`engagement-decider`/`concept-extractor`/`blackboard`/`src/publish` 已不存在。
 
 ## 模块
 
 | 目录 | 职责 |
 | --- | --- |
-| `src/orchestrator/` | 浏览会话编排：`SessionOrchestrator` 管理会话生命周期（事件驱动 + 黑板 + 多 Agent 并行 + 仲裁器），`ConceptExtractor` 概念抽取。 |
-| `src/agents/` | 5 个独立 Agent：`SessionMonitor`（会话监控）、`FeedScanner`（信息流筛选）、`ContentCurator`（内容质量评估）、`InteractionAppraiser`（互动决策）、`CommentReviewer`（评论审查，预留）。 |
-| `src/blackboard/` | 黑板（Agent 间共享状态）+ 仲裁器（`Arbiter`，合并多 Agent 决策为最终命令）。 |
-| `src/event-bus/` | 内存事件总线（typed EventEmitter），模块间解耦异步通信，定义所有领域类型。 |
-| `src/soul/` | Soul 人设与行为规则加载（`soul.yaml` → 身份/兴趣/行为准则/会话上限），为所有智能决策提供人格化上下文。 |
-| `src/risk/` | 风控与会话预算管理：`RiskController` 状态机 + 滑窗计数 + 频率限制 + 冷启动规划，约束可用动作配额。 |
-| `src/feishu/` | 飞书集成：卡片消息构建、运营命令路由（状态/暂停/恢复）、Bot 群事件接收（官方 SDK 长连接）。 |
-| `src/publish/` | 内容发布与审批流程：生成发布内容 → 飞书卡片审批 → 通过后触发 Edge 执行发布。 |
+| `src/orchestrator/` | `RoleDispatcher`：事件驱动角色调度器，注册 15 角色、`feed.entered` 启动闭环、把 Edge 上报喂数据层、把角色事件翻译成 `EdgeCommand` 下发。 |
+| `src/agents/` | 15 个角色（继承 `BaseRole`，经 EventBus 协作）：`ContentEvaluator`/`FeedScroller`/`SearchScroller`/`NoteOpener`/`DeepReader`/`ContentCuratorRole`/`InteractionAppraiserRole`/`AuthorEvaluator`/`ProfileOpener`/`ProfileBrowser`/`FollowAgent`/`SearchEvaluator`/`SearchExecutor`/`BackToFeed`/`SessionMonitorRole` + `SessionContext` 会话态。 |
+| `src/event-bus/` | 进程内 typed 事件总线（`emit` fire-and-forget / `emitAsync` / `onAny`），模块间解耦异步通信，集中定义事件类型。 |
+| `src/risk/` | 风控与会话预算：`RiskController`（动作许可判定）+ `RiskStateMachine`（`normal→warned→restricted→frozen`）+ 滑窗计数 + 三档配额 + 冷启动 + 时间窗 + 会话预算 + 互动去重 + PG 持久化。 |
+| `src/soul/` | Soul 人设与行为规则加载（`soul.yaml` → 身份/兴趣/行为准则/会话上限），为所有角色决策提供人格化上下文。 |
+| `src/feishu/` | 飞书集成（官方 SDK 长连接）：卡片构建、命令路由（`/status //pause //resume //bind`）、Bot 进退群自动入库、发布审批卡片回调写信号文件。 |
+| `src/publish-agent/` | 内容发布角色管道：`ContentScout → ContentCreator → ImageDirector → ContentAssembler → ApprovalGatekeeper → PublishExecutor`，`pipeline-context` 串联，`wanxiang-client` 万象生图，`publish-log-store` 落库。 |
 | `src/llm/` | Qwen（通义千问）文本模型 HTTP 客户端（DashScope 兼容 OpenAI 接口），仅用全局 `fetch`，无 SDK 依赖。 |
-| `src/planner/` | 任务规划接口 `TaskPlanner` + 简单实现 `SimplePlanner`（规则优先，LLM 兜底）。 |
-| `src/cache/` | PostgreSQL 锚点主缓存 `PgAnchorCache` + 概念池持久化 `ConceptStore` + Bot 群绑定存储。 |
-| `src/comm/` | 边-云 WebSocket 服务端 + 协议定义（`protocol.ts`，消息类型）+ 默认消息处理器。 |
+| `src/planner/` | 任务规划接口 `TaskPlanner` + `SimplePlanner`（规则优先，LLM 兜底）；服务"一句话目标→原子步骤"的定向场景。 |
+| `src/cache/` | PostgreSQL 锚点主缓存 `PgAnchorCache`（+ 暂存晋升）+ 概念池 `ConceptStore` + Bot 群绑定 `BotChatStore`。 |
+| `src/comm/` | 边-云 WebSocket 服务端 `EdgeCloudServer` + 协议定义 `protocol.ts`（v2，40 消息类型）+ `DefaultMessageHandler` 路由 + `command-bridge`（EdgeCommand→Envelope）。 |
+| `src/account-state.ts` | 账号 active/paused 内存状态管理（暂停时跳过笔记处理）。 |
 | `src/server.ts` | 启动入口：装配全部模块，监听 WebSocket + 启动飞书长连接。 |
 
 ## 浏览会话编排
 
-系统核心采用**事件驱动 + 黑板 + 多 Agent 并行 + 仲裁器**模式：
+系统核心采用**事件驱动 + 多角色 + 闭环往复**模式：
 
-1. **SessionOrchestrator** — 管理浏览会话生命周期，订阅 EventBus `note.arrived` 事件，协调黑板、Agent、仲裁器协作。
-2. **5 个独立 Agent**（并行 decide，通过 Blackboard 共享上下文）：
-   - `SessionMonitor`（每轮必激活）：会话时长与预算监控，超限时 veto 否决；
-   - `FeedScanner`（列表页）：从 Feed/搜索结果中筛选值得打开的卡片；
-   - `ContentCurator`（详情页）：评估笔记内容质量，质量差时 gate 阻断互动 Agent；
-   - `InteractionAppraiser`（详情页）：综合笔记内容与预算决定 like / collect / pass；
-   - `CommentReviewer`（预留）：评论区质量审查。
-3. **Arbiter（仲裁器）** — 纯逻辑合并所有 Agent 决策（veto > gate > confidence 排序 > fallback）。
-4. **ConceptExtractor** — 订阅 `interaction.occurred` 事件，从优质内容中异步抽取新概念。
-5. **Soul** — 以 `soul.yaml` 定义人设（身份/兴趣/行为准则/会话上限），驱动所有 Agent 的人格化表达。
-6. **风控预算** — `RiskController` 通过状态机 + 滑窗计数约束每日/每会话可用动作配额，防止异常行为。
+1. **RoleDispatcher** — 注册 15 角色并 `setup()` 订阅；`feed.entered` 事件启动闭环；接收 Edge 结构化上报（`page.cards`/`note.detail`/`profile.detail`）更新到数据层供角色读取。
+2. **角色按事件链协作**（节选）：`ContentEvaluator`（卡片价值）→ `NoteOpener`（开卡）→ `ContentCuratorRole`（质量关卡，`quality.pass/reject`）→ `InteractionAppraiserRole`（点赞/收藏决策）→ `AuthorEvaluator`/`ProfileOpener`/`ProfileBrowser`/`FollowAgent`（主页与关注）→ `BackToFeed`（返回续刷）。
+3. **SessionMonitorRole** — 会话守护：超时长/超预算时 `veto`，产出 `session.should_end`。
+4. **command-bridge** — 把角色产出的 `EdgeCommand` 翻译为协议 Envelope，经 `ws-server.pushToEdges` 下发。
+5. **Soul** — 以 `soul.yaml` 定义人设，驱动各角色的人格化决策。
+6. **RiskController** — 通过状态机 + 滑窗计数约束可用动作配额，账号风控状态权威单写。
 
-数据流：边缘上报 `note.content` → handler.ts emit `note.arrived` → SessionOrchestrator 写入黑板 → Agent 并行决策 → Arbiter 仲裁 → 翻译为协议消息下发给边缘。
+数据流：边缘 `page.cards`/`note.detail` 上报 → `handler` emit 事件 → 角色并发决策 → 角色事件 → `command-bridge` 翻译 → 下发边缘 `interaction.like`/`page.scroll`/`navigation.back` 等。会话以 `feed.entered` 闭环往复，直到 `SessionMonitorRole` 判结束。
 
 ## 运行
 
 ```bash
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # node:test（24 个用例，不依赖真实 PG / 网络）
+npm test            # node:test（不依赖真实 PG / 网络）
 npm start           # 起 WebSocket 服务端（默认 :8787）
 ```
+
+> 部署口径：cloud 只部署在 ECS（systemd `aidcp-cloud.service`，`:8787`，同机 PG 直连），
+> 本地不要起 cloud。详见 `docs/deployment-ecs.md` 与总览仓 `aidcp/docs/handoff-2026-06-05.md`。
 
 ### 环境变量
 
@@ -59,14 +63,16 @@ npm start           # 起 WebSocket 服务端（默认 :8787）
 | `DASHSCOPE_API_KEY` | — | Qwen API Key |
 | `FEISHU_APP_ID` | — | 飞书自建应用 App ID |
 | `FEISHU_APP_SECRET` | — | 飞书自建应用 App Secret |
-| `FEISHU_CHAT_ID` | — | 默认推送群 chat_id（审批/通知） |
+| `FEISHU_CHAT_ID` | — | 默认推送群 chat_id（审批/通知，可由 `/bind` 注册的默认群兜底） |
 | PG 连接 | `127.0.0.1:5432` / `aidcp` / `aidcp` | `DATABASE_URL` 或 `PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD` |
 
 ## 边-云协议
 
-消息基于统一信封 `{v, type, id, ts, payload}`，请求/响应以 `id` 关联。完整定义见
-[`../aidcp`（umbrella）的 `docs/protocol.md`](../../.verdent/verdent-projects/aidcp/docs/protocol.md)
-与本仓 `src/comm/protocol.ts`。
+消息基于统一信封 `{v, type, id, ts, payload}`（`v=2`），请求/响应以 `id` 关联。
+完整定义见总览仓 [`aidcp/docs/protocol.md`](../aidcp/docs/protocol.md) 与本仓 `src/comm/protocol.ts`。
 
-核心消息：`hello/welcome`、`plan.request/response`、`select.request/response`、
-`anchor.get/anchor.get.result`、`anchor.report`、`action.result`、`ping/pong`、`error`。
+核心消息分组：握手（`hello/welcome`）、定向规划（`plan.*`/`select.*`/`anchor.*`/`action.result`）、
+浏览编排（`note.content`/`browse.*`/`note.open`/`search.execute`/`session.end`）、
+角色驱动指令（`page.scroll`/`interaction.like|collect|follow`/`navigation.back`/`note.browse_images|scroll_comments`）、
+结构化上报（`page.cards`/`note.detail`/`profile.detail`/`action.completed`）、
+风控预算（`session.budget.*`/`risk.canDo.*`/`risk.record.*`）、发布（`publish.request`/`publish.approval_request`/`publish.result`）。
