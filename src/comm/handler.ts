@@ -194,6 +194,8 @@ export class DefaultMessageHandler implements MessageHandler {
     const p = env.payload as HelloPayload;
     session.edgeId = p.edgeId;
     session.app = p.app;
+    // 通知编排层：新边缘上线 → 重置/重启会话（修复会话时长随云端运行时长累计、超时后不再驱动新连接的 bug）。
+    this.deps.eventBus.emit('edge.hello', { edgeId: p.edgeId, ts: this.clock() });
     return makeEnvelope('welcome', env.id, this.clock(), {
       sessionId: session.sessionId,
       serverVersion: this.serverVersion,

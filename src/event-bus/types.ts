@@ -112,6 +112,7 @@ export interface EventMap {
   'interaction.occurred': { action: 'like' | 'collect'; noteId: string };
   'concept.discovered': { concepts: string[]; source: string };
   // Edge 上报事件（handler → RoleDispatcher）
+  'edge.hello': { edgeId: string; ts: number };
   'page.cards.arrived': { cards: PageCardsData[]; ts: number };
   'note.detail.arrived': { detail: NoteDetailData; ts: number };
   'action.completed': { action: string; ok: boolean; reason?: string; ts: number };

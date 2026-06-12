@@ -376,4 +376,39 @@ describe('RoleDispatcher Integration', () => {
     // 会话应已终止
     assert.equal(dispatcher.active, false, '会话应已自动终止');
   });
+
+  // ─── 会话生命周期: 边缘新 hello 重置会话 ──────────────────────
+
+  it('边缘新 hello → restartSession：endSession 后重连可重新驱动浏览', async () => {
+    const commands: EdgeCommand[] = [];
+    const llm = createMockLlm(['{"verdict":"skip","reason":"不相关"}']);
+    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
+    dispatcher.setup();
+    dispatcher.startSession();
+
+    // 会话超时/超限结束 → 拆除全部订阅
+    dispatcher.endSession('会话时长超限');
+    assert.equal(dispatcher.active, false, 'endSession 后会话应不活跃');
+
+    // 结束后：边缘重连上报卡片，无人处理 → 不产生指令（复现 bug 现象）
+    commands.length = 0;
+    dispatcher.bus.emit('page.cards.arrived', { cards: [], ts: Date.now() });
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(commands.length, 0, 'endSession 后 page.cards 不应再产生指令');
+
+    // 边缘新 hello → 会话重启（修复点）
+    dispatcher.bus.emit('edge.hello', { edgeId: 'edge-demo', ts: Date.now() });
+    assert.equal(dispatcher.active, true, 'edge.hello 后会话应重新活跃');
+
+    // 重启后：上报空卡片应重新驱动 → scroll 指令
+    commands.length = 0;
+    for (let i = 0; i < 2; i++) {
+      dispatcher.bus.emit('page.cards.arrived', { cards: [], ts: Date.now() });
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const scrollCmds = commands.filter((c) => c.action === 'scroll');
+    assert.ok(scrollCmds.length >= 1, `重启后应重新产生 scroll 指令, 实际=${scrollCmds.length}`);
+
+    dispatcher.endSession();
+  });
 });

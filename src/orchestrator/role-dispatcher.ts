@@ -85,7 +85,7 @@ export class RoleDispatcher {
   private visibleCards: VisibleCard[] = [];
   private currentNote: NoteData | null = null;
   private profileData: { postsCount: number; followersCount: number } | null = null;
-  private budget = { likes: 10, collects: 5, follows: 3, searches: 5 };
+  private budget = RoleDispatcher.freshBudget();
   private searchedKeywords: string[] = [];
   private sessionActive = false;
 
@@ -161,6 +161,15 @@ export class RoleDispatcher {
 
     // 订阅 Edge 上报事件
     this.setupEdgeEventSubscriptions();
+
+    // 永久监听：边缘新 hello → 重启会话。刻意注册在 commandUnsubscribers 之外，
+    // 故即使会话因超时/动作数 endSession 拆除其余订阅，此监听仍在，新边缘连接可重新驱动。
+    this.eventBus.on('edge.hello', () => this.restartSession());
+  }
+
+  /** 单次浏览会话的初始互动预算（供初始化与重置复用，避免口径漂移）。 */
+  private static freshBudget(): { likes: number; collects: number; follows: number; searches: number } {
+    return { likes: 10, collects: 5, follows: 3, searches: 5 };
   }
 
   /** 启动会话 */
@@ -171,6 +180,39 @@ export class RoleDispatcher {
       trigger: 'session_start',
       ts: this.clock(),
     });
+  }
+
+  /**
+   * 边缘新 hello 时重置并重启会话。
+   *
+   * 修复 bug：会话原本只在云端启动时 setup()+startSession() 一次性开启，
+   * SessionMonitor 的 startedAt 即云端进程启动时刻，会话时长随墙钟一直累计；
+   * 达 max_duration_min 后 endSession 拆除全部订阅，此后任何重连的边缘都不再被驱动
+   * （page.cards 无人处理 → 静默）。现在每次边缘 hello 都重置会话，使会话时长从
+   * 连接时刻起算，超时结束后下次连接也能重新驱动。
+   */
+  restartSession(): void {
+    // 若仍活跃，先拆除旧订阅，避免重复注册
+    if (this.sessionActive) {
+      this.roles.forEach((r) => r.unsubscribe());
+      for (const unsub of this.commandUnsubscribers) unsub();
+      this.commandUnsubscribers = [];
+    }
+    // 重置会话态（visitedNoteIds 由 SessionContext.reset 跨轮保留）
+    this.budget = RoleDispatcher.freshBudget();
+    this.searchedKeywords = [];
+    this.sessionContext.reset();
+    // 重新订阅角色与接线（SessionMonitor.subscribe 重置 startedAt/actionCount）
+    this.roles.forEach((r) => r.subscribe());
+    this.setupCommandTranslation();
+    this.setupEdgeEventSubscriptions();
+    this.sessionActive = true;
+    this.eventBus.emit('feed.entered', {
+      pageType: 'feed',
+      trigger: 'session_start',
+      ts: this.clock(),
+    });
+    console.log('[RoleDispatcher] 边缘 hello → 会话已重置并重启');
   }
 
   /** 结束会话 */
