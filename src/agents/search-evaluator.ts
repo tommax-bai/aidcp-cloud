@@ -52,7 +52,7 @@ export class SearchEvaluator extends BaseRole {
     const prompt = this.buildPrompt(payload);
     let raw: string;
     try {
-      raw = await this.llm!.complete(prompt);
+      raw = await this.decide(prompt);
     } catch {
       // LLM 异常时跳过搜索
       this.emit('search.skipped', {

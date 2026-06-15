@@ -77,7 +77,7 @@ export class InteractionAppraiserRole extends BaseRole {
     const prompt = this.buildPrompt(noteData, budget);
     let raw: string;
     try {
-      raw = await this.llm!.complete(prompt);
+      raw = await this.decide(prompt);
     } catch {
       this.emit('interaction.skipped', {
         noteId: payload.noteId,

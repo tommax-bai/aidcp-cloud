@@ -67,7 +67,7 @@ export class AuthorEvaluator extends BaseRole {
     const prompt = this.buildPrompt(noteData, payload.actions);
     let raw: string;
     try {
-      raw = await this.llm!.complete(prompt);
+      raw = await this.decide(prompt);
     } catch {
       this.emit('profile.skipped', {
         noteId: payload.noteId,

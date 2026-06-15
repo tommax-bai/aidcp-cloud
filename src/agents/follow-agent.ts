@@ -57,7 +57,7 @@ export class FollowAgent extends BaseRole {
     const prompt = this.buildPrompt(payload, remaining);
     let raw: string;
     try {
-      raw = await this.llm!.complete(prompt);
+      raw = await this.decide(prompt);
     } catch {
       this.emit('profile.done', {
         authorId: payload.authorId,

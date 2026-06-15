@@ -59,7 +59,7 @@ export class ContentCuratorRole extends BaseRole {
     const prompt = this.buildPrompt(noteData);
     let raw: string;
     try {
-      raw = await this.llm!.complete(prompt);
+      raw = await this.decide(prompt);
     } catch {
       this.emit('quality.reject', {
         noteId: noteData.noteId,

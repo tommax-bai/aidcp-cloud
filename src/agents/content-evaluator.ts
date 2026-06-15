@@ -75,7 +75,7 @@ export class ContentEvaluator extends BaseRole {
     const prompt = this.buildPrompt(candidates, pageType);
     let raw: string;
     try {
-      raw = await this.llm!.complete(prompt);
+      raw = await this.decide(prompt);
     } catch {
       this.emit('content.no_valuable', {
         pageType,
