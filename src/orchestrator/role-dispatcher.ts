@@ -330,9 +330,14 @@ export class RoleDispatcher {
         this.updateNoteData(payload.detail);
       }),
 
-      // Edge 确认动作完成 → 通知 SessionMonitor
+      // Edge 确认动作完成。失败动作（如 open_note modal_timeout）边缘不会再产生
+      // note.detail/page.cards，事件循环会因无触发而死等；统一以一次 scroll 续刷兜底。
       this.eventBus.on('action.completed', (payload) => {
         console.log(`[RoleDispatcher] action.completed: ${payload.action} ok=${payload.ok}`);
+        if (payload.ok === false && this.sessionActive) {
+          console.log(`[RoleDispatcher] 动作失败兜底 → scroll（recover_after_${payload.action}_failed）`);
+          this.sendCommand({ action: 'scroll', reason: `recover_after_${payload.action}_failed` });
+        }
       }),
     );
   }

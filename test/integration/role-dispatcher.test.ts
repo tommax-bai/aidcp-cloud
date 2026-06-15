@@ -411,4 +411,24 @@ describe('RoleDispatcher Integration', () => {
 
     dispatcher.endSession();
   });
+
+  // ─── 动作失败兜底（防死锁） ──────────────────────────────────
+
+  it('action.completed ok=false → 兜底 scroll 续刷，不让事件循环死等', async () => {
+    const commands: EdgeCommand[] = [];
+    const llm = createMockLlm(['{"verdict":"skip","reason":"x"}']);
+    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
+    dispatcher.setup();
+    dispatcher.startSession();
+
+    // 模拟 open_note 执行失败（modal_timeout）：边缘不会再报 note.detail/page.cards
+    commands.length = 0;
+    dispatcher.bus.emit('action.completed', { action: 'open_note', ok: false, reason: 'modal_timeout', ts: Date.now() });
+    await new Promise((r) => setTimeout(r, 10));
+
+    const recover = commands.find(
+      (c) => c.action === 'scroll' && String(c.reason ?? '').includes('recover_after_open_note_failed'),
+    );
+    assert.ok(recover, `open_note 失败后应下发兜底 scroll，实际=${JSON.stringify(commands)}`);
+  });
 });

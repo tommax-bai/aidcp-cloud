@@ -34,6 +34,9 @@ export class ContentEvaluator extends BaseRole {
   /** 当前屏可见卡片（由外部注入或通过事件 payload 提供） */
   private _visibleCards: VisibleCard[] = [];
 
+  /** 评估在途标记：避免一批 page.cards 触发多个并发评估 → 多条 open_note */
+  private _evaluating = false;
+
   constructor(options: RoleOptions, ctx: SessionContext) {
     super(options);
     this.ctx = ctx;
@@ -57,6 +60,16 @@ export class ContentEvaluator extends BaseRole {
   // ─── 核心评估 ─────────────────────────────────────────────
 
   async evaluate(pageType: 'feed' | 'search'): Promise<void> {
+    if (this._evaluating) return; // 已有评估在途，丢弃本次触发，避免并发产生多条 open_note
+    this._evaluating = true;
+    try {
+      await this._evaluate(pageType);
+    } finally {
+      this._evaluating = false;
+    }
+  }
+
+  private async _evaluate(pageType: 'feed' | 'search'): Promise<void> {
     // 过滤已访问的卡片
     const candidates = this._visibleCards.filter(
       (c) => !c.noteId || !this.ctx.isVisited(c.noteId),
@@ -144,6 +157,7 @@ ${cardList}
 3. 标记为 [视频] 的卡片你可以自主决定是否打开（视频内容也可能有价值）
 4. 已访问的卡片已被过滤，列表中全是未看过的
 5. 综合判断，选出最值得深入了解的一篇
+6. 若没有任何一张明显匹配你的兴趣领域，直接 skip——不要为娱乐/八卦/新闻/明星等无关内容牵强地编造“与AI/技术相关”的理由
 
 只输出JSON（不要输出其他内容）：
 有价值：{"verdict":"valuable","index":N,"reason":"简短原因","confidence":0.8}

@@ -41,6 +41,29 @@ describe('ContentEvaluator', () => {
     role.unsubscribe();
   });
 
+  it('并发去重：evaluate 在途时再次调用直接返回，不重复调 LLM', async () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    let calls = 0;
+    const llm = {
+      complete: async () => {
+        calls++;
+        await new Promise((r) => setTimeout(r, 20));
+        return '{"verdict":"skip","reason":"x"}';
+      },
+    };
+    const role = new ContentEvaluator({ eventBus: bus, soul: mockSoul, llm }, ctx);
+    role.setVisibleCards(sampleCards);
+
+    // 不 await 第一次，立刻再触发两次：后两次应因“在途守卫”直接返回，不再调 LLM
+    const p1 = role.evaluate('feed');
+    await role.evaluate('feed');
+    await role.evaluate('feed');
+    await p1;
+
+    assert.equal(calls, 1, `在途守卫应只放行一次 LLM 调用，实际=${calls}`);
+  });
+
   it('有价值卡片：LLM 返回 valuable → emit content.valuable', async () => {
     const bus = new EventBus();
     const ctx = new SessionContext();
