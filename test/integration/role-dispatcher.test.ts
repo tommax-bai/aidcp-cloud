@@ -52,6 +52,32 @@ function waitForEvent<T = unknown>(
   });
 }
 
+/**
+ * 构造带"假边缘"闭环回应的 dispatcher：模拟真实边缘对云端指令的回报，让 mock-LLM 驱动的
+ * 链路能跑到底（否则会停在"等边缘回传"处超时）：
+ *  - 开普通笔记(open_note 非 profile) → 回 note.detail.arrived（带 note 数据），
+ *    触发 ContentCurator 等下游（它监听 note.detail.arrived，而非已废弃的 note.entered）；
+ *  - 关注(follow) → 回 action.completed{action:'follow', ok:true}，触发 BackToFeed 返回。
+ */
+function makeDispatcher(
+  llm: { complete(p: string): Promise<string> },
+  commands: EdgeCommand[],
+  note?: { noteId: string; title: string; content: string; author?: string; authorId?: string; likeCount: number; collectCount: number },
+): RoleDispatcher {
+  let dispatcher: RoleDispatcher;
+  const sendCommand = (cmd: EdgeCommand): void => {
+    commands.push(cmd);
+    const params = (cmd.params ?? {}) as Record<string, unknown>;
+    if (cmd.action === 'open_note' && params.type !== 'profile' && note) {
+      setTimeout(() => dispatcher.bus.emit('note.detail.arrived', { detail: note, ts: Date.now() }), 0);
+    } else if (cmd.action === 'follow') {
+      setTimeout(() => dispatcher.bus.emit('action.completed', { action: 'follow', ok: true, ts: Date.now() }), 0);
+    }
+  };
+  dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand });
+  return dispatcher;
+}
+
 describe('RoleDispatcher Integration', () => {
 
   // ─── 路径 A: 无价值→翻页 ─────────────────────────────────────
@@ -135,17 +161,13 @@ describe('RoleDispatcher Integration', () => {
       '{"verdict":"valuable","index":0,"reason":"AI技术相关","confidence":0.9}',
       '{"action":"close_note","reason":"内容空洞无深度","confidence":0.8}',
     ]);
-    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
+    const note = {
+      noteId: 'note_0', title: 'AI绘画教程', content: '标题党文章，无实质内容...',
+      author: '小红', likeCount: 100, collectCount: 50,
+    };
+    const dispatcher = makeDispatcher(llm, commands, note);
     dispatcher.setup();
-
-    dispatcher.updateNoteData({
-      noteId: 'note_0',
-      title: 'AI绘画教程',
-      content: '标题党文章，无实质内容...',
-      author: '小红',
-      likeCount: 100,
-      collectCount: 50,
-    });
+    dispatcher.updateNoteData(note);
 
     // 等待 back_to_feed 事件
     const backToFeedPromise = waitForEvent(
@@ -169,9 +191,9 @@ describe('RoleDispatcher Integration', () => {
     assert.ok(commands.some((c) => c.action === 'open_note'),
       '应产出 open_note 指令');
 
-    // 验证 back(quality_rejected) 指令
-    assert.ok(commands.some((c) => c.action === 'back' && c.reason === 'quality_rejected'),
-      '应产出 back(quality_rejected) 指令');
+    // 验证返回指令（统一经 feed.entered(back_to_feed) → back）
+    assert.ok(commands.some((c) => c.action === 'back' && c.reason === 'back_to_feed'),
+      '应产出 back 指令');
 
     dispatcher.endSession();
   });
@@ -188,17 +210,13 @@ describe('RoleDispatcher Integration', () => {
       '{"action":"pass","reason":"内容有料有深度","confidence":0.85}',
       '{"action":"pass","reason":"还不够惊艳","confidence":0.5}',
     ]);
-    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
+    const note = {
+      noteId: 'note_0', title: 'LLM最新进展', content: '详细的技术分析，包含架构设计与benchmark...',
+      author: '技术猫', likeCount: 200, collectCount: 80,
+    };
+    const dispatcher = makeDispatcher(llm, commands, note);
     dispatcher.setup();
-
-    dispatcher.updateNoteData({
-      noteId: 'note_0',
-      title: 'LLM最新进展',
-      content: '详细的技术分析，包含架构设计与benchmark...',
-      author: '技术猫',
-      likeCount: 200,
-      collectCount: 80,
-    });
+    dispatcher.updateNoteData(note);
 
     // 等待 back_to_feed
     const backToFeedPromise = waitForEvent(
@@ -243,18 +261,13 @@ describe('RoleDispatcher Integration', () => {
       '{"action":"like","reason":"有启发","confidence":0.8}',
       '{"verdict":"skip","reason":"作者方向与兴趣不完全匹配"}',
     ]);
-    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
+    const note = {
+      noteId: 'note_0', title: 'AI Agent实践', content: '深度讲解AI Agent架构...',
+      author: '博主A', authorId: 'author_1', likeCount: 300, collectCount: 100,
+    };
+    const dispatcher = makeDispatcher(llm, commands, note);
     dispatcher.setup();
-
-    dispatcher.updateNoteData({
-      noteId: 'note_0',
-      title: 'AI Agent实践',
-      content: '深度讲解AI Agent架构...',
-      author: '博主A',
-      authorId: 'author_1',
-      likeCount: 300,
-      collectCount: 100,
-    });
+    dispatcher.updateNoteData(note);
 
     // 等待 back_to_feed（由 profile.skipped 触发）
     const backToFeedPromise = waitForEvent(
@@ -301,18 +314,14 @@ describe('RoleDispatcher Integration', () => {
       '{"verdict":"visit","reason":"作者专业度极高","confidence":0.85}',
       '{"verdict":"follow","reason":"持续优质输出","confidence":0.8}',
     ]);
-    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
-    dispatcher.setup();
-
-    dispatcher.updateNoteData({
-      noteId: 'note_0',
-      title: '深度学习实战指南',
+    const note = {
+      noteId: 'note_0', title: '深度学习实战指南',
       content: '非常优质的深度学习实战文章，包含完整代码和架构图...',
-      author: '大佬博主',
-      authorId: 'author_pro',
-      likeCount: 500,
-      collectCount: 200,
-    });
+      author: '大佬博主', authorId: 'author_pro', likeCount: 500, collectCount: 200,
+    };
+    const dispatcher = makeDispatcher(llm, commands, note);
+    dispatcher.setup();
+    dispatcher.updateNoteData(note);
     dispatcher.updateProfileData({ postsCount: 50, followersCount: 10000 });
 
     // 等待 back_to_feed（由 profile.done 触发）
@@ -349,9 +358,9 @@ describe('RoleDispatcher Integration', () => {
     assert.ok(commands.some((c) => c.action === 'follow'),
       '应产出 follow 指令');
 
-    // 验证 back(profile_done) 指令
-    assert.ok(commands.some((c) => c.action === 'back' && c.reason === 'profile_done'),
-      '应产出 back(profile_done) 指令');
+    // 验证返回指令（关注成功后经 feed.entered(back_to_feed) → back）
+    assert.ok(commands.some((c) => c.action === 'back' && c.reason === 'back_to_feed'),
+      '应产出 back 指令');
 
     dispatcher.endSession();
   });

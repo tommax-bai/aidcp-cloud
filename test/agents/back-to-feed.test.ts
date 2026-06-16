@@ -124,8 +124,9 @@ describe('BackToFeed', () => {
     // follow 完成回执到达 → 才返回（来源页取自会话上下文）
     bus.emit('action.completed', { action: 'follow', ok: true, ts: Date.now() });
     assert.ok(captured, 'follow 完成后应返回');
-    assert.equal(captured!.pageType, 'search', '来源页取自会话上下文');
-    assert.equal(captured!.trigger, 'back_to_feed');
+    const done = captured as FeedEnteredPayload;
+    assert.equal(done.pageType, 'search', '来源页取自会话上下文');
+    assert.equal(done.trigger, 'back_to_feed');
     assert.equal(ctx.currentNoteId, null);
   });
 
