@@ -306,10 +306,10 @@ export class RoleDispatcher {
         this.sendCommand({ action: 'open_note', params: { index: payload.index, noteId: payload.noteId }, reason: payload.reason });
       }),
 
-      this.eventBus.on('content.no_valuable', () => {
-        this.sendCommand({ action: 'scroll', reason: 'no_valuable_content' });
-      }),
-
+      // content.no_valuable 不在此直接翻页：翻页由 FeedScroller / SearchScroller 角色独家处理
+      // （它们带 pageType 过滤 + 连续滚动计数，到阈值转搜索）。曾在此再直接发一条 scroll，导致一次
+      // “没价值”判定被双发两条 scroll：第二条落在尚未判定的新页上、把它（可能含 AI 卡）直接滚过，
+      // 且污染了“连续滚 N 次转搜索”的阈值。删除以恢复单一翻页决策者。
       this.eventBus.on('session.should_end', (payload) => {
         this.sendCommand({ action: 'session.end', reason: payload.reason });
         this.endSession(payload.reason);
