@@ -81,7 +81,7 @@ describe('BackToFeed', () => {
     assert.equal(ctx.currentNoteId, null);
   });
 
-  it('收到 profile.done → emit feed.entered', () => {
+  it('收到 profile.done(不关注) → 直接 emit feed.entered', () => {
     const bus = new EventBus();
     const ctx = new SessionContext();
     ctx.setCurrentNoteId('note_4');
@@ -94,14 +94,67 @@ describe('BackToFeed', () => {
     bus.emit('profile.done', {
       authorId: 'author_1',
       sourcePageType: 'search',
-      followed: true,
+      followed: false,
       ts: Date.now(),
     });
 
-    assert.ok(captured);
+    assert.ok(captured, '不关注应直接返回');
     assert.equal(captured!.pageType, 'search');
     assert.equal(captured!.trigger, 'back_to_feed');
     assert.equal(ctx.currentNoteId, null);
+  });
+
+  it('收到 profile.done(关注) → 不立即返回，等 follow 完成回执再返回', () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    ctx.setSourcePageType('search');
+    ctx.setCurrentNoteId('note_5');
+    const role = new BackToFeed({ eventBus: bus, soul: mockSoul }, ctx);
+    role.subscribe();
+
+    let captured = null as FeedEnteredPayload | null;
+    bus.on('feed.entered', (p) => { captured = p; });
+
+    // 关注：此刻不应返回（否则 back 抢在 follow 之前）
+    bus.emit('profile.done', {
+      authorId: 'author_1', sourcePageType: 'search', followed: true, ts: Date.now(),
+    });
+    assert.equal(captured, null, '关注时 profile.done 不应立即返回');
+
+    // follow 完成回执到达 → 才返回（来源页取自会话上下文）
+    bus.emit('action.completed', { action: 'follow', ok: true, ts: Date.now() });
+    assert.ok(captured, 'follow 完成后应返回');
+    assert.equal(captured!.pageType, 'search', '来源页取自会话上下文');
+    assert.equal(captured!.trigger, 'back_to_feed');
+    assert.equal(ctx.currentNoteId, null);
+  });
+
+  it('follow 失败的回执同样触发返回（不卡在主页）', () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    ctx.setSourcePageType('feed');
+    const role = new BackToFeed({ eventBus: bus, soul: mockSoul }, ctx);
+    role.subscribe();
+
+    let captured = null as FeedEnteredPayload | null;
+    bus.on('feed.entered', (p) => { captured = p; });
+
+    bus.emit('action.completed', { action: 'follow', ok: false, reason: 'no-btn', ts: Date.now() });
+    assert.ok(captured, 'follow 失败也应返回');
+    assert.equal(captured!.pageType, 'feed');
+  });
+
+  it('非 follow 的动作回执不触发返回', () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    const role = new BackToFeed({ eventBus: bus, soul: mockSoul }, ctx);
+    role.subscribe();
+
+    let captured = null as FeedEnteredPayload | null;
+    bus.on('feed.entered', (p) => { captured = p; });
+
+    bus.emit('action.completed', { action: 'like', ok: true, ts: Date.now() });
+    assert.equal(captured, null, 'like 等其他动作完成不应触发返回');
   });
 
   it('sourcePageType 正确传递：feed 来源返回 feed', () => {

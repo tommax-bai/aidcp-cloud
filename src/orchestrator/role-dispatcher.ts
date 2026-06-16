@@ -336,7 +336,9 @@ export class RoleDispatcher {
       // note.detail/page.cards，事件循环会因无触发而死等；统一以一次 scroll 续刷兜底。
       this.eventBus.on('action.completed', (payload) => {
         console.log(`[RoleDispatcher] action.completed: ${payload.action} ok=${payload.ok}`);
-        if (payload.ok === false && this.sessionActive) {
+        // follow 的回执由 BackToFeed 接管去"返回"，不在此兜底滑动——否则 follow 失败会
+        // 既滑一屏又返回，两条指令打架。
+        if (payload.ok === false && payload.action !== 'follow' && this.sessionActive) {
           console.log(`[RoleDispatcher] 动作失败兜底 → scroll（recover_after_${payload.action}_failed）`);
           this.sendCommand({ action: 'scroll', reason: `recover_after_${payload.action}_failed` });
         }

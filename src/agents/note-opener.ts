@@ -1,17 +1,21 @@
 /**
- * NoteOpener — 笔记打开角色。
+ * NoteOpener — 笔记"已访问"记录角色。
  *
- * 职责：消费 content.valuable 事件，执行 open_note 动作，更新会话上下文。
- * 确定性执行角色，不使用 LLM。
+ * 分两步，关键在于"标已访问"必须等"真的打开了"，而不是"决定要开"：
+ *  - 找到值得看的卡（content.valuable）：仅记录来源页类型（feed/search）；
+ *  - 帖子真正打开、详情回传（note.detail.arrived）：才用回传的真实 noteId 标"已访问"
+ *    并重置连续空滑计数。
  *
- * 消费事件：content.valuable
- * 产出事件：note.entered
+ * 为什么这样：若在"决定要开"时就标已访问，那些想开却被滑走 / 开失败的卡会被误标，
+ * 以后永远不再被选中（漏看）。确定性执行角色，不使用 LLM。
+ *
+ * 消费事件：content.valuable（记来源页）、note.detail.arrived（标已访问 + 重置计数）
  */
 
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import { SessionContext } from './session-context.js';
-import type { RoleName, ContentValuablePayload } from '../event-bus/types.js';
+import type { RoleName } from '../event-bus/types.js';
 
 export class NoteOpener extends BaseRole {
   readonly roleName: RoleName = 'note_opener';
@@ -25,32 +29,20 @@ export class NoteOpener extends BaseRole {
 
   subscribe(): void {
     this.unsubscribers.push(
-      this.eventBus.on('content.valuable', (p) => this.handleContentValuable(p)),
+      // 决定要看某张卡：仅记录来源页类型，供后续评估与返回判断（此处不标已访问）。
+      this.eventBus.on('content.valuable', (p) => this.ctx.setSourcePageType(p.sourcePageType)),
+      // 帖子真正打开、详情回传后：用回传的真实 noteId 标"已访问" + 重置连续空滑计数。
+      this.eventBus.on('note.detail.arrived', (p) => {
+        const noteId = p.detail.noteId;
+        if (!noteId) return;
+        this.ctx.markVisited(noteId);
+        this.ctx.resetScrolls();
+      }),
     );
   }
 
   unsubscribe(): void {
     for (const unsub of this.unsubscribers) unsub();
     this.unsubscribers = [];
-  }
-
-  // ─── 事件处理 ─────────────────────────────────────────────
-
-  private handleContentValuable(payload: ContentValuablePayload): void {
-    // 使用真实 noteId（来自 Edge 上报），fallback 到 index 生成
-    const noteId = payload.noteId || `note_${payload.index}`;
-
-    // 更新会话上下文
-    this.ctx.setCurrentNoteId(noteId);
-    this.ctx.markVisited(noteId);
-    this.ctx.setSourcePageType(payload.sourcePageType);
-    this.ctx.resetScrolls();
-
-    // 发出 note.entered 事件
-    this.emit('note.entered', {
-      noteId,
-      sourcePageType: payload.sourcePageType,
-      ts: Date.now(),
-    });
   }
 }
