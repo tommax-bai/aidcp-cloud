@@ -184,6 +184,8 @@ async function main(): Promise<void> {
     soul,
     llm,
     eventBus,
+    // 指令级节奏：把当前风控状态喂给决策点，驱动 dwellMs/thinkMs 的 tempo
+    getRiskStatus: () => riskController.getState().status,
     sendCommand: (command) => {
       const envelope = edgeCommandToEnvelope(command);
       const sent = server.pushToEdges(envelope);

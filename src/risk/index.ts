@@ -5,6 +5,7 @@ export * from './risk-state-machine.js';
 export * from './risk-controller.js';
 export * from './pg-risk-store.js';
 export * from './session-budget.js';
+export * from './pacing.js';
 export * from './time-scheduler.js';
 export * from './cold-start-planner.js';
 export * from './interaction-dedup.js';

@@ -30,6 +30,8 @@ import { SearchExecutor } from '../agents/search-executor.js';
 import { SessionMonitorRole } from '../agents/session-monitor-role.js';
 import type { BaseRole } from '../agents/base-role.js';
 import type { Soul } from '../soul/types.js';
+import { computeDwellMs, computeThinkMs } from '../risk/pacing.js';
+import type { RiskStatus } from '../risk/types.js';
 
 // ─── 公共接口 ────────────────────────────────────────────────────────────────
 
@@ -40,6 +42,11 @@ export interface RoleDispatcherOptions {
   clock?: () => number;
   /** 外部事件总线（共享 handler 发射的 Edge 上报事件），缺省创建独立实例 */
   eventBus?: EventBus;
+  /**
+   * 读取当前账号风控状态（指令级节奏的 tempo 来源）。缺省 `'normal'`。
+   * 由 server 接线为 `() => riskController.getState().status`。
+   */
+  getRiskStatus?: () => RiskStatus;
 }
 
 export interface EdgeCommand {
@@ -77,6 +84,10 @@ export class RoleDispatcher {
   private readonly llm: { complete(prompt: string): Promise<string> };
   private readonly sendCommand: (command: EdgeCommand) => void;
   private readonly clock: () => number;
+  private readonly getRiskStatus: () => RiskStatus;
+  /** 会话开始时刻与时长上限，用于估算会话进度（疲劳乘子）。 */
+  private sessionStartedAt: number;
+  private readonly maxDurationMs: number;
   private roles: BaseRole[] = [];
   private contentEvaluator!: ContentEvaluator;
   private commandUnsubscribers: (() => void)[] = [];
@@ -94,8 +105,36 @@ export class RoleDispatcher {
     this.llm = options.llm;
     this.sendCommand = options.sendCommand;
     this.clock = options.clock ?? Date.now;
+    this.getRiskStatus = options.getRiskStatus ?? (() => 'normal');
     this.eventBus = options.eventBus ?? new EventBus();
     this.sessionContext = new SessionContext();
+    this.maxDurationMs = (this.soul.session_limits?.max_duration_min ?? 10) * 60_000;
+    this.sessionStartedAt = this.clock();
+  }
+
+  /** 会话进度 0..1（已用时长 / 时长上限），供节奏疲劳乘子使用。 */
+  private progress(): number {
+    const elapsed = this.clock() - this.sessionStartedAt;
+    return Math.min(1, Math.max(0, elapsed / this.maxDurationMs));
+  }
+
+  /** 动作前犹豫时间中心值（随风控状态 + 会话进度缩放）。 */
+  private thinkNow(): number {
+    return computeThinkMs({ status: this.getRiskStatus(), progress: this.progress() });
+  }
+
+  /**
+   * 当前笔记的停留时长中心值（随正文长度 + 风控状态 + 进度缩放）。
+   * 无当前笔记（如非详情页返回）时返回 undefined，由边缘走默认兜底。
+   */
+  private dwellForCurrentNote(mode: 'read' | 'glance'): number | undefined {
+    if (!this.currentNote) return undefined;
+    return computeDwellMs({
+      textLen: this.currentNote.content.length,
+      mode,
+      status: this.getRiskStatus(),
+      progress: this.progress(),
+    });
   }
 
   /** 获取 EventBus（供测试用） */
@@ -175,6 +214,7 @@ export class RoleDispatcher {
   /** 启动会话 */
   startSession(): void {
     this.sessionActive = true;
+    this.sessionStartedAt = this.clock();
     this.eventBus.emit('feed.entered', {
       pageType: 'feed',
       trigger: 'session_start',
@@ -207,6 +247,7 @@ export class RoleDispatcher {
     this.setupCommandTranslation();
     this.setupEdgeEventSubscriptions();
     this.sessionActive = true;
+    this.sessionStartedAt = this.clock();
     this.eventBus.emit('feed.entered', {
       pageType: 'feed',
       trigger: 'session_start',
@@ -270,7 +311,8 @@ export class RoleDispatcher {
 
       this.eventBus.on('interaction.completed', (payload) => {
         for (const action of payload.actions) {
-          this.sendCommand({ action, params: { noteId: payload.noteId } });
+          // 互动前犹豫时间（time directive）：边缘据此在执行前等待并叠抖动
+          this.sendCommand({ action, params: { noteId: payload.noteId, thinkMs: this.thinkNow() } });
           this.consumeBudget(action);
         }
       }),
@@ -281,7 +323,7 @@ export class RoleDispatcher {
 
       this.eventBus.on('profile.done', (payload) => {
         if (payload.followed) {
-          this.sendCommand({ action: 'follow', params: { authorId: payload.authorId } });
+          this.sendCommand({ action: 'follow', params: { authorId: payload.authorId, thinkMs: this.thinkNow() } });
           this.consumeBudget('follow');
         }
         // back 指令由 BackToFeed 角色通过 feed.entered 统一发送，此处不再重复
@@ -289,7 +331,10 @@ export class RoleDispatcher {
 
       this.eventBus.on('feed.entered', (payload) => {
         if (payload.trigger === 'back_to_feed') {
-          this.sendCommand({ action: 'back', reason: 'back_to_feed' });
+          // 返回前停留下限（time directive）：从当前详情页扫一眼的感知时间，治「无价值秒退」。
+          // 无当前笔记时 dwellMs=undefined，边缘走内置默认兜底。
+          const dwellMs = this.dwellForCurrentNote('glance');
+          this.sendCommand({ action: 'back', reason: 'back_to_feed', params: dwellMs === undefined ? {} : { dwellMs } });
         }
       }),
 
@@ -303,7 +348,7 @@ export class RoleDispatcher {
       this.eventBus.on('content.valuable', (payload) => {
         // 带上 noteId：edge 据此在「当前快照」里按稳定主键定位目标卡。
         // 否则 feed 在云端决策与 edge 执行之间滚动后，纯 index 寻址会开成同序号上的邻座（stale index）。
-        this.sendCommand({ action: 'open_note', params: { index: payload.index, noteId: payload.noteId }, reason: payload.reason });
+        this.sendCommand({ action: 'open_note', params: { index: payload.index, noteId: payload.noteId, thinkMs: this.thinkNow() }, reason: payload.reason });
       }),
 
       // content.no_valuable 不在此直接翻页：翻页由 FeedScroller / SearchScroller 角色独家处理

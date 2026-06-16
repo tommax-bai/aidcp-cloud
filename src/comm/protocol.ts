@@ -216,10 +216,14 @@ export interface NoteOpenPayload {
   noteId?: string;
   index?: number;
   reason?: string;
+  /** 打开前犹豫 / 感知时间中心值（毫秒，可选；时间指令见 §角色驱动指令） */
+  thinkMs?: number;
 }
 
 export interface NoteClosePayload {
   reason?: string;
+  /** 关闭前当前页应达到的总停留时间中心值（毫秒，可选） */
+  dwellMs?: number;
 }
 
 /** 让边缘执行一次搜索（cloud → edge）。 */
@@ -268,6 +272,20 @@ export interface SessionBudgetPayload {
   quotaLevel: 'conservative' | 'normal' | 'aggressive';
   viewOnly: boolean;
   startedAt: number;
+  /**
+   * 极薄节奏默认块（指令级节奏 Command Pacing）。可选、仅供边缘**自主动作 / 断连兜底**用；
+   * 内容相关的 read/pause/fatigue 系数**不**在此下发——它们收口在云端，随决策指令以
+   * `dwellMs`/`thinkMs` 下发。旧端忽略本字段并走内置默认。
+   */
+  pacing?: PacingDefaultsPayload;
+}
+
+/** session.budget 的兜底节奏默认（不含内容系数）。 */
+export interface PacingDefaultsPayload {
+  /** 全局节奏乘子（风控状态驱动：normal=1.0 / warned=1.3 / restricted=1.6） */
+  tempo: number;
+  /** 详情页最小停留下限区间（毫秒） */
+  dwellFloorMs: { min: number; max: number };
 }
 
 export interface RiskCanDoPayload {
@@ -321,6 +339,12 @@ export interface NoteAckPayload {
 }
 
 // —— 角色驱动指令 Payload（cloud → edge）——
+//
+// 时间指令（timing directive，指令级节奏 Command Pacing）：以下决策指令携带可选时间字段，
+// 由云端基于已上报内容 + 风控状态 + 会话进度算出**中心值**：
+//   - `thinkMs`：执行该动作**前**的犹豫 / 感知时间（动作之前）；
+//   - `dwellMs`：离开当前页前应达到的**总停留时间**（用于 back / close）。
+// 全部可选、向后兼容（旧端忽略）。边缘收到后叠加 lognormal 抖动再执行，缺失则走内置默认兜底。
 
 export interface PageScrollPayload {
   reason?: string;  // feed_scroll | search_scroll
@@ -329,21 +353,29 @@ export interface PageScrollPayload {
 export interface InteractionLikePayload {
   noteId: string;
   reason?: string;
+  /** 点赞前犹豫时间中心值（毫秒，可选） */
+  thinkMs?: number;
 }
 
 export interface InteractionCollectPayload {
   noteId: string;
   reason?: string;
+  /** 收藏前犹豫时间中心值（毫秒，可选） */
+  thinkMs?: number;
 }
 
 export interface InteractionFollowPayload {
   authorId?: string;
   reason?: string;
+  /** 关注前犹豫时间中心值（毫秒，可选） */
+  thinkMs?: number;
 }
 
 export interface NavigationBackPayload {
   reason?: string;  // quality_rejected | back_to_feed | profile_done
   targetPage?: 'feed' | 'search';
+  /** 返回前当前页应达到的总停留时间中心值（毫秒，可选；治详情页秒退） */
+  dwellMs?: number;
 }
 
 export interface NoteBrowseImagesPayload {

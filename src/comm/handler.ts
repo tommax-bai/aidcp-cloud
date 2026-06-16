@@ -34,7 +34,7 @@ import type { EventBus } from '../event-bus/index.js';
 import { buildPublishApprovalCard } from '../feishu/cards.js';
 import type { FeishuMessenger } from '../feishu/messenger.js';
 import type { BotChatStore } from '../cache/bot-chat-store.js';
-import { RiskController, SessionBudget } from '../risk/index.js';
+import { RiskController, SessionBudget, buildPacingDefaults } from '../risk/index.js';
 import type { RiskAction } from '../risk/index.js';
 import type { AccountStateManager } from '../account-state.js';
 
@@ -208,6 +208,8 @@ export class DefaultMessageHandler implements MessageHandler {
     return makeEnvelope('session.budget', env.id, this.clock(), {
       ...budget.snapshot(),
       viewOnly: state.status === 'restricted' || state.status === 'frozen',
+      // 极薄节奏默认块（仅边缘自主动作 / 断连兜底用；内容相关时长随决策指令下发）
+      pacing: buildPacingDefaults(state.status),
     });
   }
 
