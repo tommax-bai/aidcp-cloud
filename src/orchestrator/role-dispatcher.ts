@@ -301,7 +301,9 @@ export class RoleDispatcher {
 
       // 角色产出事件 → Edge 指令翻译
       this.eventBus.on('content.valuable', (payload) => {
-        this.sendCommand({ action: 'open_note', params: { index: payload.index }, reason: payload.reason });
+        // 带上 noteId：edge 据此在「当前快照」里按稳定主键定位目标卡。
+        // 否则 feed 在云端决策与 edge 执行之间滚动后，纯 index 寻址会开成同序号上的邻座（stale index）。
+        this.sendCommand({ action: 'open_note', params: { index: payload.index, noteId: payload.noteId }, reason: payload.reason });
       }),
 
       this.eventBus.on('content.no_valuable', () => {
