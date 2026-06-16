@@ -106,7 +106,7 @@ export class ContentCuratorRole extends BaseRole {
 
     return `你是「${identity.name}」，${identity.role}。
 你的兴趣：${interestsStr}
-你正在评估一篇小红书笔记的内容质量。
+你在快速判断：这篇小红书笔记**要不要继续看**（不是评内容好坏，只是粗筛）。
 
 笔记信息：
 标题：${note.title}
@@ -114,14 +114,14 @@ export class ContentCuratorRole extends BaseRole {
 作者：${note.author ?? '未知'}
 点赞：${note.likeCount}，收藏：${note.collectCount}
 
-评估维度：
-- 内容是否有具体细节、真实案例、数据支撑
-- 作者是否原创（有真实经验、非广告）
-- 是否空洞、标题党、广告
+判断口径（宽松，默认继续看）：
+- **大多数正常笔记都 pass**——只要话题沾边你的兴趣、或是正常的经验/资讯/观点分享。
+- 只有**明显**是这几类才 close_note：纯广告/带货导流、通篇空话毫无信息、与兴趣完全无关的标题党。
+- **正文为空或很短不等于质量差**：可能是图文/视频笔记，正文本就少；不要因此 close。
+- **拿不准时一律 pass**，把互动与否交给后续角色判断。
 
-如果质量差，输出 close_note；质量好，输出 pass（让后续角色决定互动）。
-只输出JSON：{"action":"close_note","reason":"简短原因","confidence":0.8}
-或：{"action":"pass","reason":"简短原因","confidence":0.8}`;
+只输出JSON：{"action":"pass","reason":"简短原因","confidence":0.7}
+或（仅明显垃圾）：{"action":"close_note","reason":"简短原因","confidence":0.7}`;
   }
 
   // ─── 输出解析 ───────────────────────────────────────────────

@@ -28,8 +28,11 @@ const GLANCE_FACTOR = 0.35;
 /** 动作前犹豫/感知时间的基准中心值（§3.1 操作间隔量级）。 */
 const THINK_BASE_MS = 700;
 
-/** 详情页最小停留下限（兜底；边缘缺指令时也用同一量级）。 */
-export const DWELL_FLOOR_MS = { min: 1200, max: 2600 } as const;
+/**
+ * 详情页最小停留下限（兜底；边缘缺指令时也用同一量级）。
+ * 取值偏向"打开一篇笔记后即便不感兴趣，人也会看 2.5–5s 才退"——1.2s 量级偏机械（见 6/16 实测）。
+ */
+export const DWELL_FLOOR_MS = { min: 2500, max: 5000 } as const;
 
 /** 极薄会话默认块：仅供边缘自主动作与断连兜底，不含 read/pause/fatigue 系数。 */
 export interface PacingDefaults {

@@ -331,9 +331,9 @@ export class RoleDispatcher {
 
       this.eventBus.on('feed.entered', (payload) => {
         if (payload.trigger === 'back_to_feed') {
-          // 返回前停留下限（time directive）：从当前详情页扫一眼的感知时间，治「无价值秒退」。
-          // 无当前笔记时 dwellMs=undefined，边缘走内置默认兜底。
-          const dwellMs = this.dwellForCurrentNote('glance');
+          // 返回前停留下限（time directive）：笔记已被打开并阅读过（curator 关卡），按 read 量级
+          // 给停留，治「无价值秒退」。无当前笔记时 dwellMs=undefined，边缘走内置默认兜底。
+          const dwellMs = this.dwellForCurrentNote('read');
           this.sendCommand({ action: 'back', reason: 'back_to_feed', params: dwellMs === undefined ? {} : { dwellMs } });
         }
       }),
