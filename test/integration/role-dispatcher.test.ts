@@ -130,6 +130,28 @@ describe('RoleDispatcher Integration', () => {
     dispatcher.endSession();
   });
 
+  // ─── back_to_feed 透传 sourcePageType → targetPage ───────────
+
+  it('back_to_feed: feed.entered{pageType} 透传为 navigation.back{targetPage}（搜索会话回搜索结果）', async () => {
+    const commands: EdgeCommand[] = [];
+    const llm = createMockLlm([]);
+    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
+    dispatcher.setup();
+    dispatcher.startSession();
+
+    dispatcher.bus.emit('feed.entered', { pageType: 'search', trigger: 'back_to_feed', ts: Date.now() });
+    await new Promise((r) => setTimeout(r, 10));
+    const backSearch = commands.filter((c) => c.action === 'back' && (c.params as { targetPage?: string })?.targetPage === 'search');
+    assert.equal(backSearch.length, 1, `搜索来源 back 应带 targetPage:'search'，实际=${JSON.stringify(commands.filter(c => c.action === 'back'))}`);
+
+    dispatcher.bus.emit('feed.entered', { pageType: 'feed', trigger: 'back_to_feed', ts: Date.now() });
+    await new Promise((r) => setTimeout(r, 10));
+    const backFeed = commands.filter((c) => c.action === 'back' && (c.params as { targetPage?: string })?.targetPage === 'feed');
+    assert.equal(backFeed.length, 1, `feed 来源 back 应带 targetPage:'feed'`);
+
+    dispatcher.endSession();
+  });
+
   // ─── 路径 B: 搜索链路 ────────────────────────────────────────
 
   it('路径B: 连续无价值滚动 → search.needed → SearchEvaluator → search.approved → SearchExecutor → feed.entered(search)', async () => {

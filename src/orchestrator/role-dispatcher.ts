@@ -354,7 +354,10 @@ export class RoleDispatcher {
           // 返回前停留下限（time directive）：笔记已被打开并阅读过（curator 关卡），按 read 量级
           // 给停留，治「无价值秒退」。无当前笔记时 dwellMs=undefined，边缘走内置默认兜底。
           const dwellMs = this.dwellForCurrentNote('read');
-          this.sendCommand({ action: 'back', reason: 'back_to_feed', params: dwellMs === undefined ? {} : { dwellMs } });
+          // 透传来源页型 → targetPage：搜索来源会话回搜索结果、feed 来源回 explore（此前一律丢失被错误拽回 explore）。
+          const params: Record<string, unknown> = dwellMs === undefined ? {} : { dwellMs };
+          if (payload.pageType) params.targetPage = payload.pageType;
+          this.sendCommand({ action: 'back', reason: 'back_to_feed', params });
         }
       }),
 

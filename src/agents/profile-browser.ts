@@ -57,6 +57,7 @@ export class ProfileBrowser extends BaseRole {
       sourcePageType,
       postsCount: detail.postsCount,
       followersCount: detail.followersCount,
+      likesCollects: detail.likesCollects,
       extracted: detail.extracted,
       ts: Date.now(),
     });

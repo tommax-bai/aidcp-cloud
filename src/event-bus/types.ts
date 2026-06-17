@@ -30,8 +30,11 @@ export interface NoteDetailData {
 
 export interface ProfileDetailData {
   authorId: string;
+  /** 作品数：小红书主页不公开，恒 0=未知；关注决策不依赖（保留向后兼容） */
   postsCount: number;
   followersCount: number;
+  /** 获赞与收藏数（主页真实提供）：关注决策的质量信号 */
+  likesCollects?: number;
   /** 作者资料是否成功抽取（区分"数据缺失"与"真 0 粉丝"） */
   extracted?: boolean;
 }
@@ -254,6 +257,8 @@ export interface ProfileBrowsedPayload {
   sourcePageType: 'feed' | 'search';
   postsCount: number;
   followersCount: number;
+  /** 获赞与收藏数（主页真实提供）：FollowAgent 决策的质量信号 */
+  likesCollects?: number;
   /** 作者资料是否成功抽取（false → FollowAgent 保守 skip，不当作真 0 粉丝） */
   extracted?: boolean;
   ts: number;

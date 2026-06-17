@@ -63,6 +63,36 @@ describe('FollowAgent', () => {
     role.unsubscribe();
   });
 
+  it('prompt 不含"作品数"、含获赞与收藏；postsCount=0 但粉丝/获赞健康 → 能 follow（live skip bug 回归）', async () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    let captured = '';
+    const llm = {
+      complete: async (p: string) => {
+        captured = p;
+        return '{"verdict":"follow","reason":"主题相关且受众健康","confidence":0.8}';
+      },
+    };
+    const role = new FollowAgent({ eventBus: bus, soul: mockSoul, llm, sessionContext: ctx, getRemainingFollows: () => 3 });
+    role.subscribe();
+    let done = null as ProfileDonePayload | null;
+    bus.on('profile.done', (p) => { done = p; });
+
+    // 复刻 live：小红书主页不提供作品数（postsCount=0），但粉丝 130 / 获赞与收藏 6707 健康。
+    bus.emit('profile.browsed', {
+      authorId: 'author_x', sourcePageType: 'feed',
+      postsCount: 0, followersCount: 130, likesCollects: 6707, extracted: true, ts: Date.now(),
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.ok(!captured.includes('作品数'), `prompt 不应再出现"作品数"项，实际:\n${captured}`);
+    assert.match(captured, /获赞与收藏：6707/, 'prompt 应含获赞与收藏真实值');
+    assert.match(captured, /粉丝数：130/);
+    assert.ok(done && done.followed === true, 'postsCount=0 但粉丝/获赞健康 + 相关 → 应能 follow，而非以作品数未知 skip');
+
+    role.unsubscribe();
+  });
+
   it('LLM 返回 skip → emit profile.done(followed=false)', async () => {
     const bus = new EventBus();
     const ctx = new SessionContext();
