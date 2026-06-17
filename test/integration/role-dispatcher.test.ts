@@ -111,6 +111,25 @@ describe('RoleDispatcher Integration', () => {
     dispatcher.endSession();
   });
 
+  // ─── idle 看门狗 nudge 接线 ───────────────────────────────────
+
+  it('看门狗: session.idle_nudge → scroll 指令(idle_recover_nudge)', async () => {
+    const commands: EdgeCommand[] = [];
+    const llm = createMockLlm([]);
+    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
+    dispatcher.setup();
+    dispatcher.startSession();
+
+    // 模拟看门狗在停滞时发出的恢复 nudge（SessionMonitor.checkIdle 会 emit 该事件）
+    dispatcher.bus.emit('session.idle_nudge', { reason: 'idle_recover_nudge', ts: Date.now() });
+    await new Promise((r) => setTimeout(r, 10));
+
+    const nudgeScroll = commands.filter((c) => c.action === 'scroll' && c.reason === 'idle_recover_nudge');
+    assert.equal(nudgeScroll.length, 1, `idle_nudge 应翻译为一次 scroll(idle_recover_nudge)，实际=${nudgeScroll.length}`);
+
+    dispatcher.endSession();
+  });
+
   // ─── 路径 B: 搜索链路 ────────────────────────────────────────
 
   it('路径B: 连续无价值滚动 → search.needed → SearchEvaluator → search.approved → SearchExecutor → feed.entered(search)', async () => {

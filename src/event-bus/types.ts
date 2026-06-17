@@ -315,6 +315,8 @@ export interface RoleEventMap {
   'search.skipped': SearchSkippedPayload;
   'feed.entered': FeedEnteredPayload;
   'session.should_end': { reason: string; ts: number };
+  // idle 看门狗短 idle 时发的恢复 nudge（由 RoleDispatcher 翻译为一次 scroll 命令）
+  'session.idle_nudge': { reason: string; ts: number };
 }
 
 // 角色名类型

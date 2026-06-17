@@ -301,6 +301,11 @@ export class RoleDispatcher {
         this.sendCommand({ action: 'scroll', reason: 'search_scroll' });
       }),
 
+      // idle 看门狗的恢复 nudge → 一次 scroll，重新驱动停滞的浏览循环（reason 仅作日志区分）。
+      this.eventBus.on('session.idle_nudge', () => {
+        this.sendCommand({ action: 'scroll', reason: 'idle_recover_nudge' });
+      }),
+
       // note.entered 不再发送指令：content.valuable 已经发送了带 index 的 open_note
       // quality.reject 不再直接发 back：BackToFeed 角色会通过 feed.entered 统一发送
 
