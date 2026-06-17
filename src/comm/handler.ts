@@ -25,6 +25,7 @@ import {
   type RiskRecordPayload,
   type PageCardsPayload,
   type NoteDetailPayload,
+  type ProfileDetailPayload,
   type ActionCompletedPayload,
 } from './protocol.js';
 import type { MessageHandler, EdgeSession, EdgePusher } from './ws-server.js';
@@ -171,6 +172,11 @@ export class DefaultMessageHandler implements MessageHandler {
       case 'note.detail': {
         const detail = env.payload as NoteDetailPayload;
         this.deps.eventBus.emit('note.detail.arrived', { detail, ts: this.clock() });
+        return null;
+      }
+      case 'profile.detail': {
+        const detail = env.payload as ProfileDetailPayload;
+        this.deps.eventBus.emit('profile.detail.arrived', { detail, ts: this.clock() });
         return null;
       }
       case 'action.completed': {

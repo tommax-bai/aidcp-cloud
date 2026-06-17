@@ -28,6 +28,14 @@ export interface NoteDetailData {
   collectCount: number;
 }
 
+export interface ProfileDetailData {
+  authorId: string;
+  postsCount: number;
+  followersCount: number;
+  /** 作者资料是否成功抽取（区分"数据缺失"与"真 0 粉丝"） */
+  extracted?: boolean;
+}
+
 // 页面类型
 export type PageType = 'feed' | 'note' | 'search' | 'profile' | 'unknown';
 export type LoginState = 'logged_in' | 'logged_out' | 'unknown';
@@ -115,6 +123,7 @@ export interface EventMap {
   'edge.hello': { edgeId: string; ts: number };
   'page.cards.arrived': { cards: PageCardsData[]; ts: number };
   'note.detail.arrived': { detail: NoteDetailData; ts: number };
+  'profile.detail.arrived': { detail: ProfileDetailData; ts: number };
   'action.completed': { action: string; ok: boolean; reason?: string; ts: number };
   // 会话控制事件
   'session.should_end': { reason: string; ts: number };
@@ -181,6 +190,30 @@ export interface ReadingDonePayload {
   ts: number;
 }
 
+/** DeepReader 多图阶段产出的意图：请求边缘浏览多图（dispatcher 翻译为 browse_images 指令）。 */
+export interface ReadingBrowseImagesPayload {
+  noteId: string;
+  sourcePageType: 'feed' | 'search';
+  /** 期望浏览的图片张数（边缘按实际可见数截断） */
+  count: number;
+  ts: number;
+}
+
+/** 多图阶段完成（看完或决定不看），comment_reviewer 据此进入评论阶段。 */
+export interface ReadingImagesDonePayload {
+  noteId: string;
+  sourcePageType: 'feed' | 'search';
+  imagesBrowsed: number;
+  ts: number;
+}
+
+/** comment_reviewer 产出的意图：请求边缘滚动评论区（dispatcher 翻译为 scroll_comments 指令）。 */
+export interface ReadingScrollCommentsPayload {
+  noteId: string;
+  sourcePageType: 'feed' | 'search';
+  ts: number;
+}
+
 export interface InteractionCompletedPayload {
   noteId: string;
   sourcePageType: 'feed' | 'search';
@@ -221,6 +254,8 @@ export interface ProfileBrowsedPayload {
   sourcePageType: 'feed' | 'search';
   postsCount: number;
   followersCount: number;
+  /** 作者资料是否成功抽取（false → FollowAgent 保守 skip，不当作真 0 粉丝） */
+  extracted?: boolean;
   ts: number;
 }
 
@@ -264,6 +299,9 @@ export interface RoleEventMap {
   'note.entered': NoteEnteredPayload;
   'quality.pass': QualityPassPayload;
   'quality.reject': QualityRejectPayload;
+  'reading.browse_images': ReadingBrowseImagesPayload;
+  'reading.images_done': ReadingImagesDonePayload;
+  'reading.scroll_comments': ReadingScrollCommentsPayload;
   'reading.done': ReadingDonePayload;
   'interaction.completed': InteractionCompletedPayload;
   'interaction.skipped': InteractionSkippedPayload;
@@ -288,6 +326,7 @@ export type RoleName =
   | 'note_opener'
   | 'content_curator'
   | 'deep_reader'
+  | 'comment_reviewer'
   | 'interaction_appraiser'
   | 'author_evaluator'
   | 'profile_opener'

@@ -2,7 +2,6 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventBus } from '../../src/event-bus/index.js';
 import { ProfileBrowser } from '../../src/agents/profile-browser.js';
-import { SessionContext } from '../../src/agents/session-context.js';
 import type { Soul } from '../../src/soul/types.js';
 import type { ProfileBrowsedPayload } from '../../src/event-bus/types.js';
 
@@ -12,127 +11,67 @@ const mockSoul: Soul = {
   session_limits: { max_duration_min: 10, max_likes: 8, max_collects: 5, max_searches: 3, cooldown_between_actions_sec: [2, 5] as [number, number] },
 };
 
-const sampleProfile = { postsCount: 42, followersCount: 1500 };
+function newBrowser(bus: EventBus): ProfileBrowser {
+  const role = new ProfileBrowser({ eventBus: bus, soul: mockSoul });
+  role.subscribe();
+  return role;
+}
 
-describe('ProfileBrowser', () => {
-  it('收到 profile.entered → emit profile.browsed', () => {
+describe('ProfileBrowser（数据就绪后产出）', () => {
+  it('profile.entered 缓存上下文 + profile.detail.arrived → emit profile.browsed 携真实 counts', () => {
     const bus = new EventBus();
-    const ctx = new SessionContext();
-    const role = new ProfileBrowser({
-      eventBus: bus,
-      soul: mockSoul,
-      sessionContext: ctx,
-      getProfileData: () => sampleProfile,
-    });
-    role.subscribe();
+    newBrowser(bus);
 
     let captured = null as ProfileBrowsedPayload | null;
-    bus.on('profile.browsed', (p) => { captured = p; });
+    let count = 0;
+    bus.on('profile.browsed', (p) => { captured = p; count++; });
 
-    bus.emit('profile.entered', {
-      authorId: 'author_123',
-      sourcePageType: 'feed',
+    bus.emit('profile.entered', { authorId: 'author_123', sourcePageType: 'feed', ts: Date.now() });
+    // 仅 entered 时不应产出（数据尚未就绪）
+    assert.equal(count, 0, 'entered 阶段还没数据，不应 emit');
+
+    bus.emit('profile.detail.arrived', {
+      detail: { authorId: 'author_123', postsCount: 42, followersCount: 1500, extracted: true },
       ts: Date.now(),
     });
 
-    assert.ok(captured, 'should emit profile.browsed');
+    assert.ok(captured, 'detail 到达后应 emit profile.browsed');
     assert.equal(captured!.authorId, 'author_123');
-    assert.equal(captured!.sourcePageType, 'feed');
+    assert.equal(captured!.sourcePageType, 'feed', 'sourcePageType 应来自缓存的 entered');
     assert.equal(captured!.postsCount, 42);
     assert.equal(captured!.followersCount, 1500);
+    assert.equal(captured!.extracted, true);
   });
 
-  it('profileData 为 null → emit profile.browsed with 0 counts', () => {
+  it('抽取失败（extracted=false）透传，counts 不再被静默当作真 0', () => {
     const bus = new EventBus();
-    const ctx = new SessionContext();
-    const role = new ProfileBrowser({
-      eventBus: bus,
-      soul: mockSoul,
-      sessionContext: ctx,
-      getProfileData: () => null,
-    });
-    role.subscribe();
+    newBrowser(bus);
 
     let captured = null as ProfileBrowsedPayload | null;
     bus.on('profile.browsed', (p) => { captured = p; });
 
-    bus.emit('profile.entered', {
-      authorId: 'author_unknown',
-      sourcePageType: 'search',
-      ts: Date.now(),
-    });
-
-    assert.ok(captured);
-    assert.equal(captured!.postsCount, 0);
-    assert.equal(captured!.followersCount, 0);
-  });
-
-  it('sourcePageType 透传正确', () => {
-    const bus = new EventBus();
-    const ctx = new SessionContext();
-    const role = new ProfileBrowser({
-      eventBus: bus,
-      soul: mockSoul,
-      sessionContext: ctx,
-      getProfileData: () => sampleProfile,
-    });
-    role.subscribe();
-
-    let captured = null as ProfileBrowsedPayload | null;
-    bus.on('profile.browsed', (p) => { captured = p; });
-
-    bus.emit('profile.entered', {
-      authorId: 'author_456',
-      sourcePageType: 'search',
+    bus.emit('profile.entered', { authorId: 'author_x', sourcePageType: 'search', ts: Date.now() });
+    bus.emit('profile.detail.arrived', {
+      detail: { authorId: 'author_x', postsCount: 0, followersCount: 0, extracted: false },
       ts: Date.now(),
     });
 
     assert.ok(captured);
     assert.equal(captured!.sourcePageType, 'search');
-  });
-
-  it('authorId 透传正确', () => {
-    const bus = new EventBus();
-    const ctx = new SessionContext();
-    const role = new ProfileBrowser({
-      eventBus: bus,
-      soul: mockSoul,
-      sessionContext: ctx,
-      getProfileData: () => sampleProfile,
-    });
-    role.subscribe();
-
-    let captured = null as ProfileBrowsedPayload | null;
-    bus.on('profile.browsed', (p) => { captured = p; });
-
-    bus.emit('profile.entered', {
-      authorId: 'specific_author_id',
-      sourcePageType: 'feed',
-      ts: Date.now(),
-    });
-
-    assert.ok(captured);
-    assert.equal(captured!.authorId, 'specific_author_id');
+    assert.equal(captured!.extracted, false);
   });
 
   it('unsubscribe 后不再响应事件', () => {
     const bus = new EventBus();
-    const ctx = new SessionContext();
-    const role = new ProfileBrowser({
-      eventBus: bus,
-      soul: mockSoul,
-      sessionContext: ctx,
-      getProfileData: () => sampleProfile,
-    });
-    role.subscribe();
+    const role = newBrowser(bus);
     role.unsubscribe();
 
     let captured = null as ProfileBrowsedPayload | null;
     bus.on('profile.browsed', (p) => { captured = p; });
 
-    bus.emit('profile.entered', {
-      authorId: 'author_123',
-      sourcePageType: 'feed',
+    bus.emit('profile.entered', { authorId: 'author_123', sourcePageType: 'feed', ts: Date.now() });
+    bus.emit('profile.detail.arrived', {
+      detail: { authorId: 'author_123', postsCount: 1, followersCount: 1, extracted: true },
       ts: Date.now(),
     });
 

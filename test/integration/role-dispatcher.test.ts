@@ -55,21 +55,29 @@ function waitForEvent<T = unknown>(
 /**
  * 构造带"假边缘"闭环回应的 dispatcher：模拟真实边缘对云端指令的回报，让 mock-LLM 驱动的
  * 链路能跑到底（否则会停在"等边缘回传"处超时）：
- *  - 开普通笔记(open_note 非 profile) → 回 note.detail.arrived（带 note 数据），
+ *  - 开普通笔记(open_note) → 回 note.detail.arrived（带 note 数据），
  *    触发 ContentCurator 等下游（它监听 note.detail.arrived，而非已废弃的 note.entered）；
+ *  - 深读子动作(browse_images / scroll_comments) → 回 action.completed{ok:true}，
+ *    让 DeepReader / CommentReviewer 据回执推进到 reading.images_done / reading.done；
+ *  - 进主页(profile_open) → 回 profile.detail.arrived（带作者资料），触发 ProfileBrowser → FollowAgent；
  *  - 关注(follow) → 回 action.completed{action:'follow', ok:true}，触发 BackToFeed 返回。
  */
 function makeDispatcher(
   llm: { complete(p: string): Promise<string> },
   commands: EdgeCommand[],
   note?: { noteId: string; title: string; content: string; author?: string; authorId?: string; likeCount: number; collectCount: number },
+  profile?: { authorId: string; postsCount: number; followersCount: number; extracted?: boolean },
 ): RoleDispatcher {
   let dispatcher: RoleDispatcher;
   const sendCommand = (cmd: EdgeCommand): void => {
     commands.push(cmd);
-    const params = (cmd.params ?? {}) as Record<string, unknown>;
-    if (cmd.action === 'open_note' && params.type !== 'profile' && note) {
+    if (cmd.action === 'open_note' && note) {
       setTimeout(() => dispatcher.bus.emit('note.detail.arrived', { detail: note, ts: Date.now() }), 0);
+    } else if (cmd.action === 'browse_images' || cmd.action === 'scroll_comments') {
+      setTimeout(() => dispatcher.bus.emit('action.completed', { action: cmd.action, ok: true, ts: Date.now() }), 0);
+    } else if (cmd.action === 'profile_open') {
+      const detail = profile ?? { authorId: 'author_pro', postsCount: 50, followersCount: 10000, extracted: true };
+      setTimeout(() => dispatcher.bus.emit('profile.detail.arrived', { detail, ts: Date.now() }), 0);
     } else if (cmd.action === 'follow') {
       setTimeout(() => dispatcher.bus.emit('action.completed', { action: 'follow', ok: true, ts: Date.now() }), 0);
     }
@@ -208,6 +216,7 @@ describe('RoleDispatcher Integration', () => {
     const llm = createMockLlm([
       '{"verdict":"valuable","index":0,"reason":"与LLM相关","confidence":0.9}',
       '{"action":"pass","reason":"内容有料有深度","confidence":0.85}',
+      '{"action":"skip","reason":"评论无需浏览"}',
       '{"action":"pass","reason":"还不够惊艳","confidence":0.5}',
     ]);
     const note = {
@@ -258,6 +267,7 @@ describe('RoleDispatcher Integration', () => {
     const llm = createMockLlm([
       '{"verdict":"valuable","index":0,"reason":"与AI相关","confidence":0.9}',
       '{"action":"pass","reason":"内容优质","confidence":0.9}',
+      '{"action":"skip","reason":"评论无需浏览"}',
       '{"action":"like","reason":"有启发","confidence":0.8}',
       '{"verdict":"skip","reason":"作者方向与兴趣不完全匹配"}',
     ]);
@@ -292,7 +302,7 @@ describe('RoleDispatcher Integration', () => {
       '应产出 like 指令');
 
     // 验证无 profile 打开指令
-    const profileOpen = commands.find((c) => c.action === 'open_note' && (c.params as any)?.type === 'profile');
+    const profileOpen = commands.find((c) => c.action === 'profile_open');
     assert.ok(!profileOpen, '不应打开 profile');
 
     dispatcher.endSession();
@@ -310,6 +320,7 @@ describe('RoleDispatcher Integration', () => {
     const llm = createMockLlm([
       '{"verdict":"valuable","index":0,"reason":"深度技术文章","confidence":0.95}',
       '{"action":"pass","reason":"高质量原创内容","confidence":0.9}',
+      '{"action":"skip","reason":"评论无需浏览"}',
       '{"action":"collect","reason":"值得反复参考","confidence":0.9}',
       '{"verdict":"visit","reason":"作者专业度极高","confidence":0.85}',
       '{"verdict":"follow","reason":"持续优质输出","confidence":0.8}',
@@ -319,10 +330,9 @@ describe('RoleDispatcher Integration', () => {
       content: '非常优质的深度学习实战文章，包含完整代码和架构图...',
       author: '大佬博主', authorId: 'author_pro', likeCount: 500, collectCount: 200,
     };
-    const dispatcher = makeDispatcher(llm, commands, note);
+    const dispatcher = makeDispatcher(llm, commands, note, { authorId: 'author_pro', postsCount: 50, followersCount: 10000, extracted: true });
     dispatcher.setup();
     dispatcher.updateNoteData(note);
-    dispatcher.updateProfileData({ postsCount: 50, followersCount: 10000 });
 
     // 等待 back_to_feed（由 profile.done 触发）
     const backToFeedPromise = waitForEvent(
@@ -351,7 +361,7 @@ describe('RoleDispatcher Integration', () => {
       '应产出 collect 指令');
 
     // 验证进入 profile
-    assert.ok(commands.some((c) => c.action === 'open_note' && (c.params as any)?.type === 'profile'),
+    assert.ok(commands.some((c) => c.action === 'profile_open'),
       '应产出 profile 打开指令');
 
     // 验证 follow 指令

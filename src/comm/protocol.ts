@@ -58,6 +58,7 @@ export type MessageType =
   | 'navigation.back'      // 返回上一页
   | 'note.browse_images'   // 浏览笔记图片
   | 'note.scroll_comments' // 滚动评论区
+  | 'profile.open'         // 进入作者主页（专用指令，取代 open_note{type:'profile'}）
   // —— Edge 上报（edge → cloud，RoleDispatcher 消费）——
   | 'page.cards'           // Edge 上报当前可见卡片列表
   | 'note.detail'          // Edge 上报笔记详情
@@ -380,10 +381,31 @@ export interface NavigationBackPayload {
 
 export interface NoteBrowseImagesPayload {
   noteId: string;
+  /** 浏览图片数量（由 Cloud 控制） */
+  count?: number;
+  /** 开始浏览前犹豫时间中心值（毫秒，可选） */
+  thinkMs?: number;
+  /** 浏览图片的停留时长中心值（毫秒，可选） */
+  dwellMs?: number;
 }
 
 export interface NoteScrollCommentsPayload {
   noteId: string;
+  /** 滚动评论区次数（由 Cloud 控制） */
+  count?: number;
+  /** 开始滚动前犹豫时间中心值（毫秒，可选） */
+  thinkMs?: number;
+  /** 浏览评论区的停留时长中心值（毫秒，可选） */
+  dwellMs?: number;
+}
+
+/** 进入作者主页（cloud → edge）。取代被静默丢弃的 open_note{type:'profile'}。 */
+export interface ProfileOpenPayload {
+  /** 作者标识（观测/兜底用；边缘优先点详情页作者头像进入，不强依赖该值） */
+  authorId?: string;
+  reason?: string;
+  /** 进入主页前犹豫时间中心值（毫秒，可选） */
+  thinkMs?: number;
 }
 
 // —— Edge 上报 Payload（edge → cloud）——
@@ -414,6 +436,8 @@ export interface ProfileDetailPayload {
   authorId: string;
   postsCount: number;
   followersCount: number;
+  /** 作者资料是否成功抽取；false=进了主页但没抽到数字，供云端区分"数据缺失"与"真 0 粉丝" */
+  extracted?: boolean;
 }
 
 export interface ActionCompletedPayload {
@@ -464,6 +488,7 @@ export interface PayloadMap {
   'navigation.back': NavigationBackPayload;
   'note.browse_images': NoteBrowseImagesPayload;
   'note.scroll_comments': NoteScrollCommentsPayload;
+  'profile.open': ProfileOpenPayload;
   // Edge 上报
   'page.cards': PageCardsPayload;
   'note.detail': NoteDetailPayload;

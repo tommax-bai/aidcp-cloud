@@ -54,6 +54,19 @@ export class FollowAgent extends BaseRole {
       return;
     }
 
+    // 作者资料未成功抽取（进了主页但没拿到粉丝/作品数）→ 保守 skip。
+    // 关键：不要把"数据缺失"当成"真 0 粉丝低质量"——这正是历史上 follow 恒拒的假信号根因。
+    if (payload.extracted === false) {
+      this.log('作者资料不可用（extracted=false）→ 保守 skip，不在缺失数据上判定');
+      this.emit('profile.done', {
+        authorId: payload.authorId,
+        sourcePageType: payload.sourcePageType,
+        followed: false,
+        ts: Date.now(),
+      });
+      return;
+    }
+
     const prompt = this.buildPrompt(payload, remaining);
     let raw: string;
     try {

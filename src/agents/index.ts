@@ -16,6 +16,9 @@ export { BackToFeed } from './back-to-feed.js';
 
 // ─── Phase 3：详情页深度链路角色 ───
 export { DeepReader } from './deep-reader.js';
+export type { DeepReaderOptions } from './deep-reader.js';
+export { CommentReviewer } from './comment-reviewer.js';
+export type { CommentReviewerOptions } from './comment-reviewer.js';
 export { ContentCuratorRole } from './content-curator-role.js';
 export type { NoteData, ContentCuratorRoleOptions } from './content-curator-role.js';
 export { InteractionAppraiserRole } from './interaction-appraiser-role.js';
@@ -26,7 +29,6 @@ export { AuthorEvaluator } from './author-evaluator.js';
 export type { AuthorEvaluatorOptions } from './author-evaluator.js';
 export { ProfileOpener } from './profile-opener.js';
 export { ProfileBrowser } from './profile-browser.js';
-export type { ProfileBrowserOptions } from './profile-browser.js';
 export { FollowAgent } from './follow-agent.js';
 export type { FollowAgentOptions } from './follow-agent.js';
 

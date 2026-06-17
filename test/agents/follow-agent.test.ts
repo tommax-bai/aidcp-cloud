@@ -98,6 +98,43 @@ describe('FollowAgent', () => {
     role.unsubscribe();
   });
 
+  it('资料未抽取(extracted=false) → 保守 skip 且不调用 LLM（不当作真 0 粉丝）', async () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    let llmCalled = false;
+    const llm = {
+      complete: async () => { llmCalled = true; return '{"verdict":"follow","reason":"test"}'; },
+    };
+    const role = new FollowAgent({
+      eventBus: bus,
+      soul: mockSoul,
+      llm,
+      sessionContext: ctx,
+      getRemainingFollows: () => 3,
+    });
+    role.subscribe();
+
+    let captured = null as ProfileDonePayload | null;
+    bus.on('profile.done', (p) => { captured = p; });
+
+    bus.emit('profile.browsed', {
+      authorId: 'author_no_data',
+      sourcePageType: 'feed',
+      postsCount: 0,
+      followersCount: 0,
+      extracted: false,
+      ts: Date.now(),
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.ok(captured);
+    assert.equal(captured!.followed, false);
+    assert.equal(llmCalled, false, 'extracted=false 时不应调用 LLM');
+
+    role.unsubscribe();
+  });
+
   it('配额耗尽 → emit profile.done(followed=false) 不调用 LLM', async () => {
     const bus = new EventBus();
     const ctx = new SessionContext();

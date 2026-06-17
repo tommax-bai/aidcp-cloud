@@ -18,6 +18,7 @@ import { FeedScroller } from '../agents/feed-scroller.js';
 import { NoteOpener } from '../agents/note-opener.js';
 import { BackToFeed } from '../agents/back-to-feed.js';
 import { DeepReader } from '../agents/deep-reader.js';
+import { CommentReviewer } from '../agents/comment-reviewer.js';
 import { ContentCuratorRole } from '../agents/content-curator-role.js';
 import { InteractionAppraiserRole } from '../agents/interaction-appraiser-role.js';
 import { AuthorEvaluator } from '../agents/author-evaluator.js';
@@ -50,7 +51,7 @@ export interface RoleDispatcherOptions {
 }
 
 export interface EdgeCommand {
-  action: 'scroll' | 'open_note' | 'close_note' | 'like' | 'collect' | 'follow' | 'search' | 'back' | 'browse_images' | 'scroll_comments' | 'session.end';
+  action: 'scroll' | 'open_note' | 'close_note' | 'like' | 'collect' | 'follow' | 'search' | 'back' | 'browse_images' | 'scroll_comments' | 'profile_open' | 'session.end';
   params?: Record<string, unknown>;
   reason?: string;
 }
@@ -95,7 +96,6 @@ export class RoleDispatcher {
   // 数据存储（由 Edge 上报更新）
   private visibleCards: VisibleCard[] = [];
   private currentNote: NoteData | null = null;
-  private profileData: { postsCount: number; followersCount: number } | null = null;
   private budget = RoleDispatcher.freshBudget();
   private searchedKeywords: string[] = [];
   private sessionActive = false;
@@ -159,7 +159,6 @@ export class RoleDispatcher {
     // 数据访问闭包
     const getNoteData = (noteId: string) =>
       this.currentNote?.noteId === noteId ? this.currentNote : null;
-    const getProfileData = (_authorId: string) => this.profileData;
     const getRemainingBudget = () => this.budget;
     const getSearchedKeywords = () => this.searchedKeywords;
 
@@ -173,12 +172,13 @@ export class RoleDispatcher {
       new FeedScroller(commonOptions, this.sessionContext),
       new NoteOpener(commonOptions, this.sessionContext),
       new BackToFeed(commonOptions, this.sessionContext),
-      new DeepReader(commonOptions),
+      new DeepReader({ ...commonOptions, getNoteData }),
+      new CommentReviewer({ ...commonOptions, sessionContext: this.sessionContext, getNoteData }),
       new ContentCuratorRole({ ...commonOptions, sessionContext: this.sessionContext }),
       new InteractionAppraiserRole({ ...commonOptions, sessionContext: this.sessionContext, getNoteData, getRemainingBudget }),
       new AuthorEvaluator({ ...commonOptions, sessionContext: this.sessionContext, getNoteData }),
       new ProfileOpener(commonOptions),
-      new ProfileBrowser({ ...commonOptions, sessionContext: this.sessionContext, getProfileData }),
+      new ProfileBrowser(commonOptions),
       new FollowAgent({ ...commonOptions, sessionContext: this.sessionContext, getRemainingFollows: () => this.budget.follows }),
       new SearchScroller(commonOptions, this.sessionContext),
       new SearchEvaluator({ ...commonOptions, sessionContext: this.sessionContext, getSearchedKeywords }),
@@ -281,11 +281,6 @@ export class RoleDispatcher {
     this.currentNote = note;
   }
 
-  /** Edge 上报个人主页数据 */
-  updateProfileData(data: { postsCount: number; followersCount: number }): void {
-    this.profileData = data;
-  }
-
   /** Edge 上报互动预算消耗 */
   consumeBudget(action: 'like' | 'collect' | 'follow' | 'search'): void {
     if (action === 'like' && this.budget.likes > 0) this.budget.likes--;
@@ -317,8 +312,28 @@ export class RoleDispatcher {
         }
       }),
 
-      this.eventBus.on('profile.entered', () => {
-        this.sendCommand({ action: 'open_note', params: { type: 'profile' } });
+      // 进作者主页：专用 profile_open 指令（取代 open_note{type:'profile'}——
+      // type 字段在 NoteOpenPayload 不存在会被静默丢弃，导致边缘开错笔记、从不进主页）。
+      this.eventBus.on('profile.entered', (payload) => {
+        this.sendCommand({ action: 'profile_open', params: { authorId: payload.authorId, thinkMs: this.thinkNow() } });
+      }),
+
+      // 深读：多图浏览意图 → browse_images 指令（dwellMs 按正文量级，thinkMs 为开始前犹豫）。
+      this.eventBus.on('reading.browse_images', (payload) => {
+        const dwellMs = this.dwellForCurrentNote('glance');
+        this.sendCommand({
+          action: 'browse_images',
+          params: { noteId: payload.noteId, count: payload.count, thinkMs: this.thinkNow(), ...(dwellMs === undefined ? {} : { dwellMs }) },
+        });
+      }),
+
+      // 深读：评论浏览意图 → scroll_comments 指令。
+      this.eventBus.on('reading.scroll_comments', (payload) => {
+        const dwellMs = this.dwellForCurrentNote('glance');
+        this.sendCommand({
+          action: 'scroll_comments',
+          params: { noteId: payload.noteId, thinkMs: this.thinkNow(), ...(dwellMs === undefined ? {} : { dwellMs }) },
+        });
       }),
 
       this.eventBus.on('profile.done', (payload) => {
@@ -377,13 +392,19 @@ export class RoleDispatcher {
         this.updateNoteData(payload.detail);
       }),
 
+      // Edge 上报作者主页资料 → ProfileBrowser 直接消费 profile.detail.arrived 产出 profile.browsed
+      // （携带真实 counts + extracted 标记），此处无需 dispatcher 中转存储。
+
       // Edge 确认动作完成。失败动作（如 open_note modal_timeout）边缘不会再产生
       // note.detail/page.cards，事件循环会因无触发而死等；统一以一次 scroll 续刷兜底。
       this.eventBus.on('action.completed', (payload) => {
         console.log(`[RoleDispatcher] action.completed: ${payload.action} ok=${payload.ok}`);
         // follow 的回执由 BackToFeed 接管去"返回"，不在此兜底滑动——否则 follow 失败会
         // 既滑一屏又返回，两条指令打架。
-        if (payload.ok === false && payload.action !== 'follow' && this.sessionActive) {
+        // browse_images / scroll_comments 在详情页内执行，失败由 DeepReader / CommentReviewer
+        // 自行推进（emit reading.images_done / reading.done），此处不发 feed 滚动（否则会把详情页滚走）。
+        const noRecoverScroll = payload.action === 'follow' || payload.action === 'browse_images' || payload.action === 'scroll_comments';
+        if (payload.ok === false && !noRecoverScroll && this.sessionActive) {
           console.log(`[RoleDispatcher] 动作失败兜底 → scroll（recover_after_${payload.action}_failed）`);
           this.sendCommand({ action: 'scroll', reason: `recover_after_${payload.action}_failed` });
         }
