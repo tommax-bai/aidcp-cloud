@@ -106,21 +106,27 @@ export class FollowAgent extends BaseRole {
     const { identity, interests } = this.soul;
     const interestsStr = [...interests.primary, ...interests.secondary].join('、');
 
+    // 注意：小红书个人主页通常**不公开作品数**（postsCount 多为 0=未知），故不把"作品数"
+    // 当作核心评估维度，否则会因"作品0"一律拒绝、白瞎真实粉丝数。以主题相关度 + 粉丝数为主。
+    const postsLine = profile.postsCount > 0
+      ? `作品数：${profile.postsCount}`
+      : `作品数：未知（小红书主页通常不公开，请勿据此判定质量差）`;
+
     return `你是「${identity.name}」，${identity.role}。兴趣：${interestsStr}。
 你正在浏览一位博主的个人主页，需要决定是否关注该博主。
 
 博主信息：
 作者ID：${profile.authorId}
-作品数：${profile.postsCount}
 粉丝数：${profile.followersCount}
+${postsLine}
 
 剩余关注配额：${remaining}
 
-评估维度：
-- 内容质量稳定性：作品数是否足够多（说明持续输出能力）
-- 更新频率：作品数量可间接推断更新频率
-- 主题相关度：该博主领域是否与你的兴趣相关
-- 粉丝数合理性：粉丝数适中说明内容有受众
+评估维度（按重要性）：
+- 主题相关度：该博主内容方向是否与你的兴趣高度吻合（最重要）
+- 受众与价值：粉丝数是否说明有一定受众；粉丝少也可能是优质新人，结合主题综合判断
+- 长期关注价值：是否值得长期跟进该博主
+（作品数为"未知"时不要作为扣分项——以主题相关度和粉丝数为主。）
 
 只输出JSON（不要输出其他内容）：
 关注：{"verdict":"follow","reason":"简短原因","confidence":0.8}
