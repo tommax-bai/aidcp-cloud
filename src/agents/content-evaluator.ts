@@ -127,6 +127,13 @@ export class ContentEvaluator extends BaseRole {
         ts: Date.now(),
       });
     }
+
+    // 评估完成后标记本批候选"近期已评估"（仅用于后续重访的熟悉度折扣，候选过滤不变→二次评估照常）。
+    // 置于 emit 之后：EventBus.emit 同步触发，open_note 的 familiar 判定读到的是本轮标记【之前】的状态，
+    // 故"首次评估并打开"仍按全量 thinkMs，只有"返回后再次遇到"才享 1/3 折扣。
+    for (const c of candidates) {
+      if (c.noteId) this.ctx.markEvaluated(c.noteId);
+    }
   }
 
   // ─── Prompt 构建 ───────────────────────────────────────────

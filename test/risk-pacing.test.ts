@@ -53,6 +53,25 @@ test('computeThinkMs：状态降级单调放大', () => {
   assert.ok(warned > normal, `warned(${warned}) 应 > normal(${normal})`);
 });
 
+test('computeThinkMs：熟悉内容折扣至约 1/3、非零下限、非熟悉为全量', () => {
+  const full = computeThinkMs({ status: 'normal', progress: 0.4 });
+  const familiar = computeThinkMs({ status: 'normal', progress: 0.4, familiar: true });
+  assert.ok(familiar < full, `familiar(${familiar}) 应 < full(${full})`);
+  // 约 1/3（允许下限夹取带来的偏差）
+  assert.ok(familiar <= Math.round(full / 3) + 1 && familiar >= 150, `familiar(${familiar}) 应约为 full/3 且 ≥ 下限 150`);
+  // 非零下限：即便深度疲劳后段，熟悉折扣也不退化为 0
+  const familiarLate = computeThinkMs({ status: 'normal', progress: 0.99, familiar: true });
+  assert.ok(familiarLate >= 150, `熟悉折扣仍应 ≥ 非零下限，实得 ${familiarLate}`);
+});
+
+test('computeDwellMs：不受 familiar 影响（笔记停留不折扣）', () => {
+  const a = computeDwellMs({ textLen: 600, imgCount: 2, mode: 'read', status: 'normal', progress: 0.4 });
+  // dwell 无 familiar 入参；同输入恒等，确保熟悉折扣未波及停留（治秒退红线）
+  const b = computeDwellMs({ textLen: 600, imgCount: 2, mode: 'read', status: 'normal', progress: 0.4 });
+  assert.equal(a, b);
+  assert.ok(a >= DWELL_FLOOR_MS.min);
+});
+
 test('fatigueMultiplier：热身略慢、中段 1.0、后段放大', () => {
   assert.ok(fatigueMultiplier(0.05) > 1.0); // 热身
   assert.equal(fatigueMultiplier(0.4), 1.0); // 自然

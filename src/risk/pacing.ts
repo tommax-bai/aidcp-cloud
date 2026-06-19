@@ -28,6 +28,12 @@ const GLANCE_FACTOR = 0.35;
 /** 动作前犹豫/感知时间的基准中心值（§3.1 操作间隔量级）。 */
 const THINK_BASE_MS = 700;
 
+/** 熟悉内容（近期已评估）的思考时间折扣：人对刚看过的内容反应更快，思考时间降至约 1/3。 */
+const FAMILIAR_DISCOUNT = 1 / 3;
+
+/** 思考时间下限：折扣后也不退化为零延迟（杜绝秒退指纹）。 */
+const THINK_FLOOR_MS = 150;
+
 /**
  * 详情页最小停留下限（兜底；边缘缺指令时也用同一量级）。
  * 取值偏向"打开一篇笔记后即便不感兴趣，人也会看 2.5–5s 才退"——1.2s 量级偏机械（见 6/16 实测）。
@@ -96,11 +102,17 @@ export interface ThinkInput {
   status: RiskStatus;
   /** 会话进度 0..1 */
   progress: number;
+  /** 目标内容近期已评估过（熟悉）→ 思考时间按 FAMILIAR_DISCOUNT 折扣（仍夹非零下限）。 */
+  familiar?: boolean;
 }
 
 /** 计算动作前犹豫/感知时间中心值 thinkMs（边缘据此在执行前等待，并叠加抖动）。 */
 export function computeThinkMs(input: ThinkInput): number {
   const withTempo = THINK_BASE_MS * tempoForStatus(input.status) * fatigueMultiplier(input.progress);
+  if (input.familiar) {
+    // 熟悉内容反应更快：降至约 1/3，但夹非零下限不秒退。
+    return Math.round(Math.max(withTempo * FAMILIAR_DISCOUNT, THINK_FLOOR_MS));
+  }
   return Math.round(withTempo);
 }
 

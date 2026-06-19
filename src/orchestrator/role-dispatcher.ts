@@ -125,9 +125,9 @@ export class RoleDispatcher {
     return Math.min(1, Math.max(0, elapsed / this.maxDurationMs));
   }
 
-  /** 动作前犹豫时间中心值（随风控状态 + 会话进度缩放）。 */
-  private thinkNow(): number {
-    return computeThinkMs({ status: this.getRiskStatus(), progress: this.progress() });
+  /** 动作前犹豫时间中心值（随风控状态 + 会话进度缩放）。familiar=true 对近期已评估内容按 1/3 折扣。 */
+  private thinkNow(familiar = false): number {
+    return computeThinkMs({ status: this.getRiskStatus(), progress: this.progress(), familiar });
   }
 
   /**
@@ -393,7 +393,9 @@ export class RoleDispatcher {
       this.eventBus.on('content.valuable', (payload) => {
         // 带上 noteId：edge 据此在「当前快照」里按稳定主键定位目标卡。
         // 否则 feed 在云端决策与 edge 执行之间滚动后，纯 index 寻址会开成同序号上的邻座（stale index）。
-        this.sendCommand({ action: 'open_note', params: { index: payload.index, noteId: payload.noteId, thinkMs: this.thinkNow() }, reason: payload.reason });
+        // 熟悉度折扣：返回 feed 后再次打开一张近期已评估过的卡片 → 思考时间降至 1/3（首次打开仍全量）。
+        const familiar = payload.noteId ? this.sessionContext.isRecentlyEvaluated(payload.noteId) : false;
+        this.sendCommand({ action: 'open_note', params: { index: payload.index, noteId: payload.noteId, thinkMs: this.thinkNow(familiar) }, reason: payload.reason });
       }),
 
       // content.no_valuable 不在此直接翻页：翻页由 FeedScroller / SearchScroller 角色独家处理
