@@ -75,7 +75,7 @@ export interface RoleDispatcherOptions {
 }
 
 export interface EdgeCommand {
-  action: 'scroll' | 'open_note' | 'close_note' | 'like' | 'collect' | 'follow' | 'search' | 'back' | 'browse_images' | 'scroll_comments' | 'profile_open' | 'session.end';
+  action: 'scroll' | 'open_note' | 'close_note' | 'like' | 'collect' | 'follow' | 'search' | 'back' | 'browse_images' | 'scroll_comments' | 'profile_open' | 'open_notifications' | 'session.end';
   params?: Record<string, unknown>;
   reason?: string;
 }

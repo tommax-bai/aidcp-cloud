@@ -61,7 +61,10 @@ export type MessageType =
   | 'note.browse_images'   // 浏览笔记图片
   | 'note.scroll_comments' // 滚动评论区
   | 'profile.open'         // 进入作者主页（专用指令，取代 open_note{type:'profile'}）
+  | 'notification.open'    // cloud → edge：去通知页查看「评论和@」（复合命令，仿 profile.open）
   // —— Edge 上报（edge → cloud，RoleDispatcher 消费）——
+  | 'notification.detected' // edge → cloud：检测到「消息」有未读（仅信号）
+  | 'notification.items'    // edge → cloud：上报抽取的评论/@ 项
   | 'page.cards'           // Edge 上报当前可见卡片列表
   | 'note.detail'          // Edge 上报笔记详情
   | 'profile.detail'       // Edge 上报个人主页数据
@@ -483,6 +486,35 @@ export interface ActionCompletedPayload {
   reason?: string;
 }
 
+/** edge → cloud：检测到「消息」有未读（仅信号；epoch 每次由无变有 +1，用于去重，不随未读数量变）。 */
+export interface NotificationDetectedPayload {
+  edgeId?: string;
+  accountId?: string;
+  epoch: number;
+  unreadCount?: number;
+}
+
+/** cloud → edge：去通知页查看「评论和@」（复合命令，导航+切 tab+抽取+上报 notification.items）。 */
+export interface NotificationOpenPayload {
+  limit?: number;
+  thinkMs?: number;
+}
+
+/** 单条评论/@ 通知项（边缘抽取的原始数据；是否值得通知由云端判定）。 */
+export interface NotificationItem {
+  kind: 'comment' | 'mention';
+  fromUser: string;
+  content: string;
+  noteTitle?: string;
+  itemKey?: string;
+}
+
+/** edge → cloud：上报本次巡视抽取的评论/@ 项。 */
+export interface NotificationItemsPayload {
+  items: NotificationItem[];
+  epoch?: number;
+}
+
 export interface ErrorPayload {
   code: string;
   message: string;
@@ -533,6 +565,9 @@ export interface PayloadMap {
   'note.detail': NoteDetailPayload;
   'profile.detail': ProfileDetailPayload;
   'action.completed': ActionCompletedPayload;
+  'notification.open': NotificationOpenPayload;
+  'notification.detected': NotificationDetectedPayload;
+  'notification.items': NotificationItemsPayload;
   error: ErrorPayload;
   ping: Record<string, never>;
   pong: Record<string, never>;

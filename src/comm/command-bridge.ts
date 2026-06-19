@@ -41,6 +41,8 @@ export function edgeCommandToEnvelope(command: EdgeCommand): Envelope {
       return createEnvelope('note.scroll_comments', command.params ?? {});
     case 'profile_open':
       return createEnvelope('profile.open', command.params ?? {});
+    case 'open_notifications':
+      return createEnvelope('notification.open', command.params ?? {});
     case 'session.end':
       return createEnvelope('session.end', { reason: command.reason });
     default:
