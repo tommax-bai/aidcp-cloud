@@ -27,8 +27,11 @@ import {
   type NoteDetailPayload,
   type ProfileDetailPayload,
   type ActionCompletedPayload,
+  type CaptchaDetectedPayload,
+  type CaptchaClearedPayload,
 } from './protocol.js';
 import type { MessageHandler, EdgeSession, EdgePusher } from './ws-server.js';
+import type { CaptchaCoordinator } from './captcha-coordinator.js';
 import type { TaskPlanner } from '../planner/types.js';
 import type { LlmClient } from '../llm/qwen.js';
 import type { EventBus } from '../event-bus/index.js';
@@ -62,6 +65,8 @@ export interface HandlerDeps {
   riskController?: RiskController;
   eventBus: EventBus;
   accountState?: AccountStateManager;
+  /** 验证码事件协调器（risk.captcha_detected/cleared 的消费端）。未注入则两类上报被忽略（向后兼容）。 */
+  captcha?: CaptchaCoordinator;
 }
 
 /** 把元素清单渲染成给 LLM 的编号列表（与 edge selector 一致的格式） */
@@ -164,6 +169,12 @@ export class DefaultMessageHandler implements MessageHandler {
         return this.onRiskCanDo(env);
       case 'risk.record':
         return this.onRiskRecord(env);
+      case 'risk.captcha_detected':
+        await this.deps.captcha?.onDetected(env.payload as CaptchaDetectedPayload, session, pusher);
+        return null;
+      case 'risk.captcha_cleared':
+        await this.deps.captcha?.onCleared(env.payload as CaptchaClearedPayload, session, pusher);
+        return null;
       case 'page.cards': {
         const { cards } = env.payload as PageCardsPayload;
         this.deps.eventBus.emit('page.cards.arrived', { cards, ts: this.clock() });
@@ -182,6 +193,17 @@ export class DefaultMessageHandler implements MessageHandler {
       case 'action.completed': {
         const result = env.payload as ActionCompletedPayload;
         this.deps.eventBus.emit('action.completed', { ...result, ts: this.clock() });
+        // 真实成功互动 → 驱动 RiskController 按账号计数（record 订在 interaction.occurred）。
+        // already_followed 是良性 no-op，失败 ok=false，均不计——只记真实发生的互动。
+        if (
+          result.ok &&
+          (result.action === 'like' || result.action === 'collect' || result.action === 'follow') &&
+          result.reason !== 'already_followed'
+        ) {
+          this.deps.eventBus.emit('interaction.occurred', {
+            action: result.action as 'like' | 'collect' | 'follow',
+          });
+        }
         return null;
       }
       case 'publish.result':
@@ -200,6 +222,10 @@ export class DefaultMessageHandler implements MessageHandler {
     const p = env.payload as HelloPayload;
     session.edgeId = p.edgeId;
     session.app = p.app;
+    // 身份落到连接：用于风控归属与验证码事件定位（缺字段安全降级，卡片至少带 edgeId）。
+    session.accountId = p.accountId;
+    session.machineLabel = p.machineLabel;
+    session.remoteAddr = p.remoteAddr;
     // 通知编排层：新边缘上线 → 重置/重启会话（修复会话时长随云端运行时长累计、超时后不再驱动新连接的 bug）。
     this.deps.eventBus.emit('edge.hello', { edgeId: p.edgeId, ts: this.clock() });
     return makeEnvelope('welcome', env.id, this.clock(), {

@@ -48,6 +48,11 @@ export interface RoleDispatcherOptions {
    * 由 server 接线为 `() => riskController.getState().status`。
    */
   getRiskStatus?: () => RiskStatus;
+  /**
+   * 互动前风控闸：下发 like/collect/follow 前判定是否允许。缺省始终允许（向后兼容）。
+   * 由 server 接线为 `(action) => riskController.canDo(action)`。被拒则诚实跳过（不下发、不扣 budget）。
+   */
+  canInteract?: (action: 'like' | 'collect' | 'follow') => boolean;
 }
 
 export interface EdgeCommand {
@@ -86,6 +91,7 @@ export class RoleDispatcher {
   private readonly sendCommand: (command: EdgeCommand) => void;
   private readonly clock: () => number;
   private readonly getRiskStatus: () => RiskStatus;
+  private readonly canInteract: (action: 'like' | 'collect' | 'follow') => boolean;
   /** 会话开始时刻与时长上限，用于估算会话进度（疲劳乘子）。 */
   private sessionStartedAt: number;
   private readonly maxDurationMs: number;
@@ -106,6 +112,7 @@ export class RoleDispatcher {
     this.sendCommand = options.sendCommand;
     this.clock = options.clock ?? Date.now;
     this.getRiskStatus = options.getRiskStatus ?? (() => 'normal');
+    this.canInteract = options.canInteract ?? (() => true);
     this.eventBus = options.eventBus ?? new EventBus();
     this.sessionContext = new SessionContext();
     this.maxDurationMs = (this.soul.session_limits?.max_duration_min ?? 10) * 60_000;
@@ -316,6 +323,11 @@ export class RoleDispatcher {
 
       this.eventBus.on('interaction.completed', (payload) => {
         for (const action of payload.actions) {
+          // 风控闸：被拒则诚实跳过——不下发、不扣 budget（红线：不假成功、budget 不漂移）。
+          if (!this.canInteract(action)) {
+            console.log(`[RoleDispatcher] 互动被风控拦截，跳过 action=${action} note=${payload.noteId}`);
+            continue;
+          }
           // 互动前犹豫时间（time directive）：边缘据此在执行前等待并叠抖动
           this.sendCommand({ action, params: { noteId: payload.noteId, thinkMs: this.thinkNow() } });
           this.consumeBudget(action);
@@ -348,8 +360,13 @@ export class RoleDispatcher {
 
       this.eventBus.on('profile.done', (payload) => {
         if (payload.followed) {
-          this.sendCommand({ action: 'follow', params: { authorId: payload.authorId, thinkMs: this.thinkNow() } });
-          // follow 配额改由 action.completed 真实回执扣减（仅真实新关注；already_followed no-op 与失败均不扣）。
+          // 风控闸：被拒则诚实跳过（不下发）。follow 配额本就由 action.completed 真实回执扣减，跳过即不会产生回执、不扣额。
+          if (!this.canInteract('follow')) {
+            console.log('[RoleDispatcher] 关注被风控拦截，跳过 follow');
+          } else {
+            this.sendCommand({ action: 'follow', params: { authorId: payload.authorId, thinkMs: this.thinkNow() } });
+            // follow 配额改由 action.completed 真实回执扣减（仅真实新关注；already_followed no-op 与失败均不扣）。
+          }
         }
         // back 指令由 BackToFeed 角色通过 feed.entered 统一发送，此处不再重复
       }),

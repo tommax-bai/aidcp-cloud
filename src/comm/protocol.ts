@@ -46,6 +46,8 @@ export type MessageType =
   | 'risk.canDo.result' // cloud → edge：allow / deny
   | 'risk.record' // edge → cloud：互动成功后记录 action
   | 'risk.record.result' // cloud → edge：记录结果
+  | 'risk.captcha_detected' // edge → cloud：检测到验证码/未知阻断弹窗，已本地暂停，请云端置风控态 + 停发命令 + 通知人工
+  | 'risk.captcha_cleared' // edge → cloud：验证码/未知阻断弹窗已清除，已恢复浏览
   // —— 发布编排（Publish Agent 驱动）——
   | 'publish.approval_request' // edge → cloud：请求发送发布审批卡片
   | 'publish.request' // cloud → edge：请求在浏览器中发布一篇帖子
@@ -90,6 +92,12 @@ export interface HelloPayload {
   app?: string;
   /** 边缘端能力声明 */
   capabilities?: string[];
+  /** 该边缘当前驱动的账号标识（用于风控归属与验证码事件定位；缺省视为默认账号） */
+  accountId?: string;
+  /** 人类可读的机器标签（如 "win-aliyun-3"），验证码卡片据此告诉运维去哪台机器处置 */
+  machineLabel?: string;
+  /** 远程桌面 / 可达地址（如 RDP/VNC 地址或跳板说明），用于人工远程处置 */
+  remoteAddr?: string;
 }
 
 export interface WelcomePayload {
@@ -311,6 +319,32 @@ export interface RiskRecordResultPayload {
   reason?: string;
 }
 
+/**
+ * 检测到验证码/未知阻断弹窗（edge → cloud，fire-and-forget）。
+ * 由 edge 旁路监测体在「类别翻转进 captcha/unknown」时发一次（边缘已先本地暂停）。
+ * 云端据此置风控态(restricted)、停止下发浏览命令、按 (edgeId,account) 去重后通知飞书人工处理。
+ * 注意：检测/暂停/恢复全在 edge 本地完成，本消息只是通知，云端从不被边缘动作回查。
+ */
+export interface CaptchaDetectedPayload {
+  /** 边缘节点标识 */
+  edgeId?: string;
+  /** 弹窗类别：captcha=已识别的风控挑战；unknown=可见阻断遮罩但本地未能归类（请云端命名） */
+  kind: 'captcha' | 'unknown';
+  /** 触发时页面 URL（best-effort） */
+  url?: string;
+  /** 关联账号（如有） */
+  accountId?: string;
+  /** 简短说明（观测用） */
+  reason?: string;
+}
+
+/** 验证码/未知阻断弹窗已清除（edge → cloud，fire-and-forget）。 */
+export interface CaptchaClearedPayload {
+  edgeId?: string;
+  url?: string;
+  accountId?: string;
+}
+
 /** 请求在浏览器中发布一篇帖子（cloud → edge）。 */
 export interface PublishRequestPayload {
   /** 帖子标题（小红书标题） */
@@ -481,6 +515,8 @@ export interface PayloadMap {
   'risk.canDo.result': RiskCanDoResultPayload;
   'risk.record': RiskRecordPayload;
   'risk.record.result': RiskRecordResultPayload;
+  'risk.captcha_detected': CaptchaDetectedPayload;
+  'risk.captcha_cleared': CaptchaClearedPayload;
   'publish.request': PublishRequestPayload;
   'publish.result': PublishResultPayload;
   // 角色驱动指令

@@ -15,6 +15,8 @@ class FakePusher implements EdgePusher {
   edgeCount(): number {
     return this.count;
   }
+  pauseEdge(): void {}
+  resumeEdge(): void {}
 }
 
 test('LikeCommandService: 规划点赞 → 单步 click 并下发给边缘', async () => {

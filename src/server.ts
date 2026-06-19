@@ -22,13 +22,14 @@ import { PgAnchorCache, BotChatStore } from './cache/index.js';
 import {
   EdgeCloudServer,
   DefaultMessageHandler,
+  CaptchaCoordinator,
   makeEnvelope,
   edgeCommandToEnvelope,
   type PublishRequestPayload,
 } from './comm/index.js';
 
 
-import { RiskController } from './risk/index.js';
+import { RiskController, PgRiskStore } from './risk/index.js';
 import { EventBus } from './event-bus/index.js';
 import { RoleDispatcher } from './orchestrator/index.js';
 import { loadSoul } from './soul/index.js';
@@ -40,6 +41,7 @@ import {
   FeishuMessenger,
   FeishuWsReceiver,
   buildFeishuEventDispatcher,
+  resolveDefaultChatId,
   type CommandActions,
 } from './feishu/index.js';
 import { PublishOrchestrator } from './publish-agent/index.js';
@@ -131,9 +133,17 @@ async function main(): Promise<void> {
   const eventBus = new EventBus();
   const accountState = new AccountStateManager();
 
-  const riskController = new RiskController();
+  // RiskController：以 PgRiskStore 持久化账号风控态与滑动窗计数（跨重启回放）；PG 不可用则回退内存态。
+  let riskController: RiskController;
+  try {
+    riskController = await RiskController.create({ store: new PgRiskStore() });
+    console.log('[aidcp-cloud] RiskController 已就绪（PgRiskStore 持久化）');
+  } catch (err) {
+    console.warn('[aidcp-cloud] RiskController 持久化初始化失败，回退内存态:', (err as Error).message);
+    riskController = new RiskController();
+  }
 
-  // RiskController 订阅跨模块事件：互动发生时自动记录
+  // RiskController 订阅跨模块事件：真实互动发生时按账号计数（record 内部再过 canDo）。
   eventBus.on('interaction.occurred', (evt) => {
     riskController.record(evt.action).catch((err) => {
       console.warn('[aidcp-cloud] RiskController record error:', err);
@@ -157,12 +167,21 @@ async function main(): Promise<void> {
     },
     resume: (accountId) => {
       accountState.resume(accountId);
-      console.log(`[feishu] 已恢复账号：${accountId}`);
+      // 验证码人工恢复快路：解除该账号名下被暂停的 edge（server 在下方初始化，命令运行时才触发，引用安全）。
+      const resumedEdges = server.resumeEdgesForAccount(accountId);
+      console.log(`[feishu] 已恢复账号：${accountId}（恢复 edge 数=${resumedEdges}）`);
     },
     bindChat: (record) => botChatStore.setDefault(record),
   };
   const commandRouter = new CommandRouter(actions);
   const messenger = new FeishuMessenger();
+  // 验证码事件协调器：消费 risk.captcha_detected/cleared（迁状态 + 按 edge 暂停 + 去重发飞书）。
+  const captcha = new CaptchaCoordinator({
+    riskController,
+    messenger,
+    resolveChatId: () =>
+      resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console }),
+  });
   const handler = new DefaultMessageHandler({
     planner,
     llm,
@@ -173,6 +192,7 @@ async function main(): Promise<void> {
     riskController,
     eventBus,
     accountState,
+    captcha,
   });
   const server = new EdgeCloudServer({ port, handler });
   await server.start();
@@ -186,6 +206,8 @@ async function main(): Promise<void> {
     eventBus,
     // 指令级节奏：把当前风控状态喂给决策点，驱动 dwellMs/thinkMs 的 tempo
     getRiskStatus: () => riskController.getState().status,
+    // 互动前风控闸：被拒则诚实跳过（不下发、不扣 budget）。验证码→restricted 后互动被此闸真正拦住。
+    canInteract: (action) => riskController.canDo(action),
     sendCommand: (command) => {
       const envelope = edgeCommandToEnvelope(command);
       const sent = server.pushToEdges(envelope);

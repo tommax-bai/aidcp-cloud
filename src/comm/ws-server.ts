@@ -25,6 +25,12 @@ export interface EdgeSession {
   sessionId: string;
   edgeId?: string;
   app?: string;
+  /** 该边缘当前驱动的账号（hello 上报，用于风控归属与验证码定位） */
+  accountId?: string;
+  /** 人类可读机器标签（hello 上报，验证码卡片告诉运维去哪台机器） */
+  machineLabel?: string;
+  /** 远程桌面/可达地址（hello 上报，用于人工远程处置） */
+  remoteAddr?: string;
 }
 
 /**
@@ -36,6 +42,10 @@ export interface EdgePusher {
   pushToEdges(env: Envelope, edgeId?: string): number;
   /** 当前已上线（完成 hello）的边缘数量 */
   edgeCount(): number;
+  /** 暂停向某 edge 下发指令（验证码期间）。`session.end` 不受暂停影响，仍可送达。 */
+  pauseEdge(edgeId: string): void;
+  /** 解除某 edge 的暂停（验证码清除/人工恢复）。 */
+  resumeEdge(edgeId: string): void;
 }
 
 /** 消息处理器：收到一个请求信封，产出 0/1 个响应信封 */
@@ -75,6 +85,11 @@ export class EdgeCloudServer implements EdgePusher {
   private readonly sessionIdGen: () => string;
   /** 已上线（完成 hello）的边缘连接，按 sessionId 索引 */
   private readonly edges = new Map<string, EdgeConn>();
+  /**
+   * 被暂停下发的 edgeId 集合（验证码期间）。持于传输层而非会话态，
+   * 故 RoleDispatcher.restartSession（每次 edge.hello 重建）后仍生效。
+   */
+  private readonly pausedEdges = new Set<string>();
 
   constructor(options: WsServerOptions) {
     this.port = options.port ?? 8787;
@@ -104,9 +119,12 @@ export class EdgeCloudServer implements EdgePusher {
   /** EdgePusher：把命令推给已上线边缘 */
   pushToEdges(env: Envelope, edgeId?: string): number {
     const frame = JSON.stringify(env);
+    // session.end 必达：绝不被验证码暂停闸吞掉，否则持久弹窗会导致会话无法终止（死锁）。
+    const bypassPause = env.type === 'session.end';
     let sent = 0;
     for (const conn of this.edges.values()) {
       if (edgeId && conn.session.edgeId !== edgeId) continue;
+      if (!bypassPause && conn.session.edgeId && this.pausedEdges.has(conn.session.edgeId)) continue;
       if (conn.ws.readyState === WebSocket.OPEN) {
         conn.ws.send(frame);
         sent++;
@@ -117,6 +135,37 @@ export class EdgeCloudServer implements EdgePusher {
 
   edgeCount(): number {
     return this.edges.size;
+  }
+
+  /** 已绑定端口（构造时 port:0 由系统分配，测试用）；未启动返回 null。 */
+  address(): number | null {
+    const a = this.wss?.address();
+    return a && typeof a === 'object' ? a.port : null;
+  }
+
+  /** 暂停向某 edge 下发指令（验证码期间）。幂等。 */
+  pauseEdge(edgeId: string): void {
+    this.pausedEdges.add(edgeId);
+  }
+
+  /** 解除某 edge 的暂停（验证码清除/人工恢复）。幂等。 */
+  resumeEdge(edgeId: string): void {
+    this.pausedEdges.delete(edgeId);
+  }
+
+  /** 该 edge 是否处于暂停态（观测/测试用）。 */
+  isEdgePaused(edgeId: string): boolean {
+    return this.pausedEdges.has(edgeId);
+  }
+
+  /** 解除某账号名下所有 edge 的暂停（飞书人工恢复快路）。返回恢复的 edge 数。 */
+  resumeEdgesForAccount(accountId: string): number {
+    let resumed = 0;
+    for (const conn of this.edges.values()) {
+      const eid = conn.session.edgeId;
+      if (eid && conn.session.accountId === accountId && this.pausedEdges.delete(eid)) resumed++;
+    }
+    return resumed;
   }
 
   private onConnection(ws: WebSocket): void {
