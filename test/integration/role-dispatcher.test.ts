@@ -437,6 +437,30 @@ describe('RoleDispatcher Integration', () => {
     assert.equal(dispatcher.active, false, '会话应已自动终止');
   });
 
+  it('follow 配额按真实回执扣减：真实新关注扣 1、already_followed/失败不扣', () => {
+    const commands: EdgeCommand[] = [];
+    const llm = createMockLlm(['{"verdict":"skip","reason":"不相关"}']);
+    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
+    dispatcher.setup();
+    dispatcher.startSession();
+
+    const start = dispatcher.remainingFollows; // freshBudget follows:3
+
+    // 真实新关注（ok:true 不带 reason）→ 扣 1
+    dispatcher.bus.emit('action.completed', { action: 'follow', ok: true, ts: Date.now() });
+    assert.equal(dispatcher.remainingFollows, start - 1, '真实新关注应扣 1 配额');
+
+    // already_followed 良性 no-op（ok:true + reason）→ 不扣
+    dispatcher.bus.emit('action.completed', { action: 'follow', ok: true, reason: 'already_followed', ts: Date.now() });
+    assert.equal(dispatcher.remainingFollows, start - 1, 'already_followed no-op 不应扣配额');
+
+    // 关注失败（ok:false）→ 不扣
+    dispatcher.bus.emit('action.completed', { action: 'follow', ok: false, reason: 'btn_no-btn', ts: Date.now() });
+    assert.equal(dispatcher.remainingFollows, start - 1, '关注失败不应扣配额');
+
+    dispatcher.endSession();
+  });
+
   // ─── 会话生命周期: 边缘新 hello 重置会话 ──────────────────────
 
   it('边缘新 hello → restartSession：endSession 后重连可重新驱动浏览', async () => {

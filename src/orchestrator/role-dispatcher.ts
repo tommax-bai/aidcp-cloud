@@ -289,6 +289,11 @@ export class RoleDispatcher {
     else if (action === 'search' && this.budget.searches > 0) this.budget.searches--;
   }
 
+  /** 剩余关注配额（测试可观测）。 */
+  get remainingFollows(): number {
+    return this.budget.follows;
+  }
+
   // ─── 内部：Edge 指令翻译层 ────────────────────────────────────
 
   private setupCommandTranslation(): void {
@@ -344,7 +349,7 @@ export class RoleDispatcher {
       this.eventBus.on('profile.done', (payload) => {
         if (payload.followed) {
           this.sendCommand({ action: 'follow', params: { authorId: payload.authorId, thinkMs: this.thinkNow() } });
-          this.consumeBudget('follow');
+          // follow 配额改由 action.completed 真实回执扣减（仅真实新关注；already_followed no-op 与失败均不扣）。
         }
         // back 指令由 BackToFeed 角色通过 feed.entered 统一发送，此处不再重复
       }),
@@ -407,6 +412,11 @@ export class RoleDispatcher {
       // note.detail/page.cards，事件循环会因无触发而死等；统一以一次 scroll 续刷兜底。
       this.eventBus.on('action.completed', (payload) => {
         console.log(`[RoleDispatcher] action.completed: ${payload.action} ok=${payload.ok}`);
+        // follow 配额按真实回执扣减：仅当发生了真实的新关注点击（ok:true 且非 already_followed no-op）。
+        // already_followed（良性 no-op）与各类失败（ok:false）均不扣额，使配额对齐真实平台动作。
+        if (payload.action === 'follow' && payload.ok === true && payload.reason !== 'already_followed') {
+          this.consumeBudget('follow');
+        }
         // follow 的回执由 BackToFeed 接管去"返回"，不在此兜底滑动——否则 follow 失败会
         // 既滑一屏又返回，两条指令打架。
         // browse_images / scroll_comments 在详情页内执行，失败由 DeepReader / CommentReviewer
