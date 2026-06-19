@@ -136,7 +136,16 @@ async function main(): Promise<void> {
   // RiskController：以 PgRiskStore 持久化账号风控态与滑动窗计数（跨重启回放）；PG 不可用则回退内存态。
   let riskController: RiskController;
   try {
-    riskController = await RiskController.create({ store: new PgRiskStore() });
+    // 用与锚点缓存相同的 PG* 连接口径，避免 PgRiskStore 回退到 AIDCP_PG_*/硬编码默认而连错库。
+    riskController = await RiskController.create({
+      store: new PgRiskStore({
+        host: readEnvString('PGHOST'),
+        port: readEnvPort('PGPORT'),
+        database: readEnvString('PGDATABASE'),
+        user: readEnvString('PGUSER'),
+        password: readEnvString('PGPASSWORD'),
+      }),
+    });
     console.log('[aidcp-cloud] RiskController 已就绪（PgRiskStore 持久化）');
   } catch (err) {
     console.warn('[aidcp-cloud] RiskController 持久化初始化失败，回退内存态:', (err as Error).message);
