@@ -280,6 +280,13 @@ export interface SearchNeededPayload {
 export interface SearchApprovedPayload {
   keyword: string;
   reason: string;
+  /**
+   * 关键词来源策略（如实回报，供 SearchExecutePayload.source 填充）。
+   * - `new_concept`：来自概念池 candidate（从浏览内容学到的新概念）
+   * - `random_from_interests`：来自 soul.yaml 的 seed_keywords
+   * - `extract_from_liked` / `manager`：保留来源（本变更暂不产生）
+   */
+  source?: 'extract_from_liked' | 'random_from_interests' | 'new_concept' | 'manager';
   ts: number;
 }
 
@@ -340,5 +347,6 @@ export type RoleName =
   | 'follow_agent'
   | 'search_evaluator'
   | 'search_executor'
+  | 'concept_extractor'
   | 'back_to_feed'
   | 'session_monitor';

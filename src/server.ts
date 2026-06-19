@@ -18,7 +18,7 @@ import { randomUUID } from 'node:crypto';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { QwenClient } from './llm/index.js';
 import { SimplePlanner } from './planner/index.js';
-import { PgAnchorCache, BotChatStore } from './cache/index.js';
+import { PgAnchorCache, BotChatStore, ConceptStore } from './cache/index.js';
 import {
   EdgeCloudServer,
   DefaultMessageHandler,
@@ -109,6 +109,24 @@ async function main(): Promise<void> {
     console.log('[aidcp-cloud] PublishLogStore 已就绪');
   } catch (err) {
     console.warn('[aidcp-cloud] PublishLogStore 初始化失败:', (err as Error).message);
+  }
+
+  // 概念池存储（concepts 表，跨会话搜索记忆）。init 失败则留 undefined：
+  // RoleDispatcher 不注册概念抽取角色、搜索退化为仅 seed_keywords（不崩闭环）。
+  let conceptStore: ConceptStore | undefined;
+  try {
+    const cs = new ConceptStore({
+      host: readEnvString('PGHOST'),
+      port: readEnvPort('PGPORT'),
+      database: readEnvString('PGDATABASE'),
+      user: readEnvString('PGUSER'),
+      password: readEnvString('PGPASSWORD'),
+    });
+    await cs.init();
+    conceptStore = cs;
+    console.log('[aidcp-cloud] ConceptStore 已就绪（concepts 表）');
+  } catch (err) {
+    console.warn('[aidcp-cloud] ConceptStore 初始化失败，搜索退化为仅 seed_keywords:', (err as Error).message);
   }
 
   // 去 AI 味后处理器
@@ -217,6 +235,8 @@ async function main(): Promise<void> {
     getRiskStatus: () => riskController.getState().status,
     // 互动前风控闸：被拒则诚实跳过（不下发、不扣 budget）。验证码→restricted 后互动被此闸真正拦住。
     canInteract: (action) => riskController.canDo(action),
+    // 概念池：跨会话搜索记忆 + 从浏览学新关键词（undefined 时退化为仅 seed_keywords）。
+    conceptStore,
     sendCommand: (command) => {
       const envelope = edgeCommandToEnvelope(command);
       const sent = server.pushToEdges(envelope);

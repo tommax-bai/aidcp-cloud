@@ -11,21 +11,27 @@
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { SessionContext } from './session-context.js';
-import type { RoleName, SearchNeededPayload } from '../event-bus/types.js';
+import type { ConceptPool, RoleName, SearchApprovedPayload, SearchNeededPayload } from '../event-bus/types.js';
+
+const EMPTY_POOL: ConceptPool = { known: [], candidates: [], source: new Map() };
 
 export interface SearchEvaluatorOptions extends RoleOptions {
   sessionContext: SessionContext;
   getSearchedKeywords: () => string[];
+  /** 概念池快照来源（跨会话从浏览学到的 candidates）。缺省返回空池 → 退化为仅 seed_keywords。 */
+  getConceptPool?: () => ConceptPool;
 }
 
 export class SearchEvaluator extends BaseRole {
   readonly roleName: RoleName = 'search_evaluator';
   private readonly getSearchedKeywords: () => string[];
+  private readonly getConceptPool: () => ConceptPool;
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: SearchEvaluatorOptions) {
     super(options);
     this.getSearchedKeywords = options.getSearchedKeywords;
+    this.getConceptPool = options.getConceptPool ?? (() => EMPTY_POOL);
     if (!options.llm) throw new Error('SearchEvaluator 需要 LlmClient');
   }
 
@@ -49,7 +55,19 @@ export class SearchEvaluator extends BaseRole {
   // ─── 核心评估 ─────────────────────────────────────────────
 
   async evaluate(payload: SearchNeededPayload): Promise<void> {
-    const prompt = this.buildPrompt(payload);
+    const { seedKeywords, candidates, available } = this.computeKeywordSets();
+
+    // 候选集去重去已搜后为空 → 诚实跳过（不调 LLM、不编造关键词）。
+    if (available.length === 0) {
+      this.emit('search.skipped', {
+        currentPageType: payload.currentPageType,
+        reason: 'no_available_keywords',
+        ts: Date.now(),
+      });
+      return;
+    }
+
+    const prompt = this.buildPrompt(payload, available);
     let raw: string;
     try {
       raw = await this.decide(prompt);
@@ -77,6 +95,8 @@ export class SearchEvaluator extends BaseRole {
       this.emit('search.approved', {
         keyword: result.keyword,
         reason: result.reason,
+        // 如实标注来源：概念池 candidate → new_concept；seed_keywords → random_from_interests。
+        source: this.attributeSource(result.keyword, candidates, seedKeywords),
         ts: Date.now(),
       });
     } else {
@@ -88,15 +108,48 @@ export class SearchEvaluator extends BaseRole {
     }
   }
 
+  // ─── 候选关键词集合 ────────────────────────────────────────
+
+  /**
+   * 候选集 = (seed_keywords ∪ 概念池 candidates) − known − 本会话已搜。
+   * 返回各分量以便归因 source。
+   */
+  private computeKeywordSets(): { seedKeywords: string[]; candidates: string[]; available: string[] } {
+    const seedKeywords = this.soul.interests.seed_keywords;
+    const pool = this.getConceptPool();
+    const searched = this.getSearchedKeywords();
+    const excluded = new Set<string>([...searched, ...pool.known].map((k) => k.toLowerCase()));
+
+    const available: string[] = [];
+    const seen = new Set<string>();
+    for (const kw of [...seedKeywords, ...pool.candidates]) {
+      const key = kw.toLowerCase();
+      if (excluded.has(key) || seen.has(key)) continue;
+      seen.add(key);
+      available.push(kw);
+    }
+    return { seedKeywords, candidates: pool.candidates, available };
+  }
+
+  /** 关键词来源归因：优先判定为概念池 candidate（new_concept），否则种子词（random_from_interests）。 */
+  private attributeSource(
+    keyword: string,
+    candidates: string[],
+    seedKeywords: string[],
+  ): SearchApprovedPayload['source'] {
+    const key = keyword.toLowerCase();
+    if (candidates.some((c) => c.toLowerCase() === key)) return 'new_concept';
+    if (seedKeywords.some((s) => s.toLowerCase() === key)) return 'random_from_interests';
+    // LLM 偶发返回未在候选集中的词：仍如实归为兴趣派生，不谎报为概念池。
+    return 'random_from_interests';
+  }
+
   // ─── Prompt 构建 ───────────────────────────────────────────
 
-  private buildPrompt(payload: SearchNeededPayload): string {
+  private buildPrompt(payload: SearchNeededPayload, availableKeywords: string[]): string {
     const { identity, interests } = this.soul;
-    const seedKeywords = interests.seed_keywords;
     const allInterests = [...interests.primary, ...interests.secondary];
     const searched = this.getSearchedKeywords();
-
-    const availableKeywords = seedKeywords.filter((kw) => !searched.includes(kw));
 
     return `你是「${identity.name}」，${identity.role}。
 当前浏览场景：已在${payload.currentPageType === 'search' ? '搜索结果' : '首页'}连续滚动 ${payload.consecutiveScrolls} 次无收获。

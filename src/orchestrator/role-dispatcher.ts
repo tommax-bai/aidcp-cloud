@@ -28,11 +28,22 @@ import { FollowAgent } from '../agents/follow-agent.js';
 import { SearchScroller } from '../agents/search-scroller.js';
 import { SearchEvaluator } from '../agents/search-evaluator.js';
 import { SearchExecutor } from '../agents/search-executor.js';
+import { ConceptExtractorRole, type ConceptSink } from '../agents/concept-extractor-role.js';
 import { SessionMonitorRole } from '../agents/session-monitor-role.js';
 import type { BaseRole } from '../agents/base-role.js';
 import type { Soul } from '../soul/types.js';
 import { computeDwellMs, computeThinkMs } from '../risk/pacing.js';
+import { SearchFrequencyLimiter } from '../risk/search-frequency-limiter.js';
 import type { RiskStatus } from '../risk/types.js';
+import type { ConceptPool } from '../event-bus/types.js';
+
+/** 概念池读写下游（ConceptStore 的最小契约，便于注入桩单测）。 */
+export interface ConceptStorePort extends ConceptSink {
+  loadPool(): Promise<ConceptPool>;
+  markSearched(keyword: string): Promise<void>;
+}
+
+const EMPTY_CONCEPT_POOL: ConceptPool = { known: [], candidates: [], source: new Map() };
 
 // ─── 公共接口 ────────────────────────────────────────────────────────────────
 
@@ -53,6 +64,14 @@ export interface RoleDispatcherOptions {
    * 由 server 接线为 `(action) => riskController.canDo(action)`。被拒则诚实跳过（不下发、不扣 budget）。
    */
   canInteract?: (action: 'like' | 'collect' | 'follow') => boolean;
+  /**
+   * 概念池存储（跨会话记忆）：启动时 loadPool 喂 SearchEvaluator，
+   * ConceptExtractorRole 抽到新概念 addCandidate，下发搜索后 markSearched。
+   * 缺省（如 PG 不可用）→ 退化为仅 seed_keywords，不注册概念抽取角色。
+   */
+  conceptStore?: ConceptStorePort;
+  /** 搜索限频闸参数（每会话/每天上限）；缺省用 SearchFrequencyLimiter 默认值。 */
+  searchLimiterOptions?: { maxPerSession?: number; maxPerDay?: number };
 }
 
 export interface EdgeCommand {
@@ -92,6 +111,11 @@ export class RoleDispatcher {
   private readonly clock: () => number;
   private readonly getRiskStatus: () => RiskStatus;
   private readonly canInteract: (action: 'like' | 'collect' | 'follow') => boolean;
+  private readonly conceptStore?: ConceptStorePort;
+  /** 搜索前限频闸（每关键词每会话/每天上限），dispatcher 持有单例，会话重启时清会话计数。 */
+  private readonly searchLimiter: SearchFrequencyLimiter;
+  /** 概念池快照：startSession 时 loadPool 刷新，供 SearchEvaluator 读取。 */
+  private conceptPool: ConceptPool = EMPTY_CONCEPT_POOL;
   /** 会话开始时刻与时长上限，用于估算会话进度（疲劳乘子）。 */
   private sessionStartedAt: number;
   private readonly maxDurationMs: number;
@@ -113,6 +137,8 @@ export class RoleDispatcher {
     this.clock = options.clock ?? Date.now;
     this.getRiskStatus = options.getRiskStatus ?? (() => 'normal');
     this.canInteract = options.canInteract ?? (() => true);
+    this.conceptStore = options.conceptStore;
+    this.searchLimiter = new SearchFrequencyLimiter(options.searchLimiterOptions);
     this.eventBus = options.eventBus ?? new EventBus();
     this.sessionContext = new SessionContext();
     this.maxDurationMs = (this.soul.session_limits?.max_duration_min ?? 10) * 60_000;
@@ -188,7 +214,12 @@ export class RoleDispatcher {
       new ProfileBrowser(commonOptions),
       new FollowAgent({ ...commonOptions, sessionContext: this.sessionContext, getRemainingFollows: () => this.budget.follows }),
       new SearchScroller(commonOptions, this.sessionContext),
-      new SearchEvaluator({ ...commonOptions, sessionContext: this.sessionContext, getSearchedKeywords }),
+      new SearchEvaluator({
+        ...commonOptions,
+        sessionContext: this.sessionContext,
+        getSearchedKeywords,
+        getConceptPool: () => this.conceptPool,
+      }),
       new SearchExecutor({ ...commonOptions, sessionContext: this.sessionContext }),
       new SessionMonitorRole({
         ...commonOptions,
@@ -198,6 +229,12 @@ export class RoleDispatcher {
         clock: this.clock,
       }),
     ];
+
+    // 概念抽取角色：仅在概念池可用时注册（PG 不可用则不抽取，搜索退化为仅 seed_keywords）。
+    if (this.conceptStore) {
+      const sink = this.conceptStore;
+      this.roles.push(new ConceptExtractorRole({ ...commonOptions, conceptStore: sink }));
+    }
 
     // 注册所有角色的事件订阅
     this.roles.forEach((r) => r.subscribe());
@@ -222,11 +259,34 @@ export class RoleDispatcher {
   startSession(): void {
     this.sessionActive = true;
     this.sessionStartedAt = this.clock();
+    this.searchLimiter.resetSession();
+    // 跨会话概念记忆：异步刷新，不阻塞 feed.entered（首次搜索发生在连刷阈值之后，届时池已就绪）。
+    void this.refreshConceptPool();
     this.eventBus.emit('feed.entered', {
       pageType: 'feed',
       trigger: 'session_start',
       ts: this.clock(),
     });
+  }
+
+  /**
+   * 从 ConceptStore 载入概念池快照供 SearchEvaluator 使用。
+   * PG 不可用 / loadPool 失败 → 回退空池（退化为仅 seed_keywords），不崩浏览闭环。
+   */
+  private async refreshConceptPool(): Promise<void> {
+    if (!this.conceptStore) {
+      this.conceptPool = EMPTY_CONCEPT_POOL;
+      return;
+    }
+    try {
+      this.conceptPool = await this.conceptStore.loadPool();
+      console.log(
+        `[RoleDispatcher] 概念池已载入：candidates=${this.conceptPool.candidates.length} known=${this.conceptPool.known.length}`,
+      );
+    } catch (err) {
+      this.conceptPool = EMPTY_CONCEPT_POOL;
+      console.warn(`[RoleDispatcher] 概念池载入失败，退化为仅 seed_keywords: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /**
@@ -248,6 +308,8 @@ export class RoleDispatcher {
     // 重置会话态（visitedNoteIds 由 SessionContext.reset 跨轮保留）
     this.budget = RoleDispatcher.freshBudget();
     this.searchedKeywords = [];
+    this.searchLimiter.resetSession();
+    void this.refreshConceptPool();
     this.sessionContext.reset();
     // 重新订阅角色与接线（SessionMonitor.subscribe 重置 startedAt/actionCount）
     this.roles.forEach((r) => r.subscribe());
@@ -384,9 +446,30 @@ export class RoleDispatcher {
       }),
 
       this.eventBus.on('search.approved', (payload) => {
-        this.searchedKeywords.push(payload.keyword);
+        const keyword = payload.keyword;
+        // 搜索前两道闸（红线：被拦则诚实跳过——不下发、不扣 budget、不 markSearched，绝不假成功）。
+        // 闸一：会话搜索预算。
+        if (this.budget.searches <= 0) {
+          console.log(`[RoleDispatcher] 搜索被拦截，跳过 keyword=${keyword} reason=budget_exhausted`);
+          return;
+        }
+        // 闸二：限频（每关键词每会话/每天上限）。
+        const decision = this.searchLimiter.explain(keyword);
+        if (!decision.allowed) {
+          console.log(`[RoleDispatcher] 搜索被拦截，跳过 keyword=${keyword} reason=${decision.reason}`);
+          return;
+        }
+        // 两道闸通过 → 记账 + 下发（如实带上 source）。
+        this.searchLimiter.recordSearch(keyword);
+        this.searchedKeywords.push(keyword);
         this.consumeBudget('search');
-        this.sendCommand({ action: 'search', params: { keyword: payload.keyword } });
+        const params: Record<string, unknown> = { keyword };
+        if (payload.source) params.source = payload.source;
+        this.sendCommand({ action: 'search', params });
+        // 跨会话标记已搜（fire-and-forget，失败不影响本次下发）。
+        this.conceptStore?.markSearched(keyword).catch((err) =>
+          console.warn(`[RoleDispatcher] markSearched 失败 keyword=${keyword}: ${err instanceof Error ? err.message : String(err)}`),
+        );
       }),
 
       // 角色产出事件 → Edge 指令翻译

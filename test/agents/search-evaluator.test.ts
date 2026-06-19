@@ -50,11 +50,12 @@ describe('SearchEvaluator', () => {
     role.unsubscribe();
   });
 
-  it('LLM 返回跳过决策 → emit search.skipped', async () => {
+  it('候选集为空（种子词全已搜、无概念池）→ 短路跳过 no_available_keywords（不调 LLM）', async () => {
     const bus = new EventBus();
     const ctx = new SessionContext();
     const searched = ['LLM Agent', 'RAG 实战', 'vLLM 部署'];
-    const llm = createMockLlm('{"verdict":"skip","reason":"所有关键词都搜索过了"}');
+    // 若被调用会让 reason 变成别的值；短路跳过时 LLM 不应被调用。
+    const llm = createMockLlm('{"verdict":"search","keyword":"不该出现","reason":"LLM 不应被调用"}');
 
     const options: SearchEvaluatorOptions = {
       eventBus: bus,
@@ -73,7 +74,7 @@ describe('SearchEvaluator', () => {
 
     assert.ok(captured, 'should emit search.skipped');
     assert.equal(captured!.currentPageType, 'feed');
-    assert.equal(captured!.reason, '所有关键词都搜索过了');
+    assert.equal(captured!.reason, 'no_available_keywords');
 
     role.unsubscribe();
   });
