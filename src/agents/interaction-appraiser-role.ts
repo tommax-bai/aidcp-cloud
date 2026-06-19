@@ -111,8 +111,8 @@ export class InteractionAppraiserRole extends BaseRole {
 
   private buildPrompt(note: NoteData, budget: { likes: number; collects: number }): string {
     const { identity, interests, behavior_guidelines: bg } = this.soul;
-    const collectionPrinciple = bg?.collection_principle ?? '值得反复参考、可直接落地执行';
-    const likePrinciple = bg?.like_principle ?? '学到了新东西或观点受启发';
+    const collectionPrinciple = bg?.collection_principle ?? '只有会反复参考、能直接落地复用的硬核内容才收藏，稀有谨慎';
+    const likePrinciple = bg?.like_principle ?? '有共鸣 / 认同 / 觉得有用就点赞，轻量高频';
     const interestsStr = [...interests.primary, ...interests.secondary].join('、');
 
     return `你是「${identity.name}」，${identity.role}。${identity.background}
@@ -129,10 +129,10 @@ export class InteractionAppraiserRole extends BaseRole {
 
 剩余预算：like=${budget.likes}，collect=${budget.collects}
 
-决策逻辑：
-- collect：内容值得反复查看、有实操步骤、代码/配置、架构图等可复用知识（更稀有更谨慎）
-- like：内容有启发但不需反复参考
-- both：既值得点赞也值得收藏（非常优质）
+决策逻辑（点赞是高频轻互动，收藏是稀有选择性互动）：
+- like：内容有共鸣 / 学到东西 / 认同观点即可——这是常见的轻互动，多数值得互动的笔记都该至少点赞
+- collect：仅当会反复查看、需落地复用（实操步骤 / 代码配置 / 架构图等硬核可复用知识）才收藏——稀有、谨慎
+- both：值得收藏的内容几乎也值得点赞，收藏时优先选 both
 - pass：不够格互动
 
 只输出JSON：{"action":"like","reason":"简短原因","confidence":0.8}
@@ -171,9 +171,9 @@ export class InteractionAppraiserRole extends BaseRole {
 
     if (action === 'like' && budget.likes > 0) {
       actions.push('like');
-    } else if (action === 'collect' && budget.collects > 0) {
-      actions.push('collect');
-    } else if (action === 'both') {
+    } else if (action === 'collect' || action === 'both') {
+      // 收藏即点赞：真人收藏几乎都先点赞，且 LLM 实测从不主动选 both（0/40）。
+      // 故 collect 与 both 一视同仁——在 like 配额允许下同时点赞，收藏受 collect 配额约束。
       if (budget.likes > 0) actions.push('like');
       if (budget.collects > 0) actions.push('collect');
     }

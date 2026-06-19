@@ -79,7 +79,7 @@ describe('InteractionAppraiserRole', () => {
     role.unsubscribe();
   });
 
-  it('LLM 返回 collect → emit interaction.completed with actions=["collect"]', async () => {
+  it('LLM 返回 collect（like 配额充足）→ 收藏即点赞 actions=["like","collect"]', async () => {
     const bus = new EventBus();
     const ctx = new SessionContext();
     const llm = {
@@ -111,8 +111,121 @@ describe('InteractionAppraiserRole', () => {
     await new Promise((r) => setTimeout(r, 50));
 
     assert.ok(captured);
-    assert.deepEqual(captured!.actions, ['collect']);
+    assert.deepEqual(captured!.actions, ['like', 'collect']);
     assert.equal(captured!.sourcePageType, 'search');
+
+    role.unsubscribe();
+  });
+
+  it('LLM 返回 collect（like 配额=0）→ 仅 collect，不绕过配额', async () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    const llm = {
+      complete: async () => '{"action":"collect","reason":"硬核可复用","confidence":0.9}',
+    };
+    const role = new InteractionAppraiserRole({
+      eventBus: bus,
+      soul: mockSoul,
+      llm,
+      sessionContext: ctx,
+      getNoteData: () => sampleNote,
+      getRemainingBudget: () => ({ likes: 0, collects: 3 }),
+    });
+    role.subscribe();
+
+    let captured = null as InteractionCompletedPayload | null;
+    bus.on('interaction.completed', (p) => { captured = p; });
+
+    bus.emit('reading.done', {
+      noteId: 'note_1',
+      sourcePageType: 'feed',
+      imagesBrowsed: 2,
+      commentsRead: 3,
+      keyPoints: [],
+      readDurationMs: 800,
+      ts: Date.now(),
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.ok(captured);
+    assert.deepEqual(captured!.actions, ['collect']);
+
+    role.unsubscribe();
+  });
+
+  it('LLM 返回 collect（collect 配额=0、like 配额充足）→ 仅 like', async () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    const llm = {
+      complete: async () => '{"action":"collect","reason":"有用但藏额已满","confidence":0.9}',
+    };
+    const role = new InteractionAppraiserRole({
+      eventBus: bus,
+      soul: mockSoul,
+      llm,
+      sessionContext: ctx,
+      getNoteData: () => sampleNote,
+      getRemainingBudget: () => ({ likes: 5, collects: 0 }),
+    });
+    role.subscribe();
+
+    let captured = null as InteractionCompletedPayload | null;
+    bus.on('interaction.completed', (p) => { captured = p; });
+
+    bus.emit('reading.done', {
+      noteId: 'note_1',
+      sourcePageType: 'feed',
+      imagesBrowsed: 2,
+      commentsRead: 3,
+      keyPoints: [],
+      readDurationMs: 800,
+      ts: Date.now(),
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.ok(captured);
+    assert.deepEqual(captured!.actions, ['like']);
+
+    role.unsubscribe();
+  });
+
+  it('prompt 把 like 框定为低门槛常见、collect 为稀有选择性', async () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    let capturedPrompt = '';
+    const llm = {
+      complete: async (p: string) => {
+        capturedPrompt = p;
+        return '{"action":"pass","reason":"n/a","confidence":0.5}';
+      },
+    };
+    const role = new InteractionAppraiserRole({
+      eventBus: bus,
+      soul: mockSoul,
+      llm,
+      sessionContext: ctx,
+      getNoteData: () => sampleNote,
+      getRemainingBudget: defaultBudget,
+    });
+    role.subscribe();
+
+    bus.emit('reading.done', {
+      noteId: 'note_1',
+      sourcePageType: 'feed',
+      imagesBrowsed: 1,
+      commentsRead: 1,
+      keyPoints: [],
+      readDurationMs: 300,
+      ts: Date.now(),
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.match(capturedPrompt, /点赞是高频轻互动/);
+    assert.match(capturedPrompt, /多数值得互动的笔记都该至少点赞/);
+    assert.match(capturedPrompt, /稀有、谨慎/);
 
     role.unsubscribe();
   });
