@@ -73,6 +73,67 @@ describe('PublishExecutorRole', () => {
     assert.equal(pushedEnvelopes[0].envelope.id, 'test-env-001');
   });
 
+  test('stage-4 指令驱动：真血缘落库 + publishMetadata 落库/穿透 sequencer + 已授权回写 published', async () => {
+    const insertedRecords: any[] = [];
+    const recordedMeta: any[] = [];
+    let updatedPostId: { id: number; postId: string } | undefined;
+    let seqInput: any;
+    const fakeStore = {
+      insert: async (record: any) => { insertedRecords.push(record); return 7; },
+      updateStatus: async () => {},
+      updatePostId: async (id: number, postId: string) => { updatedPostId = { id, postId }; },
+      recordMetadata: async (id: number, metadata: any, aiEnforced: boolean) => { recordedMeta.push({ id, metadata, aiEnforced }); },
+    };
+    const fakeSequencer = {
+      executePublishSequence: async (input: any) => { seqInput = input; return { ok: true, postId: 'post_real_1' }; },
+    } as any;
+
+    const role = new PublishExecutorRole({
+      store: fakeStore,
+      pusher: { pushToEdges: () => 1 },
+      sequencer: fakeSequencer,
+      isApproved: async () => true,
+      clock,
+      logger: silentLogger,
+    });
+
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('trigger', {
+      metrics: { hoursSinceLastPublish: 30, newConceptCount: 2, likedSinceLastPublish: 1 },
+      generateInput: {
+        concepts: [{ keyword: 'RAG 重排' }, { keyword: 'vLLM' }],
+        likedContents: [{ id: 11, title: 'RAG', summary: 's', author: 'a' }],
+        soul: {} as any,
+        recentPosts: [],
+      },
+      recentPublished: [],
+    } as any);
+    ctx.write('publishMetadata', {
+      topics: ['RAG'], mentions: [], location: null, collection: null,
+      visibility: 'public', permissions: { comment: 'allow', save: 'allow' },
+      mode: 'immediate', publishTime: null, compliance: { ai: true, aiEnforced: true }, metadataScore: 0.6, decidedAt: 0,
+    } as any);
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const result = ctx.get('publishResult');
+    assert.equal(result?.status, 'published');
+    // 真血缘：sourceConcepts 来自 trigger 概念、sourceLikedIds 来自真实点赞 id（不再写死 []）
+    assert.deepEqual(insertedRecords[0].sourceConcepts, ['RAG 重排', 'vLLM']);
+    assert.deepEqual(insertedRecords[0].sourceLikedIds, [11]);
+    // publishMetadata 落库 + 防篡改审计（aiEnforced=true）
+    assert.equal(recordedMeta.length, 1);
+    assert.equal(recordedMeta[0].aiEnforced, true);
+    // metadata 穿透给 sequencer
+    assert.equal(seqInput.metadata.visibility, 'public');
+    assert.equal(seqInput.approvedByUser, true);
+    // 回写 postId → published
+    assert.deepEqual(updatedPostId, { id: 7, postId: 'post_real_1' });
+  });
+
   test('manual_review → 调用 store.insert + messenger.sendApprovalCard', async () => {
     const insertedRecords: any[] = [];
     const sentCards: any[] = [];

@@ -21,8 +21,13 @@ CREATE TABLE IF NOT EXISTS publish_log (
   source_liked_ids INT[] DEFAULT '{}',
   status           TEXT NOT NULL DEFAULT 'draft'
                    CHECK (status IN ('draft','published','failed','needs_review')),
-  platform_post_id TEXT
+  platform_post_id TEXT,
+  publish_metadata JSONB,
+  ai_enforced      BOOLEAN NOT NULL DEFAULT false
 );
+-- 既有表向后兼容（幂等）：A 阶段4 元数据落库 + 防篡改审计列。
+ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS publish_metadata JSONB;
+ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS ai_enforced BOOLEAN NOT NULL DEFAULT false;
 `;
 
 export interface PublishLogStoreOptions {
@@ -98,6 +103,24 @@ export class PublishLogStore {
       `UPDATE publish_log SET platform_post_id = $2, status = 'published' WHERE id = $1`,
       [id, postId],
     );
+  }
+
+  /** 落库发帖元数据（A 阶段4 血缘/可观测）+ 防篡改审计标记。 */
+  async recordMetadata(id: number, metadata: unknown, aiEnforced: boolean): Promise<void> {
+    await this.pool.query('UPDATE publish_log SET publish_metadata = $2, ai_enforced = $3 WHERE id = $1', [
+      id,
+      JSON.stringify(metadata),
+      aiEnforced,
+    ]);
+  }
+
+  /** 最近一次发布的时间戳（毫秒）；无记录返回 null。供 PublishScheduler 概念积累扳机基准。 */
+  async getMostRecentPublishTime(): Promise<number | null> {
+    const { rows } = await this.pool.query<{ ts: string | null }>(
+      `SELECT extract(epoch from max(published_at)) * 1000 AS ts FROM publish_log WHERE status = 'published'`,
+    );
+    const ts = rows[0]?.ts;
+    return ts == null ? null : Number(ts);
   }
 
   /** 取最近 n 篇已发布帖子的正文（供生成时避免重复话题）。 */

@@ -148,6 +148,24 @@ export class ConceptStore {
     );
   }
 
+  /** 自某时刻起新发现的概念数（stage-4 PublishScheduler 概念积累扳机用）。 */
+  async countNewSince(sinceMs: number): Promise<number> {
+    const { rows } = await this.pool.query<{ n: string }>(
+      'SELECT count(*)::int AS n FROM concepts WHERE discovered_at > to_timestamp($1 / 1000.0)',
+      [sinceMs],
+    );
+    return Number(rows[0]?.n ?? 0);
+  }
+
+  /** 自某时刻起新发现的概念关键词（供 TriggerInput.generateInput.concepts）。 */
+  async getNewConceptsSince(sinceMs: number, limit = 20): Promise<string[]> {
+    const { rows } = await this.pool.query<{ keyword: string }>(
+      'SELECT keyword FROM concepts WHERE discovered_at > to_timestamp($1 / 1000.0) ORDER BY discovered_at DESC LIMIT $2',
+      [sinceMs, limit],
+    );
+    return rows.map((r) => r.keyword);
+  }
+
   /** 关闭连接池 */
   async close(): Promise<void> {
     await this.pool.end();

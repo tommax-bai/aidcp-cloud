@@ -42,6 +42,44 @@ const okFor = (cmd: PublishCommandPayload): PublishCommandResultPayload => ({
 });
 
 describe('AC-CMD CommandSequencer（云端编排驱动）', () => {
+  it('AC-CMD-SEQ-08 stage-4 元数据应用：metadata → 发 mention/location/set_option/set_schedule（submit 前）', () => {
+    const { seq } = makeSequencer(() => null);
+    const metadata = {
+      topics: ['t1'], mentions: ['userA'], location: '上海', collection: '技术',
+      visibility: 'public' as const,
+      permissions: { comment: 'allow' as const, save: 'allow' as const },
+      mode: 'scheduled' as const, publishTime: 1800000000000,
+      compliance: { ai: true }, metadataScore: 0.9, decidedAt: 0,
+    };
+    const cmds = seq.buildCommandSequence(input({ tags: ['a'], metadata, approvedByUser: true }));
+    const kinds = cmds.map((c) => c.kind);
+    // 元数据指令在 submit 之前
+    const submitIdx = kinds.indexOf('submit_publish');
+    const optIdx = kinds.indexOf('set_option');
+    assert.ok(optIdx >= 0 && optIdx < submitIdx, 'set_option 应在 submit 之前');
+    // @ / 地点 / 合集 经 add_with_candidate（按 candidateKind 区分）
+    const cands = cmds.filter((c) => c.kind === 'add_with_candidate').map((c) => c.params.candidateKind);
+    assert.ok(cands.includes('mention') && cands.includes('location') && cands.includes('collection'));
+    // 可见范围/权限/AI声明 set_option + 定时
+    const opts = cmds.filter((c) => c.kind === 'set_option').map((c) => c.params.optionKind);
+    assert.ok(opts.includes('visibility') && opts.includes('declaration_ai'));
+    assert.ok(kinds.includes('set_schedule'), 'scheduled 模式应发 set_schedule');
+    assert.ok(kinds.includes('submit_publish') && kinds.includes('capture_postId'));
+  });
+
+  it('AC-CMD-SEQ-09 未授权 + 有 metadata → 元数据指令在、但 submit/capture 截止（AC-PUB 第2闸）', () => {
+    const { seq } = makeSequencer(() => null);
+    const metadata = {
+      topics: [], mentions: [], location: null, collection: null,
+      visibility: 'self_only' as const, permissions: { comment: 'disable' as const, save: 'disable' as const },
+      mode: 'immediate' as const, publishTime: null, compliance: {}, metadataScore: 0, decidedAt: 0,
+    };
+    const cmds = seq.buildCommandSequence(input({ tags: [], metadata, approvedByUser: false }));
+    const kinds = cmds.map((c) => c.kind);
+    assert.ok(kinds.includes('set_option'), '未授权仍可发元数据（填页），但不提交');
+    assert.ok(!kinds.includes('submit_publish'), 'AC-PUB：未授权绝不入 submit');
+  });
+
   it('AC-CMD-SEQ-01 已授权序列结构：nav→select_mode→title→content→tag×N→submit→capture，seq 连续', () => {
     const { seq } = makeSequencer(() => null);
     const cmds = seq.buildCommandSequence(input({ tags: ['a', 'b'] }));

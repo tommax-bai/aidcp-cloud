@@ -1,6 +1,6 @@
 import { BasePublishRole } from './base-role.js';
 import type { RoleConfig } from './base-role.js';
-import type { PipelineFields, GateDecision, AssembledContent, PublishResult } from '../types.js';
+import type { PipelineFields, GateDecision, AssembledContent, PublishResult, TriggerInput, PublishMetadata } from '../types.js';
 import type { PipelineContext } from '../pipeline-context.js';
 import type { CommandSequencer } from '../command-sequencer.js';
 
@@ -14,10 +14,15 @@ export interface PublishLogStore {
     status: string;
     qualityScore: number;
     aiScore: number;
+    /** stage-4 来源血缘（缺省时由适配器回退 tags / []）。 */
+    sourceConcepts?: string[];
+    sourceLikedIds?: number[];
   }): Promise<number>;
   /** 发布结果回写（指令驱动路径用；可选以兼容仅 insert 的旧桩）。 */
   updateStatus?(id: number, status: string): Promise<void>;
   updatePostId?(id: number, postId: string): Promise<void>;
+  /** stage-4 元数据落库 + 防篡改审计（可选）。 */
+  recordMetadata?(id: number, metadata: unknown, aiEnforced: boolean): Promise<void>;
 }
 
 /** 边缘推送接口 */
@@ -88,12 +93,12 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     };
   }
 
-  protected async execute(input: ExecutorInput, _context: PipelineContext<PipelineFields>): Promise<PublishResult> {
+  protected async execute(input: ExecutorInput, context: PipelineContext<PipelineFields>): Promise<PublishResult> {
     const { gateDecision, assembledContent } = input;
 
     switch (gateDecision.recommendedAction) {
       case 'auto_publish':
-        return this.handleAutoPublish(assembledContent);
+        return this.handleAutoPublish(assembledContent, context);
       case 'manual_review':
         return this.handleManualReview(assembledContent);
       case 'abort':
@@ -105,7 +110,18 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     }
   }
 
-  private async handleAutoPublish(assembled: AssembledContent): Promise<PublishResult> {
+  /** stage-4 来源血缘：从 trigger 取真概念/真点赞 id（无则空，不编造）。 */
+  private lineageFrom(context: PipelineContext<PipelineFields>): { sourceConcepts: string[]; sourceLikedIds: number[] } {
+    const trigger = context.get('trigger') as TriggerInput | undefined;
+    const gi = trigger?.generateInput;
+    return {
+      sourceConcepts: gi?.concepts?.map((c) => c.keyword) ?? [],
+      sourceLikedIds: gi?.likedContents?.map((l) => l.id) ?? [],
+    };
+  }
+
+  private async handleAutoPublish(assembled: AssembledContent, context: PipelineContext<PipelineFields>): Promise<PublishResult> {
+    const lineage = this.lineageFrom(context);
     const recordId = await this.store.insert({
       title: this.deriveTitle(assembled),
       content: assembled.finalContent,
@@ -114,11 +130,13 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       status: 'draft',
       qualityScore: assembled.qualityScore,
       aiScore: assembled.aiScore,
+      sourceConcepts: lineage.sourceConcepts,
+      sourceLikedIds: lineage.sourceLikedIds,
     });
 
     // A 阶段1 新路：注入了 sequencer → 指令驱动 + AC-PUB 闸 + 结果回写。
     if (this.sequencer) {
-      return this.handleAutoPublishViaSequencer(recordId, assembled);
+      return this.handleAutoPublishViaSequencer(recordId, assembled, context);
     }
 
     // 旧整页路径（无 sequencer，地基阶段并行保留）。
@@ -151,7 +169,15 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
   private async handleAutoPublishViaSequencer(
     recordId: number,
     assembled: AssembledContent,
+    context: PipelineContext<PipelineFields>,
   ): Promise<PublishResult> {
+    // stage-4：读 stage-3 决策的元数据；落库（血缘/可观测）+ 防篡改审计（aiEnforced && !ai 视为已回正态，如实记）。
+    const metadata = context.get('publishMetadata') as PublishMetadata | undefined;
+    if (metadata && this.store.recordMetadata) {
+      const aiEnforced = metadata.compliance.aiEnforced === true;
+      await this.store.recordMetadata(recordId, metadata, aiEnforced).catch(() => {});
+    }
+
     const requestId = `publish-${recordId}`;
     const approved = this.isApproved ? await this.isApproved(requestId).catch(() => false) : false;
 
@@ -169,6 +195,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       content: assembled.finalContent,
       tags: assembled.finalTags,
       images: assembled.imageUrl ? [assembled.imageUrl] : undefined,
+      metadata,
       approvedByUser: true,
     });
 

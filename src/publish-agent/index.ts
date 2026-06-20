@@ -1,5 +1,6 @@
 export { PipelineContext } from './pipeline-context.js';
 export { PublishOrchestrator } from './publish-orchestrator.js';
+export { PublishScheduler } from './publish-scheduler.js';
 export { BasePublishRole } from './roles/base-role.js';
 export type { RoleConfig } from './roles/base-role.js';
 export { executeWithRetry, executeWithFallback } from './retry-strategy.js';

@@ -13,20 +13,16 @@
  * 运行：npm start
  */
 
-import http from 'node:http';
-import { randomUUID } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { QwenClient } from './llm/index.js';
 import { SimplePlanner } from './planner/index.js';
-import { PgAnchorCache, BotChatStore, ConceptStore } from './cache/index.js';
+import { PgAnchorCache, BotChatStore, ConceptStore, LikedNoteStore } from './cache/index.js';
 import {
   EdgeCloudServer,
   DefaultMessageHandler,
   CaptchaCoordinator,
-  makeEnvelope,
   edgeCommandToEnvelope,
-  type PublishRequestPayload,
   type Envelope,
 } from './comm/index.js';
 
@@ -49,7 +45,7 @@ import {
   type CommandActions,
 } from './feishu/index.js';
 import { CommandSequencer } from './publish-agent/command-sequencer.js';
-import { PublishOrchestrator } from './publish-agent/index.js';
+import { PublishOrchestrator, PublishScheduler } from './publish-agent/index.js';
 import { WanxiangClient } from './publish-agent/wanxiang-client.js';
 import { AccountStateManager } from './account-state.js';
 import { PgAccountStore, type AccountStore } from './account-store.js';
@@ -141,6 +137,23 @@ async function main(): Promise<void> {
     console.warn('[aidcp-cloud] PublishLogStore 初始化失败:', (err as Error).message);
   }
 
+  // 点赞笔记存储（liked_notes 表，发帖来源血缘）。init 失败留 undefined（血缘退化、不阻塞启动）。
+  let likedNoteStore: LikedNoteStore | undefined;
+  try {
+    const ls = new LikedNoteStore({
+      host: readEnvString('PGHOST'),
+      port: readEnvPort('PGPORT'),
+      database: readEnvString('PGDATABASE'),
+      user: readEnvString('PGUSER'),
+      password: readEnvString('PGPASSWORD'),
+    });
+    await ls.init();
+    likedNoteStore = ls;
+    console.log('[aidcp-cloud] LikedNoteStore 已就绪（liked_notes 表）');
+  } catch (err) {
+    console.warn('[aidcp-cloud] LikedNoteStore 初始化失败，来源血缘退化:', (err as Error).message);
+  }
+
   // 概念池存储（concepts 表，跨会话搜索记忆）。init 失败则留 undefined：
   // RoleDispatcher 不注册概念抽取角色、搜索退化为仅 seed_keywords（不崩闭环）。
   let conceptStore: ConceptStore | undefined;
@@ -228,8 +241,17 @@ async function main(): Promise<void> {
     riskController.record(evt.action).catch((err) => {
       console.warn('[aidcp-cloud] RiskController record error:', err);
     });
+    // A 阶段4 来源血缘：真实点赞落 liked_notes（noteId 才落；详情缺则空字段如实，不编造）。
+    if (evt.action === 'like' && evt.noteId && likedNoteStore) {
+      likedNoteStore.recordLike(evt.noteId).catch((err) => {
+        console.warn('[aidcp-cloud] LikedNoteStore recordLike error:', err);
+      });
+    }
   });
   console.log('[aidcp-cloud] 事件订阅已建立（RiskController）');
+
+  // A 阶段4 发帖触发器（下方实例化；actions.publish 运行时引用，前向安全）。
+  let publishScheduler: PublishScheduler | undefined;
 
   // 飞书事件接收（官方 SDK 长连接，主动连飞书，无需公网 IP / HTTP 端口）
   // MVP：账号启停/查询动作先打桩（后续接云端调度器 → plan.request）
@@ -252,6 +274,12 @@ async function main(): Promise<void> {
       console.log(`[feishu] 已恢复账号：${accountId}（恢复 edge 数=${resumedEdges}）`);
     },
     bindChat: (record) => botChatStore.setDefault(record),
+    // 手动 /publish：越过风控 canDo（人工授权），发布前飞书人审仍铁定生效（AC-PUB）。
+    publish: async () => {
+      if (!publishScheduler) return '发帖触发器未就绪（PG/概念池不可用）';
+      const o = await publishScheduler.triggerManual();
+      return `已触发（${o.reason}）→ 编排状态 ${'status' in o ? o.status : '-'}`;
+    },
   };
   const commandRouter = new CommandRouter(actions);
   const messenger = new FeishuMessenger();
@@ -395,28 +423,37 @@ async function main(): Promise<void> {
     isApproved: isPublishApproved,
   }));
   console.log(`[aidcp-cloud] PublishOrchestrator 已就绪，角色: ${publishOrchestrator.getRoles().join(', ')}`);
-  const debugPayload: PublishRequestPayload = {
-    title: '【测试请忽略】AIDCP 主动审批联调',
-    content: '自动化测试请忽略',
-    tags: ['测试'],
-  };
-  const debugServer = http.createServer((req, res) => {
-    if (req.method !== 'POST' || req.url !== '/debug/publish') {
-      res.statusCode = 404;
-      res.end('not_found');
-      return;
+
+  // A 阶段4 发帖触发器：复用已持久化的 ConceptStore/LikedNoteStore/PublishLogStore/RiskController 单例。
+  // 缺概念池/点赞库（PG 不可用）则不建——manual /publish 回"未就绪"，不静默假发布。
+  if (conceptStore && likedNoteStore) {
+    publishScheduler = new PublishScheduler({
+      conceptStore,
+      likedStore: likedNoteStore,
+      publishLog: publishLogStore,
+      risk: riskController,
+      orchestrator: publishOrchestrator,
+      soul,
+      conceptThreshold: Number(process.env.AIDCP_PUBLISH_CONCEPT_THRESHOLD ?? 20),
+      minHoursBetween: Number(process.env.AIDCP_PUBLISH_MIN_HOURS ?? 24),
+      logger: console,
+    });
+    console.log('[aidcp-cloud] PublishScheduler 已就绪（手动 /publish 即用）');
+    // 自动扳机轮询默认关闭（须显式 AIDCP_PUBLISH_AUTO=true 才开），避免未到部署/edge 就绪即自动发。
+    if (readEnvString('AIDCP_PUBLISH_AUTO') === 'true') {
+      const everyMin = Number(process.env.AIDCP_PUBLISH_AUTO_INTERVAL_MIN ?? 30);
+      setInterval(() => {
+        publishScheduler!.checkAndMaybeTrigger().then(
+          (o) => o.result !== 'skipped' && console.log(`[aidcp-cloud] PublishScheduler auto: ${o.result} (${o.reason})`),
+          (err) => console.warn('[aidcp-cloud] PublishScheduler auto error:', err),
+        );
+      }, everyMin * 60_000);
+      console.log(`[aidcp-cloud] PublishScheduler 自动扳机已开启（每 ${everyMin} 分钟）`);
     }
-    const env = makeEnvelope('publish.request', `temp-publish-${randomUUID()}`, Date.now(), debugPayload);
-    const sent = server.pushToEdges(env);
-    console.log(
-      `[aidcp-cloud] TODO(temp) debug publish trigger sent=${sent} title=${debugPayload.title}`,
-    );
-    res.setHeader('content-type', 'application/json');
-    res.end(JSON.stringify({ ok: sent > 0, sent, payload: debugPayload }));
-  });
-  debugServer.listen(debugPort, '127.0.0.1', () => {
-    console.log(`[aidcp-cloud] TODO(temp) debug publish trigger listening on 127.0.0.1:${debugPort}`);
-  });
+  } else {
+    console.warn('[aidcp-cloud] PublishScheduler 未建（ConceptStore/LikedNoteStore 不可用），发帖触发不可用');
+  }
+  // 旧 TODO(temp) /debug/publish 调试口已删除（A 阶段4）：发帖只经 PublishScheduler 三扳机 + 发布前人审。
   const feishuReceiver = new FeishuWsReceiver({ commandRouter, messenger });
   try {
     const wsClient = new lark.WSClient({

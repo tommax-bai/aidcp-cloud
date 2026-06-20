@@ -24,7 +24,7 @@ import type { BotChatRecord } from '../cache/bot-chat-store.js';
 export const DEFAULT_ACCOUNT_ID = 'default';
 
 /** 已识别的指令动作 */
-export type CommandAction = 'status' | 'pause' | 'resume' | 'publish-test' | 'bind' | 'help';
+export type CommandAction = 'status' | 'pause' | 'resume' | 'publish-test' | 'publish' | 'bind' | 'help';
 
 /** 解析后的指令结构 */
 export interface ParsedCommand {
@@ -75,6 +75,8 @@ export function parseCommand(text: string): ParsedCommand {
       return { action: 'resume', accountId: args[0] ?? DEFAULT_ACCOUNT_ID, raw, args };
     case '/publish-test':
       return { action: 'publish-test', accountId: DEFAULT_ACCOUNT_ID, raw, args };
+    case '/publish':
+      return { action: 'publish', accountId: DEFAULT_ACCOUNT_ID, raw, args };
     case '/bind':
       return { action: 'bind', accountId: DEFAULT_ACCOUNT_ID, raw, args };
     default:
@@ -92,6 +94,8 @@ export interface CommandActions {
   resume(accountId: string): Promise<void> | void;
   /** 发送审批测试卡片 */
   publishTest?(): Promise<PublishApprovalPayload> | PublishApprovalPayload;
+  /** 手动触发一次发帖编排（A 阶段4 PublishScheduler 手动扳机；返回可读回执）。 */
+  publish?(): Promise<string> | string;
   /** 绑定当前群为默认审批群 */
   bindChat?(record: BotChatRecord): Promise<void> | void;
 }
@@ -131,6 +135,8 @@ export class CommandRouter {
         return this.runResume(cmd);
       case 'publish-test':
         return this.runPublishTest(cmd, context?.chatId);
+      case 'publish':
+        return this.runPublish(cmd);
       case 'bind':
         return this.runBind(cmd, context?.chatId);
       case 'help':
@@ -156,6 +162,23 @@ export class CommandRouter {
       };
     } catch (err) {
       return this.fail(cmd, '状态查询失败', err);
+    }
+  }
+
+  private async runPublish(cmd: ParsedCommand): Promise<CommandResult> {
+    if (!this.actions.publish) {
+      return this.fail(cmd, '发帖未接线', new Error('publish action not wired'));
+    }
+    try {
+      const msg = await this.actions.publish();
+      return {
+        command: cmd.raw,
+        ok: true,
+        title: '已触发发帖编排',
+        message: `${msg}\n（人工授权越过风控，但发布前仍需飞书人审 approved=true 才会真发）`,
+      };
+    } catch (err) {
+      return this.fail(cmd, '发帖触发失败', err);
     }
   }
 

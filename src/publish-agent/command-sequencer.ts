@@ -18,6 +18,7 @@ import type {
   PublishCommandPayload,
   PublishCommandResultPayload,
 } from '../comm/protocol.js';
+import type { PublishMetadata } from './types.js';
 
 /** 边缘推送接口（与 EdgeCloudServer.pushToEdges 同构）。 */
 export interface SequencerPusher {
@@ -30,8 +31,10 @@ export interface PublishSequenceInput {
   title: string;
   content: string;
   tags: string[];
-  /** 配图 URL（本阶段 edge 未实装 upload_image，暂不入序列，仅预留） */
+  /** 配图 URL（配图 e2e 在后续 publish-media-upload change，暂不入序列） */
   images?: string[];
+  /** 发帖元数据（stage-3 决策产物）：话题/@/地点/合集/可见范围/权限/合规/定时；下发为 edge 指令应用。 */
+  metadata?: PublishMetadata;
   /** 是否已通过人审（AC-PUB）；false → 序列截止于提交前 */
   approvedByUser: boolean;
 }
@@ -93,7 +96,25 @@ export class CommandSequencer {
       // 候选项云端预生成随 params 下发，边缘只定位点击（边轻云重）。
       add('add_with_candidate', { candidateKind: 'topic', value: tag, candidates: [tag] });
     }
-    // 注：upload_image / set_schedule 本阶段 edge 未实装，暂不入序列（Open Q1/Q3）。
+
+    // stage-4 元数据应用：把 stage-3 决策的元数据下发为 edge 指令（配图 upload_image 在后续 change）。
+    const md = input.metadata;
+    if (md) {
+      for (const mention of md.mentions) {
+        add('add_with_candidate', { candidateKind: 'mention', value: mention, candidates: [mention] });
+      }
+      if (md.location) add('add_with_candidate', { candidateKind: 'location', value: md.location, candidates: [md.location] });
+      if (md.collection) add('add_with_candidate', { candidateKind: 'collection', value: md.collection, candidates: [md.collection] });
+      // 可见范围（硬必选）+ 权限开关 + 合规声明（仅置位为 true 的声明）。
+      add('set_option', { optionKind: 'visibility', optionValue: md.visibility });
+      add('set_option', { optionKind: 'comment_permission', optionValue: md.permissions.comment });
+      add('set_option', { optionKind: 'save_permission', optionValue: md.permissions.save });
+      if (md.compliance.ai) add('set_option', { optionKind: 'declaration_ai', optionValue: 'true' });
+      if (md.compliance.ad) add('set_option', { optionKind: 'declaration_ad', optionValue: 'true' });
+      if (md.compliance.origin) add('set_option', { optionKind: 'declaration_origin', optionValue: 'true' });
+      // 定时发布（仅 scheduled 且有时刻）。
+      if (md.mode === 'scheduled' && md.publishTime) add('set_schedule', { publishTime: md.publishTime });
+    }
 
     // AC-PUB 第 2 道闸：未授权 → 提交前截止，submit_publish / capture_postId 不入序列。
     if (!input.approvedByUser) return cmds;

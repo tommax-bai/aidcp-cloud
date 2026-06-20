@@ -170,3 +170,8 @@ test('CommandRouter: publish-test 使用显式 requestId', async () => {
   assert.match(res.message, /req-fixed/);
   assert.match(sent[0], /req-fixed/);
 });
+
+test('parseCommand: /aidcp publish → action publish（A 阶段4 手动扳机）', () => {
+  const cmd = parseCommand('/aidcp publish');
+  assert.equal(cmd.action, 'publish');
+});
