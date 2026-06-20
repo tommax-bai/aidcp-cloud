@@ -50,8 +50,10 @@ export type MessageType =
   | 'risk.captcha_cleared' // edge → cloud：验证码/未知阻断弹窗已清除，已恢复浏览
   // —— 发布编排（Publish Agent 驱动）——
   | 'publish.approval_request' // edge → cloud：请求发送发布审批卡片
-  | 'publish.request' // cloud → edge：请求在浏览器中发布一篇帖子
-  | 'publish.result' // edge → cloud：发布结果回传
+  | 'publish.request' // cloud → edge：请求在浏览器中发布一篇帖子（v1 整页路径，地基阶段并行保留）
+  | 'publish.result' // edge → cloud：发布结果回传（v1 整页路径）
+  | 'publish.command' // cloud → edge：下发一条参数化发布原子指令（A 阶段1 指令驱动路径）
+  | 'publish.command.result' // edge → cloud：回传单条发布指令的执行结果
   // —— 角色驱动指令（cloud → edge，RoleDispatcher 驱动）——
   | 'page.scroll'          // 页面滚动
   | 'interaction.like'     // 点赞
@@ -61,9 +63,14 @@ export type MessageType =
   | 'note.browse_images'   // 浏览笔记图片
   | 'note.scroll_comments' // 滚动评论区
   | 'profile.open'         // 进入作者主页（专用指令，取代 open_note{type:'profile'}）
-  | 'notification.open'    // cloud → edge：去通知页查看「评论和@」（复合命令，仿 profile.open）
+  | 'notification.open'             // cloud → edge：导航到通知首页（仅导航，不再复合）
+  | 'notification.browse_comments'  // cloud → edge：进「评论和@」+ 滚动 + 抽取
+  | 'notification.browse_likes'     // cloud → edge：进「赞和收藏」（v1 看一眼清未读）
+  | 'notification.browse_follows'   // cloud → edge：进「新增关注」（v1 看一眼清未读）
+  | 'notification.back_home'        // cloud → edge：返回通知首页
   // —— Edge 上报（edge → cloud，RoleDispatcher 消费）——
   | 'notification.detected' // edge → cloud：检测到「消息」有未读（仅信号）
+  | 'notification.home'     // edge → cloud：通知首页各类未读快照
   | 'notification.items'    // edge → cloud：上报抽取的评论/@ 项
   | 'page.cards'           // Edge 上报当前可见卡片列表
   | 'note.detail'          // Edge 上报笔记详情
@@ -370,6 +377,85 @@ export interface PublishResultPayload {
   error?: string;
 }
 
+/** 发布原子指令的种类（A 设计 E1-E10）。 */
+export type PublishCommandKind =
+  | 'navigate_entry'
+  | 'select_mode'
+  | 'upload_image'
+  | 'set_cover'
+  | 'fill_field'
+  | 'add_with_candidate'
+  | 'set_option'
+  | 'set_schedule'
+  | 'submit_publish'
+  | 'capture_postId';
+
+/**
+ * 各 kind 的参数（按 kind 区分；元数据维度本阶段先占位预留）。
+ * 边轻云重：候选项（candidates）由云端预生成下发，边缘只定位点击、不实时拉取。
+ */
+export interface PublishCommandParams {
+  /** fill_field：字段类型 */
+  fieldType?: 'title' | 'content';
+  /** fill_field / add_with_candidate：要填入或匹配的文本值 */
+  value?: string;
+  /** add_with_candidate：候选项种类（话题/@/地点/合集） */
+  candidateKind?: 'topic' | 'mention' | 'location' | 'collection';
+  /** add_with_candidate：云端预生成的候选文本（边缘定位点击用） */
+  candidates?: string[];
+  /** upload_image / set_cover：图片 URL */
+  imageUrl?: string;
+  /** set_option：开关项种类（可见范围/评论权限/各声明等，后续 stage 启用） */
+  optionKind?: string;
+  /** set_option：开关项取值 */
+  optionValue?: string;
+  /** set_schedule：定时发布时刻（毫秒时间戳；缺省则云端不下发此指令） */
+  publishTime?: number;
+}
+
+/**
+ * 一条参数化发布指令（cloud → edge）。
+ * `recordId + seq` 为业务级永久关联键（请求/结果配对靠它）；`envelope.id` 仅供日志。
+ * 注意：此 `recordId`（数字，PublishLogStore.insert 返回）与 AC-PUB 审批文件的 `requestId`（字符串）是两个不同的键。
+ */
+export interface PublishCommandPayload {
+  /** 发布记录主键 */
+  recordId: number;
+  /** 指令在本次发布序列中的序号（从 0 递增） */
+  seq: number;
+  /** 指令种类 */
+  kind: PublishCommandKind;
+  /** 指令参数 */
+  params: PublishCommandParams;
+  /** 边缘执行超时（毫秒，缺省由边缘兜底） */
+  timeoutMs?: number;
+  /** 简短说明（观测用） */
+  reason?: string;
+}
+
+/**
+ * 单条发布指令的执行结果（edge → cloud），按 `recordId + seq` 关联回请求。
+ * 红线：`ok` 按真实结果回报，绝不静默假成功——找不到目标 `no_target`、后置校验失败 `post_validation_failed`。
+ */
+export interface PublishCommandResultPayload {
+  recordId: number;
+  seq: number;
+  kind: PublishCommandKind;
+  /** 是否成功 */
+  ok: boolean;
+  /** 成功时的产出值（如 capture_postId 的真实 postId） */
+  value?: string;
+  /** 失败原因（no_target / post_validation_failed / kind_not_implemented / escalated 等） */
+  error?: string;
+  /** 诊断细节（定位/校验观测） */
+  details?: {
+    actionId?: string;
+    outcome?: string;
+    attempts?: number;
+    durationMs?: number;
+  };
+}
+
 /** 确认收到笔记（cloud → edge），异步处理中。 */
 export interface NoteAckPayload {
   /** 确认收到 */
@@ -494,9 +580,8 @@ export interface NotificationDetectedPayload {
   unreadCount?: number;
 }
 
-/** cloud → edge：去通知页查看「评论和@」（复合命令，导航+切 tab+抽取+上报 notification.items）。 */
+/** cloud → edge：导航到通知首页（仅导航；落地后边缘上报 notification.home 各类未读）。 */
 export interface NotificationOpenPayload {
-  limit?: number;
   thinkMs?: number;
 }
 
@@ -513,6 +598,36 @@ export interface NotificationItem {
 export interface NotificationItemsPayload {
   items: NotificationItem[];
   epoch?: number;
+}
+
+/** edge → cloud：通知首页各类未读快照（喂给分诊）。计数 >0 即该类有未读。 */
+export interface NotificationHomePayload {
+  comments: number;
+  likes: number;
+  follows: number;
+  epoch?: number;
+}
+
+/** cloud → edge：进「评论和@」+ 滚动加载 + 抽取（→ notification.items）。 */
+export interface NotificationBrowseCommentsPayload {
+  thinkMs?: number;
+  /** 最多滚动加载次数（由 Cloud 控制） */
+  scrollMax?: number;
+}
+
+/** cloud → edge：进「赞和收藏」（v1 看一眼清未读，不抽取）。 */
+export interface NotificationBrowseLikesPayload {
+  thinkMs?: number;
+}
+
+/** cloud → edge：进「新增关注」（v1 看一眼清未读，不抽取）。 */
+export interface NotificationBrowseFollowsPayload {
+  thinkMs?: number;
+}
+
+/** cloud → edge：返回通知首页（落地后重报 notification.home）。 */
+export interface NotificationBackHomePayload {
+  thinkMs?: number;
 }
 
 export interface ErrorPayload {
@@ -551,6 +666,8 @@ export interface PayloadMap {
   'risk.captcha_cleared': CaptchaClearedPayload;
   'publish.request': PublishRequestPayload;
   'publish.result': PublishResultPayload;
+  'publish.command': PublishCommandPayload;
+  'publish.command.result': PublishCommandResultPayload;
   // 角色驱动指令
   'page.scroll': PageScrollPayload;
   'interaction.like': InteractionLikePayload;
@@ -566,7 +683,12 @@ export interface PayloadMap {
   'profile.detail': ProfileDetailPayload;
   'action.completed': ActionCompletedPayload;
   'notification.open': NotificationOpenPayload;
+  'notification.browse_comments': NotificationBrowseCommentsPayload;
+  'notification.browse_likes': NotificationBrowseLikesPayload;
+  'notification.browse_follows': NotificationBrowseFollowsPayload;
+  'notification.back_home': NotificationBackHomePayload;
   'notification.detected': NotificationDetectedPayload;
+  'notification.home': NotificationHomePayload;
   'notification.items': NotificationItemsPayload;
   error: ErrorPayload;
   ping: Record<string, never>;

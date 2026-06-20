@@ -36,10 +36,13 @@ const ALL_MESSAGE_TYPES: Record<MessageType, true> = {
   'risk.canDo': true, 'risk.canDo.result': true, 'risk.record': true, 'risk.record.result': true,
   'risk.captcha_detected': true, 'risk.captcha_cleared': true,
   'publish.approval_request': true, 'publish.request': true, 'publish.result': true,
+  'publish.command': true, 'publish.command.result': true,
   'page.scroll': true, 'interaction.like': true, 'interaction.collect': true, 'interaction.follow': true,
   'navigation.back': true, 'note.browse_images': true, 'note.scroll_comments': true, 'profile.open': true,
   'page.cards': true, 'note.detail': true, 'profile.detail': true, 'action.completed': true,
-  'notification.open': true, 'notification.detected': true, 'notification.items': true,
+  'notification.open': true, 'notification.browse_comments': true, 'notification.browse_likes': true,
+  'notification.browse_follows': true, 'notification.back_home': true,
+  'notification.detected': true, 'notification.home': true, 'notification.items': true,
   error: true, ping: true, pong: true,
 };
 const ALL_TYPES = Object.keys(ALL_MESSAGE_TYPES) as MessageType[];
@@ -49,8 +52,8 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     assert.equal(PROTOCOL_VERSION, 2);
   });
 
-  it('AC-PROTO-02 消息类型总数为 47（增删消息须同步两端 + 本断言）', () => {
-    assert.equal(ALL_TYPES.length, 47);
+  it('AC-PROTO-02 消息类型总数为 54（增删消息须同步两端 + 本断言）', () => {
+    assert.equal(ALL_TYPES.length, 54);
   });
 
   it('AC-PROTO-03 每个消息类型都能构造合法信封且版本一致', () => {
