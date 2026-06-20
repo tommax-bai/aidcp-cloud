@@ -24,6 +24,9 @@ const acct: PanelAccount = {
 
 const mockPanelStore: PanelStoreReader = {
   todayTotals: async () => ({ like: 10, collect: 2, comment: 1, follow: 0, publish: 1, view: 40 }),
+  todayTotalsByAccount: async () => [
+    { accountId: 'default', totals: { like: 10, collect: 2, comment: 1, follow: 0, publish: 1, view: 40 } },
+  ],
   todayPublishCount: async () => 1,
   likeRate: async () => ({ likes: 10, views: 40, rate: 0.25, healthy: true }),
   listAccounts: async () => [acct],
@@ -31,8 +34,15 @@ const mockPanelStore: PanelStoreReader = {
   publishedHistory: async () => [
     { id: 1, title: 't', status: 'published', platformPostId: 'p1', publishedAt: 123 },
   ],
+  listAlerts: async () => [
+    { id: 1, severity: 'P0', type: 'captcha', accountId: 'default', title: '验证码弹出', detail: null, createdAt: 100, resolvedAt: null },
+  ],
+  listInteractions: async (opts) => [
+    { accountId: opts?.accountId ?? 'default', noteId: 'note-1', action: 'like', interactedAt: 200 },
+  ],
 };
 
+let dispatchActiveState = true;
 const deps = {
   edgeServer: { edgeCount: () => 3, onlineEdgeCount: () => 3 },
   eventBus: { onAny: () => () => {} }, // panel WS attach 需要；返回 unsub
@@ -42,6 +52,13 @@ const deps = {
   commandActions: {
     pause: async (id: string) => ({ accountId: id, status: 'paused' }),
     resume: async (id: string) => ({ accountId: id, status: 'active', resumedEdges: 2 }),
+    dispatch: async (id: string, action: 'start' | 'stop') => {
+      const want = action === 'start';
+      const changed = dispatchActiveState !== want;
+      dispatchActiveState = want;
+      return { accountId: id, dispatch: want ? ('started' as const) : ('stopped' as const), changed, edgesOnline: 3 };
+    },
+    dispatchActive: () => dispatchActiveState,
   },
   riskRegistry: { getController: async (id: string) => new RiskController({ accountId: id }) },
 } as unknown as PanelDeps;
@@ -114,22 +131,47 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
     const { token } = (await login.json()) as { token: string };
     const auth = { authorization: `Bearer ${token}` };
 
-    // dashboard summary：totals + edgesOnline + likeRate + accounts + attributionPending
+    // dashboard summary：totals + edgesOnline + likeRate + accounts + 按账号切片 + 告警 + 调度态
     const sum = await fetch(`${base}/api/dashboard/summary`, { headers: auth });
     assert.equal(sum.status, 200);
     const sumBody = (await sum.json()) as {
       edgesOnline: number;
       totals: { like: number; publish: number };
+      totalsByAccount: { accountId: string; totals: { like: number } }[];
       likeRate: { rate: number };
       accounts: unknown[];
+      alerts: { severity: string }[];
       attributionPending: boolean;
+      dispatchActive: boolean | null;
     };
     assert.equal(sumBody.edgesOnline, 3);
     assert.equal(sumBody.totals.like, 10);
     assert.equal(sumBody.totals.publish, 1);
     assert.equal(sumBody.likeRate.rate, 0.25);
     assert.equal(sumBody.accounts.length, 1);
-    assert.equal(sumBody.attributionPending, true);
+    // V1 task 9.6：归因已流通，去「归因待补」，上真按账号切片
+    assert.equal(sumBody.attributionPending, false);
+    assert.equal(sumBody.totalsByAccount[0].accountId, 'default');
+    assert.equal(sumBody.totalsByAccount[0].totals.like, 10);
+    // V1 task 9.5：真告警
+    assert.equal(sumBody.alerts[0].severity, 'P0');
+    // V1 task 9.4：调度引擎态
+    assert.equal(sumBody.dispatchActive, true);
+
+    // /api/version 暴露告警分级枚举（task 5.4 follow-up）
+    const ver2 = (await (await fetch(`${base}/api/version`)).json()) as { enums: { alertSeverity: string[] } };
+    assert.deepEqual(ver2.enums.alertSeverity, ['P0', 'P1', 'P2', 'P3']);
+
+    // V1 task 9.5：/api/alerts 只读流
+    const al = (await (await fetch(`${base}/api/alerts`, { headers: auth })).json()) as { alerts: unknown[] };
+    assert.equal(al.alerts.length, 1);
+
+    // V1 task 9.2：/api/monitor/interactions（按账号过滤）
+    const it = (await (
+      await fetch(`${base}/api/monitor/interactions?accountId=default`, { headers: auth })
+    ).json()) as { interactions: { accountId: string; noteId: string }[] };
+    assert.equal(it.interactions[0].noteId, 'note-1');
+    assert.equal(it.interactions[0].accountId, 'default');
 
     // accounts 列表 / 详情 / 404
     const accs = (await (await fetch(`${base}/api/accounts`, { headers: auth })).json()) as {
@@ -275,6 +317,51 @@ test('HTTP risk 写路由：枚举 kind / override 需 reason / quota / 真态�
     };
     assert.equal(q.state.quotaLevel, 'aggressive');
     assert.equal((await post('/api/accounts/default/risk/quota', { level: 'mega' })).status, 400);
+  } finally {
+    await h.close();
+  }
+});
+
+test('HTTP dispatch 写路由：start/stop 回报真态 + changed + 真实在线 edge 数（V1 9.4）', async () => {
+  const h = await startPanelApi(deps, makeConfig());
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = (await login.json()) as { token: string };
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+    const post = (path: string, body: unknown) =>
+      fetch(`${base}${path}`, { method: 'POST', headers: auth, body: JSON.stringify(body) });
+
+    // stop：从 active → stopped, changed=true, 真实在线数
+    const s1 = (await (await post('/api/accounts/default/dispatch', { action: 'stop' })).json()) as {
+      dispatch: string;
+      changed: boolean;
+      edgesOnline: number;
+    };
+    assert.equal(s1.dispatch, 'stopped');
+    assert.equal(s1.changed, true);
+    assert.equal(s1.edgesOnline, 3);
+
+    // 再 stop：已 stopped, changed=false（诚实：no-op 可辨）
+    const s2 = (await (await post('/api/accounts/default/dispatch', { action: 'stop' })).json()) as {
+      changed: boolean;
+    };
+    assert.equal(s2.changed, false);
+
+    // start：回到 started
+    const s3 = (await (await post('/api/accounts/default/dispatch', { action: 'start' })).json()) as {
+      dispatch: string;
+      changed: boolean;
+    };
+    assert.equal(s3.dispatch, 'started');
+    assert.equal(s3.changed, true);
+
+    // 未知 action → 400
+    assert.equal((await post('/api/accounts/default/dispatch', { action: 'bogus' })).status, 400);
   } finally {
     await h.close();
   }

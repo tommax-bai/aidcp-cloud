@@ -36,6 +36,17 @@ export interface PanelDeps {
   commandActions: {
     pause(accountId: string): Promise<{ accountId: string; status: 'paused' }>;
     resume(accountId: string): Promise<{ accountId: string; status: 'active'; resumedEdges: number }>;
+    /**
+     * 调度启停（V1 task 9.4）：start/stop 现役单全局 RoleDispatcher；回报真实在线 edge 数。
+     * 偏离：单账号现实下为全局开关（accountId 信息性）；per-edge 拆分留到真多账号（design 步骤 8）。
+     * 未注入则 /dispatch 返回 503（向后兼容）。
+     */
+    dispatch?(
+      accountId: string,
+      action: 'start' | 'stop',
+    ): Promise<{ accountId: string; dispatch: 'started' | 'stopped'; changed: boolean; edgesOnline: number }>;
+    /** 调度引擎当前是否活跃（dashboard summary 读）。 */
+    dispatchActive?(): boolean;
   };
   /** 风控注册表（V1 写路由 risk/status、risk/quota 按账号取 controller；单写 PER ACCOUNT）。 */
   riskRegistry: { getController(accountId: string): Promise<RiskController> };

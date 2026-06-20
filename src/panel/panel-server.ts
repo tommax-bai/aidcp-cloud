@@ -111,21 +111,27 @@ function createRequestHandler(
       return;
     }
     if (method === 'GET' && url === '/api/dashboard/summary') {
-      const [totals, likeRate, accounts, todayPublishes] = await Promise.all([
+      const [totals, totalsByAccount, likeRate, accounts, todayPublishes, alerts] = await Promise.all([
         deps.panelStore.todayTotals(),
+        deps.panelStore.todayTotalsByAccount(),
         deps.panelStore.likeRate(),
         deps.panelStore.listAccounts(),
         deps.panelStore.todayPublishCount(),
+        deps.panelStore.listAlerts({ limit: 50 }),
       ]);
       sendJson(res, 200, {
         asOf: Date.now(),
         edgesOnline: deps.edgeServer.onlineEdgeCount(), // staleness-aware（死连接不算在线，D9）
         totals: { ...totals, publish: todayPublishes },
+        // V1 task 9.6：归因已在事件上流通（interaction.occurred 带 accountId），上真按账号切片。
+        totalsByAccount,
         likeRate,
         accounts,
-        alerts: [], // V1（无数据源，前端开空态）
-        // 归因未落地：totals/likeRate 为全局，按账号切片须标「attribution pending」（interaction-attribution 红线）
-        attributionPending: true,
+        alerts, // V1 task 9.5：真告警（未解决），来自 alerts 表
+        // 归因已落地：按账号切片为真数字（保留键 default 即单账号现实下的真实账号）。
+        attributionPending: false,
+        // 调度引擎状态（V1 task 9.4：单全局 RoleDispatcher；per-edge 拆分见 design 步骤 8）。
+        dispatchActive: deps.commandActions.dispatchActive ? deps.commandActions.dispatchActive() : null,
       });
       return;
     }
@@ -153,6 +159,22 @@ function createRequestHandler(
     }
     if (method === 'GET' && url === '/api/analytics/like-rate') {
       sendJson(res, 200, await deps.panelStore.likeRate());
+      return;
+    }
+    // 告警只读流（V1 task 9.5）：默认仅未解决；?includeResolved=1 含已解决。
+    if (method === 'GET' && url === '/api/alerts') {
+      const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+      const includeResolved = query.get('includeResolved') === '1';
+      sendJson(res, 200, { alerts: await deps.panelStore.listAlerts({ limit: 100, includeResolved }) });
+      return;
+    }
+    // 按笔记互动历史（V1 task 9.2）：可选 ?accountId 过滤。
+    if (method === 'GET' && url === '/api/monitor/interactions') {
+      const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+      const accountId = query.get('accountId') ?? undefined;
+      sendJson(res, 200, {
+        interactions: await deps.panelStore.listInteractions({ limit: 100, ...(accountId ? { accountId } : {}) }),
+      });
       return;
     }
 
@@ -249,6 +271,29 @@ function createRequestHandler(
       }
       const controller = await deps.riskRegistry.getController(accountId);
       sendJson(res, 200, { state: await controller.setQuotaLevel(level as RiskQuotaLevel) });
+      return;
+    }
+    // 调度启停（V1 task 9.4）：复用共享 CommandActions；回报真实在线 edge 数，绝不乐观。
+    // 偏离：当前单全局 RoleDispatcher（非 per-edge），accountId 为信息性；per-edge 拆分见 design 步骤 8。
+    if (method === 'POST' && url.startsWith('/api/accounts/') && url.endsWith('/dispatch')) {
+      const accountId = decodeURIComponent(url.slice('/api/accounts/'.length, -'/dispatch'.length));
+      if (!deps.commandActions.dispatch) {
+        sendJson(res, 503, { error: 'dispatch_unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { action } = (body ?? {}) as { action?: unknown };
+      if (action !== 'start' && action !== 'stop') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'unknown_action' });
+        return;
+      }
+      sendJson(res, 200, await deps.commandActions.dispatch(accountId, action));
       return;
     }
 

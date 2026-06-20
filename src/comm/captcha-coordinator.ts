@@ -13,8 +13,9 @@
 
 import { buildAlertCard } from '../feishu/cards.js';
 import type { FeishuMessenger } from '../feishu/messenger.js';
-import type { AlertData } from '../feishu/types.js';
+import type { AlertData, AlertSeverity } from '../feishu/types.js';
 import type { RiskController } from '../risk/index.js';
+import type { AlertStore } from '../alerts/index.js';
 import type { CaptchaClearedPayload, CaptchaDetectedPayload } from './protocol.js';
 import type { EdgePusher, EdgeSession } from './ws-server.js';
 
@@ -27,6 +28,8 @@ export interface CaptchaCoordinatorDeps {
   clock?: () => number;
   /** 同一 edge 验证码告警的冷却窗（毫秒），默认 10 分钟，防 edge 循环验证码刷屏。 */
   cooldownMs?: number;
+  /** 告警日志（V1 task 9.5）：飞书卡发送点写入、清除点 resolveByEdge。未注入则不落库（向后兼容）。 */
+  alertStore?: Pick<AlertStore, 'raise' | 'resolveByEdge'>;
 }
 
 export class CaptchaCoordinator {
@@ -76,6 +79,15 @@ export class CaptchaCoordinator {
     if (edgeId && pusher) pusher.resumeEdge(edgeId);
     // 清除冷却记录：下次验证码可立即再次告警（一次新事件不被旧冷却压住）。
     if (edgeId) this.lastAlertAt.delete(edgeId);
+    // 验证码清除点：按 edge 解决其未解决告警（V1 task 9.5）。
+    if (edgeId && this.deps.alertStore) {
+      try {
+        const resolved = await this.deps.alertStore.resolveByEdge(edgeId, this.clock());
+        if (resolved > 0) this.logger.log('[captcha] 告警已解决', { edgeId, resolved });
+      } catch (err) {
+        this.logger.error('[captcha] 告警解决失败:', err instanceof Error ? err.message : String(err));
+      }
+    }
     this.logger.log('[captcha] cleared，恢复下发', {
       edgeId,
       accountId: payload.accountId ?? session.accountId,
@@ -99,6 +111,29 @@ export class CaptchaCoordinator {
       return;
     }
     this.lastAlertAt.set(key, now);
+
+    const severity: AlertSeverity = payload.kind === 'captcha' ? 'P0' : 'P1';
+    const title = payload.kind === 'captcha' ? '验证码弹出' : '未知阻断弹窗';
+
+    // 告警落库（V1 task 9.5）：与飞书投递解耦——即便无群/发送失败，告警事件仍被记录。
+    if (this.deps.alertStore) {
+      try {
+        await this.deps.alertStore.raise(
+          {
+            severity,
+            type: payload.kind === 'captcha' ? 'captcha' : 'block',
+            accountId,
+            edgeId,
+            title,
+            detail: payload.url ? `页面：${payload.url}` : undefined,
+          },
+          now,
+        );
+      } catch (err) {
+        // 红线：落库失败记录、不静默吞；不阻断飞书告警投递。
+        this.logger.error('[captcha] 告警落库失败:', err instanceof Error ? err.message : String(err));
+      }
+    }
 
     let chatId = '';
     try {
@@ -125,8 +160,8 @@ export class CaptchaCoordinator {
       .join('\n');
 
     const alert: AlertData = {
-      severity: payload.kind === 'captcha' ? 'P0' : 'P1',
-      title: payload.kind === 'captcha' ? '验证码弹出' : '未知阻断弹窗',
+      severity,
+      title,
       accountId,
       detail,
     };

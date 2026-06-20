@@ -7,6 +7,7 @@
  */
 
 import { RISK_ACTIONS, RISK_STATUSES, RISK_QUOTA_LEVELS } from '../risk/index.js';
+import { ALERT_SEVERITIES } from '../feishu/index.js';
 
 /** 面板 API 契约版本号。接口形状变更时递增。 */
 export const PANEL_API_VERSION = 1;
@@ -17,6 +18,8 @@ export interface VersionPayload {
     riskStatus: readonly string[];
     riskQuotaLevel: readonly string[];
     riskAction: readonly string[];
+    /** 告警分级（V1 task 9.5 落地后补；console 镜像对其断言，防三处漂移 D11）。 */
+    alertSeverity: readonly string[];
   };
 }
 
@@ -27,6 +30,7 @@ export function buildVersionPayload(): VersionPayload {
       riskStatus: RISK_STATUSES,
       riskQuotaLevel: RISK_QUOTA_LEVELS,
       riskAction: RISK_ACTIONS,
+      alertSeverity: ALERT_SEVERITIES,
     },
   };
 }

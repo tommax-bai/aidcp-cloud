@@ -31,6 +31,12 @@ export interface EdgeSession {
   machineLabel?: string;
   /** 远程桌面/可达地址（hello 上报，用于人工远程处置） */
   remoteAddr?: string;
+  /**
+   * 当前会话正在浏览的笔记 id（随 note.detail / note.content 戳；V1 task 9.2）。
+   * 用于在 action.completed 发射 interaction.occurred 时补 noteId（编排已知当前笔记），
+   * 喂按笔记互动历史（risk_interactions）。
+   */
+  currentNoteId?: string;
 }
 
 /**

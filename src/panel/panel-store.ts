@@ -11,9 +11,19 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
-import { RISK_ACTIONS, type RiskAction, type RiskStatus, type RiskQuotaLevel } from '../risk/index.js';
+import {
+  RISK_ACTIONS,
+  type RiskAction,
+  type RiskStatus,
+  type RiskQuotaLevel,
+  type InteractionAction,
+} from '../risk/index.js';
+import type { AlertSeverity } from '../feishu/types.js';
 
 const { Pool } = pg;
+
+/** PostgreSQL「关系不存在」错误码——表未迁移时面板降级为空而非崩塌（dashboard 不因新表缺失整体 500）。 */
+const PG_UNDEFINED_TABLE = '42P01';
 
 export interface PanelAccount {
   accountId: string;
@@ -40,6 +50,32 @@ export interface PanelPublish {
 
 export type TodayTotals = Record<RiskAction, number>;
 
+/** 按账号今日计数切片（V1 task 9.6：归因已流通，上真按账号数字，去「归因待补」）。 */
+export interface AccountTotals {
+  accountId: string;
+  totals: TodayTotals;
+}
+
+/** 告警事件（V1 task 9.5；面板直接 SELECT alerts 表，design D2）。 */
+export interface PanelAlert {
+  id: number;
+  severity: AlertSeverity;
+  type: string;
+  accountId: string | null;
+  title: string;
+  detail: string | null;
+  createdAt: number;
+  resolvedAt: number | null;
+}
+
+/** 按笔记互动历史（V1 task 9.2；接线孤儿 risk_interactions 后的读侧）。 */
+export interface PanelInteraction {
+  accountId: string;
+  noteId: string;
+  action: InteractionAction;
+  interactedAt: number;
+}
+
 export interface LikeRate {
   likes: number;
   views: number;
@@ -52,11 +88,17 @@ export interface LikeRate {
 /** 面板只读查询接口（便于 mock，不依赖真 PG）。 */
 export interface PanelStoreReader {
   todayTotals(): Promise<TodayTotals>;
+  /** 今日各 action 计数按账号切片（V1 task 9.6）。 */
+  todayTotalsByAccount(): Promise<AccountTotals[]>;
   todayPublishCount(): Promise<number>;
   likeRate(): Promise<LikeRate>;
   listAccounts(): Promise<PanelAccount[]>;
   getAccount(accountId: string): Promise<PanelAccount | null>;
   publishedHistory(limit: number): Promise<PanelPublish[]>;
+  /** 告警列表（V1 task 9.5）；默认仅未解决。 */
+  listAlerts(options?: { limit?: number; includeResolved?: boolean }): Promise<PanelAlert[]>;
+  /** 按笔记互动历史（V1 task 9.2）；可按账号过滤。 */
+  listInteractions(options?: { limit?: number; accountId?: string }): Promise<PanelInteraction[]>;
 }
 
 export interface PgPanelStoreOptions {
@@ -135,6 +177,28 @@ export class PgPanelStore implements PanelStoreReader {
     return totals;
   }
 
+  /** 今日各 action 计数按账号切片（GROUP BY account_id, action；归因已流通，真按账号）。 */
+  async todayTotalsByAccount(): Promise<AccountTotals[]> {
+    const { rows } = await this.pool.query<{ account_id: string; action: string; total: number }>(
+      `SELECT account_id, action, COALESCE(SUM(count), 0)::int AS total
+       FROM risk_counters
+       WHERE occurred_at >= date_trunc('day', now())
+       GROUP BY account_id, action`,
+    );
+    const byAccount = new Map<string, TodayTotals>();
+    for (const row of rows) {
+      let totals = byAccount.get(row.account_id);
+      if (!totals) {
+        totals = Object.fromEntries(RISK_ACTIONS.map((a) => [a, 0])) as TodayTotals;
+        byAccount.set(row.account_id, totals);
+      }
+      if ((RISK_ACTIONS as readonly string[]).includes(row.action)) {
+        totals[row.action as RiskAction] = row.total;
+      }
+    }
+    return [...byAccount.entries()].map(([accountId, totals]) => ({ accountId, totals }));
+  }
+
   async todayPublishCount(): Promise<number> {
     const { rows } = await this.pool.query<{ n: number }>(
       `SELECT COUNT(*)::int AS n FROM publish_log
@@ -189,6 +253,73 @@ export class PgPanelStore implements PanelStoreReader {
       platformPostId: r.platform_post_id,
       publishedAt: r.published_at.getTime(),
     }));
+  }
+
+  async listAlerts(options: { limit?: number; includeResolved?: boolean } = {}): Promise<PanelAlert[]> {
+    const limit = options.limit ?? 100;
+    const where = options.includeResolved ? '' : 'WHERE resolved_at IS NULL';
+    try {
+      const { rows } = await this.pool.query<{
+        alert_id: string | number;
+        severity: AlertSeverity;
+        type: string;
+        account_id: string | null;
+        title: string;
+        detail: string | null;
+        created_at: Date;
+        resolved_at: Date | null;
+      }>(
+        `SELECT alert_id, severity, type, account_id, title, detail, created_at, resolved_at
+         FROM alerts ${where} ORDER BY created_at DESC LIMIT $1`,
+        [limit],
+      );
+      return rows.map((r) => ({
+        id: Number(r.alert_id),
+        severity: r.severity,
+        type: r.type,
+        accountId: r.account_id,
+        title: r.title,
+        detail: r.detail,
+        createdAt: r.created_at.getTime(),
+        resolvedAt: r.resolved_at ? r.resolved_at.getTime() : null,
+      }));
+    } catch (err) {
+      // 表未迁移时降级为空（dashboard 不因新表缺失整体 500）；其他错误上抛。
+      if ((err as { code?: string }).code === PG_UNDEFINED_TABLE) return [];
+      throw err;
+    }
+  }
+
+  async listInteractions(options: { limit?: number; accountId?: string } = {}): Promise<PanelInteraction[]> {
+    const limit = options.limit ?? 100;
+    const params: unknown[] = [];
+    let where = '';
+    if (options.accountId) {
+      params.push(options.accountId);
+      where = `WHERE account_id = $${params.length}`;
+    }
+    params.push(limit);
+    try {
+      const { rows } = await this.pool.query<{
+        account_id: string;
+        note_id: string;
+        action: InteractionAction;
+        interacted_at: Date;
+      }>(
+        `SELECT account_id, note_id, action, interacted_at
+         FROM risk_interactions ${where} ORDER BY interacted_at DESC LIMIT $${params.length}`,
+        params,
+      );
+      return rows.map((r) => ({
+        accountId: r.account_id,
+        noteId: r.note_id,
+        action: r.action,
+        interactedAt: r.interacted_at.getTime(),
+      }));
+    } catch (err) {
+      if ((err as { code?: string }).code === PG_UNDEFINED_TABLE) return [];
+      throw err;
+    }
   }
 
   async close(): Promise<void> {

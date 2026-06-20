@@ -82,8 +82,9 @@ export interface FeishuCard {
 /** 账号风控状态（与 risk-control.md §7 / product-dashboard.md §2.1 枚举对齐） */
 export type AccountStatus = 'normal' | 'warned' | 'restricted' | 'banned';
 
-/** 异常严重度（与 product-exception.md §1 对齐） */
-export type AlertSeverity = 'P0' | 'P1' | 'P2' | 'P3';
+/** 异常严重度（与 product-exception.md §1 对齐）。runtime 单源，供 /api/version 漂移哨兵暴露。 */
+export const ALERT_SEVERITIES = ['P0', 'P1', 'P2', 'P3'] as const;
+export type AlertSeverity = (typeof ALERT_SEVERITIES)[number];
 
 /** 每日汇总卡片数据（对应 product-feishu.md §2.1 / §3 每日汇总卡片） */
 export interface DailySummaryData {

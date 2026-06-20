@@ -155,6 +155,8 @@ export class DefaultMessageHandler implements MessageHandler {
           collectCount: (p.collects as number) ?? (p.collectCount as number) ?? 0,
           author: (p.author as string) || undefined,
         };
+        // 戳当前笔记 id：随后 action.completed 发射 interaction.occurred 时据此补 noteId（V1 task 9.2）。
+        if (incomingNote.noteId) session.currentNoteId = incomingNote.noteId;
 
         // 暂停检查：已暂停则仅返回 ack，不触发 orchestrator
         // 账号 id 统一为 'default'（对齐 accounts 表 seed 行 / 风控 / 飞书命令缺省）
@@ -190,6 +192,8 @@ export class DefaultMessageHandler implements MessageHandler {
       }
       case 'note.detail': {
         const detail = env.payload as NoteDetailPayload;
+        // 戳当前笔记 id（v2 现役路径）：action.completed 据此补 noteId（V1 task 9.2）。
+        if (detail.noteId) session.currentNoteId = detail.noteId;
         this.deps.eventBus.emit('note.detail.arrived', { detail, ts: this.clock() });
         return null;
       }
@@ -243,6 +247,9 @@ export class DefaultMessageHandler implements MessageHandler {
             action: result.action as 'like' | 'collect' | 'follow',
             // accountId 从会话填；缺失（legacy edge）回退保留键 'default'，绝不误并入真名账号（D3/D4）
             accountId: session.accountId ?? 'default',
+            // noteId 从会话当前笔记填（V1 task 9.2）：编排已知当前笔记，喂按笔记互动历史。
+            // like/collect 总在 note.detail 之后发生，故 currentNoteId 即被互动笔记；缺则不带（如 follow 在主页）。
+            ...(session.currentNoteId ? { noteId: session.currentNoteId } : {}),
           });
         }
         return null;

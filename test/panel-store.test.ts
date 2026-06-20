@@ -8,6 +8,15 @@ function poolReturning(rows: unknown[]): pg.Pool {
   return { query: async () => ({ rows }) } as unknown as pg.Pool;
 }
 
+/** 模拟某表未迁移：query 抛 PG 错误码 code。 */
+function poolThrowing(code: string): pg.Pool {
+  return {
+    query: async () => {
+      throw Object.assign(new Error('relation does not exist'), { code });
+    },
+  } as unknown as pg.Pool;
+}
+
 test('todayTotals 把行映射成全 action 记录并补 0', async () => {
   const store = new PgPanelStore({ pool: poolReturning([
     { action: 'like', total: 10 },
@@ -75,4 +84,51 @@ test('listAccounts 无 risk_state 行时风控字段为 null（账号无风控�
   assert.equal(a.riskStatus, null);
   assert.equal(a.riskQuotaLevel, null);
   assert.equal(a.pausedAt, null);
+});
+
+test('todayTotalsByAccount 按账号分桶 + 每桶补全 action（V1 9.6）', async () => {
+  const store = new PgPanelStore({ pool: poolReturning([
+    { account_id: 'default', action: 'like', total: 10 },
+    { account_id: 'default', action: 'view', total: 40 },
+    { account_id: 'acc-2', action: 'follow', total: 3 },
+  ]) });
+  const byAcc = await store.todayTotalsByAccount();
+  const d = byAcc.find((b) => b.accountId === 'default')!;
+  assert.equal(d.totals.like, 10);
+  assert.equal(d.totals.view, 40);
+  assert.equal(d.totals.collect, 0); // 补 0
+  const a2 = byAcc.find((b) => b.accountId === 'acc-2')!;
+  assert.equal(a2.totals.follow, 3);
+  assert.equal(a2.totals.like, 0);
+});
+
+test('listAlerts 映射行；表未迁移降级为空（V1 9.5）', async () => {
+  const store = new PgPanelStore({ pool: poolReturning([
+    { alert_id: '7', severity: 'P0', type: 'captcha', account_id: 'default', title: '验证码弹出', detail: null, created_at: new Date(100), resolved_at: null },
+  ]) });
+  const [al] = await store.listAlerts();
+  assert.equal(al.id, 7);
+  assert.equal(al.severity, 'P0');
+  assert.equal(al.createdAt, 100);
+  assert.equal(al.resolvedAt, null);
+
+  // 表不存在 → []（不让 dashboard 整体 500）
+  const empty = await new PgPanelStore({ pool: poolThrowing('42P01') }).listAlerts();
+  assert.deepEqual(empty, []);
+});
+
+test('listInteractions 映射行；表未迁移降级为空（V1 9.2）', async () => {
+  const store = new PgPanelStore({ pool: poolReturning([
+    { account_id: 'default', note_id: 'note-1', action: 'like', interacted_at: new Date(200) },
+  ]) });
+  const [it] = await store.listInteractions({ accountId: 'default' });
+  assert.equal(it.noteId, 'note-1');
+  assert.equal(it.action, 'like');
+  assert.equal(it.interactedAt, 200);
+
+  const empty = await new PgPanelStore({ pool: poolThrowing('42P01') }).listInteractions();
+  assert.deepEqual(empty, []);
+
+  // 非 undefined_table 错误应上抛（不静默吞真实故障）
+  await assert.rejects(() => new PgPanelStore({ pool: poolThrowing('57014') }).listInteractions());
 });

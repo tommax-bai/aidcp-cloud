@@ -141,4 +141,60 @@ describe('CaptchaCoordinator', () => {
     await c.onDetected({ kind: 'captcha' }, makeSession({ edgeId: 'edge-fallback' }), pusher);
     assert.deepEqual(pusher.paused, ['edge-fallback']);
   });
+
+  it('alertStore：detected 落库告警(P0/captcha)，cleared 按 edge 解决（V1 9.5）', async () => {
+    const raised: { severity: string; type: string; edgeId?: string; accountId?: string }[] = [];
+    const resolvedEdges: string[] = [];
+    const alertStore = {
+      raise: async (input: { severity: string; type: string; edgeId?: string; accountId?: string }) => {
+        raised.push(input);
+        return { alertId: raised.length };
+      },
+      resolveByEdge: async (edgeId: string) => {
+        resolvedEdges.push(edgeId);
+        return 1;
+      },
+    };
+    const c = new CaptchaCoordinator({
+      riskController: risk,
+      messenger,
+      resolveChatId: async () => 'chat-1',
+      logger: silentLogger,
+      clock: () => now,
+      alertStore,
+    });
+    await c.onDetected({ edgeId: 'edge-1', kind: 'captcha', url: 'https://x' }, makeSession(), pusher);
+    assert.equal(raised.length, 1);
+    assert.equal(raised[0].severity, 'P0');
+    assert.equal(raised[0].type, 'captcha');
+    assert.equal(raised[0].edgeId, 'edge-1');
+    assert.equal(raised[0].accountId, 'acc-1');
+
+    await c.onCleared({ edgeId: 'edge-1' }, makeSession(), pusher);
+    assert.deepEqual(resolvedEdges, ['edge-1']);
+  });
+
+  it('alertStore：冷却窗内不重复落库（与发卡同闸）', async () => {
+    let raisedCount = 0;
+    const alertStore = {
+      raise: async () => {
+        raisedCount += 1;
+        return { alertId: raisedCount };
+      },
+      resolveByEdge: async () => 0,
+    };
+    const c = new CaptchaCoordinator({
+      riskController: risk,
+      messenger,
+      resolveChatId: async () => 'chat-1',
+      logger: silentLogger,
+      clock: () => now,
+      cooldownMs: 10 * 60_000,
+      alertStore,
+    });
+    await c.onDetected({ edgeId: 'edge-1', kind: 'captcha' }, makeSession(), pusher);
+    now += 60_000;
+    await c.onDetected({ edgeId: 'edge-1', kind: 'captcha' }, makeSession(), pusher);
+    assert.equal(raisedCount, 1, '冷却窗内不应重复落库');
+  });
 });

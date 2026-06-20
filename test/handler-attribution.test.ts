@@ -29,7 +29,7 @@ function makeHandler(eventBus: EventBus) {
 }
 
 function capture(eventBus: EventBus) {
-  const got: { accountId?: string; action: string }[] = [];
+  const got: { accountId?: string; action: string; noteId?: string }[] = [];
   eventBus.on('interaction.occurred', (e) => {
     got.push(e);
   });
@@ -67,4 +67,37 @@ test('失败互动不 emit（只记真实发生）', async () => {
     { sessionId: 's3' },
   );
   assert.equal(got.length, 0);
+});
+
+test('note.detail 戳 currentNoteId → interaction.occurred 携带 noteId（V1 9.2）', async () => {
+  const eventBus = new EventBus();
+  const got = capture(eventBus);
+  const handler = makeHandler(eventBus);
+  const session: EdgeSession = { sessionId: 's4', accountId: 'acc-x' };
+  // 先到达 note.detail，戳当前笔记
+  await handler.handle(
+    makeEnvelope('note.detail', 'n1', 1, {
+      noteId: 'note-42', title: 't', content: 'c', likeCount: 0, collectCount: 0,
+    }),
+    session,
+  );
+  // 随后 like 完成
+  await handler.handle(
+    makeEnvelope('action.completed', 'a4', 1, { action: 'like', ok: true }),
+    session,
+  );
+  assert.equal(got.length, 1);
+  assert.equal(got[0].noteId, 'note-42');
+  assert.equal(got[0].accountId, 'acc-x');
+});
+
+test('未见 note.detail 时 noteId 不带（不编造）（V1 9.2）', async () => {
+  const eventBus = new EventBus();
+  const got = capture(eventBus);
+  await makeHandler(eventBus).handle(
+    makeEnvelope('action.completed', 'a5', 1, { action: 'follow', ok: true }),
+    { sessionId: 's5', accountId: 'acc-y' },
+  );
+  assert.equal(got.length, 1);
+  assert.equal(got[0].noteId, undefined);
 });
