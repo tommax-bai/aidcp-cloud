@@ -241,6 +241,8 @@ export class DefaultMessageHandler implements MessageHandler {
         ) {
           this.deps.eventBus.emit('interaction.occurred', {
             action: result.action as 'like' | 'collect' | 'follow',
+            // accountId 从会话填；缺失（legacy edge）回退保留键 'default'，绝不误并入真名账号（D3/D4）
+            accountId: session.accountId ?? 'default',
           });
         }
         return null;

@@ -120,7 +120,7 @@ export interface EventMap {
   // 跨模块通知
   'session.started': { sessionId: string };
   'session.ended': { stats: SessionStats };
-  'interaction.occurred': { action: 'like' | 'collect' | 'follow'; noteId?: string };
+  'interaction.occurred': { action: 'like' | 'collect' | 'follow'; accountId?: string; noteId?: string };
   'concept.discovered': { concepts: string[]; source: string };
   // Edge 上报事件（handler → RoleDispatcher）
   'edge.hello': { edgeId: string; ts: number };
