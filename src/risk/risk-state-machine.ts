@@ -19,11 +19,13 @@ export class RiskStateMachine {
   transition(state: RiskState, signal: RiskSignal, now = signal.at ?? Date.now()): RiskState {
     const nextStatus = this.nextStatus(state, signal, now);
     const isRiskSignal = signal.kind === 'light' || signal.kind === 'quota_exceeded' || signal.kind === 'confirmed' || signal.kind === 'fatal';
+    // operator_override_recover：特权强制 normal，清零信号计数与窗口（绕过恢复窗口）。
+    const forcedRecover = signal.kind === 'operator_override_recover';
     return {
       ...state,
       status: nextStatus,
-      signalCount: isRiskSignal ? state.signalCount + 1 : state.signalCount,
-      lastSignalAt: isRiskSignal ? now : state.lastSignalAt,
+      signalCount: forcedRecover ? 0 : isRiskSignal ? state.signalCount + 1 : state.signalCount,
+      lastSignalAt: forcedRecover ? null : isRiskSignal ? now : state.lastSignalAt,
       statusSince: nextStatus === state.status ? state.statusSince : now,
       updatedAt: now,
     };
@@ -39,7 +41,13 @@ export class RiskStateMachine {
   }
 
   private nextStatus(state: RiskState, signal: RiskSignal, now: number): RiskStatus {
-    if (signal.kind === 'fatal') return 'frozen';
+    if (signal.kind === 'fatal' || signal.kind === 'manual_freeze') return 'frozen';
+    // 特权强制恢复：无视恢复窗口直接 normal（reason 校验在 controller/路由层）
+    if (signal.kind === 'operator_override_recover') return 'normal';
+    // 手动加严：normal/warned → restricted；已 restricted/frozen 不变（不降级）
+    if (signal.kind === 'manual_restrict') {
+      return state.status === 'normal' || state.status === 'warned' ? 'restricted' : state.status;
+    }
     if (signal.kind === 'manual_unfreeze' && state.status === 'frozen') return 'restricted';
     if (signal.kind === 'recovered') return this.recoverIfEligible(state, now).status;
     if (signal.kind === 'confirmed') return state.status === 'normal' ? 'restricted' : state.status === 'frozen' ? 'frozen' : 'restricted';

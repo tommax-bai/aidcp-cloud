@@ -32,11 +32,17 @@ export type RiskSignalKind =
   | 'confirmed'
   | 'fatal'
   | 'recovered'
-  | 'manual_unfreeze';
+  | 'manual_unfreeze'
+  // 运营手动信号（V1 task 8.2）：非检测信号，不 bump signalCount
+  | 'manual_restrict' // normal/warned → restricted
+  | 'manual_freeze' // any → frozen
+  | 'operator_override_recover'; // 绕过恢复窗口强制 → normal（特权，需审计理由）
 
 export interface RiskSignal {
   kind: RiskSignalKind;
   at?: number;
+  /** 运营操作的审计理由（operator_override_recover 等特权操作必填）。 */
+  reason?: string;
 }
 
 export interface CounterEvent {

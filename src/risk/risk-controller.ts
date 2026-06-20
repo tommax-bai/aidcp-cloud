@@ -25,6 +25,8 @@ export class RiskController {
   private readonly store?: RiskStore;
   private readonly minViewsForLikeRatio: number;
   private state: RiskState;
+  /** 每账号串行化：所有改 state + saveState 的写经此链，避免并发 read-modify-write 丢更新（D7）。 */
+  private mutationChain: Promise<unknown> = Promise.resolve();
 
   constructor(options: RiskControllerOptions = {}) {
     const now = options.clock?.() ?? Date.now();
@@ -80,10 +82,34 @@ export class RiskController {
     return { ...this.state };
   }
 
+  /** 把一个 state 写排进每账号串行链（transition+saveState 或 setQuotaLevel+saveState 原子）。 */
+  private enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.mutationChain.then(fn, fn); // 前一个成败都继续
+    this.mutationChain = run.then(
+      () => undefined,
+      () => undefined,
+    ); // 链不因 error 断
+    return run;
+  }
+
   async applySignal(signal: RiskSignal): Promise<RiskState> {
-    this.state = this.stateMachine.transition(this.state, signal, signal.at ?? this.clock());
-    await this.store?.saveState(this.state);
-    return this.getState();
+    return this.enqueue(async () => {
+      this.state = this.stateMachine.transition(this.state, signal, signal.at ?? this.clock());
+      await this.store?.saveState(this.state);
+      return this.getState();
+    });
+  }
+
+  /**
+   * 改账号配额档位（V1 task 8.3）：controller 单写 state.quotaLevel + 持久 + 经串行链。
+   * 状态机从不碰 quotaLevel，故必须经此方法（绝不 raw UPDATE）。
+   */
+  async setQuotaLevel(level: RiskQuotaLevel): Promise<RiskState> {
+    return this.enqueue(async () => {
+      this.state = { ...this.state, quotaLevel: level, updatedAt: this.clock() };
+      await this.store?.saveState(this.state);
+      return this.getState();
+    });
   }
 
   effectiveQuotas(): WindowQuotas {
