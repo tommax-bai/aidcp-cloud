@@ -47,6 +47,7 @@ import {
 import { PublishOrchestrator } from './publish-agent/index.js';
 import { WanxiangClient } from './publish-agent/wanxiang-client.js';
 import { AccountStateManager } from './account-state.js';
+import { PgAccountStore, type AccountStore } from './account-store.js';
 import {
   ContentScoutRole,
   ContentCreatorRole,
@@ -158,7 +159,30 @@ async function main(): Promise<void> {
 
   // 事件总线
   const eventBus = new EventBus();
-  const accountState = new AccountStateManager();
+
+  // 账号主表 + 暂停态持久化（accounts 表，seed 一个 default 行）。
+  // PG 不可用则退化为纯内存（重启丢暂停态，告警但不阻塞启动）。
+  let accountStore: AccountStore | undefined;
+  try {
+    const store = new PgAccountStore({
+      host: readEnvString('PGHOST'),
+      port: readEnvPort('PGPORT'),
+      database: readEnvString('PGDATABASE'),
+      user: readEnvString('PGUSER'),
+      password: readEnvString('PGPASSWORD'),
+    });
+    await store.init();
+    accountStore = store;
+    console.log('[aidcp-cloud] AccountStore 已就绪（accounts 表，seed default）');
+  } catch (err) {
+    console.warn(
+      '[aidcp-cloud] AccountStore 初始化失败，账号暂停态退化为纯内存（重启丢失）:',
+      (err as Error).message,
+    );
+  }
+  // 启动加载持久化暂停态进内存缓存：被暂停账号重启后仍为 paused，不静默复活。
+  const accountState = new AccountStateManager(accountStore);
+  await accountState.init();
 
   // RiskController：以 PgRiskStore 持久化账号风控态与滑动窗计数（跨重启回放）；PG 不可用则回退内存态。
   let riskController: RiskController;
@@ -197,12 +221,12 @@ async function main(): Promise<void> {
       const extra = state.pausedAt ? `\n暂停时间：${new Date(state.pausedAt).toLocaleString()}` : '';
       return `账号 \`${accountId}\` 当前状态：${statusText} ${emoji}${extra}`;
     },
-    pause: (accountId) => {
-      accountState.pause(accountId);
+    pause: async (accountId) => {
+      await accountState.pause(accountId);
       console.log(`[feishu] 已暂停账号：${accountId}`);
     },
-    resume: (accountId) => {
-      accountState.resume(accountId);
+    resume: async (accountId) => {
+      await accountState.resume(accountId);
       // 验证码人工恢复快路：解除该账号名下被暂停的 edge（server 在下方初始化，命令运行时才触发，引用安全）。
       const resumedEdges = server.resumeEdgesForAccount(accountId);
       console.log(`[feishu] 已恢复账号：${accountId}（恢复 edge 数=${resumedEdges}）`);

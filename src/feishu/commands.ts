@@ -20,8 +20,8 @@ import { buildPublishApprovalCard } from './cards.js';
 import { FeishuMessenger } from './messenger.js';
 import type { BotChatRecord } from '../cache/bot-chat-store.js';
 
-/** 单账号 MVP 的缺省账号 id */
-export const DEFAULT_ACCOUNT_ID = 'acc-default';
+/** 单账号 MVP 的缺省账号 id（统一为 'default'，对齐风控 RiskController 与 accounts 表 seed 行） */
+export const DEFAULT_ACCOUNT_ID = 'default';
 
 /** 已识别的指令动作 */
 export type CommandAction = 'status' | 'pause' | 'resume' | 'publish-test' | 'bind' | 'help';

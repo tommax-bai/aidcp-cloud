@@ -203,7 +203,7 @@ test('note.content 暂停状态 → 返回 ack、不触发 eventBus emit', async
   eventBus.on('note.arrived', (data) => { emitted.push(data); });
 
   const accountState = new AccountStateManager();
-  accountState.pause('acc-default');
+  await accountState.pause('default');
 
   const h = new DefaultMessageHandler({
     planner: new SimplePlanner(),

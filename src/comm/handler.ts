@@ -150,7 +150,8 @@ export class DefaultMessageHandler implements MessageHandler {
         };
 
         // 暂停检查：已暂停则仅返回 ack，不触发 orchestrator
-        if (this.deps.accountState?.isPaused('acc-default')) {
+        // 账号 id 统一为 'default'（对齐 accounts 表 seed 行 / 风控 / 飞书命令缺省）
+        if (this.deps.accountState?.isPaused('default')) {
           this.logger.log('[comm] 账号已暂停，跳过笔记处理:', incomingNote.title);
           return makeEnvelope('note.ack', env.id, this.clock(), { received: true });
         }
