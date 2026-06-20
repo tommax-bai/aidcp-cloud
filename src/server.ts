@@ -62,7 +62,7 @@ import {
 } from './publish-agent/roles/index.js';
 import { PostProcessor } from './publish-agent/post-processor.js';
 import { PublishLogStore } from './publish-agent/publish-log-store.js';
-import { startPanelApi, parsePanelUsers } from './panel/index.js';
+import { startPanelApi, parsePanelUsers, PgPanelStore } from './panel/index.js';
 
 function readEnvString(name: string): string | undefined {
   const value = process.env[name];
@@ -409,7 +409,22 @@ async function main(): Promise<void> {
   if (panelPort) {
     try {
       const panel = await startPanelApi(
-        { riskController, publishLogStore, conceptStore, botChatStore, eventBus, edgeServer: server },
+        {
+          riskController,
+          publishLogStore,
+          conceptStore,
+          botChatStore,
+          eventBus,
+          edgeServer: server,
+          panelStore: new PgPanelStore({
+            host: readEnvString('PGHOST'),
+            port: readEnvPort('PGPORT'),
+            database: readEnvString('PGDATABASE'),
+            user: readEnvString('PGUSER'),
+            password: readEnvString('PGPASSWORD'),
+          }),
+          publishOrchestrator,
+        },
         {
           port: panelPort,
           jwtSecret: readEnvString('AIDCP_PANEL_JWT_SECRET') ?? '',

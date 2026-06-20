@@ -11,6 +11,7 @@ import type { ConceptStore, BotChatStore } from '../cache/index.js';
 import type { PublishLogStore } from '../publish-agent/publish-log-store.js';
 import type { EventBus } from '../event-bus/index.js';
 import type { PanelUser } from './auth.js';
+import type { PanelStoreReader } from './panel-store.js';
 
 export interface PanelDeps {
   riskController: RiskController;
@@ -20,6 +21,10 @@ export interface PanelDeps {
   eventBus: EventBus;
   /** 在线边缘登记（结构类型，便于测试造桩）。online 的 staleness 真实性校验见 task 5.3。 */
   edgeServer: { edgeCount(): number };
+  /** 只读查询层（dashboard / accounts / content / analytics 聚合）。 */
+  panelStore: PanelStoreReader;
+  /** 发布编排器 in-flight 队列状态（/api/content/queue）。 */
+  publishOrchestrator: { getStatus(): { status: string; snapshot: unknown } };
 }
 
 export interface PanelConfig {

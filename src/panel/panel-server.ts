@@ -108,8 +108,48 @@ function createRequestHandler(
       return;
     }
     if (method === 'GET' && url === '/api/dashboard/summary') {
-      // task 1 骨架：证明注入链路（真实读 edgeServer）。totals/ratios/accounts/alerts 见 task 5。
-      sendJson(res, 200, { asOf: Date.now(), edgesOnline: deps.edgeServer.edgeCount(), partial: true });
+      const [totals, likeRate, accounts, todayPublishes] = await Promise.all([
+        deps.panelStore.todayTotals(),
+        deps.panelStore.likeRate(),
+        deps.panelStore.listAccounts(),
+        deps.panelStore.todayPublishCount(),
+      ]);
+      sendJson(res, 200, {
+        asOf: Date.now(),
+        edgesOnline: deps.edgeServer.edgeCount(),
+        totals: { ...totals, publish: todayPublishes },
+        likeRate,
+        accounts,
+        alerts: [], // V1（无数据源，前端开空态）
+        // 归因未落地：totals/likeRate 为全局，按账号切片须标「attribution pending」（interaction-attribution 红线）
+        attributionPending: true,
+      });
+      return;
+    }
+    if (method === 'GET' && url === '/api/accounts') {
+      sendJson(res, 200, { accounts: await deps.panelStore.listAccounts() });
+      return;
+    }
+    if (method === 'GET' && url.startsWith('/api/accounts/')) {
+      const id = decodeURIComponent(url.slice('/api/accounts/'.length));
+      const account = await deps.panelStore.getAccount(id);
+      if (!account) {
+        sendJson(res, 404, { error: 'not_found' });
+        return;
+      }
+      sendJson(res, 200, account);
+      return;
+    }
+    if (method === 'GET' && url === '/api/content/published') {
+      sendJson(res, 200, { items: await deps.panelStore.publishedHistory(50) });
+      return;
+    }
+    if (method === 'GET' && url === '/api/content/queue') {
+      sendJson(res, 200, deps.publishOrchestrator.getStatus());
+      return;
+    }
+    if (method === 'GET' && url === '/api/analytics/like-rate') {
+      sendJson(res, 200, await deps.panelStore.likeRate());
       return;
     }
 

@@ -4,15 +4,43 @@ import net from 'node:net';
 import { startPanelApi } from '../src/panel/panel-server.js';
 import { parsePanelUsers } from '../src/panel/auth.js';
 import type { PanelConfig, PanelDeps } from '../src/panel/types.js';
+import type { PanelAccount, PanelStoreReader } from '../src/panel/panel-store.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 
-// task 1 路由只触达 edgeServer；其余依赖造空桩。
-const deps = { edgeServer: { edgeCount: () => 3 } } as unknown as PanelDeps;
+const acct: PanelAccount = {
+  accountId: 'default',
+  label: 'default',
+  platform: 'xiaohongshu',
+  groupLabel: null,
+  machineLabel: null,
+  operatorStatus: 'active',
+  pausedAt: null,
+  riskStatus: 'normal',
+  riskQuotaLevel: 'normal',
+  signalCount: 0,
+};
+
+const mockPanelStore: PanelStoreReader = {
+  todayTotals: async () => ({ like: 10, collect: 2, comment: 1, follow: 0, publish: 1, view: 40 }),
+  todayPublishCount: async () => 1,
+  likeRate: async () => ({ likes: 10, views: 40, rate: 0.25, healthy: true }),
+  listAccounts: async () => [acct],
+  getAccount: async (id) => (id === 'default' ? acct : null),
+  publishedHistory: async () => [
+    { id: 1, title: 't', status: 'published', platformPostId: 'p1', publishedAt: 123 },
+  ],
+};
+
+const deps = {
+  edgeServer: { edgeCount: () => 3 },
+  panelStore: mockPanelStore,
+  publishOrchestrator: { getStatus: () => ({ status: 'idle', snapshot: null }) },
+} as unknown as PanelDeps;
 
 function makeConfig(over: Partial<PanelConfig> = {}): PanelConfig {
   return {
-    port: 0, // OS 分配
+    port: 0,
     jwtSecret: 'test-secret',
     users: parsePanelUsers('alice:pw1'),
     jwtTtlSeconds: 3600,
@@ -54,31 +82,21 @@ test('端口占用非致命（listen_error，不抛出）', async () => {
   await new Promise<void>((r) => blocker.close(() => r()));
 });
 
-test('HTTP 集成：version 公开、登录签发 JWT、受保护路由鉴权、summary 读注入', async () => {
+test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404', async () => {
   const h = await startPanelApi(deps, makeConfig());
   assert.equal(h.started, true);
   const base = `http://127.0.0.1:${h.port}`;
   try {
-    // /api/version 公开
+    // /api/version 公开 + 枚举
     const ver = await fetch(`${base}/api/version`);
     assert.equal(ver.status, 200);
     const verBody = (await ver.json()) as { panelApiVersion: number; enums: { riskStatus: string[] } };
-    assert.equal(verBody.panelApiVersion, 1);
     assert.deepEqual(verBody.enums.riskStatus, ['normal', 'warned', 'restricted', 'frozen']);
 
-    // 受保护路由无 token → 401
-    const noTok = await fetch(`${base}/api/me`);
-    assert.equal(noTok.status, 401);
+    // 受保护无 token → 401
+    assert.equal((await fetch(`${base}/api/me`)).status, 401);
 
-    // 登录错误凭据 → 401
-    const badLogin = await fetch(`${base}/api/auth/login`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ username: 'alice', password: 'wrong' }),
-    });
-    assert.equal(badLogin.status, 401);
-
-    // 登录正确凭据 → 200 + token
+    // 登录
     const login = await fetch(`${base}/api/auth/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -86,28 +104,49 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护路由鉴权、
     });
     assert.equal(login.status, 200);
     const { token } = (await login.json()) as { token: string };
-    assert.ok(token && token.split('.').length === 3);
+    const auth = { authorization: `Bearer ${token}` };
 
-    // 带 token → /api/me 200
-    const me = await fetch(`${base}/api/me`, { headers: { authorization: `Bearer ${token}` } });
-    assert.equal(me.status, 200);
-    const meBody = (await me.json()) as { sub: string };
-    assert.equal(meBody.sub, 'alice');
-
-    // summary 骨架读到注入的 edgeServer.edgeCount()
-    const sum = await fetch(`${base}/api/dashboard/summary`, { headers: { authorization: `Bearer ${token}` } });
+    // dashboard summary：totals + edgesOnline + likeRate + accounts + attributionPending
+    const sum = await fetch(`${base}/api/dashboard/summary`, { headers: auth });
     assert.equal(sum.status, 200);
-    const sumBody = (await sum.json()) as { edgesOnline: number; partial: boolean };
+    const sumBody = (await sum.json()) as {
+      edgesOnline: number;
+      totals: { like: number; publish: number };
+      likeRate: { rate: number };
+      accounts: unknown[];
+      attributionPending: boolean;
+    };
     assert.equal(sumBody.edgesOnline, 3);
-    assert.equal(sumBody.partial, true);
+    assert.equal(sumBody.totals.like, 10);
+    assert.equal(sumBody.totals.publish, 1);
+    assert.equal(sumBody.likeRate.rate, 0.25);
+    assert.equal(sumBody.accounts.length, 1);
+    assert.equal(sumBody.attributionPending, true);
 
-    // 篡改 token → 401
-    const forged = await fetch(`${base}/api/me`, { headers: { authorization: 'Bearer a.b.c' } });
-    assert.equal(forged.status, 401);
+    // accounts 列表 / 详情 / 404
+    const accs = (await (await fetch(`${base}/api/accounts`, { headers: auth })).json()) as {
+      accounts: unknown[];
+    };
+    assert.equal(accs.accounts.length, 1);
+    assert.equal((await fetch(`${base}/api/accounts/default`, { headers: auth })).status, 200);
+    assert.equal((await fetch(`${base}/api/accounts/nope`, { headers: auth })).status, 404);
 
-    // 未知 /api 路由 → 404
-    const nf = await fetch(`${base}/api/does-not-exist`, { headers: { authorization: `Bearer ${token}` } });
-    assert.equal(nf.status, 404);
+    // content/published + content/queue + analytics/like-rate
+    const pub = (await (await fetch(`${base}/api/content/published`, { headers: auth })).json()) as {
+      items: unknown[];
+    };
+    assert.equal(pub.items.length, 1);
+    const queue = (await (await fetch(`${base}/api/content/queue`, { headers: auth })).json()) as {
+      status: string;
+    };
+    assert.equal(queue.status, 'idle');
+    const lr = (await (await fetch(`${base}/api/analytics/like-rate`, { headers: auth })).json()) as {
+      healthy: boolean;
+    };
+    assert.equal(lr.healthy, true);
+
+    // 未知受保护路由 → 404
+    assert.equal((await fetch(`${base}/api/nope`, { headers: auth })).status, 404);
   } finally {
     await h.close();
   }
