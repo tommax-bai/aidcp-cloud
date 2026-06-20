@@ -29,6 +29,9 @@ import {
   type ActionCompletedPayload,
   type CaptchaDetectedPayload,
   type CaptchaClearedPayload,
+  type NotificationDetectedPayload,
+  type NotificationHomePayload,
+  type NotificationItemsPayload,
 } from './protocol.js';
 import type { MessageHandler, EdgeSession, EdgePusher } from './ws-server.js';
 import type { CaptchaCoordinator } from './captcha-coordinator.js';
@@ -189,6 +192,37 @@ export class DefaultMessageHandler implements MessageHandler {
       case 'profile.detail': {
         const detail = env.payload as ProfileDetailPayload;
         this.deps.eventBus.emit('profile.detail.arrived', { detail, ts: this.clock() });
+        return null;
+      }
+      // —— 通知巡视（消息查看）：边缘上报 → 入口事件转换 ——
+      case 'notification.detected': {
+        const p = env.payload as NotificationDetectedPayload;
+        this.deps.eventBus.emit('notification.detected.arrived', {
+          edgeId: p.edgeId,
+          epoch: p.epoch,
+          unreadCount: p.unreadCount,
+          ts: this.clock(),
+        });
+        return null;
+      }
+      case 'notification.home': {
+        const p = env.payload as NotificationHomePayload;
+        this.deps.eventBus.emit('notification.home.arrived', {
+          comments: p.comments,
+          likes: p.likes,
+          follows: p.follows,
+          epoch: p.epoch,
+          ts: this.clock(),
+        });
+        return null;
+      }
+      case 'notification.items': {
+        const p = env.payload as NotificationItemsPayload;
+        this.deps.eventBus.emit('notification.items.arrived', {
+          items: p.items,
+          epoch: p.epoch,
+          ts: this.clock(),
+        });
         return null;
       }
       case 'action.completed': {

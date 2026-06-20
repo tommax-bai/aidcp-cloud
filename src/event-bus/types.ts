@@ -335,8 +335,11 @@ export interface RoleEventMap {
   'notification.items.arrived': { items: NotificationItem[]; epoch?: number; ts: number };
   'excursion.requested': { epoch: number; ts: number };
   'browse.suspended': { epoch: number; ts: number };
-  'notification.opening': { epoch: number; ts: number };
+  /** 去通知首页意图：reason='open' 首次进入（→ open_notifications）；'back' 一类处理完返回（→ notification_back_home）。 */
+  'notification.opening': { epoch: number; reason: 'open' | 'back'; ts: number };
   'notification.category_selected': { category: NotificationCategory; epoch: number; ts: number };
+  /** per-category 浏览意图（各浏览角色产出，dispatcher 按 category 翻译为 browse_notification_* 命令）。 */
+  'notification.browse_category': { category: NotificationCategory; epoch: number; scrollMax?: number; ts: number };
   'notification.category_handled': { category: NotificationCategory; epoch: number; ts: number };
   'notification.classified': { worthy: NotificationItem[]; epoch: number; ts: number };
   'notification.classify_empty': { epoch: number; ts: number };

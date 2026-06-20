@@ -270,6 +270,26 @@ async function main(): Promise<void> {
     canInteract: (action) => riskController.canDo(action),
     // 概念池：跨会话搜索记忆 + 从浏览学新关键词（undefined 时退化为仅 seed_keywords）。
     conceptStore,
+    // 硬暂停闸（验证码/人工接管）：通知准入据此放弃巡视——硬暂停期连帧都不发。
+    isHardPaused: (edgeId) => (edgeId ? server.isEdgePaused(edgeId) : false),
+    // 通知巡视发飞书（仅"评论和@"）：复用 messenger + 默认群解析；无群则记错不吞。
+    notifyComments: async (items) => {
+      const chatId = await resolveDefaultChatId({
+        botChatStore,
+        fallbackChatId: process.env.FEISHU_CHAT_ID,
+        logger: console,
+      });
+      if (!chatId) {
+        console.error('[notification] 无可用飞书群，评论/@ 通知未发出');
+        return;
+      }
+      const lines = items.map(
+        (it) =>
+          `• ${it.fromUser || '某用户'}（${it.kind === 'mention' ? '@你' : '评论'}）：${it.content}` +
+          (it.noteTitle ? ` · 《${it.noteTitle}》` : ''),
+      );
+      await messenger.sendText(chatId, `📬 小红书新消息（${items.length}）\n${lines.join('\n')}`);
+    },
     sendCommand: (command) => {
       const envelope = edgeCommandToEnvelope(command);
       const sent = server.pushToEdges(envelope);

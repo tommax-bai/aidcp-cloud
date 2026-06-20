@@ -30,12 +30,26 @@ import { SearchEvaluator } from '../agents/search-evaluator.js';
 import { SearchExecutor } from '../agents/search-executor.js';
 import { ConceptExtractorRole, type ConceptSink } from '../agents/concept-extractor-role.js';
 import { SessionMonitorRole } from '../agents/session-monitor-role.js';
+// —— 通知巡视（消息查看）角色 ——
+import { NotificationGatekeeper } from '../agents/notification-gatekeeper.js';
+import { BrowseSuspender } from '../agents/browse-suspender.js';
+import { NotificationHomeOpener } from '../agents/notification-home-opener.js';
+import { NotificationTriage } from '../agents/notification-triage.js';
+import { NotificationCommentBrowser } from '../agents/notification-comment-browser.js';
+import { NotificationLikeBrowser } from '../agents/notification-like-browser.js';
+import { NotificationFollowBrowser } from '../agents/notification-follow-browser.js';
+import { NotificationClassifier } from '../agents/notification-classifier.js';
+import { NotificationDeduper } from '../agents/notification-deduper.js';
+import { NotificationNotifier } from '../agents/notification-notifier.js';
+import { NotificationReturnHome } from '../agents/notification-return-home.js';
+import { ExcursionResumer } from '../agents/excursion-resumer.js';
 import type { BaseRole } from '../agents/base-role.js';
 import type { Soul } from '../soul/types.js';
 import { computeDwellMs, computeThinkMs } from '../risk/pacing.js';
 import { SearchFrequencyLimiter } from '../risk/search-frequency-limiter.js';
 import type { RiskStatus } from '../risk/types.js';
 import type { ConceptPool } from '../event-bus/types.js';
+import type { NotificationItem } from '../comm/protocol.js';
 
 /** 概念池读写下游（ConceptStore 的最小契约，便于注入桩单测）。 */
 export interface ConceptStorePort extends ConceptSink {
@@ -64,6 +78,17 @@ export interface RoleDispatcherOptions {
    * 由 server 接线为 `(action) => riskController.canDo(action)`。被拒则诚实跳过（不下发、不扣 budget）。
    */
   canInteract?: (action: 'like' | 'collect' | 'follow') => boolean;
+  /**
+   * 硬暂停闸（验证码/人工接管）：边缘是否处于硬暂停态。缺省始终 false。
+   * 由 server 接线为读 ws-server 的 pausedEdges（isEdgePaused）。通知准入角色据此放弃巡视——
+   * 硬暂停期连帧都不发，不该再叠通知巡视。与 browseSuspended（软暂停）正交。
+   */
+  isHardPaused?: (edgeId?: string) => boolean;
+  /**
+   * 发飞书闭包（通知巡视用，复用 server 的 messenger + resolveChatId）。缺省不发（仅日志，仍收尾）。
+   * 只对"评论和@"类生效；赞收藏/新增关注 v1 不发。
+   */
+  notifyComments?: (items: NotificationItem[]) => Promise<void>;
   /**
    * 概念池存储（跨会话记忆）：启动时 loadPool 喂 SearchEvaluator，
    * ConceptExtractorRole 抽到新概念 addCandidate，下发搜索后 markSearched。
@@ -107,10 +132,12 @@ export class RoleDispatcher {
   private readonly sessionContext: SessionContext;
   private readonly soul: Soul;
   private readonly llm: { complete(prompt: string): Promise<string> };
-  private readonly sendCommand: (command: EdgeCommand) => void;
+  private readonly rawSendCommand: (command: EdgeCommand) => void;
   private readonly clock: () => number;
   private readonly getRiskStatus: () => RiskStatus;
   private readonly canInteract: (action: 'like' | 'collect' | 'follow') => boolean;
+  private readonly isHardPaused: (edgeId?: string) => boolean;
+  private readonly notifyComments?: (items: NotificationItem[]) => Promise<void>;
   private readonly conceptStore?: ConceptStorePort;
   /** 搜索前限频闸（每关键词每会话/每天上限），dispatcher 持有单例，会话重启时清会话计数。 */
   private readonly searchLimiter: SearchFrequencyLimiter;
@@ -133,10 +160,12 @@ export class RoleDispatcher {
   constructor(options: RoleDispatcherOptions) {
     this.soul = options.soul;
     this.llm = options.llm;
-    this.sendCommand = options.sendCommand;
+    this.rawSendCommand = options.sendCommand;
     this.clock = options.clock ?? Date.now;
     this.getRiskStatus = options.getRiskStatus ?? (() => 'normal');
     this.canInteract = options.canInteract ?? (() => true);
+    this.isHardPaused = options.isHardPaused ?? (() => false);
+    this.notifyComments = options.notifyComments;
     this.conceptStore = options.conceptStore;
     this.searchLimiter = new SearchFrequencyLimiter(options.searchLimiterOptions);
     this.eventBus = options.eventBus ?? new EventBus();
@@ -154,6 +183,30 @@ export class RoleDispatcher {
   /** 动作前犹豫时间中心值（随风控状态 + 会话进度缩放）。familiar=true 对近期已评估内容按 1/3 折扣。 */
   private thinkNow(familiar = false): number {
     return computeThinkMs({ status: this.getRiskStatus(), progress: this.progress(), familiar });
+  }
+
+  /** 通知巡视命令（巡视期放行，浏览类命令被暂停出口扣住）。 */
+  private isExcursionCommand(action: EdgeCommand['action']): boolean {
+    return action === 'open_notifications'
+      || action === 'browse_notification_comments'
+      || action === 'browse_notification_likes'
+      || action === 'browse_notification_follows'
+      || action === 'notification_back_home';
+  }
+
+  /**
+   * 发命令的统一出口（软暂停闸）。巡视期（browseSuspended）扣住 browse 类命令——它们会从下次
+   * page.cards 自行重来——只放行巡视命令与 session.end；非巡视期照常下发。所有翻译块都经此。
+   */
+  private sendCommand(command: EdgeCommand): void {
+    if (
+      this.sessionContext.browseSuspended &&
+      command.action !== 'session.end' &&
+      !this.isExcursionCommand(command.action)
+    ) {
+      return; // 软暂停：丢弃 browse 命令（不入队、由 page.cards 续刷自然重来）
+    }
+    this.rawSendCommand(command);
   }
 
   /**
@@ -228,6 +281,19 @@ export class RoleDispatcher {
         getRemainingBudget: () => this.budget,
         clock: this.clock,
       }),
+      // —— 通知巡视（消息查看）12 角色：检测→准入→暂停→开首页→分诊→按类浏览→分类→去重→发飞书→返回→恢复 ——
+      new NotificationGatekeeper({ ...commonOptions, isHardPaused: this.isHardPaused }, this.sessionContext),
+      new BrowseSuspender(commonOptions, this.sessionContext),
+      new NotificationHomeOpener(commonOptions, this.sessionContext),
+      new NotificationTriage(commonOptions, this.sessionContext),
+      new NotificationCommentBrowser(commonOptions, this.sessionContext),
+      new NotificationLikeBrowser(commonOptions, this.sessionContext),
+      new NotificationFollowBrowser(commonOptions, this.sessionContext),
+      new NotificationClassifier(commonOptions, this.sessionContext),
+      new NotificationDeduper(commonOptions, this.sessionContext),
+      new NotificationNotifier({ ...commonOptions, notify: this.notifyComments }, this.sessionContext),
+      new NotificationReturnHome(commonOptions, this.sessionContext),
+      new ExcursionResumer(commonOptions, this.sessionContext),
     ];
 
     // 概念抽取角色：仅在概念池可用时注册（PG 不可用则不抽取，搜索退化为仅 seed_keywords）。
@@ -488,6 +554,30 @@ export class RoleDispatcher {
       this.eventBus.on('session.should_end', (payload) => {
         this.sendCommand({ action: 'session.end', reason: payload.reason });
         this.endSession(payload.reason);
+      }),
+
+      // —— 通知巡视：角色意图 → 边缘命令（均为 excursion 来源，巡视暂停期照常放行）——
+      // 去通知首页：首次 open（→ open_notifications）/ 一类处理完返回（→ notification_back_home）。
+      this.eventBus.on('notification.opening', (payload) => {
+        if (payload.reason === 'back') {
+          this.sendCommand({ action: 'notification_back_home', params: { thinkMs: this.thinkNow() } });
+        } else {
+          this.sendCommand({ action: 'open_notifications', params: { thinkMs: this.thinkNow() } });
+        }
+      }),
+
+      // 进入某分类浏览：按 category 翻译为各自命令（边缘 handler 各知各的选择器）。
+      this.eventBus.on('notification.browse_category', (payload) => {
+        if (payload.category === 'comments') {
+          this.sendCommand({
+            action: 'browse_notification_comments',
+            params: { thinkMs: this.thinkNow(), ...(payload.scrollMax === undefined ? {} : { scrollMax: payload.scrollMax }) },
+          });
+        } else if (payload.category === 'likes') {
+          this.sendCommand({ action: 'browse_notification_likes', params: { thinkMs: this.thinkNow() } });
+        } else {
+          this.sendCommand({ action: 'browse_notification_follows', params: { thinkMs: this.thinkNow() } });
+        }
       }),
     );
   }

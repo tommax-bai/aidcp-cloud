@@ -77,9 +77,14 @@ export class SessionContext {
     this._excursion = { active: true, epoch, phase: 'requested', lastHandledEpoch: epoch, processedCategories: new Set() };
   }
   setExcursionPhase(phase: ExcursionState['phase']): void { this._excursion.phase = phase; }
-  /** 结束巡视：清瞬时态 + 解除暂停（保留 notifiedItemKeys）。幂等。 */
+  /**
+   * 结束巡视：清瞬时态 + 解除暂停。幂等。
+   * 保留 lastHandledEpoch（本会话内已处理的 epoch 水位，防同一 epoch 被重复检测再次开巡视；
+   * 仅 reset() 在断连时清零），以及 notifiedItemKeys。
+   */
   endExcursion(): void {
-    this._excursion = SessionContext.freshExcursion();
+    const last = this._excursion.lastHandledEpoch;
+    this._excursion = { active: false, epoch: null, phase: 'idle', lastHandledEpoch: last, processedCategories: new Set() };
     this._browseSuspended = false;
   }
   /** 本趟是否已处理过该分类（防分诊死循环）。 */
