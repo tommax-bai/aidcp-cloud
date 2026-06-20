@@ -31,8 +31,10 @@ export interface PublishSequenceInput {
   title: string;
   content: string;
   tags: string[];
-  /** 配图 URL（配图 e2e 在后续 publish-media-upload change，暂不入序列） */
+  /** 配图 URL（按序 emit upload_image；publish-media-upload change 接通边缘上传桥）。 */
   images?: string[];
+  /** 封面图 URL（全部 upload_image 成功后才下发 set_cover；任一图失败则不下发）。 */
+  cover?: string;
   /** 发帖元数据（stage-3 决策产物）：话题/@/地点/合集/可见范围/权限/合规/定时；下发为 edge 指令应用。 */
   metadata?: PublishMetadata;
   /** 是否已通过人审（AC-PUB）；false → 序列截止于提交前 */
@@ -43,6 +45,11 @@ export interface PublishSequenceResult {
   ok: boolean;
   /** 成功时的真实平台 postId（来自 capture_postId 回报） */
   postId?: string;
+  /**
+   * 配图是否全部成功上传。请求了配图（images 非空）但任一 upload_image 失败/超时 → false（降级纯文字）。
+   * 未请求配图时为 true（无图可降级）。executor 据 false 回正已落库的 imageUrl，杜绝纯文字帖留「有图」假信号。
+   */
+  imagesOk: boolean;
   /** 失败位置（seq=-1 表示未授权而未生成提交指令） */
   failedAt?: { seq: number; kind: PublishCommandKind; error: string };
 }
@@ -53,6 +60,11 @@ export interface CommandSequencerDeps {
   clock?: () => number;
   /** 单条指令等待回报的超时（毫秒，缺省 30s） */
   timeoutMs?: number;
+  /**
+   * upload_image 专用超时（毫秒，缺省 60s）。MUST 大于边缘「下载+CDP 设置+后置校验」总预算，
+   * 使慢/过期 URL 时边缘先返回干净 ok:false（降级纯文字），而非把整条序列拖到云端超时中断。
+   */
+  uploadTimeoutMs?: number;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
 
@@ -69,6 +81,7 @@ export class CommandSequencer {
   private readonly idGen: () => string;
   private readonly clock: () => number;
   private readonly timeoutMs: number;
+  private readonly uploadTimeoutMs: number;
   private readonly logger: Pick<Console, 'log' | 'warn' | 'error'>;
   private readonly pending = new Map<string, Pending>();
 
@@ -77,6 +90,7 @@ export class CommandSequencer {
     this.idGen = deps.idGen ?? (() => Math.random().toString(36).slice(2));
     this.clock = deps.clock ?? Date.now;
     this.timeoutMs = deps.timeoutMs ?? 30_000;
+    this.uploadTimeoutMs = deps.uploadTimeoutMs ?? 60_000;
     this.logger = deps.logger ?? console;
   }
 
@@ -90,6 +104,11 @@ export class CommandSequencer {
 
     add('navigate_entry');
     add('select_mode');
+    // 配图先于正文：upload_image×N（计数无关循环、前向兼容多图）→ set_cover（执行期仅当全图成功才真实下发，见 executePublishSequence）。
+    if (input.images) {
+      for (const url of input.images) add('upload_image', { imageUrl: url });
+    }
+    if (input.cover) add('set_cover', { imageUrl: input.cover });
     add('fill_field', { fieldType: 'title', value: input.title });
     add('fill_field', { fieldType: 'content', value: input.content });
     for (const tag of input.tags) {
@@ -124,24 +143,48 @@ export class CommandSequencer {
     return cmds;
   }
 
-  /** 驱动整条序列：逐条 send→await→advance；任一失败即停。 */
+  /**
+   * 驱动整条序列：逐条 send→await→advance。
+   * 红线：非配图指令任一失败即停（fail-fast），后续不下发、不假成功。
+   * 唯一放宽（且仅限配图）：upload_image 失败/超时 → 置 imagesOk=false、降级纯文字继续余下指令，
+   *   并跳过依赖该图的 set_cover——因为纯文字是诚实可接受的结果，而标题失败不是。
+   */
   async executePublishSequence(input: PublishSequenceInput): Promise<PublishSequenceResult> {
     const sequence = this.buildCommandSequence(input);
     let postId: string | undefined;
     let submitted = false;
+    let imagesOk = true;
 
     for (const cmd of sequence) {
+      // 配图失败已降级 → 不下发依赖该图的封面（红线：绝不在配图失败后下发 set_cover）。
+      if (cmd.kind === 'set_cover' && !imagesOk) {
+        this.logger.warn(`[CommandSequencer] 配图已降级，跳过 set_cover seq=${cmd.seq}`);
+        continue;
+      }
+
       let result: PublishCommandResultPayload;
       try {
         result = await this.sendAndWaitResult(cmd);
       } catch (err) {
         const error = err instanceof Error ? err.message : String(err);
+        // 配图唯一放宽：upload_image 超时/异常 → 降级纯文字、继续。
+        if (cmd.kind === 'upload_image') {
+          this.logger.warn(`[CommandSequencer] upload_image 异常降级纯文字 seq=${cmd.seq}: ${error}`);
+          imagesOk = false;
+          continue;
+        }
         this.logger.warn(`[CommandSequencer] seq=${cmd.seq} kind=${cmd.kind} 异常: ${error}`);
-        return { ok: false, failedAt: { seq: cmd.seq, kind: cmd.kind, error } };
+        return { ok: false, imagesOk, failedAt: { seq: cmd.seq, kind: cmd.kind, error } };
       }
-      // 红线：某条失败即停，后续不下发、不假成功。
       if (!result.ok) {
-        return { ok: false, failedAt: { seq: cmd.seq, kind: cmd.kind, error: result.error ?? 'unknown' } };
+        // 配图唯一放宽：upload_image 回 ok:false → 降级纯文字、继续。
+        if (cmd.kind === 'upload_image') {
+          this.logger.warn(`[CommandSequencer] upload_image 失败降级纯文字 seq=${cmd.seq}: ${result.error ?? 'unknown'}`);
+          imagesOk = false;
+          continue;
+        }
+        // 红线：非配图指令失败即停，后续不下发、不假成功。
+        return { ok: false, imagesOk, failedAt: { seq: cmd.seq, kind: cmd.kind, error: result.error ?? 'unknown' } };
       }
       if (cmd.kind === 'submit_publish') submitted = true;
       if (cmd.kind === 'capture_postId') postId = result.value;
@@ -149,20 +192,22 @@ export class CommandSequencer {
 
     // 未授权 → 序列不含 submit → 未真正发布（红线：不假成功）。
     if (!submitted) {
-      return { ok: false, failedAt: { seq: -1, kind: 'submit_publish', error: 'not_approved' } };
+      return { ok: false, imagesOk, failedAt: { seq: -1, kind: 'submit_publish', error: 'not_approved' } };
     }
-    return { ok: true, postId };
+    return { ok: true, imagesOk, postId };
   }
 
   /** 下发一条 publish.command 并等待其 result（按 recordId+seq 关联 + 超时清理）。 */
   sendAndWaitResult(cmd: PublishCommandPayload): Promise<PublishCommandResultPayload> {
     const key = `${cmd.recordId}:${cmd.seq}`;
     const envelope = makeEnvelope('publish.command', this.idGen(), this.clock(), cmd);
+    // upload_image 用更宽超时，给边缘「下载+CDP+后置校验」留足空间先返回干净 ok:false（见 uploadTimeoutMs 说明）。
+    const waitMs = cmd.kind === 'upload_image' ? this.uploadTimeoutMs : this.timeoutMs;
     return new Promise<PublishCommandResultPayload>((resolve, reject) => {
       const timeoutHandle = setTimeout(() => {
         this.pending.delete(key);
         reject(new Error(`publish.command timeout seq=${cmd.seq} kind=${cmd.kind}`));
-      }, this.timeoutMs);
+      }, waitMs);
       this.pending.set(key, { commandId: envelope.id, sentAt: this.clock(), resolve, reject, timeoutHandle });
 
       const sent = this.pusher.pushToEdges(envelope);

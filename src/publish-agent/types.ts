@@ -51,6 +51,10 @@ export interface PublishRecord {
   status: PublishStatus;
   /** 发布成功后回填的平台帖子 id */
   platformPostId?: string | null;
+  /** 生成的配图 URL（审计用；是否真附着以 imagesAttached 为准）。 */
+  imageUrl?: string | null;
+  /** 配图是否真实附着到帖子。降级纯文字时为 false——「该帖是否真有图」的权威信号。 */
+  imagesAttached?: boolean;
 }
 
 // ─── 管道角色类型 ──────────────────────────────────────────────────────────────

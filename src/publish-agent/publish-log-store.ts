@@ -23,11 +23,16 @@ CREATE TABLE IF NOT EXISTS publish_log (
                    CHECK (status IN ('draft','published','failed','needs_review')),
   platform_post_id TEXT,
   publish_metadata JSONB,
-  ai_enforced      BOOLEAN NOT NULL DEFAULT false
+  ai_enforced      BOOLEAN NOT NULL DEFAULT false,
+  image_url        TEXT,
+  images_attached  BOOLEAN NOT NULL DEFAULT false
 );
 -- 既有表向后兼容（幂等）：A 阶段4 元数据落库 + 防篡改审计列。
 ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS publish_metadata JSONB;
 ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS ai_enforced BOOLEAN NOT NULL DEFAULT false;
+-- publish-media-upload（配图收口）：审计用 image_url + 权威「真有图」信号 images_attached。
+ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS image_url TEXT;
+ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS images_attached BOOLEAN NOT NULL DEFAULT false;
 `;
 
 export interface PublishLogStoreOptions {
@@ -77,8 +82,8 @@ export class PublishLogStore {
   /** 写入一条发布记录，返回新行 id。 */
   async insert(record: PublishRecord): Promise<number> {
     const { rows } = await this.pool.query<{ id: number }>(
-      `INSERT INTO publish_log (title, content, source_concepts, source_liked_ids, status, platform_post_id)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO publish_log (title, content, source_concepts, source_liked_ids, status, platform_post_id, image_url, images_attached)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING id`,
       [
         record.title,
@@ -87,9 +92,17 @@ export class PublishLogStore {
         record.sourceLikedIds,
         record.status,
         record.platformPostId ?? null,
+        record.imageUrl ?? null,
+        // 插入时配图尚未上传，权威信号默认 false；上传成功后由 markImagesAttached 置 true。
+        record.imagesAttached ?? false,
       ],
     );
     return rows[0].id;
+  }
+
+  /** 配图收口：标记该帖配图是否真实附着（降级纯文字时为 false）。image_url 保留供审计。 */
+  async markImagesAttached(id: number, attached: boolean): Promise<void> {
+    await this.pool.query('UPDATE publish_log SET images_attached = $2 WHERE id = $1', [id, attached]);
   }
 
   /** 更新一条记录的状态。 */

@@ -23,6 +23,11 @@ export interface PublishLogStore {
   updatePostId?(id: number, postId: string): Promise<void>;
   /** stage-4 元数据落库 + 防篡改审计（可选）。 */
   recordMetadata?(id: number, metadata: unknown, aiEnforced: boolean): Promise<void>;
+  /**
+   * 配图收口：标记该帖配图是否真实附着。请求了配图但降级纯文字时置 false——
+   * 保留 image_url 供审计，但 images_attached 才是「该帖是否真有图」的权威信号（杜绝纯文字帖被读成带图）。
+   */
+  markImagesAttached?(id: number, attached: boolean): Promise<void>;
 }
 
 /** 边缘推送接口 */
@@ -189,15 +194,23 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       return { recordId, status: 'needs_review', dispatched: false, envelope: null, completedAt: this.clock() };
     }
 
+    const hadImage = !!assembled.imageUrl;
     const result = await this.sequencer!.executePublishSequence({
       recordId,
       title: this.deriveTitle(assembled),
       content: assembled.finalContent,
       tags: assembled.finalTags,
       images: assembled.imageUrl ? [assembled.imageUrl] : undefined,
+      // 单图：封面即该图本身（全图成功才会真实下发 set_cover）。
+      cover: assembled.imageUrl ?? undefined,
       metadata,
       approvedByUser: true,
     });
+
+    // 配图收口：请求了配图时如实标记是否附着——降级（imagesOk=false）即纯文字真相，杜绝「有图」假信号。
+    if (hadImage && this.store.markImagesAttached) {
+      await this.store.markImagesAttached(recordId, result.imagesOk).catch(() => {});
+    }
 
     if (result.ok && result.postId) {
       if (this.store.updatePostId) await this.store.updatePostId(recordId, result.postId).catch(() => {});

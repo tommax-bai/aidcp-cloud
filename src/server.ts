@@ -408,9 +408,12 @@ async function main(): Promise<void> {
         return publishLogStore.insert({
           title: record.title,
           content: record.content,
-          sourceConcepts: record.tags,
-          sourceLikedIds: [],
+          // 真血缘：用 executor 计算的真概念/真点赞 id（无则空数组），不再用 tags / [] 充数（修 stage-4 适配器漏接）。
+          sourceConcepts: record.sourceConcepts ?? [],
+          sourceLikedIds: record.sourceLikedIds ?? [],
           status: record.status as 'draft' | 'published' | 'failed' | 'needs_review',
+          // 审计用 image_url；是否真附着插入时为 false，上传成功后由 markImagesAttached 置 true。
+          imageUrl: record.imageUrl,
         });
       },
       async updateStatus(id, status) {
@@ -418,6 +421,14 @@ async function main(): Promise<void> {
       },
       async updatePostId(id, postId) {
         await publishLogStore.updatePostId(id, postId);
+      },
+      // stage-4 元数据落库 + 防篡改审计（补接 server 适配器漏接，使 executor 的 recordMetadata 真生效）。
+      async recordMetadata(id, metadata, aiEnforced) {
+        await publishLogStore.recordMetadata(id, metadata, aiEnforced);
+      },
+      // 配图收口：降级纯文字时如实标记，杜绝纯文字帖留「有图」假信号。
+      async markImagesAttached(id, attached) {
+        await publishLogStore.markImagesAttached(id, attached);
       },
     },
     pusher: server,

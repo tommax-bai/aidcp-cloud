@@ -20,7 +20,8 @@ function makeSequencer(responder: Responder, timeoutMs = 50) {
       return 1;
     },
   };
-  seq = new CommandSequencer({ pusher, clock: () => 0, timeoutMs });
+  // uploadTimeoutMs 与 timeoutMs 同小值，便于测 upload_image 超时降级（生产默认 60s）。
+  seq = new CommandSequencer({ pusher, clock: () => 0, timeoutMs, uploadTimeoutMs: timeoutMs });
   return { seq, pushed };
 }
 
@@ -42,6 +43,68 @@ const okFor = (cmd: PublishCommandPayload): PublishCommandResultPayload => ({
 });
 
 describe('AC-CMD CommandSequencer（云端编排驱动）', () => {
+  it('AC-MEDIA-SEQ 配图 emit：images → upload_image×N 于 select_mode 后/fill_field 前，随后 set_cover；submit/capture 仍授权后', () => {
+    const { seq } = makeSequencer(() => null);
+    const cmds = seq.buildCommandSequence(input({ tags: [], images: ['a', 'b'], cover: 'a', approvedByUser: true }));
+    const kinds = cmds.map((c) => c.kind);
+    const selIdx = kinds.indexOf('select_mode');
+    const fillIdx = kinds.indexOf('fill_field');
+    const uploads = kinds.map((k, i) => (k === 'upload_image' ? i : -1)).filter((i) => i >= 0);
+    assert.equal(uploads.length, 2, 'images=[a,b] → upload_image×2');
+    assert.ok(uploads.every((i) => i > selIdx && i < fillIdx), 'upload_image 应在 select_mode 后、fill_field 前');
+    const coverIdx = kinds.indexOf('set_cover');
+    assert.ok(coverIdx > uploads[uploads.length - 1] && coverIdx < fillIdx, 'set_cover 在 uploads 之后、fill_field 之前');
+    assert.ok(kinds.includes('submit_publish') && kinds.includes('capture_postId'), '已授权应含提交/抓取');
+  });
+
+  it('AC-MEDIA-SEQ 未授权 + 有配图 → upload_image/set_cover 在（提交前），但无 submit/capture（AC-PUB 第2闸）', () => {
+    const { seq } = makeSequencer(() => null);
+    const cmds = seq.buildCommandSequence(input({ tags: [], images: ['a'], cover: 'a', approvedByUser: false }));
+    const kinds = cmds.map((c) => c.kind);
+    assert.ok(kinds.includes('upload_image') && kinds.includes('set_cover'), '未授权仍可发配图指令（填页）');
+    assert.ok(!kinds.includes('submit_publish') && !kinds.includes('capture_postId'), 'AC-PUB：未授权绝不入提交/抓取');
+  });
+
+  it('AC-MEDIA-DEGRADE 配图回 ok:false → imagesOk=false、跳过 set_cover、文字/提交照走（降级纯文字、ok:true）', async () => {
+    const { seq, pushed } = makeSequencer((cmd) =>
+      cmd.kind === 'upload_image'
+        ? { recordId: cmd.recordId, seq: cmd.seq, kind: cmd.kind, ok: false, error: 'image_not_attached' }
+        : okFor(cmd),
+    );
+    const r = await seq.executePublishSequence(input({ tags: ['a'], images: ['x'], cover: 'x' }));
+    assert.equal(r.ok, true, '降级纯文字仍算发布成功');
+    assert.equal(r.imagesOk, false, '配图失败 imagesOk 如实 false');
+    assert.equal(r.postId, 'post_xyz');
+    assert.ok(!pushed.some((c) => c.kind === 'set_cover'), '配图失败绝不下发 set_cover');
+    assert.ok(pushed.some((c) => c.kind === 'upload_image'), 'upload_image 已尝试');
+    assert.ok(pushed.some((c) => c.kind === 'fill_field') && pushed.some((c) => c.kind === 'submit_publish'), '文字/提交照走');
+    assert.equal(seq.pendingCount, 0, 'pending 清零');
+  });
+
+  it('AC-MEDIA-DEGRADE 配图超时（无回报）→ 同样 imagesOk=false 降级、不下发 set_cover', async () => {
+    const { seq, pushed } = makeSequencer((cmd) => (cmd.kind === 'upload_image' ? null : okFor(cmd)), 20);
+    const r = await seq.executePublishSequence(input({ tags: [], images: ['x'], cover: 'x' }));
+    assert.equal(r.ok, true);
+    assert.equal(r.imagesOk, false, '超时也算配图失败、如实降级');
+    assert.ok(!pushed.some((c) => c.kind === 'set_cover'));
+    assert.ok(pushed.some((c) => c.kind === 'submit_publish'), '降级后文字仍提交');
+    assert.equal(seq.pendingCount, 0, '超时后 pending 清理');
+  });
+
+  it('AC-MEDIA-DEGRADE 红线：非配图指令失败（有配图在场）仍 fail-fast，imagesOk 不掩盖', async () => {
+    // 配图成功，但正文校验失败 → 整条按既有 fail-fast 停止（绝不套用配图降级语义）。
+    const { seq, pushed } = makeSequencer((cmd) => ({
+      recordId: cmd.recordId, seq: cmd.seq, kind: cmd.kind,
+      ok: !(cmd.kind === 'fill_field' && cmd.params.fieldType === 'content'),
+      error: 'post_validation_failed',
+    }));
+    const r = await seq.executePublishSequence(input({ tags: [], images: ['x'], cover: 'x' }));
+    assert.equal(r.ok, false, '非配图失败 → 整体失败');
+    assert.equal(r.failedAt?.kind, 'fill_field');
+    assert.equal(r.imagesOk, true, '配图本身成功，imagesOk 不被误标');
+    assert.ok(!pushed.some((c) => c.kind === 'submit_publish'), '失败后绝不下发 submit');
+  });
+
   it('AC-CMD-SEQ-08 stage-4 元数据应用：metadata → 发 mention/location/set_option/set_schedule（submit 前）', () => {
     const { seq } = makeSequencer(() => null);
     const metadata = {

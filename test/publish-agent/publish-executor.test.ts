@@ -219,4 +219,70 @@ describe('PublishExecutorRole', () => {
     assert.equal(insertedRecords.length, 1);
     assert.equal(insertedRecords[0].status, 'failed');
   });
+
+  test('AC-PUB executor 闸：未授权 → needs_review 且绝不驱动序列（红线：未授权不发布）', async () => {
+    let seqCalls = 0;
+    const fakeStore = {
+      insert: async () => 5,
+      updateStatus: async () => {},
+    };
+    const fakeSequencer = {
+      executePublishSequence: async () => { seqCalls++; return { ok: true, imagesOk: true, postId: 'x' }; },
+    } as any;
+
+    const role = new PublishExecutorRole({
+      store: fakeStore,
+      pusher: { pushToEdges: () => 0 },
+      sequencer: fakeSequencer,
+      isApproved: async () => false, // 未授权
+      clock,
+      logger: silentLogger,
+    });
+
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('assembledContent', makeAssembledContent());
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const result = ctx.get('publishResult');
+    assert.equal(result?.status, 'needs_review');
+    assert.equal(result?.dispatched, false);
+    assert.equal(seqCalls, 0, '未授权 executor 闸：绝不调 executePublishSequence');
+  });
+
+  test('AC-MEDIA 配图降级 → executor 标 markImagesAttached(false)（落库回正，杜绝纯文字帖留有图假信号）', async () => {
+    const attached: Array<{ id: number; a: boolean }> = [];
+    const fakeStore = {
+      insert: async () => 9,
+      updateStatus: async () => {},
+      updatePostId: async () => {},
+      markImagesAttached: async (id: number, a: boolean) => { attached.push({ id, a }); },
+    };
+    // 序列回 ok:true 但 imagesOk:false（配图降级纯文字仍发布成功）。
+    const fakeSequencer = {
+      executePublishSequence: async () => ({ ok: true, imagesOk: false, postId: 'p1' }),
+    } as any;
+
+    const role = new PublishExecutorRole({
+      store: fakeStore,
+      pusher: { pushToEdges: () => 1 },
+      sequencer: fakeSequencer,
+      isApproved: async () => true,
+      clock,
+      logger: silentLogger,
+    });
+
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('assembledContent', makeAssembledContent()); // 含 imageUrl → hadImage=true
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.deepEqual(attached, [{ id: 9, a: false }], '请求了配图但降级 → images_attached=false');
+    const result = ctx.get('publishResult');
+    assert.equal(result?.status, 'published', '降级纯文字仍 published');
+  });
 });
