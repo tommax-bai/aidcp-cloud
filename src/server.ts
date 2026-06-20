@@ -75,6 +75,7 @@ import {
 import { PostProcessor } from './publish-agent/post-processor.js';
 import { PublishLogStore } from './publish-agent/publish-log-store.js';
 import { startPanelApi, parsePanelUsers, PgPanelStore } from './panel/index.js';
+import { PgAlertStore } from './alerts/index.js';
 
 function readEnvString(name: string): string | undefined {
   const value = process.env[name];
@@ -219,15 +220,16 @@ async function main(): Promise<void> {
 
   // RiskController 注册表（V1 task 9.1）：每账号一个 controller、单写 PER ACCOUNT、共享 PgRiskStore。
   // 现役路径用其 default controller（单一来源，避免双 controller 写同一 risk_state）；PG 不可用则现役回退内存态。
-  const riskRegistry = new RiskControllerRegistry(
-    new PgRiskStore({
-      host: readEnvString('PGHOST'),
-      port: readEnvPort('PGPORT'),
-      database: readEnvString('PGDATABASE'),
-      user: readEnvString('PGUSER'),
-      password: readEnvString('PGPASSWORD'),
-    }),
-  );
+  // PgRiskStore 单例：既喂 registry（按账号风控单写），又作 InteractionStore 接线孤儿
+  // risk_interactions 去重表（V1 task 9.2，按笔记互动历史）。
+  const riskStore = new PgRiskStore({
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
+  const riskRegistry = new RiskControllerRegistry(riskStore);
   let riskController: RiskController;
   try {
     riskController = await riskRegistry.getController('default');
@@ -252,8 +254,34 @@ async function main(): Promise<void> {
         console.warn('[aidcp-cloud] LikedNoteStore recordLike error:', err);
       });
     }
+    // V1 task 9.2：按笔记互动落去重表（接线孤儿 risk_interactions）。
+    // 仅 like/collect（InteractionAction，follow 无 per-note 语义）；ON CONFLICT DO NOTHING 天然去重。
+    if (evt.noteId && (evt.action === 'like' || evt.action === 'collect')) {
+      riskStore
+        .recordInteraction(evt.accountId ?? 'default', evt.noteId, evt.action, Date.now())
+        .catch((err) => {
+          console.warn('[aidcp-cloud] recordInteraction error:', err);
+        });
+    }
   });
   console.log('[aidcp-cloud] 事件订阅已建立（RiskController）');
+
+  // 告警日志存储（alerts 表，V1 task 9.5）。init 失败留 undefined（告警不落库、不阻塞启动；飞书告警仍发）。
+  let alertStore: PgAlertStore | undefined;
+  try {
+    const as = new PgAlertStore({
+      host: readEnvString('PGHOST'),
+      port: readEnvPort('PGPORT'),
+      database: readEnvString('PGDATABASE'),
+      user: readEnvString('PGUSER'),
+      password: readEnvString('PGPASSWORD'),
+    });
+    await as.init();
+    alertStore = as;
+    console.log('[aidcp-cloud] AlertStore 已就绪（alerts 表）');
+  } catch (err) {
+    console.warn('[aidcp-cloud] AlertStore 初始化失败，告警不落库（飞书告警仍发）:', (err as Error).message);
+  }
 
   // A 阶段4 发帖触发器（下方实例化；actions.publish 运行时引用，前向安全）。
   let publishScheduler: PublishScheduler | undefined;
@@ -292,6 +320,8 @@ async function main(): Promise<void> {
   const captcha = new CaptchaCoordinator({
     riskController,
     messenger,
+    // V1 task 9.5：验证码告警落库（飞书卡发送点写入、清除点 resolveByEdge）。
+    alertStore,
     resolveChatId: () =>
       resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console }),
   });
@@ -372,6 +402,10 @@ async function main(): Promise<void> {
   roleDispatcher.setup();
   roleDispatcher.startSession();
   console.log('[aidcp-cloud] RoleDispatcher 已启动，决策链路就绪');
+
+  // V1 task 9.4 调度启停态：现役单全局 RoleDispatcher（boot 即 startSession → active）。
+  // 面板 /dispatch 经此切 start/end；per-edge 多路复用拆分留到真多账号（design 步骤 8）。
+  let dispatchActive = true;
 
   // 注册发布编排器的生产段角色（A 阶段2 细拆：6→11，下游 Gatekeeper/Executor 不变）。
   // 注册顺序无关正确性（黑板靠键就绪触发），按拓扑排列便于阅读。
@@ -522,6 +556,24 @@ async function main(): Promise<void> {
               const resumedEdges = server.resumeEdgesForAccount(accountId);
               return { accountId, status: 'active' as const, resumedEdges };
             },
+            // V1 task 9.4：调度启停切现役单全局 RoleDispatcher；回报真实在线 edge 数，绝不乐观。
+            // accountId 信息性（单账号现实）；no-op（已 active/已 stop）以 changed=false 诚实可辨。
+            dispatch: async (accountId, action) => {
+              const want = action === 'start';
+              const changed = dispatchActive !== want;
+              if (changed) {
+                if (want) roleDispatcher.startSession();
+                else roleDispatcher.endSession('panel_dispatch_stop');
+                dispatchActive = want;
+              }
+              return {
+                accountId,
+                dispatch: want ? ('started' as const) : ('stopped' as const),
+                changed,
+                edgesOnline: server.onlineEdgeCount(),
+              };
+            },
+            dispatchActive: () => dispatchActive,
           },
         },
         {
