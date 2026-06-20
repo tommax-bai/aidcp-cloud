@@ -158,6 +158,97 @@ export interface CoverSelection {
   selectedAt: number;
 }
 
+// ─── 阶段3 元数据 + 合规决策键（A 重构 publish-metadata-compliance-roles） ──────
+// 纯决策（cloud）：产出但本阶段不应用到边缘（edge 应用 + 落库 + 防篡改持久化 → stage-4）。
+// assembledContent 八字段逐字不动；元数据走并行 publishMetadata 键。
+
+export type Visibility = 'public' | 'friends_only' | 'self_only';
+export type PublishMode = 'immediate' | 'draft' | 'scheduled';
+export type PermissionLevel = 'allow' | 'restrict' | 'disable';
+
+/** TopicStrategist 输出：话题（3-30，扩展 createdContent.tags，不编造凑数）。 */
+export interface TopicSelection {
+  selectedTopics: string[];
+  selectedAt: number;
+}
+/** MentionStrategist 输出：@提及（去重、剔自身、≤10，无人选回 []）。 */
+export interface MentionSelection {
+  selectedMentions: string[];
+  selectedAt: number;
+}
+/** LocationStrategist 输出：地点（可空，无则 null，不编造）。 */
+export interface LocationSelection {
+  selectedLocation: string | null;
+  selectedAt: number;
+}
+/** CollectionStrategist 输出：合集（可空，无则 null，不编造）。 */
+export interface CollectionSelection {
+  selectedCollection: string | null;
+  selectedAt: number;
+}
+/** VisibilityDecider 输出：可见范围（云端必选非 null；失败保守降 self_only，绝不隐式 public）。 */
+export interface VisibilityDecision {
+  visibility: Visibility;
+  reason: string;
+  decidedAt: number;
+}
+/** PermissionDecider 输出：评论/保存权限（失败保守关闭）。 */
+export interface PermissionDecision {
+  comment: PermissionLevel;
+  save: 'allow' | 'disable';
+  decidedAt: number;
+}
+/** PublishModeDecider 输出：发布方式（定时须未来且 ≤7 天；非定时 publishTime=null）。 */
+export interface PublishModeDecision {
+  mode: PublishMode;
+  publishTime: number | null;
+  decidedAt: number;
+}
+/** 合规声明（2026 硬规：含 AI 生成则强制 ai=true；aiEnforced 置位后不可降）。 */
+export interface Compliance {
+  ai?: boolean;
+  ad?: boolean;
+  origin?: boolean;
+  /** AI 声明被红线强制置位（aiScore 超阈或命中关键词）；一经置位禁止降级。 */
+  aiEnforced?: boolean;
+}
+/** ComplianceDecider 输出。 */
+export interface ComplianceDecision {
+  compliance: Compliance;
+  decidedAt: number;
+}
+
+/** MetadataAggregator 汇合产出：发帖元数据（并行于 assembledContent，本阶段不应用到边缘）。 */
+export interface PublishMetadata {
+  topics: string[];
+  mentions: string[];
+  location: string | null;
+  collection: string | null;
+  /** 云端必选非 null。 */
+  visibility: Visibility;
+  permissions: { comment: PermissionLevel; save: 'allow' | 'disable' };
+  mode: PublishMode;
+  publishTime: number | null;
+  compliance: Compliance;
+  /** 元数据完整度 0-1（如实，缺失项计 0、不虚高）。 */
+  metadataScore: number;
+  decidedAt: number;
+}
+
+/** 元数据保守默认（不凑数/不伪造/最保守，单一来源；各角色降级与聚合兜底共用）。 */
+export const METADATA_DEFAULT_VALUES: Omit<PublishMetadata, 'decidedAt'> = {
+  topics: [],
+  mentions: [],
+  location: null,
+  collection: null,
+  visibility: 'self_only',
+  permissions: { comment: 'disable', save: 'disable' },
+  mode: 'draft',
+  publishTime: null,
+  compliance: {},
+  metadataScore: 0,
+};
+
 /** ApprovalGatekeeper 输出 */
 export interface GateDecision {
   needsApproval: boolean;
@@ -189,6 +280,16 @@ export interface PipelineFields {
   coverSelection: CoverSelection;
   imageDirective: ImageDirective;
   assembledContent: AssembledContent;
+  // 阶段3 元数据 + 合规决策键（并行于发布链，本阶段不应用到边缘）
+  topicSelection: TopicSelection;
+  mentionSelection: MentionSelection;
+  locationSelection: LocationSelection;
+  collectionSelection: CollectionSelection;
+  visibilityDecision: VisibilityDecision;
+  permissionDecision: PermissionDecision;
+  publishModeDecision: PublishModeDecision;
+  complianceDecision: ComplianceDecision;
+  publishMetadata: PublishMetadata;
   gateDecision: GateDecision;
   publishResult: PublishResult;
   /** 特殊信号：质量不达标时的重试请求 */

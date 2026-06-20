@@ -11,6 +11,17 @@ import { ContentCleanerRole } from '../../src/publish-agent/roles/content-cleane
 import { AiFlavorScorerRole } from '../../src/publish-agent/roles/ai-flavor-scorer.js';
 import { QualityScorerRole } from '../../src/publish-agent/roles/quality-scorer.js';
 import { ContentAssemblerRole } from '../../src/publish-agent/roles/content-assembler.js';
+import {
+  TopicStrategistRole,
+  MentionStrategistRole,
+  LocationStrategistRole,
+  CollectionStrategistRole,
+  VisibilityDeciderRole,
+  PermissionDeciderRole,
+  PublishModeDeciderRole,
+  ComplianceDeciderRole,
+  MetadataAggregatorRole,
+} from '../../src/publish-agent/roles/index.js';
 import { ApprovalGatekeeperRole } from '../../src/publish-agent/roles/approval-gatekeeper.js';
 import { PublishExecutorRole } from '../../src/publish-agent/roles/publish-executor.js';
 import type { TriggerInput } from '../../src/publish-agent/types.js';
@@ -79,6 +90,16 @@ function buildFullPipeline(llmResponses: Record<string, string>, opts?: { enable
   orchestrator.registerRole(new AiFlavorScorerRole(common));
   orchestrator.registerRole(new QualityScorerRole({ llmClient: fakeLlm as any, ...common }));
   orchestrator.registerRole(new ContentAssemblerRole(common));
+  // 阶段3 元数据 + 合规决策（并行于发布链；规则式确定性，无需 LLM）
+  orchestrator.registerRole(new TopicStrategistRole(common));
+  orchestrator.registerRole(new MentionStrategistRole(common));
+  orchestrator.registerRole(new LocationStrategistRole(common));
+  orchestrator.registerRole(new CollectionStrategistRole(common));
+  orchestrator.registerRole(new VisibilityDeciderRole(common));
+  orchestrator.registerRole(new PermissionDeciderRole(common));
+  orchestrator.registerRole(new PublishModeDeciderRole(common));
+  orchestrator.registerRole(new ComplianceDeciderRole(common));
+  orchestrator.registerRole(new MetadataAggregatorRole(common));
   orchestrator.registerRole(new ApprovalGatekeeperRole({ llmClient: fakeLlm as any, ...common }));
   orchestrator.registerRole(new PublishExecutorRole({ store: fakeStore, pusher: fakePusher, idGen: () => 'env-001', ...common }));
 
@@ -104,7 +125,8 @@ describe('PublishOrchestrator', () => {
     assert.equal(insertedRecords.length, 1);
     assert.equal(pushedEnvelopes.length, 1);
     // 稳定边界：组装产出仍含八字段（细拆后等价）。
-    assert.equal(orchestrator.getRoles().length, 12);
+    // 12（stage-2 生产段+下游）+ 9（stage-3 元数据/合规决策）= 21；新角色并行、不阻塞 publishResult。
+    assert.equal(orchestrator.getRoles().length, 21);
   });
 
   test('细拆后端到端等价 + 配图失败降级：组装边界正确、imageUrl 诚实为 null', async () => {

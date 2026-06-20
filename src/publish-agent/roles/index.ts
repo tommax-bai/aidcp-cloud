@@ -10,5 +10,15 @@ export { ContentCleanerRole } from './content-cleaner.js';
 export { AiFlavorScorerRole } from './ai-flavor-scorer.js';
 export { QualityScorerRole } from './quality-scorer.js';
 export { ContentAssemblerRole } from './content-assembler.js';
+// 阶段3 元数据 + 合规决策角色
+export { TopicStrategistRole } from './topic-strategist.js';
+export { MentionStrategistRole } from './mention-strategist.js';
+export { LocationStrategistRole } from './location-strategist.js';
+export { CollectionStrategistRole } from './collection-strategist.js';
+export { VisibilityDeciderRole } from './visibility-decider.js';
+export { PermissionDeciderRole } from './permission-decider.js';
+export { PublishModeDeciderRole } from './publish-mode-decider.js';
+export { ComplianceDeciderRole } from './compliance-decider.js';
+export { MetadataAggregatorRole } from './metadata-aggregator.js';
 export { ApprovalGatekeeperRole } from './approval-gatekeeper.js';
 export { PublishExecutorRole } from './publish-executor.js';

@@ -63,6 +63,15 @@ import {
   AiFlavorScorerRole,
   QualityScorerRole,
   ContentAssemblerRole,
+  TopicStrategistRole,
+  MentionStrategistRole,
+  LocationStrategistRole,
+  CollectionStrategistRole,
+  VisibilityDeciderRole,
+  PermissionDeciderRole,
+  PublishModeDeciderRole,
+  ComplianceDeciderRole,
+  MetadataAggregatorRole,
   ApprovalGatekeeperRole,
   PublishExecutorRole,
 } from './publish-agent/roles/index.js';
@@ -348,6 +357,16 @@ async function main(): Promise<void> {
   publishOrchestrator.registerRole(new QualityScorerRole({ llmClient: llm }));
   // 汇合：瘦身 ContentAssembler（纯组装，waitAll 五键）
   publishOrchestrator.registerRole(new ContentAssemblerRole());
+  // 阶段3 元数据 + 合规决策（并行于发布链，规则式确定性；产出 publishMetadata，本阶段不应用到边缘）。
+  publishOrchestrator.registerRole(new TopicStrategistRole());
+  publishOrchestrator.registerRole(new MentionStrategistRole());
+  publishOrchestrator.registerRole(new LocationStrategistRole());
+  publishOrchestrator.registerRole(new CollectionStrategistRole());
+  publishOrchestrator.registerRole(new VisibilityDeciderRole());
+  publishOrchestrator.registerRole(new PermissionDeciderRole());
+  publishOrchestrator.registerRole(new PublishModeDeciderRole());
+  publishOrchestrator.registerRole(new ComplianceDeciderRole());
+  publishOrchestrator.registerRole(new MetadataAggregatorRole());
   publishOrchestrator.registerRole(new ApprovalGatekeeperRole({ llmClient: llm }));
   publishOrchestrator.registerRole(new PublishExecutorRole({
     store: {
