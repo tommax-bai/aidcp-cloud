@@ -2,7 +2,7 @@
  * 事件总线类型定义 — 定义系统内所有事件的结构与相关领域类型。
  */
 
-import type { Envelope } from '../comm/protocol.js';
+import type { Envelope, NotificationItem } from '../comm/protocol.js';
 
 // Agent 角色枚举
 export type AgentRole = 'session_monitor' | 'feed_scanner' | 'content_curator' | 'interaction_appraiser' | 'comment_reviewer';
@@ -329,7 +329,27 @@ export interface RoleEventMap {
   'session.should_end': { reason: string; ts: number };
   // idle 看门狗短 idle 时发的恢复 nudge（由 RoleDispatcher 翻译为一次 scroll 命令）
   'session.idle_nudge': { reason: string; ts: number };
+  // —— 通知巡视（消息查看）：边缘上报入口转换 + 角色间衔接 ——
+  'notification.detected.arrived': { edgeId?: string; epoch: number; unreadCount?: number; ts: number };
+  'notification.home.arrived': { comments: number; likes: number; follows: number; epoch?: number; ts: number };
+  'notification.items.arrived': { items: NotificationItem[]; epoch?: number; ts: number };
+  'excursion.requested': { epoch: number; ts: number };
+  'browse.suspended': { epoch: number; ts: number };
+  'notification.opening': { epoch: number; ts: number };
+  'notification.category_selected': { category: NotificationCategory; epoch: number; ts: number };
+  'notification.category_handled': { category: NotificationCategory; epoch: number; ts: number };
+  'notification.classified': { worthy: NotificationItem[]; epoch: number; ts: number };
+  'notification.classify_empty': { epoch: number; ts: number };
+  'notification.classify_failed': { epoch: number; reason: string; ts: number };
+  'notification.worthy': { items: NotificationItem[]; epoch: number; ts: number };
+  'notification.all_seen': { epoch: number; ts: number };
+  'notification.notified': { count: number; epoch: number; ts: number };
+  'notification.triage_done': { epoch: number; ts: number };
+  'excursion.ended': { epoch: number; reason: string; ts: number };
 }
+
+/** 通知分类（与通知首页三栏对应）。 */
+export type NotificationCategory = 'comments' | 'likes' | 'follows';
 
 // 角色名类型
 export type RoleName =
@@ -349,4 +369,17 @@ export type RoleName =
   | 'search_executor'
   | 'concept_extractor'
   | 'back_to_feed'
-  | 'session_monitor';
+  | 'session_monitor'
+  // —— 通知巡视（消息查看）角色 ——
+  | 'notification_gatekeeper'
+  | 'browse_suspender'
+  | 'notification_home_opener'
+  | 'notification_triage'
+  | 'notification_comment_browser'
+  | 'notification_like_browser'
+  | 'notification_follow_browser'
+  | 'notification_classifier'
+  | 'notification_deduper'
+  | 'notification_notifier'
+  | 'notification_return_home'
+  | 'excursion_resumer';
