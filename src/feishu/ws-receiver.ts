@@ -90,6 +90,52 @@ export function getApprovalSignalPath(requestId: string): string {
   return join(APPROVAL_SIGNAL_DIR, `aidcp-publish-approve-${requestId}.json`);
 }
 
+export interface ApprovalWriteResult {
+  /** 本次是否写入成功（首个写者）。 */
+  written: boolean;
+  /** 若已被先前决定，返回其 approved 值（first-writer-wins）。 */
+  alreadyDecided?: boolean;
+}
+
+/** 注入 fs：first-writer-wins 需 writeFile 的 wx flag；readFile 用于读回既有决定（可选）。 */
+export interface ApprovalSignalFs {
+  writeFile: typeof fs.writeFile;
+  readFile?: typeof fs.readFile;
+}
+
+/**
+ * 写发布审批信号（飞书与 Web 共享的唯一出口，byte-identical 路径，AC-PUB-*）。
+ * first-writer-wins：用 O_EXCL（flag 'wx'），文件已存在则不覆盖、读回既有决定返回 alreadyDecided。
+ * 返回 written / alreadyDecided，**绝不返回 published**——edge 读信号后动作才是真相。
+ */
+export async function writeApprovalSignal(
+  fsImpl: ApprovalSignalFs,
+  requestId: string,
+  approved: boolean,
+  payload: PublishApprovalPayload,
+  now: number = Date.now(),
+): Promise<ApprovalWriteResult> {
+  const signalPath = getApprovalSignalPath(requestId);
+  const signal: ApprovalSignal = { requestId, approved, ts: now, payload };
+  try {
+    await fsImpl.writeFile(signalPath, JSON.stringify(signal), { flag: 'wx' });
+    return { written: true };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    // 已有决定（飞书/Web/重复点击先写）：first-writer-wins，读回既有 approved
+    if (fsImpl.readFile) {
+      try {
+        const raw = await fsImpl.readFile(signalPath, 'utf8');
+        const existing = JSON.parse(raw.toString()) as ApprovalSignal;
+        return { written: false, alreadyDecided: existing.approved };
+      } catch {
+        /* 读不回也算已决定 */
+      }
+    }
+    return { written: false, alreadyDecided: approved };
+  }
+}
+
 /**
  * 从飞书文本消息 content（JSON 字符串）抽出纯文本，并剥离 @ 提及占位。
  * 纯函数，便于单测：飞书 @ 提及在 text 中以 @_user_N 占位。
@@ -150,15 +196,18 @@ export class FeishuWsReceiver {
       };
     }
 
-    const signalPath = getApprovalSignalPath(parsed.requestId);
-    if (parsed.action === 'approve') {
-      const signal: ApprovalSignal = {
-        requestId: parsed.requestId,
-        approved: true,
-        ts: Date.now(),
-        payload: parsed.payload,
+    const approved = parsed.action === 'approve';
+    const result = await writeApprovalSignal(this.fsImpl, parsed.requestId, approved, parsed.payload);
+    if (!result.written) {
+      // first-writer-wins：已被先前决定（飞书/Web/重复点击），不覆盖
+      return {
+        toast: {
+          type: 'info',
+          content: `该发布已被处理（${result.alreadyDecided ? '已授权' : '已取消'}）`,
+        },
       };
-      await this.fsImpl.writeFile(signalPath, JSON.stringify(signal), 'utf8');
+    }
+    if (approved) {
       return {
         toast: { type: 'success', content: '已授权发布' },
         card: {
@@ -170,14 +219,6 @@ export class FeishuWsReceiver {
         },
       };
     }
-
-    const signal: ApprovalSignal = {
-      requestId: parsed.requestId,
-      approved: false,
-      ts: Date.now(),
-      payload: parsed.payload,
-    };
-    await this.fsImpl.writeFile(signalPath, JSON.stringify(signal), 'utf8');
     return {
       toast: { type: 'info', content: '已取消发布' },
       card: {

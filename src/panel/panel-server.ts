@@ -17,6 +17,7 @@ import { parseBearer, verifyCredentials } from './auth.js';
 import { buildVersionPayload } from './version.js';
 import type { PanelDeps, PanelConfig, PanelHandle } from './types.js';
 import { startPanelWs, type PanelWsHandle } from './panel-ws.js';
+import type { PublishApprovalPayload } from '../feishu/index.js';
 
 /** 登录/写体很小，限制请求体大小防滥用。 */
 const MAX_BODY_BYTES = 16 * 1024;
@@ -151,6 +152,52 @@ function createRequestHandler(
     }
     if (method === 'GET' && url === '/api/analytics/like-rate') {
       sendJson(res, 200, await deps.panelStore.likeRate());
+      return;
+    }
+
+    // ── 写操作（task 4）：经拥有写的对象，绝不乐观假成功 ──────────────────
+    if (method === 'POST' && url.startsWith('/api/publish/') && url.endsWith('/approve')) {
+      const requestId = decodeURIComponent(url.slice('/api/publish/'.length, -'/approve'.length));
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { approved, payload } = (body ?? {}) as { approved?: unknown; payload?: PublishApprovalPayload };
+      if (typeof approved !== 'boolean') {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      // payload 对 Web 审批为占位（edge 从 publish.request 已知内容）；first-writer-wins 的决定才是关键
+      const result = await deps.writeApprovalSignal(
+        requestId,
+        approved,
+        payload ?? { title: '', content: '', tags: [] },
+      );
+      sendJson(res, 200, result); // {written} 或 {alreadyDecided}，绝不 published
+      return;
+    }
+    if (method === 'POST' && url.startsWith('/api/accounts/') && url.endsWith('/command')) {
+      const accountId = decodeURIComponent(url.slice('/api/accounts/'.length, -'/command'.length));
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { command } = (body ?? {}) as { command?: unknown };
+      if (command === 'pause') {
+        sendJson(res, 200, await deps.commandActions.pause(accountId));
+        return;
+      }
+      if (command === 'resume') {
+        sendJson(res, 200, await deps.commandActions.resume(accountId));
+        return;
+      }
+      sendJson(res, 400, { error: 'bad_request', reason: 'unknown_command' });
       return;
     }
 

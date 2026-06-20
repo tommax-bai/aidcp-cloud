@@ -12,6 +12,7 @@ import type { PublishLogStore } from '../publish-agent/publish-log-store.js';
 import type { EventBus } from '../event-bus/index.js';
 import type { PanelUser } from './auth.js';
 import type { PanelStoreReader } from './panel-store.js';
+import type { PublishApprovalPayload, ApprovalWriteResult } from '../feishu/index.js';
 
 export interface PanelDeps {
   riskController: RiskController;
@@ -25,6 +26,17 @@ export interface PanelDeps {
   panelStore: PanelStoreReader;
   /** 发布编排器 in-flight 队列状态（/api/content/queue）。 */
   publishOrchestrator: { getStatus(): { status: string; snapshot: unknown } };
+  /** 发布审批写回（first-writer-wins，与飞书共享信号文件契约 AC-PUB-*）；返回 written/alreadyDecided，绝不 published。 */
+  writeApprovalSignal: (
+    requestId: string,
+    approved: boolean,
+    payload: PublishApprovalPayload,
+  ) => Promise<ApprovalWriteResult>;
+  /** 账号命令（durable，与飞书 actions 共享 accountState 底层）；返回真实结果（resume 带恢复 edge 数）。 */
+  commandActions: {
+    pause(accountId: string): Promise<{ accountId: string; status: 'paused' }>;
+    resume(accountId: string): Promise<{ accountId: string; status: 'active'; resumedEdges: number }>;
+  };
 }
 
 export interface PanelConfig {

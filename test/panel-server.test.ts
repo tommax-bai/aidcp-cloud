@@ -37,6 +37,11 @@ const deps = {
   eventBus: { onAny: () => () => {} }, // panel WS attach 需要；返回 unsub
   panelStore: mockPanelStore,
   publishOrchestrator: { getStatus: () => ({ status: 'idle', snapshot: null }) },
+  writeApprovalSignal: async (_requestId: string, _approved: boolean) => ({ written: true }),
+  commandActions: {
+    pause: async (id: string) => ({ accountId: id, status: 'paused' }),
+    resume: async (id: string) => ({ accountId: id, status: 'active', resumedEdges: 2 }),
+  },
 } as unknown as PanelDeps;
 
 function makeConfig(over: Partial<PanelConfig> = {}): PanelConfig {
@@ -148,6 +153,77 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
 
     // 未知受保护路由 → 404
     assert.equal((await fetch(`${base}/api/nope`, { headers: auth })).status, 404);
+  } finally {
+    await h.close();
+  }
+});
+
+test('HTTP 写路由：审批返 written 非 published；命令返真实结果；鉴权', async () => {
+  const h = await startPanelApi(deps, makeConfig());
+  assert.equal(h.started, true);
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = (await login.json()) as { token: string };
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+
+    // 审批：返回 written，绝不 published（红线）
+    const ap = await fetch(`${base}/api/publish/req-1/approve`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ approved: true }),
+    });
+    assert.equal(ap.status, 200);
+    const apBody = (await ap.json()) as Record<string, unknown>;
+    assert.equal(apBody.written, true);
+    assert.equal('published' in apBody, false);
+
+    // 审批缺 approved → 400
+    const bad = await fetch(`${base}/api/publish/req-1/approve`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({}),
+    });
+    assert.equal(bad.status, 400);
+
+    // 命令 pause / resume → 真实结果
+    const pb = (await (
+      await fetch(`${base}/api/accounts/default/command`, {
+        method: 'POST',
+        headers: auth,
+        body: JSON.stringify({ command: 'pause' }),
+      })
+    ).json()) as { status: string };
+    assert.equal(pb.status, 'paused');
+
+    const rb = (await (
+      await fetch(`${base}/api/accounts/default/command`, {
+        method: 'POST',
+        headers: auth,
+        body: JSON.stringify({ command: 'resume' }),
+      })
+    ).json()) as { resumedEdges: number };
+    assert.equal(rb.resumedEdges, 2);
+
+    // 未知命令 → 400
+    const unk = await fetch(`${base}/api/accounts/default/command`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ command: 'bogus' }),
+    });
+    assert.equal(unk.status, 400);
+
+    // 写路由无 token → 401
+    const noTok = await fetch(`${base}/api/accounts/default/command`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ command: 'pause' }),
+    });
+    assert.equal(noTok.status, 401);
   } finally {
     await h.close();
   }

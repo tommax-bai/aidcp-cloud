@@ -15,7 +15,7 @@
 
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { QwenClient } from './llm/index.js';
 import { SimplePlanner } from './planner/index.js';
@@ -45,6 +45,7 @@ import {
   buildFeishuEventDispatcher,
   resolveDefaultChatId,
   getApprovalSignalPath,
+  writeApprovalSignal,
   type CommandActions,
 } from './feishu/index.js';
 import { CommandSequencer } from './publish-agent/command-sequencer.js';
@@ -455,6 +456,19 @@ async function main(): Promise<void> {
             password: readEnvString('PGPASSWORD'),
           }),
           publishOrchestrator,
+          writeApprovalSignal: (requestId, approved, payload) =>
+            writeApprovalSignal({ writeFile, readFile }, requestId, approved, payload),
+          commandActions: {
+            pause: async (accountId) => {
+              await accountState.pause(accountId);
+              return { accountId, status: 'paused' as const };
+            },
+            resume: async (accountId) => {
+              await accountState.resume(accountId);
+              const resumedEdges = server.resumeEdgesForAccount(accountId);
+              return { accountId, status: 'active' as const, resumedEdges };
+            },
+          },
         },
         {
           port: panelPort,
