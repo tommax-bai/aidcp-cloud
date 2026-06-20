@@ -83,6 +83,11 @@ export class SessionMonitorRole extends BaseRole {
       this.eventBus.on('page.cards.arrived', refresh),
       this.eventBus.on('note.detail.arrived', refresh),
       this.eventBus.on('profile.detail.arrived', refresh),
+      // 通知巡视期边缘上报也算"活动"：每步回执续会话命，使健康巡视不被 idle 看门狗误判停滞
+      // （巡视期 browse 帧被暂停出口扣住，否则看门狗会因没有 browse 上报而累积 idle）。
+      this.eventBus.on('notification.detected.arrived', refresh),
+      this.eventBus.on('notification.home.arrived', refresh),
+      this.eventBus.on('notification.items.arrived', refresh),
     );
     // 启动 wall-clock 定时检查；unref 避免在 Node 下挂住进程 / 测试 runner。
     this.intervalHandle = this.setIntervalFn(() => this.checkIdle(), this.idleTickMs);
