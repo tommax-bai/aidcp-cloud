@@ -1,0 +1,77 @@
+import { BasePublishRole } from './base-role.js';
+import type { RoleConfig } from './base-role.js';
+import type { PipelineFields, CreatedContent, CleanedContent, QualityReport, PostProcessResult } from '../types.js';
+import type { PipelineContext } from '../pipeline-context.js';
+import { buildAssemblerPrompt } from '../prompts.js';
+import { executeWithFallback } from '../retry-strategy.js';
+import type { QwenClient } from '../../llm/qwen.js';
+
+interface QualityScorerInput {
+  created: CreatedContent;
+  cleaned: CleanedContent;
+}
+
+/**
+ * QualityScorer — 内容质量评分（A 阶段2，从 ContentAssembler 拆出 Step 2）。
+ * LLM 评审产出 qualityScore；失败/非法 JSON → 按 aiScore 公式降级（逐字沿用现 content-assembler.ts:66）。
+ * 与 AiFlavorScorer 分职：本角色只产 qualityScore，绝不硬编码满分、绝不抹分。
+ */
+export interface QualityScorerDeps {
+  llmClient: QwenClient;
+  clock?: () => number;
+  logger?: Pick<Console, 'log' | 'warn' | 'error'>;
+}
+
+export class QualityScorerRole extends BasePublishRole<QualityScorerInput, QualityReport> {
+  readonly config: RoleConfig = {
+    name: 'QualityScorer',
+    watchKeys: ['cleanedContent'],
+    timeoutMs: 20000,
+    fallback: 'default',
+  };
+  protected readonly outputKey = 'qualityReport' as const;
+  private llmClient: QwenClient;
+
+  constructor(deps: QualityScorerDeps) {
+    super({ logger: deps.logger, clock: deps.clock });
+    this.llmClient = deps.llmClient;
+  }
+
+  protected extractInput(snapshot: Partial<PipelineFields>): QualityScorerInput {
+    return { created: snapshot.createdContent!, cleaned: snapshot.cleanedContent! };
+  }
+
+  protected async execute(input: QualityScorerInput, _context: PipelineContext<PipelineFields>): Promise<QualityReport> {
+    const ppResult: PostProcessResult = {
+      content: input.cleaned.content,
+      aiScore: input.cleaned.aiScore,
+      rewritten: input.cleaned.rewritten,
+      flaggedPhrases: input.cleaned.flaggedPhrases,
+    };
+    const { result: review, usedFallback } = await executeWithFallback(
+      async () => {
+        const raw = await this.llmClient.chat([
+          { role: 'system', content: '你是内容质量评审员。严格返回JSON。' },
+          { role: 'user', content: buildAssemblerPrompt(input.created, ppResult) },
+        ]);
+        return this.parseReviewOutput(raw);
+      },
+      // 降级：逐字沿用历史公式 round((1-aiScore)*70)（无 AI 味时基准 70；绝不硬编码满分）。见 design Open Questions。
+      { default: { qualityScore: Math.round((1 - input.cleaned.aiScore) * 70) }, reason: 'LLM quality review failed' },
+    );
+    if (usedFallback) this.logger.warn('[QualityScorer] 评审失败，按 aiScore 公式降级');
+    return { qualityScore: review.qualityScore, reviewedAt: this.clock() };
+  }
+
+  protected override getDefaultOutput(): QualityReport {
+    return { qualityScore: 50, reviewedAt: this.clock() };
+  }
+
+  private parseReviewOutput(raw: string): { qualityScore: number } {
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error('No JSON found in QualityScorer output');
+    const obj = JSON.parse(match[0]);
+    const score = Number(obj.qualityScore);
+    return { qualityScore: isNaN(score) ? 50 : Math.max(0, Math.min(100, score)) };
+  }
+}

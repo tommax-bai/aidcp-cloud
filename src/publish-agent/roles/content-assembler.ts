@@ -1,93 +1,74 @@
 import { BasePublishRole } from './base-role.js';
 import type { RoleConfig } from './base-role.js';
-import type { PipelineFields, CreatedContent, ImageDirective, AssembledContent } from '../types.js';
+import type {
+  PipelineFields,
+  CreatedContent,
+  CleanedContent,
+  AiFlavorScore,
+  QualityReport,
+  CoverSelection,
+  AssembledContent,
+} from '../types.js';
 import type { PipelineContext } from '../pipeline-context.js';
-import { buildAssemblerPrompt } from '../prompts.js';
-import { executeWithFallback } from '../retry-strategy.js';
-import type { QwenClient } from '../../llm/qwen.js';
-import type { PostProcessResult } from '../types.js';
 
-export interface PostProcessorLike {
-  process(content: string): Promise<PostProcessResult>;
-}
-
-export interface ContentAssemblerDeps {
-  llmClient: QwenClient;
-  postProcessor: PostProcessorLike;
-  clock?: () => number;
-  logger?: Pick<Console, 'log' | 'warn' | 'error'>;
-}
-
+/**
+ * ContentAssembler（瘦身，A 阶段2）— 纯组装，无 LLM / 无 IO。
+ * 汇合生产段各上游键产出稳定边界 assembledContent（八字段逐字同形，下游零改动）。
+ * 清洗 / AI 味分 / 质量分 / 配图 已分别拆到 ContentCleaner / AiFlavorScorer / QualityScorer / ImageGenerator+CoverSelector。
+ */
 interface AssemblerInput {
-  createdContent: CreatedContent;
-  imageDirective: ImageDirective;
+  cleaned: CleanedContent;
+  aiFlavor: AiFlavorScore;
+  quality: QualityReport;
+  cover: CoverSelection;
+  created: CreatedContent;
 }
 
 export class ContentAssemblerRole extends BasePublishRole<AssemblerInput, AssembledContent> {
   readonly config: RoleConfig = {
     name: 'ContentAssembler',
-    watchKeys: ['createdContent', 'imageDirective'],
+    // waitAll 五键：各由"无论成败必写自己键"的角色生产（R1 死锁防护）。
+    watchKeys: ['cleanedContent', 'aiFlavorScore', 'qualityReport', 'imageDirective', 'coverSelection'],
     waitAll: true,
-    timeoutMs: 20000,
+    timeoutMs: 10000,
     fallback: 'default',
   };
   protected readonly outputKey = 'assembledContent' as const;
-  private llmClient: QwenClient;
-  private postProcessor: PostProcessorLike;
-
-  constructor(deps: ContentAssemblerDeps) {
-    super({ logger: deps.logger, clock: deps.clock });
-    this.llmClient = deps.llmClient;
-    this.postProcessor = deps.postProcessor;
-  }
 
   protected extractInput(snapshot: Partial<PipelineFields>): AssemblerInput {
     return {
-      createdContent: snapshot.createdContent!,
-      imageDirective: snapshot.imageDirective!,
+      cleaned: snapshot.cleanedContent!,
+      aiFlavor: snapshot.aiFlavorScore!,
+      quality: snapshot.qualityReport!,
+      cover: snapshot.coverSelection!,
+      // createdContent 取 tags：早已就绪，从 snapshot 取、不入 watchKeys（避免与 cleanedContent 重复触发条件）。
+      created: snapshot.createdContent!,
     };
   }
 
   protected async execute(input: AssemblerInput, _context: PipelineContext<PipelineFields>): Promise<AssembledContent> {
-    const { createdContent, imageDirective } = input;
-
-    // Step 1: PostProcessor 禁用词检测 + 去AI味
-    const ppResult = await this.postProcessor.process(createdContent.content);
-
-    // Step 2: LLM 质量评审
-    const { result: review, usedFallback } = await executeWithFallback(
-      async () => {
-        const raw = await this.llmClient.chat([
-          { role: 'system', content: '你是内容质量评审员。严格返回JSON。' },
-          { role: 'user', content: buildAssemblerPrompt(createdContent, ppResult) },
-        ]);
-        return this.parseReviewOutput(raw);
-      },
-      { default: { qualityScore: Math.round((1 - ppResult.aiScore) * 70) }, reason: 'LLM review failed' },
-    );
-
-    if (usedFallback) {
-      this.logger.warn('[ContentAssembler] LLM review failed, using aiScore-based qualityScore');
-    }
-
-    // Step 3: 组装最终内容
     return {
-      finalContent: ppResult.content,
-      finalTags: createdContent.tags,
-      imageUrl: imageDirective.imageUrl,
-      aiScore: ppResult.aiScore,
-      qualityScore: review.qualityScore,
-      rewritten: ppResult.rewritten,
-      flaggedPhrases: ppResult.flaggedPhrases,
+      finalContent: input.cleaned.content,
+      finalTags: input.created.tags,
+      imageUrl: input.cover.imageUrl,
+      aiScore: input.aiFlavor.aiScore,
+      qualityScore: input.quality.qualityScore,
+      rewritten: input.cleaned.rewritten,
+      flaggedPhrases: input.cleaned.flaggedPhrases,
       assembledAt: this.clock(),
     };
   }
 
-  private parseReviewOutput(raw: string): { qualityScore: number } {
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error('No JSON found in Assembler review output');
-    const obj = JSON.parse(match[0]);
-    const score = Number(obj.qualityScore);
-    return { qualityScore: isNaN(score) ? 50 : Math.max(0, Math.min(100, score)) };
+  protected override getDefaultOutput(): AssembledContent {
+    return {
+      finalContent: '',
+      finalTags: [],
+      imageUrl: null,
+      aiScore: 0,
+      qualityScore: 0,
+      rewritten: false,
+      flaggedPhrases: [],
+      assembledAt: this.clock(),
+    };
   }
 }

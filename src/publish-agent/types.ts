@@ -100,7 +100,7 @@ export interface ImageDirective {
   directedAt: number;
 }
 
-/** ContentAssembler 输出 */
+/** ContentAssembler 输出（稳定边界：阶段2 细拆后逐字不改） */
 export interface AssembledContent {
   finalContent: string;
   finalTags: string[];
@@ -110,6 +110,52 @@ export interface AssembledContent {
   rewritten: boolean;
   flaggedPhrases: string[];
   assembledAt: number;
+}
+
+// ─── 阶段2 生产段细拆新增中间键（A 重构 publish-content-media-roles） ──────────
+
+/** ContentTypeSelector 输出：内容类型（现恒图文，kind 联合预留 video/text）。 */
+export interface ContentType {
+  kind: 'image_text' | 'video' | 'text';
+  selectedAt: number;
+}
+
+/** ImagePlanner 输出：配图决策（要不要图 / prompt / 风格 / 张数）。 */
+export interface ImagePlan {
+  wantImage: boolean;
+  imagePrompt: string | null;
+  imageStyle: ImageDirective['imageStyle'];
+  imageCount: number;
+  fallbackStrategy: ImageDirective['fallbackStrategy'];
+  plannedAt: number;
+}
+
+/** ContentCleaner 输出：去 AI 味后处理结果（PostProcessResult + cleanedAt）。 */
+export interface CleanedContent {
+  content: string;
+  rewritten: boolean;
+  flaggedPhrases: string[];
+  aiScore: number;
+  cleanedAt: number;
+}
+
+/** AiFlavorScorer 输出：AI 味分（对 cleanedContent.aiScore 的显式投影）。 */
+export interface AiFlavorScore {
+  aiScore: number;
+  scoredAt: number;
+}
+
+/** QualityScorer 输出：质量评分（LLM 评审；失败按 aiScore 公式降级）。 */
+export interface QualityReport {
+  qualityScore: number;
+  reviewedAt: number;
+}
+
+/** CoverSelector 输出：封面选择（无图诚实回 null + hasCover:false）。 */
+export interface CoverSelection {
+  imageUrl: string | null;
+  hasCover: boolean;
+  selectedAt: number;
 }
 
 /** ApprovalGatekeeper 输出 */
@@ -134,6 +180,13 @@ export interface PipelineFields {
   trigger: TriggerInput;
   scoutDecision: ScoutDecision;
   createdContent: CreatedContent;
+  // 阶段2 生产段细拆中间键
+  contentType: ContentType;
+  imagePlan: ImagePlan;
+  cleanedContent: CleanedContent;
+  aiFlavorScore: AiFlavorScore;
+  qualityReport: QualityReport;
+  coverSelection: CoverSelection;
   imageDirective: ImageDirective;
   assembledContent: AssembledContent;
   gateDecision: GateDecision;

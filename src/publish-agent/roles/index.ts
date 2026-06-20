@@ -1,8 +1,14 @@
 export { BasePublishRole } from './base-role.js';
 export type { RoleConfig } from './base-role.js';
 export { ContentScoutRole } from './content-scout.js';
+export { ContentTypeSelectorRole } from './content-type-selector.js';
 export { ContentCreatorRole } from './content-creator.js';
-export { ImageDirectorRole } from './image-director.js';
+export { ImagePlannerRole } from './image-planner.js';
+export { ImageGeneratorRole } from './image-generator.js';
+export { CoverSelectorRole } from './cover-selector.js';
+export { ContentCleanerRole } from './content-cleaner.js';
+export { AiFlavorScorerRole } from './ai-flavor-scorer.js';
+export { QualityScorerRole } from './quality-scorer.js';
 export { ContentAssemblerRole } from './content-assembler.js';
 export { ApprovalGatekeeperRole } from './approval-gatekeeper.js';
 export { PublishExecutorRole } from './publish-executor.js';

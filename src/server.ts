@@ -54,8 +54,14 @@ import { AccountStateManager } from './account-state.js';
 import { PgAccountStore, type AccountStore } from './account-store.js';
 import {
   ContentScoutRole,
+  ContentTypeSelectorRole,
   ContentCreatorRole,
-  ImageDirectorRole,
+  ImagePlannerRole,
+  ImageGeneratorRole,
+  CoverSelectorRole,
+  ContentCleanerRole,
+  AiFlavorScorerRole,
+  QualityScorerRole,
   ContentAssemblerRole,
   ApprovalGatekeeperRole,
   PublishExecutorRole,
@@ -324,18 +330,24 @@ async function main(): Promise<void> {
   roleDispatcher.startSession();
   console.log('[aidcp-cloud] RoleDispatcher 已启动，决策链路就绪');
 
-  // 注册发布编排器的 6 个角色（需在 server 启动后，因为 PublishExecutorRole 依赖 server 作为 pusher）
+  // 注册发布编排器的生产段角色（A 阶段2 细拆：6→11，下游 Gatekeeper/Executor 不变）。
+  // 注册顺序无关正确性（黑板靠键就绪触发），按拓扑排列便于阅读。
   publishOrchestrator.registerRole(new ContentScoutRole({ llmClient: llm }));
+  publishOrchestrator.registerRole(new ContentTypeSelectorRole());
   publishOrchestrator.registerRole(new ContentCreatorRole({ llmClient: llm }));
-  publishOrchestrator.registerRole(new ImageDirectorRole({
-    llmClient: llm,
+  // 配图：决策（ImagePlanner）↔ 执行（ImageGenerator）↔ 封面（CoverSelector）
+  publishOrchestrator.registerRole(new ImagePlannerRole({ llmClient: llm }));
+  publishOrchestrator.registerRole(new ImageGeneratorRole({
     imageProvider: wanxiangClient,
     enableImageGeneration: !!readEnvString('WANXIANG_API_KEY'),
   }));
-  publishOrchestrator.registerRole(new ContentAssemblerRole({
-    llmClient: llm,
-    postProcessor,
-  }));
+  publishOrchestrator.registerRole(new CoverSelectorRole());
+  // 后处理：清洗（ContentCleaner）→ AI味分（AiFlavorScorer）/ 质量分（QualityScorer）
+  publishOrchestrator.registerRole(new ContentCleanerRole({ postProcessor }));
+  publishOrchestrator.registerRole(new AiFlavorScorerRole());
+  publishOrchestrator.registerRole(new QualityScorerRole({ llmClient: llm }));
+  // 汇合：瘦身 ContentAssembler（纯组装，waitAll 五键）
+  publishOrchestrator.registerRole(new ContentAssemblerRole());
   publishOrchestrator.registerRole(new ApprovalGatekeeperRole({ llmClient: llm }));
   publishOrchestrator.registerRole(new PublishExecutorRole({
     store: {
