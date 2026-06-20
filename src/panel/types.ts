@@ -37,6 +37,8 @@ export interface PanelDeps {
     pause(accountId: string): Promise<{ accountId: string; status: 'paused' }>;
     resume(accountId: string): Promise<{ accountId: string; status: 'active'; resumedEdges: number }>;
   };
+  /** 风控注册表（V1 写路由 risk/status、risk/quota 按账号取 controller；单写 PER ACCOUNT）。 */
+  riskRegistry: { getController(accountId: string): Promise<RiskController> };
 }
 
 export interface PanelConfig {

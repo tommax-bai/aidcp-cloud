@@ -18,6 +18,7 @@ import { buildVersionPayload } from './version.js';
 import type { PanelDeps, PanelConfig, PanelHandle } from './types.js';
 import { startPanelWs, type PanelWsHandle } from './panel-ws.js';
 import type { PublishApprovalPayload } from '../feishu/index.js';
+import type { RiskSignalKind, RiskQuotaLevel } from '../risk/index.js';
 
 /** 登录/写体很小，限制请求体大小防滥用。 */
 const MAX_BODY_BYTES = 16 * 1024;
@@ -198,6 +199,56 @@ function createRequestHandler(
         return;
       }
       sendJson(res, 400, { error: 'bad_request', reason: 'unknown_command' });
+      return;
+    }
+    // 风控写（V1 task 8.4）：经 registry 取账号 controller 单写；status 经枚举信号种类、quota 经 setQuotaLevel
+    if (method === 'POST' && url.startsWith('/api/accounts/') && url.endsWith('/risk/status')) {
+      const accountId = decodeURIComponent(url.slice('/api/accounts/'.length, -'/risk/status'.length));
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { kind, reason } = (body ?? {}) as { kind?: unknown; reason?: unknown };
+      const ALLOWED: RiskSignalKind[] = ['manual_restrict', 'manual_freeze', 'operator_override_recover'];
+      if (typeof kind !== 'string' || !(ALLOWED as string[]).includes(kind)) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'unknown_kind' });
+        return;
+      }
+      // operator_override_recover 绕过恢复窗口，必须带审计理由
+      if (kind === 'operator_override_recover' && (typeof reason !== 'string' || !reason.trim())) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'override_requires_audit_reason' });
+        return;
+      }
+      const controller = await deps.riskRegistry.getController(accountId);
+      const before = controller.getState().status;
+      const after = await controller.applySignal({
+        kind: kind as RiskSignalKind,
+        ...(typeof reason === 'string' ? { reason } : {}),
+      });
+      // 诚实：返回写后真态 + 是否真变化（refused 由前端按 changed=false 渲染，区别于成功）
+      sendJson(res, 200, { state: after, statusBefore: before, changed: before !== after.status });
+      return;
+    }
+    if (method === 'POST' && url.startsWith('/api/accounts/') && url.endsWith('/risk/quota')) {
+      const accountId = decodeURIComponent(url.slice('/api/accounts/'.length, -'/risk/quota'.length));
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { level } = (body ?? {}) as { level?: unknown };
+      const LEVELS: RiskQuotaLevel[] = ['conservative', 'normal', 'aggressive'];
+      if (typeof level !== 'string' || !(LEVELS as string[]).includes(level)) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'unknown_level' });
+        return;
+      }
+      const controller = await deps.riskRegistry.getController(accountId);
+      sendJson(res, 200, { state: await controller.setQuotaLevel(level as RiskQuotaLevel) });
       return;
     }
 

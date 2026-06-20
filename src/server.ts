@@ -27,7 +27,7 @@ import {
 } from './comm/index.js';
 
 
-import { RiskController, PgRiskStore } from './risk/index.js';
+import { RiskController, RiskControllerRegistry, PgRiskStore } from './risk/index.js';
 import { EventBus } from './event-bus/index.js';
 import { RoleDispatcher } from './orchestrator/index.js';
 import { loadSoul } from './soul/index.js';
@@ -217,20 +217,21 @@ async function main(): Promise<void> {
   const accountState = new AccountStateManager(accountStore);
   await accountState.init();
 
-  // RiskController：以 PgRiskStore 持久化账号风控态与滑动窗计数（跨重启回放）；PG 不可用则回退内存态。
+  // RiskController 注册表（V1 task 9.1）：每账号一个 controller、单写 PER ACCOUNT、共享 PgRiskStore。
+  // 现役路径用其 default controller（单一来源，避免双 controller 写同一 risk_state）；PG 不可用则现役回退内存态。
+  const riskRegistry = new RiskControllerRegistry(
+    new PgRiskStore({
+      host: readEnvString('PGHOST'),
+      port: readEnvPort('PGPORT'),
+      database: readEnvString('PGDATABASE'),
+      user: readEnvString('PGUSER'),
+      password: readEnvString('PGPASSWORD'),
+    }),
+  );
   let riskController: RiskController;
   try {
-    // 用与锚点缓存相同的 PG* 连接口径，避免 PgRiskStore 回退到 AIDCP_PG_*/硬编码默认而连错库。
-    riskController = await RiskController.create({
-      store: new PgRiskStore({
-        host: readEnvString('PGHOST'),
-        port: readEnvPort('PGPORT'),
-        database: readEnvString('PGDATABASE'),
-        user: readEnvString('PGUSER'),
-        password: readEnvString('PGPASSWORD'),
-      }),
-    });
-    console.log('[aidcp-cloud] RiskController 已就绪（PgRiskStore 持久化）');
+    riskController = await riskRegistry.getController('default');
+    console.log('[aidcp-cloud] RiskController 已就绪（registry default，PgRiskStore 持久化）');
   } catch (err) {
     console.warn('[aidcp-cloud] RiskController 持久化初始化失败，回退内存态:', (err as Error).message);
     riskController = new RiskController();
@@ -238,9 +239,13 @@ async function main(): Promise<void> {
 
   // RiskController 订阅跨模块事件：真实互动发生时按账号计数（record 内部再过 canDo）。
   eventBus.on('interaction.occurred', (evt) => {
-    riskController.record(evt.action).catch((err) => {
-      console.warn('[aidcp-cloud] RiskController record error:', err);
-    });
+    // V1 task 9.1：按 evt.accountId 路由到对应账号 controller（缺失回退 default）；单账号现实即 default。
+    riskRegistry
+      .getController(evt.accountId ?? 'default')
+      .then((c) => c.record(evt.action))
+      .catch((err) => {
+        console.warn('[aidcp-cloud] RiskController record error:', err);
+      });
     // A 阶段4 来源血缘：真实点赞落 liked_notes（noteId 才落；详情缺则空字段如实，不编造）。
     if (evt.action === 'like' && evt.noteId && likedNoteStore) {
       likedNoteStore.recordLike(evt.noteId).catch((err) => {
@@ -480,6 +485,7 @@ async function main(): Promise<void> {
       const panel = await startPanelApi(
         {
           riskController,
+          riskRegistry,
           publishLogStore,
           conceptStore,
           botChatStore,

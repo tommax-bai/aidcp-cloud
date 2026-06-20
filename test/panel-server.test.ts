@@ -5,6 +5,7 @@ import { startPanelApi } from '../src/panel/panel-server.js';
 import { parsePanelUsers } from '../src/panel/auth.js';
 import type { PanelConfig, PanelDeps } from '../src/panel/types.js';
 import type { PanelAccount, PanelStoreReader } from '../src/panel/panel-store.js';
+import { RiskController } from '../src/risk/index.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 
@@ -42,6 +43,7 @@ const deps = {
     pause: async (id: string) => ({ accountId: id, status: 'paused' }),
     resume: async (id: string) => ({ accountId: id, status: 'active', resumedEdges: 2 }),
   },
+  riskRegistry: { getController: async (id: string) => new RiskController({ accountId: id }) },
 } as unknown as PanelDeps;
 
 function makeConfig(over: Partial<PanelConfig> = {}): PanelConfig {
@@ -224,6 +226,55 @@ test('HTTP 写路由：审批返 written 非 published；命令返真实结果�
       body: JSON.stringify({ command: 'pause' }),
     });
     assert.equal(noTok.status, 401);
+  } finally {
+    await h.close();
+  }
+});
+
+test('HTTP risk 写路由：枚举 kind / override 需 reason / quota / 真态写回（V1 8.4）', async () => {
+  const h = await startPanelApi(deps, makeConfig());
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = (await login.json()) as { token: string };
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+    const post = (path: string, body: unknown) =>
+      fetch(`${base}${path}`, { method: 'POST', headers: auth, body: JSON.stringify(body) });
+
+    // manual_restrict: normal → restricted, changed
+    const r1 = (await (await post('/api/accounts/default/risk/status', { kind: 'manual_restrict' })).json()) as {
+      state: { status: string };
+      changed: boolean;
+    };
+    assert.equal(r1.state.status, 'restricted');
+    assert.equal(r1.changed, true);
+
+    // manual_freeze → frozen
+    const r2 = (await (await post('/api/accounts/default/risk/status', { kind: 'manual_freeze' })).json()) as {
+      state: { status: string };
+    };
+    assert.equal(r2.state.status, 'frozen');
+
+    // override 缺 reason → 400；带 reason → 200
+    assert.equal((await post('/api/accounts/default/risk/status', { kind: 'operator_override_recover' })).status, 400);
+    assert.equal(
+      (await post('/api/accounts/default/risk/status', { kind: 'operator_override_recover', reason: 'manual review' })).status,
+      200,
+    );
+
+    // 枚举外 kind → 400
+    assert.equal((await post('/api/accounts/default/risk/status', { kind: 'light' })).status, 400);
+
+    // quota: aggressive；枚举外 → 400
+    const q = (await (await post('/api/accounts/default/risk/quota', { level: 'aggressive' })).json()) as {
+      state: { quotaLevel: string };
+    };
+    assert.equal(q.state.quotaLevel, 'aggressive');
+    assert.equal((await post('/api/accounts/default/risk/quota', { level: 'mega' })).status, 400);
   } finally {
     await h.close();
   }

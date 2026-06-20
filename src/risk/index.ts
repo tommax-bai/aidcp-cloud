@@ -3,6 +3,7 @@ export * from './quotas.js';
 export * from './sliding-window-counter.js';
 export * from './risk-state-machine.js';
 export * from './risk-controller.js';
+export * from './risk-controller-registry.js';
 export * from './pg-risk-store.js';
 export * from './session-budget.js';
 export * from './pacing.js';
