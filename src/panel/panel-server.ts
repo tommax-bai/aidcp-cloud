@@ -16,6 +16,7 @@ import { signJwt, verifyJwt } from './jwt.js';
 import { parseBearer, verifyCredentials } from './auth.js';
 import { buildVersionPayload } from './version.js';
 import type { PanelDeps, PanelConfig, PanelHandle } from './types.js';
+import { startPanelWs, type PanelWsHandle } from './panel-ws.js';
 
 /** 登录/写体很小，限制请求体大小防滥用。 */
 const MAX_BODY_BYTES = 16 * 1024;
@@ -197,11 +198,28 @@ export function startPanelApi(deps: PanelDeps, config: PanelConfig): Promise<Pan
     server.listen(config.port, '127.0.0.1', () => {
       const addr = server.address();
       const actualPort = typeof addr === 'object' && addr ? addr.port : config.port;
-      logger.log(`[panel] 面板 API 已监听 127.0.0.1:${actualPort}`);
+      // attach 面板 WS（同端口 /ws，纯只读 EventBus 扇出，绝不碰 edge）。失败非致命，/api 仍可用。
+      let panelWs: PanelWsHandle | undefined;
+      try {
+        panelWs = startPanelWs({
+          httpServer: server,
+          eventBus: deps.eventBus,
+          jwtSecret: config.jwtSecret,
+          logger,
+        });
+      } catch (err) {
+        logger.warn(`[panel] 面板 WS attach 失败（非致命，/api 仍可用）: ${(err as Error).message}`);
+      }
+      logger.log(`[panel] 面板 API 已监听 127.0.0.1:${actualPort}（/api${panelWs ? ' + /ws 面板事件流' : ''}）`);
       resolve({
         started: true,
         port: actualPort,
-        close: () => new Promise<void>((r) => server.close(() => r())),
+        close: async () => {
+          if (panelWs) await panelWs.close();
+          // 强制断开 keep-alive 连接，使 server.close 能及时完成（优雅关闭）
+          server.closeAllConnections?.();
+          await new Promise<void>((r) => server.close(() => r()));
+        },
       });
     });
   });

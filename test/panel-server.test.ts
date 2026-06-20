@@ -34,6 +34,7 @@ const mockPanelStore: PanelStoreReader = {
 
 const deps = {
   edgeServer: { edgeCount: () => 3, onlineEdgeCount: () => 3 },
+  eventBus: { onAny: () => () => {} }, // panel WS attach 需要；返回 unsub
   panelStore: mockPanelStore,
   publishOrchestrator: { getStatus: () => ({ status: 'idle', snapshot: null }) },
 } as unknown as PanelDeps;
