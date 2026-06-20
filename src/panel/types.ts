@@ -19,8 +19,8 @@ export interface PanelDeps {
   conceptStore?: ConceptStore;
   botChatStore: BotChatStore;
   eventBus: EventBus;
-  /** 在线边缘登记（结构类型，便于测试造桩）。online 的 staleness 真实性校验见 task 5.3。 */
-  edgeServer: { edgeCount(): number };
+  /** 在线边缘登记（结构类型，便于测试造桩）。onlineEdgeCount 为 staleness 校验后的真实在线数（D9）。 */
+  edgeServer: { edgeCount(): number; onlineEdgeCount(): number };
   /** 只读查询层（dashboard / accounts / content / analytics 聚合）。 */
   panelStore: PanelStoreReader;
   /** 发布编排器 in-flight 队列状态（/api/content/queue）。 */

@@ -116,7 +116,7 @@ function createRequestHandler(
       ]);
       sendJson(res, 200, {
         asOf: Date.now(),
-        edgesOnline: deps.edgeServer.edgeCount(),
+        edgesOnline: deps.edgeServer.onlineEdgeCount(), // staleness-aware（死连接不算在线，D9）
         totals: { ...totals, publish: todayPublishes },
         likeRate,
         accounts,

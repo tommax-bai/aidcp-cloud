@@ -15,6 +15,9 @@ class FakePusher implements EdgePusher {
   edgeCount(): number {
     return this.count;
   }
+  onlineEdgeCount(): number {
+    return this.count;
+  }
   pauseEdge(): void {}
   resumeEdge(): void {}
 }

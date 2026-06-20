@@ -40,8 +40,10 @@ export interface EdgeSession {
 export interface EdgePusher {
   /** 推送给指定 edgeId 的连接；未指定则广播给所有已上线边缘。返回送达连接数。 */
   pushToEdges(env: Envelope, edgeId?: string): number;
-  /** 当前已上线（完成 hello）的边缘数量 */
+  /** 当前已登记（完成 hello）的边缘连接总数 */
   edgeCount(): number;
+  /** 真实在线的边缘数：已登记 AND 近期有心跳（staleness 校验，绝不把死连接当在线）。 */
+  onlineEdgeCount(): number;
   /** 暂停向某 edge 下发指令（验证码期间）。`session.end` 不受暂停影响，仍可送达。 */
   pauseEdge(edgeId: string): void;
   /** 解除某 edge 的暂停（验证码清除/人工恢复）。 */
@@ -65,6 +67,10 @@ export interface WsServerOptions {
   clock?: () => number;
   /** 注入会话 id 生成器（测试用） */
   sessionIdGen?: () => string;
+  /** 主动心跳 ping 间隔（ms）；0 关闭定时器（测试）。默认 30000。 */
+  heartbeatMs?: number;
+  /** 超过此时长无帧/pong 即视为 stale（不在线）。默认 75000（2.5×心跳）。 */
+  staleAfterMs?: number;
 }
 
 let sessionSeq = 0;
@@ -73,6 +79,8 @@ let sessionSeq = 0;
 interface EdgeConn {
   ws: WebSocket;
   session: EdgeSession;
+  /** 最近一次从该连接收到帧/pong 的时刻（staleness 判定用）。 */
+  lastSeen: number;
 }
 
 /** 边-云 WebSocket 服务端 */
@@ -90,6 +98,9 @@ export class EdgeCloudServer implements EdgePusher {
    * 故 RoleDispatcher.restartSession（每次 edge.hello 重建）后仍生效。
    */
   private readonly pausedEdges = new Set<string>();
+  private readonly heartbeatMs: number;
+  private readonly staleAfterMs: number;
+  private heartbeatTimer?: ReturnType<typeof setInterval>;
 
   constructor(options: WsServerOptions) {
     this.port = options.port ?? 8787;
@@ -97,19 +108,36 @@ export class EdgeCloudServer implements EdgePusher {
     this.handler = options.handler;
     this.clock = options.clock ?? Date.now;
     this.sessionIdGen = options.sessionIdGen ?? (() => `sess-${++sessionSeq}`);
+    this.heartbeatMs = options.heartbeatMs ?? 30000;
+    this.staleAfterMs = options.staleAfterMs ?? 75000;
   }
 
   /** 启动监听 */
   start(): Promise<void> {
-    return new Promise((resolve) => {
+    return new Promise<void>((resolve) => {
       this.wss = new WebSocketServer({ port: this.port, host: this.host });
       this.wss.on('connection', (ws) => this.onConnection(ws));
       this.wss.on('listening', () => resolve());
-    });
+    }).then(() => this.startHeartbeat());
+  }
+
+  /** 主动心跳：定时 ping 每条在线连接；pong/入站帧回到时刷新 lastSeen（见 onConnection）。 */
+  private startHeartbeat(): void {
+    if (this.heartbeatMs <= 0 || this.heartbeatTimer) return;
+    this.heartbeatTimer = setInterval(() => {
+      for (const conn of this.edges.values()) {
+        if (conn.ws.readyState === WebSocket.OPEN) conn.ws.ping();
+      }
+    }, this.heartbeatMs);
+    this.heartbeatTimer.unref?.();
   }
 
   /** 关闭服务端 */
   close(): Promise<void> {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
+    }
     return new Promise((resolve, reject) => {
       if (!this.wss) return resolve();
       this.wss.close((err) => (err ? reject(err) : resolve()));
@@ -135,6 +163,16 @@ export class EdgeCloudServer implements EdgePusher {
 
   edgeCount(): number {
     return this.edges.size;
+  }
+
+  /** 真实在线数：已登记 AND 连接 OPEN AND 近期有帧/pong（staleness 校验，死连接不算在线，D9）。 */
+  onlineEdgeCount(): number {
+    const now = this.clock();
+    let n = 0;
+    for (const conn of this.edges.values()) {
+      if (conn.ws.readyState === WebSocket.OPEN && now - conn.lastSeen < this.staleAfterMs) n++;
+    }
+    return n;
   }
 
   /** 已绑定端口（构造时 port:0 由系统分配，测试用）；未启动返回 null。 */
@@ -176,9 +214,18 @@ export class EdgeCloudServer implements EdgePusher {
       const env = parseEnvelope(text);
       const reply = await this.routeMessage(text, session);
       if (env?.type === 'hello') {
-        this.edges.set(session.sessionId, { ws, session });
+        this.edges.set(session.sessionId, { ws, session, lastSeen: this.clock() });
+      } else {
+        // 任意入站帧刷新 lastSeen（连接活着的证据）
+        const conn = this.edges.get(session.sessionId);
+        if (conn) conn.lastSeen = this.clock();
       }
       if (reply) ws.send(JSON.stringify(reply));
+    });
+    // ws 协议层 pong（响应主动 ping）也刷新 lastSeen
+    ws.on('pong', () => {
+      const conn = this.edges.get(session.sessionId);
+      if (conn) conn.lastSeen = this.clock();
     });
     ws.on('close', () => {
       this.edges.delete(session.sessionId);
