@@ -2,6 +2,7 @@ import { BasePublishRole } from './base-role.js';
 import type { RoleConfig } from './base-role.js';
 import type { PipelineFields, GateDecision, AssembledContent, PublishResult } from '../types.js';
 import type { PipelineContext } from '../pipeline-context.js';
+import type { CommandSequencer } from '../command-sequencer.js';
 
 /** PublishLogStore 接口 */
 export interface PublishLogStore {
@@ -14,6 +15,9 @@ export interface PublishLogStore {
     qualityScore: number;
     aiScore: number;
   }): Promise<number>;
+  /** 发布结果回写（指令驱动路径用；可选以兼容仅 insert 的旧桩）。 */
+  updateStatus?(id: number, status: string): Promise<void>;
+  updatePostId?(id: number, postId: string): Promise<void>;
 }
 
 /** 边缘推送接口 */
@@ -36,6 +40,10 @@ export interface PublishExecutorDeps {
   pusher: EdgePusher;
   messenger?: ApprovalMessenger;
   botChatStore?: BotChatStore;
+  /** A 阶段1 指令驱动：注入则 auto_publish 走「逐条指令 + AC-PUB 闸 + 回写」新路；不注入走旧整页 publish.request。 */
+  sequencer?: CommandSequencer;
+  /** AC-PUB 第1道：按 requestId 读审批信号判定是否已人审通过（缺省视为未授权）。 */
+  isApproved?: (requestId: string) => Promise<boolean>;
   idGen?: () => string;
   clock?: () => number;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
@@ -58,6 +66,8 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
   private pusher: EdgePusher;
   private messenger?: ApprovalMessenger;
   private botChatStore?: BotChatStore;
+  private sequencer?: CommandSequencer;
+  private isApproved?: (requestId: string) => Promise<boolean>;
   private idGen: () => string;
 
   constructor(deps: PublishExecutorDeps) {
@@ -66,6 +76,8 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     this.pusher = deps.pusher;
     this.messenger = deps.messenger;
     this.botChatStore = deps.botChatStore;
+    this.sequencer = deps.sequencer;
+    this.isApproved = deps.isApproved;
     this.idGen = deps.idGen ?? (() => Math.random().toString(36).slice(2));
   }
 
@@ -95,7 +107,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
 
   private async handleAutoPublish(assembled: AssembledContent): Promise<PublishResult> {
     const recordId = await this.store.insert({
-      title: assembled.finalContent.slice(0, 50),
+      title: this.deriveTitle(assembled),
       content: assembled.finalContent,
       tags: assembled.finalTags,
       imageUrl: assembled.imageUrl,
@@ -104,6 +116,12 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       aiScore: assembled.aiScore,
     });
 
+    // A 阶段1 新路：注入了 sequencer → 指令驱动 + AC-PUB 闸 + 结果回写。
+    if (this.sequencer) {
+      return this.handleAutoPublishViaSequencer(recordId, assembled);
+    }
+
+    // 旧整页路径（无 sequencer，地基阶段并行保留）。
     const envelope = {
       id: this.idGen(),
       type: 'publish.request',
@@ -127,6 +145,72 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       envelope,
       completedAt: this.clock(),
     };
+  }
+
+  /** 指令驱动发布：AC-PUB 第1道（读审批信号）→ 未授权发卡 needs_review；已授权驱动序列 + 回写状态。 */
+  private async handleAutoPublishViaSequencer(
+    recordId: number,
+    assembled: AssembledContent,
+  ): Promise<PublishResult> {
+    const requestId = `publish-${recordId}`;
+    const approved = this.isApproved ? await this.isApproved(requestId).catch(() => false) : false;
+
+    if (!approved) {
+      // AC-PUB 第1道：未授权 → 发审批卡 + needs_review，绝不下发任何指令（红线：未授权不发布）。
+      await this.trySendApprovalCard(recordId, assembled, requestId);
+      if (this.store.updateStatus) await this.store.updateStatus(recordId, 'needs_review').catch(() => {});
+      this.logger.log(`[PublishExecutor] cmd-path 未授权 → needs_review recordId=${recordId} requestId=${requestId}`);
+      return { recordId, status: 'needs_review', dispatched: false, envelope: null, completedAt: this.clock() };
+    }
+
+    const result = await this.sequencer!.executePublishSequence({
+      recordId,
+      title: this.deriveTitle(assembled),
+      content: assembled.finalContent,
+      tags: assembled.finalTags,
+      images: assembled.imageUrl ? [assembled.imageUrl] : undefined,
+      approvedByUser: true,
+    });
+
+    if (result.ok && result.postId) {
+      if (this.store.updatePostId) await this.store.updatePostId(recordId, result.postId).catch(() => {});
+      this.logger.log(`[PublishExecutor] cmd-path published recordId=${recordId} postId=${result.postId}`);
+      return { recordId, status: 'published', dispatched: true, envelope: null, completedAt: this.clock() };
+    }
+
+    // 红线：序列失败/未抓到 postId → 如实 failed，绝不伪造发布成功。
+    if (this.store.updateStatus) await this.store.updateStatus(recordId, 'failed').catch(() => {});
+    this.logger.warn(`[PublishExecutor] cmd-path failed recordId=${recordId} failedAt=${JSON.stringify(result.failedAt)}`);
+    return { recordId, status: 'failed', dispatched: true, envelope: null, completedAt: this.clock() };
+  }
+
+  /** AssembledContent 不带独立 title（属 stage2 内容链路），本阶段从正文首行/截断派生。 */
+  private deriveTitle(assembled: AssembledContent): string {
+    const firstLine = assembled.finalContent.split('\n')[0]?.trim() ?? '';
+    return (firstLine || assembled.finalContent).slice(0, 30);
+  }
+
+  private async trySendApprovalCard(
+    recordId: number,
+    assembled: AssembledContent,
+    requestId: string,
+  ): Promise<void> {
+    if (!this.messenger || !this.botChatStore) return;
+    try {
+      const chat = await this.botChatStore.getDefaultChat();
+      if (chat) {
+        await this.messenger.sendApprovalCard(chat.chatId, {
+          recordId,
+          requestId,
+          contentPreview: assembled.finalContent.slice(0, 100),
+          qualityScore: assembled.qualityScore,
+          aiScore: assembled.aiScore,
+        });
+        this.logger.log(`[PublishExecutor] 审批卡已发 chat=${chat.chatId} requestId=${requestId}`);
+      }
+    } catch (err) {
+      this.logger.warn(`[PublishExecutor] 发审批卡失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   private async handleManualReview(assembled: AssembledContent): Promise<PublishResult> {

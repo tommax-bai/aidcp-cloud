@@ -15,6 +15,7 @@
 
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { QwenClient } from './llm/index.js';
 import { SimplePlanner } from './planner/index.js';
@@ -26,6 +27,7 @@ import {
   makeEnvelope,
   edgeCommandToEnvelope,
   type PublishRequestPayload,
+  type Envelope,
 } from './comm/index.js';
 
 
@@ -42,8 +44,10 @@ import {
   FeishuWsReceiver,
   buildFeishuEventDispatcher,
   resolveDefaultChatId,
+  getApprovalSignalPath,
   type CommandActions,
 } from './feishu/index.js';
+import { CommandSequencer } from './publish-agent/command-sequencer.js';
 import { PublishOrchestrator } from './publish-agent/index.js';
 import { WanxiangClient } from './publish-agent/wanxiang-client.js';
 import { AccountStateManager } from './account-state.js';
@@ -242,6 +246,24 @@ async function main(): Promise<void> {
     resolveChatId: () =>
       resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console }),
   });
+  // A 阶段1 发布指令编排器：逐条下发 publish.command、按 recordId+seq 关联 publish.command.result。
+  // pusher 经 edgeServer 转发（server 在下方构造，运行时已就绪——前向引用安全，仿 sendCommand）。
+  let edgeServer: EdgeCloudServer | undefined;
+  const commandSequencer = new CommandSequencer({
+    pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
+    logger: console,
+  });
+  // AC-PUB 第1道：按 requestId 读审批信号文件，approved===true 才放行（缺失/解析失败 → 未授权）。
+  const isPublishApproved = async (requestId: string): Promise<boolean> => {
+    try {
+      const raw = await readFile(getApprovalSignalPath(requestId), 'utf8');
+      const parsed = JSON.parse(raw) as { approved?: boolean };
+      return parsed?.approved === true;
+    } catch {
+      return false;
+    }
+  };
+
   const handler = new DefaultMessageHandler({
     planner,
     llm,
@@ -253,8 +275,10 @@ async function main(): Promise<void> {
     eventBus,
     accountState,
     captcha,
+    commandSequencer,
   });
   const server = new EdgeCloudServer({ port, handler });
+  edgeServer = server;
   await server.start();
   console.log(`[aidcp-cloud] 边-云 WebSocket 服务端已监听 :${port}`);
 
@@ -324,10 +348,19 @@ async function main(): Promise<void> {
           status: record.status as 'draft' | 'published' | 'failed' | 'needs_review',
         });
       },
+      async updateStatus(id, status) {
+        await publishLogStore.updateStatus(id, status as 'draft' | 'published' | 'failed' | 'needs_review');
+      },
+      async updatePostId(id, postId) {
+        await publishLogStore.updatePostId(id, postId);
+      },
     },
     pusher: server,
     messenger,
     botChatStore,
+    // A 阶段1：注入 sequencer + 审批读取 → auto_publish 走指令驱动 + AC-PUB 闸 + 结果回写。
+    sequencer: commandSequencer,
+    isApproved: isPublishApproved,
   }));
   console.log(`[aidcp-cloud] PublishOrchestrator 已就绪，角色: ${publishOrchestrator.getRoles().join(', ')}`);
   const debugPayload: PublishRequestPayload = {

@@ -32,7 +32,9 @@ import {
   type NotificationDetectedPayload,
   type NotificationHomePayload,
   type NotificationItemsPayload,
+  type PublishCommandResultPayload,
 } from './protocol.js';
+import type { CommandSequencer } from '../publish-agent/command-sequencer.js';
 import type { MessageHandler, EdgeSession, EdgePusher } from './ws-server.js';
 import type { CaptchaCoordinator } from './captcha-coordinator.js';
 import type { TaskPlanner } from '../planner/types.js';
@@ -70,6 +72,8 @@ export interface HandlerDeps {
   accountState?: AccountStateManager;
   /** 验证码事件协调器（risk.captcha_detected/cleared 的消费端）。未注入则两类上报被忽略（向后兼容）。 */
   captcha?: CaptchaCoordinator;
+  /** A 阶段1 发布指令编排器：消费 publish.command.result 关联回报（未注入则忽略，向后兼容）。 */
+  commandSequencer?: Pick<CommandSequencer, 'onResult'>;
 }
 
 /** 把元素清单渲染成给 LLM 的编号列表（与 edge selector 一致的格式） */
@@ -241,6 +245,10 @@ export class DefaultMessageHandler implements MessageHandler {
         }
         return null;
       }
+      case 'publish.command.result':
+        // A 阶段1：按 recordId+seq 关联回 CommandSequencer，驱动序列推进。
+        this.deps.commandSequencer?.onResult(env.payload as PublishCommandResultPayload, env.id);
+        return null;
       case 'publish.result':
       case 'action.result':
         // 观测类消息：记录即可，不强制回包
