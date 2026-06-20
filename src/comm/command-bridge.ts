@@ -31,6 +31,8 @@ export function edgeCommandToEnvelope(command: EdgeCommand): Envelope {
       return createEnvelope('interaction.collect', command.params ?? {});
     case 'follow':
       return createEnvelope('interaction.follow', command.params ?? {});
+    case 'comment':
+      return createEnvelope('interaction.comment', command.params ?? {});
     case 'search':
       return createEnvelope('search.execute', command.params ?? {});
     case 'back':

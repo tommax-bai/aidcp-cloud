@@ -59,6 +59,7 @@ export type MessageType =
   | 'interaction.like'     // 点赞
   | 'interaction.collect'  // 收藏
   | 'interaction.follow'   // 关注
+  | 'interaction.comment'  // 发评论（浏览闭环写互动）
   | 'navigation.back'      // 返回上一页
   | 'note.browse_images'   // 浏览笔记图片
   | 'note.scroll_comments' // 滚动评论区
@@ -495,6 +496,15 @@ export interface InteractionFollowPayload {
   thinkMs?: number;
 }
 
+export interface InteractionCommentPayload {
+  noteId: string;
+  /** 评论正文（云端已撰写 / 去AI味 / 人审通过后下发） */
+  text: string;
+  reason?: string;
+  /** 发评论前犹豫时间中心值（毫秒，可选） */
+  thinkMs?: number;
+}
+
 export interface NavigationBackPayload {
   reason?: string;  // quality_rejected | back_to_feed | profile_done
   targetPage?: 'feed' | 'search';
@@ -673,6 +683,7 @@ export interface PayloadMap {
   'interaction.like': InteractionLikePayload;
   'interaction.collect': InteractionCollectPayload;
   'interaction.follow': InteractionFollowPayload;
+  'interaction.comment': InteractionCommentPayload;
   'navigation.back': NavigationBackPayload;
   'note.browse_images': NoteBrowseImagesPayload;
   'note.scroll_comments': NoteScrollCommentsPayload;
