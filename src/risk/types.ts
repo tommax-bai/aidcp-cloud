@@ -4,9 +4,11 @@ export type RiskAction = (typeof RISK_ACTIONS)[number];
 
 export type InteractionAction = Extract<RiskAction, 'like' | 'collect' | 'comment'>;
 
-export type RiskQuotaLevel = 'conservative' | 'normal' | 'aggressive';
+export const RISK_QUOTA_LEVELS = ['conservative', 'normal', 'aggressive'] as const;
+export type RiskQuotaLevel = (typeof RISK_QUOTA_LEVELS)[number];
 
-export type RiskStatus = 'normal' | 'warned' | 'restricted' | 'frozen';
+export const RISK_STATUSES = ['normal', 'warned', 'restricted', 'frozen'] as const;
+export type RiskStatus = (typeof RISK_STATUSES)[number];
 
 export type RiskWindow = 'minute' | 'hour' | 'day';
 

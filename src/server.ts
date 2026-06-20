@@ -57,6 +57,7 @@ import {
 } from './publish-agent/roles/index.js';
 import { PostProcessor } from './publish-agent/post-processor.js';
 import { PublishLogStore } from './publish-agent/publish-log-store.js';
+import { startPanelApi, parsePanelUsers } from './panel/index.js';
 
 function readEnvString(name: string): string | undefined {
   const value = process.env[name];
@@ -68,6 +69,14 @@ function readEnvPort(name: string): number | undefined {
   if (!value) return undefined;
   const port = Number(value);
   return Number.isInteger(port) && port > 0 ? port : undefined;
+}
+
+function parseForbiddenPorts(raw: string | undefined): number[] {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0);
 }
 
 async function main(): Promise<void> {
@@ -315,6 +324,37 @@ async function main(): Promise<void> {
     console.log('[aidcp-cloud] 飞书事件接收已启动（WSClient 长连接）');
   } catch (err) {
     console.warn('[aidcp-cloud] 飞书长连接启动失败（事件接收不可用）:', (err as Error).message);
+  }
+
+  // ── 面板 API 层（管理后台后端，进程内、独立端口、JWT）──────────────────────
+  // 未设置 AIDCP_PANEL_PORT 则禁用（默认不开新端口）；启动失败非致命，绝不连累边-云闭环。
+  const panelPort = readEnvPort('AIDCP_PANEL_PORT');
+  if (panelPort) {
+    try {
+      const panel = await startPanelApi(
+        { riskController, publishLogStore, conceptStore, botChatStore, eventBus, edgeServer: server },
+        {
+          port: panelPort,
+          jwtSecret: readEnvString('AIDCP_PANEL_JWT_SECRET') ?? '',
+          users: parsePanelUsers(readEnvString('AIDCP_PANEL_USERS')),
+          jwtTtlSeconds: readEnvPort('AIDCP_PANEL_JWT_TTL_SECONDS') ?? 3600,
+          // 自检拒绝绑定：边-云 8787 / PG 5432 / 调试 8788 / 部署时经 env 补充的 isales 等端口。
+          forbiddenPorts: [port, debugPort, 5432, ...parseForbiddenPorts(readEnvString('AIDCP_PANEL_FORBIDDEN_PORTS'))],
+          logger: console,
+        },
+      );
+      if (panel.started) {
+        console.log(`[aidcp-cloud] 面板 API 已启动（127.0.0.1:${panel.port}，经 Nginx 反代 /api）`);
+      } else {
+        console.warn(
+          `[aidcp-cloud] 面板 API 未启动（${panel.reason}${panel.detail ? ':' + panel.detail : ''}）——边-云闭环与飞书不受影响`,
+        );
+      }
+    } catch (err) {
+      console.warn('[aidcp-cloud] 面板 API 启动异常（非致命）:', (err as Error).message);
+    }
+  } else {
+    console.log('[aidcp-cloud] 面板 API 已禁用（未设置 AIDCP_PANEL_PORT）');
   }
 }
 
