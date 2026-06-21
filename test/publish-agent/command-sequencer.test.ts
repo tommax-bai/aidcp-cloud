@@ -57,38 +57,47 @@ describe('AC-CMD CommandSequencer（云端编排驱动）', () => {
     assert.ok(kinds.includes('submit_publish') && kinds.includes('capture_postId'), '已授权应含提交/抓取');
   });
 
-  it('AC-MEDIA-SEQ 未授权 + 有配图 → upload_image/set_cover 在（提交前），但无 submit/capture（AC-PUB 第2闸）', () => {
+  it('AC-MEDIA-SEQ 未授权 + 有配图（多图）→ upload_image/set_cover 在（提交前），但无 submit/capture（AC-PUB 第2闸）', () => {
     const { seq } = makeSequencer(() => null);
-    const cmds = seq.buildCommandSequence(input({ tags: [], images: ['a'], cover: 'a', approvedByUser: false }));
+    const cmds = seq.buildCommandSequence(input({ tags: [], images: ['a', 'b'], cover: 'a', approvedByUser: false }));
     const kinds = cmds.map((c) => c.kind);
     assert.ok(kinds.includes('upload_image') && kinds.includes('set_cover'), '未授权仍可发配图指令（填页）');
     assert.ok(!kinds.includes('submit_publish') && !kinds.includes('capture_postId'), 'AC-PUB：未授权绝不入提交/抓取');
   });
 
-  it('AC-MEDIA-DEGRADE 配图回 ok:false → imagesOk=false、跳过 set_cover、文字/提交照走（降级纯文字、ok:true）', async () => {
+  it('AC-MEDIA-DEGRADE 图文请求了配图而全失败（ok:false）→ 诚实 failed，绝不下发 fill_field/submit（编辑器被传图门控）', async () => {
     const { seq, pushed } = makeSequencer((cmd) =>
       cmd.kind === 'upload_image'
         ? { recordId: cmd.recordId, seq: cmd.seq, kind: cmd.kind, ok: false, error: 'image_not_attached' }
         : okFor(cmd),
     );
     const r = await seq.executePublishSequence(input({ tags: ['a'], images: ['x'], cover: 'x' }));
-    assert.equal(r.ok, true, '降级纯文字仍算发布成功');
+    assert.equal(r.ok, false, '图文无图 → 无有效帖，诚实 failed');
     assert.equal(r.imagesOk, false, '配图失败 imagesOk 如实 false');
-    assert.equal(r.postId, 'post_xyz');
-    assert.ok(!pushed.some((c) => c.kind === 'set_cover'), '配图失败绝不下发 set_cover');
+    assert.equal(r.failedAt?.kind, 'upload_image');
+    assert.equal(r.failedAt?.error, 'all_images_failed');
     assert.ok(pushed.some((c) => c.kind === 'upload_image'), 'upload_image 已尝试');
-    assert.ok(pushed.some((c) => c.kind === 'fill_field') && pushed.some((c) => c.kind === 'submit_publish'), '文字/提交照走');
+    assert.ok(!pushed.some((c) => c.kind === 'fill_field'), '全图失败后绝不进 fill_field（不假装纯文字）');
+    assert.ok(!pushed.some((c) => c.kind === 'submit_publish'), '绝不提交');
     assert.equal(seq.pendingCount, 0, 'pending 清零');
   });
 
-  it('AC-MEDIA-DEGRADE 配图超时（无回报）→ 同样 imagesOk=false 降级、不下发 set_cover', async () => {
+  it('AC-MEDIA-DEGRADE 配图超时（无回报）→ 同样 imagesOk=false、诚实 failed、不提交', async () => {
     const { seq, pushed } = makeSequencer((cmd) => (cmd.kind === 'upload_image' ? null : okFor(cmd)), 20);
     const r = await seq.executePublishSequence(input({ tags: [], images: ['x'], cover: 'x' }));
-    assert.equal(r.ok, true);
-    assert.equal(r.imagesOk, false, '超时也算配图失败、如实降级');
-    assert.ok(!pushed.some((c) => c.kind === 'set_cover'));
-    assert.ok(pushed.some((c) => c.kind === 'submit_publish'), '降级后文字仍提交');
+    assert.equal(r.ok, false);
+    assert.equal(r.imagesOk, false, '超时也算配图失败');
+    assert.equal(r.failedAt?.error, 'all_images_failed');
+    assert.ok(!pushed.some((c) => c.kind === 'submit_publish'), '绝不提交');
     assert.equal(seq.pendingCount, 0, '超时后 pending 清理');
+  });
+
+  it('AC-MEDIA-SEQ 单图不发 set_cover（封面自动取该图）；多图才发', () => {
+    const { seq } = makeSequencer(() => null);
+    const single = seq.buildCommandSequence(input({ tags: [], images: ['a'], cover: 'a' })).map((c) => c.kind);
+    assert.ok(!single.includes('set_cover'), '单图：封面自动，不下发 set_cover');
+    const multi = seq.buildCommandSequence(input({ tags: [], images: ['a', 'b'], cover: 'a' })).map((c) => c.kind);
+    assert.ok(multi.includes('set_cover'), '多图：下发 set_cover 选封面');
   });
 
   it('AC-MEDIA-DEGRADE 红线：非配图指令失败（有配图在场）仍 fail-fast，imagesOk 不掩盖', async () => {

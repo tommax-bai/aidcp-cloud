@@ -108,7 +108,9 @@ export class CommandSequencer {
     if (input.images) {
       for (const url of input.images) add('upload_image', { imageUrl: url });
     }
-    if (input.cover) add('set_cover', { imageUrl: input.cover });
+    // 封面：仅多图才下发 set_cover（选哪张当封面）。单图封面自动取该图——发布页无独立"设封面"控件，
+    // 强发 set_cover 会 no_target→fail-fast 拖垮整条发布（task-0 实测）。
+    if (input.cover && input.images && input.images.length > 1) add('set_cover', { imageUrl: input.cover });
     add('fill_field', { fieldType: 'title', value: input.title });
     add('fill_field', { fieldType: 'content', value: input.content });
     for (const tag of input.tags) {
@@ -146,16 +148,25 @@ export class CommandSequencer {
   /**
    * 驱动整条序列：逐条 send→await→advance。
    * 红线：非配图指令任一失败即停（fail-fast），后续不下发、不假成功。
-   * 唯一放宽（且仅限配图）：upload_image 失败/超时 → 置 imagesOk=false、降级纯文字继续余下指令，
-   *   并跳过依赖该图的 set_cover——因为纯文字是诚实可接受的结果，而标题失败不是。
+   * 配图失败处理（task-0 实测：图文帖编辑器被"先传图"门控）：
+   * - upload_image 失败/超时 → 置 imagesOk=false、跳过依赖该图的 set_cover；
+   * - 请求了配图（imagesRequested）而全失败 → 到 fill_field 前 MUST 诚实 failed（无有效图文帖），不假装纯文字继续；
+   * - 仅当未请求配图（无图流，前向兼容）才存在"纯文字继续"路径。
    */
   async executePublishSequence(input: PublishSequenceInput): Promise<PublishSequenceResult> {
     const sequence = this.buildCommandSequence(input);
+    const imagesRequested = !!(input.images && input.images.length);
     let postId: string | undefined;
     let submitted = false;
     let imagesOk = true;
 
     for (const cmd of sequence) {
+      // 图文帖编辑器被"先传图"门控（task-0 实测：无图则标题/正文不存在）。请求了配图而全部失败 → 无有效帖，
+      // MUST 诚实 failed，绝不进 fill_field 假装纯文字继续（红线：不假成功）。
+      if (imagesRequested && !imagesOk && cmd.kind !== 'upload_image' && cmd.kind !== 'set_cover') {
+        this.logger.warn(`[CommandSequencer] 全部配图失败、图文帖无有效内容 → failed seq=${cmd.seq}`);
+        return { ok: false, imagesOk: false, failedAt: { seq: cmd.seq, kind: 'upload_image', error: 'all_images_failed' } };
+      }
       // 配图失败已降级 → 不下发依赖该图的封面（红线：绝不在配图失败后下发 set_cover）。
       if (cmd.kind === 'set_cover' && !imagesOk) {
         this.logger.warn(`[CommandSequencer] 配图已降级，跳过 set_cover seq=${cmd.seq}`);

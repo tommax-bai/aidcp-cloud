@@ -252,7 +252,7 @@ describe('PublishExecutorRole', () => {
     assert.equal(seqCalls, 0, '未授权 executor 闸：绝不调 executePublishSequence');
   });
 
-  test('AC-MEDIA 配图降级 → executor 标 markImagesAttached(false)（落库回正，杜绝纯文字帖留有图假信号）', async () => {
+  test('AC-MEDIA 图文全图失败 → status=failed 且 executor 标 markImagesAttached(false)（落库回正，杜绝有图假信号）', async () => {
     const attached: Array<{ id: number; a: boolean }> = [];
     const fakeStore = {
       insert: async () => 9,
@@ -260,9 +260,9 @@ describe('PublishExecutorRole', () => {
       updatePostId: async () => {},
       markImagesAttached: async (id: number, a: boolean) => { attached.push({ id, a }); },
     };
-    // 序列回 ok:true 但 imagesOk:false（配图降级纯文字仍发布成功）。
+    // 图文编辑器被传图门控：全图失败 → sequencer 诚实 ok:false（imagesOk:false），无有效帖。
     const fakeSequencer = {
-      executePublishSequence: async () => ({ ok: true, imagesOk: false, postId: 'p1' }),
+      executePublishSequence: async () => ({ ok: false, imagesOk: false, failedAt: { seq: 2, kind: 'upload_image', error: 'all_images_failed' } }),
     } as any;
 
     const role = new PublishExecutorRole({
@@ -281,8 +281,8 @@ describe('PublishExecutorRole', () => {
 
     await new Promise((r) => setTimeout(r, 50));
 
-    assert.deepEqual(attached, [{ id: 9, a: false }], '请求了配图但降级 → images_attached=false');
+    assert.deepEqual(attached, [{ id: 9, a: false }], '请求了配图但失败 → images_attached=false（即便整帖 failed 也回正）');
     const result = ctx.get('publishResult');
-    assert.equal(result?.status, 'published', '降级纯文字仍 published');
+    assert.equal(result?.status, 'failed', '图文无图 → 诚实 failed');
   });
 });
