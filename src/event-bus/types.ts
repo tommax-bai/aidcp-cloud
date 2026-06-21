@@ -2,7 +2,7 @@
  * 事件总线类型定义 — 定义系统内所有事件的结构与相关领域类型。
  */
 
-import type { Envelope, NotificationItem } from '../comm/protocol.js';
+import type { CommentCandidate, Envelope, NotificationItem } from '../comm/protocol.js';
 
 // Agent 角色枚举
 export type AgentRole = 'session_monitor' | 'feed_scanner' | 'content_curator' | 'interaction_appraiser' | 'comment_reviewer';
@@ -120,14 +120,14 @@ export interface EventMap {
   // 跨模块通知
   'session.started': { sessionId: string };
   'session.ended': { stats: SessionStats };
-  'interaction.occurred': { action: 'like' | 'collect' | 'follow' | 'comment'; accountId?: string; noteId?: string };
+  'interaction.occurred': { action: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like'; accountId?: string; noteId?: string };
   'concept.discovered': { concepts: string[]; source: string };
   // Edge 上报事件（handler → RoleDispatcher）
   'edge.hello': { edgeId: string; ts: number };
   'page.cards.arrived': { cards: PageCardsData[]; ts: number };
   'note.detail.arrived': { detail: NoteDetailData; ts: number };
   'profile.detail.arrived': { detail: ProfileDetailData; ts: number };
-  'action.completed': { action: string; ok: boolean; reason?: string; ts: number };
+  'action.completed': { action: string; ok: boolean; reason?: string; ts: number; candidates?: CommentCandidate[] };
   // 会话控制事件
   'session.should_end': { reason: string; ts: number };
 }

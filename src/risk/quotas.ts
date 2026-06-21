@@ -8,6 +8,7 @@ export const DAILY_QUOTAS: Record<RiskQuotaLevel, ActionQuota> = {
     comment: 3,
     follow: 5,
     publish: 1,
+    comment_like: 3,
   },
   normal: {
     view: 150,
@@ -16,6 +17,7 @@ export const DAILY_QUOTAS: Record<RiskQuotaLevel, ActionQuota> = {
     comment: 8,
     follow: 15,
     publish: 1,
+    comment_like: 6,
   },
   aggressive: {
     view: 300,
@@ -24,6 +26,7 @@ export const DAILY_QUOTAS: Record<RiskQuotaLevel, ActionQuota> = {
     comment: 15,
     follow: 30,
     publish: 2,
+    comment_like: 12,
   },
 };
 
@@ -34,6 +37,7 @@ const MINUTE_BURST_CAP: ActionQuota = {
   comment: 1,
   follow: 1,
   publish: 1,
+  comment_like: 1,
 };
 
 const HOUR_BURST_CAP: ActionQuota = {
@@ -43,6 +47,7 @@ const HOUR_BURST_CAP: ActionQuota = {
   comment: 4,
   follow: 8,
   publish: 2,
+  comment_like: 3,
 };
 
 export function deriveWindowQuotas(level: RiskQuotaLevel): WindowQuotas {

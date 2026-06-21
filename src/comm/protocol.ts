@@ -60,6 +60,7 @@ export type MessageType =
   | 'interaction.collect'  // 收藏
   | 'interaction.follow'   // 关注
   | 'interaction.comment'  // 发评论（浏览闭环写互动）
+  | 'interaction.like_comment' // 给「别人的某条评论」点赞（详情页拟人微互动）
   | 'navigation.back'      // 返回上一页
   | 'note.browse_images'   // 浏览笔记图片
   | 'note.scroll_comments' // 滚动评论区
@@ -309,7 +310,7 @@ export interface PacingDefaultsPayload {
 }
 
 export interface RiskCanDoPayload {
-  action: 'view' | 'like' | 'collect' | 'comment' | 'follow' | 'publish';
+  action: 'view' | 'like' | 'collect' | 'comment' | 'follow' | 'publish' | 'comment_like';
   accountId?: string;
 }
 
@@ -505,6 +506,17 @@ export interface InteractionCommentPayload {
   thinkMs?: number;
 }
 
+/** cloud → edge：给详情页内某一条评论点赞。靠稳定锚点 commentAnchorId 定位，绝不按序号。 */
+export interface InteractionLikeCommentPayload {
+  /** 目标评论的稳定 DOM 锚点（形如 comment-<id>）；边缘据此 getElementById 重新定位 */
+  commentAnchorId: string;
+  /** 所在笔记 id（当前详情页） */
+  noteId: string;
+  reason?: string;
+  /** 点赞前犹豫时间中心值（毫秒，可选） */
+  thinkMs?: number;
+}
+
 export interface NavigationBackPayload {
   reason?: string;  // quality_rejected | back_to_feed | profile_done
   targetPage?: 'feed' | 'search';
@@ -576,10 +588,22 @@ export interface ProfileDetailPayload {
   extracted?: boolean;
 }
 
+/** edge → cloud：滚动评论时随手抽取的一条候选评论（供云端 comment_like_appraiser 评估 + 选中后回点）。 */
+export interface CommentCandidate {
+  /** 稳定 DOM 锚点（形如 comment-<id>），回点时据此 getElementById 重新定位 */
+  anchorId: string;
+  /** 评论作者昵称（可空） */
+  author?: string;
+  /** 评论正文片段 */
+  text: string;
+}
+
 export interface ActionCompletedPayload {
   action: string;
   ok: boolean;
   reason?: string;
+  /** 仅 scroll_comments 回执携带：本次滚动终态视口抽到的候选评论清单（best-effort，可空） */
+  candidates?: CommentCandidate[];
 }
 
 /** edge → cloud：检测到「消息」有未读（仅信号；epoch 每次由无变有 +1，用于去重，不随未读数量变）。 */
@@ -684,6 +708,7 @@ export interface PayloadMap {
   'interaction.collect': InteractionCollectPayload;
   'interaction.follow': InteractionFollowPayload;
   'interaction.comment': InteractionCommentPayload;
+  'interaction.like_comment': InteractionLikeCommentPayload;
   'navigation.back': NavigationBackPayload;
   'note.browse_images': NoteBrowseImagesPayload;
   'note.scroll_comments': NoteScrollCommentsPayload;

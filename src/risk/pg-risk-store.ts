@@ -26,7 +26,7 @@ export const RISK_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS risk_counters (
   id          BIGSERIAL PRIMARY KEY,
   account_id  TEXT NOT NULL,
-  action      TEXT NOT NULL CHECK (action IN ('like','collect','comment','follow','publish','view')),
+  action      TEXT NOT NULL CHECK (action IN ('like','collect','comment','follow','publish','view','comment_like')),
   count       INTEGER NOT NULL DEFAULT 1,
   occurred_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -53,6 +53,23 @@ CREATE TABLE IF NOT EXISTS risk_interactions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_risk_interactions_account_time ON risk_interactions (account_id, interacted_at DESC);
+
+-- 幂等迁移：已存在的 risk_counters 表（CREATE TABLE IF NOT EXISTS 不会改其旧 CHECK）需放行 'comment_like'。
+-- 仅当现有 CHECK 还不含 comment_like 时才 DROP+ADD（一次性），避免每次启动重校验整表。
+-- 注意：只动 risk_counters（配额计数）；risk_interactions（每笔记去重）刻意不含 comment_like。
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'risk_counters'::regclass
+      AND conname = 'risk_counters_action_check'
+      AND pg_get_constraintdef(oid) LIKE '%comment_like%'
+  ) THEN
+    ALTER TABLE risk_counters DROP CONSTRAINT IF EXISTS risk_counters_action_check;
+    ALTER TABLE risk_counters ADD CONSTRAINT risk_counters_action_check
+      CHECK (action IN ('like','collect','comment','follow','publish','view','comment_like'));
+  END IF;
+END $$;
 `;
 
 export function pgRiskConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Required<Omit<PgRiskStoreOptions, 'pool'>> {

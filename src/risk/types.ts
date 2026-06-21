@@ -1,7 +1,9 @@
-export const RISK_ACTIONS = ['like', 'collect', 'comment', 'follow', 'publish', 'view'] as const;
+export const RISK_ACTIONS = ['like', 'collect', 'comment', 'follow', 'publish', 'view', 'comment_like'] as const;
 
 export type RiskAction = (typeof RISK_ACTIONS)[number];
 
+// 注意：comment_like 刻意不进 InteractionAction —— 它没有「每笔记一次」语义（按评论锚点，不按 noteId 去重），
+// 故不落 risk_interactions 去重表、不进 likedNoteStore；它只走 risk_counters 配额计数（独立一档）。
 export type InteractionAction = Extract<RiskAction, 'like' | 'collect' | 'comment'>;
 
 export const RISK_QUOTA_LEVELS = ['conservative', 'normal', 'aggressive'] as const;
