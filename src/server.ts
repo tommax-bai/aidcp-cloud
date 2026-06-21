@@ -181,9 +181,10 @@ async function main(): Promise<void> {
     },
   });
 
-  // 通义万相客户端（图片生成）
+  // 通义万相客户端（图片生成）。万相文生图与 Qwen 同属阿里云百炼、同一 DashScope key——
+  // 未单设 WANXIANG_API_KEY 时回退 DASHSCOPE_API_KEY（已实测该 key 可提交万相 wanx-v1 任务并产出 OSS 图）。
   const wanxiangClient = new WanxiangClient({
-    apiKey: readEnvString('WANXIANG_API_KEY'),
+    apiKey: readEnvString('WANXIANG_API_KEY') ?? readEnvString('DASHSCOPE_API_KEY'),
   });
 
   // 发布编排器（PublishOrchestrator）

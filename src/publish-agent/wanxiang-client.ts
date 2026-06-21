@@ -62,7 +62,8 @@ export class WanxiangClient implements ImageProvider {
   private readonly fetchImpl: typeof fetch;
 
   constructor(options: WanxiangClientOptions = {}) {
-    this.apiKey = options.apiKey ?? process.env.WANXIANG_API_KEY ?? '';
+    // 万相文生图与 Qwen 同属百炼、同一 DashScope key；未单设 WANXIANG_API_KEY 时回退 DASHSCOPE_API_KEY。
+    this.apiKey = options.apiKey ?? process.env.WANXIANG_API_KEY ?? process.env.DASHSCOPE_API_KEY ?? '';
     this.model = options.model ?? 'wanx-v1';
     this.defaultSize = options.defaultSize ?? '1024*1024';
     this.maxPollAttempts = options.maxPollAttempts ?? 6;
@@ -76,7 +77,7 @@ export class WanxiangClient implements ImageProvider {
   /** 生成图片：提交任务 + 轮询结果 */
   async generate(prompt: string, style?: string): Promise<ImageResult> {
     if (!this.apiKey) {
-      return { url: null, error: 'WANXIANG_API_KEY 未配置' };
+      return { url: null, error: '图片生成 key 未配置（WANXIANG_API_KEY / DASHSCOPE_API_KEY 均空）' };
     }
 
     // 1. 提交生成任务
