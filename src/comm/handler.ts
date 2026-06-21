@@ -240,11 +240,11 @@ export class DefaultMessageHandler implements MessageHandler {
         // already_followed 是良性 no-op，失败 ok=false，均不计——只记真实发生的互动。
         if (
           result.ok &&
-          (result.action === 'like' || result.action === 'collect' || result.action === 'follow') &&
+          (result.action === 'like' || result.action === 'collect' || result.action === 'follow' || result.action === 'comment') &&
           result.reason !== 'already_followed'
         ) {
           this.deps.eventBus.emit('interaction.occurred', {
-            action: result.action as 'like' | 'collect' | 'follow',
+            action: result.action as 'like' | 'collect' | 'follow' | 'comment',
             // accountId 从会话填；缺失（legacy edge）回退保留键 'default'，绝不误并入真名账号（D3/D4）
             accountId: session.accountId ?? 'default',
             // noteId 从会话当前笔记填（V1 task 9.2）：编排已知当前笔记，喂按笔记互动历史。

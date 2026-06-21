@@ -55,10 +55,11 @@ describe('AuthorEvaluator', () => {
     let captured = null as ProfileWorthVisitingPayload | null;
     bus.on('profile.worth_visiting', (p) => { captured = p; });
 
-    bus.emit('interaction.completed', {
+    bus.emit('comment.done', {
       noteId: 'note_1',
       sourcePageType: 'feed',
       actions: ['like'],
+      ok: true,
       ts: Date.now(),
     });
 
@@ -91,10 +92,11 @@ describe('AuthorEvaluator', () => {
     let captured = null as ProfileSkippedPayload | null;
     bus.on('profile.skipped', (p) => { captured = p; });
 
-    bus.emit('interaction.completed', {
+    bus.emit('comment.done', {
       noteId: 'note_1',
       sourcePageType: 'search',
       actions: ['like'],
+      ok: true,
       ts: Date.now(),
     });
 
@@ -130,10 +132,11 @@ describe('AuthorEvaluator', () => {
     let captured = null as ProfileWorthVisitingPayload | null;
     bus.on('profile.worth_visiting', (p) => { captured = p; });
 
-    bus.emit('interaction.completed', {
+    bus.emit('comment.done', {
       noteId: 'note_1',
       sourcePageType: 'feed',
       actions: ['like', 'collect'],
+      ok: true,
       ts: Date.now(),
     });
 
@@ -161,10 +164,11 @@ describe('AuthorEvaluator', () => {
     let captured = null as ProfileSkippedPayload | null;
     bus.on('profile.skipped', (p) => { captured = p; });
 
-    bus.emit('interaction.completed', {
+    bus.emit('comment.done', {
       noteId: 'note_x',
       sourcePageType: 'feed',
       actions: ['like'],
+      ok: true,
       ts: Date.now(),
     });
 
@@ -193,10 +197,11 @@ describe('AuthorEvaluator', () => {
     let captured = null as ProfileSkippedPayload | null;
     bus.on('profile.skipped', (p) => { captured = p; });
 
-    bus.emit('interaction.completed', {
+    bus.emit('comment.done', {
       noteId: 'note_1',
       sourcePageType: 'feed',
       actions: ['like'],
+      ok: true,
       ts: Date.now(),
     });
 
@@ -224,10 +229,11 @@ describe('AuthorEvaluator', () => {
     let captured = null as ProfileSkippedPayload | null;
     bus.on('profile.skipped', (p) => { captured = p; });
 
-    bus.emit('interaction.completed', {
+    bus.emit('comment.done', {
       noteId: 'note_1',
       sourcePageType: 'feed',
       actions: ['like'],
+      ok: true,
       ts: Date.now(),
     });
 
@@ -257,10 +263,11 @@ describe('AuthorEvaluator', () => {
     let captured = null as ProfileWorthVisitingPayload | null;
     bus.on('profile.worth_visiting', (p) => { captured = p; });
 
-    bus.emit('interaction.completed', {
+    bus.emit('comment.done', {
       noteId: 'note_1',
       sourcePageType: 'search',
       actions: ['collect'],
+      ok: true,
       ts: Date.now(),
     });
 
@@ -293,10 +300,11 @@ describe('AuthorEvaluator', () => {
     bus.on('profile.worth_visiting', () => { worthEmitted = true; });
     bus.on('profile.skipped', () => { skippedEmitted = true; });
 
-    bus.emit('interaction.completed', {
+    bus.emit('comment.done', {
       noteId: 'note_1',
       sourcePageType: 'feed',
       actions: ['like'],
+      ok: true,
       ts: Date.now(),
     });
 

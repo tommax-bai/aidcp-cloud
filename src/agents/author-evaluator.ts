@@ -10,7 +10,7 @@ import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { SessionContext } from './session-context.js';
 import type { NoteData } from './content-curator-role.js';
-import type { RoleName, InteractionCompletedPayload } from '../event-bus/types.js';
+import type { RoleName, CommentDonePayload, CommentSkippedPayload } from '../event-bus/types.js';
 
 export interface AuthorEvaluatorOptions extends RoleOptions {
   sessionContext: SessionContext;
@@ -30,7 +30,10 @@ export class AuthorEvaluator extends BaseRole {
 
   subscribe(): void {
     this.unsubscribers.push(
-      this.eventBus.on('interaction.completed', (p) => this.onInteractionCompleted(p)),
+      // 接在发评论支线之后：评论成功(comment.done)或跳过(comment.skipped)后，才评估是否进个人主页。
+      // 评论支线只在真 like/collect 过的笔记上触发，故仍是「先互动才评估主页」。
+      this.eventBus.on('comment.done', (p) => this.onCommentResolved(p)),
+      this.eventBus.on('comment.skipped', (p) => this.onCommentResolved(p)),
     );
   }
 
@@ -41,7 +44,7 @@ export class AuthorEvaluator extends BaseRole {
 
   // ─── 事件处理 ─────────────────────────────────────────────
 
-  private async onInteractionCompleted(payload: InteractionCompletedPayload): Promise<void> {
+  private async onCommentResolved(payload: CommentDonePayload | CommentSkippedPayload): Promise<void> {
     const noteData = this.getNoteData(payload.noteId);
     if (!noteData) {
       this.emit('profile.skipped', {

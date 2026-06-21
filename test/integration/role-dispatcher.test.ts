@@ -354,15 +354,18 @@ describe('RoleDispatcher Integration', () => {
   it('路径F: interaction.completed → AuthorEvaluator(visit) → ProfileOpener → ProfileBrowser → FollowAgent → profile.done → BackToFeed → feed.entered', async () => {
     const commands: EdgeCommand[] = [];
     // 第1次：ContentEvaluator → valuable
-    // 第2次：ContentCuratorRole → pass
-    // 第3次：InteractionAppraiser → collect
-    // 第4次：AuthorEvaluator → visit
-    // 第5次：FollowAgent → follow
+    // 第2次：ContentCuratorRole → pass（quality）
+    // 第3次：CommentReviewer → skip（reading）
+    // 第4次：InteractionAppraiser → collect
+    // 第5次：CommentAppraiser → comment:false（不评，走 comment.skipped → 是否进主页评估）
+    // 第6次：AuthorEvaluator → visit
+    // 第7次：FollowAgent → follow
     const llm = createMockLlm([
       '{"verdict":"valuable","index":0,"reason":"深度技术文章","confidence":0.95}',
       '{"action":"pass","reason":"高质量原创内容","confidence":0.9}',
       '{"action":"skip","reason":"评论无需浏览"}',
       '{"action":"collect","reason":"值得反复参考","confidence":0.9}',
+      '{"comment":false,"reason":"无真实可说，不评"}',
       '{"verdict":"visit","reason":"作者专业度极高","confidence":0.85}',
       '{"verdict":"follow","reason":"持续优质输出","confidence":0.8}',
     ]);

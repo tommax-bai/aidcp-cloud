@@ -22,6 +22,10 @@ import { CommentReviewer } from '../agents/comment-reviewer.js';
 import { ContentCuratorRole } from '../agents/content-curator-role.js';
 import { InteractionAppraiserRole } from '../agents/interaction-appraiser-role.js';
 import { AuthorEvaluator } from '../agents/author-evaluator.js';
+import { CommentAppraiser } from '../agents/comment-appraiser.js';
+import { CommentComposer } from '../agents/comment-composer.js';
+import { CommentDeAiFlavor } from '../agents/comment-de-ai-flavor.js';
+import { CommentApprovalGate, type CommentApprovalPort } from '../agents/comment-approval-gate.js';
 import { ProfileOpener } from '../agents/profile-opener.js';
 import { ProfileBrowser } from '../agents/profile-browser.js';
 import { FollowAgent } from '../agents/follow-agent.js';
@@ -77,7 +81,7 @@ export interface RoleDispatcherOptions {
    * 互动前风控闸：下发 like/collect/follow 前判定是否允许。缺省始终允许（向后兼容）。
    * 由 server 接线为 `(action) => riskController.canDo(action)`。被拒则诚实跳过（不下发、不扣 budget）。
    */
-  canInteract?: (action: 'like' | 'collect' | 'follow') => boolean;
+  canInteract?: (action: 'like' | 'collect' | 'follow' | 'comment') => boolean;
   /**
    * 硬暂停闸（验证码/人工接管）：边缘是否处于硬暂停态。缺省始终 false。
    * 由 server 接线为读 ws-server 的 pausedEdges（isEdgePaused）。通知准入角色据此放弃巡视——
@@ -97,6 +101,13 @@ export interface RoleDispatcherOptions {
   conceptStore?: ConceptStorePort;
   /** 搜索限频闸参数（每会话/每天上限）；缺省用 SearchFrequencyLimiter 默认值。 */
   searchLimiterOptions?: { maxPerSession?: number; maxPerDay?: number };
+  /**
+   * 评论循环内人审端口（发飞书审批卡 + 查 /tmp 授权信号）。缺省（未接线）→ 评论一律诚实跳过，绝不裸发（AC-PUB）。
+   * 由 server 接线为复用 messenger + isPublishApproved（评论专属 requestId 命名空间）。
+   */
+  commentApproval?: CommentApprovalPort;
+  /** 该账号当日剩余评论上限（后台配置）。缺省 → 仅会话评论预算 + 风控配额生效。 */
+  getCommentDailyRemaining?: () => number;
 }
 
 export interface EdgeCommand {
@@ -135,7 +146,11 @@ export class RoleDispatcher {
   private readonly rawSendCommand: (command: EdgeCommand) => void;
   private readonly clock: () => number;
   private readonly getRiskStatus: () => RiskStatus;
-  private readonly canInteract: (action: 'like' | 'collect' | 'follow') => boolean;
+  private readonly canInteract: (action: 'like' | 'collect' | 'follow' | 'comment') => boolean;
+  private readonly commentApproval?: CommentApprovalPort;
+  private readonly getCommentDailyRemaining?: () => number;
+  /** 已下发待回执的评论上下文：action.completed{comment} 据此扣额 + emit comment.done（→ 是否进主页评估）。 */
+  private pendingComment: { noteId: string; sourcePageType: 'feed' | 'search'; actions: ('like' | 'collect')[]; text: string } | null = null;
   private readonly isHardPaused: (edgeId?: string) => boolean;
   private readonly notifyComments?: (items: NotificationItem[]) => Promise<void>;
   private readonly conceptStore?: ConceptStorePort;
@@ -164,6 +179,8 @@ export class RoleDispatcher {
     this.clock = options.clock ?? Date.now;
     this.getRiskStatus = options.getRiskStatus ?? (() => 'normal');
     this.canInteract = options.canInteract ?? (() => true);
+    this.commentApproval = options.commentApproval;
+    this.getCommentDailyRemaining = options.getCommentDailyRemaining;
     this.isHardPaused = options.isHardPaused ?? (() => false);
     this.notifyComments = options.notifyComments;
     this.conceptStore = options.conceptStore;
@@ -263,6 +280,20 @@ export class RoleDispatcher {
       new ContentCuratorRole({ ...commonOptions, sessionContext: this.sessionContext }),
       new InteractionAppraiserRole({ ...commonOptions, sessionContext: this.sessionContext, getNoteData, getRemainingBudget }),
       new AuthorEvaluator({ ...commonOptions, sessionContext: this.sessionContext, getNoteData }),
+      // —— 发评论支线（接在互动完成与「是否进主页评估」之间）：评估→撰写→去AI味→循环内人审 ——
+      new CommentAppraiser({
+        ...commonOptions,
+        getNoteData,
+        getRemainingComments: () => this.budget.comments,
+        ...(this.getCommentDailyRemaining ? { getDailyRemaining: this.getCommentDailyRemaining } : {}),
+      }),
+      new CommentComposer({ ...commonOptions, getNoteData }),
+      new CommentDeAiFlavor(commonOptions),
+      new CommentApprovalGate({
+        ...commonOptions,
+        ...(this.commentApproval ? { approval: this.commentApproval } : {}),
+        now: this.clock,
+      }),
       new ProfileOpener(commonOptions),
       new ProfileBrowser(commonOptions),
       new FollowAgent({ ...commonOptions, sessionContext: this.sessionContext, getRemainingFollows: () => this.budget.follows }),
@@ -317,8 +348,8 @@ export class RoleDispatcher {
   }
 
   /** 单次浏览会话的初始互动预算（供初始化与重置复用，避免口径漂移）。 */
-  private static freshBudget(): { likes: number; collects: number; follows: number; searches: number } {
-    return { likes: 10, collects: 5, follows: 3, searches: 5 };
+  private static freshBudget(): { likes: number; collects: number; follows: number; searches: number; comments: number } {
+    return { likes: 10, collects: 5, follows: 3, searches: 5, comments: 2 };
   }
 
   /** 启动会话 */
@@ -417,11 +448,12 @@ export class RoleDispatcher {
   }
 
   /** Edge 上报互动预算消耗 */
-  consumeBudget(action: 'like' | 'collect' | 'follow' | 'search'): void {
+  consumeBudget(action: 'like' | 'collect' | 'follow' | 'search' | 'comment'): void {
     if (action === 'like' && this.budget.likes > 0) this.budget.likes--;
     else if (action === 'collect' && this.budget.collects > 0) this.budget.collects--;
     else if (action === 'follow' && this.budget.follows > 0) this.budget.follows--;
     else if (action === 'search' && this.budget.searches > 0) this.budget.searches--;
+    else if (action === 'comment' && this.budget.comments > 0) this.budget.comments--;
   }
 
   /** 剩余关注配额（测试可观测）。 */
@@ -460,6 +492,29 @@ export class RoleDispatcher {
           this.sendCommand({ action, params: { noteId: payload.noteId, thinkMs: this.thinkNow() } });
           this.consumeBudget(action);
         }
+      }),
+
+      // 人审通过的评论 → 下发 comment 指令。风控闸：被拒则诚实跳过（不下发、不扣额），仍 emit comment.skipped 走「是否进主页评估」。
+      // 配额改由 action.completed 真实回执扣减（对齐 follow）。
+      this.eventBus.on('comment.approved', (payload) => {
+        if (!this.canInteract('comment')) {
+          console.log(`[RoleDispatcher] 评论被风控拦截，跳过 note=${payload.noteId}`);
+          this.eventBus.emit('comment.skipped', {
+            noteId: payload.noteId,
+            sourcePageType: payload.sourcePageType,
+            actions: payload.actions,
+            reason: 'risk_blocked',
+            ts: this.clock(),
+          });
+          return;
+        }
+        this.pendingComment = {
+          noteId: payload.noteId,
+          sourcePageType: payload.sourcePageType,
+          actions: payload.actions,
+          text: payload.text,
+        };
+        this.sendCommand({ action: 'comment', params: { noteId: payload.noteId, text: payload.text, thinkMs: this.thinkNow() } });
       }),
 
       // 进作者主页：专用 profile_open 指令（取代 open_note{type:'profile'}——
@@ -609,11 +664,25 @@ export class RoleDispatcher {
         if (payload.action === 'follow' && payload.ok === true && payload.reason !== 'already_followed') {
           this.consumeBudget('follow');
         }
+        // 评论回执：真发成功才扣额（对齐 follow）；无论成功/失败都 emit comment.done 触发「是否进主页评估」
+        // （评论支线唯一出口、每篇只一次），失败不死锁、不兜底滑动（否则把详情页滚走）。
+        if (payload.action === 'comment' && this.pendingComment) {
+          const pc = this.pendingComment;
+          this.pendingComment = null;
+          if (payload.ok === true) this.consumeBudget('comment');
+          this.eventBus.emit('comment.done', {
+            noteId: pc.noteId,
+            sourcePageType: pc.sourcePageType,
+            actions: pc.actions,
+            ok: payload.ok === true,
+            ts: this.clock(),
+          });
+        }
         // follow 的回执由 BackToFeed 接管去"返回"，不在此兜底滑动——否则 follow 失败会
         // 既滑一屏又返回，两条指令打架。
         // browse_images / scroll_comments 在详情页内执行，失败由 DeepReader / CommentReviewer
         // 自行推进（emit reading.images_done / reading.done），此处不发 feed 滚动（否则会把详情页滚走）。
-        const noRecoverScroll = payload.action === 'follow' || payload.action === 'browse_images' || payload.action === 'scroll_comments';
+        const noRecoverScroll = payload.action === 'follow' || payload.action === 'browse_images' || payload.action === 'scroll_comments' || payload.action === 'comment';
         if (payload.ok === false && !noRecoverScroll && this.sessionActive) {
           console.log(`[RoleDispatcher] 动作失败兜底 → scroll（recover_after_${payload.action}_failed）`);
           this.sendCommand({ action: 'scroll', reason: `recover_after_${payload.action}_failed` });

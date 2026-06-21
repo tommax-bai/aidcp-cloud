@@ -120,7 +120,7 @@ export interface EventMap {
   // 跨模块通知
   'session.started': { sessionId: string };
   'session.ended': { stats: SessionStats };
-  'interaction.occurred': { action: 'like' | 'collect' | 'follow'; accountId?: string; noteId?: string };
+  'interaction.occurred': { action: 'like' | 'collect' | 'follow' | 'comment'; accountId?: string; noteId?: string };
   'concept.discovered': { concepts: string[]; source: string };
   // Edge 上报事件（handler → RoleDispatcher）
   'edge.hello': { edgeId: string; ts: number };
@@ -231,6 +231,58 @@ export interface InteractionSkippedPayload {
   ts: number;
 }
 
+// —— 发评论支线（评估→撰写→去AI味→审批→下发；接在互动完成与「是否进主页评估」之间）——
+// 所有事件携带原 like/collect actions，供 AuthorEvaluator 在评论支线终结后构 prompt。
+
+export interface CommentAppraisedPayload {
+  noteId: string;
+  sourcePageType: 'feed' | 'search';
+  actions: ('like' | 'collect')[];
+  ts: number;
+}
+
+export interface CommentComposedPayload {
+  noteId: string;
+  sourcePageType: 'feed' | 'search';
+  actions: ('like' | 'collect')[];
+  draft: string;
+  ts: number;
+}
+
+export interface CommentClearedPayload {
+  noteId: string;
+  sourcePageType: 'feed' | 'search';
+  actions: ('like' | 'collect')[];
+  text: string;
+  ts: number;
+}
+
+export interface CommentApprovedPayload {
+  noteId: string;
+  sourcePageType: 'feed' | 'search';
+  actions: ('like' | 'collect')[];
+  text: string;
+  ts: number;
+}
+
+/** 评论支线成功终结（执行端真回执后）→ 触发「是否进主页评估」。 */
+export interface CommentDonePayload {
+  noteId: string;
+  sourcePageType: 'feed' | 'search';
+  actions: ('like' | 'collect')[];
+  ok: boolean;
+  ts: number;
+}
+
+/** 评论支线任意阶段诚实跳过（含不评/失败/超时/未授权）→ 触发「是否进主页评估」。 */
+export interface CommentSkippedPayload {
+  noteId: string;
+  sourcePageType: 'feed' | 'search';
+  actions: ('like' | 'collect')[];
+  reason: string;
+  ts: number;
+}
+
 export interface ProfileWorthVisitingPayload {
   noteId: string;
   authorId: string;
@@ -317,6 +369,12 @@ export interface RoleEventMap {
   'reading.done': ReadingDonePayload;
   'interaction.completed': InteractionCompletedPayload;
   'interaction.skipped': InteractionSkippedPayload;
+  'comment.appraised': CommentAppraisedPayload;
+  'comment.composed': CommentComposedPayload;
+  'comment.cleared': CommentClearedPayload;
+  'comment.approved': CommentApprovedPayload;
+  'comment.done': CommentDonePayload;
+  'comment.skipped': CommentSkippedPayload;
   'profile.worth_visiting': ProfileWorthVisitingPayload;
   'profile.skipped': ProfileSkippedPayload;
   'profile.entered': ProfileEnteredPayload;
@@ -366,6 +424,10 @@ export type RoleName =
   | 'comment_reviewer'
   | 'interaction_appraiser'
   | 'author_evaluator'
+  | 'comment_appraiser'
+  | 'comment_composer'
+  | 'comment_de_ai_flavor'
+  | 'comment_approval_gate'
   | 'profile_opener'
   | 'follow_agent'
   | 'search_evaluator'
