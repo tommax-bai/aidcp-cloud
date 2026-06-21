@@ -178,6 +178,19 @@ describe('AC-CMD CommandSequencer（云端编排驱动）', () => {
     assert.equal(pushed[pushed.length - 1].kind, 'capture_postId');
   });
 
+  it('AC-CMD-SEQ-10 capture_postId 失败但已提交 → ok:true（已发布、postId 未知，非致命，不误判 failed）', async () => {
+    const { seq, pushed } = makeSequencer((cmd) =>
+      cmd.kind === 'capture_postId'
+        ? { recordId: cmd.recordId, seq: cmd.seq, kind: cmd.kind, ok: false, error: 'no_target' }
+        : okFor(cmd),
+    );
+    const r = await seq.executePublishSequence(input({ tags: [] }));
+    assert.equal(r.ok, true, '提交成功即已发布，capture 失败非致命');
+    assert.equal(r.postId, undefined, 'postId 未抓到则 undefined（绝不伪造）');
+    assert.ok(pushed.some((c) => c.kind === 'submit_publish'), '已下发 submit');
+    assert.equal(seq.pendingCount, 0);
+  });
+
   it('AC-CMD-SEQ-04 失败按序停止：content 校验失败 → ok:false failedAt，后续 submit 绝不下发（红线）', async () => {
     const { seq, pushed } = makeSequencer((cmd) => ({
       recordId: cmd.recordId, seq: cmd.seq, kind: cmd.kind,

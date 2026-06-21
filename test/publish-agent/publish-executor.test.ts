@@ -333,4 +333,33 @@ describe('PublishExecutorRole', () => {
     const result = ctx.get('publishResult');
     assert.equal(result?.status, 'failed', '图文无图 → 诚实 failed');
   });
+
+  test('AC-PUB executor：提交成功但未抓到 postId → status=published（capture 尽力而为，绝不误判 failed）', async () => {
+    let statusUpd: string | undefined;
+    const fakeStore = {
+      insert: async () => 11,
+      updateStatus: async (_id: number, s: string) => { statusUpd = s; },
+      updatePostId: async () => {},
+      markImagesAttached: async () => {},
+    };
+    // 序列已提交（ok:true）但 capture 失败 → postId undefined。
+    const fakeSequencer = { executePublishSequence: async () => ({ ok: true, imagesOk: true }) } as any;
+    const role = new PublishExecutorRole({
+      store: fakeStore,
+      pusher: { pushToEdges: () => 1 },
+      sequencer: fakeSequencer,
+      isApproved: async () => true,
+      clock,
+      logger: silentLogger,
+    });
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('assembledContent', makeAssembledContent());
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.equal(ctx.get('publishResult')?.status, 'published', '已提交即 published');
+    assert.equal(statusUpd, 'published', '无 postId 时用 updateStatus 标 published');
+  });
 });

@@ -239,13 +239,18 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       await this.store.markImagesAttached(recordId, result.imagesOk).catch(() => {});
     }
 
-    if (result.ok && result.postId) {
-      if (this.store.updatePostId) await this.store.updatePostId(recordId, result.postId).catch(() => {});
-      this.logger.log(`[PublishExecutor] cmd-path published recordId=${recordId} postId=${result.postId}`);
+    // 提交成功即已发布（capture_postId 为尽力而为，抓不到 postId 也不可误判为 failed——那是「静默假失败」）。
+    if (result.ok) {
+      if (result.postId && this.store.updatePostId) {
+        await this.store.updatePostId(recordId, result.postId).catch(() => {});
+      } else if (this.store.updateStatus) {
+        await this.store.updateStatus(recordId, 'published').catch(() => {});
+      }
+      this.logger.log(`[PublishExecutor] cmd-path published recordId=${recordId} postId=${result.postId ?? '(未抓到)'}`);
       return { recordId, status: 'published', dispatched: true, envelope: null, completedAt: this.clock() };
     }
 
-    // 红线：序列失败/未抓到 postId → 如实 failed，绝不伪造发布成功。
+    // 红线：真失败（提交前某步失败）→ 如实 failed，绝不伪造发布成功。
     if (this.store.updateStatus) await this.store.updateStatus(recordId, 'failed').catch(() => {});
     this.logger.warn(`[PublishExecutor] cmd-path failed recordId=${recordId} failedAt=${JSON.stringify(result.failedAt)}`);
     return { recordId, status: 'failed', dispatched: true, envelope: null, completedAt: this.clock() };

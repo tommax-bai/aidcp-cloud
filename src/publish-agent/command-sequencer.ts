@@ -184,6 +184,11 @@ export class CommandSequencer {
           imagesOk = false;
           continue;
         }
+        // 已提交后抓 postId 异常：帖子已发出，postId 抓取仅记录用 → 非致命（不可把已发布误判为 failed）。
+        if (cmd.kind === 'capture_postId' && submitted) {
+          this.logger.warn(`[CommandSequencer] capture_postId 异常但已提交发布、postId 未知 seq=${cmd.seq}: ${error}`);
+          continue;
+        }
         this.logger.warn(`[CommandSequencer] seq=${cmd.seq} kind=${cmd.kind} 异常: ${error}`);
         return { ok: false, imagesOk, failedAt: { seq: cmd.seq, kind: cmd.kind, error } };
       }
@@ -192,6 +197,11 @@ export class CommandSequencer {
         if (cmd.kind === 'upload_image') {
           this.logger.warn(`[CommandSequencer] upload_image 失败降级纯文字 seq=${cmd.seq}: ${result.error ?? 'unknown'}`);
           imagesOk = false;
+          continue;
+        }
+        // 已提交后抓 postId 失败：帖子已发出 → 非致命（postId 未知，绝不把已发布误判为 failed）。
+        if (cmd.kind === 'capture_postId' && submitted) {
+          this.logger.warn(`[CommandSequencer] capture_postId 失败但已提交发布、postId 未知 seq=${cmd.seq}: ${result.error ?? 'unknown'}`);
           continue;
         }
         // 红线：非配图指令失败即停，后续不下发、不假成功。
