@@ -3,6 +3,7 @@ import type { RoleConfig } from './base-role.js';
 import type { PipelineFields, GateDecision, AssembledContent, PublishResult, TriggerInput, PublishMetadata } from '../types.js';
 import type { PipelineContext } from '../pipeline-context.js';
 import type { CommandSequencer } from '../command-sequencer.js';
+import { buildPublishApprovalCard } from '../../feishu/cards.js';
 
 /** PublishLogStore 接口 */
 export interface PublishLogStore {
@@ -120,8 +121,13 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     switch (gateDecision.recommendedAction) {
       case 'auto_publish':
         return this.handleAutoPublish(assembledContent, context);
+      // manual_review 在指令驱动路径（sequencer 已注入）下与 auto_publish 同路：AC-PUB 本就要求人审，两者最终都是
+      // 「发审批卡 → 人审通过 → 驱动指令序列」，差别仅是 gatekeeper 的风险标注、由人在卡片上定夺；真正"不问就毙"的是 abort。
+      // 无 sequencer（旧路）才退回 handleManualReview。
       case 'manual_review':
-        return this.handleManualReview(assembledContent);
+        return this.sequencer
+          ? this.handleAutoPublish(assembledContent, context)
+          : this.handleManualReview(assembledContent);
       case 'abort':
         return this.handleAbort(assembledContent);
       case 'retry':
@@ -205,7 +211,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     if (!approved) {
       // AC-PUB 第1道：未预授权 → 发审批卡，然后在窗口内轮询审批信号等待人审。
       // 人审通过即继续发布「卡片上所审的这份内容」（不重新生成）；期满未授权 → needs_review。绝不未授权下发指令（红线）。
-      await this.trySendApprovalCard(recordId, assembled, requestId);
+      await this.trySendApprovalCard(assembled, requestId);
       approved = await this.waitForApproval(requestId);
     }
 
@@ -266,7 +272,6 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
   }
 
   private async trySendApprovalCard(
-    recordId: number,
     assembled: AssembledContent,
     requestId: string,
   ): Promise<void> {
@@ -274,13 +279,14 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     try {
       const chat = await this.botChatStore.getDefaultChat();
       if (chat) {
-        await this.messenger.sendApprovalCard(chat.chatId, {
-          recordId,
+        // 必须发"已构建的交互式卡片"（含通过/取消按钮 + requestId 回调）；直接发原始数据对象飞书会 400。
+        const card = buildPublishApprovalCard({
           requestId,
-          contentPreview: assembled.finalContent.slice(0, 100),
-          qualityScore: assembled.qualityScore,
-          aiScore: assembled.aiScore,
+          title: this.deriveTitle(assembled),
+          content: assembled.finalContent,
+          tags: assembled.finalTags,
         });
+        await this.messenger.sendApprovalCard(chat.chatId, card);
         this.logger.log(`[PublishExecutor] 审批卡已发 chat=${chat.chatId} requestId=${requestId}`);
       }
     } catch (err) {

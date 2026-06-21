@@ -230,11 +230,12 @@ describe('PublishExecutorRole', () => {
       executePublishSequence: async () => { seqCalls++; return { ok: true, imagesOk: true, postId: 'x' }; },
     } as any;
 
+    const sentCards: any[] = [];
     const role = new PublishExecutorRole({
       store: fakeStore,
       pusher: { pushToEdges: () => 0 },
       sequencer: fakeSequencer,
-      messenger: { sendApprovalCard: async () => {} },
+      messenger: { sendApprovalCard: async (_c: string, card: any) => { sentCards.push(card); } },
       botChatStore: { getDefaultChat: async () => ({ chatId: 'c' }) },
       isApproved: async () => false, // 始终未授权
       approvalWaitMs: 40, // 小窗口快速超时（用真实 clock）
@@ -253,6 +254,9 @@ describe('PublishExecutorRole', () => {
     assert.equal(result?.status, 'needs_review');
     assert.equal(result?.dispatched, false);
     assert.equal(seqCalls, 0, '未授权 executor 闸：绝不调 executePublishSequence');
+    // 发的是"已构建的交互式卡片"（有 elements），不是原始数据对象（飞书发原始对象会 400）。
+    assert.equal(sentCards.length, 1, '应发审批卡');
+    assert.ok(Array.isArray(sentCards[0]?.elements), '审批卡须为已构建的 FeishuCard（含 elements），非原始数据对象');
   });
 
   test('AC-PUB executor 闸：发卡后人审通过 → 驱动序列 + published（发布所审的那份内容）', async () => {

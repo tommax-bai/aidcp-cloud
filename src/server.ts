@@ -478,7 +478,8 @@ async function main(): Promise<void> {
   publishOrchestrator.registerRole(new ImagePlannerRole({ llmClient: llm }));
   publishOrchestrator.registerRole(new ImageGeneratorRole({
     imageProvider: wanxiangClient,
-    enableImageGeneration: !!readEnvString('WANXIANG_API_KEY'),
+    // 配图与 Qwen 同用百炼 key：WANXIANG_API_KEY 或 DASHSCOPE_API_KEY 任一就绪即启用（与 wanxiangClient 的 key 解析一致）。
+    enableImageGeneration: !!(readEnvString('WANXIANG_API_KEY') ?? dashscopeApiKey),
   }));
   publishOrchestrator.registerRole(new CoverSelectorRole());
   // 后处理：清洗（ContentCleaner）→ AI味分（AiFlavorScorer）/ 质量分（QualityScorer）
