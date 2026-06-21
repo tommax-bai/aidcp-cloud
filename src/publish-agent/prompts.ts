@@ -99,6 +99,19 @@ export function buildScoutPrompt(trigger: TriggerInput): string {
       ? recentPublished.map((p, i) => `${i + 1}. ${p}`).join('\n')
       : '（暂无已发布帖子）';
 
+  const soul = generateInput.soul;
+  const forcedBlock = trigger.forced
+    ? [
+        '',
+        '【⚠️ 运营手动强制发布——本次必须发布】',
+        '运营已通过 /publish 明确要求现在发布一条（发布前仍有人工审核兜底）。因此 shouldPublish 必须为 true，',
+        '上述决策标准中"概念/点赞少则不发布"的判断本次不适用。即使素材不足，也要基于账号人设与兴趣领域',
+        '确定一个当下具体、可写、有价值的方向（优先结合已有概念/点赞），并给出 3 个要点。',
+        `账号人设：${soul?.identity?.role ?? ''}｜${soul?.identity?.background ?? ''}（语气：${soul?.identity?.tone ?? ''}）`,
+        `兴趣领域：${[...(soul?.interests?.primary ?? []), ...(soul?.interests?.seed_keywords ?? [])].slice(0, 12).join('、') || '（未配置，请发一篇该账号领域内的通用优质内容）'}`,
+      ].join('\n')
+    : '';
+
   return [
     '你是一个内容发布策略分析师。你的任务是根据当前积累的素材和度量数据，判断现在是否适合发布一篇小红书技术帖，并确定发布方向。',
     '',
@@ -120,6 +133,7 @@ export function buildScoutPrompt(trigger: TriggerInput): string {
     '- 如果概念和点赞都很少，建议不发布',
     '- 确定发布方向时，从概念和点赞内容中找到最有深度/话题性的主题',
     '- 发布方向要避免与最近已发布的帖子重复',
+    forcedBlock,
     '',
     '【输出要求】',
     '严格只输出一个 JSON 对象，不要任何额外文字或代码块围栏。格式如下：',

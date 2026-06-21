@@ -107,6 +107,28 @@ describe('ContentScoutRole', () => {
     assert.equal(decision.publishDirection, 'fallback');
   });
 
+  test('forced=true（手动 /publish）→ 即便 LLM 判 shouldPublish=false 也覆盖为 true（沿用方向/要点）', async () => {
+    let capturedPrompt = '';
+    const fakeLlm = {
+      chat: async (messages: QwenChatMessage[]) => {
+        capturedPrompt = messages[1].content;
+        return JSON.stringify({ shouldPublish: false, publishDirection: 'LLM建议方向', keyPoints: ['a', 'b'], confidence: 0.2, reason: '素材不足' });
+      },
+      complete: async () => '',
+    };
+    const role = new ContentScoutRole({ llmClient: fakeLlm as any, clock, logger: silentLogger });
+    const ctx = new PipelineContext<PipelineFields>();
+    role.register(ctx);
+    ctx.write('trigger', { ...makeTriggerInput(), forced: true });
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const decision = ctx.get('scoutDecision');
+    assert.equal(decision?.shouldPublish, true, '强制发布：覆盖 LLM 的 false');
+    assert.equal(decision?.publishDirection, 'LLM建议方向', '沿用 LLM 给的方向');
+    assert.match(capturedPrompt, /强制发布/, 'forced 提示注入了 scout prompt');
+  });
+
   test('验证调用了 buildScoutPrompt（LLM 收到 user message 含度量信息）', async () => {
     let capturedMessages: QwenChatMessage[] = [];
     const fakeLlm = {

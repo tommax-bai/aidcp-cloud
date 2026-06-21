@@ -46,7 +46,13 @@ export class ContentScoutRole extends BasePublishRole<TriggerInput, ScoutDecisio
     if (usedFallback) {
       this.logger.warn('[ContentScout] used fallback decision');
     }
-    return { ...result, scoutedAt: this.clock() };
+    // 手动 /publish 强制发布：运营已明确要发（下游人审兜底），不被「无新素材」否决。
+    // 仍用 LLM 给出的方向/要点（基于人物设定与现有素材），仅把 shouldPublish 锁为 true。
+    const shouldPublish = input.forced ? true : result.shouldPublish;
+    if (input.forced && !result.shouldPublish) {
+      this.logger.log('[ContentScout] 手动强制发布：覆盖 shouldPublish=true（沿用 LLM 方向/要点）');
+    }
+    return { ...result, shouldPublish, scoutedAt: this.clock() };
   }
 
   private parseOutput(raw: string): Omit<ScoutDecision, 'scoutedAt'> {

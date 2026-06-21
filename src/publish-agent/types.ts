@@ -73,6 +73,8 @@ export interface TriggerInput {
     recentPosts: string[];
   };
   recentPublished: string[];
+  /** 手动 /publish 强制发布：运营明确要发（下游人审仍把闸），ContentScout 不得以「无新素材」否决。 */
+  forced?: boolean;
 }
 
 /** ContentScout 输出 */

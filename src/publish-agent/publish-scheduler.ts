@@ -130,16 +130,16 @@ export class PublishScheduler {
     return { result: 'triggered', reason, status: status2 };
   }
 
-  /** 手动飞书 /publish：越过 canDo（人工授权），但下游人审仍必过（AC-PUB）。 */
+  /** 手动飞书 /publish：越过 canDo（人工授权）+ 强制发布（不被 scout「无新素材」否决），但下游人审仍必过（AC-PUB）。 */
   async triggerManual(): Promise<TriggerOutcome> {
-    this.logger.log('[PublishScheduler] 手动 /publish：越过风控 canDo（人工授权），发布前飞书人审仍生效');
-    const status = await this.doTrigger('manual_feishu');
+    this.logger.log('[PublishScheduler] 手动 /publish：越过风控 canDo + 强制发布（人工授权），发布前飞书人审仍生效');
+    const status = await this.doTrigger('manual_feishu', true);
     return { result: 'triggered', reason: 'manual_feishu', status };
   }
 
-  private async doTrigger(reason: string): Promise<string> {
-    const input = await this.buildTriggerInput();
-    this.logger.log(`[PublishScheduler] 触发发帖编排 reason=${reason} newConcepts=${input.metrics.newConceptCount} liked=${input.metrics.likedSinceLastPublish}`);
+  private async doTrigger(reason: string, forced = false): Promise<string> {
+    const input = { ...(await this.buildTriggerInput()), forced };
+    this.logger.log(`[PublishScheduler] 触发发帖编排 reason=${reason} forced=${forced} newConcepts=${input.metrics.newConceptCount} liked=${input.metrics.likedSinceLastPublish}`);
     const res = await this.d.orchestrator.trigger(input);
     return res.status;
   }
