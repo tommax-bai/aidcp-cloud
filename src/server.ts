@@ -227,7 +227,7 @@ async function main(): Promise<void> {
   // 发布编排器（PublishOrchestrator）。超时须容纳 executor 的人审等待窗口（默认 240s）+ 指令序列，故放大到 360s。
   const publishOrchestrator = new PublishOrchestrator({
     logger: console,
-    pipelineTimeoutMs: Number(process.env.AIDCP_PUBLISH_PIPELINE_TIMEOUT_MS ?? 360_000),
+    pipelineTimeoutMs: Number(process.env.AIDCP_PUBLISH_PIPELINE_TIMEOUT_MS ?? 1_080_000),
   });
 
   // 事件总线
@@ -534,6 +534,9 @@ async function main(): Promise<void> {
     // A 阶段1：注入 sequencer + 审批读取 → auto_publish 走指令驱动 + AC-PUB 闸 + 结果回写。
     sequencer: commandSequencer,
     isApproved: isPublishApproved,
+    // 人审等待窗口给足真实人工延迟（默认 15min，env 可调）；角色超时须 > 窗口 + 指令序列。
+    approvalWaitMs: Number(process.env.AIDCP_PUBLISH_APPROVAL_WAIT_MS ?? 900_000),
+    roleTimeoutMs: Number(process.env.AIDCP_PUBLISH_ROLE_TIMEOUT_MS ?? 1_080_000),
   }));
   console.log(`[aidcp-cloud] PublishOrchestrator 已就绪，角色: ${publishOrchestrator.getRoles().join(', ')}`);
 
