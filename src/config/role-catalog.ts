@@ -47,6 +47,7 @@ export const ROLE_CATALOG: RoleCatalogItem[] = [
   // —— 发布管线（文本，经 llmClient.chat）——
   { roleId: 'publish:ContentScout', displayName: '发布选题侦察', group: 'publish', llmKind: 'text', tunableTemperature: false },
   { roleId: 'publish:ContentCreator', displayName: '技术帖文案创作', group: 'publish', llmKind: 'text', tunableTemperature: true },
+  { roleId: 'publish:TitleCreator', displayName: '技术帖标题创作', group: 'publish', llmKind: 'text', tunableTemperature: true },
   { roleId: 'publish:ImagePlanner', displayName: '配图策略规划', group: 'publish', llmKind: 'text', tunableTemperature: true },
   { roleId: 'publish:QualityScorer', displayName: '内容质量评分', group: 'publish', llmKind: 'text', tunableTemperature: false },
   { roleId: 'publish:ApprovalGatekeeper', displayName: '发布审批裁决', group: 'publish', llmKind: 'text', tunableTemperature: false },

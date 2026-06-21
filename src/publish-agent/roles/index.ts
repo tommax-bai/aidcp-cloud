@@ -10,6 +10,8 @@ export { ContentCleanerRole } from './content-cleaner.js';
 export { AiFlavorScorerRole } from './ai-flavor-scorer.js';
 export { QualityScorerRole } from './quality-scorer.js';
 export { ContentAssemblerRole } from './content-assembler.js';
+// 标题链路（定稿后单独生成标题，发布门前置依赖）
+export { TitleCreatorRole } from './title-creator.js';
 // 阶段3 元数据 + 合规决策角色
 export { TopicStrategistRole } from './topic-strategist.js';
 export { MentionStrategistRole } from './mention-strategist.js';

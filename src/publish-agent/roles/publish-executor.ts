@@ -1,9 +1,10 @@
 import { BasePublishRole } from './base-role.js';
 import type { RoleConfig } from './base-role.js';
-import type { PipelineFields, GateDecision, AssembledContent, PublishResult, TriggerInput, PublishMetadata } from '../types.js';
+import type { PipelineFields, GateDecision, AssembledContent, PublishResult, TriggerInput, PublishMetadata, TitleSelection } from '../types.js';
 import type { PipelineContext } from '../pipeline-context.js';
 import type { CommandSequencer } from '../command-sequencer.js';
 import { buildPublishApprovalCard } from '../../feishu/cards.js';
+import { clampTitle, firstSentence } from '../title-clamp.js';
 
 /** PublishLogStore 接口 */
 export interface PublishLogStore {
@@ -71,6 +72,7 @@ export interface PublishExecutorDeps {
 interface ExecutorInput {
   gateDecision: GateDecision;
   assembledContent: AssembledContent;
+  titleSelection: TitleSelection;
 }
 
 export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishResult> {
@@ -100,9 +102,12 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.idGen = deps.idGen ?? (() => Math.random().toString(36).slice(2));
     // 角色超时须容纳审批等待 + 指令序列；默认 360s（> approvalWaitMs 240s + 序列）。
+    // 发布门 = waitAll(['gateDecision','titleSelection'])：标题没就绪不发布；标题 abort 不发布（黑板天然保证）。
+    // 审批卡由本角色激活后才发，故卡片必带真实标题。
     this.config = {
       name: 'PublishExecutor',
-      watchKeys: ['gateDecision'],
+      watchKeys: ['gateDecision', 'titleSelection'],
+      waitAll: true,
       timeoutMs: deps.roleTimeoutMs ?? 360_000,
       fallback: 'skip',
     };
@@ -112,29 +117,42 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     return {
       gateDecision: snapshot.gateDecision!,
       assembledContent: snapshot.assembledContent!,
+      titleSelection: snapshot.titleSelection!,
     };
   }
 
   protected async execute(input: ExecutorInput, context: PipelineContext<PipelineFields>): Promise<PublishResult> {
     const { gateDecision, assembledContent } = input;
+    // 标题收口：正常路径由 TitleCreator 产出（已 ≤18、字形安全）；意外缺失才字形安全派生。
+    const title = this.resolveTitle(input.titleSelection, assembledContent);
 
     switch (gateDecision.recommendedAction) {
       case 'auto_publish':
-        return this.handleAutoPublish(assembledContent, context);
+        return this.handleAutoPublish(assembledContent, title, context);
       // manual_review 在指令驱动路径（sequencer 已注入）下与 auto_publish 同路：AC-PUB 本就要求人审，两者最终都是
       // 「发审批卡 → 人审通过 → 驱动指令序列」，差别仅是 gatekeeper 的风险标注、由人在卡片上定夺；真正"不问就毙"的是 abort。
       // 无 sequencer（旧路）才退回 handleManualReview。
       case 'manual_review':
         return this.sequencer
-          ? this.handleAutoPublish(assembledContent, context)
-          : this.handleManualReview(assembledContent);
+          ? this.handleAutoPublish(assembledContent, title, context)
+          : this.handleManualReview(assembledContent, title);
       case 'abort':
-        return this.handleAbort(assembledContent);
+        return this.handleAbort(assembledContent, title);
       case 'retry':
         return this.handleRetry();
       default:
-        return this.handleAbort(assembledContent);
+        return this.handleAbort(assembledContent, title);
     }
+  }
+
+  /**
+   * 标题出口收口：优先用 TitleCreator 的 titleSelection.title（已 ≤18、字形安全）。
+   * waitAll 已保证 titleSelection 必就绪；此处的兜底仅防字段意外缺失——字形安全派生，绝不盲切。
+   */
+  private resolveTitle(selection: TitleSelection | undefined, assembled: AssembledContent): string {
+    if (selection && typeof selection.title === 'string') return selection.title;
+    this.logger.warn('[PublishExecutor] titleSelection 缺失，降级派生标题（字形安全 clamp）');
+    return this.deriveTitle(assembled);
   }
 
   /** stage-4 来源血缘：从 trigger 取真概念/真点赞 id（无则空，不编造）。 */
@@ -147,10 +165,10 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     };
   }
 
-  private async handleAutoPublish(assembled: AssembledContent, context: PipelineContext<PipelineFields>): Promise<PublishResult> {
+  private async handleAutoPublish(assembled: AssembledContent, title: string, context: PipelineContext<PipelineFields>): Promise<PublishResult> {
     const lineage = this.lineageFrom(context);
     const recordId = await this.store.insert({
-      title: this.deriveTitle(assembled),
+      title,
       content: assembled.finalContent,
       tags: assembled.finalTags,
       imageUrl: assembled.imageUrl,
@@ -163,7 +181,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
 
     // A 阶段1 新路：注入了 sequencer → 指令驱动 + AC-PUB 闸 + 结果回写。
     if (this.sequencer) {
-      return this.handleAutoPublishViaSequencer(recordId, assembled, context);
+      return this.handleAutoPublishViaSequencer(recordId, assembled, title, context);
     }
 
     // 旧整页路径（无 sequencer，地基阶段并行保留）。
@@ -196,6 +214,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
   private async handleAutoPublishViaSequencer(
     recordId: number,
     assembled: AssembledContent,
+    title: string,
     context: PipelineContext<PipelineFields>,
   ): Promise<PublishResult> {
     // stage-4：读 stage-3 决策的元数据；落库（血缘/可观测）+ 防篡改审计（aiEnforced && !ai 视为已回正态，如实记）。
@@ -211,7 +230,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     if (!approved) {
       // AC-PUB 第1道：未预授权 → 发审批卡，然后在窗口内轮询审批信号等待人审。
       // 人审通过即继续发布「卡片上所审的这份内容」（不重新生成）；期满未授权 → needs_review。绝不未授权下发指令（红线）。
-      await this.trySendApprovalCard(assembled, requestId);
+      await this.trySendApprovalCard(assembled, title, requestId);
       approved = await this.waitForApproval(requestId);
     }
 
@@ -224,7 +243,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     const hadImage = !!assembled.imageUrl;
     const result = await this.sequencer!.executePublishSequence({
       recordId,
-      title: this.deriveTitle(assembled),
+      title,
       content: assembled.finalContent,
       tags: assembled.finalTags,
       images: assembled.imageUrl ? [assembled.imageUrl] : undefined,
@@ -270,14 +289,17 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     return false;
   }
 
-  /** AssembledContent 不带独立 title（属 stage2 内容链路），本阶段从正文首行/截断派生。 */
+  /**
+   * 兜底派生标题（仅当 titleSelection 意外缺失时）：取正文首句、字形安全 clamp 到 18。
+   * 红线：绝不再用旧的 `slice(0, 30)` 盲切（会切碎汉字/emoji，且与真发的 ≤18 标题失真）。
+   */
   private deriveTitle(assembled: AssembledContent): string {
-    const firstLine = assembled.finalContent.split('\n')[0]?.trim() ?? '';
-    return (firstLine || assembled.finalContent).slice(0, 30);
+    return clampTitle(firstSentence(assembled.finalContent), 18);
   }
 
   private async trySendApprovalCard(
     assembled: AssembledContent,
+    title: string,
     requestId: string,
   ): Promise<void> {
     if (!this.messenger || !this.botChatStore) return;
@@ -285,9 +307,10 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       const chat = await this.botChatStore.getDefaultChat();
       if (chat) {
         // 必须发"已构建的交互式卡片"（含通过/取消按钮 + requestId 回调）；直接发原始数据对象飞书会 400。
+        // 卡片标题 = 真实发布标题（本角色已激活、titleSelection 必就绪）→ 审批人看到的即将发布的标题。
         const card = buildPublishApprovalCard({
           requestId,
-          title: this.deriveTitle(assembled),
+          title,
           content: assembled.finalContent,
           tags: assembled.finalTags,
         });
@@ -299,9 +322,9 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     }
   }
 
-  private async handleManualReview(assembled: AssembledContent): Promise<PublishResult> {
+  private async handleManualReview(assembled: AssembledContent, title: string): Promise<PublishResult> {
     const recordId = await this.store.insert({
-      title: assembled.finalContent.slice(0, 50),
+      title,
       content: assembled.finalContent,
       tags: assembled.finalTags,
       imageUrl: assembled.imageUrl,
@@ -337,9 +360,9 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     };
   }
 
-  private async handleAbort(assembled: AssembledContent): Promise<PublishResult> {
+  private async handleAbort(assembled: AssembledContent, title: string): Promise<PublishResult> {
     const recordId = await this.store.insert({
-      title: assembled.finalContent.slice(0, 50),
+      title,
       content: assembled.finalContent,
       tags: assembled.finalTags,
       imageUrl: assembled.imageUrl,

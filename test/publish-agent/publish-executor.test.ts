@@ -2,10 +2,15 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { PublishExecutorRole } from '../../src/publish-agent/roles/publish-executor.js';
 import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
-import type { PipelineFields, AssembledContent, GateDecision } from '../../src/publish-agent/types.js';
+import type { PipelineFields, AssembledContent, GateDecision, TitleSelection } from '../../src/publish-agent/types.js';
 
 const clock = () => 1700000000000;
 const silentLogger = { log() {}, warn() {}, error() {} };
+
+/** 发布门 waitAll(['gateDecision','titleSelection'])：每个用例须写 titleSelection 才会激活 executor。 */
+function makeTitleSelection(title = 'vLLM 部署踩坑'): TitleSelection {
+  return { title, source: 'llm', decidedAt: 1700000000000 };
+}
 
 function makeAssembledContent(): AssembledContent {
   return {
@@ -50,6 +55,7 @@ describe('PublishExecutorRole', () => {
 
     const ctx = new PipelineContext<PipelineFields>();
     ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
     role.register(ctx);
     ctx.write('gateDecision', makeGateDecision('auto_publish'));
 
@@ -99,6 +105,7 @@ describe('PublishExecutorRole', () => {
 
     const ctx = new PipelineContext<PipelineFields>();
     ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
     ctx.write('trigger', {
       metrics: { hoursSinceLastPublish: 30, newConceptCount: 2, likedSinceLastPublish: 1 },
       generateInput: {
@@ -162,6 +169,7 @@ describe('PublishExecutorRole', () => {
 
     const ctx = new PipelineContext<PipelineFields>();
     ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
     role.register(ctx);
     ctx.write('gateDecision', makeGateDecision('manual_review'));
 
@@ -203,6 +211,7 @@ describe('PublishExecutorRole', () => {
 
     const ctx = new PipelineContext<PipelineFields>();
     ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
     role.register(ctx);
     ctx.write('gateDecision', makeGateDecision('abort'));
 
@@ -245,6 +254,7 @@ describe('PublishExecutorRole', () => {
 
     const ctx = new PipelineContext<PipelineFields>();
     ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
     role.register(ctx);
     ctx.write('gateDecision', makeGateDecision('auto_publish'));
 
@@ -288,6 +298,7 @@ describe('PublishExecutorRole', () => {
 
     const ctx = new PipelineContext<PipelineFields>();
     ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
     role.register(ctx);
     ctx.write('gateDecision', makeGateDecision('auto_publish'));
 
@@ -324,6 +335,7 @@ describe('PublishExecutorRole', () => {
 
     const ctx = new PipelineContext<PipelineFields>();
     ctx.write('assembledContent', makeAssembledContent()); // 含 imageUrl → hadImage=true
+    ctx.write('titleSelection', makeTitleSelection());
     role.register(ctx);
     ctx.write('gateDecision', makeGateDecision('auto_publish'));
 
@@ -354,6 +366,7 @@ describe('PublishExecutorRole', () => {
     });
     const ctx = new PipelineContext<PipelineFields>();
     ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
     role.register(ctx);
     ctx.write('gateDecision', makeGateDecision('auto_publish'));
 
@@ -361,5 +374,67 @@ describe('PublishExecutorRole', () => {
 
     assert.equal(ctx.get('publishResult')?.status, 'published', '已提交即 published');
     assert.equal(statusUpd, 'published', '无 postId 时用 updateStatus 标 published');
+  });
+
+  test('AC-TITLE-GATE 发布门 waitAll：titleSelection 未写 → executor 不激活、不落库、不发布', async () => {
+    const insertedRecords: any[] = [];
+    const role = new PublishExecutorRole({
+      store: { insert: async (r: any) => { insertedRecords.push(r); return 1; } },
+      pusher: { pushToEdges: () => 1 },
+      idGen: () => 'env',
+      clock,
+      logger: silentLogger,
+    });
+
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('assembledContent', makeAssembledContent());
+    role.register(ctx);
+    // 只写 gateDecision，故意不写 titleSelection。
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.equal(ctx.get('publishResult'), undefined, '缺 titleSelection → waitAll 不满足 → executor 不激活');
+    assert.equal(insertedRecords.length, 0, '未激活则不落库');
+  });
+
+  test('AC-TITLE-FIDELITY 序列下发标题 == DB 落库标题 == titleSelection.title（同一字符串，记录==真发）', async () => {
+    const insertedRecords: any[] = [];
+    let seqInput: any;
+    const fakeStore = {
+      insert: async (r: any) => { insertedRecords.push(r); return 3; },
+      updateStatus: async () => {}, updatePostId: async () => {}, markImagesAttached: async () => {},
+    };
+    const fakeSequencer = {
+      executePublishSequence: async (input: any) => { seqInput = input; return { ok: true, imagesOk: true, postId: 'p' }; },
+    } as any;
+    const sentCards: any[] = [];
+    const role = new PublishExecutorRole({
+      store: fakeStore,
+      pusher: { pushToEdges: () => 1 },
+      sequencer: fakeSequencer,
+      messenger: { sendApprovalCard: async (_c: string, card: any) => { sentCards.push(card); } },
+      botChatStore: { getDefaultChat: async () => ({ chatId: 'c' }) },
+      // 未预授权 → 先发卡，下一轮人审通过 → 驱动序列（让审批卡也带上标题）。
+      isApproved: (() => { let n = 0; return async () => (++n >= 2); })(),
+      approvalWaitMs: 1000,
+      approvalPollMs: 5,
+      clock,
+      logger: silentLogger,
+    });
+
+    const TITLE = 'RAG 别再无脑上向量库'; // 真实 ≤18 标题
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection(TITLE));
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    assert.equal(insertedRecords[0].title, TITLE, 'DB 落库标题 == titleSelection.title');
+    assert.equal(seqInput.title, TITLE, '序列下发标题（流向 edge fill_field）== titleSelection.title');
+    // 审批卡标题也 == 同一字符串（卡片是「已构建的 FeishuCard」，标题嵌在 elements，故校验 JSON 含该标题）。
+    assert.ok(JSON.stringify(sentCards[0]).includes(TITLE), '审批卡标题 == titleSelection.title');
   });
 });

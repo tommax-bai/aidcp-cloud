@@ -62,6 +62,7 @@ import {
   AiFlavorScorerRole,
   QualityScorerRole,
   ContentAssemblerRole,
+  TitleCreatorRole,
   TopicStrategistRole,
   MentionStrategistRole,
   LocationStrategistRole,
@@ -546,6 +547,8 @@ async function main(): Promise<void> {
   publishOrchestrator.registerRole(new QualityScorerRole({ llmClient: roleLlm('publish:QualityScorer') }));
   // 汇合：瘦身 ContentAssembler（纯组装，waitAll 五键）
   publishOrchestrator.registerRole(new ContentAssemblerRole());
+  // 标题链路：定稿后单独生成标题（watch assembledContent → titleSelection）；发布门 waitAll 依赖此键（注册顺序无关）。
+  publishOrchestrator.registerRole(new TitleCreatorRole({ llmClient: roleLlm('publish:TitleCreator') }));
   // 阶段3 元数据 + 合规决策（并行于发布链，规则式确定性；产出 publishMetadata，本阶段不应用到边缘）。
   publishOrchestrator.registerRole(new TopicStrategistRole());
   publishOrchestrator.registerRole(new MentionStrategistRole());

@@ -11,6 +11,7 @@ import { ContentCleanerRole } from '../../src/publish-agent/roles/content-cleane
 import { AiFlavorScorerRole } from '../../src/publish-agent/roles/ai-flavor-scorer.js';
 import { QualityScorerRole } from '../../src/publish-agent/roles/quality-scorer.js';
 import { ContentAssemblerRole } from '../../src/publish-agent/roles/content-assembler.js';
+import { TitleCreatorRole } from '../../src/publish-agent/roles/title-creator.js';
 import {
   TopicStrategistRole,
   MentionStrategistRole,
@@ -61,6 +62,7 @@ function buildFullPipeline(llmResponses: Record<string, string>, opts?: { enable
     chat: async (messages: any[]) => {
       const systemContent = messages[0]?.content ?? '';
       if (systemContent.includes('发布决策')) return llmResponses.scout;
+      if (systemContent.includes('标题创作')) return llmResponses.title ?? '{"title":"测试标题"}';
       if (systemContent.includes('小红书技术博主')) return llmResponses.creator;
       if (systemContent.includes('配图策略')) return llmResponses.image;
       if (systemContent.includes('质量评审')) return llmResponses.assembler;
@@ -90,6 +92,8 @@ function buildFullPipeline(llmResponses: Record<string, string>, opts?: { enable
   orchestrator.registerRole(new AiFlavorScorerRole(common));
   orchestrator.registerRole(new QualityScorerRole({ llmClient: fakeLlm as any, ...common }));
   orchestrator.registerRole(new ContentAssemblerRole(common));
+  // 标题链路：定稿后单独生成标题（发布门 waitAll 依赖 titleSelection）。
+  orchestrator.registerRole(new TitleCreatorRole({ llmClient: fakeLlm as any, ...common }));
   // 阶段3 元数据 + 合规决策（并行于发布链；规则式确定性，无需 LLM）
   orchestrator.registerRole(new TopicStrategistRole(common));
   orchestrator.registerRole(new MentionStrategistRole(common));
@@ -125,8 +129,8 @@ describe('PublishOrchestrator', () => {
     assert.equal(insertedRecords.length, 1);
     assert.equal(pushedEnvelopes.length, 1);
     // 稳定边界：组装产出仍含八字段（细拆后等价）。
-    // 12（stage-2 生产段+下游）+ 9（stage-3 元数据/合规决策）= 21；新角色并行、不阻塞 publishResult。
-    assert.equal(orchestrator.getRoles().length, 21);
+    // 12（stage-2 生产段+下游）+ 9（stage-3 元数据/合规决策）+ 1（TitleCreator）= 22；新角色并行、不阻塞 publishResult。
+    assert.equal(orchestrator.getRoles().length, 22);
   });
 
   test('细拆后端到端等价 + 配图失败降级：组装边界正确、imageUrl 诚实为 null', async () => {
@@ -186,5 +190,24 @@ describe('PublishOrchestrator', () => {
     assert.equal(result2.runId, '');
     const result1 = await p1;
     assert.ok(['draft', 'needs_review', 'failed'].includes(result1.status));
+  });
+
+  test('AC-TITLE-FIDELITY / task0.2：TitleCreator 抛错 → 流水线即时 failed、未落库未发布（不干等 pipelineTimeoutMs）', async () => {
+    const { orchestrator, insertedRecords, pushedEnvelopes } = buildFullPipeline({
+      scout: JSON.stringify({ shouldPublish: true, publishDirection: 'x', keyPoints: [], confidence: 0.9, reason: 'ok' }),
+      creator: JSON.stringify({ title: 'T', content: '正文内容在这里', tags: ['a'], tone: 'casual', style: {} }),
+      image: JSON.stringify({ imagePrompt: 'p', imageStyle: 'illustration', fallbackStrategy: 'skip' }),
+      assembler: JSON.stringify({ qualityScore: 80 }),
+      gatekeeper: JSON.stringify({ needsApproval: false, recommendedAction: 'auto_publish', reason: 'ok' }),
+      title: '这不是JSON标题会解析失败', // 无 {} → TitleCreator 每次解析失败 → 重试用尽 → abort
+    });
+    const started = Date.now();
+    const result = await orchestrator.trigger(makeTriggerInput());
+    const elapsed = Date.now() - started;
+    // 即时失败：pipelineTimeoutMs=5000；若 abort 不即时收敛会干等到 5000ms。
+    assert.equal(result.status, 'failed', '标题 abort → 流水线 failed');
+    assert.ok(elapsed < 4000, `应即时失败而非干等超时（实际 ${elapsed}ms）`);
+    assert.equal(insertedRecords.length, 0, 'titleSelection 未就绪 → executor 不激活 → 未落库');
+    assert.equal(pushedEnvelopes.length, 0, '未下发 edge');
   });
 });

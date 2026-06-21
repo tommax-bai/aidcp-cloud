@@ -118,6 +118,18 @@ export interface AssembledContent {
   assembledAt: number;
 }
 
+/**
+ * TitleCreator 输出（change dedicated-title-creator-role）。
+ * 定稿正文之后单独生成的标题；长度已在云端收口 ≤18、字形安全（绝不切碎汉字/emoji）。
+ * source 诚实标注来源：'llm'=TitleCreator 真生成；'derived'=字段意外缺失时由正文派生兜底。
+ * 不带 candidates/score（YAGNI；如需 A/B 后续加字段，下游零改动）。
+ */
+export interface TitleSelection {
+  title: string;
+  source: 'llm' | 'derived';
+  decidedAt: number;
+}
+
 // ─── 阶段2 生产段细拆新增中间键（A 重构 publish-content-media-roles） ──────────
 
 /** ContentTypeSelector 输出：内容类型（现恒图文，kind 联合预留 video/text）。 */
@@ -272,6 +284,17 @@ export interface PublishResult {
   completedAt: number;
 }
 
+/**
+ * 中止信号（change dedicated-title-creator-role）。
+ * 任一 `fallback:'abort'` 角色失败时由 BasePublishRole 写入；编排器据此**即时**判 failed，
+ * 不再干等 pipelineTimeoutMs（修「abort 后 waitAll 上游永不写键 → 流水线挂死 18 分钟」）。
+ */
+export interface PipelineAbort {
+  role: string;
+  reason: string;
+  abortedAt: number;
+}
+
 /** 管道上下文字段映射（Blackboard 的 schema） */
 export interface PipelineFields {
   trigger: TriggerInput;
@@ -286,6 +309,8 @@ export interface PipelineFields {
   coverSelection: CoverSelection;
   imageDirective: ImageDirective;
   assembledContent: AssembledContent;
+  // 标题链路（change dedicated-title-creator-role）：定稿后由 TitleCreator 单独生成、长度收口云端。
+  titleSelection: TitleSelection;
   // 阶段3 元数据 + 合规决策键（并行于发布链，本阶段不应用到边缘）
   topicSelection: TopicSelection;
   mentionSelection: MentionSelection;
@@ -300,6 +325,8 @@ export interface PipelineFields {
   publishResult: PublishResult;
   /** 特殊信号：质量不达标时的重试请求 */
   retrySignal: { reason: string; attempt: number };
+  /** 特殊信号：任一 abort 角色失败 → 编排器即时收敛为 failed（不再干等超时）。 */
+  pipelineAbort: PipelineAbort;
 }
 
 /** 管道运行状态 */

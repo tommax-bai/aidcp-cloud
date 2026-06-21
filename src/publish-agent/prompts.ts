@@ -224,6 +224,46 @@ export function buildCreatorPrompt(scoutDecision: ScoutDecision, trigger: Trigge
   ].join('\n');
 }
 
+// ─── TitleCreator ────────────────────────────────────────────────────────────
+
+/**
+ * TitleCreator prompt（change dedicated-title-creator-role）— 依据**定稿正文**单独拟标题。
+ * 短提示：只讲标题规则，不复述长正文的写作规则块（注意力收束在标题这一件事上）。
+ * 输出 JSON: { title }
+ */
+export function buildTitlePrompt(body: string, persona: string, styleType: string, seedTitle?: string): string {
+  const banned = BANNED_PHRASES.map((p) => `「${p}」`).join('、');
+  const lines: string[] = [
+    `你是${persona}，正在为一篇**已定稿**的小红书技术帖拟一个标题。`,
+    '只依据下面的定稿正文来写标题，不要复述正文、不要编造正文里没有的信息。',
+    '',
+    '【定稿正文】',
+    body,
+    '',
+  ];
+  if (styleType) lines.push(`【文风类型】${styleType}`, '');
+  if (seedTitle) lines.push(`【草稿期标题（仅参考，可弃用）】${seedTitle}`, '');
+  lines.push(
+    '【标题硬规则】',
+    '- 最多 18 个可见字符（汉字 / 标点 / 空格 / 英文字母各算 1，emoji 算 1）。超过小红书会拒绝发布。',
+    '- 是一个让人想点开的钩子，但绝不标题党、不夸大、不用"震惊体"。',
+    '- 至多 1 个 emoji；也可以不用。',
+    '- 不要省略号（… 或 ...）。结尾不带标点。',
+    `- 禁止出现这些 AI 味词/句式：${banned}。`,
+    '',
+    '【好例子】',
+    '- vLLM 部署把我坑惨了',
+    '- RAG 别再无脑上向量库',
+    '【坏例子（不要这样写）】',
+    '- 震惊！这个技巧让效率翻 10 倍…（标题党 + 省略号）',
+    '- 关于 vLLM 部署的一些经验总结与思考（冗长、AI 味）',
+    '',
+    '【输出要求】严格只输出一个 JSON 对象，不要任何额外文字或代码块围栏：',
+    '{"title": "你的标题"}',
+  );
+  return lines.join('\n');
+}
+
 // ─── ImageDirector ───────────────────────────────────────────────────────────
 
 /**

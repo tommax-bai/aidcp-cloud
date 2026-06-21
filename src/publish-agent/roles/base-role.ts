@@ -95,8 +95,10 @@ export abstract class BasePublishRole<TInput, TOutput> {
         context.write(this.outputKey as any, defaultOutput as any);
       }
     } else if (fallback === 'abort') {
-      // 不写入任何输出，管道将因 timeout 而终止
+      // 红线：不派生/不造假输出。但写一个中止信号让编排器**即时**判 failed——
+      // 否则下游 waitAll 永远缺这一键，流水线会干等 pipelineTimeoutMs(18min) 才失败（挂死）。
       this.logger.error(`[${name}] aborting pipeline`);
+      context.write('pipelineAbort', { role: name, reason: err.message, abortedAt: this.clock() });
     }
     // 'default' - 子类自行处理
   }

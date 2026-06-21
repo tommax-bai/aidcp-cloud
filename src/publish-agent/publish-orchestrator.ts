@@ -113,6 +113,15 @@ export class PublishOrchestrator {
         }
       }, { once: true });
 
+      // 监听角色中止信号（任一 fallback:'abort' 角色失败时写入）→ 即时判 failed，不再干等 pipelineTimeoutMs。
+      // 由 trigger 的 catch 统一收敛为 status:'failed'（复用既有 reject→failed 路径，无新增结果整形）。
+      context.watch('pipelineAbort', (abort) => {
+        if (!settled) {
+          settled = true;
+          reject(new Error(`Pipeline aborted by ${abort.role}: ${abort.reason}`));
+        }
+      }, { once: true });
+
       // 超时
       setTimeout(() => {
         if (!settled) {
