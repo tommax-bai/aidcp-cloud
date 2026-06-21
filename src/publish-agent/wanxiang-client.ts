@@ -21,6 +21,11 @@ export interface WanxiangClientOptions {
   apiKey?: string;
   /** 模型名，默认 wan2.7-image-pro */
   model?: string;
+  /**
+   * 运行时模型名解析器（优先于 model）。注入后每次调用按需取当前配置，
+   * 使后台改图片模型名无需重启即热加载生效（change console-model-provider-config）。
+   */
+  getModel?: () => string;
   /** 默认尺寸，默认 1024*1024（wan2.7 方式二显式像素，总像素 [768*768,4096*4096]、宽高比 [1:8,8:1]） */
   defaultSize?: string;
   /** 最大轮询次数，默认 6 */
@@ -56,6 +61,7 @@ interface TaskResponse {
 export class WanxiangClient implements ImageProvider {
   private readonly apiKey: string;
   private readonly model: string;
+  private readonly getModel?: () => string;
   private readonly defaultSize: string;
   private readonly maxPollAttempts: number;
   private readonly pollIntervalMs: number;
@@ -66,6 +72,7 @@ export class WanxiangClient implements ImageProvider {
     // 万相文生图与 Qwen 同属百炼、同一 DashScope key；未单设 WANXIANG_API_KEY 时回退 DASHSCOPE_API_KEY。
     this.apiKey = options.apiKey ?? process.env.WANXIANG_API_KEY ?? process.env.DASHSCOPE_API_KEY ?? '';
     this.model = options.model ?? 'wan2.7-image-pro';
+    this.getModel = options.getModel;
     this.defaultSize = options.defaultSize ?? '1024*1024';
     this.maxPollAttempts = options.maxPollAttempts ?? 6;
     this.pollIntervalMs = options.pollIntervalMs ?? 5_000;
@@ -103,7 +110,7 @@ export class WanxiangClient implements ImageProvider {
     };
 
     const body = JSON.stringify({
-      model: this.model,
+      model: this.getModel?.() ?? this.model,
       input: { messages: [{ role: 'user', content: [{ text }] }] },
       parameters,
     });

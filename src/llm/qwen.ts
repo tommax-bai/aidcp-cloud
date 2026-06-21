@@ -24,8 +24,13 @@ export interface QwenChatMessage {
 export interface QwenClientOptions {
   /** API Key（默认读 env DASHSCOPE_API_KEY） */
   apiKey?: string;
-  /** 模型名，默认 qwen-plus */
+  /** 模型名，默认 qwen-turbo */
   model?: string;
+  /**
+   * 运行时模型名解析器（优先于 model）。注入后每次调用按需取当前配置，
+   * 使后台改模型名无需重启即热加载生效（change console-model-provider-config）。
+   */
+  getModel?: () => string;
   /** 兼容 OpenAI 的 base url，默认 DashScope 兼容端点 */
   baseUrl?: string;
   /** 采样温度，默认 0（定位/规划要稳定） */
@@ -41,12 +46,13 @@ interface ChatCompletionResponse {
   error?: { message?: string };
 }
 
-const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+export const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 
 /** Qwen HTTP 客户端 */
 export class QwenClient implements LlmClient {
   private readonly apiKey: string;
   private readonly model: string;
+  private readonly getModel?: () => string;
   private readonly baseUrl: string;
   private readonly temperature: number;
   private readonly timeoutMs: number;
@@ -55,6 +61,7 @@ export class QwenClient implements LlmClient {
   constructor(options: QwenClientOptions = {}) {
     this.apiKey = options.apiKey ?? process.env.DASHSCOPE_API_KEY ?? '';
     this.model = options.model ?? 'qwen-turbo';
+    this.getModel = options.getModel;
     this.baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
     this.temperature = options.temperature ?? 0;
     this.timeoutMs = options.timeoutMs ?? 30_000;
@@ -83,7 +90,7 @@ export class QwenClient implements LlmClient {
           Authorization: `Bearer ${this.apiKey}`,
         },
         body: JSON.stringify({
-          model: this.model,
+          model: this.getModel?.() ?? this.model,
           messages,
           temperature: this.temperature,
         }),

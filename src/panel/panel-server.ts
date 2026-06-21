@@ -297,6 +297,70 @@ function createRequestHandler(
       return;
     }
 
+    // ── 模型与凭据配置（change console-model-provider-config）──────────────
+    // 明文密钥绝不回传；写非乐观；主密钥缺失诚实 503，绝不假成功。
+    if (url === '/api/config/model') {
+      if (!deps.modelConfig) {
+        sendJson(res, 503, { error: 'model_config_unavailable' });
+        return;
+      }
+      if (method === 'GET') {
+        sendJson(res, 200, await deps.modelConfig.getView());
+        return;
+      }
+      if (method === 'PUT') {
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          sendJson(res, 400, { error: 'bad_request' });
+          return;
+        }
+        const { textModel, imageModel } = (body ?? {}) as { textModel?: unknown; imageModel?: unknown };
+        // 至少一个非空字符串字段；空 / 非字符串一律不接受（不静默忽略全空请求）
+        const patch: { textModel?: string; imageModel?: string } = {};
+        if (typeof textModel === 'string' && textModel.trim()) patch.textModel = textModel.trim();
+        if (typeof imageModel === 'string' && imageModel.trim()) patch.imageModel = imageModel.trim();
+        if (Object.keys(patch).length === 0) {
+          sendJson(res, 400, { error: 'bad_request', reason: 'no_valid_fields' });
+          return;
+        }
+        sendJson(res, 200, await deps.modelConfig.setModel(patch, verified.payload.sub));
+        return;
+      }
+    }
+    if (method === 'PUT' && url === '/api/config/credential') {
+      if (!deps.modelConfig) {
+        sendJson(res, 503, { error: 'model_config_unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { field, value } = (body ?? {}) as { field?: unknown; value?: unknown };
+      const ALLOWED_FIELDS = ['dashscope_api_key'];
+      if (typeof field !== 'string' || !ALLOWED_FIELDS.includes(field)) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'unknown_field' });
+        return;
+      }
+      if (typeof value !== 'string' || !value.trim()) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'empty_value' });
+        return;
+      }
+      const result = await deps.modelConfig.setCredential(field, value.trim(), verified.payload.sub);
+      if (!result.ok) {
+        // 主密钥缺失：诚实报因，绝不明文落库、绝不假成功
+        sendJson(res, 503, { error: result.reason });
+        return;
+      }
+      sendJson(res, 200, { field: result.field, configured: true, maskedHint: result.maskedHint });
+      return;
+    }
+
     sendJson(res, 404, { error: 'not_found' });
   }
 

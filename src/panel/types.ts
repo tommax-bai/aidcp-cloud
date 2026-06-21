@@ -50,6 +50,42 @@ export interface PanelDeps {
   };
   /** 风控注册表（V1 写路由 risk/status、risk/quota 按账号取 controller；单写 PER ACCOUNT）。 */
   riskRegistry: { getController(accountId: string): Promise<RiskController> };
+  /**
+   * 模型与凭据配置（change console-model-provider-config）。未注入则 /api/config/* 返回 503。
+   * 明文密钥绝不经此外观回传；setCredential 主密钥缺失以 {ok:false} 诚实可辨，绝不假成功。
+   */
+  modelConfig?: PanelModelConfig;
+}
+
+/** 凭据视图（永不含明文）。source：db=库内加密凭据 / env=回退环境变量 / none=未配置。 */
+export interface ModelConfigCredentialView {
+  field: string;
+  configured: boolean;
+  maskedHint: string | null;
+  source: 'db' | 'env' | 'none';
+}
+
+/** GET /api/config/model 的形状（永不含明文密钥）。 */
+export interface ModelConfigView {
+  provider: string;
+  baseUrl: string;
+  textModel: string;
+  imageModel: string;
+  credential: ModelConfigCredentialView;
+  /** 主加密密钥是否就位——凭据能否在后台编辑。 */
+  canEditCredential: boolean;
+}
+
+export type SetCredentialResult =
+  | { ok: true; field: string; maskedHint: string }
+  | { ok: false; reason: 'cred_key_missing' };
+
+export interface PanelModelConfig {
+  getView(): Promise<ModelConfigView>;
+  /** 改模型名（热加载即时生效），返回写后真态视图。 */
+  setModel(patch: { textModel?: string; imageModel?: string }, updatedBy: string): Promise<ModelConfigView>;
+  /** 加密保存密钥（重启生效）；主密钥缺失返回 {ok:false}，明文绝不回传。 */
+  setCredential(field: string, value: string, updatedBy: string): Promise<SetCredentialResult>;
 }
 
 export interface PanelConfig {

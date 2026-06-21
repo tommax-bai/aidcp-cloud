@@ -81,6 +81,12 @@
 - `FEISHU_APP_SECRET`
 - `FEISHU_CHAT_ID`
 
+模型与凭据配置（change console-model-provider-config，可选）：
+
+- `AIDCP_CRED_KEY`：后台「模型配置」页加密保存 API 密钥用的主加密密钥（AES-256-GCM）。值为 **32 字节随机、base64 编码**，生成法：`openssl rand -base64 32`。仅存放于 ECS `.env`，**绝不入库 / 入仓 / 进日志**。
+  - 未配置时：后台仍可改模型名（热加载即时生效），但「保存密钥」禁用并提示主密钥缺失；系统继续用 `DASHSCOPE_API_KEY`（env）。
+  - 已配置时：后台可改 DashScope API 密钥（加密落 `provider_credentials` 表），**改密钥后需 `systemctl restart aidcp-cloud.service` 才生效**；模型名改动无需重启。
+
 敏感信息规则：
 
 - 所有密码、token、key 仅存放于 ECS `/opt/aidcp/cloud/.env`

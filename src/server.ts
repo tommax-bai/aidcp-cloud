@@ -15,7 +15,7 @@
 
 import { readFile, writeFile } from 'node:fs/promises';
 import * as lark from '@larksuiteoapi/node-sdk';
-import { QwenClient } from './llm/index.js';
+import { QwenClient, DEFAULT_BASE_URL as QWEN_BASE_URL } from './llm/index.js';
 import { SimplePlanner } from './planner/index.js';
 import { PgAnchorCache, BotChatStore, ConceptStore, LikedNoteStore } from './cache/index.js';
 import {
@@ -78,6 +78,9 @@ import { PostProcessor } from './publish-agent/post-processor.js';
 import { PublishLogStore } from './publish-agent/publish-log-store.js';
 import { startPanelApi, parsePanelUsers, PgPanelStore } from './panel/index.js';
 import { PgAlertStore } from './alerts/index.js';
+import { ModelConfigStore } from './config/model-config-store.js';
+import { CredentialStore } from './config/credential-store.js';
+import type { ModelConfigView } from './panel/types.js';
 
 function readEnvString(name: string): string | undefined {
   const value = process.env[name];
@@ -103,7 +106,38 @@ async function main(): Promise<void> {
   const port = Number(process.env.AIDCP_PORT ?? 8787);
   const debugPort = Number(process.env.AIDCP_DEBUG_PORT ?? 8788);
 
-  const llm = new QwenClient();
+  // 模型配置 + 加密凭据（change console-model-provider-config）。
+  // 先于 LLM 客户端构造：模型名经 getCached() 运行时解析（热加载）；DashScope 密钥库内优先、回退 env。
+  const modelConfigStore = new ModelConfigStore({
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
+  const credentialStore = new CredentialStore({
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
+  try {
+    await modelConfigStore.init();
+    await credentialStore.init();
+    console.log('[aidcp-cloud] 模型配置 + 凭据存储已就绪（model_config / provider_credentials）');
+  } catch (err) {
+    console.warn('[aidcp-cloud] 模型/凭据存储初始化失败（回退代码默认模型 + env 密钥）:', (err as Error).message);
+  }
+  // 启动期解密 DashScope 密钥（库内优先、回退 env）；明文仅用于构造客户端，绝不日志化、绝不回前端。
+  const dashscopeApiKey =
+    (await credentialStore.getSecretForRuntime('dashscope', 'dashscope_api_key').catch(() => null)) ??
+    readEnvString('DASHSCOPE_API_KEY');
+
+  const llm = new QwenClient({
+    apiKey: dashscopeApiKey,
+    getModel: () => modelConfigStore.getCached().textModel,
+  });
   const planner = new SimplePlanner({ llm });
   const cache = new PgAnchorCache({
     connectionString: readEnvString('DATABASE_URL'),
@@ -186,7 +220,8 @@ async function main(): Promise<void> {
   // 通义万相客户端（图片生成）。万相文生图与 Qwen 同属阿里云百炼、同一 DashScope key——
   // 未单设 WANXIANG_API_KEY 时回退 DASHSCOPE_API_KEY（已实测该 key 可提交万相 wanx-v1 任务并产出 OSS 图）。
   const wanxiangClient = new WanxiangClient({
-    apiKey: readEnvString('WANXIANG_API_KEY') ?? readEnvString('DASHSCOPE_API_KEY'),
+    apiKey: readEnvString('WANXIANG_API_KEY') ?? dashscopeApiKey,
+    getModel: () => modelConfigStore.getCached().imageModel,
   });
 
   // 发布编排器（PublishOrchestrator）。超时须容纳 executor 的人审等待窗口（默认 240s）+ 指令序列，故放大到 360s。
@@ -549,6 +584,27 @@ async function main(): Promise<void> {
     console.warn('[aidcp-cloud] 飞书长连接启动失败（事件接收不可用）:', (err as Error).message);
   }
 
+  // 组装模型配置视图（GET /api/config/model 与 setModel 回真态共用）。永不含明文密钥。
+  const buildModelConfigView = async (): Promise<ModelConfigView> => {
+    const cfg = modelConfigStore.getCached();
+    const field = 'dashscope_api_key';
+    const stored = await credentialStore.getStored('dashscope', field).catch(() => null);
+    const envPresent = !!readEnvString('DASHSCOPE_API_KEY');
+    const credential = stored
+      ? { field, configured: true, maskedHint: stored.maskedHint, source: 'db' as const }
+      : envPresent
+        ? { field, configured: true, maskedHint: '（来自环境变量）', source: 'env' as const }
+        : { field, configured: false, maskedHint: null, source: 'none' as const };
+    return {
+      provider: 'dashscope',
+      baseUrl: QWEN_BASE_URL,
+      textModel: cfg.textModel,
+      imageModel: cfg.imageModel,
+      credential,
+      canEditCredential: credentialStore.canEdit(),
+    };
+  };
+
   // ── 面板 API 层（管理后台后端，进程内、独立端口、JWT）──────────────────────
   // 未设置 AIDCP_PANEL_PORT 则禁用（默认不开新端口）；启动失败非致命，绝不连累边-云闭环。
   const panelPort = readEnvPort('AIDCP_PANEL_PORT');
@@ -601,6 +657,19 @@ async function main(): Promise<void> {
               };
             },
             dispatchActive: () => dispatchActive,
+          },
+          // 模型与凭据配置（change console-model-provider-config）。明文密钥绝不经此回传。
+          modelConfig: {
+            getView: buildModelConfigView,
+            setModel: async (patch, updatedBy) => {
+              await modelConfigStore.set(patch, updatedBy);
+              return buildModelConfigView();
+            },
+            setCredential: async (field, value, updatedBy) => {
+              if (!credentialStore.canEdit()) return { ok: false, reason: 'cred_key_missing' as const };
+              const { maskedHint } = await credentialStore.setSecret('dashscope', field, value, updatedBy);
+              return { ok: true, field, maskedHint };
+            },
           },
         },
         {
