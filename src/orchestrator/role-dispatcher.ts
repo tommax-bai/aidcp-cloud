@@ -25,6 +25,8 @@ import { InteractionAppraiserRole } from '../agents/interaction-appraiser-role.j
 import { AuthorEvaluator } from '../agents/author-evaluator.js';
 import { CommentAppraiser } from '../agents/comment-appraiser.js';
 import { CommentLikeAppraiser } from '../agents/comment-like-appraiser.js';
+import { ValuableCommentArchivist } from '../agents/valuable-comment-archivist.js';
+import type { ValuableCommentInput, ValuableCommentRef } from '../cache/valuable-comment-store.js';
 import { CommentComposer } from '../agents/comment-composer.js';
 import { CommentDeAiFlavor } from '../agents/comment-de-ai-flavor.js';
 import { CommentApprovalGate, type CommentApprovalPort } from '../agents/comment-approval-gate.js';
@@ -112,6 +114,10 @@ export interface RoleDispatcherOptions {
   getCommentDailyRemaining?: () => number;
   /** 该账号当日剩余「评论赞」配额（接 riskController.dailyRemaining('comment_like')）。 */
   getCommentLikeDailyRemaining?: () => number;
+  /** 优质评论归档闭包（接 ValuableCommentStore.archive）；缺省 → 不注册归档角色（语料库关闭）。 */
+  archiveValuableComment?: (input: ValuableCommentInput) => Promise<void>;
+  /** 按主题键召回语料库参考评论（接 ValuableCommentStore.retrieveByTopics）；缺省 → 撰写不注入参考。 */
+  getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
 }
 
 export interface EdgeCommand {
@@ -154,6 +160,8 @@ export class RoleDispatcher {
   private readonly commentApproval?: CommentApprovalPort;
   private readonly getCommentDailyRemaining?: () => number;
   private readonly getCommentLikeDailyRemaining?: () => number;
+  private readonly archiveValuableComment?: (input: ValuableCommentInput) => Promise<void>;
+  private readonly getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
   /** 已下发待回执的评论上下文：action.completed{comment} 据此扣额 + emit comment.done（→ 是否进主页评估）。 */
   private pendingComment: { noteId: string; sourcePageType: 'feed' | 'search'; actions: ('like' | 'collect')[]; text: string } | null = null;
   private readonly isHardPaused: (edgeId?: string) => boolean;
@@ -187,6 +195,8 @@ export class RoleDispatcher {
     this.commentApproval = options.commentApproval;
     this.getCommentDailyRemaining = options.getCommentDailyRemaining;
     this.getCommentLikeDailyRemaining = options.getCommentLikeDailyRemaining;
+    this.archiveValuableComment = options.archiveValuableComment;
+    this.getCorpusReferences = options.getCorpusReferences;
     this.isHardPaused = options.isHardPaused ?? (() => false);
     this.notifyComments = options.notifyComments;
     this.conceptStore = options.conceptStore;
@@ -296,7 +306,11 @@ export class RoleDispatcher {
         getRemainingComments: () => this.budget.comments,
         ...(this.getCommentDailyRemaining ? { getDailyRemaining: this.getCommentDailyRemaining } : {}),
       }),
-      new CommentComposer({ ...commonOptions, getNoteData }),
+      new CommentComposer({
+        ...commonOptions,
+        getNoteData,
+        ...(this.getCorpusReferences ? { getCorpusReferences: this.getCorpusReferences } : {}),
+      }),
       new CommentDeAiFlavor(commonOptions),
       new CommentApprovalGate({
         ...commonOptions,
@@ -314,6 +328,10 @@ export class RoleDispatcher {
               ...(this.getCommentLikeDailyRemaining ? { getCommentLikeDailyRemaining: this.getCommentLikeDailyRemaining } : {}),
             }),
           ]
+        : []),
+      // 优质评论归档（语料库 B）：仅在特性开 + 归档闭包就绪时注册；只在 comment_like.confirmed 上落库。
+      ...(commentLikeEnabled && this.archiveValuableComment
+        ? [new ValuableCommentArchivist({ ...commonOptions, getNoteData, archive: this.archiveValuableComment })]
         : []),
       new ProfileOpener(commonOptions),
       new ProfileBrowser(commonOptions),

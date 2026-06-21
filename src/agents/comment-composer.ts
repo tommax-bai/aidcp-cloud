@@ -13,22 +13,28 @@ import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { NoteData } from './content-curator-role.js';
 import type { RoleName, CommentAppraisedPayload } from '../event-bus/types.js';
+import { topicKeysFromTitle, type ValuableCommentRef } from '../cache/valuable-comment-store.js';
 
 const MAX_COMMENT_LEN = 50;
 
 export interface CommentComposerOptions extends RoleOptions {
   getNoteData: (noteId: string) => NoteData | null;
+  /** 可选：按主题键召回语料库优质评论作参考（仅作灵感、不可照抄）。缺省/空/出错 → 行为同今天。
+   *  主题键由本角色用 topicKeysFromTitle 从当前笔记标题派生（与归档侧同一套键）。 */
+  getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
 }
 
 export class CommentComposer extends BaseRole {
   readonly roleName: RoleName = 'comment_composer';
   private readonly getNoteData: (noteId: string) => NoteData | null;
+  private readonly getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: CommentComposerOptions) {
     super(options);
     if (!options.llm) throw new Error('CommentComposer 需要 LlmClient');
     this.getNoteData = options.getNoteData;
+    this.getCorpusReferences = options.getCorpusReferences;
   }
 
   subscribe(): void {
@@ -59,9 +65,20 @@ export class CommentComposer extends BaseRole {
       return;
     }
 
+    // 语料库参考（best-effort）：取不到 / 出错 / 为空 → references 为空，prompt 与今天一致。
+    let references: string[] = [];
+    if (this.getCorpusReferences) {
+      try {
+        const refs = await this.getCorpusReferences(topicKeysFromTitle(note.title));
+        references = refs.map((r) => r.text).filter(Boolean).slice(0, 3);
+      } catch {
+        references = [];
+      }
+    }
+
     let raw: string;
     try {
-      raw = await this.decide(this.buildPrompt(note));
+      raw = await this.decide(this.buildPrompt(note, references));
     } catch {
       this.skip(payload, 'llm_error');
       return;
@@ -82,20 +99,24 @@ export class CommentComposer extends BaseRole {
       sourcePageType: payload.sourcePageType,
       actions: payload.actions,
       draft,
+      ...(references.length ? { references } : {}),
       ts: Date.now(),
     });
   }
 
-  private buildPrompt(note: NoteData): string {
+  private buildPrompt(note: NoteData, references: string[] = []): string {
     const { identity, interests } = this.soul;
     const interestsStr = [...interests.primary, ...interests.secondary].join('、');
+    const refBlock = references.length
+      ? `\n参考（仅作灵感，体会真人怎么留言；【严禁照抄/改写句子】，只借角度与口吻）：\n${references.map((r, i) => `${i + 1}. ${r}`).join('\n')}\n`
+      : '';
     return `你是「${identity.name}」，${identity.role}。语气：${identity.tone}。兴趣：${interestsStr}。
 为下面这篇你认可的笔记写**一条**评论。要求：
 - 短（${MAX_COMMENT_LEN} 字以内）、真诚、像真人随手留言，不是营销/客套；
 - 贴这篇笔记的具体内容，接一句有共鸣或真问题，别泛泛而谈；
 - 用你的人格语气；不要 emoji 堆砌、不要 AI 腔（如「值得一提」「总而言之」）；
 - **不要出现 @ 提及**、不要话题标签、不要外链。
-
+${refBlock}
 当前笔记：
 标题：${note.title}
 内容：${note.content}

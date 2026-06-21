@@ -17,7 +17,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { QwenClient, DEFAULT_BASE_URL as QWEN_BASE_URL, type ChatLlmClient } from './llm/index.js';
 import { SimplePlanner } from './planner/index.js';
-import { PgAnchorCache, BotChatStore, ConceptStore, LikedNoteStore } from './cache/index.js';
+import { PgAnchorCache, BotChatStore, ConceptStore, LikedNoteStore, ValuableCommentStore } from './cache/index.js';
 import {
   EdgeCloudServer,
   DefaultMessageHandler,
@@ -218,6 +218,26 @@ async function main(): Promise<void> {
     console.log('[aidcp-cloud] LikedNoteStore 已就绪（liked_notes 表）');
   } catch (err) {
     console.warn('[aidcp-cloud] LikedNoteStore 初始化失败，来源血缘退化:', (err as Error).message);
+  }
+
+  // 优质评论语料库（valuable_comments 表，comment-like-on-detail B）。仅特性开启时建表/接线；
+  // init 失败留 undefined（语料库退化：不归档、撰写不注入参考，不崩闭环）。
+  let valuableCommentStore: ValuableCommentStore | undefined;
+  if (process.env.AIDCP_COMMENT_LIKE === 'true') {
+    try {
+      const vs = new ValuableCommentStore({
+        host: readEnvString('PGHOST'),
+        port: readEnvPort('PGPORT'),
+        database: readEnvString('PGDATABASE'),
+        user: readEnvString('PGUSER'),
+        password: readEnvString('PGPASSWORD'),
+      });
+      await vs.init();
+      valuableCommentStore = vs;
+      console.log('[aidcp-cloud] ValuableCommentStore 已就绪（valuable_comments 表）');
+    } catch (err) {
+      console.warn('[aidcp-cloud] ValuableCommentStore 初始化失败，评论语料库退化:', (err as Error).message);
+    }
   }
 
   // 概念池存储（concepts 表，跨会话搜索记忆）。init 失败则留 undefined：
@@ -464,6 +484,13 @@ async function main(): Promise<void> {
     getCommentDailyRemaining: () => riskController.dailyRemaining('comment'),
     // 评论赞当日配额预闸：CommentLikeAppraiser 据此在调 LLM 前就判断当日是否还能点评论赞。
     getCommentLikeDailyRemaining: () => riskController.dailyRemaining('comment_like'),
+    // 优质评论语料库（comment-like-on-detail B）：归档闭包 + 按主题召回参考闭包（store 缺失则不接线）。
+    ...(valuableCommentStore
+      ? {
+          archiveValuableComment: (input) => valuableCommentStore!.archive(input),
+          getCorpusReferences: (topics) => valuableCommentStore!.retrieveByTopics(topics, 3),
+        }
+      : {}),
     // 概念池：跨会话搜索记忆 + 从浏览学新关键词（undefined 时退化为仅 seed_keywords）。
     conceptStore,
     // 硬暂停闸（验证码/人工接管）：通知准入据此放弃巡视——硬暂停期连帧都不发。

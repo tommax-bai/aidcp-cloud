@@ -246,6 +246,8 @@ export interface CommentComposedPayload {
   sourcePageType: 'feed' | 'search';
   actions: ('like' | 'collect')[];
   draft: string;
+  /** 撰写时取用的语料库参考评论原文（comment-like-on-detail B）；供 de-ai 撞车护栏判近似照搬。可空。 */
+  references?: string[];
   ts: number;
 }
 
