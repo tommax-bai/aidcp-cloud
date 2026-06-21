@@ -54,6 +54,14 @@ export interface PublishExecutorDeps {
   sequencer?: CommandSequencer;
   /** AC-PUB 第1道：按 requestId 读审批信号判定是否已人审通过（缺省视为未授权）。 */
   isApproved?: (requestId: string) => Promise<boolean>;
+  /** 未预授权时，发卡后在此窗口内轮询审批信号等待人审（毫秒，默认 240s）。期满未授权 → needs_review。 */
+  approvalWaitMs?: number;
+  /** 审批轮询间隔（毫秒，默认 3s）。 */
+  approvalPollMs?: number;
+  /** 角色执行超时（毫秒，默认 360s）；须 ≥ approvalWaitMs + 指令序列耗时，否则审批等待会被角色超时打断。 */
+  roleTimeoutMs?: number;
+  /** sleep 注入（测试用）。 */
+  sleep?: (ms: number) => Promise<void>;
   idGen?: () => string;
   clock?: () => number;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
@@ -65,12 +73,7 @@ interface ExecutorInput {
 }
 
 export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishResult> {
-  readonly config: RoleConfig = {
-    name: 'PublishExecutor',
-    watchKeys: ['gateDecision'],
-    timeoutMs: 15000,
-    fallback: 'skip',
-  };
+  readonly config: RoleConfig;
   protected readonly outputKey = 'publishResult' as const;
   private store: PublishLogStore;
   private pusher: EdgePusher;
@@ -78,6 +81,9 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
   private botChatStore?: BotChatStore;
   private sequencer?: CommandSequencer;
   private isApproved?: (requestId: string) => Promise<boolean>;
+  private approvalWaitMs: number;
+  private approvalPollMs: number;
+  private sleep: (ms: number) => Promise<void>;
   private idGen: () => string;
 
   constructor(deps: PublishExecutorDeps) {
@@ -88,7 +94,17 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     this.botChatStore = deps.botChatStore;
     this.sequencer = deps.sequencer;
     this.isApproved = deps.isApproved;
+    this.approvalWaitMs = deps.approvalWaitMs ?? 240_000;
+    this.approvalPollMs = deps.approvalPollMs ?? 3_000;
+    this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.idGen = deps.idGen ?? (() => Math.random().toString(36).slice(2));
+    // 角色超时须容纳审批等待 + 指令序列；默认 360s（> approvalWaitMs 240s + 序列）。
+    this.config = {
+      name: 'PublishExecutor',
+      watchKeys: ['gateDecision'],
+      timeoutMs: deps.roleTimeoutMs ?? 360_000,
+      fallback: 'skip',
+    };
   }
 
   protected extractInput(snapshot: Partial<PipelineFields>): ExecutorInput {
@@ -184,13 +200,18 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     }
 
     const requestId = `publish-${recordId}`;
-    const approved = this.isApproved ? await this.isApproved(requestId).catch(() => false) : false;
+    let approved = this.isApproved ? await this.isApproved(requestId).catch(() => false) : false;
 
     if (!approved) {
-      // AC-PUB 第1道：未授权 → 发审批卡 + needs_review，绝不下发任何指令（红线：未授权不发布）。
+      // AC-PUB 第1道：未预授权 → 发审批卡，然后在窗口内轮询审批信号等待人审。
+      // 人审通过即继续发布「卡片上所审的这份内容」（不重新生成）；期满未授权 → needs_review。绝不未授权下发指令（红线）。
       await this.trySendApprovalCard(recordId, assembled, requestId);
+      approved = await this.waitForApproval(requestId);
+    }
+
+    if (!approved) {
       if (this.store.updateStatus) await this.store.updateStatus(recordId, 'needs_review').catch(() => {});
-      this.logger.log(`[PublishExecutor] cmd-path 未授权 → needs_review recordId=${recordId} requestId=${requestId}`);
+      this.logger.log(`[PublishExecutor] cmd-path 未授权（超窗）→ needs_review recordId=${recordId} requestId=${requestId}`);
       return { recordId, status: 'needs_review', dispatched: false, envelope: null, completedAt: this.clock() };
     }
 
@@ -222,6 +243,20 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     if (this.store.updateStatus) await this.store.updateStatus(recordId, 'failed').catch(() => {});
     this.logger.warn(`[PublishExecutor] cmd-path failed recordId=${recordId} failedAt=${JSON.stringify(result.failedAt)}`);
     return { recordId, status: 'failed', dispatched: true, envelope: null, completedAt: this.clock() };
+  }
+
+  /** 发卡后在 approvalWaitMs 窗口内轮询审批信号；人审通过即返回 true，期满未授权返回 false。 */
+  private async waitForApproval(requestId: string): Promise<boolean> {
+    if (!this.isApproved) return false;
+    const deadline = this.clock() + this.approvalWaitMs;
+    while (this.clock() < deadline) {
+      await this.sleep(this.approvalPollMs);
+      if (await this.isApproved(requestId).catch(() => false)) {
+        this.logger.log(`[PublishExecutor] cmd-path 人审通过 requestId=${requestId}，继续发布`);
+        return true;
+      }
+    }
+    return false;
   }
 
   /** AssembledContent 不带独立 title（属 stage2 内容链路），本阶段从正文首行/截断派生。 */

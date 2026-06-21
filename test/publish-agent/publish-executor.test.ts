@@ -220,7 +220,7 @@ describe('PublishExecutorRole', () => {
     assert.equal(insertedRecords[0].status, 'failed');
   });
 
-  test('AC-PUB executor 闸：未授权 → needs_review 且绝不驱动序列（红线：未授权不发布）', async () => {
+  test('AC-PUB executor 闸：审批窗内始终未授权 → needs_review 且绝不驱动序列（红线：未授权不发布）', async () => {
     let seqCalls = 0;
     const fakeStore = {
       insert: async () => 5,
@@ -234,8 +234,11 @@ describe('PublishExecutorRole', () => {
       store: fakeStore,
       pusher: { pushToEdges: () => 0 },
       sequencer: fakeSequencer,
-      isApproved: async () => false, // 未授权
-      clock,
+      messenger: { sendApprovalCard: async () => {} },
+      botChatStore: { getDefaultChat: async () => ({ chatId: 'c' }) },
+      isApproved: async () => false, // 始终未授权
+      approvalWaitMs: 40, // 小窗口快速超时（用真实 clock）
+      approvalPollMs: 5,
       logger: silentLogger,
     });
 
@@ -244,12 +247,53 @@ describe('PublishExecutorRole', () => {
     role.register(ctx);
     ctx.write('gateDecision', makeGateDecision('auto_publish'));
 
-    await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 120));
 
     const result = ctx.get('publishResult');
     assert.equal(result?.status, 'needs_review');
     assert.equal(result?.dispatched, false);
     assert.equal(seqCalls, 0, '未授权 executor 闸：绝不调 executePublishSequence');
+  });
+
+  test('AC-PUB executor 闸：发卡后人审通过 → 驱动序列 + published（发布所审的那份内容）', async () => {
+    let approveCalls = 0;
+    let seqInput: any;
+    const sentCards: any[] = [];
+    const fakeStore = {
+      insert: async () => 8,
+      updateStatus: async () => {},
+      updatePostId: async () => {},
+      markImagesAttached: async () => {},
+    };
+    const fakeSequencer = {
+      executePublishSequence: async (input: any) => { seqInput = input; return { ok: true, imagesOk: true, postId: 'post_ok' }; },
+    } as any;
+
+    const role = new PublishExecutorRole({
+      store: fakeStore,
+      pusher: { pushToEdges: () => 1 },
+      sequencer: fakeSequencer,
+      messenger: { sendApprovalCard: async (_c: string, card: any) => { sentCards.push(card); } },
+      botChatStore: { getDefaultChat: async () => ({ chatId: 'c' }) },
+      // 初次检查 + 前一次轮询未授权，之后人审通过。
+      isApproved: async () => (++approveCalls >= 3),
+      approvalWaitMs: 1000,
+      approvalPollMs: 5,
+      logger: silentLogger,
+    });
+
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('assembledContent', makeAssembledContent());
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    const result = ctx.get('publishResult');
+    assert.equal(result?.status, 'published', '人审通过后应驱动序列并 published');
+    assert.equal(sentCards.length, 1, '应先发审批卡');
+    assert.ok(seqInput, '人审通过后应驱动 executePublishSequence');
+    assert.equal(seqInput.approvedByUser, true);
   });
 
   test('AC-MEDIA 图文全图失败 → status=failed 且 executor 标 markImagesAttached(false)（落库回正，杜绝有图假信号）', async () => {

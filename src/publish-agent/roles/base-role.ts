@@ -66,15 +66,23 @@ export abstract class BasePublishRole<TInput, TOutput> {
     return true;
   }
 
-  /** 带超时执行 */
+  /** 带超时执行。execute 胜出后必清超时定时器——否则会泄漏一个 timeoutMs 时长的 ref 定时器（拖住进程退出）。 */
   private async executeWithTimeout(input: TInput, context: PipelineContext<PipelineFields>): Promise<TOutput> {
     const timeoutMs = this.config.timeoutMs ?? 30000;
-    return Promise.race([
-      this.execute(input, context),
-      new Promise<TOutput>((_, reject) =>
-        setTimeout(() => reject(new Error(`[${this.config.name}] execution timed out after ${timeoutMs}ms`)), timeoutMs)
-      ),
-    ]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.execute(input, context),
+        new Promise<TOutput>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`[${this.config.name}] execution timed out after ${timeoutMs}ms`)),
+            timeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /** 错误处理（根据 fallback 配置决定行为） */

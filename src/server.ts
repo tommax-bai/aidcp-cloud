@@ -189,9 +189,10 @@ async function main(): Promise<void> {
     apiKey: readEnvString('WANXIANG_API_KEY') ?? readEnvString('DASHSCOPE_API_KEY'),
   });
 
-  // 发布编排器（PublishOrchestrator）
+  // 发布编排器（PublishOrchestrator）。超时须容纳 executor 的人审等待窗口（默认 240s）+ 指令序列，故放大到 360s。
   const publishOrchestrator = new PublishOrchestrator({
     logger: console,
+    pipelineTimeoutMs: Number(process.env.AIDCP_PUBLISH_PIPELINE_TIMEOUT_MS ?? 360_000),
   });
 
   // 事件总线
@@ -395,6 +396,8 @@ async function main(): Promise<void> {
     canInteract: (action) => riskController.canDo(action),
     // 评论人审端口（env 闸开启时注入；未开启 → 评论一律诚实跳过、不发）。
     ...(commentApprovalEnabled ? { commentApproval } : {}),
+    // 评论每日上限预闸：按账号风控当日剩余评论配额（运营经 setQuotaLevel 配档位）。评估阶段就拦、避免空跑撰写。
+    getCommentDailyRemaining: () => riskController.dailyRemaining('comment'),
     // 概念池：跨会话搜索记忆 + 从浏览学新关键词（undefined 时退化为仅 seed_keywords）。
     conceptStore,
     // 硬暂停闸（验证码/人工接管）：通知准入据此放弃巡视——硬暂停期连帧都不发。

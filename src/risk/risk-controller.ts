@@ -67,6 +67,16 @@ export class RiskController {
     return { allowed: true };
   }
 
+  /**
+   * 某动作当日剩余配额（按账号、按当前档位与状态）。当前被拦（状态/任一窗口耗尽）→ 0。
+   * 供评论评估在最便宜阶段预判每日上限（与 dispatch 前 canDo 同源，避免空跑撰写）。
+   */
+  dailyRemaining(action: RiskAction): number {
+    if (!this.canDo(action)) return 0;
+    const quotas = this.effectiveQuotas();
+    return Math.max(0, quotas.day[action] - this.counter.count(action, 'day'));
+  }
+
   async record(action: RiskAction): Promise<boolean> {
     if (!this.canDo(action)) {
       await this.applySignal({ kind: 'quota_exceeded' });

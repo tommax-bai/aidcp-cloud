@@ -8,6 +8,22 @@ test('三档每日配额符合 risk-control 第 6 节', () => {
   assert.deepEqual(DAILY_QUOTAS.aggressive, { view: 300, like: 100, collect: 50, comment: 15, follow: 30, publish: 2 });
 });
 
+test('dailyRemaining: comment 按当日配额递减、用尽即 0（评论每日上限预闸源）', async () => {
+  let now = 0;
+  const c = new RiskController({ quotaLevel: 'conservative', clock: () => now, minViewsForLikeRatio: 0 });
+  assert.equal(c.dailyRemaining('comment'), 3); // 保守档日配额 3
+  assert.equal(await c.record('comment'), true);
+  now += 3_600_001; // 跨小时窗口，清分钟/小时 burst，仅留当日计数
+  assert.equal(c.dailyRemaining('comment'), 2);
+  assert.equal(await c.record('comment'), true);
+  now += 3_600_001;
+  assert.equal(await c.record('comment'), true);
+  now += 3_600_001;
+  // 当日 3 条已用尽 → canDo false → dailyRemaining 0
+  assert.equal(c.canDo('comment'), false);
+  assert.equal(c.dailyRemaining('comment'), 0);
+});
+
 test('滑动窗口按动作分别计数并自动淘汰过期事件', () => {
   let now = 1_000_000;
   const counter = new SlidingWindowCounter({ clock: () => now });
