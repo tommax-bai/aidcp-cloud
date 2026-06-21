@@ -84,6 +84,32 @@ describe('ContentCreatorRole', () => {
     assert.equal(content.createdAt, 1700000000000);
   });
 
+  test('超长标题被截断至 20 字（小红书硬上限，超限「发布」会静默失效）', async () => {
+    const longTitle = '别迷信 vLLM 开箱即用，默认参数在生产环境简直是灾难'; // 30 字
+    const fakeLlm = {
+      chat: async () => JSON.stringify({
+        title: longTitle,
+        content: '正文内容',
+        tags: ['vLLM'],
+        tone: 'casual',
+        style: { type: '踩坑记录' },
+      }),
+      complete: async () => '',
+    };
+    const role = new ContentCreatorRole({ llmClient: fakeLlm as any, clock, logger: silentLogger });
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('trigger', makeTriggerInput());
+    role.register(ctx);
+    ctx.write('scoutDecision', makeScoutDecision(true));
+
+    await new Promise(r => setTimeout(r, 50));
+
+    const content = ctx.get('createdContent');
+    assert.ok(content);
+    assert.ok(content.title.length <= 20, `标题应≤20字，实际 ${content.title.length}`);
+    assert.equal(content.title, longTitle.slice(0, 20));
+  });
+
   test('LLM 失败（retry 2次后）→ abort（不写入 createdContent）', async () => {
     let callCount = 0;
     const fakeLlm = {

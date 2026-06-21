@@ -69,8 +69,10 @@ export class ContentCreatorRole extends BasePublishRole<CreatorInput, CreatedCon
     const match = raw.match(/\{[\s\S]*\}/);
     if (!match) throw new Error('No JSON found in Creator output');
     const obj = JSON.parse(match[0]);
+    // 小红书标题硬上限 20 字（超限「发布」按钮静默失效）。云端先截断至 20 兜底，edge 再截一次双保险。
+    const title = String(obj.title || '').slice(0, 20);
     return {
-      title: String(obj.title || ''),
+      title,
       content: String(obj.content || ''),
       tags: Array.isArray(obj.tags) ? obj.tags.map(String) : [],
       tone: this.validateTone(obj.tone),
