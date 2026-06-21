@@ -20,7 +20,8 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
   readonly config: RoleConfig = {
     name: 'ImageGenerator',
     watchKeys: ['imagePlan'],
-    timeoutMs: 60000,
+    // 须 > 万相轮询总预算（18×5s=90s）；否则角色超时会先于轮询完成砍断生图。
+    timeoutMs: 120000,
     fallback: 'skip',
   };
   protected readonly outputKey = 'imageDirective' as const;

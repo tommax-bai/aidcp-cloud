@@ -74,7 +74,8 @@ export class WanxiangClient implements ImageProvider {
     this.model = options.model ?? 'wan2.7-image-pro';
     this.getModel = options.getModel;
     this.defaultSize = options.defaultSize ?? '1024*1024';
-    this.maxPollAttempts = options.maxPollAttempts ?? 6;
+    // wan2.7-image-pro 文生图常需 25~40s+（thinking_mode），6×5s=30s 太紧会超时降级；放宽到 18×5s=90s。
+    this.maxPollAttempts = options.maxPollAttempts ?? 18;
     this.pollIntervalMs = options.pollIntervalMs ?? 5_000;
     this.logger = options.logger ?? console;
     const f = options.fetchImpl ?? globalThis.fetch;
