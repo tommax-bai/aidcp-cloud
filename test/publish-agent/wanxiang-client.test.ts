@@ -4,9 +4,13 @@ import { WanxiangClient } from '../../src/publish-agent/wanxiang-client.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 
-function mockFetch(responses: Array<{ ok: boolean; status?: number; json?: () => Promise<any>; text?: () => Promise<string> }>) {
+function mockFetch(
+  responses: Array<{ ok: boolean; status?: number; json?: () => Promise<any>; text?: () => Promise<string> }>,
+  capture?: { bodies: string[] },
+) {
   let callIndex = 0;
   return async (_url: string | URL | Request, _init?: RequestInit) => {
+    if (capture && _init?.body) capture.bodies.push(String(_init.body));
     const resp = responses[callIndex++] ?? responses[responses.length - 1];
     return {
       ok: resp.ok,
@@ -18,7 +22,8 @@ function mockFetch(responses: Array<{ ok: boolean; status?: number; json?: () =>
 }
 
 describe('WanxiangClient', () => {
-  test('提交成功 + 轮询返回 SUCCEEDED → url 有值', async () => {
+  test('提交成功 + 轮询返回 SUCCEEDED → url 有值（wan2.7 messages 入参 + choices 出参）', async () => {
+    const capture = { bodies: [] as string[] };
     const fetchImpl = mockFetch([
       // 提交任务响应
       {
@@ -30,12 +35,18 @@ describe('WanxiangClient', () => {
         ok: true,
         json: async () => ({ output: { task_id: 'task-123', task_status: 'RUNNING' } }),
       },
-      // 第二次轮询 - SUCCEEDED
+      // 第二次轮询 - SUCCEEDED（wan2.7：结果在 choices[].message.content[].image）
       {
         ok: true,
-        json: async () => ({ output: { task_id: 'task-123', task_status: 'SUCCEEDED', results: [{ url: 'https://cdn.example.com/img.png' }] } }),
+        json: async () => ({
+          output: {
+            task_id: 'task-123',
+            task_status: 'SUCCEEDED',
+            choices: [{ message: { content: [{ image: 'https://cdn.example.com/img.png', type: 'image' }] } }],
+          },
+        }),
       },
-    ]);
+    ], capture);
 
     const client = new WanxiangClient({
       apiKey: 'test-key',
@@ -49,6 +60,11 @@ describe('WanxiangClient', () => {
     assert.equal(result.url, 'https://cdn.example.com/img.png');
     assert.equal(result.taskId, 'task-123');
     assert.equal(result.error, undefined);
+    // 锁定 wan2.7 请求形状：model + messages 入参。
+    const submitBody = JSON.parse(capture.bodies[0]);
+    assert.equal(submitBody.model, 'wan2.7-image-pro');
+    assert.equal(submitBody.input.messages[0].content[0].text, 'cute cat illustration');
+    assert.equal(submitBody.parameters.watermark, false);
   });
 
   test('提交成功 + 轮询返回 FAILED → url=null, error 有值', async () => {

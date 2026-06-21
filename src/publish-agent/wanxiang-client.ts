@@ -12,15 +12,16 @@
 
 import type { ImageProvider, ImageResult } from './image-provider.js';
 
-const SUBMIT_URL = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis';
+// wan2.7-image-pro 异步文生图：image-generation/generation（messages 入参）；旧 wanx-v1 的 text2image/image-synthesis 已弃用。
+const SUBMIT_URL = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/image-generation/generation';
 const TASK_URL_PREFIX = 'https://dashscope.aliyuncs.com/api/v1/tasks/';
 
 export interface WanxiangClientOptions {
   /** API Key（默认读 env WANXIANG_API_KEY） */
   apiKey?: string;
-  /** 模型名，默认 wanx-v1 */
+  /** 模型名，默认 wan2.7-image-pro */
   model?: string;
-  /** 默认尺寸，默认 1024*1024 */
+  /** 默认尺寸，默认 1024*1024（wan2.7 方式二显式像素，总像素 [768*768,4096*4096]、宽高比 [1:8,8:1]） */
   defaultSize?: string;
   /** 最大轮询次数，默认 6 */
   maxPollAttempts?: number;
@@ -40,12 +41,12 @@ interface SubmitResponse {
   message?: string;
 }
 
-/** 轮询任务响应 */
+/** 轮询任务响应（wan2.7：结果在 output.choices[].message.content[] 的 image 项） */
 interface TaskResponse {
   output?: {
     task_id?: string;
     task_status?: string;
-    results?: Array<{ url?: string }>;
+    choices?: Array<{ message?: { content?: Array<{ image?: string; type?: string }> } }>;
   };
   request_id?: string;
   code?: string;
@@ -64,7 +65,7 @@ export class WanxiangClient implements ImageProvider {
   constructor(options: WanxiangClientOptions = {}) {
     // 万相文生图与 Qwen 同属百炼、同一 DashScope key；未单设 WANXIANG_API_KEY 时回退 DASHSCOPE_API_KEY。
     this.apiKey = options.apiKey ?? process.env.WANXIANG_API_KEY ?? process.env.DASHSCOPE_API_KEY ?? '';
-    this.model = options.model ?? 'wanx-v1';
+    this.model = options.model ?? 'wan2.7-image-pro';
     this.defaultSize = options.defaultSize ?? '1024*1024';
     this.maxPollAttempts = options.maxPollAttempts ?? 6;
     this.pollIntervalMs = options.pollIntervalMs ?? 5_000;
@@ -93,17 +94,17 @@ export class WanxiangClient implements ImageProvider {
 
   /** 提交异步生成任务 */
   private async submitTask(prompt: string, style?: string): Promise<ImageResult> {
+    // wan2.7 无独立 style 参数：风格并入提示词文本。
+    const text = style ? `${prompt}，风格：${style}` : prompt;
     const parameters: Record<string, unknown> = {
       size: this.defaultSize,
       n: 1,
+      watermark: false,
     };
-    if (style) {
-      parameters.style = style;
-    }
 
     const body = JSON.stringify({
       model: this.model,
-      input: { prompt },
+      input: { messages: [{ role: 'user', content: [{ text }] }] },
       parameters,
     });
 
@@ -171,7 +172,8 @@ export class WanxiangClient implements ImageProvider {
         this.logger.log(`[wanxiang] 轮询 attempt=${attempt + 1} status=${status}`);
 
         if (status === 'SUCCEEDED') {
-          const url = data.output?.results?.[0]?.url ?? null;
+          const content = data.output?.choices?.[0]?.message?.content ?? [];
+          const url = content.find((c) => c.image)?.image ?? null;
           if (!url) {
             return { url: null, taskId, error: '任务成功但结果缺少 URL' };
           }
