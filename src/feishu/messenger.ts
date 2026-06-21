@@ -56,6 +56,28 @@ export class FeishuMessenger {
     await this.send(chatId, 'text', JSON.stringify({ text }));
   }
 
+  /**
+   * 给某条消息贴 emoji 表情回应（默认 'Typing' 敲键盘表情，表示"已读/处理中"）。
+   * best-effort：失败不抛、不阻断消息处理。messageId 为开放平台 message_id（om_xxx）。
+   */
+  async addReaction(messageId: string, emojiType = 'Typing'): Promise<void> {
+    if (!messageId) return;
+    try {
+      const token = await this.tokenManager.getToken();
+      const url = `https://open.feishu.cn/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reactions`;
+      await this.fetchImpl(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify({ reaction_type: { emoji_type: emojiType } }),
+      });
+    } catch {
+      // best-effort：表情回应失败不影响命令处理
+    }
+  }
+
   /** 底层：调用飞书消息发送 API */
   private async send(chatId: string, msgType: string, content: string): Promise<void> {
     if (!chatId) throw new Error('飞书发送失败：chatId 为空');

@@ -178,6 +178,9 @@ export class FeishuWsReceiver {
     const text = extractText(message.content);
     if (!text) return;
 
+    // 已读即贴「敲键盘」表情回应，告诉用户"我看到了、正在处理"（best-effort，不阻断）。
+    if (this.messenger) void this.messenger.addReaction(message.message_id, 'Typing');
+
     const result = await this.commandRouter.handle(text, { chatId: message.chat_id });
     if (this.messenger) {
       const card = buildCommandResultCard(result);

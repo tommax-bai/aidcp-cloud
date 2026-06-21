@@ -32,7 +32,15 @@ function makeRecordingMessenger() {
     })) as unknown as typeof fetch,
     clock: () => 0,
   });
-  const fetchImpl = (async (_url: string, init: RequestInit) => {
+  const reactions: { messageId: string; body: string }[] = [];
+  const fetchImpl = (async (url: string, init: RequestInit) => {
+    const u = String(url);
+    if (u.includes('/reactions')) {
+      // .../im/v1/messages/{messageId}/reactions
+      const m = u.match(/\/messages\/([^/]+)\/reactions/);
+      reactions.push({ messageId: m ? decodeURIComponent(m[1]) : '', body: init.body as string });
+      return { ok: true, status: 200, json: async () => ({ code: 0, msg: 'ok' }) } as Response;
+    }
     const body = JSON.parse(init.body as string) as { receive_id: string };
     sent.push({ chatId: body.receive_id, body: init.body as string });
     return {
@@ -42,7 +50,7 @@ function makeRecordingMessenger() {
     } as Response;
   }) as unknown as typeof fetch;
   const messenger = new FeishuMessenger({ tokenManager, fetchImpl });
-  return { messenger, sent };
+  return { messenger, sent, reactions };
 }
 
 test('ws-receiver: extractText 抽出文本并剥离 @ 提及占位', () => {
@@ -71,6 +79,27 @@ test('ws-receiver: 文本消息 → 路由指令 → 发回执卡片', async () 
   assert.equal(sent.length, 1);
   assert.equal(sent[0].chatId, 'oc_chat');
   assert.match(sent[0].body, /interactive/);
+});
+
+test('ws-receiver: 已读文本消息 → 贴「Typing」敲键盘表情回应（已读/处理中）', async () => {
+  const { messenger, reactions } = makeRecordingMessenger();
+  const receiver = new FeishuWsReceiver({
+    appId: 'a',
+    appSecret: 's',
+    commandRouter: makeRouter(),
+    messenger,
+  });
+  await receiver.handleMessage({
+    message_id: 'om_react',
+    chat_id: 'oc_chat',
+    message_type: 'text',
+    content: JSON.stringify({ text: '/aidcp status acc-01' }),
+  });
+  // addReaction 为 best-effort fire-and-forget，等一拍让其落地。
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(reactions.length, 1, '已读应贴一个表情回应');
+  assert.equal(reactions[0].messageId, 'om_react');
+  assert.match(reactions[0].body, /Typing/);
 });
 
 test('ws-receiver: @ 提及占位被剥离后仍能解析指令', async () => {
