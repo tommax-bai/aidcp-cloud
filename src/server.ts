@@ -30,6 +30,8 @@ import {
 import { RiskController, RiskControllerRegistry, PgRiskStore } from './risk/index.js';
 import { EventBus } from './event-bus/index.js';
 import { RoleDispatcher } from './orchestrator/index.js';
+import type { CommentApprovalPort } from './agents/comment-approval-gate.js';
+import { buildCommentApprovalCard } from './feishu/comment-approval-card.js';
 import { loadSoul } from './soul/index.js';
 
 
@@ -362,6 +364,25 @@ async function main(): Promise<void> {
   await server.start();
   console.log(`[aidcp-cloud] 边-云 WebSocket 服务端已监听 :${port}`);
 
+  // ── 评论循环内人审端口（env 闸：默认 dormant，绝不裸发）─────────────────
+  // 同形复用 AC-PUB 接收端（parseApprovalActionValue + writeApprovalSignal）+ 读侧 isPublishApproved，
+  // 用评论专属 requestId（comment-<noteId>-<ts>），零改 AC-PUB 共享代码。
+  // 90s 超时 < idle 看门狗 idleNudgeMs(130s)，故审批等待期不会触发 idle nudge，无需显式暂停态。
+  const commentApprovalEnabled = process.env.AIDCP_COMMENT_APPROVAL === 'true';
+  const commentApproval: CommentApprovalPort = {
+    request: async ({ requestId, noteId, text }) => {
+      const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
+      if (!chatId) {
+        console.error('[comment] 无可用飞书群，评论审批卡未发出（将超时跳过、不发）');
+        return;
+      }
+      await messenger.sendApprovalCard(chatId, buildCommentApprovalCard({ requestId, noteId, text }));
+    },
+    isApproved: isPublishApproved,
+    timeoutMs: 90_000,
+    pollMs: 2_000,
+  };
+
   // ── RoleDispatcher：事件驱动决策链路 ─────────────────────────────────
   const soul = loadSoul();
   const roleDispatcher = new RoleDispatcher({
@@ -372,6 +393,8 @@ async function main(): Promise<void> {
     getRiskStatus: () => riskController.getState().status,
     // 互动前风控闸：被拒则诚实跳过（不下发、不扣 budget）。验证码→restricted 后互动被此闸真正拦住。
     canInteract: (action) => riskController.canDo(action),
+    // 评论人审端口（env 闸开启时注入；未开启 → 评论一律诚实跳过、不发）。
+    ...(commentApprovalEnabled ? { commentApproval } : {}),
     // 概念池：跨会话搜索记忆 + 从浏览学新关键词（undefined 时退化为仅 seed_keywords）。
     conceptStore,
     // 硬暂停闸（验证码/人工接管）：通知准入据此放弃巡视——硬暂停期连帧都不发。
