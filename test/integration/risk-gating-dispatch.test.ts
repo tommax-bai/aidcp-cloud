@@ -20,7 +20,7 @@ const mockSoul: Soul = {
 };
 const mockLlm = { complete: async () => 'pass' };
 
-function setup(canInteract: (a: 'like' | 'collect' | 'follow' | 'comment') => boolean) {
+function setup(canInteract: (a: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like') => boolean) {
   const commands: EdgeCommand[] = [];
   const bus = new EventBus();
   const d = new RoleDispatcher({

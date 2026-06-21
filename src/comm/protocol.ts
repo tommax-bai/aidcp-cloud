@@ -596,6 +596,8 @@ export interface CommentCandidate {
   author?: string;
   /** 评论正文片段 */
   text: string;
+  /** 是否已是「已赞」状态（svg use === '#liked'）；供云端预过滤，绝不回点已赞 */
+  alreadyLiked?: boolean;
 }
 
 export interface ActionCompletedPayload {

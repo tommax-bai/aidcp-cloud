@@ -375,6 +375,11 @@ export interface RoleEventMap {
   'comment.approved': CommentApprovedPayload;
   'comment.done': CommentDonePayload;
   'comment.skipped': CommentSkippedPayload;
+  // 评论点赞（comment-like-on-detail）：appraiser 选中一条 → intended（dispatcher 下发）；
+  // 真点成功 → confirmed（archivist 归档）；任何不点 → skipped（仅观测）。
+  'comment_like.intended': { noteId: string; commentAnchorId: string; author?: string; text: string; reason: string; ts: number };
+  'comment_like.confirmed': { noteId: string; commentAnchorId: string; author?: string; text: string; reason: string; ts: number };
+  'comment_like.skipped': { noteId?: string; reason: string; ts: number };
   'profile.worth_visiting': ProfileWorthVisitingPayload;
   'profile.skipped': ProfileSkippedPayload;
   'profile.entered': ProfileEnteredPayload;
@@ -428,6 +433,8 @@ export type RoleName =
   | 'comment_composer'
   | 'comment_de_ai_flavor'
   | 'comment_approval_gate'
+  | 'comment_like_appraiser'
+  | 'valuable_comment_archivist'
   | 'profile_opener'
   | 'follow_agent'
   | 'search_evaluator'

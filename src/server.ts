@@ -462,6 +462,8 @@ async function main(): Promise<void> {
     ...(commentApprovalEnabled ? { commentApproval } : {}),
     // 评论每日上限预闸：按账号风控当日剩余评论配额（运营经 setQuotaLevel 配档位）。评估阶段就拦、避免空跑撰写。
     getCommentDailyRemaining: () => riskController.dailyRemaining('comment'),
+    // 评论赞当日配额预闸：CommentLikeAppraiser 据此在调 LLM 前就判断当日是否还能点评论赞。
+    getCommentLikeDailyRemaining: () => riskController.dailyRemaining('comment_like'),
     // 概念池：跨会话搜索记忆 + 从浏览学新关键词（undefined 时退化为仅 seed_keywords）。
     conceptStore,
     // 硬暂停闸（验证码/人工接管）：通知准入据此放弃巡视——硬暂停期连帧都不发。
