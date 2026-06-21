@@ -191,6 +191,23 @@ describe('AC-CMD CommandSequencer（云端编排驱动）', () => {
     assert.equal(seq.pendingCount, 0);
   });
 
+  it('AC-CMD-SEQ-11 元数据(add_with_candidate/set_option) 失败 → best-effort 跳过、仍提交发布', async () => {
+    const metadata = {
+      topics: ['t1'], mentions: ['userA'], location: null, collection: null,
+      visibility: 'public' as const, permissions: { comment: 'allow' as const, save: 'allow' as const },
+      mode: 'immediate' as const, publishTime: null, compliance: {}, metadataScore: 0, decidedAt: 0,
+    };
+    const { seq, pushed } = makeSequencer((cmd) =>
+      cmd.kind === 'add_with_candidate' || cmd.kind === 'set_option'
+        ? { recordId: cmd.recordId, seq: cmd.seq, kind: cmd.kind, ok: false, error: 'guard_persist' }
+        : okFor(cmd),
+    );
+    const r = await seq.executePublishSequence(input({ tags: ['a'], metadata }));
+    assert.equal(r.ok, true, '元数据增强项失败不阻断发布');
+    assert.ok(pushed.some((c) => c.kind === 'submit_publish'), '仍下发 submit');
+    assert.equal(r.postId, 'post_xyz');
+  });
+
   it('AC-CMD-SEQ-04 失败按序停止：content 校验失败 → ok:false failedAt，后续 submit 绝不下发（红线）', async () => {
     const { seq, pushed } = makeSequencer((cmd) => ({
       recordId: cmd.recordId, seq: cmd.seq, kind: cmd.kind,

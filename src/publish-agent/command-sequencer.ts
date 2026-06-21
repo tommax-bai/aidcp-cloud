@@ -159,6 +159,9 @@ export class CommandSequencer {
     let postId: string | undefined;
     let submitted = false;
     let imagesOk = true;
+    // 元数据是增强项，非有效帖必需：失败best-effort跳过、继续发（带标题/正文/图的帖子仍是有效帖）。
+    // 绝不伪造该项成功——只是诚实地"少了这个标签/选项"继续。核心步（导航/选模式/标题/正文/提交）仍 fail-fast。
+    const bestEffort = new Set<PublishCommandKind>(['add_with_candidate', 'set_option', 'set_schedule']);
 
     for (const cmd of sequence) {
       // 图文帖编辑器被"先传图"门控（task-0 实测：无图则标题/正文不存在）。请求了配图而全部失败 → 无有效帖，
@@ -189,6 +192,11 @@ export class CommandSequencer {
           this.logger.warn(`[CommandSequencer] capture_postId 异常但已提交发布、postId 未知 seq=${cmd.seq}: ${error}`);
           continue;
         }
+        // 元数据增强项异常 → best-effort 跳过，继续发（少这个标签/选项不影响有效帖）。
+        if (bestEffort.has(cmd.kind)) {
+          this.logger.warn(`[CommandSequencer] ${cmd.kind} 异常但 best-effort 跳过 seq=${cmd.seq}: ${error}`);
+          continue;
+        }
         this.logger.warn(`[CommandSequencer] seq=${cmd.seq} kind=${cmd.kind} 异常: ${error}`);
         return { ok: false, imagesOk, failedAt: { seq: cmd.seq, kind: cmd.kind, error } };
       }
@@ -204,7 +212,12 @@ export class CommandSequencer {
           this.logger.warn(`[CommandSequencer] capture_postId 失败但已提交发布、postId 未知 seq=${cmd.seq}: ${result.error ?? 'unknown'}`);
           continue;
         }
-        // 红线：非配图指令失败即停，后续不下发、不假成功。
+        // 元数据增强项失败 → best-effort 跳过，继续发（少这个标签/选项不影响有效帖）。
+        if (bestEffort.has(cmd.kind)) {
+          this.logger.warn(`[CommandSequencer] ${cmd.kind} 失败但 best-effort 跳过 seq=${cmd.seq}: ${result.error ?? 'unknown'}`);
+          continue;
+        }
+        // 红线：核心步失败即停，后续不下发、不假成功。
         return { ok: false, imagesOk, failedAt: { seq: cmd.seq, kind: cmd.kind, error: result.error ?? 'unknown' } };
       }
       if (cmd.kind === 'submit_publish') submitted = true;
