@@ -4,7 +4,7 @@ import type { PipelineFields, CreatedContent, ImagePlan } from '../types.js';
 import type { PipelineContext } from '../pipeline-context.js';
 import { buildImagePrompt } from '../prompts.js';
 import { executeWithFallback } from '../retry-strategy.js';
-import type { QwenClient } from '../../llm/qwen.js';
+import type { ChatLlmClient } from '../../llm/qwen.js';
 
 /**
  * ImagePlanner — 配图「决策」（A 阶段2，从 ImageDirector 拆出 Step 1）。
@@ -12,7 +12,7 @@ import type { QwenClient } from '../../llm/qwen.js';
  * 红线：决策与执行分离，本角色只产计划、不调图源。
  */
 export interface ImagePlannerDeps {
-  llmClient: QwenClient;
+  llmClient: ChatLlmClient;
   clock?: () => number;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
@@ -25,7 +25,7 @@ export class ImagePlannerRole extends BasePublishRole<CreatedContent, ImagePlan>
     fallback: 'default',
   };
   protected readonly outputKey = 'imagePlan' as const;
-  private llmClient: QwenClient;
+  private llmClient: ChatLlmClient;
 
   constructor(deps: ImagePlannerDeps) {
     super({ logger: deps.logger, clock: deps.clock });

@@ -12,6 +12,7 @@
  */
 
 import { EventBus } from '../event-bus/index.js';
+import type { LlmCallOpts } from '../llm/qwen.js';
 import { SessionContext } from '../agents/session-context.js';
 import { ContentEvaluator } from '../agents/content-evaluator.js';
 import { FeedScroller } from '../agents/feed-scroller.js';
@@ -67,7 +68,7 @@ const EMPTY_CONCEPT_POOL: ConceptPool = { known: [], candidates: [], source: new
 
 export interface RoleDispatcherOptions {
   soul: Soul;
-  llm: { complete(prompt: string): Promise<string> };
+  llm: { complete(prompt: string, opts?: LlmCallOpts): Promise<string> };
   sendCommand: (command: EdgeCommand) => void;
   clock?: () => number;
   /** 外部事件总线（共享 handler 发射的 Edge 上报事件），缺省创建独立实例 */
@@ -142,7 +143,7 @@ export class RoleDispatcher {
   private readonly eventBus: EventBus;
   private readonly sessionContext: SessionContext;
   private readonly soul: Soul;
-  private readonly llm: { complete(prompt: string): Promise<string> };
+  private readonly llm: { complete(prompt: string, opts?: LlmCallOpts): Promise<string> };
   private readonly rawSendCommand: (command: EdgeCommand) => void;
   private readonly clock: () => number;
   private readonly getRiskStatus: () => RiskStatus;

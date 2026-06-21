@@ -8,18 +8,22 @@
 import type { EventBus } from '../event-bus/index.js';
 import type { RoleEventMap, RoleName } from '../event-bus/types.js';
 import type { Soul } from '../soul/types.js';
+import type { LlmCallOpts } from '../llm/qwen.js';
+
+/** 角色侧只需文本补全（保留弱接口，便于测试桩只实现 complete）；opts 可选，按角色解析模型/温度。 */
+type RoleLlm = { complete(prompt: string, opts?: LlmCallOpts): Promise<string> };
 
 export interface RoleOptions {
   eventBus: EventBus;
   soul: Soul;
-  llm?: { complete(prompt: string): Promise<string> };
+  llm?: RoleLlm;
 }
 
 export abstract class BaseRole {
   abstract readonly roleName: RoleName;
   protected readonly eventBus: EventBus;
   protected readonly soul: Soul;
-  protected readonly llm?: { complete(prompt: string): Promise<string> };
+  protected readonly llm?: RoleLlm;
 
   constructor(options: RoleOptions) {
     this.eventBus = options.eventBus;
@@ -55,7 +59,8 @@ export abstract class BaseRole {
     }
     let raw: string;
     try {
-      raw = await this.llm.complete(prompt);
+      // 带上角色键（browse: 前缀）→ 客户端按角色解析模型/温度（change console-role-model-config）。
+      raw = await this.llm.complete(prompt, { role: `browse:${this.roleName}` });
     } catch (err) {
       this.log(`LLM 调用失败：${(err as Error).message}`);
       throw err;

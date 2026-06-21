@@ -55,6 +55,11 @@ export interface PanelDeps {
    * 明文密钥绝不经此外观回传；setCredential 主密钥缺失以 {ok:false} 诚实可辨，绝不假成功。
    */
   modelConfig?: PanelModelConfig;
+  /**
+   * 角色级模型/温度配置（change console-role-model-config）。未注入则 /api/roles* 返回 503。
+   * 白名单制：只暴露现役 + 真调大模型的角色；写非乐观回真态；无效模型名探活不过诚实拒绝绝不落库。
+   */
+  roleConfig?: PanelRoleConfig;
 }
 
 /** 凭据视图（永不含明文）。source：db=库内加密凭据 / env=回退环境变量 / none=未配置。 */
@@ -86,6 +91,54 @@ export interface PanelModelConfig {
   setModel(patch: { textModel?: string; imageModel?: string }, updatedBy: string): Promise<ModelConfigView>;
   /** 加密保存密钥（重启生效）；主密钥缺失返回 {ok:false}，明文绝不回传。 */
   setCredential(field: string, value: string, updatedBy: string): Promise<SetCredentialResult>;
+}
+
+// ── 角色级配置（change console-role-model-config）──────────────────────────────
+
+/** 单角色目录行 + 生效值（GET /api/roles 形状）。 */
+export interface RoleConfigRowView {
+  roleId: string;
+  displayName: string;
+  group: 'browse' | 'publish';
+  llmKind: 'text' | 'image' | 'none';
+  tunableTemperature: boolean;
+  /** 当前生效模型（文本类=覆盖或全局 textModel；图像类=全局 imageModel）。 */
+  effectiveModel: string;
+  /** 是否存在按角色模型覆盖。 */
+  modelOverridden: boolean;
+  /** 温度覆盖（null=用代码默认）。 */
+  temperatureOverride: number | null;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export interface RoleConfigCatalogView {
+  roles: RoleConfigRowView[];
+}
+
+/** PUT /api/roles/:roleId/config 的入参补丁。null/'' = 清除覆盖（回落）。 */
+export interface RoleConfigPatch {
+  model?: string | null;
+  temperature?: number | null;
+}
+
+export type RoleConfigSetResult =
+  | { ok: true; view: RoleConfigCatalogView }
+  | {
+      ok: false;
+      reason:
+        | 'unknown_role'
+        | 'model_not_configurable'
+        | 'temperature_not_tunable'
+        | 'temperature_out_of_range'
+        | 'model_invalid';
+    };
+
+export interface PanelRoleConfig {
+  /** 角色目录 + 生效值（白名单制）。 */
+  getCatalog(): RoleConfigCatalogView;
+  /** 按角色写模型/温度。校验+探活不过以 {ok:false} 诚实可辨，绝不落库。写后回真态视图。 */
+  setRoleConfig(roleId: string, patch: RoleConfigPatch, updatedBy: string): Promise<RoleConfigSetResult>;
 }
 
 export interface PanelConfig {

@@ -361,6 +361,59 @@ function createRequestHandler(
       return;
     }
 
+    // ── 角色级模型/温度配置（change console-role-model-config）──────────────
+    // 白名单制；写非乐观回真态；非空模型名探活不过诚实 400 model_invalid，绝不落库。
+    if (method === 'GET' && url === '/api/roles') {
+      if (!deps.roleConfig) {
+        sendJson(res, 503, { error: 'role_config_unavailable' });
+        return;
+      }
+      sendJson(res, 200, deps.roleConfig.getCatalog());
+      return;
+    }
+    if (method === 'PUT' && url.startsWith('/api/roles/') && url.endsWith('/config')) {
+      if (!deps.roleConfig) {
+        sendJson(res, 503, { error: 'role_config_unavailable' });
+        return;
+      }
+      const roleId = decodeURIComponent(url.slice('/api/roles/'.length, -'/config'.length));
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { model, temperature } = (body ?? {}) as { model?: unknown; temperature?: unknown };
+      const patch: { model?: string | null; temperature?: number | null } = {};
+      if (model !== undefined) {
+        if (model === null || typeof model === 'string') patch.model = model;
+        else {
+          sendJson(res, 400, { error: 'bad_request', reason: 'model_type' });
+          return;
+        }
+      }
+      if (temperature !== undefined) {
+        if (temperature === null || typeof temperature === 'number') patch.temperature = temperature;
+        else {
+          sendJson(res, 400, { error: 'bad_request', reason: 'temperature_type' });
+          return;
+        }
+      }
+      if (patch.model === undefined && patch.temperature === undefined) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'no_valid_fields' });
+        return;
+      }
+      const result = await deps.roleConfig.setRoleConfig(roleId, patch, verified.payload.sub);
+      if (!result.ok) {
+        // unknown_role→404；其余校验/探活失败→400（绝不落库、绝不假成功）
+        sendJson(res, result.reason === 'unknown_role' ? 404 : 400, { error: result.reason });
+        return;
+      }
+      sendJson(res, 200, result.view);
+      return;
+    }
+
     sendJson(res, 404, { error: 'not_found' });
   }
 

@@ -4,10 +4,10 @@ import type { PipelineFields, AssembledContent, GateDecision } from '../types.js
 import type { PipelineContext } from '../pipeline-context.js';
 import { buildGatekeeperPrompt } from '../prompts.js';
 import { executeWithFallback } from '../retry-strategy.js';
-import type { QwenClient } from '../../llm/qwen.js';
+import type { ChatLlmClient } from '../../llm/qwen.js';
 
 export interface ApprovalGatekeeperDeps {
-  llmClient: QwenClient;
+  llmClient: ChatLlmClient;
   clock?: () => number;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
@@ -20,7 +20,7 @@ export class ApprovalGatekeeperRole extends BasePublishRole<AssembledContent, Ga
     fallback: 'default',
   };
   protected readonly outputKey = 'gateDecision' as const;
-  private llmClient: QwenClient;
+  private llmClient: ChatLlmClient;
 
   constructor(deps: ApprovalGatekeeperDeps) {
     super({ logger: deps.logger, clock: deps.clock });

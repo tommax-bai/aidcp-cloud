@@ -15,7 +15,7 @@
 
 import { readFile, writeFile } from 'node:fs/promises';
 import * as lark from '@larksuiteoapi/node-sdk';
-import { QwenClient, DEFAULT_BASE_URL as QWEN_BASE_URL } from './llm/index.js';
+import { QwenClient, DEFAULT_BASE_URL as QWEN_BASE_URL, type ChatLlmClient } from './llm/index.js';
 import { SimplePlanner } from './planner/index.js';
 import { PgAnchorCache, BotChatStore, ConceptStore, LikedNoteStore } from './cache/index.js';
 import {
@@ -79,6 +79,8 @@ import { PublishLogStore } from './publish-agent/publish-log-store.js';
 import { startPanelApi, parsePanelUsers, PgPanelStore } from './panel/index.js';
 import { PgAlertStore } from './alerts/index.js';
 import { ModelConfigStore } from './config/model-config-store.js';
+import { RoleConfigStore } from './config/role-config-store.js';
+import { createRoleConfigPanel } from './config/role-config-facade.js';
 import { CredentialStore } from './config/credential-store.js';
 import type { ModelConfigView } from './panel/types.js';
 
@@ -122,21 +124,48 @@ async function main(): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
+  // 角色级模型/温度覆盖（change console-role-model-config）。缺/空/无效一律回落全局，绝不 brick。
+  const roleConfigStore = new RoleConfigStore({
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
   try {
     await modelConfigStore.init();
     await credentialStore.init();
-    console.log('[aidcp-cloud] 模型配置 + 凭据存储已就绪（model_config / provider_credentials）');
+    await roleConfigStore.init();
+    console.log('[aidcp-cloud] 模型配置 + 凭据 + 角色配置存储已就绪（model_config / provider_credentials / role_config）');
   } catch (err) {
-    console.warn('[aidcp-cloud] 模型/凭据存储初始化失败（回退代码默认模型 + env 密钥）:', (err as Error).message);
+    console.warn('[aidcp-cloud] 模型/凭据/角色配置存储初始化失败（回退代码默认模型 + env 密钥）:', (err as Error).message);
   }
   // 启动期解密 DashScope 密钥（库内优先、回退 env）；明文仅用于构造客户端，绝不日志化、绝不回前端。
   const dashscopeApiKey =
     (await credentialStore.getSecretForRuntime('dashscope', 'dashscope_api_key').catch(() => null)) ??
     readEnvString('DASHSCOPE_API_KEY');
 
+  // 按角色解析模型/温度（change console-role-model-config）：
+  // 有覆盖用覆盖，否则回落全局 textModel / 构造默认温度。role 缺省（planner/select/探活）→ 走全局。
+  const resolveModelForRole = (role?: string): string => {
+    const override = role ? roleConfigStore.getForRole(role).model : null;
+    return override?.trim() || modelConfigStore.getCached().textModel;
+  };
+  const resolveTempForRole = (role?: string): number | undefined => {
+    const t = role ? roleConfigStore.getForRole(role).temperature : null;
+    return t ?? undefined;
+  };
   const llm = new QwenClient({
     apiKey: dashscopeApiKey,
-    getModel: () => modelConfigStore.getCached().textModel,
+    getModel: resolveModelForRole,
+    getTemperature: resolveTempForRole,
+    onCall: ({ role, model, ms, ok }) =>
+      console.log(`[llm] role=${role ?? '-'} model=${model} ms=${ms} ok=${ok}`),
+  });
+  // 把共享文本客户端按角色绑定成 thin wrapper（发布侧用；角色内部代码零改动）。
+  const roleLlm = (roleId: string): ChatLlmClient => ({
+    complete: (prompt, opts) => llm.complete(prompt, { ...opts, role: opts?.role ?? roleId }),
+    chat: (messages, opts) => llm.chat(messages, { ...opts, role: opts?.role ?? roleId }),
   });
   const planner = new SimplePlanner({ llm });
   const cache = new PgAnchorCache({
@@ -471,11 +500,11 @@ async function main(): Promise<void> {
 
   // 注册发布编排器的生产段角色（A 阶段2 细拆：6→11，下游 Gatekeeper/Executor 不变）。
   // 注册顺序无关正确性（黑板靠键就绪触发），按拓扑排列便于阅读。
-  publishOrchestrator.registerRole(new ContentScoutRole({ llmClient: llm }));
+  publishOrchestrator.registerRole(new ContentScoutRole({ llmClient: roleLlm('publish:ContentScout') }));
   publishOrchestrator.registerRole(new ContentTypeSelectorRole());
-  publishOrchestrator.registerRole(new ContentCreatorRole({ llmClient: llm }));
+  publishOrchestrator.registerRole(new ContentCreatorRole({ llmClient: roleLlm('publish:ContentCreator') }));
   // 配图：决策（ImagePlanner）↔ 执行（ImageGenerator）↔ 封面（CoverSelector）
-  publishOrchestrator.registerRole(new ImagePlannerRole({ llmClient: llm }));
+  publishOrchestrator.registerRole(new ImagePlannerRole({ llmClient: roleLlm('publish:ImagePlanner') }));
   publishOrchestrator.registerRole(new ImageGeneratorRole({
     imageProvider: wanxiangClient,
     // 配图与 Qwen 同用百炼 key：WANXIANG_API_KEY 或 DASHSCOPE_API_KEY 任一就绪即启用（与 wanxiangClient 的 key 解析一致）。
@@ -485,7 +514,7 @@ async function main(): Promise<void> {
   // 后处理：清洗（ContentCleaner）→ AI味分（AiFlavorScorer）/ 质量分（QualityScorer）
   publishOrchestrator.registerRole(new ContentCleanerRole({ postProcessor }));
   publishOrchestrator.registerRole(new AiFlavorScorerRole());
-  publishOrchestrator.registerRole(new QualityScorerRole({ llmClient: llm }));
+  publishOrchestrator.registerRole(new QualityScorerRole({ llmClient: roleLlm('publish:QualityScorer') }));
   // 汇合：瘦身 ContentAssembler（纯组装，waitAll 五键）
   publishOrchestrator.registerRole(new ContentAssemblerRole());
   // 阶段3 元数据 + 合规决策（并行于发布链，规则式确定性；产出 publishMetadata，本阶段不应用到边缘）。
@@ -498,7 +527,7 @@ async function main(): Promise<void> {
   publishOrchestrator.registerRole(new PublishModeDeciderRole());
   publishOrchestrator.registerRole(new ComplianceDeciderRole());
   publishOrchestrator.registerRole(new MetadataAggregatorRole());
-  publishOrchestrator.registerRole(new ApprovalGatekeeperRole({ llmClient: llm }));
+  publishOrchestrator.registerRole(new ApprovalGatekeeperRole({ llmClient: roleLlm('publish:ApprovalGatekeeper') }));
   publishOrchestrator.registerRole(new PublishExecutorRole({
     store: {
       async insert(record) {
@@ -609,6 +638,17 @@ async function main(): Promise<void> {
     };
   };
 
+  // 角色配置面板外观（change console-role-model-config）：白名单 + 生效值视图 + 写校验 + 保存前探活。
+  const roleConfigPanel = createRoleConfigPanel({
+    store: roleConfigStore,
+    getGlobalTextModel: () => modelConfigStore.getCached().textModel,
+    getGlobalImageModel: () => modelConfigStore.getCached().imageModel,
+    probeModel: async (model) => {
+      // 显式 model 覆盖 + 短超时；探活失败抛错 → facade 报 model_invalid，绝不落库。
+      await llm.chat([{ role: 'user', content: 'ping' }], { model, timeoutMs: 8000 });
+    },
+  });
+
   // ── 面板 API 层（管理后台后端，进程内、独立端口、JWT）──────────────────────
   // 未设置 AIDCP_PANEL_PORT 则禁用（默认不开新端口）；启动失败非致命，绝不连累边-云闭环。
   const panelPort = readEnvPort('AIDCP_PANEL_PORT');
@@ -675,6 +715,8 @@ async function main(): Promise<void> {
               return { ok: true, field, maskedHint };
             },
           },
+          // 角色级模型/温度配置（change console-role-model-config）。白名单 + 探活 + 写非乐观回真态。
+          roleConfig: roleConfigPanel,
         },
         {
           port: panelPort,

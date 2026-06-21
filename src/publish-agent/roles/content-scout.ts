@@ -4,10 +4,10 @@ import type { PipelineFields, TriggerInput, ScoutDecision } from '../types.js';
 import type { PipelineContext } from '../pipeline-context.js';
 import { buildScoutPrompt } from '../prompts.js';
 import { executeWithFallback } from '../retry-strategy.js';
-import type { QwenClient } from '../../llm/qwen.js';
+import type { ChatLlmClient } from '../../llm/qwen.js';
 
 export interface ContentScoutDeps {
-  llmClient: QwenClient;
+  llmClient: ChatLlmClient;
   clock?: () => number;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
@@ -20,7 +20,7 @@ export class ContentScoutRole extends BasePublishRole<TriggerInput, ScoutDecisio
     fallback: 'default',
   };
   protected readonly outputKey = 'scoutDecision' as const;
-  private llmClient: QwenClient;
+  private llmClient: ChatLlmClient;
 
   constructor(deps: ContentScoutDeps) {
     super({ logger: deps.logger, clock: deps.clock });

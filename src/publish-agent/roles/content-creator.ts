@@ -4,10 +4,10 @@ import type { PipelineFields, ScoutDecision, TriggerInput, CreatedContent } from
 import type { PipelineContext } from '../pipeline-context.js';
 import { buildCreatorPrompt } from '../prompts.js';
 import { executeWithRetry } from '../retry-strategy.js';
-import type { QwenClient } from '../../llm/qwen.js';
+import type { ChatLlmClient } from '../../llm/qwen.js';
 
 export interface ContentCreatorDeps {
-  llmClient: QwenClient;
+  llmClient: ChatLlmClient;
   clock?: () => number;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
@@ -25,7 +25,7 @@ export class ContentCreatorRole extends BasePublishRole<CreatorInput, CreatedCon
     fallback: 'abort',
   };
   protected readonly outputKey = 'createdContent' as const;
-  private llmClient: QwenClient;
+  private llmClient: ChatLlmClient;
 
   constructor(deps: ContentCreatorDeps) {
     super({ logger: deps.logger, clock: deps.clock });

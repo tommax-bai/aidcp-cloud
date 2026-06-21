@@ -4,7 +4,7 @@ import type { PipelineFields, CreatedContent, CleanedContent, QualityReport, Pos
 import type { PipelineContext } from '../pipeline-context.js';
 import { buildAssemblerPrompt } from '../prompts.js';
 import { executeWithFallback } from '../retry-strategy.js';
-import type { QwenClient } from '../../llm/qwen.js';
+import type { ChatLlmClient } from '../../llm/qwen.js';
 
 interface QualityScorerInput {
   created: CreatedContent;
@@ -17,7 +17,7 @@ interface QualityScorerInput {
  * 与 AiFlavorScorer 分职：本角色只产 qualityScore，绝不硬编码满分、绝不抹分。
  */
 export interface QualityScorerDeps {
-  llmClient: QwenClient;
+  llmClient: ChatLlmClient;
   clock?: () => number;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
@@ -30,7 +30,7 @@ export class QualityScorerRole extends BasePublishRole<QualityScorerInput, Quali
     fallback: 'default',
   };
   protected readonly outputKey = 'qualityReport' as const;
-  private llmClient: QwenClient;
+  private llmClient: ChatLlmClient;
 
   constructor(deps: QualityScorerDeps) {
     super({ logger: deps.logger, clock: deps.clock });
