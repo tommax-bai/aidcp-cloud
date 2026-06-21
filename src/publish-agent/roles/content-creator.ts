@@ -6,6 +6,9 @@ import { buildCreatorPrompt } from '../prompts.js';
 import { executeWithRetry } from '../retry-strategy.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
 
+// 内容生成超时（角色闸 + LLM 调用同值）：放宽到 120s，容纳较强/较慢模型（如 qwen-max 系）。env 可调。
+const CONTENT_TIMEOUT_MS = Number(process.env.AIDCP_PUBLISH_CONTENT_TIMEOUT_MS ?? 120000);
+
 export interface ContentCreatorDeps {
   llmClient: ChatLlmClient;
   clock?: () => number;
@@ -21,7 +24,7 @@ export class ContentCreatorRole extends BasePublishRole<CreatorInput, CreatedCon
   readonly config: RoleConfig = {
     name: 'ContentCreator',
     watchKeys: ['scoutDecision'],
-    timeoutMs: 30000,
+    timeoutMs: CONTENT_TIMEOUT_MS,
     fallback: 'abort',
   };
   protected readonly outputKey = 'createdContent' as const;
@@ -47,10 +50,14 @@ export class ContentCreatorRole extends BasePublishRole<CreatorInput, CreatedCon
     const prompt = buildCreatorPrompt(input.scoutDecision, input.trigger);
     const raw = await executeWithRetry(
       async () => {
-        return this.llmClient.chat([
-          { role: 'system', content: '你是一个小红书技术博主。严格按要求生成JSON格式内容。' },
-          { role: 'user', content: prompt },
-        ]);
+        return this.llmClient.chat(
+          [
+            { role: 'system', content: '你是一个小红书技术博主。严格按要求生成JSON格式内容。' },
+            { role: 'user', content: prompt },
+          ],
+          // LLM 调用超时须与角色闸同放宽，否则 QwenClient 默认 30s 会先 abort（角色闸放宽也没用）。
+          { timeoutMs: CONTENT_TIMEOUT_MS },
+        );
       },
       { maxRetries: 2, initialDelayMs: 500, maxDelayMs: 5000, backoffMultiplier: 2 },
     );
