@@ -167,6 +167,25 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
 
   private async handleAutoPublish(assembled: AssembledContent, title: string, context: PipelineContext<PipelineFields>): Promise<PublishResult> {
     const lineage = this.lineageFrom(context);
+    // 配图收口红线（change publish-image-required-or-fail）：图文帖必须有图。配图失败/降级（imageUrl 为空）时，
+    // 小红书图文编辑器「先传图门控」下标题/正文框根本不渲染，强行驱动只会在 fill_field no_target 才暴露。
+    // 此处**提前诚实判 failed**——不发审批卡、不下发指令、images_attached=false（红线：不静默走必然失败的纯文字路径）。
+    if (!assembled.imageUrl) {
+      const failedId = await this.store.insert({
+        title,
+        content: assembled.finalContent,
+        tags: assembled.finalTags,
+        imageUrl: null,
+        status: 'failed',
+        qualityScore: assembled.qualityScore,
+        aiScore: assembled.aiScore,
+        sourceConcepts: lineage.sourceConcepts,
+        sourceLikedIds: lineage.sourceLikedIds,
+      });
+      if (this.store.markImagesAttached) await this.store.markImagesAttached(failedId, false).catch(() => {});
+      this.logger.warn(`[PublishExecutor] 无配图（生图失败/降级）→ 图文帖无有效内容，诚实 failed recordId=${failedId}（不发卡、不下发）`);
+      return { recordId: failedId, status: 'failed', dispatched: false, envelope: null, completedAt: this.clock() };
+    }
     const recordId = await this.store.insert({
       title,
       content: assembled.finalContent,

@@ -291,8 +291,8 @@ async function main(): Promise<void> {
   const wanxiangClient = new WanxiangClient({
     apiKey: readEnvString('WANXIANG_API_KEY') ?? dashscopeApiKey,
     getModel: () => modelConfigStore.getCached().imageModel,
-    // 慢图容忍：轮询次数 env 可调（默认 18×5s=90s，零回归）；调大可减少「生图超时降级纯文字」拖垮整帖。
-    maxPollAttempts: Number(process.env.AIDCP_WANXIANG_MAX_POLL ?? 18),
+    // 慢图容忍：轮询次数 env 可调（默认 34×5s=170s；须 < ImageGenerator 角色闸 200s）。change publish-image-required-or-fail。
+    maxPollAttempts: Number(process.env.AIDCP_WANXIANG_MAX_POLL ?? 34),
   });
 
   // 发布编排器（PublishOrchestrator）。超时须容纳 executor 的人审等待窗口（默认 240s）+ 指令序列，故放大到 360s。

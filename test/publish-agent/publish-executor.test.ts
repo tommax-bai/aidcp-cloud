@@ -437,4 +437,44 @@ describe('PublishExecutorRole', () => {
     // 审批卡标题也 == 同一字符串（卡片是「已构建的 FeishuCard」，标题嵌在 elements，故校验 JSON 含该标题）。
     assert.ok(JSON.stringify(sentCards[0]).includes(TITLE), '审批卡标题 == titleSelection.title');
   });
+
+  test('AC-IMG-REQUIRED 无配图（imageUrl=null）→ 诚实 failed、不发卡、不下发、markImagesAttached(false)', async () => {
+    const insertedRecords: any[] = [];
+    const attached: Array<{ id: number; a: boolean }> = [];
+    let seqCalls = 0;
+    const sentCards: any[] = [];
+    const fakeStore = {
+      insert: async (r: any) => { insertedRecords.push(r); return 21; },
+      updateStatus: async () => {},
+      markImagesAttached: async (id: number, a: boolean) => { attached.push({ id, a }); },
+    };
+    const fakeSequencer = { executePublishSequence: async () => { seqCalls++; return { ok: true, imagesOk: true, postId: 'x' }; } } as any;
+    const role = new PublishExecutorRole({
+      store: fakeStore,
+      pusher: { pushToEdges: () => 0 },
+      sequencer: fakeSequencer,
+      messenger: { sendApprovalCard: async (_c: string, card: any) => { sentCards.push(card); } },
+      botChatStore: { getDefaultChat: async () => ({ chatId: 'c' }) },
+      isApproved: async () => true,
+      clock,
+      logger: silentLogger,
+    });
+
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('assembledContent', { ...makeAssembledContent(), imageUrl: null }); // 无图
+    ctx.write('titleSelection', makeTitleSelection());
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+
+    await new Promise((r) => setTimeout(r, 60));
+
+    const result = ctx.get('publishResult');
+    assert.equal(result?.status, 'failed', '无图 → 诚实 failed（不走必然 no_target 的纯文字路径）');
+    assert.equal(result?.dispatched, false, '无图 → 不下发');
+    assert.equal(seqCalls, 0, '无图 → 绝不驱动序列（不发卡、不点发布）');
+    assert.equal(sentCards.length, 0, '无图 → 不发审批卡（不让人审注定失败的图文帖）');
+    assert.equal(insertedRecords.length, 1, '诚实落库一条 failed');
+    assert.equal(insertedRecords[0].status, 'failed');
+    assert.deepEqual(attached, [{ id: 21, a: false }], 'markImagesAttached(false)');
+  });
 });

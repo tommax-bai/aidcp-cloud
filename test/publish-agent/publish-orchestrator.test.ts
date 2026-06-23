@@ -112,13 +112,16 @@ function buildFullPipeline(llmResponses: Record<string, string>, opts?: { enable
 
 describe('PublishOrchestrator', () => {
   test('完整链路（11 角色细拆）：trigger → … → assembledContent → gate → executor → publishResult', async () => {
-    const { orchestrator, insertedRecords, pushedEnvelopes } = buildFullPipeline({
-      scout: JSON.stringify({ shouldPublish: true, publishDirection: 'RAG优化', keyPoints: ['切块'], confidence: 0.9, reason: '充足' }),
-      creator: JSON.stringify({ title: 'RAG踩坑', content: '昨天切块切碎了召回一坨', tags: ['RAG'], tone: 'casual', style: { type: '踩坑' } }),
-      image: JSON.stringify({ imagePrompt: 'tech illustration', imageStyle: 'illustration', fallbackStrategy: 'skip' }),
-      assembler: JSON.stringify({ qualityScore: 85 }),
-      gatekeeper: JSON.stringify({ needsApproval: false, recommendedAction: 'auto_publish', reason: '质量ok' }),
-    });
+    const { orchestrator, insertedRecords, pushedEnvelopes } = buildFullPipeline(
+      {
+        scout: JSON.stringify({ shouldPublish: true, publishDirection: 'RAG优化', keyPoints: ['切块'], confidence: 0.9, reason: '充足' }),
+        creator: JSON.stringify({ title: 'RAG踩坑', content: '昨天切块切碎了召回一坨', tags: ['RAG'], tone: 'casual', style: { type: '踩坑' } }),
+        image: JSON.stringify({ imagePrompt: 'tech illustration', imageStyle: 'illustration', fallbackStrategy: 'skip' }),
+        assembler: JSON.stringify({ qualityScore: 85 }),
+        gatekeeper: JSON.stringify({ needsApproval: false, recommendedAction: 'auto_publish', reason: '质量ok' }),
+      },
+      { enableImage: true }, // 图文帖必须有图（change publish-image-required-or-fail）：生图开启 → imageUrl 有值 → 走 draft
+    );
 
     const result = await orchestrator.trigger(makeTriggerInput());
 
@@ -133,9 +136,9 @@ describe('PublishOrchestrator', () => {
     assert.equal(orchestrator.getRoles().length, 22);
   });
 
-  test('细拆后端到端等价 + 配图失败降级：组装边界正确、imageUrl 诚实为 null', async () => {
+  test('配图失败/无图 → 诚实 failed（change publish-image-required-or-fail：图文帖必须有图，绝不走必然 no_target 的纯文字路径）', async () => {
     // 经 PublishExecutor 落库记录反映 assembledContent（管道完成后 activeContext 清空、无法读 snapshot）。
-    const { orchestrator, insertedRecords } = buildFullPipeline(
+    const { orchestrator, insertedRecords, pushedEnvelopes } = buildFullPipeline(
       {
         scout: JSON.stringify({ shouldPublish: true, publishDirection: 'x', keyPoints: [], confidence: 0.8, reason: 'ok' }),
         creator: JSON.stringify({ title: 'T', content: '正文', tags: ['a', 'b'], tone: 'casual', style: {} }),
@@ -143,15 +146,16 @@ describe('PublishOrchestrator', () => {
         assembler: JSON.stringify({ qualityScore: 77 }),
         gatekeeper: JSON.stringify({ needsApproval: false, recommendedAction: 'auto_publish', reason: 'ok' }),
       },
-      { enableImage: false }, // 生图关闭 → imageDirective 空 → 封面无 → imageUrl 诚实 null（waitAll 五键仍全写、不死锁）
+      { enableImage: false }, // 生图关闭 → imageUrl 诚实 null → executor 提前诚实 failed（不发卡、不下发）
     );
     const result = await orchestrator.trigger(makeTriggerInput());
-    assert.equal(result.status, 'draft', '五键全写 → 组装触发 → 走到 executor draft');
-    assert.equal(insertedRecords.length, 1, 'assembledContent 经 executor 落库一条');
+    assert.equal(result.status, 'failed', '无图 → 图文帖无有效内容 → 诚实 failed（不再降级纯文字 draft）');
+    assert.equal(result.dispatched, false, '无图 → 不下发任何指令到边缘');
+    assert.equal(pushedEnvelopes.length, 0, '无图 → 不驱动 edge');
+    assert.equal(insertedRecords.length, 1, '诚实落库一条 failed 记录（审计）');
     const rec = insertedRecords[0];
+    assert.equal(rec.status, 'failed', '落库 status=failed');
     assert.equal(rec.imageUrl, null, '生图关闭 → 诚实 null，不伪造');
-    assert.equal(rec.qualityScore, 77, 'qualityScore 来自 QualityScorer');
-    assert.deepEqual(rec.tags, ['a', 'b'], 'finalTags 来自 createdContent');
     assert.equal(rec.content, '正文', 'finalContent 来自 cleanedContent');
   });
 

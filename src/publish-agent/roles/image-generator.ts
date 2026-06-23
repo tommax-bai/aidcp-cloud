@@ -4,6 +4,10 @@ import type { PipelineFields, ImagePlan, ImageDirective } from '../types.js';
 import type { PipelineContext } from '../pipeline-context.js';
 import type { ImageProvider } from '../image-provider.js';
 
+// 配图角色闸超时（env 可调，默认 200000=200s，change publish-image-required-or-fail）：
+// 须 > 万相轮询总预算（maxPollAttempts×5s，默认 34×5=170s），否则角色超时会先于轮询完成砍断生图 → 误判无图。
+const IMAGE_TIMEOUT_MS = Number(process.env.AIDCP_PUBLISH_IMAGE_TIMEOUT_MS ?? 200000);
+
 /**
  * ImageGenerator — 配图「执行」（A 阶段2，从 ImageDirector 拆出 Step 2）。
  * 按 ImagePlan 调通义万相生成图；不配图 / 生图失败 → 诚实回 imageUrl:null（绝不伪造 / 复用 URL）。
@@ -20,8 +24,8 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
   readonly config: RoleConfig = {
     name: 'ImageGenerator',
     watchKeys: ['imagePlan'],
-    // 须 > 万相轮询总预算（18×5s=90s）；否则角色超时会先于轮询完成砍断生图。
-    timeoutMs: 120000,
+    // 须 > 万相轮询总预算（默认 34×5s=170s）；否则角色超时会先于轮询完成砍断生图。env: AIDCP_PUBLISH_IMAGE_TIMEOUT_MS。
+    timeoutMs: IMAGE_TIMEOUT_MS,
     fallback: 'skip',
   };
   protected readonly outputKey = 'imageDirective' as const;
