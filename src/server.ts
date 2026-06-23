@@ -13,7 +13,7 @@
  * 运行：npm start
  */
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, unlink } from 'node:fs/promises';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { QwenClient, DEFAULT_BASE_URL as QWEN_BASE_URL, type ChatLlmClient } from './llm/index.js';
 import { SimplePlanner } from './planner/index.js';
@@ -291,6 +291,8 @@ async function main(): Promise<void> {
   const wanxiangClient = new WanxiangClient({
     apiKey: readEnvString('WANXIANG_API_KEY') ?? dashscopeApiKey,
     getModel: () => modelConfigStore.getCached().imageModel,
+    // 慢图容忍：轮询次数 env 可调（默认 18×5s=90s，零回归）；调大可减少「生图超时降级纯文字」拖垮整帖。
+    maxPollAttempts: Number(process.env.AIDCP_WANXIANG_MAX_POLL ?? 18),
   });
 
   // 发布编排器（PublishOrchestrator）。超时须容纳 executor 的人审等待窗口（默认 240s）+ 指令序列，故放大到 360s。
@@ -645,6 +647,23 @@ async function main(): Promise<void> {
         );
       }, everyMin * 60_000);
       console.log(`[aidcp-cloud] PublishScheduler 自动扳机已开启（每 ${everyMin} 分钟）`);
+    }
+    // Mock 触发（仅 AIDCP_MOCK_PUBLISH=true；无飞书时驱动一次发帖，诊断/联调用）：
+    // 监视信号文件 → 等价飞书 /publish 的 triggerManual(forced)；文件触发后即删避免重复。
+    // 红线不旁路：发布前 AC-PUB 人审信号（/tmp/aidcp-publish-approve-<requestId>.json）仍铁定生效，未授权绝不发布。
+    if (readEnvString('AIDCP_MOCK_PUBLISH') === 'true') {
+      const triggerFile = '/tmp/aidcp-mock-publish-trigger';
+      setInterval(async () => {
+        try {
+          await readFile(triggerFile, 'utf8');
+        } catch {
+          return; // 文件不存在 → 不触发
+        }
+        await unlink(triggerFile).catch(() => {});
+        console.log('[aidcp-cloud] MOCK publish 触发命中 → triggerManual');
+        publishScheduler!.triggerManual().catch((e) => console.warn('[aidcp-cloud] MOCK triggerManual err:', e));
+      }, 3000);
+      console.log('[aidcp-cloud] MOCK publish 触发已开启（touch /tmp/aidcp-mock-publish-trigger 触发一次）');
     }
   } else {
     console.warn('[aidcp-cloud] PublishScheduler 未建（ConceptStore/LikedNoteStore 不可用），发帖触发不可用');
