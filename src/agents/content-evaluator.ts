@@ -138,6 +138,11 @@ export class ContentEvaluator extends BaseRole {
 
   // ─── Prompt 构建 ───────────────────────────────────────────
 
+  /** 只读预览（change role-prompt-visibility）：用最小示例数据 + 真实人设渲染真实 prompt，仅供后台查看；不改 buildPrompt 逻辑。 */
+  previewPrompt(): string {
+    return this.buildPrompt([{ index: 0, title: '<示例卡片标题>', author: '<示例作者>', likeCount: 0, collectCount: 0, isVideo: false }], 'feed');
+  }
+
   private buildPrompt(cards: VisibleCard[], pageType: string): string {
     const { identity, interests } = this.soul;
     const interestsStr = [...interests.primary, ...interests.secondary].join('、');

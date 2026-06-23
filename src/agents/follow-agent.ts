@@ -102,6 +102,11 @@ export class FollowAgent extends BaseRole {
 
   // ─── Prompt 构建 ───────────────────────────────────────────
 
+  /** 只读预览（change role-prompt-visibility）：用最小示例数据 + 真实人设渲染真实 prompt，仅供后台查看；不改 buildPrompt 逻辑。 */
+  previewPrompt(): string {
+    return this.buildPrompt({ authorId: '<示例authorId>', sourcePageType: 'feed', postsCount: 0, followersCount: 0, likesCollects: 0, extracted: true, ts: 0 }, 1);
+  }
+
   private buildPrompt(profile: ProfileBrowsedPayload, remaining: number): string {
     const { identity, interests } = this.soul;
     const interestsStr = [...interests.primary, ...interests.secondary].join('、');

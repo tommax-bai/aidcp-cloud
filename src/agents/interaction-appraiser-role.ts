@@ -109,6 +109,11 @@ export class InteractionAppraiserRole extends BaseRole {
 
   // ─── Prompt 构建 ───────────────────────────────────────────
 
+  /** 只读预览（change role-prompt-visibility）：用最小示例数据 + 真实人设渲染真实 prompt，仅供后台查看；不改 buildPrompt 逻辑。 */
+  previewPrompt(): string {
+    return this.buildPrompt({ noteId: '<示例noteId>', title: '<示例标题>', content: '<示例正文，运行时为真实笔记内容>', author: '<示例作者>', likeCount: 0, collectCount: 0 }, { likes: 1, collects: 1 });
+  }
+
   private buildPrompt(note: NoteData, budget: { likes: number; collects: number }): string {
     const { identity, interests, behavior_guidelines: bg } = this.soul;
     const collectionPrinciple = bg?.collection_principle ?? '只有会反复参考、能直接落地复用的硬核内容才收藏，稀有谨慎';

@@ -175,6 +175,12 @@ export class RoleDispatcher {
   private sessionStartedAt: number;
   private readonly maxDurationMs: number;
   private roles: BaseRole[] = [];
+
+  /** 只读暴露已注册角色实例（change role-prompt-visibility，仅供后台 prompt 预览借读；不改分发逻辑）。 */
+  getRoles(): readonly BaseRole[] {
+    return this.roles;
+  }
+
   private contentEvaluator!: ContentEvaluator;
   private commandUnsubscribers: (() => void)[] = [];
 

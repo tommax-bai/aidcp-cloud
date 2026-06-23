@@ -65,6 +65,11 @@ export interface PanelDeps {
    * 白名单制：只暴露含文本角色的分类；写非乐观回真态；无效模型名探活不过诚实拒绝绝不落库。
    */
   categoryConfig?: PanelCategoryConfig;
+  /**
+   * 角色 prompt 只读预览（change role-prompt-visibility）。未注入则 `/api/roles/:id/prompt` 返回 503。
+   * 纯只读：无任何写路径；单角色渲染失败优雅降级 `available:false`，绝不崩、绝不连累闭环。
+   */
+  rolePromptPreview?: PanelRolePromptPreview;
 }
 
 /** 凭据视图（永不含明文）。source：db=库内加密凭据 / env=回退环境变量 / none=未配置。 */
@@ -184,6 +189,23 @@ export interface PanelCategoryConfig {
   getCatalog(): CategoryConfigCatalogView;
   /** 写某分类默认模型（null/'' = 清除覆盖回落全局）。探活不过以 {ok:false} 诚实可辨，绝不落库。写后回真态视图。 */
   setCategoryConfig(categoryId: string, model: string | null, updatedBy: string): Promise<CategoryConfigSetResult>;
+}
+
+// ── 角色 prompt 只读预览（change role-prompt-visibility）──────────────────────────
+
+/** GET /api/roles/:roleId/prompt 形状。available=false 时 prompt=null 且 note 说明原因。 */
+export interface RolePromptView {
+  roleId: string;
+  /** 忠实渲染的 prompt（示例数据 + 真实人设）；不可预览时为 null。 */
+  prompt: string | null;
+  available: boolean;
+  /** 占位说明 / 不可预览原因（诚实文案）。 */
+  note: string;
+}
+
+export interface PanelRolePromptPreview {
+  /** 取某角色 prompt 的只读预览（纯读，无写）。 */
+  get(roleId: string): RolePromptView;
 }
 
 export interface PanelConfig {

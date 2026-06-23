@@ -104,6 +104,14 @@ ${content}`;
     return raw.trim().replace(/^["'“”『「]+|["'“”』」]+$/g, '').trim() || content;
   }
 
+  /** 只读预览（change role-prompt-visibility）：复刻 rewrite（去 AI 味主路径）真实模板 + 示例数据，仅供后台查看；不改 rewrite/rewriteAwayFrom 逻辑。 */
+  previewPrompt(): string {
+    const content = '<示例评论正文，运行时为待改写评论>';
+    const flagged = ['<命中套话示例>'];
+    return `下面这条评论有 AI 腔/套话（命中：${flagged.join('、')}）。把它改写成更像真人随手留言的口吻，保持原意与长度、保持贴题，去掉套话与过量感叹号，不要出现 @ 与话题标签。只输出改写后的评论本身：
+${content}`;
+  }
+
   private async rewrite(content: string, flagged: string[]): Promise<string> {
     const prompt = `下面这条评论有 AI 腔/套话（命中：${flagged.join('、')}）。把它改写成更像真人随手留言的口吻，保持原意与长度、保持贴题，去掉套话与过量感叹号，不要出现 @ 与话题标签。只输出改写后的评论本身：
 ${content}`;

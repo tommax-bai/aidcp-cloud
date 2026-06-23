@@ -19,6 +19,7 @@ import type { PanelDeps, PanelConfig, PanelHandle } from './types.js';
 import { startPanelWs, type PanelWsHandle } from './panel-ws.js';
 import type { PublishApprovalPayload } from '../feishu/index.js';
 import type { RiskSignalKind, RiskQuotaLevel } from '../risk/index.js';
+import { isKnownRole } from '../config/role-catalog.js';
 
 /** 登录/写体很小，限制请求体大小防滥用。 */
 const MAX_BODY_BYTES = 16 * 1024;
@@ -454,6 +455,22 @@ function createRequestHandler(
         return;
       }
       sendJson(res, 200, result.view);
+      return;
+    }
+
+    // ── 角色 prompt 只读预览（change role-prompt-visibility）──────────────────
+    // 纯只读，无写路径；未知角色 404；非文本/无预览/渲染失败 → 200 + available:false 诚实标注。
+    if (method === 'GET' && url.startsWith('/api/roles/') && url.endsWith('/prompt')) {
+      if (!deps.rolePromptPreview) {
+        sendJson(res, 503, { error: 'role_prompt_preview_unavailable' });
+        return;
+      }
+      const roleId = decodeURIComponent(url.slice('/api/roles/'.length, -'/prompt'.length));
+      if (!isKnownRole(roleId)) {
+        sendJson(res, 404, { error: 'unknown_role' });
+        return;
+      }
+      sendJson(res, 200, deps.rolePromptPreview.get(roleId));
       return;
     }
 

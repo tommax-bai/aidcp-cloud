@@ -104,6 +104,11 @@ export class CommentReviewer extends BaseRole {
 
   // ─── Prompt 构建 / 解析 ────────────────────────────────────
 
+  /** 只读预览（change role-prompt-visibility）：用最小示例数据 + 真实人设渲染真实 prompt，仅供后台查看；不改 buildPrompt 逻辑。 */
+  previewPrompt(): string {
+    return this.buildPrompt({ noteId: '<示例noteId>', title: '<示例标题>', content: '<示例正文，运行时为真实笔记内容>', author: '<示例作者>', likeCount: 0, collectCount: 0 });
+  }
+
   private buildPrompt(note: NoteData): string {
     const { identity, interests } = this.soul;
     const interestsStr = [...interests.primary, ...interests.secondary].join('、');

@@ -146,6 +146,11 @@ export class SearchEvaluator extends BaseRole {
 
   // ─── Prompt 构建 ───────────────────────────────────────────
 
+  /** 只读预览（change role-prompt-visibility）：用最小示例数据 + 真实人设渲染真实 prompt，仅供后台查看；不改 buildPrompt 逻辑。 */
+  previewPrompt(): string {
+    return this.buildPrompt({ consecutiveScrolls: 3, currentPageType: 'feed', ts: 0 }, ['<示例候选关键词>']);
+  }
+
   private buildPrompt(payload: SearchNeededPayload, availableKeywords: string[]): string {
     const { identity, interests } = this.soul;
     const allInterests = [...interests.primary, ...interests.secondary];

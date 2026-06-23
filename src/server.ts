@@ -85,6 +85,7 @@ import { createRoleConfigPanel } from './config/role-config-facade.js';
 import { CategoryConfigStore } from './config/category-config-store.js';
 import { createCategoryConfigPanel } from './config/category-config-facade.js';
 import { categoryOf } from './config/role-catalog.js';
+import { createRolePromptProvider } from './config/role-prompt-preview.js';
 import { CredentialStore } from './config/credential-store.js';
 import type { ModelConfigView } from './panel/types.js';
 
@@ -726,6 +727,8 @@ async function main(): Promise<void> {
     getGlobalTextModel: () => modelConfigStore.getCached().textModel,
     probeModel,
   });
+  // 角色 prompt 只读预览（change role-prompt-visibility）：借 RoleDispatcher 已注册的浏览角色实例渲染真实 prompt。
+  const rolePromptProvider = createRolePromptProvider(() => roleDispatcher.getRoles());
 
   // ── 面板 API 层（管理后台后端，进程内、独立端口、JWT）──────────────────────
   // 未设置 AIDCP_PANEL_PORT 则禁用（默认不开新端口）；启动失败非致命，绝不连累边-云闭环。
@@ -797,6 +800,8 @@ async function main(): Promise<void> {
           roleConfig: roleConfigPanel,
           // 分类级模型默认配置（change role-model-category-config，item 5/6）。白名单 + 探活 + 写非乐观回真态。
           categoryConfig: categoryConfigPanel,
+          // 角色 prompt 只读预览（change role-prompt-visibility）。纯读，无写路径。
+          rolePromptPreview: rolePromptProvider,
         },
         {
           port: panelPort,
