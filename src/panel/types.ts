@@ -60,6 +60,11 @@ export interface PanelDeps {
    * 白名单制：只暴露现役 + 真调大模型的角色；写非乐观回真态；无效模型名探活不过诚实拒绝绝不落库。
    */
   roleConfig?: PanelRoleConfig;
+  /**
+   * 分类级模型默认配置（change role-model-category-config，item 5/6）。未注入则 /api/categories* 返回 503。
+   * 白名单制：只暴露含文本角色的分类；写非乐观回真态；无效模型名探活不过诚实拒绝绝不落库。
+   */
+  categoryConfig?: PanelCategoryConfig;
 }
 
 /** 凭据视图（永不含明文）。source：db=库内加密凭据 / env=回退环境变量 / none=未配置。 */
@@ -95,15 +100,22 @@ export interface PanelModelConfig {
 
 // ── 角色级配置（change console-role-model-config）──────────────────────────────
 
+/** 生效模型来源（change role-model-category-config）：覆盖 / 继承分类 / 继承默认 / 图像全局。 */
+export type ModelEffectiveSource = 'override' | 'category' | 'default' | 'image';
+
 /** 单角色目录行 + 生效值（GET /api/roles 形状）。 */
 export interface RoleConfigRowView {
   roleId: string;
   displayName: string;
   group: 'browse' | 'publish';
+  /** 所属分类（稳定 key，与 category_config.category_id 一致）。 */
+  category: string;
   llmKind: 'text' | 'image' | 'none';
   tunableTemperature: boolean;
-  /** 当前生效模型（文本类=覆盖或全局 textModel；图像类=全局 imageModel）。 */
+  /** 当前生效模型（文本类=覆盖/分类默认/全局 textModel；图像类=全局 imageModel）。 */
   effectiveModel: string;
+  /** 生效模型来源：override=按角色覆盖 / category=继承分类默认 / default=继承全局默认 / image=图像全局。 */
+  effectiveSource: ModelEffectiveSource;
   /** 是否存在按角色模型覆盖。 */
   modelOverridden: boolean;
   /** 温度覆盖（null=用代码默认）。 */
@@ -139,6 +151,39 @@ export interface PanelRoleConfig {
   getCatalog(): RoleConfigCatalogView;
   /** 按角色写模型/温度。校验+探活不过以 {ok:false} 诚实可辨，绝不落库。写后回真态视图。 */
   setRoleConfig(roleId: string, patch: RoleConfigPatch, updatedBy: string): Promise<RoleConfigSetResult>;
+}
+
+// ── 分类级模型默认（change role-model-category-config，item 5/6）──────────────────
+
+/** 单分类目录行 + 分类默认生效值（GET /api/categories 形状）。 */
+export interface CategoryConfigRowView {
+  categoryId: string;
+  displayName: string;
+  order: number;
+  /** 该分类默认模型的生效值：分类覆盖则用覆盖、否则回落全局「默认模型」(textModel)。 */
+  effectiveModel: string;
+  /** 是否存在分类默认覆盖（false=继承全局默认模型）。 */
+  modelOverridden: boolean;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export interface CategoryConfigCatalogView {
+  categories: CategoryConfigRowView[];
+}
+
+export type CategoryConfigSetResult =
+  | { ok: true; view: CategoryConfigCatalogView }
+  | {
+      ok: false;
+      reason: 'unknown_category' | 'category_not_configurable' | 'model_invalid';
+    };
+
+export interface PanelCategoryConfig {
+  /** 分类目录 + 分类默认生效值（白名单制，只含可设默认的分类）。 */
+  getCatalog(): CategoryConfigCatalogView;
+  /** 写某分类默认模型（null/'' = 清除覆盖回落全局）。探活不过以 {ok:false} 诚实可辨，绝不落库。写后回真态视图。 */
+  setCategoryConfig(categoryId: string, model: string | null, updatedBy: string): Promise<CategoryConfigSetResult>;
 }
 
 export interface PanelConfig {

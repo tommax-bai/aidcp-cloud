@@ -82,6 +82,9 @@ import { PgAlertStore } from './alerts/index.js';
 import { ModelConfigStore } from './config/model-config-store.js';
 import { RoleConfigStore } from './config/role-config-store.js';
 import { createRoleConfigPanel } from './config/role-config-facade.js';
+import { CategoryConfigStore } from './config/category-config-store.js';
+import { createCategoryConfigPanel } from './config/category-config-facade.js';
+import { categoryOf } from './config/role-catalog.js';
 import { CredentialStore } from './config/credential-store.js';
 import type { ModelConfigView } from './panel/types.js';
 
@@ -133,25 +136,41 @@ async function main(): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
+  // 分类级模型默认（change role-model-category-config，item 5/6）。缺/空/异常一律返「无覆盖」，绝不 brick。
+  const categoryConfigStore = new CategoryConfigStore({
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
   try {
     await modelConfigStore.init();
     await credentialStore.init();
     await roleConfigStore.init();
-    console.log('[aidcp-cloud] 模型配置 + 凭据 + 角色配置存储已就绪（model_config / provider_credentials / role_config）');
+    await categoryConfigStore.init();
+    console.log('[aidcp-cloud] 模型配置 + 凭据 + 角色配置 + 分类默认存储已就绪（model_config / provider_credentials / role_config / category_config）');
   } catch (err) {
-    console.warn('[aidcp-cloud] 模型/凭据/角色配置存储初始化失败（回退代码默认模型 + env 密钥）:', (err as Error).message);
+    console.warn('[aidcp-cloud] 模型/凭据/角色/分类配置存储初始化失败（回退代码默认模型 + env 密钥；解析退化两层）:', (err as Error).message);
   }
   // 启动期解密 DashScope 密钥（库内优先、回退 env）；明文仅用于构造客户端，绝不日志化、绝不回前端。
   const dashscopeApiKey =
     (await credentialStore.getSecretForRuntime('dashscope', 'dashscope_api_key').catch(() => null)) ??
     readEnvString('DASHSCOPE_API_KEY');
 
-  // 按角色解析模型/温度（change console-role-model-config）：
-  // 有覆盖用覆盖，否则回落全局 textModel / 构造默认温度。role 缺省（planner/select/探活）→ 走全局。
+  // 按角色解析模型（change role-model-category-config）：四层回落
+  //   per-role 覆盖 → 分类默认 → 全局 textModel（「默认模型」）→ 代码默认（store 缺省）。
+  // 逐层缺/空向下回落，任一层不可达都不 brick。role 缺省（planner/select/探活）→ 直接走全局，零回归。
+  // 账号维度（item 9）：分类存储读路径恒 account_id IS NULL，本期不接 accountId。
   const resolveModelForRole = (role?: string): string => {
-    const override = role ? roleConfigStore.getForRole(role).model : null;
-    return override?.trim() || modelConfigStore.getCached().textModel;
+    const roleOverride = role ? roleConfigStore.getForRole(role).model : null;
+    if (roleOverride?.trim()) return roleOverride.trim(); // 2. per-role 覆盖
+    const catId = role ? categoryOf(role) : undefined;
+    const catDefault = catId ? categoryConfigStore.getForCategory(catId).model : null;
+    if (catDefault?.trim()) return catDefault.trim(); // 3. 分类默认
+    return modelConfigStore.getCached().textModel; // 4. 全局默认（store 缺省回 5. 代码默认）
   };
+  // 温度本期不引入分类层（温度只对少数生成/改写角色开放，按角色配已足够，YAGNI）。保持两层。
   const resolveTempForRole = (role?: string): number | undefined => {
     const t = role ? roleConfigStore.getForRole(role).temperature : null;
     return t ?? undefined;
@@ -670,15 +689,23 @@ async function main(): Promise<void> {
     };
   };
 
+  // 显式 model 覆盖 + 短超时；探活失败抛错 → facade 报 model_invalid，绝不落库。
+  const probeModel = async (model: string): Promise<void> => {
+    await llm.chat([{ role: 'user', content: 'ping' }], { model, timeoutMs: 8000 });
+  };
   // 角色配置面板外观（change console-role-model-config）：白名单 + 生效值视图 + 写校验 + 保存前探活。
   const roleConfigPanel = createRoleConfigPanel({
     store: roleConfigStore,
     getGlobalTextModel: () => modelConfigStore.getCached().textModel,
     getGlobalImageModel: () => modelConfigStore.getCached().imageModel,
-    probeModel: async (model) => {
-      // 显式 model 覆盖 + 短超时；探活失败抛错 → facade 报 model_invalid，绝不落库。
-      await llm.chat([{ role: 'user', content: 'ping' }], { model, timeoutMs: 8000 });
-    },
+    getCategoryModel: (categoryId) => categoryConfigStore.getForCategory(categoryId).model,
+    probeModel,
+  });
+  // 分类默认模型面板外观（change role-model-category-config）：白名单 + 生效值视图 + 写校验 + 保存前探活。
+  const categoryConfigPanel = createCategoryConfigPanel({
+    store: categoryConfigStore,
+    getGlobalTextModel: () => modelConfigStore.getCached().textModel,
+    probeModel,
   });
 
   // ── 面板 API 层（管理后台后端，进程内、独立端口、JWT）──────────────────────
@@ -749,6 +776,8 @@ async function main(): Promise<void> {
           },
           // 角色级模型/温度配置（change console-role-model-config）。白名单 + 探活 + 写非乐观回真态。
           roleConfig: roleConfigPanel,
+          // 分类级模型默认配置（change role-model-category-config，item 5/6）。白名单 + 探活 + 写非乐观回真态。
+          categoryConfig: categoryConfigPanel,
         },
         {
           port: panelPort,

@@ -414,6 +414,49 @@ function createRequestHandler(
       return;
     }
 
+    // ── 分类级模型默认配置（change role-model-category-config，item 5/6）──────────
+    // reserved-order append 链首 C；白名单制；写非乐观回真态；非空模型名探活不过诚实 400 model_invalid，绝不落库。
+    if (method === 'GET' && url === '/api/categories') {
+      if (!deps.categoryConfig) {
+        sendJson(res, 503, { error: 'category_config_unavailable' });
+        return;
+      }
+      sendJson(res, 200, deps.categoryConfig.getCatalog());
+      return;
+    }
+    if (method === 'PUT' && url.startsWith('/api/categories/') && url.endsWith('/config')) {
+      if (!deps.categoryConfig) {
+        sendJson(res, 503, { error: 'category_config_unavailable' });
+        return;
+      }
+      const categoryId = decodeURIComponent(url.slice('/api/categories/'.length, -'/config'.length));
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { model } = (body ?? {}) as { model?: unknown };
+      // model 必须存在，且为 string 或 null（null/'' = 清除覆盖回落）。
+      if (model !== null && typeof model !== 'string') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'model_type' });
+        return;
+      }
+      const result = await deps.categoryConfig.setCategoryConfig(
+        categoryId,
+        model as string | null,
+        verified.payload.sub,
+      );
+      if (!result.ok) {
+        // unknown_category→404；其余（不可配 / 探活失败）→400（绝不落库、绝不假成功）
+        sendJson(res, result.reason === 'unknown_category' ? 404 : 400, { error: result.reason });
+        return;
+      }
+      sendJson(res, 200, result.view);
+      return;
+    }
+
     sendJson(res, 404, { error: 'not_found' });
   }
 

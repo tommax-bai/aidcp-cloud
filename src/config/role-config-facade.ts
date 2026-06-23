@@ -18,10 +18,12 @@ import type {
 
 export interface RoleConfigFacadeDeps {
   store: RoleConfigStore;
-  /** 当前全局文本模型名（回落用）。 */
+  /** 当前全局文本模型名（回落用，即「默认模型」）。 */
   getGlobalTextModel: () => string;
   /** 当前全局图片模型名（图像角色生效值展示用）。 */
   getGlobalImageModel: () => string;
+  /** 某分类的默认模型覆盖（null=分类无覆盖）；用于计算「继承分类」生效来源。 */
+  getCategoryModel: (categoryId: string) => string | null;
   /** 保存前探活：模型不可用时抛错（不抛 = 可用）。 */
   probeModel: (model: string) => Promise<void>;
 }
@@ -34,13 +36,32 @@ export function createRoleConfigPanel(deps: RoleConfigFacadeDeps): PanelRoleConf
       roles: ROLE_CATALOG.map((item) => {
         const row = deps.store.getAll().get(item.roleId);
         const ovModel = row?.model?.trim() || null;
+        // 生效模型 + 来源：四层回落（覆盖 → 分类默认 → 全局默认 → 代码默认）；图像类走全局 imageModel。
+        const catModel = item.llmKind === 'text' ? deps.getCategoryModel(item.category) : null;
+        let effectiveModel: string;
+        let effectiveSource: 'override' | 'category' | 'default' | 'image';
+        if (item.llmKind === 'image') {
+          effectiveModel = imageModel;
+          effectiveSource = 'image';
+        } else if (ovModel) {
+          effectiveModel = ovModel;
+          effectiveSource = 'override';
+        } else if (catModel) {
+          effectiveModel = catModel;
+          effectiveSource = 'category';
+        } else {
+          effectiveModel = textModel;
+          effectiveSource = 'default';
+        }
         return {
           roleId: item.roleId,
           displayName: item.displayName,
           group: item.group,
+          category: item.category,
           llmKind: item.llmKind,
           tunableTemperature: item.tunableTemperature,
-          effectiveModel: item.llmKind === 'image' ? imageModel : ovModel || textModel,
+          effectiveModel,
+          effectiveSource,
           modelOverridden: item.llmKind === 'text' && !!ovModel,
           temperatureOverride: row?.temperature ?? null,
           updatedAt: row?.updatedAt ?? null,

@@ -23,13 +23,14 @@ function fakeStore() {
   } as unknown as RoleConfigStore;
 }
 
-function makePanel(probeOk = true) {
+function makePanel(probeOk = true, categoryModels: Record<string, string | null> = {}) {
   const store = fakeStore();
   const probed: string[] = [];
   const panel = createRoleConfigPanel({
     store,
     getGlobalTextModel: () => 'qwen-turbo',
     getGlobalImageModel: () => 'wan2.7-image-pro',
+    getCategoryModel: (catId) => categoryModels[catId] ?? null,
     probeModel: async (m) => {
       probed.push(m);
       if (!probeOk) throw new Error('invalid');
@@ -38,7 +39,7 @@ function makePanel(probeOk = true) {
   return { panel, store, probed: () => probed };
 }
 
-test('getCatalog：白名单 + 区分 text/image + 生效值回落全局', () => {
+test('getCatalog：白名单 + 区分 text/image + 生效值回落全局 + 分类/来源标注', () => {
   const { panel } = makePanel();
   const view = panel.getCatalog();
   assert.ok(view.roles.length >= 16);
@@ -46,11 +47,27 @@ test('getCatalog：白名单 + 区分 text/image + 生效值回落全局', () =>
   assert.equal(ev.llmKind, 'text');
   assert.equal(ev.effectiveModel, 'qwen-turbo');
   assert.equal(ev.tunableTemperature, false);
+  assert.equal(ev.category, 'browse_judge'); // 分类标注
+  assert.equal(ev.effectiveSource, 'default'); // 无覆盖、无分类默认 → 继承全局默认
   const img = view.roles.find((r) => r.roleId === 'publish:ImageGenerator')!;
   assert.equal(img.llmKind, 'image');
   assert.equal(img.effectiveModel, 'wan2.7-image-pro');
+  assert.equal(img.effectiveSource, 'image'); // 图像走全局 imageModel
   // 纯规则/遗留角色不出现
   assert.equal(view.roles.find((r) => r.roleId === 'browse:feed_scroller'), undefined);
+});
+
+test('生效来源：分类有默认 → 同类无覆盖角色 effectiveSource=category；有覆盖 → override 压过分类', async () => {
+  // browse_judge 分类设默认 qwen-plus；content_evaluator 无 per-role 覆盖 → 继承分类
+  const { panel } = makePanel(true, { browse_judge: 'qwen-plus' });
+  let ev = panel.getCatalog().roles.find((r) => r.roleId === 'browse:content_evaluator')!;
+  assert.equal(ev.effectiveModel, 'qwen-plus');
+  assert.equal(ev.effectiveSource, 'category');
+  // 给该角色设 per-role 覆盖后，override 压过分类默认
+  await panel.setRoleConfig('browse:content_evaluator', { model: 'qwen-max' }, 'a');
+  ev = panel.getCatalog().roles.find((r) => r.roleId === 'browse:content_evaluator')!;
+  assert.equal(ev.effectiveModel, 'qwen-max');
+  assert.equal(ev.effectiveSource, 'override');
 });
 
 test('未知角色 → unknown_role，绝不落库', async () => {
