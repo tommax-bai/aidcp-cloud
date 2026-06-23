@@ -40,9 +40,16 @@ export class NotificationClassifier extends BaseRole {
     if (!this.ctx.excursionActive) return;
     const epoch = this.ctx.excursionEpoch ?? 0;
     try {
-      const worthy = (items ?? []).filter(
-        (it) => it && typeof it.content === 'string' && it.content.trim().length > 0,
-      );
+      const worthy = (items ?? []).filter((it) => {
+        if (!it || typeof it.content !== 'string') return false;
+        const c = it.content.trim();
+        if (c.length === 0) return false; // 无正文（含边缘正文缺失诚实发空串的路径）
+        // 防御性过滤（NCQ-1 纵深）：边缘正文子选择器在 reds- 命名下漏掉时，旧码会回退整行 textContent → 飞书 blob。
+        // 边缘已改为正文缺失发空串，此处再拦两类残留：正文 == 用户名（错抓到名字）、正文是纯动作标签（无真实评论）。
+        if (it.fromUser && c === it.fromUser.trim()) return false;
+        if (/^(赞了你的(评论|笔记)|收藏了你的笔记|关注了你|回复了你的?(评论|笔记)?|点赞)$/.test(c)) return false;
+        return true;
+      });
       this.log(`分类：${worthy.length}/${(items ?? []).length} 条值得通知 epoch=${epoch}`);
       this.emit('notification.classified', { worthy, epoch, ts: Date.now() });
     } catch (err) {

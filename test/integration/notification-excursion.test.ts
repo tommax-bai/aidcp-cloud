@@ -19,7 +19,7 @@ import { NotificationTriage } from '../../src/agents/notification-triage.js';
 import { NotificationCommentBrowser } from '../../src/agents/notification-comment-browser.js';
 import { NotificationLikeBrowser } from '../../src/agents/notification-like-browser.js';
 import { NotificationClassifier } from '../../src/agents/notification-classifier.js';
-import { NotificationDeduper } from '../../src/agents/notification-deduper.js';
+import { NotificationDeduper, notificationItemKey, stripRelativeTime } from '../../src/agents/notification-deduper.js';
 import { NotificationNotifier } from '../../src/agents/notification-notifier.js';
 import { ExcursionResumer } from '../../src/agents/excursion-resumer.js';
 import type { Soul } from '../../src/soul/types.js';
@@ -139,6 +139,48 @@ describe('通知巡视 — 角色级不变量', () => {
     bus.emit('notification.items.arrived', { items, ts: Date.now() });
     assert.equal(classified.length, 1);
     assert.equal(classified[0].length, 2);
+  });
+
+  it('classifier(NCQ-1 纵深): 拒 正文==用户名 与 纯动作标签（边缘 blob 残留防御）', () => {
+    const bus = new EventBus(); const ctx = new SessionContext(); ctx.beginExcursion(1);
+    new NotificationClassifier(opts(bus), ctx).subscribe();
+    const classified: NotificationItem[][] = [];
+    bus.on('notification.classified', (p) => { classified.push(p.worthy); });
+    const items: NotificationItem[] = [
+      { kind: 'comment', fromUser: '阿强', content: '这条很实用' },     // 真评论 → 留
+      { kind: 'comment', fromUser: '阿强', content: '阿强' },           // 正文==用户名（错抓名字）→ 拒
+      { kind: 'comment', fromUser: '小美', content: '赞了你的笔记' },    // 纯动作标签无正文 → 拒
+    ];
+    bus.emit('notification.items.arrived', { items, ts: Date.now() });
+    assert.equal(classified[0].length, 1, '只留真评论');
+    assert.equal(classified[0][0].content, '这条很实用');
+  });
+
+  it('deduper(NCQ-3): 回退去重键剥相对时间 → 同条评论跨巡视时间漂移不重复通知', () => {
+    // itemKey 缺失时回退键含正文；正文带「N分钟前」会跨巡视漂移 → 旧码同条评论键变化 → 重复打扰。
+    const k1 = notificationItemKey({ kind: 'comment', fromUser: '阿强', content: '说得对 3分钟前' });
+    const k2 = notificationItemKey({ kind: 'comment', fromUser: '阿强', content: '说得对 8分钟前' });
+    assert.equal(k1, k2, '剥掉相对时间后同条评论键稳定');
+    assert.equal(stripRelativeTime('说得对 3分钟前'), '说得对');
+  });
+
+  it('deduper(NCQ-3 修正): 只剥尾部时间戳，正文内联数字/日期保留 → 不同评论不误折叠丢失', () => {
+    // 内联数字/日期绝不被剥（否则两条不同评论撞键 → 第二条当已通知静默丢失，lose-real-data 红线）。
+    assert.equal(stripRelativeTime('打折5-1活动'), '打折5-1活动');
+    assert.equal(stripRelativeTime('价格12-25元'), '价格12-25元');
+    assert.equal(stripRelativeTime('我3年前去过'), '我3年前去过');
+    assert.equal(stripRelativeTime('2024-01-01 发布的笔记'), '2024-01-01 发布的笔记');
+    const a = notificationItemKey({ kind: 'comment', fromUser: '阿强', content: '打折5-1活动' });
+    const b = notificationItemKey({ kind: 'comment', fromUser: '阿强', content: '打折6-1活动' });
+    assert.notEqual(a, b, '仅内联 token 不同的两条评论键必须不同（不折叠丢失）');
+  });
+
+  it('deduper(NB-5): itemKey 为 profile 链时不当主键 → 退化到 用户名|正文（防同人多评论折叠）', () => {
+    const a = notificationItemKey({ kind: 'comment', fromUser: '阿强', content: '第一条', itemKey: '/user/profile/u1' });
+    const b = notificationItemKey({ kind: 'comment', fromUser: '阿强', content: '第二条', itemKey: '/user/profile/u1' });
+    assert.notEqual(a, b, '同人两条评论即便 profile 链相同，键也必须不同（不被折叠丢失）');
+    // 真 per-comment permalink 则直接作主键
+    assert.equal(notificationItemKey({ kind: 'comment', fromUser: '阿强', content: 'x', itemKey: '/explore/note9#c1' }), '/explore/note9#c1');
   });
 
   it('deduper: 新项 → worthy；全部已通知 → all_seen + category_handled', () => {
