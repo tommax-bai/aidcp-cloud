@@ -178,6 +178,38 @@ function createRequestHandler(
       });
       return;
     }
+    // token 用量统计（change llm-token-usage-stats）：一端点返「表格行(按北京日×四维)」+「10 分钟曲线桶」。
+    // 纯只读；可选 from/to(epoch ms) + accountId/role/model 过滤；服务端默认窗(近24h)+硬上限(31天)。未注入则 503。
+    if (method === 'GET' && url === '/api/llm-usage') {
+      if (!deps.tokenUsage) {
+        sendJson(res, 503, { error: 'token_usage_unavailable' });
+        return;
+      }
+      const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+      const numOf = (k: string): number | undefined => {
+        const v = query.get(k);
+        if (v == null || v === '') return undefined;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : undefined;
+      };
+      const fromMs = numOf('from');
+      const toMs = numOf('to');
+      const accountId = query.get('accountId') ?? undefined;
+      const role = query.get('role') ?? undefined;
+      const model = query.get('model') ?? undefined;
+      sendJson(
+        res,
+        200,
+        await deps.tokenUsage.usage({
+          ...(fromMs !== undefined ? { fromMs } : {}),
+          ...(toMs !== undefined ? { toMs } : {}),
+          ...(accountId ? { accountId } : {}),
+          ...(role ? { role } : {}),
+          ...(model ? { model } : {}),
+        }),
+      );
+      return;
+    }
 
     // ── 写操作（task 4）：经拥有写的对象，绝不乐观假成功 ──────────────────
     if (method === 'POST' && url.startsWith('/api/publish/') && url.endsWith('/approve')) {

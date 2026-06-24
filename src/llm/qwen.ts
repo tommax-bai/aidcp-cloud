@@ -19,6 +19,12 @@
 export interface LlmCallOpts {
   /** 角色标识（如 `browse:content_evaluator` / `publish:ContentCreator`）；交给注入的解析器按角色取模型/温度。 */
   role?: string;
+  /**
+   * 账号标识（token 用量按账号归属用；change llm-token-usage-stats）。
+   * 现为单租户：不传即 recorder 端缺省 `'default'`。多账号内核落地后由其在并发安全处穿入真实账号
+   * （本流不在 RoleDispatcher 实时读共享 currentAccountId，见 change design D5）。
+   */
+  accountId?: string;
   /** 显式模型名覆盖（优先于按角色解析；用于保存前探活）。 */
   model?: string;
   /** 显式温度覆盖（优先于按角色解析）。 */
@@ -67,14 +73,28 @@ export interface QwenClientOptions {
   /** 注入 fetch（测试用），默认全局 fetch */
   fetchImpl?: typeof fetch;
   /**
-   * 调用可观测钩子（change console-role-model-config）：每次调用后回报 role / 生效 model / 耗时 / 成功与否。
-   * 只含元数据，MUST NOT 含密钥或提示词正文。供运营验证按角色改模型是否真生效、成本是否变化。
+   * 调用可观测钩子（change console-role-model-config；token 字段 change llm-token-usage-stats）：
+   * 每次调用后回报 role / 生效 model / 耗时 / 成功与否 / 账号 / token 用量。
+   * 只含元数据与 token 计数，MUST NOT 含密钥或提示词正文。供运营验证按角色改模型是否真生效、按账号/角色/模型统计 token 消耗。
+   * **token 与 ok 解耦（红线）**：`promptTokens/completionTokens/totalTokens` 取自响应体 `usage`，
+   * 即使 `ok=false`（如已返回 usage 但缺 content 判失败）也带真实已计费 token；真没拿到 usage 才为 undefined。
    */
-  onCall?: (info: { role?: string; model: string; ms: number; ok: boolean }) => void;
+  onCall?: (info: {
+    role?: string;
+    model: string;
+    ms: number;
+    ok: boolean;
+    accountId?: string;
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  }) => void;
 }
 
 interface ChatCompletionResponse {
   choices?: { message?: { content?: string } }[];
+  /** DashScope 兼容模式 token 用量（change llm-token-usage-stats）：早先被静默丢弃，现捡回交给记账。 */
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
   error?: { message?: string };
 }
 
@@ -90,7 +110,16 @@ export class QwenClient implements ChatLlmClient {
   private readonly temperature: number;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
-  private readonly onCall?: (info: { role?: string; model: string; ms: number; ok: boolean }) => void;
+  private readonly onCall?: (info: {
+    role?: string;
+    model: string;
+    ms: number;
+    ok: boolean;
+    accountId?: string;
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  }) => void;
 
   constructor(options: QwenClientOptions = {}) {
     this.apiKey = options.apiKey ?? process.env.DASHSCOPE_API_KEY ?? '';
@@ -124,6 +153,9 @@ export class QwenClient implements ChatLlmClient {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const startedAt = Date.now();
     let ok = false;
+    // token 用量（change llm-token-usage-stats）：声明于 try 外，使 finally 在失败路径也能看到。
+    // 红线：响应体一旦带 usage（prompt token 已计费）就如实带出，绝不因后续判失败而清零。
+    let usage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined;
     try {
       const res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
@@ -143,6 +175,8 @@ export class QwenClient implements ChatLlmClient {
         throw new Error(`Qwen HTTP ${res.status}: ${text.slice(0, 200)}`);
       }
       const data = (await res.json()) as ChatCompletionResponse;
+      // 早于「缺 content 抛错」捕获 usage：DashScope 兼容模式即使生成失败也常已计 prompt token。
+      usage = data.usage;
       if (data.error?.message) {
         throw new Error(`Qwen API 错误: ${data.error.message}`);
       }
@@ -154,7 +188,16 @@ export class QwenClient implements ChatLlmClient {
       return content;
     } finally {
       clearTimeout(timer);
-      this.onCall?.({ role: opts?.role, model, ms: Date.now() - startedAt, ok });
+      this.onCall?.({
+        role: opts?.role,
+        model,
+        ms: Date.now() - startedAt,
+        ok,
+        accountId: opts?.accountId,
+        promptTokens: usage?.prompt_tokens,
+        completionTokens: usage?.completion_tokens,
+        totalTokens: usage?.total_tokens,
+      });
     }
   }
 }

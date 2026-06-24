@@ -16,6 +16,7 @@
 import { readFile, writeFile, unlink } from 'node:fs/promises';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { QwenClient, DEFAULT_BASE_URL as QWEN_BASE_URL, type ChatLlmClient } from './llm/index.js';
+import { TokenUsageStore } from './metrics/token-usage-store.js';
 import { SimplePlanner } from './planner/index.js';
 import { PgAnchorCache, BotChatStore, ConceptStore, LikedNoteStore, ValuableCommentStore } from './cache/index.js';
 import {
@@ -191,12 +192,41 @@ async function main(): Promise<void> {
     const t = role ? roleConfigStore.getForRole(role).temperature : null;
     return t ?? undefined;
   };
+  // token 用量记账（change llm-token-usage-stats）：出口 onCall 钩子只做纯内存累加，
+  // 定时 flush 到 llm_token_usage 预聚合表（专用池隔离热路径）。须早于接受 LLM 调用/探活建好。
+  const tokenUsageStore = new TokenUsageStore();
+  try {
+    await tokenUsageStore.init();
+    console.log('[aidcp-cloud] token 用量记账已就绪（llm_token_usage，按账号/角色/模型/10分钟桶预聚合）');
+  } catch (err) {
+    console.warn('[aidcp-cloud] token 用量记账初始化失败（用量将不落库，绝不影响 LLM 调用）:', (err as Error).message);
+  }
+  // 退出前 flush 末窗（有界 3s，防 PG 不可达时 close 挂住退出）。
+  const flushTokenUsageOnExit = (sig: string): void => {
+    console.log(`[aidcp-cloud] 收到 ${sig}，flush token 用量后退出`);
+    void Promise.race([
+      tokenUsageStore.close().catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 3000)),
+    ]).finally(() => process.exit(0));
+  };
+  process.once('SIGTERM', () => flushTokenUsageOnExit('SIGTERM'));
+  process.once('SIGINT', () => flushTokenUsageOnExit('SIGINT'));
+
   const llm = new QwenClient({
     apiKey: dashscopeApiKey,
     getModel: resolveModelForRole,
     getTemperature: resolveTempForRole,
-    onCall: ({ role, model, ms, ok }) =>
-      console.log(`[llm] role=${role ?? '-'} model=${model} ms=${ms} ok=${ok}`),
+    // 保留原 console.log（加 tokens 维度）；记账 add() 受 try/catch 双保险，绝不抛进/拖垮 LLM 调用路径。
+    onCall: (info) => {
+      console.log(
+        `[llm] role=${info.role ?? '-'} model=${info.model} ms=${info.ms} ok=${info.ok} tokens=${info.totalTokens ?? 0}`,
+      );
+      try {
+        tokenUsageStore.add(info);
+      } catch {
+        /* metrics never breaks llm */
+      }
+    },
   });
   // 把共享文本客户端按角色绑定成 thin wrapper（发布侧用；角色内部代码零改动）。
   const roleLlm = (roleId: string): ChatLlmClient => ({
@@ -754,8 +784,9 @@ async function main(): Promise<void> {
   };
 
   // 显式 model 覆盖 + 短超时；探活失败抛错 → facade 报 model_invalid，绝不落库。
+  // role 'system:model_probe'：探活真实消耗 token，如实记、可区分、不静默丢（change llm-token-usage-stats）。
   const probeModel = async (model: string): Promise<void> => {
-    await llm.chat([{ role: 'user', content: 'ping' }], { model, timeoutMs: 8000 });
+    await llm.chat([{ role: 'user', content: 'ping' }], { model, timeoutMs: 8000, role: 'system:model_probe' });
   };
   // 角色配置面板外观（change console-role-model-config）：白名单 + 生效值视图 + 写校验 + 保存前探活。
   const roleConfigPanel = createRoleConfigPanel({
@@ -852,6 +883,8 @@ async function main(): Promise<void> {
           rolePromptPreview: rolePromptProvider,
           // 账号人设配置（change account-persona-config，stream F）。按账号编辑 + soul 校验 + 写非乐观回真态。
           persona: personaPanel,
+          // token 用量统计（change llm-token-usage-stats）。同一记账 store 实例（共享专用池），纯只读查询。
+          tokenUsage: tokenUsageStore,
         },
         {
           port: panelPort,

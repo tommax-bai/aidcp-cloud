@@ -13,6 +13,7 @@ import type { EventBus } from '../event-bus/index.js';
 import type { PanelUser } from './auth.js';
 import type { PanelStoreReader } from './panel-store.js';
 import type { PublishApprovalPayload, ApprovalWriteResult } from '../feishu/index.js';
+import type { LlmUsageQuery, LlmUsagePayload } from '../metrics/token-usage-store.js';
 
 export interface PanelDeps {
   riskController: RiskController;
@@ -80,6 +81,11 @@ export interface PanelDeps {
    * 写非乐观回真态；非法数字整块拒（invalid_value），绝不部分落库、绝不假成功；不碰风控状态单写路径。
    */
   quotaConfig?: PanelQuotaConfig;
+  /**
+   * token 用量只读查询（change llm-token-usage-stats）。未注入则 /api/llm-usage 返回 503。
+   * 纯只读预聚合表（按账号/角色/模型/10 分钟桶）；缺表回落空；不写、不碰风控/发布/edge。
+   */
+  tokenUsage?: { usage(query: LlmUsageQuery): Promise<LlmUsagePayload> };
 }
 
 /** 凭据视图（永不含明文）。source：db=库内加密凭据 / env=回退环境变量 / none=未配置。 */
