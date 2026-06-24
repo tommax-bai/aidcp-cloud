@@ -4,8 +4,9 @@
  * 职责：消费多种"需要返回"的事件，清理会话上下文并 emit feed.entered。
  * 确定性执行角色，不使用 LLM。
  *
- * 消费事件：quality.reject、interaction.skipped、profile.skipped、
- *           profile.done(仅"不关注")、action.completed(仅 follow 完成)
+ * 消费事件：quality.reject、interaction.skipped、profile.skipped、profile.exit
+ *           （profile.exit 由 RoleDispatcher 在主页关注评估后于单一时序点发出，覆盖
+ *            关注已发 / 关注被风控拦 / 决定不关注 三分支——返回触发器唯一）
  * 产出事件：feed.entered
  */
 
@@ -29,11 +30,11 @@ export class BackToFeed extends BaseRole {
       this.eventBus.on('quality.reject', (p) => this.handleReturn(p.sourcePageType)),
       this.eventBus.on('interaction.skipped', (p) => this.handleReturn(p.sourcePageType)),
       this.eventBus.on('profile.skipped', (p) => this.handleReturn(p.sourcePageType)),
-      // 主页这趟结束：不关注 → 直接返回；关注 → 不在此返回，等下面 follow 的动作回执再返回，
-      // 否则 back 会抢在 follow 之前下发 → 已退回 feed、follow 点不到按钮而失败。
-      this.eventBus.on('profile.done', (p) => { if (!p.followed) this.handleReturn(p.sourcePageType); }),
-      // 关注动作完成（成功/失败都算这趟主页结束）→ 返回；来源页类型取自会话上下文。
-      this.eventBus.on('action.completed', (p) => { if (p.action === 'follow') this.handleReturn(this.ctx.sourcePageType); }),
+      // 主页子链结束（关注已发 / 关注被风控拦 / 决定不关注，由 RoleDispatcher 在单一时序点 emit）→ 返回。
+      // 关注命令（若有）已由 dispatcher 先入队，本返回命令紧随其后入队，靠边缘 FIFO 队列保证关注先执行、返回后执行。
+      // 不再单独监听 profile.done / action.completed{follow}：返回触发器唯一，杜绝「返回抢在关注前」竞态与重复返回，
+      // 并修「关注被风控拦截 → 永无 follow 回执 → 旧的等回执死等 → 卡死在作者主页」。
+      this.eventBus.on('profile.exit', (p) => this.handleReturn(p.sourcePageType)),
     );
   }
 

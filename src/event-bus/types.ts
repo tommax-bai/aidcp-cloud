@@ -325,6 +325,18 @@ export interface ProfileDonePayload {
   ts: number;
 }
 
+/**
+ * 主页子链结束信号（内部事件，非协议消息）。由 RoleDispatcher 在「主页关注评估完成」这一**单一时序点**
+ * 发出（先下发关注命令——仅当决定关注且风控放行——后 emit 本事件），BackToFeed 据此返回信息流。
+ * 返回不再死等关注回执，治「关注被风控拦截 → 永无回执 → 死等卡在作者主页」。
+ */
+export interface ProfileExitPayload {
+  sourcePageType: 'feed' | 'search';
+  /** 观测用：followed=关注已下发 / follow_blocked=关注被风控拦 / not_followed=决定不关注 */
+  reason: 'followed' | 'follow_blocked' | 'not_followed';
+  ts: number;
+}
+
 export interface SearchNeededPayload {
   consecutiveScrolls: number;
   currentPageType: 'feed' | 'search';
@@ -387,6 +399,7 @@ export interface RoleEventMap {
   'profile.entered': ProfileEnteredPayload;
   'profile.browsed': ProfileBrowsedPayload;
   'profile.done': ProfileDonePayload;
+  'profile.exit': ProfileExitPayload;
   'search.needed': SearchNeededPayload;
   'search.approved': SearchApprovedPayload;
   'search.skipped': SearchSkippedPayload;

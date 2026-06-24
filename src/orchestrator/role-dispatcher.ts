@@ -640,17 +640,27 @@ export class RoleDispatcher {
         });
       }),
 
+      // 主页关注评估完成 → **单一时序点**：先下发关注（仅当决定关注且风控放行时），紧接着 emit profile.exit
+      // 让 BackToFeed 返回信息流。靠边缘 FIFO 命令队列保证「关注先入队先执行、返回后执行」，返回不再死等关注回执
+      // （修：关注被风控拦截 → 永不产生 follow 回执 → 旧的「等回执再返回」死等 → 会话卡死在作者主页）。
+      // 三分支（关注且放行 / 关注被拦 / 决定不关注）都收敛到恰好一次 profile.exit → 恰好一次返回。
       this.eventBus.on('profile.done', (payload) => {
+        let reason: 'followed' | 'follow_blocked' | 'not_followed';
         if (payload.followed) {
-          // 风控闸：被拒则诚实跳过（不下发）。follow 配额本就由 action.completed 真实回执扣减，跳过即不会产生回执、不扣额。
+          // 风控闸：被拒则诚实跳过（不下发、不扣额；follow 配额仍由 action.completed 真实回执扣减）。
           if (!this.canInteract('follow')) {
             console.log('[RoleDispatcher] 关注被风控拦截，跳过 follow');
+            reason = 'follow_blocked';
           } else {
             this.sendCommand({ action: 'follow', params: { authorId: payload.authorId, thinkMs: this.thinkNow() } });
-            // follow 配额改由 action.completed 真实回执扣减（仅真实新关注；already_followed no-op 与失败均不扣）。
+            reason = 'followed';
           }
+        } else {
+          reason = 'not_followed';
         }
-        // back 指令由 BackToFeed 角色通过 feed.entered 统一发送，此处不再重复
+        // 关注命令（若有）已入队；MUST 在同一处理点紧接着 emit 返回信号——不可拆散到另一个响应 profile.done
+        // 的地方，否则返回可能抢在关注前下发导致关注落空（这正是原先用「等回执」绕开的竞态）。
+        this.eventBus.emit('profile.exit', { sourcePageType: payload.sourcePageType, reason, ts: this.clock() });
       }),
 
       this.eventBus.on('feed.entered', (payload) => {
@@ -782,8 +792,8 @@ export class RoleDispatcher {
             ts: this.clock(),
           });
         }
-        // follow 的回执由 BackToFeed 接管去"返回"，不在此兜底滑动——否则 follow 失败会
-        // 既滑一屏又返回，两条指令打架。
+        // follow 失败不在此兜底滑动：返回信息流已由 profile.done 单一时序点经 profile.exit 触发
+        // （与 follow 回执解耦，回执此处只用于配额扣减）；若再滑一屏会与已在途的返回命令打架。
         // browse_images / scroll_comments 在详情页内执行，失败由 DeepReader / CommentReviewer
         // 自行推进（emit reading.images_done / reading.done），此处不发 feed 滚动（否则会把详情页滚走）。
         const noRecoverScroll = payload.action === 'follow' || payload.action === 'browse_images' || payload.action === 'scroll_comments' || payload.action === 'comment' || payload.action === 'comment_like';
