@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test test/**/*.test.ts",
+    "test": "tsx --test 'test/**/*.test.ts'",
     "test:acceptance": "tsx --test test/acceptance/*.test.ts",
     "start": "tsx --env-file=.env src/server.ts",
     "trigger:like": "tsx src/cli/trigger-like.ts",
