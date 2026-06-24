@@ -48,6 +48,8 @@ export class NotificationClassifier extends BaseRole {
         // 边缘已改为正文缺失发空串，此处再拦两类残留：正文 == 用户名（错抓到名字）、正文是纯动作标签（无真实评论）。
         if (it.fromUser && c === it.fromUser.trim()) return false;
         if (/^(赞了你的(评论|笔记)|收藏了你的笔记|关注了你|回复了你的?(评论|笔记)?|点赞)$/.test(c)) return false;
+        // 已删除评论占位（真机校准 2026-06-24 观察到「该评论已删除」会进抽取结果）：非真实内容，不打扰。
+        if (/^(该)?评论已删除$/.test(c)) return false;
         return true;
       });
       this.log(`分类：${worthy.length}/${(items ?? []).length} 条值得通知 epoch=${epoch}`);

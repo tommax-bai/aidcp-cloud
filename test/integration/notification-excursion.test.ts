@@ -150,6 +150,7 @@ describe('通知巡视 — 角色级不变量', () => {
       { kind: 'comment', fromUser: '阿强', content: '这条很实用' },     // 真评论 → 留
       { kind: 'comment', fromUser: '阿强', content: '阿强' },           // 正文==用户名（错抓名字）→ 拒
       { kind: 'comment', fromUser: '小美', content: '赞了你的笔记' },    // 纯动作标签无正文 → 拒
+      { kind: 'comment', fromUser: '小紫', content: '该评论已删除' },    // 已删除占位（真机观察）→ 拒
     ];
     bus.emit('notification.items.arrived', { items, ts: Date.now() });
     assert.equal(classified[0].length, 1, '只留真评论');
