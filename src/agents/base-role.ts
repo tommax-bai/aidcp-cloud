@@ -15,20 +15,39 @@ type RoleLlm = { complete(prompt: string, opts?: LlmCallOpts): Promise<string> }
 
 export interface RoleOptions {
   eventBus: EventBus;
-  soul: Soul;
+  /**
+   * 人设注入（change account-persona-config）。两种形态，至少给一个：
+   * - getSoul：派发时按当前账号解析的取值口（热加载，PUT 人设后即时生效）——生产路径；
+   * - soul：构造期人设快照（向后兼容旧构造 / 测试桩）。
+   * 两者皆给时 getSoul 优先；皆缺则读 `this.soul` 时抛（构造契约违背，诚实失败不静默）。
+   */
+  soul?: Soul;
+  getSoul?: () => Soul;
   llm?: RoleLlm;
 }
 
 export abstract class BaseRole {
   abstract readonly roleName: RoleName;
   protected readonly eventBus: EventBus;
-  protected readonly soul: Soul;
+  private readonly soulSnapshot?: Soul;
+  private readonly getSoulFn?: () => Soul;
   protected readonly llm?: RoleLlm;
 
   constructor(options: RoleOptions) {
     this.eventBus = options.eventBus;
-    this.soul = options.soul;
+    this.soulSnapshot = options.soul;
+    this.getSoulFn = options.getSoul;
     this.llm = options.llm;
+  }
+
+  /**
+   * 人设取值口：注入 getSoul 优先（热加载，按当前账号解析），否则回落构造期快照。
+   * getter 透明替换原 `protected readonly soul` 字段——各 agent `this.soul.xxx` 读法零改动。
+   */
+  protected get soul(): Soul {
+    if (this.getSoulFn) return this.getSoulFn();
+    if (this.soulSnapshot) return this.soulSnapshot;
+    throw new Error(`${this.roleName} 缺少人设注入（soul / getSoul 至少给一个）`);
   }
 
   /** 子类实现：注册事件订阅 */

@@ -41,7 +41,13 @@ export interface PublishSchedulerDeps {
   publishLog: SchedulerPublishLog;
   risk: SchedulerRisk;
   orchestrator: SchedulerOrchestrator;
-  soul: Soul;
+  /**
+   * 人设注入（change account-persona-config）。两种形态，至少给一个：
+   * - getSoul：构建发布输入时按当前账号解析（热加载，PUT 人设后即时生效）——生产路径；
+   * - soul：构造期人设快照（向后兼容旧构造 / 测试桩）。两者皆给时 getSoul 优先。
+   */
+  soul?: Soul;
+  getSoul?: () => Soul;
   /** 概念积累阈值 N（缺省 20）。 */
   conceptThreshold?: number;
   /** 两次发布最小间隔小时（风控窗口扳机，缺省 24）。 */
@@ -75,6 +81,16 @@ export class PublishScheduler {
     this.startedAt = this.clock();
   }
 
+  /**
+   * 解析当前账号人设（getSoul 取值口优先 → 兼容快照）。取值口内部已回落打包默认 soul；
+   * 两者皆缺则抛（构造契约违背，诚实失败不静默）。
+   */
+  private resolveSoul(): Soul {
+    if (this.d.getSoul) return this.d.getSoul();
+    if (this.d.soul) return this.d.soul;
+    throw new Error('PublishScheduler 缺少人设注入（soul / getSoul 至少给一个）');
+  }
+
   /** 基准时刻：上次发布时间，无则进程启动时刻。 */
   private async baselineMs(): Promise<number> {
     return (await this.d.publishLog.getMostRecentPublishTime()) ?? this.startedAt;
@@ -99,7 +115,7 @@ export class PublishScheduler {
       generateInput: {
         concepts: conceptKeywords.map((keyword) => ({ keyword })),
         likedContents: liked.map((l) => ({ id: l.id, title: l.title, summary: l.summary, author: l.author ?? '' })),
-        soul: this.d.soul,
+        soul: this.resolveSoul(),
         recentPosts: recentPublished,
       },
       recentPublished,

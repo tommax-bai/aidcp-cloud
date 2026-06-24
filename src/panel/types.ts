@@ -70,6 +70,11 @@ export interface PanelDeps {
    * 纯只读：无任何写路径；单角色渲染失败优雅降级 `available:false`，绝不崩、绝不连累闭环。
    */
   rolePromptPreview?: PanelRolePromptPreview;
+  /**
+   * 账号人设配置（change account-persona-config，stream F）。未注入则 /api/persona* 返回 503。
+   * 写非乐观回真态；非法人设（soul 校验不过）诚实拒绝 persona_invalid，绝不落库；未知账号 404。
+   */
+  persona?: PanelPersonaConfig;
 }
 
 /** 凭据视图（永不含明文）。source：db=库内加密凭据 / env=回退环境变量 / none=未配置。 */
@@ -206,6 +211,53 @@ export interface RolePromptView {
 export interface PanelRolePromptPreview {
   /** 取某角色 prompt 的只读预览（纯读，无写）。 */
   get(roleId: string): RolePromptView;
+}
+
+// ── 账号人设配置（change account-persona-config，stream F）──────────────────────
+// reserved-order append 链：C（categories）→ D（quotas）→ F（本块 persona）→ B（nickname）。
+
+/** 人设来源：override=该账号自定义人设 / fallback=回落打包默认 soul.yaml。 */
+export type PersonaSource = 'override' | 'fallback';
+
+/** 单账号人设目录行（GET /api/persona 列表形状）。列出所有账号（含无覆盖者）。 */
+export interface PersonaConfigRowView {
+  accountId: string;
+  label: string | null;
+  source: PersonaSource;
+  /** 当前生效人设的身份摘要（解析结果），列表一眼识别「这是谁」。 */
+  identityName: string;
+  identityRole: string;
+  /** 仅 override 行带审计；fallback 行为 null。 */
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export interface PersonaConfigCatalogView {
+  accounts: PersonaConfigRowView[];
+}
+
+/** 单账号人设详情（GET /api/persona/:accountId，编辑回显）。 */
+export interface PersonaDetailView {
+  accountId: string;
+  label: string | null;
+  source: PersonaSource;
+  /** 编辑器内容：override→该账号人设文本；fallback→打包默认 soul.yaml 原文（编辑起点）。 */
+  persona: string;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export type PersonaSetResult =
+  | { ok: true; view: PersonaConfigCatalogView }
+  | { ok: false; reason: 'unknown_account' | 'persona_invalid' };
+
+export interface PanelPersonaConfig {
+  /** 账号 + 各自人设生效值/来源/审计（列出所有账号，含回落者）。 */
+  getCatalog(): Promise<PersonaConfigCatalogView>;
+  /** 单账号人设详情（编辑回显）；未知账号返回 null。 */
+  getDetail(accountId: string): Promise<PersonaDetailView | null>;
+  /** 写某账号人设。空文本=清除覆盖（回落）；非法人设以 {ok:false,reason:'persona_invalid'} 诚实拒绝绝不落库。写后回真态目录。 */
+  setPersona(accountId: string, persona: string, updatedBy: string): Promise<PersonaSetResult>;
 }
 
 export interface PanelConfig {

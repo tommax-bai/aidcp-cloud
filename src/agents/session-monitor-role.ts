@@ -37,7 +37,8 @@ export class SessionMonitorRole extends BaseRole {
   readonly roleName: RoleName = 'session_monitor';
   private readonly onSessionEnd?: (reason: string) => void;
   private readonly getRemainingBudget: () => { likes: number; collects: number; follows: number; searches: number };
-  private readonly maxDurationMs: number;
+  /** 显式时长上限覆盖（测试 / 显式注入用）；缺省则惰性从当前人设 this.soul 解析（热加载）。 */
+  private readonly maxDurationMsOverride?: number;
   private readonly maxActions: number;
   private readonly clock: () => number;
   private readonly idleNudgeMs: number;
@@ -56,7 +57,7 @@ export class SessionMonitorRole extends BaseRole {
     super(options);
     this.onSessionEnd = options.onSessionEnd;
     this.getRemainingBudget = options.getRemainingBudget;
-    this.maxDurationMs = options.maxDurationMs ?? 10 * 60_000;
+    this.maxDurationMsOverride = options.maxDurationMs;
     this.maxActions = options.maxActions ?? 60;
     this.clock = options.clock ?? Date.now;
     this.idleNudgeMs = options.idleNudgeMs ?? 130_000;
@@ -112,6 +113,11 @@ export class SessionMonitorRole extends BaseRole {
     };
   }
 
+  /** 会话时长上限（毫秒）：显式覆盖优先；否则按当前人设惰性解析（热加载，后台改 session_limits 即时生效）。 */
+  private effectiveMaxDurationMs(): number {
+    return this.maxDurationMsOverride ?? (this.soul.session_limits?.max_duration_min ?? 10) * 60_000;
+  }
+
   private handleActionCompleted(): void {
     this.lastActivityAt = this.clock();
     this.actionCount++;
@@ -147,7 +153,7 @@ export class SessionMonitorRole extends BaseRole {
 
     // 时长超限
     const elapsed = this.clock() - this.startedAt;
-    if (elapsed >= this.maxDurationMs) {
+    if (elapsed >= this.effectiveMaxDurationMs()) {
       this.triggerEnd(`会话时长 ${(elapsed / 60_000).toFixed(1)}min 已超限`);
       return;
     }

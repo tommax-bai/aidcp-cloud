@@ -70,7 +70,13 @@ const EMPTY_CONCEPT_POOL: ConceptPool = { known: [], candidates: [], source: new
 // ─── 公共接口 ────────────────────────────────────────────────────────────────
 
 export interface RoleDispatcherOptions {
-  soul: Soul;
+  /**
+   * 人设注入（change account-persona-config）。两种形态，至少给一个：
+   * - getSoul：派发时按当前账号解析的取值口（热加载，PUT 人设后即时生效）——生产路径；
+   * - soul：构造期人设快照（向后兼容旧构造 / 测试桩）。两者皆给时 getSoul 优先。
+   */
+  soul?: Soul;
+  getSoul?: (accountId?: string) => Soul;
   llm: { complete(prompt: string, opts?: LlmCallOpts): Promise<string> };
   sendCommand: (command: EdgeCommand) => void;
   clock?: () => number;
@@ -151,7 +157,11 @@ export interface NoteData {
 export class RoleDispatcher {
   private readonly eventBus: EventBus;
   private readonly sessionContext: SessionContext;
-  private readonly soul: Soul;
+  /** 人设：getSoul 取值口（热加载）优先，soulSnapshot 为兼容快照。经 resolveSoul() 统一取值。 */
+  private readonly soulSnapshot?: Soul;
+  private readonly getSoulFn?: (accountId?: string) => Soul;
+  /** 当前账号（多账号 per-edge 多路复用就位后按会话切；当前单账号默认 default，留 getSoul(accountId?) 形参缝）。 */
+  private currentAccountId = 'default';
   private readonly llm: { complete(prompt: string, opts?: LlmCallOpts): Promise<string> };
   private readonly rawSendCommand: (command: EdgeCommand) => void;
   private readonly clock: () => number;
@@ -171,9 +181,8 @@ export class RoleDispatcher {
   private readonly searchLimiter: SearchFrequencyLimiter;
   /** 概念池快照：startSession 时 loadPool 刷新，供 SearchEvaluator 读取。 */
   private conceptPool: ConceptPool = EMPTY_CONCEPT_POOL;
-  /** 会话开始时刻与时长上限，用于估算会话进度（疲劳乘子）。 */
+  /** 会话开始时刻，用于估算会话进度（疲劳乘子）。时长上限改为按当前人设惰性解析（见 maxDurationMs()）。 */
   private sessionStartedAt: number;
-  private readonly maxDurationMs: number;
   private roles: BaseRole[] = [];
 
   /** 只读暴露已注册角色实例（change role-prompt-visibility，仅供后台 prompt 预览借读；不改分发逻辑）。 */
@@ -192,7 +201,8 @@ export class RoleDispatcher {
   private sessionActive = false;
 
   constructor(options: RoleDispatcherOptions) {
-    this.soul = options.soul;
+    this.soulSnapshot = options.soul;
+    this.getSoulFn = options.getSoul;
     this.llm = options.llm;
     this.rawSendCommand = options.sendCommand;
     this.clock = options.clock ?? Date.now;
@@ -209,14 +219,28 @@ export class RoleDispatcher {
     this.searchLimiter = new SearchFrequencyLimiter(options.searchLimiterOptions);
     this.eventBus = options.eventBus ?? new EventBus();
     this.sessionContext = new SessionContext();
-    this.maxDurationMs = (this.soul.session_limits?.max_duration_min ?? 10) * 60_000;
     this.sessionStartedAt = this.clock();
+  }
+
+  /**
+   * 按当前账号解析人设（getSoul 取值口优先 → 兼容快照）。永不返回 undefined：
+   * 取值口内部已回落打包默认 soul；两者皆缺则抛（构造契约违背，诚实失败不静默）。
+   */
+  private resolveSoul(): Soul {
+    if (this.getSoulFn) return this.getSoulFn(this.currentAccountId);
+    if (this.soulSnapshot) return this.soulSnapshot;
+    throw new Error('RoleDispatcher 缺少人设注入（soul / getSoul 至少给一个）');
+  }
+
+  /** 会话时长上限（毫秒）：按当前人设惰性解析，使后台改 session_limits 后无需重启即生效（热加载）。 */
+  private maxDurationMs(): number {
+    return (this.resolveSoul().session_limits?.max_duration_min ?? 10) * 60_000;
   }
 
   /** 会话进度 0..1（已用时长 / 时长上限），供节奏疲劳乘子使用。 */
   private progress(): number {
     const elapsed = this.clock() - this.sessionStartedAt;
-    return Math.min(1, Math.max(0, elapsed / this.maxDurationMs));
+    return Math.min(1, Math.max(0, elapsed / this.maxDurationMs()));
   }
 
   /** 动作前犹豫时间中心值（随风控状态 + 会话进度缩放）。familiar=true 对近期已评估内容按 1/3 折扣。 */
@@ -279,7 +303,8 @@ export class RoleDispatcher {
 
   /** 注册所有角色并启动事件订阅 */
   setup(): void {
-    const commonOptions = { eventBus: this.eventBus, soul: this.soul, llm: this.llm };
+    // 人设以取值口下发（热加载）：每个 agent 读 this.soul 时按当前账号即时解析，PUT 人设后无需重启。
+    const commonOptions = { eventBus: this.eventBus, getSoul: () => this.resolveSoul(), llm: this.llm };
     // 详情页「评论点赞」特性总开关（默认关；线上灰度时置 AIDCP_COMMENT_LIKE=true）。
     // 关闭时：既不注册 CommentLikeAppraiser、也不接线 comment_like.intended 下发——彻底惰性。
     const commentLikeEnabled = process.env.AIDCP_COMMENT_LIKE === 'true';
@@ -350,9 +375,10 @@ export class RoleDispatcher {
         getConceptPool: () => this.conceptPool,
       }),
       new SearchExecutor({ ...commonOptions, sessionContext: this.sessionContext }),
+      // maxDurationMs 不再传死值：SessionMonitorRole 经 this.soul（getSoul 取值口）惰性解析时长上限，
+      // 使后台改 session_limits 后无需重启即生效（热加载）；缺省回落人设 / 10min。
       new SessionMonitorRole({
         ...commonOptions,
-        maxDurationMs: (this.soul.session_limits?.max_duration_min ?? 10) * 60_000,
         onSessionEnd: (reason: string) => this.endSession(reason),
         getRemainingBudget: () => this.budget,
         clock: this.clock,

@@ -32,7 +32,7 @@ import { EventBus } from './event-bus/index.js';
 import { RoleDispatcher } from './orchestrator/index.js';
 import type { CommentApprovalPort } from './agents/comment-approval-gate.js';
 import { buildCommentApprovalCard } from './feishu/comment-approval-card.js';
-import { loadSoul } from './soul/index.js';
+import { loadSoul, type Soul } from './soul/index.js';
 
 
 import {
@@ -85,6 +85,9 @@ import { createRoleConfigPanel } from './config/role-config-facade.js';
 import { CategoryConfigStore } from './config/category-config-store.js';
 import { createCategoryConfigPanel } from './config/category-config-facade.js';
 import { categoryOf } from './config/role-catalog.js';
+// 账号人设（change account-persona-config，stream F）：按账号可配 + 热加载，回落打包 soul.yaml 不 brick。
+import { PersonaStore, createPersonaResolver } from './config/persona-store.js';
+import { createPersonaPanel } from './config/persona-facade.js';
 import { createRolePromptProvider } from './config/role-prompt-preview.js';
 import { CredentialStore } from './config/credential-store.js';
 import type { ModelConfigView } from './panel/types.js';
@@ -329,6 +332,32 @@ async function main(): Promise<void> {
   const accountState = new AccountStateManager(accountStore);
   await accountState.init();
 
+  // ── 账号人设（change account-persona-config，stream F，迁移 0011）─────────────
+  // 须在 accounts 表建好之后（persona_config FK 到 accounts）。打包 soul.yaml 为永不 brick 的最终回落。
+  // PG 不可用 / init 失败 → 全程回落打包默认，不影响浏览 / 发布。
+  const fallbackSoul = loadSoul();
+  const personaStore = new PersonaStore({
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
+  try {
+    await personaStore.init();
+    console.log('[aidcp-cloud] 账号人设存储已就绪（persona_config，按账号热加载）');
+  } catch (err) {
+    console.warn(
+      '[aidcp-cloud] 人设存储初始化失败（全程回落打包 soul.yaml，不 brick）:',
+      (err as Error).message,
+    );
+  }
+  // 按账号解析人设的取值口（派发 / 发布热路径用；永不抛、缺则回落打包默认）。
+  const resolvePersona = createPersonaResolver({ store: personaStore, fallbackSoul, logger: console });
+  const getSoul = (accountId?: string): Soul => resolvePersona(accountId);
+  // 人设面板外观（后台按账号编辑 + soul 校验 + 写非乐观回真态）。
+  const personaPanel = createPersonaPanel({ store: personaStore });
+
   // RiskController 注册表（V1 task 9.1）：每账号一个 controller、单写 PER ACCOUNT、共享 PgRiskStore。
   // 现役路径用其 default controller（单一来源，避免双 controller 写同一 risk_state）；PG 不可用则现役回退内存态。
   // PgRiskStore 单例：既喂 registry（按账号风控单写），又作 InteractionStore 接线孤儿
@@ -492,9 +521,9 @@ async function main(): Promise<void> {
   };
 
   // ── RoleDispatcher：事件驱动决策链路 ─────────────────────────────────
-  const soul = loadSoul();
+  // 人设以取值口注入（change account-persona-config）：派发时按当前账号热加载，PUT 人设后无需重启。
   const roleDispatcher = new RoleDispatcher({
-    soul,
+    getSoul,
     llm,
     eventBus,
     // 指令级节奏：把当前风控状态喂给决策点，驱动 dwellMs/thinkMs 的 tempo
@@ -632,7 +661,8 @@ async function main(): Promise<void> {
       publishLog: publishLogStore,
       risk: riskController,
       orchestrator: publishOrchestrator,
-      soul,
+      // 人设取值口（change account-persona-config）：构建发布输入时按当前账号热加载。
+      getSoul,
       conceptThreshold: Number(process.env.AIDCP_PUBLISH_CONCEPT_THRESHOLD ?? 20),
       minHoursBetween: Number(process.env.AIDCP_PUBLISH_MIN_HOURS ?? 24),
       logger: console,
@@ -802,6 +832,8 @@ async function main(): Promise<void> {
           categoryConfig: categoryConfigPanel,
           // 角色 prompt 只读预览（change role-prompt-visibility）。纯读，无写路径。
           rolePromptPreview: rolePromptProvider,
+          // 账号人设配置（change account-persona-config，stream F）。按账号编辑 + soul 校验 + 写非乐观回真态。
+          persona: personaPanel,
         },
         {
           port: panelPort,

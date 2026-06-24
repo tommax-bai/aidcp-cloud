@@ -474,6 +474,60 @@ function createRequestHandler(
       return;
     }
 
+    // ── 账号人设配置（change account-persona-config，stream F）──────────────────
+    // reserved-order append 链 F（在 C/categories、D/quotas 之后）。写非乐观回真态；
+    // 非法人设（soul 校验不过）诚实 400 persona_invalid 绝不落库；未知账号 404。
+    if (method === 'GET' && url === '/api/persona') {
+      if (!deps.persona) {
+        sendJson(res, 503, { error: 'persona_unavailable' });
+        return;
+      }
+      sendJson(res, 200, await deps.persona.getCatalog());
+      return;
+    }
+    if (method === 'GET' && url.startsWith('/api/persona/')) {
+      if (!deps.persona) {
+        sendJson(res, 503, { error: 'persona_unavailable' });
+        return;
+      }
+      const accountId = decodeURIComponent(url.slice('/api/persona/'.length));
+      const detail = await deps.persona.getDetail(accountId);
+      if (!detail) {
+        sendJson(res, 404, { error: 'unknown_account' });
+        return;
+      }
+      sendJson(res, 200, detail);
+      return;
+    }
+    if (method === 'PUT' && url.startsWith('/api/persona/')) {
+      if (!deps.persona) {
+        sendJson(res, 503, { error: 'persona_unavailable' });
+        return;
+      }
+      const accountId = decodeURIComponent(url.slice('/api/persona/'.length));
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { persona } = (body ?? {}) as { persona?: unknown };
+      // persona 必须存在且为字符串（''=清除覆盖回落）。
+      if (typeof persona !== 'string') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'persona_type' });
+        return;
+      }
+      const result = await deps.persona.setPersona(accountId, persona, verified.payload.sub);
+      if (!result.ok) {
+        // unknown_account→404；persona_invalid→400（绝不落库、绝不假成功）。
+        sendJson(res, result.reason === 'unknown_account' ? 404 : 400, { error: result.reason });
+        return;
+      }
+      sendJson(res, 200, result.view);
+      return;
+    }
+
     sendJson(res, 404, { error: 'not_found' });
   }
 
