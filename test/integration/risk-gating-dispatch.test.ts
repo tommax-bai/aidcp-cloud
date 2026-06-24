@@ -32,6 +32,7 @@ function setup(canInteract: (a: 'like' | 'collect' | 'follow' | 'comment' | 'com
     clock: () => 0,
   });
   d.setup();
+  d.startSession(); // 反应链/指令翻译接线现随会话激活进行（不再在 setup 接线）
   return { bus, commands };
 }
 

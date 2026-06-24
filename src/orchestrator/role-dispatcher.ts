@@ -453,14 +453,13 @@ export class RoleDispatcher {
       this.roles.push(new ConceptExtractorRole({ ...commonOptions, conceptStore: sink }));
     }
 
-    // 注册所有角色的事件订阅
-    this.roles.forEach((r) => r.subscribe());
-
-    // 注册 Edge 指令翻译层
-    this.setupCommandTranslation();
-
-    // 订阅 Edge 上报事件
-    this.setupEdgeEventSubscriptions();
+    // 角色订阅 / 指令翻译 / Edge 事件接线**推迟到会话激活**（startSession / restartSession）才进行——
+    // 多租户（multi-account-node-support）：setup() 仅构造角色 + 注册「边缘 hello → 启动闸」入口监听，
+    // 绝不在此接线浏览反应链、也绝不启动 SessionMonitor 看门狗。否则：
+    //  (1) 未绑人设被诚实拒绝的账号，仍会因边缘自发上报 page.cards 而经反应链在**默认人设上空跑**（红线）；
+    //  (2) 仅供预览 / 从未启动会话的 dispatcher，其 SessionMonitor 定时器会向**所有**边缘误广播 idle_nudge/session.end；
+    //  (3) 从未启动的连接断开时 endSession 因 !sessionActive 早退、定时器永不清理而泄漏。
+    // 反应链/看门狗的生命周期由此与「会话是否激活」严格绑定（激活才接线、endSession 即拆除）。
 
     // 永久监听：边缘 hello → 设当前账号 + 诚实人设/调度闸 → 启动/重启会话。刻意注册在 commandUnsubscribers 之外，
     // 故即使会话因超时/动作数 endSession 拆除其余订阅，此监听仍在，重连/恢复后可重新驱动。
@@ -518,8 +517,18 @@ export class RoleDispatcher {
     };
   }
 
-  /** 启动会话 */
+  /** 启动会话：接线角色 / 指令翻译 / Edge 事件（看门狗在此随 SessionMonitor.subscribe 启动），再发 feed.entered。 */
   startSession(): void {
+    // 幂等：已活跃则先拆旧订阅，避免重复接线（正常路径下 setup 后首次启动无需拆除）。
+    if (this.sessionActive) {
+      this.roles.forEach((r) => r.unsubscribe());
+      for (const unsub of this.commandUnsubscribers) unsub();
+      this.commandUnsubscribers = [];
+    }
+    // 会话激活才接线浏览反应链 + 看门狗（见 setup() 注释：未激活的 dispatcher 绝不接线/起定时器）。
+    this.roles.forEach((r) => r.subscribe());
+    this.setupCommandTranslation();
+    this.setupEdgeEventSubscriptions();
     this.sessionActive = true;
     this.sessionStartedAt = this.clock();
     this.searchLimiter.resetSession();

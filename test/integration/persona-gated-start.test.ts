@@ -16,7 +16,7 @@ const mockSoul: Soul = {
 function make(opts: {
   isPersonaBound?: (a: string) => boolean;
   isDispatchActive?: () => boolean;
-}): { d: RoleDispatcher; rejected: { accountId: string; reason: string }[] } {
+}): { d: RoleDispatcher; rejected: { accountId: string; reason: string }[]; commands: EdgeCommand[] } {
   const rejected: { accountId: string; reason: string }[] = [];
   const commands: EdgeCommand[] = [];
   const d = new RoleDispatcher({
@@ -25,10 +25,12 @@ function make(opts: {
     sendCommand: (c) => commands.push(c),
     isPersonaBound: opts.isPersonaBound,
     isDispatchActive: opts.isDispatchActive,
-    onSessionRejected: (accountId, reason) => rejected.push({ accountId, reason }),
+    onSessionRejected: (accountId, reason) => {
+      rejected.push({ accountId, reason });
+    },
   });
   d.setup();
-  return { d, rejected };
+  return { d, rejected, commands };
 }
 
 test('未绑人设的真实账号握手 → 诚实拒绝：不启动会话、置 needs_persona_setup 告警，绝不偷用默认人设', () => {
@@ -38,6 +40,31 @@ test('未绑人设的真实账号握手 → 诚实拒绝：不启动会话、置
   assert.equal(d.active, false); // 未启动浏览循环
   assert.deepEqual(rejected, [{ accountId: 'acctX', reason: 'needs_persona_setup' }]);
   d.endSession();
+});
+
+test('未绑人设账号：边缘自发上报 page.cards 也不产生任何下发指令（反应链未接线，绝不在默认人设上空跑）', () => {
+  const { d, commands } = make({ isPersonaBound: () => false });
+  d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'acctX', ts: 1 }); // 启动闸拒绝 → 未激活、未接线
+  assert.equal(d.active, false);
+  // 真实边缘在 loop 起步会自发上报 page.cards；未绑账号的浏览反应链未接线，必须不产生 open_note 等任何指令
+  // （回归 multi-account 对抗评审发现的红线：诚实人设闸曾只挡 start，反应链仍在默认人设上空跑）。
+  d.bus.emit('page.cards.arrived', {
+    cards: [{ index: 0, title: '测试笔记', likeCount: 100, collectCount: 10, noteId: 'n1' }],
+    ts: 2,
+  });
+  assert.equal(commands.length, 0, '未绑账号绝不因 page.cards 产生任何下发指令');
+  d.endSession();
+});
+
+test('仅 setup 未启动会话的 dispatcher（如预览实例）：page.cards 不触发任何下发（看门狗/反应链均未接线）', () => {
+  const { d, commands } = make({}); // 仅构造
+  // 不 emit edge.hello、不 startSession —— 模拟仅供预览 / 从未激活的 dispatcher
+  d.bus.emit('page.cards.arrived', {
+    cards: [{ index: 0, title: 'x', likeCount: 1, collectCount: 1, noteId: 'n1' }],
+    ts: 1,
+  });
+  assert.equal(d.active, false);
+  assert.equal(commands.length, 0, '未激活 dispatcher 绝不下发指令');
 });
 
 test('已绑人设的账号握手 → 照常启动会话', () => {

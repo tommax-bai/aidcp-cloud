@@ -45,16 +45,16 @@ test('releaseFailed：失败仅释放在途坑、不记已完成，允许后续�
 });
 
 test('TTL 自动释放在途坑（防回执丢失永久占坑）', () => {
-  let fire: (() => void) | null = null;
+  const fires: Array<() => void> = [];
   const g = new InteractionGuard({
     setTimerImpl: (cb) => {
-      fire = cb;
-      return { clear: () => { fire = null; } };
+      fires.push(cb);
+      return { clear: () => {} };
     },
   });
   assert.equal(g.tryClaim('like::n1'), true);
   assert.equal(g.tryClaim('like::n1'), false); // 在途
-  fire?.(); // 模拟 TTL 到点
+  fires.forEach((f) => f()); // 模拟 TTL 到点
   assert.equal(g.tryClaim('like::n1'), true); // 在途坑已释放 → 可再占
 });
 

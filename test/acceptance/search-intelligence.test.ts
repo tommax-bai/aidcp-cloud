@@ -132,6 +132,7 @@ describe('AC-SEARCH 概念池驱动的搜索智能', () => {
       clock: () => 0,
     });
     d.setup();
+    d.startSession(); // 指令翻译接线随会话激活进行（multi-account：setup 不再接线）
     return { bus, commands, marked, d };
   }
 
