@@ -28,9 +28,10 @@ import {
 } from './comm/index.js';
 
 
-import { RiskController, RiskControllerRegistry, PgRiskStore } from './risk/index.js';
+import { RiskController, RiskControllerRegistry, PgRiskStore, InteractionGuardRegistry } from './risk/index.js';
 import { EventBus } from './event-bus/index.js';
 import { RoleDispatcher } from './orchestrator/index.js';
+import { ConnectionRuntimeRegistry, type DispatcherBuildContext } from './orchestrator/connection-runtime.js';
 import type { CommentApprovalPort } from './agents/comment-approval-gate.js';
 import { buildCommentApprovalCard } from './feishu/comment-approval-card.js';
 import { loadSoul, type Soul } from './soul/index.js';
@@ -491,10 +492,11 @@ async function main(): Promise<void> {
       console.log(`[feishu] 已恢复账号：${accountId}（恢复 edge 数=${resumedEdges}）`);
     },
     bindChat: (record) => botChatStore.setDefault(record),
-    // 手动 /publish：越过风控 canDo（人工授权），发布前飞书人审仍铁定生效（AC-PUB）。
-    publish: async () => {
+    // 手动 /publish [accountId]：越过风控 canDo（人工授权），发布前飞书人审仍铁定生效（AC-PUB）。
+    // accountId 指定以哪个账号发帖（落 publish_log.account_id + 命令定向到该账号在线节点）；缺省 default。
+    publish: async (accountId?: string) => {
       if (!publishScheduler) return '发帖触发器未就绪（PG/概念池不可用）';
-      const o = await publishScheduler.triggerManual();
+      const o = await publishScheduler.triggerManual(accountId);
       return `已触发（${o.reason}）→ 编排状态 ${'status' in o ? o.status : '-'}`;
     },
   };
@@ -527,6 +529,14 @@ async function main(): Promise<void> {
     }
   };
 
+  // ── 多租户连接运行时（multi-account-node-support）：每连接私有 EventBus + RoleDispatcher ──────────
+  // 前向声明：handler / server 经闭包引用 runtimes（runtimes 在下方装配后才被调用，运行时安全）。
+  let runtimes: ConnectionRuntimeRegistry | undefined;
+  // 调度启停态（面板 /dispatch 全局开关）：false 时新 / 现有连接不启动浏览会话。
+  let dispatchActive = true;
+  // 未绑人设告警去重（避免重连 / 空转 churn 反复刷飞书）：每账号每进程仅告警一次。
+  const personaSetupAlerted = new Set<string>();
+
   const handler = new DefaultMessageHandler({
     planner,
     llm,
@@ -539,8 +549,12 @@ async function main(): Promise<void> {
     accountState,
     captcha,
     commandSequencer,
+    // 多租户路由：私有总线（入站事件灌本连接通道）/ 握手建运行时 / 按连接真实账号解析 controller。
+    busFor: (session) => runtimes!.busFor(session),
+    onHandshake: (session) => runtimes!.onHandshake(session),
+    resolveController: (session) => runtimes?.controllerForSession(session),
   });
-  const server = new EdgeCloudServer({ port, handler });
+  const server = new EdgeCloudServer({ port, handler, onClose: (session) => runtimes?.onDisconnect(session) });
   edgeServer = server;
   await server.start();
   console.log(`[aidcp-cloud] 边-云 WebSocket 服务端已监听 :${port}`);
@@ -564,64 +578,135 @@ async function main(): Promise<void> {
     pollMs: 2_000,
   };
 
-  // ── RoleDispatcher：事件驱动决策链路 ─────────────────────────────────
-  // 人设以取值口注入（change account-persona-config）：派发时按当前账号热加载，PUT 人设后无需重启。
-  const roleDispatcher = new RoleDispatcher({
-    getSoul,
-    llm,
-    eventBus,
-    // 指令级节奏：把当前风控状态喂给决策点，驱动 dwellMs/thinkMs 的 tempo
-    getRiskStatus: () => riskController.getState().status,
-    // 互动前风控闸：被拒则诚实跳过（不下发、不扣 budget）。验证码→restricted 后互动被此闸真正拦住。
-    canInteract: (action) => riskController.canDo(action),
-    // 评论人审端口（env 闸开启时注入；未开启 → 评论一律诚实跳过、不发）。
-    ...(commentApprovalEnabled ? { commentApproval } : {}),
-    // 评论每日上限预闸：按账号风控当日剩余评论配额（运营经 setQuotaLevel 配档位）。评估阶段就拦、避免空跑撰写。
-    getCommentDailyRemaining: () => riskController.dailyRemaining('comment'),
-    // 评论赞当日配额预闸：CommentLikeAppraiser 据此在调 LLM 前就判断当日是否还能点评论赞。
-    getCommentLikeDailyRemaining: () => riskController.dailyRemaining('comment_like'),
-    // 优质评论语料库（comment-like-on-detail B）：归档闭包 + 按主题召回参考闭包（store 缺失则不接线）。
-    ...(valuableCommentStore
-      ? {
-          archiveValuableComment: (input) => valuableCommentStore!.archive(input),
-          getCorpusReferences: (topics) => valuableCommentStore!.retrieveByTopics(topics, 3),
-        }
-      : {}),
-    // 概念池：跨会话搜索记忆 + 从浏览学新关键词（undefined 时退化为仅 seed_keywords）。
-    conceptStore,
-    // 硬暂停闸（验证码/人工接管）：通知准入据此放弃巡视——硬暂停期连帧都不发。
-    isHardPaused: (edgeId) => (edgeId ? server.isEdgePaused(edgeId) : false),
-    // 通知巡视发飞书（仅"评论和@"）：复用 messenger + 默认群解析；无群则记错不吞。
-    notifyComments: async (items) => {
-      const chatId = await resolveDefaultChatId({
-        botChatStore,
-        fallbackChatId: process.env.FEISHU_CHAT_ID,
-        logger: console,
-      });
-      if (!chatId) {
-        console.error('[notification] 无可用飞书群，评论/@ 通知未发出');
-        return;
+  // ── 按连接多租户编排（multi-account-node-support D1/D2/D3/D4/D6）─────────────────
+  // 未绑人设 / 配置错误 → 飞书通知 + 后台状态（D6，不新增 cloud→edge 命令、不动协议）。
+  // 「needs_persona_setup 态」是派生字段（persona_config 行不存在即未绑），无需额外落库；这里只负责告警。
+  const onNeedsPersonaSetup = async (accountId: string, edgeId: string | undefined, reason: string): Promise<void> => {
+    console.warn(`[aidcp-cloud] 账号 ${accountId}（edge=${edgeId ?? '-'}）${reason}：未绑人设，拒绝启动浏览会话`);
+    if (personaSetupAlerted.has(accountId)) return; // 每账号每进程仅告警一次，避免空转 churn 刷屏
+    personaSetupAlerted.add(accountId);
+    try {
+      const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
+      if (chatId) {
+        await messenger.sendText(
+          chatId,
+          `⚠️ 账号 \`${accountId}\` 节点已上线但**未绑定人设**，已拒绝启动（needs_persona_setup）。\n请到后台「人设」页为该账号设置人设后，节点重连即可开始浏览。`,
+        );
       }
-      const lines = items.map(
-        (it) =>
-          `• ${it.fromUser || '某用户'}（${it.kind === 'mention' ? '@你' : '评论'}）：${it.content}` +
-          (it.noteTitle ? ` · 《${it.noteTitle}》` : ''),
-      );
-      await messenger.sendText(chatId, `📬 小红书新消息（${items.length}）\n${lines.join('\n')}`);
-    },
-    sendCommand: (command) => {
-      const envelope = edgeCommandToEnvelope(command);
-      const sent = server.pushToEdges(envelope);
-      console.log(`[RoleDispatcher] sendCommand action=${command.action} sent=${sent}`);
-    },
-  });
-  roleDispatcher.setup();
-  roleDispatcher.startSession();
-  console.log('[aidcp-cloud] RoleDispatcher 已启动，决策链路就绪');
+    } catch (err) {
+      console.error('[aidcp-cloud] needs_persona_setup 飞书告警发送失败:', (err as Error).message);
+    }
+  };
+  // 缺 / 空 accountId 握手 → 配置错误（拒绝握手在 handler/registry 完成，这里只发飞书把人叫去修启动器）。
+  const onConfigError = async (session: { edgeId?: string; machineLabel?: string }, message: string): Promise<void> => {
+    console.error(`[aidcp-cloud] 握手配置错误 edge=${session.edgeId ?? '-'}: ${message}`);
+    try {
+      const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
+      if (chatId) {
+        await messenger.sendText(
+          chatId,
+          `⚠️ 边缘节点握手被拒（配置错误）：edge=\`${session.edgeId ?? '-'}\`${session.machineLabel ? `（${session.machineLabel}）` : ''} 未声明 accountId。\n请为该节点启动器显式设置 AIDCP_ACCOUNT_ID（默认账号写 default）。`,
+        );
+      }
+    } catch (err) {
+      console.error('[aidcp-cloud] 配置错误飞书告警发送失败:', (err as Error).message);
+    }
+  };
 
-  // V1 task 9.4 调度启停态：现役单全局 RoleDispatcher（boot 即 startSession → active）。
-  // 面板 /dispatch 经此切 start/end；per-edge 多路复用拆分留到真多账号（design 步骤 8）。
-  let dispatchActive = true;
+  // 同账号并行（N:1）互动去重 guard 注册表（按账号单例）：同账号 N 连接共用一个 guard，
+  // 下发互动前占坑去重，防两节点对同一笔记/作者重复点赞/关注/评论（D7②）。
+  const interactionGuardRegistry = new InteractionGuardRegistry();
+
+  // 每个连接握手时由 buildDispatcher 造一束 RoleDispatcher：私有总线 / 该连接真实账号 controller / 定向下发。
+  // 人设以取值口注入（account-persona-config）：派发时按当前账号热加载，PUT 后无需重启。
+  const buildDispatcher = (ctx: DispatcherBuildContext): RoleDispatcher =>
+    new RoleDispatcher({
+      getSoul,
+      llm,
+      // 私有事件通道（连接间互不串味）；其上事件经 tee 汇入全局观测总线供风控记账 / 看板消费。
+      eventBus: ctx.bus,
+      // 指令级节奏：喂当前（该账号）风控状态，驱动 dwellMs/thinkMs 的 tempo。
+      getRiskStatus: () => ctx.controller.getState().status,
+      // 互动前风控闸：按该连接真实账号的 controller 判定（不再钉死 default）。被拒诚实跳过。
+      canInteract: (action) => ctx.controller.canDo(action),
+      // 评论人审端口（env 闸开启时注入；未开启 → 评论一律诚实跳过、不发）。
+      ...(commentApprovalEnabled ? { commentApproval } : {}),
+      // 评论 / 评论赞当日配额预闸：按该账号 controller 当日剩余。
+      getCommentDailyRemaining: () => ctx.controller.dailyRemaining('comment'),
+      getCommentLikeDailyRemaining: () => ctx.controller.dailyRemaining('comment_like'),
+      // 优质评论语料库（comment-like-on-detail B）：归档闭包 + 按主题召回参考闭包（store 缺失则不接线）。
+      ...(valuableCommentStore
+        ? {
+            archiveValuableComment: (input) => valuableCommentStore!.archive(input),
+            getCorpusReferences: (topics) => valuableCommentStore!.retrieveByTopics(topics, 3),
+          }
+        : {}),
+      // 概念池：跨会话搜索记忆 + 从浏览学新关键词（undefined 时退化为仅 seed_keywords）。
+      conceptStore,
+      // 硬暂停闸（验证码/人工接管）：通知准入据此放弃巡视——硬暂停期连帧都不发。
+      isHardPaused: (edgeId) => (edgeId ? server.isEdgePaused(edgeId) : false),
+      // 通知巡视发飞书（仅"评论和@"）：复用 messenger + 默认群解析；无群则记错不吞。
+      notifyComments: async (items) => {
+        const chatId = await resolveDefaultChatId({
+          botChatStore,
+          fallbackChatId: process.env.FEISHU_CHAT_ID,
+          logger: console,
+        });
+        if (!chatId) {
+          console.error('[notification] 无可用飞书群，评论/@ 通知未发出');
+          return;
+        }
+        const lines = items.map(
+          (it) =>
+            `• ${it.fromUser || '某用户'}（${it.kind === 'mention' ? '@你' : '评论'}）：${it.content}` +
+            (it.noteTitle ? ` · 《${it.noteTitle}》` : ''),
+        );
+        await messenger.sendText(chatId, `📬 小红书新消息（${items.length}）\n${lines.join('\n')}`);
+      },
+      // 下行指令只发回**发起该决策的连接**（按 edgeId 定向，不再广播 → 不串号）。单连接时等价于原广播。
+      sendCommand: (command) => {
+        const envelope = edgeCommandToEnvelope(command);
+        const sent = server.pushToEdges(envelope, ctx.edgeId);
+        console.log(
+          `[RoleDispatcher] sendCommand account=${ctx.accountId} edgeId=${ctx.edgeId ?? '-'} action=${command.action} sent=${sent}`,
+        );
+      },
+      // 诚实人设启动闸（D3）：以 persona_config 行存在为独立判据（不走会回落的解析器）；default 硬豁免（在
+      // RoleDispatcher.canStartSession 内）；存储读不到 → false（fail-closed，诚实拒绝、不偷用默认人设）。
+      isPersonaBound: (accountId) => personaStore.getForAccount(accountId) !== null,
+      onSessionRejected: (accountId, reason) => onNeedsPersonaSetup(accountId, ctx.edgeId, reason),
+      // 全局调度开关（面板 /dispatch）。
+      isDispatchActive: () => dispatchActive,
+      // 同账号并行互动去重（按账号单例 guard；同账号 N 连接共用 → 共享 in-flight/completed，不重复动作）。
+      interactionGuard: interactionGuardRegistry.forAccount(ctx.accountId),
+    });
+
+  runtimes = new ConnectionRuntimeRegistry({
+    observerBus: eventBus,
+    getController: (accountId) => riskRegistry.getController(accountId),
+    buildDispatcher,
+    ensureAccount: async (accountId) => {
+      try {
+        await accountStore?.ensureAccount?.(accountId);
+      } catch (err) {
+        console.warn(`[aidcp-cloud] ensureAccount(${accountId}) 失败（不阻塞握手）:`, (err as Error).message);
+      }
+    },
+    onConfigError,
+    closeEdge: (sessionId) => server.closeEdge(sessionId),
+    logger: console,
+  });
+  console.log('[aidcp-cloud] 连接运行时注册表就绪（按连接多租户编排，握手建运行时、断连拆除）');
+
+  // 角色 prompt 只读预览（role-prompt-visibility）：用一个仅供预览的 RoleDispatcher 渲染真实 prompt
+  // （独立私有总线、从不启动会话 / 从不下发指令；多租户下不再有单一全局 dispatcher 可借）。
+  const previewDispatcher = buildDispatcher({
+    bus: new EventBus(),
+    controller: riskController,
+    accountId: 'default',
+    edgeId: undefined,
+  });
+  previewDispatcher.setup();
 
   // 注册发布编排器的生产段角色（A 阶段2 细拆：6→11，下游 Gatekeeper/Executor 不变）。
   // 注册顺序无关正确性（黑板靠键就绪触发），按拓扑排列便于阅读。
@@ -667,13 +752,16 @@ async function main(): Promise<void> {
           status: record.status as 'draft' | 'published' | 'failed' | 'needs_review',
           // 审计用 image_url；是否真附着插入时为 false，上传成功后由 markImagesAttached 置 true。
           imageUrl: record.imageUrl,
+          // 真实发布账号（change publish-history-account-and-detail）：来自触发上下文，缺省 'default'。
+          accountId: record.accountId,
         });
       },
       async updateStatus(id, status) {
         await publishLogStore.updateStatus(id, status as 'draft' | 'published' | 'failed' | 'needs_review');
       },
-      async updatePostId(id, postId) {
-        await publishLogStore.updatePostId(id, postId);
+      async updatePostId(id, postId, postUrl) {
+        // 详情页分享 URL（带 xsec_token）一并回写；边缘抓不到则为 null（COALESCE 不覆盖、诚实置空）。
+        await publishLogStore.updatePostId(id, postId, postUrl);
       },
       // stage-4 元数据落库 + 防篡改审计（补接 server 适配器漏接，使 executor 的 recordMetadata 真生效）。
       async recordMetadata(id, metadata, aiEnforced) {
@@ -804,8 +892,8 @@ async function main(): Promise<void> {
   });
   // 安全限额面板外观（change safety-quota-config）：三档×动作×三窗口生效值 + 写校验（非法整块拒）+ 非乐观回真态。
   const quotaConfigPanel = createQuotaConfigPanel({ store: quotaConfigStore });
-  // 角色 prompt 只读预览（change role-prompt-visibility）：借 RoleDispatcher 已注册的浏览角色实例渲染真实 prompt。
-  const rolePromptProvider = createRolePromptProvider(() => roleDispatcher.getRoles());
+  // 角色 prompt 只读预览（change role-prompt-visibility）：借仅供预览的 RoleDispatcher 渲染真实 prompt。
+  const rolePromptProvider = createRolePromptProvider(() => previewDispatcher.getRoles());
 
   // ── 面板 API 层（管理后台后端，进程内、独立端口、JWT）──────────────────────
   // 未设置 AIDCP_PANEL_PORT 则禁用（默认不开新端口）；启动失败非致命，绝不连累边-云闭环。
@@ -841,15 +929,15 @@ async function main(): Promise<void> {
               const resumedEdges = server.resumeEdgesForAccount(accountId);
               return { accountId, status: 'active' as const, resumedEdges };
             },
-            // V1 task 9.4：调度启停切现役单全局 RoleDispatcher；回报真实在线 edge 数，绝不乐观。
-            // accountId 信息性（单账号现实）；no-op（已 active/已 stop）以 changed=false 诚实可辨。
+            // 调度启停全局开关：切所有连接运行时的会话（start 经诚实人设闸 / stop 全停）；回报真实在线 edge 数，绝不乐观。
+            // accountId 信息性（当前为全局开关）；no-op（已 active/已 stop）以 changed=false 诚实可辨。
             dispatch: async (accountId, action) => {
               const want = action === 'start';
               const changed = dispatchActive !== want;
               if (changed) {
-                if (want) roleDispatcher.startSession();
-                else roleDispatcher.endSession('panel_dispatch_stop');
-                dispatchActive = want;
+                dispatchActive = want; // 先置标志，使 startAll 的启动闸看到 active
+                if (want) runtimes?.startAll();
+                else runtimes?.endAll('panel_dispatch_stop');
               }
               return {
                 accountId,

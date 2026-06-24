@@ -33,6 +33,12 @@ ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS ai_enforced BOOLEAN NOT NULL DE
 -- publish-media-upload（配图收口）：审计用 image_url + 权威「真有图」信号 images_attached。
 ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS image_url TEXT;
 ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS images_attached BOOLEAN NOT NULL DEFAULT false;
+-- publish-history-account-and-detail：
+--   account_id（迁移 0005 已加；此处补进 canonical SQL，使全新 init() 的库也有该列，insert 真正写入真实账号）；
+--   post_url（带 xsec_token 的完整详情页分享 URL，发布成功后回写；抓不到存 NULL）。
+ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS post_url TEXT;
+CREATE INDEX IF NOT EXISTS idx_publish_log_account ON publish_log (account_id);
 `;
 
 export interface PublishLogStoreOptions {
@@ -82,8 +88,8 @@ export class PublishLogStore {
   /** 写入一条发布记录，返回新行 id。 */
   async insert(record: PublishRecord): Promise<number> {
     const { rows } = await this.pool.query<{ id: number }>(
-      `INSERT INTO publish_log (title, content, source_concepts, source_liked_ids, status, platform_post_id, image_url, images_attached)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO publish_log (title, content, source_concepts, source_liked_ids, status, platform_post_id, image_url, images_attached, account_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING id`,
       [
         record.title,
@@ -95,6 +101,8 @@ export class PublishLogStore {
         record.imageUrl ?? null,
         // 插入时配图尚未上传，权威信号默认 false；上传成功后由 markImagesAttached 置 true。
         record.imagesAttached ?? false,
+        // 发布账号：来自触发上下文；缺省回落 'default'（单账号向后兼容），让发布历史可真正按账号区分。
+        record.accountId ?? 'default',
       ],
     );
     return rows[0].id;
@@ -110,11 +118,14 @@ export class PublishLogStore {
     await this.pool.query('UPDATE publish_log SET status = $2 WHERE id = $1', [id, status]);
   }
 
-  /** 发布成功后回填平台帖子 id（并置为 published）。 */
-  async updatePostId(id: number, postId: string): Promise<void> {
+  /**
+   * 发布成功后回填平台帖子 id（并置为 published）；可选回写带 xsec_token 的完整详情页分享 URL。
+   * postUrl 缺省/为 null 时不覆盖既有值（边缘抓不到 URL 时诚实置空，绝不写假链接）。
+   */
+  async updatePostId(id: number, postId: string, postUrl?: string | null): Promise<void> {
     await this.pool.query(
-      `UPDATE publish_log SET platform_post_id = $2, status = 'published' WHERE id = $1`,
-      [id, postId],
+      `UPDATE publish_log SET platform_post_id = $2, post_url = COALESCE($3, post_url), status = 'published' WHERE id = $1`,
+      [id, postId, postUrl ?? null],
     );
   }
 
@@ -174,6 +185,6 @@ export class PublishLogStore {
 /** 发布记录的最小存储接口（便于单测打桩，不依赖真实 PG）。 */
 export interface PublishLogSink {
   insert(record: PublishRecord): Promise<number>;
-  updatePostId(id: number, postId: string): Promise<void>;
+  updatePostId(id: number, postId: string, postUrl?: string | null): Promise<void>;
   updateStatus(id: number, status: PublishStatus): Promise<void>;
 }

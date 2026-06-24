@@ -38,6 +38,13 @@ export interface PanelAccount {
   riskStatus: RiskStatus | null;
   riskQuotaLevel: RiskQuotaLevel | null;
   signalCount: number | null;
+  /**
+   * 人设绑定状态（派生字段，multi-account-node-support）：以 persona_config 行存在且非空为唯一判据，
+   * **不读死列 accounts.persona_ref**。
+   */
+  personaBound: boolean;
+  /** 需设置人设（派生）：未绑人设且非 default（default 硬豁免）。后台据此标「需设置人设」+ 跳转人设页。 */
+  needsPersonaSetup: boolean;
 }
 
 export interface PanelPublish {
@@ -46,6 +53,14 @@ export interface PanelPublish {
   status: string;
   platformPostId: string | null;
   publishedAt: number;
+  /** 发布账号（change publish-history-account-and-detail）。 */
+  accountId: string;
+  /** 账号展示名（accounts.label ?? account_id；nickname 待 account-real-nickname 落地后并入）。 */
+  accountLabel: string;
+  /** 已发布正文全文（后台「查看」用）。 */
+  content: string | null;
+  /** 小红书详情页分享 URL（带 xsec_token）；抓不到为 null，后台显示「无链接」、不给坏链。 */
+  postUrl: string | null;
 }
 
 export type TodayTotals = Record<RiskAction, number>;
@@ -94,7 +109,8 @@ export interface PanelStoreReader {
   likeRate(): Promise<LikeRate>;
   listAccounts(): Promise<PanelAccount[]>;
   getAccount(accountId: string): Promise<PanelAccount | null>;
-  publishedHistory(limit: number): Promise<PanelPublish[]>;
+  /** 已发布历史；可选按账号过滤（change publish-history-account-and-detail）。 */
+  publishedHistory(limit: number, accountId?: string): Promise<PanelPublish[]>;
   /** 告警列表（V1 task 9.5）；默认仅未解决。 */
   listAlerts(options?: { limit?: number; includeResolved?: boolean }): Promise<PanelAlert[]>;
   /** 按笔记互动历史（V1 task 9.2）；可按账号过滤。 */
@@ -121,11 +137,14 @@ interface AccountJoinRow {
   risk_status: string | null;
   risk_quota_level: string | null;
   signal_count: number | null;
+  persona_bound: boolean | null;
 }
 
 function toAccount(r: AccountJoinRow): PanelAccount {
+  const accountId = r.account_id;
+  const personaBound = r.persona_bound === true;
   return {
-    accountId: r.account_id,
+    accountId,
     label: r.label,
     platform: r.platform,
     groupLabel: r.group_label,
@@ -135,15 +154,20 @@ function toAccount(r: AccountJoinRow): PanelAccount {
     riskStatus: (r.risk_status as RiskStatus | null) ?? null,
     riskQuotaLevel: (r.risk_quota_level as RiskQuotaLevel | null) ?? null,
     signalCount: r.signal_count,
+    personaBound,
+    // default 硬豁免：永不标「需设置人设」（沿用打包默认人设）。
+    needsPersonaSetup: !personaBound && accountId !== 'default',
   };
 }
 
 const ACCOUNT_SELECT = `
   SELECT a.account_id, a.label, a.platform, a.group_label, a.machine_label,
          a.status AS operator_status, a.paused_at,
-         r.status AS risk_status, r.quota_level AS risk_quota_level, r.signal_count
+         r.status AS risk_status, r.quota_level AS risk_quota_level, r.signal_count,
+         (pc.account_id IS NOT NULL AND btrim(pc.persona) <> '') AS persona_bound
   FROM accounts a
-  LEFT JOIN risk_state r ON r.account_id = a.account_id`;
+  LEFT JOIN risk_state r ON r.account_id = a.account_id
+  LEFT JOIN persona_config pc ON pc.account_id = a.account_id`;
 
 export class PgPanelStore implements PanelStoreReader {
   private readonly pool: pg.Pool;
@@ -234,17 +258,35 @@ export class PgPanelStore implements PanelStoreReader {
     return r ? toAccount(r) : null;
   }
 
-  async publishedHistory(limit: number): Promise<PanelPublish[]> {
+  /**
+   * 已发布历史（change publish-history-account-and-detail）：带账号 + 正文 + 详情页链接；可选按账号过滤。
+   * LEFT JOIN accounts 取展示名（label ?? account_id）；按账号过滤走 publish_log.account_id 索引（迁移 0005）。
+   */
+  async publishedHistory(limit: number, accountId?: string): Promise<PanelPublish[]> {
+    const params: unknown[] = [];
+    let where = '';
+    if (accountId) {
+      params.push(accountId);
+      where = `WHERE pl.account_id = $${params.length}`;
+    }
+    params.push(limit);
     const { rows } = await this.pool.query<{
       id: number;
       title: string | null;
       status: string;
       platform_post_id: string | null;
       published_at: Date;
+      account_id: string;
+      account_label: string | null;
+      content: string | null;
+      post_url: string | null;
     }>(
-      `SELECT id, title, status, platform_post_id, published_at
-       FROM publish_log ORDER BY published_at DESC LIMIT $1`,
-      [limit],
+      `SELECT pl.id, pl.title, pl.status, pl.platform_post_id, pl.published_at,
+              pl.account_id, a.label AS account_label, pl.content, pl.post_url
+       FROM publish_log pl
+       LEFT JOIN accounts a ON a.account_id = pl.account_id
+       ${where} ORDER BY pl.published_at DESC LIMIT $${params.length}`,
+      params,
     );
     return rows.map((r) => ({
       id: r.id,
@@ -252,6 +294,10 @@ export class PgPanelStore implements PanelStoreReader {
       status: r.status,
       platformPostId: r.platform_post_id,
       publishedAt: r.published_at.getTime(),
+      accountId: r.account_id,
+      accountLabel: r.account_label ?? r.account_id,
+      content: r.content,
+      postUrl: r.post_url,
     }));
   }
 

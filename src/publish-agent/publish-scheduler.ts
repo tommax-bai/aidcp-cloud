@@ -43,11 +43,11 @@ export interface PublishSchedulerDeps {
   orchestrator: SchedulerOrchestrator;
   /**
    * 人设注入（change account-persona-config）。两种形态，至少给一个：
-   * - getSoul：构建发布输入时按当前账号解析（热加载，PUT 人设后即时生效）——生产路径；
+   * - getSoul：构建发布输入时按目标账号解析（热加载，PUT 人设后即时生效）——生产路径；
    * - soul：构造期人设快照（向后兼容旧构造 / 测试桩）。两者皆给时 getSoul 优先。
    */
   soul?: Soul;
-  getSoul?: () => Soul;
+  getSoul?: (accountId?: string) => Soul;
   /** 概念积累阈值 N（缺省 20）。 */
   conceptThreshold?: number;
   /** 两次发布最小间隔小时（风控窗口扳机，缺省 24）。 */
@@ -82,11 +82,11 @@ export class PublishScheduler {
   }
 
   /**
-   * 解析当前账号人设（getSoul 取值口优先 → 兼容快照）。取值口内部已回落打包默认 soul；
+   * 解析目标账号人设（getSoul 取值口优先 → 兼容快照）。取值口内部已回落打包默认 soul；
    * 两者皆缺则抛（构造契约违背，诚实失败不静默）。
    */
-  private resolveSoul(): Soul {
-    if (this.d.getSoul) return this.d.getSoul();
+  private resolveSoul(accountId?: string): Soul {
+    if (this.d.getSoul) return this.d.getSoul(accountId);
     if (this.d.soul) return this.d.soul;
     throw new Error('PublishScheduler 缺少人设注入（soul / getSoul 至少给一个）');
   }
@@ -96,8 +96,8 @@ export class PublishScheduler {
     return (await this.d.publishLog.getMostRecentPublishTime()) ?? this.startedAt;
   }
 
-  /** 聚合 TriggerInput（真概念 + 真点赞 + 最近已发 + 人设）。 */
-  async buildTriggerInput(): Promise<TriggerInput> {
+  /** 聚合 TriggerInput（真概念 + 真点赞 + 最近已发 + 目标账号人设）。 */
+  async buildTriggerInput(accountId?: string): Promise<TriggerInput> {
     const baseline = await this.baselineMs();
     const [conceptKeywords, liked, recentPublished, newConceptCount] = await Promise.all([
       this.d.conceptStore.getNewConceptsSince(baseline),
@@ -115,10 +115,12 @@ export class PublishScheduler {
       generateInput: {
         concepts: conceptKeywords.map((keyword) => ({ keyword })),
         likedContents: liked.map((l) => ({ id: l.id, title: l.title, summary: l.summary, author: l.author ?? '' })),
-        soul: this.resolveSoul(),
+        soul: this.resolveSoul(accountId),
         recentPosts: recentPublished,
       },
       recentPublished,
+      // 目标账号贯穿到落库（publish_log.account_id）与命令定向；缺省回落 'default'。
+      accountId: accountId ?? 'default',
     };
   }
 
@@ -146,16 +148,19 @@ export class PublishScheduler {
     return { result: 'triggered', reason, status: status2 };
   }
 
-  /** 手动飞书 /publish：越过 canDo（人工授权）+ 强制发布（不被 scout「无新素材」否决），但下游人审仍必过（AC-PUB）。 */
-  async triggerManual(): Promise<TriggerOutcome> {
-    this.logger.log('[PublishScheduler] 手动 /publish：越过风控 canDo + 强制发布（人工授权），发布前飞书人审仍生效');
-    const status = await this.doTrigger('manual_feishu', true);
+  /**
+   * 手动飞书 /publish [accountId]：越过 canDo（人工授权）+ 强制发布（不被 scout「无新素材」否决），但下游人审仍必过（AC-PUB）。
+   * accountId 缺省回落 'default'（单账号向后兼容）；指定时以该账号人设生成、落库该账号、命令定向到该账号节点。
+   */
+  async triggerManual(accountId?: string): Promise<TriggerOutcome> {
+    this.logger.log(`[PublishScheduler] 手动 /publish account=${accountId ?? 'default'}：越过风控 canDo + 强制发布（人工授权），发布前飞书人审仍生效`);
+    const status = await this.doTrigger('manual_feishu', true, accountId);
     return { result: 'triggered', reason: 'manual_feishu', status };
   }
 
-  private async doTrigger(reason: string, forced = false): Promise<string> {
-    const input = { ...(await this.buildTriggerInput()), forced };
-    this.logger.log(`[PublishScheduler] 触发发帖编排 reason=${reason} forced=${forced} newConcepts=${input.metrics.newConceptCount} liked=${input.metrics.likedSinceLastPublish}`);
+  private async doTrigger(reason: string, forced = false, accountId?: string): Promise<string> {
+    const input = { ...(await this.buildTriggerInput(accountId)), forced };
+    this.logger.log(`[PublishScheduler] 触发发帖编排 reason=${reason} forced=${forced} account=${input.accountId} newConcepts=${input.metrics.newConceptCount} liked=${input.metrics.likedSinceLastPublish}`);
     const res = await this.d.orchestrator.trigger(input);
     return res.status;
   }

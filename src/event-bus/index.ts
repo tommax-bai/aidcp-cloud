@@ -79,6 +79,14 @@ export class EventBus {
   }
 
   /**
+   * 类型擦除的转发用 emit：用于跨总线转发 / 聚合（每连接私有通道 tee 到全局观测总线、
+   * 看板事件扇出聚合）。语义同 emit（fire-and-forget），仅放宽编译期类型约束。
+   */
+  emitRaw(event: string, data: unknown): void {
+    this.emit(event as keyof AllEventMap, data as AllEventMap[keyof AllEventMap]);
+  }
+
+  /**
    * 异步触发事件，等待所有 handler resolve。
    */
   async emitAsync<K extends keyof AllEventMap>(event: K, data: AllEventMap[K]): Promise<void> {

@@ -150,8 +150,11 @@ function createRequestHandler(
       sendJson(res, 200, account);
       return;
     }
+    // 已发布历史（change publish-history-account-and-detail）：带账号/正文/详情链接，可选 ?accountId 过滤。
     if (method === 'GET' && url === '/api/content/published') {
-      sendJson(res, 200, { items: await deps.panelStore.publishedHistory(50) });
+      const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+      const accountId = query.get('accountId') ?? undefined;
+      sendJson(res, 200, { items: await deps.panelStore.publishedHistory(50, accountId) });
       return;
     }
     if (method === 'GET' && url === '/api/content/queue') {

@@ -76,7 +76,8 @@ export function parseCommand(text: string): ParsedCommand {
     case '/publish-test':
       return { action: 'publish-test', accountId: DEFAULT_ACCOUNT_ID, raw, args };
     case '/publish':
-      return { action: 'publish', accountId: DEFAULT_ACCOUNT_ID, raw, args };
+      // /publish [accountId]：第二个 token 视为目标账号，缺省 default（向后兼容）。以该账号人设发帖、落该账号、定向下发。
+      return { action: 'publish', accountId: args[0] ?? DEFAULT_ACCOUNT_ID, raw, args };
     case '/bind':
       return { action: 'bind', accountId: DEFAULT_ACCOUNT_ID, raw, args };
     default:
@@ -94,8 +95,8 @@ export interface CommandActions {
   resume(accountId: string): Promise<void> | void;
   /** 发送审批测试卡片 */
   publishTest?(): Promise<PublishApprovalPayload> | PublishApprovalPayload;
-  /** 手动触发一次发帖编排（A 阶段4 PublishScheduler 手动扳机；返回可读回执）。 */
-  publish?(): Promise<string> | string;
+  /** 手动触发一次发帖编排（A 阶段4 PublishScheduler 手动扳机；返回可读回执）。accountId 指定发哪个账号，缺省 default。 */
+  publish?(accountId?: string): Promise<string> | string;
   /** 绑定当前群为默认审批群 */
   bindChat?(record: BotChatRecord): Promise<void> | void;
 }
@@ -170,12 +171,13 @@ export class CommandRouter {
       return this.fail(cmd, '发帖未接线', new Error('publish action not wired'));
     }
     try {
-      const msg = await this.actions.publish();
+      const msg = await this.actions.publish(cmd.accountId);
       return {
         command: cmd.raw,
         ok: true,
         title: '已触发发帖编排',
-        message: `${msg}\n（人工授权越过风控，但发布前仍需飞书人审 approved=true 才会真发）`,
+        message: `${msg}\n（账号 \`${cmd.accountId}\`；人工授权越过风控，但发布前仍需飞书人审 approved=true 才会真发）`,
+        accountId: cmd.accountId,
       };
     } catch (err) {
       return this.fail(cmd, '发帖触发失败', err);

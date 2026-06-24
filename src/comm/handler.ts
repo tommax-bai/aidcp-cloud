@@ -57,6 +57,9 @@ export interface AnchorStore {
   dropStaged(actionId: string): Promise<void>;
 }
 
+/** 握手结果：ok 则建会话，否则按配置错误拒绝（结构兼容 connection-runtime.ts 的同名类型）。 */
+export type HandshakeOutcome = { ok: true } | { ok: false; code: string; message: string };
+
 export interface HandlerDeps {
   planner: TaskPlanner;
   llm: LlmClient;
@@ -74,6 +77,19 @@ export interface HandlerDeps {
   captcha?: CaptchaCoordinator;
   /** A 阶段1 发布指令编排器：消费 publish.command.result 关联回报（未注入则忽略，向后兼容）。 */
   commandSequencer?: Pick<CommandSequencer, 'onResult'>;
+  // ── multi-account-node-support：按连接多租户路由 ─────────────────────────
+  /**
+   * 该连接的私有事件总线（缺省 → 回落 eventBus，单租户向后兼容）。入站事件发到此总线，
+   * 经其 tee 到全局观测总线供风控记账 / 看板消费；连接间互不串味。
+   */
+  busFor?: (session: EdgeSession) => EventBus;
+  /**
+   * 握手钩子：校验账号身份、登记新账号、建该连接运行时（私有总线 + RoleDispatcher）。
+   * 返回 ok=false（如缺 accountId）则按配置错误拒绝握手、不回 welcome、不建会话。缺省 → 视为 ok（向后兼容）。
+   */
+  onHandshake?: (session: EdgeSession) => Promise<HandshakeOutcome> | HandshakeOutcome;
+  /** 按连接真实账号解析 RiskController（reserved risk 通道 / session.budget 用）；缺省回落 riskController。 */
+  resolveController?: (session: EdgeSession) => RiskController | undefined;
 }
 
 /** 把元素清单渲染成给 LLM 的编号列表（与 edge selector 一致的格式） */
@@ -126,6 +142,16 @@ export class DefaultMessageHandler implements MessageHandler {
     this.riskController = deps.riskController ?? new RiskController();
   }
 
+  /** 该连接的事件总线（多租户私有通道）；未接线则回落全局总线（单租户向后兼容）。 */
+  private bus(session: EdgeSession): EventBus {
+    return this.deps.busFor?.(session) ?? this.deps.eventBus;
+  }
+
+  /** 该连接真实账号的 RiskController；未接线则回落注入的单一 controller（向后兼容）。 */
+  private controllerFor(session: EdgeSession): RiskController {
+    return this.deps.resolveController?.(session) ?? this.riskController;
+  }
+
   async handle(
     env: Envelope,
     session: EdgeSession,
@@ -158,15 +184,15 @@ export class DefaultMessageHandler implements MessageHandler {
         // 戳当前笔记 id：随后 action.completed 发射 interaction.occurred 时据此补 noteId（V1 task 9.2）。
         if (incomingNote.noteId) session.currentNoteId = incomingNote.noteId;
 
-        // 暂停检查：已暂停则仅返回 ack，不触发 orchestrator
-        // 账号 id 统一为 'default'（对齐 accounts 表 seed 行 / 风控 / 飞书命令缺省）
-        if (this.deps.accountState?.isPaused('default')) {
+        // 暂停检查：已暂停则仅返回 ack，不触发 orchestrator。
+        // 多租户：按连接真实账号判暂停（缺失回退 default，向后兼容 legacy edge）。
+        if (this.deps.accountState?.isPaused(session.accountId ?? 'default')) {
           this.logger.log('[comm] 账号已暂停，跳过笔记处理:', incomingNote.title);
           return makeEnvelope('note.ack', env.id, this.clock(), { received: true });
         }
 
         // 异步发射事件（fire-and-forget）
-        this.deps.eventBus.emit('note.arrived', { note: incomingNote, ts: this.clock() });
+        this.bus(session).emit('note.arrived', { note: incomingNote, ts: this.clock() });
         // 立即返回 ack
         return makeEnvelope('note.ack', env.id, this.clock(), { received: true });
       }
@@ -174,11 +200,11 @@ export class DefaultMessageHandler implements MessageHandler {
         await this.onPublishApprovalRequest(env, session);
         return null;
       case 'session.budget.request':
-        return this.onSessionBudgetRequest(env);
+        return this.onSessionBudgetRequest(env, session);
       case 'risk.canDo':
-        return this.onRiskCanDo(env);
+        return this.onRiskCanDo(env, session);
       case 'risk.record':
-        return this.onRiskRecord(env);
+        return this.onRiskRecord(env, session);
       case 'risk.captcha_detected':
         await this.deps.captcha?.onDetected(env.payload as CaptchaDetectedPayload, session, pusher);
         return null;
@@ -187,25 +213,25 @@ export class DefaultMessageHandler implements MessageHandler {
         return null;
       case 'page.cards': {
         const { cards } = env.payload as PageCardsPayload;
-        this.deps.eventBus.emit('page.cards.arrived', { cards, ts: this.clock() });
+        this.bus(session).emit('page.cards.arrived', { cards, ts: this.clock() });
         return null;
       }
       case 'note.detail': {
         const detail = env.payload as NoteDetailPayload;
         // 戳当前笔记 id（v2 现役路径）：action.completed 据此补 noteId（V1 task 9.2）。
         if (detail.noteId) session.currentNoteId = detail.noteId;
-        this.deps.eventBus.emit('note.detail.arrived', { detail, ts: this.clock() });
+        this.bus(session).emit('note.detail.arrived', { detail, ts: this.clock() });
         return null;
       }
       case 'profile.detail': {
         const detail = env.payload as ProfileDetailPayload;
-        this.deps.eventBus.emit('profile.detail.arrived', { detail, ts: this.clock() });
+        this.bus(session).emit('profile.detail.arrived', { detail, ts: this.clock() });
         return null;
       }
       // —— 通知巡视（消息查看）：边缘上报 → 入口事件转换 ——
       case 'notification.detected': {
         const p = env.payload as NotificationDetectedPayload;
-        this.deps.eventBus.emit('notification.detected.arrived', {
+        this.bus(session).emit('notification.detected.arrived', {
           edgeId: p.edgeId,
           epoch: p.epoch,
           unreadCount: p.unreadCount,
@@ -215,7 +241,7 @@ export class DefaultMessageHandler implements MessageHandler {
       }
       case 'notification.home': {
         const p = env.payload as NotificationHomePayload;
-        this.deps.eventBus.emit('notification.home.arrived', {
+        this.bus(session).emit('notification.home.arrived', {
           comments: p.comments,
           likes: p.likes,
           follows: p.follows,
@@ -226,7 +252,7 @@ export class DefaultMessageHandler implements MessageHandler {
       }
       case 'notification.items': {
         const p = env.payload as NotificationItemsPayload;
-        this.deps.eventBus.emit('notification.items.arrived', {
+        this.bus(session).emit('notification.items.arrived', {
           items: p.items,
           epoch: p.epoch,
           ts: this.clock(),
@@ -235,7 +261,7 @@ export class DefaultMessageHandler implements MessageHandler {
       }
       case 'action.completed': {
         const result = env.payload as ActionCompletedPayload;
-        this.deps.eventBus.emit('action.completed', { ...result, ts: this.clock() });
+        this.bus(session).emit('action.completed', { ...result, ts: this.clock() });
         // 真实成功互动 → 驱动 RiskController 按账号计数（record 订在 interaction.occurred）。
         // already_followed 是良性 no-op，失败 ok=false，均不计——只记真实发生的互动。
         if (
@@ -243,7 +269,7 @@ export class DefaultMessageHandler implements MessageHandler {
           (result.action === 'like' || result.action === 'collect' || result.action === 'follow' || result.action === 'comment' || result.action === 'comment_like') &&
           result.reason !== 'already_followed'
         ) {
-          this.deps.eventBus.emit('interaction.occurred', {
+          this.bus(session).emit('interaction.occurred', {
             action: result.action as 'like' | 'collect' | 'follow' | 'comment' | 'comment_like',
             // accountId 从会话填；缺失（legacy edge）回退保留键 'default'，绝不误并入真名账号（D3/D4）
             accountId: session.accountId ?? 'default',
@@ -270,7 +296,7 @@ export class DefaultMessageHandler implements MessageHandler {
     }
   }
 
-  private onHello(env: Envelope, session: EdgeSession): Envelope {
+  private async onHello(env: Envelope, session: EdgeSession): Promise<Envelope> {
     const p = env.payload as HelloPayload;
     session.edgeId = p.edgeId;
     session.app = p.app;
@@ -278,16 +304,27 @@ export class DefaultMessageHandler implements MessageHandler {
     session.accountId = p.accountId;
     session.machineLabel = p.machineLabel;
     session.remoteAddr = p.remoteAddr;
-    // 通知编排层：新边缘上线 → 重置/重启会话（修复会话时长随云端运行时长累计、超时后不再驱动新连接的 bug）。
-    this.deps.eventBus.emit('edge.hello', { edgeId: p.edgeId, ts: this.clock() });
+    // 多租户握手（multi-account-node-support）：校验账号身份、登记新账号、建该连接运行时（私有总线 + RoleDispatcher）。
+    // 缺/空 accountId → 配置错误拒绝握手（不回 welcome、不建会话、绝不偷映射成 default 开跑，D4）。
+    const outcome = (await this.deps.onHandshake?.(session)) ?? ({ ok: true } as const);
+    if (!outcome.ok) {
+      this.logger.warn('[comm] 握手被拒（配置错误）:', {
+        edgeId: p.edgeId,
+        code: outcome.code,
+        message: outcome.message,
+      });
+      return makeEnvelope('error', env.id, this.clock(), { code: outcome.code, message: outcome.message });
+    }
+    // 通知该连接决策层：上线 → 携 accountId emit edge.hello（进私有通道）触发会话启动（经诚实人设/调度闸 D3）。
+    this.bus(session).emit('edge.hello', { edgeId: p.edgeId, accountId: session.accountId, ts: this.clock() });
     return makeEnvelope('welcome', env.id, this.clock(), {
       sessionId: session.sessionId,
       serverVersion: this.serverVersion,
     });
   }
 
-  private onSessionBudgetRequest(env: Envelope): Envelope {
-    const state = this.riskController.getState();
+  private onSessionBudgetRequest(env: Envelope, session: EdgeSession): Envelope {
+    const state = this.controllerFor(session).getState();
     const budget = new SessionBudget({ quotaLevel: state.quotaLevel });
     return makeEnvelope('session.budget', env.id, this.clock(), {
       ...budget.snapshot(),
@@ -297,10 +334,10 @@ export class DefaultMessageHandler implements MessageHandler {
     });
   }
 
-  private onRiskCanDo(env: Envelope): Envelope {
+  private onRiskCanDo(env: Envelope, session: EdgeSession): Envelope {
     const p = env.payload as RiskCanDoPayload;
     const action = p.action as RiskAction;
-    const result = this.riskController.explain(action);
+    const result = this.controllerFor(session).explain(action);
     return makeEnvelope('risk.canDo.result', env.id, this.clock(), {
       action,
       allowed: result.allowed,
@@ -308,10 +345,10 @@ export class DefaultMessageHandler implements MessageHandler {
     });
   }
 
-  private async onRiskRecord(env: Envelope): Promise<Envelope> {
+  private async onRiskRecord(env: Envelope, session: EdgeSession): Promise<Envelope> {
     const p = env.payload as RiskRecordPayload;
     const action = p.action as RiskAction;
-    const recorded = await this.riskController.record(action);
+    const recorded = await this.controllerFor(session).record(action);
     return makeEnvelope('risk.record.result', env.id, this.clock(), {
       action,
       recorded,

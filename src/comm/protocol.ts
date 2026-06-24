@@ -447,6 +447,11 @@ export interface PublishCommandResultPayload {
   ok: boolean;
   /** 成功时的产出值（如 capture_postId 的真实 postId） */
   value?: string;
+  /**
+   * capture_postId 附带：带 xsec_token 的完整小红书详情页分享 URL（可点开真实笔记）。
+   * 抓不到则不带（undefined）——诚实置空，绝不用裸 id 拼打不开的假链接（change publish-history-account-and-detail）。
+   */
+  postUrl?: string;
   /** 失败原因（no_target / post_validation_failed / kind_not_implemented / escalated 等） */
   error?: string;
   /** 诊断细节（定位/校验观测） */

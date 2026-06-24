@@ -39,12 +39,19 @@ export interface PublishSequenceInput {
   metadata?: PublishMetadata;
   /** 是否已通过人审（AC-PUB）；false → 序列截止于提交前 */
   approvedByUser: boolean;
+  /**
+   * 目标边缘节点 edgeId（change publish-history-account-and-detail）。指定则本次序列所有指令**定向**到该节点、
+   * 不广播；缺省（旧路径/单边缘）则广播（向后兼容）。云端已据目标账号解析出在线节点（无节点则在 executor 诚实失败、不入此序列）。
+   */
+  edgeId?: string;
 }
 
 export interface PublishSequenceResult {
   ok: boolean;
   /** 成功时的真实平台 postId（来自 capture_postId 回报） */
   postId?: string;
+  /** 成功时的小红书详情页分享 URL（带 xsec_token，来自 capture_postId 回报；边缘抓不到则 undefined） */
+  postUrl?: string;
   /**
    * 配图是否全部成功上传。请求了配图（images 非空）但任一 upload_image 失败/超时 → false（降级纯文字）。
    * 未请求配图时为 true（无图可降级）。executor 据 false 回正已落库的 imageUrl，杜绝纯文字帖留「有图」假信号。
@@ -156,7 +163,9 @@ export class CommandSequencer {
   async executePublishSequence(input: PublishSequenceInput): Promise<PublishSequenceResult> {
     const sequence = this.buildCommandSequence(input);
     const imagesRequested = !!(input.images && input.images.length);
+    const targetEdgeId = input.edgeId;
     let postId: string | undefined;
+    let postUrl: string | undefined;
     let submitted = false;
     let imagesOk = true;
     // 元数据是增强项，非有效帖必需：失败best-effort跳过、继续发（带标题/正文/图的帖子仍是有效帖）。
@@ -178,7 +187,7 @@ export class CommandSequencer {
 
       let result: PublishCommandResultPayload;
       try {
-        result = await this.sendAndWaitResult(cmd);
+        result = await this.sendAndWaitResult(cmd, targetEdgeId);
       } catch (err) {
         const error = err instanceof Error ? err.message : String(err);
         // 配图唯一放宽：upload_image 超时/异常 → 降级纯文字、继续。
@@ -221,18 +230,25 @@ export class CommandSequencer {
         return { ok: false, imagesOk, failedAt: { seq: cmd.seq, kind: cmd.kind, error: result.error ?? 'unknown' } };
       }
       if (cmd.kind === 'submit_publish') submitted = true;
-      if (cmd.kind === 'capture_postId') postId = result.value;
+      if (cmd.kind === 'capture_postId') {
+        postId = result.value;
+        // 详情页分享 URL（带 xsec_token）随 capture_postId 回报；边缘抓不到则 undefined（诚实置空，下游不写假链接）。
+        postUrl = result.postUrl;
+      }
     }
 
     // 未授权 → 序列不含 submit → 未真正发布（红线：不假成功）。
     if (!submitted) {
       return { ok: false, imagesOk, failedAt: { seq: -1, kind: 'submit_publish', error: 'not_approved' } };
     }
-    return { ok: true, imagesOk, postId };
+    return { ok: true, imagesOk, postId, postUrl };
   }
 
-  /** 下发一条 publish.command 并等待其 result（按 recordId+seq 关联 + 超时清理）。 */
-  sendAndWaitResult(cmd: PublishCommandPayload): Promise<PublishCommandResultPayload> {
+  /**
+   * 下发一条 publish.command 并等待其 result（按 recordId+seq 关联 + 超时清理）。
+   * edgeId 指定则定向到该节点；缺省广播（向后兼容）。送达数为 0（含定向到的节点已离线）→ 诚实 reject（不假成功）。
+   */
+  sendAndWaitResult(cmd: PublishCommandPayload, edgeId?: string): Promise<PublishCommandResultPayload> {
     const key = `${cmd.recordId}:${cmd.seq}`;
     const envelope = makeEnvelope('publish.command', this.idGen(), this.clock(), cmd);
     // upload_image 用更宽超时，给边缘「下载+CDP+后置校验」留足空间先返回干净 ok:false（见 uploadTimeoutMs 说明）。
@@ -244,7 +260,7 @@ export class CommandSequencer {
       }, waitMs);
       this.pending.set(key, { commandId: envelope.id, sentAt: this.clock(), resolve, reject, timeoutHandle });
 
-      const sent = this.pusher.pushToEdges(envelope);
+      const sent = this.pusher.pushToEdges(envelope, edgeId);
       if (sent <= 0) {
         clearTimeout(timeoutHandle);
         this.pending.delete(key);

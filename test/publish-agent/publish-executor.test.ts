@@ -477,4 +477,87 @@ describe('PublishExecutorRole', () => {
     assert.equal(insertedRecords[0].status, 'failed');
     assert.deepEqual(attached, [{ id: 21, a: false }], 'markImagesAttached(false)');
   });
+
+  // change publish-history-account-and-detail：定向发布 + 无节点诚实失败（红线：不广播）。
+  test('定向发布：目标账号无在线节点 → 诚实 failed 且绝不广播、不发卡、不驱动序列（红线）', async () => {
+    const insertedRecords: any[] = [];
+    let pushCalls = 0;
+    let seqCalls = 0;
+    const fakeStore = { insert: async (r: any) => { insertedRecords.push(r); return 31; } };
+    const fakePusher = {
+      pushToEdges: () => { pushCalls++; return 1; },
+      // 关键：账号 acct-X 无在线节点 → 解析返回 null。
+      resolveEdgeIdForAccount: (_accountId: string) => null,
+    };
+    const fakeSequencer = { executePublishSequence: async () => { seqCalls++; return { ok: true, imagesOk: true, postId: 'x' }; } } as any;
+
+    const role = new PublishExecutorRole({
+      store: fakeStore,
+      pusher: fakePusher,
+      sequencer: fakeSequencer,
+      isApproved: async () => true,
+      clock,
+      logger: silentLogger,
+    });
+
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('trigger', { metrics: {}, generateInput: { concepts: [], likedContents: [], soul: {} as any, recentPosts: [] }, recentPublished: [], accountId: 'acct-X' } as any);
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+
+    await new Promise((r) => setTimeout(r, 60));
+
+    const result = ctx.get('publishResult');
+    assert.equal(result?.status, 'failed', '无在线节点 → 诚实 failed');
+    assert.equal(result?.dispatched, false);
+    assert.equal(pushCalls, 0, '红线：无目标绝不广播（pushToEdges 一次都不调）');
+    assert.equal(seqCalls, 0, '无目标 → 不驱动序列');
+    assert.equal(insertedRecords.length, 1, '诚实落库一条 failed');
+    assert.equal(insertedRecords[0].status, 'failed');
+    assert.equal(insertedRecords[0].accountId, 'acct-X', '失败记录也落真实账号');
+  });
+
+  test('定向发布：解析到在线节点 → edgeId 穿透 sequencer + 真实账号落库 + postUrl 回写', async () => {
+    const insertedRecords: any[] = [];
+    let seqInput: any;
+    let postWrite: { id: number; postId: string; postUrl?: string | null } | undefined;
+    const fakeStore = {
+      insert: async (r: any) => { insertedRecords.push(r); return 33; },
+      updateStatus: async () => {},
+      updatePostId: async (id: number, postId: string, postUrl?: string | null) => { postWrite = { id, postId, postUrl }; },
+    };
+    const fakePusher = {
+      pushToEdges: () => 1,
+      resolveEdgeIdForAccount: (accountId: string) => (accountId === 'acct-A' ? 'edge-A' : null),
+    };
+    const fakeSequencer = {
+      executePublishSequence: async (input: any) => { seqInput = input; return { ok: true, imagesOk: true, postId: 'post_A', postUrl: 'https://www.xiaohongshu.com/explore/post_A?xsec_token=TOK' }; },
+    } as any;
+
+    const role = new PublishExecutorRole({
+      store: fakeStore,
+      pusher: fakePusher,
+      sequencer: fakeSequencer,
+      isApproved: async () => true,
+      clock,
+      logger: silentLogger,
+    });
+
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('trigger', { metrics: {}, generateInput: { concepts: [], likedContents: [], soul: {} as any, recentPosts: [] }, recentPublished: [], accountId: 'acct-A' } as any);
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+
+    await new Promise((r) => setTimeout(r, 80));
+
+    const result = ctx.get('publishResult');
+    assert.equal(result?.status, 'published');
+    assert.equal(seqInput.edgeId, 'edge-A', '定向：解析出的 edgeId 穿透到 sequence');
+    assert.equal(insertedRecords[0].accountId, 'acct-A', 'draft 记录落真实账号');
+    assert.deepEqual(postWrite, { id: 33, postId: 'post_A', postUrl: 'https://www.xiaohongshu.com/explore/post_A?xsec_token=TOK' }, 'postId + postUrl 一并回写');
+  });
 });

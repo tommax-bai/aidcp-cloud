@@ -19,10 +19,13 @@ export interface PublishLogStore {
     /** stage-4 来源血缘（缺省时由适配器回退 tags / []）。 */
     sourceConcepts?: string[];
     sourceLikedIds?: number[];
+    /** 发布账号（change publish-history-account-and-detail）：来自触发上下文，缺省 'default'。落 publish_log.account_id。 */
+    accountId?: string;
   }): Promise<number>;
   /** 发布结果回写（指令驱动路径用；可选以兼容仅 insert 的旧桩）。 */
   updateStatus?(id: number, status: string): Promise<void>;
-  updatePostId?(id: number, postId: string): Promise<void>;
+  /** 回写平台帖子 id（并置 published）；postUrl 为带 xsec_token 的详情页分享 URL（边缘抓不到则不传/为空）。 */
+  updatePostId?(id: number, postId: string, postUrl?: string | null): Promise<void>;
   /** stage-4 元数据落库 + 防篡改审计（可选）。 */
   recordMetadata?(id: number, metadata: unknown, aiEnforced: boolean): Promise<void>;
   /**
@@ -35,6 +38,11 @@ export interface PublishLogStore {
 /** 边缘推送接口 */
 export interface EdgePusher {
   pushToEdges(envelope: unknown, edgeId?: string): number;
+  /**
+   * 解析绑定某账号的在线边缘节点 edgeId（change publish-history-account-and-detail）。
+   * 可选：旧桩不提供时退回旧行为（不预检、广播）；真实 EdgeCloudServer 提供后 → 定向 + 无节点诚实失败。
+   */
+  resolveEdgeIdForAccount?(accountId: string): string | null;
 }
 
 /** 飞书消息接口 */
@@ -125,24 +133,32 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     const { gateDecision, assembledContent } = input;
     // 标题收口：正常路径由 TitleCreator 产出（已 ≤18、字形安全）；意外缺失才字形安全派生。
     const title = this.resolveTitle(input.titleSelection, assembledContent);
+    // 发布账号（change publish-history-account-and-detail）：从触发上下文取，贯穿落库 + 定向下发。
+    const accountId = this.accountIdFrom(context);
 
     switch (gateDecision.recommendedAction) {
       case 'auto_publish':
-        return this.handleAutoPublish(assembledContent, title, context);
+        return this.handleAutoPublish(assembledContent, title, context, accountId);
       // manual_review 在指令驱动路径（sequencer 已注入）下与 auto_publish 同路：AC-PUB 本就要求人审，两者最终都是
       // 「发审批卡 → 人审通过 → 驱动指令序列」，差别仅是 gatekeeper 的风险标注、由人在卡片上定夺；真正"不问就毙"的是 abort。
       // 无 sequencer（旧路）才退回 handleManualReview。
       case 'manual_review':
         return this.sequencer
-          ? this.handleAutoPublish(assembledContent, title, context)
-          : this.handleManualReview(assembledContent, title);
+          ? this.handleAutoPublish(assembledContent, title, context, accountId)
+          : this.handleManualReview(assembledContent, title, accountId);
       case 'abort':
-        return this.handleAbort(assembledContent, title);
+        return this.handleAbort(assembledContent, title, accountId);
       case 'retry':
         return this.handleRetry();
       default:
-        return this.handleAbort(assembledContent, title);
+        return this.handleAbort(assembledContent, title, accountId);
     }
+  }
+
+  /** 发布账号：从触发上下文取真实账号；无则回落 'default'（单账号向后兼容）。 */
+  private accountIdFrom(context: PipelineContext<PipelineFields>): string {
+    const trigger = context.get('trigger') as TriggerInput | undefined;
+    return trigger?.accountId ?? 'default';
   }
 
   /**
@@ -165,8 +181,31 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     };
   }
 
-  private async handleAutoPublish(assembled: AssembledContent, title: string, context: PipelineContext<PipelineFields>): Promise<PublishResult> {
+  private async handleAutoPublish(assembled: AssembledContent, title: string, context: PipelineContext<PipelineFields>, accountId: string): Promise<PublishResult> {
     const lineage = this.lineageFrom(context);
+
+    // 定向发布（change publish-history-account-and-detail）：解析绑定该账号的在线边缘节点。
+    // 真实 EdgeCloudServer 提供 resolveEdgeIdForAccount → 无在线节点**诚实 failed**（不发卡、不下发、绝不广播，红线）。
+    // 旧桩（单测）不提供该方法 → targetEdgeId=undefined，退回广播旧行为（零回归）。
+    const resolver = this.pusher.resolveEdgeIdForAccount?.bind(this.pusher);
+    const targetEdgeId = resolver ? (resolver(accountId) ?? undefined) : undefined;
+    if (resolver && !targetEdgeId) {
+      const failedId = await this.store.insert({
+        title,
+        content: assembled.finalContent,
+        tags: assembled.finalTags,
+        imageUrl: assembled.imageUrl,
+        status: 'failed',
+        qualityScore: assembled.qualityScore,
+        aiScore: assembled.aiScore,
+        sourceConcepts: lineage.sourceConcepts,
+        sourceLikedIds: lineage.sourceLikedIds,
+        accountId,
+      });
+      this.logger.warn(`[PublishExecutor] 账号 ${accountId} 无在线边缘节点（no_edge_for_account）→ 诚实 failed recordId=${failedId}（不发卡、不下发、不广播）`);
+      return { recordId: failedId, status: 'failed', dispatched: false, envelope: null, completedAt: this.clock() };
+    }
+
     // 配图收口红线（change publish-image-required-or-fail）：图文帖必须有图。配图失败/降级（imageUrl 为空）时，
     // 小红书图文编辑器「先传图门控」下标题/正文框根本不渲染，强行驱动只会在 fill_field no_target 才暴露。
     // 此处**提前诚实判 failed**——不发审批卡、不下发指令、images_attached=false（红线：不静默走必然失败的纯文字路径）。
@@ -181,6 +220,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
         aiScore: assembled.aiScore,
         sourceConcepts: lineage.sourceConcepts,
         sourceLikedIds: lineage.sourceLikedIds,
+        accountId,
       });
       if (this.store.markImagesAttached) await this.store.markImagesAttached(failedId, false).catch(() => {});
       this.logger.warn(`[PublishExecutor] 无配图（生图失败/降级）→ 图文帖无有效内容，诚实 failed recordId=${failedId}（不发卡、不下发）`);
@@ -196,14 +236,15 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       aiScore: assembled.aiScore,
       sourceConcepts: lineage.sourceConcepts,
       sourceLikedIds: lineage.sourceLikedIds,
+      accountId,
     });
 
     // A 阶段1 新路：注入了 sequencer → 指令驱动 + AC-PUB 闸 + 结果回写。
     if (this.sequencer) {
-      return this.handleAutoPublishViaSequencer(recordId, assembled, title, context);
+      return this.handleAutoPublishViaSequencer(recordId, assembled, title, context, targetEdgeId);
     }
 
-    // 旧整页路径（无 sequencer，地基阶段并行保留）。
+    // 旧整页路径（无 sequencer，地基阶段并行保留）。定向到目标节点（targetEdgeId 缺省广播，向后兼容）。
     const envelope = {
       id: this.idGen(),
       type: 'publish.request',
@@ -216,9 +257,9 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       createdAt: this.clock(),
     };
 
-    const dispatched = this.pusher.pushToEdges(envelope);
+    const dispatched = this.pusher.pushToEdges(envelope, targetEdgeId);
 
-    this.logger.log(`[PublishExecutor] auto_publish: recordId=${recordId}, dispatched=${dispatched}`);
+    this.logger.log(`[PublishExecutor] auto_publish: recordId=${recordId}, account=${accountId}, edge=${targetEdgeId ?? '(broadcast)'}, dispatched=${dispatched}`);
 
     return {
       recordId,
@@ -235,6 +276,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     assembled: AssembledContent,
     title: string,
     context: PipelineContext<PipelineFields>,
+    targetEdgeId?: string,
   ): Promise<PublishResult> {
     // stage-4：读 stage-3 决策的元数据；落库（血缘/可观测）+ 防篡改审计（aiEnforced && !ai 视为已回正态，如实记）。
     const metadata = context.get('publishMetadata') as PublishMetadata | undefined;
@@ -270,6 +312,8 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       cover: assembled.imageUrl ?? undefined,
       metadata,
       approvedByUser: true,
+      // 定向下发到绑定该账号的在线节点（缺省广播，向后兼容）。
+      edgeId: targetEdgeId,
     });
 
     // 配图收口：请求了配图时如实标记是否附着——降级（imagesOk=false）即纯文字真相，杜绝「有图」假信号。
@@ -280,11 +324,12 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     // 提交成功即已发布（capture_postId 为尽力而为，抓不到 postId 也不可误判为 failed——那是「静默假失败」）。
     if (result.ok) {
       if (result.postId && this.store.updatePostId) {
-        await this.store.updatePostId(recordId, result.postId).catch(() => {});
+        // postUrl（带 xsec_token 的详情页分享 URL）一并回写；边缘抓不到则为 undefined（诚实置空，不写假链接）。
+        await this.store.updatePostId(recordId, result.postId, result.postUrl).catch(() => {});
       } else if (this.store.updateStatus) {
         await this.store.updateStatus(recordId, 'published').catch(() => {});
       }
-      this.logger.log(`[PublishExecutor] cmd-path published recordId=${recordId} postId=${result.postId ?? '(未抓到)'}`);
+      this.logger.log(`[PublishExecutor] cmd-path published recordId=${recordId} postId=${result.postId ?? '(未抓到)'} postUrl=${result.postUrl ? 'yes' : '(未抓到)'}`);
       return { recordId, status: 'published', dispatched: true, envelope: null, completedAt: this.clock() };
     }
 
@@ -341,7 +386,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     }
   }
 
-  private async handleManualReview(assembled: AssembledContent, title: string): Promise<PublishResult> {
+  private async handleManualReview(assembled: AssembledContent, title: string, accountId: string): Promise<PublishResult> {
     const recordId = await this.store.insert({
       title,
       content: assembled.finalContent,
@@ -350,6 +395,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       status: 'needs_review',
       qualityScore: assembled.qualityScore,
       aiScore: assembled.aiScore,
+      accountId,
     });
 
     // 尝试发送飞书审批卡片
@@ -379,7 +425,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     };
   }
 
-  private async handleAbort(assembled: AssembledContent, title: string): Promise<PublishResult> {
+  private async handleAbort(assembled: AssembledContent, title: string, accountId: string): Promise<PublishResult> {
     const recordId = await this.store.insert({
       title,
       content: assembled.finalContent,
@@ -388,6 +434,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       status: 'failed',
       qualityScore: assembled.qualityScore,
       aiScore: assembled.aiScore,
+      accountId,
     });
 
     this.logger.log(`[PublishExecutor] aborted: recordId=${recordId}`);

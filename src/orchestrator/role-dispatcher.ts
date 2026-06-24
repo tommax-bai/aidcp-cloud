@@ -55,6 +55,7 @@ import type { BaseRole } from '../agents/base-role.js';
 import type { Soul } from '../soul/types.js';
 import { computeDwellMs, computeThinkMs } from '../risk/pacing.js';
 import { SearchFrequencyLimiter } from '../risk/search-frequency-limiter.js';
+import { InteractionGuard, isGuardedInteraction, type GuardAction } from '../risk/interaction-guard.js';
 import type { RiskStatus } from '../risk/types.js';
 import type { ConceptPool } from '../event-bus/types.js';
 import type { NotificationItem } from '../comm/protocol.js';
@@ -124,6 +125,20 @@ export interface RoleDispatcherOptions {
   archiveValuableComment?: (input: ValuableCommentInput) => Promise<void>;
   /** 按主题键召回语料库参考评论（接 ValuableCommentStore.retrieveByTopics）；缺省 → 撰写不注入参考。 */
   getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
+  /**
+   * 诚实人设启动闸（multi-account-node-support D3）：以「人设存储中是否存在该账号的人设行」为独立判据
+   * （getForAccount!==null，**不走会回落默认的解析器**）。缺省 → 不设闸（向后兼容单账号）。default 账号硬豁免（见 canStartSession）。
+   */
+  isPersonaBound?: (accountId: string) => boolean;
+  /** 账号未绑人设被诚实拒绝时回调（置 needs_persona_setup + 飞书告警）。 */
+  onSessionRejected?: (accountId: string, reason: string) => void | Promise<void>;
+  /** 全局调度开关（面板 /dispatch）：false 时不启动浏览会话。缺省 → 恒 true。 */
+  isDispatchActive?: () => boolean;
+  /**
+   * 同账号并行（N:1）互动去重 guard（multi-account-node-support D7②）：按账号单例（同账号 N 连接共用）。
+   * 下发互动前占坑去重，防两节点对同一笔记/作者重复点赞/关注/评论。缺省 → 不去重（单账号单节点向后兼容）。
+   */
+  interactionGuard?: InteractionGuard;
 }
 
 export interface EdgeCommand {
@@ -175,6 +190,13 @@ export class RoleDispatcher {
   /** 已下发待回执的评论上下文：action.completed{comment} 据此扣额 + emit comment.done（→ 是否进主页评估）。 */
   private pendingComment: { noteId: string; sourcePageType: 'feed' | 'search'; actions: ('like' | 'collect')[]; text: string } | null = null;
   private readonly isHardPaused: (edgeId?: string) => boolean;
+  private readonly isPersonaBound?: (accountId: string) => boolean;
+  private readonly onSessionRejected?: (accountId: string, reason: string) => void | Promise<void>;
+  private readonly isDispatchActive: () => boolean;
+  /** 同账号并行互动去重 guard（按账号单例）；缺省不去重。 */
+  private readonly interactionGuard?: InteractionGuard;
+  /** 已下发占坑、待回执释放的互动键（按动作）：action.completed 据此 complete / releaseFailed。 */
+  private readonly pendingInteractionKeys = new Map<GuardAction, string>();
   private readonly notifyComments?: (items: NotificationItem[]) => Promise<void>;
   private readonly conceptStore?: ConceptStorePort;
   /** 搜索前限频闸（每关键词每会话/每天上限），dispatcher 持有单例，会话重启时清会话计数。 */
@@ -214,6 +236,10 @@ export class RoleDispatcher {
     this.archiveValuableComment = options.archiveValuableComment;
     this.getCorpusReferences = options.getCorpusReferences;
     this.isHardPaused = options.isHardPaused ?? (() => false);
+    this.isPersonaBound = options.isPersonaBound;
+    this.onSessionRejected = options.onSessionRejected;
+    this.isDispatchActive = options.isDispatchActive ?? (() => true);
+    this.interactionGuard = options.interactionGuard;
     this.notifyComments = options.notifyComments;
     this.conceptStore = options.conceptStore;
     this.searchLimiter = new SearchFrequencyLimiter(options.searchLimiterOptions);
@@ -261,15 +287,28 @@ export class RoleDispatcher {
    * 发命令的统一出口（软暂停闸）。巡视期（browseSuspended）扣住 browse 类命令——它们会从下次
    * page.cards 自行重来——只放行巡视命令与 session.end；非巡视期照常下发。所有翻译块都经此。
    */
-  private sendCommand(command: EdgeCommand): void {
+  private sendCommand(command: EdgeCommand): boolean {
     if (
       this.sessionContext.browseSuspended &&
       command.action !== 'session.end' &&
       !this.isExcursionCommand(command.action)
     ) {
-      return; // 软暂停：丢弃 browse 命令（不入队、由 page.cards 续刷自然重来）
+      return false; // 软暂停：丢弃 browse 命令（不入队、由 page.cards 续刷自然重来）
+    }
+    // 同账号并行（N:1）互动前按账号去重（D7②）：占坑——已在途/已完成则跳过下发（不假成功、不扣额）。
+    // 覆盖 follow/comment/comment_like（无 per-note 落库去重）。缺目标键时放行（不去重）。
+    if (this.interactionGuard && isGuardedInteraction(command.action)) {
+      const key = InteractionGuard.keyFor(command.action, command.params);
+      if (!this.interactionGuard.tryClaim(key)) {
+        console.log(
+          `[RoleDispatcher] 互动按账号去重：${key} 已在途/已完成 → 跳过下发（account=${this.currentAccountId}）`,
+        );
+        return false;
+      }
+      if (key) this.pendingInteractionKeys.set(command.action, key);
     }
     this.rawSendCommand(command);
+    return true;
   }
 
   /**
@@ -284,6 +323,16 @@ export class RoleDispatcher {
       status: this.getRiskStatus(),
       progress: this.progress(),
     });
+  }
+
+  /** 设置该连接（运行时）的当前账号（multi-account-node-support D4：去掉 default 钉死，由连接真实账号设入）。 */
+  setCurrentAccountId(accountId: string): void {
+    this.currentAccountId = accountId;
+  }
+
+  /** 当前账号（供测试 / 观测）。 */
+  get accountId(): string {
+    return this.currentAccountId;
   }
 
   /** 获取 EventBus（供测试用） */
@@ -413,9 +462,46 @@ export class RoleDispatcher {
     // 订阅 Edge 上报事件
     this.setupEdgeEventSubscriptions();
 
-    // 永久监听：边缘新 hello → 重启会话。刻意注册在 commandUnsubscribers 之外，
-    // 故即使会话因超时/动作数 endSession 拆除其余订阅，此监听仍在，新边缘连接可重新驱动。
-    this.eventBus.on('edge.hello', () => this.restartSession());
+    // 永久监听：边缘 hello → 设当前账号 + 诚实人设/调度闸 → 启动/重启会话。刻意注册在 commandUnsubscribers 之外，
+    // 故即使会话因超时/动作数 endSession 拆除其余订阅，此监听仍在，重连/恢复后可重新驱动。
+    // 多租户（multi-account-node-support）：每连接私有总线上恰好一条 edge.hello（handler 携 accountId 发），此监听即该连接的启动入口。
+    this.eventBus.on('edge.hello', (payload) =>
+      this.onHelloEvent(payload as { edgeId: string; accountId?: string; ts: number }),
+    );
+  }
+
+  /**
+   * 边缘 hello 事件入口：把连接账号设入当前账号，过启动闸后启动/重启会话。
+   * 启动闸在角色重订阅 / 指令翻译重连**之前**短路——未绑人设的账号不开浏览循环、不发巡刷信号（D3）。
+   */
+  private onHelloEvent(payload: { edgeId: string; accountId?: string; ts: number }): void {
+    if (payload.accountId) this.currentAccountId = payload.accountId;
+    if (!this.canStartSession()) return;
+    this.restartSession();
+  }
+
+  /**
+   * 会话启动闸（诚实人设 + 全局调度开关）。`default` 账号**硬豁免**（始终可启动、沿用打包默认人设回落）。
+   * 未绑人设的非 default 账号：发 onSessionRejected（置 needs_persona_setup + 告警）并短路，绝不以默认人设静默开跑。
+   * 人设存储读不到时 isPersonaBound 返回 false（fail-closed）→ 一并诚实拒绝。
+   */
+  private canStartSession(): boolean {
+    if (!this.isDispatchActive()) return false;
+    if (this.currentAccountId !== 'default' && this.isPersonaBound && !this.isPersonaBound(this.currentAccountId)) {
+      console.warn(
+        `[RoleDispatcher] 账号 ${this.currentAccountId} 未绑定人设 → 拒绝启动浏览会话（needs_persona_setup）：不开循环、不发巡刷信号`,
+      );
+      void this.onSessionRejected?.(this.currentAccountId, 'needs_persona_setup');
+      return false;
+    }
+    return true;
+  }
+
+  /** 外部触发会话启动（经启动闸）：供面板恢复调度 / 显式启动用；已在跑则不重复。 */
+  tryStartSession(): void {
+    if (this.sessionActive) return;
+    if (!this.canStartSession()) return;
+    this.restartSession();
   }
 
   /** 单次浏览会话的初始互动预算（供初始化与重置复用，避免口径漂移）。 */
@@ -569,9 +655,10 @@ export class RoleDispatcher {
             console.log(`[RoleDispatcher] 互动被风控拦截，跳过 action=${action} note=${payload.noteId}`);
             continue;
           }
-          // 互动前犹豫时间（time directive）：边缘据此在执行前等待并叠抖动
-          this.sendCommand({ action, params: { noteId: payload.noteId, thinkMs: this.thinkNow() } });
-          this.consumeBudget(action);
+          // 互动前犹豫时间（time directive）：边缘据此在执行前等待并叠抖动。
+          // 下发被去重跳过（同账号已在途/已完成）则不扣会话预算（不漂移）。
+          const sent = this.sendCommand({ action, params: { noteId: payload.noteId, thinkMs: this.thinkNow() } });
+          if (sent) this.consumeBudget(action);
         }
       }),
 
@@ -768,6 +855,16 @@ export class RoleDispatcher {
       // note.detail/page.cards，事件循环会因无触发而死等；统一以一次 scroll 续刷兜底。
       this.eventBus.on('action.completed', (payload) => {
         console.log(`[RoleDispatcher] action.completed: ${payload.action} ok=${payload.ok}`);
+        // 同账号并行（N:1）：释放该动作的在途去重坑。成功且非 already_followed no-op → 记已完成（不再重复对同目标动作）；
+        // 失败 / already_followed → 仅释放在途坑（允许后续重试）。靠边缘 FIFO 回执与 per-动作单坑对齐，TTL 兜底防丢回执永久占坑。
+        if (this.interactionGuard && isGuardedInteraction(payload.action)) {
+          const key = this.pendingInteractionKeys.get(payload.action);
+          if (key) {
+            if (payload.ok === true && payload.reason !== 'already_followed') this.interactionGuard.complete(key);
+            else this.interactionGuard.releaseFailed(key);
+            this.pendingInteractionKeys.delete(payload.action);
+          }
+        }
         // follow 配额按真实回执扣减：仅当发生了真实的新关注点击（ok:true 且非 already_followed no-op）。
         // already_followed（良性 no-op）与各类失败（ok:false）均不扣额，使配额对齐真实平台动作。
         if (payload.action === 'follow' && payload.ok === true && payload.reason !== 'already_followed') {

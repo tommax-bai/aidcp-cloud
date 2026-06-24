@@ -55,6 +55,16 @@ export interface PublishRecord {
   imageUrl?: string | null;
   /** 配图是否真实附着到帖子。降级纯文字时为 false——「该帖是否真有图」的权威信号。 */
   imagesAttached?: boolean;
+  /**
+   * 发布账号（change publish-history-account-and-detail）。来自触发上下文（TriggerInput.accountId）；
+   * 缺省回落 'default'（单账号向后兼容）。让发布历史可真正按账号区分，不再恒为 DEFAULT。
+   */
+  accountId?: string;
+  /**
+   * 小红书详情页分享 URL（带 xsec_token 的完整链接），发布成功后由边缘抓取回报。
+   * 抓不到则为 null（诚实置空，绝不用裸 id 拼打不开的假链接）。
+   */
+  postUrl?: string | null;
 }
 
 // ─── 管道角色类型 ──────────────────────────────────────────────────────────────
@@ -75,6 +85,12 @@ export interface TriggerInput {
   recentPublished: string[];
   /** 手动 /publish 强制发布：运营明确要发（下游人审仍把闸），ContentScout 不得以「无新素材」否决。 */
   forced?: boolean;
+  /**
+   * 目标发布账号（change publish-history-account-and-detail）。触发时携带（飞书 /publish [accountId]），
+   * 缺省 'default'。贯穿到人设解析（getSoul(accountId)）、记录落库（publish_log.account_id）、
+   * 与发布命令定向下发（路由到绑定该账号的在线边缘节点）。
+   */
+  accountId?: string;
 }
 
 /** ContentScout 输出 */

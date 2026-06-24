@@ -20,6 +20,8 @@ const acct: PanelAccount = {
   riskStatus: 'normal',
   riskQuotaLevel: 'normal',
   signalCount: 0,
+  personaBound: true,
+  needsPersonaSetup: false,
 };
 
 const mockPanelStore: PanelStoreReader = {
@@ -31,8 +33,18 @@ const mockPanelStore: PanelStoreReader = {
   likeRate: async () => ({ likes: 10, views: 40, rate: 0.25, healthy: true }),
   listAccounts: async () => [acct],
   getAccount: async (id) => (id === 'default' ? acct : null),
-  publishedHistory: async () => [
-    { id: 1, title: 't', status: 'published', platformPostId: 'p1', publishedAt: 123 },
+  publishedHistory: async (_limit, accountId) => [
+    {
+      id: 1,
+      title: 't',
+      status: 'published',
+      platformPostId: 'p1',
+      publishedAt: 123,
+      accountId: accountId ?? 'default',
+      accountLabel: accountId ?? 'default',
+      content: '正文全文',
+      postUrl: 'https://www.xiaohongshu.com/explore/p1?xsec_token=tok',
+    },
   ],
   listAlerts: async () => [
     { id: 1, severity: 'P0', type: 'captcha', accountId: 'default', title: '验证码弹出', detail: null, createdAt: 100, resolvedAt: null },
@@ -172,6 +184,14 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
     ).json()) as { interactions: { accountId: string; noteId: string }[] };
     assert.equal(it.interactions[0].noteId, 'note-1');
     assert.equal(it.interactions[0].accountId, 'default');
+
+    // change publish-history-account-and-detail：已发布历史带账号/正文/详情链接 + ?accountId 透传过滤。
+    const pubFiltered = (await (
+      await fetch(`${base}/api/content/published?accountId=acc-7`, { headers: auth })
+    ).json()) as { items: { accountId: string; accountLabel: string; content: string; postUrl: string }[] };
+    assert.equal(pubFiltered.items[0].accountId, 'acc-7', '?accountId 透传到 store');
+    assert.equal(pubFiltered.items[0].content, '正文全文', '返回正文全文');
+    assert.ok(pubFiltered.items[0].postUrl.includes('xsec_token'), '返回带 token 的详情页链接');
 
     // accounts 列表 / 详情 / 404
     const accs = (await (await fetch(`${base}/api/accounts`, { headers: auth })).json()) as {

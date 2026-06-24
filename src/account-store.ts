@@ -49,6 +49,11 @@ export interface AccountStore {
   listAll(): Promise<AccountRecord[]>;
   /** upsert 一个账号的暂停态（pause 未注册账号时自动建行）。 */
   setPaused(accountId: string, paused: boolean, at: number | null): Promise<void>;
+  /**
+   * 幂等登记一个账号（握手时新账号自动入主表，multi-account-node-support D4）。
+   * 仅插入、绝不覆盖已配置行（不动既有 status/label/标签/绑定）。
+   */
+  ensureAccount?(accountId: string): Promise<void>;
   close?(): Promise<void>;
 }
 
@@ -107,6 +112,19 @@ export class PgAccountStore implements AccountStore {
        VALUES ($1, $1, $2, $3)
        ON CONFLICT (account_id) DO UPDATE SET status = EXCLUDED.status, paused_at = EXCLUDED.paused_at`,
       [accountId, status, pausedAt],
+    );
+  }
+
+  /**
+   * 幂等登记账号（握手时新账号自动入主表）：INSERT ... ON CONFLICT DO NOTHING。
+   * 仅插入、**绝不覆盖**已配置行（不动既有 status/label/paused_at/标签）。新行 status 取 DB 默认
+   * （active=「未被运营暂停」这一运营维度）；账号是否就绪由**人设绑定派生字段**（persona_config 行是否存在）
+   * 独立判定——未绑人设的账号仍被诚实启动闸拦住、不会真跑（multi-account-node-support D3/D4）。
+   */
+  async ensureAccount(accountId: string): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO accounts (account_id, label) VALUES ($1, $1) ON CONFLICT (account_id) DO NOTHING`,
+      [accountId],
     );
   }
 
