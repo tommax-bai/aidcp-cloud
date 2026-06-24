@@ -474,6 +474,64 @@ function createRequestHandler(
       return;
     }
 
+    // ── 安全限额配置（change safety-quota-config，stream D）──────────────────────
+    // reserved-order append 链 D（在 C/categories 之后、F/persona 之前）。写非乐观回真态；
+    // 非法数字整块拒（invalid_value→400），绝不部分落库；不碰风控状态单写路径。
+    if (method === 'GET' && url === '/api/quotas') {
+      if (!deps.quotaConfig) {
+        sendJson(res, 503, { error: 'quota_config_unavailable' });
+        return;
+      }
+      sendJson(res, 200, deps.quotaConfig.getCatalog());
+      return;
+    }
+    if (method === 'PUT' && url === '/api/quotas') {
+      if (!deps.quotaConfig) {
+        sendJson(res, 503, { error: 'quota_config_unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { tier, action, daily, perMinute, perHour } = (body ?? {}) as {
+        tier?: unknown;
+        action?: unknown;
+        daily?: unknown;
+        perMinute?: unknown;
+        perHour?: unknown;
+      };
+      if (typeof tier !== 'string' || typeof action !== 'string') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'tier_action_type' });
+        return;
+      }
+      // 窗口值须为数字或缺省（缺省=该窗口不改）；类型不对直接 400。
+      const win: { daily?: number; perMinute?: number; perHour?: number } = {};
+      for (const [k, v] of [['daily', daily], ['perMinute', perMinute], ['perHour', perHour]] as const) {
+        if (v === undefined) continue;
+        if (typeof v !== 'number') {
+          sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
+          return;
+        }
+        win[k] = v;
+      }
+      const result = await deps.quotaConfig.setQuota(
+        { tier: tier as never, action: action as never, ...win },
+        verified.payload.sub,
+      );
+      if (!result.ok) {
+        // unknown_tier/unknown_action→404；invalid_value/no_valid_fields→400（绝不部分落库、绝不假成功）。
+        const notFound = result.reason === 'unknown_tier' || result.reason === 'unknown_action';
+        sendJson(res, notFound ? 404 : 400, { error: result.reason });
+        return;
+      }
+      sendJson(res, 200, result.view);
+      return;
+    }
+
     // ── 账号人设配置（change account-persona-config，stream F）──────────────────
     // reserved-order append 链 F（在 C/categories、D/quotas 之后）。写非乐观回真态；
     // 非法人设（soul 校验不过）诚实 400 persona_invalid 绝不落库；未知账号 404。

@@ -1,7 +1,7 @@
 import { deriveWindowQuotas, scaleWindowQuotas, zeroInteractionQuotas } from './quotas.js';
 import { createRiskState, RiskStateMachine } from './risk-state-machine.js';
 import { SlidingWindowCounter, WINDOW_MS } from './sliding-window-counter.js';
-import type { RiskAction, RiskQuotaLevel, RiskSignal, RiskState, RiskStore, WindowQuotas } from './types.js';
+import type { QuotaProvider, RiskAction, RiskQuotaLevel, RiskSignal, RiskState, RiskStore, WindowQuotas } from './types.js';
 
 export interface RiskControllerOptions {
   accountId?: string;
@@ -10,6 +10,11 @@ export interface RiskControllerOptions {
   store?: RiskStore;
   initialState?: RiskState;
   minViewsForLikeRatio?: number;
+  /**
+   * 配额数字提供者（change safety-quota-config）：effectiveQuotas 的基准三档数字来源。
+   * 缺省（不注入）→ 回落 deriveWindowQuotas 写死默认（与历史行为逐位一致，零回归）。只读、永不抛。
+   */
+  quotaProvider?: QuotaProvider;
 }
 
 export interface CanDoResult {
@@ -24,6 +29,7 @@ export class RiskController {
   private readonly stateMachine = new RiskStateMachine();
   private readonly store?: RiskStore;
   private readonly minViewsForLikeRatio: number;
+  private readonly quotaProvider?: QuotaProvider;
   private state: RiskState;
   /** 每账号串行化：所有改 state + saveState 的写经此链，避免并发 read-modify-write 丢更新（D7）。 */
   private mutationChain: Promise<unknown> = Promise.resolve();
@@ -37,6 +43,7 @@ export class RiskController {
     this.state.quotaLevel = options.quotaLevel ?? this.state.quotaLevel;
     this.counter = new SlidingWindowCounter({ clock: this.clock });
     this.minViewsForLikeRatio = options.minViewsForLikeRatio ?? 10;
+    this.quotaProvider = options.quotaProvider;
   }
 
   static async create(options: RiskControllerOptions = {}): Promise<RiskController> {
@@ -123,10 +130,15 @@ export class RiskController {
   }
 
   effectiveQuotas(): WindowQuotas {
-    if (this.state.status === 'warned') return scaleWindowQuotas(deriveWindowQuotas('conservative'), 0.7);
-    if (this.state.status === 'restricted') return zeroInteractionQuotas(deriveWindowQuotas('conservative'));
-    if (this.state.status === 'frozen') return scaleWindowQuotas(deriveWindowQuotas('conservative'), 0);
-    return deriveWindowQuotas(this.state.quotaLevel);
+    // 基准三档数字：provider（热加载库值）优先，缺则回落 deriveWindowQuotas 写死默认（零回归）。
+    // 注意：warned/restricted/frozen 基准固定 'conservative'（与历史一致，非 state.quotaLevel）；
+    // 缩放 / 清零语义不变，只是基准数字来源换成 provider。
+    const base = (level: RiskQuotaLevel): WindowQuotas =>
+      this.quotaProvider?.windowQuotasFor(level) ?? deriveWindowQuotas(level);
+    if (this.state.status === 'warned') return scaleWindowQuotas(base('conservative'), 0.7);
+    if (this.state.status === 'restricted') return zeroInteractionQuotas(base('conservative'));
+    if (this.state.status === 'frozen') return scaleWindowQuotas(base('conservative'), 0);
+    return base(this.state.quotaLevel);
   }
 
   counts() {

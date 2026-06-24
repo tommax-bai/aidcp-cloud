@@ -1,0 +1,78 @@
+/**
+ * 安全限额面板外观（change safety-quota-config，stream D）。
+ *
+ * 把「三档 × 动作 × 三窗口生效值视图」与「按 (tier,action) 写（校验）」收口成可单测的外观，
+ * 与 server 装配解耦。复刻 role-config-facade 形态。
+ *
+ * 红线：写前校验每个数字（非负有限整数 + 合理上限 + 合法 tier/action）；任一非法整块拒、
+ *       绝不部分落库、绝不假成功。回显服务端真态（非乐观）。本外观只动 quota_config，不碰风控状态。
+ */
+
+import { QUOTA_MAX } from '../risk/quotas.js';
+import {
+  RISK_ACTIONS,
+  RISK_QUOTA_LEVELS,
+  type RiskAction,
+  type RiskQuotaLevel,
+} from '../risk/types.js';
+import type { QuotaConfigStore } from './quota-config-store.js';
+import type {
+  PanelQuotaConfig,
+  QuotaConfigCatalogView,
+  QuotaConfigRowView,
+  QuotaConfigSetResult,
+} from '../panel/types.js';
+
+export interface QuotaConfigFacadeDeps {
+  store: QuotaConfigStore;
+}
+
+const isValidQuotaNumber = (n: unknown): n is number =>
+  typeof n === 'number' && Number.isInteger(n) && n >= 0 && n <= QUOTA_MAX;
+
+export function createQuotaConfigPanel(deps: QuotaConfigFacadeDeps): PanelQuotaConfig {
+  const buildCatalog = (): QuotaConfigCatalogView => {
+    const quotas: QuotaConfigRowView[] = [];
+    for (const tier of RISK_QUOTA_LEVELS) {
+      // 该档位三窗口生效值（库值优先、缺则派生写死默认）——即运营看到的当前真生效。
+      const win = deps.store.windowQuotasFor(tier);
+      for (const action of RISK_ACTIONS) {
+        const row = deps.store.getRow(tier, action);
+        quotas.push({
+          tier,
+          action,
+          daily: win.day[action],
+          perMinute: win.minute[action],
+          perHour: win.hour[action],
+          overridden: !!row,
+          updatedAt: row?.updatedAt ?? null,
+          updatedBy: row?.updatedBy ?? null,
+        });
+      }
+    }
+    return { quotas };
+  };
+
+  return {
+    getCatalog: buildCatalog,
+    setQuota: async (patch, updatedBy): Promise<QuotaConfigSetResult> => {
+      if (!RISK_QUOTA_LEVELS.includes(patch.tier)) return { ok: false, reason: 'unknown_tier' };
+      if (!RISK_ACTIONS.includes(patch.action)) return { ok: false, reason: 'unknown_action' };
+
+      // 至少要带一个窗口值；带了的窗口必须合法（非负有限整数 + 上限）。任一非法整块拒、不落库。
+      const provided: Array<number | undefined> = [patch.daily, patch.perMinute, patch.perHour];
+      if (provided.every((v) => v === undefined)) return { ok: false, reason: 'no_valid_fields' };
+      for (const v of provided) {
+        if (v !== undefined && !isValidQuotaNumber(v)) return { ok: false, reason: 'invalid_value' };
+      }
+
+      await deps.store.set(
+        patch.tier as RiskQuotaLevel,
+        patch.action as RiskAction,
+        { daily: patch.daily, perMinute: patch.perMinute, perHour: patch.perHour },
+        updatedBy,
+      );
+      return { ok: true, view: buildCatalog() };
+    },
+  };
+}

@@ -18,6 +18,15 @@ export type ActionQuota = Record<RiskAction, number>;
 
 export type WindowQuotas = Record<RiskWindow, ActionQuota>;
 
+/**
+ * 配额数字提供者（change safety-quota-config，stream D）：按档位给出三窗口生效数字。
+ * 由 `QuotaConfigStore`（config 层）实现（同步读内存镜像、缺值回落写死默认、永不抛），
+ * 注入 `RiskController` 供 `effectiveQuotas()` 热加载。风控层只持接口、不依赖 config 层实现。
+ */
+export interface QuotaProvider {
+  windowQuotasFor(level: RiskQuotaLevel): WindowQuotas;
+}
+
 export interface RiskState {
   accountId: string;
   status: RiskStatus;

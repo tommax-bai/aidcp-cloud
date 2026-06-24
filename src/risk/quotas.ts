@@ -30,7 +30,10 @@ export const DAILY_QUOTAS: Record<RiskQuotaLevel, ActionQuota> = {
   },
 };
 
-const MINUTE_BURST_CAP: ActionQuota = {
+/** 限额数字的合理上限（校验用，防误填天文数字击穿滑动窗比较）。 */
+export const QUOTA_MAX = 100_000;
+
+export const MINUTE_BURST_CAP: ActionQuota = {
   view: 8,
   like: 4,
   collect: 3,
@@ -40,7 +43,7 @@ const MINUTE_BURST_CAP: ActionQuota = {
   comment_like: 1,
 };
 
-const HOUR_BURST_CAP: ActionQuota = {
+export const HOUR_BURST_CAP: ActionQuota = {
   view: 60,
   like: 20,
   collect: 10,

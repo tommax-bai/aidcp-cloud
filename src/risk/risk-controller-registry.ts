@@ -1,5 +1,5 @@
 import { RiskController } from './risk-controller.js';
-import type { RiskState, RiskStore } from './types.js';
+import type { QuotaProvider, RiskState, RiskStore } from './types.js';
 
 /**
  * 每账号 RiskController 注册表（V1 task 9.1）：懒加载、**单写 PER ACCOUNT**。
@@ -14,13 +14,15 @@ export class RiskControllerRegistry {
   constructor(
     private readonly store: RiskStore,
     private readonly clock?: () => number,
+    /** 配额数字提供者（change safety-quota-config）：透传给每账号 controller，effectiveQuotas 热加载用。缺省回落写死默认。 */
+    private readonly quotaProvider?: QuotaProvider,
   ) {}
 
   /** 取（或懒加载）某账号的 controller。create 会 load 持久化 state + 回放计数。 */
   getController(accountId: string): Promise<RiskController> {
     let p = this.controllers.get(accountId);
     if (!p) {
-      p = RiskController.create({ accountId, store: this.store, clock: this.clock });
+      p = RiskController.create({ accountId, store: this.store, clock: this.clock, quotaProvider: this.quotaProvider });
       this.controllers.set(accountId, p);
     }
     return p;

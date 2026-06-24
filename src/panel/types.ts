@@ -6,7 +6,7 @@
  * task 1（骨架）仅用到 edgeServer；其余依赖留待 task 5 只读接口与 task 4 写接口。
  */
 
-import type { RiskController } from '../risk/index.js';
+import type { RiskController, RiskQuotaLevel, RiskAction } from '../risk/index.js';
 import type { ConceptStore, BotChatStore } from '../cache/index.js';
 import type { PublishLogStore } from '../publish-agent/publish-log-store.js';
 import type { EventBus } from '../event-bus/index.js';
@@ -75,6 +75,11 @@ export interface PanelDeps {
    * 写非乐观回真态；非法人设（soul 校验不过）诚实拒绝 persona_invalid，绝不落库；未知账号 404。
    */
   persona?: PanelPersonaConfig;
+  /**
+   * 安全限额配置（change safety-quota-config，stream D）。未注入则 /api/quotas* 返回 503。
+   * 写非乐观回真态；非法数字整块拒（invalid_value），绝不部分落库、绝不假成功；不碰风控状态单写路径。
+   */
+  quotaConfig?: PanelQuotaConfig;
 }
 
 /** 凭据视图（永不含明文）。source：db=库内加密凭据 / env=回退环境变量 / none=未配置。 */
@@ -258,6 +263,46 @@ export interface PanelPersonaConfig {
   getDetail(accountId: string): Promise<PersonaDetailView | null>;
   /** 写某账号人设。空文本=清除覆盖（回落）；非法人设以 {ok:false,reason:'persona_invalid'} 诚实拒绝绝不落库。写后回真态目录。 */
   setPersona(accountId: string, persona: string, updatedBy: string): Promise<PersonaSetResult>;
+}
+
+// ── 安全限额配置（change safety-quota-config，stream D）──────────────────────────
+// reserved-order append 链：C（categories）→ D（本块 quotas）→ F（persona）→ B（nickname）。
+
+/** 单 (tier,action) 三窗口生效数字 + 来源/审计（GET /api/quotas 形状）。库缺行处以派生写死默认合成。 */
+export interface QuotaConfigRowView {
+  tier: RiskQuotaLevel;
+  action: RiskAction;
+  daily: number;
+  perMinute: number;
+  perHour: number;
+  /** 是否存在库内覆盖（false=显示的是派生写死默认，即当前真生效）。 */
+  overridden: boolean;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export interface QuotaConfigCatalogView {
+  quotas: QuotaConfigRowView[];
+}
+
+/** PUT /api/quotas 入参补丁。未传的窗口保持原值（或回落派生默认）。 */
+export interface QuotaConfigPatchInput {
+  tier: RiskQuotaLevel;
+  action: RiskAction;
+  daily?: number;
+  perMinute?: number;
+  perHour?: number;
+}
+
+export type QuotaConfigSetResult =
+  | { ok: true; view: QuotaConfigCatalogView }
+  | { ok: false; reason: 'unknown_tier' | 'unknown_action' | 'invalid_value' | 'no_valid_fields' };
+
+export interface PanelQuotaConfig {
+  /** 三档 × 全动作 × 三窗口生效值 + 审计（库缺行以写死默认合成回显）。 */
+  getCatalog(): QuotaConfigCatalogView;
+  /** 写某 (tier,action) 限额。校验不过整块拒（绝不部分落库 / 假成功）。写后回真态目录。 */
+  setQuota(patch: QuotaConfigPatchInput, updatedBy: string): Promise<QuotaConfigSetResult>;
 }
 
 export interface PanelConfig {

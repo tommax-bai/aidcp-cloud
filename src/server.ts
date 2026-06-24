@@ -88,6 +88,9 @@ import { categoryOf } from './config/role-catalog.js';
 // 账号人设（change account-persona-config，stream F）：按账号可配 + 热加载，回落打包 soul.yaml 不 brick。
 import { PersonaStore, createPersonaResolver } from './config/persona-store.js';
 import { createPersonaPanel } from './config/persona-facade.js';
+// 安全限额（change safety-quota-config，stream D）：三档×动作×三窗口限额数字后台可改+热加载，缺值回落写死默认。
+import { QuotaConfigStore } from './config/quota-config-store.js';
+import { createQuotaConfigPanel } from './config/quota-config-facade.js';
 import { createRolePromptProvider } from './config/role-prompt-preview.js';
 import { CredentialStore } from './config/credential-store.js';
 import type { ModelConfigView } from './panel/types.js';
@@ -148,14 +151,23 @@ async function main(): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
+  // 安全限额（change safety-quota-config，stream D）。缺行/非法值一律回落 deriveWindowQuotas 写死默认，绝不 brick。
+  const quotaConfigStore = new QuotaConfigStore({
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
   try {
     await modelConfigStore.init();
     await credentialStore.init();
     await roleConfigStore.init();
     await categoryConfigStore.init();
-    console.log('[aidcp-cloud] 模型配置 + 凭据 + 角色配置 + 分类默认存储已就绪（model_config / provider_credentials / role_config / category_config）');
+    await quotaConfigStore.init();
+    console.log('[aidcp-cloud] 模型配置 + 凭据 + 角色配置 + 分类默认 + 安全限额存储已就绪（model_config / provider_credentials / role_config / category_config / quota_config）');
   } catch (err) {
-    console.warn('[aidcp-cloud] 模型/凭据/角色/分类配置存储初始化失败（回退代码默认模型 + env 密钥；解析退化两层）:', (err as Error).message);
+    console.warn('[aidcp-cloud] 模型/凭据/角色/分类/限额配置存储初始化失败（回退代码默认模型 + env 密钥；限额回退派生写死默认）:', (err as Error).message);
   }
   // 启动期解密 DashScope 密钥（库内优先、回退 env）；明文仅用于构造客户端，绝不日志化、绝不回前端。
   const dashscopeApiKey =
@@ -369,7 +381,9 @@ async function main(): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
-  const riskRegistry = new RiskControllerRegistry(riskStore);
+  // quotaConfigStore 作 QuotaProvider 注入：每账号 controller 的 effectiveQuotas 热加载读限额数字
+  // （change safety-quota-config）；init 失败时其镜像为空 → 退化派生写死默认，绝不 brick。
+  const riskRegistry = new RiskControllerRegistry(riskStore, undefined, quotaConfigStore);
   let riskController: RiskController;
   try {
     riskController = await riskRegistry.getController('default');
@@ -757,6 +771,8 @@ async function main(): Promise<void> {
     getGlobalTextModel: () => modelConfigStore.getCached().textModel,
     probeModel,
   });
+  // 安全限额面板外观（change safety-quota-config）：三档×动作×三窗口生效值 + 写校验（非法整块拒）+ 非乐观回真态。
+  const quotaConfigPanel = createQuotaConfigPanel({ store: quotaConfigStore });
   // 角色 prompt 只读预览（change role-prompt-visibility）：借 RoleDispatcher 已注册的浏览角色实例渲染真实 prompt。
   const rolePromptProvider = createRolePromptProvider(() => roleDispatcher.getRoles());
 
@@ -830,6 +846,8 @@ async function main(): Promise<void> {
           roleConfig: roleConfigPanel,
           // 分类级模型默认配置（change role-model-category-config，item 5/6）。白名单 + 探活 + 写非乐观回真态。
           categoryConfig: categoryConfigPanel,
+          // 安全限额配置（change safety-quota-config，stream D）。三档×动作×三窗口可改 + 热加载 + 非乐观回真态。
+          quotaConfig: quotaConfigPanel,
           // 角色 prompt 只读预览（change role-prompt-visibility）。纯读，无写路径。
           rolePromptPreview: rolePromptProvider,
           // 账号人设配置（change account-persona-config，stream F）。按账号编辑 + soul 校验 + 写非乐观回真态。
