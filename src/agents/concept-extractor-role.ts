@@ -92,6 +92,13 @@ export class ConceptExtractorRole extends BaseRole {
     return this.buildPrompt({ noteId: '<示例noteId>', title: '<示例标题>', content: '<示例正文>', author: '<示例作者>', authorId: '<示例authorId>', likeCount: 0, collectCount: 0 });
   }
 
+  /** 只读人设来源片段（change prompt-viewer-persona-source）：与 buildPrompt 同源拼接，仅供查看器定位标注；不改 buildPrompt。 */
+  personaSegments(): string[] {
+    const { identity, interests } = this.soul;
+    const interestsStr = [...interests.primary, ...interests.secondary].join('、');
+    return [`你是「${identity.name}」，${identity.role}。`, `你的兴趣领域：${interestsStr}`];
+  }
+
   private buildPrompt(note: NoteDetailData): string {
     const { identity, interests } = this.soul;
     const interestsStr = [...interests.primary, ...interests.secondary].join('、');

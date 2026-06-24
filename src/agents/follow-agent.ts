@@ -107,6 +107,13 @@ export class FollowAgent extends BaseRole {
     return this.buildPrompt({ authorId: '<示例authorId>', sourcePageType: 'feed', postsCount: 0, followersCount: 0, likesCollects: 0, extracted: true, ts: 0 }, 1);
   }
 
+  /** 只读人设来源片段（change prompt-viewer-persona-source）：与 buildPrompt 同源拼接，仅供查看器定位标注；不改 buildPrompt。 */
+  personaSegments(): string[] {
+    const { identity, interests } = this.soul;
+    const interestsStr = [...interests.primary, ...interests.secondary].join('、');
+    return [`你是「${identity.name}」，${identity.role}。兴趣：${interestsStr}。`];
+  }
+
   private buildPrompt(profile: ProfileBrowsedPayload, remaining: number): string {
     const { identity, interests } = this.soul;
     const interestsStr = [...interests.primary, ...interests.secondary].join('、');

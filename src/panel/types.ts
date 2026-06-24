@@ -203,6 +203,12 @@ export interface PanelCategoryConfig {
 
 // ── 角色 prompt 只读预览（change role-prompt-visibility）──────────────────────────
 
+/** prompt 来源分段（change prompt-viewer-persona-source）：role=角色独有指令 / persona=来自账号人设。 */
+export interface RolePromptSegment {
+  source: 'role' | 'persona';
+  text: string;
+}
+
 /** GET /api/roles/:roleId/prompt 形状。available=false 时 prompt=null 且 note 说明原因。 */
 export interface RolePromptView {
   roleId: string;
@@ -211,6 +217,11 @@ export interface RolePromptView {
   available: boolean;
   /** 占位说明 / 不可预览原因（诚实文案）。 */
   note: string;
+  /**
+   * 人设来源分段（change prompt-viewer-persona-source，可选）：有则前端按段渲染、给 persona 段加底色；
+   * 无（定位不唯一 / 拼接不等 / 角色未实现 personaSegments）则回落扁平展示 `prompt`。绝不瞎标。
+   */
+  segments?: RolePromptSegment[];
 }
 
 export interface PanelRolePromptPreview {

@@ -114,6 +114,15 @@ export class InteractionAppraiserRole extends BaseRole {
     return this.buildPrompt({ noteId: '<示例noteId>', title: '<示例标题>', content: '<示例正文，运行时为真实笔记内容>', author: '<示例作者>', likeCount: 0, collectCount: 0 }, { likes: 1, collects: 1 });
   }
 
+  /** 只读人设来源片段（change prompt-viewer-persona-source）：与 buildPrompt 同源拼接，仅供查看器定位标注；不改 buildPrompt。 */
+  personaSegments(): string[] {
+    const { identity, interests, behavior_guidelines: bg } = this.soul;
+    const collectionPrinciple = bg?.collection_principle ?? '只有会反复参考、能直接落地复用的硬核内容才收藏，稀有谨慎';
+    const likePrinciple = bg?.like_principle ?? '有共鸣 / 认同 / 觉得有用就点赞，轻量高频';
+    const interestsStr = [...interests.primary, ...interests.secondary].join('、');
+    return [`你是「${identity.name}」，${identity.role}。${identity.background}\n语气：${identity.tone}\n\n你的兴趣：${interestsStr}\n收藏标准：${collectionPrinciple}\n点赞标准：${likePrinciple}`];
+  }
+
   private buildPrompt(note: NoteData, budget: { likes: number; collects: number }): string {
     const { identity, interests, behavior_guidelines: bg } = this.soul;
     const collectionPrinciple = bg?.collection_principle ?? '只有会反复参考、能直接落地复用的硬核内容才收藏，稀有谨慎';

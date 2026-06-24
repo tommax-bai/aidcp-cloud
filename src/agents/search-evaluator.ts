@@ -151,6 +151,13 @@ export class SearchEvaluator extends BaseRole {
     return this.buildPrompt({ consecutiveScrolls: 3, currentPageType: 'feed', ts: 0 }, ['<示例候选关键词>']);
   }
 
+  /** 只读人设来源片段（change prompt-viewer-persona-source）：与 buildPrompt 同源拼接，仅供查看器定位标注；不改 buildPrompt。 */
+  personaSegments(): string[] {
+    const { identity, interests } = this.soul;
+    const allInterests = [...interests.primary, ...interests.secondary];
+    return [`你是「${identity.name}」，${identity.role}。`, `兴趣领域：${allInterests.join('、')}`];
+  }
+
   private buildPrompt(payload: SearchNeededPayload, availableKeywords: string[]): string {
     const { identity, interests } = this.soul;
     const allInterests = [...interests.primary, ...interests.secondary];

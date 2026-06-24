@@ -106,6 +106,13 @@ export class CommentAppraiser extends BaseRole {
     return this.buildPrompt({ noteId: '<示例noteId>', title: '<示例标题>', content: '<示例正文，运行时为真实笔记内容>', author: '<示例作者>', likeCount: 0, collectCount: 0 });
   }
 
+  /** 只读人设来源片段（change prompt-viewer-persona-source）：与 buildPrompt 同源拼接，仅供查看器定位标注；不改 buildPrompt。 */
+  personaSegments(): string[] {
+    const { identity, interests } = this.soul;
+    const interestsStr = [...interests.primary, ...interests.secondary].join('、');
+    return [`你是「${identity.name}」，${identity.role}。兴趣：${interestsStr}。`];
+  }
+
   private buildPrompt(note: NoteData): string {
     const { identity, interests } = this.soul;
     const interestsStr = [...interests.primary, ...interests.secondary].join('、');
