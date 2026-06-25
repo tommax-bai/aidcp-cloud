@@ -18,7 +18,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import { QwenClient, DEFAULT_BASE_URL as QWEN_BASE_URL, type ChatLlmClient } from './llm/index.js';
 import { TokenUsageStore } from './metrics/token-usage-store.js';
 import { SimplePlanner } from './planner/index.js';
-import { PgAnchorCache, BotChatStore, ConceptStore, LikedNoteStore, ValuableCommentStore } from './cache/index.js';
+import { PgAnchorCache, BotChatStore, ConceptStore, LikedNoteStore, ValuableCommentStore, NotificationContactStore } from './cache/index.js';
 import {
   EdgeCloudServer,
   DefaultMessageHandler,
@@ -305,6 +305,24 @@ async function main(): Promise<void> {
     } catch (err) {
       console.warn('[aidcp-cloud] ValuableCommentStore 初始化失败，评论语料库退化:', (err as Error).message);
     }
+  }
+
+  // 通知联系人名册（notification-contact-registry，迁移 0016）：记录给本账号发过通知的人（评论/@/点赞/收藏/关注）。
+  // 无条件接线（核心特性）；init 失败留 undefined（记录与面板退化，绝不崩闭环）。
+  let notificationContactStore: NotificationContactStore | undefined;
+  try {
+    const ncs = new NotificationContactStore({
+      host: readEnvString('PGHOST'),
+      port: readEnvPort('PGPORT'),
+      database: readEnvString('PGDATABASE'),
+      user: readEnvString('PGUSER'),
+      password: readEnvString('PGPASSWORD'),
+    });
+    await ncs.init();
+    notificationContactStore = ncs;
+    console.log('[aidcp-cloud] NotificationContactStore 已就绪（notification_event / notification_contact_meta 表）');
+  } catch (err) {
+    console.warn('[aidcp-cloud] NotificationContactStore 初始化失败，通知联系人记录退化:', (err as Error).message);
   }
 
   // 概念池存储（concepts 表，跨会话搜索记忆）。init 失败则留 undefined：
@@ -619,8 +637,24 @@ async function main(): Promise<void> {
 
   // 每个连接握手时由 buildDispatcher 造一束 RoleDispatcher：私有总线 / 该连接真实账号 controller / 定向下发。
   // 人设以取值口注入（account-persona-config）：派发时按当前账号热加载，PUT 后无需重启。
-  const buildDispatcher = (ctx: DispatcherBuildContext): RoleDispatcher =>
-    new RoleDispatcher({
+  const buildDispatcher = (ctx: DispatcherBuildContext): RoleDispatcher => {
+    // 通知联系人名册（notification-contact-registry）：订阅该连接私有总线的 notification.items.arrived
+    // （评论/@/点赞/收藏/关注发送者），按该连接真实账号追加进事件流水。每连接握手 buildDispatcher 调一次 →
+    // 一连接订阅一次（避免 setup/restart 重复订阅重复记录）。记录失败只吞 + 准确日志：绝不冒充飞书失败、
+    // 绝不阻塞巡视；append 幂等，下轮安全重试。预览 dispatcher 无边缘会话 → 永不触发（不在默认账号空记）。
+    if (notificationContactStore) {
+      ctx.bus.on('notification.items.arrived', (p) => {
+        const items = p?.items ?? [];
+        if (!items.length) return;
+        notificationContactStore!.appendEvents(ctx.accountId, items).catch((err) =>
+          console.warn(
+            `[notification-contacts] 记录失败 account=${ctx.accountId}（巡视照常，下轮幂等重试）:`,
+            (err as Error).message,
+          ),
+        );
+      });
+    }
+    return new RoleDispatcher({
       getSoul,
       llm,
       // 私有事件通道（连接间互不串味）；其上事件经 tee 汇入全局观测总线供风控记账 / 看板消费。
@@ -680,6 +714,7 @@ async function main(): Promise<void> {
       // 同账号并行互动去重（按账号单例 guard；同账号 N 连接共用 → 共享 in-flight/completed，不重复动作）。
       interactionGuard: interactionGuardRegistry.forAccount(ctx.accountId),
     });
+  };
 
   runtimes = new ConnectionRuntimeRegistry({
     observerBus: eventBus,
@@ -973,6 +1008,8 @@ async function main(): Promise<void> {
           persona: personaPanel,
           // token 用量统计（change llm-token-usage-stats）。同一记账 store 实例（共享专用池），纯只读查询。
           tokenUsage: tokenUsageStore,
+          // 通知联系人名册（change notification-contact-registry）。同一记录 store 实例：读=按账号联系人列表、写=人工字段（微信/标签/备注）。
+          notificationContact: notificationContactStore,
         },
         {
           port: panelPort,

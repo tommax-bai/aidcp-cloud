@@ -214,6 +214,30 @@ function createRequestHandler(
       return;
     }
 
+    // 通知联系人名册（change notification-contact-registry）：按账号联系人列表（accountId 必填，缺则 400；
+    // 绝不默认 default、不提供全账号合并视图＝PII 隔离）。未注入 503；缺表由 store 回落空。
+    if (method === 'GET' && url === '/api/notification/contacts') {
+      if (!deps.notificationContact) {
+        sendJson(res, 503, { error: 'notification_contact_unavailable' });
+        return;
+      }
+      const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+      const accountId = (query.get('accountId') ?? '').trim();
+      if (!accountId) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'account_required' });
+        return;
+      }
+      const numOf = (k: string, dflt: number): number => {
+        const v = query.get(k);
+        if (v == null || v === '') return dflt;
+        const n = Number(v);
+        return Number.isFinite(n) && n >= 0 ? n : dflt;
+      };
+      const contacts = await deps.notificationContact.listContacts(accountId, numOf('limit', 200), numOf('offset', 0));
+      sendJson(res, 200, { contacts });
+      return;
+    }
+
     // ── 写操作（task 4）：经拥有写的对象，绝不乐观假成功 ──────────────────
     if (method === 'POST' && url.startsWith('/api/publish/') && url.endsWith('/approve')) {
       const requestId = decodeURIComponent(url.slice('/api/publish/'.length, -'/approve'.length));
@@ -618,6 +642,63 @@ function createRequestHandler(
         return;
       }
       sendJson(res, 200, result.view);
+      return;
+    }
+
+    // 通知联系人人工字段编辑（change notification-contact-registry）：只改 微信/备注/标签，只动侧表、绝不碰事件流水。
+    // accountId/senderKey 取自 URL path（非 JWT，防越权指定账号）；updatedBy=JWT sub；严格校验、非法整块拒绝不部分落库。
+    if (method === 'PUT' && url.startsWith('/api/notification/contacts/')) {
+      if (!deps.notificationContact) {
+        sendJson(res, 503, { error: 'notification_contact_unavailable' });
+        return;
+      }
+      const rest = url.slice('/api/notification/contacts/'.length);
+      const slash = rest.indexOf('/');
+      if (slash < 0) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'sender_key_required' });
+        return;
+      }
+      const accountId = decodeURIComponent(rest.slice(0, slash));
+      const senderKey = decodeURIComponent(rest.slice(slash + 1));
+      if (!accountId || !senderKey) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'account_or_sender_required' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { wechat, note, tags } = (body ?? {}) as { wechat?: unknown; note?: unknown; tags?: unknown };
+      if (wechat != null && typeof wechat !== 'string') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'wechat_type' });
+        return;
+      }
+      if (note != null && typeof note !== 'string') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'note_type' });
+        return;
+      }
+      let tagList: string[] = [];
+      if (tags != null) {
+        if (!Array.isArray(tags) || !tags.every((t) => typeof t === 'string')) {
+          sendJson(res, 400, { error: 'bad_request', reason: 'tags_type' });
+          return;
+        }
+        tagList = Array.from(new Set((tags as string[]).map((t) => t.trim()).filter((t) => t.length > 0)));
+        if (tagList.length > 20 || tagList.some((t) => t.length > 40)) {
+          sendJson(res, 400, { error: 'invalid_value', reason: 'tags_bounds' });
+          return;
+        }
+      }
+      await deps.notificationContact.setManual(
+        accountId,
+        senderKey,
+        { wechat: wechat ?? null, note: note ?? null, tags: tagList },
+        verified.payload.sub,
+      );
+      sendJson(res, 200, { ok: true }); // 写后诚实回真态（upsert 成功）；console 刷新列表重取聚合行
       return;
     }
 

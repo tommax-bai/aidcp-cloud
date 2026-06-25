@@ -14,6 +14,7 @@ import type { PanelUser } from './auth.js';
 import type { PanelStoreReader } from './panel-store.js';
 import type { PublishApprovalPayload, ApprovalWriteResult } from '../feishu/index.js';
 import type { LlmUsageQuery, LlmUsagePayload } from '../metrics/token-usage-store.js';
+import type { NotificationContact, NotificationContactManual } from '../cache/notification-contact-store.js';
 
 export interface PanelDeps {
   riskController: RiskController;
@@ -86,6 +87,20 @@ export interface PanelDeps {
    * 纯只读预聚合表（按账号/角色/模型/10 分钟桶）；缺表回落空；不写、不碰风控/发布/edge。
    */
   tokenUsage?: { usage(query: LlmUsageQuery): Promise<LlmUsagePayload> };
+  /**
+   * 通知联系人名册（change notification-contact-registry）。未注入则 /api/notification/contacts* 返回 503。
+   * 读=按账号联系人列表（accountId 必填）；写=人工字段（微信/标签/备注）只动侧表、绝不碰事件流水。
+   * 按账号隔离；不提供全账号合并视图（防把运营各账号粉丝交叉关联的 PII 泄露）。
+   */
+  notificationContact?: {
+    listContacts(accountId: string, limit?: number, offset?: number): Promise<NotificationContact[]>;
+    setManual(
+      accountId: string,
+      senderKey: string,
+      manual: NotificationContactManual,
+      updatedBy: string | null,
+    ): Promise<void>;
+  };
 }
 
 /** 凭据视图（永不含明文）。source：db=库内加密凭据 / env=回退环境变量 / none=未配置。 */

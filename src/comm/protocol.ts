@@ -626,10 +626,12 @@ export interface NotificationOpenPayload {
   thinkMs?: number;
 }
 
-/** 单条评论/@ 通知项（边缘抽取的原始数据；是否值得通知由云端判定）。 */
+/** 单条通知项（边缘抽取的原始数据；评论/@ 含正文，点赞/收藏/关注为互动型；是否值得通知由云端判定）。 */
 export interface NotificationItem {
-  kind: 'comment' | 'mention';
+  kind: 'comment' | 'mention' | 'like' | 'collect' | 'follow';
   fromUser: string;
+  /** 发送者主页ID（从通知行头像 /user/profile/<id> 解析；取不到留空）= 跨类型稳定身份。 */
+  fromUserId?: string;
   content: string;
   noteTitle?: string;
   itemKey?: string;
