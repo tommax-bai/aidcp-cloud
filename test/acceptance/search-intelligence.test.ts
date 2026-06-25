@@ -23,7 +23,6 @@ import type { ConceptPool, SearchApprovedPayload, SearchSkippedPayload } from '.
 const mockSoul: Soul = {
   identity: { name: '小林', role: 'AI工程师', background: '技术博主', tone: '友好' },
   interests: { primary: ['AI'], secondary: ['技术'], seed_keywords: ['LLM Agent', 'RAG 实战'] },
-  session_limits: { max_duration_min: 10, max_likes: 8, max_collects: 5, max_searches: 3, cooldown_between_actions_sec: [2, 5] as [number, number] },
 };
 
 const llmReturning = (s: string) => ({ complete: async () => s });

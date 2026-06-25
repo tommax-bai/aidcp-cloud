@@ -85,6 +85,4 @@ export interface Soul {
   browse_patterns?: BrowsePatterns;
   /** 行为习惯偏好（新版 ManagerAgent 使用） */
   behavior_guidelines?: BehaviorGuidelines;
-  /** 会话硬上限（新版 ManagerAgent 使用） */
-  session_limits?: SessionLimits;
 }

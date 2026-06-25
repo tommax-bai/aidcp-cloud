@@ -19,7 +19,6 @@ import type { Soul } from '../../src/soul/types.js';
 const mockSoul: Soul = {
   identity: { name: 'T', role: 'r', background: 'b', tone: 't' },
   interests: { primary: ['AI'], secondary: ['x'], seed_keywords: ['k'] },
-  session_limits: { max_duration_min: 10, max_likes: 8, max_collects: 5, max_searches: 3, cooldown_between_actions_sec: [2, 5] as [number, number] },
 };
 const mockLlm = { complete: async () => 'pass' };
 

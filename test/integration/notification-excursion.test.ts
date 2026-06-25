@@ -28,7 +28,6 @@ import type { NotificationItem } from '../../src/comm/protocol.js';
 const mockSoul: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },
   interests: { primary: ['AI'], secondary: ['技术'], seed_keywords: ['LLM'] },
-  session_limits: { max_duration_min: 10, max_likes: 8, max_collects: 5, max_searches: 3, cooldown_between_actions_sec: [2, 5] as [number, number] },
 };
 const opts = (bus: EventBus) => ({ eventBus: bus, soul: mockSoul });
 const tick = () => new Promise((r) => setTimeout(r, 10));

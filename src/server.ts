@@ -93,6 +93,8 @@ import { createPersonaPanel } from './config/persona-facade.js';
 // 安全限额（change safety-quota-config，stream D）：三档×动作×三窗口限额数字后台可改+热加载，缺值回落写死默认。
 import { QuotaConfigStore } from './config/quota-config-store.js';
 import { createQuotaConfigPanel } from './config/quota-config-facade.js';
+import { SessionConfigStore } from './config/session-config-store.js';
+import { createSessionLimitPanel } from './config/session-config-facade.js';
 import { createRolePromptProvider } from './config/role-prompt-preview.js';
 import { CredentialStore } from './config/credential-store.js';
 import type { ModelConfigView } from './panel/types.js';
@@ -161,13 +163,22 @@ async function main(): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
+  // 单场会话上限（change session-limits-to-quota-layer）：按账号单场时长 + 互动预算；缺行/非法回落写死默认，绝不 brick。
+  const sessionConfigStore = new SessionConfigStore({
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
   try {
     await modelConfigStore.init();
     await credentialStore.init();
     await roleConfigStore.init();
     await categoryConfigStore.init();
     await quotaConfigStore.init();
-    console.log('[aidcp-cloud] 模型配置 + 凭据 + 角色配置 + 分类默认 + 安全限额存储已就绪（model_config / provider_credentials / role_config / category_config / quota_config）');
+    await sessionConfigStore.init();
+    console.log('[aidcp-cloud] 模型配置 + 凭据 + 角色配置 + 分类默认 + 安全限额 + 单场上限存储已就绪（model_config / provider_credentials / role_config / category_config / quota_config / session_config）');
   } catch (err) {
     console.warn('[aidcp-cloud] 模型/凭据/角色/分类/限额配置存储初始化失败（回退代码默认模型 + env 密钥；限额回退派生写死默认）:', (err as Error).message);
   }
@@ -719,6 +730,9 @@ async function main(): Promise<void> {
       interactionGuard: interactionGuardRegistry.forAccount(ctx.accountId),
       // 动作冷却闸（engagement-restraint）：单例共享，内部按 ctx.accountId 分桶。下发互动前查、真成功后落时间戳。
       cooldownGate: actionCooldownGate,
+      // 单场上限提供者（change session-limits-to-quota-layer）：按账号读单场时长 + 互动预算（热加载、后台改即生效）；
+      // 缺行/非法回落写死默认（零回归）。每连接共享同一 store，按 currentAccountId 现读，不触风控状态单写。
+      sessionLimitProvider: sessionConfigStore,
     });
   };
 
@@ -933,6 +947,8 @@ async function main(): Promise<void> {
   });
   // 安全限额面板外观（change safety-quota-config）：三档×动作×三窗口生效值 + 写校验（非法整块拒）+ 非乐观回真态。
   const quotaConfigPanel = createQuotaConfigPanel({ store: quotaConfigStore });
+  // 单场上限面板外观（change session-limits-to-quota-layer）：按账号时长 + 六项预算回显 + 写校验（非法整块拒）+ 非乐观回真态。
+  const sessionLimitPanel = createSessionLimitPanel({ store: sessionConfigStore });
   // 角色 prompt 只读预览（change role-prompt-visibility）：借仅供预览的 RoleDispatcher 渲染真实 prompt。
   const rolePromptProvider = createRolePromptProvider(() => previewDispatcher.getRoles());
 
@@ -1008,6 +1024,8 @@ async function main(): Promise<void> {
           categoryConfig: categoryConfigPanel,
           // 安全限额配置（change safety-quota-config，stream D）。三档×动作×三窗口可改 + 热加载 + 非乐观回真态。
           quotaConfig: quotaConfigPanel,
+          // 单场会话上限配置（change session-limits-to-quota-layer）。按账号时长 + 互动预算可改 + 热加载 + 非乐观回真态。
+          sessionLimits: sessionLimitPanel,
           // 角色 prompt 只读预览（change role-prompt-visibility）。纯读，无写路径。
           rolePromptPreview: rolePromptProvider,
           // 账号人设配置（change account-persona-config，stream F）。按账号编辑 + soul 校验 + 写非乐观回真态。

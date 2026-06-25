@@ -170,24 +170,6 @@ function parseBehaviorGuidelines(v: YamlValue): BehaviorGuidelines {
   };
 }
 
-function parseSessionLimits(v: YamlValue): SessionLimits {
-  if (!isRecord(v)) throw new Error('soul.session_limits 必须是对象');
-  const cd = v.cooldown_between_actions_sec;
-  if (!Array.isArray(cd) || cd.length !== 2 || typeof cd[0] !== 'number' || typeof cd[1] !== 'number') {
-    throw new Error('soul.session_limits.cooldown_between_actions_sec 必须是 [min, max] 数字数组');
-  }
-  const limits: SessionLimits = {
-    max_duration_min: reqNumber(v, 'max_duration_min', 'session_limits'),
-    max_likes: reqNumber(v, 'max_likes', 'session_limits'),
-    max_searches: reqNumber(v, 'max_searches', 'session_limits'),
-    cooldown_between_actions_sec: [cd[0], cd[1]],
-  };
-  if (typeof v.max_collects === 'number') {
-    limits.max_collects = v.max_collects;
-  }
-  return limits;
-}
-
 /** 把已解析的 YAML 值校验并装载为强类型 Soul。 */
 export function loadSoulFromValue(value: YamlValue): Soul {
   if (!isRecord(value)) throw new Error('soul 配置根节点必须是对象');
@@ -197,7 +179,6 @@ export function loadSoulFromValue(value: YamlValue): Soul {
     engagement_rules: value.engagement_rules ? parseEngagementRules(value.engagement_rules) : undefined,
     browse_patterns: value.browse_patterns ? parseBrowsePatterns(value.browse_patterns) : undefined,
     behavior_guidelines: value.behavior_guidelines ? parseBehaviorGuidelines(value.behavior_guidelines) : undefined,
-    session_limits: value.session_limits ? parseSessionLimits(value.session_limits) : undefined,
   };
 }
 

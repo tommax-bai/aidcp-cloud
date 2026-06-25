@@ -12,7 +12,7 @@ test('loadSoul 从 soul.yaml 装载完整人设', () => {
   assert.ok(soul.interests.seed_keywords.includes('LLM Agent'));
 });
 
-test('soul.yaml 新版已移除 engagement_rules 和 browse_patterns，改用 behavior_guidelines + session_limits', () => {
+test('soul.yaml 新版已移除 engagement_rules / browse_patterns / session_limits，改用 behavior_guidelines（单场上限已搬到安全限额层）', () => {
   const soul = loadSoul();
   // 旧字段已废弃，应为 undefined
   assert.equal(soul.engagement_rules, undefined);
@@ -20,10 +20,8 @@ test('soul.yaml 新版已移除 engagement_rules 和 browse_patterns，改用 be
   // 新字段存在
   assert.ok(soul.behavior_guidelines);
   assert.equal(typeof soul.behavior_guidelines!.style, 'string');
-  assert.ok(soul.session_limits);
-  assert.equal(soul.session_limits!.max_likes, 8);
-  assert.equal(soul.session_limits!.max_searches, 3);
-  assert.deepEqual(soul.session_limits!.cooldown_between_actions_sec, [3, 8]);
+  // 单场上限已从人设搬到安全限额层（change session-limits-to-quota-layer）：loader 不再解析该字段。
+  assert.equal((soul as unknown as Record<string, unknown>).session_limits, undefined);
 });
 
 test('parseYaml 处理嵌套 map / 列表 / 行内数组 / 注释', () => {

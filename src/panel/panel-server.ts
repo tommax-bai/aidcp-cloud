@@ -15,7 +15,7 @@ import http from 'node:http';
 import { signJwt, verifyJwt } from './jwt.js';
 import { parseBearer, verifyCredentials } from './auth.js';
 import { buildVersionPayload } from './version.js';
-import type { PanelDeps, PanelConfig, PanelHandle } from './types.js';
+import type { PanelDeps, PanelConfig, PanelHandle, SessionLimitPatchInput } from './types.js';
 import { startPanelWs, type PanelWsHandle } from './panel-ws.js';
 import type { PublishApprovalPayload } from '../feishu/index.js';
 import type { RiskSignalKind, RiskQuotaLevel } from '../risk/index.js';
@@ -585,6 +585,66 @@ function createRequestHandler(
         // unknown_tier/unknown_action→404；invalid_value/no_valid_fields→400（绝不部分落库、绝不假成功）。
         const notFound = result.reason === 'unknown_tier' || result.reason === 'unknown_action';
         sendJson(res, notFound ? 404 : 400, { error: result.reason });
+        return;
+      }
+      sendJson(res, 200, result.view);
+      return;
+    }
+
+    // ── 单场会话上限配置（change session-limits-to-quota-layer）────────────────────
+    // append 链（在 D/quotas 之后、F/persona 之前）。按账号写非乐观回真态；非法数字整块拒
+    // （invalid_value→400），绝不部分落库；只写 session_config，不碰风控状态单写路径。
+    if (method === 'GET' && url === '/api/session-limits') {
+      if (!deps.sessionLimits) {
+        sendJson(res, 503, { error: 'session_limits_unavailable' });
+        return;
+      }
+      sendJson(res, 200, deps.sessionLimits.getCatalog());
+      return;
+    }
+    if (method === 'PUT' && url === '/api/session-limits') {
+      if (!deps.sessionLimits) {
+        sendJson(res, 503, { error: 'session_limits_unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { accountId, maxDurationMin, likes, collects, follows, searches, comments, comment_likes } =
+        (body ?? {}) as Record<string, unknown>;
+      if (typeof accountId !== 'string' || accountId.length === 0) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'account_id' });
+        return;
+      }
+      // 各数字字段须为数字或缺省（缺省=该项不改）；类型不对直接 400（语义校验在 facade）。
+      const patch: SessionLimitPatchInput = { accountId };
+      const numFields = ['maxDurationMin', 'likes', 'collects', 'follows', 'searches', 'comments', 'comment_likes'] as const;
+      const rawNums: Record<string, unknown> = {
+        maxDurationMin,
+        likes,
+        collects,
+        follows,
+        searches,
+        comments,
+        comment_likes,
+      };
+      for (const k of numFields) {
+        const v = rawNums[k];
+        if (v === undefined) continue;
+        if (typeof v !== 'number') {
+          sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
+          return;
+        }
+        patch[k] = v;
+      }
+      const result = await deps.sessionLimits.set(patch, verified.payload.sub);
+      if (!result.ok) {
+        // invalid_value / no_valid_fields → 400（绝不部分落库、绝不假成功）。
+        sendJson(res, 400, { error: result.reason });
         return;
       }
       sendJson(res, 200, result.view);

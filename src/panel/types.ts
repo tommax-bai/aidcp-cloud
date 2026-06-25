@@ -6,7 +6,7 @@
  * task 1（骨架）仅用到 edgeServer；其余依赖留待 task 5 只读接口与 task 4 写接口。
  */
 
-import type { RiskController, RiskQuotaLevel, RiskAction } from '../risk/index.js';
+import type { RiskController, RiskQuotaLevel, RiskAction, SessionInteractionBudget } from '../risk/index.js';
 import type { ConceptStore, BotChatStore } from '../cache/index.js';
 import type { PublishLogStore } from '../publish-agent/publish-log-store.js';
 import type { EventBus } from '../event-bus/index.js';
@@ -82,6 +82,12 @@ export interface PanelDeps {
    * 写非乐观回真态；非法数字整块拒（invalid_value），绝不部分落库、绝不假成功；不碰风控状态单写路径。
    */
   quotaConfig?: PanelQuotaConfig;
+  /**
+   * 单场会话上限配置（change session-limits-to-quota-layer）。未注入则 /api/session-limits 返回 503。
+   * 按账号编辑单场时长 + 六项互动预算；写非乐观回真态；非法整块拒（invalid_value），绝不部分落库；
+   * 只动 session_config，不碰风控状态单写路径、不经协议。
+   */
+  sessionLimits?: PanelSessionLimits;
   /**
    * token 用量只读查询（change llm-token-usage-stats）。未注入则 /api/llm-usage 返回 503。
    * 纯只读预聚合表（按账号/角色/模型/10 分钟桶）；缺表回落空；不写、不碰风控/发布/edge。
@@ -335,6 +341,50 @@ export interface PanelQuotaConfig {
   getCatalog(): QuotaConfigCatalogView;
   /** 写某 (tier,action) 限额。校验不过整块拒（绝不部分落库 / 假成功）。写后回真态目录。 */
   setQuota(patch: QuotaConfigPatchInput, updatedBy: string): Promise<QuotaConfigSetResult>;
+}
+
+// ── 单场会话上限配置（change session-limits-to-quota-layer）────────────────────────
+// 按账号一行：单场时长（分钟）+ 六项互动预算（likes/collects/follows/searches/comments/comment_likes）。
+// 库缺行处以写死默认合成（overridden:false = 显示的是写死默认，即当前真生效）。
+
+/** 单账号单场上限生效值 + 来源/审计（GET /api/session-limits 形状）。 */
+export interface SessionLimitRowView {
+  accountId: string;
+  /** 单场时长上限（分钟）。 */
+  maxDurationMin: number;
+  /** 单场互动预算（六项）。 */
+  budget: SessionInteractionBudget;
+  /** 是否存在库内覆盖（false=显示的是写死默认，即当前真生效）。 */
+  overridden: boolean;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export interface SessionLimitCatalogView {
+  limits: SessionLimitRowView[];
+}
+
+/** PUT /api/session-limits 入参补丁。未传的字段保持原值（无原值则回落写死默认）。 */
+export interface SessionLimitPatchInput {
+  accountId: string;
+  maxDurationMin?: number;
+  likes?: number;
+  collects?: number;
+  follows?: number;
+  searches?: number;
+  comments?: number;
+  comment_likes?: number;
+}
+
+export type SessionLimitSetResult =
+  | { ok: true; view: SessionLimitCatalogView }
+  | { ok: false; reason: 'invalid_value' | 'no_valid_fields' };
+
+export interface PanelSessionLimits {
+  /** 全账号（含 default）单场时长 + 互动预算生效值 + 审计（库缺行以写死默认合成回显）。 */
+  getCatalog(): SessionLimitCatalogView;
+  /** 按账号写单场上限。校验不过整块拒（绝不部分落库 / 假成功）。写后回真态目录。 */
+  set(patch: SessionLimitPatchInput, updatedBy: string): Promise<SessionLimitSetResult>;
 }
 
 export interface PanelConfig {

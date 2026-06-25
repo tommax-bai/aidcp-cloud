@@ -57,6 +57,12 @@ import { computeDwellMs, computeThinkMs } from '../risk/pacing.js';
 import { SearchFrequencyLimiter } from '../risk/search-frequency-limiter.js';
 import { InteractionGuard, isGuardedInteraction, type GuardAction } from '../risk/interaction-guard.js';
 import { ActionCooldownGate, type CooldownAction } from '../risk/action-cooldown.js';
+import {
+  DEFAULT_SESSION_DURATION_MS,
+  defaultSessionBudget,
+  type SessionInteractionBudget,
+  type SessionLimitProvider,
+} from '../risk/session-limits.js';
 import type { RiskStatus } from '../risk/types.js';
 import type { ConceptPool } from '../event-bus/types.js';
 import type { NotificationItem } from '../comm/protocol.js';
@@ -146,6 +152,12 @@ export interface RoleDispatcherOptions {
    * 单例共享、内部按 accountId 分桶，附加只读节奏闸，不写风控终态。
    */
   cooldownGate?: ActionCooldownGate;
+  /**
+   * 单场上限提供者（change session-limits-to-quota-layer）：按账号给出单场时长 + 单场互动预算
+   * （安全限额层，热加载、后台改即生效）。缺省 → 回落写死默认（时长 10min + freshBudget 数字），
+   * 与改造前逐位一致（严格零回归）。只读、不触风控状态单写、不经协议。
+   */
+  sessionLimitProvider?: SessionLimitProvider;
 }
 
 export interface EdgeCommand {
@@ -207,6 +219,8 @@ export class RoleDispatcher {
   private readonly interactionGuard?: InteractionGuard;
   /** 动作冷却闸（engagement-restraint）；缺省不冷却。 */
   private readonly cooldownGate?: ActionCooldownGate;
+  /** 单场上限提供者（按账号读单场时长 + 互动预算，热加载）；缺省回落写死默认。只读。 */
+  private readonly sessionLimitProvider?: SessionLimitProvider;
   /** 已下发占坑、待回执释放的互动键（按动作）：action.completed 据此 complete / releaseFailed。 */
   private readonly pendingInteractionKeys = new Map<GuardAction, string>();
   private readonly notifyComments?: (items: NotificationItem[]) => Promise<void>;
@@ -230,7 +244,10 @@ export class RoleDispatcher {
   // 数据存储（由 Edge 上报更新）
   private visibleCards: VisibleCard[] = [];
   private currentNote: NoteData | null = null;
-  private budget = RoleDispatcher.freshBudget();
+  /** 当前会话剩余互动预算（按账号从单场上限提供者派生，会话开始/重置时刷新）。 */
+  private budget!: SessionInteractionBudget;
+  /** 会话开始/重置时的预算快照（供比率闸：init−剩余；会话中途改预算不漂移）。 */
+  private budgetInit!: SessionInteractionBudget;
   private searchedKeywords: string[] = [];
   private sessionActive = false;
 
@@ -253,12 +270,16 @@ export class RoleDispatcher {
     this.isDispatchActive = options.isDispatchActive ?? (() => true);
     this.interactionGuard = options.interactionGuard;
     this.cooldownGate = options.cooldownGate;
+    this.sessionLimitProvider = options.sessionLimitProvider;
     this.notifyComments = options.notifyComments;
     this.conceptStore = options.conceptStore;
     this.searchLimiter = new SearchFrequencyLimiter(options.searchLimiterOptions);
     this.eventBus = options.eventBus ?? new EventBus();
     this.sessionContext = new SessionContext();
     this.sessionStartedAt = this.clock();
+    // 初始预算按当前账号从提供者派生（缺省回落写死默认）；budgetInit 留作比率闸快照。
+    this.budget = this.freshBudget();
+    this.budgetInit = { ...this.budget };
   }
 
   /**
@@ -271,9 +292,9 @@ export class RoleDispatcher {
     throw new Error('RoleDispatcher 缺少人设注入（soul / getSoul 至少给一个）');
   }
 
-  /** 会话时长上限（毫秒）：按当前人设惰性解析，使后台改 session_limits 后无需重启即生效（热加载）。 */
+  /** 会话时长上限（毫秒）：按当前账号从单场上限提供者惰性解析（热加载，后台改即时生效）；缺省回落写死默认。 */
   private maxDurationMs(): number {
-    return (this.resolveSoul().session_limits?.max_duration_min ?? 10) * 60_000;
+    return this.sessionLimitProvider?.sessionDurationMsFor(this.currentAccountId) ?? DEFAULT_SESSION_DURATION_MS;
   }
 
   /** 会话进度 0..1（已用时长 / 时长上限），供节奏疲劳乘子使用。 */
@@ -440,12 +461,13 @@ export class RoleDispatcher {
         getConceptPool: () => this.conceptPool,
       }),
       new SearchExecutor({ ...commonOptions, sessionContext: this.sessionContext }),
-      // maxDurationMs 不再传死值：SessionMonitorRole 经 this.soul（getSoul 取值口）惰性解析时长上限，
-      // 使后台改 session_limits 后无需重启即生效（热加载）；缺省回落人设 / 10min。
+      // 时长上限统一经调度器 maxDurationMs() 解析（按账号读单场上限提供者，热加载）；
+      // SessionMonitorRole 不再直读人设，复用同一路径，使后台改即时生效、缺省回落写死默认。
       new SessionMonitorRole({
         ...commonOptions,
         onSessionEnd: (reason: string) => this.endSession(reason),
         getRemainingBudget: () => this.budget,
+        getMaxDurationMs: () => this.maxDurationMs(),
         clock: this.clock,
       }),
       // —— 通知巡视（消息查看）12 角色：检测→准入→暂停→开首页→分诊→按类浏览→分类→去重→发飞书→返回→恢复 ——
@@ -519,17 +541,22 @@ export class RoleDispatcher {
     this.restartSession();
   }
 
-  /** 单次浏览会话的初始互动预算（供初始化与重置复用，避免口径漂移）。 */
-  private static freshBudget(): { likes: number; collects: number; follows: number; searches: number; comments: number; comment_likes: number } {
-    return { likes: 10, collects: 5, follows: 3, searches: 5, comments: 2, comment_likes: 3 };
+  /**
+   * 单次浏览会话的初始互动预算：按当前账号从单场上限提供者读（热加载），缺省回落写死默认。
+   * 返回新拷贝（live budget 会被逐项扣减）。供初始化与会话重置复用，避免口径漂移。
+   */
+  private freshBudget(): SessionInteractionBudget {
+    return this.sessionLimitProvider?.sessionBudgetFor(this.currentAccountId) ?? defaultSessionBudget();
   }
 
-  /** 本场已发生的 笔记赞 / 评论赞 计数（= 初始预算 - 当前剩余），供 CommentLikeAppraiser 的频率比率闸。 */
+  /**
+   * 本场已发生的 笔记赞 / 评论赞 计数（= 会话初始预算快照 - 当前剩余），供 CommentLikeAppraiser 的频率比率闸。
+   * 用会话开始/重置时存的 budgetInit 快照（不现读提供者），杜绝会话中途运营改预算致 init−剩余 漂移。
+   */
   private sessionLikeCounts(): { noteLikes: number; commentLikes: number } {
-    const init = RoleDispatcher.freshBudget();
     return {
-      noteLikes: Math.max(0, init.likes - this.budget.likes),
-      commentLikes: Math.max(0, init.comment_likes - this.budget.comment_likes),
+      noteLikes: Math.max(0, this.budgetInit.likes - this.budget.likes),
+      commentLikes: Math.max(0, this.budgetInit.comment_likes - this.budget.comment_likes),
     };
   }
 
@@ -547,6 +574,9 @@ export class RoleDispatcher {
     this.setupEdgeEventSubscriptions();
     this.sessionActive = true;
     this.sessionStartedAt = this.clock();
+    // 按当前账号刷新单场预算 + 快照（热加载：会话开始即取最新配置）。
+    this.budget = this.freshBudget();
+    this.budgetInit = { ...this.budget };
     this.searchLimiter.resetSession();
     // 跨会话概念记忆：异步刷新，不阻塞 feed.entered（首次搜索发生在连刷阈值之后，届时池已就绪）。
     void this.refreshConceptPool();
@@ -594,7 +624,9 @@ export class RoleDispatcher {
       this.commandUnsubscribers = [];
     }
     // 重置会话态（visitedNoteIds 由 SessionContext.reset 跨轮保留）
-    this.budget = RoleDispatcher.freshBudget();
+    // 按当前账号刷新单场预算 + 快照（热加载；currentAccountId 已在 onHelloEvent 设入）。
+    this.budget = this.freshBudget();
+    this.budgetInit = { ...this.budget };
     this.searchedKeywords = [];
     this.searchLimiter.resetSession();
     void this.refreshConceptPool();

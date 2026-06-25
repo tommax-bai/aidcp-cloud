@@ -7,13 +7,6 @@ import type { Soul } from '../../src/soul/types.js';
 const mockSoul: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },
   interests: { primary: ['AI'], secondary: ['编程'], seed_keywords: ['GPT'] },
-  session_limits: {
-    max_duration_min: 10,
-    max_likes: 8,
-    max_collects: 5,
-    max_searches: 3,
-    cooldown_between_actions_sec: [2, 5] as [number, number],
-  },
 };
 
 const fullBudget = () => ({ likes: 8, collects: 5, follows: 3, searches: 3 });

@@ -12,9 +12,15 @@
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { RoleName } from '../event-bus/types.js';
+import { DEFAULT_SESSION_DURATION_MS } from '../risk/session-limits.js';
 
 export interface SessionMonitorRoleOptions extends RoleOptions {
   maxDurationMs?: number;
+  /**
+   * 统一时长上限解析口（change session-limits-to-quota-layer）：由调度器注入 `() => this.maxDurationMs()`，
+   * 使监测体与浏览闭环共用同一「按账号读单场上限提供者」路径（热加载）。缺省 → 回落写死默认 10min。
+   */
+  getMaxDurationMs?: () => number;
   maxActions?: number;
   maxLikes?: number;
   maxCollects?: number;
@@ -37,8 +43,10 @@ export class SessionMonitorRole extends BaseRole {
   readonly roleName: RoleName = 'session_monitor';
   private readonly onSessionEnd?: (reason: string) => void;
   private readonly getRemainingBudget: () => { likes: number; collects: number; follows: number; searches: number };
-  /** 显式时长上限覆盖（测试 / 显式注入用）；缺省则惰性从当前人设 this.soul 解析（热加载）。 */
+  /** 显式时长上限覆盖（测试 / 显式注入用）；缺省则经 getMaxDurationMs 解析（调度器按账号读单场上限提供者）。 */
   private readonly maxDurationMsOverride?: number;
+  /** 统一时长上限解析口（调度器注入）；缺省回落写死默认。 */
+  private readonly getMaxDurationMs?: () => number;
   private readonly maxActions: number;
   private readonly clock: () => number;
   private readonly idleNudgeMs: number;
@@ -58,6 +66,7 @@ export class SessionMonitorRole extends BaseRole {
     this.onSessionEnd = options.onSessionEnd;
     this.getRemainingBudget = options.getRemainingBudget;
     this.maxDurationMsOverride = options.maxDurationMs;
+    this.getMaxDurationMs = options.getMaxDurationMs;
     this.maxActions = options.maxActions ?? 60;
     this.clock = options.clock ?? Date.now;
     this.idleNudgeMs = options.idleNudgeMs ?? 130_000;
@@ -113,9 +122,9 @@ export class SessionMonitorRole extends BaseRole {
     };
   }
 
-  /** 会话时长上限（毫秒）：显式覆盖优先；否则按当前人设惰性解析（热加载，后台改 session_limits 即时生效）。 */
+  /** 会话时长上限（毫秒）：显式覆盖优先；否则经调度器注入的统一解析口（按账号读单场上限提供者，热加载）；缺省回落写死默认。 */
   private effectiveMaxDurationMs(): number {
-    return this.maxDurationMsOverride ?? (this.soul.session_limits?.max_duration_min ?? 10) * 60_000;
+    return this.maxDurationMsOverride ?? this.getMaxDurationMs?.() ?? DEFAULT_SESSION_DURATION_MS;
   }
 
   private handleActionCompleted(): void {

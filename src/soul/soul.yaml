@@ -31,11 +31,3 @@ behavior_guidelines:
   privacy: "不盲目回关，只收藏有复用价值的硬核内容"
   collection_principle: "只有会反复参考、能直接落地复用的硬核内容才收藏，收藏是稀有谨慎的"
   like_principle: "只在真有共鸣 / 学到具体东西 / 观点让你眼前一亮时才点赞；普通的、只是泛泛认同的、刷过即忘的不点——点赞是选择性互动"
-
-# 会话硬上限（仅给 SessionMonitor 使用）
-session_limits:
-  max_duration_min: 10
-  max_likes: 8
-  max_collects: 5
-  max_searches: 3
-  cooldown_between_actions_sec: [3, 8]

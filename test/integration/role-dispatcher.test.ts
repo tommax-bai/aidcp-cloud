@@ -14,7 +14,6 @@ import type { EventBus } from '../../src/event-bus/index.js';
 const mockSoul: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },
   interests: { primary: ['AI', 'LLM'], secondary: ['编程', '技术'], seed_keywords: ['GPT', 'Transformer', 'RAG'] },
-  session_limits: { max_duration_min: 10, max_likes: 8, max_collects: 5, max_searches: 3, cooldown_between_actions_sec: [2, 5] as [number, number] },
 };
 
 /** 创建 mock LLM，每次调用使用 setTimeout 模拟真实异步 */
