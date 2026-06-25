@@ -15,8 +15,8 @@ import type { RoleName, CommentClearedPayload } from '../event-bus/types.js';
 
 /** 评论人审端口：发卡 + 查授权信号（复用发帖 messenger + isPublishApproved，换评论 requestId 命名空间）。 */
 export interface CommentApprovalPort {
-  /** 发飞书审批卡（携拟发评论原文 + requestId）。 */
-  request(input: { requestId: string; noteId: string; text: string }): Promise<void>;
+  /** 发飞书审批卡（携拟发评论原文 + requestId + 笔记标题供人识别）。title 缺省时卡片回落显示 noteId。 */
+  request(input: { requestId: string; noteId: string; text: string; title?: string }): Promise<void>;
   /** 查 /tmp 先到先得授权信号；仅 approved===true 视为已授权。 */
   isApproved(requestId: string): Promise<boolean>;
   /** 等待上限（毫秒；可信停留上限），缺省 90000。 */
@@ -28,6 +28,8 @@ export interface CommentApprovalPort {
 export interface CommentApprovalGateOptions extends RoleOptions {
   /** 人审端口；缺省（未接线）→ 一律 comment.skipped（绝不裸发）。 */
   approval?: CommentApprovalPort;
+  /** 当前笔记标题解析（noteId→标题），仅供审批卡人识别；缺省/取不到 → 卡片回落显示 noteId。 */
+  getNoteTitle?: (noteId: string) => string | null;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -35,6 +37,7 @@ export interface CommentApprovalGateOptions extends RoleOptions {
 export class CommentApprovalGate extends BaseRole {
   readonly roleName: RoleName = 'comment_approval_gate';
   private readonly approval?: CommentApprovalPort;
+  private readonly getNoteTitle?: (noteId: string) => string | null;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private unsubscribers: (() => void)[] = [];
@@ -42,6 +45,7 @@ export class CommentApprovalGate extends BaseRole {
   constructor(options: CommentApprovalGateOptions) {
     super(options);
     this.approval = options.approval;
+    this.getNoteTitle = options.getNoteTitle;
     this.now = options.now ?? (() => Date.now());
     this.sleep = options.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   }
@@ -79,8 +83,10 @@ export class CommentApprovalGate extends BaseRole {
     const timeoutMs = this.approval.timeoutMs ?? 90_000;
     const pollMs = this.approval.pollMs ?? 2_000;
 
+    // 解析笔记标题供人识别（取不到 → 卡片回落 noteId，绝不空白）。
+    const title = this.getNoteTitle?.(payload.noteId) ?? undefined;
     try {
-      await this.approval.request({ requestId, noteId: payload.noteId, text: payload.text });
+      await this.approval.request({ requestId, noteId: payload.noteId, text: payload.text, title });
     } catch (err) {
       this.log(`审批卡发送失败：${(err as Error).message}`);
       this.skip(payload, 'approval_request_failed');

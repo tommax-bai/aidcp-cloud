@@ -583,13 +583,13 @@ async function main(): Promise<void> {
   // 90s 超时 < idle 看门狗 idleNudgeMs(130s)，故审批等待期不会触发 idle nudge，无需显式暂停态。
   const commentApprovalEnabled = process.env.AIDCP_COMMENT_APPROVAL === 'true';
   const commentApproval: CommentApprovalPort = {
-    request: async ({ requestId, noteId, text }) => {
+    request: async ({ requestId, noteId, text, title }) => {
       const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
       if (!chatId) {
         console.error('[comment] 无可用飞书群，评论审批卡未发出（将超时跳过、不发）');
         return;
       }
-      await messenger.sendApprovalCard(chatId, buildCommentApprovalCard({ requestId, noteId, text }));
+      await messenger.sendApprovalCard(chatId, buildCommentApprovalCard({ requestId, noteId, text, title }));
     },
     isApproved: isPublishApproved,
     timeoutMs: 90_000,

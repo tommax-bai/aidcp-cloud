@@ -25,4 +25,29 @@ describe('buildCommentApprovalCard', () => {
     assert.equal(cancel!.action, 'cancel');
     assert.equal(cancel!.requestId, 'comment-n1-123');
   });
+
+  it('有标题：卡片「笔记」字段与 callback payload.title 都显示标题（供人识别，非裸 ID）', () => {
+    const card = buildCommentApprovalCard({ requestId: 'comment-n1-123', noteId: '6a3d138a000000001c0246bf', text: '学到了', title: '北京周末好去处' });
+    const div = card.elements.find((e) => e.tag === 'div');
+    assert.ok(div && div.tag === 'div');
+    const noteField = div.fields?.find((f) => f.text.content.startsWith('**笔记**'));
+    assert.ok(noteField, '应有「笔记」字段');
+    assert.match(noteField!.text.content, /北京周末好去处/);
+    assert.doesNotMatch(noteField!.text.content, /6a3d138a/, '有标题时不应再裸露 noteId');
+
+    const action = card.elements.find((e) => e.tag === 'action');
+    assert.ok(action && action.tag === 'action');
+    const approve = parseApprovalActionValue(action.actions[0].behaviors?.[0].value);
+    assert.ok(approve);
+    assert.equal(approve!.payload.title, '评论·笔记《北京周末好去处》', '确认卡「标题」应显示真实笔记标题');
+  });
+
+  it('无标题：回落显示 noteId（绝不空白）', () => {
+    const card = buildCommentApprovalCard({ requestId: 'comment-n1-123', noteId: '6a3d138a000000001c0246bf', text: '学到了' });
+    const action = card.elements.find((e) => e.tag === 'action');
+    assert.ok(action && action.tag === 'action');
+    const approve = parseApprovalActionValue(action.actions[0].behaviors?.[0].value);
+    assert.ok(approve);
+    assert.equal(approve!.payload.title, '评论·笔记 6a3d138a000000001c0246bf');
+  });
 });

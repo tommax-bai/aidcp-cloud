@@ -13,12 +13,19 @@ export interface CommentApprovalCardData {
   requestId: string;
   noteId: string;
   text: string;
+  /** 笔记标题（供人识别）。缺省/为空 → 回落显示 noteId，绝不空白。 */
+  title?: string;
 }
 
 export function buildCommentApprovalCard(data: CommentApprovalCardData): FeishuCard {
+  // 人识别用：有标题显标题（《》紧贴前缀），无标题诚实回落 noteId（裸 id 前留空格）。
+  // noteLabel 见于本卡「笔记」字段；callbackTitle 经 payload.title 见于审批后确认卡的「标题」字段。
+  const title = data.title?.trim();
+  const noteLabel = title ? `《${title}》` : data.noteId;
+  const callbackTitle = title ? `评论·笔记${noteLabel}` : `评论·笔记 ${data.noteId}`;
   const callbackValue = {
     requestId: data.requestId,
-    payload: { title: `评论·笔记 ${data.noteId}`, content: data.text, tags: [] as string[] },
+    payload: { title: callbackTitle, content: data.text, tags: [] as string[] },
   };
   return {
     config: { wide_screen_mode: true },
@@ -30,7 +37,7 @@ export function buildCommentApprovalCard(data: CommentApprovalCardData): FeishuC
       {
         tag: 'div',
         fields: [
-          { is_short: false, text: { tag: 'lark_md', content: `**笔记**\n${data.noteId}` } },
+          { is_short: false, text: { tag: 'lark_md', content: `**笔记**\n${noteLabel}` } },
           { is_short: false, text: { tag: 'lark_md', content: `**拟发评论**\n${data.text}` } },
         ],
       },
