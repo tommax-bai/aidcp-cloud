@@ -580,6 +580,9 @@ export interface NoteDetailPayload {
   authorId?: string;
   likeCount: number;
   collectCount: number;
+  /** 作者区关注按钮当下真实态（change skip-profile-visit-if-followed）：已关注/互关→true；
+   *  缺省/读取失败=未探到→云端回退原主页评估。边缘只读取上报、MUST NOT 臆造。 */
+  authorFollowed?: boolean;
 }
 
 export interface ProfileDetailPayload {

@@ -22,6 +22,9 @@ export interface NoteData {
   author?: string;
   likeCount: number;
   collectCount: number;
+  /** 详情页作者区关注按钮当下真实态（change skip-profile-visit-if-followed）：已关注/互关→true。
+   *  由 note.detail 透传，AuthorEvaluator 据此在评估进主页前短路已关注作者。缺省→原流程。 */
+  authorFollowed?: boolean;
 }
 
 export interface ContentCuratorRoleOptions extends RoleOptions {

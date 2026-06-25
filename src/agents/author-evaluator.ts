@@ -2,8 +2,8 @@
  * AuthorEvaluator — 作者评估角色（LLM）。
  *
  * 职责：评估是否值得进入博主个人主页。
- * 消费事件：interaction.completed
- * 产出事件：profile.worth_visiting（值得去）或 profile.skipped（不值得）
+ * 消费事件：comment.done / comment.skipped（发评论支线结算后，即「先互动才评估主页」）
+ * 产出事件：profile.worth_visiting（值得去）或 profile.skipped（不值得 / 已关注 / 数据缺失）
  */
 
 import { BaseRole } from './base-role.js';
@@ -62,6 +62,20 @@ export class AuthorEvaluator extends BaseRole {
         noteId: payload.noteId,
         sourcePageType: payload.sourcePageType,
         reason: 'author_unknown',
+        ts: Date.now(),
+      });
+      return;
+    }
+
+    // 已关注作者：跳过整条主页子链（change skip-profile-visit-if-followed）。
+    // 在调 LLM 之前最早短路——不评估、不下发 profile.open、不浏览主页、不发起关注。
+    // 信号来自 note.detail 的 authorFollowed（边缘探测的平台当下真实态）；缺省/读取失败时落 false，
+    // 走原评估流程，并由末端 interaction.follow 的 already_followed 良性 no-op 作兜底。
+    if (noteData.authorFollowed === true) {
+      this.emit('profile.skipped', {
+        noteId: payload.noteId,
+        sourcePageType: payload.sourcePageType,
+        reason: 'already_followed',
         ts: Date.now(),
       });
       return;

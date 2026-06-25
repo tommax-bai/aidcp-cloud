@@ -213,6 +213,72 @@ describe('AuthorEvaluator', () => {
     role.unsubscribe();
   });
 
+  it('authorFollowed=true → 提前 skip(already_followed)，不调 LLM、不产 worth_visiting', async () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    let llmCalled = false;
+    const llm = { complete: async () => { llmCalled = true; return '{"verdict":"visit","reason":"x","confidence":0.9}'; } };
+    const followedNote: NoteData = { ...sampleNote, authorFollowed: true };
+    const role = new AuthorEvaluator({
+      eventBus: bus,
+      soul: mockSoul,
+      llm,
+      sessionContext: ctx,
+      getNoteData: () => followedNote,
+    });
+    role.subscribe();
+
+    let skipped = null as ProfileSkippedPayload | null;
+    let worthEmitted = false;
+    bus.on('profile.skipped', (p) => { skipped = p; });
+    bus.on('profile.worth_visiting', () => { worthEmitted = true; });
+
+    bus.emit('comment.done', {
+      noteId: 'note_1',
+      sourcePageType: 'feed',
+      actions: ['like'],
+      ok: true,
+      ts: Date.now(),
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.ok(skipped, 'should emit profile.skipped');
+    assert.equal(skipped!.reason, 'already_followed');
+    assert.equal(skipped!.noteId, 'note_1');
+    assert.equal(worthEmitted, false, 'must not emit profile.worth_visiting');
+    assert.equal(llmCalled, false, 'must not call LLM when already followed');
+
+    role.unsubscribe();
+  });
+
+  it('authorFollowed=false → 照常走 LLM 评估（不短路）', async () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    let llmCalled = false;
+    const llm = { complete: async () => { llmCalled = true; return '{"verdict":"visit","reason":"好博主","confidence":0.9}'; } };
+    const notFollowed: NoteData = { ...sampleNote, authorFollowed: false };
+    const role = new AuthorEvaluator({
+      eventBus: bus,
+      soul: mockSoul,
+      llm,
+      sessionContext: ctx,
+      getNoteData: () => notFollowed,
+    });
+    role.subscribe();
+
+    let worth = null as ProfileWorthVisitingPayload | null;
+    bus.on('profile.worth_visiting', (p) => { worth = p; });
+
+    bus.emit('comment.done', { noteId: 'note_1', sourcePageType: 'feed', actions: ['like'], ok: true, ts: Date.now() });
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.equal(llmCalled, true, 'should call LLM when not followed');
+    assert.ok(worth, 'should evaluate normally');
+
+    role.unsubscribe();
+  });
+
   it('LLM 抛错 → emit profile.skipped (llm_error)', async () => {
     const bus = new EventBus();
     const ctx = new SessionContext();
