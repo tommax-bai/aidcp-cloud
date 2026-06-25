@@ -17,7 +17,8 @@ const soul: Soul = {
   interests: { primary: ['AI', 'LLM'], secondary: ['编程'], seed_keywords: ['GPT'] },
   session_limits: { max_duration_min: 10, max_likes: 8, max_collects: 5, max_searches: 3, cooldown_between_actions_sec: [2, 5] as [number, number] },
 };
-const note: NoteData = { noteId: 'n1', title: '高热度精品', content: '真有干货', author: 'guru', likeCount: 999, collectCount: 400 };
+// likeCount > 1000 且 collectCount > 300：过 engagement-restraint 的评论硬数值门槛，使本组测试仍走 LLM 判定路径。
+const note: NoteData = { noteId: 'n1', title: '高热度精品', content: '真有干货', author: 'guru', likeCount: 1200, collectCount: 400 };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const trigger = { noteId: 'n1', sourcePageType: 'feed' as const, actions: ['like'] as ('like' | 'collect')[], ts: 0 };
 

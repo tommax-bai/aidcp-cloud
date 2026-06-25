@@ -13,3 +13,4 @@ export * from './cold-start-planner.js';
 export * from './interaction-dedup.js';
 export * from './interaction-guard.js';
 export * from './search-frequency-limiter.js';
+export * from './action-cooldown.js';

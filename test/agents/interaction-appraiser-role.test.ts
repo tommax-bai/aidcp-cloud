@@ -191,7 +191,7 @@ describe('InteractionAppraiserRole', () => {
     role.unsubscribe();
   });
 
-  it('prompt 把 like 框定为低门槛常见、collect 为稀有选择性', async () => {
+  it('prompt 把 like 框定为选择性、collect 为更稀有选择性（engagement-restraint）', async () => {
     const bus = new EventBus();
     const ctx = new SessionContext();
     let capturedPrompt = '';
@@ -223,9 +223,9 @@ describe('InteractionAppraiserRole', () => {
 
     await new Promise((r) => setTimeout(r, 50));
 
-    assert.match(capturedPrompt, /点赞是高频轻互动/);
-    assert.match(capturedPrompt, /多数值得互动的笔记都该至少点赞/);
-    assert.match(capturedPrompt, /稀有、谨慎/);
+    assert.match(capturedPrompt, /点赞是选择性互动/);
+    assert.match(capturedPrompt, /真有共鸣/);
+    assert.match(capturedPrompt, /更稀有、更谨慎/);
 
     role.unsubscribe();
   });

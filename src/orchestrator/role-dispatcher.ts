@@ -56,6 +56,7 @@ import type { Soul } from '../soul/types.js';
 import { computeDwellMs, computeThinkMs } from '../risk/pacing.js';
 import { SearchFrequencyLimiter } from '../risk/search-frequency-limiter.js';
 import { InteractionGuard, isGuardedInteraction, type GuardAction } from '../risk/interaction-guard.js';
+import { ActionCooldownGate, type CooldownAction } from '../risk/action-cooldown.js';
 import type { RiskStatus } from '../risk/types.js';
 import type { ConceptPool } from '../event-bus/types.js';
 import type { NotificationItem } from '../comm/protocol.js';
@@ -139,6 +140,12 @@ export interface RoleDispatcherOptions {
    * 下发互动前占坑去重，防两节点对同一笔记/作者重复点赞/关注/评论。缺省 → 不去重（单账号单节点向后兼容）。
    */
   interactionGuard?: InteractionGuard;
+  /**
+   * 动作冷却闸（engagement-restraint）：下发 like/collect/follow 前查冷却、真成功后落时间戳；
+   * comment 冷却在 CommentAppraiser 早判（经 getCommentCooldownOk 闭包）。缺省 → 不冷却（向后兼容）。
+   * 单例共享、内部按 accountId 分桶，附加只读节奏闸，不写风控终态。
+   */
+  cooldownGate?: ActionCooldownGate;
 }
 
 export interface EdgeCommand {
@@ -195,6 +202,8 @@ export class RoleDispatcher {
   private readonly isDispatchActive: () => boolean;
   /** 同账号并行互动去重 guard（按账号单例）；缺省不去重。 */
   private readonly interactionGuard?: InteractionGuard;
+  /** 动作冷却闸（engagement-restraint）；缺省不冷却。 */
+  private readonly cooldownGate?: ActionCooldownGate;
   /** 已下发占坑、待回执释放的互动键（按动作）：action.completed 据此 complete / releaseFailed。 */
   private readonly pendingInteractionKeys = new Map<GuardAction, string>();
   private readonly notifyComments?: (items: NotificationItem[]) => Promise<void>;
@@ -240,6 +249,7 @@ export class RoleDispatcher {
     this.onSessionRejected = options.onSessionRejected;
     this.isDispatchActive = options.isDispatchActive ?? (() => true);
     this.interactionGuard = options.interactionGuard;
+    this.cooldownGate = options.cooldownGate;
     this.notifyComments = options.notifyComments;
     this.conceptStore = options.conceptStore;
     this.searchLimiter = new SearchFrequencyLimiter(options.searchLimiterOptions);
@@ -385,6 +395,8 @@ export class RoleDispatcher {
         getNoteData,
         getRemainingComments: () => this.budget.comments,
         ...(this.getCommentDailyRemaining ? { getDailyRemaining: this.getCommentDailyRemaining } : {}),
+        // 评论冷却前置到评估阶段（engagement-restraint）：按当前账号查冷却闸（无 gate 时恒放行）。
+        getCommentCooldownOk: () => this.cooldownPasses('comment'),
       }),
       new CommentComposer({
         ...commonOptions,
@@ -637,6 +649,24 @@ export class RoleDispatcher {
     return this.budget.follows;
   }
 
+  /**
+   * 冷却闸判定（engagement-restraint）：true=已过冷却可下发；false=未到点（已记中性日志「按冷却跳过」）。
+   * 无 cooldownGate（向后兼容）时恒 true。用 this.clock() 取时（注入时钟便于单测）。
+   */
+  private cooldownPasses(action: CooldownAction): boolean {
+    if (!this.cooldownGate) return true;
+    const now = this.clock();
+    if (this.cooldownGate.canAct(this.currentAccountId, action, now)) return true;
+    const remainS = Math.ceil(this.cooldownGate.remainingMs(this.currentAccountId, action, now) / 1000);
+    console.log(`[RoleDispatcher] 按冷却跳过 action=${action}（还需 ${remainS}s，account=${this.currentAccountId}）`);
+    return false;
+  }
+
+  /** 记一次真实成功动作的冷却时间戳（仅 ok:true、follow 非 already_followed 时调用）。无 gate 则 no-op。 */
+  private markCooldown(action: CooldownAction): void {
+    this.cooldownGate?.markActed(this.currentAccountId, action, this.clock());
+  }
+
   // ─── 内部：Edge 指令翻译层 ────────────────────────────────────
 
   private setupCommandTranslation(): void {
@@ -664,6 +694,8 @@ export class RoleDispatcher {
             console.log(`[RoleDispatcher] 互动被风控拦截，跳过 action=${action} note=${payload.noteId}`);
             continue;
           }
+          // 冷却闸（engagement-restraint）：未到点诚实跳过——不下发、不扣 budget（与风控拦截同口径，红线：不假成功）。
+          if (!this.cooldownPasses(action)) continue;
           // 互动前犹豫时间（time directive）：边缘据此在执行前等待并叠抖动。
           // 下发被去重跳过（同账号已在途/已完成）则不扣会话预算（不漂移）。
           const sent = this.sendCommand({ action, params: { noteId: payload.noteId, thinkMs: this.thinkNow() } });
@@ -746,6 +778,9 @@ export class RoleDispatcher {
           // 风控闸：被拒则诚实跳过（不下发、不扣额；follow 配额仍由 action.completed 真实回执扣减）。
           if (!this.canInteract('follow')) {
             console.log('[RoleDispatcher] 关注被风控拦截，跳过 follow');
+            reason = 'follow_blocked';
+          } else if (!this.cooldownPasses('follow')) {
+            // 冷却闸：未到点诚实跳过——不下发关注；仍收敛到 profile.exit 返回信息流（不死锁）。
             reason = 'follow_blocked';
           } else {
             this.sendCommand({ action: 'follow', params: { authorId: payload.authorId, thinkMs: this.thinkNow() } });
@@ -864,6 +899,15 @@ export class RoleDispatcher {
       // note.detail/page.cards，事件循环会因无触发而死等；统一以一次 scroll 续刷兜底。
       this.eventBus.on('action.completed', (payload) => {
         console.log(`[RoleDispatcher] action.completed: ${payload.action} ok=${payload.ok}`);
+        // 冷却时间戳（engagement-restraint）：仅在真实成功（ok:true）时落；下发失败不起算（不白占冷却窗）。
+        // follow 排除 already_followed 良性 no-op（与「no-op 不烧配额」同口径，不算一次真关注）。
+        if (payload.ok === true) {
+          if (payload.action === 'like' || payload.action === 'collect' || payload.action === 'comment') {
+            this.markCooldown(payload.action);
+          } else if (payload.action === 'follow' && payload.reason !== 'already_followed') {
+            this.markCooldown('follow');
+          }
+        }
         // 同账号并行（N:1）：释放该动作的在途去重坑。成功且非 already_followed no-op → 记已完成（不再重复对同目标动作）；
         // 失败 / already_followed → 仅释放在途坑（允许后续重试）。靠边缘 FIFO 回执与 per-动作单坑对齐，TTL 兜底防丢回执永久占坑。
         if (this.interactionGuard && isGuardedInteraction(payload.action)) {

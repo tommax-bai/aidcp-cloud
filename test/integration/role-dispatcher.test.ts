@@ -369,10 +369,12 @@ describe('RoleDispatcher Integration', () => {
       '{"verdict":"visit","reason":"作者专业度极高","confidence":0.85}',
       '{"verdict":"follow","reason":"持续优质输出","confidence":0.8}',
     ]);
+    // 高热度精品笔记（>1000 赞 且 >300 收藏）：过 engagement-restraint 评论硬数值门槛，
+    // 使 CommentAppraiser 仍调 LLM（消费 comment:false 那次），保持 7 次 LLM 调用序列对齐。
     const note = {
       noteId: 'note_0', title: '深度学习实战指南',
       content: '非常优质的深度学习实战文章，包含完整代码和架构图...',
-      author: '大佬博主', authorId: 'author_pro', likeCount: 500, collectCount: 200,
+      author: '大佬博主', authorId: 'author_pro', likeCount: 1500, collectCount: 400,
     };
     const dispatcher = makeDispatcher(llm, commands, note, { authorId: 'author_pro', postsCount: 50, followersCount: 10000, extracted: true });
     dispatcher.setup();
@@ -390,7 +392,7 @@ describe('RoleDispatcher Integration', () => {
 
     // 模拟 Edge 上报卡片
     dispatcher.bus.emit('page.cards.arrived', {
-      cards: [{ index: 0, title: '深度学习实战指南', likeCount: 500, collectCount: 200, noteId: 'note_0' }],
+      cards: [{ index: 0, title: '深度学习实战指南', likeCount: 1500, collectCount: 400, noteId: 'note_0' }],
       ts: Date.now(),
     });
 

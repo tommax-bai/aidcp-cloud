@@ -28,7 +28,7 @@ import {
 } from './comm/index.js';
 
 
-import { RiskController, RiskControllerRegistry, PgRiskStore, InteractionGuardRegistry } from './risk/index.js';
+import { RiskController, RiskControllerRegistry, PgRiskStore, InteractionGuardRegistry, ActionCooldownGate } from './risk/index.js';
 import { EventBus } from './event-bus/index.js';
 import { RoleDispatcher } from './orchestrator/index.js';
 import { ConnectionRuntimeRegistry, type DispatcherBuildContext } from './orchestrator/connection-runtime.js';
@@ -635,6 +635,10 @@ async function main(): Promise<void> {
   // 下发互动前占坑去重，防两节点对同一笔记/作者重复点赞/关注/评论（D7②）。
   const interactionGuardRegistry = new InteractionGuardRegistry();
 
+  // 动作冷却闸（engagement-restraint）：单例共享（内部按 accountId 分桶）——同账号 N 连接共用同一冷却时间线，
+  // 不同账号互不影响。附加只读节奏闸，不写风控终态；判定全在云端、内存态、不经协议、无迁移。
+  const actionCooldownGate = new ActionCooldownGate();
+
   // 每个连接握手时由 buildDispatcher 造一束 RoleDispatcher：私有总线 / 该连接真实账号 controller / 定向下发。
   // 人设以取值口注入（account-persona-config）：派发时按当前账号热加载，PUT 后无需重启。
   const buildDispatcher = (ctx: DispatcherBuildContext): RoleDispatcher => {
@@ -713,6 +717,8 @@ async function main(): Promise<void> {
       isDispatchActive: () => dispatchActive,
       // 同账号并行互动去重（按账号单例 guard；同账号 N 连接共用 → 共享 in-flight/completed，不重复动作）。
       interactionGuard: interactionGuardRegistry.forAccount(ctx.accountId),
+      // 动作冷却闸（engagement-restraint）：单例共享，内部按 ctx.accountId 分桶。下发互动前查、真成功后落时间戳。
+      cooldownGate: actionCooldownGate,
     });
   };
 

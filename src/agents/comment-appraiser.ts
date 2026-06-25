@@ -14,12 +14,25 @@ import type { RoleOptions } from './base-role.js';
 import type { NoteData } from './content-curator-role.js';
 import type { RoleName, InteractionCompletedPayload } from '../event-bus/types.js';
 
+/**
+ * 评论硬数值阈值（engagement-restraint）：仅当详情页**点赞 > 1000 且 收藏 > 300**（均严格大于「超过」语义）
+ * 才达精品门槛、才可能评论。为必要非充分条件——达阈值后仍叠加 LLM 精品判定 + 飞书人审。
+ */
+export const COMMENT_MIN_LIKES = 1000;
+export const COMMENT_MIN_COLLECTS = 300;
+
 export interface CommentAppraiserOptions extends RoleOptions {
   getNoteData: (noteId: string) => NoteData | null;
   /** 剩余会话评论预算（每会话稀缺名额）。 */
   getRemainingComments: () => number;
   /** 可选：该账号当日剩余评论上限（后台配置；缺省视为不额外限制，仅会话预算 + 风控生效）。 */
   getDailyRemaining?: () => number;
+  /**
+   * 评论冷却是否已过（engagement-restraint）；缺省视为不冷却（向后兼容）。
+   * 由 dispatcher 接 `cooldownGate.canAct(currentAccountId, 'comment', clock())`——评论冷却前置到评估阶段，
+   * 未到点直接 skip，避免白走撰写 / 去 AI 味 / 飞书人审。
+   */
+  getCommentCooldownOk?: () => boolean;
 }
 
 export class CommentAppraiser extends BaseRole {
@@ -27,6 +40,7 @@ export class CommentAppraiser extends BaseRole {
   private readonly getNoteData: (noteId: string) => NoteData | null;
   private readonly getRemainingComments: () => number;
   private readonly getDailyRemaining?: () => number;
+  private readonly getCommentCooldownOk?: () => boolean;
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: CommentAppraiserOptions) {
@@ -35,6 +49,7 @@ export class CommentAppraiser extends BaseRole {
     this.getNoteData = options.getNoteData;
     this.getRemainingComments = options.getRemainingComments;
     this.getDailyRemaining = options.getDailyRemaining;
+    this.getCommentCooldownOk = options.getCommentCooldownOk;
   }
 
   subscribe(): void {
@@ -68,10 +83,20 @@ export class CommentAppraiser extends BaseRole {
       this.skip(payload, 'daily_cap_reached');
       return;
     }
+    // 评论冷却（engagement-restraint）：前置到评估阶段，未到点直接跳过，绝不进入撰写 / 去 AI 味 / 人审。
+    if (this.getCommentCooldownOk && !this.getCommentCooldownOk()) {
+      this.skip(payload, 'cooldown');
+      return;
+    }
 
     const note = this.getNoteData(payload.noteId);
     if (!note) {
       this.skip(payload, 'note_data_unavailable');
+      return;
+    }
+    // 硬数值阈值（engagement-restraint）：点赞 > 1000 且 收藏 > 300（严格大于）才达精品门槛，否则在调 LLM 前即跳过。
+    if (!(note.likeCount > COMMENT_MIN_LIKES && note.collectCount > COMMENT_MIN_COLLECTS)) {
+      this.skip(payload, 'below_comment_threshold');
       return;
     }
 
