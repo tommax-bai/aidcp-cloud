@@ -9,12 +9,12 @@ const silentLogger = { log() {}, warn() {}, error() {} };
 function makeDeps(withCategoryConfig = true) {
   const view: CategoryConfigCatalogView = {
     categories: [
-      { categoryId: 'browse_judge', displayName: '浏览 · 判定类', order: 1, effectiveModel: 'qwen-turbo', modelOverridden: false, updatedAt: null, updatedBy: null },
+      { categoryId: 'browse_judge', displayName: '浏览 · 判定类', order: 1, effectiveModel: 'qwen-turbo', effectiveProvider: 'dashscope', modelOverridden: false, updatedAt: null, updatedBy: null },
     ],
   };
   const categoryConfig = {
     getCatalog: () => view,
-    setCategoryConfig: async (categoryId: string, model: string | null) => {
+    setCategoryConfig: async (categoryId: string, model: string | null, _provider: string | null) => {
       if (categoryId === 'nope_category') return { ok: false as const, reason: 'unknown_category' as const };
       if (categoryId === 'image') return { ok: false as const, reason: 'category_not_configurable' as const };
       if (model === 'bad') return { ok: false as const, reason: 'model_invalid' as const };

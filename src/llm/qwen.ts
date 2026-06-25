@@ -27,10 +27,27 @@ export interface LlmCallOpts {
   accountId?: string;
   /** 显式模型名覆盖（优先于按角色解析；用于保存前探活）。 */
   model?: string;
+  /**
+   * 显式厂商覆盖（change model-config-volcengine-provider）：优先于按角色解析的 provider。
+   * 探活按 provider 探时显式传；不传则交注入的 `getProvider` 按角色解析、再缺则走构造默认路径。
+   * MUST NOT 在此传裸 baseUrl/apiKey —— 密钥只从启动期预载的 `providerRuntime` 取，保住"唯一出口"不变量。
+   */
+  provider?: string;
   /** 显式温度覆盖（优先于按角色解析）。 */
   temperature?: number;
   /** 显式超时覆盖（毫秒；探活用短超时）。 */
   timeoutMs?: number;
+}
+
+/**
+ * 选中厂商的密钥不可用时由 `chat()` 抛出（change model-config-volcengine-provider）。
+ * 探活/调用方据此把失败诚实归因为"该厂商密钥缺失"（区别于模型名无效），绝不跨厂商兜底。
+ */
+export class ProviderKeyMissingError extends Error {
+  constructor(public readonly provider: string) {
+    super(`${provider} apiKey 缺失（在后台为该厂商配置密钥并重启 cloud）`);
+    this.name = 'ProviderKeyMissingError';
+  }
 }
 
 /** 通用文本 LLM 客户端接口（与 edge 侧 selector.LlmClient 同形，便于迁移）。只需补全。 */
@@ -64,6 +81,19 @@ export interface QwenClientOptions {
    * 返回该角色的温度覆盖；无覆盖返回 undefined → 回退构造期 temperature。
    */
   getTemperature?: (role?: string) => number | undefined;
+  /**
+   * 运行时厂商解析器（按角色，change model-config-volcengine-provider）。
+   * 返回该次调用胜出层的 provider id（与 `getModel` 取自同一解析、必然同层一致）。
+   * 注入后每次调用按 provider 从 `providerRuntime` 取 baseUrl+key；不注入则走构造默认（零回归）。
+   */
+  getProvider?: (role?: string) => string;
+  /**
+   * 启动期预载的 `provider → {baseUrl, apiKey}` 静态映射（change model-config-volcengine-provider）。
+   * 与现状"密钥启动期一次性加载"一致：模型名热加载、密钥变更重启生效。
+   * 注入后 `chat()` 按解析出的 provider 取地址与密钥；选中 provider 缺密钥即诚实抛错、绝不跨厂商兜底。
+   * 不注入（单测/旧路径）则用构造期 baseUrl+apiKey，请求与改造前逐字一致。
+   */
+  providerRuntime?: Record<string, { baseUrl: string; apiKey: string }>;
   /** 兼容 OpenAI 的 base url，默认 DashScope 兼容端点 */
   baseUrl?: string;
   /** 采样温度，默认 0（定位/规划要稳定） */
@@ -81,6 +111,8 @@ export interface QwenClientOptions {
    */
   onCall?: (info: {
     role?: string;
+    /** 生效厂商（change model-config-volcengine-provider）：供日志/记账区分同名模型来自哪个厂商。 */
+    provider?: string;
     model: string;
     ms: number;
     ok: boolean;
@@ -106,12 +138,15 @@ export class QwenClient implements ChatLlmClient {
   private readonly model: string;
   private readonly getModel?: (role?: string) => string;
   private readonly getTemperature?: (role?: string) => number | undefined;
+  private readonly getProvider?: (role?: string) => string;
+  private readonly providerRuntime?: Record<string, { baseUrl: string; apiKey: string }>;
   private readonly baseUrl: string;
   private readonly temperature: number;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
   private readonly onCall?: (info: {
     role?: string;
+    provider?: string;
     model: string;
     ms: number;
     ok: boolean;
@@ -126,6 +161,8 @@ export class QwenClient implements ChatLlmClient {
     this.model = options.model ?? 'qwen-turbo';
     this.getModel = options.getModel;
     this.getTemperature = options.getTemperature;
+    this.getProvider = options.getProvider;
+    this.providerRuntime = options.providerRuntime;
     this.baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
     this.temperature = options.temperature ?? 0;
     this.timeoutMs = options.timeoutMs ?? 30_000;
@@ -142,13 +179,28 @@ export class QwenClient implements ChatLlmClient {
 
   /** 多轮对话补全 */
   async chat(messages: QwenChatMessage[], opts?: LlmCallOpts): Promise<string> {
-    if (!this.apiKey) {
-      throw new Error('Qwen apiKey 缺失（设置 DASHSCOPE_API_KEY 或传入 apiKey）');
-    }
     // opts 优先 → 按角色解析 → 构造默认（不传 opts 时与改造前逐字一致）。
     const model = opts?.model ?? this.getModel?.(opts?.role) ?? this.model;
     const temperature = opts?.temperature ?? this.getTemperature?.(opts?.role) ?? this.temperature;
     const timeoutMs = opts?.timeoutMs ?? this.timeoutMs;
+    // provider 路由（change model-config-volcengine-provider）：按本次解析出的 provider 取 baseUrl+key。
+    // 缺密钥发请求前诚实抛错、绝不退回别厂商的 key/baseUrl（避免把模型名发到错误厂商的"静默走错"）。
+    const provider = opts?.provider ?? this.getProvider?.(opts?.role);
+    let baseUrl: string;
+    let apiKey: string;
+    if (provider && this.providerRuntime) {
+      const rt = this.providerRuntime[provider];
+      if (!rt || !rt.apiKey) throw new ProviderKeyMissingError(provider);
+      baseUrl = rt.baseUrl;
+      apiKey = rt.apiKey;
+    } else {
+      // 未注入多厂商运行时（单测/旧路径）：用构造默认，与改造前逐字一致。
+      baseUrl = this.baseUrl;
+      apiKey = this.apiKey;
+      if (!apiKey) {
+        throw new Error('Qwen apiKey 缺失（设置 DASHSCOPE_API_KEY 或传入 apiKey）');
+      }
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const startedAt = Date.now();
@@ -157,11 +209,11 @@ export class QwenClient implements ChatLlmClient {
     // 红线：响应体一旦带 usage（prompt token 已计费）就如实带出，绝不因后续判失败而清零。
     let usage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined;
     try {
-      const res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
+      const res = await this.fetchImpl(`${baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`,
+          Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
           model,
@@ -190,6 +242,7 @@ export class QwenClient implements ChatLlmClient {
       clearTimeout(timer);
       this.onCall?.({
         role: opts?.role,
+        provider,
         model,
         ms: Date.now() - startedAt,
         ok,

@@ -3,24 +3,24 @@ import assert from 'node:assert/strict';
 import pg from 'pg';
 import { RoleConfigStore } from '../src/config/role-config-store.js';
 
-/** 内存假 pool：路由 role_config 的建表 / SELECT / upsert(RETURNING)；可注入写失败。 */
-function fakePool(seed: Record<string, { model: string | null; temperature: number | null }> = {}) {
+/** 内存假 pool：路由 role_config 的建表 / SELECT / upsert(RETURNING)；可注入写失败。provider 随 0018 加列。 */
+function fakePool(seed: Record<string, { model: string | null; provider?: string | null; temperature: number | null }> = {}) {
   const rows = new Map<
     string,
-    { role_id: string; model: string | null; temperature: number | null; updated_at: string; updated_by: string }
+    { role_id: string; model: string | null; provider: string | null; temperature: number | null; updated_at: string; updated_by: string }
   >();
   for (const [roleId, v] of Object.entries(seed)) {
-    rows.set(roleId, { role_id: roleId, model: v.model, temperature: v.temperature, updated_at: '2026-06-21T00:00:00.000Z', updated_by: 'seed' });
+    rows.set(roleId, { role_id: roleId, model: v.model, provider: v.provider ?? null, temperature: v.temperature, updated_at: '2026-06-21T00:00:00.000Z', updated_by: 'seed' });
   }
   let failWrite = false;
   const pool = {
     query: async (sql: string, params?: unknown[]) => {
-      if (sql.includes('CREATE TABLE')) return { rows: [] };
+      if (sql.includes('CREATE TABLE') || sql.trimStart().startsWith('ALTER')) return { rows: [] };
       if (sql.trimStart().startsWith('SELECT')) return { rows: [...rows.values()] };
       if (sql.includes('INSERT INTO role_config')) {
         if (failWrite) throw new Error('db down');
-        const [roleId, model, temperature, updatedBy] = params as [string, string | null, number | null, string];
-        const row = { role_id: roleId, model, temperature, updated_at: '2026-06-21T01:00:00.000Z', updated_by: updatedBy };
+        const [roleId, model, provider, temperature, updatedBy] = params as [string, string | null, string | null, number | null, string];
+        const row = { role_id: roleId, model, provider, temperature, updated_at: '2026-06-21T01:00:00.000Z', updated_by: updatedBy };
         rows.set(roleId, row);
         return { rows: [row] };
       }
@@ -34,18 +34,19 @@ test('缺行 → getForRole 回落空（model/temperature 均 null）', async ()
   const { pool } = fakePool();
   const store = new RoleConfigStore({ pool });
   await store.init();
-  assert.deepEqual(store.getForRole('browse:content_evaluator'), { model: null, temperature: null });
+  assert.deepEqual(store.getForRole('browse:content_evaluator'), { model: null, provider: null, temperature: null });
 });
 
 test('set 后 getForRole 即时热加载（无需重启）', async () => {
   const { pool } = fakePool();
   const store = new RoleConfigStore({ pool });
   await store.init();
-  const row = await store.set('publish:ContentCreator', { model: 'qwen-max', temperature: 0.7 }, 'alice');
+  const row = await store.set('publish:ContentCreator', { model: 'qwen-max', provider: 'volcengine', temperature: 0.7 }, 'alice');
   assert.equal(row.model, 'qwen-max');
+  assert.equal(row.provider, 'volcengine');
   assert.equal(row.temperature, 0.7);
   assert.equal(row.updatedBy, 'alice');
-  assert.deepEqual(store.getForRole('publish:ContentCreator'), { model: 'qwen-max', temperature: 0.7 });
+  assert.deepEqual(store.getForRole('publish:ContentCreator'), { model: 'qwen-max', provider: 'volcengine', temperature: 0.7 });
 });
 
 test('越界温度归一为 null（不落非法值）', async () => {

@@ -20,6 +20,7 @@ import { startPanelWs, type PanelWsHandle } from './panel-ws.js';
 import type { PublishApprovalPayload } from '../feishu/index.js';
 import type { RiskSignalKind, RiskQuotaLevel } from '../risk/index.js';
 import { isKnownRole } from '../config/role-catalog.js';
+import { isAllowedCredential } from '../llm/index.js';
 
 /** 登录/写体很小，限制请求体大小防滥用。 */
 const MAX_BODY_BYTES = 16 * 1024;
@@ -376,16 +377,28 @@ function createRequestHandler(
           sendJson(res, 400, { error: 'bad_request' });
           return;
         }
-        const { textModel, imageModel } = (body ?? {}) as { textModel?: unknown; imageModel?: unknown };
+        // change model-config-volcengine-provider：可改 textProvider（全局文本厂商）。
+        const { textProvider, textModel, imageModel } = (body ?? {}) as {
+          textProvider?: unknown;
+          textModel?: unknown;
+          imageModel?: unknown;
+        };
         // 至少一个非空字符串字段；空 / 非字符串一律不接受（不静默忽略全空请求）
-        const patch: { textModel?: string; imageModel?: string } = {};
+        const patch: { textProvider?: string; textModel?: string; imageModel?: string } = {};
+        if (typeof textProvider === 'string' && textProvider.trim()) patch.textProvider = textProvider.trim();
         if (typeof textModel === 'string' && textModel.trim()) patch.textModel = textModel.trim();
         if (typeof imageModel === 'string' && imageModel.trim()) patch.imageModel = imageModel.trim();
         if (Object.keys(patch).length === 0) {
           sendJson(res, 400, { error: 'bad_request', reason: 'no_valid_fields' });
           return;
         }
-        sendJson(res, 200, await deps.modelConfig.setModel(patch, verified.payload.sub));
+        const result = await deps.modelConfig.setModel(patch, verified.payload.sub);
+        if (!result.ok) {
+          // 厂商未知 / 模型探活失败 / 该厂商密钥缺失：诚实 400，绝不落库、绝不假成功
+          sendJson(res, 400, { error: result.reason });
+          return;
+        }
+        sendJson(res, 200, result.view);
         return;
       }
     }
@@ -401,9 +414,13 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
-      const { field, value } = (body ?? {}) as { field?: unknown; value?: unknown };
-      const ALLOWED_FIELDS = ['dashscope_api_key'];
-      if (typeof field !== 'string' || !ALLOWED_FIELDS.includes(field)) {
+      // change model-config-volcengine-provider：按厂商写密钥；(provider, field) 须在注册表派生的白名单内。
+      const { provider, field, value } = (body ?? {}) as {
+        provider?: unknown;
+        field?: unknown;
+        value?: unknown;
+      };
+      if (typeof provider !== 'string' || typeof field !== 'string' || !isAllowedCredential(provider, field)) {
         sendJson(res, 400, { error: 'bad_request', reason: 'unknown_field' });
         return;
       }
@@ -411,13 +428,18 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request', reason: 'empty_value' });
         return;
       }
-      const result = await deps.modelConfig.setCredential(field, value.trim(), verified.payload.sub);
+      const result = await deps.modelConfig.setCredential(provider, field, value.trim(), verified.payload.sub);
       if (!result.ok) {
         // 主密钥缺失：诚实报因，绝不明文落库、绝不假成功
         sendJson(res, 503, { error: result.reason });
         return;
       }
-      sendJson(res, 200, { field: result.field, configured: true, maskedHint: result.maskedHint });
+      sendJson(res, 200, {
+        provider: result.provider,
+        field: result.field,
+        configured: true,
+        maskedHint: result.maskedHint,
+      });
       return;
     }
 
@@ -444,12 +466,24 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
-      const { model, temperature } = (body ?? {}) as { model?: unknown; temperature?: unknown };
-      const patch: { model?: string | null; temperature?: number | null } = {};
+      // change model-config-volcengine-provider：provider 跟 model 同发（写 model 时按此 provider 探活并落库）。
+      const { model, provider, temperature } = (body ?? {}) as {
+        model?: unknown;
+        provider?: unknown;
+        temperature?: unknown;
+      };
+      const patch: { model?: string | null; provider?: string | null; temperature?: number | null } = {};
       if (model !== undefined) {
         if (model === null || typeof model === 'string') patch.model = model;
         else {
           sendJson(res, 400, { error: 'bad_request', reason: 'model_type' });
+          return;
+        }
+      }
+      if (provider !== undefined) {
+        if (provider === null || typeof provider === 'string') patch.provider = provider;
+        else {
+          sendJson(res, 400, { error: 'bad_request', reason: 'provider_type' });
           return;
         }
       }
@@ -497,15 +531,25 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
-      const { model } = (body ?? {}) as { model?: unknown };
+      // change model-config-volcengine-provider：provider 跟 model 同发。
+      const { model, provider } = (body ?? {}) as { model?: unknown; provider?: unknown };
       // model 必须存在，且为 string 或 null（null/'' = 清除覆盖回落）。
       if (model !== null && typeof model !== 'string') {
         sendJson(res, 400, { error: 'bad_request', reason: 'model_type' });
         return;
       }
+      let provPatch: string | null = null;
+      if (provider !== undefined) {
+        if (provider === null || typeof provider === 'string') provPatch = provider;
+        else {
+          sendJson(res, 400, { error: 'bad_request', reason: 'provider_type' });
+          return;
+        }
+      }
       const result = await deps.categoryConfig.setCategoryConfig(
         categoryId,
         model as string | null,
+        provPatch,
         verified.payload.sub,
       );
       if (!result.ok) {

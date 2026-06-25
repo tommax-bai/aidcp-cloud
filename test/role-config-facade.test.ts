@@ -2,37 +2,71 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRoleConfigPanel } from '../src/config/role-config-facade.js';
 import type { RoleConfigStore } from '../src/config/role-config-store.js';
+import { ProviderKeyMissingError } from '../src/llm/index.js';
 
-/** 内存假 store：只实现 facade 用到的 getAll / set。 */
+type FakeRow = {
+  roleId: string;
+  model: string | null;
+  provider: string | null;
+  temperature: number | null;
+  updatedAt: string | null;
+  updatedBy: string | null;
+};
+
+/** 内存假 store：只实现 facade 用到的 getAll / getForRole / set（provider 跟 model 同行）。 */
 function fakeStore() {
-  const rows = new Map<string, { roleId: string; model: string | null; temperature: number | null; updatedAt: string | null; updatedBy: string | null }>();
+  const rows = new Map<string, FakeRow>();
   return {
     getAll: () => rows,
     getForRole: (id: string) => {
       const r = rows.get(id);
-      return r ? { model: r.model, temperature: r.temperature } : { model: null, temperature: null };
+      return r
+        ? { model: r.model, provider: r.provider, temperature: r.temperature }
+        : { model: null, provider: null, temperature: null };
     },
-    set: async (roleId: string, patch: { model?: string | null; temperature?: number | null }, by: string) => {
-      const prev = rows.get(roleId) ?? { roleId, model: null, temperature: null, updatedAt: null, updatedBy: null };
+    set: async (
+      roleId: string,
+      patch: { model?: string | null; provider?: string | null; temperature?: number | null },
+      by: string,
+    ) => {
+      const prev = rows.get(roleId) ?? {
+        roleId,
+        model: null,
+        provider: null,
+        temperature: null,
+        updatedAt: null,
+        updatedBy: null,
+      };
       const model = patch.model === undefined ? prev.model : patch.model?.trim() ? patch.model.trim() : null;
+      let provider: string | null;
+      if (patch.model === undefined) provider = prev.provider;
+      else if (model === null) provider = null;
+      else provider = patch.provider?.trim() || 'dashscope';
       const temperature = patch.temperature === undefined ? prev.temperature : patch.temperature;
-      const row = { roleId, model, temperature, updatedAt: '2026-06-21T00:00:00.000Z', updatedBy: by };
+      const row: FakeRow = { roleId, model, provider, temperature, updatedAt: '2026-06-21T00:00:00.000Z', updatedBy: by };
       rows.set(roleId, row);
       return row;
     },
   } as unknown as RoleConfigStore;
 }
 
-function makePanel(probeOk = true, categoryModels: Record<string, string | null> = {}) {
+function makePanel(
+  probeOk = true,
+  categoryModels: Record<string, string | null> = {},
+  opts: { keyMissing?: boolean; categoryProviders?: Record<string, string | null> } = {},
+) {
   const store = fakeStore();
-  const probed: string[] = [];
+  const probed: Array<{ provider: string; model: string }> = [];
   const panel = createRoleConfigPanel({
     store,
     getGlobalTextModel: () => 'qwen-turbo',
+    getGlobalTextProvider: () => 'dashscope',
     getGlobalImageModel: () => 'wan2.7-image-pro',
     getCategoryModel: (catId) => categoryModels[catId] ?? null,
-    probeModel: async (m) => {
-      probed.push(m);
+    getCategoryProvider: (catId) => opts.categoryProviders?.[catId] ?? null,
+    probeModel: async (provider, m) => {
+      probed.push({ provider, model: m });
+      if (opts.keyMissing) throw new ProviderKeyMissingError(provider);
       if (!probeOk) throw new Error('invalid');
     },
   });
@@ -108,7 +142,7 @@ test('有效模型名探活通过 → 写入 + 回真态视图（含覆盖）', 
   const { panel, store, probed } = makePanel(true);
   const r = await panel.setRoleConfig('browse:comment_composer', { model: 'qwen-max', temperature: 0.7 }, 'alice');
   assert.equal(r.ok, true);
-  assert.equal(probed()[0], 'qwen-max');
+  assert.deepEqual(probed()[0], { provider: 'dashscope', model: 'qwen-max' });
   const row = store.getAll().get('browse:comment_composer');
   assert.equal(row?.model, 'qwen-max');
   assert.equal(row?.updatedBy, 'alice');
@@ -124,4 +158,39 @@ test('空模型名清除覆盖（不探活）', async () => {
   const r = await panel.setRoleConfig('browse:comment_composer', { model: '' }, 'a');
   assert.equal(r.ok, true);
   assert.equal(probed().length, 0);
+});
+
+test('火山覆盖：按所选 provider 探活并落库，effectiveProvider 跟同行', async () => {
+  const { panel, store, probed } = makePanel(true);
+  const r = await panel.setRoleConfig(
+    'browse:comment_composer',
+    { model: 'doubao-seed-1-6', provider: 'volcengine' },
+    'alice',
+  );
+  assert.equal(r.ok, true);
+  assert.deepEqual(probed()[0], { provider: 'volcengine', model: 'doubao-seed-1-6' });
+  assert.equal(store.getAll().get('browse:comment_composer')?.provider, 'volcengine');
+  const cc = (r as { ok: true; view: { roles: Array<{ roleId: string; effectiveProvider: string }> } }).view.roles.find(
+    (x) => x.roleId === 'browse:comment_composer',
+  )!;
+  assert.equal(cc.effectiveProvider, 'volcengine');
+});
+
+test('选中厂商密钥缺失 → provider_key_missing（区别 model_invalid），绝不落库', async () => {
+  const { panel, store } = makePanel(true, {}, { keyMissing: true });
+  const r = await panel.setRoleConfig(
+    'browse:comment_composer',
+    { model: 'doubao-seed-1-6', provider: 'volcengine' },
+    'a',
+  );
+  assert.equal((r as { reason: string }).reason, 'provider_key_missing');
+  assert.equal(store.getAll().get('browse:comment_composer'), undefined);
+});
+
+test('未知 provider 归一 dashscope（绝不跨层混搭、绝不 brick）', async () => {
+  const { panel, store, probed } = makePanel(true);
+  const r = await panel.setRoleConfig('browse:comment_composer', { model: 'qwen-max', provider: 'bogus' }, 'a');
+  assert.equal(r.ok, true);
+  assert.deepEqual(probed()[0], { provider: 'dashscope', model: 'qwen-max' });
+  assert.equal(store.getAll().get('browse:comment_composer')?.provider, 'dashscope');
 });

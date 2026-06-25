@@ -14,6 +14,7 @@ import {
   isCategoryModelConfigurable,
 } from './role-catalog.js';
 import type { CategoryConfigStore } from './category-config-store.js';
+import { normProvider, ProviderKeyMissingError } from '../llm/index.js';
 import type {
   PanelCategoryConfig,
   CategoryConfigCatalogView,
@@ -24,13 +25,16 @@ export interface CategoryConfigFacadeDeps {
   store: CategoryConfigStore;
   /** 当前全局文本模型名（分类无覆盖时的回落，即「默认模型」）。 */
   getGlobalTextModel: () => string;
-  /** 保存前探活：模型不可用时抛错（不抛 = 可用）。 */
-  probeModel: (model: string) => Promise<void>;
+  /** 当前全局文本厂商（change model-config-volcengine-provider）：分类无覆盖时回落的生效厂商。 */
+  getGlobalTextProvider: () => string;
+  /** 保存前探活：按 provider 探；模型不可用抛错；该厂商密钥缺失抛 ProviderKeyMissingError。 */
+  probeModel: (provider: string, model: string) => Promise<void>;
 }
 
 export function createCategoryConfigPanel(deps: CategoryConfigFacadeDeps): PanelCategoryConfig {
   const buildCatalog = (): CategoryConfigCatalogView => {
     const textModel = deps.getGlobalTextModel();
+    const textProvider = normProvider(deps.getGlobalTextProvider());
     return {
       categories: CATEGORY_CATALOG.filter((c) => isCategoryModelConfigurable(c.categoryId))
         .slice()
@@ -42,8 +46,9 @@ export function createCategoryConfigPanel(deps: CategoryConfigFacadeDeps): Panel
             categoryId: c.categoryId,
             displayName: c.displayName,
             order: c.order,
-            // 分类默认模型：覆盖则用覆盖、否则回落全局「默认模型」。
+            // 分类默认模型：覆盖则用覆盖、否则回落全局「默认模型」；effectiveProvider 取同行 / 回落全局文本厂商。
             effectiveModel: ovModel || textModel,
+            effectiveProvider: ovModel ? normProvider(row?.provider) : textProvider,
             modelOverridden: !!ovModel,
             updatedAt: row?.updatedAt ?? null,
             updatedBy: row?.updatedBy ?? null,
@@ -54,21 +59,23 @@ export function createCategoryConfigPanel(deps: CategoryConfigFacadeDeps): Panel
 
   return {
     getCatalog: buildCatalog,
-    setCategoryConfig: async (categoryId, model, updatedBy): Promise<CategoryConfigSetResult> => {
+    setCategoryConfig: async (categoryId, model, provider, updatedBy): Promise<CategoryConfigSetResult> => {
       if (!isKnownCategory(categoryId)) return { ok: false, reason: 'unknown_category' };
       if (!isCategoryModelConfigurable(categoryId)) {
         return { ok: false, reason: 'category_not_configurable' };
       }
       const wantsModel = model !== null && (model ?? '').trim() !== '';
-      // 非空模型名：保存前探活；不过则拒，绝不落库（红线：绝不静默假成功）。
+      const prov = normProvider(provider);
+      // 非空模型名：按所选 provider 保存前探活；不过则拒，绝不落库（红线：绝不静默假成功）。
       if (wantsModel) {
         try {
-          await deps.probeModel((model as string).trim());
-        } catch {
+          await deps.probeModel(prov, (model as string).trim());
+        } catch (e) {
+          if (e instanceof ProviderKeyMissingError) return { ok: false, reason: 'provider_key_missing' };
           return { ok: false, reason: 'model_invalid' };
         }
       }
-      await deps.store.set(categoryId, model, updatedBy);
+      await deps.store.set(categoryId, model, wantsModel ? prov : provider, updatedBy);
       return { ok: true, view: buildCatalog() };
     },
   };

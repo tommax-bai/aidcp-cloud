@@ -20,6 +20,11 @@ const { Pool } = pg;
 export interface RoleConfigOverride {
   /** 模型名覆盖；null/空 = 回落全局 textModel。 */
   model: string | null;
+  /**
+   * 厂商覆盖（change model-config-volcengine-provider）；跟 model 同行：
+   * model 非空时其 provider 生效（null/未知由解析器归一 dashscope），model 为空时该层不贡献 provider。
+   */
+  provider: string | null;
   /** 温度覆盖；null = 回落构造默认。 */
   temperature: number | null;
 }
@@ -41,6 +46,11 @@ CREATE TABLE IF NOT EXISTS role_config (
 );
 `;
 
+/** 自愈加列（change model-config-volcengine-provider）：见 ModelConfigStore 同名注释。与 migrations/0018 同源。 */
+export const ROLE_CONFIG_ALTER_SQL = `
+ALTER TABLE role_config ADD COLUMN IF NOT EXISTS provider TEXT;
+`;
+
 export interface RoleConfigStoreOptions {
   host?: string;
   port?: number;
@@ -53,6 +63,7 @@ export interface RoleConfigStoreOptions {
 interface RoleConfigDbRow {
   role_id: string;
   model: string | null;
+  provider: string | null;
   temperature: number | string | null;
   updated_at: Date | string | null;
   updated_by: string | null;
@@ -74,21 +85,23 @@ export class RoleConfigStore {
       });
   }
 
-  /** 建表 + 载入内存镜像。 */
+  /** 建表 + 自愈加列 + 载入内存镜像。 */
   async init(): Promise<void> {
     await this.pool.query(ROLE_CONFIG_SCHEMA_SQL);
+    await this.pool.query(ROLE_CONFIG_ALTER_SQL);
     await this.reload();
   }
 
   private async reload(): Promise<void> {
     const { rows } = await this.pool.query<RoleConfigDbRow>(
-      `SELECT role_id, model, temperature, updated_at, updated_by FROM role_config`,
+      `SELECT role_id, model, provider, temperature, updated_at, updated_by FROM role_config`,
     );
     const next = new Map<string, RoleConfigRow>();
     for (const r of rows) {
       next.set(r.role_id, {
         roleId: r.role_id,
         model: r.model?.trim() ? r.model.trim() : null,
+        provider: r.provider?.trim() ? r.provider.trim() : null,
         temperature: normalizeTemp(r.temperature),
         updatedAt: r.updated_at ? new Date(r.updated_at).toISOString() : null,
         updatedBy: r.updated_by ?? null,
@@ -103,8 +116,8 @@ export class RoleConfigStore {
    */
   getForRole(roleId: string): RoleConfigOverride {
     const v = this.cache.get(roleId);
-    if (!v) return { model: null, temperature: null };
-    return { model: v.model, temperature: v.temperature };
+    if (!v) return { model: null, provider: null, temperature: null };
+    return { model: v.model, provider: v.provider, temperature: v.temperature };
   }
 
   /** 全部行（面板列表回显当前生效值 + 审计用）。 */
@@ -118,28 +131,35 @@ export class RoleConfigStore {
    */
   async set(
     roleId: string,
-    patch: { model?: string | null; temperature?: number | null },
+    patch: { model?: string | null; provider?: string | null; temperature?: number | null },
     updatedBy: string,
   ): Promise<RoleConfigRow> {
-    const prev = this.cache.get(roleId) ?? { model: null, temperature: null };
+    const prev = this.cache.get(roleId) ?? { model: null, provider: null, temperature: null };
     const nextModel =
       patch.model === undefined ? prev.model : patch.model?.trim() ? patch.model.trim() : null;
+    // provider 跟 model 同行（change model-config-volcengine-provider）：不动 model → 不动 provider；
+    // 清 model → 清 provider；写 model → provider 跟着写（缺省回落 dashscope，未知由解析器再归一）。
+    let nextProvider: string | null;
+    if (patch.model === undefined) nextProvider = prev.provider;
+    else if (nextModel === null) nextProvider = null;
+    else nextProvider = patch.provider?.trim() || 'dashscope';
     const nextTemp =
       patch.temperature === undefined ? prev.temperature : normalizeTemp(patch.temperature);
 
     const { rows } = await this.pool.query<RoleConfigDbRow>(
-      `INSERT INTO role_config (role_id, model, temperature, updated_at, updated_by)
-       VALUES ($1, $2, $3, now(), $4)
+      `INSERT INTO role_config (role_id, model, provider, temperature, updated_at, updated_by)
+       VALUES ($1, $2, $3, $4, now(), $5)
        ON CONFLICT (role_id)
-       DO UPDATE SET model = EXCLUDED.model, temperature = EXCLUDED.temperature,
+       DO UPDATE SET model = EXCLUDED.model, provider = EXCLUDED.provider, temperature = EXCLUDED.temperature,
                      updated_at = now(), updated_by = EXCLUDED.updated_by
-       RETURNING role_id, model, temperature, updated_at, updated_by`,
-      [roleId, nextModel, nextTemp, updatedBy],
+       RETURNING role_id, model, provider, temperature, updated_at, updated_by`,
+      [roleId, nextModel, nextProvider, nextTemp, updatedBy],
     );
     const row = rows[0];
     const result: RoleConfigRow = {
       roleId,
       model: nextModel,
+      provider: nextProvider,
       temperature: nextTemp,
       updatedAt: row?.updated_at ? new Date(row.updated_at).toISOString() : null,
       updatedBy: row?.updated_by ?? updatedBy,

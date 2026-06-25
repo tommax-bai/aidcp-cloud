@@ -15,7 +15,17 @@
 
 import { readFile, writeFile, unlink } from 'node:fs/promises';
 import * as lark from '@larksuiteoapi/node-sdk';
-import { QwenClient, DEFAULT_BASE_URL as QWEN_BASE_URL, type ChatLlmClient } from './llm/index.js';
+import {
+  QwenClient,
+  type ChatLlmClient,
+  TEXT_PROVIDERS,
+  type TextProviderId,
+  normProvider,
+  isKnownProvider,
+  ProviderKeyMissingError,
+  resolveProviderBaseUrl,
+  resolveProviderEnvKey,
+} from './llm/index.js';
 import { TokenUsageStore } from './metrics/token-usage-store.js';
 import { SimplePlanner } from './planner/index.js';
 import { PgAnchorCache, BotChatStore, ConceptStore, LikedNoteStore, ValuableCommentStore, NotificationContactStore } from './cache/index.js';
@@ -182,24 +192,44 @@ async function main(): Promise<void> {
   } catch (err) {
     console.warn('[aidcp-cloud] 模型/凭据/角色/分类/限额配置存储初始化失败（回退代码默认模型 + env 密钥；限额回退派生写死默认）:', (err as Error).message);
   }
-  // 启动期解密 DashScope 密钥（库内优先、回退 env）；明文仅用于构造客户端，绝不日志化、绝不回前端。
+  // 启动期解密 DashScope 密钥（库内优先、回退 env）；明文仅用于构造图片客户端（万相），绝不日志化、绝不回前端。
   const dashscopeApiKey =
     (await credentialStore.getSecretForRuntime('dashscope', 'dashscope_api_key').catch(() => null)) ??
     readEnvString('DASHSCOPE_API_KEY');
 
-  // 按角色解析模型（change role-model-category-config）：四层回落
-  //   per-role 覆盖 → 分类默认 → 全局 textModel（「默认模型」）→ 代码默认（store 缺省）。
-  // 逐层缺/空向下回落，任一层不可达都不 brick。role 缺省（planner/select/探活）→ 直接走全局，零回归。
-  // 账号维度（item 9）：分类存储读路径恒 account_id IS NULL，本期不接 accountId。
-  const resolveModelForRole = (role?: string): string => {
-    const roleOverride = role ? roleConfigStore.getForRole(role).model : null;
-    if (roleOverride?.trim()) return roleOverride.trim(); // 2. per-role 覆盖
-    const catId = role ? categoryOf(role) : undefined;
-    const catDefault = catId ? categoryConfigStore.getForCategory(catId).model : null;
-    if (catDefault?.trim()) return catDefault.trim(); // 3. 分类默认
-    return modelConfigStore.getCached().textModel; // 4. 全局默认（store 缺省回 5. 代码默认）
+  // provider 运行时映射（change model-config-volcengine-provider）：每文本厂商 key 启动期一次性解密载入
+  //（库内优先、回退 env），baseUrl 取注册表默认或 env 覆盖。明文仅用于构造文本出口，绝不日志化、绝不回前端。
+  // 与现状一致：模型名热加载、密钥变更重启生效。dashscope 项 == 现有 key+baseUrl 以保零回归。
+  const providerRuntime: Record<string, { baseUrl: string; apiKey: string }> = {};
+  for (const id of Object.keys(TEXT_PROVIDERS) as TextProviderId[]) {
+    const meta = TEXT_PROVIDERS[id];
+    const dbKey = await credentialStore.getSecretForRuntime(id, meta.credentialField).catch(() => null);
+    providerRuntime[id] = {
+      baseUrl: resolveProviderBaseUrl(id),
+      apiKey: dbKey ?? resolveProviderEnvKey(id) ?? '',
+    };
+  }
+
+  // 按角色解析「生效厂商 + 模型」（change model-config-volcengine-provider）：四层回落，provider 跟胜出层的 model 同行。
+  //   per-role 覆盖 → 分类默认 → 全局（textProvider/textModel）→ 代码默认（store 缺省）。
+  // 某层 model 非空才贡献 provider；provider 缺/未知由 normProvider 归一 dashscope，绝不跨层混搭、绝不 brick。
+  // role 缺省（planner/select/探活）→ 直接走全局，零回归。账号维度（item 9）：分类读路径恒 account_id IS NULL，本期不接 accountId。
+  const resolveSelection = (role?: string): { provider: TextProviderId; model: string } => {
+    if (role) {
+      const ro = roleConfigStore.getForRole(role);
+      if (ro.model?.trim()) return { provider: normProvider(ro.provider), model: ro.model.trim() }; // 2. per-role
+      const catId = categoryOf(role);
+      if (catId) {
+        const cat = categoryConfigStore.getForCategory(catId);
+        if (cat.model?.trim()) return { provider: normProvider(cat.provider), model: cat.model.trim() }; // 3. 分类默认
+      }
+    }
+    const g = modelConfigStore.getCached(); // 4. 全局默认（store 缺省回 5. 代码默认）
+    return { provider: normProvider(g.textProvider), model: g.textModel };
   };
-  // 温度本期不引入分类层（温度只对少数生成/改写角色开放，按角色配已足够，YAGNI）。保持两层。
+  const resolveModelForRole = (role?: string): string => resolveSelection(role).model;
+  const resolveProviderForRole = (role?: string): string => resolveSelection(role).provider;
+  // 温度本期不引入分类层（温度只对少数生成/改写角色开放，按角色配已足够，YAGNI）。保持两层、与 provider 无关。
   const resolveTempForRole = (role?: string): number | undefined => {
     const t = role ? roleConfigStore.getForRole(role).temperature : null;
     return t ?? undefined;
@@ -225,13 +255,16 @@ async function main(): Promise<void> {
   process.once('SIGINT', () => flushTokenUsageOnExit('SIGINT'));
 
   const llm = new QwenClient({
-    apiKey: dashscopeApiKey,
+    apiKey: dashscopeApiKey, // 构造默认（仅未注入 providerRuntime 的旧路径用；生产恒走 providerRuntime）
     getModel: resolveModelForRole,
     getTemperature: resolveTempForRole,
-    // 保留原 console.log（加 tokens 维度）；记账 add() 受 try/catch 双保险，绝不抛进/拖垮 LLM 调用路径。
+    // change model-config-volcengine-provider：按角色解析出的 provider 从 providerRuntime 取 baseUrl+key。
+    getProvider: resolveProviderForRole,
+    providerRuntime,
+    // 保留原 console.log（加 provider + tokens 维度）；记账 add() 受 try/catch 双保险，绝不抛进/拖垮 LLM 调用路径。
     onCall: (info) => {
       console.log(
-        `[llm] role=${info.role ?? '-'} model=${info.model} ms=${info.ms} ok=${info.ok} tokens=${info.totalTokens ?? 0}`,
+        `[llm] role=${info.role ?? '-'} provider=${info.provider ?? '-'} model=${info.model} ms=${info.ms} ok=${info.ok} tokens=${info.totalTokens ?? 0}`,
       );
       try {
         tokenUsageStore.add(info);
@@ -906,43 +939,59 @@ async function main(): Promise<void> {
   }
 
   // 组装模型配置视图（GET /api/config/model 与 setModel 回真态共用）。永不含明文密钥。
+  // change model-config-volcengine-provider：多厂商——列出可选文本厂商 + 各厂商凭据态；imageProvider 钉死 dashscope。
   const buildModelConfigView = async (): Promise<ModelConfigView> => {
     const cfg = modelConfigStore.getCached();
-    const field = 'dashscope_api_key';
-    const stored = await credentialStore.getStored('dashscope', field).catch(() => null);
-    const envPresent = !!readEnvString('DASHSCOPE_API_KEY');
-    const credential = stored
-      ? { field, configured: true, maskedHint: stored.maskedHint, source: 'db' as const }
-      : envPresent
-        ? { field, configured: true, maskedHint: '（来自环境变量）', source: 'env' as const }
-        : { field, configured: false, maskedHint: null, source: 'none' as const };
+    const ids = Object.keys(TEXT_PROVIDERS) as TextProviderId[];
+    const providers = ids.map((id) => ({
+      id,
+      displayName: TEXT_PROVIDERS[id].displayName,
+      baseUrl: resolveProviderBaseUrl(id),
+    }));
+    const credentials = await Promise.all(
+      ids.map(async (id) => {
+        const field = TEXT_PROVIDERS[id].credentialField;
+        const stored = await credentialStore.getStored(id, field).catch(() => null);
+        const envPresent = !!resolveProviderEnvKey(id);
+        return stored
+          ? { provider: id, field, configured: true, maskedHint: stored.maskedHint, source: 'db' as const }
+          : envPresent
+            ? { provider: id, field, configured: true, maskedHint: '（来自环境变量）', source: 'env' as const }
+            : { provider: id, field, configured: false, maskedHint: null, source: 'none' as const };
+      }),
+    );
     return {
-      provider: 'dashscope',
-      baseUrl: QWEN_BASE_URL,
+      textProvider: normProvider(cfg.textProvider),
+      imageProvider: 'dashscope',
       textModel: cfg.textModel,
       imageModel: cfg.imageModel,
-      credential,
+      providers,
+      credentials,
       canEditCredential: credentialStore.canEdit(),
     };
   };
 
-  // 显式 model 覆盖 + 短超时；探活失败抛错 → facade 报 model_invalid，绝不落库。
+  // 显式 provider + model 覆盖 + 短超时；探活按 provider 路由到正确端点+密钥。
+  // 失败抛错 → facade 区分 provider_key_missing（密钥缺失）与 model_invalid，绝不落库。
   // role 'system:model_probe'：探活真实消耗 token，如实记、可区分、不静默丢（change llm-token-usage-stats）。
-  const probeModel = async (model: string): Promise<void> => {
-    await llm.chat([{ role: 'user', content: 'ping' }], { model, timeoutMs: 8000, role: 'system:model_probe' });
+  const probeModel = async (provider: string, model: string): Promise<void> => {
+    await llm.chat([{ role: 'user', content: 'ping' }], { provider, model, timeoutMs: 8000, role: 'system:model_probe' });
   };
-  // 角色配置面板外观（change console-role-model-config）：白名单 + 生效值视图 + 写校验 + 保存前探活。
+  // 角色配置面板外观（change console-role-model-config + model-config-volcengine-provider）：白名单 + 生效值视图（含 provider）+ 写校验 + 按 provider 探活。
   const roleConfigPanel = createRoleConfigPanel({
     store: roleConfigStore,
     getGlobalTextModel: () => modelConfigStore.getCached().textModel,
+    getGlobalTextProvider: () => modelConfigStore.getCached().textProvider,
     getGlobalImageModel: () => modelConfigStore.getCached().imageModel,
     getCategoryModel: (categoryId) => categoryConfigStore.getForCategory(categoryId).model,
+    getCategoryProvider: (categoryId) => categoryConfigStore.getForCategory(categoryId).provider,
     probeModel,
   });
-  // 分类默认模型面板外观（change role-model-category-config）：白名单 + 生效值视图 + 写校验 + 保存前探活。
+  // 分类默认模型面板外观（change role-model-category-config + model-config-volcengine-provider）：白名单 + 生效值视图（含 provider）+ 写校验 + 按 provider 探活。
   const categoryConfigPanel = createCategoryConfigPanel({
     store: categoryConfigStore,
     getGlobalTextModel: () => modelConfigStore.getCached().textModel,
+    getGlobalTextProvider: () => modelConfigStore.getCached().textProvider,
     probeModel,
   });
   // 安全限额面板外观（change safety-quota-config）：三档×动作×三窗口生效值 + 写校验（非法整块拒）+ 非乐观回真态。
@@ -1005,17 +1054,44 @@ async function main(): Promise<void> {
             },
             dispatchActive: () => dispatchActive,
           },
-          // 模型与凭据配置（change console-model-provider-config）。明文密钥绝不经此回传。
+          // 模型与凭据配置（change console-model-provider-config + model-config-volcengine-provider）。明文密钥绝不经此回传。
           modelConfig: {
             getView: buildModelConfigView,
             setModel: async (patch, updatedBy) => {
-              await modelConfigStore.set(patch, updatedBy);
-              return buildModelConfigView();
+              const cfg = modelConfigStore.getCached();
+              const wantTextModel = typeof patch.textModel === 'string' && patch.textModel.trim() !== '';
+              const wantTextProvider = typeof patch.textProvider === 'string' && patch.textProvider.trim() !== '';
+              // 解析本次生效的文本厂商（变更则用新值、否则沿用当前）；未知厂商诚实拒，绝不落库。
+              let provider: string;
+              if (wantTextProvider) {
+                const p = (patch.textProvider as string).trim();
+                if (!isKnownProvider(p)) return { ok: false, reason: 'unknown_provider' as const };
+                provider = p;
+              } else {
+                provider = normProvider(cfg.textProvider);
+              }
+              // 文本模型或厂商任一变更 → 按生效厂商对生效模型探活（某厂商上合法的模型名在另一厂商未必合法）。
+              if (wantTextModel || wantTextProvider) {
+                const modelToProbe = wantTextModel ? (patch.textModel as string).trim() : cfg.textModel;
+                try {
+                  await probeModel(provider, modelToProbe);
+                } catch (e) {
+                  if (e instanceof ProviderKeyMissingError) return { ok: false, reason: 'provider_key_missing' as const };
+                  return { ok: false, reason: 'model_invalid' as const };
+                }
+              }
+              const storePatch: { textModel?: string; textProvider?: string; imageModel?: string } = {};
+              if (wantTextModel) storePatch.textModel = (patch.textModel as string).trim();
+              if (wantTextModel || wantTextProvider) storePatch.textProvider = provider;
+              if (typeof patch.imageModel === 'string' && patch.imageModel.trim())
+                storePatch.imageModel = patch.imageModel.trim();
+              await modelConfigStore.set(storePatch, updatedBy);
+              return { ok: true, view: await buildModelConfigView() };
             },
-            setCredential: async (field, value, updatedBy) => {
+            setCredential: async (provider, field, value, updatedBy) => {
               if (!credentialStore.canEdit()) return { ok: false, reason: 'cred_key_missing' as const };
-              const { maskedHint } = await credentialStore.setSecret('dashscope', field, value, updatedBy);
-              return { ok: true, field, maskedHint };
+              const { maskedHint } = await credentialStore.setSecret(provider, field, value, updatedBy);
+              return { ok: true, provider, field, maskedHint };
             },
           },
           // 角色级模型/温度配置（change console-role-model-config）。白名单 + 探活 + 写非乐观回真态。

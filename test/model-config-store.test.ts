@@ -3,15 +3,21 @@ import assert from 'node:assert/strict';
 import pg from 'pg';
 import { ModelConfigStore, MODEL_CONFIG_DEFAULTS } from '../src/config/model-config-store.js';
 
-/** 内存假 pool：路由 model_config 的建表 / SELECT / upsert（单行）。 */
-function fakeModelPool(seed?: { text_model: string | null; image_model: string | null }) {
-  let row: { text_model: string | null; image_model: string | null } | null = seed ?? null;
+/** 内存假 pool：路由 model_config 的建表 / 自愈 ALTER / SELECT / upsert（单行）。text_provider 随 0018 加列。 */
+function fakeModelPool(seed?: { text_model: string | null; text_provider?: string | null; image_model: string | null }) {
+  let row: { text_model: string | null; text_provider: string | null; image_model: string | null } | null = seed
+    ? { text_model: seed.text_model, text_provider: seed.text_provider ?? null, image_model: seed.image_model }
+    : null;
   return {
     query: async (sql: string, params?: unknown[]) => {
-      if (sql.includes('CREATE TABLE')) return { rows: [] };
+      if (sql.includes('CREATE TABLE') || sql.trimStart().startsWith('ALTER')) return { rows: [] };
       if (sql.includes('SELECT text_model')) return { rows: row ? [row] : [] };
       if (sql.includes('INSERT INTO model_config')) {
-        row = { text_model: params![0] as string, image_model: params![1] as string };
+        row = {
+          text_model: params![0] as string,
+          text_provider: params![1] as string,
+          image_model: params![2] as string,
+        };
         return { rows: [] };
       }
       return { rows: [] };
@@ -49,4 +55,23 @@ test('已有行 → init 载入库内值而非默认', async () => {
   await store.init();
   assert.equal(store.getCached().textModel, 'qwen-max');
   assert.equal(store.getCached().imageModel, 'wan2.5');
+});
+
+test('textProvider 缺省 dashscope；set 后热加载 + 持久化（含火山）', async () => {
+  const store = new ModelConfigStore({ pool: fakeModelPool() as unknown as pg.Pool });
+  await store.init();
+  assert.equal(store.getCached().textProvider, 'dashscope'); // 缺省零回归基准
+  const after = await store.set({ textModel: 'doubao-seed-1-6', textProvider: 'volcengine' }, 'admin');
+  assert.equal(after.textProvider, 'volcengine');
+  assert.equal(store.getCached().textProvider, 'volcengine');
+  assert.equal(store.getCached().textModel, 'doubao-seed-1-6');
+  assert.equal(store.getCached().imageModel, MODEL_CONFIG_DEFAULTS.imageModel); // 图片不动
+});
+
+test('已有 text_provider 行 → init 载入库内厂商', async () => {
+  const store = new ModelConfigStore({
+    pool: fakeModelPool({ text_model: 'doubao-seed-1-6', text_provider: 'volcengine', image_model: 'wan2.5' }) as unknown as pg.Pool,
+  });
+  await store.init();
+  assert.equal(store.getCached().textProvider, 'volcengine');
 });

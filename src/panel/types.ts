@@ -109,35 +109,62 @@ export interface PanelDeps {
   };
 }
 
-/** 凭据视图（永不含明文）。source：db=库内加密凭据 / env=回退环境变量 / none=未配置。 */
+/**
+ * 单厂商凭据视图（永不含明文）。source：db=库内加密凭据 / env=回退环境变量 / none=未配置。
+ * change model-config-volcengine-provider：按厂商分别回报，新增 provider。
+ */
 export interface ModelConfigCredentialView {
+  provider: string;
   field: string;
   configured: boolean;
   maskedHint: string | null;
   source: 'db' | 'env' | 'none';
 }
 
-/** GET /api/config/model 的形状（永不含明文密钥）。 */
-export interface ModelConfigView {
-  provider: string;
+/** 可选文本厂商（GET /api/config/model 的下拉项 + 只读 baseUrl）。 */
+export interface TextProviderView {
+  id: string;
+  displayName: string;
   baseUrl: string;
+}
+
+/**
+ * GET /api/config/model 的形状（永不含明文密钥）。
+ * change model-config-volcengine-provider：多厂商——textProvider 选中的全局文本厂商、providers 可选项、
+ * credentials 按厂商凭据态；imageProvider 钉死 dashscope（图片不动）。
+ */
+export interface ModelConfigView {
+  textProvider: string;
+  imageProvider: 'dashscope';
   textModel: string;
   imageModel: string;
-  credential: ModelConfigCredentialView;
+  providers: TextProviderView[];
+  credentials: ModelConfigCredentialView[];
   /** 主加密密钥是否就位——凭据能否在后台编辑。 */
   canEditCredential: boolean;
 }
 
 export type SetCredentialResult =
-  | { ok: true; field: string; maskedHint: string }
+  | { ok: true; provider: string; field: string; maskedHint: string }
   | { ok: false; reason: 'cred_key_missing' };
+
+/** PUT /api/config/model 结果（探活/厂商校验可失败，绝不假成功）。 */
+export type SetModelResult =
+  | { ok: true; view: ModelConfigView }
+  | { ok: false; reason: 'model_invalid' | 'provider_key_missing' | 'unknown_provider' };
 
 export interface PanelModelConfig {
   getView(): Promise<ModelConfigView>;
-  /** 改模型名（热加载即时生效），返回写后真态视图。 */
-  setModel(patch: { textModel?: string; imageModel?: string }, updatedBy: string): Promise<ModelConfigView>;
-  /** 加密保存密钥（重启生效）；主密钥缺失返回 {ok:false}，明文绝不回传。 */
-  setCredential(field: string, value: string, updatedBy: string): Promise<SetCredentialResult>;
+  /**
+   * 改全局文本厂商/模型名/图片模型名。文本模型变更或厂商变更时由服务端按所选厂商探活后才写（热加载即时生效）。
+   * 探活不过 / 厂商未知以 {ok:false} 诚实可辨，绝不落库。
+   */
+  setModel(
+    patch: { textProvider?: string; textModel?: string; imageModel?: string },
+    updatedBy: string,
+  ): Promise<SetModelResult>;
+  /** 按厂商加密保存密钥（重启生效）；主密钥缺失返回 {ok:false}，明文绝不回传。 */
+  setCredential(provider: string, field: string, value: string, updatedBy: string): Promise<SetCredentialResult>;
 }
 
 // ── 角色级配置（change console-role-model-config）──────────────────────────────
@@ -156,6 +183,11 @@ export interface RoleConfigRowView {
   tunableTemperature: boolean;
   /** 当前生效模型（文本类=覆盖/分类默认/全局 textModel；图像类=全局 imageModel）。 */
   effectiveModel: string;
+  /**
+   * 当前生效厂商（change model-config-volcengine-provider）：取自贡献了生效模型那一层的同行 provider；
+   * 文本类回落 dashscope，图像类恒 dashscope（万相）。供前端展示 + 保存时按此 provider 探活。
+   */
+  effectiveProvider: string;
   /** 生效模型来源：override=按角色覆盖 / category=继承分类默认 / default=继承全局默认 / image=图像全局。 */
   effectiveSource: ModelEffectiveSource;
   /** 是否存在按角色模型覆盖。 */
@@ -173,6 +205,8 @@ export interface RoleConfigCatalogView {
 /** PUT /api/roles/:roleId/config 的入参补丁。null/'' = 清除覆盖（回落）。 */
 export interface RoleConfigPatch {
   model?: string | null;
+  /** 厂商（change model-config-volcengine-provider）：跟 model 同发；写 model 时按此 provider 探活并落库。 */
+  provider?: string | null;
   temperature?: number | null;
 }
 
@@ -185,7 +219,8 @@ export type RoleConfigSetResult =
         | 'model_not_configurable'
         | 'temperature_not_tunable'
         | 'temperature_out_of_range'
-        | 'model_invalid';
+        | 'model_invalid'
+        | 'provider_key_missing';
     };
 
 export interface PanelRoleConfig {
@@ -204,6 +239,8 @@ export interface CategoryConfigRowView {
   order: number;
   /** 该分类默认模型的生效值：分类覆盖则用覆盖、否则回落全局「默认模型」(textModel)。 */
   effectiveModel: string;
+  /** 该分类默认模型的生效厂商（change model-config-volcengine-provider）：分类覆盖则用其同行 provider、否则回落全局文本厂商。 */
+  effectiveProvider: string;
   /** 是否存在分类默认覆盖（false=继承全局默认模型）。 */
   modelOverridden: boolean;
   updatedAt: string | null;
@@ -218,14 +255,19 @@ export type CategoryConfigSetResult =
   | { ok: true; view: CategoryConfigCatalogView }
   | {
       ok: false;
-      reason: 'unknown_category' | 'category_not_configurable' | 'model_invalid';
+      reason: 'unknown_category' | 'category_not_configurable' | 'model_invalid' | 'provider_key_missing';
     };
 
 export interface PanelCategoryConfig {
   /** 分类目录 + 分类默认生效值（白名单制，只含可设默认的分类）。 */
   getCatalog(): CategoryConfigCatalogView;
-  /** 写某分类默认模型（null/'' = 清除覆盖回落全局）。探活不过以 {ok:false} 诚实可辨，绝不落库。写后回真态视图。 */
-  setCategoryConfig(categoryId: string, model: string | null, updatedBy: string): Promise<CategoryConfigSetResult>;
+  /** 写某分类默认模型 + 厂商（null/'' = 清除覆盖回落全局）。探活不过以 {ok:false} 诚实可辨，绝不落库。写后回真态视图。 */
+  setCategoryConfig(
+    categoryId: string,
+    model: string | null,
+    provider: string | null,
+    updatedBy: string,
+  ): Promise<CategoryConfigSetResult>;
 }
 
 // ── 角色 prompt 只读预览（change role-prompt-visibility）──────────────────────────

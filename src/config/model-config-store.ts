@@ -15,11 +15,15 @@ const { Pool } = pg;
 /** 缺行 / PG 不可用时的回退默认（与 qwen.ts / wanxiang-client.ts 构造默认一致）。 */
 export const MODEL_CONFIG_DEFAULTS: ModelConfigValue = {
   textModel: 'qwen-turbo',
+  // 全局文本厂商默认 dashscope（零回归基准）。change model-config-volcengine-provider。
+  textProvider: 'dashscope',
   imageModel: 'wan2.7-image-pro',
 };
 
 export interface ModelConfigValue {
   textModel: string;
+  /** 全局文本厂商（change model-config-volcengine-provider）；缺/空回落 dashscope。图片侧不引 provider。 */
+  textProvider: string;
   imageModel: string;
 }
 
@@ -31,6 +35,15 @@ CREATE TABLE IF NOT EXISTS model_config (
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_by  TEXT
 );
+`;
+
+/**
+ * 自愈加列（change model-config-volcengine-provider）：ECS 上表已存在、CREATE TABLE IF NOT EXISTS 是 no-op、
+ * 不补列；rsync 先于迁移时，若 reload 的 SELECT 含新列而列尚不存在会抛错并被 init 的 catch 静默回落。
+ * 故 init() 在 reload 前额外跑此幂等 ALTER，使运行中的 store 永不领先于自己的 schema。与 migrations/0018 同源。
+ */
+export const MODEL_CONFIG_ALTER_SQL = `
+ALTER TABLE model_config ADD COLUMN IF NOT EXISTS text_provider TEXT NOT NULL DEFAULT 'dashscope';
 `;
 
 export interface ModelConfigStoreOptions {
@@ -58,19 +71,23 @@ export class ModelConfigStore {
       });
   }
 
-  /** 建表 + 载入内存镜像（缺行用默认）。 */
+  /** 建表 + 自愈加列 + 载入内存镜像（缺行用默认）。 */
   async init(): Promise<void> {
     await this.pool.query(MODEL_CONFIG_SCHEMA_SQL);
+    await this.pool.query(MODEL_CONFIG_ALTER_SQL);
     await this.reload();
   }
 
   private async reload(): Promise<void> {
-    const { rows } = await this.pool.query<{ text_model: string | null; image_model: string | null }>(
-      `SELECT text_model, image_model FROM model_config WHERE id = 1`,
-    );
+    const { rows } = await this.pool.query<{
+      text_model: string | null;
+      text_provider: string | null;
+      image_model: string | null;
+    }>(`SELECT text_model, text_provider, image_model FROM model_config WHERE id = 1`);
     const row = rows[0];
     this.cache = {
       textModel: row?.text_model?.trim() || MODEL_CONFIG_DEFAULTS.textModel,
+      textProvider: row?.text_provider?.trim() || MODEL_CONFIG_DEFAULTS.textProvider,
       imageModel: row?.image_model?.trim() || MODEL_CONFIG_DEFAULTS.imageModel,
     };
   }
@@ -88,15 +105,16 @@ export class ModelConfigStore {
   async set(patch: Partial<ModelConfigValue>, updatedBy: string): Promise<ModelConfigValue> {
     const next: ModelConfigValue = {
       textModel: patch.textModel?.trim() || this.cache.textModel,
+      textProvider: patch.textProvider?.trim() || this.cache.textProvider,
       imageModel: patch.imageModel?.trim() || this.cache.imageModel,
     };
     await this.pool.query(
-      `INSERT INTO model_config (id, text_model, image_model, updated_at, updated_by)
-       VALUES (1, $1, $2, now(), $3)
+      `INSERT INTO model_config (id, text_model, text_provider, image_model, updated_at, updated_by)
+       VALUES (1, $1, $2, $3, now(), $4)
        ON CONFLICT (id)
-       DO UPDATE SET text_model = EXCLUDED.text_model, image_model = EXCLUDED.image_model,
-                     updated_at = now(), updated_by = EXCLUDED.updated_by`,
-      [next.textModel, next.imageModel, updatedBy],
+       DO UPDATE SET text_model = EXCLUDED.text_model, text_provider = EXCLUDED.text_provider,
+                     image_model = EXCLUDED.image_model, updated_at = now(), updated_by = EXCLUDED.updated_by`,
+      [next.textModel, next.textProvider, next.imageModel, updatedBy],
     );
     this.cache = next;
     return next;

@@ -10,6 +10,7 @@
 
 import { ROLE_CATALOG, getCatalogItem, isModelConfigurable } from './role-catalog.js';
 import type { RoleConfigStore } from './role-config-store.js';
+import { normProvider, ProviderKeyMissingError, DEFAULT_TEXT_PROVIDER } from '../llm/index.js';
 import type {
   PanelRoleConfig,
   RoleConfigCatalogView,
@@ -20,12 +21,16 @@ export interface RoleConfigFacadeDeps {
   store: RoleConfigStore;
   /** 当前全局文本模型名（回落用，即「默认模型」）。 */
   getGlobalTextModel: () => string;
+  /** 当前全局文本厂商（change model-config-volcengine-provider）：default 来源的生效厂商。 */
+  getGlobalTextProvider: () => string;
   /** 当前全局图片模型名（图像角色生效值展示用）。 */
   getGlobalImageModel: () => string;
   /** 某分类的默认模型覆盖（null=分类无覆盖）；用于计算「继承分类」生效来源。 */
   getCategoryModel: (categoryId: string) => string | null;
-  /** 保存前探活：模型不可用时抛错（不抛 = 可用）。 */
-  probeModel: (model: string) => Promise<void>;
+  /** 某分类默认模型的厂商（change model-config-volcengine-provider）；category 来源的生效厂商。 */
+  getCategoryProvider: (categoryId: string) => string | null;
+  /** 保存前探活：按 provider 探；模型不可用抛错；该厂商密钥缺失抛 ProviderKeyMissingError。 */
+  probeModel: (provider: string, model: string) => Promise<void>;
 }
 
 export function createRoleConfigPanel(deps: RoleConfigFacadeDeps): PanelRoleConfig {
@@ -37,20 +42,26 @@ export function createRoleConfigPanel(deps: RoleConfigFacadeDeps): PanelRoleConf
         const row = deps.store.getAll().get(item.roleId);
         const ovModel = row?.model?.trim() || null;
         // 生效模型 + 来源：四层回落（覆盖 → 分类默认 → 全局默认 → 代码默认）；图像类走全局 imageModel。
+        // effectiveProvider 取自贡献生效模型那一层的同行 provider（normProvider 归一），与运行时解析一致。
         const catModel = item.llmKind === 'text' ? deps.getCategoryModel(item.category) : null;
         let effectiveModel: string;
+        let effectiveProvider: string;
         let effectiveSource: 'override' | 'category' | 'default' | 'image';
         if (item.llmKind === 'image') {
           effectiveModel = imageModel;
+          effectiveProvider = DEFAULT_TEXT_PROVIDER; // 图像恒 dashscope（万相）
           effectiveSource = 'image';
         } else if (ovModel) {
           effectiveModel = ovModel;
+          effectiveProvider = normProvider(row?.provider);
           effectiveSource = 'override';
         } else if (catModel) {
           effectiveModel = catModel;
+          effectiveProvider = normProvider(deps.getCategoryProvider(item.category));
           effectiveSource = 'category';
         } else {
           effectiveModel = textModel;
+          effectiveProvider = normProvider(deps.getGlobalTextProvider());
           effectiveSource = 'default';
         }
         return {
@@ -61,6 +72,7 @@ export function createRoleConfigPanel(deps: RoleConfigFacadeDeps): PanelRoleConf
           llmKind: item.llmKind,
           tunableTemperature: item.tunableTemperature,
           effectiveModel,
+          effectiveProvider,
           effectiveSource,
           modelOverridden: item.llmKind === 'text' && !!ovModel,
           temperatureOverride: row?.temperature ?? null,
@@ -88,16 +100,20 @@ export function createRoleConfigPanel(deps: RoleConfigFacadeDeps): PanelRoleConf
         }
       }
 
-      // 非空模型名：保存前探活；不过则拒，绝不落库（红线：绝不静默假成功）。
+      // 非空模型名：按所选 provider 保存前探活；不过则拒，绝不落库（红线：绝不静默假成功）。
+      // provider 归一（未知/空 → dashscope），与 model 同行写库。
+      const provider = normProvider(patch.provider);
       if (wantsModel) {
         try {
-          await deps.probeModel((patch.model as string).trim());
-        } catch {
+          await deps.probeModel(provider, (patch.model as string).trim());
+        } catch (e) {
+          // 该厂商密钥缺失 → 可区分原因（让前端提示去配密钥并重启）；否则模型名无效。
+          if (e instanceof ProviderKeyMissingError) return { ok: false, reason: 'provider_key_missing' };
           return { ok: false, reason: 'model_invalid' };
         }
       }
 
-      await deps.store.set(roleId, patch, updatedBy);
+      await deps.store.set(roleId, { ...patch, provider: wantsModel ? provider : patch.provider }, updatedBy);
       return { ok: true, view: buildCatalog() };
     },
   };
