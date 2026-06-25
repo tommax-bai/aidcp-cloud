@@ -141,6 +141,18 @@ test('同 edgeId 重连顶替旧连接（收掉旧 ws），不计为并行第二
   assert.deepEqual(h.closed, ['s1']); // 顶替：收掉旧 sessionId 的连接
 });
 
+test('同 edgeId 换账号重连（profile 换号 A→B，account-identity-from-login 2.1）：顶替旧连接 + 新运行时按 B 建、按 B 重过就绪闸（拆旧起新不串味）', async () => {
+  const h = makeHarness();
+  await h.registry.onHandshake({ sessionId: 's1', edgeId: 'eX', accountId: 'A' });
+  const s2: EdgeSession = { sessionId: 's2', edgeId: 'eX', accountId: 'B' };
+  const outcome = await h.registry.onHandshake(s2);
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(h.closed, ['s1']); // 按 edgeId 顶替旧连接（与账号是否相同无关）→ 触发旧账号运行时拆除
+  assert.deepEqual(h.ensured, ['A', 'B']); // 新账号 B 也登记进主表
+  assert.equal(h.built[1]!.accountId, 'B'); // 新运行时绑 B（私有总线 + B 的 controller + 就绪闸）
+  assert.equal((h.registry.controllerForSession(s2) as unknown as { accountId: string }).accountId, 'B');
+});
+
 test('同账号不同 edgeId = 真并行第二节点：两运行时并存、不顶替', async () => {
   const h = makeHarness();
   await h.registry.onHandshake({ sessionId: 's1', edgeId: 'eA', accountId: 'A' });
