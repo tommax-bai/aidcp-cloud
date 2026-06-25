@@ -1,8 +1,12 @@
 /**
  * notification_gatekeeper — 通知巡视准入。
  *
- * 三查（同步、无 LLM）：① 硬暂停（验证码/人工接管）中？② 已有巡视在跑？③ 该 epoch 已处理过？
- * 任一为真则忽略。通过 → 同步开一次巡视（写 ctx.excursion，check-then-set 防并发重入）→ excursion.requested。
+ * 两查（同步、无 LLM）：① 硬暂停（验证码/人工接管）中？② 已有巡视在跑？任一为真则忽略。
+ * 通过 → 同步开一次巡视（写 ctx.excursion，check-then-set 防并发重入）→ excursion.requested。
+ *
+ * 刻意不再判「该 epoch 已处理过」（change notification-clear-to-zero）：真有新消息（无→有翻转）就处理，
+ * 不因「处理过一次」而在有新消息时拒绝。并发由「已有巡视在跑」闸防止；巡视途中到达的新一波由
+ * 正在跑的清零循环重读计数时自然吸收。再触发的去重交给「未读真清零 → 下一次无→有翻转」。
  *
  * 消费事件：notification.detected.arrived
  * 产出事件：excursion.requested
@@ -44,8 +48,6 @@ export class NotificationGatekeeper extends BaseRole {
   private admit(epoch: number, edgeId?: string): void {
     if (this.isHardPaused(edgeId)) { this.log(`硬暂停中，放弃巡视 epoch=${epoch}`); return; }
     if (this.ctx.excursionActive) { this.log(`已有巡视在跑，忽略 epoch=${epoch}`); return; }
-    const last = this.ctx.excursion.lastHandledEpoch;
-    if (last !== null && epoch <= last) { this.log(`epoch=${epoch} 已处理过（last=${last}），忽略`); return; }
     this.ctx.beginExcursion(epoch);
     this.log(`准入通过，开启巡视 epoch=${epoch}`);
     this.emit('excursion.requested', { epoch, ts: Date.now() });

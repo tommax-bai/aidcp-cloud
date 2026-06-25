@@ -54,16 +54,16 @@ describe('通知巡视 — 角色级不变量', () => {
     assert.equal(ctx.excursionActive, false);
   });
 
-  it('gatekeeper: 已有巡视在跑 → 忽略；同一 epoch 已处理过 → 不重开', () => {
+  it('gatekeeper: 巡视中 → 忽略（active 闸）；结束后再来 → 重开（去 epoch 已处理过闸，真有新消息就处理）', () => {
     const bus = new EventBus(); const ctx = new SessionContext();
     new NotificationGatekeeper({ ...opts(bus), isHardPaused: () => false }, ctx).subscribe();
     let count = 0; bus.on('excursion.requested', () => { count++; });
     bus.emit('notification.detected.arrived', { epoch: 1, ts: Date.now() }); // 开
-    bus.emit('notification.detected.arrived', { epoch: 1, ts: Date.now() }); // 在跑 → 忽略
+    bus.emit('notification.detected.arrived', { epoch: 2, ts: Date.now() }); // 巡视中 → active 闸忽略（即便是更大的新 epoch）
+    assert.equal(count, 1, '巡视进行中不开并发第二趟');
     ctx.endExcursion();
-    bus.emit('notification.detected.arrived', { epoch: 1, ts: Date.now() }); // epoch 已处理 → 不重开
-    bus.emit('notification.detected.arrived', { epoch: 2, ts: Date.now() }); // 新 epoch → 开
-    assert.equal(count, 2, '只对 epoch=1（首次）与 epoch=2 准入');
+    bus.emit('notification.detected.arrived', { epoch: 1, ts: Date.now() }); // 结束后即便同 epoch 也重开：不因「处理过」而拒绝新检测
+    assert.equal(count, 2, '结束后真有新检测就处理（去掉 epoch 已处理过闸）');
   });
 
   it('suspender: excursion.requested → browseSuspended=true + browse.suspended', () => {
@@ -75,20 +75,49 @@ describe('通知巡视 — 角色级不变量', () => {
     assert.equal(sus, true);
   });
 
-  it('triage: 优先级评论>赞>关注 + processedCategories 收敛（≤3 轮）', () => {
+  it('triage: 循环到三栏清零（每轮重读计数，按优先级逐类清 → triage_done）', () => {
     const bus = new EventBus(); const ctx = new SessionContext();
     ctx.beginExcursion(1);
     new NotificationTriage(opts(bus), ctx).subscribe();
     const picks: string[] = []; let done = 0;
     bus.on('notification.category_selected', (p) => { picks.push(p.category); });
     bus.on('notification.triage_done', () => { done++; });
-    const home = { comments: 2, likes: 1, follows: 1, ts: Date.now() };
-    bus.emit('notification.home.arrived', home); // → comments
-    bus.emit('notification.home.arrived', home); // comments 已处理 → likes
-    bus.emit('notification.home.arrived', home); // → follows
-    bus.emit('notification.home.arrived', home); // 全处理过 → triage_done
-    assert.deepEqual(picks, ['comments', 'likes', 'follows']);
-    assert.equal(done, 1, '第 4 轮收敛为 triage_done');
+    // 每轮 home 反映上一类被看后已清零（loop-to-zero）
+    bus.emit('notification.home.arrived', { comments: 1, likes: 1, follows: 1, ts: Date.now() }); // → comments
+    bus.emit('notification.home.arrived', { comments: 0, likes: 1, follows: 1, ts: Date.now() }); // comments 清 → likes
+    bus.emit('notification.home.arrived', { comments: 0, likes: 0, follows: 1, ts: Date.now() }); // likes 清 → follows
+    bus.emit('notification.home.arrived', { comments: 0, likes: 0, follows: 0, ts: Date.now() }); // 全清 → done
+    assert.deepEqual(picks, ['comments', 'likes', 'follows'], '按优先级逐类清零');
+    assert.equal(done, 1, '三栏全 0 收敛为 triage_done');
+  });
+
+  it('triage: 某类清不掉 → 上限内重试后诚实放弃、仍收敛（不无限重选、不空转）', () => {
+    const bus = new EventBus(); const ctx = new SessionContext();
+    ctx.beginExcursion(1);
+    new NotificationTriage({ ...opts(bus), maxAttemptsPerCategory: 2 }, ctx).subscribe();
+    const picks: string[] = []; let done = 0;
+    bus.on('notification.category_selected', (p) => { picks.push(p.category); });
+    bus.on('notification.triage_done', () => { done++; });
+    const stuck = { comments: 1, likes: 0, follows: 0, ts: Date.now() }; // comments 永不清
+    bus.emit('notification.home.arrived', stuck); // 选 comments 第 1 次
+    bus.emit('notification.home.arrived', stuck); // 第 2 次（=上限）
+    bus.emit('notification.home.arrived', stuck); // 到上限 → 放弃 comments → 无其他未读 → triage_done
+    assert.deepEqual(picks, ['comments', 'comments'], '上限内重试 2 次');
+    assert.equal(done, 1, '到上限诚实放弃后收敛，不无限重选');
+  });
+
+  it('triage: 放弃清不掉的高优先类后仍处理低优先类（清不掉的不挡住能清的）', () => {
+    const bus = new EventBus(); const ctx = new SessionContext();
+    ctx.beginExcursion(1);
+    new NotificationTriage({ ...opts(bus), maxAttemptsPerCategory: 1 }, ctx).subscribe();
+    const picks: string[] = []; let done = 0;
+    bus.on('notification.category_selected', (p) => { picks.push(p.category); });
+    bus.on('notification.triage_done', () => { done++; });
+    bus.emit('notification.home.arrived', { comments: 1, likes: 1, follows: 0, ts: Date.now() }); // comments 第 1 次(=上限)
+    bus.emit('notification.home.arrived', { comments: 1, likes: 1, follows: 0, ts: Date.now() }); // comments 到上限放弃 → likes 第 1 次
+    bus.emit('notification.home.arrived', { comments: 1, likes: 0, follows: 0, ts: Date.now() }); // likes 清；comments 仍放弃 → done
+    assert.deepEqual(picks, ['comments', 'likes'], '高优先清不掉被放弃，低优先仍被处理');
+    assert.equal(done, 1);
   });
 
   it('triage: 非巡视期的杂散首页上报被忽略', () => {

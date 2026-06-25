@@ -5,8 +5,8 @@ export interface ExcursionState {
   active: boolean;
   epoch: number | null;
   phase: 'idle' | 'requested' | 'suspended' | 'opening' | 'ended';
-  lastHandledEpoch: number | null;
-  processedCategories: Set<NotificationCategory>;
+  /** 每类「清理尝试」次数（loop-to-zero 的有界兜底）：到上限仍有未读 → 诚实放弃该类、不空转、不假报已清。 */
+  categoryAttempts: Map<NotificationCategory, number>;
 }
 
 /**
@@ -27,11 +27,15 @@ export class SessionContext {
   private _excursion: ExcursionState = SessionContext.freshExcursion();
   /** 浏览暂停开关（巡视期扣住 browse 类命令）。存此处 → reset 一并清，断连不冻结。 */
   private _browseSuspended = false;
-  /** 已发飞书的评论/@ 去重集合（跨巡视保持，像 visited；不在 reset 清，避免重复打扰）。 */
+  /**
+   * 已发飞书的评论/@ 去重集合（跨巡视保持，像 visited；不在 reset 清，避免重复打扰）。
+   * 注意：这是「飞书通知去重」维度，与「巡视是否触发」正交——后者的 epoch「已处理过」闸已删除
+   * （change notification-clear-to-zero）。巡视扫得更勤 → 同条评论会被反复看到，故此去重水位务必保留、勿连带删。
+   */
   private _notifiedItemKeys: Set<string> = new Set();
 
   private static freshExcursion(): ExcursionState {
-    return { active: false, epoch: null, phase: 'idle', lastHandledEpoch: null, processedCategories: new Set() };
+    return { active: false, epoch: null, phase: 'idle', categoryAttempts: new Map() };
   }
 
   get sourcePageType(): 'feed' | 'search' { return this._sourcePageType; }
@@ -74,22 +78,26 @@ export class SessionContext {
 
   /** 准入通过：开一次巡视（同步 check-then-set，准入角色须同步调用）。 */
   beginExcursion(epoch: number): void {
-    this._excursion = { active: true, epoch, phase: 'requested', lastHandledEpoch: epoch, processedCategories: new Set() };
+    this._excursion = { active: true, epoch, phase: 'requested', categoryAttempts: new Map() };
   }
   setExcursionPhase(phase: ExcursionState['phase']): void { this._excursion.phase = phase; }
   /**
    * 结束巡视：清瞬时态 + 解除暂停。幂等。
-   * 保留 lastHandledEpoch（本会话内已处理的 epoch 水位，防同一 epoch 被重复检测再次开巡视；
-   * 仅 reset() 在断连时清零），以及 notifiedItemKeys。
+   * 不再保留「已处理过 epoch 水位」——巡视的再触发由「未读真清零 → 下一次无→有翻转」驱动
+   * （change notification-clear-to-zero：真有新消息就处理，不因处理过而拒绝）；notifiedItemKeys 仍跨巡视保留（见上）。
    */
   endExcursion(): void {
-    const last = this._excursion.lastHandledEpoch;
-    this._excursion = { active: false, epoch: null, phase: 'idle', lastHandledEpoch: last, processedCategories: new Set() };
+    this._excursion = { active: false, epoch: null, phase: 'idle', categoryAttempts: new Map() };
     this._browseSuspended = false;
   }
-  /** 本趟是否已处理过该分类（防分诊死循环）。 */
-  isCategoryProcessed(cat: NotificationCategory): boolean { return this._excursion.processedCategories.has(cat); }
-  markCategoryProcessed(cat: NotificationCategory): void { this._excursion.processedCategories.add(cat); }
+  /** 本趟该分类已尝试清理的次数（loop-to-zero 有界兜底用）。 */
+  getCategoryAttempts(cat: NotificationCategory): number { return this._excursion.categoryAttempts.get(cat) ?? 0; }
+  /** 记一次该分类清理尝试，返回累计次数。 */
+  incrementCategoryAttempts(cat: NotificationCategory): number {
+    const n = (this._excursion.categoryAttempts.get(cat) ?? 0) + 1;
+    this._excursion.categoryAttempts.set(cat, n);
+    return n;
+  }
 
   setBrowseSuspended(b: boolean): void { this._browseSuspended = b; }
 

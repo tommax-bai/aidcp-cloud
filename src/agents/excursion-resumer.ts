@@ -2,7 +2,8 @@
  * excursion_resumer — 恢复浏览（收敛所有终止，无计时器）。
  *
  * 订阅所有终止信号，统一一次"关暂停 + 回信息流"，ctx.excursion.active 幂等（多终止只恢复一次）：
- *  - notification.triage_done：正常收尾（无更多未读可处理）；
+ *  - notification.triage_done：正常收尾——三栏未读已清零，或剩余未读已到尝试上限被诚实放弃
+ *    （change notification-clear-to-zero：loop-to-zero 的单一收敛出口，本角色逻辑不变）；
  *  - notification.classify_failed：评论分类异常；
  *  - 巡视命令回执 action.completed{ok:false}：赞收藏/新增关注进入失败（评论失败走空 items 正常收尾路径）。
  * 务必在 emit feed.entered 之前 endExcursion（关暂停）——否则 back 命令会被发命令暂停出口扣住。

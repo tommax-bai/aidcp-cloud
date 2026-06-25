@@ -2,6 +2,8 @@
  * notification_deduper — 去重。
  *
  * 收 classified → 滤掉已通知过的项（与 ctx.notifiedItemKeys 比对，跨巡视保持，避免重复打扰）。
+ * 注意：此「飞书通知去重」与「巡视是否触发」是两个独立维度——后者的 epoch 已处理过闸已删除
+ * （change notification-clear-to-zero，巡视循环到清零）；扫得更勤更需此去重水位，务必保留、勿连带删。
  * 有新项 → worthy（交 notifier 发飞书；去重水位仅在发送成功后由 notifier 推进——"仅成功路径推进"）；
  * 无新项/为空 → all_seen + category_handled{comments}（直接收尾本类，回首页转下一轮分诊）。
  *
