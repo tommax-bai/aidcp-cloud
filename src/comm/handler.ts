@@ -220,12 +220,15 @@ export class DefaultMessageHandler implements MessageHandler {
         const detail = env.payload as NoteDetailPayload;
         // 戳当前笔记 id（v2 现役路径）：action.completed 据此补 noteId（V1 task 9.2）。
         if (detail.noteId) session.currentNoteId = detail.noteId;
-        this.bus(session).emit('note.detail.arrived', { detail, ts: this.clock() });
+        // accountId 随事件带出（change interaction-feed-enrichment）：tee 到全局总线后元数据 upsert 按真实账号归属。
+        this.bus(session).emit('note.detail.arrived', { detail, accountId: session.accountId ?? 'default', ts: this.clock() });
         return null;
       }
       case 'profile.detail': {
         const detail = env.payload as ProfileDetailPayload;
-        this.bus(session).emit('profile.detail.arrived', { detail, ts: this.clock() });
+        // 戳当前作者 id（change interaction-feed-enrichment）：action.completed 发 follow 时据此补 targetId（关注按作者）。
+        if (detail.authorId) session.currentAuthorId = detail.authorId;
+        this.bus(session).emit('profile.detail.arrived', { detail, accountId: session.accountId ?? 'default', ts: this.clock() });
         return null;
       }
       // —— 通知巡视（消息查看）：边缘上报 → 入口事件转换 ——
@@ -269,13 +272,17 @@ export class DefaultMessageHandler implements MessageHandler {
           (result.action === 'like' || result.action === 'collect' || result.action === 'follow' || result.action === 'comment' || result.action === 'comment_like') &&
           result.reason !== 'already_followed'
         ) {
+          // 展示账本目标 id（change interaction-feed-enrichment）：关注按作者（currentAuthorId），其余按笔记（currentNoteId）。
+          const targetId = result.action === 'follow' ? session.currentAuthorId : session.currentNoteId;
           this.bus(session).emit('interaction.occurred', {
             action: result.action as 'like' | 'collect' | 'follow' | 'comment' | 'comment_like',
             // accountId 从会话填；缺失（legacy edge）回退保留键 'default'，绝不误并入真名账号（D3/D4）
             accountId: session.accountId ?? 'default',
-            // noteId 从会话当前笔记填（V1 task 9.2）：编排已知当前笔记，喂按笔记互动历史。
+            // noteId 从会话当前笔记填（V1 task 9.2）：编排已知当前笔记，喂 likedNoteStore + 按笔记互动历史。
             // like/collect 总在 note.detail 之后发生，故 currentNoteId 即被互动笔记；缺则不带（如 follow 在主页）。
             ...(session.currentNoteId ? { noteId: session.currentNoteId } : {}),
+            // targetId：喂展示账本 interaction_feed（笔记动作=noteId，关注=authorId）。
+            ...(targetId ? { targetId } : {}),
           });
         }
         return null;

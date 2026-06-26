@@ -26,6 +26,8 @@ export interface NoteDetailData {
   authorId?: string;
   likeCount: number;
   collectCount: number;
+  /** 详情页带 xsec_token 的链接（change interaction-feed-enrichment）；缺则诚实置空。 */
+  url?: string;
 }
 
 export interface ProfileDetailData {
@@ -37,6 +39,10 @@ export interface ProfileDetailData {
   likesCollects?: number;
   /** 作者资料是否成功抽取（区分"数据缺失"与"真 0 粉丝"） */
   extracted?: boolean;
+  /** 作者真实昵称（change interaction-feed-enrichment）；缺则诚实置空。 */
+  nickname?: string;
+  /** 作者主页链接（change interaction-feed-enrichment）；缺则诚实置空。 */
+  url?: string;
 }
 
 // 页面类型
@@ -120,14 +126,16 @@ export interface EventMap {
   // 跨模块通知
   'session.started': { sessionId: string };
   'session.ended': { stats: SessionStats };
-  'interaction.occurred': { action: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like'; accountId?: string; noteId?: string };
+  // targetId（change interaction-feed-enrichment）：展示账本去重键——笔记动作=noteId，关注=authorId。noteId 保留（喂 likedNoteStore）。
+  'interaction.occurred': { action: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like'; accountId?: string; noteId?: string; targetId?: string };
   'concept.discovered': { concepts: string[]; source: string };
   // Edge 上报事件（handler → RoleDispatcher）
   // accountId 穿透握手事件（multi-account-node-support D4）：决策层据此设该连接当前账号，不再钉死 default。
   'edge.hello': { edgeId: string; accountId?: string; ts: number };
   'page.cards.arrived': { cards: PageCardsData[]; ts: number };
-  'note.detail.arrived': { detail: NoteDetailData; ts: number };
-  'profile.detail.arrived': { detail: ProfileDetailData; ts: number };
+  // accountId（change interaction-feed-enrichment）：tee 到全局观测总线后，元数据 upsert 需按真实账号归属（缺则保留键）。
+  'note.detail.arrived': { detail: NoteDetailData; accountId?: string; ts: number };
+  'profile.detail.arrived': { detail: ProfileDetailData; accountId?: string; ts: number };
   'action.completed': { action: string; ok: boolean; reason?: string; ts: number; candidates?: CommentCandidate[] };
   // 会话控制事件
   'session.should_end': { reason: string; ts: number };

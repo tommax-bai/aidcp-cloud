@@ -50,7 +50,7 @@ const mockPanelStore: PanelStoreReader = {
     { id: 1, severity: 'P0', type: 'captcha', accountId: 'default', title: '验证码弹出', detail: null, createdAt: 100, resolvedAt: null },
   ],
   listInteractions: async (opts) => [
-    { accountId: opts?.accountId ?? 'default', noteId: 'note-1', action: 'like', interactedAt: 200 },
+    { accountId: opts?.accountId ?? 'default', targetId: 'note-1', action: 'like', title: '一篇笔记', url: 'https://www.xiaohongshu.com/explore/note-1?xsec_token=x', interactedAt: 200 },
   ],
 };
 
@@ -178,12 +178,13 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
     const al = (await (await fetch(`${base}/api/alerts`, { headers: auth })).json()) as { alerts: unknown[] };
     assert.equal(al.alerts.length, 1);
 
-    // V1 task 9.2：/api/monitor/interactions（按账号过滤）
+    // V1 task 9.2 / change interaction-feed-enrichment：/api/monitor/interactions（按账号过滤；目标=targetId + 标题/链接）
     const it = (await (
       await fetch(`${base}/api/monitor/interactions?accountId=default`, { headers: auth })
-    ).json()) as { interactions: { accountId: string; noteId: string }[] };
-    assert.equal(it.interactions[0].noteId, 'note-1');
+    ).json()) as { interactions: { accountId: string; targetId: string; title?: string; url?: string }[] };
+    assert.equal(it.interactions[0].targetId, 'note-1');
     assert.equal(it.interactions[0].accountId, 'default');
+    assert.equal(it.interactions[0].title, '一篇笔记');
 
     // change publish-history-account-and-detail：已发布历史带账号/正文/详情链接 + ?accountId 透传过滤。
     const pubFiltered = (await (

@@ -583,6 +583,9 @@ export interface NoteDetailPayload {
   /** 作者区关注按钮当下真实态（change skip-profile-visit-if-followed）：已关注/互关→true；
    *  缺省/读取失败=未探到→云端回退原主页评估。边缘只读取上报、MUST NOT 臆造。 */
   authorFollowed?: boolean;
+  /** 详情页带 xsec_token 的完整链接（change interaction-feed-enrichment，供面板「按笔记互动」可点跳转）。
+   *  诚实置空：地址栏无 token 时不带、绝不用裸 id 拼打不开的假链接（同发布链 postUrl 约定）。 */
+  url?: string;
 }
 
 export interface ProfileDetailPayload {
@@ -594,6 +597,10 @@ export interface ProfileDetailPayload {
   likesCollects?: number;
   /** 作者资料是否成功抽取；false=进了主页但没抽到数字，供云端区分"数据缺失"与"真 0 粉丝" */
   extracted?: boolean;
+  /** 作者真实昵称（change interaction-feed-enrichment，供面板关注记录显示真名）；抓不到则诚实置空。 */
+  nickname?: string;
+  /** 作者主页链接（change interaction-feed-enrichment，供面板关注记录可点跳转）；抓不到则诚实置空。 */
+  url?: string;
 }
 
 /** edge → cloud：滚动评论时随手抽取的一条候选评论（供云端 comment_like_appraiser 评估 + 选中后回点）。 */

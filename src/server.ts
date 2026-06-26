@@ -28,7 +28,7 @@ import {
 } from './llm/index.js';
 import { TokenUsageStore } from './metrics/token-usage-store.js';
 import { SimplePlanner } from './planner/index.js';
-import { PgAnchorCache, BotChatStore, ConceptStore, LikedNoteStore, ValuableCommentStore, NotificationContactStore } from './cache/index.js';
+import { PgAnchorCache, BotChatStore, ConceptStore, LikedNoteStore, ValuableCommentStore, NotificationContactStore, InteractionFeedStore } from './cache/index.js';
 import {
   EdgeCloudServer,
   DefaultMessageHandler,
@@ -369,6 +369,23 @@ async function main(): Promise<void> {
     console.warn('[aidcp-cloud] NotificationContactStore 初始化失败，通知联系人记录退化:', (err as Error).message);
   }
 
+  // 面板互动流展示账本（change interaction-feed-enrichment）。init 失败留 undefined（面板互动表退化为空、绝不崩闭环）。
+  let interactionFeedStore: InteractionFeedStore | undefined;
+  try {
+    const ifs = new InteractionFeedStore({
+      host: readEnvString('PGHOST'),
+      port: readEnvPort('PGPORT'),
+      database: readEnvString('PGDATABASE'),
+      user: readEnvString('PGUSER'),
+      password: readEnvString('PGPASSWORD'),
+    });
+    await ifs.init();
+    interactionFeedStore = ifs;
+    console.log('[aidcp-cloud] InteractionFeedStore 已就绪（interaction_feed / interaction_target_meta 表）');
+  } catch (err) {
+    console.warn('[aidcp-cloud] InteractionFeedStore 初始化失败，面板互动流退化:', (err as Error).message);
+  }
+
   // 概念池存储（concepts 表，跨会话搜索记忆）。init 失败则留 undefined：
   // RoleDispatcher 不注册概念抽取角色、搜索退化为仅 seed_keywords（不崩闭环）。
   let conceptStore: ConceptStore | undefined;
@@ -503,6 +520,7 @@ async function main(): Promise<void> {
     }
     // V1 task 9.2：按笔记互动落去重表（接线孤儿 risk_interactions）。
     // 仅 like/collect（InteractionAction，follow 无 per-note 语义）；ON CONFLICT DO NOTHING 天然去重。
+    // 注：change interaction-feed-enrichment 后面板已改读 interaction_feed，此表保留为去重台账、行为不变（零回归）。
     if (evt.noteId && (evt.action === 'like' || evt.action === 'collect')) {
       riskStore
         .recordInteraction(evt.accountId ?? 'default', evt.noteId, evt.action, Date.now())
@@ -510,8 +528,46 @@ async function main(): Promise<void> {
           console.warn('[aidcp-cloud] recordInteraction error:', err);
         });
     }
+    // 展示账本（change interaction-feed-enrichment）：四类动作落 interaction_feed —— 纯观测账本，不碰 RiskController 终态。
+    // targetId 由 handler 据动作填（笔记动作=noteId，关注=authorId）；comment_like 无目标语义、刻意不进。
+    if (
+      interactionFeedStore &&
+      evt.targetId &&
+      (evt.action === 'like' || evt.action === 'collect' || evt.action === 'comment' || evt.action === 'follow')
+    ) {
+      interactionFeedStore
+        .recordEvent(evt.accountId ?? 'default', evt.action, evt.targetId, Date.now())
+        .catch((err) => {
+          console.warn('[aidcp-cloud] interactionFeed recordEvent error:', err);
+        });
+    }
   });
   console.log('[aidcp-cloud] 事件订阅已建立（RiskController）');
+
+  // 展示账本元数据（change interaction-feed-enrichment）：看到笔记/作者时独立 upsert 标题+链接，面板读时 LEFT JOIN。
+  // 与互动事件解耦 → 杀「动作回执先于详情到达→标题为空」竞态；诚实置空（COALESCE 缺则不覆盖、不伪造）。
+  eventBus.on('note.detail.arrived', (evt) => {
+    if (!interactionFeedStore) return;
+    const acc = evt.accountId ?? 'default';
+    const d = evt.detail;
+    if (d.noteId) {
+      interactionFeedStore.upsertMeta(acc, d.noteId, { title: d.title, url: d.url }).catch((err) => {
+        console.warn('[aidcp-cloud] interactionFeed upsertMeta(note) error:', err);
+      });
+    }
+    // 笔记上报已带作者昵称 → 顺手补作者元数据（关注展示用；主页 url 待 profile.detail 补，COALESCE 互不抹除）。
+    if (d.authorId && d.author) {
+      interactionFeedStore.upsertMeta(acc, d.authorId, { title: d.author }).catch(() => {});
+    }
+  });
+  eventBus.on('profile.detail.arrived', (evt) => {
+    if (!interactionFeedStore) return;
+    const d = evt.detail;
+    if (!d.authorId) return;
+    interactionFeedStore.upsertMeta(evt.accountId ?? 'default', d.authorId, { title: d.nickname, url: d.url }).catch((err) => {
+      console.warn('[aidcp-cloud] interactionFeed upsertMeta(profile) error:', err);
+    });
+  });
 
   // 告警日志存储（alerts 表，V1 task 9.5）。init 失败留 undefined（告警不落库、不阻塞启动；飞书告警仍发）。
   let alertStore: PgAlertStore | undefined;

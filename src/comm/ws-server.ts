@@ -37,6 +37,11 @@ export interface EdgeSession {
    * 喂按笔记互动历史（risk_interactions）。
    */
   currentNoteId?: string;
+  /**
+   * 当前会话正在访问的作者 id（随 profile.detail 戳；change interaction-feed-enrichment）。
+   * 用于在 action.completed 发射 follow 的 interaction.occurred 时补 targetId（关注按作者归属，无当前笔记）。
+   */
+  currentAuthorId?: string;
 }
 
 /**

@@ -16,8 +16,8 @@ import {
   type RiskAction,
   type RiskStatus,
   type RiskQuotaLevel,
-  type InteractionAction,
 } from '../risk/index.js';
+import type { FeedAction } from '../cache/interaction-feed-store.js';
 import type { AlertSeverity } from '../feishu/types.js';
 
 const { Pool } = pg;
@@ -83,11 +83,19 @@ export interface PanelAlert {
   resolvedAt: number | null;
 }
 
-/** 按笔记互动历史（V1 task 9.2；接线孤儿 risk_interactions 后的读侧）。 */
+/**
+ * 互动流一行（change interaction-feed-enrichment：读 interaction_feed LEFT JOIN interaction_target_meta）。
+ * 四类动作；目标 = 笔记动作 noteId / 关注 authorId；title/url 诚实置空（缺失 undefined，绝不伪造）。
+ */
 export interface PanelInteraction {
   accountId: string;
-  noteId: string;
-  action: InteractionAction;
+  /** 目标 id：笔记动作=noteId，关注=authorId。 */
+  targetId: string;
+  action: FeedAction;
+  /** 标题（笔记标题 / 作者昵称）；元数据未到则 undefined。 */
+  title?: string;
+  /** 可点链接（带 token 详情页 / 作者主页）；无真实链接则 undefined（前端不渲染死链）。 */
+  url?: string;
   interactedAt: number;
 }
 
@@ -342,25 +350,34 @@ export class PgPanelStore implements PanelStoreReader {
     let where = '';
     if (options.accountId) {
       params.push(options.accountId);
-      where = `WHERE account_id = $${params.length}`;
+      where = `WHERE f.account_id = $${params.length}`;
     }
     params.push(limit);
     try {
+      // change interaction-feed-enrichment：读展示账本 + 读时 LEFT JOIN 元数据（标题/链接）。
+      // title/url 为 NULL → 映射成 undefined（诚实置空，前端不渲染死链）。
       const { rows } = await this.pool.query<{
         account_id: string;
-        note_id: string;
-        action: InteractionAction;
-        interacted_at: Date;
+        target_id: string;
+        action: FeedAction;
+        title: string | null;
+        url: string | null;
+        occurred_at: Date;
       }>(
-        `SELECT account_id, note_id, action, interacted_at
-         FROM risk_interactions ${where} ORDER BY interacted_at DESC LIMIT $${params.length}`,
+        `SELECT f.account_id, f.target_id, f.action, m.title, m.url, f.occurred_at
+         FROM interaction_feed f
+         LEFT JOIN interaction_target_meta m
+           ON m.account_id = f.account_id AND m.target_id = f.target_id
+         ${where} ORDER BY f.occurred_at DESC LIMIT $${params.length}`,
         params,
       );
       return rows.map((r) => ({
         accountId: r.account_id,
-        noteId: r.note_id,
+        targetId: r.target_id,
         action: r.action,
-        interactedAt: r.interacted_at.getTime(),
+        ...(r.title ? { title: r.title } : {}),
+        ...(r.url ? { url: r.url } : {}),
+        interactedAt: r.occurred_at.getTime(),
       }));
     } catch (err) {
       if ((err as { code?: string }).code === PG_UNDEFINED_TABLE) return [];

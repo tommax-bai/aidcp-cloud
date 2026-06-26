@@ -117,13 +117,16 @@ test('listAlerts 映射行；表未迁移降级为空（V1 9.5）', async () => 
   assert.deepEqual(empty, []);
 });
 
-test('listInteractions 映射行；表未迁移降级为空（V1 9.2）', async () => {
+test('listInteractions 映射行；表未迁移降级为空（V1 9.2 / change interaction-feed-enrichment）', async () => {
   const store = new PgPanelStore({ pool: poolReturning([
-    { account_id: 'default', note_id: 'note-1', action: 'like', interacted_at: new Date(200) },
+    { account_id: 'default', target_id: 'note-1', action: 'like', title: '一篇笔记标题', url: 'https://www.xiaohongshu.com/explore/note-1?xsec_token=x', occurred_at: new Date(200) },
   ]) });
   const [it] = await store.listInteractions({ accountId: 'default' });
-  assert.equal(it.noteId, 'note-1');
+  // AC-PANEL：笔记动作 → targetId=noteId + 标题 + 带 token 详情页链接。
+  assert.equal(it.targetId, 'note-1');
   assert.equal(it.action, 'like');
+  assert.equal(it.title, '一篇笔记标题');
+  assert.equal(it.url, 'https://www.xiaohongshu.com/explore/note-1?xsec_token=x');
   assert.equal(it.interactedAt, 200);
 
   const empty = await new PgPanelStore({ pool: poolThrowing('42P01') }).listInteractions();
@@ -131,4 +134,26 @@ test('listInteractions 映射行；表未迁移降级为空（V1 9.2）', async 
 
   // 非 undefined_table 错误应上抛（不静默吞真实故障）
   await assert.rejects(() => new PgPanelStore({ pool: poolThrowing('57014') }).listInteractions());
+});
+
+test('listInteractions：关注按作者（targetId=authorId + 昵称 + 主页链接）；title/url 缺失诚实置空不伪造（AC-PANEL）', async () => {
+  // 关注行：title=作者昵称、url=作者主页。
+  const followStore = new PgPanelStore({ pool: poolReturning([
+    { account_id: 'default', target_id: 'author-9', action: 'follow', title: '某位作者', url: 'https://www.xiaohongshu.com/user/profile/author-9', occurred_at: new Date(300) },
+  ]) });
+  const [f] = await followStore.listInteractions();
+  assert.equal(f.targetId, 'author-9');
+  assert.equal(f.action, 'follow');
+  assert.equal(f.title, '某位作者');
+  assert.equal(f.url, 'https://www.xiaohongshu.com/user/profile/author-9');
+
+  // 元数据缺失（join 未命中 / 抓不到）→ title/url 为 undefined，绝不伪造（前端回落裸 id、不渲染死链）。
+  const bareStore = new PgPanelStore({ pool: poolReturning([
+    { account_id: 'default', target_id: 'note-2', action: 'comment', title: null, url: null, occurred_at: new Date(400) },
+  ]) });
+  const [b] = await bareStore.listInteractions();
+  assert.equal(b.targetId, 'note-2');
+  assert.equal(b.action, 'comment');
+  assert.equal(b.title, undefined);
+  assert.equal(b.url, undefined);
 });
