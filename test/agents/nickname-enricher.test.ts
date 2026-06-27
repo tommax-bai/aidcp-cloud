@@ -17,6 +17,7 @@ interface Harness {
   ctx: SessionContext;
   setCalls: { accountId: string; nickname: string }[];
   fireTimeout: () => void;
+  fireDefer: () => void;
   timerCleared: () => boolean;
   captures: { accountId: string }[];
   backToFeed: number;
@@ -27,6 +28,7 @@ function setup(opts: { accountId?: string } = {}): Harness {
   const ctx = new SessionContext();
   const setCalls: { accountId: string; nickname: string }[] = [];
   let timeoutCb: (() => void) | null = null;
+  let deferCb: (() => void) | null = null;
   let cleared = false;
   const captures: { accountId: string }[] = [];
   let backToFeed = 0;
@@ -37,7 +39,7 @@ function setup(opts: { accountId?: string } = {}): Harness {
     sessionContext: ctx,
     getAccountId: () => opts.accountId ?? REAL,
     setNickname: (accountId, nickname) => { setCalls.push({ accountId, nickname }); },
-    setTimeoutFn: (fn) => { timeoutCb = fn; return { id: 1 }; },
+    setTimeoutFn: (fn, ms) => { if (ms === 0) deferCb = fn; else timeoutCb = fn; return { id: ms === 0 ? 1 : 2 }; },
     clearTimeoutFn: () => { cleared = true; },
   });
   role.subscribe();
@@ -48,6 +50,7 @@ function setup(opts: { accountId?: string } = {}): Harness {
   return {
     bus, ctx, setCalls, captures,
     fireTimeout: () => { if (timeoutCb) timeoutCb(); },
+    fireDefer: () => { if (deferCb) deferCb(); },
     timerCleared: () => cleared,
     get backToFeed() { return backToFeed; },
   } as Harness;
@@ -65,14 +68,27 @@ function selfDetail(bus: EventBus, accountId: string, nickname?: string): void {
 }
 
 describe('NicknameEnricher（登录账号真实昵称采集，云端角色驱动）', () => {
-  it('会话开始 + 需采集 → 暂停浏览 + 置在途 + 武装超时 + emit self.profile.capture', () => {
+  it('会话开始 + 需采集 → 同步暂停浏览/置在途/武装超时；命令延后(下一拍)再 emit self.profile.capture（修 sent=0）', () => {
     const h = setup();
     h.ctx.setPendingNicknameCapture(true);
     sessionStart(h.bus);
-    assert.equal(h.captures.length, 1, '应 emit 一次 self.profile.capture');
+    // 状态同步置好（立刻挡 R3 窗口 + 让通知巡视让位）
+    assert.equal(h.ctx.browseSuspended, true, '应同步暂停自主浏览');
+    assert.equal(h.ctx.selfCaptureInFlight, true, '应同步置在途标记');
+    // 命令延后：不在 hello 同步窗口内 emit（修 sent=0：等边缘登记进可推送表后再发）
+    assert.equal(h.captures.length, 0, 'emit 应延到下一 macrotask，不在握手同步窗口内发');
+    h.fireDefer();
+    assert.equal(h.captures.length, 1, '下一拍应 emit 一次 self.profile.capture');
     assert.equal(h.captures[0].accountId, REAL);
-    assert.equal(h.ctx.browseSuspended, true, '应暂停自主浏览');
-    assert.equal(h.ctx.selfCaptureInFlight, true, '应置在途标记');
+  });
+
+  it('延后期间采集被收尾（reset/超时清掉在途）→ 延后命令不再 emit（防误发）', () => {
+    const h = setup();
+    h.ctx.setPendingNicknameCapture(true);
+    sessionStart(h.bus);
+    h.ctx.setSelfCaptureInFlight(false); // 模拟下一拍前被 reset/超时清掉
+    h.fireDefer();
+    assert.equal(h.captures.length, 0, 'in-flight 已清 → 延后命令不发');
   });
 
   it('会话开始 + 无需采集（pending=false）→ 零扰动', () => {

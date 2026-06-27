@@ -47,6 +47,9 @@ export class NotificationGatekeeper extends BaseRole {
 
   private admit(epoch: number, edgeId?: string): void {
     if (this.isHardPaused(edgeId)) { this.log(`硬暂停中，放弃巡视 epoch=${epoch}`); return; }
+    // 让位本人昵称采集（change account-real-nickname）：采集在途时不开巡视——二者都要独占边缘（进本人主页 vs 进通知页）。
+    // 采集是登录后一次性首动作（仅库内昵称空时），~20s 内必收尾（成功/超时）；其后下一次未读检测再正常准入。
+    if (this.ctx.selfCaptureInFlight) { this.log(`本人昵称采集在途，巡视让位 epoch=${epoch}`); return; }
     if (this.ctx.excursionActive) { this.log(`已有巡视在跑，忽略 epoch=${epoch}`); return; }
     this.ctx.beginExcursion(epoch);
     this.log(`准入通过，开启巡视 epoch=${epoch}`);

@@ -77,11 +77,21 @@ export class NicknameEnricher extends BaseRole {
     const accountId = this.getAccountId();
     if (!accountId || accountId === 'default') return; // 双保险：占位账号绝不采
 
-    // 同一 tick：暂停自主浏览 + 置在途标记 + 武装超时 + emit 采集意图（杜绝 await 窗口让 page.cards 插绕路）。
+    // 同步置「挂起浏览 + 在途标记 + 武装超时」：立刻挡住 R3 窗口（在途 page.cards 驱动的 open_note 被 chokepoint 丢弃），
+    // 并让通知巡视准入据 selfCaptureInFlight 让位（二者都要独占边缘：进本人主页 vs 进通知页）。
     this.ctx.setBrowseSuspended(true);
     this.ctx.setSelfCaptureInFlight(true);
     this.armTimeout();
     this.log(`会话开始，需采登录账号昵称 account=${accountId} → 驱动本人主页直驱（profile_open direct）`);
+    // 命令下发推迟到下一 macrotask：feed.entered{session_start} 跑在 hello 消息处理的同步窗口内，此刻 ws-server
+    // 尚未把本连接登记进可推送表（edges.set 在 routeMessage 之后），同步 emit 会 sent=0；推到下一拍 → hello 回合
+    // 走完、边缘已登记 → profile_open 真正送达（sent=1）。在途标记已同步置好，期间到达的巡视/page.cards 仍被让位/丢弃。
+    this.setTimeoutFn(() => this.emitCapture(accountId), 0);
+  }
+
+  /** 实际下发采集意图（延后到边缘已登记后再发）。期间若被 reset / 超时收尾（selfCaptureInFlight 已清）则不再发。 */
+  private emitCapture(accountId: string): void {
+    if (!this.ctx.selfCaptureInFlight) return;
     this.emit('self.profile.capture', { accountId });
   }
 
