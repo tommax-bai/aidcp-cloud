@@ -188,6 +188,22 @@ export class ConnectionRuntimeRegistry {
     return n;
   }
 
+  /**
+   * 后台为该账号绑定人设后（change auto-start-on-persona-bind）：唤醒该账号所有「已连接但因未绑人设被
+   * 启动闸短路、未在跑」的连接就地开会话（含 scroll 重驱唤醒干等的边端）。覆盖同账号 N 连接；
+   * 对已在跑的连接是 no-op（不打断）。返回匹配的连接数。
+   */
+  startSessionForAccount(accountId: string): number {
+    let n = 0;
+    for (const rt of this.bySession.values()) {
+      if (rt.accountId === accountId) {
+        rt.dispatcher.startOnPersonaBound();
+        n++;
+      }
+    }
+    return n;
+  }
+
   /** 当前活跃（已 startSession）的连接数。 */
   activeCount(): number {
     let n = 0;

@@ -71,10 +71,24 @@ export class NicknameEnricher extends BaseRole {
     this.clearTimer();
   }
 
-  // ─── 会话开始：需采集 → 驱动一次本人主页直驱访问 ───
+  // ─── 触发：登录引导（armLoginCapture）或浏览会话开始（feed.entered{session_start}）→ 武装一次本人主页采集 ───
+  // change nickname-capture-on-login：采真名是登录后的固定步骤，从「浏览会话开始」解耦——未绑人设、不开浏览会话也照采。
   private onFeedEntered(payload: FeedEnteredPayload): void {
     if (payload.trigger !== 'session_start') return;
-    if (!this.ctx.pendingNicknameCapture) return; // 库内已有昵称 / 占位账号 → 零扰动（已采过的会话不绕）
+    this.arm('会话开始');
+  }
+
+  /**
+   * 登录引导触发（change nickname-capture-on-login）：边端登录确立身份后，云端直接武装一次本人主页采集，
+   * 不经浏览会话、不被人设闸阻断（dispatcher 在启动闸拦下未绑人设账号时调用）。与 session_start 路径共用 arm()。
+   */
+  armLoginCapture(): void {
+    this.arm('登录引导');
+  }
+
+  /** 武装采集（两触发共用）：守卫不过即 no-op；置挂起/在途/超时，命令延到边缘就绪（首个 page.cards）再发。 */
+  private arm(via: string): void {
+    if (!this.ctx.pendingNicknameCapture) return; // 库内已有昵称 / 占位账号 → 零扰动（已采过的不绕）
     if (this.ctx.selfCaptureInFlight) return; // 已在采集中，不重入
     if (this.ctx.selfCaptureAttempts >= this.ctx.selfCaptureMaxAttempts) return; // 采空退避，不永绕
     const accountId = this.getAccountId();
@@ -82,16 +96,14 @@ export class NicknameEnricher extends BaseRole {
 
     // 同步置「挂起浏览 + 在途标记 + 武装超时」：立刻挡住 R3 窗口（在途 page.cards 驱动的 open_note 被 chokepoint 丢弃），
     // 并让通知巡视准入据 selfCaptureInFlight 让位（二者都要独占边缘：进本人主页 vs 进通知页）。
-    // 同步置「挂起浏览 + 在途标记 + 武装超时」：立刻挡住 R3 窗口（在途 page.cards 驱动的 open_note 被 chokepoint 丢弃），
-    // 并让通知巡视准入据 selfCaptureInFlight 让位（二者都要独占边缘：进本人主页 vs 进通知页）。
     this.ctx.setBrowseSuspended(true);
     this.ctx.setSelfCaptureInFlight(true);
     this.awaitingEdgeReady = true;
-    this.armTimeout(); // 兜底：即便边缘从不报 page.cards（静默），~20s 也恢复、不困死。
-    // 命令延到「边缘就绪」再发：feed.entered{session_start} 在 hello 消息处理的同步窗口内触发——此刻边缘既未登记进
+    this.armTimeout(); // 兜底：即便边缘从不报 page.cards（静默 / 未登录），~20s 也恢复、不困死。
+    // 命令延到「边缘就绪」再发：触发点（session_start / 登录 hello）都在握手同步窗口内——此刻边缘既未登记进
     // 可推送表（ws-server edges.set 在 await routeMessage 之后 → sent=0），也仍在初始扫 feed（命令循环未起 → 命令被丢）。
     // 故等首个 page.cards.arrived（初始扫描完、进命令循环、已登记）再 emit → profile_open 真送达且被执行。
-    this.log(`会话开始，需采登录账号昵称 account=${accountId} → 待边缘就绪（首个 page.cards）即驱动本人主页直驱`);
+    this.log(`${via}，需采登录账号昵称 account=${accountId} → 待边缘就绪（首个 page.cards）即驱动本人主页直驱`);
   }
 
   /** 边缘就绪信号（首个 page.cards.arrived：初始扫描完、进命令循环、已登记可推送）→ 此刻下发采集命令。 */

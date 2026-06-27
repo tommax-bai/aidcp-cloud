@@ -107,3 +107,15 @@ test('setPersona：空文本 → 清除覆盖（回落），回真态 source=fal
   const row = (r as { ok: true; view: { accounts: Array<{ accountId: string; source: string }> } }).view.accounts.find((a) => a.accountId === 'default')!;
   assert.equal(row.source, 'fallback');
 });
+
+test('setPersona：仅真绑定成功触发 onBound（清除 / 非法 / 未知账号均不触发）— auto-start-on-persona-bind', async () => {
+  const { store } = fakeStore({ accounts: [{ accountId: 'acc1', label: null }], override: { acc1: soulYaml('旧') } });
+  const bound: string[] = [];
+  const panel = createPersonaPanel({ store, onBound: (id) => bound.push(id) });
+  await panel.setPersona('acc1', soulYaml('新'), 'a'); // 真绑定 → 触发
+  assert.deepEqual(bound, ['acc1'], '真绑定成功 → onBound(accountId)');
+  await panel.setPersona('acc1', 'identity: {}\ninterests: nope', 'a'); // 非法 → 不触发
+  await panel.setPersona('acc1', '   ', 'a'); // 清除（空文本回落）→ 不触发
+  await panel.setPersona('ghost', soulYaml('x'), 'a'); // 未知账号 → 不触发
+  assert.deepEqual(bound, ['acc1'], '清除/非法/未知账号均不触发 onBound（绝不误唤醒）');
+});

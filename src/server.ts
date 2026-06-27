@@ -498,7 +498,15 @@ async function main(): Promise<void> {
   const resolvePersona = createPersonaResolver({ store: personaStore, fallbackSoul, logger: console });
   const getSoul = (accountId?: string): Soul => resolvePersona(accountId);
   // 人设面板外观（后台按账号编辑 + soul 校验 + 写非乐观回真态）。
-  const personaPanel = createPersonaPanel({ store: personaStore });
+  // auto-start-on-persona-bind：后台真绑定人设成功 → 唤醒该账号在线、被人设闸短路的节点就地开跑（无需重连）。
+  // runtimes / personaSetupAlerted 为后向声明，onBound 闭包仅在请求期（PUT 人设）才调用、装配早已完成（同 onPublishEnd 模式）。
+  const personaPanel = createPersonaPanel({
+    store: personaStore,
+    onBound: (accountId) => {
+      personaSetupAlerted.delete(accountId); // 清一次性告警去重，使日后「解绑→在线→再绑」仍能再次告警/唤醒
+      runtimes?.startSessionForAccount(accountId);
+    },
+  });
 
   // RiskController 注册表（V1 task 9.1）：每账号一个 controller、单写 PER ACCOUNT、共享 PgRiskStore。
   // 现役路径用其 default controller（单一来源，避免双 controller 写同一 risk_state）；PG 不可用则现役回退内存态。

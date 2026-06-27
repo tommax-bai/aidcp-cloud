@@ -98,3 +98,70 @@ test('未接人设闸（单账号向后兼容）：照常启动', () => {
   assert.equal(d.active, true);
   d.endSession();
 });
+
+// ─── change auto-start-on-persona-bind：绑定人设后云端自动唤醒被闸住的在线节点（无需重连）───
+
+test('绑定人设后 startOnPersonaBound 自动开会话 + 补发 scroll 重驱唤醒干等边端（无需重连）', () => {
+  let bound = false;
+  const { d, rejected, commands } = make({ isPersonaBound: () => bound });
+  d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'acctX', ts: 1 }); // 未绑 → 被闸住、未起
+  assert.equal(d.active, false);
+  assert.deepEqual(rejected, [{ accountId: 'acctX', reason: 'needs_persona_setup' }]);
+  // 后台绑定人设（镜像翻真）→ 注册表按账号调用唤醒：
+  bound = true;
+  d.startOnPersonaBound();
+  assert.equal(d.active, true, '绑定后自动开会话、无需重连');
+  const scroll = commands.find((c) => c.action === 'scroll');
+  assert.ok(scroll, '补发一条 scroll 重驱唤醒已发过 page.cards 在干等的边端');
+  assert.equal((scroll as { reason?: string }).reason, 'resume_redrive');
+  d.endSession();
+});
+
+test('startOnPersonaBound 对已在跑的会话是 no-op：不重启、不多发重驱滚动', () => {
+  const { d, commands } = make({ isPersonaBound: () => true });
+  d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'acctY', ts: 1 }); // 已绑 → 正常启动
+  assert.equal(d.active, true);
+  const before = commands.length;
+  d.startOnPersonaBound(); // 已在跑 → 顶部守卫 return
+  assert.equal(d.active, true);
+  assert.equal(commands.length, before, '不打断在跑会话、不多发重驱滚动');
+  d.endSession();
+});
+
+test('startOnPersonaBound 人设仍未真绑 → 诚实不起、不发重驱（防御）', () => {
+  const { d, commands } = make({ isPersonaBound: () => false });
+  d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'acctZ', ts: 1 });
+  assert.equal(d.active, false);
+  d.startOnPersonaBound(); // canStartSession 仍 false → 不起
+  assert.equal(d.active, false);
+  assert.equal(commands.filter((c) => c.action === 'scroll').length, 0, '未起会话 → 不发重驱滚动');
+  d.endSession();
+});
+
+// ─── change nickname-capture-on-login：采真名是登录引导固定步骤，不被人设闸阻断（但绝不浏览，守红线）───
+
+test('未绑人设但库内真名空：登录即采真名（恰一次 profile_open{direct}），绝不浏览（无 open_note/like/scroll）——红线', () => {
+  const { d, commands } = make({ isPersonaBound: () => false });
+  d.setCurrentAccountId('acctCap'); // 真实账号 + 库内昵称空（getNickname 缺省→null）→ pendingNicknameCapture=true
+  d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'acctCap', ts: 1 }); // 启动闸拒绝浏览会话，但登录引导采集武装
+  assert.equal(d.active, false, '未开浏览会话（不浏览）');
+  // 边缘就绪（自发上报 page.cards）→ 驱动一次本人主页采集；浏览反应链未接线，绝不产生浏览指令
+  d.bus.emit('page.cards.arrived', {
+    cards: [{ index: 0, title: '测试笔记', likeCount: 100, collectCount: 10, noteId: 'n1' }],
+    ts: 2,
+  });
+  const profileOpens = commands.filter((c) => c.action === 'profile_open');
+  assert.equal(profileOpens.length, 1, '登录后恰驱动一次本人主页采集');
+  assert.equal((profileOpens[0].params as { direct?: boolean }).direct, true, 'direct=true 直驱本人主页');
+  assert.equal(commands.filter((c) => c.action !== 'profile_open').length, 0, '红线：未绑人设绝不浏览（无 open_note/like/scroll 等）');
+  d.endSession();
+});
+
+test('全局调度关闭：未绑人设账号登录也不采真名（运营显式暂停一切，连边端都不驱动）', () => {
+  const { d, commands } = make({ isPersonaBound: () => false, isDispatchActive: () => false });
+  d.setCurrentAccountId('acctCap'); // pendingNicknameCapture=true
+  d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'acctCap', ts: 1 });
+  d.bus.emit('page.cards.arrived', { cards: [], ts: 2 });
+  assert.equal(commands.length, 0, '调度全局停 → 连登录引导采集也不驱动');
+  d.endSession();
+});

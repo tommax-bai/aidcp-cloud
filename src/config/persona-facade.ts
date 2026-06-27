@@ -21,6 +21,12 @@ import type {
 
 export interface PersonaFacadeDeps {
   store: PersonaStore;
+  /**
+   * 真绑定（非清除、非非法）成功后触发（change auto-start-on-persona-bind）：唤醒该账号在线、因未绑人设
+   * 被启动闸短路的节点就地开跑，无需重连。fire-and-forget（调用方不 await、不阻塞 PUT 回真态）；
+   * 触发时 store 内存镜像已刷新（isPersonaBound 已为 true）。清除覆盖 / 非法人设均不触发。
+   */
+  onBound?: (accountId: string) => void;
 }
 
 export function createPersonaPanel(deps: PersonaFacadeDeps): PanelPersonaConfig {
@@ -90,6 +96,13 @@ export function createPersonaPanel(deps: PersonaFacadeDeps): PanelPersonaConfig 
         return { ok: false, reason: 'persona_invalid' };
       }
       await deps.store.set(accountId, persona, updatedBy);
+      // 真绑定成功 → 唤醒该账号在线被人设闸短路的节点就地开跑（镜像已在 store.set 内同步刷新，
+      // isPersonaBound 此刻已为 true）。绑定本身已成功，开跑触发失败绝不让 PUT 报错（fire-and-forget + 吞错）。
+      try {
+        deps.onBound?.(accountId);
+      } catch {
+        /* best-effort：不影响绑定回真态 */
+      }
       return { ok: true, view: await buildCatalog() };
     },
   };

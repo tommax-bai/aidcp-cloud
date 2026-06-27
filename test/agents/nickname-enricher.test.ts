@@ -14,6 +14,7 @@ const REAL = 'acc-real-userid';
 
 interface Harness {
   bus: EventBus;
+  role: NicknameEnricher;
   ctx: SessionContext;
   setCalls: { accountId: string; nickname: string }[];
   fireTimeout: () => void;
@@ -46,7 +47,7 @@ function setup(opts: { accountId?: string } = {}): Harness {
   bus.on('feed.entered', (p) => { if (p.trigger === 'back_to_feed') backToFeed++; });
 
   return {
-    bus, ctx, setCalls, captures,
+    bus, role, ctx, setCalls, captures,
     fireTimeout: () => { if (timeoutCb) timeoutCb(); },
     timerCleared: () => cleared,
     get backToFeed() { return backToFeed; },
@@ -186,5 +187,35 @@ describe('NicknameEnricher（登录账号真实昵称采集，云端角色驱动
     sessionStart(h.bus);
     assert.equal(h.captures.length, 0, '达 K 上限 → 不再绕（退避）');
     assert.equal(h.ctx.browseSuspended, false);
+  });
+
+  // ── change nickname-capture-on-login：采真名从「浏览会话开始」解耦为「登录引导固定步骤」──
+  it('登录引导触发（armLoginCapture，无 session_start）→ 同款采集流程：武装→边缘就绪 emit→落库回 feed（解耦人设闸）', () => {
+    const h = setup();
+    h.ctx.setPendingNicknameCapture(true);
+    // 不发 session_start —— 直接登录引导触发（未绑人设、不开浏览会话也照采）
+    h.role.armLoginCapture();
+    assert.equal(h.ctx.browseSuspended, true, '应同步暂停');
+    assert.equal(h.ctx.selfCaptureInFlight, true, '应同步置在途');
+    assert.equal(h.captures.length, 0, 'emit 延到边缘就绪');
+    edgeReady(h.bus); // 首个 page.cards.arrived
+    assert.equal(h.captures.length, 1, '边缘就绪后 emit 一次 self.profile.capture');
+    selfDetail(h.bus, REAL, '测评酱');
+    assert.deepEqual(h.setCalls, [{ accountId: REAL, nickname: '测评酱' }], '登录引导路径同样落库真名');
+    assert.equal(h.ctx.pendingNicknameCapture, false, '采到即幂等');
+    assert.equal(h.backToFeed, 1, '回 feed 一次');
+  });
+
+  it('登录引导触发：无需采集(pending=false)→零扰动；占位账号 default 绝不采', () => {
+    const h1 = setup();
+    h1.role.armLoginCapture(); // pending 默认 false
+    assert.equal(h1.captures.length, 0, 'pending=false → 零扰动');
+    assert.equal(h1.ctx.browseSuspended, false);
+
+    const h2 = setup({ accountId: 'default' });
+    h2.ctx.setPendingNicknameCapture(true); // 即便误置
+    h2.role.armLoginCapture();
+    assert.equal(h2.captures.length, 0, 'default 占位账号绝不采（双保险）');
+    assert.equal(h2.ctx.browseSuspended, false);
   });
 });

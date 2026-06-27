@@ -263,6 +263,11 @@ export class RoleDispatcher {
   private readonly dailyResume = new Map<string, { dayKey: string; sessions: number; browseMs: number }>();
   /** SessionMonitor 引用（供 excursion → pauseClock/resumeClock；setup 时捕获）。 */
   private sessionMonitor?: SessionMonitorRole;
+  /**
+   * 登录账号真实昵称采集体（change nickname-capture-on-login）：在 setup() 永久接线、独立于浏览会话，
+   * 故未绑人设、被启动闸拦下的账号登录后仍能采一次真名（采集是登录引导固定步骤，不被人设闸阻断）。
+   */
+  private nicknameEnricher?: NicknameEnricher;
   /** 已下发占坑、待回执释放的互动键（按动作）：action.completed 据此 complete / releaseFailed。 */
   private readonly pendingInteractionKeys = new Map<GuardAction, string>();
   private readonly notifyComments?: (items: NotificationItem[]) => Promise<void>;
@@ -506,15 +511,8 @@ export class RoleDispatcher {
         : []),
       new ProfileOpener(commonOptions),
       new ProfileBrowser(commonOptions),
-      // 登录账号真实昵称采集（change account-real-nickname）：会话开始驱动一次本人主页直驱采昵称、回 feed。
-      new NicknameEnricher({
-        ...commonOptions,
-        sessionContext: this.sessionContext,
-        getAccountId: () => this.currentAccountId,
-        ...(this.setNickname ? { setNickname: this.setNickname } : {}),
-        setTimeoutFn: this.setTimeoutFn,
-        clearTimeoutFn: this.clearTimeoutFn,
-      }),
+      // 登录账号真实昵称采集体已移出会话角色集、改为 setup() 永久接线（change nickname-capture-on-login）：
+      // 采真名是登录引导固定步骤，不随浏览会话起止、不被人设闸阻断。见下方 setup() 内构造 this.nicknameEnricher。
       new FollowAgent({ ...commonOptions, sessionContext: this.sessionContext, getRemainingFollows: () => this.budget.follows }),
       new SearchScroller(commonOptions, this.sessionContext),
       new SearchEvaluator({
@@ -563,6 +561,27 @@ export class RoleDispatcher {
       | SessionMonitorRole
       | undefined;
 
+    // 登录账号真实昵称采集（change nickname-capture-on-login）：从「浏览会话开始」解耦为【登录引导固定步骤】。
+    // 采集体 + 其本人主页命令出口**永久接线**（独立于浏览会话；它依赖的 page.cards/profile.detail 由 handler 无条件上总线），
+    // 故未绑人设、被启动闸拦下的账号登录后仍能采一次真名；但**绝不**接浏览反应链（contentEvaluator 等仍只在会话激活订阅）——
+    // 未绑人设账号采完即闲置、不在默认人设上空跑（红线）。采集体全程自守（库内已有真名/占位账号/在途/采空退避即 no-op）、
+    // 风控/预算中性，故 permanently 订阅安全。绑了人设的账号行为不变（会话开始的 session_start 仍触发同一采集体）。
+    this.nicknameEnricher = new NicknameEnricher({
+      ...commonOptions,
+      sessionContext: this.sessionContext,
+      getAccountId: () => this.currentAccountId,
+      ...(this.setNickname ? { setNickname: this.setNickname } : {}),
+      setTimeoutFn: this.setTimeoutFn,
+      clearTimeoutFn: this.clearTimeoutFn,
+    });
+    this.nicknameEnricher.subscribe();
+    // 本人主页采集命令出口（云端内部事件 → profile_open{direct:true}）：永久接线（采集不依赖浏览会话）。
+    // **不复用** profile.entered（它会把自己拖进浏览管线）；direct=true 让边端直驱 /user/profile/<accountId>、纯执行；
+    // 授信经 selfCaptureInFlight 在 chokepoint 放行（见 sendCommand）。
+    this.eventBus.on('self.profile.capture', (payload) => {
+      this.sendCommand({ action: 'profile_open', params: { authorId: payload.accountId, direct: true, thinkMs: this.thinkNow() } });
+    });
+
     // 角色订阅 / 指令翻译 / Edge 事件接线**推迟到会话激活**（startSession / restartSession）才进行——
     // 多租户（multi-account-node-support）：setup() 仅构造角色 + 注册「边缘 hello → 启动闸」入口监听，
     // 绝不在此接线浏览反应链、也绝不启动 SessionMonitor 看门狗。否则：
@@ -585,8 +604,14 @@ export class RoleDispatcher {
    */
   private onHelloEvent(payload: { edgeId: string; accountId?: string; ts: number }): void {
     if (payload.accountId) this.currentAccountId = payload.accountId;
-    if (!this.canStartSession()) return;
-    this.restartSession();
+    if (this.canStartSession()) {
+      this.restartSession();
+      return;
+    }
+    // 启动闸拦下（未绑人设）：仍把「采登录账号真实昵称」当登录引导固定步骤跑一次——不开浏览会话、不挂浏览
+    // 反应链（红线，见 setup() 注释），只驱动一次本人主页采集（change nickname-capture-on-login）。
+    // 调度全局停（!isDispatchActive）则连采集也不驱动边端（运营显式暂停一切）。
+    if (this.isDispatchActive()) this.nicknameEnricher?.armLoginCapture();
   }
 
   /**
@@ -611,6 +636,21 @@ export class RoleDispatcher {
     if (this.sessionActive) return;
     if (!this.canStartSession()) return;
     this.restartSession();
+  }
+
+  /**
+   * 后台为本账号绑定人设后，由连接注册表按账号调用（change auto-start-on-persona-bind）：
+   * 若本连接此前因未绑人设被启动闸短路（未在跑）、现重判可启动，则就地开会话——与边缘重连(onHelloEvent)
+   * 等价，过同一启动闸（canStartSession=调度开关+人设；不受续场的活跃时段/每日上限约束），绝不以默认人设静默开跑。
+   * 关键：被闸住的边端已发过一次 page.cards 在干等命令，restartSession 的 feed.entered{session_start} 是
+   * 哑事件、不产首命令；故起会话后补一条滚动唤醒它重报 page.cards → 评估 → 浏览循环秒级续上（复用
+   * doAutoResume 同款 scroll→page.scroll 重驱，不新增协议；省去 idle 看门狗 ~2min 兜底）。
+   * 顶部 active 守卫：对已在跑的会话是 no-op、绝不打断、绝不多发重驱滚动。
+   */
+  startOnPersonaBound(): void {
+    if (this.sessionActive) return; // 已在跑 → 不打断、不重驱
+    this.tryStartSession(); // 过启动闸（人设此刻已绑 → 放行）
+    if (this.sessionActive) this.sendCommand({ action: 'scroll', reason: 'resume_redrive' });
   }
 
   /**
@@ -952,13 +992,6 @@ export class RoleDispatcher {
       // type 字段在 NoteOpenPayload 不存在会被静默丢弃，导致边缘开错笔记、从不进主页）。
       this.eventBus.on('profile.entered', (payload) => {
         this.sendCommand({ action: 'profile_open', params: { authorId: payload.authorId, thinkMs: this.thinkNow() } });
-      }),
-
-      // 本人主页昵称采集（change account-real-nickname）：云端内部事件 → profile_open{direct:true}。
-      // **不复用** profile.entered（它会 seed ProfileBrowser.pending 把自己拖进浏览管线）；direct=true 让 edge 直 navi
-      // 到 /user/profile/<accountId>、纯执行。授信经 selfCaptureInFlight 在 chokepoint 放行（见 sendCommand）。
-      this.eventBus.on('self.profile.capture', (payload) => {
-        this.sendCommand({ action: 'profile_open', params: { authorId: payload.accountId, direct: true, thinkMs: this.thinkNow() } });
       }),
 
       // 深读：多图浏览意图 → browse_images 指令（dwellMs 按正文量级，thinkMs 为开始前犹豫）。
