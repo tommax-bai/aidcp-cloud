@@ -127,7 +127,7 @@ export interface EventMap {
   'session.started': { sessionId: string };
   'session.ended': { stats: SessionStats };
   // targetId（change interaction-feed-enrichment）：展示账本去重键——笔记动作=noteId，关注=authorId。noteId 保留（喂 likedNoteStore）。
-  'interaction.occurred': { action: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like'; accountId?: string; noteId?: string; targetId?: string };
+  'interaction.occurred': { action: 'view' | 'like' | 'collect' | 'follow' | 'comment' | 'comment_like'; accountId?: string; noteId?: string; targetId?: string };
   'concept.discovered': { concepts: string[]; source: string };
   // Edge 上报事件（handler → RoleDispatcher）
   // accountId 穿透握手事件（multi-account-node-support D4）：决策层据此设该连接当前账号，不再钉死 default。

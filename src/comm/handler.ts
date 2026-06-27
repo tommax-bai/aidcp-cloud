@@ -222,6 +222,15 @@ export class DefaultMessageHandler implements MessageHandler {
         if (detail.noteId) session.currentNoteId = detail.noteId;
         // accountId 随事件带出（change interaction-feed-enrichment）：tee 到全局总线后元数据 upsert 按真实账号归属。
         this.bus(session).emit('note.detail.arrived', { detail, accountId: session.accountId ?? 'default', ts: this.clock() });
+        // 浏览计数（fix view-count-zero）：成功打开并上报一篇笔记即一次 view。执行端不单独回执 view 动作，
+        // 故在此唯一必经入口按账号驱动计数——与 like/collect 同走 interaction.occurred → record('view')，
+        // 既补齐面板浏览数（risk_counters），又激活浏览配额与点赞/浏览比例闸门（内存窗口）。
+        // view 不入 interaction_feed：其订阅方按动作白名单过滤，浏览不污染「已互动笔记」展示账本。
+        this.bus(session).emit('interaction.occurred', {
+          action: 'view',
+          accountId: session.accountId ?? 'default',
+          ...(detail.noteId ? { noteId: detail.noteId } : {}),
+        });
         return null;
       }
       case 'profile.detail': {
