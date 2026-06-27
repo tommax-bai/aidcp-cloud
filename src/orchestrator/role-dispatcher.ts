@@ -32,6 +32,7 @@ import { CommentDeAiFlavor } from '../agents/comment-de-ai-flavor.js';
 import { CommentApprovalGate, type CommentApprovalPort } from '../agents/comment-approval-gate.js';
 import { ProfileOpener } from '../agents/profile-opener.js';
 import { ProfileBrowser } from '../agents/profile-browser.js';
+import { NicknameEnricher } from '../agents/nickname-enricher.js';
 import { FollowAgent } from '../agents/follow-agent.js';
 import { SearchScroller } from '../agents/search-scroller.js';
 import { SearchEvaluator } from '../agents/search-evaluator.js';
@@ -176,6 +177,14 @@ export interface RoleDispatcherOptions {
   clearTimeoutFn?: (handle: unknown) => void;
   /** 休息时长抖动用随机源（测试可注入定值）；缺省 Math.random。 */
   randomFn?: () => number;
+  /**
+   * 同步读账号昵称（change account-real-nickname）：返回 string|null（库内 NULL/未知=null）。
+   * **同步**——握手时同步算「需采集」判定（不 await PG，杜绝异步窗口让 page.cards 插进采集绕路）。
+   * 由 server 注入读 AccountStore 进程内缓存；缺省 → 恒 null（无 PG 退化）。
+   */
+  getNickname?: (accountId: string) => string | null;
+  /** 持久化账号昵称（change account-real-nickname）：nickname_enricher 采到非空时单写 upsert（拒空、不阻塞）。 */
+  setNickname?: (accountId: string, nickname: string) => Promise<void> | void;
 }
 
 export interface EdgeCommand {
@@ -244,6 +253,10 @@ export class RoleDispatcher {
   private readonly setTimeoutFn: (fn: () => void, ms: number) => unknown;
   private readonly clearTimeoutFn: (handle: unknown) => void;
   private readonly randomFn: () => number;
+  /** 同步读账号昵称（change account-real-nickname）：握手同步算「需采集」用；缺省恒 null。 */
+  private readonly getNickname: (accountId: string) => string | null;
+  /** 持久化账号昵称（change account-real-nickname）：nickname_enricher 采到非空时调；缺省 → 不持久化。 */
+  private readonly setNickname?: (accountId: string, nickname: string) => Promise<void> | void;
   /** 续场休息计时器句柄（每连接私有、unref，只重开本连接会话；绝不广播）。 */
   private restTimer: unknown;
   /** 每账号当日自动续场计数（场数 + 累计浏览毫秒），按本地日界重置。 */
@@ -304,6 +317,8 @@ export class RoleDispatcher {
     this.setTimeoutFn = options.setTimeoutFn ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimeoutFn = options.clearTimeoutFn ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
     this.randomFn = options.randomFn ?? Math.random;
+    this.getNickname = options.getNickname ?? (() => null);
+    this.setNickname = options.setNickname;
     this.notifyComments = options.notifyComments;
     this.conceptStore = options.conceptStore;
     this.searchLimiter = new SearchFrequencyLimiter(options.searchLimiterOptions);
@@ -358,7 +373,10 @@ export class RoleDispatcher {
     if (
       this.sessionContext.browseSuspended &&
       command.action !== 'session.end' &&
-      !this.isExcursionCommand(command.action)
+      !this.isExcursionCommand(command.action) &&
+      // 本人昵称采集放行（change account-real-nickname）：仅放行采集在途时的 self profile_open；
+      // open_note/like/scroll 在绕路中照丢（下次 page.cards 无害重来）。非 blanket 关 suspension。
+      !(this.sessionContext.selfCaptureInFlight && command.action === 'profile_open')
     ) {
       return false; // 软暂停：丢弃 browse 命令（不入队、由 page.cards 续刷自然重来）
     }
@@ -395,6 +413,9 @@ export class RoleDispatcher {
   /** 设置该连接（运行时）的当前账号（multi-account-node-support D4：去掉 default 钉死，由连接真实账号设入）。 */
   setCurrentAccountId(accountId: string): void {
     this.currentAccountId = accountId;
+    // 握手同步算「需采集登录账号真实昵称」（change account-real-nickname）：真实账号(非 default) 且库内昵称为 NULL。
+    // 同步算（不 await PG）→ 存 SessionContext 布尔，杜绝会话开始再 await 留下的异步窗口（在途 page.cards 会插 open_note 绕路）。
+    this.sessionContext.setPendingNicknameCapture(accountId !== 'default' && this.getNickname(accountId) === null);
   }
 
   /** 当前账号（供测试 / 观测）。 */
@@ -485,6 +506,15 @@ export class RoleDispatcher {
         : []),
       new ProfileOpener(commonOptions),
       new ProfileBrowser(commonOptions),
+      // 登录账号真实昵称采集（change account-real-nickname）：会话开始驱动一次本人主页直驱采昵称、回 feed。
+      new NicknameEnricher({
+        ...commonOptions,
+        sessionContext: this.sessionContext,
+        getAccountId: () => this.currentAccountId,
+        ...(this.setNickname ? { setNickname: this.setNickname } : {}),
+        setTimeoutFn: this.setTimeoutFn,
+        clearTimeoutFn: this.clearTimeoutFn,
+      }),
       new FollowAgent({ ...commonOptions, sessionContext: this.sessionContext, getRemainingFollows: () => this.budget.follows }),
       new SearchScroller(commonOptions, this.sessionContext),
       new SearchEvaluator({
@@ -919,6 +949,13 @@ export class RoleDispatcher {
         this.sendCommand({ action: 'profile_open', params: { authorId: payload.authorId, thinkMs: this.thinkNow() } });
       }),
 
+      // 本人主页昵称采集（change account-real-nickname）：云端内部事件 → profile_open{direct:true}。
+      // **不复用** profile.entered（它会 seed ProfileBrowser.pending 把自己拖进浏览管线）；direct=true 让 edge 直 navi
+      // 到 /user/profile/<accountId>、纯执行。授信经 selfCaptureInFlight 在 chokepoint 放行（见 sendCommand）。
+      this.eventBus.on('self.profile.capture', (payload) => {
+        this.sendCommand({ action: 'profile_open', params: { authorId: payload.accountId, direct: true, thinkMs: this.thinkNow() } });
+      }),
+
       // 深读：多图浏览意图 → browse_images 指令（dwellMs 按正文量级，thinkMs 为开始前犹豫）。
       this.eventBus.on('reading.browse_images', (payload) => {
         const dwellMs = this.dwellForCurrentNote('glance');
@@ -960,6 +997,13 @@ export class RoleDispatcher {
       // （修：关注被风控拦截 → 永不产生 follow 回执 → 旧的「等回执再返回」死等 → 会话卡死在作者主页）。
       // 三分支（关注且放行 / 关注被拦 / 决定不关注）都收敛到恰好一次 profile.exit → 恰好一次返回。
       this.eventBus.on('profile.done', (payload) => {
+        // 隔离守卫②（change account-real-nickname 兜底网）：本人绝不自关注。自路径正常不到这里
+        // （ProfileBrowser 已早退、不 emit profile.browsed → 无 profile.done），此为非标记可达消费者的兜底；
+        // 仍须 emit 恰好一次 profile.exit 离开主页，绝不早退（否则会话卡死在主页）。
+        if (payload.authorId === this.currentAccountId) {
+          this.eventBus.emit('profile.exit', { sourcePageType: payload.sourcePageType, reason: 'not_followed', ts: this.clock() });
+          return;
+        }
         let reason: 'followed' | 'follow_blocked' | 'not_followed';
         if (payload.followed) {
           // 风控闸：被拒则诚实跳过（不下发、不扣额；follow 配额仍由 action.completed 真实回执扣减）。

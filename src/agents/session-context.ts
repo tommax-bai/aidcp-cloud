@@ -34,6 +34,20 @@ export class SessionContext {
    */
   private _notifiedItemKeys: Set<string> = new Set();
 
+  // ─── 登录账号真实昵称采集（change account-real-nickname）─────────────────────────
+  /** 握手同步算的「需采集」判定（真实账号且库内 nickname 为 NULL）。per-connection 决策，
+   *  跨 browse-session 重启保持（**不**在 reset 清，否则重连后永不再采）；采到后由角色置 false。 */
+  private _pendingNicknameCapture = false;
+  /** 本人主页采集在途标记。**仅**用于 chokepoint 放行 self profile_open + 超时 + 防重复收尾，
+   *  绝不用于持久化/隔离身份判定（身份恒由 detail.authorId===accountId 决定）。瞬时态——reset 必清。 */
+  private _selfCaptureInFlight = false;
+  /** 采空尝试计数（K 上限有界兜底：genuinely 抽不到的主页退避而非永绕）。per-connection 保持。 */
+  private _selfCaptureAttempts = 0;
+  private static readonly SELF_CAPTURE_MAX_ATTEMPTS = 3;
+  /** 本人主页采集 ~20s 兜底超时句柄（edge 静默/CDP 崩时恢复浏览）。瞬时态——reset 必清。 */
+  private _selfCaptureTimer: ReturnType<typeof setTimeout> | null = null;
+  static readonly SELF_CAPTURE_TIMEOUT_MS = 20_000;
+
   private static freshExcursion(): ExcursionState {
     return { active: false, epoch: null, phase: 'idle', categoryAttempts: new Map() };
   }
@@ -101,6 +115,18 @@ export class SessionContext {
 
   setBrowseSuspended(b: boolean): void { this._browseSuspended = b; }
 
+  // ─── 登录账号真实昵称采集（change account-real-nickname）访问口 ───
+  get pendingNicknameCapture(): boolean { return this._pendingNicknameCapture; }
+  setPendingNicknameCapture(b: boolean): void { this._pendingNicknameCapture = b; }
+  get selfCaptureInFlight(): boolean { return this._selfCaptureInFlight; }
+  setSelfCaptureInFlight(b: boolean): void { this._selfCaptureInFlight = b; }
+  get selfCaptureAttempts(): number { return this._selfCaptureAttempts; }
+  /** 采空 +1，返回累计；达上限后角色不再绕。 */
+  incrementSelfCaptureAttempts(): number { return ++this._selfCaptureAttempts; }
+  get selfCaptureMaxAttempts(): number { return SessionContext.SELF_CAPTURE_MAX_ATTEMPTS; }
+  get selfCaptureTimer(): ReturnType<typeof setTimeout> | null { return this._selfCaptureTimer; }
+  setSelfCaptureTimer(h: ReturnType<typeof setTimeout> | null): void { this._selfCaptureTimer = h; }
+
   /** 评论/@ 是否已发过飞书（去重；仅在确认收到分类结果时推进，失败/超时不推进）。 */
   isItemNotified(key: string): boolean { return !!key && this._notifiedItemKeys.has(key); }
   markItemNotified(key: string): void { if (key) this._notifiedItemKeys.add(key); }
@@ -112,6 +138,10 @@ export class SessionContext {
     // 通知巡视瞬时态 + 暂停开关必清（断连/重连/结束后不残留 active/暂停，否则永久冻结浏览）
     this._excursion = SessionContext.freshExcursion();
     this._browseSuspended = false;
-    // 注意：visitedNoteIds / recentEvaluatedIds / notifiedItemKeys 不重置，跨轮次保持
+    // 本人昵称采集瞬时态必清（在途标记 + 定时器）：否则 chokepoint 永久放行 profile_open / 超时空响。
+    if (this._selfCaptureTimer !== null) { clearTimeout(this._selfCaptureTimer); this._selfCaptureTimer = null; }
+    this._selfCaptureInFlight = false;
+    // 注意：visitedNoteIds / recentEvaluatedIds / notifiedItemKeys 不重置，跨轮次保持；
+    //       pendingNicknameCapture / selfCaptureAttempts 是 per-connection 决策/预算，亦**不**在此清。
   }
 }

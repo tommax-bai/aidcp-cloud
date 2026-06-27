@@ -63,6 +63,12 @@ export interface AccountStore {
    * 实现拒空白（trim 为空即 no-op，绝不用空覆盖已有真名）；调用方只在拿到可证明属己的非空昵称时调。
    */
   setNickname?(accountId: string, nickname: string): Promise<void>;
+  /**
+   * 同步读账号昵称（change account-real-nickname）：读 init() 预热 + setNickname 写后更新的进程内缓存，
+   * 返回 string|null（缺行/库内 NULL=null）。**同步**是为握手时同步算「需采集」判定、不留 await PG 的异步窗口
+   * （否则在途 page.cards 会驱动 open_note 插进采集绕路，R3-MAJOR）。缺省 → 调用方按 null 处理。
+   */
+  getNickname?(accountId: string): string | null;
   close?(): Promise<void>;
 }
 
@@ -84,6 +90,9 @@ interface AccountRow {
 /** accounts 主表持久化（PostgreSQL）。 */
 export class PgAccountStore implements AccountStore {
   private readonly pool: pg.Pool;
+  /** 账号昵称的进程内同步缓存（change account-real-nickname）：init() 预热全表 + setNickname 写后更新。
+   *  供握手同步算「需采集」判定，避免 await PG 的异步窗口；缺键=未知 → getNickname 返回 null。 */
+  private readonly nicknameCache = new Map<string, string | null>();
 
   constructor(options: PgAccountStoreOptions = {}) {
     this.pool =
@@ -97,9 +106,14 @@ export class PgAccountStore implements AccountStore {
       });
   }
 
-  /** 建表 + seed default（幂等）。 */
+  /** 建表 + seed default（幂等）+ 预热昵称同步缓存。 */
   async init(): Promise<void> {
     await this.pool.query(ACCOUNTS_SCHEMA_SQL);
+    // 预热昵称缓存（change account-real-nickname）：供握手同步读，避免每次握手 await PG。
+    const { rows } = await this.pool.query<{ account_id: string; nickname: string | null }>(
+      'SELECT account_id, nickname FROM accounts',
+    );
+    for (const r of rows) this.nicknameCache.set(r.account_id, r.nickname ?? null);
   }
 
   async listAll(): Promise<AccountRecord[]> {
@@ -151,6 +165,16 @@ export class PgAccountStore implements AccountStore {
        ON CONFLICT (account_id) DO UPDATE SET nickname = EXCLUDED.nickname`,
       [accountId, value],
     );
+    // 更新同步缓存：写后再握手（重连）即读到非空 → 不再重绕（幂等）。
+    this.nicknameCache.set(accountId, value);
+  }
+
+  /**
+   * 同步读昵称（change account-real-nickname）：读 init() 预热 + setNickname 更新的进程内缓存。
+   * 缺键（未预热到 / 新账号）或库内 NULL → 返回 null（= 「需采集」）。绝不 await PG（握手同步算门用）。
+   */
+  getNickname(accountId: string): string | null {
+    return this.nicknameCache.get(accountId) ?? null;
   }
 
   async close(): Promise<void> {

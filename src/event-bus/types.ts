@@ -409,6 +409,10 @@ export interface RoleEventMap {
   'profile.browsed': ProfileBrowsedPayload;
   'profile.done': ProfileDonePayload;
   'profile.exit': ProfileExitPayload;
+  /** 本人主页昵称采集意图（change account-real-nickname）：云端内部事件，**NOT 协议消息**——不入 protocol.ts、
+   *  不计 MessageType（计数恒 56）、无四处同步。nickname_enricher 在会话开始(需采集时)emit；
+   *  dispatcher 翻译为 profile_open{direct:true}。payload.accountId = 本人主页 id。 */
+  'self.profile.capture': { accountId: string };
   'search.needed': SearchNeededPayload;
   'search.approved': SearchApprovedPayload;
   'search.skipped': SearchSkippedPayload;
@@ -460,6 +464,7 @@ export type RoleName =
   | 'comment_like_appraiser'
   | 'valuable_comment_archivist'
   | 'profile_opener'
+  | 'nickname_enricher'
   | 'follow_agent'
   | 'search_evaluator'
   | 'search_executor'

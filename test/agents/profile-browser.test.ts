@@ -76,4 +76,40 @@ describe('ProfileBrowser（数据就绪后产出）', () => {
 
     assert.equal(captured, null, 'should not emit after unsubscribe');
   });
+
+  it('隔离守卫①（account-real-nickname）：本人主页（detail.authorId === 连接 accountId）早退、不 emit profile.browsed', () => {
+    const bus = new EventBus();
+    newBrowser(bus);
+
+    let count = 0;
+    bus.on('profile.browsed', () => { count++; });
+
+    bus.emit('profile.entered', { authorId: 'me-123', sourcePageType: 'feed', ts: Date.now() });
+    bus.emit('profile.detail.arrived', {
+      detail: { authorId: 'me-123', postsCount: 0, followersCount: 0, extracted: false, nickname: '工程师大白' },
+      accountId: 'me-123', // 本人：authorId === accountId
+      ts: Date.now(),
+    });
+
+    assert.equal(count, 0, '本人主页绝不进社交管线：不 emit profile.browsed');
+  });
+
+  it('隔离守卫①回归：他人主页（带 accountId 但 authorId ≠ accountId）仍 emit profile.browsed', () => {
+    const bus = new EventBus();
+    newBrowser(bus);
+
+    let captured = null as ProfileBrowsedPayload | null;
+    bus.on('profile.browsed', (p) => { captured = p; });
+
+    bus.emit('profile.entered', { authorId: 'other-456', sourcePageType: 'feed', ts: Date.now() });
+    bus.emit('profile.detail.arrived', {
+      detail: { authorId: 'other-456', postsCount: 5, followersCount: 200, extracted: true },
+      accountId: 'me-123', // 连接是本人 me-123，浏览的是 other-456
+      ts: Date.now(),
+    });
+
+    assert.ok(captured, '他人主页正常 emit（无回归）');
+    assert.equal(captured!.authorId, 'other-456');
+    assert.equal(captured!.followersCount, 200);
+  });
 });

@@ -90,11 +90,6 @@ export interface HandlerDeps {
   onHandshake?: (session: EdgeSession) => Promise<HandshakeOutcome> | HandshakeOutcome;
   /** 按连接真实账号解析 RiskController（reserved risk 通道 / session.budget 用）；缺省回落 riskController。 */
   resolveController?: (session: EdgeSession) => RiskController | undefined;
-  /**
-   * 持久化登录账号的平台真实昵称（change account-real-nickname）：握手携 nickname 时按已认证账号 upsert。
-   * 缺省 → 忽略（向后兼容）。实现 MUST 不阻塞握手（失败仅告警），调用方按 session.accountId 传入。
-   */
-  recordAccountNickname?: (accountId: string, nickname: string) => Promise<void>;
 }
 
 /** 把元素清单渲染成给 LLM 的编号列表（与 edge selector 一致的格式） */
@@ -326,15 +321,6 @@ export class DefaultMessageHandler implements MessageHandler {
         message: outcome.message,
       });
       return makeEnvelope('error', env.id, this.clock(), { code: outcome.code, message: outcome.message });
-    }
-    // 持久化登录账号真实昵称（change account-real-nickname）：按【已认证的 session.accountId】（非自报值）写，
-    // 仅在非空字符串时；fire-and-forget + catch，绝不阻塞/拖垮握手（照 ensureAccount「失败不阻塞握手」先例）。
-    const helloNickname = typeof p.nickname === 'string' ? p.nickname.trim() : '';
-    if (helloNickname && session.accountId) {
-      const acc = session.accountId;
-      void this.deps.recordAccountNickname?.(acc, helloNickname).catch((err) =>
-        this.logger.warn(`[comm] 持久化账号昵称失败（不阻塞握手）acc=${acc}:`, (err as Error).message),
-      );
     }
     // 通知该连接决策层：上线 → 携 accountId emit edge.hello（进私有通道）触发会话启动（经诚实人设/调度闸 D3）。
     this.bus(session).emit('edge.hello', { edgeId: p.edgeId, accountId: session.accountId, ts: this.clock() });

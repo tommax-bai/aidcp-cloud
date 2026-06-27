@@ -584,6 +584,9 @@ async function main(): Promise<void> {
     if (!interactionFeedStore) return;
     const d = evt.detail;
     if (!d.authorId) return;
+    // 隔离守卫③（change account-real-nickname）：本人主页采集绝不写进 interaction_feed 作者元数据
+    // （d.authorId === evt.accountId 即本人；evt.accountId 缺省 'default' 不会等于真实 authorId → 安全）。
+    if (d.authorId === evt.accountId) return;
     interactionFeedStore.upsertMeta(evt.accountId ?? 'default', d.authorId, { title: d.nickname, url: d.url }).catch((err) => {
       console.warn('[aidcp-cloud] interactionFeed upsertMeta(profile) error:', err);
     });
@@ -691,10 +694,6 @@ async function main(): Promise<void> {
     busFor: (session) => runtimes!.busFor(session),
     onHandshake: (session) => runtimes!.onHandshake(session),
     resolveController: (session) => runtimes?.controllerForSession(session),
-    // change account-real-nickname：握手携真实昵称时按已认证账号持久化（单写、非空才写）。
-    recordAccountNickname: async (accountId, nickname) => {
-      await accountStore?.setNickname?.(accountId, nickname);
-    },
   });
   const server = new EdgeCloudServer({ port, handler, onClose: (session) => runtimes?.onDisconnect(session) });
   edgeServer = server;
@@ -849,6 +848,10 @@ async function main(): Promise<void> {
       // 续场护栏 + 看门狗阈值提供者（change session-auto-resume-with-excursions）：按账号读，热加载。
       // 注入即开启自动续场（生产）；缺行回落写死默认（rest 10% / 全天窗口 / 不限 / 看门狗轻推~2min·放弃 1h）。
       resumeConfigProvider: resumeConfigStore,
+      // 登录账号真实昵称采集（change account-real-nickname）：同步读（进程内缓存，握手算「需采集」）+ 单写持久化。
+      // 经注入走 dispatcher 路径，**不**走被 revert 的 hello 摄取路径；无 PG → getNickname 恒 null、setNickname no-op。
+      getNickname: (accountId) => accountStore?.getNickname?.(accountId) ?? null,
+      setNickname: (accountId, nickname) => accountStore?.setNickname?.(accountId, nickname),
     });
   };
 

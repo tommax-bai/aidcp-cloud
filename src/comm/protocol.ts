@@ -110,8 +110,6 @@ export interface HelloPayload {
   machineLabel?: string;
   /** 远程桌面 / 可达地址（如 RDP/VNC 地址或跳板说明），用于人工远程处置 */
   remoteAddr?: string;
-  /** 当前登录账号自身的平台真实昵称（change account-real-nickname，随握手带回）；诚实失败时省略，绝不用 accountId/label 伪造、绝不错配被浏览作者昵称。 */
-  nickname?: string;
 }
 
 export interface WelcomePayload {
@@ -558,6 +556,8 @@ export interface ProfileOpenPayload {
   reason?: string;
   /** 进入主页前犹豫时间中心值（毫秒，可选） */
   thinkMs?: number;
+  /** 云端指定直驱（change account-real-nickname）：true=直接 Page.navigate 到 /user/profile/<authorId>、不抓取当前页第一个作者链；缺省/false 维持点详情页作者头像进入路径逐字不变。边缘对此字段一视同仁、只执行，不含「这是不是自己」判定。 */
+  direct?: boolean;
 }
 
 // —— Edge 上报 Payload（edge → cloud）——

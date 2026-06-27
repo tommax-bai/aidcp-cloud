@@ -31,7 +31,7 @@ export class ProfileBrowser extends BaseRole {
   subscribe(): void {
     this.unsubscribers.push(
       this.eventBus.on('profile.entered', (p) => this.onEntered(p)),
-      this.eventBus.on('profile.detail.arrived', (p) => this.onDetailArrived(p.detail)),
+      this.eventBus.on('profile.detail.arrived', (p) => this.onDetailArrived(p.detail, p.accountId)),
     );
   }
 
@@ -47,7 +47,15 @@ export class ProfileBrowser extends BaseRole {
     this.pending = { authorId: payload.authorId, sourcePageType: payload.sourcePageType };
   }
 
-  private onDetailArrived(detail: ProfileDetailData): void {
+  private onDetailArrived(detail: ProfileDetailData, accountId?: string): void {
+    // 隔离守卫①（change account-real-nickname）：本人主页（detail.authorId === 连接 accountId）绝不进社交管线——
+    // 早退、**不** emit profile.browsed（从根上断自关注链，连 FollowAgent LLM 都不空跑）。判据 race-free
+    // （by-id 自访问的 authorId 由 edge 从导航 URL 派生）；'default' 已被采集门排除，不会误命中。
+    // 清 pending 避免本人访问的残留 seed 污染下一次真实作者浏览。
+    if (accountId && detail.authorId && detail.authorId === accountId) {
+      this.pending = null;
+      return;
+    }
     const sourcePageType = this.pending?.sourcePageType ?? 'feed';
     const authorId = detail.authorId || this.pending?.authorId || 'unknown';
     this.pending = null;
