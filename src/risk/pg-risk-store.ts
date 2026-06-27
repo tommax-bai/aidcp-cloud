@@ -86,19 +86,16 @@ export class PgRiskStore implements RiskStore, InteractionStore {
   private readonly pool: pg.Pool;
 
   constructor(options: PgRiskStoreOptions = {}) {
-    // 注入了连接池（测试/复用）时直接采用，不解析 env（避免触发 DEFAULT_PG_CONFIG.password 的 fail-fast getter）。
-    if (options.pool) {
-      this.pool = options.pool;
-      return;
-    }
     const config = pgRiskConfigFromEnv();
-    this.pool = new Pool({
-      host: options.host ?? config.host,
-      port: options.port ?? config.port,
-      database: options.database ?? config.database,
-      user: options.user ?? config.user,
-      password: options.password ?? config.password,
-    });
+    this.pool =
+      options.pool ??
+      new Pool({
+        host: options.host ?? config.host,
+        port: options.port ?? config.port,
+        database: options.database ?? config.database,
+        user: options.user ?? config.user,
+        password: options.password ?? config.password,
+      });
   }
 
   async init(): Promise<void> {

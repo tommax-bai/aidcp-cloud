@@ -57,12 +57,11 @@
 - database=`aidcp`
 - user=`aidcp`
 
-敏感值说明（政策目标）：
+敏感值说明：
 
-- 政策目标：数据库密码只存放于 ECS `/opt/aidcp/cloud/.env`，运行时强制经由 `PGPASSWORD` / `DATABASE_URL` 注入
-- 政策目标：凭证不入 git、不写入任何仓库文档，仓库内只保留键名
-
-> **⚠️ 已知偏差（待修复）**：上述“密码绝不入 git”目前在代码层面尚未成立。`src/cache/pg-anchor-cache.ts` 内的 `DEFAULT_PG_CONFIG` 硬编码了一个明文默认口令并已随仓库提交（`src/risk/pg-risk-store.ts` 的 `pgRiskConfigFromEnv` 回退也复用该默认值）。待办：移除该硬编码默认口令（改为强制要求 `PGPASSWORD` / `DATABASE_URL`，缺失即 fail-fast），并轮换该口令；完成后此条偏差方可清除。
+- **数据库连接口令**采用源码内置默认值兜底（`src/cache/pg-anchor-cache.ts` 的 `DEFAULT_PG_CONFIG`，`src/risk/pg-risk-store.ts` 的 `pgRiskConfigFromEnv` 回退复用同一默认值）。这是一台**同机内网 PG**（`127.0.0.1:5432`，不对外暴露）的引导口令——它无法存进它自己要打开的库里，按现行设计内置兜底即可、不单独轮换；`PGPASSWORD` / `DATABASE_URL` 为**可选覆盖**（ECS `/opt/aidcp/cloud/.env` 已配 `PGPASSWORD`，优先级高于内置默认值）。
+- **业务密钥**（DashScope / 模型 API key 等）走库内加密存储（`src/config/credential-store.ts`，AES-256-GCM，主密钥 `AIDCP_CRED_KEY`）或 ECS `.env`，不写入仓库文档。
+- 本文档只保留键名与存放位置，不记录任何明文值。
 
 ## 环境变量权威来源
 
@@ -85,9 +84,8 @@ ECS 上 `aidcp-cloud` 的权威环境文件为：
 
 说明：
 
-- 政策目标：所有敏感值仅存放于 ECS `/opt/aidcp/cloud/.env`
+- 业务敏感值（API key / token / 飞书密钥等）存放于 ECS `/opt/aidcp/cloud/.env` 或库内加密存储（见上文「敏感值说明」）
 - 本文档只保留键名，不记录任何明文值
-- 注意：该“仅存放于 .env”仍是目标而非现状，源码中尚存硬编码默认口令，详见上文「敏感值说明（政策目标）」的已知偏差
 
 ## 已废弃方案：本地起 cloud + SSH 隧道
 

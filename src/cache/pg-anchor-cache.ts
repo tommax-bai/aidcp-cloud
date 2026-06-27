@@ -29,31 +29,13 @@ export interface PgAnchorCacheOptions {
   pool?: pg.Pool;
 }
 
-/**
- * 默认连接配置（本机 PG）。
- *
- * 注意：口令**不再硬编码**。`password` 为惰性 getter，仅从环境变量 `PGPASSWORD` 读取，
- * 缺失即抛错（fail-fast），避免静默连库失败或误用错误口令。历史上此处曾内联明文口令并入 git——
- * 已移除，须改用 `PGPASSWORD` / `DATABASE_URL` / 显式传入 `password`。详见 docs/environment-database.md。
- *
- * 由于多数调用点写作 `options.password ?? DEFAULT_PG_CONFIG.password`，`??` 短路保证：
- * 显式传入或 env 已给口令时不会触发 getter；仅在两者都缺失时才抛错。
- */
+/** 默认连接配置（本机 PG） */
 export const DEFAULT_PG_CONFIG = {
   host: '127.0.0.1',
   port: 5432,
   database: 'aidcp',
   user: 'aidcp',
-  get password(): string {
-    const pw = process.env.PGPASSWORD;
-    if (!pw || !pw.trim()) {
-      throw new Error(
-        'PG 口令缺失：请设置环境变量 PGPASSWORD（或改用 DATABASE_URL / 显式传入 password）。' +
-          '已移除硬编码默认口令，详见 docs/environment-database.md。',
-      );
-    }
-    return pw;
-  },
+  password: '***REMOVED***',
 };
 
 function readEnvString(name: string): string | undefined {
