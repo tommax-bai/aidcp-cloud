@@ -12,6 +12,7 @@ const silentLogger = { log() {}, warn() {}, error() {} };
 const acct: PanelAccount = {
   accountId: 'default',
   label: 'default',
+  nickname: null,
   platform: 'xiaohongshu',
   groupLabel: null,
   machineLabel: null,

@@ -105,6 +105,8 @@ import { QuotaConfigStore } from './config/quota-config-store.js';
 import { createQuotaConfigPanel } from './config/quota-config-facade.js';
 import { SessionConfigStore } from './config/session-config-store.js';
 import { createSessionLimitPanel } from './config/session-config-facade.js';
+import { ResumeConfigStore } from './config/resume-config-store.js';
+import { createResumeConfigPanel } from './config/resume-config-facade.js';
 import { createRolePromptProvider } from './config/role-prompt-preview.js';
 import { CredentialStore } from './config/credential-store.js';
 import type { ModelConfigView } from './panel/types.js';
@@ -181,6 +183,15 @@ async function main(): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
+  // 自动续场护栏 + 看门狗阈值（change session-auto-resume-with-excursions）：按账号 rest_ratio / 活跃时段 /
+  // 每日上限 / 看门狗两阈值；缺行/非法回落写死默认，绝不 brick。init 失败也不致命（空镜像→全回落默认）。
+  const resumeConfigStore = new ResumeConfigStore({
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
   try {
     await modelConfigStore.init();
     await credentialStore.init();
@@ -188,9 +199,10 @@ async function main(): Promise<void> {
     await categoryConfigStore.init();
     await quotaConfigStore.init();
     await sessionConfigStore.init();
-    console.log('[aidcp-cloud] 模型配置 + 凭据 + 角色配置 + 分类默认 + 安全限额 + 单场上限存储已就绪（model_config / provider_credentials / role_config / category_config / quota_config / session_config）');
+    await resumeConfigStore.init();
+    console.log('[aidcp-cloud] 模型配置 + 凭据 + 角色配置 + 分类默认 + 安全限额 + 单场上限 + 续场配置存储已就绪（model_config / provider_credentials / role_config / category_config / quota_config / session_config / resume_config）');
   } catch (err) {
-    console.warn('[aidcp-cloud] 模型/凭据/角色/分类/限额配置存储初始化失败（回退代码默认模型 + env 密钥；限额回退派生写死默认）:', (err as Error).message);
+    console.warn('[aidcp-cloud] 模型/凭据/角色/分类/限额/续场配置存储初始化失败（回退代码默认模型 + env 密钥；限额/续场回退派生写死默认）:', (err as Error).message);
   }
   // 启动期解密 DashScope 密钥（库内优先、回退 env）；明文仅用于构造图片客户端（万相），绝不日志化、绝不回前端。
   const dashscopeApiKey =
@@ -425,6 +437,14 @@ async function main(): Promise<void> {
   const publishOrchestrator = new PublishOrchestrator({
     logger: console,
     pipelineTimeoutMs: Number(process.env.AIDCP_PUBLISH_PIPELINE_TIMEOUT_MS ?? 1_080_000),
+    // 发布让位（change session-auto-resume-with-excursions）：发布真正开始 → 结束该账号浏览会话（让位、不续场）；
+    // 结束 → 经续场各闸起新浏览会话。runtimes 前向引用（声明在下方），closure 调用时已装配（同 commandSequencer.pusher 模式）。
+    onPublishStart: (accountId) => {
+      runtimes?.endSessionForAccount(accountId, 'publish_takeover');
+    },
+    onPublishEnd: (accountId) => {
+      runtimes?.resumeSessionForAccount(accountId);
+    },
   });
 
   // 事件总线
@@ -671,6 +691,10 @@ async function main(): Promise<void> {
     busFor: (session) => runtimes!.busFor(session),
     onHandshake: (session) => runtimes!.onHandshake(session),
     resolveController: (session) => runtimes?.controllerForSession(session),
+    // change account-real-nickname：握手携真实昵称时按已认证账号持久化（单写、非空才写）。
+    recordAccountNickname: async (accountId, nickname) => {
+      await accountStore?.setNickname?.(accountId, nickname);
+    },
   });
   const server = new EdgeCloudServer({ port, handler, onClose: (session) => runtimes?.onDisconnect(session) });
   edgeServer = server;
@@ -822,6 +846,9 @@ async function main(): Promise<void> {
       // 单场上限提供者（change session-limits-to-quota-layer）：按账号读单场时长 + 互动预算（热加载、后台改即生效）；
       // 缺行/非法回落写死默认（零回归）。每连接共享同一 store，按 currentAccountId 现读，不触风控状态单写。
       sessionLimitProvider: sessionConfigStore,
+      // 续场护栏 + 看门狗阈值提供者（change session-auto-resume-with-excursions）：按账号读，热加载。
+      // 注入即开启自动续场（生产）；缺行回落写死默认（rest 10% / 全天窗口 / 不限 / 看门狗轻推~2min·放弃 1h）。
+      resumeConfigProvider: resumeConfigStore,
     });
   };
 
@@ -1054,6 +1081,8 @@ async function main(): Promise<void> {
   const quotaConfigPanel = createQuotaConfigPanel({ store: quotaConfigStore });
   // 单场上限面板外观（change session-limits-to-quota-layer）：按账号时长 + 六项预算回显 + 写校验（非法整块拒）+ 非乐观回真态。
   const sessionLimitPanel = createSessionLimitPanel({ store: sessionConfigStore });
+  // 续场配置面板外观（change session-auto-resume-with-excursions）：按账号续场护栏 + 看门狗阈值回显 + 写校验 + 非乐观回真态。
+  const resumeConfigPanel = createResumeConfigPanel({ store: resumeConfigStore });
   // 角色 prompt 只读预览（change role-prompt-visibility）：借仅供预览的 RoleDispatcher 渲染真实 prompt。
   // 人设选择框（change prompt-preview-persona-selector）：给定 accountId 时把预览 dispatcher 当前账号临时切到
   // 该账号、同步渲染、finally 还原（previewPrompt 全程同步、单线程无交错，故原子安全）；hasPersona 用不回落的
@@ -1172,6 +1201,8 @@ async function main(): Promise<void> {
           quotaConfig: quotaConfigPanel,
           // 单场会话上限配置（change session-limits-to-quota-layer）。按账号时长 + 互动预算可改 + 热加载 + 非乐观回真态。
           sessionLimits: sessionLimitPanel,
+          // 自动续场护栏 + 看门狗阈值配置（change session-auto-resume-with-excursions）。按账号可改 + 热加载 + 非乐观回真态。
+          resumeConfig: resumeConfigPanel,
           // 角色 prompt 只读预览（change role-prompt-visibility）。纯读，无写路径。
           rolePromptPreview: rolePromptProvider,
           // 账号人设配置（change account-persona-config，stream F）。按账号编辑 + soul 校验 + 写非乐观回真态。

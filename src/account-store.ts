@@ -30,8 +30,12 @@ CREATE TABLE IF NOT EXISTS accounts (
   paused_at     TIMESTAMPTZ,
   machine_label TEXT,
   group_label   TEXT,
+  nickname      TEXT,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- 自愈式加列（change account-real-nickname，迁移 0020 文档伴随）：本仓无迁移执行器，
+-- 已存在的 accounts 表靠这条幂等 ALTER 在 init() 时补上 nickname 列（CREATE TABLE IF NOT EXISTS 不改既有表）。
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS nickname TEXT;
 INSERT INTO accounts (account_id, label) VALUES ('default', 'default')
 ON CONFLICT (account_id) DO NOTHING;
 `;
@@ -54,6 +58,11 @@ export interface AccountStore {
    * 仅插入、绝不覆盖已配置行（不动既有 status/label/标签/绑定）。
    */
   ensureAccount?(accountId: string): Promise<void>;
+  /**
+   * 写入账号的平台真实昵称（change account-real-nickname）：单写，按 account_id upsert。
+   * 实现拒空白（trim 为空即 no-op，绝不用空覆盖已有真名）；调用方只在拿到可证明属己的非空昵称时调。
+   */
+  setNickname?(accountId: string, nickname: string): Promise<void>;
   close?(): Promise<void>;
 }
 
@@ -125,6 +134,22 @@ export class PgAccountStore implements AccountStore {
     await this.pool.query(
       `INSERT INTO accounts (account_id, label) VALUES ($1, $1) ON CONFLICT (account_id) DO NOTHING`,
       [accountId],
+    );
+  }
+
+  /**
+   * 写入登录账号的平台真实昵称（change account-real-nickname）：单写、自愈 upsert。
+   * 拒空白（绝不用空覆盖已有真名）；防御性长度上限（小红书昵称远短于此，防异常拼接污染）。
+   * 行不存在时连带 seed（label=account_id），与 ensureAccount/setPaused 同款兜底。
+   */
+  async setNickname(accountId: string, nickname: string): Promise<void> {
+    const clean = nickname.trim();
+    if (!clean) return;
+    const value = clean.length > 64 ? clean.slice(0, 64) : clean;
+    await this.pool.query(
+      `INSERT INTO accounts (account_id, label, nickname) VALUES ($1, $1, $2)
+       ON CONFLICT (account_id) DO UPDATE SET nickname = EXCLUDED.nickname`,
+      [accountId, value],
     );
   }
 

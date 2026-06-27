@@ -28,6 +28,8 @@ const PG_UNDEFINED_TABLE = '42P01';
 export interface PanelAccount {
   accountId: string;
   label: string | null;
+  /** 登录账号平台真实昵称（change account-real-nickname；未采到为 null，console 回落 label/accountId）。 */
+  nickname: string | null;
   platform: string;
   groupLabel: string | null;
   machineLabel: string | null;
@@ -137,6 +139,7 @@ export interface PgPanelStoreOptions {
 interface AccountJoinRow {
   account_id: string;
   label: string | null;
+  nickname: string | null;
   platform: string;
   group_label: string | null;
   machine_label: string | null;
@@ -154,6 +157,7 @@ function toAccount(r: AccountJoinRow): PanelAccount {
   return {
     accountId,
     label: r.label,
+    nickname: r.nickname,
     platform: r.platform,
     groupLabel: r.group_label,
     machineLabel: r.machine_label,
@@ -169,7 +173,7 @@ function toAccount(r: AccountJoinRow): PanelAccount {
 }
 
 const ACCOUNT_SELECT = `
-  SELECT a.account_id, a.label, a.platform, a.group_label, a.machine_label,
+  SELECT a.account_id, a.label, a.nickname, a.platform, a.group_label, a.machine_label,
          a.status AS operator_status, a.paused_at,
          r.status AS risk_status, r.quota_level AS risk_quota_level, r.signal_count,
          (pc.account_id IS NOT NULL AND btrim(pc.persona) <> '') AS persona_bound
@@ -286,11 +290,12 @@ export class PgPanelStore implements PanelStoreReader {
       published_at: Date;
       account_id: string;
       account_label: string | null;
+      account_nickname: string | null;
       content: string | null;
       post_url: string | null;
     }>(
       `SELECT pl.id, pl.title, pl.status, pl.platform_post_id, pl.published_at,
-              pl.account_id, a.label AS account_label, pl.content, pl.post_url
+              pl.account_id, a.label AS account_label, a.nickname AS account_nickname, pl.content, pl.post_url
        FROM publish_log pl
        LEFT JOIN accounts a ON a.account_id = pl.account_id
        ${where} ORDER BY pl.published_at DESC LIMIT $${params.length}`,
@@ -303,7 +308,8 @@ export class PgPanelStore implements PanelStoreReader {
       platformPostId: r.platform_post_id,
       publishedAt: r.published_at.getTime(),
       accountId: r.account_id,
-      accountLabel: r.account_label ?? r.account_id,
+      // 真名优先（change account-real-nickname）：nickname → label → account_id，绝不显示假名。
+      accountLabel: r.account_nickname ?? r.account_label ?? r.account_id,
       content: r.content,
       postUrl: r.post_url,
     }));

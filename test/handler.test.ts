@@ -67,6 +67,54 @@ test('hello → welcome，并记录 edgeId 到会话', async () => {
   assert.equal(s.app, 'xhs');
 });
 
+// ── change account-real-nickname：hello 携真实昵称 → 按已认证账号持久化（单写、非空、不阻塞握手） ──
+
+const silent = { log() {}, warn() {}, error() {} };
+const tick = () => new Promise((r) => setImmediate(r)); // 让 fire-and-forget 的微任务落地
+
+test('hello 携真实昵称 → 按 session.accountId 持久化（trim 后）', async () => {
+  const calls: { accountId: string; nickname: string }[] = [];
+  const h = new DefaultMessageHandler({
+    planner: new SimplePlanner(), llm: dummyLlm, cache: memStore(), clock: fixedClock, eventBus: new EventBus(),
+    recordAccountNickname: async (accountId, nickname) => { calls.push({ accountId, nickname }); },
+  });
+  const s: EdgeSession = { sessionId: 'sN' };
+  const res = await h.handle(
+    makeEnvelope('hello', 'h1', 1, { edgeId: 'e1', accountId: 'acc-9', nickname: '  工程师大白 ' }),
+    s,
+  );
+  assert.equal(res?.type, 'welcome');
+  await tick();
+  assert.deepEqual(calls, [{ accountId: 'acc-9', nickname: '工程师大白' }]);
+});
+
+test('hello 无/空白昵称 → 不持久化（诚实空，不写）', async () => {
+  const calls: unknown[] = [];
+  const deps = {
+    planner: new SimplePlanner(), llm: dummyLlm, cache: memStore(), clock: fixedClock, eventBus: new EventBus(),
+    recordAccountNickname: async (a: string, n: string) => { calls.push([a, n]); },
+  };
+  const h = new DefaultMessageHandler(deps);
+  await h.handle(makeEnvelope('hello', 'h1', 1, { edgeId: 'e1', accountId: 'acc-9' }), { sessionId: 's1' });
+  await h.handle(makeEnvelope('hello', 'h2', 1, { edgeId: 'e1', accountId: 'acc-9', nickname: '   ' }), { sessionId: 's2' });
+  await tick();
+  assert.equal(calls.length, 0);
+});
+
+test('hello 持久化昵称失败不阻塞握手（仍回 welcome、不抛）', async () => {
+  const h = new DefaultMessageHandler({
+    planner: new SimplePlanner(), llm: dummyLlm, cache: memStore(), clock: fixedClock, eventBus: new EventBus(),
+    logger: silent,
+    recordAccountNickname: async () => { throw new Error('db down'); },
+  });
+  const res = await h.handle(
+    makeEnvelope('hello', 'h1', 1, { edgeId: 'e1', accountId: 'acc-9', nickname: '工程师大白' }),
+    { sessionId: 's1' },
+  );
+  assert.equal(res?.type, 'welcome');
+  await tick(); // catch 落地，无未捕获 rejection
+});
+
 test('ping → pong', async () => {
   const h = makeHandler(dummyLlm, memStore());
   const res = await h.handle(makeEnvelope('ping', 'p1', 1, {}), session);

@@ -110,6 +110,8 @@ export interface HelloPayload {
   machineLabel?: string;
   /** 远程桌面 / 可达地址（如 RDP/VNC 地址或跳板说明），用于人工远程处置 */
   remoteAddr?: string;
+  /** 当前登录账号自身的平台真实昵称（change account-real-nickname，随握手带回）；诚实失败时省略，绝不用 accountId/label 伪造、绝不错配被浏览作者昵称。 */
+  nickname?: string;
 }
 
 export interface WelcomePayload {
