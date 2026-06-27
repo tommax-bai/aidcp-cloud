@@ -787,6 +787,11 @@ export class RoleDispatcher {
     if (!this.canAutoResume(account)) return; // 护栏不过：诚实不续
     this.dailyTally(account, this.clock()).sessions += 1;
     this.tryStartSession();
+    // 续场重开后主动重驱边端（change restore-auto-resume A②）：边端浏览循环在 session.end 后已停、
+    // 不会自发重报 page.cards，故下发一次滚动唤醒（复用既有 scroll→page.scroll 通道，不新增协议；
+    // 边端循环已停时据此重启）。仅续场路径发：fresh start 边端自驱、且本人昵称采集期 browseSuspended
+    // 会经 sendCommand 软暂停闸自动扣住此滚动，二者不相扰。idle 看门狗的 nudge 仍作 ~2min 兜底。
+    if (this.sessionActive) this.sendCommand({ action: 'scroll', reason: 'resume_redrive' });
   }
 
   /** 续场闸：调度开关 + 人设（canStartSession）+ 风控状态 + 活跃时段窗口 + 每日上限。 */
@@ -1078,9 +1083,12 @@ export class RoleDispatcher {
       // “没价值”判定被双发两条 scroll：第二条落在尚未判定的新页上、把它（可能含 AI 卡）直接滚过，
       // 且污染了“连续滚 N 次转搜索”的阈值。删除以恢复单一翻页决策者。
       this.eventBus.on('session.should_end', (payload) => {
+        // 仅发结束命令给边端。结束流程（含正常结束的续场武装）由监测体注入的 onSessionEnd 回调
+        // （见构造处 :532，携 autoResumeEligible:true）唯一负责——此处 MUST NOT 再调 endSession。
+        // 否则一次监测体结束会被双调：triggerEnd 先 emit（本处理器同步跑完 endSession#1 武装续场计时器），
+        // 后走 onSessionEnd（endSession#2 在 sessionActive 守卫前无条件 cancelRestTimer 清掉刚武装的计时器、
+        // 随即因 sessionActive=false 早退不再武装）→ 续场永不触发（change restore-auto-resume A①）。
         this.sendCommand({ action: 'session.end', reason: payload.reason });
-        // 监测体判结束（时长/动作数/配额/idle）= 正常结束 → 可自动续场（歇 N% 后续刷）。
-        this.endSession(payload.reason, { autoResumeEligible: true });
       }),
 
       // —— 通知巡视：角色意图 → 边缘命令（均为 excursion 来源，巡视暂停期照常放行）——
