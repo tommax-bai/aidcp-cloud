@@ -13,6 +13,7 @@ import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { RoleName } from '../event-bus/types.js';
 import { DEFAULT_SESSION_DURATION_MS } from '../risk/session-limits.js';
+import { DEFAULT_IDLE_END_MS, DEFAULT_IDLE_NUDGE_MS } from '../risk/resume-limits.js';
 
 export interface SessionMonitorRoleOptions extends RoleOptions {
   maxDurationMs?: number;
@@ -30,9 +31,13 @@ export interface SessionMonitorRoleOptions extends RoleOptions {
   getRemainingBudget: () => { likes: number; collects: number; follows: number; searches: number };
   clock?: () => number;
   // idle 看门狗（wall-clock）：超 idleNudgeMs 无活动→发恢复 nudge；超 idleEndMs→结束会话。
-  // 默认 N=130s/M=240s：N 须 > 详情页停留上限（pacing capMs=90s）避免正常长停留中途误触。
+  // 默认 N≈130s/M=1h：N 须 > 详情页停留上限（pacing capMs=90s）避免正常长停留中途误触。
+  // 显式 idleNudgeMs/idleEndMs 为测试/显式覆盖；缺省经 getIdleNudgeMs/getIdleEndMs 按账号现读（热加载）。
   idleNudgeMs?: number;
   idleEndMs?: number;
+  /** 统一看门狗阈值解析口（change session-auto-resume-with-excursions）：调度器注入按账号读 ResumeConfigProvider 的 thunk（热加载）。 */
+  getIdleNudgeMs?: () => number;
+  getIdleEndMs?: () => number;
   idleTickMs?: number;
   // 可注入定时器（测试用桩 + 手动调 checkIdle）；生产用真 setInterval。
   setIntervalFn?: (fn: () => void, ms: number) => unknown;
@@ -49,9 +54,19 @@ export class SessionMonitorRole extends BaseRole {
   private readonly getMaxDurationMs?: () => number;
   private readonly maxActions: number;
   private readonly clock: () => number;
-  private readonly idleNudgeMs: number;
-  private readonly idleEndMs: number;
+  /** 显式看门狗阈值覆盖（测试/显式注入）；缺省经 getIdle*Ms 解析（按账号读，热加载）；再缺回落写死默认。 */
+  private readonly idleNudgeMsOverride?: number;
+  private readonly idleEndMsOverride?: number;
+  private readonly getIdleNudgeMs?: () => number;
+  private readonly getIdleEndMs?: () => number;
   private readonly idleTickMs: number;
+  /**
+   * 可暂停时钟（change session-auto-resume-with-excursions）：暂停期只延期**时限/动作数/配额**判定
+   * （checkSession early-return），**不冻空闲看门狗**（巡视上报刷新 idle、卡死巡视由看门狗兜底）。
+   * 多原因引用计数（非布尔）正确处理嵌套/并发；末次解除时前移 startedAt 排除暂停窗口。
+   */
+  private pauseReasons = new Set<string>();
+  private pauseStartedAt = 0;
   private readonly setIntervalFn: (fn: () => void, ms: number) => unknown;
   private readonly clearIntervalFn: (handle: unknown) => void;
   private unsubscribers: (() => void)[] = [];
@@ -69,8 +84,10 @@ export class SessionMonitorRole extends BaseRole {
     this.getMaxDurationMs = options.getMaxDurationMs;
     this.maxActions = options.maxActions ?? 60;
     this.clock = options.clock ?? Date.now;
-    this.idleNudgeMs = options.idleNudgeMs ?? 130_000;
-    this.idleEndMs = options.idleEndMs ?? 240_000;
+    this.idleNudgeMsOverride = options.idleNudgeMs;
+    this.idleEndMsOverride = options.idleEndMs;
+    this.getIdleNudgeMs = options.getIdleNudgeMs;
+    this.getIdleEndMs = options.getIdleEndMs;
     this.idleTickMs = options.idleTickMs ?? 5_000;
     this.setIntervalFn = options.setIntervalFn ?? ((fn, ms) => setInterval(fn, ms));
     this.clearIntervalFn =
@@ -82,6 +99,9 @@ export class SessionMonitorRole extends BaseRole {
     this.actionCount = 0;
     this.lastActivityAt = this.clock();
     this.lastNudgeAt = 0;
+    // 暂停态绝不跨场残留（每场重订阅清空，杜绝时钟永冻）。
+    this.pauseReasons.clear();
+    this.pauseStartedAt = 0;
     this.unsubscribers.push(
       this.eventBus.on('action.completed', () => this.handleActionCompleted()),
     );
@@ -112,6 +132,47 @@ export class SessionMonitorRole extends BaseRole {
     }
     for (const unsub of this.unsubscribers) unsub();
     this.unsubscribers = [];
+    // 拆订阅亦清暂停态（防对已结束会话误触/残留）。
+    this.pauseReasons.clear();
+    this.pauseStartedAt = 0;
+  }
+
+  /**
+   * 暂停时钟（change session-auto-resume-with-excursions）：会话内 excursion（如通知巡视）期间调用，
+   * 延期时限/动作数/配额判定（checkSession early-return），**不冻空闲看门狗**。多原因引用计数：
+   * 0→1 转换记暂停窗口起点；同 reason 幂等。
+   */
+  pauseClock(reason: string): void {
+    if (this.pauseReasons.size === 0) this.pauseStartedAt = this.clock();
+    this.pauseReasons.add(reason);
+  }
+
+  /**
+   * 恢复时钟：删该 reason；陌生 token no-op（多租户/重启错配安全）。末次（size→0）解除时前移 startedAt
+   * 排除整个暂停窗口（= 排除 excursion 耗时），并补调一次 checkSession 把「延期的结束」补发出来。
+   */
+  resumeClock(reason: string): void {
+    if (!this.pauseReasons.has(reason)) return;
+    this.pauseReasons.delete(reason);
+    if (this.pauseReasons.size > 0) return;
+    this.startedAt += this.clock() - this.pauseStartedAt;
+    this.pauseStartedAt = 0;
+    this.checkSession();
+  }
+
+  /** 时限/动作数/配额判定是否处于暂停。 */
+  private clockPaused(): boolean {
+    return this.pauseReasons.size > 0;
+  }
+
+  /** 看门狗恢复轻推阈值（毫秒）：显式覆盖优先；否则按账号现读（热加载）；缺省回落写死默认。 */
+  private effectiveIdleNudgeMs(): number {
+    return this.idleNudgeMsOverride ?? this.getIdleNudgeMs?.() ?? DEFAULT_IDLE_NUDGE_MS;
+  }
+
+  /** 看门狗放弃结束阈值（毫秒）：显式覆盖优先；否则按账号现读（热加载）；缺省回落写死默认。 */
+  private effectiveIdleEndMs(): number {
+    return this.idleEndMsOverride ?? this.getIdleEndMs?.() ?? DEFAULT_IDLE_END_MS;
   }
 
   /** 获取当前会话统计（供测试/调试用） */
@@ -143,17 +204,25 @@ export class SessionMonitorRole extends BaseRole {
     if (this.intervalHandle === undefined) return;
     const now = this.clock();
     const idle = now - this.lastActivityAt;
-    if (idle >= this.idleEndMs) {
+    // 空闲看门狗**不受 clockPaused 影响**（巡视期保持活着当兜底，见 spec browse-loop-resilience）。
+    // 两段阈值每 tick 现读（热加载）：放弃结束默认 1h、恢复轻推 ~2min。
+    const idleEndMs = this.effectiveIdleEndMs();
+    const idleNudgeMs = this.effectiveIdleNudgeMs();
+    if (idle >= idleEndMs) {
       this.triggerEnd(`idle ${(idle / 1000) | 0}s 无活动，看门狗终止会话`);
       return;
     }
-    if (idle >= this.idleNudgeMs && now - this.lastNudgeAt >= this.idleNudgeMs) {
+    if (idle >= idleNudgeMs && now - this.lastNudgeAt >= idleNudgeMs) {
       this.lastNudgeAt = now;
       this.emit('session.idle_nudge', { reason: 'idle_recover_nudge', ts: now });
     }
   }
 
   private checkSession(): void {
+    // 暂停期延期一切结束条件（时长/动作数/配额）——excursion（巡视）进行中不结束、不打断；
+    // resumeClock 末次解除时会补调本方法，把延期的结束补发出来。
+    if (this.clockPaused()) return;
+
     // 动作数超限
     if (this.actionCount >= this.maxActions) {
       this.triggerEnd(`动作数 ${this.actionCount} 已达上限 ${this.maxActions}`);

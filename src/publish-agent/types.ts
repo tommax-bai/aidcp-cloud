@@ -360,4 +360,11 @@ export interface OrchestratorDeps {
   clock?: () => number;
   idGen?: () => string;
   pipelineTimeoutMs?: number;
+  /**
+   * 发布让位回调（change session-auto-resume-with-excursions）。发布真正开始时调 onPublishStart、
+   * 走完任一终止路径（成功/跳过/超时/中止/异常）时经 finally 调 onPublishEnd。由 server 接到连接注册表：
+   * start → 结束该账号浏览会话（让位、不续场）；end → 经续场各闸起新浏览会话。被忽略的触发（已 running）不调。
+   */
+  onPublishStart?: (accountId: string) => void;
+  onPublishEnd?: (accountId: string) => void;
 }

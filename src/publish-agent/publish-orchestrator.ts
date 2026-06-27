@@ -16,12 +16,17 @@ export class PublishOrchestrator {
   private readonly clock: () => number;
   private readonly idGen: () => string;
   private readonly pipelineTimeoutMs: number;
+  /** 发布让位回调（change session-auto-resume-with-excursions）：发布真正开始/结束时通知 server 让位/续场。 */
+  private readonly onPublishStart?: (accountId: string) => void;
+  private readonly onPublishEnd?: (accountId: string) => void;
 
   constructor(deps?: OrchestratorDeps) {
     this.logger = deps?.logger ?? console;
     this.clock = deps?.clock ?? Date.now;
     this.idGen = deps?.idGen ?? (() => Math.random().toString(36).slice(2, 10));
     this.pipelineTimeoutMs = deps?.pipelineTimeoutMs ?? 120000; // 2分钟默认超时
+    this.onPublishStart = deps?.onPublishStart;
+    this.onPublishEnd = deps?.onPublishEnd;
   }
 
   /** 注册角色 */
@@ -46,6 +51,11 @@ export class PublishOrchestrator {
     const runId = this.idGen();
     this.logger.log(`[PublishOrchestrator] starting pipeline run=${runId}`);
     this.status = 'running';
+
+    // 发布让位：发布真正开始 → 结束该账号并发浏览会话（让位、不续场），使发布独占边缘。
+    // 被忽略的触发（上面 status==='running' 早退）不到此，故不误结束会话。
+    const publishAccountId = triggerInput.accountId ?? 'default';
+    this.onPublishStart?.(publishAccountId);
 
     // 创建新的 context
     const context = new PipelineContext<PipelineFields>();
@@ -79,6 +89,8 @@ export class PublishOrchestrator {
       };
     } finally {
       this.activeContext = null;
+      // 发布让位结束：无论成功/跳过/超时/中止/异常，均经此唯一保证终止点 → 经续场各闸起新浏览会话。
+      this.onPublishEnd?.(publishAccountId);
     }
   }
 

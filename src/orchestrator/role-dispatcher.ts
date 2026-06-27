@@ -63,6 +63,12 @@ import {
   type SessionInteractionBudget,
   type SessionLimitProvider,
 } from '../risk/session-limits.js';
+import {
+  DEFAULT_IDLE_END_MS,
+  DEFAULT_IDLE_NUDGE_MS,
+  isWithinActiveWindow,
+  type ResumeConfigProvider,
+} from '../risk/resume-limits.js';
 import type { RiskStatus } from '../risk/types.js';
 import type { ConceptPool } from '../event-bus/types.js';
 import type { NotificationItem } from '../comm/protocol.js';
@@ -158,6 +164,18 @@ export interface RoleDispatcherOptions {
    * 与改造前逐位一致（严格零回归）。只读、不触风控状态单写、不经协议。
    */
   sessionLimitProvider?: SessionLimitProvider;
+  /**
+   * 自动续场护栏 + 看门狗阈值提供者（change session-auto-resume-with-excursions）：按账号给出
+   * rest_ratio / 活跃时段窗口 / 每日上限 / 看门狗两阈值（热加载、后台改即生效）。
+   * **未注入 → 自动续场特性关（保持旧行为：单场结束即停、不续）**；看门狗回落写死默认（轻推~2min / 放弃 1h）。
+   * 只读、不触风控状态单写、不经协议。
+   */
+  resumeConfigProvider?: ResumeConfigProvider;
+  /** 续场休息计时器注入（测试桩）；生产用真 setTimeout/clearTimeout（unref）。 */
+  setTimeoutFn?: (fn: () => void, ms: number) => unknown;
+  clearTimeoutFn?: (handle: unknown) => void;
+  /** 休息时长抖动用随机源（测试可注入定值）；缺省 Math.random。 */
+  randomFn?: () => number;
 }
 
 export interface EdgeCommand {
@@ -221,6 +239,17 @@ export class RoleDispatcher {
   private readonly cooldownGate?: ActionCooldownGate;
   /** 单场上限提供者（按账号读单场时长 + 互动预算，热加载）；缺省回落写死默认。只读。 */
   private readonly sessionLimitProvider?: SessionLimitProvider;
+  /** 续场护栏 + 看门狗阈值提供者（按账号读，热加载）；未注入 → 自动续场关、看门狗回落默认。只读。 */
+  private readonly resumeConfigProvider?: ResumeConfigProvider;
+  private readonly setTimeoutFn: (fn: () => void, ms: number) => unknown;
+  private readonly clearTimeoutFn: (handle: unknown) => void;
+  private readonly randomFn: () => number;
+  /** 续场休息计时器句柄（每连接私有、unref，只重开本连接会话；绝不广播）。 */
+  private restTimer: unknown;
+  /** 每账号当日自动续场计数（场数 + 累计浏览毫秒），按本地日界重置。 */
+  private readonly dailyResume = new Map<string, { dayKey: string; sessions: number; browseMs: number }>();
+  /** SessionMonitor 引用（供 excursion → pauseClock/resumeClock；setup 时捕获）。 */
+  private sessionMonitor?: SessionMonitorRole;
   /** 已下发占坑、待回执释放的互动键（按动作）：action.completed 据此 complete / releaseFailed。 */
   private readonly pendingInteractionKeys = new Map<GuardAction, string>();
   private readonly notifyComments?: (items: NotificationItem[]) => Promise<void>;
@@ -271,6 +300,10 @@ export class RoleDispatcher {
     this.interactionGuard = options.interactionGuard;
     this.cooldownGate = options.cooldownGate;
     this.sessionLimitProvider = options.sessionLimitProvider;
+    this.resumeConfigProvider = options.resumeConfigProvider;
+    this.setTimeoutFn = options.setTimeoutFn ?? ((fn, ms) => setTimeout(fn, ms));
+    this.clearTimeoutFn = options.clearTimeoutFn ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
+    this.randomFn = options.randomFn ?? Math.random;
     this.notifyComments = options.notifyComments;
     this.conceptStore = options.conceptStore;
     this.searchLimiter = new SearchFrequencyLimiter(options.searchLimiterOptions);
@@ -465,9 +498,13 @@ export class RoleDispatcher {
       // SessionMonitorRole 不再直读人设，复用同一路径，使后台改即时生效、缺省回落写死默认。
       new SessionMonitorRole({
         ...commonOptions,
-        onSessionEnd: (reason: string) => this.endSession(reason),
+        // 监测体判结束 = 正常结束（时长/动作数/配额/idle）→ 可续场（与运营 stop/暂停/发布让位区分）。
+        onSessionEnd: (reason: string) => this.endSession(reason, { autoResumeEligible: true }),
         getRemainingBudget: () => this.budget,
         getMaxDurationMs: () => this.maxDurationMs(),
+        // 看门狗两段阈值按账号现读（热加载）；未注入续场提供者 → 回落写死默认（轻推~2min / 放弃 1h）。
+        getIdleNudgeMs: () => this.resumeConfigProvider?.idleNudgeMsFor(this.currentAccountId) ?? DEFAULT_IDLE_NUDGE_MS,
+        getIdleEndMs: () => this.resumeConfigProvider?.idleEndMsFor(this.currentAccountId) ?? DEFAULT_IDLE_END_MS,
         clock: this.clock,
       }),
       // —— 通知巡视（消息查看）12 角色：检测→准入→暂停→开首页→分诊→按类浏览→分类→去重→发飞书→返回→恢复 ——
@@ -490,6 +527,11 @@ export class RoleDispatcher {
       const sink = this.conceptStore;
       this.roles.push(new ConceptExtractorRole({ ...commonOptions, conceptStore: sink }));
     }
+
+    // 捕获 SessionMonitor 引用：供 excursion（巡视）起止 → 暂停/恢复其时钟（唯一实例）。
+    this.sessionMonitor = this.roles.find((r) => r instanceof SessionMonitorRole) as
+      | SessionMonitorRole
+      | undefined;
 
     // 角色订阅 / 指令翻译 / Edge 事件接线**推迟到会话激活**（startSession / restartSession）才进行——
     // 多租户（multi-account-node-support）：setup() 仅构造角色 + 注册「边缘 hello → 启动闸」入口监听，
@@ -562,6 +604,8 @@ export class RoleDispatcher {
 
   /** 启动会话：接线角色 / 指令翻译 / Edge 事件（看门狗在此随 SessionMonitor.subscribe 启动），再发 feed.entered。 */
   startSession(): void {
+    // 会话开始 → 取消任何待发休息计时器（已重开，无需续场）。
+    this.cancelRestTimer();
     // 幂等：已活跃则先拆旧订阅，避免重复接线（正常路径下 setup 后首次启动无需拆除）。
     if (this.sessionActive) {
       this.roles.forEach((r) => r.unsubscribe());
@@ -617,6 +661,8 @@ export class RoleDispatcher {
    * 连接时刻起算，超时结束后下次连接也能重新驱动。
    */
   restartSession(): void {
+    // 会话重开 → 取消待发休息计时器（边缘先自连重连即走此路，竞态由此化解）。
+    this.cancelRestTimer();
     // 若仍活跃，先拆除旧订阅，避免重复注册
     if (this.sessionActive) {
       this.roles.forEach((r) => r.unsubscribe());
@@ -645,14 +691,119 @@ export class RoleDispatcher {
     console.log('[RoleDispatcher] 边缘 hello → 会话已重置并重启');
   }
 
-  /** 结束会话 */
-  endSession(reason?: string): void {
+  /**
+   * 结束会话。
+   * @param opts.autoResumeEligible 本次结束是否「正常结束」可自动续场（时长/动作数/配额/idle）。
+   *   运营 stop / 验证码-风控暂停 / 掉线 / 发布让位 → 缺省 false（不续）。
+   */
+  endSession(reason?: string, opts?: { autoResumeEligible?: boolean }): void {
+    // 不论是否活跃，先取消任何待发休息计时器（运营 stop / 掉线 / 发布让位都不该残留续场）。
+    this.cancelRestTimer();
     if (!this.sessionActive) return;
+    const account = this.currentAccountId;
+    // 记当日累计浏览时长（含 excursion，仅供每日上限近似）。
+    const elapsed = this.clock() - this.sessionStartedAt;
+    if (elapsed > 0) this.dailyTally(account, this.clock()).browseMs += elapsed;
     this.sessionActive = false;
     this.roles.forEach((r) => r.unsubscribe());
     for (const unsub of this.commandUnsubscribers) unsub();
     this.commandUnsubscribers = [];
     console.log(`[RoleDispatcher] 会话结束: ${reason ?? 'manual'}`);
+    // 仅「正常结束」且续场特性已开（注入提供者）才安排休息+续场。
+    if (opts?.autoResumeEligible) this.armRestTimer(account);
+  }
+
+  // ─── 自动续场（change session-auto-resume-with-excursions）─────────────────────
+  // 单场正常结束 → 歇 rest（= 单场时长 × rest_ratio，叠抖动）→ 过续场各闸 → tryStartSession。
+  // 休息计时器每连接私有、unref、只重开本连接会话，绝不广播；任何 (re)start / endSession 即取消。
+
+  private cancelRestTimer(): void {
+    if (this.restTimer !== undefined) {
+      this.clearTimeoutFn(this.restTimer);
+      this.restTimer = undefined;
+    }
+  }
+
+  /** 安排休息计时器。未注入续场提供者 → 特性关、保持旧行为（不续）。 */
+  private armRestTimer(account: string): void {
+    this.cancelRestTimer();
+    if (!this.resumeConfigProvider) return; // 特性未开 → 不续（零回归）。
+    const ratio = this.resumeConfigProvider.restRatioFor(account);
+    const base = this.maxDurationMs() * ratio; // maxDurationMs 按 currentAccountId 读
+    const restMs = Math.max(0, Math.round(base * this.restJitter()));
+    this.restTimer = this.setTimeoutFn(() => {
+      this.restTimer = undefined;
+      this.onRestElapsed(account);
+    }, restMs);
+    (this.restTimer as { unref?: () => void } | undefined)?.unref?.();
+  }
+
+  /** 休息到点：过续场各闸 → 续场。账号已切换 → 放弃（重连到别的账号）。 */
+  private onRestElapsed(account: string): void {
+    if (this.currentAccountId !== account) return; // 重连到别的账号，放弃
+    this.doAutoResume(account);
+  }
+
+  /**
+   * 续场（发布让位结束后由连接注册表按账号调用）：过续场各闸（含活跃时段/每日上限/风控）→ 起新场。
+   * 与休息到点共用同一闸；闸不过（如发布发生在活跃窗口外）→ 诚实不续，等边缘重连/下一窗口。
+   */
+  tryAutoResume(): void {
+    this.doAutoResume(this.currentAccountId);
+  }
+
+  private doAutoResume(account: string): void {
+    if (this.sessionActive) return; // 边缘已先自连重开
+    if (!this.canAutoResume(account)) return; // 护栏不过：诚实不续
+    this.dailyTally(account, this.clock()).sessions += 1;
+    this.tryStartSession();
+  }
+
+  /** 续场闸：调度开关 + 人设（canStartSession）+ 风控状态 + 活跃时段窗口 + 每日上限。 */
+  private canAutoResume(account: string): boolean {
+    if (!this.canStartSession()) return false; // dispatchActive + 人设绑定
+    const risk = this.getRiskStatus();
+    if (risk === 'restricted' || risk === 'frozen') return false; // 撞风控不续
+    if (!this.resumeConfigProvider) return false; // 无提供者 = 特性关
+    const now = this.clock();
+    const win = this.resumeConfigProvider.activeWindowFor(account);
+    if (!isWithinActiveWindow(this.minuteOfDay(now), win)) return false; // 过活跃时段窗口
+    const caps = this.resumeConfigProvider.dailyCapsFor(account);
+    const tally = this.dailyTally(account, now);
+    if (caps.maxSessions > 0 && tally.sessions >= caps.maxSessions) return false; // 每日场数到顶
+    if (caps.maxMinutes > 0 && tally.browseMs >= caps.maxMinutes * 60_000) return false; // 每日时长到顶
+    return true;
+  }
+
+  /** 取/重置某账号当日续场计数（按本地日界重置）。 */
+  private dailyTally(account: string, now: number): { dayKey: string; sessions: number; browseMs: number } {
+    const dayKey = this.localDayKey(now);
+    let t = this.dailyResume.get(account);
+    if (!t || t.dayKey !== dayKey) {
+      t = { dayKey, sessions: 0, browseMs: 0 };
+      this.dailyResume.set(account, t);
+    }
+    return t;
+  }
+
+  private localDayKey(now: number): string {
+    const d = new Date(now);
+    return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+  }
+
+  private minuteOfDay(now: number): number {
+    const d = new Date(now);
+    return d.getHours() * 60 + d.getMinutes();
+  }
+
+  /** 休息时长抖动（lognormal，中心 1.0），使每次休息不等长（拟人）。randomFn 可注入定值（测试）。 */
+  private restJitter(): number {
+    // Box–Muller 取标准正态 → exp(σ·z)，σ 取 0.25（约 ±25% 一档）。clamp 防极端。
+    const u1 = Math.max(1e-9, this.randomFn());
+    const u2 = this.randomFn();
+    const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+    const mult = Math.exp(0.25 * z);
+    return Math.min(2, Math.max(0.5, mult));
   }
 
   // ─── Edge 数据注入接口 ────────────────────────────────────────
@@ -884,7 +1035,8 @@ export class RoleDispatcher {
       // 且污染了“连续滚 N 次转搜索”的阈值。删除以恢复单一翻页决策者。
       this.eventBus.on('session.should_end', (payload) => {
         this.sendCommand({ action: 'session.end', reason: payload.reason });
-        this.endSession(payload.reason);
+        // 监测体判结束（时长/动作数/配额/idle）= 正常结束 → 可自动续场（歇 N% 后续刷）。
+        this.endSession(payload.reason, { autoResumeEligible: true });
       }),
 
       // —— 通知巡视：角色意图 → 边缘命令（均为 excursion 来源，巡视暂停期照常放行）——
@@ -917,6 +1069,13 @@ export class RoleDispatcher {
 
   private setupEdgeEventSubscriptions(): void {
     this.commandUnsubscribers.push(
+      // 通知巡视（excursion）起止 → 暂停/恢复会话时钟（change session-auto-resume-with-excursions）：
+      // 巡视进行中延期时限/动作数/配额判定（不打断巡视），结束时把巡视耗时从单场时长扣除。
+      // 只暂停时限判定，**不冻空闲看门狗**（巡视上报自喂、卡死巡视由看门狗兜底）。token 用常量 'patrol'
+      //（gatekeeper 以 ctx.excursionActive 闸禁并发巡视，全程至多一个活动巡视，常量 token 天然正确）。
+      this.eventBus.on('excursion.requested', () => this.sessionMonitor?.pauseClock('patrol')),
+      this.eventBus.on('excursion.ended', () => this.sessionMonitor?.resumeClock('patrol')),
+
       // Edge 上报可见卡片 → 更新数据并触发评估
       this.eventBus.on('page.cards.arrived', (payload) => {
         this.updateVisibleCards(payload.cards);

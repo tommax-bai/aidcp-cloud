@@ -158,6 +158,36 @@ export class ConnectionRuntimeRegistry {
     for (const rt of this.bySession.values()) rt.dispatcher.endSession(reason);
   }
 
+  /**
+   * 发布让位（change session-auto-resume-with-excursions）：发布触发时结束该账号当前浏览会话，
+   * 使发布独占边缘。结束标记不可续场（不触发休息）；无活跃会话则 no-op。返回匹配的连接数。
+   */
+  endSessionForAccount(accountId: string, reason?: string): number {
+    let n = 0;
+    for (const rt of this.bySession.values()) {
+      if (rt.accountId === accountId) {
+        rt.dispatcher.endSession(reason);
+        n++;
+      }
+    }
+    return n;
+  }
+
+  /**
+   * 发布让位结束 → 该账号起一场全新浏览会话（经续场各闸：调度开关/人设/活跃时段/每日上限/风控）。
+   * 闸不过则诚实不起（如发布发生在活跃窗口外）。返回匹配的连接数。
+   */
+  resumeSessionForAccount(accountId: string): number {
+    let n = 0;
+    for (const rt of this.bySession.values()) {
+      if (rt.accountId === accountId) {
+        rt.dispatcher.tryAutoResume();
+        n++;
+      }
+    }
+    return n;
+  }
+
   /** 当前活跃（已 startSession）的连接数。 */
   activeCount(): number {
     let n = 0;

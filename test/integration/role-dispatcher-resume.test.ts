@@ -1,0 +1,161 @@
+/**
+ * change session-auto-resume-with-excursions — 自动续场（task 3.5）。
+ * 验证 RoleDispatcher：正常结束 arm 休息计时器（≈单场×rest_ratio）、运营停不 arm、
+ * 计时器到点过续场各闸（风控/每日上限）→ 续场，闸不过诚实不续。
+ * 另含活跃时段窗口纯函数测试（TZ 无关）。
+ */
+
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { RoleDispatcher } from '../../src/orchestrator/role-dispatcher.js';
+import { isWithinActiveWindow } from '../../src/risk/resume-limits.js';
+import type { Soul } from '../../src/soul/types.js';
+import type { ResumeConfigProvider } from '../../src/risk/resume-limits.js';
+import type { RiskStatus } from '../../src/risk/types.js';
+
+const mockSoul: Soul = {
+  identity: { name: 'B', role: 'r', background: 'b', tone: 't' },
+  interests: { primary: ['AI'], secondary: [], seed_keywords: ['x'] },
+};
+
+const fixedBudget = () => ({ likes: 10, collects: 5, follows: 3, searches: 5, comments: 2, comment_likes: 3 });
+
+function makeProvider(over?: Partial<ResumeConfigProvider>): ResumeConfigProvider {
+  return {
+    restRatioFor: () => 0.1,
+    activeWindowFor: () => ({ startMin: 0, endMin: 1440 }), // 全天不限
+    dailyCapsFor: () => ({ maxSessions: 0, maxMinutes: 0 }), // 不限
+    idleNudgeMsFor: () => 130_000,
+    idleEndMsFor: () => 3_600_000,
+    ...over,
+  };
+}
+
+function make(opts?: {
+  provider?: Partial<ResumeConfigProvider>;
+  getRiskStatus?: () => RiskStatus;
+  isDispatchActive?: () => boolean;
+}) {
+  const commands: { action: string }[] = [];
+  let now = 1_000_000;
+  let timerFn: (() => void) | undefined;
+  let timerMs: number | undefined;
+  let cleared = 0;
+  const d = new RoleDispatcher({
+    soul: mockSoul,
+    llm: { complete: async () => '{}' },
+    sendCommand: (c) => commands.push(c),
+    clock: () => now,
+    resumeConfigProvider: makeProvider(opts?.provider),
+    randomFn: () => 0.25, // → 抖动乘子 ≈ 1（确定）
+    setTimeoutFn: (fn, ms) => {
+      timerFn = fn;
+      timerMs = ms;
+      return 'T';
+    },
+    clearTimeoutFn: () => {
+      cleared++;
+    },
+    getRiskStatus: opts?.getRiskStatus ?? (() => 'normal'),
+    isDispatchActive: opts?.isDispatchActive ?? (() => true),
+    sessionLimitProvider: {
+      sessionDurationMsFor: () => 600_000, // 10min
+      sessionBudgetFor: fixedBudget,
+    },
+  });
+  d.setup();
+  return {
+    d,
+    commands,
+    fire: () => timerFn?.(),
+    getTimerMs: () => timerMs,
+    getCleared: () => cleared,
+    advance: (ms: number) => (now += ms),
+  };
+}
+
+describe('RoleDispatcher 自动续场', () => {
+  it('正常结束（autoResumeEligible）→ arm 休息计时器 ≈ 单场×rest_ratio', () => {
+    const m = make();
+    m.d.startSession();
+    assert.equal(m.d.active, true);
+    m.d.endSession('会话时长已超限', { autoResumeEligible: true });
+    assert.equal(m.d.active, false, '结束后会话非活跃');
+    // 600_000 × 0.10 × 抖动(≈1) = 60_000
+    assert.ok(
+      Math.abs((m.getTimerMs() ?? 0) - 60_000) < 1_000,
+      `休息时长应≈60s，实得 ${m.getTimerMs()}`,
+    );
+  });
+
+  it('运营停（无 eligible）→ 不 arm 休息计时器', () => {
+    const m = make();
+    m.d.startSession();
+    m.d.endSession('panel_dispatch_stop');
+    assert.equal(m.getTimerMs(), undefined, '运营停不安排续场');
+  });
+
+  it('休息到点 → 过闸 → 续场（会话重新活跃）', () => {
+    const m = make();
+    m.d.startSession();
+    m.d.endSession('timeout', { autoResumeEligible: true });
+    assert.equal(m.d.active, false);
+    m.fire(); // 休息到点
+    assert.equal(m.d.active, true, '过续场各闸 → 会话重新活跃');
+  });
+
+  it('撞风控（frozen）→ 不续场', () => {
+    const m = make({ getRiskStatus: () => 'frozen' });
+    m.d.startSession();
+    m.d.endSession('timeout', { autoResumeEligible: true });
+    m.fire();
+    assert.equal(m.d.active, false, 'frozen → 诚实不续');
+  });
+
+  it('调度全局停（isDispatchActive=false）→ 不续场', () => {
+    const m = make({ isDispatchActive: () => false });
+    m.d.startSession();
+    // isDispatchActive=false 时 startSession 仍可被显式调；但续场闸 canStartSession 会拦。
+    m.d.endSession('timeout', { autoResumeEligible: true });
+    m.fire();
+    assert.equal(m.d.active, false, '调度停 → 不续');
+  });
+
+  it('每日上限到顶 → 不再续场', () => {
+    const m = make({ provider: { dailyCapsFor: () => ({ maxSessions: 1, maxMinutes: 0 }) } });
+    // 第 1 轮：结束 → 续场成功（当日计数 → 1）
+    m.d.startSession();
+    m.d.endSession('timeout', { autoResumeEligible: true });
+    m.fire();
+    assert.equal(m.d.active, true, '首轮续场成功');
+    // 第 2 轮：结束 → 续场被每日上限拦
+    m.d.endSession('timeout', { autoResumeEligible: true });
+    m.fire();
+    assert.equal(m.d.active, false, '当日已达 1 场上限 → 不再续');
+  });
+});
+
+describe('isWithinActiveWindow（活跃时段窗口纯函数）', () => {
+  it('全天不限：(0,1440) 任意时刻为真', () => {
+    assert.equal(isWithinActiveWindow(0, { startMin: 0, endMin: 1440 }), true);
+    assert.equal(isWithinActiveWindow(720, { startMin: 0, endMin: 1440 }), true);
+    assert.equal(isWithinActiveWindow(1439, { startMin: 0, endMin: 1440 }), true);
+  });
+
+  it('普通窗口 [08:00,24:00)：窗内真、窗外假', () => {
+    const w = { startMin: 480, endMin: 1440 };
+    assert.equal(isWithinActiveWindow(600, w), true, '10:00 在窗内');
+    assert.equal(isWithinActiveWindow(60, w), false, '01:00 在窗外');
+  });
+
+  it('跨午夜窗口 [22:00,06:00)：22:00–24:00 与 00:00–06:00 为真', () => {
+    const w = { startMin: 1320, endMin: 360 };
+    assert.equal(isWithinActiveWindow(1380, w), true, '23:00 在窗内');
+    assert.equal(isWithinActiveWindow(120, w), true, '02:00 在窗内');
+    assert.equal(isWithinActiveWindow(720, w), false, '12:00 在窗外');
+  });
+
+  it('start==end 视作全天不限', () => {
+    assert.equal(isWithinActiveWindow(123, { startMin: 600, endMin: 600 }), true);
+  });
+});
