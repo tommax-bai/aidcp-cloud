@@ -31,7 +31,7 @@
 - 角色名：`aidcp`
 - cloud 在 ECS 本机运行时，默认连接参数即为正确目标
 
-代码侧已确认支持以下覆盖方式：
+代码侧已确认支持以下覆盖方式（标准 PG* 键，优先级最高）：
 
 - `DATABASE_URL`
 - `PGHOST`
@@ -40,6 +40,16 @@
 - `PGPASSWORD`
 - `PGDATABASE`
 
+此外，`src/risk/pg-risk-store.ts`（`pgRiskConfigFromEnv`）另读取一组 `AIDCP_PG_*` 作为**次级回退**：
+
+- `AIDCP_PG_HOST`
+- `AIDCP_PG_PORT`
+- `AIDCP_PG_DATABASE`（兼容 `AIDCP_PG_DB`）
+- `AIDCP_PG_USER`
+- `AIDCP_PG_PASSWORD`
+
+注意生效优先级：在 ECS 上 `src/server.ts` 会把标准 `PG*` 键显式传给 `PgRiskStore`，因此实际顺序为 `PGHOST > AIDCP_PG_HOST > 硬编码默认`。也就是说，配好标准 `PG*` 后风控库即生效，并不会停留在硬编码默认值上。
+
 默认值在当前 ECS 部署上即成立：
 
 - host=`127.0.0.1`
@@ -47,10 +57,12 @@
 - database=`aidcp`
 - user=`aidcp`
 
-敏感值说明：
+敏感值说明（政策目标）：
 
-- 数据库密码存放于 ECS `/opt/aidcp/cloud/.env`
-- 不入 git，不写入任何仓库文档
+- 政策目标：数据库密码只存放于 ECS `/opt/aidcp/cloud/.env`，运行时强制经由 `PGPASSWORD` / `DATABASE_URL` 注入
+- 政策目标：凭证不入 git、不写入任何仓库文档，仓库内只保留键名
+
+> **⚠️ 已知偏差（待修复）**：上述“密码绝不入 git”目前在代码层面尚未成立。`src/cache/pg-anchor-cache.ts` 内的 `DEFAULT_PG_CONFIG` 硬编码了一个明文默认口令并已随仓库提交（`src/risk/pg-risk-store.ts` 的 `pgRiskConfigFromEnv` 回退也复用该默认值）。待办：移除该硬编码默认口令（改为强制要求 `PGPASSWORD` / `DATABASE_URL`，缺失即 fail-fast），并轮换该口令；完成后此条偏差方可清除。
 
 ## 环境变量权威来源
 
@@ -73,8 +85,9 @@ ECS 上 `aidcp-cloud` 的权威环境文件为：
 
 说明：
 
-- 所有敏感值仅存放于 ECS `/opt/aidcp/cloud/.env`
-- 文档只保留键名，不记录任何明文值
+- 政策目标：所有敏感值仅存放于 ECS `/opt/aidcp/cloud/.env`
+- 本文档只保留键名，不记录任何明文值
+- 注意：该“仅存放于 .env”仍是目标而非现状，源码中尚存硬编码默认口令，详见上文「敏感值说明（政策目标）」的已知偏差
 
 ## 已废弃方案：本地起 cloud + SSH 隧道
 

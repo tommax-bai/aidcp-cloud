@@ -1,5 +1,7 @@
 # 多Agent角色协作架构设计文档
 
+> ℹ️ **设计基线（已落地并持续演进）**：本文是多角色协作架构的设计文档，对应实现**已落地**。现行角色清单与事件契约以源码为准：`src/event-bus/types.ts`（`RoleName` / `RoleEventMap`）与 `src/orchestrator/role-dispatcher.ts`。实际角色数已从最初的 15 扩展到约 32（新增评论支线、通知巡视 12 角色等）。文中"现状 vs 目标""迁移步骤"等章节为设计当时的过程记录，**新架构已是现状**。
+
 > 模拟人类浏览小红书的事件驱动多Agent系统
 
 ---
@@ -256,6 +258,8 @@ interface QualityRejectPayload {
 
 ### 3.7 DeepReader
 
+> ℹ️ **现状分工**：实现中 DeepReader 负责**图片阅读**（多图阶段），评论区阅读已拆给独立的 **CommentReviewer**（LLM 角色，`src/agents/comment-reviewer.ts`）——它消费 `reading.images_done`、判定后产出 `reading.scroll_comments` 意图并等回执，最终 emit `reading.done` 进入互动阶段。CommentReviewer **未**合并进 DeepReader，二者各司其职。
+
 | 维度 | 说明 |
 |------|------|
 | **职责边界** | 深度阅读笔记：浏览全部图片、滚动评论区、提取关键信息 |
@@ -482,6 +486,8 @@ interface FeedEnteredPayload {
 
 ### 3.15 SessionMonitor
 
+> ⚠️ **现状已改为事件驱动（以下 veto/gate 模型为设计当时记录）**：上线实现是 `src/agents/session-monitor-role.ts` 的 `SessionMonitorRole`——**订阅 `action.completed`**，按 动作数 / 时长 / 配额 / idle 看门狗 触发终止，发出 `session.should_end`（结束）与 `session.idle_nudge`（短 idle 轻推）两个事件。它**不再做** per-round veto/gate，也**没有** `views<5` 冷启动门 `{blocks:['interaction_appraiser']}`（那是已移除的黑板模型）。下表的 veto/gate 描述仅作历史保留。
+
 | 维度 | 说明 |
 |------|------|
 | **职责边界** | 全局风控：监控会话时长、互动配额、冷启动保护 |
@@ -534,6 +540,8 @@ if (sessionStats.views < 5) → gate: { blocks: ['interaction_appraiser'] }
 | BackToFeed | `feed.entered` | ContentEvaluator |
 
 ### 4.2 TypeScript 事件 Payload 接口定义
+
+> ℹ️ **以下接口为早期草图，权威定义见 `src/event-bus/types.ts`（`RoleEventMap`）**——它已显著扩展（约 51 个角色事件，新增评论支线 `comment.*`、评论点赞 `comment_like.*`、通知巡视 `notification.*` / `excursion.*` 等）并在细节上与本草图分叉：`content.valuable` 的 `cardIndex` 已改为 `index`；多处 `pageType` 改为 `sourcePageType`；主页子链以 `profile.exit`（`ProfileExitPayload`）回流、`BackToFeed` 由 `profile.exit` 触发返回信息流（非旧草图里的 `profile.done`）；并新增 `reading.browse_images` / `reading.images_done` / `reading.scroll_comments` 三个细分阅读事件。**本节与 §4.1/§7 之间关于事件数量（19 / 21 等）的出入一律以 `types.ts` 为准。**
 
 ```typescript
 /** 公共基础字段 */
@@ -1017,6 +1025,8 @@ sequenceDiagram
 
 ## 7. 现有代码 vs 目标架构对比
 
+> ⚠️ **本节框架已反转（保留作历史记录）**：下表的前提——"事件驱动 15 角色设计是尚未实现的目标、5 角色黑板/仲裁系统是现状"——与实际相反。事件驱动设计**正是已上线架构**，并已成长到约 32 角色（新增 评论支线、通知巡视 12 角色 等）。表中"现有实现"一列描述的 `Blackboard` / `Arbiter` / `SessionOrchestrator` / `AgentOrchestrator` / `BaseAgent` 等均已**移除**，仅是当时的旧快照；权威清单见 `src/event-bus/types.ts`（`RoleName`）与 `src/orchestrator/role-dispatcher.ts`。
+
 ### 差异矩阵表
 
 | 维度 | 现有实现 | 目标架构 | 差异说明 |
@@ -1032,12 +1042,14 @@ sequenceDiagram
 | **返回机制** | close_note action 由 Orchestrator 翻译 | BackToFeed 角色统一处理所有返回 | 抽象统一 |
 | **编排器** | SessionOrchestrator 中心化编排（轮询所有Agent） | 去中心化事件驱动（角色自激活） | 编排模式变更 |
 | **闭环保证** | 隐式（Orchestrator 内部 switch-case） | 显式（6条验证过的闭环路径） | 可验证性提升 |
-| **冷启动保护** | SessionMonitor gate 阻断 interaction_appraiser | SessionMonitor 保持不变 | 兼容 |
-| **CommentReviewer** | 已存在 | 目标架构中不包含（职责可合并到 DeepReader） | 待决定 |
+| **会话守护** | （旧）SessionMonitor veto/gate + views<5 冷启动阻断 interaction_appraiser | 事件驱动 `SessionMonitorRole`：订阅 `action.completed`，按 动作数/时长/配额/idle 发 `session.should_end` / `session.idle_nudge` | 已落地，无 veto/gate/冷启动门 |
+| **CommentReviewer** | 已存在 | 保留为独立 LLM 角色（评论区阅读判定），与 DeepReader 分工 | ✅ 已落定：未合并 |
 
 ---
 
 ## 8. 核心角色实现方案
+
+> ⚠️ **以下代码均为实现前草图，勿照搬**：现行角色统一继承 `BaseRole`（`src/agents/base-role.ts`）、由 `src/orchestrator/role-dispatcher.ts` 注册编排。草图中 `import { ... } from '../orchestrator/session-orchestrator.js'` 与 `CommandSink` 类型**均已不存在**（`session-orchestrator.ts` 已删除，统一为 `role-dispatcher.ts`）；事件名/字段也以 `src/event-bus/types.ts` 为准。请将本节视为设计意图说明，而非可编译代码。
 
 ### 8.1 FeedScroller 瘦化方案（从当前 FeedScanner 迁移）
 
@@ -1407,6 +1419,8 @@ interface BackToFeed {
 ---
 
 ## 9. 迁移步骤
+
+> ✅ **本迁移计划已完成（保留作历史记录）**：以下 Phase 1–7 描述的拆分与重构均已落地——`BaseRole` / `RoleDispatcher` / 事件驱动 `RoleEventMap` 上线，`FeedScanner` 拆分为 `ContentEvaluator` + `FeedScroller` + `NoteOpener`，详情页深读链（含 `DeepReader` + `CommentReviewer`）、作者/主页链、搜索两阶段链、`SessionMonitorRole` 守护均已实现，旧 `Blackboard`/`Arbiter`/`SessionOrchestrator` 已清理。此后又在此基线上**新增**了评论支线、评论点赞、通知巡视 12 角色、概念抽取等（见 `src/orchestrator/role-dispatcher.ts`）。下表仅作当时计划留存。
 
 ### Phase 1: 基础设施准备
 

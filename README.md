@@ -3,7 +3,7 @@
 AIDCP 云端：**事件驱动多 Agent 浏览会话编排 + 任务规划 + 文本 LLM + 锚点主缓存 + 风控状态机 + 边-云通信 + 飞书集成 + 内容发布**。
 
 边缘端（[`aidcp-edge`](../aidcp-edge)）负责把动作落到真实浏览器；云端负责"想"——
-以 Soul 人设驱动 `RoleDispatcher` 注册的 **15 个角色**（通过进程内 `EventBus` 解耦协作），
+以 Soul 人设驱动 `RoleDispatcher` 注册的**约 32 个常驻角色**（`src/agents` 下共 35 个 `BaseRole` 子类，通过进程内 `EventBus` 解耦协作），
 逐动作编排浏览会话全生命周期（列表评估 → 开卡 → 质量关卡 → 互动决策 → 主页/关注 → 搜索拓展 → 返回续刷），
 同时维护风控预算与状态机、锚点缓存、飞书运营通知与内容发布审批。
 
@@ -16,17 +16,18 @@ AIDCP 云端：**事件驱动多 Agent 浏览会话编排 + 任务规划 + 文�
 
 | 目录 | 职责 |
 | --- | --- |
-| `src/orchestrator/` | `RoleDispatcher`：事件驱动角色调度器，注册 15 角色、`feed.entered` 启动闭环、把 Edge 上报喂数据层、把角色事件翻译成 `EdgeCommand` 下发。 |
-| `src/agents/` | 15 个角色（继承 `BaseRole`，经 EventBus 协作）：`ContentEvaluator`/`FeedScroller`/`SearchScroller`/`NoteOpener`/`DeepReader`/`ContentCuratorRole`/`InteractionAppraiserRole`/`AuthorEvaluator`/`ProfileOpener`/`ProfileBrowser`/`FollowAgent`/`SearchEvaluator`/`SearchExecutor`/`BackToFeed`/`SessionMonitorRole` + `SessionContext` 会话态。 |
+| `src/orchestrator/` | `RoleDispatcher`：事件驱动角色调度器，注册约 32 个常驻角色、`feed.entered` 启动闭环、把 Edge 上报喂数据层、把角色事件翻译成 `EdgeCommand` 下发。 |
+| `src/agents/` | 约 32 个常驻角色 + 至多 3 个条件角色（`src/agents` 下共 35 个 `BaseRole` 子类，经 EventBus 协作）；权威清单见 `src/event-bus/types.ts`（`RoleName`）与 `role-dispatcher.ts`。按职责分组：**核心浏览闭环**（`FeedScroller`/`SearchScroller`/`ContentEvaluator`/`NoteOpener`/`ContentCuratorRole`/`DeepReader`/`InteractionAppraiserRole`/`AuthorEvaluator`/`ProfileOpener`/`ProfileBrowser`/`FollowAgent`/`SearchEvaluator`/`SearchExecutor`/`BackToFeed`）、**会话守护**（`SessionMonitorRole`/`BrowseSuspender`/`ExcursionResumer`）、**评论支线**（`CommentReviewer`/`CommentAppraiser`/`CommentComposer`/`CommentDeAiFlavor`/`CommentApprovalGate`/`CommentLikeAppraiser`/`ValuableCommentArchivist`）、**通知巡视 12 角色**（`NotificationGatekeeper`/`NotificationHomeOpener`/`NotificationTriage`/`NotificationCommentBrowser`/`NotificationLikeBrowser`/`NotificationFollowBrowser`/`NotificationClassifier`/`NotificationDeduper`/`NotificationNotifier`/`NotificationReturnHome` 等）、**概念抽取**（`ConceptExtractorRole`）；另含 `SessionContext` 会话态。 |
 | `src/event-bus/` | 进程内 typed 事件总线（`emit` fire-and-forget / `emitAsync` / `onAny`），模块间解耦异步通信，集中定义事件类型。 |
 | `src/risk/` | 风控与会话预算：`RiskController`（动作许可判定）+ `RiskStateMachine`（`normal→warned→restricted→frozen`）+ 滑窗计数 + 三档配额 + 冷启动 + 时间窗 + 会话预算 + 互动去重 + PG 持久化。 |
 | `src/soul/` | Soul 人设与行为规则加载（`soul.yaml` → 身份/兴趣/行为准则/会话上限），为所有角色决策提供人格化上下文。 |
-| `src/feishu/` | 飞书集成（官方 SDK 长连接）：卡片构建、命令路由（`/status //pause //resume //bind`）、Bot 进退群自动入库、发布审批卡片回调写信号文件。 |
-| `src/publish-agent/` | 内容发布角色管道：`ContentScout → ContentCreator → ImageDirector → ContentAssembler → ApprovalGatekeeper → PublishExecutor`，`pipeline-context` 串联，`wanxiang-client` 万象生图，`publish-log-store` 落库。 |
-| `src/llm/` | Qwen（通义千问）文本模型 HTTP 客户端（DashScope 兼容 OpenAI 接口），仅用全局 `fetch`，无 SDK 依赖。 |
+| `src/feishu/` | 飞书集成（官方 SDK 长连接）：卡片构建、命令路由（`/status` `/pause` `/resume` `/bind` `/publish-test`）、Bot 进退群自动入库、发布审批卡片回调写信号文件。 |
+| `src/publish-agent/` | 内容发布多阶段角色图（约 22 个 `BasePublishRole` 角色，经 `pipeline-context` 串联，非固定六步链）：`ContentScout`/`ContentTypeSelector`/`ContentCreator`/`ImagePlanner`/`ImageGenerator`/`CoverSelector`/`ContentCleaner`/`TitleCreator`、各 `Strategist`（Topic/Mention/Location/Collection）与 `Decider`（Visibility/Permission/PublishMode/Compliance）、`AiFlavorScorer`/`QualityScorer`/`ContentAssembler`/`MetadataAggregator`/`ApprovalGatekeeper`/`PublishExecutor` 等；`wanxiang-client` 万象生图，`publish-log-store` 落库。 |
+| `src/llm/` | 多文本厂商注册表（DashScope/通义千问 + 火山引擎方舟 Ark），OpenAI 兼容接口，仅用全局 `fetch`、无 SDK 依赖。 |
 | `src/planner/` | 任务规划接口 `TaskPlanner` + `SimplePlanner`（规则优先，LLM 兜底）；服务"一句话目标→原子步骤"的定向场景。 |
 | `src/cache/` | PostgreSQL 锚点主缓存 `PgAnchorCache`（+ 暂存晋升）+ 概念池 `ConceptStore` + Bot 群绑定 `BotChatStore`。 |
-| `src/comm/` | 边-云 WebSocket 服务端 `EdgeCloudServer` + 协议定义 `protocol.ts`（v2，40 消息类型）+ `DefaultMessageHandler` 路由 + `command-bridge`（EdgeCommand→Envelope）。 |
+| `src/comm/` | 边-云 WebSocket 服务端 `EdgeCloudServer` + 协议定义 `protocol.ts`（v2，56 消息类型）+ `DefaultMessageHandler` 路由 + `command-bridge`（EdgeCommand→Envelope）。 |
+| `src/panel/` | 面板 API：HTTP `/api` + JWT 鉴权 + WS 推送，管理控制台后端（`panel-server.ts` / `jwt.ts` / `auth.ts` / `panel-ws.ts` / `panel-store.ts`）。 |
 | `src/account-state.ts` | 账号 active/paused 内存状态管理（暂停时跳过笔记处理）。 |
 | `src/server.ts` | 启动入口：装配全部模块，监听 WebSocket + 启动飞书长连接。 |
 
@@ -34,9 +35,9 @@ AIDCP 云端：**事件驱动多 Agent 浏览会话编排 + 任务规划 + 文�
 
 系统核心采用**事件驱动 + 多角色 + 闭环往复**模式：
 
-1. **RoleDispatcher** — 注册 15 角色并 `setup()` 订阅；`feed.entered` 事件启动闭环；接收 Edge 结构化上报（`page.cards`/`note.detail`/`profile.detail`）更新到数据层供角色读取。
+1. **RoleDispatcher** — 注册约 32 个常驻角色并 `setup()` 订阅（权威清单见 `src/event-bus/types.ts` 的 `RoleName` 与 `role-dispatcher.ts`）；`feed.entered` 事件启动闭环；接收 Edge 结构化上报（`page.cards`/`note.detail`/`profile.detail`）更新到数据层供角色读取。
 2. **角色按事件链协作**（节选）：`ContentEvaluator`（卡片价值）→ `NoteOpener`（开卡）→ `ContentCuratorRole`（质量关卡，`quality.pass/reject`）→ `InteractionAppraiserRole`（点赞/收藏决策）→ `AuthorEvaluator`/`ProfileOpener`/`ProfileBrowser`/`FollowAgent`（主页与关注）→ `BackToFeed`（返回续刷）。
-3. **SessionMonitorRole** — 会话守护：超时长/超预算时 `veto`，产出 `session.should_end`。
+3. **SessionMonitorRole** — 会话守护：订阅 `action.completed`，按 动作数/时长/配额/idle 判定终止，产出 `session.should_end`（idle 时先 `session.idle_nudge` 轻推恢复）；事件驱动，不做动作 veto/gate。
 4. **command-bridge** — 把角色产出的 `EdgeCommand` 翻译为协议 Envelope，经 `ws-server.pushToEdges` 下发。
 5. **Soul** — 以 `soul.yaml` 定义人设，驱动各角色的人格化决策。
 6. **RiskController** — 通过状态机 + 滑窗计数约束可用动作配额，账号风控状态权威单写。
@@ -60,7 +61,9 @@ npm start           # 起 WebSocket 服务端（默认 :8787）
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `AIDCP_PORT` | `8787` | WebSocket 监听端口 |
-| `DASHSCOPE_API_KEY` | — | Qwen API Key |
+| `DASHSCOPE_API_KEY` | — | DashScope/通义千问 文本 API Key（默认厂商） |
+| `ARK_API_KEY` / `VOLCENGINE_API_KEY` | — | 火山引擎方舟 Ark 文本 API Key（按序取第一个非空） |
+| `ARK_BASE_URL` | `https://ark.cn-beijing.volces.com/api/v3` | 火山方舟 Ark 兼容端点（可选覆盖区域/自定义端点） |
 | `FEISHU_APP_ID` | — | 飞书自建应用 App ID |
 | `FEISHU_APP_SECRET` | — | 飞书自建应用 App Secret |
 | `FEISHU_CHAT_ID` | — | 默认推送群 chat_id（审批/通知，可由 `/bind` 注册的默认群兜底） |
@@ -73,6 +76,7 @@ npm start           # 起 WebSocket 服务端（默认 :8787）
 
 核心消息分组：握手（`hello/welcome`）、定向规划（`plan.*`/`select.*`/`anchor.*`/`action.result`）、
 浏览编排（`note.content`/`browse.*`/`note.open`/`search.execute`/`session.end`）、
-角色驱动指令（`page.scroll`/`interaction.like|collect|follow`/`navigation.back`/`note.browse_images|scroll_comments`）、
+角色驱动指令（`page.scroll`/`interaction.like|collect|follow|comment|like_comment`/`navigation.back`/`note.browse_images|scroll_comments`）、
+通知巡视（`notification.open`/`notification.browse_comments|likes|follows`/`notification.back_home`/`notification.detected`/`notification.home`/`notification.items`）、
 结构化上报（`page.cards`/`note.detail`/`profile.detail`/`action.completed`）、
-风控预算（`session.budget.*`/`risk.canDo.*`/`risk.record.*`）、发布（`publish.request`/`publish.approval_request`/`publish.result`）。
+风控预算（`session.budget.*`/`risk.canDo.*`/`risk.record.*`）、发布（`publish.request`/`publish.result`/`publish.command`/`publish.command.result`/`publish.approval_request`）。

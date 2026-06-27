@@ -1,10 +1,12 @@
 # 机器人主动问审批发布闭环方案（aidcp-cloud / aidcp-edge）
 
+> ✅ **已实现（as-built 记录）**：本文最初为“方案”，其描述的 `publish.approval_request` 主动审批闭环**已在 cloud 与 edge 落地**（cloud `src/comm/handler.ts` `onPublishApprovalRequest`、protocol `PublishApprovalRequestPayload`；edge `src/main.ts` 在发布前发送 `publish.approval_request`）。请按“实现记录”阅读；审批标识统一为 `requestId`（非 token）。
+
 ## 文档目标
 
-在 **/Users/bears/aidcp-cloud** 与 **/Users/bears/aidcp-edge** 两仓内，基于现有飞书审批卡片、信号文件、发布前审批门禁、以及既有 edge↔cloud WebSocket 协议，设计一套“**edge 主动发审批请求 → cloud 主动推卡 → 用户授权/取消 → edge 轮询信号 → 真发 → 回传结果**”的正式发布授权闭环，替代当前“用户手动敲 `/publish-test` 才发卡”的反向触发逻辑。
+在 **aidcp-cloud** 与 **aidcp-edge** 两仓内，基于现有飞书审批卡片、信号文件、发布前审批门禁、以及既有 edge↔cloud WebSocket 协议，设计一套“**edge 主动发审批请求 → cloud 主动推卡 → 用户授权/取消 → edge 轮询信号 → 真发 → 回传结果**”的正式发布授权闭环，替代当前“用户手动敲 `/publish-test` 才发卡”的反向触发逻辑。
 
-本文只出方案，不改业务代码、不真发。
+> ⚠️ **历史前提已失效**：本文写作时定位为“只出方案，不改业务代码、不真发”；该前提现已不成立——下述闭环**已在 cloud 与 edge 实现并合入**。以下保留原设计推理，并在关键处用“✅ 已落地”标注对应的真实符号与文件。
 
 ---
 
@@ -13,29 +15,29 @@
 ### 1.1 cloud 侧已具备能力
 
 #### 飞书审批卡片构造
-- 文件：**/Users/bears/aidcp-cloud/src/feishu/cards.ts**
+- 文件：**aidcp-cloud/src/feishu/cards.ts**
 - 现有函数：`buildPublishApprovalCard(...)`
 - 已具备：
   - 卡片展示 `title / content / tags`
   - 按钮使用 `behaviors: [{ type: 'callback', value: ... }]`
-  - callback value 已携带 `token + payload(title/content/tags)`
+  - callback value 已携带 `requestId + payload(title/content/tags)`
 
 #### 飞书消息发送
-- 文件：**/Users/bears/aidcp-cloud/src/feishu/messenger.ts**
+- 文件：**aidcp-cloud/src/feishu/messenger.ts**
 - 现有函数：`sendApprovalCard(chatId, card)`
 - 可直接复用为主动审批流的发卡出口
 
 #### 飞书卡片回调接收与写信号文件
-- 文件：**/Users/bears/aidcp-cloud/src/feishu/ws-receiver.ts**
+- 文件：**aidcp-cloud/src/feishu/ws-receiver.ts**
 - 已具备：
   - 注册 `card.action.trigger`
-  - 解析 `approve / cancel + token + payload`
-  - 写入 `/tmp/aidcp-publish-approve-<token>.json`
+  - 解析 `approve / cancel + requestId + payload`
+  - 写入 `/tmp/aidcp-publish-approve-<requestId>.json`
   - `approve` 写 `approved: true`
   - `cancel` 写 `approved: false`
 
 #### 手动联调入口
-- 文件：**/Users/bears/aidcp-cloud/src/feishu/commands.ts**
+- 文件：**aidcp-cloud/src/feishu/commands.ts**
 - 现有命令：`/publish-test`
 - 当前作用：手动发送审批卡片
 - 结论：**保留作为后备入口，不移除**
@@ -43,44 +45,44 @@
 ### 1.2 edge 侧已具备能力
 
 #### 审批门禁轮询
-- 文件：**/Users/bears/aidcp-edge/src/publish/approval-gate.ts**
+- 文件：**aidcp-edge/src/publish/approval-gate.ts**
 - 现有函数：`waitForPublishApproval(...)`
 - 已具备：
-  - 轮询 `/tmp/aidcp-publish-approve-<token>.json`
-  - 校验 `token / approved / ts / payload`
+  - 轮询 `/tmp/aidcp-publish-approve-<requestId>.json`
+  - 校验 `requestId / approved / ts / payload`
   - 支持 `approved=true / approved=false / timeout`
   - 支持消费信号文件
 
 #### 真实发布流程
-- 文件：**/Users/bears/aidcp-edge/src/flows/publish-post.ts**
+- 文件：**aidcp-edge/src/flows/publish-post.ts**
 - 现状：
   - 已在 `submit_publish` 前调用 `waitForPublishApproval(...)`
   - 审批通过后才会继续点击 Shadow DOM 发布按钮
   - 审批拒绝或超时会直接返回失败
 
 #### 主入口接线
-- 文件：**/Users/bears/aidcp-edge/src/main.ts**
+- 文件：**aidcp-edge/src/main.ts**
 - 现状：
   - 收到 `publish.request`
-  - 生成或读取 token
+  - 生成或读取 requestId（`buildPublishApprovalRequestId()`）
   - 调用 `publishPost(..., approvalGate)`
   - 最终回 `publish.result`
 
 ### 1.3 双端协议现状
 
 #### cloud 协议文件
-- **/Users/bears/aidcp-cloud/src/comm/protocol.ts**
+- **aidcp-cloud/src/comm/protocol.ts**
 
 #### edge 协议文件
-- **/Users/bears/aidcp-edge/src/comm/protocol.ts**
+- **aidcp-edge/src/comm/protocol.ts**
 
 #### 当前已有发布相关消息
 - `publish.request`：cloud → edge
 - `publish.result`：edge → cloud
 
-#### 当前缺口
-- **没有 edge → cloud 的“审批请求”消息**
-- 因此 cloud 无法在 edge 真发前被主动通知去发审批卡
+#### 原缺口（已补齐）
+- 写作时：**没有 edge → cloud 的“审批请求”消息**，cloud 无法在 edge 真发前被主动通知去发审批卡
+- ✅ **已落地**：双端协议已新增 `publish.approval_request`（edge → cloud），payload 为 `PublishApprovalRequestPayload { requestId, title, content, tags, edgeId? }`（cloud `src/comm/protocol.ts`、edge `src/comm/protocol.ts`）；edge `src/main.ts` 在发布前发送该消息，cloud `src/comm/handler.ts` 的 `onPublishApprovalRequest` 接收并发卡。
 
 ---
 
@@ -88,24 +90,24 @@
 
 ### 2.1 推荐结论
 
-采用 **“edge 生成 token，并通过新消息 `publish.approval_request` 主动上送 cloud”** 的方案。
+采用 **“edge 生成 requestId，并通过新消息 `publish.approval_request` 主动上送 cloud”** 的方案。（✅ 已按此结论落地）
 
 ### 2.2 推荐原因
 
-#### 原因一：彻底消除 token 对齐问题
-当前 `/publish-test` 仍依赖环境变量或显式参数对齐 token。改为 edge 生成后直接随协议上传，cloud 发卡与 edge 轮询天然使用同一 token，不再需要人工对齐。
+#### 原因一：彻底消除 requestId 对齐问题
+当前 `/publish-test` 仍依赖环境变量或显式参数对齐 requestId。改为 edge 生成后直接随协议上传，cloud 发卡与 edge 轮询天然使用同一 requestId，不再需要人工对齐。
 
 #### 原因二：职责边界更清晰
-edge 是真实执行发布的一方，最清楚本次发布上下文与 token；cloud 负责通知与审批编排，不负责猜测 token。
+edge 是真实执行发布的一方，最清楚本次发布上下文与 requestId；cloud 负责通知与审批编排，不负责猜测 requestId。
 
 #### 原因三：最小改动复用现有资产
 - cloud 继续复用：
-  - **/Users/bears/aidcp-cloud/src/feishu/cards.ts** 的 `buildPublishApprovalCard(...)`
-  - **/Users/bears/aidcp-cloud/src/feishu/messenger.ts** 的 `sendApprovalCard(...)`
-  - **/Users/bears/aidcp-cloud/src/feishu/ws-receiver.ts** 的 `card.action.trigger → 写信号文件`
+  - **aidcp-cloud/src/feishu/cards.ts** 的 `buildPublishApprovalCard(...)`
+  - **aidcp-cloud/src/feishu/messenger.ts** 的 `sendApprovalCard(...)`
+  - **aidcp-cloud/src/feishu/ws-receiver.ts** 的 `card.action.trigger → 写信号文件`
 - edge 继续复用：
-  - **/Users/bears/aidcp-edge/src/publish/approval-gate.ts** 的 `waitForPublishApproval(...)`
-  - **/Users/bears/aidcp-edge/src/flows/publish-post.ts** 的 Shadow DOM 真发逻辑
+  - **aidcp-edge/src/publish/approval-gate.ts** 的 `waitForPublishApproval(...)`
+  - **aidcp-edge/src/flows/publish-post.ts** 的 Shadow DOM 真发逻辑
 
 #### 原因四：与现有 `publish.request/result` 关系自然
 - `publish.request/result` 继续承担“正式发布任务下发 / 结果回传”
@@ -114,15 +116,15 @@ edge 是真实执行发布的一方，最清楚本次发布上下文与 token；
 
 ### 2.3 不推荐方案
 
-#### 方案 A：cloud 生成 token，再回传给 edge
+#### 方案 A：cloud 生成 requestId，再回传给 edge
 不推荐原因：
 - 会引入额外往返或状态同步
-- edge 在进入审批门禁前还要等待 cloud 分配 token
+- edge 在进入审批门禁前还要等待 cloud 分配 requestId
 - 与“执行方掌握执行上下文”的职责边界相反
 
-#### 方案 B：继续复用 `/publish-test` 逻辑，由 cloud 在收到 `publish.request` 后自行生成 token 发卡
+#### 方案 B：继续复用 `/publish-test` 逻辑，由 cloud 在收到 `publish.request` 后自行生成 requestId 发卡
 不推荐原因：
-- token 仍存在双端对齐风险
+- requestId 仍存在双端对齐风险
 - `publish.request` 语义已是“请求执行发布”，再塞审批触发会让消息职责混杂
 - 不利于后续扩展卡片状态回写与审批审计
 
@@ -133,35 +135,39 @@ edge 是真实执行发布的一方，最清楚本次发布上下文与 token；
 ### 3.1 新增消息名
 
 在以下两个文件同步新增：
-- **/Users/bears/aidcp-cloud/src/comm/protocol.ts**
-- **/Users/bears/aidcp-edge/src/comm/protocol.ts**
+- **aidcp-cloud/src/comm/protocol.ts**
+- **aidcp-edge/src/comm/protocol.ts**
 
 新增消息：
 - `publish.approval_request`：**edge → cloud**，请求 cloud 主动发送飞书审批卡片
 
-### 3.2 推荐 payload 契约
+> ✅ **已落地**：该消息已加入双端 `MessageType`/`PayloadMap`（cloud `src/comm/protocol.ts`、edge `src/comm/protocol.ts`），与 `publish.request` / `publish.result` 并列。
+
+### 3.2 payload 契约（as-built）
+
+> ✅ **已落地**：实际落地的类型见 cloud `src/comm/protocol.ts` `PublishApprovalRequestPayload`（edge 同名类型镜像）。最终未引入提案中的 `chatId` / `timeoutMs` 字段（chatId 改由 cloud 侧解析，见 §5.3），`requestId` 也由“可选”收敛为**必填**主标识。
 
 ```ts
-interface PublishApprovalRequestPayload {
-  token: string;
+export interface PublishApprovalRequestPayload {
+  /** 单次发布请求唯一标识 */
+  requestId: string;
+  /** 帖子标题（小红书标题） */
   title: string;
+  /** 正文（200-500 字） */
   content: string;
+  /** 话题标签（3-5 个） */
   tags: string[];
+  /** 可选边缘节点标识（观测用） */
   edgeId?: string;
-  requestId?: string;
-  chatId?: string;
-  timeoutMs?: number;
 }
 ```
 
 ### 3.3 字段说明
 
-- `token`：**必填**，由 edge 生成，cloud 发卡与回调写信号时原样透传
+- `requestId`：**必填**，由 edge 生成（`buildPublishApprovalRequestId()`），cloud 发卡与回调写信号时原样透传，是审批全链路唯一主标识
 - `title / content / tags`：**必填**，用于构造审批卡片内容
-- `edgeId`：可选，便于 cloud 记录来源边缘节点
-- `requestId`：可选，建议填当前发布任务 envelope id，便于把审批请求与后续 `publish.result` 关联
-- `chatId`：可选，若未来支持按任务路由到不同飞书群，可直接使用；第一阶段可不强依赖
-- `timeoutMs`：可选，仅用于卡片文案或 cloud 侧观测，不作为协议强依赖
+- `edgeId`：可选，便于 cloud 记录来源边缘节点（观测用）
+- ~~`chatId` / `timeoutMs`~~：**提案中曾考虑、最终未纳入 as-built 类型**。目标群由 cloud 侧解析（§5.3）；超时由 edge 轮询门禁控制，不进协议
 
 ### 3.4 在 `MessageType` 与 `PayloadMap` 中的位置
 
@@ -186,42 +192,42 @@ interface PublishApprovalRequestPayload {
 #### 推荐链路
 1. cloud 生成发布内容
 2. cloud → edge：`publish.request`
-3. edge 生成 token
+3. edge 生成 requestId
 4. edge → cloud：`publish.approval_request`
 5. cloud 发飞书审批卡
 6. 用户点击授权/取消
-7. cloud 写 `/tmp/aidcp-publish-approve-<token>.json`
+7. cloud 写 `/tmp/aidcp-publish-approve-<requestId>.json`
 8. edge `waitForPublishApproval(...)`
 9. 若 approved=true，则 edge 真点发布按钮
 10. edge → cloud：`publish.result`
 
 ---
 
-## 4. token 生成策略评估与推荐
+## 4. requestId 生成策略评估与推荐
 
 ### 4.1 推荐方案
 
-**token 由 edge 生成并随 `publish.approval_request` 上传。**
+**requestId 由 edge 生成并随 `publish.approval_request` 上传。**（✅ 已按此落地：edge `src/main.ts` 调用 `buildPublishApprovalRequestId()` 后随消息上送）
 
 ### 4.2 具体策略
 
-edge 在收到 `publish.request` 后、进入 `publishPost(...)` 前生成 token；该 token 同时用于：
-1. `publish.approval_request.payload.token`
-2. `waitForPublishApproval({ token })`
-3. 飞书卡片 callback value 中的 `token`
-4. `/tmp/aidcp-publish-approve-<token>.json`
+edge 在收到 `publish.request` 后、进入 `publishPost(...)` 前生成 requestId；该 requestId 同时用于：
+1. `publish.approval_request.payload.requestId`
+2. `waitForPublishApproval({ requestId })`
+3. 飞书卡片 callback value 中的 `requestId`
+4. `/tmp/aidcp-publish-approve-<requestId>.json`
 
 ### 4.3 推荐保留的兼容逻辑
 
-- **/Users/bears/aidcp-cloud/src/feishu/commands.ts** 中 `/publish-test` 仍保留 `resolvePublishApprovalToken(...)` 逻辑，作为手动联调后备
+- **aidcp-cloud/src/feishu/commands.ts** 中 `/publish-test` 仍保留 `resolvePublishApprovalRequestId(...)` 逻辑，作为手动联调后备（优先级：显式命令参数 → 环境变量 `AIDCP_PUBLISH_APPROVAL_REQUEST_ID` → 自动生成）
 - 但正式主动审批流不再依赖环境变量对齐
 
 ### 4.4 与其它方案对比
 
 | 方案 | 优点 | 缺点 | 结论 |
 |---|---|---|---|
-| edge 生成 token | 单一来源、无对齐问题、最贴近执行方 | cloud 需信任 edge 传入 token | 推荐 |
-| cloud 生成 token | cloud 可统一管理 | 需额外回传/同步，流程更绕 | 不推荐 |
+| edge 生成 requestId | 单一来源、无对齐问题、最贴近执行方 | cloud 需信任 edge 传入 requestId | 推荐（✅ 已落地） |
+| cloud 生成 requestId | cloud 可统一管理 | 需额外回传/同步，流程更绕 | 不推荐 |
 | 环境变量/手工指定 | 联调简单 | 正式流脆弱、易错 | 仅保留作后备 |
 
 ---
@@ -230,68 +236,63 @@ edge 在收到 `publish.request` 后、进入 `publishPost(...)` 前生成 token
 
 ### 5.1 接收 `publish.approval_request`
 
-#### 目标位置
-- **/Users/bears/aidcp-cloud/src/comm/ws-server.ts**：无需大改，只要业务 handler 能识别新消息即可
-- cloud 当前 WebSocket 业务 handler 实现处：新增分支处理 `publish.approval_request`
-- **/Users/bears/aidcp-cloud/src/comm/protocol.ts**：新增类型定义
+#### 目标位置（as-built）
+- **aidcp-cloud/src/comm/handler.ts**：消息分支 `case 'publish.approval_request'` → `onPublishApprovalRequest(env, session)`
+- **aidcp-cloud/src/comm/protocol.ts**：`PublishApprovalRequestPayload` 类型 + `MessageType`/`PayloadMap` 已新增
+
+> ✅ **已落地**：cloud WebSocket 业务 handler 已识别并处理该消息，无需再额外接线。
 
 ### 5.2 收到后调用 `sendApprovalCard(...)`
 
-#### 推荐职责拆分
-建议新增一个轻量服务或 handler 分支，概念上可命名为：
-- `PublishApprovalService.handleApprovalRequest(payload, session)`
+> ✅ **已落地**：实际未拆出独立 service，而是作为 handler 方法 `onPublishApprovalRequest(env, session)` 实现于 **aidcp-cloud/src/comm/handler.ts**，在消息分支 `case 'publish.approval_request'` 中调用。
 
-职责：
-1. 校验 payload（`token / title / content / tags`）
-2. 解析目标 `chatId`
+职责（as-built）：
+1. 校验 payload（`requestId / title / content / tags`，缺失抛 `invalid_publish_approval_request`）
+2. 解析目标 `chatId`（见 §5.3）
 3. 调用：
-   - `buildPublishApprovalCard({ token, title, content, tags })`
+   - `buildPublishApprovalCard({ requestId, title, content, tags })`
    - `messenger.sendApprovalCard(chatId, card)`
-4. 第二阶段可选：记录 `token → card/message 上下文` 映射，供卡片状态更新使用
+4. 第二阶段可选：记录 `requestId → card/message 上下文` 映射，供卡片状态更新使用
 
-### 5.3 chatId 来源建议
+### 5.3 chatId 来源（as-built）
 
-#### 第一阶段最小可行
-使用 cloud 现有固定审批群配置：
-- 优先沿用当前 Feishu 侧已有审批群配置方式
-- 若已有全局 `approvalChatId` 注入点，则直接复用
-- `publish.approval_request.payload.chatId` 第一阶段可不强依赖
+> ✅ **已落地**：`onPublishApprovalRequest` 在 cloud 侧解析目标群，**不**从 payload 取 chatId。实际解析优先级（**aidcp-cloud/src/comm/handler.ts**）：
+> 1. 由 `/bind` 设定的默认审批群：`botChatStore.getDefaultChat()` 返回的 `chatId`
+> 2. 注入的全局 `approvalChatId`
+> 3. 环境变量 `FEISHU_CHAT_ID`（兜底）
+>
+> 三者皆空时抛错并提示“请先在目标飞书群发送 `/bind` 设为默认审批群，或配置 `FEISHU_CHAT_ID`”。因此提案里的 `payload.chatId` 路由未落地（见 §3.3）。
 
-#### 第二阶段增强
-支持优先级：
-1. `payload.chatId`
-2. 业务配置中的默认审批群
-
-### 5.4 卡片 payload 如何带 token
+### 5.4 卡片 payload 如何带 requestId
 
 无需重做，直接复用现有实现：
-- **/Users/bears/aidcp-cloud/src/feishu/cards.ts**
-  - `buildPublishApprovalCard(...)` 已将 `token` 放入 callback value
-- **/Users/bears/aidcp-cloud/src/feishu/ws-receiver.ts**
-  - `parseApprovalActionValue(...)` 已能解析 `action + token + payload`
+- **aidcp-cloud/src/feishu/cards.ts**
+  - `buildPublishApprovalCard(...)` 已将 `requestId` 放入 callback value
+- **aidcp-cloud/src/feishu/ws-receiver.ts**
+  - `parseApprovalActionValue(...)` 已能解析 `action + requestId + payload`
   - `handleCardAction(...)` 已能写信号文件
 
 ### 5.5 cloud 侧改动文件清单
 
 #### 第一阶段必改
-- **/Users/bears/aidcp-cloud/src/comm/protocol.ts**
+- **aidcp-cloud/src/comm/protocol.ts**
   - 新增 `publish.approval_request` 与 payload 类型
-- **/Users/bears/aidcp-cloud/src/comm/** 下实际业务 handler 文件
+- **aidcp-cloud/src/comm/** 下实际业务 handler 文件
   - 新增对 `publish.approval_request` 的路由处理
-- **/Users/bears/aidcp-cloud/docs/feishu-publish-approval-e2e.md**
+- **aidcp-cloud/docs/feishu-publish-approval-e2e.md**
   - 更新为“主动审批流”联调文档
 
 #### 第一阶段大概率复用、不必改动主体逻辑
-- **/Users/bears/aidcp-cloud/src/feishu/cards.ts**
-- **/Users/bears/aidcp-cloud/src/feishu/messenger.ts**
-- **/Users/bears/aidcp-cloud/src/feishu/ws-receiver.ts**
+- **aidcp-cloud/src/feishu/cards.ts**
+- **aidcp-cloud/src/feishu/messenger.ts**
+- **aidcp-cloud/src/feishu/ws-receiver.ts**
 
 #### 第二阶段可改
-- **/Users/bears/aidcp-cloud/src/feishu/ws-receiver.ts**
+- **aidcp-cloud/src/feishu/ws-receiver.ts**
   - 扩展卡片状态更新回调返回
-- **/Users/bears/aidcp-cloud/src/feishu/messenger.ts**
+- **aidcp-cloud/src/feishu/messenger.ts**
   - 若飞书更新卡片需要额外 API，可在此扩展
-- **/Users/bears/aidcp-cloud/src/feishu/types.ts**
+- **aidcp-cloud/src/feishu/types.ts**
   - 增补卡片更新相关类型
 
 ---
@@ -301,32 +302,32 @@ edge 在收到 `publish.request` 后、进入 `publishPost(...)` 前生成 token
 ### 6.1 在真发流程中主动发出 `publish.approval_request`
 
 #### 推荐主接线点
-- **/Users/bears/aidcp-edge/src/main.ts**
+- **aidcp-edge/src/main.ts**
 
-当前流程：
+原流程：
 1. 收到 `publish.request`
-2. 生成 token
+2. 生成 requestId
 3. 调用 `publishPost(..., approvalGate)`
 4. 完成后回 `publish.result`
 
-建议改为：
+as-built 流程（✅ 已落地于 **aidcp-edge/src/main.ts**）：
 1. 收到 `publish.request`
-2. 生成 token
-3. **先发送 `publish.approval_request` 到 cloud**
+2. 生成 requestId（`buildPublishApprovalRequestId()`）
+3. **先 `client.send('publish.approval_request', { requestId, title, content, tags, edgeId })` 到 cloud**
 4. 再调用 `publishPost(..., approvalGate)` 进入轮询
 5. 轮询通过后继续 Shadow DOM 真发
 6. 最终回 `publish.result`
 
 ### 6.2 为什么放在 `main.ts` 而不是 `publish-post.ts`
 
-- **/Users/bears/aidcp-edge/src/flows/publish-post.ts** 当前职责是浏览器内发布动作编排
-- `publish.approval_request` 属于跨端通信编排，更适合留在 **/Users/bears/aidcp-edge/src/main.ts** 的消息收发层
+- **aidcp-edge/src/flows/publish-post.ts** 当前职责是浏览器内发布动作编排
+- `publish.approval_request` 属于跨端通信编排，更适合留在 **aidcp-edge/src/main.ts** 的消息收发层
 - 这样 `publishPost(...)` 仍保持“给定 payload + approvalGate 就执行”的纯业务职责
 
 ### 6.3 `publishPost(...)` 与已有审批门禁的衔接
 
 无需推翻现有逻辑：
-- **/Users/bears/aidcp-edge/src/flows/publish-post.ts** 继续在 `submit_publish` 前调用 `waitForPublishApproval(...)`
+- **aidcp-edge/src/flows/publish-post.ts** 继续在 `submit_publish` 前调用 `waitForPublishApproval(...)`
 - 唯一变化是：进入 `waitForPublishApproval(...)` 之前，cloud 已经因为 `publish.approval_request` 发出了卡片
 
 ### 6.4 是否需要 edge 等待 cloud 对审批请求 ACK
@@ -346,21 +347,21 @@ edge 在收到 `publish.request` 后、进入 `publishPost(...)` 前生成 token
 ### 6.5 edge 侧改动文件清单
 
 #### 第一阶段必改
-- **/Users/bears/aidcp-edge/src/comm/protocol.ts**
+- **aidcp-edge/src/comm/protocol.ts**
   - 新增 `publish.approval_request` 与 payload 类型
-- **/Users/bears/aidcp-edge/src/main.ts**
+- **aidcp-edge/src/main.ts**
   - 在收到 `publish.request` 后发送 `publish.approval_request`
 
 #### 第一阶段通常只需类型补齐，不一定要改逻辑
-- **/Users/bears/aidcp-edge/src/client/edge-client.ts**
+- **aidcp-edge/src/client/edge-client.ts**
   - 若 `send(...)` 已支持任意消息类型，则通常无需改逻辑，仅补类型即可
-- **/Users/bears/aidcp-edge/src/flows/publish-post.ts**
+- **aidcp-edge/src/flows/publish-post.ts**
   - 原则上无需结构性改动，仅保持 approvalGate 现有位置
 
 #### 第二阶段可改
-- **/Users/bears/aidcp-edge/src/main.ts**
+- **aidcp-edge/src/main.ts**
   - 在 `publish.result` 后追加卡片状态回写触发
-- **/Users/bears/aidcp-edge/src/flows/publish-post.ts**
+- **aidcp-edge/src/flows/publish-post.ts**
   - 若要细分失败原因，可补充更结构化错误码
 
 ---
@@ -382,11 +383,11 @@ edge 在收到 `publish.request` 后、进入 `publishPost(...)` 前生成 token
 - 用户点击“取消”
   - 飞书 toast：`已取消发布`
   - cloud 写 `approved: false`
-  - edge 返回失败：`[approval_gate] approval_rejected token=...`
+  - edge 返回失败：`approval_gate` 返回 `reason: 'approval_rejected'`（结果对象携带 `requestId`）
 - 卡片本身不更新
 
 #### 优点
-- 完全复用 **/Users/bears/aidcp-cloud/src/feishu/ws-receiver.ts**
+- 完全复用 **aidcp-cloud/src/feishu/ws-receiver.ts**
 - 不需要额外保存 `message_id / open_message_id / card token` 映射
 - 风险最低
 
@@ -402,17 +403,17 @@ edge 在收到 `publish.request` 后、进入 `publishPost(...)` 前生成 token
 
 #### 第二阶段所需最小新增能力
 1. cloud 在发卡成功时保存：
-   - `token`
+   - `requestId`
    - `chatId`
-   - `messageId` 或飞书可更新卡片所需上下文
+   - `messageId` 或飞书可更新卡片所需上下文（即下文的 card token）
 2. cloud 在收到：
    - `card.action.trigger`
    - `publish.result`
    - 超时事件
-   时，按 token 查上下文并更新卡片
+   时，按 requestId 查上下文并更新卡片
 
 #### 推荐实现方式
-- 第一版先做内存态映射：`Map<token, CardContext>`
+- 第一版先做内存态映射：`Map<requestId, CardContext>`
 - 若后续要求进程重启可恢复，再升级到持久化存储
 
 ---
@@ -422,11 +423,11 @@ edge 在收到 `publish.request` 后、进入 `publishPost(...)` 前生成 token
 ### 8.1 用户点取消
 
 #### 现有可复用行为
-- cloud：写 `/tmp/aidcp-publish-approve-<token>.json`，内容 `approved:false`
+- cloud：写 `/tmp/aidcp-publish-approve-<requestId>.json`，内容 `approved:false`
 - edge：`waitForPublishApproval(...)` 返回 `approval_rejected`
 - `publishPost(...)` 返回：
   - `ok: false`
-  - `error: [approval_gate] approval_rejected token=<token>`
+  - `error`：`approval_rejected`（结果对象携带 `requestId`）
 
 #### 推荐处理
 - cloud：记录 info 日志
@@ -476,24 +477,26 @@ edge 在收到 `publish.request` 后、进入 `publishPost(...)` 前生成 token
 
 ### Phase 1：打通主动审批最小闭环
 
+> ✅ **已落地**：Phase 1 闭环已在双端实现并合入——edge `src/main.ts` 发布前发送 `publish.approval_request`，cloud `src/comm/handler.ts` `onPublishApprovalRequest` 接收并发卡，`requestId` 全链路一致。以下变更范围/验收标准作为实现记录保留。
+
 #### 目标
 让 edge 在收到 `publish.request` 后，主动通知 cloud 发审批卡；用户授权后 edge 能继续真发；取消/超时能正确失败返回。
 
 #### 变更范围
 
 ##### cloud
-- **/Users/bears/aidcp-cloud/src/comm/protocol.ts**
-- **/Users/bears/aidcp-cloud/src/comm/** 下实际业务 handler 文件
-- **/Users/bears/aidcp-cloud/docs/feishu-publish-approval-e2e.md**
+- **aidcp-cloud/src/comm/protocol.ts**
+- **aidcp-cloud/src/comm/** 下实际业务 handler 文件
+- **aidcp-cloud/docs/feishu-publish-approval-e2e.md**
 
 ##### edge
-- **/Users/bears/aidcp-edge/src/comm/protocol.ts**
-- **/Users/bears/aidcp-edge/src/main.ts**
+- **aidcp-edge/src/comm/protocol.ts**
+- **aidcp-edge/src/main.ts**
 
 #### 验收标准
 - edge 收到 `publish.request` 后，会发送 `publish.approval_request`
 - cloud 收到后，会主动向审批群发送飞书卡片
-- 卡片 callback 写出的信号文件 token 与 edge 轮询 token 一致
+- 卡片 callback 写出的信号文件 requestId 与 edge 轮询 requestId 一致
 - 用户点击“授权发布”后，edge 继续执行 `submit_publish`
 - 用户点击“取消”后，edge 不执行 `submit_publish`
 - 超时后 edge 返回 `approval_timeout`
@@ -519,14 +522,14 @@ edge 在收到 `publish.request` 后、进入 `publishPost(...)` 前生成 token
 #### 变更范围
 
 ##### cloud
-- **/Users/bears/aidcp-cloud/src/feishu/ws-receiver.ts**
-- **/Users/bears/aidcp-cloud/src/feishu/messenger.ts**
-- **/Users/bears/aidcp-cloud/src/feishu/cards.ts**
-- **/Users/bears/aidcp-cloud/src/feishu/types.ts**
-- **/Users/bears/aidcp-cloud/src/comm/** 下处理 `publish.result` 的业务文件
+- **aidcp-cloud/src/feishu/ws-receiver.ts**
+- **aidcp-cloud/src/feishu/messenger.ts**
+- **aidcp-cloud/src/feishu/cards.ts**
+- **aidcp-cloud/src/feishu/types.ts**
+- **aidcp-cloud/src/comm/** 下处理 `publish.result` 的业务文件
 
 ##### edge
-- **/Users/bears/aidcp-edge/src/main.ts**（如需补充更明确的结果字段）
+- **aidcp-edge/src/main.ts**（如需补充更明确的结果字段）
 
 #### 验收标准
 - 用户点击授权后，卡片可更新为“已授权，等待发布”
@@ -537,7 +540,7 @@ edge 在收到 `publish.request` 后、进入 `publishPost(...)` 前生成 token
 
 #### 测试策略
 - 卡片模板单测：不同状态渲染正确
-- `token → card context` 映射单测
+- `requestId → card context` 映射单测
 - `publish.result` 驱动卡片更新单测
 - 超时状态更新单测
 
@@ -547,19 +550,19 @@ edge 在收到 `publish.request` 后、进入 `publishPost(...)` 前生成 token
 把“用户未审批”“cloud 发卡失败”“edge 发布失败”区分得更清楚，便于运维与排障。
 
 #### 变更范围
-- **/Users/bears/aidcp-cloud/src/comm/protocol.ts**
-- **/Users/bears/aidcp-edge/src/comm/protocol.ts**
-- **/Users/bears/aidcp-cloud/src/comm/** 下相关 handler 文件
-- **/Users/bears/aidcp-edge/src/main.ts**
+- **aidcp-cloud/src/comm/protocol.ts**
+- **aidcp-edge/src/comm/protocol.ts**
+- **aidcp-cloud/src/comm/** 下相关 handler 文件
+- **aidcp-edge/src/main.ts**
 
 #### 可选增强项
 - 为 `publish.approval_request` 增加 ACK/结果响应
 - 为 `publish.result.error` 细分结构化错误码
-- 增加 `token / requestId` 维度日志串联
+- 增加 `requestId` 维度日志串联
 
 #### 验收标准
 - 能明确区分：发卡失败 / 审批取消 / 审批超时 / 发布失败
-- 日志可按 `token` 或 `requestId` 串联完整链路
+- 日志可按 `requestId` 串联完整链路
 
 ---
 
@@ -591,7 +594,7 @@ edge 在收到 `publish.request` 后、进入 `publishPost(...)` 前生成 token
 
 #### 风险 A：cloud handler 接线位置不集中
 - 需要先确认 cloud 当前 WebSocket 业务 handler 的实际文件位置
-- 本方案已预留为 **/Users/bears/aidcp-cloud/src/comm/** 下实际业务 handler 文件
+- 本方案已预留为 **aidcp-cloud/src/comm/** 下实际业务 handler 文件
 
 #### 风险 B：审批群 chatId 来源不统一
 - 第一阶段建议先复用默认审批群配置
@@ -617,7 +620,7 @@ edge 在收到 `publish.request` 后、进入 `publishPost(...)` 前生成 token
 
 - 双端协议已支持 `publish.approval_request`
 - edge 正式发布前会主动触发 cloud 发审批卡
-- cloud 发卡使用 edge 传入 token，无需人工对齐
+- cloud 发卡使用 edge 传入 requestId，无需人工对齐
 - 用户授权 / 取消后，edge 能正确继续或中止发布
 - 超时与失败路径有明确返回
 - `/publish-test` 仍保留为后备入口
@@ -630,9 +633,9 @@ edge 在收到 `publish.request` 后、进入 `publishPost(...)` 前生成 token
 
 | 步骤 | 目标文件 | 关键验证 |
 |---|---|---|
-| 新增协议消息 | **/Users/bears/aidcp-cloud/src/comm/protocol.ts**、**/Users/bears/aidcp-edge/src/comm/protocol.ts** | 双端 envelope 构造/解析测试通过 |
-| cloud 接审批请求发卡 | **/Users/bears/aidcp-cloud/src/comm/** 下 handler、**/Users/bears/aidcp-cloud/src/feishu/cards.ts**、**/Users/bears/aidcp-cloud/src/feishu/messenger.ts** | 收到 `publish.approval_request` 后调用 `sendApprovalCard(...)` |
-| edge 主动发审批请求 | **/Users/bears/aidcp-edge/src/main.ts** | 收到 `publish.request` 后先发 `publish.approval_request` |
-| 复用审批门禁 | **/Users/bears/aidcp-edge/src/flows/publish-post.ts**、**/Users/bears/aidcp-edge/src/publish/approval-gate.ts** | approve / cancel / timeout 三路径回归通过 |
-| 文档与后备入口保留 | **/Users/bears/aidcp-cloud/docs/feishu-publish-approval-e2e.md**、**/Users/bears/aidcp-cloud/src/feishu/commands.ts** | 主动流文档可执行，`publish-test` 仍可联调 |
-| 第二阶段卡片状态回写 | **/Users/bears/aidcp-cloud/src/feishu/** 下相关文件、**/Users/bears/aidcp-cloud/src/comm/** 下处理 `publish.result` 的文件 | 卡片状态与 `publish.result` 一致 |
+| 新增协议消息 | **aidcp-cloud/src/comm/protocol.ts**、**aidcp-edge/src/comm/protocol.ts** | 双端 envelope 构造/解析测试通过 |
+| cloud 接审批请求发卡 | **aidcp-cloud/src/comm/** 下 handler、**aidcp-cloud/src/feishu/cards.ts**、**aidcp-cloud/src/feishu/messenger.ts** | 收到 `publish.approval_request` 后调用 `sendApprovalCard(...)` |
+| edge 主动发审批请求 | **aidcp-edge/src/main.ts** | 收到 `publish.request` 后先发 `publish.approval_request` |
+| 复用审批门禁 | **aidcp-edge/src/flows/publish-post.ts**、**aidcp-edge/src/publish/approval-gate.ts** | approve / cancel / timeout 三路径回归通过 |
+| 文档与后备入口保留 | **aidcp-cloud/docs/feishu-publish-approval-e2e.md**、**aidcp-cloud/src/feishu/commands.ts** | 主动流文档可执行，`publish-test` 仍可联调 |
+| 第二阶段卡片状态回写 | **aidcp-cloud/src/feishu/** 下相关文件、**aidcp-cloud/src/comm/** 下处理 `publish.result` 的文件 | 卡片状态与 `publish.result` 一致 |

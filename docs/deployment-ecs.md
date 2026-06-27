@@ -8,7 +8,7 @@
 - `aidcp-cloud` 当前部署在 ECS `121.89.85.150`
 - 部署目录为 `/opt/aidcp/cloud`
 - 由 systemd 单元 `aidcp-cloud.service` 托管，当前状态为 active running
-- 启动命令为 `npm exec tsx src/server.ts --env-file=.env`
+- 由 systemd 启动：`ExecStart=/usr/bin/npx tsx src/server.ts`，环境变量经 `EnvironmentFile=/opt/aidcp/cloud/.env` 注入
 - 工作目录为 `/opt/aidcp/cloud`
 - 服务对外监听 `0.0.0.0:8787`
 - edge 公网直连地址为 `ws://121.89.85.150:8787`
@@ -31,7 +31,8 @@
 - systemd 单元：`aidcp-cloud.service`
 - 服务状态：active running
 - 工作目录：`/opt/aidcp/cloud`
-- 启动命令：`npm exec tsx src/server.ts --env-file=.env`
+- 启动命令（systemd）：`ExecStart=/usr/bin/npx tsx src/server.ts`，环境变量由 `EnvironmentFile=/opt/aidcp/cloud/.env` 注入（不使用 `--env-file`）
+- 手动 / 调试启动（package.json 的 `start` 脚本形式）：`tsx --env-file=.env src/server.ts`（`--env-file` 必须位于脚本之前，否则会被 tsx 当作脚本参数）
 
 ### 2. 网络与访问
 
@@ -55,6 +56,8 @@
 - `PGUSER`
 - `PGPASSWORD`
 - `PGDATABASE`
+
+补充：`src/risk/pg-risk-store.ts` 另接受一组可选兜底键 `AIDCP_PG_HOST` / `AIDCP_PG_PORT` / `AIDCP_PG_DATABASE` / `AIDCP_PG_USER` / `AIDCP_PG_PASSWORD`；但 ECS 上 `src/server.ts` 已显式传入标准 `PG*` 键，优先级更高，因此风控存储与其余组件走同一套 PG 连接，无需单独配置该兜底族。
 
 当前 ECS 部署下，默认值即正确：
 

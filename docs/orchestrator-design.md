@@ -1,5 +1,21 @@
 # 浏览会话编排架构
 
+> ⚠️ **历史文档（架构已被取代）**：本文描述的是早期 `SessionOrchestrator` + `Blackboard` + `Arbiter` + 5-`BaseAgent` 编排模型，**该架构已不复存在**。当前实现为事件驱动的 `RoleDispatcher` + `BaseRole` + EventBus（`RoleEventMap`），约 32 个常驻角色协作。权威说明见 [`../README.md`](../README.md) 与源码 `src/orchestrator/role-dispatcher.ts`、`src/agents/base-role.ts`。以下内容仅作设计历史保留，**勿据此理解现状**。
+
+## 0. 当前实际架构（速览）
+
+> 本节为现状速览，其余章节（§1 起）均为历史设计，请对照阅读。
+
+- 编排是**事件驱动**的：每个连接握手时 `buildDispatcher()` 造一束 `RoleDispatcher`（`src/orchestrator/role-dispatcher.ts`），注册约 32 个常驻 `BaseRole`（`src/agents/base-role.ts`）角色（外加最多 3 个条件角色）。
+- 角色之间不经黑板，而是通过 EventBus 的 `RoleEventMap`（`src/event-bus/types.ts`，`RoleName` 为角色清单的权威来源）发/收事件协作。
+- **没有** `Blackboard` / `Arbiter` / `SessionOrchestrator` / `AgentOrchestrator` / `BaseAgent`（均已删除，`src/blackboard/`、`src/agents/types.ts` 不再存在）。
+- 生产入口是 `src/server.ts` 构建的 `RoleDispatcher`（`buildDispatcher()`），不再是 `SessionOrchestrator`。
+- 会话生命周期由 `SessionMonitorRole` 以 `action.completed` 事件驱动判定结束（按动作数 / 时长 / 配额发 `session.should_end`），**不再**有黑板的 veto/gate 或 `views < 5` 冷启动门控。
+- 单场上限来自安全限额层 `src/risk/session-limits.ts` 的 `DEFAULT_SESSION_BUDGET`（likes=10、collects=5、searches=5、follows=3、comments=2、comment_likes=3、时长 10min），**不再**取自 `soul.session_limits`。
+- 完整角色清单与职责见 [`../README.md`](../README.md) 与 [`./agent-roles-design.md`](./agent-roles-design.md)。
+
+---
+
 ## 1. 概览
 
 ### 事件驱动编排架构
@@ -185,6 +201,8 @@ interface SessionOrchestratorOptions {
 
 所有 Agent 继承 `BaseAgent` 抽象类（`src/agents/types.ts`），实现两个核心方法：
 
+> 🛈 **现状更正**：`BaseAgent` 与 `src/agents/types.ts` 均已删除。现役基类是 `BaseRole`（`src/agents/base-role.ts`），角色经 EventBus 的 `RoleEventMap` 协作，下文的 `shouldActivate()` / `decide()` / 黑板写回模型已不复存在。
+
 ```typescript
 abstract class BaseAgent {
   abstract readonly role: AgentRole;
@@ -224,11 +242,11 @@ interface AgentDecision {
   - 检查会话时长超限 → `veto: true` + `end_session`
   - 检查互动配额全部耗尽 → `veto: true` + `end_session`
   - 冷启动检测（`views < 5`） → `gate: { blocks: ['interaction_appraiser'] }`
-- **硬上限**（来自 `soul.session_limits`）：
-  - `max_duration_min`：10 分钟
-  - `max_likes`：8 次
-  - `max_collects`：5 次
-  - `max_searches`：3 次
+- **硬上限**（现役取自安全限额层 `src/risk/session-limits.ts` 的 `DEFAULT_SESSION_BUDGET`，**不再**取自 `soul.session_limits`）：
+  - 时长：10 分钟
+  - `likes`：10 次
+  - `collects`：5 次
+  - `searches`：5 次（另有 `follows`=3、`comments`=2、`comment_likes`=3）
 
 #### FeedScanner — 信息流筛选
 
@@ -440,13 +458,13 @@ actions.push('search');
 
 ### 会话级风控（SessionOrchestrator 内部）
 
-SessionOrchestrator 基于 `soul.session_limits` 自行计算剩余配额：
+SessionOrchestrator 当年基于 `soul.session_limits` 自行计算剩余配额（**现役改为读 `src/risk/session-limits.ts` 的 `DEFAULT_SESSION_BUDGET`**，默认 likes=10 / collects=5 / searches=5）：
 
 ```typescript
 private riskStatus(): RiskStatus {
-  const maxLikes = soul.session_limits?.max_likes ?? 8;
+  const maxLikes = soul.session_limits?.max_likes ?? 10;
   const maxCollects = soul.session_limits?.max_collects ?? 5;
-  const maxSearches = soul.session_limits?.max_searches ?? 3;
+  const maxSearches = soul.session_limits?.max_searches ?? 5;
   return {
     status: 'normal',
     quotaLevel: 'normal',
@@ -512,7 +530,9 @@ eventBus.on('interaction.occurred', (evt) => {
 
 harvest 优先级：`session.verdict deny > interaction.decision > feed.decision > fallback`
 
-该方案与 `SessionOrchestrator` 的黑板 + 仲裁器模式并存，作为更松耦合的编排方式。当前生产入口使用 `SessionOrchestrator`。
+该方案与 `SessionOrchestrator` 的黑板 + 仲裁器模式曾经并存，作为更松耦合的编排方式。
+
+> 🛈 **现状更正**：上述 `SessionOrchestrator` / `AgentOrchestrator` / `RoleAgent` 均已删除。当前生产入口是 `src/server.ts` 的 `buildDispatcher()` 构建的事件驱动 `RoleDispatcher`（`src/orchestrator/role-dispatcher.ts`），而非 `SessionOrchestrator`。本节中的「事件流驱动的循环收敛」思路在精神上更接近现役实现，但类名与 API 已不同，详见 §0。
 
 ---
 
