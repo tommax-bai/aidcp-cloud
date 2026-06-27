@@ -291,11 +291,25 @@ export interface RolePromptView {
    * 无（定位不唯一 / 拼接不等 / 角色未实现 personaSegments）则回落扁平展示 `prompt`。绝不瞎标。
    */
   segments?: RolePromptSegment[];
+  /**
+   * 本次预览所用账号（change prompt-preview-persona-selector，可选）：给定 `?accountId=` 时回显；
+   * 缺省（不传 accountId）则不附此字段，行为与扩展前一致。
+   */
+  accountId?: string;
+  /**
+   * 选定账号未配人设、回落系统默认人设的诚实标志（change prompt-preview-persona-selector，可选）：
+   * true=该账号无人设行、下示为默认人设（绝不把默认人设冒充为该账号人设）。
+   */
+  personaFallback?: boolean;
 }
 
 export interface PanelRolePromptPreview {
-  /** 取某角色 prompt 的只读预览（纯读，无写）。 */
-  get(roleId: string): RolePromptView;
+  /**
+   * 取某角色 prompt 的只读预览（纯读，无写）。
+   * 可选 `accountId`（change prompt-preview-persona-selector）：给定则按该账号人设渲染；
+   * 缺省则按系统默认人设（行为与扩展前一致）。
+   */
+  get(roleId: string, accountId?: string): RolePromptView;
 }
 
 // ── 账号人设配置（change account-persona-config，stream F）──────────────────────

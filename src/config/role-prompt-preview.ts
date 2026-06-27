@@ -88,40 +88,80 @@ function safePreview(roleId: string, inst: Previewable): RolePromptView {
 }
 
 export interface RolePromptProvider {
-  /** 取某角色 prompt 只读预览。未知/非文本/无预览/失败 → available:false + 诚实 note。 */
-  get(roleId: string): RolePromptView;
+  /**
+   * 取某角色 prompt 只读预览。未知/非文本/无预览/失败 → available:false + 诚实 note。
+   * 可选 accountId（change prompt-preview-persona-selector）：给定则按该账号人设渲染、回显账号 +
+   * 无人设行时诚实标注回落默认；缺省则按系统默认人设（行为与扩展前逐字一致）。
+   */
+  get(roleId: string, accountId?: string): RolePromptView;
 }
 
 /**
- * @param getBrowseRoles 取已注册的浏览角色实例（经 RoleDispatcher.getRoles() 借读）。
+ * 预览的账号口径注入（change prompt-preview-persona-selector）。两者皆缺省 → 退化为「恒系统默认人设」旧行为。
  */
-export function createRolePromptProvider(getBrowseRoles: () => readonly BaseRole[]): RolePromptProvider {
-  return {
-    get(roleId: string): RolePromptView {
-      const item = getCatalogItem(roleId);
-      if (!item) return { roleId, prompt: null, available: false, note: '未知角色' };
-      if (item.llmKind !== 'text') {
-        return {
-          roleId,
-          prompt: null,
-          available: false,
-          note: item.llmKind === 'image' ? '图像角色无文本 prompt（用全局图片模型）' : '该角色不调用大模型',
-        };
-      }
-      if (item.group === 'browse') {
-        const roleName = roleId.slice('browse:'.length);
-        const inst = getBrowseRoles().find((r) => r.roleName === roleName);
-        if (!inst || !hasPreview(inst)) {
-          return { roleId, prompt: null, available: false, note: '该角色暂不支持预览' };
-        }
-        return safePreview(roleId, inst);
-      }
-      // 发布侧：prompt 集中在 publish-agent/prompts.ts，可直接读源码；本期后台暂只渲染浏览侧（诚实，不伪造）。
+export interface RolePromptProviderOptions {
+  /**
+   * 在选定账号口径下同步执行 fn（切预览 dispatcher 当前账号 → 同步渲染 → finally 还原）。
+   * 渲染全程同步、Node 单线程，单次调用内无 await/无交错，故「切—还原」对并发预览原子安全。
+   */
+  withAccount?: <T>(accountId: string, fn: () => T) => T;
+  /** 该账号是否真有人设行（不回落判定，用于诚实回落标注）；缺省视为「无从判定」→ 不标 fallback。 */
+  hasPersona?: (accountId: string) => boolean;
+}
+
+const FALLBACK_NOTE = '该账号未配人设，预览用默认人设；实时数据为示例占位（线上调用时由系统填入真实值）。';
+
+/**
+ * @param getBrowseRoles 取已注册的浏览角色实例（经 RoleDispatcher.getRoles() 借读）。
+ * @param opts 账号口径注入（可选）：给定 withAccount/hasPersona 才支持 accountId 维度预览。
+ */
+export function createRolePromptProvider(
+  getBrowseRoles: () => readonly BaseRole[],
+  opts: RolePromptProviderOptions = {},
+): RolePromptProvider {
+  // 单角色渲染（不含账号口径切换）：未知/非文本/无预览/失败 → available:false + 诚实 note。
+  const render = (roleId: string): RolePromptView => {
+    const item = getCatalogItem(roleId);
+    if (!item) return { roleId, prompt: null, available: false, note: '未知角色' };
+    if (item.llmKind !== 'text') {
       return {
         roleId,
         prompt: null,
         available: false,
-        note: '发布侧 prompt 集中于 publish-agent/prompts.ts，本期后台暂只渲染浏览侧；发布侧待后续',
+        note: item.llmKind === 'image' ? '图像角色无文本 prompt（用全局图片模型）' : '该角色不调用大模型',
+      };
+    }
+    if (item.group === 'browse') {
+      const roleName = roleId.slice('browse:'.length);
+      const inst = getBrowseRoles().find((r) => r.roleName === roleName);
+      if (!inst || !hasPreview(inst)) {
+        return { roleId, prompt: null, available: false, note: '该角色暂不支持预览' };
+      }
+      return safePreview(roleId, inst);
+    }
+    // 发布侧：prompt 集中在 publish-agent/prompts.ts，可直接读源码；本期后台暂只渲染浏览侧（诚实，不伪造）。
+    return {
+      roleId,
+      prompt: null,
+      available: false,
+      note: '发布侧 prompt 集中于 publish-agent/prompts.ts，本期后台暂只渲染浏览侧；发布侧待后续',
+    };
+  };
+
+  return {
+    get(roleId: string, accountId?: string): RolePromptView {
+      // 无 accountId 或未注入 withAccount → 旧行为（系统默认人设），不附账号字段。
+      if (!accountId || !opts.withAccount) return render(roleId);
+      // 选定账号口径：切预览账号 → 同步渲染 → finally 还原（由 withAccount 保证，含渲染抛错路径）。
+      const view = opts.withAccount(accountId, () => render(roleId));
+      // 诚实回落标注：default 账号本就用默认人设、不算回落；其余账号无人设行才标 personaFallback。
+      const fallback = accountId !== 'default' && !!opts.hasPersona && !opts.hasPersona(accountId);
+      return {
+        ...view,
+        accountId,
+        // 仅在确为回落且渲染成功时改 note（available:false 的诚实原因 note 不覆盖）；绝不把默认人设冒充为该账号人设。
+        ...(fallback && view.available ? { note: FALLBACK_NOTE } : {}),
+        ...(fallback ? { personaFallback: true } : {}),
       };
     },
   };

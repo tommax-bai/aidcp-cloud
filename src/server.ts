@@ -1055,7 +1055,21 @@ async function main(): Promise<void> {
   // 单场上限面板外观（change session-limits-to-quota-layer）：按账号时长 + 六项预算回显 + 写校验（非法整块拒）+ 非乐观回真态。
   const sessionLimitPanel = createSessionLimitPanel({ store: sessionConfigStore });
   // 角色 prompt 只读预览（change role-prompt-visibility）：借仅供预览的 RoleDispatcher 渲染真实 prompt。
-  const rolePromptProvider = createRolePromptProvider(() => previewDispatcher.getRoles());
+  // 人设选择框（change prompt-preview-persona-selector）：给定 accountId 时把预览 dispatcher 当前账号临时切到
+  // 该账号、同步渲染、finally 还原（previewPrompt 全程同步、单线程无交错，故原子安全）；hasPersona 用不回落的
+  // getForAccount 判定该账号是否真有人设行（无行则诚实标 personaFallback、绝不冒充）。
+  const rolePromptProvider = createRolePromptProvider(() => previewDispatcher.getRoles(), {
+    withAccount: (accountId, fn) => {
+      const prev = previewDispatcher.accountId;
+      previewDispatcher.setCurrentAccountId(accountId);
+      try {
+        return fn();
+      } finally {
+        previewDispatcher.setCurrentAccountId(prev);
+      }
+    },
+    hasPersona: (accountId) => personaStore.getForAccount(accountId) !== null,
+  });
 
   // ── 面板 API 层（管理后台后端，进程内、独立端口、JWT）──────────────────────
   // 未设置 AIDCP_PANEL_PORT 则禁用（默认不开新端口）；启动失败非致命，绝不连累边-云闭环。

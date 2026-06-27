@@ -573,7 +573,11 @@ function createRequestHandler(
         sendJson(res, 404, { error: 'unknown_role' });
         return;
       }
-      sendJson(res, 200, deps.rolePromptPreview.get(roleId));
+      // 人设选择框（change prompt-preview-persona-selector）：可选 ?accountId= 按选定账号人设渲染。
+      // 缺省/未知账号不报错——透传 provider 按诚实回落标注处理（预览是只读探查，不该 4xx 挡路）。
+      const promptQuery = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+      const promptAccountId = promptQuery.get('accountId') ?? undefined;
+      sendJson(res, 200, deps.rolePromptPreview.get(roleId, promptAccountId));
       return;
     }
 
