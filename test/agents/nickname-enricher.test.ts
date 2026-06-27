@@ -17,7 +17,6 @@ interface Harness {
   ctx: SessionContext;
   setCalls: { accountId: string; nickname: string }[];
   fireTimeout: () => void;
-  fireDefer: () => void;
   timerCleared: () => boolean;
   captures: { accountId: string }[];
   backToFeed: number;
@@ -28,7 +27,6 @@ function setup(opts: { accountId?: string } = {}): Harness {
   const ctx = new SessionContext();
   const setCalls: { accountId: string; nickname: string }[] = [];
   let timeoutCb: (() => void) | null = null;
-  let deferCb: (() => void) | null = null;
   let cleared = false;
   const captures: { accountId: string }[] = [];
   let backToFeed = 0;
@@ -39,7 +37,7 @@ function setup(opts: { accountId?: string } = {}): Harness {
     sessionContext: ctx,
     getAccountId: () => opts.accountId ?? REAL,
     setNickname: (accountId, nickname) => { setCalls.push({ accountId, nickname }); },
-    setTimeoutFn: (fn, ms) => { if (ms === 0) deferCb = fn; else timeoutCb = fn; return { id: ms === 0 ? 1 : 2 }; },
+    setTimeoutFn: (fn) => { timeoutCb = fn; return { id: 1 }; },
     clearTimeoutFn: () => { cleared = true; },
   });
   role.subscribe();
@@ -50,7 +48,6 @@ function setup(opts: { accountId?: string } = {}): Harness {
   return {
     bus, ctx, setCalls, captures,
     fireTimeout: () => { if (timeoutCb) timeoutCb(); },
-    fireDefer: () => { if (deferCb) deferCb(); },
     timerCleared: () => cleared,
     get backToFeed() { return backToFeed; },
   } as Harness;
@@ -58,6 +55,10 @@ function setup(opts: { accountId?: string } = {}): Harness {
 
 function sessionStart(bus: EventBus): void {
   bus.emit('feed.entered', { pageType: 'feed', trigger: 'session_start', ts: Date.now() });
+}
+/** 边缘就绪信号：首个 page.cards.arrived（初始扫描完、进命令循环、已登记可推送）。 */
+function edgeReady(bus: EventBus): void {
+  bus.emit('page.cards.arrived', { cards: [], ts: Date.now() });
 }
 function selfDetail(bus: EventBus, accountId: string, nickname?: string): void {
   bus.emit('profile.detail.arrived', {
@@ -68,27 +69,37 @@ function selfDetail(bus: EventBus, accountId: string, nickname?: string): void {
 }
 
 describe('NicknameEnricher（登录账号真实昵称采集，云端角色驱动）', () => {
-  it('会话开始 + 需采集 → 同步暂停浏览/置在途/武装超时；命令延后(下一拍)再 emit self.profile.capture（修 sent=0）', () => {
+  it('会话开始 + 需采集 → 同步暂停浏览/置在途/武装超时；命令延到边缘就绪(首个 page.cards)再 emit（修 sent=0 + 命令循环未起）', () => {
     const h = setup();
     h.ctx.setPendingNicknameCapture(true);
     sessionStart(h.bus);
     // 状态同步置好（立刻挡 R3 窗口 + 让通知巡视让位）
     assert.equal(h.ctx.browseSuspended, true, '应同步暂停自主浏览');
     assert.equal(h.ctx.selfCaptureInFlight, true, '应同步置在途标记');
-    // 命令延后：不在 hello 同步窗口内 emit（修 sent=0：等边缘登记进可推送表后再发）
-    assert.equal(h.captures.length, 0, 'emit 应延到下一 macrotask，不在握手同步窗口内发');
-    h.fireDefer();
-    assert.equal(h.captures.length, 1, '下一拍应 emit 一次 self.profile.capture');
+    // 命令延后：会话开始时边缘还没就绪（未登记可推送 + 初始扫描中命令循环未起），不发
+    assert.equal(h.captures.length, 0, 'emit 应延到边缘就绪，不在握手窗口/初始扫描期发（否则 sent=0 或被丢）');
+    edgeReady(h.bus); // 首个 page.cards.arrived
+    assert.equal(h.captures.length, 1, '边缘就绪后应 emit 一次 self.profile.capture');
     assert.equal(h.captures[0].accountId, REAL);
   });
 
-  it('延后期间采集被收尾（reset/超时清掉在途）→ 延后命令不再 emit（防误发）', () => {
+  it('边缘就绪前采集被收尾（reset/超时清掉在途）→ 就绪信号不再 emit（防误发）', () => {
     const h = setup();
     h.ctx.setPendingNicknameCapture(true);
     sessionStart(h.bus);
-    h.ctx.setSelfCaptureInFlight(false); // 模拟下一拍前被 reset/超时清掉
-    h.fireDefer();
-    assert.equal(h.captures.length, 0, 'in-flight 已清 → 延后命令不发');
+    h.ctx.setSelfCaptureInFlight(false); // 模拟就绪前被 reset/超时清掉
+    edgeReady(h.bus);
+    assert.equal(h.captures.length, 0, 'in-flight 已清 → 就绪信号不发命令');
+  });
+
+  it('边缘就绪信号去重：多次 page.cards 只触发一次采集命令', () => {
+    const h = setup();
+    h.ctx.setPendingNicknameCapture(true);
+    sessionStart(h.bus);
+    edgeReady(h.bus);
+    edgeReady(h.bus);
+    edgeReady(h.bus);
+    assert.equal(h.captures.length, 1, '首个 page.cards 后 awaitingEdgeReady 置 false，后续不再发');
   });
 
   it('会话开始 + 无需采集（pending=false）→ 零扰动', () => {

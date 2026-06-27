@@ -45,6 +45,8 @@ export class NicknameEnricher extends BaseRole {
   private readonly setTimeoutFn: (fn: () => void, ms: number) => unknown;
   private readonly clearTimeoutFn: (handle: unknown) => void;
   private unsubscribers: (() => void)[] = [];
+  /** 采集已武装、等边缘就绪（首个 page.cards.arrived）再下发命令；下发后置 false。 */
+  private awaitingEdgeReady = false;
 
   constructor(options: RoleOptions & NicknameEnricherDeps) {
     super(options);
@@ -58,6 +60,7 @@ export class NicknameEnricher extends BaseRole {
   subscribe(): void {
     this.unsubscribers.push(
       this.eventBus.on('feed.entered', (p) => this.onFeedEntered(p)),
+      this.eventBus.on('page.cards.arrived', () => this.onEdgeReady()),
       this.eventBus.on('profile.detail.arrived', (p) => this.onDetailArrived(p.detail, p.accountId)),
     );
   }
@@ -79,19 +82,26 @@ export class NicknameEnricher extends BaseRole {
 
     // 同步置「挂起浏览 + 在途标记 + 武装超时」：立刻挡住 R3 窗口（在途 page.cards 驱动的 open_note 被 chokepoint 丢弃），
     // 并让通知巡视准入据 selfCaptureInFlight 让位（二者都要独占边缘：进本人主页 vs 进通知页）。
+    // 同步置「挂起浏览 + 在途标记 + 武装超时」：立刻挡住 R3 窗口（在途 page.cards 驱动的 open_note 被 chokepoint 丢弃），
+    // 并让通知巡视准入据 selfCaptureInFlight 让位（二者都要独占边缘：进本人主页 vs 进通知页）。
     this.ctx.setBrowseSuspended(true);
     this.ctx.setSelfCaptureInFlight(true);
-    this.armTimeout();
-    this.log(`会话开始，需采登录账号昵称 account=${accountId} → 驱动本人主页直驱（profile_open direct）`);
-    // 命令下发推迟到下一 macrotask：feed.entered{session_start} 跑在 hello 消息处理的同步窗口内，此刻 ws-server
-    // 尚未把本连接登记进可推送表（edges.set 在 routeMessage 之后），同步 emit 会 sent=0；推到下一拍 → hello 回合
-    // 走完、边缘已登记 → profile_open 真正送达（sent=1）。在途标记已同步置好，期间到达的巡视/page.cards 仍被让位/丢弃。
-    this.setTimeoutFn(() => this.emitCapture(accountId), 0);
+    this.awaitingEdgeReady = true;
+    this.armTimeout(); // 兜底：即便边缘从不报 page.cards（静默），~20s 也恢复、不困死。
+    // 命令延到「边缘就绪」再发：feed.entered{session_start} 在 hello 消息处理的同步窗口内触发——此刻边缘既未登记进
+    // 可推送表（ws-server edges.set 在 await routeMessage 之后 → sent=0），也仍在初始扫 feed（命令循环未起 → 命令被丢）。
+    // 故等首个 page.cards.arrived（初始扫描完、进命令循环、已登记）再 emit → profile_open 真送达且被执行。
+    this.log(`会话开始，需采登录账号昵称 account=${accountId} → 待边缘就绪（首个 page.cards）即驱动本人主页直驱`);
   }
 
-  /** 实际下发采集意图（延后到边缘已登记后再发）。期间若被 reset / 超时收尾（selfCaptureInFlight 已清）则不再发。 */
-  private emitCapture(accountId: string): void {
-    if (!this.ctx.selfCaptureInFlight) return;
+  /** 边缘就绪信号（首个 page.cards.arrived：初始扫描完、进命令循环、已登记可推送）→ 此刻下发采集命令。 */
+  private onEdgeReady(): void {
+    if (!this.awaitingEdgeReady || !this.ctx.selfCaptureInFlight) return; // 未武装 / 已收尾 → 不发
+    this.awaitingEdgeReady = false;
+    const accountId = this.getAccountId();
+    if (!accountId || accountId === 'default') return;
+    this.armTimeout(); // 重置超时：从命令真正下发起算，给本人主页导航 + 抽取留足 ~20s。
+    this.log(`边缘就绪 → 下发本人主页直驱采集 account=${accountId}（profile_open direct）`);
     this.emit('self.profile.capture', { accountId });
   }
 
@@ -117,6 +127,7 @@ export class NicknameEnricher extends BaseRole {
     }
     // 严格顺序：取消超时 → 清在途标记 → 解除暂停 → emit back_to_feed（此时 browseSuspended 已清，返回 back 命令放行）。
     this.clearTimer();
+    this.awaitingEdgeReady = false;
     this.ctx.setSelfCaptureInFlight(false);
     this.ctx.setBrowseSuspended(false);
     this.emit('feed.entered', { pageType: 'feed', trigger: 'back_to_feed', ts: Date.now() });
@@ -136,6 +147,7 @@ export class NicknameEnricher extends BaseRole {
   private onTimeout(): void {
     if (!this.ctx.selfCaptureInFlight) return; // 已被本人 detail 收尾 → 超时空响（防竞态双回 feed）
     this.ctx.setSelfCaptureTimer(null);
+    this.awaitingEdgeReady = false;
     this.ctx.setSelfCaptureInFlight(false);
     this.ctx.setBrowseSuspended(false);
     this.log('本人昵称采集超时（edge 静默 ~20s）→ 恢复浏览、回 feed');
