@@ -42,7 +42,7 @@ function setup(opts: { accountId?: string } = {}): Harness {
   });
   role.subscribe();
 
-  bus.on('self.profile.capture', (p) => captures.push(p));
+  bus.on('self.profile.capture', (p) => { captures.push(p); });
   bus.on('feed.entered', (p) => { if (p.trigger === 'back_to_feed') backToFeed++; });
 
   return {
