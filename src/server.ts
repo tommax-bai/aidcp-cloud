@@ -964,7 +964,23 @@ async function main(): Promise<void> {
       // 优质评论语料库（comment-like-on-detail B）：归档闭包 + 按主题召回参考闭包（store 缺失则不接线）。
       ...(valuableCommentStore
         ? {
-            archiveValuableComment: (input) => valuableCommentStore!.archive(input),
+            archiveValuableComment: async (input) => {
+              await valuableCommentStore!.archive(input);
+              // change curated-inspiration-corpus Phase 2：同一条优质评论并入精选语料（content_type='comment'、
+              // 按本连接真实账号），供发帖创作当「读者角度线索」。best-effort，失败不影响评论归档主路径。
+              if (curatedContentStore) {
+                curatedContentStore
+                  .archiveComment(ctx.accountId, {
+                    sourceId: input.dedupKey,
+                    text: input.text,
+                    author: input.author,
+                    topics: input.topics,
+                    sourceNoteTitle: input.sourceNoteTitle,
+                    reason: input.reason,
+                  })
+                  .catch((err) => console.warn('[aidcp-cloud] curated archiveComment error:', (err as Error).message));
+              }
+            },
             getCorpusReferences: (topics) => valuableCommentStore!.retrieveByTopics(topics, 3),
           }
         : {}),

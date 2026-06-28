@@ -193,6 +193,15 @@ export function buildCreatorPrompt(scoutDecision: ScoutDecision, trigger: Trigge
             .join('\n')
         : '（无）';
 
+  // 读者角度线索（change curated-inspiration-corpus Phase 2）：精选评论 —— 反哺写帖选题角度（次级、可空）。
+  const commentHintBlock = (generateInput.commentHints ?? [])
+    .slice(0, 3)
+    .map(
+      (h) =>
+        `- ${h.author ? `@${h.author}：` : ''}${h.text.replace(/\s+/g, ' ').slice(0, 100)}${h.sourceNoteTitle ? `（评论于《${h.sourceNoteTitle}》）` : ''}`,
+    )
+    .join('\n');
+
   const recentBlock =
     recentPublished.length > 0
       ? recentPublished.map((p, i) => `${i + 1}. ${p}`).join('\n')
@@ -232,6 +241,9 @@ export function buildCreatorPrompt(scoutDecision: ScoutDecision, trigger: Trigge
     '【可用素材——精选灵感（仅作灵感，严禁照抄）】',
     likedDetail,
     '【素材使用红线】以上素材只供你体会角度、话题与真实细节；严禁照抄或改写其句子，必须用你自己的话重新表达。',
+    ...(commentHintBlock
+      ? ['', '【读者角度线索——来自高赞评论（只供体会读者在意什么、可借选题角度；严禁照抄）】', commentHintBlock]
+      : []),
     '',
     '【最近发过的帖子（避免重复话题/角度）】',
     recentBlock,

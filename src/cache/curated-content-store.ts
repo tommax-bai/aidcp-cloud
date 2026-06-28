@@ -237,6 +237,37 @@ export class CuratedContentStore {
   }
 
   /**
+   * 归档一条「确认点赞成功」的优质评论（change curated-inspiration-corpus Phase 2）。
+   * content_type='comment'、bot_liked=true（机器人确实点赞了这条评论）；like_count 暂为 NULL
+   * （边端尚未抓逐条评论赞数）；title 复用为来源笔记标题（评论本身无标题，存来源供角度线索上下文）。
+   * dedup_key 重复忽略（评论一经确认点赞即归档，不刷新）；写后按账号裁保留上限。
+   */
+  async archiveComment(
+    accountId: string,
+    input: { sourceId: string; text: string; author?: string; topics: string[]; sourceNoteTitle?: string; reason?: string },
+  ): Promise<void> {
+    const dedupKey = dedupKeyOf(accountId, 'comment', input.sourceId);
+    await this.pool.query(
+      `INSERT INTO curated_content
+         (account_id, content_type, source_id, dedup_key, title, body, author, topics,
+          like_count, bot_liked, admit_reason, updated_at)
+       VALUES ($1, 'comment', $2, $3, $4, $5, $6, $7, NULL, true, $8, now())
+       ON CONFLICT (dedup_key) DO NOTHING`,
+      [
+        accountId,
+        input.sourceId,
+        dedupKey,
+        input.sourceNoteTitle ?? null,
+        input.text,
+        input.author ?? null,
+        input.topics,
+        input.reason ? `confirmed_like:${input.reason}` : 'confirmed_like',
+      ],
+    );
+    await this.trimToRetention(accountId);
+  }
+
+  /**
    * 召回给创作侧：自有动作优先（collected 权重 2、liked 权重 1），再按 collect_count、updated_at。
    * 按账号 + 内容类型过滤。
    */

@@ -231,3 +231,36 @@ test('selectForCreation：ORDER BY 含 bot_collected/bot_liked 权重，按账�
     botCollected: false,
   });
 });
+
+test('archiveComment 落 content_type=comment + bot_liked=true + ON CONFLICT DO NOTHING（Phase 2）', async () => {
+  const { pool, calls } = capturingPool();
+  const store = new CuratedContentStore({ pool });
+  await store.archiveComment('acc-1', {
+    sourceId: 'comment-9',
+    text: '很有用的评论',
+    author: '老王',
+    topics: ['露营'],
+    sourceNoteTitle: '湖边露营',
+    reason: 'insightful',
+  });
+  // 第一条 INSERT，第二条 trimToRetention DELETE。
+  assert.ok(calls.length >= 1);
+  const ins = calls[0];
+  assert.match(ins.sql, /INSERT INTO curated_content/);
+  assert.match(ins.sql, /'comment'/);
+  assert.match(ins.sql, /bot_liked/);
+  assert.match(ins.sql, /ON CONFLICT \(dedup_key\) DO NOTHING/);
+  assert.equal(ins.params[2], 'acc-1::comment::comment-9'); // dedup_key
+  assert.equal(ins.params[3], '湖边露营'); // title = 来源笔记标题
+  assert.equal(ins.params[4], '很有用的评论'); // body = 评论正文
+  assert.equal(ins.params[7], 'confirmed_like:insightful'); // admit_reason
+  // trimToRetention 按账号
+  assert.ok(calls.some((c) => /DELETE FROM curated_content/.test(c.sql)));
+});
+
+test('archiveComment 无 reason → admit_reason=confirmed_like', async () => {
+  const { pool, calls } = capturingPool();
+  const store = new CuratedContentStore({ pool });
+  await store.archiveComment('acc-2', { sourceId: 'comment-2', text: 't', topics: [] });
+  assert.equal(calls[0].params[7], 'confirmed_like');
+});

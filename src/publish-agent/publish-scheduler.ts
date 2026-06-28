@@ -120,13 +120,17 @@ export class PublishScheduler {
       : this.d.conceptStore
           .getNewConceptsSince(baseline)
           .then((ks) => ks.map((keyword) => ({ keyword, sourceNote: null as string | null })));
-    const [conceptsWithSource, liked, recentPublished, newConceptCount, materials] = await Promise.all([
+    const [conceptsWithSource, liked, recentPublished, newConceptCount, materials, commentItems] = await Promise.all([
       conceptsPromise,
       this.d.likedStore.recentSince(baseline),
       this.d.publishLog.recentPublishedContents(5),
       this.d.conceptStore.countNewSince(baseline),
       this.d.curatedStore
         ? this.d.curatedStore.selectForCreation(accountId, 'note', selectTopK)
+        : Promise.resolve([] as CuratedSelectItem[]),
+      // 精选评论当「读者角度线索」（change curated-inspiration-corpus Phase 2）：少量、次级素材。
+      this.d.curatedStore
+        ? this.d.curatedStore.selectForCreation(accountId, 'comment', 3)
         : Promise.resolve([] as CuratedSelectItem[]),
     ]);
     const hoursSinceLastPublish = (this.clock() - baseline) / HOUR_MS;
@@ -154,6 +158,8 @@ export class PublishScheduler {
           botLiked: m.botLiked,
           botCollected: m.botCollected,
         })),
+        // commentHints：精选评论 —— 读者角度线索（高赞/优质评论反哺写帖选题，change curated-inspiration-corpus Phase 2）。
+        commentHints: commentItems.map((c) => ({ text: c.body, author: c.author, sourceNoteTitle: c.title })),
         soul: this.resolveSoul(accountId),
         recentPosts: recentPublished,
       },

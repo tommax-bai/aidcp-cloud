@@ -99,6 +99,11 @@ export interface TriggerInput {
       botLiked: boolean;
       botCollected: boolean;
     }>;
+    /**
+     * 读者角度线索（change curated-inspiration-corpus Phase 2）：精选评论 —— 高赞/优质评论反哺写帖选题。
+     * 次级素材；仅供体会读者在意的角度，严禁照抄。缺省/空则不注入。
+     */
+    commentHints?: Array<{ text: string; author?: string; sourceNoteTitle?: string }>;
     soul: Soul;
     recentPosts: string[];
   };
