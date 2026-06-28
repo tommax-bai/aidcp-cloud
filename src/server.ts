@@ -57,6 +57,7 @@ import {
   resolveDefaultChatId,
   getApprovalSignalPath,
   writeApprovalSignal,
+  matchAccountByNickname,
   type CommandActions,
 } from './feishu/index.js';
 import { CommandSequencer } from './publish-agent/command-sequencer.js';
@@ -748,6 +749,27 @@ async function main(): Promise<void> {
     if (single) return single;
     throw new Error('当前为 0 个或多个账号，请显式指定账号，例如 `/aidcp status <accountId>`');
   };
+  // 按昵称解析 /publish 的目标账号（严格只认昵称、不接 id）：缺省 → 唯一真实账号；
+  // 找不到 / 重名 → 诚实抛错（带可用昵称清单），由路由层回报给运营。
+  const resolveAccountByNickname = async (nickname?: string): Promise<string> => {
+    if (!nickname) {
+      const single = await resolveSingleAccountId();
+      if (single) return single;
+      throw new Error('当前为 0 个或多个账号，请用昵称指定，例如 `/aidcp publish 工程师大白`');
+    }
+    if (!accountStore) throw new Error('账号存储未就绪，无法按昵称解析账号');
+    const all = await accountStore.listAll();
+    const candidates = all.map((a) => ({
+      accountId: a.accountId,
+      nickname: accountStore!.getNickname?.(a.accountId) ?? null,
+    }));
+    const r = matchAccountByNickname(nickname, candidates);
+    if (r.ok) return r.accountId;
+    if (r.reason === 'ambiguous') {
+      throw new Error(`有多个账号匹配昵称「${nickname}」（${r.available.join('、')}），请去重后再试`);
+    }
+    throw new Error(`找不到昵称「${nickname}」的账号。可用昵称：${r.available.join('、') || '(无)'}`);
+  };
   const actions: CommandActions = {
     status: async (accountId) => {
       const acct = await requireCommandAccount(accountId);
@@ -770,13 +792,14 @@ async function main(): Promise<void> {
       console.log(`[feishu] 已恢复账号：${acct}（恢复 edge 数=${resumedEdges}）`);
     },
     bindChat: (record) => botChatStore.setDefault(record),
-    // 手动 /publish [accountId]：越过风控 canDo（人工授权），发布前飞书人审仍铁定生效（AC-PUB）。
-    // accountId 指定以哪个账号发帖（落 publish_log.account_id + 命令定向到该账号在线节点）；缺省由 scheduler 解析唯一真实账号。
-    publish: async (accountId?: string) => {
+    // 手动 /publish <昵称>：越过风控 canDo（人工授权），发布前飞书人审仍铁定生效（AC-PUB）。
+    // 按昵称解析目标账号（严格只认昵称）→ 落 publish_log.account_id + 命令定向到该账号在线节点；缺省 → 唯一真实账号。
+    publish: async (nickname?: string) => {
       if (!publishScheduler) return '发帖触发器未就绪（PG/概念池不可用）';
-      const o = await publishScheduler.triggerManual(accountId);
-      if (o.result !== 'triggered') return `未触发（${o.reason}）。多账号下请显式指定账号：/aidcp publish <accountId>。`;
-      return `已触发（${o.reason}）→ 编排状态 ${'status' in o ? o.status : '-'}`;
+      const acct = await resolveAccountByNickname(nickname); // 找不到/重名 → 抛错，runPublish 走 fail 分支
+      const o = await publishScheduler.triggerManual(acct);
+      if (o.result !== 'triggered') return `未触发（${o.reason}）`;
+      return `已触发（${o.reason}）→ 账号 \`${acct}\` → 编排状态 ${'status' in o ? o.status : '-'}`;
     },
   };
   const commandRouter = new CommandRouter(actions);

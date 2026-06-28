@@ -28,6 +28,11 @@ export interface ParsedCommand {
   action: CommandAction;
   /** retire-default-account：缺省 undefined（执行层解析唯一真实账号），绝不回落 'default'。 */
   accountId?: string;
+  /**
+   * `/publish` 的目标账号**昵称**（用户输入的人类可读名，可含空格 → 取 `/publish ` 之后整段）。
+   * 由执行层按昵称解析为真实 account_id（严格只认昵称，不接 id）。缺省 undefined → 执行层解析唯一真实账号。
+   */
+  nickname?: string;
   /** 原始指令文本 */
   raw: string;
   /** help 场景携带的提示原因（如未识别的子命令） */
@@ -40,11 +45,40 @@ const HELP_TEXT = [
   '• `/aidcp status [accountId]` — 查账号状态',
   '• `/aidcp pause [accountId]` — 暂停账号',
   '• `/aidcp resume [accountId]` — 恢复账号',
+  '• `/aidcp publish <昵称>` — 触发该账号发帖（按昵称指定，发布前仍需人审）',
   '• `/aidcp publish-test [requestId]` — 发送测试审批卡片',
   '• `/aidcp bind` — 绑定当前群为默认审批群（开发中）',
   '',
-  '（单账号 MVP：accountId 可省略，默认作用于唯一账号）',
+  '（单账号时 accountId / 昵称可省略，默认作用于唯一账号）',
 ].join('\n');
+
+/** 账号昵称匹配的候选项（执行层从账号存储拼出）。 */
+export interface AccountNickCandidate {
+  accountId: string;
+  nickname: string | null;
+}
+
+/** 按昵称解析账号的结果。 */
+export type NicknameResolution =
+  | { ok: true; accountId: string }
+  | { ok: false; reason: 'not_found' | 'ambiguous'; available: string[] };
+
+/**
+ * 纯函数：按昵称（trim + 大小写不敏感、精确相等）在候选账号里解析唯一 account_id。
+ * 严格只认昵称（不接 id 兜底）；空昵称视为 not_found。0 个 → not_found（带可用昵称清单）、多个 → ambiguous。
+ */
+export function matchAccountByNickname(
+  nickname: string,
+  candidates: AccountNickCandidate[],
+): NicknameResolution {
+  const norm = (nickname ?? '').trim().toLowerCase();
+  const available = candidates.map((c) => c.nickname ?? `(无昵称:${c.accountId})`);
+  if (!norm) return { ok: false, reason: 'not_found', available };
+  const hits = candidates.filter((c) => (c.nickname ?? '').trim().toLowerCase() === norm);
+  if (hits.length === 1) return { ok: true, accountId: hits[0].accountId };
+  if (hits.length === 0) return { ok: false, reason: 'not_found', available };
+  return { ok: false, reason: 'ambiguous', available: hits.map((c) => c.accountId) };
+}
 
 /**
  * 解析一条文本指令为结构化命令。
@@ -74,8 +108,9 @@ export function parseCommand(text: string): ParsedCommand {
     case '/publish-test':
       return { action: 'publish-test', raw, args };
     case '/publish':
-      // /publish [accountId]：第二个 token 视为目标账号，缺省由执行层解析唯一真实账号（retire-default-account：绝不回落 default）。
-      return { action: 'publish', accountId: args[0], raw, args };
+      // /publish <昵称>：`/publish ` 之后整段视为目标账号**昵称**（可含空格），由执行层按昵称解析为真实 id（严格只认昵称、不接 id）；
+      // 缺省由执行层解析唯一真实账号（retire-default-account：绝不回落 default）。
+      return { action: 'publish', nickname: args.join(' ').trim() || undefined, raw, args };
     case '/bind':
       return { action: 'bind', raw, args };
     default:
@@ -93,8 +128,11 @@ export interface CommandActions {
   resume(accountId?: string): Promise<void> | void;
   /** 发送审批测试卡片 */
   publishTest?(): Promise<PublishApprovalPayload> | PublishApprovalPayload;
-  /** 手动触发一次发帖编排（A 阶段4 PublishScheduler 手动扳机；返回可读回执）。accountId 指定发哪个账号，缺省 default。 */
-  publish?(accountId?: string): Promise<string> | string;
+  /**
+   * 手动触发一次发帖编排（PublishScheduler 手动扳机；返回可读回执）。
+   * nickname 按昵称指定发哪个账号（执行层解析为真实 id，严格只认昵称）；缺省由执行层解析唯一真实账号。
+   */
+  publish?(nickname?: string): Promise<string> | string;
   /** 绑定当前群为默认审批群 */
   bindChat?(record: BotChatRecord): Promise<void> | void;
 }
@@ -169,12 +207,13 @@ export class CommandRouter {
       return this.fail(cmd, '发帖未接线', new Error('publish action not wired'));
     }
     try {
-      const msg = await this.actions.publish(cmd.accountId);
+      // nickname → 执行层按昵称解析真实账号（严格只认昵称）；解析失败由执行层抛错、走 fail 分支。
+      const msg = await this.actions.publish(cmd.nickname);
       return {
         command: cmd.raw,
         ok: true,
         title: '已触发发帖编排',
-        message: `${msg}\n（账号 \`${cmd.accountId}\`；人工授权越过风控，但发布前仍需飞书人审 approved=true 才会真发）`,
+        message: `${msg}\n（账号昵称 \`${cmd.nickname ?? '(唯一账号)'}\`；人工授权越过风控，但发布前仍需飞书人审 approved=true 才会真发）`,
         accountId: cmd.accountId,
       };
     } catch (err) {

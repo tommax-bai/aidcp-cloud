@@ -4,6 +4,7 @@ import {
   CommandRouter,
   parseCommand,
   resolvePublishApprovalRequestId,
+  matchAccountByNickname,
   type CommandActions,
 } from '../src/feishu/commands.js';
 
@@ -170,7 +171,57 @@ test('CommandRouter: publish-test 使用显式 requestId', async () => {
   assert.match(sent[0], /req-fixed/);
 });
 
-test('parseCommand: /aidcp publish → action publish（A 阶段4 手动扳机）', () => {
+test('parseCommand: /aidcp publish 无参 → action publish、nickname undefined（执行层解析唯一账号）', () => {
   const cmd = parseCommand('/aidcp publish');
   assert.equal(cmd.action, 'publish');
+  assert.equal(cmd.nickname, undefined);
+});
+
+test('parseCommand: /publish <昵称> → nickname 取昵称（不再当 accountId）', () => {
+  const cmd = parseCommand('/aidcp publish 工程师大白');
+  assert.equal(cmd.action, 'publish');
+  assert.equal(cmd.nickname, '工程师大白');
+});
+
+test('parseCommand: /publish 多词昵称（含空格）整段捕获', () => {
+  const cmd = parseCommand('/aidcp publish 大白 工程师');
+  assert.equal(cmd.action, 'publish');
+  assert.equal(cmd.nickname, '大白 工程师');
+});
+
+test('matchAccountByNickname: 精确命中（trim + 大小写不敏感）', () => {
+  const cands = [
+    { accountId: 'id-a', nickname: '工程师大白' },
+    { accountId: 'id-b', nickname: 'Tmax' },
+  ];
+  assert.deepEqual(matchAccountByNickname('工程师大白', cands), { ok: true, accountId: 'id-a' });
+  assert.deepEqual(matchAccountByNickname('  tmax ', cands), { ok: true, accountId: 'id-b' });
+});
+
+test('matchAccountByNickname: 找不到 → not_found（带可用昵称清单）', () => {
+  const cands = [{ accountId: 'id-a', nickname: '工程师大白' }];
+  const r = matchAccountByNickname('不存在的名', cands);
+  assert.equal(r.ok, false);
+  assert.equal(r.ok === false && r.reason, 'not_found');
+  assert.deepEqual(r.ok === false && r.available, ['工程师大白']);
+});
+
+test('matchAccountByNickname: 严格只认昵称——给 account id 也按昵称查、查不到即 not_found', () => {
+  const cands = [{ accountId: 'id-a', nickname: '工程师大白' }];
+  const r = matchAccountByNickname('id-a', cands);
+  assert.equal(r.ok, false, 'id 不当昵称命中（不接 id 兜底）');
+});
+
+test('matchAccountByNickname: 重名 → ambiguous', () => {
+  const cands = [
+    { accountId: 'id-a', nickname: '小白' },
+    { accountId: 'id-b', nickname: '小白' },
+  ];
+  const r = matchAccountByNickname('小白', cands);
+  assert.equal(r.ok === false && r.reason, 'ambiguous');
+});
+
+test('matchAccountByNickname: 空昵称 → not_found（不静默命中）', () => {
+  const r = matchAccountByNickname('   ', [{ accountId: 'id-a', nickname: '小白' }]);
+  assert.equal(r.ok === false && r.reason, 'not_found');
 });
