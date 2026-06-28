@@ -77,8 +77,8 @@ function buildFullPipeline(llmResponses: Record<string, string>, opts?: { enable
   };
   const insertedRecords: any[] = [];
   const fakeStore = { insert: async (record: any) => { insertedRecords.push(record); return 42; } };
+  // decouple-publish-generation-from-dispatch：生成候审段不下发边缘（executor 不再 push）；保留空数组以断言「生成不下发」。
   const pushedEnvelopes: any[] = [];
-  const fakePusher = { pushToEdges: (envelope: any) => { pushedEnvelopes.push(envelope); return 1; } };
 
   const orchestrator = new PublishOrchestrator({ clock, idGen: () => 'run-001', logger: silentLogger, pipelineTimeoutMs: 5000 });
   const common = { clock, logger: silentLogger };
@@ -105,7 +105,7 @@ function buildFullPipeline(llmResponses: Record<string, string>, opts?: { enable
   orchestrator.registerRole(new ComplianceDeciderRole(common));
   orchestrator.registerRole(new MetadataAggregatorRole(common));
   orchestrator.registerRole(new ApprovalGatekeeperRole({ llmClient: fakeLlm as any, ...common }));
-  orchestrator.registerRole(new PublishExecutorRole({ store: fakeStore, pusher: fakePusher, idGen: () => 'env-001', ...common }));
+  orchestrator.registerRole(new PublishExecutorRole({ store: fakeStore, ...common }));
 
   return { orchestrator, insertedRecords, pushedEnvelopes };
 }
@@ -125,12 +125,14 @@ describe('PublishOrchestrator', () => {
 
     const result = await orchestrator.trigger(makeTriggerInput());
 
-    assert.equal(result.status, 'draft');
-    assert.equal(result.dispatched, true);
+    // decouple-publish-generation-from-dispatch：生成候审段终止于「落库待审 + 发审批卡」，不下发边缘。
+    assert.equal(result.status, 'pending_approval');
+    assert.equal(result.dispatched, false);
     assert.equal(result.recordId, 42);
     assert.equal(result.runId, 'run-001');
     assert.equal(insertedRecords.length, 1);
-    assert.equal(pushedEnvelopes.length, 1);
+    assert.equal(insertedRecords[0].status, 'pending_approval', '落库为待审草稿');
+    assert.equal(pushedEnvelopes.length, 0, '生成候审段绝不下发边缘');
     // 稳定边界：组装产出仍含八字段（细拆后等价）。
     // 12（stage-2 生产段+下游）+ 9（stage-3 元数据/合规决策）+ 1（TitleCreator）= 22；新角色并行、不阻塞 publishResult。
     assert.equal(orchestrator.getRoles().length, 22);
@@ -193,7 +195,7 @@ describe('PublishOrchestrator', () => {
     assert.equal(result2.status, 'skipped');
     assert.equal(result2.runId, '');
     const result1 = await p1;
-    assert.ok(['draft', 'needs_review', 'failed'].includes(result1.status));
+    assert.ok(['pending_approval', 'draft', 'needs_review', 'failed'].includes(result1.status));
   });
 
   test('AC-TITLE-FIDELITY / task0.2：TitleCreator 抛错 → 流水线即时 failed、未落库未发布（不干等 pipelineTimeoutMs）', async () => {

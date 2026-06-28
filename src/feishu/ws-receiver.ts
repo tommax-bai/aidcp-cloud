@@ -46,6 +46,12 @@ export interface FeishuWsReceiverOptions {
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
   /** 注入 fs（测试用） */
   fsImpl?: Pick<typeof fs, 'writeFile' | 'rm'>;
+  /**
+   * 人审授权后回调（change decouple-publish-generation-from-dispatch）：仅当本次为「授权」且首写成功
+   * （written && approved）时调用，带 requestId，由 server 解析 recordId 触发下发段（通过即切）。
+   * 取消则不调。缺省（测试/旧装配）不触发，零回归。
+   */
+  onApproved?: (requestId: string) => void;
 }
 
 interface ApprovalActionValue {
@@ -158,6 +164,7 @@ export class FeishuWsReceiver {
   private readonly messenger?: FeishuMessenger;
   private readonly logger: Pick<Console, 'log' | 'warn' | 'error'>;
   private readonly fsImpl: Pick<typeof fs, 'writeFile' | 'rm'>;
+  private readonly onApproved?: (requestId: string) => void;
   private wsClient?: lark.WSClient;
 
   constructor(options: FeishuWsReceiverOptions) {
@@ -167,6 +174,7 @@ export class FeishuWsReceiver {
     this.messenger = options.messenger;
     this.logger = options.logger ?? console;
     this.fsImpl = options.fsImpl ?? fs;
+    this.onApproved = options.onApproved;
   }
 
   /**
@@ -211,6 +219,12 @@ export class FeishuWsReceiver {
       };
     }
     if (approved) {
+      // 通过即切：首写成功的「授权」即触发下发段（server 解析 recordId）。取消不触发。
+      try {
+        this.onApproved?.(parsed.requestId);
+      } catch (err) {
+        this.logger.warn('[feishu] onApproved 触发下发失败:', (err as Error).message);
+      }
       return {
         toast: { type: 'success', content: '已授权发布' },
         card: {

@@ -36,8 +36,13 @@ export interface PostProcessResult {
   flaggedPhrases: string[];
 }
 
-/** 发布记录状态。 */
-export type PublishStatus = 'draft' | 'published' | 'failed' | 'needs_review';
+/**
+ * 发布记录状态。
+ * `pending_approval`（change decouple-publish-generation-from-dispatch）：终稿已生成、落库待人审、尚未下发。
+ * 生成候审段产出即此态；人审授权 → 下发段（→ published/failed），运营显式否决 → needs_review（终态、不下发）。
+ * 取消审批超时后此态可无限期停留，绝不超时自毁/改判/自动发布（AC-PUB）。
+ */
+export type PublishStatus = 'draft' | 'pending_approval' | 'published' | 'failed' | 'needs_review';
 
 /** 一条发布记录（publish_log 表的投影）。 */
 export interface PublishRecord {
@@ -291,10 +296,14 @@ export interface GateDecision {
   decidedAt: number;
 }
 
-/** PublishExecutor 输出 */
+/**
+ * PublishExecutor 输出。
+ * `pending_approval`（change decouple-publish-generation-from-dispatch）：生成候审段正常出口——
+ * 终稿已落库、审批卡已发，编排到此收敛返回；真正下发由审批信号触发的下发段完成（不在本结果里）。
+ */
 export interface PublishResult {
   recordId: number | null;
-  status: 'draft' | 'published' | 'needs_review' | 'failed' | 'skipped';
+  status: 'draft' | 'pending_approval' | 'published' | 'needs_review' | 'failed' | 'skipped';
   dispatched: boolean;
   envelope: unknown | null;
   completedAt: number;
@@ -354,17 +363,15 @@ export interface RoleInvokeOptions {
   fallbackBehavior?: 'skip' | 'abort' | 'default';
 }
 
-/** PublishOrchestrator 依赖 */
+/**
+ * PublishOrchestrator 依赖。
+ * change decouple-publish-generation-from-dispatch：编排器只跑「生成候审段」（生成终稿 + 落库待审 + 发审批卡），
+ * **不再让位浏览**——让位/续场（onPublishStart/onPublishEnd）已下放到下发段（PublishDispatcher）。
+ * 故此处不再有让位回调；pipelineTimeoutMs 只覆盖生成本身（不再为容纳内联人审而放大）。
+ */
 export interface OrchestratorDeps {
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
   clock?: () => number;
   idGen?: () => string;
   pipelineTimeoutMs?: number;
-  /**
-   * 发布让位回调（change session-auto-resume-with-excursions）。发布真正开始时调 onPublishStart、
-   * 走完任一终止路径（成功/跳过/超时/中止/异常）时经 finally 调 onPublishEnd。由 server 接到连接注册表：
-   * start → 结束该账号浏览会话（让位、不续场）；end → 经续场各闸起新浏览会话。被忽略的触发（已 running）不调。
-   */
-  onPublishStart?: (accountId: string) => void;
-  onPublishEnd?: (accountId: string) => void;
 }

@@ -59,7 +59,7 @@ import {
   type CommandActions,
 } from './feishu/index.js';
 import { CommandSequencer } from './publish-agent/command-sequencer.js';
-import { PublishOrchestrator, PublishScheduler } from './publish-agent/index.js';
+import { PublishOrchestrator, PublishScheduler, PublishDispatcher } from './publish-agent/index.js';
 import { WanxiangClient } from './publish-agent/wanxiang-client.js';
 import { AccountStateManager } from './account-state.js';
 import { PgAccountStore, type AccountStore } from './account-store.js';
@@ -440,23 +440,24 @@ async function main(): Promise<void> {
     maxPollAttempts: Number(process.env.AIDCP_WANXIANG_MAX_POLL ?? 34),
   });
 
-  // 发布编排器（PublishOrchestrator）。超时须容纳 executor 的人审等待窗口（默认 240s）+ 指令序列，故放大到 360s。
+  // 发布编排器（PublishOrchestrator）。change decouple-publish-generation-from-dispatch：
+  // 编排只跑生成候审段（生成终稿 + 落库待审 + 发审批卡），**不再让位浏览**、**不再内联等审**——
+  // 让位/续场与真正下发已下放到 PublishDispatcher（下方构造，由人审授权触发）。故超时只覆盖生成（默认 180s）。
   const publishOrchestrator = new PublishOrchestrator({
     logger: console,
-    pipelineTimeoutMs: Number(process.env.AIDCP_PUBLISH_PIPELINE_TIMEOUT_MS ?? 1_080_000),
-    // 发布让位（change session-auto-resume-with-excursions）：发布真正开始 → 结束该账号浏览会话（让位、不续场）；
-    // 结束 → 经续场各闸起新浏览会话。runtimes 前向引用（声明在下方），closure 调用时已装配（同 commandSequencer.pusher 模式）。
-    onPublishStart: (accountId) => {
-      // 账号归属：把当前发布账号置入单槽，发布角色这一轮的 LLM 调用据此记账（串行，安全）。
-      publishAccountRef.current = accountId;
-      runtimes?.endSessionForAccount(accountId, 'publish_takeover');
-    },
-    onPublishEnd: (accountId) => {
-      // 本轮发布结束 → 复位单槽，避免发布窗口外的偶发调用错记到上一发布账号。
-      publishAccountRef.current = 'default';
-      runtimes?.resumeSessionForAccount(accountId);
-    },
+    pipelineTimeoutMs: Number(process.env.AIDCP_PUBLISH_PIPELINE_TIMEOUT_MS ?? 180_000),
   });
+  // 发布让位/续场（下发段用）：让位 → 结束该账号浏览会话（不续场、独占边缘）；解除 → 经续场各闸起新浏览。
+  // 账号归属单槽：下发这一轮的 LLM/命令据此记账（下发段按账号串行，安全）。runtimes 前向引用（下方装配），
+  // 闭包调用时已就绪（同既有 commandSequencer.pusher 前向模式）。
+  const onPublishTakeoverStart = (accountId: string): void => {
+    publishAccountRef.current = accountId;
+    runtimes?.endSessionForAccount(accountId, 'publish_takeover');
+  };
+  const onPublishTakeoverEnd = (accountId: string): void => {
+    publishAccountRef.current = 'default';
+    runtimes?.resumeSessionForAccount(accountId);
+  };
 
   // 事件总线
   const eventBus = new EventBus();
@@ -719,6 +720,35 @@ async function main(): Promise<void> {
   await server.start();
   console.log(`[aidcp-cloud] 边-云 WebSocket 服务端已监听 :${port}`);
 
+  // ── 发布下发段（change decouple-publish-generation-from-dispatch）──────────────
+  // 由人审授权信号到达触发（通过即切）。唯一碰边缘、唯一让位浏览的阶段：让位 → 从落库草稿重建发布输入 →
+  // 驱动指令序列 → 回写 → 解除让位。AC-PUB：下发前复核授权信号 approved===true，未授权绝不下发。
+  const publishDispatcher = new PublishDispatcher({
+    store: publishLogStore,
+    sequencer: commandSequencer,
+    resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
+    isApproved: isPublishApproved,
+    onPublishStart: onPublishTakeoverStart,
+    onPublishEnd: onPublishTakeoverEnd,
+    logger: console,
+  });
+  // 审批授权 → 触发下发（仅 publish-<n> 走此路；评论审批 comment-<…> 不触发发帖下发）。
+  const triggerPublishDispatchOnApprove = (requestId: string): void => {
+    const m = /^publish-(\d+)$/.exec(requestId);
+    if (!m) return;
+    publishDispatcher
+      .dispatch(Number(m[1]))
+      .catch((e) => console.warn('[aidcp-cloud] publish dispatch err:', e instanceof Error ? e.message : String(e)));
+  };
+  // 兜底补偿（at-least-once）：低频扫描已授权但未下发的待审草稿补触发（覆盖事件丢失）；靠 dispatch 幂等去重。
+  const dispatchScanMs = Number(process.env.AIDCP_PUBLISH_DISPATCH_SCAN_MS ?? 60_000);
+  if (dispatchScanMs > 0) {
+    const scanTimer = setInterval(() => {
+      publishDispatcher.scanAndDispatchApproved().catch(() => {});
+    }, dispatchScanMs);
+    scanTimer.unref?.();
+  }
+
   // ── 评论循环内人审端口（env 闸：默认 dormant，绝不裸发）─────────────────
   // 同形复用 AC-PUB 接收端（parseApprovalActionValue + writeApprovalSignal）+ 读侧 isPublishApproved，
   // 用评论专属 requestId（comment-<noteId>-<ts>），零改 AC-PUB 共享代码。
@@ -942,7 +972,8 @@ async function main(): Promise<void> {
           // 真血缘：用 executor 计算的真概念/真点赞 id（无则空数组），不再用 tags / [] 充数（修 stage-4 适配器漏接）。
           sourceConcepts: record.sourceConcepts ?? [],
           sourceLikedIds: record.sourceLikedIds ?? [],
-          status: record.status as 'draft' | 'published' | 'failed' | 'needs_review',
+          // decouple-publish-generation-from-dispatch：生成候审段落 'pending_approval'（待人审、未下发）。
+          status: record.status as 'draft' | 'pending_approval' | 'published' | 'failed' | 'needs_review',
           // 审计用 image_url；是否真附着插入时为 false，上传成功后由 markImagesAttached 置 true。
           imageUrl: record.imageUrl,
           // 真实发布账号（change publish-history-account-and-detail）：来自触发上下文，缺省 'default'。
@@ -950,13 +981,9 @@ async function main(): Promise<void> {
         });
       },
       async updateStatus(id, status) {
-        await publishLogStore.updateStatus(id, status as 'draft' | 'published' | 'failed' | 'needs_review');
+        await publishLogStore.updateStatus(id, status as 'draft' | 'pending_approval' | 'published' | 'failed' | 'needs_review');
       },
-      async updatePostId(id, postId, postUrl) {
-        // 详情页分享 URL（带 xsec_token）一并回写；边缘抓不到则为 null（COALESCE 不覆盖、诚实置空）。
-        await publishLogStore.updatePostId(id, postId, postUrl);
-      },
-      // stage-4 元数据落库 + 防篡改审计（补接 server 适配器漏接，使 executor 的 recordMetadata 真生效）。
+      // stage-4 元数据落库 + 防篡改审计（供下发段重建发布输入 + 审计）。
       async recordMetadata(id, metadata, aiEnforced) {
         await publishLogStore.recordMetadata(id, metadata, aiEnforced);
       },
@@ -965,15 +992,11 @@ async function main(): Promise<void> {
         await publishLogStore.markImagesAttached(id, attached);
       },
     },
-    pusher: server,
     messenger,
     botChatStore,
-    // A 阶段1：注入 sequencer + 审批读取 → auto_publish 走指令驱动 + AC-PUB 闸 + 结果回写。
-    sequencer: commandSequencer,
-    isApproved: isPublishApproved,
-    // 人审等待窗口给足真实人工延迟（默认 15min，env 可调）；角色超时须 > 窗口 + 指令序列。
-    approvalWaitMs: Number(process.env.AIDCP_PUBLISH_APPROVAL_WAIT_MS ?? 900_000),
-    roleTimeoutMs: Number(process.env.AIDCP_PUBLISH_ROLE_TIMEOUT_MS ?? 1_080_000),
+    // decouple-publish-generation-from-dispatch：executor 只落库待审 + 发审批卡，不再内联等审/下发，
+    // 故不再注入 sequencer / isApproved / approvalWaitMs / pusher。超时只覆盖落库+发卡（默认 30s）。
+    roleTimeoutMs: Number(process.env.AIDCP_PUBLISH_ROLE_TIMEOUT_MS ?? 30_000),
   }));
   console.log(`[aidcp-cloud] PublishOrchestrator 已就绪，角色: ${publishOrchestrator.getRoles().join(', ')}`);
 
@@ -1025,7 +1048,12 @@ async function main(): Promise<void> {
     console.warn('[aidcp-cloud] PublishScheduler 未建（ConceptStore/LikedNoteStore 不可用），发帖触发不可用');
   }
   // 旧 TODO(temp) /debug/publish 调试口已删除（A 阶段4）：发帖只经 PublishScheduler 三扳机 + 发布前人审。
-  const feishuReceiver = new FeishuWsReceiver({ commandRouter, messenger });
+  const feishuReceiver = new FeishuWsReceiver({
+    commandRouter,
+    messenger,
+    // 通过即切：飞书「授权发布」首写成功即触发下发段（仅 publish-<n>）。
+    onApproved: triggerPublishDispatchOnApprove,
+  });
   try {
     const wsClient = new lark.WSClient({
       appId: process.env.FEISHU_APP_ID ?? '',
@@ -1144,8 +1172,12 @@ async function main(): Promise<void> {
             password: readEnvString('PGPASSWORD'),
           }),
           publishOrchestrator,
-          writeApprovalSignal: (requestId, approved, payload) =>
-            writeApprovalSignal({ writeFile, readFile }, requestId, approved, payload),
+          writeApprovalSignal: async (requestId, approved, payload) => {
+            const result = await writeApprovalSignal({ writeFile, readFile }, requestId, approved, payload);
+            // 通过即切：后台「授权发布」首写成功即触发下发段（仅 publish-<n>）。取消不触发。
+            if (approved && result.written) triggerPublishDispatchOnApprove(requestId);
+            return result;
+          },
           commandActions: {
             pause: async (accountId) => {
               await accountState.pause(accountId);
