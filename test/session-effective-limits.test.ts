@@ -76,6 +76,7 @@ describe('RoleDispatcher 单场互动预算来源（change session-limits-to-quo
       sessionBudget: () => ({ likes: 1, collects: 1, follows: 1, searches: 1, comments: 1, comment_likes: 1 }),
       collectSaveLikeRatio: () => 1 / 3,
       followFansRatio: () => 1 / 8,
+      weekActiveMask: () => null, // 不限（全天活跃）
     };
     const d = makeDispatcher(provider);
     d.setup();

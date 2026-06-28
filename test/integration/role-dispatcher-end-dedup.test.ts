@@ -64,6 +64,8 @@ function make() {
       sessionBudget: fixedBudget,
       collectSaveLikeRatio: () => 1 / 3,
       followFansRatio: () => 1 / 8,
+      weekActiveMask: () => null, // 不限（全天活跃）：本测试不约束「可活跃时间」
+
     },
   });
   d.setup();

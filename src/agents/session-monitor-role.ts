@@ -38,6 +38,11 @@ export interface SessionMonitorRoleOptions extends RoleOptions {
   /** 统一看门狗阈值解析口（change session-auto-resume-with-excursions）：调度器注入按账号读 ResumeConfigProvider 的 thunk（热加载）。 */
   getIdleNudgeMs?: () => number;
   getIdleEndMs?: () => number;
+  /**
+   * 「可活跃时间」周历闸（change weekly-active-window）：调度器注入、每次 checkSession 现读（热加载）。
+   * 返回 false（当前已跨入后台配置的非活跃时段）→ 结束会话。缺省（未注入）= 不设闸（零回归）。
+   */
+  getActiveWindowOpen?: () => boolean;
   idleTickMs?: number;
   // 可注入定时器（测试用桩 + 手动调 checkIdle）；生产用真 setInterval。
   setIntervalFn?: (fn: () => void, ms: number) => unknown;
@@ -59,6 +64,8 @@ export class SessionMonitorRole extends BaseRole {
   private readonly idleEndMsOverride?: number;
   private readonly getIdleNudgeMs?: () => number;
   private readonly getIdleEndMs?: () => number;
+  /** 「可活跃时间」周历闸（调度器注入）：checkSession 现读，返回 false → 结束会话；缺省 = 不设闸。 */
+  private readonly getActiveWindowOpen?: () => boolean;
   private readonly idleTickMs: number;
   /**
    * 可暂停时钟（change session-auto-resume-with-excursions）：暂停期只延期**时限/动作数/配额**判定
@@ -88,6 +95,7 @@ export class SessionMonitorRole extends BaseRole {
     this.idleEndMsOverride = options.idleEndMs;
     this.getIdleNudgeMs = options.getIdleNudgeMs;
     this.getIdleEndMs = options.getIdleEndMs;
+    this.getActiveWindowOpen = options.getActiveWindowOpen;
     this.idleTickMs = options.idleTickMs ?? 5_000;
     this.setIntervalFn = options.setIntervalFn ?? ((fn, ms) => setInterval(fn, ms));
     this.clearIntervalFn =
@@ -222,6 +230,14 @@ export class SessionMonitorRole extends BaseRole {
     // 暂停期延期一切结束条件（时长/动作数/配额）——excursion（巡视）进行中不结束、不打断；
     // resumeClock 末次解除时会补调本方法，把延期的结束补发出来。
     if (this.clockPaused()) return;
+
+    // 「可活跃时间」周历闸（change weekly-active-window）：会话进行中跨入后台配置的非活跃时段 → 结束会话
+    // （与开场 / 续场同一周历；按服务器本地时间）。巡视暂停期不打断（上方 clockPaused 已 early-return）；
+    // 缺注入 = 不设闸（零回归）。续场侧会被 canAutoResume 同闸挡住，故窗口外不会立刻重开。
+    if (this.getActiveWindowOpen && !this.getActiveWindowOpen()) {
+      this.triggerEnd('已进入非活跃时段（可活跃时间闸）');
+      return;
+    }
 
     // 动作数超限
     if (this.actionCount >= this.maxActions) {

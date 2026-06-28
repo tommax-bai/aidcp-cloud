@@ -58,6 +58,34 @@ export const SESSION_LIMIT_MAX = 100_000;
 export const DEFAULT_COLLECT_SAVE_LIKE_DENOM = 3;
 export const DEFAULT_FOLLOW_FANS_DENOM = 8;
 
+/**
+ * 全局「可活跃时间」周历掩码（change weekly-active-window）：7 天 × 24 小时 = 168 格，
+ * 每格 '1' = 该小时活跃（允许开/续浏览会话）、'0' = 休眠（不开、运行中跨入则结束）。
+ * 索引 = 周内天 × 24 + 小时；周内天 0=周一 … 6=周日（贴合中文周序与后台展示），小时 0..23。
+ * 按**服务器本地时间**判定（与既有「每日活跃窗口」同口径，单地域、无时区参数）。
+ * 掩码缺失 / 非法（长度≠168 或含非 0/1 字符）→ 视作**全周全天活跃**（零回归、不设闸；= 未配置=不限）。
+ */
+export const WEEK_ACTIVE_MASK_LEN = 7 * 24; // 168
+
+/** 周历掩码是否合法：168 长定串、仅含 '0'/'1'。非法 → 调用方按「不限」回落。 */
+export function isValidWeekActiveMask(raw: unknown): raw is string {
+  return typeof raw === 'string' && raw.length === WEEK_ACTIVE_MASK_LEN && /^[01]+$/.test(raw);
+}
+
+/** 由本地 Date 取周内天（0=周一 … 6=周日）：把 JS getDay() 的 0=周日 折算为周一起头。 */
+export function mondayBasedDayIndex(d: Date): number {
+  return (d.getDay() + 6) % 7;
+}
+
+/**
+ * 给定本地时刻是否落在「可活跃时间」内。掩码缺失 / 非法 → true（全天活跃、零回归）。
+ * 否则查对应格：周内天 × 24 + 小时。
+ */
+export function isWeekActiveAt(mask: string | null | undefined, d: Date): boolean {
+  if (!isValidWeekActiveMask(mask)) return true;
+  return mask[mondayBasedDayIndex(d) * 24 + d.getHours()] === '1';
+}
+
 /** 写死默认预算的**新拷贝**（live budget 会被逐项扣减，绝不返回共享的只读常量）。 */
 export function defaultSessionBudget(): SessionInteractionBudget {
   return { ...DEFAULT_SESSION_BUDGET };
@@ -77,4 +105,6 @@ export interface SessionLimitProvider {
   collectSaveLikeRatio(): number;
   /** 关注质量闸比例（= 1/N，N 为「粉丝:赞藏」分母）。缺配置 / 非法 → 回落 1/DEFAULT_FOLLOW_FANS_DENOM。 */
   followFansRatio(): number;
+  /** 全局「可活跃时间」周历掩码（168 格 '0'/'1'，周一起头 × 24h）。null = 未配置 / 非法 / 不限（全周全天活跃）。 */
+  weekActiveMask(): string | null;
 }

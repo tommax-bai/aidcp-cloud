@@ -9,7 +9,7 @@
  *       本外观只动 session_config_global，不碰风控状态单写路径（risk_state / setQuotaLevel / applySignal）、不经协议。
  */
 
-import { SESSION_BUDGET_KEYS, SESSION_LIMIT_MAX } from '../risk/session-limits.js';
+import { SESSION_BUDGET_KEYS, SESSION_LIMIT_MAX, isValidWeekActiveMask } from '../risk/session-limits.js';
 import type { SessionConfigPatch, SessionConfigStore } from './session-config-store.js';
 import type {
   PanelSessionLimits,
@@ -35,6 +35,8 @@ export function createSessionLimitPanel(deps: SessionLimitFacadeDeps): PanelSess
       // 比例闸以「1:N 的 N」回显：经提供者口取比例后还原分母（无行 / 非法已回落默认 → 显示=当前真生效）。
       collectSaveLikeDenom: Math.round(1 / deps.store.collectSaveLikeRatio()),
       followFansDenom: Math.round(1 / deps.store.followFansRatio()),
+      // 「可活跃时间」周历掩码：null = 未配置 / 不限（全天活跃）。提供者已对非法值回落 null。
+      activeWeekMask: deps.store.weekActiveMask(),
       overridden: !!row,
       updatedAt: row?.updatedAt ?? null,
       updatedBy: row?.updatedBy ?? null,
@@ -51,7 +53,9 @@ export function createSessionLimitPanel(deps: SessionLimitFacadeDeps): PanelSess
         patch.collectSaveLikeDenom,
         patch.followFansDenom,
       ];
-      if (provided.every((v) => v === undefined)) return { ok: false, reason: 'no_valid_fields' };
+      if (provided.every((v) => v === undefined) && patch.activeWeekMask === undefined) {
+        return { ok: false, reason: 'no_valid_fields' };
+      }
 
       if (patch.maxDurationMin !== undefined) {
         if (!isValidLimitNumber(patch.maxDurationMin) || patch.maxDurationMin < 1) {
@@ -69,6 +73,10 @@ export function createSessionLimitPanel(deps: SessionLimitFacadeDeps): PanelSess
           return { ok: false, reason: 'invalid_value' };
         }
       }
+      // 「可活跃时间」周历掩码：传了就必须是 168 长的 '0'/'1' 串（非法整块拒，绝不落脏掩码）。
+      if (patch.activeWeekMask !== undefined && !isValidWeekActiveMask(patch.activeWeekMask)) {
+        return { ok: false, reason: 'invalid_value' };
+      }
 
       const storePatch: SessionConfigPatch = {};
       if (patch.maxDurationMin !== undefined) storePatch.maxDurationMin = patch.maxDurationMin;
@@ -78,6 +86,7 @@ export function createSessionLimitPanel(deps: SessionLimitFacadeDeps): PanelSess
       }
       if (patch.collectSaveLikeDenom !== undefined) storePatch.collectSaveLikeDenom = patch.collectSaveLikeDenom;
       if (patch.followFansDenom !== undefined) storePatch.followFansDenom = patch.followFansDenom;
+      if (patch.activeWeekMask !== undefined) storePatch.activeWeekMask = patch.activeWeekMask;
 
       await deps.store.set(storePatch, updatedBy);
       return { ok: true, view: buildView() };

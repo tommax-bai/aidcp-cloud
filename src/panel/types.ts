@@ -419,6 +419,8 @@ export interface SessionLimitView {
   collectSaveLikeDenom: number;
   /** 关注质量闸：粉丝:赞藏 比例的分母 N（即 1:N；默认 8）。 */
   followFansDenom: number;
+  /** 「可活跃时间」周历掩码（168 格 '0'/'1'，周一起头×24h；按服务器本地时间）。null = 未配置 / 全天活跃。 */
+  activeWeekMask: string | null;
   /** 是否存在库内覆盖（false=显示的是写死默认，即当前真生效）。 */
   overridden: boolean;
   updatedAt: string | null;
@@ -438,6 +440,8 @@ export interface SessionLimitPatchInput {
   collectSaveLikeDenom?: number;
   /** 关注质量闸分母 N（1:N，需 >= 1）。 */
   followFansDenom?: number;
+  /** 「可活跃时间」周历掩码（168 格 '0'/'1'，周一起头×24h）。 */
+  activeWeekMask?: string;
 }
 
 export type SessionLimitSetResult =

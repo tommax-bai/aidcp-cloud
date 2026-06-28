@@ -663,7 +663,7 @@ function createRequestHandler(
         return;
       }
       const { maxDurationMin, likes, collects, follows, searches, comments, comment_likes,
-              collectSaveLikeDenom, followFansDenom } =
+              collectSaveLikeDenom, followFansDenom, activeWeekMask } =
         (body ?? {}) as Record<string, unknown>;
       // 各数字字段须为数字或缺省（缺省=该项不改）；类型不对直接 400（语义校验在 facade）。全局配置、无账号维度。
       const patch: SessionLimitPatchInput = {};
@@ -688,6 +688,14 @@ function createRequestHandler(
           return;
         }
         patch[k] = v;
+      }
+      // 「可活跃时间」周历掩码为字符串（非数字）：传了就必须是 string；168 长 / 字符校验在 facade。
+      if (activeWeekMask !== undefined) {
+        if (typeof activeWeekMask !== 'string') {
+          sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
+          return;
+        }
+        patch.activeWeekMask = activeWeekMask;
       }
       const result = await deps.sessionLimits.set(patch, verified.payload.sub);
       if (!result.ok) {

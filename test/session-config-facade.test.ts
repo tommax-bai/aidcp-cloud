@@ -10,6 +10,7 @@ import {
   SESSION_BUDGET_KEYS,
   SESSION_LIMIT_MAX,
   defaultSessionBudget,
+  isValidWeekActiveMask,
   type SessionInteractionBudget,
 } from '../src/risk/session-limits.js';
 
@@ -42,6 +43,10 @@ function fakeStore() {
       const d = row?.followFansDenom;
       return 1 / (d != null && Number.isInteger(d) && d >= 1 ? d : DEFAULT_FOLLOW_FANS_DENOM);
     },
+    weekActiveMask: () => {
+      const m = row?.activeWeekMask ?? null;
+      return isValidWeekActiveMask(m) ? m : null;
+    },
     set: async (patch: Record<string, number | undefined>, by: string): Promise<SessionConfigRow> => {
       setCalls.push(patch);
       const prev = row;
@@ -54,6 +59,7 @@ function fakeStore() {
         budget,
         collectSaveLikeDenom: patch.collectSaveLikeDenom ?? prev?.collectSaveLikeDenom ?? null,
         followFansDenom: patch.followFansDenom ?? prev?.followFansDenom ?? null,
+        activeWeekMask: (patch as { activeWeekMask?: string }).activeWeekMask ?? prev?.activeWeekMask ?? null,
         updatedAt: '2026-06-25T01:00:00.000Z',
         updatedBy: by,
       };
@@ -151,4 +157,42 @@ test('互动质量比例：分母 0 / 负 / 非整 → invalid_value，整块拒
     assert.equal((r as { reason: string }).reason, 'invalid_value', `分母 ${bad} 应拒`);
   }
   assert.equal(setCalls.length, 0);
+});
+
+// ── 「可活跃时间」周历掩码（change weekly-active-window）──────────────────────────
+
+test('「可活跃时间」掩码：getView 空库 → activeWeekMask=null（不限）', () => {
+  const { store } = fakeStore();
+  const view = createSessionLimitPanel({ store }).getView();
+  assert.equal(view.activeWeekMask, null);
+});
+
+test('「可活跃时间」掩码：set 合法 168 串 → 回真态生效 + 落库一次', async () => {
+  const { store, setCalls } = fakeStore();
+  const panel = createSessionLimitPanel({ store });
+  const mask = '1'.repeat(168);
+  const r = await panel.set({ activeWeekMask: mask }, 'bob');
+  assert.equal(r.ok, true);
+  assert.equal(setCalls.length, 1);
+  const view = (r as { ok: true; view: { activeWeekMask: string | null; overridden: boolean } }).view;
+  assert.equal(view.activeWeekMask, mask);
+  assert.equal(view.overridden, true);
+});
+
+test('「可活跃时间」掩码：非法（长度/字符）→ invalid_value，整块拒不落库', async () => {
+  const { store, setCalls } = fakeStore();
+  const panel = createSessionLimitPanel({ store });
+  for (const bad of ['', '10', '2'.repeat(168), '1'.repeat(167)]) {
+    const r = await panel.set({ activeWeekMask: bad }, 'a');
+    assert.equal((r as { reason: string }).reason, 'invalid_value', `掩码 ${JSON.stringify(bad).slice(0, 8)} 应拒`);
+  }
+  assert.equal(setCalls.length, 0);
+});
+
+test('「可活跃时间」掩码：仅传掩码也算有效字段（非 no_valid_fields）', async () => {
+  const { store, setCalls } = fakeStore();
+  const panel = createSessionLimitPanel({ store });
+  const r = await panel.set({ activeWeekMask: '0'.repeat(168) }, 'a');
+  assert.equal(r.ok, true);
+  assert.equal(setCalls.length, 1);
 });

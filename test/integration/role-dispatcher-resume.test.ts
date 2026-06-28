@@ -35,6 +35,7 @@ function make(opts?: {
   provider?: Partial<ResumeConfigProvider>;
   getRiskStatus?: () => RiskStatus;
   isDispatchActive?: () => boolean;
+  weekMask?: string | null;
 }) {
   const commands: { action: string }[] = [];
   let now = 1_000_000;
@@ -63,6 +64,7 @@ function make(opts?: {
       sessionBudget: fixedBudget,
       collectSaveLikeRatio: () => 1 / 3,
       followFansRatio: () => 1 / 8,
+      weekActiveMask: () => opts?.weekMask ?? null, // 「可活跃时间」周历掩码；缺省 null = 全天活跃（不约束）
     },
   });
   d.setup();
@@ -134,6 +136,37 @@ describe('RoleDispatcher 自动续场', () => {
     m.d.endSession('timeout', { autoResumeEligible: true });
     m.fire();
     assert.equal(m.d.active, false, '当日已达 1 场上限 → 不再续');
+  });
+});
+
+describe('RoleDispatcher「可活跃时间」周历闸（change weekly-active-window）', () => {
+  const ALL_OFF = '0'.repeat(168); // 全周休眠（与具体时刻无关，判定确定）
+  const ALL_ON = '1'.repeat(168); // 全周活跃
+
+  it('掩码全休眠 → restartSession 不开会话（所有启动的统一收口被拦）', () => {
+    const m = make({ weekMask: ALL_OFF });
+    m.d.restartSession();
+    assert.equal(m.d.active, false, '不在可活跃时段 → 不启动浏览会话');
+  });
+
+  it('掩码全活跃 → restartSession 正常开会话', () => {
+    const m = make({ weekMask: ALL_ON });
+    m.d.restartSession();
+    assert.equal(m.d.active, true, '可活跃时段内 → 正常启动');
+  });
+
+  it('缺掩码（null）→ 不设闸，restartSession 正常开会话（零回归）', () => {
+    const m = make(); // weekMask 缺省 = null
+    m.d.restartSession();
+    assert.equal(m.d.active, true);
+  });
+
+  it('掩码全休眠 → 续场被同闸拦（休息到点不续）', () => {
+    const m = make({ weekMask: ALL_OFF });
+    m.d.startSession(); // startSession 本身不过周历闸；用它起一场再验续场被拦
+    m.d.endSession('timeout', { autoResumeEligible: true });
+    m.fire(); // 休息到点 → doAutoResume → canAutoResume（周历闸）
+    assert.equal(m.d.active, false, '可活跃时段外 → canAutoResume 拦，不续');
   });
 });
 

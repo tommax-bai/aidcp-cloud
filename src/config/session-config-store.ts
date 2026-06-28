@@ -23,6 +23,7 @@ import {
   DEFAULT_SESSION_DURATION_MIN,
   DEFAULT_SESSION_DURATION_MS,
   SESSION_BUDGET_KEYS,
+  isValidWeekActiveMask,
   type SessionBudgetKey,
   type SessionInteractionBudget,
   type SessionLimitProvider,
@@ -38,6 +39,8 @@ export interface SessionConfigRow {
   collectSaveLikeDenom: number | null;
   /** 关注质量闸分母 N（1:N）；null = 未覆盖、回落写死默认。 */
   followFansDenom: number | null;
+  /** 「可活跃时间」周历掩码（168 格 '0'/'1'，周一起头×24h）；null = 未配置、回落全天活跃。 */
+  activeWeekMask: string | null;
   updatedAt: string | null;
   updatedBy: string | null;
 }
@@ -53,6 +56,7 @@ export interface SessionConfigPatch {
   comment_likes?: number;
   collectSaveLikeDenom?: number;
   followFansDenom?: number;
+  activeWeekMask?: string;
 }
 
 export const SESSION_CONFIG_SCHEMA_SQL = `
@@ -67,6 +71,7 @@ CREATE TABLE IF NOT EXISTS session_config_global (
   budget_comment_likes INTEGER NOT NULL,
   collect_save_like_denom INTEGER,
   follow_fans_denom       INTEGER,
+  active_week_mask        TEXT,
   updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_by           TEXT
 );
@@ -80,6 +85,7 @@ CREATE TABLE IF NOT EXISTS session_config_global (
 export const SESSION_CONFIG_ALTER_SQL = `
 ALTER TABLE session_config_global ADD COLUMN IF NOT EXISTS collect_save_like_denom INTEGER;
 ALTER TABLE session_config_global ADD COLUMN IF NOT EXISTS follow_fans_denom INTEGER;
+ALTER TABLE session_config_global ADD COLUMN IF NOT EXISTS active_week_mask TEXT;
 `;
 
 export interface SessionConfigStoreOptions {
@@ -101,6 +107,7 @@ interface SessionDbRow {
   budget_comment_likes: number | string;
   collect_save_like_denom: number | string | null;
   follow_fans_denom: number | string | null;
+  active_week_mask: string | null;
   updated_at: Date | string | null;
   updated_by: string | null;
 }
@@ -147,7 +154,7 @@ export class SessionConfigStore implements SessionLimitProvider {
     const { rows } = await this.pool.query<SessionDbRow>(
       `SELECT max_duration_min, budget_likes, budget_collects, budget_follows,
               budget_searches, budget_comments, budget_comment_likes,
-              collect_save_like_denom, follow_fans_denom, updated_at, updated_by
+              collect_save_like_denom, follow_fans_denom, active_week_mask, updated_at, updated_by
          FROM session_config_global WHERE id = 1`,
     );
     this.cache = rows[0] ? this.rowFromDb(rows[0]) : null;
@@ -166,6 +173,7 @@ export class SessionConfigStore implements SessionLimitProvider {
       },
       collectSaveLikeDenom: r.collect_save_like_denom == null ? null : Number(r.collect_save_like_denom),
       followFansDenom: r.follow_fans_denom == null ? null : Number(r.follow_fans_denom),
+      activeWeekMask: r.active_week_mask ?? null,
       updatedAt: r.updated_at ? new Date(r.updated_at).toISOString() : null,
       updatedBy: r.updated_by ?? null,
     };
@@ -203,6 +211,12 @@ export class SessionConfigStore implements SessionLimitProvider {
     return 1 / (validDenom(this.cache?.followFansDenom) ?? DEFAULT_FOLLOW_FANS_DENOM);
   }
 
+  /** SessionLimitProvider：全局「可活跃时间」周历掩码。缺行 / 非法 → null（= 不限、全天活跃）。永不抛。 */
+  weekActiveMask(): string | null {
+    const raw = this.cache?.activeWeekMask ?? null;
+    return isValidWeekActiveMask(raw) ? raw : null;
+  }
+
   /** 取全局覆盖行（无行 undefined，面板审计 / overridden 判定用）。 */
   getRow(): SessionConfigRow | undefined {
     return this.cache ?? undefined;
@@ -223,12 +237,14 @@ export class SessionConfigStore implements SessionLimitProvider {
     // 比例分母可空（NULL = 回落写死默认）：未传则保持原值（含原 null）。
     const nextCollectDenom = patch.collectSaveLikeDenom ?? prev?.collectSaveLikeDenom ?? null;
     const nextFollowDenom = patch.followFansDenom ?? prev?.followFansDenom ?? null;
+    // 「可活跃时间」周历掩码可空（NULL = 全天活跃）：未传则保持原值（含原 null）。校验已在 facade。
+    const nextActiveWeekMask = patch.activeWeekMask ?? prev?.activeWeekMask ?? null;
 
     const { rows } = await this.pool.query<SessionDbRow>(
       `INSERT INTO session_config_global (id, max_duration_min, budget_likes, budget_collects,
               budget_follows, budget_searches, budget_comments, budget_comment_likes,
-              collect_save_like_denom, follow_fans_denom, updated_at, updated_by)
-       VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10)
+              collect_save_like_denom, follow_fans_denom, active_week_mask, updated_at, updated_by)
+       VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), $11)
        ON CONFLICT (id)
        DO UPDATE SET max_duration_min = EXCLUDED.max_duration_min,
                      budget_likes = EXCLUDED.budget_likes, budget_collects = EXCLUDED.budget_collects,
@@ -236,10 +252,11 @@ export class SessionConfigStore implements SessionLimitProvider {
                      budget_comments = EXCLUDED.budget_comments, budget_comment_likes = EXCLUDED.budget_comment_likes,
                      collect_save_like_denom = EXCLUDED.collect_save_like_denom,
                      follow_fans_denom = EXCLUDED.follow_fans_denom,
+                     active_week_mask = EXCLUDED.active_week_mask,
                      updated_at = now(), updated_by = EXCLUDED.updated_by
        RETURNING max_duration_min, budget_likes, budget_collects, budget_follows,
                  budget_searches, budget_comments, budget_comment_likes,
-                 collect_save_like_denom, follow_fans_denom, updated_at, updated_by`,
+                 collect_save_like_denom, follow_fans_denom, active_week_mask, updated_at, updated_by`,
       [
         nextDuration,
         nextBudget.likes,
@@ -250,6 +267,7 @@ export class SessionConfigStore implements SessionLimitProvider {
         nextBudget.comment_likes,
         nextCollectDenom,
         nextFollowDenom,
+        nextActiveWeekMask,
         updatedBy,
       ],
     );
@@ -258,6 +276,7 @@ export class SessionConfigStore implements SessionLimitProvider {
       budget: nextBudget,
       collectSaveLikeDenom: nextCollectDenom,
       followFansDenom: nextFollowDenom,
+      activeWeekMask: nextActiveWeekMask,
       updatedAt: null,
       updatedBy,
     };

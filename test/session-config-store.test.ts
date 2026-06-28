@@ -12,6 +12,9 @@ interface SeedRow {
   budget_searches: number;
   budget_comments: number;
   budget_comment_likes: number;
+  collect_save_like_denom?: number | null;
+  follow_fans_denom?: number | null;
+  active_week_mask?: string | null;
 }
 
 /** 内存假 pool（全局单行）：路由 session_config_global 的建表 / SELECT(id=1) / upsert(RETURNING)；可注入写失败 + 脏行。 */
@@ -22,9 +25,11 @@ function fakePool(seed?: SeedRow) {
   let failWrite = false;
   const pool = {
     query: async (sql: string, params?: unknown[]) => {
-      if (sql.includes('CREATE TABLE')) return { rows: [] };
+      if (sql.includes('CREATE TABLE') || sql.includes('ALTER TABLE')) return { rows: [] };
       if (sql.includes('INSERT INTO session_config_global')) {
         if (failWrite) throw new Error('db down');
+        // 入参顺序须与 store.set() 的 INSERT 占位符严格一致：
+        // [时长, 6 项预算, 收藏分母, 关注分母, 周历掩码, updated_by]（共 11 个）。
         const [
           max_duration_min,
           budget_likes,
@@ -33,8 +38,14 @@ function fakePool(seed?: SeedRow) {
           budget_searches,
           budget_comments,
           budget_comment_likes,
+          collect_save_like_denom,
+          follow_fans_denom,
+          active_week_mask,
           updated_by,
-        ] = params as [number, number, number, number, number, number, number, string];
+        ] = params as [
+          number, number, number, number, number, number, number,
+          number | null, number | null, string | null, string,
+        ];
         row = {
           max_duration_min,
           budget_likes,
@@ -43,6 +54,9 @@ function fakePool(seed?: SeedRow) {
           budget_searches,
           budget_comments,
           budget_comment_likes,
+          collect_save_like_denom,
+          follow_fans_denom,
+          active_week_mask,
           updated_at: '2026-06-25T01:00:00.000Z',
           updated_by,
         };
@@ -137,4 +151,61 @@ test('sessionBudget 返回新拷贝：调用方扣减不污染下次取值', asy
   const b = store.sessionBudget();
   b.likes = 0;
   assert.equal(store.sessionBudget().likes, DEFAULT_SESSION_BUDGET.likes, '上次扣减不应影响下次');
+});
+
+// ── 「可活跃时间」周历掩码（change weekly-active-window）──────────────────────────
+
+test('零回归：空库 → weekActiveMask() 为 null（= 全天活跃不限）', async () => {
+  const { pool } = fakePool();
+  const store = new SessionConfigStore({ pool });
+  await store.init();
+  assert.equal(store.weekActiveMask(), null);
+});
+
+test('命中合法周历掩码（168 长 0/1）→ 原样返回', async () => {
+  const mask = '0'.repeat(48) + '1'.repeat(120);
+  const { pool } = fakePool({
+    max_duration_min: 10, budget_likes: 10, budget_collects: 5, budget_follows: 3, budget_searches: 5, budget_comments: 2, budget_comment_likes: 3,
+    active_week_mask: mask,
+  });
+  const store = new SessionConfigStore({ pool });
+  await store.init();
+  assert.equal(store.weekActiveMask(), mask);
+});
+
+test('脏掩码（长度/字符非法）→ weekActiveMask() 回落 null（绝不 brick）', async () => {
+  for (const bad of ['10101', '2'.repeat(168), '1'.repeat(167)]) {
+    const { pool } = fakePool({
+      max_duration_min: 10, budget_likes: 10, budget_collects: 5, budget_follows: 3, budget_searches: 5, budget_comments: 2, budget_comment_likes: 3,
+      active_week_mask: bad,
+    });
+    const store = new SessionConfigStore({ pool });
+    await store.init();
+    assert.equal(store.weekActiveMask(), null, `脏掩码 ${JSON.stringify(bad).slice(0, 12)} 应回落 null`);
+  }
+});
+
+test('set 周历掩码 → 热加载即时生效；未传时长/预算回落写死默认', async () => {
+  const mask = '1'.repeat(168);
+  const { pool } = fakePool();
+  const store = new SessionConfigStore({ pool });
+  await store.init();
+  const row = await store.set({ activeWeekMask: mask }, 'alice');
+  assert.equal(row.activeWeekMask, mask);
+  assert.equal(store.weekActiveMask(), mask);
+  assert.equal(row.updatedBy, 'alice');
+  assert.equal(store.sessionDurationMs(), DEFAULT_SESSION_DURATION_MS, '未传时长回落写死默认');
+});
+
+test('部分写：只改 likes 不动既存掩码 → 掩码保持原值', async () => {
+  const mask = '1'.repeat(84) + '0'.repeat(84);
+  const { pool } = fakePool({
+    max_duration_min: 10, budget_likes: 10, budget_collects: 5, budget_follows: 3, budget_searches: 5, budget_comments: 2, budget_comment_likes: 3,
+    active_week_mask: mask,
+  });
+  const store = new SessionConfigStore({ pool });
+  await store.init();
+  await store.set({ likes: 7 }, 'a');
+  assert.equal(store.sessionBudget().likes, 7);
+  assert.equal(store.weekActiveMask(), mask, '未传掩码保持原值');
 });

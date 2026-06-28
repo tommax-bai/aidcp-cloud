@@ -61,6 +61,7 @@ import { ActionCooldownGate, type CooldownAction } from '../risk/action-cooldown
 import {
   DEFAULT_SESSION_DURATION_MS,
   defaultSessionBudget,
+  isWeekActiveAt,
   type SessionInteractionBudget,
   type SessionLimitProvider,
 } from '../risk/session-limits.js';
@@ -548,6 +549,8 @@ export class RoleDispatcher {
         onSessionEnd: (reason: string) => this.endSession(reason, { autoResumeEligible: true }),
         getRemainingBudget: () => this.budget,
         getMaxDurationMs: () => this.maxDurationMs(),
+        // 「可活跃时间」周历闸（change weekly-active-window）：会话进行中现读，跨入非活跃时段则结束会话（热加载）。
+        getActiveWindowOpen: () => this.isWithinActiveWeek(this.clock()),
         // 看门狗两段阈值按账号现读（热加载）；未注入续场提供者 → 回落写死默认（轻推~2min / 放弃 1h）。
         getIdleNudgeMs: () => this.resumeConfigProvider?.idleNudgeMs() ?? DEFAULT_IDLE_NUDGE_MS,
         getIdleEndMs: () => this.resumeConfigProvider?.idleEndMs() ?? DEFAULT_IDLE_END_MS,
@@ -749,6 +752,13 @@ export class RoleDispatcher {
    * 连接时刻起算，超时结束后下次连接也能重新驱动。
    */
   restartSession(): void {
+    // 「可活跃时间」闸（change weekly-active-window）：当前本地时刻不在后台配置的可活跃时段内 → 不开会话、保持休眠。
+    // 此处为所有会话(重)启动的统一收口（边缘 hello / 绑人设自启 / 续场 / 面板手动），缺配置 / 非法掩码 = 全天活跃（零回归）。
+    // 续场路径已先经 canAutoResume 同闸（此为防御性二次拦）；窗口重开后由边端重连 / 下一次 hello 驱动续上（与既有每日活跃窗口同构）。
+    if (!this.isWithinActiveWeek(this.clock())) {
+      console.log('[RoleDispatcher] 当前不在可活跃时段（可活跃时间闸）→ 不启动浏览会话，保持休眠');
+      return;
+    }
     // 会话重开 → 取消待发休息计时器（边缘先自连重连即走此路，竞态由此化解）。
     this.cancelRestTimer();
     // 若仍活跃，先拆除旧订阅，避免重复注册
@@ -855,12 +865,13 @@ export class RoleDispatcher {
   /** 续场闸：调度开关 + 人设（canStartSession）+ 风控状态 + 活跃时段窗口 + 每日上限。 */
   private canAutoResume(account: string): boolean {
     if (!this.canStartSession()) return false; // dispatchActive + 人设绑定
+    const now = this.clock();
+    if (!this.isWithinActiveWeek(now)) return false; // 「可活跃时间」周历闸（全局，change weekly-active-window）
     const risk = this.getRiskStatus();
     if (risk === 'restricted' || risk === 'frozen') return false; // 撞风控不续
     if (!this.resumeConfigProvider) return false; // 无提供者 = 特性关
-    const now = this.clock();
     const win = this.resumeConfigProvider.activeWindow();
-    if (!isWithinActiveWindow(this.minuteOfDay(now), win)) return false; // 过活跃时段窗口（全局）
+    if (!isWithinActiveWindow(this.minuteOfDay(now), win)) return false; // 过活跃时段窗口（全局，旧每日窗口）
     const caps = this.resumeConfigProvider.dailyCaps(); // 阈值全局；计数 dailyTally 仍按账号按日
     const tally = this.dailyTally(account, now);
     if (caps.maxSessions > 0 && tally.sessions >= caps.maxSessions) return false; // 每日场数到顶
@@ -887,6 +898,14 @@ export class RoleDispatcher {
   private minuteOfDay(now: number): number {
     const d = new Date(now);
     return d.getHours() * 60 + d.getMinutes();
+  }
+
+  /**
+   * 「可活跃时间」闸（change weekly-active-window）：判当前本地时刻是否落在后台配置的可活跃周历时段内。
+   * 缺单场上限提供者 / 未配置 / 掩码非法 → 视作全天活跃（零回归、不设闸）。掩码 7×24 格，周一起头，按服务器本地时间。
+   */
+  private isWithinActiveWeek(now: number): boolean {
+    return isWeekActiveAt(this.sessionLimitProvider?.weekActiveMask() ?? null, new Date(now));
   }
 
   /** 休息时长抖动（lognormal，中心 1.0），使每次休息不等长（拟人）。randomFn 可注入定值（测试）。 */
