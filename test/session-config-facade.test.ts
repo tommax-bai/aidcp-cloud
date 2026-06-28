@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { createSessionLimitPanel } from '../src/config/session-config-facade.js';
 import type { SessionConfigRow, SessionConfigStore } from '../src/config/session-config-store.js';
 import {
+  DEFAULT_COLLECT_SAVE_LIKE_DENOM,
+  DEFAULT_FOLLOW_FANS_DENOM,
   DEFAULT_SESSION_BUDGET,
   DEFAULT_SESSION_DURATION_MIN,
   SESSION_BUDGET_KEYS,
@@ -32,6 +34,14 @@ function fakeStore() {
       }
       return out;
     },
+    collectSaveLikeRatio: () => {
+      const d = row?.collectSaveLikeDenom;
+      return 1 / (d != null && Number.isInteger(d) && d >= 1 ? d : DEFAULT_COLLECT_SAVE_LIKE_DENOM);
+    },
+    followFansRatio: () => {
+      const d = row?.followFansDenom;
+      return 1 / (d != null && Number.isInteger(d) && d >= 1 ? d : DEFAULT_FOLLOW_FANS_DENOM);
+    },
     set: async (patch: Record<string, number | undefined>, by: string): Promise<SessionConfigRow> => {
       setCalls.push(patch);
       const prev = row;
@@ -42,6 +52,8 @@ function fakeStore() {
       row = {
         maxDurationMin: patch.maxDurationMin ?? prev?.maxDurationMin ?? DEFAULT_SESSION_DURATION_MIN,
         budget,
+        collectSaveLikeDenom: patch.collectSaveLikeDenom ?? prev?.collectSaveLikeDenom ?? null,
+        followFansDenom: patch.followFansDenom ?? prev?.followFansDenom ?? null,
         updatedAt: '2026-06-25T01:00:00.000Z',
         updatedBy: by,
       };
@@ -110,4 +122,33 @@ test('预算 0 是合法值（= 该项禁止）', async () => {
   const panel = createSessionLimitPanel({ store });
   const r = await panel.set({ comments: 0 }, 'a');
   assert.equal(r.ok, true);
+});
+
+test('互动质量比例：空库显示写死默认 1:3 / 1:8', () => {
+  const { store } = fakeStore();
+  const view = createSessionLimitPanel({ store }).getView();
+  assert.equal(view.collectSaveLikeDenom, DEFAULT_COLLECT_SAVE_LIKE_DENOM);
+  assert.equal(view.followFansDenom, DEFAULT_FOLLOW_FANS_DENOM);
+});
+
+test('互动质量比例：set 分母 → 回真态生效', async () => {
+  const { store, setCalls } = fakeStore();
+  const panel = createSessionLimitPanel({ store });
+  const r = await panel.set({ collectSaveLikeDenom: 4, followFansDenom: 12 }, 'bob');
+  assert.equal(r.ok, true);
+  assert.equal(setCalls.length, 1);
+  const view = (r as { ok: true; view: { collectSaveLikeDenom: number; followFansDenom: number; overridden: boolean } }).view;
+  assert.equal(view.collectSaveLikeDenom, 4);
+  assert.equal(view.followFansDenom, 12);
+  assert.equal(view.overridden, true);
+});
+
+test('互动质量比例：分母 0 / 负 / 非整 → invalid_value，整块拒不落库（除零会把闸搞坏）', async () => {
+  const { store, setCalls } = fakeStore();
+  const panel = createSessionLimitPanel({ store });
+  for (const bad of [0, -1, 2.5]) {
+    const r = await panel.set({ collectSaveLikeDenom: bad }, 'a');
+    assert.equal((r as { reason: string }).reason, 'invalid_value', `分母 ${bad} 应拒`);
+  }
+  assert.equal(setCalls.length, 0);
 });

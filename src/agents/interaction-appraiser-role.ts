@@ -29,12 +29,15 @@ export interface InteractionAppraiserRoleOptions extends RoleOptions {
   sessionContext: SessionContext;
   getNoteData: (noteId: string) => NoteData | null;
   getRemainingBudget: () => { likes: number; collects: number };
+  /** 收藏质量闸比例（后台可配，热加载）；缺省回落 COLLECT_MIN_SAVE_LIKE_RATIO。 */
+  getMinSaveLikeRatio?: () => number;
 }
 
 export class InteractionAppraiserRole extends BaseRole {
   readonly roleName: RoleName = 'interaction_appraiser';
   private readonly getNoteData: (noteId: string) => NoteData | null;
   private readonly getRemainingBudget: () => { likes: number; collects: number };
+  private readonly getMinSaveLikeRatio?: () => number;
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: InteractionAppraiserRoleOptions) {
@@ -42,6 +45,7 @@ export class InteractionAppraiserRole extends BaseRole {
     if (!options.llm) throw new Error('InteractionAppraiserRole 需要 LlmClient');
     this.getNoteData = options.getNoteData;
     this.getRemainingBudget = options.getRemainingBudget;
+    this.getMinSaveLikeRatio = options.getMinSaveLikeRatio;
   }
 
   subscribe(): void {
@@ -197,9 +201,10 @@ export class InteractionAppraiserRole extends BaseRole {
       // 收藏即点赞：真人收藏几乎都先点赞，且 LLM 实测从不主动选 both（0/40）。
       // 故 collect 与 both 一视同仁——在 like 配额允许下同时点赞，收藏受 collect 配额约束。
       if (budget.likes > 0) actions.push('like');
-      // 收藏数值闸：仅当「收藏数 / 点赞数 ≥ COLLECT_MIN_SAVE_LIKE_RATIO」（默认 1:3）才收藏。
+      // 收藏数值闸：仅当「收藏数 / 点赞数 ≥ 比例阈值」（默认 1:3，后台可配、热加载）才收藏。
       // 点赞数为 0（低流量 / 未加载）视为不达标、保守不收藏；点赞已在上面按其自身逻辑独立执行。
-      if (budget.collects > 0 && note.likeCount > 0 && note.collectCount >= note.likeCount * COLLECT_MIN_SAVE_LIKE_RATIO) {
+      const minRatio = this.getMinSaveLikeRatio?.() ?? COLLECT_MIN_SAVE_LIKE_RATIO;
+      if (budget.collects > 0 && note.likeCount > 0 && note.collectCount >= note.likeCount * minRatio) {
         actions.push('collect');
       }
     }

@@ -50,6 +50,14 @@ export const DEFAULT_SESSION_BUDGET: Readonly<SessionInteractionBudget> = {
 /** 单场上限数字的合理上限（校验用，防误填天文数字）。复用 quotas.ts 的 QUOTA_MAX 同量级。 */
 export const SESSION_LIMIT_MAX = 100_000;
 
+/**
+ * 互动质量比例闸的写死默认（engagement-restraint，change engagement-ratio-config）：以「1:N 的 N」（整数分母）表达。
+ * 收藏门槛默认 1:3（收藏数 / 点赞数 >= 1/3 才收藏）；关注门槛默认 1:8（粉丝数 / 获赞与收藏 >= 1/8 才关注）。
+ * 与两决策角色内导出的兜底常量等值；空表 / 缺值 / 非法 → 回落这两个默认。N=0 无意义（除零），校验须 >= 1。
+ */
+export const DEFAULT_COLLECT_SAVE_LIKE_DENOM = 3;
+export const DEFAULT_FOLLOW_FANS_DENOM = 8;
+
 /** 写死默认预算的**新拷贝**（live budget 会被逐项扣减，绝不返回共享的只读常量）。 */
 export function defaultSessionBudget(): SessionInteractionBudget {
   return { ...DEFAULT_SESSION_BUDGET };
@@ -65,4 +73,8 @@ export interface SessionLimitProvider {
   sessionDurationMs(): number;
   /** 全局单场互动预算（新拷贝，可被调用方扣减）。缺配置 / 字段非法 → 该项回落写死默认。 */
   sessionBudget(): SessionInteractionBudget;
+  /** 收藏质量闸比例（= 1/N，N 为「收藏:赞」分母）。缺配置 / 非法 → 回落 1/DEFAULT_COLLECT_SAVE_LIKE_DENOM。 */
+  collectSaveLikeRatio(): number;
+  /** 关注质量闸比例（= 1/N，N 为「粉丝:赞藏」分母）。缺配置 / 非法 → 回落 1/DEFAULT_FOLLOW_FANS_DENOM。 */
+  followFansRatio(): number;
 }

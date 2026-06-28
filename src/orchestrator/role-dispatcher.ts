@@ -21,7 +21,7 @@ import { BackToFeed } from '../agents/back-to-feed.js';
 import { DeepReader } from '../agents/deep-reader.js';
 import { CommentReviewer } from '../agents/comment-reviewer.js';
 import { ContentCuratorRole } from '../agents/content-curator-role.js';
-import { InteractionAppraiserRole } from '../agents/interaction-appraiser-role.js';
+import { InteractionAppraiserRole, COLLECT_MIN_SAVE_LIKE_RATIO } from '../agents/interaction-appraiser-role.js';
 import { AuthorEvaluator } from '../agents/author-evaluator.js';
 import { CommentAppraiser } from '../agents/comment-appraiser.js';
 import { CommentLikeAppraiser } from '../agents/comment-like-appraiser.js';
@@ -33,7 +33,7 @@ import { CommentApprovalGate, type CommentApprovalPort } from '../agents/comment
 import { ProfileOpener } from '../agents/profile-opener.js';
 import { ProfileBrowser } from '../agents/profile-browser.js';
 import { NicknameEnricher } from '../agents/nickname-enricher.js';
-import { FollowAgent } from '../agents/follow-agent.js';
+import { FollowAgent, FOLLOW_MIN_FANS_ENGAGEMENT_RATIO } from '../agents/follow-agent.js';
 import { SearchScroller } from '../agents/search-scroller.js';
 import { SearchEvaluator } from '../agents/search-evaluator.js';
 import { SearchExecutor } from '../agents/search-executor.js';
@@ -350,6 +350,16 @@ export class RoleDispatcher {
     return this.sessionLimitProvider?.sessionDurationMs() ?? DEFAULT_SESSION_DURATION_MS;
   }
 
+  /** 收藏质量闸比例（热加载，后台改即时生效、对所有账号生效）；缺提供者回落角色内写死默认 1:3。 */
+  private collectMinSaveLikeRatio(): number {
+    return this.sessionLimitProvider?.collectSaveLikeRatio() ?? COLLECT_MIN_SAVE_LIKE_RATIO;
+  }
+
+  /** 关注质量闸比例（热加载）；缺提供者回落角色内写死默认 1:8。 */
+  private followMinFansRatio(): number {
+    return this.sessionLimitProvider?.followFansRatio() ?? FOLLOW_MIN_FANS_ENGAGEMENT_RATIO;
+  }
+
   /** 会话进度 0..1（已用时长 / 时长上限），供节奏疲劳乘子使用。 */
   private progress(): number {
     const elapsed = this.clock() - this.sessionStartedAt;
@@ -478,7 +488,7 @@ export class RoleDispatcher {
       new DeepReader({ ...commonOptions, getNoteData }),
       new CommentReviewer({ ...commonOptions, sessionContext: this.sessionContext, getNoteData }),
       new ContentCuratorRole({ ...commonOptions, sessionContext: this.sessionContext }),
-      new InteractionAppraiserRole({ ...commonOptions, sessionContext: this.sessionContext, getNoteData, getRemainingBudget }),
+      new InteractionAppraiserRole({ ...commonOptions, sessionContext: this.sessionContext, getNoteData, getRemainingBudget, getMinSaveLikeRatio: () => this.collectMinSaveLikeRatio() }),
       new AuthorEvaluator({ ...commonOptions, sessionContext: this.sessionContext, getNoteData }),
       // —— 发评论支线（接在互动完成与「是否进主页评估」之间）：评估→撰写→去AI味→循环内人审 ——
       new CommentAppraiser({
@@ -521,7 +531,7 @@ export class RoleDispatcher {
       new ProfileBrowser(commonOptions),
       // 登录账号真实昵称采集体已移出会话角色集、改为 setup() 永久接线（change nickname-capture-on-login）：
       // 采真名是登录引导固定步骤，不随浏览会话起止、不被人设闸阻断。见下方 setup() 内构造 this.nicknameEnricher。
-      new FollowAgent({ ...commonOptions, sessionContext: this.sessionContext, getRemainingFollows: () => this.budget.follows }),
+      new FollowAgent({ ...commonOptions, sessionContext: this.sessionContext, getRemainingFollows: () => this.budget.follows, getMinFansRatio: () => this.followMinFansRatio() }),
       new SearchScroller(commonOptions, this.sessionContext),
       new SearchEvaluator({
         ...commonOptions,

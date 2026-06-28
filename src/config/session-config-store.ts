@@ -17,6 +17,8 @@
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
 import {
+  DEFAULT_COLLECT_SAVE_LIKE_DENOM,
+  DEFAULT_FOLLOW_FANS_DENOM,
   DEFAULT_SESSION_BUDGET,
   DEFAULT_SESSION_DURATION_MIN,
   DEFAULT_SESSION_DURATION_MS,
@@ -28,10 +30,14 @@ import {
 
 const { Pool } = pg;
 
-/** 全局单场上限行：时长 + 六项预算 + 审计（面板回显用）。 */
+/** 全局单场上限行：时长 + 六项预算 + 两项互动质量比例分母 + 审计（面板回显用）。 */
 export interface SessionConfigRow {
   maxDurationMin: number;
   budget: SessionInteractionBudget;
+  /** 收藏质量闸分母 N（1:N）；null = 未覆盖、回落写死默认。 */
+  collectSaveLikeDenom: number | null;
+  /** 关注质量闸分母 N（1:N）；null = 未覆盖、回落写死默认。 */
+  followFansDenom: number | null;
   updatedAt: string | null;
   updatedBy: string | null;
 }
@@ -45,6 +51,8 @@ export interface SessionConfigPatch {
   searches?: number;
   comments?: number;
   comment_likes?: number;
+  collectSaveLikeDenom?: number;
+  followFansDenom?: number;
 }
 
 export const SESSION_CONFIG_SCHEMA_SQL = `
@@ -57,9 +65,21 @@ CREATE TABLE IF NOT EXISTS session_config_global (
   budget_searches      INTEGER NOT NULL,
   budget_comments      INTEGER NOT NULL,
   budget_comment_likes INTEGER NOT NULL,
+  collect_save_like_denom INTEGER,
+  follow_fans_denom       INTEGER,
   updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_by           TEXT
 );
+`;
+
+/**
+ * 自愈加列（change engagement-ratio-config）：见 ModelConfigStore 同名注释——既有库表已存在时
+ * CREATE TABLE IF NOT EXISTS 不会补列，故 init() 在 reload 前额外跑此幂等 ALTER，使运行中的 store
+ * 永不领先于自己 schema。两列可空（NULL = 回落写死默认 3 / 8），无需 DEFAULT，对既有行零回归。与 migrations/0023 同源。
+ */
+export const SESSION_CONFIG_ALTER_SQL = `
+ALTER TABLE session_config_global ADD COLUMN IF NOT EXISTS collect_save_like_denom INTEGER;
+ALTER TABLE session_config_global ADD COLUMN IF NOT EXISTS follow_fans_denom INTEGER;
 `;
 
 export interface SessionConfigStoreOptions {
@@ -79,6 +99,8 @@ interface SessionDbRow {
   budget_searches: number | string;
   budget_comments: number | string;
   budget_comment_likes: number | string;
+  collect_save_like_denom: number | string | null;
+  follow_fans_denom: number | string | null;
   updated_at: Date | string | null;
   updated_by: string | null;
 }
@@ -89,6 +111,12 @@ function validInt(raw: number | string | null | undefined): number | undefined {
   const n = typeof raw === 'string' ? Number(raw) : raw;
   if (!Number.isInteger(n) || n < 0) return undefined;
   return n;
+}
+
+/** 比例分母：有效值须为 >= 1 的整数（0 = 除零无意义），否则视作缺（回落写死默认）。 */
+function validDenom(raw: number | string | null | undefined): number | undefined {
+  const n = validInt(raw);
+  return n !== undefined && n >= 1 ? n : undefined;
 }
 
 export class SessionConfigStore implements SessionLimitProvider {
@@ -111,13 +139,15 @@ export class SessionConfigStore implements SessionLimitProvider {
   /** 建表 + 载入内存镜像。 */
   async init(): Promise<void> {
     await this.pool.query(SESSION_CONFIG_SCHEMA_SQL);
+    await this.pool.query(SESSION_CONFIG_ALTER_SQL);
     await this.reload();
   }
 
   private async reload(): Promise<void> {
     const { rows } = await this.pool.query<SessionDbRow>(
       `SELECT max_duration_min, budget_likes, budget_collects, budget_follows,
-              budget_searches, budget_comments, budget_comment_likes, updated_at, updated_by
+              budget_searches, budget_comments, budget_comment_likes,
+              collect_save_like_denom, follow_fans_denom, updated_at, updated_by
          FROM session_config_global WHERE id = 1`,
     );
     this.cache = rows[0] ? this.rowFromDb(rows[0]) : null;
@@ -134,6 +164,8 @@ export class SessionConfigStore implements SessionLimitProvider {
         comments: Number(r.budget_comments),
         comment_likes: Number(r.budget_comment_likes),
       },
+      collectSaveLikeDenom: r.collect_save_like_denom == null ? null : Number(r.collect_save_like_denom),
+      followFansDenom: r.follow_fans_denom == null ? null : Number(r.follow_fans_denom),
       updatedAt: r.updated_at ? new Date(r.updated_at).toISOString() : null,
       updatedBy: r.updated_by ?? null,
     };
@@ -161,6 +193,16 @@ export class SessionConfigStore implements SessionLimitProvider {
     return out;
   }
 
+  /** SessionLimitProvider：收藏质量闸比例 = 1/N。缺行 / 非法（含 0）→ 回落 1/DEFAULT_COLLECT_SAVE_LIKE_DENOM。永不抛。 */
+  collectSaveLikeRatio(): number {
+    return 1 / (validDenom(this.cache?.collectSaveLikeDenom) ?? DEFAULT_COLLECT_SAVE_LIKE_DENOM);
+  }
+
+  /** SessionLimitProvider：关注质量闸比例 = 1/N。缺行 / 非法（含 0）→ 回落 1/DEFAULT_FOLLOW_FANS_DENOM。永不抛。 */
+  followFansRatio(): number {
+    return 1 / (validDenom(this.cache?.followFansDenom) ?? DEFAULT_FOLLOW_FANS_DENOM);
+  }
+
   /** 取全局覆盖行（无行 undefined，面板审计 / overridden 判定用）。 */
   getRow(): SessionConfigRow | undefined {
     return this.cache ?? undefined;
@@ -178,19 +220,26 @@ export class SessionConfigStore implements SessionLimitProvider {
       const fromPatch = patch[key as SessionBudgetKey];
       nextBudget[key] = fromPatch ?? prev?.budget?.[key] ?? DEFAULT_SESSION_BUDGET[key];
     }
+    // 比例分母可空（NULL = 回落写死默认）：未传则保持原值（含原 null）。
+    const nextCollectDenom = patch.collectSaveLikeDenom ?? prev?.collectSaveLikeDenom ?? null;
+    const nextFollowDenom = patch.followFansDenom ?? prev?.followFansDenom ?? null;
 
     const { rows } = await this.pool.query<SessionDbRow>(
       `INSERT INTO session_config_global (id, max_duration_min, budget_likes, budget_collects,
-              budget_follows, budget_searches, budget_comments, budget_comment_likes, updated_at, updated_by)
-       VALUES (1, $1, $2, $3, $4, $5, $6, $7, now(), $8)
+              budget_follows, budget_searches, budget_comments, budget_comment_likes,
+              collect_save_like_denom, follow_fans_denom, updated_at, updated_by)
+       VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10)
        ON CONFLICT (id)
        DO UPDATE SET max_duration_min = EXCLUDED.max_duration_min,
                      budget_likes = EXCLUDED.budget_likes, budget_collects = EXCLUDED.budget_collects,
                      budget_follows = EXCLUDED.budget_follows, budget_searches = EXCLUDED.budget_searches,
                      budget_comments = EXCLUDED.budget_comments, budget_comment_likes = EXCLUDED.budget_comment_likes,
+                     collect_save_like_denom = EXCLUDED.collect_save_like_denom,
+                     follow_fans_denom = EXCLUDED.follow_fans_denom,
                      updated_at = now(), updated_by = EXCLUDED.updated_by
        RETURNING max_duration_min, budget_likes, budget_collects, budget_follows,
-                 budget_searches, budget_comments, budget_comment_likes, updated_at, updated_by`,
+                 budget_searches, budget_comments, budget_comment_likes,
+                 collect_save_like_denom, follow_fans_denom, updated_at, updated_by`,
       [
         nextDuration,
         nextBudget.likes,
@@ -199,12 +248,16 @@ export class SessionConfigStore implements SessionLimitProvider {
         nextBudget.searches,
         nextBudget.comments,
         nextBudget.comment_likes,
+        nextCollectDenom,
+        nextFollowDenom,
         updatedBy,
       ],
     );
     const result = rows[0] ? this.rowFromDb(rows[0]) : {
       maxDurationMin: nextDuration,
       budget: nextBudget,
+      collectSaveLikeDenom: nextCollectDenom,
+      followFansDenom: nextFollowDenom,
       updatedAt: null,
       updatedBy,
     };

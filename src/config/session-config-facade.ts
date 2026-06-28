@@ -32,6 +32,9 @@ export function createSessionLimitPanel(deps: SessionLimitFacadeDeps): PanelSess
     return {
       maxDurationMin: Math.round(deps.store.sessionDurationMs() / 60_000),
       budget: deps.store.sessionBudget(),
+      // 比例闸以「1:N 的 N」回显：经提供者口取比例后还原分母（无行 / 非法已回落默认 → 显示=当前真生效）。
+      collectSaveLikeDenom: Math.round(1 / deps.store.collectSaveLikeRatio()),
+      followFansDenom: Math.round(1 / deps.store.followFansRatio()),
       overridden: !!row,
       updatedAt: row?.updatedAt ?? null,
       updatedBy: row?.updatedBy ?? null,
@@ -45,6 +48,8 @@ export function createSessionLimitPanel(deps: SessionLimitFacadeDeps): PanelSess
       const provided: Array<number | undefined> = [
         patch.maxDurationMin,
         ...SESSION_BUDGET_KEYS.map((k) => patch[k]),
+        patch.collectSaveLikeDenom,
+        patch.followFansDenom,
       ];
       if (provided.every((v) => v === undefined)) return { ok: false, reason: 'no_valid_fields' };
 
@@ -57,6 +62,13 @@ export function createSessionLimitPanel(deps: SessionLimitFacadeDeps): PanelSess
         const v = patch[key];
         if (v !== undefined && !isValidLimitNumber(v)) return { ok: false, reason: 'invalid_value' };
       }
+      // 比例分母：整数 + 合理上限 + 另需 >= 1（0 = 除零无意义、会把闸搞坏）。任一非法整块拒。
+      for (const denomKey of ['collectSaveLikeDenom', 'followFansDenom'] as const) {
+        const v = patch[denomKey];
+        if (v !== undefined && (!isValidLimitNumber(v) || v < 1)) {
+          return { ok: false, reason: 'invalid_value' };
+        }
+      }
 
       const storePatch: SessionConfigPatch = {};
       if (patch.maxDurationMin !== undefined) storePatch.maxDurationMin = patch.maxDurationMin;
@@ -64,6 +76,8 @@ export function createSessionLimitPanel(deps: SessionLimitFacadeDeps): PanelSess
         const v = patch[key];
         if (v !== undefined) storePatch[key] = v;
       }
+      if (patch.collectSaveLikeDenom !== undefined) storePatch.collectSaveLikeDenom = patch.collectSaveLikeDenom;
+      if (patch.followFansDenom !== undefined) storePatch.followFansDenom = patch.followFansDenom;
 
       await deps.store.set(storePatch, updatedBy);
       return { ok: true, view: buildView() };

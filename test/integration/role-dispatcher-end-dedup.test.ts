@@ -62,6 +62,8 @@ function make() {
     sessionLimitProvider: {
       sessionDurationMs: () => 600_000, // 10min
       sessionBudget: fixedBudget,
+      collectSaveLikeRatio: () => 1 / 3,
+      followFansRatio: () => 1 / 8,
     },
   });
   d.setup();

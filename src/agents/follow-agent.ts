@@ -22,17 +22,21 @@ export const FOLLOW_MIN_FANS_ENGAGEMENT_RATIO = 1 / 8;
 export interface FollowAgentOptions extends RoleOptions {
   sessionContext: SessionContext;
   getRemainingFollows: () => number;
+  /** 关注质量闸比例（后台可配，热加载）；缺省回落 FOLLOW_MIN_FANS_ENGAGEMENT_RATIO。 */
+  getMinFansRatio?: () => number;
 }
 
 export class FollowAgent extends BaseRole {
   readonly roleName: RoleName = 'follow_agent';
   private readonly getRemainingFollows: () => number;
+  private readonly getMinFansRatio?: () => number;
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: FollowAgentOptions) {
     super(options);
     if (!options.llm) throw new Error('FollowAgent 需要 LlmClient');
     this.getRemainingFollows = options.getRemainingFollows;
+    this.getMinFansRatio = options.getMinFansRatio;
   }
 
   subscribe(): void {
@@ -75,11 +79,12 @@ export class FollowAgent extends BaseRole {
       return;
     }
 
-    // 关注数值闸（engagement-restraint）：仅当「粉丝数 / 获赞与收藏数 ≥ FOLLOW_MIN_FANS_ENGAGEMENT_RATIO」（默认 1:8）才考虑关注。
+    // 关注数值闸（engagement-restraint）：仅当「粉丝数 / 获赞与收藏数 ≥ 比例阈值」（默认 1:8，后台可配、热加载）才考虑关注。
     // 仅在赞藏数已知且 > 0 时启用——缺失/未知不当低质（与 extracted 同口径），避免误杀；高赞藏低粉丝（爆款堆量 / 超头部）会被挡。
+    const minFansRatio = this.getMinFansRatio?.() ?? FOLLOW_MIN_FANS_ENGAGEMENT_RATIO;
     const lc = payload.likesCollects;
-    if (lc != null && lc > 0 && payload.followersCount < lc * FOLLOW_MIN_FANS_ENGAGEMENT_RATIO) {
-      this.log(`赞藏转粉率不足（粉丝 ${payload.followersCount} / 赞藏 ${lc} < 1:${Math.round(1 / FOLLOW_MIN_FANS_ENGAGEMENT_RATIO)}）→ 保守 skip`);
+    if (lc != null && lc > 0 && payload.followersCount < lc * minFansRatio) {
+      this.log(`赞藏转粉率不足（粉丝 ${payload.followersCount} / 赞藏 ${lc} < 1:${Math.round(1 / minFansRatio)}）→ 保守 skip`);
       this.emit('profile.done', {
         authorId: payload.authorId,
         sourcePageType: payload.sourcePageType,

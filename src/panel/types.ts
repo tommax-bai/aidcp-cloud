@@ -415,6 +415,10 @@ export interface SessionLimitView {
   maxDurationMin: number;
   /** 单场互动预算（六项）。 */
   budget: SessionInteractionBudget;
+  /** 收藏质量闸：收藏:赞 比例的分母 N（即 1:N；默认 3）。 */
+  collectSaveLikeDenom: number;
+  /** 关注质量闸：粉丝:赞藏 比例的分母 N（即 1:N；默认 8）。 */
+  followFansDenom: number;
   /** 是否存在库内覆盖（false=显示的是写死默认，即当前真生效）。 */
   overridden: boolean;
   updatedAt: string | null;
@@ -430,6 +434,10 @@ export interface SessionLimitPatchInput {
   searches?: number;
   comments?: number;
   comment_likes?: number;
+  /** 收藏质量闸分母 N（1:N，需 >= 1）。 */
+  collectSaveLikeDenom?: number;
+  /** 关注质量闸分母 N（1:N，需 >= 1）。 */
+  followFansDenom?: number;
 }
 
 export type SessionLimitSetResult =
