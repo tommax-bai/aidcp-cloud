@@ -166,6 +166,21 @@ export class ConceptStore {
     return rows.map((r) => r.keyword);
   }
 
+  /**
+   * 自某时刻起新发现的概念关键词，并带回各自的来源笔记标题。
+   * source_note 为空时 sourceNote 落 null（不编造）。
+   */
+  async getNewConceptsWithSourceSince(
+    sinceMs: number,
+    limit = 20,
+  ): Promise<Array<{ keyword: string; sourceNote: string | null }>> {
+    const { rows } = await this.pool.query<{ keyword: string; source_note: string | null }>(
+      'SELECT keyword, source_note FROM concepts WHERE discovered_at > to_timestamp($1 / 1000.0) ORDER BY discovered_at DESC LIMIT $2',
+      [sinceMs, limit],
+    );
+    return rows.map((r) => ({ keyword: r.keyword, sourceNote: r.source_note ?? null }));
+  }
+
   /** 关闭连接池 */
   async close(): Promise<void> {
     await this.pool.end();
