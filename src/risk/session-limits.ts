@@ -86,6 +86,32 @@ export function isWeekActiveAt(mask: string | null | undefined, d: Date): boolea
   return mask[mondayBasedDayIndex(d) * 24 + d.getHours()] === '1';
 }
 
+/** 一小时的毫秒数（窗口唤醒按整点粒度推进）。 */
+const HOUR_MS = 3_600_000;
+
+/**
+ * 距「下一个活跃整点」的毫秒数（change weekly-active-window 窗口唤醒增强）：用于休眠期主动安排到窗口
+ * 重开时唤醒续场，不再干等边端重连。返回 null 表示**无需唤醒**：
+ * - 掩码缺失 / 非法 → 全天活跃（本就不会休眠）；
+ * - 当前时刻已活跃（调用方不该在活跃时安排唤醒，保险起见也返回 null）；
+ * - 整周无任何活跃格（全休眠）→ 永不唤醒（运营显式关停，尊重之）。
+ * 否则从**下一个整点**起逐小时向前找首个活跃格（至多扫满一周 168 格），返回距其起点的毫秒数。
+ * 按服务器本地时间、整点粒度（单地域无 DST，整点 + k×HOUR_MS 即精确推进一小时）。
+ */
+export function msUntilNextActive(mask: string | null | undefined, nowMs: number): number | null {
+  if (!isValidWeekActiveMask(mask)) return null;
+  const now = new Date(nowMs);
+  if (isWeekActiveAt(mask, now)) return null;
+  const nextHour = new Date(now);
+  nextHour.setMinutes(0, 0, 0);
+  nextHour.setHours(nextHour.getHours() + 1);
+  for (let k = 0; k < WEEK_ACTIVE_MASK_LEN; k++) {
+    const cand = new Date(nextHour.getTime() + k * HOUR_MS);
+    if (isWeekActiveAt(mask, cand)) return cand.getTime() - nowMs;
+  }
+  return null;
+}
+
 /** 写死默认预算的**新拷贝**（live budget 会被逐项扣减，绝不返回共享的只读常量）。 */
 export function defaultSessionBudget(): SessionInteractionBudget {
   return { ...DEFAULT_SESSION_BUDGET };

@@ -10,7 +10,15 @@ import {
   isValidWeekActiveMask,
   mondayBasedDayIndex,
   isWeekActiveAt,
+  msUntilNextActive,
 } from '../src/risk/session-limits.js';
+
+/** 工作日（周一–周五）09:00–22:00 活跃的 168 掩码（测试夹具）。 */
+function workdayMask(): string {
+  let s = '';
+  for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++) s += d <= 4 && h >= 9 && h < 22 ? '1' : '0';
+  return s;
+}
 
 test('WEEK_ACTIVE_MASK_LEN = 168（7×24）', () => {
   assert.equal(WEEK_ACTIVE_MASK_LEN, 168);
@@ -60,6 +68,33 @@ test('isWeekActiveAt：按 周一起头 × 小时 精确查格', () => {
   const sunday23 = '0'.repeat(167) + '1';
   assert.equal(isWeekActiveAt(sunday23, new Date(2026, 5, 28, 23)), true, '周日23点活跃');
   assert.equal(isWeekActiveAt(sunday23, new Date(2026, 5, 28, 22)), false, '周日22点休眠');
+});
+
+test('msUntilNextActive：缺 / 非法掩码 → null（全天活跃，无需唤醒）', () => {
+  assert.equal(msUntilNextActive(null, new Date(2026, 5, 29, 3).getTime()), null);
+  assert.equal(msUntilNextActive(undefined, 123), null);
+  assert.equal(msUntilNextActive('bad', 123), null);
+});
+
+test('msUntilNextActive：当前已活跃 → null（不该在活跃时排唤醒）', () => {
+  assert.equal(msUntilNextActive('1'.repeat(168), new Date(2026, 5, 29, 9, 30).getTime()), null);
+  assert.equal(msUntilNextActive(workdayMask(), new Date(2026, 5, 29, 10, 15).getTime()), null, '周一10:15 活跃');
+});
+
+test('msUntilNextActive：整周全休眠 → null（永不唤醒，尊重运营关停）', () => {
+  assert.equal(msUntilNextActive('0'.repeat(168), new Date(2026, 5, 29, 9, 30).getTime()), null);
+});
+
+test('msUntilNextActive：当前休眠、本日稍后活跃 → 距下一活跃整点毫秒', () => {
+  // 工作日 09-22；周一 08:30 休眠 → 下一活跃 09:00 → 30min
+  assert.equal(msUntilNextActive(workdayMask(), new Date(2026, 5, 29, 8, 30, 0).getTime()), 30 * 60_000);
+  // 周一 22:10 休眠 → 下一活跃 = 周二 09:00 → 10h50min
+  assert.equal(msUntilNextActive(workdayMask(), new Date(2026, 5, 29, 22, 10, 0).getTime()), (10 * 60 + 50) * 60_000);
+});
+
+test('msUntilNextActive：跨天找次日活跃（周日深夜 → 周一 09:00）', () => {
+  // 周日全休眠；周日 2026-06-28 23:00 → 下一活跃 = 周一 09:00 → 10h
+  assert.equal(msUntilNextActive(workdayMask(), new Date(2026, 5, 28, 23, 0, 0).getTime()), 10 * 60 * 60_000);
 });
 
 test('isWeekActiveAt：典型「工作日 09-22」掩码', () => {

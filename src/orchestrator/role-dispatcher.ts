@@ -62,6 +62,7 @@ import {
   DEFAULT_SESSION_DURATION_MS,
   defaultSessionBudget,
   isWeekActiveAt,
+  msUntilNextActive,
   type SessionInteractionBudget,
   type SessionLimitProvider,
 } from '../risk/session-limits.js';
@@ -260,6 +261,8 @@ export class RoleDispatcher {
   private readonly setNickname?: (accountId: string, nickname: string) => Promise<void> | void;
   /** 续场休息计时器句柄（每连接私有、unref，只重开本连接会话；绝不广播）。 */
   private restTimer: unknown;
+  /** 「可活跃时间」窗口唤醒计时器句柄（休眠期排到下一个活跃整点主动续上；每连接私有、unref）。 */
+  private wakeTimer: unknown;
   /** 每账号当日自动续场计数（场数 + 累计浏览毫秒），按本地日界重置。 */
   private readonly dailyResume = new Map<string, { dayKey: string; sessions: number; browseMs: number }>();
   /** SessionMonitor 引用（供 excursion → pauseClock/resumeClock；setup 时捕获）。 */
@@ -695,8 +698,9 @@ export class RoleDispatcher {
 
   /** 启动会话：接线角色 / 指令翻译 / Edge 事件（看门狗在此随 SessionMonitor.subscribe 启动），再发 feed.entered。 */
   startSession(): void {
-    // 会话开始 → 取消任何待发休息计时器（已重开，无需续场）。
+    // 会话开始 → 取消任何待发休息计时器 + 窗口唤醒计时器（已重开，无需续场 / 唤醒）。
     this.cancelRestTimer();
+    this.cancelWakeTimer();
     // 幂等：已活跃则先拆旧订阅，避免重复接线（正常路径下 setup 后首次启动无需拆除）。
     if (this.sessionActive) {
       this.roles.forEach((r) => r.unsubscribe());
@@ -754,13 +758,16 @@ export class RoleDispatcher {
   restartSession(): void {
     // 「可活跃时间」闸（change weekly-active-window）：当前本地时刻不在后台配置的可活跃时段内 → 不开会话、保持休眠。
     // 此处为所有会话(重)启动的统一收口（边缘 hello / 绑人设自启 / 续场 / 面板手动），缺配置 / 非法掩码 = 全天活跃（零回归）。
-    // 续场路径已先经 canAutoResume 同闸（此为防御性二次拦）；窗口重开后由边端重连 / 下一次 hello 驱动续上（与既有每日活跃窗口同构）。
+    // 续场路径已先经 canAutoResume 同闸（此为防御性二次拦）。被拦后排一个窗口唤醒计时器：到下一个活跃整点
+    // 主动续上（窗口唤醒增强），不再干等边端重连。
     if (!this.isWithinActiveWeek(this.clock())) {
       console.log('[RoleDispatcher] 当前不在可活跃时段（可活跃时间闸）→ 不启动浏览会话，保持休眠');
+      this.armWakeTimerIfWindowed(this.currentAccountId);
       return;
     }
-    // 会话重开 → 取消待发休息计时器（边缘先自连重连即走此路，竞态由此化解）。
+    // 会话重开 → 取消待发休息计时器 + 窗口唤醒计时器（边缘先自连重连即走此路，竞态由此化解）。
     this.cancelRestTimer();
+    this.cancelWakeTimer();
     // 若仍活跃，先拆除旧订阅，避免重复注册
     if (this.sessionActive) {
       this.roles.forEach((r) => r.unsubscribe());
@@ -795,8 +802,10 @@ export class RoleDispatcher {
    *   运营 stop / 验证码-风控暂停 / 掉线 / 发布让位 → 缺省 false（不续）。
    */
   endSession(reason?: string, opts?: { autoResumeEligible?: boolean }): void {
-    // 不论是否活跃，先取消任何待发休息计时器（运营 stop / 掉线 / 发布让位都不该残留续场）。
+    // 不论是否活跃，先取消任何待发休息计时器 + 窗口唤醒计时器（运营 stop / 掉线 / 发布让位都不该残留续场；
+    // 「可活跃时间」结束的正常路径会经 armRestTimer→续场拒签 重排唤醒，故此处清掉是安全的）。
     this.cancelRestTimer();
+    this.cancelWakeTimer();
     if (!this.sessionActive) return;
     const account = this.currentAccountId;
     // 记当日累计浏览时长（含 excursion，仅供每日上限近似）。
@@ -820,6 +829,41 @@ export class RoleDispatcher {
       this.clearTimeoutFn(this.restTimer);
       this.restTimer = undefined;
     }
+  }
+
+  private cancelWakeTimer(): void {
+    if (this.wakeTimer !== undefined) {
+      this.clearTimeoutFn(this.wakeTimer);
+      this.wakeTimer = undefined;
+    }
+  }
+
+  /**
+   * 「可活跃时间」窗口唤醒（change weekly-active-window 增强）：当前处于休眠格时，算出下一个活跃整点、
+   * 到点主动起一场会话续上，不再干等边端重连 / 下一次 hello。
+   * 不安排的情形（msUntilNextActive 返回 null）：全天活跃 / 当前已活跃 / 整周全休眠（运营显式关停）。
+   * 与续场同一特性闸：未注入续场提供者（续场关）→ 不主动唤醒，保持零回归。每连接私有、unref。
+   * 抖动至多 1min：避免整点多连接齐发（防关联 + 拟人），落点仍在窗口内。
+   */
+  private armWakeTimerIfWindowed(account: string): void {
+    this.cancelWakeTimer();
+    if (!this.resumeConfigProvider) return; // 续场特性关 → 不主动唤醒（零回归）
+    const mask = this.sessionLimitProvider?.weekActiveMask() ?? null;
+    const ms = msUntilNextActive(mask, this.clock());
+    if (ms == null) return; // 无需唤醒
+    const jitter = Math.floor(this.randomFn() * 60_000);
+    this.wakeTimer = this.setTimeoutFn(() => {
+      this.wakeTimer = undefined;
+      this.onWakeElapsed(account);
+    }, ms + jitter);
+    (this.wakeTimer as { unref?: () => void } | undefined)?.unref?.();
+  }
+
+  /** 窗口唤醒到点：账号已切换 / 已在跑 → 放弃；否则过续场各闸（窗口此刻已开）→ 起会话 + 重驱边端。 */
+  private onWakeElapsed(account: string): void {
+    if (this.currentAccountId !== account) return; // 重连到别的账号
+    if (this.sessionActive) return; // 已在跑（边端可能已自连重开）
+    this.doAutoResume(account); // 窗口已开 → canAutoResume 放行 → 起会话 + scroll 重驱
   }
 
   /** 安排休息计时器。未注入续场提供者 → 特性关、保持旧行为（不续）。 */
@@ -852,7 +896,12 @@ export class RoleDispatcher {
 
   private doAutoResume(account: string): void {
     if (this.sessionActive) return; // 边缘已先自连重开
-    if (!this.canAutoResume(account)) return; // 护栏不过：诚实不续
+    if (!this.canAutoResume(account)) {
+      // 护栏不过：诚实不续。若因「可活跃时间」窗口外被拦 → 排到下一个窗口开启时主动唤醒续上
+      // （armWakeTimerIfWindowed 在「全天活跃 / 当前已活跃 / 全休眠」时自动 no-op，故非窗口原因被拦不会误排）。
+      this.armWakeTimerIfWindowed(account);
+      return;
+    }
     this.dailyTally(account, this.clock()).sessions += 1;
     this.tryStartSession();
     // 续场重开后主动重驱边端（change restore-auto-resume A②）：边端浏览循环在 session.end 后已停、

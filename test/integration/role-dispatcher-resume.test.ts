@@ -168,6 +168,37 @@ describe('RoleDispatcher「可活跃时间」周历闸（change weekly-active-wi
     m.fire(); // 休息到点 → doAutoResume → canAutoResume（周历闸）
     assert.equal(m.d.active, false, '可活跃时段外 → canAutoResume 拦，不续');
   });
+
+  // 窗口唤醒增强：休眠期排到「下一个活跃整点」主动续上，不再干等边端重连。
+  // 掩码按 make() 内固定的起始时钟（1_000_000ms）推导，保证「当前休眠、下一整点活跃」与时区无关。
+  const NOW0 = 1_000_000;
+  const idxOf = (d: Date) => (((d.getDay() + 6) % 7) * 24 + d.getHours());
+  const maskDormantNowActiveNextHour = () => {
+    const next = new Date(NOW0);
+    next.setMinutes(0, 0, 0);
+    next.setHours(next.getHours() + 1);
+    const arr = '0'.repeat(168).split('');
+    arr[idxOf(next)] = '1'; // 仅下一整点活跃；当前及其余休眠
+    return arr.join('');
+  };
+
+  it('窗口唤醒：窗口外排唤醒计时器，到点（窗口已开）→ 主动起会话续上', () => {
+    const m = make({ weekMask: maskDormantNowActiveNextHour() });
+    m.d.restartSession(); // 当前休眠 → 被拦 + 排窗口唤醒计时器
+    assert.equal(m.d.active, false, '窗口外不开会话');
+    const wakeMs = m.getTimerMs();
+    assert.ok(typeof wakeMs === 'number' && wakeMs > 0, `应排了窗口唤醒计时器，实得 ${wakeMs}`);
+    m.advance(wakeMs); // 推进到下一活跃整点（含至多 1min 抖动，仍落在该活跃小时内）
+    m.fire(); // 唤醒到点 → doAutoResume（窗口已开）→ 起会话 + 重驱
+    assert.equal(m.d.active, true, '窗口重开 → 主动起一场会话续上');
+  });
+
+  it('窗口唤醒：整周全休眠 → 不排唤醒（尊重运营显式关停）', () => {
+    const m = make({ weekMask: ALL_OFF });
+    m.d.restartSession();
+    assert.equal(m.d.active, false);
+    assert.equal(m.getTimerMs(), undefined, '全休眠无「下一活跃」→ 不排唤醒计时器');
+  });
 });
 
 describe('isWithinActiveWindow（活跃时段窗口纯函数）', () => {
