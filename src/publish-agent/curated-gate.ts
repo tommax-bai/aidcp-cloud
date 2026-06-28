@@ -16,7 +16,12 @@ export interface CuratedGateConfig {
   ratioMin: number;
   /** 比率判定的点赞数下限：低于此值则比率不可信、不予采纳（缺省 80）。 */
   ratioLikeFloor: number;
-  /** 相关性所需的最小兴趣命中数（缺省 1）。 */
+  /**
+   * 相关性闸：兴趣命中数需 ≥ 此值（**0 = 关闭硬相关性闸**）。缺省 0。
+   * 真机验(2026-06-28)发现：账号兴趣是「描述性长短语」(如「模型横向对比（能力/价格/延迟/上下文/并发）」)、
+   * 人设亦明示「兴趣领域不用于硬匹配」，子串硬匹配永不命中 → 把所有笔记误判 off_topic、精选库恒空。
+   * 且「打开哪条笔记」已由浏览侧 LLM 按人设把关、相关性在上游已保证，故缺省关闭；质量由 resonance(收藏/比率/自有收藏)独立把。
+   */
   minTopicOverlap: number;
   /** 语料保留上限（存储用，放这里供统一解析；缺省 1000）。 */
   retentionMax: number;
@@ -35,7 +40,9 @@ export const DEFAULT_CURATED_GATE_CONFIG: CuratedGateConfig = {
   collectFloor: 50,
   ratioMin: 0.2,
   ratioLikeFloor: 80,
-  minTopicOverlap: 1,
+  // 0 = 关闭硬相关性闸（见 minTopicOverlap 字段说明：真机验发现硬子串匹配长短语兴趣永不命中，
+  // 相关性已由浏览侧 LLM 按人设把关）。质量交给下面的 resonance（收藏地板 / 比率 / 自有收藏）。
+  minTopicOverlap: 0,
   retentionMax: 1000,
   selectTopK: 8,
 };

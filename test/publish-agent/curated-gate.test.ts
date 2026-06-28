@@ -28,7 +28,7 @@ describe('AC-CURATED-GATE 准入门槛 + 配置', () => {
       collectFloor: 50,
       ratioMin: 0.2,
       ratioLikeFloor: 80,
-      minTopicOverlap: 1,
+      minTopicOverlap: 0, // 0=关闭硬相关性闸（真机验后改：长短语兴趣硬匹配永不命中，相关性由浏览侧 LLM 上游把关）
       retentionMax: 1000,
       selectTopK: 8,
     });
@@ -62,14 +62,23 @@ describe('AC-CURATED-GATE 准入门槛 + 配置', () => {
     assert.deepEqual(r, { admit: true, reason: 'collect_ratio' });
   });
 
-  test('跑题（relevanceHits=0 且非 botCollected）→ 被拦(off_topic)', () => {
+  test('缺省(minTopicOverlap=0)：硬相关性闸关闭 → 跑题但高共鸣仍按 resonance 纳入', () => {
+    // 真机验后缺省关闭硬相关性闸（长短语兴趣硬匹配永不命中、相关性由浏览侧 LLM 上游把关）。
+    const r = evaluateAdmission(
+      makeInput({ noteText: '一篇关于股票投资的硬核分析', accountInterests: ['露营', '徒步'], collectCount: 500 }),
+      CONFIG,
+    );
+    assert.deepEqual(r, { admit: true, reason: 'collect_floor' });
+  });
+
+  test('显式开启相关性闸(minTopicOverlap=1)：跑题 + 非自有收藏 → 被拦(off_topic)', () => {
     const r = evaluateAdmission(
       makeInput({
         noteText: '一篇关于股票投资的硬核分析',
         accountInterests: ['露营', '徒步'],
-        collectCount: 500, // 即便共鸣极强，跑题也先被拦
+        collectCount: 500, // 即便共鸣极强，开启相关性闸后跑题也先被拦
       }),
-      CONFIG,
+      { ...CONFIG, minTopicOverlap: 1 },
     );
     assert.deepEqual(r, { admit: false, reason: 'off_topic' });
   });
