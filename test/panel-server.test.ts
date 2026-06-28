@@ -389,7 +389,7 @@ test('HTTP dispatch 写路由：start/stop 回报真态 + changed + 真实在线
   }
 });
 
-test('HTTP 精选内容后台管理：未注入 503 / 账号必填 400 / 读列表+facets / 删与清回真态 + 账号隔离', async () => {
+test('HTTP 精选内容后台管理：未注入 503 / 缺账号=全账号视图 / 读列表+facets / 删与清账号必填 + 账号隔离', async () => {
   // 未注入 curatedContent：精选路由 503，不连累其他接口。
   const noCurated = await startPanelApi(deps, makeConfig());
   try {
@@ -409,11 +409,11 @@ test('HTTP 精选内容后台管理：未注入 503 / 账号必填 400 / 读列�
   // 注入 curatedContent：完整路径。
   const calls: Array<{ fn: string; args: unknown[] }> = [];
   const curatedMock = {
-    listForPanel: async (accountId: string, opts: unknown) => {
+    listForPanel: async (accountId: string | undefined, opts: unknown) => {
       calls.push({ fn: 'list', args: [accountId, opts] });
-      return { items: [{ id: 7, accountId, contentType: 'note', sourceId: 'n-1', title: 'T', body: 'B', author: '甲', sourceUrl: null, topics: [], likeCount: null, collectCount: 5, commentCount: null, countsCapturedAt: null, botLiked: false, botCollected: true, admitReason: 'collect_floor', firstSeenAt: 1, updatedAt: 2 }], total: 1 };
+      return { items: [{ id: 7, accountId: accountId ?? 'acc-1', contentType: 'note', sourceId: 'n-1', title: 'T', body: 'B', author: '甲', sourceUrl: null, topics: [], likeCount: null, collectCount: 5, commentCount: null, countsCapturedAt: null, botLiked: false, botCollected: true, admitReason: 'collect_floor', firstSeenAt: 1, updatedAt: 2 }], total: 1 };
     },
-    facetsForPanel: async (accountId: string) => {
+    facetsForPanel: async (accountId: string | undefined) => {
       calls.push({ fn: 'facets', args: [accountId] });
       return { admitReasons: [{ admitReason: 'collect_floor', count: 1, botActionCount: 0 }], noteCount: 1, commentCount: 0 };
     },
@@ -440,10 +440,12 @@ test('HTTP 精选内容后台管理：未注入 503 / 账号必填 400 / 读列�
     const auth = { authorization: `Bearer ${token}` };
     const authJson = { ...auth, 'content-type': 'application/json' };
 
-    // 账号必填：缺 accountId → 400 account_required（绝不默认/合并＝PII 隔离）
-    const noAcc = await fetch(`${base}/api/curated/contents`, { headers: auth });
-    assert.equal(noAcc.status, 400);
-    assert.equal(((await noAcc.json()) as { reason: string }).reason, 'account_required');
+    // 缺 accountId = 全账号合并视图（200，listForPanel 收 undefined 账号）
+    const allAcc = await fetch(`${base}/api/curated/contents`, { headers: auth });
+    assert.equal(allAcc.status, 200);
+    assert.equal(((await allAcc.json()) as { total: number }).total, 1);
+    assert.equal(calls.find((c) => c.fn === 'list')?.args[0], undefined);
+    calls.length = 0;
 
     // 读列表：带类型/原因/分页过滤，回 {items,total}
     const list = (await (
@@ -455,8 +457,10 @@ test('HTTP 精选内容后台管理：未注入 503 / 账号必填 400 / 读列�
     assert.deepEqual(listCall?.args[0], 'acc-1');
     assert.deepEqual(listCall?.args[1], { contentType: 'note', admitReason: 'collect_floor', limit: 20, offset: 0 });
 
-    // facets：账号必填
-    assert.equal((await fetch(`${base}/api/curated/facets`, { headers: auth })).status, 400);
+    // facets：缺 accountId = 全账号合并统计（200，facetsForPanel 收 undefined 账号）
+    const facetsAll = await fetch(`${base}/api/curated/facets`, { headers: auth });
+    assert.equal(facetsAll.status, 200);
+    assert.equal(calls.find((c) => c.fn === 'facets')?.args[0], undefined);
     const facets = (await (await fetch(`${base}/api/curated/facets?accountId=acc-1`, { headers: auth })).json()) as {
       noteCount: number;
     };

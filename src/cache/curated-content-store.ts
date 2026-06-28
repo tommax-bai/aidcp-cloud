@@ -391,29 +391,35 @@ export class CuratedContentStore {
   }
 
   // ── 后台管理（change curated-content-admin-page）：只读检索 + 治理写 ──────────────
-  // 红线：所有方法按 account_id 过滤 / 约束，绝不跨账号；删除把 account_id 写进 WHERE 防越权
-  //      （id 是全局 SERIAL）；缺表（42P01）只读路径优雅降空，不抛 500。
+  // 红线：治理写（deleteOne / clearEmptyBody）把 account_id 写进 WHERE 防越权（id 是全局 SERIAL，故账号必填）；
+  //      只读检索（listForPanel / facetsForPanel）accountId 给定＝按账号过滤、缺省＝全账号合并视图（每行携 account_id、
+  //      删除仍按行账号防越权）；缺表（42P01）只读路径优雅降空，不抛 500。
 
   /**
-   * 面板列表（按账号隔离的分页只读）。
-   * 动态 WHERE 强制 account_id + 可选 content_type / admit_reason 精确过滤，按 updated_at DESC
-   * （命中 idx_curated_content_account_updated），COUNT(*) OVER() 同查询取回当前筛选总数。
-   * 空结果集 total 兜底 0；缺表 42P01 → {items:[],total:0} 降级。
+   * 面板列表（分页只读）。
+   * accountId 给定＝按该账号过滤；缺省（undefined/空）＝全账号合并视图（运营便利，每行带 account_id、删除仍按行账号防越权）。
+   * 动态 WHERE 拼 account_id（可选）+ content_type / admit_reason 精确过滤，按 updated_at DESC，
+   * COUNT(*) OVER() 同查询取回当前筛选总数。空结果集 total 兜底 0；缺表 42P01 → {items:[],total:0} 降级。
    */
   async listForPanel(
-    accountId: string,
+    accountId: string | undefined,
     opts: { contentType?: CuratedContentType; admitReason?: string; limit: number; offset: number },
   ): Promise<CuratedPanelListResult> {
-    const params: unknown[] = [accountId];
-    let where = 'WHERE account_id = $1';
+    const params: unknown[] = [];
+    const conds: string[] = [];
+    if (accountId) {
+      params.push(accountId);
+      conds.push(`account_id = $${params.length}`);
+    }
     if (opts.contentType) {
       params.push(opts.contentType);
-      where += ` AND content_type = $${params.length}`;
+      conds.push(`content_type = $${params.length}`);
     }
     if (opts.admitReason) {
       params.push(opts.admitReason);
-      where += ` AND admit_reason = $${params.length}`;
+      conds.push(`admit_reason = $${params.length}`);
     }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
     params.push(opts.limit);
     const limitIdx = params.length;
     params.push(opts.offset);
@@ -439,27 +445,30 @@ export class CuratedContentStore {
   }
 
   /**
-   * 面板筛选面（按账号）：纳入原因去重 + 各自计数 + 携双标记的高权重行数 + 笔记/评论计数。
+   * 面板筛选面：纳入原因去重 + 各自计数 + 携双标记的高权重行数 + 笔记/评论计数。
+   * accountId 给定＝按该账号；缺省（undefined/空）＝全账号合并统计（驱动全账号视图下的筛选下拉）。
    * 驱动筛选下拉（不硬编码原因）与清理前影响预览。缺表 42P01 → 空降级。
    */
-  async facetsForPanel(accountId: string): Promise<CuratedFacets> {
+  async facetsForPanel(accountId?: string): Promise<CuratedFacets> {
+    const where = accountId ? 'WHERE account_id = $1' : '';
+    const params = accountId ? [accountId] : [];
     try {
       const reasonsP = this.pool.query<{ admit_reason: string | null; count: string; bot_action_count: string }>(
         `SELECT admit_reason,
                 COUNT(*) AS count,
                 SUM(CASE WHEN bot_liked OR bot_collected THEN 1 ELSE 0 END) AS bot_action_count
          FROM curated_content
-         WHERE account_id = $1
+         ${where}
          GROUP BY admit_reason
          ORDER BY count DESC`,
-        [accountId],
+        params,
       );
       const typesP = this.pool.query<{ content_type: string; count: string }>(
         `SELECT content_type, COUNT(*) AS count
          FROM curated_content
-         WHERE account_id = $1
+         ${where}
          GROUP BY content_type`,
-        [accountId],
+        params,
       );
       const [reasonsR, typesR] = await Promise.all([reasonsP, typesP]);
       let noteCount = 0;

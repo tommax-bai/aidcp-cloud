@@ -101,11 +101,11 @@ export interface PanelDeps {
   tokenUsage?: { usage(query: LlmUsageQuery): Promise<LlmUsagePayload> };
   /**
    * 通知联系人名册（change notification-contact-registry）。未注入则 /api/notification/contacts* 返回 503。
-   * 读=按账号联系人列表（accountId 必填）；写=人工字段（微信/标签/备注）只动侧表、绝不碰事件流水。
-   * 按账号隔离；不提供全账号合并视图（防把运营各账号粉丝交叉关联的 PII 泄露）。
+   * 读=联系人列表（accountId 给定＝按账号；缺省＝全账号合并视图，每行带 accountId）；
+   * 写=人工字段（微信/标签/备注）只动侧表、按行账号路由、绝不碰事件流水。
    */
   notificationContact?: {
-    listContacts(accountId: string, limit?: number, offset?: number): Promise<NotificationContact[]>;
+    listContacts(accountId?: string, limit?: number, offset?: number): Promise<NotificationContact[]>;
     setManual(
       accountId: string,
       senderKey: string,
@@ -115,8 +115,9 @@ export interface PanelDeps {
   };
   /**
    * 精选创作灵感语料的后台管理面（change curated-content-admin-page）。未注入则 /api/curated/* 返回 503。
-   * 读=按账号隔离的分页列表 + 筛选面（accountId 必填）；写=删单条 / 清空正文壳行（account_id 强制进 WHERE 防越权）。
-   * 按账号隔离、不提供全账号合并视图（PII）；删除非持久（仅清当前快照，达标会重新纳入），honest 回真实条数。
+   * 读=分页列表 + 筛选面（accountId 给定＝按账号；缺省＝全账号合并视图，每行带 account_id）；
+   * 写=删单条 / 清空正文壳行（account_id 强制进 WHERE 防越权，删除按行账号路由）。
+   * 删除非持久（仅清当前快照，达标会重新纳入），honest 回真实条数。
    */
   curatedContent?: PanelCuratedContent;
 }
@@ -125,13 +126,13 @@ export interface PanelDeps {
 // 直接复用 CuratedContentStore 的方法形状作面板 dep（store 自有 curated_content 表，不塞 PgPanelStore）。
 
 export interface PanelCuratedContent {
-  /** 按账号分页只读列表（可选类型 / 纳入原因过滤）；含一致 total。缺表 store 内回落空。 */
+  /** 分页只读列表（accountId 缺省＝全账号；可选类型 / 纳入原因过滤）；含一致 total。缺表 store 内回落空。 */
   listForPanel(
-    accountId: string,
+    accountId: string | undefined,
     opts: { contentType?: CuratedContentType; admitReason?: string; limit: number; offset: number },
   ): Promise<CuratedPanelListResult>;
-  /** 按账号筛选面：纳入原因去重 + 计数 + 高权重行数 + 笔记/评论计数。缺表回落空。 */
-  facetsForPanel(accountId: string): Promise<CuratedFacets>;
+  /** 筛选面（accountId 缺省＝全账号）：纳入原因去重 + 计数 + 高权重行数 + 笔记/评论计数。缺表回落空。 */
+  facetsForPanel(accountId?: string): Promise<CuratedFacets>;
   /** 删单条（account_id 进 WHERE 防越权）；回真实删除行数 0|1。 */
   deleteOne(accountId: string, id: number): Promise<number>;
   /** 清空正文壳行（按账号）；回真实清理条数。 */

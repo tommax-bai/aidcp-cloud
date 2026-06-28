@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS notification_contact_meta (
 
 /** 一个联系人（读时聚合产物）。时间戳为 epoch ms。 */
 export interface NotificationContact {
+  /** 该联系人归属的账号（全账号视图下据此区分同一人在不同账号下的两行 + 路由人工字段写入）。 */
+  accountId: string;
   senderKey: string;
   nickname: string | null;
   userId: string | null;
@@ -197,13 +199,24 @@ export class NotificationContactStore {
   }
 
   /**
-   * 联系人列表（读时聚合）。按 COALESCE(主页ID, 昵称, dedup_key) 分组，只左连人工侧表（1:1，不放大计数）。
+   * 联系人列表（读时聚合）。按 (账号, COALESCE(主页ID, 昵称, dedup_key)) 分组，只左连人工侧表（1:1，不放大计数）。
+   * accountId 给定＝按该账号过滤；缺省（undefined/空）＝全账号合并视图（运营便利，每行仍带 accountId、写入按行账号路由隔离）。
    * 缺表（迁移未跑）回落空。
    */
-  async listContacts(accountId: string, limit = 200, offset = 0): Promise<NotificationContact[]> {
-    if (!accountId) return [];
+  async listContacts(accountId?: string, limit = 200, offset = 0): Promise<NotificationContact[]> {
     try {
+      const params: unknown[] = [];
+      let accountFilter = '';
+      if (accountId) {
+        params.push(accountId);
+        accountFilter = `WHERE e.account_id = $${params.length}`;
+      }
+      params.push(Math.max(1, Math.min(limit, 1000)));
+      const limitIdx = params.length;
+      params.push(Math.max(0, offset));
+      const offsetIdx = params.length;
       const { rows } = await this.pool.query<{
+        account_id: string;
         sender_key: string;
         nickname: string | null;
         user_id: string | null;
@@ -219,6 +232,7 @@ export class NotificationContactStore {
         updated_at: Date | null;
       }>(
         `SELECT
+           e.account_id                                              AS account_id,
            COALESCE(e.from_user_id, e.from_user, e.dedup_key)         AS sender_key,
            MAX(e.from_user)                                           AS nickname,
            MAX(e.from_user_id)                                        AS user_id,
@@ -236,14 +250,15 @@ export class NotificationContactStore {
          LEFT JOIN notification_contact_meta m
            ON m.account_id = e.account_id
           AND m.sender_key = COALESCE(e.from_user_id, e.from_user, e.dedup_key)
-         WHERE e.account_id = $1
-         GROUP BY COALESCE(e.from_user_id, e.from_user, e.dedup_key),
+         ${accountFilter}
+         GROUP BY e.account_id, COALESCE(e.from_user_id, e.from_user, e.dedup_key),
                   m.wechat, m.note, m.tags, m.updated_by, m.updated_at
          ORDER BY MAX(e.seen_at) DESC
-         LIMIT $2 OFFSET $3`,
-        [accountId, Math.max(1, Math.min(limit, 1000)), Math.max(0, offset)],
+         LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+        params,
       );
       return rows.map((r) => ({
+        accountId: r.account_id,
         senderKey: r.sender_key,
         nickname: r.nickname ?? null,
         userId: r.user_id ?? null,

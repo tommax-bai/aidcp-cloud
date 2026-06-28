@@ -12,14 +12,19 @@ import type { NotificationItem } from '../src/comm/protocol.js';
 interface Recorded {
   inserts: { sql: string; params: unknown[] }[];
   deletes: { sql: string; params: unknown[] }[];
+  selects: { sql: string; params: unknown[] }[];
 }
-function fakePool(opts: { listError?: { code: string } } = {}) {
-  const rec: Recorded = { inserts: [], deletes: [] };
+function fakePool(opts: { listError?: { code: string }; listRows?: Record<string, unknown>[] } = {}) {
+  const rec: Recorded = { inserts: [], deletes: [], selects: [] };
   const pool = {
     query: async (sql: string, params?: unknown[]) => {
       if (sql.includes('INSERT INTO notification_event')) rec.inserts.push({ sql, params: params ?? [] });
       else if (sql.includes('DELETE FROM notification_event')) rec.deletes.push({ sql, params: params ?? [] });
-      else if (sql.includes('FROM notification_event e') && opts.listError) throw opts.listError;
+      else if (sql.includes('FROM notification_event e')) {
+        rec.selects.push({ sql, params: params ?? [] });
+        if (opts.listError) throw opts.listError;
+        return { rows: opts.listRows ?? [], rowCount: opts.listRows?.length ?? 0 };
+      }
       return { rows: [], rowCount: 0 };
     },
   } as unknown as pg.Pool;
@@ -125,10 +130,47 @@ test('listContacts：缺表（42P01）回落空，不抛', async () => {
   assert.deepEqual(out, []);
 });
 
-test('listContacts：空 accountId 回落空', async () => {
-  const { pool } = fakePool();
+test('listContacts：缺 accountId（全账号视图）不加 account_id 过滤、按账号分组、每行带 accountId', async () => {
+  const { pool, rec } = fakePool({
+    listRows: [
+      {
+        account_id: 'acct-9',
+        sender_key: 'u_1',
+        nickname: '小白',
+        user_id: 'u_1',
+        first_reason: 'comment',
+        reasons: ['comment'],
+        first_seen: new Date(1000),
+        last_seen: new Date(2000),
+        event_count: '3',
+        wechat: null,
+        note: null,
+        tags: [],
+        updated_by: null,
+        updated_at: null,
+      },
+    ],
+  });
   const store = new NotificationContactStore({ pool });
-  assert.deepEqual(await store.listContacts(''), []);
+  const out = await store.listContacts(undefined);
+  // 全账号：SELECT 不带 WHERE e.account_id 过滤，仅 LIMIT/OFFSET 两个参数（占位 $1/$2）
+  assert.equal(rec.selects.length, 1);
+  assert.doesNotMatch(rec.selects[0].sql, /WHERE e\.account_id/);
+  assert.match(rec.selects[0].sql, /GROUP BY e\.account_id/);
+  assert.match(rec.selects[0].sql, /LIMIT \$1 OFFSET \$2/);
+  assert.deepEqual(rec.selects[0].params, [200, 0]);
+  // 每行带归属账号（供全账号视图区分 + 写入路由）
+  assert.equal(out[0].accountId, 'acct-9');
+  assert.equal(out[0].senderKey, 'u_1');
+});
+
+test('listContacts：给定 accountId → 加 WHERE e.account_id 过滤', async () => {
+  const { pool, rec } = fakePool();
+  const store = new NotificationContactStore({ pool });
+  await store.listContacts('acct-1');
+  assert.match(rec.selects[0].sql, /WHERE e\.account_id = \$1/);
+  assert.match(rec.selects[0].sql, /LIMIT \$2 OFFSET \$3/);
+  assert.deepEqual(rec.selects[0].params, ['acct-1', 200, 0]);
 });
 
 // ── setManual 只动侧表 ────────────────────────────────────────────────────

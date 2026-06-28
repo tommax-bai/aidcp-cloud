@@ -215,19 +215,16 @@ function createRequestHandler(
       return;
     }
 
-    // 通知联系人名册（change notification-contact-registry）：按账号联系人列表（accountId 必填，缺则 400；
-    // 绝不默认 default、不提供全账号合并视图＝PII 隔离）。未注入 503；缺表由 store 回落空。
+    // 通知联系人名册（change notification-contact-registry）：联系人列表。
+    // accountId 给定＝按账号过滤；缺省＝全账号合并视图（运营便利，每行带 accountId、写入按行账号路由隔离）。
+    // 未注入 503；缺表由 store 回落空。
     if (method === 'GET' && url === '/api/notification/contacts') {
       if (!deps.notificationContact) {
         sendJson(res, 503, { error: 'notification_contact_unavailable' });
         return;
       }
       const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
-      const accountId = (query.get('accountId') ?? '').trim();
-      if (!accountId) {
-        sendJson(res, 400, { error: 'bad_request', reason: 'account_required' });
-        return;
-      }
+      const accountId = (query.get('accountId') ?? '').trim() || undefined;
       const numOf = (k: string, dflt: number): number => {
         const v = query.get(k);
         if (v == null || v === '') return dflt;
@@ -872,8 +869,8 @@ function createRequestHandler(
     }
 
     // ── 精选内容后台管理（change curated-content-admin-page）──────────────────────
-    // 按账号隔离的只读检索 + 治理写。账号必填（缺则 400 account_required，绝不默认/合并＝PII 隔离）；
-    // 未注入 503；缺表 store 回落空。删/清把 account_id 强制进 WHERE 防越权（id 全局 SERIAL）。
+    // 只读检索（accountId 给定＝按账号；缺省＝全账号合并视图，每行带 account_id）+ 治理写。
+    // 未注入 503；缺表 store 回落空。删/清把 account_id 强制进 WHERE 防越权（id 全局 SERIAL，故治理写仍账号必填）。
     // 静态后缀路由（/facets、/contents/clear-empty）排在 :id 动态匹配之前。
     if (method === 'GET' && url === '/api/curated/facets') {
       if (!deps.curatedContent) {
@@ -881,11 +878,7 @@ function createRequestHandler(
         return;
       }
       const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
-      const accountId = (query.get('accountId') ?? '').trim();
-      if (!accountId) {
-        sendJson(res, 400, { error: 'bad_request', reason: 'account_required' });
-        return;
-      }
+      const accountId = (query.get('accountId') ?? '').trim() || undefined;
       sendJson(res, 200, await deps.curatedContent.facetsForPanel(accountId));
       return;
     }
@@ -917,11 +910,7 @@ function createRequestHandler(
         return;
       }
       const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
-      const accountId = (query.get('accountId') ?? '').trim();
-      if (!accountId) {
-        sendJson(res, 400, { error: 'bad_request', reason: 'account_required' });
-        return;
-      }
+      const accountId = (query.get('accountId') ?? '').trim() || undefined;
       const numOf = (k: string, dflt: number): number => {
         const v = query.get(k);
         if (v == null || v === '') return dflt;

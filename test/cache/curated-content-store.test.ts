@@ -343,6 +343,41 @@ test('listForPanel：无筛选时仅按账号；空结果 total 兜底 0', async
   assert.deepEqual(out, { items: [], total: 0 });
 });
 
+test('listForPanel：缺 accountId（全账号视图）不加 account_id 过滤，仍可叠类型过滤', async () => {
+  const { pool, calls } = controllablePool(() => ({ rows: [panelDbRow] }));
+  const store = new CuratedContentStore({ pool });
+  const out = await store.listForPanel(undefined, { contentType: 'note', limit: 50, offset: 0 });
+  assert.doesNotMatch(calls[0].sql, /account_id = \$/);
+  assert.match(calls[0].sql, /WHERE content_type = \$1/);
+  assert.match(calls[0].sql, /LIMIT \$2 OFFSET \$3/);
+  assert.deepEqual(calls[0].params, ['note', 50, 0]); // 无 account；类型 + limit + offset
+  assert.equal(out.total, 1);
+  assert.equal(out.items[0].accountId, 'acc-1'); // 每行带归属账号
+});
+
+test('listForPanel：缺 accountId 且无筛选 → 全表（无 WHERE）', async () => {
+  const { pool, calls } = controllablePool(() => ({ rows: [] }));
+  const store = new CuratedContentStore({ pool });
+  const out = await store.listForPanel(undefined, { limit: 20, offset: 0 });
+  assert.doesNotMatch(calls[0].sql, /WHERE/);
+  assert.deepEqual(calls[0].params, [20, 0]);
+  assert.deepEqual(out, { items: [], total: 0 });
+});
+
+test('facetsForPanel：缺 accountId（全账号视图）不加 account_id 过滤', async () => {
+  const { pool, calls } = controllablePool((sql) => {
+    if (/GROUP BY admit_reason/.test(sql)) return { rows: [{ admit_reason: 'collect_floor', count: '9', bot_action_count: '4' }] };
+    return { rows: [{ content_type: 'note', count: '7' }, { content_type: 'comment', count: '2' }] };
+  });
+  const store = new CuratedContentStore({ pool });
+  const out = await store.facetsForPanel(undefined);
+  assert.ok(calls.every((c) => !/account_id = \$/.test(c.sql))); // 两查询都不按账号
+  assert.ok(calls.every((c) => c.params.length === 0));
+  assert.equal(out.noteCount, 7);
+  assert.equal(out.commentCount, 2);
+  assert.deepEqual(out.admitReasons[0], { admitReason: 'collect_floor', count: 9, botActionCount: 4 });
+});
+
 test('listForPanel：缺表 42P01 → 优雅降级 {items:[],total:0}', async () => {
   const { pool } = controllablePool(() => {
     const err = new Error('relation does not exist') as Error & { code: string };
