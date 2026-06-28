@@ -17,9 +17,9 @@ test('ACCOUNTS_SCHEMA_SQL status/quota_level 有 CHECK 约束（status 非空、
   assert.match(ACCOUNTS_SCHEMA_SQL, /CHECK \(quota_level IN \('conservative','normal','aggressive'\)\)/);
 });
 
-test('ACCOUNTS_SCHEMA_SQL seed 一个 default 行（幂等）', () => {
-  assert.match(ACCOUNTS_SCHEMA_SQL, /INSERT INTO accounts.*'default'/s);
-  assert.match(ACCOUNTS_SCHEMA_SQL, /ON CONFLICT \(account_id\) DO NOTHING/);
+test('ACCOUNTS_SCHEMA_SQL 不再 seed 任何占位账号（retire-default-account：default 已退役，绝不建占位行）', () => {
+  // 建表 SQL 不得含任何 INSERT（不 seed 占位行）；账号父行由真实账号握手时 ensureAccount 登记。
+  assert.doesNotMatch(ACCOUNTS_SCHEMA_SQL, /INSERT INTO accounts/);
 });
 
 // ── change account-real-nickname：nickname 列自愈 DDL + setNickname 单写 ──

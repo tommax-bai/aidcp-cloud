@@ -191,7 +191,7 @@ export interface PersonaResolverDeps {
  */
 export function createPersonaResolver(deps: PersonaResolverDeps): PersonaResolver {
   const logger = deps.logger ?? console;
-  return (accountId = 'default'): Soul => {
+  return (accountId = '__unbound__'): Soul => {
     const text = deps.store?.getForAccount(accountId) ?? null;
     if (!text) return deps.fallbackSoul;
     try {

@@ -231,8 +231,8 @@ export class EdgeCloudServer implements EdgePusher {
   /**
    * 解析绑定某账号的在线边缘节点 edgeId（发布命令定向下发用）。
    * 只认 OPEN + 非 stale 的连接（死连接不算在线，与 onlineEdgeCount 同口径）。
-   * 匹配 `session.accountId === accountId`；为兼容未声明账号的旧边缘，仅当目标为 'default' 时把
-   * 未声明账号（accountId 为空）也视作 default。同账号多条在线连接 → 取最早登记者（Map 插入序）并记日志。
+   * 严格匹配 `session.accountId === accountId`（retire-default-account：握手已保证每个连接带真实账号，
+   * 去掉「目标为 default 时把未声明账号也算上」的 legacy 兼容）。同账号多条在线连接 → 取最早登记者（Map 插入序）并记日志。
    * 无在线节点返回 null（调用方据此诚实失败、绝不广播）。
    */
   resolveEdgeIdForAccount(accountId: string): string | null {
@@ -242,9 +242,7 @@ export class EdgeCloudServer implements EdgePusher {
       const eid = conn.session.edgeId;
       if (!eid) continue;
       if (conn.ws.readyState !== WebSocket.OPEN || now - conn.lastSeen >= this.staleAfterMs) continue;
-      const bound = conn.session.accountId;
-      const isMatch = bound === accountId || (accountId === 'default' && (bound == null || bound === ''));
-      if (isMatch) matches.push(eid);
+      if (conn.session.accountId === accountId) matches.push(eid);
     }
     if (matches.length === 0) return null;
     if (matches.length > 1) {

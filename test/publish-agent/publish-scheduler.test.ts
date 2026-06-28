@@ -31,7 +31,8 @@ function build(k: Knobs = {}) {
       getMostRecentPublishTime: async () => (k.lastPublishMs === undefined ? null : k.lastPublishMs),
       recentPublishedContents: async () => ['上一篇'],
     },
-    risk: { canDo: () => k.canDo ?? true, getState: () => ({ status: k.status ?? 'normal' }) },
+    resolveRisk: async () => ({ canDo: () => k.canDo ?? true, getState: () => ({ status: k.status ?? 'normal' }) }),
+    resolveSingleAccountId: async () => 'acc-test',
     orchestrator: { trigger: async (input) => { triggered.push(JSON.stringify(input.metrics)); return { status: 'draft' }; } },
     soul: {} as PublishSchedulerDeps['soul'],
     conceptThreshold: k.conceptThreshold ?? 5,
@@ -83,7 +84,7 @@ describe('AC-PUB-SCHED PublishScheduler 三扳机', () => {
 
   it('buildTriggerInput 聚合真概念 + 真点赞 + 最近已发', async () => {
     const { scheduler } = build({ newConcepts: 3, lastPublishMs: T - 10 * HOUR });
-    const input = await scheduler.buildTriggerInput();
+    const input = await scheduler.buildTriggerInput('acc-test');
     assert.deepEqual(input.generateInput.concepts.map((c) => c.keyword), ['LLM Agent', 'RAG']);
     assert.equal(input.generateInput.likedContents[0].id, 7);
     assert.equal(input.metrics.newConceptCount, 3);

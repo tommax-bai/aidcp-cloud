@@ -20,7 +20,8 @@ import type { CaptchaClearedPayload, CaptchaDetectedPayload } from './protocol.j
 import type { EdgePusher, EdgeSession } from './ws-server.js';
 
 export interface CaptchaCoordinatorDeps {
-  riskController: RiskController;
+  /** retire-default-account：按真实账号解析该账号的 RiskController（替代单租户全局 controller）。 */
+  resolveController: (accountId: string) => Promise<RiskController>;
   messenger?: Pick<FeishuMessenger, 'sendCard'>;
   /** 解析目标飞书群（注入，便于与发布审批共用解析口径）。 */
   resolveChatId: () => Promise<string>;
@@ -53,13 +54,20 @@ export class CaptchaCoordinator {
     const edgeId = payload.edgeId ?? session.edgeId;
     const accountId = payload.accountId ?? session.accountId;
 
-    // ① 风控态迁移（云端单写）：captcha=强信号→restricted；unknown=弱信号→warned。
-    try {
-      await this.deps.riskController.applySignal({ kind: payload.kind === 'captcha' ? 'confirmed' : 'light' });
-    } catch (err) {
-      this.logger.error('[captcha] applySignal 失败:', err instanceof Error ? err.message : String(err));
+    // ① 风控态迁移（云端单写，retire-default-account：按真实账号解析 controller，绝不回落全局 default）。
+    //    captcha=强信号→restricted；unknown=弱信号→warned。缺账号=上游缺陷，honest-fail 跳过迁移 + 告警。
+    let status = 'unknown';
+    if (!accountId) {
+      this.logger.warn('[captcha] detected 缺 accountId（握手应已保证）— 跳过风控迁移，绝不回落 default');
+    } else {
+      try {
+        const controller = await this.deps.resolveController(accountId);
+        await controller.applySignal({ kind: payload.kind === 'captcha' ? 'confirmed' : 'light' });
+        status = controller.getState().status;
+      } catch (err) {
+        this.logger.error('[captcha] applySignal 失败:', err instanceof Error ? err.message : String(err));
+      }
     }
-    const status = this.deps.riskController.getState().status;
 
     // ② 按 edge 暂停下发（session.end 仍可达）。
     if (edgeId && pusher) pusher.pauseEdge(edgeId);

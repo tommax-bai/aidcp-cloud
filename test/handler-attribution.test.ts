@@ -48,7 +48,7 @@ test('interaction.occurred 携带 accountId（从 session.accountId）', async (
   assert.equal(got[0].accountId, 'acc-x');
 });
 
-test('缺 session.accountId → 回退保留键 default（不误并入真名账号）', async () => {
+test('缺 session.accountId → 不回落 default（emit accountId=undefined，下游 consumer honest-fail 丢弃）', async () => {
   const eventBus = new EventBus();
   const got = capture(eventBus);
   await makeHandler(eventBus).handle(
@@ -56,7 +56,7 @@ test('缺 session.accountId → 回退保留键 default（不误并入真名账�
     { sessionId: 's2' },
   );
   assert.equal(got.length, 1);
-  assert.equal(got[0].accountId, 'default');
+  assert.equal(got[0].accountId, undefined, 'retire-default-account：绝不回落保留键 default（下游 consumer 据此 honest-fail 丢弃）');
 });
 
 test('失败互动不 emit（只记真实发生）', async () => {
@@ -86,9 +86,11 @@ test('note.detail 戳 currentNoteId → interaction.occurred 携带 noteId（V1 
     makeEnvelope('action.completed', 'a4', 1, { action: 'like', ok: true }),
     session,
   );
-  assert.equal(got.length, 1);
-  assert.equal(got[0].noteId, 'note-42');
-  assert.equal(got[0].accountId, 'acc-x');
+  // note.detail 发一条 view（fix view-count-zero）+ action.completed 发一条 like；取 like 校验归因。
+  const like = got.find((e) => e.action === 'like');
+  assert.ok(like, 'like interaction 已发射');
+  assert.equal(like!.noteId, 'note-42');
+  assert.equal(like!.accountId, 'acc-x');
 });
 
 test('未见 note.detail 时 noteId 不带（不编造）（V1 9.2）', async () => {

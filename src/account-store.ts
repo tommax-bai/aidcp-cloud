@@ -1,8 +1,8 @@
 /**
  * accounts 主表持久化（PostgreSQL，aidcp 库）。
  *
- * 多账号重构第一步：用真 accounts 主表替换硬编码单账号；seed 一个 account_id='default' 行
- * 对齐风控/会话的现有字面量，使已按账号 keyed 的表（risk_state 等）有父行。
+ * 多账号重构：用真 accounts 主表替换硬编码单账号。'default' 已退役为保留禁用标识
+ * （change retire-default-account），不再 seed；账号父行改由真实账号握手时 ensureAccount 幂等登记产生。
  * 运营暂停态持久化于此（status/paused_at），重启后由 AccountStateManager 加载，
  * 故被暂停账号不会因内存丢失而静默复活。
  *
@@ -16,7 +16,13 @@ const { Pool } = pg;
 
 export type AccountStatusValue = 'active' | 'paused';
 
-/** accounts 建表 + seed 默认账号（幂等：表已存在不重建、default 行已存在不重复插）。 */
+/**
+ * retire-default-account：'default' 是被退役的保留账号标识，任何入口 MUST NOT 创建 / 接受它。
+ * 真实账号一律是登录派生的小红书 userid（≥20 位字母数字，结构上不会等于 'default'）。
+ */
+export const RETIRED_ACCOUNT_ID = 'default';
+
+/** accounts 建表（幂等：表已存在不重建）。retire-default-account 后不再 seed 任何占位行。 */
 export const ACCOUNTS_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS accounts (
   account_id    TEXT PRIMARY KEY,
@@ -36,8 +42,7 @@ CREATE TABLE IF NOT EXISTS accounts (
 -- 自愈式加列（change account-real-nickname，迁移 0020 文档伴随）：本仓无迁移执行器，
 -- 已存在的 accounts 表靠这条幂等 ALTER 在 init() 时补上 nickname 列（CREATE TABLE IF NOT EXISTS 不改既有表）。
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS nickname TEXT;
-INSERT INTO accounts (account_id, label) VALUES ('default', 'default')
-ON CONFLICT (account_id) DO NOTHING;
+-- retire-default-account：不再 seed 'default' 占位行。账号父行由真实账号握手时 ensureAccount 幂等登记产生。
 `;
 
 export interface AccountRecord {
@@ -128,6 +133,11 @@ export class PgAccountStore implements AccountStore {
   }
 
   async setPaused(accountId: string, paused: boolean, at: number | null): Promise<void> {
+    // retire-default-account：退役保留标识无对应账号，绝不为其建 / 改行。
+    if (accountId === RETIRED_ACCOUNT_ID) {
+      console.warn(`[account-store] 忽略对退役保留账号 '${RETIRED_ACCOUNT_ID}' 的 setPaused（retire-default-account）`);
+      return;
+    }
     const status: AccountStatusValue = paused ? 'paused' : 'active';
     const pausedAt = paused && at ? new Date(at) : null;
     await this.pool.query(
@@ -145,6 +155,11 @@ export class PgAccountStore implements AccountStore {
    * 独立判定——未绑人设的账号仍被诚实启动闸拦住、不会真跑（multi-account-node-support D3/D4）。
    */
   async ensureAccount(accountId: string): Promise<void> {
+    // retire-default-account：绝不为退役保留标识建行（防任何路径把 'default' 重新登记进主表）。
+    if (accountId === RETIRED_ACCOUNT_ID) {
+      console.warn(`[account-store] 拒绝登记退役保留账号 '${RETIRED_ACCOUNT_ID}'（retire-default-account）`);
+      return;
+    }
     await this.pool.query(
       `INSERT INTO accounts (account_id, label) VALUES ($1, $1) ON CONFLICT (account_id) DO NOTHING`,
       [accountId],
@@ -157,6 +172,8 @@ export class PgAccountStore implements AccountStore {
    * 行不存在时连带 seed（label=account_id），与 ensureAccount/setPaused 同款兜底。
    */
   async setNickname(accountId: string, nickname: string): Promise<void> {
+    // retire-default-account：退役保留标识无对应账号，绝不为其建 / 改行。
+    if (accountId === RETIRED_ACCOUNT_ID) return;
     const clean = nickname.trim();
     if (!clean) return;
     const value = clean.length > 64 ? clean.slice(0, 64) : clean;

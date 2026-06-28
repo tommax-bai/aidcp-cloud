@@ -63,7 +63,7 @@ describe('CaptchaCoordinator', () => {
 
   function makeCoordinator(cooldownMs?: number) {
     return new CaptchaCoordinator({
-      riskController: risk,
+      resolveController: async () => risk,
       messenger,
       resolveChatId: async () => 'chat-1',
       logger: silentLogger,
@@ -156,7 +156,7 @@ describe('CaptchaCoordinator', () => {
       },
     };
     const c = new CaptchaCoordinator({
-      riskController: risk,
+      resolveController: async () => risk,
       messenger,
       resolveChatId: async () => 'chat-1',
       logger: silentLogger,
@@ -184,7 +184,7 @@ describe('CaptchaCoordinator', () => {
       resolveByEdge: async () => 0,
     };
     const c = new CaptchaCoordinator({
-      riskController: risk,
+      resolveController: async () => risk,
       messenger,
       resolveChatId: async () => 'chat-1',
       logger: silentLogger,

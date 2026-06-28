@@ -43,7 +43,8 @@ function memStore(): AnchorStore & { main: Map<string, RemoteAnchor>; staging: M
   };
 }
 
-const session: EdgeSession = { sessionId: 'sess-test' };
+// retire-default-account：握手后会话必带真实账号；note 处理按账号判暂停 / 归因，故测试会话显式带 accountId。
+const session: EdgeSession = { sessionId: 'sess-test', accountId: 'acc-test' };
 const fixedClock = () => 1000;
 
 function makeHandler(llm: LlmClient, store: AnchorStore) {
@@ -203,7 +204,7 @@ test('note.content 暂停状态 → 返回 ack、不触发 eventBus emit', async
   eventBus.on('note.arrived', (data) => { emitted.push(data); });
 
   const accountState = new AccountStateManager();
-  await accountState.pause('default');
+  await accountState.pause('acc-test'); // 与 session.accountId 一致（retire-default-account：会话带真实账号）
 
   const h = new DefaultMessageHandler({
     planner: new SimplePlanner(),

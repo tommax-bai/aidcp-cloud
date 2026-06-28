@@ -88,11 +88,11 @@ export class NicknameEnricher extends BaseRole {
 
   /** 武装采集（两触发共用）：守卫不过即 no-op；置挂起/在途/超时，命令延到边缘就绪（首个 page.cards）再发。 */
   private arm(via: string): void {
-    if (!this.ctx.pendingNicknameCapture) return; // 库内已有昵称 / 占位账号 → 零扰动（已采过的不绕）
+    if (!this.ctx.pendingNicknameCapture) return; // 库内已有昵称 → 零扰动（已采过的不绕）
     if (this.ctx.selfCaptureInFlight) return; // 已在采集中，不重入
     if (this.ctx.selfCaptureAttempts >= this.ctx.selfCaptureMaxAttempts) return; // 采空退避，不永绕
     const accountId = this.getAccountId();
-    if (!accountId || accountId === 'default') return; // 双保险：占位账号绝不采
+    if (!accountId) return; // honest-fail：缺账号不采（retire-default-account：default 已退役，无占位账号需跳过）
 
     // 同步置「挂起浏览 + 在途标记 + 武装超时」：立刻挡住 R3 窗口（在途 page.cards 驱动的 open_note 被 chokepoint 丢弃），
     // 并让通知巡视准入据 selfCaptureInFlight 让位（二者都要独占边缘：进本人主页 vs 进通知页）。
@@ -111,7 +111,7 @@ export class NicknameEnricher extends BaseRole {
     if (!this.awaitingEdgeReady || !this.ctx.selfCaptureInFlight) return; // 未武装 / 已收尾 → 不发
     this.awaitingEdgeReady = false;
     const accountId = this.getAccountId();
-    if (!accountId || accountId === 'default') return;
+    if (!accountId) return; // honest-fail：缺账号不采
     this.armTimeout(); // 重置超时：从命令真正下发起算，给本人主页导航 + 抽取留足 ~20s。
     this.log(`边缘就绪 → 下发本人主页直驱采集 account=${accountId}（profile_open direct）`);
     this.emit('self.profile.capture', { accountId });

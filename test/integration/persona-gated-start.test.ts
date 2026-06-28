@@ -75,12 +75,12 @@ test('已绑人设的账号握手 → 照常启动会话', () => {
   d.endSession();
 });
 
-test('default 账号硬豁免：即便判定未绑（isPersonaBound=false）也照常启动', () => {
+test('retire-default-account：default 不再硬豁免 —— 未绑人设一律诚实拒绝（无任何账号例外）', () => {
   const { d, rejected } = make({ isPersonaBound: () => false });
   d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'default', ts: 1 });
   assert.equal(d.accountId, 'default');
-  assert.equal(d.active, true); // 豁免
-  assert.equal(rejected.length, 0); // 不告警
+  assert.equal(d.active, false); // 不再豁免：未绑人设即拒
+  assert.deepEqual(rejected, [{ accountId: 'default', reason: 'needs_persona_setup' }]);
   d.endSession();
 });
 

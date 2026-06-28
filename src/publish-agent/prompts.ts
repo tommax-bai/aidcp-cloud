@@ -86,13 +86,23 @@ export function buildScoutPrompt(trigger: TriggerInput): string {
       ? generateInput.concepts.map((c) => `- ${c.keyword}${c.sourceNote ? `（来源: ${c.sourceNote}）` : ''}`).join('\n')
       : '（暂无新概念）';
 
+  // 素材块：优先精选灵感语料（materials），回落旧点赞素材（likedContents）。
+  const materials = generateInput.materials ?? [];
   const likedBlock =
-    generateInput.likedContents.length > 0
-      ? generateInput.likedContents
+    materials.length > 0
+      ? materials
           .slice(0, 10)
-          .map((n) => `- ${n.title}${n.author ? `（@${n.author}）` : ''}: ${n.summary.slice(0, 80)}`)
+          .map((m) => {
+            const tag = m.botCollected ? '已收藏' : m.botLiked ? '已点赞' : '浏览过';
+            return `- 「${m.title}」(赞${m.likeCount ?? '?'} 藏${m.collectCount ?? '?'}，${tag})`;
+          })
           .join('\n')
-      : '（暂无点赞内容）';
+      : generateInput.likedContents.length > 0
+        ? generateInput.likedContents
+            .slice(0, 10)
+            .map((n) => `- ${n.title}${n.author ? `（@${n.author}）` : ''}: ${n.summary.slice(0, 80)}`)
+            .join('\n')
+        : '（暂无素材）';
 
   const recentBlock =
     recentPublished.length > 0
@@ -164,13 +174,24 @@ export function buildCreatorPrompt(scoutDecision: ScoutDecision, trigger: Trigge
       ? generateInput.concepts.map((c) => `- ${c.keyword}${c.sourceNote ? `（来源: ${c.sourceNote}）` : ''}`).join('\n')
       : '（无）';
 
+  // 素材块：优先精选灵感语料（materials，蒸馏正文要点），回落旧点赞素材（likedContents）。
+  const materials = generateInput.materials ?? [];
   const likedDetail =
-    generateInput.likedContents.length > 0
-      ? generateInput.likedContents
+    materials.length > 0
+      ? materials
           .slice(0, 8)
-          .map((n) => `- ${n.title}${n.author ? `（@${n.author}）` : ''}: ${n.summary}`)
+          .map((m) => {
+            const tag = m.botCollected ? '我已收藏' : m.botLiked ? '我已点赞' : '我浏览过';
+            const excerpt = m.body.replace(/\s+/g, ' ').slice(0, 200);
+            return `- 「${m.title}」(赞${m.likeCount ?? '?'} 藏${m.collectCount ?? '?'}，${tag})：${excerpt}`;
+          })
           .join('\n')
-      : '（无）';
+      : generateInput.likedContents.length > 0
+        ? generateInput.likedContents
+            .slice(0, 8)
+            .map((n) => `- ${n.title}${n.author ? `（@${n.author}）` : ''}: ${n.summary}`)
+            .join('\n')
+        : '（无）';
 
   const recentBlock =
     recentPublished.length > 0
@@ -208,8 +229,9 @@ export function buildCreatorPrompt(scoutDecision: ScoutDecision, trigger: Trigge
     '【可用素材——新概念】',
     conceptsDetail,
     '',
-    '【可用素材——最近点赞内容（可引用真实细节）】',
+    '【可用素材——精选灵感（仅作灵感，严禁照抄）】',
     likedDetail,
+    '【素材使用红线】以上素材只供你体会角度、话题与真实细节；严禁照抄或改写其句子，必须用你自己的话重新表达。',
     '',
     '【最近发过的帖子（避免重复话题/角度）】',
     recentBlock,

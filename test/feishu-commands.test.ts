@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   CommandRouter,
-  DEFAULT_ACCOUNT_ID,
   parseCommand,
   resolvePublishApprovalRequestId,
   type CommandActions,
@@ -14,10 +13,10 @@ test('parseCommand: /aidcp status acc-01', () => {
   assert.equal(cmd.accountId, 'acc-01');
 });
 
-test('parseCommand: 省略 accountId 落到默认账号', () => {
+test('parseCommand: 省略 accountId → undefined（执行层解析唯一真实账号，retire-default-account：绝不回落 default）', () => {
   const cmd = parseCommand('/aidcp pause');
   assert.equal(cmd.action, 'pause');
-  assert.equal(cmd.accountId, DEFAULT_ACCOUNT_ID);
+  assert.equal(cmd.accountId, undefined);
 });
 
 test('parseCommand: resume 大小写不敏感', () => {

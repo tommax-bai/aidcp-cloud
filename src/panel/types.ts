@@ -17,7 +17,6 @@ import type { LlmUsageQuery, LlmUsagePayload } from '../metrics/token-usage-stor
 import type { NotificationContact, NotificationContactManual } from '../cache/notification-contact-store.js';
 
 export interface PanelDeps {
-  riskController: RiskController;
   publishLogStore: PublishLogStore;
   conceptStore?: ConceptStore;
   botChatStore: BotChatStore;

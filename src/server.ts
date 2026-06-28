@@ -28,7 +28,8 @@ import {
 } from './llm/index.js';
 import { TokenUsageStore } from './metrics/token-usage-store.js';
 import { SimplePlanner } from './planner/index.js';
-import { PgAnchorCache, BotChatStore, ConceptStore, LikedNoteStore, ValuableCommentStore, NotificationContactStore, InteractionFeedStore } from './cache/index.js';
+import { PgAnchorCache, BotChatStore, ConceptStore, LikedNoteStore, ValuableCommentStore, NotificationContactStore, InteractionFeedStore, CuratedContentStore, topicKeysFromTitle } from './cache/index.js';
+import { evaluateAdmission, resolveCuratedGateConfig } from './publish-agent/curated-gate.js';
 import {
   EdgeCloudServer,
   DefaultMessageHandler,
@@ -405,6 +406,31 @@ async function main(): Promise<void> {
     console.warn('[aidcp-cloud] InteractionFeedStore 初始化失败，面板互动流退化:', (err as Error).message);
   }
 
+  // 精选灵感语料（curated_content 表，change curated-inspiration-corpus）。过门槛的高价值笔记落详细行，
+  // 作发帖创作正向素材来源。init 失败留 undefined（不捕获、创作回落旧路径，绝不崩闭环）。
+  let curatedContentStore: CuratedContentStore | undefined;
+  try {
+    const ccs = new CuratedContentStore({
+      host: readEnvString('PGHOST'),
+      port: readEnvPort('PGPORT'),
+      database: readEnvString('PGDATABASE'),
+      user: readEnvString('PGUSER'),
+      password: readEnvString('PGPASSWORD'),
+    });
+    await ccs.init();
+    curatedContentStore = ccs;
+    console.log('[aidcp-cloud] CuratedContentStore 已就绪（curated_content 表）');
+  } catch (err) {
+    console.warn('[aidcp-cloud] CuratedContentStore 初始化失败，精选灵感语料退化:', (err as Error).message);
+  }
+
+  // 「本账号最近观测到的笔记内容」缓存（change curated-inspiration-corpus）：collect 总在 note.detail 之后、
+  // 同访问内发生，自有收藏自动纳入精选时据此补建正文。仅留最近一条/账号，内存态、丢失无害（取不到则诚实降级、正文留空）。
+  const lastObservedNoteByAccount = new Map<
+    string,
+    { noteId: string; title: string; body: string; author?: string; sourceUrl?: string; topics: string[]; likeCount: number; collectCount: number }
+  >();
+
   // 概念池存储（concepts 表，跨会话搜索记忆）。init 失败则留 undefined：
   // RoleDispatcher 不注册概念抽取角色、搜索退化为仅 seed_keywords（不崩闭环）。
   let conceptStore: ConceptStore | undefined;
@@ -534,20 +560,33 @@ async function main(): Promise<void> {
   // quotaConfigStore 作 QuotaProvider 注入：每账号 controller 的 effectiveQuotas 热加载读限额数字
   // （change safety-quota-config）；init 失败时其镜像为空 → 退化派生写死默认，绝不 brick。
   const riskRegistry = new RiskControllerRegistry(riskStore, undefined, quotaConfigStore);
-  let riskController: RiskController;
-  try {
-    riskController = await riskRegistry.getController('default');
-    console.log('[aidcp-cloud] RiskController 已就绪（registry default，PgRiskStore 持久化）');
-  } catch (err) {
-    console.warn('[aidcp-cloud] RiskController 持久化初始化失败，回退内存态:', (err as Error).message);
-    riskController = new RiskController();
-  }
+  // retire-default-account：不再建单租户全局 'default' controller；风控一律经 registry 按真实账号懒解析。
+  const resolveController = (accountId: string): Promise<RiskController> => riskRegistry.getController(accountId);
+  // 「唯一真实账号」解析（飞书无参 / 自动发帖用）：恰好一个真实账号 → 它，0 或多个 → null（honest-fail，绝不回落 default）。
+  const resolveSingleAccountId = async (): Promise<string | null> => {
+    if (!accountStore) return null;
+    try {
+      const all = await accountStore.listAll();
+      return all.length === 1 ? all[0].accountId : null;
+    } catch (err) {
+      console.warn('[aidcp-cloud] resolveSingleAccountId 失败:', (err as Error).message);
+      return null;
+    }
+  };
+  console.log('[aidcp-cloud] RiskControllerRegistry 已就绪（按真实账号懒解析，PgRiskStore 持久化）');
 
   // RiskController 订阅跨模块事件：真实互动发生时按账号计数（record 内部再过 canDo）。
   eventBus.on('interaction.occurred', (evt) => {
-    // V1 task 9.1：按 evt.accountId 路由到对应账号 controller（缺失回退 default）；单账号现实即 default。
+    // retire-default-account：账号归因 honest-fail —— 缺 accountId（握手已保证存在）即丢弃该事件 + 告警，
+    // 绝不回落保留键 default（杜绝脏流量记到退役账号名下）。
+    if (!evt.accountId) {
+      console.warn('[aidcp-cloud] interaction.occurred 缺 accountId — 丢弃（honest-fail），绝不回落 default');
+      return;
+    }
+    const accountId = evt.accountId;
+    // 按 accountId 路由到对应账号 controller（record 内部再过 canDo）。
     riskRegistry
-      .getController(evt.accountId ?? 'default')
+      .getController(accountId)
       .then((c) => c.record(evt.action))
       .catch((err) => {
         console.warn('[aidcp-cloud] RiskController record error:', err);
@@ -558,12 +597,24 @@ async function main(): Promise<void> {
         console.warn('[aidcp-cloud] LikedNoteStore recordLike error:', err);
       });
     }
+    // 精选灵感：把自有动作并入精选语料（change curated-inspiration-corpus）。
+    // like = 弱信号（只标既有行、不自动建）；collect = 强信号（自动纳入，用同访问观测到的笔记内容补建正文，取不到则诚实留空）。
+    if (curatedContentStore && evt.noteId && (evt.action === 'like' || evt.action === 'collect')) {
+      const observed = lastObservedNoteByAccount.get(accountId);
+      const content =
+        evt.action === 'collect' && observed && observed.noteId === evt.noteId
+          ? { title: observed.title, body: observed.body, author: observed.author, sourceUrl: observed.sourceUrl, topics: observed.topics }
+          : undefined;
+      curatedContentStore.markBotAction(accountId, evt.noteId, evt.action, content).catch((err) => {
+        console.warn('[aidcp-cloud] curated markBotAction error:', err);
+      });
+    }
     // V1 task 9.2：按笔记互动落去重表（接线孤儿 risk_interactions）。
     // 仅 like/collect（InteractionAction，follow 无 per-note 语义）；ON CONFLICT DO NOTHING 天然去重。
     // 注：change interaction-feed-enrichment 后面板已改读 interaction_feed，此表保留为去重台账、行为不变（零回归）。
     if (evt.noteId && (evt.action === 'like' || evt.action === 'collect')) {
       riskStore
-        .recordInteraction(evt.accountId ?? 'default', evt.noteId, evt.action, Date.now())
+        .recordInteraction(accountId, evt.noteId, evt.action, Date.now())
         .catch((err) => {
           console.warn('[aidcp-cloud] recordInteraction error:', err);
         });
@@ -576,7 +627,7 @@ async function main(): Promise<void> {
       (evt.action === 'like' || evt.action === 'collect' || evt.action === 'comment' || evt.action === 'follow')
     ) {
       interactionFeedStore
-        .recordEvent(evt.accountId ?? 'default', evt.action, evt.targetId, Date.now())
+        .recordEvent(accountId, evt.action, evt.targetId, Date.now())
         .catch((err) => {
           console.warn('[aidcp-cloud] interactionFeed recordEvent error:', err);
         });
@@ -587,27 +638,83 @@ async function main(): Promise<void> {
   // 展示账本元数据（change interaction-feed-enrichment）：看到笔记/作者时独立 upsert 标题+链接，面板读时 LEFT JOIN。
   // 与互动事件解耦 → 杀「动作回执先于详情到达→标题为空」竞态；诚实置空（COALESCE 缺则不覆盖、不伪造）。
   eventBus.on('note.detail.arrived', (evt) => {
-    if (!interactionFeedStore) return;
-    const acc = evt.accountId ?? 'default';
+    // retire-default-account：缺 accountId 即 honest-fail 丢弃，绝不回落 default。
+    if (!evt.accountId) {
+      console.warn('[aidcp-cloud] note.detail.arrived 缺 accountId — 跳过（honest-fail）');
+      return;
+    }
+    const acc = evt.accountId;
     const d = evt.detail;
-    if (d.noteId) {
+    if (interactionFeedStore && d.noteId) {
       interactionFeedStore.upsertMeta(acc, d.noteId, { title: d.title, url: d.url }).catch((err) => {
         console.warn('[aidcp-cloud] interactionFeed upsertMeta(note) error:', err);
       });
     }
     // 笔记上报已带作者昵称 → 顺手补作者元数据（关注展示用；主页 url 待 profile.detail 补，COALESCE 互不抹除）。
-    if (d.authorId && d.author) {
+    if (interactionFeedStore && d.authorId && d.author) {
       interactionFeedStore.upsertMeta(acc, d.authorId, { title: d.author }).catch(() => {});
+    }
+    // 精选灵感捕获（change curated-inspiration-corpus）：详情已带全文+赞藏数 → 记最近观测 + 过门槛则落精选语料。
+    if (curatedContentStore && d.noteId) {
+      const topics = topicKeysFromTitle(d.title);
+      lastObservedNoteByAccount.set(acc, {
+        noteId: d.noteId,
+        title: d.title,
+        body: d.content,
+        author: d.author,
+        sourceUrl: d.url,
+        topics,
+        likeCount: d.likeCount,
+        collectCount: d.collectCount,
+      });
+      const soul = getSoul(acc);
+      const interests = [
+        ...(soul.interests?.primary ?? []),
+        ...(soul.interests?.secondary ?? []),
+        ...(soul.interests?.seed_keywords ?? []),
+      ];
+      const gate = evaluateAdmission(
+        {
+          noteText: `${d.title ?? ''} ${d.content ?? ''}`,
+          accountInterests: interests,
+          likeCount: d.likeCount,
+          collectCount: d.collectCount,
+          botCollected: false,
+        },
+        resolveCuratedGateConfig(acc),
+      );
+      if (gate.admit) {
+        curatedContentStore
+          .upsertObservation({
+            accountId: acc,
+            contentType: 'note',
+            sourceId: d.noteId,
+            title: d.title,
+            body: d.content,
+            author: d.author,
+            sourceUrl: d.url,
+            topics,
+            likeCount: d.likeCount,
+            collectCount: d.collectCount,
+            admitReason: gate.reason,
+          })
+          .catch((err) => console.warn('[aidcp-cloud] curated upsertObservation error:', err));
+      }
     }
   });
   eventBus.on('profile.detail.arrived', (evt) => {
     if (!interactionFeedStore) return;
     const d = evt.detail;
     if (!d.authorId) return;
+    // retire-default-account：缺 accountId 即 honest-fail 丢弃，绝不回落 default。
+    if (!evt.accountId) {
+      console.warn('[aidcp-cloud] profile.detail.arrived 缺 accountId — 跳过元数据 upsert（honest-fail）');
+      return;
+    }
     // 隔离守卫③（change account-real-nickname）：本人主页采集绝不写进 interaction_feed 作者元数据
-    // （d.authorId === evt.accountId 即本人；evt.accountId 缺省 'default' 不会等于真实 authorId → 安全）。
+    // （d.authorId === evt.accountId 即本人 → 跳过）。
     if (d.authorId === evt.accountId) return;
-    interactionFeedStore.upsertMeta(evt.accountId ?? 'default', d.authorId, { title: d.nickname, url: d.url }).catch((err) => {
+    interactionFeedStore.upsertMeta(evt.accountId, d.authorId, { title: d.nickname, url: d.url }).catch((err) => {
       console.warn('[aidcp-cloud] interactionFeed upsertMeta(profile) error:', err);
     });
   });
@@ -634,30 +741,41 @@ async function main(): Promise<void> {
 
   // 飞书事件接收（官方 SDK 长连接，主动连飞书，无需公网 IP / HTTP 端口）
   // MVP：账号启停/查询动作先打桩（后续接云端调度器 → plan.request）
+  // retire-default-account：飞书无参命令解析「唯一真实账号」；解析不出（0 或多个）抛错 → 路由层回「请显式指定账号」，绝不回落 default。
+  const requireCommandAccount = async (accountId?: string): Promise<string> => {
+    if (accountId) return accountId;
+    const single = await resolveSingleAccountId();
+    if (single) return single;
+    throw new Error('当前为 0 个或多个账号，请显式指定账号，例如 `/aidcp status <accountId>`');
+  };
   const actions: CommandActions = {
-    status: (accountId) => {
-      const state = accountState.getStatus(accountId);
+    status: async (accountId) => {
+      const acct = await requireCommandAccount(accountId);
+      const state = accountState.getStatus(acct);
       const emoji = state.status === 'paused' ? '⏸️' : '🟢';
       const statusText = state.status === 'paused' ? 'paused' : 'active';
       const extra = state.pausedAt ? `\n暂停时间：${new Date(state.pausedAt).toLocaleString()}` : '';
-      return `账号 \`${accountId}\` 当前状态：${statusText} ${emoji}${extra}`;
+      return `账号 \`${acct}\` 当前状态：${statusText} ${emoji}${extra}`;
     },
     pause: async (accountId) => {
-      await accountState.pause(accountId);
-      console.log(`[feishu] 已暂停账号：${accountId}`);
+      const acct = await requireCommandAccount(accountId);
+      await accountState.pause(acct);
+      console.log(`[feishu] 已暂停账号：${acct}`);
     },
     resume: async (accountId) => {
-      await accountState.resume(accountId);
+      const acct = await requireCommandAccount(accountId);
+      await accountState.resume(acct);
       // 验证码人工恢复快路：解除该账号名下被暂停的 edge（server 在下方初始化，命令运行时才触发，引用安全）。
-      const resumedEdges = server.resumeEdgesForAccount(accountId);
-      console.log(`[feishu] 已恢复账号：${accountId}（恢复 edge 数=${resumedEdges}）`);
+      const resumedEdges = server.resumeEdgesForAccount(acct);
+      console.log(`[feishu] 已恢复账号：${acct}（恢复 edge 数=${resumedEdges}）`);
     },
     bindChat: (record) => botChatStore.setDefault(record),
     // 手动 /publish [accountId]：越过风控 canDo（人工授权），发布前飞书人审仍铁定生效（AC-PUB）。
-    // accountId 指定以哪个账号发帖（落 publish_log.account_id + 命令定向到该账号在线节点）；缺省 default。
+    // accountId 指定以哪个账号发帖（落 publish_log.account_id + 命令定向到该账号在线节点）；缺省由 scheduler 解析唯一真实账号。
     publish: async (accountId?: string) => {
       if (!publishScheduler) return '发帖触发器未就绪（PG/概念池不可用）';
       const o = await publishScheduler.triggerManual(accountId);
+      if (o.result !== 'triggered') return `未触发（${o.reason}）。多账号下请显式指定账号：/aidcp publish <accountId>。`;
       return `已触发（${o.reason}）→ 编排状态 ${'status' in o ? o.status : '-'}`;
     },
   };
@@ -665,7 +783,7 @@ async function main(): Promise<void> {
   const messenger = new FeishuMessenger();
   // 验证码事件协调器：消费 risk.captcha_detected/cleared（迁状态 + 按 edge 暂停 + 去重发飞书）。
   const captcha = new CaptchaCoordinator({
-    riskController,
+    resolveController,
     messenger,
     // V1 task 9.5：验证码告警落库（飞书卡发送点写入、清除点 resolveByEdge）。
     alertStore,
@@ -705,7 +823,6 @@ async function main(): Promise<void> {
     messenger,
     botChatStore,
     approvalChatId: process.env.FEISHU_CHAT_ID,
-    riskController,
     eventBus,
     accountState,
     captcha,
@@ -925,8 +1042,9 @@ async function main(): Promise<void> {
   // （独立私有总线、从不启动会话 / 从不下发指令；多租户下不再有单一全局 dispatcher 可借）。
   const previewDispatcher = buildDispatcher({
     bus: new EventBus(),
-    controller: riskController,
-    accountId: 'default',
+    // retire-default-account：预览不写任何状态；用一次性内存 controller + 保留预览标识，绝不用 default。
+    controller: new RiskController({ accountId: '__preview__' }),
+    accountId: '__preview__',
     edgeId: undefined,
   });
   previewDispatcher.setup();
@@ -1007,8 +1125,12 @@ async function main(): Promise<void> {
       conceptStore,
       likedStore: likedNoteStore,
       publishLog: publishLogStore,
-      risk: riskController,
+      resolveRisk: resolveController,
+      resolveSingleAccountId,
       orchestrator: publishOrchestrator,
+      // 精选灵感语料（change curated-inspiration-corpus）：发帖创作正向素材来源；缺失则回落旧点赞素材路径。
+      curatedStore: curatedContentStore,
+      selectTopK: resolveCuratedGateConfig().selectTopK,
       // 人设取值口（change account-persona-config）：构建发布输入时按当前账号热加载。
       getSoul,
       conceptThreshold: Number(process.env.AIDCP_PUBLISH_CONCEPT_THRESHOLD ?? 20),
@@ -1157,7 +1279,6 @@ async function main(): Promise<void> {
     try {
       const panel = await startPanelApi(
         {
-          riskController,
           riskRegistry,
           publishLogStore,
           conceptStore,

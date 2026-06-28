@@ -48,8 +48,8 @@ function fakePool(opts: { failUpsert?: boolean } = {}) {
 test('同维度多次 add → flush 累加为一行（calls/okCalls/tokens 相加）', async () => {
   const { pool, upserts } = fakePool();
   const store = new TokenUsageStore({ pool });
-  store.add({ role: 'browse:content_evaluator', model: 'qwen-plus', ok: true, promptTokens: 10, completionTokens: 5, totalTokens: 15 });
-  store.add({ role: 'browse:content_evaluator', model: 'qwen-plus', ok: false, promptTokens: 4, completionTokens: 0, totalTokens: 4 });
+  store.add({ accountId: 'acc-x', role: 'browse:content_evaluator', model: 'qwen-plus', ok: true, promptTokens: 10, completionTokens: 5, totalTokens: 15 });
+  store.add({ accountId: 'acc-x', role: 'browse:content_evaluator', model: 'qwen-plus', ok: false, promptTokens: 4, completionTokens: 0, totalTokens: 4 });
   await store.flush();
   assert.equal(upserts.length, 1);
   const u = upserts[0];
@@ -61,13 +61,18 @@ test('同维度多次 add → flush 累加为一行（calls/okCalls/tokens 相�
   assert.equal(u.bucketMs % 600_000, 0, 'bucketMs 对齐 10 分钟');
 });
 
-test('缺省诚实标签：无 accountId → default、无 role → untagged，token 缺失 → 0', async () => {
+test('honest-fail：无 accountId → 丢弃不记（retire-default-account：绝不回落 default）；有账号无 role → untagged，token 缺失 → 0', async () => {
   const { pool, upserts } = fakePool();
   const store = new TokenUsageStore({ pool });
+  // 无 accountId：honest-fail 丢弃，绝不回落 default。
   store.add({ model: 'qwen-turbo', ok: true });
   await store.flush();
+  assert.equal(upserts.length, 0, '缺 accountId 的用量被丢弃，不记到 default');
+  // 有账号、无 role / 无 token：role 回落 untagged、token 缺失计 0（这些诚实标签保留）。
+  store.add({ accountId: 'acc-x', model: 'qwen-turbo', ok: true });
+  await store.flush();
   assert.equal(upserts.length, 1);
-  assert.equal(upserts[0].accountId, 'default');
+  assert.equal(upserts[0].accountId, 'acc-x');
   assert.equal(upserts[0].role, 'untagged');
   assert.equal(upserts[0].totalTokens, 0);
   assert.equal(upserts[0].calls, 1);
@@ -76,9 +81,9 @@ test('缺省诚实标签：无 accountId → default、无 role → untagged，t
 test('不同维度 → 分行', async () => {
   const { pool, upserts } = fakePool();
   const store = new TokenUsageStore({ pool });
-  store.add({ role: 'browse:a', model: 'm1', ok: true, totalTokens: 1 });
-  store.add({ role: 'browse:b', model: 'm1', ok: true, totalTokens: 2 });
-  store.add({ role: 'browse:a', model: 'm2', ok: true, totalTokens: 3 });
+  store.add({ accountId: 'acc-x', role: 'browse:a', model: 'm1', ok: true, totalTokens: 1 });
+  store.add({ accountId: 'acc-x', role: 'browse:b', model: 'm1', ok: true, totalTokens: 2 });
+  store.add({ accountId: 'acc-x', role: 'browse:a', model: 'm2', ok: true, totalTokens: 3 });
   await store.flush();
   assert.equal(upserts.length, 3);
 });
@@ -86,7 +91,7 @@ test('不同维度 → 分行', async () => {
 test('flush 失败被隔离：不抛出、buffer 已清不重试累加', async () => {
   const { pool } = fakePool({ failUpsert: true });
   const store = new TokenUsageStore({ pool });
-  store.add({ role: 'browse:a', model: 'm', ok: true, totalTokens: 9 });
+  store.add({ accountId: 'acc-x', role: 'browse:a', model: 'm', ok: true, totalTokens: 9 });
   await assert.doesNotReject(() => store.flush(), 'flush 失败绝不抛出');
   // 失败的增量被丢弃（不重试累加）：再 flush 一次无任何新 upsert 尝试也不抛。
   await assert.doesNotReject(() => store.flush());
@@ -95,9 +100,9 @@ test('flush 失败被隔离：不抛出、buffer 已清不重试累加', async (
 test('flush 后再 add 同桶 → 第二次 flush 只带增量（加法 upsert，由 PG 累加）', async () => {
   const { pool, upserts } = fakePool();
   const store = new TokenUsageStore({ pool });
-  store.add({ role: 'browse:a', model: 'm', ok: true, totalTokens: 5 });
+  store.add({ accountId: 'acc-x', role: 'browse:a', model: 'm', ok: true, totalTokens: 5 });
   await store.flush();
-  store.add({ role: 'browse:a', model: 'm', ok: true, totalTokens: 7 });
+  store.add({ accountId: 'acc-x', role: 'browse:a', model: 'm', ok: true, totalTokens: 7 });
   await store.flush();
   assert.equal(upserts.length, 2);
   assert.equal(upserts[0].totalTokens, 5);

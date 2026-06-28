@@ -36,7 +36,7 @@ export class RiskController {
 
   constructor(options: RiskControllerOptions = {}) {
     const now = options.clock?.() ?? Date.now();
-    this.accountId = options.accountId ?? 'default';
+    this.accountId = options.accountId ?? '__unbound__';
     this.clock = options.clock ?? Date.now;
     this.store = options.store;
     this.state = options.initialState ?? createRiskState(this.accountId, now);
@@ -47,7 +47,7 @@ export class RiskController {
   }
 
   static async create(options: RiskControllerOptions = {}): Promise<RiskController> {
-    const accountId = options.accountId ?? 'default';
+    const accountId = options.accountId ?? '__unbound__';
     const now = options.clock?.() ?? Date.now();
     await options.store?.init?.();
     const state = (await options.store?.loadState(accountId)) ?? options.initialState ?? createRiskState(accountId, now);

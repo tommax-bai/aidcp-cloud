@@ -9,7 +9,7 @@
  *   /bind                      绑定当前群为默认审批群（占位）
  * 未识别 → 返回帮助信息。
  *
- * 单账号 MVP：accountId 可省略，缺省落到唯一账号（DEFAULT_ACCOUNT_ID）。
+ * retire-default-account：accountId 可省略，缺省由执行层解析「唯一真实账号」；0 或多个则要求显式指定（绝不回落 default）。
  *
  * 解析（parseCommand）与执行（CommandRouter）分离，便于单测：解析是纯函数，
  * 执行通过注入的 CommandActions 把动作落到云端调度器（这里先打桩为接口）。
@@ -20,16 +20,14 @@ import { buildPublishApprovalCard } from './cards.js';
 import { FeishuMessenger } from './messenger.js';
 import type { BotChatRecord } from '../cache/bot-chat-store.js';
 
-/** 单账号 MVP 的缺省账号 id（统一为 'default'，对齐风控 RiskController 与 accounts 表 seed 行） */
-export const DEFAULT_ACCOUNT_ID = 'default';
-
 /** 已识别的指令动作 */
 export type CommandAction = 'status' | 'pause' | 'resume' | 'publish-test' | 'publish' | 'bind' | 'help';
 
 /** 解析后的指令结构 */
 export interface ParsedCommand {
   action: CommandAction;
-  accountId: string;
+  /** retire-default-account：缺省 undefined（执行层解析唯一真实账号），绝不回落 'default'。 */
+  accountId?: string;
   /** 原始指令文本 */
   raw: string;
   /** help 场景携带的提示原因（如未识别的子命令） */
@@ -68,31 +66,31 @@ export function parseCommand(text: string): ParsedCommand {
 
   switch (command) {
     case '/status':
-      return { action: 'status', accountId: args[0] ?? DEFAULT_ACCOUNT_ID, raw, args };
+      return { action: 'status', accountId: args[0], raw, args };
     case '/pause':
-      return { action: 'pause', accountId: args[0] ?? DEFAULT_ACCOUNT_ID, raw, args };
+      return { action: 'pause', accountId: args[0], raw, args };
     case '/resume':
-      return { action: 'resume', accountId: args[0] ?? DEFAULT_ACCOUNT_ID, raw, args };
+      return { action: 'resume', accountId: args[0], raw, args };
     case '/publish-test':
-      return { action: 'publish-test', accountId: DEFAULT_ACCOUNT_ID, raw, args };
+      return { action: 'publish-test', raw, args };
     case '/publish':
-      // /publish [accountId]：第二个 token 视为目标账号，缺省 default（向后兼容）。以该账号人设发帖、落该账号、定向下发。
-      return { action: 'publish', accountId: args[0] ?? DEFAULT_ACCOUNT_ID, raw, args };
+      // /publish [accountId]：第二个 token 视为目标账号，缺省由执行层解析唯一真实账号（retire-default-account：绝不回落 default）。
+      return { action: 'publish', accountId: args[0], raw, args };
     case '/bind':
-      return { action: 'bind', accountId: DEFAULT_ACCOUNT_ID, raw, args };
+      return { action: 'bind', raw, args };
     default:
-      return { action: 'help', accountId: DEFAULT_ACCOUNT_ID, raw, hint: '未识别的子命令' };
+      return { action: 'help', raw, hint: '未识别的子命令' };
   }
 }
 
 /** 账号状态查询/启停的底层动作（落到云端调度器；MVP 可打桩） */
 export interface CommandActions {
-  /** 查询账号状态，返回一段可读描述 */
-  status(accountId: string): Promise<string> | string;
-  /** 暂停账号 */
-  pause(accountId: string): Promise<void> | void;
-  /** 恢复账号 */
-  resume(accountId: string): Promise<void> | void;
+  /** 查询账号状态，返回一段可读描述。accountId 缺省由执行层解析唯一真实账号。 */
+  status(accountId?: string): Promise<string> | string;
+  /** 暂停账号。accountId 缺省由执行层解析唯一真实账号。 */
+  pause(accountId?: string): Promise<void> | void;
+  /** 恢复账号。accountId 缺省由执行层解析唯一真实账号。 */
+  resume(accountId?: string): Promise<void> | void;
   /** 发送审批测试卡片 */
   publishTest?(): Promise<PublishApprovalPayload> | PublishApprovalPayload;
   /** 手动触发一次发帖编排（A 阶段4 PublishScheduler 手动扳机；返回可读回执）。accountId 指定发哪个账号，缺省 default。 */

@@ -84,6 +84,21 @@ export interface TriggerInput {
   generateInput: {
     concepts: Array<{ keyword: string; sourceNote?: string; discoveredAt?: number }>;
     likedContents: Array<{ id: number; title: string; summary: string; author: string }>;
+    /**
+     * 精选灵感语料（change curated-inspiration-corpus）：发帖创作的正向素材来源。
+     * 过门槛的高价值笔记（全文 + 赞藏数 + 机器人自有点赞/收藏标记）。缺省/空则创作回落旧点赞素材路径。
+     */
+    materials?: Array<{
+      sourceId: string;
+      title: string;
+      body: string;
+      author?: string;
+      topics: string[];
+      likeCount: number | null;
+      collectCount: number | null;
+      botLiked: boolean;
+      botCollected: boolean;
+    }>;
     soul: Soul;
     recentPosts: string[];
   };

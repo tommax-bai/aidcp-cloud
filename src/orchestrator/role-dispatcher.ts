@@ -225,8 +225,8 @@ export class RoleDispatcher {
   /** 人设：getSoul 取值口（热加载）优先，soulSnapshot 为兼容快照。经 resolveSoul() 统一取值。 */
   private readonly soulSnapshot?: Soul;
   private readonly getSoulFn?: (accountId?: string) => Soul;
-  /** 当前账号（多账号 per-edge 多路复用就位后按会话切；当前单账号默认 default，留 getSoul(accountId?) 形参缝）。 */
-  private currentAccountId = 'default';
+  /** 当前账号（由连接真实账号经 setCurrentAccountId 设入）。绑定前为保留占位 '__unbound__'（retire-default-account：不再用 'default' 钉死）。 */
+  private currentAccountId = '__unbound__';
   private readonly llm: { complete(prompt: string, opts?: LlmCallOpts): Promise<string> };
   private readonly rawSendCommand: (command: EdgeCommand) => void;
   private readonly clock: () => number;
@@ -429,9 +429,9 @@ export class RoleDispatcher {
   /** 设置该连接（运行时）的当前账号（multi-account-node-support D4：去掉 default 钉死，由连接真实账号设入）。 */
   setCurrentAccountId(accountId: string): void {
     this.currentAccountId = accountId;
-    // 握手同步算「需采集登录账号真实昵称」（change account-real-nickname）：真实账号(非 default) 且库内昵称为 NULL。
+    // 握手同步算「需采集登录账号真实昵称」（change account-real-nickname）：账号握手已保证为真实 userid，库内昵称 NULL 即采。
     // 同步算（不 await PG）→ 存 SessionContext 布尔，杜绝会话开始再 await 留下的异步窗口（在途 page.cards 会插 open_note 绕路）。
-    this.sessionContext.setPendingNicknameCapture(accountId !== 'default' && this.getNickname(accountId) === null);
+    this.sessionContext.setPendingNicknameCapture(this.getNickname(accountId) === null);
   }
 
   /** 当前账号（供测试 / 观测）。 */
@@ -636,13 +636,13 @@ export class RoleDispatcher {
   }
 
   /**
-   * 会话启动闸（诚实人设 + 全局调度开关）。`default` 账号**硬豁免**（始终可启动、沿用打包默认人设回落）。
-   * 未绑人设的非 default 账号：发 onSessionRejected（置 needs_persona_setup + 告警）并短路，绝不以默认人设静默开跑。
+   * 会话启动闸（诚实人设 + 全局调度开关）。retire-default-account：所有账号一视同仁，无 default 豁免。
+   * 未绑人设的账号：发 onSessionRejected（置 needs_persona_setup + 告警）并短路，绝不以默认人设静默开跑。
    * 人设存储读不到时 isPersonaBound 返回 false（fail-closed）→ 一并诚实拒绝。
    */
   private canStartSession(): boolean {
     if (!this.isDispatchActive()) return false;
-    if (this.currentAccountId !== 'default' && this.isPersonaBound && !this.isPersonaBound(this.currentAccountId)) {
+    if (this.isPersonaBound && !this.isPersonaBound(this.currentAccountId)) {
       console.warn(
         `[RoleDispatcher] 账号 ${this.currentAccountId} 未绑定人设 → 拒绝启动浏览会话（needs_persona_setup）：不开循环、不发巡刷信号`,
       );

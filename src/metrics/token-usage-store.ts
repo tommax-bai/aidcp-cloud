@@ -133,6 +133,8 @@ export class TokenUsageStore {
   private flushing = false;
   private droppedFlushes = 0;
   private warnedUntagged = false;
+  /** retire-default-account：缺 accountId 的用量记录被丢弃时只告警一次（避免刷屏）。 */
+  private warnedNoAccount = false;
 
   constructor(options: TokenUsageStoreOptions = {}) {
     // 专用小连接池（热路径隔离）：与边-云/风控/面板池物理分开。
@@ -164,11 +166,20 @@ export class TokenUsageStore {
 
   /**
    * 纯内存累加（同步、不触 PG、不抛实际异常）。调用方仍须 try/catch 包裹——记账绝不进 LLM 路径。
-   * account/role 缺省为保留诚实标签（不静默丢用量）；token 缺失即 0（不伪造）。
+   * retire-default-account：缺 accountId 即丢弃 + 告警一次（绝不回落 default）；role 缺省为保留诚实标签 untagged；token 缺失即 0（不伪造）。
    */
   add(info: TokenUsageCallInfo): void {
+    // retire-default-account：缺 accountId 即 honest-fail 丢弃该用量记录 + 告警一次，绝不回落 default
+    // （账号由 dispatcher 绑定到每次 LLM 调用，缺=上游缺陷，须暴露而非掩盖）。
+    if (!info.accountId || info.accountId.length === 0) {
+      if (!this.warnedNoAccount) {
+        this.warnedNoAccount = true;
+        console.warn('[token-usage] 调用缺 accountId — 丢弃该用量记录（honest-fail），绝不回落 default。请排查未绑账号的 LLM 调用路径。');
+      }
+      return;
+    }
     const bucketMs = Math.floor(Date.now() / BUCKET_MS) * BUCKET_MS;
-    const accountId = info.accountId && info.accountId.length > 0 ? info.accountId : 'default';
+    const accountId = info.accountId;
     const role = info.role && info.role.length > 0 ? info.role : 'untagged';
     if (role === 'untagged' && !this.warnedUntagged) {
       this.warnedUntagged = true;

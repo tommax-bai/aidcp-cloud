@@ -81,9 +81,17 @@ export class ConnectionRuntimeRegistry {
     if (!accountId) {
       await this.deps.onConfigError(
         session,
-        '握手缺少 accountId：每个节点（含默认账号）须显式声明 AIDCP_ACCOUNT_ID，无名连接无可路由 / 限频 / 设人设的身份。',
+        '握手缺少 accountId：每个节点须显式声明 AIDCP_ACCOUNT_ID（登录派生的真实 userid），无名连接无可路由 / 限频 / 设人设的身份。',
       );
       return { ok: false, code: 'missing_account_id', message: '握手缺少 accountId（配置错误）' };
+    }
+    // retire-default-account：'default' 已退役为保留禁用标识，不再是合法账号身份；与缺账号同等当配置错误拒绝。
+    if (accountId === 'default') {
+      await this.deps.onConfigError(
+        session,
+        "握手 accountId='default' 被拒：default 已退役为保留标识，节点须以登录派生的真实小红书 userid 接入。",
+      );
+      return { ok: false, code: 'retired_account_id', message: "accountId='default' 已退役（保留禁用标识）" };
     }
 
     // 同 edgeId 重连顶替（同一节点回来，不计为并行第二节点）：收掉该 edgeId 的旧连接。

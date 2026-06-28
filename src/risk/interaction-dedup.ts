@@ -12,7 +12,7 @@ export class InteractionDedup {
   private readonly clock: () => number;
 
   constructor(options: InteractionDedupOptions) {
-    this.accountId = options.accountId ?? 'default';
+    this.accountId = options.accountId ?? '__unbound__';
     this.store = options.store;
     this.clock = options.clock ?? Date.now;
   }

@@ -184,9 +184,14 @@ export class DefaultMessageHandler implements MessageHandler {
         // 戳当前笔记 id：随后 action.completed 发射 interaction.occurred 时据此补 noteId（V1 task 9.2）。
         if (incomingNote.noteId) session.currentNoteId = incomingNote.noteId;
 
+        // retire-default-account：按连接真实账号判暂停；会话账号握手已保证存在，
+        // 缺失=上游缺陷，honest-fail 跳过该笔记 + 告警，绝不回落 default。
+        if (!session.accountId) {
+          this.logger.warn('[comm] note.arrived 会话缺 accountId（握手应已保证）— 跳过该笔记，绝不回落 default');
+          return makeEnvelope('note.ack', env.id, this.clock(), { received: true });
+        }
         // 暂停检查：已暂停则仅返回 ack，不触发 orchestrator。
-        // 多租户：按连接真实账号判暂停（缺失回退 default，向后兼容 legacy edge）。
-        if (this.deps.accountState?.isPaused(session.accountId ?? 'default')) {
+        if (this.deps.accountState?.isPaused(session.accountId)) {
           this.logger.log('[comm] 账号已暂停，跳过笔记处理:', incomingNote.title);
           return makeEnvelope('note.ack', env.id, this.clock(), { received: true });
         }
@@ -221,14 +226,14 @@ export class DefaultMessageHandler implements MessageHandler {
         // 戳当前笔记 id（v2 现役路径）：action.completed 据此补 noteId（V1 task 9.2）。
         if (detail.noteId) session.currentNoteId = detail.noteId;
         // accountId 随事件带出（change interaction-feed-enrichment）：tee 到全局总线后元数据 upsert 按真实账号归属。
-        this.bus(session).emit('note.detail.arrived', { detail, accountId: session.accountId ?? 'default', ts: this.clock() });
+        this.bus(session).emit('note.detail.arrived', { detail, accountId: session.accountId, ts: this.clock() });
         // 浏览计数（fix view-count-zero）：成功打开并上报一篇笔记即一次 view。执行端不单独回执 view 动作，
         // 故在此唯一必经入口按账号驱动计数——与 like/collect 同走 interaction.occurred → record('view')，
         // 既补齐面板浏览数（risk_counters），又激活浏览配额与点赞/浏览比例闸门（内存窗口）。
         // view 不入 interaction_feed：其订阅方按动作白名单过滤，浏览不污染「已互动笔记」展示账本。
         this.bus(session).emit('interaction.occurred', {
           action: 'view',
-          accountId: session.accountId ?? 'default',
+          accountId: session.accountId,
           ...(detail.noteId ? { noteId: detail.noteId } : {}),
         });
         return null;
@@ -237,7 +242,7 @@ export class DefaultMessageHandler implements MessageHandler {
         const detail = env.payload as ProfileDetailPayload;
         // 戳当前作者 id（change interaction-feed-enrichment）：action.completed 发 follow 时据此补 targetId（关注按作者）。
         if (detail.authorId) session.currentAuthorId = detail.authorId;
-        this.bus(session).emit('profile.detail.arrived', { detail, accountId: session.accountId ?? 'default', ts: this.clock() });
+        this.bus(session).emit('profile.detail.arrived', { detail, accountId: session.accountId, ts: this.clock() });
         return null;
       }
       // —— 通知巡视（消息查看）：边缘上报 → 入口事件转换 ——
@@ -285,8 +290,8 @@ export class DefaultMessageHandler implements MessageHandler {
           const targetId = result.action === 'follow' ? session.currentAuthorId : session.currentNoteId;
           this.bus(session).emit('interaction.occurred', {
             action: result.action as 'like' | 'collect' | 'follow' | 'comment' | 'comment_like',
-            // accountId 从会话填；缺失（legacy edge）回退保留键 'default'，绝不误并入真名账号（D3/D4）
-            accountId: session.accountId ?? 'default',
+            // accountId 从会话填（握手已保证存在）；缺失=上游缺陷，下游 consumer honest-fail 丢弃，绝不回落 default
+            accountId: session.accountId,
             // noteId 从会话当前笔记填（V1 task 9.2）：编排已知当前笔记，喂 likedNoteStore + 按笔记互动历史。
             // like/collect 总在 note.detail 之后发生，故 currentNoteId 即被互动笔记；缺则不带（如 follow 在主页）。
             ...(session.currentNoteId ? { noteId: session.currentNoteId } : {}),

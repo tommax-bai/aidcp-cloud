@@ -112,8 +112,8 @@ describe('NicknameEnricher（登录账号真实昵称采集，云端角色驱动
     assert.equal(h.ctx.selfCaptureInFlight, false);
   });
 
-  it('占位账号 default 绝不采（双保险）', () => {
-    const h = setup({ accountId: 'default' });
+  it('缺账号（空 accountId）→ honest-fail 绝不采（retire-default-account：default 已退役，无占位账号需特判）', () => {
+    const h = setup({ accountId: '' });
     h.ctx.setPendingNicknameCapture(true); // 即便 pending 被误置
     sessionStart(h.bus);
     assert.equal(h.captures.length, 0);
@@ -206,16 +206,16 @@ describe('NicknameEnricher（登录账号真实昵称采集，云端角色驱动
     assert.equal(h.backToFeed, 1, '回 feed 一次');
   });
 
-  it('登录引导触发：无需采集(pending=false)→零扰动；占位账号 default 绝不采', () => {
+  it('登录引导触发：无需采集(pending=false)→零扰动；缺账号（空 accountId）→ honest-fail 绝不采', () => {
     const h1 = setup();
     h1.role.armLoginCapture(); // pending 默认 false
     assert.equal(h1.captures.length, 0, 'pending=false → 零扰动');
     assert.equal(h1.ctx.browseSuspended, false);
 
-    const h2 = setup({ accountId: 'default' });
+    const h2 = setup({ accountId: '' });
     h2.ctx.setPendingNicknameCapture(true); // 即便误置
     h2.role.armLoginCapture();
-    assert.equal(h2.captures.length, 0, 'default 占位账号绝不采（双保险）');
+    assert.equal(h2.captures.length, 0, '缺账号 honest-fail 绝不采');
     assert.equal(h2.ctx.browseSuspended, false);
   });
 });
