@@ -73,6 +73,9 @@ export const ROLE_CATALOG: RoleCatalogItem[] = [
   { roleId: 'browse:comment_reviewer', displayName: '是否翻评论区判定', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
   { roleId: 'browse:comment_de_ai_flavor', displayName: '评论去 AI 味改写', group: 'browse', category: 'browse_compose', llmKind: 'text', tunableTemperature: true },
   { roleId: 'browse:concept_extractor', displayName: '技术概念关键词抽取', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
+  // 精选准入两段式·模型评估（change curated-admission-eval-roles，Phase 3）：判定类（确定性 JSON 输出，不调温度）。
+  { roleId: 'browse:curated_note_evaluator', displayName: '精选准入·正文评估', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
+  { roleId: 'browse:curated_comment_evaluator', displayName: '精选准入·评论评估', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
   // —— 发布管线（文本，经 llmClient.chat）——
   { roleId: 'publish:ContentScout', displayName: '发布选题侦察', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: false },
   { roleId: 'publish:ContentCreator', displayName: '技术帖文案创作', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
