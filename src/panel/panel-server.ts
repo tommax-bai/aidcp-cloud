@@ -871,6 +871,97 @@ function createRequestHandler(
       return;
     }
 
+    // ── 精选内容后台管理（change curated-content-admin-page）──────────────────────
+    // 按账号隔离的只读检索 + 治理写。账号必填（缺则 400 account_required，绝不默认/合并＝PII 隔离）；
+    // 未注入 503；缺表 store 回落空。删/清把 account_id 强制进 WHERE 防越权（id 全局 SERIAL）。
+    // 静态后缀路由（/facets、/contents/clear-empty）排在 :id 动态匹配之前。
+    if (method === 'GET' && url === '/api/curated/facets') {
+      if (!deps.curatedContent) {
+        sendJson(res, 503, { error: 'curated_unavailable' });
+        return;
+      }
+      const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+      const accountId = (query.get('accountId') ?? '').trim();
+      if (!accountId) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'account_required' });
+        return;
+      }
+      sendJson(res, 200, await deps.curatedContent.facetsForPanel(accountId));
+      return;
+    }
+    if (method === 'POST' && url === '/api/curated/contents/clear-empty') {
+      if (!deps.curatedContent) {
+        sendJson(res, 503, { error: 'curated_unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const rawAccount = ((body ?? {}) as { accountId?: unknown }).accountId;
+      const accountId = typeof rawAccount === 'string' ? rawAccount.trim() : '';
+      if (!accountId) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'account_required' });
+        return;
+      }
+      const deleted = await deps.curatedContent.clearEmptyBody(accountId);
+      sendJson(res, 200, { deleted }); // 诚实回真实清理条数（可能因机器人并发写与预览不同）
+      return;
+    }
+    if (method === 'GET' && url === '/api/curated/contents') {
+      if (!deps.curatedContent) {
+        sendJson(res, 503, { error: 'curated_unavailable' });
+        return;
+      }
+      const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+      const accountId = (query.get('accountId') ?? '').trim();
+      if (!accountId) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'account_required' });
+        return;
+      }
+      const numOf = (k: string, dflt: number): number => {
+        const v = query.get(k);
+        if (v == null || v === '') return dflt;
+        const n = Number(v);
+        return Number.isFinite(n) && n >= 0 ? n : dflt;
+      };
+      const ctRaw = (query.get('contentType') ?? '').trim();
+      const contentType = ctRaw === 'note' || ctRaw === 'comment' ? ctRaw : undefined;
+      const admitReason = (query.get('admitReason') ?? '').trim() || undefined;
+      const result = await deps.curatedContent.listForPanel(accountId, {
+        ...(contentType ? { contentType } : {}),
+        ...(admitReason ? { admitReason } : {}),
+        limit: numOf('limit', 50),
+        offset: numOf('offset', 0),
+      });
+      sendJson(res, 200, result);
+      return;
+    }
+    if (method === 'DELETE' && url.startsWith('/api/curated/contents/')) {
+      if (!deps.curatedContent) {
+        sendJson(res, 503, { error: 'curated_unavailable' });
+        return;
+      }
+      const idRaw = decodeURIComponent(url.slice('/api/curated/contents/'.length));
+      const id = Number(idRaw);
+      if (!Number.isInteger(id) || id <= 0) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_id' });
+        return;
+      }
+      const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+      const accountId = (query.get('accountId') ?? '').trim();
+      if (!accountId) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'account_required' });
+        return;
+      }
+      const deleted = await deps.curatedContent.deleteOne(accountId, id);
+      sendJson(res, 200, { deleted }); // 诚实回真实删除行数（0=已不存在/越权，1=已删），绝不假成功
+      return;
+    }
+
     sendJson(res, 404, { error: 'not_found' });
   }
 

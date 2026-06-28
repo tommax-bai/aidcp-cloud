@@ -388,3 +388,105 @@ test('HTTP dispatch 写路由：start/stop 回报真态 + changed + 真实在线
     await h.close();
   }
 });
+
+test('HTTP 精选内容后台管理：未注入 503 / 账号必填 400 / 读列表+facets / 删与清回真态 + 账号隔离', async () => {
+  // 未注入 curatedContent：精选路由 503，不连累其他接口。
+  const noCurated = await startPanelApi(deps, makeConfig());
+  try {
+    const base = `http://127.0.0.1:${noCurated.port}`;
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = (await login.json()) as { token: string };
+    const auth = { authorization: `Bearer ${token}` };
+    assert.equal((await fetch(`${base}/api/curated/contents?accountId=acc-1`, { headers: auth })).status, 503);
+  } finally {
+    await noCurated.close();
+  }
+
+  // 注入 curatedContent：完整路径。
+  const calls: Array<{ fn: string; args: unknown[] }> = [];
+  const curatedMock = {
+    listForPanel: async (accountId: string, opts: unknown) => {
+      calls.push({ fn: 'list', args: [accountId, opts] });
+      return { items: [{ id: 7, accountId, contentType: 'note', sourceId: 'n-1', title: 'T', body: 'B', author: '甲', sourceUrl: null, topics: [], likeCount: null, collectCount: 5, commentCount: null, countsCapturedAt: null, botLiked: false, botCollected: true, admitReason: 'collect_floor', firstSeenAt: 1, updatedAt: 2 }], total: 1 };
+    },
+    facetsForPanel: async (accountId: string) => {
+      calls.push({ fn: 'facets', args: [accountId] });
+      return { admitReasons: [{ admitReason: 'collect_floor', count: 1, botActionCount: 0 }], noteCount: 1, commentCount: 0 };
+    },
+    // 仅本账号本 id 命中删 1，模拟越权（别账号 id）删 0。
+    deleteOne: async (accountId: string, id: number) => {
+      calls.push({ fn: 'delete', args: [accountId, id] });
+      return accountId === 'acc-1' && id === 7 ? 1 : 0;
+    },
+    clearEmptyBody: async (accountId: string) => {
+      calls.push({ fn: 'clear', args: [accountId] });
+      return 3;
+    },
+  };
+  const depsWithCurated = { ...(deps as object), curatedContent: curatedMock } as unknown as PanelDeps;
+  const h = await startPanelApi(depsWithCurated, makeConfig());
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = (await login.json()) as { token: string };
+    const auth = { authorization: `Bearer ${token}` };
+    const authJson = { ...auth, 'content-type': 'application/json' };
+
+    // 账号必填：缺 accountId → 400 account_required（绝不默认/合并＝PII 隔离）
+    const noAcc = await fetch(`${base}/api/curated/contents`, { headers: auth });
+    assert.equal(noAcc.status, 400);
+    assert.equal(((await noAcc.json()) as { reason: string }).reason, 'account_required');
+
+    // 读列表：带类型/原因/分页过滤，回 {items,total}
+    const list = (await (
+      await fetch(`${base}/api/curated/contents?accountId=acc-1&contentType=note&admitReason=collect_floor&limit=20&offset=0`, { headers: auth })
+    ).json()) as { items: { id: number }[]; total: number };
+    assert.equal(list.total, 1);
+    assert.equal(list.items[0].id, 7);
+    const listCall = calls.find((c) => c.fn === 'list');
+    assert.deepEqual(listCall?.args[0], 'acc-1');
+    assert.deepEqual(listCall?.args[1], { contentType: 'note', admitReason: 'collect_floor', limit: 20, offset: 0 });
+
+    // facets：账号必填
+    assert.equal((await fetch(`${base}/api/curated/facets`, { headers: auth })).status, 400);
+    const facets = (await (await fetch(`${base}/api/curated/facets?accountId=acc-1`, { headers: auth })).json()) as {
+      noteCount: number;
+    };
+    assert.equal(facets.noteCount, 1);
+
+    // 删单条：本账号本 id → deleted 1
+    const del = (await (await fetch(`${base}/api/curated/contents/7?accountId=acc-1`, { method: 'DELETE', headers: auth })).json()) as {
+      deleted: number;
+    };
+    assert.equal(del.deleted, 1);
+
+    // 删单条越权：别账号 id → deleted 0（诚实，不假成功）
+    const delCross = (await (await fetch(`${base}/api/curated/contents/999?accountId=acc-1`, { method: 'DELETE', headers: auth })).json()) as {
+      deleted: number;
+    };
+    assert.equal(delCross.deleted, 0);
+
+    // 删单条缺账号 → 400
+    assert.equal((await fetch(`${base}/api/curated/contents/7`, { method: 'DELETE', headers: auth })).status, 400);
+
+    // 清空正文壳行：回真实条数 3
+    const clr = (await (
+      await fetch(`${base}/api/curated/contents/clear-empty`, { method: 'POST', headers: authJson, body: JSON.stringify({ accountId: 'acc-1' }) })
+    ).json()) as { deleted: number };
+    assert.equal(clr.deleted, 3);
+
+    // 清空缺账号 → 400
+    const clrNoAcc = await fetch(`${base}/api/curated/contents/clear-empty`, { method: 'POST', headers: authJson, body: JSON.stringify({}) });
+    assert.equal(clrNoAcc.status, 400);
+  } finally {
+    await h.close();
+  }
+});

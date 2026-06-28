@@ -1426,6 +1426,9 @@ async function main(): Promise<void> {
           tokenUsage: tokenUsageStore,
           // 通知联系人名册（change notification-contact-registry）。同一记录 store 实例：读=按账号联系人列表、写=人工字段（微信/标签/备注）。
           notificationContact: notificationContactStore,
+          // 精选内容后台管理（change curated-content-admin-page）。同一精选语料 store 实例：读=按账号列表/筛选面、写=删单条/清空壳行。
+          // init 失败留 undefined 时面板自然 503，绝不崩边-云闭环。
+          curatedContent: curatedContentStore,
         },
         {
           port: panelPort,

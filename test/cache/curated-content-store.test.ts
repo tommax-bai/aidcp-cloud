@@ -267,3 +267,134 @@ test('archiveComment 无 reason/无 likeCount → admit_reason=confirmed_like、
   assert.equal(calls[0].params[7], null); // like_count 抓不到 → null，不编造
   assert.equal(calls[0].params[8], 'confirmed_like');
 });
+
+// ── 后台管理（change curated-content-admin-page）─────────────────────────────────
+
+/** 可控返回 rows/rowCount、可抛错的 pool（面板读写方法用）。 */
+function controllablePool(handler: (sql: string, params: unknown[]) => { rows?: unknown[]; rowCount?: number }): {
+  pool: pg.Pool;
+  calls: Array<{ sql: string; params: unknown[] }>;
+} {
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      calls.push({ sql, params });
+      const r = handler(sql, params);
+      return { rows: r.rows ?? [], rowCount: r.rowCount };
+    },
+  } as unknown as pg.Pool;
+  return { pool, calls };
+}
+
+const panelDbRow = {
+  id: 7,
+  account_id: 'acc-1',
+  content_type: 'note',
+  source_id: 'n-1',
+  title: 'T',
+  body: 'B',
+  author: '甲',
+  source_url: 'u',
+  topics: ['x'],
+  like_count: 10,
+  collect_count: 4,
+  comment_count: 2,
+  counts_captured_at: new Date(1000),
+  bot_liked: true,
+  bot_collected: false,
+  admit_reason: 'collect_floor',
+  first_seen_at: new Date(2000),
+  updated_at: new Date(3000),
+  total_count: '1',
+};
+
+test('listForPanel：按账号 + 类型 + 原因过滤，COUNT(*) OVER() 取 total，映射 epoch ms + 诚实置空', async () => {
+  const { pool, calls } = controllablePool(() => ({ rows: [panelDbRow] }));
+  const store = new CuratedContentStore({ pool });
+  const out = await store.listForPanel('acc-1', { contentType: 'note', admitReason: 'collect_floor', limit: 50, offset: 0 });
+
+  const sql = calls[0].sql;
+  assert.match(sql, /WHERE account_id = \$1/);
+  assert.match(sql, /content_type = \$2/);
+  assert.match(sql, /admit_reason = \$3/);
+  assert.match(sql, /COUNT\(\*\) OVER\(\) AS total_count/);
+  assert.match(sql, /ORDER BY updated_at DESC/);
+  assert.match(sql, /LIMIT \$4 OFFSET \$5/);
+  assert.deepEqual(calls[0].params, ['acc-1', 'note', 'collect_floor', 50, 0]);
+
+  assert.equal(out.total, 1);
+  assert.equal(out.items[0].id, 7);
+  assert.equal(out.items[0].countsCapturedAt, 1000); // Date → epoch ms
+  assert.equal(out.items[0].firstSeenAt, 2000);
+  assert.equal(out.items[0].updatedAt, 3000);
+  assert.equal(out.items[0].likeCount, 10);
+  assert.equal(out.items[0].commentCount, 2);
+  assert.equal(out.items[0].botLiked, true);
+  assert.equal(out.items[0].botCollected, false);
+});
+
+test('listForPanel：无筛选时仅按账号；空结果 total 兜底 0', async () => {
+  const { pool, calls } = controllablePool(() => ({ rows: [] }));
+  const store = new CuratedContentStore({ pool });
+  const out = await store.listForPanel('acc-1', { limit: 20, offset: 40 });
+  assert.doesNotMatch(calls[0].sql, /content_type = \$/);
+  assert.doesNotMatch(calls[0].sql, /admit_reason = \$/);
+  assert.deepEqual(calls[0].params, ['acc-1', 20, 40]); // 仅 account + limit + offset
+  assert.deepEqual(out, { items: [], total: 0 });
+});
+
+test('listForPanel：缺表 42P01 → 优雅降级 {items:[],total:0}', async () => {
+  const { pool } = controllablePool(() => {
+    const err = new Error('relation does not exist') as Error & { code: string };
+    err.code = '42P01';
+    throw err;
+  });
+  const store = new CuratedContentStore({ pool });
+  const out = await store.listForPanel('acc-1', { limit: 10, offset: 0 });
+  assert.deepEqual(out, { items: [], total: 0 });
+});
+
+test('facetsForPanel：纳入原因去重+计数+高权重行数 与 笔记/评论计数，均按账号', async () => {
+  const { pool, calls } = controllablePool((sql) => {
+    if (/GROUP BY admit_reason/.test(sql)) {
+      return {
+        rows: [
+          { admit_reason: 'collect_floor', count: '3', bot_action_count: '1' },
+          { admit_reason: 'bot_collect(content_missing)', count: '2', bot_action_count: '2' },
+        ],
+      };
+    }
+    return { rows: [{ content_type: 'note', count: '4' }, { content_type: 'comment', count: '1' }] };
+  });
+  const store = new CuratedContentStore({ pool });
+  const out = await store.facetsForPanel('acc-1');
+  assert.ok(calls.every((c) => c.params[0] === 'acc-1')); // 两查询都按账号
+  assert.equal(out.noteCount, 4);
+  assert.equal(out.commentCount, 1);
+  assert.deepEqual(out.admitReasons[0], { admitReason: 'collect_floor', count: 3, botActionCount: 1 });
+  assert.deepEqual(out.admitReasons[1], { admitReason: 'bot_collect(content_missing)', count: 2, botActionCount: 2 });
+});
+
+test('deleteOne：account_id 进 WHERE 防越权，回真实删除行数', async () => {
+  const { pool, calls } = controllablePool(() => ({ rowCount: 1 }));
+  const store = new CuratedContentStore({ pool });
+  const n = await store.deleteOne('acc-1', 7);
+  assert.match(calls[0].sql, /DELETE FROM curated_content WHERE id = \$1 AND account_id = \$2/);
+  assert.deepEqual(calls[0].params, [7, 'acc-1']);
+  assert.equal(n, 1);
+});
+
+test('deleteOne：凭别账号 id 删 → rowCount 0（越权被隔离），诚实回 0', async () => {
+  const { pool } = controllablePool(() => ({ rowCount: 0 }));
+  const store = new CuratedContentStore({ pool });
+  assert.equal(await store.deleteOne('acc-1', 999), 0);
+});
+
+test('clearEmptyBody：按账号删空正文壳行（body IS NULL OR body=\'\'），回真实条数', async () => {
+  const { pool, calls } = controllablePool(() => ({ rowCount: 5 }));
+  const store = new CuratedContentStore({ pool });
+  const n = await store.clearEmptyBody('acc-1');
+  assert.match(calls[0].sql, /DELETE FROM curated_content WHERE account_id = \$1 AND \(body IS NULL OR body = ''\)/);
+  assert.deepEqual(calls[0].params, ['acc-1']);
+  assert.equal(n, 5);
+});

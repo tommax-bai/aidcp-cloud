@@ -8,6 +8,7 @@
 
 import type { RiskController, RiskQuotaLevel, RiskAction, SessionInteractionBudget } from '../risk/index.js';
 import type { ConceptStore, BotChatStore } from '../cache/index.js';
+import type { CuratedContentType, CuratedPanelListResult, CuratedFacets } from '../cache/index.js';
 import type { PublishLogStore } from '../publish-agent/publish-log-store.js';
 import type { EventBus } from '../event-bus/index.js';
 import type { PanelUser } from './auth.js';
@@ -112,6 +113,29 @@ export interface PanelDeps {
       updatedBy: string | null,
     ): Promise<void>;
   };
+  /**
+   * 精选创作灵感语料的后台管理面（change curated-content-admin-page）。未注入则 /api/curated/* 返回 503。
+   * 读=按账号隔离的分页列表 + 筛选面（accountId 必填）；写=删单条 / 清空正文壳行（account_id 强制进 WHERE 防越权）。
+   * 按账号隔离、不提供全账号合并视图（PII）；删除非持久（仅清当前快照，达标会重新纳入），honest 回真实条数。
+   */
+  curatedContent?: PanelCuratedContent;
+}
+
+// ── 精选内容后台管理（change curated-content-admin-page）────────────────────────
+// 直接复用 CuratedContentStore 的方法形状作面板 dep（store 自有 curated_content 表，不塞 PgPanelStore）。
+
+export interface PanelCuratedContent {
+  /** 按账号分页只读列表（可选类型 / 纳入原因过滤）；含一致 total。缺表 store 内回落空。 */
+  listForPanel(
+    accountId: string,
+    opts: { contentType?: CuratedContentType; admitReason?: string; limit: number; offset: number },
+  ): Promise<CuratedPanelListResult>;
+  /** 按账号筛选面：纳入原因去重 + 计数 + 高权重行数 + 笔记/评论计数。缺表回落空。 */
+  facetsForPanel(accountId: string): Promise<CuratedFacets>;
+  /** 删单条（account_id 进 WHERE 防越权）；回真实删除行数 0|1。 */
+  deleteOne(accountId: string, id: number): Promise<number>;
+  /** 清空正文壳行（按账号）；回真实清理条数。 */
+  clearEmptyBody(accountId: string): Promise<number>;
 }
 
 /**

@@ -64,6 +64,46 @@ export interface CuratedSelectItem {
   botCollected: boolean;
 }
 
+/**
+ * 面板（后台管理）用的一行完整视图（camelCase、时间戳 epoch ms）。
+ * 与召回视图 CuratedSelectItem 不同：带 id（删除需用）+ 全字段，供运营查看 / 治理。
+ * 计数诚实置空：缺失为 null（区别真实 0）；时间戳缺失为 null。
+ */
+export interface CuratedPanelRow {
+  id: number;
+  accountId: string;
+  contentType: CuratedContentType;
+  sourceId: string;
+  title: string | null;
+  body: string | null;
+  author: string | null;
+  sourceUrl: string | null;
+  topics: string[];
+  likeCount: number | null;
+  collectCount: number | null;
+  commentCount: number | null;
+  countsCapturedAt: number | null;
+  botLiked: boolean;
+  botCollected: boolean;
+  admitReason: string | null;
+  firstSeenAt: number;
+  updatedAt: number;
+}
+
+/** 面板列表结果：当前筛选下的一页行 + 一致的总条数（供分页器）。 */
+export interface CuratedPanelListResult {
+  items: CuratedPanelRow[];
+  total: number;
+}
+
+/** 面板筛选面：驱动筛选下拉 + 清理前影响预览（按账号）。 */
+export interface CuratedFacets {
+  /** 该账号实际出现的纳入原因去重 + 各自计数 + 携机器人点赞/收藏标记的高权重行数。 */
+  admitReasons: { admitReason: string | null; count: number; botActionCount: number }[];
+  noteCount: number;
+  commentCount: number;
+}
+
 export interface CuratedContentStoreOptions {
   host?: string;
   port?: number;
@@ -123,6 +163,53 @@ interface CuratedRow {
   collect_count: number | string | null;
   bot_liked: boolean;
   bot_collected: boolean;
+}
+
+/** 面板列表用的完整 snake-case 行（含 id 与全字段；total_count 来自 COUNT(*) OVER()）。 */
+interface CuratedPanelDbRow {
+  id: number;
+  account_id: string;
+  content_type: string;
+  source_id: string;
+  title: string | null;
+  body: string | null;
+  author: string | null;
+  source_url: string | null;
+  topics: string[] | null;
+  like_count: number | string | null;
+  collect_count: number | string | null;
+  comment_count: number | string | null;
+  counts_captured_at: Date | null;
+  bot_liked: boolean;
+  bot_collected: boolean;
+  admit_reason: string | null;
+  first_seen_at: Date;
+  updated_at: Date;
+  total_count?: number | string;
+}
+
+/** snake-case 行 → 面板 camelCase 视图（时间戳转 epoch ms、INT 诚实置空）。 */
+function rowToPanelView(r: CuratedPanelDbRow): CuratedPanelRow {
+  return {
+    id: r.id,
+    accountId: r.account_id,
+    contentType: r.content_type === 'comment' ? 'comment' : 'note',
+    sourceId: r.source_id,
+    title: r.title,
+    body: r.body,
+    author: r.author,
+    sourceUrl: r.source_url,
+    topics: r.topics ?? [],
+    likeCount: toNumOrNull(r.like_count),
+    collectCount: toNumOrNull(r.collect_count),
+    commentCount: toNumOrNull(r.comment_count),
+    countsCapturedAt: r.counts_captured_at ? r.counts_captured_at.getTime() : null,
+    botLiked: r.bot_liked,
+    botCollected: r.bot_collected,
+    admitReason: r.admit_reason,
+    firstSeenAt: r.first_seen_at.getTime(),
+    updatedAt: r.updated_at.getTime(),
+  };
 }
 
 export class CuratedContentStore {
@@ -301,6 +388,125 @@ export class CuratedContentStore {
       botLiked: r.bot_liked,
       botCollected: r.bot_collected,
     }));
+  }
+
+  // ── 后台管理（change curated-content-admin-page）：只读检索 + 治理写 ──────────────
+  // 红线：所有方法按 account_id 过滤 / 约束，绝不跨账号；删除把 account_id 写进 WHERE 防越权
+  //      （id 是全局 SERIAL）；缺表（42P01）只读路径优雅降空，不抛 500。
+
+  /**
+   * 面板列表（按账号隔离的分页只读）。
+   * 动态 WHERE 强制 account_id + 可选 content_type / admit_reason 精确过滤，按 updated_at DESC
+   * （命中 idx_curated_content_account_updated），COUNT(*) OVER() 同查询取回当前筛选总数。
+   * 空结果集 total 兜底 0；缺表 42P01 → {items:[],total:0} 降级。
+   */
+  async listForPanel(
+    accountId: string,
+    opts: { contentType?: CuratedContentType; admitReason?: string; limit: number; offset: number },
+  ): Promise<CuratedPanelListResult> {
+    const params: unknown[] = [accountId];
+    let where = 'WHERE account_id = $1';
+    if (opts.contentType) {
+      params.push(opts.contentType);
+      where += ` AND content_type = $${params.length}`;
+    }
+    if (opts.admitReason) {
+      params.push(opts.admitReason);
+      where += ` AND admit_reason = $${params.length}`;
+    }
+    params.push(opts.limit);
+    const limitIdx = params.length;
+    params.push(opts.offset);
+    const offsetIdx = params.length;
+    try {
+      const { rows } = await this.pool.query<CuratedPanelDbRow>(
+        `SELECT id, account_id, content_type, source_id, title, body, author, source_url, topics,
+                like_count, collect_count, comment_count, counts_captured_at,
+                bot_liked, bot_collected, admit_reason, first_seen_at, updated_at,
+                COUNT(*) OVER() AS total_count
+         FROM curated_content
+         ${where}
+         ORDER BY updated_at DESC
+         LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+        params,
+      );
+      const total = rows.length > 0 ? Number(rows[0].total_count) : 0;
+      return { items: rows.map(rowToPanelView), total };
+    } catch (err) {
+      if ((err as { code?: string }).code === '42P01') return { items: [], total: 0 };
+      throw err;
+    }
+  }
+
+  /**
+   * 面板筛选面（按账号）：纳入原因去重 + 各自计数 + 携双标记的高权重行数 + 笔记/评论计数。
+   * 驱动筛选下拉（不硬编码原因）与清理前影响预览。缺表 42P01 → 空降级。
+   */
+  async facetsForPanel(accountId: string): Promise<CuratedFacets> {
+    try {
+      const reasonsP = this.pool.query<{ admit_reason: string | null; count: string; bot_action_count: string }>(
+        `SELECT admit_reason,
+                COUNT(*) AS count,
+                SUM(CASE WHEN bot_liked OR bot_collected THEN 1 ELSE 0 END) AS bot_action_count
+         FROM curated_content
+         WHERE account_id = $1
+         GROUP BY admit_reason
+         ORDER BY count DESC`,
+        [accountId],
+      );
+      const typesP = this.pool.query<{ content_type: string; count: string }>(
+        `SELECT content_type, COUNT(*) AS count
+         FROM curated_content
+         WHERE account_id = $1
+         GROUP BY content_type`,
+        [accountId],
+      );
+      const [reasonsR, typesR] = await Promise.all([reasonsP, typesP]);
+      let noteCount = 0;
+      let commentCount = 0;
+      for (const r of typesR.rows) {
+        if (r.content_type === 'comment') commentCount = Number(r.count);
+        else noteCount = Number(r.count);
+      }
+      return {
+        admitReasons: reasonsR.rows.map((r) => ({
+          admitReason: r.admit_reason,
+          count: Number(r.count),
+          botActionCount: Number(r.bot_action_count),
+        })),
+        noteCount,
+        commentCount,
+      };
+    } catch (err) {
+      if ((err as { code?: string }).code === '42P01') return { admitReasons: [], noteCount: 0, commentCount: 0 };
+      throw err;
+    }
+  }
+
+  /**
+   * 删除单条（误纳入/低质/隐私）。account_id 必进 WHERE 防越权（仅凭全局 id 不可触别账号行）。
+   * 返回真实删除行数（0|1）——删 0 与删 1 由调用方诚实区分，绝不假成功。
+   * 注意：删除仅清当前快照；准入不查史，下次再观测到且仍达标会经 upsert 重新纳入。
+   */
+  async deleteOne(accountId: string, id: number): Promise<number> {
+    const { rowCount } = await this.pool.query(`DELETE FROM curated_content WHERE id = $1 AND account_id = $2`, [
+      id,
+      accountId,
+    ]);
+    return rowCount ?? 0;
+  }
+
+  /**
+   * 清理「空正文壳行」（body 为 NULL 或空串），按账号约束。
+   * 刻意用「正文为空」一条确定性谓词，而非「按纳入原因」——空壳行恰带机器人收藏标记（高权重），
+   * 任何「按原因 + 默认保护机器人动作行」的清理都会保护壳行、误删有正文优质行。返回真实清理条数。
+   */
+  async clearEmptyBody(accountId: string): Promise<number> {
+    const { rowCount } = await this.pool.query(
+      `DELETE FROM curated_content WHERE account_id = $1 AND (body IS NULL OR body = '')`,
+      [accountId],
+    );
+    return rowCount ?? 0;
   }
 
   /** 按账号裁到 newest retentionMax（按账号、不跨账号）。 */
