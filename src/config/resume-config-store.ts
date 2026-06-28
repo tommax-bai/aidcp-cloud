@@ -1,16 +1,18 @@
 /**
- * 自动续场护栏 + 看门狗阈值配置存储（resume_config 表，PostgreSQL）。
+ * 自动续场护栏 + 看门狗阈值配置存储（resume_config_global 表，PostgreSQL）—— 全局单例。
  *
- * change session-auto-resume-with-excursions：按账号可后台编辑 + 热加载；实现 ResumeConfigProvider
- * 供调度器（续场闸 + 休息时长）/ 会话监测体（看门狗阈值）每次现读（PUT 后无需重启）。
+ * change restore-auto-resume-and-global-safety-config（stream B）：把续场护栏 + 看门狗阈值从
+ * **按账号**收敛为**全局单例**（用户 2026-06-27 拍板：取消账号维度、改全局通用，对所有账号生效）。
+ * 落库（至多一行 id=1）+ 热加载；实现 ResumeConfigProvider 供调度器（续场闸 + 休息时长）/
+ * 会话监测体（看门狗阈值）每次现读（PUT 后无需重启）。
  *
- * 安全不变量（复刻 SessionConfigStore）：
- * - 绝不 brick：某账号缺行 / 字段非法 → 该项逐项回落写死默认；永不抛。
+ * 安全不变量（保持）：
+ * - 绝不 brick：缺配置 / 字段非法 → 该项逐项回落写死默认；永不抛。
  * - 写库成功才刷内存镜像。
  * - 零回归：表为空时取值与写死默认逐位一致（缺行全回落）。
  *
- * 红线：本 store 只读写 resume_config；绝不碰风控状态单写路径（risk_state / setQuotaLevel / applySignal）、不经协议。
- * 建表幂等（CREATE TABLE IF NOT EXISTS），与 migrations/0020_resume_config.sql 同源。
+ * 红线：本 store 只读写 resume_config_global；绝不碰风控状态单写路径（risk_state / setQuotaLevel / applySignal）、不经协议。
+ * 建表幂等（CREATE TABLE IF NOT EXISTS），与 migrations/0022_global_safety_config.sql 同源。
  */
 
 import pg from 'pg';
@@ -31,9 +33,8 @@ import {
 
 const { Pool } = pg;
 
-/** 单账号行：续场护栏 + 看门狗阈值 + 审计（面板回显用）。null 表示该列未覆盖（回落写死默认）。 */
+/** 全局续场护栏 + 看门狗阈值行 + 审计（面板回显用）。null 表示该列未覆盖（回落写死默认）。 */
 export interface ResumeConfigRow {
-  accountId: string;
   restRatioPct: number | null;
   activeWindowStartMin: number | null;
   activeWindowEndMin: number | null;
@@ -57,8 +58,8 @@ export interface ResumeConfigPatch {
 }
 
 export const RESUME_CONFIG_SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS resume_config (
-  account_id              TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS resume_config_global (
+  id                      INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
   rest_ratio_pct          INTEGER,
   active_window_start_min INTEGER,
   active_window_end_min   INTEGER,
@@ -81,7 +82,6 @@ export interface ResumeConfigStoreOptions {
 }
 
 interface ResumeDbRow {
-  account_id: string;
   rest_ratio_pct: number | string | null;
   active_window_start_min: number | string | null;
   active_window_end_min: number | string | null;
@@ -110,7 +110,8 @@ function validMinuteOfDay(raw: number | string | null | undefined): number | und
 
 export class ResumeConfigStore implements ResumeConfigProvider {
   private readonly pool: pg.Pool;
-  private cache = new Map<string, ResumeConfigRow>();
+  /** 全局单行镜像；null = 库无行（全回落写死默认）。 */
+  private cache: ResumeConfigRow | null = null;
 
   constructor(options: ResumeConfigStoreOptions = {}) {
     this.pool =
@@ -132,13 +133,11 @@ export class ResumeConfigStore implements ResumeConfigProvider {
 
   private async reload(): Promise<void> {
     const { rows } = await this.pool.query<ResumeDbRow>(
-      `SELECT account_id, rest_ratio_pct, active_window_start_min, active_window_end_min,
+      `SELECT rest_ratio_pct, active_window_start_min, active_window_end_min,
               daily_max_sessions, daily_max_minutes, idle_nudge_ms, idle_end_ms, updated_at, updated_by
-         FROM resume_config`,
+         FROM resume_config_global WHERE id = 1`,
     );
-    const next = new Map<string, ResumeConfigRow>();
-    for (const r of rows) next.set(r.account_id, this.rowFromDb(r));
-    this.cache = next;
+    this.cache = rows[0] ? this.rowFromDb(rows[0]) : null;
   }
 
   private numOrNull(raw: number | string | null): number | null {
@@ -147,7 +146,6 @@ export class ResumeConfigStore implements ResumeConfigProvider {
 
   private rowFromDb(r: ResumeDbRow): ResumeConfigRow {
     return {
-      accountId: r.account_id,
       restRatioPct: this.numOrNull(r.rest_ratio_pct),
       activeWindowStartMin: this.numOrNull(r.active_window_start_min),
       activeWindowEndMin: this.numOrNull(r.active_window_end_min),
@@ -162,58 +160,51 @@ export class ResumeConfigStore implements ResumeConfigProvider {
 
   // ─── ResumeConfigProvider（逐项回落写死默认、永不抛） ───────────────────────
 
-  restRatioFor(accountId: string): number {
-    const pct = validInt(this.cache.get(accountId)?.restRatioPct ?? undefined);
+  restRatio(): number {
+    const pct = validInt(this.cache?.restRatioPct ?? undefined);
     return (pct ?? DEFAULT_REST_RATIO_PCT) / 100;
   }
 
-  activeWindowFor(accountId: string): ActiveWindow {
-    const row = this.cache.get(accountId);
-    const startMin = validMinuteOfDay(row?.activeWindowStartMin ?? undefined);
-    const endMin = validMinuteOfDay(row?.activeWindowEndMin ?? undefined);
+  activeWindow(): ActiveWindow {
+    const startMin = validMinuteOfDay(this.cache?.activeWindowStartMin ?? undefined);
+    const endMin = validMinuteOfDay(this.cache?.activeWindowEndMin ?? undefined);
     if (startMin === undefined || endMin === undefined) return { ...DEFAULT_ACTIVE_WINDOW };
     return { startMin, endMin };
   }
 
-  dailyCapsFor(accountId: string): DailyCaps {
-    const row = this.cache.get(accountId);
+  dailyCaps(): DailyCaps {
     return {
-      maxSessions: validInt(row?.dailyMaxSessions ?? undefined) ?? DEFAULT_DAILY_MAX_SESSIONS,
-      maxMinutes: validInt(row?.dailyMaxMinutes ?? undefined) ?? DEFAULT_DAILY_MAX_MINUTES,
+      maxSessions: validInt(this.cache?.dailyMaxSessions ?? undefined) ?? DEFAULT_DAILY_MAX_SESSIONS,
+      maxMinutes: validInt(this.cache?.dailyMaxMinutes ?? undefined) ?? DEFAULT_DAILY_MAX_MINUTES,
     };
   }
 
-  idleNudgeMsFor(accountId: string): number {
-    const ms = validInt(this.cache.get(accountId)?.idleNudgeMs ?? undefined);
+  idleNudgeMs(): number {
+    const ms = validInt(this.cache?.idleNudgeMs ?? undefined);
     // 缺 / 非法 / 低于详情页停留上限 → 回落写死默认（绝不让 nudge 在正常长停留中误触）。
     if (ms === undefined || ms < IDLE_NUDGE_MIN_MS) return DEFAULT_IDLE_NUDGE_MS;
     return ms;
   }
 
-  idleEndMsFor(accountId: string): number {
-    const ms = validInt(this.cache.get(accountId)?.idleEndMs ?? undefined);
-    const nudge = this.idleNudgeMsFor(accountId);
+  idleEndMs(): number {
+    const ms = validInt(this.cache?.idleEndMs ?? undefined);
+    const nudge = this.idleNudgeMs();
     // 缺 / 非法 / 不大于轻推 → 回落写死默认（且默认 1h 必 > 任何合法 nudge）。
     if (ms === undefined || ms <= nudge) return Math.max(DEFAULT_IDLE_END_MS, nudge + 1);
     return ms;
   }
 
-  /** 取某账号覆盖行（缺行 undefined，面板审计用）。 */
-  getRow(accountId: string): ResumeConfigRow | undefined {
-    return this.cache.get(accountId);
-  }
-
-  /** 全部覆盖行（面板列表用）。 */
-  getAll(): Map<string, ResumeConfigRow> {
-    return this.cache;
+  /** 取全局覆盖行（无行 undefined，面板审计 / overridden 判定用）。 */
+  getRow(): ResumeConfigRow | undefined {
+    return this.cache ?? undefined;
   }
 
   /**
    * 写库 + 刷内存镜像（热加载）。未传的字段保持原值（无原值则写 null = 回落写死默认）。
    * 先写库成功、再刷镜像。调用方（facade）应已校验数字合法。
    */
-  async set(accountId: string, patch: ResumeConfigPatch, updatedBy: string): Promise<ResumeConfigRow> {
-    const prev = this.cache.get(accountId);
+  async set(patch: ResumeConfigPatch, updatedBy: string): Promise<ResumeConfigRow> {
+    const prev = this.cache;
     const pick = (
       key: keyof ResumeConfigPatch,
       prevVal: number | null | undefined,
@@ -230,10 +221,10 @@ export class ResumeConfigStore implements ResumeConfigProvider {
     };
 
     const { rows } = await this.pool.query<ResumeDbRow>(
-      `INSERT INTO resume_config (account_id, rest_ratio_pct, active_window_start_min, active_window_end_min,
+      `INSERT INTO resume_config_global (id, rest_ratio_pct, active_window_start_min, active_window_end_min,
               daily_max_sessions, daily_max_minutes, idle_nudge_ms, idle_end_ms, updated_at, updated_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), $9)
-       ON CONFLICT (account_id)
+       VALUES (1, $1, $2, $3, $4, $5, $6, $7, now(), $8)
+       ON CONFLICT (id)
        DO UPDATE SET rest_ratio_pct = EXCLUDED.rest_ratio_pct,
                      active_window_start_min = EXCLUDED.active_window_start_min,
                      active_window_end_min = EXCLUDED.active_window_end_min,
@@ -241,10 +232,9 @@ export class ResumeConfigStore implements ResumeConfigProvider {
                      daily_max_minutes = EXCLUDED.daily_max_minutes,
                      idle_nudge_ms = EXCLUDED.idle_nudge_ms, idle_end_ms = EXCLUDED.idle_end_ms,
                      updated_at = now(), updated_by = EXCLUDED.updated_by
-       RETURNING account_id, rest_ratio_pct, active_window_start_min, active_window_end_min,
+       RETURNING rest_ratio_pct, active_window_start_min, active_window_end_min,
                  daily_max_sessions, daily_max_minutes, idle_nudge_ms, idle_end_ms, updated_at, updated_by`,
       [
-        accountId,
         next.restRatioPct,
         next.activeWindowStartMin,
         next.activeWindowEndMin,
@@ -257,8 +247,8 @@ export class ResumeConfigStore implements ResumeConfigProvider {
     );
     const result = rows[0]
       ? this.rowFromDb(rows[0])
-      : { accountId, ...next, updatedAt: null, updatedBy };
-    this.cache.set(accountId, result);
+      : { ...next, updatedAt: null, updatedBy };
+    this.cache = result;
     return result;
   }
 

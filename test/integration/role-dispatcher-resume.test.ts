@@ -22,11 +22,11 @@ const fixedBudget = () => ({ likes: 10, collects: 5, follows: 3, searches: 5, co
 
 function makeProvider(over?: Partial<ResumeConfigProvider>): ResumeConfigProvider {
   return {
-    restRatioFor: () => 0.1,
-    activeWindowFor: () => ({ startMin: 0, endMin: 1440 }), // 全天不限
-    dailyCapsFor: () => ({ maxSessions: 0, maxMinutes: 0 }), // 不限
-    idleNudgeMsFor: () => 130_000,
-    idleEndMsFor: () => 3_600_000,
+    restRatio: () => 0.1,
+    activeWindow: () => ({ startMin: 0, endMin: 1440 }), // 全天不限
+    dailyCaps: () => ({ maxSessions: 0, maxMinutes: 0 }), // 不限
+    idleNudgeMs: () => 130_000,
+    idleEndMs: () => 3_600_000,
     ...over,
   };
 }
@@ -59,8 +59,8 @@ function make(opts?: {
     getRiskStatus: opts?.getRiskStatus ?? (() => 'normal'),
     isDispatchActive: opts?.isDispatchActive ?? (() => true),
     sessionLimitProvider: {
-      sessionDurationMsFor: () => 600_000, // 10min
-      sessionBudgetFor: fixedBudget,
+      sessionDurationMs: () => 600_000, // 10min
+      sessionBudget: fixedBudget,
     },
   });
   d.setup();
@@ -122,7 +122,7 @@ describe('RoleDispatcher 自动续场', () => {
   });
 
   it('每日上限到顶 → 不再续场', () => {
-    const m = make({ provider: { dailyCapsFor: () => ({ maxSessions: 1, maxMinutes: 0 }) } });
+    const m = make({ provider: { dailyCaps: () => ({ maxSessions: 1, maxMinutes: 0 }) } });
     // 第 1 轮：结束 → 续场成功（当日计数 → 1）
     m.d.startSession();
     m.d.endSession('timeout', { autoResumeEligible: true });

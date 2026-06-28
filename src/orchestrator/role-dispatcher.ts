@@ -160,14 +160,14 @@ export interface RoleDispatcherOptions {
    */
   cooldownGate?: ActionCooldownGate;
   /**
-   * 单场上限提供者（change session-limits-to-quota-layer）：按账号给出单场时长 + 单场互动预算
-   * （安全限额层，热加载、后台改即生效）。缺省 → 回落写死默认（时长 10min + freshBudget 数字），
+   * 单场上限提供者（全局单例，change restore-auto-resume-and-global-safety-config）：给出全局单场时长 + 单场互动预算
+   * （安全限额层，热加载、后台改即生效、对所有账号生效）。缺省 → 回落写死默认（时长 10min + freshBudget 数字），
    * 与改造前逐位一致（严格零回归）。只读、不触风控状态单写、不经协议。
    */
   sessionLimitProvider?: SessionLimitProvider;
   /**
-   * 自动续场护栏 + 看门狗阈值提供者（change session-auto-resume-with-excursions）：按账号给出
-   * rest_ratio / 活跃时段窗口 / 每日上限 / 看门狗两阈值（热加载、后台改即生效）。
+   * 自动续场护栏 + 看门狗阈值提供者（全局单例，change restore-auto-resume-and-global-safety-config）：给出全局
+   * rest_ratio / 活跃时段窗口 / 每日上限 / 看门狗两阈值（热加载、后台改即生效、对所有账号生效）。
    * **未注入 → 自动续场特性关（保持旧行为：单场结束即停、不续）**；看门狗回落写死默认（轻推~2min / 放弃 1h）。
    * 只读、不触风控状态单写、不经协议。
    */
@@ -246,9 +246,9 @@ export class RoleDispatcher {
   private readonly interactionGuard?: InteractionGuard;
   /** 动作冷却闸（engagement-restraint）；缺省不冷却。 */
   private readonly cooldownGate?: ActionCooldownGate;
-  /** 单场上限提供者（按账号读单场时长 + 互动预算，热加载）；缺省回落写死默认。只读。 */
+  /** 单场上限提供者（读全局单场时长 + 互动预算，热加载、对所有账号生效）；缺省回落写死默认。只读。 */
   private readonly sessionLimitProvider?: SessionLimitProvider;
-  /** 续场护栏 + 看门狗阈值提供者（按账号读，热加载）；未注入 → 自动续场关、看门狗回落默认。只读。 */
+  /** 续场护栏 + 看门狗阈值提供者（读全局配置，热加载、对所有账号生效）；未注入 → 自动续场关、看门狗回落默认。只读。 */
   private readonly resumeConfigProvider?: ResumeConfigProvider;
   private readonly setTimeoutFn: (fn: () => void, ms: number) => unknown;
   private readonly clearTimeoutFn: (handle: unknown) => void;
@@ -276,7 +276,7 @@ export class RoleDispatcher {
   private readonly searchLimiter: SearchFrequencyLimiter;
   /** 概念池快照：startSession 时 loadPool 刷新，供 SearchEvaluator 读取。 */
   private conceptPool: ConceptPool = EMPTY_CONCEPT_POOL;
-  /** 会话开始时刻，用于估算会话进度（疲劳乘子）。时长上限改为按当前人设惰性解析（见 maxDurationMs()）。 */
+  /** 会话开始时刻，用于估算会话进度（疲劳乘子）。时长上限改为从全局单场上限提供者惰性解析（见 maxDurationMs()）。 */
   private sessionStartedAt: number;
   private roles: BaseRole[] = [];
 
@@ -291,7 +291,7 @@ export class RoleDispatcher {
   // 数据存储（由 Edge 上报更新）
   private visibleCards: VisibleCard[] = [];
   private currentNote: NoteData | null = null;
-  /** 当前会话剩余互动预算（按账号从单场上限提供者派生，会话开始/重置时刷新）。 */
+  /** 当前会话剩余互动预算（从全局单场上限提供者派生，会话开始/重置时刷新）。 */
   private budget!: SessionInteractionBudget;
   /** 会话开始/重置时的预算快照（供比率闸：init−剩余；会话中途改预算不漂移）。 */
   private budgetInit!: SessionInteractionBudget;
@@ -345,9 +345,9 @@ export class RoleDispatcher {
     throw new Error('RoleDispatcher 缺少人设注入（soul / getSoul 至少给一个）');
   }
 
-  /** 会话时长上限（毫秒）：按当前账号从单场上限提供者惰性解析（热加载，后台改即时生效）；缺省回落写死默认。 */
+  /** 会话时长上限（毫秒）：从全局单场上限提供者惰性解析（热加载，后台改即时生效、对所有账号生效）；缺省回落写死默认。 */
   private maxDurationMs(): number {
-    return this.sessionLimitProvider?.sessionDurationMsFor(this.currentAccountId) ?? DEFAULT_SESSION_DURATION_MS;
+    return this.sessionLimitProvider?.sessionDurationMs() ?? DEFAULT_SESSION_DURATION_MS;
   }
 
   /** 会话进度 0..1（已用时长 / 时长上限），供节奏疲劳乘子使用。 */
@@ -446,7 +446,15 @@ export class RoleDispatcher {
   /** 注册所有角色并启动事件订阅 */
   setup(): void {
     // 人设以取值口下发（热加载）：每个 agent 读 this.soul 时按当前账号即时解析，PUT 人设后无需重启。
-    const commonOptions = { eventBus: this.eventBus, getSoul: () => this.resolveSoul(), llm: this.llm };
+    // token 用量账号归属（fix llm-token-usage account attribution）：把本连接「当前账号」穿进每次 LLM 调用，
+    // 使记账按真实账号归属、不再全记 default。currentAccountId 按连接稳定、调用时现读（并发安全：每连接独立
+    // dispatcher，无共享可变态）；调用方已显式给 accountId（如探活）则尊重之。只追加一个字段，绝不改请求体、
+    // 不进 LLM 失败路径（记账红线）。
+    const accountBoundLlm = {
+      complete: (prompt: string, opts?: LlmCallOpts): Promise<string> =>
+        this.llm.complete(prompt, { ...opts, accountId: opts?.accountId ?? this.currentAccountId }),
+    };
+    const commonOptions = { eventBus: this.eventBus, getSoul: () => this.resolveSoul(), llm: accountBoundLlm };
     // 详情页「评论点赞」特性总开关（默认关；线上灰度时置 AIDCP_COMMENT_LIKE=true）。
     // 关闭时：既不注册 CommentLikeAppraiser、也不接线 comment_like.intended 下发——彻底惰性。
     const commentLikeEnabled = process.env.AIDCP_COMMENT_LIKE === 'true';
@@ -531,8 +539,8 @@ export class RoleDispatcher {
         getRemainingBudget: () => this.budget,
         getMaxDurationMs: () => this.maxDurationMs(),
         // 看门狗两段阈值按账号现读（热加载）；未注入续场提供者 → 回落写死默认（轻推~2min / 放弃 1h）。
-        getIdleNudgeMs: () => this.resumeConfigProvider?.idleNudgeMsFor(this.currentAccountId) ?? DEFAULT_IDLE_NUDGE_MS,
-        getIdleEndMs: () => this.resumeConfigProvider?.idleEndMsFor(this.currentAccountId) ?? DEFAULT_IDLE_END_MS,
+        getIdleNudgeMs: () => this.resumeConfigProvider?.idleNudgeMs() ?? DEFAULT_IDLE_NUDGE_MS,
+        getIdleEndMs: () => this.resumeConfigProvider?.idleEndMs() ?? DEFAULT_IDLE_END_MS,
         clock: this.clock,
       }),
       // —— 通知巡视（消息查看）12 角色：检测→准入→暂停→开首页→分诊→按类浏览→分类→去重→发飞书→返回→恢复 ——
@@ -654,11 +662,11 @@ export class RoleDispatcher {
   }
 
   /**
-   * 单次浏览会话的初始互动预算：按当前账号从单场上限提供者读（热加载），缺省回落写死默认。
+   * 单次浏览会话的初始互动预算：从全局单场上限提供者读（热加载，对所有账号生效），缺省回落写死默认。
    * 返回新拷贝（live budget 会被逐项扣减）。供初始化与会话重置复用，避免口径漂移。
    */
   private freshBudget(): SessionInteractionBudget {
-    return this.sessionLimitProvider?.sessionBudgetFor(this.currentAccountId) ?? defaultSessionBudget();
+    return this.sessionLimitProvider?.sessionBudget() ?? defaultSessionBudget();
   }
 
   /**
@@ -798,8 +806,8 @@ export class RoleDispatcher {
   private armRestTimer(account: string): void {
     this.cancelRestTimer();
     if (!this.resumeConfigProvider) return; // 特性未开 → 不续（零回归）。
-    const ratio = this.resumeConfigProvider.restRatioFor(account);
-    const base = this.maxDurationMs() * ratio; // maxDurationMs 按 currentAccountId 读
+    const ratio = this.resumeConfigProvider.restRatio();
+    const base = this.maxDurationMs() * ratio; // 单场时长全局；休息 = 时长 × 全局休息比例
     const restMs = Math.max(0, Math.round(base * this.restJitter()));
     this.restTimer = this.setTimeoutFn(() => {
       this.restTimer = undefined;
@@ -841,9 +849,9 @@ export class RoleDispatcher {
     if (risk === 'restricted' || risk === 'frozen') return false; // 撞风控不续
     if (!this.resumeConfigProvider) return false; // 无提供者 = 特性关
     const now = this.clock();
-    const win = this.resumeConfigProvider.activeWindowFor(account);
-    if (!isWithinActiveWindow(this.minuteOfDay(now), win)) return false; // 过活跃时段窗口
-    const caps = this.resumeConfigProvider.dailyCapsFor(account);
+    const win = this.resumeConfigProvider.activeWindow();
+    if (!isWithinActiveWindow(this.minuteOfDay(now), win)) return false; // 过活跃时段窗口（全局）
+    const caps = this.resumeConfigProvider.dailyCaps(); // 阈值全局；计数 dailyTally 仍按账号按日
     const tally = this.dailyTally(account, now);
     if (caps.maxSessions > 0 && tally.sessions >= caps.maxSessions) return false; // 每日场数到顶
     if (caps.maxMinutes > 0 && tally.browseMs >= caps.maxMinutes * 60_000) return false; // 每日时长到顶

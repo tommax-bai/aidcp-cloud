@@ -83,15 +83,15 @@ export interface PanelDeps {
    */
   quotaConfig?: PanelQuotaConfig;
   /**
-   * 单场会话上限配置（change session-limits-to-quota-layer）。未注入则 /api/session-limits 返回 503。
-   * 按账号编辑单场时长 + 六项互动预算；写非乐观回真态；非法整块拒（invalid_value），绝不部分落库；
-   * 只动 session_config，不碰风控状态单写路径、不经协议。
+   * 单场会话上限配置（全局单例，change restore-auto-resume-and-global-safety-config）。未注入则 /api/session-limits 返回 503。
+   * 全局编辑单场时长 + 六项互动预算、对所有账号生效；写非乐观回真态；非法整块拒（invalid_value），绝不部分落库；
+   * 只动 session_config_global，不碰风控状态单写路径、不经协议。
    */
   sessionLimits?: PanelSessionLimits;
   /**
-   * 自动续场护栏 + 看门狗阈值配置（change session-auto-resume-with-excursions）。未注入则 /api/resume-config 返回 503。
-   * 按账号编辑 rest_ratio / 活跃时段窗口 / 每日上限 / 看门狗两阈值；写非乐观回真态；非法整块拒，绝不部分落库；
-   * 只动 resume_config，不碰风控状态单写路径、不经协议。
+   * 自动续场护栏 + 看门狗阈值配置（全局单例，change restore-auto-resume-and-global-safety-config）。未注入则 /api/resume-config 返回 503。
+   * 全局编辑 rest_ratio / 活跃时段窗口 / 每日上限 / 看门狗两阈值、对所有账号生效；写非乐观回真态；非法整块拒，绝不部分落库；
+   * 只动 resume_config_global，不碰风控状态单写路径、不经协议。
    */
   resumeConfig?: PanelResumeConfig;
   /**
@@ -405,13 +405,12 @@ export interface PanelQuotaConfig {
   setQuota(patch: QuotaConfigPatchInput, updatedBy: string): Promise<QuotaConfigSetResult>;
 }
 
-// ── 单场会话上限配置（change session-limits-to-quota-layer）────────────────────────
-// 按账号一行：单场时长（分钟）+ 六项互动预算（likes/collects/follows/searches/comments/comment_likes）。
-// 库缺行处以写死默认合成（overridden:false = 显示的是写死默认，即当前真生效）。
+// ── 单场会话上限配置（全局单例，change restore-auto-resume-and-global-safety-config）──
+// 单份全局配置：单场时长（分钟）+ 六项互动预算（likes/collects/follows/searches/comments/comment_likes）。
+// 对所有账号生效。库无行处以写死默认合成（overridden:false = 显示的是写死默认，即当前真生效）。
 
-/** 单账号单场上限生效值 + 来源/审计（GET /api/session-limits 形状）。 */
-export interface SessionLimitRowView {
-  accountId: string;
+/** 全局单场上限生效值 + 来源/审计（GET /api/session-limits 形状）。 */
+export interface SessionLimitView {
   /** 单场时长上限（分钟）。 */
   maxDurationMin: number;
   /** 单场互动预算（六项）。 */
@@ -422,13 +421,8 @@ export interface SessionLimitRowView {
   updatedBy: string | null;
 }
 
-export interface SessionLimitCatalogView {
-  limits: SessionLimitRowView[];
-}
-
-/** PUT /api/session-limits 入参补丁。未传的字段保持原值（无原值则回落写死默认）。 */
+/** PUT /api/session-limits 入参补丁（全局，无账号）。未传的字段保持原值（无原值则回落写死默认）。 */
 export interface SessionLimitPatchInput {
-  accountId: string;
   maxDurationMin?: number;
   likes?: number;
   collects?: number;
@@ -439,19 +433,18 @@ export interface SessionLimitPatchInput {
 }
 
 export type SessionLimitSetResult =
-  | { ok: true; view: SessionLimitCatalogView }
+  | { ok: true; view: SessionLimitView }
   | { ok: false; reason: 'invalid_value' | 'no_valid_fields' };
 
 export interface PanelSessionLimits {
-  /** 全账号（含 default）单场时长 + 互动预算生效值 + 审计（库缺行以写死默认合成回显）。 */
-  getCatalog(): SessionLimitCatalogView;
-  /** 按账号写单场上限。校验不过整块拒（绝不部分落库 / 假成功）。写后回真态目录。 */
+  /** 全局单场时长 + 互动预算生效值 + 审计（库无行以写死默认合成回显）。 */
+  getView(): SessionLimitView;
+  /** 写全局单场上限。校验不过整块拒（绝不部分落库 / 假成功）。写后回真态。 */
   set(patch: SessionLimitPatchInput, updatedBy: string): Promise<SessionLimitSetResult>;
 }
 
-/** 单账号续场护栏 + 看门狗阈值生效值 + 来源/审计（GET /api/resume-config 形状，change session-auto-resume-with-excursions）。 */
-export interface ResumeConfigRowView {
-  accountId: string;
+/** 全局续场护栏 + 看门狗阈值生效值 + 来源/审计（GET /api/resume-config 形状）。 */
+export interface ResumeConfigView {
   /** 休息比例（百分比，如 10 = 单场时长的 10%）。 */
   restRatioPct: number;
   /** 活跃时段窗口起/止（自午夜分钟数，0..1440；0..1440 = 全天不限）。 */
@@ -469,13 +462,8 @@ export interface ResumeConfigRowView {
   updatedBy: string | null;
 }
 
-export interface ResumeConfigCatalogView {
-  configs: ResumeConfigRowView[];
-}
-
-/** PUT /api/resume-config 入参补丁。未传的字段保持原值（无原值则回落写死默认）。 */
+/** PUT /api/resume-config 入参补丁（全局，无账号）。未传的字段保持原值（无原值则回落写死默认）。 */
 export interface ResumeConfigPatchInput {
-  accountId: string;
   restRatioPct?: number;
   activeWindowStartMin?: number;
   activeWindowEndMin?: number;
@@ -486,13 +474,13 @@ export interface ResumeConfigPatchInput {
 }
 
 export type ResumeConfigSetResult =
-  | { ok: true; view: ResumeConfigCatalogView }
+  | { ok: true; view: ResumeConfigView }
   | { ok: false; reason: 'invalid_value' | 'no_valid_fields' };
 
 export interface PanelResumeConfig {
-  /** 全账号（含 default）续场护栏 + 看门狗阈值生效值 + 审计（库缺行以写死默认合成回显）。 */
-  getCatalog(): ResumeConfigCatalogView;
-  /** 按账号写续场配置。校验不过整块拒（绝不部分落库 / 假成功）。写后回真态目录。 */
+  /** 全局续场护栏 + 看门狗阈值生效值 + 审计（库无行以写死默认合成回显）。 */
+  getView(): ResumeConfigView;
+  /** 写全局续场配置。校验不过整块拒（绝不部分落库 / 假成功）。写后回真态。 */
   set(patch: ResumeConfigPatchInput, updatedBy: string): Promise<ResumeConfigSetResult>;
 }
 

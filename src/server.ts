@@ -175,7 +175,7 @@ async function main(): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
-  // 单场会话上限（change session-limits-to-quota-layer）：按账号单场时长 + 互动预算；缺行/非法回落写死默认，绝不 brick。
+  // 单场会话上限（全局单例，change restore-auto-resume-and-global-safety-config）：全局单场时长 + 互动预算、对所有账号生效；缺行/非法回落写死默认，绝不 brick。
   const sessionConfigStore = new SessionConfigStore({
     host: readEnvString('PGHOST'),
     port: readEnvPort('PGPORT'),
@@ -183,8 +183,8 @@ async function main(): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
-  // 自动续场护栏 + 看门狗阈值（change session-auto-resume-with-excursions）：按账号 rest_ratio / 活跃时段 /
-  // 每日上限 / 看门狗两阈值；缺行/非法回落写死默认，绝不 brick。init 失败也不致命（空镜像→全回落默认）。
+  // 自动续场护栏 + 看门狗阈值（全局单例，change restore-auto-resume-and-global-safety-config）：全局 rest_ratio / 活跃时段 /
+  // 每日上限 / 看门狗两阈值、对所有账号生效；缺行/非法回落写死默认，绝不 brick。init 失败也不致命（空镜像→全回落默认）。
   const resumeConfigStore = new ResumeConfigStore({
     host: readEnvString('PGHOST'),
     port: readEnvPort('PGPORT'),
@@ -276,7 +276,7 @@ async function main(): Promise<void> {
     // 保留原 console.log（加 provider + tokens 维度）；记账 add() 受 try/catch 双保险，绝不抛进/拖垮 LLM 调用路径。
     onCall: (info) => {
       console.log(
-        `[llm] role=${info.role ?? '-'} provider=${info.provider ?? '-'} model=${info.model} ms=${info.ms} ok=${info.ok} tokens=${info.totalTokens ?? 0}`,
+        `[llm] account=${info.accountId ?? '-'} role=${info.role ?? '-'} provider=${info.provider ?? '-'} model=${info.model} ms=${info.ms} ok=${info.ok} tokens=${info.totalTokens ?? 0}`,
       );
       try {
         tokenUsageStore.add(info);
@@ -285,10 +285,17 @@ async function main(): Promise<void> {
       }
     },
   });
+  // 发布链 token 账号归属（fix llm-token-usage account attribution）：发布管线严格串行（PublishOrchestrator
+  // 单跑闸，同一时刻只跑一个账号），故用单槽「当前发布账号」即并发安全。由 onPublishStart/onPublishEnd 括起
+  // （见下方 publishOrchestrator 装配），把真实发布账号穿进发布角色的每次 LLM 调用，使记账不再全记 default。
+  const publishAccountRef = { current: 'default' };
   // 把共享文本客户端按角色绑定成 thin wrapper（发布侧用；角色内部代码零改动）。
+  // 账号：调用方显式给则尊重，否则取当前发布账号（发布角色只在发布窗口内调用，窗口外回落 default 无害）。
   const roleLlm = (roleId: string): ChatLlmClient => ({
-    complete: (prompt, opts) => llm.complete(prompt, { ...opts, role: opts?.role ?? roleId }),
-    chat: (messages, opts) => llm.chat(messages, { ...opts, role: opts?.role ?? roleId }),
+    complete: (prompt, opts) =>
+      llm.complete(prompt, { ...opts, role: opts?.role ?? roleId, accountId: opts?.accountId ?? publishAccountRef.current }),
+    chat: (messages, opts) =>
+      llm.chat(messages, { ...opts, role: opts?.role ?? roleId, accountId: opts?.accountId ?? publishAccountRef.current }),
   });
   const planner = new SimplePlanner({ llm });
   const cache = new PgAnchorCache({
@@ -440,9 +447,13 @@ async function main(): Promise<void> {
     // 发布让位（change session-auto-resume-with-excursions）：发布真正开始 → 结束该账号浏览会话（让位、不续场）；
     // 结束 → 经续场各闸起新浏览会话。runtimes 前向引用（声明在下方），closure 调用时已装配（同 commandSequencer.pusher 模式）。
     onPublishStart: (accountId) => {
+      // 账号归属：把当前发布账号置入单槽，发布角色这一轮的 LLM 调用据此记账（串行，安全）。
+      publishAccountRef.current = accountId;
       runtimes?.endSessionForAccount(accountId, 'publish_takeover');
     },
     onPublishEnd: (accountId) => {
+      // 本轮发布结束 → 复位单槽，避免发布窗口外的偶发调用错记到上一发布账号。
+      publishAccountRef.current = 'default';
       runtimes?.resumeSessionForAccount(accountId);
     },
   });
@@ -850,10 +861,10 @@ async function main(): Promise<void> {
       interactionGuard: interactionGuardRegistry.forAccount(ctx.accountId),
       // 动作冷却闸（engagement-restraint）：单例共享，内部按 ctx.accountId 分桶。下发互动前查、真成功后落时间戳。
       cooldownGate: actionCooldownGate,
-      // 单场上限提供者（change session-limits-to-quota-layer）：按账号读单场时长 + 互动预算（热加载、后台改即生效）；
-      // 缺行/非法回落写死默认（零回归）。每连接共享同一 store，按 currentAccountId 现读，不触风控状态单写。
+      // 单场上限提供者（全局单例，change restore-auto-resume-and-global-safety-config）：读全局单场时长 + 互动预算（热加载、后台改即生效）、对所有账号生效；
+      // 缺行/非法回落写死默认（零回归）。每连接共享同一 store，现读全局单行，不触风控状态单写。
       sessionLimitProvider: sessionConfigStore,
-      // 续场护栏 + 看门狗阈值提供者（change session-auto-resume-with-excursions）：按账号读，热加载。
+      // 续场护栏 + 看门狗阈值提供者（全局单例，change restore-auto-resume-and-global-safety-config）：读全局配置、对所有账号生效，热加载。
       // 注入即开启自动续场（生产）；缺行回落写死默认（rest 10% / 全天窗口 / 不限 / 看门狗轻推~2min·放弃 1h）。
       resumeConfigProvider: resumeConfigStore,
       // 登录账号真实昵称采集（change account-real-nickname）：同步读（进程内缓存，握手算「需采集」）+ 单写持久化。
@@ -1090,9 +1101,9 @@ async function main(): Promise<void> {
   });
   // 安全限额面板外观（change safety-quota-config）：三档×动作×三窗口生效值 + 写校验（非法整块拒）+ 非乐观回真态。
   const quotaConfigPanel = createQuotaConfigPanel({ store: quotaConfigStore });
-  // 单场上限面板外观（change session-limits-to-quota-layer）：按账号时长 + 六项预算回显 + 写校验（非法整块拒）+ 非乐观回真态。
+  // 单场上限面板外观（全局单例，change restore-auto-resume-and-global-safety-config）：全局时长 + 六项预算回显 + 写校验（非法整块拒）+ 非乐观回真态。
   const sessionLimitPanel = createSessionLimitPanel({ store: sessionConfigStore });
-  // 续场配置面板外观（change session-auto-resume-with-excursions）：按账号续场护栏 + 看门狗阈值回显 + 写校验 + 非乐观回真态。
+  // 续场配置面板外观（全局单例，change restore-auto-resume-and-global-safety-config）：全局续场护栏 + 看门狗阈值回显 + 写校验 + 非乐观回真态。
   const resumeConfigPanel = createResumeConfigPanel({ store: resumeConfigStore });
   // 角色 prompt 只读预览（change role-prompt-visibility）：借仅供预览的 RoleDispatcher 渲染真实 prompt。
   // 人设选择框（change prompt-preview-persona-selector）：给定 accountId 时把预览 dispatcher 当前账号临时切到

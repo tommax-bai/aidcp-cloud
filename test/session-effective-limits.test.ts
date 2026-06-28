@@ -72,8 +72,8 @@ describe('RoleDispatcher 单场互动预算来源（change session-limits-to-quo
 
   it('注入提供者 → 会话预算按提供者（更小预算更快耗尽 → 会话终止）', () => {
     const provider: SessionLimitProvider = {
-      sessionDurationMsFor: () => DEFAULT_SESSION_DURATION_MS,
-      sessionBudgetFor: () => ({ likes: 1, collects: 1, follows: 1, searches: 1, comments: 1, comment_likes: 1 }),
+      sessionDurationMs: () => DEFAULT_SESSION_DURATION_MS,
+      sessionBudget: () => ({ likes: 1, collects: 1, follows: 1, searches: 1, comments: 1, comment_likes: 1 }),
     };
     const d = makeDispatcher(provider);
     d.setup();

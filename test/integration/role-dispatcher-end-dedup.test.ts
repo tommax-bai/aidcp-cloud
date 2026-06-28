@@ -26,11 +26,11 @@ const mockSoul: Soul = {
 const fixedBudget = () => ({ likes: 10, collects: 5, follows: 3, searches: 5, comments: 2, comment_likes: 3 });
 
 const resumeProvider: ResumeConfigProvider = {
-  restRatioFor: () => 0.1,
-  activeWindowFor: () => ({ startMin: 0, endMin: 1440 }),
-  dailyCapsFor: () => ({ maxSessions: 0, maxMinutes: 0 }),
-  idleNudgeMsFor: () => 130_000,
-  idleEndMsFor: () => 3_600_000,
+  restRatio: () => 0.1,
+  activeWindow: () => ({ startMin: 0, endMin: 1440 }),
+  dailyCaps: () => ({ maxSessions: 0, maxMinutes: 0 }),
+  idleNudgeMs: () => 130_000,
+  idleEndMs: () => 3_600_000,
 };
 
 function make() {
@@ -60,8 +60,8 @@ function make() {
     getRiskStatus: () => 'normal',
     isDispatchActive: () => true,
     sessionLimitProvider: {
-      sessionDurationMsFor: () => 600_000, // 10min
-      sessionBudgetFor: fixedBudget,
+      sessionDurationMs: () => 600_000, // 10min
+      sessionBudget: fixedBudget,
     },
   });
   d.setup();

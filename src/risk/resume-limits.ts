@@ -53,21 +53,21 @@ export interface DailyCaps {
 }
 
 /**
- * 自动续场护栏 + 看门狗阈值提供者（安全限额层接口）。
+ * 自动续场护栏 + 看门狗阈值提供者（安全限额层接口）：全局单例，不再按账号。
  * 由 ResumeConfigStore（config 层）实现（同步读内存镜像、缺值逐项回落写死默认、永不抛），
  * 注入调度器（续场闸 + 休息时长）与会话监测体（看门狗阈值）供运行时每次现读（PUT 后无需重启）。
  */
 export interface ResumeConfigProvider {
-  /** 某账号休息比例（小数，如 0.10）。缺 / 非法 → DEFAULT_REST_RATIO_PCT/100。 */
-  restRatioFor(accountId: string): number;
-  /** 某账号活跃时段窗口。缺 / 非法 → 全天不限。 */
-  activeWindowFor(accountId: string): ActiveWindow;
-  /** 某账号每日上限。缺 / 非法 → 不限（0/0）。 */
-  dailyCapsFor(accountId: string): DailyCaps;
-  /** 某账号看门狗恢复轻推阈值（毫秒）。缺 / 非法 → DEFAULT_IDLE_NUDGE_MS（且保证 >= IDLE_NUDGE_MIN_MS）。 */
-  idleNudgeMsFor(accountId: string): number;
-  /** 某账号看门狗放弃结束阈值（毫秒）。缺 / 非法 → DEFAULT_IDLE_END_MS（且保证 > idleNudge）。 */
-  idleEndMsFor(accountId: string): number;
+  /** 全局休息比例（小数，如 0.10）。缺 / 非法 → DEFAULT_REST_RATIO_PCT/100。 */
+  restRatio(): number;
+  /** 全局活跃时段窗口。缺 / 非法 → 全天不限。 */
+  activeWindow(): ActiveWindow;
+  /** 全局每日上限（阈值；计数仍按账号按日）。缺 / 非法 → 不限（0/0）。 */
+  dailyCaps(): DailyCaps;
+  /** 全局看门狗恢复轻推阈值（毫秒）。缺 / 非法 → DEFAULT_IDLE_NUDGE_MS（且保证 >= IDLE_NUDGE_MIN_MS）。 */
+  idleNudgeMs(): number;
+  /** 全局看门狗放弃结束阈值（毫秒）。缺 / 非法 → DEFAULT_IDLE_END_MS（且保证 > idleNudge）。 */
+  idleEndMs(): number;
 }
 
 /**

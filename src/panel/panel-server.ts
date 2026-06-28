@@ -639,15 +639,15 @@ function createRequestHandler(
       return;
     }
 
-    // ── 单场会话上限配置（change session-limits-to-quota-layer）────────────────────
-    // append 链（在 D/quotas 之后、F/persona 之前）。按账号写非乐观回真态；非法数字整块拒
-    // （invalid_value→400），绝不部分落库；只写 session_config，不碰风控状态单写路径。
+    // ── 单场会话上限配置（全局单例，change restore-auto-resume-and-global-safety-config）──────
+    // append 链（在 D/quotas 之后、F/persona 之前）。全局写非乐观回真态；非法数字整块拒
+    // （invalid_value→400），绝不部分落库；只写 session_config_global，不碰风控状态单写路径。
     if (method === 'GET' && url === '/api/session-limits') {
       if (!deps.sessionLimits) {
         sendJson(res, 503, { error: 'session_limits_unavailable' });
         return;
       }
-      sendJson(res, 200, deps.sessionLimits.getCatalog());
+      sendJson(res, 200, deps.sessionLimits.getView());
       return;
     }
     if (method === 'PUT' && url === '/api/session-limits') {
@@ -662,14 +662,10 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
-      const { accountId, maxDurationMin, likes, collects, follows, searches, comments, comment_likes } =
+      const { maxDurationMin, likes, collects, follows, searches, comments, comment_likes } =
         (body ?? {}) as Record<string, unknown>;
-      if (typeof accountId !== 'string' || accountId.length === 0) {
-        sendJson(res, 400, { error: 'bad_request', reason: 'account_id' });
-        return;
-      }
-      // 各数字字段须为数字或缺省（缺省=该项不改）；类型不对直接 400（语义校验在 facade）。
-      const patch: SessionLimitPatchInput = { accountId };
+      // 各数字字段须为数字或缺省（缺省=该项不改）；类型不对直接 400（语义校验在 facade）。全局配置、无账号维度。
+      const patch: SessionLimitPatchInput = {};
       const numFields = ['maxDurationMin', 'likes', 'collects', 'follows', 'searches', 'comments', 'comment_likes'] as const;
       const rawNums: Record<string, unknown> = {
         maxDurationMin,
@@ -699,15 +695,15 @@ function createRequestHandler(
       return;
     }
 
-    // ── 自动续场护栏 + 看门狗阈值配置（change session-auto-resume-with-excursions）──────────
-    // append 链。按账号写非乐观回真态；非法数字整块拒（invalid_value→400），绝不部分落库；
-    // 只写 resume_config，不碰风控状态单写路径。
+    // ── 自动续场护栏 + 看门狗阈值配置（全局单例，change restore-auto-resume-and-global-safety-config）──────
+    // append 链。全局写非乐观回真态；非法数字整块拒（invalid_value→400），绝不部分落库；
+    // 只写 resume_config_global，不碰风控状态单写路径。
     if (method === 'GET' && url === '/api/resume-config') {
       if (!deps.resumeConfig) {
         sendJson(res, 503, { error: 'resume_config_unavailable' });
         return;
       }
-      sendJson(res, 200, deps.resumeConfig.getCatalog());
+      sendJson(res, 200, deps.resumeConfig.getView());
       return;
     }
     if (method === 'PUT' && url === '/api/resume-config') {
@@ -723,12 +719,8 @@ function createRequestHandler(
         return;
       }
       const raw = (body ?? {}) as Record<string, unknown>;
-      const accountId = raw.accountId;
-      if (typeof accountId !== 'string' || accountId.length === 0) {
-        sendJson(res, 400, { error: 'bad_request', reason: 'account_id' });
-        return;
-      }
-      const patch: ResumeConfigPatchInput = { accountId };
+      // 全局配置、无账号维度；各数字字段须为数字或缺省（缺省=该项不改）。
+      const patch: ResumeConfigPatchInput = {};
       const numFields = [
         'restRatioPct',
         'activeWindowStartMin',

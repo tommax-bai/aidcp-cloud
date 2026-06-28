@@ -56,13 +56,13 @@ export function defaultSessionBudget(): SessionInteractionBudget {
 }
 
 /**
- * 单场上限提供者（安全限额层接口）：按账号给出单场时长（毫秒）与单场互动预算。
+ * 单场上限提供者（安全限额层接口）：全局单例给出单场时长（毫秒）与单场互动预算（不再按账号）。
  * 由 SessionConfigStore（config 层）实现（同步读内存镜像、缺值逐项回落写死默认、永不抛），
  * 注入浏览闭环调度器与会话监测体供运行时每次现读（PUT 后无需重启）。消费方只持接口、不依赖 config 实现。
  */
 export interface SessionLimitProvider {
-  /** 某账号的单场时长上限（毫秒）。缺行 / 非法 → 回落 DEFAULT_SESSION_DURATION_MS。 */
-  sessionDurationMsFor(accountId: string): number;
-  /** 某账号的单场互动预算（新拷贝，可被调用方扣减）。缺行 / 字段非法 → 该项回落写死默认。 */
-  sessionBudgetFor(accountId: string): SessionInteractionBudget;
+  /** 全局单场时长上限（毫秒）。缺配置 / 非法 → 回落 DEFAULT_SESSION_DURATION_MS。 */
+  sessionDurationMs(): number;
+  /** 全局单场互动预算（新拷贝，可被调用方扣减）。缺配置 / 字段非法 → 该项回落写死默认。 */
+  sessionBudget(): SessionInteractionBudget;
 }
