@@ -48,6 +48,7 @@ export class ValuableCommentArchivist extends BaseRole {
     author?: string;
     text: string;
     reason: string;
+    likeCount?: number;
   }): void {
     const note = this.getNoteData(payload.noteId);
     const title = note?.title;
@@ -59,6 +60,7 @@ export class ValuableCommentArchivist extends BaseRole {
       sourceNoteTitle: title,
       topics: topicKeysFromTitle(title),
       reason: payload.reason,
+      likeCount: payload.likeCount,
     };
     // fire-and-forget：归档失败不影响浏览主路径（如实 log，不抛）。
     this.archive(input).catch((err) => this.log(`归档失败（不影响主流程）：${(err as Error).message}`));

@@ -1000,6 +1000,7 @@ async function main(): Promise<void> {
                     topics: input.topics,
                     sourceNoteTitle: input.sourceNoteTitle,
                     reason: input.reason,
+                    likeCount: input.likeCount,
                   })
                   .catch((err) => console.warn('[aidcp-cloud] curated archiveComment error:', (err as Error).message));
               }

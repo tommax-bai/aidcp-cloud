@@ -244,14 +244,14 @@ export class CuratedContentStore {
    */
   async archiveComment(
     accountId: string,
-    input: { sourceId: string; text: string; author?: string; topics: string[]; sourceNoteTitle?: string; reason?: string },
+    input: { sourceId: string; text: string; author?: string; topics: string[]; sourceNoteTitle?: string; reason?: string; likeCount?: number | null },
   ): Promise<void> {
     const dedupKey = dedupKeyOf(accountId, 'comment', input.sourceId);
     await this.pool.query(
       `INSERT INTO curated_content
          (account_id, content_type, source_id, dedup_key, title, body, author, topics,
           like_count, bot_liked, admit_reason, updated_at)
-       VALUES ($1, 'comment', $2, $3, $4, $5, $6, $7, NULL, true, $8, now())
+       VALUES ($1, 'comment', $2, $3, $4, $5, $6, $7, $8, true, $9, now())
        ON CONFLICT (dedup_key) DO NOTHING`,
       [
         accountId,
@@ -261,6 +261,7 @@ export class CuratedContentStore {
         input.text,
         input.author ?? null,
         input.topics,
+        input.likeCount ?? null,
         input.reason ? `confirmed_like:${input.reason}` : 'confirmed_like',
       ],
     );
@@ -283,6 +284,7 @@ export class CuratedContentStore {
        WHERE account_id = $1 AND content_type = $2
        ORDER BY (CASE WHEN bot_collected THEN 2 ELSE 0 END + CASE WHEN bot_liked THEN 1 ELSE 0 END) DESC,
                 collect_count DESC NULLS LAST,
+                like_count DESC NULLS LAST,
                 updated_at DESC
        LIMIT $3`,
       [accountId, contentType, limit],

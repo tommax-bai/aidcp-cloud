@@ -42,6 +42,8 @@ interface LikePick {
   author?: string;
   text: string;
   reason: string;
+  /** 该评论点赞数（change curated-inspiration-corpus Phase 2b），透传到 confirmed → 精选语料。 */
+  likeCount?: number;
 }
 
 export class CommentLikeAppraiser extends BaseRole {
@@ -108,6 +110,7 @@ export class CommentLikeAppraiser extends BaseRole {
           author: pick.author,
           text: pick.text,
           reason: pick.reason,
+          likeCount: pick.likeCount,
           ts: Date.now(),
         });
       }
@@ -150,7 +153,7 @@ export class CommentLikeAppraiser extends BaseRole {
     const pick = this.parsePick(raw, usable);
     if (!pick) return this.skip(noteId, 'abstain_or_parse_failed'); // 解析失败 / 选「都不点」= 弃权，绝不默认挑第一条
 
-    this.likePending = { noteId, commentAnchorId: pick.anchorId, author: pick.author, text: pick.text, reason: pick.reason };
+    this.likePending = { noteId, commentAnchorId: pick.anchorId, author: pick.author, text: pick.text, reason: pick.reason, likeCount: pick.likeCount };
     this.emit('comment_like.intended', {
       noteId,
       commentAnchorId: pick.anchorId,
@@ -209,7 +212,7 @@ ${list}
   }
 
   /** 解析 LLM 输出；返回选中的候选，或 null（弃权：解析失败 / pick=0 / 越界）。绝不回退默认挑第一条。 */
-  private parsePick(raw: string, usable: CommentCandidate[]): { anchorId: string; author?: string; text: string; reason: string } | null {
+  private parsePick(raw: string, usable: CommentCandidate[]): { anchorId: string; author?: string; text: string; reason: string; likeCount?: number } | null {
     const start = raw.indexOf('{');
     const end = raw.lastIndexOf('}');
     if (start < 0 || end <= start) return null;
@@ -225,6 +228,6 @@ ${list}
     if (!Number.isInteger(pick) || pick < 1 || pick > usable.length) return null; // 0 / NaN / 越界 → 弃权
     const chosen = usable[pick - 1];
     const reason = typeof o.reason === 'string' ? o.reason : 'comment_like_picked';
-    return { anchorId: chosen.anchorId, author: chosen.author, text: chosen.text, reason };
+    return { anchorId: chosen.anchorId, author: chosen.author, text: chosen.text, reason, likeCount: chosen.likeCount };
   }
 }

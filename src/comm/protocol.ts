@@ -615,6 +615,8 @@ export interface CommentCandidate {
   text: string;
   /** 是否已是「已赞」状态（svg use === '#liked'）；供云端预过滤，绝不回点已赞 */
   alreadyLiked?: boolean;
+  /** 该评论的点赞数（change curated-inspiration-corpus Phase 2b；解析「1.2万」等惯例，抓不到为 undefined，不编造） */
+  likeCount?: number;
 }
 
 export interface ActionCompletedPayload {

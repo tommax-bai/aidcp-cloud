@@ -51,6 +51,8 @@ export interface ValuableCommentInput {
   sourceNoteTitle?: string;
   topics: string[];
   reason?: string;
+  /** 该评论的点赞数（change curated-inspiration-corpus Phase 2b）；valuable_comments 表不存此列、仅透传给精选语料。 */
+  likeCount?: number;
 }
 
 export interface ValuableCommentRef {
