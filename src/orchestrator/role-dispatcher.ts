@@ -26,6 +26,8 @@ import { AuthorEvaluator } from '../agents/author-evaluator.js';
 import { CommentAppraiser } from '../agents/comment-appraiser.js';
 import { CommentLikeAppraiser } from '../agents/comment-like-appraiser.js';
 import { ValuableCommentArchivist } from '../agents/valuable-comment-archivist.js';
+import { CuratedNoteEvaluator, type CuratedNoteSink } from '../agents/curated-note-evaluator.js';
+import { CuratedCommentEvaluator, type CuratedCommentSink } from '../agents/curated-comment-evaluator.js';
 import type { ValuableCommentInput, ValuableCommentRef } from '../cache/valuable-comment-store.js';
 import { CommentComposer } from '../agents/comment-composer.js';
 import { CommentDeAiFlavor } from '../agents/comment-de-ai-flavor.js';
@@ -142,6 +144,12 @@ export interface RoleDispatcherOptions {
   /** 按主题键召回语料库参考评论（接 ValuableCommentStore.retrieveByTopics）；缺省 → 撰写不注入参考。 */
   getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
   /**
+   * 精选语料库（change curated-admission-eval-roles，Phase 3）：注入则注册两段式准入的模型评估角色
+   * —— 正文角色（curated_note_evaluator，恒注册）+ 评论角色（curated_comment_evaluator，仅评论赞链路开启时）。
+   * 缺省（如 PG 不可用）→ 两角色都不注册，准入退回全局处理器的自有收藏直纳路径（仿 concept_extractor 仅概念池可用时注册）。
+   */
+  curatedStore?: CuratedNoteSink & CuratedCommentSink;
+  /**
    * 诚实人设启动闸（multi-account-node-support D3）：以「人设存储中是否存在该账号的人设行」为独立判据
    * （getForAccount!==null，**不走会回落默认的解析器**）。缺省 → 不设闸（向后兼容单账号）。default 账号硬豁免（见 canStartSession）。
    */
@@ -237,6 +245,7 @@ export class RoleDispatcher {
   private readonly getCommentDailyRemaining?: () => number;
   private readonly getCommentLikeDailyRemaining?: () => number;
   private readonly archiveValuableComment?: (input: ValuableCommentInput) => Promise<void>;
+  private readonly curatedStore?: CuratedNoteSink & CuratedCommentSink;
   private readonly getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
   /** 已下发待回执的评论上下文：action.completed{comment} 据此扣额 + emit comment.done（→ 是否进主页评估）。 */
   private pendingComment: { noteId: string; sourcePageType: 'feed' | 'search'; actions: ('like' | 'collect')[]; text: string } | null = null;
@@ -315,6 +324,7 @@ export class RoleDispatcher {
     this.getCommentLikeDailyRemaining = options.getCommentLikeDailyRemaining;
     this.archiveValuableComment = options.archiveValuableComment;
     this.getCorpusReferences = options.getCorpusReferences;
+    this.curatedStore = options.curatedStore;
     this.isHardPaused = options.isHardPaused ?? (() => false);
     this.isPersonaBound = options.isPersonaBound;
     this.onSessionRejected = options.onSessionRejected;
@@ -578,6 +588,34 @@ export class RoleDispatcher {
     if (this.conceptStore) {
       const sink = this.conceptStore;
       this.roles.push(new ConceptExtractorRole({ ...commonOptions, conceptStore: sink }));
+    }
+
+    // 精选准入「两段式」模型评估角色（change curated-admission-eval-roles，Phase 3）：
+    // 仅在精选库可用时注册（仿 concept_extractor）。第一段共鸣预筛在角色内零 LLM 短路、第二段读全文 LLM 评估。
+    // 评估总开关 AIDCP_CURATED_LLM_EVAL 缺省开；置 'false' 回退「仅共鸣」（等价 Phase 2b 行为）。
+    if (this.curatedStore) {
+      const store = this.curatedStore;
+      const llmEvalEnabled = process.env.AIDCP_CURATED_LLM_EVAL !== 'false';
+      this.roles.push(
+        new CuratedNoteEvaluator({
+          ...commonOptions,
+          curatedStore: store,
+          getAccountId: () => this.currentAccountId,
+          llmEvalEnabled,
+        }),
+      );
+      // 评论评估角色仅在评论赞链路开启时注册——其源事件 comment_like.confirmed 仅该链路产出。
+      if (commentLikeEnabled) {
+        this.roles.push(
+          new CuratedCommentEvaluator({
+            ...commonOptions,
+            curatedStore: store,
+            getNoteData,
+            getAccountId: () => this.currentAccountId,
+            llmEvalEnabled,
+          }),
+        );
+      }
     }
 
     // 捕获 SessionMonitor 引用：供 excursion（巡视）起止 → 暂停/恢复其时钟（唯一实例）。

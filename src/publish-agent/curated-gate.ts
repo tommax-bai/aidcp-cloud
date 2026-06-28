@@ -17,6 +17,13 @@ export interface CuratedGateConfig {
   /** 比率判定的点赞数下限：低于此值则比率不可信、不予采纳（缺省 80）。 */
   ratioLikeFloor: number;
   /**
+   * 评论共鸣预筛的赞数地板（change curated-admission-eval-roles，Phase 3；缺省 10）。
+   * 评论第一段预筛 = 评论赞数达此地板 ∪ 已被机器人确认点赞（见 passesCommentResonance）。
+   * 注：当前唯一调用方（评论评估角色）消费「确认点赞」事件、confirmedLike 恒真 → 该地板对它是冗余放行；
+   * 留作可配地板，供将来「未点赞但高赞评论」之类的来源接入时复用。
+   */
+  commentLikeFloor: number;
+  /**
    * 相关性闸：兴趣命中数需 ≥ 此值（**0 = 关闭硬相关性闸**）。缺省 0。
    * 真机验(2026-06-28)发现：账号兴趣是「描述性长短语」(如「模型横向对比（能力/价格/延迟/上下文/并发）」)、
    * 人设亦明示「兴趣领域不用于硬匹配」，子串硬匹配永不命中 → 把所有笔记误判 off_topic、精选库恒空。
@@ -40,6 +47,7 @@ export const DEFAULT_CURATED_GATE_CONFIG: CuratedGateConfig = {
   collectFloor: 50,
   ratioMin: 0.2,
   ratioLikeFloor: 80,
+  commentLikeFloor: 10,
   // 0 = 关闭硬相关性闸（见 minTopicOverlap 字段说明：真机验发现硬子串匹配长短语兴趣永不命中，
   // 相关性已由浏览侧 LLM 按人设把关）。质量交给下面的 resonance（收藏地板 / 比率 / 自有收藏）。
   minTopicOverlap: 0,
@@ -78,20 +86,78 @@ export interface AdmissionResult {
   reason: string;
 }
 
+/** 共鸣预筛（两段式准入第一段）的输入：只看客观共鸣信号，不看相关性。 */
+export interface ResonanceInput {
+  /** 点赞数（缺失为 null，诚实置空）。 */
+  likeCount: number | null;
+  /** 收藏数（缺失为 null，诚实置空）。 */
+  collectCount: number | null;
+}
+
+/** 预筛结果：是否过 + 原因码。 */
+export interface ResonanceResult {
+  ok: boolean;
+  reason: string;
+}
+
 /**
- * 判定单条笔记是否准入精选语料。
+ * 笔记第一段「共鸣预筛」（确定性、零 LLM；change curated-admission-eval-roles，Phase 3）。
+ * **只判收藏共鸣、不判相关性**——相关性移交第二段的模型评估（读全文）。
+ *
+ * 过（满足其一即过）：
+ *  - 收藏数达地板（collectFloor）→ collect_floor；
+ *  - 点赞 + 收藏齐备、点赞 ≥ ratioLikeFloor 且 收藏/点赞 ≥ ratioMin → collect_ratio（小众优质）；
+ *  - 否则 → below_resonance（点赞这类弱信号不单独构成共鸣）。
+ *
+ * 红线：诚实置空——缺失计数按未达标处理（不编造分数）；不过者绝不进第二段（成本红线）。
+ */
+export function passesResonance(input: ResonanceInput, config: CuratedGateConfig): ResonanceResult {
+  if ((input.collectCount ?? 0) >= config.collectFloor) {
+    return { ok: true, reason: 'collect_floor' };
+  }
+  if (
+    input.likeCount != null &&
+    input.collectCount != null &&
+    input.likeCount >= config.ratioLikeFloor &&
+    input.collectCount / input.likeCount >= config.ratioMin
+  ) {
+    return { ok: true, reason: 'collect_ratio' };
+  }
+  return { ok: false, reason: 'below_resonance' };
+}
+
+/** 评论第一段共鸣预筛的输入。 */
+export interface CommentResonanceInput {
+  /** 该评论的赞数（缺失为 null，诚实置空）。 */
+  likeCount: number | null;
+  /** 该评论是否已被机器人确认点赞（确认点赞本身是机器人选过 → 放行进第二段评估）。 */
+  confirmedLike: boolean;
+}
+
+/**
+ * 评论第一段共鸣预筛：评论赞数达地板 **∪** 已被机器人确认点赞。两者皆缺 → below_comment_resonance。
+ * 红线：诚实置空——赞数缺失按未达标处理（不编造）。
+ */
+export function passesCommentResonance(input: CommentResonanceInput, config: CuratedGateConfig): ResonanceResult {
+  if (input.confirmedLike) return { ok: true, reason: 'confirmed_like' };
+  if (input.likeCount != null && input.likeCount >= config.commentLikeFloor) {
+    return { ok: true, reason: 'comment_like_floor' };
+  }
+  return { ok: false, reason: 'below_comment_resonance' };
+}
+
+/**
+ * 判定单条笔记是否准入精选语料（**整体闸，向后兼容**；Phase 3 后准入主路径走「两段式」，
+ * 见 passesResonance + 模型评估角色）。本函数保留：① 给可配的硬相关性子串闸一个入口（缺省关）；
+ * ② 既有调用方 / 单测向后兼容。
  *
  * 顺序：先过相关性，再过共鸣。
- * 1) 相关性：兴趣关键词以子串形式（大小写不敏感）命中 noteText 的个数 ≥ minTopicOverlap，
- *    或 botCollected（自有收藏豁免相关性）。不相关 → off_topic。
- * 2) 共鸣（满足其一即纳入）：
- *    - botCollected → bot_collect；
- *    - 收藏数达地板 → collect_floor；
- *    - 点赞与收藏齐备、点赞 ≥ ratioLikeFloor 且 收藏/点赞 ≥ ratioMin → collect_ratio；
- *    - 否则 → below_resonance（点赞这类弱信号不单独构成准入）。
+ * 1) 相关性：兴趣关键词以子串形式（大小写不敏感）命中 noteText 的个数 ≥ minTopicOverlap（**缺省 0=关**），
+ *    或 botCollected（自有收藏豁免相关性）。不相关 → off_topic。Phase 3 起相关性由模型评估承担、本子串闸退役为可配。
+ * 2) 共鸣：botCollected → bot_collect；其余复用 passesResonance（collect_floor / collect_ratio / below_resonance）。
  */
 export function evaluateAdmission(input: AdmissionInput, config: CuratedGateConfig): AdmissionResult {
-  // ① 相关性
+  // ① 相关性（硬子串闸；缺省 minTopicOverlap=0 即关闭，相关性由模型评估承担——本闸退役为可配）
   const text = (input.noteText ?? '').toLowerCase();
   let relevanceHits = 0;
   for (const interest of input.accountInterests ?? []) {
@@ -102,21 +168,8 @@ export function evaluateAdmission(input: AdmissionInput, config: CuratedGateConf
   const relevant = input.botCollected || relevanceHits >= config.minTopicOverlap;
   if (!relevant) return { admit: false, reason: 'off_topic' };
 
-  // ② 共鸣
+  // ② 共鸣（自有收藏强信号直接过；其余复用 passesResonance）
   if (input.botCollected) return { admit: true, reason: 'bot_collect' };
-
-  if ((input.collectCount ?? 0) >= config.collectFloor) {
-    return { admit: true, reason: 'collect_floor' };
-  }
-
-  if (
-    input.likeCount != null &&
-    input.collectCount != null &&
-    input.likeCount >= config.ratioLikeFloor &&
-    input.collectCount / input.likeCount >= config.ratioMin
-  ) {
-    return { admit: true, reason: 'collect_ratio' };
-  }
-
-  return { admit: false, reason: 'below_resonance' };
+  const res = passesResonance(input, config);
+  return { admit: res.ok, reason: res.reason };
 }

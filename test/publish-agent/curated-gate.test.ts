@@ -4,6 +4,8 @@ import {
   DEFAULT_CURATED_GATE_CONFIG,
   resolveCuratedGateConfig,
   evaluateAdmission,
+  passesResonance,
+  passesCommentResonance,
   type AdmissionInput,
   type CuratedGateConfig,
 } from '../../src/publish-agent/curated-gate.js';
@@ -28,6 +30,7 @@ describe('AC-CURATED-GATE 准入门槛 + 配置', () => {
       collectFloor: 50,
       ratioMin: 0.2,
       ratioLikeFloor: 80,
+      commentLikeFloor: 10, // Phase 3：评论共鸣预筛赞数地板（confirmedLike 恒过时为冗余放行）
       minTopicOverlap: 0, // 0=关闭硬相关性闸（真机验后改：长短语兴趣硬匹配永不命中，相关性由浏览侧 LLM 上游把关）
       retentionMax: 1000,
       selectTopK: 8,
@@ -116,5 +119,47 @@ describe('AC-CURATED-GATE 准入门槛 + 配置', () => {
     // 相关但所有共鸣信号缺失 → below_resonance（诚实置空：null collect 不算达地板）
     const r = evaluateAdmission(makeInput({ collectCount: null, likeCount: null }), CONFIG);
     assert.deepEqual(r, { admit: false, reason: 'below_resonance' });
+  });
+});
+
+describe('AC-CURATED-RESONANCE 笔记共鸣预筛（两段式第一段，只判共鸣不判相关性）', () => {
+  test('collect 达地板 → 过(collect_floor)', () => {
+    assert.deepEqual(passesResonance({ collectCount: 50, likeCount: 10 }, CONFIG), { ok: true, reason: 'collect_floor' });
+  });
+
+  test('比率 + 赞数双过 → 过(collect_ratio)', () => {
+    // collect=30 < 50 不达 floor；like=120 ≥ 80，30/120=0.25 ≥ 0.20 → 比率分支
+    assert.deepEqual(passesResonance({ collectCount: 30, likeCount: 120 }, CONFIG), { ok: true, reason: 'collect_ratio' });
+  });
+
+  test('比率达标但 like < ratioLikeFloor → below_resonance（小样本噪声防护）', () => {
+    assert.deepEqual(passesResonance({ collectCount: 20, likeCount: 50 }, CONFIG), { ok: false, reason: 'below_resonance' });
+  });
+
+  test('计数全缺 → below_resonance（诚实置空，不编造）', () => {
+    assert.deepEqual(passesResonance({ collectCount: null, likeCount: null }, CONFIG), { ok: false, reason: 'below_resonance' });
+  });
+
+  test('相关性完全不参与预筛（跑题文本无入参，结果只由共鸣定）', () => {
+    // passesResonance 不接受 noteText/interests —— 相关性已移交模型评估，预筛只看共鸣信号。
+    assert.deepEqual(passesResonance({ collectCount: 500, likeCount: 1 }, CONFIG), { ok: true, reason: 'collect_floor' });
+  });
+});
+
+describe('AC-CURATED-COMMENT-RESONANCE 评论共鸣预筛（赞数达标 ∪ 已确认点赞）', () => {
+  test('已确认点赞 → 过(confirmed_like)，即便无赞数', () => {
+    assert.deepEqual(passesCommentResonance({ likeCount: null, confirmedLike: true }, CONFIG), { ok: true, reason: 'confirmed_like' });
+  });
+
+  test('未确认点赞但赞数达地板 → 过(comment_like_floor)', () => {
+    assert.deepEqual(passesCommentResonance({ likeCount: 10, confirmedLike: false }, CONFIG), { ok: true, reason: 'comment_like_floor' });
+  });
+
+  test('双缺（未确认 + 赞数不达标）→ 被拦(below_comment_resonance)', () => {
+    assert.deepEqual(passesCommentResonance({ likeCount: 9, confirmedLike: false }, CONFIG), { ok: false, reason: 'below_comment_resonance' });
+  });
+
+  test('双缺（未确认 + 赞数缺失）→ 被拦（诚实置空）', () => {
+    assert.deepEqual(passesCommentResonance({ likeCount: null, confirmedLike: false }, CONFIG), { ok: false, reason: 'below_comment_resonance' });
   });
 });

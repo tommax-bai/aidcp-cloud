@@ -463,6 +463,8 @@ export type RoleName =
   | 'comment_approval_gate'
   | 'comment_like_appraiser'
   | 'valuable_comment_archivist'
+  | 'curated_note_evaluator'
+  | 'curated_comment_evaluator'
   | 'profile_opener'
   | 'nickname_enricher'
   | 'follow_agent'

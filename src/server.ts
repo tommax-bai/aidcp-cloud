@@ -29,7 +29,7 @@ import {
 import { TokenUsageStore } from './metrics/token-usage-store.js';
 import { SimplePlanner } from './planner/index.js';
 import { PgAnchorCache, BotChatStore, ConceptStore, LikedNoteStore, ValuableCommentStore, NotificationContactStore, InteractionFeedStore, CuratedContentStore, topicKeysFromTitle } from './cache/index.js';
-import { evaluateAdmission, resolveCuratedGateConfig } from './publish-agent/curated-gate.js';
+import { resolveCuratedGateConfig } from './publish-agent/curated-gate.js';
 import {
   EdgeCloudServer,
   DefaultMessageHandler,
@@ -655,7 +655,10 @@ async function main(): Promise<void> {
     if (interactionFeedStore && d.authorId && d.author) {
       interactionFeedStore.upsertMeta(acc, d.authorId, { title: d.author }).catch(() => {});
     }
-    // 精选灵感捕获（change curated-inspiration-corpus）：详情已带全文+赞藏数 → 记最近观测 + 过门槛则落精选语料。
+    // 精选灵感（change curated-inspiration-corpus + curated-admission-eval-roles）：
+    // 此处**只记最近观测笔记内容**（供自有收藏 markBotAction('collect') 补建正文用，见 interaction.occurred 处理器）。
+    // 「笔记是否进精选」的准入判定已移交角色 curated_note_evaluator（Phase 3 两段式：共鸣预筛 → 读全文 LLM 评估），
+    // 以拿到账号绑定 LLM 与人设；此处不再直接 upsertObservation。
     if (curatedContentStore && d.noteId) {
       const topics = topicKeysFromTitle(d.title);
       lastObservedNoteByAccount.set(acc, {
@@ -668,39 +671,6 @@ async function main(): Promise<void> {
         likeCount: d.likeCount,
         collectCount: d.collectCount,
       });
-      const soul = getSoul(acc);
-      const interests = [
-        ...(soul.interests?.primary ?? []),
-        ...(soul.interests?.secondary ?? []),
-        ...(soul.interests?.seed_keywords ?? []),
-      ];
-      const gate = evaluateAdmission(
-        {
-          noteText: `${d.title ?? ''} ${d.content ?? ''}`,
-          accountInterests: interests,
-          likeCount: d.likeCount,
-          collectCount: d.collectCount,
-          botCollected: false,
-        },
-        resolveCuratedGateConfig(acc),
-      );
-      if (gate.admit) {
-        curatedContentStore
-          .upsertObservation({
-            accountId: acc,
-            contentType: 'note',
-            sourceId: d.noteId,
-            title: d.title,
-            body: d.content,
-            author: d.author,
-            sourceUrl: d.url,
-            topics,
-            likeCount: d.likeCount,
-            collectCount: d.collectCount,
-            admitReason: gate.reason,
-          })
-          .catch((err) => console.warn('[aidcp-cloud] curated upsertObservation error:', err));
-      }
     }
   });
   eventBus.on('profile.detail.arrived', (evt) => {
@@ -988,28 +958,19 @@ async function main(): Promise<void> {
       ...(valuableCommentStore
         ? {
             archiveValuableComment: async (input) => {
+              // 评论写作语料（喂 composer）：行为不变，仍在此同步落。
+              // 「评论是否进精选」的准入判定已移交角色 curated_comment_evaluator（change curated-admission-eval-roles，
+              // Phase 3：共鸣预筛 → LLM 评估），故此处不再直接 archiveComment（避免绕过模型评估直纳）。
               await valuableCommentStore!.archive(input);
-              // change curated-inspiration-corpus Phase 2：同一条优质评论并入精选语料（content_type='comment'、
-              // 按本连接真实账号），供发帖创作当「读者角度线索」。best-effort，失败不影响评论归档主路径。
-              if (curatedContentStore) {
-                curatedContentStore
-                  .archiveComment(ctx.accountId, {
-                    sourceId: input.dedupKey,
-                    text: input.text,
-                    author: input.author,
-                    topics: input.topics,
-                    sourceNoteTitle: input.sourceNoteTitle,
-                    reason: input.reason,
-                    likeCount: input.likeCount,
-                  })
-                  .catch((err) => console.warn('[aidcp-cloud] curated archiveComment error:', (err as Error).message));
-              }
             },
             getCorpusReferences: (topics) => valuableCommentStore!.retrieveByTopics(topics, 3),
           }
         : {}),
       // 概念池：跨会话搜索记忆 + 从浏览学新关键词（undefined 时退化为仅 seed_keywords）。
       conceptStore,
+      // 精选语料库（change curated-admission-eval-roles，Phase 3）：注入则注册两段式准入的模型评估角色
+      // （正文 curated_note_evaluator + 评论 curated_comment_evaluator）。缺省（PG 不可用）→ 不注册。
+      curatedStore: curatedContentStore,
       // 硬暂停闸（验证码/人工接管）：通知准入据此放弃巡视——硬暂停期连帧都不发。
       isHardPaused: (edgeId) => (edgeId ? server.isEdgePaused(edgeId) : false),
       // 通知巡视发飞书（仅"评论和@"）：复用 messenger + 默认群解析；无群则记错不吞。
