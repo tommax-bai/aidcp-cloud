@@ -17,6 +17,14 @@ import type { SessionContext } from './session-context.js';
 import type { NoteData } from './content-curator-role.js';
 import type { RoleName, ReadingDonePayload } from '../event-bus/types.js';
 
+/**
+ * 收藏硬数值阈值（engagement-restraint）：仅当笔记「收藏数 / 点赞数 ≥ 此比例」（默认 1/3，即 1:3）才收藏。
+ * 高收藏率=有反复参考 / 保存价值的硬核内容；娱乐 / 颜值类赞高藏低会被挡，与人设 collection_principle 同向。
+ * 必要非充分条件——达阈值后仍叠加 LLM 收藏判定 + 风控 / 冷却 / 预算。点赞不受此闸约束。
+ * 调参：改此常量即可（与评论的 COMMENT_MIN_LIKES 同构，单点可配）。
+ */
+export const COLLECT_MIN_SAVE_LIKE_RATIO = 1 / 3;
+
 export interface InteractionAppraiserRoleOptions extends RoleOptions {
   sessionContext: SessionContext;
   getNoteData: (noteId: string) => NoteData | null;
@@ -88,7 +96,7 @@ export class InteractionAppraiserRole extends BaseRole {
       return;
     }
 
-    const result = this.parseOutput(raw, budget);
+    const result = this.parseOutput(raw, budget, noteData);
     if (!result || result.actions.length === 0) {
       this.emit('interaction.skipped', {
         noteId: payload.noteId,
@@ -157,7 +165,7 @@ export class InteractionAppraiserRole extends BaseRole {
 
   // ─── 输出解析 ───────────────────────────────────────────────
 
-  private parseOutput(raw: string, budget: { likes: number; collects: number }): AppraiserResult | null {
+  private parseOutput(raw: string, budget: { likes: number; collects: number }, note: NoteData): AppraiserResult | null {
     const start = raw.indexOf('{');
     const end = raw.lastIndexOf('}');
     if (start < 0 || end <= start) return null;
@@ -189,7 +197,11 @@ export class InteractionAppraiserRole extends BaseRole {
       // 收藏即点赞：真人收藏几乎都先点赞，且 LLM 实测从不主动选 both（0/40）。
       // 故 collect 与 both 一视同仁——在 like 配额允许下同时点赞，收藏受 collect 配额约束。
       if (budget.likes > 0) actions.push('like');
-      if (budget.collects > 0) actions.push('collect');
+      // 收藏数值闸：仅当「收藏数 / 点赞数 ≥ COLLECT_MIN_SAVE_LIKE_RATIO」（默认 1:3）才收藏。
+      // 点赞数为 0（低流量 / 未加载）视为不达标、保守不收藏；点赞已在上面按其自身逻辑独立执行。
+      if (budget.collects > 0 && note.likeCount > 0 && note.collectCount >= note.likeCount * COLLECT_MIN_SAVE_LIKE_RATIO) {
+        actions.push('collect');
+      }
     }
     // action === 'pass' → actions 为空
 

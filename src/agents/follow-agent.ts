@@ -11,6 +11,14 @@ import type { RoleOptions } from './base-role.js';
 import type { SessionContext } from './session-context.js';
 import type { RoleName, ProfileBrowsedPayload } from '../event-bus/types.js';
 
+/**
+ * 关注硬数值阈值（engagement-restraint）：仅当作者「粉丝数 / 获赞与收藏数 ≥ 此比例」（默认 1/8，即 1:8）才考虑关注。
+ * 高「赞藏转粉率」=粉丝粘性扎实、非靠单爆款堆量的优质（中腰部）号；挡掉爆款堆赞藏却转化差的号与超头部号。
+ * 仅在赞藏数已知且 > 0 时启用此闸（缺失数据不当低质，沿用 extracted 的保守口径，避免误杀真创作者）。
+ * 必要非充分条件——达阈值后仍叠加 LLM 关注判定 + 风控 / 冷却 / 去重 / 预算。调参：改此常量即可。
+ */
+export const FOLLOW_MIN_FANS_ENGAGEMENT_RATIO = 1 / 8;
+
 export interface FollowAgentOptions extends RoleOptions {
   sessionContext: SessionContext;
   getRemainingFollows: () => number;
@@ -58,6 +66,20 @@ export class FollowAgent extends BaseRole {
     // 关键：不要把"数据缺失"当成"真 0 粉丝低质量"——这正是历史上 follow 恒拒的假信号根因。
     if (payload.extracted === false) {
       this.log('作者资料不可用（extracted=false）→ 保守 skip，不在缺失数据上判定');
+      this.emit('profile.done', {
+        authorId: payload.authorId,
+        sourcePageType: payload.sourcePageType,
+        followed: false,
+        ts: Date.now(),
+      });
+      return;
+    }
+
+    // 关注数值闸（engagement-restraint）：仅当「粉丝数 / 获赞与收藏数 ≥ FOLLOW_MIN_FANS_ENGAGEMENT_RATIO」（默认 1:8）才考虑关注。
+    // 仅在赞藏数已知且 > 0 时启用——缺失/未知不当低质（与 extracted 同口径），避免误杀；高赞藏低粉丝（爆款堆量 / 超头部）会被挡。
+    const lc = payload.likesCollects;
+    if (lc != null && lc > 0 && payload.followersCount < lc * FOLLOW_MIN_FANS_ENGAGEMENT_RATIO) {
+      this.log(`赞藏转粉率不足（粉丝 ${payload.followersCount} / 赞藏 ${lc} < 1:${Math.round(1 / FOLLOW_MIN_FANS_ENGAGEMENT_RATIO)}）→ 保守 skip`);
       this.emit('profile.done', {
         authorId: payload.authorId,
         sourcePageType: payload.sourcePageType,

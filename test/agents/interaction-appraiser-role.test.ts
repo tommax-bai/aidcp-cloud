@@ -266,6 +266,52 @@ describe('InteractionAppraiserRole', () => {
     role.unsubscribe();
   });
 
+  it('收藏数值闸：收藏率低于 1:3 的笔记，LLM 判 both 也只点赞、不收藏', async () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    // 赞高藏低（20/300 ≈ 1:15，远低于 1:3）：泛娱乐 / 颜值类典型，达不到「有保存价值」门槛。
+    const lowRatioNote: NoteData = {
+      noteId: 'note_low',
+      title: '泛娱乐笔记',
+      content: '好看但没人存...',
+      author: '某人',
+      likeCount: 300,
+      collectCount: 20,
+    };
+    const llm = {
+      complete: async () => '{"action":"both","reason":"看着不错","confidence":0.9}',
+    };
+    const role = new InteractionAppraiserRole({
+      eventBus: bus,
+      soul: mockSoul,
+      llm,
+      sessionContext: ctx,
+      getNoteData: () => lowRatioNote,
+      getRemainingBudget: defaultBudget,
+    });
+    role.subscribe();
+
+    let captured = null as InteractionCompletedPayload | null;
+    bus.on('interaction.completed', (p) => { captured = p; });
+
+    bus.emit('reading.done', {
+      noteId: 'note_low',
+      sourcePageType: 'feed',
+      imagesBrowsed: 1,
+      commentsRead: 1,
+      keyPoints: [],
+      readDurationMs: 300,
+      ts: Date.now(),
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.ok(captured, '低收藏率仍可点赞 → 应有 interaction.completed');
+    assert.deepEqual(captured!.actions, ['like'], '收藏率 < 1:3 → 只点赞，不收藏');
+
+    role.unsubscribe();
+  });
+
   it('LLM 返回 pass → emit interaction.skipped', async () => {
     const bus = new EventBus();
     const ctx = new SessionContext();

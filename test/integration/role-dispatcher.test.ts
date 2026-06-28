@@ -373,7 +373,7 @@ describe('RoleDispatcher Integration', () => {
     const note = {
       noteId: 'note_0', title: '深度学习实战指南',
       content: '非常优质的深度学习实战文章，包含完整代码和架构图...',
-      author: '大佬博主', authorId: 'author_pro', likeCount: 1500, collectCount: 400,
+      author: '大佬博主', authorId: 'author_pro', likeCount: 1500, collectCount: 600,
     };
     const dispatcher = makeDispatcher(llm, commands, note, { authorId: 'author_pro', postsCount: 50, followersCount: 10000, extracted: true });
     dispatcher.setup();
@@ -391,7 +391,7 @@ describe('RoleDispatcher Integration', () => {
 
     // 模拟 Edge 上报卡片
     dispatcher.bus.emit('page.cards.arrived', {
-      cards: [{ index: 0, title: '深度学习实战指南', likeCount: 1500, collectCount: 400, noteId: 'note_0' }],
+      cards: [{ index: 0, title: '深度学习实战指南', likeCount: 1500, collectCount: 600, noteId: 'note_0' }],
       ts: Date.now(),
     });
 

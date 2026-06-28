@@ -77,17 +77,46 @@ describe('FollowAgent', () => {
     let done = null as ProfileDonePayload | null;
     bus.on('profile.done', (p) => { done = p; });
 
-    // 复刻 live：小红书主页不提供作品数（postsCount=0），但粉丝 130 / 获赞与收藏 6707 健康。
+    // 复刻 live：小红书主页不提供作品数（postsCount=0），但粉丝 1000 / 获赞与收藏 6707（转粉率过 1:8 门槛）。
+    // 注：原 live 账号为 130 粉 / 6707 赞藏（转粉率 1:51），现由关注数值闸挡下——见下方独立用例。
     bus.emit('profile.browsed', {
       authorId: 'author_x', sourcePageType: 'feed',
-      postsCount: 0, followersCount: 130, likesCollects: 6707, extracted: true, ts: Date.now(),
+      postsCount: 0, followersCount: 1000, likesCollects: 6707, extracted: true, ts: Date.now(),
     });
     await new Promise((r) => setTimeout(r, 50));
 
     assert.ok(!captured.includes('作品数'), `prompt 不应再出现"作品数"项，实际:\n${captured}`);
     assert.match(captured, /获赞与收藏：6707/, 'prompt 应含获赞与收藏真实值');
-    assert.match(captured, /粉丝数：130/);
-    assert.ok(done && done.followed === true, 'postsCount=0 但粉丝/获赞健康 + 相关 → 应能 follow，而非以作品数未知 skip');
+    assert.match(captured, /粉丝数：1000/);
+    assert.ok(done && done.followed === true, 'postsCount=0 但粉丝/获赞健康 + 转粉率达标 + 相关 → 应能 follow，而非以作品数未知 skip');
+
+    role.unsubscribe();
+  });
+
+  it('关注数值闸：转粉率不足（130 粉 / 6707 赞藏 = 1:51 < 1:8）→ 保守 skip 且不调用 LLM', async () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    let llmCalled = false;
+    const llm = {
+      complete: async () => { llmCalled = true; return '{"verdict":"follow","reason":"test"}'; },
+    };
+    const role = new FollowAgent({ eventBus: bus, soul: mockSoul, llm, sessionContext: ctx, getRemainingFollows: () => 3 });
+    role.subscribe();
+
+    let captured = null as ProfileDonePayload | null;
+    bus.on('profile.done', (p) => { captured = p; });
+
+    // 真实 live 账号：靠爆款冲了赞藏（6707）却几乎不涨粉（130）→ 转粉率 1:51，远低于 1:8 门槛 → 挡。
+    bus.emit('profile.browsed', {
+      authorId: 'author_low_conv', sourcePageType: 'feed',
+      postsCount: 0, followersCount: 130, likesCollects: 6707, extracted: true, ts: Date.now(),
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.ok(captured);
+    assert.equal(captured!.followed, false, '转粉率不足 → 不关注');
+    assert.equal(llmCalled, false, '比例闸应在调 LLM 前拦下');
 
     role.unsubscribe();
   });
