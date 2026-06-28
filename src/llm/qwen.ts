@@ -165,7 +165,9 @@ export class QwenClient implements ChatLlmClient {
     this.providerRuntime = options.providerRuntime;
     this.baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
     this.temperature = options.temperature ?? 0;
-    this.timeoutMs = options.timeoutMs ?? 30_000;
+    // 默认 60s：判定类高频角色（dashscope/qwen3.7-plus 的内容评估/概念抽取）高峰期正常也要 25–30s，
+    // 30s 上限会把约 6% 的慢调用误判为超时中止（ECS 实测 2026-06-28）；探活/发布等显式传 timeoutMs 的路径不受影响。
+    this.timeoutMs = options.timeoutMs ?? 60_000;
     this.onCall = options.onCall;
     const f = options.fetchImpl ?? globalThis.fetch;
     if (!f) throw new Error('global fetch 不可用（需 Node>=18）；请注入 fetchImpl');
