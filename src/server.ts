@@ -492,10 +492,17 @@ async function main(): Promise<void> {
   // 独占）；解除即续场。注意边端 session.end 只停浏览循环、不置终态，后续浏览类命令（search/open/comment）
   // 会唤醒重启循环并被处理（见 browse-session.ts closing 注释）。LLM 记账经 scheduler 的 llmFor 显式带 accountId，
   // 故此处不动 publishAccountRef。
+  // 手动 /comment 的评论**不计入风控配额**（人工授权，与 /publish 越过风控同理）：评论任务接管期间该账号在此集合，
+  // `interaction.occurred` 的 `RiskController.record` 据此对 `comment` 动作跳过——不消耗自治评论预算、不动风控态。
+  // 仍保留去重（risk_interactions，避免 /comment 重复评同一篇）与展示账本。接管已结束自治会话 → 该窗口唯一的
+  // comment 即手动评论，故据接管态判定精准、绝不误伤自治评论计数。
+  const manualCommentAccounts = new Set<string>();
   const onCommentTakeoverStart = (accountId: string): void => {
+    manualCommentAccounts.add(accountId);
     runtimes?.endSessionForAccount(accountId, 'comment_takeover');
   };
   const onCommentTakeoverEnd = (accountId: string): void => {
+    manualCommentAccounts.delete(accountId);
     runtimes?.resumeSessionForAccount(accountId);
   };
 
@@ -598,13 +605,19 @@ async function main(): Promise<void> {
       return;
     }
     const accountId = evt.accountId;
+    // 手动 /comment 的评论不计入风控配额（人工授权，change comment-search-command）：评论任务接管期间的 `comment`
+    // 跳过 RiskController.record——不消耗自治评论预算、不动风控态。自治评论照常计数；去重(risk_interactions)与
+    // 展示账本(interaction_feed)不受影响（各自在下方/其他消费者处理）。
+    const skipRiskRecord = evt.action === 'comment' && manualCommentAccounts.has(accountId);
     // 按 accountId 路由到对应账号 controller（record 内部再过 canDo）。
-    riskRegistry
-      .getController(accountId)
-      .then((c) => c.record(evt.action))
-      .catch((err) => {
-        console.warn('[aidcp-cloud] RiskController record error:', err);
-      });
+    if (!skipRiskRecord) {
+      riskRegistry
+        .getController(accountId)
+        .then((c) => c.record(evt.action))
+        .catch((err) => {
+          console.warn('[aidcp-cloud] RiskController record error:', err);
+        });
+    }
     // A 阶段4 来源血缘：真实点赞落 liked_notes（noteId 才落；详情缺则空字段如实，不编造）。
     if (evt.action === 'like' && evt.noteId && likedNoteStore) {
       likedNoteStore.recordLike(evt.noteId).catch((err) => {
