@@ -116,11 +116,37 @@ export class CommentComposer extends BaseRole {
     return [`你是「${identity.name}」，${identity.role}。语气：${identity.tone}。兴趣：${interestsStr}。`];
   }
 
-  private buildPrompt(note: NoteData, references: string[] = []): string {
+  /**
+   * 命令式撰写一条评论草稿（change comment-search-command，按需评论任务调用）。
+   * 与事件路径（onAppraised）共用同一 buildPrompt + sanitize + 长度闸；额外可注入**现场评论**作语境
+   * （现状事件路径只看标题+正文+语料参考，不读评论区）。空 / 超长 / LLM 失败 → 诚实返回 null（不伪造）。
+   */
+  async composeDraft(
+    note: NoteData,
+    opts: { references?: string[]; onPageComments?: string[] } = {},
+  ): Promise<string | null> {
+    const references = (opts.references ?? []).filter(Boolean).slice(0, 3);
+    const onPageComments = (opts.onPageComments ?? []).filter(Boolean).slice(0, 6);
+    let raw: string;
+    try {
+      raw = await this.decide(this.buildPrompt(note, references, onPageComments));
+    } catch {
+      return null;
+    }
+    const draft = this.sanitize(this.extractText(raw));
+    if (!draft || draft.length > MAX_COMMENT_LEN) return null;
+    return draft;
+  }
+
+  private buildPrompt(note: NoteData, references: string[] = [], onPageComments: string[] = []): string {
     const { identity, interests } = this.soul;
     const interestsStr = [...interests.primary, ...interests.secondary].join('、');
     const refBlock = references.length
       ? `\n参考（仅作灵感，体会真人怎么留言；【严禁照抄/改写句子】，只借角度与口吻）：\n${references.map((r, i) => `${i + 1}. ${r}`).join('\n')}\n`
+      : '';
+    // 现场评论块（change comment-search-command）：让评论贴合这条笔记下大家正在聊的，别重复别人已说过的。
+    const liveBlock = onPageComments.length
+      ? `\n这条笔记现有的评论（体会大家在聊什么、从哪个角度切入；别重复别人已说过的，也别照抄）：\n${onPageComments.map((c, i) => `${i + 1}. ${c}`).join('\n')}\n`
       : '';
     return `你是「${identity.name}」，${identity.role}。语气：${identity.tone}。兴趣：${interestsStr}。
 为下面这篇你认可的笔记写**一条**评论。要求：
@@ -128,7 +154,7 @@ export class CommentComposer extends BaseRole {
 - 贴这篇笔记的具体内容，接一句有共鸣或真问题，别泛泛而谈；
 - 用你的人格语气；不要 emoji 堆砌、不要 AI 腔（如「值得一提」「总而言之」）；
 - **不要出现 @ 提及**、不要话题标签、不要外链。
-${refBlock}
+${refBlock}${liveBlock}
 当前笔记：
 标题：${note.title}
 内容：${note.content}
