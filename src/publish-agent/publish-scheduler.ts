@@ -39,7 +39,7 @@ export interface SchedulerRisk {
   getState(): { status: string };
 }
 export interface SchedulerOrchestrator {
-  trigger(input: TriggerInput): Promise<{ status: string; runId?: string }>;
+  trigger(input: TriggerInput): Promise<{ status: string; reason?: string; runId?: string }>;
 }
 
 export interface PublishSchedulerDeps {
@@ -71,7 +71,10 @@ export interface PublishSchedulerDeps {
 }
 
 export type TriggerOutcome =
-  | { result: 'triggered'; reason: string; status: string }
+  // reason = 触发原因（manual_feishu / concept_threshold(...) / risk_window(...)）；
+  // status = 编排终态（pending_approval/published/draft 正常，failed/timeout/skipped 非正常）；
+  // failureReason = 编排非正常收敛时的可读原因（来自编排器，供飞书回执 surface「为什么」）。
+  | { result: 'triggered'; reason: string; status: string; failureReason?: string }
   | { result: 'skipped'; reason: string }
   | { result: 'blocked'; reason: string };
 
@@ -196,8 +199,8 @@ export class PublishScheduler {
     }
 
     const reason = byConcept ? `concept_threshold(${newConceptCount})` : `risk_window(${hoursSince.toFixed(1)}h)`;
-    const status2 = await this.doTrigger(reason, false, accountId);
-    return { result: 'triggered', reason, status: status2 };
+    const { status: triggeredStatus, failureReason } = await this.doTrigger(reason, false, accountId);
+    return { result: 'triggered', reason, status: triggeredStatus, failureReason };
   }
 
   /**
@@ -212,14 +215,14 @@ export class PublishScheduler {
       return { result: 'blocked', reason: 'account_required' };
     }
     this.logger.log(`[PublishScheduler] 手动 /publish account=${resolved}：越过风控 canDo + 强制发布（人工授权），发布前飞书人审仍生效`);
-    const status = await this.doTrigger('manual_feishu', true, resolved);
-    return { result: 'triggered', reason: 'manual_feishu', status };
+    const { status, failureReason } = await this.doTrigger('manual_feishu', true, resolved);
+    return { result: 'triggered', reason: 'manual_feishu', status, failureReason };
   }
 
-  private async doTrigger(reason: string, forced = false, accountId: string): Promise<string> {
+  private async doTrigger(reason: string, forced = false, accountId: string): Promise<{ status: string; failureReason?: string }> {
     const input = { ...(await this.buildTriggerInput(accountId)), forced };
     this.logger.log(`[PublishScheduler] 触发发帖编排 reason=${reason} forced=${forced} account=${input.accountId} newConcepts=${input.metrics.newConceptCount} liked=${input.metrics.likedSinceLastPublish}`);
     const res = await this.d.orchestrator.trigger(input);
-    return res.status;
+    return { status: res.status, failureReason: res.reason };
   }
 }

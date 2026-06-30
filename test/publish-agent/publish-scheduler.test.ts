@@ -14,6 +14,10 @@ interface Knobs {
   status?: string;
   conceptThreshold?: number;
   minHoursBetween?: number;
+  /** 编排器返回的终态（缺省 'draft' 正常）；用于模拟 failed/skipped 等非正常出口。 */
+  orchestratorStatus?: string;
+  /** 编排器返回的非正常原因（failed/skipped 时填，验证沿链路 surface）。 */
+  orchestratorReason?: string;
 }
 
 function build(k: Knobs = {}) {
@@ -33,7 +37,7 @@ function build(k: Knobs = {}) {
     },
     resolveRisk: async () => ({ canDo: () => k.canDo ?? true, getState: () => ({ status: k.status ?? 'normal' }) }),
     resolveSingleAccountId: async () => 'acc-test',
-    orchestrator: { trigger: async (input) => { triggered.push(JSON.stringify(input.metrics)); return { status: 'draft' }; } },
+    orchestrator: { trigger: async (input) => { triggered.push(JSON.stringify(input.metrics)); return { status: k.orchestratorStatus ?? 'draft', reason: k.orchestratorReason }; } },
     soul: {} as PublishSchedulerDeps['soul'],
     conceptThreshold: k.conceptThreshold ?? 5,
     minHoursBetween: k.minHoursBetween ?? 24,
@@ -80,6 +84,14 @@ describe('AC-PUB-SCHED PublishScheduler 三扳机', () => {
     assert.equal(o.result, 'triggered');
     assert.equal(o.reason, 'manual_feishu');
     assert.equal(triggered.length, 1, '手动越过风控仍触发编排');
+  });
+
+  it('手动 /publish 编排失败 → 触发但 status=failed，并把编排失败原因沿链路 surface 为 failureReason', async () => {
+    const { scheduler } = build({ orchestratorStatus: 'failed', orchestratorReason: 'Pipeline aborted by TitleCreator: 标题解析失败' });
+    const o = await scheduler.triggerManual('acc-test');
+    assert.equal(o.result, 'triggered');
+    assert.equal(o.result === 'triggered' && o.status, 'failed');
+    assert.equal(o.result === 'triggered' && o.failureReason, 'Pipeline aborted by TitleCreator: 标题解析失败', '失败原因不再被丢，供飞书回执显示「为什么」');
   });
 
   it('buildTriggerInput 聚合真概念 + 真点赞 + 最近已发', async () => {

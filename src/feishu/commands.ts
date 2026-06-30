@@ -15,7 +15,7 @@
  * 执行通过注入的 CommandActions 把动作落到云端调度器（这里先打桩为接口）。
  */
 
-import type { CommandResult, PublishApprovalPayload } from './types.js';
+import type { CommandResult, CommandResultLevel, PublishApprovalPayload } from './types.js';
 import { buildPublishApprovalCard } from './cards.js';
 import { FeishuMessenger } from './messenger.js';
 import type { BotChatRecord } from '../cache/bot-chat-store.js';
@@ -123,6 +123,20 @@ export function parseCommand(text: string): ParsedCommand {
   }
 }
 
+/**
+ * /publish 执行层回执：执行层据真实编排终态自判 ok/level（不再让路由层一律当成功）。
+ * - ok=true + level 'success'：已生成稿件并进入人审（pending_approval / published / draft）。
+ * - ok=false + level 'warning'：未触发 / 未产出稿件（未解析到账号、已有编排在跑、选题判定不发等）。
+ * - ok=false + level 'error'：编排失败（异常 / 中止 / 超时）或触发器不可用。
+ * message 已含失败/未产出的原因，路由层原样透传，不再二次包装。
+ */
+export interface PublishCommandReceipt {
+  ok: boolean;
+  level: CommandResultLevel;
+  title: string;
+  message: string;
+}
+
 /** 账号状态查询/启停的底层动作（落到云端调度器；MVP 可打桩） */
 export interface CommandActions {
   /** 查询账号状态，返回一段可读描述。accountId 缺省由执行层解析唯一真实账号。 */
@@ -134,10 +148,13 @@ export interface CommandActions {
   /** 发送审批测试卡片 */
   publishTest?(): Promise<PublishApprovalPayload> | PublishApprovalPayload;
   /**
-   * 手动触发一次发帖编排（PublishScheduler 手动扳机；返回可读回执）。
+   * 手动触发一次发帖编排（PublishScheduler 手动扳机）。
    * nickname 按昵称指定发哪个账号（执行层解析为真实 id，严格只认昵称）；缺省由执行层解析唯一真实账号。
+   *
+   * 返回结构化回执 PublishCommandReceipt：执行层据**编排终态**判 ok/level（成功=绿、未触发/未产出=黄、失败=红），
+   * 并把失败原因带进 message——杜绝「触发成功 ≠ 编排成功」被一律染成绿色 ✅ 的误导。
    */
-  publish?(nickname?: string): Promise<string> | string;
+  publish?(nickname?: string): Promise<PublishCommandReceipt> | PublishCommandReceipt;
   /**
    * 手动触发一次按需评论任务（CommentScheduler 手动扳机；返回可读回执）。
    * nickname 按昵称指定评哪个账号（执行层解析为真实 id，严格只认昵称）；缺省由执行层解析唯一真实账号。
@@ -220,12 +237,15 @@ export class CommandRouter {
     }
     try {
       // nickname → 执行层按昵称解析真实账号（严格只认昵称）；解析失败由执行层抛错、走 fail 分支。
-      const msg = await this.actions.publish(cmd.nickname);
+      // 回执的 ok/level/title/message 由执行层据**真实编排终态**给出（成功绿、未触发/未产出黄、失败红），
+      // 路由层不再一律当成功——杜绝「触发成功但编排 failed」被染成绿色 ✅。
+      const r = await this.actions.publish(cmd.nickname);
       return {
         command: cmd.raw,
-        ok: true,
-        title: '已触发发帖编排',
-        message: `${msg}\n（账号昵称 \`${cmd.nickname ?? '(唯一账号)'}\`；人工授权越过风控，但发布前仍需飞书人审 approved=true 才会真发）`,
+        ok: r.ok,
+        level: r.level,
+        title: r.title,
+        message: r.message,
         accountId: cmd.accountId,
       };
     } catch (err) {

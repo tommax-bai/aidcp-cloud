@@ -201,6 +201,57 @@ test('parseCommand: /comment 无参 → action comment、nickname undefined（�
   assert.equal(cmd.nickname, undefined);
 });
 
+test('CommandRouter: publish 编排失败 → 回执 ok:false / level:error（红 ❌，绝不再绿色）+ 透传失败原因', async () => {
+  const router = new CommandRouter({
+    ...makeActions().actions,
+    publish: async (nickname?: string) => ({
+      ok: false,
+      level: 'error',
+      title: '发帖编排失败',
+      message: `账号 \`${nickname}\` 已触发（manual_feishu）→ 编排状态 failed\n原因：Pipeline timed out after 120000ms`,
+    }),
+  });
+  const res = await router.handle('/aidcp publish Tmax');
+  assert.equal(res.ok, false, '「触发成功但编排 failed」不再被当成功');
+  assert.equal(res.level, 'error', '红色 ❌');
+  assert.match(res.title, /失败/);
+  assert.match(res.message, /原因：/, '把失败原因带给人，而非只给干瘪 failed');
+});
+
+test('CommandRouter: publish 未产出 → 回执 ok:false / level:warning（黄 ⚠️，非失败也别染绿）', async () => {
+  const router = new CommandRouter({
+    ...makeActions().actions,
+    publish: async () => ({ ok: false, level: 'warning', title: '发帖未产出', message: '编排状态 skipped' }),
+  });
+  const res = await router.handle('/aidcp publish Tmax');
+  assert.equal(res.ok, false);
+  assert.equal(res.level, 'warning');
+  assert.match(res.title, /未产出/);
+});
+
+test('CommandRouter: publish 成功 → 回执 ok:true / level:success（绿 ✅）', async () => {
+  const router = new CommandRouter({
+    ...makeActions().actions,
+    publish: async () => ({ ok: true, level: 'success', title: '已触发发帖编排', message: '编排状态 pending_approval' }),
+  });
+  const res = await router.handle('/aidcp publish Tmax');
+  assert.equal(res.ok, true);
+  assert.equal(res.level, 'success');
+  assert.match(res.title, /已触发发帖编排/);
+});
+
+test('CommandRouter: publish 抛错（账号解析失败）→ honest fail 红色回执', async () => {
+  const router = new CommandRouter({
+    ...makeActions().actions,
+    publish: async () => {
+      throw new Error('找不到昵称「X」的账号。可用昵称：Tmax');
+    },
+  });
+  const res = await router.handle('/aidcp publish X');
+  assert.equal(res.ok, false);
+  assert.match(res.message, /找不到昵称/);
+});
+
 test('CommandRouter: comment 调用 actions.comment 并回「已触发按需评论」', async () => {
   const calls: (string | undefined)[] = [];
   const router = new CommandRouter({

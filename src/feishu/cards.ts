@@ -147,8 +147,11 @@ export function buildAlertCard(alert: AlertData): FeishuCard {
 
 /** 指令回执卡片 */
 export function buildCommandResultCard(result: CommandResult): FeishuCard {
-  const template: FeishuHeaderTemplate = result.ok ? 'green' : 'red';
-  const icon = result.ok ? '✅' : '❌';
+  // 三态配色：缺省按 ok 推导（绿/红双态，老回执零改）；warning 走黄色 ⚠️，专治「触发成功但编排没成」被误染绿色。
+  const level = result.level ?? (result.ok ? 'success' : 'error');
+  const template: FeishuHeaderTemplate =
+    level === 'success' ? 'green' : level === 'warning' ? 'yellow' : 'red';
+  const icon = level === 'success' ? '✅' : level === 'warning' ? '⚠️' : '❌';
   const accLine = result.accountId ? `\n**账号**：${result.accountId}` : '';
   return {
     header: {

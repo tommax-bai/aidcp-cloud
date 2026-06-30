@@ -40,6 +40,7 @@ export class PublishOrchestrator {
         dispatched: false,
         envelope: null,
         completedAt: this.clock(),
+        reason: '已有一轮发帖编排在运行中，本次未触发',
         runId: '',
       };
     }
@@ -79,6 +80,8 @@ export class PublishOrchestrator {
         dispatched: false,
         envelope: null,
         completedAt: this.clock(),
+        // 把真实失败原因（中止角色+理由 / 超时 / 异常信息）带出去，不再只落日志——上层飞书回执据此告诉人「为什么」。
+        reason: errMsg,
         runId,
       };
     } finally {
@@ -115,6 +118,7 @@ export class PublishOrchestrator {
             dispatched: false,
             envelope: null,
             completedAt: this.clock(),
+            reason: decision.reason ? `选题判定不发布：${decision.reason}` : '选题判定不发布',
           });
         }
       }, { once: true });

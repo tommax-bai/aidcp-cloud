@@ -159,6 +159,7 @@ describe('PublishOrchestrator', () => {
     assert.equal(rec.status, 'failed', '落库 status=failed');
     assert.equal(rec.imageUrl, null, '生图关闭 → 诚实 null，不伪造');
     assert.equal(rec.content, '正文', 'finalContent 来自 cleanedContent');
+    assert.match(result.reason ?? '', /无配图/, 'failed 带可读原因（供飞书回执 surface「为什么」），不再只给干瘪 status');
   });
 
   test('scout 决定不发布 → 早期终止，返回 status=skipped', async () => {
@@ -170,6 +171,7 @@ describe('PublishOrchestrator', () => {
     assert.equal(result.status, 'skipped');
     assert.equal(result.dispatched, false);
     assert.equal(result.recordId, null);
+    assert.match(result.reason ?? '', /不发布/, 'skipped 带选题判定原因');
   });
 
   test('管道超时 → 返回 status=failed', async () => {
@@ -180,6 +182,7 @@ describe('PublishOrchestrator', () => {
     assert.equal(result.status, 'failed');
     assert.equal(result.dispatched, false);
     assert.equal(result.recordId, null);
+    assert.match(result.reason ?? '', /timed out/i, '超时失败带「为什么」（timed out），不再只给 failed');
   });
 
   test('重复 trigger → 第二次被忽略（running 状态防重入）', async () => {
@@ -212,6 +215,7 @@ describe('PublishOrchestrator', () => {
     const elapsed = Date.now() - started;
     // 即时失败：pipelineTimeoutMs=5000；若 abort 不即时收敛会干等到 5000ms。
     assert.equal(result.status, 'failed', '标题 abort → 流水线 failed');
+    assert.match(result.reason ?? '', /aborted by/i, 'abort 失败带中止角色与理由（供飞书回执显示「哪一步、为什么」）');
     assert.ok(elapsed < 4000, `应即时失败而非干等超时（实际 ${elapsed}ms）`);
     assert.equal(insertedRecords.length, 0, 'titleSelection 未就绪 → executor 不激活 → 未落库');
     assert.equal(pushedEnvelopes.length, 0, '未下发 edge');

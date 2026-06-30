@@ -108,11 +108,11 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       case 'manual_review':
         return this.stageDraftForApproval(assembledContent, title, context, accountId);
       case 'abort':
-        return this.handleAbort(assembledContent, title, accountId);
+        return this.handleAbort(assembledContent, title, accountId, gateDecision.reason);
       case 'retry':
         return this.handleRetry();
       default:
-        return this.handleAbort(assembledContent, title, accountId);
+        return this.handleAbort(assembledContent, title, accountId, gateDecision.reason);
     }
   }
 
@@ -168,7 +168,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       });
       if (this.store.markImagesAttached) await this.store.markImagesAttached(failedId, false).catch(() => {});
       this.logger.warn(`[PublishExecutor] 无配图（生图失败/降级）→ 图文帖无有效内容，诚实 failed recordId=${failedId}（不落待审、不发卡）`);
-      return { recordId: failedId, status: 'failed', dispatched: false, envelope: null, completedAt: this.clock() };
+      return { recordId: failedId, status: 'failed', dispatched: false, envelope: null, completedAt: this.clock(), reason: '无配图（生图失败/降级）：图文帖无有效内容，已诚实失败、未发审批卡' };
     }
 
     // 落库待审草稿。tags 走 finalTags，话题/元数据由 recordMetadata 落 publishMetadata（含 topics），
@@ -233,7 +233,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     }
   }
 
-  private async handleAbort(assembled: AssembledContent, title: string, accountId: string): Promise<PublishResult> {
+  private async handleAbort(assembled: AssembledContent, title: string, accountId: string, gateReason?: string): Promise<PublishResult> {
     const recordId = await this.store.insert({
       title,
       content: assembled.finalContent,
@@ -245,7 +245,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       accountId,
     });
 
-    this.logger.log(`[PublishExecutor] aborted: recordId=${recordId}`);
+    this.logger.log(`[PublishExecutor] aborted: recordId=${recordId} reason=${gateReason ?? '-'}`);
 
     return {
       recordId,
@@ -253,6 +253,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       dispatched: false,
       envelope: null,
       completedAt: this.clock(),
+      reason: gateReason ? `合规/质量闸否决：${gateReason}` : '合规/质量闸否决',
     };
   }
 
@@ -265,6 +266,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       dispatched: false,
       envelope: null,
       completedAt: this.clock(),
+      reason: '内容质量不达标、重试已用尽',
     };
   }
 

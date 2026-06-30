@@ -327,6 +327,11 @@ export interface PublishResult {
   dispatched: boolean;
   envelope: unknown | null;
   completedAt: number;
+  /**
+   * 非成功收敛的可读原因（失败的异常信息 / 中止角色+理由 / 超时；跳过的诚实说明）。
+   * 仅在 failed / timeout / skipped 等非正常出口填充，供上层（飞书回执）surface「为什么」，不再只给一个干瘪状态。
+   */
+  reason?: string;
 }
 
 /**

@@ -127,12 +127,23 @@ export interface AlertData {
   actionUrl?: string;
 }
 
+/**
+ * 回执配色级别：success=绿 ✅、warning=黄 ⚠️（未触发/未产出等「没成功但非崩」）、error=红 ❌（失败/异常）。
+ * 缺省时按 ok 推导（ok→success、!ok→error），故老回执无需改动即维持原绿/红双态。
+ */
+export type CommandResultLevel = 'success' | 'warning' | 'error';
+
 /** 指令回执卡片数据（对应 product-feishu.md §2.2 指令回执） */
 export interface CommandResult {
   /** 原始指令文本，如 "/pause acc-01" */
   command: string;
   /** 执行是否成功 */
   ok: boolean;
+  /**
+   * 配色级别（可选）。缺省按 ok 推导。
+   * 用于区分「失败（红）」与「未触发/未产出（黄）」——避免把「触发成功但编排没成」误染成绿色成功。
+   */
+  level?: CommandResultLevel;
   /** 回执标题 */
   title: string;
   /** 回执正文（lark_md） */

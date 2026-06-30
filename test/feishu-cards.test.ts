@@ -114,6 +114,30 @@ test('buildCommandResultCard: 失败用红色', () => {
   assert.match(card.header?.title.content ?? '', /❌/);
 });
 
+test('buildCommandResultCard: level=warning 用黄色 ⚠️（触发成功但编排未产出，别染绿）', () => {
+  const card = buildCommandResultCard({
+    command: '/aidcp publish Tmax',
+    ok: false,
+    level: 'warning',
+    title: '发帖未产出',
+    message: '已触发但编排 skipped',
+  });
+  assert.equal(card.header?.template, 'yellow');
+  assert.match(card.header?.title.content ?? '', /⚠️/);
+});
+
+test('buildCommandResultCard: level=error 用红色 ❌（编排失败，绝不绿色）', () => {
+  const card = buildCommandResultCard({
+    command: '/aidcp publish Tmax',
+    ok: false,
+    level: 'error',
+    title: '发帖编排失败',
+    message: '编排状态 failed\n原因：Pipeline timed out',
+  });
+  assert.equal(card.header?.template, 'red');
+  assert.match(card.header?.title.content ?? '', /❌/);
+});
+
 test('buildPublishApprovalCard: 构造新版 callback behaviors', () => {
   const card = buildPublishApprovalCard({
     requestId: 'req-1',
