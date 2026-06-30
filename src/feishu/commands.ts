@@ -21,7 +21,7 @@ import { FeishuMessenger } from './messenger.js';
 import type { BotChatRecord } from '../cache/bot-chat-store.js';
 
 /** 已识别的指令动作 */
-export type CommandAction = 'status' | 'pause' | 'resume' | 'publish-test' | 'publish' | 'bind' | 'help';
+export type CommandAction = 'status' | 'pause' | 'resume' | 'publish-test' | 'publish' | 'comment' | 'bind' | 'help';
 
 /** 解析后的指令结构 */
 export interface ParsedCommand {
@@ -46,6 +46,7 @@ const HELP_TEXT = [
   '• `/aidcp pause [accountId]` — 暂停账号',
   '• `/aidcp resume [accountId]` — 恢复账号',
   '• `/aidcp publish <昵称>` — 触发该账号发帖（按昵称指定，发布前仍需人审）',
+  '• `/aidcp comment <昵称>` — 触发该账号按需评论（搜最近一天最多收藏的强相关笔记，评论前仍需人审）',
   '• `/aidcp publish-test [requestId]` — 发送测试审批卡片',
   '• `/aidcp bind` — 绑定当前群为默认审批群（开发中）',
   '',
@@ -111,6 +112,10 @@ export function parseCommand(text: string): ParsedCommand {
       // /publish <昵称>：`/publish ` 之后整段视为目标账号**昵称**（可含空格），由执行层按昵称解析为真实 id（严格只认昵称、不接 id）；
       // 缺省由执行层解析唯一真实账号（retire-default-account：绝不回落 default）。
       return { action: 'publish', nickname: args.join(' ').trim() || undefined, raw, args };
+    case '/comment':
+      // /comment <昵称>：与 /publish 同构——`/comment ` 之后整段视为目标账号**昵称**，执行层按昵称解析真实 id；
+      // 缺省由执行层解析唯一真实账号（retire-default-account：绝不回落 default）。
+      return { action: 'comment', nickname: args.join(' ').trim() || undefined, raw, args };
     case '/bind':
       return { action: 'bind', raw, args };
     default:
@@ -133,6 +138,11 @@ export interface CommandActions {
    * nickname 按昵称指定发哪个账号（执行层解析为真实 id，严格只认昵称）；缺省由执行层解析唯一真实账号。
    */
   publish?(nickname?: string): Promise<string> | string;
+  /**
+   * 手动触发一次按需评论任务（CommentScheduler 手动扳机；返回可读回执）。
+   * nickname 按昵称指定评哪个账号（执行层解析为真实 id，严格只认昵称）；缺省由执行层解析唯一真实账号。
+   */
+  comment?(nickname?: string): Promise<string> | string;
   /** 绑定当前群为默认审批群 */
   bindChat?(record: BotChatRecord): Promise<void> | void;
 }
@@ -174,6 +184,8 @@ export class CommandRouter {
         return this.runPublishTest(cmd, context?.chatId);
       case 'publish':
         return this.runPublish(cmd);
+      case 'comment':
+        return this.runComment(cmd);
       case 'bind':
         return this.runBind(cmd, context?.chatId);
       case 'help':
@@ -218,6 +230,25 @@ export class CommandRouter {
       };
     } catch (err) {
       return this.fail(cmd, '发帖触发失败', err);
+    }
+  }
+
+  private async runComment(cmd: ParsedCommand): Promise<CommandResult> {
+    if (!this.actions.comment) {
+      return this.fail(cmd, '按需评论未接线', new Error('comment action not wired'));
+    }
+    try {
+      // nickname → 执行层按昵称解析真实账号（严格只认昵称）；解析失败 / 边端离线由执行层抛错、走 fail 分支。
+      const msg = await this.actions.comment(cmd.nickname);
+      return {
+        command: cmd.raw,
+        ok: true,
+        title: '已触发按需评论',
+        message: `${msg}\n（账号昵称 \`${cmd.nickname ?? '(唯一账号)'}\`；搜「最近一天·最多收藏」的强相关笔记，评论前仍需飞书人审 approved=true 才会真发）`,
+        accountId: cmd.accountId,
+      };
+    } catch (err) {
+      return this.fail(cmd, '按需评论触发失败', err);
     }
   }
 

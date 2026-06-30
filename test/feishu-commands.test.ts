@@ -189,6 +189,53 @@ test('parseCommand: /publish 多词昵称（含空格）整段捕获', () => {
   assert.equal(cmd.nickname, '大白 工程师');
 });
 
+test('parseCommand: /aidcp comment <昵称> → action comment、nickname 取昵称', () => {
+  const cmd = parseCommand('/aidcp comment 工程师大白');
+  assert.equal(cmd.action, 'comment');
+  assert.equal(cmd.nickname, '工程师大白');
+});
+
+test('parseCommand: /comment 无参 → action comment、nickname undefined（执行层解析唯一账号）', () => {
+  const cmd = parseCommand('/aidcp comment');
+  assert.equal(cmd.action, 'comment');
+  assert.equal(cmd.nickname, undefined);
+});
+
+test('CommandRouter: comment 调用 actions.comment 并回「已触发按需评论」', async () => {
+  const calls: (string | undefined)[] = [];
+  const router = new CommandRouter({
+    ...makeActions().actions,
+    comment: (nickname) => {
+      calls.push(nickname);
+      return '已为账号 工程师大白 启动按需评论任务';
+    },
+  });
+  const res = await router.handle('/aidcp comment 工程师大白');
+  assert.equal(res.ok, true);
+  assert.match(res.title, /已触发按需评论/);
+  assert.match(res.message, /人审/);
+  assert.deepEqual(calls, ['工程师大白']);
+});
+
+test('CommandRouter: comment 未接线 → honest fail（不静默成功）', async () => {
+  const router = new CommandRouter(makeActions().actions);
+  const res = await router.handle('/aidcp comment 工程师大白');
+  assert.equal(res.ok, false);
+  assert.match(res.title, /按需评论触发失败|未接线/);
+});
+
+test('CommandRouter: comment 执行层抛错（如边端离线/昵称无匹配）→ 失败回执', async () => {
+  const router = new CommandRouter({
+    ...makeActions().actions,
+    comment: () => {
+      throw new Error('该账号暂无在线边端');
+    },
+  });
+  const res = await router.handle('/aidcp comment 工程师大白');
+  assert.equal(res.ok, false);
+  assert.match(res.message, /在线边端/);
+});
+
 test('matchAccountByNickname: 精确命中（trim + 大小写不敏感）', () => {
   const cands = [
     { accountId: 'id-a', nickname: '工程师大白' },
