@@ -255,6 +255,15 @@ export interface SearchExecutePayload {
   source?: 'extract_from_liked' | 'random_from_interests' | 'new_concept' | 'manager';
   /** 本次搜索最多浏览的结果数 */
   maxResults?: number;
+  /**
+   * 结果页原生排序标签（change comment-search-command）。缺省=不切（综合，维持自治浏览旧行为）。
+   * 边缘据此点搜索结果页对应排序 tab；定位失败 honest 降级、不冒充。
+   */
+  sort?: 'comprehensive' | 'latest' | 'most_liked' | 'most_collected' | 'most_commented';
+  /**
+   * 结果页原生时间范围筛选（change comment-search-command）。缺省=不筛（不限时间）。
+   */
+  timeWindow?: 'all' | 'one_day' | 'one_week' | 'half_year';
 }
 
 /** 结束本次浏览会话（cloud → edge）。 */
