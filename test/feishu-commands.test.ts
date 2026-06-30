@@ -252,20 +252,42 @@ test('CommandRouter: publish 抛错（账号解析失败）→ honest fail 红�
   assert.match(res.message, /找不到昵称/);
 });
 
-test('CommandRouter: comment 调用 actions.comment 并回「已触发按需评论」', async () => {
+test('CommandRouter: comment 触发成功 → 结构化回执 ok:true / level:success（绿✅）透传', async () => {
   const calls: (string | undefined)[] = [];
   const router = new CommandRouter({
     ...makeActions().actions,
     comment: (nickname) => {
       calls.push(nickname);
-      return '已为账号 工程师大白 启动按需评论任务';
+      return { ok: true, level: 'success', title: '已触发按需评论', message: '已为账号 工程师大白 启动按需评论任务（评论前仍需人审）' };
     },
   });
   const res = await router.handle('/aidcp comment 工程师大白');
   assert.equal(res.ok, true);
+  assert.equal(res.level, 'success', '成功=绿色样式');
   assert.match(res.title, /已触发按需评论/);
-  assert.match(res.message, /人审/);
   assert.deepEqual(calls, ['工程师大白']);
+});
+
+test('CommandRouter: comment 未触发 → ok:false / level:warning（黄⚠️，非崩也别染绿）', async () => {
+  const router = new CommandRouter({
+    ...makeActions().actions,
+    comment: () => ({ ok: false, level: 'warning', title: '未触发按需评论', message: '该账号已有评论任务在跑' }),
+  });
+  const res = await router.handle('/aidcp comment Tmax');
+  assert.equal(res.ok, false);
+  assert.equal(res.level, 'warning', '未触发=黄色样式，区别于失败红');
+  assert.match(res.title, /未触发/);
+});
+
+test('CommandRouter: comment 触发失败 → ok:false / level:error（红❌）透传', async () => {
+  const router = new CommandRouter({
+    ...makeActions().actions,
+    comment: () => ({ ok: false, level: 'error', title: '按需评论触发失败', message: '边端离线' }),
+  });
+  const res = await router.handle('/aidcp comment Tmax');
+  assert.equal(res.ok, false);
+  assert.equal(res.level, 'error', '失败=红色样式');
+  assert.match(res.message, /边端离线/);
 });
 
 test('CommandRouter: comment 未接线 → honest fail（不静默成功）', async () => {

@@ -137,6 +137,21 @@ export interface PublishCommandReceipt {
   message: string;
 }
 
+/**
+ * /comment 执行层回执：执行层据**触发结果**自判 ok/level（与 publish 同构，不再一律绿色 ✅）。
+ * - ok=true + 'success'：任务已成功触发开跑（账号解析到、边端在线）。
+ * - ok=false + 'warning'：未触发（未解析到账号 / 已有任务在跑等，没成功但非崩）。
+ * - ok=false + 'error'：触发失败（边端离线 / 异常）。
+ * 注：评论任务异步（搜索→甄选→人审→发布），**最终**结果（评了/没合适/失败）经后续结果卡片补达；
+ * 本回执只表「触发」态——失败/未触发与成功在飞书卡片上分别走红❌/黄⚠️/绿✅，不同样式。
+ */
+export interface CommentCommandReceipt {
+  ok: boolean;
+  level: CommandResultLevel;
+  title: string;
+  message: string;
+}
+
 /** 账号状态查询/启停的底层动作（落到云端调度器；MVP 可打桩） */
 export interface CommandActions {
   /** 查询账号状态，返回一段可读描述。accountId 缺省由执行层解析唯一真实账号。 */
@@ -156,10 +171,13 @@ export interface CommandActions {
    */
   publish?(nickname?: string): Promise<PublishCommandReceipt> | PublishCommandReceipt;
   /**
-   * 手动触发一次按需评论任务（CommentScheduler 手动扳机；返回可读回执）。
+   * 手动触发一次按需评论任务（CommentScheduler 手动扳机）。
    * nickname 按昵称指定评哪个账号（执行层解析为真实 id，严格只认昵称）；缺省由执行层解析唯一真实账号。
+   *
+   * 返回结构化回执 CommentCommandReceipt：执行层据**触发结果**判 ok/level（开跑=绿、未触发=黄、失败=红），
+   * 与 publish 同构——杜绝「触发」被无脑染绿（最终评/未评结果另由结果卡片补达）。
    */
-  comment?(nickname?: string): Promise<string> | string;
+  comment?(nickname?: string): Promise<CommentCommandReceipt> | CommentCommandReceipt;
   /** 绑定当前群为默认审批群 */
   bindChat?(record: BotChatRecord): Promise<void> | void;
 }
@@ -259,12 +277,15 @@ export class CommandRouter {
     }
     try {
       // nickname → 执行层按昵称解析真实账号（严格只认昵称）；解析失败 / 边端离线由执行层抛错、走 fail 分支。
-      const msg = await this.actions.comment(cmd.nickname);
+      // 回执 ok/level/title/message 由执行层据**真实触发结果**给出（开跑绿、未触发黄、触发失败红），
+      // 路由层不再一律当成功——杜绝「触发」被无脑染绿 ✅（评论任务最终结果另由结果卡片补达）。
+      const r = await this.actions.comment(cmd.nickname);
       return {
         command: cmd.raw,
-        ok: true,
-        title: '已触发按需评论',
-        message: `${msg}\n（账号昵称 \`${cmd.nickname ?? '(唯一账号)'}\`；搜「最近一天·最多收藏」的强相关笔记，评论前仍需飞书人审 approved=true 才会真发）`,
+        ok: r.ok,
+        level: r.level,
+        title: r.title,
+        message: r.message,
         accountId: cmd.accountId,
       };
     } catch (err) {
