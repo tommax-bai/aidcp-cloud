@@ -1,0 +1,185 @@
+/**
+ * CommentScheduler — 按需评论任务的触发器与装配中枢（change comment-search-command，task 3.1/3.3 最终装配）。
+ *
+ * 飞书 /comment 命令式触发：解析到账号后调 triggerManual(accountId)。
+ *  - 同步：账号边端在线且无在跑任务 → 启动任务（异步）并**立即**回结构化「触发」回执（开跑绿）；
+ *    边端离线 → 红；已有任务在跑 → 黄（不并发抢边端）。
+ *  - 异步任务：接管该账号边端（结束自动浏览）→ 跑有界换词重试（runCommentTask）→ finally 恢复浏览 →
+ *    据最终结果补发结果卡片（评了绿 / 没合适黄 / 失败红，绝不染绿）。
+ *
+ * 装配：角色①搜索词生成 + 角色②强相关甄选 + 边端步骤（edge-steps）+ 撰写人审（compose-approve）→ CommentTaskSteps。
+ * 全部依赖经构造注入（账号绑定 LLM / 人设 / 精选 / 去重 / 人审口 / 接管恢复钩子 / 结果卡片），便于单测。
+ *
+ * 红线：边端离线 / 任一步失败 honest-fail；按账号串行；人审保留（在 compose-approve 内）。
+ */
+
+import type { EventBus } from '../event-bus/index.js';
+import type { Soul } from '../soul/types.js';
+import { CommentSearchTermGenerator, type RoleLlmLike } from '../agents/comment-search-term-generator.js';
+import { CommentTargetPicker } from '../agents/comment-target-picker.js';
+import { CommentComposer } from '../agents/comment-composer.js';
+import { PostProcessor } from '../publish-agent/post-processor.js';
+import type { CommentApprovalPort } from '../agents/comment-approval-gate.js';
+import type { CommentCommandReceipt } from '../feishu/commands.js';
+import { runCommentTask, type CommentTaskResult, type CommentTaskSteps } from './comment-task-runner.js';
+import { buildEdgeCommentSteps, type EdgePusher, type CommentDedup } from './edge-steps.js';
+import { buildComposeAndApprove } from './compose-approve.js';
+import type { CuratedSampleForTerms } from '../agents/comment-search-term-generator.js';
+
+export interface CommentResultReceipt {
+  ok: boolean;
+  level: 'success' | 'warning' | 'error';
+  title: string;
+  message: string;
+}
+
+export interface CommentSchedulerDeps {
+  /** 解析该账号的连接运行时（私有总线 + 在线 edgeId）；null / 无 edgeId = 边端离线（honest 拒绝）。 */
+  resolveConnection: (accountId: string) => { bus: EventBus; edgeId?: string } | null;
+  pusher: EdgePusher;
+  getSoul: (accountId: string) => Soul;
+  /** 取精选样本喂搜索词生成（按账号；出错回 []）。 */
+  selectCurated: (accountId: string, contentType: 'note' | 'comment', limit: number) => Promise<CuratedSampleForTerms[]>;
+  /** 账号绑定 LLM（计 token 归属该账号）。 */
+  llmFor: (accountId: string) => RoleLlmLike;
+  /** 该账号每笔记去重（InteractionDedup）。 */
+  dedupFor: (accountId: string) => CommentDedup;
+  /** 评论人审口（复用发帖 /tmp 信号机制）；未接线 → compose-approve 一律不发。 */
+  approval?: CommentApprovalPort;
+  /** 去 AI 味处理器（可带账号 rewrite）；缺省仅扫描。 */
+  postProcessorFor?: (accountId: string) => Pick<PostProcessor, 'process'>;
+  /** 接管该账号边端（结束自动浏览，独占）。 */
+  onTakeoverStart: (accountId: string) => void;
+  /** 任务结束恢复浏览。 */
+  onTakeoverEnd: (accountId: string) => void;
+  /** 任务跑完补发结果卡片（level 按结果，绝不染绿）。 */
+  postResultCard?: (accountId: string, receipt: CommentResultReceipt) => Promise<void> | void;
+  /** 原生筛选（缺省 most_collected / one_day）。 */
+  sort?: string;
+  timeWindow?: string;
+  /** 换词尝试上限 K（缺省 5）。 */
+  maxTerms?: number;
+  /** 边端单步超时（缺省 edge-steps 默认 28s）。 */
+  stepTimeoutMs?: number;
+  now?: () => number;
+  logger?: Pick<Console, 'log' | 'warn'>;
+}
+
+export class CommentScheduler {
+  private readonly running = new Set<string>();
+
+  constructor(private readonly deps: CommentSchedulerDeps) {}
+
+  /** 是否该账号已有任务在跑（观测用）。 */
+  isRunning(accountId: string): boolean {
+    return this.running.has(accountId);
+  }
+
+  /** 飞书 /comment 触发：返回「触发态」结构化回执；最终结果异步补发结果卡片。 */
+  async triggerManual(accountId: string): Promise<CommentCommandReceipt> {
+    if (!accountId || accountId === 'default') {
+      return { ok: false, level: 'error', title: '按需评论触发失败', message: '未解析到有效账号（绝不回落 default）' };
+    }
+    if (this.running.has(accountId)) {
+      return { ok: false, level: 'warning', title: '未触发按需评论', message: '该账号已有评论任务在跑，请等其结束' };
+    }
+    const conn = this.deps.resolveConnection(accountId);
+    if (!conn || !conn.edgeId) {
+      return { ok: false, level: 'error', title: '按需评论触发失败', message: '该账号暂无在线边端' };
+    }
+
+    this.running.add(accountId);
+    const edgeId = conn.edgeId;
+    const bus = conn.bus;
+    // 异步跑任务，命令立即回执（任务含人审轮询，不可同步等）。
+    void this.runTask(accountId, bus, edgeId).finally(() => this.running.delete(accountId));
+
+    return {
+      ok: true,
+      level: 'success',
+      title: '已触发按需评论',
+      message: '已启动按需评论任务（搜「最近一天·最多收藏」的强相关、未评过笔记；评论前仍需飞书人审 approved=true 才会真发；结果稍后回报）',
+    };
+  }
+
+  private async runTask(accountId: string, bus: EventBus, edgeId: string): Promise<void> {
+    const log = this.deps.logger ?? console;
+    const soul = this.deps.getSoul(accountId);
+    const llm = this.deps.llmFor(accountId);
+
+    const generator = new CommentSearchTermGenerator({ llm, soul, maxTerms: this.deps.maxTerms });
+    const picker = new CommentTargetPicker({ llm, soul });
+    // 命令路径不走 composer 的事件链，getNoteData 仅事件路径用 → 给空桩。
+    const composer = new CommentComposer({ eventBus: bus, soul, llm, getNoteData: () => null });
+
+    const composeAndApprove = buildComposeAndApprove({
+      composer,
+      approval: this.deps.approval,
+      postProcessor: this.deps.postProcessorFor?.(accountId),
+      now: this.deps.now,
+      logger: log,
+    });
+
+    const edge = buildEdgeCommentSteps({
+      bus,
+      pusher: this.deps.pusher,
+      edgeId,
+      dedup: this.deps.dedupFor(accountId),
+      sort: this.deps.sort ?? 'most_collected',
+      timeWindow: this.deps.timeWindow ?? 'one_day',
+      stepTimeoutMs: this.deps.stepTimeoutMs,
+      logger: log,
+    });
+
+    const steps: CommentTaskSteps = {
+      generateTerms: async () => {
+        const samples = await this.deps.selectCurated(accountId, 'note', 8).catch(() => []);
+        const r = await generator.generate(samples);
+        return r.terms;
+      },
+      searchAndHarvest: (term) => edge.searchAndHarvest(term),
+      filterUncommented: (cards) => edge.filterUncommented(cards),
+      pick: (cards) => picker.pick(cards),
+      readNote: (card) => edge.readNote(card),
+      composeAndApprove: (note, comments) => composeAndApprove(note, comments),
+      post: (noteId, text) => edge.post(noteId, text),
+      recordCommented: (noteId) => edge.recordCommented(noteId),
+    };
+
+    // 接管边端（独占）→ 跑任务 → finally 恢复浏览。
+    this.deps.onTakeoverStart(accountId);
+    let result: CommentTaskResult;
+    try {
+      result = await runCommentTask(steps, { maxTerms: this.deps.maxTerms, logger: log });
+    } catch (err) {
+      log.warn(`[comment-scheduler] 任务异常 account=${accountId}：${(err as Error).message}`);
+      result = { outcome: 'post_failed', termsTried: 0, reason: (err as Error).message };
+    } finally {
+      this.deps.onTakeoverEnd(accountId);
+    }
+
+    try {
+      await this.deps.postResultCard?.(accountId, outcomeToReceipt(result));
+    } catch (err) {
+      log.warn(`[comment-scheduler] 结果卡片发送失败 account=${accountId}：${(err as Error).message}`);
+    }
+  }
+}
+
+/** CommentTaskResult → 结果卡片回执（level 按结果，失败/未产出绝不染绿）。 */
+export function outcomeToReceipt(r: CommentTaskResult): CommentResultReceipt {
+  switch (r.outcome) {
+    case 'commented':
+      return { ok: true, level: 'success', title: '按需评论已发出', message: `已在笔记 ${r.noteId ?? ''} 下发表评论：「${r.text ?? ''}」（搜索词「${r.term ?? ''}」，试 ${r.termsTried} 个词）` };
+    case 'no_terms':
+      return { ok: false, level: 'warning', title: '按需评论未产出', message: '未能生成搜索词（人设与精选集都为空），本次不评' };
+    case 'no_strong_candidate':
+      return { ok: false, level: 'warning', title: '按需评论未产出', message: `试过 ${r.termsTried} 个搜索词，没有「最近一天最多收藏、与人设强相关且没评过」的笔记，本次不评` };
+    case 'compose_skipped':
+      return { ok: false, level: 'warning', title: '按需评论未发出', message: `选中笔记 ${r.noteId ?? ''}，但撰写为空/未授权/超时，本次不发` };
+    case 'read_failed':
+      return { ok: false, level: 'error', title: '按需评论失败', message: `选中笔记 ${r.noteId ?? ''}，但开笔记/读正文失败（边端超时或离线）` };
+    case 'post_failed':
+      return { ok: false, level: 'error', title: '按需评论失败', message: `选中笔记 ${r.noteId ?? ''}，但发布未确认成功${r.reason ? `（${r.reason}）` : ''}` };
+  }
+}
