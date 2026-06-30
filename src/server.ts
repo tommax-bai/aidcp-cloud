@@ -45,6 +45,8 @@ import { RoleDispatcher } from './orchestrator/index.js';
 import { ConnectionRuntimeRegistry, type DispatcherBuildContext } from './orchestrator/connection-runtime.js';
 import type { CommentApprovalPort } from './agents/comment-approval-gate.js';
 import { buildCommentApprovalCard } from './feishu/comment-approval-card.js';
+import { buildCommandResultCard } from './feishu/cards.js';
+import { CommentScheduler } from './comment-agent/comment-scheduler.js';
 import { loadSoul, type Soul } from './soul/index.js';
 
 
@@ -486,6 +488,17 @@ async function main(): Promise<void> {
     runtimes?.resumeSessionForAccount(accountId);
   };
 
+  // 按需评论让位/续场（change comment-search-command）：与发布同构——评论任务接管该账号边端（结束自动浏览、
+  // 独占）；解除即续场。注意边端 session.end 只停浏览循环、不置终态，后续浏览类命令（search/open/comment）
+  // 会唤醒重启循环并被处理（见 browse-session.ts closing 注释）。LLM 记账经 scheduler 的 llmFor 显式带 accountId，
+  // 故此处不动 publishAccountRef。
+  const onCommentTakeoverStart = (accountId: string): void => {
+    runtimes?.endSessionForAccount(accountId, 'comment_takeover');
+  };
+  const onCommentTakeoverEnd = (accountId: string): void => {
+    runtimes?.resumeSessionForAccount(accountId);
+  };
+
   // 事件总线
   const eventBus = new EventBus();
 
@@ -709,6 +722,8 @@ async function main(): Promise<void> {
 
   // A 阶段4 发帖触发器（下方实例化；actions.publish 运行时引用，前向安全）。
   let publishScheduler: PublishScheduler | undefined;
+  // 按需评论触发器（change comment-search-command；下方实例化，actions.comment 运行时引用，前向安全）。
+  let commentScheduler: CommentScheduler | undefined;
 
   // 飞书事件接收（官方 SDK 长连接，主动连飞书，无需公网 IP / HTTP 端口）
   // MVP：账号启停/查询动作先打桩（后续接云端调度器 → plan.request）
@@ -789,6 +804,15 @@ async function main(): Promise<void> {
       }
       // 正常出口（pending_approval / published / draft / needs_review）：已生成并进入人审或已发 → 绿色 ✅。
       return { ok: true, level: 'success', title: '已触发发帖编排', message: `${head}\n${note}` };
+    },
+    // 手动 /comment <昵称>（change comment-search-command）：按昵称解析账号 → 触发按需评论任务。
+    // 回执据**触发结果**判 ok/level（开跑绿 / 未触发黄 / 失败红）；最终评/未评结果由 scheduler 异步补结果卡片。
+    comment: async (nickname?: string) => {
+      if (!commentScheduler) {
+        return { ok: false, level: 'error', title: '按需评论未就绪', message: '评论触发器未就绪（启动中或依赖不可用），未发起任务。' };
+      }
+      const acct = await resolveAccountByNickname(nickname); // 找不到/重名 → 抛错，runComment 走 fail 分支（红 ❌）
+      return commentScheduler.triggerManual(acct);
     },
   };
   const commandRouter = new CommandRouter(actions);
@@ -1137,6 +1161,45 @@ async function main(): Promise<void> {
     roleTimeoutMs: Number(process.env.AIDCP_PUBLISH_ROLE_TIMEOUT_MS ?? 30_000),
   }));
   console.log(`[aidcp-cloud] PublishOrchestrator 已就绪，角色: ${publishOrchestrator.getRoles().join(', ')}`);
+
+  // 按需评论触发器（change comment-search-command）：飞书 /comment 即用。装配角色①搜索词生成 + 角色②强相关甄选
+  // + 边端步骤（搜索原生筛选/开笔记翻评论/发布/去重）+ 撰写人审 → 有界换词重试；接管边端跑、finally 恢复浏览，
+  // 结果异步补结果卡片（level 按结果、绝不染绿）。纯增量、不依赖概念池；边端离线/任一步失败 honest-fail。
+  commentScheduler = new CommentScheduler({
+    resolveConnection: (accountId) => runtimes?.runtimeForAccount(accountId) ?? null,
+    pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
+    getSoul,
+    selectCurated: (accountId, type, limit) =>
+      curatedContentStore
+        ? curatedContentStore
+            .selectForCreation(accountId, type, limit)
+            .then((rows) => rows.map((r) => ({ title: r.title, topics: r.topics, collectCount: r.collectCount })))
+        : Promise.resolve([]),
+    llmFor: (accountId) => ({ complete: (prompt, opts) => llm.complete(prompt, { ...opts, accountId }) }),
+    dedupFor: (accountId) => ({
+      hasInteracted: (noteId, action) => riskStore.hasInteraction(accountId, noteId, action).catch(() => false),
+      recordInteraction: (noteId, action) =>
+        riskStore.recordInteraction(accountId, noteId, action, Date.now()).catch(() => {}),
+    }),
+    ...(commentApprovalEnabled ? { approval: commentApproval } : {}),
+    onTakeoverStart: onCommentTakeoverStart,
+    onTakeoverEnd: onCommentTakeoverEnd,
+    postResultCard: async (accountId, receipt) => {
+      const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
+      if (!chatId) {
+        console.warn('[comment] 无可用飞书群，结果卡片未发出');
+        return;
+      }
+      await messenger.sendCard(
+        chatId,
+        buildCommandResultCard({ command: '/comment', ok: receipt.ok, level: receipt.level, title: receipt.title, message: receipt.message, accountId }),
+      );
+    },
+    logger: console,
+  });
+  console.log(
+    `[aidcp-cloud] CommentScheduler 已就绪（飞书 /comment 即用${commentApprovalEnabled ? '' : '；⚠️ AIDCP_COMMENT_APPROVAL 未开 → 人审口未接线、评论一律不发'}）`,
+  );
 
   // A 阶段4 发帖触发器：复用已持久化的 ConceptStore/LikedNoteStore/PublishLogStore/RiskController 单例。
   // 缺概念池/点赞库（PG 不可用）则不建——manual /publish 回"未就绪"，不静默假发布。

@@ -212,6 +212,20 @@ export class ConnectionRuntimeRegistry {
     return n;
   }
 
+  /**
+   * 取该账号某在线连接的私有总线 + edgeId（change comment-search-command：按需评论任务接管边端后，
+   * 用私有总线等边端上报、用 edgeId 定向下发命令）。同账号多连接取**首个带 edgeId** 的；无匹配 → null。
+   */
+  runtimeForAccount(accountId: string): { bus: EventBus; edgeId?: string } | null {
+    let fallback: { bus: EventBus; edgeId?: string } | null = null;
+    for (const rt of this.bySession.values()) {
+      if (rt.accountId !== accountId) continue;
+      if (rt.edgeId) return { bus: rt.bus, edgeId: rt.edgeId };
+      fallback ??= { bus: rt.bus, edgeId: rt.edgeId };
+    }
+    return fallback;
+  }
+
   /** 当前活跃（已 startSession）的连接数。 */
   activeCount(): number {
     let n = 0;
