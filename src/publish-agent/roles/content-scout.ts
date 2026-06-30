@@ -6,6 +6,14 @@ import { buildScoutPrompt } from '../prompts.js';
 import { executeWithFallback } from '../retry-strategy.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
 
+/**
+ * 角色闸 + LLM 调用同放宽（env AIDCP_PUBLISH_SCOUT_TIMEOUT_MS）。ContentScout 调 qwen3.7-max，实测单次约 33s；
+ * 原 15s 角色闸会先于 LLM 完成砍断 → 角色超时 → 因 fallback:'default' 不写键，整条管道干等全局 180s 才 failed
+ * （2026-06-30 真机实测：run=2vwhy664，ContentScout failed after 15000ms，LLM 32.8s 才 ok，管道 180s 超时）。
+ * 90s 既盖住慢调用、又远低于全局闸；必须同时传给 chat()，否则 QwenClient 默认 60s 会先 abort（见 ContentCreator）。
+ */
+const SCOUT_TIMEOUT_MS = Number(process.env.AIDCP_PUBLISH_SCOUT_TIMEOUT_MS ?? 90000);
+
 export interface ContentScoutDeps {
   llmClient: ChatLlmClient;
   clock?: () => number;
@@ -16,8 +24,10 @@ export class ContentScoutRole extends BasePublishRole<TriggerInput, ScoutDecisio
   readonly config: RoleConfig = {
     name: 'ContentScout',
     watchKeys: ['trigger'],
-    timeoutMs: 15000,
-    fallback: 'default',
+    timeoutMs: SCOUT_TIMEOUT_MS,
+    // LLM 角色对齐 ContentCreator/TitleCreator 范式：角色闸超时（真卡死）即写中止信号、整条管道**即刻** failed，
+    // 不再像原 'default' 那样静默不写键、把流水线吊到全局 180s。正常 LLM 失败仍由 execute 内 executeWithFallback 兜底续跑。
+    fallback: 'abort',
   };
   protected readonly outputKey = 'scoutDecision' as const;
   private llmClient: ChatLlmClient;
@@ -35,10 +45,14 @@ export class ContentScoutRole extends BasePublishRole<TriggerInput, ScoutDecisio
     const prompt = buildScoutPrompt(input);
     const { result, usedFallback } = await executeWithFallback(
       async () => {
-        const raw = await this.llmClient.chat([
-          { role: 'system', content: '你是发布决策专家。分析数据后返回严格JSON。' },
-          { role: 'user', content: prompt },
-        ]);
+        const raw = await this.llmClient.chat(
+          [
+            { role: 'system', content: '你是发布决策专家。分析数据后返回严格JSON。' },
+            { role: 'user', content: prompt },
+          ],
+          // 与角色闸同放宽，否则 QwenClient 默认 60s 会先 abort（角色闸放宽也没用，见 ContentCreator）。
+          { timeoutMs: SCOUT_TIMEOUT_MS },
+        );
         return this.parseOutput(raw);
       },
       { default: this.getFallbackDecision(), reason: 'LLM failed' },
