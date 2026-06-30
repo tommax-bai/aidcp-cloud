@@ -1,5 +1,6 @@
 import type { PipelineContext } from '../pipeline-context.js';
 import type { PipelineFields } from '../types.js';
+import type { PipelineLogSink } from '../publish-pipeline-log-store.js';
 
 export interface RoleConfig {
   name: string;
@@ -20,8 +21,10 @@ export abstract class BasePublishRole<TInput, TOutput> {
   }
 
   /** 注册到 context 的 watch */
-  register(context: PipelineContext<PipelineFields>): void {
+  register(context: PipelineContext<PipelineFields>, opts?: { sink?: PipelineLogSink; runId?: string }): void {
     const { watchKeys, waitAll, name } = this.config;
+    const sink = opts?.sink;
+    const runId = opts?.runId ?? '';
 
     const onActivate = async (_value: unknown, ctx: PipelineContext<PipelineFields>) => {
       const startedAt = this.clock();
@@ -38,9 +41,16 @@ export abstract class BasePublishRole<TInput, TOutput> {
         const duration = this.clock() - startedAt;
         this.logger.log(`[${name}] completed in ${duration}ms`);
         ctx.write(this.outputKey as any, output as any);
+        // 角色执行日志（best-effort：不 await、吞错——绝不波及发布主链路）。change publish-pipeline-observability。
+        void sink
+          ?.append({ runId, roleName: name, triggeredAt: startedAt, completedAt: this.clock(), success: true, errorMessage: null, durationMs: duration })
+          .catch(() => {});
       } catch (err) {
         const duration = this.clock() - startedAt;
         this.logger.error(`[${name}] failed after ${duration}ms:`, err);
+        void sink
+          ?.append({ runId, roleName: name, triggeredAt: startedAt, completedAt: this.clock(), success: false, errorMessage: (err as Error).message, durationMs: duration })
+          .catch(() => {});
         await this.handleError(err as Error, context);
       }
     };

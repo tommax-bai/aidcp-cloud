@@ -1,5 +1,6 @@
 import { PipelineContext } from './pipeline-context.js';
 import type { BasePublishRole } from './roles/base-role.js';
+import type { PipelineLogSink } from './publish-pipeline-log-store.js';
 import type {
   PipelineFields,
   PipelineStatus,
@@ -16,6 +17,8 @@ export class PublishOrchestrator {
   private readonly clock: () => number;
   private readonly idGen: () => string;
   private readonly pipelineTimeoutMs: number;
+  /** 角色执行日志写入口（change publish-pipeline-observability）；未注入则不落库、行为不变。 */
+  private readonly pipelineLogSink?: PipelineLogSink;
 
   constructor(deps?: OrchestratorDeps) {
     this.logger = deps?.logger ?? console;
@@ -23,6 +26,7 @@ export class PublishOrchestrator {
     this.idGen = deps?.idGen ?? (() => Math.random().toString(36).slice(2, 10));
     // 只覆盖生成候审段（生成终稿 + 落库待审 + 发审批卡）；不再为内联人审放大。
     this.pipelineTimeoutMs = deps?.pipelineTimeoutMs ?? 120000; // 2分钟默认超时
+    this.pipelineLogSink = deps?.pipelineLogSink;
   }
 
   /** 注册角色 */
@@ -56,9 +60,9 @@ export class PublishOrchestrator {
     const context = new PipelineContext<PipelineFields>();
     this.activeContext = context;
 
-    // 注册所有角色的 watch
+    // 注册所有角色的 watch（带 sink + runId：每角色每次执行 best-effort 落 publish_pipeline_logs 一行）。
     for (const role of this.roles) {
-      role.register(context);
+      role.register(context, { sink: this.pipelineLogSink, runId });
     }
 
     // 写入 trigger 启动链式反应

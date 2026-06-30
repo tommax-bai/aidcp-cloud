@@ -61,28 +61,30 @@ export class InteractionAppraiserRole extends BaseRole {
 
   // ─── 事件处理 ─────────────────────────────────────────────
 
+  /**
+   * 统一「不互动」出口（change skip-reason-buckets）：每条 skip 打一行带**稳定 token** 的日志
+   * （`[interaction_appraiser] skip reason=<token>`），journalctl 可 grep 分桶,区分「设计内克制」
+   * (no_budget / model_pass) 与「故障吞赞」(note_data_unavailable / llm_error / parse_failed)。
+   * 事件 payload 形状不变(reason 仍是 string),下游(back-to-feed / comment-appraiser)消费不受影响。
+   */
+  private emitSkip(noteId: string, sourcePageType: 'feed' | 'search', reason: string): void {
+    this.log(`skip reason=${reason} note=${noteId}`);
+    this.emit('interaction.skipped', { noteId, sourcePageType, reason, ts: Date.now() });
+  }
+
   private async onReadingDone(payload: ReadingDonePayload): Promise<void> {
     const budget = this.getRemainingBudget();
 
-    // 无预算可用，直接 skip
+    // 无预算可用，直接 skip（设计内克制：预算耗尽）。
     if (budget.likes <= 0 && budget.collects <= 0) {
-      this.emit('interaction.skipped', {
-        noteId: payload.noteId,
-        sourcePageType: payload.sourcePageType,
-        reason: 'no_budget',
-        ts: Date.now(),
-      });
+      this.emitSkip(payload.noteId, payload.sourcePageType, 'no_budget');
       return;
     }
 
     const noteData = this.getNoteData(payload.noteId);
     if (!noteData) {
-      this.emit('interaction.skipped', {
-        noteId: payload.noteId,
-        sourcePageType: payload.sourcePageType,
-        reason: 'note_data_unavailable',
-        ts: Date.now(),
-      });
+      // 故障：读完瞬间笔记数据取不到（feed 已滚动、currentNote 已被下一篇覆盖）。
+      this.emitSkip(payload.noteId, payload.sourcePageType, 'note_data_unavailable');
       return;
     }
 
@@ -91,23 +93,21 @@ export class InteractionAppraiserRole extends BaseRole {
     try {
       raw = await this.decide(prompt);
     } catch {
-      this.emit('interaction.skipped', {
-        noteId: payload.noteId,
-        sourcePageType: payload.sourcePageType,
-        reason: 'llm_error',
-        ts: Date.now(),
-      });
+      // 故障：判定 LLM 超时/报错。
+      this.emitSkip(payload.noteId, payload.sourcePageType, 'llm_error');
       return;
     }
 
     const result = this.parseOutput(raw, budget, noteData);
-    if (!result || result.actions.length === 0) {
-      this.emit('interaction.skipped', {
-        noteId: payload.noteId,
-        sourcePageType: payload.sourcePageType,
-        reason: result?.reason ?? 'parse_failed',
-        ts: Date.now(),
-      });
+    if (!result) {
+      // 故障：模型没回合法 JSON。与「模型判 pass」分开计,才能区分吞赞 vs 克制。
+      this.emitSkip(payload.noteId, payload.sourcePageType, 'parse_failed');
+      return;
+    }
+    if (result.actions.length === 0) {
+      // 设计内克制：模型判 pass（多数普通笔记落这里）。LLM 自由文本原因只进日志、不当稳定 token 透出。
+      this.log(`model_pass detail=${result.reason}`);
+      this.emitSkip(payload.noteId, payload.sourcePageType, 'model_pass');
       return;
     }
 

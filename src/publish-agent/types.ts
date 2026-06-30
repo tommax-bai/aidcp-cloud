@@ -399,4 +399,6 @@ export interface OrchestratorDeps {
   clock?: () => number;
   idGen?: () => string;
   pipelineTimeoutMs?: number;
+  /** 角色执行日志写入口（change publish-pipeline-observability）；缺省则不落库、行为不变。 */
+  pipelineLogSink?: import('./publish-pipeline-log-store.js').PipelineLogSink;
 }

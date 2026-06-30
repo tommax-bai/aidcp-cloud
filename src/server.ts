@@ -93,6 +93,7 @@ import {
 } from './publish-agent/roles/index.js';
 import { PostProcessor } from './publish-agent/post-processor.js';
 import { PublishLogStore } from './publish-agent/publish-log-store.js';
+import { PublishPipelineLogStore } from './publish-agent/publish-pipeline-log-store.js';
 import { startPanelApi, parsePanelUsers, PgPanelStore } from './panel/index.js';
 import { PgAlertStore } from './alerts/index.js';
 import { ModelConfigStore } from './config/model-config-store.js';
@@ -330,6 +331,15 @@ async function main(): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
+  // 发布角色执行日志（publish_pipeline_logs 表，change publish-pipeline-observability）：复用同库连接配置。
+  // 表由 migration 0004 已建,无需 init;写入 best-effort、不阻塞发布。注入给 PublishOrchestrator 当 pipelineLogSink。
+  const publishPipelineLogStore = new PublishPipelineLogStore({
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
   try {
     await publishLogStore.init();
     console.log('[aidcp-cloud] PublishLogStore 已就绪');
@@ -475,6 +485,8 @@ async function main(): Promise<void> {
   const publishOrchestrator = new PublishOrchestrator({
     logger: console,
     pipelineTimeoutMs: Number(process.env.AIDCP_PUBLISH_PIPELINE_TIMEOUT_MS ?? 180_000),
+    // 角色执行日志写入口（死表 publish_pipeline_logs 激活）：每角色每次执行 best-effort 落一行。
+    pipelineLogSink: publishPipelineLogStore,
   });
   // 发布让位/续场（下发段用）：让位 → 结束该账号浏览会话（不续场、独占边缘）；解除 → 经续场各闸起新浏览。
   // 账号归属单槽：下发这一轮的 LLM/命令据此记账（下发段按账号串行，安全）。runtimes 前向引用（下方装配），
@@ -1223,7 +1235,19 @@ async function main(): Promise<void> {
       publishLog: publishLogStore,
       resolveRisk: resolveController,
       resolveSingleAccountId,
-      orchestrator: publishOrchestrator,
+      // 生成段账号归账（fix publish LLM account=default）：发布生成段严格串行（PublishOrchestrator 单跑闸），
+      // 用单槽 publishAccountRef 把真实账号穿进发布角色每次 LLM 调用,使生成段记账不再全记 default。
+      // 与下发段 onPublishTakeoverStart 同构（前后括住、finally 复位）；两段不重叠,互不踩 ref。
+      orchestrator: {
+        trigger: async (input) => {
+          publishAccountRef.current = input.accountId ?? 'default';
+          try {
+            return await publishOrchestrator.trigger(input);
+          } finally {
+            publishAccountRef.current = 'default';
+          }
+        },
+      },
       // 精选灵感语料（change curated-inspiration-corpus）：发帖创作正向素材来源；缺失则回落旧点赞素材路径。
       curatedStore: curatedContentStore,
       selectTopK: resolveCuratedGateConfig().selectTopK,

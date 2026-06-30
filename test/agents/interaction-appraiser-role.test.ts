@@ -345,7 +345,8 @@ describe('InteractionAppraiserRole', () => {
 
     assert.ok(captured, 'should emit interaction.skipped');
     assert.equal(captured!.noteId, 'note_1');
-    assert.equal(captured!.reason, '不够格');
+    // change skip-reason-buckets：模型判 pass 的 reason 现在是稳定 token 'model_pass'（LLM 自由文本只进日志,不当 reason 透出）。
+    assert.equal(captured!.reason, 'model_pass');
 
     role.unsubscribe();
   });

@@ -1077,11 +1077,16 @@ export class RoleDispatcher {
         for (const action of payload.actions) {
           // 风控闸：被拒则诚实跳过——不下发、不扣 budget（红线：不假成功、budget 不漂移）。
           if (!this.canInteract(action)) {
-            console.log(`[RoleDispatcher] 互动被风控拦截，跳过 action=${action} note=${payload.noteId}`);
+            // 稳定 token（change skip-reason-buckets）：与 interaction_appraiser 同口径,journalctl grep 'skip reason=' 可统一分桶。
+            console.log(`[interaction_appraiser] skip reason=risk_blocked action=${action} note=${payload.noteId}`);
             continue;
           }
           // 冷却闸（engagement-restraint）：未到点诚实跳过——不下发、不扣 budget（与风控拦截同口径，红线：不假成功）。
-          if (!this.cooldownPasses(action)) continue;
+          if (!this.cooldownPasses(action)) {
+            // 原本完全静默(直接 continue)→ 补一行稳定 token,让「冷却吞掉的互动」也可见。
+            console.log(`[interaction_appraiser] skip reason=cooldown action=${action} note=${payload.noteId}`);
+            continue;
+          }
           // 互动前犹豫时间（time directive）：边缘据此在执行前等待并叠抖动。
           // 下发被去重跳过（同账号已在途/已完成）则不扣会话预算（不漂移）。
           const sent = this.sendCommand({ action, params: { noteId: payload.noteId, thinkMs: this.thinkNow() } });
