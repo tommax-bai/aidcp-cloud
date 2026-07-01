@@ -61,34 +61,47 @@ export const CATEGORY_CATALOG: CategoryCatalogItem[] = [
  * 发布配图执行为图像模型（imageModel 全局配置，本期不在此 per-role 覆盖，仅列出以区分类型）。
  */
 export const ROLE_CATALOG: RoleCatalogItem[] = [
+  // 数组序 = 用户访问小红书的先后（浏览闭环真实触发链路：见 role-dispatcher + 各 agent 订阅的事件）。
+  // 后台「角色配置页」按此数组序渲染（API 原样透出、前端不再重排）。分类（category）仅作行内标签、
+  // 不再是排序键——「判定类」贯穿整个浏览流程、与访问顺序天然冲突，故取访问顺序、分类降级为标签。
+  // 发布段按 PipelineContext 的 watch/output 依赖链排（非线性硬编码序列）。
+  //
   // —— 浏览闭环（文本，经 BaseRole.decide → llm.complete）——
-  { roleId: 'browse:content_curator', displayName: '详情页内容粗筛', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
+  // A. 进信息流 / 列表页
   { roleId: 'browse:content_evaluator', displayName: '列表页卡片择选', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
   { roleId: 'browse:search_evaluator', displayName: '搜索关键词决策', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
+  // B. 点开笔记·读正文（三者同订阅 note.detail.arrived：content_curator 为主闸，另两为 fire-and-forget 旁路）
+  { roleId: 'browse:content_curator', displayName: '详情页内容粗筛', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
+  { roleId: 'browse:concept_extractor', displayName: '技术概念关键词抽取', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false }, // 仅概念池可用时注册
+  { roleId: 'browse:curated_note_evaluator', displayName: '精选准入·正文评估', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false }, // 仅精选库可用时注册
+  // C. 翻评论区（看别人评论）
+  { roleId: 'browse:comment_reviewer', displayName: '是否翻评论区判定', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
+  { roleId: 'browse:curated_comment_evaluator', displayName: '精选准入·评论评估', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false }, // 仅评论点赞+精选库时注册
+  // D. 点赞 / 收藏
   { roleId: 'browse:interaction_appraiser', displayName: '点赞收藏判定', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
-  { roleId: 'browse:follow_agent', displayName: '关注博主判定', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
-  { roleId: 'browse:author_evaluator', displayName: '是否进主页评估', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
+  // E. 自己发评论（点赞收藏后才进入的支线）
   { roleId: 'browse:comment_appraiser', displayName: '是否值得评论判定', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
   { roleId: 'browse:comment_composer', displayName: '评论文案撰写', group: 'browse', category: 'browse_compose', llmKind: 'text', tunableTemperature: true },
-  { roleId: 'browse:comment_reviewer', displayName: '是否翻评论区判定', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
   { roleId: 'browse:comment_de_ai_flavor', displayName: '评论去 AI 味改写', group: 'browse', category: 'browse_compose', llmKind: 'text', tunableTemperature: true },
-  { roleId: 'browse:concept_extractor', displayName: '技术概念关键词抽取', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
-  // 精选准入两段式·模型评估（change curated-admission-eval-roles，Phase 3）：判定类（确定性 JSON 输出，不调温度）。
-  { roleId: 'browse:curated_note_evaluator', displayName: '精选准入·正文评估', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
-  { roleId: 'browse:curated_comment_evaluator', displayName: '精选准入·评论评估', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
-  // 按需评论任务（change comment-search-command，飞书 /comment）：判定类（确定性结构化输出，不调温度）。
+  // F. 逛作者主页
+  { roleId: 'browse:author_evaluator', displayName: '是否进主页评估', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
+  { roleId: 'browse:follow_agent', displayName: '关注博主判定', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
+  // G. 独立命令式评论任务（change comment-search-command，飞书 /comment）：不在日常浏览闭环内，命令式调用、单列于末。
   { roleId: 'browse:comment_search_term_generator', displayName: '评论·搜索词生成', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
   { roleId: 'browse:comment_target_picker', displayName: '评论·搜索笔记甄选', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
-  // —— 发布管线（文本，经 llmClient.chat）——
+  // —— 发布管线（文本，经 llmClient.chat；顺序 = PipelineContext watch/output 依赖链）——
   { roleId: 'publish:ContentScout', displayName: '发布选题侦察', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: false },
   { roleId: 'publish:ContentCreator', displayName: '技术帖文案创作', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
-  { roleId: 'publish:TitleCreator', displayName: '技术帖标题创作', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
+  // 配图分支（createdContent 后分叉）：选题 → 指令 → 生成
   { roleId: 'publish:ImageSetPlanner', displayName: '配图选题（张数+主题）', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
   { roleId: 'publish:ImagePromptComposer', displayName: '配图指令（主题→万相prompt）', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
+  // 质量分支（与配图分支并行，数据先就绪）
   { roleId: 'publish:QualityScorer', displayName: '内容质量评分', group: 'publish', category: 'publish_gate', llmKind: 'text', tunableTemperature: false },
-  { roleId: 'publish:ApprovalGatekeeper', displayName: '发布审批裁决', group: 'publish', category: 'publish_gate', llmKind: 'text', tunableTemperature: false },
-  // —— 发布配图执行（图像，imageModel 全局配置；本期不开放 per-role 覆盖，列出仅为区分类型）——
+  // 发布配图执行（图像，imageModel 全局配置；本期不开放 per-role 覆盖，列出仅为区分类型）
   { roleId: 'publish:ImageGenerator', displayName: '配图生成执行', group: 'publish', category: 'image', llmKind: 'image', tunableTemperature: false },
+  // 汇合后出稿 / 审批（TitleCreator 与 ApprovalGatekeeper 同 watch assembledContent，为发布执行前最后两步）
+  { roleId: 'publish:TitleCreator', displayName: '技术帖标题创作', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
+  { roleId: 'publish:ApprovalGatekeeper', displayName: '发布审批裁决', group: 'publish', category: 'publish_gate', llmKind: 'text', tunableTemperature: false },
 ];
 
 const BY_ID = new Map(ROLE_CATALOG.map((r) => [r.roleId, r]));
