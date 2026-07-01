@@ -6,6 +6,10 @@ import { buildAssemblerPrompt } from '../prompts.js';
 import { executeWithFallback } from '../retry-strategy.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
 
+// change raise-model-call-timeouts-for-thinking-models：角色闸 ≥ 单次模型天花板（180s）且同传进 chat()，
+// 使一次合法的 thinking 质量评审不被角色秒表提前掐断（旧 20s 峰值必误超时→退化公式打分）。env 可调。
+const QUALITY_TIMEOUT_MS = Number(process.env.AIDCP_PUBLISH_QUALITY_TIMEOUT_MS ?? 180_000);
+
 interface QualityScorerInput {
   created: CreatedContent;
   cleaned: CleanedContent;
@@ -26,7 +30,7 @@ export class QualityScorerRole extends BasePublishRole<QualityScorerInput, Quali
   readonly config: RoleConfig = {
     name: 'QualityScorer',
     watchKeys: ['cleanedContent'],
-    timeoutMs: 20000,
+    timeoutMs: QUALITY_TIMEOUT_MS,
     fallback: 'default',
   };
   protected readonly outputKey = 'qualityReport' as const;
@@ -53,7 +57,7 @@ export class QualityScorerRole extends BasePublishRole<QualityScorerInput, Quali
         const raw = await this.llmClient.chat([
           { role: 'system', content: '你是内容质量评审员。严格返回JSON。' },
           { role: 'user', content: buildAssemblerPrompt(input.created, ppResult) },
-        ]);
+        ], { timeoutMs: QUALITY_TIMEOUT_MS });
         return this.parseReviewOutput(raw);
       },
       // 降级：逐字沿用历史公式 round((1-aiScore)*70)（无 AI 味时基准 70；绝不硬编码满分）。见 design Open Questions。

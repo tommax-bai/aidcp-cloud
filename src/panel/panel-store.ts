@@ -71,6 +71,14 @@ export type TodayTotals = Record<RiskAction, number>;
 export interface AccountTotals {
   accountId: string;
   totals: TodayTotals;
+  /**
+   * 当前 day 窗口生效配额上限（每动作，change decouple-quota-hit-from-risk）：取自该账号
+   * `RiskController.effectiveQuotas().day`，随风控态 / 档位变化（restricted 互动上限为 0）。
+   * 面板只读组合、绝不写风控态；拿不到 controller 时诚实缺省（不编造上限）。
+   */
+  quotas?: TodayTotals;
+  /** 今日已撞当日上限（used >= cap）的动作，供前端把该格标红（节奏用量、非平台风险）。 */
+  saturated?: RiskAction[];
 }
 
 /** 告警事件（V1 task 9.5；面板直接 SELECT alerts 表，design D2）。 */

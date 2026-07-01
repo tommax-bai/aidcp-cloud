@@ -25,7 +25,9 @@ export class PublishOrchestrator {
     this.clock = deps?.clock ?? Date.now;
     this.idGen = deps?.idGen ?? (() => Math.random().toString(36).slice(2, 10));
     // 只覆盖生成候审段（生成终稿 + 落库待审 + 发审批卡）；不再为内联人审放大。
-    this.pipelineTimeoutMs = deps?.pipelineTimeoutMs ?? 120000; // 2分钟默认超时
+    // change raise-model-call-timeouts-for-thinking-models：兜底默认与 server.ts 生效值对齐（600s），
+    // 须 ≥ 关键路径各模型角色预算之和（容器不得小于内容物）。
+    this.pipelineTimeoutMs = deps?.pipelineTimeoutMs ?? 600_000;
     this.pipelineLogSink = deps?.pipelineLogSink;
   }
 

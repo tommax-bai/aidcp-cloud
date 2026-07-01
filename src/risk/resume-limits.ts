@@ -16,14 +16,22 @@ export const DEFAULT_REST_RATIO_PCT = 10;
 /** 休息比例上限（校验用，防误填天文数字）：最多 10×（1000%）。 */
 export const REST_RATIO_PCT_MAX = 1000;
 
-/** 看门狗恢复轻推阈值写死默认（毫秒，~2min）。须 > 详情页停留上限（pacing capMs=90s）以免正常长停留误触。 */
-export const DEFAULT_IDLE_NUDGE_MS = 130_000;
+/**
+ * 看门狗恢复轻推阈值写死默认（毫秒，~4min）。change raise-model-call-timeouts-for-thinking-models：
+ * MUST 严格大于「单次模型调用天花板（180s）」与「详情页停留上限（pacing capMs=90s）」之更大者，
+ * 否则一次进行中的合法 thinking 决策（其间无 edge 活动、空转计时在涨）会被中途注入恢复滚动、滚走正要返回决策的页面。
+ * 抬高单次模型天花板时 MUST 同步抬高本值以守该不变量。
+ */
+export const DEFAULT_IDLE_NUDGE_MS = 240_000;
 
-/** 看门狗放弃结束阈值写死默认（毫秒，1h）。仅戳不活的真死局才回收。 */
+/** 看门狗放弃结束阈值写死默认（毫秒，1h）。仅戳不活的真死局才回收。MUST 大于 idle-nudge。 */
 export const DEFAULT_IDLE_END_MS = 3_600_000;
 
-/** 轻推阈值下限（毫秒）：必须严格大于详情页停留上限 90s，否则正常长停留会误触 nudge。 */
-export const IDLE_NUDGE_MIN_MS = 91_000;
+/**
+ * 轻推阈值下限（毫秒）。change raise-model-call-timeouts-for-thinking-models：MUST ≥ 单次模型调用天花板（180s），
+ * 使运营经后台绝不能把轻推配到低于一次合法模型调用（旧 91s 只挡详情页停留上限，已不足以挡 thinking 决策）。
+ */
+export const IDLE_NUDGE_MIN_MS = 200_000;
 
 /** 看门狗阈值合理上限（毫秒，24h）：防误填。 */
 export const IDLE_MS_MAX = 24 * 3_600_000;

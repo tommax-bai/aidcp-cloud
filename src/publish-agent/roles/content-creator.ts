@@ -7,7 +7,7 @@ import { executeWithRetry } from '../retry-strategy.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
 
 // 内容生成超时（角色闸 + LLM 调用同值）：放宽到 120s，容纳较强/较慢模型（如 qwen-max 系）。env 可调。
-const CONTENT_TIMEOUT_MS = Number(process.env.AIDCP_PUBLISH_CONTENT_TIMEOUT_MS ?? 120000);
+const CONTENT_TIMEOUT_MS = Number(process.env.AIDCP_PUBLISH_CONTENT_TIMEOUT_MS ?? 180_000);
 
 export interface ContentCreatorDeps {
   llmClient: ChatLlmClient;

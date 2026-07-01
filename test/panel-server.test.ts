@@ -494,3 +494,55 @@ test('HTTP 精选内容后台管理：未注入 503 / 缺账号=全账号视图 
     await h.close();
   }
 });
+
+async function loginToken(base: string): Promise<string> {
+  const login = await fetch(`${base}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+  });
+  return ((await login.json()) as { token: string }).token;
+}
+
+type SummaryByAccount = {
+  totalsByAccount: { accountId: string; totals: Record<string, number>; quotas?: Record<string, number>; saturated?: string[] }[];
+};
+
+test('summary 按账号带 day 上限 + 饱和标记（change decouple-quota-hit-from-risk）', async () => {
+  const h = await startPanelApi(deps, makeConfig());
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const auth = { authorization: `Bearer ${await loginToken(base)}` };
+    const sum = (await (await fetch(`${base}/api/dashboard/summary`, { headers: auth })).json()) as SummaryByAccount;
+    const entry = sum.totalsByAccount[0];
+    // 默认 controller = normal 档 → effectiveQuotas().day 为 normal 每日配额
+    assert.equal(entry.quotas?.like, 50);
+    assert.equal(entry.quotas?.view, 150);
+    assert.equal(entry.quotas?.publish, 1);
+    // 用量 publish=1 >= cap 1 → 饱和标红；like=10 < 50 → 不饱和
+    assert.ok(entry.saturated?.includes('publish'), 'publish 撞当日上限应标饱和');
+    assert.ok(!entry.saturated?.includes('like'), 'like 未到上限不应标饱和');
+  } finally {
+    await h.close();
+  }
+});
+
+test('summary 上限随风控态收敛：restricted 账号互动上限为 0，且组合只读不改风控态', async () => {
+  const restricted = new RiskController({ accountId: 'r' });
+  await restricted.applySignal({ kind: 'confirmed' }); // normal → restricted（平台硬信号）
+  assert.equal(restricted.getState().status, 'restricted');
+  const depsR = { ...(deps as object), riskRegistry: { getController: async () => restricted } } as unknown as PanelDeps;
+  const h = await startPanelApi(depsR, makeConfig());
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const auth = { authorization: `Bearer ${await loginToken(base)}` };
+    const sum = (await (await fetch(`${base}/api/dashboard/summary`, { headers: auth })).json()) as SummaryByAccount;
+    const entry = sum.totalsByAccount[0];
+    assert.equal(entry.quotas?.like, 0, 'restricted 互动上限如实为 0');
+    assert.ok((entry.quotas?.view ?? 0) > 0, 'restricted 浏览仍有额度');
+    // 只读：拉 summary 绝不改风控态
+    assert.equal(restricted.getState().status, 'restricted', '组合只读、不触发状态迁移');
+  } finally {
+    await h.close();
+  }
+});

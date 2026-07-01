@@ -15,6 +15,10 @@ import type { ChatLlmClient } from '../../llm/qwen.js';
 
 const IMAGE_STYLES: NonNullable<ImagePlan['imageStyle']>[] = ['photography', 'illustration', 'dataviz', 'isometric'];
 
+// change raise-model-call-timeouts-for-thinking-models：每主题一条 prompt 是文本 LLM 调用（并行 Promise.all，
+// 墙钟=最慢单次），角色闸 ≥ 单次模型天花板（180s）且同传进每次 chat()（旧 45s 峰值必误超时→退回主体文本）。env 可调。
+const IMAGE_PROMPT_TIMEOUT_MS = Number(process.env.AIDCP_PUBLISH_IMGPROMPT_TIMEOUT_MS ?? 180_000);
+
 export interface ImagePromptComposerDeps {
   llmClient: ChatLlmClient;
   /** 近重复 Jaccard 阈值（主体 token 集），≥ 此值判近重复丢弃（默认 0.85）。 */
@@ -32,7 +36,7 @@ export class ImagePromptComposerRole extends BasePublishRole<ImageSetPlan, Image
   readonly config: RoleConfig = {
     name: 'ImagePromptComposer',
     watchKeys: ['imageSetPlan'],
-    timeoutMs: 45000,
+    timeoutMs: IMAGE_PROMPT_TIMEOUT_MS,
     fallback: 'default',
   };
   protected readonly outputKey = 'imagePlan' as const;
@@ -106,7 +110,7 @@ export class ImagePromptComposerRole extends BasePublishRole<ImageSetPlan, Image
       const raw = await this.llmClient.chat([
         { role: 'system', content: '你是文生图 prompt 工程师。严格返回JSON。' },
         { role: 'user', content: buildImagePromptComposerPrompt(theme, styleHint) },
-      ]);
+      ], { timeoutMs: IMAGE_PROMPT_TIMEOUT_MS });
       const match = raw.match(/\{[\s\S]*\}/);
       if (!match) throw new Error('no json');
       const obj = JSON.parse(match[0]) as { imagePrompt?: unknown; imageStyle?: unknown };

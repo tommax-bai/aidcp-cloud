@@ -19,6 +19,7 @@ import type { PanelDeps, PanelConfig, PanelHandle, SessionLimitPatchInput, Resum
 import { startPanelWs, type PanelWsHandle } from './panel-ws.js';
 import type { PublishApprovalPayload } from '../feishu/index.js';
 import type { RiskSignalKind, RiskQuotaLevel } from '../risk/index.js';
+import { RISK_ACTIONS } from '../risk/index.js';
 import { isKnownRole } from '../config/role-catalog.js';
 import { isAllowedCredential } from '../llm/index.js';
 
@@ -121,12 +122,26 @@ function createRequestHandler(
         deps.panelStore.todayPublishCount(),
         deps.panelStore.listAlerts({ limit: 50 }),
       ]);
+      // 每账号补当前 day 窗口生效上限 + 已撞顶动作（change decouple-quota-hit-from-risk）：经 registry
+      // （缓存 controller）现读 effectiveQuotas().day，随风控态/档位变化；只读、绝不写风控态；拿不到诚实缺省。
+      const totalsByAccountWithQuotas = await Promise.all(
+        totalsByAccount.map(async (entry) => {
+          try {
+            const dayQuotas = (await deps.riskRegistry.getController(entry.accountId)).effectiveQuotas().day;
+            const saturated = RISK_ACTIONS.filter((a) => entry.totals[a] >= dayQuotas[a]);
+            return { ...entry, quotas: dayQuotas, saturated };
+          } catch {
+            return entry; // 诚实回落：拿不到 controller 就不带上限（前端只显数字）
+          }
+        }),
+      );
       sendJson(res, 200, {
         asOf: Date.now(),
         edgesOnline: deps.edgeServer.onlineEdgeCount(), // staleness-aware（死连接不算在线，D9）
         totals: { ...totals, publish: todayPublishes },
         // V1 task 9.6：归因已在事件上流通（interaction.occurred 带 accountId），上真按账号切片。
-        totalsByAccount,
+        // decouple-quota-hit-from-risk：每账号带 day 上限 + 饱和标记（用量可见）。
+        totalsByAccount: totalsByAccountWithQuotas,
         likeRate,
         accounts,
         alerts, // V1 task 9.5：真告警（未解决），来自 alerts 表

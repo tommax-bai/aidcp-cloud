@@ -7,7 +7,7 @@ export { ImageSetPlannerRole } from './image-set-planner.js';
 export { ImagePromptComposerRole } from './image-prompt-composer.js';
 export { ImageGeneratorRole } from './image-generator.js';
 export { CoverSelectorRole } from './cover-selector.js';
-export { ContentCleanerRole } from './content-cleaner.js';
+export { ContentCleanerRole, CLEAN_TIMEOUT_MS } from './content-cleaner.js';
 export { AiFlavorScorerRole } from './ai-flavor-scorer.js';
 export { QualityScorerRole } from './quality-scorer.js';
 export { ContentAssemblerRole } from './content-assembler.js';

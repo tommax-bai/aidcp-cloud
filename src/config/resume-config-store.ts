@@ -181,7 +181,8 @@ export class ResumeConfigStore implements ResumeConfigProvider {
 
   idleNudgeMs(): number {
     const ms = validInt(this.cache?.idleNudgeMs ?? undefined);
-    // 缺 / 非法 / 低于详情页停留上限 → 回落写死默认（绝不让 nudge 在正常长停留中误触）。
+    // 缺 / 非法 / 低于轻推下限（≥单次模型天花板 180s，change raise-model-call-timeouts-for-thinking-models）→ 回落写死默认。
+    // 读时钳制：即使 DB 里存着旧值（如 130s/91s），也自动抬到 DEFAULT_IDLE_NUDGE_MS，守「轻推 > 模型天花板」不变量、绝不误触。
     if (ms === undefined || ms < IDLE_NUDGE_MIN_MS) return DEFAULT_IDLE_NUDGE_MS;
     return ms;
   }

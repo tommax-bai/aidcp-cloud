@@ -74,14 +74,15 @@ test('零回归：全局表为空 → 全回落写死默认（rest 10% / 全天 
 test('命中全局行 → 各项用库值', async () => {
   const { pool } = fakePool({
     rest_ratio_pct: 25, active_window_start_min: 480, active_window_end_min: 1320,
-    daily_max_sessions: 6, daily_max_minutes: 120, idle_nudge_ms: 120_000, idle_end_ms: 1_800_000,
+    daily_max_sessions: 6, daily_max_minutes: 120, idle_nudge_ms: 300_000, idle_end_ms: 1_800_000,
   });
   const store = new ResumeConfigStore({ pool });
   await store.init();
   assert.equal(store.restRatio(), 0.25);
   assert.deepEqual(store.activeWindow(), { startMin: 480, endMin: 1320 });
   assert.deepEqual(store.dailyCaps(), { maxSessions: 6, maxMinutes: 120 });
-  assert.equal(store.idleNudgeMs(), 120_000);
+  // change raise-model-call-timeouts-for-thinking-models：库值须 ≥ 轻推下限（200s，≥单次模型天花板）方原样取用。
+  assert.equal(store.idleNudgeMs(), 300_000);
   assert.equal(store.idleEndMs(), 1_800_000);
 });
 
@@ -97,7 +98,7 @@ test('看门狗不变量：放弃 <= 轻推 → 放弃回落写死默认（end �
   assert.ok(store.idleEndMs() > store.idleNudgeMs(), 'end 必严格大于 nudge');
 });
 
-test('轻推低于详情页停留上限（< 91s）→ 回落写死默认（绝不误触）', async () => {
+test('轻推低于下限（< 单次模型天花板/200s）→ 回落写死默认（绝不误触/绝不短于合法模型调用）', async () => {
   const { pool } = fakePool({
     rest_ratio_pct: null, active_window_start_min: null, active_window_end_min: null,
     daily_max_sessions: null, daily_max_minutes: null, idle_nudge_ms: 50_000, idle_end_ms: 3_600_000,

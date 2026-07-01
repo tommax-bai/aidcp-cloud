@@ -99,7 +99,7 @@ test('分钟越界（> 1440）→ invalid_value', async () => {
   assert.equal((r as { reason: string }).reason, 'invalid_value');
 });
 
-test('轻推低于下限（< 91s）→ invalid_value（facade 拒，避免误触）', async () => {
+test('轻推低于下限（< 单次模型天花板/200s）→ invalid_value（facade 拒，避免短于合法模型调用/误触）', async () => {
   const { store } = fakeStore();
   const panel = createResumeConfigPanel({ store });
   const r = await panel.set({ idleNudgeMs: 50_000 }, 'a');

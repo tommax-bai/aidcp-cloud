@@ -10,6 +10,13 @@ export interface PostProcessorLike {
 }
 
 /**
+ * 去 AI 味清洗超时（change raise-model-call-timeouts-for-thinking-models）。
+ * 实际模型调用在 server.ts 注入的 PostProcessor.rewrite（llm.complete）里，故此常量**同时**给角色闸与该 complete() 的超时，
+ * 两处共读、防漂移；MUST ≥ 单次模型调用天花板（180s），角色闸绝不短于所包裹的模型预算。重写比普通生成更慢，故给足。
+ */
+export const CLEAN_TIMEOUT_MS = Number(process.env.AIDCP_PUBLISH_CLEAN_TIMEOUT_MS ?? 180_000);
+
+/**
  * ContentCleaner — 去 AI 味清洗（A 阶段2，从 ContentAssembler 拆出 Step 1）。
  * 复用现有 PostProcessor（不改其实现），产出 cleanedContent（含 aiScore，供下游评分/组装）。
  * R1 死锁防护：execute 用 executeWithFallback 兜底，无论成败必写 cleanedContent 键。
@@ -24,7 +31,7 @@ export class ContentCleanerRole extends BasePublishRole<CreatedContent, CleanedC
   readonly config: RoleConfig = {
     name: 'ContentCleaner',
     watchKeys: ['createdContent'],
-    timeoutMs: 20000,
+    timeoutMs: CLEAN_TIMEOUT_MS,
     fallback: 'default',
   };
   protected readonly outputKey = 'cleanedContent' as const;

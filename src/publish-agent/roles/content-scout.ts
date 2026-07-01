@@ -12,7 +12,7 @@ import type { ChatLlmClient } from '../../llm/qwen.js';
  * （2026-06-30 真机实测：run=2vwhy664，ContentScout failed after 15000ms，LLM 32.8s 才 ok，管道 180s 超时）。
  * 90s 既盖住慢调用、又远低于全局闸；必须同时传给 chat()，否则 QwenClient 默认 60s 会先 abort（见 ContentCreator）。
  */
-const SCOUT_TIMEOUT_MS = Number(process.env.AIDCP_PUBLISH_SCOUT_TIMEOUT_MS ?? 90000);
+const SCOUT_TIMEOUT_MS = Number(process.env.AIDCP_PUBLISH_SCOUT_TIMEOUT_MS ?? 180_000);
 
 export interface ContentScoutDeps {
   llmClient: ChatLlmClient;

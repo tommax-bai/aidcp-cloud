@@ -20,7 +20,7 @@ import type { ChatLlmClient } from '../../llm/qwen.js';
 /** 标题可见字符硬上限：18（提示词目标 18；XHS >20 静默拒发，云端切 18 留 2 字余量吸收计数分歧）。 */
 const TITLE_MAX = 18;
 /** 标题生成超时（角色闸 + LLM 调用同值）：120s，容纳较强/较慢模型。env 可调。 */
-const TITLE_TIMEOUT_MS = Number(process.env.AIDCP_PUBLISH_TITLE_TIMEOUT_MS ?? 120000);
+const TITLE_TIMEOUT_MS = Number(process.env.AIDCP_PUBLISH_TITLE_TIMEOUT_MS ?? 180_000);
 /** 语义重试次数（首次 + 重试 ≤2）。 */
 const MAX_ATTEMPTS = 3;
 /** TitleCreator 专用 system（含「标题创作」标识，与 ContentCreator 的「小红书技术博主」相区分，便于按 system 路由的桩）。 */

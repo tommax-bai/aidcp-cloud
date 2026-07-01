@@ -14,6 +14,10 @@ import type { ChatLlmClient } from '../../llm/qwen.js';
 
 const DEFAULT_MAX_IMAGES = 3;
 
+// change raise-model-call-timeouts-for-thinking-models：配图选题是文本 LLM 调用，角色闸 ≥ 单次模型天花板（180s）
+// 且同传进 chat()（旧 30s 峰值必误超时→退化为 1 张通用主题）。env 可调。注意：这是文本选题，非万相生图（生图闸另计）。
+const IMAGE_SET_PLAN_TIMEOUT_MS = Number(process.env.AIDCP_PUBLISH_IMGSETPLAN_TIMEOUT_MS ?? 180_000);
+
 function resolveMaxImages(): number {
   const raw = Number(process.env.AIDCP_PUBLISH_MAX_IMAGES);
   const n = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_MAX_IMAGES;
@@ -38,7 +42,7 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
   readonly config: RoleConfig = {
     name: 'ImageSetPlanner',
     watchKeys: ['createdContent'],
-    timeoutMs: 30000,
+    timeoutMs: IMAGE_SET_PLAN_TIMEOUT_MS,
     fallback: 'default',
   };
   protected readonly outputKey = 'imageSetPlan' as const;
@@ -61,7 +65,7 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
         const raw = await this.llmClient.chat([
           { role: 'system', content: '你是配图选题师。严格返回JSON。' },
           { role: 'user', content: buildImageSetPlanPrompt(input, this.maxImages) },
-        ]);
+        ], { timeoutMs: IMAGE_SET_PLAN_TIMEOUT_MS });
         return this.parse(raw);
       },
       { default: null, reason: 'ImageSetPlanner LLM failed' },
