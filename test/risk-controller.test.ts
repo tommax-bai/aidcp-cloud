@@ -24,6 +24,27 @@ test('dailyRemaining: comment 按当日配额递减、用尽即 0（评论每日
   assert.equal(c.dailyRemaining('comment'), 0);
 });
 
+test('record 撞配额被拒是背压、绝不升级威胁态（change decouple-quota-hit-from-risk）', async () => {
+  let now = 0;
+  const c = new RiskController({ quotaLevel: 'conservative', clock: () => now, minViewsForLikeRatio: 0 });
+  // 用尽当日 comment 配额（保守档 3），每次跨小时窗只留当日计数
+  for (let i = 0; i < DAILY_QUOTAS.conservative.comment; i++) {
+    assert.equal(await c.record('comment'), true);
+    now += 3_600_001;
+  }
+  assert.equal(c.canDo('comment'), false);
+  const before = c.getState();
+  // 反复撞配额：始终返 false，且威胁态 / 信号计数 / 最后信号时间都不动（不自升 warned/restricted）
+  for (let i = 0; i < 5; i++) {
+    assert.equal(await c.record('comment'), false, '撞配额 record 返 false（背压）');
+    now += 1000;
+  }
+  const after = c.getState();
+  assert.equal(after.status, 'normal', '撞配额绝不把 normal 推向 warned/restricted');
+  assert.equal(after.signalCount, before.signalCount, '撞配额不 bump signalCount');
+  assert.equal(after.lastSignalAt, before.lastSignalAt, '撞配额不刷新 lastSignalAt（不重置恢复窗口）');
+});
+
 test('滑动窗口按动作分别计数并自动淘汰过期事件', () => {
   let now = 1_000_000;
   const counter = new SlidingWindowCounter({ clock: () => now });

@@ -18,7 +18,7 @@ export function createRiskState(accountId: string, now = Date.now()): RiskState 
 export class RiskStateMachine {
   transition(state: RiskState, signal: RiskSignal, now = signal.at ?? Date.now()): RiskState {
     const nextStatus = this.nextStatus(state, signal, now);
-    const isRiskSignal = signal.kind === 'light' || signal.kind === 'quota_exceeded' || signal.kind === 'confirmed' || signal.kind === 'fatal';
+    const isRiskSignal = signal.kind === 'light' || signal.kind === 'confirmed' || signal.kind === 'fatal';
     // operator_override_recover：特权强制 normal，清零信号计数与窗口（绕过恢复窗口）。
     const forcedRecover = signal.kind === 'operator_override_recover';
     return {
@@ -51,7 +51,9 @@ export class RiskStateMachine {
     if (signal.kind === 'manual_unfreeze' && state.status === 'frozen') return 'restricted';
     if (signal.kind === 'recovered') return this.recoverIfEligible(state, now).status;
     if (signal.kind === 'confirmed') return state.status === 'normal' ? 'restricted' : state.status === 'frozen' ? 'frozen' : 'restricted';
-    if (signal.kind === 'light' || signal.kind === 'quota_exceeded') {
+    // 软信号（未知阻断浮层）逐级升：normal→warned→restricted。配额饱和不再是软信号（见
+    // change decouple-quota-hit-from-risk）——威胁态只由平台可观测信号升级。
+    if (signal.kind === 'light') {
       if (state.status === 'normal') return 'warned';
       if (state.status === 'warned') return 'restricted';
     }

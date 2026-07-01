@@ -39,7 +39,8 @@ export interface RiskState {
 
 export type RiskSignalKind =
   | 'light'
-  | 'quota_exceeded'
+  // 注意：不含 'quota_exceeded'——撞自己的速率配额是节奏背压、不是风控信号（change
+  // decouple-quota-hit-from-risk）。威胁态只由平台可观测信号 + 运营手动信号驱动。
   | 'confirmed'
   | 'fatal'
   | 'recovered'

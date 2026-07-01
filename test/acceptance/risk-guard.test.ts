@@ -55,4 +55,20 @@ describe('AC-RISK 风控安全闸（绝不自残）', () => {
     await rc.applySignal({ kind: 'fatal' });
     assert.equal(rc.getState().status, 'frozen');
   });
+
+  it('AC-RISK-04 撞自己的配额是背压、绝不自升威胁态（change decouple-quota-hit-from-risk）', async () => {
+    const rc = new RiskController({ quotaLevel: 'conservative' });
+    // 用尽 comment 配额
+    for (let i = 0; i < 1000 && rc.canDo('comment'); i++) await rc.record('comment');
+    assert.equal(rc.canDo('comment'), false, '达上限后必被拒');
+    const before = rc.getState();
+    // 反复撞配额：始终 false，威胁态 / 信号计数 / 恢复窗口都不受影响（不自锁）
+    for (let i = 0; i < 10; i++) {
+      assert.equal(await rc.record('comment'), false, '超限 record 返 false（背压）');
+    }
+    const after = rc.getState();
+    assert.equal(after.status, 'normal', '撞配额绝不把 normal 推向 warned/restricted（不自残/不自锁）');
+    assert.equal(after.signalCount, before.signalCount, '撞配额不 bump signalCount');
+    assert.equal(after.lastSignalAt, before.lastSignalAt, '撞配额不刷新 lastSignalAt（不重置恢复窗口）');
+  });
 });

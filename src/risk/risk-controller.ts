@@ -85,8 +85,11 @@ export class RiskController {
   }
 
   async record(action: RiskAction): Promise<boolean> {
+    // 撞自己的速率配额是「节奏背压」，不是风控信号：被拒只返 false（canDo 已拦住动作），
+    // 绝不 applySignal 自升威胁态（change decouple-quota-hit-from-risk）。威胁态只由平台可观测
+    // 信号（验证码/阻断浮层/运营手动）驱动。过载节奏的可见性改由接线层（server.ts 的
+    // interaction.occurred）经 explain() 判 quota:hour/minute 发低优先级运维告警。
     if (!this.canDo(action)) {
-      await this.applySignal({ kind: 'quota_exceeded' });
       return false;
     }
     const now = this.clock();
