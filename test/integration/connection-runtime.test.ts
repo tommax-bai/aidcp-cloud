@@ -92,6 +92,25 @@ test('空白 accountId 同样被拒（trim 后为空）', async () => {
   assert.equal(h.registry.runtimeCount(), 0);
 });
 
+test('edge-command-target-guard R1：缺 edgeId 握手被当配置错误拒绝，不建运行时（无可路由出站身份）', async () => {
+  const h = makeHarness();
+  const session: EdgeSession = { sessionId: 's1', accountId: 'acctA' }; // 有账号、无 edgeId
+  const outcome = await h.registry.onHandshake(session);
+  assert.equal(outcome.ok, false);
+  assert.equal((outcome as { code: string }).code, 'missing_edge_id');
+  assert.equal(h.registry.runtimeCount(), 0); // 不建运行时
+  assert.equal(h.configErrors.length, 1); // 发配置告警
+  assert.equal(h.built.length, 0); // 未建 dispatcher
+});
+
+test('edge-command-target-guard R1：空白 edgeId 同样被拒（trim 后为空）', async () => {
+  const h = makeHarness();
+  const outcome = await h.registry.onHandshake({ sessionId: 's1', edgeId: '   ', accountId: 'acctA' });
+  assert.equal(outcome.ok, false);
+  assert.equal((outcome as { code: string }).code, 'missing_edge_id');
+  assert.equal(h.registry.runtimeCount(), 0);
+});
+
 test('合法账号握手：登记账号 + 解析 controller + 建私有总线运行时（setup + setCurrentAccountId）', async () => {
   const h = makeHarness();
   const session: EdgeSession = { sessionId: 's1', edgeId: 'eA', accountId: 'acctA' };

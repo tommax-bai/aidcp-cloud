@@ -21,7 +21,10 @@ import type { EventBus } from '../event-bus/index.js';
 import type { CommentCandidateCard } from '../agents/comment-target-picker.js';
 import type { NoteForComment, OnPageComment } from './comment-task-runner.js';
 
-/** 边端推送（与 EdgeCloudServer.pushToEdges 同构）。 */
+/**
+ * 边端推送（与 EdgeCloudServer.pushToEdges 同构）。
+ * edge-command-target-guard：缺目标 edgeId 时绝不广播——返回 0 视为诚实失败（送达 0 → 该步空 / 失败，不假成功）。
+ */
 export interface EdgePusher {
   pushToEdges(envelope: unknown, edgeId?: string): number;
 }

@@ -44,16 +44,16 @@ test('暂停后普通指令被丢弃、session.end 必达、恢复后续发', as
   const scroll = makeEnvelope('page.scroll', 'c1', 0, {});
   const end = makeEnvelope('session.end', 'c2', 0, { reason: 'x' });
 
-  // 暂停前：普通指令可达
-  assert.equal(s.pushToEdges(scroll), 1);
+  // 暂停前：普通指令可达（定向下发，edge-command-target-guard 后须显式带目标 edgeId）
+  assert.equal(s.pushToEdges(scroll, 'edge-1'), 1);
 
   s.pauseEdge('edge-1');
   // 暂停中：普通指令被丢弃；session.end 仍必达（不死锁）
-  assert.equal(s.pushToEdges(scroll), 0, '暂停的 edge 不应收到普通指令');
-  assert.equal(s.pushToEdges(end), 1, 'session.end 必达，绕过暂停闸');
+  assert.equal(s.pushToEdges(scroll, 'edge-1'), 0, '暂停的 edge 不应收到普通指令');
+  assert.equal(s.pushToEdges(end, 'edge-1'), 1, 'session.end 必达，绕过暂停闸');
 
   s.resumeEdge('edge-1');
-  assert.equal(s.pushToEdges(scroll), 1, '恢复后普通指令应再次可达');
+  assert.equal(s.pushToEdges(scroll, 'edge-1'), 1, '恢复后普通指令应再次可达');
 
   ws.close();
   await s.close();

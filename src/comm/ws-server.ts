@@ -49,7 +49,11 @@ export interface EdgeSession {
  * 控制端（trigger）触发的命令通过它主动推给边缘（而非请求/响应）。
  */
 export interface EdgePusher {
-  /** 推送给指定 edgeId 的连接；未指定则广播给所有已上线边缘。返回送达连接数。 */
+  /**
+   * 推送给指定 edgeId 的连接（定向下发），返回送达连接数。
+   * edge-command-target-guard：缺目标 edgeId 时**绝不广播**——命中 0、返回 0、记警告（诚实失败）。
+   * 全网广播须走独立的显式方法，不得靠省略 edgeId 触发。
+   */
   pushToEdges(env: Envelope, edgeId?: string): number;
   /**
    * 解析「绑定某账号的在线边缘节点」的 edgeId（change publish-history-account-and-detail）。
@@ -168,12 +172,20 @@ export class EdgeCloudServer implements EdgePusher {
 
   /** EdgePusher：把命令推给已上线边缘 */
   pushToEdges(env: Envelope, edgeId?: string): number {
+    // edge-command-target-guard R2/R3：缺目标 edgeId 时绝不广播——诚实失败（命中 0、返回 0、记警告）。
+    // 沿用 resolveEdgeIdForAccount 的「0 = 诚实失败信号」语义；调用方据投递数做诚实失败处理。
+    // 如将来确需「全网广播」，须新增语义明确的独立方法（如 broadcastToAllEdges），
+    // 禁止靠省略 edgeId 隐式退化为广播（否则某连接漏带 edgeId 会把命令误投给所有 edge）。
+    if (!edgeId || !edgeId.trim()) {
+      console.warn(`[ws-server] pushToEdges 缺目标 edgeId（type=${env.type}）：拒绝广播、诚实失败（命中 0）`);
+      return 0;
+    }
     const frame = JSON.stringify(env);
     // session.end 必达：绝不被验证码暂停闸吞掉，否则持久弹窗会导致会话无法终止（死锁）。
     const bypassPause = env.type === 'session.end';
     let sent = 0;
     for (const conn of this.edges.values()) {
-      if (edgeId && conn.session.edgeId !== edgeId) continue;
+      if (conn.session.edgeId !== edgeId) continue;
       if (!bypassPause && conn.session.edgeId && this.pausedEdges.has(conn.session.edgeId)) continue;
       if (conn.ws.readyState === WebSocket.OPEN) {
         conn.ws.send(frame);

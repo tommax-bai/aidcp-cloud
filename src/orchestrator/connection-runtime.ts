@@ -94,6 +94,20 @@ export class ConnectionRuntimeRegistry {
       return { ok: false, code: 'retired_account_id', message: "accountId='default' 已退役（保留禁用标识）" };
     }
 
+    // edge-command-target-guard R1：缺 / 空 edgeId 当配置错误拒绝握手，与 accountId 校验对称。
+    // 无节点号 = 无可路由的出站身份；放行只会制造「登记在册但一下发即广播」的危险连接
+    // （出口 pushToEdges 在目标为空时会退化为向所有 edge 广播 → 可能把本连接的命令误投给他人）。
+    const edgeId = session.edgeId?.trim();
+    if (!edgeId) {
+      await this.deps.onConfigError(
+        session,
+        '握手缺少 edgeId：每个节点须声明稳定的 edgeId（节点 / 机器身份）。无节点号 = 无可路由的出站身份，命令无法定向下发。',
+      );
+      return { ok: false, code: 'missing_edge_id', message: '握手缺少 edgeId（配置错误）' };
+    }
+    // 归一化：写回 trim 后的值，确保后续所有 session.edgeId 读取（重连顶替 / runtime.edgeId / 定向下发）一致。
+    session.edgeId = edgeId;
+
     // 同 edgeId 重连顶替（同一节点回来，不计为并行第二节点）：收掉该 edgeId 的旧连接。
     // 仅顶替「不同 sessionId 但同 edgeId」的旧运行时；不同 edgeId 则视为真并行第二节点，并存。
     if (session.edgeId) {
