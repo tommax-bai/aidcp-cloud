@@ -87,6 +87,24 @@ ECS 上 `aidcp-cloud` 的权威环境文件为：
 - 业务敏感值（API key / token / 飞书密钥等）存放于 ECS `/opt/aidcp/cloud/.env` 或库内加密存储（见上文「敏感值说明」）
 - 本文档只保留键名，不记录任何明文值
 
+## 超时旋钮（可选覆盖，均有安全默认，缺省/非法回落、绝不 brick）
+
+> change `raise-model-call-timeouts-for-thinking-models`（2026-07-01）：为 thinking 类模型整体抬高单次调用天花板并联动放大外层时限。以下键**不设即用默认值**，只在需要按部署调优时写入 ECS `.env`。毫秒。
+
+- `AIDCP_LLM_TIMEOUT_MS`（默认 `180000`）：云端单次文本模型调用天花板（QwenClient 构造默认）。thinking 模型复杂提示常需 60–150s+，故 ≥180s。**联动不变量**：看门狗恢复轻推阈值必须严格大于此值（见下）。
+- `AIDCP_PUBLISH_PIPELINE_TIMEOUT_MS`（默认 `600000`）：发布流水线总闸，须 ≥ 关键路径各模型角色预算之和（容器不得小于内容物）。
+- 发布角色执行超时（各角色闸；均须 ≥ 单次模型天花板且会同传进该角色的模型调用）：
+  - `AIDCP_PUBLISH_GATE_TIMEOUT_MS`（默认 `180000`，ApprovalGatekeeper）
+  - `AIDCP_PUBLISH_QUALITY_TIMEOUT_MS`（默认 `180000`，QualityScorer）
+  - `AIDCP_PUBLISH_CLEAN_TIMEOUT_MS`（默认 `180000`，ContentCleaner 去 AI 味重写）
+  - `AIDCP_PUBLISH_IMGSETPLAN_TIMEOUT_MS`（默认 `180000`，ImageSetPlanner 配图选题，文本 LLM）
+  - `AIDCP_PUBLISH_IMGPROMPT_TIMEOUT_MS`（默认 `180000`，ImagePromptComposer 配图指令，文本 LLM）
+  - `AIDCP_PUBLISH_SCOUT_TIMEOUT_MS`（默认 `180000`，ContentScout）
+  - `AIDCP_PUBLISH_CONTENT_TIMEOUT_MS`（默认 `180000`，ContentCreator）
+  - `AIDCP_PUBLISH_TITLE_TIMEOUT_MS`（默认 `180000`，TitleCreator）
+- 看门狗空转阈值（浏览闭环，代码写死默认；生产按账号值走后台配置管线、非 env）：恢复轻推默认 240s（`DEFAULT_IDLE_NUDGE_MS`，须 > 单次模型天花板）、轻推配置下限 200s（`IDLE_NUDGE_MIN_MS`，读时钳制：DB 存旧值自动抬到默认）、放弃结束生产值须显式设 ≥480s（否则 ≤ 轻推时读时回落写死默认 1h）。
+- 生图相关（未随本次改动，列此便于对照）：`AIDCP_WANXIANG_MAX_POLL`（默认 34，×5s=170s 轮询预算）、`AIDCP_PUBLISH_PER_IMAGE_TIMEOUT_MS`（默认 100000，每图）。
+
 ## 已废弃方案：本地起 cloud + SSH 隧道
 
 > **状态：已废弃，仅供历史本地调试背景参考，不再作为现行方案。**
