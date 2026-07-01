@@ -18,6 +18,7 @@ interface Knobs {
   orchestratorStatus?: string;
   /** 编排器返回的非正常原因（failed/skipped 时填，验证沿链路 surface）。 */
   orchestratorReason?: string;
+  personaBound?: boolean;
 }
 
 function build(k: Knobs = {}) {
@@ -37,6 +38,7 @@ function build(k: Knobs = {}) {
     },
     resolveRisk: async () => ({ canDo: () => k.canDo ?? true, getState: () => ({ status: k.status ?? 'normal' }) }),
     resolveSingleAccountId: async () => 'acc-test',
+    isPersonaBound: k.personaBound === undefined ? undefined : () => k.personaBound === true,
     orchestrator: { trigger: async (input) => { triggered.push(JSON.stringify(input.metrics)); return { status: k.orchestratorStatus ?? 'draft', reason: k.orchestratorReason }; } },
     soul: {} as PublishSchedulerDeps['soul'],
     conceptThreshold: k.conceptThreshold ?? 5,
@@ -92,6 +94,29 @@ describe('AC-PUB-SCHED PublishScheduler 三扳机', () => {
     assert.equal(o.result, 'triggered');
     assert.equal(o.result === 'triggered' && o.status, 'failed');
     assert.equal(o.result === 'triggered' && o.failureReason, 'Pipeline aborted by TitleCreator: 标题解析失败', '失败原因不再被丢，供飞书回执显示「为什么」');
+  });
+
+  it('手动 /publish 未绑人设 → 拒绝 needs_persona_setup，绝不以默认人设发布（不触发编排）', async () => {
+    const { scheduler, triggered } = build({ newConcepts: 10, canDo: true, personaBound: false });
+    const o = await scheduler.triggerManual('acc-test');
+    assert.equal(o.result, 'blocked');
+    assert.equal(o.reason, 'needs_persona_setup');
+    assert.equal(triggered.length, 0, '未绑人设绝不调 orchestrator.trigger');
+  });
+
+  it('自动扳机未绑人设 → 拒绝 needs_persona_setup，不触发', async () => {
+    const { scheduler, triggered } = build({ newConcepts: 10, canDo: true, personaBound: false });
+    const o = await scheduler.checkAndMaybeTrigger();
+    assert.equal(o.result, 'blocked');
+    assert.equal(o.reason, 'needs_persona_setup');
+    assert.equal(triggered.length, 0);
+  });
+
+  it('绑人设账号 → 人设闸放行，正常触发', async () => {
+    const { scheduler, triggered } = build({ newConcepts: 10, canDo: true, personaBound: true });
+    const o = await scheduler.checkAndMaybeTrigger();
+    assert.equal(o.result, 'triggered');
+    assert.equal(triggered.length, 1);
   });
 
   it('buildTriggerInput 聚合真概念 + 真点赞 + 最近已发', async () => {

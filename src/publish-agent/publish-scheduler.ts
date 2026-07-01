@@ -50,6 +50,11 @@ export interface PublishSchedulerDeps {
   resolveRisk: (accountId: string) => Promise<SchedulerRisk>;
   /** 解析「唯一真实账号」：恰好一个真实账号则返回它，0 或多个返回 null（自动 / 无参发布据此 honest-fail，绝不回落 default）。 */
   resolveSingleAccountId: () => Promise<string | null>;
+  /**
+   * 人设绑定判定（persona-driven-content-pipeline）：注入则发布前闸——未绑人设的账号诚实拒绝，
+   * 绝不以打包默认人设（回落 soul）生成内容。缺省（不注入）→ 不闸（向后兼容旧构造 / 测试桩）。
+   */
+  isPersonaBound?: (accountId: string) => boolean;
   orchestrator: SchedulerOrchestrator;
   /**
    * 人设注入（change account-persona-config）。两种形态，至少给一个：
@@ -180,6 +185,10 @@ export class PublishScheduler {
       this.logger.warn('[PublishScheduler] 自动扳机：无法解析唯一真实账号（0 或多个）— 跳过，绝不回落 default');
       return { result: 'skipped', reason: 'no_single_account' };
     }
+    if (this.d.isPersonaBound && !this.d.isPersonaBound(accountId)) {
+      this.logger.warn(`[PublishScheduler] 自动扳机：账号 ${accountId} 未绑定人设 — 跳过，绝不以默认人设发布`);
+      return { result: 'blocked', reason: 'needs_persona_setup' };
+    }
     const baseline = await this.baselineMs();
     const newConceptCount = await this.d.conceptStore.countNewSince(baseline);
     const hoursSince = (this.clock() - baseline) / HOUR_MS;
@@ -213,6 +222,10 @@ export class PublishScheduler {
     if (!resolved) {
       this.logger.warn('[PublishScheduler] 手动 /publish 未指定账号且无法解析唯一真实账号（0 或多个）— 拒绝，需显式指定账号');
       return { result: 'blocked', reason: 'account_required' };
+    }
+    if (this.d.isPersonaBound && !this.d.isPersonaBound(resolved)) {
+      this.logger.warn(`[PublishScheduler] 手动 /publish：账号 ${resolved} 未绑定人设 — 拒绝，绝不以默认人设发布`);
+      return { result: 'blocked', reason: 'needs_persona_setup' };
     }
     this.logger.log(`[PublishScheduler] 手动 /publish account=${resolved}：越过风控 canDo + 强制发布（人工授权），发布前飞书人审仍生效`);
     const { status, failureReason } = await this.doTrigger('manual_feishu', true, resolved);

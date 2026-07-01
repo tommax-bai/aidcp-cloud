@@ -1310,6 +1310,8 @@ async function main(): Promise<void> {
       publishLog: publishLogStore,
       resolveRisk: resolveController,
       resolveSingleAccountId,
+      // persona-driven-content-pipeline：发布前人设闸——未绑人设的账号拒绝发布，绝不以打包默认人设生成（与浏览侧 canStartSession 同口径）。
+      isPersonaBound: (accountId) => personaStore.getForAccount(accountId) !== null,
       // 生成段账号归账（fix publish LLM account=default）：发布生成段严格串行（PublishOrchestrator 单跑闸），
       // 用单槽 publishAccountRef 把真实账号穿进发布角色每次 LLM 调用,使生成段记账不再全记 default。
       // 与下发段 onPublishTakeoverStart 同构（前后括住、finally 复位）；两段不重叠,互不踩 ref。

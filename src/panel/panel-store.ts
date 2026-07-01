@@ -175,8 +175,8 @@ function toAccount(r: AccountJoinRow): PanelAccount {
     riskQuotaLevel: (r.risk_quota_level as RiskQuotaLevel | null) ?? null,
     signalCount: r.signal_count,
     personaBound,
-    // default 硬豁免：永不标「需设置人设」（沿用打包默认人设）。
-    needsPersonaSetup: !personaBound && accountId !== 'default',
+    // retire-default-account / persona-driven-content-pipeline：default 账号已删，不再特判——是否需补人设仅看 personaBound。
+    needsPersonaSetup: !personaBound,
   };
 }
 
