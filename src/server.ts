@@ -88,7 +88,8 @@ import {
   QualityScorerRole,
   ContentAssemblerRole,
   TitleCreatorRole,
-  TopicStrategistRole,
+  TopicGeneratorRole,
+  TopicEvaluatorRole,
   MentionStrategistRole,
   LocationStrategistRole,
   CollectionStrategistRole,
@@ -1211,7 +1212,9 @@ async function main(): Promise<void> {
   // 标题链路：定稿后单独生成标题（watch assembledContent → titleSelection）；发布门 waitAll 依赖此键（注册顺序无关）。
   publishOrchestrator.registerRole(new TitleCreatorRole({ llmClient: roleLlm('publish:TitleCreator') }));
   // 阶段3 元数据 + 合规决策（并行于发布链，规则式确定性；产出 publishMetadata，本阶段不应用到边缘）。
-  publishOrchestrator.registerRole(new TopicStrategistRole());
+  // change split-topic-roles：话题拆生成/评判两角色（生成 watch assembledContent、评判 watch topicCandidates、产出 topicSelection）。
+  publishOrchestrator.registerRole(new TopicGeneratorRole({ llmClient: roleLlm('publish:TopicGenerator') }));
+  publishOrchestrator.registerRole(new TopicEvaluatorRole({ llmClient: roleLlm('publish:TopicEvaluator') }));
   publishOrchestrator.registerRole(new MentionStrategistRole());
   publishOrchestrator.registerRole(new LocationStrategistRole());
   publishOrchestrator.registerRole(new CollectionStrategistRole());

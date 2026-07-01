@@ -14,7 +14,8 @@ import { QualityScorerRole } from '../../src/publish-agent/roles/quality-scorer.
 import { ContentAssemblerRole } from '../../src/publish-agent/roles/content-assembler.js';
 import { TitleCreatorRole } from '../../src/publish-agent/roles/title-creator.js';
 import {
-  TopicStrategistRole,
+  TopicGeneratorRole,
+  TopicEvaluatorRole,
   MentionStrategistRole,
   LocationStrategistRole,
   CollectionStrategistRole,
@@ -64,6 +65,9 @@ function buildFullPipeline(llmResponses: Record<string, string>, opts?: { enable
       const systemContent = messages[0]?.content ?? '';
       if (systemContent.includes('发布决策')) return llmResponses.scout;
       if (systemContent.includes('标题创作')) return llmResponses.title ?? '{"title":"测试标题"}';
+      // change split-topic-roles：话题生成 → 候选；话题评判 → 保留子集。
+      if (systemContent.includes('话题生成')) return llmResponses.topicGen ?? '{"topics":["测试话题","大模型"]}';
+      if (systemContent.includes('话题评判')) return llmResponses.topicEval ?? '{"kept":["测试话题"]}';
       if (systemContent.includes('小红书技术博主')) return llmResponses.creator;
       // 配图三角色（publish-multi-image）：选题（配图选题师）→ 指令（文生图 prompt 工程师）。缺省给合法产物。
       if (systemContent.includes('配图选题')) return llmResponses.imageSet ?? '{"wantImage":true,"imageCount":1,"themes":[{"subject":"配图示意"}],"styleHint":null}';
@@ -99,8 +103,10 @@ function buildFullPipeline(llmResponses: Record<string, string>, opts?: { enable
   orchestrator.registerRole(new ContentAssemblerRole(common));
   // 标题链路：定稿后单独生成标题（发布门 waitAll 依赖 titleSelection）。
   orchestrator.registerRole(new TitleCreatorRole({ llmClient: fakeLlm as any, ...common }));
+  // change split-topic-roles：话题拆生成/评判两 LLM 角色（生成 watch assembledContent、评判 watch topicCandidates → topicSelection）。
+  orchestrator.registerRole(new TopicGeneratorRole({ llmClient: fakeLlm as any, ...common }));
+  orchestrator.registerRole(new TopicEvaluatorRole({ llmClient: fakeLlm as any, ...common }));
   // 阶段3 元数据 + 合规决策（并行于发布链；规则式确定性，无需 LLM）
-  orchestrator.registerRole(new TopicStrategistRole(common));
   orchestrator.registerRole(new MentionStrategistRole(common));
   orchestrator.registerRole(new LocationStrategistRole(common));
   orchestrator.registerRole(new CollectionStrategistRole(common));
@@ -139,8 +145,8 @@ describe('PublishOrchestrator', () => {
     assert.equal(insertedRecords[0].status, 'pending_approval', '落库为待审草稿');
     assert.equal(pushedEnvelopes.length, 0, '生成候审段绝不下发边缘');
     // 稳定边界：组装产出仍含八字段（细拆后等价）。
-    // 13（stage-2 生产段+下游，含配图三角色 ImageSetPlanner/ImagePromptComposer/ImageGenerator）+ 9（stage-3 元数据/合规决策）+ 1（TitleCreator）= 23。
-    assert.equal(orchestrator.getRoles().length, 23);
+    // 13（stage-2 生产段+下游，含配图三角色 ImageSetPlanner/ImagePromptComposer/ImageGenerator）+ 10（stage-3 元数据/合规决策：change split-topic-roles 去 TopicStrategist、加 TopicGenerator+TopicEvaluator）+ 1（TitleCreator）= 24。
+    assert.equal(orchestrator.getRoles().length, 24);
   });
 
   test('配图失败/无图 → 诚实 failed（change publish-image-required-or-fail：图文帖必须有图，绝不走必然 no_target 的纯文字路径）', async () => {

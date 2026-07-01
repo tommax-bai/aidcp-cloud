@@ -260,7 +260,12 @@ export type Visibility = 'public' | 'friends_only' | 'self_only';
 export type PublishMode = 'immediate' | 'draft' | 'scheduled';
 export type PermissionLevel = 'allow' | 'restrict' | 'disable';
 
-/** TopicStrategist 输出：话题（3-30，扩展 createdContent.tags，不编造凑数）。 */
+/** TopicGenerator 输出：话题候选（change split-topic-roles：依定稿正文 LLM 生成，strip #/trim/去重；宁缺毋滥不编造）。 */
+export interface TopicCandidates {
+  candidates: string[];
+  generatedAt: number;
+}
+/** TopicEvaluator 输出：从候选按相关性/质量/合规筛选（change split-topic-roles：只筛不加、去重、≤30，不编造凑数）。 */
 export interface TopicSelection {
   selectedTopics: string[];
   selectedAt: number;
@@ -398,6 +403,8 @@ export interface PipelineFields {
   assembledContent: AssembledContent;
   // 标题链路（change dedicated-title-creator-role）：定稿后由 TitleCreator 单独生成、长度收口云端。
   titleSelection: TitleSelection;
+  // 话题链路（change split-topic-roles）：定稿后 TopicGenerator 生成候选 → TopicEvaluator 评判为 topicSelection。
+  topicCandidates: TopicCandidates;
   // 阶段3 元数据 + 合规决策键（并行于发布链，本阶段不应用到边缘）
   topicSelection: TopicSelection;
   mentionSelection: MentionSelection;

@@ -79,7 +79,8 @@ describe('ContentCreatorRole', () => {
     assert.ok(content);
     assert.equal(content.title, 'vLLM 部署踩坑');
     assert.match(content.content, /vLLM/);
-    assert.deepEqual(content.tags, ['vLLM', '大模型部署']);
+    // change split-topic-roles：正文角色不再产标签（即便 LLM 吐了 tags 也丢弃）；话题由 TopicGenerator/TopicEvaluator 另生成。
+    assert.deepEqual(content.tags, []);
     assert.equal(content.tone, 'casual');
     assert.equal(content.createdAt, 1700000000000);
   });

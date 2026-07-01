@@ -8,6 +8,8 @@ import {
   ContentScoutRole,
   ContentCreatorRole,
   TitleCreatorRole,
+  TopicGeneratorRole,
+  TopicEvaluatorRole,
   CLEAN_TIMEOUT_MS,
 } from '../../src/publish-agent/roles/index.js';
 import { PublishOrchestrator } from '../../src/publish-agent/index.js';
@@ -34,6 +36,9 @@ const llmRoles = [
   new ContentScoutRole({ llmClient: stubLlm, logger }),
   new ContentCreatorRole({ llmClient: stubLlm, logger }),
   new TitleCreatorRole({ llmClient: stubLlm, logger }),
+  // change split-topic-roles：话题生成/评判两 LLM 角色，同受 ≥180s 超时下限约束。
+  new TopicGeneratorRole({ llmClient: stubLlm, logger }),
+  new TopicEvaluatorRole({ llmClient: stubLlm, logger }),
 ] as any[];
 
 test('调用模型的发布角色：角色闸 ≥ 单次模型调用天花板（不短于所包裹的模型预算）', () => {

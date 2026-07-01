@@ -65,6 +65,7 @@ interface ExecutorInput {
   gateDecision: GateDecision;
   assembledContent: AssembledContent;
   titleSelection: TitleSelection;
+  publishMetadata: PublishMetadata;
 }
 
 export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishResult> {
@@ -79,11 +80,13 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     this.store = deps.store;
     this.messenger = deps.messenger;
     this.botChatStore = deps.botChatStore;
-    // 发布门 = waitAll(['gateDecision','titleSelection'])：标题没就绪不发布；标题 abort 不发布（黑板天然保证）。
+    // 发布门 = waitAll(['gateDecision','titleSelection','publishMetadata'])：标题没就绪不发布；标题 abort 不发布（黑板天然保证）。
+    // change split-topic-roles：加 publishMetadata 为等待键——话题唯一真源为 publishMetadata.topics（finalTags 已恒空），
+    //   卡/落库/下发三处话题一致，并消除原先 context.get('publishMetadata') 的取值竞态。
     // 审批卡由本角色激活后才发，故卡片必带真实标题。落库+发卡为快操作，超时回落 30s（不再为内联人审放大到分钟级）。
     this.config = {
       name: 'PublishExecutor',
-      watchKeys: ['gateDecision', 'titleSelection'],
+      watchKeys: ['gateDecision', 'titleSelection', 'publishMetadata'],
       waitAll: true,
       timeoutMs: deps.roleTimeoutMs ?? 30_000,
       fallback: 'skip',
@@ -95,26 +98,29 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       gateDecision: snapshot.gateDecision!,
       assembledContent: snapshot.assembledContent!,
       titleSelection: snapshot.titleSelection!,
+      publishMetadata: snapshot.publishMetadata!,
     };
   }
 
   protected async execute(input: ExecutorInput, context: PipelineContext<PipelineFields>): Promise<PublishResult> {
-    const { gateDecision, assembledContent } = input;
+    const { gateDecision, assembledContent, publishMetadata } = input;
     const title = this.resolveTitle(input.titleSelection, assembledContent);
     const accountId = this.accountIdFrom(context);
+    // change split-topic-roles：话题唯一真源 = publishMetadata.topics（finalTags 已恒空）；卡/落库/下发一律读它。
+    const topics = publishMetadata?.topics ?? [];
 
     switch (gateDecision.recommendedAction) {
       // auto_publish 与 manual_review 同路：AC-PUB 本就要求人审，两者都是「落库待审草稿 + 发审批卡」，
       // 差别仅是 gatekeeper 的风险标注、由人在卡片上定夺；真正"不问就毙"的是 abort。
       case 'auto_publish':
       case 'manual_review':
-        return this.stageDraftForApproval(assembledContent, title, context, accountId);
+        return this.stageDraftForApproval(assembledContent, title, context, accountId, topics, publishMetadata);
       case 'abort':
-        return this.handleAbort(assembledContent, title, accountId, gateDecision.reason);
+        return this.handleAbort(assembledContent, title, accountId, topics, gateDecision.reason);
       case 'retry':
         return this.handleRetry();
       default:
-        return this.handleAbort(assembledContent, title, accountId, gateDecision.reason);
+        return this.handleAbort(assembledContent, title, accountId, topics, gateDecision.reason);
     }
   }
 
@@ -150,6 +156,8 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     title: string,
     context: PipelineContext<PipelineFields>,
     accountId: string,
+    topics: string[],
+    publishMetadata: PublishMetadata | undefined,
   ): Promise<PublishResult> {
     const lineage = this.lineageFrom(context);
 
@@ -159,7 +167,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       const failedId = await this.store.insert({
         title,
         content: assembled.finalContent,
-        tags: assembled.finalTags,
+        tags: topics,
         imageUrl: null,
         images: [],
         status: 'failed',
@@ -174,12 +182,12 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       return { recordId: failedId, status: 'failed', dispatched: false, envelope: null, completedAt: this.clock(), reason: '无配图（M=0 全部生图失败/降级）：图文帖无有效内容，已诚实失败、未发审批卡' };
     }
 
-    // 落库待审草稿。tags 走 finalTags，话题/元数据由 recordMetadata 落 publishMetadata（含 topics），
-    // 供下发段无重生成地重建发布输入。images 存全部成功配图（下发段读回逐张上传）。
+    // 落库待审草稿。change split-topic-roles：tags 取 publishMetadata.topics（唯一真源，与卡/下发一致），
+    // 完整元数据仍由 recordMetadata 落 publishMetadata。images 存全部成功配图（下发段读回逐张上传）。
     const recordId = await this.store.insert({
       title,
       content: assembled.finalContent,
-      tags: assembled.finalTags,
+      tags: topics,
       imageUrl: assembled.imageUrl,
       images: assembled.imageUrls,
       status: 'pending_approval',
@@ -191,15 +199,15 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     });
 
     // 元数据落库 + 防篡改审计（aiEnforced && !ai 由 MetadataAggregator 已回正；此处如实记审计位）。
-    const metadata = context.get('publishMetadata') as PublishMetadata | undefined;
-    if (metadata && this.store.recordMetadata) {
-      const aiEnforced = metadata.compliance.aiEnforced === true;
-      await this.store.recordMetadata(recordId, metadata, aiEnforced).catch(() => {});
+    // change split-topic-roles：publishMetadata 已是等待键，直接用入参（消除原 context.get 取值竞态）。
+    if (publishMetadata && this.store.recordMetadata) {
+      const aiEnforced = publishMetadata.compliance.aiEnforced === true;
+      await this.store.recordMetadata(recordId, publishMetadata, aiEnforced).catch(() => {});
     }
 
     // 发飞书审批卡（带真实标题+正文+话题）。人审通过即触发下发段发「卡片上所审的这份草稿」（不重新生成）。
     const requestId = `publish-${recordId}`;
-    await this.trySendApprovalCard(assembled, title, requestId);
+    await this.trySendApprovalCard(assembled, title, requestId, topics);
 
     this.logger.log(`[PublishExecutor] 草稿待审 recordId=${recordId} account=${accountId} requestId=${requestId}（已发审批卡，候审不让位、无超时）`);
     return { recordId, status: 'pending_approval', dispatched: false, envelope: null, completedAt: this.clock() };
@@ -217,6 +225,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     assembled: AssembledContent,
     title: string,
     requestId: string,
+    topics: string[],
   ): Promise<void> {
     if (!this.messenger || !this.botChatStore) return;
     try {
@@ -227,7 +236,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
           requestId,
           title,
           content: assembled.finalContent,
-          tags: assembled.finalTags,
+          tags: topics,
         });
         await this.messenger.sendApprovalCard(chat.chatId, card);
         this.logger.log(`[PublishExecutor] 审批卡已发 chat=${chat.chatId} requestId=${requestId}`);
@@ -237,11 +246,11 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     }
   }
 
-  private async handleAbort(assembled: AssembledContent, title: string, accountId: string, gateReason?: string): Promise<PublishResult> {
+  private async handleAbort(assembled: AssembledContent, title: string, accountId: string, topics: string[], gateReason?: string): Promise<PublishResult> {
     const recordId = await this.store.insert({
       title,
       content: assembled.finalContent,
-      tags: assembled.finalTags,
+      tags: topics,
       imageUrl: assembled.imageUrl,
       images: assembled.imageUrls,
       status: 'failed',

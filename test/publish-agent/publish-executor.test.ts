@@ -3,6 +3,9 @@
  * 生成候审段出口：只「落库待审草稿（pending_approval）+ 发飞书审批卡」即返回，
  * 不再内联等审、不再驱动序列、不再解析边缘（这些都属下发段 PublishDispatcher）。
  * 保留红线：无配图 → 诚实 failed、不发卡；真血缘 + 元数据落库 + aiEnforced 审计；标题忠实。
+ *
+ * change split-topic-roles：话题唯一真源 = publishMetadata.topics（finalTags 已恒空）；
+ * executor 的 waitAll 新增 publishMetadata，卡/落库 tags 均取 publishMetadata.topics。
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -20,7 +23,8 @@ function makeTitleSelection(title = 'vLLM 部署踩坑'): TitleSelection {
 function makeAssembledContent(): AssembledContent {
   return {
     finalContent: '昨天试了 vLLM 跑 14B，显存直接爆了',
-    finalTags: ['vLLM', '大模型部署'],
+    // change split-topic-roles：finalTags 恒空；话题真源为 publishMetadata.topics。
+    finalTags: [],
     imageUrls: ['https://example.com/a.png', 'https://example.com/b.png'],
     imageUrl: 'https://example.com/a.png',
     aiScore: 0.1,
@@ -40,8 +44,18 @@ function makeGateDecision(action: GateDecision['recommendedAction']): GateDecisi
   };
 }
 
+/** change split-topic-roles：话题真源。默认 topics 刻意 ≠ finalTags，以证明 tags 取自 topics。 */
+function makePublishMetadata(topics: string[] = ['话题甲', '话题乙']): any {
+  return {
+    topics, mentions: [], location: null, collection: null,
+    visibility: 'public', permissions: { comment: 'allow', save: 'allow' },
+    mode: 'immediate', publishTime: null,
+    compliance: { ai: true, aiEnforced: false }, metadataScore: 0.6, decidedAt: 0,
+  };
+}
+
 describe('PublishExecutorRole（生成候审段出口）', () => {
-  test('auto_publish → 落库 pending_approval + 发审批卡，不下发、不驱动序列', async () => {
+  test('auto_publish → 落库 pending_approval + 发审批卡，不下发、不驱动序列；tags 取 publishMetadata.topics', async () => {
     const insertedRecords: any[] = [];
     const sentCards: any[] = [];
     const role = new PublishExecutorRole({
@@ -55,6 +69,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     const ctx = new PipelineContext<PipelineFields>();
     ctx.write('assembledContent', makeAssembledContent());
     ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('publishMetadata', makePublishMetadata());
     role.register(ctx);
     ctx.write('gateDecision', makeGateDecision('auto_publish'));
 
@@ -68,10 +83,12 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     assert.equal(insertedRecords.length, 1);
     assert.equal(insertedRecords[0].status, 'pending_approval');
     assert.match(insertedRecords[0].content, /vLLM/);
+    assert.deepEqual(insertedRecords[0].tags, ['话题甲', '话题乙'], 'tags 取 publishMetadata.topics（非 finalTags）');
     assert.deepEqual(insertedRecords[0].images, ['https://example.com/a.png', 'https://example.com/b.png'], '多图全集随草稿落库（下发段读回）');
     // 审批卡是「已构建的 FeishuCard」（含 elements），requestId=publish-<recordId>。
     assert.equal(sentCards.length, 1, '应发审批卡');
     assert.ok(Array.isArray(sentCards[0]?.elements), '须为已构建卡片');
+    assert.ok(JSON.stringify(sentCards[0]).includes('话题甲'), '审批卡话题取自 publishMetadata.topics');
   });
 
   test('manual_review → 同 auto_publish：落库 pending_approval + 发审批卡（人审为常态闸）', async () => {
@@ -88,6 +105,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     const ctx = new PipelineContext<PipelineFields>();
     ctx.write('assembledContent', makeAssembledContent());
     ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('publishMetadata', makePublishMetadata());
     role.register(ctx);
     ctx.write('gateDecision', makeGateDecision('manual_review'));
 
@@ -100,7 +118,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     assert.equal(sentCards.length, 1);
   });
 
-  test('abort → 落库 status=failed、不发卡', async () => {
+  test('abort → 落库 status=failed、不发卡；tags 仍取 publishMetadata.topics', async () => {
     const insertedRecords: any[] = [];
     const sentCards: any[] = [];
     const role = new PublishExecutorRole({
@@ -114,6 +132,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     const ctx = new PipelineContext<PipelineFields>();
     ctx.write('assembledContent', makeAssembledContent());
     ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('publishMetadata', makePublishMetadata(['风险话题']));
     role.register(ctx);
     ctx.write('gateDecision', makeGateDecision('abort'));
 
@@ -123,10 +142,11 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     assert.equal(result?.recordId, 77);
     assert.equal(result?.status, 'failed');
     assert.equal(insertedRecords[0].status, 'failed');
+    assert.deepEqual(insertedRecords[0].tags, ['风险话题'], 'abort 落库 tags 也取 publishMetadata.topics');
     assert.equal(sentCards.length, 0, 'abort 不发审批卡');
   });
 
-  test('真血缘落库 + publishMetadata 落库 + aiEnforced 审计（供下发段重建）', async () => {
+  test('真血缘落库 + publishMetadata 落库 + aiEnforced 审计（供下发段重建）；tags == topics', async () => {
     const insertedRecords: any[] = [];
     const recordedMeta: any[] = [];
     const role = new PublishExecutorRole({
@@ -166,6 +186,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     assert.equal(ctx.get('publishResult')?.status, 'pending_approval');
     assert.deepEqual(insertedRecords[0].sourceConcepts, ['RAG 重排', 'vLLM']);
     assert.deepEqual(insertedRecords[0].sourceLikedIds, [11]);
+    assert.deepEqual(insertedRecords[0].tags, ['RAG'], '落库 tags == publishMetadata.topics');
     assert.equal(recordedMeta.length, 1);
     assert.equal(recordedMeta[0].aiEnforced, true, 'aiEnforced 审计如实落库');
   });
@@ -188,6 +209,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     const ctx = new PipelineContext<PipelineFields>();
     ctx.write('assembledContent', { ...makeAssembledContent(), imageUrls: [], imageUrl: null });
     ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('publishMetadata', makePublishMetadata());
     role.register(ctx);
     ctx.write('gateDecision', makeGateDecision('auto_publish'));
 
@@ -212,6 +234,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
 
     const ctx = new PipelineContext<PipelineFields>();
     ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('publishMetadata', makePublishMetadata());
     role.register(ctx);
     ctx.write('gateDecision', makeGateDecision('auto_publish')); // 故意不写 titleSelection
 
@@ -219,6 +242,31 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
 
     assert.equal(ctx.get('publishResult'), undefined, '缺 titleSelection → waitAll 不满足 → 不激活');
     assert.equal(insertedRecords.length, 0, '未激活则不落库');
+  });
+
+  test('change split-topic-roles 发布门 waitAll：publishMetadata 未写 → executor 不激活（不早于 publishMetadata 触发）', async () => {
+    const insertedRecords: any[] = [];
+    const role = new PublishExecutorRole({
+      store: { insert: async (r: any) => { insertedRecords.push(r); return 1; } },
+      clock,
+      logger: silentLogger,
+    });
+
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish')); // 故意不写 publishMetadata
+
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(ctx.get('publishResult'), undefined, '缺 publishMetadata → waitAll 不满足 → 不激活');
+    assert.equal(insertedRecords.length, 0);
+
+    // 补写 publishMetadata → waitAll 满足 → 激活落库。
+    ctx.write('publishMetadata', makePublishMetadata());
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(ctx.get('publishResult')?.status, 'pending_approval', '补齐 publishMetadata 后激活');
+    assert.equal(insertedRecords.length, 1);
   });
 
   test('AC-TITLE-FIDELITY 落库标题 == titleSelection.title，审批卡含该标题', async () => {
@@ -236,6 +284,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     const ctx = new PipelineContext<PipelineFields>();
     ctx.write('assembledContent', makeAssembledContent());
     ctx.write('titleSelection', makeTitleSelection(TITLE));
+    ctx.write('publishMetadata', makePublishMetadata());
     role.register(ctx);
     ctx.write('gateDecision', makeGateDecision('auto_publish'));
 

@@ -250,11 +250,12 @@ export function buildCreatorPrompt(scoutDecision: ScoutDecision, trigger: Trigge
     '',
     '【输出要求】',
     '严格只输出一个 JSON 对象，不要任何额外文字或代码块围栏。格式如下：',
-    '{"title": "小红书标题18字内可带1个emoji", "content": "正文200-500字", "tags": ["标签1","标签2","标签3"], "tone": "professional|casual|technical|narrative", "style": {"type": "踩坑记录|对比分析|趋势观察|读后感"}}',
+    '{"title": "小红书标题18字内可带1个emoji", "content": "正文200-500字", "tone": "professional|casual|technical|narrative", "style": {"type": "踩坑记录|对比分析|趋势观察|读后感"}}',
     '⚠️ 标题硬上限 18 字（含标点/空格/英文字母各算 1 字，emoji 算 1 字），超过 20 字小红书会拒绝发布——务必精炼、不要写省略号、不要堆砌。',
+    '⚠️ 不要输出 tags/话题字段——话题由独立角色依定稿正文另行生成（change split-topic-roles）。',
     '',
     '示例输出：',
-    '{"title": "vLLM 部署把我坑惨了", "content": "显存24G想跑14B...", "tags": ["vLLM","大模型部署","踩坑"], "tone": "casual", "style": {"type": "踩坑记录"}}',
+    '{"title": "vLLM 部署把我坑惨了", "content": "显存24G想跑14B...", "tone": "casual", "style": {"type": "踩坑记录"}}',
   ].join('\n');
 }
 
@@ -296,6 +297,56 @@ export function buildTitlePrompt(body: string, persona: string, styleType: strin
     '{"title": "你的标题"}',
   );
   return lines.join('\n');
+}
+
+// ─── 话题链路（change split-topic-roles）：生成 TopicGenerator → 评判 TopicEvaluator ───
+
+/**
+ * TopicGenerator prompt — 依据**定稿正文**提炼一批贴合的话题候选（不带 #）。
+ * 红线：宁缺毋滥、绝不硬凑/编造无关热词。输出 JSON: { topics: string[] }
+ */
+export function buildTopicGenerationPrompt(body: string, persona: string): string {
+  return [
+    `你是${persona}，正在为一篇**已定稿**的小红书技术帖挑选话题（发布时的 #话题）。`,
+    '【任务：话题生成】只依据下面的定稿正文，提炼一批真正贴合正文的话题词。',
+    '',
+    '【定稿正文】',
+    body,
+    '',
+    '【规则】',
+    '- 每个话题是一个简短的词或短语，不带 # 号、不带空格、不加书名号。',
+    '- 粗细搭配：既有精准技术点（如 vLLM、RAG），也有更宽的领域词（如 大模型部署、AI工具）。',
+    '- 必须真正来自正文、贴合内容；宁缺毋滥——正文撑不起就少给几个，绝不硬凑、绝不编造无关热词。',
+    '- 最多给 15 个。',
+    '',
+    '【输出要求】严格只输出一个 JSON 对象，不要任何额外文字或代码块围栏：',
+    '{"topics": ["话题1","话题2","话题3"]}',
+  ].join('\n');
+}
+
+/**
+ * TopicEvaluator prompt — 从候选里**只筛不加**地挑最终话题（相关性/质量/合规）。
+ * 红线：保留项必须是候选子集、绝不新增或改写、绝不硬凑数量。输出 JSON: { kept: string[] }
+ */
+export function buildTopicEvaluationPrompt(candidates: string[], title: string, body: string): string {
+  return [
+    '你是小红书内容运营，正在为一篇技术帖**筛选**最终要带的话题（#话题）。',
+    '【任务：话题评判】从给定候选里挑出与正文最相关、质量最好、合规安全的一批。',
+    '',
+    `【标题】${title}`,
+    '【定稿正文】',
+    body,
+    '',
+    `【候选话题】${candidates.join('、')}`,
+    '',
+    '【规则】',
+    '- 只能从候选里挑，绝不新增候选之外的话题、绝不改写候选词。',
+    '- 按「与正文相关性 + 话题质量 + 合规安全」权衡，去掉不相关 / 低质 / 敏感的。',
+    '- 保留项按重要性排序输出；宁缺毋滥——没有合适的就少留几个，绝不硬凑数量。',
+    '',
+    '【输出要求】严格只输出一个 JSON 对象，不要任何额外文字或代码块围栏：',
+    '{"kept": ["话题1","话题2"]}',
+  ].join('\n');
 }
 
 // ─── 配图链路（change publish-multi-image）：选题 ImageSetPlanner → 指令 ImagePromptComposer ───

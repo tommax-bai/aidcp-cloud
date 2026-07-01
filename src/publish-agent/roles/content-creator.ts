@@ -74,7 +74,8 @@ export class ContentCreatorRole extends BasePublishRole<CreatorInput, CreatedCon
     return {
       title,
       content: String(obj.content || ''),
-      tags: Array.isArray(obj.tags) ? obj.tags.map(String) : [],
+      // change split-topic-roles：正文角色不再产标签；话题改由 TopicGenerator/TopicEvaluator 依定稿正文另行生成。
+      tags: [],
       tone: this.validateTone(obj.tone),
       style: typeof obj.style === 'object' && obj.style !== null ? obj.style : {},
     };

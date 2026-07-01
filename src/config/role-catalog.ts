@@ -103,6 +103,9 @@ export const ROLE_CATALOG: RoleCatalogItem[] = [
   { roleId: 'publish:ImageGenerator', displayName: '配图生成执行', group: 'publish', category: 'image', llmKind: 'image', tunableTemperature: false },
   // 汇合后出稿 / 审批（TitleCreator 与 ApprovalGatekeeper 同 watch assembledContent，为发布执行前最后两步）
   { roleId: 'publish:TitleCreator', displayName: '技术帖标题创作', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
+  // change split-topic-roles：话题生成（依定稿正文召回候选）+ 话题评判（相关性/质量精排、只筛不加）。
+  { roleId: 'publish:TopicGenerator', displayName: '话题生成（依定稿）', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
+  { roleId: 'publish:TopicEvaluator', displayName: '话题相关性评判', group: 'publish', category: 'publish_gate', llmKind: 'text', tunableTemperature: false },
   { roleId: 'publish:ApprovalGatekeeper', displayName: '发布审批裁决', group: 'publish', category: 'publish_gate', llmKind: 'text', tunableTemperature: false },
 ];
 
