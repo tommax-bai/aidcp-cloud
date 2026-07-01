@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRolePromptProvider } from '../src/config/role-prompt-preview.js';
+import { PUBLISH_PREVIEW_BUILDERS } from '../src/publish-agent/prompts-preview.js';
 import type { BaseRole } from '../src/agents/base-role.js';
 
 function fakeRole(roleName: string, preview: () => string): BaseRole {
@@ -31,11 +32,75 @@ test('图像角色 → available:false（无文本 prompt）', () => {
   assert.equal(v.prompt, null);
 });
 
-test('发布文本角色 → available:false（本期只渲染浏览侧，诚实标注）', () => {
+// ── 发布侧忠实渲染（change publish-prompt-preview）────────────────────────────
+
+test('发布文本角色 → available:true + 真实 prompt 文本，不附来源段', () => {
   const p = createRolePromptProvider(() => []);
   const v = p.get('publish:ContentCreator');
+  assert.equal(v.available, true);
+  assert.ok(v.prompt && v.prompt.trim().length > 0);
+  assert.equal(v.segments, undefined); // 发布人设为内置默认、不做来源段
+  assert.ok(v.note.length > 0);
+});
+
+test('7 个发布文本角色全部 available:true 且 prompt 非空', () => {
+  const p = createRolePromptProvider(() => []);
+  const ids = [
+    'publish:ContentScout',
+    'publish:ContentCreator',
+    'publish:TitleCreator',
+    'publish:ImageSetPlanner',
+    'publish:ImagePromptComposer',
+    'publish:QualityScorer',
+    'publish:ApprovalGatekeeper',
+  ];
+  for (const id of ids) {
+    const v = p.get(id);
+    assert.equal(v.available, true, `${id} 应可预览`);
+    assert.ok(v.prompt && v.prompt.trim().length > 0, `${id} prompt 应非空`);
+    assert.equal(v.segments, undefined, `${id} 不应附来源段`);
+  }
+});
+
+test('发布角色渲染抛错 → 优雅降级 available:false，绝不抛', () => {
+  const original = PUBLISH_PREVIEW_BUILDERS['publish:ContentScout'];
+  PUBLISH_PREVIEW_BUILDERS['publish:ContentScout'] = () => {
+    throw new Error('boom');
+  };
+  try {
+    const p = createRolePromptProvider(() => []);
+    const v = p.get('publish:ContentScout');
+    assert.equal(v.available, false);
+    assert.equal(v.prompt, null);
+    assert.match(v.note, /预览不可用/);
+  } finally {
+    PUBLISH_PREVIEW_BUILDERS['publish:ContentScout'] = original;
+  }
+});
+
+test('发布角色带 accountId → 内置默认渲染 + 诚实标注不随账号切；无 personaFallback/segments/accountId', () => {
+  const p = createRolePromptProvider(() => [], {
+    withAccount: (_a, fn) => fn(),
+    hasPersona: () => false,
+  });
+  const v = p.get('publish:ContentCreator', 'acc-no-persona');
+  assert.equal(v.available, true);
+  assert.ok(v.prompt && v.prompt.length > 0);
+  assert.match(v.note, /不随账号切换/); // 诚实标注：不冒充按账号
+  assert.equal(v.personaFallback, undefined); // 发布不适用「账号无人设回落」语义
+  assert.equal(v.segments, undefined);
+  assert.equal(v.accountId, undefined); // 不回显账号，避免前端「人设来自账号」误导
+});
+
+test('配图生成执行带 accountId 仍 available:false（图像无文本 prompt）', () => {
+  const p = createRolePromptProvider(() => [], {
+    withAccount: (_a, fn) => fn(),
+    hasPersona: () => false,
+  });
+  const v = p.get('publish:ImageGenerator', 'acc-x');
   assert.equal(v.available, false);
-  assert.match(v.note, /发布侧/);
+  assert.equal(v.prompt, null);
+  assert.equal(v.personaFallback, undefined);
 });
 
 test('previewPrompt 抛错 → 优雅降级 available:false，绝不抛', () => {

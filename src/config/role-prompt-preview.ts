@@ -17,9 +17,14 @@
 
 import type { BaseRole } from '../agents/base-role.js';
 import { getCatalogItem } from './role-catalog.js';
+import { PUBLISH_PREVIEW_BUILDERS } from '../publish-agent/prompts-preview.js';
 import type { RolePromptView, RolePromptSegment } from '../panel/types.js';
 
 const PLACEHOLDER_NOTE = '实时数据为示例占位（线上调用时由系统填入真实值）；人设为当前账号真实人设。';
+// 发布侧忠实渲染的说明（change publish-prompt-preview）：发布人设为内置默认、不随账号切换。
+const PUBLISH_PLACEHOLDER_NOTE = '实时数据为示例占位（线上调用时由系统填入真实值）；发布侧人设为内置默认、不随账号切换。';
+// 发布侧带 accountId 预览时的诚实标注：不随账号切、不做账号回落。
+const PUBLISH_ACCOUNT_NOTE = '发布侧 prompt 的人设为内置默认、不随账号切换；预览按内置默认渲染（与所选账号无关）。';
 
 interface Previewable {
   previewPrompt(): string;
@@ -139,19 +144,29 @@ export function createRolePromptProvider(
       }
       return safePreview(roleId, inst);
     }
-    // 发布侧：prompt 集中在 publish-agent/prompts.ts，可直接读源码；本期后台暂只渲染浏览侧（诚实，不伪造）。
-    return {
-      roleId,
-      prompt: null,
-      available: false,
-      note: '发布侧 prompt 集中于 publish-agent/prompts.ts，本期后台暂只渲染浏览侧；发布侧待后续',
-    };
+    // 发布侧文本角色（change publish-prompt-preview）：用示例输入调既有 build*Prompt 忠实渲染。
+    // 无来源段（发布人设为内置默认、不随账号切）；渲染抛错优雅降级、绝不连累发布闭环。
+    const buildPreview = PUBLISH_PREVIEW_BUILDERS[roleId];
+    if (!buildPreview) {
+      return { roleId, prompt: null, available: false, note: '该角色暂不支持预览' };
+    }
+    try {
+      return { roleId, prompt: buildPreview(), available: true, note: PUBLISH_PLACEHOLDER_NOTE };
+    } catch (e) {
+      return { roleId, prompt: null, available: false, note: `预览不可用：${(e as Error).message}` };
+    }
   };
 
   return {
     get(roleId: string, accountId?: string): RolePromptView {
       // 无 accountId 或未注入 withAccount → 旧行为（系统默认人设），不附账号字段。
       if (!accountId || !opts.withAccount) return render(roleId);
+      // 发布侧（change publish-prompt-preview）：人设为内置默认、不随账号切——不切账号口径、不做 personaFallback、
+      // 不回显 accountId（避免前端「人设来自账号」误导），仅在可用时诚实标注「不随账号切换」。
+      if (getCatalogItem(roleId)?.group === 'publish') {
+        const pubView = render(roleId);
+        return pubView.available ? { ...pubView, note: PUBLISH_ACCOUNT_NOTE } : pubView;
+      }
       // 选定账号口径：切预览账号 → 同步渲染 → finally 还原（由 withAccount 保证，含渲染抛错路径）。
       const view = opts.withAccount(accountId, () => render(roleId));
       // 诚实回落标注：default 账号本就用默认人设、不算回落；其余账号无人设行才标 personaFallback。
