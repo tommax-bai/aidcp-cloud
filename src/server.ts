@@ -39,7 +39,7 @@ import {
 } from './comm/index.js';
 
 
-import { RiskController, RiskControllerRegistry, PgRiskStore, InteractionGuardRegistry, ActionCooldownGate } from './risk/index.js';
+import { RiskController, RiskControllerRegistry, PgRiskStore, InteractionGuardRegistry, ActionCooldownGate, PacingSaturationAlerter } from './risk/index.js';
 import { EventBus } from './event-bus/index.js';
 import { RoleDispatcher } from './orchestrator/index.js';
 import { ConnectionRuntimeRegistry, type DispatcherBuildContext } from './orchestrator/connection-runtime.js';
@@ -76,6 +76,7 @@ import {
   ImageGeneratorRole,
   CoverSelectorRole,
   ContentCleanerRole,
+  CLEAN_TIMEOUT_MS,
   AiFlavorScorerRole,
   QualityScorerRole,
   ContentAssemblerRole,
@@ -127,6 +128,15 @@ function readEnvPort(name: string): number | undefined {
   if (!value) return undefined;
   const port = Number(value);
   return Number.isInteger(port) && port > 0 ? port : undefined;
+}
+
+/**
+ * 解析毫秒超时 env：非有限数 / 低于 1s（surely misconfig）视为非法，回落 fallback（绝不 brick）。
+ * change raise-model-call-timeouts-for-thinking-models：为单次模型天花板 / 发布总闸等提供统一的下限保护。
+ */
+function normalizeTimeoutMs(raw: string | undefined, fallback: number): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 1_000 ? n : fallback;
 }
 
 function parseForbiddenPorts(raw: string | undefined): number[] {
@@ -274,6 +284,9 @@ async function main(): Promise<void> {
 
   const llm = new QwenClient({
     apiKey: dashscopeApiKey, // 构造默认（仅未注入 providerRuntime 的旧路径用；生产恒走 providerRuntime）
+    // 单次模型调用天花板（change raise-model-call-timeouts-for-thinking-models）：默认 180s 容纳 thinking 模型，
+    // env AIDCP_LLM_TIMEOUT_MS 可调；非法/缺省回落 180_000（正数下限保护，绝不 brick）。
+    timeoutMs: normalizeTimeoutMs(process.env.AIDCP_LLM_TIMEOUT_MS, 180_000),
     getModel: resolveModelForRole,
     getTemperature: resolveTempForRole,
     // change model-config-volcengine-provider：按角色解析出的 provider 从 providerRuntime 取 baseUrl+key。
@@ -467,7 +480,9 @@ async function main(): Promise<void> {
   const postProcessor = new PostProcessor({
     rewrite: async (content, flagged) => {
       const prompt = `请重写以下内容，去除AI味过重的表达（${flagged.join('、')}），保持原意和自然口吾：\n\n${content}`;
-      return llm.complete(prompt);
+      // change raise-model-call-timeouts-for-thinking-models：与 ContentCleaner 角色闸共用 CLEAN_TIMEOUT_MS，
+      // 使该 complete() 的超时不短于角色闸（外层秒表绝不短于所包裹的模型预算、且底层 HTTP 同时限被真正中止）。
+      return llm.complete(prompt, { timeoutMs: CLEAN_TIMEOUT_MS });
     },
   });
 
@@ -482,10 +497,12 @@ async function main(): Promise<void> {
 
   // 发布编排器（PublishOrchestrator）。change decouple-publish-generation-from-dispatch：
   // 编排只跑生成候审段（生成终稿 + 落库待审 + 发审批卡），**不再让位浏览**、**不再内联等审**——
-  // 让位/续场与真正下发已下放到 PublishDispatcher（下方构造，由人审授权触发）。故超时只覆盖生成（默认 180s）。
+  // 让位/续场与真正下发已下放到 PublishDispatcher（下方构造，由人审授权触发）。
+  // change raise-model-call-timeouts-for-thinking-models：总闸默认 180s → 600s，须 ≥ 关键路径各模型角色预算之和
+  // （容器不得小于内容物；旧 180s < scout+content 串行和 210s，慢跑会中途掐断并丢弃已付费产出）。env 可调、下限保护。
   const publishOrchestrator = new PublishOrchestrator({
     logger: console,
-    pipelineTimeoutMs: Number(process.env.AIDCP_PUBLISH_PIPELINE_TIMEOUT_MS ?? 180_000),
+    pipelineTimeoutMs: normalizeTimeoutMs(process.env.AIDCP_PUBLISH_PIPELINE_TIMEOUT_MS, 600_000),
     // 角色执行日志写入口（死表 publish_pipeline_logs 激活）：每角色每次执行 best-effort 落一行。
     pipelineLogSink: publishPipelineLogStore,
   });
@@ -609,6 +626,10 @@ async function main(): Promise<void> {
   };
   console.log('[aidcp-cloud] RiskControllerRegistry 已就绪（按真实账号懒解析，PgRiskStore 持久化）');
 
+  // 节奏饱和运维告警器（change decouple-quota-hit-from-risk）：撞速率突发窗不再升风控态，
+  // 改道成低优先级运维告警。alertStore 就绪后（见下方）赋值；闭包在事件触发时读取，故此处先声明。
+  let pacingAlerter: PacingSaturationAlerter | undefined;
+
   // RiskController 订阅跨模块事件：真实互动发生时按账号计数（record 内部再过 canDo）。
   eventBus.on('interaction.occurred', (evt) => {
     // retire-default-account：账号归因 honest-fail —— 缺 accountId（握手已保证存在）即丢弃该事件 + 告警，
@@ -626,7 +647,17 @@ async function main(): Promise<void> {
     if (!skipRiskRecord) {
       riskRegistry
         .getController(accountId)
-        .then((c) => c.record(evt.action))
+        .then(async (c) => {
+          const recorded = await c.record(evt.action);
+          // 配额饱和改道（change decouple-quota-hit-from-risk）：record 被拒且原因是突发窗（小时/分钟）
+          // 过载 → 发低优先级运维告警（每日窗静默、只背压）。风控状态在 record 内部已不再被撞配额改动。
+          if (!recorded && pacingAlerter) {
+            const reason = c.explain(evt.action).reason;
+            if (reason === 'quota:hour' || reason === 'quota:minute') {
+              pacingAlerter.maybe(accountId, evt.action, reason === 'quota:hour' ? 'hour' : 'minute');
+            }
+          }
+        })
         .catch((err) => {
           console.warn('[aidcp-cloud] RiskController record error:', err);
         });
@@ -744,6 +775,11 @@ async function main(): Promise<void> {
     console.log('[aidcp-cloud] AlertStore 已就绪（alerts 表）');
   } catch (err) {
     console.warn('[aidcp-cloud] AlertStore 初始化失败，告警不落库（飞书告警仍发）:', (err as Error).message);
+  }
+  // 节奏饱和告警器接线（change decouple-quota-hit-from-risk）：有 alertStore 才发，缺则降级为不发、不阻塞。
+  if (alertStore) {
+    pacingAlerter = new PacingSaturationAlerter({ alertStore });
+    console.log('[aidcp-cloud] PacingSaturationAlerter 已就绪（撞突发窗 → 低优先级运维告警）');
   }
 
   // A 阶段4 发帖触发器（下方实例化；actions.publish 运行时引用，前向安全）。
