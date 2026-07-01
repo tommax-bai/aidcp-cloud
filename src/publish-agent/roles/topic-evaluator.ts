@@ -26,7 +26,6 @@ export interface TopicEvaluatorDeps {
 
 interface TopicEvalInput {
   candidates: string[];
-  title: string;
   body: string;
 }
 
@@ -35,7 +34,8 @@ export class TopicEvaluatorRole extends BasePublishRole<TopicEvalInput, TopicSel
     name: 'TopicEvaluator',
     watchKeys: ['topicCandidates'],
     timeoutMs: TOPIC_TIMEOUT_MS,
-    fallback: 'default',
+    // 'skip'：角色闸超时也经 handleError 写空 topicSelection，保证 MetadataAggregator 的 waitAll 不 fail-slow 到 600s。
+    fallback: 'skip',
   };
   protected readonly outputKey = 'topicSelection' as const;
   private llmClient: ChatLlmClient;
@@ -46,9 +46,10 @@ export class TopicEvaluatorRole extends BasePublishRole<TopicEvalInput, TopicSel
   }
 
   protected extractInput(snapshot: Partial<PipelineFields>): TopicEvalInput {
+    // 只取候选 + 定稿正文：不读 titleSelection——它与本角色的上游 topicCandidates 无就绪顺序，
+    // 读它会得到"有时有、有时空"的非确定标题；正文(finalContent)才是相关性判断的确定信号。
     return {
       candidates: snapshot.topicCandidates?.candidates ?? [],
-      title: snapshot.titleSelection?.title ?? '',
       body: snapshot.assembledContent?.finalContent ?? '',
     };
   }
@@ -63,7 +64,8 @@ export class TopicEvaluatorRole extends BasePublishRole<TopicEvalInput, TopicSel
         const raw = await this.llmClient.chat(
           [
             { role: 'system', content: TOPIC_EVAL_SYSTEM },
-            { role: 'user', content: buildTopicEvaluationPrompt(input.candidates, input.title, input.body) },
+            // 传空标题：评判只依据候选 + 定稿正文（正文为确定信号），不引入非确定就绪的标题。
+            { role: 'user', content: buildTopicEvaluationPrompt(input.candidates, '', input.body) },
           ],
           { timeoutMs: TOPIC_TIMEOUT_MS },
         );
