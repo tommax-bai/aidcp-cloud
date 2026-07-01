@@ -1269,6 +1269,8 @@ async function main(): Promise<void> {
     resolveConnection: (accountId) => runtimes?.runtimeForAccount(accountId) ?? null,
     pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
     getSoul,
+    // persona-driven-content-pipeline：/comment 触发前人设闸——未绑人设不接管边端、不启动评论任务（与浏览/发布同口径）。
+    isPersonaBound: (accountId) => personaStore.getForAccount(accountId) !== null,
     selectCurated: (accountId, type, limit) =>
       curatedContentStore
         ? curatedContentStore

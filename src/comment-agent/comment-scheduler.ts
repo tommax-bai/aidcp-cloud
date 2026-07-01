@@ -38,6 +38,8 @@ export interface CommentSchedulerDeps {
   resolveConnection: (accountId: string) => { bus: EventBus; edgeId?: string } | null;
   pusher: EdgePusher;
   getSoul: (accountId: string) => Soul;
+  /** 人设绑定判定（persona-driven-content-pipeline）：注入则触发前闸——未绑人设的账号不接管边端、不启动评论任务，绝不以默认人设代评。缺省→不闸（向后兼容旧构造 / 测试桩）。 */
+  isPersonaBound?: (accountId: string) => boolean;
   /** 取精选样本喂搜索词生成（按账号；出错回 []）。 */
   selectCurated: (accountId: string, contentType: 'note' | 'comment', limit: number) => Promise<CuratedSampleForTerms[]>;
   /** 账号绑定 LLM（计 token 归属该账号）。 */
@@ -79,6 +81,9 @@ export class CommentScheduler {
   async triggerManual(accountId: string): Promise<CommentCommandReceipt> {
     if (!accountId || accountId === 'default') {
       return { ok: false, level: 'error', title: '按需评论触发失败', message: '未解析到有效账号（绝不回落 default）' };
+    }
+    if (this.deps.isPersonaBound && !this.deps.isPersonaBound(accountId)) {
+      return { ok: false, level: 'warning', title: '未触发按需评论', message: '该账号未绑定人设——请先到后台「人设」页设置；未绑人设不启动评论任务，绝不以默认人设代评。' };
     }
     if (this.running.has(accountId)) {
       return { ok: false, level: 'warning', title: '未触发按需评论', message: '该账号已有评论任务在跑，请等其结束' };

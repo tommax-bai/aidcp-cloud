@@ -93,6 +93,16 @@ describe('CommentScheduler.triggerManual', () => {
     assert.equal(r.level, 'error');
   });
 
+  it('未绑人设 → 拒绝、不接管边端（不以默认人设代评）', async () => {
+    let takeovers = 0;
+    const s = new CommentScheduler(baseDeps({ isPersonaBound: () => false, onTakeoverStart: () => { takeovers += 1; } }));
+    const r = await s.triggerManual('acc-1');
+    assert.equal(r.ok, false);
+    assert.equal(r.level, 'warning');
+    assert.match(r.message, /未绑定人设/);
+    assert.equal(takeovers, 0, '未绑人设绝不接管边端');
+  });
+
   it('触发成功 → ok:true / level:success；happy path 跑通：接管/恢复成对 + 结果卡片 success', async () => {
     const bus = new EventBus();
     const takeovers: string[] = [];
