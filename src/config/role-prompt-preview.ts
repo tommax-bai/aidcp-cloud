@@ -17,7 +17,7 @@
 
 import type { BaseRole } from '../agents/base-role.js';
 import { getCatalogItem } from './role-catalog.js';
-import { PUBLISH_PREVIEW_BUILDERS } from '../publish-agent/prompts-preview.js';
+import { PUBLISH_PREVIEW_BUILDERS, IMAGE_PROMPT_PREVIEW_BUILDERS } from '../publish-agent/prompts-preview.js';
 import type { RolePromptView, RolePromptSegment } from '../panel/types.js';
 
 const PLACEHOLDER_NOTE = '实时数据为示例占位（线上调用时由系统填入真实值）；人设为当前账号真实人设。';
@@ -25,6 +25,9 @@ const PLACEHOLDER_NOTE = '实时数据为示例占位（线上调用时由系统
 const PUBLISH_PLACEHOLDER_NOTE = '实时数据为示例占位（线上调用时由系统填入真实值）；发布侧人设为内置默认、不随账号切换。';
 // 发布侧带 accountId 预览时的诚实标注：不随账号切、不做账号回落。
 const PUBLISH_ACCOUNT_NOTE = '发布侧 prompt 的人设为内置默认、不随账号切换；预览按内置默认渲染（与所选账号无关）。';
+// 图像角色的图片指令说明（change publish-prompt-preview 补图片类）。
+const IMAGE_PREVIEW_NOTE =
+  '发给文生图模型的图片指令（非大模型文本 prompt）：主体由「配图指令」角色按正文产出（此处为示例），系统统一追加下方固定风格基底；配图用全局图片模型生成。';
 
 interface Previewable {
   previewPrompt(): string;
@@ -129,12 +132,20 @@ export function createRolePromptProvider(
     const item = getCatalogItem(roleId);
     if (!item) return { roleId, prompt: null, available: false, note: '未知角色' };
     if (item.llmKind !== 'text') {
-      return {
-        roleId,
-        prompt: null,
-        available: false,
-        note: item.llmKind === 'image' ? '图像角色无文本 prompt（用全局图片模型）' : '该角色不调用大模型',
-      };
+      // 图像角色（change publish-prompt-preview 补图片类）：展示发给文生图模型的「有效图片指令」
+      // （示例主体 + 固定风格基底）；无预览闭包时回落旧「无文本 prompt」说明。
+      if (item.llmKind === 'image') {
+        const buildImg = IMAGE_PROMPT_PREVIEW_BUILDERS[roleId];
+        if (!buildImg) {
+          return { roleId, prompt: null, available: false, note: '图像角色无文本 prompt（用全局图片模型）' };
+        }
+        try {
+          return { roleId, prompt: buildImg(), available: true, note: IMAGE_PREVIEW_NOTE };
+        } catch (e) {
+          return { roleId, prompt: null, available: false, note: `预览不可用：${(e as Error).message}` };
+        }
+      }
+      return { roleId, prompt: null, available: false, note: '该角色不调用大模型' };
     }
     if (item.group === 'browse') {
       const roleName = roleId.slice('browse:'.length);
@@ -162,10 +173,15 @@ export function createRolePromptProvider(
       // 无 accountId 或未注入 withAccount → 旧行为（系统默认人设），不附账号字段。
       if (!accountId || !opts.withAccount) return render(roleId);
       // 发布侧（change publish-prompt-preview）：人设为内置默认、不随账号切——不切账号口径、不做 personaFallback、
-      // 不回显 accountId（避免前端「人设来自账号」误导），仅在可用时诚实标注「不随账号切换」。
-      if (getCatalogItem(roleId)?.group === 'publish') {
+      // 不回显 accountId（避免前端「人设来自账号」误导）。仅**文本**发布角色在可用时标注「不随账号切换」；
+      // 图像角色无人设，保留其自身图片指令说明。
+      const pubItem = getCatalogItem(roleId);
+      if (pubItem?.group === 'publish') {
         const pubView = render(roleId);
-        return pubView.available ? { ...pubView, note: PUBLISH_ACCOUNT_NOTE } : pubView;
+        if (pubView.available && pubItem.llmKind === 'text') {
+          return { ...pubView, note: PUBLISH_ACCOUNT_NOTE };
+        }
+        return pubView;
       }
       // 选定账号口径：切预览账号 → 同步渲染 → finally 还原（由 withAccount 保证，含渲染抛错路径）。
       const view = opts.withAccount(accountId, () => render(roleId));

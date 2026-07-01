@@ -22,6 +22,7 @@ import {
   buildAssemblerPrompt,
   buildGatekeeperPrompt,
   IMAGE_COUNT_HARD_MAX,
+  IMAGE_STYLE_BASE,
 } from './prompts.js';
 
 // —— 最小合法示例输入（仅供预览渲染；不触发任何真实发布）——
@@ -94,4 +95,16 @@ export const PUBLISH_PREVIEW_BUILDERS: Record<string, () => string> = {
     buildImagePromptComposerPrompt({ subject: '<示例配图主体>', intent: '<示例配图要点>' }, '科技扁平'),
   'publish:QualityScorer': () => buildAssemblerPrompt(EXAMPLE_CREATED, EXAMPLE_POST_PROCESS),
   'publish:ApprovalGatekeeper': () => buildGatekeeperPrompt(EXAMPLE_ASSEMBLED),
+};
+
+// —— 图像角色（配图生成执行）：发给文生图模型的「有效图片指令」预览 ——
+// 图片角色不调文本大模型，但它发给文生图模型的图片指令 = 「配图指令」角色按正文产出的英文主体描述
+// （此处为示例）+ 系统在 composer 侧统一追加的固定风格基底 IMAGE_STYLE_BASE。后者是每张图被强制施加的
+// 风格/负向约束（无文字/无水印/无真人），此前在查看器里各处均不可见——本预览把它显性化。
+const EXAMPLE_IMAGE_SUBJECT =
+  'isometric diagram of a distributed system with labeled service nodes and data flow arrows';
+
+/** roleId → 图片指令渲染闭包（示例主体 + 固定风格基底），与文本预览分开，供图像分支使用。 */
+export const IMAGE_PROMPT_PREVIEW_BUILDERS: Record<string, () => string> = {
+  'publish:ImageGenerator': () => `${EXAMPLE_IMAGE_SUBJECT}. ${IMAGE_STYLE_BASE}`,
 };

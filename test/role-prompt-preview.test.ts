@@ -25,11 +25,14 @@ test('未知角色 → available:false + 未知角色', () => {
   assert.equal(v.note, '未知角色');
 });
 
-test('图像角色 → available:false（无文本 prompt）', () => {
+test('图像角色 → available:true（发给文生图模型的图片指令，含固定风格基底）', () => {
   const p = createRolePromptProvider(() => []);
   const v = p.get('publish:ImageGenerator');
-  assert.equal(v.available, false);
-  assert.equal(v.prompt, null);
+  assert.equal(v.available, true);
+  assert.ok(v.prompt && v.prompt.trim().length > 0);
+  assert.match(v.prompt!, /no text|no watermark|no human faces/); // 固定风格基底可见
+  assert.equal(v.segments, undefined); // 图片指令无人设来源段
+  assert.match(v.note, /文生图|图片指令/);
 });
 
 // ── 发布侧忠实渲染（change publish-prompt-preview）────────────────────────────
@@ -92,15 +95,18 @@ test('发布角色带 accountId → 内置默认渲染 + 诚实标注不随账�
   assert.equal(v.accountId, undefined); // 不回显账号，避免前端「人设来自账号」误导
 });
 
-test('配图生成执行带 accountId 仍 available:false（图像无文本 prompt）', () => {
+test('配图生成执行带 accountId → available:true 图片指令，不加人设标注/回落', () => {
   const p = createRolePromptProvider(() => [], {
     withAccount: (_a, fn) => fn(),
     hasPersona: () => false,
   });
   const v = p.get('publish:ImageGenerator', 'acc-x');
-  assert.equal(v.available, false);
-  assert.equal(v.prompt, null);
+  assert.equal(v.available, true);
+  assert.ok(v.prompt && v.prompt.length > 0);
+  assert.match(v.note, /文生图|图片指令/); // 保留图片指令说明，不被人设标注覆盖
   assert.equal(v.personaFallback, undefined);
+  assert.equal(v.accountId, undefined);
+  assert.equal(v.segments, undefined);
 });
 
 test('previewPrompt 抛错 → 优雅降级 available:false，绝不抛', () => {
