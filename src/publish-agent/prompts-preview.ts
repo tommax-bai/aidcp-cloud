@@ -41,7 +41,7 @@ const EXAMPLE_SOUL: Soul = {
 const EXAMPLE_TRIGGER: TriggerInput = {
   metrics: { hoursSinceLastPublish: 12, newConceptCount: 3, likedSinceLastPublish: 6 },
   generateInput: {
-    concepts: [{ keyword: '<示例技术概念>', sourceNote: '<示例来源笔记>' }],
+    concepts: [{ keyword: '<示例概念>', sourceNote: '<示例来源笔记>' }],
     likedContents: [{ id: 0, title: '<示例点赞笔记标题>', summary: '<示例摘要>', author: '<示例作者>' }],
     soul: EXAMPLE_SOUL,
     recentPosts: [],

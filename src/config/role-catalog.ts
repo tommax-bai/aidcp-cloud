@@ -72,7 +72,7 @@ export const ROLE_CATALOG: RoleCatalogItem[] = [
   { roleId: 'browse:search_evaluator', displayName: '搜索关键词决策', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
   // B. 点开笔记·读正文（三者同订阅 note.detail.arrived：content_curator 为主闸，另两为 fire-and-forget 旁路）
   { roleId: 'browse:content_curator', displayName: '详情页内容粗筛', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
-  { roleId: 'browse:concept_extractor', displayName: '技术概念关键词抽取', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false }, // 仅概念池可用时注册
+  { roleId: 'browse:concept_extractor', displayName: '笔记关键词抽取', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false }, // 仅概念池可用时注册
   { roleId: 'browse:curated_note_evaluator', displayName: '精选准入·正文评估', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false }, // 仅精选库可用时注册
   // C. 翻评论区（看别人评论）
   { roleId: 'browse:comment_reviewer', displayName: '是否翻评论区判定', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
@@ -92,7 +92,7 @@ export const ROLE_CATALOG: RoleCatalogItem[] = [
   { roleId: 'browse:comment_target_picker', displayName: '评论·搜索笔记甄选', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
   // —— 发布管线（文本，经 llmClient.chat；顺序 = PipelineContext watch/output 依赖链）——
   { roleId: 'publish:ContentScout', displayName: '发布选题侦察', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: false },
-  { roleId: 'publish:ContentCreator', displayName: '技术帖文案创作', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
+  { roleId: 'publish:ContentCreator', displayName: '笔记正文创作', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
   // 配图分支（createdContent 后分叉）：选题 → 指令 → 生成
   { roleId: 'publish:ImageSetPlanner', displayName: '配图选题（张数+主题）', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
   { roleId: 'publish:ImagePromptComposer', displayName: '配图指令（主题→万相prompt）', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
@@ -102,7 +102,7 @@ export const ROLE_CATALOG: RoleCatalogItem[] = [
   // 发布配图执行（图像，imageModel 全局配置；本期不开放 per-role 覆盖，列出仅为区分类型）
   { roleId: 'publish:ImageGenerator', displayName: '配图生成执行', group: 'publish', category: 'image', llmKind: 'image', tunableTemperature: false },
   // 汇合后出稿 / 审批（TitleCreator 与 ApprovalGatekeeper 同 watch assembledContent，为发布执行前最后两步）
-  { roleId: 'publish:TitleCreator', displayName: '技术帖标题创作', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
+  { roleId: 'publish:TitleCreator', displayName: '笔记标题创作', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
   // change split-topic-roles：话题生成（依定稿正文召回候选）+ 话题评判（相关性/质量精排、只筛不加）。
   { roleId: 'publish:TopicGenerator', displayName: '话题生成（依定稿）', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
   { roleId: 'publish:TopicEvaluator', displayName: '话题相关性评判', group: 'publish', category: 'publish_gate', llmKind: 'text', tunableTemperature: false },

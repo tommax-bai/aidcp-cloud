@@ -52,7 +52,7 @@ export class ContentCreatorRole extends BasePublishRole<CreatorInput, CreatedCon
       async () => {
         return this.llmClient.chat(
           [
-            { role: 'system', content: '你是一个小红书技术博主。严格按要求生成JSON格式内容。' },
+            { role: 'system', content: '你是小红书笔记创作者，正文创作：严格按要求生成JSON格式内容。' },
             { role: 'user', content: prompt },
           ],
           // LLM 调用超时须与角色闸同放宽，否则 QwenClient 默认 30s 会先 abort（角色闸放宽也没用）。

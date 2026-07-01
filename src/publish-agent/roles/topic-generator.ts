@@ -37,7 +37,9 @@ export class TopicGeneratorRole extends BasePublishRole<TopicGenInput, TopicCand
     name: 'TopicGenerator',
     watchKeys: ['assembledContent'],
     timeoutMs: TOPIC_TIMEOUT_MS,
-    fallback: 'default',
+    // 'skip'（非 'default'）：即便角色闸超时（execute 未及降级即被 Promise.race 掐断），handleError 也会写 getDefaultOutput，
+    // 保证 topicCandidates 必写、下游 waitAll 不会干等到 pipelineTimeoutMs（'default' 在超时路径是 no-op，会 fail-slow）。
+    fallback: 'skip',
   };
   protected readonly outputKey = 'topicCandidates' as const;
   private llmClient: ChatLlmClient;
@@ -53,7 +55,7 @@ export class TopicGeneratorRole extends BasePublishRole<TopicGenInput, TopicCand
     const identity = snapshot.trigger?.generateInput?.soul?.identity;
     const persona = identity
       ? `${identity.role}｜${identity.background}（语气：${identity.tone}）`
-      : '小红书技术博主';
+      : '小红书博主';
     return { body, persona };
   }
 

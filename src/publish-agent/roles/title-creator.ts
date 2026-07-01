@@ -23,7 +23,7 @@ const TITLE_MAX = 18;
 const TITLE_TIMEOUT_MS = Number(process.env.AIDCP_PUBLISH_TITLE_TIMEOUT_MS ?? 180_000);
 /** 语义重试次数（首次 + 重试 ≤2）。 */
 const MAX_ATTEMPTS = 3;
-/** TitleCreator 专用 system（含「标题创作」标识，与 ContentCreator 的「小红书技术博主」相区分，便于按 system 路由的桩）。 */
+/** TitleCreator 专用 system（含「标题创作」标识，与 ContentCreator 的「正文创作」相区分，便于按 system 路由的桩）。 */
 const TITLE_SYSTEM = '你是小红书爆款标题创作专家。严格按要求只输出 JSON 格式的标题。';
 
 export interface TitleCreatorDeps {
@@ -61,7 +61,7 @@ export class TitleCreatorRole extends BasePublishRole<TitleInput, TitleSelection
     const identity = snapshot.trigger?.generateInput?.soul?.identity;
     const persona = identity
       ? `${identity.role}｜${identity.background}（语气：${identity.tone}）`
-      : '小红书技术博主';
+      : '小红书博主';
     return {
       body,
       persona,

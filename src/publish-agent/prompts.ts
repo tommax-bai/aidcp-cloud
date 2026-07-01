@@ -41,7 +41,7 @@ export const ENCOURAGED_STYLE: string[] = [
   '偶尔用 "..." 省略号表达思考',
 ];
 
-/** 模拟的真人高赞技术帖范文（few-shot，体现人味）。 */
+/** 模拟的真人高赞笔记范文（few-shot，体现人味；示例话题偏技术，仅作"语气/真实感"参考，勿照搬领域）。 */
 export const FEW_SHOT_EXAMPLES: string[] = [
   `RAG 不是万能药，别再无脑上向量库了
 折腾了俩礼拜，公司知识库问答终于上线。一开始我也是跟风 embedding + 向量检索一把梭，结果召回一坨，用户问"报销流程"它给我返回个"差旅政策第三版废止通知"...
@@ -123,7 +123,7 @@ export function buildScoutPrompt(trigger: TriggerInput): string {
     : '';
 
   return [
-    '你是一个内容发布策略分析师。你的任务是根据当前积累的素材和度量数据，判断现在是否适合发布一篇小红书技术帖，并确定发布方向。',
+    '你是一个内容发布策略分析师。你的任务是根据当前积累的素材和度量数据，判断现在是否适合发布一篇小红书笔记，并确定发布方向。',
     '',
     '【当前度量数据】',
     metricsBlock,
@@ -163,6 +163,8 @@ export function buildScoutPrompt(trigger: TriggerInput): string {
  */
 export function buildCreatorPrompt(scoutDecision: ScoutDecision, trigger: TriggerInput): string {
   const { generateInput, recentPublished } = trigger;
+  const { identity } = generateInput.soul;
+  const soulInterests = [...generateInput.soul.interests.primary, ...generateInput.soul.interests.secondary].join('、');
 
   const banned = BANNED_PHRASES.map((p) => `「${p}」`).join('、');
   const encouraged = ENCOURAGED_STYLE.map((s) => `- ${s}`).join('\n');
@@ -208,8 +210,8 @@ export function buildCreatorPrompt(scoutDecision: ScoutDecision, trigger: Trigge
       : '（无）';
 
   return [
-    '你是「小林」，一名 AI/技术方向的 R&D 工程师，3 年经验，大厂做 LLM 应用落地，关注开源和前沿论文。说话技术向、理性、偶尔幽默。',
-    '你在写一篇要发到小红书的技术帖，目标是真实、有个人观点、像一个真人随手记录。',
+    `你是「${identity.name}」，${identity.role}，${identity.background}。说话${identity.tone}。你关注的领域：${soulInterests}。`,
+    '你在写一篇要发到小红书的笔记，目标是真实、有个人观点、像一个真人随手记录。',
     '',
     '【硬性禁止】下列词/句式绝对不能出现：' + banned + '。',
     '禁止任何排比句式（"第一…第二…第三…"、"既…又…还…"）。整篇最多出现 1 个感叹号。',
@@ -224,7 +226,7 @@ export function buildCreatorPrompt(scoutDecision: ScoutDecision, trigger: Trigge
     '- 必须包含具体细节（从下面给的概念/点赞内容里提取真实信息）。',
     '- 要有明确的个人立场和判断，不要和稀泥。',
     '',
-    '【高赞真人范文（学习这种语气）】',
+    '【高赞真人范文（只学这种"真人语气/真实感"，不要照搬其话题领域——你的话题由你的人设与下方写作方向决定）】',
     fewShot,
     '',
     '【AI 味反例（坚决不要这样写）】',
@@ -269,7 +271,7 @@ export function buildCreatorPrompt(scoutDecision: ScoutDecision, trigger: Trigge
 export function buildTitlePrompt(body: string, persona: string, styleType: string, seedTitle?: string): string {
   const banned = BANNED_PHRASES.map((p) => `「${p}」`).join('、');
   const lines: string[] = [
-    `你是${persona}，正在为一篇**已定稿**的小红书技术帖拟一个标题。`,
+    `你是${persona}，正在为一篇**已定稿**的小红书笔记拟一个标题。`,
     '只依据下面的定稿正文来写标题，不要复述正文、不要编造正文里没有的信息。',
     '',
     '【定稿正文】',
@@ -307,7 +309,7 @@ export function buildTitlePrompt(body: string, persona: string, styleType: strin
  */
 export function buildTopicGenerationPrompt(body: string, persona: string): string {
   return [
-    `你是${persona}，正在为一篇**已定稿**的小红书技术帖挑选话题（发布时的 #话题）。`,
+    `你是${persona}，正在为一篇**已定稿**的小红书笔记挑选话题（发布时的 #话题）。`,
     '【任务：话题生成】只依据下面的定稿正文，提炼一批真正贴合正文的话题词。',
     '',
     '【定稿正文】',
@@ -330,7 +332,7 @@ export function buildTopicGenerationPrompt(body: string, persona: string): strin
  */
 export function buildTopicEvaluationPrompt(candidates: string[], title: string, body: string): string {
   return [
-    '你是小红书内容运营，正在为一篇技术帖**筛选**最终要带的话题（#话题）。',
+    '你是小红书内容运营，正在为一篇笔记**筛选**最终要带的话题（#话题）。',
     '【任务：话题评判】从给定候选里挑出与正文最相关、质量最好、合规安全的一批。',
     '',
     `【标题】${title}`,
@@ -435,7 +437,7 @@ export function buildAssemblerPrompt(
   const banned = BANNED_PHRASES.map((p) => `「${p}」`).join('、');
 
   return [
-    '你是一个内容质量评审员。你的任务是评估一篇小红书技术帖的整体质量，综合内容本身和后处理检测结果给出评分。',
+    '你是一个内容质量评审员。你的任务是评估一篇小红书笔记的整体质量，综合内容本身和后处理检测结果给出评分。',
     '',
     '【待评审内容】',
     `标题: ${content.title}`,

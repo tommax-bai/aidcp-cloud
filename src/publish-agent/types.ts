@@ -2,7 +2,7 @@ import type { Soul } from '../soul/types.js';
 
 // ─── 从 publish/types.ts 迁移的类型 ────────────────────────────────────────────
 
-/** 一个已积累的技术概念（concepts 表的投影）。 */
+/** 一个已积累的领域/话题概念（concepts 表的投影）。 */
 export interface Concept {
   /** 概念关键词 */
   keyword: string;

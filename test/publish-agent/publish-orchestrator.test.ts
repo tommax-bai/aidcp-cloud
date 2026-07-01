@@ -56,7 +56,7 @@ function makeTriggerInput(): TriggerInput {
 
 /**
  * 注册 A 阶段2 细拆后的 11 个生产段角色（顺序无关，黑板靠键就绪触发）。
- * fakeLlm 按 system prompt 路由：发布决策→Scout、小红书技术博主→Creator、
+ * fakeLlm 按 system prompt 路由：发布决策→Scout、正文创作→Creator、
  * 配图选题→ImageSetPlanner、配图指令→ImagePromptComposer、质量评审→QualityScorer、审批决策→Gatekeeper。
  */
 function buildFullPipeline(llmResponses: Record<string, string>, opts?: { enableImage?: boolean }) {
@@ -68,7 +68,7 @@ function buildFullPipeline(llmResponses: Record<string, string>, opts?: { enable
       // change split-topic-roles：话题生成 → 候选；话题评判 → 保留子集。
       if (systemContent.includes('话题生成')) return llmResponses.topicGen ?? '{"topics":["测试话题","大模型"]}';
       if (systemContent.includes('话题评判')) return llmResponses.topicEval ?? '{"kept":["测试话题"]}';
-      if (systemContent.includes('小红书技术博主')) return llmResponses.creator;
+      if (systemContent.includes('正文创作')) return llmResponses.creator;
       // 配图三角色（publish-multi-image）：选题（配图选题师）→ 指令（文生图 prompt 工程师）。缺省给合法产物。
       if (systemContent.includes('配图选题')) return llmResponses.imageSet ?? '{"wantImage":true,"imageCount":1,"themes":[{"subject":"配图示意"}],"styleHint":null}';
       if (systemContent.includes('prompt 工程师') || systemContent.includes('文生图')) return llmResponses.imageCompose ?? '{"imagePrompt":"tech illustration","imageStyle":"illustration"}';

@@ -1,7 +1,7 @@
 /**
- * ConceptExtractorRole — 从浏览内容中抽取技术概念关键词（LLM，事件驱动）。
+ * ConceptExtractorRole — 从浏览内容中抽取领域/话题概念关键词（LLM，事件驱动）。
  *
- * 职责：浏览到笔记详情时，用 LLM 从 title+content 抽取 1-3 个高置信技术概念关键词，
+ * 职责：浏览到笔记详情时，用 LLM 从 title+content 抽取 1-3 个高置信领域/话题概念关键词（话题中立、不限技术领域），
  * 写入 ConceptStore（status='candidate'），使搜索关键词跨会话从浏览中学习，
  * 不再局限于 soul.yaml 的 6 个写死种子词。
  *
@@ -71,7 +71,7 @@ export class ConceptExtractorRole extends BaseRole {
     const keywords = this.parseKeywords(raw);
     // 红线：抽不到关键词 → 不写任何行、不产生占位/编造关键词。
     if (keywords.length === 0) {
-      this.log(`无可抽取的技术概念，跳过写库 note="${oneLine(note.title)}"`);
+      this.log(`无可抽取的概念，跳过写库 note="${oneLine(note.title)}"`);
       return;
     }
 
@@ -104,7 +104,7 @@ export class ConceptExtractorRole extends BaseRole {
     const interestsStr = [...interests.primary, ...interests.secondary].join('、');
 
     return `你是「${identity.name}」，${identity.role}。
-你在阅读一篇小红书笔记，请从中抽取**可用作搜索关键词的技术概念名词**，用于后续主动检索同领域优质内容。
+你在阅读一篇小红书笔记，请从中抽取**可用作搜索关键词的领域/话题概念名词**，用于后续主动检索同领域优质内容。
 
 你的兴趣领域：${interestsStr}
 
@@ -112,10 +112,10 @@ export class ConceptExtractorRole extends BaseRole {
 笔记正文：${note.content}
 
 抽取要求：
-- 只抽**具体的技术概念/工具/方法名词**（如「向量检索」「LangGraph」「KV Cache」），可作为搜索词。
+- 抽**具体的领域/话题概念名词**（可作搜索词，依笔记所属领域而定——如工具、方法、地点、品类、菜式、玩法等），不限技术领域。
 - 与你兴趣领域相关、有检索价值的优先。
 - 最多 ${this.maxKeywords} 个，按价值排序；宁缺毋滥。
-- **如果笔记里没有值得检索的技术概念（如纯生活/广告/无信息），返回空数组 []。不要编造、不要凑数。**
+- **如果笔记里没有值得检索的概念（如纯情绪宣泄/广告/无信息），返回空数组 []。不要编造、不要凑数。**
 
 只输出 JSON 数组（不要输出其他内容）：
 ["概念1","概念2"]
