@@ -77,6 +77,7 @@ export const ROLE_CATALOG: RoleCatalogItem[] = [
   // C. 翻评论区（看别人评论）
   { roleId: 'browse:comment_reviewer', displayName: '是否翻评论区判定', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
   { roleId: 'browse:curated_comment_evaluator', displayName: '精选准入·评论评估', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false }, // 仅评论点赞+精选库时注册
+  { roleId: 'browse:comment_like_appraiser', displayName: '评论点赞择选', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false }, // 仅 AIDCP_COMMENT_LIKE=true 时注册（线上已开）
   // D. 点赞 / 收藏
   { roleId: 'browse:interaction_appraiser', displayName: '点赞收藏判定', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
   // E. 自己发评论（点赞收藏后才进入的支线）
@@ -95,7 +96,8 @@ export const ROLE_CATALOG: RoleCatalogItem[] = [
   // 配图分支（createdContent 后分叉）：选题 → 指令 → 生成
   { roleId: 'publish:ImageSetPlanner', displayName: '配图选题（张数+主题）', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
   { roleId: 'publish:ImagePromptComposer', displayName: '配图指令（主题→万相prompt）', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
-  // 质量分支（与配图分支并行，数据先就绪）
+  // 质量分支（与配图分支并行，数据先就绪）：先去 AI 味清洗（ContentCleaner 经注入 PostProcessor）→ 再质量评分
+  { roleId: 'publish:ContentCleaner', displayName: '正文去 AI 味改写', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
   { roleId: 'publish:QualityScorer', displayName: '内容质量评分', group: 'publish', category: 'publish_gate', llmKind: 'text', tunableTemperature: false },
   // 发布配图执行（图像，imageModel 全局配置；本期不开放 per-role 覆盖，列出仅为区分类型）
   { roleId: 'publish:ImageGenerator', displayName: '配图生成执行', group: 'publish', category: 'image', llmKind: 'image', tunableTemperature: false },

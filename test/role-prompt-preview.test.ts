@@ -65,6 +65,29 @@ test('7 个发布文本角色全部 available:true 且 prompt 非空', () => {
   }
 });
 
+test('正文去 AI 味改写（ContentCleaner）→ available:true + 真实重写 prompt（与 server 同源）', () => {
+  const p = createRolePromptProvider(() => []);
+  const v = p.get('publish:ContentCleaner');
+  assert.equal(v.available, true);
+  assert.ok(v.prompt && v.prompt.includes('去除AI味')); // buildDeAiRewritePrompt 真实文本
+  assert.equal(v.segments, undefined);
+});
+
+test('评论点赞择选（comment_like_appraiser）→ 已注册即 available:true（浏览角色，可预览）', () => {
+  const roles = [fakeRole('comment_like_appraiser', () => 'RENDERED-COMMENT-LIKE')];
+  const p = createRolePromptProvider(() => roles);
+  const v = p.get('browse:comment_like_appraiser');
+  assert.equal(v.available, true);
+  assert.equal(v.prompt, 'RENDERED-COMMENT-LIKE');
+});
+
+test('评论点赞择选未注册（开关关）→ available:false 诚实标注，不崩', () => {
+  const p = createRolePromptProvider(() => []); // 未注册（AIDCP_COMMENT_LIKE 关）
+  const v = p.get('browse:comment_like_appraiser');
+  assert.equal(v.available, false);
+  assert.match(v.note, /暂不支持预览/);
+});
+
 test('发布角色渲染抛错 → 优雅降级 available:false，绝不抛', () => {
   const original = PUBLISH_PREVIEW_BUILDERS['publish:ContentScout'];
   PUBLISH_PREVIEW_BUILDERS['publish:ContentScout'] = () => {

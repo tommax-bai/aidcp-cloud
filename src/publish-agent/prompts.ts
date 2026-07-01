@@ -450,3 +450,16 @@ export function buildGatekeeperPrompt(assembled: AssembledContent): string {
     '{"needsApproval": false, "recommendedAction": "auto_publish", "reason": "AI味极低(0.08)，质量评分82，无禁用词命中，可自动发布"}',
   ].join('\n');
 }
+
+// ─── ContentCleaner（去 AI 味重写） ──────────────────────────────────────────────
+
+/**
+ * 去 AI 味重写 prompt（change publish-prompt-preview）。
+ * 抽自 server.ts 注入 PostProcessor 的 `rewrite` 内联 prompt，**逐字不变**——使线上真用的 prompt
+ * 与后台只读预览**同一份来源**（防漂移），并让「正文去 AI 味改写」角色的 prompt 在查看器可见。
+ * 注：末尾「口吾」为原文既有笔误（应为「口吻」），此处**保持逐字一致以确保线上行为零变化**；
+ * 如需订正另开 change 改 prompt 行为。
+ */
+export function buildDeAiRewritePrompt(content: string, flagged: string[]): string {
+  return `请重写以下内容，去除AI味过重的表达（${flagged.join('、')}），保持原意和自然口吾：\n\n${content}`;
+}

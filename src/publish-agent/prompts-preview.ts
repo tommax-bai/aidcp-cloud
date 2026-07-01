@@ -21,6 +21,7 @@ import {
   buildImagePromptComposerPrompt,
   buildAssemblerPrompt,
   buildGatekeeperPrompt,
+  buildDeAiRewritePrompt,
   IMAGE_COUNT_HARD_MAX,
   IMAGE_STYLE_BASE,
 } from './prompts.js';
@@ -95,6 +96,9 @@ export const PUBLISH_PREVIEW_BUILDERS: Record<string, () => string> = {
     buildImagePromptComposerPrompt({ subject: '<示例配图主体>', intent: '<示例配图要点>' }, '科技扁平'),
   'publish:QualityScorer': () => buildAssemblerPrompt(EXAMPLE_CREATED, EXAMPLE_POST_PROCESS),
   'publish:ApprovalGatekeeper': () => buildGatekeeperPrompt(EXAMPLE_ASSEMBLED),
+  // 正文去 AI 味改写（ContentCleaner）：prompt 与 server.ts 注入的 rewrite 同源（buildDeAiRewritePrompt）。
+  'publish:ContentCleaner': () =>
+    buildDeAiRewritePrompt(EXAMPLE_CREATED.content, ['首先', '过量感叹号']),
 };
 
 // —— 图像角色（配图生成执行）：发给文生图模型的「有效图片指令」预览 ——

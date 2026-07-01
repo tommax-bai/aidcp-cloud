@@ -100,6 +100,7 @@ import {
   ApprovalGatekeeperRole,
   PublishExecutorRole,
 } from './publish-agent/roles/index.js';
+import { buildDeAiRewritePrompt } from './publish-agent/prompts.js';
 import { PostProcessor } from './publish-agent/post-processor.js';
 import { PublishLogStore } from './publish-agent/publish-log-store.js';
 import { PublishPipelineLogStore } from './publish-agent/publish-pipeline-log-store.js';
@@ -486,10 +487,14 @@ async function main(): Promise<void> {
   // 去 AI 味后处理器
   const postProcessor = new PostProcessor({
     rewrite: async (content, flagged) => {
-      const prompt = `请重写以下内容，去除AI味过重的表达（${flagged.join('、')}），保持原意和自然口吾：\n\n${content}`;
+      // change publish-prompt-preview：prompt 抽到 buildDeAiRewritePrompt（与后台只读预览同一份来源、防漂移）；
+      // 带 role='publish:ContentCleaner' 使该重写按其后台模型/温度配置解析（否则配了是静默 no-op）。
       // change raise-model-call-timeouts-for-thinking-models：与 ContentCleaner 角色闸共用 CLEAN_TIMEOUT_MS，
       // 使该 complete() 的超时不短于角色闸（外层秒表绝不短于所包裹的模型预算、且底层 HTTP 同时限被真正中止）。
-      return llm.complete(prompt, { timeoutMs: CLEAN_TIMEOUT_MS });
+      return llm.complete(buildDeAiRewritePrompt(content, flagged), {
+        role: 'publish:ContentCleaner',
+        timeoutMs: CLEAN_TIMEOUT_MS,
+      });
     },
   });
 
