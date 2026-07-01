@@ -19,8 +19,10 @@ function envInt(name: string, def: number): number {
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : def;
 }
 
-// 每图超时：MUST > 单图万相轮询总预算（默认 18×5s=90s），否则每图超时会先于轮询完成砍断生图 → 误判无图。
-const DEFAULT_PER_IMAGE_TIMEOUT_MS = 100_000;
+// 每图超时：MUST > 单图万相轮询总预算，否则每图超时会先于轮询 SUCCEEDED 砍断生图 → 误判无图（红线）。
+// 实装接线预算：server.ts 把 WanxiangClient 的 maxPollAttempts 接到 AIDCP_WANXIANG_MAX_POLL（默认 34）、间隔 5s
+// → 34×5s=170s。故默认取 200s（> 170s 留余量，对齐旧单图角色闸 200s）。改万相轮询预算时须同步抬高本默认。
+const DEFAULT_PER_IMAGE_TIMEOUT_MS = 200_000;
 const DEFAULT_MAX_IMAGES = 3;
 
 export interface ImageGeneratorDeps {

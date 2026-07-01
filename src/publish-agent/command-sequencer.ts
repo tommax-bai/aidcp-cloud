@@ -177,6 +177,9 @@ export class CommandSequencer {
     // 已尝试上传张数（成功+失败）。upload 均在 fill 前且连续；据此判「全部上传已尝试完」，
     // 避免在 upload 阶段之前（navigate/select_mode，此时 attachedCount 天然为 0）误触发 K===0 早停。
     let uploadsAttempted = 0;
+    // 最后一条 upload_image 的 seq（诚实诊断用）：K===0 全失败早停在 fill 处触发，failedAt 指回真实 upload seq、
+    // 而非误报为触发早停的那条 fill_field 的 seq（避免运维照 seq 查错命令）。
+    let lastUploadSeq = -1;
     // 元数据是增强项，非有效帖必需：失败best-effort跳过、继续发（带标题/正文/图的帖子仍是有效帖）。
     // 绝不伪造该项成功——只是诚实地"少了这个标签/选项"继续。核心步（导航/选模式/标题/正文/提交）仍 fail-fast。
     const bestEffort = new Set<PublishCommandKind>(['add_with_candidate', 'set_option', 'set_schedule']);
@@ -185,14 +188,16 @@ export class CommandSequencer {
       // 图文帖编辑器被"先传图"门控（task-0 实测：无图则标题/正文不存在）。全部上传已尝试完但 K===0 → 无有效帖，
       // MUST 诚实 failed，绝不进 fill_field 假装纯文字继续（红线：不假成功）。uploadsAttempted<total 时仍在上传阶段前/中，不误触发。
       if (imagesRequested && uploadsAttempted >= totalImages && attachedCount === 0 && cmd.kind !== 'upload_image' && cmd.kind !== 'set_cover') {
-        this.logger.warn(`[CommandSequencer] 全部配图失败（K=0）、图文帖无有效内容 → failed seq=${cmd.seq}`);
-        return { ok: false, attachedCount: 0, failedAt: { seq: cmd.seq, kind: 'upload_image', error: 'all_images_failed' } };
+        this.logger.warn(`[CommandSequencer] 全部配图失败（K=0）、图文帖无有效内容 → failed（触发于 seq=${cmd.seq}，归因末条 upload seq=${lastUploadSeq}）`);
+        return { ok: false, attachedCount: 0, failedAt: { seq: lastUploadSeq, kind: 'upload_image', error: 'all_images_failed' } };
       }
       // 无成功配图 → 不下发依赖首图的封面（红线：绝不在配图全失败后下发 set_cover）。
       if (cmd.kind === 'set_cover' && attachedCount === 0) {
         this.logger.warn(`[CommandSequencer] 无成功配图，跳过 set_cover seq=${cmd.seq}`);
         continue;
       }
+      // 记录末条 upload seq（发送前即记；供上方 K===0 早停诚实归因）。
+      if (cmd.kind === 'upload_image') lastUploadSeq = cmd.seq;
 
       let result: PublishCommandResultPayload;
       try {

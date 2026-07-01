@@ -76,6 +76,7 @@ describe('AC-CMD CommandSequencer（云端编排驱动）', () => {
     assert.equal(r.attachedCount, 0, '配图全失败 K=0');
     assert.equal(r.failedAt?.kind, 'upload_image');
     assert.equal(r.failedAt?.error, 'all_images_failed');
+    assert.equal(r.failedAt?.seq, 2, 'failedAt.seq 归因真实 upload seq（=2），非触发早停的 fill_field seq');
     assert.ok(pushed.some((c) => c.kind === 'upload_image'), 'upload_image 已尝试');
     assert.ok(!pushed.some((c) => c.kind === 'fill_field'), '全图失败后绝不进 fill_field（不假装纯文字）');
     assert.ok(!pushed.some((c) => c.kind === 'submit_publish'), '绝不提交');
