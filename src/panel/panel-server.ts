@@ -390,16 +390,19 @@ function createRequestHandler(
           return;
         }
         // change model-config-volcengine-provider：可改 textProvider（全局文本厂商）。
-        const { textProvider, textModel, imageModel } = (body ?? {}) as {
+        // change image-provider-volcengine-seedream：可改 imageProvider（全局图片厂商）。
+        const { textProvider, textModel, imageModel, imageProvider } = (body ?? {}) as {
           textProvider?: unknown;
           textModel?: unknown;
           imageModel?: unknown;
+          imageProvider?: unknown;
         };
         // 至少一个非空字符串字段；空 / 非字符串一律不接受（不静默忽略全空请求）
-        const patch: { textProvider?: string; textModel?: string; imageModel?: string } = {};
+        const patch: { textProvider?: string; textModel?: string; imageModel?: string; imageProvider?: string } = {};
         if (typeof textProvider === 'string' && textProvider.trim()) patch.textProvider = textProvider.trim();
         if (typeof textModel === 'string' && textModel.trim()) patch.textModel = textModel.trim();
         if (typeof imageModel === 'string' && imageModel.trim()) patch.imageModel = imageModel.trim();
+        if (typeof imageProvider === 'string' && imageProvider.trim()) patch.imageProvider = imageProvider.trim();
         if (Object.keys(patch).length === 0) {
           sendJson(res, 400, { error: 'bad_request', reason: 'no_valid_fields' });
           return;

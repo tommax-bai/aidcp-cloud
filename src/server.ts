@@ -65,6 +65,13 @@ import {
 import { CommandSequencer } from './publish-agent/command-sequencer.js';
 import { PublishOrchestrator, PublishScheduler, PublishDispatcher } from './publish-agent/index.js';
 import { WanxiangClient } from './publish-agent/wanxiang-client.js';
+import { SeedreamClient } from './publish-agent/seedream-client.js';
+import {
+  IMAGE_PROVIDERS,
+  type ImageProviderId,
+  normImageProvider,
+  RoutingImageProvider,
+} from './publish-agent/image-providers.js';
 import { AccountStateManager } from './account-state.js';
 import { PgAccountStore, type AccountStore } from './account-store.js';
 import {
@@ -494,6 +501,24 @@ async function main(): Promise<void> {
     // 慢图容忍：轮询次数 env 可调（默认 34×5s=170s；须 < ImageGenerator 角色闸 200s）。change publish-image-required-or-fail。
     maxPollAttempts: Number(process.env.AIDCP_WANXIANG_MAX_POLL ?? 34),
   });
+
+  // 即梦-Seedream 客户端（图片生成，火山方舟 Ark 同步）。change image-provider-volcengine-seedream：
+  // 复用启动期已载入的火山 key+base（providerRuntime['volcengine']，与文本火山同源）；imageModel 热加载。
+  const arkRuntime = providerRuntime['volcengine'];
+  const seedreamClient = new SeedreamClient({
+    apiKey: arkRuntime?.apiKey || undefined,
+    baseUrl: arkRuntime?.baseUrl || undefined,
+    getModel: () => modelConfigStore.getCached().imageModel,
+    timeoutMs: Number(process.env.AIDCP_SEEDREAM_TIMEOUT_MS ?? 60_000),
+  });
+
+  // 图片出口：按全局 image_provider 路由（dashscope→万相、volcengine→即梦 Seedream），热加载、缺密钥诚实失败不跨厂商兜底。
+  const imageProvider = new RoutingImageProvider({
+    getProvider: () => modelConfigStore.getCached().imageProvider,
+    providers: { dashscope: wanxiangClient, volcengine: seedreamClient },
+  });
+  // 图片总开关：任一图片厂商密钥就绪即启用（选中厂商若缺密钥，其客户端会诚实失败 → 该张记 M 少一张、不假成功）。
+  const anyImageKeyPresent = !!(readEnvString('WANXIANG_API_KEY') ?? dashscopeApiKey) || !!arkRuntime?.apiKey;
 
   // 发布编排器（PublishOrchestrator）。change decouple-publish-generation-from-dispatch：
   // 编排只跑生成候审段（生成终稿 + 落库待审 + 发审批卡），**不再让位浏览**、**不再内联等审**——
@@ -1165,10 +1190,11 @@ async function main(): Promise<void> {
   publishOrchestrator.registerRole(new ImageSetPlannerRole({ llmClient: roleLlm('publish:ImageSetPlanner') }));
   publishOrchestrator.registerRole(new ImagePromptComposerRole({ llmClient: roleLlm('publish:ImagePromptComposer') }));
   publishOrchestrator.registerRole(new ImageGeneratorRole({
-    imageProvider: wanxiangClient,
-    // 配图与 Qwen 同用百炼 key：WANXIANG_API_KEY 或 DASHSCOPE_API_KEY 任一就绪即启用（与 wanxiangClient 的 key 解析一致）。
+    imageProvider,
+    // change image-provider-volcengine-seedream：注入路由图片出口（按 image_provider 分发万相/即梦）。
+    // 任一图片厂商密钥就绪即启用；选中厂商缺密钥时其客户端诚实失败（M 少一张、不假成功）。
     // 并行多图张数/每图超时/并发经 env 读取（AIDCP_PUBLISH_MAX_IMAGES/PER_IMAGE_TIMEOUT_MS/IMAGE_CONCURRENCY）。
-    enableImageGeneration: !!(readEnvString('WANXIANG_API_KEY') ?? dashscopeApiKey),
+    enableImageGeneration: anyImageKeyPresent,
   }));
   publishOrchestrator.registerRole(new CoverSelectorRole());
   // 后处理：清洗（ContentCleaner）→ AI味分（AiFlavorScorer）/ 质量分（QualityScorer）
@@ -1376,12 +1402,18 @@ async function main(): Promise<void> {
             : { provider: id, field, configured: false, maskedHint: null, source: 'none' as const };
       }),
     );
+    // change image-provider-volcengine-seedream：图片厂商也可选（万相/即梦 Seedream），独立于文本厂商。
+    const imageProviders = (Object.keys(IMAGE_PROVIDERS) as ImageProviderId[]).map((id) => ({
+      id,
+      displayName: IMAGE_PROVIDERS[id].displayName,
+    }));
     return {
       textProvider: normProvider(cfg.textProvider),
-      imageProvider: 'dashscope',
+      imageProvider: normImageProvider(cfg.imageProvider),
       textModel: cfg.textModel,
       imageModel: cfg.imageModel,
       providers,
+      imageProviders,
       credentials,
       canEditCredential: credentialStore.canEdit(),
     };
@@ -1515,11 +1547,19 @@ async function main(): Promise<void> {
                   return { ok: false, reason: 'model_invalid' as const };
                 }
               }
-              const storePatch: { textModel?: string; textProvider?: string; imageModel?: string } = {};
+              const storePatch: {
+                textModel?: string;
+                textProvider?: string;
+                imageModel?: string;
+                imageProvider?: string;
+              } = {};
               if (wantTextModel) storePatch.textModel = (patch.textModel as string).trim();
               if (wantTextModel || wantTextProvider) storePatch.textProvider = provider;
               if (typeof patch.imageModel === 'string' && patch.imageModel.trim())
                 storePatch.imageModel = patch.imageModel.trim();
+              // change image-provider-volcengine-seedream：图片厂商未知则归一（不 brick，与图片路由归一一致），非文本探活范畴。
+              if (typeof patch.imageProvider === 'string' && patch.imageProvider.trim())
+                storePatch.imageProvider = normImageProvider(patch.imageProvider);
               await modelConfigStore.set(storePatch, updatedBy);
               return { ok: true, view: await buildModelConfigView() };
             },

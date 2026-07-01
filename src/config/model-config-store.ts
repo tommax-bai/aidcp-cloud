@@ -18,13 +18,20 @@ export const MODEL_CONFIG_DEFAULTS: ModelConfigValue = {
   // 全局文本厂商默认 dashscope（零回归基准）。change model-config-volcengine-provider。
   textProvider: 'dashscope',
   imageModel: 'wan2.7-image-pro',
+  // 全局图片厂商默认 dashscope（万相；零回归基准）。change image-provider-volcengine-seedream。
+  imageProvider: 'dashscope',
 };
 
 export interface ModelConfigValue {
   textModel: string;
-  /** 全局文本厂商（change model-config-volcengine-provider）；缺/空回落 dashscope。图片侧不引 provider。 */
+  /** 全局文本厂商（change model-config-volcengine-provider）；缺/空回落 dashscope。 */
   textProvider: string;
   imageModel: string;
+  /**
+   * 全局图片厂商（change image-provider-volcengine-seedream）；缺/空回落 dashscope（万相）。
+   * dashscope→通义万相（异步）、volcengine→即梦 Seedream（火山方舟 Ark 同步）。独立于 textProvider。
+   */
+  imageProvider: string;
 }
 
 export const MODEL_CONFIG_SCHEMA_SQL = `
@@ -44,6 +51,7 @@ CREATE TABLE IF NOT EXISTS model_config (
  */
 export const MODEL_CONFIG_ALTER_SQL = `
 ALTER TABLE model_config ADD COLUMN IF NOT EXISTS text_provider TEXT NOT NULL DEFAULT 'dashscope';
+ALTER TABLE model_config ADD COLUMN IF NOT EXISTS image_provider TEXT NOT NULL DEFAULT 'dashscope';
 `;
 
 export interface ModelConfigStoreOptions {
@@ -83,12 +91,14 @@ export class ModelConfigStore {
       text_model: string | null;
       text_provider: string | null;
       image_model: string | null;
-    }>(`SELECT text_model, text_provider, image_model FROM model_config WHERE id = 1`);
+      image_provider: string | null;
+    }>(`SELECT text_model, text_provider, image_model, image_provider FROM model_config WHERE id = 1`);
     const row = rows[0];
     this.cache = {
       textModel: row?.text_model?.trim() || MODEL_CONFIG_DEFAULTS.textModel,
       textProvider: row?.text_provider?.trim() || MODEL_CONFIG_DEFAULTS.textProvider,
       imageModel: row?.image_model?.trim() || MODEL_CONFIG_DEFAULTS.imageModel,
+      imageProvider: row?.image_provider?.trim() || MODEL_CONFIG_DEFAULTS.imageProvider,
     };
   }
 
@@ -107,14 +117,16 @@ export class ModelConfigStore {
       textModel: patch.textModel?.trim() || this.cache.textModel,
       textProvider: patch.textProvider?.trim() || this.cache.textProvider,
       imageModel: patch.imageModel?.trim() || this.cache.imageModel,
+      imageProvider: patch.imageProvider?.trim() || this.cache.imageProvider,
     };
     await this.pool.query(
-      `INSERT INTO model_config (id, text_model, text_provider, image_model, updated_at, updated_by)
-       VALUES (1, $1, $2, $3, now(), $4)
+      `INSERT INTO model_config (id, text_model, text_provider, image_model, image_provider, updated_at, updated_by)
+       VALUES (1, $1, $2, $3, $4, now(), $5)
        ON CONFLICT (id)
        DO UPDATE SET text_model = EXCLUDED.text_model, text_provider = EXCLUDED.text_provider,
-                     image_model = EXCLUDED.image_model, updated_at = now(), updated_by = EXCLUDED.updated_by`,
-      [next.textModel, next.textProvider, next.imageModel, updatedBy],
+                     image_model = EXCLUDED.image_model, image_provider = EXCLUDED.image_provider,
+                     updated_at = now(), updated_by = EXCLUDED.updated_by`,
+      [next.textModel, next.textProvider, next.imageModel, next.imageProvider, updatedBy],
     );
     this.cache = next;
     return next;

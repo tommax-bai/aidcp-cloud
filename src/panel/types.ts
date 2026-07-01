@@ -158,17 +158,26 @@ export interface TextProviderView {
   baseUrl: string;
 }
 
+/** 可选图片厂商（GET /api/config/model 的图片厂商下拉项）。change image-provider-volcengine-seedream。 */
+export interface ImageProviderView {
+  id: string;
+  displayName: string;
+}
+
 /**
  * GET /api/config/model 的形状（永不含明文密钥）。
  * change model-config-volcengine-provider：多厂商——textProvider 选中的全局文本厂商、providers 可选项、
- * credentials 按厂商凭据态；imageProvider 钉死 dashscope（图片不动）。
+ * credentials 按厂商凭据态。
+ * change image-provider-volcengine-seedream：imageProvider 也可选（万相 dashscope / 即梦 Seedream volcengine），
+ * imageProviders 为下拉项；图片厂商独立于文本厂商。
  */
 export interface ModelConfigView {
   textProvider: string;
-  imageProvider: 'dashscope';
+  imageProvider: string;
   textModel: string;
   imageModel: string;
   providers: TextProviderView[];
+  imageProviders: ImageProviderView[];
   credentials: ModelConfigCredentialView[];
   /** 主加密密钥是否就位——凭据能否在后台编辑。 */
   canEditCredential: boolean;
@@ -190,7 +199,7 @@ export interface PanelModelConfig {
    * 探活不过 / 厂商未知以 {ok:false} 诚实可辨，绝不落库。
    */
   setModel(
-    patch: { textProvider?: string; textModel?: string; imageModel?: string },
+    patch: { textProvider?: string; textModel?: string; imageModel?: string; imageProvider?: string },
     updatedBy: string,
   ): Promise<SetModelResult>;
   /** 按厂商加密保存密钥（重启生效）；主密钥缺失返回 {ok:false}，明文绝不回传。 */

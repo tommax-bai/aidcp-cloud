@@ -18,6 +18,7 @@ function makeModelConfig(opts: { canEdit: boolean }) {
     textProvider: 'dashscope',
     textModel: 'qwen-turbo',
     imageModel: 'wan2.7-image-pro',
+    imageProvider: 'dashscope',
     creds: new Map<string, { configured: boolean; maskedHint: string | null }>(),
   };
   const credView = (provider: string, field: string): ModelConfigView['credentials'][number] => {
@@ -32,12 +33,16 @@ function makeModelConfig(opts: { canEdit: boolean }) {
   };
   const view = (): ModelConfigView => ({
     textProvider: state.textProvider,
-    imageProvider: 'dashscope',
+    imageProvider: state.imageProvider,
     textModel: state.textModel,
     imageModel: state.imageModel,
     providers: [
       { id: 'dashscope', displayName: '阿里百炼 DashScope', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
       { id: 'volcengine', displayName: '火山引擎方舟 Ark', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3' },
+    ],
+    imageProviders: [
+      { id: 'dashscope', displayName: '阿里百炼 · 通义万相' },
+      { id: 'volcengine', displayName: '火山方舟 · 即梦 Seedream' },
     ],
     credentials: [credView('dashscope', 'dashscope_api_key'), credView('volcengine', 'volcengine_api_key')],
     canEditCredential: opts.canEdit,
@@ -49,10 +54,12 @@ function makeModelConfig(opts: { canEdit: boolean }) {
       textProvider?: string;
       textModel?: string;
       imageModel?: string;
+      imageProvider?: string;
     }): Promise<SetModelResult> => {
       if (patch.textProvider) state.textProvider = patch.textProvider;
       if (patch.textModel) state.textModel = patch.textModel;
       if (patch.imageModel) state.imageModel = patch.imageModel;
+      if (patch.imageProvider) state.imageProvider = patch.imageProvider;
       return { ok: true, view: view() };
     },
     setCredential: async (provider: string, field: string, value: string): Promise<SetCredentialResult> => {
