@@ -4,7 +4,10 @@
  * 取代原 node:http webhook（8788 端口）：由本端主动连接飞书，无需公网 IP，
  * 也无需配置回调地址。职责：
  * - 注册 im.message.receive_v1：解析文本 → 路由到 CommandRouter，结果以指令回执卡片回到群；
- * - 事件去重：SDK 已对长连接事件做幂等保证（依据 event_id），无需自行维护 SeenSet；
+ * - fast-ack（change feishu-message-fast-ack）：消息事件**受理即返回**，命令执行 + 回卡甩到后台，
+ *   绝不阻塞 SDK 的事件回帧。SDK 按 event_id 对「短时重复帧」有幂等，但**挡不住「处理器久不回帧
+ *   导致的超时重推」**——长耗时命令（如 /publish 约 3 分钟）会因此被飞书重推、执行两次；fast-ack
+ *   从根上消除这条。残余的长连接重连 replay 重推由发帖并发闸兜底，本层不自建 SeenSet 去重；
  * - URL 验证：长连接模式不需要 challenge 回包，SDK 内部处理握手。
  *
  * 依赖 @larksuiteoapi/node-sdk 的 WSClient + EventDispatcher；
@@ -189,11 +192,22 @@ export class FeishuWsReceiver {
     // 已读即贴「敲键盘」表情回应，告诉用户"我看到了、正在处理"（best-effort，不阻断）。
     if (this.messenger) void this.messenger.addReaction(message.message_id, 'Typing');
 
-    const result = await this.commandRouter.handle(text, { chatId: message.chat_id });
-    if (this.messenger) {
-      const card = buildCommandResultCard(result);
-      await this.messenger.sendCard(message.chat_id, card);
-    }
+    // fast-ack（change feishu-message-fast-ack）：受理即返回，命令执行 + 结果卡发送甩到后台，
+    // 绝不阻塞 SDK 的事件回执。否则长耗时命令（如 /publish 发帖生成实测约 3 分钟）会让飞书
+    // 判「超时未送达」、约 20s 后重推同一消息 → 命令被执行两次（第二次撞发帖并发闸 → 误导性
+    // 「发帖未产出／已有一轮在运行中」卡）。终态结果卡照旧异步补发、honest-status 判级不变；
+    // 不插入「任务启动中」中间卡。重复执行由发帖并发闸兜底（本层不自建去重）。
+    void this.commandRouter
+      .handle(text, { chatId: message.chat_id })
+      .then((result) => {
+        if (this.messenger) {
+          return this.messenger.sendCard(message.chat_id, buildCommandResultCard(result));
+        }
+      })
+      .catch((err) => {
+        // 与改动前一致：异常记日志、不发卡。此处兜住后台 promise，杜绝 unhandledRejection。
+        this.logger.error('[feishu] 后台处理指令失败:', (err as Error).message);
+      });
   }
 
   async handleCardAction(value: unknown): Promise<{

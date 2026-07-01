@@ -9,6 +9,25 @@ import {
 import { CommandRouter, type CommandActions } from '../src/feishu/commands.js';
 import { FeishuMessenger } from '../src/feishu/messenger.js';
 import { FeishuTokenManager } from '../src/feishu/token.js';
+import type { CommandResult } from '../src/feishu/types.js';
+
+/** 可控命令桩：handle 返回一个可手动 resolve/reject 的 promise，用于验证 fast-ack（受理即返回）。 */
+function makeDeferredRouter(): {
+  router: CommandRouter;
+  resolve: (r: CommandResult) => void;
+  reject: (e: unknown) => void;
+} {
+  let resolve!: (r: CommandResult) => void;
+  let reject!: (e: unknown) => void;
+  const p = new Promise<CommandResult>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  const router = { handle: () => p } as unknown as CommandRouter;
+  return { router, resolve, reject };
+}
+
+const tick = () => new Promise((r) => setTimeout(r, 20));
 
 function makeRouter(): CommandRouter {
   const actions: CommandActions = {
@@ -76,6 +95,8 @@ test('ws-receiver: 文本消息 → 路由指令 → 发回执卡片', async () 
     message_type: 'text',
     content: JSON.stringify({ text: '/aidcp status acc-01' }),
   });
+  // fast-ack：命令执行 + 回卡在后台异步补发，等一拍让其落地。
+  await new Promise((r) => setTimeout(r, 20));
   assert.equal(sent.length, 1);
   assert.equal(sent[0].chatId, 'oc_chat');
   assert.match(sent[0].body, /interactive/);
@@ -116,6 +137,8 @@ test('ws-receiver: @ 提及占位被剥离后仍能解析指令', async () => {
     message_type: 'text',
     content: JSON.stringify({ text: '@_user_1 /aidcp pause acc-02' }),
   });
+  // fast-ack：回卡后台异步补发，等一拍。
+  await new Promise((r) => setTimeout(r, 20));
   assert.equal(sent.length, 1);
 });
 
@@ -134,6 +157,86 @@ test('ws-receiver: 非文本消息被忽略', async () => {
     content: JSON.stringify({ image_key: 'img_x' }),
   });
   assert.equal(sent.length, 0);
+});
+
+test('ws-receiver: fast-ack — 命令未完成时 handleMessage 即返回，终态卡后台异步补发', async () => {
+  const { messenger, sent } = makeRecordingMessenger();
+  const { router, resolve } = makeDeferredRouter();
+  const receiver = new FeishuWsReceiver({
+    appId: 'a',
+    appSecret: 's',
+    commandRouter: router,
+    messenger,
+  });
+  // 命令永不完成也应立即返回（受理即返回，不阻塞 SDK 回帧）。node:test 若 handleMessage 阻塞会挂起超时。
+  await receiver.handleMessage({
+    message_id: 'om_slow',
+    chat_id: 'oc_chat',
+    message_type: 'text',
+    content: JSON.stringify({ text: '/aidcp publish acc-01' }),
+  });
+  await tick();
+  assert.equal(sent.length, 0, '命令未完成前不发终态卡（受理即返回、不阻塞）');
+
+  // 命令完成 → 后台异步补发终态卡。
+  resolve({ command: '/aidcp publish acc-01', ok: true, level: 'success', title: '已触发发帖编排', message: 'ok' });
+  await tick();
+  assert.equal(sent.length, 1, '命令完成后异步补发一张终态卡');
+});
+
+test('ws-receiver: 终态卡随 honest-status（未产出=黄⚠️），受理与终态卡之间无中间卡', async () => {
+  const { messenger, sent } = makeRecordingMessenger();
+  const { router, resolve } = makeDeferredRouter();
+  const receiver = new FeishuWsReceiver({
+    appId: 'a',
+    appSecret: 's',
+    commandRouter: router,
+    messenger,
+  });
+  await receiver.handleMessage({
+    message_id: 'om_warn',
+    chat_id: 'oc_chat',
+    message_type: 'text',
+    content: JSON.stringify({ text: '/aidcp publish acc-01' }),
+  });
+  await tick();
+  assert.equal(sent.length, 0, '终态未定前不插「任务启动中」中间卡');
+
+  resolve({
+    command: '/aidcp publish acc-01',
+    ok: false,
+    level: 'warning',
+    title: '发帖未产出',
+    message: '已有一轮发帖编排在运行中',
+  });
+  await tick();
+  assert.equal(sent.length, 1, '仅发一张终态卡');
+  assert.match(sent[0].body, /发帖未产出/, '终态卡应含真实标题');
+  assert.match(sent[0].body, /已有一轮发帖编排在运行中/, '终态卡应含真实原因（honest-status 不变）');
+});
+
+test('ws-receiver: 后台执行抛错被 catch 记日志、不外溢、不发卡', async () => {
+  const { messenger, sent } = makeRecordingMessenger();
+  const { router, reject } = makeDeferredRouter();
+  const errors: string[] = [];
+  const receiver = new FeishuWsReceiver({
+    appId: 'a',
+    appSecret: 's',
+    commandRouter: router,
+    messenger,
+    logger: { log: () => {}, warn: () => {}, error: (...a: unknown[]) => errors.push(a.map(String).join(' ')) },
+  });
+  await receiver.handleMessage({
+    message_id: 'om_err',
+    chat_id: 'oc_chat',
+    message_type: 'text',
+    content: JSON.stringify({ text: '/aidcp publish acc-01' }),
+  });
+  reject(new Error('boom'));
+  await tick();
+  assert.equal(sent.length, 0, '后台失败不发卡（与改动前一致）');
+  assert.equal(errors.length, 1, '后台异常被 catch 记一条错误日志');
+  assert.match(errors[0], /boom/);
 });
 
 test('ws-receiver: 缺少凭证时 start 抛错', async () => {
