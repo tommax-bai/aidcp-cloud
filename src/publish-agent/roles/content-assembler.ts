@@ -47,10 +47,13 @@ export class ContentAssemblerRole extends BasePublishRole<AssemblerInput, Assemb
   }
 
   protected async execute(input: AssemblerInput, _context: PipelineContext<PipelineFields>): Promise<AssembledContent> {
+    // 多图：透传上传全集（coverSelection.imageUrls，[0]=封面）；imageUrl 派生 = 首张（审计/向后兼容）。
+    const imageUrls = input.cover.imageUrls ?? [];
     return {
       finalContent: input.cleaned.content,
       finalTags: input.created.tags,
-      imageUrl: input.cover.imageUrl,
+      imageUrls,
+      imageUrl: imageUrls[0] ?? null,
       aiScore: input.aiFlavor.aiScore,
       qualityScore: input.quality.qualityScore,
       rewritten: input.cleaned.rewritten,
@@ -63,6 +66,7 @@ export class ContentAssemblerRole extends BasePublishRole<AssemblerInput, Assemb
     return {
       finalContent: '',
       finalTags: [],
+      imageUrls: [],
       imageUrl: null,
       aiScore: 0,
       qualityScore: 0,

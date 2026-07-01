@@ -21,7 +21,8 @@ function makeAssembledContent(): AssembledContent {
   return {
     finalContent: '昨天试了 vLLM 跑 14B，显存直接爆了',
     finalTags: ['vLLM', '大模型部署'],
-    imageUrl: 'https://example.com/img.png',
+    imageUrls: ['https://example.com/a.png', 'https://example.com/b.png'],
+    imageUrl: 'https://example.com/a.png',
     aiScore: 0.1,
     qualityScore: 80,
     rewritten: false,
@@ -67,6 +68,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     assert.equal(insertedRecords.length, 1);
     assert.equal(insertedRecords[0].status, 'pending_approval');
     assert.match(insertedRecords[0].content, /vLLM/);
+    assert.deepEqual(insertedRecords[0].images, ['https://example.com/a.png', 'https://example.com/b.png'], '多图全集随草稿落库（下发段读回）');
     // 审批卡是「已构建的 FeishuCard」（含 elements），requestId=publish-<recordId>。
     assert.equal(sentCards.length, 1, '应发审批卡');
     assert.ok(Array.isArray(sentCards[0]?.elements), '须为已构建卡片');
@@ -168,14 +170,14 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     assert.equal(recordedMeta[0].aiEnforced, true, 'aiEnforced 审计如实落库');
   });
 
-  test('AC-IMG-REQUIRED 无配图（imageUrl=null）→ 诚实 failed、不发卡、不落待审、markImagesAttached(false)', async () => {
+  test('AC-IMG-REQUIRED 无配图（imageUrls 空）→ 诚实 failed、不发卡、不落待审、markImagesAttached(0)', async () => {
     const insertedRecords: any[] = [];
-    const attached: Array<{ id: number; a: boolean }> = [];
+    const attached: Array<{ id: number; count: number }> = [];
     const sentCards: any[] = [];
     const role = new PublishExecutorRole({
       store: {
         insert: async (r: any) => { insertedRecords.push(r); return 21; },
-        markImagesAttached: async (id: number, a: boolean) => { attached.push({ id, a }); },
+        markImagesAttached: async (id: number, count: number) => { attached.push({ id, count }); },
       },
       messenger: { sendApprovalCard: async (_c: string, card: any) => { sentCards.push(card); } },
       botChatStore: { getDefaultChat: async () => ({ chatId: 'c' }) },
@@ -184,7 +186,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     });
 
     const ctx = new PipelineContext<PipelineFields>();
-    ctx.write('assembledContent', { ...makeAssembledContent(), imageUrl: null });
+    ctx.write('assembledContent', { ...makeAssembledContent(), imageUrls: [], imageUrl: null });
     ctx.write('titleSelection', makeTitleSelection());
     role.register(ctx);
     ctx.write('gateDecision', makeGateDecision('auto_publish'));
@@ -192,12 +194,12 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     await new Promise((r) => setTimeout(r, 60));
 
     const result = ctx.get('publishResult');
-    assert.equal(result?.status, 'failed', '无图 → 诚实 failed');
+    assert.equal(result?.status, 'failed', '无图（M=0）→ 诚实 failed');
     assert.equal(result?.dispatched, false);
     assert.equal(sentCards.length, 0, '无图 → 不发审批卡（不让人审注定失败的图文帖）');
     assert.equal(insertedRecords.length, 1);
     assert.equal(insertedRecords[0].status, 'failed');
-    assert.deepEqual(attached, [{ id: 21, a: false }], 'markImagesAttached(false)');
+    assert.deepEqual(attached, [{ id: 21, count: 0 }], 'markImagesAttached(0)');
   });
 
   test('AC-TITLE-GATE 发布门 waitAll：titleSelection 未写 → executor 不激活、不落库', async () => {

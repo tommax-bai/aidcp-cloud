@@ -298,40 +298,76 @@ export function buildTitlePrompt(body: string, persona: string, styleType: strin
   return lines.join('\n');
 }
 
-// ─── ImageDirector ───────────────────────────────────────────────────────────
+// ─── 配图链路（change publish-multi-image）：选题 ImageSetPlanner → 指令 ImagePromptComposer ───
 
 /**
- * ImageDirector prompt — 配图策略规划
- * 输出 JSON: { imagePrompt, imageStyle, fallbackStrategy }
+ * 固定风格基底（模板常量，MUST NOT 由 LLM 产）。
+ * 每张万相 prompt 共享此基底 → 图集风格统一；LLM 只填「画什么主体」，不碰风格/负向约束。
+ * 红线：无文字、无真人面部（规避平台肖像/水印风险 + 文生图产文字易糊）。
  */
-export function buildImagePrompt(createdContent: CreatedContent): string {
-  const contentPreview = createdContent.content.slice(0, 150);
+export const IMAGE_STYLE_BASE =
+  'minimalist flat vector illustration, tech blue and slate palette, clean geometric shapes, ' +
+  'soft gradient background, high detail, no text, no watermark, no human faces, no real people';
+
+/** 配图张数上限（硬夹 ≤9，小红书图文帖硬约束；env AIDCP_PUBLISH_MAX_IMAGES 只在角色侧再夹一次）。 */
+export const IMAGE_COUNT_HARD_MAX = 9;
+
+/**
+ * ImageSetPlanner prompt — 图集选题（读正文决定张数 + 每张主题 + 风格倾向）。
+ * 纯内容决策：只产「要不要图 / 几张 / 每张画什么主体（业务语言）」，不产万相 prompt、不碰图源。
+ * 输出 JSON: { wantImage, imageCount, themes:[{subject,intent}], styleHint }
+ */
+export function buildImageSetPlanPrompt(createdContent: CreatedContent, maxImages: number): string {
+  const contentPreview = createdContent.content.slice(0, 400);
+  const cap = Math.max(1, Math.min(maxImages, IMAGE_COUNT_HARD_MAX));
 
   return [
-    '你是一个小红书配图策略规划师。根据文章标题、正文前 150 字和文风类型，规划一张合适的配图。',
+    '你是一个小红书图文帖的配图选题师。读文章标题与正文，决定这篇帖子配几张图、每张图分别画什么主体，让图文形成叙事递进。',
     '',
     '【文章标题】',
     createdContent.title,
     '',
-    '【正文前 150 字】',
+    '【正文前 400 字】',
     contentPreview,
     '',
     '【文风类型】',
     `tone: ${createdContent.tone}`,
     '',
-    '【配图规划要求】',
-    '- imagePrompt: 用英文描述配图内容（给文生图模型用），要与文章主题相关',
-    '- 风格偏科技感、简洁、扁平化，适合技术博客',
-    '- 不要出现真人面部、不要有文字',
-    '- imageStyle: 从 photography / illustration / dataviz / isometric 中选一个',
-    '- fallbackStrategy: 如果图片生成失败的备选策略，从 skip（不配图） / color_placeholder（纯色占位） 中选',
+    '【选题要求】',
+    `- imageCount: 建议 ${Math.min(3, cap)} 张左右，范围 1~${cap}（不得为 0；内容确实单薄可只 1 张）。`,
+    '- themes: 与 imageCount 等长的数组，每项一个主体（如「整体架构示意」「踩坑前后对比」「实际使用场景」），第 0 张是最抓眼的钩子图/封面。',
+    '- subject 用中文业务语言描述画面主体（不要写英文 prompt、不要写风格词——风格由系统统一注入）。',
+    '- intent（可选）：这张图想传达的要点，给后续生成更多上下文。',
+    '- styleHint（可选）：整体风格倾向的中文描述（如「科技扁平」「手绘温暖」），供参考，可省。',
+    '- 主体之间应有区分、共同服务于文章叙事；不要重复同一画面。',
     '',
     '【输出要求】',
     '严格只输出一个 JSON 对象，不要任何额外文字或代码块围栏。格式如下：',
-    '{"imagePrompt": "English description for image generation...", "imageStyle": "illustration", "fallbackStrategy": "skip"}',
+    '{"wantImage": true, "imageCount": 3, "themes": [{"subject": "整体架构示意", "intent": "让读者先看到全貌"}, {"subject": "踩坑前后对比"}, {"subject": "实际部署场景"}], "styleHint": "科技扁平"}',
+  ].join('\n');
+}
+
+/**
+ * ImagePromptComposer prompt — 把「一张图的主题」翻成一条万相文生图 prompt（英文主体描述）。
+ * 只产主体描述；风格基底由系统在 composer 角色侧拼接（IMAGE_STYLE_BASE），不让 LLM 产风格/负向词。
+ * 输出 JSON: { imagePrompt, imageStyle }
+ */
+export function buildImagePromptComposerPrompt(theme: { subject: string; intent?: string }, styleHint: string | null): string {
+  return [
+    '你是文生图 prompt 工程师。把下面这张配图的中文主题，翻成一条给文生图模型的英文主体描述（只描述"画什么"，不要写风格、不要写画质词、不要写 no text 之类负向约束——这些系统会统一补）。',
     '',
-    '示例输出：',
-    '{"imagePrompt": "minimalist flat illustration of a neural network architecture with nodes and connections, tech blue gradient background, clean vector style", "imageStyle": "illustration", "fallbackStrategy": "skip"}',
+    '【这张图的主题】',
+    `主体：${theme.subject}`,
+    ...(theme.intent ? [`要点：${theme.intent}`] : []),
+    ...(styleHint ? [`整体风格倾向（参考）：${styleHint}`] : []),
+    '',
+    '【要求】',
+    '- imagePrompt: 一句英文，描述画面主体与构图，与主题强相关；不含任何文字/水印/真人。',
+    '- imageStyle: 从 photography / illustration / dataviz / isometric 中选最贴合的一个。',
+    '',
+    '【输出要求】',
+    '严格只输出一个 JSON 对象，不要任何额外文字或代码块围栏。格式如下：',
+    '{"imagePrompt": "isometric diagram of a distributed system with labeled service nodes and data flow arrows", "imageStyle": "isometric"}',
   ].join('\n');
 }
 

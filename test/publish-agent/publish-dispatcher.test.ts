@@ -16,7 +16,8 @@ function makeDraft(over: Partial<DispatchDraft> = {}): DispatchDraft {
     accountId: 'acct-A',
     title: 'vLLM 部署踩坑',
     content: '昨天试了 vLLM 跑 14B',
-    imageUrl: 'https://example.com/img.png',
+    imageUrl: 'https://example.com/a.png',
+    imageUrls: ['https://example.com/a.png', 'https://example.com/b.png'],
     metadata: {
       topics: ['vLLM', '大模型部署'], mentions: [], location: null, collection: null,
       visibility: 'public', permissions: { comment: 'allow', save: 'allow' },
@@ -38,19 +39,19 @@ function harness(opts: {
   let seqInput: any;
   const statusUpdates: Array<{ id: number; status: string }> = [];
   let postWrite: any;
-  const attached: Array<{ id: number; a: boolean }> = [];
+  const attached: Array<{ id: number; count: number }> = [];
   const store = {
     loadForDispatch: async (_id: number) => (opts.draft === undefined ? makeDraft() : opts.draft),
     updateStatus: async (id: number, status: string) => { statusUpdates.push({ id, status }); events.push(`status:${status}`); },
     updatePostId: async (id: number, postId: string, postUrl?: string | null) => { postWrite = { id, postId, postUrl }; events.push('postId'); },
-    markImagesAttached: async (id: number, a: boolean) => { attached.push({ id, a }); },
+    markImagesAttached: async (id: number, count: number) => { attached.push({ id, count }); },
     listPendingApprovalIds: async () => (opts.draft && opts.draft.status === 'pending_approval' ? [opts.draft.recordId] : []),
   };
   const sequencer = {
     executePublishSequence: async (input: any) => {
       seqInput = input;
       events.push('seq');
-      return opts.seqResult ?? { ok: true, imagesOk: true, postId: 'post_real' };
+      return opts.seqResult ?? { ok: true, attachedCount: 2, postId: 'post_real' };
     },
   };
   const dispatcher = new PublishDispatcher({
@@ -72,12 +73,14 @@ describe('PublishDispatcher', () => {
 
     // 时序：让位先于序列，解除让位在序列之后。
     assert.deepEqual(h.events.filter((e) => ['start', 'seq', 'postId', 'end'].includes(e)), ['start', 'seq', 'postId', 'end']);
-    // 重建：title/content 来自草稿；tags 来自 metadata.topics；图来自 imageUrl；edgeId 定向。
+    // 重建：title/content 来自草稿；tags 来自 metadata.topics；多图来自 imageUrls 全集；本期不传 cover；edgeId 定向。
     assert.equal(h.seqInput.title, 'vLLM 部署踩坑');
     assert.deepEqual(h.seqInput.tags, ['vLLM', '大模型部署']);
-    assert.deepEqual(h.seqInput.images, ['https://example.com/img.png']);
+    assert.deepEqual(h.seqInput.images, ['https://example.com/a.png', 'https://example.com/b.png'], '下发多图全集');
+    assert.equal(h.seqInput.cover, undefined, '本期不传 cover（封面=首张上传=平台默认）');
     assert.equal(h.seqInput.edgeId, 'edge-A');
     assert.equal(h.seqInput.approvedByUser, true);
+    assert.deepEqual(h.attached, [{ id: 7, count: 2 }], '如实标记真实附着数 K=2');
     assert.deepEqual(h.postWrite, { id: 7, postId: 'post_real', postUrl: undefined });
   });
 
@@ -105,7 +108,7 @@ describe('PublishDispatcher', () => {
   });
 
   test('解除让位经唯一终止点：序列失败也调 onPublishEnd', async () => {
-    const h = harness({ approved: true, edgeId: 'edge-A', seqResult: { ok: false, imagesOk: false, failedAt: { seq: 5, kind: 'submit_publish', error: 'x' } } });
+    const h = harness({ approved: true, edgeId: 'edge-A', seqResult: { ok: false, attachedCount: 0, failedAt: { seq: 5, kind: 'submit_publish', error: 'x' } } });
     await h.dispatcher.dispatch(7);
     assert.equal(h.events.includes('start'), true);
     assert.equal(h.events.includes('end'), true, '失败路径仍解除让位');
@@ -113,7 +116,7 @@ describe('PublishDispatcher', () => {
   });
 
   test('提交成功但未抓到 postId → updateStatus published（不误判 failed）', async () => {
-    const h = harness({ approved: true, edgeId: 'edge-A', seqResult: { ok: true, imagesOk: true } });
+    const h = harness({ approved: true, edgeId: 'edge-A', seqResult: { ok: true, attachedCount: 1 } });
     await h.dispatcher.dispatch(7);
     assert.deepEqual(h.statusUpdates.at(-1), { id: 7, status: 'published' });
   });

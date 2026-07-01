@@ -20,7 +20,10 @@ import type {
 } from '../comm/protocol.js';
 import type { PublishMetadata } from './types.js';
 
-/** 边缘推送接口（与 EdgeCloudServer.pushToEdges 同构）。 */
+/**
+ * 边缘推送接口（与 EdgeCloudServer.pushToEdges 同构）。
+ * edge-command-target-guard：缺目标 edgeId 时绝不广播——返回 0 视为诚实失败（发布步空 / 失败，不假成功）。
+ */
 export interface SequencerPusher {
   pushToEdges(envelope: unknown, edgeId?: string): number;
 }
@@ -31,9 +34,9 @@ export interface PublishSequenceInput {
   title: string;
   content: string;
   tags: string[];
-  /** 配图 URL（按序 emit upload_image；publish-media-upload change 接通边缘上传桥）。 */
+  /** 配图 URL（按序 emit upload_image×N；多图逐张上传，publish-multi-image）。 */
   images?: string[];
-  /** 封面图 URL（全部 upload_image 成功后才下发 set_cover；任一图失败则不下发）。 */
+  /** 封面图 URL（本期不传：封面=首张上传=平台默认；仅 cover 且 images>1 才下发 set_cover，见 buildCommandSequence）。 */
   cover?: string;
   /** 发帖元数据（stage-3 决策产物）：话题/@/地点/合集/可见范围/权限/合规/定时；下发为 edge 指令应用。 */
   metadata?: PublishMetadata;
@@ -53,10 +56,11 @@ export interface PublishSequenceResult {
   /** 成功时的小红书详情页分享 URL（带 xsec_token，来自 capture_postId 回报；边缘抓不到则 undefined） */
   postUrl?: string;
   /**
-   * 配图是否全部成功上传。请求了配图（images 非空）但任一 upload_image 失败/超时 → false（降级纯文字）。
-   * 未请求配图时为 true（无图可降级）。executor 据 false 回正已落库的 imageUrl，杜绝纯文字帖留「有图」假信号。
+   * 真实上传成功张数 K（多图部分成功记账，publish-multi-image）。
+   * 请求 N 张实成 K 张：K≥1 即有效图文帖、照发；K===0（全失败）→ 无有效帖、诚实 failed。
+   * 未请求配图时为 0。下发段据此 markImagesAttached(id, K)，杜绝「要 N 张实成 K 张被读成 N 张」。
    */
-  imagesOk: boolean;
+  attachedCount: number;
   /** 失败位置（seq=-1 表示未授权而未生成提交指令） */
   failedAt?: { seq: number; kind: PublishCommandKind; error: string };
 }
@@ -111,12 +115,12 @@ export class CommandSequencer {
 
     add('navigate_entry');
     add('select_mode');
-    // 配图先于正文：upload_image×N（计数无关循环、前向兼容多图）→ set_cover（执行期仅当全图成功才真实下发，见 executePublishSequence）。
+    // 配图先于正文：upload_image×N 逐张上传（多图，publish-multi-image）→ 执行期按真实成功数 K 记账（见 executePublishSequence）。
     if (input.images) {
       for (const url of input.images) add('upload_image', { imageUrl: url });
     }
-    // 封面：仅多图才下发 set_cover（选哪张当封面）。单图封面自动取该图——发布页无独立"设封面"控件，
-    // 强发 set_cover 会 no_target→fail-fast 拖垮整条发布（task-0 实测）。
+    // 封面：仅 cover 且多图才下发 set_cover。本期下发段传 cover:undefined → 不触发（封面=首张上传=平台默认）；
+    // edge set_cover 仍 fail-closed 未校准，强发会 no_target→fail-fast 拖垮整条发布（task-0 实测）。留此分支供后续设封面那期。
     if (input.cover && input.images && input.images.length > 1) add('set_cover', { imageUrl: input.cover });
     add('fill_field', { fieldType: 'title', value: input.title });
     add('fill_field', { fieldType: 'content', value: input.content });
@@ -155,33 +159,38 @@ export class CommandSequencer {
   /**
    * 驱动整条序列：逐条 send→await→advance。
    * 红线：非配图指令任一失败即停（fail-fast），后续不下发、不假成功。
-   * 配图失败处理（task-0 实测：图文帖编辑器被"先传图"门控）：
-   * - upload_image 失败/超时 → 置 imagesOk=false、跳过依赖该图的 set_cover；
-   * - 请求了配图（imagesRequested）而全失败 → 到 fill_field 前 MUST 诚实 failed（无有效图文帖），不假装纯文字继续；
+   * 配图部分成功处理（publish-multi-image，task-0 实测：图文帖编辑器被"先传图"门控）：
+   * - upload_image×N 逐张下发；成功一张 attachedCount(K)++，失败/超时那张诚实丢弃（不补不复用）；
+   * - 请求了配图（imagesRequested）而 **K===0 全失败** → 到 fill_field 前 MUST 诚实 failed（无有效图文帖）；
+   * - K≥1（部分成功）即有效帖、照发 K 张、继续走完序列；
    * - 仅当未请求配图（无图流，前向兼容）才存在"纯文字继续"路径。
    */
   async executePublishSequence(input: PublishSequenceInput): Promise<PublishSequenceResult> {
     const sequence = this.buildCommandSequence(input);
     const imagesRequested = !!(input.images && input.images.length);
+    const totalImages = imagesRequested ? input.images!.length : 0;
     const targetEdgeId = input.edgeId;
     let postId: string | undefined;
     let postUrl: string | undefined;
     let submitted = false;
-    let imagesOk = true;
+    let attachedCount = 0;
+    // 已尝试上传张数（成功+失败）。upload 均在 fill 前且连续；据此判「全部上传已尝试完」，
+    // 避免在 upload 阶段之前（navigate/select_mode，此时 attachedCount 天然为 0）误触发 K===0 早停。
+    let uploadsAttempted = 0;
     // 元数据是增强项，非有效帖必需：失败best-effort跳过、继续发（带标题/正文/图的帖子仍是有效帖）。
     // 绝不伪造该项成功——只是诚实地"少了这个标签/选项"继续。核心步（导航/选模式/标题/正文/提交）仍 fail-fast。
     const bestEffort = new Set<PublishCommandKind>(['add_with_candidate', 'set_option', 'set_schedule']);
 
     for (const cmd of sequence) {
-      // 图文帖编辑器被"先传图"门控（task-0 实测：无图则标题/正文不存在）。请求了配图而全部失败 → 无有效帖，
-      // MUST 诚实 failed，绝不进 fill_field 假装纯文字继续（红线：不假成功）。
-      if (imagesRequested && !imagesOk && cmd.kind !== 'upload_image' && cmd.kind !== 'set_cover') {
-        this.logger.warn(`[CommandSequencer] 全部配图失败、图文帖无有效内容 → failed seq=${cmd.seq}`);
-        return { ok: false, imagesOk: false, failedAt: { seq: cmd.seq, kind: 'upload_image', error: 'all_images_failed' } };
+      // 图文帖编辑器被"先传图"门控（task-0 实测：无图则标题/正文不存在）。全部上传已尝试完但 K===0 → 无有效帖，
+      // MUST 诚实 failed，绝不进 fill_field 假装纯文字继续（红线：不假成功）。uploadsAttempted<total 时仍在上传阶段前/中，不误触发。
+      if (imagesRequested && uploadsAttempted >= totalImages && attachedCount === 0 && cmd.kind !== 'upload_image' && cmd.kind !== 'set_cover') {
+        this.logger.warn(`[CommandSequencer] 全部配图失败（K=0）、图文帖无有效内容 → failed seq=${cmd.seq}`);
+        return { ok: false, attachedCount: 0, failedAt: { seq: cmd.seq, kind: 'upload_image', error: 'all_images_failed' } };
       }
-      // 配图失败已降级 → 不下发依赖该图的封面（红线：绝不在配图失败后下发 set_cover）。
-      if (cmd.kind === 'set_cover' && !imagesOk) {
-        this.logger.warn(`[CommandSequencer] 配图已降级，跳过 set_cover seq=${cmd.seq}`);
+      // 无成功配图 → 不下发依赖首图的封面（红线：绝不在配图全失败后下发 set_cover）。
+      if (cmd.kind === 'set_cover' && attachedCount === 0) {
+        this.logger.warn(`[CommandSequencer] 无成功配图，跳过 set_cover seq=${cmd.seq}`);
         continue;
       }
 
@@ -190,10 +199,10 @@ export class CommandSequencer {
         result = await this.sendAndWaitResult(cmd, targetEdgeId);
       } catch (err) {
         const error = err instanceof Error ? err.message : String(err);
-        // 配图唯一放宽：upload_image 超时/异常 → 降级纯文字、继续。
+        // 配图唯一放宽：upload_image 超时/异常 → 丢弃该张（不计入 K）、继续（其余图仍可成功=部分成功）。
         if (cmd.kind === 'upload_image') {
-          this.logger.warn(`[CommandSequencer] upload_image 异常降级纯文字 seq=${cmd.seq}: ${error}`);
-          imagesOk = false;
+          uploadsAttempted++;
+          this.logger.warn(`[CommandSequencer] upload_image 异常丢弃该张 seq=${cmd.seq}: ${error}`);
           continue;
         }
         // 已提交后抓 postId 异常：帖子已发出，postId 抓取仅记录用 → 非致命（不可把已发布误判为 failed）。
@@ -207,13 +216,13 @@ export class CommandSequencer {
           continue;
         }
         this.logger.warn(`[CommandSequencer] seq=${cmd.seq} kind=${cmd.kind} 异常: ${error}`);
-        return { ok: false, imagesOk, failedAt: { seq: cmd.seq, kind: cmd.kind, error } };
+        return { ok: false, attachedCount, failedAt: { seq: cmd.seq, kind: cmd.kind, error } };
       }
       if (!result.ok) {
-        // 配图唯一放宽：upload_image 回 ok:false → 降级纯文字、继续。
+        // 配图唯一放宽：upload_image 回 ok:false → 丢弃该张（不计入 K）、继续。
         if (cmd.kind === 'upload_image') {
-          this.logger.warn(`[CommandSequencer] upload_image 失败降级纯文字 seq=${cmd.seq}: ${result.error ?? 'unknown'}`);
-          imagesOk = false;
+          uploadsAttempted++;
+          this.logger.warn(`[CommandSequencer] upload_image 失败丢弃该张 seq=${cmd.seq}: ${result.error ?? 'unknown'}`);
           continue;
         }
         // 已提交后抓 postId 失败：帖子已发出 → 非致命（postId 未知，绝不把已发布误判为 failed）。
@@ -227,7 +236,12 @@ export class CommandSequencer {
           continue;
         }
         // 红线：核心步失败即停，后续不下发、不假成功。
-        return { ok: false, imagesOk, failedAt: { seq: cmd.seq, kind: cmd.kind, error: result.error ?? 'unknown' } };
+        return { ok: false, attachedCount, failedAt: { seq: cmd.seq, kind: cmd.kind, error: result.error ?? 'unknown' } };
+      }
+      // 一张配图真实上传成功 → 计入尝试 + 计入 K。
+      if (cmd.kind === 'upload_image') {
+        uploadsAttempted++;
+        attachedCount++;
       }
       if (cmd.kind === 'submit_publish') submitted = true;
       if (cmd.kind === 'capture_postId') {
@@ -239,9 +253,9 @@ export class CommandSequencer {
 
     // 未授权 → 序列不含 submit → 未真正发布（红线：不假成功）。
     if (!submitted) {
-      return { ok: false, imagesOk, failedAt: { seq: -1, kind: 'submit_publish', error: 'not_approved' } };
+      return { ok: false, attachedCount, failedAt: { seq: -1, kind: 'submit_publish', error: 'not_approved' } };
     }
-    return { ok: true, imagesOk, postId, postUrl };
+    return { ok: true, attachedCount, postId, postUrl };
   }
 
   /**

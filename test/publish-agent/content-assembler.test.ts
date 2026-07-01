@@ -19,14 +19,14 @@ function makeCreatedContent(): CreatedContent {
 }
 
 /** 写入瘦身 ContentAssembler 所需的全部上游键（createdContent + 5 个 waitAll 键）。 */
-function writeAllUpstream(ctx: PipelineContext<PipelineFields>, over: { imageUrl?: string | null } = {}) {
-  const url = over.imageUrl ?? null;
+function writeAllUpstream(ctx: PipelineContext<PipelineFields>, over: { imageUrls?: string[] } = {}) {
+  const urls = over.imageUrls ?? [];
   ctx.write('createdContent', makeCreatedContent());
   ctx.write('cleanedContent', { content: '正文(cleaned)', rewritten: true, flaggedPhrases: ['首先'], aiScore: 0.15, cleanedAt: clock() });
   ctx.write('aiFlavorScore', { aiScore: 0.15, scoredAt: clock() });
   ctx.write('qualityReport', { qualityScore: 85, reviewedAt: clock() });
-  ctx.write('imageDirective', { imagePrompt: null, imageUrl: url, imageStyle: null, fallbackStrategy: 'skip', directedAt: clock() });
-  ctx.write('coverSelection', { imageUrl: url, hasCover: !!url, selectedAt: clock() });
+  ctx.write('imageDirective', { imagePrompt: null, imageUrls: urls, imageUrl: urls[0] ?? null, imageStyle: null, fallbackStrategy: 'skip', directedAt: clock() });
+  ctx.write('coverSelection', { imageUrls: urls, hasCover: urls.length > 0, selectedAt: clock() });
 }
 
 describe('ContentAssemblerRole（瘦身，纯组装）', () => {
@@ -40,28 +40,29 @@ describe('ContentAssemblerRole（瘦身，纯组装）', () => {
     ctx.write('cleanedContent', { content: 'c', rewritten: false, flaggedPhrases: [], aiScore: 0.1, cleanedAt: clock() });
     ctx.write('aiFlavorScore', { aiScore: 0.1, scoredAt: clock() });
     ctx.write('qualityReport', { qualityScore: 70, reviewedAt: clock() });
-    ctx.write('imageDirective', { imagePrompt: null, imageUrl: null, imageStyle: null, fallbackStrategy: 'skip', directedAt: clock() });
+    ctx.write('imageDirective', { imagePrompt: null, imageUrls: [], imageUrl: null, imageStyle: null, fallbackStrategy: 'skip', directedAt: clock() });
     await new Promise((r) => setTimeout(r, 30));
     assert.equal(ctx.get('assembledContent'), undefined);
 
     // 补第 5 个 waitAll 键 → 触发
-    ctx.write('coverSelection', { imageUrl: null, hasCover: false, selectedAt: clock() });
+    ctx.write('coverSelection', { imageUrls: [], hasCover: false, selectedAt: clock() });
     await new Promise((r) => setTimeout(r, 30));
     assert.ok(ctx.get('assembledContent'));
   });
 
-  test('纯组装：八字段值来自各上游键（无 LLM / 无 IO）', async () => {
+  test('纯组装：多图透传 imageUrls + imageUrl 派生=首张（无 LLM / 无 IO）', async () => {
     const role = new ContentAssemblerRole({ clock, logger: silentLogger });
     const ctx = new PipelineContext<PipelineFields>();
     role.register(ctx);
-    writeAllUpstream(ctx, { imageUrl: 'https://example.com/img.png' });
+    writeAllUpstream(ctx, { imageUrls: ['https://example.com/a.png', 'https://example.com/b.png'] });
     await new Promise((r) => setTimeout(r, 30));
 
     const a = ctx.get('assembledContent');
     assert.ok(a);
     assert.equal(a.finalContent, '正文(cleaned)');
     assert.deepEqual(a.finalTags, ['vLLM', '大模型部署']);
-    assert.equal(a.imageUrl, 'https://example.com/img.png');
+    assert.deepEqual(a.imageUrls, ['https://example.com/a.png', 'https://example.com/b.png'], '透传上传全集');
+    assert.equal(a.imageUrl, 'https://example.com/a.png', 'imageUrl 派生 = 首张（封面）');
     assert.equal(a.aiScore, 0.15);
     assert.equal(a.qualityScore, 85);
     assert.equal(a.rewritten, true);
@@ -69,12 +70,14 @@ describe('ContentAssemblerRole（瘦身，纯组装）', () => {
     assert.equal(a.assembledAt, clock());
   });
 
-  test('无图：imageUrl 诚实为 null（来自空封面）', async () => {
+  test('无图：imageUrls 空 + imageUrl 诚实为 null（来自空封面）', async () => {
     const role = new ContentAssemblerRole({ clock, logger: silentLogger });
     const ctx = new PipelineContext<PipelineFields>();
     role.register(ctx);
-    writeAllUpstream(ctx, { imageUrl: null });
+    writeAllUpstream(ctx, { imageUrls: [] });
     await new Promise((r) => setTimeout(r, 30));
-    assert.equal(ctx.get('assembledContent')!.imageUrl, null);
+    const a = ctx.get('assembledContent')!;
+    assert.deepEqual(a.imageUrls, []);
+    assert.equal(a.imageUrl, null);
   });
 });

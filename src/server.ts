@@ -71,7 +71,8 @@ import {
   ContentScoutRole,
   ContentTypeSelectorRole,
   ContentCreatorRole,
-  ImagePlannerRole,
+  ImageSetPlannerRole,
+  ImagePromptComposerRole,
   ImageGeneratorRole,
   CoverSelectorRole,
   ContentCleanerRole,
@@ -1123,11 +1124,14 @@ async function main(): Promise<void> {
   publishOrchestrator.registerRole(new ContentScoutRole({ llmClient: roleLlm('publish:ContentScout') }));
   publishOrchestrator.registerRole(new ContentTypeSelectorRole());
   publishOrchestrator.registerRole(new ContentCreatorRole({ llmClient: roleLlm('publish:ContentCreator') }));
-  // 配图：决策（ImagePlanner）↔ 执行（ImageGenerator）↔ 封面（CoverSelector）
-  publishOrchestrator.registerRole(new ImagePlannerRole({ llmClient: roleLlm('publish:ImagePlanner') }));
+  // 配图三角色（change publish-multi-image）：选题（ImageSetPlanner）→ 指令（ImagePromptComposer）→ 执行（ImageGenerator）→ 封面（CoverSelector）
+  // 选题读正文定张数+主题（配强模型）；指令把主题翻成万相 prompt（配便宜模型）；执行并行出多图；封面恒取首张。
+  publishOrchestrator.registerRole(new ImageSetPlannerRole({ llmClient: roleLlm('publish:ImageSetPlanner') }));
+  publishOrchestrator.registerRole(new ImagePromptComposerRole({ llmClient: roleLlm('publish:ImagePromptComposer') }));
   publishOrchestrator.registerRole(new ImageGeneratorRole({
     imageProvider: wanxiangClient,
     // 配图与 Qwen 同用百炼 key：WANXIANG_API_KEY 或 DASHSCOPE_API_KEY 任一就绪即启用（与 wanxiangClient 的 key 解析一致）。
+    // 并行多图张数/每图超时/并发经 env 读取（AIDCP_PUBLISH_MAX_IMAGES/PER_IMAGE_TIMEOUT_MS/IMAGE_CONCURRENCY）。
     enableImageGeneration: !!(readEnvString('WANXIANG_API_KEY') ?? dashscopeApiKey),
   }));
   publishOrchestrator.registerRole(new CoverSelectorRole());
@@ -1161,8 +1165,9 @@ async function main(): Promise<void> {
           sourceLikedIds: record.sourceLikedIds ?? [],
           // decouple-publish-generation-from-dispatch：生成候审段落 'pending_approval'（待人审、未下发）。
           status: record.status as 'draft' | 'pending_approval' | 'published' | 'failed' | 'needs_review',
-          // 审计用 image_url；是否真附着插入时为 false，上传成功后由 markImagesAttached 置 true。
+          // 审计用 image_url（封面=首张）+ 多图全集 images（下发段读回逐张上传）；真实附着数插入时 0，上传成功后由 markImagesAttached 置真实 K。
           imageUrl: record.imageUrl,
+          imageUrls: record.images,
           // 真实发布账号（change publish-history-account-and-detail）：来自触发上下文，缺省 'default'。
           accountId: record.accountId,
         });
@@ -1174,9 +1179,9 @@ async function main(): Promise<void> {
       async recordMetadata(id, metadata, aiEnforced) {
         await publishLogStore.recordMetadata(id, metadata, aiEnforced);
       },
-      // 配图收口：降级纯文字时如实标记，杜绝纯文字帖留「有图」假信号。
-      async markImagesAttached(id, attached) {
-        await publishLogStore.markImagesAttached(id, attached);
+      // 配图收口：如实标记真实附着张数 K（生成段无图诚实 failed 时传 0），杜绝纯文字帖留「有图」假信号。
+      async markImagesAttached(id, count) {
+        await publishLogStore.markImagesAttached(id, count);
       },
     },
     messenger,

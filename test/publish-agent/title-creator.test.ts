@@ -10,7 +10,7 @@ const silentLogger = { log() {}, warn() {}, error() {} };
 
 function makeAssembled(finalContent = '昨天试了 vLLM 跑 14B，显存直接爆了，调小 max_model_len 才起来'): AssembledContent {
   return {
-    finalContent, finalTags: ['vLLM'], imageUrl: null,
+    finalContent, finalTags: ['vLLM'], imageUrls: [], imageUrl: null,
     aiScore: 0.1, qualityScore: 80, rewritten: false, flaggedPhrases: [], assembledAt: clock(),
   };
 }

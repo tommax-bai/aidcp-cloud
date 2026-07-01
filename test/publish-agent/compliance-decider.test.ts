@@ -14,6 +14,7 @@ function assembled(over: Partial<AssembledContent>): AssembledContent {
   return {
     finalContent: '正文',
     finalTags: [],
+    imageUrls: [],
     imageUrl: null,
     aiScore: 0,
     qualityScore: 0,

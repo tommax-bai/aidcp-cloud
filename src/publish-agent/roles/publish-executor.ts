@@ -24,6 +24,8 @@ export interface PublishLogStore {
     content: string;
     tags: string[];
     imageUrl: string | null;
+    /** 多图：全部成功配图 URL（下发段读回逐张上传；[0]=封面）。缺省回落 imageUrl 单图。 */
+    images?: string[];
     status: string;
     qualityScore: number;
     aiScore: number;
@@ -35,8 +37,8 @@ export interface PublishLogStore {
   updateStatus?(id: number, status: string): Promise<void>;
   /** 发帖元数据落库 + 防篡改审计（供下发段重建发布输入 + 审计）。 */
   recordMetadata?(id: number, metadata: unknown, aiEnforced: boolean): Promise<void>;
-  /** 配图收口：标记该帖配图是否真实附着。 */
-  markImagesAttached?(id: number, attached: boolean): Promise<void>;
+  /** 配图收口：标记该帖真实附着张数 K（生成段尚未上传时为 0）。 */
+  markImagesAttached?(id: number, count: number): Promise<void>;
 }
 
 /** 飞书消息接口 */
@@ -151,14 +153,15 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
   ): Promise<PublishResult> {
     const lineage = this.lineageFrom(context);
 
-    // 配图收口红线（change publish-image-required-or-fail）：图文帖必须有图。无图（生图失败/降级）→
-    // 提前诚实 failed，不落待审、不发审批卡、images_attached=false（绝不静默走必然失败的纯文字路径）。
-    if (!assembled.imageUrl) {
+    // 配图收口红线（change publish-image-required-or-fail + publish-multi-image）：图文帖必须有图。
+    // 全部生图失败（imageUrls 空）→ 提前诚实 failed，不落待审、不发审批卡、附着数=0（绝不静默走必然失败的纯文字路径）。
+    if (assembled.imageUrls.length === 0) {
       const failedId = await this.store.insert({
         title,
         content: assembled.finalContent,
         tags: assembled.finalTags,
         imageUrl: null,
+        images: [],
         status: 'failed',
         qualityScore: assembled.qualityScore,
         aiScore: assembled.aiScore,
@@ -166,18 +169,19 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
         sourceLikedIds: lineage.sourceLikedIds,
         accountId,
       });
-      if (this.store.markImagesAttached) await this.store.markImagesAttached(failedId, false).catch(() => {});
-      this.logger.warn(`[PublishExecutor] 无配图（生图失败/降级）→ 图文帖无有效内容，诚实 failed recordId=${failedId}（不落待审、不发卡）`);
-      return { recordId: failedId, status: 'failed', dispatched: false, envelope: null, completedAt: this.clock(), reason: '无配图（生图失败/降级）：图文帖无有效内容，已诚实失败、未发审批卡' };
+      if (this.store.markImagesAttached) await this.store.markImagesAttached(failedId, 0).catch(() => {});
+      this.logger.warn(`[PublishExecutor] 无配图（M=0 全失败/降级）→ 图文帖无有效内容，诚实 failed recordId=${failedId}（不落待审、不发卡）`);
+      return { recordId: failedId, status: 'failed', dispatched: false, envelope: null, completedAt: this.clock(), reason: '无配图（M=0 全部生图失败/降级）：图文帖无有效内容，已诚实失败、未发审批卡' };
     }
 
     // 落库待审草稿。tags 走 finalTags，话题/元数据由 recordMetadata 落 publishMetadata（含 topics），
-    // 供下发段无重生成地重建发布输入。
+    // 供下发段无重生成地重建发布输入。images 存全部成功配图（下发段读回逐张上传）。
     const recordId = await this.store.insert({
       title,
       content: assembled.finalContent,
       tags: assembled.finalTags,
       imageUrl: assembled.imageUrl,
+      images: assembled.imageUrls,
       status: 'pending_approval',
       qualityScore: assembled.qualityScore,
       aiScore: assembled.aiScore,
@@ -239,6 +243,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       content: assembled.finalContent,
       tags: assembled.finalTags,
       imageUrl: assembled.imageUrl,
+      images: assembled.imageUrls,
       status: 'failed',
       qualityScore: assembled.qualityScore,
       aiScore: assembled.aiScore,

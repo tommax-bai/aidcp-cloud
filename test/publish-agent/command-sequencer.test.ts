@@ -73,7 +73,7 @@ describe('AC-CMD CommandSequencer（云端编排驱动）', () => {
     );
     const r = await seq.executePublishSequence(input({ tags: ['a'], images: ['x'], cover: 'x' }));
     assert.equal(r.ok, false, '图文无图 → 无有效帖，诚实 failed');
-    assert.equal(r.imagesOk, false, '配图失败 imagesOk 如实 false');
+    assert.equal(r.attachedCount, 0, '配图全失败 K=0');
     assert.equal(r.failedAt?.kind, 'upload_image');
     assert.equal(r.failedAt?.error, 'all_images_failed');
     assert.ok(pushed.some((c) => c.kind === 'upload_image'), 'upload_image 已尝试');
@@ -82,14 +82,28 @@ describe('AC-CMD CommandSequencer（云端编排驱动）', () => {
     assert.equal(seq.pendingCount, 0, 'pending 清零');
   });
 
-  it('AC-MEDIA-DEGRADE 配图超时（无回报）→ 同样 imagesOk=false、诚实 failed、不提交', async () => {
+  it('AC-MEDIA-DEGRADE 配图超时（无回报）→ 同样 K=0、诚实 failed、不提交', async () => {
     const { seq, pushed } = makeSequencer((cmd) => (cmd.kind === 'upload_image' ? null : okFor(cmd)), 20);
     const r = await seq.executePublishSequence(input({ tags: [], images: ['x'], cover: 'x' }));
     assert.equal(r.ok, false);
-    assert.equal(r.imagesOk, false, '超时也算配图失败');
+    assert.equal(r.attachedCount, 0, '超时也算配图失败 K=0');
     assert.equal(r.failedAt?.error, 'all_images_failed');
     assert.ok(!pushed.some((c) => c.kind === 'submit_publish'), '绝不提交');
     assert.equal(seq.pendingCount, 0, '超时后 pending 清理');
+  });
+
+  it('AC-MEDIA-PARTIAL 部分成功 K=2/3：K≥1 即有效帖、照发 K 张、继续提交（不 all-or-nothing）', async () => {
+    // images=[a,b,c]，b 上传失败 → K=2；仍走到 submit（部分成功不再全帖 failed）。
+    const { seq, pushed } = makeSequencer((cmd) =>
+      cmd.kind === 'upload_image' && cmd.params.imageUrl === 'b'
+        ? { recordId: cmd.recordId, seq: cmd.seq, kind: cmd.kind, ok: false, error: 'image_not_attached' }
+        : okFor(cmd),
+    );
+    const r = await seq.executePublishSequence(input({ tags: [], images: ['a', 'b', 'c'] }));
+    assert.equal(r.ok, true, 'K≥1 即有效帖');
+    assert.equal(r.attachedCount, 2, '真实附着 K=2（a、c 成功；b 丢弃）');
+    assert.ok(pushed.some((c) => c.kind === 'submit_publish'), '部分成功仍提交发布');
+    assert.equal(r.postId, 'post_xyz');
   });
 
   it('AC-MEDIA-SEQ 单图不发 set_cover（封面自动取该图）；多图才发', () => {
@@ -100,7 +114,7 @@ describe('AC-CMD CommandSequencer（云端编排驱动）', () => {
     assert.ok(multi.includes('set_cover'), '多图：下发 set_cover 选封面');
   });
 
-  it('AC-MEDIA-DEGRADE 红线：非配图指令失败（有配图在场）仍 fail-fast，imagesOk 不掩盖', async () => {
+  it('AC-MEDIA-DEGRADE 红线：非配图指令失败（有配图在场）仍 fail-fast，K 不掩盖', async () => {
     // 配图成功，但正文校验失败 → 整条按既有 fail-fast 停止（绝不套用配图降级语义）。
     const { seq, pushed } = makeSequencer((cmd) => ({
       recordId: cmd.recordId, seq: cmd.seq, kind: cmd.kind,
@@ -110,7 +124,7 @@ describe('AC-CMD CommandSequencer（云端编排驱动）', () => {
     const r = await seq.executePublishSequence(input({ tags: [], images: ['x'], cover: 'x' }));
     assert.equal(r.ok, false, '非配图失败 → 整体失败');
     assert.equal(r.failedAt?.kind, 'fill_field');
-    assert.equal(r.imagesOk, true, '配图本身成功，imagesOk 不被误标');
+    assert.equal(r.attachedCount, 1, '配图本身成功 K=1，不被误标');
     assert.ok(!pushed.some((c) => c.kind === 'submit_publish'), '失败后绝不下发 submit');
   });
 

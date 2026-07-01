@@ -11,6 +11,7 @@ function makeAssembledContent(overrides?: Partial<AssembledContent>): AssembledC
   return {
     finalContent: '昨天试了 vLLM 跑 14B，显存直接爆了',
     finalTags: ['vLLM', '大模型部署'],
+    imageUrls: [],
     imageUrl: null,
     aiScore: 0.1,
     qualityScore: 80,

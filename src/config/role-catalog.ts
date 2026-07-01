@@ -83,7 +83,8 @@ export const ROLE_CATALOG: RoleCatalogItem[] = [
   { roleId: 'publish:ContentScout', displayName: '发布选题侦察', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: false },
   { roleId: 'publish:ContentCreator', displayName: '技术帖文案创作', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
   { roleId: 'publish:TitleCreator', displayName: '技术帖标题创作', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
-  { roleId: 'publish:ImagePlanner', displayName: '配图策略规划', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
+  { roleId: 'publish:ImageSetPlanner', displayName: '配图选题（张数+主题）', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
+  { roleId: 'publish:ImagePromptComposer', displayName: '配图指令（主题→万相prompt）', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
   { roleId: 'publish:QualityScorer', displayName: '内容质量评分', group: 'publish', category: 'publish_gate', llmKind: 'text', tunableTemperature: false },
   { roleId: 'publish:ApprovalGatekeeper', displayName: '发布审批裁决', group: 'publish', category: 'publish_gate', llmKind: 'text', tunableTemperature: false },
   // —— 发布配图执行（图像，imageModel 全局配置；本期不开放 per-role 覆盖，列出仅为区分类型）——

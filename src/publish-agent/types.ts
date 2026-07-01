@@ -56,10 +56,14 @@ export interface PublishRecord {
   status: PublishStatus;
   /** 发布成功后回填的平台帖子 id */
   platformPostId?: string | null;
-  /** 生成的配图 URL（审计用；是否真附着以 imagesAttached 为准）。 */
+  /** 生成的配图封面 URL（审计用 = imageUrls[0]；是否真附着以 imagesAttachedCount 为准）。 */
   imageUrl?: string | null;
-  /** 配图是否真实附着到帖子。降级纯文字时为 false——「该帖是否真有图」的权威信号。 */
+  /** 多图：全部成功配图 URL（迁移 0017 复活 publish_log.images 列）。 */
+  imageUrls?: string[];
+  /** 配图是否真实附着到帖子。降级纯文字时为 false——「该帖是否真有图」的权威信号（= imagesAttachedCount>0 派生）。 */
   imagesAttached?: boolean;
+  /** 真实附着张数（边缘成功上传条数 K；落 publish_log.images_attached_count）。 */
+  imagesAttachedCount?: number;
   /**
    * 发布账号（change publish-history-account-and-detail）。来自触发上下文（TriggerInput.accountId）；
    * 缺省回落 'default'（单账号向后兼容）。让发布历史可真正按账号区分，不再恒为 DEFAULT。
@@ -138,9 +142,12 @@ export interface CreatedContent {
   createdAt: number;
 }
 
-/** ImageDirector 输出 */
+/** ImageGenerator 输出（多图：imageUrls 为生成成功的真实 URL 数组）。 */
 export interface ImageDirective {
   imagePrompt: string | null;
+  /** 生成成功的真实 URL（按规划顺序，[0]=封面位）；失败那张不入数组。绝不含伪造/占位/复用 URL（红线）。 */
+  imageUrls: string[];
+  /** @deprecated 单数派生兼容（= imageUrls[0] ?? null）；过渡后删。 */
   imageUrl: string | null;
   imageStyle: 'photography' | 'illustration' | 'dataviz' | 'isometric' | null;
   fallbackStrategy: 'skip' | 'color_placeholder';
@@ -151,6 +158,9 @@ export interface ImageDirective {
 export interface AssembledContent {
   finalContent: string;
   finalTags: string[];
+  /** 多图：上传全集（= coverSelection.imageUrls；[0]=封面）。供 PublishExecutor 下发 N 张上传。 */
+  imageUrls: string[];
+  /** @deprecated 封面单数派生（= imageUrls[0] ?? null）；审计/向后兼容，过渡后删。 */
   imageUrl: string | null;
   aiScore: number;
   qualityScore: number;
@@ -179,10 +189,34 @@ export interface ContentType {
   selectedAt: number;
 }
 
-/** ImagePlanner 输出：配图决策（要不要图 / prompt / 风格 / 张数）。 */
+/** 一张配图的主题（业务语言，由 ImageSetPlanner 产；prompt 工程据此生成万相 prompt）。 */
+export interface ImageTheme {
+  /** 主题（如「架构示意」「前后对比」「使用场景」）。 */
+  subject: string;
+  /** 意图/要点（可选，给 prompt 工程更多上下文）。 */
+  intent?: string;
+}
+
+/**
+ * ImageSetPlanner 输出：图集选题（读正文决定张数 + 每张主题 + 风格倾向）。
+ * 纯内容决策——不产万相 prompt、不调图源（决策/执行解耦红线）。
+ */
+export interface ImageSetPlan {
+  wantImage: boolean;
+  /** 目标张数（已 clamp 到 [1, 上限≤9]；wantImage:false 时为 0）。 */
+  imageCount: number;
+  /** 每张主题（长度 = imageCount；[0] 为钩子图/封面位）。 */
+  themes: ImageTheme[];
+  /** 整体风格倾向（业务语言，供 prompt 工程参考；非最终 imageStyle 枚举）。 */
+  styleHint: string | null;
+  plannedAt: number;
+}
+
+/** ImagePromptComposer 输出：配图指令（每主题一条万相 prompt + 风格枚举 + 张数）。 */
 export interface ImagePlan {
   wantImage: boolean;
-  imagePrompt: string | null;
+  /** 每张的万相 prompt（各异、共享固定风格基底；[0]=封面位）。去重后恒非空（wantImage:true）。 */
+  imagePrompts: string[];
   imageStyle: ImageDirective['imageStyle'];
   imageCount: number;
   fallbackStrategy: ImageDirective['fallbackStrategy'];
@@ -210,9 +244,10 @@ export interface QualityReport {
   reviewedAt: number;
 }
 
-/** CoverSelector 输出：封面选择（无图诚实回 null + hasCover:false）。 */
+/** CoverSelector 输出：封面选择（透传图集；封面恒取首张；无图诚实空 + hasCover:false）。 */
 export interface CoverSelection {
-  imageUrl: string | null;
+  /** 全部成功配图（透传 imageDirective.imageUrls；[0]=封面）。 */
+  imageUrls: string[];
   hasCover: boolean;
   selectedAt: number;
 }
@@ -352,6 +387,8 @@ export interface PipelineFields {
   createdContent: CreatedContent;
   // 阶段2 生产段细拆中间键
   contentType: ContentType;
+  // 配图链路三角色（change publish-multi-image）：选题 → 指令 → 生成。
+  imageSetPlan: ImageSetPlan;
   imagePlan: ImagePlan;
   cleanedContent: CleanedContent;
   aiFlavorScore: AiFlavorScore;

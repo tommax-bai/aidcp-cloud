@@ -4,7 +4,8 @@ import { PublishOrchestrator } from '../../src/publish-agent/publish-orchestrato
 import { ContentScoutRole } from '../../src/publish-agent/roles/content-scout.js';
 import { ContentTypeSelectorRole } from '../../src/publish-agent/roles/content-type-selector.js';
 import { ContentCreatorRole } from '../../src/publish-agent/roles/content-creator.js';
-import { ImagePlannerRole } from '../../src/publish-agent/roles/image-planner.js';
+import { ImageSetPlannerRole } from '../../src/publish-agent/roles/image-set-planner.js';
+import { ImagePromptComposerRole } from '../../src/publish-agent/roles/image-prompt-composer.js';
 import { ImageGeneratorRole } from '../../src/publish-agent/roles/image-generator.js';
 import { CoverSelectorRole } from '../../src/publish-agent/roles/cover-selector.js';
 import { ContentCleanerRole } from '../../src/publish-agent/roles/content-cleaner.js';
@@ -55,7 +56,7 @@ function makeTriggerInput(): TriggerInput {
 /**
  * 注册 A 阶段2 细拆后的 11 个生产段角色（顺序无关，黑板靠键就绪触发）。
  * fakeLlm 按 system prompt 路由：发布决策→Scout、小红书技术博主→Creator、
- * 配图策略→ImagePlanner、质量评审→QualityScorer、审批决策→Gatekeeper。
+ * 配图选题→ImageSetPlanner、配图指令→ImagePromptComposer、质量评审→QualityScorer、审批决策→Gatekeeper。
  */
 function buildFullPipeline(llmResponses: Record<string, string>, opts?: { enableImage?: boolean }) {
   const fakeLlm = {
@@ -64,7 +65,9 @@ function buildFullPipeline(llmResponses: Record<string, string>, opts?: { enable
       if (systemContent.includes('发布决策')) return llmResponses.scout;
       if (systemContent.includes('标题创作')) return llmResponses.title ?? '{"title":"测试标题"}';
       if (systemContent.includes('小红书技术博主')) return llmResponses.creator;
-      if (systemContent.includes('配图策略')) return llmResponses.image;
+      // 配图三角色（publish-multi-image）：选题（配图选题师）→ 指令（文生图 prompt 工程师）。缺省给合法产物。
+      if (systemContent.includes('配图选题')) return llmResponses.imageSet ?? '{"wantImage":true,"imageCount":1,"themes":[{"subject":"配图示意"}],"styleHint":null}';
+      if (systemContent.includes('prompt 工程师') || systemContent.includes('文生图')) return llmResponses.imageCompose ?? '{"imagePrompt":"tech illustration","imageStyle":"illustration"}';
       if (systemContent.includes('质量评审')) return llmResponses.assembler;
       if (systemContent.includes('审批决策')) return llmResponses.gatekeeper;
       return '{}';
@@ -85,7 +88,9 @@ function buildFullPipeline(llmResponses: Record<string, string>, opts?: { enable
   orchestrator.registerRole(new ContentScoutRole({ llmClient: fakeLlm as any, ...common }));
   orchestrator.registerRole(new ContentTypeSelectorRole(common));
   orchestrator.registerRole(new ContentCreatorRole({ llmClient: fakeLlm as any, ...common }));
-  orchestrator.registerRole(new ImagePlannerRole({ llmClient: fakeLlm as any, ...common }));
+  // 配图三角色（publish-multi-image）：选题 → 指令 → 执行。
+  orchestrator.registerRole(new ImageSetPlannerRole({ llmClient: fakeLlm as any, ...common }));
+  orchestrator.registerRole(new ImagePromptComposerRole({ llmClient: fakeLlm as any, ...common }));
   orchestrator.registerRole(new ImageGeneratorRole({ imageProvider: fakeImageProvider, enableImageGeneration: opts?.enableImage ?? false, ...common }));
   orchestrator.registerRole(new CoverSelectorRole(common));
   orchestrator.registerRole(new ContentCleanerRole({ postProcessor: fakePostProcessor, ...common }));
@@ -134,8 +139,8 @@ describe('PublishOrchestrator', () => {
     assert.equal(insertedRecords[0].status, 'pending_approval', '落库为待审草稿');
     assert.equal(pushedEnvelopes.length, 0, '生成候审段绝不下发边缘');
     // 稳定边界：组装产出仍含八字段（细拆后等价）。
-    // 12（stage-2 生产段+下游）+ 9（stage-3 元数据/合规决策）+ 1（TitleCreator）= 22；新角色并行、不阻塞 publishResult。
-    assert.equal(orchestrator.getRoles().length, 22);
+    // 13（stage-2 生产段+下游，含配图三角色 ImageSetPlanner/ImagePromptComposer/ImageGenerator）+ 9（stage-3 元数据/合规决策）+ 1（TitleCreator）= 23。
+    assert.equal(orchestrator.getRoles().length, 23);
   });
 
   test('配图失败/无图 → 诚实 failed（change publish-image-required-or-fail：图文帖必须有图，绝不走必然 no_target 的纯文字路径）', async () => {

@@ -33,6 +33,11 @@ ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS ai_enforced BOOLEAN NOT NULL DE
 -- publish-media-upload（配图收口）：审计用 image_url + 权威「真有图」信号 images_attached。
 ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS image_url TEXT;
 ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS images_attached BOOLEAN NOT NULL DEFAULT false;
+-- publish-multi-image（迁移 0017）：全部成功配图 URL images + 真实附着张数 images_attached_count（images_attached = count>0 派生）。
+-- 复活 0004 已建的休眠 images 列；幂等无害。显式兜空使存量旧行非 NULL（读侧亦 ?? [] 兜底）。
+ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS images TEXT[] NOT NULL DEFAULT '{}';
+UPDATE publish_log SET images = '{}' WHERE images IS NULL;
+ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS images_attached_count INT NOT NULL DEFAULT 0;
 -- publish-history-account-and-detail：
 --   account_id（迁移 0005 已加；此处补进 canonical SQL，使全新 init() 的库也有该列，insert 真正写入真实账号）；
 --   post_url（带 xsec_token 的完整详情页分享 URL，发布成功后回写；抓不到存 NULL）。
@@ -79,7 +84,10 @@ export interface DispatchDraft {
   accountId: string;
   title: string | null;
   content: string;
+  /** 封面 URL（= imageUrls[0]，审计/向后兼容）；无图为 null。 */
   imageUrl: string | null;
+  /** 多图：全部成功配图 URL（下发段逐张 upload_image；[0]=封面）。空数组=无图。 */
+  imageUrls: string[];
   /** 发帖元数据（含 topics/mentions/location/collection/visibility/permissions/mode/publishTime/compliance）；缺则 null。 */
   metadata: PublishMetadata | null;
   status: PublishStatus;
@@ -108,9 +116,12 @@ export class PublishLogStore {
 
   /** 写入一条发布记录，返回新行 id。 */
   async insert(record: PublishRecord): Promise<number> {
+    // 多图双写：images 存全部成功配图（下发段读回逐张上传）；image_url 存封面 = imageUrls[0]（审计/向后兼容）。
+    const images = record.imageUrls ?? (record.imageUrl ? [record.imageUrl] : []);
+    const coverUrl = record.imageUrl ?? images[0] ?? null;
     const { rows } = await this.pool.query<{ id: number }>(
-      `INSERT INTO publish_log (title, content, source_concepts, source_liked_ids, status, platform_post_id, image_url, images_attached, account_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `INSERT INTO publish_log (title, content, source_concepts, source_liked_ids, status, platform_post_id, image_url, images, images_attached, account_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING id`,
       [
         record.title,
@@ -119,8 +130,9 @@ export class PublishLogStore {
         record.sourceLikedIds,
         record.status,
         record.platformPostId ?? null,
-        record.imageUrl ?? null,
-        // 插入时配图尚未上传，权威信号默认 false；上传成功后由 markImagesAttached 置 true。
+        coverUrl,
+        images,
+        // 插入时配图尚未上传，权威信号默认 false；上传成功后由 markImagesAttached 置真实附着数。
         record.imagesAttached ?? false,
         // 发布账号：来自触发上下文；缺省回落 'default'（单账号向后兼容），让发布历史可真正按账号区分。
         record.accountId ?? 'default',
@@ -129,9 +141,14 @@ export class PublishLogStore {
     return rows[0].id;
   }
 
-  /** 配图收口：标记该帖配图是否真实附着（降级纯文字时为 false）。image_url 保留供审计。 */
-  async markImagesAttached(id: number, attached: boolean): Promise<void> {
-    await this.pool.query('UPDATE publish_log SET images_attached = $2 WHERE id = $1', [id, attached]);
+  /**
+   * 配图收口：标记该帖真实附着张数 K（边缘成功上传条数）。
+   * 多图部分成功：K≥1 即有效帖；images_attached = K>0 派生保留（向后兼容旧读者）。
+   * 杜绝「要 N 张实成 K 张被读成 N 张」——落真实 K，不落请求数。
+   */
+  async markImagesAttached(id: number, count: number): Promise<void> {
+    const k = Math.max(0, Math.floor(count));
+    await this.pool.query('UPDATE publish_log SET images_attached_count = $2, images_attached = ($2 > 0) WHERE id = $1', [id, k]);
   }
 
   /** 更新一条记录的状态。 */
@@ -197,10 +214,11 @@ export class PublishLogStore {
       title: string | null;
       content: string;
       image_url: string | null;
+      images: string[] | null;
       publish_metadata: unknown;
       status: string;
     }>(
-      `SELECT id, account_id, title, content, image_url, publish_metadata, status
+      `SELECT id, account_id, title, content, image_url, images, publish_metadata, status
        FROM publish_log WHERE id = $1`,
       [recordId],
     );
@@ -217,12 +235,15 @@ export class PublishLogStore {
         metadata = null;
       }
     }
+    // 多图读回：优先用 images 全集；旧行 images 为空但有 image_url 时回落单图（向后兼容零回归）。
+    const imageUrls = (r.images ?? []).length > 0 ? r.images! : r.image_url ? [r.image_url] : [];
     return {
       recordId: r.id,
       accountId: r.account_id ?? 'default',
       title: r.title,
       content: r.content,
-      imageUrl: r.image_url,
+      imageUrl: r.image_url ?? imageUrls[0] ?? null,
+      imageUrls,
       metadata,
       status: toStatus(r.status),
     };

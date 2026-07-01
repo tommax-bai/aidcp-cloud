@@ -21,7 +21,8 @@ export interface DispatchStore {
   loadForDispatch(recordId: number): Promise<DispatchDraft | null>;
   updateStatus(id: number, status: string): Promise<void>;
   updatePostId(id: number, postId: string, postUrl?: string | null): Promise<void>;
-  markImagesAttached(id: number, attached: boolean): Promise<void>;
+  /** 配图收口：标记真实附着张数 K（K>0 派生 images_attached=true）。 */
+  markImagesAttached(id: number, count: number): Promise<void>;
   /** 兜底扫描用：列出所有待审草稿 id（供事件丢失时补触发）。 */
   listPendingApprovalIds(): Promise<number[]>;
 }
@@ -149,7 +150,7 @@ export class PublishDispatcher {
     }
 
     // 图文帖必须有图（executor 已拦，下发段再守一道；缺图诚实 failed）。
-    if (!draft.imageUrl) {
+    if (draft.imageUrls.length === 0) {
       await this.store.updateStatus(recordId, 'failed').catch(() => {});
       this.logger.warn(`[PublishDispatcher] recordId=${recordId} 无配图，诚实 failed（不下发）`);
       return;
@@ -172,15 +173,17 @@ export class PublishDispatcher {
         content: draft.content,
         // 话题取落库元数据的 topics（生成候审段经 recordMetadata 落库）；缺则空数组。
         tags: draft.metadata?.topics ?? [],
-        images: [draft.imageUrl],
-        cover: draft.imageUrl,
+        // 多图：下发全部成功配图逐张上传（[0]=封面）。本期不传 cover——封面=首张上传=平台默认；
+        // 强发 set_cover 会踩 edge fail-closed 桩（coverActiveValidator 缺 anchor 必败、非 best-effort 整帖 failed）。
+        images: draft.imageUrls,
+        cover: undefined,
         metadata: draft.metadata ?? undefined,
         approvedByUser: true,
         edgeId,
       });
 
-      // 配图收口：如实标记是否真附着（降级纯文字即 false）。
-      await this.store.markImagesAttached(recordId, result.imagesOk).catch(() => {});
+      // 配图收口：如实标记真实附着张数 K（部分成功 K≥1 即有效帖；全失败 K=0）。
+      await this.store.markImagesAttached(recordId, result.attachedCount).catch(() => {});
 
       if (result.ok) {
         if (result.postId) {
