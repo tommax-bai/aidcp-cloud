@@ -156,6 +156,11 @@ export interface PublishApprovalPayload {
   title: string;
   content: string;
   tags: string[];
+  /**
+   * 授权所载内容版本号（edit-note-draft-before-publish）：卡片构建时烤入、随授权签名 payload 落盘，
+   * 下发闸据此比对当前草稿版本以守「审=发」。缺省（部署前老卡片/老签名）按 0 处理，向后兼容。
+   */
+  contentVersion?: number;
 }
 
 export interface PublishApprovalCardData extends PublishApprovalPayload {

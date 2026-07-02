@@ -211,6 +211,9 @@ function buildPublishApprovalStateCard(
       title: payload.title,
       content: payload.content,
       tags: payload.tags,
+      // 烤入本卡构建时的内容版本号（edit-note-draft-before-publish）：点授权时随签名落盘，
+      // 下发闸据此守「审=发」。构建时未编辑草稿恒 0；卡片发出后草稿被后台改则活版本 >0、此值仍为旧。
+      contentVersion: payload.contentVersion ?? 0,
     },
   };
   const terminalText =
@@ -274,4 +277,33 @@ export function buildApprovedPublishApprovalCard(payload: PublishApprovalCardDat
 
 export function buildCancelledPublishApprovalCard(payload: PublishApprovalCardData): FeishuCard {
   return buildPublishApprovalStateCard(payload, 'cancelled');
+}
+
+/**
+ * 草稿已在控制台改过、原卡片失效的替换卡（edit-note-draft-before-publish）。
+ * 云端无法主动刷新已发出的老卡片；命中版本不符时，作为卡片回调响应就地替换成本卡，引导到控制台重新审批。
+ * 无授权按钮——旧卡片的授权权威被作废，避免「看着旧字节批出新字节」。
+ */
+export function buildSupersededPublishApprovalCard(requestId: string): FeishuCard {
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      template: 'grey',
+      title: { tag: 'plain_text', content: '草稿已更新' },
+    },
+    elements: [
+      {
+        tag: 'div',
+        fields: [
+          {
+            is_short: false,
+            text: {
+              tag: 'lark_md',
+              content: `该草稿（\`${requestId}\`）已在控制台修改，此卡片内容已过期、授权已失效。\n请到**管理后台**查看最新内容并在那里审批。`,
+            },
+          },
+        ],
+      },
+    ],
+  };
 }

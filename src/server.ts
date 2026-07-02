@@ -944,14 +944,40 @@ async function main(): Promise<void> {
     pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
     logger: console,
   });
-  // AC-PUB 第1道：按 requestId 读审批信号文件，approved===true 才放行（缺失/解析失败 → 未授权）。
-  const isPublishApproved = async (requestId: string): Promise<boolean> => {
+  // AC-PUB 第1道 + 版本闸（edit-note-draft-before-publish）：按 requestId 读审批信号文件，
+  // 回 { approved, contentVersion }；signal.payload.contentVersion 缺失（部署前老签名）→ 0（向后兼容）。
+  // 缺文件/解析失败 → null（未授权）。
+  const readPublishApproval = async (
+    requestId: string,
+  ): Promise<{ approved: boolean; contentVersion: number } | null> => {
     try {
       const raw = await readFile(getApprovalSignalPath(requestId), 'utf8');
-      const parsed = JSON.parse(raw) as { approved?: boolean };
-      return parsed?.approved === true;
+      const parsed = JSON.parse(raw) as { approved?: boolean; payload?: { contentVersion?: number } };
+      return { approved: parsed?.approved === true, contentVersion: Number(parsed?.payload?.contentVersion ?? 0) };
     } catch {
-      return false;
+      return null;
+    }
+  };
+  // 布尔视图（评论审批口沿用；只关心 approved）。
+  const isPublishApproved = async (requestId: string): Promise<boolean> => {
+    const d = await readPublishApproval(requestId);
+    return d?.approved === true;
+  };
+  // 作废（删除）一份过期授权签名（edit-note-draft-before-publish）：下发版本闸命中不符时调用，令草稿回可重审。
+  const voidApprovalSignal = async (requestId: string): Promise<void> => {
+    try {
+      await unlink(getApprovalSignalPath(requestId));
+    } catch {
+      /* 已不存在则忽略（幂等） */
+    }
+  };
+  // 读某草稿当前内容版本号（edit-note-draft-before-publish）：面板/飞书授权前的写时预检用；不存在/出错 → null。
+  const readLiveContentVersion = async (recordId: number): Promise<number | null> => {
+    try {
+      const draft = await publishLogStore.loadForDispatch(recordId);
+      return draft ? draft.contentVersion : null;
+    } catch {
+      return null;
     }
   };
 
@@ -991,7 +1017,8 @@ async function main(): Promise<void> {
     store: publishLogStore,
     sequencer: commandSequencer,
     resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
-    isApproved: isPublishApproved,
+    readApproval: readPublishApproval,
+    voidApprovalSignal,
     onPublishStart: onPublishTakeoverStart,
     onPublishEnd: onPublishTakeoverEnd,
     logger: console,
@@ -1398,6 +1425,9 @@ async function main(): Promise<void> {
     messenger,
     // 通过即切：飞书「授权发布」首写成功即触发下发段（仅 publish-<n>）。
     onApproved: triggerPublishDispatchOnApprove,
+    // 写时版本预检（edit-note-draft-before-publish）：飞书卡片授权前比对活版本与卡片烤入版本；
+    // 不一致 → 不写签名、回「请到控制台重新审批」替换卡（云端无法主动刷新已发出的老卡片）。
+    readLiveContentVersion,
   });
   try {
     const wsClient = new lark.WSClient({
@@ -1528,6 +1558,13 @@ async function main(): Promise<void> {
             // 通过即切：后台「授权发布」首写成功即触发下发段（仅 publish-<n>）。取消不触发。
             if (approved && result.written) triggerPublishDispatchOnApprove(requestId);
             return result;
+          },
+          // 待审正文草稿就地编辑 + 活版本读回 + 授权在途探测（edit-note-draft-before-publish）。经拥有者对象单写，绝不 raw UPDATE。
+          publishDraft: {
+            edit: (recordId, expectedVersion, patch, editor) =>
+              publishLogStore.editDraft(recordId, expectedVersion, patch, editor),
+            liveVersion: readLiveContentVersion,
+            hasDecision: async (recordId) => (await readPublishApproval(`publish-${recordId}`)) !== null,
           },
           commandActions: {
             pause: async (accountId) => {

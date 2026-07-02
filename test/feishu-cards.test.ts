@@ -156,6 +156,8 @@ test('buildPublishApprovalCard: 构造新版 callback behaviors', () => {
       title: '测试标题',
       content: '这是一段很长的正文内容，用于验证审批卡片摘要与按钮回调载荷。',
       tags: ['话题A', '话题B'],
+      // edit-note-draft-before-publish：卡片烤入构建时内容版本号（未编辑草稿=0），随授权守「审=发」。
+      contentVersion: 0,
     },
   });
   assert.equal(buttons[1].behaviors?.[0]?.value.action, 'cancel');

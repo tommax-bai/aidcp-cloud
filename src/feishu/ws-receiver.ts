@@ -23,6 +23,7 @@ import {
   buildApprovedPublishApprovalCard,
   buildCancelledPublishApprovalCard,
   buildCommandResultCard,
+  buildSupersededPublishApprovalCard,
 } from './cards.js';
 import type { PublishApprovalPayload } from './types.js';
 
@@ -55,6 +56,12 @@ export interface FeishuWsReceiverOptions {
    * 取消则不调。缺省（测试/旧装配）不触发，零回归。
    */
   onApproved?: (requestId: string) => void;
+  /**
+   * 读某草稿当前内容版本号（change edit-note-draft-before-publish）：卡片授权/取消前的写时版本预检。
+   * 仅对 `publish-<n>` requestId 生效。缺省（测试/旧装配）不预检、零回归。
+   * 返回 null（不存在/读失败）→ fail-safe 拒到控制台，绝不放行未确认版本。
+   */
+  readLiveContentVersion?: (recordId: number) => Promise<number | null>;
 }
 
 interface ApprovalActionValue {
@@ -168,6 +175,7 @@ export class FeishuWsReceiver {
   private readonly logger: Pick<Console, 'log' | 'warn' | 'error'>;
   private readonly fsImpl: Pick<typeof fs, 'writeFile' | 'rm'>;
   private readonly onApproved?: (requestId: string) => void;
+  private readonly readLiveContentVersion?: (recordId: number) => Promise<number | null>;
   private wsClient?: lark.WSClient;
 
   constructor(options: FeishuWsReceiverOptions) {
@@ -178,6 +186,7 @@ export class FeishuWsReceiver {
     this.logger = options.logger ?? console;
     this.fsImpl = options.fsImpl ?? fs;
     this.onApproved = options.onApproved;
+    this.readLiveContentVersion = options.readLiveContentVersion;
   }
 
   /**
@@ -222,6 +231,39 @@ export class FeishuWsReceiver {
     }
 
     const approved = parsed.action === 'approve';
+
+    // 写时版本预检（change edit-note-draft-before-publish）：卡片授权/取消前比对活版本与卡片烤入版本。
+    // 云端无法主动刷新已发出的老卡片——草稿一经后台编辑，老卡片显示的是旧字节、点授权会发出未审内容，
+    // 点取消会以先到先得锁死签名、令编辑过的好草稿再也无法授权。故版本不符时**拒绝本次决定、绝不写签名**，
+    // 就地替换成「请到控制台重新审批」卡（唯一可行的卡片更新方式）。仅 publish-<n> 且注入了读版本函数时生效。
+    if (this.readLiveContentVersion) {
+      const m = /^publish-(\d+)$/.exec(parsed.requestId);
+      if (m) {
+        const recordId = Number(m[1]);
+        const bakedVersion = parsed.payload.contentVersion ?? 0;
+        let liveVersion: number | null;
+        try {
+          liveVersion = await this.readLiveContentVersion(recordId);
+        } catch {
+          liveVersion = null;
+        }
+        if (liveVersion === null) {
+          // fail-safe：无法确认版本（不存在/PG 抖动）→ 拒到控制台，绝不放行未确认版本。不写签名。
+          return {
+            toast: { type: 'error', content: '暂时无法确认草稿版本，请到控制台审批' },
+            card: { type: 'raw', data: buildSupersededPublishApprovalCard(parsed.requestId) },
+          };
+        }
+        if (liveVersion !== bakedVersion) {
+          // 草稿已在控制台改过（版本不符）→ 拒绝本次决定、不写签名，就地替换成重新审批引导卡。
+          return {
+            toast: { type: 'info', content: '草稿已在控制台修改，请到控制台审批' },
+            card: { type: 'raw', data: buildSupersededPublishApprovalCard(parsed.requestId) },
+          };
+        }
+      }
+    }
+
     const result = await writeApprovalSignal(this.fsImpl, parsed.requestId, approved, parsed.payload);
     if (!result.written) {
       // first-writer-wins：已被先前决定（飞书/Web/重复点击），不覆盖

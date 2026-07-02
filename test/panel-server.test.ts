@@ -46,6 +46,7 @@ const mockPanelStore: PanelStoreReader = {
       accountLabel: accountId ?? 'default',
       content: '正文全文',
       postUrl: 'https://www.xiaohongshu.com/explore/p1?xsec_token=tok',
+      contentVersion: 0,
     },
   ],
   listAlerts: async () => [
@@ -291,6 +292,89 @@ test('HTTP 写路由：审批返 written 非 published；命令返真实结果�
       body: JSON.stringify({ command: 'pause' }),
     });
     assert.equal(noTok.status, 401);
+  } finally {
+    await h.close();
+  }
+});
+
+test('HTTP 待审草稿编辑 + 授权写时版本预检（edit-note-draft-before-publish）：CAS 拒因映射 / already_decided / version_stale 不写签名', async () => {
+  const signalWrites: Array<{ requestId: string; approved: boolean; payload: Record<string, unknown> }> = [];
+  const edits: Array<{ recordId: number; editor: string }> = [];
+  const draftDeps = {
+    ...(deps as object),
+    writeApprovalSignal: async (requestId: string, approved: boolean, payload: Record<string, unknown>) => {
+      signalWrites.push({ requestId, approved, payload });
+      return { written: true };
+    },
+    publishDraft: {
+      edit: async (recordId: number, expectedVersion: number, patch: { title?: string; content?: string }, editor: string) => {
+        edits.push({ recordId, editor });
+        if (recordId === 99) return { ok: false, reason: 'not_found' as const };
+        if (expectedVersion !== 0) return { ok: false, reason: 'version_conflict' as const };
+        return { ok: true as const, contentVersion: expectedVersion + 1, title: patch.title ?? '原', content: patch.content ?? '原', metadata: null };
+      },
+      liveVersion: async (recordId: number) => (recordId === 7 ? 5 : 0),
+      hasDecision: async (recordId: number) => recordId === 8,
+    },
+  } as unknown as PanelDeps;
+  const h = await startPanelApi(draftDeps, makeConfig());
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = (await login.json()) as { token: string };
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+
+    // 编辑成功 → 200 回真态（版本自增）+ editor = JWT sub
+    const ok = await fetch(`${base}/api/publish/1/draft`, { method: 'PUT', headers: auth, body: JSON.stringify({ expectedVersion: 0, title: '新标题', content: '新正文' }) });
+    assert.equal(ok.status, 200);
+    assert.equal(((await ok.json()) as { contentVersion: number }).contentVersion, 1);
+    assert.equal(edits[0].editor, 'alice', 'editor 取 JWT 主体');
+
+    // 版本冲突 → 409；not_found → 404；空补丁 → 400；坏版本 → 400
+    assert.equal((await fetch(`${base}/api/publish/1/draft`, { method: 'PUT', headers: auth, body: JSON.stringify({ expectedVersion: 9, content: 'x' }) })).status, 409);
+    assert.equal((await fetch(`${base}/api/publish/99/draft`, { method: 'PUT', headers: auth, body: JSON.stringify({ expectedVersion: 0, content: 'x' }) })).status, 404);
+    assert.equal((await fetch(`${base}/api/publish/1/draft`, { method: 'PUT', headers: auth, body: JSON.stringify({ expectedVersion: 0 }) })).status, 400);
+    assert.equal((await fetch(`${base}/api/publish/1/draft`, { method: 'PUT', headers: auth, body: JSON.stringify({ content: 'x' }) })).status, 400);
+
+    // 授权在途 → 409 already_decided
+    assert.equal((await fetch(`${base}/api/publish/8/draft`, { method: 'PUT', headers: auth, body: JSON.stringify({ expectedVersion: 0, content: 'x' }) })).status, 409);
+
+    // 授权写时版本预检：record 7 live=5；授权带 v3 不符 → 409 version_stale、绝不写签名
+    const stale = await fetch(`${base}/api/publish/publish-7/approve`, { method: 'POST', headers: auth, body: JSON.stringify({ approved: true, contentVersion: 3 }) });
+    assert.equal(stale.status, 409);
+    assert.equal(((await stale.json()) as { error: string }).error, 'version_stale');
+    assert.equal(signalWrites.length, 0, '版本不符绝不写签名');
+
+    // 版本一致(v5) → 写签名，payload 带 contentVersion
+    const okAp = await fetch(`${base}/api/publish/publish-7/approve`, { method: 'POST', headers: auth, body: JSON.stringify({ approved: true, contentVersion: 5 }) });
+    assert.equal(okAp.status, 200);
+    assert.equal(signalWrites.length, 1);
+    assert.equal(signalWrites[0].payload.contentVersion, 5, '授权版本随签名 payload 落盘');
+  } finally {
+    await h.close();
+  }
+});
+
+test('HTTP 待审草稿编辑：未注入 publishDraft → 503', async () => {
+  const h = await startPanelApi(deps, makeConfig());
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = (await login.json()) as { token: string };
+    const r = await fetch(`${base}/api/publish/1/draft`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedVersion: 0, content: 'x' }),
+    });
+    assert.equal(r.status, 503);
   } finally {
     await h.close();
   }

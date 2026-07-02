@@ -65,6 +65,11 @@ export interface PanelPublish {
   content: string | null;
   /** 小红书详情页分享 URL（带 xsec_token）；抓不到为 null，后台显示「无链接」、不给坏链。 */
   postUrl: string | null;
+  /**
+   * 内容版本号（change edit-note-draft-before-publish）：0=未编辑，>0=已在控制台改过（原飞书卡片已失效）。
+   * 控制台据此渲染生命周期标签，并在审批时快照此值随授权带回（「审=发」凭证）。
+   */
+  contentVersion: number;
 }
 
 export type TodayTotals = Record<RiskAction, number>;
@@ -306,9 +311,11 @@ export class PgPanelStore implements PanelStoreReader {
       account_nickname: string | null;
       content: string | null;
       post_url: string | null;
+      content_version: number | string | null;
     }>(
       `SELECT pl.id, pl.title, pl.status, pl.platform_post_id, pl.published_at,
-              pl.account_id, a.label AS account_label, a.nickname AS account_nickname, pl.content, pl.post_url
+              pl.account_id, a.label AS account_label, a.nickname AS account_nickname, pl.content, pl.post_url,
+              pl.content_version
        FROM publish_log pl
        LEFT JOIN accounts a ON a.account_id = pl.account_id
        ${where} ORDER BY pl.published_at DESC LIMIT $${params.length}`,
@@ -325,6 +332,7 @@ export class PgPanelStore implements PanelStoreReader {
       accountLabel: r.account_nickname ?? r.account_label ?? r.account_id,
       content: r.content,
       postUrl: r.post_url,
+      contentVersion: Number(r.content_version ?? 0),
     }));
   }
 

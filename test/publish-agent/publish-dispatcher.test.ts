@@ -24,6 +24,7 @@ function makeDraft(over: Partial<DispatchDraft> = {}): DispatchDraft {
       mode: 'immediate', publishTime: null, compliance: {}, metadataScore: 0.5, decidedAt: 0,
     } as any,
     status: 'pending_approval',
+    contentVersion: 0,
     ...over,
   };
 }
@@ -32,6 +33,8 @@ function makeDraft(over: Partial<DispatchDraft> = {}): DispatchDraft {
 function harness(opts: {
   draft?: DispatchDraft | null;
   approved?: boolean;
+  /** 授权信号所载版本（edit-note-draft-before-publish）；缺省 = 草稿版本（版本一致，不触发版本闸）。 */
+  approvedVersion?: number;
   edgeId?: string | null;
   seqResult?: any;
 }) {
@@ -40,6 +43,7 @@ function harness(opts: {
   const statusUpdates: Array<{ id: number; status: string }> = [];
   let postWrite: any;
   const attached: Array<{ id: number; count: number }> = [];
+  const voided: string[] = [];
   const store = {
     loadForDispatch: async (_id: number) => (opts.draft === undefined ? makeDraft() : opts.draft),
     updateStatus: async (id: number, status: string) => { statusUpdates.push({ id, status }); events.push(`status:${status}`); },
@@ -54,16 +58,22 @@ function harness(opts: {
       return opts.seqResult ?? { ok: true, attachedCount: 2, postId: 'post_real' };
     },
   };
+  // 授权所载版本：默认取草稿版本（版本一致）；显式传 approvedVersion 则模拟「授权后又被编辑」。
+  const draftVersion = (opts.draft === undefined ? makeDraft() : opts.draft)?.contentVersion ?? 0;
   const dispatcher = new PublishDispatcher({
     store,
     sequencer,
     resolveEdgeIdForAccount: () => (opts.edgeId === undefined ? 'edge-A' : opts.edgeId),
-    isApproved: async () => opts.approved ?? true,
+    readApproval: async () =>
+      (opts.approved ?? true)
+        ? { approved: true, contentVersion: opts.approvedVersion ?? draftVersion }
+        : { approved: false, contentVersion: opts.approvedVersion ?? draftVersion },
+    voidApprovalSignal: async (requestId: string) => { voided.push(requestId); events.push('void'); },
     onPublishStart: () => events.push('start'),
     onPublishEnd: () => events.push('end'),
     logger: silentLogger,
   });
-  return { dispatcher, events, get seqInput() { return seqInput; }, statusUpdates, get postWrite() { return postWrite; }, attached };
+  return { dispatcher, events, get seqInput() { return seqInput; }, statusUpdates, get postWrite() { return postWrite; }, attached, voided };
 }
 
 describe('PublishDispatcher', () => {
@@ -131,5 +141,30 @@ describe('PublishDispatcher', () => {
     const h = harness({ approved: true, edgeId: 'edge-A', draft: makeDraft({ status: 'pending_approval' }) });
     await h.dispatcher.scanAndDispatchApproved();
     assert.equal(h.events.includes('seq'), true, '兜底扫描补触发下发');
+  });
+
+  test('版本闸：授权版本 ≠ 草稿版本 → 作废过期签名、留待审、绝不下发未审内容', async () => {
+    // 草稿已被编辑到 v2，但授权签名载的是旧 v1（授权后又落了一次编辑）。
+    const h = harness({ approved: true, edgeId: 'edge-A', draft: makeDraft({ contentVersion: 2 }), approvedVersion: 1 });
+    await h.dispatcher.dispatch(7);
+    assert.equal(h.events.includes('seq'), false, '版本不符绝不驱动序列（不发未审内容）');
+    assert.equal(h.events.includes('start'), false, '版本不符不让位');
+    assert.deepEqual(h.voided, ['publish-7'], '作废过期签名');
+    assert.equal(h.statusUpdates.length, 0, '留待审：不改态、不落 failed/needs_review（不锁死，可重审）');
+  });
+
+  test('版本闸：授权版本 == 草稿版本 → 照常下发', async () => {
+    const h = harness({ approved: true, edgeId: 'edge-A', draft: makeDraft({ contentVersion: 3 }), approvedVersion: 3 });
+    await h.dispatcher.dispatch(7);
+    assert.equal(h.events.includes('seq'), true, '版本一致照常下发');
+    assert.equal(h.voided.length, 0, '版本一致不作废签名');
+  });
+
+  test('版本闸兼容：缺版本的老签名(v0) 对未编辑草稿(v0) → 照常下发', async () => {
+    // 部署前在飞的老审批：signal 无 contentVersion → 读回 0；未编辑草稿 content_version 默认 0 → 0===0 放行。
+    const h = harness({ approved: true, edgeId: 'edge-A', draft: makeDraft({ contentVersion: 0 }), approvedVersion: 0 });
+    await h.dispatcher.dispatch(7);
+    assert.equal(h.events.includes('seq'), true, '老签名 0 == 未编辑草稿 0 → 照常发（deploy 向后兼容）');
+    assert.equal(h.voided.length, 0);
   });
 });

@@ -308,3 +308,64 @@ test('ws-receiver: cancel 写入 approved=false 信号文件', async () => {
   assert.equal(writes.length, 1);
   assert.match(writes[0].content, /\"approved\":false/);
 });
+
+// ── 写时版本预检（change edit-note-draft-before-publish）──────────────────────
+function receiverWithVersion(live: number | null, writes: Array<{ path: string; content: string }>) {
+  return new FeishuWsReceiver({
+    appId: 'a',
+    appSecret: 's',
+    commandRouter: makeRouter(),
+    fsImpl: {
+      writeFile: async (path, content) => {
+        writes.push({ path: String(path), content: String(content) });
+      },
+      rm: async () => {},
+    },
+    readLiveContentVersion: async () => live,
+  });
+}
+
+test('ws-receiver: 版本预检 — 活版本 == 卡片烤入版本 → 写签名（payload 带 contentVersion）', async () => {
+  const writes: Array<{ path: string; content: string }> = [];
+  const res = await receiverWithVersion(2, writes).handleCardAction({
+    action: 'approve',
+    requestId: 'publish-42',
+    payload: { title: '标题', content: '正文', tags: ['话题'], contentVersion: 2 },
+  });
+  assert.equal(res.toast.type, 'success');
+  assert.equal(writes.length, 1, '版本一致才写签名');
+  assert.match(writes[0].content, /\"contentVersion\":2/);
+});
+
+test('ws-receiver: 版本预检 — 活版本 ≠ 烤入版本 → 拒绝、绝不写签名、回重新审批替换卡', async () => {
+  const writes: Array<{ path: string; content: string }> = [];
+  const res = await receiverWithVersion(3, writes).handleCardAction({
+    action: 'approve',
+    requestId: 'publish-42',
+    payload: { title: '标题', content: '正文', tags: ['话题'], contentVersion: 1 },
+  });
+  assert.equal(writes.length, 0, '版本不符绝不写签名');
+  assert.equal(res.toast.type, 'info');
+  assert.ok(res.card, '返回替换卡引导到控制台');
+});
+
+test('ws-receiver: 版本预检 — 陈旧 cancel 同样被拒（防锁死编辑过的草稿签名）', async () => {
+  const writes: Array<{ path: string; content: string }> = [];
+  const res = await receiverWithVersion(3, writes).handleCardAction({
+    action: 'cancel',
+    requestId: 'publish-42',
+    payload: { title: '标题', content: '正文', tags: ['话题'], contentVersion: 1 },
+  });
+  assert.equal(writes.length, 0, '陈旧 cancel 也不写签名（否则先到先得锁死、编辑过的草稿再也发不出）');
+});
+
+test('ws-receiver: 版本预检 fail-safe — 读版本失败(null) → 拒到控制台、不写签名', async () => {
+  const writes: Array<{ path: string; content: string }> = [];
+  const res = await receiverWithVersion(null, writes).handleCardAction({
+    action: 'approve',
+    requestId: 'publish-42',
+    payload: { title: '标题', content: '正文', tags: ['话题'], contentVersion: 0 },
+  });
+  assert.equal(writes.length, 0, 'fail-safe：无法确认版本绝不放行');
+  assert.equal(res.toast.type, 'error');
+});

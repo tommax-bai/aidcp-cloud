@@ -6,7 +6,21 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
-import type { PublishRecord, PublishStatus, PublishMetadata } from './types.js';
+import type { PublishRecord, PublishStatus, PublishMetadata, Visibility } from './types.js';
+import { clampTitle } from './title-clamp.js';
+
+/** JSONB publish_metadata 解析：pg 驱动通常已解析为对象；兼容字符串形态；解析失败诚实置 null。 */
+function parsePublishMetadata(raw: unknown): PublishMetadata | null {
+  if (raw == null) return null;
+  try {
+    return (typeof raw === 'string' ? JSON.parse(raw) : raw) as PublishMetadata;
+  } catch {
+    return null;
+  }
+}
+
+/** 合法可见范围枚举（与 types.ts 的 Visibility 同步；编辑侧校验用）。 */
+const VISIBILITY_VALUES: readonly Visibility[] = ['public', 'friends_only', 'self_only'];
 
 const { Pool } = pg;
 
@@ -49,6 +63,12 @@ CREATE INDEX IF NOT EXISTS idx_publish_log_account ON publish_log (account_id);
 ALTER TABLE publish_log DROP CONSTRAINT IF EXISTS publish_log_status_check;
 ALTER TABLE publish_log ADD CONSTRAINT publish_log_status_check
   CHECK (status IN ('draft','pending_approval','published','failed','needs_review'));
+-- edit-note-draft-before-publish：待审草稿就地编辑的「审=发」凭证 + 谁/何时审计。
+--   content_version：每行内容版本号（真列、非塞 JSONB，令版本闸是原子 WHERE 谓词）；既有行回填 0；每次成功编辑 +1。
+--   edited_by / edited_at：最后一次编辑者（JWT 主体）与时间；仅「谁/何时」，非 diff 日志。
+ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS content_version INT NOT NULL DEFAULT 0;
+ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS edited_by TEXT;
+ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ;
 `;
 
 export interface PublishLogStoreOptions {
@@ -91,7 +111,34 @@ export interface DispatchDraft {
   /** 发帖元数据（含 topics/mentions/location/collection/visibility/permissions/mode/publishTime/compliance）；缺则 null。 */
   metadata: PublishMetadata | null;
   status: PublishStatus;
+  /** 内容版本号（edit-note-draft-before-publish）：下发闸比对授权所载版本与此值，不一致则作废过期签名并留待审。 */
+  contentVersion: number;
 }
+
+/**
+ * 待审草稿编辑补丁（edit-note-draft-before-publish）：本期仅正文文本 + 文本类元数据可编辑。
+ * 未出现的键 = 不改（保留原值）；深合并只动 visibility/topics，其余元数据键逐字保留。
+ */
+export interface EditDraftPatch {
+  title?: string;
+  content?: string;
+  visibility?: string;
+  topics?: string[];
+}
+
+/** editDraft 可区分拒因（诚实非乐观；面板据此映射不同 HTTP/文案）。 */
+export type EditDraftReason =
+  | 'not_found'
+  | 'not_pending'
+  | 'version_conflict'
+  | 'invalid_title'
+  | 'missing_visibility'
+  | 'invalid_field';
+
+/** editDraft 结果：成功回读写后真态（含自增后的版本号）；失败带可区分拒因。 */
+export type EditDraftResult =
+  | { ok: true; contentVersion: number; title: string | null; content: string; metadata: PublishMetadata | null }
+  | { ok: false; reason: EditDraftReason };
 
 /** publish_log 持久化（PostgreSQL，aidcp 库）。 */
 export class PublishLogStore {
@@ -217,24 +264,16 @@ export class PublishLogStore {
       images: string[] | null;
       publish_metadata: unknown;
       status: string;
+      content_version: number | string | null;
     }>(
-      `SELECT id, account_id, title, content, image_url, images, publish_metadata, status
+      `SELECT id, account_id, title, content, image_url, images, publish_metadata, status, content_version
        FROM publish_log WHERE id = $1`,
       [recordId],
     );
     const r = rows[0];
     if (!r) return null;
-    let metadata: PublishMetadata | null = null;
-    if (r.publish_metadata != null) {
-      // JSONB 列：pg 驱动通常已解析为对象；兼容字符串形态。解析失败诚实置 null（下发走保守默认、不崩）。
-      try {
-        metadata = (typeof r.publish_metadata === 'string'
-          ? JSON.parse(r.publish_metadata)
-          : r.publish_metadata) as PublishMetadata;
-      } catch {
-        metadata = null;
-      }
-    }
+    // JSONB 列：pg 驱动通常已解析为对象；兼容字符串形态。解析失败诚实置 null（下发走保守默认、不崩）。
+    const metadata = parsePublishMetadata(r.publish_metadata);
     // 多图读回：优先用 images 全集；旧行 images 为空但有 image_url 时回落单图（向后兼容零回归）。
     const imageUrls = (r.images ?? []).length > 0 ? r.images! : r.image_url ? [r.image_url] : [];
     return {
@@ -246,7 +285,149 @@ export class PublishLogStore {
       imageUrls,
       metadata,
       status: toStatus(r.status),
+      contentVersion: Number(r.content_version ?? 0),
     };
+  }
+
+  /**
+   * 就地编辑一条待审正文草稿（edit-note-draft-before-publish）。单写、乐观 CAS、诚实非乐观。
+   *
+   * 红线：
+   * - 仅 `pending_approval` 可编辑（非则 not_pending，绝不静默改写）；
+   * - 乐观并发——`content_version` 必须等于调用方所见 expectedVersion，否则 version_conflict（无丢更新）；
+   * - 标题仍在此一处 `clampTitle(≤18)`、拒空 → invalid_title（面板不写裸标题）；
+   * - 可见范围校验非空且合法枚举（空→missing_visibility，未知→invalid_field），绝不落库无可见范围草稿；
+   * - 元数据**深合并**：只拼 visibility/topics，compliance/permissions/mentions/location/collection/mode/publishTime
+   *   等未改键逐字保留，绝不重算 aiEnforced 棘轮、绝不下调 AI 声明；
+   * - FOR UPDATE 行锁 + 事务令「读版本→写」原子，成功 content_version+1、写 edited_by/edited_at、RETURNING 回读真态。
+   *
+   * 注：跨进程「授权在途（签名已存在）」的 already_decided 预闸由面板端点侧探测（拥有 requestId 格式与 /tmp 信号），
+   * 本方法只管 DB 层单写；写时/下发两处版本闸是最终权威。
+   */
+  async editDraft(
+    recordId: number,
+    expectedVersion: number,
+    patch: EditDraftPatch,
+    editor: string,
+  ): Promise<EditDraftResult> {
+    // ── 先做纯字段校验（红线：字形安全标题、可见范围枚举、类型），任一不过即诚实拒绝，不进事务 ──
+    let newTitle: string | undefined;
+    if (patch.title !== undefined) {
+      if (typeof patch.title !== 'string' || patch.title.trim().length === 0) {
+        return { ok: false, reason: 'invalid_title' };
+      }
+      newTitle = clampTitle(patch.title, 18);
+    }
+    if (patch.content !== undefined) {
+      if (typeof patch.content !== 'string' || patch.content.trim().length === 0) {
+        return { ok: false, reason: 'invalid_field' };
+      }
+    }
+    let newVisibility: Visibility | undefined;
+    if (patch.visibility !== undefined) {
+      if (typeof patch.visibility !== 'string' || patch.visibility.length === 0) {
+        return { ok: false, reason: 'missing_visibility' };
+      }
+      if (!VISIBILITY_VALUES.includes(patch.visibility as Visibility)) {
+        return { ok: false, reason: 'invalid_field' };
+      }
+      newVisibility = patch.visibility as Visibility;
+    }
+    let newTopics: string[] | undefined;
+    if (patch.topics !== undefined) {
+      if (!Array.isArray(patch.topics) || !patch.topics.every((t) => typeof t === 'string')) {
+        return { ok: false, reason: 'invalid_field' };
+      }
+      newTopics = patch.topics;
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const sel = await client.query<{
+        status: string;
+        content_version: number | string;
+        title: string | null;
+        content: string;
+        publish_metadata: unknown;
+      }>(
+        `SELECT status, content_version, title, content, publish_metadata
+         FROM publish_log WHERE id = $1 FOR UPDATE`,
+        [recordId],
+      );
+      const row = sel.rows[0];
+      if (!row) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'not_found' };
+      }
+      if (row.status !== 'pending_approval') {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'not_pending' };
+      }
+      if (Number(row.content_version) !== expectedVersion) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'version_conflict' };
+      }
+
+      // 深合并：只动 visibility/topics，其余键逐字保留。待审行本应有元数据（生成段 recordMetadata 落库）；
+      // 万一为 null 又要改可见范围/话题，则无从保证非空可见范围 → 诚实拒 invalid_field（守硬必选致命闸）。
+      let metadata = parsePublishMetadata(row.publish_metadata);
+      if (newVisibility !== undefined || newTopics !== undefined) {
+        if (metadata == null) {
+          await client.query('ROLLBACK');
+          return { ok: false, reason: 'invalid_field' };
+        }
+        metadata = { ...metadata };
+        if (newVisibility !== undefined) metadata.visibility = newVisibility;
+        if (newTopics !== undefined) metadata.topics = newTopics;
+      }
+
+      const nextVersion = Number(row.content_version) + 1;
+      const upd = await client.query<{
+        content_version: number | string;
+        title: string | null;
+        content: string;
+        publish_metadata: unknown;
+      }>(
+        `UPDATE publish_log
+         SET title = $2, content = $3, publish_metadata = $4::jsonb,
+             content_version = $5, edited_by = $6, edited_at = now()
+         WHERE id = $1 AND status = 'pending_approval' AND content_version = $7
+         RETURNING content_version, title, content, publish_metadata`,
+        [
+          recordId,
+          newTitle !== undefined ? newTitle : row.title,
+          patch.content !== undefined ? patch.content : row.content,
+          metadata != null ? JSON.stringify(metadata) : null,
+          nextVersion,
+          editor,
+          expectedVersion,
+        ],
+      );
+      if (upd.rowCount === 0) {
+        // 理论不达（已持 FOR UPDATE 锁 + 前置版本校验）；兜底当版本冲突。
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'version_conflict' };
+      }
+      await client.query('COMMIT');
+      const out = upd.rows[0];
+      return {
+        ok: true,
+        contentVersion: Number(out.content_version),
+        title: out.title,
+        content: out.content,
+        metadata: parsePublishMetadata(out.publish_metadata),
+      };
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        /* 连接已断则忽略 */
+      }
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   /**

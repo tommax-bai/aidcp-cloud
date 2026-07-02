@@ -27,13 +27,21 @@ export interface DispatchStore {
   listPendingApprovalIds(): Promise<number[]>;
 }
 
+/** 授权信号读回（edit-note-draft-before-publish）：approved + 授权所载内容版本号（缺→0，向后兼容）。无信号→null。 */
+export interface ApprovalDecision {
+  approved: boolean;
+  contentVersion: number;
+}
+
 export interface PublishDispatcherDeps {
   store: DispatchStore;
   sequencer: Pick<CommandSequencer, 'executePublishSequence'>;
   /** 解析绑定该账号的在线边缘节点 edgeId；无在线节点返回 null（→ 诚实 failed）。 */
   resolveEdgeIdForAccount: (accountId: string) => string | null;
-  /** AC-PUB 复核：按 requestId 读授权信号，approved===true 才放行。 */
-  isApproved: (requestId: string) => Promise<boolean>;
+  /** AC-PUB 复核 + 版本闸：按 requestId 读授权信号（approved + contentVersion）；无信号返回 null（未授权）。 */
+  readApproval: (requestId: string) => Promise<ApprovalDecision | null>;
+  /** edit-note-draft-before-publish：作废（删除）一份过期授权签名，令草稿回可重审。 */
+  voidApprovalSignal: (requestId: string) => Promise<void>;
   /** 让位：结束该账号浏览会话（标记不可续场）。 */
   onPublishStart: (accountId: string) => void;
   /** 解除让位：经续场各闸起新浏览会话（无论成功/失败/异常，经唯一保证终止点）。 */
@@ -45,7 +53,8 @@ export class PublishDispatcher {
   private readonly store: DispatchStore;
   private readonly sequencer: Pick<CommandSequencer, 'executePublishSequence'>;
   private readonly resolveEdgeIdForAccount: (accountId: string) => string | null;
-  private readonly isApproved: (requestId: string) => Promise<boolean>;
+  private readonly readApproval: (requestId: string) => Promise<ApprovalDecision | null>;
+  private readonly voidApprovalSignal: (requestId: string) => Promise<void>;
   private readonly onPublishStart: (accountId: string) => void;
   private readonly onPublishEnd: (accountId: string) => void;
   private readonly logger: Pick<Console, 'log' | 'warn' | 'error'>;
@@ -59,7 +68,8 @@ export class PublishDispatcher {
     this.store = deps.store;
     this.sequencer = deps.sequencer;
     this.resolveEdgeIdForAccount = deps.resolveEdgeIdForAccount;
-    this.isApproved = deps.isApproved;
+    this.readApproval = deps.readApproval;
+    this.voidApprovalSignal = deps.voidApprovalSignal;
     this.onPublishStart = deps.onPublishStart;
     this.onPublishEnd = deps.onPublishEnd;
     this.logger = deps.logger ?? console;
@@ -114,8 +124,8 @@ export class PublishDispatcher {
       return;
     }
     for (const id of ids) {
-      const approved = await this.isApproved(`publish-${id}`).catch(() => false);
-      if (approved) {
+      const decision = await this.readApproval(`publish-${id}`).catch(() => null);
+      if (decision?.approved) {
         this.logger.log(`[PublishDispatcher] 兜底扫描发现已授权待审 recordId=${id} → 补触发下发`);
         await this.dispatch(id).catch((e) =>
           this.logger.warn(`[PublishDispatcher] 兜底下发 recordId=${id} 失败: ${e instanceof Error ? e.message : String(e)}`),
@@ -143,9 +153,20 @@ export class PublishDispatcher {
 
     // AC-PUB 复核：下发前必核授权信号，未授权绝不下发（纵深防御）。
     const requestId = `publish-${recordId}`;
-    const approved = await this.isApproved(requestId).catch(() => false);
-    if (!approved) {
+    const decision = await this.readApproval(requestId).catch(() => null);
+    if (!decision?.approved) {
       this.logger.warn(`[PublishDispatcher] recordId=${recordId} 授权信号未确认 approved，绝不下发（AC-PUB）`);
+      return;
+    }
+
+    // 版本闸（edit-note-draft-before-publish）：授权所载版本 ≠ 当前草稿版本 → 说明草稿在授权后又被编辑，
+    // 该授权是对旧字节的、绝不能发出未审内容。作废（删除）过期签名并留待审（自愈回可重审），绝不落 needs_review、绝不自毁。
+    // 这是「审=发」的结构性权威兜底：写时预检漏网（读版本与写签名之间又落编辑的 TOCTOU）在此收口。
+    if (decision.contentVersion !== draft.contentVersion) {
+      await this.voidApprovalSignal(requestId).catch(() => {});
+      this.logger.warn(
+        `[PublishDispatcher] recordId=${recordId} 授权版本 v${decision.contentVersion} ≠ 草稿 v${draft.contentVersion} → 作废过期签名、留待审（不下发未审内容）`,
+      );
       return;
     }
 

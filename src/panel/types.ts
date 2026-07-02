@@ -9,7 +9,7 @@
 import type { RiskController, RiskQuotaLevel, RiskAction, SessionInteractionBudget } from '../risk/index.js';
 import type { ConceptStore, BotChatStore } from '../cache/index.js';
 import type { CuratedContentType, CuratedPanelListResult, CuratedFacets } from '../cache/index.js';
-import type { PublishLogStore } from '../publish-agent/publish-log-store.js';
+import type { PublishLogStore, EditDraftPatch, EditDraftResult } from '../publish-agent/publish-log-store.js';
 import type { SetGroupLabelResult, SetGroupChatInfoResult } from '../account-store.js';
 import type { EventBus } from '../event-bus/index.js';
 import type { PanelUser } from './auth.js';
@@ -37,6 +37,23 @@ export interface PanelDeps {
     approved: boolean,
     payload: PublishApprovalPayload,
   ) => Promise<ApprovalWriteResult>;
+  /**
+   * 待审正文草稿就地编辑（change edit-note-draft-before-publish）。未注入则 `PUT /api/publish/:id/draft` 返回 503。
+   * edit：经拥有者对象（publish_log 单写）乐观 CAS——仅 pending_approval 可编、版本必须匹配、clampTitle 收口、
+   *   可见范围枚举校验、元数据深合并保 compliance 字节、content_version+1、写后回读真态；面板绝不 raw UPDATE、绝不乐观假成功。
+   * liveVersion：读某草稿当前 content_version（授权写时预检用）；不存在/出错 → null。
+   */
+  publishDraft?: {
+    edit(
+      recordId: number,
+      expectedVersion: number,
+      patch: EditDraftPatch,
+      editor: string,
+    ): Promise<EditDraftResult>;
+    liveVersion(recordId: number): Promise<number | null>;
+    /** 该草稿是否已有授权决定在途（签名文件已存在）；编辑端点据此 fast-fail already_decided。 */
+    hasDecision(recordId: number): Promise<boolean>;
+  };
   /** 账号命令（durable，与飞书 actions 共享 accountState 底层）；返回真实结果（resume 带恢复 edge 数）。 */
   commandActions: {
     pause(accountId: string): Promise<{ accountId: string; status: 'paused' }>;

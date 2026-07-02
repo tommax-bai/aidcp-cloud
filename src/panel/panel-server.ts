@@ -18,6 +18,7 @@ import { buildVersionPayload } from './version.js';
 import type { PanelDeps, PanelConfig, PanelHandle, SessionLimitPatchInput, ResumeConfigPatchInput } from './types.js';
 import { startPanelWs, type PanelWsHandle } from './panel-ws.js';
 import type { PublishApprovalPayload } from '../feishu/index.js';
+import type { EditDraftPatch } from '../publish-agent/publish-log-store.js';
 import type { RiskSignalKind, RiskQuotaLevel } from '../risk/index.js';
 import { RISK_ACTIONS } from '../risk/index.js';
 import { isKnownRole } from '../config/role-catalog.js';
@@ -261,18 +262,103 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
-      const { approved, payload } = (body ?? {}) as { approved?: unknown; payload?: PublishApprovalPayload };
+      const { approved, payload, contentVersion } = (body ?? {}) as {
+        approved?: unknown;
+        payload?: PublishApprovalPayload;
+        contentVersion?: unknown;
+      };
       if (typeof approved !== 'boolean') {
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
-      // payload 对 Web 审批为占位（edge 从 publish.request 已知内容）；first-writer-wins 的决定才是关键
-      const result = await deps.writeApprovalSignal(
-        requestId,
-        approved,
-        payload ?? { title: '', content: '', tags: [] },
-      );
+      // 人授权的内容版本快照（edit-note-draft-before-publish）：控制台抽屉渲染时快照、随授权带回。缺省→0（部署兼容）。
+      const authorizedVersion =
+        typeof contentVersion === 'number' && Number.isFinite(contentVersion) ? contentVersion : undefined;
+      // 写时版本预检：仅授权(approved) + publish-<n> + 带版本 + 有读版本能力时。活版本 ≠ 授权版本 → 拒、不写签名。
+      if (approved && authorizedVersion !== undefined && deps.publishDraft) {
+        const m = /^publish-(\d+)$/.exec(requestId);
+        if (m) {
+          const live = await deps.publishDraft.liveVersion(Number(m[1]));
+          if (live !== null && live !== authorizedVersion) {
+            sendJson(res, 409, { error: 'version_stale', currentVersion: live });
+            return;
+          }
+        }
+      }
+      // payload 对 Web 审批为占位（edge 从落库草稿读内容）；first-writer-wins 的决定才是关键。
+      // contentVersion 随 payload 落盘：下发闸据此守「审=发」（缺省→0，未编辑草稿 0===0 照发）。
+      const result = await deps.writeApprovalSignal(requestId, approved, {
+        ...(payload ?? { title: '', content: '', tags: [] }),
+        contentVersion: authorizedVersion ?? 0,
+      });
       sendJson(res, 200, result); // {written} 或 {alreadyDecided}，绝不 published
+      return;
+    }
+    // 待审正文草稿就地编辑（change edit-note-draft-before-publish）：经拥有者对象单写、乐观 CAS、诚实非乐观。
+    // 面板绝不 raw UPDATE；仅 pending_approval 可编、版本必须匹配、拒因→可区分 HTTP；成功回读真态（含自增后版本）。
+    if (method === 'PUT' && url.startsWith('/api/publish/') && url.endsWith('/draft')) {
+      if (!deps.publishDraft) {
+        sendJson(res, 503, { error: 'unavailable' });
+        return;
+      }
+      const recordId = Number(decodeURIComponent(url.slice('/api/publish/'.length, -'/draft'.length)));
+      if (!Number.isInteger(recordId) || recordId <= 0) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_record_id' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { expectedVersion, title, content, visibility, topics } = (body ?? {}) as {
+        expectedVersion?: unknown;
+        title?: unknown;
+        content?: unknown;
+        visibility?: unknown;
+        topics?: unknown;
+      };
+      if (typeof expectedVersion !== 'number' || !Number.isInteger(expectedVersion) || expectedVersion < 0) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_version' });
+        return;
+      }
+      // 仅出现的字段进补丁；字段类型/红线细校验（clampTitle、可见范围枚举、topics 数组）由 store 单写一处统一做。
+      const patch: EditDraftPatch = {};
+      if (title !== undefined) patch.title = title as string;
+      if (content !== undefined) patch.content = content as string;
+      if (visibility !== undefined) patch.visibility = visibility as string;
+      if (topics !== undefined) patch.topics = topics as string[];
+      if (Object.keys(patch).length === 0) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'empty_patch' });
+        return;
+      }
+      // 授权在途 fast-fail（签名已存在）→ already_decided（暂态；下发兜底作废过期签名后草稿回可编辑）。
+      if (await deps.publishDraft.hasDecision(recordId)) {
+        sendJson(res, 409, { error: 'already_decided' });
+        return;
+      }
+      const result = await deps.publishDraft.edit(recordId, expectedVersion, patch, verified.payload.sub);
+      if (!result.ok) {
+        const status =
+          result.reason === 'not_found'
+            ? 404
+            : result.reason === 'version_conflict' || result.reason === 'not_pending'
+              ? 409
+              : result.reason === 'missing_visibility'
+                ? 422
+                : 400; // invalid_title / invalid_field
+        sendJson(res, status, { error: result.reason });
+        return;
+      }
+      sendJson(res, 200, {
+        recordId,
+        contentVersion: result.contentVersion,
+        title: result.title,
+        content: result.content,
+        metadata: result.metadata,
+      });
       return;
     }
     if (method === 'POST' && url.startsWith('/api/accounts/') && url.endsWith('/command')) {
