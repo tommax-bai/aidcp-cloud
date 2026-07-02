@@ -12,8 +12,17 @@
 import { BANNED_PHRASES } from './prompts.js';
 import type { PostProcessResult } from './types.js';
 
-/** 感叹号检测：最多允许 1 个（全角/半角都算）。 */
+/** 感叹号检测正则（全角/半角都算）；上限由 exclamationMax 决定（默认 1）。 */
 const EXCLAMATION_RE = /[!！]/g;
+
+/**
+ * 感叹号上限按内容语气分档（change category-adaptive-images-and-judgment）。
+ * 活泼/叙事（casual/narrative）等生活·情感调性放宽到 3，专业/克制（professional/technical）保持 1。
+ * 生成侧 buildCreatorPrompt 与本检测口径为同一套——放宽后生活类正文不再被判「过量感叹号」推向 rewrite/人审。
+ */
+export function exclamationMaxForTone(tone: string | undefined): number {
+  return tone === 'casual' || tone === 'narrative' ? 3 : 1;
+}
 
 /** AI 味评分归一的分母（命中达到该数量即视为满分 1.0）。 */
 const AI_SCORE_CAP = 4;
@@ -29,13 +38,13 @@ export interface PostProcessorOptions {
  * 扫描正文，返回命中的禁用词/句式（含"过量感叹号"作为一个虚拟命中项）。
  * 纯函数，便于单测。
  */
-export function detectBannedPhrases(content: string): string[] {
+export function detectBannedPhrases(content: string, exclamationMax = 1): string[] {
   const hits: string[] = [];
   for (const p of BANNED_PHRASES) {
     if (content.includes(p)) hits.push(p);
   }
   const exclaims = content.match(EXCLAMATION_RE);
-  if (exclaims && exclaims.length > 1) {
+  if (exclaims && exclaims.length > exclamationMax) {
     hits.push('过量感叹号');
   }
   return hits;
@@ -62,8 +71,8 @@ export class PostProcessor {
    * @returns PostProcessResult；命中超阈且重写后仍超阈时 aiScore 较高，
    *          调用方据此决定 status='needs_review'。
    */
-  async process(content: string): Promise<PostProcessResult> {
-    const firstHits = detectBannedPhrases(content);
+  async process(content: string, exclamationMax = 1): Promise<PostProcessResult> {
+    const firstHits = detectBannedPhrases(content, exclamationMax);
 
     // 未达重写阈值：直接返回。
     if (firstHits.length < this.rewriteThreshold || !this.rewriteFn) {
@@ -89,7 +98,7 @@ export class PostProcessor {
       };
     }
 
-    const secondHits = detectBannedPhrases(rewritten);
+    const secondHits = detectBannedPhrases(rewritten, exclamationMax);
     return {
       content: rewritten,
       aiScore: aiScoreFromHits(secondHits.length),

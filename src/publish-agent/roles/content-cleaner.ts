@@ -3,10 +3,11 @@ import type { RoleConfig } from './base-role.js';
 import type { PipelineFields, CreatedContent, CleanedContent, PostProcessResult } from '../types.js';
 import type { PipelineContext } from '../pipeline-context.js';
 import { executeWithFallback } from '../retry-strategy.js';
+import { exclamationMaxForTone } from '../post-processor.js';
 
 /** 去 AI 味后处理器接口（从原 ContentAssembler 迁出，server 注入 PostProcessor）。 */
 export interface PostProcessorLike {
-  process(content: string): Promise<PostProcessResult>;
+  process(content: string, exclamationMax?: number): Promise<PostProcessResult>;
 }
 
 /**
@@ -47,8 +48,10 @@ export class ContentCleanerRole extends BasePublishRole<CreatedContent, CleanedC
   }
 
   protected async execute(input: CreatedContent, _context: PipelineContext<PipelineFields>): Promise<CleanedContent> {
+    // 感叹号检测上限按本帖语气分档（与生成侧 buildCreatorPrompt 同一套口径）：生活/情感类放宽、专业/克制类保持严。
+    const exclamationMax = exclamationMaxForTone(input.tone);
     const { result: pp, usedFallback } = await executeWithFallback(
-      () => this.postProcessor.process(input.content),
+      () => this.postProcessor.process(input.content, exclamationMax),
       {
         // 清洗失败降级：退回原文、按"无 AI 味检出"记 aiScore=0（如实标未重写），保证键必写不死锁。
         default: { content: input.content, aiScore: 0, rewritten: false, flaggedPhrases: [] } as PostProcessResult,
