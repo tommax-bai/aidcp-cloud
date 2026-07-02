@@ -7,7 +7,8 @@
  * 人设规则、禁用词和鼓励风格均内联定义于本文件。
  */
 
-import type { TriggerInput, ScoutDecision, CreatedContent, AssembledContent } from './types.js';
+import type { TriggerInput, ScoutDecision, CreatedContent, AssembledContent, ImageCategory, StyleProfile } from './types.js';
+import { IMAGE_CATEGORIES } from './types.js';
 
 /**
  * 禁用词/句式列表（negative list）。
@@ -354,13 +355,92 @@ export function buildTopicEvaluationPrompt(candidates: string[], title: string, 
 // ─── 配图链路（change publish-multi-image）：选题 ImageSetPlanner → 指令 ImagePromptComposer ───
 
 /**
- * 固定风格基底（模板常量，MUST NOT 由 LLM 产）。
- * 每张万相 prompt 共享此基底 → 图集风格统一；LLM 只填「画什么主体」，不碰风格/负向约束。
- * 红线：无文字、无真人面部（规避平台肖像/水印风险 + 文生图产文字易糊）。
+ * 品类风格档（change category-adaptive-images-and-judgment）。
+ * 取代旧全局常量 IMAGE_STYLE_BASE：不再对所有帖施加同一段风格，而是按内容品类选一档、
+ * 帖内逐字复用（守帧内一致）、帖间因品类而异。MUST NOT 由 LLM 产（模板常量）。
+ * 红线延续：内页无文字、封面留白后期叠字、无写实真人正脸、无水印。
  */
-export const IMAGE_STYLE_BASE =
-  'minimalist flat vector illustration, tech blue and slate palette, clean geometric shapes, ' +
-  'soft gradient background, high detail, no text, no watermark, no human faces, no real people';
+const COVER_SUFFIX =
+  'large clean negative space at the top for a title overlay, no on-image text (title added in post)';
+const buildProfile = (styleBase: string): StyleProfile => ({
+  styleBase,
+  coverStyleBase: `${styleBase}, ${COVER_SUFFIX}`,
+});
+
+export const STYLE_PROFILES: Record<ImageCategory, StyleProfile> = {
+  knowledge: buildProfile(
+    'clean editorial flat-lay, overhead top-down, soft diffused window light, warm oat and terracotta palette, generous negative space, subtle paper grain, minimal styling, vertical 3:4, no text, no watermark, no logo',
+  ),
+  beauty: buildProfile(
+    'beauty editorial photography, extreme close-up, soft diffused window light, shallow depth of field, dewy glossy texture, warm rosy peach palette, high-key clean background, faceless product or hands only, no realistic human face, vertical 3:4, no text, no watermark',
+  ),
+  food: buildProfile(
+    'appetizing food photography, 45-degree angle, warm natural window light, shallow depth of field, glossy fresh texture, warm amber and red palette, cozy dining ambiance, subtle film grain, faceless, vertical 3:4, no text, no watermark',
+  ),
+  fashion: buildProfile(
+    'full-body street-style fashion photography, natural daylight, 35mm film aesthetic, muted low-saturation film grade, higher contrast, candid mid-stride, faceless cropped below the eyes, no realistic recognizable face, vertical 3:4, no text, no watermark',
+  ),
+  travel: buildProfile(
+    'cinematic travel landscape photography, wide establishing shot, golden hour backlight, single dominant hue, natural haze, atmospheric depth, subtle film grade, tiny faceless figure for scale, vertical 3:4, no text, no watermark',
+  ),
+  home: buildProfile(
+    'home lifestyle photography, soft natural window light, minimal high-end styling, cozy lived-in scene, shallow depth of field, warm beige and muted morandi palette, subtle wood and linen texture, no people, vertical 3:4, no text, no watermark, no logo',
+  ),
+  emotion: buildProfile(
+    'warm healing atmospheric photography, soft window backlight, airy negative space, dreamy soft focus, muted blush and beige pastel palette, natural film grain, no people, vertical 3:4, no text, no watermark',
+  ),
+  career: buildProfile(
+    'clean modern editorial workspace flat-lay, overhead top-down, soft daylight, muted slate and oat professional palette, generous negative space, subtle paper texture, faceless hands only, vertical 3:4, no text, no watermark',
+  ),
+  tech: buildProfile(
+    'clean isometric diagram, minimalist flat vector illustration, tech blue and slate palette, clean geometric shapes, soft gradient background, labeled nodes and flow arrows, crisp lines, no people, vertical 3:4, no watermark',
+  ),
+  general: buildProfile(
+    'authentic lifestyle photography, natural soft daylight, shallow depth of field, warm neutral palette, candid real-life scene, subtle film grain, no realistic recognizable face, vertical 3:4, no text, no watermark',
+  ),
+};
+
+/** 按品类取风格档；未知/缺失回落安全兜底档 general（绝不 brick）。 */
+export function resolveStyleProfile(category: string | null | undefined): StyleProfile {
+  const key =
+    category && (IMAGE_CATEGORIES as readonly string[]).includes(category)
+      ? (category as ImageCategory)
+      : 'general';
+  return STYLE_PROFILES[key];
+}
+
+/**
+ * 品类判定 prompt（发布侧独立分类角色用）。读标题 + 正文，从固定品类枚举选一个 category。
+ * 单一职责（不干别的）→ 分类更准；flash 模型即可。输出 JSON {category}。
+ */
+export function buildCategoryClassifierPrompt(title: string, body: string): string {
+  const preview = body.slice(0, 500);
+  return [
+    '你是小红书内容品类分类器。读下面的标题与正文，判断它最贴合哪一个内容品类，只输出该品类的英文 key。',
+    '',
+    '【可选品类（只能选其一，输出 key）】',
+    '- knowledge：干货/知识/教程/科普/清单',
+    '- beauty：美妆/护肤/试色/妆容',
+    '- food：美食/探店/食谱/饮品',
+    '- fashion：穿搭/OOTD/单品/时尚',
+    '- travel：旅行/攻略/风景/目的地',
+    '- home：家居/好物/收纳/家装',
+    '- emotion：情感/治愈/读书/成长感悟/心情',
+    '- career：职场/工作/效率/成长干货',
+    '- tech：技术/编程/AI/数据/示意图类',
+    '- general：都不明显贴合时的兜底（通用生活方式）',
+    '',
+    '【标题】',
+    title,
+    '',
+    '【正文前 500 字】',
+    preview,
+    '',
+    '【输出要求】',
+    '严格只输出一个 JSON 对象，不要任何额外文字或代码块围栏。格式：',
+    '{"category": "food"}',
+  ].join('\n');
+}
 
 /** 配图张数上限（硬夹 ≤9，小红书图文帖硬约束；env AIDCP_PUBLISH_MAX_IMAGES 只在角色侧再夹一次）。 */
 export const IMAGE_COUNT_HARD_MAX = 9;
@@ -407,20 +487,19 @@ export function buildImageSetPlanPrompt(createdContent: CreatedContent, maxImage
  */
 export function buildImagePromptComposerPrompt(theme: { subject: string; intent?: string }, styleHint: string | null): string {
   return [
-    '你是文生图 prompt 工程师。把下面这张配图的中文主题，翻成一条给文生图模型的英文主体描述（只描述"画什么"，不要写风格、不要写画质词、不要写 no text 之类负向约束——这些系统会统一补）。',
+    '你是文生图 prompt 工程师。把下面这张配图的中文主题，写成一句【中文】画面主体描述——只描述"画什么"（主体 + 一个正在发生的动作/使用场景 + 环境），不要写风格、不要写画质词、不要写 no text 之类负向约束（这些系统会按内容品类统一补）。保留中文、不要翻成英文（图像模型原生支持中文、更贴中文语境）。',
     '',
     '【这张图的主题】',
     `主体：${theme.subject}`,
     ...(theme.intent ? [`要点：${theme.intent}`] : []),
-    ...(styleHint ? [`整体风格倾向（参考）：${styleHint}`] : []),
+    ...(styleHint ? [`整体风格倾向（参考，可忽略）：${styleHint}`] : []),
     '',
     '【要求】',
-    '- imagePrompt: 一句英文，描述画面主体与构图，与主题强相关；不含任何文字/水印/真人。',
-    '- imageStyle: 从 photography / illustration / dataviz / isometric 中选最贴合的一个。',
+    '- imagePrompt: 一句中文，描述画面主体、动作/场景与构图，与主题强相关；不含任何文字/水印/真人正脸。',
     '',
     '【输出要求】',
     '严格只输出一个 JSON 对象，不要任何额外文字或代码块围栏。格式如下：',
-    '{"imagePrompt": "isometric diagram of a distributed system with labeled service nodes and data flow arrows", "imageStyle": "isometric"}',
+    '{"imagePrompt": "一碗热气腾腾的番茄牛腩面摆在原木餐桌上，斜上方45度俯拍，撒着葱花"}',
   ].join('\n');
 }
 

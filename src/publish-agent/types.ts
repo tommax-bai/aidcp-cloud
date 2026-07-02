@@ -223,6 +223,37 @@ export interface ImagePlan {
   plannedAt: number;
 }
 
+// ─── 配图品类（change category-adaptive-images-and-judgment）：CategoryClassifier 判、配图风格档 + 质量评审消费 ───
+
+/** 配图内容品类枚举（含安全兜底档 general）。风格档 STYLE_PROFILES 按此键控；分类器只能产出其一。 */
+export const IMAGE_CATEGORIES = [
+  'knowledge', // 干货/知识
+  'beauty',    // 美妆/护肤
+  'food',      // 美食/探店
+  'fashion',   // 穿搭/OOTD
+  'travel',    // 旅行
+  'home',      // 家居/好物
+  'emotion',   // 情感/治愈/读书
+  'career',    // 职场/成长
+  'tech',      // 技术/示意图
+  'general',   // 兜底：通用生活方式（写实摄影）
+] as const;
+export type ImageCategory = (typeof IMAGE_CATEGORIES)[number];
+
+/** 一档配图风格基底（模板常量派生，MUST NOT 由 LLM 产）：内页与封面两份，逐字复用于本帖以守帧内一致。 */
+export interface StyleProfile {
+  /** 图 1..N 内页风格基底。 */
+  styleBase: string;
+  /** 图 0 封面风格基底（同风格族 + 顶部留白供后期叠标题）。 */
+  coverStyleBase: string;
+}
+
+/** CategoryClassifier 输出：本帖内容品类（一帖判一次；配图选题与质量评审复用同一值）。 */
+export interface PostCategory {
+  category: ImageCategory;
+  classifiedAt: number;
+}
+
 /** ContentCleaner 输出：去 AI 味后处理结果（PostProcessResult + cleanedAt）。 */
 export interface CleanedContent {
   content: string;
@@ -392,6 +423,8 @@ export interface PipelineFields {
   createdContent: CreatedContent;
   // 阶段2 生产段细拆中间键
   contentType: ContentType;
+  // 配图品类（change category-adaptive-images-and-judgment）：CategoryClassifier 读正文判一次，配图选题 + 质量评审复用。
+  postCategory: PostCategory;
   // 配图链路三角色（change publish-multi-image）：选题 → 指令 → 生成。
   imageSetPlan: ImageSetPlan;
   imagePlan: ImagePlan;

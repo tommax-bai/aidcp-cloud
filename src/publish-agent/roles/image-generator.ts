@@ -74,10 +74,11 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
       return this.emptyDirective(input.fallbackStrategy);
     }
 
-    const style = input.imageStyle ?? undefined;
     // 并行出图（有界并发）：每张 Promise.race(generate, 每图超时)，settle 后按规划顺序收成功 URL。
+    // 去第二风格源（change category-adaptive-images-and-judgment）：不再把 imageStyle 枚举传给 provider——
+    // 风格已并入品类风格档写进 prompt；provider 侧再拼「，风格：<enum>」会与风格档冲突、劣化 Seedream。
     const results = await mapWithConcurrency(input.imagePrompts, this.concurrency, (prompt) =>
-      this.generateOne(prompt, style),
+      this.generateOne(prompt),
     );
     const imageUrls = results.filter((url): url is string => !!url);
 
@@ -102,11 +103,11 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
   }
 
   /** 单张：Promise.race(generate, 每图超时)。超时/异常/无 URL → 诚实回 null（该张不进数组、不伪造）。 */
-  private async generateOne(prompt: string, style: string | undefined): Promise<string | null> {
+  private async generateOne(prompt: string): Promise<string | null> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const res = await Promise.race<ImageResult>([
-        this.imageProvider.generate(prompt, style),
+        this.imageProvider.generate(prompt),
         new Promise<ImageResult>((resolve) => {
           timer = setTimeout(() => resolve({ url: null, error: `per-image timeout ${this.perImageTimeoutMs}ms` }), this.perImageTimeoutMs);
         }),

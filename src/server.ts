@@ -78,6 +78,7 @@ import {
   ContentScoutRole,
   ContentTypeSelectorRole,
   ContentCreatorRole,
+  CategoryClassifierRole,
   ImageSetPlannerRole,
   ImagePromptComposerRole,
   ImageGeneratorRole,
@@ -1210,6 +1211,8 @@ async function main(): Promise<void> {
   publishOrchestrator.registerRole(new ContentCreatorRole({ llmClient: roleLlm('publish:ContentCreator') }));
   // 配图三角色（change publish-multi-image）：选题（ImageSetPlanner）→ 指令（ImagePromptComposer）→ 执行（ImageGenerator）→ 封面（CoverSelector）
   // 选题读正文定张数+主题（配强模型）；指令把主题翻成万相 prompt（配便宜模型）；执行并行出多图；封面恒取首张。
+  // 品类判定（change category-adaptive-images-and-judgment）：读正文判品类，供配图选题风格档 + 质量评审复用；flash 可后台配。
+  publishOrchestrator.registerRole(new CategoryClassifierRole({ llmClient: roleLlm('publish:CategoryClassifier') }));
   publishOrchestrator.registerRole(new ImageSetPlannerRole({ llmClient: roleLlm('publish:ImageSetPlanner') }));
   publishOrchestrator.registerRole(new ImagePromptComposerRole({ llmClient: roleLlm('publish:ImagePromptComposer') }));
   publishOrchestrator.registerRole(new ImageGeneratorRole({

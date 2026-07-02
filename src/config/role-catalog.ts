@@ -120,6 +120,7 @@ export const ROLE_CATALOG: RoleCatalogItem[] = [
   { roleId: 'publish:ContentScout', displayName: '发布选题侦察', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: false },
   { roleId: 'publish:ContentCreator', displayName: '笔记正文创作', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
   // 配图分支（createdContent 后分叉）：选题 → 指令 → 生成
+  { roleId: 'publish:CategoryClassifier', displayName: '配图品类判定', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: false },
   { roleId: 'publish:ImageSetPlanner', displayName: '配图选题（张数+主题）', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
   { roleId: 'publish:ImagePromptComposer', displayName: '配图指令（主题→万相prompt）', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
   // 质量分支（与配图分支并行，数据先就绪）：先去 AI 味清洗（ContentCleaner 经注入 PostProcessor）→ 再质量评分
