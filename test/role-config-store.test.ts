@@ -4,13 +4,13 @@ import pg from 'pg';
 import { RoleConfigStore } from '../src/config/role-config-store.js';
 
 /** 内存假 pool：路由 role_config 的建表 / SELECT / upsert(RETURNING)；可注入写失败。provider 随 0018 加列。 */
-function fakePool(seed: Record<string, { model: string | null; provider?: string | null; temperature: number | null }> = {}) {
+function fakePool(seed: Record<string, { model: string | null; provider?: string | null; temperature: number | null; thinkingMode?: string | null }> = {}) {
   const rows = new Map<
     string,
-    { role_id: string; model: string | null; provider: string | null; temperature: number | null; updated_at: string; updated_by: string }
+    { role_id: string; model: string | null; provider: string | null; temperature: number | null; thinking_mode: string | null; updated_at: string; updated_by: string }
   >();
   for (const [roleId, v] of Object.entries(seed)) {
-    rows.set(roleId, { role_id: roleId, model: v.model, provider: v.provider ?? null, temperature: v.temperature, updated_at: '2026-06-21T00:00:00.000Z', updated_by: 'seed' });
+    rows.set(roleId, { role_id: roleId, model: v.model, provider: v.provider ?? null, temperature: v.temperature, thinking_mode: v.thinkingMode ?? null, updated_at: '2026-06-21T00:00:00.000Z', updated_by: 'seed' });
   }
   let failWrite = false;
   const pool = {
@@ -19,8 +19,9 @@ function fakePool(seed: Record<string, { model: string | null; provider?: string
       if (sql.trimStart().startsWith('SELECT')) return { rows: [...rows.values()] };
       if (sql.includes('INSERT INTO role_config')) {
         if (failWrite) throw new Error('db down');
-        const [roleId, model, provider, temperature, updatedBy] = params as [string, string | null, string | null, number | null, string];
-        const row = { role_id: roleId, model, provider, temperature, updated_at: '2026-06-21T01:00:00.000Z', updated_by: updatedBy };
+        // change role-thinking-mode-config：thinking_mode 排在 temperature 之后、updated_by 之前（6 参数）。
+        const [roleId, model, provider, temperature, thinkingMode, updatedBy] = params as [string, string | null, string | null, number | null, string | null, string];
+        const row = { role_id: roleId, model, provider, temperature, thinking_mode: thinkingMode, updated_at: '2026-06-21T01:00:00.000Z', updated_by: updatedBy };
         rows.set(roleId, row);
         return { rows: [row] };
       }
@@ -34,7 +35,7 @@ test('缺行 → getForRole 回落空（model/temperature 均 null）', async ()
   const { pool } = fakePool();
   const store = new RoleConfigStore({ pool });
   await store.init();
-  assert.deepEqual(store.getForRole('browse:content_evaluator'), { model: null, provider: null, temperature: null });
+  assert.deepEqual(store.getForRole('browse:content_evaluator'), { model: null, provider: null, temperature: null, thinkingMode: null });
 });
 
 test('set 后 getForRole 即时热加载（无需重启）', async () => {
@@ -46,7 +47,30 @@ test('set 后 getForRole 即时热加载（无需重启）', async () => {
   assert.equal(row.provider, 'volcengine');
   assert.equal(row.temperature, 0.7);
   assert.equal(row.updatedBy, 'alice');
-  assert.deepEqual(store.getForRole('publish:ContentCreator'), { model: 'qwen-max', provider: 'volcengine', temperature: 0.7 });
+  assert.deepEqual(store.getForRole('publish:ContentCreator'), { model: 'qwen-max', provider: 'volcengine', temperature: 0.7, thinkingMode: null });
+});
+
+test('思考模式独立读写 + 不动模型行（change role-thinking-mode-config）', async () => {
+  const { pool } = fakePool();
+  const store = new RoleConfigStore({ pool });
+  await store.init();
+  // 先设模型（含 provider/温度）
+  await store.set('publish:ContentCreator', { model: 'qwen-max', provider: 'dashscope', temperature: 0.7 }, 'a');
+  // 只设思考模式：模型行不受影响
+  await store.set('publish:ContentCreator', { thinkingMode: 'on' }, 'b');
+  let v = store.getForRole('publish:ContentCreator');
+  assert.equal(v.thinkingMode, 'on');
+  assert.equal(v.model, 'qwen-max'); // 未被思考模式写入清掉
+  assert.equal(v.temperature, 0.7);
+  // 'default'/脏串清除思考模式（回落），且不动模型
+  await store.set('publish:ContentCreator', { thinkingMode: 'default' }, 'c');
+  v = store.getForRole('publish:ContentCreator');
+  assert.equal(v.thinkingMode, null);
+  assert.equal(v.model, 'qwen-max');
+  // 只改模型：思考模式保持（此处已为 null）
+  await store.set('publish:ContentCreator', { thinkingMode: 'off' }, 'd');
+  await store.set('publish:ContentCreator', { model: 'qwen-plus' }, 'e');
+  assert.equal(store.getForRole('publish:ContentCreator').thinkingMode, 'off');
 });
 
 test('越界温度归一为 null（不落非法值）', async () => {

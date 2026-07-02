@@ -17,6 +17,7 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { normalizeThinkingMode, type ThinkingMode } from './role-catalog.js';
 
 const { Pool } = pg;
 
@@ -26,6 +27,11 @@ export interface CategoryConfigOverride {
   model: string | null;
   /** 厂商覆盖（change model-config-volcengine-provider）；跟 model 同行（model 为空时不贡献 provider）。 */
   provider: string | null;
+  /**
+   * 分类默认思考模式（change role-thinking-mode-config）；'off'/'on' 覆盖，null = 未覆盖（回落 default）。
+   * 与 model/provider **相互独立**：写分类思考模式不动分类模型行。
+   */
+  thinkingMode: ThinkingMode | null;
 }
 
 /** 写回真态（含审计字段，供面板非乐观回显）。 */
@@ -52,6 +58,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_category_config_account
 /** 自愈加列（change model-config-volcengine-provider）：见 ModelConfigStore 同名注释。与 migrations/0018 同源。 */
 export const CATEGORY_CONFIG_ALTER_SQL = `
 ALTER TABLE category_config ADD COLUMN IF NOT EXISTS provider TEXT;
+ALTER TABLE category_config ADD COLUMN IF NOT EXISTS thinking_mode TEXT;
 `;
 
 export interface CategoryConfigStoreOptions {
@@ -67,6 +74,7 @@ interface CategoryConfigDbRow {
   category_id: string;
   model: string | null;
   provider: string | null;
+  thinking_mode: string | null;
   updated_at: Date | string | null;
   updated_by: string | null;
 }
@@ -97,7 +105,7 @@ export class CategoryConfigStore {
 
   private async reload(): Promise<void> {
     const { rows } = await this.pool.query<CategoryConfigDbRow>(
-      `SELECT category_id, model, provider, updated_at, updated_by
+      `SELECT category_id, model, provider, thinking_mode, updated_at, updated_by
          FROM category_config
         WHERE account_id IS NULL`,
     );
@@ -107,6 +115,7 @@ export class CategoryConfigStore {
         categoryId: r.category_id,
         model: r.model?.trim() ? r.model.trim() : null,
         provider: r.provider?.trim() ? r.provider.trim() : null,
+        thinkingMode: normalizeThinkingMode(r.thinking_mode),
         updatedAt: r.updated_at ? new Date(r.updated_at).toISOString() : null,
         updatedBy: r.updated_by ?? null,
       });
@@ -120,8 +129,8 @@ export class CategoryConfigStore {
    */
   getForCategory(categoryId: string): CategoryConfigOverride {
     const v = this.cache.get(categoryId);
-    if (!v) return { model: null, provider: null };
-    return { model: v.model, provider: v.provider };
+    if (!v) return { model: null, provider: null, thinkingMode: null };
+    return { model: v.model, provider: v.provider, thinkingMode: v.thinkingMode };
   }
 
   /** 全部全局默认行（面板列表回显当前生效值 + 审计用）。 */
@@ -136,28 +145,41 @@ export class CategoryConfigStore {
    */
   async set(
     categoryId: string,
-    model: string | null,
-    provider: string | null,
+    patch: {
+      model?: string | null;
+      provider?: string | null;
+      /** 分类思考模式（change role-thinking-mode-config）：'off'/'on' 覆盖，'default'/null/'' 清除；undefined = 不动。独立于 model 行。 */
+      thinkingMode?: string | null;
+    },
     updatedBy: string,
   ): Promise<CategoryConfigRow> {
-    const nextModel = model?.trim() ? model.trim() : null;
-    // provider 跟 model 同行（change model-config-volcengine-provider）：清 model → 清 provider；
-    // 写 model → provider 跟着写（缺省回落 dashscope，未知由解析器再归一）。
-    const nextProvider = nextModel === null ? null : provider?.trim() || 'dashscope';
+    const prev = this.cache.get(categoryId) ?? { model: null, provider: null, thinkingMode: null };
+    const nextModel =
+      patch.model === undefined ? prev.model : patch.model?.trim() ? patch.model.trim() : null;
+    // provider 跟 model 同行（change model-config-volcengine-provider）：不动 model → 不动 provider；
+    // 清 model → 清 provider；写 model → provider 跟着写（缺省回落 dashscope，未知由解析器再归一）。
+    let nextProvider: string | null;
+    if (patch.model === undefined) nextProvider = prev.provider;
+    else if (nextModel === null) nextProvider = null;
+    else nextProvider = patch.provider?.trim() || 'dashscope';
+    // 思考模式独立于 model 行（change role-thinking-mode-config）：不传 → 保持；传 'default'/空/脏串 → null（清除）。
+    const nextThinking =
+      patch.thinkingMode === undefined ? prev.thinkingMode : normalizeThinkingMode(patch.thinkingMode);
     const { rows } = await this.pool.query<CategoryConfigDbRow>(
-      `INSERT INTO category_config (category_id, account_id, model, provider, updated_at, updated_by)
-       VALUES ($1, NULL, $2, $3, now(), $4)
+      `INSERT INTO category_config (category_id, account_id, model, provider, thinking_mode, updated_at, updated_by)
+       VALUES ($1, NULL, $2, $3, $4, now(), $5)
        ON CONFLICT (category_id) WHERE account_id IS NULL
-       DO UPDATE SET model = EXCLUDED.model, provider = EXCLUDED.provider,
+       DO UPDATE SET model = EXCLUDED.model, provider = EXCLUDED.provider, thinking_mode = EXCLUDED.thinking_mode,
                      updated_at = now(), updated_by = EXCLUDED.updated_by
-       RETURNING category_id, model, provider, updated_at, updated_by`,
-      [categoryId, nextModel, nextProvider, updatedBy],
+       RETURNING category_id, model, provider, thinking_mode, updated_at, updated_by`,
+      [categoryId, nextModel, nextProvider, nextThinking, updatedBy],
     );
     const row = rows[0];
     const result: CategoryConfigRow = {
       categoryId,
       model: nextModel,
       provider: nextProvider,
+      thinkingMode: nextThinking,
       updatedAt: row?.updated_at ? new Date(row.updated_at).toISOString() : null,
       updatedBy: row?.updated_by ?? updatedBy,
     };

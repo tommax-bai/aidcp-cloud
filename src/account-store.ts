@@ -51,6 +51,14 @@ export interface AccountRecord {
   pausedAt: number | null;
 }
 
+/**
+ * setGroupLabel 结果（change editable-account-group-label）：诚实可区分——
+ * 成功回读真态；退役保留账号 / 无对应行以 ok:false + 具名 reason 返回，绝不静默成功。
+ */
+export type SetGroupLabelResult =
+  | { ok: true; groupLabel: string | null }
+  | { ok: false; reason: 'account_not_found' | 'retired_account' };
+
 /** AccountStateManager 依赖的最小存储接口（便于内存打桩、不依赖真 PG）。 */
 export interface AccountStore {
   init?(): Promise<void>;
@@ -74,6 +82,12 @@ export interface AccountStore {
    * （否则在途 page.cards 会驱动 open_note 插进采集绕路，R3-MAJOR）。缺省 → 调用方按 null 处理。
    */
   getNickname?(accountId: string): string | null;
+  /**
+   * 写账号分组标签（change editable-account-group-label）：单写、UPDATE-only（**不 seed 造行**）。
+   * trim 后空（空串 / 纯空白 / null）→ 写 NULL（清空分组）；退役保留账号与无对应行以可区分结果返回；
+   * 写后经 RETURNING 回读真态。面板层只经此方法写，绝不 raw UPDATE。
+   */
+  setGroupLabel?(accountId: string, groupLabel: string | null): Promise<SetGroupLabelResult>;
   close?(): Promise<void>;
 }
 
@@ -192,6 +206,25 @@ export class PgAccountStore implements AccountStore {
    */
   getNickname(accountId: string): string | null {
     return this.nicknameCache.get(accountId) ?? null;
+  }
+
+  /**
+   * 写账号分组标签（change editable-account-group-label）：单写、UPDATE-only + RETURNING。
+   * - 退役保留账号 `default` 直接拒（不落库、不静默成功）；
+   * - trim 后空 → 写 NULL（清空分组），MUST NOT 存纯空白脏值；防御性长度上限（防异常拼接污染）；
+   * - 无对应行（0 rows）→ 返回 account_not_found，**绝不 seed 造幽灵行**（区别于 setNickname 的握手竞态 upsert）；
+   * - 返回 RETURNING 回读的真值（写后真态，绝不乐观 ok）。
+   */
+  async setGroupLabel(accountId: string, groupLabel: string | null): Promise<SetGroupLabelResult> {
+    if (accountId === RETIRED_ACCOUNT_ID) return { ok: false, reason: 'retired_account' };
+    const clean = (groupLabel ?? '').trim();
+    const value = clean === '' ? null : clean.length > 64 ? clean.slice(0, 64) : clean;
+    const { rows } = await this.pool.query<{ group_label: string | null }>(
+      `UPDATE accounts SET group_label = $2 WHERE account_id = $1 RETURNING group_label`,
+      [accountId, value],
+    );
+    if (rows.length === 0) return { ok: false, reason: 'account_not_found' };
+    return { ok: true, groupLabel: rows[0].group_label };
   }
 
   async close(): Promise<void> {

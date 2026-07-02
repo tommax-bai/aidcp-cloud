@@ -13,6 +13,7 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { normalizeThinkingMode, type ThinkingMode } from './role-catalog.js';
 
 const { Pool } = pg;
 
@@ -27,6 +28,11 @@ export interface RoleConfigOverride {
   provider: string | null;
   /** 温度覆盖；null = 回落构造默认。 */
   temperature: number | null;
+  /**
+   * 思考模式覆盖（change role-thinking-mode-config）；'off'/'on' = 显式覆盖，null = 未覆盖（回落分类→default）。
+   * 与 model/provider/temperature **相互独立**：写思考模式不动模型行，反之亦然。
+   */
+  thinkingMode: ThinkingMode | null;
 }
 
 /** 写回真态（含审计字段，供面板非乐观回显）。 */
@@ -49,6 +55,7 @@ CREATE TABLE IF NOT EXISTS role_config (
 /** 自愈加列（change model-config-volcengine-provider）：见 ModelConfigStore 同名注释。与 migrations/0018 同源。 */
 export const ROLE_CONFIG_ALTER_SQL = `
 ALTER TABLE role_config ADD COLUMN IF NOT EXISTS provider TEXT;
+ALTER TABLE role_config ADD COLUMN IF NOT EXISTS thinking_mode TEXT;
 `;
 
 export interface RoleConfigStoreOptions {
@@ -65,6 +72,7 @@ interface RoleConfigDbRow {
   model: string | null;
   provider: string | null;
   temperature: number | string | null;
+  thinking_mode: string | null;
   updated_at: Date | string | null;
   updated_by: string | null;
 }
@@ -94,7 +102,7 @@ export class RoleConfigStore {
 
   private async reload(): Promise<void> {
     const { rows } = await this.pool.query<RoleConfigDbRow>(
-      `SELECT role_id, model, provider, temperature, updated_at, updated_by FROM role_config`,
+      `SELECT role_id, model, provider, temperature, thinking_mode, updated_at, updated_by FROM role_config`,
     );
     const next = new Map<string, RoleConfigRow>();
     for (const r of rows) {
@@ -103,6 +111,7 @@ export class RoleConfigStore {
         model: r.model?.trim() ? r.model.trim() : null,
         provider: r.provider?.trim() ? r.provider.trim() : null,
         temperature: normalizeTemp(r.temperature),
+        thinkingMode: normalizeThinkingMode(r.thinking_mode),
         updatedAt: r.updated_at ? new Date(r.updated_at).toISOString() : null,
         updatedBy: r.updated_by ?? null,
       });
@@ -116,8 +125,13 @@ export class RoleConfigStore {
    */
   getForRole(roleId: string): RoleConfigOverride {
     const v = this.cache.get(roleId);
-    if (!v) return { model: null, provider: null, temperature: null };
-    return { model: v.model, provider: v.provider, temperature: v.temperature };
+    if (!v) return { model: null, provider: null, temperature: null, thinkingMode: null };
+    return {
+      model: v.model,
+      provider: v.provider,
+      temperature: v.temperature,
+      thinkingMode: v.thinkingMode,
+    };
   }
 
   /** 全部行（面板列表回显当前生效值 + 审计用）。 */
@@ -131,10 +145,21 @@ export class RoleConfigStore {
    */
   async set(
     roleId: string,
-    patch: { model?: string | null; provider?: string | null; temperature?: number | null },
+    patch: {
+      model?: string | null;
+      provider?: string | null;
+      temperature?: number | null;
+      /** 思考模式（change role-thinking-mode-config）：'off'/'on' 覆盖，'default'/null/'' 清除（回落）；undefined = 不动。独立于 model 行。 */
+      thinkingMode?: string | null;
+    },
     updatedBy: string,
   ): Promise<RoleConfigRow> {
-    const prev = this.cache.get(roleId) ?? { model: null, provider: null, temperature: null };
+    const prev = this.cache.get(roleId) ?? {
+      model: null,
+      provider: null,
+      temperature: null,
+      thinkingMode: null,
+    };
     const nextModel =
       patch.model === undefined ? prev.model : patch.model?.trim() ? patch.model.trim() : null;
     // provider 跟 model 同行（change model-config-volcengine-provider）：不动 model → 不动 provider；
@@ -145,15 +170,19 @@ export class RoleConfigStore {
     else nextProvider = patch.provider?.trim() || 'dashscope';
     const nextTemp =
       patch.temperature === undefined ? prev.temperature : normalizeTemp(patch.temperature);
+    // 思考模式独立于 model 行（change role-thinking-mode-config）：不传 → 保持；传 'default'/空/脏串 → null（清除）。
+    const nextThinking =
+      patch.thinkingMode === undefined ? prev.thinkingMode : normalizeThinkingMode(patch.thinkingMode);
 
     const { rows } = await this.pool.query<RoleConfigDbRow>(
-      `INSERT INTO role_config (role_id, model, provider, temperature, updated_at, updated_by)
-       VALUES ($1, $2, $3, $4, now(), $5)
+      `INSERT INTO role_config (role_id, model, provider, temperature, thinking_mode, updated_at, updated_by)
+       VALUES ($1, $2, $3, $4, $5, now(), $6)
        ON CONFLICT (role_id)
        DO UPDATE SET model = EXCLUDED.model, provider = EXCLUDED.provider, temperature = EXCLUDED.temperature,
+                     thinking_mode = EXCLUDED.thinking_mode,
                      updated_at = now(), updated_by = EXCLUDED.updated_by
-       RETURNING role_id, model, provider, temperature, updated_at, updated_by`,
-      [roleId, nextModel, nextProvider, nextTemp, updatedBy],
+       RETURNING role_id, model, provider, temperature, thinking_mode, updated_at, updated_by`,
+      [roleId, nextModel, nextProvider, nextTemp, nextThinking, updatedBy],
     );
     const row = rows[0];
     const result: RoleConfigRow = {
@@ -161,6 +190,7 @@ export class RoleConfigStore {
       model: nextModel,
       provider: nextProvider,
       temperature: nextTemp,
+      thinkingMode: nextThinking,
       updatedAt: row?.updated_at ? new Date(row.updated_at).toISOString() : null,
       updatedBy: row?.updated_by ?? updatedBy,
     };

@@ -16,6 +16,8 @@
  * 调用方按需传：`role` 触发按角色解析模型/温度；`model`/`temperature`/`timeoutMs` 为显式覆盖（探活与测试用）。
  * **不传 opts 时行为与改造前逐字一致**（零回归不变量）。
  */
+import { type ThinkingMode } from '../config/role-catalog.js';
+
 export interface LlmCallOpts {
   /** 角色标识（如 `browse:content_evaluator` / `publish:ContentCreator`）；交给注入的解析器按角色取模型/温度。 */
   role?: string;
@@ -37,6 +39,11 @@ export interface LlmCallOpts {
   temperature?: number;
   /** 显式超时覆盖（毫秒；探活用短超时）。 */
   timeoutMs?: number;
+  /**
+   * 显式思考模式覆盖（change role-thinking-mode-config；测试/探活用）：`'off'|'on'` 覆盖，`'default'` = 不干预（不发 thinking 字段）。
+   * 优先于按角色解析；不传则走注入的 `getThinking`，再缺则 default（零回归）。
+   */
+  thinkingMode?: ThinkingMode | 'default';
 }
 
 /**
@@ -88,6 +95,12 @@ export interface QwenClientOptions {
    */
   getProvider?: (role?: string) => string;
   /**
+   * 运行时思考模式解析器（按角色，change role-thinking-mode-config）。
+   * 返回该角色生效的思考三态（'off'/'on'）或 undefined(=default 不干预)。注入后每次调用按角色解析、热加载。
+   * **不注入时（单测/旧路径）行为与改造前逐字一致**：不发任何 thinking 字段。
+   */
+  getThinking?: (role?: string) => ThinkingMode | undefined;
+  /**
    * 启动期预载的 `provider → {baseUrl, apiKey}` 静态映射（change model-config-volcengine-provider）。
    * 与现状"密钥启动期一次性加载"一致：模型名热加载、密钥变更重启生效。
    * 注入后 `chat()` 按解析出的 provider 取地址与密钥；选中 provider 缺密钥即诚实抛错、绝不跨厂商兜底。
@@ -132,6 +145,54 @@ interface ChatCompletionResponse {
 
 export const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 
+/** 已告警过的守卫组合（warn-once，避免刷屏）；key = `${provider}|${model}|${mode}`。 */
+const warnedThinkingGuards = new Set<string>();
+
+/** 模型家族粗判（按名字前缀；change role-thinking-mode-config 的家族判定集中此处，便于单测与校正）。 */
+function thinkingModelFamily(model: string): 'qwen' | 'deepseek' | 'other' {
+  const m = model.trim().toLowerCase();
+  if (m.startsWith('qwen')) return 'qwen';
+  if (m.startsWith('deepseek')) return 'deepseek';
+  return 'other';
+}
+
+/**
+ * 把思考三态按 provider + model 翻译成要合并进请求体的附加字段（change role-thinking-mode-config）。
+ * - `undefined`（= default） → `{}`：不发任何 thinking 字段，请求体与本 change 前逐字一致（零回归红线）。
+ * - `off`：dashscope → `{ enable_thinking: false }`；volcengine → `{ thinking: { type: 'disabled' } }`。
+ * - `on`：dashscope + deepseek 系 → `{ enable_thinking: true }`（非流式可用，推理落 reasoning_content、我们仍只读 content）；
+ *         volcengine → `{ thinking: { type: 'enabled' } }`；
+ *         **dashscope + qwen 系 / 未识别组合 → `{}` 失败安全 + warn**（Qwen 开思考需流式，出口恒非流式，绝不发会 400 的字段）。
+ * ⚠ 参数键名（enable_thinking / thinking.type）晚于训练截止；部署前须逐个 curl 探活确认目标模型接受（见 change tasks 1.x），错了只需改此一处。
+ */
+export function buildThinkingParams(
+  provider: string | undefined,
+  model: string,
+  mode: ThinkingMode | undefined,
+): { params: Record<string, unknown>; warn?: string } {
+  if (!mode) return { params: {} };
+  if (provider === 'volcengine') {
+    return { params: { thinking: { type: mode === 'on' ? 'enabled' : 'disabled' } } };
+  }
+  if (provider === 'dashscope') {
+    if (mode === 'off') return { params: { enable_thinking: false } };
+    // on：仅 DeepSeek 系非流式可开思考；Qwen 系需流式 → 失败安全回落 default + warn。
+    if (thinkingModelFamily(model) === 'deepseek') return { params: { enable_thinking: true } };
+    return {
+      params: {},
+      warn: `thinking=on 对 dashscope/${model} 需流式支持（本期不支持），回落 default 不发 thinking 字段，绝不发会 400 的请求`,
+    };
+  }
+  // 未知 provider：失败安全，绝不发可能被拒的字段。
+  return {
+    params: {},
+    warn:
+      mode === 'on'
+        ? `thinking=on 对未知 provider ${provider ?? '-'}/${model} 失败安全回落 default`
+        : undefined,
+  };
+}
+
 /** Qwen HTTP 客户端 */
 export class QwenClient implements ChatLlmClient {
   private readonly apiKey: string;
@@ -139,6 +200,7 @@ export class QwenClient implements ChatLlmClient {
   private readonly getModel?: (role?: string) => string;
   private readonly getTemperature?: (role?: string) => number | undefined;
   private readonly getProvider?: (role?: string) => string;
+  private readonly getThinking?: (role?: string) => ThinkingMode | undefined;
   private readonly providerRuntime?: Record<string, { baseUrl: string; apiKey: string }>;
   private readonly baseUrl: string;
   private readonly temperature: number;
@@ -162,6 +224,7 @@ export class QwenClient implements ChatLlmClient {
     this.getModel = options.getModel;
     this.getTemperature = options.getTemperature;
     this.getProvider = options.getProvider;
+    this.getThinking = options.getThinking;
     this.providerRuntime = options.providerRuntime;
     this.baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
     this.temperature = options.temperature ?? 0;
@@ -190,6 +253,20 @@ export class QwenClient implements ChatLlmClient {
     // provider 路由（change model-config-volcengine-provider）：按本次解析出的 provider 取 baseUrl+key。
     // 缺密钥发请求前诚实抛错、绝不退回别厂商的 key/baseUrl（避免把模型名发到错误厂商的"静默走错"）。
     const provider = opts?.provider ?? this.getProvider?.(opts?.role);
+    // 思考三态解析（change role-thinking-mode-config）：显式覆盖 → 按角色解析 → undefined(=default)。
+    // 'default' 显式覆盖等价 undefined（不发 thinking 字段）。不注入 getThinking 的旧路径/单测恒 undefined → 零回归。
+    let thinking: ThinkingMode | undefined;
+    if (opts?.thinkingMode === 'off' || opts?.thinkingMode === 'on') thinking = opts.thinkingMode;
+    else if (opts?.thinkingMode === 'default') thinking = undefined;
+    else thinking = this.getThinking?.(opts?.role);
+    const { params: thinkingParams, warn: thinkingWarn } = buildThinkingParams(provider, model, thinking);
+    if (thinkingWarn) {
+      const k = `${provider ?? '-'}|${model}|${thinking ?? '-'}`;
+      if (!warnedThinkingGuards.has(k)) {
+        warnedThinkingGuards.add(k);
+        console.warn(`[llm] ${thinkingWarn}`);
+      }
+    }
     let baseUrl: string;
     let apiKey: string;
     if (provider && this.providerRuntime) {
@@ -219,10 +296,12 @@ export class QwenClient implements ChatLlmClient {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${apiKey}`,
         },
+        // change role-thinking-mode-config：thinkingParams 为 default 态时为空对象，spread 不加任何字段 → 请求体零回归。
         body: JSON.stringify({
           model,
           messages,
           temperature,
+          ...thinkingParams,
         }),
         signal: controller.signal,
       });

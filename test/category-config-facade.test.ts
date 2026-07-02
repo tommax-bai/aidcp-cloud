@@ -4,21 +4,34 @@ import { createCategoryConfigPanel } from '../src/config/category-config-facade.
 import type { CategoryConfigStore } from '../src/config/category-config-store.js';
 import { ProviderKeyMissingError } from '../src/llm/index.js';
 
-type FakeRow = { categoryId: string; model: string | null; provider: string | null; updatedAt: string | null; updatedBy: string | null };
+type FakeRow = { categoryId: string; model: string | null; provider: string | null; thinkingMode: 'off' | 'on' | null; updatedAt: string | null; updatedBy: string | null };
 
-/** 内存假 store：只实现 facade 用到的 getAll / getForCategory / set（provider 跟 model 同行）。 */
+/** 内存假 store：只实现 facade 用到的 getAll / getForCategory / set（provider 跟 model 同行 + thinkingMode 独立）。 */
 function fakeStore() {
   const rows = new Map<string, FakeRow>();
   return {
     getAll: () => rows,
     getForCategory: (id: string) => {
       const r = rows.get(id);
-      return r ? { model: r.model, provider: r.provider } : { model: null, provider: null };
+      return r
+        ? { model: r.model, provider: r.provider, thinkingMode: r.thinkingMode }
+        : { model: null, provider: null, thinkingMode: null };
     },
-    set: async (categoryId: string, model: string | null, provider: string | null, by: string) => {
-      const next = model?.trim() ? model.trim() : null;
-      const nextProvider = next === null ? null : provider?.trim() || 'dashscope';
-      const row: FakeRow = { categoryId, model: next, provider: nextProvider, updatedAt: '2026-06-23T00:00:00.000Z', updatedBy: by };
+    set: async (
+      categoryId: string,
+      patch: { model?: string | null; provider?: string | null; thinkingMode?: string | null },
+      by: string,
+    ) => {
+      const prev = rows.get(categoryId);
+      const next = patch.model === undefined ? prev?.model ?? null : patch.model?.trim() ? patch.model.trim() : null;
+      let nextProvider: string | null;
+      if (patch.model === undefined) nextProvider = prev?.provider ?? null;
+      else if (next === null) nextProvider = null;
+      else nextProvider = patch.provider?.trim() || 'dashscope';
+      const nt = patch.thinkingMode?.trim().toLowerCase();
+      const nextThinking =
+        patch.thinkingMode === undefined ? prev?.thinkingMode ?? null : nt === 'off' || nt === 'on' ? nt : null;
+      const row: FakeRow = { categoryId, model: next, provider: nextProvider, thinkingMode: nextThinking, updatedAt: '2026-06-23T00:00:00.000Z', updatedBy: by };
       rows.set(categoryId, row);
       return row;
     },
@@ -54,14 +67,14 @@ test('getCatalog：只列可设默认的分类（纯图像分类 image 不出现
 
 test('未知分类 → unknown_category，绝不落库', async () => {
   const { panel, store } = makePanel();
-  const r = await panel.setCategoryConfig('nope_category', 'qwen-max', 'dashscope', 'a');
+  const r = await panel.setCategoryConfig('nope_category', { model: 'qwen-max', provider: 'dashscope' }, 'a');
   assert.deepEqual(r, { ok: false, reason: 'unknown_category' });
   assert.equal(store.getAll().size, 0);
 });
 
 test('纯图像分类设文本默认 → category_not_configurable，且未探活', async () => {
   const { panel, probed } = makePanel();
-  const r = await panel.setCategoryConfig('image', 'qwen-max', 'dashscope', 'a');
+  const r = await panel.setCategoryConfig('image', { model: 'qwen-max', provider: 'dashscope' }, 'a');
   assert.equal(r.ok, false);
   assert.equal((r as { reason: string }).reason, 'category_not_configurable');
   assert.equal(probed().length, 0);
@@ -69,14 +82,14 @@ test('纯图像分类设文本默认 → category_not_configurable，且未探�
 
 test('无效模型名探活失败 → model_invalid，绝不落库', async () => {
   const { panel, store } = makePanel(false);
-  const r = await panel.setCategoryConfig('browse_judge', 'nope-model', 'dashscope', 'a');
+  const r = await panel.setCategoryConfig('browse_judge', { model: 'nope-model', provider: 'dashscope' }, 'a');
   assert.equal((r as { reason: string }).reason, 'model_invalid');
   assert.equal(store.getAll().get('browse_judge'), undefined);
 });
 
 test('有效模型名探活通过 → 写入 + 回真态视图（含覆盖 + provider）', async () => {
   const { panel, store, probed } = makePanel(true);
-  const r = await panel.setCategoryConfig('browse_judge', 'qwen-plus', 'dashscope', 'alice');
+  const r = await panel.setCategoryConfig('browse_judge', { model: 'qwen-plus', provider: 'dashscope' }, 'alice');
   assert.equal(r.ok, true);
   assert.deepEqual(probed()[0], { provider: 'dashscope', model: 'qwen-plus' });
   assert.equal(store.getAll().get('browse_judge')?.model, 'qwen-plus');
@@ -89,7 +102,7 @@ test('有效模型名探活通过 → 写入 + 回真态视图（含覆盖 + pro
 
 test('火山分类默认：按 provider 探活并落库，effectiveProvider 跟同行', async () => {
   const { panel, store, probed } = makePanel(true);
-  const r = await panel.setCategoryConfig('browse_judge', 'doubao-seed-1-6', 'volcengine', 'alice');
+  const r = await panel.setCategoryConfig('browse_judge', { model: 'doubao-seed-1-6', provider: 'volcengine' }, 'alice');
   assert.equal(r.ok, true);
   assert.deepEqual(probed()[0], { provider: 'volcengine', model: 'doubao-seed-1-6' });
   assert.equal(store.getAll().get('browse_judge')?.provider, 'volcengine');
@@ -101,14 +114,14 @@ test('火山分类默认：按 provider 探活并落库，effectiveProvider 跟�
 
 test('分类厂商密钥缺失 → provider_key_missing，绝不落库', async () => {
   const { panel, store } = makePanel(true, { keyMissing: true });
-  const r = await panel.setCategoryConfig('browse_judge', 'doubao-seed-1-6', 'volcengine', 'a');
+  const r = await panel.setCategoryConfig('browse_judge', { model: 'doubao-seed-1-6', provider: 'volcengine' }, 'a');
   assert.equal((r as { reason: string }).reason, 'provider_key_missing');
   assert.equal(store.getAll().get('browse_judge'), undefined);
 });
 
 test('空/ null 模型名清除覆盖（不探活，回落全局）', async () => {
   const { panel, probed } = makePanel(true);
-  const r = await panel.setCategoryConfig('browse_judge', null, null, 'a');
+  const r = await panel.setCategoryConfig('browse_judge', { model: null, provider: null }, 'a');
   assert.equal(r.ok, true);
   assert.equal(probed().length, 0);
 });

@@ -12,14 +12,20 @@ import {
   CATEGORY_CATALOG,
   isKnownCategory,
   isCategoryModelConfigurable,
+  isValidThinkingModePatch,
 } from './role-catalog.js';
 import type { CategoryConfigStore } from './category-config-store.js';
-import { normProvider, ProviderKeyMissingError } from '../llm/index.js';
+import { normProvider, ProviderKeyMissingError, buildThinkingParams } from '../llm/index.js';
 import type {
   PanelCategoryConfig,
   CategoryConfigCatalogView,
   CategoryConfigSetResult,
 } from '../panel/types.js';
+
+/** 生效模型是否支持"开启(on)"（与出口 buildThinkingParams 同源；DashScope Qwen 需流式 → false）。 */
+function thinkingOnAvailableFor(provider: string, model: string): boolean {
+  return Object.keys(buildThinkingParams(provider, model, 'on').params).length > 0;
+}
 
 export interface CategoryConfigFacadeDeps {
   store: CategoryConfigStore;
@@ -42,14 +48,21 @@ export function createCategoryConfigPanel(deps: CategoryConfigFacadeDeps): Panel
         .map((c) => {
           const row = deps.store.getAll().get(c.categoryId);
           const ovModel = row?.model?.trim() || null;
+          const effModel = ovModel || textModel;
+          const effProvider = ovModel ? normProvider(row?.provider) : textProvider;
+          const ovThinking = row?.thinkingMode ?? null;
           return {
             categoryId: c.categoryId,
             displayName: c.displayName,
             order: c.order,
             // 分类默认模型：覆盖则用覆盖、否则回落全局「默认模型」；effectiveProvider 取同行 / 回落全局文本厂商。
-            effectiveModel: ovModel || textModel,
-            effectiveProvider: ovModel ? normProvider(row?.provider) : textProvider,
+            effectiveModel: effModel,
+            effectiveProvider: effProvider,
             modelOverridden: !!ovModel,
+            // 思考模式（change role-thinking-mode-config）：分类覆盖则用覆盖、否则 default。
+            effectiveThinkingMode: ovThinking ?? 'default',
+            thinkingModeOverridden: !!ovThinking,
+            thinkingOnAvailable: thinkingOnAvailableFor(effProvider, effModel),
             updatedAt: row?.updatedAt ?? null,
             updatedBy: row?.updatedBy ?? null,
           };
@@ -59,23 +72,31 @@ export function createCategoryConfigPanel(deps: CategoryConfigFacadeDeps): Panel
 
   return {
     getCatalog: buildCatalog,
-    setCategoryConfig: async (categoryId, model, provider, updatedBy): Promise<CategoryConfigSetResult> => {
+    setCategoryConfig: async (categoryId, patch, updatedBy): Promise<CategoryConfigSetResult> => {
       if (!isKnownCategory(categoryId)) return { ok: false, reason: 'unknown_category' };
       if (!isCategoryModelConfigurable(categoryId)) {
         return { ok: false, reason: 'category_not_configurable' };
       }
-      const wantsModel = model !== null && (model ?? '').trim() !== '';
-      const prov = normProvider(provider);
+      // 思考模式校验（change role-thinking-mode-config）：非法值诚实拒绝、绝不落库、绝不当作清除。
+      if (!isValidThinkingModePatch(patch.thinkingMode)) {
+        return { ok: false, reason: 'thinking_mode_invalid' };
+      }
+      const wantsModel = patch.model !== undefined && (patch.model ?? '').trim() !== '';
+      const prov = normProvider(patch.provider);
       // 非空模型名：按所选 provider 保存前探活；不过则拒，绝不落库（红线：绝不静默假成功）。
       if (wantsModel) {
         try {
-          await deps.probeModel(prov, (model as string).trim());
+          await deps.probeModel(prov, (patch.model as string).trim());
         } catch (e) {
           if (e instanceof ProviderKeyMissingError) return { ok: false, reason: 'provider_key_missing' };
           return { ok: false, reason: 'model_invalid' };
         }
       }
-      await deps.store.set(categoryId, model, wantsModel ? prov : provider, updatedBy);
+      await deps.store.set(
+        categoryId,
+        { ...patch, provider: wantsModel ? prov : patch.provider },
+        updatedBy,
+      );
       return { ok: true, view: buildCatalog() };
     },
   };

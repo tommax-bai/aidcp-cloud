@@ -64,6 +64,7 @@ function makePanel(
     getGlobalImageModel: () => 'wan2.7-image-pro',
     getCategoryModel: (catId) => categoryModels[catId] ?? null,
     getCategoryProvider: (catId) => opts.categoryProviders?.[catId] ?? null,
+    getCategoryThinking: () => null,
     probeModel: async (provider, m) => {
       probed.push({ provider, model: m });
       if (opts.keyMissing) throw new ProviderKeyMissingError(provider);

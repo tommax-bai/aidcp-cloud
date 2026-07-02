@@ -8,14 +8,30 @@
  * 白名单：只暴露 ROLE_CATALOG 内的现役 LLM 角色；图像/none 不可 per-role 配模型；温度仅可调温度角色。
  */
 
-import { ROLE_CATALOG, getCatalogItem, isModelConfigurable } from './role-catalog.js';
+import {
+  ROLE_CATALOG,
+  getCatalogItem,
+  isModelConfigurable,
+  isValidThinkingModePatch,
+  type ThinkingMode,
+} from './role-catalog.js';
 import type { RoleConfigStore } from './role-config-store.js';
-import { normProvider, ProviderKeyMissingError, DEFAULT_TEXT_PROVIDER } from '../llm/index.js';
+import {
+  normProvider,
+  ProviderKeyMissingError,
+  DEFAULT_TEXT_PROVIDER,
+  buildThinkingParams,
+} from '../llm/index.js';
 import type {
   PanelRoleConfig,
   RoleConfigCatalogView,
   RoleConfigSetResult,
 } from '../panel/types.js';
+
+/** 生效模型是否支持"开启(on)"：与出口翻译同源——on 能翻出非空参数即支持（否则如 DashScope Qwen 需流式，不支持）。 */
+function thinkingOnAvailableFor(provider: string, model: string): boolean {
+  return Object.keys(buildThinkingParams(provider, model, 'on').params).length > 0;
+}
 
 export interface RoleConfigFacadeDeps {
   store: RoleConfigStore;
@@ -29,6 +45,8 @@ export interface RoleConfigFacadeDeps {
   getCategoryModel: (categoryId: string) => string | null;
   /** 某分类默认模型的厂商（change model-config-volcengine-provider）；category 来源的生效厂商。 */
   getCategoryProvider: (categoryId: string) => string | null;
+  /** 某分类默认思考模式（change role-thinking-mode-config；null=分类无覆盖）；用于 role 缺省时回落分类。 */
+  getCategoryThinking: (categoryId: string) => ThinkingMode | null;
   /** 保存前探活：按 provider 探；模型不可用抛错；该厂商密钥缺失抛 ProviderKeyMissingError。 */
   probeModel: (provider: string, model: string) => Promise<void>;
 }
@@ -64,6 +82,18 @@ export function createRoleConfigPanel(deps: RoleConfigFacadeDeps): PanelRoleConf
           effectiveProvider = normProvider(deps.getGlobalTextProvider());
           effectiveSource = 'default';
         }
+        // 思考模式（change role-thinking-mode-config）：仅文本类可配。role 覆盖 → 分类 → default 两层回落。
+        const ovThinking = item.llmKind === 'text' ? row?.thinkingMode ?? null : null;
+        const catThinking = item.llmKind === 'text' ? deps.getCategoryThinking(item.category) : null;
+        let effectiveThinkingMode: 'default' | ThinkingMode = 'default';
+        let thinkingModeSource: 'override' | 'category' | 'default' = 'default';
+        if (ovThinking) {
+          effectiveThinkingMode = ovThinking;
+          thinkingModeSource = 'override';
+        } else if (catThinking) {
+          effectiveThinkingMode = catThinking;
+          thinkingModeSource = 'category';
+        }
         return {
           roleId: item.roleId,
           displayName: item.displayName,
@@ -76,6 +106,11 @@ export function createRoleConfigPanel(deps: RoleConfigFacadeDeps): PanelRoleConf
           effectiveSource,
           modelOverridden: item.llmKind === 'text' && !!ovModel,
           temperatureOverride: row?.temperature ?? null,
+          effectiveThinkingMode,
+          thinkingModeOverride: ovThinking,
+          thinkingModeSource,
+          thinkingOnAvailable:
+            item.llmKind === 'text' && thinkingOnAvailableFor(effectiveProvider, effectiveModel),
           updatedAt: row?.updatedAt ?? null,
           updatedBy: row?.updatedBy ?? null,
         };
@@ -91,6 +126,17 @@ export function createRoleConfigPanel(deps: RoleConfigFacadeDeps): PanelRoleConf
 
       const wantsModel = patch.model !== undefined && (patch.model ?? '').trim() !== '';
       if (wantsModel && !isModelConfigurable(roleId)) {
+        return { ok: false, reason: 'model_not_configurable' };
+      }
+      // 思考模式校验（change role-thinking-mode-config）：非法值诚实拒绝、绝不落库、绝不当作清除。
+      if (!isValidThinkingModePatch(patch.thinkingMode)) {
+        return { ok: false, reason: 'thinking_mode_invalid' };
+      }
+      // 想设 off/on（而非清除）只对文本类角色开放（图像/none 不调文本 LLM）。
+      const wantsThinking =
+        patch.thinkingMode != null &&
+        ['off', 'on'].includes(patch.thinkingMode.trim().toLowerCase());
+      if (wantsThinking && !isModelConfigurable(roleId)) {
         return { ok: false, reason: 'model_not_configurable' };
       }
       if (patch.temperature !== undefined && patch.temperature !== null) {

@@ -15,6 +15,32 @@ export type RoleGroup = 'browse' | 'publish';
 export type LlmKind = 'text' | 'image' | 'none';
 
 /**
+ * 思考模式（change role-thinking-mode-config）。
+ * 存储/解析层用 `'off' | 'on'` 表达显式覆盖；`null` = default（不干预、跟模型走，请求体零回归）。
+ * 面板对外用三态字符串 `'default' | 'off' | 'on'`（`normalizeThinkingMode` 把 'default'/空/脏串归一为 null）。
+ */
+export type ThinkingMode = 'off' | 'on';
+
+/** 面板对外三态（default 显式表达"不干预"）。 */
+export type ThinkingModeApi = 'default' | ThinkingMode;
+
+/** 归一：仅接受 'off' / 'on'（去空白、大小写不敏感）；其余（含 'default' / 空 / 脏串 / null）→ null（= default）。 */
+export function normalizeThinkingMode(raw: string | null | undefined): ThinkingMode | null {
+  const t = raw?.trim().toLowerCase();
+  return t === 'off' || t === 'on' ? t : null;
+}
+
+/**
+ * 面板写入校验：允许 undefined（不动）/ null / ''（清除）/ 'default' / 'off' / 'on'（大小写不敏感）；其余非法。
+ * 与 `normalizeThinkingMode` 的区别：后者把脏串静默归 null，本函数用于**写路径先拒非法值**（绝不当作清除）。
+ */
+export function isValidThinkingModePatch(v: string | null | undefined): boolean {
+  if (v === undefined || v === null) return true;
+  const t = v.trim().toLowerCase();
+  return t === '' || t === 'default' || t === 'off' || t === 'on';
+}
+
+/**
  * 角色分类（change role-model-category-config，item 5/6）。
  * 扁平一层，仅服务后台查看/编辑/分类级模型默认解析；不进运行时注册表（铁律）。
  */

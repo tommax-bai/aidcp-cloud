@@ -9,8 +9,8 @@ const silentLogger = { log() {}, warn() {}, error() {} };
 function makeDeps(withRoleConfig = true) {
   const view: RoleConfigCatalogView = {
     roles: [
-      { roleId: 'browse:comment_composer', displayName: '评论文案撰写', group: 'browse', category: 'browse_compose', llmKind: 'text', tunableTemperature: true, effectiveModel: 'qwen-turbo', effectiveProvider: 'dashscope', effectiveSource: 'default', modelOverridden: false, temperatureOverride: null, updatedAt: null, updatedBy: null },
-      { roleId: 'publish:ImageGenerator', displayName: '配图生成执行', group: 'publish', category: 'image', llmKind: 'image', tunableTemperature: false, effectiveModel: 'wan2.7-image-pro', effectiveProvider: 'dashscope', effectiveSource: 'image', modelOverridden: false, temperatureOverride: null, updatedAt: null, updatedBy: null },
+      { roleId: 'browse:comment_composer', displayName: '评论文案撰写', group: 'browse', category: 'browse_compose', llmKind: 'text', tunableTemperature: true, effectiveModel: 'qwen-turbo', effectiveProvider: 'dashscope', effectiveSource: 'default', modelOverridden: false, temperatureOverride: null, effectiveThinkingMode: 'default', thinkingModeOverride: null, thinkingModeSource: 'default', thinkingOnAvailable: false, updatedAt: null, updatedBy: null },
+      { roleId: 'publish:ImageGenerator', displayName: '配图生成执行', group: 'publish', category: 'image', llmKind: 'image', tunableTemperature: false, effectiveModel: 'wan2.7-image-pro', effectiveProvider: 'dashscope', effectiveSource: 'image', modelOverridden: false, temperatureOverride: null, effectiveThinkingMode: 'default', thinkingModeOverride: null, thinkingModeSource: 'default', thinkingOnAvailable: false, updatedAt: null, updatedBy: null },
     ],
   };
   const roleConfig = {
