@@ -495,6 +495,75 @@ test('HTTP 精选内容后台管理：未注入 503 / 缺账号=全账号视图 
   }
 });
 
+test('HTTP 分组标签写路由：未注入 503 / 成功回真态 / 清空 / 404 / 退役拒 / 坏类型 / 鉴权（editable-account-group-label）', async () => {
+  // 未注入 accountAttr → 503（不连累其他接口）
+  const noAttr = await startPanelApi(deps, makeConfig());
+  try {
+    const base = `http://127.0.0.1:${noAttr.port}`;
+    const token = await loginToken(base);
+    const r = await fetch(`${base}/api/accounts/acc-1/group-label`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ groupLabel: '矩阵A' }),
+    });
+    assert.equal(r.status, 503);
+  } finally {
+    await noAttr.close();
+  }
+
+  // 注入 accountAttr（内存 map 模拟已存在账号 acc-1）：契约同 PgAccountStore.setGroupLabel
+  const rows = new Map<string, string | null>([['acc-1', null]]);
+  const accountAttr = {
+    setGroupLabel: async (accountId: string, label: string | null) => {
+      if (accountId === 'default') return { ok: false as const, reason: 'retired_account' as const };
+      if (!rows.has(accountId)) return { ok: false as const, reason: 'account_not_found' as const };
+      const clean = (label ?? '').trim();
+      const value = clean === '' ? null : clean;
+      rows.set(accountId, value);
+      return { ok: true as const, groupLabel: value };
+    },
+  };
+  const depsAttr = { ...(deps as object), accountAttr } as unknown as PanelDeps;
+  const h = await startPanelApi(depsAttr, makeConfig());
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const token = await loginToken(base);
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+    const put = (id: string, body: unknown) =>
+      fetch(`${base}/api/accounts/${id}/group-label`, { method: 'PUT', headers: auth, body: JSON.stringify(body) });
+
+    // 成功：回写后真态
+    const ok = (await (await put('acc-1', { groupLabel: '  矩阵A  ' })).json()) as { accountId: string; groupLabel: string | null };
+    assert.equal(ok.accountId, 'acc-1');
+    assert.equal(ok.groupLabel, '矩阵A');
+
+    // 清空：空串 → NULL（分组清除）
+    const cleared = (await (await put('acc-1', { groupLabel: '' })).json()) as { groupLabel: string | null };
+    assert.equal(cleared.groupLabel, null);
+
+    // 不存在账号 → 404 可区分
+    assert.equal((await put('ghost', { groupLabel: '矩阵B' })).status, 404);
+
+    // 退役保留账号 → 400（reason retired_account），绝不静默成功
+    const retired = await put('default', { groupLabel: '矩阵C' });
+    assert.equal(retired.status, 400);
+    assert.equal(((await retired.json()) as { reason: string }).reason, 'retired_account');
+
+    // 坏类型（groupLabel 非 string/null）→ 400（路由层拒，不触及 store）
+    assert.equal((await put('acc-1', { groupLabel: 123 })).status, 400);
+
+    // 无 token → 401
+    const noTok = await fetch(`${base}/api/accounts/acc-1/group-label`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ groupLabel: '矩阵A' }),
+    });
+    assert.equal(noTok.status, 401);
+  } finally {
+    await h.close();
+  }
+});
+
 async function loginToken(base: string): Promise<string> {
   const login = await fetch(`${base}/api/auth/login`, {
     method: 'POST',
@@ -542,6 +611,80 @@ test('summary 上限随风控态收敛：restricted 账号互动上限为 0，�
     assert.ok((entry.quotas?.view ?? 0) > 0, 'restricted 浏览仍有额度');
     // 只读：拉 summary 绝不改风控态
     assert.equal(restricted.getState().status, 'restricted', '组合只读、不触发状态迁移');
+  } finally {
+    await h.close();
+  }
+});
+
+// AC-ALERT-2 + AC-ALERT-3（change alert-resolution-by-id）：
+// 告警手动解决路由契约（401/400/503/200 诚实透传）+ 红线隔离（只经 alertStore，绝不触风控单写）。
+test('HTTP 告警手动解决：401/400/503/200 诚实 + 只经 alertStore、不触风控', async () => {
+  // 无 token → 401（JWT 中间件，先于路由）
+  const noAuthH = await startPanelApi(deps, makeConfig());
+  try {
+    const base = `http://127.0.0.1:${noAuthH.port}`;
+    assert.equal((await fetch(`${base}/api/alerts/1/resolve`, { method: 'POST' })).status, 401);
+  } finally {
+    await noAuthH.close();
+  }
+
+  // 未注入 alertStore（base deps 无）→ 有效 id 也 503（面板故障不连累闭环的既有降级）
+  const noStoreH = await startPanelApi(deps, makeConfig());
+  try {
+    const base = `http://127.0.0.1:${noStoreH.port}`;
+    const auth = { authorization: `Bearer ${await loginToken(base)}` };
+    const r503 = await fetch(`${base}/api/alerts/9/resolve`, { method: 'POST', headers: auth });
+    assert.equal(r503.status, 503);
+    assert.equal(((await r503.json()) as { error: string }).error, 'alerts_unavailable');
+  } finally {
+    await noStoreH.close();
+  }
+
+  // 注入 fake alertStore + spy riskRegistry（断言解决绝不触风控单写）
+  const resolveCalls: number[] = [];
+  let riskTouched = false;
+  const alertStore = {
+    resolveById: async (id: number) => {
+      resolveCalls.push(id);
+      return id === 42 ? 1 : 0; // 42=未解决→1；其它=不存在/已解决→0
+    },
+  };
+  const depsAlert = {
+    ...(deps as object),
+    alertStore,
+    riskRegistry: {
+      getController: async (id: string) => {
+        riskTouched = true;
+        return new RiskController({ accountId: id });
+      },
+    },
+  } as unknown as PanelDeps;
+  const h = await startPanelApi(depsAlert, makeConfig());
+  try {
+    const base = `http://127.0.0.1:${h.port}`;
+    const auth = { authorization: `Bearer ${await loginToken(base)}` };
+
+    // 非整数 id → 400 invalid_id（请求形状先于存储可用性；不调存储）
+    const bad = await fetch(`${base}/api/alerts/abc/resolve`, { method: 'POST', headers: auth });
+    assert.equal(bad.status, 400);
+    assert.equal(((await bad.json()) as { reason: string }).reason, 'invalid_id');
+    // ≤0 id → 400
+    assert.equal((await fetch(`${base}/api/alerts/0/resolve`, { method: 'POST', headers: auth })).status, 400);
+
+    // 解决未解决告警 → 200 {resolved:1}
+    const ok = await fetch(`${base}/api/alerts/42/resolve`, { method: 'POST', headers: auth });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(await ok.json(), { resolved: 1 });
+
+    // 解决不存在/已解决 → 200 {resolved:0}（诚实透传，非假成功）
+    const gone = await fetch(`${base}/api/alerts/7/resolve`, { method: 'POST', headers: auth });
+    assert.equal(gone.status, 200);
+    assert.deepEqual(await gone.json(), { resolved: 0 });
+
+    // 红线：解决只经 alertStore.resolveById，绝不触风控 controller（不 applySignal/setQuotaLevel/写 risk_state）。
+    // 面板 edgeServer dep 结构上无 resume 能力，故亦无从 resumeEdge。
+    assert.deepEqual(resolveCalls, [42, 7]);
+    assert.equal(riskTouched, false, '手动解决绝不触风控 controller');
   } finally {
     await h.close();
   }

@@ -62,6 +62,12 @@ export interface AlertStore {
   raise(input: AlertRecordInput, at?: number): Promise<{ alertId: number }>;
   /** 按 edge 解决其所有未解决告警（验证码清除点），返回解决条数。 */
   resolveByEdge(edgeId: string, at?: number): Promise<number>;
+  /**
+   * 按 alert_id 解决单条未解决告警（面板手动勾销，change alert-resolution-by-id）。
+   * 不依赖 edge_id——故对 edge_id=NULL 的告警（如节奏过载）与从未收到配对清除的告警都可解决。
+   * 返回真实解决条数（0=没这条/已解决，1=本次解决），绝不假成功。
+   */
+  resolveById(alertId: number, at?: number): Promise<number>;
   list(options?: { limit?: number; includeResolved?: boolean }): Promise<AlertRow[]>;
   close?(): Promise<void>;
 }
@@ -137,6 +143,17 @@ export class PgAlertStore implements AlertStore {
       `UPDATE alerts SET resolved_at = ${at !== undefined ? 'to_timestamp($2 / 1000.0)' : 'now()'}
        WHERE edge_id = $1 AND resolved_at IS NULL`,
       at !== undefined ? [edgeId, at] : [edgeId],
+    );
+    return rowCount ?? 0;
+  }
+
+  async resolveById(alertId: number, at?: number): Promise<number> {
+    // 镜像 resolveByEdge：同守 `resolved_at IS NULL`，故与按 edge 自动清除并存时靠行锁串行、
+    // 后到者命中 0 行、幂等诚实。只 UPDATE resolved_at，绝不碰风控单写、绝不 resumeEdge。
+    const { rowCount } = await this.pool.query(
+      `UPDATE alerts SET resolved_at = ${at !== undefined ? 'to_timestamp($2 / 1000.0)' : 'now()'}
+       WHERE alert_id = $1 AND resolved_at IS NULL`,
+      at !== undefined ? [alertId, at] : [alertId],
     );
     return rowCount ?? 0;
   }

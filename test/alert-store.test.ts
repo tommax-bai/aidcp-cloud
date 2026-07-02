@@ -48,6 +48,40 @@ test('resolveByEdge 返回受影响行数', async () => {
   assert.equal(calls[0].params[0], 'edge-1');
 });
 
+// AC-ALERT-1：按 id 手动解决诚实回真实行数（change alert-resolution-by-id）。
+test('resolveById：解决一条未解决告警回 1（带 at → to_timestamp，守 resolved_at IS NULL / alert_id=$1）', async () => {
+  const { pool, calls } = fakePool({ rowCount: 1 });
+  const store = new PgAlertStore({ pool });
+  const n = await store.resolveById(42, 9999);
+  assert.equal(n, 1);
+  assert.match(calls[0].sql, /UPDATE alerts SET resolved_at/);
+  assert.match(calls[0].sql, /to_timestamp/); // 带 at
+  assert.match(calls[0].sql, /alert_id = \$1/); // 按 id 定位，不依赖 edge_id
+  assert.match(calls[0].sql, /resolved_at IS NULL/); // 只解决未解决的
+  assert.equal(calls[0].params[0], 42);
+  assert.equal(calls[0].params[1], 9999);
+});
+
+test('resolveById：不存在/已解决命中 0 行诚实回 0（不带 at 用 now()），绝不假成功', async () => {
+  const { pool, calls } = fakePool({ rowCount: 0 });
+  const store = new PgAlertStore({ pool });
+  const n = await store.resolveById(7);
+  assert.equal(n, 0);
+  assert.match(calls[0].sql, /now\(\)/);
+  assert.equal(calls[0].params[0], 7);
+});
+
+// AC-ALERT-4：与按 edge 自动清除共存——两入口共用同一 `resolved_at IS NULL` 守卫，
+// 故并发/重复解决靠行锁串行、后到者命中 0 行、幂等诚实、不二次解决。
+test('resolveById 与 resolveByEdge 共用 resolved_at IS NULL 守卫（并存无冲突）', async () => {
+  const byId = fakePool({ rowCount: 1 });
+  await new PgAlertStore({ pool: byId.pool }).resolveById(5, 1);
+  const byEdge = fakePool({ rowCount: 0 }); // 手动已解后按 edge 清除命中 0 行
+  await new PgAlertStore({ pool: byEdge.pool }).resolveByEdge('edge-x', 2);
+  assert.match(byId.calls[0].sql, /resolved_at IS NULL/);
+  assert.match(byEdge.calls[0].sql, /resolved_at IS NULL/);
+});
+
 test('list 默认仅未解决；includeResolved 含全部', async () => {
   const { pool, calls } = fakePool({
     rows: [

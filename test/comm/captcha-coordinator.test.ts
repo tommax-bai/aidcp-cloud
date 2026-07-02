@@ -197,4 +197,44 @@ describe('CaptchaCoordinator', () => {
     await c.onDetected({ edgeId: 'edge-1', kind: 'captcha' }, makeSession(), pusher);
     assert.equal(raisedCount, 1, '冷却窗内不应重复落库');
   });
+
+  // AC-ALERT-5（change alert-resolution-by-id）：手动 by-id 解决与协调器去重冷却相互独立。
+  // 手动勾销走面板 resolveById、不经 onCleared，故不清协调器 per-edge 冷却——窗内同 edge 再报仍被压制。
+  // 固化为已知语义（活状况如实复现，非 bug）。
+  it('手动 by-id 解决不走 onCleared、不清协调器冷却：窗内同 edge 再报仍被压制', async () => {
+    let raisedCount = 0;
+    const resolvedIds: number[] = [];
+    const alertStore = {
+      raise: async () => {
+        raisedCount += 1;
+        return { alertId: raisedCount };
+      },
+      resolveByEdge: async () => 0,
+      // 面板手动勾销走 by-id，与协调器完全解耦，绝不经 onCleared。
+      resolveById: async (id: number) => {
+        resolvedIds.push(id);
+        return 1;
+      },
+    };
+    const c = new CaptchaCoordinator({
+      resolveController: async () => risk,
+      messenger,
+      resolveChatId: async () => 'chat-1',
+      logger: silentLogger,
+      clock: () => now,
+      cooldownMs: 10 * 60_000,
+      alertStore,
+    });
+    await c.onDetected({ edgeId: 'edge-1', kind: 'captcha' }, makeSession(), pusher);
+    assert.equal(raisedCount, 1);
+
+    // 运营在面板按 alert_id 手动勾销该告警（模拟 POST /api/alerts/:id/resolve → resolveById），不经 onCleared。
+    await alertStore.resolveById(1);
+    assert.deepEqual(resolvedIds, [1]);
+
+    now += 60_000; // 1min < 10min 冷却窗
+    await c.onDetected({ edgeId: 'edge-1', kind: 'captcha' }, makeSession(), pusher);
+    assert.equal(raisedCount, 1, '手动解决不清协调器冷却，窗内不应重复落库');
+    assert.equal(messenger.sent.length, 1, '同理窗内不重复发卡');
+  });
 });

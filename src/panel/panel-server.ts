@@ -296,6 +296,37 @@ function createRequestHandler(
       sendJson(res, 400, { error: 'bad_request', reason: 'unknown_command' });
       return;
     }
+    // 账号分组标签写（change editable-account-group-label）：经账号存储单写（accounts 表拥有者），
+    // 绝不 raw UPDATE、绝不乐观假成功；空归 NULL（清空）、无行 404、退役账号拒、写后回读真态。
+    if (method === 'PUT' && url.startsWith('/api/accounts/') && url.endsWith('/group-label')) {
+      const accountId = decodeURIComponent(url.slice('/api/accounts/'.length, -'/group-label'.length));
+      if (!deps.accountAttr) {
+        sendJson(res, 503, { error: 'unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { groupLabel } = (body ?? {}) as { groupLabel?: unknown };
+      // groupLabel 只接受 string | null | 缺省（缺省/ null / 空串 = 清空）；其它类型诚实拒。
+      if (groupLabel !== undefined && groupLabel !== null && typeof groupLabel !== 'string') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_group_label' });
+        return;
+      }
+      const label = typeof groupLabel === 'string' ? groupLabel : null;
+      const result = await deps.accountAttr.setGroupLabel(accountId, label);
+      if (!result.ok) {
+        if (result.reason === 'account_not_found') sendJson(res, 404, { error: 'account_not_found' });
+        else sendJson(res, 400, { error: 'bad_request', reason: result.reason }); // retired_account
+        return;
+      }
+      sendJson(res, 200, { accountId, groupLabel: result.groupLabel });
+      return;
+    }
     // 风控写（V1 task 8.4）：经 registry 取账号 controller 单写；status 经枚举信号种类、quota 经 setQuotaLevel
     if (method === 'POST' && url.startsWith('/api/accounts/') && url.endsWith('/risk/status')) {
       const accountId = decodeURIComponent(url.slice('/api/accounts/'.length, -'/risk/status'.length));
@@ -482,12 +513,19 @@ function createRequestHandler(
         return;
       }
       // change model-config-volcengine-provider：provider 跟 model 同发（写 model 时按此 provider 探活并落库）。
-      const { model, provider, temperature } = (body ?? {}) as {
+      // change role-thinking-mode-config：thinkingMode 独立可发（'default'|'off'|'on' 或 null）。
+      const { model, provider, temperature, thinkingMode } = (body ?? {}) as {
         model?: unknown;
         provider?: unknown;
         temperature?: unknown;
+        thinkingMode?: unknown;
       };
-      const patch: { model?: string | null; provider?: string | null; temperature?: number | null } = {};
+      const patch: {
+        model?: string | null;
+        provider?: string | null;
+        temperature?: number | null;
+        thinkingMode?: string | null;
+      } = {};
       if (model !== undefined) {
         if (model === null || typeof model === 'string') patch.model = model;
         else {
@@ -509,7 +547,14 @@ function createRequestHandler(
           return;
         }
       }
-      if (patch.model === undefined && patch.temperature === undefined) {
+      if (thinkingMode !== undefined) {
+        if (thinkingMode === null || typeof thinkingMode === 'string') patch.thinkingMode = thinkingMode;
+        else {
+          sendJson(res, 400, { error: 'bad_request', reason: 'thinking_mode_type' });
+          return;
+        }
+      }
+      if (patch.model === undefined && patch.temperature === undefined && patch.thinkingMode === undefined) {
         sendJson(res, 400, { error: 'bad_request', reason: 'no_valid_fields' });
         return;
       }
@@ -547,24 +592,41 @@ function createRequestHandler(
         return;
       }
       // change model-config-volcengine-provider：provider 跟 model 同发。
-      const { model, provider } = (body ?? {}) as { model?: unknown; provider?: unknown };
-      // model 必须存在，且为 string 或 null（null/'' = 清除覆盖回落）。
-      if (model !== null && typeof model !== 'string') {
-        sendJson(res, 400, { error: 'bad_request', reason: 'model_type' });
-        return;
+      // change role-thinking-mode-config：thinkingMode 独立可发；model 不再必填（可只改思考模式）。
+      const { model, provider, thinkingMode } = (body ?? {}) as {
+        model?: unknown;
+        provider?: unknown;
+        thinkingMode?: unknown;
+      };
+      const patch: { model?: string | null; provider?: string | null; thinkingMode?: string | null } = {};
+      if (model !== undefined) {
+        if (model === null || typeof model === 'string') patch.model = model;
+        else {
+          sendJson(res, 400, { error: 'bad_request', reason: 'model_type' });
+          return;
+        }
       }
-      let provPatch: string | null = null;
       if (provider !== undefined) {
-        if (provider === null || typeof provider === 'string') provPatch = provider;
+        if (provider === null || typeof provider === 'string') patch.provider = provider;
         else {
           sendJson(res, 400, { error: 'bad_request', reason: 'provider_type' });
           return;
         }
       }
+      if (thinkingMode !== undefined) {
+        if (thinkingMode === null || typeof thinkingMode === 'string') patch.thinkingMode = thinkingMode;
+        else {
+          sendJson(res, 400, { error: 'bad_request', reason: 'thinking_mode_type' });
+          return;
+        }
+      }
+      if (patch.model === undefined && patch.thinkingMode === undefined) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'no_valid_fields' });
+        return;
+      }
       const result = await deps.categoryConfig.setCategoryConfig(
         categoryId,
-        model as string | null,
-        provPatch,
+        patch,
         verified.payload.sub,
       );
       if (!result.ok) {
@@ -966,6 +1028,27 @@ function createRequestHandler(
       }
       const deleted = await deps.curatedContent.deleteOne(accountId, id);
       sendJson(res, 200, { deleted }); // 诚实回真实删除行数（0=已不存在/越权，1=已删），绝不假成功
+      return;
+    }
+
+    // 告警手动解决（change alert-resolution-by-id）：运营按 alert_id 勾销单条未解决告警。
+    // by-id 不依赖 edge_id——一次解开「block 需边缘同进程送配对 cleared 才解」与「pacing edge_id=NULL
+    // 永不被按 edge 清除匹配」两根因。红线：只闭合日志行（resolveById 只 UPDATE resolved_at），
+    // 绝不碰风控单写、绝不 resumeEdge；诚实回真实解决行数（0=没这条/已解决，1=本次解决）。
+    // 先校验 id（请求形状，400），再判存储可用性（未注入 503），末尾 404 前。
+    if (method === 'POST' && url.startsWith('/api/alerts/') && url.endsWith('/resolve')) {
+      const idRaw = decodeURIComponent(url.slice('/api/alerts/'.length, -'/resolve'.length));
+      const id = Number(idRaw);
+      if (!Number.isInteger(id) || id <= 0) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_id' });
+        return;
+      }
+      if (!deps.alertStore) {
+        sendJson(res, 503, { error: 'alerts_unavailable' });
+        return;
+      }
+      const resolved = await deps.alertStore.resolveById(id);
+      sendJson(res, 200, { resolved }); // 诚实透传真实解决行数，前端据 0/1 区分文案，绝不假成功
       return;
     }
 

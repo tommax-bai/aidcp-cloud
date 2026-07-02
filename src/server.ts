@@ -112,7 +112,7 @@ import { RoleConfigStore } from './config/role-config-store.js';
 import { createRoleConfigPanel } from './config/role-config-facade.js';
 import { CategoryConfigStore } from './config/category-config-store.js';
 import { createCategoryConfigPanel } from './config/category-config-facade.js';
-import { categoryOf } from './config/role-catalog.js';
+import { categoryOf, type ThinkingMode } from './config/role-catalog.js';
 // 账号人设（change account-persona-config，stream F）：按账号可配 + 热加载，回落打包 soul.yaml 不 brick。
 import { PersonaStore, createPersonaResolver } from './config/persona-store.js';
 import { createPersonaPanel } from './config/persona-facade.js';
@@ -271,6 +271,20 @@ async function main(): Promise<void> {
     const t = role ? roleConfigStore.getForRole(role).temperature : null;
     return t ?? undefined;
   };
+  // 思考模式解析（change role-thinking-mode-config）：role → 分类 → undefined(=default 不干预)。
+  // 与模型/温度相互独立；两层回落、无全局层（全局隐含 default）。取自共享内存镜像、热加载。
+  // 返回 undefined 时出口不发任何 thinking 字段（请求体零回归）。可行性守卫（Qwen+on）在出口按当时模型判定。
+  const resolveThinkingForRole = (role?: string): ThinkingMode | undefined => {
+    if (!role) return undefined;
+    const ro = roleConfigStore.getForRole(role).thinkingMode;
+    if (ro) return ro;
+    const catId = categoryOf(role);
+    if (catId) {
+      const cat = categoryConfigStore.getForCategory(catId).thinkingMode;
+      if (cat) return cat;
+    }
+    return undefined;
+  };
   // token 用量记账（change llm-token-usage-stats）：出口 onCall 钩子只做纯内存累加，
   // 定时 flush 到 llm_token_usage 预聚合表（专用池隔离热路径）。须早于接受 LLM 调用/探活建好。
   const tokenUsageStore = new TokenUsageStore();
@@ -300,6 +314,8 @@ async function main(): Promise<void> {
     getTemperature: resolveTempForRole,
     // change model-config-volcengine-provider：按角色解析出的 provider 从 providerRuntime 取 baseUrl+key。
     getProvider: resolveProviderForRole,
+    // change role-thinking-mode-config：按角色解析思考三态（role→分类→default）；default 出口不发 thinking 字段（零回归）。
+    getThinking: resolveThinkingForRole,
     providerRuntime,
     // 保留原 console.log（加 provider + tokens 维度）；记账 add() 受 try/catch 双保险，绝不抛进/拖垮 LLM 调用路径。
     onCall: (info) => {
@@ -1445,6 +1461,7 @@ async function main(): Promise<void> {
     getGlobalImageModel: () => modelConfigStore.getCached().imageModel,
     getCategoryModel: (categoryId) => categoryConfigStore.getForCategory(categoryId).model,
     getCategoryProvider: (categoryId) => categoryConfigStore.getForCategory(categoryId).provider,
+    getCategoryThinking: (categoryId) => categoryConfigStore.getForCategory(categoryId).thinkingMode,
     probeModel,
   });
   // 分类默认模型面板外观（change role-model-category-config + model-config-volcengine-provider）：白名单 + 生效值视图（含 provider）+ 写校验 + 按 provider 探活。
@@ -1533,6 +1550,10 @@ async function main(): Promise<void> {
             },
             dispatchActive: () => dispatchActive,
           },
+          // 账号属性写入（change editable-account-group-label）：经账号存储单写；存储未就绪 → 不注入，路由回 503。
+          accountAttr: accountStore?.setGroupLabel
+            ? { setGroupLabel: (accountId, label) => accountStore!.setGroupLabel!(accountId, label) }
+            : undefined,
           // 模型与凭据配置（change console-model-provider-config + model-config-volcengine-provider）。明文密钥绝不经此回传。
           modelConfig: {
             getView: buildModelConfigView,
@@ -1602,6 +1623,9 @@ async function main(): Promise<void> {
           // 精选内容后台管理（change curated-content-admin-page）。同一精选语料 store 实例：读=按账号列表/筛选面、写=删单条/清空壳行。
           // init 失败留 undefined 时面板自然 503，绝不崩边-云闭环。
           curatedContent: curatedContentStore,
+          // 告警手动解决（change alert-resolution-by-id）：复用同一告警存储单例（上方 L811 构造，init 失败为 undefined）。
+          // 面板按 alert_id 勾销单条告警；未注入时路由自然 503。只闭合日志行，绝不碰风控单写 / edge 恢复。
+          alertStore,
         },
         {
           port: panelPort,

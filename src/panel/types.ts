@@ -10,12 +10,15 @@ import type { RiskController, RiskQuotaLevel, RiskAction, SessionInteractionBudg
 import type { ConceptStore, BotChatStore } from '../cache/index.js';
 import type { CuratedContentType, CuratedPanelListResult, CuratedFacets } from '../cache/index.js';
 import type { PublishLogStore } from '../publish-agent/publish-log-store.js';
+import type { SetGroupLabelResult } from '../account-store.js';
 import type { EventBus } from '../event-bus/index.js';
 import type { PanelUser } from './auth.js';
 import type { PanelStoreReader } from './panel-store.js';
 import type { PublishApprovalPayload, ApprovalWriteResult } from '../feishu/index.js';
 import type { LlmUsageQuery, LlmUsagePayload } from '../metrics/token-usage-store.js';
 import type { NotificationContact, NotificationContactManual } from '../cache/notification-contact-store.js';
+import type { ThinkingMode, ThinkingModeApi } from '../config/role-catalog.js';
+import type { AlertStore } from '../alerts/index.js';
 
 export interface PanelDeps {
   publishLogStore: PublishLogStore;
@@ -52,6 +55,14 @@ export interface PanelDeps {
   };
   /** 风控注册表（V1 写路由 risk/status、risk/quota 按账号取 controller；单写 PER ACCOUNT）。 */
   riskRegistry: { getController(accountId: string): Promise<RiskController> };
+  /**
+   * 账号属性写入（change editable-account-group-label）。未注入则 `/api/accounts/:id/group-label` 返回 503。
+   * setGroupLabel 经账号存储单写（accounts 表拥有者）：UPDATE-only、空归 NULL（清空）、退役账号 / 无行以
+   * 可区分结果返回、写后回读真态；面板层绝不 raw UPDATE、绝不乐观假成功；不碰风控单写 / 协议 / 边缘。
+   */
+  accountAttr?: {
+    setGroupLabel(accountId: string, groupLabel: string | null): Promise<SetGroupLabelResult>;
+  };
   /**
    * 模型与凭据配置（change console-model-provider-config）。未注入则 /api/config/* 返回 503。
    * 明文密钥绝不经此外观回传；setCredential 主密钥缺失以 {ok:false} 诚实可辨，绝不假成功。
@@ -120,6 +131,13 @@ export interface PanelDeps {
    * 删除非持久（仅清当前快照，达标会重新纳入），honest 回真实条数。
    */
   curatedContent?: PanelCuratedContent;
+  /**
+   * 告警手动解决（change alert-resolution-by-id）。未注入则 `POST /api/alerts/:id/resolve` 返回 503。
+   * 复用 main() 已构造的告警存储单例（同 raise/resolveByEdge 的所有者）。
+   * 红线：只 UPDATE alerts.resolved_at 闭合日志行——绝不碰风控状态单写（applySignal/setQuotaLevel/risk_state）、
+   * 绝不解除边缘暂停（resumeEdge，那是验证码清除点的事）；诚实回真实解决行数（0=没这条/已解决，1=已解决）。
+   */
+  alertStore?: Pick<AlertStore, 'resolveById'>;
 }
 
 // ── 精选内容后台管理（change curated-content-admin-page）────────────────────────
@@ -233,6 +251,20 @@ export interface RoleConfigRowView {
   modelOverridden: boolean;
   /** 温度覆盖（null=用代码默认）。 */
   temperatureOverride: number | null;
+  /**
+   * 当前生效思考模式（change role-thinking-mode-config）：role→分类→default 两层回落后的三态。
+   */
+  effectiveThinkingMode: ThinkingModeApi;
+  /** 按角色思考模式覆盖（null=未覆盖，继承分类/default）。 */
+  thinkingModeOverride: ThinkingMode | null;
+  /** 生效思考模式来源：override=按角色 / category=继承分类 / default=不干预。 */
+  thinkingModeSource: 'override' | 'category' | 'default';
+  /**
+   * 当前生效模型是否支持"开启(on)"（change role-thinking-mode-config）：
+   * false 表示该模型开思考需流式（如 DashScope Qwen），本期不支持——前端据此禁用"开启"选项。
+   * 与出口 `buildThinkingParams` 同源判定，保证 UI 与后端一致。
+   */
+  thinkingOnAvailable: boolean;
   updatedAt: string | null;
   updatedBy: string | null;
 }
@@ -247,6 +279,11 @@ export interface RoleConfigPatch {
   /** 厂商（change model-config-volcengine-provider）：跟 model 同发；写 model 时按此 provider 探活并落库。 */
   provider?: string | null;
   temperature?: number | null;
+  /**
+   * 思考模式（change role-thinking-mode-config）：`'default'|'off'|'on'` 或 null。
+   * 'default'/null/'' = 清除覆盖（回落）；独立于 model（可只改思考模式）。非法值以 {ok:false} 拒绝。
+   */
+  thinkingMode?: string | null;
 }
 
 export type RoleConfigSetResult =
@@ -259,7 +296,8 @@ export type RoleConfigSetResult =
         | 'temperature_not_tunable'
         | 'temperature_out_of_range'
         | 'model_invalid'
-        | 'provider_key_missing';
+        | 'provider_key_missing'
+        | 'thinking_mode_invalid';
     };
 
 export interface PanelRoleConfig {
@@ -282,6 +320,12 @@ export interface CategoryConfigRowView {
   effectiveProvider: string;
   /** 是否存在分类默认覆盖（false=继承全局默认模型）。 */
   modelOverridden: boolean;
+  /** 该分类默认思考模式（change role-thinking-mode-config）：分类覆盖则用覆盖、否则 default。 */
+  effectiveThinkingMode: ThinkingModeApi;
+  /** 是否存在分类思考模式覆盖（false=default）。 */
+  thinkingModeOverridden: boolean;
+  /** 该分类默认模型是否支持"开启(on)"（与出口 buildThinkingParams 同源；false 前端禁用开启）。 */
+  thinkingOnAvailable: boolean;
   updatedAt: string | null;
   updatedBy: string | null;
 }
@@ -290,21 +334,33 @@ export interface CategoryConfigCatalogView {
   categories: CategoryConfigRowView[];
 }
 
+/** PUT /api/categories/:categoryId/config 入参补丁（change role-thinking-mode-config）。null/'' = 清除。 */
+export interface CategoryConfigPatch {
+  model?: string | null;
+  provider?: string | null;
+  /** 分类思考模式：`'default'|'off'|'on'` 或 null；独立于 model。非法值以 {ok:false} 拒绝。 */
+  thinkingMode?: string | null;
+}
+
 export type CategoryConfigSetResult =
   | { ok: true; view: CategoryConfigCatalogView }
   | {
       ok: false;
-      reason: 'unknown_category' | 'category_not_configurable' | 'model_invalid' | 'provider_key_missing';
+      reason:
+        | 'unknown_category'
+        | 'category_not_configurable'
+        | 'model_invalid'
+        | 'provider_key_missing'
+        | 'thinking_mode_invalid';
     };
 
 export interface PanelCategoryConfig {
   /** 分类目录 + 分类默认生效值（白名单制，只含可设默认的分类）。 */
   getCatalog(): CategoryConfigCatalogView;
-  /** 写某分类默认模型 + 厂商（null/'' = 清除覆盖回落全局）。探活不过以 {ok:false} 诚实可辨，绝不落库。写后回真态视图。 */
+  /** 写某分类默认模型 + 厂商 + 思考模式（null/'' = 清除覆盖回落）。探活不过以 {ok:false} 诚实可辨，绝不落库。写后回真态视图。 */
   setCategoryConfig(
     categoryId: string,
-    model: string | null,
-    provider: string | null,
+    patch: CategoryConfigPatch,
     updatedBy: string,
   ): Promise<CategoryConfigSetResult>;
 }
