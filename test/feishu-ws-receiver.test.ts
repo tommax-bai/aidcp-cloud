@@ -351,7 +351,7 @@ test('ws-receiver: 版本预检 — 活版本 ≠ 烤入版本 → 拒绝、绝�
 
 test('ws-receiver: 版本预检 — 陈旧 cancel 同样被拒（防锁死编辑过的草稿签名）', async () => {
   const writes: Array<{ path: string; content: string }> = [];
-  const res = await receiverWithVersion(3, writes).handleCardAction({
+  await receiverWithVersion(3, writes).handleCardAction({
     action: 'cancel',
     requestId: 'publish-42',
     payload: { title: '标题', content: '正文', tags: ['话题'], contentVersion: 1 },
