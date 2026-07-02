@@ -93,7 +93,7 @@ export class CommentDeAiFlavor extends BaseRole {
 
   /** 改写【一次】，让评论表达相近的体会但用自己的话，明确不照搬参考。 */
   private async rewriteAwayFrom(content: string, references: string[]): Promise<string> {
-    const prompt = `下面这条评论与某些「参考评论」过于雷同，有照搬嫌疑。请用你自己的话重写，保持相近的体会与贴题，但句子结构与措辞要明显不同，不要复述参考。只输出重写后的评论本身：
+    const prompt = `下面这条评论与某些「参考评论」过于雷同，有照搬嫌疑。请用你自己的语气、用你自己的话重写，保持相近的体会与贴题，但句子结构与措辞要明显不同，不要复述参考。只输出重写后的评论本身：
 
 参考评论（不可照抄）：
 ${references.map((r, i) => `${i + 1}. ${r}`).join('\n')}
@@ -104,18 +104,30 @@ ${content}`;
     return raw.trim().replace(/^["'“”『「]+|["'“”』」]+$/g, '').trim() || content;
   }
 
-  /** 只读预览（change role-prompt-visibility）：复刻 rewrite（去 AI 味主路径）真实模板 + 示例数据，仅供后台查看；不改 rewrite/rewriteAwayFrom 逻辑。 */
-  previewPrompt(): string {
-    const content = '<示例评论正文，运行时为待改写评论>';
-    const flagged = ['<命中套话示例>'];
-    return `下面这条评论有 AI 腔/套话（命中：${flagged.join('、')}）。把它改写成更像真人随手留言的口吻，保持原意与长度、保持贴题，去掉套话与过量感叹号，不要出现 @ 与话题标签。只输出改写后的评论本身：
+  /** 人设语气片段（change category-adaptive-images-and-judgment）：去 AI 味重写按该账号语气、不抹平成通用中庸腔。
+   *  soul 未注入（如无账号预览）时诚实降级到通用口吻，不抛。 */
+  private personaVoiceLine(): string {
+    try {
+      const { identity } = this.soul;
+      return `把它按你（「${identity.name}」，${identity.role}，语气「${identity.tone}」）的口吻重写、保留你自己的个人腔`;
+    } catch {
+      return '把它改写成更像真人随手留言的口吻';
+    }
+  }
+
+  /** 去 AI 味 rewrite 的共享模板（rewrite 与 previewPrompt 同源，守 prompt-preview 同源红线）。 */
+  private buildRewritePrompt(content: string, flagged: string[]): string {
+    return `下面这条评论有 AI 腔/套话（命中：${flagged.join('、')}）。${this.personaVoiceLine()}，保持原意与长度、保持贴题，去掉套话与明显模板腔（保留自然的口语感叹、只在明显套话时收敛），不要出现 @ 与话题标签。只输出改写后的评论本身：
 ${content}`;
   }
 
+  /** 只读预览（change role-prompt-visibility）：复刻 rewrite（去 AI 味主路径）真实模板 + 示例数据，仅供后台查看；不改 rewrite/rewriteAwayFrom 逻辑。 */
+  previewPrompt(): string {
+    return this.buildRewritePrompt('<示例评论正文，运行时为待改写评论>', ['<命中套话示例>']);
+  }
+
   private async rewrite(content: string, flagged: string[]): Promise<string> {
-    const prompt = `下面这条评论有 AI 腔/套话（命中：${flagged.join('、')}）。把它改写成更像真人随手留言的口吻，保持原意与长度、保持贴题，去掉套话与过量感叹号，不要出现 @ 与话题标签。只输出改写后的评论本身：
-${content}`;
-    const raw = await this.decide(prompt);
+    const raw = await this.decide(this.buildRewritePrompt(content, flagged));
     return raw.trim().replace(/^["'“”『「]+|["'“”』」]+$/g, '').trim() || content;
   }
 }
