@@ -16,6 +16,7 @@ const acct: PanelAccount = {
   platform: 'xiaohongshu',
   groupLabel: null,
   machineLabel: null,
+  groupChatInfo: null,
   operatorStatus: 'active',
   pausedAt: null,
   riskStatus: 'normal',
@@ -557,6 +558,82 @@ test('HTTP 分组标签写路由：未注入 503 / 成功回真态 / 清空 / 40
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ groupLabel: '矩阵A' }),
+    });
+    assert.equal(noTok.status, 401);
+  } finally {
+    await h.close();
+  }
+});
+
+test('HTTP 群聊码写路由：未注入 503 / verbatim 回真态 / 清空 / 404 / 退役拒 / 坏类型 / 鉴权（account-group-chat-injection）', async () => {
+  // 未注入 accountAttr（无 setGroupChatInfo）→ 503
+  const noAttr = await startPanelApi(deps, makeConfig());
+  try {
+    const base = `http://127.0.0.1:${noAttr.port}`;
+    const token = await loginToken(base);
+    const r = await fetch(`${base}/api/accounts/acc-1/group-chat-info`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ groupChatInfo: '加群码' }),
+    });
+    assert.equal(r.status, 503);
+  } finally {
+    await noAttr.close();
+  }
+
+  // 注入 accountAttr.setGroupChatInfo（内存 map；契约同 PgAccountStore.setGroupChatInfo：verbatim，仅判空清空）
+  const rows = new Map<string, string | null>([['acc-1', null]]);
+  const accountAttr = {
+    setGroupLabel: async () => ({ ok: true as const, groupLabel: null }),
+    setGroupChatInfo: async (accountId: string, info: string | null) => {
+      if (accountId === 'default') return { ok: false as const, reason: 'retired_account' as const };
+      if (!rows.has(accountId)) return { ok: false as const, reason: 'account_not_found' as const };
+      const raw = info ?? '';
+      const value = raw.trim() === '' ? null : raw; // verbatim：非空原样存
+      rows.set(accountId, value);
+      return { ok: true as const, groupChatInfo: value };
+    },
+  };
+  const depsAttr = { ...(deps as object), accountAttr } as unknown as PanelDeps;
+  const h = await startPanelApi(depsAttr, makeConfig());
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const token = await loginToken(base);
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+    const put = (id: string, body: unknown) =>
+      fetch(`${base}/api/accounts/${id}/group-chat-info`, { method: 'PUT', headers: auth, body: JSON.stringify(body) });
+
+    // 成功：verbatim 回真态——首尾空白 / emoji / 换行原样保留（不 trim、不截断）
+    const raw = '  2【长按复制】加群🐶🍅\n第二行 :/#f  ';
+    const ok = (await (await put('acc-1', { groupChatInfo: raw })).json()) as {
+      accountId: string;
+      groupChatInfo: string | null;
+    };
+    assert.equal(ok.accountId, 'acc-1');
+    assert.equal(ok.groupChatInfo, raw); // 逐字节一致
+
+    // 清空：空串 → NULL
+    const cleared = (await (await put('acc-1', { groupChatInfo: '' })).json()) as { groupChatInfo: string | null };
+    assert.equal(cleared.groupChatInfo, null);
+
+    // 不存在账号 → 404
+    assert.equal((await put('ghost', { groupChatInfo: '加群码' })).status, 404);
+
+    // 退役保留账号 → 400 reason retired_account
+    const retired = await put('default', { groupChatInfo: '加群码' });
+    assert.equal(retired.status, 400);
+    assert.equal(((await retired.json()) as { reason: string }).reason, 'retired_account');
+
+    // 坏类型 → 400（路由层拒，不触及 store）
+    const bad = await put('acc-1', { groupChatInfo: 123 });
+    assert.equal(bad.status, 400);
+    assert.equal(((await bad.json()) as { reason: string }).reason, 'invalid_group_chat_info');
+
+    // 无 token → 401
+    const noTok = await fetch(`${base}/api/accounts/acc-1/group-chat-info`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ groupChatInfo: '加群码' }),
     });
     assert.equal(noTok.status, 401);
   } finally {

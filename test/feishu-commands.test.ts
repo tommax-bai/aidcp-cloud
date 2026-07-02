@@ -201,6 +201,67 @@ test('parseCommand: /comment 无参 → action comment、nickname undefined（�
   assert.equal(cmd.nickname, undefined);
 });
 
+// ── change account-group-chat-injection：/comment 尾部引流开关 group:on/off ──
+
+test('parseCommand: /comment <昵称> group:on → injectGroup true、昵称不含开关', () => {
+  const cmd = parseCommand('/aidcp comment 工程师大白 group:on');
+  assert.equal(cmd.action, 'comment');
+  assert.equal(cmd.nickname, '工程师大白');
+  assert.equal(cmd.injectGroup, true);
+});
+
+test('parseCommand: /comment <昵称> group:off → injectGroup false', () => {
+  const cmd = parseCommand('/aidcp comment 工程师大白 group:off');
+  assert.equal(cmd.nickname, '工程师大白');
+  assert.equal(cmd.injectGroup, false);
+});
+
+test('parseCommand: 引流开关大小写不敏感（GROUP:ON）', () => {
+  const cmd = parseCommand('/aidcp comment 工程师大白 GROUP:ON');
+  assert.equal(cmd.nickname, '工程师大白');
+  assert.equal(cmd.injectGroup, true);
+});
+
+test('parseCommand: /comment 无开关 → injectGroup undefined、昵称完整（零回归）', () => {
+  const cmd = parseCommand('/aidcp comment 工程师大白');
+  assert.equal(cmd.nickname, '工程师大白');
+  assert.equal(cmd.injectGroup, undefined);
+});
+
+test('parseCommand: 含空格昵称 + 尾部开关正确切分', () => {
+  const cmd = parseCommand('/aidcp comment 大白 工程师 group:on');
+  assert.equal(cmd.nickname, '大白 工程师');
+  assert.equal(cmd.injectGroup, true);
+});
+
+test('parseCommand: 开关只认末尾（trailing-only）——中间的 group:on-样 token 不当开关，并入昵称', () => {
+  const cmd = parseCommand('/aidcp comment group:on 工程师');
+  assert.equal(cmd.injectGroup, undefined); // 末尾是「工程师」，非开关
+  assert.equal(cmd.nickname, 'group:on 工程师'); // 整段作昵称（执行层再诚实解析/报错）
+});
+
+test('parseCommand: 仅 group:on 无昵称 → injectGroup true、nickname undefined（单账号引流）', () => {
+  const cmd = parseCommand('/aidcp comment group:on');
+  assert.equal(cmd.injectGroup, true);
+  assert.equal(cmd.nickname, undefined);
+});
+
+test('CommandRouter: /comment group:on 把 injectGroup=true 透传给 comment 动作', async () => {
+  let seen: { nickname?: string; options?: { injectGroup?: boolean } } | null = null;
+  const router = new CommandRouter({
+    ...makeActions().actions,
+    comment: async (nickname?: string, options?: { injectGroup?: boolean }) => {
+      seen = { nickname, options };
+      return { ok: true as const, level: 'success' as const, title: '已触发', message: 'ok' };
+    },
+  });
+  await router.handle('/aidcp comment 工程师大白 group:on');
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectGroup: true } });
+
+  await router.handle('/aidcp comment 工程师大白');
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectGroup: undefined } });
+});
+
 test('CommandRouter: publish 编排失败 → 回执 ok:false / level:error（红 ❌，绝不再绿色）+ 透传失败原因', async () => {
   const router = new CommandRouter({
     ...makeActions().actions,

@@ -129,6 +129,76 @@ describe('CommentScheduler.triggerManual', () => {
     assert.equal(card.level, 'success', '评了 → 结果卡片绿');
   });
 
+  // ── change account-group-chat-injection：group:on 缺码 fail-closed + 有码端到端注入 ──
+
+  it('group:on 但未注入 getGroupChatInfo → fail-closed（黄告警、不接管边端）', async () => {
+    let takeovers = 0;
+    const s = new CommentScheduler(baseDeps({ onTakeoverStart: () => { takeovers += 1; } }));
+    const r = await s.triggerManual('acc-1', { injectGroup: true });
+    assert.equal(r.ok, false);
+    assert.equal(r.level, 'warning');
+    assert.match(r.message, /关联群聊/);
+    assert.equal(takeovers, 0, '缺码绝不接管边端 / 绝不发无码评论');
+  });
+
+  it('group:on 但账号未配码（getGroupChatInfo→null）→ fail-closed，不接管边端', async () => {
+    let takeovers = 0;
+    const s = new CommentScheduler(
+      baseDeps({ getGroupChatInfo: async () => null, onTakeoverStart: () => { takeovers += 1; } }),
+    );
+    const r = await s.triggerManual('acc-1', { injectGroup: true });
+    assert.equal(r.ok, false);
+    assert.equal(r.level, 'warning');
+    assert.match(r.message, /关联群聊/);
+    assert.equal(takeovers, 0);
+  });
+
+  it('group:on + 有码 → 触发成功，且群聊码注入到人审卡文本（端到端，审=发）', async () => {
+    const bus = new EventBus();
+    const cardDone = deferred<void>();
+    let approvedText: string | undefined;
+    const code = '加群🐶\n第二行';
+    const s = new CommentScheduler(
+      baseDeps({
+        resolveConnection: () => ({ bus, edgeId: 'e1' }),
+        pusher: fakeEdge(bus),
+        getGroupChatInfo: async () => code,
+        approval: {
+          request: async (r: { text: string }) => { approvedText = r.text; },
+          isApproved: async () => true,
+        },
+        postResultCard: () => { cardDone.resolve(); },
+      }),
+    );
+    const receipt = await s.triggerManual('acc-1', { injectGroup: true });
+    assert.equal(receipt.ok, true);
+    await cardDone.promise;
+    assert.equal(approvedText, `这套检索链路很实在\n${code}`, '人审卡文本 = 正文 + 换行 + verbatim 码');
+  });
+
+  it('无 group:on（缺省）→ 不读码、正常评论，零回归', async () => {
+    const bus = new EventBus();
+    const cardDone = deferred<void>();
+    let approvedText: string | undefined;
+    let readCode = false;
+    const s = new CommentScheduler(
+      baseDeps({
+        resolveConnection: () => ({ bus, edgeId: 'e1' }),
+        pusher: fakeEdge(bus),
+        getGroupChatInfo: async () => { readCode = true; return '加群码'; },
+        approval: {
+          request: async (r: { text: string }) => { approvedText = r.text; },
+          isApproved: async () => true,
+        },
+        postResultCard: () => { cardDone.resolve(); },
+      }),
+    );
+    await s.triggerManual('acc-1'); // 无 injectGroup
+    await cardDone.promise;
+    assert.equal(readCode, false, '不带开关时绝不读码');
+    assert.equal(approvedText, '这套检索链路很实在', '正文原样、无码追加');
+  });
+
   it('同账号已在跑 → ok:false / level:warning（不并发抢边端）', async () => {
     // 用可控 gate 把首个任务卡在 generateTerms（running 持续），断言后释放让其干净收尾、不挂住进程。
     const bus = new EventBus();

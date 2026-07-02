@@ -916,12 +916,13 @@ async function main(): Promise<void> {
     },
     // 手动 /comment <昵称>（change comment-search-command）：按昵称解析账号 → 触发按需评论任务。
     // 回执据**触发结果**判 ok/level（开跑绿 / 未触发黄 / 失败红）；最终评/未评结果由 scheduler 异步补结果卡片。
-    comment: async (nickname?: string) => {
+    comment: async (nickname?: string, options?: { injectGroup?: boolean }) => {
       if (!commentScheduler) {
         return { ok: false, level: 'error', title: '按需评论未就绪', message: '评论触发器未就绪（启动中或依赖不可用），未发起任务。' };
       }
       const acct = await resolveAccountByNickname(nickname); // 找不到/重名 → 抛错，runComment 走 fail 分支（红 ❌）
-      return commentScheduler.triggerManual(acct);
+      // injectGroup（change account-group-chat-injection）：group:on 时注入账号群聊码；缺码 fail-closed 由 scheduler 处置。
+      return commentScheduler.triggerManual(acct, { injectGroup: options?.injectGroup });
     },
   };
   const commandRouter = new CommandRouter(actions);
@@ -1287,6 +1288,10 @@ async function main(): Promise<void> {
     getSoul,
     // persona-driven-content-pipeline：/comment 触发前人设闸——未绑人设不接管边端、不启动评论任务（与浏览/发布同口径）。
     isPersonaBound: (accountId) => personaStore.getForAccount(accountId) !== null,
+    // account-group-chat-injection：/comment group:on 时读账号群聊码（异步直读账号存储）；缺码由 scheduler fail-closed。
+    getGroupChatInfo: accountStore?.getGroupChatInfo
+      ? (accountId) => accountStore!.getGroupChatInfo!(accountId)
+      : undefined,
     selectCurated: (accountId, type, limit) =>
       curatedContentStore
         ? curatedContentStore
@@ -1550,9 +1555,18 @@ async function main(): Promise<void> {
             },
             dispatchActive: () => dispatchActive,
           },
-          // 账号属性写入（change editable-account-group-label）：经账号存储单写；存储未就绪 → 不注入，路由回 503。
+          // 账号属性写入（change editable-account-group-label + account-group-chat-injection）：经账号存储单写；
+          // 存储未就绪 → 不注入，路由回 503。setGroupChatInfo 可选（存储方法存在时才挂，否则该子路由单独 503）。
           accountAttr: accountStore?.setGroupLabel
-            ? { setGroupLabel: (accountId, label) => accountStore!.setGroupLabel!(accountId, label) }
+            ? {
+                setGroupLabel: (accountId, label) => accountStore!.setGroupLabel!(accountId, label),
+                ...(accountStore.setGroupChatInfo
+                  ? {
+                      setGroupChatInfo: (accountId: string, info: string | null) =>
+                        accountStore!.setGroupChatInfo!(accountId, info),
+                    }
+                  : {}),
+              }
             : undefined,
           // 模型与凭据配置（change console-model-provider-config + model-config-volcengine-provider）。明文密钥绝不经此回传。
           modelConfig: {

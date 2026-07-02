@@ -327,6 +327,38 @@ function createRequestHandler(
       sendJson(res, 200, { accountId, groupLabel: result.groupLabel });
       return;
     }
+    // 账号「关联群聊引流码」写（change account-group-chat-injection）：经账号存储单写（accounts 表拥有者），
+    // **verbatim——不 trim / 不截断**；绝不 raw UPDATE、绝不乐观假成功；空归 NULL（清空）、无行 404、退役账号拒、写后回读真态。
+    if (method === 'PUT' && url.startsWith('/api/accounts/') && url.endsWith('/group-chat-info')) {
+      const accountId = decodeURIComponent(url.slice('/api/accounts/'.length, -'/group-chat-info'.length));
+      if (!deps.accountAttr?.setGroupChatInfo) {
+        sendJson(res, 503, { error: 'unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { groupChatInfo } = (body ?? {}) as { groupChatInfo?: unknown };
+      // groupChatInfo 只接受 string | null | 缺省（缺省 / null / 空串 = 清空）；其它类型诚实拒。
+      if (groupChatInfo !== undefined && groupChatInfo !== null && typeof groupChatInfo !== 'string') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_group_chat_info' });
+        return;
+      }
+      // verbatim：不 trim——原样透传给存储（存储只用 trim 判空决定清空 vs 设值）。
+      const info = typeof groupChatInfo === 'string' ? groupChatInfo : null;
+      const result = await deps.accountAttr.setGroupChatInfo(accountId, info);
+      if (!result.ok) {
+        if (result.reason === 'account_not_found') sendJson(res, 404, { error: 'account_not_found' });
+        else sendJson(res, 400, { error: 'bad_request', reason: result.reason }); // retired_account
+        return;
+      }
+      sendJson(res, 200, { accountId, groupChatInfo: result.groupChatInfo });
+      return;
+    }
     // 风控写（V1 task 8.4）：经 registry 取账号 controller 单写；status 经枚举信号种类、quota 经 setQuotaLevel
     if (method === 'POST' && url.startsWith('/api/accounts/') && url.endsWith('/risk/status')) {
       const accountId = decodeURIComponent(url.slice('/api/accounts/'.length, -'/risk/status'.length));

@@ -86,4 +86,56 @@ describe('buildComposeAndApprove', () => {
     });
     assert.equal(await step(note, comments), null);
   });
+
+  // ── change account-group-chat-injection：群聊引流码 verbatim 注入 + 审=发 ──
+
+  it('群聊引流码注入：去AI味后 / 人审前 verbatim 追加，人审卡文本 == 返回文本（审=发）', async () => {
+    let approvedText: string | undefined;
+    const code = '2【长按复制】加群🐶\n第二行 :/#f'; // 含 emoji / 换行 / 特殊符
+    const step = buildComposeAndApprove({
+      composer: composer('这套检索链路很实在'),
+      groupChatCode: code,
+      approval: {
+        request: async (r: { text: string }) => {
+          approvedText = r.text;
+        },
+        isApproved: async () => true,
+      },
+      logger: { log: () => {}, warn: () => {} },
+    });
+    const text = await step(note, comments);
+    const expected = `这套检索链路很实在\n${code}`;
+    assert.equal(text, expected); // 返回含码完整终稿（正文 + 换行 + verbatim 码）
+    assert.equal(approvedText, expected); // 人审卡展示的正是要发的（AC-PUB 审=发）
+  });
+
+  it('无群聊码（groupChatCode 缺省 / null）→ 文本不变，零回归', async () => {
+    const step1 = buildComposeAndApprove({
+      composer: composer('这套检索链路很实在'),
+      approval: approvalPort(true),
+      logger: { log: () => {}, warn: () => {} },
+    });
+    assert.equal(await step1(note, comments), '这套检索链路很实在');
+
+    const step2 = buildComposeAndApprove({
+      composer: composer('这套检索链路很实在'),
+      groupChatCode: null,
+      approval: approvalPort(true),
+      logger: { log: () => {}, warn: () => {} },
+    });
+    assert.equal(await step2(note, comments), '这套检索链路很实在');
+  });
+
+  it('码不参与反照搬：references 命中码不致弃发（overlap 只比正文）', async () => {
+    const code = '加群暗号-xyz';
+    const step = buildComposeAndApprove({
+      composer: composer('这套检索链路很实在'),
+      groupChatCode: code,
+      getReferences: async () => [code], // 参考里正好含码字面
+      approval: approvalPort(true),
+      logger: { log: () => {}, warn: () => {} },
+    });
+    // 正文不撞参考 → 不弃发；码追加在 overlap 之后 → 不进比对
+    assert.equal(await step(note, comments), `这套检索链路很实在\n${code}`);
+  });
 });

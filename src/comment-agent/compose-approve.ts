@@ -31,6 +31,12 @@ export interface ComposeApproveDeps {
   approval?: CommentApprovalPort;
   /** 可选精选参考召回（仅作灵感、撞则弃）；缺省/出错 → 无参考。 */
   getReferences?: (note: NoteForComment) => Promise<string[]>;
+  /**
+   * 群聊引流码（change account-group-chat-injection）：非 null 时在去 AI 味 + 反照搬之后、人审之前 verbatim 追加。
+   * 由 CommentScheduler 在任务开始处解析一次（/comment group:on 且账号已配码；否则 null=不注入）。
+   * 缺省 / null → 不注入（普通评论，零回归）。边缘保真（trim / 提及补全）由 edge 侧任务处置，此处保证云端「审=发」。
+   */
+  groupChatCode?: string | null;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   logger?: Pick<Console, 'log' | 'warn'>;
@@ -83,7 +89,16 @@ export function buildComposeAndApprove(
       return null;
     }
 
-    // ③ 人审（AC-PUB）：未接线 / 超时 / 拒绝 → null（绝不裸发）。
+    // ③ 群聊引流码注入（change account-group-chat-injection）：命中开关且有码时，在去 AI 味 + 反照搬**之后**、
+    //    人审**之前** verbatim 追加——① 追加在去 AI 味之后 → 不被重写吞掉；② 追加在人审卡之前 → 人审看到的即含码完整
+    //    终稿（AC-PUB「审=发」）；③ 码不参与上面的 overlapsAny 反照搬比对（只比正文）。正文长度闸在 composeDraft 内、
+    //    作用于正文草稿，追加后终稿可超上限——有意（码本身长），非缺陷。边缘保真（trim / 提及补全）另由 edge 侧任务处置。
+    if (deps.groupChatCode) {
+      text = `${text}\n${deps.groupChatCode}`;
+      log.log(`[comment-compose] 已注入群聊引流码 note=${note.noteId}（人审卡将展示含码终稿）`);
+    }
+
+    // ④ 人审（AC-PUB）：未接线 / 超时 / 拒绝 → null（绝不裸发）。
     if (!deps.approval) {
       log.warn(`[comment-compose] 评论人审口未接线 note=${note.noteId} → 不发（绝不裸发）`);
       return null;

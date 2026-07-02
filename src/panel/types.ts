@@ -10,7 +10,7 @@ import type { RiskController, RiskQuotaLevel, RiskAction, SessionInteractionBudg
 import type { ConceptStore, BotChatStore } from '../cache/index.js';
 import type { CuratedContentType, CuratedPanelListResult, CuratedFacets } from '../cache/index.js';
 import type { PublishLogStore } from '../publish-agent/publish-log-store.js';
-import type { SetGroupLabelResult } from '../account-store.js';
+import type { SetGroupLabelResult, SetGroupChatInfoResult } from '../account-store.js';
 import type { EventBus } from '../event-bus/index.js';
 import type { PanelUser } from './auth.js';
 import type { PanelStoreReader } from './panel-store.js';
@@ -62,6 +62,12 @@ export interface PanelDeps {
    */
   accountAttr?: {
     setGroupLabel(accountId: string, groupLabel: string | null): Promise<SetGroupLabelResult>;
+    /**
+     * 账号「关联群聊引流码」写入（change account-group-chat-injection）。未注入则
+     * `/api/accounts/:id/group-chat-info` 返回 503。经账号存储单写：UPDATE-only、**verbatim（不 trim / 不截断）**、
+     * 空归 NULL（清空）、退役账号 / 无行以可区分结果返回、写后回读真态；绝不 raw UPDATE / 乐观假成功。
+     */
+    setGroupChatInfo?(accountId: string, groupChatInfo: string | null): Promise<SetGroupChatInfoResult>;
   };
   /**
    * 模型与凭据配置（change console-model-provider-config）。未注入则 /api/config/* 返回 503。

@@ -40,6 +40,12 @@ export interface CommentSchedulerDeps {
   getSoul: (accountId: string) => Soul;
   /** 人设绑定判定（persona-driven-content-pipeline）：注入则触发前闸——未绑人设的账号不接管边端、不启动评论任务，绝不以默认人设代评。缺省→不闸（向后兼容旧构造 / 测试桩）。 */
   isPersonaBound?: (accountId: string) => boolean;
+  /**
+   * 读账号「关联群聊引流码」（change account-group-chat-injection）：/comment group:on 时任务开始处**解析一次**，
+   * 缺码 → fail-closed（触发闸回黄色告警、本次不发）；有码 → 同一个已解析值一路带到注入（gate 与注入同源，无 TOCTOU）。
+   * 缺省 → 无法取码（group:on 时一律 fail-closed）。
+   */
+  getGroupChatInfo?: (accountId: string) => Promise<string | null>;
   /** 取精选样本喂搜索词生成（按账号；出错回 []）。 */
   selectCurated: (accountId: string, contentType: 'note' | 'comment', limit: number) => Promise<CuratedSampleForTerms[]>;
   /** 账号绑定 LLM（计 token 归属该账号）。 */
@@ -78,12 +84,29 @@ export class CommentScheduler {
   }
 
   /** 飞书 /comment 触发：返回「触发态」结构化回执；最终结果异步补发结果卡片。 */
-  async triggerManual(accountId: string): Promise<CommentCommandReceipt> {
+  async triggerManual(
+    accountId: string,
+    options?: { injectGroup?: boolean },
+  ): Promise<CommentCommandReceipt> {
     if (!accountId || accountId === 'default') {
       return { ok: false, level: 'error', title: '按需评论触发失败', message: '未解析到有效账号（绝不回落 default）' };
     }
     if (this.deps.isPersonaBound && !this.deps.isPersonaBound(accountId)) {
       return { ok: false, level: 'warning', title: '未触发按需评论', message: '该账号未绑定人设——请先到后台「人设」页设置；未绑人设不启动评论任务，绝不以默认人设代评。' };
+    }
+    // 群聊引流码闸（change account-group-chat-injection）：group:on 时**解析一次**码——缺码 fail-closed（本次不发，
+    // 绝不静默降级成无码评论，镜像上面的 isPersonaBound 闸）；有码则用同一个已解析值注入（gate 与注入同源，无 TOCTOU）。
+    let groupChatCode: string | null = null;
+    if (options?.injectGroup) {
+      groupChatCode = this.deps.getGroupChatInfo ? await this.deps.getGroupChatInfo(accountId) : null;
+      if (!groupChatCode) {
+        return {
+          ok: false,
+          level: 'warning',
+          title: '未触发按需评论',
+          message: '该账号未配置「关联群聊信息」——请先到后台账号页设置；要求引流但无码，本次不发（绝不发无码评论）。',
+        };
+      }
     }
     if (this.running.has(accountId)) {
       return { ok: false, level: 'warning', title: '未触发按需评论', message: '该账号已有评论任务在跑，请等其结束' };
@@ -96,8 +119,8 @@ export class CommentScheduler {
     this.running.add(accountId);
     const edgeId = conn.edgeId;
     const bus = conn.bus;
-    // 异步跑任务，命令立即回执（任务含人审轮询，不可同步等）。
-    void this.runTask(accountId, bus, edgeId).finally(() => this.running.delete(accountId));
+    // 异步跑任务，命令立即回执（任务含人审轮询，不可同步等）。groupChatCode 已解析一次，带进任务用于注入（gate 同源）。
+    void this.runTask(accountId, bus, edgeId, groupChatCode).finally(() => this.running.delete(accountId));
 
     return {
       ok: true,
@@ -107,7 +130,12 @@ export class CommentScheduler {
     };
   }
 
-  private async runTask(accountId: string, bus: EventBus, edgeId: string): Promise<void> {
+  private async runTask(
+    accountId: string,
+    bus: EventBus,
+    edgeId: string,
+    groupChatCode: string | null = null,
+  ): Promise<void> {
     const log = this.deps.logger ?? console;
     const soul = this.deps.getSoul(accountId);
     const llm = this.deps.llmFor(accountId);
@@ -121,6 +149,8 @@ export class CommentScheduler {
       composer,
       approval: this.deps.approval,
       postProcessor: this.deps.postProcessorFor?.(accountId),
+      // 群聊引流码（change account-group-chat-injection）：已在 triggerManual 解析一次（同源），非 null 时注入。
+      groupChatCode,
       now: this.deps.now,
       logger: log,
     });
