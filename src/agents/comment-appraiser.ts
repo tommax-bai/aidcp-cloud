@@ -15,11 +15,15 @@ import type { NoteData } from './content-curator-role.js';
 import type { RoleName, InteractionCompletedPayload } from '../event-bus/types.js';
 
 /**
- * 评论硬数值阈值（engagement-restraint）：仅当详情页**点赞 > 1000 且 收藏 > 300**（均严格大于「超过」语义）
- * 才达精品门槛、才可能评论。为必要非充分条件——达阈值后仍叠加 LLM 精品判定 + 飞书人审。
+ * 评论硬数值阈值（engagement-restraint；change category-adaptive-images-and-judgment 起收藏侧不再一刀切绝对值）：
+ * 精品门槛 = 点赞 > COMMENT_MIN_LIKES **且**（收藏 > COMMENT_MIN_COLLECTS **或** 点赞 > COMMENT_HIGH_LIKES）。
+ * 即超高热度爆帖（点赞极高）即便收藏绝对值不高也可达门槛——治「高赞低藏的情感 / 颜值爆帖被固定收藏 300 一律排除」；
+ * 但主条件仍要求高点赞（非宽松纯 OR），保持 pre-LLM 便宜确定性门槛、必要非充分。达门槛后仍叠加 LLM 精品判定 + 飞书人审 + 每日上限 + 风控取小。
  */
 export const COMMENT_MIN_LIKES = 1000;
 export const COMMENT_MIN_COLLECTS = 300;
+/** 超高热度豁免收藏绝对值的点赞线（爆帖赞高藏低仍可达门槛）。 */
+export const COMMENT_HIGH_LIKES = 10000;
 
 export interface CommentAppraiserOptions extends RoleOptions {
   getNoteData: (noteId: string) => NoteData | null;
@@ -94,8 +98,9 @@ export class CommentAppraiser extends BaseRole {
       this.skip(payload, 'note_data_unavailable');
       return;
     }
-    // 硬数值阈值（engagement-restraint）：点赞 > 1000 且 收藏 > 300（严格大于）才达精品门槛，否则在调 LLM 前即跳过。
-    if (!(note.likeCount > COMMENT_MIN_LIKES && note.collectCount > COMMENT_MIN_COLLECTS)) {
+    // 硬数值阈值（engagement-restraint）：点赞 > MIN_LIKES 且（收藏 > MIN_COLLECTS 或 点赞 > HIGH_LIKES 的高热爆帖豁免）才达门槛，否则调 LLM 前即跳过。
+    const collectOk = note.collectCount > COMMENT_MIN_COLLECTS || note.likeCount > COMMENT_HIGH_LIKES;
+    if (!(note.likeCount > COMMENT_MIN_LIKES && collectOk)) {
       this.skip(payload, 'below_comment_threshold');
       return;
     }

@@ -18,10 +18,10 @@ import type { NoteData } from './content-curator-role.js';
 import type { RoleName, ReadingDonePayload } from '../event-bus/types.js';
 
 /**
- * 收藏硬数值阈值（engagement-restraint）：仅当笔记「收藏数 / 点赞数 ≥ 此比例」（默认 1/3，即 1:3）才收藏。
- * 高收藏率=有反复参考 / 保存价值的硬核内容；娱乐 / 颜值类赞高藏低会被挡，与人设 collection_principle 同向。
- * 必要非充分条件——达阈值后仍叠加 LLM 收藏判定 + 风控 / 冷却 / 预算。点赞不受此闸约束。
- * 调参：改此常量即可（与评论的 COMMENT_MIN_LIKES 同构，单点可配）。
+ * 收藏硬数值阈值（engagement-restraint）：仅当笔记「收藏数 / 点赞数 ≥ 此比例」（默认 1/3）才收藏。
+ * 高收藏率=有反复参考 / 保存价值；必要非充分条件——达阈值后仍叠加 LLM 收藏判定 + 风控 / 冷却 / 预算。点赞不受此闸约束。
+ * change category-adaptive-images-and-judgment：默认比例是**通用地板**，非「硬核=唯一收藏标准」——审美 / 灵感 / 心情板类
+ * 口味（好看即收藏、高赞低藏）的账号应经后台 getMinSaveLikeRatio 钩子调低 / 旁路此比例；仍保留地板存在性与「0 赞不收藏」防线。
  */
 export const COLLECT_MIN_SAVE_LIKE_RATIO = 1 / 3;
 
@@ -157,7 +157,7 @@ export class InteractionAppraiserRole extends BaseRole {
 
 决策逻辑（点赞是选择性互动，收藏是更稀有的选择性互动）：
 - like：仅在内容**真有共鸣 / 学到具体东西 / 观点让你眼前一亮**时才点；普通的、只是泛泛认同的、刷过即忘的笔记不点
-- collect：仅当会反复查看、需落地复用（实操步骤 / 代码配置 / 架构图等硬核可复用知识）才收藏——更稀有、更谨慎
+- collect：仅当会反复回看、日后能照着做或参考（具体可复用的类型以你的兴趣与上文收藏原则为准）才收藏——更稀有、更谨慎
 - both：值得收藏的内容几乎也值得点赞，收藏时优先选 both
 - pass：不够格互动（多数普通笔记落这里）
 
