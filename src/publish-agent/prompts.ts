@@ -9,6 +9,7 @@
 
 import type { TriggerInput, ScoutDecision, CreatedContent, AssembledContent, ImageCategory, StyleProfile } from './types.js';
 import { IMAGE_CATEGORIES } from './types.js';
+import type { Soul } from '../soul/types.js';
 
 /**
  * 禁用词/句式列表（negative list）。
@@ -506,17 +507,50 @@ export function buildImagePromptComposerPrompt(theme: { subject: string; intent?
 // ─── ContentAssembler ────────────────────────────────────────────────────────
 
 /**
- * ContentAssembler prompt — 质量评审
- * 输出 JSON: { qualityScore, issues, suggestions }
+ * 「内容价值」维度按品类切子标准（change category-adaptive-images-and-judgment）：
+ * 不再单一「有无硬信息」，否则系统性压低情感/审美/生活/图片流类正当内容。
+ */
+const QUALITY_VALUE_HINTS: Record<ImageCategory, string> = {
+  knowledge: '信息量、实用性、可操作性（是否学到具体、能照着做）',
+  career: '信息量、实用性、可操作性（对成长/工作是否真有用）',
+  tech: '信息量、准确性、实用性',
+  emotion: '共鸣、真实体验、情绪真挚度（不苛求硬信息/数据）',
+  beauty: '种草力、真实使用体验、质感呈现（不苛求硬信息）',
+  fashion: '搭配灵感、种草力、画面感（不苛求硬信息）',
+  food: '食欲感、真实探店/试做体验、画面感（不苛求硬信息）',
+  travel: '氛围感、目的地吸引力、真实体验（不苛求硬信息）',
+  home: '生活美感、种草力、真实体验（不苛求硬信息）',
+  general: '综合内容价值：视内容取信息量 或 共鸣/画面感/真实体验',
+};
+
+/**
+ * ContentAssembler prompt — 质量评审（change category-adaptive-images-and-judgment：接人设 + 品类自适应维度）。
+ * 输出 JSON: { qualityScore, issues, suggestions }。
+ * 红线：只改「打分口味」——不改 gatekeeper 放行阈值、不改 QualityScorer 降级公式（AC-PUB，在角色侧）。
  */
 export function buildAssemblerPrompt(
   content: CreatedContent,
-  postProcessResult: { aiScore: number; flaggedPhrases: string[]; rewritten: boolean }
+  postProcessResult: { aiScore: number; flaggedPhrases: string[]; rewritten: boolean },
+  soul: Soul | null,
+  category: ImageCategory,
 ): string {
   const banned = BANNED_PHRASES.map((p) => `「${p}」`).join('、');
+  const valueHint = QUALITY_VALUE_HINTS[category] ?? QUALITY_VALUE_HINTS.general;
+  const personaBlock = soul
+    ? [
+        '【账号人设（评审须贴合其声音与领域，勿以「不像技术/干货」压分）】',
+        `角色定位: ${soul.identity.role}`,
+        `语气: ${soul.identity.tone}`,
+        `兴趣领域: ${soul.interests.primary.length ? soul.interests.primary.join('、') : '（未填）'}`,
+        '',
+      ]
+    : [];
 
   return [
-    '你是一个内容质量评审员。你的任务是评估一篇小红书笔记的整体质量，综合内容本身和后处理检测结果给出评分。',
+    '你是一个内容质量评审员。你的任务是评估一篇小红书笔记的整体质量，综合内容本身和后处理检测结果给出评分。评分须贴合该账号人设与本帖品类，MUST NOT 用单一「干货/信息密度」口味评判所有内容。',
+    '',
+    ...personaBlock,
+    `【本帖品类】${category}`,
     '',
     '【待评审内容】',
     `标题: ${content.title}`,
@@ -533,10 +567,10 @@ export function buildAssemblerPrompt(
     banned,
     '',
     '【评分维度】',
-    '- 真实感（是否像真人写的，不是AI生成）: 0-25分',
-    '- 信息价值（是否有具体细节、实用信息）: 0-25分',
+    '- 真实感（是否贴合该账号人设声音、像这个人真写的，而非通用 AI 腔）: 0-25分',
+    `- 内容价值（按本帖品类看：${valueHint}）: 0-25分`,
     '- 可读性（结构、语言流畅度）: 0-25分',
-    '- 话题性（是否有吸引力、能引发讨论）: 0-25分',
+    '- 话题性（是否有吸引力、能引发讨论/共鸣）: 0-25分',
     '- 如果 aiScore > 0.5 或命中禁用词 > 2 个，总分上限 60',
     '',
     '【输出要求】',
@@ -544,7 +578,7 @@ export function buildAssemblerPrompt(
     '{"qualityScore": 0-100, "issues": ["问题1","问题2"], "suggestions": ["建议1","建议2"]}',
     '',
     '示例输出：',
-    '{"qualityScore": 78, "issues": ["开头稍显刻意","缺少具体数据支撑"], "suggestions": ["可以补充实际测试数据","开头改为直接抛问题"]}',
+    '{"qualityScore": 78, "issues": ["开头稍显平淡","个人体验可以再具体一点"], "suggestions": ["开头改为直接抛出场景或痛点","补充一处你自己的真实细节/感受"]}',
   ].join('\n');
 }
 

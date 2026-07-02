@@ -1,10 +1,11 @@
 import { BasePublishRole } from './base-role.js';
 import type { RoleConfig } from './base-role.js';
-import type { PipelineFields, CreatedContent, CleanedContent, QualityReport, PostProcessResult } from '../types.js';
+import type { PipelineFields, CreatedContent, CleanedContent, QualityReport, PostProcessResult, ImageCategory } from '../types.js';
 import type { PipelineContext } from '../pipeline-context.js';
 import { buildAssemblerPrompt } from '../prompts.js';
 import { executeWithFallback } from '../retry-strategy.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
+import type { Soul } from '../../soul/types.js';
 
 // change raise-model-call-timeouts-for-thinking-models：角色闸 ≥ 单次模型天花板（180s）且同传进 chat()，
 // 使一次合法的 thinking 质量评审不被角色秒表提前掐断（旧 20s 峰值必误超时→退化公式打分）。env 可调。
@@ -13,6 +14,9 @@ const QUALITY_TIMEOUT_MS = Number(process.env.AIDCP_PUBLISH_QUALITY_TIMEOUT_MS ?
 interface QualityScorerInput {
   created: CreatedContent;
   cleaned: CleanedContent;
+  // change category-adaptive-images-and-judgment：评审接人设 + 本帖品类（管线内已可达，无新跨阶段 plumbing）。
+  soul: Soul | null;
+  category: ImageCategory;
 }
 
 /**
@@ -42,7 +46,12 @@ export class QualityScorerRole extends BasePublishRole<QualityScorerInput, Quali
   }
 
   protected extractInput(snapshot: Partial<PipelineFields>): QualityScorerInput {
-    return { created: snapshot.createdContent!, cleaned: snapshot.cleanedContent! };
+    return {
+      created: snapshot.createdContent!,
+      cleaned: snapshot.cleanedContent!,
+      soul: snapshot.trigger?.generateInput?.soul ?? null,
+      category: snapshot.postCategory?.category ?? 'general',
+    };
   }
 
   protected async execute(input: QualityScorerInput, _context: PipelineContext<PipelineFields>): Promise<QualityReport> {
@@ -56,7 +65,7 @@ export class QualityScorerRole extends BasePublishRole<QualityScorerInput, Quali
       async () => {
         const raw = await this.llmClient.chat([
           { role: 'system', content: '你是内容质量评审员。严格返回JSON。' },
-          { role: 'user', content: buildAssemblerPrompt(input.created, ppResult) },
+          { role: 'user', content: buildAssemblerPrompt(input.created, ppResult, input.soul, input.category) },
         ], { timeoutMs: QUALITY_TIMEOUT_MS });
         return this.parseReviewOutput(raw);
       },

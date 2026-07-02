@@ -97,7 +97,7 @@ export const PUBLISH_PREVIEW_BUILDERS: Record<string, () => string> = {
     buildCategoryClassifierPrompt(EXAMPLE_CREATED.title, EXAMPLE_CREATED.content),
   'publish:ImagePromptComposer': () =>
     buildImagePromptComposerPrompt({ subject: '<示例配图主体>', intent: '<示例配图要点>' }, '温暖生活感'),
-  'publish:QualityScorer': () => buildAssemblerPrompt(EXAMPLE_CREATED, EXAMPLE_POST_PROCESS),
+  'publish:QualityScorer': () => buildAssemblerPrompt(EXAMPLE_CREATED, EXAMPLE_POST_PROCESS, EXAMPLE_SOUL, 'knowledge'),
   'publish:ApprovalGatekeeper': () => buildGatekeeperPrompt(EXAMPLE_ASSEMBLED),
   // 正文去 AI 味改写（ContentCleaner）：prompt 与 server.ts 注入的 rewrite 同源（buildDeAiRewritePrompt）。
   'publish:ContentCleaner': () =>
