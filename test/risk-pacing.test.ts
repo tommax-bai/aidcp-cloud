@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import {
   computeDwellMs,
   computeThinkMs,
+  computeFeedFloorMs,
   tempoForStatus,
   fatigueMultiplier,
   buildPacingDefaults,
   DWELL_FLOOR_MS,
+  FEED_FLOOR,
 } from '../src/risk/index.js';
 
 test('tempo 随风控状态单调放慢：normal < warned < restricted', () => {
@@ -84,4 +86,40 @@ test('buildPacingDefaults：仅含 tempo 与 dwellFloorMs（不含内容系数�
   assert.equal(defaults.tempo, tempoForStatus('warned'));
   assert.deepEqual(defaults.dwellFloorMs, { min: DWELL_FLOOR_MS.min, max: DWELL_FLOOR_MS.max });
   assert.deepEqual(Object.keys(defaults).sort(), ['dwellFloorMs', 'tempo']);
+});
+
+// ======== feed-scroll-card-floor：按新卡数的翻页停留兜底 ========
+
+test('computeFeedFloorMs：无新卡（0）→ 0（返回未刷新不加延迟）', () => {
+  assert.equal(computeFeedFloorMs({ newCount: 0, status: 'normal', progress: 0.3 }), 0);
+  assert.equal(computeFeedFloorMs({ newCount: -3, status: 'normal', progress: 0.3 }), 0);
+});
+
+test('computeFeedFloorMs：按新卡数线性缩放（3–4 张≈1.3–1.8s，normal/中段）', () => {
+  const base = { status: 'normal' as const, progress: 0.3 }; // fatigue=1.0
+  const three = computeFeedFloorMs({ newCount: 3, ...base });
+  const four = computeFeedFloorMs({ newCount: 4, ...base });
+  assert.equal(three, FEED_FLOOR.perCardMs * 3); // 1350
+  assert.equal(four, FEED_FLOOR.perCardMs * 4);  // 1800
+  assert.ok(four > three);
+});
+
+test('computeFeedFloorMs：整屏换新封顶 capMs', () => {
+  const big = computeFeedFloorMs({ newCount: 30, status: 'normal', progress: 0.3 });
+  assert.equal(big, FEED_FLOOR.capMs);
+  // 单调不降且不超过封顶
+  const mid = computeFeedFloorMs({ newCount: 8, status: 'normal', progress: 0.3 });
+  assert.ok(mid <= FEED_FLOOR.capMs && mid >= computeFeedFloorMs({ newCount: 3, status: 'normal', progress: 0.3 }));
+});
+
+test('computeFeedFloorMs：风控降级放大（warned > normal，同新卡数、未封顶）', () => {
+  const normal = computeFeedFloorMs({ newCount: 3, status: 'normal', progress: 0.3 });
+  const warned = computeFeedFloorMs({ newCount: 3, status: 'warned', progress: 0.3 });
+  assert.ok(warned > normal, `warned(${warned}) 应 > normal(${normal})`);
+});
+
+test('computeFeedFloorMs：会话后段疲劳放大（同新卡数、未封顶）', () => {
+  const mid = computeFeedFloorMs({ newCount: 2, status: 'normal', progress: 0.3 }); // fatigue=1.0
+  const late = computeFeedFloorMs({ newCount: 2, status: 'normal', progress: 0.95 }); // fatigue>1
+  assert.ok(late > mid, `late(${late}) 应 > mid(${mid})`);
 });

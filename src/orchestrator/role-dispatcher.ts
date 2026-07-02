@@ -56,7 +56,7 @@ import { NotificationReturnHome } from '../agents/notification-return-home.js';
 import { ExcursionResumer } from '../agents/excursion-resumer.js';
 import type { BaseRole } from '../agents/base-role.js';
 import type { Soul } from '../soul/types.js';
-import { computeDwellMs, computeThinkMs } from '../risk/pacing.js';
+import { computeDwellMs, computeThinkMs, computeFeedFloorMs } from '../risk/pacing.js';
 import { SearchFrequencyLimiter } from '../risk/search-frequency-limiter.js';
 import { InteractionGuard, isGuardedInteraction, type GuardAction } from '../risk/interaction-guard.js';
 import { ActionCooldownGate, type CooldownAction } from '../risk/action-cooldown.js';
@@ -249,6 +249,8 @@ export class RoleDispatcher {
   private readonly getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
   /** 已下发待回执的评论上下文：action.completed{comment} 据此扣额 + emit comment.done（→ 是否进主页评估）。 */
   private pendingComment: { noteId: string; sourcePageType: 'feed' | 'search'; actions: ('like' | 'collect')[]; text: string } | null = null;
+  /** feed 翻页按新卡数算的待发停留兜底（feed-scroll-card-floor）：page.cards.arrived 覆盖写、feed.scrolled 消费后归零。 */
+  private pendingFeedFloorMs = 0;
   private readonly isHardPaused: (edgeId?: string) => boolean;
   private readonly isPersonaBound?: (accountId: string) => boolean;
   private readonly onSessionRejected?: (accountId: string, reason: string) => void | Promise<void>;
@@ -1058,7 +1060,14 @@ export class RoleDispatcher {
   private setupCommandTranslation(): void {
     this.commandUnsubscribers.push(
       this.eventBus.on('feed.scrolled', () => {
-        this.sendCommand({ action: 'scroll', reason: 'feed_scroll' });
+        // feed-scroll-card-floor：消费 page.cards.arrived 算好的停留兜底（floor>0 才挂 dwellMs），随即归零。
+        const floor = this.pendingFeedFloorMs;
+        this.pendingFeedFloorMs = 0;
+        this.sendCommand(
+          floor > 0
+            ? { action: 'scroll', reason: 'feed_scroll', params: { dwellMs: floor } }
+            : { action: 'scroll', reason: 'feed_scroll' },
+        );
       }),
 
       this.eventBus.on('search.scrolled', () => {
@@ -1293,6 +1302,19 @@ export class RoleDispatcher {
       // Edge 上报可见卡片 → 更新数据并触发评估
       this.eventBus.on('page.cards.arrived', (payload) => {
         this.updateVisibleCards(payload.cards);
+        // feed-scroll-card-floor：仅 feed 来源——按本批 noteId 差分"上一批"算新卡数（缺 noteId 计为非新卡），
+        // 覆盖写 pendingFeedFloorMs（含写 0），避免 open→return 残留旧值；search 上报不写不消费 feed 集合。
+        if (this.sessionContext.sourcePageType === 'feed') {
+          const noteIds = payload.cards
+            .map((c) => c.noteId)
+            .filter((id): id is string => typeof id === 'string' && id.length > 0);
+          const newCount = this.sessionContext.feedBatchNewCount(noteIds);
+          this.pendingFeedFloorMs = computeFeedFloorMs({
+            newCount,
+            status: this.getRiskStatus(),
+            progress: this.progress(),
+          });
+        }
         void this.contentEvaluator?.evaluate(this.sessionContext.sourcePageType);
       }),
 

@@ -23,6 +23,12 @@ export class SessionContext {
   private _recentEvaluatedIds: string[] = [];
   private static readonly RECENT_EVALUATED_CAP = 30;
 
+  /**
+   * 上一批 feed 可见卡的 noteId 集合（feed-scroll-card-floor 简版差分基准）：每次 feed 上报覆盖。
+   * 不在 reset 清（跨轮/重连保持，像 visitedNoteIds），避免重连把整屏误判为新卡而空叠停留。
+   */
+  private _lastFeedNoteIds: Set<string> = new Set();
+
   /** 通知巡视瞬时状态（reset 必清——断连/结束后绝不残留 active/暂停，否则永久冻结浏览）。 */
   private _excursion: ExcursionState = SessionContext.freshExcursion();
   /** 浏览暂停开关（巡视期扣住 browse 类命令）。存此处 → reset 一并清，断连不冻结。 */
@@ -84,6 +90,19 @@ export class SessionContext {
     return !!noteId && this._recentEvaluatedIds.includes(noteId);
   }
 
+  /**
+   * feed-scroll-card-floor：算本批相对"上一批 feed 卡"的新卡数（不在上一批集合中的去重数量），
+   * 随即用本批 noteId 覆盖基准集合。缺 noteId 的卡由调用方剔除、计为非新卡。
+   * 返回未刷新（同一批 noteId）→ 0；部分重叠 → 只计真正的新卡。
+   */
+  feedBatchNewCount(noteIds: string[]): number {
+    const incoming = new Set(noteIds);
+    let newCount = 0;
+    for (const id of incoming) if (!this._lastFeedNoteIds.has(id)) newCount++;
+    this._lastFeedNoteIds = incoming;
+    return newCount;
+  }
+
   // ─── 通知巡视状态（共享底座，角色间只读这一份） ───
   get excursion(): Readonly<ExcursionState> { return this._excursion; }
   get excursionActive(): boolean { return this._excursion.active; }
@@ -141,7 +160,7 @@ export class SessionContext {
     // 本人昵称采集瞬时态必清（在途标记 + 定时器）：否则 chokepoint 永久放行 profile_open / 超时空响。
     if (this._selfCaptureTimer !== null) { clearTimeout(this._selfCaptureTimer); this._selfCaptureTimer = null; }
     this._selfCaptureInFlight = false;
-    // 注意：visitedNoteIds / recentEvaluatedIds / notifiedItemKeys 不重置，跨轮次保持；
+    // 注意：visitedNoteIds / recentEvaluatedIds / notifiedItemKeys / lastFeedNoteIds 不重置，跨轮次保持；
     //       pendingNicknameCapture / selfCaptureAttempts 是 per-connection 决策/预算，亦**不**在此清。
   }
 }

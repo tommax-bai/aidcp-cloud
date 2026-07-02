@@ -20,7 +20,8 @@ function createEnvelope(type: MessageType, payload: Record<string, unknown>): En
 export function edgeCommandToEnvelope(command: EdgeCommand): Envelope {
   switch (command.action) {
     case 'scroll':
-      return createEnvelope('page.scroll', { reason: command.reason });
+      // feed-scroll-card-floor：透传 params（如 dwellMs）；旧行为只带 reason 会丢弃 params。
+      return createEnvelope('page.scroll', { reason: command.reason, ...command.params });
     case 'open_note':
       return createEnvelope('note.open', command.params ?? {});
     case 'close_note':

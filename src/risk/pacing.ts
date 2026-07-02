@@ -116,6 +116,31 @@ export function computeThinkMs(input: ThinkInput): number {
   return Math.round(withTempo);
 }
 
+/**
+ * feed 翻页「看新卡」停留下限系数（feed-scroll-card-floor，可调）：
+ * 真人扫一眼一张新卡约 0.3–0.5s；perCardMs 线性缩放，capMs 封顶整屏换新不至过长。
+ */
+export const FEED_FLOOR = { perCardMs: 450, capMs: 7000 } as const;
+
+export interface FeedFloorInput {
+  /** 本次翻页新出现（未见过）的卡片数。 */
+  newCount: number;
+  status: RiskStatus;
+  /** 会话进度 0..1 */
+  progress: number;
+}
+
+/**
+ * 计算 feed 翻页停留时长中心值 dwellMs（按本次新卡数缩放，复用 tempo/fatigue）。
+ * 无新卡（newCount<=0）→ 0（返回未刷新不加延迟）；有新卡按张数线性、封顶 `FEED_FLOOR.capMs`。
+ */
+export function computeFeedFloorMs(input: FeedFloorInput): number {
+  const n = Math.max(0, Math.floor(input.newCount));
+  if (n === 0) return 0;
+  const withTempo = FEED_FLOOR.perCardMs * n * tempoForStatus(input.status) * fatigueMultiplier(input.progress);
+  return Math.round(clamp(withTempo, 0, FEED_FLOOR.capMs));
+}
+
 /** 组装下发给 session.budget 的极薄默认块（仅兜底用）。 */
 export function buildPacingDefaults(status: RiskStatus): PacingDefaults {
   return {
