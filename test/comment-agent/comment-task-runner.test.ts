@@ -72,7 +72,9 @@ function makeSteps(cfg: StubConfig) {
     },
     composeAndApprove: async () => {
       calls.compose++;
-      return cfg.composeText === undefined ? '一条评论' : cfg.composeText;
+      // change account-group-chat-injection：返回 {text, groupChatCode} | null（null/'' 模拟跳过/未授权）。
+      if (cfg.composeText === undefined) return { text: '一条评论', groupChatCode: null };
+      return cfg.composeText ? { text: cfg.composeText, groupChatCode: null } : null;
     },
     post: async () => {
       calls.post++;

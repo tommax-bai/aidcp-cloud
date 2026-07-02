@@ -47,10 +47,16 @@ export interface CommentTaskSteps {
   pick(cards: CommentCandidateCard[]): Promise<PickResult>;
   /** 开选中笔记 → 读正文 + 翻评论区采现场评论；失败返回 null。 */
   readNote(card: CommentCandidateCard): Promise<{ note: NoteForComment; comments: OnPageComment[] } | null>;
-  /** 撰写（含现场评论）→ 去 AI 味 → 飞书人审；返回授权通过的评论文本，跳过/未授权/失败返回 null。 */
-  composeAndApprove(note: NoteForComment, comments: OnPageComment[]): Promise<string | null>;
-  /** 发布评论（interaction.comment + 真回执校验）；返回是否真成功。 */
-  post(noteId: string, text: string): Promise<boolean>;
+  /**
+   * 撰写（含现场评论）→ 去 AI 味 → 飞书人审；返回授权通过的 {正文, 群聊码}，跳过/未授权/失败返回 null。
+   * 正文（text）与群聊码（groupChatCode，account-group-chat-injection）分开：边缘逐字敲正文、整段插码。
+   */
+  composeAndApprove(
+    note: NoteForComment,
+    comments: OnPageComment[],
+  ): Promise<{ text: string; groupChatCode: string | null } | null>;
+  /** 发布评论（interaction.comment + 真回执校验）；正文逐字、群聊码整段插入；返回是否真成功。 */
+  post(noteId: string, text: string, groupChatCode?: string | null): Promise<boolean>;
   /** 发布成功后记一笔「已评论」（供下次去重）。 */
   recordCommented(noteId: string): Promise<void>;
 }
@@ -127,17 +133,19 @@ export async function runCommentTask(
     if (!read) {
       return { outcome: 'read_failed', term, noteId: card.noteId, termsTried: tried, reason: 'open/read note failed' };
     }
-    const text = await steps.composeAndApprove(read.note, read.comments);
-    if (!text) {
+    const composed = await steps.composeAndApprove(read.note, read.comments);
+    if (!composed) {
       return { outcome: 'compose_skipped', term, noteId: card.noteId, termsTried: tried, reason: 'empty/unapproved/rejected' };
     }
-    const ok = await steps.post(card.noteId, text);
+    // 结果卡 / 日志展示的是合并终稿（正文 + 换行 + 码），= 人审通过、边缘将拼出的文本。
+    const displayText = composed.groupChatCode ? `${composed.text}\n${composed.groupChatCode}` : composed.text;
+    const ok = await steps.post(card.noteId, composed.text, composed.groupChatCode);
     if (!ok) {
-      return { outcome: 'post_failed', term, noteId: card.noteId, text, termsTried: tried, reason: 'comment not verified posted' };
+      return { outcome: 'post_failed', term, noteId: card.noteId, text: displayText, termsTried: tried, reason: 'comment not verified posted' };
     }
     await steps.recordCommented(card.noteId);
     log.log(`[comment-task] 已评论 note=${card.noteId}（词「${term}」，尝试 ${tried} 个词）`);
-    return { outcome: 'commented', term, noteId: card.noteId, text, termsTried: tried };
+    return { outcome: 'commented', term, noteId: card.noteId, text: displayText, termsTried: tried };
   }
 
   log.log(`[comment-task] 试过 ${tried} 个搜索词仍无强相关未评过候选 → 诚实结束、本次不评`);

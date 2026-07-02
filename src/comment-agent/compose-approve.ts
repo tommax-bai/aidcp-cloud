@@ -43,17 +43,27 @@ export interface ComposeApproveDeps {
 }
 
 /**
- * 装配 composeAndApprove：返回「(note, 现场评论) → 授权通过的评论文本 / null」。
+ * composeAndApprove 结果（change account-group-chat-injection）：正文与群聊码**分开**返回——
+ * 边缘逐字符敲 `text`（正文），再单次整段插入 `groupChatCode`（串码，绕过 @/# 提及补全）。
+ * 人审卡展示的是二者合并的完整终稿（审=发）。groupChatCode 为 null = 不注入（普通评论）。
+ */
+export interface ComposeApproveResult {
+  text: string;
+  groupChatCode: string | null;
+}
+
+/**
+ * 装配 composeAndApprove：返回「(note, 现场评论) → 授权通过的 {正文, 群聊码} / null」。
  */
 export function buildComposeAndApprove(
   deps: ComposeApproveDeps,
-): (note: NoteForComment, comments: OnPageComment[]) => Promise<string | null> {
+): (note: NoteForComment, comments: OnPageComment[]) => Promise<ComposeApproveResult | null> {
   const postProcessor = deps.postProcessor ?? new PostProcessor({});
   const now = deps.now ?? (() => Date.now());
   const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   const log = deps.logger ?? console;
 
-  return async (note: NoteForComment, comments: OnPageComment[]): Promise<string | null> => {
+  return async (note: NoteForComment, comments: OnPageComment[]): Promise<ComposeApproveResult | null> => {
     const references = deps.getReferences ? await deps.getReferences(note).catch(() => []) : [];
     const onPageComments = comments.map((c) => c.text).filter(Boolean);
     const noteData: NoteData = {
@@ -89,23 +99,24 @@ export function buildComposeAndApprove(
       return null;
     }
 
-    // ③ 群聊引流码注入（change account-group-chat-injection）：命中开关且有码时，在去 AI 味 + 反照搬**之后**、
-    //    人审**之前** verbatim 追加——① 追加在去 AI 味之后 → 不被重写吞掉；② 追加在人审卡之前 → 人审看到的即含码完整
-    //    终稿（AC-PUB「审=发」）；③ 码不参与上面的 overlapsAny 反照搬比对（只比正文）。正文长度闸在 composeDraft 内、
-    //    作用于正文草稿，追加后终稿可超上限——有意（码本身长），非缺陷。边缘保真（trim / 提及补全）另由 edge 侧任务处置。
-    if (deps.groupChatCode) {
-      text = `${text}\n${deps.groupChatCode}`;
-      log.log(`[comment-compose] 已注入群聊引流码 note=${note.noteId}（人审卡将展示含码终稿）`);
+    // ③ 群聊引流码（change account-group-chat-injection）：命中开关且有码时，正文（text）与码**分开**——
+    //    正文交边缘逐字符敲、码交边缘单次整段插入（绕过 @/# 提及补全）。此处只把二者的**合并终稿**送人审卡，
+    //    保证「人审看到的 = 边缘将拼出的」（AC-PUB 审=发）；码不参与上面的 overlapsAny 反照搬比对（只比正文）。
+    //    正文长度闸在 composeDraft 内、作用于正文草稿；码走整段插入、天然绕过（有意，码本身长）。
+    const code = deps.groupChatCode || null;
+    const reviewText = code ? `${text}\n${code}` : text; // 人审卡 = 正文 + 换行 + 码（边缘将逐字敲正文、整段插码拼出同一终稿）
+    if (code) {
+      log.log(`[comment-compose] 群聊引流码待注入 note=${note.noteId}（正文逐字 + 码整段插入；人审卡展示合并终稿）`);
     }
 
-    // ④ 人审（AC-PUB）：未接线 / 超时 / 拒绝 → null（绝不裸发）。
+    // ④ 人审（AC-PUB）：未接线 / 超时 / 拒绝 → null（绝不裸发）。审的是 reviewText（含码合并终稿）。
     if (!deps.approval) {
       log.warn(`[comment-compose] 评论人审口未接线 note=${note.noteId} → 不发（绝不裸发）`);
       return null;
     }
     const requestId = `comment-${note.noteId}-${now()}`;
     try {
-      await deps.approval.request({ requestId, noteId: note.noteId, text, title: note.title });
+      await deps.approval.request({ requestId, noteId: note.noteId, text: reviewText, title: note.title });
     } catch (err) {
       log.warn(`[comment-compose] 审批卡发送失败 note=${note.noteId}：${(err as Error).message} → 不发`);
       return null;
@@ -122,7 +133,7 @@ export function buildComposeAndApprove(
       }
       if (approved) {
         log.log(`[comment-compose] 人审通过 note=${note.noteId} requestId=${requestId}`);
-        return text;
+        return { text, groupChatCode: code }; // 正文与码分开回给发送步骤（边缘分别处理）
       }
       await sleep(pollMs);
     }

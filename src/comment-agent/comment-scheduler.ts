@@ -177,7 +177,7 @@ export class CommentScheduler {
       pick: (cards) => picker.pick(cards),
       readNote: (card) => edge.readNote(card),
       composeAndApprove: (note, comments) => composeAndApprove(note, comments),
-      post: (noteId, text) => edge.post(noteId, text),
+      post: (noteId, text, groupChatCode) => edge.post(noteId, text, groupChatCode),
       recordCommented: (noteId) => edge.recordCommented(noteId),
     };
 

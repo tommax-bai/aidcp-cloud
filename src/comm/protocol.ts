@@ -513,8 +513,14 @@ export interface InteractionFollowPayload {
 
 export interface InteractionCommentPayload {
   noteId: string;
-  /** 评论正文（云端已撰写 / 去AI味 / 人审通过后下发） */
+  /** 评论正文（云端已撰写 / 去AI味 / 人审通过后下发）。边缘**逐字符拟人输入**这一段。 */
   text: string;
+  /**
+   * 群聊引流码（change account-group-chat-injection，可选）：非空时边缘在 `text` 逐字输入完成后，
+   * 用**单次整段插入**（Input.insertText，绕过 @/# 提及/主题补全）追加「换行 + 此码」——串码直接粘贴、不逐字敲。
+   * 人审卡展示的是「text + 换行 + 此码」的完整终稿（AC-PUB 审=发）。缺省 = 不注入（普通评论）。
+   */
+  groupChatCode?: string;
   reason?: string;
   /** 发评论前犹豫时间中心值（毫秒，可选） */
   thinkMs?: number;
