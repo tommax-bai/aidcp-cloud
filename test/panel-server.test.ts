@@ -146,10 +146,12 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
     const { token } = (await login.json()) as { token: string };
     const auth = { authorization: `Bearer ${token}` };
 
-    // dashboard summary：totals + edgesOnline + likeRate + accounts + 按账号切片 + 告警 + 调度态
+    // dashboard summary：asOf 新鲜度 + totals + edgesOnline + likeRate + accounts + 按账号切片 + 告警 + 调度态
+    const beforeSummary = Date.now();
     const sum = await fetch(`${base}/api/dashboard/summary`, { headers: auth });
     assert.equal(sum.status, 200);
     const sumBody = (await sum.json()) as {
+      asOf: number;
       edgesOnline: number;
       totals: { like: number; publish: number };
       totalsByAccount: { accountId: string; totals: { like: number } }[];
@@ -159,6 +161,12 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
       attributionPending: boolean;
       dispatchActive: boolean | null;
     };
+    // change dashboard-refresh-clarity：asOf = 服务端该次查询当前时刻（数据新鲜度，console 渲染「数据截至」）
+    assert.equal(typeof sumBody.asOf, 'number');
+    assert.ok(
+      sumBody.asOf >= beforeSummary && sumBody.asOf <= Date.now(),
+      `asOf 应为服务端处理该请求时刻（got ${sumBody.asOf}）`,
+    );
     assert.equal(sumBody.edgesOnline, 3);
     assert.equal(sumBody.totals.like, 10);
     assert.equal(sumBody.totals.publish, 1);

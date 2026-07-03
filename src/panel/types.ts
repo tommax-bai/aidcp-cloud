@@ -19,7 +19,14 @@ import type {
 } from '../config/content-schedule-store.js';
 import type { EventBus } from '../event-bus/index.js';
 import type { PanelUser } from './auth.js';
-import type { PanelStoreReader } from './panel-store.js';
+import type {
+  PanelStoreReader,
+  TodayTotals,
+  AccountTotals,
+  LikeRate,
+  PanelAccount,
+  PanelAlert,
+} from './panel-store.js';
 import type { PublishApprovalPayload, ApprovalWriteResult } from '../feishu/index.js';
 import type { LlmUsageQuery, LlmUsagePayload } from '../metrics/token-usage-store.js';
 import type { NotificationContact, NotificationContactManual } from '../cache/notification-contact-store.js';
@@ -195,6 +202,31 @@ export interface PanelDeps {
    * 绝不解除边缘暂停（resumeEdge，那是验证码清除点的事）；诚实回真实解决行数（0=没这条/已解决，1=已解决）。
    */
   alertStore?: Pick<AlertStore, 'resolveById'>;
+}
+
+// ── 总览 DTO（change dashboard-refresh-clarity）─────────────────────────────────
+// GET /api/dashboard/summary 响应形状；console `src/types/api.ts` 的 DashboardSummary 镜像此 DTO。
+
+export interface DashboardSummary {
+  /**
+   * 服务端生成的数据新鲜度时间戳（该次查询的服务器当前时刻，Date.now()）。
+   * console 据此渲染「数据截至 …」：每轮轮询后 asOf 推进即证明界面在实时更新、未冻结。
+   */
+  asOf: number;
+  /** 活态在线边缘数（staleness 校验后、死连接不计，D9）；为 0 时 console 如实提示「系统当前未在浏览，故无新数据」。 */
+  edgesOnline: number;
+  /** 今日全局计数；publish 键为 publish_log 真实数（覆盖 risk_counters 同名键）。 */
+  totals: TodayTotals;
+  /** 按账号切片（V1 task 9.6）；带当日配额上限 + 饱和标记，拿不到 controller 时诚实缺省（不编造上限）。 */
+  totalsByAccount: AccountTotals[];
+  likeRate: LikeRate;
+  accounts: PanelAccount[];
+  /** 未解决告警（V1 task 9.5）。 */
+  alerts: PanelAlert[];
+  /** 归因已落地：恒 false；保留键供旧前端兼容。 */
+  attributionPending: boolean;
+  /** 调度引擎当前是否活跃（V1 task 9.4）；未注入 dispatchActive 时 null。 */
+  dispatchActive: boolean | null;
 }
 
 // ── 精选内容后台管理（change curated-content-admin-page）────────────────────────

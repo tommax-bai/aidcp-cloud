@@ -15,7 +15,14 @@ import http from 'node:http';
 import { signJwt, verifyJwt } from './jwt.js';
 import { parseBearer, verifyCredentials } from './auth.js';
 import { buildVersionPayload } from './version.js';
-import type { PanelDeps, PanelConfig, PanelHandle, SessionLimitPatchInput, ResumeConfigPatchInput } from './types.js';
+import type {
+  PanelDeps,
+  PanelConfig,
+  PanelHandle,
+  SessionLimitPatchInput,
+  ResumeConfigPatchInput,
+  DashboardSummary,
+} from './types.js';
 import { startPanelWs, type PanelWsHandle } from './panel-ws.js';
 import type { PublishApprovalPayload } from '../feishu/index.js';
 import type { EditDraftPatch } from '../publish-agent/publish-log-store.js';
@@ -137,7 +144,9 @@ function createRequestHandler(
           }
         }),
       );
-      sendJson(res, 200, {
+      // change dashboard-refresh-clarity：响应收口到 DashboardSummary DTO（asOf=服务端此刻，
+      // console 渲染「数据截至 …」区分「无新活动」与「界面冻结」）；沿用上方既有索引查询，无全表扫描。
+      const summary: DashboardSummary = {
         asOf: Date.now(),
         edgesOnline: deps.edgeServer.onlineEdgeCount(), // staleness-aware（死连接不算在线，D9）
         totals: { ...totals, publish: todayPublishes },
@@ -151,7 +160,8 @@ function createRequestHandler(
         attributionPending: false,
         // 调度引擎状态（V1 task 9.4：单全局 RoleDispatcher；per-edge 拆分见 design 步骤 8）。
         dispatchActive: deps.commandActions.dispatchActive ? deps.commandActions.dispatchActive() : null,
-      });
+      };
+      sendJson(res, 200, summary);
       return;
     }
     if (method === 'GET' && url === '/api/accounts') {
