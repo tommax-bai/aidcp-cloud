@@ -93,6 +93,12 @@ export class PublishScheduler {
   private readonly minHoursBetween: number;
   /** 无发布记录时的基准（进程启动时刻），避免把历史全量概念算成"新"。 */
   private readonly startedAt: number;
+  /**
+   * 发帖全局忙（change content-schedule-auto-publish）：任一 doTrigger（自动 / 手动 / 排期）进行中即 true。
+   * 供 ContentScheduler 全局串行发帖——因 publishAccountRef 是全局可变槽，多账号并发发帖会污染 token 账号归属
+   * （对抗评审阻断项）。**load-bearing 不变量：发帖必须全局串行**；禁止未来「按账号并行发帖」优化，除非先消灭全局槽。
+   */
+  private publishing = false;
 
   constructor(deps: PublishSchedulerDeps) {
     this.d = deps;
@@ -232,10 +238,45 @@ export class PublishScheduler {
     return { result: 'triggered', reason: 'manual_feishu', status, failureReason };
   }
 
+  /**
+   * 排期扳机（change content-schedule-auto-publish）：由 ContentScheduler 对显式账号触发。
+   * 绕开 checkAndMaybeTrigger 的 resolveSingleAccountId 单账号闸（调度器直接给账号），但仍过
+   * persona 绑定 + 风控 status===normal + canDo('publish') + 发布前人审（AC-PUB）。forced=false → ContentScout
+   * 可诚实判「无新素材」而跳过（诚实空槽，非硬凑）。触发条件是「时段格 + 错峰命中」（由调度器判），不看概念阈值。
+   */
+  async triggerScheduled(accountId: string): Promise<TriggerOutcome> {
+    if (this.d.isPersonaBound && !this.d.isPersonaBound(accountId)) {
+      this.logger.warn(`[PublishScheduler] 排期扳机：账号 ${accountId} 未绑定人设 — 跳过，绝不以默认人设发布`);
+      return { result: 'blocked', reason: 'needs_persona_setup' };
+    }
+    const risk = await this.d.resolveRisk(accountId);
+    const status = risk.getState().status;
+    if (status !== 'normal') {
+      this.logger.warn(`[PublishScheduler] 排期扳机：账号 ${accountId} 风控非 normal(status=${status}) — 跳过`);
+      return { result: 'blocked', reason: `risk_status(${status})` };
+    }
+    if (!risk.canDo('publish')) {
+      this.logger.warn(`[PublishScheduler] 排期扳机：账号 ${accountId} 风控拒绝(canDo=false) — 跳过`);
+      return { result: 'blocked', reason: `risk_denied(status=${status})` };
+    }
+    const { status: triggeredStatus, failureReason } = await this.doTrigger('scheduled_window', false, accountId);
+    return { result: 'triggered', reason: 'scheduled_window', status: triggeredStatus, failureReason };
+  }
+
+  /** 发帖是否全局忙（供 ContentScheduler 全局串行）。任一 doTrigger 进行中即 true。 */
+  isBusy(): boolean {
+    return this.publishing;
+  }
+
   private async doTrigger(reason: string, forced = false, accountId: string): Promise<{ status: string; failureReason?: string }> {
     const input = { ...(await this.buildTriggerInput(accountId)), forced };
     this.logger.log(`[PublishScheduler] 触发发帖编排 reason=${reason} forced=${forced} account=${input.accountId} newConcepts=${input.metrics.newConceptCount} liked=${input.metrics.likedSinceLastPublish}`);
-    const res = await this.d.orchestrator.trigger(input);
-    return { status: res.status, failureReason: res.reason };
+    this.publishing = true;
+    try {
+      const res = await this.d.orchestrator.trigger(input);
+      return { status: res.status, failureReason: res.reason };
+    } finally {
+      this.publishing = false;
+    }
   }
 }

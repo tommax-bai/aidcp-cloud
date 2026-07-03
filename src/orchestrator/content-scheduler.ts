@@ -75,6 +75,12 @@ export function offsetMinute(accountId: string, day: Date, action: string): numb
 export class ContentScheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
   private tickRunning = false;
+  /**
+   * 发帖全局串行（同步置位）：防同一 tick 内先后给两个账号 fire → 两次并发发帖污染 publishAccountRef 全局槽 /
+   * finally-复位竞态（对抗评审阻断项）。fire 时同步置 true、triggerPost settle 时清；配合注入的 isPublishBusy()
+   * （覆盖手动 /publish）构成「同刻至多一个账号在发帖」。
+   */
+  private postFiring = false;
   /** 每账号跨动作单飞（本 Phase 只发帖；为 Phase 2/3 预留背板）。 */
   private readonly inFlight = new Set<string>();
   /** 幂等：account → 上次触发的小时格键。 */
@@ -129,8 +135,8 @@ export class ContentScheduler {
           if (this.inFlight.has(accountId)) continue;
           // 风控 normal 闸。
           if (this.deps.riskStatus(accountId) !== 'normal') continue;
-          // 发帖全局串行：忙则本槽顺延（本小时不发，不 burst）。
-          if (this.deps.isPublishBusy()) continue;
+          // 发帖全局串行：本调度器已有发帖在飞 或 手动 /publish 在跑 → 本槽顺延（本小时不发，不 burst）。
+          if (this.postFiring || this.deps.isPublishBusy()) continue;
           // 日上限原子：已发历史 + 在途未审草稿。
           const [posted, pending] = await Promise.all([
             this.deps.postedTodayCount(accountId),
@@ -138,13 +144,17 @@ export class ContentScheduler {
           ]);
           if (posted + (pending ? 1 : 0) >= s.postDailyCap) continue;
 
-          // 命中：记幂等 + 单飞，fire-and-forget（绝不 await 生成管线）。结果卡由 triggerPost 实现异步补。
+          // 命中：记幂等 + 单飞 + 全局串行（同步置位），fire-and-forget（绝不 await 生成管线）。结果卡由 triggerPost 实现异步补。
           this.lastFired.set(accountId, cell);
           this.inFlight.add(accountId);
+          this.postFiring = true;
           void this.deps
             .triggerPost(accountId)
             .catch((e) => this.deps.logger?.warn(`[content-scheduler] triggerPost 异常 account=${accountId}：${(e as Error).message}`))
-            .finally(() => this.inFlight.delete(accountId));
+            .finally(() => {
+              this.inFlight.delete(accountId);
+              this.postFiring = false;
+            });
         } catch (e) {
           this.deps.logger?.warn(`[content-scheduler] tick 账号处理异常 account=${accountId}：${(e as Error).message}`);
         }

@@ -442,6 +442,20 @@ export class PublishLogStore {
     return Number(rows[0]?.n ?? '0') > 0;
   }
 
+  /**
+   * 该账号今日（服务器本地日历日 00:00 起）已发布数（change content-schedule-auto-publish）。
+   * 供内容排期日上限判定——**持久已发历史**（重启不清零），与在途 hasPendingApprovalForAccount 相加做原子上限、防 TOCTOU 超发。
+   * date_trunc('day', now()) 取 DB 会话时区当日起点，对齐本仓服务器本地时、单地域约定。
+   */
+  async countPublishedTodayForAccount(accountId: string): Promise<number> {
+    const { rows } = await this.pool.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM publish_log
+        WHERE account_id = $1 AND status = 'published' AND published_at >= date_trunc('day', now())`,
+      [accountId],
+    );
+    return Number(rows[0]?.n ?? '0');
+  }
+
   /** 取最近一条发布记录（任意状态），用于计算距上次发布时长。 */
   async latest(): Promise<PublishRecord | null> {
     const { rows } = await this.pool.query<PublishRow>(

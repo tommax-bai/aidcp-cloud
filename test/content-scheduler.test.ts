@@ -136,6 +136,53 @@ test('content-scheduler: fire-and-forget — triggerPost 永不 settle，onTick 
   assert.deepEqual(calls, [ACC], '已发起（但未 await 其完成）');
 });
 
+test('content-scheduler: 发帖全局串行 — 同 tick 内两账号撞同偏移分钟，只发一个（postFiring 同步闸）', async () => {
+  // 找两个在 BASE_DAY 上 offset 相同的账号，把 now 的分钟设为该共享 offset。
+  const seen = new Map<number, string>();
+  let a = '', b = '', off = -1;
+  for (let i = 0; i < 5000 && off < 0; i++) {
+    const id = `serial-${i}`;
+    const o = offsetMinute(id, BASE_DAY, 'post');
+    if (seen.has(o)) {
+      a = seen.get(o)!;
+      b = id;
+      off = o;
+    } else {
+      seen.set(o, id);
+    }
+  }
+  assert.ok(off >= 0, '应能找到一对同偏移账号');
+  const nowMs = new Date(2026, 0, 5, 10, off, 0).getTime();
+
+  const calls: string[] = [];
+  const state: State = {
+    online: [a, b],
+    view: { autoEnabled: true, postEnabled: true, postDailyCap: 2, effectiveMask: FULL },
+    risk: 'normal',
+    posted: 0,
+    pending: false,
+    busy: false,
+    nowMs,
+    triggerImpl: () => new Promise(() => {}), // 第一个 fire 后永不 settle → postFiring 保持 true
+  };
+  const deps: ContentSchedulerDeps = {
+    onlineAccounts: () => state.online,
+    scheduleFor: () => state.view,
+    riskStatus: () => state.risk,
+    postedTodayCount: () => Promise.resolve(state.posted),
+    hasPendingPost: () => Promise.resolve(state.pending),
+    isPublishBusy: () => state.busy,
+    triggerPost: (id) => {
+      calls.push(id);
+      return state.triggerImpl(id);
+    },
+    now: () => state.nowMs,
+    logger: { warn: () => {} },
+  };
+  await new ContentScheduler(deps).onTick();
+  assert.equal(calls.length, 1, '两账号同偏移分钟，本 tick 只发一个（全局串行）');
+});
+
 test('content-scheduler: 重入护栏 — 上轮未完时并发 tick 被跳过，不双触发', async () => {
   let release!: () => void;
   const gate = new Promise<void>((res) => (release = res));
