@@ -1511,6 +1511,40 @@ async function main(): Promise<void> {
               },
               isCommentBusy: (accountId: string) => commentScheduler!.isRunning(accountId),
               commentedTodayCount: (accountId: string) => riskStore.countInteractionsTodayForAccount(accountId, 'comment'),
+              // 群评两件套（change content-schedule-group-comments）：同一评论机器 + injectGroup，
+              // 尝试型持久日上限——触发回执 ok（任务真开跑）即记 attempt（被人审拒/无目标也占额度，保守方向）。
+              triggerGroupComment: async (accountId: string) => {
+                const sendReceiptCard = async (level: 'warning' | 'error', title: string, message: string) => {
+                  const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
+                  if (!chatId) {
+                    console.warn(`[content-scheduler] 无可用飞书群，排期群评回执卡未发出 account=${accountId} title=${title}`);
+                    return;
+                  }
+                  await messenger
+                    .sendCard(chatId, buildCommandResultCard({ command: '排期群评（自动）', ok: false, level, title, message, accountId }))
+                    .catch((e) => console.warn('[content-scheduler] 排期群评回执卡发送失败：', (e as Error).message));
+                };
+                try {
+                  const controller = await resolveController(accountId);
+                  if (!controller.canDo('comment')) {
+                    await sendReceiptCard('warning', '排期群评：配额拒绝，本槽未触发', `风控 canDo('comment')=false（自动路径必过配额；手动 /comment group:on 不受此限）`);
+                    return;
+                  }
+                  const receipt = await commentScheduler!.triggerManual(accountId, { injectGroup: true });
+                  if (!receipt.ok) {
+                    // 触发未成（缺码 fail-closed / 离线 / 未绑人设 / 在跑）：透传回执如实回卡；不占尝试额度。
+                    await sendReceiptCard(receipt.level === 'error' ? 'error' : 'warning', `排期群评：${receipt.title}`, receipt.message);
+                    return;
+                  }
+                  // 任务真开跑 → 记一条持久 attempt（尝试型日上限；重启不清零、绝不超发）。终态结果卡评论链自补。
+                  await contentScheduleStore.recordGroupCommentAttempt(accountId).catch((e) =>
+                    console.warn('[content-scheduler] 群评 attempt 记录失败（上限将偏松，需关注）：', (e as Error).message),
+                  );
+                } catch (e) {
+                  await sendReceiptCard('error', '排期群评：触发异常', (e as Error).message);
+                }
+              },
+              groupAttemptsTodayCount: (accountId: string) => contentScheduleStore.countGroupAttemptsToday(accountId),
             }
           : {}),
         logger: console,

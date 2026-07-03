@@ -10,7 +10,7 @@ const HALF = '1'.repeat(84) + '0'.repeat(84);
  * pg.Pool 桩：按 SQL 前缀路由固定应答，记录全部 query 调用。
  * 覆盖：init 建表（空镜像）/ SELECT 1 FROM accounts 存在性 / UPSERT RETURNING 回读。
  */
-function makePoolStub(opts: { accountExists?: boolean } = {}) {
+function makePoolStub(opts: { accountExists?: boolean; myGroupCode?: string | null; codeSharedByOther?: boolean } = {}) {
   const calls: Array<{ sql: string; params: unknown[] }> = [];
   const accountExists = opts.accountExists ?? true;
   const pool = {
@@ -20,6 +20,12 @@ function makePoolStub(opts: { accountExists?: boolean } = {}) {
       if (s.startsWith('CREATE TABLE')) return { rows: [] };
       if (s.startsWith('SELECT content_active_mask')) return { rows: [] }; // init reload：全局无行
       if (s.startsWith('SELECT account_id, auto_enabled')) return { rows: [] }; // init reload：侧表无行
+      if (s.startsWith('SELECT group_chat_info FROM accounts')) {
+        return { rows: [{ group_chat_info: opts.myGroupCode ?? null }] };
+      }
+      if (s.startsWith('SELECT 1 FROM accounts WHERE group_chat_info')) {
+        return { rows: opts.codeSharedByOther ? [{ '?column?': 1 }] : [] };
+      }
       if (s.startsWith('SELECT 1 FROM accounts')) return { rows: accountExists ? [{ '?column?': 1 }] : [] };
       if (s.startsWith('INSERT INTO content_schedule_global')) {
         return { rows: [{ content_active_mask: params[0], updated_at: new Date('2026-07-03T00:00:00Z'), updated_by: params[1] }] };
@@ -29,8 +35,9 @@ function makePoolStub(opts: { accountExists?: boolean } = {}) {
           rows: [{
             account_id: params[0], auto_enabled: params[1], post_enabled: params[2],
             post_daily_cap: params[3], comment_enabled: params[4], comment_daily_cap: params[5],
-            content_active_mask: params[6],
-            updated_at: new Date('2026-07-03T00:00:00Z'), updated_by: params[7],
+            group_comment_enabled: params[6], group_comment_daily_cap: params[7],
+            content_active_mask: params[8],
+            updated_at: new Date('2026-07-03T00:00:00Z'), updated_by: params[9],
           }],
         };
       }
@@ -41,7 +48,7 @@ function makePoolStub(opts: { accountExists?: boolean } = {}) {
   return { pool, calls };
 }
 
-async function makeStore(opts: { accountExists?: boolean } = {}) {
+async function makeStore(opts: { accountExists?: boolean; myGroupCode?: string | null; codeSharedByOther?: boolean } = {}) {
   const { pool, calls } = makePoolStub(opts);
   const store = new ContentScheduleStore({ pool });
   await store.init();
@@ -57,6 +64,8 @@ test('store: 未配 = 完全不自动（零回归默认）', async () => {
     postDailyCap: 0,
     commentEnabled: false,
     commentDailyCap: 0,
+    groupCommentEnabled: false,
+    groupCommentDailyCap: 0,
     effectiveMask: null,
   });
   assert.equal(store.getGlobal(), null);
@@ -164,4 +173,63 @@ test('store/comment: 两新字段合法写回读；非法整块拒；部分补�
   await store.setAccount('acc-1', { postEnabled: true, postDailyCap: 1 }, 'op');
   const row = store.getAccount('acc-1');
   assert.deepEqual([row?.commentEnabled, row?.commentDailyCap], [true, 3], 'comment 字段保持');
+});
+
+
+test('store/group: 群评 cap 硬上限 0..10（11/负/小数整块拒）；合法写回读（change content-schedule-group-comments）', async () => {
+  const { store, calls } = await makeStore({ myGroupCode: 'CODE-A' });
+  const before = calls.length;
+  for (const patch of [{ groupCommentDailyCap: 11 }, { groupCommentDailyCap: -1 }, { groupCommentDailyCap: 1.5 }]) {
+    const bad = await store.setAccount('acc-1', patch, 'op');
+    assert.deepEqual(bad, { ok: false, reason: 'invalid_value' }, JSON.stringify(patch));
+  }
+  assert.equal(calls.length, before, '非法群评补丁不触库');
+  const r = await store.setAccount('acc-1', { groupCommentEnabled: true, groupCommentDailyCap: 3 }, 'op');
+  assert.ok(r.ok);
+  if (r.ok) assert.deepEqual([r.row.groupCommentEnabled, r.row.groupCommentDailyCap], [true, 3]);
+});
+
+test('store/group: 一码一号硬校验 — 无码拒 no_group_code、同码他号拒 shared_group_code、异码放行、每次开启重跑', async () => {
+  // 无码 → no_group_code
+  const noCode = await makeStore({ myGroupCode: null });
+  assert.deepEqual(await noCode.store.setAccount('acc-1', { groupCommentEnabled: true }, 'op'),
+    { ok: false, reason: 'no_group_code' });
+  // 同码他号 → shared_group_code（绝不仅告警放行）
+  const shared = await makeStore({ myGroupCode: 'CODE-A', codeSharedByOther: true });
+  assert.deepEqual(await shared.store.setAccount('acc-1', { groupCommentEnabled: true }, 'op'),
+    { ok: false, reason: 'shared_group_code' });
+  // 异码 → 放行
+  const okCase = await makeStore({ myGroupCode: 'CODE-A', codeSharedByOther: false });
+  const r = await okCase.store.setAccount('acc-1', { groupCommentEnabled: true }, 'op');
+  assert.ok(r.ok);
+  // 关闭开关不触发校验（enabled=false 写入无码也允许——只拦「开启」）
+  const off = await makeStore({ myGroupCode: null });
+  const r2 = await off.store.setAccount('acc-1', { groupCommentEnabled: false }, 'op');
+  assert.ok(r2.ok, '关闭写入不过一码一号校验');
+});
+
+test('store/group: attempts 记录与当日计数（pool 桩验 SQL 形状）', async () => {
+  const seen: Array<{ sql: string; params: unknown[] }> = [];
+  const pool = {
+    query: async (sql: string, params: unknown[] = []) => {
+      seen.push({ sql, params });
+      const t = sql.trim();
+      if (t.startsWith('CREATE TABLE')) return { rows: [] };
+      if (t.startsWith('SELECT content_active_mask')) return { rows: [] };
+      if (t.startsWith('SELECT account_id, auto_enabled')) return { rows: [] };
+      if (t.startsWith('INSERT INTO group_comment_attempts')) return { rows: [] };
+      if (t.startsWith('SELECT count(*)::text AS n FROM group_comment_attempts')) return { rows: [{ n: '2' }] };
+      throw new Error('未覆盖 SQL: ' + t.slice(0, 50));
+    },
+    end: async () => {},
+  } as unknown as pg.Pool;
+  const store = new ContentScheduleStore({ pool });
+  await store.init();
+  await store.recordGroupCommentAttempt('acc-1');
+  const rec = seen.find((c) => c.sql.includes('INSERT INTO group_comment_attempts'));
+  assert.deepEqual(rec?.params, ['acc-1']);
+  const n = await store.countGroupAttemptsToday('acc-1');
+  assert.equal(n, 2);
+  const cnt = seen.find((c) => c.sql.includes('count(*)::text AS n FROM group_comment_attempts'));
+  assert.match(cnt!.sql, /attempted_at >= date_trunc\('day', now\(\)\)/);
 });

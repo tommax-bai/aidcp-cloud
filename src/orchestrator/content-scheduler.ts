@@ -27,6 +27,9 @@ export interface ContentScheduleView {
   /** 自动评论开关 / 日上限（change content-schedule-comments）。 */
   commentEnabled: boolean;
   commentDailyCap: number;
+  /** 自动群评开关 / 每日尝试上限（change content-schedule-group-comments）。 */
+  groupCommentEnabled: boolean;
+  groupCommentDailyCap: number;
   effectiveMask: string | null;
 }
 
@@ -61,6 +64,14 @@ export interface ContentSchedulerDeps {
   isCommentBusy?(accountId: string): boolean;
   /** 该账号今日已发评论数（持久互动记录，服务器本地日）。 */
   commentedTodayCount?(accountId: string): Promise<number>;
+  /**
+   * 群评两件套（change content-schedule-group-comments）。可选：任一未注入 → 群评动作整体跳过（零回归）。
+   * triggerGroupComment 实现负责 canDo('comment') 配额闸 + triggerManual(injectGroup:true) + 回执 ok 记持久 attempt +
+   * 触发失败回黄卡（缺码 fail-closed 由触发回执透传；终态结果卡评论链自补）。单飞复用 isCommentBusy（同一评论机器）。
+   */
+  triggerGroupComment?(accountId: string): Promise<unknown>;
+  /** 该账号今日群评自动尝试数（持久 attempts 台账，服务器本地日；尝试型上限）。 */
+  groupAttemptsTodayCount?(accountId: string): Promise<number>;
   now?: () => number;
   logger?: { warn: (m: string) => void; info?: (m: string) => void };
 }
@@ -148,12 +159,17 @@ export class ContentScheduler {
           if (this.inFlight.has(accountId)) continue;
 
           // 动作循环（post 在前：纯云端、不接管边端；每账号每 tick 至多 fire 一个动作）。
-          for (const action of ['post', 'comment'] as const) {
+          for (const action of ['post', 'comment', 'group_comment'] as const) {
             if (action === 'post' && (!s.postEnabled || s.postDailyCap <= 0)) continue;
             if (action === 'comment') {
               if (!s.commentEnabled || s.commentDailyCap <= 0) continue;
               // 评论三件套未注入（如 commentScheduler 未建）→ 评论动作整体跳过（零回归）。
               if (!this.deps.triggerComment || !this.deps.isCommentBusy || !this.deps.commentedTodayCount) continue;
+            }
+            if (action === 'group_comment') {
+              if (!s.groupCommentEnabled || s.groupCommentDailyCap <= 0) continue;
+              // 群评两件套未注入（或评论机器缺）→ 群评动作整体跳过（零回归）。
+              if (!this.deps.triggerGroupComment || !this.deps.isCommentBusy || !this.deps.groupAttemptsTodayCount) continue;
             }
             // 分钟错峰（按动作独立哈希，动作间自然岔开）。
             if (minute !== offsetMinute(accountId, now, action)) continue;
@@ -183,7 +199,7 @@ export class ContentScheduler {
                   this.inFlight.delete(accountId);
                   this.postFiring = false;
                 });
-            } else {
+            } else if (action === 'comment') {
               // 评论单飞：任务在跑不重触发（cap 的「在跑?1:0」项在此恒 0——在跑早被拦下）。
               if (this.deps.isCommentBusy!(accountId)) continue;
               // 日上限原子：持久已发计数（评论管线任务内联等审 + 单飞，无排队草稿窗口，无需在途台账）。
@@ -195,6 +211,19 @@ export class ContentScheduler {
               void this.deps
                 .triggerComment!(accountId)
                 .catch((e) => this.deps.logger?.warn(`[content-scheduler] triggerComment 异常 account=${accountId}：${(e as Error).message}`))
+                .finally(() => this.inFlight.delete(accountId));
+            } else {
+              // 群评：单飞复用评论机器（同一 isRunning，评论/群评互斥天然成立）。
+              if (this.deps.isCommentBusy!(accountId)) continue;
+              // 尝试型日上限：持久 attempts 台账（被拒/无目标也占额度，保守方向；重启不清零）。
+              const attempts = await this.deps.groupAttemptsTodayCount!(accountId);
+              if (attempts >= s.groupCommentDailyCap) continue;
+
+              this.lastFired.set(fireKey, cell);
+              this.inFlight.add(accountId);
+              void this.deps
+                .triggerGroupComment!(accountId)
+                .catch((e) => this.deps.logger?.warn(`[content-scheduler] triggerGroupComment 异常 account=${accountId}：${(e as Error).message}`))
                 .finally(() => this.inFlight.delete(accountId));
             }
             break; // 每账号每 tick 至多一动作（防同分钟双动作抢边端）。

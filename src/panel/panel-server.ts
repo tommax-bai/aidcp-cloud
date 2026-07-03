@@ -909,7 +909,7 @@ function createRequestHandler(
       }
       const raw = (body ?? {}) as Record<string, unknown>;
       const patch: AccountContentSchedulePatch = {};
-      for (const k of ['autoEnabled', 'postEnabled', 'commentEnabled'] as const) {
+      for (const k of ['autoEnabled', 'postEnabled', 'commentEnabled', 'groupCommentEnabled'] as const) {
         const v = raw[k];
         if (v === undefined) continue;
         if (typeof v !== 'boolean') {
@@ -932,6 +932,13 @@ function createRequestHandler(
         }
         patch.commentDailyCap = raw.commentDailyCap;
       }
+      if (raw.groupCommentDailyCap !== undefined) {
+        if (typeof raw.groupCommentDailyCap !== 'number') {
+          sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
+          return;
+        }
+        patch.groupCommentDailyCap = raw.groupCommentDailyCap;
+      }
       if ('contentActiveMask' in raw) {
         const m = raw.contentActiveMask;
         if (m !== null && typeof m !== 'string') {
@@ -943,7 +950,7 @@ function createRequestHandler(
       const result = await deps.contentSchedule.setAccount(accountId, patch, verified.payload.sub);
       if (!result.ok) {
         if (result.reason === 'account_not_found') sendJson(res, 404, { error: 'account_not_found' });
-        else sendJson(res, 400, { error: 'bad_request', reason: result.reason }); // retired_account / invalid_value / no_valid_fields
+        else sendJson(res, 400, { error: 'bad_request', reason: result.reason }); // retired_account / invalid_value / no_valid_fields / no_group_code / shared_group_code
         return;
       }
       sendJson(res, 200, result.row);
