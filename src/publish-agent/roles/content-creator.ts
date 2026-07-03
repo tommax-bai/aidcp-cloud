@@ -3,6 +3,7 @@ import type { RoleConfig } from './base-role.js';
 import type { PipelineFields, ScoutDecision, TriggerInput, CreatedContent } from '../types.js';
 import type { PipelineContext } from '../pipeline-context.js';
 import { buildCreatorPrompt } from '../prompts.js';
+import { escapeControlCharsInJsonStrings } from '../json-repair.js';
 import { executeWithRetry } from '../retry-strategy.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
 
@@ -68,7 +69,15 @@ export class ContentCreatorRole extends BasePublishRole<CreatorInput, CreatedCon
   private parseOutput(raw: string): Omit<CreatedContent, 'createdAt'> {
     const match = raw.match(/\{[\s\S]*\}/);
     if (!match) throw new Error('No JSON found in Creator output');
-    const obj = JSON.parse(match[0]);
+    // doubao 常把多行正文的换行不转义直接放进 JSON 字符串（Bad control character，正文角色切 doubao 后必炸）——
+    // 先原样 parse，失败则只转义字符串内部裸控制字符后重试；仍失败照旧抛（诚实中止，不伪造内容）。
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- JSON.parse 返回值，与原实现同型
+    let obj: any;
+    try {
+      obj = JSON.parse(match[0]);
+    } catch {
+      obj = JSON.parse(escapeControlCharsInJsonStrings(match[0]));
+    }
     // 小红书标题硬上限 20 字（超限「发布」按钮静默失效）。云端先截断至 20 兜底，edge 再截一次双保险。
     const title = String(obj.title || '').slice(0, 20);
     return {
