@@ -51,6 +51,10 @@ test('暂停后普通指令被丢弃、session.end 必达、恢复后续发', as
   // 暂停中：普通指令被丢弃；session.end 仍必达（不死锁）
   assert.equal(s.pushToEdges(scroll, 'edge-1'), 0, '暂停的 edge 不应收到普通指令');
   assert.equal(s.pushToEdges(end, 'edge-1'), 1, 'session.end 必达，绕过暂停闸');
+  // ui.snapshot 同样豁免（edge-companion-ui 8.1）：纯界面数据非页面命令，验证码暂停期
+  // 吞掉它会让发布终态（rejected/failed）推送永久丢失（终态不经 hello 快照回放）。
+  const snap = makeEnvelope('ui.snapshot', 'c3', 0, { publish: { state: 'failed', code: '#1' } });
+  assert.equal(s.pushToEdges(snap, 'edge-1'), 1, 'ui.snapshot 必达，绕过暂停闸');
 
   s.resumeEdge('edge-1');
   assert.equal(s.pushToEdges(scroll, 'edge-1'), 1, '恢复后普通指令应再次可达');

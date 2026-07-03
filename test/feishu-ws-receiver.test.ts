@@ -416,7 +416,6 @@ test('ws-receiver: cancel 撞先写签名（first-writer-wins 未写入）→ �
         err.code = 'EEXIST';
         throw err;
       },
-      readFile: async () => JSON.stringify({ approved: true }),
       rm: async () => {},
     },
     onRejected: (id) => rejected.push(id),

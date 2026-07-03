@@ -190,7 +190,9 @@ export class EdgeCloudServer implements EdgePusher {
     }
     const frame = JSON.stringify(env);
     // session.end 必达：绝不被验证码暂停闸吞掉，否则持久弹窗会导致会话无法终止（死锁）。
-    const bypassPause = env.type === 'session.end';
+    // ui.snapshot 同样豁免（edge-companion-ui 8.1 评审修正）：它是纯界面数据、不是页面命令，
+    // 验证码暂停期吞掉它会让发布终态（rejected/failed）推送永久丢失（终态不经 hello 快照回放）。
+    const bypassPause = env.type === 'session.end' || env.type === 'ui.snapshot';
     let sent = 0;
     for (const conn of this.edges.values()) {
       if (conn.session.edgeId !== edgeId) continue;

@@ -202,6 +202,9 @@ export class PublishDispatcher {
     if (!edgeId) {
       await this.store.updateStatus(recordId, 'failed').catch(() => {});
       this.logger.warn(`[PublishDispatcher] 账号 ${accountId} 无在线边缘节点，recordId=${recordId} 诚实 failed（不让位、不下发）`);
+      // 也通知陪伴界面（评审修正）：推送内部会重新解析在线边缘——若边缘在「判离线→写失败」的
+      // 间隙里恰好重连，failed 能送达；仍离线则推送层如实放弃（终态推送为一次性 best-effort）。
+      this.notifyUi(accountId, recordId, 'failed', draft.title);
       return;
     }
 
