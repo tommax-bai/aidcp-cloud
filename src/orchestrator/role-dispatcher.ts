@@ -285,6 +285,11 @@ export class RoleDispatcher {
   private nicknameEnricher?: NicknameEnricher;
   /** 已下发占坑、待回执释放的互动键（按动作）：action.completed 据此 complete / releaseFailed。 */
   private readonly pendingInteractionKeys = new Map<GuardAction, string>();
+  /**
+   * like/collect 下发后的重试上下文（change fix-interaction-and-comment-capture）：回执带不带 noteId，
+   * 故下发时按动作暂存 noteId + 已重试次数；可重试失败（点了没生效/互动栏一时缺失）时据此原地重发一次。
+   */
+  private readonly interactionRetry = new Map<'like' | 'collect', { noteId: string; attempts: number }>();
   private readonly notifyComments?: (items: NotificationItem[]) => Promise<void>;
   private readonly conceptStore?: ConceptStorePort;
   /** 搜索前限频闸（每关键词每会话/每天上限），dispatcher 持有单例，会话重启时清会话计数。 */
@@ -824,6 +829,9 @@ export class RoleDispatcher {
     this.searchLimiter.resetSession();
     void this.refreshConceptPool();
     this.sessionContext.reset();
+    // 清在途互动状态（change fix-interaction-and-comment-capture）：新场从干净的重试/去重态开始。
+    this.interactionRetry.clear();
+    this.pendingInteractionKeys.clear();
     // 重新订阅角色与接线（SessionMonitor.subscribe 重置 startedAt/actionCount）
     this.roles.forEach((r) => r.subscribe());
     this.setupCommandTranslation();
@@ -857,6 +865,9 @@ export class RoleDispatcher {
     this.roles.forEach((r) => r.unsubscribe());
     for (const unsub of this.commandUnsubscribers) unsub();
     this.commandUnsubscribers = [];
+    // 清在途互动状态（change fix-interaction-and-comment-capture）：防上一场极晚到的回执驱动新场重发/误扣。
+    this.interactionRetry.clear();
+    this.pendingInteractionKeys.clear();
     console.log(`[RoleDispatcher] 会话结束: ${reason ?? 'manual'}`);
     // 仅「正常结束」且续场特性已开（注入提供者）才安排休息+续场。
     if (opts?.autoResumeEligible) this.armRestTimer(account);
@@ -1099,9 +1110,12 @@ export class RoleDispatcher {
             continue;
           }
           // 互动前犹豫时间（time directive）：边缘据此在执行前等待并叠抖动。
-          // 下发被去重跳过（同账号已在途/已完成）则不扣会话预算（不漂移）。
+          // change fix-interaction-and-comment-capture：预算不再在下发时乐观扣（失败/去重跳过不该烧预算），
+          // 改按 action.completed{ok:true} 扣（对齐 follow/comment）；此处仅登记重试上下文（noteId + 次数）。
           const sent = this.sendCommand({ action, params: { noteId: payload.noteId, thinkMs: this.thinkNow() } });
-          if (sent) this.consumeBudget(action);
+          if (sent && (action === 'like' || action === 'collect')) {
+            this.interactionRetry.set(action, { noteId: payload.noteId, attempts: 0 });
+          }
         }
       }),
 
@@ -1341,6 +1355,11 @@ export class RoleDispatcher {
             this.markCooldown('follow');
           }
         }
+        // change fix-interaction-and-comment-capture：like/collect 预算按真成功回执扣（对齐 follow/comment）。
+        // 下发时不再乐观扣；失败/去重跳过不烧预算；重试成功也只在此扣一次（失败回执 ok:false 不进此分支）。
+        if (payload.ok === true && (payload.action === 'like' || payload.action === 'collect')) {
+          this.consumeBudget(payload.action);
+        }
         // 同账号并行（N:1）：释放该动作的在途去重坑。成功且非 already_followed no-op → 记已完成（不再重复对同目标动作）；
         // 失败 / already_followed → 仅释放在途坑（允许后续重试）。靠边缘 FIFO 回执与 per-动作单坑对齐，TTL 兜底防丢回执永久占坑。
         if (this.interactionGuard && isGuardedInteraction(payload.action)) {
@@ -1379,7 +1398,42 @@ export class RoleDispatcher {
         // （与 follow 回执解耦，回执此处只用于配额扣减）；若再滑一屏会与已在途的返回命令打架。
         // browse_images / scroll_comments 在详情页内执行，失败由 DeepReader / CommentReviewer
         // 自行推进（emit reading.images_done / reading.done），此处不发 feed 滚动（否则会把详情页滚走）。
-        const noRecoverScroll = payload.action === 'follow' || payload.action === 'browse_images' || payload.action === 'scroll_comments' || payload.action === 'comment' || payload.action === 'comment_like';
+        // change fix-interaction-and-comment-capture：like/collect 可重试失败（点了没生效 state_unchanged /
+        // 互动栏一时缺失 btn_no-bar·btn_no-btn）原地有界重试一次；不可重试（验证码/已点过）诚实终止。
+        // 重试或终止都不发兜底滚动——like/collect 在详情页内执行，滚动会把详情页滚走。
+        if (payload.action === 'like' || payload.action === 'collect') {
+          const RETRIABLE_INTERACTION_REASONS = new Set(['state_unchanged', 'btn_no-bar', 'btn_no-btn']);
+          const tracker = this.interactionRetry.get(payload.action);
+          if (
+            payload.ok === false &&
+            this.sessionActive &&
+            typeof payload.reason === 'string' &&
+            RETRIABLE_INTERACTION_REASONS.has(payload.reason) &&
+            tracker &&
+            tracker.attempts < 1
+          ) {
+            // 只有重发真发出（未被软暂停/去重丢弃）才消耗这次重试名额；否则不烧名额、落下方清理。
+            const resent = this.sendCommand({ action: payload.action, params: { noteId: tracker.noteId, thinkMs: this.thinkNow() } });
+            if (resent) {
+              tracker.attempts += 1;
+              console.log(
+                `[RoleDispatcher] ${payload.action} 失败可重试 → 原地重发（note=${tracker.noteId} attempt=${tracker.attempts} reason=${payload.reason}）`,
+              );
+              return; // 重发已发出，等下一个回执，不落兜底滚动、不清 tracker
+            }
+            console.log(`[RoleDispatcher] ${payload.action} 重发被软暂停/去重丢弃 → 不消耗重试名额`);
+          }
+          // 成功 / 不可重试 / 重试用尽 / 重发被丢弃：清理重试上下文。
+          this.interactionRetry.delete(payload.action);
+        }
+        const noRecoverScroll =
+          payload.action === 'follow' ||
+          payload.action === 'browse_images' ||
+          payload.action === 'scroll_comments' ||
+          payload.action === 'comment' ||
+          payload.action === 'comment_like' ||
+          payload.action === 'like' ||
+          payload.action === 'collect';
         if (payload.ok === false && !noRecoverScroll && this.sessionActive) {
           console.log(`[RoleDispatcher] 动作失败兜底 → scroll（recover_after_${payload.action}_failed）`);
           this.sendCommand({ action: 'scroll', reason: `recover_after_${payload.action}_failed` });

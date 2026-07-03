@@ -22,6 +22,8 @@ function makeEnv(
     cards?: Array<{ title?: string; author?: string; collectCount?: number; noteId?: string }>;
     detail?: { title?: string; content?: string };
     comments?: Array<{ author?: string; text: string; likeCount?: number }>;
+    scrollOk?: boolean; // scroll_comments 回执 ok（默认 true）；false 模拟采集失败（no_scroll/no_target）
+    scrollReason?: string;
     postOk?: boolean;
   },
 ) {
@@ -48,7 +50,7 @@ function makeEnv(
           ts: Date.now(),
         } as never);
       } else if (env.type === 'note.scroll_comments') {
-        bus.emit('action.completed', { action: 'scroll_comments', ok: true, candidates: opts.comments ?? [], ts: Date.now() } as never);
+        bus.emit('action.completed', { action: 'scroll_comments', ok: opts.scrollOk ?? true, reason: opts.scrollReason, candidates: opts.comments ?? [], ts: Date.now() } as never);
       } else if (env.type === 'interaction.comment') {
         bus.emit('action.completed', { action: 'comment', ok: opts.postOk ?? true, ts: Date.now() } as never);
       }
@@ -127,6 +129,22 @@ describe('buildEdgeCommentSteps', () => {
     assert.equal(r!.note.title, 'RAG 实战');
     assert.deepEqual(r!.comments.map((c) => c.text), ['学到了', '求教程']);
     assert.deepEqual(sentTypes, ['note.open', 'note.scroll_comments']);
+  });
+
+  // change fix-interaction-and-comment-capture：采集失败(ok:false)但边端仍带回可见候选时，撰写仍拿到现场评论
+  // （区分「采集失败」与「真无评论」，不把失败静默抹平成无评论）。
+  it('readNote：scroll_comments ok:false 但带回候选 → comments 仍填充（不抹平失败）', async () => {
+    const bus = new EventBus();
+    const { pusher } = makeEnv(bus, {
+      detail: { title: 'x', content: '正文' },
+      scrollOk: false,
+      scrollReason: 'no_scroll',
+      comments: [{ text: '短评论区也采到了', likeCount: 1 }],
+    });
+    const steps = buildEdgeCommentSteps({ bus, pusher, edgeId: 'e1', dedup: makeDedup() });
+    const r = await steps.readNote({ index: 0, noteId: 'a', title: 'x' });
+    assert.ok(r);
+    assert.deepEqual(r!.comments.map((c) => c.text), ['短评论区也采到了'], 'ok:false 也应带回边端可见候选');
   });
 
   it('readNote：note.detail 超时 → null', async () => {
