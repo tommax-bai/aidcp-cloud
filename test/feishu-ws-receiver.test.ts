@@ -369,3 +369,63 @@ test('ws-receiver: 版本预检 fail-safe — 读版本失败(null) → 拒到�
   assert.equal(writes.length, 0, 'fail-safe：无法确认版本绝不放行');
   assert.equal(res.toast.type, 'error');
 });
+
+// ── 陪伴界面 rejected 通知（change edge-companion-ui 8.1）──────────────────────
+test('ws-receiver: cancel 首写成功 → 触发 onRejected；approve 不触发', async () => {
+  const rejected: string[] = [];
+  const approved: string[] = [];
+  const receiver = new FeishuWsReceiver({
+    appId: 'a',
+    appSecret: 's',
+    commandRouter: makeRouter(),
+    fsImpl: {
+      writeFile: async () => {},
+      rm: async () => {},
+    },
+    onApproved: (id) => approved.push(id),
+    onRejected: (id) => rejected.push(id),
+  });
+  const cancelRes = await receiver.handleCardAction({
+    action: 'cancel',
+    requestId: 'publish-86',
+    payload: { title: '标题', content: '正文', tags: [] },
+  });
+  assert.equal(cancelRes.toast.type, 'info');
+  assert.deepEqual(rejected, ['publish-86']);
+  assert.deepEqual(approved, []);
+
+  const approveRes = await receiver.handleCardAction({
+    action: 'approve',
+    requestId: 'publish-87',
+    payload: { title: '标题', content: '正文', tags: [] },
+  });
+  assert.equal(approveRes.toast.type, 'success');
+  assert.deepEqual(approved, ['publish-87']);
+  assert.deepEqual(rejected, ['publish-86'], 'approve 不触发 onRejected');
+});
+
+test('ws-receiver: cancel 撞先写签名（first-writer-wins 未写入）→ 不触发 onRejected', async () => {
+  const rejected: string[] = [];
+  const receiver = new FeishuWsReceiver({
+    appId: 'a',
+    appSecret: 's',
+    commandRouter: makeRouter(),
+    fsImpl: {
+      writeFile: async () => {
+        const err = new Error('exists') as NodeJS.ErrnoException;
+        err.code = 'EEXIST';
+        throw err;
+      },
+      readFile: async () => JSON.stringify({ approved: true }),
+      rm: async () => {},
+    },
+    onRejected: (id) => rejected.push(id),
+  });
+  const res = await receiver.handleCardAction({
+    action: 'cancel',
+    requestId: 'publish-88',
+    payload: { title: '标题', content: '正文', tags: [] },
+  });
+  assert.equal(res.toast.type, 'info');
+  assert.deepEqual(rejected, [], '未首写不触发（决定已被他人先做）');
+});

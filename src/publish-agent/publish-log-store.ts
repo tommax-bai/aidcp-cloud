@@ -456,6 +456,38 @@ export class PublishLogStore {
     return Number(rows[0]?.n ?? '0');
   }
 
+  /**
+   * 陪伴界面数据回填（change edge-companion-ui 8.1）：某账号最近一次**成功发布**的摘要。
+   * at = published_at 的 epoch 毫秒（该列在草稿 INSERT 时落、状态翻转不更新，为草稿入库时间近似——
+   * 界面只做「上次发布 · N 前」粒度展示，可接受；绝不臆造真实发布时刻）。无记录返回 null。
+   */
+  async lastPublishedForAccount(accountId: string): Promise<{ title: string | null; at: number } | null> {
+    const { rows } = await this.pool.query<{ title: string | null; ts: string | null }>(
+      `SELECT title, extract(epoch from published_at) * 1000 AS ts FROM publish_log
+        WHERE account_id = $1 AND status = 'published'
+        ORDER BY published_at DESC, id DESC LIMIT 1`,
+      [accountId],
+    );
+    const r = rows[0];
+    if (!r || r.ts == null) return null;
+    return { title: r.title ?? null, at: Number(r.ts) };
+  }
+
+  /**
+   * 陪伴界面数据回填（change edge-companion-ui 8.1）：某账号最新一条待审草稿（发布卡 pending 态）。
+   * 是否真在候审还须结合授权信号判定（已拒草稿 status 仍留 pending_approval，由调用方过滤）。
+   */
+  async pendingApprovalForAccount(accountId: string): Promise<{ id: number; title: string | null } | null> {
+    const { rows } = await this.pool.query<{ id: number; title: string | null }>(
+      `SELECT id, title FROM publish_log
+        WHERE account_id = $1 AND status = 'pending_approval'
+        ORDER BY id DESC LIMIT 1`,
+      [accountId],
+    );
+    const r = rows[0];
+    return r ? { id: r.id, title: r.title ?? null } : null;
+  }
+
   /** 取最近一条发布记录（任意状态），用于计算距上次发布时长。 */
   async latest(): Promise<PublishRecord | null> {
     const { rows } = await this.pool.query<PublishRow>(

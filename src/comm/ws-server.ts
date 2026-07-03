@@ -95,6 +95,12 @@ export interface WsServerOptions {
   staleAfterMs?: number;
   /** 连接关闭回调（multi-account-node-support）：拆除该连接的多租户运行时。 */
   onClose?: (session: EdgeSession) => void;
+  /**
+   * 边缘握手注册完成回调（change edge-companion-ui 8.1）：连接已进推送表（edges.set）且 welcome
+   * 已回发之后触发——此刻起 pushToEdges 可命中该连接（绕开「hello 处理中推送 sent=0」的前科）。
+   * 仅握手成功（回 welcome）才触发；被拒握手（回 error）不触发。回调异常自吞，不影响主链路。
+   */
+  onEdgeRegistered?: (session: EdgeSession) => void;
 }
 
 let sessionSeq = 0;
@@ -125,6 +131,7 @@ export class EdgeCloudServer implements EdgePusher {
   private readonly heartbeatMs: number;
   private readonly staleAfterMs: number;
   private readonly onCloseCb?: (session: EdgeSession) => void;
+  private readonly onEdgeRegisteredCb?: (session: EdgeSession) => void;
   private heartbeatTimer?: ReturnType<typeof setInterval>;
 
   constructor(options: WsServerOptions) {
@@ -136,6 +143,7 @@ export class EdgeCloudServer implements EdgePusher {
     this.heartbeatMs = options.heartbeatMs ?? 30000;
     this.staleAfterMs = options.staleAfterMs ?? 75000;
     this.onCloseCb = options.onClose;
+    this.onEdgeRegisteredCb = options.onEdgeRegistered;
   }
 
   /** 启动监听 */
@@ -278,6 +286,15 @@ export class EdgeCloudServer implements EdgePusher {
         if (conn) conn.lastSeen = this.clock();
       }
       if (reply) ws.send(JSON.stringify(reply));
+      // 握手注册完成（连接已可被主动推送、welcome 已先行回发）→ 通知快照层回填陪伴界面数据。
+      // 仅握手成功才触发（被拒时 reply 是 error 信封）；回调异常自吞，绝不影响连接主循环。
+      if (env?.type === 'hello' && reply?.type === 'welcome') {
+        try {
+          this.onEdgeRegisteredCb?.(session);
+        } catch (err) {
+          console.warn(`[ws-server] onEdgeRegistered 回调异常（已吞）: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
     });
     // ws 协议层 pong（响应主动 ping）也刷新 lastSeen
     ws.on('pong', () => {

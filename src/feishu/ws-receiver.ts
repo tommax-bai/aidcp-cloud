@@ -57,6 +57,11 @@ export interface FeishuWsReceiverOptions {
    */
   onApproved?: (requestId: string) => void;
   /**
+   * 取消（拒绝发布）首写成功时调用（change edge-companion-ui 8.1）：带 requestId，供快照层把
+   * rejected 状态推给该账号在线边缘（发布卡收起为「暂不发布」）。缺省不触发，零回归。
+   */
+  onRejected?: (requestId: string) => void;
+  /**
    * 读某草稿当前内容版本号（change edit-note-draft-before-publish）：卡片授权/取消前的写时版本预检。
    * 仅对 `publish-<n>` requestId 生效。缺省（测试/旧装配）不预检、零回归。
    * 返回 null（不存在/读失败）→ fail-safe 拒到控制台，绝不放行未确认版本。
@@ -175,6 +180,7 @@ export class FeishuWsReceiver {
   private readonly logger: Pick<Console, 'log' | 'warn' | 'error'>;
   private readonly fsImpl: Pick<typeof fs, 'writeFile' | 'rm'>;
   private readonly onApproved?: (requestId: string) => void;
+  private readonly onRejected?: (requestId: string) => void;
   private readonly readLiveContentVersion?: (recordId: number) => Promise<number | null>;
   private wsClient?: lark.WSClient;
 
@@ -186,6 +192,7 @@ export class FeishuWsReceiver {
     this.logger = options.logger ?? console;
     this.fsImpl = options.fsImpl ?? fs;
     this.onApproved = options.onApproved;
+    this.onRejected = options.onRejected;
     this.readLiveContentVersion = options.readLiveContentVersion;
   }
 
@@ -291,6 +298,12 @@ export class FeishuWsReceiver {
           }),
         },
       };
+    }
+    // 取消首写成功：通知陪伴界面 rejected（发布卡收起为「暂不发布」）。best-effort，绝不影响审批主链路。
+    try {
+      this.onRejected?.(parsed.requestId);
+    } catch (err) {
+      this.logger.warn('[feishu] onRejected 通知失败:', (err as Error).message);
     }
     return {
       toast: { type: 'info', content: '已取消发布' },

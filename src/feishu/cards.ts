@@ -205,6 +205,15 @@ function buildPublishApprovalStateCard(
       text: { tag: 'lark_md', content: `**话题**\n${tags}` },
     },
   ];
+  // 编号（change edge-companion-ui 8.1）：与客户端发布卡「编号」对暗号（同源=发布记录 id）。
+  // 仅 publish-<n> 形态的 requestId 展示（/publish_test 等调试卡不带，宁缺毋假）。
+  const recordIdMatch = /^publish-(\d+)$/.exec(payload.requestId);
+  if (recordIdMatch) {
+    fields.push({
+      is_short: true,
+      text: { tag: 'lark_md', content: `**编号**\n#${recordIdMatch[1]}` },
+    });
+  }
   const callbackValue = {
     requestId: payload.requestId,
     payload: {

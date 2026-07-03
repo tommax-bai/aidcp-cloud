@@ -64,6 +64,7 @@ import {
   type CommandActions,
 } from './feishu/index.js';
 import { CommandSequencer } from './publish-agent/command-sequencer.js';
+import { UiSnapshotService } from './comm/ui-snapshot.js';
 import { PublishOrchestrator, PublishScheduler, PublishDispatcher } from './publish-agent/index.js';
 import { WanxiangClient } from './publish-agent/wanxiang-client.js';
 import { SeedreamClient } from './publish-agent/seedream-client.js';
@@ -1038,7 +1039,17 @@ async function main(): Promise<void> {
     onHandshake: (session) => runtimes!.onHandshake(session),
     resolveController: (session) => runtimes?.controllerForSession(session),
   });
-  const server = new EdgeCloudServer({ port, handler, onClose: (session) => runtimes?.onDisconnect(session) });
+  // 陪伴界面快照层（edge-companion-ui 8.1）：前向引用（服务实例在 server 起后构造，同 pusher 闭包模式）。
+  let uiSnapshot: UiSnapshotService | undefined;
+  const server = new EdgeCloudServer({
+    port,
+    handler,
+    onClose: (session) => runtimes?.onDisconnect(session),
+    // 握手注册完成（连接已可被推送、welcome 已回）→ 回填该账号的陪伴界面快照（昵称/最近发布/在途候审）。
+    onEdgeRegistered: (session) => {
+      void uiSnapshot?.pushHelloSnapshot(session.accountId, session.edgeId);
+    },
+  });
   edgeServer = server;
   await server.start();
   console.log(`[aidcp-cloud] 边-云 WebSocket 服务端已监听 :${port}`);
@@ -1046,6 +1057,18 @@ async function main(): Promise<void> {
   // ── 发布下发段（change decouple-publish-generation-from-dispatch）──────────────
   // 由人审授权信号到达触发（通过即切）。唯一碰边缘、唯一让位浏览的阶段：让位 → 从落库草稿重建发布输入 →
   // 驱动指令序列 → 回写 → 解除让位。AC-PUB：下发前复核授权信号 approved===true，未授权绝不下发。
+  // 陪伴界面快照层实例化（edge-companion-ui 8.1）：hello 回填 + 发布审批状态实时推送。
+  uiSnapshot = new UiSnapshotService({
+    pusher: { pushToEdges: (env, edgeId) => server.pushToEdges(env, edgeId) },
+    resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
+    getNickname: (accountId) => accountStore?.getNickname?.(accountId) ?? null,
+    lastPublishedForAccount: (accountId) => publishLogStore.lastPublishedForAccount(accountId),
+    pendingApprovalForAccount: (accountId) => publishLogStore.pendingApprovalForAccount(accountId),
+    readApproval: readPublishApproval,
+    logger: console,
+  });
+  const uiSnapshotService = uiSnapshot;
+
   const publishDispatcher = new PublishDispatcher({
     store: publishLogStore,
     sequencer: commandSequencer,
@@ -1054,6 +1077,9 @@ async function main(): Promise<void> {
     voidApprovalSignal,
     onPublishStart: onPublishTakeoverStart,
     onPublishEnd: onPublishTakeoverEnd,
+    // 陪伴界面：授权核实→approved、云端终判失败→failed 推给在线边缘（published 由边缘自知）。
+    notifyUiPublishState: (accountId, recordId, state, title) =>
+      uiSnapshotService.pushPublishState(accountId, recordId, state, title),
     logger: console,
   });
   // 审批授权 → 触发下发（仅 publish-<n> 走此路；评论审批 comment-<…> 不触发发帖下发）。
@@ -1064,6 +1090,19 @@ async function main(): Promise<void> {
       .dispatch(Number(m[1]))
       .catch((e) => console.warn('[aidcp-cloud] publish dispatch err:', e instanceof Error ? e.message : String(e)));
   };
+  // 陪伴界面：拒绝发布（飞书取消/面板拒绝首写成功）→ rejected 推给该账号在线边缘（仅 publish-<n>）。
+  const notifyPublishRejected = (requestId: string): void => {
+    const m = /^publish-(\d+)$/.exec(requestId);
+    if (!m) return;
+    const recordId = Number(m[1]);
+    void publishLogStore
+      .loadForDispatch(recordId)
+      .then((draft) => {
+        if (draft) uiSnapshotService.pushPublishState(draft.accountId, recordId, 'rejected', draft.title);
+      })
+      .catch(() => {});
+  };
+
   // 兜底补偿（at-least-once）：低频扫描已授权但未下发的待审草稿补触发（覆盖事件丢失）；靠 dispatch 幂等去重。
   const dispatchScanMs = Number(process.env.AIDCP_PUBLISH_DISPATCH_SCAN_MS ?? 60_000);
   if (dispatchScanMs > 0) {
@@ -1345,6 +1384,9 @@ async function main(): Promise<void> {
     },
     messenger,
     botChatStore,
+    // 陪伴界面（edge-companion-ui 8.1）：候审即推 pending（发布卡自动展开到「等你确认」）。
+    notifyPublishPending: (accountId, recordId, title) =>
+      uiSnapshotService.pushPublishState(accountId, recordId, 'pending', title),
     // decouple-publish-generation-from-dispatch：executor 只落库待审 + 发审批卡，不再内联等审/下发，
     // 故不再注入 sequencer / isApproved / approvalWaitMs / pusher。超时只覆盖落库+发卡（默认 30s）。
     roleTimeoutMs: Number(process.env.AIDCP_PUBLISH_ROLE_TIMEOUT_MS ?? 30_000),
@@ -1605,6 +1647,8 @@ async function main(): Promise<void> {
     messenger,
     // 通过即切：飞书「授权发布」首写成功即触发下发段（仅 publish-<n>）。
     onApproved: triggerPublishDispatchOnApprove,
+    // 陪伴界面：取消首写成功 → rejected 推给在线边缘（仅 publish-<n>）。
+    onRejected: notifyPublishRejected,
     // 写时版本预检（edit-note-draft-before-publish）：飞书卡片授权前比对活版本与卡片烤入版本；
     // 不一致 → 不写签名、回「请到控制台重新审批」替换卡（云端无法主动刷新已发出的老卡片）。
     readLiveContentVersion,
@@ -1737,8 +1781,10 @@ async function main(): Promise<void> {
           publishOrchestrator,
           writeApprovalSignal: async (requestId, approved, payload) => {
             const result = await writeApprovalSignal({ writeFile, readFile }, requestId, approved, payload);
-            // 通过即切：后台「授权发布」首写成功即触发下发段（仅 publish-<n>）。取消不触发。
+            // 通过即切：后台「授权发布」首写成功即触发下发段（仅 publish-<n>）。取消不触发下发，
+            // 但要通知陪伴界面 rejected（发布卡收起为「暂不发布」）。
             if (approved && result.written) triggerPublishDispatchOnApprove(requestId);
+            else if (!approved && result.written) notifyPublishRejected(requestId);
             return result;
           },
           // 待审正文草稿就地编辑 + 活版本读回 + 授权在途探测（edit-note-draft-before-publish）。经拥有者对象单写，绝不 raw UPDATE。

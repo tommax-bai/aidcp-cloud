@@ -162,3 +162,25 @@ test('buildPublishApprovalCard: 构造新版 callback behaviors', () => {
   });
   assert.equal(buttons[1].behaviors?.[0]?.value.action, 'cancel');
 });
+
+test('buildPublishApprovalCard: publish-<n> 卡片带「编号」字段（与客户端发布卡对暗号）', () => {
+  const card = buildPublishApprovalCard({
+    requestId: 'publish-83',
+    title: '标题',
+    content: '正文',
+    tags: [],
+  });
+  const flat = JSON.stringify(card);
+  assert.match(flat, /编号/);
+  assert.match(flat, /#83/);
+});
+
+test('buildPublishApprovalCard: 非 publish-<n> requestId 不带编号（宁缺毋假）', () => {
+  const card = buildPublishApprovalCard({
+    requestId: 'req-test-1',
+    title: '标题',
+    content: '正文',
+    tags: [],
+  });
+  assert.ok(!JSON.stringify(card).includes('编号'));
+});

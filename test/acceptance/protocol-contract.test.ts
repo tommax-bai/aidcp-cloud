@@ -25,6 +25,7 @@ import {
  */
 const ALL_MESSAGE_TYPES: Record<MessageType, true> = {
   hello: true, welcome: true,
+  'ui.snapshot': true,
   'plan.request': true, 'plan.response': true,
   'select.request': true, 'select.response': true,
   'anchor.get': true, 'anchor.get.result': true, 'anchor.report': true,
@@ -53,8 +54,8 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     assert.equal(PROTOCOL_VERSION, 2);
   });
 
-  it('AC-PROTO-02 消息类型总数为 56（增删消息须同步两端 + 本断言）', () => {
-    assert.equal(ALL_TYPES.length, 56);
+  it('AC-PROTO-02 消息类型总数为 57（增删消息须同步两端 + 本断言）', () => {
+    assert.equal(ALL_TYPES.length, 57);
   });
 
   it('AC-PROTO-03 每个消息类型都能构造合法信封且版本一致', () => {

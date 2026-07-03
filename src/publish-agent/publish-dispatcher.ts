@@ -46,6 +46,11 @@ export interface PublishDispatcherDeps {
   onPublishStart: (accountId: string) => void;
   /** 解除让位：经续场各闸起新浏览会话（无论成功/失败/异常，经唯一保证终止点）。 */
   onPublishEnd: (accountId: string) => void;
+  /**
+   * 陪伴界面通知（change edge-companion-ui 8.1，可选）：审批已核通过（approved）与云端终判失败（failed）
+   * 推给该账号的在线边缘。published 不经此通道（边缘 submit 成功处自知）。best-effort，绝不影响下发主链路。
+   */
+  notifyUiPublishState?: (accountId: string, recordId: number, state: 'approved' | 'failed', title?: string | null) => void;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
 
@@ -57,6 +62,7 @@ export class PublishDispatcher {
   private readonly voidApprovalSignal: (requestId: string) => Promise<void>;
   private readonly onPublishStart: (accountId: string) => void;
   private readonly onPublishEnd: (accountId: string) => void;
+  private readonly notifyUiPublishState?: (accountId: string, recordId: number, state: 'approved' | 'failed', title?: string | null) => void;
   private readonly logger: Pick<Console, 'log' | 'warn' | 'error'>;
 
   /** 同 recordId 在途去重（防重复点击/事件与兜底扫描双触发）。 */
@@ -72,6 +78,7 @@ export class PublishDispatcher {
     this.voidApprovalSignal = deps.voidApprovalSignal;
     this.onPublishStart = deps.onPublishStart;
     this.onPublishEnd = deps.onPublishEnd;
+    this.notifyUiPublishState = deps.notifyUiPublishState;
     this.logger = deps.logger ?? console;
   }
 
@@ -134,6 +141,15 @@ export class PublishDispatcher {
     }
   }
 
+  /** 陪伴界面通知 best-effort 包装：通知层异常绝不打断下发主链路。 */
+  private notifyUi(accountId: string, recordId: number, state: 'approved' | 'failed', title?: string | null): void {
+    try {
+      this.notifyUiPublishState?.(accountId, recordId, state, title);
+    } catch {
+      /* best-effort */
+    }
+  }
+
   /** 临界区：单条草稿的实际下发（已按账号串行进入）。 */
   private async runDispatch(recordId: number, accountId: string): Promise<void> {
     const draft = await this.store.loadForDispatch(recordId);
@@ -170,10 +186,14 @@ export class PublishDispatcher {
       return;
     }
 
+    // 陪伴界面：授权已核实（AC-PUB + 版本闸双过）→ 推 approved（发布卡转「择时发布」）。
+    this.notifyUi(accountId, recordId, 'approved', draft.title);
+
     // 图文帖必须有图（executor 已拦，下发段再守一道；缺图诚实 failed）。
     if (draft.imageUrls.length === 0) {
       await this.store.updateStatus(recordId, 'failed').catch(() => {});
       this.logger.warn(`[PublishDispatcher] recordId=${recordId} 无配图，诚实 failed（不下发）`);
+      this.notifyUi(accountId, recordId, 'failed', draft.title);
       return;
     }
 
@@ -216,10 +236,12 @@ export class PublishDispatcher {
       } else {
         await this.store.updateStatus(recordId, 'failed').catch(() => {});
         this.logger.warn(`[PublishDispatcher] recordId=${recordId} 下发失败 failedAt=${JSON.stringify(result.failedAt)}`);
+        this.notifyUi(accountId, recordId, 'failed', draft.title);
       }
     } catch (err) {
       await this.store.updateStatus(recordId, 'failed').catch(() => {});
       this.logger.warn(`[PublishDispatcher] recordId=${recordId} 下发异常: ${err instanceof Error ? err.message : String(err)}`);
+      this.notifyUi(accountId, recordId, 'failed', draft.title);
     } finally {
       // 无论成功/失败/异常，经此唯一终止点解除让位 → 续场各闸起新浏览。
       this.onPublishEnd(accountId);

@@ -18,6 +18,8 @@ export type MessageType =
   // —— 连接握手 ——
   | 'hello' // edge → cloud：边缘上线，声明能力/会话
   | 'welcome' // cloud → edge：握手确认
+  // —— 陪伴界面数据回填（cloud → edge，主动推送）——
+  | 'ui.snapshot' // cloud → edge：账号资料快照 + 发布审批状态回填（昵称/最近发布/pending·approved·rejected·failed），边缘核心转 [ui-event] 行给桌面壳
   // —— 任务规划 ——
   | 'plan.request' // edge → cloud：给定高层目标，请求拆解为步骤
   | 'plan.response' // cloud → edge：返回有序步骤清单
@@ -116,6 +118,29 @@ export interface WelcomePayload {
   /** 云端分配的会话 id */
   sessionId: string;
   serverVersion: string;
+}
+
+/**
+ * 陪伴界面数据快照（cloud → edge 主动推送，change edge-companion-ui 8.1）。
+ * 发送时机：① 边缘 hello 注册完成后回填全量快照；② 发布审批生命周期变化时增量推送。
+ * 红线：字段全部可选、缺失=云端无该数据；边缘 MUST NOT 以占位/猜测补全（宁缺毋假）。
+ */
+export interface UiSnapshotPayload {
+  /** 账号身份；nickname 为云端账号主数据里的小红书真实昵称（accounts.nickname），空/缺失时边缘不得转发 identity 事件 */
+  account?: { id: string; nickname?: string };
+  /** 最近一次成功发布的摘要；at = epoch ms（来源 publish_log.published_at，为草稿入库时间近似） */
+  lastPublish?: { title: string; at: number };
+  /**
+   * 发布审批状态。云端只推边缘看不到的状态（pending/approved/rejected/failed 终判）；
+   * published 由边缘在提交成功处自知、不经此通道；reminded 仅在真的再次提醒后才推——
+   * 云端当前无再提醒机制，故此值现阶段不会出现（枚举保留，绝不谎称已提醒）。
+   */
+  publish?: {
+    state: 'pending' | 'reminded' | 'approved' | 'published' | 'rejected' | 'failed';
+    title?: string;
+    /** 界面「编号」对暗号用，与飞书审批卡「编号」字段一致（取发布记录 id，如 "#83"） */
+    code?: string;
+  };
 }
 
 /** 规划请求：高层自然语言目标 */
@@ -588,6 +613,7 @@ export interface PageCardsPayload {
     collectCount: number;
     coverDesc?: string;
     noteId?: string;
+    isVideo?: boolean;
   }>;
 }
 
@@ -609,10 +635,10 @@ export interface NoteDetailPayload {
 
 export interface ProfileDetailPayload {
   authorId: string;
-  /** 作品数：小红书主页不公开，恒 0=未知；关注决策不依赖（保留向后兼容） */
+  /** 作品数：小红书主页【不公开】，恒为 0/未知——关注决策 MUST NOT 依赖此字段（保留仅为向后兼容） */
   postsCount: number;
   followersCount: number;
-  /** 获赞与收藏数（主页真实提供）：关注决策的质量信号 */
+  /** 获赞与收藏数（主页 .user-interactions 提供）：关注决策的真实质量信号。缺失=未抽到 */
   likesCollects?: number;
   /** 作者资料是否成功抽取；false=进了主页但没抽到数字，供云端区分"数据缺失"与"真 0 粉丝" */
   extracted?: boolean;
@@ -713,6 +739,7 @@ export interface ErrorPayload {
 export interface PayloadMap {
   hello: HelloPayload;
   welcome: WelcomePayload;
+  'ui.snapshot': UiSnapshotPayload;
   'plan.request': PlanRequestPayload;
   'plan.response': PlanResponsePayload;
   'select.request': SelectRequestPayload;

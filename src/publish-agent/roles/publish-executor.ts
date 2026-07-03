@@ -55,6 +55,11 @@ export interface PublishExecutorDeps {
   store: PublishLogStore;
   messenger?: ApprovalMessenger;
   botChatStore?: BotChatStore;
+  /**
+   * 陪伴界面通知（change edge-companion-ui 8.1，可选）：草稿落库候审 + 审批卡已发后，
+   * 把 pending 状态推给该账号的在线边缘（发布卡自动展开）。绝不阻塞/影响发布主链路。
+   */
+  notifyPublishPending?: (accountId: string, recordId: number, title: string) => void;
   /** 角色执行超时（毫秒，默认 30s）。只覆盖落库 + 发卡，无内联人审等待，故无需放大。 */
   roleTimeoutMs?: number;
   clock?: () => number;
@@ -74,12 +79,14 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
   private store: PublishLogStore;
   private messenger?: ApprovalMessenger;
   private botChatStore?: BotChatStore;
+  private notifyPublishPending?: (accountId: string, recordId: number, title: string) => void;
 
   constructor(deps: PublishExecutorDeps) {
     super({ logger: deps.logger, clock: deps.clock });
     this.store = deps.store;
     this.messenger = deps.messenger;
     this.botChatStore = deps.botChatStore;
+    this.notifyPublishPending = deps.notifyPublishPending;
     // 发布门 = waitAll(['gateDecision','titleSelection','publishMetadata'])：标题没就绪不发布；标题 abort 不发布（黑板天然保证）。
     // change split-topic-roles：加 publishMetadata 为等待键——话题唯一真源为 publishMetadata.topics（finalTags 已恒空），
     //   卡/落库/下发三处话题一致，并消除原先 context.get('publishMetadata') 的取值竞态。
@@ -208,6 +215,14 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     // 发飞书审批卡（带真实标题+正文+话题）。人审通过即触发下发段发「卡片上所审的这份草稿」（不重新生成）。
     const requestId = `publish-${recordId}`;
     await this.trySendApprovalCard(assembled, title, requestId, topics);
+
+    // 陪伴界面（edge-companion-ui 8.1）：候审状态推给在线边缘（发布卡自动展开到「等你确认」）。
+    // 失败自吞（通知层 best-effort），绝不影响候审主链路。
+    try {
+      this.notifyPublishPending?.(accountId, recordId, title);
+    } catch {
+      /* best-effort */
+    }
 
     this.logger.log(`[PublishExecutor] 草稿待审 recordId=${recordId} account=${accountId} requestId=${requestId}（已发审批卡，候审不让位、无超时）`);
     return { recordId, status: 'pending_approval', dispatched: false, envelope: null, completedAt: this.clock() };
