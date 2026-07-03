@@ -481,8 +481,8 @@ export interface RolePromptView {
    */
   accountId?: string;
   /**
-   * 选定账号未配人设、回落系统默认人设的诚实标志（change prompt-preview-persona-selector，可选）：
-   * true=该账号无人设行、下示为默认人设（绝不把默认人设冒充为该账号人设）。
+   * 选定账号未绑定人设的诚实标志（prompt-preview-persona-selector / persona-driven-content-pipeline，可选）：
+   * true=该账号无人设行（运行会被诚实拒绝）、下示 prompt 为示例人设渲染仅供查看（绝不冒充该账号人设）。
    */
   personaFallback?: boolean;
 }
