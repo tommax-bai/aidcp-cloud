@@ -73,7 +73,8 @@ export class WanxiangClient implements ImageProvider {
     this.apiKey = options.apiKey ?? process.env.WANXIANG_API_KEY ?? process.env.DASHSCOPE_API_KEY ?? '';
     this.model = options.model ?? 'wan2.7-image-pro';
     this.getModel = options.getModel;
-    this.defaultSize = options.defaultSize ?? '1024*1024';
+    // 竖版 3:4（如 1152*1536，万相总像素 [768²,4096²] 内）经 env 激活、瞬间可回滚；代码默认保持方图不变。
+    this.defaultSize = options.defaultSize ?? process.env.AIDCP_WANXIANG_IMAGE_SIZE ?? '1024*1024';
     // wan2.7-image-pro 文生图常需 25~40s+（thinking_mode），6×5s=30s 太紧会超时降级；放宽到 18×5s=90s。
     this.maxPollAttempts = options.maxPollAttempts ?? 18;
     this.pollIntervalMs = options.pollIntervalMs ?? 5_000;

@@ -25,7 +25,11 @@ export interface SeedreamClientOptions {
    * 使后台改图片模型名无需重启即热加载生效（与 WanxiangClient 一致）。
    */
   getModel?: () => string;
-  /** 生成尺寸（Ark 用 "宽x高" 像素，默认 2048x2048）。 */
+  /**
+   * 生成尺寸（Ark 用 "宽x高" 像素）。缺省链：显式 options → env `AIDCP_SEEDREAM_IMAGE_SIZE` → 方图 2048x2048。
+   * change category-adaptive-images-and-judgment（1.7）：竖版 3:4（如 1536x2048）经 env 激活、瞬间可回滚——
+   * 代码默认保持方图不变，避免并发方整体升 HEAD 自动部署时误激活【未验证】的尺寸导致全部出图失败。
+   */
   defaultSize?: string;
   /** 是否打水印，默认 false。 */
   watermark?: boolean;
@@ -61,7 +65,7 @@ export class SeedreamClient implements ImageProvider {
     this.baseUrl = (options.baseUrl ?? ARK_IMAGE_BASE_URL).replace(/\/+$/, '');
     this.model = options.model ?? 'doubao-seedream-4-5-251128';
     this.getModel = options.getModel;
-    this.defaultSize = options.defaultSize ?? '2048x2048';
+    this.defaultSize = options.defaultSize ?? process.env.AIDCP_SEEDREAM_IMAGE_SIZE ?? '2048x2048';
     this.watermark = options.watermark ?? false;
     this.timeoutMs = options.timeoutMs && options.timeoutMs > 0 ? options.timeoutMs : 60_000;
     this.logger = options.logger ?? console;
