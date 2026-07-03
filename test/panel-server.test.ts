@@ -6,6 +6,7 @@ import { parsePanelUsers } from '../src/panel/auth.js';
 import type { PanelConfig, PanelDeps } from '../src/panel/types.js';
 import type { PanelAccount, PanelStoreReader } from '../src/panel/panel-store.js';
 import { RiskController } from '../src/risk/index.js';
+import { TokenRevocationStore } from '../src/panel/revocation.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 
@@ -928,6 +929,40 @@ test('HTTP 存在性校验 + requestId 白名单：幽灵账号 404、路径穿�
       })).status,
       200,
     );
+  } finally {
+    await h.close();
+  }
+});
+
+test('HTTP auth 续签 + 登出撤销（console-cloud-panel-hardening #24/#26）', async () => {
+  const revocation = new TokenRevocationStore();
+  const h = await startPanelApi({ ...deps, revocation } as unknown as PanelDeps, makeConfig());
+  assert.equal(h.started, true);
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = (await login.json()) as { token: string };
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+
+    // #24 续签：换发一枚不同的新 token，且新 token 可用（活跃不被踢）
+    const ref = await fetch(`${base}/api/auth/refresh`, { method: 'POST', headers: auth });
+    assert.equal(ref.status, 200);
+    const { token: fresh } = (await ref.json()) as { token: string };
+    assert.notEqual(fresh, token);
+    assert.equal(
+      (await fetch(`${base}/api/me`, { headers: { authorization: `Bearer ${fresh}` } })).status,
+      200,
+    );
+
+    // #26 登出：拉黑当前 token 的 jti → 该 token 立即失效（401 revoked），不再等自然过期
+    assert.equal((await fetch(`${base}/api/auth/logout`, { method: 'POST', headers: auth })).status, 200);
+    const after = await fetch(`${base}/api/me`, { headers: { authorization: `Bearer ${token}` } });
+    assert.equal(after.status, 401);
+    assert.equal(((await after.json()) as { reason?: string }).reason, 'revoked');
   } finally {
     await h.close();
   }

@@ -58,3 +58,13 @@ test('结构不合法被拒（malformed）', () => {
   assert.equal(r.valid, false);
   if (!r.valid) assert.equal(r.reason, 'malformed');
 });
+
+test('signJwt 产出唯一 jti，verify 回带（#26 撤销标识）', () => {
+  const now = 1_700_000_000_000;
+  const t1 = signJwt({ sub: 'a' }, SECRET, 3600, now);
+  const t2 = signJwt({ sub: 'a' }, SECRET, 3600, now);
+  const r1 = verifyJwt(t1, SECRET, now);
+  const r2 = verifyJwt(t2, SECRET, now);
+  assert.ok(r1.valid && typeof r1.payload.jti === 'string' && r1.payload.jti.length > 0, 'payload 带非空 jti');
+  if (r1.valid && r2.valid) assert.notEqual(r1.payload.jti, r2.payload.jti); // 每次签发唯一
+});

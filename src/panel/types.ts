@@ -18,6 +18,7 @@ import type {
   SetAccountContentScheduleResult,
 } from '../config/content-schedule-store.js';
 import type { EventBus } from '../event-bus/index.js';
+import type { TokenRevocationStore } from './revocation.js';
 import type { PanelUser } from './auth.js';
 import type {
   PanelStoreReader,
@@ -57,6 +58,8 @@ export interface PanelContentSchedule {
 }
 
 export interface PanelDeps {
+  /** 令牌撤销黑名单（change console-cloud-panel-hardening #26）；未注入则登出/撤销不生效（向后兼容）。 */
+  revocation?: TokenRevocationStore;
   publishLogStore: PublishLogStore;
   conceptStore?: ConceptStore;
   botChatStore: BotChatStore;

@@ -18,6 +18,8 @@ export interface JwtPayload {
   iat: number;
   /** expiry（秒）。 */
   exp: number;
+  /** JWT ID：令牌唯一标识，供撤销黑名单（change console-cloud-panel-hardening #26）。旧令牌可能无此字段（部署过渡兼容）。 */
+  jti?: string;
 }
 
 function base64urlJson(obj: unknown): string {
@@ -32,7 +34,7 @@ export function signJwt(
   nowMs: number = Date.now(),
 ): string {
   const iat = Math.floor(nowMs / 1000);
-  const payload: JwtPayload = { sub: claims.sub, iat, exp: iat + ttlSeconds };
+  const payload: JwtPayload = { sub: claims.sub, iat, exp: iat + ttlSeconds, jti: crypto.randomUUID() };
   const signingInput = `${base64urlJson(HEADER)}.${base64urlJson(payload)}`;
   const sig = crypto.createHmac('sha256', secret).update(signingInput).digest('base64url');
   return `${signingInput}.${sig}`;

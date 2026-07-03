@@ -136,6 +136,25 @@ function createRequestHandler(
       sendJson(res, 401, { error: 'unauthorized', reason: verified.reason });
       return;
     }
+    // 撤销黑名单（change console-cloud-panel-hardening #26）：验签通过但 jti 已被登出/管理撤销 → 拒。
+    if (deps.revocation?.isRevoked(verified.payload.jti)) {
+      sendJson(res, 401, { error: 'unauthorized', reason: 'revoked' });
+      return;
+    }
+
+    // 滑动续签（#24）：持未过期令牌换发一枚 exp 推进的新令牌，活跃使用不因定长 TTL 被踢。
+    // 使 TTL 可保持短以缩短泄露窗口而不牺牲活跃体验（解除 #3 拉长 TTL 与 #26 无撤销的张力）。
+    if (method === 'POST' && url === '/api/auth/refresh') {
+      const fresh = signJwt({ sub: verified.payload.sub }, config.jwtSecret, config.jwtTtlSeconds);
+      sendJson(res, 200, { token: fresh, expiresIn: config.jwtTtlSeconds });
+      return;
+    }
+    // 登出（#26）：拉黑当前 jti，使令牌对服务端立即失效（不再等自然过期）。
+    if (method === 'POST' && url === '/api/auth/logout') {
+      deps.revocation?.revoke(verified.payload.jti, verified.payload.exp);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
 
     if (method === 'GET' && url === '/api/me') {
       sendJson(res, 200, { sub: verified.payload.sub, panelApiVersion: buildVersionPayload().panelApiVersion });
@@ -1378,6 +1397,7 @@ export function startPanelApi(deps: PanelDeps, config: PanelConfig): Promise<Pan
           httpServer: server,
           eventBus: deps.eventBus,
           jwtSecret: config.jwtSecret,
+          revocation: deps.revocation,
           logger,
         });
       } catch (err) {

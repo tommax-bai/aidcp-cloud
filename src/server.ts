@@ -108,6 +108,7 @@ import { PostProcessor } from './publish-agent/post-processor.js';
 import { PublishLogStore } from './publish-agent/publish-log-store.js';
 import { PublishPipelineLogStore } from './publish-agent/publish-pipeline-log-store.js';
 import { startPanelApi, parsePanelUsers, PgPanelStore } from './panel/index.js';
+import { TokenRevocationStore } from './panel/revocation.js';
 import { PgAlertStore } from './alerts/index.js';
 import { ModelConfigStore } from './config/model-config-store.js';
 import { RoleConfigStore } from './config/role-config-store.js';
@@ -1719,6 +1720,7 @@ async function main(): Promise<void> {
     try {
       const panel = await startPanelApi(
         {
+          revocation: new TokenRevocationStore(),
           riskRegistry,
           publishLogStore,
           conceptStore,

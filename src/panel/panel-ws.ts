@@ -4,7 +4,8 @@
  * 订阅云内 EventBus（onAny），归一化为面板帧，单一全局流广播给所有浏览器客户端。
  * 红线：
  * - 绝不向 edge 发送任何消息（与边-云 :8787 物理隔离）；只读 EventBus、不接收 client 指令（指令走 /api）。
- * - JWT 经连接 URL 的 ?token= 校验（WS 不便设 Authorization 头）。
+ * - JWT 经**首帧**校验（连上后 client 首帧发 {token}；不走 URL ?token= 以免明文落 Nginx 日志，#25）——
+ *   验签通过 + 未撤销才认证、加入广播集；令牌到 exp 主动断连（#25）。
  * - attach 到 panel http server（同端口、path=/ws），与 /api 共存。
  */
 
@@ -12,11 +13,14 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type http from 'node:http';
 import type { EventBus } from '../event-bus/index.js';
 import { verifyJwt } from './jwt.js';
+import type { TokenRevocationStore } from './revocation.js';
 
 export interface PanelWsOptions {
   httpServer: http.Server;
   eventBus: EventBus;
   jwtSecret: string;
+  /** 令牌撤销黑名单（#26）；首帧验签后额外查它，被撤销令牌拒连。 */
+  revocation?: TokenRevocationStore;
   logger?: Pick<Console, 'log' | 'warn'>;
 }
 
@@ -37,6 +41,7 @@ export interface PanelWsHandle {
 export const PANEL_WS_MAX_FRAME_BYTES = 256 * 1024; // 单帧载荷上限，超则截断为摘要帧
 export const PANEL_WS_BACKPRESSURE_BYTES = 1024 * 1024; // 发送缓冲堆积阈值
 export const PANEL_WS_MAX_SLOW_STRIKES = 30; // 连续跳帧上限 → 断开慢客户端
+export const PANEL_WS_AUTH_TIMEOUT_MS = 5000; // 首帧鉴权超时（#25）：连上后须在此内发有效 {token} 首帧
 
 /**
  * 序列化面板帧；载荷超上限则截断为带标记的摘要帧（大对象如 page.cards / note.detail，前端按需另拉）。
@@ -81,26 +86,56 @@ export function startPanelWs(options: PanelWsOptions): PanelWsHandle {
   const logger = options.logger ?? console;
   const wss = new WebSocketServer({ server: options.httpServer, path: '/ws' });
 
-  wss.on('connection', (ws, req) => {
-    // JWT 校验：从 ?token= 取（无效即拒绝，自定义 close code 4401）
-    const url = new URL(req.url ?? '/', 'http://localhost');
-    const token = url.searchParams.get('token') ?? '';
-    const verified = verifyJwt(token, options.jwtSecret);
-    if (!verified.valid) {
-      ws.close(4401, 'unauthorized');
-      return;
-    }
-    // 纯只读：不监听 client message（面板 WS 不接收指令）。
+  // 已认证客户端集合（首帧鉴权后加入）。广播只发给它们；未认证连接不收任何事件。
+  const authed = new Set<WebSocket>();
+  const slowStrikes = new WeakMap<WebSocket, number>();
+
+  wss.on('connection', (ws) => {
+    // 首帧鉴权（#25）：连上后 client 须在超时内发首帧 {token}；不走 URL ?token=（明文落 Nginx 日志）。
+    let isAuthed = false;
+    let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+    const authTimer = setTimeout(() => {
+      if (!isAuthed) ws.close(4401, 'auth_timeout');
+    }, PANEL_WS_AUTH_TIMEOUT_MS);
+
+    ws.on('message', (raw) => {
+      if (isAuthed) return; // 已认证：纯只读，忽略后续 client 消息（指令走 /api）
+      let token = '';
+      try {
+        const msg = JSON.parse(raw.toString()) as { token?: unknown };
+        if (typeof msg?.token === 'string') token = msg.token;
+      } catch {
+        ws.close(4401, 'bad_auth_frame');
+        return;
+      }
+      const verified = verifyJwt(token, options.jwtSecret);
+      if (!verified.valid || options.revocation?.isRevoked(verified.payload.jti)) {
+        ws.close(4401, 'unauthorized');
+        return;
+      }
+      isAuthed = true;
+      authed.add(ws);
+      clearTimeout(authTimer);
+      // 到期断连（#25）：令牌到 exp 时主动关闭，过期令牌不再享有连接期法外之地。
+      const msToExp = verified.payload.exp * 1000 - Date.now();
+      expiryTimer = setTimeout(() => ws.close(4401, 'token_expired'), Math.max(0, msToExp));
+    });
+
+    ws.on('close', () => {
+      authed.delete(ws);
+      slowStrikes.delete(ws);
+      clearTimeout(authTimer);
+      if (expiryTimer) clearTimeout(expiryTimer);
+    });
     ws.on('error', (err) => logger.warn(`[panel-ws] client error: ${err.message}`));
   });
 
-  // 订阅 EventBus，归一化广播给所有客户端（纯读侧扇出，绝不回发 edge）。
-  // 背压保护（#20）：零订阅短路省序列化；大载荷截断；慢客户端跳帧/断开，防同进程 OOM。
-  const slowStrikes = new WeakMap<WebSocket, number>();
+  // 订阅 EventBus，归一化广播给**已认证**客户端（纯读侧扇出，绝不回发 edge）。
+  // 背压保护（#20）：无已认证订阅时短路省序列化；大载荷截断；慢客户端跳帧/断开，防同进程 OOM。
   const unsub = options.eventBus.onAny((event, data) => {
-    if (wss.clients.size === 0) return; // 零订阅：不序列化，不在编排热路径白耗 CPU
+    if (authed.size === 0) return; // 无已认证订阅：不序列化，不在编排热路径白耗 CPU
     const text = serializePanelFrame(event, data, Date.now());
-    for (const client of wss.clients) {
+    for (const client of authed) {
       if (client.readyState !== WebSocket.OPEN) continue;
       const decision = backpressureDecision(client.bufferedAmount, slowStrikes.get(client) ?? 0);
       if (decision.close) {
@@ -115,7 +150,7 @@ export function startPanelWs(options: PanelWsOptions): PanelWsHandle {
   });
 
   return {
-    clientCount: () => wss.clients.size,
+    clientCount: () => authed.size,
     close: () =>
       new Promise<void>((resolve) => {
         unsub();
