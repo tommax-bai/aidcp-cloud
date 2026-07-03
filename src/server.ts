@@ -1477,6 +1477,42 @@ async function main(): Promise<void> {
             .sendCard(chatId, buildCommandResultCard({ command: '排期发帖（自动）', ok, level, title, message, accountId }))
             .catch((e) => console.warn('[content-scheduler] 排期结果卡发送失败：', (e as Error).message));
         },
+        // 评论动作三件套（change content-schedule-comments）：commentScheduler 未建（PG 缺）则不注入 → 调度器整体跳过评论动作。
+        ...(commentScheduler
+          ? {
+              // 触发排期评论：自动路径 MUST 过 canDo('comment') 配额闸（手动 /comment 跳配额、人是刹车；自动无人在场）。
+              // 触发回执非 ok（配额拒 / 离线 / 未绑人设 / 在跑）回黄卡如实说明；任务终态结果卡由评论链自补（postResultCard），此处绝不重复发。
+              triggerComment: async (accountId: string) => {
+                const sendReceiptCard = async (level: 'warning' | 'error', title: string, message: string) => {
+                  const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
+                  if (!chatId) {
+                    console.warn(`[content-scheduler] 无可用飞书群，排期评论回执卡未发出 account=${accountId} title=${title}`);
+                    return;
+                  }
+                  await messenger
+                    .sendCard(chatId, buildCommandResultCard({ command: '排期评论（自动）', ok: false, level, title, message, accountId }))
+                    .catch((e) => console.warn('[content-scheduler] 排期评论回执卡发送失败：', (e as Error).message));
+                };
+                try {
+                  const controller = await resolveController(accountId);
+                  if (!controller.canDo('comment')) {
+                    await sendReceiptCard('warning', '排期评论：配额拒绝，本槽未触发', `风控 canDo('comment')=false（自动路径必过配额；手动 /comment 不受此限）`);
+                    return;
+                  }
+                  const receipt = await commentScheduler!.triggerManual(accountId);
+                  if (!receipt.ok) {
+                    // 触发未成（离线 / 未绑人设 / 已在跑等）：如实回执；终态卡不存在（任务没开跑）。
+                    await sendReceiptCard(receipt.level === 'error' ? 'error' : 'warning', `排期评论：${receipt.title}`, receipt.message);
+                  }
+                  // ok=任务已开跑：不发卡（评论链任务结束自补终态结果卡，避免双卡）。
+                } catch (e) {
+                  await sendReceiptCard('error', '排期评论：触发异常', (e as Error).message);
+                }
+              },
+              isCommentBusy: (accountId: string) => commentScheduler!.isRunning(accountId),
+              commentedTodayCount: (accountId: string) => riskStore.countInteractionsTodayForAccount(accountId, 'comment'),
+            }
+          : {}),
         logger: console,
       });
       contentScheduler.start(60_000);

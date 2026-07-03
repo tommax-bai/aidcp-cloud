@@ -177,6 +177,20 @@ export class PgRiskStore implements RiskStore, InteractionStore {
     );
   }
 
+  /**
+   * 该账号今日（服务器本地日历日 00:00 起）某动作的互动计数（change content-schedule-comments）。
+   * 供内容排期评论日上限判定——持久已发历史（重启不清零），与「任务在跑?1:0」相加做原子上限。
+   * date_trunc('day', now()) 取 DB 会话时区当日起点，对齐 publish 侧 countPublishedTodayForAccount 口径。
+   */
+  async countInteractionsTodayForAccount(accountId: string, action: InteractionAction): Promise<number> {
+    const { rows } = await this.pool.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM risk_interactions
+        WHERE account_id = $1 AND action = $2 AND interacted_at >= date_trunc('day', now())`,
+      [accountId, action],
+    );
+    return Number(rows[0]?.n ?? '0');
+  }
+
   async close(): Promise<void> {
     await this.pool.end();
   }

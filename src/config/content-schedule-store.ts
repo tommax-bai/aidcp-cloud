@@ -38,6 +38,10 @@ export interface AccountContentScheduleRow {
   autoEnabled: boolean;
   postEnabled: boolean;
   postDailyCap: number;
+  /** 自动评论开关（change content-schedule-comments）。 */
+  commentEnabled: boolean;
+  /** 评论日上限；0 = 不自动（与开关双保险）。 */
+  commentDailyCap: number;
   contentActiveMask: string | null;
   updatedAt: string | null;
   updatedBy: string | null;
@@ -51,6 +55,8 @@ export interface ContentScheduleCatalogRow {
   autoEnabled: boolean;
   postEnabled: boolean;
   postDailyCap: number;
+  commentEnabled: boolean;
+  commentDailyCap: number;
   maskSource: 'override' | 'global';
   hasOverrideMask: boolean;
   /** 侧表有行（false = 纯默认 = 未配 = 不自动）。 */
@@ -64,6 +70,8 @@ export interface EffectiveContentSchedule {
   autoEnabled: boolean;
   postEnabled: boolean;
   postDailyCap: number;
+  commentEnabled: boolean;
+  commentDailyCap: number;
   effectiveMask: string | null;
 }
 
@@ -75,6 +83,8 @@ export interface AccountContentSchedulePatch {
   autoEnabled?: boolean;
   postEnabled?: boolean;
   postDailyCap?: number;
+  commentEnabled?: boolean;
+  commentDailyCap?: number;
   /** 每账号时段覆盖：168 位 '0'/'1'，或 null=清空覆盖=继承全局。 */
   contentActiveMask?: string | null;
 }
@@ -103,6 +113,10 @@ CREATE TABLE IF NOT EXISTS account_content_schedule (
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_by          TEXT
 );
+-- 自愈加列（change content-schedule-comments，迁移 0029 文档伴随）：Phase 2 评论动作两列，
+-- 既有表靠幂等 ALTER 在 init() 补上；默认 false / 0 = 不自动（fail-closed，零回归）。
+ALTER TABLE account_content_schedule ADD COLUMN IF NOT EXISTS comment_enabled BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE account_content_schedule ADD COLUMN IF NOT EXISTS comment_daily_cap INTEGER NOT NULL DEFAULT 0;
 `;
 
 export interface ContentScheduleStoreOptions {
@@ -125,6 +139,8 @@ interface AccountDbRow {
   auto_enabled: boolean;
   post_enabled: boolean;
   post_daily_cap: number | string;
+  comment_enabled: boolean;
+  comment_daily_cap: number | string;
   content_active_mask: string | null;
   updated_at: Date | string | null;
   updated_by: string | null;
@@ -173,7 +189,8 @@ export class ContentScheduleStore {
     this.globalCache = g.rows[0] ? this.globalFromDb(g.rows[0]) : null;
 
     const a = await this.pool.query<AccountDbRow>(
-      `SELECT account_id, auto_enabled, post_enabled, post_daily_cap, content_active_mask, updated_at, updated_by
+      `SELECT account_id, auto_enabled, post_enabled, post_daily_cap, comment_enabled, comment_daily_cap,
+              content_active_mask, updated_at, updated_by
          FROM account_content_schedule`,
     );
     this.accountCache.clear();
@@ -194,6 +211,8 @@ export class ContentScheduleStore {
       autoEnabled: r.auto_enabled === true,
       postEnabled: r.post_enabled === true,
       postDailyCap: Number(r.post_daily_cap),
+      commentEnabled: r.comment_enabled === true,
+      commentDailyCap: Number(r.comment_daily_cap),
       contentActiveMask: r.content_active_mask ?? null,
       updatedAt: toIso(r.updated_at),
       updatedBy: r.updated_by ?? null,
@@ -216,11 +235,21 @@ export class ContentScheduleStore {
    */
   effectiveScheduleFor(accountId: string): EffectiveContentSchedule {
     const a = this.accountCache.get(accountId);
-    if (!a) return { autoEnabled: false, postEnabled: false, postDailyCap: 0, effectiveMask: null };
+    if (!a)
+      return {
+        autoEnabled: false,
+        postEnabled: false,
+        postDailyCap: 0,
+        commentEnabled: false,
+        commentDailyCap: 0,
+        effectiveMask: null,
+      };
     return {
       autoEnabled: a.autoEnabled,
       postEnabled: a.postEnabled,
       postDailyCap: a.postDailyCap,
+      commentEnabled: a.commentEnabled,
+      commentDailyCap: a.commentDailyCap,
       effectiveMask: a.contentActiveMask ?? this.globalCache?.contentActiveMask ?? null,
     };
   }
@@ -272,6 +301,14 @@ export class ContentScheduleStore {
       if (!validCap(patch.postDailyCap)) return { ok: false, reason: 'invalid_value' };
       hasField = true;
     }
+    if ('commentEnabled' in patch) {
+      if (typeof patch.commentEnabled !== 'boolean') return { ok: false, reason: 'invalid_value' };
+      hasField = true;
+    }
+    if ('commentDailyCap' in patch) {
+      if (!validCap(patch.commentDailyCap)) return { ok: false, reason: 'invalid_value' };
+      hasField = true;
+    }
     if ('contentActiveMask' in patch) {
       if (!validMaskPatch(patch.contentActiveMask)) return { ok: false, reason: 'invalid_value' };
       hasField = true;
@@ -287,20 +324,26 @@ export class ContentScheduleStore {
     const nextAuto = patch.autoEnabled ?? prev?.autoEnabled ?? false;
     const nextPost = patch.postEnabled ?? prev?.postEnabled ?? false;
     const nextCap = patch.postDailyCap ?? prev?.postDailyCap ?? 0;
+    const nextCommentEnabled = patch.commentEnabled ?? prev?.commentEnabled ?? false;
+    const nextCommentCap = patch.commentDailyCap ?? prev?.commentDailyCap ?? 0;
     const nextMask =
       'contentActiveMask' in patch ? patch.contentActiveMask ?? null : prev?.contentActiveMask ?? null;
 
     const { rows } = await this.pool.query<AccountDbRow>(
       `INSERT INTO account_content_schedule
-         (account_id, auto_enabled, post_enabled, post_daily_cap, content_active_mask, updated_at, updated_by)
-       VALUES ($1, $2, $3, $4, $5, now(), $6)
+         (account_id, auto_enabled, post_enabled, post_daily_cap, comment_enabled, comment_daily_cap,
+          content_active_mask, updated_at, updated_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, now(), $8)
        ON CONFLICT (account_id) DO UPDATE SET auto_enabled = EXCLUDED.auto_enabled,
                                               post_enabled = EXCLUDED.post_enabled,
                                               post_daily_cap = EXCLUDED.post_daily_cap,
+                                              comment_enabled = EXCLUDED.comment_enabled,
+                                              comment_daily_cap = EXCLUDED.comment_daily_cap,
                                               content_active_mask = EXCLUDED.content_active_mask,
                                               updated_at = now(), updated_by = EXCLUDED.updated_by
-       RETURNING account_id, auto_enabled, post_enabled, post_daily_cap, content_active_mask, updated_at, updated_by`,
-      [accountId, nextAuto, nextPost, nextCap, nextMask, updatedBy],
+       RETURNING account_id, auto_enabled, post_enabled, post_daily_cap, comment_enabled, comment_daily_cap,
+                 content_active_mask, updated_at, updated_by`,
+      [accountId, nextAuto, nextPost, nextCap, nextCommentEnabled, nextCommentCap, nextMask, updatedBy],
     );
     const row = rows[0]
       ? this.accountFromDb(rows[0])
@@ -309,6 +352,8 @@ export class ContentScheduleStore {
           autoEnabled: nextAuto,
           postEnabled: nextPost,
           postDailyCap: nextCap,
+          commentEnabled: nextCommentEnabled,
+          commentDailyCap: nextCommentCap,
           contentActiveMask: nextMask,
           updatedAt: null,
           updatedBy,
@@ -329,13 +374,15 @@ export class ContentScheduleStore {
       auto_enabled: boolean | null;
       post_enabled: boolean | null;
       post_daily_cap: number | string | null;
+      comment_enabled: boolean | null;
+      comment_daily_cap: number | string | null;
       content_active_mask: string | null;
       updated_at: Date | string | null;
       updated_by: string | null;
     }>(
       `SELECT a.account_id, a.label, a.nickname,
-              s.auto_enabled, s.post_enabled, s.post_daily_cap, s.content_active_mask,
-              s.updated_at, s.updated_by
+              s.auto_enabled, s.post_enabled, s.post_daily_cap, s.comment_enabled, s.comment_daily_cap,
+              s.content_active_mask, s.updated_at, s.updated_by
          FROM accounts a
          LEFT JOIN account_content_schedule s ON s.account_id = a.account_id
         WHERE a.account_id <> $1
@@ -352,6 +399,8 @@ export class ContentScheduleStore {
         autoEnabled: r.auto_enabled === true,
         postEnabled: r.post_enabled === true,
         postDailyCap: r.post_daily_cap == null ? 0 : Number(r.post_daily_cap),
+        commentEnabled: r.comment_enabled === true,
+        commentDailyCap: r.comment_daily_cap == null ? 0 : Number(r.comment_daily_cap),
         maskSource: hasOverrideMask ? 'override' : 'global',
         hasOverrideMask,
         configured,

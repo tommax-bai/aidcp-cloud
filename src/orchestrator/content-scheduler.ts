@@ -24,6 +24,9 @@ export interface ContentScheduleView {
   autoEnabled: boolean;
   postEnabled: boolean;
   postDailyCap: number;
+  /** 自动评论开关 / 日上限（change content-schedule-comments）。 */
+  commentEnabled: boolean;
+  commentDailyCap: number;
   effectiveMask: string | null;
 }
 
@@ -49,6 +52,15 @@ export interface ContentSchedulerDeps {
   /** 触发排期发帖：**fire-and-forget**——返回一个在生成完成/失败时 settle 的 promise，调度器只挂 finally、绝不 await。
    *  该实现负责走既有提议→人审→派发、并异步补飞书结果卡（成功/空槽/失败）。 */
   triggerPost(accountId: string): Promise<unknown>;
+  /**
+   * 评论动作三件套（change content-schedule-comments）。可选：任一未注入 → 评论动作整体跳过（零回归）。
+   * triggerComment 的实现负责 canDo('comment') 配额闸 + 调命令式评论入口 + 触发失败回黄卡（终态结果卡由评论链自补）。
+   */
+  triggerComment?(accountId: string): Promise<unknown>;
+  /** 该账号评论任务是否在跑（= commentScheduler.isRunning，单飞闸）。 */
+  isCommentBusy?(accountId: string): boolean;
+  /** 该账号今日已发评论数（持久互动记录，服务器本地日）。 */
+  commentedTodayCount?(accountId: string): Promise<number>;
   now?: () => number;
   logger?: { warn: (m: string) => void; info?: (m: string) => void };
 }
@@ -89,7 +101,7 @@ export class ContentScheduler {
   private postFiring = false;
   /** 每账号跨动作单飞（本 Phase 只发帖；为 Phase 2/3 预留背板）。 */
   private readonly inFlight = new Set<string>();
-  /** 幂等：account → 上次触发的小时格键。 */
+  /** 幂等：`account|action` → 上次触发的小时格键（每动作独立，发帖触发不吞同小时评论槽）。 */
   private readonly lastFired = new Map<string, string>();
 
   constructor(private readonly deps: ContentSchedulerDeps) {}
@@ -129,40 +141,64 @@ export class ContentScheduler {
       for (const accountId of this.deps.onlineAccounts()) {
         try {
           const s = this.deps.scheduleFor(accountId);
-          // 总开关 / 发帖开关 / 日上限（双保险，sync）。
-          if (!s.autoEnabled || !s.postEnabled || s.postDailyCap <= 0) continue;
-          // fail-closed：内容格缺失 / 非法 / 当前非活跃格 → 跳过（绝不回落全天）。
+          // 账号级闸（对所有动作统一）：总开关 / fail-closed 内容格 / 自动 ⊆ 活跃 / 单飞。
+          if (!s.autoEnabled) continue;
           if (!isValidWeekActiveMask(s.effectiveMask) || !isWeekActiveAt(s.effectiveMask, now)) continue;
-          // 自动 ⊆ 活跃：浏览掩码休眠的小时绝不自动发内容（休眠格圈了内容位也拦；掩码未配=全天活跃=不限）。
           if (this.deps.browseActiveAt && !this.deps.browseActiveAt(now)) continue;
-          // 分钟错峰：仅命中偏移分钟才尝试。
-          if (minute !== offsetMinute(accountId, now, 'post')) continue;
-          // 幂等：同小时格不重触发。
-          if (this.lastFired.get(accountId) === cell) continue;
-          // 每账号单飞（上次触发尚未 settle）。
           if (this.inFlight.has(accountId)) continue;
-          // 风控 normal 闸（同步 / 异步皆可）。
-          if ((await this.deps.riskStatus(accountId)) !== 'normal') continue;
-          // 发帖全局串行：本调度器已有发帖在飞 或 手动 /publish 在跑 → 本槽顺延（本小时不发，不 burst）。
-          if (this.postFiring || this.deps.isPublishBusy()) continue;
-          // 日上限原子：已发历史 + 在途未审草稿。
-          const [posted, pending] = await Promise.all([
-            this.deps.postedTodayCount(accountId),
-            this.deps.hasPendingPost(accountId),
-          ]);
-          if (posted + (pending ? 1 : 0) >= s.postDailyCap) continue;
 
-          // 命中：记幂等 + 单飞 + 全局串行（同步置位），fire-and-forget（绝不 await 生成管线）。结果卡由 triggerPost 实现异步补。
-          this.lastFired.set(accountId, cell);
-          this.inFlight.add(accountId);
-          this.postFiring = true;
-          void this.deps
-            .triggerPost(accountId)
-            .catch((e) => this.deps.logger?.warn(`[content-scheduler] triggerPost 异常 account=${accountId}：${(e as Error).message}`))
-            .finally(() => {
-              this.inFlight.delete(accountId);
-              this.postFiring = false;
-            });
+          // 动作循环（post 在前：纯云端、不接管边端；每账号每 tick 至多 fire 一个动作）。
+          for (const action of ['post', 'comment'] as const) {
+            if (action === 'post' && (!s.postEnabled || s.postDailyCap <= 0)) continue;
+            if (action === 'comment') {
+              if (!s.commentEnabled || s.commentDailyCap <= 0) continue;
+              // 评论三件套未注入（如 commentScheduler 未建）→ 评论动作整体跳过（零回归）。
+              if (!this.deps.triggerComment || !this.deps.isCommentBusy || !this.deps.commentedTodayCount) continue;
+            }
+            // 分钟错峰（按动作独立哈希，动作间自然岔开）。
+            if (minute !== offsetMinute(accountId, now, action)) continue;
+            // 幂等：每动作独立小时格键（发帖触发绝不吞同小时评论槽）。
+            const fireKey = `${accountId}|${action}`;
+            if (this.lastFired.get(fireKey) === cell) continue;
+            // 风控 normal 闸（账号级，靠后放：仅命中分钟才付 async 成本）。
+            if ((await this.deps.riskStatus(accountId)) !== 'normal') break;
+
+            if (action === 'post') {
+              // 发帖全局串行：本调度器已有发帖在飞 或 手动 /publish 在跑 → 本槽顺延（不 burst）。
+              if (this.postFiring || this.deps.isPublishBusy()) continue;
+              // 日上限原子：已发历史 + 在途未审草稿。
+              const [posted, pending] = await Promise.all([
+                this.deps.postedTodayCount(accountId),
+                this.deps.hasPendingPost(accountId),
+              ]);
+              if (posted + (pending ? 1 : 0) >= s.postDailyCap) continue;
+
+              this.lastFired.set(fireKey, cell);
+              this.inFlight.add(accountId);
+              this.postFiring = true;
+              void this.deps
+                .triggerPost(accountId)
+                .catch((e) => this.deps.logger?.warn(`[content-scheduler] triggerPost 异常 account=${accountId}：${(e as Error).message}`))
+                .finally(() => {
+                  this.inFlight.delete(accountId);
+                  this.postFiring = false;
+                });
+            } else {
+              // 评论单飞：任务在跑不重触发（cap 的「在跑?1:0」项在此恒 0——在跑早被拦下）。
+              if (this.deps.isCommentBusy!(accountId)) continue;
+              // 日上限原子：持久已发计数（评论管线任务内联等审 + 单飞，无排队草稿窗口，无需在途台账）。
+              const sent = await this.deps.commentedTodayCount!(accountId);
+              if (sent >= s.commentDailyCap) continue;
+
+              this.lastFired.set(fireKey, cell);
+              this.inFlight.add(accountId);
+              void this.deps
+                .triggerComment!(accountId)
+                .catch((e) => this.deps.logger?.warn(`[content-scheduler] triggerComment 异常 account=${accountId}：${(e as Error).message}`))
+                .finally(() => this.inFlight.delete(accountId));
+            }
+            break; // 每账号每 tick 至多一动作（防同分钟双动作抢边端）。
+          }
         } catch (e) {
           this.deps.logger?.warn(`[content-scheduler] tick 账号处理异常 account=${accountId}：${(e as Error).message}`);
         }

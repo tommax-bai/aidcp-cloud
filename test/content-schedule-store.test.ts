@@ -28,8 +28,9 @@ function makePoolStub(opts: { accountExists?: boolean } = {}) {
         return {
           rows: [{
             account_id: params[0], auto_enabled: params[1], post_enabled: params[2],
-            post_daily_cap: params[3], content_active_mask: params[4],
-            updated_at: new Date('2026-07-03T00:00:00Z'), updated_by: params[5],
+            post_daily_cap: params[3], comment_enabled: params[4], comment_daily_cap: params[5],
+            content_active_mask: params[6],
+            updated_at: new Date('2026-07-03T00:00:00Z'), updated_by: params[7],
           }],
         };
       }
@@ -50,7 +51,14 @@ async function makeStore(opts: { accountExists?: boolean } = {}) {
 test('store: 未配 = 完全不自动（零回归默认）', async () => {
   const { store } = await makeStore();
   const s = store.effectiveScheduleFor('acc-1');
-  assert.deepEqual(s, { autoEnabled: false, postEnabled: false, postDailyCap: 0, effectiveMask: null });
+  assert.deepEqual(s, {
+    autoEnabled: false,
+    postEnabled: false,
+    postDailyCap: 0,
+    commentEnabled: false,
+    commentDailyCap: 0,
+    effectiveMask: null,
+  });
   assert.equal(store.getGlobal(), null);
   assert.equal(store.getAccount('acc-1'), null);
 });
@@ -136,4 +144,24 @@ test('store: setAccount 未传字段保持原值（部分补丁不清其它字�
     [true, true, 1],
     '开关保持、仅 cap 变',
   );
+});
+
+
+test('store/comment: 两新字段合法写回读；非法整块拒；部分补丁保持原值（change content-schedule-comments）', async () => {
+  const { store, calls } = await makeStore();
+  // 合法写
+  const r = await store.setAccount('acc-1', { commentEnabled: true, commentDailyCap: 3 }, 'op');
+  assert.ok(r.ok);
+  if (r.ok) assert.deepEqual([r.row.commentEnabled, r.row.commentDailyCap], [true, 3]);
+  // 非法整块拒（越界 / 类型错），且不触库
+  const before = calls.length;
+  for (const patch of [{ commentDailyCap: -1 }, { commentDailyCap: 51 }, { commentEnabled: 'on' as unknown as boolean }]) {
+    const bad = await store.setAccount('acc-1', patch, 'op');
+    assert.equal(bad.ok, false, JSON.stringify(patch));
+  }
+  assert.equal(calls.length, before, '非法评论补丁不产生 SQL');
+  // 部分补丁保持原值：只改 post 不动 comment
+  await store.setAccount('acc-1', { postEnabled: true, postDailyCap: 1 }, 'op');
+  const row = store.getAccount('acc-1');
+  assert.deepEqual([row?.commentEnabled, row?.commentDailyCap], [true, 3], 'comment 字段保持');
 });

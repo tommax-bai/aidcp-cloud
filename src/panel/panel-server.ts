@@ -909,7 +909,7 @@ function createRequestHandler(
       }
       const raw = (body ?? {}) as Record<string, unknown>;
       const patch: AccountContentSchedulePatch = {};
-      for (const k of ['autoEnabled', 'postEnabled'] as const) {
+      for (const k of ['autoEnabled', 'postEnabled', 'commentEnabled'] as const) {
         const v = raw[k];
         if (v === undefined) continue;
         if (typeof v !== 'boolean') {
@@ -924,6 +924,13 @@ function createRequestHandler(
           return;
         }
         patch.postDailyCap = raw.postDailyCap;
+      }
+      if (raw.commentDailyCap !== undefined) {
+        if (typeof raw.commentDailyCap !== 'number') {
+          sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
+          return;
+        }
+        patch.commentDailyCap = raw.commentDailyCap;
       }
       if ('contentActiveMask' in raw) {
         const m = raw.contentActiveMask;
