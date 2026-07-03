@@ -40,6 +40,12 @@ export interface ContentSchedulerDeps {
   hasPendingPost(accountId: string): Promise<boolean>;
   /** 发帖是否全局忙（全局串行闸，无 accountId）。 */
   isPublishBusy(): boolean;
+  /**
+   * 当前是否在「可活跃时间」（浏览周历掩码）内 —— **自动内容时窗 ⊆ 活跃时段** 的强制闸（用户拍板：
+   * 休眠格绝不自动发内容，账号"睡着"的时段准点发帖本身就是不自然信号）。语义沿浏览掩码的 fail-open
+   * （缺失/未配=全天活跃=不额外限制）；缺省不注入=不限制（零回归、纯测试桩兼容）。
+   */
+  browseActiveAt?(now: Date): boolean;
   /** 触发排期发帖：**fire-and-forget**——返回一个在生成完成/失败时 settle 的 promise，调度器只挂 finally、绝不 await。
    *  该实现负责走既有提议→人审→派发、并异步补飞书结果卡（成功/空槽/失败）。 */
   triggerPost(accountId: string): Promise<unknown>;
@@ -127,6 +133,8 @@ export class ContentScheduler {
           if (!s.autoEnabled || !s.postEnabled || s.postDailyCap <= 0) continue;
           // fail-closed：内容格缺失 / 非法 / 当前非活跃格 → 跳过（绝不回落全天）。
           if (!isValidWeekActiveMask(s.effectiveMask) || !isWeekActiveAt(s.effectiveMask, now)) continue;
+          // 自动 ⊆ 活跃：浏览掩码休眠的小时绝不自动发内容（休眠格圈了内容位也拦；掩码未配=全天活跃=不限）。
+          if (this.deps.browseActiveAt && !this.deps.browseActiveAt(now)) continue;
           // 分钟错峰：仅命中偏移分钟才尝试。
           if (minute !== offsetMinute(accountId, now, 'post')) continue;
           // 幂等：同小时格不重触发。

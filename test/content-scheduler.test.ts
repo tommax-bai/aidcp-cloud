@@ -26,6 +26,8 @@ interface State {
   busy: boolean;
   nowMs: number;
   triggerImpl: (id: string) => Promise<unknown>;
+  /** 「自动 ⊆ 活跃」闸：undefined=不注入（不限）。 */
+  browseActive?: boolean;
 }
 
 function mk(overrides: Partial<State> = {}) {
@@ -52,11 +54,27 @@ function mk(overrides: Partial<State> = {}) {
       calls.push(id);
       return state.triggerImpl(id);
     },
+    ...(state.browseActive !== undefined ? { browseActiveAt: () => state.browseActive! } : {}),
     now: () => state.nowMs,
     logger: { warn: () => {} },
   };
   return { scheduler: new ContentScheduler(deps), state, calls };
 }
+
+test('content-scheduler: 自动 ⊆ 活跃 — 浏览掩码休眠时段不自动（即使内容格圈了）；活跃则放行', async () => {
+  // 浏览休眠 → 拦（内容格全开也不行：休眠格绝不自动发内容）
+  const blocked = mk({ browseActive: false });
+  await blocked.scheduler.onTick();
+  assert.deepEqual(blocked.calls, [], '浏览休眠时段绝不自动发');
+  // 浏览活跃 → 放行
+  const allowed = mk({ browseActive: true });
+  await allowed.scheduler.onTick();
+  assert.deepEqual(allowed.calls, [ACC]);
+  // 不注入（浏览掩码未配 = 全天活跃语义）→ 不限（既有测试的缺省路径，零回归）
+  const noGate = mk({});
+  await noGate.scheduler.onTick();
+  assert.deepEqual(noGate.calls, [ACC]);
+});
 
 test('content-scheduler: happy path — 命中偏移分钟 + 各闸通过 → 触发一次', async () => {
   const { scheduler, calls } = mk();

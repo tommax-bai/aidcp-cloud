@@ -127,6 +127,7 @@ import { createResumeConfigPanel } from './config/resume-config-facade.js';
 // 内容排期（change content-schedule-auto-publish，Phase 1 只发帖）：全局内容格 + 每账号排期存储 + 分钟心跳触发扇入。
 import { ContentScheduleStore } from './config/content-schedule-store.js';
 import { ContentScheduler } from './orchestrator/content-scheduler.js';
+import { isWeekActiveAt } from './risk/session-limits.js';
 import { createRolePromptProvider } from './config/role-prompt-preview.js';
 import { CredentialStore } from './config/credential-store.js';
 import type { ModelConfigView } from './panel/types.js';
@@ -1432,6 +1433,8 @@ async function main(): Promise<void> {
         postedTodayCount: (accountId) => publishLogStore.countPublishedTodayForAccount(accountId),
         hasPendingPost: (accountId) => publishLogStore.hasPendingApprovalForAccount(accountId),
         isPublishBusy: () => publishScheduler?.isBusy() ?? false,
+        // 自动 ⊆ 活跃（用户拍板：浏览休眠格绝不自动发内容）：读浏览周历掩码，沿其 fail-open（未配=全天活跃=不限）。
+        browseActiveAt: (now) => isWeekActiveAt(sessionConfigStore.weekActiveMask(), now),
         // fire-and-forget：调度器只发起；结果（成功/诚实空槽/失败）在此异步补一张飞书卡，绝不静默假成功。
         triggerPost: async (accountId) => {
           let ok = false;
