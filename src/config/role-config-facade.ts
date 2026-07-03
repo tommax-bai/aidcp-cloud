@@ -19,9 +19,9 @@ import type { RoleConfigStore } from './role-config-store.js';
 import {
   normProvider,
   ProviderKeyMissingError,
-  DEFAULT_TEXT_PROVIDER,
   buildThinkingParams,
 } from '../llm/index.js';
+import { normImageProvider } from '../publish-agent/image-providers.js';
 import type {
   PanelRoleConfig,
   RoleConfigCatalogView,
@@ -41,6 +41,8 @@ export interface RoleConfigFacadeDeps {
   getGlobalTextProvider: () => string;
   /** 当前全局图片模型名（图像角色生效值展示用）。 */
   getGlobalImageModel: () => string;
+  /** 当前全局图片厂商（change console-cloud-panel-hardening #5：图像角色生效厂商展示用，替代恒填文本默认）。 */
+  getGlobalImageProvider: () => string;
   /** 某分类的默认模型覆盖（null=分类无覆盖）；用于计算「继承分类」生效来源。 */
   getCategoryModel: (categoryId: string) => string | null;
   /** 某分类默认模型的厂商（change model-config-volcengine-provider）；category 来源的生效厂商。 */
@@ -67,7 +69,7 @@ export function createRoleConfigPanel(deps: RoleConfigFacadeDeps): PanelRoleConf
         let effectiveSource: 'override' | 'category' | 'default' | 'image';
         if (item.llmKind === 'image') {
           effectiveModel = imageModel;
-          effectiveProvider = DEFAULT_TEXT_PROVIDER; // 图像恒 dashscope（万相）
+          effectiveProvider = normImageProvider(deps.getGlobalImageProvider()); // 图像读真实图片厂商（#5，不再恒填文本默认）
           effectiveSource = 'image';
         } else if (ovModel) {
           effectiveModel = ovModel;

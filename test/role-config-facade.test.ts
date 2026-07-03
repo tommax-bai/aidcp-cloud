@@ -53,7 +53,7 @@ function fakeStore() {
 function makePanel(
   probeOk = true,
   categoryModels: Record<string, string | null> = {},
-  opts: { keyMissing?: boolean; categoryProviders?: Record<string, string | null> } = {},
+  opts: { keyMissing?: boolean; categoryProviders?: Record<string, string | null>; imageProvider?: string } = {},
 ) {
   const store = fakeStore();
   const probed: Array<{ provider: string; model: string }> = [];
@@ -62,6 +62,7 @@ function makePanel(
     getGlobalTextModel: () => 'qwen-turbo',
     getGlobalTextProvider: () => 'dashscope',
     getGlobalImageModel: () => 'wan2.7-image-pro',
+    getGlobalImageProvider: () => opts.imageProvider ?? 'dashscope',
     getCategoryModel: (catId) => categoryModels[catId] ?? null,
     getCategoryProvider: (catId) => opts.categoryProviders?.[catId] ?? null,
     getCategoryThinking: () => null,
@@ -88,8 +89,15 @@ test('getCatalog：白名单 + 区分 text/image + 生效值回落全局 + 分�
   assert.equal(img.llmKind, 'image');
   assert.equal(img.effectiveModel, 'wan2.7-image-pro');
   assert.equal(img.effectiveSource, 'image'); // 图像走全局 imageModel
+  assert.equal(img.effectiveProvider, 'dashscope'); // #5：图像读真实图片厂商（默认万相 dashscope）
   // 纯规则/遗留角色不出现
   assert.equal(view.roles.find((r) => r.roleId === 'browse:feed_scroller'), undefined);
+});
+
+test('图像角色 effectiveProvider 随全局图片厂商（#5：切火山即梦即如实显示，不再钉死文本默认）', () => {
+  const { panel } = makePanel(true, {}, { imageProvider: 'volcengine' });
+  const img = panel.getCatalog().roles.find((r) => r.roleId === 'publish:ImageGenerator')!;
+  assert.equal(img.effectiveProvider, 'volcengine');
 });
 
 test('生效来源：分类有默认 → 同类无覆盖角色 effectiveSource=category；有覆盖 → override 压过分类', async () => {

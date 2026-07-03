@@ -181,9 +181,16 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
     // V1 task 9.4：调度引擎态
     assert.equal(sumBody.dispatchActive, true);
 
-    // /api/version 暴露告警分级枚举（task 5.4 follow-up）
-    const ver2 = (await (await fetch(`${base}/api/version`)).json()) as { enums: { alertSeverity: string[] } };
+    // /api/version 暴露告警分级枚举（task 5.4 follow-up）+ 厂商全集 + DTO 字段指纹（console-cloud-panel-hardening #4/#5/#6）
+    const ver2 = (await (await fetch(`${base}/api/version`)).json()) as {
+      enums: { alertSeverity: string[]; riskAction: string[]; imageProvider: string[]; textProvider: string[] };
+      dtoFields: { panelAccount: string[] };
+    };
     assert.deepEqual(ver2.enums.alertSeverity, ['P0', 'P1', 'P2', 'P3']);
+    assert.ok(ver2.enums.riskAction.includes('comment_like'), 'riskAction live 真值含评论赞（#4 哨兵源）');
+    assert.ok(ver2.enums.imageProvider.includes('volcengine'), 'imageProvider 全集含火山（#5 哨兵源）');
+    assert.ok(ver2.enums.textProvider.includes('dashscope'), 'textProvider 全集（#6 哨兵源）');
+    assert.ok(ver2.dtoFields.panelAccount.includes('accountId'), 'PanelAccount 字段指纹（#6 对拍源）');
 
     // V1 task 9.5：/api/alerts 只读流
     const al = (await (await fetch(`${base}/api/alerts`, { headers: auth })).json()) as { alerts: unknown[] };

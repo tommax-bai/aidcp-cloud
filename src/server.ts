@@ -1676,6 +1676,7 @@ async function main(): Promise<void> {
     getGlobalTextModel: () => modelConfigStore.getCached().textModel,
     getGlobalTextProvider: () => modelConfigStore.getCached().textProvider,
     getGlobalImageModel: () => modelConfigStore.getCached().imageModel,
+    getGlobalImageProvider: () => modelConfigStore.getCached().imageProvider,
     getCategoryModel: (categoryId) => categoryConfigStore.getForCategory(categoryId).model,
     getCategoryProvider: (categoryId) => categoryConfigStore.getForCategory(categoryId).provider,
     getCategoryThinking: (categoryId) => categoryConfigStore.getForCategory(categoryId).thinkingMode,
