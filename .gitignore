@@ -5,3 +5,4 @@ dist/
 .DS_Store
 aidcp-cloud.zip
 cloud_output.txt
+node_modules
