@@ -240,6 +240,18 @@ export class ConnectionRuntimeRegistry {
     return fallback;
   }
 
+  /**
+   * 当前在线账号（有 edgeId 的连接，去重；change content-schedule-auto-publish）。
+   * 供 ContentScheduler 每分钟 tick 扇出——只对在线账号评估排期，离线账号本槽自然跳过（诚实、不补跑）。
+   */
+  onlineAccountIds(): string[] {
+    const ids = new Set<string>();
+    for (const rt of this.bySession.values()) {
+      if (rt.edgeId) ids.add(rt.accountId);
+    }
+    return [...ids];
+  }
+
   /** 当前活跃（已 startSession）的连接数。 */
   activeCount(): number {
     let n = 0;

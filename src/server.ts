@@ -124,6 +124,9 @@ import { SessionConfigStore } from './config/session-config-store.js';
 import { createSessionLimitPanel } from './config/session-config-facade.js';
 import { ResumeConfigStore } from './config/resume-config-store.js';
 import { createResumeConfigPanel } from './config/resume-config-facade.js';
+// 内容排期（change content-schedule-auto-publish，Phase 1 只发帖）：全局内容格 + 每账号排期存储 + 分钟心跳触发扇入。
+import { ContentScheduleStore } from './config/content-schedule-store.js';
+import { ContentScheduler } from './orchestrator/content-scheduler.js';
 import { createRolePromptProvider } from './config/role-prompt-preview.js';
 import { CredentialStore } from './config/credential-store.js';
 import type { ModelConfigView } from './panel/types.js';
@@ -218,6 +221,15 @@ async function main(): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
+  // 内容排期（change content-schedule-auto-publish）：全局「内容可自动时段」+ 每账号发帖排期。
+  // fail-closed：未配 / 非法 = 不自动（与浏览掩码「缺失=全天活跃」刻意相反）；init 失败不致命（空镜像 = 全不自动）。
+  const contentScheduleStore = new ContentScheduleStore({
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
   try {
     await modelConfigStore.init();
     await credentialStore.init();
@@ -226,6 +238,7 @@ async function main(): Promise<void> {
     await quotaConfigStore.init();
     await sessionConfigStore.init();
     await resumeConfigStore.init();
+    await contentScheduleStore.init();
     console.log('[aidcp-cloud] 模型配置 + 凭据 + 角色配置 + 分类默认 + 安全限额 + 单场上限 + 续场配置存储已就绪（model_config / provider_credentials / role_config / category_config / quota_config / session_config / resume_config）');
   } catch (err) {
     console.warn('[aidcp-cloud] 模型/凭据/角色/分类/限额/续场配置存储初始化失败（回退代码默认模型 + env 密钥；限额/续场回退派生写死默认）:', (err as Error).message);
@@ -1388,8 +1401,70 @@ async function main(): Promise<void> {
       logger: console,
     });
     console.log('[aidcp-cloud] PublishScheduler 已就绪（手动 /publish 即用）');
-    // 自动扳机轮询默认关闭（须显式 AIDCP_PUBLISH_AUTO=true 才开），避免未到部署/edge 就绪即自动发。
-    if (readEnvString('AIDCP_PUBLISH_AUTO') === 'true') {
+
+    // ── 内容排期调度器（change content-schedule-auto-publish，Phase 1 只发帖）────────────────
+    // 每分钟心跳、按账号扇出、分钟错峰；到点只产草稿→飞书人审→approved 才发（AC-PUB 不动）。
+    // 与旧 AIDCP_PUBLISH_AUTO 单账号扳机**无条件互斥**：内容排期开则旧扳机确定性不启（防错时双触发→同日双草稿超发），不留 fallback。
+    const contentScheduleAutoOn = readEnvString('AIDCP_CONTENT_SCHEDULE_AUTO') === 'true';
+    if (contentScheduleAutoOn) {
+      const contentScheduler = new ContentScheduler({
+        onlineAccounts: () => runtimes?.onlineAccountIds() ?? [],
+        scheduleFor: (accountId) => contentScheduleStore.effectiveScheduleFor(accountId),
+        riskStatus: async (accountId) => (await resolveController(accountId)).getState().status,
+        postedTodayCount: (accountId) => publishLogStore.countPublishedTodayForAccount(accountId),
+        hasPendingPost: (accountId) => publishLogStore.hasPendingApprovalForAccount(accountId),
+        isPublishBusy: () => publishScheduler?.isBusy() ?? false,
+        // fire-and-forget：调度器只发起；结果（成功/诚实空槽/失败）在此异步补一张飞书卡，绝不静默假成功。
+        triggerPost: async (accountId) => {
+          let ok = false;
+          let level: 'success' | 'warning' | 'error' = 'error';
+          let title = '排期发帖失败';
+          let message = 'unknown';
+          try {
+            const o = await publishScheduler!.triggerScheduled(accountId);
+            if (o.result === 'triggered') {
+              const st = o.status;
+              if (st === 'pending_approval' || st === 'published' || st === 'draft') {
+                ok = true;
+                level = 'success';
+                title = '排期发帖：草稿已生成，待飞书人审';
+                message = `status=${st}（真发仍须人审通过；未通过/超时一律不发）`;
+              } else if (st === 'skipped') {
+                level = 'warning';
+                title = '排期发帖：本槽无新素材，本次不发';
+                message = o.failureReason ?? '内容侦察判定无可用素材（诚实空槽，不硬凑内容）';
+              } else {
+                level = 'error';
+                title = '排期发帖：编排未成';
+                message = `status=${st}${o.failureReason ? `：${o.failureReason}` : ''}`;
+              }
+            } else {
+              // blocked（未绑人设 / 风控非 normal / canDo 拒）→ 黄色如实回报。
+              level = 'warning';
+              title = '排期发帖：本槽被闸拦下，未触发';
+              message = o.reason;
+            }
+          } catch (e) {
+            message = (e as Error).message;
+          }
+          const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
+          if (!chatId) {
+            console.warn(`[content-scheduler] 无可用飞书群，排期结果卡未发出 account=${accountId} title=${title}`);
+            return;
+          }
+          await messenger
+            .sendCard(chatId, buildCommandResultCard({ command: '排期发帖（自动）', ok, level, title, message, accountId }))
+            .catch((e) => console.warn('[content-scheduler] 排期结果卡发送失败：', (e as Error).message));
+        },
+        logger: console,
+      });
+      contentScheduler.start(60_000);
+      console.log('[aidcp-cloud] ContentScheduler 已启动（每分钟心跳、按账号错峰；旧 AIDCP_PUBLISH_AUTO 扳机已被互斥关闭）');
+      if (readEnvString('AIDCP_PUBLISH_AUTO') === 'true') {
+        console.warn('[aidcp-cloud] ⚠️ AIDCP_PUBLISH_AUTO=true 被忽略：内容排期调度器已接管自动发帖（互斥，防错时双触发）');
+      }
+    } else if (readEnvString('AIDCP_PUBLISH_AUTO') === 'true') {
+      // 旧单账号自动扳机（内容排期未开时保持原行为，零回归）。
       const everyMin = Number(process.env.AIDCP_PUBLISH_AUTO_INTERVAL_MIN ?? 30);
       setInterval(() => {
         publishScheduler!.checkAndMaybeTrigger().then(
@@ -1612,6 +1687,22 @@ async function main(): Promise<void> {
                   : {}),
               }
             : undefined,
+          // 内容排期（change content-schedule-auto-publish，Phase 1 只发帖）：经 ContentScheduleStore 单写，
+          // 非法整块拒、写前校验账号存在防幽灵行、退役拒、写后回读真态；fail-closed（未配=不自动）。
+          contentSchedule: {
+            getGlobalView: () => {
+              const g = contentScheduleStore.getGlobal();
+              return {
+                contentActiveMask: g?.contentActiveMask ?? null,
+                overridden: g !== null,
+                updatedAt: g?.updatedAt ?? null,
+                updatedBy: g?.updatedBy ?? null,
+              };
+            },
+            listCatalog: () => contentScheduleStore.listCatalog(),
+            setGlobal: (mask, updatedBy) => contentScheduleStore.setGlobal({ contentActiveMask: mask }, updatedBy),
+            setAccount: (accountId, patch, updatedBy) => contentScheduleStore.setAccount(accountId, patch, updatedBy),
+          },
           // 模型与凭据配置（change console-model-provider-config + model-config-volcengine-provider）。明文密钥绝不经此回传。
           modelConfig: {
             getView: buildModelConfigView,

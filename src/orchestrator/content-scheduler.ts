@@ -32,8 +32,8 @@ export interface ContentSchedulerDeps {
   onlineAccounts(): string[];
   /** 单账号生效排期（store.effectiveScheduleFor，内存现读）。 */
   scheduleFor(accountId: string): ContentScheduleView;
-  /** 风控状态（只 'normal' 才自动）。 */
-  riskStatus(accountId: string): string;
+  /** 风控状态（只 'normal' 才自动）。可同步或异步（server 侧按账号 registry 解析是 async）。 */
+  riskStatus(accountId: string): string | Promise<string>;
   /** 今日已发帖数（持久历史，按账号服务器本地日）。 */
   postedTodayCount(accountId: string): Promise<number>;
   /** 是否有在途未审发帖草稿（防 TOCTOU 超发）。 */
@@ -133,8 +133,8 @@ export class ContentScheduler {
           if (this.lastFired.get(accountId) === cell) continue;
           // 每账号单飞（上次触发尚未 settle）。
           if (this.inFlight.has(accountId)) continue;
-          // 风控 normal 闸。
-          if (this.deps.riskStatus(accountId) !== 'normal') continue;
+          // 风控 normal 闸（同步 / 异步皆可）。
+          if ((await this.deps.riskStatus(accountId)) !== 'normal') continue;
           // 发帖全局串行：本调度器已有发帖在飞 或 手动 /publish 在跑 → 本槽顺延（本小时不发，不 burst）。
           if (this.postFiring || this.deps.isPublishBusy()) continue;
           // 日上限原子：已发历史 + 在途未审草稿。
