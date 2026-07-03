@@ -61,6 +61,25 @@ function createRequestHandler(
 ): (req: http.IncomingMessage, res: http.ServerResponse) => void {
   const logger = config.logger ?? console;
 
+  // 账号存在性校验（change console-cloud-panel-hardening #28）：pause/resume/风控写端点的底层是
+  // ON CONFLICT INSERT，对不存在账号会凭空造幽灵行并「假成功」（违背「绝不静默假成功」红线）。
+  // 端点层先校验账号存在——不存在即 404；账号列表查询失败诚实 503（不放行、绝不造幽灵）。
+  // 数据源为只读账号列表（accounts 表小、已为 dashboard 拉取，非全表扫描）。
+  const assertAccountExists = async (accountId: string, res: http.ServerResponse): Promise<boolean> => {
+    let known: Awaited<ReturnType<typeof deps.panelStore.listAccounts>>;
+    try {
+      known = await deps.panelStore.listAccounts();
+    } catch {
+      sendJson(res, 503, { error: 'unavailable', reason: 'account_lookup_failed' });
+      return false;
+    }
+    if (!known.some((a) => a.accountId === accountId)) {
+      sendJson(res, 404, { error: 'account_not_found' });
+      return false;
+    }
+    return true;
+  };
+
   async function handleLogin(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     let body: unknown;
     try {
@@ -145,7 +164,9 @@ function createRequestHandler(
         }),
       );
       // change dashboard-refresh-clarity：响应收口到 DashboardSummary DTO（asOf=服务端此刻，
-      // console 渲染「数据截至 …」区分「无新活动」与「界面冻结」）；沿用上方既有索引查询，无全表扫描。
+      // console 渲染「数据截至 …」区分「无新活动」与「界面冻结」）。今日聚合（todayTotals /
+      // todayTotalsByAccount / likeRate）走 risk_counters 的 occurred_at 打头索引
+      // （change console-cloud-panel-hardening #21 新补），不带账号前缀也不再退化为全表扫描。
       const summary: DashboardSummary = {
         asOf: Date.now(),
         edgesOnline: deps.edgeServer.onlineEdgeCount(), // staleness-aware（死连接不算在线，D9）
@@ -266,6 +287,13 @@ function createRequestHandler(
     // ── 写操作（task 4）：经拥有写的对象，绝不乐观假成功 ──────────────────
     if (method === 'POST' && url.startsWith('/api/publish/') && url.endsWith('/approve')) {
       const requestId = decodeURIComponent(url.slice('/api/publish/'.length, -'/approve'.length));
+      // requestId 白名单（change console-cloud-panel-hardening #29）：requestId 会被拼进审批信号文件落盘路径
+      // （/tmp/aidcp-publish-approve-<requestId>.json）。仅放行受控字符集 [A-Za-z0-9_-]——排除 '.' '/' 即堵死
+      // '../' 路径穿越（真实审批 requestId 恒为 publish-<数字>，此集为其超集，向后兼容既有调用）。非法即 400、不进任何文件写。
+      if (!/^[A-Za-z0-9_-]+$/.test(requestId)) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_request_id' });
+        return;
+      }
       let body: unknown;
       try {
         body = await readJsonBody(req);
@@ -382,12 +410,16 @@ function createRequestHandler(
         return;
       }
       const { command } = (body ?? {}) as { command?: unknown };
-      if (command === 'pause') {
-        sendJson(res, 200, await deps.commandActions.pause(accountId));
-        return;
-      }
-      if (command === 'resume') {
-        sendJson(res, 200, await deps.commandActions.resume(accountId));
+      if (command === 'pause' || command === 'resume') {
+        // 存在性校验先行（#28）：不存在账号 → 404，绝不经 ON CONFLICT 造幽灵账号行 + 假成功。
+        if (!(await assertAccountExists(accountId, res))) return;
+        sendJson(
+          res,
+          200,
+          command === 'pause'
+            ? await deps.commandActions.pause(accountId)
+            : await deps.commandActions.resume(accountId),
+        );
         return;
       }
       sendJson(res, 400, { error: 'bad_request', reason: 'unknown_command' });
@@ -477,6 +509,8 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request', reason: 'override_requires_audit_reason' });
         return;
       }
+      // 存在性校验先行（#28）：不存在账号 → 404，绝不经 saveState 的 ON CONFLICT 造幽灵 risk_state 行。
+      if (!(await assertAccountExists(accountId, res))) return;
       const controller = await deps.riskRegistry.getController(accountId);
       const before = controller.getState().status;
       const after = await controller.applySignal({
@@ -502,6 +536,8 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request', reason: 'unknown_level' });
         return;
       }
+      // 存在性校验先行（#28）：同上，杜绝对不存在账号造幽灵风控行 + 假成功。
+      if (!(await assertAccountExists(accountId, res))) return;
       const controller = await deps.riskRegistry.getController(accountId);
       sendJson(res, 200, { state: await controller.setQuotaLevel(level as RiskQuotaLevel) });
       return;

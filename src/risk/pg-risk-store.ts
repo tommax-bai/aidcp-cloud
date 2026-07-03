@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS risk_counters (
 
 CREATE INDEX IF NOT EXISTS idx_risk_counters_account_time ON risk_counters (account_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_risk_counters_account_action_time ON risk_counters (account_id, action, occurred_at DESC);
+-- 面板今日聚合（todayTotals / todayTotalsByAccount / likeRate）不带 account 前缀、只按 occurred_at 过滤；
+-- 上面两个 account 打头的复合索引服务不了纯时间范围扫描 → 补 occurred_at 打头索引消灭全表扫描（change console-cloud-panel-hardening #21）。
+CREATE INDEX IF NOT EXISTS idx_risk_counters_time ON risk_counters (occurred_at DESC);
 
 CREATE TABLE IF NOT EXISTS risk_state (
   account_id     TEXT PRIMARY KEY,
@@ -189,6 +192,20 @@ export class PgRiskStore implements RiskStore, InteractionStore {
       [accountId, action],
     );
     return Number(rows[0]?.n ?? '0');
+  }
+
+  /**
+   * 数据保留：删早于 N 天的配额计数流水（change console-cloud-panel-hardening #21）。
+   * 风控只回读最近 1 天（见 loadCounters 的 since），更早的行是永不再被业务读到的死数据。
+   * DELETE 走 idx_risk_counters_time（occurred_at），不全表扫描。
+   * risk_interactions（每笔记去重台账）刻意不在此清理——去重语义依赖历史留存。
+   */
+  async purgeCountersOlderThan(days: number): Promise<number> {
+    const res = await this.pool.query(
+      `DELETE FROM risk_counters WHERE occurred_at < now() - ($1::int * interval '1 day')`,
+      [days],
+    );
+    return res.rowCount ?? 0;
   }
 
   async close(): Promise<void> {

@@ -1,11 +1,30 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { TokenUsageStore } from '../src/metrics/token-usage-store.js';
+import { TokenUsageStore, TOKEN_USAGE_SCHEMA_SQL } from '../src/metrics/token-usage-store.js';
 
 /**
  * change llm-token-usage-stats：内存累加 + flush upsert 的记账逻辑（无需真实 PG，注入桩池）。
  */
+
+test('TOKEN_USAGE_SCHEMA_SQL 补 bucket_start 打头索引服务全局时间窗查询（#22）', () => {
+  assert.match(TOKEN_USAGE_SCHEMA_SQL, /idx_llm_token_usage_bucket\s+ON llm_token_usage \(bucket_start\)/);
+});
+
+test('purgeOlderThan 按 bucket_start 删过期桶、回传删除行数', async () => {
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      calls.push({ sql, params });
+      return { rowCount: 9 };
+    },
+  } as unknown as pg.Pool;
+  const store = new TokenUsageStore({ pool });
+  const n = await store.purgeOlderThan(45);
+  assert.equal(n, 9);
+  assert.match(calls[0].sql, /DELETE FROM llm_token_usage WHERE bucket_start </);
+  assert.deepEqual(calls[0].params, [45]);
+});
 
 interface RecordedUpsert {
   bucketMs: number;

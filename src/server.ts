@@ -27,6 +27,7 @@ import {
   resolveProviderEnvKey,
 } from './llm/index.js';
 import { TokenUsageStore } from './metrics/token-usage-store.js';
+import { startRetentionSweeper } from './panel/retention-sweeper.js';
 import { SimplePlanner } from './planner/index.js';
 import { PgAnchorCache, BotChatStore, ConceptStore, LikedNoteStore, ValuableCommentStore, NotificationContactStore, InteractionFeedStore, CuratedContentStore, topicKeysFromTitle } from './cache/index.js';
 import { resolveCuratedGateConfig } from './publish-agent/curated-gate.js';
@@ -696,6 +697,14 @@ async function main(): Promise<void> {
     }
   };
   console.log('[aidcp-cloud] RiskControllerRegistry 已就绪（按真实账号懒解析，PgRiskStore 持久化）');
+
+  // 数据保留清理（change console-cloud-panel-hardening #21/#22/#23）：面板只读查询打在追加型表上，
+  // 零保留策略会使全表扫描成本随运行时长单调恶化 → 日频清理三表过期行（各表独立 try/catch，
+  // 一个失败不拖累其它、绝不逃逸崩进程；只删各自表、不碰风控单写/发布链/edge）。
+  startRetentionSweeper({
+    targets: { riskStore, interactionFeedStore, tokenUsageStore },
+    logger: console,
+  });
 
   // 节奏饱和运维告警器（change decouple-quota-hit-from-risk）：撞速率突发窗不再升风控态，
   // 改道成低优先级运维告警。alertStore 就绪后（见下方）赋值；闭包在事件触发时读取，故此处先声明。

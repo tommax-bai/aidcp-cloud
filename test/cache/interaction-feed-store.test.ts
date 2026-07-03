@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
-import { InteractionFeedStore } from '../../src/cache/interaction-feed-store.js';
+import { InteractionFeedStore, INTERACTION_FEED_SCHEMA_SQL } from '../../src/cache/interaction-feed-store.js';
 
 /** 捕获每次 query 的 (sql, params)，用于断言写入行为，不依赖真 PG。 */
 function capturingPool(): { pool: pg.Pool; calls: Array<{ sql: string; params: unknown[] }> } {
@@ -58,4 +58,24 @@ test('upsertMeta title+url 全空白则不写（无可补充）', async () => {
   const store = new InteractionFeedStore({ pool });
   await store.upsertMeta('default', 'note-3', { title: '', url: undefined });
   assert.equal(calls.length, 0);
+});
+
+test('SCHEMA 补 occurred_at 打头索引服务全局互动流查询（#23）', () => {
+  assert.match(INTERACTION_FEED_SCHEMA_SQL, /idx_interaction_feed_time ON interaction_feed \(occurred_at DESC\)/);
+});
+
+test('purgeOlderThan 删过期 feed 行 + 清孤儿 meta、回传删除行数', async () => {
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      calls.push({ sql, params });
+      return { rowCount: 6 };
+    },
+  } as unknown as pg.Pool;
+  const store = new InteractionFeedStore({ pool });
+  const n = await store.purgeOlderThan(30);
+  assert.equal(n, 6);
+  assert.match(calls[0].sql, /DELETE FROM interaction_feed WHERE occurred_at </);
+  assert.deepEqual(calls[0].params, [30]);
+  assert.match(calls[1].sql, /DELETE FROM interaction_target_meta/);
 });

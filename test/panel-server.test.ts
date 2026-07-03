@@ -858,3 +858,70 @@ test('HTTP 告警手动解决：401/400/503/200 诚实 + 只经 alertStore、不
     await h.close();
   }
 });
+
+test('HTTP 存在性校验 + requestId 白名单：幽灵账号 404、路径穿越 requestId 400（console-cloud-panel-hardening #28/#29）', async () => {
+  const h = await startPanelApi(deps, makeConfig());
+  assert.equal(h.started, true);
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = (await login.json()) as { token: string };
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+
+    // #28：对不存在账号 'ghost' 的 pause/resume/风控写 → 404 account_not_found。
+    // 反例保证：mock commandActions.pause/riskRegistry.getController 对任意 id 都成功，若未前置校验会误返 200。
+    const pauseGhost = await fetch(`${base}/api/accounts/ghost/command`, {
+      method: 'POST', headers: auth, body: JSON.stringify({ command: 'pause' }),
+    });
+    assert.equal(pauseGhost.status, 404);
+    assert.equal(((await pauseGhost.json()) as { error: string }).error, 'account_not_found');
+
+    assert.equal(
+      (await fetch(`${base}/api/accounts/ghost/command`, {
+        method: 'POST', headers: auth, body: JSON.stringify({ command: 'resume' }),
+      })).status,
+      404,
+    );
+    assert.equal(
+      (await fetch(`${base}/api/accounts/ghost/risk/status`, {
+        method: 'POST', headers: auth, body: JSON.stringify({ kind: 'manual_restrict' }),
+      })).status,
+      404,
+    );
+    assert.equal(
+      (await fetch(`${base}/api/accounts/ghost/risk/quota`, {
+        method: 'POST', headers: auth, body: JSON.stringify({ level: 'conservative' }),
+      })).status,
+      404,
+    );
+
+    // 存在的账号 'default' 仍正常（回归保证：校验不误伤合法账号）。
+    assert.equal(
+      (await fetch(`${base}/api/accounts/default/command`, {
+        method: 'POST', headers: auth, body: JSON.stringify({ command: 'pause' }),
+      })).status,
+      200,
+    );
+
+    // #29：审批 requestId 含路径穿越（decode 后为 ../../tmp/pwn）→ 400 invalid_request_id，不进任何文件写。
+    const traversal = await fetch(`${base}/api/publish/%2e%2e%2f%2e%2e%2ftmp%2fpwn/approve`, {
+      method: 'POST', headers: auth, body: JSON.stringify({ approved: true }),
+    });
+    assert.equal(traversal.status, 400);
+    assert.equal(((await traversal.json()) as { reason?: string }).reason, 'invalid_request_id');
+
+    // 合法 publish-<n> requestId 仍放行（回归保证）。
+    assert.equal(
+      (await fetch(`${base}/api/publish/publish-42/approve`, {
+        method: 'POST', headers: auth, body: JSON.stringify({ approved: true }),
+      })).status,
+      200,
+    );
+  } finally {
+    await h.close();
+  }
+});

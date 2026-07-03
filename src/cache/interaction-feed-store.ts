@@ -32,6 +32,9 @@ CREATE TABLE IF NOT EXISTS interaction_feed (
   PRIMARY KEY (account_id, action, target_id)
 );
 CREATE INDEX IF NOT EXISTS idx_interaction_feed_account_time ON interaction_feed (account_id, occurred_at DESC);
+-- 面板监控页「按笔记互动」全局视图不带 account 前缀、按 occurred_at 倒序取最新 N 条；
+-- 上面 account 打头索引服务不了 → 补 occurred_at 打头索引消灭全表扫描（change console-cloud-panel-hardening #23）。
+CREATE INDEX IF NOT EXISTS idx_interaction_feed_time ON interaction_feed (occurred_at DESC);
 
 CREATE TABLE IF NOT EXISTS interaction_target_meta (
   account_id TEXT        NOT NULL,
@@ -112,6 +115,25 @@ export class InteractionFeedStore {
              updated_at = now()`,
       [accountId, id, title, url],
     );
+  }
+
+  /**
+   * 数据保留：删早于 N 天的展示账本行 + 随之不再被任何 feed 行引用的孤儿 meta 旁表行
+   * （change console-cloud-panel-hardening #23）。DELETE 走 idx_interaction_feed_time（occurred_at），不全表扫描。
+   */
+  async purgeOlderThan(days: number): Promise<number> {
+    const res = await this.pool.query(
+      `DELETE FROM interaction_feed WHERE occurred_at < now() - ($1::int * interval '1 day')`,
+      [days],
+    );
+    await this.pool.query(
+      `DELETE FROM interaction_target_meta m
+        WHERE NOT EXISTS (
+          SELECT 1 FROM interaction_feed f
+           WHERE f.account_id = m.account_id AND f.target_id = m.target_id
+        )`,
+    );
+    return res.rowCount ?? 0;
   }
 
   async close(): Promise<void> {

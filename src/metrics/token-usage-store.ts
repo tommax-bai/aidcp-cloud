@@ -46,6 +46,10 @@ CREATE TABLE IF NOT EXISTS llm_token_usage (
 );
 CREATE INDEX IF NOT EXISTS idx_llm_token_usage_account_bucket
   ON llm_token_usage (account_id, bucket_start);
+-- 用量页全局视图（不带 account 过滤）按 bucket_start 时间窗查询，上面 account 打头索引服务不了
+-- → 补 bucket_start 打头索引（change console-cloud-panel-hardening #22）。
+CREATE INDEX IF NOT EXISTS idx_llm_token_usage_bucket
+  ON llm_token_usage (bucket_start);
 `;
 
 const UPSERT_SQL = `
@@ -262,7 +266,7 @@ export class TokenUsageStore {
     await this.flush();
   }
 
-  /** 留存口径：删早于 N 天的桶（本流不接调度，多账号上线时再接）。 */
+  /** 留存口径：删早于 N 天的桶。由 RetentionSweeper 日频接线调度（change console-cloud-panel-hardening #22）。 */
   async purgeOlderThan(days: number): Promise<number> {
     const res = await this.pool.query(
       `DELETE FROM llm_token_usage WHERE bucket_start < now() - ($1::int * interval '1 day')`,
