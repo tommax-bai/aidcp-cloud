@@ -1405,16 +1405,20 @@ async function main(): Promise<void> {
     if (readEnvString('AIDCP_MOCK_PUBLISH') === 'true') {
       const triggerFile = '/tmp/aidcp-mock-publish-trigger';
       setInterval(async () => {
+        let raw: string;
         try {
-          await readFile(triggerFile, 'utf8');
+          raw = await readFile(triggerFile, 'utf8');
         } catch {
           return; // 文件不存在 → 不触发
         }
         await unlink(triggerFile).catch(() => {});
-        console.log('[aidcp-cloud] MOCK publish 触发命中 → triggerManual');
-        publishScheduler!.triggerManual().catch((e) => console.warn('[aidcp-cloud] MOCK triggerManual err:', e));
+        // 文件内容（trim 后非空）视为目标账号 id——多账号部署下 triggerManual() 无参会因解析不出唯一账号被拒；
+        // 空文件保持旧语义（解析唯一账号）。人设闸 + AC-PUB 人审闸照常生效，绝不旁路。
+        const mockAccount = raw.trim() || undefined;
+        console.log(`[aidcp-cloud] MOCK publish 触发命中 → triggerManual(${mockAccount ?? '(唯一账号)'})`);
+        publishScheduler!.triggerManual(mockAccount).catch((e) => console.warn('[aidcp-cloud] MOCK triggerManual err:', e));
       }, 3000);
-      console.log('[aidcp-cloud] MOCK publish 触发已开启（touch /tmp/aidcp-mock-publish-trigger 触发一次）');
+      console.log('[aidcp-cloud] MOCK publish 触发已开启（touch /tmp/aidcp-mock-publish-trigger 触发一次；文件内容可写目标账号 id）');
     }
   } else {
     console.warn('[aidcp-cloud] PublishScheduler 未建（ConceptStore/LikedNoteStore 不可用），发帖触发不可用');
