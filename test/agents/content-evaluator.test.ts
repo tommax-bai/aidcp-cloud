@@ -199,3 +199,45 @@ describe('ContentEvaluator', () => {
     assert.ok(captured, 'evaluate should still work after unsubscribe');
   });
 });
+
+// ─── change llm-role-review-remediation:输出域内校验 ─────────────────────────
+describe('ContentEvaluator — 序号域内校验', () => {
+  function make(llmResponse: string) {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    const llm = { complete: async () => llmResponse };
+    const role = new ContentEvaluator({ eventBus: bus, soul: mockSoul, llm }, ctx);
+    role.setVisibleCards(sampleCards);
+    return { bus, role };
+  }
+
+  it('index 越界 → content.no_valuable(index_out_of_range)，绝不静默落第一张', async () => {
+    const { bus, role } = make('{"verdict":"valuable","index":99,"reason":"x","confidence":0.9}');
+    let valuable = null as ContentValuablePayload | null;
+    let noValuable = null as ContentNoValuablePayload | null;
+    bus.on('content.valuable', (p) => { valuable = p; });
+    bus.on('content.no_valuable', (p) => { noValuable = p; });
+    await role.evaluate('feed');
+    assert.equal(valuable, null, '越界绝不 emit content.valuable');
+    assert.ok(noValuable, '越界应按 skip 如实上报');
+    assert.equal(noValuable!.reason, 'index_out_of_range');
+  });
+
+  it('index 非整数/负数/缺失 → 判解析失败(parse_failed)，不默认第一张', async () => {
+    const bads = [
+      '{"verdict":"valuable","index":1.5,"reason":"x"}',
+      '{"verdict":"valuable","index":-1,"reason":"x"}',
+      '{"verdict":"valuable","reason":"x"}',
+    ];
+    for (const bad of bads) {
+      const { bus, role } = make(bad);
+      let valuable = null as ContentValuablePayload | null;
+      let noValuable = null as ContentNoValuablePayload | null;
+      bus.on('content.valuable', (p) => { valuable = p; });
+      bus.on('content.no_valuable', (p) => { noValuable = p; });
+      await role.evaluate('feed');
+      assert.equal(valuable, null, `非法 index 不该选卡: ${bad}`);
+      assert.equal(noValuable?.reason, 'parse_failed', `应判解析失败: ${bad}`);
+    }
+  });
+});

@@ -176,3 +176,39 @@ describe('SearchEvaluator', () => {
     }, /需要 LlmClient/);
   });
 });
+
+// ─── change llm-role-review-remediation:关键词域内校验 ───────────────────────
+describe('SearchEvaluator — 关键词域内校验', () => {
+  function make(llmResponse: string) {
+    const bus = new EventBus();
+    const options: SearchEvaluatorOptions = {
+      eventBus: bus,
+      soul: mockSoul,
+      llm: createMockLlm(llmResponse),
+      sessionContext: new SessionContext(),
+      getSearchedKeywords: () => [],
+    };
+    const role = new SearchEvaluator(options);
+    return { bus, role };
+  }
+
+  it('编造词（不在候选集）→ search.skipped(keyword_not_in_candidates)，绝不真实搜索', async () => {
+    const { bus, role } = make('{"verdict":"search","keyword":"量化交易","reason":"编造"}');
+    let approved = null as SearchApprovedPayload | null;
+    let skipped = null as SearchSkippedPayload | null;
+    bus.on('search.approved', (p) => { approved = p; });
+    bus.on('search.skipped', (p) => { skipped = p; });
+    await role.evaluate({ consecutiveScrolls: 5, currentPageType: 'feed', ts: Date.now() });
+    assert.equal(approved, null, '编造词绝不 approved');
+    assert.equal(skipped?.reason, 'keyword_not_in_candidates');
+  });
+
+  it('候选词大小写/空白不一致 → approved 且回写候选集原词', async () => {
+    const { bus, role } = make('{"verdict":"search","keyword":" llm agent ","reason":"ok"}');
+    let approved = null as SearchApprovedPayload | null;
+    bus.on('search.approved', (p) => { approved = p; });
+    await role.evaluate({ consecutiveScrolls: 5, currentPageType: 'feed', ts: Date.now() });
+    assert.ok(approved, '候选集内词应放行');
+    assert.equal(approved!.keyword, 'LLM Agent', '下游收到候选集原词');
+  });
+});

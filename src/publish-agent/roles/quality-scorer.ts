@@ -65,7 +65,8 @@ export class QualityScorerRole extends BasePublishRole<QualityScorerInput, Quali
       async () => {
         const raw = await this.llmClient.chat([
           { role: 'system', content: '你是内容质量评审员。严格返回JSON。' },
-          { role: 'user', content: buildAssemblerPrompt(input.created, ppResult, input.soul, input.category) },
+          // 评审对象必须是将发布文本：正文用清洗稿（未重写时与草稿相同）；标题/标签仍取定稿来源。
+          { role: 'user', content: buildAssemblerPrompt({ ...input.created, content: input.cleaned.content }, ppResult, input.soul, input.category) },
         ], { timeoutMs: QUALITY_TIMEOUT_MS });
         return this.parseReviewOutput(raw);
       },

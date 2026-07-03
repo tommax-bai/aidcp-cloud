@@ -110,3 +110,16 @@ describe('AC-TITLE-ROLE TitleCreator', () => {
     assert.equal(calls, 0, '空正文不调 LLM');
   });
 });
+
+// ─── change llm-role-review-remediation:JSON 控制字符修复 ────────────────────
+describe('TitleCreator — JSON 控制字符修复', () => {
+  test('标题 JSON 字符串含裸换行 → 修复后解析成功，不触发整篇 abort', async () => {
+    const fakeLlm = { chat: async () => '{"title":"看这里\n真的绝"}', complete: async () => '' };
+    const role = new TitleCreatorRole({ llmClient: fakeLlm as any, clock, logger: silentLogger });
+    const ctx = await run(role, makeAssembled());
+    const sel = ctx.get('titleSelection');
+    assert.ok(sel, '裸换行不应导致「解析炸=整篇 abort」');
+    assert.equal(sel.source, 'llm');
+    assert.ok(sel.title.includes('看这里'));
+  });
+});

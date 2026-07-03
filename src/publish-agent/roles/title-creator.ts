@@ -3,6 +3,7 @@ import type { RoleConfig } from './base-role.js';
 import type { PipelineFields, TitleSelection } from '../types.js';
 import type { PipelineContext } from '../pipeline-context.js';
 import { buildTitlePrompt, BANNED_PHRASES } from '../prompts.js';
+import { escapeControlCharsInJsonStrings } from '../json-repair.js';
 import { clampTitle, graphemeCount } from '../title-clamp.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
 
@@ -119,7 +120,8 @@ export class TitleCreatorRole extends BasePublishRole<TitleInput, TitleSelection
   private parseTitle(raw: string): string {
     const match = raw.match(/\{[\s\S]*\}/);
     if (!match) throw new Error('TitleCreator: 输出无 JSON');
-    const obj = JSON.parse(match[0]);
+    // doubao 系有裸控制字符前科（正文创作已中招同修）；解析前同源修复，防「解析炸=整篇 abort」。
+    const obj = JSON.parse(escapeControlCharsInJsonStrings(match[0]));
     const title = typeof obj.title === 'string' ? obj.title.trim() : '';
     if (!title) throw new Error('TitleCreator: JSON 无非空 title');
     return title;

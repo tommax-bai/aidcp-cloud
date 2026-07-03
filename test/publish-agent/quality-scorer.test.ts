@@ -36,3 +36,26 @@ describe('QualityScorerRole', () => {
     assert.equal(r2.qualityScore, 70);
   });
 });
+
+// ─── change llm-role-review-remediation:评审对象必须是将发布文本 ─────────────
+describe('QualityScorerRole — 评审清洗稿', () => {
+  test('rewritten=true 时 prompt 嵌入清洗稿、不再嵌入草稿正文', async () => {
+    let prompt = '';
+    const llm = {
+      chat: async (msgs: { role: string; content: string }[]) => {
+        prompt = msgs[1].content;
+        return JSON.stringify({ qualityScore: 80 });
+      },
+      complete: async () => '',
+    };
+    const role = new QualityScorerRole({ llmClient: llm as any, clock, logger: silentLogger });
+    const ctx = new PipelineContext<PipelineFields>();
+    role.register(ctx);
+    ctx.write('createdContent', { ...created, content: '重写前草稿DRAFT' });
+    ctx.write('cleanedContent', { content: '重写后清洗稿CLEAN', rewritten: true, flaggedPhrases: ['首先'], aiScore: 0.4, cleanedAt: clock() });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.ok(ctx.get('qualityReport'), '评审应正常产出');
+    assert.ok(prompt.includes('重写后清洗稿CLEAN'), '评审 prompt 必须嵌入清洗稿（将发布文本）');
+    assert.ok(!prompt.includes('重写前草稿DRAFT'), '评审 prompt 不得再嵌入重写前草稿');
+  });
+});

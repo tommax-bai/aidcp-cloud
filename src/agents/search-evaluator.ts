@@ -92,11 +92,24 @@ export class SearchEvaluator extends BaseRole {
     }
 
     if (result.verdict === 'search') {
+      // 域内校验：关键词必须来自本次提示词给定的候选集；编造词绝不进入真实搜索。
+      // 命中时回写候选集里的原词（大小写/空白以候选集为准），下游搜索与归因都用原词。
+      const canonical = available.find(
+        (k) => k.toLowerCase() === result.keyword.trim().toLowerCase(),
+      );
+      if (!canonical) {
+        this.emit('search.skipped', {
+          currentPageType: payload.currentPageType,
+          reason: 'keyword_not_in_candidates',
+          ts: Date.now(),
+        });
+        return;
+      }
       this.emit('search.approved', {
-        keyword: result.keyword,
+        keyword: canonical,
         reason: result.reason,
         // 如实标注来源：概念池 candidate → new_concept；seed_keywords → random_from_interests。
-        source: this.attributeSource(result.keyword, candidates, seedKeywords),
+        source: this.attributeSource(canonical, candidates, seedKeywords),
         ts: Date.now(),
       });
     } else {
@@ -140,7 +153,7 @@ export class SearchEvaluator extends BaseRole {
     const key = keyword.toLowerCase();
     if (candidates.some((c) => c.toLowerCase() === key)) return 'new_concept';
     if (seedKeywords.some((s) => s.toLowerCase() === key)) return 'random_from_interests';
-    // LLM 偶发返回未在候选集中的词：仍如实归为兴趣派生，不谎报为概念池。
+    // 入参已经过候选集成员校验（available ⊆ seed ∪ candidates），此分支正常不可达；保守归为兴趣派生。
     return 'random_from_interests';
   }
 

@@ -621,12 +621,11 @@ export function buildGatekeeperPrompt(assembled: AssembledContent): string {
 // ─── ContentCleaner（去 AI 味重写） ──────────────────────────────────────────────
 
 /**
- * 去 AI 味重写 prompt（change publish-prompt-preview）。
- * 抽自 server.ts 注入 PostProcessor 的 `rewrite` 内联 prompt，**逐字不变**——使线上真用的 prompt
- * 与后台只读预览**同一份来源**（防漂移），并让「正文去 AI 味改写」角色的 prompt 在查看器可见。
- * 注：末尾「口吾」为原文既有笔误（应为「口吻」），此处**保持逐字一致以确保线上行为零变化**；
- * 如需订正另开 change 改 prompt 行为。
+ * 去 AI 味重写 prompt（change publish-prompt-preview 抽出同源；change llm-role-review-remediation 修订）。
+ * 线上真用的 prompt 与后台只读预览**同一份来源**（防漂移）。
+ * 输出约束是红线：重写产物会**逐字**成为发布正文，后续无任何环节能剥离前言/解释，
+ * 故 MUST 显式要求只输出正文本身（模型带一句「好的，以下是重写后的内容：」就会原样发出去）。
  */
 export function buildDeAiRewritePrompt(content: string, flagged: string[]): string {
-  return `请重写以下内容，去除AI味过重的表达（${flagged.join('、')}），保持原意和自然口吾：\n\n${content}`;
+  return `请重写以下内容，去除AI味过重的表达（${flagged.join('、')}），保持原意和自然口吻。\n只输出重写后的正文本身——不要任何前言、解释、标题或格式包裹，输出的第一个字就是正文的第一个字。\n\n${content}`;
 }

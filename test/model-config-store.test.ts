@@ -25,7 +25,7 @@ function fakeModelPool(seed?: { text_model: string | null; text_provider?: strin
   };
 }
 
-test('缺行 → 回退代码默认（qwen-turbo / wan2.7-image-pro）', async () => {
+test('缺行 → 回退代码默认（qwen3.7-plus / wan2.7-image-pro；qwen-turbo 2026-07-13 下架不再作兜底）', async () => {
   const store = new ModelConfigStore({ pool: fakeModelPool() as unknown as pg.Pool });
   await store.init();
   assert.deepEqual(store.getCached(), MODEL_CONFIG_DEFAULTS);

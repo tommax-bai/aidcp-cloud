@@ -110,16 +110,26 @@ export class ContentEvaluator extends BaseRole {
     }
 
     if (result.verdict === 'valuable') {
-      const card = candidates[result.index] ?? candidates[0];
-      this.emit('content.valuable', {
-        index: card.index,
-        noteId: card.noteId,
-        title: card.title,
-        reason: result.reason,
-        confidence: result.confidence,
-        sourcePageType: pageType,
-        ts: Date.now(),
-      });
+      // 域内校验：LLM 回的序号必须落在本屏候选内；越界按 skip 如实处理，
+      // 绝不静默换成别的卡片（否则会打开一篇从未被评估过的笔记）。
+      const card = candidates[result.index];
+      if (!card) {
+        this.emit('content.no_valuable', {
+          pageType,
+          reason: 'index_out_of_range',
+          ts: Date.now(),
+        });
+      } else {
+        this.emit('content.valuable', {
+          index: card.index,
+          noteId: card.noteId,
+          title: card.title,
+          reason: result.reason,
+          confidence: result.confidence,
+          sourcePageType: pageType,
+          ts: Date.now(),
+        });
+      }
     } else {
       this.emit('content.no_valuable', {
         pageType,
@@ -202,10 +212,11 @@ ${cardList}
     const o = obj as Record<string, unknown>;
 
     if (o.verdict === 'valuable') {
-      const index = typeof o.index === 'number' ? o.index : 0;
+      // index 必须是非负整数；缺失/非法即判解析失败，不得默认 0（默认 0 = 静默选第一张卡）。
+      if (typeof o.index !== 'number' || !Number.isInteger(o.index) || o.index < 0) return null;
       const reason = typeof o.reason === 'string' ? o.reason : 'valuable';
       const confidence = typeof o.confidence === 'number' ? o.confidence : 0.7;
-      return { verdict: 'valuable', index, reason, confidence };
+      return { verdict: 'valuable', index: o.index, reason, confidence };
     } else if (o.verdict === 'skip') {
       const reason = typeof o.reason === 'string' ? o.reason : 'no_match';
       return { verdict: 'skip', reason, confidence: 0 };

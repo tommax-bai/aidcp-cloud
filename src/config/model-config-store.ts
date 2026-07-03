@@ -12,9 +12,14 @@ import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
 
 const { Pool } = pg;
 
-/** 缺行 / PG 不可用时的回退默认（与 qwen.ts / wanxiang-client.ts 构造默认一致）。 */
+/**
+ * 缺行 / PG 不可用时的回退默认。
+ * textModel 必须指向现役在售模型：qwen-turbo 百炼 2026-07-13 下架，兜底指向已下架模型 = 兜底即坏
+ * （change llm-role-review-remediation）。qwen.ts 构造默认仍为 qwen-turbo，仅存于无解析器注入的单测路径。
+ * imageModel 与 wanxiang-client.ts 构造默认一致。
+ */
 export const MODEL_CONFIG_DEFAULTS: ModelConfigValue = {
-  textModel: 'qwen-turbo',
+  textModel: 'qwen3.7-plus',
   // 全局文本厂商默认 dashscope（零回归基准）。change model-config-volcengine-provider。
   textProvider: 'dashscope',
   imageModel: 'wan2.7-image-pro',
