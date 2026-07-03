@@ -4,8 +4,10 @@
  * change account-persona-config：把原全局单份 soul.yaml 做成「按账号可配 + 热加载」。
  * 落库 + 内存镜像；派发 / 发布时按当前账号解析人设 —— PUT 后无需重启即生效。
  *
- * 安全不变量（复刻 RoleConfigStore）：
- * - 绝不 brick：某账号缺行 / 为空 / 解析失败，解析器回落打包 soul.yaml（永不抛）。
+ * 安全不变量：
+ * - 系统不存在默认/兜底人设（change persona-driven-content-pipeline）：某账号缺行 / 为空 / 解析失败，
+ *   解析器返回明确的「无人设」信号（null，永不抛），由调用方以 no_persona 诚实拒绝——绝不静默回落
+ *   任何默认人设（红线：不静默假成功）。
  * - 写库成功才刷内存镜像（避免「镜像已变、库未变」不一致）。
  *
  * 建表幂等（CREATE TABLE IF NOT EXISTS），与 migrations/0011_persona_config.sql 同源。
@@ -104,7 +106,7 @@ export class PersonaStore {
 
   /**
    * 同步取某账号的人设文本（解析器每次派发用，读内存镜像，不打 PG）。
-   * 缺行 / 空文本一律返回 null（回落由解析器处理）；永不抛。
+   * 缺行 / 空文本一律返回 null（= 无人设，由入口闸诚实拒绝）；永不抛。
    */
   getForAccount(accountId: string): string | null {
     const v = this.cache.get(accountId);
@@ -163,7 +165,10 @@ export class PersonaStore {
     return result;
   }
 
-  /** 清除某账号的人设覆盖（删行 → 回落打包默认）。写库成功才删镜像。 */
+  /**
+   * 清除某账号的人设（删行 → 该账号变为「未绑人设」，浏览/发布/评论入口将诚实拒绝其运行）。
+   * 写库成功才删镜像。注：面板 PUT 已不允许清空（人设必填），此方法仅供运维/测试直用。
+   */
   async clear(accountId: string): Promise<void> {
     await this.pool.query(`DELETE FROM persona_config WHERE account_id = $1`, [accountId]);
     this.cache.delete(accountId);
@@ -174,37 +179,44 @@ export class PersonaStore {
   }
 }
 
-/** 按账号解析人设（派发 / 发布的热路径取值口）。 */
-export type PersonaResolver = (accountId?: string) => Soul;
+/**
+ * 按账号解析人设（派发 / 发布的热路径取值口）。
+ * 返回 null = 明确「无人设」信号（change persona-driven-content-pipeline）：调用方 MUST 以 no_persona
+ * 诚实拒绝，MUST NOT 以任何默认/替代人设继续运行。
+ */
+export type PersonaResolver = (accountId?: string) => Soul | null;
 
 export interface PersonaResolverDeps {
-  /** 人设存储（缺失 = 全程回落打包默认，不 brick）。 */
+  /** 人设存储（缺失 = 所有账号解析为「无人设」，fail-closed 诚实拒绝，绝不偷用默认人设）。 */
   store?: Pick<PersonaStore, 'getForAccount'>;
-  /** 打包默认 soul（启动 fail-fast 已验证可解析，恒定可用的最终回落）。 */
-  fallbackSoul: Soul;
   logger?: Pick<Console, 'warn'>;
 }
 
 /**
- * 造一个按账号解析人设的取值口（纯函数式：每次调用读镜像 → 解析 → 回落）。
- * 回落链：命中镜像且可解析 → 用之；否则（无行 / 空 / 解析失败）回落打包默认。永不抛。
+ * 造一个按账号解析人设的取值口（纯函数式：每次调用读镜像 → 解析）。
+ * 命中镜像且可解析 → 用之；否则（无行 / 空 / 解析失败）返回 null（明确「无人设」信号）。
+ * 永不抛、永不返回默认人设——系统不存在默认/兜底人设，无人设由调用方以 no_persona 诚实拒绝。
  */
 export function createPersonaResolver(deps: PersonaResolverDeps): PersonaResolver {
   const logger = deps.logger ?? console;
-  return (accountId = '__unbound__'): Soul => {
+  return (accountId = '__unbound__'): Soul | null => {
     const text = deps.store?.getForAccount(accountId) ?? null;
-    if (!text) return deps.fallbackSoul;
+    if (!text) return null;
     try {
       return loadSoulFromYaml(text);
     } catch (err) {
-      // 写入门已挡非法人设，此处为防御性兜底（理论上不达）：记 warn 并回落，绝不抛、绝不 brick。
-      logger.warn(`[persona] 账号 ${accountId} 人设解析失败，回落打包默认: ${(err as Error).message}`);
-      return deps.fallbackSoul;
+      // 写入门已挡非法人设，此处为防御性兜底（理论上不达）：记 warn 并按「无人设」处理，
+      // 绝不抛、绝不静默替换成任何默认人设（红线：不静默假成功）。
+      logger.warn(`[persona] 账号 ${accountId} 人设解析失败，按「无人设」处理（no_persona）: ${(err as Error).message}`);
+      return null;
     }
   };
 }
 
-/** 读打包 soul.yaml 原文（面板编辑「回落」账号时的起点模板）；进程内缓存一份。 */
+/**
+ * 读打包 soul.yaml 原文——仅作面板编辑器的「起点模板」与 prompt 预览的示例人设，
+ * 绝非运行时兜底（change persona-driven-content-pipeline：系统不存在默认/兜底人设）。进程内缓存一份。
+ */
 let cachedDefaultPersonaText: string | null = null;
 export function getDefaultPersonaText(): string {
   if (cachedDefaultPersonaText === null) {

@@ -117,7 +117,7 @@ export interface RolePromptProviderOptions {
   hasPersona?: (accountId: string) => boolean;
 }
 
-const FALLBACK_NOTE = '该账号未配人设，预览用默认人设；实时数据为示例占位（线上调用时由系统填入真实值）。';
+const FALLBACK_NOTE = '该账号未绑定人设（运行会被诚实拒绝，no_persona）；此预览按示例人设渲染、仅供查看；实时数据为示例占位（线上调用时由系统填入真实值）。';
 
 /**
  * @param getBrowseRoles 取已注册的浏览角色实例（经 RoleDispatcher.getRoles() 借读）。
@@ -185,8 +185,9 @@ export function createRolePromptProvider(
       }
       // 选定账号口径：切预览账号 → 同步渲染 → finally 还原（由 withAccount 保证，含渲染抛错路径）。
       const view = opts.withAccount(accountId, () => render(roleId));
-      // 诚实回落标注：default 账号本就用默认人设、不算回落；其余账号无人设行才标 personaFallback。
-      const fallback = accountId !== 'default' && !!opts.hasPersona && !opts.hasPersona(accountId);
+      // 诚实标注（persona-driven-content-pipeline：default 账号已删、不再特判）：无人设行即标 personaFallback
+      // ——该账号运行会被诚实拒绝，预览仅按示例人设渲染供查看。
+      const fallback = !!opts.hasPersona && !opts.hasPersona(accountId);
       return {
         ...view,
         accountId,

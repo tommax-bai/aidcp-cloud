@@ -625,9 +625,9 @@ async function main(): Promise<void> {
   await accountState.init();
 
   // ── 账号人设（change account-persona-config，stream F，迁移 0011）─────────────
-  // 须在 accounts 表建好之后（persona_config FK 到 accounts）。打包 soul.yaml 为永不 brick 的最终回落。
-  // PG 不可用 / init 失败 → 全程回落打包默认，不影响浏览 / 发布。
-  const fallbackSoul = loadSoul();
+  // 须在 accounts 表建好之后（persona_config FK 到 accounts）。
+  // persona-driven-content-pipeline：系统不存在默认/兜底人设——PG 不可用 / init 失败时人设镜像为空，
+  // 所有账号按「未绑人设」fail-closed 诚实拒绝（isPersonaBound=false），绝不静默套打包 soul.yaml 开跑。
   const personaStore = new PersonaStore({
     host: readEnvString('PGHOST'),
     port: readEnvPort('PGPORT'),
@@ -640,13 +640,22 @@ async function main(): Promise<void> {
     console.log('[aidcp-cloud] 账号人设存储已就绪（persona_config，按账号热加载）');
   } catch (err) {
     console.warn(
-      '[aidcp-cloud] 人设存储初始化失败（全程回落打包 soul.yaml，不 brick）:',
+      '[aidcp-cloud] 人设存储初始化失败 → 所有账号视为未绑人设、入口闸诚实拒绝运行（fail-closed，绝不回落默认人设）:',
       (err as Error).message,
     );
   }
-  // 按账号解析人设的取值口（派发 / 发布热路径用；永不抛、缺则回落打包默认）。
-  const resolvePersona = createPersonaResolver({ store: personaStore, fallbackSoul, logger: console });
-  const getSoul = (accountId?: string): Soul => resolvePersona(accountId);
+  // 按账号解析人设的取值口（派发 / 发布热路径用；永不抛）。persona-driven-content-pipeline：
+  // 无人设/解析失败 → resolvePersona 返回 null（明确「无人设」信号）；浏览/发布/评论入口闸
+  // （isPersonaBound）已先行诚实拒绝，getSoul 再遇 null 即抛 no_persona（防御性，如会话中途被解绑），
+  // 绝不静默套用任何默认/替代人设（红线：不静默假成功）。
+  const resolvePersona = createPersonaResolver({ store: personaStore, logger: console });
+  const getSoul = (accountId?: string): Soul => {
+    const soul = resolvePersona(accountId);
+    if (!soul) {
+      throw new Error(`no_persona: 账号 ${accountId ?? '(未指定)'} 未绑定人设，拒绝以默认人设运行`);
+    }
+    return soul;
+  };
   // 人设面板外观（后台按账号编辑 + soul 校验 + 写非乐观回真态）。
   // auto-start-on-persona-bind：后台真绑定人设成功 → 唤醒该账号在线、被人设闸短路的节点就地开跑（无需重连）。
   // runtimes / personaSetupAlerted 为后向声明，onBound 闭包仅在请求期（PUT 人设）才调用、装配早已完成（同 onPublishEnd 模式）。
@@ -1117,7 +1126,8 @@ async function main(): Promise<void> {
 
   // 每个连接握手时由 buildDispatcher 造一束 RoleDispatcher：私有总线 / 该连接真实账号 controller / 定向下发。
   // 人设以取值口注入（account-persona-config）：派发时按当前账号热加载，PUT 后无需重启。
-  const buildDispatcher = (ctx: DispatcherBuildContext): RoleDispatcher => {
+  // opts.getSoul 仅供预览实例注入示例人设（见 previewDispatcher）；运行时连接一律用严格 getSoul。
+  const buildDispatcher = (ctx: DispatcherBuildContext, opts?: { getSoul?: (accountId?: string) => Soul }): RoleDispatcher => {
     // 通知联系人名册（notification-contact-registry）：订阅该连接私有总线的 notification.items.arrived
     // （评论/@/点赞/收藏/关注发送者），按该连接真实账号追加进事件流水。每连接握手 buildDispatcher 调一次 →
     // 一连接订阅一次（避免 setup/restart 重复订阅重复记录）。记录失败只吞 + 准确日志：绝不冒充飞书失败、
@@ -1135,7 +1145,7 @@ async function main(): Promise<void> {
       });
     }
     return new RoleDispatcher({
-      getSoul,
+      getSoul: opts?.getSoul ?? getSoul,
       llm,
       // 私有事件通道（连接间互不串味）；其上事件经 tee 汇入全局观测总线供风控记账 / 看板消费。
       eventBus: ctx.bus,
@@ -1235,13 +1245,21 @@ async function main(): Promise<void> {
 
   // 角色 prompt 只读预览（role-prompt-visibility）：用一个仅供预览的 RoleDispatcher 渲染真实 prompt
   // （独立私有总线、从不启动会话 / 从不下发指令；多租户下不再有单一全局 dispatcher 可借）。
-  const previewDispatcher = buildDispatcher({
-    bus: new EventBus(),
-    // retire-default-account：预览不写任何状态；用一次性内存 controller + 保留预览标识，绝不用 default。
-    controller: new RiskController({ accountId: '__preview__' }),
-    accountId: '__preview__',
-    edgeId: undefined,
-  });
+  // persona-driven-content-pipeline：预览专用示例人设（打包 soul.yaml）——仅供后台只读预览渲染占位，
+  // 页面对未绑人设账号已诚实标注（personaFallback）；运行时 getSoul 无此回落（无人设即拒），
+  // 绝不以示例人设生成/发布任何内容。
+  const previewSampleSoul = loadSoul();
+  const previewGetSoul = (accountId?: string): Soul => resolvePersona(accountId) ?? previewSampleSoul;
+  const previewDispatcher = buildDispatcher(
+    {
+      bus: new EventBus(),
+      // retire-default-account：预览不写任何状态；用一次性内存 controller + 保留预览标识，绝不用 default。
+      controller: new RiskController({ accountId: '__preview__' }),
+      accountId: '__preview__',
+      edgeId: undefined,
+    },
+    { getSoul: previewGetSoul },
+  );
   previewDispatcher.setup();
 
   // 注册发布编排器的生产段角色（A 阶段2 细拆：6→11，下游 Gatekeeper/Executor 不变）。

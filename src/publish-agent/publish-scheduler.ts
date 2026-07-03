@@ -110,8 +110,10 @@ export class PublishScheduler {
   }
 
   /**
-   * 解析目标账号人设（getSoul 取值口优先 → 兼容快照）。取值口内部已回落打包默认 soul；
-   * 两者皆缺则抛（构造契约违背，诚实失败不静默）。
+   * 解析目标账号人设（getSoul 取值口优先 → 兼容快照）。persona-driven-content-pipeline：取值口
+   * 无默认人设回落——未绑人设账号已被 isPersonaBound 入口闸先行拒绝（needs_persona_setup）；
+   * 若此后仍解析不到（如闸后被解绑），getSoul 抛 no_persona 诚实失败，绝不以默认人设生成。
+   * soul / getSoul 两者皆缺则抛（构造契约违背，诚实失败不静默）。
    */
   private resolveSoul(accountId?: string): Soul {
     if (this.d.getSoul) return this.d.getSoul(accountId);

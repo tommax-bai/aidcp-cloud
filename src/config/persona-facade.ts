@@ -5,7 +5,10 @@
  * 与 server 装配解耦。复刻 role-config-facade 形态。
  *
  * 红线：写前用 soul 加载器校验，非法人设诚实拒绝（{ok:false, reason:'persona_invalid'}）——
- *       不落库、不刷镜像、绝不假成功。空文本 = 清除覆盖（回落打包默认）。
+ *       不落库、不刷镜像、绝不假成功。
+ * persona-driven-content-pipeline：人设必填——空文本诚实拒绝（persona_required），不再有
+ *       「清空回落默认」语义（系统不存在默认/兜底人设）；未绑账号在视图中如实标 none（未绑定），
+ *       绝不把打包 soul.yaml 冒充为其生效人设。
  */
 
 import { loadSoulFromYaml } from '../soul/index.js';
@@ -22,9 +25,9 @@ import type {
 export interface PersonaFacadeDeps {
   store: PersonaStore;
   /**
-   * 真绑定（非清除、非非法）成功后触发（change auto-start-on-persona-bind）：唤醒该账号在线、因未绑人设
+   * 真绑定（非空、非非法）成功后触发（change auto-start-on-persona-bind）：唤醒该账号在线、因未绑人设
    * 被启动闸短路的节点就地开跑，无需重连。fire-and-forget（调用方不 await、不阻塞 PUT 回真态）；
-   * 触发时 store 内存镜像已刷新（isPersonaBound 已为 true）。清除覆盖 / 非法人设均不触发。
+   * 触发时 store 内存镜像已刷新（isPersonaBound 已为 true）。空文本 / 非法人设均被拒、不触发。
    */
   onBound?: (accountId: string) => void;
 }
@@ -42,17 +45,17 @@ export function createPersonaPanel(deps: PersonaFacadeDeps): PanelPersonaConfig 
 
   const buildRow = (accountId: string, label: string | null): PersonaConfigRowView => {
     const row = deps.store.getRow(accountId);
-    const overrideText = row?.persona.trim() ? row.persona : null;
-    const effectiveText = overrideText ?? getDefaultPersonaText();
-    const { name, role } = identityOf(effectiveText);
+    const personaText = row?.persona.trim() ? row.persona : null;
+    // 未绑人设：source='none' + 空身份摘要（诚实——该账号运行会被拒），绝不用打包默认冒充生效人设。
+    const { name, role } = personaText ? identityOf(personaText) : { name: '', role: '' };
     return {
       accountId,
       label,
-      source: overrideText ? 'override' : 'fallback',
+      source: personaText ? 'override' : 'none',
       identityName: name,
       identityRole: role,
-      updatedAt: overrideText ? row?.updatedAt ?? null : null,
-      updatedBy: overrideText ? row?.updatedBy ?? null : null,
+      updatedAt: personaText ? row?.updatedAt ?? null : null,
+      updatedBy: personaText ? row?.updatedBy ?? null : null,
     };
   };
 
@@ -68,15 +71,16 @@ export function createPersonaPanel(deps: PersonaFacadeDeps): PanelPersonaConfig 
       const acct = accounts.find((a) => a.accountId === accountId);
       if (!acct) return null;
       const row = deps.store.getRow(accountId);
-      const overrideText = row?.persona.trim() ? row.persona : null;
+      const personaText = row?.persona.trim() ? row.persona : null;
       return {
         accountId,
         label: acct.label,
-        source: overrideText ? 'override' : 'fallback',
-        // 编辑起点：覆盖→该账号文本；回落→打包默认 soul.yaml 原文（便于在默认基础上改）。
-        persona: overrideText ?? getDefaultPersonaText(),
-        updatedAt: overrideText ? row?.updatedAt ?? null : null,
-        updatedBy: overrideText ? row?.updatedBy ?? null : null,
+        source: personaText ? 'override' : 'none',
+        // 编辑器内容：已绑→该账号文本；未绑→打包 soul.yaml 原文仅作「起点模板」（非运行时兜底——
+        // 未绑账号运行会被拒；运营须在模板上改出真实人设后显式保存）。
+        persona: personaText ?? getDefaultPersonaText(),
+        updatedAt: personaText ? row?.updatedAt ?? null : null,
+        updatedBy: personaText ? row?.updatedBy ?? null : null,
       };
     },
     setPersona: async (accountId, persona, updatedBy): Promise<PersonaSetResult> => {
@@ -84,10 +88,10 @@ export function createPersonaPanel(deps: PersonaFacadeDeps): PanelPersonaConfig 
       if (!(await deps.store.accountExists(accountId))) {
         return { ok: false, reason: 'unknown_account' };
       }
+      // 人设必填（persona-driven-content-pipeline）：空文本诚实拒绝，不清行、不落库——
+      // 不再有「清空回落默认」语义；前端被绕过也在此挡住。
       if (!(persona ?? '').trim()) {
-        // 空文本 = 清除覆盖 → 回落打包默认（对齐 role-config 空值=回落语义）。
-        await deps.store.clear(accountId);
-        return { ok: true, view: await buildCatalog() };
+        return { ok: false, reason: 'persona_required' };
       }
       // 写前校验：非法人设诚实拒绝、不落库、不刷镜像、不假成功（红线）。
       try {

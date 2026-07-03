@@ -185,8 +185,8 @@ test('给定 accountId（有人设）→ withAccount 包裹渲染 + 回显 accou
   assert.equal(current, 'default'); // 渲染后已还原
 });
 
-test('给定 accountId 但该账号无人设 → personaFallback:true + 诚实回落 note', () => {
-  const roles = [fakeRole('content_evaluator', () => 'RENDERED-DEFAULT-PERSONA')];
+test('给定 accountId 但该账号无人设 → personaFallback:true + 诚实标注（运行会被拒，仅示例渲染）', () => {
+  const roles = [fakeRole('content_evaluator', () => 'RENDERED-SAMPLE-PERSONA')];
   const p = createRolePromptProvider(() => roles, {
     withAccount: (_a, fn) => fn(),
     hasPersona: () => false,
@@ -195,18 +195,18 @@ test('给定 accountId 但该账号无人设 → personaFallback:true + 诚实�
   assert.equal(v.available, true);
   assert.equal(v.accountId, 'acc-no-persona');
   assert.equal(v.personaFallback, true);
-  assert.match(v.note, /未配人设|默认人设/); // 绝不冒充该账号人设
+  assert.match(v.note, /未绑定人设|示例人设/); // 绝不冒充该账号人设
 });
 
-test("accountId='default' → 不标 personaFallback（默认账号本就用默认人设）", () => {
+test("persona-driven-content-pipeline：accountId='default' 不再豁免——无人设行同样标 personaFallback", () => {
   const roles = [fakeRole('content_evaluator', () => 'R')];
   const p = createRolePromptProvider(() => roles, {
     withAccount: (_a, fn) => fn(),
-    hasPersona: () => false, // 即便判无人设，default 也豁免
+    hasPersona: () => false, // default 账号已删，无任何账号例外
   });
   const v = p.get('browse:content_evaluator', 'default');
   assert.equal(v.accountId, 'default');
-  assert.equal(v.personaFallback, undefined);
+  assert.equal(v.personaFallback, true);
 });
 
 test('不传 accountId → 行为不变（不附 accountId / personaFallback，不走账号口径）', () => {

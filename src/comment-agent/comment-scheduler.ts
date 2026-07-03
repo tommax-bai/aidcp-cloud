@@ -120,7 +120,15 @@ export class CommentScheduler {
     const edgeId = conn.edgeId;
     const bus = conn.bus;
     // 异步跑任务，命令立即回执（任务含人审轮询，不可同步等）。groupChatCode 已解析一次，带进任务用于注入（gate 同源）。
-    void this.runTask(accountId, bus, edgeId, groupChatCode).finally(() => this.running.delete(accountId));
+    // catch：runTask 内部已兜任务期异常；此处兜「任务启动前」的防御性抛（如 gate 后人设被解绑 → getSoul 抛
+    // no_persona，persona-driven-content-pipeline）——诚实记日志、不让未处理拒绝炸进程，绝不假成功。
+    void this.runTask(accountId, bus, edgeId, groupChatCode)
+      .catch((err) =>
+        (this.deps.logger ?? console).warn(
+          `[comment-scheduler] 任务未能启动/异常中止 account=${accountId}：${(err as Error).message}`,
+        ),
+      )
+      .finally(() => this.running.delete(accountId));
 
     return {
       ok: true,

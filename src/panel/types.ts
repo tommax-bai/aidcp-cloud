@@ -499,18 +499,21 @@ export interface PanelRolePromptPreview {
 // ── 账号人设配置（change account-persona-config，stream F）──────────────────────
 // reserved-order append 链：C（categories）→ D（quotas）→ F（本块 persona）→ B（nickname）。
 
-/** 人设来源：override=该账号自定义人设 / fallback=回落打包默认 soul.yaml。 */
-export type PersonaSource = 'override' | 'fallback';
+/**
+ * 人设来源（persona-driven-content-pipeline：系统不存在默认/兜底人设）：
+ * override=该账号已绑定人设 / none=未绑定（该账号浏览/发布/评论会被诚实拒绝）。
+ */
+export type PersonaSource = 'override' | 'none';
 
 /** 单账号人设目录行（GET /api/persona 列表形状）。列出所有账号（含无覆盖者）。 */
 export interface PersonaConfigRowView {
   accountId: string;
   label: string | null;
   source: PersonaSource;
-  /** 当前生效人设的身份摘要（解析结果），列表一眼识别「这是谁」。 */
+  /** 当前生效人设的身份摘要（解析结果），列表一眼识别「这是谁」；未绑定（none）为空串。 */
   identityName: string;
   identityRole: string;
-  /** 仅 override 行带审计；fallback 行为 null。 */
+  /** 仅 override 行带审计；none 行为 null。 */
   updatedAt: string | null;
   updatedBy: string | null;
 }
@@ -524,7 +527,7 @@ export interface PersonaDetailView {
   accountId: string;
   label: string | null;
   source: PersonaSource;
-  /** 编辑器内容：override→该账号人设文本；fallback→打包默认 soul.yaml 原文（编辑起点）。 */
+  /** 编辑器内容：override→该账号人设文本；none→打包 soul.yaml 原文仅作「起点模板」（非运行时兜底）。 */
   persona: string;
   updatedAt: string | null;
   updatedBy: string | null;
@@ -532,14 +535,17 @@ export interface PersonaDetailView {
 
 export type PersonaSetResult =
   | { ok: true; view: PersonaConfigCatalogView }
-  | { ok: false; reason: 'unknown_account' | 'persona_invalid' };
+  | { ok: false; reason: 'unknown_account' | 'persona_invalid' | 'persona_required' };
 
 export interface PanelPersonaConfig {
-  /** 账号 + 各自人设生效值/来源/审计（列出所有账号，含回落者）。 */
+  /** 账号 + 各自人设生效值/来源/审计（列出所有账号，含未绑定者）。 */
   getCatalog(): Promise<PersonaConfigCatalogView>;
   /** 单账号人设详情（编辑回显）；未知账号返回 null。 */
   getDetail(accountId: string): Promise<PersonaDetailView | null>;
-  /** 写某账号人设。空文本=清除覆盖（回落）；非法人设以 {ok:false,reason:'persona_invalid'} 诚实拒绝绝不落库。写后回真态目录。 */
+  /**
+   * 写某账号人设。人设必填（persona-driven-content-pipeline）：空文本以 persona_required 诚实拒绝
+   * （不再有「清空回落」语义）；非法人设以 persona_invalid 诚实拒绝绝不落库。写后回真态目录。
+   */
   setPersona(accountId: string, persona: string, updatedBy: string): Promise<PersonaSetResult>;
 }
 

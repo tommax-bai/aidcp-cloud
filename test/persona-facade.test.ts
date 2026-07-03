@@ -39,13 +39,13 @@ function fakeStore(opts: { accounts?: PersonaAccount[]; override?: Record<string
   return { store, rows };
 }
 
-test('getCatalog：无覆盖账号 source=fallback + 身份摘要取打包默认（小林），无审计', async () => {
+test('getCatalog：未绑人设账号 source=none + 空身份摘要（绝不用打包默认冒充生效人设），无审计', async () => {
   const { store } = fakeStore();
   const panel = createPersonaPanel({ store });
   const view = await panel.getCatalog();
   const row = view.accounts.find((a) => a.accountId === 'default')!;
-  assert.equal(row.source, 'fallback');
-  assert.equal(row.identityName, '小林'); // 来自打包 soul.yaml
+  assert.equal(row.source, 'none');
+  assert.equal(row.identityName, ''); // persona-driven-content-pipeline：无人设即空，不再显示小林
   assert.equal(row.updatedAt, null);
   assert.equal(row.updatedBy, null);
 });
@@ -59,15 +59,15 @@ test('getCatalog：有覆盖账号 source=override + 身份摘要取覆盖 + 带
   assert.equal(row.updatedBy, 'seed');
 });
 
-test('getDetail：覆盖→返回该账号文本；回落→返回打包默认原文（含小林）；未知账号→null', async () => {
+test('getDetail：已绑→返回该账号文本；未绑→source=none + 打包原文仅作编辑起点模板；未知账号→null', async () => {
   const { store } = fakeStore({ accounts: [{ accountId: 'default', label: 'D' }, { accountId: 'acc2', label: null }], override: { default: soulYaml('账号A') } });
   const panel = createPersonaPanel({ store });
   const overridden = await panel.getDetail('default');
   assert.ok(overridden!.persona.includes('账号A'));
   assert.equal(overridden!.source, 'override');
-  const fallback = await panel.getDetail('acc2');
-  assert.equal(fallback!.source, 'fallback');
-  assert.ok(fallback!.persona.includes('小林')); // 打包默认原文作为编辑起点
+  const unbound = await panel.getDetail('acc2');
+  assert.equal(unbound!.source, 'none');
+  assert.ok(unbound!.persona.includes('小林')); // 打包原文仅作编辑起点模板（非运行时兜底）
   assert.equal(await panel.getDetail('ghost'), null);
 });
 
@@ -98,24 +98,22 @@ test('setPersona：合法人设 → 落库 + 回真态目录（source=override�
   assert.equal(row.identityName, '新人设');
 });
 
-test('setPersona：空文本 → 清除覆盖（回落），回真态 source=fallback', async () => {
+test('setPersona：空文本 → persona_required 诚实拒绝，不清行、不落库（人设必填，无「清空回落」）', async () => {
   const { store, rows } = fakeStore({ override: { default: soulYaml('旧') } });
   const panel = createPersonaPanel({ store });
   const r = await panel.setPersona('default', '   ', 'a');
-  assert.equal(r.ok, true);
-  assert.equal(rows.has('default'), false);
-  const row = (r as { ok: true; view: { accounts: Array<{ accountId: string; source: string }> } }).view.accounts.find((a) => a.accountId === 'default')!;
-  assert.equal(row.source, 'fallback');
+  assert.deepEqual(r, { ok: false, reason: 'persona_required' });
+  assert.ok(rows.get('default')?.persona.includes('旧'), '既有绑定不被空提交清掉');
 });
 
-test('setPersona：仅真绑定成功触发 onBound（清除 / 非法 / 未知账号均不触发）— auto-start-on-persona-bind', async () => {
+test('setPersona：仅真绑定成功触发 onBound（空文本 / 非法 / 未知账号均不触发）— auto-start-on-persona-bind', async () => {
   const { store } = fakeStore({ accounts: [{ accountId: 'acc1', label: null }], override: { acc1: soulYaml('旧') } });
   const bound: string[] = [];
   const panel = createPersonaPanel({ store, onBound: (id) => bound.push(id) });
   await panel.setPersona('acc1', soulYaml('新'), 'a'); // 真绑定 → 触发
   assert.deepEqual(bound, ['acc1'], '真绑定成功 → onBound(accountId)');
   await panel.setPersona('acc1', 'identity: {}\ninterests: nope', 'a'); // 非法 → 不触发
-  await panel.setPersona('acc1', '   ', 'a'); // 清除（空文本回落）→ 不触发
+  await panel.setPersona('acc1', '   ', 'a'); // 空文本（persona_required 拒绝）→ 不触发
   await panel.setPersona('ghost', soulYaml('x'), 'a'); // 未知账号 → 不触发
-  assert.deepEqual(bound, ['acc1'], '清除/非法/未知账号均不触发 onBound（绝不误唤醒）');
+  assert.deepEqual(bound, ['acc1'], '空文本/非法/未知账号均不触发 onBound（绝不误唤醒）');
 });

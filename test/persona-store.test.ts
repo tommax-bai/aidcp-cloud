@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import { PersonaStore, createPersonaResolver } from '../src/config/persona-store.js';
-import { loadSoulFromYaml } from '../src/soul/index.js';
 
 const soulYaml = (name: string) => `
 identity:
@@ -113,36 +112,30 @@ test('listAccounts 列全部账号（含无人设覆盖者）; accountExists 区
   assert.equal(await store.accountExists('ghost'), false);
 });
 
-// ── createPersonaResolver：回落链 + 永不抛（task 5.3）──────────────────────────
+// ── createPersonaResolver：无人设信号 + 永不抛（persona-driven-content-pipeline：系统不存在默认/兜底人设）──
 test('resolver：命中镜像且可解析 → 用之', () => {
-  const fallback = loadSoulFromYaml(soulYaml('FALLBACK'));
   const resolve = createPersonaResolver({
     store: { getForAccount: () => soulYaml('OVERRIDE') },
-    fallbackSoul: fallback,
   });
-  assert.equal(resolve('default').identity.name, 'OVERRIDE');
+  assert.equal(resolve('default')?.identity.name, 'OVERRIDE');
 });
 
-test('resolver：无行 → 回落打包默认', () => {
-  const fallback = loadSoulFromYaml(soulYaml('FALLBACK'));
-  const resolve = createPersonaResolver({ store: { getForAccount: () => null }, fallbackSoul: fallback });
-  assert.equal(resolve('default').identity.name, 'FALLBACK');
+test('resolver：无行 → null（明确「无人设」信号，绝不返回任何默认人设）', () => {
+  const resolve = createPersonaResolver({ store: { getForAccount: () => null } });
+  assert.equal(resolve('default'), null);
 });
 
-test('resolver：解析失败 → 记 warn 回落，永不抛', () => {
-  const fallback = loadSoulFromYaml(soulYaml('FALLBACK'));
+test('resolver：解析失败 → 记 warn + null（按无人设处理），永不抛、绝不静默替换默认人设', () => {
   const warns: string[] = [];
   const resolve = createPersonaResolver({
     store: { getForAccount: () => 'this: is: not: valid: soul' },
-    fallbackSoul: fallback,
     logger: { warn: (m: string) => warns.push(m) },
   });
-  assert.equal(resolve('bad').identity.name, 'FALLBACK');
+  assert.equal(resolve('bad'), null);
   assert.equal(warns.length, 1);
 });
 
-test('resolver：无 store（PG 不可用）→ 全程回落打包默认', () => {
-  const fallback = loadSoulFromYaml(soulYaml('FALLBACK'));
-  const resolve = createPersonaResolver({ fallbackSoul: fallback });
-  assert.equal(resolve().identity.name, 'FALLBACK');
+test('resolver：无 store（PG 不可用）→ null（fail-closed，所有账号视为未绑人设）', () => {
+  const resolve = createPersonaResolver({});
+  assert.equal(resolve(), null);
 });

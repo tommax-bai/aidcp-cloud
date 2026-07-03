@@ -1,7 +1,8 @@
 /**
- * Soul 配置加载器：读取 soul.yaml → 校验 → 强类型 Soul。
+ * Soul 配置加载器：读取 soul 文本 → 校验 → 强类型 Soul。
  *
- * - 默认从本模块同目录的 soul.yaml 读取（随源码分发）；
+ * - 默认从本模块同目录的 soul.yaml 读取（随源码分发）。注意（persona-driven-content-pipeline）：
+ *   soul.yaml 已不是任何账号的默认/兜底人设——仅作面板编辑起点模板与 prompt 预览示例人设；
  * - 解析用自带的极简 YAML 解析器（yaml.ts），不引第三方依赖；
  * - 严格校验必填字段与类型，缺失/类型错直接抛错（fail-fast，避免运行期人设残缺）。
  */
