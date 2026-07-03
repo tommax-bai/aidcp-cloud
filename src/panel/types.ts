@@ -11,6 +11,12 @@ import type { ConceptStore, BotChatStore } from '../cache/index.js';
 import type { CuratedContentType, CuratedPanelListResult, CuratedFacets } from '../cache/index.js';
 import type { PublishLogStore, EditDraftPatch, EditDraftResult } from '../publish-agent/publish-log-store.js';
 import type { SetGroupLabelResult, SetGroupChatInfoResult } from '../account-store.js';
+import type {
+  ContentScheduleCatalogRow,
+  AccountContentSchedulePatch,
+  SetContentGlobalResult,
+  SetAccountContentScheduleResult,
+} from '../config/content-schedule-store.js';
 import type { EventBus } from '../event-bus/index.js';
 import type { PanelUser } from './auth.js';
 import type { PanelStoreReader } from './panel-store.js';
@@ -19,6 +25,29 @@ import type { LlmUsageQuery, LlmUsagePayload } from '../metrics/token-usage-stor
 import type { NotificationContact, NotificationContactManual } from '../cache/notification-contact-store.js';
 import type { ThinkingMode, ThinkingModeApi } from '../config/role-catalog.js';
 import type { AlertStore } from '../alerts/index.js';
+
+/** 全局「内容可自动时段」视图（GET /api/content-schedule/global）。overridden = 库有行。 */
+export interface ContentScheduleGlobalView {
+  contentActiveMask: string | null;
+  overridden: boolean;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+/**
+ * 内容排期面板外观（change content-schedule-auto-publish，Phase 1）。未注入则 /api/content-schedule* 返回 503。
+ * 经 ContentScheduleStore 单写：非法整块拒、写前校验账号存在（防幽灵行）、退役拒、写后回读真态；绝不 raw UPDATE / 乐观。
+ */
+export interface PanelContentSchedule {
+  getGlobalView(): ContentScheduleGlobalView;
+  listCatalog(): Promise<ContentScheduleCatalogRow[]>;
+  setGlobal(contentActiveMask: string | null, updatedBy: string): Promise<SetContentGlobalResult>;
+  setAccount(
+    accountId: string,
+    patch: AccountContentSchedulePatch,
+    updatedBy: string,
+  ): Promise<SetAccountContentScheduleResult>;
+}
 
 export interface PanelDeps {
   publishLogStore: PublishLogStore;
@@ -86,6 +115,11 @@ export interface PanelDeps {
      */
     setGroupChatInfo?(accountId: string, groupChatInfo: string | null): Promise<SetGroupChatInfoResult>;
   };
+  /**
+   * 内容排期（change content-schedule-auto-publish，Phase 1 只发帖）。未注入则 /api/content-schedule* 返回 503。
+   * 全局内容格 + 每账号排期读写；写非乐观回真态、非法整块拒、写前校验账号存在防幽灵行；不碰风控单写 / 浏览掩码 / 协议。
+   */
+  contentSchedule?: PanelContentSchedule;
   /**
    * 模型与凭据配置（change console-model-provider-config）。未注入则 /api/config/* 返回 503。
    * 明文密钥绝不经此外观回传；setCredential 主密钥缺失以 {ok:false} 诚实可辨，绝不假成功。

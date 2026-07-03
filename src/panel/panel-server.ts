@@ -19,6 +19,7 @@ import type { PanelDeps, PanelConfig, PanelHandle, SessionLimitPatchInput, Resum
 import { startPanelWs, type PanelWsHandle } from './panel-ws.js';
 import type { PublishApprovalPayload } from '../feishu/index.js';
 import type { EditDraftPatch } from '../publish-agent/publish-log-store.js';
+import type { AccountContentSchedulePatch } from '../config/content-schedule-store.js';
 import type { RiskSignalKind, RiskQuotaLevel } from '../risk/index.js';
 import { RISK_ACTIONS } from '../risk/index.js';
 import { isKnownRole } from '../config/role-catalog.js';
@@ -837,6 +838,101 @@ function createRequestHandler(
     // ── 单场会话上限配置（全局单例，change restore-auto-resume-and-global-safety-config）──────
     // append 链（在 D/quotas 之后、F/persona 之前）。全局写非乐观回真态；非法数字整块拒
     // （invalid_value→400），绝不部分落库；只写 session_config_global，不碰风控状态单写路径。
+    // ── 内容排期（change content-schedule-auto-publish，Phase 1 只发帖）──────
+    // 全局内容格 + 每账号排期。写非乐观回真态、非法整块拒、写前校验账号存在防幽灵行；未注入 503。
+    // 顺序：/global 精确匹配须在 /:accountId 前缀前（否则 'global' 被当账号 id）。
+    if (method === 'GET' && url === '/api/content-schedule/global') {
+      if (!deps.contentSchedule) {
+        sendJson(res, 503, { error: 'content_schedule_unavailable' });
+        return;
+      }
+      sendJson(res, 200, deps.contentSchedule.getGlobalView());
+      return;
+    }
+    if (method === 'PUT' && url === '/api/content-schedule/global') {
+      if (!deps.contentSchedule) {
+        sendJson(res, 503, { error: 'content_schedule_unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { contentActiveMask } = (body ?? {}) as { contentActiveMask?: unknown };
+      // string | null | 缺省；168 长 / 字符校验在 store（非法整块拒）。
+      if (contentActiveMask !== undefined && contentActiveMask !== null && typeof contentActiveMask !== 'string') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
+        return;
+      }
+      const mask = typeof contentActiveMask === 'string' ? contentActiveMask : null;
+      const result = await deps.contentSchedule.setGlobal(mask, verified.payload.sub);
+      if (!result.ok) {
+        sendJson(res, 400, { error: result.reason }); // invalid_value / no_valid_fields
+        return;
+      }
+      sendJson(res, 200, deps.contentSchedule.getGlobalView());
+      return;
+    }
+    if (method === 'GET' && url === '/api/content-schedule') {
+      if (!deps.contentSchedule) {
+        sendJson(res, 503, { error: 'content_schedule_unavailable' });
+        return;
+      }
+      sendJson(res, 200, { rows: await deps.contentSchedule.listCatalog() });
+      return;
+    }
+    if (method === 'PUT' && url.startsWith('/api/content-schedule/')) {
+      if (!deps.contentSchedule) {
+        sendJson(res, 503, { error: 'content_schedule_unavailable' });
+        return;
+      }
+      const accountId = decodeURIComponent(url.slice('/api/content-schedule/'.length));
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const raw = (body ?? {}) as Record<string, unknown>;
+      const patch: AccountContentSchedulePatch = {};
+      for (const k of ['autoEnabled', 'postEnabled'] as const) {
+        const v = raw[k];
+        if (v === undefined) continue;
+        if (typeof v !== 'boolean') {
+          sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
+          return;
+        }
+        patch[k] = v;
+      }
+      if (raw.postDailyCap !== undefined) {
+        if (typeof raw.postDailyCap !== 'number') {
+          sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
+          return;
+        }
+        patch.postDailyCap = raw.postDailyCap;
+      }
+      if ('contentActiveMask' in raw) {
+        const m = raw.contentActiveMask;
+        if (m !== null && typeof m !== 'string') {
+          sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
+          return;
+        }
+        patch.contentActiveMask = m as string | null;
+      }
+      const result = await deps.contentSchedule.setAccount(accountId, patch, verified.payload.sub);
+      if (!result.ok) {
+        if (result.reason === 'account_not_found') sendJson(res, 404, { error: 'account_not_found' });
+        else sendJson(res, 400, { error: 'bad_request', reason: result.reason }); // retired_account / invalid_value / no_valid_fields
+        return;
+      }
+      sendJson(res, 200, result.row);
+      return;
+    }
+
     if (method === 'GET' && url === '/api/session-limits') {
       if (!deps.sessionLimits) {
         sendJson(res, 503, { error: 'session_limits_unavailable' });
