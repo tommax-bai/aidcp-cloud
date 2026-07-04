@@ -15,7 +15,7 @@
  */
 
 import { promises as fs } from 'node:fs';
-import { join } from 'node:path';
+import { posix } from 'node:path';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { CommandRouter } from './commands.js';
 import { FeishuMessenger } from './messenger.js';
@@ -116,7 +116,7 @@ export function parseApprovalActionValue(value: unknown):
 }
 
 export function getApprovalSignalPath(requestId: string): string {
-  return join(APPROVAL_SIGNAL_DIR, `aidcp-publish-approve-${requestId}.json`);
+  return posix.join(APPROVAL_SIGNAL_DIR, `aidcp-publish-approve-${requestId}.json`);
 }
 
 export interface ApprovalWriteResult {
