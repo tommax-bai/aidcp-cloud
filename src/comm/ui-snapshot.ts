@@ -37,7 +37,7 @@ export interface UiSnapshotDeps {
   pendingApprovalForAccount?: (accountId: string) => Promise<{ id: number; title: string | null } | null>;
   /** 读授权信号：null=未决（真候审）；approved=true=已批在途；false=已拒（hello 不回放）。 */
   readApproval?: (requestId: string) => Promise<{ approved: boolean } | null>;
-  todayUsageForAccount?: (accountId: string) => Promise<UiDailyUsagePayload | null>;
+  todayUsageForAccount?: (accountId: string, edgeId?: string) => Promise<UiDailyUsagePayload | null>;
   clock?: () => number;
   idGen?: () => string;
   logger?: Pick<Console, 'log' | 'warn'>;
@@ -91,7 +91,7 @@ export class UiSnapshotService {
       }
 
       const dailyUsage = this.deps.todayUsageForAccount
-        ? await this.deps.todayUsageForAccount(accountId).catch(() => null)
+        ? await this.deps.todayUsageForAccount(accountId, edgeId).catch(() => null)
         : null;
       if (dailyUsage) payload.dailyUsage = dailyUsage;
 

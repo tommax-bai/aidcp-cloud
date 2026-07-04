@@ -87,6 +87,20 @@ export function pgRiskConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Requi
   };
 }
 
+function emptyActionQuota(): ActionQuota {
+  return Object.fromEntries(RISK_ACTIONS.map((action) => [action, 0])) as ActionQuota;
+}
+
+function rowsToActionQuota(rows: { action: string; total: number }[]): ActionQuota {
+  const totals = emptyActionQuota();
+  for (const row of rows) {
+    if ((RISK_ACTIONS as readonly string[]).includes(row.action)) {
+      totals[row.action as RiskAction] = row.total;
+    }
+  }
+  return totals;
+}
+
 export class PgRiskStore implements RiskStore, InteractionStore {
   private readonly pool: pg.Pool;
 
@@ -125,13 +139,18 @@ export class PgRiskStore implements RiskStore, InteractionStore {
        GROUP BY action`,
       [accountId],
     );
-    const totals = Object.fromEntries(RISK_ACTIONS.map((action) => [action, 0])) as ActionQuota;
-    for (const row of rows) {
-      if ((RISK_ACTIONS as readonly string[]).includes(row.action)) {
-        totals[row.action as RiskAction] = row.total;
-      }
-    }
-    return totals;
+    return rowsToActionQuota(rows);
+  }
+
+  async totalsForAccountSince(accountId: string, since: number): Promise<ActionQuota> {
+    const { rows } = await this.pool.query<{ action: string; total: number }>(
+      `SELECT action, COALESCE(SUM(count), 0)::int AS total
+       FROM risk_counters
+       WHERE account_id = $1 AND occurred_at >= to_timestamp($2 / 1000.0)
+       GROUP BY action`,
+      [accountId, since],
+    );
+    return rowsToActionQuota(rows);
   }
 
   async appendCounter(accountId: string, action: RiskAction, occurredAt: number): Promise<void> {

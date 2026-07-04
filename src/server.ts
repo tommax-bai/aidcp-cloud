@@ -66,7 +66,12 @@ import {
 } from './feishu/index.js';
 import { CommandSequencer } from './publish-agent/command-sequencer.js';
 import { UiSnapshotService } from './comm/ui-snapshot.js';
-import type { UiDailyUsageAction, UiDailyUsageCounts, UiDailyUsagePayload } from './comm/protocol.js';
+import type {
+  UiDailyUsageAction,
+  UiDailyUsageCounts,
+  UiDailyUsagePayload,
+  UiDailyUsageWindowStatus,
+} from './comm/protocol.js';
 import { PublishOrchestrator, PublishScheduler, PublishDispatcher } from './publish-agent/index.js';
 import { WanxiangClient } from './publish-agent/wanxiang-client.js';
 import { SeedreamClient } from './publish-agent/seedream-client.js';
@@ -161,6 +166,44 @@ function pickDailyUsageCounts(source: Partial<Record<string, number>>): UiDailyU
     counts[action] = Number.isFinite(value) ? Math.max(0, Math.floor(Number(value))) : 0;
   }
   return counts;
+}
+
+function pickSessionUsageCounts(source: object | null | undefined): UiDailyUsageCounts {
+  const values = (source ?? {}) as Partial<Record<string, number>>;
+  const mappings: Array<[UiDailyUsageAction, string]> = [
+    ['like', 'likes'],
+    ['collect', 'collects'],
+    ['comment', 'comments'],
+    ['follow', 'follows'],
+  ];
+  const counts: UiDailyUsageCounts = {};
+  for (const [action, key] of mappings) {
+    const value = values[key];
+    if (Number.isFinite(value)) counts[action] = Math.max(0, Math.floor(Number(value)));
+  }
+  return counts;
+}
+
+function quotaSaturation(totals: UiDailyUsageCounts, quotas: UiDailyUsageCounts): UiDailyUsageAction[] {
+  return UI_DAILY_USAGE_ACTIONS.filter((action) => {
+    const cap = quotas[action];
+    return typeof cap === 'number' && (totals[action] ?? 0) >= cap;
+  });
+}
+
+function makeUsageWindow(
+  totals: UiDailyUsageCounts,
+  quotas?: UiDailyUsageCounts,
+  options?: { active?: boolean; startedAt?: number; skipSaturation?: boolean },
+): UiDailyUsageWindowStatus {
+  const window: UiDailyUsageWindowStatus = { totals };
+  if (options && Object.prototype.hasOwnProperty.call(options, 'active')) window.active = options.active;
+  if (typeof options?.startedAt === 'number' && Number.isFinite(options.startedAt)) window.startedAt = options.startedAt;
+  if (quotas && Object.keys(quotas).length > 0) {
+    window.quotas = quotas;
+    window.saturated = options?.skipSaturation ? [] : quotaSaturation(totals, quotas);
+  }
+  return window;
 }
 
 /**
@@ -1137,24 +1180,60 @@ async function main(): Promise<void> {
   // 由人审授权信号到达触发（通过即切）。唯一碰边缘、唯一让位浏览的阶段：让位 → 从落库草稿重建发布输入 →
   // 驱动指令序列 → 回写 → 解除让位。AC-PUB：下发前复核授权信号 approved===true，未授权绝不下发。
   // 陪伴界面快照层实例化（edge-companion-ui 8.1）：hello 回填 + 发布审批状态实时推送。
-  const buildTodayUsageForAccount = async (accountId: string): Promise<UiDailyUsagePayload> => {
-    const [riskTotals, publishCount] = await Promise.all([
+  const buildTodayUsageForAccount = async (accountId: string, edgeId?: string): Promise<UiDailyUsagePayload> => {
+    const asOf = Date.now();
+    const minuteSince = asOf - 60_000;
+    const hourSince = asOf - 60 * 60_000;
+    const [
+      minuteRiskTotals,
+      hourRiskTotals,
+      dayRiskTotals,
+      minutePublishCount,
+      hourPublishCount,
+      dayPublishCount,
+    ] = await Promise.all([
+      riskStore.totalsForAccountSince(accountId, minuteSince),
+      riskStore.totalsForAccountSince(accountId, hourSince),
       riskStore.todayTotalsForAccount(accountId),
+      publishLogStore.countPublishedSinceForAccount(accountId, minuteSince),
+      publishLogStore.countPublishedSinceForAccount(accountId, hourSince),
       publishLogStore.countPublishedTodayForAccount(accountId),
     ]);
-    const totals = pickDailyUsageCounts(riskTotals);
-    totals.publish = publishCount;
-    const payload: UiDailyUsagePayload = { asOf: Date.now(), totals };
+
+    const minuteTotals = pickDailyUsageCounts(minuteRiskTotals);
+    minuteTotals.publish = minutePublishCount;
+    const hourTotals = pickDailyUsageCounts(hourRiskTotals);
+    hourTotals.publish = hourPublishCount;
+    const dayTotals = pickDailyUsageCounts(dayRiskTotals);
+    dayTotals.publish = dayPublishCount;
+
+    const sessionUsage = runtimes?.sessionUsageForAccount(accountId, edgeId) ?? null;
+    const sessionTotals = pickSessionUsageCounts(sessionUsage?.totals ?? {});
+    const sessionQuotas = pickSessionUsageCounts(sessionUsage?.quotas ?? sessionConfigStore.sessionBudget());
+    const windows: NonNullable<UiDailyUsagePayload['windows']> = {
+      session: makeUsageWindow(sessionTotals, sessionQuotas, {
+        active: sessionUsage?.active === true,
+        startedAt: sessionUsage?.startedAt,
+        skipSaturation: sessionUsage?.active !== true,
+      }),
+      minute: makeUsageWindow(minuteTotals),
+      hour: makeUsageWindow(hourTotals),
+      day: makeUsageWindow(dayTotals),
+    };
+
+    const payload: UiDailyUsagePayload = { asOf, totals: dayTotals, windows };
     try {
       const controller = await riskRegistry.getController(accountId);
-      const quotas = pickDailyUsageCounts(controller.effectiveQuotas().day);
+      const effective = controller.effectiveQuotas();
+      const minuteQuotas = pickDailyUsageCounts(effective.minute);
+      const hourQuotas = pickDailyUsageCounts(effective.hour);
+      const dayQuotas = pickDailyUsageCounts(effective.day);
       payload.quotaLevel = controller.getState().quotaLevel;
-      payload.quotas = quotas;
-      payload.saturated = UI_DAILY_USAGE_ACTIONS.filter((action) => {
-        const used = totals[action] ?? 0;
-        const cap = quotas[action];
-        return typeof cap === 'number' && used >= cap;
-      });
+      windows.minute = makeUsageWindow(minuteTotals, minuteQuotas);
+      windows.hour = makeUsageWindow(hourTotals, hourQuotas);
+      windows.day = makeUsageWindow(dayTotals, dayQuotas);
+      payload.quotas = dayQuotas;
+      payload.saturated = windows.day.saturated ?? [];
     } catch (err) {
       console.warn(
         `[aidcp-cloud] ui daily usage quota read failed account=${accountId}: ${err instanceof Error ? err.message : String(err)}`,

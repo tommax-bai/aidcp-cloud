@@ -223,6 +223,13 @@ export interface VisibleCard {
   noteId?: string;
 }
 
+export interface SessionUsageSnapshot {
+  active: boolean;
+  startedAt?: number;
+  totals: SessionInteractionBudget;
+  quotas: SessionInteractionBudget;
+}
+
 export interface NoteData {
   noteId: string;
   title: string;
@@ -493,6 +500,34 @@ export class RoleDispatcher {
   /** 会话是否活跃 */
   get active(): boolean {
     return this.sessionActive;
+  }
+
+  /** Current single-session budget usage for read-only UI snapshots. */
+  sessionUsageSnapshot(): SessionUsageSnapshot {
+    const empty: SessionInteractionBudget = {
+      likes: 0,
+      collects: 0,
+      follows: 0,
+      searches: 0,
+      comments: 0,
+      comment_likes: 0,
+    };
+    if (!this.sessionActive) {
+      return { active: false, totals: empty, quotas: this.freshBudget() };
+    }
+    return {
+      active: true,
+      startedAt: this.sessionStartedAt,
+      totals: {
+        likes: Math.max(0, this.budgetInit.likes - this.budget.likes),
+        collects: Math.max(0, this.budgetInit.collects - this.budget.collects),
+        follows: Math.max(0, this.budgetInit.follows - this.budget.follows),
+        searches: Math.max(0, this.budgetInit.searches - this.budget.searches),
+        comments: Math.max(0, this.budgetInit.comments - this.budget.comments),
+        comment_likes: Math.max(0, this.budgetInit.comment_likes - this.budget.comment_likes),
+      },
+      quotas: { ...this.budgetInit },
+    };
   }
 
   /** 注册所有角色并启动事件订阅 */

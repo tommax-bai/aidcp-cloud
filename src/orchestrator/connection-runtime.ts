@@ -12,7 +12,7 @@
  * 编排上下文不再有「单一全局总线做跨连接协调」：连接之间结构上互不可见，新连接不重置他连接会话、不串号。
  */
 import { EventBus } from '../event-bus/index.js';
-import type { RoleDispatcher } from './role-dispatcher.js';
+import type { RoleDispatcher, SessionUsageSnapshot } from './role-dispatcher.js';
 import type { EdgeSession } from '../comm/ws-server.js';
 import type { RiskController } from '../risk/index.js';
 
@@ -236,6 +236,18 @@ export class ConnectionRuntimeRegistry {
       if (rt.accountId !== accountId) continue;
       if (rt.edgeId) return { bus: rt.bus, edgeId: rt.edgeId };
       fallback ??= { bus: rt.bus, edgeId: rt.edgeId };
+    }
+    return fallback;
+  }
+
+  /** Read-only current single-session quota usage for an online account/edge. */
+  sessionUsageForAccount(accountId: string, edgeId?: string): SessionUsageSnapshot | null {
+    let fallback: SessionUsageSnapshot | null = null;
+    for (const rt of this.bySession.values()) {
+      if (rt.accountId !== accountId) continue;
+      const snapshot = rt.dispatcher.sessionUsageSnapshot();
+      if (edgeId && rt.edgeId === edgeId) return snapshot;
+      if (!fallback || snapshot.active) fallback = snapshot;
     }
     return fallback;
   }

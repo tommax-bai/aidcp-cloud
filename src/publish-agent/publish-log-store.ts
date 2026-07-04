@@ -465,6 +465,15 @@ export class PublishLogStore {
     return Number(rows[0]?.n ?? '0');
   }
 
+  async countPublishedSinceForAccount(accountId: string, since: number): Promise<number> {
+    const { rows } = await this.pool.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM publish_log
+        WHERE account_id = $1 AND status = 'published' AND published_at >= to_timestamp($2 / 1000.0)`,
+      [accountId, since],
+    );
+    return Number(rows[0]?.n ?? '0');
+  }
+
   /**
    * 陪伴界面数据回填（change edge-companion-ui 8.1）：某账号最近一次**成功发布**的摘要。
    * at = published_at 的 epoch 毫秒（该列在草稿 INSERT 时落、状态翻转不更新，为草稿入库时间近似——

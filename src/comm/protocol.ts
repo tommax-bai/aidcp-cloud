@@ -165,14 +165,27 @@ export interface WelcomePayload {
  */
 export type UiDailyUsageAction = 'view' | 'like' | 'collect' | 'comment' | 'follow' | 'publish';
 export type UiDailyUsageCounts = Partial<Record<UiDailyUsageAction, number>>;
+export type UiDailyUsageWindow = 'session' | 'minute' | 'hour' | 'day';
+
+export interface UiDailyUsageWindowStatus {
+  active?: boolean;
+  startedAt?: number;
+  totals: UiDailyUsageCounts;
+  quotas?: UiDailyUsageCounts;
+  saturated?: UiDailyUsageAction[];
+}
 
 export interface UiDailyUsagePayload {
   /** Epoch ms when cloud assembled the account daily usage projection. */
   asOf: number;
   quotaLevel?: 'conservative' | 'normal' | 'aggressive';
+  /** Backward-compatible alias for the day window totals. */
   totals: UiDailyUsageCounts;
+  /** Backward-compatible alias for the day window quotas. */
   quotas?: UiDailyUsageCounts;
+  /** Backward-compatible alias for the day window saturated actions. */
   saturated?: UiDailyUsageAction[];
+  windows?: Partial<Record<UiDailyUsageWindow, UiDailyUsageWindowStatus>>;
 }
 
 export interface UiSnapshotPayload {
