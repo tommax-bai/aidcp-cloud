@@ -1,13 +1,13 @@
 /**
  * 操作兜底 floor 配置存储（pacing_floor_config 表，PostgreSQL）。
  *
- * change pacing-floor-config-min-interval（cloud 业务层）：把四类操作（action/scroll/card_gap/
- * detail_dwell）的最小间隔兜底区间 `{minMs,maxMs}` 做成后台可编辑 + 热加载。落库 + 内存镜像；
+ * change pacing-floor-config-min-interval（cloud 业务层）：把各类浏览节奏兜底区间 `{minMs,maxMs}`
+ * 做成后台可编辑 + 热加载。落库 + 内存镜像；
  * 实现 `PacingFloorProvider` 供 `buildPacingSnapshot` 每次现读（PUT 后下次握手即新值、无需重启）。
  *
  * 安全不变量（复刻 QuotaConfigStore）：
  * - 绝不 brick：某 op 缺行 / 字段非法 → 该 op 回落 `BUILTIN_FLOOR[op]`（非零内置默认）；`floorFor` 永不抛。
- * - 绝不零延迟：`floorFor` 在**读出口** clamp 到 `[OP_MIN_FLOOR[op], CAP_MS]`（权威夹点）——即便有人
+ * - 绝不零延迟：`floorFor` 在**读出口** clamp 到 `[OP_MIN_FLOOR[op], 类别上限]`（权威夹点）——即便有人
  *   绕过面板 psql 直插 0/负数/超界，离开云端进程前已被夹成非零合法。配置只能抬高延迟、抬不穿非零下限。
  * - 半填竞态防护：`reload()` **构建新 Map → 原子替换 `this.cache` 引用**（非原地 clear+fill），
  *   `floorFor` 只读引用快照——握手绝不读到半填 Map 导致某 op 误缺回落。
@@ -128,7 +128,7 @@ export class PacingConfigStore implements PacingFloorProvider {
   /**
    * PacingFloorProvider 实现：某 op 生效兜底区间（现读、零 IO）。
    * 库内合法值优先；缺行/非法 → 回落 `BUILTIN_FLOOR[op]`。**并在此读出口 clamp**（权威夹点）到
-   * `[OP_MIN_FLOOR[op], CAP_MS]`——离开云端进程前恒非零合法。永不抛。
+   * `[OP_MIN_FLOOR[op], 类别上限]`——离开云端进程前恒非零合法。永不抛。
    */
   floorFor(op: PacingOp): PacingFloorPayload {
     const builtin = BUILTIN_FLOOR[op];
@@ -150,7 +150,7 @@ export class PacingConfigStore implements PacingFloorProvider {
 
   /**
    * 写库 + 刷内存镜像（热加载）。先写库成功、再刷镜像（写库失败镜像不变）。
-   * 调用方（facade）应已校验区间合法（非负整数、min≤max、min 展宽、≤CAP）。
+   * 调用方（facade）应已校验区间合法（非负整数、min≤max、min 展宽、≤类别上限）。
    */
   async set(op: PacingOp, patch: PacingConfigPatch, updatedBy: string): Promise<PacingConfigRow> {
     const { rows } = await this.pool.query<PacingDbRow>(

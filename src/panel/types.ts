@@ -635,8 +635,8 @@ export interface PanelQuotaConfig {
 }
 
 // ── 操作兜底 floor 配置（change pacing-floor-config-min-interval）─────────────────
-// 四类操作（action/scroll/card_gap/detail_dwell）的最小间隔兜底区间 {minMs,maxMs}，全局一套。
-// 生效值 = 读出口 clamp 后（含非零防呆下限护栏、CAP 封顶）；overridden=false 显示的是内置默认（当前真生效）。
+// 各类浏览节奏兜底区间 {minMs,maxMs}，全局一套。
+// 生效值 = 读出口 clamp 后（含非零防呆下限护栏、类别上限封顶）；overridden=false 显示的是内置默认（当前真生效）。
 
 /** 单 op 生效兜底区间（已含读出口夹逼护栏）+ 来源/审计（GET /api/pacing 形状）。 */
 export interface PacingConfigRowView {
@@ -653,7 +653,7 @@ export interface PacingConfigCatalogView {
   pacing: PacingConfigRowView[];
 }
 
-/** PUT /api/pacing 入参：两值须成对给（校验在 facade：非负整数、min≤max、max≥min×1.5、≤CAP）。 */
+/** PUT /api/pacing 入参：两值须成对给（校验在 facade：非负整数、min≤max、max≥min×1.5、≤类别上限）。 */
 export interface PacingConfigPatchInput {
   operation: PacingOp;
   minMs: number;
@@ -665,7 +665,7 @@ export type PacingConfigSetResult =
   | { ok: false; reason: 'unknown_operation' | 'invalid_value' | 'no_valid_fields' };
 
 export interface PanelPacingConfig {
-  /** 四类操作生效兜底区间 + 审计（库缺行以内置默认合成、含 clamp 护栏回显）。 */
+  /** 各类操作生效兜底区间 + 审计（库缺行以内置默认合成、含 clamp 护栏回显）。 */
   getCatalog(): PacingConfigCatalogView;
   /** 写某 op 兜底区间。校验不过整块拒（绝不部分落库 / 假成功）。写后回真态目录。 */
   setPacing(patch: PacingConfigPatchInput, updatedBy: string): Promise<PacingConfigSetResult>;
