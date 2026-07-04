@@ -1146,8 +1146,10 @@ async function main(): Promise<void> {
     const recordId = Number(m[1]);
     void publishLogStore
       .loadForDispatch(recordId)
-      .then((draft) => {
-        if (draft) uiSnapshotService.pushPublishState(draft.accountId, recordId, 'rejected', draft.title);
+      .then(async (draft) => {
+        if (!draft || draft.status !== 'pending_approval') return;
+        await publishLogStore.rejectPendingApproval(recordId);
+        uiSnapshotService.pushPublishState(draft.accountId, recordId, 'rejected', draft.title);
       })
       .catch(() => {});
   };

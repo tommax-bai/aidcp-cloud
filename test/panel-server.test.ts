@@ -321,6 +321,41 @@ test('HTTP 写路由：审批返 written 非 published；命令返真实结果�
   }
 });
 
+test('HTTP 审批驳回：publish-<id> 首写成功后落库为 needs_review', async () => {
+  const rejectedIds: number[] = [];
+  const rejectDeps = {
+    ...(deps as object),
+    publishLogStore: {
+      rejectPendingApproval: async (id: number) => {
+        rejectedIds.push(id);
+        return true;
+      },
+    },
+    writeApprovalSignal: async () => ({ written: true }),
+  } as unknown as PanelDeps;
+  const h = await startPanelApi(rejectDeps, makeConfig());
+  assert.equal(h.started, true);
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = (await login.json()) as { token: string };
+    const res = await fetch(`${base}/api/publish/publish-86/approve`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ approved: false, contentVersion: 0 }),
+    });
+    assert.equal(res.status, 200);
+    assert.equal(((await res.json()) as { written: boolean }).written, true);
+    assert.deepEqual(rejectedIds, [86]);
+  } finally {
+    await h.close();
+  }
+});
+
 test('HTTP 审批：账号离线时拒绝授权且不写审批信号', async () => {
   const signalWrites: Array<{ requestId: string; approved: boolean }> = [];
   const offlineDeps = {

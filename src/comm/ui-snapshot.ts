@@ -15,10 +15,8 @@
  *    核心（重）启动时清发布卡在途态、由 hello 快照重建，故错过的终态不会滞留成陈卡。
  *    推送失败绝不影响发布主链路（全部 try/catch 自吞）。
  *
- * 已知限制（2026-07-03 评审记录，根因在既有审批信号存储设计、本 change 不动）：拒绝决定只落
- * /tmp 信号文件（DB 行永远停在 pending_approval）。若信号文件丢失（ECS 重装/清 tmp），已拒草稿
- * 会在 hello 快照里重新以 pending 出现（仅界面观感；发布安全不受影响——下发闸仍要求 approved===true
- * 的信号在场）。彻底修法 = 把审批决定持久化进 DB，属审批信号子系统的后续 change。
+ * 拒绝决定现在会把 publish_log 从 pending_approval 持久化为 needs_review；hello 快照只回放仍在
+ * pending_approval 的真候审/已批在途。即使 /tmp 信号丢失，已拒草稿也不会重新冒成 pending。
  */
 
 import { makeEnvelope, type Envelope, type UiSnapshotPayload } from './protocol.js';

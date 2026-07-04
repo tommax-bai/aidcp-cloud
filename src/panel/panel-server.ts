@@ -363,6 +363,10 @@ function createRequestHandler(
         }
       }
       const result = await deps.writeApprovalSignal(requestId, approved, approvalPayload);
+      if (!approved && (result.written || result.alreadyDecided === false)) {
+        const m = /^publish-(\d+)$/.exec(requestId);
+        if (m) await deps.publishLogStore.rejectPendingApproval(Number(m[1]));
+      }
       sendJson(res, 200, result); // {written} 或 {alreadyDecided}，绝不 published
       return;
     }

@@ -203,6 +203,15 @@ export class PublishLogStore {
     await this.pool.query('UPDATE publish_log SET status = $2 WHERE id = $1', [id, status]);
   }
 
+  /** 人工驳回：只允许 pending_approval 翻到 needs_review，避免旧卡误伤已发布记录。 */
+  async rejectPendingApproval(id: number): Promise<boolean> {
+    const result = await this.pool.query(
+      `UPDATE publish_log SET status = 'needs_review' WHERE id = $1 AND status = 'pending_approval'`,
+      [id],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
   /**
    * 发布成功后回填平台帖子 id（并置为 published）；可选回写带 xsec_token 的完整详情页分享 URL。
    * postUrl 缺省/为 null 时不覆盖既有值（边缘抓不到 URL 时诚实置空，绝不写假链接）。
@@ -475,7 +484,7 @@ export class PublishLogStore {
 
   /**
    * 陪伴界面数据回填（change edge-companion-ui 8.1）：某账号最新一条待审草稿（发布卡 pending 态）。
-   * 是否真在候审还须结合授权信号判定（已拒草稿 status 仍留 pending_approval，由调用方过滤）。
+   * 已拒草稿会被持久化为 needs_review，因此这里仅返回仍需 hello 回填的待审/已批在途记录。
    */
   async pendingApprovalForAccount(accountId: string): Promise<{ id: number; title: string | null } | null> {
     const { rows } = await this.pool.query<{ id: number; title: string | null }>(
