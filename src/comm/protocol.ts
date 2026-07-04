@@ -114,10 +114,41 @@ export interface HelloPayload {
   remoteAddr?: string;
 }
 
+/**
+ * 每类操作的兜底 floor 语义标识（最小间隔 gating；change pacing-floor-config-min-interval）。
+ * 语义不是"操作后无条件附加固定等待"，而是"两次操作间的最小间隔下限"——边缘记上次操作
+ * 完成时刻，收到下一操作时若距上次已达 floor 则立即执行（不累加、吸收云端往返），否则只补差额。
+ */
+export type PacingOp = 'action' | 'scroll' | 'card_gap' | 'detail_dwell';
+
+/** 单类操作的兜底区间（毫秒）；边缘据此现采样目标、只补差额。值已含云端读出口 clamp 护栏、非零。 */
+export interface PacingFloorPayload {
+  minMs: number;
+  maxMs: number;
+}
+
+/**
+ * 节奏快照（cloud → edge，随 welcome 握手响应下发；change pacing-floor-config-min-interval）。
+ * 承载全局节奏兜底：风控档标量 tempo（边缘乘算）+ 每类操作 floor 默认区间。可选、向后兼容
+ * （旧端忽略）；缺失 / 某字段缺失时边缘逐字段回落内置非零默认，绝不零延迟。与 session.budget
+ * 的 `PacingDefaultsPayload`（已废弃为下发路径的死通道）区分。
+ */
+export interface PacingSnapshotPayload {
+  /** 风控档全局节奏乘子（normal=1.0 / warned=1.3 / restricted=1.6），边缘乘算 */
+  tempo: number;
+  /** 每类操作兜底 floor 默认区间（已含 clamp 护栏、非零）；逐字段可缺、边缘逐项回落内置默认 */
+  opFloorsMs: Partial<Record<PacingOp, PacingFloorPayload>>;
+}
+
 export interface WelcomePayload {
   /** 云端分配的会话 id */
   sessionId: string;
   serverVersion: string;
+  /**
+   * 节奏快照（change pacing-floor-config-min-interval）：tempo + 每类操作兜底 floor 区间。
+   * 可选、向后兼容（旧端忽略）；边缘据此做操作间最小间隔 gating 与详情页停留兜底。
+   */
+  pacing?: PacingSnapshotPayload;
 }
 
 /**

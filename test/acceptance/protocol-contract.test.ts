@@ -17,6 +17,8 @@ import {
   isEnvelope,
   parseEnvelope,
   type MessageType,
+  type WelcomePayload,
+  type PacingSnapshotPayload,
 } from '../../src/comm/protocol.js';
 
 /**
@@ -76,5 +78,30 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
   it('AC-PROTO-05 坏帧解析返回 null（坏 JSON / 缺字段）', () => {
     assert.equal(parseEnvelope('not json'), null);
     assert.equal(parseEnvelope('{"v":2}'), null);
+  });
+
+  it('AC-PROTO-06 welcome.pacing 快照结构化往返：每字段存活（防 payload 静默漂移）', () => {
+    // typecheck 的 Record<MessageType> 与 AC-PROTO-02 计数均抓不到 payload 字段漂移，
+    // 故对 WelcomePayload.pacing 逐字段断言；样例填满全字段、两端逐字一致。
+    const pacing: PacingSnapshotPayload = {
+      tempo: 1.3,
+      opFloorsMs: {
+        action: { minMs: 1500, maxMs: 4000 },
+        scroll: { minMs: 500, maxMs: 1500 },
+        card_gap: { minMs: 3000, maxMs: 7000 },
+        detail_dwell: { minMs: 2500, maxMs: 5000 },
+      },
+    };
+    const welcome: WelcomePayload = { sessionId: 's-1', serverVersion: 'v-test', pacing };
+    const env = makeEnvelope('welcome', 'w-1', 1700000000000, welcome);
+    const back = parseEnvelope(JSON.stringify(env));
+    assert.deepEqual(back, env);
+    const p = (back!.payload as WelcomePayload).pacing;
+    assert.ok(p, 'pacing 应往返存活');
+    assert.equal(p!.tempo, 1.3);
+    assert.deepEqual(p!.opFloorsMs.action, { minMs: 1500, maxMs: 4000 });
+    assert.deepEqual(p!.opFloorsMs.scroll, { minMs: 500, maxMs: 1500 });
+    assert.deepEqual(p!.opFloorsMs.card_gap, { minMs: 3000, maxMs: 7000 });
+    assert.deepEqual(p!.opFloorsMs.detail_dwell, { minMs: 2500, maxMs: 5000 });
   });
 });
