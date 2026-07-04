@@ -98,6 +98,42 @@ describe('CaptchaCoordinator', () => {
     assert.match(headerTitle, /P1/);
   });
 
+  it('detected alert detail includes overlay text, DOM features, and first URL', async () => {
+    const c = makeCoordinator();
+    await c.onDetected(
+      {
+        edgeId: 'edge-1',
+        kind: 'unknown',
+        url: 'https://later.example/explore',
+        overlay: {
+          kind: 'unknown',
+          firstDetectedUrl: 'https://first.example/explore',
+          capturedAt: 123,
+          text: 'content unavailable',
+          dom: {
+            tag: 'div',
+            className: 'global-mask',
+            rect: { x: 0, y: 0, width: 1280, height: 720 },
+            hasIframe: false,
+            hasClose: false,
+            matchReasons: ['large_rect', 'fixed_or_absolute', 'no_close_control'],
+          },
+          candidates: [{ tag: 'div', text: 'content unavailable' }],
+        },
+      },
+      makeSession(),
+      pusher,
+    );
+
+    const detail = (messenger.sent[0].card.elements[0] as { text: { content: string } }).text.content;
+    assert.match(detail, /https:\/\/first\.example\/explore/);
+    assert.match(detail, /https:\/\/later\.example\/explore/);
+    assert.match(detail, /content unavailable/);
+    assert.match(detail, /tag=div/);
+    assert.match(detail, /class=global-mask/);
+    assert.match(detail, /match=large_rect,fixed_or_absolute,no_close_control/);
+  });
+
   it('冷却窗内重复 detected 只发一张卡', async () => {
     const c = makeCoordinator(10 * 60_000);
     await c.onDetected({ edgeId: 'edge-1', kind: 'captcha' }, makeSession(), pusher);

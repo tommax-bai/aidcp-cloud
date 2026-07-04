@@ -414,6 +414,32 @@ export interface RiskRecordResultPayload {
  * 云端据此置风控态(restricted)、停止下发浏览命令、按 (edgeId,account) 去重后通知飞书人工处理。
  * 注意：检测/暂停/恢复全在 edge 本地完成，本消息只是通知，云端从不被边缘动作回查。
  */
+export interface BlockingOverlayDomFeaturePayload {
+  tag: string;
+  id?: string;
+  className?: string;
+  role?: string;
+  ariaModal?: string;
+  selector?: string;
+  text?: string;
+  rect?: { x: number; y: number; width: number; height: number };
+  style?: { position?: string; zIndex?: string; opacity?: string };
+  hasIframe?: boolean;
+  iframeSrcs?: string[];
+  hasClose?: boolean;
+  matchReasons?: string[];
+}
+
+export interface BlockingOverlaySnapshotPayload {
+  kind: 'captcha' | 'unknown';
+  /** URL captured at the first local transition into captcha/unknown for this episode. */
+  firstDetectedUrl?: string;
+  capturedAt: number;
+  text?: string;
+  dom?: BlockingOverlayDomFeaturePayload;
+  candidates: BlockingOverlayDomFeaturePayload[];
+}
+
 export interface CaptchaDetectedPayload {
   /** 边缘节点标识 */
   edgeId?: string;
@@ -421,6 +447,8 @@ export interface CaptchaDetectedPayload {
   kind: 'captcha' | 'unknown';
   /** 触发时页面 URL（best-effort） */
   url?: string;
+  /** 首次阻断现场快照（best-effort）：遮罩文案 + DOM 特征 + 首次检测 URL。 */
+  overlay?: BlockingOverlaySnapshotPayload;
   /** 关联账号（如有） */
   accountId?: string;
   /** 简短说明（观测用） */

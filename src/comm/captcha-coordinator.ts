@@ -16,7 +16,12 @@ import type { FeishuMessenger } from '../feishu/messenger.js';
 import type { AlertData, AlertSeverity } from '../feishu/types.js';
 import type { RiskController } from '../risk/index.js';
 import type { AlertStore } from '../alerts/index.js';
-import type { CaptchaClearedPayload, CaptchaDetectedPayload } from './protocol.js';
+import type {
+  BlockingOverlayDomFeaturePayload,
+  BlockingOverlaySnapshotPayload,
+  CaptchaClearedPayload,
+  CaptchaDetectedPayload,
+} from './protocol.js';
 import type { EdgePusher, EdgeSession } from './ws-server.js';
 
 export interface CaptchaCoordinatorDeps {
@@ -72,7 +77,14 @@ export class CaptchaCoordinator {
     // ② 按 edge 暂停下发（session.end 仍可达）。
     if (edgeId && pusher) pusher.pauseEdge(edgeId);
 
-    this.logger.log('[captcha] detected', { edgeId, accountId, kind: payload.kind, status, url: payload.url });
+    this.logger.log('[captcha] detected', {
+      edgeId,
+      accountId,
+      kind: payload.kind,
+      status,
+      url: payload.url,
+      overlay: summarizeOverlayForLog(payload.overlay),
+    });
 
     // ③ 去重冷却后发飞书告警。
     await this.maybeAlert(payload, session, edgeId, accountId, status);
@@ -122,6 +134,7 @@ export class CaptchaCoordinator {
 
     const severity: AlertSeverity = payload.kind === 'captcha' ? 'P0' : 'P1';
     const title = payload.kind === 'captcha' ? '验证码弹出' : '未知阻断弹窗';
+    const detail = buildCaptchaAlertDetail(payload, session, edgeId, status);
 
     // 告警落库（V1 task 9.5）：与飞书投递解耦——即便无群/发送失败，告警事件仍被记录。
     if (this.deps.alertStore) {
@@ -133,7 +146,7 @@ export class CaptchaCoordinator {
             accountId,
             edgeId,
             title,
-            detail: payload.url ? `页面：${payload.url}` : undefined,
+            detail,
           },
           now,
         );
@@ -154,19 +167,6 @@ export class CaptchaCoordinator {
       return;
     }
 
-    const machine = session.machineLabel ?? edgeId ?? '未知机器';
-    const detail = [
-      `**类别**：${payload.kind === 'captcha' ? '验证码挑战' : '未知阻断弹窗'}`,
-      `**机器**：${machine}`,
-      session.remoteAddr ? `**远程地址**：${session.remoteAddr}` : '',
-      `**Edge**：${edgeId ?? '未知'}`,
-      `**风控态**：已置 ${status}`,
-      payload.url ? `**页面**：${payload.url}` : '',
-      '请远程连到该机器人工处置；处置后边缘会自动恢复浏览。',
-    ]
-      .filter(Boolean)
-      .join('\n');
-
     const alert: AlertData = {
       severity,
       title,
@@ -182,4 +182,75 @@ export class CaptchaCoordinator {
       this.logger.error('[captcha] 飞书告警发送失败:', err instanceof Error ? err.message : String(err));
     }
   }
+}
+
+function buildCaptchaAlertDetail(
+  payload: CaptchaDetectedPayload,
+  session: EdgeSession,
+  edgeId: string | undefined,
+  status: string,
+): string {
+  const machine = session.machineLabel ?? edgeId ?? '未知机器';
+  const firstUrl = payload.overlay?.firstDetectedUrl ?? payload.url;
+  const lines = [
+    `**类别**：${payload.kind === 'captcha' ? '验证码挑战' : '未知阻断弹窗'}`,
+    `**机器**：${machine}`,
+    session.remoteAddr ? `**远程地址**：${session.remoteAddr}` : '',
+    `**Edge**：${edgeId ?? '未知'}`,
+    `**风控态**：已置 ${status}`,
+    firstUrl ? `**首次检测 URL**：${firstUrl}` : '',
+    payload.url && payload.url !== firstUrl ? `**上报时页面**：${payload.url}` : '',
+    ...formatOverlaySnapshotLines(payload.overlay),
+    '请远程连到该机器人工处置；处置后边缘会自动恢复浏览。',
+  ];
+  return lines.filter(Boolean).join('\n');
+}
+
+function formatOverlaySnapshotLines(overlay: BlockingOverlaySnapshotPayload | undefined): string[] {
+  if (!overlay) return [];
+  const lines = [
+    overlay.text ? `**遮罩文案**：${clip(overlay.text, 500)}` : '',
+    overlay.dom ? `**DOM 特征**：${formatDomFeature(overlay.dom)}` : '',
+  ];
+  if (overlay.candidates.length > 1) {
+    lines.push(`**候选遮罩数**：${overlay.candidates.length}`);
+  }
+  return lines.filter(Boolean);
+}
+
+function formatDomFeature(dom: BlockingOverlayDomFeaturePayload): string {
+  const parts = [
+    `tag=${dom.tag}`,
+    dom.id ? `id=${clip(dom.id, 80)}` : '',
+    dom.className ? `class=${clip(dom.className, 160)}` : '',
+    dom.role ? `role=${dom.role}` : '',
+    dom.ariaModal ? `aria-modal=${dom.ariaModal}` : '',
+    dom.selector ? `selector=${clip(dom.selector, 180)}` : '',
+    dom.rect
+      ? `rect=${dom.rect.width}x${dom.rect.height}@${dom.rect.x},${dom.rect.y}`
+      : '',
+    dom.style?.position ? `position=${dom.style.position}` : '',
+    dom.style?.zIndex ? `zIndex=${dom.style.zIndex}` : '',
+    typeof dom.hasClose === 'boolean' ? `hasClose=${dom.hasClose}` : '',
+    typeof dom.hasIframe === 'boolean' ? `hasIframe=${dom.hasIframe}` : '',
+    dom.iframeSrcs && dom.iframeSrcs.length > 0 ? `iframeSrc=${clip(dom.iframeSrcs.join(', '), 180)}` : '',
+    dom.matchReasons && dom.matchReasons.length > 0 ? `match=${dom.matchReasons.join(',')}` : '',
+  ];
+  return parts.filter(Boolean).join('; ');
+}
+
+function summarizeOverlayForLog(overlay: BlockingOverlaySnapshotPayload | undefined): Record<string, unknown> | undefined {
+  if (!overlay) return undefined;
+  return {
+    kind: overlay.kind,
+    firstDetectedUrl: overlay.firstDetectedUrl,
+    text: overlay.text,
+    dom: overlay.dom,
+    candidateCount: overlay.candidates.length,
+  };
+}
+
+function clip(value: string, max: number): string {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  return normalized.length <= max ? normalized : `${normalized.slice(0, max - 3)}...`;
 }
