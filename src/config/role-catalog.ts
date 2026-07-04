@@ -106,6 +106,8 @@ export const ROLE_CATALOG: RoleCatalogItem[] = [
   { roleId: 'browse:comment_like_appraiser', displayName: '评论点赞择选', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false }, // 仅 AIDCP_COMMENT_LIKE=true 时注册（线上已开）
   // D. 点赞 / 收藏
   { roleId: 'browse:interaction_appraiser', displayName: '点赞收藏判定', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
+  // D2. 阅读后写作旁路（不阻塞互动/返回信息流；仅发布链路可用时注册）
+  { roleId: 'browse:write_note_opportunity', displayName: '读后写笔记判定', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
   // E. 自己发评论（点赞收藏后才进入的支线）
   { roleId: 'browse:comment_appraiser', displayName: '是否值得评论判定', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
   { roleId: 'browse:comment_composer', displayName: '评论文案撰写', group: 'browse', category: 'browse_compose', llmKind: 'text', tunableTemperature: true },

@@ -78,6 +78,15 @@ describe('triggerManual referenceNote（洗稿参照）', () => {
     assert.equal(inputs[0].generateInput.referenceNote, undefined);
   });
 
+  it('阅读旁路参照创作可标记 reason=read_reference', async () => {
+    const { scheduler, inputs } = build();
+    const o = await scheduler.triggerManual('acc-test', { referenceNote: ref, reason: 'read_reference' });
+    assert.equal(o.result, 'triggered');
+    assert.equal(o.reason, 'read_reference');
+    assert.equal(inputs.length, 1);
+    assert.equal(inputs[0].generateInput.referenceNote?.sourceId, 'note-42');
+  });
+
   it('未绑人设时参照创作同样被人设闸拒绝（与 /publish 同口径）', async () => {
     const gated = new PublishScheduler({
       conceptStore: { countNewSince: async () => 0, getNewConceptsSince: async () => [] },

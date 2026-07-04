@@ -1358,6 +1358,26 @@ async function main(): Promise<void> {
       // 精选语料库（change curated-admission-eval-roles，Phase 3）：注入则注册两段式准入的模型评估角色
       // （正文 curated_note_evaluator + 评论 curated_comment_evaluator）。缺省（PG 不可用）→ 不注册。
       curatedStore: curatedContentStore,
+      // 阅读后写笔记旁路（change read-to-write-note-lane）：复用现有发布链路的参照创作，不新增发布通道。
+      ...(publishScheduler
+        ? {
+            isWriteNoteBusy: () => publishScheduler?.isBusy() ?? true,
+            triggerWriteNote: async (accountId, referenceNote) => {
+              if (!publishScheduler) return { triggered: false, reason: 'publish_unready' };
+              if (publishScheduler.isBusy()) return { triggered: false, reason: 'publish_busy' };
+              if (personaStore.getForAccount(accountId) === null) return { triggered: false, reason: 'needs_persona' };
+              if (!referenceNote.body.trim()) return { triggered: false, reason: 'empty_body' };
+              const o = await publishScheduler.triggerManual(accountId, { referenceNote, reason: 'read_reference' });
+              if (o.result !== 'triggered') return { triggered: false, reason: o.reason };
+              return {
+                triggered: true,
+                reason: o.reason,
+                status: o.status,
+                ...(o.failureReason ? { failureReason: o.failureReason } : {}),
+              };
+            },
+          }
+        : {}),
       // 硬暂停闸（验证码/人工接管）：通知准入据此放弃巡视——硬暂停期连帧都不发。
       isHardPaused: (edgeId) => (edgeId ? server.isEdgePaused(edgeId) : false),
       // 通知巡视发飞书（仅"评论和@"）：复用 messenger + 默认群解析；无群则记错不吞。

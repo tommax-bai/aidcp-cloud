@@ -22,6 +22,7 @@ import { DeepReader } from '../agents/deep-reader.js';
 import { CommentReviewer } from '../agents/comment-reviewer.js';
 import { ContentCuratorRole } from '../agents/content-curator-role.js';
 import { InteractionAppraiserRole, COLLECT_MIN_SAVE_LIKE_RATIO } from '../agents/interaction-appraiser-role.js';
+import { WriteNoteOpportunity, type WriteNoteReference, type WriteNoteTriggerResult } from '../agents/write-note-opportunity.js';
 import { AuthorEvaluator } from '../agents/author-evaluator.js';
 import { CommentAppraiser } from '../agents/comment-appraiser.js';
 import { CommentLikeAppraiser } from '../agents/comment-like-appraiser.js';
@@ -152,6 +153,13 @@ export interface RoleDispatcherOptions {
    */
   curatedStore?: CuratedNoteSink & CuratedCommentSink;
   /**
+   * 阅读后写笔记旁路（change read-to-write-note-lane）：读完笔记后可保守触发现有发布链路的参照创作。
+   * 缺省不注册角色；触发态不代表发布成功，发布终态仍走既有人审/回执。
+   */
+  triggerWriteNote?: (accountId: string, referenceNote: WriteNoteReference) => Promise<WriteNoteTriggerResult>;
+  /** 发布链路忙碌闸：忙时阅读旁路诚实跳过，不抢占浏览闭环。 */
+  isWriteNoteBusy?: () => boolean;
+  /**
    * 诚实人设启动闸（multi-account-node-support D3）：以「人设存储中是否存在该账号的人设行」为独立判据
    * （getForAccount!==null，**不走会回落默认的解析器**）。缺省 → 不设闸（向后兼容单账号）。default 账号硬豁免（见 canStartSession）。
    */
@@ -249,6 +257,8 @@ export class RoleDispatcher {
   private readonly getCommentLikeDailyRemaining?: () => number;
   private readonly archiveValuableComment?: (input: ValuableCommentInput) => Promise<void>;
   private readonly curatedStore?: CuratedNoteSink & CuratedCommentSink;
+  private readonly triggerWriteNote?: (accountId: string, referenceNote: WriteNoteReference) => Promise<WriteNoteTriggerResult>;
+  private readonly isWriteNoteBusy?: () => boolean;
   private readonly getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
   /** 已下发待回执的评论上下文：action.completed{comment} 据此扣额 + emit comment.done（→ 是否进主页评估）。 */
   private pendingComment: { noteId: string; sourcePageType: 'feed' | 'search'; actions: ('like' | 'collect')[]; text: string } | null = null;
@@ -338,6 +348,8 @@ export class RoleDispatcher {
     this.archiveValuableComment = options.archiveValuableComment;
     this.getCorpusReferences = options.getCorpusReferences;
     this.curatedStore = options.curatedStore;
+    this.triggerWriteNote = options.triggerWriteNote;
+    this.isWriteNoteBusy = options.isWriteNoteBusy;
     this.isHardPaused = options.isHardPaused ?? (() => false);
     this.isPersonaBound = options.isPersonaBound;
     this.onSessionRejected = options.onSessionRejected;
@@ -504,6 +516,8 @@ export class RoleDispatcher {
       this.currentNote?.noteId === noteId ? this.currentNote : null;
     const getRemainingBudget = () => this.budget;
     const getSearchedKeywords = () => this.searchedKeywords;
+    const triggerWriteNote = this.triggerWriteNote;
+    const isWriteNoteBusy = this.isWriteNoteBusy;
 
     // ContentEvaluator 需要特殊处理：通过 setVisibleCards 注入数据
     const contentEvaluator = new ContentEvaluator(commonOptions, this.sessionContext);
@@ -519,6 +533,18 @@ export class RoleDispatcher {
       new CommentReviewer({ ...commonOptions, sessionContext: this.sessionContext, getNoteData }),
       new ContentCuratorRole({ ...commonOptions, sessionContext: this.sessionContext }),
       new InteractionAppraiserRole({ ...commonOptions, sessionContext: this.sessionContext, getNoteData, getRemainingBudget, getMinSaveLikeRatio: () => this.collectMinSaveLikeRatio() }),
+      ...(triggerWriteNote
+        ? [
+            new WriteNoteOpportunity({
+              ...commonOptions,
+              getNoteData,
+              getAccountId: () => this.currentAccountId,
+              triggerWriteNote,
+              ...(isWriteNoteBusy ? { isWriteNoteBusy } : {}),
+              clock: this.clock,
+            }),
+          ]
+        : []),
       new AuthorEvaluator({ ...commonOptions, sessionContext: this.sessionContext, getNoteData }),
       // —— 发评论支线（接在互动完成与「是否进主页评估」之间）：评估→撰写→去AI味→循环内人审 ——
       new CommentAppraiser({
