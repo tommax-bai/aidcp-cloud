@@ -19,7 +19,7 @@
  * pending_approval 的真候审/已批在途。即使 /tmp 信号丢失，已拒草稿也不会重新冒成 pending。
  */
 
-import { makeEnvelope, type Envelope, type UiSnapshotPayload } from './protocol.js';
+import { makeEnvelope, type Envelope, type UiDailyUsagePayload, type UiSnapshotPayload } from './protocol.js';
 import { randomUUID } from 'node:crypto';
 
 /** 云端可推送的发布审批状态（published 由边缘本地发射，不在此列）。 */
@@ -37,6 +37,7 @@ export interface UiSnapshotDeps {
   pendingApprovalForAccount?: (accountId: string) => Promise<{ id: number; title: string | null } | null>;
   /** 读授权信号：null=未决（真候审）；approved=true=已批在途；false=已拒（hello 不回放）。 */
   readApproval?: (requestId: string) => Promise<{ approved: boolean } | null>;
+  todayUsageForAccount?: (accountId: string) => Promise<UiDailyUsagePayload | null>;
   clock?: () => number;
   idGen?: () => string;
   logger?: Pick<Console, 'log' | 'warn'>;
@@ -89,7 +90,12 @@ export class UiSnapshotService {
         }
       }
 
-      if (!payload.account && !payload.lastPublish && !payload.publish) return; // 全空不发包
+      const dailyUsage = this.deps.todayUsageForAccount
+        ? await this.deps.todayUsageForAccount(accountId).catch(() => null)
+        : null;
+      if (dailyUsage) payload.dailyUsage = dailyUsage;
+
+      if (!payload.account && !payload.lastPublish && !payload.publish && !payload.dailyUsage) return; // 全空不发包
       this.push(accountId, edgeId, payload, 'hello快照');
     } catch (err) {
       this.logger.warn(

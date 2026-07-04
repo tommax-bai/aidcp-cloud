@@ -1,6 +1,8 @@
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/index.js';
+import { RISK_ACTIONS } from './types.js';
 import type {
+  ActionQuota,
   CounterEvent,
   InteractionAction,
   InteractionStore,
@@ -113,6 +115,23 @@ export class PgRiskStore implements RiskStore, InteractionStore {
       [accountId, since],
     );
     return rows.map((row) => ({ action: row.action, occurredAt: row.occurred_at.getTime(), count: row.count }));
+  }
+
+  async todayTotalsForAccount(accountId: string): Promise<ActionQuota> {
+    const { rows } = await this.pool.query<{ action: string; total: number }>(
+      `SELECT action, COALESCE(SUM(count), 0)::int AS total
+       FROM risk_counters
+       WHERE account_id = $1 AND occurred_at >= date_trunc('day', now())
+       GROUP BY action`,
+      [accountId],
+    );
+    const totals = Object.fromEntries(RISK_ACTIONS.map((action) => [action, 0])) as ActionQuota;
+    for (const row of rows) {
+      if ((RISK_ACTIONS as readonly string[]).includes(row.action)) {
+        totals[row.action as RiskAction] = row.total;
+      }
+    }
+    return totals;
   }
 
   async appendCounter(accountId: string, action: RiskAction, occurredAt: number): Promise<void> {

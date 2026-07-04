@@ -46,6 +46,42 @@ test('ui-snapshot: hello 快照带昵称 + 最近发布，定向到该 edge', as
   assert.equal(sent[0].env.payload.publish, undefined);
 });
 
+test('ui-snapshot: hello snapshot includes account daily usage and quota saturation', async () => {
+  const dailyUsage: UiSnapshotPayload['dailyUsage'] = {
+    asOf: 1730000001000,
+    quotaLevel: 'normal',
+    totals: { view: 10, like: 3, collect: 1, comment: 0, follow: 2, publish: 1 },
+    quotas: { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
+    saturated: ['publish'],
+  };
+  const { service, sent } = makeService({ todayUsageForAccount: async () => dailyUsage });
+  await service.pushHelloSnapshot('acc-1', 'edge-1');
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].env.payload.dailyUsage, dailyUsage);
+});
+
+test('ui-snapshot: daily usage alone is enough to send hello snapshot', async () => {
+  const { service, sent } = makeService({
+    getNickname: () => null,
+    lastPublishedForAccount: async () => null,
+    pendingApprovalForAccount: async () => null,
+    todayUsageForAccount: async () => ({
+      asOf: 1730000001000,
+      totals: { view: 0, like: 0, collect: 0, comment: 0, follow: 0, publish: 0 },
+    }),
+  });
+  await service.pushHelloSnapshot('acc-1', 'edge-1');
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].env.payload.dailyUsage?.totals, {
+    view: 0,
+    like: 0,
+    collect: 0,
+    comment: 0,
+    follow: 0,
+    publish: 0,
+  });
+});
+
 test('ui-snapshot: 无昵称不发 identity 字段（宁缺毋假）', async () => {
   const { service, sent } = makeService({ getNickname: () => null });
   await service.pushHelloSnapshot('acc-1', 'edge-1');

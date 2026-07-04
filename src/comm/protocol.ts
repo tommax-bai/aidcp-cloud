@@ -163,6 +163,18 @@ export interface WelcomePayload {
  * 发送时机：① 边缘 hello 注册完成后回填全量快照；② 发布审批生命周期变化时增量推送。
  * 红线：字段全部可选、缺失=云端无该数据；边缘 MUST NOT 以占位/猜测补全（宁缺毋假）。
  */
+export type UiDailyUsageAction = 'view' | 'like' | 'collect' | 'comment' | 'follow' | 'publish';
+export type UiDailyUsageCounts = Partial<Record<UiDailyUsageAction, number>>;
+
+export interface UiDailyUsagePayload {
+  /** Epoch ms when cloud assembled the account daily usage projection. */
+  asOf: number;
+  quotaLevel?: 'conservative' | 'normal' | 'aggressive';
+  totals: UiDailyUsageCounts;
+  quotas?: UiDailyUsageCounts;
+  saturated?: UiDailyUsageAction[];
+}
+
 export interface UiSnapshotPayload {
   /** 账号身份；nickname 为云端账号主数据里的小红书真实昵称（accounts.nickname），空/缺失时边缘不得转发 identity 事件 */
   account?: { id: string; nickname?: string };
@@ -179,6 +191,8 @@ export interface UiSnapshotPayload {
     /** 界面「编号」对暗号用，与飞书审批卡「编号」字段一致（取发布记录 id，如 "#83"） */
     code?: string;
   };
+  /** Account-scoped today usage and optional current daily quota context for the companion UI. */
+  dailyUsage?: UiDailyUsagePayload;
 }
 
 /** 规划请求：高层自然语言目标 */

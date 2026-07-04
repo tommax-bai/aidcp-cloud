@@ -66,6 +66,7 @@ import {
 } from './feishu/index.js';
 import { CommandSequencer } from './publish-agent/command-sequencer.js';
 import { UiSnapshotService } from './comm/ui-snapshot.js';
+import type { UiDailyUsageAction, UiDailyUsageCounts, UiDailyUsagePayload } from './comm/protocol.js';
 import { PublishOrchestrator, PublishScheduler, PublishDispatcher } from './publish-agent/index.js';
 import { WanxiangClient } from './publish-agent/wanxiang-client.js';
 import { SeedreamClient } from './publish-agent/seedream-client.js';
@@ -149,6 +150,17 @@ function readEnvPort(name: string): number | undefined {
   if (!value) return undefined;
   const port = Number(value);
   return Number.isInteger(port) && port > 0 ? port : undefined;
+}
+
+const UI_DAILY_USAGE_ACTIONS: UiDailyUsageAction[] = ['view', 'like', 'collect', 'comment', 'follow', 'publish'];
+
+function pickDailyUsageCounts(source: Partial<Record<string, number>>): UiDailyUsageCounts {
+  const counts: UiDailyUsageCounts = {};
+  for (const action of UI_DAILY_USAGE_ACTIONS) {
+    const value = source[action];
+    counts[action] = Number.isFinite(value) ? Math.max(0, Math.floor(Number(value))) : 0;
+  }
+  return counts;
 }
 
 /**
@@ -1107,6 +1119,32 @@ async function main(): Promise<void> {
   // 由人审授权信号到达触发（通过即切）。唯一碰边缘、唯一让位浏览的阶段：让位 → 从落库草稿重建发布输入 →
   // 驱动指令序列 → 回写 → 解除让位。AC-PUB：下发前复核授权信号 approved===true，未授权绝不下发。
   // 陪伴界面快照层实例化（edge-companion-ui 8.1）：hello 回填 + 发布审批状态实时推送。
+  const buildTodayUsageForAccount = async (accountId: string): Promise<UiDailyUsagePayload> => {
+    const [riskTotals, publishCount] = await Promise.all([
+      riskStore.todayTotalsForAccount(accountId),
+      publishLogStore.countPublishedTodayForAccount(accountId),
+    ]);
+    const totals = pickDailyUsageCounts(riskTotals);
+    totals.publish = publishCount;
+    const payload: UiDailyUsagePayload = { asOf: Date.now(), totals };
+    try {
+      const controller = await riskRegistry.getController(accountId);
+      const quotas = pickDailyUsageCounts(controller.effectiveQuotas().day);
+      payload.quotaLevel = controller.getState().quotaLevel;
+      payload.quotas = quotas;
+      payload.saturated = UI_DAILY_USAGE_ACTIONS.filter((action) => {
+        const used = totals[action] ?? 0;
+        const cap = quotas[action];
+        return typeof cap === 'number' && used >= cap;
+      });
+    } catch (err) {
+      console.warn(
+        `[aidcp-cloud] ui daily usage quota read failed account=${accountId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return payload;
+  };
+
   uiSnapshot = new UiSnapshotService({
     pusher: { pushToEdges: (env, edgeId) => server.pushToEdges(env, edgeId) },
     resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
@@ -1114,6 +1152,7 @@ async function main(): Promise<void> {
     lastPublishedForAccount: (accountId) => publishLogStore.lastPublishedForAccount(accountId),
     pendingApprovalForAccount: (accountId) => publishLogStore.pendingApprovalForAccount(accountId),
     readApproval: readPublishApproval,
+    todayUsageForAccount: buildTodayUsageForAccount,
     logger: console,
   });
   const uiSnapshotService = uiSnapshot;
