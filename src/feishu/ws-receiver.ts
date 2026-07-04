@@ -67,6 +67,14 @@ export interface FeishuWsReceiverOptions {
    * 返回 null（不存在/读失败）→ fail-safe 拒到控制台，绝不放行未确认版本。
    */
   readLiveContentVersion?: (recordId: number) => Promise<number | null>;
+  /**
+   * 发帖授权前置检查：仅在「授权发布」写信号前调用，用于拦截账号/节点离线等不可发布状态。
+   * 返回 ok=false 时不写审批信号、不替换卡片，保持审批态不变。
+   */
+  preflightApprovePublish?: (
+    requestId: string,
+    payload: PublishApprovalPayload,
+  ) => Promise<PublishApprovalPreflightResult>;
 }
 
 interface ApprovalActionValue {
@@ -117,6 +125,12 @@ export interface ApprovalWriteResult {
   /** 若已被先前决定，返回其 approved 值（first-writer-wins）。 */
   alreadyDecided?: boolean;
 }
+
+export type PublishApprovalPreflightReason = 'account_offline' | 'publish_target_unavailable';
+
+export type PublishApprovalPreflightResult =
+  | { ok: true; accountId?: string; edgeId?: string }
+  | { ok: false; reason: PublishApprovalPreflightReason; accountId?: string };
 
 /** 注入 fs：first-writer-wins 需 writeFile 的 wx flag；readFile 用于读回既有决定（可选）。 */
 export interface ApprovalSignalFs {
@@ -182,6 +196,10 @@ export class FeishuWsReceiver {
   private readonly onApproved?: (requestId: string) => void;
   private readonly onRejected?: (requestId: string) => void;
   private readonly readLiveContentVersion?: (recordId: number) => Promise<number | null>;
+  private readonly preflightApprovePublish?: (
+    requestId: string,
+    payload: PublishApprovalPayload,
+  ) => Promise<PublishApprovalPreflightResult>;
   private wsClient?: lark.WSClient;
 
   constructor(options: FeishuWsReceiverOptions) {
@@ -194,6 +212,7 @@ export class FeishuWsReceiver {
     this.onApproved = options.onApproved;
     this.onRejected = options.onRejected;
     this.readLiveContentVersion = options.readLiveContentVersion;
+    this.preflightApprovePublish = options.preflightApprovePublish;
   }
 
   /**
@@ -268,6 +287,18 @@ export class FeishuWsReceiver {
             card: { type: 'raw', data: buildSupersededPublishApprovalCard(parsed.requestId) },
           };
         }
+      }
+    }
+
+    if (approved && this.preflightApprovePublish) {
+      const preflight = await this.preflightApprovePublish(parsed.requestId, parsed.payload);
+      if (!preflight.ok) {
+        return {
+          toast: {
+            type: 'error',
+            content: preflight.reason === 'account_offline' ? '账号不在线，无法发布' : '无法确认发布账号，无法发布',
+          },
+        };
       }
     }
 

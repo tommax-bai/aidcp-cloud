@@ -370,6 +370,34 @@ test('ws-receiver: 版本预检 fail-safe — 读版本失败(null) → 拒到�
   assert.equal(res.toast.type, 'error');
 });
 
+test('ws-receiver: 授权发布前账号离线 → 提醒且不写签名、不替换审批卡', async () => {
+  const writes: Array<{ path: string; content: string }> = [];
+  const approved: string[] = [];
+  const receiver = new FeishuWsReceiver({
+    appId: 'a',
+    appSecret: 's',
+    commandRouter: makeRouter(),
+    fsImpl: {
+      writeFile: async (path, content) => {
+        writes.push({ path: String(path), content: String(content) });
+      },
+      rm: async () => {},
+    },
+    onApproved: (id) => approved.push(id),
+    preflightApprovePublish: async () => ({ ok: false, reason: 'account_offline', accountId: 'acc-offline' }),
+  });
+  const res = await receiver.handleCardAction({
+    action: 'approve',
+    requestId: 'publish-42',
+    payload: { title: '标题', content: '正文', tags: ['话题'], contentVersion: 0 },
+  });
+  assert.equal(res.toast.type, 'error');
+  assert.equal(res.toast.content, '账号不在线，无法发布');
+  assert.equal(writes.length, 0, '离线时绝不写 approved=true 签名');
+  assert.equal(res.card, undefined, '不返回替换卡，飞书审批卡保持原待审状态');
+  assert.deepEqual(approved, [], '不触发下发段');
+});
+
 // ── 陪伴界面 rejected 通知（change edge-companion-ui 8.1）──────────────────────
 test('ws-receiver: cancel 首写成功 → 触发 onRejected；approve 不触发', async () => {
   const rejected: string[] = [];

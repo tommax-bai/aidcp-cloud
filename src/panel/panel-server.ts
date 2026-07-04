@@ -347,10 +347,22 @@ function createRequestHandler(
       }
       // payload 对 Web 审批为占位（edge 从落库草稿读内容）；first-writer-wins 的决定才是关键。
       // contentVersion 随 payload 落盘：下发闸据此守「审=发」（缺省→0，未编辑草稿 0===0 照发）。
-      const result = await deps.writeApprovalSignal(requestId, approved, {
+      const approvalPayload: PublishApprovalPayload = {
         ...(payload ?? { title: '', content: '', tags: [] }),
         contentVersion: authorizedVersion ?? 0,
-      });
+      };
+      if (approved && deps.preflightApprovePublish) {
+        const preflight = await deps.preflightApprovePublish(requestId, approvalPayload);
+        if (!preflight.ok) {
+          sendJson(res, 409, {
+            error: preflight.reason,
+            reason: preflight.reason,
+            ...(preflight.accountId ? { accountId: preflight.accountId } : {}),
+          });
+          return;
+        }
+      }
+      const result = await deps.writeApprovalSignal(requestId, approved, approvalPayload);
       sendJson(res, 200, result); // {written} 或 {alreadyDecided}，绝不 published
       return;
     }

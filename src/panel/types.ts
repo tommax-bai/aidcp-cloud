@@ -29,7 +29,7 @@ import type {
   PanelAccount,
   PanelAlert,
 } from './panel-store.js';
-import type { PublishApprovalPayload, ApprovalWriteResult } from '../feishu/index.js';
+import type { PublishApprovalPayload, ApprovalWriteResult, PublishApprovalPreflightResult } from '../feishu/index.js';
 import type { LlmUsageQuery, LlmUsagePayload } from '../metrics/token-usage-store.js';
 import type { NotificationContact, NotificationContactManual } from '../cache/notification-contact-store.js';
 import type { ThinkingMode, ThinkingModeApi } from '../config/role-catalog.js';
@@ -77,6 +77,14 @@ export interface PanelDeps {
     approved: boolean,
     payload: PublishApprovalPayload,
   ) => Promise<ApprovalWriteResult>;
+  /**
+   * 发帖授权前置检查：面板点击「授权发布」时，在写审批信号前确认目标账号有在线节点。
+   * ok=false 时端点返回错误且不写信号，审批状态保持待审。
+   */
+  preflightApprovePublish?: (
+    requestId: string,
+    payload: PublishApprovalPayload,
+  ) => Promise<PublishApprovalPreflightResult>;
   /**
    * 待审正文草稿就地编辑（change edit-note-draft-before-publish）。未注入则 `PUT /api/publish/:id/draft` 返回 503。
    * edit：经拥有者对象（publish_log 单写）乐观 CAS——仅 pending_approval 可编、版本必须匹配、clampTitle 收口、

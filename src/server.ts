@@ -62,6 +62,7 @@ import {
   writeApprovalSignal,
   matchAccountByNickname,
   type CommandActions,
+  type PublishApprovalPreflightResult,
 } from './feishu/index.js';
 import { CommandSequencer } from './publish-agent/command-sequencer.js';
 import { UiSnapshotService } from './comm/ui-snapshot.js';
@@ -1151,6 +1152,30 @@ async function main(): Promise<void> {
       .catch(() => {});
   };
 
+  const preflightApprovePublish = async (requestId: string): Promise<PublishApprovalPreflightResult> => {
+    const m = /^publish-(\d+)$/.exec(requestId);
+    if (!m) return { ok: true };
+    const recordId = Number(m[1]);
+    let draft: Awaited<ReturnType<typeof publishLogStore.loadForDispatch>>;
+    try {
+      draft = await publishLogStore.loadForDispatch(recordId);
+    } catch (err) {
+      console.warn(
+        `[aidcp-cloud] 授权发布前置检查失败，无法读取草稿 requestId=${requestId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return { ok: false, reason: 'publish_target_unavailable' };
+    }
+    if (!draft) return { ok: false, reason: 'publish_target_unavailable' };
+    const edgeId = server.resolveEdgeIdForAccount(draft.accountId);
+    if (!edgeId) {
+      console.warn(`[aidcp-cloud] 授权发布被拦截：账号 ${draft.accountId} 无在线节点，requestId=${requestId}`);
+      return { ok: false, reason: 'account_offline', accountId: draft.accountId };
+    }
+    return { ok: true, accountId: draft.accountId, edgeId };
+  };
+
   // 兜底补偿（at-least-once）：低频扫描已授权但未下发的待审草稿补触发（覆盖事件丢失）；靠 dispatch 幂等去重。
   const dispatchScanMs = Number(process.env.AIDCP_PUBLISH_DISPATCH_SCAN_MS ?? 60_000);
   if (dispatchScanMs > 0) {
@@ -1249,6 +1274,7 @@ async function main(): Promise<void> {
       eventBus: ctx.bus,
       // 指令级节奏：喂当前（该账号）风控状态，驱动 dwellMs/thinkMs 的 tempo。
       getRiskStatus: () => ctx.controller.getState().status,
+      pacingFloors: pacingConfigStore,
       // 互动前风控闸：按该连接真实账号的 controller 判定（不再钉死 default）。被拒诚实跳过。
       canInteract: (action) => ctx.controller.canDo(action),
       // 评论人审端口（env 闸开启时注入；未开启 → 评论一律诚实跳过、不发）。
@@ -1703,6 +1729,7 @@ async function main(): Promise<void> {
     // 写时版本预检（edit-note-draft-before-publish）：飞书卡片授权前比对活版本与卡片烤入版本；
     // 不一致 → 不写签名、回「请到控制台重新审批」替换卡（云端无法主动刷新已发出的老卡片）。
     readLiveContentVersion,
+    preflightApprovePublish: (requestId) => preflightApprovePublish(requestId),
   });
   try {
     const wsClient = new lark.WSClient({
@@ -1832,6 +1859,7 @@ async function main(): Promise<void> {
             password: readEnvString('PGPASSWORD'),
           }),
           publishOrchestrator,
+          preflightApprovePublish: (requestId) => preflightApprovePublish(requestId),
           writeApprovalSignal: async (requestId, approved, payload) => {
             const result = await writeApprovalSignal({ writeFile, readFile }, requestId, approved, payload);
             // 通过即切：后台「授权发布」首写成功即触发下发段（仅 publish-<n>）。取消不触发下发，

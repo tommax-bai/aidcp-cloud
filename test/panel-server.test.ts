@@ -321,6 +321,43 @@ test('HTTP 写路由：审批返 written 非 published；命令返真实结果�
   }
 });
 
+test('HTTP 审批：账号离线时拒绝授权且不写审批信号', async () => {
+  const signalWrites: Array<{ requestId: string; approved: boolean }> = [];
+  const offlineDeps = {
+    ...(deps as object),
+    preflightApprovePublish: async () => ({ ok: false as const, reason: 'account_offline' as const, accountId: 'default' }),
+    writeApprovalSignal: async (requestId: string, approved: boolean) => {
+      signalWrites.push({ requestId, approved });
+      return { written: true };
+    },
+  } as unknown as PanelDeps;
+  const h = await startPanelApi(offlineDeps, makeConfig());
+  assert.equal(h.started, true);
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = (await login.json()) as { token: string };
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+
+    const ap = await fetch(`${base}/api/publish/publish-42/approve`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ approved: true }),
+    });
+    assert.equal(ap.status, 409);
+    const body = (await ap.json()) as { error: string; reason: string; accountId?: string };
+    assert.equal(body.reason, 'account_offline');
+    assert.equal(body.accountId, 'default');
+    assert.equal(signalWrites.length, 0, '离线时不写 approved=true 信号，审批状态保持待审');
+  } finally {
+    await h.close();
+  }
+});
+
 test('HTTP 待审草稿编辑 + 授权写时版本预检（edit-note-draft-before-publish）：CAS 拒因映射 / already_decided / version_stale 不写签名', async () => {
   const signalWrites: Array<{ requestId: string; approved: boolean; payload: Record<string, unknown> }> = [];
   const edits: Array<{ recordId: number; editor: string }> = [];
