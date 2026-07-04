@@ -130,6 +130,37 @@ describe('CommentScheduler.triggerTargeted 拒绝路径（机器原因码）', (
     assert.equal(r.reason, 'edge_offline');
   });
 
+  it('并发双触发（同账号）→ 恰一个 ok:true，单飞闸原子（回归：dedup await 不得切开 has→add）', async () => {
+    // dedup 查询用一个延迟 promise 模拟真实 PG 往返，制造 has→add 之间的可插入窗口。
+    const bus = new EventBus();
+    let takeoverStarts = 0;
+    const cardDones: Array<() => void> = [];
+    const s = new CommentScheduler(
+      baseDeps({
+        resolveConnection: () => ({ bus, edgeId: 'e1' }),
+        pusher: { pushToEdges: () => 1 }, // 边端不回上报 → 任务在步超时前挂着，保住在跑窗口
+        stepTimeoutMs: 300,
+        dedupFor: () => ({
+          hasInteracted: async () => {
+            await new Promise((r) => setImmediate(r)); // 模拟 PG 往返：给并发触发插入机会
+            return false;
+          },
+          recordInteraction: async () => {},
+        }),
+        onTakeoverStart: () => { takeoverStarts += 1; },
+        postResultCard: () => { cardDones.shift()?.(); },
+      }),
+    );
+    const done = new Promise<void>((r) => { cardDones.push(r); });
+    const [a, b] = await Promise.all([s.triggerTargeted('acc-1', target), s.triggerTargeted('acc-1', target)]);
+    const oks = [a, b].filter((r) => r.ok);
+    assert.equal(oks.length, 1, '并发双触发必须恰有一个成功、一个被单飞闸拒');
+    const rejected = [a, b].find((r) => !r.ok)!;
+    assert.equal(rejected.reason, 'running');
+    assert.equal(takeoverStarts, 1, '只接管一次边端（不双接管同一账号）');
+    await done; // 等唯一在跑任务收尾，防悬挂
+  });
+
   it('同账号已有任务在跑 → warning / running（单飞）', async () => {
     // 边端不回任何上报 + 极短步超时：第一单很快失败，但在其在跑窗口内第二单必须被拒。
     const bus = new EventBus();

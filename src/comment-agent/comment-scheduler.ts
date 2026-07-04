@@ -177,16 +177,19 @@ export class CommentScheduler {
         };
       }
     }
-    if (this.running.has(accountId)) {
-      return { ok: false, level: 'warning', title: '未触发定向评论', message: '该账号已有评论任务在跑，请等其结束', reason: 'running' };
-    }
     // 去重前置：已评过该笔记 → 诚实拒绝，不发起边端任务（PG 出错按未评处理，与 /comment 去重同容错取向）。
+    // 位置铁律：这个 await 必须排在下面的单飞闸「has→add」之前——否则闸的检查与置位被 await 切开、
+    // 事件循环里被并发触发插入，两个触发都过闸并发驱动同一边端（对抗审查确诊的 TOCTOU）。triggerManual 亦守此序。
     const alreadyCommented = await this.deps
       .dedupFor(accountId)
       .hasInteracted(target.noteId, 'comment')
       .catch(() => false);
     if (alreadyCommented) {
       return { ok: false, level: 'warning', title: '未触发定向评论', message: '该账号已评论过这篇笔记（去重账本命中），不重复评论', reason: 'already_commented' };
+    }
+    // 单飞闸 + 起跑：has 检查、resolveConnection、add 三步全同步、其间无 await，事件循环内原子，杜绝并发双触发。
+    if (this.running.has(accountId)) {
+      return { ok: false, level: 'warning', title: '未触发定向评论', message: '该账号已有评论任务在跑，请等其结束', reason: 'running' };
     }
     const conn = this.deps.resolveConnection(accountId);
     if (!conn || !conn.edgeId) {
