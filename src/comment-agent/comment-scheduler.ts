@@ -21,7 +21,14 @@ import { CommentComposer } from '../agents/comment-composer.js';
 import { PostProcessor } from '../publish-agent/post-processor.js';
 import type { CommentApprovalPort } from '../agents/comment-approval-gate.js';
 import type { CommentCommandReceipt } from '../feishu/commands.js';
-import { runCommentTask, type CommentTaskResult, type CommentTaskSteps } from './comment-task-runner.js';
+import {
+  runCommentTask,
+  runTargetedCommentTask,
+  type CommentTaskResult,
+  type CommentTaskSteps,
+  type TargetedCommentResult,
+  type TargetedCommentSteps,
+} from './comment-task-runner.js';
 import { buildEdgeCommentSteps, type EdgePusher, type CommentDedup } from './edge-steps.js';
 import { buildComposeAndApprove } from './compose-approve.js';
 import type { CuratedSampleForTerms } from '../agents/comment-search-term-generator.js';
@@ -138,6 +145,134 @@ export class CommentScheduler {
     };
   }
 
+  /**
+   * 定向评论触发（change curated-note-actions）：管理后台精选页对指定笔记评论。
+   * 与 triggerManual 守卫同构（账号/人设/群码 fail-closed/单飞/边端在线），另加**去重前置**（已评过 → 诚实拒绝）。
+   * 目标定位为搜索驱动（标题截断作搜索词、综合排序+不限时间窗、结果内按 noteId 精确匹配），绝不导航存量 URL。
+   */
+  async triggerTargeted(
+    accountId: string,
+    target: { noteId: string; title: string },
+    options?: { injectGroup?: boolean },
+  ): Promise<CommentCommandReceipt & { reason?: string }> {
+    if (!accountId || accountId === 'default') {
+      return { ok: false, level: 'error', title: '定向评论触发失败', message: '未解析到有效账号（绝不回落 default）', reason: 'account_required' };
+    }
+    if (!target.noteId || !target.title.trim()) {
+      return { ok: false, level: 'warning', title: '未触发定向评论', message: '目标笔记缺 noteId 或标题为空，无法搜索定位', reason: 'bad_target' };
+    }
+    if (this.deps.isPersonaBound && !this.deps.isPersonaBound(accountId)) {
+      return { ok: false, level: 'warning', title: '未触发定向评论', message: '该账号未绑定人设——请先到后台「人设」页设置；未绑人设不启动评论任务，绝不以默认人设代评。', reason: 'needs_persona' };
+    }
+    let groupChatCode: string | null = null;
+    if (options?.injectGroup) {
+      groupChatCode = this.deps.getGroupChatInfo ? await this.deps.getGroupChatInfo(accountId) : null;
+      if (!groupChatCode) {
+        return {
+          ok: false,
+          level: 'warning',
+          title: '未触发定向评论',
+          message: '该账号未配置「关联群聊信息」——请先到后台账号页设置；要求带群但无码，本次不发（绝不发无码评论，也不降级为内容评论）。',
+          reason: 'group_code_missing',
+        };
+      }
+    }
+    if (this.running.has(accountId)) {
+      return { ok: false, level: 'warning', title: '未触发定向评论', message: '该账号已有评论任务在跑，请等其结束', reason: 'running' };
+    }
+    // 去重前置：已评过该笔记 → 诚实拒绝，不发起边端任务（PG 出错按未评处理，与 /comment 去重同容错取向）。
+    const alreadyCommented = await this.deps
+      .dedupFor(accountId)
+      .hasInteracted(target.noteId, 'comment')
+      .catch(() => false);
+    if (alreadyCommented) {
+      return { ok: false, level: 'warning', title: '未触发定向评论', message: '该账号已评论过这篇笔记（去重账本命中），不重复评论', reason: 'already_commented' };
+    }
+    const conn = this.deps.resolveConnection(accountId);
+    if (!conn || !conn.edgeId) {
+      return { ok: false, level: 'error', title: '定向评论触发失败', message: '该账号暂无在线边端', reason: 'edge_offline' };
+    }
+
+    this.running.add(accountId);
+    void this.runTargetedTask(accountId, conn.bus, conn.edgeId, target, groupChatCode)
+      .catch((err) =>
+        (this.deps.logger ?? console).warn(
+          `[comment-scheduler] 定向任务未能启动/异常中止 account=${accountId}：${(err as Error).message}`,
+        ),
+      )
+      .finally(() => this.running.delete(accountId));
+
+    return {
+      ok: true,
+      level: 'success',
+      title: '已触发定向评论',
+      message: '已启动定向评论任务（搜索定位目标笔记→撰写→飞书人审 approved=true 才会真发；结果稍后回报）',
+    };
+  }
+
+  private async runTargetedTask(
+    accountId: string,
+    bus: EventBus,
+    edgeId: string,
+    target: { noteId: string; title: string },
+    groupChatCode: string | null,
+  ): Promise<void> {
+    const log = this.deps.logger ?? console;
+    const soul = this.deps.getSoul(accountId);
+    const llm = this.deps.llmFor(accountId);
+    const composer = new CommentComposer({ eventBus: bus, soul, llm, getNoteData: () => null });
+
+    const composeAndApprove = buildComposeAndApprove({
+      composer,
+      approval: this.deps.approval,
+      postProcessor: this.deps.postProcessorFor?.(accountId),
+      groupChatCode,
+      now: this.deps.now,
+      logger: log,
+    });
+
+    // 定向流程覆盖原生筛选：综合排序 + 不限时间窗（/comment 默认「最多收藏+一天内」会筛掉非当日老笔记）。
+    const edge = buildEdgeCommentSteps({
+      bus,
+      pusher: this.deps.pusher,
+      edgeId,
+      dedup: this.deps.dedupFor(accountId),
+      sort: 'comprehensive',
+      timeWindow: 'all',
+      stepTimeoutMs: this.deps.stepTimeoutMs,
+      logger: log,
+    });
+
+    const steps: TargetedCommentSteps = {
+      searchAndHarvest: (term) => edge.searchAndHarvest(term),
+      readNote: (card) => edge.readNote(card),
+      composeAndApprove: (note, comments) => composeAndApprove(note, comments),
+      post: (noteId, text, code) => edge.post(noteId, text, code),
+      recordCommented: (noteId) => edge.recordCommented(noteId),
+    };
+
+    // 搜索词：标题截 ≤20 字（拟人逐字输入须守单步时限）；第二次尝试放宽为前 12 字。
+    const searchTerm = target.title.trim().slice(0, TARGETED_SEARCH_TERM_MAX_LEN);
+    const fallbackTerm = target.title.trim().slice(0, TARGETED_SEARCH_FALLBACK_LEN);
+
+    this.deps.onTakeoverStart(accountId);
+    let result: TargetedCommentResult;
+    try {
+      result = await runTargetedCommentTask(steps, { noteId: target.noteId, searchTerm, fallbackTerm }, { logger: log });
+    } catch (err) {
+      log.warn(`[comment-scheduler] 定向任务异常 account=${accountId}：${(err as Error).message}`);
+      result = { outcome: 'post_failed', noteId: target.noteId, searchAttempts: 0, reason: (err as Error).message };
+    } finally {
+      this.deps.onTakeoverEnd(accountId);
+    }
+
+    try {
+      await this.deps.postResultCard?.(accountId, targetedOutcomeToReceipt(result, groupChatCode != null));
+    } catch (err) {
+      log.warn(`[comment-scheduler] 定向结果卡片发送失败 account=${accountId}：${(err as Error).message}`);
+    }
+  }
+
   private async runTask(
     accountId: string,
     bus: EventBus,
@@ -206,6 +341,28 @@ export class CommentScheduler {
     } catch (err) {
       log.warn(`[comment-scheduler] 结果卡片发送失败 account=${accountId}：${(err as Error).message}`);
     }
+  }
+}
+
+/** 定向搜索词上限：拟人逐字输入约 110ms/字，20 字 ≈ 2-3s，稳守 28s 单步预算（XHS 标题上限亦 20 字）。 */
+export const TARGETED_SEARCH_TERM_MAX_LEN = 20;
+/** 第二次尝试的放宽搜索词长度（前 12 字）。 */
+export const TARGETED_SEARCH_FALLBACK_LEN = 12;
+
+/** TargetedCommentResult → 结果卡片回执（change curated-note-actions；卡面可辨识为定向来源，绝不染绿）。 */
+export function targetedOutcomeToReceipt(r: TargetedCommentResult, withGroup: boolean): CommentResultReceipt {
+  const kind = withGroup ? '定向带群评论' : '定向内容评论';
+  switch (r.outcome) {
+    case 'commented':
+      return { ok: true, level: 'success', title: `${kind}已发出`, message: `已在目标笔记 ${r.noteId} 下发表评论：「${r.text ?? ''}」（${r.searchAttempts} 次搜索定位）` };
+    case 'note_not_found':
+      return { ok: false, level: 'warning', title: `${kind}未产出`, message: `搜索定位 ${r.searchAttempts} 次均未在结果中找到目标笔记 ${r.noteId}（可能未被搜索收录），本次不评、绝不评「相似」笔记` };
+    case 'compose_skipped':
+      return { ok: false, level: 'warning', title: `${kind}未发出`, message: `已定位目标笔记 ${r.noteId}，但撰写为空/未授权/超时，本次不发` };
+    case 'read_failed':
+      return { ok: false, level: 'error', title: `${kind}失败`, message: `已定位目标笔记 ${r.noteId}，但开笔记/读正文失败${r.reason ? `（${r.reason}）` : ''}` };
+    case 'post_failed':
+      return { ok: false, level: 'error', title: `${kind}失败`, message: `目标笔记 ${r.noteId} 评论发布未确认成功${r.reason ? `（${r.reason}）` : ''}` };
   }
 }
 

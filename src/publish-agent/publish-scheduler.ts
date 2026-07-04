@@ -16,6 +16,12 @@ import type { TriggerInput } from './types.js';
 import type { Soul } from '../soul/types.js';
 import type { CuratedSelectItem } from '../cache/curated-content-store.js';
 
+/** 洗稿参照笔记（change curated-note-actions）：管理后台精选页人工指定，注入创作输入独立参照块。 */
+export type ReferenceNote = NonNullable<TriggerInput['generateInput']['referenceNote']>;
+
+/** 参照正文注入上限（字符）：蒸馏注入、防全文直灌撑爆 prompt。 */
+export const REFERENCE_BODY_MAX_LEN = 800;
+
 export interface SchedulerConceptStore {
   countNewSince(sinceMs: number): Promise<number>;
   getNewConceptsSince(sinceMs: number, limit?: number): Promise<string[]>;
@@ -223,8 +229,9 @@ export class PublishScheduler {
   /**
    * 手动飞书 /publish [accountId]：越过 canDo（人工授权）+ 强制发布（不被 scout「无新素材」否决），但下游人审仍必过（AC-PUB）。
    * accountId 缺省回落 'default'（单账号向后兼容）；指定时以该账号人设生成、落库该账号、命令定向到该账号节点。
+   * opts.referenceNote（change curated-note-actions）：管理后台精选页指定的洗稿参照笔记，注入创作输入独立参照块。
    */
-  async triggerManual(accountId?: string): Promise<TriggerOutcome> {
+  async triggerManual(accountId?: string, opts?: { referenceNote?: ReferenceNote }): Promise<TriggerOutcome> {
     // retire-default-account：账号显式优先，缺省解析唯一真实账号；解析不出（0 或多个）则诚实拒绝、要求显式指定，绝不回落 default。
     const resolved = accountId ?? (await this.d.resolveSingleAccountId());
     if (!resolved) {
@@ -235,9 +242,15 @@ export class PublishScheduler {
       this.logger.warn(`[PublishScheduler] 手动 /publish：账号 ${resolved} 未绑定人设 — 拒绝，绝不以默认人设发布`);
       return { result: 'blocked', reason: 'needs_persona_setup' };
     }
-    this.logger.log(`[PublishScheduler] 手动 /publish account=${resolved}：越过风控 canDo + 强制发布（人工授权），发布前飞书人审仍生效`);
-    const { status, failureReason } = await this.doTrigger('manual_feishu', true, resolved);
-    return { result: 'triggered', reason: 'manual_feishu', status, failureReason };
+    // 洗稿参照红线（change curated-note-actions）：空正文不得作参照，触发即诚实拒绝。
+    if (opts?.referenceNote && !opts.referenceNote.body.trim()) {
+      this.logger.warn(`[PublishScheduler] 参照创作：参照笔记正文为空 — 拒绝（empty_body）`);
+      return { result: 'blocked', reason: 'empty_body' };
+    }
+    const reason = opts?.referenceNote ? 'manual_reference' : 'manual_feishu';
+    this.logger.log(`[PublishScheduler] 手动发布 account=${resolved} reason=${reason}：越过风控 canDo + 强制发布（人工授权），发布前飞书人审仍生效`);
+    const { status, failureReason } = await this.doTrigger(reason, true, resolved, opts?.referenceNote);
+    return { result: 'triggered', reason, status, failureReason };
   }
 
   /**
@@ -270,8 +283,24 @@ export class PublishScheduler {
     return this.publishing;
   }
 
-  private async doTrigger(reason: string, forced = false, accountId: string): Promise<{ status: string; failureReason?: string }> {
-    const input = { ...(await this.buildTriggerInput(accountId)), forced };
+  private async doTrigger(
+    reason: string,
+    forced = false,
+    accountId: string,
+    referenceNote?: ReferenceNote,
+  ): Promise<{ status: string; failureReason?: string }> {
+    const base = await this.buildTriggerInput(accountId);
+    const input: TriggerInput = referenceNote
+      ? {
+          ...base,
+          forced,
+          generateInput: {
+            ...base.generateInput,
+            // 参照正文有界截断（≤800 字）：控 prompt 规模，避免全文直灌。
+            referenceNote: { ...referenceNote, body: referenceNote.body.slice(0, REFERENCE_BODY_MAX_LEN) },
+          },
+        }
+      : { ...base, forced };
     this.logger.log(`[PublishScheduler] 触发发帖编排 reason=${reason} forced=${forced} account=${input.accountId} newConcepts=${input.metrics.newConceptCount} liked=${input.metrics.likedSinceLastPublish}`);
     this.publishing = true;
     try {

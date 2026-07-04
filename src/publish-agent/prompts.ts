@@ -125,6 +125,17 @@ export function buildScoutPrompt(trigger: TriggerInput): string {
       ].join('\n')
     : '';
 
+  // 洗稿参照（change curated-note-actions）：运营指定参照笔记时，发布方向钉在参照选题上。
+  const referenceNote = generateInput.referenceNote;
+  const referenceBlock = referenceNote
+    ? [
+        '',
+        '【参照笔记——本次为洗稿参照创作】',
+        `运营指定了一篇参照笔记：「${referenceNote.title}」${referenceNote.author ? `（@${referenceNote.author}）` : ''}${referenceNote.topics.length > 0 ? `，话题：${referenceNote.topics.slice(0, 6).join('、')}` : ''}。`,
+        'publishDirection 必须钉在这篇参照笔记的选题上，keyPoints 从其核心要点提炼（后续创作会以人设口吻重写，不会照抄）。',
+      ].join('\n')
+    : '';
+
   return [
     '你是一个内容发布策略分析师。你的任务是根据当前积累的素材和度量数据，判断现在是否适合发布一篇小红书笔记，并确定发布方向。',
     '',
@@ -147,6 +158,7 @@ export function buildScoutPrompt(trigger: TriggerInput): string {
     '- 确定发布方向时，从概念和点赞内容中找到最有深度/话题性的主题',
     '- 发布方向要避免与最近已发布的帖子重复',
     forcedBlock,
+    referenceBlock,
     '',
     '【输出要求】',
     '严格只输出一个 JSON 对象，不要任何额外文字或代码块围栏。格式如下：',
@@ -212,6 +224,19 @@ export function buildCreatorPrompt(scoutDecision: ScoutDecision, trigger: Trigge
       ? recentPublished.map((p, i) => `${i + 1}. ${p}`).join('\n')
       : '（无）';
 
+  // 洗稿参照块（change curated-note-actions）：独立于素材块——素材「仅作灵感严禁照抄」，参照「借题重写禁逐句照抄」，两套规则并存不混。
+  const referenceNote = generateInput.referenceNote;
+  const referenceBlock = referenceNote
+    ? [
+        '',
+        '【参照笔记——洗稿参照（独立于上方素材规则）】',
+        `标题：「${referenceNote.title}」${referenceNote.author ? `（@${referenceNote.author}）` : ''}${referenceNote.topics.length > 0 ? `｜话题：${referenceNote.topics.slice(0, 6).join('、')}` : ''}`,
+        `正文节选：${referenceNote.body.replace(/\s+/g, ' ').slice(0, 800)}`,
+        '【参照使用规则】本次创作以这篇笔记为参照：借它的选题、结构与核心要点，以你的人设视角与口吻重新创作成一篇属于你的笔记。',
+        '禁止逐句照抄、禁止只做同义替换；成稿必须与参照有可辨识的表达差异（不同的开头、不同的细节与例子组织），并补充你自己的经验与判断。',
+      ]
+    : [];
+
   return [
     `你是「${identity.name}」，${identity.role}，${identity.background}。说话${identity.tone}。你关注的领域：${soulInterests}。`,
     '你在写一篇要发到小红书的笔记，目标是真实、有个人观点、像一个真人随手记录。',
@@ -246,6 +271,7 @@ export function buildCreatorPrompt(scoutDecision: ScoutDecision, trigger: Trigge
     '【可用素材——精选灵感（仅作灵感，严禁照抄）】',
     likedDetail,
     '【素材使用红线】以上素材只供你体会角度、话题与真实细节；严禁照抄或改写其句子，必须用你自己的话重新表达。',
+    ...referenceBlock,
     ...(commentHintBlock
       ? ['', '【读者角度线索——来自高赞评论（只供体会读者在意什么、可借选题角度；严禁照抄）】', commentHintBlock]
       : []),

@@ -108,6 +108,18 @@ export interface TriggerInput {
      * 次级素材；仅供体会读者在意的角度，严禁照抄。缺省/空则不注入。
      */
     commentHints?: Array<{ text: string; author?: string; sourceNoteTitle?: string }>;
+    /**
+     * 洗稿参照笔记（change curated-note-actions）：管理后台从精选页人工指定的单条笔记。
+     * 以独立条件块注入创作提示（借其选题/结构/要点、以人设口吻重新创作、禁止逐句照抄），
+     * 与 materials 素材块并存、互不改变对方规则。缺省则本次创作无参照。
+     */
+    referenceNote?: {
+      sourceId: string;
+      title: string;
+      body: string;
+      topics: string[];
+      author?: string;
+    };
     soul: Soul;
     recentPosts: string[];
   };

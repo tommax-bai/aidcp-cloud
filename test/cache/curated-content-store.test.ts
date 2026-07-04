@@ -433,3 +433,32 @@ test('clearEmptyBody：按账号删空正文壳行（body IS NULL OR body=\'\'�
   assert.deepEqual(calls[0].params, ['acc-1']);
   assert.equal(n, 5);
 });
+
+// ── getOneForAccount（change curated-note-actions：行级动作的防越权单行读）───────
+
+test('getOneForAccount：id + account_id 双条件命中，映射面板视图', async () => {
+  const { pool, calls } = controllablePool(() => ({ rows: [panelDbRow] }));
+  const store = new CuratedContentStore({ pool });
+  const row = await store.getOneForAccount(7, 'acc-1');
+  assert.match(calls[0].sql, /WHERE id = \$1 AND account_id = \$2/);
+  assert.deepEqual(calls[0].params, [7, 'acc-1']);
+  assert.ok(row);
+  assert.equal(row.id, 7);
+  assert.equal(row.updatedAt, 3000);
+});
+
+test('getOneForAccount：跨账号/不存在 → null（越权被隔离，不泄露行存在性）', async () => {
+  const { pool } = controllablePool(() => ({ rows: [] }));
+  const store = new CuratedContentStore({ pool });
+  assert.equal(await store.getOneForAccount(999, 'acc-1'), null);
+});
+
+test('getOneForAccount：缺表 42P01 → null 优雅降级，不抛 500', async () => {
+  const { pool } = controllablePool(() => {
+    const err = new Error('missing') as Error & { code?: string };
+    err.code = '42P01';
+    throw err;
+  });
+  const store = new CuratedContentStore({ pool });
+  assert.equal(await store.getOneForAccount(1, 'acc-1'), null);
+});

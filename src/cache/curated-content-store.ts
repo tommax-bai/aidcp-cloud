@@ -493,6 +493,28 @@ export class CuratedContentStore {
   }
 
   /**
+   * 读单行（行级动作用，change curated-note-actions）。
+   * account_id 必进 WHERE 防越权（同 deleteOne：id 是全局 SERIAL，仅凭 id 不可触别账号行）。
+   * 未命中/跨账号不匹配 → null；缺表 42P01 → null 优雅降级，不抛 500。
+   */
+  async getOneForAccount(id: number, accountId: string): Promise<CuratedPanelRow | null> {
+    try {
+      const { rows } = await this.pool.query<CuratedPanelDbRow>(
+        `SELECT id, account_id, content_type, source_id, title, body, author, source_url, topics,
+                like_count, collect_count, comment_count, counts_captured_at,
+                bot_liked, bot_collected, admit_reason, first_seen_at, updated_at
+         FROM curated_content
+         WHERE id = $1 AND account_id = $2`,
+        [id, accountId],
+      );
+      return rows.length > 0 ? rowToPanelView(rows[0]) : null;
+    } catch (err) {
+      if ((err as { code?: string }).code === '42P01') return null;
+      throw err;
+    }
+  }
+
+  /**
    * 删除单条（误纳入/低质/隐私）。account_id 必进 WHERE 防越权（仅凭全局 id 不可触别账号行）。
    * 返回真实删除行数（0|1）——删 0 与删 1 由调用方诚实区分，绝不假成功。
    * 注意：删除仅清当前快照；准入不查史，下次再观测到且仍达标会经 upsert 重新纳入。

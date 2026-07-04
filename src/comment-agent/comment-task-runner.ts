@@ -151,3 +151,100 @@ export async function runCommentTask(
   log.log(`[comment-task] 试过 ${tried} 个搜索词仍无强相关未评过候选 → 诚实结束、本次不评`);
   return { outcome: 'no_strong_candidate', termsTried: tried };
 }
+
+// ─── 定向评论（change curated-note-actions）──────────────────────────────────
+//
+// 与按需评论共用步骤集的边端/撰写子集，但目标已知：不生成搜索词、不 LLM 择优——
+// 以指定搜索词检索后在返回卡片中按 noteId **精确匹配**；命中即对这一篇走到底（失败=诚实失败），
+// 有界搜索尝试（≤2 次，兼顺带消化 takeover 重醒后的首包错配），用尽未命中 → note_not_found 诚实结束。
+// 红线：绝不「差不多就评」——非目标 noteId 的卡片一律不评；详情上报 noteId 与目标不一致不评。
+
+/** 定向评论所需步骤子集（去重在调度层前置检查，此处不再过滤）。 */
+export type TargetedCommentSteps = Pick<
+  CommentTaskSteps,
+  'searchAndHarvest' | 'readNote' | 'composeAndApprove' | 'post' | 'recordCommented'
+>;
+
+export interface TargetedCommentTarget {
+  /** 目标笔记 id（精选行 source_id）。 */
+  noteId: string;
+  /** 首次搜索词（笔记标题截断）。 */
+  searchTerm: string;
+  /** 第二次尝试的放宽搜索词（如标题前 12 字）；缺省沿用 searchTerm 重发。 */
+  fallbackTerm?: string;
+}
+
+export type TargetedCommentOutcome =
+  | 'commented' // 成功评在目标笔记上
+  | 'note_not_found' // 有界搜索尝试用尽，返回卡片中始终无目标 noteId
+  | 'read_failed' // 命中后开笔记/读正文失败（含详情 noteId 与目标不一致）
+  | 'compose_skipped' // 撰写为空/未授权/被拒
+  | 'post_failed'; // 发布未真成功
+
+export interface TargetedCommentResult {
+  outcome: TargetedCommentOutcome;
+  noteId: string;
+  /** 人审通过的合并终稿（正文 + 换行 + 群聊码），命中撰写后才有。 */
+  text?: string;
+  /** 实际发起的搜索尝试次数。 */
+  searchAttempts: number;
+  reason?: string;
+}
+
+export interface TargetedCommentRunnerOptions {
+  /** 搜索尝试上限（缺省 2）。 */
+  maxSearchAttempts?: number;
+  logger?: Pick<Console, 'log' | 'warn'>;
+}
+
+const DEFAULT_MAX_SEARCH_ATTEMPTS = 2;
+
+/**
+ * 跑一次定向评论任务（纯控制流；边端 I/O 经 steps 注入）。
+ */
+export async function runTargetedCommentTask(
+  steps: TargetedCommentSteps,
+  target: TargetedCommentTarget,
+  options: TargetedCommentRunnerOptions = {},
+): Promise<TargetedCommentResult> {
+  const maxAttempts = options.maxSearchAttempts ?? DEFAULT_MAX_SEARCH_ATTEMPTS;
+  const log = options.logger ?? console;
+
+  let card: CommentCandidateCard | undefined;
+  let attempts = 0;
+  while (attempts < maxAttempts && !card) {
+    attempts++;
+    const term = attempts === 1 ? target.searchTerm : (target.fallbackTerm ?? target.searchTerm);
+    log.log(`[targeted-comment] 搜索定位第 ${attempts}/${maxAttempts} 次「${term}」 target=${target.noteId}`);
+    const cards = await steps.searchAndHarvest(term);
+    card = cards.find((c) => c.noteId === target.noteId);
+    if (!card) {
+      log.log(`[targeted-comment] 第 ${attempts} 次返回 ${cards.length} 张卡片，无目标 noteId → ${attempts < maxAttempts ? '重试' : '用尽'}`);
+    }
+  }
+  if (!card) {
+    return { outcome: 'note_not_found', noteId: target.noteId, searchAttempts: attempts, reason: `target not in search results after ${attempts} attempts` };
+  }
+
+  // —— 目标命中：对这一篇走到底（失败=诚实失败，绝不偷换另一篇）。 ——
+  const read = await steps.readNote(card);
+  if (!read) {
+    return { outcome: 'read_failed', noteId: target.noteId, searchAttempts: attempts, reason: 'open/read note failed' };
+  }
+  if (read.note.noteId !== target.noteId) {
+    // 防御：详情上报的 noteId 与目标不一致 —— 宁可不评，绝不评错帖。
+    return { outcome: 'read_failed', noteId: target.noteId, searchAttempts: attempts, reason: `detail_note_mismatch(${read.note.noteId})` };
+  }
+  const composed = await steps.composeAndApprove(read.note, read.comments);
+  if (!composed) {
+    return { outcome: 'compose_skipped', noteId: target.noteId, searchAttempts: attempts, reason: 'empty/unapproved/rejected' };
+  }
+  const displayText = composed.groupChatCode ? `${composed.text}\n${composed.groupChatCode}` : composed.text;
+  const ok = await steps.post(target.noteId, composed.text, composed.groupChatCode);
+  if (!ok) {
+    return { outcome: 'post_failed', noteId: target.noteId, text: displayText, searchAttempts: attempts, reason: 'comment not verified posted' };
+  }
+  await steps.recordCommented(target.noteId);
+  log.log(`[targeted-comment] 已评论 note=${target.noteId}（${attempts} 次搜索定位）`);
+  return { outcome: 'commented', noteId: target.noteId, text: displayText, searchAttempts: attempts };
+}

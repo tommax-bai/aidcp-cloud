@@ -1976,6 +1976,58 @@ async function main(): Promise<void> {
           // 精选内容后台管理（change curated-content-admin-page）。同一精选语料 store 实例：读=按账号列表/筛选面、写=删单条/清空壳行。
           // init 失败留 undefined 时面板自然 503，绝不崩边-云闭环。
           curatedContent: curatedContentStore,
+          // 精选笔记行级定向动作（change curated-note-actions）：参照洗稿创作 + 定向评论（内容/带群）。
+          // HTTP 只回**触发态**（生成段可达数分钟，不可同步等）；终态沿既有渠道（发布=待审草稿+人审卡+异步结果卡、
+          // 评论=人审卡+定向终态结果卡）。域内拒绝回 triggered=false+机器原因码，绝不染绿。
+          curatedActions: {
+            createPostFromNote: async (accountId, row) => {
+              if (!publishScheduler) return { triggered: false, reason: 'publish_unready' };
+              if (publishScheduler.isBusy()) return { triggered: false, reason: 'publish_busy' };
+              if (personaStore.getForAccount(accountId) === null) return { triggered: false, reason: 'needs_persona' };
+              if (!(row.body ?? '').trim()) return { triggered: false, reason: 'empty_body' };
+              // fire-and-forget：触发后异步补飞书结果卡（诚实三态，镜像 /publish 回执语义；成功终态=人审卡本身，不重复报绿）。
+              void publishScheduler
+                .triggerManual(accountId, {
+                  referenceNote: {
+                    sourceId: row.sourceId,
+                    title: row.title ?? '',
+                    body: row.body ?? '',
+                    topics: row.topics,
+                    ...(row.author ? { author: row.author } : {}),
+                  },
+                })
+                .then(async (o) => {
+                  // 只在「没走到人审卡」时补卡（未触发黄 / 失败红 / 跳过黄）；进人审（pending_approval 等）由人审卡自证，不双卡。
+                  let receipt: { ok: boolean; level: 'success' | 'warning' | 'error'; title: string; message: string } | null = null;
+                  if (o.result !== 'triggered') {
+                    receipt = { ok: false, level: 'warning', title: '参照创作未触发', message: `账号 \`${accountId}\` 未触发：${o.reason}` };
+                  } else if (o.status === 'failed' || o.status === 'timeout') {
+                    receipt = { ok: false, level: 'error', title: '参照创作编排失败', message: `账号 \`${accountId}\` 编排状态 ${o.status}${o.failureReason ? `\n原因：${o.failureReason}` : ''}` };
+                  } else if (o.status === 'skipped') {
+                    receipt = { ok: false, level: 'warning', title: '参照创作未产出', message: `账号 \`${accountId}\` 编排状态 skipped${o.failureReason ? `（${o.failureReason}）` : ''}` };
+                  }
+                  if (!receipt) return;
+                  const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
+                  if (!chatId) return;
+                  await messenger.sendCard(
+                    chatId,
+                    buildCommandResultCard({ command: '参照创作', ok: receipt.ok, level: receipt.level, title: receipt.title, message: receipt.message, accountId }),
+                  );
+                })
+                .catch((err) => console.warn(`[curated-actions] 参照创作编排异常 account=${accountId}：${(err as Error).message}`));
+              return { triggered: true }; // 触发已发起；HTTP 立即回触发态
+
+            },
+            commentOnNote: async (accountId, row, withGroup) => {
+              if (!commentScheduler) return { triggered: false, reason: 'comment_unready' };
+              const r = await commentScheduler.triggerTargeted(
+                accountId,
+                { noteId: row.sourceId, title: row.title ?? '' },
+                { injectGroup: withGroup },
+              );
+              return r.ok ? { triggered: true } : { triggered: false, reason: r.reason ?? 'rejected' };
+            },
+          },
           // 告警手动解决（change alert-resolution-by-id）：复用同一告警存储单例（上方 L811 构造，init 失败为 undefined）。
           // 面板按 alert_id 勾销单条告警；未注入时路由自然 503。只闭合日志行，绝不碰风控单写 / edge 恢复。
           alertStore,

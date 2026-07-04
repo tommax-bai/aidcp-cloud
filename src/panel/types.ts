@@ -8,7 +8,7 @@
 
 import type { RiskController, RiskQuotaLevel, RiskAction, SessionInteractionBudget } from '../risk/index.js';
 import type { ConceptStore, BotChatStore } from '../cache/index.js';
-import type { CuratedContentType, CuratedPanelListResult, CuratedFacets } from '../cache/index.js';
+import type { CuratedContentType, CuratedPanelListResult, CuratedPanelRow, CuratedFacets } from '../cache/index.js';
 import type { PublishLogStore, EditDraftPatch, EditDraftResult } from '../publish-agent/publish-log-store.js';
 import type { SetGroupLabelResult, SetGroupChatInfoResult } from '../account-store.js';
 import type {
@@ -206,6 +206,12 @@ export interface PanelDeps {
    */
   curatedContent?: PanelCuratedContent;
   /**
+   * 精选笔记行级定向动作（change curated-note-actions）。未注入则相应 POST 端点返回 503。
+   * 两动作均为**触发态**回执（triggered/reason），不是成功态；终态沿既有渠道（发布=内容页草稿+飞书人审卡、
+   * 评论=飞书人审卡+终态结果卡）。执行账号固定=行归属账号；域内拒绝以稳定机器原因码回 triggered=false，绝不染绿。
+   */
+  curatedActions?: PanelCuratedActions;
+  /**
    * 告警手动解决（change alert-resolution-by-id）。未注入则 `POST /api/alerts/:id/resolve` 返回 503。
    * 复用 main() 已构造的告警存储单例（同 raise/resolveByEdge 的所有者）。
    * 红线：只 UPDATE alerts.resolved_at 闭合日志行——绝不碰风控状态单写（applySignal/setQuotaLevel/risk_state）、
@@ -254,6 +260,27 @@ export interface PanelCuratedContent {
   deleteOne(accountId: string, id: number): Promise<number>;
   /** 清空正文壳行（按账号）；回真实清理条数。 */
   clearEmptyBody(accountId: string): Promise<number>;
+  /** 读单行（行级动作用，change curated-note-actions）：account_id 进 WHERE 防越权；未命中/缺表 → null。 */
+  getOneForAccount(id: number, accountId: string): Promise<CuratedPanelRow | null>;
+}
+
+// ── 精选笔记行级定向动作（change curated-note-actions）──────────────────────────
+
+/**
+ * 动作触发态回执：console `src/types/api.ts` 的 CuratedActionReceipt 镜像此 DTO。
+ * triggered=false 时 reason 为稳定机器原因码（empty_body / note_only / needs_persona / publish_busy /
+ * edge_offline / running / group_code_missing / already_commented / …），console 映射中文提示。
+ */
+export interface CuratedActionReceipt {
+  triggered: boolean;
+  reason?: string;
+}
+
+export interface PanelCuratedActions {
+  /** 参照洗稿创作：以精选笔记行为参照触发发布链生成草稿（走既有飞书人审+下发，AC-PUB 不短路）。 */
+  createPostFromNote(accountId: string, row: CuratedPanelRow): Promise<CuratedActionReceipt>;
+  /** 定向评论：搜索定位该笔记后评论（withGroup=追加账号群聊口令，缺码 fail-closed）。 */
+  commentOnNote(accountId: string, row: CuratedPanelRow, withGroup: boolean): Promise<CuratedActionReceipt>;
 }
 
 /**

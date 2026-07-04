@@ -1337,6 +1337,62 @@ function createRequestHandler(
       sendJson(res, 200, { deleted }); // 诚实回真实清理条数（可能因机器人并发写与预览不同）
       return;
     }
+    // ── 精选笔记行级定向动作（change curated-note-actions）────────────────────────
+    // POST /api/curated/contents/:id/create-post（参照洗稿创作）与 POST /api/curated/contents/:id/comment（定向评论）。
+    // 行加载走 getOneForAccount（account_id 进 WHERE 防越权）；仅 note 行开放（comment 行未存源 noteId 无法定位）。
+    // 响应为**触发态**回执 {triggered, reason?}：域内拒绝 200+false+机器原因码；结构性错误才用 4xx/503。
+    if (method === 'POST' && url.startsWith('/api/curated/contents/') && (url.endsWith('/create-post') || url.endsWith('/comment'))) {
+      if (!deps.curatedContent || !deps.curatedActions) {
+        sendJson(res, 503, { error: 'curated_actions_unavailable' });
+        return;
+      }
+      const action = url.endsWith('/create-post') ? 'create-post' : 'comment';
+      const idRaw = decodeURIComponent(url.slice('/api/curated/contents/'.length, url.lastIndexOf('/')));
+      const id = Number(idRaw);
+      if (!Number.isInteger(id) || id <= 0) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_id' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const parsed = (body ?? {}) as { accountId?: unknown; withGroup?: unknown };
+      const accountId = typeof parsed.accountId === 'string' ? parsed.accountId.trim() : '';
+      if (!accountId) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'account_required' });
+        return;
+      }
+      const row = await deps.curatedContent.getOneForAccount(id, accountId);
+      if (!row) {
+        sendJson(res, 404, { error: 'not_found' }); // 不存在或跨账号不匹配——同一形状，绝不泄露他账号行存在性
+        return;
+      }
+      if (row.contentType !== 'note') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'note_only' });
+        return;
+      }
+      if (action === 'create-post') {
+        // 壳行红线（bot_collect(content_missing) 等）：空正文不得作洗稿参照，触发前诚实拒绝。
+        if (!(row.body ?? '').trim()) {
+          sendJson(res, 200, { triggered: false, reason: 'empty_body' });
+          return;
+        }
+        sendJson(res, 200, await deps.curatedActions.createPostFromNote(accountId, row));
+        return;
+      }
+      if (!(row.title ?? '').trim()) {
+        // 定向评论靠标题搜索定位：无标题无从搜起。
+        sendJson(res, 200, { triggered: false, reason: 'empty_title' });
+        return;
+      }
+      const withGroup = parsed.withGroup === true;
+      sendJson(res, 200, await deps.curatedActions.commentOnNote(accountId, row, withGroup));
+      return;
+    }
     if (method === 'GET' && url === '/api/curated/contents') {
       if (!deps.curatedContent) {
         sendJson(res, 503, { error: 'curated_unavailable' });
