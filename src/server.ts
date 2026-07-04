@@ -1415,6 +1415,8 @@ async function main(): Promise<void> {
       pacingFloors: pacingConfigStore,
       // 互动前风控闸：按该连接真实账号的 controller 判定（不再钉死 default）。被拒诚实跳过。
       canInteract: (action) => ctx.controller.canDo(action),
+      // 浏览前风控闸：view 配额耗尽时不再打开下一篇笔记，避免事后 record('view') 才背压。
+      canView: () => ctx.controller.canDo('view'),
       // 评论人审端口（env 闸开启时注入；未开启 → 评论一律诚实跳过、不发）。
       ...(commentApprovalEnabled ? { commentApproval } : {}),
       // 评论 / 评论赞当日配额预闸：按该账号 controller 当日剩余。

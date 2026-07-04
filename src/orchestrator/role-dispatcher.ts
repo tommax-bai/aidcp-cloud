@@ -115,6 +115,11 @@ export interface RoleDispatcherOptions {
    */
   canInteract?: (action: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like') => boolean;
   /**
+   * 浏览前风控闸：下发 open_note 前判定是否允许新增一次 view。缺省始终允许（向后兼容）。
+   * 由 server 接线为 `() => riskController.canDo('view')`。被拒则结束当前会话，不打开下一篇。
+   */
+  canView?: () => boolean;
+  /**
    * 硬暂停闸（验证码/人工接管）：边缘是否处于硬暂停态。缺省始终 false。
    * 由 server 接线为读 ws-server 的 pausedEdges（isEdgePaused）。通知准入角色据此放弃巡视——
    * 硬暂停期连帧都不发，不该再叠通知巡视。与 browseSuspended（软暂停）正交。
@@ -259,6 +264,7 @@ export class RoleDispatcher {
   private readonly getRiskStatus: () => RiskStatus;
   private readonly pacingFloors?: PacingFloorProvider;
   private readonly canInteract: (action: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like') => boolean;
+  private readonly canView: () => boolean;
   private readonly commentApproval?: CommentApprovalPort;
   private readonly getCommentDailyRemaining?: () => number;
   private readonly getCommentLikeDailyRemaining?: () => number;
@@ -349,6 +355,7 @@ export class RoleDispatcher {
     this.getRiskStatus = options.getRiskStatus ?? (() => 'normal');
     this.pacingFloors = options.pacingFloors;
     this.canInteract = options.canInteract ?? (() => true);
+    this.canView = options.canView ?? (() => true);
     this.commentApproval = options.commentApproval;
     this.getCommentDailyRemaining = options.getCommentDailyRemaining;
     this.getCommentLikeDailyRemaining = options.getCommentLikeDailyRemaining;
@@ -767,6 +774,13 @@ export class RoleDispatcher {
       void this.onSessionRejected?.(this.currentAccountId, 'needs_persona_setup');
       return false;
     }
+    if (!this.canView()) {
+      console.warn(
+        `[RoleDispatcher] 账号 ${this.currentAccountId} view 配额已耗尽 → 拒绝启动浏览会话（view_quota_exhausted）`,
+      );
+      void this.onSessionRejected?.(this.currentAccountId, 'view_quota_exhausted');
+      return false;
+    }
     return true;
   }
 
@@ -940,6 +954,13 @@ export class RoleDispatcher {
     // 仅「正常结束」且续场特性已开（注入提供者）才安排休息+续场。
     if (opts?.autoResumeEligible) this.armRestTimer(account, this.takePendingAutoResumeInMs());
     else this.pendingAutoResumeInMs = undefined;
+  }
+
+  private endForViewQuota(): void {
+    const reason = 'view_quota_exhausted';
+    console.log(`[RoleDispatcher] view 配额已耗尽 → 结束当前浏览会话（account=${this.currentAccountId}）`);
+    this.sendCommand({ action: 'session.end', reason });
+    this.endSession(reason, { autoResumeEligible: true });
   }
 
   // ─── 自动续场（change session-auto-resume-with-excursions）─────────────────────
@@ -1339,6 +1360,10 @@ export class RoleDispatcher {
 
       // 角色产出事件 → Edge 指令翻译
       this.eventBus.on('content.valuable', (payload) => {
+        if (!this.canView()) {
+          this.endForViewQuota();
+          return;
+        }
         // 带上 noteId：edge 据此在「当前快照」里按稳定主键定位目标卡。
         // 否则 feed 在云端决策与 edge 执行之间滚动后，纯 index 寻址会开成同序号上的邻座（stale index）。
         // 熟悉度折扣：返回 feed 后再次打开一张近期已评估过的卡片 → 思考时间降至 1/3（首次打开仍全量）。

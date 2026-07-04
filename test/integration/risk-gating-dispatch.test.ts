@@ -19,7 +19,10 @@ const mockSoul: Soul = {
 };
 const mockLlm = { complete: async () => 'pass' };
 
-function setup(canInteract: (a: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like') => boolean) {
+function setup(
+  canInteract: (a: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like') => boolean,
+  opts: { canView?: () => boolean } = {},
+) {
   const commands: EdgeCommand[] = [];
   const bus = new EventBus();
   const d = new RoleDispatcher({
@@ -27,6 +30,7 @@ function setup(canInteract: (a: 'like' | 'collect' | 'follow' | 'comment' | 'com
     llm: mockLlm,
     eventBus: bus,
     canInteract,
+    canView: opts.canView,
     sendCommand: (c) => commands.push(c),
     clock: () => 0,
   });
@@ -36,6 +40,7 @@ function setup(canInteract: (a: 'like' | 'collect' | 'follow' | 'comment' | 'com
 }
 
 const actionsOf = (commands: EdgeCommand[]) => commands.map((c) => c.action);
+const valuable = { index: 0, noteId: 'n1', title: 't', confidence: 0.9, sourcePageType: 'feed' as const, reason: 'test', ts: 0 };
 
 describe('RoleDispatcher 互动风控闸', () => {
   it('canInteract=false：like/collect/follow 全部不下发，scroll 仍下发', () => {
@@ -71,5 +76,43 @@ describe('RoleDispatcher 互动风控闸', () => {
 
     assert.ok(actionsOf(commands).includes('like'), 'like 应放行');
     assert.ok(!actionsOf(commands).includes('follow'), 'follow 应被拦');
+  });
+
+  it('canView=false：content.valuable 不下发 open_note，并结束会话', () => {
+    const { bus, commands } = setup(() => true, { canView: () => false });
+
+    bus.emit('content.valuable', valuable);
+
+    assert.ok(!actionsOf(commands).includes('open_note'), 'view 配额拒绝时不得打开下一篇');
+    assert.ok(actionsOf(commands).includes('session.end'), 'view 配额拒绝时应结束当前会话');
+  });
+
+  it('canView=true：content.valuable 正常下发 open_note', () => {
+    const { bus, commands } = setup(() => true, { canView: () => true });
+
+    bus.emit('content.valuable', valuable);
+
+    assert.ok(actionsOf(commands).includes('open_note'), 'view 配额放行时应正常打开笔记');
+  });
+
+  it('edge.hello 启动入口受 canView 闸约束', () => {
+    const commands: EdgeCommand[] = [];
+    const bus = new EventBus();
+    const d = new RoleDispatcher({
+      soul: mockSoul,
+      llm: mockLlm,
+      eventBus: bus,
+      canInteract: () => true,
+      canView: () => false,
+      sendCommand: (c) => commands.push(c),
+      clock: () => 0,
+    });
+    d.setup();
+
+    bus.emit('edge.hello', { edgeId: 'edge-1', accountId: 'acct-1', ts: 0 });
+    bus.emit('content.valuable', valuable);
+
+    assert.equal(d.active, false, 'view 配额拒绝时不应启动浏览会话');
+    assert.equal(commands.length, 0, '会话未启动时不应响应 content.valuable 下发命令');
   });
 });
