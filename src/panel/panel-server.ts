@@ -167,7 +167,9 @@ function createRequestHandler(
         deps.panelStore.likeRate(),
         deps.panelStore.listAccounts(),
         deps.panelStore.todayPublishCount(),
-        deps.panelStore.listAlerts({ limit: 50 }),
+        // merge-monitor-into-dashboard：console 监控页并入首页后，summary 成为告警唯一读口，
+        // 上限对齐被退役的独立告警流（GET /api/alerts 的 100），避免可见告警静默减半。
+        deps.panelStore.listAlerts({ limit: 100 }),
       ]);
       // 每账号补当前 day 窗口生效上限 + 已撞顶动作（change decouple-quota-hit-from-risk）：经 registry
       // （缓存 controller）现读 effectiveQuotas().day，随风控态/档位变化；只读、绝不写风控态；拿不到诚实缺省。
