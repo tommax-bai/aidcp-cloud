@@ -99,6 +99,14 @@ test('超 CAP → invalid_value', async () => {
   assert.deepEqual(res, { ok: false, reason: 'invalid_value' });
 });
 
+test('content_read 允许内容停留类的 90s 上限（不按 15s gate CAP 拦截）', async () => {
+  const { store, setCalls } = fakeStore();
+  const panel = createPacingConfigPanel({ store });
+  const res = await panel.setPacing({ operation: 'content_read', minMs: 2500, maxMs: 90_000 }, 'alice');
+  assert.ok(res.ok);
+  assert.deepEqual(setCalls[0], { op: 'content_read', minMs: 2500, maxMs: 90_000 });
+});
+
 test('两值都缺 → no_valid_fields', async () => {
   const { store } = fakeStore();
   const panel = createPacingConfigPanel({ store });

@@ -9,6 +9,7 @@ import {
   buildPacingDefaults,
   DWELL_FLOOR_MS,
   FEED_FLOOR,
+  type PacingFloorProvider,
 } from '../src/risk/index.js';
 
 test('tempo 随风控状态单调放慢：normal < warned < restricted', () => {
@@ -47,6 +48,14 @@ test('computeDwellMs：风控状态降级时中心值单调放大（同内容）
 test('computeDwellMs：上限截断（超长文不超过 cap）', () => {
   const dwell = computeDwellMs({ textLen: 1_000_000, mode: 'read', status: 'restricted', progress: 1 });
   assert.ok(dwell <= 90_000, `dwell(${dwell}) 应 ≤ cap`);
+});
+
+test('computeDwellMs：正文阅读/扫读使用后台配置夹点', () => {
+  const pacing: PacingFloorProvider = {
+    floorFor: (op) => (op === 'content_read' ? { minMs: 10_000, maxMs: 12_000 } : { minMs: 2500, maxMs: 5000 }),
+  };
+  const dwell = computeDwellMs({ textLen: 0, mode: 'read', status: 'normal', progress: 0.3, pacing });
+  assert.equal(dwell, 10_000);
 });
 
 test('computeThinkMs：状态降级单调放大', () => {
@@ -110,6 +119,14 @@ test('computeFeedFloorMs：整屏换新封顶 capMs', () => {
   // 单调不降且不超过封顶
   const mid = computeFeedFloorMs({ newCount: 8, status: 'normal', progress: 0.3 });
   assert.ok(mid <= FEED_FLOOR.capMs && mid >= computeFeedFloorMs({ newCount: 3, status: 'normal', progress: 0.3 }));
+});
+
+test('computeFeedFloorMs：Feed卡片阅读使用后台配置的每卡值与封顶', () => {
+  const pacing: PacingFloorProvider = {
+    floorFor: (op) => (op === 'feed_card_read' ? { minMs: 1000, maxMs: 2500 } : { minMs: 1500, maxMs: 4000 }),
+  };
+  assert.equal(computeFeedFloorMs({ newCount: 2, status: 'normal', progress: 0.3, pacing }), 2000);
+  assert.equal(computeFeedFloorMs({ newCount: 5, status: 'normal', progress: 0.3, pacing }), 2500);
 });
 
 test('computeFeedFloorMs：风控降级放大（warned > normal，同新卡数、未封顶）', () => {

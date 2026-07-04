@@ -8,6 +8,7 @@ import {
   OP_MIN_FLOOR,
   CAP_MS,
   PACING_OPS,
+  maxFloorForOp,
   type PacingFloorProvider,
 } from '../src/risk/pacing.js';
 import { IDLE_NUDGE_MIN_MS } from '../src/risk/resume-limits.js';
@@ -50,13 +51,14 @@ test('buildPacingSnapshot：provider 漏夹的越界值 → 快照防御性二�
   for (const op of PACING_OPS) {
     const f = snap.opFloorsMs[op]!;
     assert.ok(f.minMs >= OP_MIN_FLOOR[op] && f.minMs > 0, `${op} 快照 min 恒 ≥ 非零下限`);
-    assert.ok(f.maxMs <= CAP_MS, `${op} 快照 max 恒 ≤ CAP`);
+    assert.ok(f.maxMs <= maxFloorForOp(op), `${op} 快照 max 恒 ≤ 类别 CAP`);
   }
 });
 
 test('clampFloorRange：0→下限、超界→CAP、越序→抬 max、合法→原样', () => {
   assert.deepEqual(clampFloorRange('action', 0, 0), { minMs: OP_MIN_FLOOR.action, maxMs: OP_MIN_FLOOR.action });
   assert.deepEqual(clampFloorRange('scroll', 999999, 999999), { minMs: CAP_MS, maxMs: CAP_MS });
+  assert.deepEqual(clampFloorRange('content_read', 999999, 999999), { minMs: 90_000, maxMs: 90_000 });
   const ord = clampFloorRange('detail_dwell', 5000, 2000);
   assert.ok(ord.maxMs >= ord.minMs);
   assert.deepEqual(clampFloorRange('card_gap', 3000, 7000), { minMs: 3000, maxMs: 7000 });
@@ -77,7 +79,8 @@ test('每 op 防呆下限 < 内置默认 min < 内置默认 max ≤ CAP（配置
     assert.ok(OP_MIN_FLOOR[op] > 0, `${op} 防呆下限须 > 0`);
     assert.ok(OP_MIN_FLOOR[op] <= BUILTIN_FLOOR[op].minMs, `${op} 内置 min 须 ≥ 防呆下限`);
     assert.ok(BUILTIN_FLOOR[op].minMs < BUILTIN_FLOOR[op].maxMs, `${op} 内置区间须有展宽`);
-    assert.ok(BUILTIN_FLOOR[op].maxMs <= CAP_MS, `${op} 内置 max 须 ≤ CAP`);
+    assert.ok(BUILTIN_FLOOR[op].maxMs <= maxFloorForOp(op), `${op} 内置 max 须 ≤ 类别 CAP`);
+    assert.ok(maxFloorForOp(op) < IDLE_NUDGE_MIN_MS, `${op} 类别 CAP 须低于 idle 轻推下限`);
     // 内置默认满足 facade 的 1.5× 最小展宽（自身也是合法配置）。
     assert.ok(BUILTIN_FLOOR[op].maxMs >= BUILTIN_FLOOR[op].minMs * 1.5, `${op} 内置默认须满足 1.5× 最小展宽`);
   }

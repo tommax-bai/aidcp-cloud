@@ -90,6 +90,9 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
         scroll: { minMs: 500, maxMs: 1500 },
         card_gap: { minMs: 3000, maxMs: 7000 },
         detail_dwell: { minMs: 2500, maxMs: 5000 },
+        feed_card_read: { minMs: 450, maxMs: 7000 },
+        content_glance: { minMs: 2500, maxMs: 90000 },
+        content_read: { minMs: 2500, maxMs: 90000 },
       },
     };
     const welcome: WelcomePayload = { sessionId: 's-1', serverVersion: 'v-test', pacing };
@@ -103,5 +106,8 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     assert.deepEqual(p!.opFloorsMs.scroll, { minMs: 500, maxMs: 1500 });
     assert.deepEqual(p!.opFloorsMs.card_gap, { minMs: 3000, maxMs: 7000 });
     assert.deepEqual(p!.opFloorsMs.detail_dwell, { minMs: 2500, maxMs: 5000 });
+    assert.deepEqual(p!.opFloorsMs.feed_card_read, { minMs: 450, maxMs: 7000 });
+    assert.deepEqual(p!.opFloorsMs.content_glance, { minMs: 2500, maxMs: 90000 });
+    assert.deepEqual(p!.opFloorsMs.content_read, { minMs: 2500, maxMs: 90000 });
   });
 });

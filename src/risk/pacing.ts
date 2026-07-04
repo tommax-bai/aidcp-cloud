@@ -45,18 +45,26 @@ export const DWELL_FLOOR_MS = { min: 2500, max: 5000 } as const;
 //
 // 语义：不是"操作后无条件附加固定等待"，而是"两次操作间的最小间隔下限"。数值全局后台可配、
 // 存 PG（pacing_floor_config），经 welcome 握手下发（PacingSnapshotPayload），边缘热加载。
-// 本模块只持写死默认 + 防呆下限 + CAP + 权威 clamp + 快照组装；落库/内存镜像由
+// 本模块只持写死默认 + 防呆下限 + 类别上限 + 权威 clamp + 快照组装；落库/内存镜像由
 // src/config/pacing-config-store.ts 实现 PacingFloorProvider。
 
 /**
  * 全局操作兜底 floor 上限（毫秒）。看门狗 lockstep 不变量：结构上 MUST ≪ 空闲看门狗轻推下限
- * `IDLE_NUDGE_MIN_MS(200_000)`——任何 op 有效兜底恒 ≤ 15s，单次前台等待永不误触 idle 看门狗。
- * 这是代码常量而非配置，配再大也被夹到此值；由 resume-limits 不变量测试断言该常量关系（tripwire）。
+ * `IDLE_NUDGE_MIN_MS(200_000)`——前台 gate op 有效兜底恒 ≤ 15s，阅读停留类恒低于看门狗轻推下限。
+ * 这是代码常量而非配置，配再大也被夹到类别上限；由 resume-limits 不变量测试断言该常量关系（tripwire）。
  */
 export const CAP_MS = 15_000;
 
-/** 四类操作的稳定枚举（与协议 PacingOp 逐字对齐；遍历/白名单用）。 */
-export const PACING_OPS: readonly PacingOp[] = ['action', 'scroll', 'card_gap', 'detail_dwell'] as const;
+/** 各类 pacing 操作的稳定枚举（与协议 PacingOp 逐字对齐；遍历/白名单用）。 */
+export const PACING_OPS: readonly PacingOp[] = [
+  'action',
+  'scroll',
+  'card_gap',
+  'detail_dwell',
+  'feed_card_read',
+  'content_glance',
+  'content_read',
+] as const;
 
 /**
  * 每类操作的非零防呆下限（毫秒，= 读出口 clamp 下界）。
@@ -68,7 +76,24 @@ export const OP_MIN_FLOOR: Record<PacingOp, number> = {
   scroll: 300,
   card_gap: 1000,
   detail_dwell: 1000,
+  feed_card_read: 100,
+  content_glance: 1000,
+  content_read: 1000,
 } as const;
+
+export const OP_MAX_FLOOR: Record<PacingOp, number> = {
+  action: CAP_MS,
+  scroll: CAP_MS,
+  card_gap: CAP_MS,
+  detail_dwell: CAP_MS,
+  feed_card_read: 30_000,
+  content_glance: READ.capMs,
+  content_read: READ.capMs,
+} as const;
+
+export function maxFloorForOp(op: PacingOp): number {
+  return OP_MAX_FLOOR[op];
+}
 
 /**
  * 每类操作的内置默认区间（毫秒）——表空/缺行/字段非法时逐项回落此值（零回归基线，= 现役量级）。
@@ -80,12 +105,15 @@ export const BUILTIN_FLOOR: Record<PacingOp, PacingFloorPayload> = {
   scroll: { minMs: 500, maxMs: 1500 },
   card_gap: { minMs: 3000, maxMs: 7000 },
   detail_dwell: { minMs: DWELL_FLOOR_MS.min, maxMs: DWELL_FLOOR_MS.max },
+  feed_card_read: { minMs: 450, maxMs: 7000 },
+  content_glance: { minMs: DWELL_FLOOR_MS.min, maxMs: READ.capMs },
+  content_read: { minMs: DWELL_FLOOR_MS.min, maxMs: READ.capMs },
 } as const;
 
 /**
  * 兜底 floor 提供者（config 层实现，风控层只持接口）：给定操作类别返回**已夹逼**的生效区间。
  * 由 `PacingConfigStore.floorFor` 实现（同步读内存镜像、缺行/非法逐项回落非零内置默认、
- * 在读出口 clamp 到 `[OP_MIN_FLOOR[op], CAP_MS]`、永不抛）。供 `buildPacingSnapshot` 现读（PUT 后无需重启）。
+ * 在读出口 clamp 到 `[OP_MIN_FLOOR[op], 类别上限]`、永不抛）。供 `buildPacingSnapshot` 现读（PUT 后无需重启）。
  */
 export interface PacingFloorProvider {
   floorFor(op: PacingOp): PacingFloorPayload;
@@ -93,15 +121,26 @@ export interface PacingFloorProvider {
 
 /**
  * 权威读出口夹逼（第二道夹，`floorFor` 与快照组装共用此单一实现）：把任意区间夹到
- * `[OP_MIN_FLOOR[op], CAP_MS]`，并保证 `min ≤ max`（越序时 max 抬到 min）。
+ * `[OP_MIN_FLOOR[op], 类别上限]`，并保证 `min ≤ max`（越序时 max 抬到 min）。
  * 负数/超界/零展宽在此被结构性夹成非零合法区间——绝不零延迟、绝不逼近看门狗。
  */
 export function clampFloorRange(op: PacingOp, minMs: number, maxMs: number): PacingFloorPayload {
   const lo = OP_MIN_FLOOR[op];
-  const min = Math.round(clamp(minMs, lo, CAP_MS));
-  let max = Math.round(clamp(maxMs, lo, CAP_MS));
+  const hi = maxFloorForOp(op);
+  const min = Math.round(clamp(minMs, lo, hi));
+  let max = Math.round(clamp(maxMs, lo, hi));
   if (max < min) max = min;
   return { minMs: min, maxMs: max };
+}
+
+function floorForComputation(op: PacingOp, provider?: PacingFloorProvider): PacingFloorPayload {
+  if (!provider) return BUILTIN_FLOOR[op];
+  try {
+    const f = provider.floorFor(op);
+    return clampFloorRange(op, f.minMs, f.maxMs);
+  } catch {
+    return BUILTIN_FLOOR[op];
+  }
 }
 
 /**
@@ -171,6 +210,7 @@ export interface DwellInput {
   status: RiskStatus;
   /** 会话进度 0..1 */
   progress: number;
+  pacing?: PacingFloorProvider;
 }
 
 /**
@@ -182,7 +222,8 @@ export function computeDwellMs(input: DwellInput): number {
   const raw = READ.baseMs + READ.kTextMsPerChar * Math.max(0, textLen) + READ.kImgMs * Math.max(0, imgCount);
   const scaled = mode === 'glance' ? raw * GLANCE_FACTOR : raw;
   const withTempo = scaled * tempoForStatus(status) * fatigueMultiplier(progress);
-  return Math.round(clamp(withTempo, DWELL_FLOOR_MS.min, READ.capMs));
+  const floor = floorForComputation(mode === 'glance' ? 'content_glance' : 'content_read', input.pacing);
+  return Math.round(clamp(withTempo, floor.minMs, floor.maxMs));
 }
 
 export interface ThinkInput {
@@ -215,6 +256,7 @@ export interface FeedFloorInput {
   status: RiskStatus;
   /** 会话进度 0..1 */
   progress: number;
+  pacing?: PacingFloorProvider;
 }
 
 /**
@@ -224,8 +266,9 @@ export interface FeedFloorInput {
 export function computeFeedFloorMs(input: FeedFloorInput): number {
   const n = Math.max(0, Math.floor(input.newCount));
   if (n === 0) return 0;
-  const withTempo = FEED_FLOOR.perCardMs * n * tempoForStatus(input.status) * fatigueMultiplier(input.progress);
-  return Math.round(clamp(withTempo, 0, FEED_FLOOR.capMs));
+  const floor = floorForComputation('feed_card_read', input.pacing);
+  const withTempo = floor.minMs * n * tempoForStatus(input.status) * fatigueMultiplier(input.progress);
+  return Math.round(clamp(withTempo, 0, floor.maxMs));
 }
 
 /** 组装下发给 session.budget 的极薄默认块（仅兜底用）。 */

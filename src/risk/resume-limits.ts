@@ -31,9 +31,9 @@ export const DEFAULT_IDLE_END_MS = 3_600_000;
  * 轻推阈值下限（毫秒）。change raise-model-call-timeouts-for-thinking-models：MUST ≥ 单次模型调用天花板（180s），
  * 使运营经后台绝不能把轻推配到低于一次合法模型调用（旧 91s 只挡详情页停留上限，已不足以挡 thinking 决策）。
  *
- * change pacing-floor-config-min-interval 看门狗 lockstep 不变量：MUST 严格大于操作兜底 floor 上限
- * `CAP_MS(15_000)`（src/risk/pacing.ts）——任何 op 有效兜底恒 ≤ 15s ≪ 本值，单次前台最小间隔等待永不误触
- * idle 看门狗杀会话。下调本值 / 上调 CAP_MS 前 MUST 守此关系；由不变量测试断言该常量关系（tripwire）。
+ * change pacing-floor-config-min-interval 看门狗 lockstep 不变量：MUST 严格大于前台操作 gate floor 上限
+ * `CAP_MS(15_000)`（src/risk/pacing.ts）——单次前台最小间隔等待恒 ≤ 15s ≪ 本值，永不误触 idle 看门狗。
+ * 内容阅读停留另有 90s 内容模型上限，也必须低于本下限；由不变量测试断言这些常量关系（tripwire）。
  */
 export const IDLE_NUDGE_MIN_MS = 200_000;
 

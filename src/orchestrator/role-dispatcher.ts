@@ -56,7 +56,7 @@ import { NotificationReturnHome } from '../agents/notification-return-home.js';
 import { ExcursionResumer } from '../agents/excursion-resumer.js';
 import type { BaseRole } from '../agents/base-role.js';
 import type { Soul } from '../soul/types.js';
-import { computeDwellMs, computeThinkMs, computeFeedFloorMs } from '../risk/pacing.js';
+import { computeDwellMs, computeThinkMs, computeFeedFloorMs, type PacingFloorProvider } from '../risk/pacing.js';
 import { SearchFrequencyLimiter } from '../risk/search-frequency-limiter.js';
 import { InteractionGuard, isGuardedInteraction, type GuardAction } from '../risk/interaction-guard.js';
 import { ActionCooldownGate, type CooldownAction } from '../risk/action-cooldown.js';
@@ -106,6 +106,8 @@ export interface RoleDispatcherOptions {
    * 由 server 接线为 `() => riskController.getState().status`。
    */
   getRiskStatus?: () => RiskStatus;
+  /** 后台节奏兜底配置 provider；用于内容阅读/feed 新卡阅读的云端时长计算。 */
+  pacingFloors?: PacingFloorProvider;
   /**
    * 互动前风控闸：下发 like/collect/follow 前判定是否允许。缺省始终允许（向后兼容）。
    * 由 server 接线为 `(action) => riskController.canDo(action)`。被拒则诚实跳过（不下发、不扣 budget）。
@@ -240,6 +242,7 @@ export class RoleDispatcher {
   private readonly rawSendCommand: (command: EdgeCommand) => void;
   private readonly clock: () => number;
   private readonly getRiskStatus: () => RiskStatus;
+  private readonly pacingFloors?: PacingFloorProvider;
   private readonly canInteract: (action: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like') => boolean;
   private readonly commentApproval?: CommentApprovalPort;
   private readonly getCommentDailyRemaining?: () => number;
@@ -325,6 +328,7 @@ export class RoleDispatcher {
     this.rawSendCommand = options.sendCommand;
     this.clock = options.clock ?? Date.now;
     this.getRiskStatus = options.getRiskStatus ?? (() => 'normal');
+    this.pacingFloors = options.pacingFloors;
     this.canInteract = options.canInteract ?? (() => true);
     this.commentApproval = options.commentApproval;
     this.getCommentDailyRemaining = options.getCommentDailyRemaining;
@@ -445,6 +449,7 @@ export class RoleDispatcher {
       mode,
       status: this.getRiskStatus(),
       progress: this.progress(),
+      pacing: this.pacingFloors,
     });
   }
 
@@ -1329,6 +1334,7 @@ export class RoleDispatcher {
             newCount,
             status: this.getRiskStatus(),
             progress: this.progress(),
+            pacing: this.pacingFloors,
           });
         }
         void this.contentEvaluator?.evaluate(this.sessionContext.sourcePageType);

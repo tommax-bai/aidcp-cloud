@@ -119,7 +119,14 @@ export interface HelloPayload {
  * 语义不是"操作后无条件附加固定等待"，而是"两次操作间的最小间隔下限"——边缘记上次操作
  * 完成时刻，收到下一操作时若距上次已达 floor 则立即执行（不累加、吸收云端往返），否则只补差额。
  */
-export type PacingOp = 'action' | 'scroll' | 'card_gap' | 'detail_dwell';
+export type PacingOp =
+  | 'action'
+  | 'scroll'
+  | 'card_gap'
+  | 'detail_dwell'
+  | 'feed_card_read'
+  | 'content_glance'
+  | 'content_read';
 
 /** 单类操作的兜底区间（毫秒）；边缘据此现采样目标、只补差额。值已含云端读出口 clamp 护栏、非零。 */
 export interface PacingFloorPayload {
