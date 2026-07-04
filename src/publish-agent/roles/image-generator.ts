@@ -1,7 +1,11 @@
+import crypto from 'node:crypto';
 import { BasePublishRole } from './base-role.js';
 import type { RoleConfig } from './base-role.js';
+import type { PipelineContext } from '../pipeline-context.js';
 import type { PipelineFields, ImagePlan, ImageDirective } from '../types.js';
 import type { ImageProvider, ImageResult } from '../image-provider.js';
+import type { ObjectStore } from '../../storage/object-store.js';
+import { relocateImageToStore } from '../../storage/object-store.js';
 import { IMAGE_COUNT_HARD_MAX } from '../prompts.js';
 
 /**
@@ -19,10 +23,13 @@ function envInt(name: string, def: number): number {
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : def;
 }
 
-// 每图超时：MUST > 单图万相轮询总预算，否则每图超时会先于轮询 SUCCEEDED 砍断生图 → 误判无图（红线）。
-// 实装接线预算：server.ts 把 WanxiangClient 的 maxPollAttempts 接到 AIDCP_WANXIANG_MAX_POLL（默认 34）、间隔 5s
-// → 34×5s=170s。故默认取 200s（> 170s 留余量，对齐旧单图角色闸 200s）。改万相轮询预算时须同步抬高本默认。
-const DEFAULT_PER_IMAGE_TIMEOUT_MS = 200_000;
+// 每图超时：MUST > 单图万相轮询总预算 + OSS 转存预算，否则会先于「轮询 SUCCEEDED → 转存」结算前砍断 → 误判无图（红线）。
+// 预算拆解：① 万相轮询——server.ts 把 maxPollAttempts 接到 AIDCP_WANXIANG_MAX_POLL（默认 34）、间隔 5s → 34×5s=170s
+// 睡眠 + ~34 次 GET 往返（合计再几到十几秒），故生成 wall-clock 上限约 185s；② change cloud-oss-storage-integration：
+// 注入 ossUploader 后「生成 + OSS 转存」串行共享本每图超时（3.3：不拖垮发布链），转存另有 30s 内层超时。
+// 故默认取 240s（≈185s 生成上限 + 30s 转存 + 余量），避免「生成刚成功但转存被外闸砍」的尾部误丢。改任一子预算须同步调整。
+// 生图实测 25~40s、转存实测数秒，绝大多数远在预算内；仅生成拖到轮询上限的尾部才吃到余量。
+const DEFAULT_PER_IMAGE_TIMEOUT_MS = 240_000;
 const DEFAULT_MAX_IMAGES = 3;
 
 export interface ImageGeneratorDeps {
@@ -34,6 +41,15 @@ export interface ImageGeneratorDeps {
   maxImages?: number;
   /** 并发上限（缺省 env AIDCP_PUBLISH_IMAGE_CONCURRENCY，默认 = maxImages，即全并发）。 */
   concurrency?: number;
+  /**
+   * OSS 转存出口（change cloud-oss-storage-integration）。注入后每张图在生成成功后转存到 OSS、
+   * 换成稳定公网 URL；**未注入时行为与集成前完全一致（零回归）**，直接用 provider 临时 URL。
+   */
+  ossUploader?: ObjectStore;
+  /** 抓 provider 字节用的 fetch（缺省全局 fetch，测试可注入假实现脱网）。仅在 ossUploader 注入时用到。 */
+  fetchImpl?: typeof fetch;
+  /** 对象键的单次运行 token 生成器（缺省随机 hex）；记录 id 此刻尚未生成，故用运行 token 代替 recordId。 */
+  idGen?: () => string;
   clock?: () => number;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
@@ -45,11 +61,17 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
   private enableImageGeneration: boolean;
   private perImageTimeoutMs: number;
   private concurrency: number;
+  private ossUploader?: ObjectStore;
+  private fetchImpl?: typeof fetch;
+  private idGen: () => string;
 
   constructor(deps: ImageGeneratorDeps) {
     super({ logger: deps.logger, clock: deps.clock });
     this.imageProvider = deps.imageProvider;
     this.enableImageGeneration = deps.enableImageGeneration ?? true;
+    this.ossUploader = deps.ossUploader;
+    this.fetchImpl = deps.fetchImpl;
+    this.idGen = deps.idGen ?? (() => crypto.randomBytes(6).toString('hex'));
     this.perImageTimeoutMs = deps.perImageTimeoutMs ?? envInt('AIDCP_PUBLISH_PER_IMAGE_TIMEOUT_MS', DEFAULT_PER_IMAGE_TIMEOUT_MS);
     const maxImages = Math.max(1, Math.min(deps.maxImages ?? envInt('AIDCP_PUBLISH_MAX_IMAGES', DEFAULT_MAX_IMAGES), IMAGE_COUNT_HARD_MAX));
     this.concurrency = Math.max(1, Math.min(deps.concurrency ?? envInt('AIDCP_PUBLISH_IMAGE_CONCURRENCY', maxImages), maxImages));
@@ -68,17 +90,22 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     return snapshot.imagePlan!;
   }
 
-  protected async execute(input: ImagePlan): Promise<ImageDirective> {
+  protected async execute(input: ImagePlan, context: PipelineContext<PipelineFields>): Promise<ImageDirective> {
     // 不开启 / 计划不配图 / 无 prompt → 直接空 directive（诚实纯文字，交下游 executor 判 failed）。
     if (!this.enableImageGeneration || !input.wantImage || input.imagePrompts.length === 0) {
       return this.emptyDirective(input.fallbackStrategy);
     }
 
-    // 并行出图（有界并发）：每张 Promise.race(generate, 每图超时)，settle 后按规划顺序收成功 URL。
+    // 配图转存 OSS（change cloud-oss-storage-integration）：键按账号 + 单次运行 token 分层。
+    // recordId 此刻尚未生成（发布记录晚于此处落库），故用运行 token 代替 recordId 做键分组。
+    const accountId = context.snapshot().trigger?.accountId ?? 'default';
+    const runToken = this.idGen();
+
+    // 并行出图（有界并发）：每张 Promise.race(生成+转存, 每图超时)，settle 后按规划顺序收成功 URL。
     // 去第二风格源（change category-adaptive-images-and-judgment）：不再把 imageStyle 枚举传给 provider——
     // 风格已并入品类风格档写进 prompt；provider 侧再拼「，风格：<enum>」会与风格档冲突、劣化 Seedream。
-    const results = await mapWithConcurrency(input.imagePrompts, this.concurrency, (prompt) =>
-      this.generateOne(prompt),
+    const results = await mapWithConcurrency(input.imagePrompts, this.concurrency, (prompt, i) =>
+      this.generateOne(prompt, { accountId, runToken, seq: i }),
     );
     const imageUrls = results.filter((url): url is string => !!url);
 
@@ -102,24 +129,56 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     return this.emptyDirective('skip');
   }
 
-  /** 单张：Promise.race(generate, 每图超时)。超时/异常/无 URL → 诚实回 null（该张不进数组、不伪造）。 */
-  private async generateOne(prompt: string): Promise<string | null> {
+  /**
+   * 单张：Promise.race(生成+转存, 每图超时)。超时/异常/无 URL/转存失败 → 诚实回 null（该张不进数组、不伪造）。
+   * 转存（抓字节 + PUT OSS）与生成共享同一每图超时预算（承 3.3：不拖垮发布链）；转存自身另有 30s 内层超时。
+   */
+  private async generateOne(prompt: string, keyCtx: { accountId: string; runToken: string; seq: number }): Promise<string | null> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const res = await Promise.race<ImageResult>([
-        this.imageProvider.generate(prompt),
-        new Promise<ImageResult>((resolve) => {
-          timer = setTimeout(() => resolve({ url: null, error: `per-image timeout ${this.perImageTimeoutMs}ms` }), this.perImageTimeoutMs);
+      return await Promise.race<string | null>([
+        this.produceAndRelocate(prompt, keyCtx),
+        new Promise<string | null>((resolve) => {
+          timer = setTimeout(() => {
+            this.logger.warn(`[ImageGenerator] 单张超时 ${this.perImageTimeoutMs}ms，诚实落空`);
+            resolve(null);
+          }, this.perImageTimeoutMs);
         }),
       ]);
-      if (!res.url) this.logger.warn(`[ImageGenerator] 单张生图失败: ${res.error ?? 'no_url'}`);
-      return res.url ?? null;
     } catch (err) {
       this.logger.warn(`[ImageGenerator] 单张生图异常: ${err instanceof Error ? err.message : String(err)}`);
       return null;
     } finally {
       if (timer) clearTimeout(timer);
     }
+  }
+
+  /**
+   * 出图 → （若注入 ossUploader）转存 OSS 换稳定公网 URL。
+   * - 未注入 ossUploader：直接回 provider 临时 URL（**零回归**，与集成前一致）。
+   * - 注入了：转存失败（抓字节 / PUT 任一）即回 null，复用「失败那张不进数组、M=K 诚实」语义，绝不伪造 URL。
+   */
+  private async produceAndRelocate(
+    prompt: string,
+    keyCtx: { accountId: string; runToken: string; seq: number },
+  ): Promise<string | null> {
+    const res: ImageResult = await this.imageProvider.generate(prompt);
+    if (!res.url) {
+      this.logger.warn(`[ImageGenerator] 单张生图失败: ${res.error ?? 'no_url'}`);
+      return null;
+    }
+    if (!this.ossUploader) return res.url; // 未配置 OSS：零回归，直接用 provider 临时 URL
+    const keyBase = `publish/${keyCtx.accountId}/${keyCtx.runToken}/${keyCtx.seq}`;
+    const ossUrl = await relocateImageToStore(res.url, keyBase, {
+      store: this.ossUploader,
+      fetchImpl: this.fetchImpl,
+      logger: this.logger,
+    });
+    if (!ossUrl) {
+      this.logger.warn('[ImageGenerator] OSS 转存失败，该张诚实落空（M 少一张，不伪造 URL）');
+      return null;
+    }
+    return ossUrl;
   }
 
   private emptyDirective(fallbackStrategy: ImageDirective['fallbackStrategy']): ImageDirective {

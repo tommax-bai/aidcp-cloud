@@ -68,6 +68,7 @@ import { UiSnapshotService } from './comm/ui-snapshot.js';
 import { PublishOrchestrator, PublishScheduler, PublishDispatcher } from './publish-agent/index.js';
 import { WanxiangClient } from './publish-agent/wanxiang-client.js';
 import { SeedreamClient } from './publish-agent/seedream-client.js';
+import type { ObjectStore } from './storage/object-store.js';
 import {
   IMAGE_PROVIDERS,
   type ImageProviderId,
@@ -263,6 +264,38 @@ async function main(): Promise<void> {
   const dashscopeApiKey =
     (await credentialStore.getSecretForRuntime('dashscope', 'dashscope_api_key').catch(() => null)) ??
     readEnvString('DASHSCOPE_API_KEY');
+
+  // OSS 对象存储上传出口（change cloud-oss-storage-integration）：照抄 DASHSCOPE「库内优先、回退 env」范式。
+  // AccessKey/Secret 敏感 → 加密库(provider='oss')优先、env 回退；region/bucket 非敏感 → env（默认 oss-cn-beijing / aidcp）。
+  // 凭据明文仅用于构造 OSS 客户端，绝不日志化、绝不回前端；凭据齐备才构造 uploader，缺则不注入（触发配图「零回归」路径）。
+  const ossAccessKeyId =
+    (await credentialStore.getSecretForRuntime('oss', 'access_key_id').catch(() => null)) ??
+    readEnvString('OSS_ACCESS_KEY_ID');
+  const ossAccessKeySecret =
+    (await credentialStore.getSecretForRuntime('oss', 'access_key_secret').catch(() => null)) ??
+    readEnvString('OSS_ACCESS_KEY_SECRET');
+  const ossRegion = readEnvString('OSS_REGION') ?? 'oss-cn-beijing';
+  const ossBucket = readEnvString('OSS_BUCKET') ?? 'aidcp';
+  const ossInternal = readEnvString('OSS_INTERNAL') === 'true';
+  let ossUploader: ObjectStore | undefined;
+  if (ossAccessKeyId && ossAccessKeySecret) {
+    try {
+      // 动态载入：仅在配了 OSS 凭据时才把 ali-oss 依赖树拉进进程（未配置时零加载、零回归）。
+      const { createOssObjectStore } = await import('./storage/oss-client-factory.js');
+      ossUploader = createOssObjectStore({
+        accessKeyId: ossAccessKeyId,
+        accessKeySecret: ossAccessKeySecret,
+        bucket: ossBucket,
+        region: ossRegion,
+        internal: ossInternal,
+      });
+      console.log(`[aidcp-cloud] OSS 对象存储已就绪（bucket=${ossBucket} region=${ossRegion} internal=${ossInternal}）：配图将转存到稳定公网链接`);
+    } catch (err) {
+      console.warn('[aidcp-cloud] OSS 客户端构造失败（配图回退 provider 临时 URL、零回归）:', (err as Error).message);
+    }
+  } else {
+    console.log('[aidcp-cloud] 未配置 OSS 凭据（oss/access_key_id[_secret] 或 env OSS_ACCESS_KEY_ID[_SECRET]），配图沿用 provider 临时 URL');
+  }
 
   // provider 运行时映射（change model-config-volcengine-provider）：每文本厂商 key 启动期一次性解密载入
   //（库内优先、回退 env），baseUrl 取注册表默认或 env 覆盖。明文仅用于构造文本出口，绝不日志化、绝不回前端。
@@ -1344,6 +1377,9 @@ async function main(): Promise<void> {
     // 任一图片厂商密钥就绪即启用；选中厂商缺密钥时其客户端诚实失败（M 少一张、不假成功）。
     // 并行多图张数/每图超时/并发经 env 读取（AIDCP_PUBLISH_MAX_IMAGES/PER_IMAGE_TIMEOUT_MS/IMAGE_CONCURRENCY）。
     enableImageGeneration: anyImageKeyPresent,
+    // change cloud-oss-storage-integration：注入 OSS 转存出口（配了凭据才有；缺则 undefined = 配图零回归用 provider URL）。
+    // 生成成功后逐张转存 OSS 换稳定公网 URL，根治「审批超 provider TTL → 死链」；转存失败诚实落空、不伪造 URL。
+    ossUploader,
   }));
   publishOrchestrator.registerRole(new CoverSelectorRole());
   // 后处理：清洗（ContentCleaner）→ AI味分（AiFlavorScorer）/ 质量分（QualityScorer）
