@@ -64,9 +64,9 @@ export function deriveWindowQuotas(level: RiskQuotaLevel): WindowQuotas {
 
 export function scaleWindowQuotas(quotas: WindowQuotas, factor: number): WindowQuotas {
   return {
-    minute: mapQuota(quotas.minute, (_action, value) => Math.max(0, Math.floor(value * factor))),
-    hour: mapQuota(quotas.hour, (_action, value) => Math.max(0, Math.floor(value * factor))),
-    day: mapQuota(quotas.day, (_action, value) => Math.max(0, Math.floor(value * factor))),
+    minute: mapQuota(quotas.minute, (_action, value) => Math.max(0, Math.ceil(value * factor))),
+    hour: mapQuota(quotas.hour, (_action, value) => Math.max(0, Math.ceil(value * factor))),
+    day: mapQuota(quotas.day, (_action, value) => Math.max(0, Math.ceil(value * factor))),
   };
 }
 
