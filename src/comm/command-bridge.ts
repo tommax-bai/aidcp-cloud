@@ -57,7 +57,7 @@ export function edgeCommandToEnvelope(command: EdgeCommand): Envelope {
     case 'notification_back_home':
       return createEnvelope('notification.back_home', command.params ?? {});
     case 'session.end':
-      return createEnvelope('session.end', { reason: command.reason });
+      return createEnvelope('session.end', { reason: command.reason, ...command.params });
     default:
       throw new Error(`Unknown edge command action: ${(command as EdgeCommand).action}`);
   }

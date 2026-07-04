@@ -34,7 +34,7 @@ const resumeProvider: ResumeConfigProvider = {
 };
 
 function make() {
-  const commands: { action: string; reason?: string }[] = [];
+  const commands: { action: string; reason?: string; params?: Record<string, unknown> }[] = [];
   let now = 1_000_000;
   let timerFn: (() => void) | undefined;
   let timerMs: number | undefined;
@@ -101,6 +101,11 @@ describe('restore-auto-resume A①：监测体单次结束不自毁续场计时�
     );
     // 边端应收到一条 session.end（结束命令仍下发）。
     assert.ok(commandsHave(m.commands, 'session.end'), '应下发 session.end 命令给边端');
+    const end = m.commands.find((c) => c.action === 'session.end');
+    assert.ok(
+      Math.abs(Number(end?.params?.autoResumeInMs ?? 0) - 60_000) < 1_000,
+      `session.end 应携带预计续场等待时间，实得 ${JSON.stringify(end?.params)}`,
+    );
   });
 
   it('休息到点 → 真续场（会话重新活跃）', () => {

@@ -281,6 +281,8 @@ export class RoleDispatcher {
   private readonly dailyResume = new Map<string, { dayKey: string; sessions: number; browseMs: number }>();
   /** SessionMonitor 引用（供 excursion → pauseClock/resumeClock；setup 时捕获）。 */
   private sessionMonitor?: SessionMonitorRole;
+  /** 本次正常结束已对边端公布的续场休息时长；随后 armRestTimer 复用，避免 UI 与真实计时器漂移。 */
+  private pendingAutoResumeInMs: number | undefined;
   /**
    * 登录账号真实昵称采集体（change nickname-capture-on-login）：在 setup() 永久接线、独立于浏览会话，
    * 故未绑人设、被启动闸拦下的账号登录后仍能采一次真名（采集是登录引导固定步骤，不被人设闸阻断）。
@@ -875,7 +877,8 @@ export class RoleDispatcher {
     this.pendingInteractionKeys.clear();
     console.log(`[RoleDispatcher] 会话结束: ${reason ?? 'manual'}`);
     // 仅「正常结束」且续场特性已开（注入提供者）才安排休息+续场。
-    if (opts?.autoResumeEligible) this.armRestTimer(account);
+    if (opts?.autoResumeEligible) this.armRestTimer(account, this.takePendingAutoResumeInMs());
+    else this.pendingAutoResumeInMs = undefined;
   }
 
   // ─── 自动续场（change session-auto-resume-with-excursions）─────────────────────
@@ -925,17 +928,29 @@ export class RoleDispatcher {
   }
 
   /** 安排休息计时器。未注入续场提供者 → 特性关、保持旧行为（不续）。 */
-  private armRestTimer(account: string): void {
+  private armRestTimer(account: string, plannedRestMs?: number): void {
     this.cancelRestTimer();
     if (!this.resumeConfigProvider) return; // 特性未开 → 不续（零回归）。
-    const ratio = this.resumeConfigProvider.restRatio();
-    const base = this.maxDurationMs() * ratio; // 单场时长全局；休息 = 时长 × 全局休息比例
-    const restMs = Math.max(0, Math.round(base * this.restJitter()));
+    const restMs = plannedRestMs ?? this.computeAutoResumeInMs();
+    if (restMs === undefined) return;
     this.restTimer = this.setTimeoutFn(() => {
       this.restTimer = undefined;
       this.onRestElapsed(account);
     }, restMs);
     (this.restTimer as { unref?: () => void } | undefined)?.unref?.();
+  }
+
+  private computeAutoResumeInMs(): number | undefined {
+    if (!this.resumeConfigProvider) return undefined;
+    const ratio = this.resumeConfigProvider.restRatio();
+    const base = this.maxDurationMs() * ratio; // 单场时长全局；休息 = 时长 × 全局休息比例
+    return Math.max(0, Math.round(base * this.restJitter()));
+  }
+
+  private takePendingAutoResumeInMs(): number | undefined {
+    const ms = this.pendingAutoResumeInMs;
+    this.pendingAutoResumeInMs = undefined;
+    return ms;
   }
 
   /** 休息到点：过续场各闸 → 续场。账号已切换 → 放弃（重连到别的账号）。 */
@@ -1280,7 +1295,13 @@ export class RoleDispatcher {
         // 否则一次监测体结束会被双调：triggerEnd 先 emit（本处理器同步跑完 endSession#1 武装续场计时器），
         // 后走 onSessionEnd（endSession#2 在 sessionActive 守卫前无条件 cancelRestTimer 清掉刚武装的计时器、
         // 随即因 sessionActive=false 早退不再武装）→ 续场永不触发（change restore-auto-resume A①）。
-        this.sendCommand({ action: 'session.end', reason: payload.reason });
+        const autoResumeInMs = this.computeAutoResumeInMs();
+        this.pendingAutoResumeInMs = autoResumeInMs;
+        this.sendCommand({
+          action: 'session.end',
+          reason: payload.reason,
+          params: autoResumeInMs === undefined ? undefined : { autoResumeInMs },
+        });
       }),
 
       // —— 通知巡视：角色意图 → 边缘命令（均为 excursion 来源，巡视暂停期照常放行）——

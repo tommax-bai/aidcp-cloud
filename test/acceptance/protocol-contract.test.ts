@@ -19,6 +19,7 @@ import {
   type MessageType,
   type WelcomePayload,
   type PacingSnapshotPayload,
+  type SessionEndPayload,
 } from '../../src/comm/protocol.js';
 
 /**
@@ -109,5 +110,12 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     assert.deepEqual(p!.opFloorsMs.feed_card_read, { minMs: 450, maxMs: 7000 });
     assert.deepEqual(p!.opFloorsMs.content_glance, { minMs: 2500, maxMs: 90000 });
     assert.deepEqual(p!.opFloorsMs.content_read, { minMs: 2500, maxMs: 90000 });
+  });
+
+  it('AC-PROTO-07 session.end 自动续场等待时间往返存活', () => {
+    const payload: SessionEndPayload = { reason: 'timeout', autoResumeInMs: 60_000 };
+    const env = makeEnvelope('session.end', 'end-1', 1700000000000, payload);
+    const back = parseEnvelope(JSON.stringify(env));
+    assert.deepEqual((back!.payload as SessionEndPayload).autoResumeInMs, 60_000);
   });
 });

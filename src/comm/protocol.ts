@@ -332,6 +332,11 @@ export interface SearchExecutePayload {
 /** 结束本次浏览会话（cloud → edge）。 */
 export interface SessionEndPayload {
   reason: string;
+  /**
+   * 正常结束后云端已安排/预计的休息时长（毫秒）。仅用于边端 UI 提示；
+   * 缺失表示本次结束不会自动续场，或旧云端未提供该信息。
+   */
+  autoResumeInMs?: number;
   /** 会话汇总统计（观测用） */
   stats?: {
     likedCount: number;
