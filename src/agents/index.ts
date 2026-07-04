@@ -23,8 +23,6 @@ export { ContentCuratorRole } from './content-curator-role.js';
 export type { NoteData, ContentCuratorRoleOptions } from './content-curator-role.js';
 export { InteractionAppraiserRole } from './interaction-appraiser-role.js';
 export type { InteractionAppraiserRoleOptions } from './interaction-appraiser-role.js';
-export { WriteNoteOpportunity } from './write-note-opportunity.js';
-export type { WriteNoteOpportunityOptions, WriteNoteReference, WriteNoteTriggerResult } from './write-note-opportunity.js';
 
 // ─── Phase 4：作者评估 + Profile 链路角色 ───
 export { AuthorEvaluator } from './author-evaluator.js';

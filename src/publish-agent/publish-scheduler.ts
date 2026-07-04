@@ -89,12 +89,8 @@ export type TriggerOutcome =
   | { result: 'skipped'; reason: string }
   | { result: 'blocked'; reason: string };
 
-export type ManualReferenceReason = 'manual_reference' | 'read_reference';
-
 export interface ManualTriggerOptions {
   referenceNote?: ReferenceNote;
-  /** 缺省保持既有后台/飞书手动参照创作口径：manual_reference。 */
-  reason?: ManualReferenceReason;
 }
 
 const HOUR_MS = 3_600_000;
@@ -238,7 +234,6 @@ export class PublishScheduler {
    * 手动飞书 /publish [accountId]：越过 canDo（人工授权）+ 强制发布（不被 scout「无新素材」否决），但下游人审仍必过（AC-PUB）。
    * accountId 缺省回落 'default'（单账号向后兼容）；指定时以该账号人设生成、落库该账号、命令定向到该账号节点。
    * opts.referenceNote（change curated-note-actions）：管理后台精选页指定的洗稿参照笔记，注入创作输入独立参照块。
-   * opts.reason 缺省 manual_reference；阅读旁路可显式传 read_reference，便于观测来源。
    */
   async triggerManual(accountId?: string, opts?: ManualTriggerOptions): Promise<TriggerOutcome> {
     // retire-default-account：账号显式优先，缺省解析唯一真实账号；解析不出（0 或多个）则诚实拒绝、要求显式指定，绝不回落 default。
@@ -256,7 +251,7 @@ export class PublishScheduler {
       this.logger.warn(`[PublishScheduler] 参照创作：参照笔记正文为空 — 拒绝（empty_body）`);
       return { result: 'blocked', reason: 'empty_body' };
     }
-    const reason = opts?.referenceNote ? (opts.reason ?? 'manual_reference') : 'manual_feishu';
+    const reason = opts?.referenceNote ? 'manual_reference' : 'manual_feishu';
     this.logger.log(`[PublishScheduler] 手动发布 account=${resolved} reason=${reason}：越过风控 canDo + 强制发布（人工授权），发布前飞书人审仍生效`);
     const { status, failureReason } = await this.doTrigger(reason, true, resolved, opts?.referenceNote);
     return { result: 'triggered', reason, status, failureReason };

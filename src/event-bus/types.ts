@@ -469,7 +469,6 @@ export type RoleName =
   | 'valuable_comment_archivist'
   | 'curated_note_evaluator'
   | 'curated_comment_evaluator'
-  | 'write_note_opportunity'
   // —— 按需评论任务角色（change comment-search-command，飞书 /comment）——
   | 'comment_search_term_generator'
   | 'comment_target_picker'
