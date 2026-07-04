@@ -127,7 +127,7 @@ export class CuratedNoteEvaluator extends BaseRole {
     try {
       await this.curatedStore.upsertObservation({
         accountId,
-        contentType: 'note',
+        contentType: d.mediaType === 'video' ? 'video' : 'image_text',
         sourceId: d.noteId,
         title: d.title,
         body: d.content,

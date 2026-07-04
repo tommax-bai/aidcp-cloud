@@ -23,7 +23,7 @@ function capturingPool(rowsFor?: (sql: string) => unknown[]): {
 
 const baseObs: CuratedObservation = {
   accountId: 'acc-1',
-  contentType: 'note',
+  contentType: 'image_text',
   sourceId: 'note-9',
   title: '标题',
   body: '正文内容',
@@ -42,7 +42,8 @@ test('init 建表幂等（DDL 含 IF NOT EXISTS 与索引）', async () => {
   await store.init();
   assert.equal(calls.length, 1);
   assert.match(calls[0].sql, /CREATE TABLE IF NOT EXISTS curated_content/);
-  assert.match(calls[0].sql, /content_type IN \('note','comment'\)/);
+  assert.match(calls[0].sql, /content_type IN \('image_text','video','comment'\)/);
+  assert.match(calls[0].sql, /content_type = 'image_text'/);
   assert.match(calls[0].sql, /dedup_key\s+TEXT NOT NULL UNIQUE/);
   assert.match(calls[0].sql, /CREATE INDEX IF NOT EXISTS .* USING GIN\(topics\)/);
   assert.match(calls[0].sql, /CREATE INDEX IF NOT EXISTS .*\(account_id, updated_at DESC\)/);
@@ -71,9 +72,9 @@ test('upsertObservation：INSERT...ON CONFLICT DO UPDATE，含 dedup_key、不�
   // dedup_key = accountId::contentType::sourceId。
   const params = calls[0].params;
   assert.equal(params[0], 'acc-1');
-  assert.equal(params[1], 'note');
+  assert.equal(params[1], 'image_text');
   assert.equal(params[2], 'note-9');
-  assert.equal(params[3], 'acc-1::note::note-9');
+  assert.equal(params[3], 'acc-1::image_text::note-9');
   // 计数原样落库。
   assert.deepEqual(params.slice(9, 12), [12, 3, 5]);
   assert.equal(params[12], 'high_quality');
@@ -122,8 +123,9 @@ test('markBotAction like 走 UPDATE（不 INSERT），行不存在则 no-op，�
   assert.equal(calls.length, 1);
   assert.match(calls[0].sql, /^\s*UPDATE curated_content SET bot_liked = true/);
   assert.doesNotMatch(calls[0].sql, /INSERT/);
-  // 按 dedup_key 命中既有行（note/comment 任一）。
-  assert.ok(calls[0].params.includes('acc-1::note::note-9'));
+  // 按账号+sourceId 命中既有源帖行（image_text/video 任一），不自动建行。
+  assert.match(calls[0].sql, /content_type IN \('image_text', 'video'\)/);
+  assert.deepEqual(calls[0].params, ['acc-1', 'note-9']);
 });
 
 test('markBotAction collect 走 INSERT...ON CONFLICT（自有收藏自动建/纳入）', async () => {
@@ -142,14 +144,28 @@ test('markBotAction collect 走 INSERT...ON CONFLICT（自有收藏自动建/纳
   assert.match(sql, /ON CONFLICT \(dedup_key\) DO UPDATE SET bot_collected = true/);
   const params = calls[0].params;
   assert.equal(params[0], 'acc-1');
-  assert.equal(params[1], 'note-9');
-  assert.equal(params[2], 'acc-1::note::note-9'); // dedup_key 用 note 类型
-  assert.equal(params[3], 'T'); // title
-  assert.equal(params[4], '收藏的正文'); // body
-  assert.equal(params[5], 'A'); // author
-  assert.equal(params[6], 'u'); // source_url
-  assert.deepEqual(params[7], ['x']); // topics
-  assert.equal(params[8], 'bot_collect'); // admit_reason（有正文）
+  assert.equal(params[1], 'image_text');
+  assert.equal(params[2], 'note-9');
+  assert.equal(params[3], 'acc-1::image_text::note-9'); // dedup_key 用媒体类型
+  assert.equal(params[4], 'T'); // title
+  assert.equal(params[5], '收藏的正文'); // body
+  assert.equal(params[6], 'A'); // author
+  assert.equal(params[7], 'u'); // source_url
+  assert.deepEqual(params[8], ['x']); // topics
+  assert.equal(params[9], 'bot_collect'); // admit_reason（有正文）
+});
+
+test('markBotAction collect 视频内容：content_type/dedup_key 用 video', async () => {
+  const { pool, calls } = capturingPool();
+  const store = new CuratedContentStore({ pool });
+  await store.markBotAction('acc-1', 'note-v', 'collect', {
+    title: 'V',
+    body: '视频文案',
+    mediaType: 'video',
+  });
+  const params = calls[0].params;
+  assert.equal(params[1], 'video');
+  assert.equal(params[3], 'acc-1::video::note-v');
 });
 
 test('markBotAction collect 无内容：body 落 ""、admit_reason 标 content_missing（不编造正文）', async () => {
@@ -157,19 +173,19 @@ test('markBotAction collect 无内容：body 落 ""、admit_reason 标 content_m
   const store = new CuratedContentStore({ pool });
   await store.markBotAction('acc-1', 'note-9', 'collect');
   const params = calls[0].params;
-  assert.equal(params[3], null); // title
-  assert.equal(params[4], ''); // body 空串、不编造
-  assert.equal(params[5], null); // author
-  assert.equal(params[6], null); // source_url
-  assert.deepEqual(params[7], []); // topics 空数组
-  assert.equal(params[8], 'bot_collect(content_missing)'); // admit_reason 标注缺内容
+  assert.equal(params[4], null); // title
+  assert.equal(params[5], ''); // body 空串、不编造
+  assert.equal(params[6], null); // author
+  assert.equal(params[7], null); // source_url
+  assert.deepEqual(params[8], []); // topics 空数组
+  assert.equal(params[9], 'bot_collect(content_missing)'); // admit_reason 标注缺内容
 });
 
 test('selectForCreation：ORDER BY 含 bot_collected/bot_liked 权重，按账号+类型过滤，映射成 CuratedSelectItem', async () => {
   const cannedRows = [
     {
       source_id: 'note-1',
-      content_type: 'note',
+      content_type: 'image_text',
       title: 'T1',
       body: 'B1',
       author: '甲',
@@ -181,7 +197,7 @@ test('selectForCreation：ORDER BY 含 bot_collected/bot_liked 权重，按账�
     },
     {
       source_id: 'note-2',
-      content_type: 'note',
+      content_type: 'video',
       title: null,
       body: null,
       author: null,
@@ -194,20 +210,20 @@ test('selectForCreation：ORDER BY 含 bot_collected/bot_liked 权重，按账�
   ];
   const { pool, calls } = capturingPool((sql) => (/SELECT/.test(sql) ? cannedRows : []));
   const store = new CuratedContentStore({ pool });
-  const out = await store.selectForCreation('acc-1', 'note', 7);
+  const out = await store.selectForCreation('acc-1', 'source_post', 7);
 
   const sql = calls[0].sql;
-  assert.match(sql, /WHERE account_id = \$1 AND content_type = \$2/);
+  assert.match(sql, /WHERE account_id = \$1 AND content_type IN \('image_text', 'video'\)/);
   assert.match(sql, /CASE WHEN bot_collected THEN 2 ELSE 0 END/);
   assert.match(sql, /CASE WHEN bot_liked THEN 1 ELSE 0 END/);
   assert.match(sql, /collect_count DESC NULLS LAST/);
   assert.match(sql, /updated_at DESC/);
-  assert.deepEqual(calls[0].params, ['acc-1', 'note', 7]);
+  assert.deepEqual(calls[0].params, ['acc-1', 7]);
 
   // 映射：实值行。
   assert.deepEqual(out[0], {
     sourceId: 'note-1',
-    contentType: 'note',
+    contentType: 'image_text',
     title: 'T1',
     body: 'B1',
     author: '甲',
@@ -220,7 +236,7 @@ test('selectForCreation：ORDER BY 含 bot_collected/bot_liked 权重，按账�
   // 映射：空值行——诚实置空（null/'' /undefined/[]），count 不编造 0。
   assert.deepEqual(out[1], {
     sourceId: 'note-2',
-    contentType: 'note',
+    contentType: 'video',
     title: '',
     body: '',
     author: undefined,
@@ -289,7 +305,7 @@ function controllablePool(handler: (sql: string, params: unknown[]) => { rows?: 
 const panelDbRow = {
   id: 7,
   account_id: 'acc-1',
-  content_type: 'note',
+  content_type: 'image_text',
   source_id: 'n-1',
   title: 'T',
   body: 'B',
@@ -311,7 +327,7 @@ const panelDbRow = {
 test('listForPanel：按账号 + 类型 + 原因过滤，COUNT(*) OVER() 取 total，映射 epoch ms + 诚实置空', async () => {
   const { pool, calls } = controllablePool(() => ({ rows: [panelDbRow] }));
   const store = new CuratedContentStore({ pool });
-  const out = await store.listForPanel('acc-1', { contentType: 'note', admitReason: 'collect_floor', limit: 50, offset: 0 });
+  const out = await store.listForPanel('acc-1', { contentType: 'image_text', admitReason: 'collect_floor', limit: 50, offset: 0 });
 
   const sql = calls[0].sql;
   assert.match(sql, /WHERE account_id = \$1/);
@@ -320,7 +336,7 @@ test('listForPanel：按账号 + 类型 + 原因过滤，COUNT(*) OVER() 取 tot
   assert.match(sql, /COUNT\(\*\) OVER\(\) AS total_count/);
   assert.match(sql, /ORDER BY updated_at DESC/);
   assert.match(sql, /LIMIT \$4 OFFSET \$5/);
-  assert.deepEqual(calls[0].params, ['acc-1', 'note', 'collect_floor', 50, 0]);
+  assert.deepEqual(calls[0].params, ['acc-1', 'image_text', 'collect_floor', 50, 0]);
 
   assert.equal(out.total, 1);
   assert.equal(out.items[0].id, 7);
@@ -348,9 +364,9 @@ test('listForPanel：缺 accountId（全账号视图）不加 account_id 过滤�
   const store = new CuratedContentStore({ pool });
   const out = await store.listForPanel(undefined, { contentType: 'note', limit: 50, offset: 0 });
   assert.doesNotMatch(calls[0].sql, /account_id = \$/);
-  assert.match(calls[0].sql, /WHERE content_type = \$1/);
-  assert.match(calls[0].sql, /LIMIT \$2 OFFSET \$3/);
-  assert.deepEqual(calls[0].params, ['note', 50, 0]); // 无 account；类型 + limit + offset
+  assert.match(calls[0].sql, /WHERE content_type IN \('image_text', 'video'\)/);
+  assert.match(calls[0].sql, /LIMIT \$1 OFFSET \$2/);
+  assert.deepEqual(calls[0].params, [50, 0]); // 无 account；旧 note 别名不占参数位
   assert.equal(out.total, 1);
   assert.equal(out.items[0].accountId, 'acc-1'); // 每行带归属账号
 });
@@ -367,12 +383,14 @@ test('listForPanel：缺 accountId 且无筛选 → 全表（无 WHERE）', asyn
 test('facetsForPanel：缺 accountId（全账号视图）不加 account_id 过滤', async () => {
   const { pool, calls } = controllablePool((sql) => {
     if (/GROUP BY admit_reason/.test(sql)) return { rows: [{ admit_reason: 'collect_floor', count: '9', bot_action_count: '4' }] };
-    return { rows: [{ content_type: 'note', count: '7' }, { content_type: 'comment', count: '2' }] };
+    return { rows: [{ content_type: 'image_text', count: '5' }, { content_type: 'video', count: '2' }, { content_type: 'comment', count: '2' }] };
   });
   const store = new CuratedContentStore({ pool });
   const out = await store.facetsForPanel(undefined);
   assert.ok(calls.every((c) => !/account_id = \$/.test(c.sql))); // 两查询都不按账号
   assert.ok(calls.every((c) => c.params.length === 0));
+  assert.equal(out.imageTextCount, 5);
+  assert.equal(out.videoCount, 2);
   assert.equal(out.noteCount, 7);
   assert.equal(out.commentCount, 2);
   assert.deepEqual(out.admitReasons[0], { admitReason: 'collect_floor', count: 9, botActionCount: 4 });
@@ -399,11 +417,13 @@ test('facetsForPanel：纳入原因去重+计数+高权重行数 与 笔记/评�
         ],
       };
     }
-    return { rows: [{ content_type: 'note', count: '4' }, { content_type: 'comment', count: '1' }] };
+    return { rows: [{ content_type: 'image_text', count: '3' }, { content_type: 'video', count: '1' }, { content_type: 'comment', count: '1' }] };
   });
   const store = new CuratedContentStore({ pool });
   const out = await store.facetsForPanel('acc-1');
   assert.ok(calls.every((c) => c.params[0] === 'acc-1')); // 两查询都按账号
+  assert.equal(out.imageTextCount, 3);
+  assert.equal(out.videoCount, 1);
   assert.equal(out.noteCount, 4);
   assert.equal(out.commentCount, 1);
   assert.deepEqual(out.admitReasons[0], { admitReason: 'collect_floor', count: 3, botActionCount: 1 });

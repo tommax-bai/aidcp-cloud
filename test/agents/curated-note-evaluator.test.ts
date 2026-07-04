@@ -71,7 +71,7 @@ describe('CuratedNoteEvaluator 两段式准入', () => {
     assert.equal(r.llmCalled, true);
     assert.equal(r.upserts.length, 1);
     assert.equal(r.upserts[0].admitReason, 'llm_eval');
-    assert.equal(r.upserts[0].contentType, 'note');
+    assert.equal(r.upserts[0].contentType, 'image_text');
     assert.equal(r.upserts[0].sourceId, 'n1');
     assert.equal(r.upserts[0].accountId, 'acc-1');
   });
@@ -82,6 +82,12 @@ describe('CuratedNoteEvaluator 两段式准入', () => {
     });
     assert.equal(r.llmCalled, true);
     assert.equal(r.upserts.length, 0);
+  });
+
+  it('预筛过的视频详情 → upsert contentType=video', async () => {
+    const r = await run(mkDetail({ collectCount: 100, mediaType: 'video' }));
+    assert.equal(r.upserts.length, 1);
+    assert.equal(r.upserts[0].contentType, 'video');
   });
 
   it('预筛过 + 评估判广告/标题党 → 不纳入', async () => {

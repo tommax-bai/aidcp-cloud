@@ -1,7 +1,7 @@
 /**
  * 精选笔记行级定向动作端点单测（change curated-note-actions）。
  * 覆盖：未注入 curatedActions → 503；坏 id/缺账号 → 400；跨账号/不存在 → 404（同形状不泄露）；
- * 评论行 → note_only；壳行 create-post → empty_body（不触发）；无标题 comment → empty_title；
+ * 视频/评论行洗稿 → image_text_only；评论行评论 → source_post_only；壳行 create-post → empty_body（不触发）；无标题 comment → empty_title；
  * 触发透传（create-post 带行、comment 带 withGroup）；域内拒绝原因码透传；JWT 闸。
  */
 import { test } from 'node:test';
@@ -35,7 +35,7 @@ function row(over: Partial<CuratedPanelRow> = {}): CuratedPanelRow {
   return {
     id: 7,
     accountId: 'acc-1',
-    contentType: 'note',
+    contentType: 'image_text',
     sourceId: 'note-42',
     title: '好用的收纳技巧',
     body: '正文内容',
@@ -65,12 +65,12 @@ async function loginAuth(base: string): Promise<Record<string, string>> {
   return { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
 }
 
-test('HTTP 精选行级动作：503/400/404/note_only/empty_body/empty_title/触发透传', async () => {
+test('HTTP 精选行级动作：503/400/404/类型约束/empty_body/empty_title/触发透传', async () => {
   // ① 注入 curatedContent 但未注入 curatedActions → 503。
   const rows = new Map<string, CuratedPanelRow | null>();
   const curatedMock = {
     listForPanel: async () => ({ items: [], total: 0 }),
-    facetsForPanel: async () => ({ admitReasons: [], noteCount: 0, commentCount: 0 }),
+    facetsForPanel: async () => ({ admitReasons: [], imageTextCount: 0, videoCount: 0, noteCount: 0, commentCount: 0 }),
     deleteOne: async () => 0,
     clearEmptyBody: async () => 0,
     getOneForAccount: async (id: number, accountId: string) => rows.get(`${id}:${accountId}`) ?? null,
@@ -117,11 +117,20 @@ test('HTTP 精选行级动作：503/400/404/note_only/empty_body/empty_title/触
     // 行不存在/跨账号 → 404（同形状，不泄露他账号行存在性）。
     assert.equal((await post('/api/curated/contents/7/create-post', { accountId: 'acc-other' })).status, 404);
 
-    // 评论行 → 400 note_only（两端点同判）。
+    // 评论行 → 洗稿 image_text_only、评论 source_post_only，动作不被调用。
     rows.set('8:acc-1', row({ id: 8, contentType: 'comment' }));
-    const noteOnly = await post('/api/curated/contents/8/comment', { accountId: 'acc-1' });
-    assert.equal(noteOnly.status, 400);
-    assert.equal(((await noteOnly.json()) as { reason: string }).reason, 'note_only');
+    const commentCreate = await post('/api/curated/contents/8/create-post', { accountId: 'acc-1' });
+    assert.equal(commentCreate.status, 200);
+    assert.deepEqual(await commentCreate.json(), { triggered: false, reason: 'image_text_only' });
+    const commentComment = await post('/api/curated/contents/8/comment', { accountId: 'acc-1' });
+    assert.equal(commentComment.status, 200);
+    assert.deepEqual(await commentComment.json(), { triggered: false, reason: 'source_post_only' });
+
+    // 视频行 → 洗稿 image_text_only；定向评论仍是源帖能力，后面单独覆盖可触发。
+    rows.set('11:acc-1', row({ id: 11, contentType: 'video' }));
+    const videoCreate = await post('/api/curated/contents/11/create-post', { accountId: 'acc-1' });
+    assert.equal(videoCreate.status, 200);
+    assert.deepEqual(await videoCreate.json(), { triggered: false, reason: 'image_text_only' });
 
     // 壳行（空正文）create-post → 200 triggered:false empty_body，动作不被调用。
     rows.set('9:acc-1', row({ id: 9, body: '' }));
@@ -148,10 +157,14 @@ test('HTTP 精选行级动作：503/400/404/note_only/empty_body/empty_title/触
     const groupComment = await post('/api/curated/contents/7/comment', { accountId: 'acc-1', withGroup: true });
     assert.deepEqual(await groupComment.json(), { triggered: false, reason: 'group_code_missing' });
 
+    const videoComment = await post('/api/curated/contents/11/comment', { accountId: 'acc-1' });
+    assert.deepEqual(await videoComment.json(), { triggered: true });
+
     assert.deepEqual(actionCalls, [
       { fn: 'create', accountId: 'acc-1', rowId: 7 },
       { fn: 'comment', accountId: 'acc-1', rowId: 7, withGroup: false },
       { fn: 'comment', accountId: 'acc-1', rowId: 7, withGroup: true },
+      { fn: 'comment', accountId: 'acc-1', rowId: 11, withGroup: false },
     ]);
   } finally {
     await h.close();

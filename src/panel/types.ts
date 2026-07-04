@@ -8,7 +8,7 @@
 
 import type { RiskController, RiskQuotaLevel, RiskAction, SessionInteractionBudget } from '../risk/index.js';
 import type { ConceptStore, BotChatStore } from '../cache/index.js';
-import type { CuratedContentType, CuratedPanelListResult, CuratedPanelRow, CuratedFacets } from '../cache/index.js';
+import type { CuratedContentTypeFilter, CuratedPanelListResult, CuratedPanelRow, CuratedFacets } from '../cache/index.js';
 import type { PublishLogStore, EditDraftPatch, EditDraftResult } from '../publish-agent/publish-log-store.js';
 import type { SetGroupLabelResult, SetGroupChatInfoResult } from '../account-store.js';
 import type {
@@ -260,7 +260,7 @@ export interface PanelCuratedContent {
   /** 分页只读列表（accountId 缺省＝全账号；可选类型 / 纳入原因过滤）；含一致 total。缺表 store 内回落空。 */
   listForPanel(
     accountId: string | undefined,
-    opts: { contentType?: CuratedContentType; admitReason?: string; limit: number; offset: number },
+    opts: { contentType?: CuratedContentTypeFilter; admitReason?: string; limit: number; offset: number },
   ): Promise<CuratedPanelListResult>;
   /** 筛选面（accountId 缺省＝全账号）：纳入原因去重 + 计数 + 高权重行数 + 笔记/评论计数。缺表回落空。 */
   facetsForPanel(accountId?: string): Promise<CuratedFacets>;
@@ -276,8 +276,8 @@ export interface PanelCuratedContent {
 
 /**
  * 动作触发态回执：console `src/types/api.ts` 的 CuratedActionReceipt 镜像此 DTO。
- * triggered=false 时 reason 为稳定机器原因码（empty_body / note_only / needs_persona / publish_busy /
- * edge_offline / running / group_code_missing / already_commented / …），console 映射中文提示。
+ * triggered=false 时 reason 为稳定机器原因码（empty_body / image_text_only / source_post_only / needs_persona /
+ * publish_busy / edge_offline / running / group_code_missing / already_commented / …），console 映射中文提示。
  */
 export interface CuratedActionReceipt {
   triggered: boolean;

@@ -556,7 +556,17 @@ async function main(): Promise<void> {
   // 同访问内发生，自有收藏自动纳入精选时据此补建正文。仅留最近一条/账号，内存态、丢失无害（取不到则诚实降级、正文留空）。
   const lastObservedNoteByAccount = new Map<
     string,
-    { noteId: string; title: string; body: string; author?: string; sourceUrl?: string; topics: string[]; likeCount: number; collectCount: number }
+    {
+      noteId: string;
+      title: string;
+      body: string;
+      mediaType: 'image_text' | 'video';
+      author?: string;
+      sourceUrl?: string;
+      topics: string[];
+      likeCount: number;
+      collectCount: number;
+    }
   >();
 
   // 概念池存储（concepts 表，跨会话搜索记忆）。init 失败则留 undefined：
@@ -814,7 +824,14 @@ async function main(): Promise<void> {
       const observed = lastObservedNoteByAccount.get(accountId);
       const content =
         evt.action === 'collect' && observed && observed.noteId === evt.noteId
-          ? { title: observed.title, body: observed.body, author: observed.author, sourceUrl: observed.sourceUrl, topics: observed.topics }
+          ? {
+              title: observed.title,
+              body: observed.body,
+              mediaType: observed.mediaType,
+              author: observed.author,
+              sourceUrl: observed.sourceUrl,
+              topics: observed.topics,
+            }
           : undefined;
       curatedContentStore.markBotAction(accountId, evt.noteId, evt.action, content).catch((err) => {
         console.warn('[aidcp-cloud] curated markBotAction error:', err);
@@ -875,6 +892,7 @@ async function main(): Promise<void> {
         noteId: d.noteId,
         title: d.title,
         body: d.content,
+        mediaType: d.mediaType === 'video' ? 'video' : 'image_text',
         author: d.author,
         sourceUrl: d.url,
         topics,

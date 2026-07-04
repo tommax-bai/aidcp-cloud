@@ -23,7 +23,9 @@ import { DEFAULT_PG_CONFIG } from './pg-anchor-cache.js';
 
 const { Pool } = pg;
 
-export type CuratedContentType = 'note' | 'comment';
+export type CuratedSourceContentType = 'image_text' | 'video';
+export type CuratedContentType = CuratedSourceContentType | 'comment';
+export type CuratedContentTypeFilter = CuratedContentType | 'note' | 'source_post';
 
 /** 一次观测：别人的笔记/评论被判定「值得当灵感」时落库/刷新。 */
 export interface CuratedObservation {
@@ -48,6 +50,7 @@ export interface CuratedActionContent {
   author?: string;
   sourceUrl?: string;
   topics?: string[];
+  mediaType?: CuratedSourceContentType;
 }
 
 /** 召回给创作侧的一条灵感。 */
@@ -100,6 +103,9 @@ export interface CuratedPanelListResult {
 export interface CuratedFacets {
   /** 该账号实际出现的纳入原因去重 + 各自计数 + 携机器人点赞/收藏标记的高权重行数。 */
   admitReasons: { admitReason: string | null; count: number; botActionCount: number }[];
+  imageTextCount: number;
+  videoCount: number;
+  /** 兼容旧前端：noteCount = imageTextCount + videoCount。 */
   noteCount: number;
   commentCount: number;
 }
@@ -120,7 +126,7 @@ export const CURATED_CONTENT_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS curated_content (
   id                 SERIAL PRIMARY KEY,
   account_id         TEXT NOT NULL,
-  content_type       TEXT NOT NULL CHECK (content_type IN ('note','comment')),
+  content_type       TEXT NOT NULL CHECK (content_type IN ('image_text','video','comment')),
   source_id          TEXT NOT NULL,
   dedup_key          TEXT NOT NULL UNIQUE,
   title              TEXT,
@@ -140,11 +146,75 @@ CREATE TABLE IF NOT EXISTS curated_content (
 );
 CREATE INDEX IF NOT EXISTS idx_curated_content_topics ON curated_content USING GIN(topics);
 CREATE INDEX IF NOT EXISTS idx_curated_content_account_updated ON curated_content (account_id, updated_at DESC);
+
+DO $$
+BEGIN
+  IF to_regclass('public.curated_content') IS NOT NULL THEN
+    ALTER TABLE curated_content DROP CONSTRAINT IF EXISTS curated_content_content_type_check;
+
+    -- split-curated-source-media-types：存量 note 无法可靠反推是否视频，统一迁为 image_text。
+    UPDATE curated_content target
+       SET bot_liked = target.bot_liked OR legacy.bot_liked,
+           bot_collected = target.bot_collected OR legacy.bot_collected,
+           title = COALESCE(target.title, legacy.title),
+           body = COALESCE(NULLIF(target.body, ''), legacy.body),
+           author = COALESCE(target.author, legacy.author),
+           source_url = COALESCE(target.source_url, legacy.source_url),
+           topics = CASE WHEN COALESCE(array_length(target.topics, 1), 0) = 0 THEN legacy.topics ELSE target.topics END,
+           like_count = COALESCE(target.like_count, legacy.like_count),
+           collect_count = COALESCE(target.collect_count, legacy.collect_count),
+           comment_count = COALESCE(target.comment_count, legacy.comment_count),
+           admit_reason = COALESCE(target.admit_reason, legacy.admit_reason),
+           updated_at = GREATEST(target.updated_at, legacy.updated_at)
+      FROM curated_content legacy
+     WHERE target.account_id = legacy.account_id
+       AND target.source_id = legacy.source_id
+       AND target.content_type = 'image_text'
+       AND legacy.content_type = 'note'
+       AND target.id <> legacy.id;
+
+    DELETE FROM curated_content legacy
+      USING curated_content target
+     WHERE target.account_id = legacy.account_id
+       AND target.source_id = legacy.source_id
+       AND target.content_type = 'image_text'
+       AND legacy.content_type = 'note'
+       AND target.id <> legacy.id;
+
+    UPDATE curated_content
+       SET content_type = 'image_text',
+           dedup_key = account_id || '::image_text::' || source_id
+     WHERE content_type = 'note';
+
+    ALTER TABLE curated_content
+      ADD CONSTRAINT curated_content_content_type_check
+      CHECK (content_type IN ('image_text','video','comment'));
+  END IF;
+END $$;
 `;
 
 /** 账号维度去重键。 */
 function dedupKeyOf(accountId: string, contentType: CuratedContentType, sourceId: string): string {
   return `${accountId}::${contentType}::${sourceId}`;
+}
+
+function normalizeContentType(value: string): CuratedContentType {
+  if (value === 'comment') return 'comment';
+  if (value === 'video') return 'video';
+  return 'image_text';
+}
+
+function normalizeSourceMediaType(value: unknown): CuratedSourceContentType {
+  return value === 'video' ? 'video' : 'image_text';
+}
+
+function appendContentTypeFilter(conds: string[], params: unknown[], contentType: CuratedContentTypeFilter): void {
+  if (contentType === 'note' || contentType === 'source_post') {
+    conds.push(`content_type IN ('image_text', 'video')`);
+    return;
+  }
+  params.push(contentType);
+  conds.push(`content_type = $${params.length}`);
 }
 
 /** INT 列归一为 number | null（诚实置空：缺失/NULL → null，不编造 0）。 */
@@ -193,7 +263,7 @@ function rowToPanelView(r: CuratedPanelDbRow): CuratedPanelRow {
   return {
     id: r.id,
     accountId: r.account_id,
-    contentType: r.content_type === 'comment' ? 'comment' : 'note',
+    contentType: normalizeContentType(r.content_type),
     sourceId: r.source_id,
     title: r.title,
     body: r.body,
@@ -291,26 +361,28 @@ export class CuratedContentStore {
   ): Promise<void> {
     if (action === 'like') {
       // 点赞为弱信号：只标既有行，不自动建行。
-      const dedupKeyNote = dedupKeyOf(accountId, 'note', sourceId);
-      const dedupKeyComment = dedupKeyOf(accountId, 'comment', sourceId);
       await this.pool.query(
         `UPDATE curated_content SET bot_liked = true, updated_at = now()
-         WHERE dedup_key = $1 OR dedup_key = $2`,
-        [dedupKeyNote, dedupKeyComment],
+         WHERE account_id = $1
+           AND source_id = $2
+           AND content_type IN ('image_text', 'video')`,
+        [accountId, sourceId],
       );
       return;
     }
     // collect：自有收藏自动建/纳入（笔记维度）。
-    const dedupKey = dedupKeyOf(accountId, 'note', sourceId);
+    const mediaType = normalizeSourceMediaType(content?.mediaType);
+    const dedupKey = dedupKeyOf(accountId, mediaType, sourceId);
     const admitReason = content?.body ? 'bot_collect' : 'bot_collect(content_missing)';
     await this.pool.query(
       `INSERT INTO curated_content
          (account_id, content_type, source_id, dedup_key, title, body, author, source_url,
           topics, like_count, collect_count, admit_reason, bot_collected, updated_at)
-       VALUES ($1, 'note', $2, $3, $4, $5, $6, $7, $8, NULL, NULL, $9, true, now())
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, NULL, $10, true, now())
        ON CONFLICT (dedup_key) DO UPDATE SET bot_collected = true, updated_at = now()`,
       [
         accountId,
+        mediaType,
         sourceId,
         dedupKey,
         content?.title ?? null,
@@ -361,24 +433,29 @@ export class CuratedContentStore {
    */
   async selectForCreation(
     accountId: string,
-    contentType: CuratedContentType,
+    contentType: CuratedContentTypeFilter,
     limit: number,
   ): Promise<CuratedSelectItem[]> {
+    const params: unknown[] = [accountId];
+    const conds = ['account_id = $1'];
+    appendContentTypeFilter(conds, params, contentType);
+    params.push(limit);
+    const limitIdx = params.length;
     const { rows } = await this.pool.query<CuratedRow>(
       `SELECT source_id, content_type, title, body, author, topics,
               like_count, collect_count, bot_liked, bot_collected
        FROM curated_content
-       WHERE account_id = $1 AND content_type = $2
+       WHERE ${conds.join(' AND ')}
        ORDER BY (CASE WHEN bot_collected THEN 2 ELSE 0 END + CASE WHEN bot_liked THEN 1 ELSE 0 END) DESC,
                 collect_count DESC NULLS LAST,
                 like_count DESC NULLS LAST,
                 updated_at DESC
-       LIMIT $3`,
-      [accountId, contentType, limit],
+       LIMIT $${limitIdx}`,
+      params,
     );
     return rows.map((r) => ({
       sourceId: r.source_id,
-      contentType: (r.content_type === 'comment' ? 'comment' : 'note') as CuratedContentType,
+      contentType: normalizeContentType(r.content_type),
       title: r.title ?? '',
       body: r.body ?? '',
       author: r.author ?? undefined,
@@ -403,7 +480,7 @@ export class CuratedContentStore {
    */
   async listForPanel(
     accountId: string | undefined,
-    opts: { contentType?: CuratedContentType; admitReason?: string; limit: number; offset: number },
+    opts: { contentType?: CuratedContentTypeFilter; admitReason?: string; limit: number; offset: number },
   ): Promise<CuratedPanelListResult> {
     const params: unknown[] = [];
     const conds: string[] = [];
@@ -412,8 +489,7 @@ export class CuratedContentStore {
       conds.push(`account_id = $${params.length}`);
     }
     if (opts.contentType) {
-      params.push(opts.contentType);
-      conds.push(`content_type = $${params.length}`);
+      appendContentTypeFilter(conds, params, opts.contentType);
     }
     if (opts.admitReason) {
       params.push(opts.admitReason);
@@ -471,11 +547,13 @@ export class CuratedContentStore {
         params,
       );
       const [reasonsR, typesR] = await Promise.all([reasonsP, typesP]);
-      let noteCount = 0;
+      let imageTextCount = 0;
+      let videoCount = 0;
       let commentCount = 0;
       for (const r of typesR.rows) {
         if (r.content_type === 'comment') commentCount = Number(r.count);
-        else noteCount = Number(r.count);
+        else if (r.content_type === 'video') videoCount = Number(r.count);
+        else imageTextCount = Number(r.count);
       }
       return {
         admitReasons: reasonsR.rows.map((r) => ({
@@ -483,11 +561,15 @@ export class CuratedContentStore {
           count: Number(r.count),
           botActionCount: Number(r.bot_action_count),
         })),
-        noteCount,
+        imageTextCount,
+        videoCount,
+        noteCount: imageTextCount + videoCount,
         commentCount,
       };
     } catch (err) {
-      if ((err as { code?: string }).code === '42P01') return { admitReasons: [], noteCount: 0, commentCount: 0 };
+      if ((err as { code?: string }).code === '42P01') {
+        return { admitReasons: [], imageTextCount: 0, videoCount: 0, noteCount: 0, commentCount: 0 };
+      }
       throw err;
     }
   }

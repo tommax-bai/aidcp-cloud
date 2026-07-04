@@ -706,6 +706,8 @@ export interface NoteDetailPayload {
   noteId: string;
   title: string;
   content: string;
+  /** 媒体类型：缺省按 image_text 兼容老边端；边端仅从真实卡片/详情态判断，MUST NOT 臆造 video。 */
+  mediaType?: 'image_text' | 'video';
   author?: string;
   authorId?: string;
   likeCount: number;

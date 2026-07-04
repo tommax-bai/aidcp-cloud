@@ -592,11 +592,11 @@ test('HTTP 精选内容后台管理：未注入 503 / 缺账号=全账号视图 
   const curatedMock = {
     listForPanel: async (accountId: string | undefined, opts: unknown) => {
       calls.push({ fn: 'list', args: [accountId, opts] });
-      return { items: [{ id: 7, accountId: accountId ?? 'acc-1', contentType: 'note', sourceId: 'n-1', title: 'T', body: 'B', author: '甲', sourceUrl: null, topics: [], likeCount: null, collectCount: 5, commentCount: null, countsCapturedAt: null, botLiked: false, botCollected: true, admitReason: 'collect_floor', firstSeenAt: 1, updatedAt: 2 }], total: 1 };
+      return { items: [{ id: 7, accountId: accountId ?? 'acc-1', contentType: 'image_text', sourceId: 'n-1', title: 'T', body: 'B', author: '甲', sourceUrl: null, topics: [], likeCount: null, collectCount: 5, commentCount: null, countsCapturedAt: null, botLiked: false, botCollected: true, admitReason: 'collect_floor', firstSeenAt: 1, updatedAt: 2 }], total: 1 };
     },
     facetsForPanel: async (accountId: string | undefined) => {
       calls.push({ fn: 'facets', args: [accountId] });
-      return { admitReasons: [{ admitReason: 'collect_floor', count: 1, botActionCount: 0 }], noteCount: 1, commentCount: 0 };
+      return { admitReasons: [{ admitReason: 'collect_floor', count: 1, botActionCount: 0 }], imageTextCount: 1, videoCount: 0, noteCount: 1, commentCount: 0 };
     },
     // 仅本账号本 id 命中删 1，模拟越权（别账号 id）删 0。
     deleteOne: async (accountId: string, id: number) => {
@@ -630,21 +630,30 @@ test('HTTP 精选内容后台管理：未注入 503 / 缺账号=全账号视图 
 
     // 读列表：带类型/原因/分页过滤，回 {items,total}
     const list = (await (
-      await fetch(`${base}/api/curated/contents?accountId=acc-1&contentType=note&admitReason=collect_floor&limit=20&offset=0`, { headers: auth })
+      await fetch(`${base}/api/curated/contents?accountId=acc-1&contentType=image_text&admitReason=collect_floor&limit=20&offset=0`, { headers: auth })
     ).json()) as { items: { id: number }[]; total: number };
     assert.equal(list.total, 1);
     assert.equal(list.items[0].id, 7);
     const listCall = calls.find((c) => c.fn === 'list');
     assert.deepEqual(listCall?.args[0], 'acc-1');
-    assert.deepEqual(listCall?.args[1], { contentType: 'note', admitReason: 'collect_floor', limit: 20, offset: 0 });
+    assert.deepEqual(listCall?.args[1], { contentType: 'image_text', admitReason: 'collect_floor', limit: 20, offset: 0 });
+    calls.length = 0;
+
+    // 旧 contentType=note 兼容为源帖别名，由 store 层解释为 image_text+video。
+    await fetch(`${base}/api/curated/contents?accountId=acc-1&contentType=note&limit=20&offset=0`, { headers: auth });
+    assert.deepEqual(calls.find((c) => c.fn === 'list')?.args[1], { contentType: 'note', limit: 20, offset: 0 });
 
     // facets：缺 accountId = 全账号合并统计（200，facetsForPanel 收 undefined 账号）
     const facetsAll = await fetch(`${base}/api/curated/facets`, { headers: auth });
     assert.equal(facetsAll.status, 200);
     assert.equal(calls.find((c) => c.fn === 'facets')?.args[0], undefined);
     const facets = (await (await fetch(`${base}/api/curated/facets?accountId=acc-1`, { headers: auth })).json()) as {
+      imageTextCount: number;
+      videoCount: number;
       noteCount: number;
     };
+    assert.equal(facets.imageTextCount, 1);
+    assert.equal(facets.videoCount, 0);
     assert.equal(facets.noteCount, 1);
 
     // 删单条：本账号本 id → deleted 1

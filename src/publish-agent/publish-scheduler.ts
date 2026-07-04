@@ -14,7 +14,7 @@
 
 import type { TriggerInput } from './types.js';
 import type { Soul } from '../soul/types.js';
-import type { CuratedSelectItem } from '../cache/curated-content-store.js';
+import type { CuratedContentTypeFilter, CuratedSelectItem } from '../cache/curated-content-store.js';
 
 /** 洗稿参照笔记（change curated-note-actions）：管理后台精选页人工指定，注入创作输入独立参照块。 */
 export type ReferenceNote = NonNullable<TriggerInput['generateInput']['referenceNote']>;
@@ -30,7 +30,7 @@ export interface SchedulerConceptStore {
 }
 /** 精选灵感语料召回口（change curated-inspiration-corpus）。 */
 export interface SchedulerCuratedStore {
-  selectForCreation(accountId: string, contentType: 'note' | 'comment', limit: number): Promise<CuratedSelectItem[]>;
+  selectForCreation(accountId: string, contentType: CuratedContentTypeFilter, limit: number): Promise<CuratedSelectItem[]>;
 }
 export interface SchedulerLikedStore {
   countSince(sinceMs: number): Promise<number>;
@@ -148,7 +148,7 @@ export class PublishScheduler {
       this.d.publishLog.recentPublishedContents(5),
       this.d.conceptStore.countNewSince(baseline),
       this.d.curatedStore
-        ? this.d.curatedStore.selectForCreation(accountId, 'note', selectTopK)
+        ? this.d.curatedStore.selectForCreation(accountId, 'source_post', selectTopK)
         : Promise.resolve([] as CuratedSelectItem[]),
       // 精选评论当「读者角度线索」（change curated-inspiration-corpus Phase 2）：少量、次级素材。
       this.d.curatedStore

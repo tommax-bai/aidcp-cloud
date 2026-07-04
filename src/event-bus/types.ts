@@ -22,6 +22,8 @@ export interface NoteDetailData {
   noteId: string;
   title: string;
   content: string;
+  /** 缺省按 image_text 兼容老边端。 */
+  mediaType?: 'image_text' | 'video';
   author?: string;
   authorId?: string;
   likeCount: number;

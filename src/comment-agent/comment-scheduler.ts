@@ -32,6 +32,7 @@ import {
 import { buildEdgeCommentSteps, type EdgePusher, type CommentDedup } from './edge-steps.js';
 import { buildComposeAndApprove } from './compose-approve.js';
 import type { CuratedSampleForTerms } from '../agents/comment-search-term-generator.js';
+import type { CuratedContentTypeFilter } from '../cache/curated-content-store.js';
 
 export interface CommentResultReceipt {
   ok: boolean;
@@ -54,7 +55,7 @@ export interface CommentSchedulerDeps {
    */
   getGroupChatInfo?: (accountId: string) => Promise<string | null>;
   /** 取精选样本喂搜索词生成（按账号；出错回 []）。 */
-  selectCurated: (accountId: string, contentType: 'note' | 'comment', limit: number) => Promise<CuratedSampleForTerms[]>;
+  selectCurated: (accountId: string, contentType: CuratedContentTypeFilter, limit: number) => Promise<CuratedSampleForTerms[]>;
   /** 账号绑定 LLM（计 token 归属该账号）。 */
   llmFor: (accountId: string) => RoleLlmLike;
   /** 该账号每笔记去重（InteractionDedup）。 */
@@ -314,7 +315,7 @@ export class CommentScheduler {
 
     const steps: CommentTaskSteps = {
       generateTerms: async () => {
-        const samples = await this.deps.selectCurated(accountId, 'note', 8).catch(() => []);
+        const samples = await this.deps.selectCurated(accountId, 'source_post', 8).catch(() => []);
         const r = await generator.generate(samples);
         return r.terms;
       },

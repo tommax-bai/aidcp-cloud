@@ -35,6 +35,10 @@ import { isAllowedCredential } from '../llm/index.js';
 /** 登录/写体很小，限制请求体大小防滥用。 */
 const MAX_BODY_BYTES = 16 * 1024;
 
+function isCuratedSourcePostType(contentType: string): boolean {
+  return contentType === 'image_text' || contentType === 'video';
+}
+
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
   const buf = Buffer.from(JSON.stringify(body), 'utf8');
   res.statusCode = status;
@@ -1387,17 +1391,21 @@ function createRequestHandler(
         sendJson(res, 404, { error: 'not_found' }); // 不存在或跨账号不匹配——同一形状，绝不泄露他账号行存在性
         return;
       }
-      if (row.contentType !== 'note') {
-        sendJson(res, 400, { error: 'bad_request', reason: 'note_only' });
-        return;
-      }
       if (action === 'create-post') {
+        if (row.contentType !== 'image_text') {
+          sendJson(res, 200, { triggered: false, reason: 'image_text_only' });
+          return;
+        }
         // 壳行红线（bot_collect(content_missing) 等）：空正文不得作洗稿参照，触发前诚实拒绝。
         if (!(row.body ?? '').trim()) {
           sendJson(res, 200, { triggered: false, reason: 'empty_body' });
           return;
         }
         sendJson(res, 200, await deps.curatedActions.createPostFromNote(accountId, row));
+        return;
+      }
+      if (!isCuratedSourcePostType(row.contentType)) {
+        sendJson(res, 200, { triggered: false, reason: 'source_post_only' });
         return;
       }
       if (!(row.title ?? '').trim()) {
@@ -1423,7 +1431,10 @@ function createRequestHandler(
         return Number.isFinite(n) && n >= 0 ? n : dflt;
       };
       const ctRaw = (query.get('contentType') ?? '').trim();
-      const contentType = ctRaw === 'note' || ctRaw === 'comment' ? ctRaw : undefined;
+      const contentType =
+        ctRaw === 'image_text' || ctRaw === 'video' || ctRaw === 'comment' || ctRaw === 'note'
+          ? ctRaw
+          : undefined;
       const admitReason = (query.get('admitReason') ?? '').trim() || undefined;
       const result = await deps.curatedContent.listForPanel(accountId, {
         ...(contentType ? { contentType } : {}),
