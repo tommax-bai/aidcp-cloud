@@ -51,6 +51,7 @@ const mockPanelStore: PanelStoreReader = {
       images: ['https://aidcp.oss-cn-beijing.aliyuncs.com/publish/default/run1/1.jpeg'],
       imageUrl: 'https://aidcp.oss-cn-beijing.aliyuncs.com/publish/default/run1/1.jpeg',
       imagesAttachedCount: 1,
+      sourceReference: null,
     },
   ],
   listAlerts: async () => [

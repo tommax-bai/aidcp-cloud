@@ -168,6 +168,25 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
       generateInput: {
         concepts: [{ keyword: 'RAG 重排' }, { keyword: 'vLLM' }],
         likedContents: [{ id: 11, title: 'RAG', summary: 's', author: 'a' }],
+        referenceNote: {
+          sourceId: 'note-42',
+          title: '来源标题',
+          body: 'prompt 片段',
+          topics: ['来源话题'],
+          author: '来源作者',
+          sourceReference: {
+            kind: 'curated_reference',
+            curatedContentId: 7,
+            accountId: 'acc-1',
+            sourceId: 'note-42',
+            title: '来源标题',
+            body: '完整来稿正文，不应被 prompt 截断影响',
+            author: '来源作者',
+            topics: ['来源话题'],
+            sourceUrl: 'https://www.xiaohongshu.com/explore/note-42?xsec_token=tok',
+            capturedAt: 1699999999000,
+          },
+        },
         soul: {} as any,
         recentPosts: [],
       },
@@ -186,6 +205,9 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     assert.equal(ctx.get('publishResult')?.status, 'pending_approval');
     assert.deepEqual(insertedRecords[0].sourceConcepts, ['RAG 重排', 'vLLM']);
     assert.deepEqual(insertedRecords[0].sourceLikedIds, [11]);
+    assert.equal(insertedRecords[0].sourceReference?.curatedContentId, 7);
+    assert.equal(insertedRecords[0].sourceReference?.body, '完整来稿正文，不应被 prompt 截断影响');
+    assert.equal(insertedRecords[0].sourceReference?.sourceUrl, 'https://www.xiaohongshu.com/explore/note-42?xsec_token=tok');
     assert.deepEqual(insertedRecords[0].tags, ['RAG'], '落库 tags == publishMetadata.topics');
     assert.equal(recordedMeta.length, 1);
     assert.equal(recordedMeta[0].aiEnforced, true, 'aiEnforced 审计如实落库');

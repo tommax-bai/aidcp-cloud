@@ -157,3 +157,62 @@ test('listInteractions：关注按作者（targetId=authorId + 昵称 + 主页�
   assert.equal(b.title, undefined);
   assert.equal(b.url, undefined);
 });
+
+test('publishedHistory 映射参照洗稿来稿快照；普通发布来源为 null', async () => {
+  const sourceReference = {
+    kind: 'curated_reference',
+    curatedContentId: 7,
+    accountId: 'acc-1',
+    sourceId: 'note-42',
+    title: '来稿标题',
+    body: '来稿正文',
+    author: '作者甲',
+    topics: ['收纳'],
+    sourceUrl: null,
+    capturedAt: 1700000000000,
+  };
+  const store = new PgPanelStore({
+    pool: poolReturning([
+      {
+        id: 1,
+        title: '发布标题',
+        status: 'published',
+        platform_post_id: 'post-1',
+        published_at: new Date(500),
+        account_id: 'acc-1',
+        account_label: '账号标签',
+        account_nickname: null,
+        content: '发布正文',
+        post_url: null,
+        content_version: 0,
+        images: [],
+        image_url: null,
+        images_attached_count: 0,
+        source_reference: sourceReference,
+      },
+      {
+        id: 2,
+        title: '普通发布',
+        status: 'published',
+        platform_post_id: 'post-2',
+        published_at: new Date(600),
+        account_id: 'acc-1',
+        account_label: '账号标签',
+        account_nickname: null,
+        content: '普通正文',
+        post_url: null,
+        content_version: 0,
+        images: [],
+        image_url: null,
+        images_attached_count: 0,
+        source_reference: null,
+      },
+    ]),
+  });
+
+  const rows = await store.publishedHistory(50, 'acc-1');
+  assert.equal(rows[0].sourceReference?.curatedContentId, 7);
+  assert.equal(rows[0].sourceReference?.body, '来稿正文');
+  assert.equal(rows[0].sourceReference?.sourceUrl, null, '缺来源链接保持 null，不伪造');
+  assert.equal(rows[1].sourceReference, null);
+});

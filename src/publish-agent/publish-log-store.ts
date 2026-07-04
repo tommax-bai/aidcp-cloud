@@ -69,6 +69,8 @@ ALTER TABLE publish_log ADD CONSTRAINT publish_log_status_check
 ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS content_version INT NOT NULL DEFAULT 0;
 ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS edited_by TEXT;
 ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ;
+-- publish-reference-source-panel：参照洗稿来稿快照。普通发布为 NULL；内容页只读此快照，不 join 当前精选池。
+ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS source_reference JSONB;
 `;
 
 export interface PublishLogStoreOptions {
@@ -167,8 +169,8 @@ export class PublishLogStore {
     const images = record.imageUrls ?? (record.imageUrl ? [record.imageUrl] : []);
     const coverUrl = record.imageUrl ?? images[0] ?? null;
     const { rows } = await this.pool.query<{ id: number }>(
-      `INSERT INTO publish_log (title, content, source_concepts, source_liked_ids, status, platform_post_id, image_url, images, images_attached, account_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `INSERT INTO publish_log (title, content, source_concepts, source_liked_ids, status, platform_post_id, image_url, images, images_attached, account_id, source_reference)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
        RETURNING id`,
       [
         record.title,
@@ -183,6 +185,7 @@ export class PublishLogStore {
         record.imagesAttached ?? false,
         // 发布账号：来自触发上下文；缺省回落 'default'（单账号向后兼容），让发布历史可真正按账号区分。
         record.accountId ?? 'default',
+        record.sourceReference ? JSON.stringify(record.sourceReference) : null,
       ],
     );
     return rows[0].id;

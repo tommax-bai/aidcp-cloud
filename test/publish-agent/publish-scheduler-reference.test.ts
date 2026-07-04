@@ -44,6 +44,10 @@ const ref: ReferenceNote = {
   body: '正文'.repeat(1000), // 2000 字 > 800 上限
   topics: ['收纳', '家居'],
   author: '博主甲',
+  curatedContentId: 7,
+  accountId: 'acc-test',
+  sourceUrl: 'https://www.xiaohongshu.com/explore/note-42?xsec_token=tok',
+  capturedAt: T - 1,
 };
 
 describe('triggerManual referenceNote（洗稿参照）', () => {
@@ -59,6 +63,10 @@ describe('triggerManual referenceNote（洗稿参照）', () => {
     assert.equal(got.title, '好用的收纳技巧');
     assert.equal(got.body.length, REFERENCE_BODY_MAX_LEN); // 有界截断，防全文直灌
     assert.deepEqual(got.topics, ['收纳', '家居']);
+    assert.equal(got.sourceReference?.curatedContentId, 7);
+    assert.equal(got.sourceReference?.sourceUrl, 'https://www.xiaohongshu.com/explore/note-42?xsec_token=tok');
+    assert.equal(got.sourceReference?.body, ref.body, '展示/审计快照保留触发时完整正文，不使用 prompt 截断片段');
+    assert.equal(got.sourceReference?.capturedAt, T - 1);
     assert.equal(inputs[0].forced, true); // 人工触发不被 scout 否决
   });
 

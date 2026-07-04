@@ -12,7 +12,7 @@
  * 复用 server 注入的 RiskController/各 Store 单例。
  */
 
-import type { TriggerInput } from './types.js';
+import type { PublishSourceReference, TriggerInput } from './types.js';
 import type { Soul } from '../soul/types.js';
 import type { CuratedContentTypeFilter, CuratedSelectItem } from '../cache/curated-content-store.js';
 
@@ -292,6 +292,22 @@ export class PublishScheduler {
     return this.publishing;
   }
 
+  private freezeReferenceSource(accountId: string, referenceNote: ReferenceNote): PublishSourceReference {
+    if (referenceNote.sourceReference) return referenceNote.sourceReference;
+    return {
+      kind: 'curated_reference',
+      curatedContentId: referenceNote.curatedContentId ?? null,
+      accountId: referenceNote.accountId ?? accountId,
+      sourceId: referenceNote.sourceId,
+      title: referenceNote.title || null,
+      body: referenceNote.body || null,
+      author: referenceNote.author ?? null,
+      topics: referenceNote.topics,
+      sourceUrl: referenceNote.sourceUrl ?? null,
+      capturedAt: referenceNote.capturedAt ?? this.clock(),
+    };
+  }
+
   private async doTrigger(
     reason: string,
     forced = false,
@@ -306,7 +322,14 @@ export class PublishScheduler {
           generateInput: {
             ...base.generateInput,
             // 参照正文有界截断（≤800 字）：控 prompt 规模，避免全文直灌。
-            referenceNote: { ...referenceNote, body: referenceNote.body.slice(0, REFERENCE_BODY_MAX_LEN) },
+            // 展示/审计快照保持触发时原文，避免内容页只能看到 prompt 截断片段。
+            referenceNote: {
+              ...referenceNote,
+              accountId: referenceNote.accountId ?? accountId,
+              capturedAt: referenceNote.capturedAt ?? this.clock(),
+              body: referenceNote.body.slice(0, REFERENCE_BODY_MAX_LEN),
+              sourceReference: this.freezeReferenceSource(accountId, referenceNote),
+            },
           },
         }
       : { ...base, forced };

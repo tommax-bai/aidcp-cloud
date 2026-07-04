@@ -1603,6 +1603,8 @@ async function main(): Promise<void> {
           imageUrls: record.images,
           // 真实发布账号（change publish-history-account-and-detail）：来自触发上下文，缺省 'default'。
           accountId: record.accountId,
+          // 参照洗稿来稿快照；普通发布为空，内容页据此展示来源。
+          sourceReference: record.sourceReference ?? null,
         });
       },
       async updateStatus(id, status) {
@@ -2179,6 +2181,10 @@ async function main(): Promise<void> {
                     title: row.title ?? '',
                     body: row.body ?? '',
                     topics: row.topics,
+                    curatedContentId: row.id,
+                    accountId,
+                    sourceUrl: row.sourceUrl,
+                    capturedAt: Date.now(),
                     ...(row.author ? { author: row.author } : {}),
                   },
                 })

@@ -44,6 +44,20 @@ export interface PostProcessResult {
  */
 export type PublishStatus = 'draft' | 'pending_approval' | 'published' | 'failed' | 'needs_review';
 
+/** 单条参照洗稿来稿快照（publish-reference-source-panel）：供发布历史审计与后台查看，触发时冻结。 */
+export interface PublishSourceReference {
+  kind: 'curated_reference';
+  curatedContentId: number | null;
+  accountId: string;
+  sourceId: string;
+  title: string | null;
+  body: string | null;
+  author: string | null;
+  topics: string[];
+  sourceUrl: string | null;
+  capturedAt: number;
+}
+
 /** 一条发布记录（publish_log 表的投影）。 */
 export interface PublishRecord {
   id?: number;
@@ -74,6 +88,8 @@ export interface PublishRecord {
    * 抓不到则为 null（诚实置空，绝不用裸 id 拼打不开的假链接）。
    */
   postUrl?: string | null;
+  /** 参照洗稿来稿快照；普通发布为空，绝不编造来源。 */
+  sourceReference?: PublishSourceReference | null;
 }
 
 // ─── 管道角色类型 ──────────────────────────────────────────────────────────────
@@ -119,6 +135,16 @@ export interface TriggerInput {
       body: string;
       topics: string[];
       author?: string;
+      /** 精选行 id；非精选/阅读旁路来源可为空。 */
+      curatedContentId?: number | null;
+      /** 触发账号；缺省由 TriggerInput.accountId 补齐。 */
+      accountId?: string;
+      /** 原来源链接；可空，不用裸 sourceId 伪造链接。 */
+      sourceUrl?: string | null;
+      /** 触发时刻；缺省由调度器补齐。 */
+      capturedAt?: number;
+      /** 展示/审计用完整快照；prompt 可截断 body，但此快照保持触发时正文。 */
+      sourceReference?: PublishSourceReference;
     };
     soul: Soul;
     recentPosts: string[];

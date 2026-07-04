@@ -51,6 +51,19 @@ export interface PanelAccount {
   needsPersonaSetup: boolean;
 }
 
+export interface PanelPublishSourceReference {
+  kind: 'curated_reference';
+  curatedContentId: number | null;
+  accountId: string;
+  sourceId: string;
+  title: string | null;
+  body: string | null;
+  author: string | null;
+  topics: string[];
+  sourceUrl: string | null;
+  capturedAt: number;
+}
+
 export interface PanelPublish {
   id: number;
   title: string | null;
@@ -79,6 +92,8 @@ export interface PanelPublish {
   imageUrl: string | null;
   /** 边端实际附着上传成功的图片张数（诚实信号：区分「生成了几张」与「真上传了几张」）。 */
   imagesAttachedCount: number;
+  /** 参照洗稿来稿快照；普通发布为 null。 */
+  sourceReference: PanelPublishSourceReference | null;
 }
 
 export type TodayTotals = Record<RiskAction, number>;
@@ -195,6 +210,42 @@ function toAccount(r: AccountJoinRow): PanelAccount {
     personaBound,
     // retire-default-account / persona-driven-content-pipeline：default 账号已删，不再特判——是否需补人设仅看 personaBound。
     needsPersonaSetup: !personaBound,
+  };
+}
+
+function strOrNull(v: unknown): string | null {
+  return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
+function parseSourceReference(raw: unknown): PanelPublishSourceReference | null {
+  if (raw == null) return null;
+  let obj: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      obj = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (!obj || typeof obj !== 'object') return null;
+  const r = obj as Record<string, unknown>;
+  if (r.kind !== 'curated_reference' || typeof r.sourceId !== 'string' || r.sourceId.length === 0) return null;
+  const capturedAt = Number(r.capturedAt);
+  const curatedContentId =
+    typeof r.curatedContentId === 'number' || typeof r.curatedContentId === 'string'
+      ? Number(r.curatedContentId)
+      : NaN;
+  return {
+    kind: 'curated_reference',
+    curatedContentId: Number.isFinite(curatedContentId) ? curatedContentId : null,
+    accountId: typeof r.accountId === 'string' && r.accountId.length > 0 ? r.accountId : '',
+    sourceId: r.sourceId,
+    title: strOrNull(r.title),
+    body: strOrNull(r.body),
+    author: strOrNull(r.author),
+    topics: Array.isArray(r.topics) ? r.topics.filter((t): t is string => typeof t === 'string') : [],
+    sourceUrl: strOrNull(r.sourceUrl),
+    capturedAt: Number.isFinite(capturedAt) ? capturedAt : 0,
   };
 }
 
@@ -324,10 +375,11 @@ export class PgPanelStore implements PanelStoreReader {
       images: string[] | null;
       image_url: string | null;
       images_attached_count: number | string | null;
+      source_reference: unknown;
     }>(
       `SELECT pl.id, pl.title, pl.status, pl.platform_post_id, pl.published_at,
               pl.account_id, a.label AS account_label, a.nickname AS account_nickname, pl.content, pl.post_url,
-              pl.content_version, pl.images, pl.image_url, pl.images_attached_count
+              pl.content_version, pl.images, pl.image_url, pl.images_attached_count, pl.source_reference
        FROM publish_log pl
        LEFT JOIN accounts a ON a.account_id = pl.account_id
        ${where} ORDER BY pl.published_at DESC LIMIT $${params.length}`,
@@ -348,6 +400,7 @@ export class PgPanelStore implements PanelStoreReader {
       images: r.images ?? [],
       imageUrl: r.image_url,
       imagesAttachedCount: Number(r.images_attached_count ?? 0),
+      sourceReference: parseSourceReference(r.source_reference),
     }));
   }
 

@@ -1,6 +1,15 @@
 import { BasePublishRole } from './base-role.js';
 import type { RoleConfig } from './base-role.js';
-import type { PipelineFields, GateDecision, AssembledContent, PublishResult, TriggerInput, PublishMetadata, TitleSelection } from '../types.js';
+import type {
+  PipelineFields,
+  GateDecision,
+  AssembledContent,
+  PublishResult,
+  TriggerInput,
+  PublishMetadata,
+  PublishSourceReference,
+  TitleSelection,
+} from '../types.js';
 import type { PipelineContext } from '../pipeline-context.js';
 import { buildPublishApprovalCard } from '../../feishu/cards.js';
 import { clampTitle, firstSentence } from '../title-clamp.js';
@@ -33,6 +42,8 @@ export interface PublishLogStore {
     sourceLikedIds?: number[];
     /** 发布账号（来自触发上下文，缺省 'default'）。落 publish_log.account_id。 */
     accountId?: string;
+    /** 参照洗稿来稿快照；普通发布为空，绝不编造来源。 */
+    sourceReference?: PublishSourceReference | null;
   }): Promise<number>;
   updateStatus?(id: number, status: string): Promise<void>;
   /** 发帖元数据落库 + 防篡改审计（供下发段重建发布输入 + 审计）。 */
@@ -123,11 +134,11 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       case 'manual_review':
         return this.stageDraftForApproval(assembledContent, title, context, accountId, topics, publishMetadata);
       case 'abort':
-        return this.handleAbort(assembledContent, title, accountId, topics, gateDecision.reason);
+        return this.handleAbort(assembledContent, title, context, accountId, topics, gateDecision.reason);
       case 'retry':
         return this.handleRetry();
       default:
-        return this.handleAbort(assembledContent, title, accountId, topics, gateDecision.reason);
+        return this.handleAbort(assembledContent, title, context, accountId, topics, gateDecision.reason);
     }
   }
 
@@ -153,6 +164,25 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     };
   }
 
+  private sourceReferenceFrom(context: PipelineContext<PipelineFields>, accountId: string): PublishSourceReference | null {
+    const trigger = context.get('trigger') as TriggerInput | undefined;
+    const referenceNote = trigger?.generateInput.referenceNote;
+    if (!referenceNote) return null;
+    if (referenceNote.sourceReference) return referenceNote.sourceReference;
+    return {
+      kind: 'curated_reference',
+      curatedContentId: referenceNote.curatedContentId ?? null,
+      accountId: referenceNote.accountId ?? accountId,
+      sourceId: referenceNote.sourceId,
+      title: referenceNote.title || null,
+      body: referenceNote.body || null,
+      author: referenceNote.author ?? null,
+      topics: referenceNote.topics ?? [],
+      sourceUrl: referenceNote.sourceUrl ?? null,
+      capturedAt: referenceNote.capturedAt ?? this.clock(),
+    };
+  }
+
   /**
    * 生成候审段出口：落库待审草稿（status='pending_approval'）+ 元数据落库 + 发飞书审批卡，随即返回。
    * MUST NOT 让位浏览、MUST NOT 内联等待人审、MUST NOT 下发边缘指令——这些都属下发段（PublishDispatcher）。
@@ -167,6 +197,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     publishMetadata: PublishMetadata | undefined,
   ): Promise<PublishResult> {
     const lineage = this.lineageFrom(context);
+    const sourceReference = this.sourceReferenceFrom(context, accountId);
 
     // 配图收口红线（change publish-image-required-or-fail + publish-multi-image）：图文帖必须有图。
     // 全部生图失败（imageUrls 空）→ 提前诚实 failed，不落待审、不发审批卡、附着数=0（绝不静默走必然失败的纯文字路径）。
@@ -183,6 +214,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
         sourceConcepts: lineage.sourceConcepts,
         sourceLikedIds: lineage.sourceLikedIds,
         accountId,
+        sourceReference,
       });
       if (this.store.markImagesAttached) await this.store.markImagesAttached(failedId, 0).catch(() => {});
       this.logger.warn(`[PublishExecutor] 无配图（M=0 全失败/降级）→ 图文帖无有效内容，诚实 failed recordId=${failedId}（不落待审、不发卡）`);
@@ -203,6 +235,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       sourceConcepts: lineage.sourceConcepts,
       sourceLikedIds: lineage.sourceLikedIds,
       accountId,
+      sourceReference,
     });
 
     // 元数据落库 + 防篡改审计（aiEnforced && !ai 由 MetadataAggregator 已回正；此处如实记审计位）。
@@ -261,7 +294,14 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     }
   }
 
-  private async handleAbort(assembled: AssembledContent, title: string, accountId: string, topics: string[], gateReason?: string): Promise<PublishResult> {
+  private async handleAbort(
+    assembled: AssembledContent,
+    title: string,
+    context: PipelineContext<PipelineFields>,
+    accountId: string,
+    topics: string[],
+    gateReason?: string,
+  ): Promise<PublishResult> {
     const recordId = await this.store.insert({
       title,
       content: assembled.finalContent,
@@ -272,6 +312,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       qualityScore: assembled.qualityScore,
       aiScore: assembled.aiScore,
       accountId,
+      sourceReference: this.sourceReferenceFrom(context, accountId),
     });
 
     this.logger.log(`[PublishExecutor] aborted: recordId=${recordId} reason=${gateReason ?? '-'}`);
