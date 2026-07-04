@@ -48,6 +48,9 @@ const mockPanelStore: PanelStoreReader = {
       content: '正文全文',
       postUrl: 'https://www.xiaohongshu.com/explore/p1?xsec_token=tok',
       contentVersion: 0,
+      images: ['https://aidcp.oss-cn-beijing.aliyuncs.com/publish/default/run1/1.jpeg'],
+      imageUrl: 'https://aidcp.oss-cn-beijing.aliyuncs.com/publish/default/run1/1.jpeg',
+      imagesAttachedCount: 1,
     },
   ],
   listAlerts: async () => [
@@ -208,10 +211,15 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
     // change publish-history-account-and-detail：已发布历史带账号/正文/详情链接 + ?accountId 透传过滤。
     const pubFiltered = (await (
       await fetch(`${base}/api/content/published?accountId=acc-7`, { headers: auth })
-    ).json()) as { items: { accountId: string; accountLabel: string; content: string; postUrl: string }[] };
+    ).json()) as {
+      items: { accountId: string; accountLabel: string; content: string; postUrl: string; images: string[]; imagesAttachedCount: number }[];
+    };
     assert.equal(pubFiltered.items[0].accountId, 'acc-7', '?accountId 透传到 store');
     assert.equal(pubFiltered.items[0].content, '正文全文', '返回正文全文');
     assert.ok(pubFiltered.items[0].postUrl.includes('xsec_token'), '返回带 token 的详情页链接');
+    // 面板展示发布配图（后台内容页详情浮层）：images 全集 + 真实附着张数一并透传。
+    assert.equal(pubFiltered.items[0].images.length, 1, '返回配图 URL 列表');
+    assert.equal(pubFiltered.items[0].imagesAttachedCount, 1, '返回真实附着张数');
 
     // accounts 列表 / 详情 / 404
     const accs = (await (await fetch(`${base}/api/accounts`, { headers: auth })).json()) as {

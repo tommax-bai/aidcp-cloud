@@ -70,6 +70,15 @@ export interface PanelPublish {
    * 控制台据此渲染生命周期标签，并在审批时快照此值随授权带回（「审=发」凭证）。
    */
   contentVersion: number;
+  /**
+   * 全部配图 URL（保序，[0]=封面；空数组=无图）。配了 OSS 转存后为公读永久链接可直接 <img>；
+   * 更早的历史行存的是生图厂商临时签名 URL（约 24h 过期），前端须容忍死链、不在云端补签。
+   */
+  images: string[];
+  /** 封面图 URL（= images[0]，向后兼容列）；无图为 null。 */
+  imageUrl: string | null;
+  /** 边端实际附着上传成功的图片张数（诚实信号：区分「生成了几张」与「真上传了几张」）。 */
+  imagesAttachedCount: number;
 }
 
 export type TodayTotals = Record<RiskAction, number>;
@@ -312,10 +321,13 @@ export class PgPanelStore implements PanelStoreReader {
       content: string | null;
       post_url: string | null;
       content_version: number | string | null;
+      images: string[] | null;
+      image_url: string | null;
+      images_attached_count: number | string | null;
     }>(
       `SELECT pl.id, pl.title, pl.status, pl.platform_post_id, pl.published_at,
               pl.account_id, a.label AS account_label, a.nickname AS account_nickname, pl.content, pl.post_url,
-              pl.content_version
+              pl.content_version, pl.images, pl.image_url, pl.images_attached_count
        FROM publish_log pl
        LEFT JOIN accounts a ON a.account_id = pl.account_id
        ${where} ORDER BY pl.published_at DESC LIMIT $${params.length}`,
@@ -333,6 +345,9 @@ export class PgPanelStore implements PanelStoreReader {
       content: r.content,
       postUrl: r.post_url,
       contentVersion: Number(r.content_version ?? 0),
+      images: r.images ?? [],
+      imageUrl: r.image_url,
+      imagesAttachedCount: Number(r.images_attached_count ?? 0),
     }));
   }
 
