@@ -51,8 +51,11 @@ export interface LlmCallOpts {
  * 探活/调用方据此把失败诚实归因为"该厂商密钥缺失"（区别于模型名无效），绝不跨厂商兜底。
  */
 export class ProviderKeyMissingError extends Error {
-  constructor(public readonly provider: string) {
-    super(`${provider} apiKey 缺失（在后台为该厂商配置密钥并重启 cloud）`);
+  constructor(
+    public readonly provider: string,
+    meta?: Pick<LlmErrorMeta, 'role' | 'model' | 'accountId'>,
+  ) {
+    super(`${provider} apiKey 缺失 ${formatLlmMeta({ ...meta, provider })}（在后台为该厂商配置密钥并重启 cloud）`);
     this.name = 'ProviderKeyMissingError';
   }
 }
@@ -140,10 +143,130 @@ interface ChatCompletionResponse {
   choices?: { message?: { content?: string } }[];
   /** DashScope 兼容模式 token 用量（change llm-token-usage-stats）：早先被静默丢弃，现捡回交给记账。 */
   usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
-  error?: { message?: string };
+  error?: { code?: string; message?: string; request_id?: string; requestId?: string; type?: string };
 }
 
 export const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+
+interface LlmErrorMeta {
+  provider?: string;
+  model?: string;
+  role?: string;
+  accountId?: string;
+  baseUrl?: string;
+}
+
+interface ProviderErrorPayload {
+  code?: string;
+  message?: string;
+  requestId?: string;
+  type?: string;
+}
+
+function endpointHost(baseUrl: string | undefined): string | undefined {
+  if (!baseUrl) return undefined;
+  try {
+    return new URL(baseUrl).host;
+  } catch {
+    return baseUrl.slice(0, 80);
+  }
+}
+
+function compactText(s: string | undefined, max = 500): string | undefined {
+  const t = s?.replace(/\s+/g, ' ').trim();
+  if (!t) return undefined;
+  return t.length > max ? `${t.slice(0, max)}...` : t;
+}
+
+function valueOrDash(v: string | undefined): string {
+  return v?.trim() || '-';
+}
+
+function formatLlmMeta(meta: LlmErrorMeta): string {
+  return [
+    `provider=${valueOrDash(meta.provider)}`,
+    `model=${valueOrDash(meta.model)}`,
+    `role=${valueOrDash(meta.role)}`,
+    `account=${valueOrDash(meta.accountId)}`,
+    `endpoint=${valueOrDash(endpointHost(meta.baseUrl))}`,
+  ].join(' ');
+}
+
+function extractRequestId(message: string | undefined): string | undefined {
+  return message?.match(/request\s*id\s*:\s*([A-Za-z0-9._:-]+)/i)?.[1];
+}
+
+function parseProviderErrorBody(body: string): ProviderErrorPayload {
+  try {
+    const parsed = JSON.parse(body) as {
+      error?: { code?: unknown; message?: unknown; request_id?: unknown; requestId?: unknown; type?: unknown };
+      code?: unknown;
+      message?: unknown;
+      request_id?: unknown;
+      requestId?: unknown;
+      type?: unknown;
+    };
+    const err = parsed.error ?? parsed;
+    const message = typeof err.message === 'string' ? err.message : undefined;
+    const requestIdRaw = err.request_id ?? err.requestId ?? parsed.request_id ?? parsed.requestId;
+    return {
+      code: typeof err.code === 'string' ? err.code : undefined,
+      message,
+      requestId: typeof requestIdRaw === 'string' ? requestIdRaw : extractRequestId(message),
+      type: typeof err.type === 'string' ? err.type : undefined,
+    };
+  } catch {
+    return { message: compactText(body, 240), requestId: extractRequestId(body) };
+  }
+}
+
+function formatProviderErrorFields(err: ProviderErrorPayload): string {
+  return [
+    err.code ? `code=${err.code}` : undefined,
+    err.requestId ? `requestId=${err.requestId}` : undefined,
+    err.type ? `type=${err.type}` : undefined,
+    err.message ? `apiMessage=${JSON.stringify(compactText(err.message, 240))}` : undefined,
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
+
+function buildLlmHttpError(status: number, body: string, meta: LlmErrorMeta): Error {
+  const parsed = parseProviderErrorBody(body);
+  const providerFields = formatProviderErrorFields(parsed);
+  const bodyPreview = compactText(body, 300);
+  return new Error(
+    [
+      `LLM HTTP ${status}`,
+      formatLlmMeta(meta),
+      providerFields,
+      bodyPreview ? `body=${bodyPreview}` : undefined,
+    ]
+      .filter(Boolean)
+      .join(' | '),
+  );
+}
+
+function buildLlmApiError(err: NonNullable<ChatCompletionResponse['error']>, meta: LlmErrorMeta): Error {
+  return new Error(
+    [
+      'LLM API error',
+      formatLlmMeta(meta),
+      formatProviderErrorFields({
+        code: err.code,
+        message: err.message,
+        requestId: err.request_id ?? err.requestId ?? extractRequestId(err.message),
+        type: err.type,
+      }),
+    ]
+      .filter(Boolean)
+      .join(' | '),
+  );
+}
+
+function buildLlmShapeError(message: string, meta: LlmErrorMeta): Error {
+  return new Error(['LLM response error', formatLlmMeta(meta), message].join(' | '));
+}
 
 /** 已告警过的守卫组合（warn-once，避免刷屏）；key = `${provider}|${model}|${mode}`。 */
 const warnedThinkingGuards = new Set<string>();
@@ -271,7 +394,9 @@ export class QwenClient implements ChatLlmClient {
     let apiKey: string;
     if (provider && this.providerRuntime) {
       const rt = this.providerRuntime[provider];
-      if (!rt || !rt.apiKey) throw new ProviderKeyMissingError(provider);
+      if (!rt || !rt.apiKey) {
+        throw new ProviderKeyMissingError(provider, { role: opts?.role, model, accountId: opts?.accountId });
+      }
       baseUrl = rt.baseUrl;
       apiKey = rt.apiKey;
     } else {
@@ -307,17 +432,23 @@ export class QwenClient implements ChatLlmClient {
       });
       if (!res.ok) {
         const text = await res.text().catch(() => '');
-        throw new Error(`Qwen HTTP ${res.status}: ${text.slice(0, 200)}`);
+        throw buildLlmHttpError(res.status, text, { provider, model, role: opts?.role, accountId: opts?.accountId, baseUrl });
       }
       const data = (await res.json()) as ChatCompletionResponse;
       // 早于「缺 content 抛错」捕获 usage：DashScope 兼容模式即使生成失败也常已计 prompt token。
       usage = data.usage;
       if (data.error?.message) {
-        throw new Error(`Qwen API 错误: ${data.error.message}`);
+        throw buildLlmApiError(data.error, { provider, model, role: opts?.role, accountId: opts?.accountId, baseUrl });
       }
       const content = data.choices?.[0]?.message?.content;
       if (typeof content !== 'string') {
-        throw new Error('Qwen 响应缺少 choices[0].message.content');
+        throw buildLlmShapeError('missing choices[0].message.content', {
+          provider,
+          model,
+          role: opts?.role,
+          accountId: opts?.accountId,
+          baseUrl,
+        });
       }
       ok = true;
       return content;

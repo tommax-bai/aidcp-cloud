@@ -30,6 +30,14 @@ function fakeFetch(rec: Rec): typeof fetch {
   }) as unknown as typeof fetch;
 }
 
+function fakeErrorFetch(status: number, body: string): typeof fetch {
+  return (async () => ({
+    ok: false,
+    status,
+    text: async () => body,
+  })) as unknown as typeof fetch;
+}
+
 const DS = { baseUrl: DEFAULT_BASE_URL, apiKey: 'sk-ds' };
 const ARK = { baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', apiKey: 'ark-key' };
 
@@ -93,6 +101,41 @@ test('onCall 带 provider（日志/记账可区分同名模型来自哪个厂商
   assert.equal(info?.provider, 'volcengine');
   assert.equal(info?.model, 'doubao-seed-1-6');
   assert.equal(info?.ok, true);
+});
+
+test('HTTP 错误提示带排障元数据，且不再误写 Qwen HTTP', async () => {
+  const c = new QwenClient({
+    apiKey: 'sk-ds',
+    providerRuntime: { dashscope: DS, volcengine: ARK },
+    getProvider: () => 'volcengine',
+    getModel: () => 'doubao-seed-2-0-pro-260215',
+    fetchImpl: fakeErrorFetch(
+      403,
+      JSON.stringify({
+        error: {
+          code: 'AccountOverdueError',
+          message: 'The request failed because your account has an overdue balance. Request id: req-123',
+          type: 'billing',
+        },
+      }),
+    ),
+  });
+  await assert.rejects(
+    () => c.complete('hi', { role: 'publish:ContentCreator', accountId: '63e2ff0500000000260049ce' }),
+    (e) => {
+      const msg = (e as Error).message;
+      assert.match(msg, /^LLM HTTP 403/);
+      assert.match(msg, /provider=volcengine/);
+      assert.match(msg, /model=doubao-seed-2-0-pro-260215/);
+      assert.match(msg, /role=publish:ContentCreator/);
+      assert.match(msg, /account=63e2ff0500000000260049ce/);
+      assert.match(msg, /endpoint=ark\.cn-beijing\.volces\.com/);
+      assert.match(msg, /code=AccountOverdueError/);
+      assert.match(msg, /requestId=req-123/);
+      assert.doesNotMatch(msg, /Qwen HTTP/);
+      return true;
+    },
+  );
 });
 
 test('注册表/归一/白名单/baseUrl 覆盖', () => {
