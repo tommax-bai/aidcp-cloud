@@ -13,6 +13,7 @@
  */
 
 import type { RiskStatus } from './types.js';
+import type { PacingOp, PacingFloorPayload, PacingSnapshotPayload } from '../comm/protocol.js';
 
 /** read_time 模型系数（§3.2）。 */
 const READ = {
@@ -39,6 +40,92 @@ const THINK_FLOOR_MS = 150;
  * 取值偏向"打开一篇笔记后即便不感兴趣，人也会看 2.5–5s 才退"——1.2s 量级偏机械（见 6/16 实测）。
  */
 export const DWELL_FLOOR_MS = { min: 2500, max: 5000 } as const;
+
+// ── 操作兜底 floor 配置（change pacing-floor-config-min-interval）─────────────────
+//
+// 语义：不是"操作后无条件附加固定等待"，而是"两次操作间的最小间隔下限"。数值全局后台可配、
+// 存 PG（pacing_floor_config），经 welcome 握手下发（PacingSnapshotPayload），边缘热加载。
+// 本模块只持写死默认 + 防呆下限 + CAP + 权威 clamp + 快照组装；落库/内存镜像由
+// src/config/pacing-config-store.ts 实现 PacingFloorProvider。
+
+/**
+ * 全局操作兜底 floor 上限（毫秒）。看门狗 lockstep 不变量：结构上 MUST ≪ 空闲看门狗轻推下限
+ * `IDLE_NUDGE_MIN_MS(200_000)`——任何 op 有效兜底恒 ≤ 15s，单次前台等待永不误触 idle 看门狗。
+ * 这是代码常量而非配置，配再大也被夹到此值；由 resume-limits 不变量测试断言该常量关系（tripwire）。
+ */
+export const CAP_MS = 15_000;
+
+/** 四类操作的稳定枚举（与协议 PacingOp 逐字对齐；遍历/白名单用）。 */
+export const PACING_OPS: readonly PacingOp[] = ['action', 'scroll', 'card_gap', 'detail_dwell'] as const;
+
+/**
+ * 每类操作的非零防呆下限（毫秒，= 读出口 clamp 下界）。
+ * 不变量：配置只能抬高延迟、永远抬不穿这个非零下限——即便有人绕过面板 psql 直插 0/负数，
+ * 离开云端进程前经 floorFor 的 clamp 夹回。取自设计 §5。
+ */
+export const OP_MIN_FLOOR: Record<PacingOp, number> = {
+  action: 800,
+  scroll: 300,
+  card_gap: 1000,
+  detail_dwell: 1000,
+} as const;
+
+/**
+ * 每类操作的内置默认区间（毫秒）——表空/缺行/字段非法时逐项回落此值（零回归基线，= 现役量级）。
+ * 取自设计 §5：action/scroll/card_gap 与边缘 timing.ts 预设量级对齐；detail_dwell 复用 `DWELL_FLOOR_MS`。
+ * 与边缘 BUILTIN_FLOOR 逐字对齐（表空时云端下发此值、边缘据此 gating，混版缺字段时两侧回落一致）。
+ */
+export const BUILTIN_FLOOR: Record<PacingOp, PacingFloorPayload> = {
+  action: { minMs: 1500, maxMs: 4000 },
+  scroll: { minMs: 500, maxMs: 1500 },
+  card_gap: { minMs: 3000, maxMs: 7000 },
+  detail_dwell: { minMs: DWELL_FLOOR_MS.min, maxMs: DWELL_FLOOR_MS.max },
+} as const;
+
+/**
+ * 兜底 floor 提供者（config 层实现，风控层只持接口）：给定操作类别返回**已夹逼**的生效区间。
+ * 由 `PacingConfigStore.floorFor` 实现（同步读内存镜像、缺行/非法逐项回落非零内置默认、
+ * 在读出口 clamp 到 `[OP_MIN_FLOOR[op], CAP_MS]`、永不抛）。供 `buildPacingSnapshot` 现读（PUT 后无需重启）。
+ */
+export interface PacingFloorProvider {
+  floorFor(op: PacingOp): PacingFloorPayload;
+}
+
+/**
+ * 权威读出口夹逼（第二道夹，`floorFor` 与快照组装共用此单一实现）：把任意区间夹到
+ * `[OP_MIN_FLOOR[op], CAP_MS]`，并保证 `min ≤ max`（越序时 max 抬到 min）。
+ * 负数/超界/零展宽在此被结构性夹成非零合法区间——绝不零延迟、绝不逼近看门狗。
+ */
+export function clampFloorRange(op: PacingOp, minMs: number, maxMs: number): PacingFloorPayload {
+  const lo = OP_MIN_FLOOR[op];
+  const min = Math.round(clamp(minMs, lo, CAP_MS));
+  let max = Math.round(clamp(maxMs, lo, CAP_MS));
+  if (max < min) max = min;
+  return { minMs: min, maxMs: max };
+}
+
+/**
+ * 组装 welcome 握手节奏快照（total 函数）：`tempo`(风控档标量) + 每类操作已夹逼 floor 区间。
+ * 整体 try/catch——provider 抛错/任意异常一律返回 `undefined`（省略 welcome 的 `pacing` 字段），
+ * 绝不 brick 握手/致边缘非零退出。status 由调用方（handler）纯读风控态传入、握手早于风控态则回落 normal。
+ */
+export function buildPacingSnapshot(
+  status: RiskStatus,
+  provider: PacingFloorProvider,
+): PacingSnapshotPayload | undefined {
+  try {
+    const tempo = tempoForStatus(status);
+    const opFloorsMs: Partial<Record<PacingOp, PacingFloorPayload>> = {};
+    for (const op of PACING_OPS) {
+      const { minMs, maxMs } = provider.floorFor(op);
+      // 防御性二次夹：即便某实现漏夹，快照离云端前也非零合法（权威夹点仍在 floorFor）。
+      opFloorsMs[op] = clampFloorRange(op, minMs, maxMs);
+    }
+    return { tempo, opFloorsMs };
+  } catch {
+    return undefined;
+  }
+}
 
 /** 极薄会话默认块：仅供边缘自主动作与断连兜底，不含 read/pause/fatigue 系数。 */
 export interface PacingDefaults {

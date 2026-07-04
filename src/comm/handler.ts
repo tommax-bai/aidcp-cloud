@@ -43,8 +43,9 @@ import type { EventBus } from '../event-bus/index.js';
 import { buildPublishApprovalCard } from '../feishu/cards.js';
 import type { FeishuMessenger } from '../feishu/messenger.js';
 import type { BotChatStore } from '../cache/bot-chat-store.js';
-import { RiskController, SessionBudget, buildPacingDefaults } from '../risk/index.js';
-import type { RiskAction } from '../risk/index.js';
+import { RiskController, SessionBudget, buildPacingDefaults, buildPacingSnapshot } from '../risk/index.js';
+import type { RiskAction, RiskStatus, PacingFloorProvider } from '../risk/index.js';
+import type { PacingSnapshotPayload } from './protocol.js';
 import type { AccountStateManager } from '../account-state.js';
 
 /** 锚点缓存的最小接口（PgAnchorCache 实现它，单测可打桩） */
@@ -90,6 +91,11 @@ export interface HandlerDeps {
   onHandshake?: (session: EdgeSession) => Promise<HandshakeOutcome> | HandshakeOutcome;
   /** 按连接真实账号解析 RiskController（reserved risk 通道 / session.budget 用）；缺省回落 riskController。 */
   resolveController?: (session: EdgeSession) => RiskController | undefined;
+  /**
+   * 操作兜底 floor 提供者（change pacing-floor-config-min-interval）：welcome 握手现读组装 pacing 快照下发。
+   * 未注入 → welcome 省略 `pacing` 字段（边缘回落内置非零默认，向后兼容）。纯读、不写任何状态。
+   */
+  pacingFloors?: PacingFloorProvider;
 }
 
 /** 把元素清单渲染成给 LLM 的编号列表（与 edge selector 一致的格式） */
@@ -341,7 +347,27 @@ export class DefaultMessageHandler implements MessageHandler {
     return makeEnvelope('welcome', env.id, this.clock(), {
       sessionId: session.sessionId,
       serverVersion: this.serverVersion,
+      // 节奏快照（change pacing-floor-config-min-interval）：tempo + 每类操作兜底 floor 区间。
+      // 纯读风控 status（不写风控态）；握手早于风控态建立 / 解析失败 → 回落 normal(tempo=1.0)。
+      // buildPacingSnapshot 是 total 函数：provider 抛错一律返 undefined，绝不 brick 握手。
+      pacing: this.buildWelcomePacing(session),
     });
+  }
+
+  /**
+   * 组装 welcome 的节奏快照。未注入 pacingFloors → undefined（省略字段、向后兼容）。
+   * 纯读该连接风控 status（getState 只读）；解析/读态抛错 → 回落 normal。整体不 brick 握手。
+   */
+  private buildWelcomePacing(session: EdgeSession): PacingSnapshotPayload | undefined {
+    const provider = this.deps.pacingFloors;
+    if (!provider) return undefined;
+    let status: RiskStatus = 'normal';
+    try {
+      status = this.controllerFor(session).getState().status;
+    } catch {
+      status = 'normal';
+    }
+    return buildPacingSnapshot(status, provider);
   }
 
   private onSessionBudgetRequest(env: Envelope, session: EdgeSession): Envelope {

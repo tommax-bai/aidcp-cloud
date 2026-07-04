@@ -123,6 +123,8 @@ import { createPersonaPanel } from './config/persona-facade.js';
 // 安全限额（change safety-quota-config，stream D）：三档×动作×三窗口限额数字后台可改+热加载，缺值回落写死默认。
 import { QuotaConfigStore } from './config/quota-config-store.js';
 import { createQuotaConfigPanel } from './config/quota-config-facade.js';
+import { PacingConfigStore } from './config/pacing-config-store.js';
+import { createPacingConfigPanel } from './config/pacing-config-facade.js';
 import { SessionConfigStore } from './config/session-config-store.js';
 import { createSessionLimitPanel } from './config/session-config-facade.js';
 import { ResumeConfigStore } from './config/resume-config-store.js';
@@ -208,6 +210,15 @@ async function main(): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
+  // 操作兜底 floor（change pacing-floor-config-min-interval）：四类操作最小间隔兜底区间、全局一套；
+  // 缺行/非法值一律回落 BUILTIN_FLOOR 内置默认并在读出口 clamp，绝不 brick、绝不零延迟。
+  const pacingConfigStore = new PacingConfigStore({
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
   // 单场会话上限（全局单例，change restore-auto-resume-and-global-safety-config）：全局单场时长 + 互动预算、对所有账号生效；缺行/非法回落写死默认，绝不 brick。
   const sessionConfigStore = new SessionConfigStore({
     host: readEnvString('PGHOST'),
@@ -240,6 +251,7 @@ async function main(): Promise<void> {
     await roleConfigStore.init();
     await categoryConfigStore.init();
     await quotaConfigStore.init();
+    await pacingConfigStore.init();
     await sessionConfigStore.init();
     await resumeConfigStore.init();
     await contentScheduleStore.init();
@@ -1038,6 +1050,9 @@ async function main(): Promise<void> {
     busFor: (session) => runtimes!.busFor(session),
     onHandshake: (session) => runtimes!.onHandshake(session),
     resolveController: (session) => runtimes?.controllerForSession(session),
+    // 节奏兜底 floor 提供者（change pacing-floor-config-min-interval）：welcome 握手现读组装 pacing 快照下发
+    // （PUT 后下次握手即新值 = 热加载）。init 失败也安全：空镜像 → floorFor 逐项回落 BUILTIN_FLOOR 内置默认。
+    pacingFloors: pacingConfigStore,
   });
   // 陪伴界面快照层（edge-companion-ui 8.1）：前向引用（服务实例在 server 起后构造，同 pusher 闭包模式）。
   let uiSnapshot: UiSnapshotService | undefined;
@@ -1736,6 +1751,8 @@ async function main(): Promise<void> {
   });
   // 安全限额面板外观（change safety-quota-config）：三档×动作×三窗口生效值 + 写校验（非法整块拒）+ 非乐观回真态。
   const quotaConfigPanel = createQuotaConfigPanel({ store: quotaConfigStore });
+  // 操作兜底 floor 面板外观（change pacing-floor-config-min-interval）：四类操作生效兜底区间 + 写校验（展宽/CAP，非法整块拒）+ 非乐观回真态。
+  const pacingConfigPanel = createPacingConfigPanel({ store: pacingConfigStore });
   // 单场上限面板外观（全局单例，change restore-auto-resume-and-global-safety-config）：全局时长 + 六项预算回显 + 写校验（非法整块拒）+ 非乐观回真态。
   const sessionLimitPanel = createSessionLimitPanel({ store: sessionConfigStore });
   // 续场配置面板外观（全局单例，change restore-auto-resume-and-global-safety-config）：全局续场护栏 + 看门狗阈值回显 + 写校验 + 非乐观回真态。
@@ -1906,6 +1923,8 @@ async function main(): Promise<void> {
           categoryConfig: categoryConfigPanel,
           // 安全限额配置（change safety-quota-config，stream D）。三档×动作×三窗口可改 + 热加载 + 非乐观回真态。
           quotaConfig: quotaConfigPanel,
+          // 操作兜底 floor 配置（change pacing-floor-config-min-interval）。四类操作最小间隔兜底区间可改 + 热加载 + 非乐观回真态。
+          pacingConfig: pacingConfigPanel,
           // 单场会话上限配置（change session-limits-to-quota-layer）。按账号时长 + 互动预算可改 + 热加载 + 非乐观回真态。
           sessionLimits: sessionLimitPanel,
           // 自动续场护栏 + 看门狗阈值配置（change session-auto-resume-with-excursions）。按账号可改 + 热加载 + 非乐观回真态。

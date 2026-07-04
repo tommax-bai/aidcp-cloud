@@ -18,6 +18,7 @@ import type {
   SetAccountContentScheduleResult,
 } from '../config/content-schedule-store.js';
 import type { EventBus } from '../event-bus/index.js';
+import type { PacingOp } from '../comm/protocol.js';
 import type { TokenRevocationStore } from './revocation.js';
 import type { PanelUser } from './auth.js';
 import type {
@@ -160,6 +161,12 @@ export interface PanelDeps {
    * 写非乐观回真态；非法数字整块拒（invalid_value），绝不部分落库、绝不假成功；不碰风控状态单写路径。
    */
   quotaConfig?: PanelQuotaConfig;
+  /**
+   * 操作兜底 floor 配置（change pacing-floor-config-min-interval）。未注入则 /api/pacing* 返回 503。
+   * 写非乐观回真态；非法数字整块拒（invalid_value / unknown_operation），绝不部分落库；生效值经读出口 clamp、
+   * 保证配置只能抬高延迟、抬不穿非零下限；只动 pacing_floor_config，不碰风控状态单写路径。
+   */
+  pacingConfig?: PanelPacingConfig;
   /**
    * 单场会话上限配置（全局单例，change restore-auto-resume-and-global-safety-config）。未注入则 /api/session-limits 返回 503。
    * 全局编辑单场时长 + 六项互动预算、对所有账号生效；写非乐观回真态；非法整块拒（invalid_value），绝不部分落库；
@@ -590,6 +597,43 @@ export interface PanelQuotaConfig {
   getCatalog(): QuotaConfigCatalogView;
   /** 写某 (tier,action) 限额。校验不过整块拒（绝不部分落库 / 假成功）。写后回真态目录。 */
   setQuota(patch: QuotaConfigPatchInput, updatedBy: string): Promise<QuotaConfigSetResult>;
+}
+
+// ── 操作兜底 floor 配置（change pacing-floor-config-min-interval）─────────────────
+// 四类操作（action/scroll/card_gap/detail_dwell）的最小间隔兜底区间 {minMs,maxMs}，全局一套。
+// 生效值 = 读出口 clamp 后（含非零防呆下限护栏、CAP 封顶）；overridden=false 显示的是内置默认（当前真生效）。
+
+/** 单 op 生效兜底区间（已含读出口夹逼护栏）+ 来源/审计（GET /api/pacing 形状）。 */
+export interface PacingConfigRowView {
+  operation: PacingOp;
+  minMs: number;
+  maxMs: number;
+  /** 是否存在库内覆盖（false=显示的是内置默认，即当前真生效）。 */
+  overridden: boolean;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export interface PacingConfigCatalogView {
+  pacing: PacingConfigRowView[];
+}
+
+/** PUT /api/pacing 入参：两值须成对给（校验在 facade：非负整数、min≤max、max≥min×1.5、≤CAP）。 */
+export interface PacingConfigPatchInput {
+  operation: PacingOp;
+  minMs: number;
+  maxMs: number;
+}
+
+export type PacingConfigSetResult =
+  | { ok: true; view: PacingConfigCatalogView }
+  | { ok: false; reason: 'unknown_operation' | 'invalid_value' | 'no_valid_fields' };
+
+export interface PanelPacingConfig {
+  /** 四类操作生效兜底区间 + 审计（库缺行以内置默认合成、含 clamp 护栏回显）。 */
+  getCatalog(): PacingConfigCatalogView;
+  /** 写某 op 兜底区间。校验不过整块拒（绝不部分落库 / 假成功）。写后回真态目录。 */
+  setPacing(patch: PacingConfigPatchInput, updatedBy: string): Promise<PacingConfigSetResult>;
 }
 
 // ── 单场会话上限配置（全局单例，change restore-auto-resume-and-global-safety-config）──

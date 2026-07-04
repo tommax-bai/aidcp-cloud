@@ -900,6 +900,63 @@ function createRequestHandler(
       return;
     }
 
+    // ── 操作兜底 floor 配置（change pacing-floor-config-min-interval）──────────────
+    // 四类操作最小间隔兜底区间 {minMs,maxMs}，全局一套。写非乐观回真态；非法整块拒
+    // （unknown_operation→404 / invalid_value/no_valid_fields→400），绝不部分落库；生效值经读出口 clamp
+    // （含非零防呆下限护栏），配置只能抬高延迟、抬不穿非零下限；不碰风控状态单写路径。
+    if (method === 'GET' && url === '/api/pacing') {
+      if (!deps.pacingConfig) {
+        sendJson(res, 503, { error: 'pacing_unavailable' });
+        return;
+      }
+      sendJson(res, 200, deps.pacingConfig.getCatalog());
+      return;
+    }
+    if (method === 'PUT' && url === '/api/pacing') {
+      if (!deps.pacingConfig) {
+        sendJson(res, 503, { error: 'pacing_unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { operation, minMs, maxMs } = (body ?? {}) as {
+        operation?: unknown;
+        minMs?: unknown;
+        maxMs?: unknown;
+      };
+      if (typeof operation !== 'string') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'operation_type' });
+        return;
+      }
+      // 区间两端须为数字（缺省=该值不改，交 facade 判 no_valid_fields / invalid_value）；类型不对直接 400。
+      const patch: { minMs?: number; maxMs?: number } = {};
+      for (const [k, v] of [['minMs', minMs], ['maxMs', maxMs]] as const) {
+        if (v === undefined) continue;
+        if (typeof v !== 'number') {
+          sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
+          return;
+        }
+        patch[k] = v;
+      }
+      const result = await deps.pacingConfig.setPacing(
+        { operation: operation as never, minMs: patch.minMs as never, maxMs: patch.maxMs as never },
+        verified.payload.sub,
+      );
+      if (!result.ok) {
+        // unknown_operation→404；invalid_value/no_valid_fields→400（绝不部分落库、绝不假成功）。
+        const notFound = result.reason === 'unknown_operation';
+        sendJson(res, notFound ? 404 : 400, { error: result.reason });
+        return;
+      }
+      sendJson(res, 200, result.view);
+      return;
+    }
+
     // ── 单场会话上限配置（全局单例，change restore-auto-resume-and-global-safety-config）──────
     // append 链（在 D/quotas 之后、F/persona 之前）。全局写非乐观回真态；非法数字整块拒
     // （invalid_value→400），绝不部分落库；只写 session_config_global，不碰风控状态单写路径。
