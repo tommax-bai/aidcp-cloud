@@ -434,25 +434,40 @@ test('ws-receiver: cancel 首写成功 → 触发 onRejected；approve 不触发
 
 test('ws-receiver: cancel 撞先写签名（first-writer-wins 未写入）→ 不触发 onRejected', async () => {
   const rejected: string[] = [];
+  const payload = { title: '标题', content: '正文', tags: [] };
+  const fsImpl = {
+    writeFile: async () => {
+      const err = new Error('exists') as NodeJS.ErrnoException;
+      err.code = 'EEXIST';
+      throw err;
+    },
+    readFile: async () =>
+      JSON.stringify({
+        requestId: 'publish-88',
+        approved: false,
+        ts: 0,
+        payload,
+      }),
+    rm: async () => {},
+  } as unknown as ConstructorParameters<typeof FeishuWsReceiver>[0]['fsImpl'];
   const receiver = new FeishuWsReceiver({
     appId: 'a',
     appSecret: 's',
     commandRouter: makeRouter(),
-    fsImpl: {
-      writeFile: async () => {
-        const err = new Error('exists') as NodeJS.ErrnoException;
-        err.code = 'EEXIST';
-        throw err;
-      },
-      rm: async () => {},
-    },
+    fsImpl,
     onRejected: (id) => rejected.push(id),
   });
   const res = await receiver.handleCardAction({
     action: 'cancel',
     requestId: 'publish-88',
-    payload: { title: '标题', content: '正文', tags: [] },
+    payload,
   });
   assert.equal(res.toast.type, 'info');
+  assert.equal(res.toast.content, '该发布已被处理（已取消）');
+  assert.equal((res.card as { type?: string } | undefined)?.type, 'raw', '重复点击也要返回替换卡');
+  assert.equal(
+    (res.card as { data?: { header?: { title?: { content?: string } } } }).data?.header?.title?.content,
+    '已取消发布',
+  );
   assert.deepEqual(rejected, [], '未首写不触发（决定已被他人先做）');
 });

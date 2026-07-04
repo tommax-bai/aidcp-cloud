@@ -305,10 +305,18 @@ export class FeishuWsReceiver {
     const result = await writeApprovalSignal(this.fsImpl, parsed.requestId, approved, parsed.payload);
     if (!result.written) {
       // first-writer-wins：已被先前决定（飞书/Web/重复点击），不覆盖
+      const alreadyApproved = result.alreadyDecided === true;
       return {
         toast: {
           type: 'info',
-          content: `该发布已被处理（${result.alreadyDecided ? '已授权' : '已取消'}）`,
+          content: `该发布已被处理（${alreadyApproved ? '已授权' : '已取消'}）`,
+        },
+        card: {
+          type: 'raw',
+          data: (alreadyApproved ? buildApprovedPublishApprovalCard : buildCancelledPublishApprovalCard)({
+            requestId: parsed.requestId,
+            ...parsed.payload,
+          }),
         },
       };
     }
