@@ -3,7 +3,7 @@
  * change curated-admission-eval-roles（Phase 3）。
  *
  * 流程（消费 note.detail.arrived，payload 带全文 content + 赞藏数）：
- *   ① 第一段共鸣预筛（passesResonance，零 LLM）短路——不过即返回，绝不进第二段（成本红线）；
+ *   ① 正文为空先短路；第一段共鸣预筛（passesResonance，零 LLM）短路——不过即返回，绝不进第二段（成本红线）；
  *   ② 过则按账号人设领域、**读笔记全文** LLM 评估（相关性 + 内容丰富度 + 非纯广告/标题党/蹭热点）；
  *   ③ admit ∧ relevanceOk ∧ richnessOk ∧ !isPromoOrClickbait → curatedStore.upsertObservation（admitReason='llm_eval'）。
  *
@@ -84,27 +84,30 @@ export class CuratedNoteEvaluator extends BaseRole {
 
   private async evaluate(d: NoteDetailData, eventAccountId?: string): Promise<void> {
     if (!d || !d.noteId) return;
+    const body = d.content.trim();
+    if (!body) return;
+    const note = { ...d, content: body };
     const accountId = eventAccountId ?? this.getAccountId();
     // honest-fail：缺账号 / 未绑定占位 → 不落（杜绝脏流量记到退役账号名下）。
     if (!accountId || accountId === '__unbound__') return;
 
     const config = resolveCuratedGateConfig(accountId);
     // ── 第一段：共鸣预筛（零 LLM）。不过即弃，绝不进第二段（成本红线）。 ──
-    const res = passesResonance({ likeCount: d.likeCount, collectCount: d.collectCount }, config);
+    const res = passesResonance({ likeCount: note.likeCount, collectCount: note.collectCount }, config);
     if (!res.ok) return;
 
-    const topics = topicKeysFromTitle(d.title);
+    const topics = topicKeysFromTitle(note.title);
 
     // 开关关 → 回退「仅共鸣」：预筛过即纳入（不调 LLM、不评相关性/丰富度）。
     if (!this.llmEvalEnabled) {
-      await this.admit(accountId, d, topics, res.reason);
+      await this.admit(accountId, note, topics, res.reason);
       return;
     }
 
     // ── 第二段：模型评估（仅预筛幸存者）。读全文判相关 + 丰富 + 非广告标题党。 ──
     let raw: string;
     try {
-      raw = await this.decide(this.buildPrompt(d));
+      raw = await this.decide(this.buildPrompt(note));
     } catch {
       // 诚实红线 + fire-and-forget：LLM 降级 → 不纳入；不抛、不阻塞浏览。
       this.log(`LLM 评估失败 → 诚实不纳入 note=${d.noteId}`);
@@ -119,7 +122,7 @@ export class CuratedNoteEvaluator extends BaseRole {
       this.log(`评估不准入 note=${d.noteId}：${parsed.reason}`);
       return;
     }
-    await this.admit(accountId, d, topics, 'llm_eval');
+    await this.admit(accountId, note, topics, 'llm_eval');
   }
 
   /** 落精选语料（fire-and-forget：失败只 log，不抛、不阻塞浏览主路径）。 */

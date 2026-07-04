@@ -7,12 +7,12 @@
  * 去重键 dedup_key = `${accountId}::${contentType}::${sourceId}`，UNIQUE。
  *
  * 两类写入语义（关键红线）：
- *  - upsertObservation（观测）：刷新正文/作者/计数/admit_reason/updated_at，**保留 first_seen_at**，
+ *  - upsertObservation（观测）：非空正文才写入；刷新正文/作者/计数/admit_reason/updated_at，**保留 first_seen_at**，
  *    且**绝不**触碰 bot_liked / bot_collected —— 观测不得把已置的「自有动作标记」抹掉。
  *  - markBotAction（自有动作）：
  *      · like   —— 弱信号，只 UPDATE 既有行（行不存在则 no-op，不自动建行）。
- *      · collect —— 强信号，INSERT ... ON CONFLICT 自动建/纳入；无内容时 body 落 ''、
- *        admit_reason 标 content_missing（诚实置空，绝不编造正文）。
+ *      · collect —— 强信号，有非空正文时 INSERT ... ON CONFLICT 自动建/纳入；
+ *        无非空正文时只补标记既有行，绝不补建空正文精选壳行。
  *
  * 召回 selectForCreation：自有动作优先（collected 权重 2、liked 权重 1），再按 collect_count、updated_at。
  * 保留上限：upsertObservation 后按账号裁到 newest retentionMax（按账号、不跨账号），防无界增长。
@@ -43,7 +43,7 @@ export interface CuratedObservation {
   admitReason: string;
 }
 
-/** 自有动作（collect 自动建行）时可附带的内容，缺失即诚实置空，不编造。 */
+/** 自有动作（collect 自动建行）时可附带的内容；缺少非空正文时不补建精选壳行。 */
 export interface CuratedActionContent {
   title?: string;
   body?: string;
@@ -305,12 +305,14 @@ export class CuratedContentStore {
   }
 
   /**
-   * 观测落库/刷新（账号维度去重）。
+   * 观测落库/刷新（账号维度去重）；正文为空则不写入精选素材。
    * ON CONFLICT DO UPDATE 刷新正文/作者/计数/admit_reason/updated_at（counts_captured_at=now()），
    * **保留 first_seen_at**，且**不触碰 bot_liked / bot_collected**（观测绝不抹掉已置的自有动作标记）。
    * 写后按账号裁到保留上限。
    */
   async upsertObservation(obs: CuratedObservation): Promise<void> {
+    const body = obs.body.trim();
+    if (!body) return;
     const dedupKey = dedupKeyOf(obs.accountId, obs.contentType, obs.sourceId);
     await this.pool.query(
       `INSERT INTO curated_content
@@ -335,7 +337,7 @@ export class CuratedContentStore {
         obs.sourceId,
         dedupKey,
         obs.title ?? null,
-        obs.body,
+        body,
         obs.author ?? null,
         obs.sourceUrl ?? null,
         obs.topics,
@@ -351,7 +353,7 @@ export class CuratedContentStore {
   /**
    * 记一次自有动作。
    *  - like：弱信号，只 UPDATE 既有行 bot_liked=true（行不存在则 no-op，不自动建行）。
-   *  - collect：强信号，INSERT ... ON CONFLICT 自动建/纳入；无内容时 body '' 且 admit_reason 标 content_missing。
+   *  - collect：强信号，有非空正文时 INSERT ... ON CONFLICT 自动建/纳入；无正文时只标既有行、不补建壳行。
    */
   async markBotAction(
     accountId: string,
@@ -370,10 +372,21 @@ export class CuratedContentStore {
       );
       return;
     }
-    // collect：自有收藏自动建/纳入（笔记维度）。
+    // collect：自有收藏自动建/纳入（源帖维度）；没有非空正文时不补建精选壳行。
+    const body = content?.body?.trim();
+    if (!body) {
+      await this.pool.query(
+        `UPDATE curated_content SET bot_collected = true, updated_at = now()
+         WHERE account_id = $1
+           AND source_id = $2
+           AND content_type IN ('image_text', 'video')`,
+        [accountId, sourceId],
+      );
+      return;
+    }
+
     const mediaType = normalizeSourceMediaType(content?.mediaType);
     const dedupKey = dedupKeyOf(accountId, mediaType, sourceId);
-    const admitReason = content?.body ? 'bot_collect' : 'bot_collect(content_missing)';
     await this.pool.query(
       `INSERT INTO curated_content
          (account_id, content_type, source_id, dedup_key, title, body, author, source_url,
@@ -386,11 +399,11 @@ export class CuratedContentStore {
         sourceId,
         dedupKey,
         content?.title ?? null,
-        content?.body ?? '',
+        body,
         content?.author ?? null,
         content?.sourceUrl ?? null,
         content?.topics ?? [],
-        admitReason,
+        'bot_collect',
       ],
     );
   }

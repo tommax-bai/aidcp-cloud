@@ -1396,7 +1396,7 @@ function createRequestHandler(
           sendJson(res, 200, { triggered: false, reason: 'image_text_only' });
           return;
         }
-        // 壳行红线（bot_collect(content_missing) 等）：空正文不得作洗稿参照，触发前诚实拒绝。
+        // 历史/异常壳行红线：空正文不得作洗稿参照，触发前诚实拒绝。
         if (!(row.body ?? '').trim()) {
           sendJson(res, 200, { triggered: false, reason: 'empty_body' });
           return;

@@ -102,6 +102,13 @@ test('upsertObservation：缺失可选字段诚实置空（null），不编造',
   assert.equal(params[11], null); // comment_count
 });
 
+test('upsertObservation：正文为空则不写入精选素材', async () => {
+  const { pool, calls } = capturingPool();
+  const store = new CuratedContentStore({ pool });
+  await store.upsertObservation({ ...baseObs, body: '   ' });
+  assert.equal(calls.length, 0);
+});
+
 test('upsertObservation 之后按账号裁到保留上限（DELETE 带 account_id 且 NOT IN newest LIMIT）', async () => {
   const { pool, calls } = capturingPool();
   const store = new CuratedContentStore({ pool, retentionMax: 500 });
@@ -168,17 +175,25 @@ test('markBotAction collect 视频内容：content_type/dedup_key 用 video', as
   assert.equal(params[3], 'acc-1::video::note-v');
 });
 
-test('markBotAction collect 无内容：body 落 ""、admit_reason 标 content_missing（不编造正文）', async () => {
+test('markBotAction collect 无正文：只补标记既有源帖行，不补建空正文壳行', async () => {
   const { pool, calls } = capturingPool();
   const store = new CuratedContentStore({ pool });
   await store.markBotAction('acc-1', 'note-9', 'collect');
-  const params = calls[0].params;
-  assert.equal(params[4], null); // title
-  assert.equal(params[5], ''); // body 空串、不编造
-  assert.equal(params[6], null); // author
-  assert.equal(params[7], null); // source_url
-  assert.deepEqual(params[8], []); // topics 空数组
-  assert.equal(params[9], 'bot_collect(content_missing)'); // admit_reason 标注缺内容
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].sql, /^\s*UPDATE curated_content SET bot_collected = true/);
+  assert.doesNotMatch(calls[0].sql, /INSERT/);
+  assert.match(calls[0].sql, /content_type IN \('image_text', 'video'\)/);
+  assert.deepEqual(calls[0].params, ['acc-1', 'note-9']);
+});
+
+test('markBotAction collect 空白正文：按缺正文处理，不补建精选壳行', async () => {
+  const { pool, calls } = capturingPool();
+  const store = new CuratedContentStore({ pool });
+  await store.markBotAction('acc-1', 'note-9', 'collect', { title: 'T', body: '   ', mediaType: 'video' });
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].sql, /^\s*UPDATE curated_content SET bot_collected = true/);
+  assert.doesNotMatch(calls[0].sql, /INSERT/);
+  assert.deepEqual(calls[0].params, ['acc-1', 'note-9']);
 });
 
 test('selectForCreation：ORDER BY 含 bot_collected/bot_liked 权重，按账号+类型过滤，映射成 CuratedSelectItem', async () => {

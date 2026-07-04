@@ -66,6 +66,12 @@ describe('CuratedNoteEvaluator 两段式准入', () => {
     assert.equal(r.upserts.length, 0);
   });
 
+  it('空正文 → 零 LLM 调用、不纳入', async () => {
+    const r = await run(mkDetail({ collectCount: 100, content: '   ' }));
+    assert.equal(r.llmCalled, false, '空正文不是可用精选素材，绝不调 LLM');
+    assert.equal(r.upserts.length, 0);
+  });
+
   it('预筛过(收藏达地板) + 评估准入 → upsert(admitReason=llm_eval)', async () => {
     const r = await run(mkDetail({ collectCount: 100 }));
     assert.equal(r.llmCalled, true);

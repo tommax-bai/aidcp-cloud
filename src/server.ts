@@ -552,8 +552,8 @@ async function main(): Promise<void> {
     console.warn('[aidcp-cloud] CuratedContentStore 初始化失败，精选灵感语料退化:', (err as Error).message);
   }
 
-  // 「本账号最近观测到的笔记内容」缓存（change curated-inspiration-corpus）：collect 总在 note.detail 之后、
-  // 同访问内发生，自有收藏自动纳入精选时据此补建正文。仅留最近一条/账号，内存态、丢失无害（取不到则诚实降级、正文留空）。
+  // 「本账号最近观测到的笔记内容」缓存（change curated-inspiration-corpus）：collect 通常在 note.detail 之后、
+  // 同访问内发生，自有收藏自动纳入精选时据此补建正文。仅留最近一条/账号，内存态、丢失无害（取不到则不补建空正文壳行）。
   const lastObservedNoteByAccount = new Map<
     string,
     {
@@ -819,7 +819,7 @@ async function main(): Promise<void> {
       });
     }
     // 精选灵感：把自有动作并入精选语料（change curated-inspiration-corpus）。
-    // like = 弱信号（只标既有行、不自动建）；collect = 强信号（自动纳入，用同访问观测到的笔记内容补建正文，取不到则诚实留空）。
+    // like = 弱信号（只标既有行、不自动建）；collect = 强信号（有同访问非空正文才补建精选，取不到则只补标记既有行）。
     if (curatedContentStore && evt.noteId && (evt.action === 'like' || evt.action === 'collect')) {
       const observed = lastObservedNoteByAccount.get(accountId);
       const content =
@@ -883,7 +883,7 @@ async function main(): Promise<void> {
       interactionFeedStore.upsertMeta(acc, d.authorId, { title: d.author }).catch(() => {});
     }
     // 精选灵感（change curated-inspiration-corpus + curated-admission-eval-roles）：
-    // 此处**只记最近观测笔记内容**（供自有收藏 markBotAction('collect') 补建正文用，见 interaction.occurred 处理器）。
+    // 此处**只记最近观测笔记内容**（供自有收藏 markBotAction('collect') 在正文可用时补建精选，见 interaction.occurred 处理器）。
     // 「笔记是否进精选」的准入判定已移交角色 curated_note_evaluator（Phase 3 两段式：共鸣预筛 → 读全文 LLM 评估），
     // 以拿到账号绑定 LLM 与人设；此处不再直接 upsertObservation。
     if (curatedContentStore && d.noteId) {
