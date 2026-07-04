@@ -27,7 +27,7 @@ export class CommentReviewer extends BaseRole {
   private readonly getNoteData: (noteId: string) => NoteData | null;
   private unsubscribers: (() => void)[] = [];
   /** 等待 scroll_comments 回执的在途上下文（单飞：一次只深读一篇）。 */
-  private pending: { noteId: string; sourcePageType: 'feed' | 'search'; imagesBrowsed: number } | null = null;
+  private pending: { noteId: string; sourcePageType: 'feed' | 'search'; imagesBrowsed: number; count: number } | null = null;
 
   constructor(options: CommentReviewerOptions) {
     super(options);
@@ -62,15 +62,18 @@ export class CommentReviewer extends BaseRole {
       }
     }
 
-    if (read) {
+    if (read && note) {
+      const count = this.planScrollCount(note, payload.imagesBrowsed);
       this.pending = {
         noteId: payload.noteId,
         sourcePageType: payload.sourcePageType,
         imagesBrowsed: payload.imagesBrowsed,
+        count,
       };
       this.emit('reading.scroll_comments', {
         noteId: payload.noteId,
         sourcePageType: payload.sourcePageType,
+        count,
         ts: Date.now(),
       });
     } else {
@@ -78,11 +81,11 @@ export class CommentReviewer extends BaseRole {
     }
   }
 
-  private onActionCompleted(payload: { action: string; ok: boolean }): void {
+  private onActionCompleted(payload: { action: string; ok: boolean; reason?: string }): void {
     if (payload.action !== 'scroll_comments' || !this.pending) return;
     const ctx = this.pending;
     this.pending = null;
-    this.emitReadingDone(ctx.noteId, ctx.sourcePageType, ctx.imagesBrowsed, payload.ok ? 1 : 0);
+    this.emitReadingDone(ctx.noteId, ctx.sourcePageType, ctx.imagesBrowsed, payload.ok ? this.parseScrolledCount(payload.reason, 1) : 0);
   }
 
   private emitReadingDone(
@@ -150,5 +153,23 @@ export class CommentReviewer extends BaseRole {
     }
     if (!obj || typeof obj !== 'object') return false;
     return (obj as Record<string, unknown>).action === 'read';
+  }
+
+  private planScrollCount(note: NoteData, imagesBrowsed: number): number {
+    const textLen = note.content.length;
+    const engagement = note.likeCount + note.collectCount * 1.5;
+    let count = textLen > 900 ? 8 : textLen > 520 ? 7 : textLen > 260 ? 6 : 4;
+    if (engagement >= 600) count += 2;
+    else if (engagement >= 180) count += 1;
+    if (imagesBrowsed >= 6) count += 1;
+    return Math.max(3, Math.min(10, count));
+  }
+
+  private parseScrolledCount(reason: unknown, fallback: number): number {
+    if (typeof reason !== 'string') return fallback;
+    const m = reason.match(/scrolled=(\d+)(?:\/\d+)?/);
+    if (!m) return fallback;
+    const n = Number(m[1]);
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
   }
 }

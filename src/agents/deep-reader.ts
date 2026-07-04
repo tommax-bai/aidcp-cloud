@@ -28,8 +28,16 @@ export interface DeepReaderOptions extends RoleOptions {
 const SHORT_BODY_THRESHOLD = 80;
 const BROWSE_PROB_SHORT = 0.7;
 const BROWSE_PROB_LONG = 0.4;
-/** 一次浏览的目标张数（边缘按实际可见图数截断）。 */
-const TARGET_IMAGE_COUNT = 3;
+/** 高质量/高互动图文给足上限；边缘会按真实图片总数截断，达到“能看完就看完”。 */
+const VIEW_ALL_IMAGE_CAP = 18;
+
+function parseReasonCount(reason: unknown, key: string): number | null {
+  if (typeof reason !== 'string') return null;
+  const m = reason.match(new RegExp(`${key}=(\\d+)`));
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
 
 export class DeepReader extends BaseRole {
   readonly roleName: RoleName = 'deep_reader';
@@ -62,19 +70,19 @@ export class DeepReader extends BaseRole {
 
   private onQualityPass(payload: QualityPassPayload): void {
     const note = this.getNoteData(payload.noteId);
-    const browse = this.decideBrowse(note);
+    const plan = this.planBrowse(note);
 
-    if (browse) {
+    if (plan) {
       this.pending = {
         noteId: payload.noteId,
         sourcePageType: payload.sourcePageType,
-        count: TARGET_IMAGE_COUNT,
+        count: plan.count,
       };
-      this.log(`决定浏览多图（count≈${TARGET_IMAGE_COUNT}）`);
+      this.log(`决定浏览多图（count≈${plan.count}，${plan.reason}）`);
       this.emit('reading.browse_images', {
         noteId: payload.noteId,
         sourcePageType: payload.sourcePageType,
-        count: TARGET_IMAGE_COUNT,
+        count: plan.count,
         ts: Date.now(),
       });
     } else {
@@ -88,24 +96,33 @@ export class DeepReader extends BaseRole {
     }
   }
 
-  private onActionCompleted(payload: { action: string; ok: boolean }): void {
+  private onActionCompleted(payload: { action: string; ok: boolean; reason?: string }): void {
     if (payload.action !== 'browse_images' || !this.pending) return;
     const ctx = this.pending;
     this.pending = null;
+    const actual = payload.ok ? (parseReasonCount(payload.reason, 'browsed') ?? ctx.count) : 0;
     this.emit('reading.images_done', {
       noteId: ctx.noteId,
       sourcePageType: ctx.sourcePageType,
-      imagesBrowsed: payload.ok ? ctx.count : 0,
+      imagesBrowsed: actual,
       ts: Date.now(),
     });
   }
 
   // ─── 决策 ─────────────────────────────────────────────────
 
-  /** 概率门 + 正文长度启发：是否浏览多图。 */
-  private decideBrowse(note: NoteData | null): boolean {
+  /** 概率门 + 正文长度/互动强度启发：是否浏览多图，以及浏览多少张。 */
+  private planBrowse(note: NoteData | null): { count: number; reason: string } | null {
     const textLen = note?.content?.length ?? 0;
-    const prob = textLen > 0 && textLen < SHORT_BODY_THRESHOLD ? BROWSE_PROB_SHORT : BROWSE_PROB_LONG;
-    return this.random() < prob;
+    const engagement = (note?.likeCount ?? 0) + (note?.collectCount ?? 0) * 1.5;
+    const imageLed = textLen > 0 && textLen < SHORT_BODY_THRESHOLD;
+    const highQuality = engagement >= 300 || (imageLed && engagement >= 80);
+    const prob = highQuality ? 0.9 : imageLed ? BROWSE_PROB_SHORT : BROWSE_PROB_LONG;
+    if (this.random() >= prob) return null;
+
+    if (highQuality) return { count: VIEW_ALL_IMAGE_CAP, reason: '高互动图文，尽量看完' };
+    if (imageLed) return { count: engagement >= 80 ? 8 : 6, reason: '短正文偏图文，增加翻图' };
+    if (textLen < 220) return { count: engagement >= 120 ? 7 : 5, reason: '图文并重，适中翻图' };
+    return { count: engagement >= 120 ? 5 : 3, reason: '长正文为主，少量看图' };
   }
 }

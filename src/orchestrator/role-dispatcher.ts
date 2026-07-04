@@ -1167,7 +1167,7 @@ export class RoleDispatcher {
         const dwellMs = this.dwellForCurrentNote('glance');
         this.sendCommand({
           action: 'scroll_comments',
-          params: { noteId: payload.noteId, thinkMs: this.thinkNow(), ...(dwellMs === undefined ? {} : { dwellMs }) },
+          params: { noteId: payload.noteId, count: payload.count, thinkMs: this.thinkNow(), ...(dwellMs === undefined ? {} : { dwellMs }) },
         });
       }),
 

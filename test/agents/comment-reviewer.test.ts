@@ -49,6 +49,7 @@ describe('CommentReviewer（评论判定）', () => {
     await new Promise((r) => setTimeout(r, 50));
 
     assert.ok(intent, '应 emit reading.scroll_comments');
+    assert.ok(intent!.count >= 3, '应带动态滚动次数');
     assert.equal(doneCount, 0, '回执前不应 emit reading.done');
 
     bus.emit('action.completed', { action: 'scroll_comments', ok: true, ts: Date.now() });

@@ -59,7 +59,7 @@ function makeAppraiser(opts: {
   bus.on('comment_like.skipped', (e) => { skipped.push(e as { reason: string }); });
   role.subscribe();
   async function driveScroll(cands: CommentCandidate[] = candidates) {
-    bus.emit('reading.scroll_comments', { noteId: 'n1', sourcePageType: 'feed', ts: 0 });
+    bus.emit('reading.scroll_comments', { noteId: 'n1', sourcePageType: 'feed', count: 4, ts: 0 });
     bus.emit('action.completed', { action: 'scroll_comments', ok: true, candidates: cands, ts: 0 });
     await tick();
   }

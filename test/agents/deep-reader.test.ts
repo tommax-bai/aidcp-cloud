@@ -32,13 +32,31 @@ describe('DeepReader（多图判定）', () => {
     assert.ok(intent, '应 emit reading.browse_images');
     assert.equal(intent!.noteId, 'note_1');
     assert.ok(intent!.count > 0);
+    assert.ok(intent!.count > 3, '短图文不应固定只看 3 张');
     assert.equal(doneCount, 0, '回执到达前不应 emit reading.images_done');
 
     // 模拟边缘 browse_images 完成回执
-    bus.emit('action.completed', { action: 'browse_images', ok: true, ts: Date.now() });
+    bus.emit('action.completed', { action: 'browse_images', ok: true, reason: 'browsed=4', ts: Date.now() });
     assert.ok(done, '回执后应 emit reading.images_done');
     assert.equal(done!.noteId, 'note_1');
-    assert.ok(done!.imagesBrowsed > 0);
+    assert.equal(done!.imagesBrowsed, 4, '应按边缘真实 browsed=N 入账');
+
+    role.unsubscribe();
+  });
+
+  it('高互动图文 → 给足看完上限，由边缘按真实总数截断', () => {
+    const bus = new EventBus();
+    const high: NoteData = { noteId: 'note_1', title: 't', content: '短正文', likeCount: 500, collectCount: 120 };
+    const role = new DeepReader({ eventBus: bus, soul: mockSoul, getNoteData: () => high, random: () => 0 });
+    role.subscribe();
+
+    let intent = null as ReadingBrowseImagesPayload | null;
+    bus.on('reading.browse_images', (p) => { intent = p; });
+
+    bus.emit('quality.pass', { noteId: 'note_1', sourcePageType: 'feed', reason: 'ok', ts: Date.now() });
+
+    assert.ok(intent, '应 emit reading.browse_images');
+    assert.equal(intent!.count, 18);
 
     role.unsubscribe();
   });

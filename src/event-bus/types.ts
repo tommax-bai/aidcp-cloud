@@ -223,6 +223,8 @@ export interface ReadingImagesDonePayload {
 export interface ReadingScrollCommentsPayload {
   noteId: string;
   sourcePageType: 'feed' | 'search';
+  /** 期望滚动评论区的次数（边缘按实际可滚动状态截断/如实回报） */
+  count: number;
   ts: number;
 }
 
