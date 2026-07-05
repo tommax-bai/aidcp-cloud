@@ -69,6 +69,11 @@ interface BillingLine {
   text: string;
 }
 
+interface BillingQuantity {
+  raw: number;
+  tokens: number;
+}
+
 export function createBillingPriceRefresh(options: BillingPriceRefreshOptions) {
   const runFetch = options.fetch ?? fetch;
   const env = options.env ?? process.env;
@@ -511,21 +516,50 @@ function normalizeBillingLine(
   if (!row || typeof row !== 'object') return null;
   const obj = row as Record<string, unknown>;
   const text = JSON.stringify(obj);
-  const tokens = normalizeTokenUsage(
-    firstNumber(obj, [
-      'Usage',
-      'UsageAmount',
-      'BillableQuantity',
-      'BillableAmount',
-      'BillableQuantityValue',
-      'Quantity',
-      'ResourceAmount',
-      'ActualUsage',
-      'DeductedQuantity',
-    ]),
+  const quantity = billingTokenQuantity(obj, text);
+  const amount = billingLineAmount(obj, quantity);
+  if (quantity == null || amount == null || quantity.tokens <= 0 || amount < 0) return null;
+  return {
+    provider,
+    usageDay: day,
+    currency: stringField(obj, ['Currency', 'currency']) ?? 'CNY',
+    amount,
+    tokens: quantity.tokens,
+    kind: inferLineKind(text),
     text,
-  );
-  const amount = firstNumber(obj, [
+  };
+}
+
+function billingTokenQuantity(obj: Record<string, unknown>, text: string): BillingQuantity | null {
+  const candidates = [
+    {
+      keys: ['Usage', 'UsageAmount', 'ActualUsage'],
+      unitKeys: ['UsageUnit', 'Unit', 'PriceUnit'],
+    },
+    {
+      keys: ['BillableQuantity', 'BillableAmount', 'BillableQuantityValue', 'Quantity', 'ResourceAmount', 'DeductedQuantity'],
+      unitKeys: ['Unit', 'UsageUnit', 'PriceUnit'],
+    },
+    {
+      keys: ['Count', 'DeductionCount'],
+      unitKeys: ['Unit', 'PriceUnit'],
+    },
+  ];
+
+  for (const candidate of candidates) {
+    const unitText = candidate.unitKeys.map((key) => stringField(obj, [key])).filter(Boolean).join(' ');
+    for (const key of candidate.keys) {
+      const raw = numberField(obj, key);
+      const tokens = normalizeTokenUsage(raw, unitText || text);
+      if (tokens != null) return { raw: raw as number, tokens };
+    }
+  }
+
+  return null;
+}
+
+function billingLineAmount(obj: Record<string, unknown>, quantity: BillingQuantity | null): number | null {
+  const billedAmount = firstNumber(obj, [
     'PretaxAmount',
     'PaymentAmount',
     'CashAmount',
@@ -541,24 +575,33 @@ function normalizeBillingLine(
     'RealCost',
     'OriginalCost',
   ]);
-  if (tokens == null || amount == null || tokens <= 0 || amount < 0) return null;
-  return {
-    provider,
-    usageDay: day,
-    currency: stringField(obj, ['Currency', 'currency']) ?? 'CNY',
-    amount,
-    tokens,
-    kind: inferLineKind(text),
-    text,
-  };
+  if (billedAmount != null && billedAmount > 0) return billedAmount;
+  const derivedAmount = deriveAmountFromUnitPrice(obj, quantity);
+  return derivedAmount ?? billedAmount;
 }
 
-function normalizeTokenUsage(value: number | null, text: string): number | null {
+function deriveAmountFromUnitPrice(obj: Record<string, unknown>, quantity: BillingQuantity | null): number | null {
+  if (!quantity || quantity.tokens <= 0) return null;
+  const price = firstNumber(obj, ['Price', 'DiscountBizUnitPrice', 'MarketPrice']);
+  if (price == null || price < 0) return null;
+  const priceUnitText = ['PriceUnit', 'Unit', 'UsageUnit'].map((key) => stringField(obj, [key])).filter(Boolean).join(' ');
+  const priceUnitTokens = tokenUnitMultiplier(priceUnitText);
+  if (priceUnitTokens == null || priceUnitTokens <= 0) return null;
+  return price * (quantity.tokens / priceUnitTokens);
+}
+
+function normalizeTokenUsage(value: number | null, unitText: string): number | null {
   if (value == null) return null;
-  if (/\u767e\u4e07|million/i.test(text)) return value * 1_000_000;
-  if (/\u4e07/i.test(text)) return value * 10_000;
-  if (/\u5343|1k|k\s*token/i.test(text)) return value * 1000;
-  return value;
+  const multiplier = tokenUnitMultiplier(unitText);
+  return multiplier == null ? null : value * multiplier;
+}
+
+function tokenUnitMultiplier(unitText: string): number | null {
+  if (/\u767e\u4e07|million/i.test(unitText)) return 1_000_000;
+  if (/\u4e07/i.test(unitText)) return 10_000;
+  if (/\u5343|1k|k\s*token/i.test(unitText)) return 1000;
+  if (/token/i.test(unitText)) return 1;
+  return null;
 }
 
 function inferLineKind(text: string): BillingLine['kind'] {
@@ -569,12 +612,20 @@ function inferLineKind(text: string): BillingLine['kind'] {
 
 function firstNumber(obj: Record<string, unknown>, keys: string[]): number | null {
   for (const key of keys) {
-    const value = valueByKey(obj, key);
-    if (typeof value === 'number' && Number.isFinite(value)) return value;
-    if (typeof value === 'string') {
-      const n = Number(value.replace(/,/g, ''));
-      if (Number.isFinite(n)) return n;
-    }
+    const n = numberField(obj, key);
+    if (n != null) return n;
+  }
+  return null;
+}
+
+function numberField(obj: Record<string, unknown>, key: string): number | null {
+  const value = valueByKey(obj, key);
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const normalized = value.replace(/,/g, '').trim();
+    if (!normalized || normalized === '-') return null;
+    const n = Number(normalized);
+    if (Number.isFinite(n)) return n;
   }
   return null;
 }

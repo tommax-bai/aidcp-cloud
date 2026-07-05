@@ -202,6 +202,91 @@ test('manual billing refresh matches Volcengine billing labels to runtime model 
   assert.equal(character?.totalCostPer1k, 0.5);
 });
 
+test('manual billing refresh derives Volcengine token price from rounded bill amount and unit price', async () => {
+  const written: LlmBillingPriceSnapshotInput[][] = [];
+  const refresh = createBillingPriceRefresh({
+    nowMs: () => Date.parse('2026-07-05T03:30:00.000Z'),
+    env: {
+      VOLCENGINE_BILLING_ACCESS_KEY_ID: 'ak',
+      VOLCENGINE_BILLING_ACCESS_KEY_SECRET: 'sk',
+    } as NodeJS.ProcessEnv,
+    tokenUsage: {
+      billingPriceTargets: async () => [
+        target({
+          provider: 'volcengine',
+          model: 'doubao-seed-character-260628',
+          promptTokens: 860,
+          completionTokens: 120,
+          totalTokens: 980,
+        }),
+      ],
+      upsertBillingPrices: async (prices) => {
+        written.push(prices);
+        return prices.length;
+      },
+    },
+    fetch: async () =>
+      new Response(
+        JSON.stringify({
+          Result: {
+            List: [
+              {
+                Product: 'ark_bd',
+                ProductZh: '字节跳动大模型服务（豆包大模型）',
+                ConfigName: 'Doubao-Seed-Character',
+                Element: 'Doubao-Seed-Character-32k以内推理（输入）',
+                ExpandField: 'doubao-seed-character',
+                Price: '0.000800',
+                PriceUnit: '千tokens',
+                Count: '0.86',
+                Unit: '千tokens',
+                PretaxAmount: '0.00',
+                Currency: 'CNY',
+                ChargeItemCode: 'Doubao-Seed-Character_32k_infer_input_cn-beijing_realtime',
+              },
+              {
+                Product: 'ark_bd',
+                ProductZh: '字节跳动大模型服务（豆包大模型）',
+                ConfigName: 'Doubao-Seed-Character',
+                Element: 'Doubao-Seed-Character-32k以内推理（输出）',
+                ExpandField: 'doubao-seed-character',
+                Price: '0.002000',
+                PriceUnit: '千tokens',
+                Count: '0.12',
+                Unit: '千tokens',
+                PretaxAmount: '0.00',
+                Currency: 'CNY',
+                ChargeItemCode: 'Doubao-Seed-Character_32k_infer_output_cn-beijing_realtime',
+              },
+              {
+                Product: 'Doubao-Seedream',
+                ProductZh: '豆包图像创作模型',
+                ConfigName: 'Doubao-Seedream-5.0-Lite',
+                Price: '0.02',
+                PriceUnit: '张',
+                Count: '1',
+                Unit: '张',
+                PretaxAmount: '0.02',
+                Currency: 'CNY',
+                ChargeItemCode: 'Doubao_Seedream_5.0_t2i_cn-beijing_realtime',
+              },
+            ],
+          },
+        }),
+        { status: 200 },
+      ),
+  });
+
+  const result = await refresh.refresh();
+  assert.equal(result.written, 1);
+  assert.equal(result.skipped.length, 0);
+  assert.equal(result.prices[0].pricingBasis, 'input_output_tokens');
+  const price = written[0][0];
+  assert.equal(price.model, 'doubao-seed-character-260628');
+  assert.ok(Math.abs((price.promptCostPer1k ?? 0) - 0.0008) < 1e-12);
+  assert.ok(Math.abs((price.completionCostPer1k ?? 0) - 0.002) < 1e-12);
+});
+
 test('manual billing refresh keeps DashScope target skipped when Aliyun bill has no model sample', async () => {
   const refresh = createBillingPriceRefresh({
     nowMs: () => Date.parse('2026-07-05T03:30:00.000Z'),
