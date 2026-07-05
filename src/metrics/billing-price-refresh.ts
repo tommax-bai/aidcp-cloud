@@ -305,7 +305,40 @@ function sumAll(lines: BillingLine[]): { amount: number; tokens: number } {
 function lineMatchesModel(line: BillingLine, model: string): boolean {
   const text = line.text.toLowerCase();
   const m = model.toLowerCase();
-  return text.includes(m);
+  if (text.includes(m)) return true;
+  if (line.provider !== 'volcengine') return false;
+
+  const normalizedText = normalizeModelForBillingMatch(text);
+  return volcengineModelAliases(model).some((alias) => normalizedText.includes(alias));
+}
+
+function volcengineModelAliases(model: string): string[] {
+  const normalized = normalizeModelForBillingMatch(model);
+  const aliases = new Set<string>();
+  addSpecificVolcengineAlias(aliases, normalized);
+
+  // Runtime Volcengine model ids often carry release-date suffixes that billing omits.
+  addSpecificVolcengineAlias(aliases, normalized.replace(/-\d{6,8}$/, ''));
+
+  return Array.from(aliases);
+}
+
+function addSpecificVolcengineAlias(aliases: Set<string>, value: string): void {
+  if (!isSpecificVolcengineAlias(value)) return;
+  aliases.add(value);
+}
+
+function isSpecificVolcengineAlias(value: string): boolean {
+  const parts = value.split('-').filter(Boolean);
+  return value.length >= 12 && parts.length >= 3 && value.startsWith('doubao-');
+}
+
+function normalizeModelForBillingMatch(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
 }
 
 async function fetchAliyunBillingLines(

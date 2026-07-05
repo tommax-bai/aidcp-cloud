@@ -118,6 +118,132 @@ test('manual billing refresh reads generic platform AccessKey credentials from s
   assert.ok(requestedSecrets.includes('aliyun/access_key_secret'));
 });
 
+test('manual billing refresh matches Volcengine billing labels to runtime model ids', async () => {
+  const written: LlmBillingPriceSnapshotInput[][] = [];
+  const refresh = createBillingPriceRefresh({
+    nowMs: () => Date.parse('2026-07-05T03:30:00.000Z'),
+    env: {
+      VOLCENGINE_BILLING_ACCESS_KEY_ID: 'ak',
+      VOLCENGINE_BILLING_ACCESS_KEY_SECRET: 'sk',
+    } as NodeJS.ProcessEnv,
+    tokenUsage: {
+      billingPriceTargets: async () => [
+        target({
+          provider: 'volcengine',
+          model: 'doubao-seed-2-0-pro-260215',
+          promptTokens: 2000,
+          completionTokens: 3000,
+          totalTokens: 5000,
+        }),
+        target({
+          provider: 'volcengine',
+          model: 'doubao-seed-character-260628',
+          promptTokens: 500,
+          completionTokens: 500,
+          totalTokens: 1000,
+        }),
+      ],
+      upsertBillingPrices: async (prices) => {
+        written.push(prices);
+        return prices.length;
+      },
+    },
+    fetch: async () =>
+      new Response(
+        JSON.stringify({
+          Result: {
+            List: [
+              {
+                Product: 'ark_bd',
+                ProductZh: '字节跳动大模型服务（豆包大模型）',
+                ConfigName: 'Doubao-Seed-2.0-pro',
+                ChargeItemCode: 'Doubao_Seed_2.0_pro_32k_infer_input_cn-beijing_realtime',
+                Unit: '千tokens',
+                Usage: '2',
+                PretaxAmount: '0.4',
+                Currency: 'CNY',
+              },
+              {
+                Product: 'ark_bd',
+                ProductZh: '字节跳动大模型服务（豆包大模型）',
+                ConfigName: 'Doubao-Seed-2.0-pro',
+                ChargeItemCode: 'Doubao_Seed_2.0_pro_32k_infer_output_cn-beijing_realtime',
+                Unit: '千tokens',
+                Usage: '3',
+                PretaxAmount: '0.9',
+                Currency: 'CNY',
+              },
+              {
+                Product: 'ark_bd',
+                ProductZh: '字节跳动大模型服务（豆包大模型）',
+                ConfigName: 'Doubao-Seed-Character',
+                ChargeItemCode: 'Doubao-Seed-Character_32k_infer_cn-beijing_realtime',
+                Unit: '千tokens',
+                Usage: '1',
+                PretaxAmount: '0.5',
+                Currency: 'CNY',
+              },
+            ],
+          },
+        }),
+        { status: 200 },
+      ),
+  });
+
+  const result = await refresh.refresh();
+  assert.equal(result.written, 2);
+  assert.equal(result.skipped.length, 0);
+  assert.equal(result.prices.find((p) => p.model === 'doubao-seed-2-0-pro-260215')?.pricingBasis, 'input_output_tokens');
+  assert.equal(result.prices.find((p) => p.model === 'doubao-seed-character-260628')?.pricingBasis, 'total_tokens');
+  const pro = written[0].find((p) => p.model === 'doubao-seed-2-0-pro-260215');
+  const character = written[0].find((p) => p.model === 'doubao-seed-character-260628');
+  assert.equal(pro?.promptCostPer1k, 0.2);
+  assert.ok(Math.abs((pro?.completionCostPer1k ?? 0) - 0.3) < 1e-9);
+  assert.equal(character?.totalCostPer1k, 0.5);
+});
+
+test('manual billing refresh keeps DashScope target skipped when Aliyun bill has no model sample', async () => {
+  const refresh = createBillingPriceRefresh({
+    nowMs: () => Date.parse('2026-07-05T03:30:00.000Z'),
+    env: {
+      ALIYUN_BILLING_ACCESS_KEY_ID: 'ak',
+      ALIYUN_BILLING_ACCESS_KEY_SECRET: 'sk',
+    } as NodeJS.ProcessEnv,
+    tokenUsage: {
+      billingPriceTargets: async () => [target()],
+      upsertBillingPrices: async () => {
+        throw new Error('must_not_write');
+      },
+    },
+    fetch: async () =>
+      new Response(
+        JSON.stringify({
+          Data: {
+            Items: [
+              {
+                ProductName: '对象存储',
+                ProductDetail: '对象存储OSS标准存储包-套餐内',
+                BillingItem: '标准存储包定价',
+                Usage: '20',
+                UsageUnit: 'GB',
+                PretaxAmount: 1.2,
+                Currency: 'CNY',
+              },
+            ],
+          },
+        }),
+        { status: 200 },
+      ),
+  });
+
+  const result = await refresh.refresh();
+  assert.equal(result.written, 0);
+  assert.deepEqual(result.missingCredentials, []);
+  assert.equal(result.skipped.length, 1);
+  assert.equal(result.skipped[0].provider, 'dashscope');
+  assert.equal(result.skipped[0].reason, 'no_billing_sample');
+});
+
 test('manual billing refresh reports missing credentials without writing fallback prices', async () => {
   const refresh = createBillingPriceRefresh({
     nowMs: () => Date.parse('2026-07-05T03:30:00.000Z'),
