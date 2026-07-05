@@ -54,6 +54,7 @@ import {
   type RiskWindow,
 } from './risk/index.js';
 import { EventBus } from './event-bus/index.js';
+import type { NoteDetailData } from './event-bus/index.js';
 import { RoleDispatcher } from './orchestrator/index.js';
 import { ConnectionRuntimeRegistry, type DispatcherBuildContext } from './orchestrator/connection-runtime.js';
 import type { CommentApprovalPort } from './agents/comment-approval-gate.js';
@@ -1028,7 +1029,7 @@ async function main(): Promise<void> {
 
   // 展示账本元数据（change interaction-feed-enrichment）：看到笔记/作者时独立 upsert 标题+链接，面板读时 LEFT JOIN。
   // 与互动事件解耦 → 杀「动作回执先于详情到达→标题为空」竞态；诚实置空（COALESCE 缺则不覆盖、不伪造）。
-  eventBus.on('note.detail.arrived', (evt) => {
+  const rememberObservedNote = (evt: { detail: NoteDetailData; accountId?: string; ts: number }): void => {
     // retire-default-account：缺 accountId 即 honest-fail 丢弃，绝不回落 default。
     if (!evt.accountId) {
       console.warn('[aidcp-cloud] note.detail.arrived 缺 accountId — 跳过（honest-fail）');
@@ -1064,7 +1065,9 @@ async function main(): Promise<void> {
         referenceImages: d.images ?? [],
       });
     }
-  });
+  };
+  eventBus.on('note.detail.arrived', rememberObservedNote);
+  eventBus.on('note.image_snapshot.arrived', rememberObservedNote);
   eventBus.on('profile.detail.arrived', (evt) => {
     if (!interactionFeedStore) return;
     const d = evt.detail;

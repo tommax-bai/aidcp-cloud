@@ -32,6 +32,8 @@ export interface NoteDetailData {
   url?: string;
   /** Original carousel images observed by edge; empty/missing means unavailable. */
   images?: NoteImagePayload[];
+  /** Refresh-only image snapshot; not a new view and not a normal browse-detail decision event. */
+  refreshOnly?: boolean;
 }
 
 export interface ProfileDetailData {
@@ -139,6 +141,8 @@ export interface EventMap {
   'page.cards.arrived': { cards: PageCardsData[]; ts: number };
   // accountId（change interaction-feed-enrichment）：tee 到全局观测总线后，元数据 upsert 需按真实账号归属（缺则保留键）。
   'note.detail.arrived': { detail: NoteDetailData; accountId?: string; ts: number };
+  /** Refresh-only note detail carrying newly observed carousel images; consumers MUST NOT count it as a new view. */
+  'note.image_snapshot.arrived': { detail: NoteDetailData; accountId?: string; ts: number };
   'profile.detail.arrived': { detail: ProfileDetailData; accountId?: string; ts: number };
   'action.completed': { action: string; ok: boolean; reason?: string; ts: number; candidates?: CommentCandidate[] };
   // 会话控制事件

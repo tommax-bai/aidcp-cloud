@@ -93,6 +93,32 @@ test('note.detail 戳 currentNoteId → interaction.occurred 携带 noteId（V1 
   assert.equal(like!.accountId, 'acc-x');
 });
 
+test('refreshOnly note.detail 只刷新图片快照，不计 view', async () => {
+  const eventBus = new EventBus();
+  const got = capture(eventBus);
+  const snapshots: unknown[] = [];
+  eventBus.on('note.image_snapshot.arrived', (e) => {
+    snapshots.push(e);
+  });
+  const handler = makeHandler(eventBus);
+  const session: EdgeSession = { sessionId: 's-refresh', accountId: 'acc-x' };
+  await handler.handle(
+    makeEnvelope('note.detail', 'n-refresh', 1, {
+      noteId: 'note-42',
+      title: 't',
+      content: 'c',
+      likeCount: 0,
+      collectCount: 0,
+      images: [{ index: 0, url: 'https://img.test/a.jpg' }],
+      refreshOnly: true,
+    }),
+    session,
+  );
+
+  assert.equal(got.find((e) => e.action === 'view'), undefined);
+  assert.equal(snapshots.length, 1);
+});
+
 test('未见 note.detail 时 noteId 不带（不编造）（V1 9.2）', async () => {
   const eventBus = new EventBus();
   const got = capture(eventBus);

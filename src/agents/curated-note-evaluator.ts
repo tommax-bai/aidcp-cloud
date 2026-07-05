@@ -29,6 +29,12 @@ import type { CuratedObservation } from '../cache/curated-content-store.js';
 /** 评估角色只需精选库的「观测落库」口（窄接口，便于测试桩）。 */
 export interface CuratedNoteSink {
   upsertObservation(obs: CuratedObservation): Promise<void>;
+  refreshReferenceImages?(
+    accountId: string,
+    sourceId: string,
+    contentType: 'image_text' | 'video',
+    images: NonNullable<NoteDetailData['images']>,
+  ): Promise<number>;
 }
 
 export interface CuratedNoteEvaluatorOptions extends RoleOptions {
@@ -67,7 +73,10 @@ export class CuratedNoteEvaluator extends BaseRole {
   }
 
   subscribe(): void {
-    this.unsubscribers.push(this.eventBus.on('note.detail.arrived', (p) => this.onNoteDetailArrived(p)));
+    this.unsubscribers.push(
+      this.eventBus.on('note.detail.arrived', (p) => this.onNoteDetailArrived(p)),
+      this.eventBus.on('note.image_snapshot.arrived', (p) => this.onImageSnapshotArrived(p)),
+    );
   }
 
   unsubscribe(): void {
@@ -80,6 +89,27 @@ export class CuratedNoteEvaluator extends BaseRole {
   private onNoteDetailArrived(payload: { detail: NoteDetailData; accountId?: string; ts: number }): void {
     // 异步评估，绝不阻塞浏览主路径（fire-and-forget）。
     void this.evaluate(payload.detail, payload.accountId);
+  }
+
+  private onImageSnapshotArrived(payload: { detail: NoteDetailData; accountId?: string; ts: number }): void {
+    void this.refreshImages(payload.detail, payload.accountId);
+  }
+
+  private async refreshImages(d: NoteDetailData, eventAccountId?: string): Promise<void> {
+    if (!d || !d.noteId || !d.images?.length) return;
+    const accountId = eventAccountId ?? this.getAccountId();
+    if (!accountId || accountId === '__unbound__') return;
+    const contentType = d.mediaType === 'video' ? 'video' : 'image_text';
+    try {
+      const updated = await this.curatedStore.refreshReferenceImages?.(accountId, d.noteId, contentType, d.images);
+      if (updated && updated > 0) {
+        this.log(`刷新精选参考图 note=${d.noteId} images=${d.images.length}`);
+        return;
+      }
+    } catch (err) {
+      this.log(`刷新精选参考图失败（回落准入评估）：${(err as Error).message}`);
+    }
+    await this.evaluate(d, eventAccountId);
   }
 
   private async evaluate(d: NoteDetailData, eventAccountId?: string): Promise<void> {

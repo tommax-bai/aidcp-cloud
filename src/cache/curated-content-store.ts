@@ -58,7 +58,7 @@ export type CuratedReferenceImageRelocator = (ctx: {
   images: CuratedReferenceImage[];
 }) => Promise<CuratedReferenceImage[]>;
 
-export const CURATED_REFERENCE_IMAGE_DEFAULT_LIMIT = 3;
+export const CURATED_REFERENCE_IMAGE_DEFAULT_LIMIT = 9;
 export const CURATED_REFERENCE_IMAGE_HARD_MAX = 9;
 
 /** 一次观测：别人的笔记/评论被判定「值得当灵感」时落库/刷新。 */
@@ -513,6 +513,26 @@ export class CuratedContentStore {
       ],
     );
     await this.trimToRetention(obs.accountId);
+  }
+
+  async refreshReferenceImages(
+    accountId: string,
+    sourceId: string,
+    contentType: CuratedSourceContentType,
+    input: CuratedReferenceImageInput[] | undefined,
+  ): Promise<number> {
+    const referenceImages = await this.prepareReferenceImages(accountId, sourceId, input);
+    if (referenceImages.length === 0) return 0;
+    const { rowCount } = await this.pool.query(
+      `UPDATE curated_content
+          SET reference_images = $4::jsonb,
+              updated_at = now()
+        WHERE account_id = $1
+          AND source_id = $2
+          AND content_type = $3`,
+      [accountId, sourceId, contentType, JSON.stringify(referenceImages)],
+    );
+    return rowCount ?? 0;
   }
 
   /**

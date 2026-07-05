@@ -231,6 +231,10 @@ export class DefaultMessageHandler implements MessageHandler {
         const detail = env.payload as NoteDetailPayload;
         // 戳当前笔记 id（v2 现役路径）：action.completed 据此补 noteId（V1 task 9.2）。
         if (detail.noteId) session.currentNoteId = detail.noteId;
+        if (detail.refreshOnly) {
+          this.bus(session).emit('note.image_snapshot.arrived', { detail, accountId: session.accountId, ts: this.clock() });
+          return null;
+        }
         // accountId 随事件带出（change interaction-feed-enrichment）：tee 到全局总线后元数据 upsert 按真实账号归属。
         this.bus(session).emit('note.detail.arrived', { detail, accountId: session.accountId, ts: this.clock() });
         // 浏览计数（fix view-count-zero）：成功打开并上报一篇笔记即一次 view。执行端不单独回执 view 动作，
@@ -562,6 +566,5 @@ export class DefaultMessageHandler implements MessageHandler {
     }
   }
 }
-
 
 

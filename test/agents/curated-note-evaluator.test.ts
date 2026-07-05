@@ -138,4 +138,77 @@ describe('CuratedNoteEvaluator 两段式准入', () => {
     const r = await run(mkDetail({ collectCount: 100 }), { eventAccountId: 'acc-evt' });
     assert.equal(r.upserts[0].accountId, 'acc-evt');
   });
+
+  it('图片快照刷新：已有精选行只更新图片，不调 LLM', async () => {
+    const bus = new EventBus();
+    let llmCalled = false;
+    const refreshes: Array<{ accountId: string; sourceId: string; images: unknown[] }> = [];
+    const role = new CuratedNoteEvaluator({
+      eventBus: bus,
+      soul,
+      llm: {
+        complete: async () => {
+          llmCalled = true;
+          return '{"admit":true,"relevanceOk":true,"richnessOk":true,"isPromoOrClickbait":false,"reason":"相关扎实"}';
+        },
+      },
+      curatedStore: {
+        upsertObservation: async () => {
+          throw new Error('refresh existing row should not upsert');
+        },
+        refreshReferenceImages: async (accountId, sourceId, _contentType, images) => {
+          refreshes.push({ accountId, sourceId, images });
+          return 1;
+        },
+      },
+      getAccountId: () => 'acc-1',
+    });
+    role.subscribe();
+    bus.emit('note.image_snapshot.arrived', {
+      detail: mkDetail({ images: [{ index: 0, url: 'https://img.test/a.jpg' }] }),
+      accountId: 'acc-evt',
+      ts: Date.now(),
+    });
+    await sleep(30);
+
+    assert.equal(llmCalled, false);
+    assert.equal(refreshes.length, 1);
+    assert.equal(refreshes[0].accountId, 'acc-evt');
+    assert.equal(refreshes[0].sourceId, 'n1');
+  });
+
+  it('图片快照刷新：未命中已有行时回落准入评估，避免先刷新后入库丢图', async () => {
+    const bus = new EventBus();
+    let llmCalled = false;
+    const upserts: CuratedObservation[] = [];
+    const role = new CuratedNoteEvaluator({
+      eventBus: bus,
+      soul,
+      llm: {
+        complete: async () => {
+          llmCalled = true;
+          return '{"admit":true,"relevanceOk":true,"richnessOk":true,"isPromoOrClickbait":false,"reason":"相关扎实"}';
+        },
+      },
+      curatedStore: {
+        upsertObservation: async (obs) => {
+          upserts.push(obs);
+        },
+        refreshReferenceImages: async () => 0,
+      },
+      getAccountId: () => 'acc-1',
+    });
+    role.subscribe();
+    bus.emit('note.image_snapshot.arrived', {
+      detail: mkDetail({ collectCount: 100, images: [{ index: 0, url: 'https://img.test/a.jpg' }] }),
+      accountId: 'acc-evt',
+      ts: Date.now(),
+    });
+    await sleep(30);
+
+    assert.equal(llmCalled, true);
+    assert.equal(upserts.length, 1);
+    assert.equal(upserts[0].accountId, 'acc-evt');
+    assert.deepEqual(upserts[0].referenceImages, [{ index: 0, url: 'https://img.test/a.jpg' }]);
+  });
 });

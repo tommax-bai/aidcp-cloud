@@ -127,6 +127,34 @@ test('reference images are normalized, deduped, relocated, and stored as JSONB',
   assert.equal(stored[0].alt, 'cover');
 });
 
+test('reference images default limit stores up to the platform cap of 9', async () => {
+  const { pool, calls } = capturingPool();
+  const store = new CuratedContentStore({ pool });
+  await store.upsertObservation({
+    ...baseObs,
+    referenceImages: Array.from({ length: 10 }, (_, i) => ({ index: i, sourceUrl: `https://img.test/${i}.jpg` })),
+  });
+
+  const stored = JSON.parse(calls[0].params[9] as string) as ReturnType<typeof normalizeCuratedReferenceImages>;
+  assert.equal(stored.length, 9);
+  assert.deepEqual(stored.map((img) => img.index), [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+});
+
+test('refreshReferenceImages：只更新已有源帖图片，空输入不写库', async () => {
+  const { pool, calls } = capturingPool();
+  const store = new CuratedContentStore({ pool });
+  assert.equal(await store.refreshReferenceImages('acc-1', 'note-9', 'image_text', []), 0);
+  assert.equal(calls.length, 0);
+
+  await store.refreshReferenceImages('acc-1', 'note-9', 'image_text', [
+    { index: 0, sourceUrl: 'https://img.test/a.jpg' },
+  ]);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].sql, /UPDATE curated_content/);
+  assert.match(calls[0].sql, /reference_images = \$4::jsonb/);
+  assert.deepEqual(calls[0].params.slice(0, 3), ['acc-1', 'note-9', 'image_text']);
+});
+
 test('normalizeCuratedReferenceImages drops invalid URLs and caps at the configured limit', () => {
   const normalized = normalizeCuratedReferenceImages(
     [

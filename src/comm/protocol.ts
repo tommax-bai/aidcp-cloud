@@ -746,7 +746,10 @@ export interface NoteDetailPayload {
   /** 详情页带 xsec_token 的完整链接（change interaction-feed-enrichment，供面板「按笔记互动」可点跳转）。
    *  诚实置空：地址栏无 token 时不带、绝不用裸 id 拼打不开的假链接（同发布链 postUrl 约定）。 */
   url?: string;
+  /** Original carousel image references; omitted/empty when not observed. */
   images?: NoteImagePayload[];
+  /** Refresh-only detail after carousel browsing; cloud MUST NOT count it as a new view. */
+  refreshOnly?: boolean;
 }
 
 export interface ProfileDetailPayload {
