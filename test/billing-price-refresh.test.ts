@@ -64,6 +64,7 @@ test('manual billing refresh derives total-token price from Aliyun bill detail',
   assert.equal(written[0][0].totalCostPer1k, 0.6);
   assert.equal(written[0][0].source, 'billing:aliyun:DescribeInstanceBill');
   assert.match(urls[0], /MaxResults=300/);
+  assert.match(urls[0], /IsHideZeroCharge=false/);
   assert.doesNotMatch(urls[0], /PageNum|PageSize/);
 });
 
@@ -116,6 +117,94 @@ test('manual billing refresh reads generic platform AccessKey credentials from s
   assert.ok(requestedSecrets.includes('aliyun/access_key_id'));
   assert.ok(requestedSecrets.includes('aliyun/billing_access_key_secret'));
   assert.ok(requestedSecrets.includes('aliyun/access_key_secret'));
+});
+
+test('manual billing refresh derives DashScope split price from Aliyun gross amount when discounted amount is zero', async () => {
+  const written: LlmBillingPriceSnapshotInput[][] = [];
+  const urls: string[] = [];
+  const refresh = createBillingPriceRefresh({
+    nowMs: () => Date.parse('2026-07-05T03:30:00.000Z'),
+    env: {
+      ALIYUN_BILLING_ACCESS_KEY_ID: 'ak',
+      ALIYUN_BILLING_ACCESS_KEY_SECRET: 'sk',
+    } as NodeJS.ProcessEnv,
+    tokenUsage: {
+      billingPriceTargets: async () => [
+        target({
+          provider: 'dashscope',
+          model: 'qwen3.7-plus',
+          promptTokens: 223_644,
+          completionTokens: 25_708,
+          totalTokens: 249_352,
+        }),
+      ],
+      upsertBillingPrices: async (prices) => {
+        written.push(prices);
+        return prices.length;
+      },
+    },
+    fetch: async (url) => {
+      urls.push(String(url));
+      return new Response(
+        JSON.stringify({
+          Data: {
+            Items: [
+              {
+                ProductCode: 'sfm',
+                ProductName: '大模型服务平台百炼',
+                ProductDetail: '百炼大模型推理',
+                InstanceID: '4766633;ws-pzw5gks2odi3rsxq;qwen3.7-plus;context_0-256k_input_token;;0',
+                BillingItem: '大模型文本消耗量',
+                BillingItemCode: 'token_number',
+                Usage: '223.644',
+                UsageUnit: '千tokens',
+                PretaxAmount: 0,
+                PretaxGrossAmount: 0.447288,
+                Currency: 'CNY',
+              },
+              {
+                ProductCode: 'sfm',
+                ProductName: '大模型服务平台百炼',
+                ProductDetail: '百炼大模型推理',
+                InstanceID: '4766633;ws-pzw5gks2odi3rsxq;qwen3.7-plus;context_0-256k_output_token;;0',
+                BillingItem: '大模型文本消耗量',
+                BillingItemCode: 'token_number',
+                Usage: '25.708',
+                UsageUnit: '千tokens',
+                PretaxAmount: 0,
+                PretaxGrossAmount: 0.205664,
+                Currency: 'CNY',
+              },
+              {
+                ProductCode: 'sfm',
+                ProductName: '大模型服务平台百炼',
+                ProductDetail: '百炼大模型推理',
+                InstanceID: '4766633;ws-pzw5gks2odi3rsxq;qwen3.7-max;input_token;;0',
+                BillingItem: '大模型文本消耗量',
+                BillingItemCode: 'token_number',
+                Usage: '0',
+                UsageUnit: '千tokens',
+                PretaxAmount: 0,
+                PretaxGrossAmount: 0,
+                Currency: 'CNY',
+              },
+            ],
+          },
+        }),
+        { status: 200 },
+      );
+    },
+  });
+
+  const result = await refresh.refresh();
+  assert.equal(result.written, 1);
+  assert.equal(result.skipped.length, 0);
+  assert.equal(result.prices[0].pricingBasis, 'input_output_tokens');
+  assert.match(urls[0], /IsHideZeroCharge=false/);
+  const price = written[0][0];
+  assert.equal(price.model, 'qwen3.7-plus');
+  assert.ok(Math.abs((price.promptCostPer1k ?? 0) - 0.002) < 1e-12);
+  assert.ok(Math.abs((price.completionCostPer1k ?? 0) - 0.008) < 1e-12);
 });
 
 test('manual billing refresh matches Volcengine billing labels to runtime model ids', async () => {
@@ -326,6 +415,50 @@ test('manual billing refresh keeps DashScope target skipped when Aliyun bill has
   assert.deepEqual(result.missingCredentials, []);
   assert.equal(result.skipped.length, 1);
   assert.equal(result.skipped[0].provider, 'dashscope');
+  assert.equal(result.skipped[0].reason, 'no_billing_sample');
+});
+
+test('manual billing refresh keeps DashScope target skipped when Aliyun token rows have no positive billing-derived amount', async () => {
+  const refresh = createBillingPriceRefresh({
+    nowMs: () => Date.parse('2026-07-05T03:30:00.000Z'),
+    env: {
+      ALIYUN_BILLING_ACCESS_KEY_ID: 'ak',
+      ALIYUN_BILLING_ACCESS_KEY_SECRET: 'sk',
+    } as NodeJS.ProcessEnv,
+    tokenUsage: {
+      billingPriceTargets: async () => [target({ model: 'qwen3.7-max' })],
+      upsertBillingPrices: async () => {
+        throw new Error('must_not_write');
+      },
+    },
+    fetch: async () =>
+      new Response(
+        JSON.stringify({
+          Data: {
+            Items: [
+              {
+                ProductCode: 'sfm',
+                ProductName: '大模型服务平台百炼',
+                ProductDetail: '百炼大模型推理',
+                InstanceID: '4766633;ws-pzw5gks2odi3rsxq;qwen3.7-max;input_token;;0',
+                BillingItem: '大模型文本消耗量',
+                BillingItemCode: 'token_number',
+                Usage: '1',
+                UsageUnit: '千tokens',
+                PretaxAmount: 0,
+                PretaxGrossAmount: 0,
+                Currency: 'CNY',
+              },
+            ],
+          },
+        }),
+        { status: 200 },
+      ),
+  });
+
+  const result = await refresh.refresh();
+  assert.equal(result.written, 0);
+  assert.equal(result.skipped.length, 1);
   assert.equal(result.skipped[0].reason, 'no_billing_sample');
 });
 

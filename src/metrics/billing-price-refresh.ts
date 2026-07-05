@@ -369,7 +369,7 @@ async function fetchAliyunBillingLines(
       BillingDate: day,
       Granularity: 'DAILY',
       IsBillingItem: 'true',
-      IsHideZeroCharge: 'true',
+      IsHideZeroCharge: 'false',
       MaxResults: String(pageSize),
     };
     if (nextToken) params.NextToken = nextToken;
@@ -559,25 +559,31 @@ function billingTokenQuantity(obj: Record<string, unknown>, text: string): Billi
 }
 
 function billingLineAmount(obj: Record<string, unknown>, quantity: BillingQuantity | null): number | null {
-  const billedAmount = firstNumber(obj, [
+  const netAmount = firstPositiveNumber(obj, [
     'PretaxAmount',
     'PaymentAmount',
     'CashAmount',
     'AfterDiscountAmount',
-    'PretaxGrossAmount',
     'PayableAmount',
-    'DiscountBillAmount',
-    'BillAmount',
-    'OriginalBillAmount',
     'ExpenseAmount',
     'Cost',
     'Charge',
     'RealCost',
+  ]);
+  if (netAmount != null) return netAmount;
+
+  const grossAmount = firstPositiveNumber(obj, [
+    'PretaxGrossAmount',
+    'BillAmount',
+    'OriginalBillAmount',
     'OriginalCost',
   ]);
-  if (billedAmount != null && billedAmount > 0) return billedAmount;
+  if (grossAmount != null) return grossAmount;
+
   const derivedAmount = deriveAmountFromUnitPrice(obj, quantity);
-  return derivedAmount ?? billedAmount;
+  if (derivedAmount != null && derivedAmount > 0) return derivedAmount;
+
+  return null;
 }
 
 function deriveAmountFromUnitPrice(obj: Record<string, unknown>, quantity: BillingQuantity | null): number | null {
@@ -614,6 +620,14 @@ function firstNumber(obj: Record<string, unknown>, keys: string[]): number | nul
   for (const key of keys) {
     const n = numberField(obj, key);
     if (n != null) return n;
+  }
+  return null;
+}
+
+function firstPositiveNumber(obj: Record<string, unknown>, keys: string[]): number | null {
+  for (const key of keys) {
+    const n = numberField(obj, key);
+    if (n != null && n > 0) return n;
   }
   return null;
 }
