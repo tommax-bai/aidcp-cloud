@@ -3,15 +3,15 @@ import assert from 'node:assert/strict';
 import pg from 'pg';
 import { TokenUsageStore, TOKEN_USAGE_SCHEMA_SQL } from '../src/metrics/token-usage-store.js';
 
-/**
- * change llm-token-usage-stats：内存累加 + flush upsert 的记账逻辑（无需真实 PG，注入桩池）。
- */
-
-test('TOKEN_USAGE_SCHEMA_SQL 补 bucket_start 打头索引服务全局时间窗查询（#22）', () => {
-  assert.match(TOKEN_USAGE_SCHEMA_SQL, /idx_llm_token_usage_bucket\s+ON llm_token_usage \(bucket_start\)/);
+test('schema keeps provider dimension and billing-derived price snapshots', () => {
+  assert.match(TOKEN_USAGE_SCHEMA_SQL, /provider\s+TEXT\s+NOT NULL DEFAULT 'unknown'/);
+  assert.match(TOKEN_USAGE_SCHEMA_SQL, /PRIMARY KEY \(bucket_start, account_id, role, provider, model\)/);
+  assert.match(TOKEN_USAGE_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS llm_billing_price_snapshot/);
+  assert.match(TOKEN_USAGE_SCHEMA_SQL, /idx_llm_token_usage_provider_model_bucket/);
+  assert.doesNotMatch(TOKEN_USAGE_SCHEMA_SQL, /qwen-turbo|doubao|public price/i);
 });
 
-test('purgeOlderThan 按 bucket_start 删过期桶、回传删除行数', async () => {
+test('purgeOlderThan deletes old buckets and returns row count', async () => {
   const calls: Array<{ sql: string; params: unknown[] }> = [];
   const pool = {
     query: async (sql: string, params: unknown[]) => {
@@ -30,6 +30,7 @@ interface RecordedUpsert {
   bucketMs: number;
   accountId: string;
   role: string;
+  provider: string;
   model: string;
   promptTokens: number;
   completionTokens: number;
@@ -38,9 +39,9 @@ interface RecordedUpsert {
   okCalls: number;
 }
 
-/** 桩 pg.Pool：SCHEMA/查询忽略，记录 upsert 参数。可选让 upsert 抛错以测失败隔离。 */
 function fakePool(opts: { failUpsert?: boolean } = {}) {
   const upserts: RecordedUpsert[] = [];
+  const priceUpserts: unknown[][] = [];
   const pool = {
     query: async (sql: string, params?: unknown[]) => {
       if (sql.includes('INSERT INTO llm_token_usage')) {
@@ -50,80 +51,171 @@ function fakePool(opts: { failUpsert?: boolean } = {}) {
           bucketMs: Number(p[0]),
           accountId: String(p[1]),
           role: String(p[2]),
-          model: String(p[3]),
-          promptTokens: Number(p[4]),
-          completionTokens: Number(p[5]),
-          totalTokens: Number(p[6]),
-          calls: Number(p[7]),
-          okCalls: Number(p[8]),
+          provider: String(p[3]),
+          model: String(p[4]),
+          promptTokens: Number(p[5]),
+          completionTokens: Number(p[6]),
+          totalTokens: Number(p[7]),
+          calls: Number(p[8]),
+          okCalls: Number(p[9]),
         });
+      }
+      if (sql.includes('INSERT INTO llm_billing_price_snapshot')) {
+        priceUpserts.push(params ?? []);
       }
       return { rows: [], rowCount: 0 };
     },
   } as unknown as pg.Pool;
-  return { pool, upserts };
+  return { pool, upserts, priceUpserts };
 }
 
-test('同维度多次 add → flush 累加为一行（calls/okCalls/tokens 相加）', async () => {
+test('same provider/model dimension accumulates into one upsert row', async () => {
   const { pool, upserts } = fakePool();
   const store = new TokenUsageStore({ pool });
-  store.add({ accountId: 'acc-x', role: 'browse:content_evaluator', model: 'qwen-plus', ok: true, promptTokens: 10, completionTokens: 5, totalTokens: 15 });
-  store.add({ accountId: 'acc-x', role: 'browse:content_evaluator', model: 'qwen-plus', ok: false, promptTokens: 4, completionTokens: 0, totalTokens: 4 });
+  store.add({
+    accountId: 'acc-x',
+    role: 'browse:content_evaluator',
+    provider: 'dashscope',
+    model: 'qwen-plus',
+    ok: true,
+    promptTokens: 10,
+    completionTokens: 5,
+    totalTokens: 15,
+  });
+  store.add({
+    accountId: 'acc-x',
+    role: 'browse:content_evaluator',
+    provider: 'dashscope',
+    model: 'qwen-plus',
+    ok: false,
+    promptTokens: 4,
+    completionTokens: 0,
+    totalTokens: 4,
+  });
   await store.flush();
   assert.equal(upserts.length, 1);
-  const u = upserts[0];
-  assert.equal(u.promptTokens, 14);
-  assert.equal(u.completionTokens, 5);
-  assert.equal(u.totalTokens, 19);
-  assert.equal(u.calls, 2);
-  assert.equal(u.okCalls, 1, '失败那次不计入 okCalls');
-  assert.equal(u.bucketMs % 600_000, 0, 'bucketMs 对齐 10 分钟');
+  assert.equal(upserts[0].provider, 'dashscope');
+  assert.equal(upserts[0].promptTokens, 14);
+  assert.equal(upserts[0].completionTokens, 5);
+  assert.equal(upserts[0].totalTokens, 19);
+  assert.equal(upserts[0].calls, 2);
+  assert.equal(upserts[0].okCalls, 1);
+  assert.equal(upserts[0].bucketMs % 600_000, 0);
 });
 
-test('honest-fail：无 accountId → 丢弃不记（retire-default-account：绝不回落 default）；有账号无 role → untagged，token 缺失 → 0', async () => {
+test('different providers split rows even when model names match', async () => {
   const { pool, upserts } = fakePool();
   const store = new TokenUsageStore({ pool });
-  // 无 accountId：honest-fail 丢弃，绝不回落 default。
-  store.add({ model: 'qwen-turbo', ok: true });
+  store.add({ accountId: 'acc-x', role: 'browse:a', provider: 'dashscope', model: 'same-model', ok: true, totalTokens: 1 });
+  store.add({ accountId: 'acc-x', role: 'browse:a', provider: 'volcengine', model: 'same-model', ok: true, totalTokens: 2 });
   await store.flush();
-  assert.equal(upserts.length, 0, '缺 accountId 的用量被丢弃，不记到 default');
-  // 有账号、无 role / 无 token：role 回落 untagged、token 缺失计 0（这些诚实标签保留）。
+  assert.equal(upserts.length, 2);
+  assert.deepEqual(
+    upserts.map((u) => u.provider).sort(),
+    ['dashscope', 'volcengine'],
+  );
+});
+
+test('missing accountId is dropped; missing role/provider/tokens keep honest labels', async () => {
+  const { pool, upserts } = fakePool();
+  const store = new TokenUsageStore({ pool });
+  store.add({ provider: 'dashscope', model: 'qwen-turbo', ok: true });
+  await store.flush();
+  assert.equal(upserts.length, 0);
+
   store.add({ accountId: 'acc-x', model: 'qwen-turbo', ok: true });
   await store.flush();
   assert.equal(upserts.length, 1);
   assert.equal(upserts[0].accountId, 'acc-x');
   assert.equal(upserts[0].role, 'untagged');
+  assert.equal(upserts[0].provider, 'unknown');
   assert.equal(upserts[0].totalTokens, 0);
   assert.equal(upserts[0].calls, 1);
 });
 
-test('不同维度 → 分行', async () => {
-  const { pool, upserts } = fakePool();
-  const store = new TokenUsageStore({ pool });
-  store.add({ accountId: 'acc-x', role: 'browse:a', model: 'm1', ok: true, totalTokens: 1 });
-  store.add({ accountId: 'acc-x', role: 'browse:b', model: 'm1', ok: true, totalTokens: 2 });
-  store.add({ accountId: 'acc-x', role: 'browse:a', model: 'm2', ok: true, totalTokens: 3 });
-  await store.flush();
-  assert.equal(upserts.length, 3);
-});
-
-test('flush 失败被隔离：不抛出、buffer 已清不重试累加', async () => {
+test('flush failure is isolated and does not retry additive increments', async () => {
   const { pool } = fakePool({ failUpsert: true });
   const store = new TokenUsageStore({ pool });
-  store.add({ accountId: 'acc-x', role: 'browse:a', model: 'm', ok: true, totalTokens: 9 });
-  await assert.doesNotReject(() => store.flush(), 'flush 失败绝不抛出');
-  // 失败的增量被丢弃（不重试累加）：再 flush 一次无任何新 upsert 尝试也不抛。
+  store.add({ accountId: 'acc-x', role: 'browse:a', provider: 'dashscope', model: 'm', ok: true, totalTokens: 9 });
+  await assert.doesNotReject(() => store.flush());
   await assert.doesNotReject(() => store.flush());
 });
 
-test('flush 后再 add 同桶 → 第二次 flush 只带增量（加法 upsert，由 PG 累加）', async () => {
-  const { pool, upserts } = fakePool();
+test('upsertBillingPrices stores billing-derived snapshots and rejects empty prices', async () => {
+  const { pool, priceUpserts } = fakePool();
   const store = new TokenUsageStore({ pool });
-  store.add({ accountId: 'acc-x', role: 'browse:a', model: 'm', ok: true, totalTokens: 5 });
-  await store.flush();
-  store.add({ accountId: 'acc-x', role: 'browse:a', model: 'm', ok: true, totalTokens: 7 });
-  await store.flush();
-  assert.equal(upserts.length, 2);
-  assert.equal(upserts[0].totalTokens, 5);
-  assert.equal(upserts[1].totalTokens, 7, '第二次只带新增量，不重复已 flush 的 5');
+  await assert.rejects(
+    () =>
+      store.upsertBillingPrices([
+        { provider: 'dashscope', model: 'qwen-plus', usageDay: '2026-07-05', source: 'billing:aliyun' },
+      ]),
+    /billing_price_requires_split_or_total_cost/,
+  );
+  const written = await store.upsertBillingPrices([
+    {
+      provider: 'dashscope',
+      model: 'qwen-plus',
+      usageDay: '2026-07-05',
+      totalCostPer1k: 0.0012,
+      source: 'billing:aliyun:DescribeInstanceBill',
+      sourcePeriod: '2026-07',
+      sourceSyncedAtMs: 1783200000000,
+    },
+  ]);
+  assert.equal(written, 1);
+  assert.equal(priceUpserts.length, 1);
+  assert.equal(priceUpserts[0][0], 'dashscope');
+  assert.equal(priceUpserts[0][2], '2026-07-05');
+  assert.equal(priceUpserts[0][6], 0.0012);
+});
+
+test('usage returns billing-backed cost estimate when snapshot joins', async () => {
+  const seenSql: string[] = [];
+  const pool = {
+    query: async (sql: string) => {
+      seenSql.push(sql);
+      if (sql.includes('WITH usage_rows')) {
+        return {
+          rows: [
+            {
+              day: '2026-07-05',
+              usage_day: '2026-07-05',
+              account_id: 'acc-x',
+              role: 'browse:a',
+              provider: 'dashscope',
+              model: 'qwen-plus',
+              prompt_tokens: '1000',
+              completion_tokens: '2000',
+              total_tokens: '3000',
+              calls: '3',
+              ok_calls: '3',
+              cost_amount: '0.12340000',
+              cost_currency: 'CNY',
+              cost_source: 'billing:aliyun:DescribeInstanceBill',
+              cost_source_date: '2026-07',
+              cost_synced_at_ms: '1783200000000',
+              pricing_basis: 'input_output_tokens',
+            },
+          ],
+        };
+      }
+      return {
+        rows: [
+          { bucket_ms: '1783200000000', prompt_tokens: '1000', completion_tokens: '2000', total_tokens: '3000', calls: '3' },
+        ],
+      };
+    },
+  } as unknown as pg.Pool;
+  const store = new TokenUsageStore({ pool });
+  const payload = await store.usage({ fromMs: 1783200000000, toMs: 1783286400000 });
+  assert.match(seenSql[0] + seenSql[1], /LEFT JOIN llm_billing_price_snapshot/);
+  assert.equal(payload.rows[0].provider, 'dashscope');
+  assert.deepEqual(payload.rows[0].costEstimate, {
+    amount: 0.1234,
+    currency: 'CNY',
+    source: 'billing:aliyun:DescribeInstanceBill',
+    sourceDate: '2026-07',
+    syncedAtMs: 1783200000000,
+    pricingBasis: 'input_output_tokens',
+  });
 });

@@ -1,40 +1,22 @@
-/**
- * 文本 LLM token 用量记账（llm_token_usage 表，PostgreSQL）。
- *
- * change llm-token-usage-stats：把 QwenClient 出口 onCall 回报的 token 用量按
- * (10 分钟桶, 账号, 角色, 模型) 预聚合落库，供后台「用量」页出表格 + 10 分钟曲线。
- *
- * 热路径隔离（红线，design D2）：
- * - add() 只做纯内存 Map 累加（同步、不触 PG）；调用方（server.ts onCall 钩子）须 try/catch 包裹，
- *   记账的任何慢/失败/异常绝不阻塞、抛进或拖垮 LLM 调用路径。
- * - 持久化走定时 flush（与每次调用解耦）+ 专用小连接池（与热路径/边-云池隔离）。
- * - flush 失败：丢弃当窗增量 + 计数告警，MUST NOT 重试累加（加法 upsert 非幂等，重试会二次累加造假）。
- *
- * token 与 ok 解耦（红线）：token 量取自响应体 usage，即使 ok=false 也带真实已计费 token；
- * 真没拿到 usage 才为 0。account 缺省 'default'、role 缺省 'untagged'、探活 'system:model_probe'。
- *
- * 建表幂等（CREATE TABLE IF NOT EXISTS），与 migrations/0013_llm_token_usage.sql 同源。
- * 只读写 llm_token_usage；绝不碰风控状态单写路径 / 发布链 / edge。
- */
-
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
 
 const { Pool } = pg;
 
 const PG_UNDEFINED_TABLE = '42P01';
-const BUCKET_MS = 600_000; // 10 分钟
+const BUCKET_MS = 600_000;
 const DEFAULT_FLUSH_MS = 15_000;
-const DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000; // 曲线缺省窗 = 近 24h（144 桶）
+const DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const MAX_RANGE_DAYS = 31;
 const MAX_RANGE_MS = MAX_RANGE_DAYS * 24 * 60 * 60 * 1000;
+const UNKNOWN_PROVIDER = 'unknown';
 
-/** 与迁移 0013 同源的内嵌 DDL（幂等）。 */
 export const TOKEN_USAGE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS llm_token_usage (
   bucket_start      TIMESTAMPTZ NOT NULL,
   account_id        TEXT        NOT NULL,
   role              TEXT        NOT NULL,
+  provider          TEXT        NOT NULL DEFAULT 'unknown',
   model             TEXT        NOT NULL,
   prompt_tokens     BIGINT      NOT NULL DEFAULT 0,
   completion_tokens BIGINT      NOT NULL DEFAULT 0,
@@ -42,21 +24,68 @@ CREATE TABLE IF NOT EXISTS llm_token_usage (
   calls             BIGINT      NOT NULL DEFAULT 0,
   ok_calls          BIGINT      NOT NULL DEFAULT 0,
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (bucket_start, account_id, role, model)
+  PRIMARY KEY (bucket_start, account_id, role, provider, model)
 );
+
+ALTER TABLE llm_token_usage
+  ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'unknown';
+
+DO $$
+DECLARE
+  pk_name text;
+  pk_def text;
+BEGIN
+  SELECT conname, pg_get_constraintdef(oid)
+    INTO pk_name, pk_def
+    FROM pg_constraint
+   WHERE conrelid = 'llm_token_usage'::regclass
+     AND contype = 'p'
+   LIMIT 1;
+
+  IF pk_name IS NULL THEN
+    ALTER TABLE llm_token_usage
+      ADD PRIMARY KEY (bucket_start, account_id, role, provider, model);
+  ELSIF pk_def NOT LIKE '%provider%' THEN
+    EXECUTE format('ALTER TABLE llm_token_usage DROP CONSTRAINT %I', pk_name);
+    ALTER TABLE llm_token_usage
+      ADD PRIMARY KEY (bucket_start, account_id, role, provider, model);
+  END IF;
+END $$;
+
 CREATE INDEX IF NOT EXISTS idx_llm_token_usage_account_bucket
   ON llm_token_usage (account_id, bucket_start);
--- 用量页全局视图（不带 account 过滤）按 bucket_start 时间窗查询，上面 account 打头索引服务不了
--- → 补 bucket_start 打头索引（change console-cloud-panel-hardening #22）。
 CREATE INDEX IF NOT EXISTS idx_llm_token_usage_bucket
   ON llm_token_usage (bucket_start);
+CREATE INDEX IF NOT EXISTS idx_llm_token_usage_provider_model_bucket
+  ON llm_token_usage (provider, model, bucket_start);
+
+CREATE TABLE IF NOT EXISTS llm_billing_price_snapshot (
+  provider                  TEXT        NOT NULL,
+  model                     TEXT        NOT NULL,
+  usage_day                 DATE        NOT NULL,
+  currency                  TEXT        NOT NULL DEFAULT 'CNY',
+  prompt_cost_per_1k        NUMERIC(18, 8),
+  completion_cost_per_1k    NUMERIC(18, 8),
+  total_cost_per_1k         NUMERIC(18, 8),
+  source                    TEXT        NOT NULL,
+  source_period             TEXT,
+  source_synced_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (provider, model, usage_day),
+  CHECK (
+    total_cost_per_1k IS NOT NULL
+    OR (prompt_cost_per_1k IS NOT NULL AND completion_cost_per_1k IS NOT NULL)
+  )
+);
+CREATE INDEX IF NOT EXISTS idx_llm_billing_price_snapshot_day
+  ON llm_billing_price_snapshot (usage_day);
 `;
 
 const UPSERT_SQL = `
 INSERT INTO llm_token_usage
-  (bucket_start, account_id, role, model, prompt_tokens, completion_tokens, total_tokens, calls, ok_calls)
-VALUES (to_timestamp($1::bigint / 1000.0), $2, $3, $4, $5, $6, $7, $8, $9)
-ON CONFLICT (bucket_start, account_id, role, model) DO UPDATE SET
+  (bucket_start, account_id, role, provider, model, prompt_tokens, completion_tokens, total_tokens, calls, ok_calls)
+VALUES (to_timestamp($1::bigint / 1000.0), $2, $3, $4, $5, $6, $7, $8, $9, $10)
+ON CONFLICT (bucket_start, account_id, role, provider, model) DO UPDATE SET
   prompt_tokens     = llm_token_usage.prompt_tokens     + EXCLUDED.prompt_tokens,
   completion_tokens = llm_token_usage.completion_tokens + EXCLUDED.completion_tokens,
   total_tokens      = llm_token_usage.total_tokens      + EXCLUDED.total_tokens,
@@ -65,9 +94,25 @@ ON CONFLICT (bucket_start, account_id, role, model) DO UPDATE SET
   updated_at        = now()
 `;
 
-/** QwenClient onCall 回报的形状（token 与 ok 解耦）。 */
+const UPSERT_BILLING_PRICE_SQL = `
+INSERT INTO llm_billing_price_snapshot
+  (provider, model, usage_day, currency, prompt_cost_per_1k, completion_cost_per_1k,
+   total_cost_per_1k, source, source_period, source_synced_at, updated_at)
+VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9, to_timestamp($10::bigint / 1000.0), now())
+ON CONFLICT (provider, model, usage_day) DO UPDATE SET
+  currency               = EXCLUDED.currency,
+  prompt_cost_per_1k     = EXCLUDED.prompt_cost_per_1k,
+  completion_cost_per_1k = EXCLUDED.completion_cost_per_1k,
+  total_cost_per_1k      = EXCLUDED.total_cost_per_1k,
+  source                 = EXCLUDED.source,
+  source_period          = EXCLUDED.source_period,
+  source_synced_at       = EXCLUDED.source_synced_at,
+  updated_at             = now()
+`;
+
 export interface TokenUsageCallInfo {
   role?: string;
+  provider?: string;
   model: string;
   accountId?: string;
   ok: boolean;
@@ -80,6 +125,7 @@ interface Accum {
   bucketMs: number;
   accountId: string;
   role: string;
+  provider: string;
   model: string;
   promptTokens: number;
   completionTokens: number;
@@ -88,20 +134,31 @@ interface Accum {
   okCalls: number;
 }
 
-/** 表格一行（按北京日期 × 四维聚合）。token 量为 BIGINT 求和后按数值返回。 */
+export type LlmUsageCostPricingBasis = 'input_output_tokens' | 'total_tokens';
+
+export interface LlmUsageCostEstimate {
+  amount: number;
+  currency: string;
+  source: string;
+  sourceDate: string;
+  syncedAtMs: number | null;
+  pricingBasis: LlmUsageCostPricingBasis;
+}
+
 export interface LlmUsageRow {
-  day: string; // 'YYYY-MM-DD'（Asia/Shanghai）
+  day: string;
   accountId: string;
   role: string;
+  provider: string;
   model: string;
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
   calls: number;
   okCalls: number;
+  costEstimate: LlmUsageCostEstimate | null;
 }
 
-/** 曲线一点（10 分钟桶；bucketMs 为 UTC epoch ms）。 */
 export interface LlmUsageBucket {
   bucketMs: number;
   promptTokens: number;
@@ -115,6 +172,7 @@ export interface LlmUsageQuery {
   toMs?: number;
   accountId?: string;
   role?: string;
+  provider?: string;
   model?: string;
 }
 
@@ -122,6 +180,19 @@ export interface LlmUsagePayload {
   rows: LlmUsageRow[];
   buckets: LlmUsageBucket[];
   window: { fromMs: number; toMs: number; clampedToDays: number | null };
+}
+
+export interface LlmBillingPriceSnapshotInput {
+  provider: string;
+  model: string;
+  usageDay: string;
+  currency?: string;
+  promptCostPer1k?: number | null;
+  completionCostPer1k?: number | null;
+  totalCostPer1k?: number | null;
+  source: string;
+  sourcePeriod?: string | null;
+  sourceSyncedAtMs?: number;
 }
 
 export interface TokenUsageStoreOptions {
@@ -137,11 +208,9 @@ export class TokenUsageStore {
   private flushing = false;
   private droppedFlushes = 0;
   private warnedUntagged = false;
-  /** retire-default-account：缺 accountId 的用量记录被丢弃时只告警一次（避免刷屏）。 */
   private warnedNoAccount = false;
 
   constructor(options: TokenUsageStoreOptions = {}) {
-    // 专用小连接池（热路径隔离）：与边-云/风控/面板池物理分开。
     this.pool =
       options.pool ??
       new Pool({
@@ -156,29 +225,21 @@ export class TokenUsageStore {
     this.flushMs = options.flushMs ?? (Number.isFinite(envFlush) && envFlush > 0 ? envFlush : DEFAULT_FLUSH_MS);
   }
 
-  /** 建表（与迁移同源）+ 起定时 flush。须早于开始接受 LLM 调用/探活。 */
   async init(): Promise<void> {
     await this.pool.query(TOKEN_USAGE_SCHEMA_SQL);
     if (!this.timer) {
       this.timer = setInterval(() => {
-        // 永不让定时 flush 的 rejection 逃逸成 unhandledRejection（崩进程）。
         this.flush().catch(() => {});
       }, this.flushMs);
       this.timer.unref?.();
     }
   }
 
-  /**
-   * 纯内存累加（同步、不触 PG、不抛实际异常）。调用方仍须 try/catch 包裹——记账绝不进 LLM 路径。
-   * retire-default-account：缺 accountId 即丢弃 + 告警一次（绝不回落 default）；role 缺省为保留诚实标签 untagged；token 缺失即 0（不伪造）。
-   */
   add(info: TokenUsageCallInfo): void {
-    // retire-default-account：缺 accountId 即 honest-fail 丢弃该用量记录 + 告警一次，绝不回落 default
-    // （账号由 dispatcher 绑定到每次 LLM 调用，缺=上游缺陷，须暴露而非掩盖）。
     if (!info.accountId || info.accountId.length === 0) {
       if (!this.warnedNoAccount) {
         this.warnedNoAccount = true;
-        console.warn('[token-usage] 调用缺 accountId — 丢弃该用量记录（honest-fail），绝不回落 default。请排查未绑账号的 LLM 调用路径。');
+        console.warn('[token-usage] missing accountId; dropped usage record instead of falling back to default');
       }
       return;
     }
@@ -187,18 +248,15 @@ export class TokenUsageStore {
     const role = info.role && info.role.length > 0 ? info.role : 'untagged';
     if (role === 'untagged' && !this.warnedUntagged) {
       this.warnedUntagged = true;
-      // warn-once：legacy/工具路径（PostProcessor / v1 planner / v1 selector）无 tag 属预期；
-      // 若某真实角色丢了 tag 而落到这里，这条告警让回归可见、不被静默吸收。
-      console.warn(
-        '[token-usage] 记到 untagged 调用（无角色 tag）。legacy/工具路径预期内；若某真实角色应有 tag 却落此，请排查。',
-      );
+      console.warn('[token-usage] recorded untagged LLM call');
     }
-    const model = info.model && info.model.length > 0 ? info.model : 'unknown';
+    const provider = normalizeDim(info.provider, UNKNOWN_PROVIDER);
+    const model = normalizeDim(info.model, 'unknown');
     const prompt = info.promptTokens ?? 0;
     const completion = info.completionTokens ?? 0;
     const total = info.totalTokens ?? 0;
     const ok = info.ok ? 1 : 0;
-    const key = `${bucketMs}|${accountId}|${role}|${model}`;
+    const key = `${bucketMs}|${accountId}|${role}|${provider}|${model}`;
     const cur = this.buffer.get(key);
     if (cur) {
       cur.promptTokens += prompt;
@@ -206,27 +264,27 @@ export class TokenUsageStore {
       cur.totalTokens += total;
       cur.calls += 1;
       cur.okCalls += ok;
-    } else {
-      this.buffer.set(key, {
-        bucketMs,
-        accountId,
-        role,
-        model,
-        promptTokens: prompt,
-        completionTokens: completion,
-        totalTokens: total,
-        calls: 1,
-        okCalls: ok,
-      });
+      return;
     }
+    this.buffer.set(key, {
+      bucketMs,
+      accountId,
+      role,
+      provider,
+      model,
+      promptTokens: prompt,
+      completionTokens: completion,
+      totalTokens: total,
+      calls: 1,
+      okCalls: ok,
+    });
   }
 
-  /** 把内存累计增量 upsert 到 PG。失败丢弃 + 计数，绝不重试累加。 */
   async flush(): Promise<void> {
     if (this.flushing || this.buffer.size === 0) return;
     this.flushing = true;
     const snapshot = this.buffer;
-    this.buffer = new Map(); // 立即换新 buffer：flush 期间新调用进新 map，不阻塞 add()
+    this.buffer = new Map();
     try {
       for (const a of snapshot.values()) {
         try {
@@ -234,6 +292,7 @@ export class TokenUsageStore {
             a.bucketMs,
             a.accountId,
             a.role,
+            a.provider,
             a.model,
             a.promptTokens,
             a.completionTokens,
@@ -245,11 +304,10 @@ export class TokenUsageStore {
           this.droppedFlushes += 1;
           if (this.droppedFlushes <= 3 || this.droppedFlushes % 50 === 0) {
             console.warn(
-              `[token-usage] flush upsert 失败（丢弃该增量、不重试累加；累计丢 ${this.droppedFlushes}）：`,
+              `[token-usage] flush upsert failed; dropped increment ${this.droppedFlushes}:`,
               (err as Error).message,
             );
           }
-          // 不 re-add：加法 upsert 非幂等，重试可能二次累加。诚实丢一窗 + 计数。
         }
       }
     } finally {
@@ -257,7 +315,6 @@ export class TokenUsageStore {
     }
   }
 
-  /** 停定时器 + 末次 flush（进程退出前调）。 */
   async close(): Promise<void> {
     if (this.timer) {
       clearInterval(this.timer);
@@ -266,7 +323,6 @@ export class TokenUsageStore {
     await this.flush();
   }
 
-  /** 留存口径：删早于 N 天的桶。由 RetentionSweeper 日频接线调度（change console-cloud-panel-hardening #22）。 */
   async purgeOlderThan(days: number): Promise<number> {
     const res = await this.pool.query(
       `DELETE FROM llm_token_usage WHERE bucket_start < now() - ($1::int * interval '1 day')`,
@@ -275,7 +331,34 @@ export class TokenUsageStore {
     return res.rowCount ?? 0;
   }
 
-  /** 面板查询：一次返回表格行（北京日期×四维）+ 10 分钟曲线桶。缺表回落空。 */
+  async upsertBillingPrices(prices: LlmBillingPriceSnapshotInput[]): Promise<number> {
+    let written = 0;
+    for (const p of prices) {
+      const provider = normalizeDim(p.provider, UNKNOWN_PROVIDER);
+      const model = normalizeDim(p.model, 'unknown');
+      const currency = normalizeDim(p.currency, 'CNY');
+      const hasSplit = p.promptCostPer1k != null && p.completionCostPer1k != null;
+      const hasTotal = p.totalCostPer1k != null;
+      if (!hasSplit && !hasTotal) {
+        throw new Error('billing_price_requires_split_or_total_cost');
+      }
+      await this.pool.query(UPSERT_BILLING_PRICE_SQL, [
+        provider,
+        model,
+        p.usageDay,
+        currency,
+        p.promptCostPer1k ?? null,
+        p.completionCostPer1k ?? null,
+        p.totalCostPer1k ?? null,
+        p.source,
+        p.sourcePeriod ?? null,
+        p.sourceSyncedAtMs ?? Date.now(),
+      ]);
+      written += 1;
+    }
+    return written;
+  }
+
   async usage(q: LlmUsageQuery = {}): Promise<LlmUsagePayload> {
     const nowMs = Date.now();
     let toMs = q.toMs ?? nowMs;
@@ -311,6 +394,10 @@ export class TokenUsageStore {
       params.push(q.role);
       clauses.push(`role = $${params.length}`);
     }
+    if (q.provider) {
+      params.push(q.provider);
+      clauses.push(`provider = $${params.length}`);
+    }
     if (q.model) {
       params.push(q.model);
       clauses.push(`model = $${params.length}`);
@@ -323,39 +410,89 @@ export class TokenUsageStore {
     const filter = this.filterClause(q, params);
     const { rows } = await this.pool.query<{
       day: string;
+      usage_day: string;
       account_id: string;
       role: string;
+      provider: string;
       model: string;
       prompt_tokens: string;
       completion_tokens: string;
       total_tokens: string;
       calls: string;
       ok_calls: string;
+      cost_amount: string | null;
+      cost_currency: string | null;
+      cost_source: string | null;
+      cost_source_date: string | null;
+      cost_synced_at_ms: string | null;
+      pricing_basis: LlmUsageCostPricingBasis | null;
     }>(
-      `SELECT to_char(bucket_start AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD') AS day,
-              account_id, role, model,
-              SUM(prompt_tokens)::bigint     AS prompt_tokens,
-              SUM(completion_tokens)::bigint AS completion_tokens,
-              SUM(total_tokens)::bigint      AS total_tokens,
-              SUM(calls)::bigint             AS calls,
-              SUM(ok_calls)::bigint          AS ok_calls
-         FROM llm_token_usage
-        WHERE bucket_start >= to_timestamp($1::bigint / 1000.0)
-          AND bucket_start <  to_timestamp($2::bigint / 1000.0)${filter}
-        GROUP BY day, account_id, role, model
-        ORDER BY day DESC, total_tokens DESC`,
+      `WITH usage_rows AS (
+         SELECT (bucket_start AT TIME ZONE 'Asia/Shanghai')::date AS usage_day,
+                to_char(bucket_start AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD') AS day,
+                account_id, role, provider, model,
+                SUM(prompt_tokens)::bigint     AS prompt_tokens,
+                SUM(completion_tokens)::bigint AS completion_tokens,
+                SUM(total_tokens)::bigint      AS total_tokens,
+                SUM(calls)::bigint             AS calls,
+                SUM(ok_calls)::bigint          AS ok_calls
+           FROM llm_token_usage
+          WHERE bucket_start >= to_timestamp($1::bigint / 1000.0)
+            AND bucket_start <  to_timestamp($2::bigint / 1000.0)${filter}
+          GROUP BY usage_day, day, account_id, role, provider, model
+       )
+       SELECT u.day, u.usage_day::text AS usage_day,
+              u.account_id, u.role, u.provider, u.model,
+              u.prompt_tokens, u.completion_tokens, u.total_tokens, u.calls, u.ok_calls,
+              CASE
+                WHEN p.prompt_cost_per_1k IS NOT NULL AND p.completion_cost_per_1k IS NOT NULL
+                  THEN ((u.prompt_tokens::numeric * p.prompt_cost_per_1k)
+                       + (u.completion_tokens::numeric * p.completion_cost_per_1k)) / 1000
+                WHEN p.total_cost_per_1k IS NOT NULL
+                  THEN (u.total_tokens::numeric * p.total_cost_per_1k) / 1000
+                ELSE NULL
+              END AS cost_amount,
+              p.currency AS cost_currency,
+              p.source AS cost_source,
+              COALESCE(p.source_period, p.usage_day::text) AS cost_source_date,
+              (extract(epoch from p.source_synced_at) * 1000)::bigint AS cost_synced_at_ms,
+              CASE
+                WHEN p.prompt_cost_per_1k IS NOT NULL AND p.completion_cost_per_1k IS NOT NULL
+                  THEN 'input_output_tokens'
+                WHEN p.total_cost_per_1k IS NOT NULL
+                  THEN 'total_tokens'
+                ELSE NULL
+              END AS pricing_basis
+         FROM usage_rows u
+         LEFT JOIN llm_billing_price_snapshot p
+           ON p.provider = u.provider
+          AND p.model = u.model
+          AND p.usage_day = u.usage_day
+        ORDER BY u.day DESC, u.total_tokens DESC`,
       params,
     );
     return rows.map((r) => ({
       day: r.day,
       accountId: r.account_id,
       role: r.role,
+      provider: r.provider,
       model: r.model,
       promptTokens: Number(r.prompt_tokens),
       completionTokens: Number(r.completion_tokens),
       totalTokens: Number(r.total_tokens),
       calls: Number(r.calls),
       okCalls: Number(r.ok_calls),
+      costEstimate:
+        r.cost_amount != null && r.cost_currency && r.cost_source && r.cost_source_date && r.pricing_basis
+          ? {
+              amount: Number(r.cost_amount),
+              currency: r.cost_currency,
+              source: r.cost_source,
+              sourceDate: r.cost_source_date,
+              syncedAtMs: r.cost_synced_at_ms != null ? Number(r.cost_synced_at_ms) : null,
+              pricingBasis: r.pricing_basis,
+            }
+          : null,
     }));
   }
 
@@ -389,4 +526,9 @@ export class TokenUsageStore {
       calls: Number(r.calls),
     }));
   }
+}
+
+function normalizeDim(value: string | null | undefined, fallback: string): string {
+  const s = value?.trim();
+  return s ? s : fallback;
 }

@@ -273,6 +273,7 @@ function createRequestHandler(
       const toMs = numOf('to');
       const accountId = query.get('accountId') ?? undefined;
       const role = query.get('role') ?? undefined;
+      const provider = query.get('provider') ?? undefined;
       const model = query.get('model') ?? undefined;
       sendJson(
         res,
@@ -282,6 +283,7 @@ function createRequestHandler(
           ...(toMs !== undefined ? { toMs } : {}),
           ...(accountId ? { accountId } : {}),
           ...(role ? { role } : {}),
+          ...(provider ? { provider } : {}),
           ...(model ? { model } : {}),
         }),
       );
