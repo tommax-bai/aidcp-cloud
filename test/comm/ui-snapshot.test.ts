@@ -117,6 +117,62 @@ test('ui-snapshot: daily usage alone is enough to send hello snapshot', async ()
   });
 });
 
+test('ui-snapshot: daily usage refresh is scheduled and remains targeted', async () => {
+  const dailyUsage: UiSnapshotPayload['dailyUsage'] = {
+    asOf: 1730000001000,
+    totals: { view: 1, like: 0, collect: 0, comment: 0, follow: 0, publish: 0 },
+    windows: {
+      minute: {
+        totals: { view: 1, like: 0, collect: 0, comment: 0, follow: 0, publish: 0 },
+        refreshAt: 1730000061000,
+      },
+    },
+  };
+  let pusherOnline = true;
+  const timers: Array<{ fn: () => void; delay: number }> = [];
+  const sent: Sent[] = [];
+  const service = new UiSnapshotService({
+    pusher: {
+      pushToEdges(env, edgeId) {
+        if (!pusherOnline) return 0;
+        sent.push({ env: env as Envelope<UiSnapshotPayload>, edgeId });
+        return 1;
+      },
+    },
+    resolveEdgeIdForAccount: () => 'edge-1',
+    getNickname: () => null,
+    lastPublishedForAccount: async () => null,
+    pendingApprovalForAccount: async () => null,
+    readApproval: async () => null,
+    todayUsageForAccount: async () => dailyUsage,
+    clock: () => 1730000001000,
+    idGen: () => `uisnap-${sent.length + 1}`,
+    setTimeoutFn: ((fn: () => void, delay: number) => {
+      timers.push({ fn, delay });
+      return { unref() {} } as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+    clearTimeoutFn: (() => {}) as typeof clearTimeout,
+    logger: { log: () => {}, warn: () => {} },
+  });
+
+  await service.pushHelloSnapshot('acc-1', 'edge-1');
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].edgeId, 'edge-1');
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].delay, 60_000);
+
+  timers[0].fn();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].edgeId, 'edge-1');
+  assert.deepEqual(sent[1].env.payload, { dailyUsage });
+
+  pusherOnline = false;
+  timers[1].fn();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sent.length, 2, 'offline refresh should not broadcast or keep pushing visible messages');
+});
+
 test('ui-snapshot: 无昵称不发 identity 字段（宁缺毋假）', async () => {
   const { service, sent } = makeService({ getNickname: () => null });
   await service.pushHelloSnapshot('acc-1', 'edge-1');

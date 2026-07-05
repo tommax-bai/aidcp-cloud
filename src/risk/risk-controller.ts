@@ -1,7 +1,7 @@
 import { deriveWindowQuotas, scaleWindowQuotas, zeroInteractionQuotas } from './quotas.js';
 import { createRiskState, RiskStateMachine } from './risk-state-machine.js';
 import { SlidingWindowCounter, WINDOW_MS } from './sliding-window-counter.js';
-import type { QuotaProvider, RiskAction, RiskQuotaLevel, RiskSignal, RiskState, RiskStore, WindowQuotas } from './types.js';
+import type { QuotaProvider, RiskAction, RiskQuotaLevel, RiskSignal, RiskState, RiskStore, RiskWindow, WindowQuotas } from './types.js';
 
 export interface RiskControllerOptions {
   accountId?: string;
@@ -90,6 +90,17 @@ export class RiskController {
     if (!this.canDo(action)) return 0;
     const quotas = this.effectiveQuotas();
     return Math.max(0, quotas.day[action] - this.counter.count(action, 'day'));
+  }
+
+  /**
+   * Read-only release timing for a specific quota window.
+   * Returns 0 when the window has spare quota, undefined when no finite release
+   * can be computed (for example quota <= 0).
+   */
+  quotaReleaseAfterMs(action: RiskAction, window: RiskWindow): number | undefined {
+    const quota = this.effectiveQuotas()[window][action];
+    if (this.counter.count(action, window) < quota) return 0;
+    return this.counter.retryAfterMs(action, window, quota);
   }
 
   async record(action: RiskAction): Promise<boolean> {

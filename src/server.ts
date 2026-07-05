@@ -43,7 +43,16 @@ import {
 } from './comm/index.js';
 
 
-import { RiskController, RiskControllerRegistry, PgRiskStore, InteractionGuardRegistry, ActionCooldownGate, PacingSaturationAlerter } from './risk/index.js';
+import {
+  RiskController,
+  RiskControllerRegistry,
+  PgRiskStore,
+  InteractionGuardRegistry,
+  ActionCooldownGate,
+  PacingSaturationAlerter,
+  type RiskAction,
+  type RiskWindow,
+} from './risk/index.js';
 import { EventBus } from './event-bus/index.js';
 import { RoleDispatcher } from './orchestrator/index.js';
 import { ConnectionRuntimeRegistry, type DispatcherBuildContext } from './orchestrator/connection-runtime.js';
@@ -241,7 +250,15 @@ function quotaSaturation(totals: UiDailyUsageCounts, quotas: UiDailyUsageCounts)
 function makeUsageWindow(
   totals: UiDailyUsageCounts,
   quotas?: UiDailyUsageCounts,
-  options?: { active?: boolean; startedAt?: number; windowMs?: number; expiresAt?: number; skipSaturation?: boolean },
+  options?: {
+    active?: boolean;
+    startedAt?: number;
+    windowMs?: number;
+    expiresAt?: number;
+    refreshAt?: number;
+    releaseAt?: number;
+    skipSaturation?: boolean;
+  },
 ): UiDailyUsageWindowStatus {
   const window: UiDailyUsageWindowStatus = { totals };
   if (options && Object.prototype.hasOwnProperty.call(options, 'active')) window.active = options.active;
@@ -250,11 +267,29 @@ function makeUsageWindow(
     window.windowMs = Math.floor(options.windowMs);
   }
   if (typeof options?.expiresAt === 'number' && Number.isFinite(options.expiresAt)) window.expiresAt = options.expiresAt;
+  if (typeof options?.refreshAt === 'number' && Number.isFinite(options.refreshAt)) window.refreshAt = options.refreshAt;
+  if (typeof options?.releaseAt === 'number' && Number.isFinite(options.releaseAt)) window.releaseAt = options.releaseAt;
   if (quotas && Object.keys(quotas).length > 0) {
     window.quotas = quotas;
     window.saturated = options?.skipSaturation ? [] : quotaSaturation(totals, quotas);
   }
   return window;
+}
+
+function usageWindowReleaseAt(
+  controller: RiskController,
+  window: RiskWindow,
+  saturated: UiDailyUsageAction[] | undefined,
+  asOf: number,
+): number | undefined {
+  let releaseAt: number | undefined;
+  for (const action of saturated ?? []) {
+    const retryAfterMs = controller.quotaReleaseAfterMs(action as RiskAction, window);
+    if (typeof retryAfterMs !== 'number' || !Number.isFinite(retryAfterMs) || retryAfterMs <= 0) continue;
+    const at = asOf + Math.ceil(retryAfterMs);
+    releaseAt = releaseAt === undefined ? at : Math.min(releaseAt, at);
+  }
+  return releaseAt;
 }
 
 function dayWindowStart(at: number): number {
@@ -1271,6 +1306,7 @@ async function main(): Promise<void> {
     const dayWindowMs = 24 * 60 * 60_000;
     const minuteSince = asOf - 60_000;
     const hourSince = asOf - 60 * 60_000;
+    const nextUsageRefreshAt = asOf + minuteWindowMs;
     const sessionUsage = runtimes?.sessionUsageForAccount(accountId, edgeId) ?? null;
     const sessionStartedAt = sessionUsage?.active === true
       && typeof sessionUsage.startedAt === 'number'
@@ -1316,8 +1352,18 @@ async function main(): Promise<void> {
           : undefined,
         skipSaturation: sessionUsage?.active !== true,
       }),
-      minute: makeUsageWindow(minuteTotals, undefined, { startedAt: minuteSince, windowMs: minuteWindowMs, expiresAt: asOf + minuteWindowMs }),
-      hour: makeUsageWindow(hourTotals, undefined, { startedAt: hourSince, windowMs: hourWindowMs, expiresAt: asOf + hourWindowMs }),
+      minute: makeUsageWindow(minuteTotals, undefined, {
+        startedAt: minuteSince,
+        windowMs: minuteWindowMs,
+        expiresAt: asOf + minuteWindowMs,
+        refreshAt: nextUsageRefreshAt,
+      }),
+      hour: makeUsageWindow(hourTotals, undefined, {
+        startedAt: hourSince,
+        windowMs: hourWindowMs,
+        expiresAt: asOf + hourWindowMs,
+        refreshAt: nextUsageRefreshAt,
+      }),
       day: makeUsageWindow(dayTotals, undefined, { startedAt: dayStartedAt, windowMs: dayWindowMs, expiresAt: dayStartedAt + dayWindowMs }),
     };
 
@@ -1329,9 +1375,32 @@ async function main(): Promise<void> {
       const hourQuotas = pickDailyUsageCounts(effective.hour);
       const dayQuotas = pickDailyUsageCounts(effective.day);
       payload.quotaLevel = controller.getState().quotaLevel;
-      windows.minute = makeUsageWindow(minuteTotals, minuteQuotas, { startedAt: minuteSince, windowMs: minuteWindowMs, expiresAt: asOf + minuteWindowMs });
-      windows.hour = makeUsageWindow(hourTotals, hourQuotas, { startedAt: hourSince, windowMs: hourWindowMs, expiresAt: asOf + hourWindowMs });
-      windows.day = makeUsageWindow(dayTotals, dayQuotas, { startedAt: dayStartedAt, windowMs: dayWindowMs, expiresAt: dayStartedAt + dayWindowMs });
+      const minuteWindow = makeUsageWindow(minuteTotals, minuteQuotas, {
+        startedAt: minuteSince,
+        windowMs: minuteWindowMs,
+        expiresAt: asOf + minuteWindowMs,
+        refreshAt: nextUsageRefreshAt,
+      });
+      const minuteReleaseAt = usageWindowReleaseAt(controller, 'minute', minuteWindow.saturated, asOf);
+      if (typeof minuteReleaseAt === 'number' && Number.isFinite(minuteReleaseAt)) minuteWindow.releaseAt = minuteReleaseAt;
+      const hourWindow = makeUsageWindow(hourTotals, hourQuotas, {
+        startedAt: hourSince,
+        windowMs: hourWindowMs,
+        expiresAt: asOf + hourWindowMs,
+        refreshAt: nextUsageRefreshAt,
+      });
+      const hourReleaseAt = usageWindowReleaseAt(controller, 'hour', hourWindow.saturated, asOf);
+      if (typeof hourReleaseAt === 'number' && Number.isFinite(hourReleaseAt)) hourWindow.releaseAt = hourReleaseAt;
+      const dayWindow = makeUsageWindow(dayTotals, dayQuotas, {
+        startedAt: dayStartedAt,
+        windowMs: dayWindowMs,
+        expiresAt: dayStartedAt + dayWindowMs,
+      });
+      const dayReleaseAt = usageWindowReleaseAt(controller, 'day', dayWindow.saturated, asOf);
+      if (typeof dayReleaseAt === 'number' && Number.isFinite(dayReleaseAt)) dayWindow.releaseAt = dayReleaseAt;
+      windows.minute = minuteWindow;
+      windows.hour = hourWindow;
+      windows.day = dayWindow;
       payload.quotas = dayQuotas;
       payload.saturated = windows.day.saturated ?? [];
     } catch (err) {

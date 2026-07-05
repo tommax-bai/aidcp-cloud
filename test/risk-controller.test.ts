@@ -80,6 +80,20 @@ test('explain: 配额超限时返回滑动窗口重试时间', async () => {
   assert.equal(decision.retryAfterMs, 60_000 - now);
 });
 
+test('quotaReleaseAfterMs: 按指定窗口只读返回释放时间', async () => {
+  let now = 0;
+  const controller = new RiskController({ quotaLevel: 'conservative', clock: () => now, minViewsForLikeRatio: 0 });
+  const quota = deriveWindowQuotas('conservative').hour.view;
+  for (let i = 0; i < quota; i++) {
+    assert.equal(await controller.record('view'), true);
+    now += 61_000;
+  }
+
+  const before = controller.getState();
+  assert.equal(controller.quotaReleaseAfterMs('view', 'hour'), 60 * 60_000 - now);
+  assert.equal(controller.getState().updatedAt, before.updatedAt, '只读 release hint 不写风控状态');
+});
+
 test('canDo: 小时窗口超限返回 false', async () => {
   let now = 0;
   const controller = new RiskController({ quotaLevel: 'conservative', clock: () => now, minViewsForLikeRatio: 0 });

@@ -172,6 +172,10 @@ export interface UiDailyUsageWindowStatus {
   startedAt?: number;
   windowMs?: number;
   expiresAt?: number;
+  /** Epoch ms when cloud plans/recommends refreshing this usage-window snapshot. */
+  refreshAt?: number;
+  /** Epoch ms when a saturated quota in this window is expected to release. */
+  releaseAt?: number;
   totals: UiDailyUsageCounts;
   quotas?: UiDailyUsageCounts;
   saturated?: UiDailyUsageAction[];

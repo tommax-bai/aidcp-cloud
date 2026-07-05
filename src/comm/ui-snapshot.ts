@@ -24,6 +24,9 @@ import { randomUUID } from 'node:crypto';
 
 /** 云端可推送的发布审批状态（published 由边缘本地发射，不在此列）。 */
 export type PublishUiState = 'pending' | 'approved' | 'rejected' | 'failed';
+type TimerHandle = ReturnType<typeof setTimeout>;
+
+const MIN_DAILY_USAGE_REFRESH_DELAY_MS = 1_000;
 
 export interface UiSnapshotDeps {
   pusher: { pushToEdges(env: Envelope, edgeId?: string): number };
@@ -40,6 +43,8 @@ export interface UiSnapshotDeps {
   todayUsageForAccount?: (accountId: string, edgeId?: string) => Promise<UiDailyUsagePayload | null>;
   clock?: () => number;
   idGen?: () => string;
+  setTimeoutFn?: typeof setTimeout;
+  clearTimeoutFn?: typeof clearTimeout;
   logger?: Pick<Console, 'log' | 'warn'>;
 }
 
@@ -53,11 +58,16 @@ export class UiSnapshotService {
   private readonly clock: () => number;
   private readonly idGen: () => string;
   private readonly logger: Pick<Console, 'log' | 'warn'>;
+  private readonly setTimeoutFn: typeof setTimeout;
+  private readonly clearTimeoutFn: typeof clearTimeout;
+  private readonly dailyUsageTimers = new Map<string, TimerHandle>();
 
   constructor(deps: UiSnapshotDeps) {
     this.deps = deps;
     this.clock = deps.clock ?? Date.now;
     this.idGen = deps.idGen ?? (() => `uisnap-${randomUUID()}`);
+    this.setTimeoutFn = deps.setTimeoutFn ?? setTimeout;
+    this.clearTimeoutFn = deps.clearTimeoutFn ?? clearTimeout;
     this.logger = deps.logger ?? console;
   }
 
@@ -96,7 +106,8 @@ export class UiSnapshotService {
       if (dailyUsage) payload.dailyUsage = dailyUsage;
 
       if (!payload.account && !payload.lastPublish && !payload.publish && !payload.dailyUsage) return; // 全空不发包
-      this.push(accountId, edgeId, payload, 'hello快照');
+      const sent = this.push(accountId, edgeId, payload, 'hello快照');
+      if (sent > 0 && dailyUsage) this.scheduleDailyUsageRefresh(accountId, edgeId, dailyUsage);
     } catch (err) {
       this.logger.warn(
         `[ui-snapshot] hello 快照构建失败 account=${accountId}: ${err instanceof Error ? err.message : String(err)}`,
@@ -123,11 +134,65 @@ export class UiSnapshotService {
     }
   }
 
-  private push(accountId: string, edgeId: string, payload: UiSnapshotPayload, tag: string): void {
+  async pushDailyUsageSnapshot(accountId: string, edgeId: string): Promise<void> {
+    if (!this.deps.todayUsageForAccount) return;
+    try {
+      const dailyUsage = await this.deps.todayUsageForAccount(accountId, edgeId).catch(() => null);
+      if (!dailyUsage) {
+        this.cancelDailyUsageRefresh(accountId, edgeId);
+        return;
+      }
+      const sent = this.push(accountId, edgeId, { dailyUsage }, 'dailyUsage刷新');
+      if (sent > 0) this.scheduleDailyUsageRefresh(accountId, edgeId, dailyUsage);
+      else this.cancelDailyUsageRefresh(accountId, edgeId);
+    } catch (err) {
+      this.cancelDailyUsageRefresh(accountId, edgeId);
+      this.logger.warn(
+        `[ui-snapshot] dailyUsage 刷新异常 account=${accountId} edge=${edgeId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  private push(accountId: string, edgeId: string, payload: UiSnapshotPayload, tag: string): number {
     const env = makeEnvelope('ui.snapshot', this.idGen(), this.clock(), payload);
     const sent = this.deps.pusher.pushToEdges(env, edgeId);
     if (sent <= 0) {
       this.logger.warn(`[ui-snapshot] ${tag} 推送未送达 account=${accountId} edge=${edgeId}（连接可能刚断，不重试）`);
     }
+    return sent;
   }
+
+  private scheduleDailyUsageRefresh(accountId: string, edgeId: string, dailyUsage: UiDailyUsagePayload): void {
+    const refreshAt = nextDailyUsageRefreshAt(dailyUsage, this.clock());
+    this.cancelDailyUsageRefresh(accountId, edgeId);
+    if (refreshAt === undefined) return;
+    const delay = Math.max(MIN_DAILY_USAGE_REFRESH_DELAY_MS, Math.ceil(refreshAt - this.clock()));
+    const timer = this.setTimeoutFn(() => {
+      this.dailyUsageTimers.delete(this.dailyUsageTimerKey(accountId, edgeId));
+      void this.pushDailyUsageSnapshot(accountId, edgeId);
+    }, delay);
+    (timer as { unref?: () => void }).unref?.();
+    this.dailyUsageTimers.set(this.dailyUsageTimerKey(accountId, edgeId), timer);
+  }
+
+  private cancelDailyUsageRefresh(accountId: string, edgeId: string): void {
+    const key = this.dailyUsageTimerKey(accountId, edgeId);
+    const existing = this.dailyUsageTimers.get(key);
+    if (existing) this.clearTimeoutFn(existing);
+    this.dailyUsageTimers.delete(key);
+  }
+
+  private dailyUsageTimerKey(accountId: string, edgeId: string): string {
+    return `${accountId}\u0000${edgeId}`;
+  }
+}
+
+function nextDailyUsageRefreshAt(dailyUsage: UiDailyUsagePayload, now: number): number | undefined {
+  let next: number | undefined;
+  for (const window of Object.values(dailyUsage.windows ?? {})) {
+    const refreshAt = window?.refreshAt;
+    if (typeof refreshAt !== 'number' || !Number.isFinite(refreshAt) || refreshAt <= now) continue;
+    next = next === undefined ? refreshAt : Math.min(next, refreshAt);
+  }
+  return next;
 }
