@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import type pg from 'pg';
 import {
   CuratedContentStore,
+  normalizeCuratedReferenceImages,
   type CuratedObservation,
 } from '../../src/cache/curated-content-store.js';
 
@@ -43,6 +44,7 @@ test('init 建表幂等（DDL 含 IF NOT EXISTS 与索引）', async () => {
   assert.equal(calls.length, 1);
   assert.match(calls[0].sql, /CREATE TABLE IF NOT EXISTS curated_content/);
   assert.match(calls[0].sql, /content_type IN \('image_text','video','comment'\)/);
+  assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS reference_images JSONB/);
   assert.match(calls[0].sql, /content_type = 'image_text'/);
   assert.match(calls[0].sql, /dedup_key\s+TEXT NOT NULL UNIQUE/);
   assert.match(calls[0].sql, /CREATE INDEX IF NOT EXISTS .* USING GIN\(topics\)/);
@@ -76,8 +78,68 @@ test('upsertObservation：INSERT...ON CONFLICT DO UPDATE，含 dedup_key、不�
   assert.equal(params[2], 'note-9');
   assert.equal(params[3], 'acc-1::image_text::note-9');
   // 计数原样落库。
-  assert.deepEqual(params.slice(9, 12), [12, 3, 5]);
-  assert.equal(params[12], 'high_quality');
+  assert.deepEqual(params.slice(10, 13), [12, 3, 5]);
+  assert.equal(params[13], 'high_quality');
+});
+
+test('reference images are normalized, deduped, relocated, and stored as JSONB', async () => {
+  const { pool, calls } = capturingPool();
+  const relocatedInputs: unknown[] = [];
+  const store = new CuratedContentStore({
+    pool,
+    referenceImageLimit: 2,
+    referenceImageRelocator: async ({ images }) => {
+      relocatedInputs.push(images);
+      return images.map((img) => ({
+        ...img,
+        ossUrl: `https://oss.test/ref-${img.index}.jpg`,
+        captureStatus: 'stored' as const,
+        capturedAt: 123,
+      }));
+    },
+  });
+
+  await store.upsertObservation({
+    ...baseObs,
+    referenceImages: [
+      { index: 9, sourceUrl: 'https://img.test/a.jpg', width: 640, height: 480, alt: 'cover' },
+      { index: 1, sourceUrl: 'https://img.test/a.jpg' },
+      { index: 2, sourceUrl: 'https://img.test/b.jpg' },
+      { index: 3, sourceUrl: 'data:image/png;base64,xx' },
+    ],
+  });
+
+  assert.equal(relocatedInputs.length, 1);
+  assert.deepEqual(
+    (relocatedInputs[0] as Array<{ sourceUrl: string }>).map((img) => img.sourceUrl),
+    ['https://img.test/a.jpg', 'https://img.test/b.jpg'],
+  );
+  const stored = JSON.parse(calls[0].params[9] as string) as ReturnType<typeof normalizeCuratedReferenceImages>;
+  assert.deepEqual(
+    stored.map((img) => ({ index: img.index, sourceUrl: img.sourceUrl, ossUrl: img.ossUrl, captureStatus: img.captureStatus, capturedAt: img.capturedAt })),
+    [
+      { index: 9, sourceUrl: 'https://img.test/a.jpg', ossUrl: 'https://oss.test/ref-9.jpg', captureStatus: 'stored', capturedAt: 123 },
+      { index: 2, sourceUrl: 'https://img.test/b.jpg', ossUrl: 'https://oss.test/ref-2.jpg', captureStatus: 'stored', capturedAt: 123 },
+    ],
+  );
+  assert.equal(stored[0].width, 640);
+  assert.equal(stored[0].height, 480);
+  assert.equal(stored[0].alt, 'cover');
+});
+
+test('normalizeCuratedReferenceImages drops invalid URLs and caps at the configured limit', () => {
+  const normalized = normalizeCuratedReferenceImages(
+    [
+      { sourceUrl: 'ftp://img.test/a.jpg' },
+      { sourceUrl: 'https://img.test/a.jpg' },
+      { sourceUrl: 'https://img.test/a.jpg' },
+      { sourceUrl: 'https://img.test/b.jpg' },
+    ],
+    { now: 99, limit: 1 },
+  );
+  assert.deepEqual(normalized, [
+    { index: 0, sourceUrl: 'https://img.test/a.jpg', captureStatus: 'url_only', capturedAt: 99 },
+  ]);
 });
 
 test('upsertObservation：缺失可选字段诚实置空（null），不编造', async () => {
@@ -97,9 +159,10 @@ test('upsertObservation：缺失可选字段诚实置空（null），不编造',
   assert.equal(params[6], null); // author
   assert.equal(params[7], null); // source_url
   assert.deepEqual(params[8], []); // topics
-  assert.equal(params[9], null); // like_count
-  assert.equal(params[10], null); // collect_count
-  assert.equal(params[11], null); // comment_count
+  assert.equal(params[9], '[]'); // reference_images
+  assert.equal(params[10], null); // like_count
+  assert.equal(params[11], null); // collect_count
+  assert.equal(params[12], null); // comment_count
 });
 
 test('upsertObservation：正文为空则不写入精选素材', async () => {
@@ -148,7 +211,7 @@ test('markBotAction collect 走 INSERT...ON CONFLICT（自有收藏自动建/纳
   assert.equal(calls.length, 1);
   const sql = calls[0].sql;
   assert.match(sql, /INSERT INTO curated_content/);
-  assert.match(sql, /ON CONFLICT \(dedup_key\) DO UPDATE SET bot_collected = true/);
+  assert.match(sql, /ON CONFLICT \(dedup_key\) DO UPDATE SET\s+bot_collected = true/);
   const params = calls[0].params;
   assert.equal(params[0], 'acc-1');
   assert.equal(params[1], 'image_text');
@@ -159,7 +222,8 @@ test('markBotAction collect 走 INSERT...ON CONFLICT（自有收藏自动建/纳
   assert.equal(params[6], 'A'); // author
   assert.equal(params[7], 'u'); // source_url
   assert.deepEqual(params[8], ['x']); // topics
-  assert.equal(params[9], 'bot_collect'); // admit_reason（有正文）
+  assert.equal(params[9], '[]'); // reference_images
+  assert.equal(params[10], 'bot_collect'); // admit_reason（有正文）
 });
 
 test('markBotAction collect 视频内容：content_type/dedup_key 用 video', async () => {
@@ -247,6 +311,7 @@ test('selectForCreation：ORDER BY 含 bot_collected/bot_liked 权重，按账�
     collectCount: 4,
     botLiked: true,
     botCollected: true,
+    referenceImages: [],
   });
   // 映射：空值行——诚实置空（null/'' /undefined/[]），count 不编造 0。
   assert.deepEqual(out[1], {
@@ -260,6 +325,7 @@ test('selectForCreation：ORDER BY 含 bot_collected/bot_liked 权重，按账�
     collectCount: null,
     botLiked: false,
     botCollected: false,
+    referenceImages: [],
   });
 });
 
@@ -337,6 +403,7 @@ const panelDbRow = {
   first_seen_at: new Date(2000),
   updated_at: new Date(3000),
   total_count: '1',
+  reference_images: [],
 };
 
 test('listForPanel：按账号 + 类型 + 原因过滤，COUNT(*) OVER() 取 total，映射 epoch ms + 诚实置空', async () => {

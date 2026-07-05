@@ -8,7 +8,7 @@
  * 缺密钥在发请求前诚实失败（区别于万相同名语义），MUST NOT 跨厂商兜底（路由层不偷换、本客户端只诚实回错）。
  */
 
-import type { ImageProvider, ImageResult } from './image-provider.js';
+import type { ImageGenerateOptions, ImageProvider, ImageResult } from './image-provider.js';
 
 /** Ark 图片端点默认 base（与文本火山同 base；实际路径为 {baseUrl}/images/generations）。 */
 export const ARK_IMAGE_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3';
@@ -75,7 +75,9 @@ export class SeedreamClient implements ImageProvider {
   }
 
   /** 生成图片：Ark 同步单次请求。失败诚实回 { url: null, error }，绝不抛、绝不伪造 URL。 */
-  async generate(prompt: string, style?: string): Promise<ImageResult> {
+  async generate(prompt: string, style?: string, options?: ImageGenerateOptions): Promise<ImageResult> {
+    const withReferenceStatus = (result: ImageResult): ImageResult =>
+      options?.referenceImages?.length ? { ...result, referenceStatus: 'unsupported', referenceUsed: false } : result;
     if (!this.apiKey) {
       // 缺密钥在发请求前诚实失败（红线：绝不发空 Bearer、绝不跨厂商兜底）。
       return { url: null, error: '即梦-Seedream key 缺失（在后台为火山方舟配置密钥并重启 cloud）' };
@@ -108,28 +110,28 @@ export class SeedreamClient implements ImageProvider {
         const errText = await res.text().catch(() => '');
         const errMsg = `即梦-Seedream 请求失败 HTTP ${res.status}: ${errText.slice(0, 200)}`;
         this.logger.error(errMsg);
-        return { url: null, error: errMsg };
+        return withReferenceStatus({ url: null, error: errMsg });
       }
 
       const data = (await res.json()) as ArkImageResponse;
       if (data.error || (data.code && data.code !== 'Success' && data.code !== '0')) {
         const errMsg = `即梦-Seedream 返回错误: ${data.error?.code ?? data.code ?? ''} - ${data.error?.message ?? data.message ?? ''}`;
         this.logger.error(errMsg);
-        return { url: null, error: errMsg };
+        return withReferenceStatus({ url: null, error: errMsg });
       }
 
       const url = data.data?.find((d) => d.url)?.url ?? null;
       if (!url) {
         return { url: null, error: '即梦-Seedream 响应缺少图片 URL' };
       }
-      return { url };
+      return withReferenceStatus({ url });
     } catch (err) {
       const aborted = err instanceof Error && err.name === 'AbortError';
       const errMsg = aborted
         ? `即梦-Seedream 请求超时（${this.timeoutMs}ms）`
         : `即梦-Seedream 请求异常: ${err instanceof Error ? err.message : String(err)}`;
       this.logger.error(errMsg);
-      return { url: null, error: errMsg };
+      return withReferenceStatus({ url: null, error: errMsg });
     } finally {
       clearTimeout(timer);
     }

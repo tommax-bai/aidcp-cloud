@@ -2,7 +2,7 @@
  * 事件总线类型定义 — 定义系统内所有事件的结构与相关领域类型。
  */
 
-import type { CommentCandidate, Envelope, NotificationItem } from '../comm/protocol.js';
+import type { CommentCandidate, Envelope, NoteImagePayload, NotificationItem } from '../comm/protocol.js';
 
 // Agent 角色枚举
 export type AgentRole = 'session_monitor' | 'feed_scanner' | 'content_curator' | 'interaction_appraiser' | 'comment_reviewer';
@@ -30,6 +30,8 @@ export interface NoteDetailData {
   collectCount: number;
   /** 详情页带 xsec_token 的链接（change interaction-feed-enrichment）；缺则诚实置空。 */
   url?: string;
+  /** Original carousel images observed by edge; empty/missing means unavailable. */
+  images?: NoteImagePayload[];
 }
 
 export interface ProfileDetailData {

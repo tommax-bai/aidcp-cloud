@@ -30,6 +30,7 @@ import { TokenUsageStore } from './metrics/token-usage-store.js';
 import { startRetentionSweeper } from './panel/retention-sweeper.js';
 import { SimplePlanner } from './planner/index.js';
 import { PgAnchorCache, BotChatStore, ConceptStore, LikedNoteStore, ValuableCommentStore, NotificationContactStore, InteractionFeedStore, CuratedContentStore, topicKeysFromTitle } from './cache/index.js';
+import type { CuratedReferenceImage, CuratedReferenceImageInput } from './cache/index.js';
 import { resolveCuratedGateConfig } from './publish-agent/curated-gate.js';
 import {
   EdgeCloudServer,
@@ -75,7 +76,7 @@ import type {
 import { PublishOrchestrator, PublishScheduler, PublishDispatcher } from './publish-agent/index.js';
 import { WanxiangClient } from './publish-agent/wanxiang-client.js';
 import { SeedreamClient } from './publish-agent/seedream-client.js';
-import type { ObjectStore } from './storage/object-store.js';
+import { relocateImageToStore, type ObjectStore } from './storage/object-store.js';
 import {
   IMAGE_PROVIDERS,
   type ImageProviderId,
@@ -159,6 +160,46 @@ function readEnvPort(name: string): number | undefined {
   if (!value) return undefined;
   const port = Number(value);
   return Number.isInteger(port) && port > 0 ? port : undefined;
+}
+
+function objectKeyPart(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 96) || 'unknown';
+}
+
+function createCuratedReferenceImageRelocator(store: ObjectStore) {
+  return async (ctx: {
+    accountId: string;
+    sourceId: string;
+    images: CuratedReferenceImage[];
+  }): Promise<CuratedReferenceImage[]> => {
+    const account = objectKeyPart(ctx.accountId);
+    const source = objectKeyPart(ctx.sourceId);
+    const out: CuratedReferenceImage[] = [];
+    for (let i = 0; i < ctx.images.length; i++) {
+      const img = ctx.images[i];
+      try {
+        const relocated = await relocateImageToStore(img.sourceUrl, `curated-reference/${account}/${source}/${String(i + 1).padStart(2, '0')}`, {
+          store,
+          logger: console,
+        });
+        if (!relocated) throw new Error('relocation returned empty url');
+        out.push({
+          ...img,
+          ossUrl: relocated,
+          captureStatus: 'stored',
+          capturedAt: Date.now(),
+        });
+      } catch (err) {
+        console.warn('[aidcp-cloud] curated reference image relocation failed:', (err as Error).message);
+        out.push({
+          ...img,
+          captureStatus: 'fetch_failed',
+          capturedAt: img.capturedAt ?? Date.now(),
+        });
+      }
+    }
+    return out;
+  };
 }
 
 const UI_DAILY_USAGE_ACTIONS: UiDailyUsageAction[] = ['view', 'like', 'collect', 'comment', 'follow', 'publish'];
@@ -617,6 +658,8 @@ async function main(): Promise<void> {
       database: readEnvString('PGDATABASE'),
       user: readEnvString('PGUSER'),
       password: readEnvString('PGPASSWORD'),
+      ...(ossUploader ? { referenceImageRelocator: createCuratedReferenceImageRelocator(ossUploader) } : {}),
+      logger: console,
     });
     await ccs.init();
     curatedContentStore = ccs;
@@ -639,6 +682,7 @@ async function main(): Promise<void> {
       topics: string[];
       likeCount: number;
       collectCount: number;
+      referenceImages: CuratedReferenceImageInput[];
     }
   >();
 
@@ -904,6 +948,7 @@ async function main(): Promise<void> {
               author: observed.author,
               sourceUrl: observed.sourceUrl,
               topics: observed.topics,
+              referenceImages: observed.referenceImages,
             }
           : undefined;
       curatedContentStore.markBotAction(accountId, evt.noteId, evt.action, content).catch((err) => {
@@ -971,6 +1016,7 @@ async function main(): Promise<void> {
         topics,
         likeCount: d.likeCount,
         collectCount: d.collectCount,
+        referenceImages: d.images ?? [],
       });
     }
   });
@@ -2201,11 +2247,12 @@ async function main(): Promise<void> {
           // HTTP 只回**触发态**（生成段可达数分钟，不可同步等）；终态沿既有渠道（发布=待审草稿+人审卡+异步结果卡、
           // 评论=人审卡+定向终态结果卡）。域内拒绝回 triggered=false+机器原因码，绝不染绿。
           curatedActions: {
-            createPostFromNote: async (accountId, row) => {
+            createPostFromNote: async (accountId, row, options) => {
               if (!publishScheduler) return { triggered: false, reason: 'publish_unready' };
               if (publishScheduler.isBusy()) return { triggered: false, reason: 'publish_busy' };
               if (personaStore.getForAccount(accountId) === null) return { triggered: false, reason: 'needs_persona' };
               if (!(row.body ?? '').trim()) return { triggered: false, reason: 'empty_body' };
+              const useReferenceImages = options?.useReferenceImages ?? row.referenceImages.length > 0;
               // fire-and-forget：触发后异步补飞书结果卡（诚实三态，镜像 /publish 回执语义；成功终态=人审卡本身，不重复报绿）。
               void publishScheduler
                 .triggerManual(accountId, {
@@ -2219,6 +2266,7 @@ async function main(): Promise<void> {
                     sourceUrl: row.sourceUrl,
                     capturedAt: Date.now(),
                     ...(row.author ? { author: row.author } : {}),
+                    ...(useReferenceImages && row.referenceImages.length > 0 ? { images: row.referenceImages } : {}),
                   },
                 })
                 .then(async (o) => {

@@ -32,6 +32,11 @@ function envInt(name: string, def: number): number {
 const DEFAULT_PER_IMAGE_TIMEOUT_MS = 240_000;
 const DEFAULT_MAX_IMAGES = 3;
 
+interface ImageGenerationOutcome {
+  url: string | null;
+  referenceStatus?: 'used' | 'unsupported' | 'unavailable' | 'skipped';
+}
+
 export interface ImageGeneratorDeps {
   imageProvider: ImageProvider;
   enableImageGeneration?: boolean;
@@ -100,14 +105,19 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     // recordId 此刻尚未生成（发布记录晚于此处落库），故用运行 token 代替 recordId 做键分组。
     const accountId = context.snapshot().trigger?.accountId ?? 'default';
     const runToken = this.idGen();
+    const referenceImages = input.referenceImages ?? context.snapshot().trigger?.generateInput?.referenceNote?.images ?? [];
+    const referenceUrls = referenceImages
+      .map((img) => (img.ossUrl ?? img.sourceUrl ?? '').trim())
+      .filter(Boolean)
+      .slice(0, 3);
 
     // 并行出图（有界并发）：每张 Promise.race(生成+转存, 每图超时)，settle 后按规划顺序收成功 URL。
     // 去第二风格源（change category-adaptive-images-and-judgment）：不再把 imageStyle 枚举传给 provider——
     // 风格已并入品类风格档写进 prompt；provider 侧再拼「，风格：<enum>」会与风格档冲突、劣化 Seedream。
     const results = await mapWithConcurrency(input.imagePrompts, this.concurrency, (prompt, i) =>
-      this.generateOne(prompt, { accountId, runToken, seq: i }),
+      this.generateOne(prompt, { accountId, runToken, seq: i }, referenceUrls),
     );
-    const imageUrls = results.filter((url): url is string => !!url);
+    const imageUrls = results.map((r) => r.url).filter((url): url is string => !!url);
 
     if (imageUrls.length === 0) {
       this.logger.warn(`[ImageGenerator] ${input.imagePrompts.length} 张全部生图失败，降级纯文字（M=0）`);
@@ -121,6 +131,8 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
       imageUrl: imageUrls[0] ?? null,
       imageStyle: input.imageStyle,
       fallbackStrategy: imageUrls.length > 0 ? 'skip' : input.fallbackStrategy,
+      ...(referenceImages.length > 0 ? { referenceImages } : {}),
+      referenceImageStatus: this.summarizeReferenceStatus(referenceUrls, results),
       directedAt: this.clock(),
     };
   }
@@ -133,21 +145,25 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
    * 单张：Promise.race(生成+转存, 每图超时)。超时/异常/无 URL/转存失败 → 诚实回 null（该张不进数组、不伪造）。
    * 转存（抓字节 + PUT OSS）与生成共享同一每图超时预算（承 3.3：不拖垮发布链）；转存自身另有 30s 内层超时。
    */
-  private async generateOne(prompt: string, keyCtx: { accountId: string; runToken: string; seq: number }): Promise<string | null> {
+  private async generateOne(
+    prompt: string,
+    keyCtx: { accountId: string; runToken: string; seq: number },
+    referenceUrls: string[],
+  ): Promise<ImageGenerationOutcome> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      return await Promise.race<string | null>([
-        this.produceAndRelocate(prompt, keyCtx),
-        new Promise<string | null>((resolve) => {
+      return await Promise.race<ImageGenerationOutcome>([
+        this.produceAndRelocate(prompt, keyCtx, referenceUrls),
+        new Promise<ImageGenerationOutcome>((resolve) => {
           timer = setTimeout(() => {
             this.logger.warn(`[ImageGenerator] 单张超时 ${this.perImageTimeoutMs}ms，诚实落空`);
-            resolve(null);
+            resolve({ url: null, referenceStatus: referenceUrls.length > 0 ? 'unavailable' : 'skipped' });
           }, this.perImageTimeoutMs);
         }),
       ]);
     } catch (err) {
       this.logger.warn(`[ImageGenerator] 单张生图异常: ${err instanceof Error ? err.message : String(err)}`);
-      return null;
+      return { url: null, referenceStatus: referenceUrls.length > 0 ? 'unavailable' : 'skipped' };
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -161,13 +177,19 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
   private async produceAndRelocate(
     prompt: string,
     keyCtx: { accountId: string; runToken: string; seq: number },
-  ): Promise<string | null> {
-    const res: ImageResult = await this.imageProvider.generate(prompt);
+    referenceUrls: string[],
+  ): Promise<ImageGenerationOutcome> {
+    const res: ImageResult = await this.imageProvider.generate(
+      prompt,
+      undefined,
+      referenceUrls.length > 0 ? { referenceImages: referenceUrls } : undefined,
+    );
+    const referenceStatus = res.referenceStatus ?? (referenceUrls.length > 0 ? 'unsupported' : 'skipped');
     if (!res.url) {
       this.logger.warn(`[ImageGenerator] 单张生图失败: ${res.error ?? 'no_url'}`);
-      return null;
+      return { url: null, referenceStatus };
     }
-    if (!this.ossUploader) return res.url; // 未配置 OSS：零回归，直接用 provider 临时 URL
+    if (!this.ossUploader) return { url: res.url, referenceStatus };
     const keyBase = `publish/${keyCtx.accountId}/${keyCtx.runToken}/${keyCtx.seq}`;
     const ossUrl = await relocateImageToStore(res.url, keyBase, {
       store: this.ossUploader,
@@ -176,9 +198,21 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     });
     if (!ossUrl) {
       this.logger.warn('[ImageGenerator] OSS 转存失败，该张诚实落空（M 少一张，不伪造 URL）');
-      return null;
+      return { url: null, referenceStatus };
     }
-    return ossUrl;
+    return { url: ossUrl, referenceStatus };
+  }
+
+  private summarizeReferenceStatus(
+    referenceUrls: string[],
+    outcomes: ImageGenerationOutcome[],
+  ): NonNullable<ImageDirective['referenceImageStatus']> {
+    if (referenceUrls.length === 0) return 'none';
+    const statuses = outcomes.map((r) => r.referenceStatus).filter(Boolean);
+    if (statuses.includes('used')) return 'used';
+    if (statuses.includes('unavailable')) return 'unavailable';
+    if (statuses.includes('unsupported')) return 'unsupported';
+    return 'skipped';
   }
 
   private emptyDirective(fallbackStrategy: ImageDirective['fallbackStrategy']): ImageDirective {

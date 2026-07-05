@@ -140,6 +140,7 @@ export class CuratedNoteEvaluator extends BaseRole {
         likeCount: d.likeCount,
         collectCount: d.collectCount,
         admitReason,
+        referenceImages: d.images ?? [],
       });
       this.log(`纳入精选 note=${d.noteId}（${admitReason}）`);
     } catch (err) {

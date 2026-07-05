@@ -70,6 +70,45 @@ describe('triggerManual referenceNote（洗稿参照）', () => {
     assert.equal(inputs[0].forced, true); // 人工触发不被 scout 否决
   });
 
+  it('reference images are filtered, capped, and passed into referenceNote only as usable guidance', async () => {
+    const { scheduler, inputs } = build();
+    const o = await scheduler.triggerManual('acc-test', {
+      referenceNote: {
+        ...ref,
+        images: [
+          { index: 0, sourceUrl: 'https://img.test/a.jpg', ossUrl: 'https://oss.test/a.jpg' },
+          { index: 1, sourceUrl: 'https://img.test/b.jpg' },
+          { index: 2, sourceUrl: '   ' },
+          { index: 3, sourceUrl: 'https://img.test/c.jpg' },
+          { index: 4, sourceUrl: 'https://img.test/d.jpg' },
+        ],
+      },
+    });
+
+    assert.equal(o.result, 'triggered');
+    const images = inputs[0].generateInput.referenceNote?.images ?? [];
+    assert.deepEqual(
+      images.map((img) => ({ index: img.index, sourceUrl: img.sourceUrl, ossUrl: img.ossUrl })),
+      [
+        { index: 0, sourceUrl: 'https://img.test/a.jpg', ossUrl: 'https://oss.test/a.jpg' },
+        { index: 1, sourceUrl: 'https://img.test/b.jpg', ossUrl: undefined },
+        { index: 3, sourceUrl: 'https://img.test/c.jpg', ossUrl: undefined },
+      ],
+    );
+  });
+
+  it('invalid reference images do not leak from the original referenceNote spread', async () => {
+    const { scheduler, inputs } = build();
+    const o = await scheduler.triggerManual('acc-test', {
+      referenceNote: {
+        ...ref,
+        images: [{ index: 0, sourceUrl: '   ' }],
+      },
+    });
+    assert.equal(o.result, 'triggered');
+    assert.equal(inputs[0].generateInput.referenceNote?.images, undefined);
+  });
+
   it('参照正文为空 → blocked empty_body，绝不调编排（空参照红线）', async () => {
     const { scheduler, inputs } = build();
     const o = await scheduler.triggerManual('acc-test', { referenceNote: { ...ref, body: '   ' } });

@@ -8,7 +8,7 @@
  * 不共用 `normProvider`。密钥仍复用 `providerRuntime`（同厂商同 key），不重复造凭据存储。
  */
 
-import type { ImageProvider, ImageResult } from './image-provider.js';
+import type { ImageGenerateOptions, ImageProvider, ImageResult } from './image-provider.js';
 
 /** 已知图片厂商 id（扩展时在此扩 union + 下方加一条字面项，TS 强制穷举）。 */
 export type ImageProviderId = 'dashscope' | 'volcengine';
@@ -65,14 +65,14 @@ export class RoutingImageProvider implements ImageProvider {
     this.logger = options.logger ?? console;
   }
 
-  async generate(prompt: string, style?: string): Promise<ImageResult> {
+  async generate(prompt: string, style?: string, options?: ImageGenerateOptions): Promise<ImageResult> {
     const id = normImageProvider(this.getProvider());
     const provider = this.providers[id];
     if (!provider) {
       const errMsg = `图片厂商 ${id} 未装配（缺对应客户端）`;
       this.logger.error(`[image-router] ${errMsg}`);
-      return { url: null, error: errMsg };
+      return { url: null, error: errMsg, referenceStatus: options?.referenceImages?.length ? 'unavailable' : 'skipped' };
     }
-    return provider.generate(prompt, style);
+    return provider.generate(prompt, style, options);
   }
 }

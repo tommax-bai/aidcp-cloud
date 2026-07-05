@@ -51,6 +51,7 @@ function row(over: Partial<CuratedPanelRow> = {}): CuratedPanelRow {
     admitReason: 'bot_collect',
     firstSeenAt: 1,
     updatedAt: 2,
+    referenceImages: [],
     ...over,
   };
 }
@@ -87,10 +88,12 @@ test('HTTP 精选行级动作：503/400/404/类型约束/empty_body/empty_title/
   }
 
   // ② 完整注入：透传与各拒绝路径。
-  const actionCalls: Array<{ fn: string; accountId: string; rowId: number; withGroup?: boolean }> = [];
+  const actionCalls: Array<{ fn: string; accountId: string; rowId: number; withGroup?: boolean; useReferenceImages?: boolean }> = [];
   const actionsMock = {
-    createPostFromNote: async (accountId: string, r2: CuratedPanelRow) => {
-      actionCalls.push({ fn: 'create', accountId, rowId: r2.id });
+    createPostFromNote: async (accountId: string, r2: CuratedPanelRow, options?: { useReferenceImages?: boolean }) => {
+      const call: { fn: string; accountId: string; rowId: number; useReferenceImages?: boolean } = { fn: 'create', accountId, rowId: r2.id };
+      if (typeof options?.useReferenceImages === 'boolean') call.useReferenceImages = options.useReferenceImages;
+      actionCalls.push(call);
       return { triggered: true };
     },
     commentOnNote: async (accountId: string, r2: CuratedPanelRow, withGroup: boolean) => {
@@ -150,6 +153,13 @@ test('HTTP 精选行级动作：503/400/404/类型约束/empty_body/empty_title/
     const created = await post('/api/curated/contents/7/create-post', { accountId: 'acc-1' });
     assert.equal(created.status, 200);
     assert.deepEqual(await created.json(), { triggered: true });
+    rows.set('12:acc-1', row({
+      id: 12,
+      referenceImages: [{ index: 0, sourceUrl: 'https://img.test/a.jpg', captureStatus: 'url_only', capturedAt: 1 }],
+    }));
+    const createdTextOnly = await post('/api/curated/contents/12/create-post', { accountId: 'acc-1', useReferenceImages: false });
+    assert.equal(createdTextOnly.status, 200);
+    assert.deepEqual(await createdTextOnly.json(), { triggered: true });
 
     const contentComment = await post('/api/curated/contents/7/comment', { accountId: 'acc-1' });
     assert.deepEqual(await contentComment.json(), { triggered: true });
@@ -162,6 +172,7 @@ test('HTTP 精选行级动作：503/400/404/类型约束/empty_body/empty_title/
 
     assert.deepEqual(actionCalls, [
       { fn: 'create', accountId: 'acc-1', rowId: 7 },
+      { fn: 'create', accountId: 'acc-1', rowId: 12, useReferenceImages: false },
       { fn: 'comment', accountId: 'acc-1', rowId: 7, withGroup: false },
       { fn: 'comment', accountId: 'acc-1', rowId: 7, withGroup: true },
       { fn: 'comment', accountId: 'acc-1', rowId: 11, withGroup: false },

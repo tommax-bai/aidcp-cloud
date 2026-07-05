@@ -717,6 +717,15 @@ export interface PageCardsPayload {
   }>;
 }
 
+/** Note detail image reference observed by edge. */
+export interface NoteImagePayload {
+  index: number;
+  url: string;
+  width?: number;
+  height?: number;
+  alt?: string;
+}
+
 export interface NoteDetailPayload {
   noteId: string;
   title: string;
@@ -733,6 +742,7 @@ export interface NoteDetailPayload {
   /** 详情页带 xsec_token 的完整链接（change interaction-feed-enrichment，供面板「按笔记互动」可点跳转）。
    *  诚实置空：地址栏无 token 时不带、绝不用裸 id 拼打不开的假链接（同发布链 postUrl 约定）。 */
   url?: string;
+  images?: NoteImagePayload[];
 }
 
 export interface ProfileDetailPayload {

@@ -14,7 +14,7 @@ function plan(prompts: string[]): ImagePlan {
 }
 const noPlan: ImagePlan = { wantImage: false, imagePrompts: [], imageStyle: null, imageCount: 0, fallbackStrategy: 'skip', plannedAt: clock() };
 
-function run(provider: { generate: (p: string, s?: string) => Promise<ImageResult> }, p: ImagePlan, enable = true, waitMs = 60) {
+function run(provider: ImageGeneratorDeps['imageProvider'], p: ImagePlan, enable = true, waitMs = 60) {
   const role = new ImageGeneratorRole({
     imageProvider: provider,
     enableImageGeneration: enable,
@@ -39,6 +39,24 @@ describe('ImageGeneratorRole（并行多图）', () => {
     const d = await run(provider, plan(['a', 'b', 'c']));
     assert.deepEqual(d.imageUrls, ['https://cdn/a.png', 'https://cdn/b.png', 'https://cdn/c.png'], '保序');
     assert.equal(d.imageUrl, 'https://cdn/a.png', '封面派生=首张');
+  });
+
+  test('reference images are forwarded to provider and surfaced in directive audit fields', async () => {
+    const seen: Array<string[] | undefined> = [];
+    const referenceImages = [
+      { index: 0, sourceUrl: 'https://img.test/source-a.jpg', ossUrl: 'https://oss.test/a.jpg', captureStatus: 'stored' as const, capturedAt: 1 },
+      { index: 1, sourceUrl: 'https://img.test/source-b.jpg', captureStatus: 'url_only' as const, capturedAt: 2 },
+    ];
+    const provider = {
+      generate: async (_prompt: string, _style?: string, options?: { referenceImages?: string[] }): Promise<ImageResult> => {
+        seen.push(options?.referenceImages);
+        return { url: 'https://cdn/a.png', referenceStatus: 'unsupported', referenceUsed: false };
+      },
+    };
+    const d = await run(provider, { ...plan(['a']), referenceImages });
+    assert.deepEqual(seen, [['https://oss.test/a.jpg', 'https://img.test/source-b.jpg']]);
+    assert.deepEqual(d.referenceImages, referenceImages);
+    assert.equal(d.referenceImageStatus, 'unsupported');
   });
 
   test('部分成功 M=2/3：失败那张不进数组、其余保序（红线）', async () => {

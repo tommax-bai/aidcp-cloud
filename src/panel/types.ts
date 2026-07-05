@@ -286,7 +286,7 @@ export interface CuratedActionReceipt {
 
 export interface PanelCuratedActions {
   /** 参照洗稿创作：以精选笔记行为参照触发发布链生成草稿（走既有飞书人审+下发，AC-PUB 不短路）。 */
-  createPostFromNote(accountId: string, row: CuratedPanelRow): Promise<CuratedActionReceipt>;
+  createPostFromNote(accountId: string, row: CuratedPanelRow, options?: { useReferenceImages?: boolean }): Promise<CuratedActionReceipt>;
   /** 定向评论：搜索定位该笔记后评论（withGroup=追加账号群聊口令，缺码 fail-closed）。 */
   commentOnNote(accountId: string, row: CuratedPanelRow, withGroup: boolean): Promise<CuratedActionReceipt>;
 }

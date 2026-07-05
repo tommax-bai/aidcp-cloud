@@ -10,7 +10,7 @@
  * 失败返回 { url: null, error } 不抛异常，调用方无需 try/catch。
  */
 
-import type { ImageProvider, ImageResult } from './image-provider.js';
+import type { ImageGenerateOptions, ImageProvider, ImageResult } from './image-provider.js';
 
 // wan2.7-image-pro 异步文生图：image-generation/generation（messages 入参）；旧 wanx-v1 的 text2image/image-synthesis 已弃用。
 const SUBMIT_URL = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/image-generation/generation';
@@ -85,7 +85,9 @@ export class WanxiangClient implements ImageProvider {
   }
 
   /** 生成图片：提交任务 + 轮询结果 */
-  async generate(prompt: string, style?: string): Promise<ImageResult> {
+  async generate(prompt: string, style?: string, options?: ImageGenerateOptions): Promise<ImageResult> {
+    const withReferenceStatus = (result: ImageResult): ImageResult =>
+      options?.referenceImages?.length ? { ...result, referenceStatus: 'unsupported', referenceUsed: false } : result;
     if (!this.apiKey) {
       return { url: null, error: '图片生成 key 未配置（WANXIANG_API_KEY / DASHSCOPE_API_KEY 均空）' };
     }
@@ -93,12 +95,12 @@ export class WanxiangClient implements ImageProvider {
     // 1. 提交生成任务
     const submitResult = await this.submitTask(prompt, style);
     if (submitResult.error) {
-      return submitResult;
+      return withReferenceStatus(submitResult);
     }
     const taskId = submitResult.taskId!;
 
     // 2. 轮询任务状态
-    return this.pollTask(taskId);
+    return withReferenceStatus(await this.pollTask(taskId));
   }
 
   /** 提交异步生成任务 */

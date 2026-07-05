@@ -59,6 +59,17 @@ export interface PublishSourceReference {
 }
 
 /** 一条发布记录（publish_log 表的投影）。 */
+export interface ReferenceImageSnapshot {
+  index: number;
+  sourceUrl: string;
+  ossUrl?: string;
+  width?: number;
+  height?: number;
+  alt?: string;
+  captureStatus?: 'stored' | 'url_only' | 'fetch_failed' | 'unsupported';
+  capturedAt?: number;
+}
+
 export interface PublishRecord {
   id?: number;
   title: string | null;
@@ -145,6 +156,8 @@ export interface TriggerInput {
       capturedAt?: number;
       /** 展示/审计用完整快照；prompt 可截断 body，但此快照保持触发时正文。 */
       sourceReference?: PublishSourceReference;
+      /** Original note images as generation guidance only; never publish/reuse originals directly. */
+      images?: ReferenceImageSnapshot[];
     };
     soul: Soul;
     recentPosts: string[];
@@ -230,6 +243,8 @@ export interface ImageDirective {
   imageUrl: string | null;
   imageStyle: 'photography' | 'illustration' | 'dataviz' | 'isometric' | null;
   fallbackStrategy: 'skip' | 'color_placeholder';
+  referenceImages?: ReferenceImageSnapshot[];
+  referenceImageStatus?: 'none' | 'used' | 'unsupported' | 'unavailable' | 'skipped';
   directedAt: number;
 }
 
@@ -299,6 +314,7 @@ export interface ImagePlan {
   imageStyle: ImageDirective['imageStyle'];
   imageCount: number;
   fallbackStrategy: ImageDirective['fallbackStrategy'];
+  referenceImages?: ReferenceImageSnapshot[];
   plannedAt: number;
 }
 

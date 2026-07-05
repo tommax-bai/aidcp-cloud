@@ -1,7 +1,9 @@
 import { BasePublishRole } from './base-role.js';
 import type { RoleConfig } from './base-role.js';
+import type { PipelineContext } from '../pipeline-context.js';
 import type { PipelineFields, ImageSetPlan, ImagePlan, ImageTheme, ImageCategory } from '../types.js';
 import { buildImagePromptComposerPrompt, resolveStyleProfile } from '../prompts.js';
+import { buildReferenceImageGuidance, referenceImagesFromSnapshot } from '../reference-image-guidance.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
 
 /**
@@ -58,15 +60,18 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
     };
   }
 
-  protected async execute(input: ComposerInput): Promise<ImagePlan> {
+  protected async execute(input: ComposerInput, context: PipelineContext<PipelineFields>): Promise<ImagePlan> {
     const plan = input.plan;
     if (!plan.wantImage || plan.themes.length === 0) {
       return this.emptyPlan();
     }
+    const snapshot = context.snapshot();
+    const referenceImages = referenceImagesFromSnapshot(snapshot);
+    const referenceImageGuidance = buildReferenceImageGuidance(snapshot);
 
     // 每主题一条中文主体描述（并行，保序；某条 LLM 失败退回主体文本 fallback，不让该张凭空消失）。
     const composed = await Promise.all(
-      plan.themes.map((theme) => this.composeTheme(theme, plan.styleHint)),
+      plan.themes.map((theme) => this.composeTheme(theme, plan.styleHint, referenceImageGuidance)),
     );
 
     // 去重护栏：按主体近重复比对，命中即丢——但永远保住第 0 张（封面位）。
@@ -100,6 +105,7 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
       imageStyle: null, // 风格由品类风格档承载；不再产枚举、不再由 provider 二次拼（去第二风格源）
       imageCount: imagePrompts.length,
       fallbackStrategy: 'skip',
+      ...(referenceImages.length > 0 ? { referenceImages } : {}),
       plannedAt: this.clock(),
     };
   }
@@ -113,11 +119,11 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
   }
 
   /** 单主题 → 中文主体描述；LLM 失败退回主体文本（该张不凭空消失，图像模型可吃中文主体）。 */
-  private async composeTheme(theme: ImageTheme, styleHint: string | null): Promise<string> {
+  private async composeTheme(theme: ImageTheme, styleHint: string | null, referenceImageGuidance?: string | null): Promise<string> {
     try {
       const raw = await this.llmClient.chat([
         { role: 'system', content: '你是文生图 prompt 工程师。严格返回JSON。' },
-        { role: 'user', content: buildImagePromptComposerPrompt(theme, styleHint) },
+        { role: 'user', content: buildImagePromptComposerPrompt(theme, styleHint, referenceImageGuidance) },
       ], { timeoutMs: IMAGE_PROMPT_TIMEOUT_MS });
       const match = raw.match(/\{[\s\S]*\}/);
       if (!match) throw new Error('no json');

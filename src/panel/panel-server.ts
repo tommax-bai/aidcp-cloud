@@ -1382,7 +1382,7 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
-      const parsed = (body ?? {}) as { accountId?: unknown; withGroup?: unknown };
+      const parsed = (body ?? {}) as { accountId?: unknown; withGroup?: unknown; useReferenceImages?: unknown };
       const accountId = typeof parsed.accountId === 'string' ? parsed.accountId.trim() : '';
       if (!accountId) {
         sendJson(res, 400, { error: 'bad_request', reason: 'account_required' });
@@ -1403,7 +1403,8 @@ function createRequestHandler(
           sendJson(res, 200, { triggered: false, reason: 'empty_body' });
           return;
         }
-        sendJson(res, 200, await deps.curatedActions.createPostFromNote(accountId, row));
+        const useReferenceImages = typeof parsed.useReferenceImages === 'boolean' ? parsed.useReferenceImages : undefined;
+        sendJson(res, 200, await deps.curatedActions.createPostFromNote(accountId, row, { useReferenceImages }));
         return;
       }
       if (!isCuratedSourcePostType(row.contentType)) {

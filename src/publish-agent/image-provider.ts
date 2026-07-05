@@ -1,21 +1,23 @@
 /**
- * 图片生成抽象接口。
- *
- * 定义统一的图片生成结果与提供者契约，便于替换具体实现
- * （如通义万相、DALL-E 等）。
+ * Unified image generation provider contract.
  */
 
-/** 图片生成结果 */
 export interface ImageResult {
-  /** 生成的图片 URL，失败为 null */
+  /** Generated image URL; null means no real image was produced. */
   url: string | null;
-  /** 异步任务 ID */
+  /** Optional async task id from the provider. */
   taskId?: string;
-  /** 错误信息 */
+  /** Provider or generation error. */
   error?: string;
+  referenceUsed?: boolean;
+  referenceStatus?: 'used' | 'unsupported' | 'unavailable' | 'skipped';
 }
 
-/** 图片提供者接口 */
+export interface ImageGenerateOptions {
+  /** Public or provider-readable reference images, used only as generation guidance. */
+  referenceImages?: string[];
+}
+
 export interface ImageProvider {
-  generate(prompt: string, style?: string): Promise<ImageResult>;
+  generate(prompt: string, style?: string, options?: ImageGenerateOptions): Promise<ImageResult>;
 }

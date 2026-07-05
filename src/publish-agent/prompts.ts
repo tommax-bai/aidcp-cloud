@@ -713,7 +713,7 @@ export function buildImageSetPlanPrompt(createdContent: CreatedContent, maxImage
  * 只产主体描述；风格基底由系统在 composer 角色侧拼接（IMAGE_STYLE_BASE），不让 LLM 产风格/负向词。
  * 输出 JSON: { imagePrompt, imageStyle }
  */
-export function buildImagePromptComposerPrompt(theme: { subject: string; intent?: string }, styleHint: string | null): string {
+export function buildImagePromptComposerPrompt(theme: { subject: string; intent?: string }, styleHint: string | null, referenceImageGuidance?: string | null): string {
   return [
     '你是文生图 prompt 工程师。把下面这张配图的中文主题，写成一句【中文】画面主体描述——只描述"画什么"（主体 + 一个正在发生的动作/使用场景 + 环境），不要写风格、不要写画质词、不要写 no text 之类负向约束（这些系统会按内容品类统一补）。保留中文、不要翻成英文（图像模型原生支持中文、更贴中文语境）。',
     '',
@@ -721,6 +721,7 @@ export function buildImagePromptComposerPrompt(theme: { subject: string; intent?
     `主体：${theme.subject}`,
     ...(theme.intent ? [`要点：${theme.intent}`] : []),
     ...(styleHint ? [`整体风格倾向（参考，可忽略）：${styleHint}`] : []),
+    ...(referenceImageGuidance ? ['', 'Reference image guidance:', referenceImageGuidance] : []),
     '',
     '【要求】',
     '- imagePrompt: 一句中文，描述画面主体、动作/场景与构图，与主题强相关；不含任何文字/水印/真人正脸。',

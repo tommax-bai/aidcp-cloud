@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { ImagePromptComposerRole } from '../../src/publish-agent/roles/image-prompt-composer.js';
 import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
-import type { PipelineFields, ImageSetPlan, ImageTheme, ImageCategory } from '../../src/publish-agent/types.js';
+import type { PipelineFields, ImageSetPlan, ImageTheme, ImageCategory, TriggerInput } from '../../src/publish-agent/types.js';
 
 const clock = () => 1700000000000;
 const silentLogger = { log() {}, warn() {}, error() {} };
@@ -12,10 +12,11 @@ function setPlan(themes: ImageTheme[], wantImage = true): ImageSetPlan {
 }
 
 // composer 现 waitAll [imageSetPlan, postCategory]：两键都写才触发（category 决定品类风格档）。
-function run(llm: unknown, plan: ImageSetPlan, waitMs = 60, category: ImageCategory = 'food') {
+function run(llm: unknown, plan: ImageSetPlan, waitMs = 60, category: ImageCategory = 'food', trigger?: TriggerInput) {
   const role = new ImagePromptComposerRole({ llmClient: llm as never, clock, logger: silentLogger });
   const ctx = new PipelineContext<PipelineFields>();
   role.register(ctx);
+  if (trigger) ctx.write('trigger', trigger);
   ctx.write('postCategory', { category, classifiedAt: clock() });
   ctx.write('imageSetPlan', plan);
   return new Promise<NonNullable<PipelineFields['imagePlan']>>((resolve) =>
@@ -37,6 +38,47 @@ describe('ImagePromptComposerRole（配图指令，仅桩 LLM、不依赖图源�
     assert.match(plan.imagePrompts[0], /negative space at the top/, '封面档留白');
     // 不再产 imageStyle 枚举（风格由品类风格档承载、不由 provider 二次拼）。
     assert.equal(plan.imageStyle, null);
+  });
+
+  test('reference images are included as visual guidance and preserved on ImagePlan', async () => {
+    let userPrompt = '';
+    const referenceImages = [
+      { index: 0, sourceUrl: 'https://img.test/source.jpg', ossUrl: 'https://oss.test/source.jpg', width: 800, height: 600, alt: 'desk setup' },
+    ];
+    const llm = {
+      chat: async (msgs: Array<{ content: string }>) => {
+        userPrompt = msgs[1]?.content ?? '';
+        return JSON.stringify({ imagePrompt: 'reference aware scene' });
+      },
+      complete: async () => '',
+    };
+    const trigger = {
+      accountId: 'acc-test',
+      generateInput: {
+        concepts: [],
+        likedContents: [],
+        referenceNote: {
+          sourceId: 'note-ref',
+          title: 'ref',
+          body: 'body',
+          topics: [],
+          images: referenceImages,
+        },
+        soul: {} as TriggerInput['generateInput']['soul'],
+        recentPosts: [],
+      },
+      metrics: { hoursSinceLastPublish: 999, newConceptCount: 0, likedSinceLastPublish: 0 },
+      recentPublished: [],
+      forced: true,
+      reason: 'manual_reference',
+      triggeredAt: clock(),
+    } as TriggerInput;
+
+    const plan = await run(llm, setPlan([{ subject: 'desk' }]), 60, 'knowledge', trigger);
+    assert.match(userPrompt, /Reference image guidance/);
+    assert.match(userPrompt, /https:\/\/oss\.test\/source\.jpg/);
+    assert.match(userPrompt, /desk setup/);
+    assert.deepEqual(plan.referenceImages, referenceImages);
   });
 
   test('近重复主体 → 丢弃，但永远保住第 0 张（wantImage:true → ≥1）', async () => {

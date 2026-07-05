@@ -12,7 +12,7 @@
  * 复用 server 注入的 RiskController/各 Store 单例。
  */
 
-import type { PublishSourceReference, TriggerInput } from './types.js';
+import type { PublishSourceReference, ReferenceImageSnapshot, TriggerInput } from './types.js';
 import type { Soul } from '../soul/types.js';
 import type { CuratedContentTypeFilter, CuratedSelectItem } from '../cache/curated-content-store.js';
 
@@ -21,6 +21,7 @@ export type ReferenceNote = NonNullable<TriggerInput['generateInput']['reference
 
 /** 参照正文注入上限（字符）：保真改写需要足够上下文，同时防超长全文撑爆 prompt。 */
 export const REFERENCE_BODY_MAX_LEN = 6000;
+export const REFERENCE_IMAGE_MAX_COUNT = 3;
 
 export interface SchedulerConceptStore {
   countNewSince(sinceMs: number): Promise<number>;
@@ -303,6 +304,12 @@ export class PublishScheduler {
     };
   }
 
+  private prepareReferenceImages(referenceNote: ReferenceNote): ReferenceImageSnapshot[] {
+    return (referenceNote.images ?? [])
+      .filter((img) => typeof (img.ossUrl ?? img.sourceUrl) === 'string' && (img.ossUrl ?? img.sourceUrl).trim())
+      .slice(0, REFERENCE_IMAGE_MAX_COUNT);
+  }
+
   private async doTrigger(
     reason: string,
     forced = false,
@@ -310,6 +317,12 @@ export class PublishScheduler {
     referenceNote?: ReferenceNote,
   ): Promise<{ status: string; failureReason?: string }> {
     const base = await this.buildTriggerInput(accountId);
+    const referenceImages = referenceNote ? this.prepareReferenceImages(referenceNote) : [];
+    let referenceNoteWithoutImages: Omit<ReferenceNote, 'images'> | undefined;
+    if (referenceNote) {
+      const { images: _rawReferenceImages, ...rest } = referenceNote;
+      referenceNoteWithoutImages = rest;
+    }
     const input: TriggerInput = referenceNote
       ? {
           ...base,
@@ -318,11 +331,12 @@ export class PublishScheduler {
             ...base.generateInput,
             // 参照正文有界截断：保真改写需要足够上下文；展示/审计快照保持触发时原文。
             referenceNote: {
-              ...referenceNote,
+              ...referenceNoteWithoutImages!,
               accountId: referenceNote.accountId ?? accountId,
               capturedAt: referenceNote.capturedAt ?? this.clock(),
               body: referenceNote.body.slice(0, REFERENCE_BODY_MAX_LEN),
               sourceReference: this.freezeReferenceSource(accountId, referenceNote),
+              ...(referenceImages.length > 0 ? { images: referenceImages } : {}),
             },
           },
         }

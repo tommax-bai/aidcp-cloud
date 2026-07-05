@@ -27,6 +27,40 @@ export type CuratedSourceContentType = 'image_text' | 'video';
 export type CuratedContentType = CuratedSourceContentType | 'comment';
 export type CuratedContentTypeFilter = CuratedContentType | 'note' | 'source_post';
 
+export type CuratedReferenceImageStatus = 'stored' | 'url_only' | 'fetch_failed' | 'unsupported';
+
+export interface CuratedReferenceImage {
+  index: number;
+  sourceUrl: string;
+  ossUrl?: string;
+  width?: number;
+  height?: number;
+  alt?: string;
+  captureStatus: CuratedReferenceImageStatus;
+  capturedAt: number;
+}
+
+export interface CuratedReferenceImageInput {
+  index?: number;
+  url?: string;
+  sourceUrl?: string;
+  ossUrl?: string;
+  width?: number;
+  height?: number;
+  alt?: string;
+  captureStatus?: CuratedReferenceImageStatus;
+  capturedAt?: number;
+}
+
+export type CuratedReferenceImageRelocator = (ctx: {
+  accountId: string;
+  sourceId: string;
+  images: CuratedReferenceImage[];
+}) => Promise<CuratedReferenceImage[]>;
+
+export const CURATED_REFERENCE_IMAGE_DEFAULT_LIMIT = 3;
+export const CURATED_REFERENCE_IMAGE_HARD_MAX = 9;
+
 /** 一次观测：别人的笔记/评论被判定「值得当灵感」时落库/刷新。 */
 export interface CuratedObservation {
   accountId: string;
@@ -41,6 +75,7 @@ export interface CuratedObservation {
   collectCount?: number | null;
   commentCount?: number | null;
   admitReason: string;
+  referenceImages?: CuratedReferenceImageInput[];
 }
 
 /** 自有动作（collect 自动建行）时可附带的内容；缺少非空正文时不补建精选壳行。 */
@@ -51,6 +86,7 @@ export interface CuratedActionContent {
   sourceUrl?: string;
   topics?: string[];
   mediaType?: CuratedSourceContentType;
+  referenceImages?: CuratedReferenceImageInput[];
 }
 
 /** 召回给创作侧的一条灵感。 */
@@ -65,6 +101,7 @@ export interface CuratedSelectItem {
   collectCount: number | null;
   botLiked: boolean;
   botCollected: boolean;
+  referenceImages: CuratedReferenceImage[];
 }
 
 /**
@@ -91,6 +128,7 @@ export interface CuratedPanelRow {
   admitReason: string | null;
   firstSeenAt: number;
   updatedAt: number;
+  referenceImages: CuratedReferenceImage[];
 }
 
 /** 面板列表结果：当前筛选下的一页行 + 一致的总条数（供分页器）。 */
@@ -119,6 +157,9 @@ export interface CuratedContentStoreOptions {
   pool?: pg.Pool;
   /** 每账号保留上限（行数），超出裁最旧。默认 1000。 */
   retentionMax?: number;
+  referenceImageLimit?: number;
+  referenceImageRelocator?: CuratedReferenceImageRelocator;
+  logger?: Pick<Console, 'warn'>;
 }
 
 /** 建表 DDL（幂等，columns-right-on-first-ship；本仓无迁移框架）。 */
@@ -138,12 +179,14 @@ CREATE TABLE IF NOT EXISTS curated_content (
   collect_count      INT,
   comment_count      INT,
   counts_captured_at TIMESTAMPTZ,
+  reference_images   JSONB NOT NULL DEFAULT '[]'::jsonb,
   bot_liked          BOOLEAN NOT NULL DEFAULT false,
   bot_collected      BOOLEAN NOT NULL DEFAULT false,
   admit_reason       TEXT,
   first_seen_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE curated_content ADD COLUMN IF NOT EXISTS reference_images JSONB NOT NULL DEFAULT '[]'::jsonb;
 CREATE INDEX IF NOT EXISTS idx_curated_content_topics ON curated_content USING GIN(topics);
 CREATE INDEX IF NOT EXISTS idx_curated_content_account_updated ON curated_content (account_id, updated_at DESC);
 
@@ -161,6 +204,10 @@ BEGIN
            author = COALESCE(target.author, legacy.author),
            source_url = COALESCE(target.source_url, legacy.source_url),
            topics = CASE WHEN COALESCE(array_length(target.topics, 1), 0) = 0 THEN legacy.topics ELSE target.topics END,
+           reference_images = CASE
+                                WHEN target.reference_images = '[]'::jsonb THEN legacy.reference_images
+                                ELSE target.reference_images
+                              END,
            like_count = COALESCE(target.like_count, legacy.like_count),
            collect_count = COALESCE(target.collect_count, legacy.collect_count),
            comment_count = COALESCE(target.comment_count, legacy.comment_count),
@@ -222,6 +269,92 @@ function toNumOrNull(v: unknown): number | null {
   return v === null || v === undefined ? null : Number(v);
 }
 
+function clampReferenceImageLimit(limit: number | undefined): number {
+  const raw = limit ?? CURATED_REFERENCE_IMAGE_DEFAULT_LIMIT;
+  if (!Number.isFinite(raw)) return CURATED_REFERENCE_IMAGE_DEFAULT_LIMIT;
+  return Math.max(0, Math.min(CURATED_REFERENCE_IMAGE_HARD_MAX, Math.floor(raw)));
+}
+
+function cleanOptionalString(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const t = v.trim();
+  return t ? t : undefined;
+}
+
+function cleanReferenceUrl(v: unknown): string | undefined {
+  const t = cleanOptionalString(v);
+  if (!t) return undefined;
+  try {
+    const u = new URL(t);
+    return u.protocol === 'http:' || u.protocol === 'https:' ? u.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function positiveInt(v: unknown): number | undefined {
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
+}
+
+function isReferenceImageStatus(v: unknown): v is CuratedReferenceImageStatus {
+  return v === 'stored' || v === 'url_only' || v === 'fetch_failed' || v === 'unsupported';
+}
+
+export function normalizeCuratedReferenceImages(
+  input: CuratedReferenceImageInput[] | undefined,
+  opts: { now?: number; limit?: number; defaultStatus?: CuratedReferenceImageStatus } = {},
+): CuratedReferenceImage[] {
+  if (!Array.isArray(input) || input.length === 0) return [];
+  const now = opts.now ?? Date.now();
+  const limit = clampReferenceImageLimit(opts.limit);
+  if (limit <= 0) return [];
+  const seen = new Set<string>();
+  const out: CuratedReferenceImage[] = [];
+  for (const raw of input) {
+    if (!raw || typeof raw !== 'object') continue;
+    const sourceUrl = cleanReferenceUrl(raw.sourceUrl ?? raw.url);
+    const ossUrl = cleanReferenceUrl(raw.ossUrl);
+    if (!sourceUrl && !ossUrl) continue;
+    const dedupeKey = sourceUrl ?? ossUrl!;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    const width = positiveInt(raw.width);
+    const height = positiveInt(raw.height);
+    const alt = cleanOptionalString(raw.alt);
+    const idx = positiveInt(raw.index);
+    out.push({
+      index: idx ?? out.length,
+      sourceUrl: sourceUrl ?? ossUrl!,
+      ...(ossUrl ? { ossUrl } : {}),
+      ...(width !== undefined ? { width } : {}),
+      ...(height !== undefined ? { height } : {}),
+      ...(alt ? { alt } : {}),
+      captureStatus: isReferenceImageStatus(raw.captureStatus) ? raw.captureStatus : opts.defaultStatus ?? (ossUrl ? 'stored' : 'url_only'),
+      capturedAt: positiveInt(raw.capturedAt) ?? now,
+    });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function parseReferenceImages(v: unknown): CuratedReferenceImage[] {
+  if (Array.isArray(v)) {
+    return normalizeCuratedReferenceImages(v as CuratedReferenceImageInput[], {
+      limit: CURATED_REFERENCE_IMAGE_HARD_MAX,
+    });
+  }
+  if (typeof v === 'string' && v.trim()) {
+    try {
+      const parsed = JSON.parse(v) as CuratedReferenceImageInput[];
+      return parseReferenceImages(parsed);
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 interface CuratedRow {
   source_id: string;
   content_type: string;
@@ -233,6 +366,7 @@ interface CuratedRow {
   collect_count: number | string | null;
   bot_liked: boolean;
   bot_collected: boolean;
+  reference_images: unknown;
 }
 
 /** 面板列表用的完整 snake-case 行（含 id 与全字段；total_count 来自 COUNT(*) OVER()）。 */
@@ -256,6 +390,7 @@ interface CuratedPanelDbRow {
   first_seen_at: Date;
   updated_at: Date;
   total_count?: number | string;
+  reference_images: unknown;
 }
 
 /** snake-case 行 → 面板 camelCase 视图（时间戳转 epoch ms、INT 诚实置空）。 */
@@ -279,15 +414,22 @@ function rowToPanelView(r: CuratedPanelDbRow): CuratedPanelRow {
     admitReason: r.admit_reason,
     firstSeenAt: r.first_seen_at.getTime(),
     updatedAt: r.updated_at.getTime(),
+    referenceImages: parseReferenceImages(r.reference_images),
   };
 }
 
 export class CuratedContentStore {
   private readonly pool: pg.Pool;
   private readonly retentionMax: number;
+  private readonly referenceImageLimit: number;
+  private readonly referenceImageRelocator?: CuratedReferenceImageRelocator;
+  private readonly logger?: Pick<Console, 'warn'>;
 
   constructor(options: CuratedContentStoreOptions = {}) {
     this.retentionMax = options.retentionMax ?? 1000;
+    this.referenceImageLimit = clampReferenceImageLimit(options.referenceImageLimit);
+    this.referenceImageRelocator = options.referenceImageRelocator;
+    this.logger = options.logger;
     this.pool =
       options.pool ??
       new Pool({
@@ -304,6 +446,23 @@ export class CuratedContentStore {
     await this.pool.query(CURATED_CONTENT_SCHEMA_SQL);
   }
 
+  private async prepareReferenceImages(
+    accountId: string,
+    sourceId: string,
+    input: CuratedReferenceImageInput[] | undefined,
+  ): Promise<CuratedReferenceImage[]> {
+    const normalized = normalizeCuratedReferenceImages(input, { limit: this.referenceImageLimit });
+    if (normalized.length === 0 || !this.referenceImageRelocator) return normalized;
+    try {
+      return normalizeCuratedReferenceImages(await this.referenceImageRelocator({ accountId, sourceId, images: normalized }), {
+        limit: this.referenceImageLimit,
+      });
+    } catch (err) {
+      this.logger?.warn?.(`[CuratedContentStore] reference image relocation failed: ${(err as Error).message}`);
+      return normalized;
+    }
+  }
+
   /**
    * 观测落库/刷新（账号维度去重）；正文为空则不写入精选素材。
    * ON CONFLICT DO UPDATE 刷新正文/作者/计数/admit_reason/updated_at（counts_captured_at=now()），
@@ -314,17 +473,22 @@ export class CuratedContentStore {
     const body = obs.body.trim();
     if (!body) return;
     const dedupKey = dedupKeyOf(obs.accountId, obs.contentType, obs.sourceId);
+    const referenceImages = await this.prepareReferenceImages(obs.accountId, obs.sourceId, obs.referenceImages);
     await this.pool.query(
       `INSERT INTO curated_content
          (account_id, content_type, source_id, dedup_key, title, body, author, source_url,
-          topics, like_count, collect_count, comment_count, counts_captured_at, admit_reason, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), $13, now())
+          topics, reference_images, like_count, collect_count, comment_count, counts_captured_at, admit_reason, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, now(), $14, now())
        ON CONFLICT (dedup_key) DO UPDATE SET
          title              = EXCLUDED.title,
          body               = EXCLUDED.body,
          author             = EXCLUDED.author,
          source_url         = EXCLUDED.source_url,
          topics             = EXCLUDED.topics,
+         reference_images   = CASE
+                                WHEN EXCLUDED.reference_images = '[]'::jsonb THEN curated_content.reference_images
+                                ELSE EXCLUDED.reference_images
+                              END,
          like_count         = EXCLUDED.like_count,
          collect_count      = EXCLUDED.collect_count,
          comment_count      = EXCLUDED.comment_count,
@@ -341,6 +505,7 @@ export class CuratedContentStore {
         obs.author ?? null,
         obs.sourceUrl ?? null,
         obs.topics,
+        JSON.stringify(referenceImages),
         obs.likeCount ?? null,
         obs.collectCount ?? null,
         obs.commentCount ?? null,
@@ -387,12 +552,19 @@ export class CuratedContentStore {
 
     const mediaType = normalizeSourceMediaType(content?.mediaType);
     const dedupKey = dedupKeyOf(accountId, mediaType, sourceId);
+    const referenceImages = await this.prepareReferenceImages(accountId, sourceId, content?.referenceImages);
     await this.pool.query(
       `INSERT INTO curated_content
          (account_id, content_type, source_id, dedup_key, title, body, author, source_url,
-          topics, like_count, collect_count, admit_reason, bot_collected, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, NULL, $10, true, now())
-       ON CONFLICT (dedup_key) DO UPDATE SET bot_collected = true, updated_at = now()`,
+          topics, reference_images, like_count, collect_count, admit_reason, bot_collected, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, NULL, NULL, $11, true, now())
+       ON CONFLICT (dedup_key) DO UPDATE SET
+         bot_collected = true,
+         reference_images = CASE
+                              WHEN curated_content.reference_images = '[]'::jsonb THEN EXCLUDED.reference_images
+                              ELSE curated_content.reference_images
+                            END,
+         updated_at = now()`,
       [
         accountId,
         mediaType,
@@ -403,6 +575,7 @@ export class CuratedContentStore {
         content?.author ?? null,
         content?.sourceUrl ?? null,
         content?.topics ?? [],
+        JSON.stringify(referenceImages),
         'bot_collect',
       ],
     );
@@ -456,7 +629,7 @@ export class CuratedContentStore {
     const limitIdx = params.length;
     const { rows } = await this.pool.query<CuratedRow>(
       `SELECT source_id, content_type, title, body, author, topics,
-              like_count, collect_count, bot_liked, bot_collected
+              like_count, collect_count, bot_liked, bot_collected, reference_images
        FROM curated_content
        WHERE ${conds.join(' AND ')}
        ORDER BY (CASE WHEN bot_collected THEN 2 ELSE 0 END + CASE WHEN bot_liked THEN 1 ELSE 0 END) DESC,
@@ -477,6 +650,7 @@ export class CuratedContentStore {
       collectCount: toNumOrNull(r.collect_count),
       botLiked: r.bot_liked,
       botCollected: r.bot_collected,
+      referenceImages: parseReferenceImages(r.reference_images),
     }));
   }
 
@@ -516,7 +690,7 @@ export class CuratedContentStore {
     try {
       const { rows } = await this.pool.query<CuratedPanelDbRow>(
         `SELECT id, account_id, content_type, source_id, title, body, author, source_url, topics,
-                like_count, collect_count, comment_count, counts_captured_at,
+                like_count, collect_count, comment_count, counts_captured_at, reference_images,
                 bot_liked, bot_collected, admit_reason, first_seen_at, updated_at,
                 COUNT(*) OVER() AS total_count
          FROM curated_content
@@ -596,7 +770,7 @@ export class CuratedContentStore {
     try {
       const { rows } = await this.pool.query<CuratedPanelDbRow>(
         `SELECT id, account_id, content_type, source_id, title, body, author, source_url, topics,
-                like_count, collect_count, comment_count, counts_captured_at,
+                like_count, collect_count, comment_count, counts_captured_at, reference_images,
                 bot_liked, bot_collected, admit_reason, first_seen_at, updated_at
          FROM curated_content
          WHERE id = $1 AND account_id = $2`,
