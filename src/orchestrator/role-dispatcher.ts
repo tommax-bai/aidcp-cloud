@@ -85,6 +85,14 @@ export interface ConceptStorePort extends ConceptSink {
 }
 
 const EMPTY_CONCEPT_POOL: ConceptPool = { known: [], candidates: [], source: new Map() };
+const VIEW_QUOTA_RECHECK_FALLBACK_MS = 60_000;
+const VIEW_QUOTA_WAKE_GRACE_MS = 250;
+
+export interface ViewQuotaDecision {
+  allowed: boolean;
+  reason?: string;
+  retryAfterMs?: number;
+}
 
 // ─── 公共接口 ────────────────────────────────────────────────────────────────
 
@@ -113,11 +121,13 @@ export interface RoleDispatcherOptions {
    * 由 server 接线为 `(action) => riskController.canDo(action)`。被拒则诚实跳过（不下发、不扣 budget）。
    */
   canInteract?: (action: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like') => boolean;
-  /**
-   * 浏览前风控闸：下发 open_note 前判定是否允许新增一次 view。缺省始终允许（向后兼容）。
-   * 由 server 接线为 `() => riskController.canDo('view')`。被拒则结束当前会话，不打开下一篇。
-   */
+  /** 浏览前风控闸：兼容旧测试/旧装配；优先使用 explainView。 */
   canView?: () => boolean;
+  /**
+   * 浏览前风控闸：下发 open_note 前判定是否允许新增一次 view，并给出 quota 窗口重试时间。
+   * 由 server 接线为 `() => riskController.explain('view')`。被拒则进入浏览休眠，不打开下一篇。
+   */
+  explainView?: () => ViewQuotaDecision;
   /**
    * 硬暂停闸（验证码/人工接管）：边缘是否处于硬暂停态。缺省始终 false。
    * 由 server 接线为读 ws-server 的 pausedEdges（isEdgePaused）。通知准入角色据此放弃巡视——
@@ -257,6 +267,7 @@ export class RoleDispatcher {
   private readonly pacingFloors?: PacingFloorProvider;
   private readonly canInteract: (action: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like') => boolean;
   private readonly canView: () => boolean;
+  private readonly explainView: () => ViewQuotaDecision;
   private readonly commentApproval?: CommentApprovalPort;
   private readonly getCommentDailyRemaining?: () => number;
   private readonly getCommentLikeDailyRemaining?: () => number;
@@ -290,6 +301,9 @@ export class RoleDispatcher {
   private restTimer: unknown;
   /** 「可活跃时间」窗口唤醒计时器句柄（休眠期排到下一个活跃整点主动续上；每连接私有、unref）。 */
   private wakeTimer: unknown;
+  /** 浏览额度休眠计时器句柄（minute/hour/day 窗口释放后重驱浏览；每连接私有、unref）。 */
+  private viewQuotaSleepTimer: unknown;
+  private viewQuotaSleeping = false;
   /** 每账号当日自动续场计数（场数 + 累计浏览毫秒），按本地日界重置。 */
   private readonly dailyResume = new Map<string, { dayKey: string; sessions: number; browseMs: number }>();
   /** SessionMonitor 引用（供 excursion → pauseClock/resumeClock；setup 时捕获）。 */
@@ -346,6 +360,10 @@ export class RoleDispatcher {
     this.pacingFloors = options.pacingFloors;
     this.canInteract = options.canInteract ?? (() => true);
     this.canView = options.canView ?? (() => true);
+    this.explainView = options.explainView ?? (() => {
+      const allowed = this.canView();
+      return allowed ? { allowed } : { allowed, reason: 'view_quota_exhausted' };
+    });
     this.commentApproval = options.commentApproval;
     this.getCommentDailyRemaining = options.getCommentDailyRemaining;
     this.getCommentLikeDailyRemaining = options.getCommentLikeDailyRemaining;
@@ -423,18 +441,23 @@ export class RoleDispatcher {
       || action === 'notification_back_home';
   }
 
+  private isQuotaSleepBypass(command: EdgeCommand): boolean {
+    return command.action === 'session.end'
+      || this.isExcursionCommand(command.action)
+      || (this.sessionContext.selfCaptureInFlight && command.action === 'profile_open');
+  }
+
   /**
    * 发命令的统一出口（软暂停闸）。巡视期（browseSuspended）扣住 browse 类命令——它们会从下次
    * page.cards 自行重来——只放行巡视命令与 session.end；非巡视期照常下发。所有翻译块都经此。
    */
   private sendCommand(command: EdgeCommand): boolean {
+    if (this.viewQuotaSleeping && !this.isQuotaSleepBypass(command)) {
+      return false; // 浏览额度休眠：不打开/滚动/互动，等窗口释放后重驱
+    }
     if (
       this.sessionContext.browseSuspended &&
-      command.action !== 'session.end' &&
-      !this.isExcursionCommand(command.action) &&
-      // 本人昵称采集放行（change account-real-nickname）：仅放行采集在途时的 self profile_open；
-      // open_note/like/scroll 在绕路中照丢（下次 page.cards 无害重来）。非 blanket 关 suspension。
-      !(this.sessionContext.selfCaptureInFlight && command.action === 'profile_open')
+      !this.isQuotaSleepBypass(command)
     ) {
       return false; // 软暂停：丢弃 browse 命令（不入队、由 page.cards 续刷自然重来）
     }
@@ -736,6 +759,7 @@ export class RoleDispatcher {
 
   /**
    * 会话启动闸（诚实人设 + 全局调度开关）。retire-default-account：所有账号一视同仁，无 default 豁免。
+   * 临时 view 配额耗尽不在这里拒签；它在 open_note 前进入浏览休眠，窗口释放后自动重驱。
    * 未绑人设的账号：发 onSessionRejected（置 needs_persona_setup + 告警）并短路，绝不以默认人设静默开跑。
    * 人设存储读不到时 isPersonaBound 返回 false（fail-closed）→ 一并诚实拒绝。
    */
@@ -746,13 +770,6 @@ export class RoleDispatcher {
         `[RoleDispatcher] 账号 ${this.currentAccountId} 未绑定人设 → 拒绝启动浏览会话（needs_persona_setup）：不开循环、不发巡刷信号`,
       );
       void this.onSessionRejected?.(this.currentAccountId, 'needs_persona_setup');
-      return false;
-    }
-    if (!this.canView()) {
-      console.warn(
-        `[RoleDispatcher] 账号 ${this.currentAccountId} view 配额已耗尽 → 拒绝启动浏览会话（view_quota_exhausted）`,
-      );
-      void this.onSessionRejected?.(this.currentAccountId, 'view_quota_exhausted');
       return false;
     }
     return true;
@@ -804,6 +821,7 @@ export class RoleDispatcher {
     // 会话开始 → 取消任何待发休息计时器 + 窗口唤醒计时器（已重开，无需续场 / 唤醒）。
     this.cancelRestTimer();
     this.cancelWakeTimer();
+    this.cancelViewQuotaSleep(false);
     // 幂等：已活跃则先拆旧订阅，避免重复接线（正常路径下 setup 后首次启动无需拆除）。
     if (this.sessionActive) {
       this.roles.forEach((r) => r.unsubscribe());
@@ -871,6 +889,7 @@ export class RoleDispatcher {
     // 会话重开 → 取消待发休息计时器 + 窗口唤醒计时器（边缘先自连重连即走此路，竞态由此化解）。
     this.cancelRestTimer();
     this.cancelWakeTimer();
+    this.cancelViewQuotaSleep(false);
     // 若仍活跃，先拆除旧订阅，避免重复注册
     if (this.sessionActive) {
       this.roles.forEach((r) => r.unsubscribe());
@@ -912,6 +931,7 @@ export class RoleDispatcher {
     // 「可活跃时间」结束的正常路径会经 armRestTimer→续场拒签 重排唤醒，故此处清掉是安全的）。
     this.cancelRestTimer();
     this.cancelWakeTimer();
+    this.cancelViewQuotaSleep(false);
     if (!this.sessionActive) return;
     const account = this.currentAccountId;
     // 记当日累计浏览时长（含 excursion，仅供每日上限近似）。
@@ -930,11 +950,58 @@ export class RoleDispatcher {
     else this.pendingAutoResumeInMs = undefined;
   }
 
-  private endForViewQuota(): void {
-    const reason = 'view_quota_exhausted';
-    console.log(`[RoleDispatcher] view 配额已耗尽 → 结束当前浏览会话（account=${this.currentAccountId}）`);
-    this.sendCommand({ action: 'session.end', reason });
-    this.endSession(reason, { autoResumeEligible: true });
+  private sleepForViewQuota(decision: ViewQuotaDecision): void {
+    if (this.viewQuotaSleeping) return;
+    const delay = this.viewQuotaSleepDelay(decision);
+    this.viewQuotaSleeping = true;
+    this.sessionMonitor?.pauseClock('view_quota');
+    console.log(
+      `[RoleDispatcher] view 配额暂不可用 → 休眠浏览 ${Math.ceil(delay / 1000)}s（account=${this.currentAccountId}, reason=${decision.reason ?? 'unknown'}）`,
+    );
+    const account = this.currentAccountId;
+    this.viewQuotaSleepTimer = this.setTimeoutFn(() => {
+      this.viewQuotaSleepTimer = undefined;
+      this.onViewQuotaSleepElapsed(account);
+    }, delay);
+    (this.viewQuotaSleepTimer as { unref?: () => void } | undefined)?.unref?.();
+  }
+
+  private viewQuotaSleepDelay(decision: ViewQuotaDecision): number {
+    const retryAfterMs =
+      typeof decision.retryAfterMs === 'number' && Number.isFinite(decision.retryAfterMs)
+        ? decision.retryAfterMs
+        : VIEW_QUOTA_RECHECK_FALLBACK_MS;
+    return Math.max(1_000, Math.round(retryAfterMs + VIEW_QUOTA_WAKE_GRACE_MS));
+  }
+
+  private onViewQuotaSleepElapsed(account: string): void {
+    if (this.currentAccountId !== account) {
+      this.clearViewQuotaSleep(false);
+      return;
+    }
+    const decision = this.explainView();
+    if (!decision.allowed) {
+      this.viewQuotaSleeping = false;
+      this.sleepForViewQuota(decision);
+      return;
+    }
+    this.clearViewQuotaSleep(true);
+    console.log(`[RoleDispatcher] view 配额已恢复 → 重驱浏览（account=${this.currentAccountId}）`);
+    if (this.sessionActive) this.sendCommand({ action: 'scroll', reason: 'resume_after_view_quota' });
+  }
+
+  private cancelViewQuotaSleep(resumeClock: boolean): void {
+    if (this.viewQuotaSleepTimer !== undefined) {
+      this.clearTimeoutFn(this.viewQuotaSleepTimer);
+      this.viewQuotaSleepTimer = undefined;
+    }
+    this.clearViewQuotaSleep(resumeClock);
+  }
+
+  private clearViewQuotaSleep(resumeClock: boolean): void {
+    const wasSleeping = this.viewQuotaSleeping;
+    this.viewQuotaSleeping = false;
+    if (resumeClock && wasSleeping) this.sessionMonitor?.resumeClock('view_quota');
   }
 
   // ─── 自动续场（change session-auto-resume-with-excursions）─────────────────────
@@ -1334,8 +1401,9 @@ export class RoleDispatcher {
 
       // 角色产出事件 → Edge 指令翻译
       this.eventBus.on('content.valuable', (payload) => {
-        if (!this.canView()) {
-          this.endForViewQuota();
+        const viewDecision = this.explainView();
+        if (!viewDecision.allowed) {
+          this.sleepForViewQuota(viewDecision);
           return;
         }
         // 带上 noteId：edge 据此在「当前快照」里按稳定主键定位目标卡。

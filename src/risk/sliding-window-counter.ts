@@ -28,6 +28,25 @@ export class SlidingWindowCounter {
       .reduce((sum, event) => sum + event.count, 0);
   }
 
+  retryAfterMs(action: RiskAction, window: RiskWindow, quota: number, at = this.clock()): number | undefined {
+    if (quota <= 0) return undefined;
+    const since = at - WINDOW_MS[window];
+    const active = this.events
+      .filter((event) => event.action === action && event.occurredAt > since && event.occurredAt <= at)
+      .sort((a, b) => a.occurredAt - b.occurredAt);
+    const total = active.reduce((sum, event) => sum + event.count, 0);
+    if (total < quota) return 0;
+
+    let remaining = total;
+    for (const event of active) {
+      remaining -= event.count;
+      if (remaining < quota) {
+        return Math.max(0, event.occurredAt + WINDOW_MS[window] - at);
+      }
+    }
+    return 0;
+  }
+
   counts(window: RiskWindow, at = this.clock()): Record<RiskAction, number> {
     return Object.fromEntries(RISK_ACTIONS.map((action) => [action, this.count(action, window, at)])) as Record<
       RiskAction,

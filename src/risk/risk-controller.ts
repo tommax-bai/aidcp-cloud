@@ -20,6 +20,7 @@ export interface RiskControllerOptions {
 export interface CanDoResult {
   allowed: boolean;
   reason?: string;
+  retryAfterMs?: number;
 }
 
 export class RiskController {
@@ -68,7 +69,14 @@ export class RiskController {
 
     const quotas = this.effectiveQuotas();
     for (const window of ['minute', 'hour', 'day'] as const) {
-      if (this.counter.count(action, window) >= quotas[window][action]) return { allowed: false, reason: `quota:${window}` };
+      const quota = quotas[window][action];
+      if (this.counter.count(action, window) >= quota) {
+        return {
+          allowed: false,
+          reason: `quota:${window}`,
+          retryAfterMs: this.counter.retryAfterMs(action, window, quota),
+        };
+      }
     }
     if (action === 'like' && !this.likeRatioAllowsNextLike()) return { allowed: false, reason: 'ratio:like_view' };
     return { allowed: true };

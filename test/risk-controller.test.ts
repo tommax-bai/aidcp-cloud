@@ -65,6 +65,21 @@ test('canDo: 分钟窗口超限返回 false', async () => {
   assert.equal(controller.canDo('collect'), false);
 });
 
+test('explain: 配额超限时返回滑动窗口重试时间', async () => {
+  let now = 0;
+  const controller = new RiskController({ quotaLevel: 'conservative', clock: () => now, minViewsForLikeRatio: 0 });
+  const quota = deriveWindowQuotas('conservative').minute.view;
+  for (let i = 0; i < quota; i++) {
+    assert.equal(await controller.record('view'), true);
+    now += 1_000;
+  }
+
+  const decision = controller.explain('view');
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.reason, 'quota:minute');
+  assert.equal(decision.retryAfterMs, 60_000 - now);
+});
+
 test('canDo: 小时窗口超限返回 false', async () => {
   let now = 0;
   const controller = new RiskController({ quotaLevel: 'conservative', clock: () => now, minViewsForLikeRatio: 0 });
