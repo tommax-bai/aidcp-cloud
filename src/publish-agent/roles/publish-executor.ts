@@ -9,6 +9,7 @@ import type {
   PublishMetadata,
   PublishSourceReference,
   TitleSelection,
+  ImageReferenceAudit,
 } from '../types.js';
 import type { PipelineContext } from '../pipeline-context.js';
 import { buildPublishApprovalCard } from '../../feishu/cards.js';
@@ -241,8 +242,9 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     // 元数据落库 + 防篡改审计（aiEnforced && !ai 由 MetadataAggregator 已回正；此处如实记审计位）。
     // change split-topic-roles：publishMetadata 已是等待键，直接用入参（消除原 context.get 取值竞态）。
     if (publishMetadata && this.store.recordMetadata) {
-      const aiEnforced = publishMetadata.compliance.aiEnforced === true;
-      await this.store.recordMetadata(recordId, publishMetadata, aiEnforced).catch(() => {});
+      const metadataWithAudit = this.withReferenceImageAudit(publishMetadata, context, assembled.imageUrls.length);
+      const aiEnforced = metadataWithAudit.compliance.aiEnforced === true;
+      await this.store.recordMetadata(recordId, metadataWithAudit, aiEnforced).catch(() => {});
     }
 
     // 发飞书审批卡（带真实标题+正文+话题）。人审通过即触发下发段发「卡片上所审的这份草稿」（不重新生成）。
@@ -259,6 +261,43 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
 
     this.logger.log(`[PublishExecutor] 草稿待审 recordId=${recordId} account=${accountId} requestId=${requestId}（已发审批卡，候审不让位、无超时）`);
     return { recordId, status: 'pending_approval', dispatched: false, envelope: null, completedAt: this.clock() };
+  }
+
+  private withReferenceImageAudit(
+    metadata: PublishMetadata,
+    context: PipelineContext<PipelineFields>,
+    generatedCount: number,
+  ): PublishMetadata {
+    const audit = this.buildReferenceImageAudit(context, generatedCount);
+    if (!audit) return metadata;
+    return { ...metadata, referenceImageAudit: audit };
+  }
+
+  private buildReferenceImageAudit(
+    context: PipelineContext<PipelineFields>,
+    generatedCount: number,
+  ): ImageReferenceAudit | null {
+    const trigger = context.get('trigger') as TriggerInput | undefined;
+    const referenceImages = trigger?.generateInput.referenceNote?.images ?? [];
+    const requestedCount = referenceImages.length;
+    if (requestedCount === 0) return null;
+
+    const usableCount = referenceImages
+      .map((img) => (img.ossUrl ?? img.sourceUrl ?? '').trim())
+      .filter(Boolean)
+      .length;
+    const imageDirective = context.get('imageDirective');
+    const rawStatus = imageDirective?.referenceImageStatus ?? (usableCount > 0 ? 'skipped' : 'unavailable');
+    const status: ImageReferenceAudit['status'] =
+      usableCount === 0 && rawStatus === 'none' ? 'unavailable' : rawStatus;
+
+    return {
+      requestedCount,
+      usableCount,
+      status,
+      providerClaimedUsed: status === 'used',
+      generatedCount,
+    };
   }
 
   /**

@@ -188,6 +188,15 @@ test('publishedHistory 映射参照洗稿来稿快照；普通发布来源为 nu
         images: [],
         image_url: null,
         images_attached_count: 0,
+        publish_metadata: {
+          referenceImageAudit: {
+            requestedCount: 2,
+            usableCount: 2,
+            status: 'unsupported',
+            providerClaimedUsed: false,
+            generatedCount: 3,
+          },
+        },
         source_reference: sourceReference,
       },
       {
@@ -205,6 +214,7 @@ test('publishedHistory 映射参照洗稿来稿快照；普通发布来源为 nu
         images: [],
         image_url: null,
         images_attached_count: 0,
+        publish_metadata: null,
         source_reference: null,
       },
     ]),
@@ -214,5 +224,13 @@ test('publishedHistory 映射参照洗稿来稿快照；普通发布来源为 nu
   assert.equal(rows[0].sourceReference?.curatedContentId, 7);
   assert.equal(rows[0].sourceReference?.body, '来稿正文');
   assert.equal(rows[0].sourceReference?.sourceUrl, null, '缺来源链接保持 null，不伪造');
+  assert.deepEqual(rows[0].imageReferenceAudit, {
+    requestedCount: 2,
+    usableCount: 2,
+    status: 'unsupported',
+    providerClaimedUsed: false,
+    generatedCount: 3,
+  });
   assert.equal(rows[1].sourceReference, null);
+  assert.equal(rows[1].imageReferenceAudit, null);
 });

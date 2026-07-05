@@ -248,6 +248,21 @@ export interface ImageDirective {
   directedAt: number;
 }
 
+export type ReferenceImageUsageStatus = 'none' | 'used' | 'unsupported' | 'unavailable' | 'skipped';
+
+export interface ImageReferenceAudit {
+  /** 原始触发输入里请求作为视觉参考的图片数。 */
+  requestedCount: number;
+  /** 实际有 ossUrl/sourceUrl、可传给 provider 的参考图数。 */
+  usableCount: number;
+  /** provider / 生成链路对参考图使用情况的真实汇总。 */
+  status: ReferenceImageUsageStatus;
+  /** 只有 provider 明确返回 used 时为 true；传过 URL 但 provider 不支持必须为 false。 */
+  providerClaimedUsed: boolean;
+  /** 本次实际生成成功的配图数量。 */
+  generatedCount: number;
+}
+
 /** ContentAssembler 输出（稳定边界：阶段2 细拆后逐字不改） */
 export interface AssembledContent {
   finalContent: string;
@@ -457,6 +472,8 @@ export interface PublishMetadata {
   compliance: Compliance;
   /** 元数据完整度 0-1（如实，缺失项计 0、不虚高）。 */
   metadataScore: number;
+  /** 参照洗稿参考图是否真实被图片 provider 使用的审计；普通发布/历史行可为空。 */
+  referenceImageAudit?: ImageReferenceAudit;
   decidedAt: number;
 }
 

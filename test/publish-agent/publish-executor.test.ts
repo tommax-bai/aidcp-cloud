@@ -174,6 +174,10 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
           body: 'prompt 片段',
           topics: ['来源话题'],
           author: '来源作者',
+          images: [
+            { index: 0, sourceUrl: 'https://ref.test/1.webp', captureStatus: 'stored' },
+            { index: 1, sourceUrl: 'https://ref.test/2.webp', ossUrl: 'https://oss.test/2.webp', captureStatus: 'stored' },
+          ],
           sourceReference: {
             kind: 'curated_reference',
             curatedContentId: 7,
@@ -197,6 +201,15 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
       visibility: 'public', permissions: { comment: 'allow', save: 'allow' },
       mode: 'immediate', publishTime: null, compliance: { ai: true, aiEnforced: true }, metadataScore: 0.6, decidedAt: 0,
     } as any);
+    ctx.write('imageDirective', {
+      imagePrompt: 'prompt',
+      imageUrls: ['https://example.com/a.png', 'https://example.com/b.png'],
+      imageUrl: 'https://example.com/a.png',
+      imageStyle: null,
+      fallbackStrategy: 'skip',
+      referenceImageStatus: 'unsupported',
+      directedAt: 0,
+    });
     role.register(ctx);
     ctx.write('gateDecision', makeGateDecision('auto_publish'));
 
@@ -211,6 +224,95 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     assert.deepEqual(insertedRecords[0].tags, ['RAG'], '落库 tags == publishMetadata.topics');
     assert.equal(recordedMeta.length, 1);
     assert.equal(recordedMeta[0].aiEnforced, true, 'aiEnforced 审计如实落库');
+    assert.deepEqual(recordedMeta[0].metadata.referenceImageAudit, {
+      requestedCount: 2,
+      usableCount: 2,
+      status: 'unsupported',
+      providerClaimedUsed: false,
+      generatedCount: 2,
+    });
+  });
+
+  test('参考图 provider 返回 used → publishMetadata.referenceImageAudit 标记 providerClaimedUsed=true', async () => {
+    const recordedMeta: any[] = [];
+    const role = new PublishExecutorRole({
+      store: {
+        insert: async () => 8,
+        recordMetadata: async (id: number, metadata: any, aiEnforced: boolean) => { recordedMeta.push({ id, metadata, aiEnforced }); },
+      },
+      clock,
+      logger: silentLogger,
+    });
+
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('assembledContent', {
+      ...makeAssembledContent(),
+      imageUrls: ['https://example.com/a.png'],
+      imageUrl: 'https://example.com/a.png',
+    });
+    ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('trigger', {
+      metrics: { hoursSinceLastPublish: 30, newConceptCount: 1, likedSinceLastPublish: 0 },
+      generateInput: {
+        concepts: [],
+        likedContents: [],
+        referenceNote: {
+          sourceId: 'note-used',
+          title: '来源标题',
+          body: '来源正文',
+          topics: [],
+          images: [{ index: 0, sourceUrl: 'https://ref.test/used.webp', captureStatus: 'stored' }],
+        },
+        soul: {} as any,
+        recentPosts: [],
+      },
+      recentPublished: [],
+    } as any);
+    ctx.write('publishMetadata', makePublishMetadata());
+    ctx.write('imageDirective', {
+      imagePrompt: 'prompt',
+      imageUrls: ['https://example.com/a.png'],
+      imageUrl: 'https://example.com/a.png',
+      imageStyle: null,
+      fallbackStrategy: 'skip',
+      referenceImageStatus: 'used',
+      directedAt: 0,
+    });
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.deepEqual(recordedMeta[0].metadata.referenceImageAudit, {
+      requestedCount: 1,
+      usableCount: 1,
+      status: 'used',
+      providerClaimedUsed: true,
+      generatedCount: 1,
+    });
+  });
+
+  test('无 reference images → publishMetadata 不伪造 referenceImageAudit', async () => {
+    const recordedMeta: any[] = [];
+    const role = new PublishExecutorRole({
+      store: {
+        insert: async () => 9,
+        recordMetadata: async (_id: number, metadata: any) => { recordedMeta.push(metadata); },
+      },
+      clock,
+      logger: silentLogger,
+    });
+
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('publishMetadata', makePublishMetadata());
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.equal(recordedMeta[0].referenceImageAudit, undefined);
   });
 
   test('AC-IMG-REQUIRED 无配图（imageUrls 空）→ 诚实 failed、不发卡、不落待审、markImagesAttached(0)', async () => {

@@ -64,6 +64,16 @@ export interface PanelPublishSourceReference {
   capturedAt: number;
 }
 
+export type PanelImageReferenceAuditStatus = 'none' | 'used' | 'unsupported' | 'unavailable' | 'skipped';
+
+export interface PanelImageReferenceAudit {
+  requestedCount: number;
+  usableCount: number;
+  status: PanelImageReferenceAuditStatus;
+  providerClaimedUsed: boolean;
+  generatedCount: number;
+}
+
 export interface PanelPublish {
   id: number;
   title: string | null;
@@ -92,6 +102,8 @@ export interface PanelPublish {
   imageUrl: string | null;
   /** 边端实际附着上传成功的图片张数（诚实信号：区分「生成了几张」与「真上传了几张」）。 */
   imagesAttachedCount: number;
+  /** 参照洗稿参考图是否真实被图片 provider 使用的审计；普通发布/历史行为 null。 */
+  imageReferenceAudit: PanelImageReferenceAudit | null;
   /** 参照洗稿来稿快照；普通发布为 null。 */
   sourceReference: PanelPublishSourceReference | null;
 }
@@ -215,6 +227,37 @@ function toAccount(r: AccountJoinRow): PanelAccount {
 
 function strOrNull(v: unknown): string | null {
   return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
+function parseJsonObject(raw: unknown): Record<string, unknown> | null {
+  if (raw == null) return null;
+  let obj: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      obj = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  return obj && typeof obj === 'object' ? (obj as Record<string, unknown>) : null;
+}
+
+function parseImageReferenceAudit(raw: unknown): PanelImageReferenceAudit | null {
+  const meta = parseJsonObject(raw);
+  const audit = parseJsonObject(meta?.referenceImageAudit);
+  if (!audit) return null;
+  const status = typeof audit.status === 'string' ? audit.status : '';
+  if (!['none', 'used', 'unsupported', 'unavailable', 'skipped'].includes(status)) return null;
+  const requestedCount = Number(audit.requestedCount);
+  const usableCount = Number(audit.usableCount);
+  const generatedCount = Number(audit.generatedCount);
+  return {
+    requestedCount: Number.isFinite(requestedCount) ? requestedCount : 0,
+    usableCount: Number.isFinite(usableCount) ? usableCount : 0,
+    status: status as PanelImageReferenceAuditStatus,
+    providerClaimedUsed: audit.providerClaimedUsed === true,
+    generatedCount: Number.isFinite(generatedCount) ? generatedCount : 0,
+  };
 }
 
 function parseSourceReference(raw: unknown): PanelPublishSourceReference | null {
@@ -375,11 +418,12 @@ export class PgPanelStore implements PanelStoreReader {
       images: string[] | null;
       image_url: string | null;
       images_attached_count: number | string | null;
+      publish_metadata: unknown;
       source_reference: unknown;
     }>(
       `SELECT pl.id, pl.title, pl.status, pl.platform_post_id, pl.published_at,
               pl.account_id, a.label AS account_label, a.nickname AS account_nickname, pl.content, pl.post_url,
-              pl.content_version, pl.images, pl.image_url, pl.images_attached_count, pl.source_reference
+              pl.content_version, pl.images, pl.image_url, pl.images_attached_count, pl.publish_metadata, pl.source_reference
        FROM publish_log pl
        LEFT JOIN accounts a ON a.account_id = pl.account_id
        ${where} ORDER BY pl.published_at DESC LIMIT $${params.length}`,
@@ -400,6 +444,7 @@ export class PgPanelStore implements PanelStoreReader {
       images: r.images ?? [],
       imageUrl: r.image_url,
       imagesAttachedCount: Number(r.images_attached_count ?? 0),
+      imageReferenceAudit: parseImageReferenceAudit(r.publish_metadata),
       sourceReference: parseSourceReference(r.source_reference),
     }));
   }
