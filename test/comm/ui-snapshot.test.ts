@@ -55,16 +55,25 @@ test('ui-snapshot: hello snapshot includes account daily usage and quota saturat
     saturated: ['publish'],
     windows: {
       minute: {
+        startedAt: 1729999941000,
+        windowMs: 60000,
+        expiresAt: 1730000061000,
         totals: { view: 2, like: 1, collect: 0, comment: 0, follow: 0, publish: 0 },
         quotas: { view: 8, like: 3, collect: 2, comment: 1, follow: 1, publish: 1 },
         saturated: [],
       },
       hour: {
+        startedAt: 1729996401000,
+        windowMs: 3600000,
+        expiresAt: 1730003601000,
         totals: { view: 10, like: 3, collect: 1, comment: 0, follow: 2, publish: 1 },
         quotas: { view: 60, like: 13, collect: 7, comment: 2, follow: 4, publish: 1 },
         saturated: ['publish'],
       },
       day: {
+        startedAt: 1729958400000,
+        windowMs: 86400000,
+        expiresAt: 1730044800000,
         totals: { view: 10, like: 3, collect: 1, comment: 0, follow: 2, publish: 1 },
         quotas: { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 },
         saturated: ['publish'],
@@ -72,7 +81,9 @@ test('ui-snapshot: hello snapshot includes account daily usage and quota saturat
       session: {
         active: true,
         startedAt: 1730000000000,
-        totals: { like: 1, collect: 0, comment: 0, follow: 0 },
+        windowMs: 600000,
+        expiresAt: 1730000600000,
+        totals: { view: 2, like: 1, collect: 0, comment: 0, follow: 0, publish: 0 },
         quotas: { like: 10, collect: 5, comment: 2, follow: 3 },
         saturated: [],
       },

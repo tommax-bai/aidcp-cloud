@@ -170,6 +170,8 @@ export type UiDailyUsageWindow = 'session' | 'minute' | 'hour' | 'day';
 export interface UiDailyUsageWindowStatus {
   active?: boolean;
   startedAt?: number;
+  windowMs?: number;
+  expiresAt?: number;
   totals: UiDailyUsageCounts;
   quotas?: UiDailyUsageCounts;
   saturated?: UiDailyUsageAction[];

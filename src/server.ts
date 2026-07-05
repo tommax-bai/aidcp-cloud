@@ -198,16 +198,42 @@ function quotaSaturation(totals: UiDailyUsageCounts, quotas: UiDailyUsageCounts)
 function makeUsageWindow(
   totals: UiDailyUsageCounts,
   quotas?: UiDailyUsageCounts,
-  options?: { active?: boolean; startedAt?: number; skipSaturation?: boolean },
+  options?: { active?: boolean; startedAt?: number; windowMs?: number; expiresAt?: number; skipSaturation?: boolean },
 ): UiDailyUsageWindowStatus {
   const window: UiDailyUsageWindowStatus = { totals };
   if (options && Object.prototype.hasOwnProperty.call(options, 'active')) window.active = options.active;
   if (typeof options?.startedAt === 'number' && Number.isFinite(options.startedAt)) window.startedAt = options.startedAt;
+  if (typeof options?.windowMs === 'number' && Number.isFinite(options.windowMs) && options.windowMs > 0) {
+    window.windowMs = Math.floor(options.windowMs);
+  }
+  if (typeof options?.expiresAt === 'number' && Number.isFinite(options.expiresAt)) window.expiresAt = options.expiresAt;
   if (quotas && Object.keys(quotas).length > 0) {
     window.quotas = quotas;
     window.saturated = options?.skipSaturation ? [] : quotaSaturation(totals, quotas);
   }
   return window;
+}
+
+function dayWindowStart(at: number): number {
+  const d = new Date(at);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function completeSessionUsageCounts(
+  budgetTotals: object | null | undefined,
+  riskTotals: Partial<Record<string, number>> | null,
+  publishCount: number | null,
+): UiDailyUsageCounts {
+  const totals = pickDailyUsageCounts(riskTotals ?? {});
+  const interactions = pickSessionUsageCounts(budgetTotals);
+  for (const action of ['like', 'collect', 'comment', 'follow'] as const) {
+    totals[action] = interactions[action] ?? totals[action] ?? 0;
+  }
+  totals.publish = typeof publishCount === 'number' && Number.isFinite(publishCount)
+    ? Math.max(0, Math.floor(publishCount))
+    : (totals.publish ?? 0);
+  return totals;
 }
 
 /**
@@ -1186,19 +1212,33 @@ async function main(): Promise<void> {
   // 陪伴界面快照层实例化（edge-companion-ui 8.1）：hello 回填 + 发布审批状态实时推送。
   const buildTodayUsageForAccount = async (accountId: string, edgeId?: string): Promise<UiDailyUsagePayload> => {
     const asOf = Date.now();
+    const minuteWindowMs = 60_000;
+    const hourWindowMs = 60 * 60_000;
+    const dayStartedAt = dayWindowStart(asOf);
+    const dayWindowMs = 24 * 60 * 60_000;
     const minuteSince = asOf - 60_000;
     const hourSince = asOf - 60 * 60_000;
+    const sessionUsage = runtimes?.sessionUsageForAccount(accountId, edgeId) ?? null;
+    const sessionStartedAt = sessionUsage?.active === true
+      && typeof sessionUsage.startedAt === 'number'
+      && Number.isFinite(sessionUsage.startedAt)
+      ? sessionUsage.startedAt
+      : null;
     const [
+      sessionRiskTotals,
       minuteRiskTotals,
       hourRiskTotals,
       dayRiskTotals,
+      sessionPublishCount,
       minutePublishCount,
       hourPublishCount,
       dayPublishCount,
     ] = await Promise.all([
+      sessionStartedAt === null ? Promise.resolve(null) : riskStore.totalsForAccountSince(accountId, sessionStartedAt),
       riskStore.totalsForAccountSince(accountId, minuteSince),
       riskStore.totalsForAccountSince(accountId, hourSince),
       riskStore.todayTotalsForAccount(accountId),
+      sessionStartedAt === null ? Promise.resolve(null) : publishLogStore.countPublishedSinceForAccount(accountId, sessionStartedAt),
       publishLogStore.countPublishedSinceForAccount(accountId, minuteSince),
       publishLogStore.countPublishedSinceForAccount(accountId, hourSince),
       publishLogStore.countPublishedTodayForAccount(accountId),
@@ -1211,18 +1251,21 @@ async function main(): Promise<void> {
     const dayTotals = pickDailyUsageCounts(dayRiskTotals);
     dayTotals.publish = dayPublishCount;
 
-    const sessionUsage = runtimes?.sessionUsageForAccount(accountId, edgeId) ?? null;
-    const sessionTotals = pickSessionUsageCounts(sessionUsage?.totals ?? {});
+    const sessionTotals = completeSessionUsageCounts(sessionUsage?.totals ?? {}, sessionRiskTotals, sessionPublishCount);
     const sessionQuotas = pickSessionUsageCounts(sessionUsage?.quotas ?? sessionConfigStore.sessionBudget());
     const windows: NonNullable<UiDailyUsagePayload['windows']> = {
       session: makeUsageWindow(sessionTotals, sessionQuotas, {
         active: sessionUsage?.active === true,
         startedAt: sessionUsage?.startedAt,
+        windowMs: sessionConfigStore.sessionDurationMs(),
+        expiresAt: sessionUsage?.active === true && typeof sessionUsage.startedAt === 'number'
+          ? sessionUsage.startedAt + sessionConfigStore.sessionDurationMs()
+          : undefined,
         skipSaturation: sessionUsage?.active !== true,
       }),
-      minute: makeUsageWindow(minuteTotals),
-      hour: makeUsageWindow(hourTotals),
-      day: makeUsageWindow(dayTotals),
+      minute: makeUsageWindow(minuteTotals, undefined, { startedAt: minuteSince, windowMs: minuteWindowMs, expiresAt: asOf + minuteWindowMs }),
+      hour: makeUsageWindow(hourTotals, undefined, { startedAt: hourSince, windowMs: hourWindowMs, expiresAt: asOf + hourWindowMs }),
+      day: makeUsageWindow(dayTotals, undefined, { startedAt: dayStartedAt, windowMs: dayWindowMs, expiresAt: dayStartedAt + dayWindowMs }),
     };
 
     const payload: UiDailyUsagePayload = { asOf, totals: dayTotals, windows };
@@ -1233,9 +1276,9 @@ async function main(): Promise<void> {
       const hourQuotas = pickDailyUsageCounts(effective.hour);
       const dayQuotas = pickDailyUsageCounts(effective.day);
       payload.quotaLevel = controller.getState().quotaLevel;
-      windows.minute = makeUsageWindow(minuteTotals, minuteQuotas);
-      windows.hour = makeUsageWindow(hourTotals, hourQuotas);
-      windows.day = makeUsageWindow(dayTotals, dayQuotas);
+      windows.minute = makeUsageWindow(minuteTotals, minuteQuotas, { startedAt: minuteSince, windowMs: minuteWindowMs, expiresAt: asOf + minuteWindowMs });
+      windows.hour = makeUsageWindow(hourTotals, hourQuotas, { startedAt: hourSince, windowMs: hourWindowMs, expiresAt: asOf + hourWindowMs });
+      windows.day = makeUsageWindow(dayTotals, dayQuotas, { startedAt: dayStartedAt, windowMs: dayWindowMs, expiresAt: dayStartedAt + dayWindowMs });
       payload.quotas = dayQuotas;
       payload.saturated = windows.day.saturated ?? [];
     } catch (err) {
