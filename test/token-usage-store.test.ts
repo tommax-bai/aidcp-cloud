@@ -253,6 +253,7 @@ test('billingPriceTargets groups T-1/T-2 usage with inferred provider', async ()
   const targets = await store.billingPriceTargets(['2026-07-04', '2026-07-03', '2026-07-04']);
   assert.match(seen[0].sql, /lower\(model\) LIKE 'deepseek%'/);
   assert.match(seen[0].sql, /provider <> 'unknown'/);
+  assert.match(seen[0].sql, /HAVING SUM\(total_tokens\) > 0/);
   assert.deepEqual(seen[0].params, [['2026-07-04', '2026-07-03']]);
   assert.deepEqual(targets, [
     {

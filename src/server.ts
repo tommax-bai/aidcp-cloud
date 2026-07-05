@@ -1730,6 +1730,27 @@ async function main(): Promise<void> {
   publishOrchestrator.registerRole(new ImagePromptComposerRole({ llmClient: roleLlm('publish:ImagePromptComposer') }));
   publishOrchestrator.registerRole(new ImageGeneratorRole({
     imageProvider,
+    getProvider: () => modelConfigStore.getCached().imageProvider,
+    getModel: () => modelConfigStore.getCached().imageModel,
+    usageRecorder: (info) => {
+      console.log(
+        `[image] account=${info.accountId} role=publish:ImageGenerator provider=${info.provider} model=${info.model} ok=${info.ok}`,
+      );
+      try {
+        tokenUsageStore.add({
+          accountId: info.accountId,
+          role: 'publish:ImageGenerator',
+          provider: info.provider,
+          model: info.model,
+          ok: info.ok,
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+        });
+      } catch {
+        /* metrics never breaks image generation */
+      }
+    },
     // change image-provider-volcengine-seedream：注入路由图片出口（按 image_provider 分发万相/即梦）。
     // 任一图片厂商密钥就绪即启用；选中厂商缺密钥时其客户端诚实失败（M 少一张、不假成功）。
     // 并行多图张数/每图超时/并发经 env 读取（AIDCP_PUBLISH_MAX_IMAGES/PER_IMAGE_TIMEOUT_MS/IMAGE_CONCURRENCY）。

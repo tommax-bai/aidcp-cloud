@@ -113,6 +113,59 @@ describe('ImageGeneratorRole（并行多图）', () => {
     assert.deepEqual(d.imageUrls, []);
     assert.equal(called, false);
   });
+
+  test('每次图片 provider 尝试都会记录账号/角色用量维度，token 由记账层保持 0', async () => {
+    const records: Array<{ accountId: string; provider: string; model: string; ok: boolean }> = [];
+    const provider = {
+      generate: async (p: string): Promise<ImageResult> => (p === 'bad' ? { url: null, error: 'fail' } : { url: `https://cdn/${p}.png` }),
+    };
+    const role = new ImageGeneratorRole({
+      imageProvider: provider,
+      enableImageGeneration: true,
+      perImageTimeoutMs: 80,
+      maxImages: 3,
+      concurrency: 3,
+      getProvider: () => 'volcengine',
+      getModel: () => 'doubao-seedream-4-5-251128',
+      usageRecorder: (r) => records.push(r),
+      clock,
+      logger: silentLogger,
+    });
+    const ctx = new PipelineContext<PipelineFields>();
+    role.register(ctx);
+    ctx.write('trigger', { accountId: 'acct-img' } as unknown as TriggerInput);
+    ctx.write('imagePlan', plan(['ok', 'bad']));
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    assert.deepEqual(records, [
+      { accountId: 'acct-img', provider: 'volcengine', model: 'doubao-seedream-4-5-251128', ok: true },
+      { accountId: 'acct-img', provider: 'volcengine', model: 'doubao-seedream-4-5-251128', ok: false },
+    ]);
+  });
+
+  test('图片用量 recorder 异常不得影响生图结果', async () => {
+    const provider = { generate: async (p: string): Promise<ImageResult> => ({ url: `https://cdn/${p}.png` }) };
+    const role = new ImageGeneratorRole({
+      imageProvider: provider,
+      enableImageGeneration: true,
+      perImageTimeoutMs: 80,
+      maxImages: 1,
+      concurrency: 1,
+      getProvider: () => 'dashscope',
+      getModel: () => 'wan2.7-image-pro',
+      usageRecorder: () => {
+        throw new Error('metrics down');
+      },
+      clock,
+      logger: silentLogger,
+    });
+    const ctx = new PipelineContext<PipelineFields>();
+    role.register(ctx);
+    ctx.write('trigger', { accountId: 'acct-img' } as unknown as TriggerInput);
+    ctx.write('imagePlan', plan(['ok']));
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.deepEqual(ctx.get('imageDirective')?.imageUrls, ['https://cdn/ok.png']);
+  });
 });
 
 // ─── OSS 转存（change cloud-oss-storage-integration） ──────────────────────────

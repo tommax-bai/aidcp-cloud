@@ -4,6 +4,7 @@ import type { RoleConfig } from './base-role.js';
 import type { PipelineContext } from '../pipeline-context.js';
 import type { PipelineFields, ImagePlan, ImageDirective } from '../types.js';
 import type { ImageProvider, ImageResult } from '../image-provider.js';
+import { normImageProvider } from '../image-providers.js';
 import type { ObjectStore } from '../../storage/object-store.js';
 import { relocateImageToStore } from '../../storage/object-store.js';
 import { IMAGE_COUNT_HARD_MAX } from '../prompts.js';
@@ -37,9 +38,21 @@ interface ImageGenerationOutcome {
   referenceStatus?: 'used' | 'unsupported' | 'unavailable' | 'skipped';
 }
 
+export interface ImageUsageRecord {
+  accountId: string;
+  provider: string;
+  model: string;
+  ok: boolean;
+}
+
 export interface ImageGeneratorDeps {
   imageProvider: ImageProvider;
   enableImageGeneration?: boolean;
+  /** 图片模型调用记账钩子；最佳努力，绝不能影响生图结果。 */
+  usageRecorder?: (record: ImageUsageRecord) => void;
+  /** 当前全局图片厂商/模型；与路由 provider 分开传入，用作 usage 维度。 */
+  getProvider?: () => string;
+  getModel?: () => string;
   /** 每图超时（毫秒，缺省 env AIDCP_PUBLISH_PER_IMAGE_TIMEOUT_MS，默认 100s）。 */
   perImageTimeoutMs?: number;
   /** 张数上限（缺省 env AIDCP_PUBLISH_MAX_IMAGES，默认 3，硬夹 ≤9）——仅用于计算角色总闸余量。 */
@@ -69,6 +82,9 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
   private ossUploader?: ObjectStore;
   private fetchImpl?: typeof fetch;
   private idGen: () => string;
+  private usageRecorder?: (record: ImageUsageRecord) => void;
+  private getProvider: () => string;
+  private getModel: () => string;
 
   constructor(deps: ImageGeneratorDeps) {
     super({ logger: deps.logger, clock: deps.clock });
@@ -77,6 +93,9 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     this.ossUploader = deps.ossUploader;
     this.fetchImpl = deps.fetchImpl;
     this.idGen = deps.idGen ?? (() => crypto.randomBytes(6).toString('hex'));
+    this.usageRecorder = deps.usageRecorder;
+    this.getProvider = deps.getProvider ?? (() => 'unknown');
+    this.getModel = deps.getModel ?? (() => 'unknown');
     this.perImageTimeoutMs = deps.perImageTimeoutMs ?? envInt('AIDCP_PUBLISH_PER_IMAGE_TIMEOUT_MS', DEFAULT_PER_IMAGE_TIMEOUT_MS);
     const maxImages = Math.max(1, Math.min(deps.maxImages ?? envInt('AIDCP_PUBLISH_MAX_IMAGES', DEFAULT_MAX_IMAGES), IMAGE_COUNT_HARD_MAX));
     this.concurrency = Math.max(1, Math.min(deps.concurrency ?? envInt('AIDCP_PUBLISH_IMAGE_CONCURRENCY', maxImages), maxImages));
@@ -151,17 +170,25 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     referenceUrls: string[],
   ): Promise<ImageGenerationOutcome> {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let usageRecorded = false;
+    const recordAttempt = (ok: boolean): void => {
+      if (usageRecorded) return;
+      usageRecorded = true;
+      this.recordUsage(keyCtx.accountId, ok);
+    };
     try {
       return await Promise.race<ImageGenerationOutcome>([
-        this.produceAndRelocate(prompt, keyCtx, referenceUrls),
+        this.produceAndRelocate(prompt, keyCtx, referenceUrls, recordAttempt),
         new Promise<ImageGenerationOutcome>((resolve) => {
           timer = setTimeout(() => {
             this.logger.warn(`[ImageGenerator] 单张超时 ${this.perImageTimeoutMs}ms，诚实落空`);
+            recordAttempt(false);
             resolve({ url: null, referenceStatus: referenceUrls.length > 0 ? 'unavailable' : 'skipped' });
           }, this.perImageTimeoutMs);
         }),
       ]);
     } catch (err) {
+      recordAttempt(false);
       this.logger.warn(`[ImageGenerator] 单张生图异常: ${err instanceof Error ? err.message : String(err)}`);
       return { url: null, referenceStatus: referenceUrls.length > 0 ? 'unavailable' : 'skipped' };
     } finally {
@@ -178,12 +205,20 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     prompt: string,
     keyCtx: { accountId: string; runToken: string; seq: number },
     referenceUrls: string[],
+    recordAttempt: (ok: boolean) => void,
   ): Promise<ImageGenerationOutcome> {
-    const res: ImageResult = await this.imageProvider.generate(
-      prompt,
-      undefined,
-      referenceUrls.length > 0 ? { referenceImages: referenceUrls } : undefined,
-    );
+    let res: ImageResult;
+    try {
+      res = await this.imageProvider.generate(
+        prompt,
+        undefined,
+        referenceUrls.length > 0 ? { referenceImages: referenceUrls } : undefined,
+      );
+      recordAttempt(!!res.url);
+    } catch (err) {
+      recordAttempt(false);
+      throw err;
+    }
     const referenceStatus = res.referenceStatus ?? (referenceUrls.length > 0 ? 'unsupported' : 'skipped');
     if (!res.url) {
       this.logger.warn(`[ImageGenerator] 单张生图失败: ${res.error ?? 'no_url'}`);
@@ -201,6 +236,20 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
       return { url: null, referenceStatus };
     }
     return { url: ossUrl, referenceStatus };
+  }
+
+  private recordUsage(accountId: string, ok: boolean): void {
+    if (!this.usageRecorder) return;
+    try {
+      this.usageRecorder({
+        accountId,
+        provider: normImageProvider(this.getProvider()),
+        model: this.getModel().trim() || 'unknown',
+        ok,
+      });
+    } catch {
+      /* metrics never breaks image generation */
+    }
   }
 
   private summarizeReferenceStatus(
