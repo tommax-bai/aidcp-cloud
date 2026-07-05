@@ -65,6 +65,108 @@ describe('WanxiangClient', () => {
     assert.equal(submitBody.model, 'wan2.7-image-pro');
     assert.equal(submitBody.input.messages[0].content[0].text, 'cute cat illustration');
     assert.equal(submitBody.parameters.watermark, false);
+    assert.equal(result.referenceStatus, undefined);
+    assert.equal(result.referenceUsed, undefined);
+  });
+
+  test('携带 referenceImages 时按 Wan 2.7 多模态图片输入提交，成功标记 used', async () => {
+    const capture = { bodies: [] as string[] };
+    const fetchImpl = mockFetch([
+      {
+        ok: true,
+        json: async () => ({ output: { task_id: 'task-ref', task_status: 'PENDING' } }),
+      },
+      {
+        ok: true,
+        json: async () => ({
+          output: {
+            task_id: 'task-ref',
+            task_status: 'SUCCEEDED',
+            choices: [{ message: { content: [{ image: 'https://cdn.example.com/ref-out.png', type: 'image' }] } }],
+          },
+        }),
+      },
+    ], capture);
+
+    const client = new WanxiangClient({
+      apiKey: 'test-key',
+      pollIntervalMs: 10,
+      maxPollAttempts: 5,
+      logger: silentLogger,
+      fetchImpl: fetchImpl as any,
+    });
+
+    const result = await client.generate('保持原图黑白文字卡片版式，改写成新的标题和要点', undefined, {
+      referenceImages: [' https://oss.example.com/original-1.webp ', '', 'https://oss.example.com/original-2.webp'],
+    });
+
+    assert.equal(result.url, 'https://cdn.example.com/ref-out.png');
+    assert.equal(result.referenceStatus, 'used');
+    assert.equal(result.referenceUsed, true);
+    const submitBody = JSON.parse(capture.bodies[0]);
+    assert.deepEqual(submitBody.input.messages[0].content, [
+      { image: 'https://oss.example.com/original-1.webp' },
+      { image: 'https://oss.example.com/original-2.webp' },
+      { text: '保持原图黑白文字卡片版式，改写成新的标题和要点' },
+    ]);
+    assert.equal(submitBody.parameters.size, '2K');
+    assert.equal(submitBody.parameters.watermark, false);
+  });
+
+  test('referenceImages 路径提交失败时标记 unavailable，不伪装 used', async () => {
+    const fetchImpl = mockFetch([
+      {
+        ok: false,
+        status: 400,
+        text: async () => 'Invalid image URL',
+      },
+    ]);
+
+    const client = new WanxiangClient({
+      apiKey: 'test-key',
+      pollIntervalMs: 10,
+      logger: silentLogger,
+      fetchImpl: fetchImpl as any,
+    });
+
+    const result = await client.generate('p', undefined, { referenceImages: ['https://oss.example.com/a.webp'] });
+    assert.equal(result.url, null);
+    assert.equal(result.referenceStatus, 'unavailable');
+    assert.equal(result.referenceUsed, false);
+    assert.match(result.error!, /HTTP 400/);
+  });
+
+  test('referenceImages 路径轮询无 URL 时标记 unavailable', async () => {
+    const fetchImpl = mockFetch([
+      {
+        ok: true,
+        json: async () => ({ output: { task_id: 'task-empty', task_status: 'PENDING' } }),
+      },
+      {
+        ok: true,
+        json: async () => ({
+          output: {
+            task_id: 'task-empty',
+            task_status: 'SUCCEEDED',
+            choices: [{ message: { content: [] } }],
+          },
+        }),
+      },
+    ]);
+
+    const client = new WanxiangClient({
+      apiKey: 'test-key',
+      pollIntervalMs: 10,
+      maxPollAttempts: 5,
+      logger: silentLogger,
+      fetchImpl: fetchImpl as any,
+    });
+
+    const result = await client.generate('p', undefined, { referenceImages: ['https://oss.example.com/a.webp'] });
+    assert.equal(result.url, null);
+    assert.equal(result.referenceStatus, 'unavailable');
+    assert.equal(result.referenceUsed, false);
+    assert.match(result.error!, /缺少 URL/);
   });
 
   test('提交成功 + 轮询返回 FAILED → url=null, error 有值', async () => {
@@ -131,6 +233,24 @@ describe('WanxiangClient', () => {
 
     const result = await client.generate('test prompt');
     assert.equal(result.url, null);
+    assert.ok(result.error);
+    assert.match(result.error, /API_KEY/);
+  });
+
+  test('referenceImages 路径无 API key 时标记 unavailable 且不发请求', async () => {
+    const fetchImpl = mockFetch([]);
+
+    const client = new WanxiangClient({
+      apiKey: '',
+      pollIntervalMs: 10,
+      logger: silentLogger,
+      fetchImpl: fetchImpl as any,
+    });
+
+    const result = await client.generate('test prompt', undefined, { referenceImages: ['https://oss.example.com/a.webp'] });
+    assert.equal(result.url, null);
+    assert.equal(result.referenceStatus, 'unavailable');
+    assert.equal(result.referenceUsed, false);
     assert.ok(result.error);
     assert.match(result.error, /API_KEY/);
   });

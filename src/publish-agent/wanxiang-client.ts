@@ -1,10 +1,13 @@
 /**
- * 通义万相（Wanxiang）文生图 HTTP 客户端。
+ * 通义万相（Wanxiang）HTTP 客户端。
  *
- * 走 DashScope 文生图异步任务接口：
+ * 走 DashScope Wan 2.7 异步任务接口：
  * 1. POST 提交生成任务 → 返回 task_id
  * 2. GET 轮询任务状态（最多 6 次，间隔 5s，总超时约 30s）
  * 3. 状态为 SUCCEEDED 时获取结果 URL
+ *
+ * 文生图时提交 text content；带 referenceImages 时提交 image content + text content，
+ * 由 Wan 2.7 真实消费参考图。参考图是否实际使用必须通过 referenceStatus 诚实回报。
  *
  * 仅依赖运行时全局 fetch（Node>=18），不引第三方 SDK，保持轻量。
  * 失败返回 { url: null, error } 不抛异常，调用方无需 try/catch。
@@ -28,6 +31,11 @@ export interface WanxiangClientOptions {
   getModel?: () => string;
   /** 默认尺寸，默认 1024*1024（wan2.7 方式二显式像素，总像素 [768*768,4096*4096]、宽高比 [1:8,8:1]） */
   defaultSize?: string;
+  /**
+   * 参考图生成尺寸。Wan 2.7 在有图片输入且 size 为 1K/2K 时按最后一张输入图比例输出；
+   * 默认 2K，避免长截图/文字卡片参考图被显式方图尺寸打平。
+   */
+  referenceSize?: string;
   /** 最大轮询次数，默认 6 */
   maxPollAttempts?: number;
   /** 轮询间隔（毫秒），默认 5000 */
@@ -58,11 +66,14 @@ interface TaskResponse {
   message?: string;
 }
 
+type WanxiangContentItem = { text: string } | { image: string };
+
 export class WanxiangClient implements ImageProvider {
   private readonly apiKey: string;
   private readonly model: string;
   private readonly getModel?: () => string;
   private readonly defaultSize: string;
+  private readonly referenceSize: string;
   private readonly maxPollAttempts: number;
   private readonly pollIntervalMs: number;
   private readonly logger: Pick<Console, 'log' | 'warn' | 'error'>;
@@ -75,6 +86,7 @@ export class WanxiangClient implements ImageProvider {
     this.getModel = options.getModel;
     // 竖版 3:4（如 1152*1536，万相总像素 [768²,4096²] 内）经 env 激活、瞬间可回滚；代码默认保持方图不变。
     this.defaultSize = options.defaultSize ?? process.env.AIDCP_WANXIANG_IMAGE_SIZE ?? '1024*1024';
+    this.referenceSize = options.referenceSize ?? process.env.AIDCP_WANXIANG_REFERENCE_IMAGE_SIZE ?? '2K';
     // wan2.7-image-pro 文生图常需 25~40s+（thinking_mode），6×5s=30s 太紧会超时降级；放宽到 18×5s=90s。
     this.maxPollAttempts = options.maxPollAttempts ?? 18;
     this.pollIntervalMs = options.pollIntervalMs ?? 5_000;
@@ -86,36 +98,43 @@ export class WanxiangClient implements ImageProvider {
 
   /** 生成图片：提交任务 + 轮询结果 */
   async generate(prompt: string, style?: string, options?: ImageGenerateOptions): Promise<ImageResult> {
-    const withReferenceStatus = (result: ImageResult): ImageResult =>
-      options?.referenceImages?.length ? { ...result, referenceStatus: 'unsupported', referenceUsed: false } : result;
+    const referenceImages = normalizeReferenceImages(options?.referenceImages);
+    const referenceMode = referenceImages.length > 0;
+    const withReferenceStatus = (result: ImageResult, status: NonNullable<ImageResult['referenceStatus']>): ImageResult =>
+      referenceMode ? { ...result, referenceStatus: status, referenceUsed: status === 'used' } : result;
     if (!this.apiKey) {
-      return { url: null, error: '图片生成 key 未配置（WANXIANG_API_KEY / DASHSCOPE_API_KEY 均空）' };
+      return withReferenceStatus(
+        { url: null, error: '图片生成 key 未配置（WANXIANG_API_KEY / DASHSCOPE_API_KEY 均空）' },
+        'unavailable',
+      );
     }
 
     // 1. 提交生成任务
-    const submitResult = await this.submitTask(prompt, style);
+    const submitResult = await this.submitTask(prompt, style, referenceImages);
     if (submitResult.error) {
-      return withReferenceStatus(submitResult);
+      return withReferenceStatus(submitResult, 'unavailable');
     }
     const taskId = submitResult.taskId!;
 
     // 2. 轮询任务状态
-    return withReferenceStatus(await this.pollTask(taskId));
+    const result = await this.pollTask(taskId);
+    return withReferenceStatus(result, result.url ? 'used' : 'unavailable');
   }
 
   /** 提交异步生成任务 */
-  private async submitTask(prompt: string, style?: string): Promise<ImageResult> {
+  private async submitTask(prompt: string, style: string | undefined, referenceImages: string[]): Promise<ImageResult> {
     // wan2.7 无独立 style 参数：风格并入提示词文本。
     const text = style ? `${prompt}，风格：${style}` : prompt;
+    const content: WanxiangContentItem[] = [...referenceImages.map((image) => ({ image })), { text }];
     const parameters: Record<string, unknown> = {
-      size: this.defaultSize,
+      size: referenceImages.length > 0 ? this.referenceSize : this.defaultSize,
       n: 1,
       watermark: false,
     };
 
     const body = JSON.stringify({
       model: this.getModel?.() ?? this.model,
-      input: { messages: [{ role: 'user', content: [{ text }] }] },
+      input: { messages: [{ role: 'user', content }] },
       parameters,
     });
 
@@ -210,4 +229,8 @@ export class WanxiangClient implements ImageProvider {
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
+}
+
+function normalizeReferenceImages(images: string[] | undefined): string[] {
+  return (images ?? []).map((image) => image.trim()).filter(Boolean).slice(0, 9);
 }
