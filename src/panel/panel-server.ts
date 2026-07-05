@@ -30,7 +30,7 @@ import type { AccountContentSchedulePatch } from '../config/content-schedule-sto
 import type { RiskSignalKind, RiskQuotaLevel } from '../risk/index.js';
 import { RISK_ACTIONS } from '../risk/index.js';
 import { isKnownRole } from '../config/role-catalog.js';
-import { isAllowedCredential } from '../llm/index.js';
+import { isAllowedPlatformCredential } from '../config/platform-credentials.js';
 
 /** 登录/写体很小，限制请求体大小防滥用。 */
 const MAX_BODY_BYTES = 16 * 1024;
@@ -677,13 +677,13 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
-      // change model-config-volcengine-provider：按厂商写密钥；(provider, field) 须在注册表派生的白名单内。
+      // change platform-provider-credentials-config：按平台凭据写密钥；(provider, field) 须在注册表派生的白名单内。
       const { provider, field, value } = (body ?? {}) as {
         provider?: unknown;
         field?: unknown;
         value?: unknown;
       };
-      if (typeof provider !== 'string' || typeof field !== 'string' || !isAllowedCredential(provider, field)) {
+      if (typeof provider !== 'string' || typeof field !== 'string' || !isAllowedPlatformCredential(provider, field)) {
         sendJson(res, 400, { error: 'bad_request', reason: 'unknown_field' });
         return;
       }

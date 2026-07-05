@@ -295,12 +295,18 @@ export interface PanelCuratedActions {
 }
 
 /**
- * 单厂商凭据视图（永不含明文）。source：db=库内加密凭据 / env=回退环境变量 / none=未配置。
- * change model-config-volcengine-provider：按厂商分别回报，新增 provider。
+ * 单项平台凭据视图（永不含明文）。source：db=库内加密凭据 / env=回退环境变量 / none=未配置。
+ * change platform-provider-credentials-config：从模型 API key 扩展为平台凭据，带分组与展示名。
  */
 export interface ModelConfigCredentialView {
   provider: string;
   field: string;
+  label: string;
+  providerLabel: string;
+  group: 'model_api' | 'billing_access';
+  groupLabel: string;
+  secretKind: 'api_key' | 'access_key_id' | 'access_key_secret';
+  restartRequired: boolean;
   configured: boolean;
   maskedHint: string | null;
   source: 'db' | 'env' | 'none';

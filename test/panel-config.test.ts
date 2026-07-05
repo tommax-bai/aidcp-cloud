@@ -14,6 +14,53 @@ const silentLogger = { log() {}, warn() {}, error() {} };
 
 /** 可变 mock modelConfig 外观（多厂商）；canEdit 可切换以测主密钥缺失分支。 */
 function makeModelConfig(opts: { canEdit: boolean }) {
+  const credentialDefs: Array<
+    Pick<
+      ModelConfigView['credentials'][number],
+      'provider' | 'field' | 'label' | 'providerLabel' | 'group' | 'groupLabel' | 'secretKind' | 'restartRequired'
+    >
+  > = [
+    {
+      provider: 'dashscope',
+      field: 'dashscope_api_key',
+      label: '阿里百炼 DashScope API Key',
+      providerLabel: '阿里百炼 DashScope',
+      group: 'model_api',
+      groupLabel: '模型 API Key',
+      secretKind: 'api_key',
+      restartRequired: true,
+    },
+    {
+      provider: 'volcengine',
+      field: 'volcengine_api_key',
+      label: '火山引擎方舟 Ark API Key',
+      providerLabel: '火山引擎方舟 Ark',
+      group: 'model_api',
+      groupLabel: '模型 API Key',
+      secretKind: 'api_key',
+      restartRequired: true,
+    },
+    {
+      provider: 'aliyun',
+      field: 'access_key_id',
+      label: '阿里云平台 AccessKey ID',
+      providerLabel: '阿里云平台',
+      group: 'billing_access',
+      groupLabel: '账单查询 AccessKey',
+      secretKind: 'access_key_id',
+      restartRequired: true,
+    },
+    {
+      provider: 'aliyun',
+      field: 'access_key_secret',
+      label: '阿里云平台 AccessKey Secret',
+      providerLabel: '阿里云平台',
+      group: 'billing_access',
+      groupLabel: '账单查询 AccessKey',
+      secretKind: 'access_key_secret',
+      restartRequired: true,
+    },
+  ];
   const state = {
     textProvider: 'dashscope',
     textModel: 'qwen-turbo',
@@ -21,11 +68,10 @@ function makeModelConfig(opts: { canEdit: boolean }) {
     imageProvider: 'dashscope',
     creds: new Map<string, { configured: boolean; maskedHint: string | null }>(),
   };
-  const credView = (provider: string, field: string): ModelConfigView['credentials'][number] => {
-    const c = state.creds.get(provider);
+  const credView = (def: typeof credentialDefs[number]): ModelConfigView['credentials'][number] => {
+    const c = state.creds.get(`${def.provider}/${def.field}`);
     return {
-      provider,
-      field,
+      ...def,
       configured: !!c?.configured,
       maskedHint: c?.maskedHint ?? null,
       source: c?.configured ? 'db' : 'none',
@@ -44,7 +90,7 @@ function makeModelConfig(opts: { canEdit: boolean }) {
       { id: 'dashscope', displayName: '阿里百炼 · 通义万相' },
       { id: 'volcengine', displayName: '火山方舟 · 即梦 Seedream' },
     ],
-    credentials: [credView('dashscope', 'dashscope_api_key'), credView('volcengine', 'volcengine_api_key')],
+    credentials: credentialDefs.map(credView),
     canEditCredential: opts.canEdit,
   });
   return {
@@ -65,7 +111,7 @@ function makeModelConfig(opts: { canEdit: boolean }) {
     setCredential: async (provider: string, field: string, value: string): Promise<SetCredentialResult> => {
       if (!opts.canEdit) return { ok: false, reason: 'cred_key_missing' };
       const maskedHint = `${value.slice(0, 4)}****${value.slice(-4)}`;
-      state.creds.set(provider, { configured: true, maskedHint });
+      state.creds.set(`${provider}/${field}`, { configured: true, maskedHint });
       return { ok: true, provider, field, maskedHint };
     },
   };
@@ -124,6 +170,9 @@ test('config 路由：GET 多厂商形状无明文、PUT model 改厂商/名回�
     assert.ok(view.providers.some((p) => p.id === 'volcengine'));
     const dsCred = view.credentials.find((c) => c.provider === 'dashscope');
     assert.equal(dsCred?.configured, false);
+    const aliyunCred = view.credentials.find((c) => c.provider === 'aliyun' && c.field === 'access_key_id');
+    assert.equal(aliyunCred?.group, 'billing_access');
+    assert.equal(aliyunCred?.label, '阿里云平台 AccessKey ID');
     const raw = JSON.stringify(view);
     assert.ok(!raw.includes('apiKey'));
     assert.ok(!('value' in view));
@@ -159,6 +208,18 @@ test('config 路由：GET 多厂商形状无明文、PUT model 改厂商/名回�
     assert.equal(pcBody.configured, true);
     assert.equal(pcBody.maskedHint, 'ark-****ijkl');
     assert.ok(!JSON.stringify(pcBody).includes('ark-abcdefghijkl'));
+
+    // PUT credential：平台账单 AccessKey 也走同一加密写入口与白名单
+    const billingKey = await fetch(`${base}/api/config/credential`, {
+      method: 'PUT',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'aliyun', field: 'access_key_id', value: 'LTAIabcdefghijkl' }),
+    });
+    assert.equal(billingKey.status, 200);
+    const billingBody = (await billingKey.json()) as { provider: string; field: string; configured: boolean; maskedHint: string };
+    assert.equal(billingBody.provider, 'aliyun');
+    assert.equal(billingBody.field, 'access_key_id');
+    assert.equal(billingBody.maskedHint, 'LTAI****ijkl');
 
     // PUT credential 未知 (provider, field) → 400（白名单制）
     const pcBad = await fetch(`${base}/api/config/credential`, {

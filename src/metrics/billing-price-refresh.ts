@@ -108,7 +108,7 @@ export function createBillingPriceRefresh(options: BillingPriceRefreshOptions) {
 
         const creds = await loadBillingCredentials(provider, options.credentials, env);
         if (!creds) {
-          missingCredentials.add(provider);
+          missingCredentials.add(provider === 'dashscope' ? 'aliyun' : provider);
           for (const target of targetsByProvider[provider]) skipped.push(skipOf(target, 'missing_credentials'));
           continue;
         }
@@ -208,6 +208,8 @@ async function loadBillingCredentials(
           storeProvider: 'aliyun',
           idField: 'billing_access_key_id',
           secretField: 'billing_access_key_secret',
+          genericIdField: 'access_key_id',
+          genericSecretField: 'access_key_secret',
           idEnv: ['ALIYUN_BILLING_ACCESS_KEY_ID', 'ALIBABA_CLOUD_ACCESS_KEY_ID', 'ALIYUN_ACCESS_KEY_ID'],
           secretEnv: ['ALIYUN_BILLING_ACCESS_KEY_SECRET', 'ALIBABA_CLOUD_ACCESS_KEY_SECRET', 'ALIYUN_ACCESS_KEY_SECRET'],
         }
@@ -215,16 +217,28 @@ async function loadBillingCredentials(
           storeProvider: 'volcengine',
           idField: 'billing_access_key_id',
           secretField: 'billing_access_key_secret',
+          genericIdField: 'access_key_id',
+          genericSecretField: 'access_key_secret',
           idEnv: ['VOLCENGINE_BILLING_ACCESS_KEY_ID', 'VOLC_ACCESSKEY', 'VOLCENGINE_ACCESS_KEY_ID'],
           secretEnv: ['VOLCENGINE_BILLING_ACCESS_KEY_SECRET', 'VOLC_SECRETKEY', 'VOLCENGINE_ACCESS_KEY_SECRET'],
         };
   const accessKeyId =
-    (await store?.getSecretForRuntime(aliases.storeProvider, aliases.idField).catch(() => null)) ??
+    (await readStoredBillingCredential(store, aliases.storeProvider, aliases.idField)) ??
+    (await readStoredBillingCredential(store, aliases.storeProvider, aliases.genericIdField)) ??
     firstEnv(env, aliases.idEnv);
   const accessKeySecret =
-    (await store?.getSecretForRuntime(aliases.storeProvider, aliases.secretField).catch(() => null)) ??
+    (await readStoredBillingCredential(store, aliases.storeProvider, aliases.secretField)) ??
+    (await readStoredBillingCredential(store, aliases.storeProvider, aliases.genericSecretField)) ??
     firstEnv(env, aliases.secretEnv);
   return accessKeyId && accessKeySecret ? { accessKeyId, accessKeySecret } : null;
+}
+
+async function readStoredBillingCredential(
+  store: BillingPriceRefreshCredentials | undefined,
+  provider: string,
+  field: string,
+): Promise<string | null> {
+  return (await store?.getSecretForRuntime(provider, field).catch(() => null)) ?? null;
 }
 
 function firstEnv(env: NodeJS.ProcessEnv, keys: string[]): string | null {

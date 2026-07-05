@@ -26,6 +26,7 @@ import {
   resolveProviderBaseUrl,
   resolveProviderEnvKey,
 } from './llm/index.js';
+import { PLATFORM_CREDENTIALS, resolvePlatformCredentialEnvValue } from './config/platform-credentials.js';
 import { TokenUsageStore } from './metrics/token-usage-store.js';
 import { createBillingPriceRefresh } from './metrics/billing-price-refresh.js';
 import { startRetentionSweeper } from './panel/retention-sweeper.js';
@@ -1993,8 +1994,8 @@ async function main(): Promise<void> {
     console.warn('[aidcp-cloud] 飞书长连接启动失败（事件接收不可用）:', (err as Error).message);
   }
 
-  // 组装模型配置视图（GET /api/config/model 与 setModel 回真态共用）。永不含明文密钥。
-  // change model-config-volcengine-provider：多厂商——列出可选文本厂商 + 各厂商凭据态；imageProvider 钉死 dashscope。
+  // 组装平台配置视图（GET /api/config/model 与 setModel 回真态共用）。永不含明文密钥。
+  // change platform-provider-credentials-config：多厂商模型配置 + 平台凭据态（模型 API key / 账单 AccessKey）。
   const buildModelConfigView = async (): Promise<ModelConfigView> => {
     const cfg = modelConfigStore.getCached();
     const ids = Object.keys(TEXT_PROVIDERS) as TextProviderId[];
@@ -2004,15 +2005,24 @@ async function main(): Promise<void> {
       baseUrl: resolveProviderBaseUrl(id),
     }));
     const credentials = await Promise.all(
-      ids.map(async (id) => {
-        const field = TEXT_PROVIDERS[id].credentialField;
-        const stored = await credentialStore.getStored(id, field).catch(() => null);
-        const envPresent = !!resolveProviderEnvKey(id);
+      PLATFORM_CREDENTIALS.map(async (cred) => {
+        const stored = await credentialStore.getStored(cred.provider, cred.field).catch(() => null);
+        const envPresent = !!resolvePlatformCredentialEnvValue(cred);
+        const base = {
+          provider: cred.provider,
+          field: cred.field,
+          label: cred.label,
+          providerLabel: cred.providerLabel,
+          group: cred.group,
+          groupLabel: cred.groupLabel,
+          secretKind: cred.secretKind,
+          restartRequired: cred.restartRequired,
+        };
         return stored
-          ? { provider: id, field, configured: true, maskedHint: stored.maskedHint, source: 'db' as const }
+          ? { ...base, configured: true, maskedHint: stored.maskedHint, source: 'db' as const }
           : envPresent
-            ? { provider: id, field, configured: true, maskedHint: '（来自环境变量）', source: 'env' as const }
-            : { provider: id, field, configured: false, maskedHint: null, source: 'none' as const };
+            ? { ...base, configured: true, maskedHint: '（来自环境变量）', source: 'env' as const }
+            : { ...base, configured: false, maskedHint: null, source: 'none' as const };
       }),
     );
     // change image-provider-volcengine-seedream：图片厂商也可选（万相/即梦 Seedream），独立于文本厂商。
