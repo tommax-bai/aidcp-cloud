@@ -7,7 +7,17 @@
  * 人设规则、禁用词和鼓励风格均内联定义于本文件。
  */
 
-import type { TriggerInput, ScoutDecision, CreatedContent, AssembledContent, ImageCategory, StyleProfile } from './types.js';
+import type {
+  TriggerInput,
+  ScoutDecision,
+  CreatedContent,
+  AssembledContent,
+  ImageCategory,
+  StyleProfile,
+  ReferenceAnalysis,
+  FaithfulRewritePlan,
+  FaithfulDraft,
+} from './types.js';
 import { IMAGE_CATEGORIES } from './types.js';
 import type { Soul } from '../soul/types.js';
 
@@ -69,6 +79,196 @@ export const NEGATIVE_EXAMPLES: string[] = [
   `值得一提的是，vLLM 是一个高性能推理框架。让我们一起来看看它的优势：第一，它支持 PagedAttention；第二，它吞吐量高；第三，它易于部署。综上所述，vLLM 各有优劣，建议大家根据需求选择。`,
 ];
 
+type ReferenceNoteInput = NonNullable<TriggerInput['generateInput']['referenceNote']>;
+
+function summarizeSoul(soul: Soul): string {
+  const identity = soul.identity;
+  const interests = [...(soul.interests?.primary ?? []), ...(soul.interests?.secondary ?? []), ...(soul.interests?.seed_keywords ?? [])]
+    .slice(0, 12)
+    .join('、');
+  return [
+    `账号名称：${identity?.name ?? ''}`,
+    `角色定位：${identity?.role ?? ''}`,
+    `背景：${identity?.background ?? ''}`,
+    `语气：${identity?.tone ?? ''}`,
+    `兴趣领域：${interests || '未配置'}`,
+  ].join('\n');
+}
+
+function referenceNoteBlock(referenceNote: ReferenceNoteInput): string {
+  return [
+    `sourceId：${referenceNote.sourceId}`,
+    `标题：${referenceNote.title}`,
+    `作者：${referenceNote.author ?? ''}`,
+    `话题：${referenceNote.topics.join('、') || '无'}`,
+    '',
+    '正文：',
+    referenceNote.body,
+  ].join('\n');
+}
+
+// ─── Faithful reference rewrite ───────────────────────────────────────────────
+
+export function buildReferenceAnalysisPrompt(referenceNote: ReferenceNoteInput, soul: Soul): string {
+  return [
+    '你是“保真改写”的原稿分析员。任务是把运营指定的参照笔记拆成可核验的事实、观点与结构，供后续改写使用。',
+    '',
+    '红线：',
+    '- 只分析原稿已经出现的信息，不补背景、不扩展行业知识、不推测作者身份。',
+    '- 原稿里没有的实测数据、百分比、时间线、个人经历、项目身份，一律放入 forbiddenAdditions。',
+    '- 不输出成稿，不润色，不评价是否吸引人。',
+    '',
+    '账号人设只用于识别后续语气边界，不得把账号经历当成原稿事实：',
+    summarizeSoul(soul),
+    '',
+    '【参照笔记】',
+    referenceNoteBlock(referenceNote),
+    '',
+    '严格只输出 JSON：',
+    JSON.stringify(
+      {
+        title: '原标题',
+        thesis: '原稿核心观点',
+        structure: ['原稿段落结构/展开顺序'],
+        keyFacts: ['原稿明确出现的事实/数据/事件'],
+        keyClaims: ['原稿明确表达的判断/结论'],
+        entities: ['项目/人物/机构/产品等实体'],
+        timeline: ['原稿明确出现的时间点；没有则空数组'],
+        mustPreserve: ['改写必须保留的关键信息'],
+        forbiddenAdditions: ['不得新增的高风险信息类型'],
+        perspective: '原稿叙述视角，例如项目成员/使用者/观察者/未知',
+      },
+      null,
+      2,
+    ),
+  ].join('\n');
+}
+
+export function buildFaithfulRewritePlanPrompt(analysis: ReferenceAnalysis, referenceNote: ReferenceNoteInput, soul: Soul): string {
+  return [
+    '你是“保真改写”的结构规划员。任务是在不改变原意、不新增事实的前提下，规划一篇表达不同但信息保真的小红书笔记。',
+    '',
+    '必须遵守：',
+    '- 只做保真改写，不做解读二创，不做借题重写。',
+    '- 可以调整句式、段落顺序、开头切入和表达节奏，但不能新增原文没有的测评数据、案例、经历、身份。',
+    '- 如果账号人设与原稿视角冲突，优先保留原稿事实，不把“我测了”“我参与了”“我们场景”写进计划，除非原稿已明确出现。',
+    '- 规划必须覆盖 analysis.mustPreserve 的全部内容。',
+    '',
+    '账号人设：',
+    summarizeSoul(soul),
+    '',
+    '【参照笔记】',
+    referenceNoteBlock(referenceNote),
+    '',
+    '【原稿分析】',
+    JSON.stringify(analysis, null, 2),
+    '',
+    '严格只输出 JSON：',
+    JSON.stringify(
+      {
+        titleDirection: '标题改写方向',
+        paragraphs: [
+          {
+            source: '对应原稿段落/信息块',
+            rewriteGoal: '这一段怎样换表达但保留原意',
+            mustKeep: ['本段必须保留的信息'],
+          },
+        ],
+        styleNotes: ['口语化/节奏建议，不能引入新事实'],
+        forbiddenAdditions: ['本次改写绝不能新增的信息'],
+      },
+      null,
+      2,
+    ),
+  ].join('\n');
+}
+
+export function buildFaithfulDraftPrompt(
+  analysis: ReferenceAnalysis,
+  plan: FaithfulRewritePlan,
+  referenceNote: ReferenceNoteInput,
+  soul: Soul,
+): string {
+  return [
+    '你是“保真改写”的正文写手。请按分析和计划改写参照笔记，输出一篇可发布的小红书笔记草稿。',
+    '',
+    '硬性边界：',
+    '- 这是保真改写，不是解读二创，也不是借题重写。',
+    '- 不得新增原文没有的实测结果、百分比、性能数据、公司/团队场景、个人经历、参与身份。',
+    '- 不得把账号人设包装成亲历者；除非原稿明确是第一人称经历，否则用中性观察/转述口吻。',
+    '- 标题和正文可以换说法，但核心观点、事实、时间线、因果关系必须与原稿一致。',
+    '- 正文不要输出话题标签，话题由后续角色生成。',
+    '',
+    '账号人设（仅影响语气，不提供新事实）：',
+    summarizeSoul(soul),
+    '',
+    '【参照笔记】',
+    referenceNoteBlock(referenceNote),
+    '',
+    '【原稿分析】',
+    JSON.stringify(analysis, null, 2),
+    '',
+    '【改写计划】',
+    JSON.stringify(plan, null, 2),
+    '',
+    '严格只输出 JSON：',
+    JSON.stringify(
+      {
+        title: '20字以内标题',
+        content: '改写后的正文，不含话题标签',
+        tone: 'casual',
+        style: { rewriteMode: 'faithful' },
+      },
+      null,
+      2,
+    ),
+  ].join('\n');
+}
+
+export function buildFidelityAuditPrompt(
+  analysis: ReferenceAnalysis,
+  plan: FaithfulRewritePlan,
+  draft: FaithfulDraft,
+  referenceNote: ReferenceNoteInput,
+): string {
+  return [
+    '你是“保真改写”的忠实度审核员。请对照原稿、分析、计划和草稿，判断草稿能否进入后续发布链路。',
+    '',
+    '通过标准：',
+    '- 草稿覆盖 analysis.mustPreserve 的关键信息。',
+    '- 草稿没有新增原稿未出现的事实、数据、亲历经验、团队身份、因果判断。',
+    '- 草稿与原稿表达不同，但主题、事实、观点和时间线一致。',
+    '- 审核员不得放过任何原稿未出现的实测数据、亲历视角或身份包装。',
+    '- 如果存在“我测了/我们场景/直接降了xx%”这类原稿没有的亲历或数据，必须不通过。',
+    '',
+    '【参照笔记】',
+    referenceNoteBlock(referenceNote),
+    '',
+    '【原稿分析】',
+    JSON.stringify(analysis, null, 2),
+    '',
+    '【改写计划】',
+    JSON.stringify(plan, null, 2),
+    '',
+    '【草稿】',
+    JSON.stringify(draft, null, 2),
+    '',
+    '严格只输出 JSON：',
+    JSON.stringify(
+      {
+        pass: true,
+        score: 0.92,
+        reason: '通过/不通过的简短理由',
+        issues: ['表达或结构问题'],
+        unsupportedClaims: ['草稿新增但原稿没有的信息；没有则空数组'],
+        missingKeyPoints: ['原稿关键点缺失；没有则空数组'],
+      },
+      null,
+      2,
+    ),
+  ].join('\n');
+}
+
 // ─── ContentScout ────────────────────────────────────────────────────────────
 
 /**
@@ -125,14 +325,14 @@ export function buildScoutPrompt(trigger: TriggerInput): string {
       ].join('\n')
     : '';
 
-  // 洗稿参照（change curated-note-actions）：运营指定参照笔记时，发布方向钉在参照选题上。
+  // 兼容旧调用：运行时 referenceNote 已由保真改写链处理，Scout 不再参与洗稿路径。
   const referenceNote = generateInput.referenceNote;
   const referenceBlock = referenceNote
     ? [
         '',
-        '【参照笔记——本次为洗稿参照创作】',
+        '【参照笔记——保真洗稿路径】',
         `运营指定了一篇参照笔记：「${referenceNote.title}」${referenceNote.author ? `（@${referenceNote.author}）` : ''}${referenceNote.topics.length > 0 ? `，话题：${referenceNote.topics.slice(0, 6).join('、')}` : ''}。`,
-        'publishDirection 必须钉在这篇参照笔记的选题上，keyPoints 从其核心要点提炼（后续创作会以人设口吻重写，不会照抄）。',
+        '如果本角色被旧调用路径触发，只能提炼原稿核心要点；不得引导解读二创、借题重写或新增原稿没有的事实。',
       ].join('\n')
     : '';
 
@@ -224,16 +424,16 @@ export function buildCreatorPrompt(scoutDecision: ScoutDecision, trigger: Trigge
       ? recentPublished.map((p, i) => `${i + 1}. ${p}`).join('\n')
       : '（无）';
 
-  // 洗稿参照块（change curated-note-actions）：独立于素材块——素材「仅作灵感严禁照抄」，参照「借题重写禁逐句照抄」，两套规则并存不混。
+  // 兼容旧调用：运行时 referenceNote 已由保真改写链处理，ContentCreator 不再参与洗稿路径。
   const referenceNote = generateInput.referenceNote;
   const referenceBlock = referenceNote
     ? [
         '',
-        '【参照笔记——洗稿参照（独立于上方素材规则）】',
+        '【参照笔记——保真洗稿（本块优先级高于上方风格建议）】',
         `标题：「${referenceNote.title}」${referenceNote.author ? `（@${referenceNote.author}）` : ''}${referenceNote.topics.length > 0 ? `｜话题：${referenceNote.topics.slice(0, 6).join('、')}` : ''}`,
-        `正文节选：${referenceNote.body.replace(/\s+/g, ' ').slice(0, 800)}`,
-        '【参照使用规则】本次创作以这篇笔记为参照：借它的选题、结构与核心要点，以你的人设视角与口吻重新创作成一篇属于你的笔记。',
-        '禁止逐句照抄、禁止只做同义替换；成稿必须与参照有可辨识的表达差异（不同的开头、不同的细节与例子组织），并补充你自己的经验与判断。',
+        `正文节选：${referenceNote.body.replace(/\s+/g, ' ').slice(0, 1200)}`,
+        '【参照使用规则】仅做保真改写：保留原稿主题、结构、事实、观点与因果关系，用不同表达重述。',
+        '禁止解读二创、禁止借题扩写、禁止补充自己的经验与判断、禁止伪造亲历视角或新增原稿没有的数据。',
       ]
     : [];
 

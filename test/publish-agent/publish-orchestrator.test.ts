@@ -15,6 +15,10 @@ import { QualityScorerRole } from '../../src/publish-agent/roles/quality-scorer.
 import { ContentAssemblerRole } from '../../src/publish-agent/roles/content-assembler.js';
 import { TitleCreatorRole } from '../../src/publish-agent/roles/title-creator.js';
 import {
+  ReferenceAnalyzerRole,
+  FaithfulRewritePlannerRole,
+  FaithfulDraftWriterRole,
+  FidelityAuditorRole,
   TopicGeneratorRole,
   TopicEvaluatorRole,
   MentionStrategistRole,
@@ -55,6 +59,26 @@ function makeTriggerInput(): TriggerInput {
   };
 }
 
+function makeReferenceTriggerInput(): TriggerInput {
+  const base = makeTriggerInput();
+  return {
+    ...base,
+    forced: true,
+    generateInput: {
+      ...base.generateInput,
+      concepts: [],
+      likedContents: [],
+      referenceNote: {
+        sourceId: 'lmcache-1',
+        title: 'LMCache 突破一万 star',
+        body: 'LMCache 从实验室项目走向开源项目，先通过 vLLM patch 接入，后来改成 connector API，并在 agentic workload 增长后升级到多进程架构。',
+        topics: ['LMCache', 'KV Cache'],
+        author: 'committer',
+      },
+    },
+  };
+}
+
 /**
  * 注册 A 阶段2 细拆后的 11 个生产段角色（顺序无关，黑板靠键就绪触发）。
  * fakeLlm 按 system prompt 路由：发布决策→Scout、正文创作→Creator、
@@ -65,6 +89,10 @@ function buildFullPipeline(llmResponses: Record<string, string>, opts?: { enable
     chat: async (messages: any[]) => {
       const systemContent = messages[0]?.content ?? '';
       if (systemContent.includes('发布决策')) return llmResponses.scout;
+      if (systemContent.includes('保真改写原稿分析员')) return llmResponses.referenceAnalysis ?? '{"title":"T","thesis":"t","structure":[],"keyFacts":[],"keyClaims":[],"entities":[],"timeline":[],"mustPreserve":[],"forbiddenAdditions":[],"perspective":"unknown"}';
+      if (systemContent.includes('保真改写规划员')) return llmResponses.faithfulPlan ?? '{"titleDirection":"T","paragraphs":[],"styleNotes":[],"forbiddenAdditions":[]}';
+      if (systemContent.includes('保真改写正文写手')) return llmResponses.faithfulDraft ?? '{"title":"保真标题","content":"保真正文","tone":"casual","style":{"rewriteMode":"faithful"}}';
+      if (systemContent.includes('保真改写忠实度审核员')) return llmResponses.fidelityAudit ?? '{"pass":true,"score":0.9,"reason":"ok","issues":[],"unsupportedClaims":[],"missingKeyPoints":[]}';
       if (systemContent.includes('标题创作')) return llmResponses.title ?? '{"title":"测试标题"}';
       // change split-topic-roles：话题生成 → 候选；话题评判 → 保留子集。
       if (systemContent.includes('话题生成')) return llmResponses.topicGen ?? '{"topics":["测试话题","大模型"]}';
@@ -95,6 +123,10 @@ function buildFullPipeline(llmResponses: Record<string, string>, opts?: { enable
   orchestrator.registerRole(new ContentScoutRole({ llmClient: fakeLlm as any, ...common }));
   orchestrator.registerRole(new ContentTypeSelectorRole(common));
   orchestrator.registerRole(new ContentCreatorRole({ llmClient: fakeLlm as any, ...common }));
+  orchestrator.registerRole(new ReferenceAnalyzerRole({ llmClient: fakeLlm as any, ...common }));
+  orchestrator.registerRole(new FaithfulRewritePlannerRole({ llmClient: fakeLlm as any, ...common }));
+  orchestrator.registerRole(new FaithfulDraftWriterRole({ llmClient: fakeLlm as any, ...common }));
+  orchestrator.registerRole(new FidelityAuditorRole({ llmClient: fakeLlm as any, ...common }));
   // 品类判定（category-adaptive-images-and-judgment）：读正文判品类，供配图指令风格档（composer waitAll 依赖 postCategory）。
   orchestrator.registerRole(new CategoryClassifierRole({ llmClient: fakeLlm as any, ...common }));
   // 配图三角色（publish-multi-image）：选题 → 指令 → 执行。
@@ -150,8 +182,52 @@ describe('PublishOrchestrator', () => {
     assert.equal(insertedRecords[0].status, 'pending_approval', '落库为待审草稿');
     assert.equal(pushedEnvelopes.length, 0, '生成候审段绝不下发边缘');
     // 稳定边界：组装产出仍含八字段（细拆后等价）。
-    // 14（stage-2 生产段+下游，含品类判定 CategoryClassifier + 配图三角色 ImageSetPlanner/ImagePromptComposer/ImageGenerator）+ 10（stage-3 元数据/合规决策：change split-topic-roles 去 TopicStrategist、加 TopicGenerator+TopicEvaluator）+ 1（TitleCreator）= 25。
-    assert.equal(orchestrator.getRoles().length, 25);
+    // 既有 25 个发布角色 + 保真洗稿 4 角色 = 29。
+    assert.equal(orchestrator.getRoles().length, 29);
+  });
+
+  test('保真洗稿链路：referenceNote 绕过 Scout/Creator，经审核后复用下游发布链', async () => {
+    const { orchestrator, insertedRecords } = buildFullPipeline(
+      {
+        referenceAnalysis: JSON.stringify({
+          title: 'LMCache 突破一万 star',
+          thesis: '方向判断和工程落地促成开源认可',
+          structure: ['起源', '接入演进', '架构升级'],
+          keyFacts: ['vLLM patch', 'connector API', '多进程架构'],
+          keyClaims: ['长期工程投入很关键'],
+          entities: ['LMCache', 'vLLM'],
+          timeline: ['2024 年 7 月', '2025 年 Q2-Q3'],
+          mustPreserve: ['connector API 替代 patch'],
+          forbiddenAdditions: ['个人实测延迟下降数据'],
+          perspective: '项目成员复盘',
+        }),
+        faithfulPlan: JSON.stringify({
+          titleDirection: '保留 star 与工程演进',
+          paragraphs: [{ source: '接入演进', rewriteGoal: '换表达保留事实', mustKeep: ['connector API 替代 patch'] }],
+          styleNotes: ['口语化'],
+          forbiddenAdditions: ['个人实测延迟下降数据'],
+        }),
+        faithfulDraft: JSON.stringify({
+          title: 'LMCache 万星背后',
+          content: 'LMCache 破万星，重点不是热闹，而是它从实验室方案一路补工程：早期靠 vLLM patch，后来换成 connector API，再到多进程架构，都是围绕 KV cache 怎么稳定复用。',
+          tone: 'casual',
+          style: { rewriteMode: 'faithful' },
+        }),
+        fidelityAudit: JSON.stringify({ pass: true, score: 0.92, reason: 'ok', issues: [], unsupportedClaims: [], missingKeyPoints: [] }),
+        title: JSON.stringify({ title: 'LMCache 万星背后' }),
+        assembler: JSON.stringify({ qualityScore: 85 }),
+        gatekeeper: JSON.stringify({ needsApproval: false, recommendedAction: 'auto_publish', reason: '质量ok' }),
+      },
+      { enableImage: true },
+    );
+
+    const result = await orchestrator.trigger(makeReferenceTriggerInput());
+
+    assert.equal(result.status, 'pending_approval');
+    assert.equal(insertedRecords.length, 1);
+    assert.equal(insertedRecords[0].sourceReference?.sourceId, 'lmcache-1');
+    assert.match(insertedRecords[0].content, /connector API/);
+    assert.doesNotMatch(insertedRecords[0].content, /延迟直接降了58/);
   });
 
   test('配图失败/无图 → 诚实 failed（change publish-image-required-or-fail：图文帖必须有图，绝不走必然 no_target 的纯文字路径）', async () => {
@@ -191,9 +267,7 @@ describe('PublishOrchestrator', () => {
   });
 
   test('管道超时 → 返回 status=failed', async () => {
-    const fakeLlm = { chat: async () => new Promise<string>(() => {}), complete: async () => '' };
     const orchestrator = new PublishOrchestrator({ clock, idGen: () => 'run-timeout', logger: silentLogger, pipelineTimeoutMs: 200 });
-    orchestrator.registerRole(new ContentScoutRole({ llmClient: fakeLlm as any, clock, logger: silentLogger }));
     const result = await orchestrator.trigger(makeTriggerInput());
     assert.equal(result.status, 'failed');
     assert.equal(result.dispatched, false);

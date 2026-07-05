@@ -129,6 +129,37 @@ describe('ContentScoutRole', () => {
     assert.match(capturedPrompt, /强制发布/, 'forced 提示注入了 scout prompt');
   });
 
+  test('有 referenceNote → 洗稿走保真链路，ContentScout 不调用 LLM、不写 scoutDecision', async () => {
+    let calls = 0;
+    const fakeLlm = {
+      chat: async () => {
+        calls += 1;
+        return JSON.stringify({ shouldPublish: true, publishDirection: 'x', keyPoints: [], confidence: 0.5, reason: 'x' });
+      },
+      complete: async () => '',
+    };
+    const role = new ContentScoutRole({ llmClient: fakeLlm as any, clock, logger: silentLogger });
+    const ctx = new PipelineContext<PipelineFields>();
+    role.register(ctx);
+    ctx.write('trigger', {
+      ...makeTriggerInput(),
+      generateInput: {
+        ...makeTriggerInput().generateInput,
+        referenceNote: {
+          sourceId: 'ref-1',
+          title: '参照标题',
+          body: '参照正文',
+          topics: ['测试'],
+        },
+      },
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.equal(calls, 0);
+    assert.equal(ctx.get('scoutDecision'), undefined);
+  });
+
   test('验证调用了 buildScoutPrompt（LLM 收到 user message 含度量信息）', async () => {
     let capturedMessages: QwenChatMessage[] = [];
     const fakeLlm = {

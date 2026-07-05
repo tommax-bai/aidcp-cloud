@@ -3,6 +3,12 @@ export type { RoleConfig } from './base-role.js';
 export { ContentScoutRole } from './content-scout.js';
 export { ContentTypeSelectorRole } from './content-type-selector.js';
 export { ContentCreatorRole } from './content-creator.js';
+export {
+  ReferenceAnalyzerRole,
+  FaithfulRewritePlannerRole,
+  FaithfulDraftWriterRole,
+  FidelityAuditorRole,
+} from './faithful-reference-rewrite.js';
 export { CategoryClassifierRole } from './category-classifier.js';
 export { ImageSetPlannerRole } from './image-set-planner.js';
 export { ImagePromptComposerRole } from './image-prompt-composer.js';

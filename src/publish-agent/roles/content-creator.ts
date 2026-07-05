@@ -37,7 +37,7 @@ export class ContentCreatorRole extends BasePublishRole<CreatorInput, CreatedCon
   }
 
   protected override shouldActivate(snapshot: Partial<PipelineFields>): boolean {
-    return snapshot.scoutDecision?.shouldPublish === true;
+    return !snapshot.trigger?.generateInput.referenceNote && snapshot.scoutDecision?.shouldPublish === true;
   }
 
   protected extractInput(snapshot: Partial<PipelineFields>): CreatorInput {

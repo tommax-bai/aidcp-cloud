@@ -12,10 +12,22 @@
  */
 
 import type { Soul } from '../soul/types.js';
-import type { TriggerInput, ScoutDecision, CreatedContent, AssembledContent } from './types.js';
+import type {
+  TriggerInput,
+  ScoutDecision,
+  CreatedContent,
+  AssembledContent,
+  ReferenceAnalysis,
+  FaithfulRewritePlan,
+  FaithfulDraft,
+} from './types.js';
 import {
   buildScoutPrompt,
   buildCreatorPrompt,
+  buildReferenceAnalysisPrompt,
+  buildFaithfulRewritePlanPrompt,
+  buildFaithfulDraftPrompt,
+  buildFidelityAuditPrompt,
   buildTitlePrompt,
   buildImageSetPlanPrompt,
   buildImagePromptComposerPrompt,
@@ -49,6 +61,51 @@ const EXAMPLE_TRIGGER: TriggerInput = {
   },
   recentPublished: ['<示例最近已发布标题>'],
   forced: false,
+};
+
+const EXAMPLE_REFERENCE_NOTE: NonNullable<TriggerInput['generateInput']['referenceNote']> = {
+  sourceId: '<示例原稿sourceId>',
+  title: '<示例原稿标题>',
+  body: '示例原稿正文：项目从实验室走向开源社区，先通过 patch 接入推理框架，后来改为 connector API，并在 agentic workload 增长后升级到多进程架构。',
+  topics: ['开源项目', '推理优化'],
+  author: '<示例作者>',
+};
+
+const EXAMPLE_REFERENCE_ANALYSIS: ReferenceAnalysis = {
+  sourceId: EXAMPLE_REFERENCE_NOTE.sourceId,
+  title: EXAMPLE_REFERENCE_NOTE.title,
+  thesis: '开源项目被认可来自方向判断和长期工程投入。',
+  structure: ['里程碑', '早期动机', '接入方式演进', '工业需求出现', '多进程架构升级', '总结'],
+  keyFacts: ['曾通过 patch 接入推理框架', '后来改为 connector API', 'agentic workload 增长后需要外置 KV cache'],
+  keyClaims: ['方向判断和工程落地共同促成项目被使用'],
+  entities: ['LMCache', 'vLLM'],
+  timeline: ['2024 年 7 月', '2025 年 Q2-Q3'],
+  mustPreserve: ['项目演进脉络', 'connector API 替代 patch', '工业界接入需求', '多进程架构升级原因'],
+  forbiddenAdditions: ['个人实测延迟下降数据', '未出现的公司业务场景', '未出现的使用者亲历'],
+  perspective: '项目成员复盘',
+  analyzedAt: 0,
+};
+
+const EXAMPLE_FAITHFUL_PLAN: FaithfulRewritePlan = {
+  titleDirection: '保留里程碑与原因复盘，不改成使用测评',
+  paragraphs: [
+    {
+      source: '项目突破 star 与起源',
+      rewriteGoal: '换成更短的社媒开头，但仍说明项目演进背景',
+      mustKeep: ['项目突破 star', '实验室到开源项目'],
+    },
+  ],
+  styleNotes: ['口语化，但不要伪装成亲测经验'],
+  forbiddenAdditions: EXAMPLE_REFERENCE_ANALYSIS.forbiddenAdditions,
+  plannedAt: 0,
+};
+
+const EXAMPLE_FAITHFUL_DRAFT: FaithfulDraft = {
+  title: '<示例保真改写标题>',
+  content: '<示例保真改写正文>',
+  tone: 'casual',
+  style: { rewriteMode: 'faithful' },
+  draftedAt: 0,
 };
 
 const EXAMPLE_SCOUT: ScoutDecision = {
@@ -90,6 +147,13 @@ const EXAMPLE_POST_PROCESS = { aiScore: 0.1, flaggedPhrases: [] as string[], rew
 export const PUBLISH_PREVIEW_BUILDERS: Record<string, () => string> = {
   'publish:ContentScout': () => buildScoutPrompt(EXAMPLE_TRIGGER),
   'publish:ContentCreator': () => buildCreatorPrompt(EXAMPLE_SCOUT, EXAMPLE_TRIGGER),
+  'publish:ReferenceAnalyzer': () => buildReferenceAnalysisPrompt(EXAMPLE_REFERENCE_NOTE, EXAMPLE_SOUL),
+  'publish:FaithfulRewritePlanner': () =>
+    buildFaithfulRewritePlanPrompt(EXAMPLE_REFERENCE_ANALYSIS, EXAMPLE_REFERENCE_NOTE, EXAMPLE_SOUL),
+  'publish:FaithfulDraftWriter': () =>
+    buildFaithfulDraftPrompt(EXAMPLE_REFERENCE_ANALYSIS, EXAMPLE_FAITHFUL_PLAN, EXAMPLE_REFERENCE_NOTE, EXAMPLE_SOUL),
+  'publish:FidelityAuditor': () =>
+    buildFidelityAuditPrompt(EXAMPLE_REFERENCE_ANALYSIS, EXAMPLE_FAITHFUL_PLAN, EXAMPLE_FAITHFUL_DRAFT, EXAMPLE_REFERENCE_NOTE),
   'publish:TitleCreator': () =>
     buildTitlePrompt(EXAMPLE_CREATED.content, '<示例账号人设>', '踩坑记录', '<示例草稿期标题>'),
   'publish:ImageSetPlanner': () => buildImageSetPlanPrompt(EXAMPLE_CREATED, IMAGE_COUNT_HARD_MAX),

@@ -37,6 +37,10 @@ export class ContentScoutRole extends BasePublishRole<TriggerInput, ScoutDecisio
     this.llmClient = deps.llmClient;
   }
 
+  protected override shouldActivate(snapshot: Partial<PipelineFields>): boolean {
+    return !snapshot.trigger?.generateInput.referenceNote;
+  }
+
   protected extractInput(snapshot: Partial<PipelineFields>): TriggerInput {
     return snapshot.trigger!;
   }

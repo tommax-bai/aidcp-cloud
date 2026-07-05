@@ -19,8 +19,8 @@ import type { CuratedContentTypeFilter, CuratedSelectItem } from '../cache/curat
 /** 洗稿参照笔记（change curated-note-actions）：管理后台精选页人工指定，注入创作输入独立参照块。 */
 export type ReferenceNote = NonNullable<TriggerInput['generateInput']['referenceNote']>;
 
-/** 参照正文注入上限（字符）：蒸馏注入、防全文直灌撑爆 prompt。 */
-export const REFERENCE_BODY_MAX_LEN = 800;
+/** 参照正文注入上限（字符）：保真改写需要足够上下文，同时防超长全文撑爆 prompt。 */
+export const REFERENCE_BODY_MAX_LEN = 6000;
 
 export interface SchedulerConceptStore {
   countNewSince(sinceMs: number): Promise<number>;
@@ -316,8 +316,7 @@ export class PublishScheduler {
           forced,
           generateInput: {
             ...base.generateInput,
-            // 参照正文有界截断（≤800 字）：控 prompt 规模，避免全文直灌。
-            // 展示/审计快照保持触发时原文，避免内容页只能看到 prompt 截断片段。
+            // 参照正文有界截断：保真改写需要足够上下文；展示/审计快照保持触发时原文。
             referenceNote: {
               ...referenceNote,
               accountId: referenceNote.accountId ?? accountId,

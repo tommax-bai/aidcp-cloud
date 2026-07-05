@@ -1,6 +1,6 @@
 /**
  * PublishScheduler 洗稿参照注入单测（change curated-note-actions）。
- * 覆盖：referenceNote 透传进 TriggerInput.generateInput（含正文 ≤800 字截断）、
+ * 覆盖：referenceNote 透传进 TriggerInput.generateInput（含正文有界截断）、
  * 空正文参照触发即 blocked empty_body（不调编排）、无参照路径不带字段（向后兼容 /publish）。
  */
 import { describe, it } from 'node:test';
@@ -41,7 +41,7 @@ function build() {
 const ref: ReferenceNote = {
   sourceId: 'note-42',
   title: '好用的收纳技巧',
-  body: '正文'.repeat(1000), // 2000 字 > 800 上限
+  body: '正文'.repeat(4000), // 8000 字 > REFERENCE_BODY_MAX_LEN 上限
   topics: ['收纳', '家居'],
   author: '博主甲',
   curatedContentId: 7,
@@ -51,7 +51,7 @@ const ref: ReferenceNote = {
 };
 
 describe('triggerManual referenceNote（洗稿参照）', () => {
-  it('参照透传进 generateInput.referenceNote，正文截 ≤800 字，forced=true，reason=manual_reference', async () => {
+  it('参照透传进 generateInput.referenceNote，正文有界截断，forced=true，reason=manual_reference', async () => {
     const { scheduler, inputs } = build();
     const o = await scheduler.triggerManual('acc-test', { referenceNote: ref });
     assert.equal(o.result, 'triggered');

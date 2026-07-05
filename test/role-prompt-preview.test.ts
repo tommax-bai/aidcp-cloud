@@ -46,11 +46,15 @@ test('发布文本角色 → available:true + 真实 prompt 文本，不附来�
   assert.ok(v.note.length > 0);
 });
 
-test('8 个发布文本角色全部 available:true 且 prompt 非空', () => {
+test('12 个发布文本角色全部 available:true 且 prompt 非空', () => {
   const p = createRolePromptProvider(() => []);
   const ids = [
     'publish:ContentScout',
     'publish:ContentCreator',
+    'publish:ReferenceAnalyzer',
+    'publish:FaithfulRewritePlanner',
+    'publish:FaithfulDraftWriter',
+    'publish:FidelityAuditor',
     'publish:TitleCreator',
     'publish:CategoryClassifier',
     'publish:ImageSetPlanner',

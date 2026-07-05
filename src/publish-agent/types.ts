@@ -125,9 +125,9 @@ export interface TriggerInput {
      */
     commentHints?: Array<{ text: string; author?: string; sourceNoteTitle?: string }>;
     /**
-     * 洗稿参照笔记（change curated-note-actions）：管理后台从精选页人工指定的单条笔记。
-     * 以独立条件块注入创作提示（借其选题/结构/要点、以人设口吻重新创作、禁止逐句照抄），
-     * 与 materials 素材块并存、互不改变对方规则。缺省则本次创作无参照。
+     * 保真洗稿参照笔记：管理后台从精选页人工指定的单条笔记。
+     * 有参照时走 ReferenceAnalyzer -> FaithfulRewritePlanner -> FaithfulDraftWriter -> FidelityAuditor，
+     * 审核通过后才写入 createdContent；不得借题扩写、解读二创或新增原稿没有的事实。
      */
     referenceNote?: {
       sourceId: string;
@@ -178,6 +178,47 @@ export interface CreatedContent {
   tone: 'professional' | 'casual' | 'technical' | 'narrative';
   style: Record<string, string>;
   createdAt: number;
+}
+
+export interface ReferenceAnalysis {
+  sourceId: string;
+  title: string;
+  thesis: string;
+  structure: string[];
+  keyFacts: string[];
+  keyClaims: string[];
+  entities: string[];
+  timeline: string[];
+  mustPreserve: string[];
+  forbiddenAdditions: string[];
+  perspective: string;
+  analyzedAt: number;
+}
+
+export interface FaithfulRewritePlan {
+  titleDirection: string;
+  paragraphs: Array<{ source: string; rewriteGoal: string; mustKeep: string[] }>;
+  styleNotes: string[];
+  forbiddenAdditions: string[];
+  plannedAt: number;
+}
+
+export interface FaithfulDraft {
+  title: string;
+  content: string;
+  tone: CreatedContent['tone'];
+  style: Record<string, string>;
+  draftedAt: number;
+}
+
+export interface FidelityAuditReport {
+  pass: boolean;
+  score: number;
+  reason: string;
+  issues: string[];
+  unsupportedClaims: string[];
+  missingKeyPoints: string[];
+  auditedAt: number;
 }
 
 /** ImageGenerator 输出（多图：imageUrls 为生成成功的真实 URL 数组）。 */
@@ -458,6 +499,10 @@ export interface PipelineAbort {
 export interface PipelineFields {
   trigger: TriggerInput;
   scoutDecision: ScoutDecision;
+  referenceAnalysis: ReferenceAnalysis;
+  faithfulRewritePlan: FaithfulRewritePlan;
+  faithfulDraft: FaithfulDraft;
+  fidelityAuditReport: FidelityAuditReport;
   createdContent: CreatedContent;
   // 阶段2 生产段细拆中间键
   contentType: ContentType;

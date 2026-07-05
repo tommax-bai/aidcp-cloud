@@ -94,6 +94,18 @@ test('getCatalog：白名单 + 区分 text/image + 生效值回落全局 + 分�
   assert.equal(view.roles.find((r) => r.roleId === 'browse:feed_scroller'), undefined);
 });
 
+test('getCatalog：保真洗稿四角色进入后台目录，只有正文改写可调温度', () => {
+  const { panel } = makePanel();
+  const byId = new Map(panel.getCatalog().roles.map((r) => [r.roleId, r]));
+  assert.equal(byId.get('publish:ReferenceAnalyzer')?.displayName, '保真洗稿·原稿分析');
+  assert.equal(byId.get('publish:FaithfulRewritePlanner')?.tunableTemperature, false);
+  assert.equal(byId.get('publish:FaithfulDraftWriter')?.tunableTemperature, true);
+  assert.equal(byId.get('publish:FidelityAuditor')?.category, 'publish_gate');
+  for (const id of ['publish:ReferenceAnalyzer', 'publish:FaithfulRewritePlanner', 'publish:FaithfulDraftWriter', 'publish:FidelityAuditor']) {
+    assert.equal(byId.get(id)?.llmKind, 'text', `${id} 应为可配置文本模型角色`);
+  }
+});
+
 test('图像角色 effectiveProvider 随全局图片厂商（#5：切火山即梦即如实显示，不再钉死文本默认）', () => {
   const { panel } = makePanel(true, {}, { imageProvider: 'volcengine' });
   const img = panel.getCatalog().roles.find((r) => r.roleId === 'publish:ImageGenerator')!;

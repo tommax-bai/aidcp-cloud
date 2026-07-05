@@ -120,6 +120,10 @@ export const ROLE_CATALOG: RoleCatalogItem[] = [
   // —— 发布管线（文本，经 llmClient.chat；顺序 = PipelineContext watch/output 依赖链）——
   { roleId: 'publish:ContentScout', displayName: '发布选题侦察', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: false },
   { roleId: 'publish:ContentCreator', displayName: '笔记正文创作', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
+  { roleId: 'publish:ReferenceAnalyzer', displayName: '保真洗稿·原稿分析', group: 'publish', category: 'publish_gate', llmKind: 'text', tunableTemperature: false },
+  { roleId: 'publish:FaithfulRewritePlanner', displayName: '保真洗稿·改写规划', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: false },
+  { roleId: 'publish:FaithfulDraftWriter', displayName: '保真洗稿·正文改写', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
+  { roleId: 'publish:FidelityAuditor', displayName: '保真洗稿·忠实度审核', group: 'publish', category: 'publish_gate', llmKind: 'text', tunableTemperature: false },
   // 配图分支（createdContent 后分叉）：选题 → 指令 → 生成
   { roleId: 'publish:CategoryClassifier', displayName: '配图品类判定', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: false },
   { roleId: 'publish:ImageSetPlanner', displayName: '配图选题（张数+主题）', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
