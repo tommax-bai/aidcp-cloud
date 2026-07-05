@@ -7,7 +7,7 @@
  * 铁律：
  * - 只调既有 build*Prompt、**绝不改其逻辑**（线上 prompt 行为零变化）。
  * - 示例入参用 types.ts 的类型对齐（编译期锁形状），占位串沿用浏览侧 `<示例…>` 约定；实时字段一望即知是占位。
- * - 发布正文人设为构建函数**内置默认**（如文案创作内置人设），**不随账号切换**——故本注册表不接账号口径。
+ * - 默认用示例人设；预览提供方可传入选定账号人设，构造同形示例输入后忠实渲染（生产发布同样吃账号人设）。
  * - 配图生成执行（publish:ImageGenerator）确实无文本 prompt（吃配图指令输出 + 固定风格常量），不在此注册。
  */
 
@@ -35,6 +35,8 @@ import {
   buildAssemblerPrompt,
   buildGatekeeperPrompt,
   buildDeAiRewritePrompt,
+  buildTopicGenerationPrompt,
+  buildTopicEvaluationPrompt,
   IMAGE_COUNT_HARD_MAX,
   resolveStyleProfile,
 } from './prompts.js';
@@ -62,6 +64,21 @@ const EXAMPLE_TRIGGER: TriggerInput = {
   recentPublished: ['<示例最近已发布标题>'],
   forced: false,
 };
+
+function triggerWithSoul(soul: Soul = EXAMPLE_SOUL): TriggerInput {
+  return {
+    ...EXAMPLE_TRIGGER,
+    generateInput: {
+      ...EXAMPLE_TRIGGER.generateInput,
+      soul,
+    },
+  };
+}
+
+function personaLine(soul: Soul = EXAMPLE_SOUL): string {
+  const { identity } = soul;
+  return `${identity.role}｜${identity.background}（语气：${identity.tone}）`;
+}
 
 const EXAMPLE_REFERENCE_NOTE: NonNullable<TriggerInput['generateInput']['referenceNote']> = {
   sourceId: '<示例原稿sourceId>',
@@ -142,27 +159,32 @@ const EXAMPLE_POST_PROCESS = { aiScore: 0.1, flaggedPhrases: [] as string[], rew
 
 /**
  * roleId（含 `publish:` 前缀，与 role-catalog 一致）→ 渲染闭包。
- * 闭包用示例入参调既有 build*Prompt；预览提供方按此表忠实渲染发布侧文本角色。
+ * 闭包用示例入参调既有 build*Prompt；可传入账号人设以替换示例人设。
  */
-export const PUBLISH_PREVIEW_BUILDERS: Record<string, () => string> = {
-  'publish:ContentScout': () => buildScoutPrompt(EXAMPLE_TRIGGER),
-  'publish:ContentCreator': () => buildCreatorPrompt(EXAMPLE_SCOUT, EXAMPLE_TRIGGER),
-  'publish:ReferenceAnalyzer': () => buildReferenceAnalysisPrompt(EXAMPLE_REFERENCE_NOTE, EXAMPLE_SOUL),
-  'publish:FaithfulRewritePlanner': () =>
-    buildFaithfulRewritePlanPrompt(EXAMPLE_REFERENCE_ANALYSIS, EXAMPLE_REFERENCE_NOTE, EXAMPLE_SOUL),
-  'publish:FaithfulDraftWriter': () =>
-    buildFaithfulDraftPrompt(EXAMPLE_REFERENCE_ANALYSIS, EXAMPLE_FAITHFUL_PLAN, EXAMPLE_REFERENCE_NOTE, EXAMPLE_SOUL),
+export type PublishPreviewBuilder = (soul?: Soul) => string;
+
+export const PUBLISH_PREVIEW_BUILDERS: Record<string, PublishPreviewBuilder> = {
+  'publish:ContentScout': (soul) => buildScoutPrompt(triggerWithSoul(soul)),
+  'publish:ContentCreator': (soul) => buildCreatorPrompt(EXAMPLE_SCOUT, triggerWithSoul(soul)),
+  'publish:ReferenceAnalyzer': (soul) => buildReferenceAnalysisPrompt(EXAMPLE_REFERENCE_NOTE, soul ?? EXAMPLE_SOUL),
+  'publish:FaithfulRewritePlanner': (soul) =>
+    buildFaithfulRewritePlanPrompt(EXAMPLE_REFERENCE_ANALYSIS, EXAMPLE_REFERENCE_NOTE, soul ?? EXAMPLE_SOUL),
+  'publish:FaithfulDraftWriter': (soul) =>
+    buildFaithfulDraftPrompt(EXAMPLE_REFERENCE_ANALYSIS, EXAMPLE_FAITHFUL_PLAN, EXAMPLE_REFERENCE_NOTE, soul ?? EXAMPLE_SOUL),
   'publish:FidelityAuditor': () =>
     buildFidelityAuditPrompt(EXAMPLE_REFERENCE_ANALYSIS, EXAMPLE_FAITHFUL_PLAN, EXAMPLE_FAITHFUL_DRAFT, EXAMPLE_REFERENCE_NOTE),
-  'publish:TitleCreator': () =>
-    buildTitlePrompt(EXAMPLE_CREATED.content, '<示例账号人设>', '踩坑记录', '<示例草稿期标题>'),
+  'publish:TitleCreator': (soul) =>
+    buildTitlePrompt(EXAMPLE_CREATED.content, personaLine(soul), '踩坑记录', '<示例草稿期标题>'),
   'publish:ImageSetPlanner': () => buildImageSetPlanPrompt(EXAMPLE_CREATED, IMAGE_COUNT_HARD_MAX),
   'publish:CategoryClassifier': () =>
     buildCategoryClassifierPrompt(EXAMPLE_CREATED.title, EXAMPLE_CREATED.content),
   'publish:ImagePromptComposer': () =>
     buildImagePromptComposerPrompt({ subject: '<示例配图主体>', intent: '<示例配图要点>' }, '温暖生活感'),
-  'publish:QualityScorer': () => buildAssemblerPrompt(EXAMPLE_CREATED, EXAMPLE_POST_PROCESS, EXAMPLE_SOUL, 'knowledge'),
+  'publish:QualityScorer': (soul) => buildAssemblerPrompt(EXAMPLE_CREATED, EXAMPLE_POST_PROCESS, soul ?? EXAMPLE_SOUL, 'knowledge'),
   'publish:ApprovalGatekeeper': () => buildGatekeeperPrompt(EXAMPLE_ASSEMBLED),
+  'publish:TopicGenerator': (soul) => buildTopicGenerationPrompt(EXAMPLE_ASSEMBLED.finalContent, personaLine(soul)),
+  'publish:TopicEvaluator': () =>
+    buildTopicEvaluationPrompt(['<示例话题1>', '<示例话题2>', '<示例话题3>'], '', EXAMPLE_ASSEMBLED.finalContent),
   // 正文去 AI 味改写（ContentCleaner）：prompt 与 server.ts 注入的 rewrite 同源（buildDeAiRewritePrompt）。
   'publish:ContentCleaner': () =>
     buildDeAiRewritePrompt(EXAMPLE_CREATED.content, ['首先', '过量感叹号']),

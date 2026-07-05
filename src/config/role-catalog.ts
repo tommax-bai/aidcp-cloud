@@ -76,8 +76,8 @@ export interface CategoryCatalogItem {
 export const CATEGORY_CATALOG: CategoryCatalogItem[] = [
   { categoryId: 'browse_judge', displayName: '浏览 · 判定类', order: 1 },
   { categoryId: 'browse_compose', displayName: '浏览 · 撰写改写类', order: 2 },
-  { categoryId: 'publish_create', displayName: '发布 · 创作类', order: 3 },
-  { categoryId: 'publish_gate', displayName: '发布 · 裁决类', order: 4 },
+  { categoryId: 'publish_create', displayName: '发布 · 生成规划类', order: 3 },
+  { categoryId: 'publish_gate', displayName: '发布 · 分析评审类', order: 4 },
   { categoryId: 'image', displayName: '图像类', order: 5 },
 ];
 

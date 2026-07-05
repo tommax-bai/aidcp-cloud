@@ -57,6 +57,9 @@ import { EventBus } from './event-bus/index.js';
 import { RoleDispatcher } from './orchestrator/index.js';
 import { ConnectionRuntimeRegistry, type DispatcherBuildContext } from './orchestrator/connection-runtime.js';
 import type { CommentApprovalPort } from './agents/comment-approval-gate.js';
+import type { BaseRole } from './agents/base-role.js';
+import { CommentSearchTermGenerator, type RoleLlmLike } from './agents/comment-search-term-generator.js';
+import { CommentTargetPicker } from './agents/comment-target-picker.js';
 import { buildCommentApprovalCard } from './feishu/comment-approval-card.js';
 import { buildCommandResultCard } from './feishu/cards.js';
 import { CommentScheduler } from './comment-agent/comment-scheduler.js';
@@ -1694,6 +1697,21 @@ async function main(): Promise<void> {
     { getSoul: previewGetSoul },
   );
   previewDispatcher.setup();
+  const previewOnlyLlm: RoleLlmLike = {
+    complete: async () => {
+      throw new Error('preview-only role must not call LLM');
+    },
+  };
+  const previewOnlyRoles = [
+    new CommentSearchTermGenerator({
+      llm: previewOnlyLlm,
+      getSoul: () => previewGetSoul(previewDispatcher.accountId),
+    }),
+    new CommentTargetPicker({
+      llm: previewOnlyLlm,
+      getSoul: () => previewGetSoul(previewDispatcher.accountId),
+    }),
+  ] as unknown as readonly BaseRole[];
 
   // 注册发布编排器的生产段角色（A 阶段2 细拆：6→11，下游 Gatekeeper/Executor 不变）。
   // 注册顺序无关正确性（黑板靠键就绪触发），按拓扑排列便于阅读。
@@ -2148,7 +2166,7 @@ async function main(): Promise<void> {
   // 人设选择框（change prompt-preview-persona-selector）：给定 accountId 时把预览 dispatcher 当前账号临时切到
   // 该账号、同步渲染、finally 还原（previewPrompt 全程同步、单线程无交错，故原子安全）；hasPersona 用不回落的
   // getForAccount 判定该账号是否真有人设行（无行则诚实标 personaFallback、绝不冒充）。
-  const rolePromptProvider = createRolePromptProvider(() => previewDispatcher.getRoles(), {
+  const rolePromptProvider = createRolePromptProvider(() => [...previewDispatcher.getRoles(), ...previewOnlyRoles], {
     withAccount: (accountId, fn) => {
       const prev = previewDispatcher.accountId;
       previewDispatcher.setCurrentAccountId(accountId);
@@ -2159,6 +2177,7 @@ async function main(): Promise<void> {
       }
     },
     hasPersona: (accountId) => personaStore.getForAccount(accountId) !== null,
+    getPersona: (accountId) => resolvePersona(accountId),
   });
 
   // ── 面板 API 层（管理后台后端，进程内、独立端口、JWT）──────────────────────

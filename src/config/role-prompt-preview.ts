@@ -2,7 +2,7 @@
  * 角色 prompt 只读预览（change role-prompt-visibility，Option A；change prompt-viewer-persona-source 加人设来源标注）。
  *
  * 忠实渲染：调浏览角色**真实的** `previewPrompt()`（其内部用最小示例数据 + 真实 this.soul 调既有 buildPrompt），
- * 把结果原样供后台只读查看——看到的就是线上真用的指令文字与**真实人设**（实时数据为示例占位）。
+ * 把结果原样供后台只读查看——看到的就是线上真用的指令文字与人设口径（实时数据为示例占位）。
  *
  * 人设来源标注（prompt-viewer-persona-source）：对实现了 `personaSegments()` 的角色，把渲染 prompt 拆成
  * 「角色段 / 人设段」交替返回（`segments`），供前端给人设段加底色。两道诚实闸——① 每个人设片段在
@@ -16,15 +16,15 @@
  */
 
 import type { BaseRole } from '../agents/base-role.js';
+import type { Soul } from '../soul/types.js';
 import { getCatalogItem } from './role-catalog.js';
 import { PUBLISH_PREVIEW_BUILDERS, IMAGE_PROMPT_PREVIEW_BUILDERS } from '../publish-agent/prompts-preview.js';
 import type { RolePromptView, RolePromptSegment } from '../panel/types.js';
 
 const PLACEHOLDER_NOTE = '实时数据为示例占位（线上调用时由系统填入真实值）；人设为当前账号真实人设。';
-// 发布侧忠实渲染的说明（change publish-prompt-preview）：发布人设为内置默认、不随账号切换。
-const PUBLISH_PLACEHOLDER_NOTE = '实时数据为示例占位（线上调用时由系统填入真实值）；发布侧人设为内置默认、不随账号切换。';
-// 发布侧带 accountId 预览时的诚实标注：不随账号切、不做账号回落。
-const PUBLISH_ACCOUNT_NOTE = '发布侧 prompt 的人设为内置默认、不随账号切换；预览按内置默认渲染（与所选账号无关）。';
+// 发布侧忠实渲染的说明：默认用示例输入 + 示例人设；选账号时预览提供方可替换为该账号人设。
+const PUBLISH_PLACEHOLDER_NOTE = '实时数据为示例占位（线上调用时由系统填入真实值）；发布侧预览使用示例人设。';
+const PUBLISH_ACCOUNT_NOTE = '实时数据为示例占位（线上调用时由系统填入真实值）；发布侧预览已使用所选账号人设。';
 // 图像角色的图片指令说明（change publish-prompt-preview 补图片类）。
 const IMAGE_PREVIEW_NOTE =
   '发给文生图模型的图片指令（非大模型文本 prompt）：主体由「配图指令」角色按正文产出（此处为示例），系统统一追加下方固定风格基底；配图用全局图片模型生成。';
@@ -99,13 +99,13 @@ export interface RolePromptProvider {
   /**
    * 取某角色 prompt 只读预览。未知/非文本/无预览/失败 → available:false + 诚实 note。
    * 可选 accountId（change prompt-preview-persona-selector）：给定则按该账号人设渲染、回显账号 +
-   * 无人设行时诚实标注回落默认；缺省则按系统默认人设（行为与扩展前逐字一致）。
+   * 无人设行时诚实标注回落示例人设；缺省则按示例人设（行为与扩展前兼容）。
    */
   get(roleId: string, accountId?: string): RolePromptView;
 }
 
 /**
- * 预览的账号口径注入（change prompt-preview-persona-selector）。两者皆缺省 → 退化为「恒系统默认人设」旧行为。
+ * 预览的账号口径注入（change prompt-preview-persona-selector）。两者皆缺省 → 退化为「恒示例人设」行为。
  */
 export interface RolePromptProviderOptions {
   /**
@@ -115,6 +115,8 @@ export interface RolePromptProviderOptions {
   withAccount?: <T>(accountId: string, fn: () => T) => T;
   /** 该账号是否真有人设行（不回落判定，用于诚实回落标注）；缺省视为「无从判定」→ 不标 fallback。 */
   hasPersona?: (accountId: string) => boolean;
+  /** 取选定账号的真实人设；返回 null 表示无人设，发布侧预览回落示例人设并诚实标注。 */
+  getPersona?: (accountId: string) => Soul | null;
 }
 
 const FALLBACK_NOTE = '该账号未绑定人设（运行会被诚实拒绝，no_persona）；此预览按示例人设渲染、仅供查看；实时数据为示例占位（线上调用时由系统填入真实值）。';
@@ -128,7 +130,7 @@ export function createRolePromptProvider(
   opts: RolePromptProviderOptions = {},
 ): RolePromptProvider {
   // 单角色渲染（不含账号口径切换）：未知/非文本/无预览/失败 → available:false + 诚实 note。
-  const render = (roleId: string): RolePromptView => {
+  const render = (roleId: string, publishSoul?: Soul): RolePromptView => {
     const item = getCatalogItem(roleId);
     if (!item) return { roleId, prompt: null, available: false, note: '未知角色' };
     if (item.llmKind !== 'text') {
@@ -155,14 +157,14 @@ export function createRolePromptProvider(
       }
       return safePreview(roleId, inst);
     }
-    // 发布侧文本角色（change publish-prompt-preview）：用示例输入调既有 build*Prompt 忠实渲染。
-    // 无来源段（发布人设为内置默认、不随账号切）；渲染抛错优雅降级、绝不连累发布闭环。
+    // 发布侧文本角色（change publish-prompt-preview）：用示例输入调既有 build*Prompt 忠实渲染；
+    // 可由账号口径传入真实人设替换示例人设。渲染抛错优雅降级、绝不连累发布闭环。
     const buildPreview = PUBLISH_PREVIEW_BUILDERS[roleId];
     if (!buildPreview) {
       return { roleId, prompt: null, available: false, note: '该角色暂不支持预览' };
     }
     try {
-      return { roleId, prompt: buildPreview(), available: true, note: PUBLISH_PLACEHOLDER_NOTE };
+      return { roleId, prompt: buildPreview(publishSoul), available: true, note: PUBLISH_PLACEHOLDER_NOTE };
     } catch (e) {
       return { roleId, prompt: null, available: false, note: `预览不可用：${(e as Error).message}` };
     }
@@ -170,19 +172,23 @@ export function createRolePromptProvider(
 
   return {
     get(roleId: string, accountId?: string): RolePromptView {
-      // 无 accountId 或未注入 withAccount → 旧行为（系统默认人设），不附账号字段。
+      // 无 accountId 或未注入 withAccount → 示例人设预览，不附账号字段。
       if (!accountId || !opts.withAccount) return render(roleId);
-      // 发布侧（change publish-prompt-preview）：人设为内置默认、不随账号切——不切账号口径、不做 personaFallback、
-      // 不回显 accountId（避免前端「人设来自账号」误导）。仅**文本**发布角色在可用时标注「不随账号切换」；
-      // 图像角色无人设，保留其自身图片指令说明。
       const pubItem = getCatalogItem(roleId);
       if (pubItem?.group === 'publish') {
-        const pubView = render(roleId);
-        if (pubView.available && pubItem.llmKind === 'text') {
-          return { ...pubView, note: PUBLISH_ACCOUNT_NOTE };
-        }
-        return pubView;
+        // 图像角色无人设，保留其自身图片指令说明。
+        if (pubItem.llmKind !== 'text') return render(roleId);
+        const persona = opts.getPersona?.(accountId) ?? null;
+        const fallback = !!opts.getPersona && persona == null;
+        const pubView = render(roleId, persona ?? undefined);
+        return {
+          ...pubView,
+          accountId,
+          ...(pubView.available ? { note: fallback ? FALLBACK_NOTE : PUBLISH_ACCOUNT_NOTE } : {}),
+          ...(fallback ? { personaFallback: true } : {}),
+        };
       }
+      if (!opts.withAccount) return render(roleId);
       // 选定账号口径：切预览账号 → 同步渲染 → finally 还原（由 withAccount 保证，含渲染抛错路径）。
       const view = opts.withAccount(accountId, () => render(roleId));
       // 诚实标注（persona-driven-content-pipeline：default 账号已删、不再特判）：无人设行即标 personaFallback

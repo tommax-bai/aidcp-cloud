@@ -545,7 +545,7 @@ export interface PanelRolePromptPreview {
   /**
    * 取某角色 prompt 的只读预览（纯读，无写）。
    * 可选 `accountId`（change prompt-preview-persona-selector）：给定则按该账号人设渲染；
-   * 缺省则按系统默认人设（行为与扩展前一致）。
+   * 缺省则按示例人设（行为与扩展前兼容）。
    */
   get(roleId: string, accountId?: string): RolePromptView;
 }
