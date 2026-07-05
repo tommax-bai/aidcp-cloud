@@ -293,6 +293,15 @@ function createRequestHandler(
     // 通知联系人名册（change notification-contact-registry）：联系人列表。
     // accountId 给定＝按账号过滤；缺省＝全账号合并视图（运营便利，每行带 accountId、写入按行账号路由隔离）。
     // 未注入 503；缺表由 store 回落空。
+    if (method === 'POST' && url === '/api/llm-usage/prices/refresh') {
+      if (!deps.billingPriceRefresh) {
+        sendJson(res, 503, { error: 'billing_price_refresh_unavailable' });
+        return;
+      }
+      sendJson(res, 200, await deps.billingPriceRefresh.refresh());
+      return;
+    }
+
     if (method === 'GET' && url === '/api/notification/contacts') {
       if (!deps.notificationContact) {
         sendJson(res, 503, { error: 'notification_contact_unavailable' });

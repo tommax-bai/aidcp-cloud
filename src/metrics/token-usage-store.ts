@@ -10,6 +10,15 @@ const DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const MAX_RANGE_DAYS = 31;
 const MAX_RANGE_MS = MAX_RANGE_DAYS * 24 * 60 * 60 * 1000;
 const UNKNOWN_PROVIDER = 'unknown';
+const DASHSCOPE_PROVIDER = 'dashscope';
+const VOLCENGINE_PROVIDER = 'volcengine';
+
+const EFFECTIVE_PROVIDER_SQL = `CASE
+  WHEN provider <> 'unknown' THEN provider
+  WHEN lower(model) LIKE 'doubao%' OR lower(model) LIKE 'ep-%' THEN 'volcengine'
+  WHEN lower(model) LIKE 'qwen%' OR lower(model) LIKE 'deepseek%' THEN 'dashscope'
+  ELSE provider
+END`;
 
 export const TOKEN_USAGE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS llm_token_usage (
@@ -195,6 +204,15 @@ export interface LlmBillingPriceSnapshotInput {
   sourceSyncedAtMs?: number;
 }
 
+export interface LlmBillingPriceTarget {
+  usageDay: string;
+  provider: string;
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
 export interface TokenUsageStoreOptions {
   pool?: pg.Pool;
   flushMs?: number;
@@ -359,6 +377,50 @@ export class TokenUsageStore {
     return written;
   }
 
+  async billingPriceTargets(usageDays: string[]): Promise<LlmBillingPriceTarget[]> {
+    const days = Array.from(new Set(usageDays.map((d) => d.trim()).filter(Boolean)));
+    if (days.length === 0) return [];
+    const { rows } = await this.pool.query<{
+      usage_day: string;
+      provider: string;
+      model: string;
+      prompt_tokens: string;
+      completion_tokens: string;
+      total_tokens: string;
+    }>(
+      `WITH normalized AS (
+         SELECT (bucket_start AT TIME ZONE 'Asia/Shanghai')::date AS usage_day,
+                ${EFFECTIVE_PROVIDER_SQL} AS provider,
+                model,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens
+           FROM llm_token_usage
+          WHERE (bucket_start AT TIME ZONE 'Asia/Shanghai')::date = ANY($1::date[])
+       )
+       SELECT usage_day::text AS usage_day,
+              provider,
+              model,
+              SUM(prompt_tokens)::bigint AS prompt_tokens,
+              SUM(completion_tokens)::bigint AS completion_tokens,
+              SUM(total_tokens)::bigint AS total_tokens
+         FROM normalized
+        WHERE provider <> 'unknown'
+        GROUP BY usage_day, provider, model
+        HAVING SUM(total_tokens) > 0
+        ORDER BY usage_day DESC, provider, model`,
+      [days],
+    );
+    return rows.map((r) => ({
+      usageDay: r.usage_day,
+      provider: r.provider,
+      model: r.model,
+      promptTokens: Number(r.prompt_tokens),
+      completionTokens: Number(r.completion_tokens),
+      totalTokens: Number(r.total_tokens),
+    }));
+  }
+
   async usage(q: LlmUsageQuery = {}): Promise<LlmUsagePayload> {
     const nowMs = Date.now();
     let toMs = q.toMs ?? nowMs;
@@ -396,7 +458,7 @@ export class TokenUsageStore {
     }
     if (q.provider) {
       params.push(q.provider);
-      clauses.push(`provider = $${params.length}`);
+      clauses.push(`${EFFECTIVE_PROVIDER_SQL} = $${params.length}`);
     }
     if (q.model) {
       params.push(q.model);
@@ -430,7 +492,7 @@ export class TokenUsageStore {
       `WITH usage_rows AS (
          SELECT (bucket_start AT TIME ZONE 'Asia/Shanghai')::date AS usage_day,
                 to_char(bucket_start AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD') AS day,
-                account_id, role, provider, model,
+                account_id, role, ${EFFECTIVE_PROVIDER_SQL} AS provider, model,
                 SUM(prompt_tokens)::bigint     AS prompt_tokens,
                 SUM(completion_tokens)::bigint AS completion_tokens,
                 SUM(total_tokens)::bigint      AS total_tokens,
@@ -439,7 +501,7 @@ export class TokenUsageStore {
            FROM llm_token_usage
           WHERE bucket_start >= to_timestamp($1::bigint / 1000.0)
             AND bucket_start <  to_timestamp($2::bigint / 1000.0)${filter}
-          GROUP BY usage_day, day, account_id, role, provider, model
+          GROUP BY usage_day, day, account_id, role, ${EFFECTIVE_PROVIDER_SQL}, model
        )
        SELECT u.day, u.usage_day::text AS usage_day,
               u.account_id, u.role, u.provider, u.model,
@@ -464,10 +526,14 @@ export class TokenUsageStore {
                 ELSE NULL
               END AS pricing_basis
          FROM usage_rows u
-         LEFT JOIN llm_billing_price_snapshot p
-           ON p.provider = u.provider
-          AND p.model = u.model
-          AND p.usage_day = u.usage_day
+         LEFT JOIN LATERAL (
+           SELECT p.*
+             FROM llm_billing_price_snapshot p
+            WHERE p.provider = u.provider
+              AND p.model = u.model
+            ORDER BY p.usage_day DESC, p.source_synced_at DESC
+            LIMIT 1
+         ) p ON true
         ORDER BY u.day DESC, u.total_tokens DESC`,
       params,
     );
@@ -531,4 +597,13 @@ export class TokenUsageStore {
 function normalizeDim(value: string | null | undefined, fallback: string): string {
   const s = value?.trim();
   return s ? s : fallback;
+}
+
+export function inferBillingProvider(provider: string | null | undefined, model: string | null | undefined): string {
+  const p = normalizeDim(provider, UNKNOWN_PROVIDER);
+  if (p !== UNKNOWN_PROVIDER) return p;
+  const m = (model ?? '').trim().toLowerCase();
+  if (m.startsWith('doubao') || m.startsWith('ep-')) return VOLCENGINE_PROVIDER;
+  if (m.startsWith('qwen') || m.startsWith('deepseek')) return DASHSCOPE_PROVIDER;
+  return UNKNOWN_PROVIDER;
 }

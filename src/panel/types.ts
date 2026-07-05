@@ -31,6 +31,7 @@ import type {
 } from './panel-store.js';
 import type { PublishApprovalPayload, ApprovalWriteResult, PublishApprovalPreflightResult } from '../feishu/index.js';
 import type { LlmUsageQuery, LlmUsagePayload } from '../metrics/token-usage-store.js';
+import type { BillingPriceRefreshResult } from '../metrics/billing-price-refresh.js';
 import type { NotificationContact, NotificationContactManual } from '../cache/notification-contact-store.js';
 import type { ThinkingMode, ThinkingModeApi } from '../config/role-catalog.js';
 import type { AlertStore } from '../alerts/index.js';
@@ -192,6 +193,8 @@ export interface PanelDeps {
    * 纯只读预聚合表（按账号/角色/模型/10 分钟桶）；缺表回落空；不写、不碰风控/发布/edge。
    */
   tokenUsage?: { usage(query: LlmUsageQuery): Promise<LlmUsagePayload> };
+  /** Manual billing-derived provider/model price refresh. Never scheduled; invoked only by panel action. */
+  billingPriceRefresh?: { refresh(): Promise<BillingPriceRefreshResult> };
   /**
    * 通知联系人名册（change notification-contact-registry）。未注入则 /api/notification/contacts* 返回 503。
    * 读=联系人列表（accountId 给定＝按账号；缺省＝全账号合并视图，每行带 accountId）；

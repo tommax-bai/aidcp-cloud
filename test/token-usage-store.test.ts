@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { TokenUsageStore, TOKEN_USAGE_SCHEMA_SQL } from '../src/metrics/token-usage-store.js';
+import { inferBillingProvider, TokenUsageStore, TOKEN_USAGE_SCHEMA_SQL } from '../src/metrics/token-usage-store.js';
 
 test('schema keeps provider dimension and billing-derived price snapshots', () => {
   assert.match(TOKEN_USAGE_SCHEMA_SQL, /provider\s+TEXT\s+NOT NULL DEFAULT 'unknown'/);
@@ -9,6 +9,15 @@ test('schema keeps provider dimension and billing-derived price snapshots', () =
   assert.match(TOKEN_USAGE_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS llm_billing_price_snapshot/);
   assert.match(TOKEN_USAGE_SCHEMA_SQL, /idx_llm_token_usage_provider_model_bucket/);
   assert.doesNotMatch(TOKEN_USAGE_SCHEMA_SQL, /qwen-turbo|doubao|public price/i);
+});
+
+test('inferBillingProvider maps legacy unknown rows by model name', () => {
+  assert.equal(inferBillingProvider('unknown', 'qwen3.7-plus'), 'dashscope');
+  assert.equal(inferBillingProvider('unknown', 'deepseek-v4-flash'), 'dashscope');
+  assert.equal(inferBillingProvider('unknown', 'doubao-seed-character-260628'), 'volcengine');
+  assert.equal(inferBillingProvider('unknown', 'ep-abc'), 'volcengine');
+  assert.equal(inferBillingProvider('dashscope', 'doubao-seed'), 'dashscope');
+  assert.equal(inferBillingProvider('unknown', 'other-model'), 'unknown');
 });
 
 test('purgeOlderThan deletes old buckets and returns row count', async () => {
@@ -208,7 +217,8 @@ test('usage returns billing-backed cost estimate when snapshot joins', async () 
   } as unknown as pg.Pool;
   const store = new TokenUsageStore({ pool });
   const payload = await store.usage({ fromMs: 1783200000000, toMs: 1783286400000 });
-  assert.match(seenSql[0] + seenSql[1], /LEFT JOIN llm_billing_price_snapshot/);
+  assert.match(seenSql[0] + seenSql[1], /LEFT JOIN LATERAL/);
+  assert.match(seenSql[0] + seenSql[1], /ORDER BY p\.usage_day DESC/);
   assert.equal(payload.rows[0].provider, 'dashscope');
   assert.deepEqual(payload.rows[0].costEstimate, {
     amount: 0.1234,
@@ -218,4 +228,40 @@ test('usage returns billing-backed cost estimate when snapshot joins', async () 
     syncedAtMs: 1783200000000,
     pricingBasis: 'input_output_tokens',
   });
+});
+
+test('billingPriceTargets groups T-1/T-2 usage with inferred provider', async () => {
+  const seen: Array<{ sql: string; params: unknown[] | undefined }> = [];
+  const pool = {
+    query: async (sql: string, params?: unknown[]) => {
+      seen.push({ sql, params });
+      return {
+        rows: [
+          {
+            usage_day: '2026-07-04',
+            provider: 'dashscope',
+            model: 'deepseek-v4-flash',
+            prompt_tokens: '100',
+            completion_tokens: '50',
+            total_tokens: '150',
+          },
+        ],
+      };
+    },
+  } as unknown as pg.Pool;
+  const store = new TokenUsageStore({ pool });
+  const targets = await store.billingPriceTargets(['2026-07-04', '2026-07-03', '2026-07-04']);
+  assert.match(seen[0].sql, /lower\(model\) LIKE 'deepseek%'/);
+  assert.match(seen[0].sql, /provider <> 'unknown'/);
+  assert.deepEqual(seen[0].params, [['2026-07-04', '2026-07-03']]);
+  assert.deepEqual(targets, [
+    {
+      usageDay: '2026-07-04',
+      provider: 'dashscope',
+      model: 'deepseek-v4-flash',
+      promptTokens: 100,
+      completionTokens: 50,
+      totalTokens: 150,
+    },
+  ]);
 });

@@ -27,6 +27,7 @@ import {
   resolveProviderEnvKey,
 } from './llm/index.js';
 import { TokenUsageStore } from './metrics/token-usage-store.js';
+import { createBillingPriceRefresh } from './metrics/billing-price-refresh.js';
 import { startRetentionSweeper } from './panel/retention-sweeper.js';
 import { SimplePlanner } from './planner/index.js';
 import { PgAnchorCache, BotChatStore, ConceptStore, LikedNoteStore, ValuableCommentStore, NotificationContactStore, InteractionFeedStore, CuratedContentStore, topicKeysFromTitle } from './cache/index.js';
@@ -485,6 +486,11 @@ async function main(): Promise<void> {
     console.warn('[aidcp-cloud] token 用量记账初始化失败（用量将不落库，绝不影响 LLM 调用）:', (err as Error).message);
   }
   // 退出前 flush 末窗（有界 3s，防 PG 不可达时 close 挂住退出）。
+  const billingPriceRefresh = createBillingPriceRefresh({
+    tokenUsage: tokenUsageStore,
+    credentials: credentialStore,
+    env: process.env,
+  });
   const flushTokenUsageOnExit = (sig: string): void => {
     console.log(`[aidcp-cloud] 收到 ${sig}，flush token 用量后退出`);
     void Promise.race([
@@ -2238,6 +2244,7 @@ async function main(): Promise<void> {
           persona: personaPanel,
           // token 用量统计（change llm-token-usage-stats）。同一记账 store 实例（共享专用池），纯只读查询。
           tokenUsage: tokenUsageStore,
+          billingPriceRefresh,
           // 通知联系人名册（change notification-contact-registry）。同一记录 store 实例：读=按账号联系人列表、写=人工字段（微信/标签/备注）。
           notificationContact: notificationContactStore,
           // 精选内容后台管理（change curated-content-admin-page）。同一精选语料 store 实例：读=按账号列表/筛选面、写=删单条/清空壳行。
