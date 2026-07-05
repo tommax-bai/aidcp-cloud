@@ -241,8 +241,7 @@ export class CommentScheduler {
       pusher: this.deps.pusher,
       edgeId,
       dedup: this.deps.dedupFor(accountId),
-      sort: 'comprehensive',
-      timeWindow: 'all',
+      // Targeted title search relies on exact noteId matching; native filters add no value here.
       stepTimeoutMs: this.deps.stepTimeoutMs,
       logger: log,
     });

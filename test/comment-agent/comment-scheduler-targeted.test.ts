@@ -211,8 +211,8 @@ describe('CommentScheduler.triggerTargeted happy path', () => {
 
     const search = edge.pushed.find((e) => e.type === 'search.execute');
     assert.ok(search, '应下发 search.execute');
-    assert.equal(search.payload.sort, 'comprehensive'); // 不沿用 /comment 的 most_collected
-    assert.equal(search.payload.timeWindow, 'all'); // 不沿用 one_day（老笔记须可检索）
+    assert.equal(search.payload.sort, undefined); // 定向搜索不驱动原生筛选面板
+    assert.equal(search.payload.timeWindow, undefined); // 不沿用 /comment 的 one_day
     assert.equal((search.payload.keyword as string).length, TARGETED_SEARCH_TERM_MAX_LEN);
     assert.equal(search.payload.keyword, longTitle.slice(0, TARGETED_SEARCH_TERM_MAX_LEN));
 
