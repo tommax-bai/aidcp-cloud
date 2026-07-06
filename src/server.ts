@@ -1168,13 +1168,13 @@ async function main(): Promise<void> {
     // 按昵称解析目标账号（严格只认昵称）→ 落 publish_log.account_id + 命令定向到该账号在线节点；缺省 → 唯一真实账号。
     // 回执据**真实编排终态**判 ok/level：成功（已生成进人审）=绿、未触发/未产出=黄、失败/不可用=红，并把失败原因带进正文。
     // 红线：「触发动作成功」≠「发帖成功」——绝不把 failed/skipped 染成绿色 ✅ 误导人以为已发。
-    publish: async (nickname?: string) => {
+    publish: async (nickname?: string, options?: { sourceChatId?: string }) => {
       if (!publishScheduler) {
         return { ok: false, level: 'error', title: '发帖未触发', message: '发帖触发器未就绪（PG / 概念池不可用），未发起任何编排。' };
       }
       const acct = await resolveAccountByNickname(nickname); // 找不到/重名 → 抛错，runPublish 走 fail 分支（红 ❌）
       const note = `（账号昵称 \`${nickname ?? '(唯一账号)'}\`；人工授权越过风控，但发布前仍需飞书人审 approved=true 才会真发）`;
-      const o = await publishScheduler.triggerManual(acct);
+      const o = await publishScheduler.triggerManual(acct, { manualApprovalChatId: options?.sourceChatId });
       // 触发动作本身被拒（解析不出唯一账号等）：没成功但非崩 → 黄色 ⚠️。
       if (o.result !== 'triggered') {
         return { ok: false, level: 'warning', title: '发帖未触发', message: `账号 \`${acct}\` 未触发：${o.reason}` };
@@ -1188,6 +1188,16 @@ async function main(): Promise<void> {
       // 跳过：触发了但没产出稿件（已有编排在跑 / 选题判定不发）→ 黄色 ⚠️，非失败但也别染绿。
       if (o.status === 'skipped') {
         return { ok: false, level: 'warning', title: '发帖未产出', message: `${head}${why}` };
+      }
+      if (o.approvalCard && !o.approvalCard.sent) {
+        const target = o.approvalCard.targetChatId ? `目标会话 \`${o.approvalCard.targetChatId}\`` : '未解析到目标会话';
+        const error = o.approvalCard.error ? `\n发卡错误：${o.approvalCard.error}` : '';
+        return {
+          ok: false,
+          level: 'warning',
+          title: '草稿已生成，审批卡未送达',
+          message: `${head}\n已生成待审草稿，但审批卡没有送达（${target}）。${error}\n请在控制台审批，或修复飞书会话权限后重试。`,
+        };
       }
       // 正常出口（pending_approval / published / draft / needs_review）：已生成并进入人审或已发 → 绿色 ✅。
       return { ok: true, level: 'success', title: '已触发发帖编排', message: `${head}\n${note}` };

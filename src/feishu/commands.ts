@@ -168,6 +168,11 @@ export interface CommentCommandReceipt {
   message: string;
 }
 
+export interface PublishCommandOptions {
+  /** Source Feishu conversation that delivered this command; approval cards should prefer this target. */
+  sourceChatId?: string;
+}
+
 /** 账号状态查询/启停的底层动作（落到云端调度器；MVP 可打桩） */
 export interface CommandActions {
   /** 查询账号状态，返回一段可读描述。accountId 缺省由执行层解析唯一真实账号。 */
@@ -185,7 +190,7 @@ export interface CommandActions {
    * 返回结构化回执 PublishCommandReceipt：执行层据**编排终态**判 ok/level（成功=绿、未触发/未产出=黄、失败=红），
    * 并把失败原因带进 message——杜绝「触发成功 ≠ 编排成功」被一律染成绿色 ✅ 的误导。
    */
-  publish?(nickname?: string): Promise<PublishCommandReceipt> | PublishCommandReceipt;
+  publish?(nickname?: string, options?: PublishCommandOptions): Promise<PublishCommandReceipt> | PublishCommandReceipt;
   /**
    * 手动触发一次按需评论任务（CommentScheduler 手动扳机）。
    * nickname 按昵称指定评哪个账号（执行层解析为真实 id，严格只认昵称）；缺省由执行层解析唯一真实账号。
@@ -240,7 +245,7 @@ export class CommandRouter {
       case 'publish-test':
         return this.runPublishTest(cmd, context?.chatId);
       case 'publish':
-        return this.runPublish(cmd);
+        return this.runPublish(cmd, context?.chatId);
       case 'comment':
         return this.runComment(cmd);
       case 'bind':
@@ -271,7 +276,7 @@ export class CommandRouter {
     }
   }
 
-  private async runPublish(cmd: ParsedCommand): Promise<CommandResult> {
+  private async runPublish(cmd: ParsedCommand, sourceChatId?: string): Promise<CommandResult> {
     if (!this.actions.publish) {
       return this.fail(cmd, '发帖未接线', new Error('publish action not wired'));
     }
@@ -279,7 +284,7 @@ export class CommandRouter {
       // nickname → 执行层按昵称解析真实账号（严格只认昵称）；解析失败由执行层抛错、走 fail 分支。
       // 回执的 ok/level/title/message 由执行层据**真实编排终态**给出（成功绿、未触发/未产出黄、失败红），
       // 路由层不再一律当成功——杜绝「触发成功但编排 failed」被染成绿色 ✅。
-      const r = await this.actions.publish(cmd.nickname);
+      const r = await this.actions.publish(cmd.nickname, { sourceChatId });
       return {
         command: cmd.raw,
         ok: r.ok,

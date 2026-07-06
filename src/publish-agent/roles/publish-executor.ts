@@ -63,6 +63,15 @@ export interface BotChatStore {
   getDefaultChat(): Promise<{ chatId: string } | null>;
 }
 
+type ApprovalCardTargetSource = 'manual_source' | 'default_chat' | 'none';
+
+interface ApprovalCardSendResult {
+  sent: boolean;
+  targetChatId?: string;
+  targetSource: ApprovalCardTargetSource;
+  error?: string;
+}
+
 export interface PublishExecutorDeps {
   store: PublishLogStore;
   messenger?: ApprovalMessenger;
@@ -249,7 +258,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
 
     // 发飞书审批卡（带真实标题+正文+话题）。人审通过即触发下发段发「卡片上所审的这份草稿」（不重新生成）。
     const requestId = `publish-${recordId}`;
-    await this.trySendApprovalCard(assembled, title, requestId, topics);
+    const approvalCard = await this.trySendApprovalCard(assembled, title, requestId, topics, context);
 
     // 陪伴界面（edge-companion-ui 8.1）：候审状态推给在线边缘（发布卡自动展开到「等你确认」）。
     // 失败自吞（通知层 best-effort），绝不影响候审主链路。
@@ -259,8 +268,11 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       /* best-effort */
     }
 
-    this.logger.log(`[PublishExecutor] 草稿待审 recordId=${recordId} account=${accountId} requestId=${requestId}（已发审批卡，候审不让位、无超时）`);
-    return { recordId, status: 'pending_approval', dispatched: false, envelope: null, completedAt: this.clock() };
+    const cardStatus = approvalCard.sent
+      ? `审批卡已发 source=${approvalCard.targetSource} chat=${approvalCard.targetChatId}`
+      : `审批卡未送达 source=${approvalCard.targetSource}${approvalCard.error ? ` error=${approvalCard.error}` : ''}`;
+    this.logger.log(`[PublishExecutor] 草稿待审 recordId=${recordId} account=${accountId} requestId=${requestId}（${cardStatus}；候审不让位、无超时）`);
+    return { recordId, status: 'pending_approval', dispatched: false, envelope: null, completedAt: this.clock(), approvalCard };
   }
 
   private withReferenceImageAudit(
@@ -313,24 +325,44 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     title: string,
     requestId: string,
     topics: string[],
-  ): Promise<void> {
-    if (!this.messenger || !this.botChatStore) return;
-    try {
-      const chat = await this.botChatStore.getDefaultChat();
-      if (chat) {
-        // 必须发"已构建的交互式卡片"（含通过/取消按钮 + requestId 回调）；直接发原始数据对象飞书会 400。
-        const card = buildPublishApprovalCard({
-          requestId,
-          title,
-          content: assembled.finalContent,
-          tags: topics,
-        });
-        await this.messenger.sendApprovalCard(chat.chatId, card);
-        this.logger.log(`[PublishExecutor] 审批卡已发 chat=${chat.chatId} requestId=${requestId}`);
-      }
-    } catch (err) {
-      this.logger.warn(`[PublishExecutor] 发审批卡失败: ${err instanceof Error ? err.message : String(err)}`);
+    context: PipelineContext<PipelineFields>,
+  ): Promise<ApprovalCardSendResult> {
+    if (!this.messenger) {
+      return { sent: false, targetSource: 'none', error: 'messenger_not_configured' };
     }
+    const target = await this.resolveApprovalCardTarget(context);
+    if (!target.chatId) {
+      return { sent: false, targetSource: target.source, error: 'approval_chat_not_configured' };
+    }
+    try {
+      // 必须发"已构建的交互式卡片"（含通过/取消按钮 + requestId 回调）；直接发原始数据对象飞书会 400。
+      const card = buildPublishApprovalCard({
+        requestId,
+        title,
+        content: assembled.finalContent,
+        tags: topics,
+      });
+      await this.messenger.sendApprovalCard(target.chatId, card);
+      this.logger.log(`[PublishExecutor] 审批卡已发 source=${target.source} chat=${target.chatId} requestId=${requestId}`);
+      return { sent: true, targetChatId: target.chatId, targetSource: target.source };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`[PublishExecutor] 发审批卡失败 source=${target.source} chat=${target.chatId}: ${message}`);
+      return { sent: false, targetChatId: target.chatId, targetSource: target.source, error: message };
+    }
+  }
+
+  private async resolveApprovalCardTarget(context: PipelineContext<PipelineFields>): Promise<{
+    chatId?: string;
+    source: ApprovalCardTargetSource;
+  }> {
+    const trigger = context.get('trigger') as TriggerInput | undefined;
+    const manualChatId = trigger?.manualApprovalChatId?.trim();
+    if (manualChatId) return { chatId: manualChatId, source: 'manual_source' };
+
+    const chat = await this.botChatStore?.getDefaultChat();
+    if (chat?.chatId) return { chatId: chat.chatId, source: 'default_chat' };
+    return { source: 'none' };
   }
 
   private async handleAbort(

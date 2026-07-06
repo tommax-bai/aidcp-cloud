@@ -12,7 +12,7 @@
  * 复用 server 注入的 RiskController/各 Store 单例。
  */
 
-import type { PublishSourceReference, ReferenceImageSnapshot, TriggerInput } from './types.js';
+import type { PublishResult, PublishSourceReference, ReferenceImageSnapshot, TriggerInput } from './types.js';
 import type { Soul } from '../soul/types.js';
 import type { CuratedContentTypeFilter, CuratedSelectItem } from '../cache/curated-content-store.js';
 
@@ -45,8 +45,15 @@ export interface SchedulerRisk {
   canDo(action: 'publish'): boolean;
   getState(): { status: string };
 }
+export type SchedulerApprovalCardResult = NonNullable<PublishResult['approvalCard']>;
+export type SchedulerTriggerResult = {
+  status: string;
+  reason?: string;
+  runId?: string;
+  approvalCard?: SchedulerApprovalCardResult;
+};
 export interface SchedulerOrchestrator {
-  trigger(input: TriggerInput): Promise<{ status: string; reason?: string; runId?: string }>;
+  trigger(input: TriggerInput): Promise<SchedulerTriggerResult>;
 }
 
 export interface PublishSchedulerDeps {
@@ -86,12 +93,14 @@ export type TriggerOutcome =
   // reason = 触发原因（manual_feishu / concept_threshold(...) / risk_window(...)）；
   // status = 编排终态（pending_approval/published/draft 正常，failed/timeout/skipped 非正常）；
   // failureReason = 编排非正常收敛时的可读原因（来自编排器，供飞书回执 surface「为什么」）。
-  | { result: 'triggered'; reason: string; status: string; failureReason?: string }
+  | { result: 'triggered'; reason: string; status: string; failureReason?: string; approvalCard?: SchedulerApprovalCardResult }
   | { result: 'skipped'; reason: string }
   | { result: 'blocked'; reason: string };
 
 export interface ManualTriggerOptions {
   referenceNote?: ReferenceNote;
+  /** Feishu conversation that triggered manual publish; approval card should prefer it. */
+  manualApprovalChatId?: string;
 }
 
 const HOUR_MS = 3_600_000;
@@ -227,8 +236,8 @@ export class PublishScheduler {
     }
 
     const reason = byConcept ? `concept_threshold(${newConceptCount})` : `risk_window(${hoursSince.toFixed(1)}h)`;
-    const { status: triggeredStatus, failureReason } = await this.doTrigger(reason, false, accountId);
-    return { result: 'triggered', reason, status: triggeredStatus, failureReason };
+    const { status: triggeredStatus, failureReason, approvalCard } = await this.doTrigger(reason, false, accountId);
+    return { result: 'triggered', reason, status: triggeredStatus, failureReason, approvalCard };
   }
 
   /**
@@ -254,8 +263,8 @@ export class PublishScheduler {
     }
     const reason = opts?.referenceNote ? 'manual_reference' : 'manual_feishu';
     this.logger.log(`[PublishScheduler] 手动发布 account=${resolved} reason=${reason}：越过风控 canDo + 强制发布（人工授权），发布前飞书人审仍生效`);
-    const { status, failureReason } = await this.doTrigger(reason, true, resolved, opts?.referenceNote);
-    return { result: 'triggered', reason, status, failureReason };
+    const { status, failureReason, approvalCard } = await this.doTrigger(reason, true, resolved, opts?.referenceNote, opts?.manualApprovalChatId);
+    return { result: 'triggered', reason, status, failureReason, approvalCard };
   }
 
   /**
@@ -279,8 +288,8 @@ export class PublishScheduler {
       this.logger.warn(`[PublishScheduler] 排期扳机：账号 ${accountId} 风控拒绝(canDo=false) — 跳过`);
       return { result: 'blocked', reason: `risk_denied(status=${status})` };
     }
-    const { status: triggeredStatus, failureReason } = await this.doTrigger('scheduled_window', false, accountId);
-    return { result: 'triggered', reason: 'scheduled_window', status: triggeredStatus, failureReason };
+    const { status: triggeredStatus, failureReason, approvalCard } = await this.doTrigger('scheduled_window', false, accountId);
+    return { result: 'triggered', reason: 'scheduled_window', status: triggeredStatus, failureReason, approvalCard };
   }
 
   /** 发帖是否全局忙（供 ContentScheduler 全局串行）。任一 doTrigger 进行中即 true。 */
@@ -315,7 +324,8 @@ export class PublishScheduler {
     forced = false,
     accountId: string,
     referenceNote?: ReferenceNote,
-  ): Promise<{ status: string; failureReason?: string }> {
+    manualApprovalChatId?: string,
+  ): Promise<{ status: string; failureReason?: string; approvalCard?: SchedulerApprovalCardResult }> {
     const base = await this.buildTriggerInput(accountId);
     const referenceImages = referenceNote ? this.prepareReferenceImages(referenceNote) : [];
     let referenceNoteWithoutImages: Omit<ReferenceNote, 'images'> | undefined;
@@ -341,11 +351,14 @@ export class PublishScheduler {
           },
         }
       : { ...base, forced };
+    if (manualApprovalChatId?.trim()) {
+      input.manualApprovalChatId = manualApprovalChatId.trim();
+    }
     this.logger.log(`[PublishScheduler] 触发发帖编排 reason=${reason} forced=${forced} account=${input.accountId} newConcepts=${input.metrics.newConceptCount} liked=${input.metrics.likedSinceLastPublish}`);
     this.publishing = true;
     try {
       const res = await this.d.orchestrator.trigger(input);
-      return { status: res.status, failureReason: res.reason };
+      return { status: res.status, failureReason: res.reason, approvalCard: res.approvalCard };
     } finally {
       this.publishing = false;
     }

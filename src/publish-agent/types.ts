@@ -171,6 +171,11 @@ export interface TriggerInput {
    * 与发布命令定向下发（路由到绑定该账号的在线边缘节点）。
    */
   accountId?: string;
+  /**
+   * Manual Feishu command source conversation for publish approval routing.
+   * When present, PublishExecutor sends the approval card here before considering the default approval group.
+   */
+  manualApprovalChatId?: string;
 }
 
 /** ContentScout 输出 */
@@ -502,7 +507,7 @@ export interface GateDecision {
 /**
  * PublishExecutor 输出。
  * `pending_approval`（change decouple-publish-generation-from-dispatch）：生成候审段正常出口——
- * 终稿已落库、审批卡已发，编排到此收敛返回；真正下发由审批信号触发的下发段完成（不在本结果里）。
+ * 终稿已落库并尝试发审批卡，编排到此收敛返回；真正下发由审批信号触发的下发段完成（不在本结果里）。
  */
 export interface PublishResult {
   recordId: number | null;
@@ -515,6 +520,13 @@ export interface PublishResult {
    * 仅在 failed / timeout / skipped 等非正常出口填充，供上层（飞书回执）surface「为什么」，不再只给一个干瘪状态。
    */
   reason?: string;
+  /** Approval card delivery attempt for pending drafts; omitted when no card should be sent. */
+  approvalCard?: {
+    sent: boolean;
+    targetChatId?: string;
+    targetSource: 'manual_source' | 'default_chat' | 'none';
+    error?: string;
+  };
 }
 
 /**

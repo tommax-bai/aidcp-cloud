@@ -91,6 +91,104 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     assert.ok(JSON.stringify(sentCards[0]).includes('话题甲'), '审批卡话题取自 publishMetadata.topics');
   });
 
+  test('手动飞书 publish source chat 优先于默认群', async () => {
+    const sent: Array<{ chatId: string; card: any }> = [];
+    const role = new PublishExecutorRole({
+      store: { insert: async () => 43 },
+      messenger: { sendApprovalCard: async (chatId: string, card: any) => { sent.push({ chatId, card }); } },
+      botChatStore: {
+        getDefaultChat: async () => {
+          throw new Error('default chat should not be queried when manual source chat exists');
+        },
+      },
+      clock,
+      logger: silentLogger,
+    });
+
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('trigger', {
+      metrics: { hoursSinceLastPublish: 1, newConceptCount: 1, likedSinceLastPublish: 0 },
+      generateInput: { concepts: [], likedContents: [], soul: {} as any, recentPosts: [] },
+      recentPublished: [],
+      accountId: 'acc-test',
+      manualApprovalChatId: 'chat-private',
+    } as any);
+    ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('publishMetadata', makePublishMetadata());
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].chatId, 'chat-private');
+    assert.equal(ctx.get('publishResult')?.approvalCard?.sent, true);
+    assert.equal(ctx.get('publishResult')?.approvalCard?.targetSource, 'manual_source');
+  });
+
+  test('无手动 source chat 时回落默认审批群', async () => {
+    const sent: Array<{ chatId: string; card: any }> = [];
+    const role = new PublishExecutorRole({
+      store: { insert: async () => 44 },
+      messenger: { sendApprovalCard: async (chatId: string, card: any) => { sent.push({ chatId, card }); } },
+      botChatStore: { getDefaultChat: async () => ({ chatId: 'chat-default' }) },
+      clock,
+      logger: silentLogger,
+    });
+
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('publishMetadata', makePublishMetadata());
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].chatId, 'chat-default');
+    assert.equal(ctx.get('publishResult')?.approvalCard?.sent, true);
+    assert.equal(ctx.get('publishResult')?.approvalCard?.targetSource, 'default_chat');
+  });
+
+  test('审批卡发送失败 → pending_approval 仍诚实携带失败结果', async () => {
+    const warnings: string[] = [];
+    const logs: string[] = [];
+    const role = new PublishExecutorRole({
+      store: { insert: async () => 45 },
+      messenger: { sendApprovalCard: async () => { throw new Error('Feishu HTTP 400'); } },
+      botChatStore: { getDefaultChat: async () => ({ chatId: 'chat-default' }) },
+      clock,
+      logger: {
+        log: (...args: unknown[]) => logs.push(args.map(String).join(' ')),
+        warn: (...args: unknown[]) => warnings.push(args.map(String).join(' ')),
+        error() {},
+      },
+    });
+
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('publishMetadata', makePublishMetadata());
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const result = ctx.get('publishResult');
+    assert.equal(result?.status, 'pending_approval');
+    assert.deepEqual(result?.approvalCard, {
+      sent: false,
+      targetChatId: 'chat-default',
+      targetSource: 'default_chat',
+      error: 'Feishu HTTP 400',
+    });
+    assert.match(warnings.join('\n'), /发审批卡失败/);
+    assert.match(logs.join('\n'), /审批卡未送达/);
+    assert.doesNotMatch(logs.join('\n'), /已发审批卡/);
+  });
+
   test('manual_review → 同 auto_publish：落库 pending_approval + 发审批卡（人审为常态闸）', async () => {
     const insertedRecords: any[] = [];
     const sentCards: any[] = [];

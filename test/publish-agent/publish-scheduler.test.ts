@@ -23,6 +23,7 @@ interface Knobs {
 
 function build(k: Knobs = {}) {
   const triggered: string[] = [];
+  const inputs: any[] = [];
   const deps: PublishSchedulerDeps = {
     conceptStore: {
       countNewSince: async () => k.newConcepts ?? 0,
@@ -39,14 +40,14 @@ function build(k: Knobs = {}) {
     resolveRisk: async () => ({ canDo: () => k.canDo ?? true, getState: () => ({ status: k.status ?? 'normal' }) }),
     resolveSingleAccountId: async () => 'acc-test',
     isPersonaBound: k.personaBound === undefined ? undefined : () => k.personaBound === true,
-    orchestrator: { trigger: async (input) => { triggered.push(JSON.stringify(input.metrics)); return { status: k.orchestratorStatus ?? 'draft', reason: k.orchestratorReason }; } },
+    orchestrator: { trigger: async (input) => { triggered.push(JSON.stringify(input.metrics)); inputs.push(input); return { status: k.orchestratorStatus ?? 'draft', reason: k.orchestratorReason }; } },
     soul: {} as PublishSchedulerDeps['soul'],
     conceptThreshold: k.conceptThreshold ?? 5,
     minHoursBetween: k.minHoursBetween ?? 24,
     clock: () => T,
     logger: silent,
   };
-  return { scheduler: new PublishScheduler(deps), triggered };
+  return { scheduler: new PublishScheduler(deps), triggered, inputs };
 }
 
 describe('AC-PUB-SCHED PublishScheduler 三扳机', () => {
@@ -127,5 +128,22 @@ describe('AC-PUB-SCHED PublishScheduler 三扳机', () => {
     assert.equal(input.metrics.newConceptCount, 3);
     assert.equal(input.metrics.likedSinceLastPublish, 1);
     assert.deepEqual(input.recentPublished, ['上一篇']);
+  });
+
+  it('手动 /publish 可携带审批卡目标 chatId 到 TriggerInput', async () => {
+    const { scheduler, inputs } = build({ newConcepts: 0 });
+    const o = await scheduler.triggerManual('acc-test', { manualApprovalChatId: 'chat-private' });
+    assert.equal(o.result, 'triggered');
+    assert.equal(inputs[0].manualApprovalChatId, 'chat-private');
+  });
+
+  it('自动/排期触发不携带手动审批卡目标 chatId', async () => {
+    const auto = build({ newConcepts: 10, canDo: true });
+    await auto.scheduler.checkAndMaybeTrigger();
+    assert.equal(auto.inputs[0].manualApprovalChatId, undefined);
+
+    const scheduled = build({ newConcepts: 0, canDo: true });
+    await scheduled.scheduler.triggerScheduled('acc-test');
+    assert.equal(scheduled.inputs[0].manualApprovalChatId, undefined);
   });
 });

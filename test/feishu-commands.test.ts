@@ -301,6 +301,20 @@ test('CommandRouter: publish 成功 → 回执 ok:true / level:success（绿 ✅
   assert.match(res.title, /已触发发帖编排/);
 });
 
+test('CommandRouter: publish 把来源 chatId 透传给执行层', async () => {
+  let seen: { nickname?: string; sourceChatId?: string } | null = null;
+  const router = new CommandRouter({
+    ...makeActions().actions,
+    publish: async (nickname, options) => {
+      seen = { nickname, sourceChatId: options?.sourceChatId };
+      return { ok: true, level: 'success', title: '已触发发帖编排', message: '编排状态 pending_approval' };
+    },
+  });
+  const res = await router.handle('/aidcp publish Tmax', { chatId: 'chat-private' });
+  assert.equal(res.ok, true);
+  assert.deepEqual(seen, { nickname: 'Tmax', sourceChatId: 'chat-private' });
+});
+
 test('CommandRouter: publish 抛错（账号解析失败）→ honest fail 红色回执', async () => {
   const router = new CommandRouter({
     ...makeActions().actions,
