@@ -33,6 +33,13 @@ import { buildEdgeCommentSteps, type EdgePusher, type CommentDedup } from './edg
 import { buildComposeAndApprove } from './compose-approve.js';
 import type { CuratedSampleForTerms } from '../agents/comment-search-term-generator.js';
 import type { CuratedContentTypeFilter } from '../cache/curated-content-store.js';
+import {
+  XHS_COMMENT_PROFILE,
+  commentProfileForPlatform,
+  defaultCommentSearchLabel,
+  type PlatformId,
+  type CommentPlatformProfile,
+} from '../platform/index.js';
 
 export interface CommentResultReceipt {
   ok: boolean;
@@ -73,6 +80,10 @@ export interface CommentSchedulerDeps {
   /** 原生筛选（缺省 most_collected / one_day）。 */
   sort?: string;
   timeWindow?: string;
+  /** 平台评论 profile；缺省 xhs，后续 Facebook 由账号平台注入。 */
+  platformProfile?: CommentPlatformProfile;
+  /** 账号平台事实源（accounts.platform）；注入后按账号选择 comment profile。 */
+  getPlatform?: (accountId: string) => Promise<PlatformId> | PlatformId;
   /** 换词尝试上限 K（缺省 5）。 */
   maxTerms?: number;
   /** 边端单步超时（缺省 edge-steps 默认 28s）。 */
@@ -85,6 +96,11 @@ export class CommentScheduler {
   private readonly running = new Set<string>();
 
   constructor(private readonly deps: CommentSchedulerDeps) {}
+
+  private async platformProfileFor(accountId: string): Promise<CommentPlatformProfile> {
+    if (!this.deps.getPlatform) return this.deps.platformProfile ?? XHS_COMMENT_PROFILE;
+    return commentProfileForPlatform(await this.deps.getPlatform(accountId));
+  }
 
   /** 是否该账号已有任务在跑（观测用）。 */
   isRunning(accountId: string): boolean {
@@ -123,6 +139,17 @@ export class CommentScheduler {
     if (!conn || !conn.edgeId) {
       return { ok: false, level: 'error', title: '按需评论触发失败', message: '该账号暂无在线边端' };
     }
+    let platformProfile: CommentPlatformProfile;
+    try {
+      platformProfile = await this.platformProfileFor(accountId);
+    } catch (err) {
+      return {
+        ok: false,
+        level: 'error',
+        title: '按需评论触发失败',
+        message: `该账号平台暂不支持评论调度：${(err as Error).message}`,
+      };
+    }
 
     this.running.add(accountId);
     const edgeId = conn.edgeId;
@@ -130,7 +157,7 @@ export class CommentScheduler {
     // 异步跑任务，命令立即回执（任务含人审轮询，不可同步等）。groupChatCode 已解析一次，带进任务用于注入（gate 同源）。
     // catch：runTask 内部已兜任务期异常；此处兜「任务启动前」的防御性抛（如 gate 后人设被解绑 → getSoul 抛
     // no_persona，persona-driven-content-pipeline）——诚实记日志、不让未处理拒绝炸进程，绝不假成功。
-    void this.runTask(accountId, bus, edgeId, groupChatCode)
+    void this.runTask(accountId, bus, edgeId, groupChatCode, platformProfile)
       .catch((err) =>
         (this.deps.logger ?? console).warn(
           `[comment-scheduler] 任务未能启动/异常中止 account=${accountId}：${(err as Error).message}`,
@@ -142,7 +169,7 @@ export class CommentScheduler {
       ok: true,
       level: 'success',
       title: '已触发按需评论',
-      message: '已启动按需评论任务（搜「最近一天·最多收藏」的强相关、未评过笔记；评论前仍需飞书人审 approved=true 才会真发；结果稍后回报）',
+      message: `已启动按需评论任务（搜「${defaultCommentSearchLabel(platformProfile)}」的强相关、未评过笔记；评论前仍需飞书人审 approved=true 才会真发；结果稍后回报）`,
     };
   }
 
@@ -196,9 +223,21 @@ export class CommentScheduler {
     if (!conn || !conn.edgeId) {
       return { ok: false, level: 'error', title: '定向评论触发失败', message: '该账号暂无在线边端', reason: 'edge_offline' };
     }
+    let platformProfile: CommentPlatformProfile;
+    try {
+      platformProfile = await this.platformProfileFor(accountId);
+    } catch (err) {
+      return {
+        ok: false,
+        level: 'error',
+        title: '定向评论触发失败',
+        message: `该账号平台暂不支持评论调度：${(err as Error).message}`,
+        reason: 'unsupported_platform',
+      };
+    }
 
     this.running.add(accountId);
-    void this.runTargetedTask(accountId, conn.bus, conn.edgeId, target, groupChatCode)
+    void this.runTargetedTask(accountId, conn.bus, conn.edgeId, target, groupChatCode, platformProfile)
       .catch((err) =>
         (this.deps.logger ?? console).warn(
           `[comment-scheduler] 定向任务未能启动/异常中止 account=${accountId}：${(err as Error).message}`,
@@ -220,11 +259,12 @@ export class CommentScheduler {
     edgeId: string,
     target: { noteId: string; title: string },
     groupChatCode: string | null,
+    platformProfile: CommentPlatformProfile,
   ): Promise<void> {
     const log = this.deps.logger ?? console;
     const soul = this.deps.getSoul(accountId);
     const llm = this.deps.llmFor(accountId);
-    const composer = new CommentComposer({ eventBus: bus, soul, llm, getNoteData: () => null });
+    const composer = new CommentComposer({ eventBus: bus, soul, llm, getNoteData: () => null, platformProfile });
 
     const composeAndApprove = buildComposeAndApprove({
       composer,
@@ -281,16 +321,17 @@ export class CommentScheduler {
     accountId: string,
     bus: EventBus,
     edgeId: string,
-    groupChatCode: string | null = null,
+    groupChatCode: string | null,
+    platformProfile: CommentPlatformProfile,
   ): Promise<void> {
     const log = this.deps.logger ?? console;
     const soul = this.deps.getSoul(accountId);
     const llm = this.deps.llmFor(accountId);
 
-    const generator = new CommentSearchTermGenerator({ llm, soul, maxTerms: this.deps.maxTerms });
-    const picker = new CommentTargetPicker({ llm, soul });
+    const generator = new CommentSearchTermGenerator({ llm, soul, maxTerms: this.deps.maxTerms, platformProfile });
+    const picker = new CommentTargetPicker({ llm, soul, platformProfile });
     // 命令路径不走 composer 的事件链，getNoteData 仅事件路径用 → 给空桩。
-    const composer = new CommentComposer({ eventBus: bus, soul, llm, getNoteData: () => null });
+    const composer = new CommentComposer({ eventBus: bus, soul, llm, getNoteData: () => null, platformProfile });
 
     const composeAndApprove = buildComposeAndApprove({
       composer,
@@ -308,8 +349,8 @@ export class CommentScheduler {
       pusher: this.deps.pusher,
       edgeId,
       dedup: this.deps.dedupFor(accountId),
-      sort: this.deps.sort ?? 'most_collected',
-      timeWindow: this.deps.timeWindow ?? 'one_day',
+      sort: this.deps.sort ?? platformProfile.search.defaultSort,
+      timeWindow: this.deps.timeWindow ?? platformProfile.search.defaultTimeWindow,
       stepTimeoutMs: this.deps.stepTimeoutMs,
       logger: log,
     });
@@ -350,9 +391,9 @@ export class CommentScheduler {
 }
 
 /** 定向搜索词上限：拟人逐字输入约 110ms/字，20 字 ≈ 2-3s，稳守 28s 单步预算（XHS 标题上限亦 20 字）。 */
-export const TARGETED_SEARCH_TERM_MAX_LEN = 20;
+export const TARGETED_SEARCH_TERM_MAX_LEN = XHS_COMMENT_PROFILE.search.targetedSearchTermMaxLength;
 /** 第二次尝试的放宽搜索词长度（前 12 字）。 */
-export const TARGETED_SEARCH_FALLBACK_LEN = 12;
+export const TARGETED_SEARCH_FALLBACK_LEN = XHS_COMMENT_PROFILE.search.targetedSearchFallbackLength;
 
 /** TargetedCommentResult → 结果卡片回执（change curated-note-actions；卡面可辨识为定向来源，绝不染绿）。 */
 export function targetedOutcomeToReceipt(r: TargetedCommentResult, withGroup: boolean): CommentResultReceipt {

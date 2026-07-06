@@ -102,6 +102,8 @@ export interface Envelope<T = unknown> {
 export interface HelloPayload {
   /** 边缘节点标识 */
   edgeId: string;
+  /** 运行时平台标识（如 "xiaohongshu"）；缺省按历史 xhs 处理 */
+  platform?: string;
   /** 业务/站点标识（如 "xhs"） */
   app?: string;
   /** 边缘端能力声明 */

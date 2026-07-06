@@ -1693,6 +1693,7 @@ async function main(): Promise<void> {
         console.warn(`[aidcp-cloud] ensureAccount(${accountId}) 失败（不阻塞握手）:`, (err as Error).message);
       }
     },
+    getAccountPlatform: async (accountId) => accountStore?.getPlatform?.(accountId) ?? 'xiaohongshu',
     onConfigError,
     closeEdge: (sessionId) => server.closeEdge(sessionId),
     logger: console,
@@ -1854,6 +1855,7 @@ async function main(): Promise<void> {
     getSoul,
     // persona-driven-content-pipeline：/comment 触发前人设闸——未绑人设不接管边端、不启动评论任务（与浏览/发布同口径）。
     isPersonaBound: (accountId) => personaStore.getForAccount(accountId) !== null,
+    getPlatform: (accountId) => accountStore?.getPlatform?.(accountId) ?? 'xiaohongshu',
     // account-group-chat-injection：/comment group:on 时读账号群聊码（异步直读账号存储）；缺码由 scheduler fail-closed。
     getGroupChatInfo: accountStore?.getGroupChatInfo
       ? (accountId) => accountStore!.getGroupChatInfo!(accountId)

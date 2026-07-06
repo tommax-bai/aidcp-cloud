@@ -29,6 +29,11 @@ test('ACCOUNTS_SCHEMA_SQL 含 nickname 列 + 幂等自愈 ALTER（本仓无迁�
   assert.match(ACCOUNTS_SCHEMA_SQL, /ALTER TABLE accounts ADD COLUMN IF NOT EXISTS nickname TEXT/);
 });
 
+test('ACCOUNTS_SCHEMA_SQL 含 platform 列 + 幂等自愈 ALTER（accounts.platform 是平台事实源）', () => {
+  assert.match(ACCOUNTS_SCHEMA_SQL, /platform\s+TEXT NOT NULL DEFAULT 'xiaohongshu'/);
+  assert.match(ACCOUNTS_SCHEMA_SQL, /ALTER TABLE accounts ADD COLUMN IF NOT EXISTS platform TEXT NOT NULL DEFAULT 'xiaohongshu'/);
+});
+
 function fakePool(): { calls: { text: string; params: unknown[] }[]; pool: pg.Pool } {
   const calls: { text: string; params: unknown[] }[] = [];
   const pool = {
@@ -179,4 +184,30 @@ test('getGroupChatInfo: 异步直读 SELECT，回 verbatim 值 / 缺行为 null'
   const { pool: emptyPool } = fakePoolReturning([]);
   const store2 = new PgAccountStore({ pool: emptyPool });
   assert.equal(await store2.getGroupChatInfo('ghost'), null);
+});
+
+test('getPlatform: 读取 accounts.platform 并归一，缺行按历史 xhs 默认', async () => {
+  const { calls, pool } = fakePoolReturning([{ platform: 'facebook' }]);
+  const store = new PgAccountStore({ pool });
+  assert.equal(await store.getPlatform('acc-fb'), 'facebook');
+  assert.match(calls[0].text, /SELECT platform FROM accounts WHERE account_id = \$1/);
+
+  const { pool: emptyPool } = fakePoolReturning([]);
+  const store2 = new PgAccountStore({ pool: emptyPool });
+  assert.equal(await store2.getPlatform('missing'), 'xiaohongshu');
+});
+
+test('listByPlatform: 按平台枚举账号并保留暂停态', async () => {
+  const pausedAt = new Date('2026-07-06T00:00:00Z');
+  const { calls, pool } = fakePoolReturning([
+    { account_id: 'a1', status: 'active', paused_at: null, platform: 'xiaohongshu' },
+    { account_id: 'a2', status: 'paused', paused_at: pausedAt, platform: 'xiaohongshu' },
+  ]);
+  const store = new PgAccountStore({ pool });
+  assert.deepEqual(await store.listByPlatform('xiaohongshu'), [
+    { accountId: 'a1', status: 'active', pausedAt: null, platform: 'xiaohongshu' },
+    { accountId: 'a2', status: 'paused', pausedAt: pausedAt.getTime(), platform: 'xiaohongshu' },
+  ]);
+  assert.match(calls[0].text, /WHERE platform = \$1 ORDER BY account_id/);
+  assert.deepEqual(calls[0].params, ['xiaohongshu']);
 });

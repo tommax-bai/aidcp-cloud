@@ -130,6 +130,21 @@ describe('CommentScheduler.triggerTargeted 拒绝路径（机器原因码）', (
     assert.equal(r.reason, 'edge_offline');
   });
 
+  it('账号平台未接入评论 registry → error / unsupported_platform，不回落 xhs 流程', async () => {
+    let takeovers = 0;
+    const s = new CommentScheduler(
+      baseDeps({
+        getPlatform: () => 'facebook',
+        onTakeoverStart: () => { takeovers += 1; },
+      }),
+    );
+    const r = await s.triggerTargeted('acc-1', target);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'unsupported_platform');
+    assert.match(r.message, /暂不支持评论调度/);
+    assert.equal(takeovers, 0);
+  });
+
   it('并发双触发（同账号）→ 恰一个 ok:true，单飞闸原子（回归：dedup await 不得切开 has→add）', async () => {
     // dedup 查询用一个延迟 promise 模拟真实 PG 往返，制造 has→add 之间的可插入窗口。
     const bus = new EventBus();

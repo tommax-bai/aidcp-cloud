@@ -9,6 +9,7 @@ import { EventBus } from '../../src/event-bus/index.js';
 import type { RoleDispatcher } from '../../src/orchestrator/role-dispatcher.js';
 import type { RiskController } from '../../src/risk/index.js';
 import type { EdgeSession } from '../../src/comm/ws-server.js';
+import type { PlatformId } from '../../src/platform/index.js';
 
 class FakeDispatcher {
   accountId = '';
@@ -44,7 +45,7 @@ interface Harness {
   dispatchers: FakeDispatcher[];
 }
 
-function makeHarness(): Harness {
+function makeHarness(platformByAccount: Record<string, PlatformId> = {}): Harness {
   const observerBus = new EventBus();
   const built: DispatcherBuildContext[] = [];
   const ensured: string[] = [];
@@ -63,6 +64,7 @@ function makeHarness(): Harness {
     ensureAccount: async (accountId) => {
       ensured.push(accountId);
     },
+    getAccountPlatform: async (accountId) => platformByAccount[accountId] ?? 'xiaohongshu',
     onConfigError: (session, message) => {
       configErrors.push({ edgeId: session.edgeId, message });
     },
@@ -127,6 +129,39 @@ test('合法账号握手：登记账号 + 解析 controller + 建私有总线运
   assert.notEqual(bus, h.observerBus);
   // controllerForSession 返回该连接 controller。
   assert.equal((h.registry.controllerForSession(session) as unknown as { accountId: string }).accountId, 'acctA');
+});
+
+test('平台匹配：edge platform 与 accounts.platform 同为 xiaohongshu 时允许握手', async () => {
+  const h = makeHarness({ acctA: 'xiaohongshu' });
+  const session: EdgeSession = { sessionId: 's1', edgeId: 'eA', accountId: 'acctA', platform: 'xhs' };
+  const outcome = await h.registry.onHandshake(session);
+  assert.equal(outcome.ok, true);
+  assert.equal(session.platform, 'xiaohongshu');
+  assert.equal(h.registry.runtimeCount(), 1);
+});
+
+test('平台不匹配：xhs edge 不接管 facebook 账号，且不顶替旧连接', async () => {
+  const h = makeHarness({ A: 'xiaohongshu', B: 'facebook' });
+  await h.registry.onHandshake({ sessionId: 's1', edgeId: 'eX', accountId: 'A', platform: 'xiaohongshu' });
+  const outcome = await h.registry.onHandshake({ sessionId: 's2', edgeId: 'eX', accountId: 'B', platform: 'xiaohongshu' });
+  assert.equal(outcome.ok, false);
+  assert.equal((outcome as { code: string }).code, 'platform_mismatch');
+  assert.deepEqual(h.closed, [], 'mismatch 不应驱逐同 edgeId 的旧健康连接');
+  assert.equal(h.registry.runtimeCount(), 1);
+});
+
+test('未知 edge platform：配置错误拒绝，且不登记账号', async () => {
+  const h = makeHarness();
+  const outcome = await h.registry.onHandshake({
+    sessionId: 's1',
+    edgeId: 'eA',
+    accountId: 'acctA',
+    platform: 'instagram',
+  });
+  assert.equal(outcome.ok, false);
+  assert.equal((outcome as { code: string }).code, 'unsupported_platform');
+  assert.deepEqual(h.ensured, []);
+  assert.equal(h.registry.runtimeCount(), 0);
 });
 
 test('两连接（不同账号）私有总线互相隔离 + 各自 tee 到全局观测总线（看板聚合）', async () => {

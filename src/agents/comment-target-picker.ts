@@ -19,6 +19,7 @@
 import type { Soul } from '../soul/types.js';
 import type { RoleName } from '../event-bus/types.js';
 import type { RoleLlmLike } from './comment-search-term-generator.js';
+import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/index.js';
 
 /** 一张去重后的搜索结果候选卡片（窄投影）。 */
 export interface CommentCandidateCard {
@@ -36,6 +37,7 @@ export interface CommentTargetPickerOptions {
   llm: RoleLlmLike;
   soul?: Soul;
   getSoul?: () => Soul;
+  platformProfile?: CommentPlatformProfile;
 }
 
 /** 甄选结果：pickIndex=选中的候选下标（无则 null）；stronglyRelevantIndexes=判为强相关的全部下标。 */
@@ -52,12 +54,14 @@ export class CommentTargetPicker {
   private readonly llm: RoleLlmLike;
   private readonly soulSnapshot?: Soul;
   private readonly getSoulFn?: () => Soul;
+  private readonly platformProfile: CommentPlatformProfile;
 
   constructor(options: CommentTargetPickerOptions) {
     if (!options.llm) throw new Error('CommentTargetPicker 需要 LlmClient');
     this.llm = options.llm;
     this.soulSnapshot = options.soul;
     this.getSoulFn = options.getSoul;
+    this.platformProfile = options.platformProfile ?? XHS_COMMENT_PROFILE;
   }
 
   private get soul(): Soul {
@@ -121,7 +125,7 @@ export class CommentTargetPicker {
     return `你是「${identity.name}」，${identity.role}。
 你的创作领域 / 兴趣：${interestsStr}
 
-下面是按「最近一天 + 最多收藏」筛出、且你尚未评论过的小红书候选笔记。
+下面是按「${this.platformProfile.search.defaultTimeWindowLabel} + ${this.platformProfile.search.defaultSortLabel}」筛出、且你尚未评论过的${this.platformProfile.siteName}候选${this.platformProfile.contentName}。
 你要从中选一篇**和你创作领域强相关**的来留评论。
 
 **强相关**= 这篇笔记的主题正落在你的创作领域核心、你能以内行视角自然地搭话；
