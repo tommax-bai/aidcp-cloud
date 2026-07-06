@@ -15,13 +15,14 @@
 import type { PublishResult, PublishSourceReference, ReferenceImageSnapshot, TriggerInput } from './types.js';
 import type { Soul } from '../soul/types.js';
 import type { CuratedContentTypeFilter, CuratedSelectItem } from '../cache/curated-content-store.js';
+import { referenceImagesForGeneration, REFERENCE_IMAGE_MAX_COUNT } from './reference-image-guidance.js';
 
 /** 洗稿参照笔记（change curated-note-actions）：管理后台精选页人工指定，注入创作输入独立参照块。 */
 export type ReferenceNote = NonNullable<TriggerInput['generateInput']['referenceNote']>;
 
 /** 参照正文注入上限（字符）：保真改写需要足够上下文，同时防超长全文撑爆 prompt。 */
 export const REFERENCE_BODY_MAX_LEN = 6000;
-export const REFERENCE_IMAGE_MAX_COUNT = 3;
+export { REFERENCE_IMAGE_MAX_COUNT };
 
 export interface SchedulerConceptStore {
   countNewSince(sinceMs: number): Promise<number>;
@@ -314,9 +315,7 @@ export class PublishScheduler {
   }
 
   private prepareReferenceImages(referenceNote: ReferenceNote): ReferenceImageSnapshot[] {
-    return (referenceNote.images ?? [])
-      .filter((img) => typeof (img.ossUrl ?? img.sourceUrl) === 'string' && (img.ossUrl ?? img.sourceUrl).trim())
-      .slice(0, REFERENCE_IMAGE_MAX_COUNT);
+    return referenceImagesForGeneration(referenceNote.images ?? []);
   }
 
   private async doTrigger(

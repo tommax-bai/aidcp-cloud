@@ -11,6 +11,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { PublishExecutorRole } from '../../src/publish-agent/roles/publish-executor.js';
 import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
+import { REFERENCE_IMAGE_MAX_COUNT } from '../../src/publish-agent/reference-image-guidance.js';
 import type { PipelineFields, AssembledContent, GateDecision, TitleSelection } from '../../src/publish-agent/types.js';
 
 const clock = () => 1700000000000;
@@ -304,10 +305,12 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
           body: 'prompt 片段',
           topics: ['来源话题'],
           author: '来源作者',
-          images: [
-            { index: 0, sourceUrl: 'https://ref.test/1.webp', captureStatus: 'stored' },
-            { index: 1, sourceUrl: 'https://ref.test/2.webp', ossUrl: 'https://oss.test/2.webp', captureStatus: 'stored' },
-          ],
+          images: Array.from({ length: REFERENCE_IMAGE_MAX_COUNT }, (_, i) => ({
+            index: i,
+            sourceUrl: `https://ref.test/${i + 1}.webp`,
+            ...(i === 1 ? { ossUrl: 'https://oss.test/2.webp' } : {}),
+            captureStatus: 'stored' as const,
+          })),
           sourceReference: {
             kind: 'curated_reference',
             curatedContentId: 7,
@@ -355,8 +358,8 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     assert.equal(recordedMeta.length, 1);
     assert.equal(recordedMeta[0].aiEnforced, true, 'aiEnforced 审计如实落库');
     assert.deepEqual(recordedMeta[0].metadata.referenceImageAudit, {
-      requestedCount: 2,
-      usableCount: 2,
+      requestedCount: REFERENCE_IMAGE_MAX_COUNT,
+      usableCount: REFERENCE_IMAGE_MAX_COUNT,
       status: 'unsupported',
       providerClaimedUsed: false,
       generatedCount: 2,

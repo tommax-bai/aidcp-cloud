@@ -2,6 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { ImagePromptComposerRole } from '../../src/publish-agent/roles/image-prompt-composer.js';
 import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
+import { REFERENCE_IMAGE_MAX_COUNT } from '../../src/publish-agent/reference-image-guidance.js';
 import type { PipelineFields, ImageSetPlan, ImageTheme, ImageCategory, TriggerInput } from '../../src/publish-agent/types.js';
 
 const clock = () => 1700000000000;
@@ -42,9 +43,14 @@ describe('ImagePromptComposerRole（配图指令，仅桩 LLM、不依赖图源�
 
   test('reference images are included as visual guidance and preserved on ImagePlan', async () => {
     let userPrompt = '';
-    const referenceImages = [
-      { index: 0, sourceUrl: 'https://img.test/source.jpg', ossUrl: 'https://oss.test/source.jpg', width: 800, height: 600, alt: 'desk setup' },
-    ];
+    const referenceImages = Array.from({ length: 10 }, (_, i) => ({
+      index: i,
+      sourceUrl: `https://img.test/source-${i}.jpg`,
+      ossUrl: `https://oss.test/source-${i}.jpg`,
+      width: 800,
+      height: 600,
+      alt: i === 0 ? 'desk setup' : `reference ${i}`,
+    }));
     const llm = {
       chat: async (msgs: Array<{ content: string }>) => {
         userPrompt = msgs[1]?.content ?? '';
@@ -76,9 +82,12 @@ describe('ImagePromptComposerRole（配图指令，仅桩 LLM、不依赖图源�
 
     const plan = await run(llm, setPlan([{ subject: 'desk' }]), 60, 'knowledge', trigger);
     assert.match(userPrompt, /Reference image guidance/);
-    assert.match(userPrompt, /https:\/\/oss\.test\/source\.jpg/);
+    assert.match(userPrompt, /https:\/\/oss\.test\/source-0\.jpg/);
+    assert.match(userPrompt, /https:\/\/oss\.test\/source-8\.jpg/);
+    assert.doesNotMatch(userPrompt, /https:\/\/oss\.test\/source-9\.jpg/);
     assert.match(userPrompt, /desk setup/);
-    assert.deepEqual(plan.referenceImages, referenceImages);
+    assert.equal(plan.referenceImages?.length, REFERENCE_IMAGE_MAX_COUNT);
+    assert.deepEqual(plan.referenceImages, referenceImages.slice(0, REFERENCE_IMAGE_MAX_COUNT));
   });
 
   test('近重复主体 → 丢弃，但永远保住第 0 张（wantImage:true → ≥1）', async () => {

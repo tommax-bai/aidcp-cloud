@@ -3,7 +3,7 @@ import type { RoleConfig } from './base-role.js';
 import type { PipelineContext } from '../pipeline-context.js';
 import type { PipelineFields, ImageSetPlan, ImagePlan, ImageTheme, ImageCategory } from '../types.js';
 import { buildImagePromptComposerPrompt, resolveStyleProfile } from '../prompts.js';
-import { buildReferenceImageGuidance, referenceImagesFromSnapshot } from '../reference-image-guidance.js';
+import { buildReferenceImageGuidance, referenceImagesForGeneration, referenceImagesFromSnapshot } from '../reference-image-guidance.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
 
 /**
@@ -66,7 +66,7 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
       return this.emptyPlan();
     }
     const snapshot = context.snapshot();
-    const referenceImages = referenceImagesFromSnapshot(snapshot);
+    const referenceImages = referenceImagesForGeneration(referenceImagesFromSnapshot(snapshot));
     const referenceImageGuidance = buildReferenceImageGuidance(snapshot);
 
     // 每主题一条中文主体描述（并行，保序；某条 LLM 失败退回主体文本 fallback，不让该张凭空消失）。

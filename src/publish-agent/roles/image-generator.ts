@@ -8,6 +8,7 @@ import { normImageProvider } from '../image-providers.js';
 import type { ObjectStore } from '../../storage/object-store.js';
 import { relocateImageToStore } from '../../storage/object-store.js';
 import { IMAGE_COUNT_HARD_MAX } from '../prompts.js';
+import { referenceImageUrl, referenceImagesForGeneration } from '../reference-image-guidance.js';
 
 /**
  * ImageGenerator — 配图「执行」（change publish-multi-image：单图 → 并行多图）。
@@ -124,11 +125,9 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     // recordId 此刻尚未生成（发布记录晚于此处落库），故用运行 token 代替 recordId 做键分组。
     const accountId = context.snapshot().trigger?.accountId ?? 'default';
     const runToken = this.idGen();
-    const referenceImages = input.referenceImages ?? context.snapshot().trigger?.generateInput?.referenceNote?.images ?? [];
-    const referenceUrls = referenceImages
-      .map((img) => (img.ossUrl ?? img.sourceUrl ?? '').trim())
-      .filter(Boolean)
-      .slice(0, 3);
+    const rawReferenceImages = input.referenceImages ?? context.snapshot().trigger?.generateInput?.referenceNote?.images ?? [];
+    const referenceImages = referenceImagesForGeneration(rawReferenceImages);
+    const referenceUrls = referenceImages.map((img) => referenceImageUrl(img)!);
 
     // 并行出图（有界并发）：每张 Promise.race(生成+转存, 每图超时)，settle 后按规划顺序收成功 URL。
     // 去第二风格源（change category-adaptive-images-and-judgment）：不再把 imageStyle 枚举传给 provider——

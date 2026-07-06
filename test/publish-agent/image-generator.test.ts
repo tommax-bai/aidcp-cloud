@@ -2,6 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { ImageGeneratorRole, type ImageGeneratorDeps } from '../../src/publish-agent/roles/image-generator.js';
 import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
+import { REFERENCE_IMAGE_MAX_COUNT } from '../../src/publish-agent/reference-image-guidance.js';
 import type { PipelineFields, ImagePlan, TriggerInput } from '../../src/publish-agent/types.js';
 import type { ImageResult } from '../../src/publish-agent/image-provider.js';
 import type { ObjectStore, PutOptions, PutResult } from '../../src/storage/object-store.js';
@@ -46,7 +47,15 @@ describe('ImageGeneratorRole（并行多图）', () => {
     const referenceImages = [
       { index: 0, sourceUrl: 'https://img.test/source-a.jpg', ossUrl: 'https://oss.test/a.jpg', captureStatus: 'stored' as const, capturedAt: 1 },
       { index: 1, sourceUrl: 'https://img.test/source-b.jpg', captureStatus: 'url_only' as const, capturedAt: 2 },
+      { index: 2, sourceUrl: '   ', captureStatus: 'url_only' as const, capturedAt: 3 },
+      ...Array.from({ length: 9 }, (_, i) => ({
+        index: i + 3,
+        sourceUrl: `https://img.test/source-${i + 3}.jpg`,
+        captureStatus: 'url_only' as const,
+        capturedAt: i + 4,
+      })),
     ];
+    const expectedImages = [referenceImages[0], referenceImages[1], ...referenceImages.slice(3, 10)];
     const provider = {
       generate: async (_prompt: string, _style?: string, options?: { referenceImages?: string[] }): Promise<ImageResult> => {
         seen.push(options?.referenceImages);
@@ -54,8 +63,19 @@ describe('ImageGeneratorRole（并行多图）', () => {
       },
     };
     const d = await run(provider, { ...plan(['a']), referenceImages });
-    assert.deepEqual(seen, [['https://oss.test/a.jpg', 'https://img.test/source-b.jpg']]);
-    assert.deepEqual(d.referenceImages, referenceImages);
+    assert.equal(expectedImages.length, REFERENCE_IMAGE_MAX_COUNT);
+    assert.deepEqual(seen, [[
+      'https://oss.test/a.jpg',
+      'https://img.test/source-b.jpg',
+      'https://img.test/source-3.jpg',
+      'https://img.test/source-4.jpg',
+      'https://img.test/source-5.jpg',
+      'https://img.test/source-6.jpg',
+      'https://img.test/source-7.jpg',
+      'https://img.test/source-8.jpg',
+      'https://img.test/source-9.jpg',
+    ]]);
+    assert.deepEqual(d.referenceImages, expectedImages);
     assert.equal(d.referenceImageStatus, 'unsupported');
   });
 

@@ -5,7 +5,7 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { PublishScheduler, REFERENCE_BODY_MAX_LEN } from '../../src/publish-agent/publish-scheduler.js';
+import { PublishScheduler, REFERENCE_BODY_MAX_LEN, REFERENCE_IMAGE_MAX_COUNT } from '../../src/publish-agent/publish-scheduler.js';
 import type { PublishSchedulerDeps, ReferenceNote } from '../../src/publish-agent/publish-scheduler.js';
 import type { TriggerInput } from '../../src/publish-agent/types.js';
 
@@ -72,6 +72,10 @@ describe('triggerManual referenceNote（洗稿参照）', () => {
 
   it('reference images are filtered, capped, and passed into referenceNote only as usable guidance', async () => {
     const { scheduler, inputs } = build();
+    const extraImages = Array.from({ length: 7 }, (_, i) => ({
+      index: i + 4,
+      sourceUrl: `https://img.test/${i + 4}.jpg`,
+    }));
     const o = await scheduler.triggerManual('acc-test', {
       referenceNote: {
         ...ref,
@@ -80,19 +84,26 @@ describe('triggerManual referenceNote（洗稿参照）', () => {
           { index: 1, sourceUrl: 'https://img.test/b.jpg' },
           { index: 2, sourceUrl: '   ' },
           { index: 3, sourceUrl: 'https://img.test/c.jpg' },
-          { index: 4, sourceUrl: 'https://img.test/d.jpg' },
+          ...extraImages,
         ],
       },
     });
 
     assert.equal(o.result, 'triggered');
     const images = inputs[0].generateInput.referenceNote?.images ?? [];
+    assert.equal(images.length, REFERENCE_IMAGE_MAX_COUNT);
     assert.deepEqual(
       images.map((img) => ({ index: img.index, sourceUrl: img.sourceUrl, ossUrl: img.ossUrl })),
       [
         { index: 0, sourceUrl: 'https://img.test/a.jpg', ossUrl: 'https://oss.test/a.jpg' },
         { index: 1, sourceUrl: 'https://img.test/b.jpg', ossUrl: undefined },
         { index: 3, sourceUrl: 'https://img.test/c.jpg', ossUrl: undefined },
+        { index: 4, sourceUrl: 'https://img.test/4.jpg', ossUrl: undefined },
+        { index: 5, sourceUrl: 'https://img.test/5.jpg', ossUrl: undefined },
+        { index: 6, sourceUrl: 'https://img.test/6.jpg', ossUrl: undefined },
+        { index: 7, sourceUrl: 'https://img.test/7.jpg', ossUrl: undefined },
+        { index: 8, sourceUrl: 'https://img.test/8.jpg', ossUrl: undefined },
+        { index: 9, sourceUrl: 'https://img.test/9.jpg', ossUrl: undefined },
       ],
     );
   });
