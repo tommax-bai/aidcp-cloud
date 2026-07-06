@@ -27,7 +27,12 @@ describe('buildCommentApprovalCard', () => {
   });
 
   it('有标题：卡片「笔记」字段与 callback payload.title 都显示标题（供人识别，非裸 ID）', () => {
-    const card = buildCommentApprovalCard({ requestId: 'comment-n1-123', noteId: '6a3d138a000000001c0246bf', text: '学到了', title: '北京周末好去处' });
+    const card = buildCommentApprovalCard({
+      requestId: 'comment-n1-123',
+      noteId: '6a3d138a000000001c0246bf',
+      text: '学到了',
+      title: '北京周末好去处',
+    });
     const div = card.elements.find((e) => e.tag === 'div');
     assert.ok(div && div.tag === 'div');
     const noteField = div.fields?.find((f) => f.text.content.startsWith('**笔记**'));
@@ -42,7 +47,7 @@ describe('buildCommentApprovalCard', () => {
     assert.equal(approve!.payload.title, '评论·笔记《北京周末好去处》', '确认卡「标题」应显示真实笔记标题');
   });
 
-  it('卡片显示账号昵称；缺昵称时回落 accountId，且不写入授权 payload', () => {
+  it('卡片显示账号昵称；缺昵称时不回落显示 accountId，且不写入授权 payload', () => {
     const card = buildCommentApprovalCard({
       requestId: 'comment-n1-123',
       noteId: 'n1',
@@ -69,15 +74,46 @@ describe('buildCommentApprovalCard', () => {
       text: '学到了',
       accountId: 'acc-02',
     });
-    assert.match(JSON.stringify(fallback), /acc-02/);
+    const fallbackJson = JSON.stringify(fallback);
+    assert.match(fallbackJson, /未获取昵称/);
+    assert.doesNotMatch(fallbackJson, /acc-02/);
   });
 
-  it('无标题：回落显示 noteId（绝不空白）', () => {
+  it('卡片显示笔记用户昵称；缺昵称时不展示 id、只显示未获取昵称', () => {
+    const card = buildCommentApprovalCard({
+      requestId: 'comment-n1-123',
+      noteId: 'n1',
+      text: '学到了',
+      title: '北京周末好去处',
+      authorName: '开源老周',
+    });
+    const div = card.elements.find((e) => e.tag === 'div');
+    assert.ok(div && div.tag === 'div');
+    const userField = div.fields?.find((f) => f.text.content.startsWith('**用户**'));
+    assert.ok(userField, '应有「用户」字段');
+    assert.match(userField!.text.content, /开源老周/);
+
+    const fallback = buildCommentApprovalCard({
+      requestId: 'comment-n1-124',
+      noteId: 'n1',
+      text: '学到了',
+      title: '北京周末好去处',
+    });
+    const fallbackUser = (fallback.elements.find((e) => e.tag === 'div') as { fields?: Array<{ text: { content: string } }> }).fields?.find((f) =>
+      f.text.content.startsWith('**用户**'),
+    );
+    assert.match(fallbackUser!.text.content, /未获取昵称/);
+  });
+
+  it('无标题：显示未获取标题，不在可见字段或 callback title 中裸露 noteId', () => {
     const card = buildCommentApprovalCard({ requestId: 'comment-n1-123', noteId: '6a3d138a000000001c0246bf', text: '学到了' });
+    const json = JSON.stringify(card);
+    assert.match(json, /未获取标题/);
+    assert.doesNotMatch(json, /6a3d138a/);
     const action = card.elements.find((e) => e.tag === 'action');
     assert.ok(action && action.tag === 'action');
     const approve = parseApprovalActionValue(action.actions[0].behaviors?.[0].value);
     assert.ok(approve);
-    assert.equal(approve!.payload.title, '评论·笔记 6a3d138a000000001c0246bf');
+    assert.equal(approve!.payload.title, '评论·笔记（未获取标题）');
   });
 });

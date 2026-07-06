@@ -125,6 +125,7 @@ export function buildComposeAndApprove(
         noteId: note.noteId,
         text: reviewText,
         title: note.title,
+        authorName: note.author,
         accountId: deps.accountId,
         accountName: deps.accountName,
       });

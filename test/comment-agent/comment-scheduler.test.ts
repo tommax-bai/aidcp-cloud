@@ -122,7 +122,7 @@ describe('CommentScheduler.triggerManual', () => {
     const bus = new EventBus();
     const takeovers: string[] = [];
     const recorded: string[] = [];
-    const cardDone = deferred<{ ok: boolean; level: string }>();
+    const cardDone = deferred<{ ok: boolean; level: string; message: string }>();
     const s = new CommentScheduler(
       baseDeps({
         resolveConnection: () => ({ bus, edgeId: 'e1' }),
@@ -130,7 +130,7 @@ describe('CommentScheduler.triggerManual', () => {
         dedupFor: () => ({ hasInteracted: async () => false, recordInteraction: async (n) => { recorded.push(n); } }),
         onTakeoverStart: () => takeovers.push('start'),
         onTakeoverEnd: () => takeovers.push('end'),
-        postResultCard: (_a, r) => { cardDone.resolve({ ok: r.ok, level: r.level }); },
+        postResultCard: (_a, r) => { cardDone.resolve({ ok: r.ok, level: r.level, message: r.message }); },
       }),
     );
     const receipt = await s.triggerManual('acc-1');
@@ -142,6 +142,8 @@ describe('CommentScheduler.triggerManual', () => {
     assert.deepEqual(recorded, ['n1'], '发布成功后记一笔去重');
     assert.equal(card.ok, true);
     assert.equal(card.level, 'success', '评了 → 结果卡片绿');
+    assert.match(card.message, /笔记《RAG 实战》/);
+    assert.doesNotMatch(card.message, / n1 /);
   });
 
   // ── change account-group-chat-injection：group:on 缺码 fail-closed + 有码端到端注入 ──
@@ -246,9 +248,11 @@ describe('CommentScheduler.triggerManual', () => {
 
 describe('outcomeToReceipt（失败/未产出绝不染绿）', () => {
   it('commented → success（绿）', () => {
-    const r = outcomeToReceipt({ outcome: 'commented', noteId: 'n1', text: 'x', term: 't', termsTried: 1 });
+    const r = outcomeToReceipt({ outcome: 'commented', noteId: 'n1', noteTitle: 'RAG 实战', text: 'x', term: 't', termsTried: 1 });
     assert.equal(r.ok, true);
     assert.equal(r.level, 'success');
+    assert.match(r.message, /笔记《RAG 实战》/);
+    assert.doesNotMatch(r.message, /n1/);
   });
   it('no_strong_candidate / no_terms / compose_skipped → warning（黄）', () => {
     assert.equal(outcomeToReceipt({ outcome: 'no_strong_candidate', termsTried: 5 }).level, 'warning');

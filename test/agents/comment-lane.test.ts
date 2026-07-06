@@ -133,7 +133,7 @@ describe('CommentApprovalGate', () => {
     assert.equal(approved, false);
   });
 
-  it('授权通过 → comment.approved（携文本）+ 审批卡携账号与笔记标题（供人识别）', async () => {
+  it('授权通过 → comment.approved（携文本）+ 审批卡携账号、笔记标题与用户昵称（供人识别）', async () => {
     const bus = new EventBus();
     let card: any = null;
     const approval: CommentApprovalPort = { request: async (i) => { card = i; }, isApproved: async () => true, timeoutMs: 1000, pollMs: 1 };
@@ -145,6 +145,7 @@ describe('CommentApprovalGate', () => {
       getAccountId: () => 'acc-01',
       getAccountName: () => 'Tmax',
       getNoteTitle: (id) => (id === 'n1' ? note.title : null),
+      getNoteAuthor: (id) => (id === 'n1' ? note.author ?? null : null),
       now: () => t++,
       sleep: async () => {},
     });
@@ -156,6 +157,7 @@ describe('CommentApprovalGate', () => {
     assert.equal(out?.text, '学到了');
     assert.ok(card && card.text === '学到了' && String(card.requestId).startsWith('comment-'));
     assert.equal(card.title, note.title, '标题应由 getNoteTitle 解析后透传给审批卡');
+    assert.equal(card.authorName, note.author, '用户昵称应由 getNoteAuthor 解析后透传给审批卡');
     assert.equal(card.accountId, 'acc-01');
     assert.equal(card.accountName, 'Tmax');
   });

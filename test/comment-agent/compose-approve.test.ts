@@ -9,7 +9,7 @@ import type { ComposerLike } from '../../src/comment-agent/compose-approve.js';
 import type { CommentApprovalPort } from '../../src/agents/comment-approval-gate.js';
 import type { NoteForComment, OnPageComment } from '../../src/comment-agent/comment-task-runner.js';
 
-const note: NoteForComment = { noteId: 'n1', title: 'RAG 实战', content: '正文', likeCount: 10, collectCount: 5 };
+const note: NoteForComment = { noteId: 'n1', title: 'RAG 实战', content: '正文', author: '开源老周', likeCount: 10, collectCount: 5 };
 const comments: OnPageComment[] = [{ text: '学到了' }, { text: '求教程' }];
 
 function composer(draft: string | null, capture?: (opts: { onPageComments?: string[] }) => void): ComposerLike {
@@ -55,14 +55,14 @@ describe('buildComposeAndApprove', () => {
     assert.deepEqual(seen, ['学到了', '求教程']);
   });
 
-  it('人审请求携带账号信息，供审批卡显示昵称', async () => {
-    let request: { accountId?: string; accountName?: string } | undefined;
+  it('人审请求携带账号信息与用户昵称，供审批卡显示昵称', async () => {
+    let request: { accountId?: string; accountName?: string; authorName?: string } | undefined;
     const step = buildComposeAndApprove({
       composer: composer('这套检索链路很实在'),
       accountId: 'acc-01',
       accountName: 'Tmax',
       approval: {
-        request: async (r: { accountId?: string; accountName?: string }) => { request = r; },
+        request: async (r: { accountId?: string; accountName?: string; authorName?: string }) => { request = r; },
         isApproved: async () => true,
       },
       logger: { log: () => {}, warn: () => {} },
@@ -71,6 +71,7 @@ describe('buildComposeAndApprove', () => {
     assert.equal(result?.text, '这套检索链路很实在');
     assert.equal(request?.accountId, 'acc-01');
     assert.equal(request?.accountName, 'Tmax');
+    assert.equal(request?.authorName, '开源老周');
   });
 
   it('人审口未接线 → null（绝不裸发）', async () => {

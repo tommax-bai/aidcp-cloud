@@ -606,6 +606,7 @@ export class RoleDispatcher {
         getAccountId: () => this.currentAccountId,
         getAccountName: () => this.getNickname(this.currentAccountId),
         getNoteTitle: (id) => getNoteData(id)?.title ?? null,
+        getNoteAuthor: (id) => getNoteData(id)?.author ?? null,
         now: this.clock,
       }),
       // —— 评论点赞（comment-like-on-detail，默认关）：自有单航班，结合正文偶尔给一条评论点赞 ——

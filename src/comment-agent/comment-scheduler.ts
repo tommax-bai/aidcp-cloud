@@ -302,7 +302,7 @@ export class CommentScheduler {
     this.deps.onTakeoverStart(accountId);
     let result: TargetedCommentResult;
     try {
-      result = await runTargetedCommentTask(steps, { noteId: target.noteId, searchTerm, fallbackTerm }, { logger: log });
+      result = await runTargetedCommentTask(steps, { noteId: target.noteId, title: target.title, searchTerm, fallbackTerm }, { logger: log });
     } catch (err) {
       log.warn(`[comment-scheduler] 定向任务异常 account=${accountId}：${(err as Error).message}`);
       result = { outcome: 'post_failed', noteId: target.noteId, searchAttempts: 0, reason: (err as Error).message };
@@ -395,37 +395,45 @@ export const TARGETED_SEARCH_TERM_MAX_LEN = XHS_COMMENT_PROFILE.search.targetedS
 /** 第二次尝试的放宽搜索词长度（前 12 字）。 */
 export const TARGETED_SEARCH_FALLBACK_LEN = XHS_COMMENT_PROFILE.search.targetedSearchFallbackLength;
 
+function noteLabel(title: string | undefined, prefix: string): string {
+  const clean = title?.trim();
+  return clean ? `${prefix}《${clean}》` : `${prefix}（未获取标题）`;
+}
+
 /** TargetedCommentResult → 结果卡片回执（change curated-note-actions；卡面可辨识为定向来源，绝不染绿）。 */
 export function targetedOutcomeToReceipt(r: TargetedCommentResult, withGroup: boolean): CommentResultReceipt {
   const kind = withGroup ? '定向带群评论' : '定向内容评论';
+  const target = noteLabel(r.noteTitle, '目标笔记');
   switch (r.outcome) {
     case 'commented':
-      return { ok: true, level: 'success', title: `${kind}已发出`, message: `已在目标笔记 ${r.noteId} 下发表评论：「${r.text ?? ''}」（${r.searchAttempts} 次搜索定位）` };
+      return { ok: true, level: 'success', title: `${kind}已发出`, message: `已在${target}下发表评论：「${r.text ?? ''}」（${r.searchAttempts} 次搜索定位）` };
     case 'note_not_found':
-      return { ok: false, level: 'warning', title: `${kind}未产出`, message: `搜索定位 ${r.searchAttempts} 次均未在结果中找到目标笔记 ${r.noteId}（可能未被搜索收录），本次不评、绝不评「相似」笔记` };
+      return { ok: false, level: 'warning', title: `${kind}未产出`, message: `搜索定位 ${r.searchAttempts} 次均未在结果中找到${target}（可能未被搜索收录），本次不评、绝不评「相似」笔记` };
     case 'compose_skipped':
-      return { ok: false, level: 'warning', title: `${kind}未发出`, message: `已定位目标笔记 ${r.noteId}，但撰写为空/未授权/超时，本次不发` };
+      return { ok: false, level: 'warning', title: `${kind}未发出`, message: `已定位${target}，但撰写为空/未授权/超时，本次不发` };
     case 'read_failed':
-      return { ok: false, level: 'error', title: `${kind}失败`, message: `已定位目标笔记 ${r.noteId}，但开笔记/读正文失败${r.reason ? `（${r.reason}）` : ''}` };
+      return { ok: false, level: 'error', title: `${kind}失败`, message: `已定位${target}，但开笔记/读正文失败${r.reason ? `（${r.reason}）` : ''}` };
     case 'post_failed':
-      return { ok: false, level: 'error', title: `${kind}失败`, message: `目标笔记 ${r.noteId} 评论发布未确认成功${r.reason ? `（${r.reason}）` : ''}` };
+      return { ok: false, level: 'error', title: `${kind}失败`, message: `${target}评论发布未确认成功${r.reason ? `（${r.reason}）` : ''}` };
   }
 }
 
 /** CommentTaskResult → 结果卡片回执（level 按结果，失败/未产出绝不染绿）。 */
 export function outcomeToReceipt(r: CommentTaskResult): CommentResultReceipt {
+  const selected = noteLabel(r.noteTitle, '选中笔记');
+  const commented = noteLabel(r.noteTitle, '笔记');
   switch (r.outcome) {
     case 'commented':
-      return { ok: true, level: 'success', title: '按需评论已发出', message: `已在笔记 ${r.noteId ?? ''} 下发表评论：「${r.text ?? ''}」（搜索词「${r.term ?? ''}」，试 ${r.termsTried} 个词）` };
+      return { ok: true, level: 'success', title: '按需评论已发出', message: `已在${commented}下发表评论：「${r.text ?? ''}」（搜索词「${r.term ?? ''}」，试 ${r.termsTried} 个词）` };
     case 'no_terms':
       return { ok: false, level: 'warning', title: '按需评论未产出', message: '未能生成搜索词（人设与精选集都为空），本次不评' };
     case 'no_strong_candidate':
       return { ok: false, level: 'warning', title: '按需评论未产出', message: `试过 ${r.termsTried} 个搜索词，没有「最近一天最多收藏、与人设强相关且没评过」的笔记，本次不评` };
     case 'compose_skipped':
-      return { ok: false, level: 'warning', title: '按需评论未发出', message: `选中笔记 ${r.noteId ?? ''}，但撰写为空/未授权/超时，本次不发` };
+      return { ok: false, level: 'warning', title: '按需评论未发出', message: `${selected}已选中，但撰写为空/未授权/超时，本次不发` };
     case 'read_failed':
-      return { ok: false, level: 'error', title: '按需评论失败', message: `选中笔记 ${r.noteId ?? ''}，但开笔记/读正文失败（边端超时或离线）` };
+      return { ok: false, level: 'error', title: '按需评论失败', message: `${selected}已选中，但开笔记/读正文失败（边端超时或离线）` };
     case 'post_failed':
-      return { ok: false, level: 'error', title: '按需评论失败', message: `选中笔记 ${r.noteId ?? ''}，但发布未确认成功${r.reason ? `（${r.reason}）` : ''}` };
+      return { ok: false, level: 'error', title: '按需评论失败', message: `${selected}已选中，但发布未确认成功${r.reason ? `（${r.reason}）` : ''}` };
   }
 }

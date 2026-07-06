@@ -203,7 +203,7 @@ describe('CommentScheduler.triggerTargeted happy path', () => {
     const edge = fakeEdge(bus, 'note-1');
     const takeovers: string[] = [];
     const recorded: string[] = [];
-    const cardDone = deferred<{ ok: boolean; level: string; title: string }>();
+    const cardDone = deferred<{ ok: boolean; level: string; title: string; message: string }>();
     const longTitle = '一二三四五六七八九十甲乙丙丁戊己庚辛壬癸子丑寅卯'; // 24 字 > 20 上限
     const s = new CommentScheduler(
       baseDeps({
@@ -223,6 +223,8 @@ describe('CommentScheduler.triggerTargeted happy path', () => {
     assert.equal(receipt.ok, true);
     assert.equal(receipt.level, 'success');
     assert.match(receipt.title, /定向内容评论/); // 卡面可辨识定向来源
+    assert.match(receipt.message, /目标笔记《目标笔记》/);
+    assert.doesNotMatch(receipt.message, /note-1/);
 
     const search = edge.pushed.find((e) => e.type === 'search.execute');
     assert.ok(search, '应下发 search.execute');
@@ -266,13 +268,17 @@ describe('CommentScheduler.triggerTargeted happy path', () => {
 
 describe('targetedOutcomeToReceipt（绝不染绿）', () => {
   it('commented → 绿；note_not_found/compose_skipped → 黄；read_failed/post_failed → 红', () => {
-    assert.equal(targetedOutcomeToReceipt({ outcome: 'commented', noteId: 'n', searchAttempts: 1 }, false).level, 'success');
-    const nf = targetedOutcomeToReceipt({ outcome: 'note_not_found', noteId: 'n', searchAttempts: 2 }, false);
+    const ok = targetedOutcomeToReceipt({ outcome: 'commented', noteId: 'n', noteTitle: '目标笔记标题', searchAttempts: 1 }, false);
+    assert.equal(ok.level, 'success');
+    assert.match(ok.message, /目标笔记《目标笔记标题》/);
+    assert.doesNotMatch(ok.message, / noteId| n /);
+    const nf = targetedOutcomeToReceipt({ outcome: 'note_not_found', noteId: 'n', noteTitle: '目标笔记标题', searchAttempts: 2 }, false);
     assert.equal(nf.level, 'warning');
     assert.equal(nf.ok, false);
     assert.match(nf.message, /绝不评「相似」笔记/);
-    assert.equal(targetedOutcomeToReceipt({ outcome: 'compose_skipped', noteId: 'n', searchAttempts: 1 }, false).level, 'warning');
-    assert.equal(targetedOutcomeToReceipt({ outcome: 'read_failed', noteId: 'n', searchAttempts: 1 }, false).level, 'error');
-    assert.equal(targetedOutcomeToReceipt({ outcome: 'post_failed', noteId: 'n', searchAttempts: 1 }, false).level, 'error');
+    assert.doesNotMatch(nf.message, / n /);
+    assert.equal(targetedOutcomeToReceipt({ outcome: 'compose_skipped', noteId: 'n', noteTitle: '目标笔记标题', searchAttempts: 1 }, false).level, 'warning');
+    assert.equal(targetedOutcomeToReceipt({ outcome: 'read_failed', noteId: 'n', noteTitle: '目标笔记标题', searchAttempts: 1 }, false).level, 'error');
+    assert.equal(targetedOutcomeToReceipt({ outcome: 'post_failed', noteId: 'n', noteTitle: '目标笔记标题', searchAttempts: 1 }, false).level, 'error');
   });
 });

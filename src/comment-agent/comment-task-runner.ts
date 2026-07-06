@@ -74,6 +74,7 @@ export interface CommentTaskResult {
   /** 命中的搜索词 / 笔记 / 文本（命中后才有）。 */
   term?: string;
   noteId?: string;
+  noteTitle?: string;
   text?: string;
   /** 实际尝试过的搜索词数。 */
   termsTried: number;
@@ -131,21 +132,21 @@ export async function runCommentTask(
     // —— 强相关命中：首中即止，对这一篇走到底（失败=诚实失败，不偷换另一篇）。 ——
     const read = await steps.readNote(card);
     if (!read) {
-      return { outcome: 'read_failed', term, noteId: card.noteId, termsTried: tried, reason: 'open/read note failed' };
+      return { outcome: 'read_failed', term, noteId: card.noteId, noteTitle: card.title, termsTried: tried, reason: 'open/read note failed' };
     }
     const composed = await steps.composeAndApprove(read.note, read.comments);
     if (!composed) {
-      return { outcome: 'compose_skipped', term, noteId: card.noteId, termsTried: tried, reason: 'empty/unapproved/rejected' };
+      return { outcome: 'compose_skipped', term, noteId: card.noteId, noteTitle: read.note.title, termsTried: tried, reason: 'empty/unapproved/rejected' };
     }
     // 结果卡 / 日志展示的是合并终稿（正文 + 换行 + 码），= 人审通过、边缘将拼出的文本。
     const displayText = composed.groupChatCode ? `${composed.text}\n${composed.groupChatCode}` : composed.text;
     const ok = await steps.post(card.noteId, composed.text, composed.groupChatCode);
     if (!ok) {
-      return { outcome: 'post_failed', term, noteId: card.noteId, text: displayText, termsTried: tried, reason: 'comment not verified posted' };
+      return { outcome: 'post_failed', term, noteId: card.noteId, noteTitle: read.note.title, text: displayText, termsTried: tried, reason: 'comment not verified posted' };
     }
     await steps.recordCommented(card.noteId);
     log.log(`[comment-task] 已评论 note=${card.noteId}（词「${term}」，尝试 ${tried} 个词）`);
-    return { outcome: 'commented', term, noteId: card.noteId, text: displayText, termsTried: tried };
+    return { outcome: 'commented', term, noteId: card.noteId, noteTitle: read.note.title, text: displayText, termsTried: tried };
   }
 
   log.log(`[comment-task] 试过 ${tried} 个搜索词仍无强相关未评过候选 → 诚实结束、本次不评`);
@@ -168,6 +169,8 @@ export type TargetedCommentSteps = Pick<
 export interface TargetedCommentTarget {
   /** 目标笔记 id（精选行 source_id）。 */
   noteId: string;
+  /** 目标笔记标题，仅用于人审/结果卡展示，不参与机器定位。 */
+  title?: string;
   /** 首次搜索词（笔记标题截断）。 */
   searchTerm: string;
   /** 第二次尝试的放宽搜索词（如标题前 12 字）；缺省沿用 searchTerm 重发。 */
@@ -184,6 +187,7 @@ export type TargetedCommentOutcome =
 export interface TargetedCommentResult {
   outcome: TargetedCommentOutcome;
   noteId: string;
+  noteTitle?: string;
   /** 人审通过的合并终稿（正文 + 换行 + 群聊码），命中撰写后才有。 */
   text?: string;
   /** 实际发起的搜索尝试次数。 */
@@ -223,28 +227,28 @@ export async function runTargetedCommentTask(
     }
   }
   if (!card) {
-    return { outcome: 'note_not_found', noteId: target.noteId, searchAttempts: attempts, reason: `target not in search results after ${attempts} attempts` };
+    return { outcome: 'note_not_found', noteId: target.noteId, noteTitle: target.title, searchAttempts: attempts, reason: `target not in search results after ${attempts} attempts` };
   }
 
   // —— 目标命中：对这一篇走到底（失败=诚实失败，绝不偷换另一篇）。 ——
   const read = await steps.readNote(card);
   if (!read) {
-    return { outcome: 'read_failed', noteId: target.noteId, searchAttempts: attempts, reason: 'open/read note failed' };
+    return { outcome: 'read_failed', noteId: target.noteId, noteTitle: target.title ?? card.title, searchAttempts: attempts, reason: 'open/read note failed' };
   }
   if (read.note.noteId !== target.noteId) {
     // 防御：详情上报的 noteId 与目标不一致 —— 宁可不评，绝不评错帖。
-    return { outcome: 'read_failed', noteId: target.noteId, searchAttempts: attempts, reason: `detail_note_mismatch(${read.note.noteId})` };
+    return { outcome: 'read_failed', noteId: target.noteId, noteTitle: target.title ?? card.title, searchAttempts: attempts, reason: `detail_note_mismatch(${read.note.noteId})` };
   }
   const composed = await steps.composeAndApprove(read.note, read.comments);
   if (!composed) {
-    return { outcome: 'compose_skipped', noteId: target.noteId, searchAttempts: attempts, reason: 'empty/unapproved/rejected' };
+    return { outcome: 'compose_skipped', noteId: target.noteId, noteTitle: read.note.title || target.title, searchAttempts: attempts, reason: 'empty/unapproved/rejected' };
   }
   const displayText = composed.groupChatCode ? `${composed.text}\n${composed.groupChatCode}` : composed.text;
   const ok = await steps.post(target.noteId, composed.text, composed.groupChatCode);
   if (!ok) {
-    return { outcome: 'post_failed', noteId: target.noteId, text: displayText, searchAttempts: attempts, reason: 'comment not verified posted' };
+    return { outcome: 'post_failed', noteId: target.noteId, noteTitle: read.note.title || target.title, text: displayText, searchAttempts: attempts, reason: 'comment not verified posted' };
   }
   await steps.recordCommented(target.noteId);
   log.log(`[targeted-comment] 已评论 note=${target.noteId}（${attempts} 次搜索定位）`);
-  return { outcome: 'commented', noteId: target.noteId, text: displayText, searchAttempts: attempts };
+  return { outcome: 'commented', noteId: target.noteId, noteTitle: read.note.title || target.title, text: displayText, searchAttempts: attempts };
 }

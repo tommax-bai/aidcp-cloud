@@ -15,8 +15,16 @@ import type { RoleName, CommentClearedPayload } from '../event-bus/types.js';
 
 /** 评论人审端口：发卡 + 查授权信号（复用发帖 messenger + isPublishApproved，换评论 requestId 命名空间）。 */
 export interface CommentApprovalPort {
-  /** 发飞书审批卡（携账号、拟发评论原文 + requestId + 笔记标题供人识别）。title 缺省时卡片回落显示 noteId。 */
-  request(input: { requestId: string; noteId: string; text: string; title?: string; accountId?: string; accountName?: string }): Promise<void>;
+  /** 发飞书审批卡（携账号、拟发评论原文 + requestId + 笔记标题/用户昵称供人识别）。缺省时卡片显示未获取，不展示 id。 */
+  request(input: {
+    requestId: string;
+    noteId: string;
+    text: string;
+    title?: string;
+    authorName?: string;
+    accountId?: string;
+    accountName?: string;
+  }): Promise<void>;
   /** 查 /tmp 先到先得授权信号；仅 approved===true 视为已授权。 */
   isApproved(requestId: string): Promise<boolean>;
   /** 等待上限（毫秒；可信停留上限），缺省 90000。 */
@@ -32,8 +40,10 @@ export interface CommentApprovalGateOptions extends RoleOptions {
   getAccountId?: () => string | null | undefined;
   /** 当前账号展示名/昵称；仅用于审批卡展示，缺省时由发卡端按 accountId 兜底。 */
   getAccountName?: () => string | null | undefined;
-  /** 当前笔记标题解析（noteId→标题），仅供审批卡人识别；缺省/取不到 → 卡片回落显示 noteId。 */
+  /** 当前笔记标题解析（noteId→标题），仅供审批卡人识别；缺省/取不到 → 卡片显示未获取标题。 */
   getNoteTitle?: (noteId: string) => string | null;
+  /** 当前笔记作者/用户昵称解析（noteId→昵称），仅供审批卡人识别；缺省/取不到 → 卡片显示未获取昵称。 */
+  getNoteAuthor?: (noteId: string) => string | null;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -44,6 +54,7 @@ export class CommentApprovalGate extends BaseRole {
   private readonly getAccountId?: () => string | null | undefined;
   private readonly getAccountName?: () => string | null | undefined;
   private readonly getNoteTitle?: (noteId: string) => string | null;
+  private readonly getNoteAuthor?: (noteId: string) => string | null;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private unsubscribers: (() => void)[] = [];
@@ -54,6 +65,7 @@ export class CommentApprovalGate extends BaseRole {
     this.getAccountId = options.getAccountId;
     this.getAccountName = options.getAccountName;
     this.getNoteTitle = options.getNoteTitle;
+    this.getNoteAuthor = options.getNoteAuthor;
     this.now = options.now ?? (() => Date.now());
     this.sleep = options.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   }
@@ -91,12 +103,13 @@ export class CommentApprovalGate extends BaseRole {
     const timeoutMs = this.approval.timeoutMs ?? 90_000;
     const pollMs = this.approval.pollMs ?? 2_000;
 
-    // 解析笔记标题供人识别（取不到 → 卡片回落 noteId，绝不空白）。
+    // 解析笔记标题和作者昵称供人识别（取不到 → 卡片显示未获取，不展示内部 id）。
     const title = this.getNoteTitle?.(payload.noteId) ?? undefined;
+    const authorName = this.getNoteAuthor?.(payload.noteId) ?? undefined;
     const accountId = this.getAccountId?.() ?? undefined;
     const accountName = this.getAccountName?.() ?? undefined;
     try {
-      await this.approval.request({ requestId, noteId: payload.noteId, text: payload.text, title, accountId, accountName });
+      await this.approval.request({ requestId, noteId: payload.noteId, text: payload.text, title, authorName, accountId, accountName });
     } catch (err) {
       this.log(`审批卡发送失败：${(err as Error).message}`);
       this.skip(payload, 'approval_request_failed');

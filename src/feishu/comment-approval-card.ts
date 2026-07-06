@@ -13,27 +13,38 @@ export interface CommentApprovalCardData {
   requestId: string;
   noteId: string;
   text: string;
-  /** 评论账号 id；仅用于审批卡展示兜底，不进入授权 payload。 */
+  /** 评论账号 id；仅用于存在性判断，不进入授权 payload、不作为卡片可见文案。 */
   accountId?: string;
-  /** 评论账号展示名/昵称；展示优先级高于 accountId。 */
+  /** 评论账号展示名/昵称；卡片可见文案只用昵称，不展示 id。 */
   accountName?: string;
-  /** 笔记标题（供人识别）。缺省/为空 → 回落显示 noteId，绝不空白。 */
+  /** 笔记标题（供人识别）。缺省/为空 → 显示未获取标题，不展示 noteId。 */
   title?: string;
+  /** 笔记作者/用户昵称；缺省/为空 → 显示未获取昵称，不展示 authorId。 */
+  authorName?: string;
 }
 
 function formatAccountDisplay(accountName?: string, accountId?: string): string {
   const name = accountName?.trim();
   if (name) return name;
-  return accountId?.trim() ?? '';
+  return accountId?.trim() ? '（未获取昵称）' : '';
+}
+
+function formatNicknameDisplay(nickname?: string): string {
+  return nickname?.trim() || '（未获取昵称）';
+}
+
+function formatNoteLabel(title?: string): string {
+  const clean = title?.trim();
+  return clean ? `《${clean}》` : '（未获取标题）';
 }
 
 export function buildCommentApprovalCard(data: CommentApprovalCardData): FeishuCard {
-  // 人识别用：有标题显标题（《》紧贴前缀），无标题诚实回落 noteId（裸 id 前留空格）。
+  // 人识别用：卡片可见字段只展示标题/昵称；noteId 只保留在 requestId 所代表的机器通道里。
   // noteLabel 见于本卡「笔记」字段；callbackTitle 经 payload.title 见于审批后确认卡的「标题」字段。
-  const title = data.title?.trim();
-  const noteLabel = title ? `《${title}》` : data.noteId;
-  const callbackTitle = title ? `评论·笔记${noteLabel}` : `评论·笔记 ${data.noteId}`;
+  const noteLabel = formatNoteLabel(data.title);
+  const callbackTitle = `评论·笔记${noteLabel}`;
   const accountLabel = formatAccountDisplay(data.accountName, data.accountId);
+  const authorLabel = formatNicknameDisplay(data.authorName);
   const callbackValue = {
     requestId: data.requestId,
     payload: { title: callbackTitle, content: data.text, tags: [] as string[] },
@@ -52,6 +63,7 @@ export function buildCommentApprovalCard(data: CommentApprovalCardData): FeishuC
             ? [{ is_short: false, text: { tag: 'lark_md' as const, content: `**账号**\n${accountLabel}` } }]
             : []),
           { is_short: false, text: { tag: 'lark_md', content: `**笔记**\n${noteLabel}` } },
+          { is_short: false, text: { tag: 'lark_md', content: `**用户**\n${authorLabel}` } },
           { is_short: false, text: { tag: 'lark_md', content: `**拟发评论**\n${data.text}` } },
         ],
       },
