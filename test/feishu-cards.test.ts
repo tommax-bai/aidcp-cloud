@@ -89,7 +89,7 @@ test('buildAlertCard: P2 用橙色头部', () => {
 
 test('buildCommandResultCard: 成功用绿色，含指令与账号', () => {
   const card = buildCommandResultCard({
-    command: '/aidcp pause acc-01',
+    command: '/pause acc-01',
     ok: true,
     title: '已暂停账号',
     message: '账号已暂停。',
@@ -99,13 +99,13 @@ test('buildCommandResultCard: 成功用绿色，含指令与账号', () => {
   assert.match(card.header?.title.content ?? '', /✅/);
   const div = card.elements[0];
   assert.ok(div.tag === 'div' && div.text);
-  assert.match(div.text!.content, /\/aidcp pause acc-01/);
+  assert.match(div.text!.content, /\/pause acc-01/);
   assert.match(div.text!.content, /acc-01/);
 });
 
 test('buildCommandResultCard: 失败用红色', () => {
   const card = buildCommandResultCard({
-    command: '/aidcp foo',
+    command: '/foo',
     ok: false,
     title: '需要帮助',
     message: 'help',
@@ -116,7 +116,7 @@ test('buildCommandResultCard: 失败用红色', () => {
 
 test('buildCommandResultCard: level=warning 用黄色 ⚠️（触发成功但编排未产出，别染绿）', () => {
   const card = buildCommandResultCard({
-    command: '/aidcp publish Tmax',
+    command: '/publish Tmax',
     ok: false,
     level: 'warning',
     title: '发帖未产出',
@@ -128,7 +128,7 @@ test('buildCommandResultCard: level=warning 用黄色 ⚠️（触发成功但�
 
 test('buildCommandResultCard: level=error 用红色 ❌（编排失败，绝不绿色）', () => {
   const card = buildCommandResultCard({
-    command: '/aidcp publish Tmax',
+    command: '/publish Tmax',
     ok: false,
     level: 'error',
     title: '发帖编排失败',

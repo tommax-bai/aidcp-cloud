@@ -73,10 +73,10 @@ function makeRecordingMessenger() {
 }
 
 test('ws-receiver: extractText 抽出文本并剥离 @ 提及占位', () => {
-  assert.equal(extractText(JSON.stringify({ text: '/aidcp status' })), '/aidcp status');
+  assert.equal(extractText(JSON.stringify({ text: '/status' })), '/status');
   assert.equal(
-    extractText(JSON.stringify({ text: '@_user_1 /aidcp pause acc-02' })),
-    '/aidcp pause acc-02',
+    extractText(JSON.stringify({ text: '@_user_1 /pause acc-02' })),
+    '/pause acc-02',
   );
   assert.equal(extractText('{not json'), '');
 });
@@ -93,7 +93,7 @@ test('ws-receiver: 文本消息 → 路由指令 → 发回执卡片', async () 
     message_id: 'om_1',
     chat_id: 'oc_chat',
     message_type: 'text',
-    content: JSON.stringify({ text: '/aidcp status acc-01' }),
+    content: JSON.stringify({ text: '/status acc-01' }),
   });
   // fast-ack：命令执行 + 回卡在后台异步补发，等一拍让其落地。
   await new Promise((r) => setTimeout(r, 20));
@@ -114,7 +114,7 @@ test('ws-receiver: 已读文本消息 → 贴「Typing」敲键盘表情回应�
     message_id: 'om_react',
     chat_id: 'oc_chat',
     message_type: 'text',
-    content: JSON.stringify({ text: '/aidcp status acc-01' }),
+    content: JSON.stringify({ text: '/status acc-01' }),
   });
   // addReaction 为 best-effort fire-and-forget，等一拍让其落地。
   await new Promise((r) => setTimeout(r, 20));
@@ -135,7 +135,7 @@ test('ws-receiver: @ 提及占位被剥离后仍能解析指令', async () => {
     message_id: 'om_2',
     chat_id: 'oc_chat',
     message_type: 'text',
-    content: JSON.stringify({ text: '@_user_1 /aidcp pause acc-02' }),
+    content: JSON.stringify({ text: '@_user_1 /pause acc-02' }),
   });
   // fast-ack：回卡后台异步补发，等一拍。
   await new Promise((r) => setTimeout(r, 20));
@@ -173,13 +173,13 @@ test('ws-receiver: fast-ack — 命令未完成时 handleMessage 即返回，终
     message_id: 'om_slow',
     chat_id: 'oc_chat',
     message_type: 'text',
-    content: JSON.stringify({ text: '/aidcp publish acc-01' }),
+    content: JSON.stringify({ text: '/publish acc-01' }),
   });
   await tick();
   assert.equal(sent.length, 0, '命令未完成前不发终态卡（受理即返回、不阻塞）');
 
   // 命令完成 → 后台异步补发终态卡。
-  resolve({ command: '/aidcp publish acc-01', ok: true, level: 'success', title: '已触发发帖编排', message: 'ok' });
+  resolve({ command: '/publish acc-01', ok: true, level: 'success', title: '已触发发帖编排', message: 'ok' });
   await tick();
   assert.equal(sent.length, 1, '命令完成后异步补发一张终态卡');
 });
@@ -197,13 +197,13 @@ test('ws-receiver: 终态卡随 honest-status（未产出=黄⚠️），受理�
     message_id: 'om_warn',
     chat_id: 'oc_chat',
     message_type: 'text',
-    content: JSON.stringify({ text: '/aidcp publish acc-01' }),
+    content: JSON.stringify({ text: '/publish acc-01' }),
   });
   await tick();
   assert.equal(sent.length, 0, '终态未定前不插「任务启动中」中间卡');
 
   resolve({
-    command: '/aidcp publish acc-01',
+    command: '/publish acc-01',
     ok: false,
     level: 'warning',
     title: '发帖未产出',
@@ -230,7 +230,7 @@ test('ws-receiver: 后台执行抛错被 catch 记日志、不外溢、不发卡
     message_id: 'om_err',
     chat_id: 'oc_chat',
     message_type: 'text',
-    content: JSON.stringify({ text: '/aidcp publish acc-01' }),
+    content: JSON.stringify({ text: '/publish acc-01' }),
   });
   reject(new Error('boom'));
   await tick();

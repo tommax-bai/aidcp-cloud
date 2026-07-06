@@ -8,48 +8,54 @@ import {
   type CommandActions,
 } from '../src/feishu/commands.js';
 
-test('parseCommand: /aidcp status acc-01', () => {
+test('parseCommand: /status acc-01', () => {
+  const cmd = parseCommand('/status acc-01');
+  assert.equal(cmd.action, 'status');
+  assert.equal(cmd.accountId, 'acc-01');
+});
+
+test('parseCommand: legacy /aidcp prefix remains compatible', () => {
   const cmd = parseCommand('/aidcp status acc-01');
   assert.equal(cmd.action, 'status');
   assert.equal(cmd.accountId, 'acc-01');
 });
 
 test('parseCommand: 省略 accountId → undefined（执行层解析唯一真实账号，retire-default-account：绝不回落 default）', () => {
-  const cmd = parseCommand('/aidcp pause');
+  const cmd = parseCommand('/pause');
   assert.equal(cmd.action, 'pause');
   assert.equal(cmd.accountId, undefined);
 });
 
 test('parseCommand: resume 大小写不敏感', () => {
-  const cmd = parseCommand('/aidcp RESUME acc-09');
+  const cmd = parseCommand('/RESUME acc-09');
   assert.equal(cmd.action, 'resume');
   assert.equal(cmd.accountId, 'acc-09');
 });
 
-test('parseCommand: 非 /aidcp 前缀 → help', () => {
+test('parseCommand: 非命令文本 → help', () => {
   const cmd = parseCommand('你好啊');
   assert.equal(cmd.action, 'help');
 });
 
 test('parseCommand: 未识别子命令 → help 带 hint', () => {
-  const cmd = parseCommand('/aidcp foobar');
+  const cmd = parseCommand('/foobar');
   assert.equal(cmd.action, 'help');
   assert.match(cmd.hint ?? '', /未识别的子命令/);
 });
 
 test('parseCommand: 多余空白被规整', () => {
-  const cmd = parseCommand('  /aidcp   status   acc-03  ');
+  const cmd = parseCommand('  /status   acc-03  ');
   assert.equal(cmd.action, 'status');
   assert.equal(cmd.accountId, 'acc-03');
 });
 
 test('parseCommand: publish-test 被识别', () => {
-  const cmd = parseCommand('/aidcp publish-test');
+  const cmd = parseCommand('/publish-test');
   assert.equal(cmd.action, 'publish-test');
 });
 
 test('parseCommand: publish-test 保留显式 requestId 参数', () => {
-  const cmd = parseCommand('/aidcp publish-test req-fixed');
+  const cmd = parseCommand('/publish-test req-fixed');
   assert.equal(cmd.action, 'publish-test');
   assert.deepEqual(cmd.args, ['req-fixed']);
 });
@@ -74,7 +80,7 @@ function makeActions(): { actions: CommandActions; log: string[] } {
 test('CommandRouter: status 调用 actions.status 并回成功回执', async () => {
   const { actions, log } = makeActions();
   const router = new CommandRouter(actions);
-  const res = await router.handle('/aidcp status acc-01');
+  const res = await router.handle('/status acc-01');
   assert.equal(res.ok, true);
   assert.equal(res.title, '账号状态');
   assert.match(res.message, /normal/);
@@ -84,10 +90,10 @@ test('CommandRouter: status 调用 actions.status 并回成功回执', async () 
 test('CommandRouter: pause/resume 执行动作', async () => {
   const { actions, log } = makeActions();
   const router = new CommandRouter(actions);
-  const p = await router.handle('/aidcp pause acc-01');
+  const p = await router.handle('/pause acc-01');
   assert.equal(p.ok, true);
   assert.match(p.title, /已暂停/);
-  const r = await router.handle('/aidcp resume acc-01');
+  const r = await router.handle('/resume acc-01');
   assert.equal(r.ok, true);
   assert.match(r.title, /已恢复/);
   assert.deepEqual(log, ['pause:acc-01', 'resume:acc-01']);
@@ -96,10 +102,10 @@ test('CommandRouter: pause/resume 执行动作', async () => {
 test('CommandRouter: 未识别指令返回帮助（ok=false）', async () => {
   const { actions } = makeActions();
   const router = new CommandRouter(actions);
-  const res = await router.handle('/aidcp wtf');
+  const res = await router.handle('/wtf');
   assert.equal(res.ok, false);
   assert.equal(res.title, '需要帮助');
-  assert.match(res.message, /\/aidcp status/);
+  assert.match(res.message, /\/status/);
 });
 
 test('CommandRouter: 动作抛错时回失败回执', async () => {
@@ -111,7 +117,7 @@ test('CommandRouter: 动作抛错时回失败回执', async () => {
     resume: () => {},
   };
   const router = new CommandRouter(actions);
-  const res = await router.handle('/aidcp status acc-01');
+  const res = await router.handle('/status acc-01');
   assert.equal(res.ok, false);
   assert.match(res.message, /调度器不可用/);
 });
@@ -134,7 +140,7 @@ test('CommandRouter: publish-test 发送审批卡片', async () => {
     },
     messenger,
   );
-  const res = await router.handle('/aidcp publish-test', { chatId: 'oc_chat' });
+  const res = await router.handle('/publish-test', { chatId: 'oc_chat' });
   assert.equal(res.ok, true);
   assert.equal(sent.length, 1);
   assert.match(sent[0], /授权发布/);
@@ -165,38 +171,38 @@ test('CommandRouter: publish-test 使用显式 requestId', async () => {
     },
   } as unknown as import('../src/feishu/messenger.js').FeishuMessenger;
   const router = new CommandRouter(makeActions().actions, messenger);
-  const res = await router.handle('/aidcp publish-test req-fixed', { chatId: 'oc_chat' });
+  const res = await router.handle('/publish-test req-fixed', { chatId: 'oc_chat' });
   assert.equal(res.ok, true);
   assert.match(res.message, /req-fixed/);
   assert.match(sent[0], /req-fixed/);
 });
 
-test('parseCommand: /aidcp publish 无参 → action publish、nickname undefined（执行层解析唯一账号）', () => {
-  const cmd = parseCommand('/aidcp publish');
+test('parseCommand: /publish 无参 → action publish、nickname undefined（执行层解析唯一账号）', () => {
+  const cmd = parseCommand('/publish');
   assert.equal(cmd.action, 'publish');
   assert.equal(cmd.nickname, undefined);
 });
 
 test('parseCommand: /publish <昵称> → nickname 取昵称（不再当 accountId）', () => {
-  const cmd = parseCommand('/aidcp publish 工程师大白');
+  const cmd = parseCommand('/publish 工程师大白');
   assert.equal(cmd.action, 'publish');
   assert.equal(cmd.nickname, '工程师大白');
 });
 
 test('parseCommand: /publish 多词昵称（含空格）整段捕获', () => {
-  const cmd = parseCommand('/aidcp publish 大白 工程师');
+  const cmd = parseCommand('/publish 大白 工程师');
   assert.equal(cmd.action, 'publish');
   assert.equal(cmd.nickname, '大白 工程师');
 });
 
-test('parseCommand: /aidcp comment <昵称> → action comment、nickname 取昵称', () => {
-  const cmd = parseCommand('/aidcp comment 工程师大白');
+test('parseCommand: /comment <昵称> → action comment、nickname 取昵称', () => {
+  const cmd = parseCommand('/comment 工程师大白');
   assert.equal(cmd.action, 'comment');
   assert.equal(cmd.nickname, '工程师大白');
 });
 
 test('parseCommand: /comment 无参 → action comment、nickname undefined（执行层解析唯一账号）', () => {
-  const cmd = parseCommand('/aidcp comment');
+  const cmd = parseCommand('/comment');
   assert.equal(cmd.action, 'comment');
   assert.equal(cmd.nickname, undefined);
 });
@@ -204,44 +210,44 @@ test('parseCommand: /comment 无参 → action comment、nickname undefined（�
 // ── change account-group-chat-injection：/comment 尾部引流开关 group:on/off ──
 
 test('parseCommand: /comment <昵称> group:on → injectGroup true、昵称不含开关', () => {
-  const cmd = parseCommand('/aidcp comment 工程师大白 group:on');
+  const cmd = parseCommand('/comment 工程师大白 group:on');
   assert.equal(cmd.action, 'comment');
   assert.equal(cmd.nickname, '工程师大白');
   assert.equal(cmd.injectGroup, true);
 });
 
 test('parseCommand: /comment <昵称> group:off → injectGroup false', () => {
-  const cmd = parseCommand('/aidcp comment 工程师大白 group:off');
+  const cmd = parseCommand('/comment 工程师大白 group:off');
   assert.equal(cmd.nickname, '工程师大白');
   assert.equal(cmd.injectGroup, false);
 });
 
 test('parseCommand: 引流开关大小写不敏感（GROUP:ON）', () => {
-  const cmd = parseCommand('/aidcp comment 工程师大白 GROUP:ON');
+  const cmd = parseCommand('/comment 工程师大白 GROUP:ON');
   assert.equal(cmd.nickname, '工程师大白');
   assert.equal(cmd.injectGroup, true);
 });
 
 test('parseCommand: /comment 无开关 → injectGroup undefined、昵称完整（零回归）', () => {
-  const cmd = parseCommand('/aidcp comment 工程师大白');
+  const cmd = parseCommand('/comment 工程师大白');
   assert.equal(cmd.nickname, '工程师大白');
   assert.equal(cmd.injectGroup, undefined);
 });
 
 test('parseCommand: 含空格昵称 + 尾部开关正确切分', () => {
-  const cmd = parseCommand('/aidcp comment 大白 工程师 group:on');
+  const cmd = parseCommand('/comment 大白 工程师 group:on');
   assert.equal(cmd.nickname, '大白 工程师');
   assert.equal(cmd.injectGroup, true);
 });
 
 test('parseCommand: 开关只认末尾（trailing-only）——中间的 group:on-样 token 不当开关，并入昵称', () => {
-  const cmd = parseCommand('/aidcp comment group:on 工程师');
+  const cmd = parseCommand('/comment group:on 工程师');
   assert.equal(cmd.injectGroup, undefined); // 末尾是「工程师」，非开关
   assert.equal(cmd.nickname, 'group:on 工程师'); // 整段作昵称（执行层再诚实解析/报错）
 });
 
 test('parseCommand: 仅 group:on 无昵称 → injectGroup true、nickname undefined（单账号引流）', () => {
-  const cmd = parseCommand('/aidcp comment group:on');
+  const cmd = parseCommand('/comment group:on');
   assert.equal(cmd.injectGroup, true);
   assert.equal(cmd.nickname, undefined);
 });
@@ -255,10 +261,10 @@ test('CommandRouter: /comment group:on 把 injectGroup=true 透传给 comment �
       return { ok: true as const, level: 'success' as const, title: '已触发', message: 'ok' };
     },
   });
-  await router.handle('/aidcp comment 工程师大白 group:on');
+  await router.handle('/comment 工程师大白 group:on');
   assert.deepEqual(seen, { nickname: '工程师大白', options: { injectGroup: true } });
 
-  await router.handle('/aidcp comment 工程师大白');
+  await router.handle('/comment 工程师大白');
   assert.deepEqual(seen, { nickname: '工程师大白', options: { injectGroup: undefined } });
 });
 
@@ -272,7 +278,7 @@ test('CommandRouter: publish 编排失败 → 回执 ok:false / level:error（�
       message: `账号 \`${nickname}\` 已触发（manual_feishu）→ 编排状态 failed\n原因：Pipeline timed out after 120000ms`,
     }),
   });
-  const res = await router.handle('/aidcp publish Tmax');
+  const res = await router.handle('/publish Tmax');
   assert.equal(res.ok, false, '「触发成功但编排 failed」不再被当成功');
   assert.equal(res.level, 'error', '红色 ❌');
   assert.match(res.title, /失败/);
@@ -284,7 +290,7 @@ test('CommandRouter: publish 未产出 → 回执 ok:false / level:warning（黄
     ...makeActions().actions,
     publish: async () => ({ ok: false, level: 'warning', title: '发帖未产出', message: '编排状态 skipped' }),
   });
-  const res = await router.handle('/aidcp publish Tmax');
+  const res = await router.handle('/publish Tmax');
   assert.equal(res.ok, false);
   assert.equal(res.level, 'warning');
   assert.match(res.title, /未产出/);
@@ -295,7 +301,7 @@ test('CommandRouter: publish 成功 → 回执 ok:true / level:success（绿 ✅
     ...makeActions().actions,
     publish: async () => ({ ok: true, level: 'success', title: '已触发发帖编排', message: '编排状态 pending_approval' }),
   });
-  const res = await router.handle('/aidcp publish Tmax');
+  const res = await router.handle('/publish Tmax');
   assert.equal(res.ok, true);
   assert.equal(res.level, 'success');
   assert.match(res.title, /已触发发帖编排/);
@@ -310,7 +316,7 @@ test('CommandRouter: publish 把来源 chatId 透传给执行层', async () => {
       return { ok: true, level: 'success', title: '已触发发帖编排', message: '编排状态 pending_approval' };
     },
   });
-  const res = await router.handle('/aidcp publish Tmax', { chatId: 'chat-private' });
+  const res = await router.handle('/publish Tmax', { chatId: 'chat-private' });
   assert.equal(res.ok, true);
   assert.deepEqual(seen, { nickname: 'Tmax', sourceChatId: 'chat-private' });
 });
@@ -322,7 +328,7 @@ test('CommandRouter: publish 抛错（账号解析失败）→ honest fail 红�
       throw new Error('找不到昵称「X」的账号。可用昵称：Tmax');
     },
   });
-  const res = await router.handle('/aidcp publish X');
+  const res = await router.handle('/publish X');
   assert.equal(res.ok, false);
   assert.match(res.message, /找不到昵称/);
 });
@@ -336,7 +342,7 @@ test('CommandRouter: comment 触发成功 → 结构化回执 ok:true / level:su
       return { ok: true, level: 'success', title: '已触发按需评论', message: '已为账号 工程师大白 启动按需评论任务（评论前仍需人审）' };
     },
   });
-  const res = await router.handle('/aidcp comment 工程师大白');
+  const res = await router.handle('/comment 工程师大白');
   assert.equal(res.ok, true);
   assert.equal(res.level, 'success', '成功=绿色样式');
   assert.match(res.title, /已触发按需评论/);
@@ -348,7 +354,7 @@ test('CommandRouter: comment 未触发 → ok:false / level:warning（黄⚠️�
     ...makeActions().actions,
     comment: () => ({ ok: false, level: 'warning', title: '未触发按需评论', message: '该账号已有评论任务在跑' }),
   });
-  const res = await router.handle('/aidcp comment Tmax');
+  const res = await router.handle('/comment Tmax');
   assert.equal(res.ok, false);
   assert.equal(res.level, 'warning', '未触发=黄色样式，区别于失败红');
   assert.match(res.title, /未触发/);
@@ -359,7 +365,7 @@ test('CommandRouter: comment 触发失败 → ok:false / level:error（红❌）
     ...makeActions().actions,
     comment: () => ({ ok: false, level: 'error', title: '按需评论触发失败', message: '边端离线' }),
   });
-  const res = await router.handle('/aidcp comment Tmax');
+  const res = await router.handle('/comment Tmax');
   assert.equal(res.ok, false);
   assert.equal(res.level, 'error', '失败=红色样式');
   assert.match(res.message, /边端离线/);
@@ -367,7 +373,7 @@ test('CommandRouter: comment 触发失败 → ok:false / level:error（红❌）
 
 test('CommandRouter: comment 未接线 → honest fail（不静默成功）', async () => {
   const router = new CommandRouter(makeActions().actions);
-  const res = await router.handle('/aidcp comment 工程师大白');
+  const res = await router.handle('/comment 工程师大白');
   assert.equal(res.ok, false);
   assert.match(res.title, /按需评论触发失败|未接线/);
 });
@@ -379,7 +385,7 @@ test('CommandRouter: comment 执行层抛错（如边端离线/昵称无匹配�
       throw new Error('该账号暂无在线边端');
     },
   });
-  const res = await router.handle('/aidcp comment 工程师大白');
+  const res = await router.handle('/comment 工程师大白');
   assert.equal(res.ok, false);
   assert.match(res.message, /在线边端/);
 });

@@ -1119,7 +1119,7 @@ async function main(): Promise<void> {
     if (accountId) return accountId;
     const single = await resolveSingleAccountId();
     if (single) return single;
-    throw new Error('当前为 0 个或多个账号，请显式指定账号，例如 `/aidcp status <accountId>`');
+    throw new Error('当前为 0 个或多个账号，请显式指定账号，例如 `/status <accountId>`');
   };
   // 按昵称解析 /publish 的目标账号（严格只认昵称、不接 id）：缺省 → 唯一真实账号；
   // 找不到 / 重名 → 诚实抛错（带可用昵称清单），由路由层回报给运营。
@@ -1127,7 +1127,7 @@ async function main(): Promise<void> {
     if (!nickname) {
       const single = await resolveSingleAccountId();
       if (single) return single;
-      throw new Error('当前为 0 个或多个账号，请用昵称指定，例如 `/aidcp publish 工程师大白`');
+      throw new Error('当前为 0 个或多个账号，请用昵称指定，例如 `/publish 工程师大白`');
     }
     if (!accountStore) throw new Error('账号存储未就绪，无法按昵称解析账号');
     const all = await accountStore.listAll();

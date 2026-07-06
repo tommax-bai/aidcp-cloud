@@ -47,14 +47,14 @@ export interface ParsedCommand {
 
 const HELP_TEXT = [
   '可用指令：',
-  '• `/aidcp status [accountId]` — 查账号状态',
-  '• `/aidcp pause [accountId]` — 暂停账号',
-  '• `/aidcp resume [accountId]` — 恢复账号',
-  '• `/aidcp publish <昵称>` — 触发该账号发帖（按昵称指定，发布前仍需人审）',
-  '• `/aidcp comment <昵称>` — 触发该账号按需评论（搜最近一天最多收藏的强相关笔记，评论前仍需人审）',
-  '• `/aidcp comment <昵称> group:on` — 同上，并在评论末尾注入该账号后台配置的「关联群聊引流码」（未配则拦下告警、不发）',
-  '• `/aidcp publish-test [requestId]` — 发送测试审批卡片',
-  '• `/aidcp bind` — 绑定当前群为默认审批群（开发中）',
+  '• `/status [accountId]` — 查账号状态',
+  '• `/pause [accountId]` — 暂停账号',
+  '• `/resume [accountId]` — 恢复账号',
+  '• `/publish <昵称>` — 触发该账号发帖（按昵称指定，发布前仍需人审）',
+  '• `/comment <昵称>` — 触发该账号按需评论（搜最近一天最多收藏的强相关笔记，评论前仍需人审）',
+  '• `/comment <昵称> group:on` — 同上，并在评论末尾注入该账号后台配置的「关联群聊引流码」（未配则拦下告警、不发）',
+  '• `/publish-test [requestId]` — 发送测试审批卡片',
+  '• `/bind` — 绑定当前群为默认审批群（开发中）',
   '',
   '（单账号时 accountId / 昵称可省略，默认作用于唯一账号）',
 ].join('\n');
@@ -91,8 +91,9 @@ export function matchAccountByNickname(
  * 解析一条文本指令为结构化命令。
  *
  * 规则：
- * - 必须直接输入 `/status`、`/pause`、`/resume`、`/publish-test`、`/bind` 之一；
- * - `/status`、`/pause`、`/resume` 的第二个 token 视为 accountId，缺省用 DEFAULT_ACCOUNT_ID；
+ * - 直接输入 `/status`、`/pause`、`/resume`、`/publish`、`/comment`、`/publish-test`、`/bind` 之一；
+ * - 旧 `/aidcp <cmd>` 前缀仍兼容，但不再作为用户提示示例；
+ * - `/status`、`/pause`、`/resume` 的第二个 token 视为 accountId，缺省交由执行层解析唯一真实账号；
  * - `/publish-test` 的第二个 token 视为 requestId（可省略）；
  * - 其余输入归为 help。
  */
