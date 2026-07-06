@@ -112,11 +112,15 @@ export function buildDailySummaryCard(data: DailySummaryData): FeishuCard {
   return card;
 }
 
+function formatAccountDisplay(accountName?: string, accountId?: string): string {
+  const name = accountName?.trim();
+  if (name) return name;
+  return accountId ?? '';
+}
+
 /** P0/P1 告警卡片 */
 export function buildAlertCard(alert: AlertData): FeishuCard {
-  const acc = alert.accountName
-    ? `${alert.accountName}${alert.accountId ? `(${alert.accountId})` : ''}`
-    : (alert.accountId ?? '');
+  const acc = formatAccountDisplay(alert.accountName, alert.accountId);
   const titleSuffix = acc ? ` · ${acc}` : '';
   const card: FeishuCard = {
     header: {
@@ -152,7 +156,8 @@ export function buildCommandResultCard(result: CommandResult): FeishuCard {
   const template: FeishuHeaderTemplate =
     level === 'success' ? 'green' : level === 'warning' ? 'yellow' : 'red';
   const icon = level === 'success' ? '✅' : level === 'warning' ? '⚠️' : '❌';
-  const accLine = result.accountId ? `\n**账号**：${result.accountId}` : '';
+  const acc = formatAccountDisplay(result.accountName, result.accountId);
+  const accLine = acc ? `\n**账号**：${acc}` : '';
   return {
     header: {
       template,

@@ -61,7 +61,7 @@ describe('CaptchaCoordinator', () => {
     now = 1_000_000;
   });
 
-  function makeCoordinator(cooldownMs?: number) {
+  function makeCoordinator(cooldownMs?: number, getAccountName?: (accountId: string) => string | null | undefined) {
     return new CaptchaCoordinator({
       resolveController: async () => risk,
       messenger,
@@ -69,6 +69,7 @@ describe('CaptchaCoordinator', () => {
       logger: silentLogger,
       clock: () => now,
       cooldownMs,
+      getAccountName,
     });
   }
 
@@ -90,12 +91,14 @@ describe('CaptchaCoordinator', () => {
   });
 
   it('unknown → 账号置 warned（更温和）+ 发卡(P1)', async () => {
-    const c = makeCoordinator();
+    const c = makeCoordinator(undefined, (accountId) => (accountId === 'acc-1' ? '工程师大白' : null));
     await c.onDetected({ edgeId: 'edge-1', kind: 'unknown' }, makeSession(), pusher);
 
     assert.equal(risk.getState().status, 'warned');
     const headerTitle = (messenger.sent[0].card.header?.title as { content: string }).content;
     assert.match(headerTitle, /P1/);
+    assert.match(headerTitle, /工程师大白/);
+    assert.doesNotMatch(headerTitle, /acc-1/);
   });
 
   it('detected alert detail includes overlay text, DOM features, and first URL', async () => {

@@ -76,10 +76,21 @@ test('buildAlertCard: P0/P1 红色头部 + 去处理按钮', () => {
   });
   assert.equal(card.header?.template, 'red');
   assert.match(card.header?.title.content ?? '', /P1/);
-  assert.match(card.header?.title.content ?? '', /小李美食\(acc-02\)/);
+  assert.match(card.header?.title.content ?? '', /小李美食/);
+  assert.doesNotMatch(card.header?.title.content ?? '', /acc-02/);
   const buttons = findAction(card.elements);
   assert.equal(buttons[0].text.content, '去处理');
   assert.equal(buttons[0].url, 'https://console.aidcp.local/accounts/acc-02');
+});
+
+test('buildAlertCard: 缺昵称时账号标题后缀回落 ID', () => {
+  const card = buildAlertCard({
+    severity: 'P1',
+    title: '未知阻断弹窗',
+    accountId: 'acc-02',
+    detail: 'x',
+  });
+  assert.match(card.header?.title.content ?? '', /acc-02/);
 });
 
 test('buildAlertCard: P2 用橙色头部', () => {
@@ -89,18 +100,34 @@ test('buildAlertCard: P2 用橙色头部', () => {
 
 test('buildCommandResultCard: 成功用绿色，含指令与账号', () => {
   const card = buildCommandResultCard({
-    command: '/pause acc-01',
+    command: '/pause 小李美食',
     ok: true,
     title: '已暂停账号',
     message: '账号已暂停。',
     accountId: 'acc-01',
+    accountName: '小李美食',
   });
   assert.equal(card.header?.template, 'green');
   assert.match(card.header?.title.content ?? '', /✅/);
   const div = card.elements[0];
   assert.ok(div.tag === 'div' && div.text);
-  assert.match(div.text!.content, /\/pause acc-01/);
-  assert.match(div.text!.content, /acc-01/);
+  assert.match(div.text!.content, /\/pause 小李美食/);
+  assert.match(div.text!.content, /\*\*账号\*\*：小李美食/);
+  assert.doesNotMatch(div.text!.content, /\*\*账号\*\*：acc-01/);
+});
+
+test('buildCommandResultCard: 缺昵称时账号行回落 ID', () => {
+  const card = buildCommandResultCard({
+    command: '参照创作',
+    ok: false,
+    level: 'error',
+    title: '参照创作编排失败',
+    message: '编排状态 failed',
+    accountId: 'acc-01',
+  });
+  const div = card.elements[0];
+  assert.ok(div.tag === 'div' && div.text);
+  assert.match(div.text!.content, /\*\*账号\*\*：acc-01/);
 });
 
 test('buildCommandResultCard: 失败用红色', () => {

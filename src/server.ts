@@ -859,6 +859,10 @@ async function main(): Promise<void> {
   // 启动加载持久化暂停态进内存缓存：被暂停账号重启后仍为 paused，不静默复活。
   const accountState = new AccountStateManager(accountStore);
   await accountState.init();
+  const accountDisplayName = (accountId: string): string | undefined => {
+    const nickname = accountStore?.getNickname?.(accountId)?.trim();
+    return nickname || undefined;
+  };
 
   // ── 账号人设（change account-persona-config，stream F，迁移 0011）─────────────
   // 须在 accounts 表建好之后（persona_config FK 到 accounts）。
@@ -1222,6 +1226,7 @@ async function main(): Promise<void> {
     messenger,
     // V1 task 9.5：验证码告警落库（飞书卡发送点写入、清除点 resolveByEdge）。
     alertStore,
+    getAccountName: accountDisplayName,
     resolveChatId: () =>
       resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console }),
   });
@@ -1874,7 +1879,15 @@ async function main(): Promise<void> {
       }
       await messenger.sendCard(
         chatId,
-        buildCommandResultCard({ command: '/comment', ok: receipt.ok, level: receipt.level, title: receipt.title, message: receipt.message, accountId }),
+        buildCommandResultCard({
+          command: '/comment',
+          ok: receipt.ok,
+          level: receipt.level,
+          title: receipt.title,
+          message: receipt.message,
+          accountId,
+          accountName: accountDisplayName(accountId),
+        }),
       );
     },
     logger: console,
@@ -1971,7 +1984,18 @@ async function main(): Promise<void> {
             return;
           }
           await messenger
-            .sendCard(chatId, buildCommandResultCard({ command: '排期发帖（自动）', ok, level, title, message, accountId }))
+            .sendCard(
+              chatId,
+              buildCommandResultCard({
+                command: '排期发帖（自动）',
+                ok,
+                level,
+                title,
+                message,
+                accountId,
+                accountName: accountDisplayName(accountId),
+              }),
+            )
             .catch((e) => console.warn('[content-scheduler] 排期结果卡发送失败：', (e as Error).message));
         },
         // 评论动作三件套（change content-schedule-comments）：commentScheduler 未建（PG 缺）则不注入 → 调度器整体跳过评论动作。
@@ -1987,7 +2011,18 @@ async function main(): Promise<void> {
                     return;
                   }
                   await messenger
-                    .sendCard(chatId, buildCommandResultCard({ command: '排期评论（自动）', ok: false, level, title, message, accountId }))
+                    .sendCard(
+                      chatId,
+                      buildCommandResultCard({
+                        command: '排期评论（自动）',
+                        ok: false,
+                        level,
+                        title,
+                        message,
+                        accountId,
+                        accountName: accountDisplayName(accountId),
+                      }),
+                    )
                     .catch((e) => console.warn('[content-scheduler] 排期评论回执卡发送失败：', (e as Error).message));
                 };
                 try {
@@ -2018,7 +2053,18 @@ async function main(): Promise<void> {
                     return;
                   }
                   await messenger
-                    .sendCard(chatId, buildCommandResultCard({ command: '排期群评（自动）', ok: false, level, title, message, accountId }))
+                    .sendCard(
+                      chatId,
+                      buildCommandResultCard({
+                        command: '排期群评（自动）',
+                        ok: false,
+                        level,
+                        title,
+                        message,
+                        accountId,
+                        accountName: accountDisplayName(accountId),
+                      }),
+                    )
                     .catch((e) => console.warn('[content-scheduler] 排期群评回执卡发送失败：', (e as Error).message));
                 };
                 try {
@@ -2416,19 +2462,29 @@ async function main(): Promise<void> {
                 .then(async (o) => {
                   // 只在「没走到人审卡」时补卡（未触发黄 / 失败红 / 跳过黄）；进人审（pending_approval 等）由人审卡自证，不双卡。
                   let receipt: { ok: boolean; level: 'success' | 'warning' | 'error'; title: string; message: string } | null = null;
+                  const accountName = accountDisplayName(accountId);
+                  const accountLabel = accountName ?? accountId;
                   if (o.result !== 'triggered') {
-                    receipt = { ok: false, level: 'warning', title: '参照创作未触发', message: `账号 \`${accountId}\` 未触发：${o.reason}` };
+                    receipt = { ok: false, level: 'warning', title: '参照创作未触发', message: `账号 \`${accountLabel}\` 未触发：${o.reason}` };
                   } else if (o.status === 'failed' || o.status === 'timeout') {
-                    receipt = { ok: false, level: 'error', title: '参照创作编排失败', message: `账号 \`${accountId}\` 编排状态 ${o.status}${o.failureReason ? `\n原因：${o.failureReason}` : ''}` };
+                    receipt = { ok: false, level: 'error', title: '参照创作编排失败', message: `账号 \`${accountLabel}\` 编排状态 ${o.status}${o.failureReason ? `\n原因：${o.failureReason}` : ''}` };
                   } else if (o.status === 'skipped') {
-                    receipt = { ok: false, level: 'warning', title: '参照创作未产出', message: `账号 \`${accountId}\` 编排状态 skipped${o.failureReason ? `（${o.failureReason}）` : ''}` };
+                    receipt = { ok: false, level: 'warning', title: '参照创作未产出', message: `账号 \`${accountLabel}\` 编排状态 skipped${o.failureReason ? `（${o.failureReason}）` : ''}` };
                   }
                   if (!receipt) return;
                   const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
                   if (!chatId) return;
                   await messenger.sendCard(
                     chatId,
-                    buildCommandResultCard({ command: '参照创作', ok: receipt.ok, level: receipt.level, title: receipt.title, message: receipt.message, accountId }),
+                    buildCommandResultCard({
+                      command: '参照创作',
+                      ok: receipt.ok,
+                      level: receipt.level,
+                      title: receipt.title,
+                      message: receipt.message,
+                      accountId,
+                      accountName,
+                    }),
                   );
                 })
                 .catch((err) => console.warn(`[curated-actions] 参照创作编排异常 account=${accountId}：${(err as Error).message}`));

@@ -150,6 +150,8 @@ export interface CommandResult {
   message: string;
   /** 相关账号 id */
   accountId?: string;
+  /** 账号展示名。仅用于卡片文案；路由与审计仍使用 accountId。 */
+  accountName?: string;
 }
 
 export interface PublishApprovalPayload {

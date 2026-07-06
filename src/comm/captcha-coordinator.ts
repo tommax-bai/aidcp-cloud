@@ -36,6 +36,8 @@ export interface CaptchaCoordinatorDeps {
   cooldownMs?: number;
   /** 告警日志（V1 task 9.5）：飞书卡发送点写入、清除点 resolveByEdge。未注入则不落库（向后兼容）。 */
   alertStore?: Pick<AlertStore, 'raise' | 'resolveByEdge'>;
+  /** 账号展示名读取。仅用于飞书卡片文案；账号归属仍使用 accountId。 */
+  getAccountName?: (accountId: string) => string | null | undefined;
 }
 
 export class CaptchaCoordinator {
@@ -171,6 +173,7 @@ export class CaptchaCoordinator {
       severity,
       title,
       accountId,
+      accountName: accountId ? normalizeAccountName(this.deps.getAccountName?.(accountId)) : undefined,
       detail,
     };
 
@@ -182,6 +185,11 @@ export class CaptchaCoordinator {
       this.logger.error('[captcha] 飞书告警发送失败:', err instanceof Error ? err.message : String(err));
     }
   }
+}
+
+function normalizeAccountName(name: string | null | undefined): string | undefined {
+  const clean = name?.trim();
+  return clean || undefined;
 }
 
 function buildCaptchaAlertDetail(
