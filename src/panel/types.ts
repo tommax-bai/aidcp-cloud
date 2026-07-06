@@ -539,6 +539,10 @@ export interface RolePromptView {
    * true=该账号无人设行（运行会被诚实拒绝）、下示 prompt 为示例人设渲染仅供查看（绝不冒充该账号人设）。
    */
   personaFallback?: boolean;
+  /** 本次预览的人设来源（change improve-role-prompt-persona-preview，可选；旧查看器忽略）。 */
+  personaSource?: 'sample' | 'account' | 'fallback_sample' | 'none';
+  /** 面向操作员的人设来源短标签（可选）：用于在 prompt 上方突出展示。 */
+  personaSourceLabel?: string;
 }
 
 export interface PanelRolePromptPreview {

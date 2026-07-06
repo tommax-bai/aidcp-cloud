@@ -37,7 +37,9 @@ test('浏览文本角色 → available:true + 真实 prompt 文本', () => {
   const v = p.get('browse:content_evaluator');
   assert.equal(v.available, true);
   assert.equal(v.prompt, 'RENDERED-PROMPT-CE');
-  assert.ok(v.note.length > 0);
+  assert.match(v.note, /示例人设/);
+  assert.equal(v.personaSource, 'sample');
+  assert.equal(v.personaSourceLabel, '示例人设');
 });
 
 test('未知角色 → available:false + 未知角色', () => {
@@ -173,6 +175,8 @@ test('发布角色带 accountId 且有人设 → 使用账号人设渲染并回�
   assert.match(v.prompt, /测试账号|AI工程师|做过大模型应用落地/);
   assert.equal(v.accountId, 'acc-1');
   assert.equal(v.personaFallback, undefined);
+  assert.equal(v.personaSource, 'account');
+  assert.equal(v.personaSourceLabel, '所选账号人设');
   assert.equal(v.segments, undefined);
 });
 
@@ -186,6 +190,8 @@ test('发布角色带 accountId 但无人设 → personaFallback:true + 示例�
   assert.equal(v.available, true);
   assert.equal(v.accountId, 'acc-no-persona');
   assert.equal(v.personaFallback, true);
+  assert.equal(v.personaSource, 'fallback_sample');
+  assert.equal(v.personaSourceLabel, '示例人设');
   assert.match(v.note, /未绑定人设|示例人设/);
   assert.match(v.prompt ?? '', /<示例账号>|<示例角色定位>/);
 });
@@ -252,6 +258,8 @@ test('给定 accountId（有人设）→ withAccount 包裹渲染 + 回显 accou
   assert.equal(v.prompt, 'RENDERED-FOR-ACC');
   assert.equal(v.accountId, 'acc-123');
   assert.equal(v.personaFallback, undefined);
+  assert.equal(v.personaSource, 'account');
+  assert.equal(v.personaSourceLabel, '所选账号人设');
   assert.equal(seenDuringRender, 'acc-123'); // 渲染确实在切账号期间发生
   assert.equal(current, 'default'); // 渲染后已还原
 });
@@ -266,6 +274,8 @@ test('给定 accountId 但该账号无人设 → personaFallback:true + 诚实�
   assert.equal(v.available, true);
   assert.equal(v.accountId, 'acc-no-persona');
   assert.equal(v.personaFallback, true);
+  assert.equal(v.personaSource, 'fallback_sample');
+  assert.equal(v.personaSourceLabel, '示例人设');
   assert.match(v.note, /未绑定人设|示例人设/); // 绝不冒充该账号人设
 });
 
@@ -280,7 +290,7 @@ test("persona-driven-content-pipeline：accountId='default' 不再豁免——�
   assert.equal(v.personaFallback, true);
 });
 
-test('不传 accountId → 行为不变（不附 accountId / personaFallback，不走账号口径）', () => {
+test('不传 accountId → 示例人设预览（不附 accountId / personaFallback，不走账号口径）', () => {
   const roles = [fakeRole('content_evaluator', () => 'R')];
   let withAccountCalled = false;
   const p = createRolePromptProvider(() => roles, {
@@ -294,6 +304,8 @@ test('不传 accountId → 行为不变（不附 accountId / personaFallback，�
   assert.equal(v.available, true);
   assert.equal(v.accountId, undefined);
   assert.equal(v.personaFallback, undefined);
+  assert.equal(v.personaSource, 'sample');
+  assert.equal(v.personaSourceLabel, '示例人设');
   assert.equal(withAccountCalled, false);
 });
 

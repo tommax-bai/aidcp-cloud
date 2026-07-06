@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { segmentPromptByPersona } from '../src/config/role-prompt-preview.js';
 import { EventBus } from '../src/event-bus/index.js';
 import { ContentEvaluator } from '../src/agents/content-evaluator.js';
+import { CuratedNoteEvaluator } from '../src/agents/curated-note-evaluator.js';
 import { SessionContext } from '../src/agents/session-context.js';
 import type { Soul } from '../src/soul/types.js';
 
@@ -70,4 +71,22 @@ test('ContentEvaluator：真实渲染 prompt 能定位人设段、拼接等值�
   assert.equal(segs!.map((s) => s.text).join(''), flat, '拼接逐字等于扁平 prompt');
   // 真实人设不是占位：身份名出现在 prompt 里
   assert.ok(flat.includes('你是「TestBot」'));
+});
+
+test('CuratedNoteEvaluator：真实渲染 prompt 能定位人设段，且包含 seed keywords', () => {
+  const role = new CuratedNoteEvaluator({
+    eventBus: new EventBus(),
+    soul: mockSoul,
+    llm: { complete: async () => '{}' },
+    curatedStore: { upsertObservation: async () => {} },
+    getAccountId: () => 'acc-1',
+  });
+  const flat = role.previewPrompt();
+  const segs = segmentPromptByPersona(flat, role.personaSegments());
+  assert.ok(segs, '应成功分段');
+  const persona = segs!.find((s) => s.source === 'persona')!;
+  assert.ok(persona.text.includes('TestBot'), '人设段含身份名');
+  assert.ok(persona.text.includes('AI、LLM、编程、GPT'), '人设段含 primary/secondary/seed keywords');
+  assert.ok(flat.includes('<示例正文，运行时为真实笔记全文>'), '运行时正文仍为示例占位');
+  assert.equal(segs!.map((s) => s.text).join(''), flat, '拼接逐字等于扁平 prompt');
 });

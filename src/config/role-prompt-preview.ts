@@ -21,7 +21,8 @@ import { getCatalogItem } from './role-catalog.js';
 import { PUBLISH_PREVIEW_BUILDERS, IMAGE_PROMPT_PREVIEW_BUILDERS } from '../publish-agent/prompts-preview.js';
 import type { RolePromptView, RolePromptSegment } from '../panel/types.js';
 
-const PLACEHOLDER_NOTE = '实时数据为示例占位（线上调用时由系统填入真实值）；人设为当前账号真实人设。';
+const SAMPLE_PERSONA_NOTE = '实时数据为示例占位（线上调用时由系统填入真实值）；人设为示例人设。';
+const ACCOUNT_PERSONA_NOTE = '实时数据为示例占位（线上调用时由系统填入真实值）；人设来自所选账号。';
 // 发布侧忠实渲染的说明：默认用示例输入 + 示例人设；选账号时预览提供方可替换为该账号人设。
 const PUBLISH_PLACEHOLDER_NOTE = '实时数据为示例占位（线上调用时由系统填入真实值）；发布侧预览使用示例人设。';
 const PUBLISH_ACCOUNT_NOTE = '实时数据为示例占位（线上调用时由系统填入真实值）；发布侧预览已使用所选账号人设。';
@@ -41,6 +42,18 @@ interface PersonaSegmented {
 }
 function hasPersonaSegments(r: unknown): r is PersonaSegmented {
   return typeof (r as { personaSegments?: unknown }).personaSegments === 'function';
+}
+
+type PersonaSource = NonNullable<RolePromptView['personaSource']>;
+
+function withPersonaSource(view: RolePromptView, source: PersonaSource, label: string, note?: string): RolePromptView {
+  if (!view.available) return view;
+  return {
+    ...view,
+    ...(note ? { note } : {}),
+    personaSource: source,
+    personaSourceLabel: label,
+  };
 }
 
 /**
@@ -89,7 +102,7 @@ function safePreview(roleId: string, inst: Previewable): RolePromptView {
         segments = undefined;
       }
     }
-    return { roleId, prompt, available: true, note: PLACEHOLDER_NOTE, ...(segments ? { segments } : {}) };
+    return { roleId, prompt, available: true, note: SAMPLE_PERSONA_NOTE, ...(segments ? { segments } : {}) };
   } catch (e) {
     return { roleId, prompt: null, available: false, note: `预览不可用：${(e as Error).message}` };
   }
@@ -173,7 +186,12 @@ export function createRolePromptProvider(
   return {
     get(roleId: string, accountId?: string): RolePromptView {
       // 无 accountId 或未注入 withAccount → 示例人设预览，不附账号字段。
-      if (!accountId || !opts.withAccount) return render(roleId);
+      if (!accountId || !opts.withAccount) {
+        const view = render(roleId);
+        const item = getCatalogItem(roleId);
+        if (item?.llmKind !== 'text') return view;
+        return withPersonaSource(view, 'sample', item.group === 'publish' ? '发布侧示例人设' : '示例人设');
+      }
       const pubItem = getCatalogItem(roleId);
       if (pubItem?.group === 'publish') {
         // 图像角色无人设，保留其自身图片指令说明。
@@ -182,9 +200,13 @@ export function createRolePromptProvider(
         const fallback = !!opts.getPersona && persona == null;
         const pubView = render(roleId, persona ?? undefined);
         return {
-          ...pubView,
+          ...withPersonaSource(
+            pubView,
+            fallback ? 'fallback_sample' : 'account',
+            fallback ? '示例人设' : '所选账号人设',
+            fallback ? FALLBACK_NOTE : PUBLISH_ACCOUNT_NOTE,
+          ),
           accountId,
-          ...(pubView.available ? { note: fallback ? FALLBACK_NOTE : PUBLISH_ACCOUNT_NOTE } : {}),
           ...(fallback ? { personaFallback: true } : {}),
         };
       }
@@ -195,10 +217,13 @@ export function createRolePromptProvider(
       // ——该账号运行会被诚实拒绝，预览仅按示例人设渲染供查看。
       const fallback = !!opts.hasPersona && !opts.hasPersona(accountId);
       return {
-        ...view,
+        ...withPersonaSource(
+          view,
+          fallback ? 'fallback_sample' : 'account',
+          fallback ? '示例人设' : '所选账号人设',
+          fallback ? FALLBACK_NOTE : ACCOUNT_PERSONA_NOTE,
+        ),
         accountId,
-        // 仅在确为回落且渲染成功时改 note（available:false 的诚实原因 note 不覆盖）；绝不把默认人设冒充为该账号人设。
-        ...(fallback && view.available ? { note: FALLBACK_NOTE } : {}),
         ...(fallback ? { personaFallback: true } : {}),
       };
     },

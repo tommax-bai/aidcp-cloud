@@ -195,8 +195,8 @@ export class CuratedNoteEvaluator extends BaseRole {
   /** 只读人设来源片段（change prompt-viewer-persona-source）：与 buildPrompt 同源拼接，仅供查看器定位标注。 */
   personaSegments(): string[] {
     const { identity, interests } = this.soul;
-    const interestsStr = [...interests.primary, ...interests.secondary].join('、');
-    return [`你是「${identity.name}」，${identity.role}。\n创作领域 / 兴趣：${interestsStr}`];
+    const interestsStr = [...interests.primary, ...interests.secondary, ...(interests.seed_keywords ?? [])].join('、');
+    return [`你是「${identity.name}」，${identity.role}。\n你的创作领域 / 兴趣（作软背景，不要硬性字面匹配）：${interestsStr}`];
   }
 
   private buildPrompt(note: NoteDetailData): string {
