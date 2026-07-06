@@ -11,6 +11,7 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from './cache/pg-anchor-cache.js';
+import { normalizePlatformId, type PlatformId } from './platform/index.js';
 
 const { Pool } = pg;
 
@@ -42,6 +43,8 @@ CREATE TABLE IF NOT EXISTS accounts (
 -- 自愈式加列（change account-real-nickname，迁移 0020 文档伴随）：本仓无迁移执行器，
 -- 已存在的 accounts 表靠这条幂等 ALTER 在 init() 时补上 nickname 列（CREATE TABLE IF NOT EXISTS 不改既有表）。
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS nickname TEXT;
+-- 自愈式加列（change platform-abstraction-layer）：accounts.platform 是运行时平台事实源。
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS platform TEXT NOT NULL DEFAULT 'xiaohongshu';
 -- 自愈式加列（change account-group-chat-injection，迁移 0027 文档伴随）：每账号「关联群聊引流码」，
 -- 供 /comment group:on 注入引流。verbatim 存储——写入不 trim / 不截断（见 setGroupChatInfo），与 nickname / group_label 刻意相反。
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS group_chat_info TEXT;
@@ -52,6 +55,10 @@ export interface AccountRecord {
   accountId: string;
   status: AccountStatusValue;
   pausedAt: number | null;
+}
+
+export interface PlatformAccountRecord extends AccountRecord {
+  platform: PlatformId;
 }
 
 /**
@@ -111,6 +118,10 @@ export interface AccountStore {
    * 供 /comment 任务开始处解析一次（人工触发的低频路径，可 await PG，无需同步缓存）。缺行 / 库内 NULL → null。
    */
   getGroupChatInfo?(accountId: string): Promise<string | null>;
+  /** 读取账号平台；缺省/旧数据按 xiaohongshu 归一。 */
+  getPlatform?(accountId: string): Promise<PlatformId>;
+  /** 按平台枚举账号；返回状态字段，调用方可据 active/paused 做调度闸。 */
+  listByPlatform?(platform: PlatformId): Promise<PlatformAccountRecord[]>;
   close?(): Promise<void>;
 }
 
@@ -129,12 +140,18 @@ interface AccountRow {
   paused_at: Date | null;
 }
 
+interface AccountPlatformRow extends AccountRow {
+  platform: string | null;
+}
+
 /** accounts 主表持久化（PostgreSQL）。 */
 export class PgAccountStore implements AccountStore {
   private readonly pool: pg.Pool;
   /** 账号昵称的进程内同步缓存（change account-real-nickname）：init() 预热全表 + setNickname 写后更新。
    *  供握手同步算「需采集」判定，避免 await PG 的异步窗口；缺键=未知 → getNickname 返回 null。 */
   private readonly nicknameCache = new Map<string, string | null>();
+  /** 账号平台缓存（init 预热 + getPlatform 回填）。accounts.platform 是事实源，缓存只做读路径加速。 */
+  private readonly platformCache = new Map<string, PlatformId>();
 
   constructor(options: PgAccountStoreOptions = {}) {
     this.pool =
@@ -152,10 +169,13 @@ export class PgAccountStore implements AccountStore {
   async init(): Promise<void> {
     await this.pool.query(ACCOUNTS_SCHEMA_SQL);
     // 预热昵称缓存（change account-real-nickname）：供握手同步读，避免每次握手 await PG。
-    const { rows } = await this.pool.query<{ account_id: string; nickname: string | null }>(
-      'SELECT account_id, nickname FROM accounts',
+    const { rows } = await this.pool.query<{ account_id: string; nickname: string | null; platform: string | null }>(
+      'SELECT account_id, nickname, platform FROM accounts',
     );
-    for (const r of rows) this.nicknameCache.set(r.account_id, r.nickname ?? null);
+    for (const r of rows) {
+      this.nicknameCache.set(r.account_id, r.nickname ?? null);
+      this.platformCache.set(r.account_id, normalizePlatformId(r.platform));
+    }
   }
 
   async listAll(): Promise<AccountRecord[]> {
@@ -284,6 +304,33 @@ export class PgAccountStore implements AccountStore {
       [accountId],
     );
     return rows.length > 0 ? rows[0].group_chat_info ?? null : null;
+  }
+
+  async getPlatform(accountId: string): Promise<PlatformId> {
+    if (accountId === RETIRED_ACCOUNT_ID) return 'xiaohongshu';
+    const cached = this.platformCache.get(accountId);
+    if (cached) return cached;
+    const { rows } = await this.pool.query<{ platform: string | null }>(
+      `SELECT platform FROM accounts WHERE account_id = $1`,
+      [accountId],
+    );
+    const platform = normalizePlatformId(rows[0]?.platform);
+    if (rows.length > 0) this.platformCache.set(accountId, platform);
+    return platform;
+  }
+
+  async listByPlatform(platform: PlatformId): Promise<PlatformAccountRecord[]> {
+    const normalized = normalizePlatformId(platform);
+    const { rows } = await this.pool.query<AccountPlatformRow>(
+      `SELECT account_id, status, paused_at, platform FROM accounts WHERE platform = $1 ORDER BY account_id`,
+      [normalized],
+    );
+    return rows.map((r) => ({
+      accountId: r.account_id,
+      status: r.status === 'paused' ? 'paused' : 'active',
+      pausedAt: r.paused_at ? r.paused_at.getTime() : null,
+      platform: normalizePlatformId(r.platform),
+    }));
   }
 
   async close(): Promise<void> {

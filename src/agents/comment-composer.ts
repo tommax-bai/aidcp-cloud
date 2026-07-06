@@ -14,11 +14,13 @@ import type { RoleOptions } from './base-role.js';
 import type { NoteData } from './content-curator-role.js';
 import type { RoleName, CommentAppraisedPayload } from '../event-bus/types.js';
 import { topicKeysFromTitle, type ValuableCommentRef } from '../cache/valuable-comment-store.js';
+import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/index.js';
 
-const MAX_COMMENT_LEN = 50;
+export const DEFAULT_MAX_COMMENT_LEN = XHS_COMMENT_PROFILE.maxCommentLength;
 
 export interface CommentComposerOptions extends RoleOptions {
   getNoteData: (noteId: string) => NoteData | null;
+  platformProfile?: CommentPlatformProfile;
   /** 可选：按主题键召回语料库优质评论作参考（仅作灵感、不可照抄）。缺省/空/出错 → 行为同今天。
    *  主题键由本角色用 topicKeysFromTitle 从当前笔记标题派生（与归档侧同一套键）。 */
   getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
@@ -27,6 +29,7 @@ export interface CommentComposerOptions extends RoleOptions {
 export class CommentComposer extends BaseRole {
   readonly roleName: RoleName = 'comment_composer';
   private readonly getNoteData: (noteId: string) => NoteData | null;
+  private readonly platformProfile: CommentPlatformProfile;
   private readonly getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
   private unsubscribers: (() => void)[] = [];
 
@@ -34,6 +37,7 @@ export class CommentComposer extends BaseRole {
     super(options);
     if (!options.llm) throw new Error('CommentComposer 需要 LlmClient');
     this.getNoteData = options.getNoteData;
+    this.platformProfile = options.platformProfile ?? XHS_COMMENT_PROFILE;
     this.getCorpusReferences = options.getCorpusReferences;
   }
 
@@ -89,7 +93,7 @@ export class CommentComposer extends BaseRole {
       this.skip(payload, 'compose_empty');
       return;
     }
-    if (draft.length > MAX_COMMENT_LEN) {
+    if (draft.length > this.platformProfile.maxCommentLength) {
       this.skip(payload, 'compose_too_long');
       return;
     }
@@ -134,7 +138,7 @@ export class CommentComposer extends BaseRole {
       return null;
     }
     const draft = this.sanitize(this.extractText(raw));
-    if (!draft || draft.length > MAX_COMMENT_LEN) return null;
+    if (!draft || draft.length > this.platformProfile.maxCommentLength) return null;
     return draft;
   }
 
@@ -150,7 +154,7 @@ export class CommentComposer extends BaseRole {
       : '';
     return `你是「${identity.name}」，${identity.role}。语气：${identity.tone}。兴趣：${interestsStr}。
 为下面这篇你认可的笔记写**一条**评论。要求：
-- 短（${MAX_COMMENT_LEN} 字以内）、真诚、像真人随手留言，不是营销/客套；
+- 短（${this.platformProfile.maxCommentLength} 字以内）、真诚、像真人随手留言，不是营销/客套；
 - 贴这篇笔记的具体内容，接一句有共鸣或真问题，别泛泛而谈；
 - 用你的人格语气；不要 emoji 堆砌、不要 AI 腔（如「值得一提」「总而言之」）；
 - **不要出现 @ 提及**、不要话题标签、不要外链。

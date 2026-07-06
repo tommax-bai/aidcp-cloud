@@ -24,6 +24,8 @@ import {
 export interface EdgeSession {
   sessionId: string;
   edgeId?: string;
+  /** edge hello 上报的运行时平台；缺省按 xhs 兼容。 */
+  platform?: string;
   app?: string;
   /** 该边缘当前驱动的账号（hello 上报，用于风控归属与验证码定位） */
   accountId?: string;

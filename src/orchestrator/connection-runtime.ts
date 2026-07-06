@@ -15,6 +15,7 @@ import { EventBus } from '../event-bus/index.js';
 import type { RoleDispatcher, SessionUsageSnapshot } from './role-dispatcher.js';
 import type { EdgeSession } from '../comm/ws-server.js';
 import type { RiskController } from '../risk/index.js';
+import { normalizePlatformId, type PlatformId } from '../platform/index.js';
 
 /** 单连接运行时束。 */
 export interface ConnectionRuntime {
@@ -47,6 +48,8 @@ export interface RuntimeRegistryDeps {
   buildDispatcher: (ctx: DispatcherBuildContext) => RoleDispatcher;
   /** 握手时对新账号做幂等 upsert（不覆盖已配置行、不默认 active）。 */
   ensureAccount: (accountId: string) => Promise<void>;
+  /** 从 accounts.platform 读取账号平台；缺省用于测试/旧装配时按 xhs 处理。 */
+  getAccountPlatform?: (accountId: string) => Promise<PlatformId>;
   /** 缺/空 accountId → 配置错误告警（拒绝握手，不建会话、不偷映射 default）。 */
   onConfigError: (session: EdgeSession, message: string) => void | Promise<void>;
   /** 同 edgeId 重连顶替：收掉该 sessionId 的旧 ws（→ ws close → onDisconnect 拆除其运行时）。 */
@@ -108,21 +111,35 @@ export class ConnectionRuntimeRegistry {
     // 归一化：写回 trim 后的值，确保后续所有 session.edgeId 读取（重连顶替 / runtime.edgeId / 定向下发）一致。
     session.edgeId = edgeId;
 
-    // 同 edgeId 重连顶替（同一节点回来，不计为并行第二节点）：收掉该 edgeId 的旧连接。
-    // 仅顶替「不同 sessionId 但同 edgeId」的旧运行时；不同 edgeId 则视为真并行第二节点，并存。
-    if (session.edgeId) {
-      for (const rt of [...this.bySession.values()]) {
-        if (rt.edgeId === session.edgeId && rt.sessionId !== session.sessionId) {
-          this.deps.logger?.log?.(
-            `[runtime] edgeId=${session.edgeId} 重连，顶替旧连接 sessionId=${rt.sessionId}（account=${rt.accountId}）`,
-          );
-          this.deps.closeEdge(rt.sessionId);
-        }
-      }
+    let edgePlatform: PlatformId;
+    try {
+      edgePlatform = normalizePlatformId(session.platform);
+    } catch (err) {
+      await this.deps.onConfigError(session, `握手平台无效：${(err as Error).message}`);
+      return { ok: false, code: 'unsupported_platform', message: (err as Error).message };
     }
-
+    session.platform = edgePlatform;
     // 新账号自动登记（幂等 upsert）。
     await this.deps.ensureAccount(accountId);
+    const accountPlatform = this.deps.getAccountPlatform
+      ? await this.deps.getAccountPlatform(accountId)
+      : 'xiaohongshu';
+    if (accountPlatform !== edgePlatform) {
+      const message = `edge platform=${edgePlatform} 与账号 ${accountId} accounts.platform=${accountPlatform} 不一致，拒绝派活`;
+      await this.deps.onConfigError(session, message);
+      return { ok: false, code: 'platform_mismatch', message };
+    }
+
+    // 同 edgeId 重连顶替（同一节点回来，不计为并行第二节点）：收掉该 edgeId 的旧连接。
+    // 仅顶替「不同 sessionId 但同 edgeId」的旧运行时；不同 edgeId 则视为真并行第二节点，并存。
+    for (const rt of [...this.bySession.values()]) {
+      if (rt.edgeId === session.edgeId && rt.sessionId !== session.sessionId) {
+        this.deps.logger?.log?.(
+          `[runtime] edgeId=${session.edgeId} 重连，顶替旧连接 sessionId=${rt.sessionId}（account=${rt.accountId}）`,
+        );
+        this.deps.closeEdge(rt.sessionId);
+      }
+    }
 
     // 解析该连接账号的 RiskController（同账号 N 连接经注册表天然共用 → 额度合并不翻倍，D7①）。
     const controller = await this.deps.getController(accountId);

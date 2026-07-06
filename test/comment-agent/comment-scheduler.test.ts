@@ -86,6 +86,21 @@ describe('CommentScheduler.triggerManual', () => {
     assert.match(r.message, /在线边端/);
   });
 
+  it('账号平台未接入评论 registry → 拒绝，不回落 xhs 流程', async () => {
+    let takeovers = 0;
+    const s = new CommentScheduler(
+      baseDeps({
+        getPlatform: () => 'facebook',
+        onTakeoverStart: () => { takeovers += 1; },
+      }),
+    );
+    const r = await s.triggerManual('acc-1');
+    assert.equal(r.ok, false);
+    assert.equal(r.level, 'error');
+    assert.match(r.message, /暂不支持评论调度/);
+    assert.equal(takeovers, 0);
+  });
+
   it('account=default → 拒绝（绝不回落）', async () => {
     const s = new CommentScheduler(baseDeps());
     const r = await s.triggerManual('default');

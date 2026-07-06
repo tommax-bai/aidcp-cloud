@@ -330,6 +330,7 @@ export class DefaultMessageHandler implements MessageHandler {
   private async onHello(env: Envelope, session: EdgeSession): Promise<Envelope> {
     const p = env.payload as HelloPayload;
     session.edgeId = p.edgeId;
+    session.platform = p.platform;
     session.app = p.app;
     // 身份落到连接：用于风控归属与验证码事件定位（缺字段安全降级，卡片至少带 edgeId）。
     session.accountId = p.accountId;
@@ -566,5 +567,4 @@ export class DefaultMessageHandler implements MessageHandler {
     }
   }
 }
-
 

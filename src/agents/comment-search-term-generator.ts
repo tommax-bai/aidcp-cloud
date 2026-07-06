@@ -19,6 +19,7 @@
 import type { Soul } from '../soul/types.js';
 import type { LlmCallOpts } from '../llm/qwen.js';
 import type { RoleName } from '../event-bus/types.js';
+import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/index.js';
 
 /** 角色侧只需文本补全；opts 携带角色键，客户端按角色解析模型/温度。 */
 export interface RoleLlmLike {
@@ -37,6 +38,7 @@ export interface CommentSearchTermGeneratorOptions {
   /** 人设注入：getSoul 优先（热加载、按账号），否则用构造期快照。 */
   soul?: Soul;
   getSoul?: () => Soul;
+  platformProfile?: CommentPlatformProfile;
   /** 一次最多产出的搜索词数（缺省 5）。 */
   maxTerms?: number;
 }
@@ -55,6 +57,7 @@ export class CommentSearchTermGenerator {
   private readonly llm: RoleLlmLike;
   private readonly soulSnapshot?: Soul;
   private readonly getSoulFn?: () => Soul;
+  private readonly platformProfile: CommentPlatformProfile;
   private readonly maxTerms: number;
 
   constructor(options: CommentSearchTermGeneratorOptions) {
@@ -62,6 +65,7 @@ export class CommentSearchTermGenerator {
     this.llm = options.llm;
     this.soulSnapshot = options.soul;
     this.getSoulFn = options.getSoul;
+    this.platformProfile = options.platformProfile ?? XHS_COMMENT_PROFILE;
     this.maxTerms = options.maxTerms ?? DEFAULT_MAX_TERMS;
   }
 
@@ -138,11 +142,11 @@ export class CommentSearchTermGenerator {
 你的创作领域 / 兴趣：${interestsStr}
 你的种子关键词：${seedStr}
 
-你打算去小红书搜一批**和你创作领域强相关**的笔记，准备在其中挑一篇留评论。
+你打算去${this.platformProfile.siteName}搜一批**和你创作领域强相关**的${this.platformProfile.contentName}，准备在其中挑一篇留评论。
 下面是你过去收藏 / 沉淀进「灵感库」的高价值笔记标题（反映你真正关注的细分方向）：
 ${curatedBlock}
 
-请据此生成 ${this.maxTerms} 个**有序**的小红书搜索词（先放最贴合、最可能搜到强相关优质笔记的）。要求：
+请据此生成 ${this.maxTerms} 个**有序**的${this.platformProfile.siteName}搜索词（先放最贴合、最可能搜到强相关优质${this.platformProfile.contentName}的）。要求：
 - 每个词都落在你的创作领域内，具体可搜（贴近真实用户搜法，2~8 字为宜）；
 - 覆盖不同细分角度，彼此不重复；
 - 若精选样本稀疏，就基于你的领域 / 兴趣 / 种子词来定，**不要编造与领域无关的词**。
