@@ -1,23 +1,30 @@
 # aidcp-cloud ECS 部署现状
 
 > 勘察日期：2026-06-04
-> 状态：只读勘察确认
+> 状态：原单 ECS 部署勘察。2026-07-06 起此机器命名为 `dev`；新 `ol` 目标见中控仓 `aidcp/docs/deployment-environments.md`。
+
+## 当前双环境口径
+
+- `dev`: `121.89.85.150`，SSH key `~/codes/isales-4.pem`，主干高频部署和真机验证目标。
+- `ol`: `123.56.253.183`，SSH key `/Users/baitianxing/Downloads/ol.pem`，稳定上线目标，只部署 release 分支/tag 或 exact clean SHA。
+- 部署前先在中控仓运行 `scripts/deploy-target <dev|ol> --check`。
+- 本文下方的 `121.89.85.150` 命令描述的是 `dev` 现状。不要把 dev `.env`、PostgreSQL 暴露面、Feishu 凭据无审查复制到 `ol`。
 
 ## 一页结论
 
-- `aidcp-cloud` 当前部署在 ECS `121.89.85.150`
+- `aidcp-cloud` 当前部署在 dev ECS `121.89.85.150`
 - 部署目录为 `/opt/aidcp/cloud`
 - 由 systemd 单元 `aidcp-cloud.service` 托管，当前状态为 active running
 - 由 systemd 启动：`ExecStart=/usr/bin/npx tsx src/server.ts`，环境变量经 `EnvironmentFile=/opt/aidcp/cloud/.env` 注入
 - 工作目录为 `/opt/aidcp/cloud`
 - 服务对外监听 `0.0.0.0:8787`
-- edge 公网直连地址为 `ws://121.89.85.150:8787`
+- dev edge 公网直连地址为 `ws://121.89.85.150:8787`; ol edge 地址为 `ws://123.56.253.183:8787` 或后续 ol 域名
 - PostgreSQL 与 cloud 同机，cloud 直连 `127.0.0.1:5432`
 - 本地不再启动 cloud，本地只运行 edge
 
 ## 架构铁律
 
-> **cloud 只部署在云端 ECS，本地永不再起 cloud；本地只跑 edge，edge 连接 ECS cloud：`ws://121.89.85.150:8787`。**
+> **cloud 只部署在命名 ECS target，本地永不再起 cloud；本地只跑 edge，edge 显式连接 dev 或 ol cloud。**
 
 历史教训：
 
@@ -37,7 +44,8 @@
 ### 2. 网络与访问
 
 - cloud 对外监听：`0.0.0.0:8787`
-- edge 连接地址：`ws://121.89.85.150:8787`
+- dev edge 连接地址：`ws://121.89.85.150:8787`
+- ol edge 连接地址：`ws://123.56.253.183:8787` 或后续 ol 域名
 - 当前确认信息中未引入额外反向代理，edge 为公网直连 ECS cloud
 
 ### 3. 数据库连接
@@ -83,6 +91,7 @@
 - `FEISHU_APP_ID`
 - `FEISHU_APP_SECRET`
 - `FEISHU_CHAT_ID`
+- `AIDCP_FEISHU_WS_ENABLED`（可选；仅设为 `false` 时跳过飞书长连接接收，用于 dev/ol 临时复用同一飞书应用但只让一个目标处理真实事件）
 
 模型与凭据配置（change console-model-provider-config，可选）：
 
@@ -151,21 +160,31 @@
 
 ### ECS SSH 连接方式
 
-- 登录命令：`ssh -i ~/codes/isales-4.pem root@121.89.85.150`
+- dev 登录命令：`ssh -i ~/codes/isales-4.pem root@121.89.85.150`
+- ol 登录命令：`ssh -i /Users/baitianxing/Downloads/ol.pem root@123.56.253.183`
 - 注意：默认 SSH key 会被拒绝，必须显式指定 `~/codes/isales-4.pem`
-- 私钥文件位置：`~/codes/isales-4.pem`
+- 私钥文件位置：dev 为 `~/codes/isales-4.pem`，ol 为 `/Users/baitianxing/Downloads/ol.pem`
 - 私钥权限要求：`600`
 - 文档只记录私钥路径与权限要求，不记录私钥内容
 
 `rsync` 部署示例：
 
 ```bash
+# dev example
 rsync -av -e 'ssh -i ~/codes/isales-4.pem' \
   --exclude '.env' \
   --exclude 'node_modules' \
   --exclude '.git' \
   <本地src/等> \
   root@121.89.85.150:/opt/aidcp/cloud/
+
+# ol example, only from release branch/tag or exact clean SHA
+rsync -av -e 'ssh -i /Users/baitianxing/Downloads/ol.pem' \
+  --exclude '.env' \
+  --exclude 'node_modules' \
+  --exclude '.git' \
+  <本地src/等> \
+  root@123.56.253.183:/opt/aidcp/cloud/
 ```
 
 部署后验证清单：
@@ -198,6 +217,7 @@ rsync -av -e 'ssh -i ~/codes/isales-4.pem' \
 - `FEISHU_APP_ID`
 - `FEISHU_APP_SECRET`
 - `FEISHU_CHAT_ID`
+- `AIDCP_FEISHU_WS_ENABLED`（可选；仅设为 `false` 时跳过飞书长连接接收）
 - `PGHOST`
 - `PGPORT`
 - `PGUSER`

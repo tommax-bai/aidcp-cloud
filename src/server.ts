@@ -73,6 +73,7 @@ import {
   FeishuMessenger,
   FeishuWsReceiver,
   buildFeishuEventDispatcher,
+  isFeishuWsEnabled,
   resolveDefaultChatId,
   getApprovalSignalPath,
   writeApprovalSignal,
@@ -2098,21 +2099,25 @@ async function main(): Promise<void> {
     readLiveContentVersion,
     preflightApprovePublish: (requestId) => preflightApprovePublish(requestId),
   });
-  try {
-    const wsClient = new lark.WSClient({
-      appId: process.env.FEISHU_APP_ID ?? '',
-      appSecret: process.env.FEISHU_APP_SECRET ?? '',
-      onReady: () => console.log('[aidcp-cloud] 飞书长连接已建立（WSClient onReady）'),
-      onError: (err) => console.error('[aidcp-cloud] 飞书长连接错误:', err.message),
-      onReconnecting: () => console.warn('[aidcp-cloud] 飞书长连接重连中…'),
-      onReconnected: () => console.log('[aidcp-cloud] 飞书长连接已重连'),
-    });
-    await wsClient.start({
-      eventDispatcher: buildFeishuEventDispatcher(feishuReceiver, botChatEventHandler, console),
-    });
-    console.log('[aidcp-cloud] 飞书事件接收已启动（WSClient 长连接）');
-  } catch (err) {
-    console.warn('[aidcp-cloud] 飞书长连接启动失败（事件接收不可用）:', (err as Error).message);
+  if (isFeishuWsEnabled()) {
+    try {
+      const wsClient = new lark.WSClient({
+        appId: process.env.FEISHU_APP_ID ?? '',
+        appSecret: process.env.FEISHU_APP_SECRET ?? '',
+        onReady: () => console.log('[aidcp-cloud] 飞书长连接已建立（WSClient onReady）'),
+        onError: (err) => console.error('[aidcp-cloud] 飞书长连接错误:', err.message),
+        onReconnecting: () => console.warn('[aidcp-cloud] 飞书长连接重连中…'),
+        onReconnected: () => console.log('[aidcp-cloud] 飞书长连接已重连'),
+      });
+      await wsClient.start({
+        eventDispatcher: buildFeishuEventDispatcher(feishuReceiver, botChatEventHandler, console),
+      });
+      console.log('[aidcp-cloud] 飞书事件接收已启动（WSClient 长连接）');
+    } catch (err) {
+      console.warn('[aidcp-cloud] 飞书长连接启动失败（事件接收不可用）:', (err as Error).message);
+    }
+  } else {
+    console.warn('[aidcp-cloud] 飞书长连接已禁用（AIDCP_FEISHU_WS_ENABLED=false）；当前进程不接收飞书事件');
   }
 
   // 组装平台配置视图（GET /api/config/model 与 setModel 回真态共用）。永不含明文密钥。

@@ -11,4 +11,5 @@ export * from './cards.js';
 export * from './commands.js';
 export * from './bot-chat-events.js';
 export * from './handler.js';
+export * from './ws-config.js';
 export * from './ws-receiver.js';
