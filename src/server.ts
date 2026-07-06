@@ -1520,13 +1520,14 @@ async function main(): Promise<void> {
   // 90s 超时 < idle 看门狗 idleNudgeMs(130s)，故审批等待期不会触发 idle nudge，无需显式暂停态。
   const commentApprovalEnabled = process.env.AIDCP_COMMENT_APPROVAL === 'true';
   const commentApproval: CommentApprovalPort = {
-    request: async ({ requestId, noteId, text, title }) => {
+    request: async ({ requestId, noteId, text, title, accountId, accountName }) => {
       const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
       if (!chatId) {
         console.error('[comment] 无可用飞书群，评论审批卡未发出（将超时跳过、不发）');
         return;
       }
-      await messenger.sendApprovalCard(chatId, buildCommentApprovalCard({ requestId, noteId, text, title }));
+      const displayName = accountName?.trim() || (accountId ? accountDisplayName(accountId) : undefined);
+      await messenger.sendApprovalCard(chatId, buildCommentApprovalCard({ requestId, noteId, text, title, accountId, accountName: displayName }));
     },
     isApproved: isPublishApproved,
     timeoutMs: 90_000,
@@ -1834,6 +1835,7 @@ async function main(): Promise<void> {
     },
     messenger,
     botChatStore,
+    getAccountName: accountDisplayName,
     // 陪伴界面（edge-companion-ui 8.1）：候审即推 pending（发布卡自动展开到「等你确认」）。
     notifyPublishPending: (accountId, recordId, title) =>
       uiSnapshotService.pushPublishState(accountId, recordId, 'pending', title),

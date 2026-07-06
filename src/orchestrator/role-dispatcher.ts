@@ -603,6 +603,8 @@ export class RoleDispatcher {
       new CommentApprovalGate({
         ...commonOptions,
         ...(this.commentApproval ? { approval: this.commentApproval } : {}),
+        getAccountId: () => this.currentAccountId,
+        getAccountName: () => this.getNickname(this.currentAccountId),
         getNoteTitle: (id) => getNoteData(id)?.title ?? null,
         now: this.clock,
       }),

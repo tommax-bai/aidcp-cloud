@@ -229,6 +229,7 @@ export class CommentScheduler {
     const composeAndApprove = buildComposeAndApprove({
       composer,
       approval: this.deps.approval,
+      accountId,
       postProcessor: this.deps.postProcessorFor?.(accountId),
       groupChatCode,
       now: this.deps.now,
@@ -294,6 +295,7 @@ export class CommentScheduler {
     const composeAndApprove = buildComposeAndApprove({
       composer,
       approval: this.deps.approval,
+      accountId,
       postProcessor: this.deps.postProcessorFor?.(accountId),
       // 群聊引流码（change account-group-chat-injection）：已在 triggerManual 解析一次（同源），非 null 时注入。
       groupChatCode,

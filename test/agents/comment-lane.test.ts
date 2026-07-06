@@ -133,12 +133,21 @@ describe('CommentApprovalGate', () => {
     assert.equal(approved, false);
   });
 
-  it('授权通过 → comment.approved（携文本）+ 审批卡携笔记标题（供人识别）', async () => {
+  it('授权通过 → comment.approved（携文本）+ 审批卡携账号与笔记标题（供人识别）', async () => {
     const bus = new EventBus();
     let card: any = null;
     const approval: CommentApprovalPort = { request: async (i) => { card = i; }, isApproved: async () => true, timeoutMs: 1000, pollMs: 1 };
     let t = 0;
-    const role = new CommentApprovalGate({ eventBus: bus, soul, approval, getNoteTitle: (id) => (id === 'n1' ? note.title : null), now: () => t++, sleep: async () => {} });
+    const role = new CommentApprovalGate({
+      eventBus: bus,
+      soul,
+      approval,
+      getAccountId: () => 'acc-01',
+      getAccountName: () => 'Tmax',
+      getNoteTitle: (id) => (id === 'n1' ? note.title : null),
+      now: () => t++,
+      sleep: async () => {},
+    });
     role.subscribe();
     let out: any = null;
     bus.on('comment.approved', (p) => { out = p; });
@@ -147,6 +156,8 @@ describe('CommentApprovalGate', () => {
     assert.equal(out?.text, '学到了');
     assert.ok(card && card.text === '学到了' && String(card.requestId).startsWith('comment-'));
     assert.equal(card.title, note.title, '标题应由 getNoteTitle 解析后透传给审批卡');
+    assert.equal(card.accountId, 'acc-01');
+    assert.equal(card.accountName, 'Tmax');
   });
 
   it('超时 → comment.skipped(approval_timeout)，不发', async () => {

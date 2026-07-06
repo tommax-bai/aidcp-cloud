@@ -190,6 +190,32 @@ test('buildPublishApprovalCard: 构造新版 callback behaviors', () => {
   assert.equal(buttons[1].behaviors?.[0]?.value.action, 'cancel');
 });
 
+test('buildPublishApprovalCard: 审批卡显示账号昵称，缺昵称时回落账号 id', () => {
+  const withName = buildPublishApprovalCard({
+    requestId: 'publish-1',
+    title: '标题',
+    content: '正文',
+    tags: [],
+    accountId: 'acc-01',
+    accountName: 'Tmax',
+  });
+  const named = JSON.stringify(withName);
+  assert.match(named, /账号/);
+  assert.match(named, /Tmax/);
+  assert.doesNotMatch(named, /acc-01/);
+
+  const fallback = buildPublishApprovalCard({
+    requestId: 'publish-2',
+    title: '标题',
+    content: '正文',
+    tags: [],
+    accountId: 'acc-02',
+  });
+  const flat = JSON.stringify(fallback);
+  assert.match(flat, /账号/);
+  assert.match(flat, /acc-02/);
+});
+
 test('buildPublishApprovalCard: publish-<n> 卡片带「编号」字段（与客户端发布卡对暗号）', () => {
   const card = buildPublishApprovalCard({
     requestId: 'publish-83',

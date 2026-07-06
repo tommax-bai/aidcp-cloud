@@ -91,6 +91,38 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     assert.ok(JSON.stringify(sentCards[0]).includes('话题甲'), '审批卡话题取自 publishMetadata.topics');
   });
 
+  test('审批卡显示触发账号昵称，缺昵称时由卡片回落 accountId', async () => {
+    const sentCards: any[] = [];
+    const role = new PublishExecutorRole({
+      store: { insert: async () => 42 },
+      messenger: { sendApprovalCard: async (_c: string, card: any) => { sentCards.push(card); } },
+      botChatStore: { getDefaultChat: async () => ({ chatId: 'chat-1' }) },
+      getAccountName: (accountId) => (accountId === 'acc-test' ? 'Tmax' : undefined),
+      clock,
+      logger: silentLogger,
+    });
+
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('trigger', {
+      metrics: { hoursSinceLastPublish: 1, newConceptCount: 1, likedSinceLastPublish: 0 },
+      generateInput: { concepts: [], likedContents: [], soul: {} as any, recentPosts: [] },
+      recentPublished: [],
+      accountId: 'acc-test',
+    } as any);
+    ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('publishMetadata', makePublishMetadata());
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const flat = JSON.stringify(sentCards[0]);
+    assert.match(flat, /账号/);
+    assert.match(flat, /Tmax/);
+    assert.doesNotMatch(flat, /acc-test/);
+  });
+
   test('手动飞书 publish source chat 优先于默认群', async () => {
     const sent: Array<{ chatId: string; card: any }> = [];
     const role = new PublishExecutorRole({

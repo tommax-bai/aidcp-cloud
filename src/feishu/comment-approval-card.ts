@@ -13,8 +13,18 @@ export interface CommentApprovalCardData {
   requestId: string;
   noteId: string;
   text: string;
+  /** 评论账号 id；仅用于审批卡展示兜底，不进入授权 payload。 */
+  accountId?: string;
+  /** 评论账号展示名/昵称；展示优先级高于 accountId。 */
+  accountName?: string;
   /** 笔记标题（供人识别）。缺省/为空 → 回落显示 noteId，绝不空白。 */
   title?: string;
+}
+
+function formatAccountDisplay(accountName?: string, accountId?: string): string {
+  const name = accountName?.trim();
+  if (name) return name;
+  return accountId?.trim() ?? '';
 }
 
 export function buildCommentApprovalCard(data: CommentApprovalCardData): FeishuCard {
@@ -23,6 +33,7 @@ export function buildCommentApprovalCard(data: CommentApprovalCardData): FeishuC
   const title = data.title?.trim();
   const noteLabel = title ? `《${title}》` : data.noteId;
   const callbackTitle = title ? `评论·笔记${noteLabel}` : `评论·笔记 ${data.noteId}`;
+  const accountLabel = formatAccountDisplay(data.accountName, data.accountId);
   const callbackValue = {
     requestId: data.requestId,
     payload: { title: callbackTitle, content: data.text, tags: [] as string[] },
@@ -37,6 +48,9 @@ export function buildCommentApprovalCard(data: CommentApprovalCardData): FeishuC
       {
         tag: 'div',
         fields: [
+          ...(accountLabel
+            ? [{ is_short: false, text: { tag: 'lark_md' as const, content: `**账号**\n${accountLabel}` } }]
+            : []),
           { is_short: false, text: { tag: 'lark_md', content: `**笔记**\n${noteLabel}` } },
           { is_short: false, text: { tag: 'lark_md', content: `**拟发评论**\n${data.text}` } },
         ],

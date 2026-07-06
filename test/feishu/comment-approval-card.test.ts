@@ -42,6 +42,36 @@ describe('buildCommentApprovalCard', () => {
     assert.equal(approve!.payload.title, '评论·笔记《北京周末好去处》', '确认卡「标题」应显示真实笔记标题');
   });
 
+  it('卡片显示账号昵称；缺昵称时回落 accountId，且不写入授权 payload', () => {
+    const card = buildCommentApprovalCard({
+      requestId: 'comment-n1-123',
+      noteId: 'n1',
+      text: '学到了',
+      accountId: 'acc-01',
+      accountName: 'Tmax',
+    });
+    const div = card.elements.find((e) => e.tag === 'div');
+    assert.ok(div && div.tag === 'div');
+    const accountField = div.fields?.find((f) => f.text.content.startsWith('**账号**'));
+    assert.ok(accountField, '应有「账号」字段');
+    assert.match(accountField!.text.content, /Tmax/);
+    assert.doesNotMatch(accountField!.text.content, /acc-01/);
+
+    const action = card.elements.find((e) => e.tag === 'action');
+    assert.ok(action && action.tag === 'action');
+    const approve = parseApprovalActionValue(action.actions[0].behaviors?.[0].value);
+    assert.ok(approve);
+    assert.deepEqual(Object.keys(approve!.payload).sort(), ['content', 'tags', 'title'], '账号只展示，不进入授权 payload');
+
+    const fallback = buildCommentApprovalCard({
+      requestId: 'comment-n1-124',
+      noteId: 'n1',
+      text: '学到了',
+      accountId: 'acc-02',
+    });
+    assert.match(JSON.stringify(fallback), /acc-02/);
+  });
+
   it('无标题：回落显示 noteId（绝不空白）', () => {
     const card = buildCommentApprovalCard({ requestId: 'comment-n1-123', noteId: '6a3d138a000000001c0246bf', text: '学到了' });
     const action = card.elements.find((e) => e.tag === 'action');

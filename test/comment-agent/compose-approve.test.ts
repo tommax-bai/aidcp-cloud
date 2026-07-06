@@ -55,6 +55,24 @@ describe('buildComposeAndApprove', () => {
     assert.deepEqual(seen, ['学到了', '求教程']);
   });
 
+  it('人审请求携带账号信息，供审批卡显示昵称', async () => {
+    let request: { accountId?: string; accountName?: string } | undefined;
+    const step = buildComposeAndApprove({
+      composer: composer('这套检索链路很实在'),
+      accountId: 'acc-01',
+      accountName: 'Tmax',
+      approval: {
+        request: async (r: { accountId?: string; accountName?: string }) => { request = r; },
+        isApproved: async () => true,
+      },
+      logger: { log: () => {}, warn: () => {} },
+    });
+    const result = await step(note, comments);
+    assert.equal(result?.text, '这套检索链路很实在');
+    assert.equal(request?.accountId, 'acc-01');
+    assert.equal(request?.accountName, 'Tmax');
+  });
+
   it('人审口未接线 → null（绝不裸发）', async () => {
     const step = buildComposeAndApprove({
       composer: composer('一条评论'),

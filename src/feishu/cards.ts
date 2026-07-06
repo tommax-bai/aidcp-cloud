@@ -196,7 +196,16 @@ function buildPublishApprovalStateCard(
 ): FeishuCard {
   const summary = summarizeContent(payload.content);
   const tags = formatTags(payload.tags);
+  const accountLabel = formatAccountDisplay(payload.accountName, payload.accountId);
   const fields: FeishuField[] = [
+    ...(accountLabel
+      ? [
+          {
+            is_short: false,
+            text: { tag: 'lark_md' as const, content: `**账号**\n${accountLabel}` },
+          },
+        ]
+      : []),
     {
       is_short: false,
       text: { tag: 'lark_md', content: `**标题**\n${payload.title || '（无标题）'}` },

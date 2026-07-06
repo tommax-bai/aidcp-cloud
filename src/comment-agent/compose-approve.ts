@@ -29,6 +29,10 @@ export interface ComposeApproveDeps {
   postProcessor?: Pick<PostProcessor, 'process'>;
   /** 人审端口；缺省（未接线）→ 一律不发（返回 null，绝不裸发）。 */
   approval?: CommentApprovalPort;
+  /** 当前评论账号 id；仅用于人审卡展示。 */
+  accountId?: string;
+  /** 当前评论账号展示名/昵称；仅用于人审卡展示。 */
+  accountName?: string;
   /** 可选精选参考召回（仅作灵感、撞则弃）；缺省/出错 → 无参考。 */
   getReferences?: (note: NoteForComment) => Promise<string[]>;
   /**
@@ -116,7 +120,14 @@ export function buildComposeAndApprove(
     }
     const requestId = `comment-${note.noteId}-${now()}`;
     try {
-      await deps.approval.request({ requestId, noteId: note.noteId, text: reviewText, title: note.title });
+      await deps.approval.request({
+        requestId,
+        noteId: note.noteId,
+        text: reviewText,
+        title: note.title,
+        accountId: deps.accountId,
+        accountName: deps.accountName,
+      });
     } catch (err) {
       log.warn(`[comment-compose] 审批卡发送失败 note=${note.noteId}：${(err as Error).message} → 不发`);
       return null;

@@ -167,6 +167,10 @@ export interface PublishApprovalPayload {
 
 export interface PublishApprovalCardData extends PublishApprovalPayload {
   requestId: string;
+  /** 发布账号 id；仅用于审批卡展示兜底，不进入授权 payload。 */
+  accountId?: string;
+  /** 发布账号展示名/昵称；展示优先级高于 accountId。 */
+  accountName?: string;
 }
 
 /* ------------------------------------------------------------------ */
