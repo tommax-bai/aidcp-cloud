@@ -19,6 +19,11 @@ import type {
 } from '../config/content-schedule-store.js';
 import type { EventBus } from '../event-bus/index.js';
 import type { PacingOp } from '../comm/protocol.js';
+import type {
+  CaptchaAssistDispatchResult,
+  CaptchaAssistIncidentView,
+  CaptchaAssistTokenVerifyResult,
+} from '../comm/captcha-assist.js';
 import type { TokenRevocationStore } from './revocation.js';
 import type { PanelUser } from './auth.js';
 import type {
@@ -57,6 +62,23 @@ export interface PanelContentSchedule {
     patch: AccountContentSchedulePatch,
     updatedBy: string,
   ): Promise<SetAccountContentScheduleResult>;
+}
+
+export interface PanelCaptchaAssist {
+  verifyToken(token: string | undefined): CaptchaAssistTokenVerifyResult;
+  getIncident(incidentId: string): CaptchaAssistIncidentView | null;
+  requestCapture(
+    incidentId: string,
+    actor: string,
+    reason?: 'initial' | 'refresh' | 'retry',
+  ): Promise<CaptchaAssistDispatchResult>;
+  submitClick(input: {
+    incidentId: string;
+    snapshotId: string;
+    points: { x: number; y: number; label?: string }[];
+    actor: string;
+    settleMs?: number;
+  }): Promise<CaptchaAssistDispatchResult>;
 }
 
 export interface PanelDeps {
@@ -140,6 +162,11 @@ export interface PanelDeps {
    * 全局内容格 + 每账号排期读写；写非乐观回真态、非法整块拒、写前校验账号存在防幽灵行；不碰风控单写 / 浏览掩码 / 协议。
    */
   contentSchedule?: PanelContentSchedule;
+  /**
+   * 验证码云端协助（change remote-captcha-assist）。受 console JWT 或飞书 scoped token 保护；
+   * 只向原 edge 下发 capture/click，不直接改风控态，不伪造 cleared。
+   */
+  captchaAssist?: PanelCaptchaAssist;
   /**
    * 模型与凭据配置（change console-model-provider-config）。未注入则 /api/config/* 返回 503。
    * 明文密钥绝不经此外观回传；setCredential 主密钥缺失以 {ok:false} 诚实可辨，绝不假成功。

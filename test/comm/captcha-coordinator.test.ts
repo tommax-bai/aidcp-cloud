@@ -181,6 +181,33 @@ describe('CaptchaCoordinator', () => {
     assert.deepEqual(pusher.paused, ['edge-fallback']);
   });
 
+  it('assist enabled：飞书卡带云端协助按钮，detail 保留远程连接兜底语义', async () => {
+    const c = new CaptchaCoordinator({
+      resolveController: async () => risk,
+      messenger,
+      resolveChatId: async () => 'chat-1',
+      logger: silentLogger,
+      clock: () => now,
+      assist: {
+        onDetected: async () => ({
+          incidentId: 'cap-1',
+          actionUrl: 'https://console.example/captcha-assist/cap-1?token=t',
+          sent: 1,
+        }),
+        onCleared: () => {},
+      },
+    });
+    await c.onDetected({ edgeId: 'edge-1', kind: 'captcha' }, makeSession(), pusher);
+
+    const card = messenger.sent[0].card;
+    const detail = (card.elements[0] as { text: { content: string } }).text.content;
+    assert.match(detail, /云端协助页/);
+    assert.match(detail, /远程连接.*兜底/);
+    const action = card.elements.find((el) => el.tag === 'action') as { actions: { text: { content: string }; url?: string }[] };
+    assert.equal(action.actions[0].text.content, '打开协助处理');
+    assert.equal(action.actions[0].url, 'https://console.example/captcha-assist/cap-1?token=t');
+  });
+
   it('alertStore：detected 落库告警(P0/captcha)，cleared 按 edge 解决（V1 9.5）', async () => {
     const raised: { severity: string; type: string; edgeId?: string; accountId?: string }[] = [];
     const resolvedEdges: string[] = [];

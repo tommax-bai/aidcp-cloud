@@ -34,7 +34,7 @@ async function connectEdge(port: number, edgeId: string, accountId?: string): Pr
   return ws;
 }
 
-test('暂停后普通指令被丢弃、session.end 必达、恢复后续发', async () => {
+test('暂停后普通指令被丢弃、session.end/ui.snapshot/captcha assist 恢复命令必达、恢复后续发', async () => {
   const s = new EdgeCloudServer({ handler: helloHandler, port: 0, clock: () => 0 });
   await s.start();
   const port = s.address();
@@ -55,6 +55,16 @@ test('暂停后普通指令被丢弃、session.end 必达、恢复后续发', as
   // 吞掉它会让发布终态（rejected/failed）推送永久丢失（终态不经 hello 快照回放）。
   const snap = makeEnvelope('ui.snapshot', 'c3', 0, { publish: { state: 'failed', code: '#1' } });
   assert.equal(s.pushToEdges(snap, 'edge-1'), 1, 'ui.snapshot 必达，绕过暂停闸');
+  const capture = makeEnvelope('captcha.assist.capture', 'c4', 0, { incidentId: 'cap-1', reason: 'refresh' });
+  assert.equal(s.pushToEdges(capture, 'edge-1'), 1, 'captcha.assist.capture 必达，绕过暂停闸');
+  const click = makeEnvelope('captcha.assist.click', 'c5', 0, {
+    incidentId: 'cap-1',
+    snapshotId: 'snap-1',
+    points: [{ x: 0.5, y: 0.5 }],
+  });
+  assert.equal(s.pushToEdges(click, 'edge-1'), 1, 'captcha.assist.click 必达，绕过暂停闸');
+  const publish = makeEnvelope('publish.command', 'c6', 0, { recordId: 1, seq: 1, kind: 'submit_publish', params: {} });
+  assert.equal(s.pushToEdges(publish, 'edge-1'), 0, '发布页面动作仍必须被暂停闸拦截');
 
   s.resumeEdge('edge-1');
   assert.equal(s.pushToEdges(scroll, 'edge-1'), 1, '恢复后普通指令应再次可达');

@@ -29,6 +29,8 @@ import {
   type ActionCompletedPayload,
   type CaptchaDetectedPayload,
   type CaptchaClearedPayload,
+  type CaptchaAssistSnapshotPayload,
+  type CaptchaAssistClickResultPayload,
   type NotificationDetectedPayload,
   type NotificationHomePayload,
   type NotificationItemsPayload,
@@ -37,6 +39,7 @@ import {
 import type { CommandSequencer } from '../publish-agent/command-sequencer.js';
 import type { MessageHandler, EdgeSession, EdgePusher } from './ws-server.js';
 import type { CaptchaCoordinator } from './captcha-coordinator.js';
+import type { CaptchaAssistService } from './captcha-assist.js';
 import type { TaskPlanner } from '../planner/types.js';
 import type { LlmClient } from '../llm/qwen.js';
 import type { EventBus } from '../event-bus/index.js';
@@ -76,6 +79,8 @@ export interface HandlerDeps {
   accountState?: AccountStateManager;
   /** 验证码事件协调器（risk.captcha_detected/cleared 的消费端）。未注入则两类上报被忽略（向后兼容）。 */
   captcha?: CaptchaCoordinator;
+  /** 验证码协助通道：消费 edge 截图和人工点击复检结果。未注入则忽略（向后兼容）。 */
+  captchaAssist?: Pick<CaptchaAssistService, 'onSnapshot' | 'onClickResult'>;
   /** A 阶段1 发布指令编排器：消费 publish.command.result 关联回报（未注入则忽略，向后兼容）。 */
   commandSequencer?: Pick<CommandSequencer, 'onResult'>;
   // ── multi-account-node-support：按连接多租户路由 ─────────────────────────
@@ -221,6 +226,12 @@ export class DefaultMessageHandler implements MessageHandler {
         return null;
       case 'risk.captcha_cleared':
         await this.deps.captcha?.onCleared(env.payload as CaptchaClearedPayload, session, pusher);
+        return null;
+      case 'captcha.assist.snapshot':
+        this.deps.captchaAssist?.onSnapshot(env.payload as CaptchaAssistSnapshotPayload);
+        return null;
+      case 'captcha.assist.click_result':
+        this.deps.captchaAssist?.onClickResult(env.payload as CaptchaAssistClickResultPayload);
         return null;
       case 'page.cards': {
         const { cards } = env.payload as PageCardsPayload;
@@ -567,4 +578,3 @@ export class DefaultMessageHandler implements MessageHandler {
     }
   }
 }
-

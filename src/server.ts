@@ -38,6 +38,7 @@ import {
   EdgeCloudServer,
   DefaultMessageHandler,
   CaptchaCoordinator,
+  CaptchaAssistService,
   edgeCommandToEnvelope,
   type Envelope,
 } from './comm/index.js';
@@ -1220,6 +1221,23 @@ async function main(): Promise<void> {
   };
   const commandRouter = new CommandRouter(actions);
   const messenger = new FeishuMessenger();
+  // A 阶段1 发布指令编排器 / 验证码协助均经 edgeServer 推送（server 在下方构造，闭包运行时已就绪）。
+  let edgeServer: EdgeCloudServer | undefined;
+  const captchaAssist = new CaptchaAssistService({
+    enabled: readEnvString('AIDCP_CAPTCHA_ASSIST_ENABLED') === 'true',
+    publicBaseUrl: readEnvString('AIDCP_CAPTCHA_ASSIST_PUBLIC_BASE_URL') ?? readEnvString('AIDCP_PANEL_PUBLIC_BASE_URL'),
+    tokenSecret: readEnvString('AIDCP_CAPTCHA_ASSIST_TOKEN_SECRET') ?? readEnvString('AIDCP_PANEL_JWT_SECRET'),
+    tokenTtlSeconds: readEnvPort('AIDCP_CAPTCHA_ASSIST_TOKEN_TTL_SECONDS') ?? 30 * 60,
+    incidentTtlMs: (readEnvPort('AIDCP_CAPTCHA_ASSIST_INCIDENT_TTL_SECONDS') ?? 30 * 60) * 1000,
+    pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
+    logger: console,
+    getAccountName: accountDisplayName,
+  });
+  if (readEnvString('AIDCP_CAPTCHA_ASSIST_ENABLED') === 'true' && !captchaAssist.isAvailable()) {
+    console.warn(
+      '[aidcp-cloud] 验证码云端协助未启用：需要 AIDCP_CAPTCHA_ASSIST_PUBLIC_BASE_URL 或 AIDCP_PANEL_PUBLIC_BASE_URL，并配置 token secret',
+    );
+  }
   // 验证码事件协调器：消费 risk.captcha_detected/cleared（迁状态 + 按 edge 暂停 + 去重发飞书）。
   const captcha = new CaptchaCoordinator({
     resolveController,
@@ -1227,12 +1245,11 @@ async function main(): Promise<void> {
     // V1 task 9.5：验证码告警落库（飞书卡发送点写入、清除点 resolveByEdge）。
     alertStore,
     getAccountName: accountDisplayName,
+    assist: captchaAssist,
     resolveChatId: () =>
       resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console }),
   });
   // A 阶段1 发布指令编排器：逐条下发 publish.command、按 recordId+seq 关联 publish.command.result。
-  // pusher 经 edgeServer 转发（server 在下方构造，运行时已就绪——前向引用安全，仿 sendCommand）。
-  let edgeServer: EdgeCloudServer | undefined;
   const commandSequencer = new CommandSequencer({
     pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
     logger: console,
@@ -1292,6 +1309,7 @@ async function main(): Promise<void> {
     eventBus,
     accountState,
     captcha,
+    captchaAssist,
     commandSequencer,
     // 多租户路由：私有总线（入站事件灌本连接通道）/ 握手建运行时 / 按连接真实账号解析 controller。
     busFor: (session) => runtimes!.busFor(session),
@@ -2365,6 +2383,7 @@ async function main(): Promise<void> {
             setGlobal: (mask, updatedBy) => contentScheduleStore.setGlobal({ contentActiveMask: mask }, updatedBy),
             setAccount: (accountId, patch, updatedBy) => contentScheduleStore.setAccount(accountId, patch, updatedBy),
           },
+          captchaAssist: captchaAssist.isAvailable() ? captchaAssist : undefined,
           // 模型与凭据配置（change console-model-provider-config + model-config-volcengine-provider）。明文密钥绝不经此回传。
           modelConfig: {
             getView: buildModelConfigView,

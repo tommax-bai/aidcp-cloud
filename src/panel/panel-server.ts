@@ -84,6 +84,132 @@ function createRequestHandler(
     return true;
   };
 
+  type CaptchaAssistAuth =
+    | { ok: true; actor: string }
+    | { ok: false; status: number; body: { error: string; reason?: string } };
+
+  function authenticateCaptchaAssist(req: http.IncomingMessage, incidentId: string): CaptchaAssistAuth {
+    const bearer = parseBearer(req.headers.authorization);
+    if (bearer) {
+      const verified = verifyJwt(bearer, config.jwtSecret);
+      if (verified.valid) {
+        if (deps.revocation?.isRevoked(verified.payload.jti)) {
+          return { ok: false, status: 401, body: { error: 'unauthorized', reason: 'revoked' } };
+        }
+        return { ok: true, actor: `panel:${verified.payload.sub}` };
+      }
+    }
+
+    const requestUrl = new URL(req.url ?? '/', 'http://localhost');
+    const scopedToken = requestUrl.searchParams.get('token') ?? undefined;
+    if (!scopedToken) {
+      return { ok: false, status: 401, body: { error: 'unauthorized', reason: 'missing_token' } };
+    }
+    const verified = deps.captchaAssist?.verifyToken(scopedToken);
+    if (!verified?.ok) {
+      return { ok: false, status: 401, body: { error: 'unauthorized', reason: verified?.reason ?? 'unavailable' } };
+    }
+    if (verified.incidentId !== incidentId) {
+      return { ok: false, status: 403, body: { error: 'forbidden', reason: 'token_scope_mismatch' } };
+    }
+    return { ok: true, actor: 'captcha-assist-token' };
+  }
+
+  function captchaAssistStatus(reason: string | undefined): number {
+    if (reason === 'not_found') return 404;
+    if (reason === 'invalid_points') return 400;
+    return 409;
+  }
+
+  async function handleCaptchaAssist(req: http.IncomingMessage, res: http.ServerResponse, method: string, url: string): Promise<void> {
+    if (!deps.captchaAssist) {
+      sendJson(res, 503, { error: 'captcha_assist_unavailable' });
+      return;
+    }
+    const suffix = url.slice('/api/captcha-assist/'.length);
+    const parts = suffix.split('/').filter(Boolean).map((part) => decodeURIComponent(part));
+    const incidentId = parts[0];
+    if (!incidentId || parts.length > 2) {
+      sendJson(res, 404, { error: 'not_found' });
+      return;
+    }
+    const auth = authenticateCaptchaAssist(req, incidentId);
+    if (!auth.ok) {
+      sendJson(res, auth.status, auth.body);
+      return;
+    }
+
+    if (method === 'GET' && parts.length === 1) {
+      const incident = deps.captchaAssist.getIncident(incidentId);
+      if (!incident) {
+        sendJson(res, 404, { error: 'not_found' });
+        return;
+      }
+      sendJson(res, 200, { incident });
+      return;
+    }
+
+    if (method === 'POST' && parts.length === 2 && parts[1] === 'capture') {
+      const result = await deps.captchaAssist.requestCapture(incidentId, auth.actor, 'refresh');
+      if (!result.ok) {
+        sendJson(res, captchaAssistStatus(result.reason), { error: result.reason, ...(result.incident ? { incident: result.incident } : {}) });
+        return;
+      }
+      sendJson(res, 200, result);
+      return;
+    }
+
+    if (method === 'POST' && parts.length === 2 && parts[1] === 'click') {
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { snapshotId, points, settleMs } = (body ?? {}) as {
+        snapshotId?: unknown;
+        points?: unknown;
+        settleMs?: unknown;
+      };
+      if (typeof snapshotId !== 'string' || !Array.isArray(points)) {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const normalizedPoints = points.map((point) => point as { x?: unknown; y?: unknown; label?: unknown });
+      if (
+        normalizedPoints.some(
+          (point) =>
+            typeof point.x !== 'number' ||
+            typeof point.y !== 'number' ||
+            (point.label !== undefined && typeof point.label !== 'string'),
+        )
+      ) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_points' });
+        return;
+      }
+      const result = await deps.captchaAssist.submitClick({
+        incidentId,
+        snapshotId,
+        points: normalizedPoints.map((point) => ({
+          x: point.x as number,
+          y: point.y as number,
+          ...(typeof point.label === 'string' ? { label: point.label } : {}),
+        })),
+        actor: auth.actor,
+        ...(typeof settleMs === 'number' && Number.isFinite(settleMs) ? { settleMs } : {}),
+      });
+      if (!result.ok) {
+        sendJson(res, captchaAssistStatus(result.reason), { error: result.reason, ...(result.incident ? { incident: result.incident } : {}) });
+        return;
+      }
+      sendJson(res, 200, result);
+      return;
+    }
+
+    sendJson(res, 404, { error: 'not_found' });
+  }
+
   async function handleLogin(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     let body: unknown;
     try {
@@ -126,6 +252,10 @@ function createRequestHandler(
     }
     if (method === 'POST' && url === '/api/auth/login') {
       await handleLogin(req, res);
+      return;
+    }
+    if (url.startsWith('/api/captcha-assist/')) {
+      await handleCaptchaAssist(req, res, method, url);
       return;
     }
 
