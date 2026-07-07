@@ -344,6 +344,19 @@ function createRequestHandler(
       sendJson(res, 200, { accounts: await deps.panelStore.listAccounts() });
       return;
     }
+    // Facebook 定时评论配置读（change facebook-scheduled-comment 2.1）：必须在下面通配 GET /api/accounts/:id
+    // 之前注册，否则会被当成 id=":id/facebook-comment-config" 吞掉。缺行返回空默认（供面板回显）。
+    if (method === 'GET' && url.startsWith('/api/accounts/') && url.endsWith('/facebook-comment-config')) {
+      const accountId = decodeURIComponent(
+        url.slice('/api/accounts/'.length, -'/facebook-comment-config'.length),
+      );
+      if (!deps.facebookCommentConfig) {
+        sendJson(res, 503, { error: 'unavailable' });
+        return;
+      }
+      sendJson(res, 200, deps.facebookCommentConfig.get(accountId));
+      return;
+    }
     if (method === 'GET' && url.startsWith('/api/accounts/')) {
       const id = decodeURIComponent(url.slice('/api/accounts/'.length));
       const account = await deps.panelStore.getAccount(id);
@@ -668,6 +681,37 @@ function createRequestHandler(
         return;
       }
       sendJson(res, 200, { accountId, groupChatInfo: result.groupChatInfo });
+      return;
+    }
+    // Facebook 定时评论配置写（change facebook-scheduled-comment 2.1）：关键词列表 + 容器列表。
+    // 经独立 store 单写：非法整块拒、退役 / 无账号可区分、写后回读真态；绝不乐观假成功。
+    if (method === 'PUT' && url.startsWith('/api/accounts/') && url.endsWith('/facebook-comment-config')) {
+      const accountId = decodeURIComponent(
+        url.slice('/api/accounts/'.length, -'/facebook-comment-config'.length),
+      );
+      if (!deps.facebookCommentConfig) {
+        sendJson(res, 503, { error: 'unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { keywords, containers } = (body ?? {}) as { keywords?: unknown; containers?: unknown };
+      const result = await deps.facebookCommentConfig.set(
+        accountId,
+        { keywords: keywords as string[] | undefined, containers: containers as string[] | undefined },
+        `panel:${verified.payload.sub}`,
+      );
+      if (!result.ok) {
+        if (result.reason === 'account_not_found') sendJson(res, 404, { error: 'account_not_found' });
+        else sendJson(res, 400, { error: 'bad_request', reason: result.reason }); // invalid_value / no_valid_fields / retired_account
+        return;
+      }
+      sendJson(res, 200, result.row);
       return;
     }
     // 风控写（V1 task 8.4）：经 registry 取账号 controller 单写；status 经枚举信号种类、quota 经 setQuotaLevel
