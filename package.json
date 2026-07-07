@@ -18,8 +18,10 @@
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.66.0",
+    "@resvg/resvg-js": "2.6.2",
     "ali-oss": "^6.23.0",
     "pg": "^8.13.1",
+    "satori": "0.26.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
