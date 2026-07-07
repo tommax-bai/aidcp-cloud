@@ -71,6 +71,28 @@ export class SessionContext {
   markVisited(noteId: string): void { this._visitedNoteIds.add(noteId); }
   isVisited(noteId: string): boolean { return this._visitedNoteIds.has(noteId); }
 
+  /** 本场已看过（打开过）的笔记数（change humanize-interaction-prompts）：注入判定 prompt 作会话状态，
+   *  使判定带序列依赖（第 2 篇 vs 第 15 篇兴致不同）。跨轮保持，与 visitedNoteIds 同生命周期。 */
+  get visitedCount(): number { return this._visitedNoteIds.size; }
+
+  /**
+   * 最近若干次真实互动的有界记录（change humanize-interaction-prompts）：由互动评估角色在 emit
+   * interaction.completed 后追加（如 'like' / 'collect' / 'like+collect'），供后续判定 prompt 注入
+   * 「刚点过什么」的当下状态。有界 recency（最多 RECENT_INTERACTIONS_CAP），跨轮保持、reset 不清
+   * （与 visited 同——会话内连续性信号）。
+   */
+  private _recentInteractions: string[] = [];
+  private static readonly RECENT_INTERACTIONS_CAP = 6;
+  recordInteraction(label: string): void {
+    if (!label) return;
+    this._recentInteractions.push(label);
+    if (this._recentInteractions.length > SessionContext.RECENT_INTERACTIONS_CAP) {
+      this._recentInteractions.shift();
+    }
+  }
+  /** 最近互动的只读快照（最旧→最新）。 */
+  get recentInteractions(): readonly string[] { return this._recentInteractions; }
+
   /**
    * 标记一张卡片"近期已评估"（用于熟悉度折扣，非用于跳过评估）。
    * 维护有界 recency：重复出现的 noteId 移到队尾刷新 recency；超出容量淘汰最旧。

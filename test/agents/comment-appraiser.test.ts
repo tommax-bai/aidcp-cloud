@@ -1,6 +1,7 @@
 /**
  * CommentAppraiser 评论硬数值阈值 + 评论冷却早判单测（change engagement-restraint）。
- * 阈值：点赞 > 1000 且 收藏 > 300（严格大于）才达门槛。冷却：未到点在评估阶段即跳过、不调 LLM。
+ * 阈值（change humanize-interaction-prompts 起默认地板 300/100）：点赞 > 300 且（收藏 > 100 或 点赞 > 10000，严格大于）才达门槛。
+ * 冷却：未到点在评估阶段即跳过、不调 LLM。
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -39,35 +40,47 @@ async function run(note: NoteData, opts: { cooldownOk?: boolean } = {}) {
   return { appraised, skipped, llmCalled };
 }
 
-describe('CommentAppraiser 硬数值阈值（>1000 赞 且 >300 收藏，严格大于）', () => {
-  it('1001/301 达标 → 进入 LLM 判定 → comment.appraised', async () => {
-    const r = await run(mkNote(1001, 301));
+describe('CommentAppraiser 硬数值阈值（>300 赞 且 (>100 藏 或 >10000 赞)，严格大于）', () => {
+  it('301/101 达标 → 进入 LLM 判定 → comment.appraised', async () => {
+    const r = await run(mkNote(301, 101));
     assert.ok(r.appraised, '应达标并被 LLM 判为要评');
     assert.equal(r.skipped, null);
     assert.equal(r.llmCalled, true);
   });
 
-  it('1000/301 边界（赞恰好等于 1000）→ below_comment_threshold，不调 LLM', async () => {
-    const r = await run(mkNote(1000, 301));
+  it('中腰部高收藏（500/150，旧 1000 门槛下会被排除）→ 达标进入 LLM', async () => {
+    const r = await run(mkNote(500, 150));
+    assert.ok(r.appraised, '新默认地板应纳入中腰部高收藏内容');
+    assert.equal(r.llmCalled, true);
+  });
+
+  it('300/101 边界（赞恰好等于 300）→ below_comment_threshold，不调 LLM', async () => {
+    const r = await run(mkNote(300, 101));
     assert.equal(r.skipped?.reason, 'below_comment_threshold');
     assert.equal(r.appraised, null);
     assert.equal(r.llmCalled, false);
   });
 
-  it('1001/300 边界（收藏恰好等于 300）→ below_comment_threshold', async () => {
-    const r = await run(mkNote(1001, 300));
+  it('301/100 边界（收藏恰好等于 100）→ below_comment_threshold', async () => {
+    const r = await run(mkNote(301, 100));
     assert.equal(r.skipped?.reason, 'below_comment_threshold');
     assert.equal(r.llmCalled, false);
   });
 
-  it('1000/300 双边界 → below_comment_threshold', async () => {
-    const r = await run(mkNote(1000, 300));
+  it('300/100 双边界 → below_comment_threshold', async () => {
+    const r = await run(mkNote(300, 100));
     assert.equal(r.skipped?.reason, 'below_comment_threshold');
   });
 
-  it('高赞但低收藏（5000/200）→ below_comment_threshold（两条件都需满足）', async () => {
-    const r = await run(mkNote(5000, 200));
+  it('高赞但低收藏（5000/50）→ below_comment_threshold（未过超高热豁免、收藏不足）', async () => {
+    const r = await run(mkNote(5000, 50));
     assert.equal(r.skipped?.reason, 'below_comment_threshold');
+  });
+
+  it('超高热爆帖豁免收藏（10001/50）→ 达标进入 LLM', async () => {
+    const r = await run(mkNote(10001, 50));
+    assert.ok(r.appraised, '赞 > 10000 应豁免收藏绝对值');
+    assert.equal(r.llmCalled, true);
   });
 });
 

@@ -12,9 +12,19 @@
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { NoteData } from './content-curator-role.js';
+import { tieredInterests } from './persona-format.js';
+import { interactionLabel } from './interaction-label.js';
 import type { RoleName, CommentAppraisedPayload } from '../event-bus/types.js';
 import { topicKeysFromTitle, type ValuableCommentRef } from '../cache/valuable-comment-store.js';
 import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/index.js';
+
+/** 撰写语境（change humanize-interaction-prompts）：把「为何值得评 / 刚做了什么互动」穿透进 prompt。 */
+interface ComposeContext {
+  /** 评估角色判「值得评」的理由（来自 comment.appraised payload）。 */
+  reason?: string;
+  /** 本次对该笔记的真实互动（like / collect）。 */
+  actions?: ('like' | 'collect')[];
+}
 
 export const DEFAULT_MAX_COMMENT_LEN = XHS_COMMENT_PROFILE.maxCommentLength;
 
@@ -82,13 +92,19 @@ export class CommentComposer extends BaseRole {
 
     let raw: string;
     try {
-      raw = await this.decide(this.buildPrompt(note, references));
+      raw = await this.decide(this.buildPrompt(note, references, [], { reason: payload.reason, actions: payload.actions }));
     } catch {
       this.skip(payload, 'llm_error');
       return;
     }
 
-    const draft = this.sanitize(this.extractText(raw));
+    const parsed = this.parseOutput(raw);
+    // 语义弃权（change humanize-interaction-prompts）：写不出真东西时诚实不写，绝不硬凑客套话。
+    if (parsed.decline) {
+      this.skip(payload, 'nothing_genuine');
+      return;
+    }
+    const draft = this.sanitize(parsed.text);
     if (!draft) {
       this.skip(payload, 'compose_empty');
       return;
@@ -115,9 +131,14 @@ export class CommentComposer extends BaseRole {
 
   /** 只读人设来源片段（change prompt-viewer-persona-source）：与 buildPrompt 同源拼接，仅供查看器定位标注；不改 buildPrompt。 */
   personaSegments(): string[] {
+    return [this.personaHeader()];
+  }
+
+  /** 人设头（change humanize-interaction-prompts）：补注个人经历背景（对齐互动评估角色的注入水平），
+   *  让不同账号写出的评论口吻不同。 */
+  private personaHeader(): string {
     const { identity, interests } = this.soul;
-    const interestsStr = [...interests.primary, ...interests.secondary].join('、');
-    return [`你是「${identity.name}」，${identity.role}。语气：${identity.tone}。兴趣：${interestsStr}。`];
+    return `你是「${identity.name}」，${identity.role}。${identity.background}\n语气：${identity.tone}。兴趣：${tieredInterests(interests)}。`;
   }
 
   /**
@@ -137,14 +158,14 @@ export class CommentComposer extends BaseRole {
     } catch {
       return null;
     }
-    const draft = this.sanitize(this.extractText(raw));
+    const parsed = this.parseOutput(raw);
+    if (parsed.decline) return null; // 诚实弃权 → 命令路径视为无草稿
+    const draft = this.sanitize(parsed.text);
     if (!draft || draft.length > this.platformProfile.maxCommentLength) return null;
     return draft;
   }
 
-  private buildPrompt(note: NoteData, references: string[] = [], onPageComments: string[] = []): string {
-    const { identity, interests } = this.soul;
-    const interestsStr = [...interests.primary, ...interests.secondary].join('、');
+  private buildPrompt(note: NoteData, references: string[] = [], onPageComments: string[] = [], ctx: ComposeContext = {}): string {
     const refBlock = references.length
       ? `\n参考（仅作灵感，体会真人怎么留言；【严禁照抄/改写句子】，只借角度与口吻）：\n${references.map((r, i) => `${i + 1}. ${r}`).join('\n')}\n`
       : '';
@@ -152,34 +173,43 @@ export class CommentComposer extends BaseRole {
     const liveBlock = onPageComments.length
       ? `\n这条笔记现有的评论（体会大家在聊什么、从哪个角度切入；别重复别人已说过的，也别照抄）：\n${onPageComments.map((c, i) => `${i + 1}. ${c}`).join('\n')}\n`
       : '';
-    return `你是「${identity.name}」，${identity.role}。语气：${identity.tone}。兴趣：${interestsStr}。
-为下面这篇你认可的笔记写**一条**评论。要求：
-- 短（${this.platformProfile.maxCommentLength} 字以内）、真诚、像真人随手留言，不是营销/客套；
-- 贴这篇笔记的具体内容，接一句有共鸣或真问题，别泛泛而谈；
-- 用你的人格语气；不要 emoji 堆砌、不要 AI 腔（如「值得一提」「总而言之」）；
-- **不要出现 @ 提及**、不要话题标签、不要外链。
+    // 语境穿透（change humanize-interaction-prompts）：刚做了什么互动 + 评估角色为何觉得值得评。
+    const actLine = ctx.actions && ctx.actions.length ? `你刚${interactionLabel(ctx.actions)}这篇。` : '';
+    const reasonLine = ctx.reason ? `你觉得它值得评，是因为：${ctx.reason}` : '';
+    const ctxBlock = actLine || reasonLine ? `\n${[actLine, reasonLine].filter(Boolean).join('')}\n` : '';
+    return `${this.personaHeader()}
+为下面这篇你认可的笔记写**一条**评论。${ctxBlock}
+要求：
+- 像真人随手留言，真诚、不营销不客套；一般就一两句，可以更短、更随口（最多 ${this.platformProfile.maxCommentLength} 字）；
+- 贴这篇笔记的具体内容，别泛泛而谈；
+- 怎么切入你自己定，挑最自然的一种、别每条都一个套路：接一句真实共鸣 / 问一个你真想问的问题 / 讲一句你相关的经历 / 一句纯情绪的短评；
+- 用你的人格语气；不要 emoji 堆砌、不要 AI 腔（如「值得一提」「总而言之」「感谢分享」这类客套）；
+- **不要出现 @ 提及**、不要话题标签、不要外链；
+- 如果这篇你其实没有真东西可说、只挤得出客套话，就别硬写。
 ${refBlock}${liveBlock}
 当前笔记：
+作者：${note.author ?? '未知'}
 标题：${note.title}
 内容：${note.content}
 
-只输出JSON：{"text":"你的评论"}`;
+只输出JSON：有真东西想说 → {"text":"你的评论"}；实在没有真东西可说 → {"decline":"nothing_genuine"}`;
   }
 
-  /** 优先取 JSON {text}，否则退化为首个非空行。 */
-  private extractText(raw: string): string {
+  /** 解析撰写输出：JSON {text} → 文本；JSON {decline} → 弃权；否则退化为首个非空行当文本。 */
+  private parseOutput(raw: string): { text: string; decline?: false } | { decline: true } {
     const start = raw.indexOf('{');
     const end = raw.lastIndexOf('}');
     if (start >= 0 && end > start) {
       try {
         const o = JSON.parse(raw.slice(start, end + 1)) as Record<string, unknown>;
-        if (typeof o.text === 'string') return o.text;
+        if (o.decline) return { decline: true };
+        if (typeof o.text === 'string') return { text: o.text };
       } catch {
         /* fall through */
       }
     }
     const line = raw.split('\n').map((l) => l.trim()).find(Boolean);
-    return line ?? '';
+    return { text: line ?? '' };
   }
 
   /** 去首尾引号/空白；剥掉裸 @ 提及（data-tribute 防误触发）。 */

@@ -67,7 +67,8 @@ test('ContentEvaluator：真实渲染 prompt 能定位人设段、拼接等值�
   assert.ok(segs, '应成功分段');
   const persona = segs!.find((s) => s.source === 'persona')!;
   assert.ok(persona.text.includes('TestBot'), '人设段含身份名');
-  assert.ok(persona.text.includes('AI、LLM、编程'), '人设段含拼接兴趣');
+  // change humanize-interaction-prompts：兴趣改分层表述「主要关注 …；也会看 …」，主/次都在人设段内。
+  assert.ok(persona.text.includes('主要关注 AI、LLM') && persona.text.includes('编程'), '人设段含分层兴趣');
   assert.equal(segs!.map((s) => s.text).join(''), flat, '拼接逐字等于扁平 prompt');
   // 真实人设不是占位：身份名出现在 prompt 里
   assert.ok(flat.includes('你是「TestBot」'));

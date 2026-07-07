@@ -12,16 +12,21 @@
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { NoteData } from './content-curator-role.js';
+import { tieredInterests } from './persona-format.js';
+import { interactionLabel } from './interaction-label.js';
 import type { RoleName, InteractionCompletedPayload } from '../event-bus/types.js';
 
 /**
  * 评论硬数值阈值（engagement-restraint；change category-adaptive-images-and-judgment 起收藏侧不再一刀切绝对值）：
  * 精品门槛 = 点赞 > COMMENT_MIN_LIKES **且**（收藏 > COMMENT_MIN_COLLECTS **或** 点赞 > COMMENT_HIGH_LIKES）。
- * 即超高热度爆帖（点赞极高）即便收藏绝对值不高也可达门槛——治「高赞低藏的情感 / 颜值爆帖被固定收藏 300 一律排除」；
- * 但主条件仍要求高点赞（非宽松纯 OR），保持 pre-LLM 便宜确定性门槛、必要非充分。达门槛后仍叠加 LLM 精品判定 + 飞书人审 + 每日上限 + 风控取小。
+ * 即超高热度爆帖（点赞极高）即便收藏绝对值不高也可达门槛——治「高赞低藏的情感 / 颜值爆帖被固定收藏一律排除」；
+ * 但主条件仍要求较高点赞（非宽松纯 OR），保持 pre-LLM 便宜确定性门槛、必要非充分。达门槛后仍叠加 LLM 精品判定 + 飞书人审 + 每日上限 + 风控取小。
+ *
+ * change humanize-interaction-prompts：默认地板从 1000/300 下调到 300/100（等比），把中腰部高收藏内容
+ * （教程 / 攻略 / 清单类）纳入候选；合取结构与超高热豁免（10000，不变）保持。门槛机制不变、仅调默认数值。
  */
-export const COMMENT_MIN_LIKES = 1000;
-export const COMMENT_MIN_COLLECTS = 300;
+export const COMMENT_MIN_LIKES = 300;
+export const COMMENT_MIN_COLLECTS = 100;
 /** 超高热度豁免收藏绝对值的点赞线（爆帖赞高藏低仍可达门槛）。 */
 export const COMMENT_HIGH_LIKES = 10000;
 
@@ -107,7 +112,7 @@ export class CommentAppraiser extends BaseRole {
 
     let raw: string;
     try {
-      raw = await this.decide(this.buildPrompt(note));
+      raw = await this.decide(this.buildPrompt(note, payload.actions));
     } catch {
       this.skip(payload, 'llm_error');
       return;
@@ -127,33 +132,41 @@ export class CommentAppraiser extends BaseRole {
       noteId: payload.noteId,
       sourcePageType: payload.sourcePageType,
       actions: payload.actions,
+      // 穿透「为何值得评」的理由给撰写角色（change humanize-interaction-prompts）：撰写不必从零重推切入点。
+      ...(verdict.reason ? { reason: verdict.reason } : {}),
       ts: Date.now(),
     });
   }
 
   /** 只读预览（change role-prompt-visibility）：用最小示例数据 + 真实人设渲染真实 prompt，仅供后台查看；不改 buildPrompt 逻辑。 */
   previewPrompt(): string {
-    return this.buildPrompt({ noteId: '<示例noteId>', title: '<示例标题>', content: '<示例正文，运行时为真实笔记内容>', author: '<示例作者>', likeCount: 0, collectCount: 0 });
+    return this.buildPrompt({ noteId: '<示例noteId>', title: '<示例标题>', content: '<示例正文，运行时为真实笔记内容>', author: '<示例作者>', likeCount: 0, collectCount: 0 }, ['like']);
   }
 
   /** 只读人设来源片段（change prompt-viewer-persona-source）：与 buildPrompt 同源拼接，仅供查看器定位标注；不改 buildPrompt。 */
   personaSegments(): string[] {
-    const { identity, interests } = this.soul;
-    const interestsStr = [...interests.primary, ...interests.secondary].join('、');
-    return [`你是「${identity.name}」，${identity.role}。兴趣：${interestsStr}。`];
+    return [this.personaHeader()];
   }
 
-  private buildPrompt(note: NoteData): string {
-    const { identity, interests } = this.soul;
-    const interestsStr = [...interests.primary, ...interests.secondary].join('、');
-    return `你是「${identity.name}」，${identity.role}。兴趣：${interestsStr}。
-你刚对这篇笔记做了互动，现在决定「要不要在它下面留一条评论」。
+  /** 人设头（change humanize-interaction-prompts）：注入身份 / 背景 / 语气 / 兴趣 / 浏览风格，
+   *  让「开不开口评论」这种性格行为随账号不同而不同（不再只有名字+职业+兴趣）。 */
+  private personaHeader(): string {
+    const { identity, interests, behavior_guidelines: bg } = this.soul;
+    const lines = [`你是「${identity.name}」，${identity.role}。${identity.background}`, `语气：${identity.tone}`, `兴趣：${tieredInterests(interests)}`];
+    if (bg?.style) lines.push(`你平时逛小红书的风格：${bg.style}`);
+    return lines.join('\n');
+  }
 
-评论是最稀缺、最慎重的互动——只在**高热度 + 高价值的精品笔记**上评，每天只发极少量。
-判定门槛（从严，宁缺毋滥）：
-- 高热度：点赞/收藏量明显偏高，是被广泛认可的优质内容；
-- 高价值：内容对你这个人格真正有共鸣、有可说的真东西，能自然地接一句，而不是套话；
-- 不评的情形：普通/低热度笔记、你没有真实可说的、只能说客套话的，一律不评。
+  private buildPrompt(note: NoteData, actions: ('like' | 'collect')[] = []): string {
+    return `${this.personaHeader()}
+
+你刚${interactionLabel(actions)}这篇笔记，现在在想「要不要在下面留一条评论」。
+
+评论是你最慎重的互动——多数时候你只看不评，只在真有话想说、且内容够好时才开口。
+你什么时候会评：
+- 这篇确实是被很多人认可的好内容（热度明显偏高）；
+- 你对它真有共鸣、有具体的话能说，能自然接上一句；
+- 反过来：普通 / 冷清的笔记、你其实没真东西可说、只能说「学到了 / 感谢分享」这类客套的，一律不评。
 
 当前笔记：
 标题：${note.title}
@@ -161,7 +174,7 @@ export class CommentAppraiser extends BaseRole {
 点赞数：${note.likeCount}，收藏数：${note.collectCount}
 
 只输出JSON：
-要评：{"comment":true,"reason":"为何这条精品值得评"}
+要评：{"comment":true,"reason":"你真正想说的那句话的由头"}
 不评：{"comment":false,"reason":"简短原因"}`;
   }
 

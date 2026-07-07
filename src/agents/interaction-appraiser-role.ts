@@ -15,6 +15,7 @@ import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { SessionContext } from './session-context.js';
 import type { NoteData } from './content-curator-role.js';
+import { tieredInterests } from './persona-format.js';
 import type { RoleName, ReadingDonePayload } from '../event-bus/types.js';
 
 /**
@@ -35,6 +36,7 @@ export interface InteractionAppraiserRoleOptions extends RoleOptions {
 
 export class InteractionAppraiserRole extends BaseRole {
   readonly roleName: RoleName = 'interaction_appraiser';
+  private readonly sessionContext: SessionContext;
   private readonly getNoteData: (noteId: string) => NoteData | null;
   private readonly getRemainingBudget: () => { likes: number; collects: number };
   private readonly getMinSaveLikeRatio?: () => number;
@@ -43,6 +45,7 @@ export class InteractionAppraiserRole extends BaseRole {
   constructor(options: InteractionAppraiserRoleOptions) {
     super(options);
     if (!options.llm) throw new Error('InteractionAppraiserRole 需要 LlmClient');
+    this.sessionContext = options.sessionContext;
     this.getNoteData = options.getNoteData;
     this.getRemainingBudget = options.getRemainingBudget;
     this.getMinSaveLikeRatio = options.getMinSaveLikeRatio;
@@ -88,7 +91,7 @@ export class InteractionAppraiserRole extends BaseRole {
       return;
     }
 
-    const prompt = this.buildPrompt(noteData, budget);
+    const prompt = this.buildPrompt(noteData, this.readingContext(payload));
     let raw: string;
     try {
       raw = await this.decide(prompt);
@@ -117,30 +120,52 @@ export class InteractionAppraiserRole extends BaseRole {
       actions: result.actions,
       ts: Date.now(),
     });
+    // 会话连续性（change humanize-interaction-prompts）：记下这次真实互动，供后续笔记判定注入
+    // 「刚点过什么」的当下状态（有界 recency）。仅记真发生的互动，pass/skip 不记。
+    this.sessionContext.recordInteraction(result.actions.join('+'));
+  }
+
+  /** 从 reading.done 抽出注入判定 prompt 的「刚读完体验 + 会话状态」（change humanize-interaction-prompts）。 */
+  private readingContext(payload: ReadingDonePayload): ReadingContext {
+    return {
+      imagesBrowsed: payload.imagesBrowsed,
+      commentsRead: payload.commentsRead,
+      keyPoints: payload.keyPoints,
+      visitedCount: this.sessionContext.visitedCount,
+      recentInteractions: [...this.sessionContext.recentInteractions],
+    };
   }
 
   // ─── Prompt 构建 ───────────────────────────────────────────
 
   /** 只读预览（change role-prompt-visibility）：用最小示例数据 + 真实人设渲染真实 prompt，仅供后台查看；不改 buildPrompt 逻辑。 */
   previewPrompt(): string {
-    return this.buildPrompt({ noteId: '<示例noteId>', title: '<示例标题>', content: '<示例正文，运行时为真实笔记内容>', author: '<示例作者>', likeCount: 0, collectCount: 0 }, { likes: 1, collects: 1 });
+    return this.buildPrompt(
+      { noteId: '<示例noteId>', title: '<示例标题>', content: '<示例正文，运行时为真实笔记内容>', author: '<示例作者>', likeCount: 0, collectCount: 0 },
+      { imagesBrowsed: 3, commentsRead: 0, keyPoints: [], visitedCount: 4, recentInteractions: ['like', 'pass'] },
+    );
   }
 
   /** 只读人设来源片段（change prompt-viewer-persona-source）：与 buildPrompt 同源拼接，仅供查看器定位标注；不改 buildPrompt。 */
   personaSegments(): string[] {
     const { identity, interests, behavior_guidelines: bg } = this.soul;
-    const collectionPrinciple = bg?.collection_principle ?? '只有会反复参考、能直接落地复用的硬核内容才收藏，稀有谨慎';
-    const likePrinciple = bg?.like_principle ?? '有共鸣 / 认同 / 觉得有用就点赞，轻量高频';
-    const interestsStr = [...interests.primary, ...interests.secondary].join('、');
+    const collectionPrinciple = bg?.collection_principle ?? COLLECT_PRINCIPLE_FALLBACK;
+    const likePrinciple = bg?.like_principle ?? LIKE_PRINCIPLE_FALLBACK;
+    const interestsStr = tieredInterests(interests);
     return [`你是「${identity.name}」，${identity.role}。${identity.background}\n语气：${identity.tone}\n\n你的兴趣：${interestsStr}\n收藏标准：${collectionPrinciple}\n点赞标准：${likePrinciple}`];
   }
 
-  private buildPrompt(note: NoteData, budget: { likes: number; collects: number }): string {
+  private buildPrompt(note: NoteData, ctx: ReadingContext): string {
     const { identity, interests, behavior_guidelines: bg } = this.soul;
-    const collectionPrinciple = bg?.collection_principle ?? '只有会反复参考、能直接落地复用的硬核内容才收藏，稀有谨慎';
-    const likePrinciple = bg?.like_principle ?? '有共鸣 / 认同 / 觉得有用就点赞，轻量高频';
-    const interestsStr = [...interests.primary, ...interests.secondary].join('、');
+    const collectionPrinciple = bg?.collection_principle ?? COLLECT_PRINCIPLE_FALLBACK;
+    const likePrinciple = bg?.like_principle ?? LIKE_PRINCIPLE_FALLBACK;
+    const interestsStr = tieredInterests(interests);
+    const experienceBlock = buildExperienceBlock(ctx);
+    const stateBlock = buildStateBlock(ctx);
 
+    // 决策逻辑段只承载**动作空间语义**（选择性层级 + 多数 pass 的克制先验）；
+    // 「什么内容够格点 / 藏」的具体口味判据交上文注入的人设「点赞标准 / 收藏标准」派生
+    // （change humanize-interaction-prompts：不再对全部账号硬编码同一套知识型 rubric）。
     return `你是「${identity.name}」，${identity.role}。${identity.background}
 语气：${identity.tone}
 
@@ -152,19 +177,17 @@ export class InteractionAppraiserRole extends BaseRole {
 标题：${note.title}
 内容：${note.content}
 点赞数：${note.likeCount}，收藏数：${note.collectCount}
-
-剩余预算：like=${budget.likes}，collect=${budget.collects}
-
-决策逻辑（点赞是选择性互动，收藏是更稀有的选择性互动）：
-- like：仅在内容**真有共鸣 / 学到具体东西 / 观点让你眼前一亮**时才点；普通的、只是泛泛认同的、刷过即忘的笔记不点
-- collect：仅当会反复回看、日后能照着做或参考（具体可复用的类型以你的兴趣与上文收藏原则为准）才收藏——更稀有、更谨慎
+${experienceBlock}${stateBlock}
+你在刷手机，决定对这篇笔记做什么（点赞是选择性互动，收藏是更稀有的选择性互动）：
+- like：按你上面的**点赞标准**判断这篇够不够格点；只是泛泛认同、刷过即忘的不点（多数笔记如此）
+- collect：按你上面的**收藏标准**判断——更稀有、更谨慎，只有真会反复回看 / 照着做的才收藏
 - both：值得收藏的内容几乎也值得点赞，收藏时优先选 both
 - pass：不够格互动（多数普通笔记落这里）
 
-只输出JSON：{"action":"like","reason":"简短原因","confidence":0.8}
-或：{"action":"collect","reason":"简短原因","confidence":0.9}
-或：{"action":"both","reason":"简短原因","confidence":0.9}
-或：{"action":"pass","reason":"简短原因","confidence":0.5}`;
+只输出JSON：{"action":"like","reason":"简短原因"}
+或：{"action":"collect","reason":"简短原因"}
+或：{"action":"both","reason":"简短原因"}
+或：{"action":"pass","reason":"简短原因"}`;
   }
 
   // ─── 输出解析 ───────────────────────────────────────────────
@@ -219,4 +242,43 @@ export class InteractionAppraiserRole extends BaseRole {
 interface AppraiserResult {
   actions: ('like' | 'collect')[];
   reason: string;
+}
+
+/** 注入判定 prompt 的「刚读完体验 + 会话状态」（change humanize-interaction-prompts）。 */
+interface ReadingContext {
+  imagesBrowsed: number;
+  commentsRead: number;
+  keyPoints: string[];
+  visitedCount: number;
+  recentInteractions: string[];
+}
+
+// 兜底原则（soul 缺 behavior_guidelines 时）：与「点赞是选择性、收藏更稀有」的框定一致，
+// 不出现「轻量高频」等与选择性框定矛盾的表述（change humanize-interaction-prompts）。
+const LIKE_PRINCIPLE_FALLBACK = '只在真有共鸣 / 学到具体东西 / 观点让你眼前一亮时才点；普通的、泛泛认同的、刷过即忘的不点';
+const COLLECT_PRINCIPLE_FALLBACK = '只有会反复参考、能直接落地复用的硬核内容才收藏，更稀有更谨慎';
+
+/**
+ * 「刚读完这篇」的体验片段（change humanize-interaction-prompts）：用真实流动的 imagesBrowsed /
+ * commentsRead 作体验信号（数据现成、由 reading.done 透传）。keyPoints 为**非空才注入**的休眠钩子——
+ * 当前浏览闭环里 reading.done 的 keyPoints 恒为空（唯一发出者 comment_reviewer 硬编码 []），
+ * 待将来有深读角色真产出要点后自动生效；空则省略，绝不编造占位。全部信号都无时整段省略。
+ */
+function buildExperienceBlock(ctx: ReadingContext): string {
+  const parts: string[] = [];
+  if (ctx.imagesBrowsed > 0) parts.push(`翻了 ${ctx.imagesBrowsed} 张图`);
+  if (ctx.commentsRead > 0) parts.push('扫了下评论区');
+  const keyPoints = ctx.keyPoints.filter(Boolean).slice(0, 3);
+  let line = '';
+  if (parts.length) line += `你刚读完这篇：${parts.join('、')}`;
+  if (keyPoints.length) line += `${line ? '；' : '你刚读完这篇：'}印象最深的是 ${keyPoints.join('；')}`;
+  return line ? `\n${line}。\n` : '';
+}
+
+/** 会话状态片段（change humanize-interaction-prompts）：本场已看过多少篇 + 最近点过什么，给判定引入序列依赖。 */
+function buildStateBlock(ctx: ReadingContext): string {
+  if (ctx.visitedCount <= 0 && ctx.recentInteractions.length === 0) return '';
+  let line = `本场你已经看过 ${ctx.visitedCount} 篇笔记`;
+  if (ctx.recentInteractions.length) line += `，最近几次互动：${ctx.recentInteractions.join('、')}`;
+  return `${line}。\n`;
 }

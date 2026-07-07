@@ -39,7 +39,7 @@ describe('CommentComposer.composeDraft', () => {
     assert.equal(draft, '这套检索链路很实在');
     assert.match(getPrompt(), /这条笔记现有的评论/);
     assert.match(getPrompt(), /这个分块策略学到了/);
-    assert.match(getPrompt(), /50 字以内/);
+    assert.match(getPrompt(), /最多 50 字/);
   });
 
   it('不传现场评论 → prompt 无现场评论块（行为同旧）', async () => {

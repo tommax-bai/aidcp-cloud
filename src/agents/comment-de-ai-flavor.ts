@@ -13,6 +13,34 @@ import type { RoleOptions } from './base-role.js';
 import type { RoleName, CommentComposedPayload } from '../event-bus/types.js';
 import { PostProcessor } from '../publish-agent/post-processor.js';
 
+/**
+ * 评论体裁专用 AI 味信号集（change humanize-interaction-prompts）：发帖侧词表是长文议论文连接词，
+ * 对评论近零召回；评论的 AI 腔主形态是**客套 / 敷衍 / 和稀泥**。命中 1 条即触发人设口吻改写。
+ * 初版高精度、人工校准（宁少勿滥，避免误伤真诚口语；参 BANNED_PHRASES 里「不得不说」因是真人常用被移出的先例）。
+ * 与发帖侧 BANNED_PHRASES 叠加，不改发帖侧行为。
+ */
+export const COMMENT_AI_PHRASES: string[] = [
+  '感谢分享',
+  '感谢楼主',
+  '受益匪浅',
+  '干货满满',
+  '满满的干货',
+  '涨知识了',
+  '学到了很多',
+  '说得太对了',
+  '说到我心坎里',
+  '深有同感',
+  '不明觉厉',
+  '期待你的更新',
+  '支持一下',
+  '值得收藏',
+];
+
+/** 评论触发改写的命中阈值（1 = 命中一条客套句即改写；发帖侧仍用默认 2）。 */
+const COMMENT_REWRITE_THRESHOLD = 1;
+/** 评论体裁语气偏活泼，感叹号上限放宽到 3（避免单个「！」把真诚口语误判为过量）。 */
+const COMMENT_EXCLAMATION_MAX = 3;
+
 export class CommentDeAiFlavor extends BaseRole {
   readonly roleName: RoleName = 'comment_de_ai_flavor';
   private readonly post: PostProcessor;
@@ -22,8 +50,8 @@ export class CommentDeAiFlavor extends BaseRole {
     super(options);
     this.post = new PostProcessor(
       this.llm
-        ? { rewrite: (content, flagged) => this.rewrite(content, flagged) }
-        : {},
+        ? { rewrite: (content, flagged) => this.rewrite(content, flagged), rewriteThreshold: COMMENT_REWRITE_THRESHOLD, extraPhrases: COMMENT_AI_PHRASES }
+        : { rewriteThreshold: COMMENT_REWRITE_THRESHOLD, extraPhrases: COMMENT_AI_PHRASES },
     );
   }
 
@@ -41,7 +69,7 @@ export class CommentDeAiFlavor extends BaseRole {
   private async onComposed(payload: CommentComposedPayload): Promise<void> {
     let text = payload.draft;
     try {
-      const result = await this.post.process(payload.draft);
+      const result = await this.post.process(payload.draft, COMMENT_EXCLAMATION_MAX);
       text = result.content;
     } catch {
       // 去 AI 味失败不应阻断：退回原草稿（确定性、不抛）。
@@ -91,9 +119,11 @@ export class CommentDeAiFlavor extends BaseRole {
     });
   }
 
-  /** 改写【一次】，让评论表达相近的体会但用自己的话，明确不照搬参考。 */
+  /** 改写【一次】，让评论表达相近的体会但用自己的话，明确不照搬参考。
+   *  change humanize-interaction-prompts：撞车改写复用主路径人设口吻行——最需要账号间差异化的时刻，
+   *  绝不收敛成无人设的通用中庸腔。 */
   private async rewriteAwayFrom(content: string, references: string[]): Promise<string> {
-    const prompt = `下面这条评论与某些「参考评论」过于雷同，有照搬嫌疑。请用你自己的语气、用你自己的话重写，保持相近的体会与贴题，但句子结构与措辞要明显不同，不要复述参考。只输出重写后的评论本身：
+    const prompt = `下面这条评论与某些「参考评论」过于雷同，有照搬嫌疑。${this.personaVoiceLine()}，保持相近的体会与贴题，但句子结构与措辞要明显不同，不要复述参考。只输出重写后的评论本身：
 
 参考评论（不可照抄）：
 ${references.map((r, i) => `${i + 1}. ${r}`).join('\n')}
@@ -117,7 +147,7 @@ ${content}`;
 
   /** 去 AI 味 rewrite 的共享模板（rewrite 与 previewPrompt 同源，守 prompt-preview 同源红线）。 */
   private buildRewritePrompt(content: string, flagged: string[]): string {
-    return `下面这条评论有 AI 腔/套话（命中：${flagged.join('、')}）。${this.personaVoiceLine()}，保持原意与长度、保持贴题，去掉套话与明显模板腔（保留自然的口语感叹、只在明显套话时收敛），不要出现 @ 与话题标签。只输出改写后的评论本身：
+    return `下面这条评论有 AI 腔/套话（命中：${flagged.join('、')}）。${this.personaVoiceLine()}，保持原意、保持贴题，可以更短更随口（删减往往比堆砌更自然），去掉套话与明显模板腔（保留自然的口语感叹、只在明显套话时收敛），不要出现 @ 与话题标签。只输出改写后的评论本身：
 ${content}`;
   }
 

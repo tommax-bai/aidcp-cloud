@@ -257,6 +257,9 @@ export interface CommentAppraisedPayload {
   noteId: string;
   sourcePageType: 'feed' | 'search';
   actions: ('like' | 'collect')[];
+  /** 评估角色判「值得评」的理由（change humanize-interaction-prompts）：穿透给撰写角色作语境，
+   *  让撰写不必从零重推切入点。可选、向后兼容——无 reason 时撰写 prompt 省略该片段。 */
+  reason?: string;
   ts: number;
 }
 

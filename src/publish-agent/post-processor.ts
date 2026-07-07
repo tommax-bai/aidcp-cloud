@@ -32,16 +32,24 @@ export interface PostProcessorOptions {
   rewriteThreshold?: number;
   /** 重写器：给定正文 + 命中词，返回新正文；不传则不重写 */
   rewrite?: (content: string, flagged: string[]) => Promise<string>;
+  /**
+   * 额外的体裁专用禁用词（change humanize-interaction-prompts）：在发帖侧通用词表之外叠加。
+   * 评论去 AI 味用它接入评论体裁客套句集；缺省为空——发帖侧行为完全不变。
+   */
+  extraPhrases?: string[];
 }
 
 /**
  * 扫描正文，返回命中的禁用词/句式（含"过量感叹号"作为一个虚拟命中项）。
- * 纯函数，便于单测。
+ * 纯函数，便于单测。extraPhrases 为调用方按体裁叠加的额外词表（默认空，发帖侧不受影响）。
  */
-export function detectBannedPhrases(content: string, exclamationMax = 1): string[] {
+export function detectBannedPhrases(content: string, exclamationMax = 1, extraPhrases: string[] = []): string[] {
   const hits: string[] = [];
   for (const p of BANNED_PHRASES) {
     if (content.includes(p)) hits.push(p);
+  }
+  for (const p of extraPhrases) {
+    if (p && content.includes(p) && !hits.includes(p)) hits.push(p);
   }
   const exclaims = content.match(EXCLAMATION_RE);
   if (exclaims && exclaims.length > exclamationMax) {
@@ -60,10 +68,12 @@ export function aiScoreFromHits(hitCount: number): number {
 export class PostProcessor {
   private readonly rewriteThreshold: number;
   private readonly rewriteFn?: (content: string, flagged: string[]) => Promise<string>;
+  private readonly extraPhrases: string[];
 
   constructor(options: PostProcessorOptions = {}) {
     this.rewriteThreshold = Math.max(1, options.rewriteThreshold ?? 2);
     this.rewriteFn = options.rewrite;
+    this.extraPhrases = options.extraPhrases ?? [];
   }
 
   /**
@@ -72,7 +82,7 @@ export class PostProcessor {
    *          调用方据此决定 status='needs_review'。
    */
   async process(content: string, exclamationMax = 1): Promise<PostProcessResult> {
-    const firstHits = detectBannedPhrases(content, exclamationMax);
+    const firstHits = detectBannedPhrases(content, exclamationMax, this.extraPhrases);
 
     // 未达重写阈值：直接返回。
     if (firstHits.length < this.rewriteThreshold || !this.rewriteFn) {
@@ -98,7 +108,7 @@ export class PostProcessor {
       };
     }
 
-    const secondHits = detectBannedPhrases(rewritten, exclamationMax);
+    const secondHits = detectBannedPhrases(rewritten, exclamationMax, this.extraPhrases);
     return {
       content: rewritten,
       aiScore: aiScoreFromHits(secondHits.length),

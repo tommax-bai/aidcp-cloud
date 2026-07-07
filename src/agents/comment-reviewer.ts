@@ -15,6 +15,7 @@ import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { SessionContext } from './session-context.js';
 import type { NoteData } from './content-curator-role.js';
+import { tieredInterests } from './persona-format.js';
 import type { RoleName, ReadingImagesDonePayload } from '../event-bus/types.js';
 
 export interface CommentReviewerOptions extends RoleOptions {
@@ -24,6 +25,7 @@ export interface CommentReviewerOptions extends RoleOptions {
 
 export class CommentReviewer extends BaseRole {
   readonly roleName: RoleName = 'comment_reviewer';
+  private readonly sessionContext: SessionContext;
   private readonly getNoteData: (noteId: string) => NoteData | null;
   private unsubscribers: (() => void)[] = [];
   /** 等待 scroll_comments 回执的在途上下文（单飞：一次只深读一篇）。 */
@@ -32,6 +34,7 @@ export class CommentReviewer extends BaseRole {
   constructor(options: CommentReviewerOptions) {
     super(options);
     if (!options.llm) throw new Error('CommentReviewer 需要 LlmClient');
+    this.sessionContext = options.sessionContext;
     this.getNoteData = options.getNoteData;
   }
 
@@ -114,30 +117,38 @@ export class CommentReviewer extends BaseRole {
 
   /** 只读人设来源片段（change prompt-viewer-persona-source）：与 buildPrompt 同源拼接，仅供查看器定位标注；不改 buildPrompt。 */
   personaSegments(): string[] {
-    const { identity, interests } = this.soul;
-    const interestsStr = [...interests.primary, ...interests.secondary].join('、');
-    return [`你是「${identity.name}」，${identity.role}。兴趣：${interestsStr}。`];
+    return [this.personaHeader()];
+  }
+
+  /** 人设头（change humanize-interaction-prompts）：注入背景 / 语气 / 兴趣 / 浏览风格，
+   *  让「翻不翻评论区」这种性格行为随账号不同而不同。 */
+  private personaHeader(): string {
+    const { identity, interests, behavior_guidelines: bg } = this.soul;
+    const lines = [`你是「${identity.name}」，${identity.role}。${identity.background}`, `语气：${identity.tone}`, `兴趣：${tieredInterests(interests)}`];
+    if (bg?.style) lines.push(`你平时逛小红书的风格：${bg.style}`);
+    return lines.join('\n');
   }
 
   private buildPrompt(note: NoteData): string {
-    const { identity, interests } = this.soul;
-    const interestsStr = [...interests.primary, ...interests.secondary].join('、');
+    const visited = this.sessionContext.visitedCount;
+    const stateLine = visited > 0 ? `\n（本场你已经看过 ${visited} 篇笔记了。）\n` : '';
 
-    return `你是「${identity.name}」，${identity.role}。兴趣：${interestsStr}。
-你刚看完一篇小红书笔记的正文，正在决定**要不要顺手翻一翻评论区**（像真人一样：有时看、有时跳过）。
+    return `${this.personaHeader()}
 
+你刚看完这篇笔记的正文，在想**要不要顺手翻一翻评论区**——像真人一样，有时想看看大家怎么说，有时刷过就算了。
+${stateLine}
 笔记信息：
 标题：${note.title}
 内容：${note.content}
 点赞：${note.likeCount}，收藏：${note.collectCount}
 
-判断口径：
-- 话题与你的兴趣相关、或互动量较高（评论区可能有有价值的讨论）→ 倾向看；
-- 与兴趣无关、或明显是水帖 → 倾向跳过。
-- 这是浏览行为，不是发评论。
+你怎么定：
+- 话题跟你兴趣对味、或者互动量挺高（评论区可能有意思）→ 想看看；
+- 跟你没关系、或明显是水帖 → 就跳过。
+- 这只是翻着看，不是去发评论。
 
 只输出JSON（不要输出其他内容）：
-看评论：{"action":"read","reason":"简短原因","confidence":0.7}
+看评论：{"action":"read","reason":"简短原因"}
 不看：{"action":"skip","reason":"简短原因"}`;
   }
 

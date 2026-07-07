@@ -13,7 +13,16 @@
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import { SessionContext } from './session-context.js';
+import { tieredInterests } from './persona-format.js';
 import type { RoleName } from '../event-bus/types.js';
+
+/**
+ * 受控好奇心豁免概率（change humanize-interaction-prompts）：小概率在某一轮选卡里追加
+ * 「也可以纯粹因为标题有趣点开兴趣之外的内容」的许可，模拟真人偶发的好奇/看热闹。
+ * 掷骰在代码层（random 可注入单测），未命中轮次 prompt 与从严口径逐字一致；命中轮仍是真实评估过的卡、
+ * 诚实 skip 与品牌安全禁区不受豁免影响。
+ */
+export const CURIOSITY_EXEMPTION_PROBABILITY = 0.12;
 
 export interface VisibleCard {
   index: number;
@@ -29,6 +38,7 @@ export interface VisibleCard {
 export class ContentEvaluator extends BaseRole {
   readonly roleName: RoleName = 'content_evaluator';
   private readonly ctx: SessionContext;
+  private readonly random: () => number;
   private unsubscribers: (() => void)[] = [];
 
   /** 当前屏可见卡片（由外部注入或通过事件 payload 提供） */
@@ -37,9 +47,10 @@ export class ContentEvaluator extends BaseRole {
   /** 评估在途标记：避免一批 page.cards 触发多个并发评估 → 多条 open_note */
   private _evaluating = false;
 
-  constructor(options: RoleOptions, ctx: SessionContext) {
+  constructor(options: RoleOptions, ctx: SessionContext, random: () => number = Math.random) {
     super(options);
     this.ctx = ctx;
+    this.random = random;
     if (!options.llm) throw new Error('ContentEvaluator 需要 LlmClient');
   }
 
@@ -84,8 +95,11 @@ export class ContentEvaluator extends BaseRole {
       return;
     }
 
+    // 受控好奇心豁免（change humanize-interaction-prompts）：掷骰在代码层，命中才在 prompt 追加好奇许可。
+    const curious = this.random() < CURIOSITY_EXEMPTION_PROBABILITY;
+
     // 构建 prompt 并调用 LLM
-    const prompt = this.buildPrompt(candidates, pageType);
+    const prompt = this.buildPrompt(candidates, pageType, curious);
     let raw: string;
     try {
       raw = await this.decide(prompt);
@@ -156,13 +170,12 @@ export class ContentEvaluator extends BaseRole {
   /** 只读人设来源片段（change prompt-viewer-persona-source）：与 buildPrompt 同源拼接，仅供查看器定位标注；不改 buildPrompt。 */
   personaSegments(): string[] {
     const { identity, interests } = this.soul;
-    const interestsStr = [...interests.primary, ...interests.secondary].join('、');
-    return [`你是「${identity.name}」，${identity.role}。\n背景：${identity.background}\n兴趣领域：${interestsStr}`];
+    return [`你是「${identity.name}」，${identity.role}。\n背景：${identity.background}\n兴趣领域：${tieredInterests(interests)}`];
   }
 
-  private buildPrompt(cards: VisibleCard[], pageType: string): string {
+  private buildPrompt(cards: VisibleCard[], pageType: string, curious = false): string {
     const { identity, interests } = this.soul;
-    const interestsStr = [...interests.primary, ...interests.secondary].join('、');
+    const interestsStr = tieredInterests(interests);
 
     const cardList = cards
       .map((c, i) => {
@@ -171,26 +184,31 @@ export class ContentEvaluator extends BaseRole {
       })
       .join('\n');
 
+    // 好奇心许可（change humanize-interaction-prompts）：仅在命中豁免的这一轮出现；不改诚实 skip 与品牌安全。
+    const curiosityLine = curious
+      ? '\n（这一屏你心情不错，也可以纯粹因为某个标题有意思就点开一篇兴趣之外的内容——但仍要是真觉得有意思，不硬凑；品牌安全底线照样适用。）'
+      : '';
+
     return `你是「${identity.name}」，${identity.role}。
 背景：${identity.background}
 兴趣领域：${interestsStr}
 
-当前在小红书${pageType === 'feed' ? '推荐页' : '搜索结果页'}，请从以下可见卡片中选择一个最值得打开的内容。
+你正在小红书${pageType === 'feed' ? '推荐页' : '搜索结果页'}刷着，从下面这些卡片里挑一张你最想点开的。
 
 可见卡片：
 ${cardList}
 
-评估要点：
-1. 标题与你兴趣领域的匹配度是最重要的因素
-2. 互动数据（点赞/收藏）作为参考，但不必硬性要求高互动
-3. 标记为 [视频] 的卡片你可以自主决定是否打开（视频内容也可能有价值）
-4. 已访问的卡片已被过滤，列表中全是未看过的
-5. 综合判断，选出最值得深入了解的一篇
-6. 若没有任何一张明显匹配你上面的兴趣领域，直接 skip——不要为与你兴趣无关的内容牵强地编造相关理由（诚实 skip 优于硬凑；你的兴趣领域以上面列出的为准，不预设任何默认题材）
-7. 品牌安全底线（无论你的兴趣如何都适用）：涉及政治敏感、色情低俗、赌博、违法或明显不良导向的内容一律不选
+你怎么挑：
+1. 先看标题跟你的兴趣对不对味——这是最主要的
+2. 点赞/收藏数看看就好，不必非得高互动
+3. 标 [视频] 的你自己定要不要看（视频也可能有料）
+4. 已经看过的都过滤掉了，这些都是没看过的
+5. 挑一张你真正最想深入看的
+6. 要是这一屏没有一张真对你胃口，就直接 skip——别为跟你无关的内容硬编相关理由（诚实 skip 好过硬凑；你的兴趣以上面列的为准，不预设任何默认题材）
+7. 品牌安全底线（不管你兴趣如何都适用）：政治敏感、色情低俗、赌博、违法或明显不良导向的一律不选${curiosityLine}
 
 只输出JSON（不要输出其他内容）：
-有价值：{"verdict":"valuable","index":N,"reason":"简短原因","confidence":0.8}
+有价值：{"verdict":"valuable","index":N,"reason":"简短原因"}
 全部跳过：{"verdict":"skip","reason":"简短原因"}`;
   }
 

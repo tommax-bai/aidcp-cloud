@@ -18,8 +18,12 @@
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { NoteData } from './content-curator-role.js';
+import { tieredInterests } from './persona-format.js';
 import type { CommentCandidate } from '../comm/protocol.js';
 import type { RoleName, ReadingScrollCommentsPayload } from '../event-bus/types.js';
+
+/** 点赞哲学兜底（soul 缺 behavior_guidelines 时）：选择性、只在真戳到时点。 */
+const LIKE_PRINCIPLE_FALLBACK = '只在真有共鸣 / 觉得有意思 / 学到东西时才点；平淡的、随手认同的不点';
 
 export interface CommentLikeAppraiserOptions extends RoleOptions {
   getNoteData: (noteId: string) => NoteData | null;
@@ -177,14 +181,18 @@ export class CommentLikeAppraiser extends BaseRole {
 
   /** 只读人设来源片段（change prompt-viewer-persona-source）：与 buildPrompt 同源拼接，仅供查看器定位标注；不改 buildPrompt。 */
   personaSegments(): string[] {
-    const { identity, interests } = this.soul;
-    const interestsStr = [...interests.primary, ...interests.secondary].join('、');
-    return [`你是「${identity.name}」，${identity.role}。兴趣：${interestsStr}。`];
+    return [this.personaHeader()];
+  }
+
+  /** 人设头（change humanize-interaction-prompts）：注入语气 + 兴趣 + 点赞哲学，
+   *  让「给哪条评论点赞」按账号口味不同而不同（不再全 fleet 共用固定三轴）。 */
+  private personaHeader(): string {
+    const { identity, interests, behavior_guidelines: bg } = this.soul;
+    const likePrinciple = bg?.like_principle ?? LIKE_PRINCIPLE_FALLBACK;
+    return `你是「${identity.name}」，${identity.role}。语气：${identity.tone}。兴趣：${tieredInterests(interests)}。\n你点赞的一贯标准：${likePrinciple}`;
   }
 
   private buildPrompt(note: NoteData | null, usable: CommentCandidate[]): string {
-    const { identity, interests } = this.soul;
-    const interestsStr = [...interests.primary, ...interests.secondary].join('、');
     const noteBlock = note
       ? `当前笔记：\n标题：${note.title}\n内容：${note.content}`
       : '（正文暂不可用，只凭评论判断）';
@@ -192,19 +200,17 @@ export class CommentLikeAppraiser extends BaseRole {
       .map((c, i) => `${i + 1}. ${c.author ? `@${c.author}：` : ''}${c.text}`)
       .join('\n');
 
-    return `你是「${identity.name}」，${identity.role}。兴趣：${interestsStr}。
+    return `${this.personaHeader()}
+
 你正在看一篇小红书笔记的评论区，像真人一样**偶尔**会给某条特别戳到你的评论点个赞。
-多数时候不必点；只在确有一条评论有趣 / 有知识含量 / 让你强烈共鸣时，才点它一个。
+多数时候不必点；只在确有一条评论**按你上面的点赞标准**真的戳到你时，才点它一个。
 
 ${noteBlock}
 
 评论候选（最多挑 1 条点赞，挑不出就不点）：
 ${list}
 
-判断口径：
-- 趣味性（机灵 / 好笑 / 角度新）、知识深度（讲到点上 / 有信息量）、共鸣（说出你的想法）任一突出即可考虑；
-- 平庸、口水、广告、与正文无关的不点；
-- 像你自己会写的、或明显是自夸/带货的不点。
+一律不点的：平庸、口水、广告、与正文无关的；像你自己会写的、或明显是自夸 / 带货的。
 
 只输出JSON（不要其他内容）：
 点某条：{"pick": <1..${usable.length} 的序号>, "reason": "简短原因"}
