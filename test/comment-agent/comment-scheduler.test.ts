@@ -86,7 +86,7 @@ describe('CommentScheduler.triggerManual', () => {
     assert.match(r.message, /在线边端/);
   });
 
-  it('账号平台未接入评论 registry → 拒绝，不回落 xhs 流程', async () => {
+  it('facebook 平台评论执行未接入 → 诚实拒绝，绝不回落 xhs 流程（facebook-scheduled-comment 2.2 待实装）', async () => {
     let takeovers = 0;
     const s = new CommentScheduler(
       baseDeps({
@@ -97,8 +97,9 @@ describe('CommentScheduler.triggerManual', () => {
     const r = await s.triggerManual('acc-1');
     assert.equal(r.ok, false);
     assert.equal(r.level, 'error');
-    assert.match(r.message, /暂不支持评论调度/);
-    assert.equal(takeovers, 0);
+    // facebook 现已在 registry（供平台闸/未来路由），但定向评论执行尚未接入 → 诚实拒绝、不跑 xhs 搜索。
+    assert.match(r.message, /Facebook 定向评论执行尚未接入|待实装/);
+    assert.equal(takeovers, 0, '绝不回落 xhs 流程（不启动接管）');
   });
 
   it('account=default → 拒绝（绝不回落）', async () => {

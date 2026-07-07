@@ -86,9 +86,11 @@ export interface AccountStore {
   setPaused(accountId: string, paused: boolean, at: number | null): Promise<void>;
   /**
    * 幂等登记一个账号（握手时新账号自动入主表，multi-account-node-support D4）。
-   * 仅插入、绝不覆盖已配置行（不动既有 status/label/标签/绑定）。
+   * 仅插入、绝不覆盖已配置行（不动既有 status/label/标签/绑定/platform）。
+   * platform（facebook-scheduled-comment 2.5）：仅在插入新行时写入 edge 声明的平台，
+   * 修复全新 Facebook 账号首连被 platform_mismatch 死锁的问题；既有行的 platform 保持事实源不变。
    */
-  ensureAccount?(accountId: string): Promise<void>;
+  ensureAccount?(accountId: string, platform?: PlatformId): Promise<void>;
   /**
    * 写入账号的平台真实昵称（change account-real-nickname）：单写，按 account_id upsert。
    * 实现拒空白（trim 为空即 no-op，绝不用空覆盖已有真名）；调用方只在拿到可证明属己的非空昵称时调。
@@ -211,16 +213,22 @@ export class PgAccountStore implements AccountStore {
    * （active=「未被运营暂停」这一运营维度）；账号是否就绪由**人设绑定派生字段**（persona_config 行是否存在）
    * 独立判定——未绑人设的账号仍被诚实启动闸拦住、不会真跑（multi-account-node-support D3/D4）。
    */
-  async ensureAccount(accountId: string): Promise<void> {
+  async ensureAccount(accountId: string, platform?: PlatformId): Promise<void> {
     // retire-default-account：绝不为退役保留标识建行（防任何路径把 'default' 重新登记进主表）。
     if (accountId === RETIRED_ACCOUNT_ID) {
       console.warn(`[account-store] 拒绝登记退役保留账号 '${RETIRED_ACCOUNT_ID}'（retire-default-account）`);
       return;
     }
-    await this.pool.query(
-      `INSERT INTO accounts (account_id, label) VALUES ($1, $1) ON CONFLICT (account_id) DO NOTHING`,
-      [accountId],
+    // facebook-scheduled-comment 2.5：新账号登记时按 edge 声明的平台建行（缺省回落 xhs，行为不变）。
+    // ON CONFLICT DO NOTHING → 既有行的 platform 绝不被覆盖（平台仍以现有行为事实源）。
+    // RETURNING 判定是否真插入了新行：仅新行才回填 platformCache（既有行不触碰缓存，防污染）。
+    const normalized = platform ? normalizePlatformId(platform) : 'xiaohongshu';
+    const { rows } = await this.pool.query<{ platform: string }>(
+      `INSERT INTO accounts (account_id, label, platform) VALUES ($1, $1, $2)
+       ON CONFLICT (account_id) DO NOTHING RETURNING platform`,
+      [accountId, normalized],
     );
+    if (rows.length > 0) this.platformCache.set(accountId, normalizePlatformId(rows[0].platform));
   }
 
   /**

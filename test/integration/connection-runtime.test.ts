@@ -61,8 +61,10 @@ function makeHarness(platformByAccount: Record<string, PlatformId> = {}): Harnes
       dispatchers.push(d);
       return d as unknown as RoleDispatcher;
     },
-    ensureAccount: async (accountId) => {
+    ensureAccount: async (accountId, platform) => {
       ensured.push(accountId);
+      // 模型真实 store：仅新账号 insert-time 按 edge 声明平台建行；既有账号平台绝不覆盖（2.5）。
+      if (platform && !(accountId in platformByAccount)) platformByAccount[accountId] = platform;
     },
     getAccountPlatform: async (accountId) => platformByAccount[accountId] ?? 'xiaohongshu',
     onConfigError: (session, message) => {
@@ -148,6 +150,24 @@ test('平台不匹配：xhs edge 不接管 facebook 账号，且不顶替旧连�
   assert.equal((outcome as { code: string }).code, 'platform_mismatch');
   assert.deepEqual(h.closed, [], 'mismatch 不应驱逐同 edgeId 的旧健康连接');
   assert.equal(h.registry.runtimeCount(), 1);
+});
+
+test('facebook-scheduled-comment 2.5：全新 Facebook 账号首连不再被 platform_mismatch 死锁（insert-time 按 edge 平台建行）', async () => {
+  // 全新账号（未预置于 platformByAccount）+ edge 声明 facebook。
+  const h = makeHarness();
+  const outcome = await h.registry.onHandshake({ sessionId: 's1', edgeId: 'eFB', accountId: 'fb-new', platform: 'facebook' });
+  assert.equal(outcome.ok, true, '首连应成功：ensureAccount 已按 edge 平台建行，getAccountPlatform 读回 facebook，与 edge 一致');
+  assert.deepEqual(h.ensured, ['fb-new']);
+  assert.equal(h.registry.runtimeCount(), 1);
+  // dispatcher 收到该连接平台，供 session-start 平台闸使用。
+  assert.equal(h.built[0].platform, 'facebook');
+});
+
+test('facebook-scheduled-comment 2.8：facebook 连接的 dispatcher 上下文带 platform=facebook', async () => {
+  const h = makeHarness({ acctX: 'facebook' });
+  const outcome = await h.registry.onHandshake({ sessionId: 's1', edgeId: 'eA', accountId: 'acctX', platform: 'facebook' });
+  assert.equal(outcome.ok, true);
+  assert.equal(h.built[0].platform, 'facebook');
 });
 
 test('未知 edge platform：配置错误拒绝，且不登记账号', async () => {

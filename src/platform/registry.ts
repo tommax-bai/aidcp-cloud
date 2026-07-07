@@ -61,6 +61,29 @@ export const XHS_COMMENT_PROFILE: CommentPlatformProfile = {
   },
 };
 
+// Facebook v1（facebook-scheduled-comment）：只做定向评论，不做全站搜索。
+// search 子对象为满足 CommentPlatformProfile 类型契约的占位（FB v1 不消费搜索语义）。
+export const FB_COMMENT_PROFILE: CommentPlatformProfile = {
+  platform: 'facebook',
+  siteName: 'Facebook',
+  contentName: '帖子',
+  // 软上界：Facebook 评论无 50 字硬限，这里给一个自然评论的保守上限，真实约束由确定性校验器执行。
+  maxCommentLength: 500,
+  metrics: {
+    like: '赞',
+    collect: '', // Facebook 无「收藏」概念；FB 定向评论路径不使用该字段，占位满足类型。
+  },
+  search: {
+    // FB v1 不做全站搜索（只浏览配置的 target URL）；以下为占位，不被 FB 路径消费。
+    defaultSort: 'recent',
+    defaultSortLabel: '最新',
+    defaultTimeWindow: 'none',
+    defaultTimeWindowLabel: '不限',
+    targetedSearchTermMaxLength: 0,
+    targetedSearchFallbackLength: 0,
+  },
+};
+
 export const PLATFORM_REGISTRY: Record<'xiaohongshu', PlatformRegistryEntry> &
   Partial<Record<PlatformId, PlatformRegistryEntry>> = {
   xiaohongshu: {
@@ -76,6 +99,22 @@ export const PLATFORM_REGISTRY: Record<'xiaohongshu', PlatformRegistryEntry> &
       },
     },
     comment: XHS_COMMENT_PROFILE,
+  },
+  facebook: {
+    platform: 'facebook',
+    app: 'fb',
+    displayName: 'Facebook',
+    // 刻意只声明 'comment'，绝不含 'browse'：否则 edge 装配闸会把 xhs 浏览会话挂到 FB edge，
+    // 且云端 session-start 平台闸（canStartSession）正是靠「capabilities 不含 browse」拦下 FB 账号起 xhs 浏览循环。
+    capabilities: ['comment'],
+    scheduler: {
+      comment: {
+        enabled: true,
+        defaultSort: FB_COMMENT_PROFILE.search.defaultSort,
+        defaultTimeWindow: FB_COMMENT_PROFILE.search.defaultTimeWindow,
+      },
+    },
+    comment: FB_COMMENT_PROFILE,
   },
 };
 

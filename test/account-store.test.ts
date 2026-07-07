@@ -211,3 +211,36 @@ test('listByPlatform: 按平台枚举账号并保留暂停态', async () => {
   assert.match(calls[0].text, /WHERE platform = \$1 ORDER BY account_id/);
   assert.deepEqual(calls[0].params, ['xiaohongshu']);
 });
+
+// ── facebook-scheduled-comment 2.5：握手 insert-time 平台预置（修复全新 FB 账号首连死锁）──
+
+test('ensureAccount: 新账号按 edge 声明平台建行（INSERT 带 platform，回填缓存，无需再查库）', async () => {
+  // RETURNING 返回一行 → 视为真插入了新行。
+  const { calls, pool } = fakePoolReturning([{ platform: 'facebook' }]);
+  const store = new PgAccountStore({ pool });
+  await store.ensureAccount('fb-acc', 'facebook');
+  assert.match(calls[0].text, /INSERT INTO accounts[\s\S]*platform[\s\S]*ON CONFLICT \(account_id\) DO NOTHING RETURNING platform/);
+  assert.deepEqual(calls[0].params, ['fb-acc', 'facebook']);
+  // 缓存已回填 → getPlatform 命中缓存、不再发第二次查询。
+  assert.equal(await store.getPlatform('fb-acc'), 'facebook');
+  assert.equal(calls.length, 1, 'getPlatform 命中缓存，不应产生额外查询');
+});
+
+test('ensureAccount: 缺省平台回落 xiaohongshu（行为不变）', async () => {
+  const { calls, pool } = fakePoolReturning([{ platform: 'xiaohongshu' }]);
+  const store = new PgAccountStore({ pool });
+  await store.ensureAccount('legacy-acc');
+  assert.deepEqual(calls[0].params, ['legacy-acc', 'xiaohongshu']);
+});
+
+test('ensureAccount: 既有行冲突（RETURNING 空）→ 不回填缓存（不污染既有平台）', async () => {
+  // ON CONFLICT DO NOTHING 命中既有行 → RETURNING 空。
+  const { calls, pool } = fakePoolReturning([]);
+  const store = new PgAccountStore({ pool });
+  await store.ensureAccount('existing', 'facebook');
+  assert.equal(calls.length, 1);
+  // 缓存未被写成 facebook；getPlatform 落库读真态（这里 fake 返回空 → 归一化为 xiaohongshu），
+  // 关键是发生了第二次查询（= 未命中缓存），证明既有行平台没被 ensureAccount 覆盖/污染。
+  await store.getPlatform('existing');
+  assert.equal(calls.length, 2, '既有行不应回填缓存，getPlatform 必须落库读真态');
+});

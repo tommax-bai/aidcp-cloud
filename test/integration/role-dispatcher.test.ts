@@ -519,4 +519,30 @@ describe('RoleDispatcher Integration', () => {
     );
     assert.ok(recover, `open_note 失败后应下发兜底 scroll，实际=${JSON.stringify(commands)}`);
   });
+
+  // ─── facebook-scheduled-comment 2.8: 会话启动平台闸 ─────────────────
+
+  it('2.8: facebook 平台（无 browse 能力）→ 启动闸拒绝，不起 xhs 浏览会话（不发 feed.entered{session_start}）', async () => {
+    const llm = createMockLlm(['{"verdict":"skip"}']);
+    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: () => {}, accountPlatform: 'facebook' });
+    dispatcher.setCurrentAccountId('fb-acc');
+    dispatcher.setup();
+    const starts: unknown[] = [];
+    dispatcher.bus.on('feed.entered', (p: unknown) => { starts.push(p); });
+    dispatcher.tryStartSession(); // 经 canStartSession 平台闸
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(starts.length, 0, 'facebook 账号不应启动浏览会话');
+  });
+
+  it('2.8: 缺省/xiaohongshu 平台（含 browse）→ 启动闸放行，正常起会话', async () => {
+    const llm = createMockLlm(['{"verdict":"skip"}']);
+    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: () => {}, accountPlatform: 'xiaohongshu' });
+    dispatcher.setCurrentAccountId('xhs-acc');
+    dispatcher.setup();
+    const starts: unknown[] = [];
+    dispatcher.bus.on('feed.entered', (p: unknown) => { starts.push(p); });
+    dispatcher.tryStartSession();
+    await new Promise((r) => setTimeout(r, 10));
+    assert.ok(starts.length >= 1, 'xhs 账号应正常启动会话（平台闸不拦）');
+  });
 });

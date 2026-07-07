@@ -1619,6 +1619,8 @@ async function main(): Promise<void> {
       llm,
       // 私有事件通道（连接间互不串味）；其上事件经 tee 汇入全局观测总线供风控记账 / 看板消费。
       eventBus: ctx.bus,
+      // 该连接账号平台（facebook-scheduled-comment 2.8）：喂 session-start 平台闸，拦下无 browse 能力平台起 xhs 浏览循环。
+      accountPlatform: ctx.platform,
       // 指令级节奏：喂当前（该账号）风控状态，驱动 dwellMs/thinkMs 的 tempo。
       getRiskStatus: () => ctx.controller.getState().status,
       pacingFloors: pacingConfigStore,
@@ -1703,9 +1705,9 @@ async function main(): Promise<void> {
     observerBus: eventBus,
     getController: (accountId) => riskRegistry.getController(accountId),
     buildDispatcher,
-    ensureAccount: async (accountId) => {
+    ensureAccount: async (accountId, platform) => {
       try {
-        await accountStore?.ensureAccount?.(accountId);
+        await accountStore?.ensureAccount?.(accountId, platform);
       } catch (err) {
         console.warn(`[aidcp-cloud] ensureAccount(${accountId}) 失败（不阻塞握手）:`, (err as Error).message);
       }

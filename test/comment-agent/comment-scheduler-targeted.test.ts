@@ -130,7 +130,7 @@ describe('CommentScheduler.triggerTargeted 拒绝路径（机器原因码）', (
     assert.equal(r.reason, 'edge_offline');
   });
 
-  it('账号平台未接入评论 registry → error / unsupported_platform，不回落 xhs 流程', async () => {
+  it('facebook 定向评论执行未接入 → error / unsupported_platform，绝不回落 xhs 流程（facebook-scheduled-comment 2.2 待实装）', async () => {
     let takeovers = 0;
     const s = new CommentScheduler(
       baseDeps({
@@ -141,8 +141,8 @@ describe('CommentScheduler.triggerTargeted 拒绝路径（机器原因码）', (
     const r = await s.triggerTargeted('acc-1', target);
     assert.equal(r.ok, false);
     assert.equal(r.reason, 'unsupported_platform');
-    assert.match(r.message, /暂不支持评论调度/);
-    assert.equal(takeovers, 0);
+    assert.match(r.message, /Facebook 定向评论执行尚未接入|待实装/);
+    assert.equal(takeovers, 0, '绝不回落 xhs 流程');
   });
 
   it('并发双触发（同账号）→ 恰一个 ok:true，单飞闸原子（回归：dedup await 不得切开 has→add）', async () => {

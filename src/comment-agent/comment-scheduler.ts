@@ -151,6 +151,17 @@ export class CommentScheduler {
       };
     }
 
+    // facebook-scheduled-comment：registry 已有 facebook 条目（供平台闸 / 未来定向路由），但 FB 定向评论
+    // 执行（2.2 runFacebookTargetedTask）尚未接入。此处诚实拒绝、绝不回落 xhs 搜索流程（design 决策：不 fork、不假成功）。
+    if (platformProfile.platform === 'facebook') {
+      return {
+        ok: false,
+        level: 'error',
+        title: '按需评论触发失败',
+        message: 'Facebook 定向评论执行尚未接入（facebook-scheduled-comment 2.2 待实装）；不回落 xhs 搜索流程',
+      };
+    }
+
     this.running.add(accountId);
     const edgeId = conn.edgeId;
     const bus = conn.bus;
@@ -232,6 +243,17 @@ export class CommentScheduler {
         level: 'error',
         title: '定向评论触发失败',
         message: `该账号平台暂不支持评论调度：${(err as Error).message}`,
+        reason: 'unsupported_platform',
+      };
+    }
+
+    // facebook-scheduled-comment：FB 定向评论执行（2.2）尚未接入 → 诚实拒绝、绝不回落 xhs 搜索定位流程。
+    if (platformProfile.platform === 'facebook') {
+      return {
+        ok: false,
+        level: 'error',
+        title: '定向评论触发失败',
+        message: 'Facebook 定向评论执行尚未接入（facebook-scheduled-comment 2.2 待实装）；不回落 xhs 流程',
         reason: 'unsupported_platform',
       };
     }
