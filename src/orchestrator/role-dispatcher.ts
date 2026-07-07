@@ -12,6 +12,7 @@
  */
 
 import { EventBus } from '../event-bus/index.js';
+import { platformRegistryEntry, type PlatformId } from '../platform/index.js';
 import type { LlmCallOpts } from '../llm/qwen.js';
 import { SessionContext } from '../agents/session-context.js';
 import { ContentEvaluator } from '../agents/content-evaluator.js';
@@ -176,6 +177,11 @@ export interface RoleDispatcherOptions {
   /** 全局调度开关（面板 /dispatch）：false 时不启动浏览会话。缺省 → 恒 true。 */
   isDispatchActive?: () => boolean;
   /**
+   * 该连接账号的运行时平台（facebook-scheduled-comment 2.8）。设置后，若该平台注册表能力不含 'browse'
+   * （如 Facebook v1 只声明 'comment'），canStartSession 诚实拒绝启动 xhs 浏览角色循环。缺省 → 不设闸（向后兼容）。
+   */
+  accountPlatform?: PlatformId;
+  /**
    * 同账号并行（N:1）互动去重 guard（multi-account-node-support D7②）：按账号单例（同账号 N 连接共用）。
    * 下发互动前占坑去重，防两节点对同一笔记/作者重复点赞/关注/评论。缺省 → 不去重（单账号单节点向后兼容）。
    */
@@ -282,6 +288,8 @@ export class RoleDispatcher {
   private readonly isPersonaBound?: (accountId: string) => boolean;
   private readonly onSessionRejected?: (accountId: string, reason: string) => void | Promise<void>;
   private readonly isDispatchActive: () => boolean;
+  /** 该连接账号平台（2.8 会话平台闸）；缺省不设闸。 */
+  private readonly accountPlatform?: PlatformId;
   /** 同账号并行互动去重 guard（按账号单例）；缺省不去重。 */
   private readonly interactionGuard?: InteractionGuard;
   /** 动作冷却闸（engagement-restraint）；缺省不冷却。 */
@@ -374,6 +382,7 @@ export class RoleDispatcher {
     this.isPersonaBound = options.isPersonaBound;
     this.onSessionRejected = options.onSessionRejected;
     this.isDispatchActive = options.isDispatchActive ?? (() => true);
+    this.accountPlatform = options.accountPlatform;
     this.interactionGuard = options.interactionGuard;
     this.cooldownGate = options.cooldownGate;
     this.sessionLimitProvider = options.sessionLimitProvider;
@@ -768,6 +777,15 @@ export class RoleDispatcher {
    */
   private canStartSession(): boolean {
     if (!this.isDispatchActive()) return false;
+    // facebook-scheduled-comment 2.8：平台不具备 browse 能力（如 Facebook v1 只声明 'comment'）→ 诚实拒绝启动
+    // xhs 浏览角色循环。放在人设闸之前，避免 FB 账号被误判 needs_persona_setup。不复用 onSessionRejected
+    //（那会硬编码发「未绑人设」飞书告警并误报）；FB 账号不浏览是正常预期、非事故，只 console.warn。
+    if (this.accountPlatform && !platformRegistryEntry(this.accountPlatform).capabilities.includes('browse')) {
+      console.warn(
+        `[RoleDispatcher] 账号 ${this.currentAccountId} 平台=${this.accountPlatform} 无 browse 能力 → 拒绝启动浏览会话（platform_no_browse）：不挂 xhs 浏览循环、不起看门狗`,
+      );
+      return false;
+    }
     if (this.isPersonaBound && !this.isPersonaBound(this.currentAccountId)) {
       console.warn(
         `[RoleDispatcher] 账号 ${this.currentAccountId} 未绑定人设 → 拒绝启动浏览会话（needs_persona_setup）：不开循环、不发巡刷信号`,

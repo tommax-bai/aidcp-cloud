@@ -37,6 +37,8 @@ export interface DispatcherBuildContext {
   controller: RiskController;
   accountId: string;
   edgeId?: string;
+  /** 该连接账号的运行时平台（facebook-scheduled-comment 2.8）：喂 dispatcher 的 session-start 平台闸。缺省按 xhs（不设闸）。 */
+  platform?: PlatformId;
 }
 
 export interface RuntimeRegistryDeps {
@@ -46,8 +48,8 @@ export interface RuntimeRegistryDeps {
   getController: (accountId: string) => Promise<RiskController>;
   /** 用连接上下文构造该连接的 RoleDispatcher（连接相关闸 / sendCommand 定向 / 私有总线均在此注入）。 */
   buildDispatcher: (ctx: DispatcherBuildContext) => RoleDispatcher;
-  /** 握手时对新账号做幂等 upsert（不覆盖已配置行、不默认 active）。 */
-  ensureAccount: (accountId: string) => Promise<void>;
+  /** 握手时对新账号做幂等 upsert（不覆盖已配置行、不默认 active）。platform：仅新行登记时按 edge 声明的平台建行（2.5 死锁修复）。 */
+  ensureAccount: (accountId: string, platform?: PlatformId) => Promise<void>;
   /** 从 accounts.platform 读取账号平台；缺省用于测试/旧装配时按 xhs 处理。 */
   getAccountPlatform?: (accountId: string) => Promise<PlatformId>;
   /** 缺/空 accountId → 配置错误告警（拒绝握手，不建会话、不偷映射 default）。 */
@@ -119,8 +121,9 @@ export class ConnectionRuntimeRegistry {
       return { ok: false, code: 'unsupported_platform', message: (err as Error).message };
     }
     session.platform = edgePlatform;
-    // 新账号自动登记（幂等 upsert）。
-    await this.deps.ensureAccount(accountId);
+    // 新账号自动登记（幂等 upsert）。按 edge 声明的平台建新行：修复全新 Facebook 账号首连
+    // 被 platform_mismatch 死锁（旧路径新行默认 xhs → 与 edge=facebook 不一致被拒）。既有行不覆盖。
+    await this.deps.ensureAccount(accountId, edgePlatform);
     const accountPlatform = this.deps.getAccountPlatform
       ? await this.deps.getAccountPlatform(accountId)
       : 'xiaohongshu';
@@ -166,7 +169,7 @@ export class ConnectionRuntimeRegistry {
       },
     };
 
-    runtime.dispatcher = this.deps.buildDispatcher({ bus, controller, accountId, edgeId: session.edgeId });
+    runtime.dispatcher = this.deps.buildDispatcher({ bus, controller, accountId, edgeId: session.edgeId, platform: accountPlatform });
     runtime.dispatcher.setCurrentAccountId(accountId);
     runtime.dispatcher.setup();
     this.bySession.set(session.sessionId, runtime);
