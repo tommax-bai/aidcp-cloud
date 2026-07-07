@@ -5,6 +5,7 @@ import { ContentScoutRole } from '../../src/publish-agent/roles/content-scout.js
 import { ContentTypeSelectorRole } from '../../src/publish-agent/roles/content-type-selector.js';
 import { ContentCreatorRole } from '../../src/publish-agent/roles/content-creator.js';
 import { CategoryClassifierRole } from '../../src/publish-agent/roles/category-classifier.js';
+import { CoverCardWriterRole } from '../../src/publish-agent/roles/cover-card-writer.js';
 import { ImageSetPlannerRole } from '../../src/publish-agent/roles/image-set-planner.js';
 import { ImagePromptComposerRole } from '../../src/publish-agent/roles/image-prompt-composer.js';
 import { ImageGeneratorRole } from '../../src/publish-agent/roles/image-generator.js';
@@ -129,6 +130,9 @@ function buildFullPipeline(llmResponses: Record<string, string>, opts?: { enable
   orchestrator.registerRole(new FidelityAuditorRole({ llmClient: fakeLlm as any, ...common }));
   // 品类判定（category-adaptive-images-and-judgment）：读正文判品类，供配图指令风格档（composer waitAll 依赖 postCategory）。
   orchestrator.registerRole(new CategoryClassifierRole({ llmClient: fakeLlm as any, ...common }));
+  // 封面形态决策（textcard-cover-form）：恒写 coverCardPlan（composer waitAll 三键依赖此键）；
+  // 测试缺省渲染旗标关 + 无参照图 → 生成式兜底、零额外 LLM，全管线行为与改造前一致。
+  orchestrator.registerRole(new CoverCardWriterRole({ llmClient: fakeLlm as any, renderEnabled: () => false, ...common }));
   // 配图三角色（publish-multi-image）：选题 → 指令 → 执行。
   orchestrator.registerRole(new ImageSetPlannerRole({ llmClient: fakeLlm as any, ...common }));
   orchestrator.registerRole(new ImagePromptComposerRole({ llmClient: fakeLlm as any, ...common }));
@@ -182,8 +186,8 @@ describe('PublishOrchestrator', () => {
     assert.equal(insertedRecords[0].status, 'pending_approval', '落库为待审草稿');
     assert.equal(pushedEnvelopes.length, 0, '生成候审段绝不下发边缘');
     // 稳定边界：组装产出仍含八字段（细拆后等价）。
-    // 既有 25 个发布角色 + 保真洗稿 4 角色 = 29。
-    assert.equal(orchestrator.getRoles().length, 29);
+    // 既有 25 个发布角色 + 保真洗稿 4 角色 + 封面形态决策（textcard-cover-form）= 30。
+    assert.equal(orchestrator.getRoles().length, 30);
   });
 
   test('保真洗稿链路：referenceNote 绕过 Scout/Creator，经审核后复用下游发布链', async () => {

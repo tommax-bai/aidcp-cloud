@@ -103,6 +103,14 @@ import {
 } from './publish-agent/image-providers.js';
 import { AccountStateManager } from './account-state.js';
 import { PgAccountStore, type AccountStore } from './account-store.js';
+// change textcard-cover-form：封面形态感知（vision 客户端 + 感知服务）与文字卡渲染出口。
+import { OpenAiCompatVisionClient } from './llm/vision.js';
+import {
+  createCoverFormSensor,
+  resolveCoverFormModel,
+  resolveCoverFormProvider,
+} from './publish-agent/cover-form-sensor.js';
+import { createTextCardRenderer, type TextCardRenderer } from './render/text-card.js';
 import {
   ContentScoutRole,
   ContentTypeSelectorRole,
@@ -112,6 +120,7 @@ import {
   FaithfulDraftWriterRole,
   FidelityAuditorRole,
   CategoryClassifierRole,
+  CoverCardWriterRole,
   ImageSetPlannerRole,
   ImagePromptComposerRole,
   ImageGeneratorRole,
@@ -1764,6 +1773,48 @@ async function main(): Promise<void> {
     }),
   ] as unknown as readonly BaseRole[];
 
+  // ── 封面形态链路装配（change textcard-cover-form）：双旗标默认关，全关=与现版逐字一致 ──
+  // 感知旗标 AIDCP_COVER_FORM_SENSING 只门控视觉调用；渲染旗标 AIDCP_PUBLISH_TEXTCARD_COVER 只门控决策+渲染。
+  // 感知开+渲染关 = 影子模式（注解与审计照落、封面照走生成式），面板核准确率后再放行渲染。
+  const coverFormVision = new OpenAiCompatVisionClient({
+    // v1 模型解析两层收敛（design D5 评审修正）：env → 代码默认；绝不进按角色文本解析/全局文本模型回落层。
+    getModel: resolveCoverFormModel,
+    getProvider: resolveCoverFormProvider,
+    providerRuntime,
+    onCall: (info) => {
+      console.log(
+        `[llm] account=${info.accountId ?? '-'} role=${info.role ?? '-'} provider=${info.provider ?? '-'} model=${info.model} ms=${info.ms} ok=${info.ok} tokens=${info.totalTokens ?? 0}`,
+      );
+      try {
+        tokenUsageStore.add(info);
+      } catch {
+        /* metrics never breaks llm */
+      }
+    },
+  });
+  const coverFormSensor = createCoverFormSensor({
+    vision: coverFormVision,
+    enabled: () => process.env.AIDCP_COVER_FORM_SENSING === 'true',
+    // 回写缓存：素材库可用才接（历史空行/无库时感知照跑、只是不缓存）。单条 UPDATE 带锚守卫，绝不 bump updated_at。
+    ...(curatedContentStore
+      ? { annotate: curatedContentStore.annotateReferenceImageFormGuess.bind(curatedContentStore) }
+      : {}),
+    getModel: resolveCoverFormModel,
+    getProvider: resolveCoverFormProvider,
+  });
+  // 渲染出口：lazy 工厂只在渲染旗标开时初始化（关=零加载零成本）；工厂失败→null，text_card 请求诚实降级生成式。
+  let textCardRenderer: TextCardRenderer | null = null;
+  if (process.env.AIDCP_PUBLISH_TEXTCARD_COVER === 'true') {
+    void createTextCardRenderer({ logger: console })
+      .then((r) => {
+        textCardRenderer = r;
+        console.log(r ? '[aidcp-cloud] 文字卡渲染出口已就绪（satori+resvg+字体校验通过）' : '[aidcp-cloud] 文字卡渲染出口不可用（工厂返回 null），封面按生成式降级');
+      })
+      .catch((err) => {
+        console.warn('[aidcp-cloud] 文字卡渲染工厂异常（封面按生成式降级）:', (err as Error).message);
+      });
+  }
+
   // 注册发布编排器的生产段角色（A 阶段2 细拆：6→11，下游 Gatekeeper/Executor 不变）。
   // 注册顺序无关正确性（黑板靠键就绪触发），按拓扑排列便于阅读。
   publishOrchestrator.registerRole(new ContentScoutRole({ llmClient: roleLlm('publish:ContentScout') }));
@@ -1777,6 +1828,14 @@ async function main(): Promise<void> {
   // 选题读正文定张数+主题（配强模型）；指令把主题翻成万相 prompt（配便宜模型）；执行并行出多图；封面恒取首张。
   // 品类判定（change category-adaptive-images-and-judgment）：读正文判品类，供配图选题风格档 + 质量评审复用；flash 可后台配。
   publishOrchestrator.registerRole(new CategoryClassifierRole({ llmClient: roleLlm('publish:CategoryClassifier') }));
+  // 封面形态决策（textcard-cover-form）：恒写 coverCardPlan（composer waitAll 三键依赖）；门禁序内感知独立于渲染旗标（影子模式）。
+  publishOrchestrator.registerRole(new CoverCardWriterRole({
+    llmClient: roleLlm('publish:CoverCardWriter'),
+    sensor: coverFormSensor,
+    renderEnabled: () => process.env.AIDCP_PUBLISH_TEXTCARD_COVER === 'true',
+    rendererAvailable: () => textCardRenderer !== null,
+    ossAvailable: () => !!ossUploader,
+  }));
   publishOrchestrator.registerRole(new ImageSetPlannerRole({ llmClient: roleLlm('publish:ImageSetPlanner') }));
   publishOrchestrator.registerRole(new ImagePromptComposerRole({ llmClient: roleLlm('publish:ImagePromptComposer') }));
   publishOrchestrator.registerRole(new ImageGeneratorRole({
@@ -1809,6 +1868,8 @@ async function main(): Promise<void> {
     // change cloud-oss-storage-integration：注入 OSS 转存出口（配了凭据才有；缺则 undefined = 配图零回归用 provider URL）。
     // 生成成功后逐张转存 OSS 换稳定公网 URL，根治「审批超 provider TTL → 死链」；转存失败诚实落空、不伪造 URL。
     ossUploader,
+    // change textcard-cover-form：文字卡渲染出口（工厂异步就绪故取 getter）；执行器只读 plan+依赖可用性，不二次读旗标。
+    getTextCardRenderer: () => textCardRenderer,
   }));
   publishOrchestrator.registerRole(new CoverSelectorRole());
   // 后处理：清洗（ContentCleaner）→ AI味分（AiFlavorScorer）/ 质量分（QualityScorer）

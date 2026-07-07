@@ -2,13 +2,14 @@ import crypto from 'node:crypto';
 import { BasePublishRole } from './base-role.js';
 import type { RoleConfig } from './base-role.js';
 import type { PipelineContext } from '../pipeline-context.js';
-import type { PipelineFields, ImagePlan, ImageDirective } from '../types.js';
+import type { PipelineFields, ImagePlan, ImageDirective, CoverFormAudit, CoverRenderStatus } from '../types.js';
 import type { ImageProvider, ImageResult } from '../image-provider.js';
 import { normImageProvider } from '../image-providers.js';
 import type { ObjectStore } from '../../storage/object-store.js';
 import { relocateImageToStore } from '../../storage/object-store.js';
 import { IMAGE_COUNT_HARD_MAX } from '../prompts.js';
 import { referenceImageUrl, referenceImagesForGeneration } from '../reference-image-guidance.js';
+import type { TextCardRenderer, TextCardRenderMeta } from '../../render/text-card.js';
 
 /**
  * ImageGenerator — 配图「执行」（change publish-multi-image：单图 → 并行多图）。
@@ -24,6 +25,11 @@ function envInt(name: string, def: number): number {
   const raw = Number(process.env[name]);
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : def;
 }
+
+// 文字卡渲染内层闸（change textcard-cover-form）：渲染+字节直传在进入每图槽机制**之前**独立结算——
+// 若共用每图槽，最坏序列 = 渲染 30s + 万相轮询尾部 ~185s + 转存 30s = 245s > 240s，兜底生图会在收尾前
+// 被槽闸砍掉（评审 must-fix：由本特性引入的尾部回归）。故独立结算 + 角色总闸公式加渲染超时项。
+const DEFAULT_TEXTCARD_RENDER_TIMEOUT_MS = 30_000;
 
 // 每图超时：MUST > 单图万相轮询总预算 + OSS 转存预算，否则会先于「轮询 SUCCEEDED → 转存」结算前砍断 → 误判无图（红线）。
 // 预算拆解：① 万相轮询——server.ts 把 maxPollAttempts 接到 AIDCP_WANXIANG_MAX_POLL（默认 34）、间隔 5s → 34×5s=170s
@@ -69,6 +75,13 @@ export interface ImageGeneratorDeps {
   fetchImpl?: typeof fetch;
   /** 对象键的单次运行 token 生成器（缺省随机 hex）；记录 id 此刻尚未生成，故用运行 token 代替 recordId。 */
   idGen?: () => string;
+  /**
+   * 文字卡渲染出口（change textcard-cover-form）。工厂异步就绪故取 getter；未注入或返回 null =
+   * 渲染不可用，text_card 决策按渲染失败降级生成式。**执行器只读 plan 与注入依赖，绝不二次读环境旗标。**
+   */
+  getTextCardRenderer?: () => TextCardRenderer | null;
+  /** 渲染+字节直传内层闸（毫秒，缺省 env AIDCP_TEXTCARD_RENDER_TIMEOUT_MS，默认 30s）。 */
+  renderTimeoutMs?: number;
   clock?: () => number;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
@@ -86,6 +99,8 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
   private usageRecorder?: (record: ImageUsageRecord) => void;
   private getProvider: () => string;
   private getModel: () => string;
+  private getTextCardRenderer?: () => TextCardRenderer | null;
+  private renderTimeoutMs: number;
 
   constructor(deps: ImageGeneratorDeps) {
     super({ logger: deps.logger, clock: deps.clock });
@@ -97,16 +112,20 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     this.usageRecorder = deps.usageRecorder;
     this.getProvider = deps.getProvider ?? (() => 'unknown');
     this.getModel = deps.getModel ?? (() => 'unknown');
+    this.getTextCardRenderer = deps.getTextCardRenderer;
+    this.renderTimeoutMs = deps.renderTimeoutMs ?? envInt('AIDCP_TEXTCARD_RENDER_TIMEOUT_MS', DEFAULT_TEXTCARD_RENDER_TIMEOUT_MS);
     this.perImageTimeoutMs = deps.perImageTimeoutMs ?? envInt('AIDCP_PUBLISH_PER_IMAGE_TIMEOUT_MS', DEFAULT_PER_IMAGE_TIMEOUT_MS);
     const maxImages = Math.max(1, Math.min(deps.maxImages ?? envInt('AIDCP_PUBLISH_MAX_IMAGES', DEFAULT_MAX_IMAGES), IMAGE_COUNT_HARD_MAX));
     this.concurrency = Math.max(1, Math.min(deps.concurrency ?? envInt('AIDCP_PUBLISH_IMAGE_CONCURRENCY', maxImages), maxImages));
-    // 角色总闸 = 每图超时 × 最坏波数 + 余量（20s）。波数=ceil(maxImages/concurrency)；默认全并发即 1 波。
+    // 角色总闸 = 每图超时 × 最坏波数 + 渲染内层闸（渲染出口注入时；渲染先于每图槽独立结算，评审 must-fix）+ 余量（20s）。
+    // 波数=ceil(maxImages/concurrency)；默认全并发即 1 波。
     // 每图任务自超时（不 hang），execute 恒在此总闸前结算 → 总闸只作病态兜底，绝不吃掉部分成功。
     const waves = Math.ceil(maxImages / this.concurrency);
+    const renderBudget = deps.getTextCardRenderer ? this.renderTimeoutMs : 0;
     this.config = {
       name: 'ImageGenerator',
       watchKeys: ['imagePlan'],
-      timeoutMs: this.perImageTimeoutMs * waves + 20_000,
+      timeoutMs: this.perImageTimeoutMs * waves + renderBudget + 20_000,
       fallback: 'skip',
     };
   }
@@ -129,12 +148,32 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     const referenceImages = referenceImagesForGeneration(rawReferenceImages);
     const referenceUrls = referenceImages.map((img) => referenceImageUrl(img)!);
 
+    // 文字卡封面分支（change textcard-cover-form）：决策为 text_card 且文案/渲染出口/OSS 俱备时，
+    // 0 号槽先由本地渲染+字节直传产出——在进入每图槽机制**之前**独立结算（30s 内层闸），
+    // 失败后 0 号以**完整每图槽预算**用计划内恒在的生成式提示词走 provider（评审 must-fix：不挤占兜底预算）。
+    const renderer = this.getTextCardRenderer?.() ?? null;
+    const renderWanted = input.coverForm === 'text_card' && !!input.coverCard;
+    let renderedCover: { url: string; meta: TextCardRenderMeta } | null = null;
+    if (renderWanted) {
+      if (renderer && this.ossUploader) {
+        const postKey =
+          context.snapshot().trigger?.generateInput?.referenceNote?.sourceId ?? input.coverCard!.title;
+        renderedCover = await this.renderCoverCard(renderer, input, { accountId, runToken }, postKey);
+      } else {
+        this.logger.warn('[ImageGenerator] 计划为 text_card 但渲染出口/OSS 不可用，0 号回落生成式（诚实降级）');
+      }
+    }
+
     // 并行出图（有界并发）：每张 Promise.race(生成+转存, 每图超时)，settle 后按规划顺序收成功 URL。
     // 去第二风格源（change category-adaptive-images-and-judgment）：不再把 imageStyle 枚举传给 provider——
     // 风格已并入品类风格档写进 prompt；provider 侧再拼「，风格：<enum>」会与风格档冲突、劣化 Seedream。
-    const results = await mapWithConcurrency(input.imagePrompts, this.concurrency, (prompt, i) =>
-      this.generateOne(prompt, { accountId, runToken, seq: i }, referenceUrls),
-    );
+    // 渲染成功时 0 号槽直接用渲染结果替换（不前插不移位），该槽不再走 provider。
+    const results = await mapWithConcurrency(input.imagePrompts, this.concurrency, (prompt, i) => {
+      if (i === 0 && renderedCover) {
+        return Promise.resolve<ImageGenerationOutcome>({ url: renderedCover.url, referenceStatus: 'skipped' });
+      }
+      return this.generateOne(prompt, { accountId, runToken, seq: i }, referenceUrls);
+    });
     const imageUrls = results.map((r) => r.url).filter((url): url is string => !!url);
 
     if (imageUrls.length === 0) {
@@ -142,6 +181,15 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     } else if (imageUrls.length < input.imagePrompts.length) {
       this.logger.warn(`[ImageGenerator] 部分成功 M=${imageUrls.length}/${input.imagePrompts.length}（失败那张不进数组，诚实）`);
     }
+
+    // 渲染结局审计（诚实红线：降级用了生成图绝不标 rendered；unknown 绝不猜 text_card）。
+    const renderStatus: CoverRenderStatus = !renderWanted
+      ? 'not_attempted'
+      : renderedCover
+        ? 'rendered'
+        : results[0]?.url
+          ? 'render_failed_generative'
+          : 'render_failed_none';
 
     return {
       imagePrompt: input.imagePrompts[0] ?? null,
@@ -151,8 +199,78 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
       fallbackStrategy: imageUrls.length > 0 ? 'skip' : input.fallbackStrategy,
       ...(referenceImages.length > 0 ? { referenceImages } : {}),
       referenceImageStatus: this.summarizeReferenceStatus(referenceUrls, results),
+      ...(input.coverGate
+        ? {
+            coverFormAudit: {
+              coverForm: input.coverForm ?? 'generative',
+              sensedForm: input.coverGate.sensedForm,
+              sensedSource: input.coverGate.sensedSource,
+              gateReason: input.coverGate.gateReason,
+              renderStatus,
+              ...(renderedCover
+                ? {
+                    renderMeta: {
+                      themeKey: renderedCover.meta.themeKey,
+                      truncated: renderedCover.meta.truncated,
+                      sanitized: renderedCover.meta.sanitized,
+                      reductions: renderedCover.meta.reductions,
+                    },
+                  }
+                : {}),
+            } satisfies CoverFormAudit,
+          }
+        : {}),
       directedAt: this.clock(),
     };
+  }
+
+  /**
+   * 文字卡渲染 + PNG 字节直传 OSS（0 号封面槽专用）。
+   * 内层闸 renderTimeoutMs 独立结算；任一环节失败/超时诚实回 null（调用方立即回落生成式），绝不伪造 URL。
+   */
+  private async renderCoverCard(
+    renderer: TextCardRenderer,
+    input: ImagePlan,
+    keyCtx: { accountId: string; runToken: string },
+    postKey: string,
+  ): Promise<{ url: string; meta: TextCardRenderMeta } | null> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        (async (): Promise<{ url: string; meta: TextCardRenderMeta } | null> => {
+          const res = await renderer.render(
+            { title: input.coverCard!.title, bullets: input.coverCard!.bullets, tags: input.coverCard!.tags },
+            { accountId: keyCtx.accountId, postKey },
+          );
+          if (!res.ok) {
+            this.logger.warn(`[ImageGenerator] 文字卡渲染失败（${res.reason}${res.detail ? `: ${res.detail}` : ''}），0 号回落生成式`);
+            return null;
+          }
+          const { url } = await this.ossUploader!.put(
+            `publish/${keyCtx.accountId}/${keyCtx.runToken}/0.png`,
+            res.png,
+            { contentType: 'image/png' },
+          );
+          if (!url) {
+            this.logger.warn('[ImageGenerator] 文字卡 OSS 直传未返回 URL，0 号回落生成式');
+            return null;
+          }
+          this.logger.log(`[ImageGenerator] 文字卡封面渲染成功 theme=${res.meta.themeKey}${res.meta.truncated ? ' truncated' : ''}${res.meta.sanitized ? ' sanitized' : ''}`);
+          return { url, meta: res.meta };
+        })(),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => {
+            this.logger.warn(`[ImageGenerator] 文字卡渲染超时 ${this.renderTimeoutMs}ms，0 号回落生成式（兜底享完整每图槽预算）`);
+            resolve(null);
+          }, this.renderTimeoutMs);
+        }),
+      ]);
+    } catch (err) {
+      this.logger.warn(`[ImageGenerator] 文字卡渲染异常，0 号回落生成式: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   protected override getDefaultOutput(): ImageDirective {

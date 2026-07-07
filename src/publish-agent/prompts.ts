@@ -856,3 +856,50 @@ export function buildGatekeeperPrompt(assembled: AssembledContent): string {
 export function buildDeAiRewritePrompt(content: string, flagged: string[]): string {
   return `请重写以下内容，去除AI味过重的表达（${flagged.join('、')}），保持原意和自然口吻。\n只输出重写后的正文本身——不要任何前言、解释、标题或格式包裹，输出的第一个字就是正文的第一个字。\n\n${content}`;
 }
+
+// ─── 封面文字卡文案（change textcard-cover-form）：CoverCardWriter 专用 ────────────
+
+/**
+ * 卡面文案 prompt。防搬运红线：只喂洗稿后的标题/正文/标签，MUST NOT 注入原笔记任何文本
+ * （原文只在产后校验器里做重叠比对、不进生成上下文）。
+ * 产出会被确定性排版渲染成封面（标题+要点+标签），故约束长度与条数；违规由校验器拦、
+ * 带紧约束重试一次（tighten=true），仍违规回落生成式封面。
+ */
+export function buildCoverCardCopyPrompt(
+  title: string,
+  body: string,
+  tags: string[],
+  tighten = false,
+): string {
+  const preview = body.slice(0, 800);
+  const lines = [
+    '你是小红书封面文字卡的文案编辑。基于下面这篇笔记（标题+正文），提炼一张封面文字卡的文案。',
+    '',
+    '【笔记标题】',
+    title,
+    '',
+    '【正文前 800 字】',
+    preview,
+    '',
+  ];
+  if (tags.length > 0) {
+    lines.push(`【候选标签】${tags.join('、')}`, '');
+  }
+  lines.push(
+    '【要求】',
+    '- cardTitle：封面主标题，8~16 个字，钩子感强、口语化，不照抄笔记标题（换个说法）。',
+    '- bullets：0~5 条要点，每条 6~14 个字，短句、并列结构；正文没有清晰要点就给空数组，绝不硬凑。',
+    '- tags：0~3 个标签词（不带 # 号），只能从候选标签挑或用正文里的核心词。',
+    '- 全部文案必须来自这篇笔记本身的内容，绝不新增笔记里没有的事实。',
+    '- 不出现任何联系方式/价格/促销用语/平台名/作者名；不用 emoji。',
+  );
+  if (tighten) {
+    lines.push('- 【加严】上一版与原文重叠过多或含违规词：这次必须完全换表达方式重写，逐字重复超过 8 字即不合格。');
+  }
+  lines.push(
+    '',
+    '【输出要求】严格只输出一个 JSON 对象，不要任何额外文字或代码块围栏：',
+    '{"cardTitle": "…", "bullets": ["…"], "tags": ["…"]}',
+  );
+  return lines.join('\n');
+}

@@ -52,6 +52,7 @@ const mockPanelStore: PanelStoreReader = {
       imageUrl: 'https://aidcp.oss-cn-beijing.aliyuncs.com/publish/default/run1/1.jpeg',
       imagesAttachedCount: 1,
       imageReferenceAudit: null,
+      coverFormAudit: null,
       sourceReference: null,
     },
   ],

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { ImagePromptComposerRole } from '../../src/publish-agent/roles/image-prompt-composer.js';
 import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
 import { REFERENCE_IMAGE_MAX_COUNT } from '../../src/publish-agent/reference-image-guidance.js';
-import type { PipelineFields, ImageSetPlan, ImageTheme, ImageCategory, TriggerInput } from '../../src/publish-agent/types.js';
+import type { PipelineFields, ImageSetPlan, ImageTheme, ImageCategory, TriggerInput, CoverCardPlan } from '../../src/publish-agent/types.js';
 
 const clock = () => 1700000000000;
 const silentLogger = { log() {}, warn() {}, error() {} };
@@ -12,13 +12,26 @@ function setPlan(themes: ImageTheme[], wantImage = true): ImageSetPlan {
   return { wantImage, imageCount: themes.length, themes, styleHint: null, plannedAt: clock() };
 }
 
-// composer 现 waitAll [imageSetPlan, postCategory]：两键都写才触发（category 决定品类风格档）。
-function run(llm: unknown, plan: ImageSetPlan, waitMs = 60, category: ImageCategory = 'food', trigger?: TriggerInput) {
+/** 缺省生成式决策（change textcard-cover-form：composer 现 waitAll 三键，CoverCardWriter 恒写此键）。 */
+function generativeCoverPlan(): CoverCardPlan {
+  return { coverForm: 'generative', card: null, sensedForm: 'unknown', sensedSource: 'none', gateReason: 'flag_off', decidedAt: clock() };
+}
+
+// composer 现 waitAll [imageSetPlan, postCategory, coverCardPlan]：三键都写才触发（category 决定品类风格档）。
+function run(
+  llm: unknown,
+  plan: ImageSetPlan,
+  waitMs = 60,
+  category: ImageCategory = 'food',
+  trigger?: TriggerInput,
+  coverPlan: CoverCardPlan = generativeCoverPlan(),
+) {
   const role = new ImagePromptComposerRole({ llmClient: llm as never, clock, logger: silentLogger });
   const ctx = new PipelineContext<PipelineFields>();
   role.register(ctx);
   if (trigger) ctx.write('trigger', trigger);
   ctx.write('postCategory', { category, classifiedAt: clock() });
+  ctx.write('coverCardPlan', coverPlan);
   ctx.write('imageSetPlan', plan);
   return new Promise<NonNullable<PipelineFields['imagePlan']>>((resolve) =>
     setTimeout(() => resolve(ctx.get('imagePlan')!), waitMs),
@@ -119,5 +132,33 @@ describe('ImagePromptComposerRole（配图指令，仅桩 LLM、不依赖图源�
     assert.equal(plan.wantImage, false);
     assert.equal(plan.imagePrompts.length, 0);
     assert.equal(called, false, '不配图计划不调 LLM');
+  });
+
+  // ─── change textcard-cover-form：封面形态决策盖章透传 ───
+
+  test('text_card 决策盖章进 imagePlan 且 0 号生成式提示词恒在（降级兜底就位）', async () => {
+    const llm = { chat: async () => JSON.stringify({ imagePrompt: 'cover scene' }), complete: async () => '' };
+    const coverPlan: CoverCardPlan = {
+      coverForm: 'text_card',
+      card: { title: '这5个坑我替你踩了', bullets: ['坑一', '坑二'], tags: ['避坑'] },
+      sensedForm: 'text_card',
+      sensedSource: 'vision',
+      gateReason: 'ok',
+      decidedAt: clock(),
+    };
+    const plan = await run(llm, setPlan([{ subject: 'a' }]), 60, 'food', undefined, coverPlan);
+    assert.equal(plan.coverForm, 'text_card');
+    assert.deepEqual(plan.coverCard, coverPlan.card);
+    assert.deepEqual(plan.coverGate, { sensedForm: 'text_card', sensedSource: 'vision', gateReason: 'ok' });
+    assert.equal(plan.imagePrompts.length, 1, 'text_card 决策下 0 号生成式提示词照常产出');
+    assert.match(plan.imagePrompts[0], /negative space at the top/, '0 号仍为封面档生成式提示词');
+  });
+
+  test('缺省生成式决策盖章为常量（flag-off 零回归面）', async () => {
+    const llm = { chat: async () => JSON.stringify({ imagePrompt: 'x' }), complete: async () => '' };
+    const plan = await run(llm, setPlan([{ subject: 'a' }]));
+    assert.equal(plan.coverForm, 'generative');
+    assert.equal(plan.coverCard, null);
+    assert.equal(plan.coverGate?.gateReason, 'flag_off');
   });
 });

@@ -75,6 +75,16 @@ export interface PanelImageReferenceAudit {
   generatedCount: number;
 }
 
+/** 封面形态审计（change textcard-cover-form）：null-safe 解析，历史行为 null。 */
+export interface PanelCoverFormAudit {
+  coverForm: string;
+  sensedForm: string;
+  sensedSource: string;
+  gateReason: string;
+  renderStatus: string;
+  renderMeta: { themeKey: string; truncated: boolean; sanitized: boolean; reductions: string[] } | null;
+}
+
 export interface PanelPublish {
   id: number;
   title: string | null;
@@ -105,6 +115,8 @@ export interface PanelPublish {
   imagesAttachedCount: number;
   /** 参照洗稿参考图是否真实被图片 provider 使用的审计；普通发布/历史行为 null。 */
   imageReferenceAudit: PanelImageReferenceAudit | null;
+  /** 封面形态审计（change textcard-cover-form）；普通发布/历史行为 null。 */
+  coverFormAudit: PanelCoverFormAudit | null;
   /** 参照洗稿来稿快照；普通发布为 null。 */
   sourceReference: PanelPublishSourceReference | null;
 }
@@ -258,6 +270,31 @@ function parseImageReferenceAudit(raw: unknown): PanelImageReferenceAudit | null
     status: status as PanelImageReferenceAuditStatus,
     providerClaimedUsed: audit.providerClaimedUsed === true,
     generatedCount: Number.isFinite(generatedCount) ? generatedCount : 0,
+  };
+}
+
+function parseCoverFormAudit(raw: unknown): PanelCoverFormAudit | null {
+  const meta = parseJsonObject(raw);
+  const audit = parseJsonObject(meta?.coverFormAudit);
+  if (!audit) return null;
+  const coverForm = typeof audit.coverForm === 'string' ? audit.coverForm : '';
+  const renderStatus = typeof audit.renderStatus === 'string' ? audit.renderStatus : '';
+  if (!coverForm || !renderStatus) return null;
+  const rawMeta = parseJsonObject(audit.renderMeta);
+  return {
+    coverForm,
+    sensedForm: typeof audit.sensedForm === 'string' ? audit.sensedForm : 'unknown',
+    sensedSource: typeof audit.sensedSource === 'string' ? audit.sensedSource : 'none',
+    gateReason: typeof audit.gateReason === 'string' ? audit.gateReason : '',
+    renderStatus,
+    renderMeta: rawMeta
+      ? {
+          themeKey: typeof rawMeta.themeKey === 'string' ? rawMeta.themeKey : '',
+          truncated: rawMeta.truncated === true,
+          sanitized: rawMeta.sanitized === true,
+          reductions: Array.isArray(rawMeta.reductions) ? rawMeta.reductions.map((r) => String(r)) : [],
+        }
+      : null,
   };
 }
 
@@ -446,6 +483,7 @@ export class PgPanelStore implements PanelStoreReader {
       imageUrl: r.image_url,
       imagesAttachedCount: Number(r.images_attached_count ?? 0),
       imageReferenceAudit: parseImageReferenceAudit(r.publish_metadata),
+      coverFormAudit: parseCoverFormAudit(r.publish_metadata),
       sourceReference: parseSourceReference(r.source_reference),
     }));
   }

@@ -1,15 +1,17 @@
 import { BasePublishRole } from './base-role.js';
 import type { RoleConfig } from './base-role.js';
 import type { PipelineContext } from '../pipeline-context.js';
-import type { PipelineFields, ImageSetPlan, ImagePlan, ImageTheme, ImageCategory } from '../types.js';
+import type { PipelineFields, ImageSetPlan, ImagePlan, ImageTheme, ImageCategory, CoverCardPlan } from '../types.js';
 import { buildImagePromptComposerPrompt, resolveStyleProfile } from '../prompts.js';
 import { buildReferenceImageGuidance, referenceImagesForGeneration, referenceImagesFromSnapshot } from '../reference-image-guidance.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
 
 /**
  * ImagePromptComposer — 配图「指令」（change publish-multi-image；change category-adaptive-images-and-judgment 起按品类风格档）。
- * waitAll [imageSetPlan, postCategory] → 把每张图的主题翻成一条**中文**主体描述，拼上本帖【品类风格档】
+ * waitAll [imageSetPlan, postCategory, coverCardPlan] → 把每张图的主题翻成一条**中文**主体描述，拼上本帖【品类风格档】
  * （图0封面变体、图1..N内页 styleBase，逐字复用 → 帖内一致；帖间因品类而异），写 imagePlan。
+ * change textcard-cover-form：把 CoverCardWriter 决策**原样盖章**进 ImagePlan（coverForm/coverCard/coverGate），
+ * 使配图计划仍是执行器的「唯一完整指令」；即使决策为 text_card 也照常产 0 号生成式封面提示词（降级兜底就位）。
  * 红线：
  * - 决策与执行解耦——只产 prompt、绝不调图源。
  * - 风格基底为品类风格档（模板常量派生），MUST NOT 由 LLM 产（图集风格统一）。
@@ -21,10 +23,11 @@ import type { ChatLlmClient } from '../../llm/qwen.js';
 // 墙钟=最慢单次），角色闸 ≥ 单次模型天花板（180s）且同传进每次 chat()（旧 45s 峰值必误超时→退回主体文本）。env 可调。
 const IMAGE_PROMPT_TIMEOUT_MS = Number(process.env.AIDCP_PUBLISH_IMGPROMPT_TIMEOUT_MS ?? 180_000);
 
-/** waitAll 输入：图集选题 + 本帖品类（来自 CategoryClassifier）。 */
+/** waitAll 输入：图集选题 + 本帖品类（来自 CategoryClassifier）+ 封面形态决策（来自 CoverCardWriter）。 */
 interface ComposerInput {
   plan: ImageSetPlan;
   category: ImageCategory;
+  coverPlan: CoverCardPlan | undefined;
 }
 
 export interface ImagePromptComposerDeps {
@@ -38,7 +41,7 @@ export interface ImagePromptComposerDeps {
 export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, ImagePlan> {
   readonly config: RoleConfig = {
     name: 'ImagePromptComposer',
-    watchKeys: ['imageSetPlan', 'postCategory'],
+    watchKeys: ['imageSetPlan', 'postCategory', 'coverCardPlan'],
     waitAll: true,
     timeoutMs: IMAGE_PROMPT_TIMEOUT_MS,
     fallback: 'default',
@@ -57,13 +60,14 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
     return {
       plan: snapshot.imageSetPlan!,
       category: snapshot.postCategory?.category ?? 'general',
+      coverPlan: snapshot.coverCardPlan,
     };
   }
 
   protected async execute(input: ComposerInput, context: PipelineContext<PipelineFields>): Promise<ImagePlan> {
     const plan = input.plan;
     if (!plan.wantImage || plan.themes.length === 0) {
-      return this.emptyPlan();
+      return this.stampCover(this.emptyPlan(), input.coverPlan);
     }
     const snapshot = context.snapshot();
     const referenceImages = referenceImagesForGeneration(referenceImagesFromSnapshot(snapshot));
@@ -99,23 +103,41 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
       (desc, i) => `${desc}. ${i === 0 ? profile.coverStyleBase : profile.styleBase}`,
     );
 
-    return {
-      wantImage: true,
-      imagePrompts,
-      imageStyle: null, // 风格由品类风格档承载；不再产枚举、不再由 provider 二次拼（去第二风格源）
-      imageCount: imagePrompts.length,
-      fallbackStrategy: 'skip',
-      ...(referenceImages.length > 0 ? { referenceImages } : {}),
-      plannedAt: this.clock(),
-    };
+    return this.stampCover(
+      {
+        wantImage: true,
+        imagePrompts,
+        imageStyle: null, // 风格由品类风格档承载；不再产枚举、不再由 provider 二次拼（去第二风格源）
+        imageCount: imagePrompts.length,
+        fallbackStrategy: 'skip',
+        ...(referenceImages.length > 0 ? { referenceImages } : {}),
+        plannedAt: this.clock(),
+      },
+      input.coverPlan,
+    );
   }
 
   protected override getDefaultOutput(): ImagePlan {
-    return this.emptyPlan();
+    return this.stampCover(this.emptyPlan(), undefined);
   }
 
   private emptyPlan(): ImagePlan {
     return { wantImage: false, imagePrompts: [], imageStyle: null, imageCount: 0, fallbackStrategy: 'skip', plannedAt: this.clock() };
+  }
+
+  /**
+   * 封面形态决策盖章（change textcard-cover-form）：把 CoverCardWriter 决策原样透传进配图计划。
+   * 缺 coverPlan（异常兜底路径）= 生成式常量，行为与现版一致；即使 text_card 也保留 0 号生成式提示词（降级兜底）。
+   */
+  private stampCover(plan: ImagePlan, coverPlan: CoverCardPlan | undefined): ImagePlan {
+    return {
+      ...plan,
+      coverForm: coverPlan?.coverForm ?? 'generative',
+      coverCard: coverPlan?.card ?? null,
+      coverGate: coverPlan
+        ? { sensedForm: coverPlan.sensedForm, sensedSource: coverPlan.sensedSource, gateReason: coverPlan.gateReason }
+        : { sensedForm: 'unknown', sensedSource: 'none', gateReason: 'flag_off' },
+    };
   }
 
   /** 单主题 → 中文主体描述；LLM 失败退回主体文本（该张不凭空消失，图像模型可吃中文主体）。 */

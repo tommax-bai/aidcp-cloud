@@ -255,7 +255,10 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     // 元数据落库 + 防篡改审计（aiEnforced && !ai 由 MetadataAggregator 已回正；此处如实记审计位）。
     // change split-topic-roles：publishMetadata 已是等待键，直接用入参（消除原 context.get 取值竞态）。
     if (publishMetadata && this.store.recordMetadata) {
-      const metadataWithAudit = this.withReferenceImageAudit(publishMetadata, context, assembled.imageUrls.length);
+      const metadataWithAudit = this.withCoverFormAudit(
+        this.withReferenceImageAudit(publishMetadata, context, assembled.imageUrls.length),
+        context,
+      );
       const aiEnforced = metadataWithAudit.compliance.aiEnforced === true;
       await this.store.recordMetadata(recordId, metadataWithAudit, aiEnforced).catch(() => {});
     }
@@ -287,6 +290,13 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     const audit = this.buildReferenceImageAudit(context, generatedCount);
     if (!audit) return metadata;
     return { ...metadata, referenceImageAudit: audit };
+  }
+
+  /** 封面形态审计并列落库（change textcard-cover-form）：直取执行角色产出，缺省不编造。 */
+  private withCoverFormAudit(metadata: PublishMetadata, context: PipelineContext<PipelineFields>): PublishMetadata {
+    const audit = context.get('imageDirective')?.coverFormAudit;
+    if (!audit) return metadata;
+    return { ...metadata, coverFormAudit: audit };
   }
 
   private buildReferenceImageAudit(

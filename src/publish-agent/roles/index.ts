@@ -10,6 +10,8 @@ export {
   FidelityAuditorRole,
 } from './faithful-reference-rewrite.js';
 export { CategoryClassifierRole } from './category-classifier.js';
+// 封面形态决策 + 卡面文案（change textcard-cover-form）
+export { CoverCardWriterRole } from './cover-card-writer.js';
 export { ImageSetPlannerRole } from './image-set-planner.js';
 export { ImagePromptComposerRole } from './image-prompt-composer.js';
 export { ImageGeneratorRole } from './image-generator.js';
