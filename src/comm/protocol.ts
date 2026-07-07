@@ -50,6 +50,11 @@ export type MessageType =
   | 'risk.record.result' // cloud → edge：记录结果
   | 'risk.captcha_detected' // edge → cloud：检测到验证码/未知阻断弹窗，已本地暂停，请云端置风控态 + 停发命令 + 通知人工
   | 'risk.captcha_cleared' // edge → cloud：验证码/未知阻断弹窗已清除，已恢复浏览
+  // —— 验证码远程协助（captcha 暂停期间唯一允许穿透的恢复指令）——
+  | 'captcha.assist.capture' // cloud → edge：请求原浏览器会话捕获当前验证码现场截图
+  | 'captcha.assist.snapshot' // edge → cloud：返回验证码现场截图和坐标映射
+  | 'captcha.assist.click' // cloud → edge：把人工点位派发到原浏览器会话
+  | 'captcha.assist.click_result' // edge → cloud：返回点击后的 fresh 复检结果
   // —— 发布编排（Publish Agent 驱动）——
   | 'publish.approval_request' // edge → cloud：请求发送发布审批卡片
   | 'publish.request' // cloud → edge：请求在浏览器中发布一篇帖子（v1 整页路径，地基阶段并行保留）
@@ -497,6 +502,83 @@ export interface CaptchaClearedPayload {
   accountId?: string;
 }
 
+export interface CaptchaAssistCapturePayload {
+  /** Cloud-side incident id. Edge treats it as an opaque correlation id. */
+  incidentId: string;
+  /** Optional reason for observability: initial page load, manual refresh, retry after still_blocked. */
+  reason?: 'initial' | 'refresh' | 'retry';
+  requestedAt?: number;
+  /** Best-effort screenshot bounds requested by cloud; edge may clamp further. */
+  maxImageWidth?: number;
+  maxImageHeight?: number;
+  quality?: number;
+}
+
+export interface CaptchaAssistViewportPayload {
+  width: number;
+  height: number;
+  deviceScaleFactor?: number;
+}
+
+export interface CaptchaAssistCropPayload {
+  /** CSS-pixel crop rectangle in the current browser viewport. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface CaptchaAssistImagePayload {
+  mime: 'image/png' | 'image/jpeg';
+  /** Base64 encoded image bytes. Must be short-lived and never logged. */
+  data: string;
+  width: number;
+  height: number;
+}
+
+export interface CaptchaAssistSnapshotPayload {
+  incidentId: string;
+  edgeId?: string;
+  accountId?: string;
+  snapshotId: string;
+  capturedAt: number;
+  expiresAt?: number;
+  kind: 'captcha' | 'unknown';
+  url?: string;
+  viewport: CaptchaAssistViewportPayload;
+  crop: CaptchaAssistCropPayload;
+  image: CaptchaAssistImagePayload;
+  /** Fresh overlay metadata captured with the screenshot. */
+  overlay?: BlockingOverlaySnapshotPayload;
+}
+
+export interface CaptchaAssistClickPointPayload {
+  /** Normalized x coordinate relative to the displayed snapshot image, [0, 1]. */
+  x: number;
+  /** Normalized y coordinate relative to the displayed snapshot image, [0, 1]. */
+  y: number;
+  label?: string;
+}
+
+export interface CaptchaAssistClickPayload {
+  incidentId: string;
+  snapshotId: string;
+  points: CaptchaAssistClickPointPayload[];
+  requestedAt?: number;
+  settleMs?: number;
+}
+
+export interface CaptchaAssistClickResultPayload {
+  incidentId: string;
+  snapshotId?: string;
+  edgeId?: string;
+  accountId?: string;
+  status: 'cleared' | 'still_blocked' | 'stale_snapshot' | 'not_blocked' | 'invalid_target' | 'failed';
+  reason?: string;
+  checkedAt: number;
+  snapshot?: CaptchaAssistSnapshotPayload;
+}
+
 /** 请求在浏览器中发布一篇帖子（cloud → edge）。 */
 export interface PublishRequestPayload {
   /** 帖子标题（小红书标题） */
@@ -886,6 +968,10 @@ export interface PayloadMap {
   'risk.record.result': RiskRecordResultPayload;
   'risk.captcha_detected': CaptchaDetectedPayload;
   'risk.captcha_cleared': CaptchaClearedPayload;
+  'captcha.assist.capture': CaptchaAssistCapturePayload;
+  'captcha.assist.snapshot': CaptchaAssistSnapshotPayload;
+  'captcha.assist.click': CaptchaAssistClickPayload;
+  'captcha.assist.click_result': CaptchaAssistClickResultPayload;
   'publish.request': PublishRequestPayload;
   'publish.result': PublishResultPayload;
   'publish.command': PublishCommandPayload;

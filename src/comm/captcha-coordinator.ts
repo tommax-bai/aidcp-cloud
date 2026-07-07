@@ -23,6 +23,16 @@ import type {
   CaptchaDetectedPayload,
 } from './protocol.js';
 import type { EdgePusher, EdgeSession } from './ws-server.js';
+import type { CaptchaAssistDetectedResult } from './captcha-assist.js';
+
+export interface CaptchaAssistCoordinatorPort {
+  onDetected(
+    payload: CaptchaDetectedPayload,
+    session: EdgeSession,
+    status: string,
+  ): Promise<CaptchaAssistDetectedResult | null> | CaptchaAssistDetectedResult | null;
+  onCleared(edgeId: string | undefined, accountId?: string): void;
+}
 
 export interface CaptchaCoordinatorDeps {
   /** retire-default-account：按真实账号解析该账号的 RiskController（替代单租户全局 controller）。 */
@@ -38,6 +48,8 @@ export interface CaptchaCoordinatorDeps {
   alertStore?: Pick<AlertStore, 'raise' | 'resolveByEdge'>;
   /** 账号展示名读取。仅用于飞书卡片文案；账号归属仍使用 accountId。 */
   getAccountName?: (accountId: string) => string | null | undefined;
+  /** 云端协助处置通道。未注入或未配置时保留原远程桌面处置行为。 */
+  assist?: CaptchaAssistCoordinatorPort;
 }
 
 export class CaptchaCoordinator {
@@ -79,6 +91,14 @@ export class CaptchaCoordinator {
     // ② 按 edge 暂停下发（session.end 仍可达）。
     if (edgeId && pusher) pusher.pauseEdge(edgeId);
 
+    let assistActionUrl: string | undefined;
+    try {
+      const assist = await this.deps.assist?.onDetected(payload, session, status);
+      assistActionUrl = assist?.actionUrl || undefined;
+    } catch (err) {
+      this.logger.error('[captcha] 创建云端协助事件失败:', err instanceof Error ? err.message : String(err));
+    }
+
     this.logger.log('[captcha] detected', {
       edgeId,
       accountId,
@@ -89,7 +109,7 @@ export class CaptchaCoordinator {
     });
 
     // ③ 去重冷却后发飞书告警。
-    await this.maybeAlert(payload, session, edgeId, accountId, status);
+    await this.maybeAlert(payload, session, edgeId, accountId, status, assistActionUrl);
   }
 
   async onCleared(
@@ -99,6 +119,11 @@ export class CaptchaCoordinator {
   ): Promise<void> {
     const edgeId = payload.edgeId ?? session.edgeId;
     if (edgeId && pusher) pusher.resumeEdge(edgeId);
+    try {
+      this.deps.assist?.onCleared(edgeId, payload.accountId ?? session.accountId);
+    } catch (err) {
+      this.logger.error('[captcha] 标记云端协助事件已清除失败:', err instanceof Error ? err.message : String(err));
+    }
     // 清除冷却记录：下次验证码可立即再次告警（一次新事件不被旧冷却压住）。
     if (edgeId) this.lastAlertAt.delete(edgeId);
     // 验证码清除点：按 edge 解决其未解决告警（V1 task 9.5）。
@@ -123,6 +148,7 @@ export class CaptchaCoordinator {
     edgeId: string | undefined,
     accountId: string | undefined,
     status: string,
+    assistActionUrl?: string,
   ): Promise<void> {
     if (!this.deps.messenger) return;
     const key = edgeId ?? 'unknown-edge';
@@ -136,7 +162,7 @@ export class CaptchaCoordinator {
 
     const severity: AlertSeverity = payload.kind === 'captcha' ? 'P0' : 'P1';
     const title = payload.kind === 'captcha' ? '验证码弹出' : '未知阻断弹窗';
-    const detail = buildCaptchaAlertDetail(payload, session, edgeId, status);
+    const detail = buildCaptchaAlertDetail(payload, session, edgeId, status, Boolean(assistActionUrl));
 
     // 告警落库（V1 task 9.5）：与飞书投递解耦——即便无群/发送失败，告警事件仍被记录。
     if (this.deps.alertStore) {
@@ -175,6 +201,7 @@ export class CaptchaCoordinator {
       accountId,
       accountName: accountId ? normalizeAccountName(this.deps.getAccountName?.(accountId)) : undefined,
       detail,
+      ...(assistActionUrl ? { actionText: '打开协助处理', actionUrl: assistActionUrl } : {}),
     };
 
     try {
@@ -197,6 +224,7 @@ function buildCaptchaAlertDetail(
   session: EdgeSession,
   edgeId: string | undefined,
   status: string,
+  hasAssistAction: boolean,
 ): string {
   const machine = session.machineLabel ?? edgeId ?? '未知机器';
   const firstUrl = payload.overlay?.firstDetectedUrl ?? payload.url;
@@ -209,7 +237,9 @@ function buildCaptchaAlertDetail(
     firstUrl ? `**首次检测 URL**：${firstUrl}` : '',
     payload.url && payload.url !== firstUrl ? `**上报时页面**：${payload.url}` : '',
     ...formatOverlaySnapshotLines(payload.overlay),
-    '请远程连到该机器人工处置；处置后边缘会自动恢复浏览。',
+    hasAssistAction
+      ? '可点击卡片按钮在云端协助页处理；远程连接该机器仍可作为兜底。处置后边缘会自动复检并恢复浏览。'
+      : '请远程连到该机器人工处置；处置后边缘会自动恢复浏览。',
   ];
   return lines.filter(Boolean).join('\n');
 }

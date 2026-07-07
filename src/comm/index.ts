@@ -3,5 +3,6 @@ export * from './protocol.js';
 export * from './ws-server.js';
 export * from './handler.js';
 export * from './captcha-coordinator.js';
+export * from './captcha-assist.js';
 export * from './like-command.js';
 export * from './command-bridge.js';

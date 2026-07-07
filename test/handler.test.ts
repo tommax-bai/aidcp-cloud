@@ -145,6 +145,49 @@ test('未知类型 → error 信封', async () => {
   assert.equal(res?.type, 'error');
 });
 
+test('captcha assist snapshot / click_result routed to assist service without response', async () => {
+  const snapshots: string[] = [];
+  const results: string[] = [];
+  const h = new DefaultMessageHandler({
+    planner: new SimplePlanner(),
+    llm: dummyLlm,
+    cache: memStore(),
+    clock: fixedClock,
+    eventBus: new EventBus(),
+    captchaAssist: {
+      onSnapshot: (payload) => { snapshots.push(payload.snapshotId); },
+      onClickResult: (payload) => { results.push(payload.status); },
+    },
+  });
+
+  const snap = await h.handle(
+    makeEnvelope('captcha.assist.snapshot', 'cap-snap', 1, {
+      incidentId: 'cap-1',
+      snapshotId: 'snap-1',
+      capturedAt: 1,
+      kind: 'captcha',
+      viewport: { width: 100, height: 100 },
+      crop: { x: 0, y: 0, width: 100, height: 100 },
+      image: { mime: 'image/png', data: 'base64', width: 100, height: 100 },
+    }),
+    session,
+  );
+  const click = await h.handle(
+    makeEnvelope('captcha.assist.click_result', 'cap-click', 1, {
+      incidentId: 'cap-1',
+      snapshotId: 'snap-1',
+      status: 'cleared',
+      checkedAt: 2,
+    }),
+    session,
+  );
+
+  assert.equal(snap, null);
+  assert.equal(click, null);
+  assert.deepEqual(snapshots, ['snap-1']);
+  assert.deepEqual(results, ['cleared']);
+});
+
 test('note.content → 通过 EventBus 发射 note.arrived 并返回 note.ack', async () => {
   const eventBus = new EventBus();
   const emitted: unknown[] = [];
