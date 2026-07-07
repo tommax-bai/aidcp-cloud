@@ -172,6 +172,7 @@ import { createResumeConfigPanel } from './config/resume-config-facade.js';
 // 内容排期（change content-schedule-auto-publish，Phase 1 只发帖）：全局内容格 + 每账号排期存储 + 分钟心跳触发扇入。
 import { ContentScheduleStore } from './config/content-schedule-store.js';
 import { FacebookCommentConfigStore } from './config/facebook-comment-config-store.js';
+import { FacebookCommentAuditStore } from './comment-agent/facebook-comment-audit-store.js';
 import { ContentScheduler } from './orchestrator/content-scheduler.js';
 import { isWeekActiveAt } from './risk/session-limits.js';
 import { createRolePromptProvider } from './config/role-prompt-preview.js';
@@ -434,6 +435,14 @@ async function main(): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
+  // Facebook 定时评论每次触发的审计行（facebook-scheduled-comment 2.7）：best-effort、不阻塞主链路。
+  const facebookCommentAuditStore = new FacebookCommentAuditStore({
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
   try {
     await modelConfigStore.init();
     await credentialStore.init();
@@ -445,6 +454,7 @@ async function main(): Promise<void> {
     await resumeConfigStore.init();
     await contentScheduleStore.init();
     await facebookCommentConfigStore.init();
+    await facebookCommentAuditStore.init();
     console.log('[aidcp-cloud] 模型配置 + 凭据 + 角色配置 + 分类默认 + 安全限额 + 单场上限 + 续场配置存储已就绪（model_config / provider_credentials / role_config / category_config / quota_config / session_config / resume_config）');
   } catch (err) {
     console.warn('[aidcp-cloud] 模型/凭据/角色/分类/限额/续场配置存储初始化失败（回退代码默认模型 + env 密钥；限额/续场回退派生写死默认）:', (err as Error).message);
@@ -1966,6 +1976,30 @@ async function main(): Promise<void> {
     ...(commentApprovalEnabled ? { approval: commentApproval } : {}),
     onTakeoverStart: onCommentTakeoverStart,
     onTakeoverEnd: onCommentTakeoverEnd,
+    // ── facebook-scheduled-comment 2.2/2.3：FB 定向评论执行（影子先行；kill switch 默认关；真发边端能力待接入） ──
+    facebookConfigFor: (accountId) => facebookCommentConfigStore.effectiveConfigFor(accountId),
+    facebookAutoEnabled: () => readEnvString('AIDCP_FB_COMMENT_AUTO') === 'true',
+    facebookShadow: () => readEnvString('AIDCP_FB_COMMENT_SHADOW') === 'true',
+    facebookCompose: async (accountId, { keyword }) => {
+      // 无人值守撰写（不走人审）：一次 LLM 调用产草稿，交给确定性校验器把关；完整去 AI 味/人设由 3.1 后续。
+      try {
+        const s = getSoul(accountId);
+        const prompt =
+          `你在 Facebook 上以「${s.identity.name}」（${s.identity.role}）的身份，针对话题「${keyword}」写一条自然、真诚的评论。` +
+          `要求：像真人随手留言，一两句即可；不要外链、不要 @、不要联系方式（微信/电话/邮箱）、不要营销话术、不要话题标签。只输出评论正文。`;
+        const text = await llm.complete(prompt, { accountId, role: 'facebook_comment_composer' } as never);
+        const clean = String(text ?? '').trim();
+        return clean || null;
+      } catch {
+        return null;
+      }
+    },
+    facebookCanComment: async (accountId) => (await resolveController(accountId)).canDo('comment'),
+    facebookCommentedToday: (accountId) => riskStore.countInteractionsTodayForAccount(accountId, 'comment'),
+    facebookDailyCap: () => Number(readEnvString('AIDCP_FB_COMMENT_DAILY_CAP') ?? '2') || 2,
+    facebookAudit: (row) => {
+      void facebookCommentAuditStore.append(row);
+    },
     postResultCard: async (accountId, receipt) => {
       const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
       if (!chatId) {

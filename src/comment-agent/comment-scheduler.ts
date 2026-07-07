@@ -40,6 +40,9 @@ import {
   type PlatformId,
   type CommentPlatformProfile,
 } from '../platform/index.js';
+import { validateFacebookComment } from './facebook-comment-validators.js';
+import type { EffectiveFacebookCommentConfig } from '../config/facebook-comment-config-store.js';
+import type { FacebookCommentAuditRow } from './facebook-comment-audit-store.js';
 
 export interface CommentResultReceipt {
   ok: boolean;
@@ -90,6 +93,25 @@ export interface CommentSchedulerDeps {
   stepTimeoutMs?: number;
   now?: () => number;
   logger?: Pick<Console, 'log' | 'warn'>;
+
+  // ── facebook-scheduled-comment 2.2/2.3：Facebook 定向评论执行（缺省全不注入 → FB 分支继续诚实拒绝，零回归） ──
+  /** 读该账号 FB 定向评论生效配置（关键词+容器，fail-closed：任一空则 enabled=false）。 */
+  facebookConfigFor?: (accountId: string) => EffectiveFacebookCommentConfig;
+  /** kill switch（AIDCP_FB_COMMENT_AUTO）：默认关；关且非影子 → 整条 FB 评论不跑。 */
+  facebookAutoEnabled?: () => boolean;
+  /** 影子模式（AIDCP_FB_COMMENT_SHADOW）：跑选词+撰写+校验+审计，但绝不提交、不记风控/冷却。 */
+  facebookShadow?: () => boolean;
+  /** FB 评论撰写（无人值守，不走人审）：按关键词/容器产草稿；返回 null=撰写失败。 */
+  facebookCompose?: (accountId: string, ctx: { keyword: string; container: string }) => Promise<string | null>;
+  /** 真发路径风控闸：canDo('comment')。 */
+  facebookCanComment?: (accountId: string) => Promise<boolean>;
+  /** 真发路径日上限（当日已评数 / 上限）。 */
+  facebookCommentedToday?: (accountId: string) => Promise<number>;
+  facebookDailyCap?: (accountId: string) => number;
+  /** best-effort 审计 sink（每次触发一行，含影子）。 */
+  facebookAudit?: (row: FacebookCommentAuditRow) => void;
+  /** 选关键词/容器的随机源（测试注入定值；缺省 Math.random）。 */
+  random?: () => number;
 }
 
 export class CommentScheduler {
@@ -151,15 +173,27 @@ export class CommentScheduler {
       };
     }
 
-    // facebook-scheduled-comment：registry 已有 facebook 条目（供平台闸 / 未来定向路由），但 FB 定向评论
-    // 执行（2.2 runFacebookTargetedTask）尚未接入。此处诚实拒绝、绝不回落 xhs 搜索流程（design 决策：不 fork、不假成功）。
+    // facebook-scheduled-comment 2.2：Facebook 走独立定向评论路径（关键词+容器，绝不回落 xhs 搜索）。
+    // FB deps 注入时路由到 runFacebookTargetedTask（影子先行）；未注入则维持诚实拒绝（零回归）。
     if (platformProfile.platform === 'facebook') {
-      return {
-        ok: false,
-        level: 'error',
-        title: '按需评论触发失败',
-        message: 'Facebook 定向评论执行尚未接入（facebook-scheduled-comment 2.2 待实装）；不回落 xhs 搜索流程',
-      };
+      if (!this.deps.facebookConfigFor) {
+        return {
+          ok: false,
+          level: 'error',
+          title: '按需评论触发失败',
+          message: 'Facebook 定向评论执行尚未接入（facebook-scheduled-comment 2.2 待实装）；不回落 xhs 搜索流程',
+        };
+      }
+      this.running.add(accountId);
+      void this.runFacebookTargetedTask(accountId)
+        .catch((err) =>
+          (this.deps.logger ?? console).warn(
+            `[comment-scheduler] FB 定向评论任务异常 account=${accountId}：${(err as Error).message}`,
+          ),
+        )
+        .finally(() => this.running.delete(accountId));
+      const mode = this.deps.facebookShadow?.() ? '影子模式（不真发）' : '真发（按风控/冷却/上限闸）';
+      return { ok: true, level: 'success', title: '已触发 Facebook 定向评论', message: `已触发 Facebook 定向评论 · ${mode}；结果稍后回报` };
     }
 
     this.running.add(accountId);
@@ -247,15 +281,28 @@ export class CommentScheduler {
       };
     }
 
-    // facebook-scheduled-comment：FB 定向评论执行（2.2）尚未接入 → 诚实拒绝、绝不回落 xhs 搜索定位流程。
+    // facebook-scheduled-comment 2.2：FB 走独立定向评论路径（关键词+容器），绝不回落 xhs 定位流程。
+    // 注：面板定向入口的具体 target 对 FB 不适用（FB 由配置的关键词/容器驱动），故 target 被忽略。
     if (platformProfile.platform === 'facebook') {
-      return {
-        ok: false,
-        level: 'error',
-        title: '定向评论触发失败',
-        message: 'Facebook 定向评论执行尚未接入（facebook-scheduled-comment 2.2 待实装）；不回落 xhs 流程',
-        reason: 'unsupported_platform',
-      };
+      if (!this.deps.facebookConfigFor) {
+        return {
+          ok: false,
+          level: 'error',
+          title: '定向评论触发失败',
+          message: 'Facebook 定向评论执行尚未接入（facebook-scheduled-comment 2.2 待实装）；不回落 xhs 流程',
+          reason: 'unsupported_platform',
+        };
+      }
+      this.running.add(accountId);
+      void this.runFacebookTargetedTask(accountId)
+        .catch((err) =>
+          (this.deps.logger ?? console).warn(
+            `[comment-scheduler] FB 定向评论任务异常 account=${accountId}：${(err as Error).message}`,
+          ),
+        )
+        .finally(() => this.running.delete(accountId));
+      const mode = this.deps.facebookShadow?.() ? '影子模式（不真发）' : '真发（按风控/冷却/上限闸）';
+      return { ok: true, level: 'success', title: '已触发 Facebook 定向评论', message: `已触发 Facebook 定向评论 · ${mode}；结果稍后回报` };
     }
 
     this.running.add(accountId);
@@ -273,6 +320,79 @@ export class CommentScheduler {
       title: '已触发定向评论',
       message: '已启动定向评论任务（搜索定位目标笔记→撰写→飞书人审 approved=true 才会真发；结果稍后回报）',
     };
+  }
+
+  /**
+   * Facebook 定向评论执行（facebook-scheduled-comment 2.2 + 2.3 影子）。当前增量为**纯云端影子编排**：
+   * 闸链 → 随机选关键词/容器 → 撰写 → 只拒不修校验 → 每次触发写一行审计。
+   * 影子模式（AIDCP_FB_COMMENT_SHADOW）到「校验通过」即止步，**绝不提交、不记风控/冷却**（物理发不出评论）。
+   * 真发路径（kill switch 开且非影子）在校验通过后过 canDo + 日上限闸——但**边端评论执行能力（4.x）+ 协议载荷
+   * + 有界超时 + F1 真机确认**尚未接入，故真发路径当前诚实回 not_wired、不发。这些是单独 gated 的真机 follow-up。
+   *
+   * 红线：绝不走 onCommentTakeoverStart（那会把账号塞进 manualCommentAccounts 跳过风控计数，违反 2.4）。
+   */
+  private async runFacebookTargetedTask(accountId: string): Promise<void> {
+    const d = this.deps;
+    const rand = d.random ?? Math.random;
+    const shadow = d.facebookShadow?.() ?? false;
+    const autoEnabled = d.facebookAutoEnabled?.() ?? false;
+    const audit = (row: FacebookCommentAuditRow) => {
+      try {
+        d.facebookAudit?.(row);
+      } catch {
+        /* best-effort：审计绝不波及主链路 */
+      }
+    };
+
+    // kill switch：既未开真发、也未开影子 → 整条功能关闭，静默不跑（不产审计噪音）。
+    if (!autoEnabled && !shadow) return;
+
+    // 配置 fail-closed：关键词或容器任一为空 → 诚实 no-op。
+    const cfg: EffectiveFacebookCommentConfig = d.facebookConfigFor!(accountId);
+    if (!cfg.enabled || cfg.keywords.length === 0 || cfg.containers.length === 0) {
+      audit({ accountId, outcome: 'no_targets', shadow });
+      return;
+    }
+
+    const keyword = cfg.keywords[Math.floor(rand() * cfg.keywords.length)] ?? cfg.keywords[0];
+    const container = cfg.containers[Math.floor(rand() * cfg.containers.length)] ?? cfg.containers[0];
+
+    // 撰写（无人值守，不走人审）。
+    const draft = d.facebookCompose ? await d.facebookCompose(accountId, { keyword, container }) : null;
+    if (!draft || !draft.trim()) {
+      audit({ accountId, outcome: 'compose_skipped', reason: 'empty_compose', shadow, keyword, container });
+      return;
+    }
+
+    // 只拒不修的确定性校验（llm-output-honesty）：任一违规 → compose_skipped 终局，绝不修复后发。
+    const v = validateFacebookComment(draft, { targetKeywords: [keyword] });
+    if (!v.ok) {
+      audit({ accountId, outcome: 'compose_skipped', reason: v.reason, shadow, keyword, container, textLength: draft.length });
+      return;
+    }
+
+    // 影子：到此为止——不提交、不记风控/冷却、不按已发去重。
+    if (shadow) {
+      audit({ accountId, outcome: 'shadow_ok', shadow: true, keyword, container, textLength: v.text.length });
+      return;
+    }
+
+    // ── 真发路径（autoEnabled）：先过风控 + 日上限闸（两入口统一在此收口） ──
+    if (d.facebookCanComment && !(await d.facebookCanComment(accountId))) {
+      audit({ accountId, outcome: 'quota_denied', reason: 'canDo', shadow: false, keyword, container });
+      return;
+    }
+    if (d.facebookDailyCap && d.facebookCommentedToday) {
+      const cap = d.facebookDailyCap(accountId);
+      const done = await d.facebookCommentedToday(accountId);
+      if (cap > 0 && done >= cap) {
+        audit({ accountId, outcome: 'quota_denied', reason: 'daily_cap', shadow: false, keyword, container });
+        return;
+      }
+    }
+
+    // 边端评论执行能力（edge 4.x）+ 协议载荷 + 有界超时 + F1 真机确认 = 单独 gated follow-up；当前诚实不发。
+    audit({ accountId, outcome: 'not_wired', reason: 'edge_comment_capability_pending', shadow: false, keyword, container, textLength: v.text.length });
   }
 
   private async runTargetedTask(

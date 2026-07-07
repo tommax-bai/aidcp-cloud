@@ -270,3 +270,114 @@ describe('outcomeToReceipt（失败/未产出绝不染绿）', () => {
     }
   });
 });
+
+// ── facebook-scheduled-comment 2.2/2.3：runFacebookTargetedTask 影子先行编排（纯云，物理不发） ──
+describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () => {
+  type Audit = import('../../src/comment-agent/facebook-comment-audit-store.js').FacebookCommentAuditRow;
+  function fbDeps(over: Partial<CommentSchedulerDeps> & {
+    keywords?: string[]; containers?: string[]; auto?: boolean; shadow?: boolean;
+    compose?: string | null; canComment?: boolean; cap?: number; done?: number;
+  } = {}): { deps: CommentSchedulerDeps; audits: Audit[]; posted: string[] } {
+    const audits: Audit[] = [];
+    const posted: string[] = [];
+    const bus = new EventBus();
+    const deps = baseDeps({
+      getPlatform: () => 'facebook',
+      // 记录任何真发出去的 edge 命令（用来断言影子/未接入路径绝不下发提交）。
+      pusher: { pushToEdges: (env: unknown) => { posted.push((env as { type: string }).type); return 1; } },
+      resolveConnection: () => ({ bus, edgeId: 'e-fb' }),
+      random: () => 0,
+      facebookConfigFor: () => ({
+        enabled: (over.keywords ?? ['咖啡']).length > 0 && (over.containers ?? ['g1']).length > 0,
+        keywords: over.keywords ?? ['咖啡'],
+        containers: over.containers ?? ['g1'],
+      }),
+      facebookAutoEnabled: () => over.auto ?? false,
+      facebookShadow: () => over.shadow ?? false,
+      facebookCompose: async () => (over.compose === undefined ? '这家手冲咖啡很不错' : over.compose),
+      facebookCanComment: async () => over.canComment ?? true,
+      facebookDailyCap: () => over.cap ?? 5,
+      facebookCommentedToday: async () => over.done ?? 0,
+      facebookAudit: (row) => audits.push(row),
+      ...over,
+    });
+    return { deps, audits, posted };
+  }
+  const tick = () => new Promise((r) => setTimeout(r, 15));
+
+  it('影子模式：撰写+校验通过 → 审计 shadow_ok，且绝不下发任何 edge 命令', async () => {
+    const { deps, audits, posted } = fbDeps({ shadow: true });
+    const r = await new CommentScheduler(deps).triggerManual('fb-1');
+    assert.equal(r.ok, true);
+    await tick();
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0].outcome, 'shadow_ok');
+    assert.equal(audits[0].shadow, true);
+    assert.deepEqual(posted, [], '影子绝不下发提交命令');
+  });
+
+  it('配置空（无容器）→ fail-closed 审计 no_targets，不发', async () => {
+    const { deps, audits, posted } = fbDeps({ shadow: true, containers: [] });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits[0].outcome, 'no_targets');
+    assert.deepEqual(posted, []);
+  });
+
+  it('校验器拒（含链接）→ 审计 compose_skipped（只拒不修），不发', async () => {
+    const { deps, audits, posted } = fbDeps({ shadow: true, compose: '好文 https://spam.example 推荐' });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits[0].outcome, 'compose_skipped');
+    assert.equal(audits[0].reason, 'contains_url');
+    assert.deepEqual(posted, []);
+  });
+
+  it('撰写为空 → compose_skipped(empty_compose)', async () => {
+    const { deps, audits } = fbDeps({ shadow: true, compose: null });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits[0].outcome, 'compose_skipped');
+    assert.equal(audits[0].reason, 'empty_compose');
+  });
+
+  it('kill switch 全关（auto=false, shadow=false）→ 静默不跑、无审计、不发', async () => {
+    const { deps, audits, posted } = fbDeps({ auto: false, shadow: false });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.deepEqual(audits, []);
+    assert.deepEqual(posted, []);
+  });
+
+  it('真发路径 canDo 拒 → quota_denied，不发', async () => {
+    const { deps, audits, posted } = fbDeps({ auto: true, shadow: false, canComment: false });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits[0].outcome, 'quota_denied');
+    assert.equal(audits[0].reason, 'canDo');
+    assert.deepEqual(posted, []);
+  });
+
+  it('真发路径日上限满 → quota_denied(daily_cap)', async () => {
+    const { deps, audits } = fbDeps({ auto: true, shadow: false, cap: 2, done: 2 });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits[0].outcome, 'quota_denied');
+    assert.equal(audits[0].reason, 'daily_cap');
+  });
+
+  it('真发路径过闸但边端能力未接入 → not_wired（绝不假成功、绝不下发提交）', async () => {
+    const { deps, audits, posted } = fbDeps({ auto: true, shadow: false });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits[0].outcome, 'not_wired');
+    assert.deepEqual(posted, [], 'not_wired 绝不下发提交命令');
+  });
+
+  it('未注入 FB deps → 维持诚实拒绝（零回归）', async () => {
+    const deps = baseDeps({ getPlatform: () => 'facebook' }); // 不注入 facebookConfigFor
+    const r = await new CommentScheduler(deps).triggerManual('fb-1');
+    assert.equal(r.ok, false);
+    assert.match(r.message, /尚未接入|待实装/);
+  });
+});
