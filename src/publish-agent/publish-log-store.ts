@@ -6,6 +6,7 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { SHANGHAI_DAY_START_SQL } from '../time/shanghai-day.js';
 import type { PublishRecord, PublishStatus, PublishMetadata, Visibility } from './types.js';
 import { clampTitle } from './title-clamp.js';
 
@@ -455,14 +456,14 @@ export class PublishLogStore {
   }
 
   /**
-   * 该账号今日（服务器本地日历日 00:00 起）已发布数（change content-schedule-auto-publish）。
+   * 该账号今日（Asia/Shanghai 自然日 00:00 起）已发布数（change content-schedule-auto-publish）。
    * 供内容排期日上限判定——**持久已发历史**（重启不清零），与在途 hasPendingApprovalForAccount 相加做原子上限、防 TOCTOU 超发。
-   * date_trunc('day', now()) 取 DB 会话时区当日起点，对齐本仓服务器本地时、单地域约定。
+   * 显式 Asia/Shanghai 下界，对齐风控 day quota 与客户端 today 用量口径。
    */
   async countPublishedTodayForAccount(accountId: string): Promise<number> {
     const { rows } = await this.pool.query<{ n: string }>(
       `SELECT count(*)::text AS n FROM publish_log
-        WHERE account_id = $1 AND status = 'published' AND published_at >= date_trunc('day', now())`,
+        WHERE account_id = $1 AND status = 'published' AND published_at >= ${SHANGHAI_DAY_START_SQL}`,
       [accountId],
     );
     return Number(rows[0]?.n ?? '0');

@@ -231,5 +231,5 @@ test('store/group: attempts 记录与当日计数（pool 桩验 SQL 形状）', 
   const n = await store.countGroupAttemptsToday('acc-1');
   assert.equal(n, 2);
   const cnt = seen.find((c) => c.sql.includes('count(*)::text AS n FROM group_comment_attempts'));
-  assert.match(cnt!.sql, /attempted_at >= date_trunc\('day', now\(\)\)/);
+  assert.match(cnt!.sql, /attempted_at >= .*AT TIME ZONE 'Asia\/Shanghai'/s);
 });

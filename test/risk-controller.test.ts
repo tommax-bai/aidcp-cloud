@@ -94,6 +94,33 @@ test('quotaReleaseAfterMs: 按指定窗口只读返回释放时间', async () =>
   assert.equal(controller.getState().updatedAt, before.updatedAt, '只读 release hint 不写风控状态');
 });
 
+test('day quota: 按 Asia/Shanghai 自然日计算，昨天的浏览不占今天额度', () => {
+  const now = Date.UTC(2026, 6, 7, 4, 0, 0); // 2026-07-07 12:00 CST
+  const controller = new RiskController({ quotaLevel: 'normal', clock: () => now, minViewsForLikeRatio: 0 });
+  const debugCounter = controller as unknown as { counter: { record(action: 'view', at: number, count?: number): void } };
+
+  debugCounter.counter.record('view', Date.UTC(2026, 6, 6, 9, 59, 22), 150); // 2026-07-06 17:59 CST
+  debugCounter.counter.record('view', Date.UTC(2026, 6, 7, 0, 30, 0), 76); // 2026-07-07 08:30 CST
+
+  const decision = controller.explain('view');
+  assert.equal(decision.allowed, true, '今天自然日仅 76/150，应允许继续浏览');
+});
+
+test('day quota: 当日满额后的释放时间为下一个 Asia/Shanghai 00:00', () => {
+  const now = Date.UTC(2026, 6, 7, 4, 0, 0); // 2026-07-07 12:00 CST
+  const nextLocalMidnight = Date.UTC(2026, 6, 7, 16, 0, 0); // 2026-07-08 00:00 CST
+  const controller = new RiskController({ quotaLevel: 'normal', clock: () => now, minViewsForLikeRatio: 0 });
+  const debugCounter = controller as unknown as { counter: { record(action: 'view', at: number, count?: number): void } };
+
+  debugCounter.counter.record('view', Date.UTC(2026, 6, 7, 0, 30, 0), 150); // 2026-07-07 08:30 CST
+
+  const decision = controller.explain('view');
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.reason, 'quota:day');
+  assert.equal(decision.retryAfterMs, nextLocalMidnight - now);
+  assert.equal(controller.quotaReleaseAfterMs('view', 'day'), nextLocalMidnight - now);
+});
+
 test('canDo: 小时窗口超限返回 false', async () => {
   let now = 0;
   const controller = new RiskController({ quotaLevel: 'conservative', clock: () => now, minViewsForLikeRatio: 0 });

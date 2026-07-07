@@ -5,7 +5,7 @@ import { PgRiskStore } from '../../src/risk/pg-risk-store.js';
 
 /**
  * countInteractionsTodayForAccount（change content-schedule-comments）：
- * 供排期评论日上限判定的持久计数——按账号 + action + 服务器本地当日（date_trunc('day', now())）过滤。
+ * 供排期评论日上限判定的持久计数——按账号 + action + Asia/Shanghai 自然日过滤。
  * pool 桩验证参数传递（账号 / action 落到 $1/$2）、SQL 含当日过滤、返回数值解析（text count → number）。
  */
 function makeStore(n: string) {
@@ -30,7 +30,24 @@ test('countInteractionsTodayForAccount: 按账号+action 过滤、含当日下�
   assert.match(sql, /FROM risk_interactions/);
   assert.match(sql, /account_id = \$1/);
   assert.match(sql, /action = \$2/);
-  assert.match(sql, /interacted_at >= date_trunc\('day', now\(\)\)/, '服务器本地当日下界（对齐 publish 侧口径）');
+  assert.match(sql, /interacted_at >= .*AT TIME ZONE 'Asia\/Shanghai'/s, '显式上海自然日下界（对齐 publish 侧口径）');
+});
+
+test('todayTotalsForAccount: 今日用量按 Asia/Shanghai 自然日聚合', async () => {
+  const seen: Array<{ sql: string; params: unknown[] }> = [];
+  const pool = {
+    query: async (sql: string, params: unknown[] = []) => {
+      seen.push({ sql, params });
+      return { rows: [{ action: 'view', total: 7 }] };
+    },
+    end: async () => {},
+  } as unknown as pg.Pool;
+  const store = new PgRiskStore({ pool });
+
+  const totals = await store.todayTotalsForAccount('acc-1');
+  assert.equal(totals.view, 7);
+  assert.deepEqual(seen[0].params, ['acc-1']);
+  assert.match(seen[0].sql, /occurred_at >= .*AT TIME ZONE 'Asia\/Shanghai'/s);
 });
 
 test('countInteractionsTodayForAccount: 空结果回 0（不为 NaN）', async () => {

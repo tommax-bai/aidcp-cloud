@@ -35,6 +35,25 @@ test('todayTotals 忽略未知 action', async () => {
   assert.equal(Object.values(totals).every((v) => v === 0), true);
 });
 
+test('today 面板查询显式使用 Asia/Shanghai 自然日下界', async () => {
+  const seen: string[] = [];
+  const pool = {
+    query: async (sql: string) => {
+      seen.push(sql);
+      return { rows: [] };
+    },
+  } as unknown as pg.Pool;
+  const store = new PgPanelStore({ pool });
+
+  await store.todayTotals();
+  await store.todayTotalsByAccount();
+  await store.todayPublishCount();
+  await store.likeRate();
+
+  assert.equal(seen.length, 4);
+  for (const sql of seen) assert.match(sql, /AT TIME ZONE 'Asia\/Shanghai'/);
+});
+
 test('likeRate 计算 rate 与健康区间（15%-35%）', async () => {
   const healthy = await new PgPanelStore({ pool: poolReturning([{ likes: 10, views: 40 }]) }).likeRate();
   assert.equal(healthy.rate, 0.25);

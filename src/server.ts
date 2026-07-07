@@ -30,6 +30,7 @@ import { PLATFORM_CREDENTIALS, resolvePlatformCredentialEnvValue } from './confi
 import { TokenUsageStore } from './metrics/token-usage-store.js';
 import { createBillingPriceRefresh } from './metrics/billing-price-refresh.js';
 import { startRetentionSweeper } from './panel/retention-sweeper.js';
+import { shanghaiDayStartMs } from './time/shanghai-day.js';
 import { SimplePlanner } from './planner/index.js';
 import { PgAnchorCache, BotChatStore, ConceptStore, LikedNoteStore, ValuableCommentStore, NotificationContactStore, InteractionFeedStore, CuratedContentStore, topicKeysFromTitle } from './cache/index.js';
 import type { CuratedReferenceImage, CuratedReferenceImageInput } from './cache/index.js';
@@ -299,9 +300,7 @@ function usageWindowReleaseAt(
 }
 
 function dayWindowStart(at: number): number {
-  const d = new Date(at);
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
+  return shanghaiDayStartMs(at);
 }
 
 function completeSessionUsageCounts(

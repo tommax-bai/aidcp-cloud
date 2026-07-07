@@ -403,7 +403,7 @@ Edge 接收协议命令并执行
 │   → 抽取新概念 → emit('concept.discovered')          │
 │                                                      │
 │ RiskController (订阅 interaction.occurred)            │
-│   → 记录互动动作到滑动窗口计数器                     │
+│   → 记录互动动作到配额窗口计数器                     │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -495,7 +495,7 @@ private riskStatus(): RiskStatus {
 
 独立于编排器，作为跨会话的长期风控：
 
-- 基于**滑动窗口计数器**（分钟/小时/天三级窗口）
+- 基于**配额窗口计数器**（分钟/小时为滑动窗口；天为 Asia/Shanghai 自然日窗口）
 - 状态机：`normal → warned → restricted → frozen`
 - 点赞率约束：`like/view ≤ 35%`（当日浏览量 ≥ 10 时生效）
 

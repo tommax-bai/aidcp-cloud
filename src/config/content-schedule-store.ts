@@ -18,6 +18,7 @@
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
 import { RETIRED_ACCOUNT_ID } from '../account-store.js';
+import { SHANGHAI_DAY_START_SQL } from '../time/shanghai-day.js';
 import { isValidWeekActiveMask } from '../risk/session-limits.js';
 
 const { Pool } = pg;
@@ -446,11 +447,11 @@ export class ContentScheduleStore {
     await this.pool.query(`INSERT INTO group_comment_attempts (account_id) VALUES ($1)`, [accountId]);
   }
 
-  /** 该账号今日（服务器本地日历日）群评自动尝试数。 */
+  /** 该账号今日（Asia/Shanghai 自然日）群评自动尝试数。 */
   async countGroupAttemptsToday(accountId: string): Promise<number> {
     const { rows } = await this.pool.query<{ n: string }>(
       `SELECT count(*)::text AS n FROM group_comment_attempts
-        WHERE account_id = $1 AND attempted_at >= date_trunc('day', now())`,
+        WHERE account_id = $1 AND attempted_at >= ${SHANGHAI_DAY_START_SQL}`,
       [accountId],
     );
     return Number(rows[0]?.n ?? '0');

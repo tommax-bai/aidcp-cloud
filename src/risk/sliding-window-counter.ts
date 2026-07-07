@@ -1,10 +1,17 @@
 import { RISK_ACTIONS, type CounterEvent, type RiskAction, type RiskWindow } from './types.js';
+import { nextShanghaiDayStartMs, shanghaiDayStartMs } from '../time/shanghai-day.js';
 
 const WINDOW_MS: Record<RiskWindow, number> = {
   minute: 60_000,
   hour: 60 * 60_000,
   day: 24 * 60 * 60_000,
 };
+
+function eventInWindow(event: CounterEvent, action: RiskAction, window: RiskWindow, at: number): boolean {
+  if (event.action !== action || event.occurredAt > at) return false;
+  if (window === 'day') return event.occurredAt >= shanghaiDayStartMs(at);
+  return event.occurredAt > at - WINDOW_MS[window];
+}
 
 export class SlidingWindowCounter {
   private readonly events: CounterEvent[] = [];
@@ -22,20 +29,19 @@ export class SlidingWindowCounter {
   }
 
   count(action: RiskAction, window: RiskWindow, at = this.clock()): number {
-    const since = at - WINDOW_MS[window];
     return this.events
-      .filter((event) => event.action === action && event.occurredAt > since && event.occurredAt <= at)
+      .filter((event) => eventInWindow(event, action, window, at))
       .reduce((sum, event) => sum + event.count, 0);
   }
 
   retryAfterMs(action: RiskAction, window: RiskWindow, quota: number, at = this.clock()): number | undefined {
     if (quota <= 0) return undefined;
-    const since = at - WINDOW_MS[window];
     const active = this.events
-      .filter((event) => event.action === action && event.occurredAt > since && event.occurredAt <= at)
+      .filter((event) => eventInWindow(event, action, window, at))
       .sort((a, b) => a.occurredAt - b.occurredAt);
     const total = active.reduce((sum, event) => sum + event.count, 0);
     if (total < quota) return 0;
+    if (window === 'day') return Math.max(0, nextShanghaiDayStartMs(at) - at);
 
     let remaining = total;
     for (const event of active) {

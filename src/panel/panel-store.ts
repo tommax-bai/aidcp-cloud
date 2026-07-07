@@ -11,6 +11,7 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { SHANGHAI_DAY_START_SQL } from '../time/shanghai-day.js';
 import {
   RISK_ACTIONS,
   type RiskAction,
@@ -322,7 +323,7 @@ export class PgPanelStore implements PanelStoreReader {
     const { rows } = await this.pool.query<{ action: string; total: number }>(
       `SELECT action, COALESCE(SUM(count), 0)::int AS total
        FROM risk_counters
-       WHERE occurred_at >= date_trunc('day', now())
+       WHERE occurred_at >= ${SHANGHAI_DAY_START_SQL}
        GROUP BY action`,
     );
     const totals = Object.fromEntries(RISK_ACTIONS.map((a) => [a, 0])) as TodayTotals;
@@ -339,7 +340,7 @@ export class PgPanelStore implements PanelStoreReader {
     const { rows } = await this.pool.query<{ account_id: string; action: string; total: number }>(
       `SELECT account_id, action, COALESCE(SUM(count), 0)::int AS total
        FROM risk_counters
-       WHERE occurred_at >= date_trunc('day', now())
+       WHERE occurred_at >= ${SHANGHAI_DAY_START_SQL}
        GROUP BY account_id, action`,
     );
     const byAccount = new Map<string, TodayTotals>();
@@ -359,7 +360,7 @@ export class PgPanelStore implements PanelStoreReader {
   async todayPublishCount(): Promise<number> {
     const { rows } = await this.pool.query<{ n: number }>(
       `SELECT COUNT(*)::int AS n FROM publish_log
-       WHERE status = 'published' AND published_at >= date_trunc('day', now())`,
+       WHERE status = 'published' AND published_at >= ${SHANGHAI_DAY_START_SQL}`,
     );
     return rows[0]?.n ?? 0;
   }
@@ -369,7 +370,7 @@ export class PgPanelStore implements PanelStoreReader {
       `SELECT COALESCE(SUM(count) FILTER (WHERE action = 'like'), 0)::int AS likes,
               COALESCE(SUM(count) FILTER (WHERE action = 'view'), 0)::int AS views
        FROM risk_counters
-       WHERE occurred_at >= date_trunc('day', now())`,
+       WHERE occurred_at >= ${SHANGHAI_DAY_START_SQL}`,
     );
     const likes = rows[0]?.likes ?? 0;
     const views = rows[0]?.views ?? 0;

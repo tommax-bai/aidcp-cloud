@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/index.js';
+import { SHANGHAI_DAY_START_SQL } from '../time/shanghai-day.js';
 import { RISK_ACTIONS } from './types.js';
 import type {
   ActionQuota,
@@ -135,7 +136,7 @@ export class PgRiskStore implements RiskStore, InteractionStore {
     const { rows } = await this.pool.query<{ action: string; total: number }>(
       `SELECT action, COALESCE(SUM(count), 0)::int AS total
        FROM risk_counters
-       WHERE account_id = $1 AND occurred_at >= date_trunc('day', now())
+       WHERE account_id = $1 AND occurred_at >= ${SHANGHAI_DAY_START_SQL}
        GROUP BY action`,
       [accountId],
     );
@@ -219,14 +220,14 @@ export class PgRiskStore implements RiskStore, InteractionStore {
   }
 
   /**
-   * 该账号今日（服务器本地日历日 00:00 起）某动作的互动计数（change content-schedule-comments）。
+   * 该账号今日（Asia/Shanghai 自然日 00:00 起）某动作的互动计数（change content-schedule-comments）。
    * 供内容排期评论日上限判定——持久已发历史（重启不清零），与「任务在跑?1:0」相加做原子上限。
-   * date_trunc('day', now()) 取 DB 会话时区当日起点，对齐 publish 侧 countPublishedTodayForAccount 口径。
+   * 显式 Asia/Shanghai 下界，对齐 publish 侧 countPublishedTodayForAccount 与风控 day quota 口径。
    */
   async countInteractionsTodayForAccount(accountId: string, action: InteractionAction): Promise<number> {
     const { rows } = await this.pool.query<{ n: string }>(
       `SELECT count(*)::text AS n FROM risk_interactions
-        WHERE account_id = $1 AND action = $2 AND interacted_at >= date_trunc('day', now())`,
+        WHERE account_id = $1 AND action = $2 AND interacted_at >= ${SHANGHAI_DAY_START_SQL}`,
       [accountId, action],
     );
     return Number(rows[0]?.n ?? '0');

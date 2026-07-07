@@ -40,7 +40,7 @@ export interface ContentSchedulerDeps {
   scheduleFor(accountId: string): ContentScheduleView;
   /** 风控状态（只 'normal' 才自动）。可同步或异步（server 侧按账号 registry 解析是 async）。 */
   riskStatus(accountId: string): string | Promise<string>;
-  /** 今日已发帖数（持久历史，按账号服务器本地日）。 */
+  /** 今日已发帖数（持久历史，按账号 Asia/Shanghai 自然日）。 */
   postedTodayCount(accountId: string): Promise<number>;
   /** 是否有在途未审发帖草稿（防 TOCTOU 超发）。 */
   hasPendingPost(accountId: string): Promise<boolean>;
@@ -62,7 +62,7 @@ export interface ContentSchedulerDeps {
   triggerComment?(accountId: string): Promise<unknown>;
   /** 该账号评论任务是否在跑（= commentScheduler.isRunning，单飞闸）。 */
   isCommentBusy?(accountId: string): boolean;
-  /** 该账号今日已发评论数（持久互动记录，服务器本地日）。 */
+  /** 该账号今日已发评论数（持久互动记录，Asia/Shanghai 自然日）。 */
   commentedTodayCount?(accountId: string): Promise<number>;
   /**
    * 群评两件套（change content-schedule-group-comments）。可选：任一未注入 → 群评动作整体跳过（零回归）。
@@ -70,7 +70,7 @@ export interface ContentSchedulerDeps {
    * 触发失败回黄卡（缺码 fail-closed 由触发回执透传；终态结果卡评论链自补）。单飞复用 isCommentBusy（同一评论机器）。
    */
   triggerGroupComment?(accountId: string): Promise<unknown>;
-  /** 该账号今日群评自动尝试数（持久 attempts 台账，服务器本地日；尝试型上限）。 */
+  /** 该账号今日群评自动尝试数（持久 attempts 台账，Asia/Shanghai 自然日；尝试型上限）。 */
   groupAttemptsTodayCount?(accountId: string): Promise<number>;
   now?: () => number;
   logger?: { warn: (m: string) => void; info?: (m: string) => void };
