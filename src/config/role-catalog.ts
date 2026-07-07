@@ -12,7 +12,9 @@
  */
 
 export type RoleGroup = 'browse' | 'publish';
-export type LlmKind = 'text' | 'image' | 'none';
+// 'vision'（change textcard-cover-form）：多模态视觉角色。v1 仅展示——模型经 env 两层解析
+// （AIDCP_COVER_FORM_MODEL → 代码默认），不开面板写入（isModelConfigurable 仍只放行 text）。
+export type LlmKind = 'text' | 'image' | 'vision' | 'none';
 
 /**
  * 思考模式（change role-thinking-mode-config）。
@@ -126,6 +128,9 @@ export const ROLE_CATALOG: RoleCatalogItem[] = [
   { roleId: 'publish:FidelityAuditor', displayName: '保真洗稿·忠实度审核', group: 'publish', category: 'publish_gate', llmKind: 'text', tunableTemperature: false },
   // 配图分支（createdContent 后分叉）：选题 → 指令 → 生成
   { roleId: 'publish:CategoryClassifier', displayName: '配图品类判定', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: false },
+  // change textcard-cover-form：封面形态感知（vision，模型经 env 配置、面板只读展示）+ 文字卡文案（text，可配模型）。
+  { roleId: 'publish:CoverFormSensor', displayName: '封面形态感知（模型经 env 配置）', group: 'publish', category: 'publish_create', llmKind: 'vision', tunableTemperature: false },
+  { roleId: 'publish:CoverCardWriter', displayName: '封面文字卡文案', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
   { roleId: 'publish:ImageSetPlanner', displayName: '配图选题（张数+主题）', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
   { roleId: 'publish:ImagePromptComposer', displayName: '配图指令（主题→万相prompt）', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
   // 质量分支（与配图分支并行，数据先就绪）：先去 AI 味清洗（ContentCleaner 经注入 PostProcessor）→ 再质量评分

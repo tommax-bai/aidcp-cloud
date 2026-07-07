@@ -415,7 +415,8 @@ export interface PanelModelConfig {
 // ── 角色级配置（change console-role-model-config）──────────────────────────────
 
 /** 生效模型来源（change role-model-category-config）：覆盖 / 继承分类 / 继承默认 / 图像全局。 */
-export type ModelEffectiveSource = 'override' | 'category' | 'default' | 'image';
+// 'vision'（change textcard-cover-form）：视觉角色的生效模型来自 env 两层解析（面板只读展示）。
+export type ModelEffectiveSource = 'override' | 'category' | 'default' | 'image' | 'vision';
 
 /** 单角色目录行 + 生效值（GET /api/roles 形状）。 */
 export interface RoleConfigRowView {
@@ -424,7 +425,7 @@ export interface RoleConfigRowView {
   group: 'browse' | 'publish';
   /** 所属分类（稳定 key，与 category_config.category_id 一致）。 */
   category: string;
-  llmKind: 'text' | 'image' | 'none';
+  llmKind: 'text' | 'image' | 'vision' | 'none';
   tunableTemperature: boolean;
   /** 当前生效模型（文本类=覆盖/分类默认/全局 textModel；图像类=全局 imageModel）。 */
   effectiveModel: string;

@@ -22,6 +22,7 @@ import {
   buildThinkingParams,
 } from '../llm/index.js';
 import { normImageProvider } from '../publish-agent/image-providers.js';
+import { resolveCoverFormModel, resolveCoverFormProvider } from '../publish-agent/cover-form-sensor.js';
 import type {
   PanelRoleConfig,
   RoleConfigCatalogView,
@@ -66,11 +67,17 @@ export function createRoleConfigPanel(deps: RoleConfigFacadeDeps): PanelRoleConf
         const catModel = item.llmKind === 'text' ? deps.getCategoryModel(item.category) : null;
         let effectiveModel: string;
         let effectiveProvider: string;
-        let effectiveSource: 'override' | 'category' | 'default' | 'image';
+        let effectiveSource: 'override' | 'category' | 'default' | 'image' | 'vision';
         if (item.llmKind === 'image') {
           effectiveModel = imageModel;
           effectiveProvider = normImageProvider(deps.getGlobalImageProvider()); // 图像读真实图片厂商（#5，不再恒填文本默认）
           effectiveSource = 'image';
+        } else if (item.llmKind === 'vision') {
+          // change textcard-cover-form（v1 收敛）：视觉角色模型经 env 两层解析（env → 代码默认）、面板只读展示。
+          // 绝不落全局文本模型回落层（文本模型收到 image_url 必错）；写入仍被 isModelConfigurable 拒绝。
+          effectiveModel = resolveCoverFormModel();
+          effectiveProvider = normProvider(resolveCoverFormProvider());
+          effectiveSource = 'vision';
         } else if (ovModel) {
           effectiveModel = ovModel;
           effectiveProvider = normProvider(row?.provider);
