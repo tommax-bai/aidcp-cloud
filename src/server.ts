@@ -161,6 +161,7 @@ import { ResumeConfigStore } from './config/resume-config-store.js';
 import { createResumeConfigPanel } from './config/resume-config-facade.js';
 // 内容排期（change content-schedule-auto-publish，Phase 1 只发帖）：全局内容格 + 每账号排期存储 + 分钟心跳触发扇入。
 import { ContentScheduleStore } from './config/content-schedule-store.js';
+import { FacebookCommentConfigStore } from './config/facebook-comment-config-store.js';
 import { ContentScheduler } from './orchestrator/content-scheduler.js';
 import { isWeekActiveAt } from './risk/session-limits.js';
 import { createRolePromptProvider } from './config/role-prompt-preview.js';
@@ -416,6 +417,15 @@ async function main(): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
+  // 每账号 Facebook 定时评论配置（change facebook-scheduled-comment 2.1）：关键词列表 + 容器列表。
+  // fail-closed：任一为空 = 不生效（诚实 no-op）；init 失败不致命（空镜像 = 全不生效）。
+  const facebookCommentConfigStore = new FacebookCommentConfigStore({
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
   try {
     await modelConfigStore.init();
     await credentialStore.init();
@@ -426,6 +436,7 @@ async function main(): Promise<void> {
     await sessionConfigStore.init();
     await resumeConfigStore.init();
     await contentScheduleStore.init();
+    await facebookCommentConfigStore.init();
     console.log('[aidcp-cloud] 模型配置 + 凭据 + 角色配置 + 分类默认 + 安全限额 + 单场上限 + 续场配置存储已就绪（model_config / provider_credentials / role_config / category_config / quota_config / session_config / resume_config）');
   } catch (err) {
     console.warn('[aidcp-cloud] 模型/凭据/角色/分类/限额/续场配置存储初始化失败（回退代码默认模型 + env 密钥；限额/续场回退派生写死默认）:', (err as Error).message);
@@ -2384,6 +2395,12 @@ async function main(): Promise<void> {
             listCatalog: () => contentScheduleStore.listCatalog(),
             setGlobal: (mask, updatedBy) => contentScheduleStore.setGlobal({ contentActiveMask: mask }, updatedBy),
             setAccount: (accountId, patch, updatedBy) => contentScheduleStore.setAccount(accountId, patch, updatedBy),
+          },
+          // 每账号 Facebook 定时评论配置（change facebook-scheduled-comment 2.1）：关键词 + 容器列表。
+          facebookCommentConfig: {
+            get: (accountId) => facebookCommentConfigStore.getForAccount(accountId),
+            set: (accountId, patch, updatedBy) =>
+              facebookCommentConfigStore.setAccount(accountId, patch, updatedBy),
           },
           captchaAssist: captchaAssist.isAvailable() ? captchaAssist : undefined,
           // 模型与凭据配置（change console-model-provider-config + model-config-volcengine-provider）。明文密钥绝不经此回传。

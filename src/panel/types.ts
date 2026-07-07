@@ -12,6 +12,11 @@ import type { CuratedContentTypeFilter, CuratedPanelListResult, CuratedPanelRow,
 import type { PublishLogStore, EditDraftPatch, EditDraftResult } from '../publish-agent/publish-log-store.js';
 import type { SetGroupLabelResult, SetGroupChatInfoResult } from '../account-store.js';
 import type {
+  FacebookCommentConfigRow,
+  FacebookCommentConfigPatch,
+  SetFacebookCommentConfigResult,
+} from '../config/facebook-comment-config-store.js';
+import type {
   ContentScheduleCatalogRow,
   AccountContentSchedulePatch,
   SetContentGlobalResult,
@@ -156,6 +161,19 @@ export interface PanelDeps {
      * 空归 NULL（清空）、退役账号 / 无行以可区分结果返回、写后回读真态；绝不 raw UPDATE / 乐观假成功。
      */
     setGroupChatInfo?(accountId: string, groupChatInfo: string | null): Promise<SetGroupChatInfoResult>;
+  };
+  /**
+   * 每账号 Facebook 定时评论配置（change facebook-scheduled-comment 2.1）：关键词列表 + 容器列表。
+   * 未注入则 `/api/accounts/:id/facebook-comment-config` 返回 503。经独立 store 单写：非法整块拒、
+   * 退役 / 无账号以可区分结果返回、写后回读真态；绝不乐观假成功。
+   */
+  facebookCommentConfig?: {
+    get(accountId: string): FacebookCommentConfigRow;
+    set(
+      accountId: string,
+      patch: FacebookCommentConfigPatch,
+      updatedBy: string,
+    ): Promise<SetFacebookCommentConfigResult>;
   };
   /**
    * 内容排期（change content-schedule-auto-publish，Phase 1 只发帖）。未注入则 /api/content-schedule* 返回 503。
