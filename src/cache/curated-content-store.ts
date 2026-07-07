@@ -29,6 +29,32 @@ export type CuratedContentTypeFilter = CuratedContentType | 'note' | 'source_pos
 
 export type CuratedReferenceImageStatus = 'stored' | 'url_only' | 'fetch_failed' | 'unsupported';
 
+/**
+ * 封面形态枚举（change textcard-cover-form，design D3）。
+ * 持久化四值收窄：screenshot 等并入 other（无行为差异的分类是死分类）；
+ * 管线层的 unknown（未感知/失败/低置信）不入库——error 不持久化、无负缓存。
+ */
+export type CuratedCoverForm = 'text_card' | 'photo' | 'illustration' | 'other';
+
+/**
+ * 参照图形态感知注解（change textcard-cover-form，design D1/D3）。
+ * 注解是缓存不是事实源：`detectedFor` 为判定锚（= 判定时该 item 的 capturedAt，重抓必变、零 TTL）；
+ * 被观测刷新洗掉 = 下次发布重测，自愈。刻意**不含**颜色/坐标/OCR 文本字段（防搬运结构隔离，D13）。
+ */
+export interface CuratedReferenceImageFormGuess {
+  form: CuratedCoverForm;
+  /** 置信度 0..1（原样持久化；阈值在消费端施加——存观测不存策略）。 */
+  confidence: number;
+  /** 判定时刻（epoch ms，正整数）。 */
+  detectedAt: number;
+  /** 判定锚 = 判定时 item 的 capturedAt（epoch ms，正整数）；与 item 当前 capturedAt 相等才算缓存命中。 */
+  detectedFor: number;
+  /** 判定用的视觉模型名（非空）。 */
+  model: string;
+  /** 判定用的厂商 id（可缺）。 */
+  provider?: string;
+}
+
 export interface CuratedReferenceImage {
   index: number;
   sourceUrl: string;
@@ -38,6 +64,8 @@ export interface CuratedReferenceImage {
   alt?: string;
   captureStatus: CuratedReferenceImageStatus;
   capturedAt: number;
+  /** 形态感知注解（change textcard-cover-form）；经白名单校验，非法即整体丢弃、保图片本体。 */
+  formGuess?: CuratedReferenceImageFormGuess;
 }
 
 export interface CuratedReferenceImageInput {
@@ -50,6 +78,8 @@ export interface CuratedReferenceImageInput {
   alt?: string;
   captureStatus?: CuratedReferenceImageStatus;
   capturedAt?: number;
+  /** 原始形态注解（DB/上游 JSON 未经校验，unknown；normalize 白名单校验后才带出）。 */
+  formGuess?: unknown;
 }
 
 export type CuratedReferenceImageRelocator = (ctx: {
@@ -301,6 +331,45 @@ function isReferenceImageStatus(v: unknown): v is CuratedReferenceImageStatus {
   return v === 'stored' || v === 'url_only' || v === 'fetch_failed' || v === 'unsupported';
 }
 
+/** 形态枚举守卫（感知服务解析模型输出也复用此守卫，枚举只此一处）。 */
+export function isCuratedCoverForm(v: unknown): v is CuratedCoverForm {
+  return v === 'text_card' || v === 'photo' || v === 'illustration' || v === 'other';
+}
+
+/** 严格正整数（形态注解时间戳专用：0/负数/小数/非数一律不合法——区别于 positiveInt 的 ≥0 取整语义）。 */
+function strictPositiveInt(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : undefined;
+}
+
+/**
+ * 形态注解白名单归一（change textcard-cover-form）：form ∈ 枚举、confidence 有限数 ∈[0,1]、
+ * detectedAt/detectedFor 正整数、model 非空字符串；**任一项非法 → 整体丢弃注解（undefined）**，
+ * 由调用方保留图片本体字段（绝不因注解脏而丢图、绝不抛错）。provider 可缺，非法只丢 provider。
+ */
+export function normalizeCuratedReferenceImageFormGuess(v: unknown): CuratedReferenceImageFormGuess | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const o = v as Record<string, unknown>;
+  if (!isCuratedCoverForm(o.form)) return undefined;
+  const confidence = o.confidence;
+  if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+    return undefined;
+  }
+  const detectedAt = strictPositiveInt(o.detectedAt);
+  const detectedFor = strictPositiveInt(o.detectedFor);
+  if (detectedAt === undefined || detectedFor === undefined) return undefined;
+  const model = cleanOptionalString(o.model);
+  if (!model) return undefined;
+  const provider = cleanOptionalString(o.provider);
+  return {
+    form: o.form,
+    confidence,
+    detectedAt,
+    detectedFor,
+    model,
+    ...(provider ? { provider } : {}),
+  };
+}
+
 export function normalizeCuratedReferenceImages(
   input: CuratedReferenceImageInput[] | undefined,
   opts: { now?: number; limit?: number; defaultStatus?: CuratedReferenceImageStatus } = {},
@@ -323,6 +392,8 @@ export function normalizeCuratedReferenceImages(
     const height = positiveInt(raw.height);
     const alt = cleanOptionalString(raw.alt);
     const idx = positiveInt(raw.index);
+    // 形态注解白名单（change textcard-cover-form）：非法只丢 formGuess、图片本体照常保留。
+    const formGuess = normalizeCuratedReferenceImageFormGuess(raw.formGuess);
     out.push({
       index: idx ?? out.length,
       sourceUrl: sourceUrl ?? ossUrl!,
@@ -332,6 +403,7 @@ export function normalizeCuratedReferenceImages(
       ...(alt ? { alt } : {}),
       captureStatus: isReferenceImageStatus(raw.captureStatus) ? raw.captureStatus : opts.defaultStatus ?? (ossUrl ? 'stored' : 'url_only'),
       capturedAt: positiveInt(raw.capturedAt) ?? now,
+      ...(formGuess ? { formGuess } : {}),
     });
     if (out.length >= limit) break;
   }
@@ -533,6 +605,55 @@ export class CuratedContentStore {
       [accountId, sourceId, contentType, JSON.stringify(referenceImages)],
     );
     return rowCount ?? 0;
+  }
+
+  /**
+   * 形态注解定点回写（change textcard-cover-form，design D1 修正）。
+   *
+   * 单条 UPDATE + jsonb_set **只写目标 item 的 formGuess**（`index` 为 reference_images
+   * JSONB 数组下标，非 item 的 index 字段），WHERE 内嵌 capturedAt 锚比对：
+   * 目标 item 存在 且（item 无 capturedAt 或 = guess.detectedFor）才写；锚不符即 0 行**弃写**
+   * （浏览闭环刚整体替换了图集数组——绝不覆盖新图集）。PG 行锁下单语句原子，
+   * MUST NOT 以「JS 读-改-整数组回写」实现（TOCTOU 会把新图集盖回旧值）。
+   *
+   * 同一条语句顺带把归一化 capturedAt（= guess.detectedFor）落盘作锚——存量缺 capturedAt 的
+   * item 若不落锚则缓存永不命中、每次发布白付一次视觉调用。
+   *
+   * 红线：**绝不触碰行 updated_at**（selectForCreation 按其排序，抬了扰动创作召回）。
+   * 返回是否真写入（rowCount>0）；guess 不过白名单/参数非法 → 直接 false，绝不抛错。
+   */
+  async annotateReferenceImageFormGuess(
+    rowId: number,
+    index: number,
+    guess: CuratedReferenceImageFormGuess,
+  ): Promise<boolean> {
+    const normalized = normalizeCuratedReferenceImageFormGuess(guess);
+    if (!normalized || !Number.isInteger(rowId) || !Number.isInteger(index) || index < 0) {
+      this.logger?.warn?.(
+        `[CuratedContentStore] annotateReferenceImageFormGuess rejected invalid input (rowId=${rowId}, index=${index})`,
+      );
+      return false;
+    }
+    const { rowCount } = await this.pool.query(
+      `UPDATE curated_content
+          SET reference_images = jsonb_set(
+                jsonb_set(
+                  reference_images,
+                  ARRAY[$2::text, 'capturedAt'],
+                  COALESCE(reference_images #> ARRAY[$2::text, 'capturedAt'], to_jsonb($4::bigint)),
+                  true
+                ),
+                ARRAY[$2::text, 'formGuess'],
+                $3::jsonb,
+                true
+              )
+        WHERE id = $1
+          AND jsonb_typeof(reference_images #> ARRAY[$2::text]) = 'object'
+          AND (reference_images #> ARRAY[$2::text, 'capturedAt'] IS NULL
+               OR reference_images #> ARRAY[$2::text, 'capturedAt'] = to_jsonb($4::bigint))`,
+      [rowId, String(index), JSON.stringify(normalized), normalized.detectedFor],
+    );
+    return (rowCount ?? 0) > 0;
   }
 
   /**

@@ -1,4 +1,5 @@
 import type { Soul } from '../soul/types.js';
+import type { CuratedReferenceImageFormGuess } from '../cache/curated-content-store.js';
 
 // ─── 从 publish/types.ts 迁移的类型 ────────────────────────────────────────────
 
@@ -68,6 +69,8 @@ export interface ReferenceImageSnapshot {
   alt?: string;
   captureStatus?: 'stored' | 'url_only' | 'fetch_failed' | 'unsupported';
   capturedAt?: number;
+  /** 封面形态感知注解（change textcard-cover-form）：detectedFor === capturedAt 才算缓存命中（零 TTL 锚）。 */
+  formGuess?: CuratedReferenceImageFormGuess;
 }
 
 export interface PublishRecord {
@@ -250,10 +253,64 @@ export interface ImageDirective {
   fallbackStrategy: 'skip' | 'color_placeholder';
   referenceImages?: ReferenceImageSnapshot[];
   referenceImageStatus?: 'none' | 'used' | 'unsupported' | 'unavailable' | 'skipped';
+  /** 封面形态审计（change textcard-cover-form）：决策来源 + 门禁原因 + 渲染结局；旧路径缺省。 */
+  coverFormAudit?: CoverFormAudit;
   directedAt: number;
 }
 
 export type ReferenceImageUsageStatus = 'none' | 'used' | 'unsupported' | 'unavailable' | 'skipped';
+
+// ─── 封面形态链路（change textcard-cover-form）：感知 → 决策/文案 → 渲染分支 ───
+
+/** 封面产出形态决策（二值；执行结局另由 renderStatus 承载，二维正交不压一维）。 */
+export type CoverForm = 'generative' | 'text_card';
+
+/** 管线层感知结果（持久层为四值枚举；unknown 表「未感知/失败/低置信」，缺失绝不猜形态）。 */
+export type SensedCoverForm = 'text_card' | 'photo' | 'illustration' | 'other' | 'unknown';
+
+/** 文字卡卡面文案（只来自洗稿产物；badge 按 YAGNI 裁剪、模板侧留槽不接 LLM）。 */
+export interface CoverCardCopy {
+  title: string;
+  /** 要点 0-5 条。 */
+  bullets: string[];
+  /** 标签 ≤3（不含 # 前缀）。 */
+  tags: string[];
+}
+
+/** 封面形态门禁原因（每跳可回放「为什么这帖没出文字卡」）。 */
+export type CoverCardGateReason =
+  | 'ok'
+  | 'flag_off'
+  | 'no_reference_images'
+  | 'form_unknown'
+  | 'low_confidence'
+  | 'form_not_text_card'
+  | 'renderer_unavailable'
+  | 'copy_llm_failed';
+
+/** CoverCardWriter 输出（恒写键：任何失败/门禁不过都写生成式兜底，下游三键合流绝不挂死）。 */
+export interface CoverCardPlan {
+  coverForm: CoverForm;
+  /** 仅 coverForm==='text_card' 时非 null。 */
+  card: CoverCardCopy | null;
+  sensedForm: SensedCoverForm;
+  sensedSource: 'cached' | 'vision' | 'none';
+  gateReason: CoverCardGateReason;
+  decidedAt: number;
+}
+
+/** 封面渲染执行结局（诚实审计：降级用了生成图绝不标 text_card）。 */
+export type CoverRenderStatus = 'not_attempted' | 'rendered' | 'render_failed_generative' | 'render_failed_none';
+
+/** 封面形态审计（沿 referenceImageAudit 先例并列落 ImageDirective 与 publishMetadata，面板 null-safe）。 */
+export interface CoverFormAudit {
+  coverForm: CoverForm;
+  sensedForm: SensedCoverForm;
+  sensedSource: 'cached' | 'vision' | 'none';
+  gateReason: CoverCardGateReason;
+  renderStatus: CoverRenderStatus;
+  renderMeta?: { themeKey: string; truncated: boolean; sanitized: boolean; reductions: string[] };
+}
 
 export interface ImageReferenceAudit {
   /** 原始触发输入里请求作为视觉参考的图片数。 */
@@ -335,6 +392,14 @@ export interface ImagePlan {
   imageCount: number;
   fallbackStrategy: ImageDirective['fallbackStrategy'];
   referenceImages?: ReferenceImageSnapshot[];
+  /**
+   * 封面形态盖章透传（change textcard-cover-form）：composer 把 coverCardPlan 原样盖进计划，
+   * 使配图计划仍是「唯一完整指令」——执行器只读 plan、绝不二次读环境旗标（防决策/执行裂脑）。
+   * 缺省（旗标关/旧路径）= 生成式，行为与现版逐字一致。
+   */
+  coverForm?: CoverForm;
+  coverCard?: CoverCardCopy | null;
+  coverGate?: Pick<CoverCardPlan, 'sensedForm' | 'sensedSource' | 'gateReason'>;
   plannedAt: number;
 }
 
@@ -479,6 +544,8 @@ export interface PublishMetadata {
   metadataScore: number;
   /** 参照洗稿参考图是否真实被图片 provider 使用的审计；普通发布/历史行可为空。 */
   referenceImageAudit?: ImageReferenceAudit;
+  /** 封面形态审计（change textcard-cover-form）；普通发布/历史行可为空。 */
+  coverFormAudit?: CoverFormAudit;
   decidedAt: number;
 }
 
@@ -555,6 +622,8 @@ export interface PipelineFields {
   postCategory: PostCategory;
   // 配图链路三角色（change publish-multi-image）：选题 → 指令 → 生成。
   imageSetPlan: ImageSetPlan;
+  // 封面形态决策（change textcard-cover-form）：CoverCardWriter 恒写；composer waitAll 三键合流。
+  coverCardPlan: CoverCardPlan;
   imagePlan: ImagePlan;
   cleanedContent: CleanedContent;
   aiFlavorScore: AiFlavorScore;

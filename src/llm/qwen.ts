@@ -148,7 +148,8 @@ interface ChatCompletionResponse {
 
 export const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 
-interface LlmErrorMeta {
+/** LLM 错误排障元数据（错误信息统一带 provider/model/role/account/endpoint，多模态客户端复用）。 */
+export interface LlmErrorMeta {
   provider?: string;
   model?: string;
   role?: string;
@@ -231,7 +232,8 @@ function formatProviderErrorFields(err: ProviderErrorPayload): string {
     .join(' ');
 }
 
-function buildLlmHttpError(status: number, body: string, meta: LlmErrorMeta): Error {
+/** HTTP 非 2xx → 统一格式错误（含厂商错误体解析；vision.ts 复用，勿在别处复制实现）。 */
+export function buildLlmHttpError(status: number, body: string, meta: LlmErrorMeta): Error {
   const parsed = parseProviderErrorBody(body);
   const providerFields = formatProviderErrorFields(parsed);
   const bodyPreview = compactText(body, 300);
@@ -247,7 +249,11 @@ function buildLlmHttpError(status: number, body: string, meta: LlmErrorMeta): Er
   );
 }
 
-function buildLlmApiError(err: NonNullable<ChatCompletionResponse['error']>, meta: LlmErrorMeta): Error {
+/** 响应体带 error 字段（HTTP 200 但 API 报错）→ 统一格式错误（vision.ts 复用）。 */
+export function buildLlmApiError(
+  err: { code?: string; message?: string; request_id?: string; requestId?: string; type?: string },
+  meta: LlmErrorMeta,
+): Error {
   return new Error(
     [
       'LLM API error',
@@ -264,7 +270,8 @@ function buildLlmApiError(err: NonNullable<ChatCompletionResponse['error']>, met
   );
 }
 
-function buildLlmShapeError(message: string, meta: LlmErrorMeta): Error {
+/** 响应形状不符（缺 content 等）→ 统一格式错误（vision.ts 复用）。 */
+export function buildLlmShapeError(message: string, meta: LlmErrorMeta): Error {
   return new Error(['LLM response error', formatLlmMeta(meta), message].join(' | '));
 }
 
