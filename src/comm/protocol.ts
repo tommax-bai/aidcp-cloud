@@ -860,6 +860,12 @@ export interface PageCardsPayload {
     noteId?: string;
     isVideo?: boolean;
   }>;
+  /**
+   * 本次容器内搜索所在容器的**真实人类可读名称**（change facebook-container-display-name，可选）。
+   * Facebook 定向评论：边缘在配置容器（群/主页）内搜索时，从群页读出真实群名回传，云端据此把配置里的容器名
+   * 自动回填/刷新——让后台/审计/飞书一律展示群名而非群 id（id 对人无辨识度）。缺省=非容器搜索或未解析出名称。
+   */
+  containerName?: string;
 }
 
 /** Note detail image reference observed by edge. */

@@ -2044,6 +2044,7 @@ async function main(): Promise<void> {
     facebookAudit: (row) => {
       void facebookCommentAuditStore.append(row);
     },
+    facebookResolveContainerName: (accountId, url, name) => facebookCommentConfigStore.resolveContainerName(accountId, url, name),
     postResultCard: async (accountId, receipt) => {
       const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
       if (!chatId) {

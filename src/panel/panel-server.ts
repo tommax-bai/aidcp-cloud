@@ -708,7 +708,11 @@ function createRequestHandler(
       const { keywords, containers } = (body ?? {}) as { keywords?: unknown; containers?: unknown };
       const result = await deps.facebookCommentConfig.set(
         accountId,
-        { keywords: keywords as string[] | undefined, containers: containers as string[] | undefined },
+        {
+          keywords: keywords as string[] | undefined,
+          // 容器可传裸 url 字符串（向后兼容）或 {url,name}；store 侧 sanitize/coerce 统一处理。
+          containers: containers as Array<string | { url: string; name?: string }> | undefined,
+        },
         `panel:${verified.payload.sub}`,
       );
       if (!result.ok) {

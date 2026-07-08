@@ -19,19 +19,29 @@ import { RETIRED_ACCOUNT_ID } from '../account-store.js';
 
 const { Pool } = pg;
 
-/** 每账号配置行（面板回显用）。keywords/containers 均为已 sanitize 的字符串数组。 */
+/**
+ * 容器（群/主页）配置项（change facebook-container-display-name）。
+ * `url` 是功能主键（边缘据此导航 + 建站内搜索链，含群 id）；`name` 是人类可读群名（边缘从群页自动解析回填），
+ * 未解析出前为空。**对人展示一律用 name（缺则「待识别」占位），绝不展示 url 里的 id**（id 对人无辨识度）。
+ */
+export interface FacebookContainer {
+  url: string;
+  name?: string;
+}
+
+/** 每账号配置行（面板回显用）。keywords 为字符串数组；containers 为 {url,name} 数组。 */
 export interface FacebookCommentConfigRow {
   accountId: string;
   keywords: string[];
-  containers: string[];
+  containers: FacebookContainer[];
   updatedAt: string | null;
   updatedBy: string | null;
 }
 
-/** 写补丁：未传的字段保持原值（面板可只改关键词或只改容器）。 */
+/** 写补丁：未传的字段保持原值（面板可只改关键词或只改容器）。容器可传 url 字符串或 {url,name}。 */
 export interface FacebookCommentConfigPatch {
   keywords?: string[];
-  containers?: string[];
+  containers?: Array<string | FacebookContainer>;
 }
 
 export type SetFacebookCommentConfigResult =
@@ -42,7 +52,7 @@ export type SetFacebookCommentConfigResult =
 export interface EffectiveFacebookCommentConfig {
   enabled: boolean;
   keywords: string[];
-  containers: string[];
+  containers: FacebookContainer[];
 }
 
 export const FACEBOOK_COMMENT_CONFIG_SCHEMA_SQL = `
@@ -95,6 +105,45 @@ function sanitizeInput(raw: string[] | undefined): string[] | null | undefined {
   return coerceList(raw);
 }
 
+/**
+ * JSONB / 面板入参 → FacebookContainer[]。**向后兼容**：既接受历史的裸 url 字符串项，也接受 {url,name} 对象项；
+ * trim url、丢空、按 url 去重；name 仅在非空字符串时保留（否则待边缘解析回填）。
+ */
+function coerceContainers(raw: unknown): FacebookContainer[] {
+  if (!Array.isArray(raw)) return [];
+  const out: FacebookContainer[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    let url = '';
+    let name: string | undefined;
+    if (typeof item === 'string') {
+      url = item.trim();
+    } else if (item && typeof item === 'object') {
+      const o = item as Record<string, unknown>;
+      if (typeof o.url === 'string') url = o.url.trim();
+      if (typeof o.name === 'string' && o.name.trim()) name = o.name.trim();
+    }
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    out.push(name ? { url, name } : { url });
+  }
+  return out;
+}
+
+/** 容器入参校验：数组，每项是字符串或含字符串 url 的对象；否则 null（整块拒）。合法则 coerce。 */
+function sanitizeContainersInput(
+  raw: Array<string | FacebookContainer> | undefined,
+): FacebookContainer[] | null | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) return null;
+  for (const x of raw) {
+    if (typeof x === 'string') continue;
+    if (x && typeof x === 'object' && typeof (x as { url?: unknown }).url === 'string') continue;
+    return null;
+  }
+  return coerceContainers(raw);
+}
+
 export class FacebookCommentConfigStore {
   private readonly pool: pg.Pool;
   private cache = new Map<string, FacebookCommentConfigRow>();
@@ -129,7 +178,7 @@ export class FacebookCommentConfigStore {
     return {
       accountId: r.account_id,
       keywords: coerceList(r.keywords),
-      containers: coerceList(r.containers),
+      containers: coerceContainers(r.containers),
       updatedAt: r.updated_at ? new Date(r.updated_at).toISOString() : null,
       updatedBy: r.updated_by ?? null,
     };
@@ -170,7 +219,7 @@ export class FacebookCommentConfigStore {
     if (accountId === RETIRED_ACCOUNT_ID) return { ok: false, reason: 'retired_account' };
 
     const keywords = sanitizeInput(patch.keywords);
-    const containers = sanitizeInput(patch.containers);
+    const containers = sanitizeContainersInput(patch.containers);
     if (keywords === null || containers === null) return { ok: false, reason: 'invalid_value' };
     if (keywords === undefined && containers === undefined) return { ok: false, reason: 'no_valid_fields' };
 
@@ -196,5 +245,32 @@ export class FacebookCommentConfigStore {
     const row = this.toRow(rows[0]);
     this.cache.set(accountId, row); // 写库成功才刷镜像。
     return { ok: true, row };
+  }
+
+  /**
+   * 自动回填容器真实群名（change facebook-container-display-name）：边缘在容器内搜索时读出真名，
+   * 云端据此把配置里 url 匹配的容器名刷新——人只看群名、不看 id。
+   * best-effort：不改 updated_by/updated_at（非运营编辑），url 未配置/名称未变/出错均静默跳过、绝不波及主链路。
+   */
+  async resolveContainerName(accountId: string, url: string, name: string): Promise<void> {
+    const u = (url ?? '').trim();
+    const n = (name ?? '').trim();
+    if (!u || !n) return;
+    const current = this.cache.get(accountId);
+    if (!current) return; // 无配置行 → 无可回填
+    const idx = current.containers.findIndex((c) => c.url === u);
+    if (idx < 0) return; // 该 url 未配置（可能已被运营删/换）→ 忽略
+    if (current.containers[idx].name === n) return; // 名称未变 → 免写
+    const nextContainers = current.containers.map((c, i) => (i === idx ? { url: c.url, name: n } : c));
+    try {
+      const { rows } = await this.pool.query<FbConfigDbRow>(
+        `UPDATE account_facebook_comment_config SET containers = $2::jsonb WHERE account_id = $1
+         RETURNING account_id, keywords, containers, updated_at, updated_by`,
+        [accountId, JSON.stringify(nextContainers)],
+      );
+      if (rows[0]) this.cache.set(accountId, this.toRow(rows[0]));
+    } catch {
+      /* best-effort：群名回填绝不波及主链路 */
+    }
   }
 }

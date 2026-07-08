@@ -24,6 +24,17 @@ function fakePool(opts: { accountExists?: boolean; returning?: unknown } = {}): 
         };
         return { rows: [row], rowCount: 1 };
       }
+      // resolveContainerName 的 UPDATE ... SET containers RETURNING（params: [accountId, containersJson]）。
+      if (/UPDATE account_facebook_comment_config SET containers/.test(text)) {
+        const row = {
+          account_id: params[0],
+          keywords: [],
+          containers: JSON.parse(String(params[1])),
+          updated_at: '2026-07-07T00:00:00.000Z',
+          updated_by: 'panel:op',
+        };
+        return { rows: [row], rowCount: 1 };
+      }
       // reload SELECT
       return { rows: [], rowCount: 0 };
     },
@@ -51,7 +62,8 @@ test('effectiveConfigFor: fail-closed — 关键词或容器任一为空则不�
   const eff = store.effectiveConfigFor('acc-1');
   assert.equal(eff.enabled, true);
   assert.deepEqual(eff.keywords, ['coffee']);
-  assert.deepEqual(eff.containers, ['group-123']);
+  // 容器归一为 {url,name}；裸 url 字符串入参 → {url}（name 待边缘解析回填）。
+  assert.deepEqual(eff.containers, [{ url: 'group-123' }]);
 });
 
 test('setAccount: sanitize（trim/去空串/去重），写 JSONB，写成功刷缓存', async () => {
@@ -74,7 +86,28 @@ test('setAccount: 部分补丁（只改容器）保留原关键词', async () =>
   await store.setAccount('acc-1', { containers: ['g1', 'g2'] }, 'panel:op'); // 不传 keywords
   const row = store.getForAccount('acc-1');
   assert.deepEqual(row.keywords, ['coffee'], '未传的关键词应保留原值');
-  assert.deepEqual(row.containers, ['g1', 'g2']);
+  assert.deepEqual(row.containers, [{ url: 'g1' }, { url: 'g2' }]);
+});
+
+test('容器向后兼容 + 群名：接受裸 url 与 {url,name}，按 url 去重；resolveContainerName 回填真名', async () => {
+  const { pool } = fakePool();
+  const store = new FacebookCommentConfigStore({ pool });
+  // 混合入参：裸 url + {url,name} + 重复 url（后者被去重）。
+  await store.setAccount(
+    'acc-1',
+    { keywords: ['x'], containers: ['https://fb.com/groups/1', { url: 'https://fb.com/groups/2', name: '手动名' }, 'https://fb.com/groups/1'] },
+    'panel:op',
+  );
+  assert.deepEqual(store.getForAccount('acc-1').containers, [
+    { url: 'https://fb.com/groups/1' },
+    { url: 'https://fb.com/groups/2', name: '手动名' },
+  ]);
+  // 边缘解析回填 group 1 的真名（url 匹配才回填）。
+  await store.resolveContainerName('acc-1', 'https://fb.com/groups/1', 'Puerto Rico Y Sus Encantos e Historia');
+  assert.deepEqual(store.getForAccount('acc-1').containers[0], { url: 'https://fb.com/groups/1', name: 'Puerto Rico Y Sus Encantos e Historia' });
+  // url 未配置 → 忽略，不新增/不报错。
+  await store.resolveContainerName('acc-1', 'https://fb.com/groups/999', '不存在的群');
+  assert.equal(store.getForAccount('acc-1').containers.length, 2);
 });
 
 test('setAccount: 非法值（非字符串数组）整块拒 invalid_value，不刷缓存', async () => {

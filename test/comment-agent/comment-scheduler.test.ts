@@ -290,7 +290,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
       facebookConfigFor: () => ({
         enabled: (over.keywords ?? ['咖啡']).length > 0 && (over.containers ?? ['g1']).length > 0,
         keywords: over.keywords ?? ['咖啡'],
-        containers: over.containers ?? ['g1'],
+        containers: (over.containers ?? ['g1']).map((u) => ({ url: u })),
       }),
       facebookAutoEnabled: () => over.auto ?? false,
       facebookShadow: () => over.shadow ?? false,
@@ -389,15 +389,19 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     seen?: string[];
     /** 连接在 trigger 通过后掉线：resolveConnection 首次（trigger 闸）返回连接、其后（真发内）返回 null。 */
     dropAfterTrigger?: boolean;
+    /** 边缘回传的真实群名（undefined=默认 PR 群名，null=不回传）。 */
+    containerName?: string | null;
   } = {}): {
     deps: CommentSchedulerDeps;
     audits: Audit[];
     posted: string[];
     dedupRecorded: string[];
+    resolvedNames: Array<{ url: string; name: string }>;
   } {
     const audits: Audit[] = [];
     const posted: string[] = [];
     const dedupRecorded: string[] = [];
+    const resolvedNames: Array<{ url: string; name: string }> = [];
     const seen = new Set(cfg.seen ?? []);
     const bus = new EventBus();
     const candidates = cfg.candidates ?? [PERMALINK];
@@ -410,7 +414,11 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
           if (cfg.searchFail) {
             bus.emit('action.completed', { action: 'search', ok: false, reason: cfg.searchFail, ts: 0 } as never);
           } else {
-            bus.emit('page.cards.arrived', { cards: candidates.map((p, i) => ({ index: i, noteId: p })), ts: 0 } as never);
+            bus.emit('page.cards.arrived', {
+              cards: candidates.map((p, i) => ({ index: i, noteId: p })),
+              ...(cfg.containerName === undefined ? { containerName: 'Puerto Rico Y Sus Encantos e Historia' } : cfg.containerName ? { containerName: cfg.containerName } : {}),
+              ts: 0,
+            } as never);
           }
         } else if (env.type === 'note.open') {
           const url = (env.payload as { url?: string }).url;
@@ -444,27 +452,42 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
           seen.add(noteId);
         },
       }),
-      facebookConfigFor: () => ({ enabled: true, keywords: ['咖啡'], containers: ['https://www.facebook.com/groups/1'] }),
+      facebookConfigFor: () => ({ enabled: true, keywords: ['咖啡'], containers: [{ url: 'https://www.facebook.com/groups/1' }] }),
       facebookAutoEnabled: () => true,
       facebookShadow: () => false,
+      facebookResolveContainerName: async (_acct: string, url: string, name: string) => {
+        resolvedNames.push({ url, name });
+      },
       facebookCompose: async () => '这家手冲咖啡很不错',
       facebookCanComment: async () => true,
       facebookDailyCap: () => 5,
       facebookCommentedToday: async () => 0,
       facebookAudit: (row) => audits.push(row),
     });
-    return { deps, audits, posted, dedupRecorded };
+    return { deps, audits, posted, dedupRecorded, resolvedNames };
   }
   const tick = () => new Promise((r) => setTimeout(r, 120));
 
   it('happy path：搜索→开帖→提交确认 → commented，三命令依次下发，提交前打去重标记', async () => {
-    const { deps, audits, posted, dedupRecorded } = fbFlowDeps({ submit: { ok: true } });
+    const { deps, audits, posted, dedupRecorded, resolvedNames } = fbFlowDeps({ submit: { ok: true } });
     await new CommentScheduler(deps).triggerManual('fb-1');
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'commented');
     assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
     // §5.4 防重复真发：提交派发前已打 attempted 去重标记（与成功计数解耦）。
     assert.deepEqual(dedupRecorded, [PERMALINK]);
+    // 群名自动回填：边缘回传真名 → 调 resolveContainerName（url→真名）；审计用群名、不用 id。
+    assert.deepEqual(resolvedNames, [{ url: 'https://www.facebook.com/groups/1', name: 'Puerto Rico Y Sus Encantos e Historia' }]);
+    assert.equal(audits.at(-1)?.container, 'Puerto Rico Y Sus Encantos e Historia');
+  });
+
+  it('边缘未回传群名 → 不回填、审计退回 url（绝不编造名称）', async () => {
+    const { deps, audits, resolvedNames } = fbFlowDeps({ submit: { ok: true }, containerName: null });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    assert.deepEqual(resolvedNames, []);
+    assert.equal(audits.at(-1)?.container, 'https://www.facebook.com/groups/1');
   });
 
   it('提交后无法服务器确认 → verification_ambiguous，但去重标记仍已打（防重复真发）', async () => {

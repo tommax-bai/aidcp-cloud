@@ -38,6 +38,8 @@ export interface FacebookSearchStepResult {
   ok: boolean;
   reason?: string;
   candidates: FacebookCandidate[];
+  /** 容器真实群名（边缘从群页读出回传，change facebook-container-display-name）；供云端回填配置容器名。 */
+  containerName?: string;
 }
 export interface FacebookOpenStepResult {
   ok: boolean;
@@ -50,6 +52,7 @@ export interface FacebookCommentStepResult {
 
 interface PageCardsArrived {
   cards: Array<{ noteId?: string }>;
+  containerName?: string;
 }
 interface NoteDetailArrived {
   detail: { noteId?: string };
@@ -109,19 +112,22 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
   return {
     async searchInContainer(keyword, container) {
       // 命中：page.cards.arrived（候选）或 action.completed{action:'search'}（诚实阻断/权限失败）。
-      const outcome = await sendAndRace<{ kind: 'cards'; cards: FacebookCandidate[] } | { kind: 'fail'; reason: string }>(
+      const outcome = await sendAndRace<
+        { kind: 'cards'; cards: FacebookCandidate[]; containerName?: string } | { kind: 'fail'; reason: string }
+      >(
         deps.bus,
         [
           {
             event: 'page.cards.arrived',
             match: (data) => {
-              const cards = (data as PageCardsArrived).cards ?? [];
+              const p = data as PageCardsArrived;
+              const cards = p.cards ?? [];
               const list: FacebookCandidate[] = [];
               for (const c of cards) {
                 if (c.noteId) list.push({ permalink: c.noteId });
                 if (list.length >= maxCandidates) break;
               }
-              return { kind: 'cards', cards: list };
+              return { kind: 'cards', cards: list, ...(p.containerName ? { containerName: p.containerName } : {}) };
             },
           },
           {
@@ -141,7 +147,7 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
         return { ok: false, reason: 'timeout', candidates: [] };
       }
       if (outcome.kind === 'fail') return { ok: false, reason: outcome.reason, candidates: [] };
-      return { ok: true, candidates: outcome.cards };
+      return { ok: true, candidates: outcome.cards, ...(outcome.containerName ? { containerName: outcome.containerName } : {}) };
     },
 
     async openPost(url) {

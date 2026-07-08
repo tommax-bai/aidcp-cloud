@@ -111,6 +111,8 @@ export interface CommentSchedulerDeps {
   facebookDailyCap?: (accountId: string) => number;
   /** best-effort 审计 sink（每次触发一行，含影子）。 */
   facebookAudit?: (row: FacebookCommentAuditRow) => void;
+  /** 回填容器真实群名（change facebook-container-display-name）：边缘搜索时读出真名 → 刷新配置容器名（人只看群名）。 */
+  facebookResolveContainerName?: (accountId: string, url: string, name: string) => Promise<void> | void;
   /** 选关键词/容器的随机源（测试注入定值；缺省 Math.random）。 */
   random?: () => number;
 }
@@ -398,7 +400,10 @@ export class CommentScheduler {
     }
 
     const keyword = cfg.keywords[Math.floor(rand() * cfg.keywords.length)] ?? cfg.keywords[0];
-    const container = cfg.containers[Math.floor(rand() * cfg.containers.length)] ?? cfg.containers[0];
+    const chosen = cfg.containers[Math.floor(rand() * cfg.containers.length)] ?? cfg.containers[0];
+    const containerUrl = chosen.url; // 功能主键：边缘据此站内搜（含群 id）
+    // 人类可读容器标签：已解析出的群名优先，否则暂用 url（下次搜索会自动回填真名）。审计/回执一律用它、不用裸 id。
+    let container = chosen.name ?? chosen.url;
 
     // 撰写（无人值守，不走人审）。
     const draft = d.facebookCompose ? await d.facebookCompose(accountId, { keyword, container }) : null;
@@ -450,8 +455,13 @@ export class CommentScheduler {
     });
     const dedup = d.dedupFor(accountId);
 
-    // 1) 容器内搜索候选帖（边端只在配置容器内搜、绝不全站）。
-    const search = await steps.searchInContainer(keyword, container);
+    // 1) 容器内搜索候选帖（边端只在配置容器内搜、绝不全站）。用 url 下发。
+    const search = await steps.searchInContainer(keyword, containerUrl);
+    // 边缘回传的真实群名 → 回填配置容器名（人只看群名、不看 id）；本轮后续审计也改用真名。
+    if (search.containerName) {
+      container = search.containerName;
+      void d.facebookResolveContainerName?.(accountId, containerUrl, search.containerName);
+    }
     if (!search.ok) {
       audit({ accountId, outcome: mapFacebookBlockOutcome(search.reason), reason: search.reason, shadow: false, keyword, container });
       return;
