@@ -127,17 +127,17 @@ test('reference images are normalized, deduped, relocated, and stored as JSONB',
   assert.equal(stored[0].alt, 'cover');
 });
 
-test('reference images default limit stores up to the curated cap of 30', async () => {
+test('reference images default limit stores up to the curated cap of 18', async () => {
   const { pool, calls } = capturingPool();
   const store = new CuratedContentStore({ pool });
   await store.upsertObservation({
     ...baseObs,
-    referenceImages: Array.from({ length: 32 }, (_, i) => ({ index: i, sourceUrl: `https://img.test/${i}.jpg` })),
+    referenceImages: Array.from({ length: 20 }, (_, i) => ({ index: i, sourceUrl: `https://img.test/${i}.jpg` })),
   });
 
   const stored = JSON.parse(calls[0].params[9] as string) as ReturnType<typeof normalizeCuratedReferenceImages>;
-  assert.equal(stored.length, 30);
-  assert.deepEqual(stored.map((img) => img.index), Array.from({ length: 30 }, (_, i) => i));
+  assert.equal(stored.length, 18);
+  assert.deepEqual(stored.map((img) => img.index), Array.from({ length: 18 }, (_, i) => i));
 });
 
 test('refreshReferenceImages：只更新已有源帖图片，空输入不写库', async () => {

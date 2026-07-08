@@ -88,11 +88,11 @@ export type CuratedReferenceImageRelocator = (ctx: {
   images: CuratedReferenceImage[];
 }) => Promise<CuratedReferenceImage[]>;
 
-// 抓取精选集时每条内容持久化的参考图上限（灵感素材池，非发布图张数）。
+// 抓取精选集时每条内容持久化的参考图上限（灵感素材池，非发布图张数）。18 = 小红书单帖图片数上界。
 // 与发布侧 IMAGE_COUNT_HARD_MAX/REFERENCE_IMAGE_MAX_COUNT=9（小红书图文帖硬约束）解耦：
-// 存更多参考图、发布生成仍只取子集（≤9）。
-export const CURATED_REFERENCE_IMAGE_DEFAULT_LIMIT = 30;
-export const CURATED_REFERENCE_IMAGE_HARD_MAX = 30;
+// 存全一篇的图、发布生成仍只取子集（≤9）。
+export const CURATED_REFERENCE_IMAGE_DEFAULT_LIMIT = 18;
+export const CURATED_REFERENCE_IMAGE_HARD_MAX = 18;
 
 /** 一次观测：别人的笔记/评论被判定「值得当灵感」时落库/刷新。 */
 export interface CuratedObservation {
