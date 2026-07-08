@@ -35,7 +35,12 @@ import {
   type NotificationHomePayload,
   type NotificationItemsPayload,
   type PublishCommandResultPayload,
+  type PersonaGeneratePayload,
+  type PersonaGenerateResultPayload,
+  type PersonaPersistPayload,
 } from './protocol.js';
+import type { PersonaGenerator } from '../agents/persona-generator.js';
+import type { PanelPersonaConfig } from '../panel/types.js';
 import type { CommandSequencer } from '../publish-agent/command-sequencer.js';
 import type { MessageHandler, EdgeSession, EdgePusher } from './ws-server.js';
 import type { CaptchaCoordinator } from './captcha-coordinator.js';
@@ -101,6 +106,16 @@ export interface HandlerDeps {
    * 未注入 → welcome 省略 `pacing` 字段（边缘回落内置非零默认，向后兼容）。纯读、不写任何状态。
    */
   pacingFloors?: PacingFloorProvider;
+  /**
+   * 建号自助人设生成器（change edge-persona-keyword-generation）：persona.generate 的处理端。
+   * 未注入 → persona.generate 诚实回 { ok:false, reason:'unavailable' }（向后兼容）。
+   */
+  personaGenerator?: Pick<PersonaGenerator, 'generate'>;
+  /**
+   * 人设写入外观（复用 setPersona 的 FK 守护 / 空校验 / soul 校验 / 落库 / 绑定唤醒）：persona.persist 的处理端。
+   * 未注入 → persona.persist 诚实回 { ok:false, reason:'unavailable' }（向后兼容）。
+   */
+  personaFacade?: Pick<PanelPersonaConfig, 'setPersona'>;
 }
 
 /** 把元素清单渲染成给 LLM 的编号列表（与 edge selector 一致的格式） */
@@ -145,6 +160,11 @@ export class DefaultMessageHandler implements MessageHandler {
   private readonly serverVersion: string;
   private readonly logger: Pick<Console, 'error' | 'warn' | 'log'>;
   private readonly riskController: RiskController;
+  /**
+   * persona.generate 幂等在途缓存（键 = accountId:idempotencyKey）。
+   * 同键复用同一 Promise → 重连/重试不重复调大模型、不双计费；成功结果保留、失败逐出（允许后续重试）。
+   */
+  private readonly personaGenInflight = new Map<string, Promise<PersonaGenerateResultPayload>>();
 
   constructor(private readonly deps: HandlerDeps) {
     this.clock = deps.clock ?? Date.now;
@@ -221,6 +241,10 @@ export class DefaultMessageHandler implements MessageHandler {
         return this.onRiskCanDo(env, session);
       case 'risk.record':
         return this.onRiskRecord(env, session);
+      case 'persona.generate':
+        return this.onPersonaGenerate(env, session);
+      case 'persona.persist':
+        return this.onPersonaPersist(env, session);
       case 'risk.captcha_detected':
         await this.deps.captcha?.onDetected(env.payload as CaptchaDetectedPayload, session, pusher);
         return null;
@@ -417,6 +441,84 @@ export class DefaultMessageHandler implements MessageHandler {
       recorded,
       reason: recorded ? undefined : 'denied',
     });
+  }
+
+  /**
+   * persona.generate（change edge-persona-keyword-generation）：建号自助人设生成。
+   * 以握手绑定 session.accountId 为准（忽略 payload 自报）；幂等在途去重防双计费；生成失败硬 fail-closed。
+   */
+  private async onPersonaGenerate(env: Envelope, session: EdgeSession): Promise<Envelope> {
+    const p = env.payload as PersonaGeneratePayload;
+    if (!this.deps.personaGenerator) {
+      return makeEnvelope('persona.generate.result', env.id, this.clock(), { ok: false, reason: 'unavailable' });
+    }
+    if (!session.accountId) {
+      this.logger.warn('[persona] persona.generate 会话缺 accountId（握手应已保证）— 诚实回 unknown_account');
+      return makeEnvelope('persona.generate.result', env.id, this.clock(), { ok: false, reason: 'unknown_account' });
+    }
+    const accountId = session.accountId;
+    const idempotencyKey = (p.idempotencyKey ?? '').trim();
+    if (!idempotencyKey) {
+      return makeEnvelope('persona.generate.result', env.id, this.clock(), { ok: false, reason: 'missing_idempotency_key' });
+    }
+    const cacheKey = `${accountId}:${idempotencyKey}`;
+    let inflight = this.personaGenInflight.get(cacheKey);
+    if (!inflight) {
+      inflight = this.runPersonaGenerate(accountId, idempotencyKey, p.keywordSelections ?? [])
+        .then((res) => {
+          // 成功结果保留缓存（重连/重试复用、防双计费）；失败逐出（允许客户重试）。
+          if (!res.ok) this.personaGenInflight.delete(cacheKey);
+          return res;
+        })
+        .catch((err) => {
+          this.personaGenInflight.delete(cacheKey);
+          this.logger.warn(`[persona] persona.generate 异常: ${(err as Error).message}`);
+          return { ok: false, reason: 'generation_failed' } as PersonaGenerateResultPayload;
+        });
+      this.personaGenInflight.set(cacheKey, inflight);
+    }
+    const result = await inflight;
+    return makeEnvelope('persona.generate.result', env.id, this.clock(), result);
+  }
+
+  private async runPersonaGenerate(
+    accountId: string,
+    idempotencyKey: string,
+    keywordSelections: string[],
+  ): Promise<PersonaGenerateResultPayload> {
+    // 每账号差异化种子：拌 accountId + 幂等键（每次「生成/重新生成」都带新键 → 有区分度），抗跨账号同质化。
+    const diversitySeed = `account:${accountId}|nonce:${idempotencyKey}`;
+    const outcome = await this.deps.personaGenerator!.generate({ accountId, keywordSelections, diversitySeed });
+    if (outcome.ok) {
+      return { ok: true, soulYaml: outcome.soulYaml, identitySummary: outcome.identitySummary };
+    }
+    return { ok: false, reason: outcome.reason };
+  }
+
+  /**
+   * persona.persist（change edge-persona-keyword-generation）：落库客户确认后的人设。
+   * 复用 setPersona 全套（FK/空/soul 校验/落库/绑定唤醒）；以握手绑定 accountId 为准防越权；unknown_account 为正常分支诚实回执。
+   */
+  private async onPersonaPersist(env: Envelope, session: EdgeSession): Promise<Envelope> {
+    const p = env.payload as PersonaPersistPayload;
+    if (!this.deps.personaFacade) {
+      return makeEnvelope('persona.persist.result', env.id, this.clock(), { ok: false, reason: 'unavailable' });
+    }
+    if (!session.accountId) {
+      this.logger.warn('[persona] persona.persist 会话缺 accountId（握手应已保证）— 诚实回 unknown_account');
+      return makeEnvelope('persona.persist.result', env.id, this.clock(), { ok: false, reason: 'unknown_account' });
+    }
+    const result = await this.deps.personaFacade.setPersona(
+      session.accountId,
+      p.soulYaml ?? '',
+      `edge-onboarding:${session.accountId}`,
+    );
+    return makeEnvelope(
+      'persona.persist.result',
+      env.id,
+      this.clock(),
+      result.ok ? { ok: true } : { ok: false, reason: result.reason },
+    );
   }
 
   private async onPlan(env: Envelope, pusher?: EdgePusher): Promise<Envelope> {

@@ -119,6 +119,8 @@ export const ROLE_CATALOG: RoleCatalogItem[] = [
   // G. 独立命令式评论任务（change comment-search-command，飞书 /comment）：不在日常浏览闭环内，命令式调用、单列于末。
   { roleId: 'browse:comment_search_term_generator', displayName: '评论·搜索词生成', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
   { roleId: 'browse:comment_target_picker', displayName: '评论·搜索笔记甄选', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
+  // H. 建号自助人设生成（change edge-persona-keyword-generation）：客户端 onboarding 关键词驱动，命令式、单列；创作类可调温度以增人设区分度。
+  { roleId: 'browse:persona_generator', displayName: '建号·人设生成', group: 'browse', category: 'browse_compose', llmKind: 'text', tunableTemperature: true },
   // —— 发布管线（文本，经 llmClient.chat；顺序 = PipelineContext watch/output 依赖链）——
   { roleId: 'publish:ContentScout', displayName: '发布选题侦察', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: false },
   { roleId: 'publish:ContentCreator', displayName: '笔记正文创作', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },

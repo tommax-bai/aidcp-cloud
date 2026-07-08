@@ -63,6 +63,7 @@ import { ConnectionRuntimeRegistry, type DispatcherBuildContext } from './orches
 import type { CommentApprovalPort } from './agents/comment-approval-gate.js';
 import type { BaseRole } from './agents/base-role.js';
 import { CommentSearchTermGenerator, type RoleLlmLike } from './agents/comment-search-term-generator.js';
+import { PersonaGenerator } from './agents/persona-generator.js';
 import { CommentTargetPicker } from './agents/comment-target-picker.js';
 import { buildCommentApprovalCard } from './feishu/comment-approval-card.js';
 import { buildCommandResultCard } from './feishu/cards.js';
@@ -1358,6 +1359,9 @@ async function main(): Promise<void> {
   // 未绑人设告警去重（避免重连 / 空转 churn 反复刷飞书）：每账号每进程仅告警一次。
   const personaSetupAlerted = new Set<string>();
 
+  // 建号自助人设生成器（change edge-persona-keyword-generation）：复用共享 llm（按角色 browse:persona_generator
+  // 解析模型/温度、按 accountId 记账），生成 persona.generate 的草稿。
+  const personaGenerator = new PersonaGenerator({ llm });
   const handler = new DefaultMessageHandler({
     planner,
     llm,
@@ -1370,6 +1374,9 @@ async function main(): Promise<void> {
     captcha,
     captchaAssist,
     commandSequencer,
+    // 建号自助人设（change edge-persona-keyword-generation）：persona.generate 生成器 + persona.persist 复用写入外观。
+    personaGenerator,
+    personaFacade: personaPanel,
     // 多租户路由：私有总线（入站事件灌本连接通道）/ 握手建运行时 / 按连接真实账号解析 controller。
     busFor: (session) => runtimes!.busFor(session),
     onHandshake: (session) => runtimes!.onHandshake(session),

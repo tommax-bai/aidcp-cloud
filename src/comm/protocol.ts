@@ -85,6 +85,11 @@ export type MessageType =
   | 'note.detail'          // Edge 上报笔记详情
   | 'profile.detail'       // Edge 上报个人主页数据
   | 'action.completed'     // Edge 确认 action 执行完成
+  // —— Persona 生成（edge → cloud 请求 / cloud → edge 响应，建号关键词驱动，客户自助 onboarding）——
+  | 'persona.generate'        // edge → cloud：按关键词选择请求生成 persona
+  | 'persona.generate.result' // cloud → edge：返回 soul.yaml/身份摘要或失败原因
+  | 'persona.persist'         // edge → cloud：请求持久化确认后的 soul.yaml
+  | 'persona.persist.result'  // cloud → edge：持久化结果
   // —— 通用 ——
   | 'error' // 任一方 → 对方：错误信息
   | 'ping'
@@ -458,6 +463,45 @@ export interface RiskRecordPayload {
 export interface RiskRecordResultPayload {
   action: RiskCanDoPayload['action'];
   recorded: boolean;
+  reason?: string;
+}
+
+/**
+ * Persona 生成（建号关键词驱动，客户自助 onboarding）。
+ * edge → cloud：按客户勾选的关键词请求云端生成账号 persona（soul.yaml + 身份摘要）。
+ * 安全：云端以握手绑定的 session.accountId 为准，不信任本载荷自报的 accountId。
+ */
+export interface PersonaGeneratePayload {
+  accountId: string;
+  /** 建号流程勾选的关键词集合（供 persona 生成种子化） */
+  keywordSelections: string[];
+  /** 幂等键：同 key 重复请求云端只生成一次、复用结果，防重连/重试重复扣费 */
+  idempotencyKey: string;
+}
+
+/**
+ * cloud → edge：persona 生成结果。
+ * ok=false 时带 reason，MUST NOT 返回半成品/占位 soul.yaml（宁缺毋假、fail-closed）。
+ */
+export interface PersonaGenerateResultPayload {
+  ok: boolean;
+  /** 生成的 soul.yaml 全文（仅 ok 时存在）；失败置空，绝不占位冒充 */
+  soulYaml?: string;
+  /** 身份摘要（供边缘展示确认；仅 ok 时存在） */
+  identitySummary?: string;
+  /** 失败原因（ok=false 时存在，如 generation_failed / persona_invalid） */
+  reason?: string;
+}
+
+/** edge → cloud：请求持久化客户确认后的 soul.yaml（走云端现有校验写入通道）。 */
+export interface PersonaPersistPayload {
+  accountId: string;
+  soulYaml: string;
+}
+
+/** cloud → edge：持久化结果；失败带 reason（如 unknown_account / persona_required / persona_invalid）。 */
+export interface PersonaPersistResultPayload {
+  ok: boolean;
   reason?: string;
 }
 
@@ -1016,6 +1060,11 @@ export interface PayloadMap {
   'notification.detected': NotificationDetectedPayload;
   'notification.home': NotificationHomePayload;
   'notification.items': NotificationItemsPayload;
+  // Persona 生成（建号关键词驱动，edge 发起请求/响应）
+  'persona.generate': PersonaGeneratePayload;
+  'persona.generate.result': PersonaGenerateResultPayload;
+  'persona.persist': PersonaPersistPayload;
+  'persona.persist.result': PersonaPersistResultPayload;
   error: ErrorPayload;
   ping: Record<string, never>;
   pong: Record<string, never>;

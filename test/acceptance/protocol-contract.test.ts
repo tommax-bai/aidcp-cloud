@@ -22,6 +22,8 @@ import {
   type SessionEndPayload,
   type SearchExecutePayload,
   type NoteOpenPayload,
+  type PersonaGeneratePayload,
+  type PersonaGenerateResultPayload,
 } from '../../src/comm/protocol.js';
 
 /**
@@ -52,6 +54,8 @@ const ALL_MESSAGE_TYPES: Record<MessageType, true> = {
   'notification.open': true, 'notification.browse_comments': true, 'notification.browse_likes': true,
   'notification.browse_follows': true, 'notification.back_home': true,
   'notification.detected': true, 'notification.home': true, 'notification.items': true,
+  'persona.generate': true, 'persona.generate.result': true,
+  'persona.persist': true, 'persona.persist.result': true,
   error: true, ping: true, pong: true,
 };
 const ALL_TYPES = Object.keys(ALL_MESSAGE_TYPES) as MessageType[];
@@ -61,8 +65,8 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     assert.equal(PROTOCOL_VERSION, 2);
   });
 
-  it('AC-PROTO-02 消息类型总数为 61（增删消息须同步两端 + 本断言）', () => {
-    assert.equal(ALL_TYPES.length, 61);
+  it('AC-PROTO-02 消息类型总数为 65（增删消息须同步两端 + 本断言）', () => {
+    assert.equal(ALL_TYPES.length, 65);
   });
 
   it('AC-PROTO-03 每个消息类型都能构造合法信封且版本一致', () => {
@@ -133,5 +137,19 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     const open: NoteOpenPayload = { url: 'https://www.facebook.com/groups/123456/posts/999' };
     const openBack = parseEnvelope(JSON.stringify(makeEnvelope('note.open', 'o-1', 1700000000000, open)));
     assert.equal((openBack!.payload as NoteOpenPayload).url, 'https://www.facebook.com/groups/123456/posts/999');
+  });
+
+  it('AC-PROTO-09 persona 生成载荷可选字段往返存活（防两端静默漂移）', () => {
+    // change edge-persona-keyword-generation 新增 persona.generate/persist 请求响应对（edge 发起、pending-id 回包）。
+    // typecheck 的 MessageType 穷举抓不到可选字段（soulYaml/identitySummary/reason）漂移，故此往返断言兜底。
+    const req: PersonaGeneratePayload = { accountId: 'acc-1', keywordSelections: ['美妆', '活泼'], idempotencyKey: 'idem-1' };
+    const reqBack = parseEnvelope(JSON.stringify(makeEnvelope('persona.generate', 'g-1', 1700000000000, req)));
+    assert.deepEqual((reqBack!.payload as PersonaGeneratePayload).keywordSelections, ['美妆', '活泼']);
+    assert.equal((reqBack!.payload as PersonaGeneratePayload).idempotencyKey, 'idem-1');
+
+    const res: PersonaGenerateResultPayload = { ok: true, soulYaml: 'identity:\n  name: x', identitySummary: '美妆达人' };
+    const resBack = parseEnvelope(JSON.stringify(makeEnvelope('persona.generate.result', 'g-1', 1700000000000, res)));
+    assert.equal((resBack!.payload as PersonaGenerateResultPayload).soulYaml, 'identity:\n  name: x');
+    assert.equal((resBack!.payload as PersonaGenerateResultPayload).identitySummary, '美妆达人');
   });
 });

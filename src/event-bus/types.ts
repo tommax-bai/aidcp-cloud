@@ -485,6 +485,8 @@ export type RoleName =
   // —— 按需评论任务角色（change comment-search-command，飞书 /comment）——
   | 'comment_search_term_generator'
   | 'comment_target_picker'
+  // —— 建号自助人设生成（change edge-persona-keyword-generation，命令式，客户端 onboarding 触发）——
+  | 'persona_generator'
   | 'profile_opener'
   | 'nickname_enricher'
   | 'follow_agent'
