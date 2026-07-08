@@ -20,6 +20,7 @@ import type {
   PanelConfig,
   PanelHandle,
   SessionLimitPatchInput,
+  HotLeadConfigPatchInput,
   ResumeConfigPatchInput,
   DashboardSummary,
 } from './types.js';
@@ -1334,6 +1335,48 @@ function createRequestHandler(
       const result = await deps.sessionLimits.set(patch, verified.payload.sub);
       if (!result.ok) {
         // invalid_value / no_valid_fields → 400（绝不部分落库、绝不假成功）。
+        sendJson(res, 400, { error: result.reason });
+        return;
+      }
+      sendJson(res, 200, result.view);
+      return;
+    }
+
+    // ── 引流线索热度过滤阈值（全局单例，change feed-hot-lead-group-comment）──────
+    if (method === 'GET' && url === '/api/hot-lead-config') {
+      if (!deps.hotLeadConfig) {
+        sendJson(res, 503, { error: 'hot_lead_config_unavailable' });
+        return;
+      }
+      sendJson(res, 200, deps.hotLeadConfig.getView());
+      return;
+    }
+    if (method === 'PUT' && url === '/api/hot-lead-config') {
+      if (!deps.hotLeadConfig) {
+        sendJson(res, 503, { error: 'hot_lead_config_unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { postAgeMaxHours, velocityMin, minLikeFloor } = (body ?? {}) as Record<string, unknown>;
+      const patch: HotLeadConfigPatchInput = {};
+      const rawNums: Record<string, unknown> = { postAgeMaxHours, velocityMin, minLikeFloor };
+      for (const k of ['postAgeMaxHours', 'velocityMin', 'minLikeFloor'] as const) {
+        const v = rawNums[k];
+        if (v === undefined) continue;
+        if (typeof v !== 'number') {
+          sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
+          return;
+        }
+        patch[k] = v;
+      }
+      const result = await deps.hotLeadConfig.set(patch, verified.payload.sub);
+      if (!result.ok) {
         sendJson(res, 400, { error: result.reason });
         return;
       }

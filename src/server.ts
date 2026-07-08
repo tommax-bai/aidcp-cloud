@@ -168,6 +168,8 @@ import { PacingConfigStore } from './config/pacing-config-store.js';
 import { createPacingConfigPanel } from './config/pacing-config-facade.js';
 import { SessionConfigStore } from './config/session-config-store.js';
 import { createSessionLimitPanel } from './config/session-config-facade.js';
+import { HotLeadConfigStore } from './config/hot-lead-config-store.js';
+import { createHotLeadConfigPanel } from './config/hot-lead-config-facade.js';
 import { ResumeConfigStore } from './config/resume-config-store.js';
 import { createResumeConfigPanel } from './config/resume-config-facade.js';
 // 内容排期（change content-schedule-auto-publish，Phase 1 只发帖）：全局内容格 + 每账号排期存储 + 分钟心跳触发扇入。
@@ -409,6 +411,14 @@ async function main(): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
+  // 引流线索热度过滤阈值（全局单例，change feed-hot-lead-group-comment）：帖龄上限 / 速率阈值 / 最小赞，落安全页卡片、热加载。
+  const hotLeadConfigStore = new HotLeadConfigStore({
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
   // 自动续场护栏 + 看门狗阈值（全局单例，change restore-auto-resume-and-global-safety-config）：全局 rest_ratio / 活跃时段 /
   // 每日上限 / 看门狗两阈值、对所有账号生效；缺行/非法回落写死默认，绝不 brick。init 失败也不致命（空镜像→全回落默认）。
   const resumeConfigStore = new ResumeConfigStore({
@@ -452,6 +462,7 @@ async function main(): Promise<void> {
     await quotaConfigStore.init();
     await pacingConfigStore.init();
     await sessionConfigStore.init();
+    await hotLeadConfigStore.init();
     await resumeConfigStore.init();
     await contentScheduleStore.init();
     await facebookCommentConfigStore.init();
@@ -1701,6 +1712,8 @@ async function main(): Promise<void> {
       curatedStore: curatedContentStore,
       // 引流待评候选队列（change feed-hot-lead-group-comment）：注入则注册 hot_lead_detector（接稿件价值判定之后）。
       hotLeadQueue,
+      // 热度过滤阈值取值口：判定角色每次现读全局配置（后台改完热加载即时生效）。
+      hotLeadGateConfig: () => hotLeadConfigStore.getGateConfig(),
       // 引流线索「已评过」去重：复用 riskStore 的按账号互动去重（与自治评论/群评同一账本）。
       hasCommentedForLead: (accountId, noteId) =>
         riskStore.hasInteraction(accountId, noteId, 'comment').catch(() => false),
@@ -2398,6 +2411,8 @@ async function main(): Promise<void> {
   const pacingConfigPanel = createPacingConfigPanel({ store: pacingConfigStore });
   // 单场上限面板外观（全局单例，change restore-auto-resume-and-global-safety-config）：全局时长 + 六项预算回显 + 写校验（非法整块拒）+ 非乐观回真态。
   const sessionLimitPanel = createSessionLimitPanel({ store: sessionConfigStore });
+  // 引流线索热度过滤阈值面板外观（全局单例，change feed-hot-lead-group-comment）：三阈值回显 + 写校验（非法整块拒）+ 热加载。
+  const hotLeadConfigPanel = createHotLeadConfigPanel({ store: hotLeadConfigStore });
   // 续场配置面板外观（全局单例，change restore-auto-resume-and-global-safety-config）：全局续场护栏 + 看门狗阈值回显 + 写校验 + 非乐观回真态。
   const resumeConfigPanel = createResumeConfigPanel({ store: resumeConfigStore });
   // 角色 prompt 只读预览（change role-prompt-visibility）：借仅供预览的 RoleDispatcher 渲染真实 prompt。
@@ -2579,6 +2594,7 @@ async function main(): Promise<void> {
           pacingConfig: pacingConfigPanel,
           // 单场会话上限配置（change session-limits-to-quota-layer）。按账号时长 + 互动预算可改 + 热加载 + 非乐观回真态。
           sessionLimits: sessionLimitPanel,
+          hotLeadConfig: hotLeadConfigPanel,
           // 自动续场护栏 + 看门狗阈值配置（change session-auto-resume-with-excursions）。按账号可改 + 热加载 + 非乐观回真态。
           resumeConfig: resumeConfigPanel,
           // 角色 prompt 只读预览（change role-prompt-visibility）。纯读，无写路径。

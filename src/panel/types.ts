@@ -227,6 +227,8 @@ export interface PanelDeps {
    * 只动 session_config_global，不碰风控状态单写路径、不经协议。
    */
   sessionLimits?: PanelSessionLimits;
+  /** 引流线索热度过滤阈值（全局，change feed-hot-lead-group-comment）；缺则 /api/hot-lead-config 返 503。 */
+  hotLeadConfig?: PanelHotLeadConfig;
   /**
    * 自动续场护栏 + 看门狗阈值配置（全局单例，change restore-auto-resume-and-global-safety-config）。未注入则 /api/resume-config 返回 503。
    * 全局编辑 rest_ratio / 活跃时段窗口 / 每日上限 / 看门狗两阈值、对所有账号生效；写非乐观回真态；非法整块拒，绝不部分落库；
@@ -778,6 +780,36 @@ export interface PanelSessionLimits {
   getView(): SessionLimitView;
   /** 写全局单场上限。校验不过整块拒（绝不部分落库 / 假成功）。写后回真态。 */
   set(patch: SessionLimitPatchInput, updatedBy: string): Promise<SessionLimitSetResult>;
+}
+
+/** 引流线索热度过滤阈值生效值 + 审计（GET /api/hot-lead-config 形状，change feed-hot-lead-group-comment）。 */
+export interface HotLeadConfigView {
+  /** 帖龄上限（小时）：超龄不算线索。 */
+  postAgeMaxHours: number;
+  /** 每小时点赞速率阈值：达此值算「涨得快」。 */
+  velocityMin: number;
+  /** 最小绝对赞数：挡小基数假热。 */
+  minLikeFloor: number;
+  /** 是否存在库内覆盖（false=显示的是写死默认）。 */
+  overridden: boolean;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+/** PUT /api/hot-lead-config 入参补丁（全局，无账号）。未传字段保持原值。 */
+export interface HotLeadConfigPatchInput {
+  postAgeMaxHours?: number;
+  velocityMin?: number;
+  minLikeFloor?: number;
+}
+
+export type HotLeadConfigSetResult =
+  | { ok: true; view: HotLeadConfigView }
+  | { ok: false; reason: 'invalid_value' | 'no_valid_fields' };
+
+export interface PanelHotLeadConfig {
+  getView(): HotLeadConfigView;
+  set(patch: HotLeadConfigPatchInput, updatedBy: string): Promise<HotLeadConfigSetResult>;
 }
 
 /** 全局续场护栏 + 看门狗阈值生效值 + 来源/审计（GET /api/resume-config 形状）。 */
