@@ -472,6 +472,64 @@ test('HTTP 待审草稿编辑 + 授权写时版本预检（edit-note-draft-befor
   }
 });
 
+test('HTTP 待审草稿编辑：images 补丁透传 store + 响应回带删后 images；防注入映射 400（pending-draft-image-delete）', async () => {
+  const patches: Array<Record<string, unknown>> = [];
+  const draftDeps = {
+    ...(deps as object),
+    publishDraft: {
+      edit: async (_recordId: number, expectedVersion: number, patch: Record<string, unknown>, _editor: string) => {
+        patches.push(patch);
+        // 模拟 store 的「只删不注入」：含非法 URL → invalid_field。
+        if (patch.images !== undefined && (patch.images as string[]).includes('evil')) {
+          return { ok: false, reason: 'invalid_field' as const };
+        }
+        return {
+          ok: true as const,
+          contentVersion: expectedVersion + 1,
+          title: '原',
+          content: '原',
+          metadata: null,
+          images: (patch.images as string[]) ?? ['a', 'b'],
+        };
+      },
+      liveVersion: async () => 0,
+      hasDecision: async () => false,
+    },
+  } as unknown as PanelDeps;
+  const h = await startPanelApi(draftDeps, makeConfig());
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = (await login.json()) as { token: string };
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+
+    // 删一张：images 补丁进 store，响应回带删后 images
+    const ok = await fetch(`${base}/api/publish/1/draft`, {
+      method: 'PUT',
+      headers: auth,
+      body: JSON.stringify({ expectedVersion: 0, images: ['a', 'c'] }),
+    });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(((await ok.json()) as { images: string[] }).images, ['a', 'c'], '响应回带删后 images');
+    assert.deepEqual(patches[0].images, ['a', 'c'], 'images 补丁透传到 store 单写');
+
+    // 防注入：store 拒 invalid_field → 400
+    const bad = await fetch(`${base}/api/publish/1/draft`, {
+      method: 'PUT',
+      headers: auth,
+      body: JSON.stringify({ expectedVersion: 0, images: ['a', 'evil'] }),
+    });
+    assert.equal(bad.status, 400);
+    assert.equal(((await bad.json()) as { error: string }).error, 'invalid_field');
+  } finally {
+    await h.close();
+  }
+});
+
 test('HTTP 待审草稿编辑：未注入 publishDraft → 503', async () => {
   const h = await startPanelApi(deps, makeConfig());
   const base = `http://127.0.0.1:${h.port}`;

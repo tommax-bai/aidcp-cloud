@@ -121,12 +121,15 @@ export interface DispatchDraft {
 /**
  * 待审草稿编辑补丁（edit-note-draft-before-publish）：本期仅正文文本 + 文本类元数据可编辑。
  * 未出现的键 = 不改（保留原值）；深合并只动 visibility/topics，其余元数据键逐字保留。
+ * images（change pending-draft-image-delete）：编辑后应保留的配图 URL **有序列表**——只删不注入，
+ * 提交的每项 MUST 是该记录当前 images 的成员（事务内保序过滤），任一非成员 → invalid_field。
  */
 export interface EditDraftPatch {
   title?: string;
   content?: string;
   visibility?: string;
   topics?: string[];
+  images?: string[];
 }
 
 /** editDraft 可区分拒因（诚实非乐观；面板据此映射不同 HTTP/文案）。 */
@@ -138,9 +141,16 @@ export type EditDraftReason =
   | 'missing_visibility'
   | 'invalid_field';
 
-/** editDraft 结果：成功回读写后真态（含自增后的版本号）；失败带可区分拒因。 */
+/** editDraft 结果：成功回读写后真态（含自增后的版本号 + 删后配图列表）；失败带可区分拒因。 */
 export type EditDraftResult =
-  | { ok: true; contentVersion: number; title: string | null; content: string; metadata: PublishMetadata | null }
+  | {
+      ok: true;
+      contentVersion: number;
+      title: string | null;
+      content: string;
+      metadata: PublishMetadata | null;
+      images: string[];
+    }
   | { ok: false; reason: EditDraftReason };
 
 /** publish_log 持久化（PostgreSQL，aidcp 库）。 */
@@ -353,6 +363,13 @@ export class PublishLogStore {
       }
       newTopics = patch.topics;
     }
+    // images（pending-draft-image-delete）：此处只做类型预检（数组 + 全 string）；
+    // 「只删不注入」的子集校验须在事务内对当前 images 比对（见下），不能在事务外做。
+    if (patch.images !== undefined) {
+      if (!Array.isArray(patch.images) || !patch.images.every((u) => typeof u === 'string')) {
+        return { ok: false, reason: 'invalid_field' };
+      }
+    }
 
     const client = await this.pool.connect();
     try {
@@ -363,8 +380,10 @@ export class PublishLogStore {
         title: string | null;
         content: string;
         publish_metadata: unknown;
+        image_url: string | null;
+        images: string[] | null;
       }>(
-        `SELECT status, content_version, title, content, publish_metadata
+        `SELECT status, content_version, title, content, publish_metadata, image_url, images
          FROM publish_log WHERE id = $1 FOR UPDATE`,
         [recordId],
       );
@@ -395,18 +414,41 @@ export class PublishLogStore {
         if (newTopics !== undefined) metadata.topics = newTopics;
       }
 
+      // images 子集校验 + 保序过滤（pending-draft-image-delete）：只删不注入。
+      // 提交列表每项 MUST 是当前配图成员，否则整块拒 invalid_field、绝不落库；
+      // 落库列表恒为当前 images 的保序子序列（cover = 首项 ?? null），删空合法 = 纯文字帖。
+      // 未带 images 补丁时逐字保留原 images / image_url（零回归）。
+      let nextImages = row.images ?? [];
+      let nextCover: string | null = row.image_url;
+      if (patch.images !== undefined) {
+        const currentImages = row.images ?? (row.image_url ? [row.image_url] : []);
+        const currentSet = new Set(currentImages);
+        for (const u of patch.images) {
+          if (!currentSet.has(u)) {
+            await client.query('ROLLBACK');
+            return { ok: false, reason: 'invalid_field' };
+          }
+        }
+        const keepSet = new Set(patch.images);
+        nextImages = currentImages.filter((u) => keepSet.has(u));
+        nextCover = nextImages[0] ?? null;
+      }
+
       const nextVersion = Number(row.content_version) + 1;
       const upd = await client.query<{
         content_version: number | string;
         title: string | null;
         content: string;
         publish_metadata: unknown;
+        image_url: string | null;
+        images: string[] | null;
       }>(
         `UPDATE publish_log
          SET title = $2, content = $3, publish_metadata = $4::jsonb,
-             content_version = $5, edited_by = $6, edited_at = now()
+             content_version = $5, edited_by = $6, edited_at = now(),
+             images = $8::text[], image_url = $9
          WHERE id = $1 AND status = 'pending_approval' AND content_version = $7
-         RETURNING content_version, title, content, publish_metadata`,
+         RETURNING content_version, title, content, publish_metadata, image_url, images`,
         [
           recordId,
           newTitle !== undefined ? newTitle : row.title,
@@ -415,6 +457,8 @@ export class PublishLogStore {
           nextVersion,
           editor,
           expectedVersion,
+          nextImages,
+          nextCover,
         ],
       );
       if (upd.rowCount === 0) {
@@ -430,6 +474,7 @@ export class PublishLogStore {
         title: out.title,
         content: out.content,
         metadata: parsePublishMetadata(out.publish_metadata),
+        images: out.images ?? [],
       };
     } catch (err) {
       try {

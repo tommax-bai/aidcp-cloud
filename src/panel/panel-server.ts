@@ -548,12 +548,13 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
-      const { expectedVersion, title, content, visibility, topics } = (body ?? {}) as {
+      const { expectedVersion, title, content, visibility, topics, images } = (body ?? {}) as {
         expectedVersion?: unknown;
         title?: unknown;
         content?: unknown;
         visibility?: unknown;
         topics?: unknown;
+        images?: unknown;
       };
       if (typeof expectedVersion !== 'number' || !Number.isInteger(expectedVersion) || expectedVersion < 0) {
         sendJson(res, 400, { error: 'bad_request', reason: 'invalid_version' });
@@ -565,6 +566,8 @@ function createRequestHandler(
       if (content !== undefined) patch.content = content as string;
       if (visibility !== undefined) patch.visibility = visibility as string;
       if (topics !== undefined) patch.topics = topics as string[];
+      // images 补丁（pending-draft-image-delete）：删配图的保留子集；类型/子集红线校验由 store 单写一处统一做。
+      if (images !== undefined) patch.images = images as string[];
       if (Object.keys(patch).length === 0) {
         sendJson(res, 400, { error: 'bad_request', reason: 'empty_patch' });
         return;
@@ -593,6 +596,7 @@ function createRequestHandler(
         title: result.title,
         content: result.content,
         metadata: result.metadata,
+        images: result.images,
       });
       return;
     }

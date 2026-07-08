@@ -26,9 +26,10 @@ function fakeClient(row: Record<string, unknown> | null, opts: { updateRowCount?
         updateParams = params;
         const rc = opts.updateRowCount ?? 1;
         // 回读真态：模拟 RETURNING（版本 = nextVersion=params[4]，title/content/meta 取本次写入值）。
+        // 回读真态：模拟 RETURNING（images/image_url 取本次写入的 params[7]/[8]，见 editDraft UPDATE 参数序）。
         return {
           rowCount: rc,
-          rows: rc > 0 ? [{ content_version: params?.[4], title: params?.[1], content: params?.[2], publish_metadata: params?.[3] }] : [],
+          rows: rc > 0 ? [{ content_version: params?.[4], title: params?.[1], content: params?.[2], publish_metadata: params?.[3], images: params?.[7], image_url: params?.[8] }] : [],
         };
       }
       return { rows: [], rowCount: 0 }; // BEGIN/COMMIT/ROLLBACK
@@ -94,5 +95,68 @@ describe('PublishLogStore.editDraft', () => {
   test('元数据为 null 又要改可见范围 → invalid_field（守硬必选可见范围致命闸）', async () => {
     const fc = fakeClient({ status: 'pending_approval', content_version: 0, title: 't', content: 'c', publish_metadata: null });
     assert.deepEqual(await storeWith(fc).editDraft(9, 0, { visibility: 'public' }, 'op'), { ok: false, reason: 'invalid_field' });
+  });
+});
+
+describe('PublishLogStore.editDraft — 配图删除（pending-draft-image-delete）', () => {
+  // 待审行工厂：默认 image_url = images[0]，可覆盖。
+  const PENDING = (images: string[], image_url: string | null = images[0] ?? null) => ({
+    status: 'pending_approval', content_version: 1, title: 't', content: 'c', publish_metadata: META, image_url, images,
+  });
+
+  test('删一张：落库为保序子序列、cover 重算为首项、content_version+1、回读真态 images', async () => {
+    const fc = fakeClient(PENDING(['a', 'b', 'c']));
+    const res = await storeWith(fc).editDraft(9, 1, { images: ['a', 'c'] }, 'alice');
+    assert.equal(res.ok, true);
+    if (!res.ok) return;
+    const p = fc.updateParams!; // [id,title,content,meta,nextVer,editor,expVer,images,cover]
+    assert.deepEqual(p[7], ['a', 'c'], 'images = 当前集合的保序子序列');
+    assert.equal(p[8], 'a', 'cover = 保留列表首项');
+    assert.equal(res.contentVersion, 2, 'content_version 自增（作废旧飞书卡）');
+    assert.deepEqual(res.images, ['a', 'c'], '回读真态带回删后 images');
+  });
+
+  test('防注入：提交含非当前成员 URL → invalid_field，绝不落库（无 UPDATE）并回滚', async () => {
+    const fc = fakeClient(PENDING(['a', 'b']));
+    const res = await storeWith(fc).editDraft(9, 1, { images: ['a', 'https://evil/x.png'] }, 'op');
+    assert.deepEqual(res, { ok: false, reason: 'invalid_field' });
+    assert.equal(fc.updateParams, undefined, '注入被拦：没有发生 UPDATE');
+    assert.ok(fc.calls.some((c) => c.sql.startsWith('ROLLBACK')), '事务已回滚');
+  });
+
+  test('删空 = 纯文字帖：images=[]、cover=null 合法落库', async () => {
+    const fc = fakeClient(PENDING(['a', 'b']));
+    const res = await storeWith(fc).editDraft(9, 1, { images: [] }, 'op');
+    assert.equal(res.ok, true);
+    if (!res.ok) return;
+    const p = fc.updateParams!;
+    assert.deepEqual(p[7], [], '配图清空');
+    assert.equal(p[8], null, 'cover = null');
+    assert.deepEqual(res.images, []);
+  });
+
+  test('坏类型 images（非数组 / 含非 string）→ invalid_field，事务前拒、不碰 DB', async () => {
+    const store = new PublishLogStore({ pool: { connect: async () => { throw new Error('should not connect'); } } as any });
+    assert.deepEqual(await store.editDraft(1, 0, { images: 'a' as any }, 'op'), { ok: false, reason: 'invalid_field' });
+    assert.deepEqual(await store.editDraft(1, 0, { images: [1 as any] }, 'op'), { ok: false, reason: 'invalid_field' });
+  });
+
+  test('非待审记录删配图 → not_pending', async () => {
+    const fc = fakeClient({ status: 'published', content_version: 1, title: 't', content: 'c', publish_metadata: META, image_url: 'a', images: ['a', 'b'] });
+    assert.deepEqual(await storeWith(fc).editDraft(9, 1, { images: ['a'] }, 'op'), { ok: false, reason: 'not_pending' });
+  });
+
+  test('版本不符删配图 → version_conflict（无丢更新）', async () => {
+    const fc = fakeClient(PENDING(['a', 'b'])); // 活版本 1
+    assert.deepEqual(await storeWith(fc).editDraft(9, 0, { images: ['a'] }, 'op'), { ok: false, reason: 'version_conflict' });
+  });
+
+  test('未带 images 补丁：逐字保留原 images / image_url（零回归）', async () => {
+    const fc = fakeClient(PENDING(['a', 'b'], 'a'));
+    const res = await storeWith(fc).editDraft(9, 1, { content: '新正文' }, 'op');
+    assert.equal(res.ok, true);
+    const p = fc.updateParams!;
+    assert.deepEqual(p[7], ['a', 'b'], '未删图时 images 逐字保留');
+    assert.equal(p[8], 'a', '未删图时 image_url 逐字保留');
   });
 });
