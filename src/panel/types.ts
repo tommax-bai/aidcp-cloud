@@ -229,6 +229,8 @@ export interface PanelDeps {
   sessionLimits?: PanelSessionLimits;
   /** 引流线索热度过滤阈值（全局，change feed-hot-lead-group-comment）；缺则 /api/hot-lead-config 返 503。 */
   hotLeadConfig?: PanelHotLeadConfig;
+  /** 引流待评候选队列消费（段二人审逐条）；缺则 /api/hot-leads* 返 503。 */
+  hotLeads?: PanelHotLeads;
   /**
    * 自动续场护栏 + 看门狗阈值配置（全局单例，change restore-auto-resume-and-global-safety-config）。未注入则 /api/resume-config 返回 503。
    * 全局编辑 rest_ratio / 活跃时段窗口 / 每日上限 / 看门狗两阈值、对所有账号生效；写非乐观回真态；非法整块拒，绝不部分落库；
@@ -810,6 +812,28 @@ export type HotLeadConfigSetResult =
 export interface PanelHotLeadConfig {
   getView(): HotLeadConfigView;
   set(patch: HotLeadConfigPatchInput, updatedBy: string): Promise<HotLeadConfigSetResult>;
+}
+
+/** 引流待评候选队列一条（GET /api/hot-leads 形状，change feed-hot-lead-group-comment 段二消费）。 */
+export interface HotLeadQueueItem {
+  id: number;
+  noteId: string;
+  title?: string;
+  likeCount: number;
+  velocity: number;
+  ageHours: number;
+  discoveredAt: number;
+}
+
+export type HotLeadCommentResult =
+  | { ok: true }
+  | { ok: false; reason: string };
+
+/** 段二人审逐条消费：列某账号 pending 候选 + 对选中一条发带群码定向评论（走既有 triggerTargeted + 飞书人审=发）。 */
+export interface PanelHotLeads {
+  list(accountId: string): Promise<HotLeadQueueItem[]>;
+  /** 对选中 lead 发带群码定向引流评论；ok 后把该 lead 置 actioned。缺账号/缺码/边端离线/已评过 → 诚实失败。 */
+  comment(accountId: string, leadId: number, noteId: string, title: string): Promise<HotLeadCommentResult>;
 }
 
 /** 全局续场护栏 + 看门狗阈值生效值 + 来源/审计（GET /api/resume-config 形状）。 */

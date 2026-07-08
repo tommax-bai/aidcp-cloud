@@ -1384,6 +1384,46 @@ function createRequestHandler(
       return;
     }
 
+    // ── 引流待评候选队列消费（段二人审逐条，change feed-hot-lead-group-comment）──────
+    if (method === 'GET' && url.startsWith('/api/hot-leads')) {
+      if (!deps.hotLeads) {
+        sendJson(res, 503, { error: 'hot_leads_unavailable' });
+        return;
+      }
+      const accountId = new URL(url, 'http://x').searchParams.get('accountId');
+      if (!accountId) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'account_required' });
+        return;
+      }
+      sendJson(res, 200, { items: await deps.hotLeads.list(accountId) });
+      return;
+    }
+    if (method === 'POST' && url === '/api/hot-leads/comment') {
+      if (!deps.hotLeads) {
+        sendJson(res, 503, { error: 'hot_leads_unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { accountId, leadId, noteId, title } = (body ?? {}) as Record<string, unknown>;
+      if (typeof accountId !== 'string' || typeof leadId !== 'number' || typeof noteId !== 'string') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
+        return;
+      }
+      const r = await deps.hotLeads.comment(accountId, leadId, noteId, typeof title === 'string' ? title : '');
+      if (!r.ok) {
+        sendJson(res, 409, { error: 'comment_rejected', reason: r.reason });
+        return;
+      }
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
     // ── 自动续场护栏 + 看门狗阈值配置（全局单例，change restore-auto-resume-and-global-safety-config）──────
     // append 链。全局写非乐观回真态；非法数字整块拒（invalid_value→400），绝不部分落库；
     // 只写 resume_config_global，不碰风控状态单写路径。

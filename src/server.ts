@@ -2595,6 +2595,34 @@ async function main(): Promise<void> {
           // 单场会话上限配置（change session-limits-to-quota-layer）。按账号时长 + 互动预算可改 + 热加载 + 非乐观回真态。
           sessionLimits: sessionLimitPanel,
           hotLeadConfig: hotLeadConfigPanel,
+          // 引流待评候选队列消费（段二人审逐条）：列 pending + 对选中一条发带群码定向评论（复用 triggerTargeted+飞书人审=发），
+          // ok 后置 actioned。仅在队列 + 评论机器都可用时提供，否则面板自然 503。
+          ...(hotLeadQueue && commentScheduler
+            ? {
+                hotLeads: {
+                  list: async (accountId: string) => {
+                    const rows = await hotLeadQueue!.listPending(accountId);
+                    return rows.map((r) => ({
+                      id: r.id,
+                      noteId: r.noteId,
+                      title: r.snapshot.title,
+                      likeCount: r.snapshot.likeCount,
+                      velocity: r.snapshot.velocity,
+                      ageHours: r.snapshot.ageHours,
+                      discoveredAt: r.discoveredAt,
+                    }));
+                  },
+                  comment: async (accountId: string, leadId: number, noteId: string, title: string) => {
+                    const r = await commentScheduler!.triggerTargeted(accountId, { noteId, title }, { injectGroup: true });
+                    if (r.ok) {
+                      await hotLeadQueue!.markActioned(leadId).catch(() => {});
+                      return { ok: true as const };
+                    }
+                    return { ok: false as const, reason: r.reason ?? 'rejected' };
+                  },
+                },
+              }
+            : {}),
           // 自动续场护栏 + 看门狗阈值配置（change session-auto-resume-with-excursions）。按账号可改 + 热加载 + 非乐观回真态。
           resumeConfig: resumeConfigPanel,
           // 角色 prompt 只读预览（change role-prompt-visibility）。纯读，无写路径。
