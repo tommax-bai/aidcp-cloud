@@ -837,6 +837,9 @@ export interface NoteDetailPayload {
   authorId?: string;
   likeCount: number;
   collectCount: number;
+  /** 发布相对时刻原始文本（change feed-hot-lead-group-comment）：如「3小时前 / 昨天 14:30 / 07-05」。
+   *  边缘只从正文列底部日期容器抽原始串、不解析；云端解析成小时数并算热度速率。缺则诚实置空、MUST NOT 臆造。 */
+  publishedAtText?: string;
   /** 作者区关注按钮当下真实态（change skip-profile-visit-if-followed）：已关注/互关→true；
    *  缺省/读取失败=未探到→云端回退原主页评估。边缘只读取上报、MUST NOT 臆造。 */
   authorFollowed?: boolean;

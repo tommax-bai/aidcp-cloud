@@ -28,6 +28,8 @@ export interface NoteDetailData {
   authorId?: string;
   likeCount: number;
   collectCount: number;
+  /** 发布相对时刻原始文本（change feed-hot-lead-group-comment）；云端解析算热度速率。缺则诚实置空。 */
+  publishedAtText?: string;
   /** 详情页带 xsec_token 的链接（change interaction-feed-enrichment）；缺则诚实置空。 */
   url?: string;
   /** Original carousel images observed by edge; empty/missing means unavailable. */
@@ -478,6 +480,8 @@ export type RoleName =
   | 'valuable_comment_archivist'
   | 'curated_note_evaluator'
   | 'curated_comment_evaluator'
+  // —— 引流线索评估（change feed-hot-lead-group-comment）：纯确定性、不调 LLM、不进 role-catalog ——
+  | 'hot_lead_detector'
   // —— 按需评论任务角色（change comment-search-command，飞书 /comment）——
   | 'comment_search_term_generator'
   | 'comment_target_picker'

@@ -34,6 +34,7 @@ import { shanghaiDayStartMs } from './time/shanghai-day.js';
 import { SimplePlanner } from './planner/index.js';
 import { PgAnchorCache, BotChatStore, ConceptStore, LikedNoteStore, ValuableCommentStore, NotificationContactStore, InteractionFeedStore, CuratedContentStore, topicKeysFromTitle } from './cache/index.js';
 import type { CuratedReferenceImage, CuratedReferenceImageInput } from './cache/index.js';
+import { PgHotLeadQueue } from './hot-lead/hot-lead-queue.js';
 import { resolveCuratedGateConfig } from './publish-agent/curated-gate.js';
 import {
   EdgeCloudServer,
@@ -743,6 +744,24 @@ async function main(): Promise<void> {
     console.log('[aidcp-cloud] CuratedContentStore 已就绪（curated_content 表）');
   } catch (err) {
     console.warn('[aidcp-cloud] CuratedContentStore 初始化失败，精选灵感语料退化:', (err as Error).message);
+  }
+
+  // 引流待评候选队列（change feed-hot-lead-group-comment）：浏览闭环发现的高热度速率帖沉淀于此、人审逐条消费。
+  // init 失败留 undefined（不注册 hot_lead_detector、闭环不变、绝不崩），仿 curatedContentStore。
+  let hotLeadQueue: PgHotLeadQueue | undefined;
+  try {
+    const hlq = new PgHotLeadQueue({
+      host: readEnvString('PGHOST'),
+      port: readEnvPort('PGPORT'),
+      database: readEnvString('PGDATABASE'),
+      user: readEnvString('PGUSER'),
+      password: readEnvString('PGPASSWORD'),
+    });
+    await hlq.init();
+    hotLeadQueue = hlq;
+    console.log('[aidcp-cloud] HotLeadQueue 已就绪（hot_lead_queue 表）');
+  } catch (err) {
+    console.warn('[aidcp-cloud] HotLeadQueue 初始化失败，引流线索发现退化:', (err as Error).message);
   }
 
   // 「本账号最近观测到的笔记内容」缓存（change curated-inspiration-corpus）：collect 通常在 note.detail 之后、
@@ -1680,6 +1699,11 @@ async function main(): Promise<void> {
       // 精选语料库（change curated-admission-eval-roles，Phase 3）：注入则注册两段式准入的模型评估角色
       // （正文 curated_note_evaluator + 评论 curated_comment_evaluator）。缺省（PG 不可用）→ 不注册。
       curatedStore: curatedContentStore,
+      // 引流待评候选队列（change feed-hot-lead-group-comment）：注入则注册 hot_lead_detector（接稿件价值判定之后）。
+      hotLeadQueue,
+      // 引流线索「已评过」去重：复用 riskStore 的按账号互动去重（与自治评论/群评同一账本）。
+      hasCommentedForLead: (accountId, noteId) =>
+        riskStore.hasInteraction(accountId, noteId, 'comment').catch(() => false),
       // 硬暂停闸（验证码/人工接管）：通知准入据此放弃巡视——硬暂停期连帧都不发。
       isHardPaused: (edgeId) => (edgeId ? server.isEdgePaused(edgeId) : false),
       // 通知巡视发飞书（仅"评论和@"）：复用 messenger + 默认群解析；无群则记错不吞。

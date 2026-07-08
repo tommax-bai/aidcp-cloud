@@ -29,6 +29,9 @@ import { CommentLikeAppraiser } from '../agents/comment-like-appraiser.js';
 import { ValuableCommentArchivist } from '../agents/valuable-comment-archivist.js';
 import { CuratedNoteEvaluator, type CuratedNoteSink } from '../agents/curated-note-evaluator.js';
 import { CuratedCommentEvaluator, type CuratedCommentSink } from '../agents/curated-comment-evaluator.js';
+import { HotLeadDetector } from '../hot-lead/hot-lead-detector.js';
+import type { HotLeadQueue } from '../hot-lead/hot-lead-queue.js';
+import type { HotLeadGateConfig } from '../hot-lead/heat-velocity.js';
 import type { ValuableCommentInput, ValuableCommentRef } from '../cache/valuable-comment-store.js';
 import { CommentComposer } from '../agents/comment-composer.js';
 import { CommentDeAiFlavor } from '../agents/comment-de-ai-flavor.js';
@@ -168,6 +171,15 @@ export interface RoleDispatcherOptions {
    */
   curatedStore?: CuratedNoteSink & CuratedCommentSink;
   /**
+   * 引流待评候选队列（change feed-hot-lead-group-comment）：注入则注册 hot_lead_detector（接稿件价值判定之后，
+   * quality.pass 命中热度闸即入队，只发现不发布）。缺省 → 不注册（仿 concept_extractor 仅资源可用时注册）。
+   */
+  hotLeadQueue?: HotLeadQueue;
+  /** 引流线索热度闸阈值取值口（接后台全局配置 provider）；缺省用代码保守默认。 */
+  hotLeadGateConfig?: () => HotLeadGateConfig;
+  /** 引流线索「已评过」去重口（接 riskStore.hasInteraction(accountId,noteId,'comment')）；缺则只靠队列内去重。 */
+  hasCommentedForLead?: (accountId: string, noteId: string) => Promise<boolean>;
+  /**
    * 诚实人设启动闸（multi-account-node-support D3）：以「人设存储中是否存在该账号的人设行」为独立判据
    * （getForAccount!==null，**不走会回落默认的解析器**）。缺省 → 不设闸（向后兼容单账号）。default 账号硬豁免（见 canStartSession）。
    */
@@ -279,6 +291,9 @@ export class RoleDispatcher {
   private readonly getCommentLikeDailyRemaining?: () => number;
   private readonly archiveValuableComment?: (input: ValuableCommentInput) => Promise<void>;
   private readonly curatedStore?: CuratedNoteSink & CuratedCommentSink;
+  private readonly hotLeadQueue?: HotLeadQueue;
+  private readonly hotLeadGateConfig?: () => HotLeadGateConfig;
+  private readonly hasCommentedForLead?: (accountId: string, noteId: string) => Promise<boolean>;
   private readonly getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
   /** 已下发待回执的评论上下文：action.completed{comment} 据此扣额 + emit comment.done（→ 是否进主页评估）。 */
   private pendingComment: { noteId: string; sourcePageType: 'feed' | 'search'; actions: ('like' | 'collect')[]; text: string } | null = null;
@@ -378,6 +393,9 @@ export class RoleDispatcher {
     this.archiveValuableComment = options.archiveValuableComment;
     this.getCorpusReferences = options.getCorpusReferences;
     this.curatedStore = options.curatedStore;
+    this.hotLeadQueue = options.hotLeadQueue;
+    this.hotLeadGateConfig = options.hotLeadGateConfig;
+    this.hasCommentedForLead = options.hasCommentedForLead;
     this.isHardPaused = options.isHardPaused ?? (() => false);
     this.isPersonaBound = options.isPersonaBound;
     this.onSessionRejected = options.onSessionRejected;
@@ -709,6 +727,20 @@ export class RoleDispatcher {
           }),
         );
       }
+    }
+
+    // 引流线索评估（change feed-hot-lead-group-comment）：接稿件价值判定之后（订阅 quality.pass + note.detail.arrived）。
+    // 纯确定性、不调 LLM（故用 commonOptions 但不读 soul/llm）；仅在候选队列可用时注册（仿 curated / concept_extractor）。
+    if (this.hotLeadQueue) {
+      this.roles.push(
+        new HotLeadDetector({
+          ...commonOptions,
+          queue: this.hotLeadQueue,
+          getAccountId: () => this.currentAccountId,
+          ...(this.hotLeadGateConfig ? { getGateConfig: this.hotLeadGateConfig } : {}),
+          ...(this.hasCommentedForLead ? { hasCommented: this.hasCommentedForLead } : {}),
+        }),
+      );
     }
 
     // 捕获 SessionMonitor 引用：供 excursion（巡视）起止 → 暂停/恢复其时钟（唯一实例）。
