@@ -13,9 +13,11 @@ import { ALERT_SEVERITIES } from '../feishu/index.js';
 import { TEXT_PROVIDERS } from '../llm/providers.js';
 import { IMAGE_PROVIDERS } from '../publish-agent/image-providers.js';
 import type { PanelAccount } from './panel-store.js';
+import type { LlmKind, ThinkingModeApi } from '../config/role-catalog.js';
+import type { ModelEffectiveSource, PersonaSource } from './types.js';
 
 /** 面板 API 契约版本号。接口形状变更时递增。 */
-export const PANEL_API_VERSION = 2;
+export const PANEL_API_VERSION = 3;
 
 /**
  * PanelAccount 字段权威清单（console 镜像对拍此清单防漂移，#5/#6）。
@@ -45,6 +47,37 @@ type _PanelAccountFieldsMissing = _AssertNever<Exclude<keyof PanelAccount, (type
 type _PanelAccountFieldsExtra = _AssertNever<Exclude<(typeof PANEL_ACCOUNT_FIELDS)[number], keyof PanelAccount>>;
 export type { _PanelAccountFieldsMissing, _PanelAccountFieldsExtra };
 
+/**
+ * 面板角色 / 模型配置枚举的权威 runtime 全集（console 镜像对拍此清单防漂移，change
+ * console-panel-config-enum-fingerprint）。这些值被 console 用作 `{text,color}` 徽标映射的键，
+ * 漂移会令未同步的 console 出现「键缺失」→ 曾使 /roles 整页崩（`llmKind:'vision'` / `effectiveSource:'vision'`）。
+ * 类型定义仍在 role-catalog.ts / panel/types.ts；此处仅并列出 runtime 全集供 `/api/version` 导出。
+ * 下方 `_AssertNever` 强制数组恰好覆盖对应类型全集——漏 / 多成员均编译失败（对齐 PANEL_ACCOUNT_FIELDS 范式）。
+ */
+export const LLM_KINDS = ['text', 'image', 'vision', 'none'] as const;
+export const MODEL_EFFECTIVE_SOURCES = ['override', 'category', 'default', 'image', 'vision'] as const;
+export const PERSONA_SOURCES = ['override', 'none'] as const;
+export const THINKING_MODES_API = ['default', 'off', 'on'] as const;
+
+type _LlmKindMissing = _AssertNever<Exclude<LlmKind, (typeof LLM_KINDS)[number]>>;
+type _LlmKindExtra = _AssertNever<Exclude<(typeof LLM_KINDS)[number], LlmKind>>;
+type _ModelEffectiveSourceMissing = _AssertNever<Exclude<ModelEffectiveSource, (typeof MODEL_EFFECTIVE_SOURCES)[number]>>;
+type _ModelEffectiveSourceExtra = _AssertNever<Exclude<(typeof MODEL_EFFECTIVE_SOURCES)[number], ModelEffectiveSource>>;
+type _PersonaSourceMissing = _AssertNever<Exclude<PersonaSource, (typeof PERSONA_SOURCES)[number]>>;
+type _PersonaSourceExtra = _AssertNever<Exclude<(typeof PERSONA_SOURCES)[number], PersonaSource>>;
+type _ThinkingModeApiMissing = _AssertNever<Exclude<ThinkingModeApi, (typeof THINKING_MODES_API)[number]>>;
+type _ThinkingModeApiExtra = _AssertNever<Exclude<(typeof THINKING_MODES_API)[number], ThinkingModeApi>>;
+export type {
+  _LlmKindMissing,
+  _LlmKindExtra,
+  _ModelEffectiveSourceMissing,
+  _ModelEffectiveSourceExtra,
+  _PersonaSourceMissing,
+  _PersonaSourceExtra,
+  _ThinkingModeApiMissing,
+  _ThinkingModeApiExtra,
+};
+
 export interface VersionPayload {
   panelApiVersion: number;
   enums: {
@@ -57,6 +90,14 @@ export interface VersionPayload {
     textProvider: readonly string[];
     /** 图片生成厂商全集（console 镜像对拍，#5——图片厂商漂移的哨兵）。 */
     imageProvider: readonly string[];
+    /** 模型类型全集（含 vision 视觉角色；console KIND_LABEL 徽标映射键，漂移哨兵）。 */
+    llmKind: readonly string[];
+    /** 生效模型来源全集（含 vision；console SOURCE_TAG 徽标映射键，漂移哨兵）。 */
+    effectiveSource: readonly string[];
+    /** 人设来源全集（console 人设页 SOURCE_TAG 徽标映射键，漂移哨兵）。 */
+    personaSource: readonly string[];
+    /** 思考模式三态全集（console THINKING_TAG 徽标映射键，漂移哨兵）。 */
+    thinkingMode: readonly string[];
   };
   /** 关键 DTO 字段指纹（console 镜像对拍防漂移，#5/#6）。 */
   dtoFields: {
@@ -74,6 +115,10 @@ export function buildVersionPayload(): VersionPayload {
       alertSeverity: ALERT_SEVERITIES,
       textProvider: Object.keys(TEXT_PROVIDERS),
       imageProvider: Object.keys(IMAGE_PROVIDERS),
+      llmKind: LLM_KINDS,
+      effectiveSource: MODEL_EFFECTIVE_SOURCES,
+      personaSource: PERSONA_SOURCES,
+      thinkingMode: THINKING_MODES_API,
     },
     dtoFields: {
       panelAccount: PANEL_ACCOUNT_FIELDS,

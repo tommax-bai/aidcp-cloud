@@ -190,7 +190,16 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
 
     // /api/version 暴露告警分级枚举（task 5.4 follow-up）+ 厂商全集 + DTO 字段指纹（console-cloud-panel-hardening #4/#5/#6）
     const ver2 = (await (await fetch(`${base}/api/version`)).json()) as {
-      enums: { alertSeverity: string[]; riskAction: string[]; imageProvider: string[]; textProvider: string[] };
+      enums: {
+        alertSeverity: string[];
+        riskAction: string[];
+        imageProvider: string[];
+        textProvider: string[];
+        llmKind: string[];
+        effectiveSource: string[];
+        personaSource: string[];
+        thinkingMode: string[];
+      };
       dtoFields: { panelAccount: string[] };
     };
     assert.deepEqual(ver2.enums.alertSeverity, ['P0', 'P1', 'P2', 'P3']);
@@ -198,6 +207,11 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
     assert.ok(ver2.enums.imageProvider.includes('volcengine'), 'imageProvider 全集含火山（#5 哨兵源）');
     assert.ok(ver2.enums.textProvider.includes('dashscope'), 'textProvider 全集（#6 哨兵源）');
     assert.ok(ver2.dtoFields.panelAccount.includes('accountId'), 'PanelAccount 字段指纹（#6 对拍源）');
+    // 配置枚举哨兵源（console-panel-config-enum-fingerprint）：llmKind/effectiveSource 含 vision（曾致 /roles 崩）
+    assert.ok(ver2.enums.llmKind.includes('vision'), 'llmKind live 全集含 vision（配置枚举哨兵源）');
+    assert.ok(ver2.enums.effectiveSource.includes('vision'), 'effectiveSource live 全集含 vision（配置枚举哨兵源）');
+    assert.deepEqual(ver2.enums.personaSource, ['override', 'none'], 'personaSource 全集');
+    assert.deepEqual(ver2.enums.thinkingMode, ['default', 'off', 'on'], 'thinkingMode 三态全集');
 
     // V1 task 9.5：/api/alerts 只读流
     const al = (await (await fetch(`${base}/api/alerts`, { headers: auth })).json()) as { alerts: unknown[] };
