@@ -20,6 +20,8 @@ import {
   type WelcomePayload,
   type PacingSnapshotPayload,
   type SessionEndPayload,
+  type SearchExecutePayload,
+  type NoteOpenPayload,
 } from '../../src/comm/protocol.js';
 
 /**
@@ -119,5 +121,17 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     const env = makeEnvelope('session.end', 'end-1', 1700000000000, payload);
     const back = parseEnvelope(JSON.stringify(env));
     assert.deepEqual((back!.payload as SessionEndPayload).autoResumeInMs, 60_000);
+  });
+
+  it('AC-PROTO-08 Facebook 定向评论可选载荷字段往返存活（container / url，防两端静默漂移）', () => {
+    // change facebook-scheduled-comment 给 search.execute 加 container?、note.open 加 url?（复用消息、零新增类型）。
+    // 两份 protocol.ts 须逐字镜像这两个字段；typecheck 的 MessageType 穷举抓不到可选字段漂移，故此往返断言兜底。
+    const search: SearchExecutePayload = { keyword: '咖啡', container: 'https://www.facebook.com/groups/123456' };
+    const searchBack = parseEnvelope(JSON.stringify(makeEnvelope('search.execute', 's-1', 1700000000000, search)));
+    assert.equal((searchBack!.payload as SearchExecutePayload).container, 'https://www.facebook.com/groups/123456');
+
+    const open: NoteOpenPayload = { url: 'https://www.facebook.com/groups/123456/posts/999' };
+    const openBack = parseEnvelope(JSON.stringify(makeEnvelope('note.open', 'o-1', 1700000000000, open)));
+    assert.equal((openBack!.payload as NoteOpenPayload).url, 'https://www.facebook.com/groups/123456/posts/999');
   });
 });

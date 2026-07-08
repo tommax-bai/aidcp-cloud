@@ -30,6 +30,7 @@ import {
   type TargetedCommentSteps,
 } from './comment-task-runner.js';
 import { buildEdgeCommentSteps, type EdgePusher, type CommentDedup } from './edge-steps.js';
+import { buildFacebookEdgeSteps } from './facebook-edge-steps.js';
 import { buildComposeAndApprove } from './compose-approve.js';
 import type { CuratedSampleForTerms } from '../agents/comment-search-term-generator.js';
 import type { CuratedContentTypeFilter } from '../cache/curated-content-store.js';
@@ -42,7 +43,7 @@ import {
 } from '../platform/index.js';
 import { validateFacebookComment } from './facebook-comment-validators.js';
 import type { EffectiveFacebookCommentConfig } from '../config/facebook-comment-config-store.js';
-import type { FacebookCommentAuditRow } from './facebook-comment-audit-store.js';
+import type { FacebookCommentAuditRow, FacebookCommentOutcome } from './facebook-comment-audit-store.js';
 
 export interface CommentResultReceipt {
   ok: boolean;
@@ -112,6 +113,45 @@ export interface CommentSchedulerDeps {
   facebookAudit?: (row: FacebookCommentAuditRow) => void;
   /** 选关键词/容器的随机源（测试注入定值；缺省 Math.random）。 */
   random?: () => number;
+}
+
+// ── Facebook 边端步骤诚实非成功原因 → 审计 outcome 映射（reason 原文另存审计行 reason 字段供取证）──
+
+/** 搜索步骤失败 → outcome。阻断态（登录/验证码）归 login_required（触发跳过账号 + 告警）；容器不可用归 no_targets。 */
+function mapFacebookBlockOutcome(reason?: string): FacebookCommentOutcome {
+  switch (reason) {
+    case 'login_required':
+    case 'blocked_by_captcha':
+      return 'login_required';
+    case 'permission_gated':
+      return 'no_targets'; // 容器非成员/门槛 = 无可用目标（fail-closed）
+    default:
+      return 'submit_failed'; // timeout / nav_error / 未知
+  }
+}
+
+/** 开帖步骤失败 → outcome。阻断态归 login_required；候选帖不可用（无评论框/开帖失败）归 no_strong_candidate。 */
+function mapFacebookOpenOutcome(reason?: string): FacebookCommentOutcome {
+  switch (reason) {
+    case 'login_required':
+    case 'blocked_by_captcha':
+      return 'login_required';
+    default:
+      return 'no_strong_candidate'; // editor_not_found / open_failed / not_facebook / timeout
+  }
+}
+
+/** 提交步骤失败 → outcome。阻断态归 login_required；确认不了归 verification_ambiguous；其余归 submit_failed。 */
+function mapFacebookSubmitOutcome(reason?: string): FacebookCommentOutcome {
+  switch (reason) {
+    case 'login_required':
+    case 'blocked_by_captcha':
+      return 'login_required';
+    case 'verification_ambiguous':
+      return 'verification_ambiguous';
+    default:
+      return 'submit_failed'; // identity_unknown / editor_not_found / submit_control_* / marker_not_accepted / timeout
+  }
 }
 
 export class CommentScheduler {
@@ -323,13 +363,16 @@ export class CommentScheduler {
   }
 
   /**
-   * Facebook 定向评论执行（facebook-scheduled-comment 2.2 + 2.3 影子）。当前增量为**纯云端影子编排**：
-   * 闸链 → 随机选关键词/容器 → 撰写 → 只拒不修校验 → 每次触发写一行审计。
-   * 影子模式（AIDCP_FB_COMMENT_SHADOW）到「校验通过」即止步，**绝不提交、不记风控/冷却**（物理发不出评论）。
-   * 真发路径（kill switch 开且非影子）在校验通过后过 canDo + 日上限闸——但**边端评论执行能力（4.x）+ 协议载荷
-   * + 有界超时 + F1 真机确认**尚未接入，故真发路径当前诚实回 not_wired、不发。这些是单独 gated 的真机 follow-up。
+   * Facebook 定向评论执行（facebook-scheduled-comment 2.2/2.3 + 真发接线 task 4.x）。
+   * 闸链 → 随机选关键词/容器 → 撰写 → 只拒不修校验：
+   * - 影子模式（AIDCP_FB_COMMENT_SHADOW）到「校验通过」即止步，**绝不提交、不记风控/冷却/去重**（物理发不出评论）。
+   * - 真发路径（kill switch AIDCP_FB_COMMENT_AUTO 开且非影子）：过 canDo + 日上限闸后，经边端评论能力真发——
+   *   容器内搜索 → 选未评候选 → 开帖 → 提交并「服务器确认」。每步有界超时（此路径无巡视看门狗）。
    *
-   * 红线：绝不走 onCommentTakeoverStart（那会把账号塞进 manualCommentAccounts 跳过风控计数，违反 2.4）。
+   * 红线：
+   * - 绝不走 onCommentTakeoverStart（那会把账号塞进 manualCommentAccounts 跳过风控计数，违反 2.4）。
+   * - 真发成功的风控计数走 interaction.occurred → RiskController.record('comment') 自动路径（handler.ts），
+   *   **绝不在此重复 record**；本方法只在**提交派发前**打 attempted 去重标记（防重复真发 §5.4，与成功计数解耦）。
    */
   private async runFacebookTargetedTask(accountId: string): Promise<void> {
     const d = this.deps;
@@ -391,8 +434,72 @@ export class CommentScheduler {
       }
     }
 
-    // 边端评论执行能力（edge 4.x）+ 协议载荷 + 有界超时 + F1 真机确认 = 单独 gated follow-up；当前诚实不发。
-    audit({ accountId, outcome: 'not_wired', reason: 'edge_comment_capability_pending', shadow: false, keyword, container, textLength: v.text.length });
+    // ── 真发接线（edge 4.x 评论能力 + 协议载荷 container/url + 有界超时）──
+    // 边端离线 → 诚实非成功（连接可能在 trigger 后掉线；此路径无看门狗，靠每步有界超时兜底）。
+    const conn = d.resolveConnection(accountId);
+    if (!conn || !conn.edgeId) {
+      audit({ accountId, outcome: 'submit_failed', reason: 'edge_offline', shadow: false, keyword, container, textLength: v.text.length });
+      return;
+    }
+    const steps = buildFacebookEdgeSteps({
+      bus: conn.bus,
+      pusher: d.pusher,
+      edgeId: conn.edgeId,
+      ...(typeof d.stepTimeoutMs === 'number' ? { stepTimeoutMs: d.stepTimeoutMs } : {}),
+      logger: d.logger ?? console,
+    });
+    const dedup = d.dedupFor(accountId);
+
+    // 1) 容器内搜索候选帖（边端只在配置容器内搜、绝不全站）。
+    const search = await steps.searchInContainer(keyword, container);
+    if (!search.ok) {
+      audit({ accountId, outcome: mapFacebookBlockOutcome(search.reason), reason: search.reason, shadow: false, keyword, container });
+      return;
+    }
+    // 2) 选一个未评过的候选（防重复真发：跳过 dedup 已标记的 permalink）。
+    let target: string | undefined;
+    for (const c of search.candidates) {
+      const seen = await dedup.hasInteracted(c.permalink, 'comment').catch(() => false);
+      if (!seen) {
+        target = c.permalink;
+        break;
+      }
+    }
+    if (!target) {
+      audit({
+        accountId,
+        outcome: 'no_strong_candidate',
+        reason: search.candidates.length === 0 ? 'no_candidates' : 'all_deduped',
+        shadow: false,
+        keyword,
+        container,
+      });
+      return;
+    }
+    // 3) 开帖（permalink 直驱详情页）。
+    const open = await steps.openPost(target);
+    if (!open.ok) {
+      audit({ accountId, outcome: mapFacebookOpenOutcome(open.reason), reason: open.reason, shadow: false, keyword, container });
+      return;
+    }
+    // 4) 防重复真发（BLOCKING §5.4）：**提交派发前**即打 attempted 去重标记（与成功计数解耦）——
+    //    确认假阴性/网络抖动时不会对同一目标重复真评；该标记同时使 facebookCommentedToday 计入当日配额（保守）。
+    await dedup.recordInteraction(target, 'comment').catch(() => {});
+    // 5) 提交评论 + 服务器确认（边端 own-identity 收窄）。成功记风控走 interaction.occurred 自动路径，绝不在此重复 record。
+    const submit = await steps.submitComment(target, v.text);
+    if (submit.ok) {
+      audit({ accountId, outcome: 'commented', shadow: false, keyword, container, textLength: v.text.length });
+    } else {
+      audit({
+        accountId,
+        outcome: mapFacebookSubmitOutcome(submit.reason),
+        reason: submit.reason,
+        shadow: false,
+        keyword,
+        container,
+        textLength: v.text.length,
+      });
+    }
   }
 
   private async runTargetedTask(

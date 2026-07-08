@@ -340,6 +340,12 @@ export interface NoteOpenPayload {
   noteId?: string;
   index?: number;
   reason?: string;
+  /**
+   * 直接打开的完整目标链接（change facebook-scheduled-comment，可选）。非空时边缘按此 permalink 直驱打开
+   * （Facebook 定向评论：候选帖 permalink 直达详情页），不再依赖 feed 卡片索引/noteId 定位。
+   * 缺省 = 走原有 index/noteId 卡片定位（小红书浏览闭环旧行为，向后兼容）。
+   */
+  url?: string;
   /** 打开前犹豫 / 感知时间中心值（毫秒，可选；时间指令见 §角色驱动指令） */
   thinkMs?: number;
 }
@@ -367,6 +373,13 @@ export interface SearchExecutePayload {
    * 结果页原生时间范围筛选（change comment-search-command）。缺省=不筛（不限时间）。
    */
   timeWindow?: 'all' | 'one_day' | 'one_week' | 'half_year';
+  /**
+   * 站内搜索容器（change facebook-scheduled-comment，可选）。非空时边缘只在该容器内搜索，绝不全站搜。
+   * Facebook 定向评论：容器为运营方自己的 / 已加入的主页或群的完整链接（`https://www.facebook.com/...`）；
+   * 边缘先校验其为白名单内的合法 Facebook 链接，非法/非成员则 honest `permission_gated`、绝不回退全站。
+   * 缺省 = 无容器约束（小红书全站搜索旧行为，向后兼容）。
+   */
+  container?: string;
 }
 
 /** 结束本次浏览会话（cloud → edge）。 */

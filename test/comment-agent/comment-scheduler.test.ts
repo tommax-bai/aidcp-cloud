@@ -366,18 +366,157 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
     assert.equal(audits[0].reason, 'daily_cap');
   });
 
-  it('真发路径过闸但边端能力未接入 → not_wired（绝不假成功、绝不下发提交）', async () => {
-    const { deps, audits, posted } = fbDeps({ auto: true, shadow: false });
-    await new CommentScheduler(deps).triggerManual('fb-1');
-    await tick();
-    assert.equal(audits[0].outcome, 'not_wired');
-    assert.deepEqual(posted, [], 'not_wired 绝不下发提交命令');
-  });
-
   it('未注入 FB deps → 维持诚实拒绝（零回归）', async () => {
     const deps = baseDeps({ getPlatform: () => 'facebook' }); // 不注入 facebookConfigFor
     const r = await new CommentScheduler(deps).triggerManual('fb-1');
     assert.equal(r.ok, false);
     assert.match(r.message, /尚未接入|待实装/);
+  });
+});
+
+// ── facebook-scheduled-comment 真发接线（task 4.x）：容器搜索 → 开帖 → 提交 + 服务器确认 ──
+describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => {
+  type Audit = import('../../src/comment-agent/facebook-comment-audit-store.js').FacebookCommentAuditRow;
+  const PERMALINK = 'https://www.facebook.com/groups/1/posts/2';
+
+  /** FB 真发流水线的假边端：按命令类型 emit 对应上报到同一私有总线；可配搜索失败/开帖失败/提交结果/候选集。 */
+  function fbFlowDeps(cfg: {
+    candidates?: string[];
+    searchFail?: string;
+    openOk?: boolean;
+    openReason?: string;
+    submit?: { ok: boolean; reason?: string };
+    seen?: string[];
+    /** 连接在 trigger 通过后掉线：resolveConnection 首次（trigger 闸）返回连接、其后（真发内）返回 null。 */
+    dropAfterTrigger?: boolean;
+  } = {}): {
+    deps: CommentSchedulerDeps;
+    audits: Audit[];
+    posted: string[];
+    dedupRecorded: string[];
+  } {
+    const audits: Audit[] = [];
+    const posted: string[] = [];
+    const dedupRecorded: string[] = [];
+    const seen = new Set(cfg.seen ?? []);
+    const bus = new EventBus();
+    const candidates = cfg.candidates ?? [PERMALINK];
+    let resolveCalls = 0;
+    const pusher = {
+      pushToEdges: (envelope: unknown): number => {
+        const env = envelope as Envelope;
+        posted.push(env.type);
+        if (env.type === 'search.execute') {
+          if (cfg.searchFail) {
+            bus.emit('action.completed', { action: 'search', ok: false, reason: cfg.searchFail, ts: 0 } as never);
+          } else {
+            bus.emit('page.cards.arrived', { cards: candidates.map((p, i) => ({ index: i, noteId: p })), ts: 0 } as never);
+          }
+        } else if (env.type === 'note.open') {
+          const url = (env.payload as { url?: string }).url;
+          if (cfg.openOk === false) {
+            bus.emit('action.completed', { action: 'open_note', ok: false, reason: cfg.openReason ?? 'editor_not_found', ts: 0 } as never);
+          } else {
+            bus.emit('note.detail.arrived', { detail: { noteId: url, title: '', content: '', likeCount: 0, collectCount: 0 }, ts: 0 } as never);
+          }
+        } else if (env.type === 'interaction.comment') {
+          const s = cfg.submit ?? { ok: true };
+          bus.emit('action.completed', { action: 'comment', ok: s.ok, ...(s.reason ? { reason: s.reason } : {}), ts: 0 } as never);
+        }
+        return 1;
+      },
+    };
+    const deps = baseDeps({
+      getPlatform: () => 'facebook',
+      resolveConnection: () => {
+        resolveCalls += 1;
+        // dropAfterTrigger：首调（triggerManual 在线闸）给连接，其后（真发内 re-resolve）返回 null。
+        if (cfg.dropAfterTrigger && resolveCalls > 1) return null;
+        return { bus, edgeId: 'e-fb' };
+      },
+      pusher,
+      stepTimeoutMs: 60, // 有界超时；任何未 emit 的等待 60ms 后诚实超时（不 28s 挂死测试）
+      random: () => 0,
+      dedupFor: () => ({
+        hasInteracted: async (noteId: string) => seen.has(noteId),
+        recordInteraction: async (noteId: string) => {
+          dedupRecorded.push(noteId);
+          seen.add(noteId);
+        },
+      }),
+      facebookConfigFor: () => ({ enabled: true, keywords: ['咖啡'], containers: ['https://www.facebook.com/groups/1'] }),
+      facebookAutoEnabled: () => true,
+      facebookShadow: () => false,
+      facebookCompose: async () => '这家手冲咖啡很不错',
+      facebookCanComment: async () => true,
+      facebookDailyCap: () => 5,
+      facebookCommentedToday: async () => 0,
+      facebookAudit: (row) => audits.push(row),
+    });
+    return { deps, audits, posted, dedupRecorded };
+  }
+  const tick = () => new Promise((r) => setTimeout(r, 120));
+
+  it('happy path：搜索→开帖→提交确认 → commented，三命令依次下发，提交前打去重标记', async () => {
+    const { deps, audits, posted, dedupRecorded } = fbFlowDeps({ submit: { ok: true } });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
+    // §5.4 防重复真发：提交派发前已打 attempted 去重标记（与成功计数解耦）。
+    assert.deepEqual(dedupRecorded, [PERMALINK]);
+  });
+
+  it('提交后无法服务器确认 → verification_ambiguous，但去重标记仍已打（防重复真发）', async () => {
+    const { deps, audits, dedupRecorded } = fbFlowDeps({ submit: { ok: false, reason: 'verification_ambiguous' } });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'verification_ambiguous');
+    assert.deepEqual(dedupRecorded, [PERMALINK], '即便确认失败，也已标记以防重复真评同一目标');
+  });
+
+  it('搜索遇登录失效 → login_required，不开帖不提交、不打去重', async () => {
+    const { deps, audits, posted, dedupRecorded } = fbFlowDeps({ searchFail: 'login_required' });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'login_required');
+    assert.deepEqual(posted, ['search.execute']);
+    assert.deepEqual(dedupRecorded, []);
+  });
+
+  it('容器内无候选 → no_strong_candidate', async () => {
+    const { deps, audits, posted } = fbFlowDeps({ candidates: [] });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'no_strong_candidate');
+    assert.deepEqual(posted, ['search.execute']);
+  });
+
+  it('唯一候选已评过（dedup 命中）→ no_strong_candidate(all_deduped)，绝不重复开帖/提交', async () => {
+    const { deps, audits, posted, dedupRecorded } = fbFlowDeps({ seen: [PERMALINK] });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'no_strong_candidate');
+    assert.equal(audits.at(-1)?.reason, 'all_deduped');
+    assert.deepEqual(posted, ['search.execute']);
+    assert.deepEqual(dedupRecorded, [], '已评过的目标不再重复标记/提交');
+  });
+
+  it('开帖失败（评论框催不出）→ no_strong_candidate，未提交、未打去重', async () => {
+    const { deps, audits, posted, dedupRecorded } = fbFlowDeps({ openOk: false, openReason: 'editor_not_found' });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'no_strong_candidate');
+    assert.deepEqual(posted, ['search.execute', 'note.open']);
+    assert.deepEqual(dedupRecorded, [], '开帖失败在提交去重标记之前，不占标记');
+  });
+
+  it('trigger 后连接掉线 → submit_failed(edge_offline)，绝不下发任何命令', async () => {
+    const { deps, audits, posted } = fbFlowDeps({ dropAfterTrigger: true });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'submit_failed');
+    assert.equal(audits.at(-1)?.reason, 'edge_offline');
+    assert.deepEqual(posted, []);
   });
 });
