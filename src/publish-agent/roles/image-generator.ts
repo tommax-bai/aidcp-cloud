@@ -38,7 +38,8 @@ const DEFAULT_TEXTCARD_RENDER_TIMEOUT_MS = 30_000;
 // 故默认取 240s（≈185s 生成上限 + 30s 转存 + 余量），避免「生成刚成功但转存被外闸砍」的尾部误丢。改任一子预算须同步调整。
 // 生图实测 25~40s、转存实测数秒，绝大多数远在预算内；仅生成拖到轮询上限的尾部才吃到余量。
 const DEFAULT_PER_IMAGE_TIMEOUT_MS = 240_000;
-const DEFAULT_MAX_IMAGES = 3;
+// change rewrite-image-count-parity：默认张数上限 3→9（与 ImageSetPlanner 保持一致；仅用于角色总闸余量估算）。
+const DEFAULT_MAX_IMAGES = 9;
 
 interface ImageGenerationOutcome {
   url: string | null;

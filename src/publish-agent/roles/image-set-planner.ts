@@ -1,7 +1,9 @@
 import { BasePublishRole } from './base-role.js';
 import type { RoleConfig } from './base-role.js';
+import type { PipelineContext } from '../pipeline-context.js';
 import type { PipelineFields, CreatedContent, ImageSetPlan, ImageTheme } from '../types.js';
 import { buildImageSetPlanPrompt, IMAGE_COUNT_HARD_MAX } from '../prompts.js';
+import { referenceImagesForGeneration } from '../reference-image-guidance.js';
 import { executeWithFallback } from '../retry-strategy.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
 
@@ -10,9 +12,10 @@ import type { ChatLlmClient } from '../../llm/qwen.js';
  * LLM 读正文决定：配几张 + 每张画什么主体（业务语言）+ 风格倾向；写 imageSetPlan。
  * 红线：决策与执行解耦——只产选题、绝不产万相 prompt、绝不调图源。
  * 图文帖必须有图：张数恒 clamp 到 [1, maxImages≤9]；LLM 失败降级朝「更少图」退（1 张通用主题），键必写不死锁。
+ * change rewrite-image-count-parity：洗稿帖张数对齐源稿有效图数（≤maxImages），非洗稿维持内容驱动。
  */
 
-const DEFAULT_MAX_IMAGES = 3;
+const DEFAULT_MAX_IMAGES = 9;
 
 // change raise-model-call-timeouts-for-thinking-models：配图选题是文本 LLM 调用，角色闸 ≥ 单次模型天花板（180s）
 // 且同传进 chat()（旧 30s 峰值必误超时→退化为 1 张通用主题）。env 可调。注意：这是文本选题，非万相生图（生图闸另计）。
@@ -59,12 +62,18 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
     return snapshot.createdContent!;
   }
 
-  protected async execute(input: CreatedContent): Promise<ImageSetPlan> {
+  protected async execute(input: CreatedContent, context: PipelineContext<PipelineFields>): Promise<ImageSetPlan> {
+    // 洗稿对齐（rewrite-image-count-parity）：源参照笔记有效图 ≥1 张 → 目标张数 = clamp(有效源图数, 1, maxImages)；
+    // 有效口径同生图参考图（referenceImagesForGeneration）。非洗稿 / 无有效源图 → undefined，维持内容驱动。
+    const refImages = context.snapshot().trigger?.generateInput?.referenceNote?.images ?? [];
+    const usableSourceCount = referenceImagesForGeneration(refImages).length;
+    const targetCount = usableSourceCount >= 1 ? Math.min(usableSourceCount, this.maxImages) : undefined;
+
     const { result, usedFallback } = await executeWithFallback<ParsedPlan | null>(
       async () => {
         const raw = await this.llmClient.chat([
           { role: 'system', content: '你是配图选题师。严格返回JSON。' },
-          { role: 'user', content: buildImageSetPlanPrompt(input, this.maxImages) },
+          { role: 'user', content: buildImageSetPlanPrompt(input, this.maxImages, targetCount) },
         ], { timeoutMs: IMAGE_SET_PLAN_TIMEOUT_MS });
         return this.parse(raw);
       },
@@ -75,7 +84,7 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
       this.logger.warn('[ImageSetPlanner] LLM 失败，降级朝更少图退（1 张通用主题）');
       return this.degradePlan(input);
     }
-    return this.buildPlan(result, input);
+    return this.buildPlan(result, input, targetCount);
   }
 
   protected override getDefaultOutput(): ImageSetPlan {
@@ -89,8 +98,12 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
     return { wantImage: true, imageCount: 1, themes: [{ subject: `${subject} 主题示意` }], styleHint: null, plannedAt: this.clock() };
   }
 
-  private buildPlan(p: ParsedPlan, input: CreatedContent): ImageSetPlan {
-    const count = Math.max(1, Math.min(p.imageCount, this.maxImages));
+  private buildPlan(p: ParsedPlan, input: CreatedContent, targetCount?: number): ImageSetPlan {
+    // 洗稿对齐时张数钉死为 targetCount（已 ≤ maxImages）；否则取 LLM 判断值夹 [1, maxImages]。
+    const count =
+      targetCount !== undefined
+        ? Math.max(1, Math.min(targetCount, this.maxImages))
+        : Math.max(1, Math.min(p.imageCount, this.maxImages));
     const themes = p.themes.slice(0, count);
     // themes 不足 → 用标题派生补齐（保证长度=count，[0]=钩子图/封面位）。
     while (themes.length < count) {

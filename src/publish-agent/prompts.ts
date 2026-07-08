@@ -678,9 +678,19 @@ export const IMAGE_COUNT_HARD_MAX = 9;
  * 纯内容决策：只产「要不要图 / 几张 / 每张画什么主体（业务语言）」，不产万相 prompt、不碰图源。
  * 输出 JSON: { wantImage, imageCount, themes:[{subject,intent}], styleHint }
  */
-export function buildImageSetPlanPrompt(createdContent: CreatedContent, maxImages: number): string {
+export function buildImageSetPlanPrompt(createdContent: CreatedContent, maxImages: number, exactCount?: number): string {
   const contentPreview = createdContent.content.slice(0, 400);
   const cap = Math.max(1, Math.min(maxImages, IMAGE_COUNT_HARD_MAX));
+  // 洗稿场景钉死张数（对齐源稿图片数）：夹进 [1, cap]；非洗稿不传、维持内容驱动的建议区间。
+  const fixed = exactCount !== undefined ? Math.max(1, Math.min(Math.floor(exactCount), cap)) : undefined;
+  const countRequirement =
+    fixed !== undefined
+      ? `- imageCount: 本帖固定配 ${fixed} 张（对齐原稿图片数量），MUST 恰好等于 ${fixed}，不得多、不得少。`
+      : `- imageCount: 建议 ${Math.min(3, cap)} 张左右，范围 1~${cap}（不得为 0；内容确实单薄可只 1 张）。`;
+  const themesRequirement =
+    fixed !== undefined
+      ? `- themes: 必须给正好 ${fixed} 项，每项一个主体（如「整体架构示意」「踩坑前后对比」「实际使用场景」），第 0 张是最抓眼的钩子图/封面。`
+      : '- themes: 与 imageCount 等长的数组，每项一个主体（如「整体架构示意」「踩坑前后对比」「实际使用场景」），第 0 张是最抓眼的钩子图/封面。';
 
   return [
     '你是一个小红书图文帖的配图选题师。读文章标题与正文，决定这篇帖子配几张图、每张图分别画什么主体，让图文形成叙事递进。',
@@ -695,8 +705,8 @@ export function buildImageSetPlanPrompt(createdContent: CreatedContent, maxImage
     `tone: ${createdContent.tone}`,
     '',
     '【选题要求】',
-    `- imageCount: 建议 ${Math.min(3, cap)} 张左右，范围 1~${cap}（不得为 0；内容确实单薄可只 1 张）。`,
-    '- themes: 与 imageCount 等长的数组，每项一个主体（如「整体架构示意」「踩坑前后对比」「实际使用场景」），第 0 张是最抓眼的钩子图/封面。',
+    countRequirement,
+    themesRequirement,
     '- subject 用中文业务语言描述画面主体（不要写英文 prompt、不要写风格词——风格由系统统一注入）。',
     '- intent（可选）：这张图想传达的要点，给后续生成更多上下文。',
     '- styleHint（可选）：整体风格倾向的中文描述（如「科技扁平」「手绘温暖」），供参考，可省。',
