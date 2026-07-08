@@ -32,7 +32,7 @@ import { createBillingPriceRefresh } from './metrics/billing-price-refresh.js';
 import { startRetentionSweeper } from './panel/retention-sweeper.js';
 import { shanghaiDayStartMs } from './time/shanghai-day.js';
 import { SimplePlanner } from './planner/index.js';
-import { PgAnchorCache, BotChatStore, ConceptStore, LikedNoteStore, ValuableCommentStore, NotificationContactStore, InteractionFeedStore, CuratedContentStore, topicKeysFromTitle } from './cache/index.js';
+import { PgAnchorCache, BotChatStore, GroupRouteStore, ConceptStore, LikedNoteStore, ValuableCommentStore, NotificationContactStore, InteractionFeedStore, CuratedContentStore, topicKeysFromTitle } from './cache/index.js';
 import type { CuratedReferenceImage, CuratedReferenceImageInput } from './cache/index.js';
 import { PgHotLeadQueue } from './hot-lead/hot-lead-queue.js';
 import { resolveCuratedGateConfig } from './publish-agent/curated-gate.js';
@@ -79,6 +79,7 @@ import {
   buildFeishuEventDispatcher,
   isFeishuWsEnabled,
   resolveDefaultChatId,
+  resolveChatIdForAccount,
   getApprovalSignalPath,
   writeApprovalSignal,
   matchAccountByNickname,
@@ -721,6 +722,18 @@ async function main(): Promise<void> {
     console.warn('[aidcp-cloud] NotificationContactStore 初始化失败，通知联系人记录退化:', (err as Error).message);
   }
 
+  // 团队 → 群路由（change feishu-per-team-notification-routing，schema 自建于 init）：出站按账号 group_label 路由到对应群。
+  // init 失败留 undefined（路由退化 → 一律落默认群，绝不崩、绝不静默丢）。空表 = 今天行为逐字一致。
+  let groupRouteStore: GroupRouteStore | undefined;
+  try {
+    const grs = new GroupRouteStore();
+    await grs.init();
+    groupRouteStore = grs;
+    console.log('[aidcp-cloud] GroupRouteStore 已就绪（group_route 表；账号→团队群路由）');
+  } catch (err) {
+    console.warn('[aidcp-cloud] GroupRouteStore 初始化失败，团队路由退化（一律落默认群）:', (err as Error).message);
+  }
+
   // 面板互动流展示账本（change interaction-feed-enrichment）。init 失败留 undefined（面板互动表退化为空、绝不崩闭环）。
   let interactionFeedStore: InteractionFeedStore | undefined;
   try {
@@ -1279,7 +1292,24 @@ async function main(): Promise<void> {
       return commentScheduler.triggerManual(acct, { injectGroup: options?.injectGroup });
     },
   };
-  const commandRouter = new CommandRouter(actions);
+  // 命令作用域（change feishu-per-team-notification-routing）：账号影响类命令只在「管理群」受理，外部 / 非管理群一律诚实拒。
+  // 管理群 = 独立显式 env 白名单 FEISHU_MANAGEMENT_CHAT_IDS（逗号分隔）——**不由 /bind 授予、不复用 is_default**（防自助提权）。
+  // 未配置（env 空）→ 放行全部（零回归 / 滚动上线 ramp：先零变更部署，待就绪再显式设白名单收紧）。
+  const managementChatIds = new Set(
+    (readEnvString('FEISHU_MANAGEMENT_CHAT_IDS') ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+  const commandScopingEnabled = managementChatIds.size > 0;
+  const isCommandChatAuthorized = (chatId?: string): boolean =>
+    !commandScopingEnabled || (!!chatId && managementChatIds.has(chatId));
+  console.log(
+    commandScopingEnabled
+      ? `[aidcp-cloud] 飞书命令作用域已启用：仅 ${managementChatIds.size} 个管理群可下达账号命令（外部群纯通知投递）`
+      : '[aidcp-cloud] 飞书命令作用域未启用（FEISHU_MANAGEMENT_CHAT_IDS 为空）→ 放行全部命令（零回归）',
+  );
+  const commandRouter = new CommandRouter(actions, undefined, undefined, isCommandChatAuthorized);
   const messenger = new FeishuMessenger();
   // A 阶段1 发布指令编排器 / 验证码协助均经 edgeServer 推送（server 在下方构造，闭包运行时已就绪）。
   let edgeServer: EdgeCloudServer | undefined;
@@ -1726,15 +1756,19 @@ async function main(): Promise<void> {
         riskStore.hasInteraction(accountId, noteId, 'comment').catch(() => false),
       // 硬暂停闸（验证码/人工接管）：通知准入据此放弃巡视——硬暂停期连帧都不发。
       isHardPaused: (edgeId) => (edgeId ? server.isEdgePaused(edgeId) : false),
-      // 通知巡视发飞书（仅"评论和@"）：复用 messenger + 默认群解析；无群则记错不吞。
+      // 通知巡视发飞书（仅"评论和@"）：按本连接真实账号路由到其团队群（change feishu-per-team-notification-routing）——
+      // 账号 → group_label → group_route.chat_id 命中即投；未绑定 / 读失败一律回落默认群、绝不静默丢。
+      // 这是本 change 的核心投递点（账号的平台入站消息 = 各团队要收的"消息"）；其余审批卡 / 运维告警仍走默认群（面向运营方）。
       notifyComments: async (items) => {
-        const chatId = await resolveDefaultChatId({
+        const chatId = await resolveChatIdForAccount(ctx.accountId, {
+          accountStore,
+          groupRouteStore,
           botChatStore,
           fallbackChatId: process.env.FEISHU_CHAT_ID,
           logger: console,
         });
         if (!chatId) {
-          console.error('[notification] 无可用飞书群，评论/@ 通知未发出');
+          console.error(`[notification] 无可用飞书群，评论/@ 通知未发出 account=${ctx.accountId}`);
           return;
         }
         const lines = items.map(
@@ -2642,6 +2676,9 @@ async function main(): Promise<void> {
           billingPriceRefresh,
           // 通知联系人名册（change notification-contact-registry）。同一记录 store 实例：读=按账号联系人列表、写=人工字段（微信/标签/备注）。
           notificationContact: notificationContactStore,
+          // 团队 → 群路由配置面（change feishu-per-team-notification-routing）。同一 group_route store 实例：读=全部映射、写=按团队键 upsert/清除。
+          // init 失败留 undefined 时面板自然 503，绝不崩闭环。botChatStore 已注入（GET /api/bot-chats 复用其 listActive）。
+          notificationRoutes: groupRouteStore,
           // 精选内容后台管理（change curated-content-admin-page）。同一精选语料 store 实例：读=按账号列表/筛选面、写=删单条/清空壳行。
           // init 失败留 undefined 时面板自然 503，绝不崩边-云闭环。
           curatedContent: curatedContentStore,

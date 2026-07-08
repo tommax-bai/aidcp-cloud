@@ -120,6 +120,11 @@ export interface AccountStore {
    * 供 /comment 任务开始处解析一次（人工触发的低频路径，可 await PG，无需同步缓存）。缺行 / 库内 NULL → null。
    */
   getGroupChatInfo?(accountId: string): Promise<string | null>;
+  /**
+   * 读账号分组标签 `group_label`（change feishu-per-team-notification-routing）：异步直读 PG，返回值 / null。
+   * 供出站按团队路由（账号 → group_label → 目标群）解析一次。缺行 / 库内 NULL → null；读失败由调用方按「无团队路由」兜底（落默认群），绝不当致命错误。
+   */
+  getGroupLabel?(accountId: string): Promise<string | null>;
   /** 读取账号平台；缺省/旧数据按 xiaohongshu 归一。 */
   getPlatform?(accountId: string): Promise<PlatformId>;
   /** 按平台枚举账号；返回状态字段，调用方可据 active/paused 做调度闸。 */
@@ -312,6 +317,18 @@ export class PgAccountStore implements AccountStore {
       [accountId],
     );
     return rows.length > 0 ? rows[0].group_chat_info ?? null : null;
+  }
+
+  /**
+   * 读账号分组标签（change feishu-per-team-notification-routing）：异步直读，返回值 / null。
+   * 缺行 / 库内 NULL → null。出站路由解析用（低频，可 await PG）；读异常向上抛，由解析器 try/catch 落默认群。
+   */
+  async getGroupLabel(accountId: string): Promise<string | null> {
+    const { rows } = await this.pool.query<{ group_label: string | null }>(
+      `SELECT group_label FROM accounts WHERE account_id = $1`,
+      [accountId],
+    );
+    return rows.length > 0 ? rows[0].group_label ?? null : null;
   }
 
   async getPlatform(accountId: string): Promise<PlatformId> {

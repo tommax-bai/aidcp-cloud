@@ -464,6 +464,25 @@ function createRequestHandler(
       return;
     }
 
+    // 团队 → 群路由列表（change feishu-per-team-notification-routing）：读全部 group_label→chat 映射。
+    if (method === 'GET' && url === '/api/notification/routes') {
+      if (!deps.notificationRoutes) {
+        sendJson(res, 503, { error: 'notification_routes_unavailable' });
+        return;
+      }
+      const routes = await deps.notificationRoutes.listRoutes();
+      sendJson(res, 200, { routes });
+      return;
+    }
+
+    // 机器人当前所在群（change feishu-per-team-notification-routing）：供路由配置从真实所在群下拉选目标，
+    // 杜绝手贴 raw chat_id 贴错群（→ 跨客户 PII 泄漏）。目标为 opaque chat_id（非枚举）。
+    if (method === 'GET' && url === '/api/bot-chats') {
+      const chats = await deps.botChatStore.listActive();
+      sendJson(res, 200, { chats });
+      return;
+    }
+
     // ── 写操作（task 4）：经拥有写的对象，绝不乐观假成功 ──────────────────
     if (method === 'POST' && url.startsWith('/api/publish/') && url.endsWith('/approve')) {
       const requestId = decodeURIComponent(url.slice('/api/publish/'.length, -'/approve'.length));
@@ -654,6 +673,39 @@ function createRequestHandler(
         return;
       }
       sendJson(res, 200, { accountId, groupLabel: result.groupLabel });
+      return;
+    }
+    // 团队 → 群路由写（change feishu-per-team-notification-routing）：按团队键 upsert / 清除（chat_id 空 = 清除该路由）。
+    // 经 group_route 存储单写：非法键（空 groupLabel）拒、写后回读真态、绝不乐观假成功。目标为 opaque chat_id（非枚举）。
+    if (method === 'PUT' && url === '/api/notification/routes') {
+      if (!deps.notificationRoutes) {
+        sendJson(res, 503, { error: 'notification_routes_unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { groupLabel, chatId } = (body ?? {}) as { groupLabel?: unknown; chatId?: unknown };
+      if (typeof groupLabel !== 'string' || groupLabel.trim() === '') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_group_label' });
+        return;
+      }
+      // chatId 只接受 string | null | 缺省（缺省 / null / 空串 = 清除该团队路由）；其它类型诚实拒。
+      if (chatId !== undefined && chatId !== null && typeof chatId !== 'string') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_chat_id' });
+        return;
+      }
+      const target = typeof chatId === 'string' ? chatId : null;
+      const result = await deps.notificationRoutes.setRoute(groupLabel, target, verified.payload.sub);
+      if (!result.ok) {
+        sendJson(res, 400, { error: 'bad_request', reason: result.reason }); // invalid_key
+        return;
+      }
+      sendJson(res, 200, { route: result.route }); // 写后回读真态（route=null 表已清除）
       return;
     }
     // 账号「关联群聊引流码」写（change account-group-chat-injection）：经账号存储单写（accounts 表拥有者），

@@ -231,11 +231,28 @@ export class CommandRouter {
     private readonly actions: CommandActions,
     private readonly messenger?: FeishuMessenger,
     private readonly approvalChatId?: string,
+    /**
+     * 命令作用域闸（change feishu-per-team-notification-routing）：给定来源 chatId 是否为可下达账号命令的「管理群」。
+     * 缺省（未注入）→ 放行全部（零回归 / 旧装配 / 测试）。返回 false → 对**非 help** 命令诚实拒（外部客户群纯通知投递）。
+     * 据此 `/bind` 等提权命令也被同一闸拦住，无法被任意群自助获得管理权。
+     */
+    private readonly isChatAuthorized?: (chatId?: string) => boolean,
   ) {}
 
   /** 处理一条文本指令，返回回执（CommandResult，交给 cards 渲染卡片） */
   async handle(text: string, context?: { chatId?: string }): Promise<CommandResult> {
     const cmd = parseCommand(text);
+    // 作用域闸（change feishu-per-team-notification-routing）：非管理群不受理会影响账号的命令
+    // （发帖 / 评论 / 启停 / 绑定 / 测试卡）；help 放行（无害）。诚实拒、绝不静默假受理。
+    if (cmd.action !== 'help' && this.isChatAuthorized && !this.isChatAuthorized(context?.chatId)) {
+      return {
+        command: cmd.raw || text,
+        ok: false,
+        level: 'warning',
+        title: '本群无权下达账号命令',
+        message: '当前群仅用于接收通知。账号命令（发帖 / 评论 / 启停 / 绑定等）请在管理群操作。',
+      };
+    }
     switch (cmd.action) {
       case 'status':
         return this.runStatus(cmd);

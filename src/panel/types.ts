@@ -7,7 +7,7 @@
  */
 
 import type { RiskController, RiskQuotaLevel, RiskAction, SessionInteractionBudget } from '../risk/index.js';
-import type { ConceptStore, BotChatStore } from '../cache/index.js';
+import type { ConceptStore, BotChatStore, GroupRoute, SetGroupRouteResult } from '../cache/index.js';
 import type { CuratedContentTypeFilter, CuratedPanelListResult, CuratedPanelRow, CuratedFacets } from '../cache/index.js';
 import type { PublishLogStore, EditDraftPatch, EditDraftResult } from '../publish-agent/publish-log-store.js';
 import type { SetGroupLabelResult, SetGroupChatInfoResult } from '../account-store.js';
@@ -257,6 +257,15 @@ export interface PanelDeps {
       manual: NotificationContactManual,
       updatedBy: string | null,
     ): Promise<void>;
+  };
+  /**
+   * 团队（accounts.group_label）→ 飞书群路由配置面（change feishu-per-team-notification-routing）。
+   * 未注入则 /api/notification/routes* 返回 503。读=全部映射；写=按团队键 upsert / 清除（chat_id 空 = 清除），
+   * 绝不乐观假成功、写后回读真态。绑定目标是 opaque chat_id（非枚举，避免 cloud→console 枚举漂移白屏）。
+   */
+  notificationRoutes?: {
+    listRoutes(): Promise<GroupRoute[]>;
+    setRoute(groupLabel: string, chatId: string | null, updatedBy: string | null): Promise<SetGroupRouteResult>;
   };
   /**
    * 精选创作灵感语料的后台管理面（change curated-content-admin-page）。未注入则 /api/curated/* 返回 503。

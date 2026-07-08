@@ -97,6 +97,36 @@ export class BotChatStore {
     };
   }
 
+  /**
+   * 列机器人当前活跃所在群（change feishu-per-team-notification-routing）：只读、无 DDL。
+   * 供面板路由配置从「机器人实际所在群」下拉选目标，杜绝手贴 raw chat_id 贴错群（→ 跨客户 PII 泄漏）。
+   * 默认群置顶，其余按 updated_at 倒序。缺表回落空。
+   */
+  async listActive(): Promise<Array<BotChatRecord & { isDefault: boolean }>> {
+    try {
+      const result = await this.pool.query<{
+        chat_id: string;
+        chat_name: string | null;
+        chat_type: string | null;
+        is_default: boolean;
+      }>(
+        `SELECT chat_id, chat_name, chat_type, is_default
+         FROM bot_chats
+         WHERE status = 'active'
+         ORDER BY is_default DESC, updated_at DESC`,
+      );
+      return result.rows.map((row) => ({
+        chatId: row.chat_id,
+        chatName: row.chat_name,
+        chatType: row.chat_type,
+        isDefault: row.is_default === true,
+      }));
+    } catch (err) {
+      if ((err as { code?: string }).code === '42P01') return [];
+      throw err;
+    }
+  }
+
   async close(): Promise<void> {
     await this.pool.end();
   }

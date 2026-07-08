@@ -8,4 +8,5 @@ export * from './interaction-feed-store.js';
 export * from './curated-content-store.js';
 export * from './pg-config.js';
 export * from './bot-chat-store.js';
+export * from './group-route-store.js';
 
