@@ -10,8 +10,9 @@
  *  - 子上限：`contact_comment_daily_cap`（`countAttemptsToday < cap`），生效 = min(配置, 上面两层)——
  *    因 canDo 与场次先过闸，故子上限只需与配置比较，min 由闸序天然实现。
  *
- * 红线：任一闸不过 MUST 不触发；**仅当触发回执 `ok`** 才记账（`recordComment` 消费共用配额 + `recordAttempt`
- * 子上限/审计）——未真开跑（单飞/离线/缺码）不记，绝不误占额度。人工 `/comment` 命令不走本 helper（人是刹车）。
+ * 红线：任一闸不过 MUST 不触发；**仅当触发回执 `ok`** 才记尝试。`recordComment` 默认为触发 ok 后消费
+ * 共用配额；调用方可用 `recordCommentOnTrigger=false` 改为在最终 `commented` 回调里消费，避免「未产出但占 comment」。
+ * 人工 `/comment` 命令不走本 helper（人是刹车）。
  */
 
 export type AutoCommentSource = 'scheduled_comment' | 'scheduled_contact' | 'hot_lead';
@@ -40,6 +41,8 @@ export interface GatedAutoCommentDeps {
 export interface TriggerReceiptLike {
   ok: boolean;
   reason?: string;
+  /** 缺省 true；false 表示触发成功不立刻消耗 comment 配额，由触发方在最终 commented 后自行 recordComment。 */
+  recordCommentOnTrigger?: boolean;
 }
 
 export interface GatedAutoCommentResult {
@@ -49,7 +52,7 @@ export interface GatedAutoCommentResult {
 }
 
 /**
- * 过统一安全闸后触发一次自动评论/联系评论，回执 ok 才记账（消费共用配额 + 子上限/审计）。
+ * 过统一安全闸后触发一次自动评论/联系评论，回执 ok 才记尝试；comment 配额可按回执策略触发即记或最终成功后记。
  * triggerFn 为触发闭包（排期＝triggerManual({injectContact})；浏览＝triggerTargeted({noteId,title},{injectContact})）。
  */
 export async function triggerGatedAutoComment(
@@ -80,8 +83,10 @@ export async function triggerGatedAutoComment(
   const receipt = await triggerFn();
   if (!receipt.ok) return { fired: false, reason: receipt.reason ?? 'trigger_rejected' };
 
-  // 仅 ok 才记账：消费共用配额 + 子上限/审计（各自吞错，绝不因记账失败回滚已发出的评论）。
-  await deps.recordComment(accountId).catch(() => false);
+  // 仅 ok 才记账：子上限/审计记录触发尝试；comment 配额默认触发即记，hot-lead 当前笔记直评改为最终 commented 后记。
+  if (receipt.recordCommentOnTrigger !== false) {
+    await deps.recordComment(accountId).catch(() => false);
+  }
   await deps.recordAttempt(accountId, source, snapshot).catch(() => {});
   return { fired: true };
 }

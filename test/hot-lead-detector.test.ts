@@ -48,6 +48,8 @@ test('命中 + 账号开 + 过闸 → 触发 + 消耗单场预算', async () => 
   assert.equal(calls.fired, 1);
   assert.equal(calls.consumed, 1);
   assert.equal(calls.lastArgs?.noteId, 'n1');
+  assert.equal(calls.lastArgs?.currentDetail.noteId, 'n1');
+  assert.equal(calls.lastArgs?.currentDetail.content, 'body');
 });
 
 test('账号未开自动联系评论 → 不触发（零回归）', async () => {

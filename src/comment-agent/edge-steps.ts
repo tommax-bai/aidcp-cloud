@@ -108,6 +108,7 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
   searchAndHarvest(term: string): Promise<CommentCandidateCard[]>;
   filterUncommented(cards: CommentCandidateCard[]): Promise<CommentCandidateCard[]>;
   readNote(card: CommentCandidateCard): Promise<{ note: NoteForComment; comments: OnPageComment[] } | null>;
+  readCurrentNote(note: NoteForComment): Promise<{ note: NoteForComment; comments: OnPageComment[] } | null>;
   post(noteId: string, text: string, contactInfo?: string | null): Promise<boolean>;
   recordCommented(noteId: string): Promise<void>;
 } {
@@ -117,6 +118,31 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
   const log = deps.logger ?? console;
 
   const push = (env: unknown) => pusher.pushToEdges(env, edgeId);
+
+  const readCurrentNote = async (note: NoteForComment): Promise<{ note: NoteForComment; comments: OnPageComment[] } | null> => {
+    const noteId = note.noteId;
+    const scrolled = await sendAndAwait<ActionCompleted>(
+      bus,
+      'action.completed',
+      (d) => d.action === 'scroll_comments',
+      timeout,
+      () => push(makeEnvelope('note.scroll_comments', randomUUID(), Date.now(), { noteId, count: 2 })),
+    );
+    const candidates = scrolled?.candidates ?? [];
+    if (!scrolled) {
+      log.warn(`[comment-edge] 当前笔记 ${noteId} 采评论无 scroll_comments 回执（超时/边端离线）`);
+    } else if (scrolled.reason === 'no_target' && candidates.length === 0) {
+      log.warn(
+        `[comment-edge] 当前笔记 ${noteId} 未命中评论容器（no_target），可能布局变体/选择器待校准，非确定「无评论」`,
+      );
+    }
+    const comments: OnPageComment[] = candidates.map((c) => ({
+      author: c.author,
+      text: c.text,
+      likeCount: c.likeCount,
+    }));
+    return { note, comments };
+  };
 
   return {
     async searchAndHarvest(term: string): Promise<CommentCandidateCard[]> {
@@ -189,30 +215,12 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
       // 翻两屏评论区采现场评论（best-effort：抓不到 → 空，不致命）。
       // change fix-interaction-and-comment-capture：区分「采集失败」（ok:false：没找到可滚容器/滚不动/异常）
       // 与「真无评论」（ok:true 且候选空）——采集失败记 warn，不静默当作「这篇没评论」（红线：空数组≠无评论）。
-      const scrolled = await sendAndAwait<ActionCompleted>(
-        bus,
-        'action.completed',
-        (d) => d.action === 'scroll_comments',
-        timeout,
-        () => push(makeEnvelope('note.scroll_comments', randomUUID(), Date.now(), { noteId, count: 2 })),
-      );
-      const candidates = scrolled?.candidates ?? [];
-      if (!scrolled) {
-        log.warn(`[comment-edge] 笔记 ${noteId} 采评论无 scroll_comments 回执（超时/边端离线）`);
-      } else if (scrolled.reason === 'no_target' && candidates.length === 0) {
-        // 找不到评论容器：偏采集/布局问题（选择器待真机校准），非确定「无评论」——值得留意。
-        // 注意：no_scroll（短评论区不可滚）多为真的评论很少/没有，故不在此告警（避免误报真无评论）。
-        log.warn(
-          `[comment-edge] 笔记 ${noteId} 未命中评论容器（no_target），可能布局变体/选择器待校准，非确定「无评论」`,
-        );
-      }
-      const comments: OnPageComment[] = candidates.map((c) => ({
-        author: c.author,
-        text: c.text,
-        likeCount: c.likeCount,
-      }));
-      return { note, comments };
+      // 找不到评论容器：偏采集/布局问题（选择器待真机校准），非确定「无评论」——值得留意。
+      // 注意：no_scroll（短评论区不可滚）多为真的评论很少/没有，故不在此告警（避免误报真无评论）。
+      return readCurrentNote(note);
     },
+
+    readCurrentNote,
 
     async post(noteId: string, text: string, contactInfo?: string | null): Promise<boolean> {
       const completed = await sendAndAwait<ActionCompleted>(

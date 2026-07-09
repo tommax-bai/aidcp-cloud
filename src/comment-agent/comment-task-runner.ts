@@ -164,13 +164,18 @@ export async function runCommentTask(
 export type TargetedCommentSteps = Pick<
   CommentTaskSteps,
   'searchAndHarvest' | 'readNote' | 'composeAndApprove' | 'post' | 'recordCommented'
->;
+> & {
+  /** 当前详情页已是目标笔记时：复用已读 detail，只补采现场评论，不再按标题搜索。 */
+  readCurrentNote?: (note: NoteForComment) => Promise<{ note: NoteForComment; comments: OnPageComment[] } | null>;
+};
 
 export interface TargetedCommentTarget {
   /** 目标笔记 id（精选行 source_id）。 */
   noteId: string;
   /** 目标笔记标题，仅用于人审/结果卡展示，不参与机器定位。 */
   title?: string;
+  /** 已打开并读过的当前笔记详情；存在时直接在当前笔记评论，绝不再按标题搜索兜底。 */
+  currentNote?: NoteForComment;
   /** 首次搜索词（笔记标题截断）。 */
   searchTerm: string;
   /** 第二次尝试的放宽搜索词（如标题前 12 字）；缺省沿用 searchTerm 重发。 */
@@ -216,28 +221,41 @@ export async function runTargetedCommentTask(
 
   let card: CommentCandidateCard | undefined;
   let attempts = 0;
-  while (attempts < maxAttempts && !card) {
-    attempts++;
-    const term = attempts === 1 ? target.searchTerm : (target.fallbackTerm ?? target.searchTerm);
-    log.log(`[targeted-comment] 搜索定位第 ${attempts}/${maxAttempts} 次「${term}」 target=${target.noteId}`);
-    const cards = await steps.searchAndHarvest(term);
-    card = cards.find((c) => c.noteId === target.noteId);
-    if (!card) {
-      log.log(`[targeted-comment] 第 ${attempts} 次返回 ${cards.length} 张卡片，无目标 noteId → ${attempts < maxAttempts ? '重试' : '用尽'}`);
-    }
-  }
-  if (!card) {
-    return { outcome: 'note_not_found', noteId: target.noteId, noteTitle: target.title, searchAttempts: attempts, reason: `target not in search results after ${attempts} attempts` };
-  }
 
-  // —— 目标命中：对这一篇走到底（失败=诚实失败，绝不偷换另一篇）。 ——
-  const read = await steps.readNote(card);
-  if (!read) {
-    return { outcome: 'read_failed', noteId: target.noteId, noteTitle: target.title ?? card.title, searchAttempts: attempts, reason: 'open/read note failed' };
+  let read: { note: NoteForComment; comments: OnPageComment[] } | null = null;
+  if (target.currentNote) {
+    if (target.currentNote.noteId !== target.noteId) {
+      return { outcome: 'read_failed', noteId: target.noteId, noteTitle: target.title, searchAttempts: 0, reason: `current_detail_mismatch(${target.currentNote.noteId})` };
+    }
+    log.log(`[targeted-comment] 复用当前笔记上下文 target=${target.noteId}，跳过标题搜索兜底`);
+    read = steps.readCurrentNote ? await steps.readCurrentNote(target.currentNote) : { note: target.currentNote, comments: [] };
+    if (!read) {
+      return { outcome: 'read_failed', noteId: target.noteId, noteTitle: target.title ?? target.currentNote.title, searchAttempts: 0, reason: 'current note context unavailable' };
+    }
+  } else {
+    while (attempts < maxAttempts && !card) {
+      attempts++;
+      const term = attempts === 1 ? target.searchTerm : (target.fallbackTerm ?? target.searchTerm);
+      log.log(`[targeted-comment] 搜索定位第 ${attempts}/${maxAttempts} 次「${term}」 target=${target.noteId}`);
+      const cards = await steps.searchAndHarvest(term);
+      card = cards.find((c) => c.noteId === target.noteId);
+      if (!card) {
+        log.log(`[targeted-comment] 第 ${attempts} 次返回 ${cards.length} 张卡片，无目标 noteId → ${attempts < maxAttempts ? '重试' : '用尽'}`);
+      }
+    }
+    if (!card) {
+      return { outcome: 'note_not_found', noteId: target.noteId, noteTitle: target.title, searchAttempts: attempts, reason: `target not in search results after ${attempts} attempts` };
+    }
+
+    // —— 目标命中：对这一篇走到底（失败=诚实失败，绝不偷换另一篇）。 ——
+    read = await steps.readNote(card);
+    if (!read) {
+      return { outcome: 'read_failed', noteId: target.noteId, noteTitle: target.title ?? card.title, searchAttempts: attempts, reason: 'open/read note failed' };
+    }
   }
   if (read.note.noteId !== target.noteId) {
     // 防御：详情上报的 noteId 与目标不一致 —— 宁可不评，绝不评错帖。
-    return { outcome: 'read_failed', noteId: target.noteId, noteTitle: target.title ?? card.title, searchAttempts: attempts, reason: `detail_note_mismatch(${read.note.noteId})` };
+    return { outcome: 'read_failed', noteId: target.noteId, noteTitle: target.title ?? read.note.title, searchAttempts: attempts, reason: `detail_note_mismatch(${read.note.noteId})` };
   }
   const composed = await steps.composeAndApprove(read.note, read.comments);
   if (!composed) {
@@ -249,6 +267,6 @@ export async function runTargetedCommentTask(
     return { outcome: 'post_failed', noteId: target.noteId, noteTitle: read.note.title || target.title, text: displayText, searchAttempts: attempts, reason: 'comment not verified posted' };
   }
   await steps.recordCommented(target.noteId);
-  log.log(`[targeted-comment] 已评论 note=${target.noteId}（${attempts} 次搜索定位）`);
+  log.log(`[targeted-comment] 已评论 note=${target.noteId}（${attempts > 0 ? `${attempts} 次搜索定位` : '复用当前笔记上下文'}）`);
   return { outcome: 'commented', noteId: target.noteId, noteTitle: read.note.title || target.title, text: displayText, searchAttempts: attempts };
 }

@@ -26,6 +26,7 @@ import {
   runTargetedCommentTask,
   type CommentTaskResult,
   type CommentTaskSteps,
+  type NoteForComment,
   type TargetedCommentResult,
   type TargetedCommentSteps,
 } from './comment-task-runner.js';
@@ -274,7 +275,13 @@ export class CommentScheduler {
   async triggerTargeted(
     accountId: string,
     target: { noteId: string; title: string },
-    options?: { injectContact?: boolean },
+    options?: {
+      injectContact?: boolean;
+      /** 已经处于目标笔记详情页时传入：直接评论当前笔记，不走标题搜索兜底。 */
+      currentNote?: NoteForComment;
+      /** 异步任务最终结果回调；用于自动联系评论在真正 commented 后再记风控配额。 */
+      onResult?: (result: TargetedCommentResult) => Promise<void> | void;
+    },
   ): Promise<CommentCommandReceipt & { reason?: string }> {
     if (!accountId || accountId === 'default') {
       return { ok: false, level: 'error', title: '定向评论触发失败', message: '未解析到有效账号（绝不回落 default）', reason: 'account_required' };
@@ -354,7 +361,7 @@ export class CommentScheduler {
     }
 
     this.running.add(accountId);
-    void this.runTargetedTask(accountId, conn.bus, conn.edgeId, target, contactInfo, platformProfile)
+    void this.runTargetedTask(accountId, conn.bus, conn.edgeId, { ...target, currentNote: options?.currentNote }, contactInfo, platformProfile, options?.onResult)
       .catch((err) =>
         (this.deps.logger ?? console).warn(
           `[comment-scheduler] 定向任务未能启动/异常中止 account=${accountId}：${(err as Error).message}`,
@@ -366,7 +373,9 @@ export class CommentScheduler {
       ok: true,
       level: 'success',
       title: '已触发定向评论',
-      message: '已启动定向评论任务（搜索定位目标笔记→撰写→飞书人审 approved=true 才会真发；结果稍后回报）',
+      message: options?.currentNote
+        ? '已启动定向评论任务（复用当前笔记上下文→撰写→飞书人审 approved=true 才会真发；结果稍后回报）'
+        : '已启动定向评论任务（搜索定位目标笔记→撰写→飞书人审 approved=true 才会真发；结果稍后回报）',
     };
   }
 
@@ -535,9 +544,10 @@ export class CommentScheduler {
     accountId: string,
     bus: EventBus,
     edgeId: string,
-    target: { noteId: string; title: string },
+    target: { noteId: string; title: string; currentNote?: NoteForComment },
     contactInfo: string | null,
     platformProfile: CommentPlatformProfile,
+    onResult?: (result: TargetedCommentResult) => Promise<void> | void,
   ): Promise<void> {
     const log = this.deps.logger ?? console;
     const soul = this.deps.getSoul(accountId);
@@ -568,6 +578,7 @@ export class CommentScheduler {
     const steps: TargetedCommentSteps = {
       searchAndHarvest: (term) => edge.searchAndHarvest(term),
       readNote: (card) => edge.readNote(card),
+      readCurrentNote: (note) => edge.readCurrentNote(note),
       composeAndApprove: (note, comments) => composeAndApprove(note, comments),
       post: (noteId, text, code) => edge.post(noteId, text, code),
       recordCommented: (noteId) => edge.recordCommented(noteId),
@@ -580,12 +591,18 @@ export class CommentScheduler {
     this.deps.onTakeoverStart(accountId);
     let result: TargetedCommentResult;
     try {
-      result = await runTargetedCommentTask(steps, { noteId: target.noteId, title: target.title, searchTerm, fallbackTerm }, { logger: log });
+      result = await runTargetedCommentTask(steps, { noteId: target.noteId, title: target.title, currentNote: target.currentNote, searchTerm, fallbackTerm }, { logger: log });
     } catch (err) {
       log.warn(`[comment-scheduler] 定向任务异常 account=${accountId}：${(err as Error).message}`);
       result = { outcome: 'post_failed', noteId: target.noteId, searchAttempts: 0, reason: (err as Error).message };
     } finally {
       this.deps.onTakeoverEnd(accountId);
+    }
+
+    try {
+      await onResult?.(result);
+    } catch (err) {
+      log.warn(`[comment-scheduler] 定向结果回调失败 account=${accountId}：${(err as Error).message}`);
     }
 
     try {
@@ -682,15 +699,24 @@ function noteLabel(title: string | undefined, prefix: string): string {
 export function targetedOutcomeToReceipt(r: TargetedCommentResult, withContact: boolean): CommentResultReceipt {
   const kind = withContact ? '定向联系评论' : '定向内容评论';
   const target = noteLabel(r.noteTitle, '目标笔记');
+  const positioning = r.searchAttempts > 0 ? `${r.searchAttempts} 次搜索定位` : '复用当前笔记上下文';
+  const currentContext = r.searchAttempts === 0;
   switch (r.outcome) {
     case 'commented':
-      return { ok: true, level: 'success', title: `${kind}已发出`, message: `已在${target}下发表评论：「${r.text ?? ''}」（${r.searchAttempts} 次搜索定位）` };
+      return { ok: true, level: 'success', title: `${kind}已发出`, message: `已在${target}下发表评论：「${r.text ?? ''}」（${positioning}）` };
     case 'note_not_found':
       return { ok: false, level: 'warning', title: `${kind}未产出`, message: `搜索定位 ${r.searchAttempts} 次均未在结果中找到${target}（可能未被搜索收录），本次不评、绝不评「相似」笔记` };
     case 'compose_skipped':
-      return { ok: false, level: 'warning', title: `${kind}未发出`, message: `已定位${target}，但撰写为空/未授权/超时，本次不发` };
+      return { ok: false, level: 'warning', title: `${kind}未发出`, message: `${currentContext ? '已确认当前' : '已定位'}${target}，但撰写为空/未授权/超时，本次不发` };
     case 'read_failed':
-      return { ok: false, level: 'error', title: `${kind}失败`, message: `已定位${target}，但开笔记/读正文失败${r.reason ? `（${r.reason}）` : ''}` };
+      return {
+        ok: false,
+        level: 'error',
+        title: `${kind}失败`,
+        message: currentContext
+          ? `${target}当前上下文不可用，本次不搜索兜底${r.reason ? `（${r.reason}）` : ''}`
+          : `已定位${target}，但开笔记/读正文失败${r.reason ? `（${r.reason}）` : ''}`,
+      };
     case 'post_failed':
       return { ok: false, level: 'error', title: `${kind}失败`, message: `${target}评论发布未确认成功${r.reason ? `（${r.reason}）` : ''}` };
   }

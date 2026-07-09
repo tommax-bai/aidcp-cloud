@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runTargetedCommentTask } from '../../src/comment-agent/comment-task-runner.js';
-import type { TargetedCommentSteps } from '../../src/comment-agent/comment-task-runner.js';
+import type { NoteForComment, TargetedCommentSteps } from '../../src/comment-agent/comment-task-runner.js';
 import type { CommentCandidateCard } from '../../src/agents/comment-target-picker.js';
 
 const silent = { log: () => {}, warn: () => {} };
@@ -29,7 +29,7 @@ interface StubConfig {
 }
 
 function makeSteps(cfg: StubConfig) {
-  const calls = { searchTerms: [] as string[], read: 0, compose: 0, post: [] as string[], record: [] as string[] };
+  const calls = { searchTerms: [] as string[], read: 0, readCurrent: 0, compose: 0, post: [] as string[], record: [] as string[] };
   let i = 0;
   const steps: TargetedCommentSteps = {
     searchAndHarvest: async (term) => {
@@ -44,6 +44,14 @@ function makeSteps(cfg: StubConfig) {
       return {
         note: { noteId: cfg.detailNoteId ?? c.noteId!, title: c.title ?? '', content: '正文' },
         comments: [],
+      };
+    },
+    readCurrentNote: async (note) => {
+      calls.readCurrent++;
+      if (cfg.detailNoteId === null) return null;
+      return {
+        note: { ...note, noteId: cfg.detailNoteId ?? note.noteId },
+        comments: [{ text: '当前评论' }],
       };
     },
     composeAndApprove: async () => {
@@ -61,6 +69,14 @@ function makeSteps(cfg: StubConfig) {
   };
   return { steps, calls };
 }
+
+const currentNote = (noteId = 'target-1'): NoteForComment => ({
+  noteId,
+  title: '当前笔记标题',
+  content: '当前正文',
+  likeCount: 3000,
+  collectCount: 500,
+});
 
 test('首搜命中目标 noteId → 读/撰写/发布/记账走到底，outcome=commented', async () => {
   const { steps, calls } = makeSteps({ harvests: [[card(0, 'other'), card(1, 'target-1')]] });
@@ -97,6 +113,38 @@ test('两次搜索均无目标 → note_not_found，绝不读/评任何「相似
   assert.equal(calls.compose, 0);
   assert.deepEqual(calls.post, []);
   assert.deepEqual(calls.record, []);
+});
+
+test('当前笔记上下文存在 → 跳过标题搜索，直接采当前评论并发布', async () => {
+  const { steps, calls } = makeSteps({ harvests: [[card(0, 'other')]] });
+  const r = await runTargetedCommentTask(
+    steps,
+    { noteId: 'target-1', title: '目标标题', currentNote: currentNote(), searchTerm: '不应搜索', fallbackTerm: '也不应搜索' },
+    { logger: silent },
+  );
+  assert.equal(r.outcome, 'commented');
+  assert.equal(r.searchAttempts, 0);
+  assert.deepEqual(calls.searchTerms, []);
+  assert.equal(calls.read, 0);
+  assert.equal(calls.readCurrent, 1);
+  assert.deepEqual(calls.post, ['target-1']);
+  assert.deepEqual(calls.record, ['target-1']);
+});
+
+test('当前笔记上下文 noteId 错配 → read_failed，绝不退回标题搜索', async () => {
+  const { steps, calls } = makeSteps({ harvests: [[card(0, 'target-1')]] });
+  const r = await runTargetedCommentTask(
+    steps,
+    { noteId: 'target-1', title: '目标标题', currentNote: currentNote('other-note'), searchTerm: '不应搜索' },
+    { logger: silent },
+  );
+  assert.equal(r.outcome, 'read_failed');
+  assert.equal(r.searchAttempts, 0);
+  assert.match(r.reason ?? '', /current_detail_mismatch/);
+  assert.deepEqual(calls.searchTerms, []);
+  assert.equal(calls.read, 0);
+  assert.equal(calls.readCurrent, 0);
+  assert.deepEqual(calls.post, []);
 });
 
 test('fallbackTerm 缺省 → 第二次沿用原搜索词重发', async () => {

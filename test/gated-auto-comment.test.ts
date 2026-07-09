@@ -33,6 +33,25 @@ test('全闸过 → 触发 + 记共用配额 + 记子上限', async () => {
   assert.equal(calls.recordAttempt, 1);
 });
 
+test('触发 ok 但关闭触发即记 comment → 只记尝试，不占 comment 配额', async () => {
+  const { d, calls } = deps();
+  const r = await triggerGatedAutoComment(
+    {
+      accountId: 'a',
+      source: 'hot_lead',
+      triggerFn: async () => {
+        calls.triggered++;
+        return { ok: true, recordCommentOnTrigger: false };
+      },
+    },
+    d,
+  );
+  assert.equal(r.fired, true);
+  assert.equal(calls.triggered, 1);
+  assert.equal(calls.recordComment, 0);
+  assert.equal(calls.recordAttempt, 1);
+});
+
 test('单场评论预算耗尽 → 不触发、不记账', async () => {
   const { d, calls } = deps({ sessionRemaining: 0 });
   const r = await triggerGatedAutoComment({ accountId: 'a', source: 'hot_lead', triggerFn: okTrigger(calls) }, d);

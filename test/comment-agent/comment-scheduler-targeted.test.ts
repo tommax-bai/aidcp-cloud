@@ -264,6 +264,39 @@ describe('CommentScheduler.triggerTargeted happy path', () => {
     assert.ok(comment);
     assert.equal(comment.payload.groupChatCode, 'GROUP-CODE'); // 线协议字段名仍为 groupChatCode；联系方式整段注入（边端 insertText）
   });
+
+  it('当前笔记触发：复用 currentNote，不下发标题搜索/开笔记，最终结果回调为 commented', async () => {
+    const bus = new EventBus();
+    const edge = fakeEdge(bus, 'note-1');
+    const cardDone = deferred<{ ok: boolean; message: string }>();
+    const finalOutcomes: string[] = [];
+    const s = new CommentScheduler(
+      baseDeps({
+        resolveConnection: () => ({ bus, edgeId: 'e1' }),
+        pusher: edge.pusher,
+        postResultCard: (_a, receipt) => { cardDone.resolve(receipt); },
+      }),
+    );
+    const r = await s.triggerTargeted(
+      'acc-1',
+      target,
+      {
+        currentNote: { noteId: 'note-1', title: '当前笔记标题', content: '当前正文', likeCount: 3522, collectCount: 2367 },
+        onResult: (result) => { finalOutcomes.push(result.outcome); },
+      },
+    );
+    assert.equal(r.ok, true);
+    assert.match(r.message, /复用当前笔记上下文/);
+
+    const receipt = await cardDone.promise;
+    assert.equal(receipt.ok, true);
+    assert.match(receipt.message, /复用当前笔记上下文/);
+    assert.deepEqual(finalOutcomes, ['commented']);
+    assert.equal(edge.pushed.some((e) => e.type === 'search.execute'), false);
+    assert.equal(edge.pushed.some((e) => e.type === 'note.open'), false);
+    assert.ok(edge.pushed.some((e) => e.type === 'note.scroll_comments'));
+    assert.ok(edge.pushed.some((e) => e.type === 'interaction.comment'));
+  });
 });
 
 describe('targetedOutcomeToReceipt（绝不染绿）', () => {
@@ -277,6 +310,8 @@ describe('targetedOutcomeToReceipt（绝不染绿）', () => {
     assert.equal(nf.ok, false);
     assert.match(nf.message, /绝不评「相似」笔记/);
     assert.doesNotMatch(nf.message, / n /);
+    const current = targetedOutcomeToReceipt({ outcome: 'commented', noteId: 'n', noteTitle: '目标笔记标题', searchAttempts: 0 }, true);
+    assert.match(current.message, /复用当前笔记上下文/);
     assert.equal(targetedOutcomeToReceipt({ outcome: 'compose_skipped', noteId: 'n', noteTitle: '目标笔记标题', searchAttempts: 1 }, false).level, 'warning');
     assert.equal(targetedOutcomeToReceipt({ outcome: 'read_failed', noteId: 'n', noteTitle: '目标笔记标题', searchAttempts: 1 }, false).level, 'error');
     assert.equal(targetedOutcomeToReceipt({ outcome: 'post_failed', noteId: 'n', noteTitle: '目标笔记标题', searchAttempts: 1 }, false).level, 'error');

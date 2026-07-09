@@ -12,6 +12,7 @@
  */
 
 import { EventBus } from '../event-bus/index.js';
+import type { NoteDetailData } from '../event-bus/types.js';
 import { platformRegistryEntry, type PlatformId } from '../platform/index.js';
 import type { LlmCallOpts } from '../llm/qwen.js';
 import { SessionContext } from '../agents/session-context.js';
@@ -179,11 +180,12 @@ export interface RoleDispatcherOptions {
   isAutoContactEnabled?: (accountId: string) => Promise<boolean>;
   /** 引流线索「已评过」去重口（接 riskStore.hasInteraction(accountId,noteId,'comment')）。 */
   hasCommentedForLead?: (accountId: string, noteId: string) => Promise<boolean>;
-  /** 触发一条受闸自动联系评论（内部走 helper：canDo+子上限+record+triggerTargeted(injectContact)）。注入则注册 detector。 */
+  /** 触发一条受闸自动联系评论（内部走 helper：canDo+子上限+当前详情直评）。注入则注册 detector。 */
   fireAutoContactComment?: (args: {
     accountId: string;
     noteId: string;
     title: string;
+    currentDetail: NoteDetailData;
     velocity: number;
     ageHours: number;
   }) => Promise<{ fired: boolean; reason?: string }>;
@@ -306,6 +308,7 @@ export class RoleDispatcher {
     accountId: string;
     noteId: string;
     title: string;
+    currentDetail: NoteDetailData;
     velocity: number;
     ageHours: number;
   }) => Promise<{ fired: boolean; reason?: string }>;

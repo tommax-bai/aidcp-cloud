@@ -1790,18 +1790,37 @@ async function main(): Promise<void> {
       // 引流线索「已评过」去重：复用 riskStore 的按账号互动去重（与自治评论/联系评论同一账本）。
       hasCommentedForLead: (accountId, noteId) =>
         riskStore.hasInteraction(accountId, noteId, 'comment').catch(() => false),
-      // 引流线索自动触发（change feed-hot-lead-auto-group-comment）：过统一安全闸 → triggerTargeted(injectContact) → 飞书人审。
-      // 仅评论机器可用时注入（否则 detector 不注册）。helper 一处收口 canDo/子上限/记账（含 record('comment') 消费共用配额）。
+      // 引流线索自动触发（change feed-hot-lead-auto-group-comment）：过统一安全闸 → 复用当前 note.detail 的 triggerTargeted(injectContact) → 飞书人审。
+      // 仅评论机器可用时注入（否则 detector 不注册）。helper 一处收口 canDo/子上限/尝试审计；record('comment') 只在最终 commented 后消费。
       ...(commentScheduler
         ? {
-            fireAutoContactComment: (args: { accountId: string; noteId: string; title: string; velocity: number; ageHours: number }) =>
+            fireAutoContactComment: (args: { accountId: string; noteId: string; title: string; currentDetail: NoteDetailData; velocity: number; ageHours: number }) =>
               triggerGatedAutoComment(
                 {
                   accountId: args.accountId,
                   source: 'hot_lead',
                   snapshot: { noteId: args.noteId, velocity: args.velocity, ageHours: args.ageHours },
-                  triggerFn: () =>
-                    commentScheduler!.triggerTargeted(args.accountId, { noteId: args.noteId, title: args.title }, { injectContact: true }),
+                  triggerFn: async () => {
+                    const receipt = await commentScheduler!.triggerTargeted(
+                      args.accountId,
+                      { noteId: args.noteId, title: args.title },
+                      {
+                        injectContact: true,
+                        currentNote: {
+                          noteId: args.currentDetail.noteId,
+                          title: args.currentDetail.title,
+                          content: args.currentDetail.content,
+                          author: args.currentDetail.author,
+                          likeCount: args.currentDetail.likeCount,
+                          collectCount: args.currentDetail.collectCount,
+                        },
+                        onResult: async (result) => {
+                          if (result.outcome === 'commented') await (await resolveController(args.accountId)).record('comment');
+                        },
+                      },
+                    );
+                    return { ...receipt, recordCommentOnTrigger: false };
+                  },
                 },
                 {
                   canComment: async (a) => (await resolveController(a)).canDo('comment'),

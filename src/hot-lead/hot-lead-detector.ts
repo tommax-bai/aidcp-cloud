@@ -3,12 +3,12 @@
  *
  * 接在**稿件价值判定之后**：只对通过质量闸（`quality.pass`）的笔记评估热度（两事件按 noteId 对齐，
  * `note.detail.arrived` 缓存最近一篇、`quality.pass` 放行才跑闸）。命中且过安全闸 → **经受闸自动评论 helper
- * 触发一条带联系方式的引流评论**（`triggerTargeted(injectContact)` → 飞书人审=发），不再入持久队列。
+ * 触发一条带联系方式的引流评论**（复用当前 note.detail → 飞书人审=发），不再入持久队列。
  *
  * 统一安全模型（change feed-hot-lead-auto-group-comment）：与普通评论共用评论安全上限——
  *  - 场次：单场会话评论预算（此处 gate + 触发成功即扣减）；
- *  - 时/日 + 子上限 + 记账：由注入的 `fireAutoContactComment`（内部走 helper：canDo → 子上限 → record('comment')
- *    消费共用配额 + recordContactCommentAttempt）统一处置。
+ *  - 时/日 + 子上限 + 记账：由注入的 `fireAutoContactComment` 统一处置；任务触发只记尝试，
+ *    真正发出后才消费共用 comment 配额。
  * 去重三层：`hasCommented`（已发出）+ 本角色**短时 triggered 标记**（防人审拒/超时后重刷反复推审）+ 触发通道单飞。
  *
  * 纯确定性、不调 LLM（不进 role-catalog）。回调 fire-and-forget、不阻塞浏览。账号未开自动联系评论 → 仅记日志、不发（零回归）。
@@ -25,6 +25,8 @@ export interface FireAutoContactArgs {
   accountId: string;
   noteId: string;
   title: string;
+  /** 刚刚被质量闸判定通过的当前详情；自动联系评论必须复用它，不按标题搜索兜底。 */
+  currentDetail: NoteDetailData;
   velocity: number;
   ageHours: number;
 }
@@ -37,7 +39,7 @@ export interface HotLeadDetectorOptions extends RoleOptions {
   isAutoContactEnabled?: (accountId: string) => Promise<boolean>;
   /** 「本账号已评过该笔记」去重口（接 riskStore.hasInteraction(accountId,noteId,'comment')）。 */
   hasCommented?: (accountId: string, noteId: string) => Promise<boolean>;
-  /** 触发一条受闸自动联系评论（内部走 helper：canDo+子上限+record+triggerTargeted(injectContact)）。缺则仅记日志、不发。 */
+  /** 触发一条受闸自动联系评论（内部走 helper：canDo+子上限+当前详情直评）。缺则仅记日志、不发。 */
   fireAutoContactComment?: (args: FireAutoContactArgs) => Promise<{ fired: boolean; reason?: string }>;
   /** 场次：当前会话剩余评论预算（缺则不设场次闸）。 */
   getSessionCommentBudgetRemaining?: () => number;
@@ -151,6 +153,7 @@ export class HotLeadDetector extends BaseRole {
       accountId,
       noteId: detail.noteId,
       title: detail.title,
+      currentDetail: detail,
       velocity: evAl.velocity ?? 0,
       ageHours: evAl.hoursAgo ?? 0,
     }).catch((e) => ({ fired: false, reason: (e as Error).message }));
