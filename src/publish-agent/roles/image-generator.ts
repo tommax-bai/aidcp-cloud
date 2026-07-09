@@ -218,6 +218,11 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
                     },
                   }
                 : {}),
+              // 帖级形态档影子审计（change textcard-carousel-form-parity，阶段0）：仅旗标开时非空，
+              // 条件展开保「旗标关时不新增审计键」→ coverFormAudit byte-identical 零回归。
+              ...(input.formProfile ? { formProfile: input.formProfile } : {}),
+              ...(input.formProfileGate ? { formProfileGate: input.formProfileGate } : {}),
+              ...(input.perImageForms ? { perImageForms: input.perImageForms } : {}),
             } satisfies CoverFormAudit,
           }
         : {}),

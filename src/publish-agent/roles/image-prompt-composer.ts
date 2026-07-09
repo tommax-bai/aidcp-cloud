@@ -137,6 +137,11 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
       coverGate: coverPlan
         ? { sensedForm: coverPlan.sensedForm, sensedSource: coverPlan.sensedSource, gateReason: coverPlan.gateReason }
         : { sensedForm: 'unknown', sensedSource: 'none', gateReason: 'flag_off' },
+      // 帖级形态档透传（change textcard-carousel-form-parity，阶段0 影子）：仅旗标开时非空，
+      // 条件展开保「旗标关时不新增键」→ 配图计划 byte-identical 零回归。
+      ...(coverPlan?.formProfile ? { formProfile: coverPlan.formProfile } : {}),
+      ...(coverPlan?.formProfileGate ? { formProfileGate: coverPlan.formProfileGate } : {}),
+      ...(coverPlan?.perImageForms ? { perImageForms: coverPlan.perImageForms } : {}),
     };
   }
 

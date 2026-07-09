@@ -13,6 +13,7 @@ import { buildCoverCardCopyPrompt } from '../prompts.js';
 import { detectBannedPhrases } from '../post-processor.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
 import type { CoverFormSensor, CoverFormSenseResult } from '../cover-form-sensor.js';
+import type { PostImageFormProfileService } from '../post-image-form-profile.js';
 
 /**
  * CoverCardWriter — 封面形态决策 + 卡面文案（change textcard-cover-form）。
@@ -66,6 +67,12 @@ export interface CoverCardWriterDeps {
   llmClient: ChatLlmClient;
   /** 形态感知服务；未装配（如感知代码路径整体关闭）= 感知不可用，按 unknown 处理。 */
   sensor?: CoverFormSensor | null;
+  /**
+   * 帖级形态档服务（change textcard-carousel-form-parity，阶段0 影子）：未装配或旗标关 = 不计算形态档，
+   * CoverCardPlan 不带 formProfile（byte-identical 零回归）。装配且旗标开 = 复用封面感知结果 + 内页有界并发判形，
+   * 只把形态档写进计划（阶段0 不改渲染）。
+   */
+  profileService?: PostImageFormProfileService | null;
   /** 渲染旗标（AIDCP_PUBLISH_TEXTCARD_COVER）；只门控决策+文案，不门控感知（影子模式）。 */
   renderEnabled?: () => boolean;
   /** 渲染出口就绪探针（工厂加载成功且字体校验过）。 */
@@ -96,6 +103,7 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
   protected readonly outputKey = 'coverCardPlan' as const;
   private llmClient: ChatLlmClient;
   private sensor: CoverFormSensor | null;
+  private profileService: PostImageFormProfileService | null;
   private renderEnabled: () => boolean;
   private rendererAvailable: () => boolean;
   private ossAvailable: () => boolean;
@@ -105,6 +113,7 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
     super({ logger: deps.logger, clock: deps.clock });
     this.llmClient = deps.llmClient;
     this.sensor = deps.sensor ?? null;
+    this.profileService = deps.profileService ?? null;
     this.renderEnabled = deps.renderEnabled ?? (() => process.env.AIDCP_PUBLISH_TEXTCARD_COVER === 'true');
     this.rendererAvailable = deps.rendererAvailable ?? (() => false);
     this.ossAvailable = deps.ossAvailable ?? (() => false);
@@ -148,26 +157,31 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
     const sensedSource: CoverCardPlan['sensedSource'] =
       sensed?.status === 'detected' ? (sensed.cached ? 'cached' : 'vision') : 'none';
 
+    // 帖级形态档（change textcard-carousel-form-parity，阶段0 影子）：旗标关 → {} → attach 恒等 → byte-identical 零回归。
+    // 旗标开 → 复用上面封面感知结果 + 内页有界并发判形，只把形态档并列写进计划（阶段0 不改任何渲染/门禁决策）。
+    const profileFields = await this.computeProfileFields(referenceNote, images, sensed, snapshot.trigger?.accountId);
+    const attach = (plan: CoverCardPlan): CoverCardPlan => ({ ...plan, ...profileFields });
+
     // 门禁 3：渲染旗标（只门控决策+文案；关 = 影子模式收口在此）。
     if (!this.renderEnabled()) {
-      return this.generativePlan('flag_off', sensedForm, sensedSource);
+      return attach(this.generativePlan('flag_off', sensedForm, sensedSource));
     }
 
     // 门禁 4：形态与置信（unknown/低置信/非文字卡分别如实落原因，绝不猜）。
     if (sensed?.status !== 'detected') {
       const reason: CoverCardGateReason = sensed?.status === 'no_image' ? 'no_reference_images' : 'form_unknown';
-      return this.generativePlan(reason, sensedForm, sensedSource);
+      return attach(this.generativePlan(reason, sensedForm, sensedSource));
     }
     if (sensed.guess!.form !== 'text_card') {
-      return this.generativePlan('form_not_text_card', sensedForm, sensedSource);
+      return attach(this.generativePlan('form_not_text_card', sensedForm, sensedSource));
     }
     if (sensed.guess!.confidence < this.minConfidence) {
-      return this.generativePlan('low_confidence', sensedForm, sensedSource);
+      return attach(this.generativePlan('low_confidence', sensedForm, sensedSource));
     }
 
     // 门禁 5：渲染出口与 OSS 上传器可用（渲染字节没有 provider 临时 URL，缺 OSS 在门禁即关）。
     if (!this.rendererAvailable() || !this.ossAvailable()) {
-      return this.generativePlan('renderer_unavailable', sensedForm, sensedSource);
+      return attach(this.generativePlan('renderer_unavailable', sensedForm, sensedSource));
     }
 
     // 全过：一次文案 LLM；违规带紧约束重试一次（只花角色闸剩余预算）。
@@ -178,7 +192,7 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
       const first = await this.composeCopy(input, input.tags, false, COPY_CALL_TIMEOUT_MS);
       let violation = first ? this.findViolation(first, originalTitle, originalBody, referenceNote.author) : 'llm 输出不可解析';
       if (first && !violation) {
-        return this.textCardPlan(first, sensedForm, sensedSource);
+        return attach(this.textCardPlan(first, sensedForm, sensedSource));
       }
       const remaining = COVERCARD_TIMEOUT_MS - (this.clock() - startedAt) - 10_000;
       if (remaining >= RETRY_MIN_BUDGET_MS) {
@@ -186,16 +200,45 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
         const second = await this.composeCopy(input, input.tags, true, Math.min(COPY_CALL_TIMEOUT_MS, remaining));
         violation = second ? this.findViolation(second, originalTitle, originalBody, referenceNote.author) : 'llm 输出不可解析';
         if (second && !violation) {
-          return this.textCardPlan(second, sensedForm, sensedSource);
+          return attach(this.textCardPlan(second, sensedForm, sensedSource));
         }
       } else {
         this.logger.warn(`[CoverCardWriter] 剩余预算不足（<${RETRY_MIN_BUDGET_MS}ms），跳过重试直接回落生成式`);
       }
       this.logger.warn(`[CoverCardWriter] 卡面文案仍违规（${violation}），回落生成式封面`);
-      return this.generativePlan('copy_llm_failed', sensedForm, sensedSource);
+      return attach(this.generativePlan('copy_llm_failed', sensedForm, sensedSource));
     } catch (err) {
       this.logger.warn(`[CoverCardWriter] 文案 LLM 失败，回落生成式: ${err instanceof Error ? err.message : String(err)}`);
-      return this.generativePlan('copy_llm_failed', sensedForm, sensedSource);
+      return attach(this.generativePlan('copy_llm_failed', sensedForm, sensedSource));
+    }
+  }
+
+  /**
+   * 帖级形态档字段（change textcard-carousel-form-parity，阶段0 影子）。
+   * 旗标关/服务未装配 → {}（attach 恒等，byte-identical 零回归）。开 → 复用封面感知结果 + 内页有界并发判形，
+   * 只产 formProfile/formProfileGate/perImageForms 三个并列字段；服务承诺不抛，此处再兜底防御，绝不波及发布。
+   */
+  private async computeProfileFields(
+    referenceNote: NonNullable<PipelineFields['trigger']>['generateInput']['referenceNote'],
+    images: ReferenceImageSnapshot[],
+    sensed: CoverFormSenseResult | null,
+    triggerAccountId: string | undefined,
+  ): Promise<Pick<Partial<CoverCardPlan>, 'formProfile' | 'formProfileGate' | 'perImageForms'>> {
+    if (!referenceNote || !this.profileService?.enabled()) return {};
+    try {
+      const res = await this.profileService.compute({
+        ref: {
+          curatedContentId: referenceNote.curatedContentId ?? null,
+          accountId: referenceNote.accountId ?? triggerAccountId ?? 'default',
+          sourceId: referenceNote.sourceId,
+          images,
+        },
+        coverSense: sensed ?? { status: 'disabled', cached: false },
+      });
+      return { formProfile: res.profile, formProfileGate: res.gateReason, perImageForms: res.perImageForms };
+    } catch (err) {
+      this.logger.warn(`[CoverCardWriter] 帖级形态档计算异常（跳过，不影响发布）: ${err instanceof Error ? err.message : String(err)}`);
+      return {};
     }
   }
 

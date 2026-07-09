@@ -2,11 +2,25 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { CoverCardWriterRole } from '../../src/publish-agent/roles/cover-card-writer.js';
 import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
-import type { PipelineFields, TriggerInput, CoverCardPlan } from '../../src/publish-agent/types.js';
+import type { PipelineFields, TriggerInput, CoverCardPlan, PostFormProfileResult } from '../../src/publish-agent/types.js';
 import type { CoverFormSensor, CoverFormSenseResult } from '../../src/publish-agent/cover-form-sensor.js';
+import type { PostImageFormProfileService } from '../../src/publish-agent/post-image-form-profile.js';
 import type { CuratedReferenceImageFormGuess } from '../../src/cache/curated-content-store.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
+
+/** 桩帖级形态档服务：固定返回一个形态档；enabled 可控。 */
+function stubProfileService(result: PostFormProfileResult, enabled: boolean): PostImageFormProfileService & { computed: number } {
+  const svc = {
+    computed: 0,
+    enabled: () => enabled,
+    compute: async () => {
+      svc.computed++;
+      return result;
+    },
+  };
+  return svc;
+}
 
 function guess(form: CuratedReferenceImageFormGuess['form'], confidence: number): CuratedReferenceImageFormGuess {
   return { form, confidence, detectedAt: 1, detectedFor: 1, model: 'stub-vl' };
@@ -49,6 +63,7 @@ function makeTrigger(withImages: boolean, overrides?: { author?: string; title?:
 interface RunOpts {
   llmOutputs?: string[];
   sensor?: CoverFormSensor | null;
+  profileService?: PostImageFormProfileService | null;
   renderEnabled?: boolean;
   rendererAvailable?: boolean;
   ossAvailable?: boolean;
@@ -73,6 +88,7 @@ function run(opts: RunOpts): Promise<{ plan: CoverCardPlan; llmCalls: string[] }
   const role = new CoverCardWriterRole({
     llmClient: llm as never,
     sensor: opts.sensor,
+    profileService: opts.profileService,
     renderEnabled: () => opts.renderEnabled ?? true,
     rendererAvailable: () => opts.rendererAvailable ?? true,
     ossAvailable: () => opts.ossAvailable ?? true,
@@ -240,5 +256,69 @@ describe('CoverCardWriterRole（封面形态决策 + 卡面文案；恒写键、
     });
     assert.equal(plan.coverForm, 'generative');
     assert.equal(plan.gateReason, 'copy_llm_failed');
+  });
+});
+
+describe('CoverCardWriterRole × 帖级形态档（change textcard-carousel-form-parity，阶段0 影子）', () => {
+  const ALL_CARD: PostFormProfileResult = {
+    profile: 'all_text_card',
+    gateReason: 'all_text_card',
+    perImageForms: [{ index: 0, form: 'text_card', source: 'vision' }],
+    innerSensed: 0,
+  };
+
+  test('未装配形态档服务 → 计划不含 formProfile 键（byte-identical 零回归）', async () => {
+    const { plan } = await run({
+      sensor: stubSensor({ status: 'detected', guess: guess('text_card', 0.9), cached: false }),
+      llmOutputs: [GOOD_COPY],
+    });
+    assert.equal(plan.coverForm, 'text_card'); // 既有决策不变
+    assert.equal('formProfile' in plan, false);
+    assert.equal('formProfileGate' in plan, false);
+    assert.equal('perImageForms' in plan, false);
+  });
+
+  test('形态档旗标关（enabled=false）→ 不调 compute、计划不含 formProfile（零回归）', async () => {
+    const svc = stubProfileService(ALL_CARD, false);
+    const { plan } = await run({
+      sensor: stubSensor({ status: 'detected', guess: guess('text_card', 0.9), cached: false }),
+      profileService: svc,
+      llmOutputs: [GOOD_COPY],
+    });
+    assert.equal(svc.computed, 0);
+    assert.equal('formProfile' in plan, false);
+  });
+
+  test('形态档旗标开 → 影子盖章 formProfile，但既有封面决策完全不变（阶段0 不改渲染）', async () => {
+    const svc = stubProfileService(ALL_CARD, true);
+    const { plan } = await run({
+      sensor: stubSensor({ status: 'detected', guess: guess('text_card', 0.9), cached: false }),
+      profileService: svc,
+      llmOutputs: [GOOD_COPY],
+    });
+    // 影子形态档已记录
+    assert.equal(svc.computed, 1);
+    assert.equal(plan.formProfile, 'all_text_card');
+    assert.equal(plan.formProfileGate, 'all_text_card');
+    assert.deepEqual(plan.perImageForms, ALL_CARD.perImageForms);
+    // 但封面决策仍是原来的 text_card + 文案（阶段0 只记录，不改任何渲染/门禁结局）
+    assert.equal(plan.coverForm, 'text_card');
+    assert.equal(plan.gateReason, 'ok');
+    assert.ok(plan.card);
+  });
+
+  test('形态档旗标开但封面走生成式（form_not_text_card）→ 形态档并列盖章、封面决策仍生成式', async () => {
+    const svc = stubProfileService(
+      { profile: 'generative', gateReason: 'generative_cover_not_card', perImageForms: [{ index: 0, form: 'photo', source: 'vision' }], innerSensed: 0 },
+      true,
+    );
+    const { plan } = await run({
+      sensor: stubSensor({ status: 'detected', guess: guess('photo', 0.95), cached: false }),
+      profileService: svc,
+    });
+    assert.equal(plan.coverForm, 'generative');
+    assert.equal(plan.gateReason, 'form_not_text_card');
+    assert.equal(plan.formProfile, 'generative');
+    assert.equal(plan.formProfileGate, 'generative_cover_not_card');
   });
 });

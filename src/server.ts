@@ -113,6 +113,8 @@ import {
   resolveCoverFormModel,
   resolveCoverFormProvider,
 } from './publish-agent/cover-form-sensor.js';
+// change textcard-carousel-form-parity（阶段0 影子）：帖级形态档服务（封面先行 + 内页有界并发判形）。
+import { createPostImageFormProfileService } from './publish-agent/post-image-form-profile.js';
 import { createTextCardRenderer, type TextCardRenderer } from './render/text-card.js';
 import {
   ContentScoutRole,
@@ -1924,6 +1926,14 @@ async function main(): Promise<void> {
     getModel: resolveCoverFormModel,
     getProvider: resolveCoverFormProvider,
   });
+  // 帖级形态档服务（change textcard-carousel-form-parity，阶段0 影子）：AIDCP_POST_FORM_PROFILE 默认关。
+  // 开=CoverCardWriter 复用封面感知结果 + 对内页 senseAt 有界并发判形、只把形态档写审计（不改渲染）；关=不计算、byte-identical。
+  // 依赖感知旗标 AIDCP_COVER_FORM_SENSING（senseAt 受同一 enabled 门控；感知关时形态档恒 generative）。
+  const postFormProfileService = createPostImageFormProfileService({
+    senseAt: (ref, arrayIndex) => coverFormSensor.senseAt!(ref, arrayIndex),
+    enabled: () => process.env.AIDCP_POST_FORM_PROFILE === 'true',
+    logger: console,
+  });
   // 渲染出口：lazy 工厂只在渲染旗标开时初始化（关=零加载零成本）；工厂失败→null，text_card 请求诚实降级生成式。
   let textCardRenderer: TextCardRenderer | null = null;
   if (process.env.AIDCP_PUBLISH_TEXTCARD_COVER === 'true') {
@@ -1954,6 +1964,8 @@ async function main(): Promise<void> {
   publishOrchestrator.registerRole(new CoverCardWriterRole({
     llmClient: roleLlm('publish:CoverCardWriter'),
     sensor: coverFormSensor,
+    // 帖级形态档影子服务（change textcard-carousel-form-parity，阶段0）：旗标关时不计算、byte-identical。
+    profileService: postFormProfileService,
     renderEnabled: () => process.env.AIDCP_PUBLISH_TEXTCARD_COVER === 'true',
     rendererAvailable: () => textCardRenderer !== null,
     ossAvailable: () => !!ossUploader,

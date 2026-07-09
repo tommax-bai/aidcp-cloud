@@ -48,7 +48,16 @@ export interface CoverFormSenseRef {
 
 export interface CoverFormSensor {
   sense(ref: CoverFormSenseRef): Promise<CoverFormSenseResult>;
+  /**
+   * 判定参照图数组中**指定下标**那张的形态（change textcard-carousel-form-parity）。
+   * 与 sense() 共用同一核心（缓存→视觉→严格解析→回写），红线一致（无负缓存/绝不猜/绝不抛）。
+   * 该下标无可用 URL → status='no_image'。可选：旧 stub 只实现 sense() 仍合法。
+   */
+  senseAt?(ref: CoverFormSenseRef, arrayIndex: number): Promise<CoverFormSenseResult>;
 }
+
+/** 判定「指定下标一张」的函数型（帖级形态档服务据此判内页；与具体 sensor 解耦，便于单测注入假实现）。 */
+export type SenseImageAtFn = (ref: CoverFormSenseRef, arrayIndex: number) => Promise<CoverFormSenseResult>;
 
 export interface CoverFormSensorDeps {
   /** 多模态客户端（model/provider 已在装配处解析注入，见 vision.ts 不变量）。 */
@@ -80,7 +89,7 @@ function envPositiveInt(name: string): number | undefined {
 }
 
 /** 可用图 URL：ossUrl 优先（转存稳定、不受平台防盗链），缺则 sourceUrl；两者皆空 → undefined。 */
-function usableImageUrl(img: ReferenceImageSnapshot): string | undefined {
+export function usableImageUrl(img: ReferenceImageSnapshot): string | undefined {
   const oss = typeof img.ossUrl === 'string' && img.ossUrl.trim() ? img.ossUrl.trim() : undefined;
   if (oss) return oss;
   return typeof img.sourceUrl === 'string' && img.sourceUrl.trim() ? img.sourceUrl.trim() : undefined;
@@ -148,79 +157,94 @@ export function createCoverFormSensor(deps: CoverFormSensorDeps): CoverFormSenso
   const timeoutMs = deps.timeoutMs ?? envPositiveInt('AIDCP_COVER_FORM_TIMEOUT_MS') ?? 30_000;
   const clock = deps.clock ?? Date.now;
 
+  // 判定「指定一张」核心：缓存 → 单次视觉 → 严格解析 → 回写（change textcard-carousel-form-parity 从 sense 抽出）。
+  // sense() 与 senseAt() 共用；行为逐字节等价旧 sense（封面单张路径），红线一致（无负缓存/绝不猜/绝不抛）。
+  async function senseImageAt(
+    ref: CoverFormSenseRef,
+    item: ReferenceImageSnapshot,
+    url: string,
+    arrayIndex: number,
+  ): Promise<CoverFormSenseResult> {
+    // ③ 缓存命中：detectedFor 锚 === item 当前 capturedAt（重抓必变、零 TTL）→ 零视觉调用。
+    if (item.formGuess && typeof item.capturedAt === 'number' && item.formGuess.detectedFor === item.capturedAt) {
+      return { status: 'detected', guess: item.formGuess, cached: true };
+    }
+
+    // ④ miss → 单次视觉调用（内层超时闸随 opts 下发）；调用失败/超时 → error，绝不持久化、绝不抛。
+    let raw: string;
+    try {
+      raw = await deps.vision.chatVision(buildSenseMessages(url), {
+        role: COVER_FORM_SENSOR_ROLE,
+        accountId: ref.accountId,
+        timeoutMs,
+      });
+    } catch (err) {
+      return { status: 'error', cached: false, detail: compactError(err) };
+    }
+
+    // ⑤ 严格解析：脏 JSON / 缺核心字段 / 越界 → error，MUST NOT 默认成功、绝不猜形态。
+    const parsed = parseSenseOutput(raw);
+    if (!parsed) {
+      return { status: 'error', cached: false, detail: 'unparseable vision output (missing/invalid form or confidence)' };
+    }
+
+    // ⑥ 盖章判定：detectedFor = item.capturedAt（存量缺失则用归一化 now——annotate 同条语句会把它落盘作锚）。
+    const now = clock();
+    const detectedFor =
+      typeof item.capturedAt === 'number' && Number.isInteger(item.capturedAt) && item.capturedAt > 0
+        ? item.capturedAt
+        : now;
+    const guess: CuratedReferenceImageFormGuess = {
+      form: parsed.form,
+      confidence: parsed.confidence,
+      detectedAt: now,
+      detectedFor,
+      model: deps.getModel(),
+      provider: deps.getProvider(),
+    };
+
+    // ⑦ best-effort 回写素材行：仅有落库行时；锚不符弃写 / PG 失败只记日志，绝不影响本次发布。
+    if (deps.annotate && ref.curatedContentId !== null) {
+      try {
+        const written = await deps.annotate(ref.curatedContentId, arrayIndex, guess);
+        if (!written) {
+          deps.logger?.warn?.(
+            `[CoverFormSensor] annotation skipped (anchor mismatch or row missing) rowId=${ref.curatedContentId} index=${arrayIndex} source=${ref.sourceId}`,
+          );
+        }
+      } catch (err) {
+        deps.logger?.warn?.(
+          `[CoverFormSensor] annotation write failed rowId=${ref.curatedContentId} index=${arrayIndex}: ${compactError(err)}`,
+        );
+      }
+    }
+
+    // 低置信不过滤：原样返回，阈值在消费端（存观测不存策略）。
+    return { status: 'detected', guess, cached: false };
+  }
+
   return {
     async sense(ref: CoverFormSenseRef): Promise<CoverFormSenseResult> {
       // ① 旗标闸：关即零调用零写入（感知只由本旗标门控，先于且独立于渲染旗标——design D4 修正）。
       if (!deps.enabled()) return { status: 'disabled', cached: false };
 
       // ② 选第一张有可用 URL 的参照图；全不可用 → 诚实 no_image（封面走生成式，绝不阻断发布）。
-      let picked: { item: ReferenceImageSnapshot; url: string; arrayIndex: number } | undefined;
       for (let i = 0; i < (ref.images?.length ?? 0); i++) {
         const url = usableImageUrl(ref.images[i]);
-        if (url) {
-          picked = { item: ref.images[i], url, arrayIndex: i };
-          break;
-        }
+        if (url) return senseImageAt(ref, ref.images[i], url, i);
       }
-      if (!picked) return { status: 'no_image', cached: false, detail: 'no usable reference image url' };
-      const { item, url, arrayIndex } = picked;
+      return { status: 'no_image', cached: false, detail: 'no usable reference image url' };
+    },
 
-      // ③ 缓存命中：detectedFor 锚 === item 当前 capturedAt（重抓必变、零 TTL）→ 零视觉调用。
-      if (item.formGuess && typeof item.capturedAt === 'number' && item.formGuess.detectedFor === item.capturedAt) {
-        return { status: 'detected', guess: item.formGuess, cached: true };
+    // 判定指定下标那张（帖级形态档服务判内页用）。旗标关 → disabled；该下标无可用 URL → no_image。
+    async senseAt(ref: CoverFormSenseRef, arrayIndex: number): Promise<CoverFormSenseResult> {
+      if (!deps.enabled()) return { status: 'disabled', cached: false };
+      const item = ref.images?.[arrayIndex];
+      const url = item ? usableImageUrl(item) : undefined;
+      if (!item || !url) {
+        return { status: 'no_image', cached: false, detail: `reference image[${arrayIndex}] has no usable url` };
       }
-
-      // ④ miss → 单次视觉调用（内层超时闸随 opts 下发）；调用失败/超时 → error，绝不持久化、绝不抛。
-      let raw: string;
-      try {
-        raw = await deps.vision.chatVision(buildSenseMessages(url), {
-          role: COVER_FORM_SENSOR_ROLE,
-          accountId: ref.accountId,
-          timeoutMs,
-        });
-      } catch (err) {
-        return { status: 'error', cached: false, detail: compactError(err) };
-      }
-
-      // ⑤ 严格解析：脏 JSON / 缺核心字段 / 越界 → error，MUST NOT 默认成功、绝不猜形态。
-      const parsed = parseSenseOutput(raw);
-      if (!parsed) {
-        return { status: 'error', cached: false, detail: 'unparseable vision output (missing/invalid form or confidence)' };
-      }
-
-      // ⑥ 盖章判定：detectedFor = item.capturedAt（存量缺失则用归一化 now——annotate 同条语句会把它落盘作锚）。
-      const now = clock();
-      const detectedFor =
-        typeof item.capturedAt === 'number' && Number.isInteger(item.capturedAt) && item.capturedAt > 0
-          ? item.capturedAt
-          : now;
-      const guess: CuratedReferenceImageFormGuess = {
-        form: parsed.form,
-        confidence: parsed.confidence,
-        detectedAt: now,
-        detectedFor,
-        model: deps.getModel(),
-        provider: deps.getProvider(),
-      };
-
-      // ⑦ best-effort 回写素材行：仅有落库行时；锚不符弃写 / PG 失败只记日志，绝不影响本次发布。
-      if (deps.annotate && ref.curatedContentId !== null) {
-        try {
-          const written = await deps.annotate(ref.curatedContentId, arrayIndex, guess);
-          if (!written) {
-            deps.logger?.warn?.(
-              `[CoverFormSensor] annotation skipped (anchor mismatch or row missing) rowId=${ref.curatedContentId} index=${arrayIndex} source=${ref.sourceId}`,
-            );
-          }
-        } catch (err) {
-          deps.logger?.warn?.(
-            `[CoverFormSensor] annotation write failed rowId=${ref.curatedContentId} index=${arrayIndex}: ${compactError(err)}`,
-          );
-        }
-      }
-
-      // 低置信不过滤：原样返回，阈值在消费端（存观测不存策略）。
-      return { status: 'detected', guess, cached: false };
+      return senseImageAt(ref, item, url, arrayIndex);
     },
   };
 }

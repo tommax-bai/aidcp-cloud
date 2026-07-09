@@ -268,6 +268,39 @@ export type CoverForm = 'generative' | 'text_card';
 /** 管线层感知结果（持久层为四值枚举；unknown 表「未感知/失败/低置信」，缺失绝不猜形态）。 */
 export type SensedCoverForm = 'text_card' | 'photo' | 'illustration' | 'other' | 'unknown';
 
+// ─── 帖级形态档（change textcard-carousel-form-parity，阶段0 影子）：封面先行 + 内页有界并发判形 → 三档 ───
+
+/** 帖级形态档三档：generative 普通帖 / card_cover 卡封面+生图内页（现版行为）/ all_text_card 整帖文字卡。 */
+export type PostFormProfile = 'generative' | 'card_cover' | 'all_text_card';
+
+/** 帖级形态档门禁原因（穷举；每帖可回放「为什么归这档」）。 */
+export type PostFormGateReason =
+  | 'all_text_card'
+  | 'card_cover'
+  | 'generative_cover_not_card'
+  | 'downgrade_inner_not_unanimous'
+  | 'downgrade_unknown_or_error'
+  | 'downgrade_over_cap'
+  | 'carousel_copy_failed'
+  | 'renderer_unavailable';
+
+/** 单张源图形态判定（审计用；index 与参照图数组下标一致，source 记缓存命中/视觉/未判）。 */
+export interface PerImageFormGuess {
+  index: number;
+  form: SensedCoverForm;
+  source: 'cached' | 'vision' | 'none';
+}
+
+/** 帖级形态档结果（纯服务 computePostImageFormProfile 产；阶段0 只记录不改渲染）。 */
+export interface PostFormProfileResult {
+  profile: PostFormProfile;
+  gateReason: PostFormGateReason;
+  /** 逐张形态（含封面 index）；未判定/未启用为空。 */
+  perImageForms: PerImageFormGuess[];
+  /** 本次对内页发起的判定次数（含缓存命中）——审计成本用。 */
+  innerSensed: number;
+}
+
 /** 文字卡卡面文案（只来自洗稿产物；badge 按 YAGNI 裁剪、模板侧留槽不接 LLM）。 */
 export interface CoverCardCopy {
   title: string;
@@ -297,6 +330,15 @@ export interface CoverCardPlan {
   sensedSource: 'cached' | 'vision' | 'none';
   gateReason: CoverCardGateReason;
   decidedAt: number;
+  /**
+   * 帖级形态档（change textcard-carousel-form-parity，阶段0 影子）：仅 AIDCP_POST_FORM_PROFILE 开时非空。
+   * 只记录不改渲染（阶段0），故与既有 coverForm/card 决策正交并列；旗标关时 undefined，保逐字节零回归。
+   */
+  formProfile?: PostFormProfile;
+  formProfileGate?: PostFormGateReason;
+  perImageForms?: PerImageFormGuess[];
+  /** 阶段1 预留：整帖多卡文案（阶段0 恒不写）。 */
+  cardSet?: (CoverCardCopy | null)[];
 }
 
 /** 封面渲染执行结局（诚实审计：降级用了生成图绝不标 text_card）。 */
@@ -310,6 +352,13 @@ export interface CoverFormAudit {
   gateReason: CoverCardGateReason;
   renderStatus: CoverRenderStatus;
   renderMeta?: { themeKey: string; truncated: boolean; sanitized: boolean; reductions: string[] };
+  /**
+   * 帖级形态档影子审计（change textcard-carousel-form-parity，阶段0）：仅 AIDCP_POST_FORM_PROFILE 开时非空。
+   * 面板 null-safe 解析（旧行/旗标关为 undefined）；运营据此核纯卡源稿频率与内页判定准确率。
+   */
+  formProfile?: PostFormProfile;
+  formProfileGate?: PostFormGateReason;
+  perImageForms?: PerImageFormGuess[];
 }
 
 export interface ImageReferenceAudit {
@@ -400,6 +449,13 @@ export interface ImagePlan {
   coverForm?: CoverForm;
   coverCard?: CoverCardCopy | null;
   coverGate?: Pick<CoverCardPlan, 'sensedForm' | 'sensedSource' | 'gateReason'>;
+  /**
+   * 帖级形态档盖章透传（change textcard-carousel-form-parity，阶段0 影子）：composer 把 coverCardPlan 的形态档
+   * 原样透传，供 ImageGenerator 并列写进 coverFormAudit。旗标关时 undefined，保配图计划逐字节零回归。
+   */
+  formProfile?: PostFormProfile;
+  formProfileGate?: PostFormGateReason;
+  perImageForms?: PerImageFormGuess[];
   plannedAt: number;
 }
 
