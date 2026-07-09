@@ -8,10 +8,12 @@
  * 正确性闸（对抗评审挖出的必须项）：
  * - **fail-closed**：内容格缺失 / 非法一律「不活跃、跳过」（isValidWeekActiveMask && isWeekActiveAt），绝不回落全天。
  * - **分钟错峰**：offset = hash(accountId + 本地日期 + 'post') % 60，逐日变、账号间错开；仅命中分钟才尝试。
- * - **发帖全局串行**：下发前过注入的 isPublishBusy()（真全局闸），忙则本槽顺延（本小时不发）。
+ * - **账号粒度自主单飞**（change parallel-rewrite-drafts）：过注入的 isPublishBusy(accountId)——该账号自主轮
+ *   在跑则本槽顺延；洗稿在途不让槽；全局并发帽在调度器 claim 层另行兜底（帽满触发诚实 skipped）。
  * - **fire-and-forget**：triggerPost 走耗时生成管线；心跳绝不 await 它（否则单分钟被阻塞、其它账号饿死、错峰被击穿）。
  * - **幂等**：(account, 小时格) 同格不重触发；**tick 重入护栏**：上轮未完即跳过本轮。
- * - **日上限原子**：已发历史 + 在途未审草稿之和 >= cap 则不发（防重启丢内存态 / 双扳机超发）。
+ * - **日上限原子**：已发历史 + 在途**自主**草稿真实条数之和 >= cap 则不发（防两张自动草稿都获批超发；
+ *   洗稿候选不占排期日上限，由账号在途帽独立兜量）。
  * - **风控 normal 闸**：非 normal 态不自动放量。
  *
  * localDayKey：本模块自带（服务器本地 YYYY-MM-DD），刻意不导出 role-dispatcher 的同名函数以避开热点文件。
@@ -42,10 +44,14 @@ export interface ContentSchedulerDeps {
   riskStatus(accountId: string): string | Promise<string>;
   /** 今日已发帖数（持久历史，按账号 Asia/Shanghai 自然日）。 */
   postedTodayCount(accountId: string): Promise<number>;
-  /** 是否有在途未审发帖草稿（防 TOCTOU 超发）。 */
-  hasPendingPost(accountId: string): Promise<boolean>;
-  /** 发帖是否全局忙（全局串行闸，无 accountId）。 */
-  isPublishBusy(): boolean;
+  /**
+   * 在途**自主来源**未审草稿真实条数（change parallel-rewrite-drafts）：日上限原子判定
+   * posted + pendingAutonomous >= cap——自主候选按条数计防两张都获批超发；洗稿候选不占排期日上限
+   * （人工发起、由账号在途帽独立兜量）。
+   */
+  pendingAutonomousCount(accountId: string): Promise<number>;
+  /** 该账号自主发帖轮是否在跑（change parallel-rewrite-drafts：账号粒度单飞；洗稿在途不让排期槽）。 */
+  isPublishBusy(accountId: string): boolean;
   /**
    * 当前是否在「可活跃时间」（浏览周历掩码）内 —— **自动内容时窗 ⊆ 活跃时段** 的强制闸（用户拍板：
    * 休眠格绝不自动发内容，账号"睡着"的时段准点发帖本身就是不自然信号）。语义沿浏览掩码的 fail-open
@@ -105,9 +111,9 @@ export class ContentScheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
   private tickRunning = false;
   /**
-   * 发帖全局串行（同步置位）：防同一 tick 内先后给两个账号 fire → 两次并发发帖污染 publishAccountRef 全局槽 /
-   * finally-复位竞态（对抗评审阻断项）。fire 时同步置 true、triggerPost settle 时清；配合注入的 isPublishBusy()
-   * （覆盖手动 /publish）构成「同刻至多一个账号在发帖」。
+   * 同 tick 发帖单发旗标（change parallel-rewrite-drafts 语义降级保留）：旧槽污染理由已随全局槽消灭，
+   * 保留它是防同一 tick 内多账号齐发（错峰被同分钟命中击穿时的成本/风控尖峰缓冲）；跨 tick 的并发
+   * 准入由调度器 claim 层（账号自主单飞 + 全局帽）负责。
    */
   private postFiring = false;
   /** 每账号跨动作单飞（本 Phase 只发帖；为 Phase 2/3 预留背板）。 */
@@ -180,14 +186,16 @@ export class ContentScheduler {
             if ((await this.deps.riskStatus(accountId)) !== 'normal') break;
 
             if (action === 'post') {
-              // 发帖全局串行：本调度器已有发帖在飞 或 手动 /publish 在跑 → 本槽顺延（不 burst）。
-              if (this.postFiring || this.deps.isPublishBusy()) continue;
-              // 日上限原子：已发历史 + 在途未审草稿。
-              const [posted, pending] = await Promise.all([
+              // 账号粒度自主单飞（change parallel-rewrite-drafts）：该账号已有自主轮在跑 → 本槽顺延；
+              // 洗稿在途不让槽（全局并发帽由 claim 层兜底，帽满触发同样诚实 skipped）。postFiring 保留：
+              // 防同一 tick 内多账号齐发的错峰意义独立于旧槽污染理由。
+              if (this.postFiring || this.deps.isPublishBusy(accountId)) continue;
+              // 日上限原子：已发历史 + 在途自主草稿真实条数（洗稿候选不计入）。
+              const [posted, pendingAuto] = await Promise.all([
                 this.deps.postedTodayCount(accountId),
-                this.deps.hasPendingPost(accountId),
+                this.deps.pendingAutonomousCount(accountId),
               ]);
-              if (posted + (pending ? 1 : 0) >= s.postDailyCap) continue;
+              if (posted + pendingAuto >= s.postDailyCap) continue;
 
               this.lastFired.set(fireKey, cell);
               this.inFlight.add(accountId);

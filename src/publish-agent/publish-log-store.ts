@@ -493,11 +493,33 @@ export class PublishLogStore {
    * 用于生成段堆积保护：已有 pending_approval 草稿时不再为该账号生成新草稿。
    */
   async hasPendingApprovalForAccount(accountId: string): Promise<boolean> {
+    return (await this.countPendingForAccount(accountId)) > 0;
+  }
+
+  /**
+   * 该账号在途待审草稿真实条数（change parallel-rewrite-drafts）。
+   * 供账号在途帽判定（claim 同步段内以「在途 claim 数 + 本计数」之和对帽）；多候选并存世界布尔不够用。
+   */
+  async countPendingForAccount(accountId: string): Promise<number> {
     const { rows } = await this.pool.query<{ n: string }>(
       `SELECT count(*)::text AS n FROM publish_log WHERE account_id = $1 AND status = 'pending_approval'`,
       [accountId],
     );
-    return Number(rows[0]?.n ?? '0') > 0;
+    return Number(rows[0]?.n ?? '0');
+  }
+
+  /**
+   * 该账号在途待审草稿中**自主来源**（非参照洗稿）的真实条数（change parallel-rewrite-drafts）。
+   * 供排期日上限原子判定 posted + pendingAutonomous >= cap：自主候选按真实条数计（防两张自动草稿都获批即超发），
+   * 洗稿候选（source_reference 非空）是人工发起的候选、不占排期日上限（由账号在途帽独立兜量）。
+   */
+  async countPendingAutonomousForAccount(accountId: string): Promise<number> {
+    const { rows } = await this.pool.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM publish_log
+        WHERE account_id = $1 AND status = 'pending_approval' AND source_reference IS NULL`,
+      [accountId],
+    );
+    return Number(rows[0]?.n ?? '0');
   }
 
   /**

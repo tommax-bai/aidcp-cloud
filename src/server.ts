@@ -2204,9 +2204,14 @@ async function main(): Promise<void> {
       getSoul,
       conceptThreshold: Number(process.env.AIDCP_PUBLISH_CONCEPT_THRESHOLD ?? 20),
       minHoursBetween: Number(process.env.AIDCP_PUBLISH_MIN_HOURS ?? 24),
+      // 并发准入（change parallel-rewrite-drafts）：账号在途帽（claim + DB 待审之和，覆盖全部触发入口）
+      // + 全局并发生成帽（保护 LLM/生图供应商；上线先压 AIDCP_PUBLISH_IMAGE_CONCURRENCY 观察成功率）。
+      countPendingForAccount: (accountId) => publishLogStore.countPendingForAccount(accountId),
+      pendingCapPerAccount: Number(process.env.AIDCP_PUBLISH_PENDING_CAP_PER_ACCOUNT ?? 3),
+      maxConcurrentRuns: Number(process.env.AIDCP_PUBLISH_MAX_CONCURRENT_RUNS ?? 2),
       logger: console,
     });
-    console.log('[aidcp-cloud] PublishScheduler 已就绪（手动 /publish 即用）');
+    console.log('[aidcp-cloud] PublishScheduler 已就绪（手动 /publish 即用；洗稿并行=参照稿粒度）');
 
     // ── 内容排期调度器（change content-schedule-auto-publish，Phase 1 只发帖）────────────────
     // 每分钟心跳、按账号扇出、分钟错峰；到点只产草稿→飞书人审→approved 才发（AC-PUB 不动）。
@@ -2218,8 +2223,11 @@ async function main(): Promise<void> {
         scheduleFor: (accountId) => contentScheduleStore.effectiveScheduleFor(accountId),
         riskStatus: async (accountId) => (await resolveController(accountId)).getState().status,
         postedTodayCount: (accountId) => publishLogStore.countPublishedTodayForAccount(accountId),
-        hasPendingPost: (accountId) => publishLogStore.hasPendingApprovalForAccount(accountId),
-        isPublishBusy: () => publishScheduler?.isBusy() ?? false,
+        // 日上限口径（change parallel-rewrite-drafts）：自主在途按真实条数计（防两张自动草稿都获批超发）；
+        // 洗稿候选（source_reference 非空）不占排期日上限——由账号在途帽独立兜量，不堵 cap=1 账号的排期。
+        pendingAutonomousCount: (accountId) => publishLogStore.countPendingAutonomousForAccount(accountId),
+        // 忙判定收窄为账号粒度自主单飞：洗稿在途不让排期槽（全局帽在 claim 层另行兜底）。
+        isPublishBusy: (accountId) => publishScheduler?.isBusy(accountId) ?? false,
         // 自动 ⊆ 活跃（用户拍板：浏览休眠格绝不自动发内容）：读浏览周历掩码，沿其 fail-open（未配=全天活跃=不限）。
         browseActiveAt: (now) => isWeekActiveAt(sessionConfigStore.weekActiveMask(), now),
         // fire-and-forget：调度器只发起；结果（成功/诚实空槽/失败）在此异步补一张飞书卡，绝不静默假成功。
@@ -2761,37 +2769,45 @@ async function main(): Promise<void> {
           curatedActions: {
             createPostFromNote: async (accountId, row, options) => {
               if (!publishScheduler) return { triggered: false, reason: 'publish_unready' };
-              if (publishScheduler.isBusy()) return { triggered: false, reason: 'publish_busy' };
               if (personaStore.getForAccount(accountId) === null) return { triggered: false, reason: 'needs_persona' };
               if (!(row.body ?? '').trim()) return { triggered: false, reason: 'empty_body' };
               const useReferenceImages = options?.useReferenceImages ?? row.referenceImages.length > 0;
-              // fire-and-forget：触发后异步补飞书结果卡（诚实三态，镜像 /publish 回执语义；成功终态=人审卡本身，不重复报绿）。
-              void publishScheduler
-                .triggerManual(accountId, {
-                  referenceNote: {
-                    sourceId: row.sourceId,
-                    title: row.title ?? '',
-                    body: row.body ?? '',
-                    topics: row.topics,
-                    curatedContentId: row.id,
-                    accountId,
-                    sourceUrl: row.sourceUrl,
-                    capturedAt: Date.now(),
-                    ...(row.author ? { author: row.author } : {}),
-                    ...(useReferenceImages && row.referenceImages.length > 0 ? { images: row.referenceImages } : {}),
-                  },
-                })
+              // 并发准入（change parallel-rewrite-drafts）：预取 DB 待审数 → 同步键控 claim。全部拒绝
+              //（duplicate_source / publish_capacity / publish_busy）都在 HTTP 回执同步可见、绝不落到只有飞书卡才知道；
+              // 同账号跨参照稿并行放行。claim 成功即管线已发起，结果卡链挂 outcome。
+              const dbPendingCount = await publishLogStore.countPendingForAccount(accountId).catch(() => 0);
+              const begin = publishScheduler.tryBeginRewrite(
+                accountId,
+                {
+                  sourceId: row.sourceId,
+                  title: row.title ?? '',
+                  body: row.body ?? '',
+                  topics: row.topics,
+                  curatedContentId: row.id,
+                  accountId,
+                  sourceUrl: row.sourceUrl,
+                  capturedAt: Date.now(),
+                  ...(row.author ? { author: row.author } : {}),
+                  ...(useReferenceImages && row.referenceImages.length > 0 ? { images: row.referenceImages } : {}),
+                },
+                { dbPendingCount },
+              );
+              if (!begin.started) return { triggered: false, reason: begin.reason };
+              // fire-and-forget：结果卡链挂 outcome（诚实三态，镜像 /publish 回执语义；成功终态=人审卡本身，不重复报绿）。
+              // 并行多轮可区分：卡文案带参照稿标题/sourceId。
+              const sourceLabel = (row.title ?? '').trim() || row.sourceId;
+              void begin.outcome
                 .then(async (o) => {
                   // 只在「没走到人审卡」时补卡（未触发黄 / 失败红 / 跳过黄）；进人审（pending_approval 等）由人审卡自证，不双卡。
                   let receipt: { ok: boolean; level: 'success' | 'warning' | 'error'; title: string; message: string } | null = null;
                   const accountName = accountDisplayName(accountId);
                   const accountLabel = accountName ?? accountId;
                   if (o.result !== 'triggered') {
-                    receipt = { ok: false, level: 'warning', title: '参照创作未触发', message: `账号 \`${accountLabel}\` 未触发：${o.reason}` };
+                    receipt = { ok: false, level: 'warning', title: '参照创作未触发', message: `账号 \`${accountLabel}\`「${sourceLabel}」未触发：${o.reason}` };
                   } else if (o.status === 'failed' || o.status === 'timeout') {
-                    receipt = { ok: false, level: 'error', title: '参照创作编排失败', message: `账号 \`${accountLabel}\` 编排状态 ${o.status}${o.failureReason ? `\n原因：${o.failureReason}` : ''}` };
+                    receipt = { ok: false, level: 'error', title: '参照创作编排失败', message: `账号 \`${accountLabel}\`「${sourceLabel}」编排状态 ${o.status}${o.failureReason ? `\n原因：${o.failureReason}` : ''}` };
                   } else if (o.status === 'skipped') {
-                    receipt = { ok: false, level: 'warning', title: '参照创作未产出', message: `账号 \`${accountLabel}\` 编排状态 skipped${o.failureReason ? `（${o.failureReason}）` : ''}` };
+                    receipt = { ok: false, level: 'warning', title: '参照创作未产出', message: `账号 \`${accountLabel}\`「${sourceLabel}」编排状态 skipped${o.failureReason ? `（${o.failureReason}）` : ''}` };
                   }
                   if (!receipt) return;
                   const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });

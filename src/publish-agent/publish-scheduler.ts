@@ -57,10 +57,27 @@ export interface SchedulerOrchestrator {
   trigger(input: TriggerInput): Promise<SchedulerTriggerResult>;
 }
 
+/** claim 拒绝原因（change parallel-rewrite-drafts）：同键在途 / 自主单飞 / 账号在途帽满 / 全局并发帽满。 */
+export type ClaimRejectReason = 'duplicate_source' | 'already_running' | 'publish_capacity' | 'publish_busy';
+
+/** console 洗稿同步触发结果：started=false 时 reason 供 HTTP 回执直译；started=true 时 outcome 在本轮收敛时 settle。 */
+export type BeginRewriteResult =
+  | { started: true; outcome: Promise<TriggerOutcome> }
+  | { started: false; reason: ClaimRejectReason };
+
 export interface PublishSchedulerDeps {
   conceptStore: SchedulerConceptStore;
   likedStore: SchedulerLikedStore;
   publishLog: SchedulerPublishLog;
+  /**
+   * 账号在途帽的 DB 待审计数口（change parallel-rewrite-drafts）：claim 前 await 取好、同步段内与在途
+   * claim 数相加对帽（claim 数精确防并发穿透，DB 数允许轻微滞后）。缺省（测试桩）→ 只按 claim 数对帽。
+   */
+  countPendingForAccount?: (accountId: string) => Promise<number>;
+  /** 每账号在途帽：生成中 claim + 落库待审之和（默认 3；覆盖全部触发入口，防排期小时格结构性击穿堆稿）。 */
+  pendingCapPerAccount?: number;
+  /** 全局并发生成帽（默认 2；保护 LLM/生图供应商——文本重试盲退避不识 429、生图零重试）。 */
+  maxConcurrentRuns?: number;
   /** retire-default-account：按真实账号解析风控（替代单租户全局 risk controller）。 */
   resolveRisk: (accountId: string) => Promise<SchedulerRisk>;
   /** 解析「唯一真实账号」：恰好一个真实账号则返回它，0 或多个返回 null（自动 / 无参发布据此 honest-fail，绝不回落 default）。 */
@@ -115,11 +132,15 @@ export class PublishScheduler {
   /** 无发布记录时的基准（进程启动时刻），避免把历史全量概念算成"新"。 */
   private readonly startedAt: number;
   /**
-   * 发帖全局忙（change content-schedule-auto-publish）：任一 doTrigger（自动 / 手动 / 排期）进行中即 true。
-   * 供 ContentScheduler 全局串行发帖——因 publishAccountRef 是全局可变槽，多账号并发发帖会污染 token 账号归属
-   * （对抗评审阻断项）。**load-bearing 不变量：发帖必须全局串行**；禁止未来「按账号并行发帖」优化，除非先消灭全局槽。
+   * 键控 claim 注册表（change parallel-rewrite-drafts，取代原 publishing 全局布尔）。
+   * **load-bearing 不变量（重写）**：归账已逐调用显式（全局槽已消灭），全局串行的旧理由不复存在；新不变量：
+   * ① 洗稿按 (accountId, sourceId) 单飞、跨参照稿可并行（含同账号）；② 自主创作按账号单飞（输入确定性、
+   * 并发必相似）；③ claim 的检查与置位在零 await 同步段完成（tryClaim）、释放在覆盖 buildTriggerInput
+   * 全程的 finally（任何 DB 瞬错不得让键永久卡死）。键：rewrite:<accountId>:<sourceId> / auto:<accountId>。
    */
-  private publishing = false;
+  private readonly claims = new Map<string, { kind: 'rewrite' | 'autonomous'; accountId: string; startedAt: number }>();
+  private readonly pendingCapPerAccount: number;
+  private readonly maxConcurrentRuns: number;
 
   constructor(deps: PublishSchedulerDeps) {
     this.d = deps;
@@ -127,7 +148,34 @@ export class PublishScheduler {
     this.logger = deps.logger ?? console;
     this.conceptThreshold = deps.conceptThreshold ?? 20;
     this.minHoursBetween = deps.minHoursBetween ?? 24;
+    this.pendingCapPerAccount = Math.max(1, deps.pendingCapPerAccount ?? 3);
+    this.maxConcurrentRuns = Math.max(1, deps.maxConcurrentRuns ?? 2);
     this.startedAt = this.clock();
+  }
+
+  /**
+   * 同步原子 claim：检查（同键 / 全局帽 / 账号在途帽）与置位之间零 await——关掉旧 publishing 迟置位的
+   * TOCTOU。账号帽 = 在途 claim 数（精确）+ 调用方预取的 DB 待审数（允许轻微滞后）。
+   */
+  private tryClaim(
+    key: string,
+    kind: 'rewrite' | 'autonomous',
+    accountId: string,
+    dbPendingCount: number,
+  ): { ok: true } | { ok: false; reason: ClaimRejectReason } {
+    if (this.claims.has(key)) return { ok: false, reason: kind === 'rewrite' ? 'duplicate_source' : 'already_running' };
+    let accountInFlight = 0;
+    for (const c of this.claims.values()) if (c.accountId === accountId) accountInFlight++;
+    if (accountInFlight + dbPendingCount >= this.pendingCapPerAccount) return { ok: false, reason: 'publish_capacity' };
+    if (this.claims.size >= this.maxConcurrentRuns) return { ok: false, reason: 'publish_busy' };
+    this.claims.set(key, { kind, accountId, startedAt: this.clock() });
+    return { ok: true };
+  }
+
+  /** 账号在途帽的 DB 待审计数（claim 前预取；未注入=0，只按 claim 数对帽）。 */
+  private async dbPendingCount(accountId: string): Promise<number> {
+    if (!this.d.countPendingForAccount) return 0;
+    return this.d.countPendingForAccount(accountId);
   }
 
   /**
@@ -293,9 +341,50 @@ export class PublishScheduler {
     return { result: 'triggered', reason: 'scheduled_window', status: triggeredStatus, failureReason, approvalCard };
   }
 
-  /** 发帖是否全局忙（供 ContentScheduler 全局串行）。任一 doTrigger 进行中即 true。 */
-  isBusy(): boolean {
-    return this.publishing;
+  /**
+   * 自主忙判定（change parallel-rewrite-drafts：语义收窄）：仅计**自主创作轮**在跑——洗稿在途不再让
+   * 排期槽（原让位动机=防槽污染，槽已消灭；放任让位会让活跃客户账号被持续饿槽）。
+   * 带 accountId = 该账号自主轮在跑；缺省 = 任一账号自主轮在跑（旧单账号调用面兼容）。
+   */
+  isBusy(accountId?: string): boolean {
+    for (const c of this.claims.values()) {
+      if (c.kind !== 'autonomous') continue;
+      if (!accountId || c.accountId === accountId) return true;
+    }
+    return false;
+  }
+
+  /**
+   * console 洗稿同步触发入口（change parallel-rewrite-drafts）：同步 claim（零 await 原子段），
+   * 失败即回稳定原因码（HTTP 回执可见，绝不落到只有飞书卡才知道）；成功即内部发起异步管线并返回
+   * outcome——调用方把既有 fire-and-forget 结果卡链挂在 outcome 上（skipped/failed 有人补卡）。
+   * dbPendingCount 由调用方在预检段 await 预取后传入（保持本方法同步）。
+   * 前置校验（persona / 空正文）由调用方入口闸负责——本方法只管并发准入与执行。
+   */
+  tryBeginRewrite(
+    accountId: string,
+    referenceNote: ReferenceNote,
+    opts?: { manualApprovalChatId?: string; dbPendingCount?: number },
+  ): BeginRewriteResult {
+    const key = `rewrite:${accountId}:${referenceNote.sourceId}`;
+    const claim = this.tryClaim(key, 'rewrite', accountId, opts?.dbPendingCount ?? 0);
+    if (!claim.ok) {
+      this.logger.warn(`[PublishScheduler] 洗稿触发被拒 account=${accountId} source=${referenceNote.sourceId} reason=${claim.reason}`);
+      return { started: false, reason: claim.reason };
+    }
+    this.logger.log(`[PublishScheduler] 洗稿并行触发 account=${accountId} source=${referenceNote.sourceId}（在途 claim ${this.claims.size}/${this.maxConcurrentRuns}）`);
+    const outcome = (async (): Promise<TriggerOutcome> => {
+      const { status, failureReason, approvalCard } = await this.runClaimed(
+        key,
+        'manual_reference',
+        true,
+        accountId,
+        referenceNote,
+        opts?.manualApprovalChatId,
+      );
+      return { result: 'triggered', reason: 'manual_reference', status, failureReason, approvalCard };
+    })();
+    return { started: true, outcome };
   }
 
   private freezeReferenceSource(accountId: string, referenceNote: ReferenceNote): PublishSourceReference {
@@ -318,6 +407,10 @@ export class PublishScheduler {
     return referenceImagesForGeneration(referenceNote.images ?? []);
   }
 
+  /**
+   * 统一触发漏斗（自动 / 手动飞书 / 排期 / 手动参照）：预取 DB 待审数 → 同步 claim → 执行。
+   * claim 被拒 → 诚实 skipped + 稳定原因（飞书黄卡照旧显示「已有一轮…」语义；洗稿键被拒=同源在途）。
+   */
   private async doTrigger(
     reason: string,
     forced = false,
@@ -325,6 +418,35 @@ export class PublishScheduler {
     referenceNote?: ReferenceNote,
     manualApprovalChatId?: string,
   ): Promise<{ status: string; failureReason?: string; approvalCard?: SchedulerApprovalCardResult }> {
+    const dbPending = await this.dbPendingCount(accountId);
+    const kind = referenceNote ? ('rewrite' as const) : ('autonomous' as const);
+    const key = referenceNote ? `rewrite:${accountId}:${referenceNote.sourceId}` : `auto:${accountId}`;
+    const claim = this.tryClaim(key, kind, accountId, dbPending);
+    if (!claim.ok) {
+      const text =
+        claim.reason === 'already_running'
+          ? '已有一轮发帖编排在运行中，本次未触发'
+          : claim.reason === 'duplicate_source'
+            ? '该参照稿已有一轮生成在途，本次未触发'
+            : claim.reason === 'publish_capacity'
+              ? '该账号在途待审草稿已达上限，本次未触发'
+              : '生成并发已满，本次未触发';
+      this.logger.warn(`[PublishScheduler] 触发被 claim 拒绝 account=${accountId} key=${key} reason=${claim.reason}`);
+      return { status: 'skipped', failureReason: `${text}（${claim.reason}）` };
+    }
+    return this.runClaimed(key, reason, forced, accountId, referenceNote, manualApprovalChatId);
+  }
+
+  /** claim 已持有的执行段：finally 覆盖含 buildTriggerInput 在内全程释放键（DB 瞬错不卡键）。 */
+  private async runClaimed(
+    key: string,
+    reason: string,
+    forced: boolean,
+    accountId: string,
+    referenceNote?: ReferenceNote,
+    manualApprovalChatId?: string,
+  ): Promise<{ status: string; failureReason?: string; approvalCard?: SchedulerApprovalCardResult }> {
+    try {
     const base = await this.buildTriggerInput(accountId);
     const referenceImages = referenceNote ? this.prepareReferenceImages(referenceNote) : [];
     let referenceNoteWithoutImages: Omit<ReferenceNote, 'images'> | undefined;
@@ -354,12 +476,11 @@ export class PublishScheduler {
       input.manualApprovalChatId = manualApprovalChatId.trim();
     }
     this.logger.log(`[PublishScheduler] 触发发帖编排 reason=${reason} forced=${forced} account=${input.accountId} newConcepts=${input.metrics.newConceptCount} liked=${input.metrics.likedSinceLastPublish}`);
-    this.publishing = true;
-    try {
-      const res = await this.d.orchestrator.trigger(input);
-      return { status: res.status, failureReason: res.reason, approvalCard: res.approvalCard };
+    const res = await this.d.orchestrator.trigger(input);
+    return { status: res.status, failureReason: res.reason, approvalCard: res.approvalCard };
     } finally {
-      this.publishing = false;
+      // 释放 claim：finally 覆盖 buildTriggerInput + 编排全程——任何 DB 瞬错/管线异常都不得让键永久卡死。
+      this.claims.delete(key);
     }
   }
 }

@@ -349,7 +349,9 @@ export interface PanelCuratedContent {
 /**
  * 动作触发态回执：console `src/types/api.ts` 的 CuratedActionReceipt 镜像此 DTO。
  * triggered=false 时 reason 为稳定机器原因码（empty_body / image_text_only / source_post_only / needs_persona /
- * publish_busy / edge_offline / running / contact_info_missing / already_commented / …），console 映射中文提示。
+ * publish_busy（change parallel-rewrite-drafts 起语义=并发生成已满，非全局串行）/ duplicate_source（同参照稿
+ * 已有一轮在途或待审同源并发触发）/ publish_capacity（该账号在途待审草稿达上限）/ edge_offline / running /
+ * contact_info_missing / already_commented / …），console 映射中文提示。
  */
 export interface CuratedActionReceipt {
   triggered: boolean;

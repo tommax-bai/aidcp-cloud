@@ -48,7 +48,7 @@ function mk(overrides: Partial<State> = {}) {
     scheduleFor: () => state.view,
     riskStatus: () => state.risk,
     postedTodayCount: () => Promise.resolve(state.posted),
-    hasPendingPost: () => Promise.resolve(state.pending),
+    pendingAutonomousCount: () => Promise.resolve(state.pending ? 1 : 0),
     isPublishBusy: () => state.busy,
     triggerPost: (id) => {
       calls.push(id);
@@ -188,7 +188,7 @@ test('content-scheduler: 发帖全局串行 — 同 tick 内两账号撞同偏�
     scheduleFor: () => state.view,
     riskStatus: () => state.risk,
     postedTodayCount: () => Promise.resolve(state.posted),
-    hasPendingPost: () => Promise.resolve(state.pending),
+    pendingAutonomousCount: () => Promise.resolve(state.pending ? 1 : 0),
     isPublishBusy: () => state.busy,
     triggerPost: (id) => {
       calls.push(id);
@@ -224,7 +224,7 @@ test('content-scheduler: 重入护栏 — 上轮未完时并发 tick 被跳过�
       await gate; // 卡住第一轮
       return state.posted;
     },
-    hasPendingPost: () => Promise.resolve(state.pending),
+    pendingAutonomousCount: () => Promise.resolve(state.pending ? 1 : 0),
     isPublishBusy: () => state.busy,
     triggerPost: (id) => {
       calls.push(id);
@@ -273,7 +273,7 @@ function mkC(overrides: Partial<CState> = {}) {
     scheduleFor: () => st.view,
     riskStatus: () => 'normal',
     postedTodayCount: () => Promise.resolve(0),
-    hasPendingPost: () => Promise.resolve(false),
+    pendingAutonomousCount: () => Promise.resolve(0),
     isPublishBusy: () => false,
     triggerPost: (id) => {
       fired.push(`post:${id}`);
@@ -380,7 +380,7 @@ function mkG(overrides: Partial<GState> = {}) {
     scheduleFor: () => st.view,
     riskStatus: () => 'normal',
     postedTodayCount: () => Promise.resolve(0),
-    hasPendingPost: () => Promise.resolve(false),
+    pendingAutonomousCount: () => Promise.resolve(0),
     isPublishBusy: () => false,
     triggerPost: (id) => { fired.push(`post:${id}`); return Promise.resolve(); },
     isCommentBusy: () => st.commentBusy,

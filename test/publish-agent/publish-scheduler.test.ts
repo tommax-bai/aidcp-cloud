@@ -147,3 +147,130 @@ describe('AC-PUB-SCHED PublishScheduler 三扳机', () => {
     assert.equal(scheduled.inputs[0].manualApprovalChatId, undefined);
   });
 });
+
+/**
+ * 键控单飞 + 容量帽（change parallel-rewrite-drafts / spec publish-generation-concurrency）。
+ * 并行单位=参照稿：洗稿 rewrite:(account,source) 单飞、跨源可并行（含同账号）；自主 auto:(account) 单飞。
+ * claim 检查与置位零 await 原子；finally 覆盖 buildTriggerInput 全程（DB 瞬错不卡键）。
+ */
+describe('claim 键控单飞与容量帽', () => {
+  function buildConcurrent(opts: {
+    pendingCap?: number;
+    maxRuns?: number;
+    dbPending?: number;
+    conceptsThrow?: boolean;
+  } = {}) {
+    const gates: Array<() => void> = [];
+    let releasing = false;
+    const started: string[] = [];
+    const deps: PublishSchedulerDeps = {
+      conceptStore: {
+        countNewSince: async () => {
+          if (opts.conceptsThrow) throw new Error('PG transient error');
+          return 0;
+        },
+        getNewConceptsSince: async () => [],
+      },
+      likedStore: { countSince: async () => 0, recentSince: async () => [] },
+      publishLog: { getMostRecentPublishTime: async () => null, recentPublishedContents: async () => [] },
+      resolveRisk: async () => ({ canDo: () => true, getState: () => ({ status: 'normal' }) }),
+      resolveSingleAccountId: async () => 'acc-test',
+      countPendingForAccount: async () => opts.dbPending ?? 0,
+      pendingCapPerAccount: opts.pendingCap ?? 3,
+      maxConcurrentRuns: opts.maxRuns ?? 2,
+      orchestrator: {
+        trigger: async (input) => {
+          started.push(input.generateInput.referenceNote?.sourceId ?? `auto:${input.accountId}`);
+          // 可控挂起：让轮次保持在跑，供并发/在途断言。releaseAll 先于本处执行时直接放行（防注册晚于释放挂死）。
+          if (!releasing) await new Promise<void>((r) => gates.push(r));
+          return { status: 'pending_approval' };
+        },
+      },
+      soul: {} as PublishSchedulerDeps['soul'],
+      clock: () => T,
+      logger: silent,
+    };
+    const scheduler = new PublishScheduler(deps);
+    const note = (sourceId: string) => ({ sourceId, title: 't', body: '正文', topics: [] as string[] });
+    const releaseAll = () => { releasing = true; for (const g of gates.splice(0)) g(); };
+    return { scheduler, started, note, releaseAll };
+  }
+
+  it('同键并发双触发恰一成功：第二发同步拒 duplicate_source', async () => {
+    const { scheduler, note, releaseAll } = buildConcurrent();
+    const a = scheduler.tryBeginRewrite('acc-test', note('src-1'));
+    const b = scheduler.tryBeginRewrite('acc-test', note('src-1'));
+    assert.equal(a.started, true);
+    assert.equal(b.started, false);
+    if (!b.started) assert.equal(b.reason, 'duplicate_source');
+    releaseAll();
+    if (a.started) await a.outcome;
+  });
+
+  it('同账号跨参照稿并行放行；全局帽满第三发拒 publish_busy', async () => {
+    const { scheduler, started, note, releaseAll } = buildConcurrent({ maxRuns: 2, pendingCap: 10 });
+    const a = scheduler.tryBeginRewrite('acc-test', note('src-1'));
+    const b = scheduler.tryBeginRewrite('acc-test', note('src-2'));
+    const c = scheduler.tryBeginRewrite('acc-test', note('src-3'));
+    assert.equal(a.started && b.started, true, '跨源两轮并行放行');
+    assert.equal(c.started, false);
+    if (!c.started) assert.equal(c.reason, 'publish_busy', '全局帽满诚实拒绝');
+    await new Promise((r) => setTimeout(r, 5));
+    assert.deepEqual(started.sort(), ['src-1', 'src-2'], '两轮真的都在跑');
+    releaseAll();
+    if (a.started) await a.outcome;
+    if (b.started) await b.outcome;
+  });
+
+  it('账号在途帽 = claim + DB 待审之和：dbPending 达帽即拒 publish_capacity（排期等全部入口同受此帽）', async () => {
+    const { scheduler, note } = buildConcurrent({ pendingCap: 3, dbPending: 3 });
+    const a = scheduler.tryBeginRewrite('acc-test', note('src-1'), { dbPendingCount: 3 });
+    assert.equal(a.started, false);
+    if (!a.started) assert.equal(a.reason, 'publish_capacity');
+    // 自主入口（排期/飞书）同受帽约束：doTrigger 预取 dbPending=3 → capacity 拒绝、诚实 skipped。
+    const o = await scheduler.triggerScheduled('acc-test');
+    assert.equal(o.result, 'triggered');
+    if (o.result === 'triggered') {
+      assert.equal(o.status, 'skipped');
+      assert.match(o.failureReason ?? '', /publish_capacity/);
+    }
+  });
+
+  it('自主同账号二次触发 → skipped already_running（飞书 20s 重推去重语义保住）', async () => {
+    const { scheduler, releaseAll } = buildConcurrent({ pendingCap: 10 });
+    const p1 = scheduler.triggerManual('acc-test');
+    await new Promise((r) => setTimeout(r, 5)); // 第一轮进入编排挂起
+    const o2 = await scheduler.triggerManual('acc-test');
+    assert.equal(o2.result, 'triggered');
+    if (o2.result === 'triggered') {
+      assert.equal(o2.status, 'skipped');
+      assert.match(o2.failureReason ?? '', /已有一轮发帖编排在运行中/, '黄卡文案语义原样');
+    }
+    releaseAll();
+    await p1;
+  });
+
+  it('isBusy 收窄为自主轮：洗稿在途不算忙（排期不让槽）、自主在途才算', async () => {
+    const { scheduler, note, releaseAll } = buildConcurrent({ pendingCap: 10 });
+    const a = scheduler.tryBeginRewrite('acc-test', note('src-1'));
+    assert.equal(a.started, true);
+    assert.equal(scheduler.isBusy('acc-test'), false, '洗稿在途不让排期槽');
+    const p = scheduler.triggerManual('acc-test');
+    await new Promise((r) => setTimeout(r, 5));
+    assert.equal(scheduler.isBusy('acc-test'), true, '自主轮在跑才算忙');
+    releaseAll();
+    if (a.started) await a.outcome;
+    await p;
+  });
+
+  it('brick 防线：buildTriggerInput 抛 PG 错误 → claim 于 finally 释放、同键立即可再触发', async () => {
+    const { scheduler, note } = buildConcurrent({ conceptsThrow: true });
+    const a = scheduler.tryBeginRewrite('acc-test', note('src-1'));
+    assert.equal(a.started, true);
+    if (a.started) await assert.rejects(a.outcome, /PG transient error/, '本轮诚实失败上抛');
+    // 键已释放：立即重试不再是 duplicate_source（这次仍会抛，但 claim 层放行即证键未卡死）。
+    const b = scheduler.tryBeginRewrite('acc-test', note('src-1'));
+    assert.equal(b.started, true, 'DB 瞬错绝不把键永久卡死');
+    if (b.started) await assert.rejects(b.outcome);
+  });
+});
