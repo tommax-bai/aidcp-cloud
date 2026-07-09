@@ -549,6 +549,16 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.deepEqual(dedupRecorded, [PERMALINK], '即便确认失败，也已标记以防重复真评同一目标');
   });
 
+  it('提交硬失败（如权限门/找不到评论框）→ 不打去重标记，可重试、不白占当日上限', async () => {
+    const { deps, audits, dedupRecorded } = fbFlowDeps({ submit: { ok: false, reason: 'permission_gated' } });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'submit_failed');
+    assert.equal(audits.at(-1)?.reason, 'permission_gated');
+    // 硬失败没真点提交 → 无重复真发风险 → 不打标记（同一目标可重试）。
+    assert.deepEqual(dedupRecorded, []);
+  });
+
   it('搜索遇登录失效 → login_required，不开帖不提交、不打去重', async () => {
     const { deps, audits, posted, dedupRecorded } = fbFlowDeps({ searchFail: 'login_required' });
     await new CommentScheduler(deps).triggerManual('fb-1');

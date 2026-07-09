@@ -509,11 +509,13 @@ export class CommentScheduler {
       return;
     }
 
-    // 6) 防重复真发（BLOCKING §5.4）：**提交派发前**即打 attempted 去重标记（与成功计数解耦）——
-    //    确认假阴性/网络抖动时不会对同一目标重复真评；该标记同时使 facebookCommentedToday 计入当日配额（保守）。
-    await dedup.recordInteraction(target, 'comment').catch(() => {});
-    // 7) 提交评论 + 服务器确认（边端 own-identity 收窄）。成功记风控走 interaction.occurred 自动路径，绝不在此重复 record。
+    // 6) 提交评论 + 服务器确认（边端 own-identity 收窄）。成功记风控走 interaction.occurred 自动路径，绝不在此重复 record。
     const submit = await steps.submitComment(target, v.text);
+    // 防重复真发（BLOCKING §5.4）：仅在**真提交了**（成功 或 提交后确认不了 verification_ambiguous）时打去重标记——
+    // 硬失败（权限门/找不到评论框/被拦/身份未知）没真点提交、无重复真发风险，不打标记（可重试、不白占当日上限）。
+    // 该标记同时使 facebookCommentedToday 计入当日配额；仅计「真发过一次」的目标，不误伤硬失败重试。
+    const reallySubmitted = submit.ok || submit.reason === 'verification_ambiguous';
+    if (reallySubmitted) await dedup.recordInteraction(target, 'comment').catch(() => {});
     if (submit.ok) {
       audit({ accountId, outcome: 'commented', shadow: false, keyword, container, textLength: v.text.length });
     } else {
