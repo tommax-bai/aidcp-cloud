@@ -25,7 +25,7 @@ const { Pool } = pg;
 
 /** 发帖日上限防御性上界（与 console CAP_MAX 对齐；防异常大值）。 */
 export const CONTENT_POST_DAILY_CAP_MAX = 50;
-/** 带联系方式评论日上限硬上界（change content-schedule-group-comments）：协同 spam 敏感动作，与 50 刻意分开；UI 建议 ≤3。 */
+/** 联系评论日上限硬上界（change content-schedule-group-comments）：协同 spam 敏感动作，与 50 刻意分开；UI 建议 ≤3。 */
 export const CONTACT_COMMENT_DAILY_CAP_MAX = 10;
 
 /** 全局「内容可自动时段」行。contentActiveMask：168 格 '0'/'1'；null = 未配 = 全 0 = 不自动（fail-closed）。 */
@@ -45,9 +45,9 @@ export interface AccountContentScheduleRow {
   commentEnabled: boolean;
   /** 评论日上限；0 = 不自动（与开关双保险）。 */
   commentDailyCap: number;
-  /** 自动带联系方式评论开关（change content-schedule-group-comments；开启须过一码一号硬校验）。 */
+  /** 自动联系评论开关（change content-schedule-group-comments；开启须过一码一号硬校验）。 */
   contactCommentEnabled: boolean;
-  /** 带联系方式评论每日自动尝试上限（0..10 硬上限；尝试型：被拒/无目标也占额度）。 */
+  /** 联系评论每日自动尝试上限（0..10 硬上限；尝试型：被拒/无目标也占额度）。 */
   contactCommentDailyCap: number;
   contentActiveMask: string | null;
   updatedAt: string | null;
@@ -66,7 +66,7 @@ export interface ContentScheduleCatalogRow {
   commentDailyCap: number;
   contactCommentEnabled: boolean;
   contactCommentDailyCap: number;
-  /** 该账号是否已配联系方式（accounts.contact_info IS NOT NULL；带联系方式评论开关的前置徽标）。 */
+  /** 该账号是否已配联系方式（accounts.contact_info IS NOT NULL；联系评论开关的前置徽标）。 */
   hasContactInfo: boolean;
   maskSource: 'override' | 'global';
   hasOverrideMask: boolean;
@@ -113,7 +113,7 @@ export type SetAccountContentScheduleResult =
       ok: true;
       row: AccountContentScheduleRow;
       /**
-       * 开启自动带联系方式评论时该联系方式与其它账号共用（一码一号从「硬阻断」放松为「放行 + 提示」，
+       * 开启自动联系评论时该联系方式与其它账号共用（一码一号从「硬阻断」放松为「放行 + 提示」，
        * change loosen-group-comment-shared-code）。true 时上层须回一条防关联风险提示、绝不静默。
        */
       sharedContactInfoWarning?: boolean;
@@ -148,10 +148,10 @@ CREATE TABLE IF NOT EXISTS account_content_schedule (
 -- 既有表靠幂等 ALTER 在 init() 补上；默认 false / 0 = 不自动（fail-closed，零回归）。
 ALTER TABLE account_content_schedule ADD COLUMN IF NOT EXISTS comment_enabled BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE account_content_schedule ADD COLUMN IF NOT EXISTS comment_daily_cap INTEGER NOT NULL DEFAULT 0;
--- 自愈加列（change content-schedule-group-comments → generalize-contact-info，物理改名迁移 0036 文档伴随）：Phase 3 带联系方式评论两列，默认 false/0 = 不自动。
+-- 自愈加列（change content-schedule-group-comments → generalize-contact-info，物理改名迁移 0036 文档伴随）：Phase 3 联系评论两列，默认 false/0 = 不自动。
 ALTER TABLE account_content_schedule ADD COLUMN IF NOT EXISTS contact_comment_enabled BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE account_content_schedule ADD COLUMN IF NOT EXISTS contact_comment_daily_cap INTEGER NOT NULL DEFAULT 0;
--- 带联系方式评论每日自动尝试台账（尝试型持久日上限：触发回执 ok 即记；重启不清零、绝不超发）。
+-- 联系评论每日自动尝试台账（尝试型持久日上限：触发回执 ok 即记；重启不清零、绝不超发）。
 CREATE TABLE IF NOT EXISTS contact_comment_attempts (
   id           BIGSERIAL PRIMARY KEY,
   account_id   TEXT NOT NULL,
@@ -364,7 +364,7 @@ export class ContentScheduleStore {
       hasField = true;
     }
     if ('contactCommentDailyCap' in patch) {
-      // 带联系方式评论硬上限 0..10（协同 spam 敏感，区别于发帖/评论的 50）；越界整块拒。
+      // 联系评论硬上限 0..10（协同 spam 敏感，区别于发帖/评论的 50）；越界整块拒。
       const v = patch.contactCommentDailyCap;
       if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > CONTACT_COMMENT_DAILY_CAP_MAX)
         return { ok: false, reason: 'invalid_value' };
@@ -380,7 +380,7 @@ export class ContentScheduleStore {
     const exists = await this.pool.query(`SELECT 1 FROM accounts WHERE account_id = $1`, [accountId]);
     if (exists.rows.length === 0) return { ok: false, reason: 'account_not_found' };
 
-    // 开启自动带联系方式评论的联系方式闸（change content-schedule-group-comments；一码一号于 loosen-group-comment-shared-code
+    // 开启自动联系评论的联系方式闸（change content-schedule-group-comments；一码一号于 loosen-group-comment-shared-code
     // 从「硬阻断」放松为「放行 + 提示」）：每次 contactCommentEnabled=true 的写入都重跑。
     // 无联系方式 → no_contact_info 硬拒（没联系方式开开关无意义，提前拦；触发时缺联系方式 fail-closed 仍在，纵深）；
     // 联系方式与其它账号共用 → 不再硬拒，置 sharedContactInfoWarning 放行，防关联封号改由上层如实提示（绝不静默）。
@@ -449,14 +449,14 @@ export class ContentScheduleStore {
   }
 
   /**
-   * 带联系方式评论每日自动尝试台账（change content-schedule-group-comments）：触发回执 ok（任务真开跑）即记。
+   * 联系评论每日自动尝试台账（change content-schedule-group-comments）：触发回执 ok（任务真开跑）即记。
    * 尝试型上限的保守方向——被人审拒 / 无强相关目标也占额度；持久、重启不清零、绝不超发。
    */
   async recordContactCommentAttempt(accountId: string): Promise<void> {
     await this.pool.query(`INSERT INTO contact_comment_attempts (account_id) VALUES ($1)`, [accountId]);
   }
 
-  /** 该账号今日（Asia/Shanghai 自然日）带联系方式评论自动尝试数。 */
+  /** 该账号今日（Asia/Shanghai 自然日）联系评论自动尝试数。 */
   async countContactAttemptsToday(accountId: string): Promise<number> {
     const { rows } = await this.pool.query<{ n: string }>(
       `SELECT count(*)::text AS n FROM contact_comment_attempts

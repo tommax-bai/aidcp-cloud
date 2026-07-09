@@ -348,7 +348,7 @@ test('content-scheduler/comment: 开关闸 — commentEnabled 关或 cap 0 不�
   }
 });
 
-// ── Phase 3（change content-schedule-group-comments → generalize-contact-info）：带联系方式评论动作 ─────────────────
+// ── Phase 3（change content-schedule-group-comments → generalize-contact-info）：联系评论动作 ─────────────────
 
 const G_OFFSET = offsetMinute(ACC, BASE_DAY, 'contact_comment');
 const G_NOW_HIT = new Date(2026, 0, 5, 10, G_OFFSET, 0);
@@ -396,7 +396,7 @@ function mkG(overrides: Partial<GState> = {}) {
   return { scheduler: new ContentScheduler(deps), st, fired };
 }
 
-test('content-scheduler/contact: happy path — 命中带联系方式评论偏移分钟 → triggerContactComment 一次', async () => {
+test('content-scheduler/contact: happy path — 命中联系评论偏移分钟 → triggerContactComment 一次', async () => {
   const { scheduler, fired } = mkG();
   await scheduler.onTick();
   assert.deepEqual(fired, [`contact:${ACC}`]);
@@ -417,7 +417,7 @@ test('content-scheduler/contact: 尝试型日上限 — attempts>=cap 不触发�
   assert.deepEqual(b.fired, [`contact:${ACC}`]);
 });
 
-test('content-scheduler/contact: 两件套未注入 — 带联系方式评论开着也整体跳过（零回归、不炸）', async () => {
+test('content-scheduler/contact: 两件套未注入 — 联系评论开着也整体跳过（零回归、不炸）', async () => {
   const { scheduler, fired } = mkG({ wired: false });
   await scheduler.onTick();
   assert.deepEqual(fired, []);
@@ -440,7 +440,7 @@ test('content-scheduler/contact: 开关闸 — contactCommentEnabled 关或 cap 
   }
 });
 
-test('content-scheduler/contact: 幂等独立 — 带联系方式评论槽不被同小时其它动作吞（发帖先触发后带联系方式评论照常）', async () => {
+test('content-scheduler/contact: 幂等独立 — 联系评论槽不被同小时其它动作吞（发帖先触发后联系评论照常）', async () => {
   assert.notEqual(OFFSET, G_OFFSET, '两动作偏移已知不同');
   const { scheduler, st, fired } = mkG({
     view: {
@@ -455,5 +455,5 @@ test('content-scheduler/contact: 幂等独立 — 带联系方式评论槽不被
   await new Promise((r) => setImmediate(r)); // settle 单飞
   st.nowMs = G_NOW_HIT.getTime();
   await scheduler.onTick();
-  assert.deepEqual(fired, [`post:${ACC}`, `contact:${ACC}`], '发帖幂等键不吞带联系方式评论槽');
+  assert.deepEqual(fired, [`post:${ACC}`, `contact:${ACC}`], '发帖幂等键不吞联系评论槽');
 });

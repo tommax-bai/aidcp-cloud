@@ -680,7 +680,7 @@ function noteLabel(title: string | undefined, prefix: string): string {
 
 /** TargetedCommentResult → 结果卡片回执（change curated-note-actions；卡面可辨识为定向来源，绝不染绿）。 */
 export function targetedOutcomeToReceipt(r: TargetedCommentResult, withContact: boolean): CommentResultReceipt {
-  const kind = withContact ? '定向带联系方式评论' : '定向内容评论';
+  const kind = withContact ? '定向联系评论' : '定向内容评论';
   const target = noteLabel(r.noteTitle, '目标笔记');
   switch (r.outcome) {
     case 'commented':

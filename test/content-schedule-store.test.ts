@@ -176,14 +176,14 @@ test('store/comment: 两新字段合法写回读；非法整块拒；部分补�
 });
 
 
-test('store/contact: 带联系方式评论 cap 硬上限 0..10（11/负/小数整块拒）；合法写回读（change content-schedule-group-comments）', async () => {
+test('store/contact: 联系评论 cap 硬上限 0..10（11/负/小数整块拒）；合法写回读（change content-schedule-group-comments）', async () => {
   const { store, calls } = await makeStore({ myGroupCode: 'CODE-A' });
   const before = calls.length;
   for (const patch of [{ contactCommentDailyCap: 11 }, { contactCommentDailyCap: -1 }, { contactCommentDailyCap: 1.5 }]) {
     const bad = await store.setAccount('acc-1', patch, 'op');
     assert.deepEqual(bad, { ok: false, reason: 'invalid_value' }, JSON.stringify(patch));
   }
-  assert.equal(calls.length, before, '非法带联系方式评论补丁不触库');
+  assert.equal(calls.length, before, '非法联系评论补丁不触库');
   const r = await store.setAccount('acc-1', { contactCommentEnabled: true, contactCommentDailyCap: 3 }, 'op');
   assert.ok(r.ok);
   if (r.ok) assert.deepEqual([r.row.contactCommentEnabled, r.row.contactCommentDailyCap], [true, 3]);

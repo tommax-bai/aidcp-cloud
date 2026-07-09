@@ -243,7 +243,7 @@ describe('CommentScheduler.triggerTargeted happy path', () => {
     assert.equal(s.isRunning('acc-1'), false);
   });
 
-  it('带联系方式：联系方式走 compose 注入路径，结果卡标「定向带联系方式评论」', async () => {
+  it('带联系方式：联系方式走 compose 注入路径，结果卡标「定向联系评论」', async () => {
     const bus = new EventBus();
     const edge = fakeEdge(bus, 'note-1');
     const cardDone = deferred<{ ok: boolean; title: string }>();
@@ -259,7 +259,7 @@ describe('CommentScheduler.triggerTargeted happy path', () => {
     assert.equal(r.ok, true);
     const receipt = await cardDone.promise;
     assert.equal(receipt.ok, true);
-    assert.match(receipt.title, /定向带联系方式评论/);
+    assert.match(receipt.title, /定向联系评论/);
     const comment = edge.pushed.find((e) => e.type === 'interaction.comment');
     assert.ok(comment);
     assert.equal(comment.payload.groupChatCode, 'GROUP-CODE'); // 线协议字段名仍为 groupChatCode；联系方式整段注入（边端 insertText）

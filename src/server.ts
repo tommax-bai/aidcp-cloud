@@ -1803,7 +1803,7 @@ async function main(): Promise<void> {
       hotLeadQueue,
       // 热度过滤阈值取值口：判定角色每次现读全局配置（后台改完热加载即时生效）。
       hotLeadGateConfig: () => hotLeadConfigStore.getGateConfig(),
-      // 引流线索「已评过」去重：复用 riskStore 的按账号互动去重（与自治评论/带联系方式评论同一账本）。
+      // 引流线索「已评过」去重：复用 riskStore 的按账号互动去重（与自治评论/联系评论同一账本）。
       hasCommentedForLead: (accountId, noteId) =>
         riskStore.hasInteraction(accountId, noteId, 'comment').catch(() => false),
       // 硬暂停闸（验证码/人工接管）：通知准入据此放弃巡视——硬暂停期连帧都不发。
@@ -2328,20 +2328,20 @@ async function main(): Promise<void> {
               },
               isCommentBusy: (accountId: string) => commentScheduler!.isRunning(accountId),
               commentedTodayCount: (accountId: string) => riskStore.countInteractionsTodayForAccount(accountId, 'comment'),
-              // 带联系方式评论两件套（change content-schedule-group-comments → generalize-contact-info）：同一评论机器 + injectContact，
+              // 联系评论两件套（change content-schedule-group-comments → generalize-contact-info）：同一评论机器 + injectContact，
               // 尝试型持久日上限——触发回执 ok（任务真开跑）即记 attempt（被人审拒/无目标也占额度，保守方向）。
               triggerContactComment: async (accountId: string) => {
                 const sendReceiptCard = async (level: 'warning' | 'error', title: string, message: string) => {
                   const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
                   if (!chatId) {
-                    console.warn(`[content-scheduler] 无可用飞书群，排期带联系方式评论回执卡未发出 account=${accountId} title=${title}`);
+                    console.warn(`[content-scheduler] 无可用飞书群，排期联系评论回执卡未发出 account=${accountId} title=${title}`);
                     return;
                   }
                   await messenger
                     .sendCard(
                       chatId,
                       buildCommandResultCard({
-                        command: '排期带联系方式评论（自动）',
+                        command: '排期联系评论（自动）',
                         ok: false,
                         level,
                         title,
@@ -2350,26 +2350,26 @@ async function main(): Promise<void> {
                         accountName: accountDisplayName(accountId),
                       }),
                     )
-                    .catch((e) => console.warn('[content-scheduler] 排期带联系方式评论回执卡发送失败：', (e as Error).message));
+                    .catch((e) => console.warn('[content-scheduler] 排期联系评论回执卡发送失败：', (e as Error).message));
                 };
                 try {
                   const controller = await resolveController(accountId);
                   if (!controller.canDo('comment')) {
-                    await sendReceiptCard('warning', '排期带联系方式评论：配额拒绝，本槽未触发', `风控 canDo('comment')=false（自动路径必过配额；手动 /comment --contact 不受此限）`);
+                    await sendReceiptCard('warning', '排期联系评论：配额拒绝，本槽未触发', `风控 canDo('comment')=false（自动路径必过配额；手动 /comment --contact 不受此限）`);
                     return;
                   }
                   const receipt = await commentScheduler!.triggerManual(accountId, { injectContact: true });
                   if (!receipt.ok) {
                     // 触发未成（缺联系方式 fail-closed / 离线 / 未绑人设 / 在跑）：透传回执如实回卡；不占尝试额度。
-                    await sendReceiptCard(receipt.level === 'error' ? 'error' : 'warning', `排期带联系方式评论：${receipt.title}`, receipt.message);
+                    await sendReceiptCard(receipt.level === 'error' ? 'error' : 'warning', `排期联系评论：${receipt.title}`, receipt.message);
                     return;
                   }
                   // 任务真开跑 → 记一条持久 attempt（尝试型日上限；重启不清零、绝不超发）。终态结果卡评论链自补。
                   await contentScheduleStore.recordContactCommentAttempt(accountId).catch((e) =>
-                    console.warn('[content-scheduler] 带联系方式评论 attempt 记录失败（上限将偏松，需关注）：', (e as Error).message),
+                    console.warn('[content-scheduler] 联系评论 attempt 记录失败（上限将偏松，需关注）：', (e as Error).message),
                   );
                 } catch (e) {
-                  await sendReceiptCard('error', '排期带联系方式评论：触发异常', (e as Error).message);
+                  await sendReceiptCard('error', '排期联系评论：触发异常', (e as Error).message);
                 }
               },
               contactAttemptsTodayCount: (accountId: string) => contentScheduleStore.countContactAttemptsToday(accountId),

@@ -29,7 +29,7 @@ export interface ContentScheduleView {
   /** 自动评论开关 / 日上限（change content-schedule-comments）。 */
   commentEnabled: boolean;
   commentDailyCap: number;
-  /** 自动带联系方式评论开关 / 每日尝试上限（change content-schedule-group-comments）。 */
+  /** 自动联系评论开关 / 每日尝试上限（change content-schedule-group-comments）。 */
   contactCommentEnabled: boolean;
   contactCommentDailyCap: number;
   effectiveMask: string | null;
@@ -71,12 +71,12 @@ export interface ContentSchedulerDeps {
   /** 该账号今日已发评论数（持久互动记录，Asia/Shanghai 自然日）。 */
   commentedTodayCount?(accountId: string): Promise<number>;
   /**
-   * 带联系方式评论两件套（change content-schedule-group-comments）。可选：任一未注入 → 该动作整体跳过（零回归）。
+   * 联系评论两件套（change content-schedule-group-comments）。可选：任一未注入 → 该动作整体跳过（零回归）。
    * triggerContactComment 实现负责 canDo('comment') 配额闸 + triggerManual(injectContact:true) + 回执 ok 记持久 attempt +
    * 触发失败回黄卡（缺联系方式 fail-closed 由触发回执透传；终态结果卡评论链自补）。单飞复用 isCommentBusy（同一评论机器）。
    */
   triggerContactComment?(accountId: string): Promise<unknown>;
-  /** 该账号今日带联系方式评论自动尝试数（持久 attempts 台账，Asia/Shanghai 自然日；尝试型上限）。 */
+  /** 该账号今日联系评论自动尝试数（持久 attempts 台账，Asia/Shanghai 自然日；尝试型上限）。 */
   contactAttemptsTodayCount?(accountId: string): Promise<number>;
   now?: () => number;
   logger?: { warn: (m: string) => void; info?: (m: string) => void };
@@ -174,7 +174,7 @@ export class ContentScheduler {
             }
             if (action === 'contact_comment') {
               if (!s.contactCommentEnabled || s.contactCommentDailyCap <= 0) continue;
-              // 带联系方式评论两件套未注入（或评论机器缺）→ 该动作整体跳过（零回归）。
+              // 联系评论两件套未注入（或评论机器缺）→ 该动作整体跳过（零回归）。
               if (!this.deps.triggerContactComment || !this.deps.isCommentBusy || !this.deps.contactAttemptsTodayCount) continue;
             }
             // 分钟错峰（按动作独立哈希，动作间自然岔开）。
@@ -221,7 +221,7 @@ export class ContentScheduler {
                 .catch((e) => this.deps.logger?.warn(`[content-scheduler] triggerComment 异常 account=${accountId}：${(e as Error).message}`))
                 .finally(() => this.inFlight.delete(accountId));
             } else {
-              // 带联系方式评论：单飞复用评论机器（同一 isRunning，评论/带联系方式评论互斥天然成立）。
+              // 联系评论：单飞复用评论机器（同一 isRunning，评论/联系评论互斥天然成立）。
               if (this.deps.isCommentBusy!(accountId)) continue;
               // 尝试型日上限：持久 attempts 台账（被拒/无目标也占额度，保守方向；重启不清零）。
               const attempts = await this.deps.contactAttemptsTodayCount!(accountId);
