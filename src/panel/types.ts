@@ -10,7 +10,7 @@ import type { RiskController, RiskQuotaLevel, RiskAction, SessionInteractionBudg
 import type { ConceptStore, BotChatStore, GroupRoute, SetGroupRouteResult } from '../cache/index.js';
 import type { CuratedContentTypeFilter, CuratedPanelListResult, CuratedPanelRow, CuratedFacets } from '../cache/index.js';
 import type { PublishLogStore, EditDraftPatch, EditDraftResult } from '../publish-agent/publish-log-store.js';
-import type { SetGroupLabelResult, SetGroupChatInfoResult } from '../account-store.js';
+import type { SetGroupLabelResult, SetContactInfoResult } from '../account-store.js';
 import type {
   FacebookCommentConfigRow,
   FacebookCommentConfigPatch,
@@ -156,11 +156,11 @@ export interface PanelDeps {
   accountAttr?: {
     setGroupLabel(accountId: string, groupLabel: string | null): Promise<SetGroupLabelResult>;
     /**
-     * 账号「关联群聊引流码」写入（change account-group-chat-injection）。未注入则
-     * `/api/accounts/:id/group-chat-info` 返回 503。经账号存储单写：UPDATE-only、**verbatim（不 trim / 不截断）**、
-     * 空归 NULL（清空）、退役账号 / 无行以可区分结果返回、写后回读真态；绝不 raw UPDATE / 乐观假成功。
+     * 账号「联系方式」写入（change account-group-chat-injection → generalize-contact-info）。未注入则
+     * `/api/accounts/:id/contact-info`（旧 `/group-chat-info` 过渡期仍受理）返回 503。经账号存储单写：UPDATE-only、
+     * **verbatim（不 trim / 不截断）**、空归 NULL（清空）、退役账号 / 无行以可区分结果返回、写后回读真态；绝不 raw UPDATE / 乐观假成功。
      */
-    setGroupChatInfo?(accountId: string, groupChatInfo: string | null): Promise<SetGroupChatInfoResult>;
+    setContactInfo?(accountId: string, contactInfo: string | null): Promise<SetContactInfoResult>;
   };
   /**
    * 每账号 Facebook 定时评论配置（change facebook-scheduled-comment 2.1）：关键词列表 + 容器列表。
@@ -349,7 +349,7 @@ export interface PanelCuratedContent {
 /**
  * 动作触发态回执：console `src/types/api.ts` 的 CuratedActionReceipt 镜像此 DTO。
  * triggered=false 时 reason 为稳定机器原因码（empty_body / image_text_only / source_post_only / needs_persona /
- * publish_busy / edge_offline / running / group_code_missing / already_commented / …），console 映射中文提示。
+ * publish_busy / edge_offline / running / contact_info_missing / already_commented / …），console 映射中文提示。
  */
 export interface CuratedActionReceipt {
   triggered: boolean;
@@ -359,8 +359,8 @@ export interface CuratedActionReceipt {
 export interface PanelCuratedActions {
   /** 参照洗稿创作：以精选笔记行为参照触发发布链生成草稿（走既有飞书人审+下发，AC-PUB 不短路）。 */
   createPostFromNote(accountId: string, row: CuratedPanelRow, options?: { useReferenceImages?: boolean }): Promise<CuratedActionReceipt>;
-  /** 定向评论：搜索定位该笔记后评论（withGroup=追加账号群聊口令，缺码 fail-closed）。 */
-  commentOnNote(accountId: string, row: CuratedPanelRow, withGroup: boolean): Promise<CuratedActionReceipt>;
+  /** 定向评论：搜索定位该笔记后评论（withContact=追加账号联系方式，缺联系方式 fail-closed）。 */
+  commentOnNote(accountId: string, row: CuratedPanelRow, withContact: boolean): Promise<CuratedActionReceipt>;
 }
 
 /**
@@ -849,10 +849,10 @@ export type HotLeadCommentResult =
   | { ok: true }
   | { ok: false; reason: string };
 
-/** 段二人审逐条消费：列某账号 pending 候选 + 对选中一条发带群码定向评论（走既有 triggerTargeted + 飞书人审=发）。 */
+/** 段二人审逐条消费：列某账号 pending 候选 + 对选中一条发带联系方式定向评论（走既有 triggerTargeted + 飞书人审=发）。 */
 export interface PanelHotLeads {
   list(accountId: string): Promise<HotLeadQueueItem[]>;
-  /** 对选中 lead 发带群码定向引流评论；ok 后把该 lead 置 actioned。缺账号/缺码/边端离线/已评过 → 诚实失败。 */
+  /** 对选中 lead 发带联系方式定向引流评论；ok 后把该 lead 置 actioned。缺账号/缺联系方式/边端离线/已评过 → 诚实失败。 */
   comment(accountId: string, leadId: number, noteId: string, title: string): Promise<HotLeadCommentResult>;
 }
 

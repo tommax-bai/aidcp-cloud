@@ -51,7 +51,7 @@ describe('buildComposeAndApprove', () => {
     });
     const result = await step(note, comments);
     assert.equal(result?.text, '这套检索链路很实在');
-    assert.equal(result?.groupChatCode, null);
+    assert.equal(result?.contactInfo, null);
     assert.deepEqual(seen, ['学到了', '求教程']);
   });
 
@@ -107,14 +107,14 @@ describe('buildComposeAndApprove', () => {
     assert.equal(await step(note, comments), null);
   });
 
-  // ── change account-group-chat-injection：群聊引流码 verbatim 注入 + 审=发 ──
+  // ── change account-group-chat-injection → generalize-contact-info：联系方式 verbatim 注入 + 审=发 ──
 
-  it('群聊引流码：正文与码分开返回；人审卡展示合并终稿（审=发）', async () => {
+  it('联系方式：正文与联系方式分开返回；人审卡展示合并终稿（审=发）', async () => {
     let approvedText: string | undefined;
     const code = '2【长按复制】加群🐶\n第二行 :/#f'; // 含 emoji / 换行 / 特殊符
     const step = buildComposeAndApprove({
       composer: composer('这套检索链路很实在'),
-      groupChatCode: code,
+      contactInfo: code,
       approval: {
         request: async (r: { text: string }) => {
           approvedText = r.text;
@@ -126,11 +126,11 @@ describe('buildComposeAndApprove', () => {
     const result = await step(note, comments);
     const merged = `这套检索链路很实在\n${code}`;
     assert.equal(result?.text, '这套检索链路很实在'); // 正文（边缘逐字敲）
-    assert.equal(result?.groupChatCode, code); // 码（边缘整段插入，verbatim）
+    assert.equal(result?.contactInfo, code); // 码（边缘整段插入，verbatim）
     assert.equal(approvedText, merged); // 人审卡展示合并终稿（AC-PUB 审=发）
   });
 
-  it('无群聊码（groupChatCode 缺省 / null）→ 正文不变、码为 null，零回归', async () => {
+  it('无联系方式（contactInfo 缺省 / null）→ 正文不变、联系方式为 null，零回归', async () => {
     const step1 = buildComposeAndApprove({
       composer: composer('这套检索链路很实在'),
       approval: approvalPort(true),
@@ -138,22 +138,22 @@ describe('buildComposeAndApprove', () => {
     });
     const r1 = await step1(note, comments);
     assert.equal(r1?.text, '这套检索链路很实在');
-    assert.equal(r1?.groupChatCode, null);
+    assert.equal(r1?.contactInfo, null);
 
     const step2 = buildComposeAndApprove({
       composer: composer('这套检索链路很实在'),
-      groupChatCode: null,
+      contactInfo: null,
       approval: approvalPort(true),
       logger: { log: () => {}, warn: () => {} },
     });
-    assert.equal((await step2(note, comments))?.groupChatCode, null);
+    assert.equal((await step2(note, comments))?.contactInfo, null);
   });
 
   it('码不参与反照搬：references 命中码不致弃发（overlap 只比正文）', async () => {
     const code = '加群暗号-xyz';
     const step = buildComposeAndApprove({
       composer: composer('这套检索链路很实在'),
-      groupChatCode: code,
+      contactInfo: code,
       getReferences: async () => [code], // 参考里正好含码字面
       approval: approvalPort(true),
       logger: { log: () => {}, warn: () => {} },
@@ -161,6 +161,6 @@ describe('buildComposeAndApprove', () => {
     // 正文不撞参考 → 不弃发；码不进 overlap 比对；正文与码分开返回
     const r = await step(note, comments);
     assert.equal(r?.text, '这套检索链路很实在');
-    assert.equal(r?.groupChatCode, code);
+    assert.equal(r?.contactInfo, code);
   });
 });

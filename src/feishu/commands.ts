@@ -39,10 +39,10 @@ export interface ParsedCommand {
   hint?: string;
   args?: string[];
   /**
-   * `/comment` 的引流开关（change account-group-chat-injection）：尾部 `group:on` → true、`group:off` → false、
-   * 缺省 undefined（= 关 = 今天的普通评论、零回归）。命中该字段时执行层把账号的「关联群聊引流码」注入本次评论。
+   * `/comment` 的联系方式开关（change generalize-contact-info）：尾部 `--contact` present → true、
+   * 缺省 undefined（= 关 = 今天的普通评论、零回归）。命中该字段时执行层把账号的「联系方式」注入本次评论。
    */
-  injectGroup?: boolean;
+  injectContact?: boolean;
 }
 
 const HELP_TEXT = [
@@ -52,7 +52,7 @@ const HELP_TEXT = [
   '• `/resume [accountId]` — 恢复账号',
   '• `/publish <昵称>` — 触发该账号发帖（按昵称指定，发布前仍需人审）',
   '• `/comment <昵称>` — 触发该账号按需评论（搜最近一天最多收藏的强相关笔记，评论前仍需人审）',
-  '• `/comment <昵称> group:on` — 同上，并在评论末尾注入该账号后台配置的「关联群聊引流码」（未配则拦下告警、不发）',
+  '• `/comment <昵称> --contact` — 同上，并在评论末尾注入该账号后台配置的「联系方式」（未配则拦下告警、不发）',
   '• `/publish-test [requestId]` — 发送测试审批卡片',
   '• `/bind` — 绑定当前群为默认审批群（开发中）',
   '',
@@ -120,18 +120,18 @@ export function parseCommand(text: string): ParsedCommand {
       // 缺省由执行层解析唯一真实账号（retire-default-account：绝不回落 default）。
       return { action: 'publish', nickname: args.join(' ').trim() || undefined, raw, args };
     case '/comment': {
-      // /comment <昵称> [group:on|group:off]：与 /publish 同构——`/comment ` 之后（去掉尾部引流开关）整段视为**昵称**。
-      // 引流开关（change account-group-chat-injection）：**只认末尾** token `group:on/off`（大小写不敏感），命中即剔除、
-      // 其余 join 为昵称；trailing-only 避免把中间 token 误当开关而错切昵称。缺开关 → injectGroup=undefined（关、零回归）。
+      // /comment <昵称> [--contact]：与 /publish 同构——`/comment ` 之后（去掉尾部联系方式开关）整段视为**昵称**。
+      // 联系方式开关（change generalize-contact-info）：**只认末尾** token `--contact`（大小写不敏感），present=开、缺省=关；
+      // 命中即剔除、其余 join 为昵称；trailing-only 避免把中间 token 误当开关而错切昵称。缺开关 → injectContact=undefined（关、零回归）。
+      // 无向后兼容：旧 `group:on/off` 不再识别，末尾若出现旧 token 会被并入昵称、走既有找不到账号的诚实失败。
       let commentArgs = args;
-      let injectGroup: boolean | undefined;
+      let injectContact: boolean | undefined;
       const lastToken = commentArgs[commentArgs.length - 1] ?? '';
-      const switchMatch = /^group:(on|off)$/i.exec(lastToken);
-      if (switchMatch) {
-        injectGroup = switchMatch[1].toLowerCase() === 'on';
+      if (/^--contact$/i.test(lastToken)) {
+        injectContact = true;
         commentArgs = commentArgs.slice(0, -1);
       }
-      return { action: 'comment', nickname: commentArgs.join(' ').trim() || undefined, injectGroup, raw, args };
+      return { action: 'comment', nickname: commentArgs.join(' ').trim() || undefined, injectContact, raw, args };
     }
     case '/bind':
       return { action: 'bind', raw, args };
@@ -199,12 +199,12 @@ export interface CommandActions {
    * 返回结构化回执 CommentCommandReceipt：执行层据**触发结果**判 ok/level（开跑=绿、未触发=黄、失败=红），
    * 与 publish 同构——杜绝「触发」被无脑染绿（最终评/未评结果另由结果卡片补达）。
    *
-   * options.injectGroup（change account-group-chat-injection）：true 时把账号「关联群聊引流码」注入本次评论；
-   * 该账号未配码 → 执行层 fail-closed（回黄色告警、本次不发），绝不静默发无码评论。缺省 = 不注入 = 零回归。
+   * options.injectContact（change generalize-contact-info）：true 时把账号「联系方式」注入本次评论；
+   * 该账号未配联系方式 → 执行层 fail-closed（回黄色告警、本次不发），绝不静默发无联系方式评论。缺省 = 不注入 = 零回归。
    */
   comment?(
     nickname?: string,
-    options?: { injectGroup?: boolean },
+    options?: { injectContact?: boolean },
   ): Promise<CommentCommandReceipt> | CommentCommandReceipt;
   /** 绑定当前群为默认审批群 */
   bindChat?(record: BotChatRecord): Promise<void> | void;
@@ -324,7 +324,7 @@ export class CommandRouter {
       // nickname → 执行层按昵称解析真实账号（严格只认昵称）；解析失败 / 边端离线由执行层抛错、走 fail 分支。
       // 回执 ok/level/title/message 由执行层据**真实触发结果**给出（开跑绿、未触发黄、触发失败红），
       // 路由层不再一律当成功——杜绝「触发」被无脑染绿 ✅（评论任务最终结果另由结果卡片补达）。
-      const r = await this.actions.comment(cmd.nickname, { injectGroup: cmd.injectGroup });
+      const r = await this.actions.comment(cmd.nickname, { injectContact: cmd.injectContact });
       return {
         command: cmd.raw,
         ok: r.ok,

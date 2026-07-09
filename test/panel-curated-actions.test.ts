@@ -2,7 +2,7 @@
  * 精选笔记行级定向动作端点单测（change curated-note-actions）。
  * 覆盖：未注入 curatedActions → 503；坏 id/缺账号 → 400；跨账号/不存在 → 404（同形状不泄露）；
  * 视频/评论行洗稿 → image_text_only；评论行评论 → source_post_only；壳行 create-post → empty_body（不触发）；无标题 comment → empty_title；
- * 触发透传（create-post 带行、comment 带 withGroup）；域内拒绝原因码透传；JWT 闸。
+ * 触发透传（create-post 带行、comment 带 withContact）；域内拒绝原因码透传；JWT 闸。
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -88,7 +88,7 @@ test('HTTP 精选行级动作：503/400/404/类型约束/empty_body/empty_title/
   }
 
   // ② 完整注入：透传与各拒绝路径。
-  const actionCalls: Array<{ fn: string; accountId: string; rowId: number; withGroup?: boolean; useReferenceImages?: boolean }> = [];
+  const actionCalls: Array<{ fn: string; accountId: string; rowId: number; withContact?: boolean; useReferenceImages?: boolean }> = [];
   const actionsMock = {
     createPostFromNote: async (accountId: string, r2: CuratedPanelRow, options?: { useReferenceImages?: boolean }) => {
       const call: { fn: string; accountId: string; rowId: number; useReferenceImages?: boolean } = { fn: 'create', accountId, rowId: r2.id };
@@ -96,9 +96,9 @@ test('HTTP 精选行级动作：503/400/404/类型约束/empty_body/empty_title/
       actionCalls.push(call);
       return { triggered: true };
     },
-    commentOnNote: async (accountId: string, r2: CuratedPanelRow, withGroup: boolean) => {
-      actionCalls.push({ fn: 'comment', accountId, rowId: r2.id, withGroup });
-      return withGroup ? { triggered: false, reason: 'group_code_missing' } : { triggered: true };
+    commentOnNote: async (accountId: string, r2: CuratedPanelRow, withContact: boolean) => {
+      actionCalls.push({ fn: 'comment', accountId, rowId: r2.id, withContact });
+      return withContact ? { triggered: false, reason: 'contact_info_missing' } : { triggered: true };
     },
   };
   const h = await startPanelApi(
@@ -148,7 +148,7 @@ test('HTTP 精选行级动作：503/400/404/类型约束/empty_body/empty_title/
     assert.deepEqual(await noTitle.json(), { triggered: false, reason: 'empty_title' });
     assert.equal(actionCalls.length, 0, '以上拒绝路径都不该触达动作实现');
 
-    // 正常触发：create-post 透传行；comment 透传 withGroup 与域内拒绝原因码。
+    // 正常触发：create-post 透传行；comment 透传 withContact 与域内拒绝原因码。
     rows.set('7:acc-1', row());
     const created = await post('/api/curated/contents/7/create-post', { accountId: 'acc-1' });
     assert.equal(created.status, 200);
@@ -164,8 +164,8 @@ test('HTTP 精选行级动作：503/400/404/类型约束/empty_body/empty_title/
     const contentComment = await post('/api/curated/contents/7/comment', { accountId: 'acc-1' });
     assert.deepEqual(await contentComment.json(), { triggered: true });
 
-    const groupComment = await post('/api/curated/contents/7/comment', { accountId: 'acc-1', withGroup: true });
-    assert.deepEqual(await groupComment.json(), { triggered: false, reason: 'group_code_missing' });
+    const contactComment = await post('/api/curated/contents/7/comment', { accountId: 'acc-1', withContact: true });
+    assert.deepEqual(await contactComment.json(), { triggered: false, reason: 'contact_info_missing' });
 
     const videoComment = await post('/api/curated/contents/11/comment', { accountId: 'acc-1' });
     assert.deepEqual(await videoComment.json(), { triggered: true });
@@ -173,9 +173,9 @@ test('HTTP 精选行级动作：503/400/404/类型约束/empty_body/empty_title/
     assert.deepEqual(actionCalls, [
       { fn: 'create', accountId: 'acc-1', rowId: 7 },
       { fn: 'create', accountId: 'acc-1', rowId: 12, useReferenceImages: false },
-      { fn: 'comment', accountId: 'acc-1', rowId: 7, withGroup: false },
-      { fn: 'comment', accountId: 'acc-1', rowId: 7, withGroup: true },
-      { fn: 'comment', accountId: 'acc-1', rowId: 11, withGroup: false },
+      { fn: 'comment', accountId: 'acc-1', rowId: 7, withContact: false },
+      { fn: 'comment', accountId: 'acc-1', rowId: 7, withContact: true },
+      { fn: 'comment', accountId: 'acc-1', rowId: 11, withContact: false },
     ]);
   } finally {
     await h.close();

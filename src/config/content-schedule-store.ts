@@ -25,8 +25,8 @@ const { Pool } = pg;
 
 /** 发帖日上限防御性上界（与 console CAP_MAX 对齐；防异常大值）。 */
 export const CONTENT_POST_DAILY_CAP_MAX = 50;
-/** 群评日上限硬上界（change content-schedule-group-comments）：协同 spam 敏感动作，与 50 刻意分开；UI 建议 ≤3。 */
-export const GROUP_COMMENT_DAILY_CAP_MAX = 10;
+/** 带联系方式评论日上限硬上界（change content-schedule-group-comments）：协同 spam 敏感动作，与 50 刻意分开；UI 建议 ≤3。 */
+export const CONTACT_COMMENT_DAILY_CAP_MAX = 10;
 
 /** 全局「内容可自动时段」行。contentActiveMask：168 格 '0'/'1'；null = 未配 = 全 0 = 不自动（fail-closed）。 */
 export interface ContentScheduleGlobalRow {
@@ -45,10 +45,10 @@ export interface AccountContentScheduleRow {
   commentEnabled: boolean;
   /** 评论日上限；0 = 不自动（与开关双保险）。 */
   commentDailyCap: number;
-  /** 自动群评开关（change content-schedule-group-comments；开启须过一码一号硬校验）。 */
-  groupCommentEnabled: boolean;
-  /** 群评每日自动尝试上限（0..10 硬上限；尝试型：被拒/无目标也占额度）。 */
-  groupCommentDailyCap: number;
+  /** 自动带联系方式评论开关（change content-schedule-group-comments；开启须过一码一号硬校验）。 */
+  contactCommentEnabled: boolean;
+  /** 带联系方式评论每日自动尝试上限（0..10 硬上限；尝试型：被拒/无目标也占额度）。 */
+  contactCommentDailyCap: number;
   contentActiveMask: string | null;
   updatedAt: string | null;
   updatedBy: string | null;
@@ -64,10 +64,10 @@ export interface ContentScheduleCatalogRow {
   postDailyCap: number;
   commentEnabled: boolean;
   commentDailyCap: number;
-  groupCommentEnabled: boolean;
-  groupCommentDailyCap: number;
-  /** 该账号是否已配群码（accounts.group_chat_info IS NOT NULL；群评开关的前置徽标）。 */
-  hasGroupCode: boolean;
+  contactCommentEnabled: boolean;
+  contactCommentDailyCap: number;
+  /** 该账号是否已配联系方式（accounts.contact_info IS NOT NULL；带联系方式评论开关的前置徽标）。 */
+  hasContactInfo: boolean;
   maskSource: 'override' | 'global';
   hasOverrideMask: boolean;
   /** 侧表有行（false = 纯默认 = 未配 = 不自动）。 */
@@ -83,8 +83,8 @@ export interface EffectiveContentSchedule {
   postDailyCap: number;
   commentEnabled: boolean;
   commentDailyCap: number;
-  groupCommentEnabled: boolean;
-  groupCommentDailyCap: number;
+  contactCommentEnabled: boolean;
+  contactCommentDailyCap: number;
   effectiveMask: string | null;
 }
 
@@ -98,8 +98,8 @@ export interface AccountContentSchedulePatch {
   postDailyCap?: number;
   commentEnabled?: boolean;
   commentDailyCap?: number;
-  groupCommentEnabled?: boolean;
-  groupCommentDailyCap?: number;
+  contactCommentEnabled?: boolean;
+  contactCommentDailyCap?: number;
   /** 每账号时段覆盖：168 位 '0'/'1'，或 null=清空覆盖=继承全局。 */
   contentActiveMask?: string | null;
 }
@@ -113,10 +113,10 @@ export type SetAccountContentScheduleResult =
       ok: true;
       row: AccountContentScheduleRow;
       /**
-       * 开启自动群评时该群码与其它账号共用（一码一号从「硬阻断」放松为「放行 + 提示」，
+       * 开启自动带联系方式评论时该联系方式与其它账号共用（一码一号从「硬阻断」放松为「放行 + 提示」，
        * change loosen-group-comment-shared-code）。true 时上层须回一条防关联风险提示、绝不静默。
        */
-      sharedGroupCodeWarning?: boolean;
+      sharedContactInfoWarning?: boolean;
     }
   | {
       ok: false;
@@ -125,7 +125,7 @@ export type SetAccountContentScheduleResult =
         | 'retired_account'
         | 'invalid_value'
         | 'no_valid_fields'
-        | 'no_group_code';
+        | 'no_contact_info';
     };
 
 export const CONTENT_SCHEDULE_SCHEMA_SQL = `
@@ -148,16 +148,16 @@ CREATE TABLE IF NOT EXISTS account_content_schedule (
 -- 既有表靠幂等 ALTER 在 init() 补上；默认 false / 0 = 不自动（fail-closed，零回归）。
 ALTER TABLE account_content_schedule ADD COLUMN IF NOT EXISTS comment_enabled BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE account_content_schedule ADD COLUMN IF NOT EXISTS comment_daily_cap INTEGER NOT NULL DEFAULT 0;
--- 自愈加列（change content-schedule-group-comments，迁移 0030 文档伴随）：Phase 3 群评两列，默认 false/0 = 不自动。
-ALTER TABLE account_content_schedule ADD COLUMN IF NOT EXISTS group_comment_enabled BOOLEAN NOT NULL DEFAULT false;
-ALTER TABLE account_content_schedule ADD COLUMN IF NOT EXISTS group_comment_daily_cap INTEGER NOT NULL DEFAULT 0;
--- 群评每日自动尝试台账（尝试型持久日上限：触发回执 ok 即记；重启不清零、绝不超发）。
-CREATE TABLE IF NOT EXISTS group_comment_attempts (
+-- 自愈加列（change content-schedule-group-comments → generalize-contact-info，物理改名迁移 0036 文档伴随）：Phase 3 带联系方式评论两列，默认 false/0 = 不自动。
+ALTER TABLE account_content_schedule ADD COLUMN IF NOT EXISTS contact_comment_enabled BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE account_content_schedule ADD COLUMN IF NOT EXISTS contact_comment_daily_cap INTEGER NOT NULL DEFAULT 0;
+-- 带联系方式评论每日自动尝试台账（尝试型持久日上限：触发回执 ok 即记；重启不清零、绝不超发）。
+CREATE TABLE IF NOT EXISTS contact_comment_attempts (
   id           BIGSERIAL PRIMARY KEY,
   account_id   TEXT NOT NULL,
   attempted_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_group_comment_attempts_account ON group_comment_attempts (account_id, attempted_at);
+CREATE INDEX IF NOT EXISTS idx_contact_comment_attempts_account ON contact_comment_attempts (account_id, attempted_at);
 `;
 
 export interface ContentScheduleStoreOptions {
@@ -182,8 +182,8 @@ interface AccountDbRow {
   post_daily_cap: number | string;
   comment_enabled: boolean;
   comment_daily_cap: number | string;
-  group_comment_enabled: boolean;
-  group_comment_daily_cap: number | string;
+  contact_comment_enabled: boolean;
+  contact_comment_daily_cap: number | string;
   content_active_mask: string | null;
   updated_at: Date | string | null;
   updated_by: string | null;
@@ -233,7 +233,7 @@ export class ContentScheduleStore {
 
     const a = await this.pool.query<AccountDbRow>(
       `SELECT account_id, auto_enabled, post_enabled, post_daily_cap, comment_enabled, comment_daily_cap,
-              group_comment_enabled, group_comment_daily_cap,
+              contact_comment_enabled, contact_comment_daily_cap,
               content_active_mask, updated_at, updated_by
          FROM account_content_schedule`,
     );
@@ -257,8 +257,8 @@ export class ContentScheduleStore {
       postDailyCap: Number(r.post_daily_cap),
       commentEnabled: r.comment_enabled === true,
       commentDailyCap: Number(r.comment_daily_cap),
-      groupCommentEnabled: r.group_comment_enabled === true,
-      groupCommentDailyCap: Number(r.group_comment_daily_cap),
+      contactCommentEnabled: r.contact_comment_enabled === true,
+      contactCommentDailyCap: Number(r.contact_comment_daily_cap),
       contentActiveMask: r.content_active_mask ?? null,
       updatedAt: toIso(r.updated_at),
       updatedBy: r.updated_by ?? null,
@@ -288,8 +288,8 @@ export class ContentScheduleStore {
         postDailyCap: 0,
         commentEnabled: false,
         commentDailyCap: 0,
-        groupCommentEnabled: false,
-        groupCommentDailyCap: 0,
+        contactCommentEnabled: false,
+        contactCommentDailyCap: 0,
         effectiveMask: null,
       };
     return {
@@ -298,8 +298,8 @@ export class ContentScheduleStore {
       postDailyCap: a.postDailyCap,
       commentEnabled: a.commentEnabled,
       commentDailyCap: a.commentDailyCap,
-      groupCommentEnabled: a.groupCommentEnabled,
-      groupCommentDailyCap: a.groupCommentDailyCap,
+      contactCommentEnabled: a.contactCommentEnabled,
+      contactCommentDailyCap: a.contactCommentDailyCap,
       effectiveMask: a.contentActiveMask ?? this.globalCache?.contentActiveMask ?? null,
     };
   }
@@ -359,14 +359,14 @@ export class ContentScheduleStore {
       if (!validCap(patch.commentDailyCap)) return { ok: false, reason: 'invalid_value' };
       hasField = true;
     }
-    if ('groupCommentEnabled' in patch) {
-      if (typeof patch.groupCommentEnabled !== 'boolean') return { ok: false, reason: 'invalid_value' };
+    if ('contactCommentEnabled' in patch) {
+      if (typeof patch.contactCommentEnabled !== 'boolean') return { ok: false, reason: 'invalid_value' };
       hasField = true;
     }
-    if ('groupCommentDailyCap' in patch) {
-      // 群评硬上限 0..10（协同 spam 敏感，区别于发帖/评论的 50）；越界整块拒。
-      const v = patch.groupCommentDailyCap;
-      if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > GROUP_COMMENT_DAILY_CAP_MAX)
+    if ('contactCommentDailyCap' in patch) {
+      // 带联系方式评论硬上限 0..10（协同 spam 敏感，区别于发帖/评论的 50）；越界整块拒。
+      const v = patch.contactCommentDailyCap;
+      if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > CONTACT_COMMENT_DAILY_CAP_MAX)
         return { ok: false, reason: 'invalid_value' };
       hasField = true;
     }
@@ -380,23 +380,23 @@ export class ContentScheduleStore {
     const exists = await this.pool.query(`SELECT 1 FROM accounts WHERE account_id = $1`, [accountId]);
     if (exists.rows.length === 0) return { ok: false, reason: 'account_not_found' };
 
-    // 开启自动群评的群码闸（change content-schedule-group-comments；一码一号于 loosen-group-comment-shared-code
-    // 从「硬阻断」放松为「放行 + 提示」）：每次 groupCommentEnabled=true 的写入都重跑。
-    // 无码 → no_group_code 硬拒（没码开开关无意义，提前拦；触发时缺码 fail-closed 仍在，纵深）；
-    // 群码与其它账号共用 → 不再硬拒，置 sharedGroupCodeWarning 放行，防关联封号改由上层如实提示（绝不静默）。
-    let sharedGroupCodeWarning = false;
-    if (patch.groupCommentEnabled === true) {
-      const code = await this.pool.query<{ group_chat_info: string | null }>(
-        `SELECT group_chat_info FROM accounts WHERE account_id = $1`,
+    // 开启自动带联系方式评论的联系方式闸（change content-schedule-group-comments；一码一号于 loosen-group-comment-shared-code
+    // 从「硬阻断」放松为「放行 + 提示」）：每次 contactCommentEnabled=true 的写入都重跑。
+    // 无联系方式 → no_contact_info 硬拒（没联系方式开开关无意义，提前拦；触发时缺联系方式 fail-closed 仍在，纵深）；
+    // 联系方式与其它账号共用 → 不再硬拒，置 sharedContactInfoWarning 放行，防关联封号改由上层如实提示（绝不静默）。
+    let sharedContactInfoWarning = false;
+    if (patch.contactCommentEnabled === true) {
+      const code = await this.pool.query<{ contact_info: string | null }>(
+        `SELECT contact_info FROM accounts WHERE account_id = $1`,
         [accountId],
       );
-      const myCode = code.rows[0]?.group_chat_info ?? null;
-      if (myCode === null) return { ok: false, reason: 'no_group_code' };
+      const myCode = code.rows[0]?.contact_info ?? null;
+      if (myCode === null) return { ok: false, reason: 'no_contact_info' };
       const shared = await this.pool.query(
-        `SELECT 1 FROM accounts WHERE group_chat_info = $1 AND account_id <> $2 LIMIT 1`,
+        `SELECT 1 FROM accounts WHERE contact_info = $1 AND account_id <> $2 LIMIT 1`,
         [myCode, accountId],
       );
-      if (shared.rows.length > 0) sharedGroupCodeWarning = true;
+      if (shared.rows.length > 0) sharedContactInfoWarning = true;
     }
 
     // 未传字段保持原值（原无行则取列默认 false/false/0/null）。
@@ -406,28 +406,28 @@ export class ContentScheduleStore {
     const nextCap = patch.postDailyCap ?? prev?.postDailyCap ?? 0;
     const nextCommentEnabled = patch.commentEnabled ?? prev?.commentEnabled ?? false;
     const nextCommentCap = patch.commentDailyCap ?? prev?.commentDailyCap ?? 0;
-    const nextGroupEnabled = patch.groupCommentEnabled ?? prev?.groupCommentEnabled ?? false;
-    const nextGroupCap = patch.groupCommentDailyCap ?? prev?.groupCommentDailyCap ?? 0;
+    const nextContactEnabled = patch.contactCommentEnabled ?? prev?.contactCommentEnabled ?? false;
+    const nextContactCap = patch.contactCommentDailyCap ?? prev?.contactCommentDailyCap ?? 0;
     const nextMask =
       'contentActiveMask' in patch ? patch.contentActiveMask ?? null : prev?.contentActiveMask ?? null;
 
     const { rows } = await this.pool.query<AccountDbRow>(
       `INSERT INTO account_content_schedule
          (account_id, auto_enabled, post_enabled, post_daily_cap, comment_enabled, comment_daily_cap,
-          group_comment_enabled, group_comment_daily_cap, content_active_mask, updated_at, updated_by)
+          contact_comment_enabled, contact_comment_daily_cap, content_active_mask, updated_at, updated_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10)
        ON CONFLICT (account_id) DO UPDATE SET auto_enabled = EXCLUDED.auto_enabled,
                                               post_enabled = EXCLUDED.post_enabled,
                                               post_daily_cap = EXCLUDED.post_daily_cap,
                                               comment_enabled = EXCLUDED.comment_enabled,
                                               comment_daily_cap = EXCLUDED.comment_daily_cap,
-                                              group_comment_enabled = EXCLUDED.group_comment_enabled,
-                                              group_comment_daily_cap = EXCLUDED.group_comment_daily_cap,
+                                              contact_comment_enabled = EXCLUDED.contact_comment_enabled,
+                                              contact_comment_daily_cap = EXCLUDED.contact_comment_daily_cap,
                                               content_active_mask = EXCLUDED.content_active_mask,
                                               updated_at = now(), updated_by = EXCLUDED.updated_by
        RETURNING account_id, auto_enabled, post_enabled, post_daily_cap, comment_enabled, comment_daily_cap,
-                 group_comment_enabled, group_comment_daily_cap, content_active_mask, updated_at, updated_by`,
-      [accountId, nextAuto, nextPost, nextCap, nextCommentEnabled, nextCommentCap, nextGroupEnabled, nextGroupCap, nextMask, updatedBy],
+                 contact_comment_enabled, contact_comment_daily_cap, content_active_mask, updated_at, updated_by`,
+      [accountId, nextAuto, nextPost, nextCap, nextCommentEnabled, nextCommentCap, nextContactEnabled, nextContactCap, nextMask, updatedBy],
     );
     const row = rows[0]
       ? this.accountFromDb(rows[0])
@@ -438,28 +438,28 @@ export class ContentScheduleStore {
           postDailyCap: nextCap,
           commentEnabled: nextCommentEnabled,
           commentDailyCap: nextCommentCap,
-          groupCommentEnabled: nextGroupEnabled,
-          groupCommentDailyCap: nextGroupCap,
+          contactCommentEnabled: nextContactEnabled,
+          contactCommentDailyCap: nextContactCap,
           contentActiveMask: nextMask,
           updatedAt: null,
           updatedBy,
         };
     this.accountCache.set(accountId, row);
-    return sharedGroupCodeWarning ? { ok: true, row, sharedGroupCodeWarning: true } : { ok: true, row };
+    return sharedContactInfoWarning ? { ok: true, row, sharedContactInfoWarning: true } : { ok: true, row };
   }
 
   /**
-   * 群评每日自动尝试台账（change content-schedule-group-comments）：触发回执 ok（任务真开跑）即记。
+   * 带联系方式评论每日自动尝试台账（change content-schedule-group-comments）：触发回执 ok（任务真开跑）即记。
    * 尝试型上限的保守方向——被人审拒 / 无强相关目标也占额度；持久、重启不清零、绝不超发。
    */
-  async recordGroupCommentAttempt(accountId: string): Promise<void> {
-    await this.pool.query(`INSERT INTO group_comment_attempts (account_id) VALUES ($1)`, [accountId]);
+  async recordContactCommentAttempt(accountId: string): Promise<void> {
+    await this.pool.query(`INSERT INTO contact_comment_attempts (account_id) VALUES ($1)`, [accountId]);
   }
 
-  /** 该账号今日（Asia/Shanghai 自然日）群评自动尝试数。 */
-  async countGroupAttemptsToday(accountId: string): Promise<number> {
+  /** 该账号今日（Asia/Shanghai 自然日）带联系方式评论自动尝试数。 */
+  async countContactAttemptsToday(accountId: string): Promise<number> {
     const { rows } = await this.pool.query<{ n: string }>(
-      `SELECT count(*)::text AS n FROM group_comment_attempts
+      `SELECT count(*)::text AS n FROM contact_comment_attempts
         WHERE account_id = $1 AND attempted_at >= ${SHANGHAI_DAY_START_SQL}`,
       [accountId],
     );
@@ -480,16 +480,16 @@ export class ContentScheduleStore {
       post_daily_cap: number | string | null;
       comment_enabled: boolean | null;
       comment_daily_cap: number | string | null;
-      group_comment_enabled: boolean | null;
-      group_comment_daily_cap: number | string | null;
-      has_group_code: boolean;
+      contact_comment_enabled: boolean | null;
+      contact_comment_daily_cap: number | string | null;
+      has_contact_info: boolean;
       content_active_mask: string | null;
       updated_at: Date | string | null;
       updated_by: string | null;
     }>(
-      `SELECT a.account_id, a.label, a.nickname, (a.group_chat_info IS NOT NULL) AS has_group_code,
+      `SELECT a.account_id, a.label, a.nickname, (a.contact_info IS NOT NULL) AS has_contact_info,
               s.auto_enabled, s.post_enabled, s.post_daily_cap, s.comment_enabled, s.comment_daily_cap,
-              s.group_comment_enabled, s.group_comment_daily_cap,
+              s.contact_comment_enabled, s.contact_comment_daily_cap,
               s.content_active_mask, s.updated_at, s.updated_by
          FROM accounts a
          LEFT JOIN account_content_schedule s ON s.account_id = a.account_id
@@ -509,9 +509,9 @@ export class ContentScheduleStore {
         postDailyCap: r.post_daily_cap == null ? 0 : Number(r.post_daily_cap),
         commentEnabled: r.comment_enabled === true,
         commentDailyCap: r.comment_daily_cap == null ? 0 : Number(r.comment_daily_cap),
-        groupCommentEnabled: r.group_comment_enabled === true,
-        groupCommentDailyCap: r.group_comment_daily_cap == null ? 0 : Number(r.group_comment_daily_cap),
-        hasGroupCode: r.has_group_code === true,
+        contactCommentEnabled: r.contact_comment_enabled === true,
+        contactCommentDailyCap: r.contact_comment_daily_cap == null ? 0 : Number(r.contact_comment_daily_cap),
+        hasContactInfo: r.has_contact_info === true,
         maskSource: hasOverrideMask ? 'override' : 'global',
         hasOverrideMask,
         configured,

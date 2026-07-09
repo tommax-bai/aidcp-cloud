@@ -48,15 +48,15 @@ export interface CommentTaskSteps {
   /** 开选中笔记 → 读正文 + 翻评论区采现场评论；失败返回 null。 */
   readNote(card: CommentCandidateCard): Promise<{ note: NoteForComment; comments: OnPageComment[] } | null>;
   /**
-   * 撰写（含现场评论）→ 去 AI 味 → 飞书人审；返回授权通过的 {正文, 群聊码}，跳过/未授权/失败返回 null。
-   * 正文（text）与群聊码（groupChatCode，account-group-chat-injection）分开：边缘逐字敲正文、整段插码。
+   * 撰写（含现场评论）→ 去 AI 味 → 飞书人审；返回授权通过的 {正文, 联系方式}，跳过/未授权/失败返回 null。
+   * 正文（text）与联系方式（contactInfo，account-group-chat-injection）分开：边缘逐字敲正文、整段插入联系方式。
    */
   composeAndApprove(
     note: NoteForComment,
     comments: OnPageComment[],
-  ): Promise<{ text: string; groupChatCode: string | null } | null>;
-  /** 发布评论（interaction.comment + 真回执校验）；正文逐字、群聊码整段插入；返回是否真成功。 */
-  post(noteId: string, text: string, groupChatCode?: string | null): Promise<boolean>;
+  ): Promise<{ text: string; contactInfo: string | null } | null>;
+  /** 发布评论（interaction.comment + 真回执校验）；正文逐字、联系方式整段插入；返回是否真成功。 */
+  post(noteId: string, text: string, contactInfo?: string | null): Promise<boolean>;
   /** 发布成功后记一笔「已评论」（供下次去重）。 */
   recordCommented(noteId: string): Promise<void>;
 }
@@ -138,9 +138,9 @@ export async function runCommentTask(
     if (!composed) {
       return { outcome: 'compose_skipped', term, noteId: card.noteId, noteTitle: read.note.title, termsTried: tried, reason: 'empty/unapproved/rejected' };
     }
-    // 结果卡 / 日志展示的是合并终稿（正文 + 换行 + 码），= 人审通过、边缘将拼出的文本。
-    const displayText = composed.groupChatCode ? `${composed.text}\n${composed.groupChatCode}` : composed.text;
-    const ok = await steps.post(card.noteId, composed.text, composed.groupChatCode);
+    // 结果卡 / 日志展示的是合并终稿（正文 + 换行 + 联系方式），= 人审通过、边缘将拼出的文本。
+    const displayText = composed.contactInfo ? `${composed.text}\n${composed.contactInfo}` : composed.text;
+    const ok = await steps.post(card.noteId, composed.text, composed.contactInfo);
     if (!ok) {
       return { outcome: 'post_failed', term, noteId: card.noteId, noteTitle: read.note.title, text: displayText, termsTried: tried, reason: 'comment not verified posted' };
     }
@@ -188,7 +188,7 @@ export interface TargetedCommentResult {
   outcome: TargetedCommentOutcome;
   noteId: string;
   noteTitle?: string;
-  /** 人审通过的合并终稿（正文 + 换行 + 群聊码），命中撰写后才有。 */
+  /** 人审通过的合并终稿（正文 + 换行 + 联系方式），命中撰写后才有。 */
   text?: string;
   /** 实际发起的搜索尝试次数。 */
   searchAttempts: number;
@@ -243,8 +243,8 @@ export async function runTargetedCommentTask(
   if (!composed) {
     return { outcome: 'compose_skipped', noteId: target.noteId, noteTitle: read.note.title || target.title, searchAttempts: attempts, reason: 'empty/unapproved/rejected' };
   }
-  const displayText = composed.groupChatCode ? `${composed.text}\n${composed.groupChatCode}` : composed.text;
-  const ok = await steps.post(target.noteId, composed.text, composed.groupChatCode);
+  const displayText = composed.contactInfo ? `${composed.text}\n${composed.contactInfo}` : composed.text;
+  const ok = await steps.post(target.noteId, composed.text, composed.contactInfo);
   if (!ok) {
     return { outcome: 'post_failed', noteId: target.noteId, noteTitle: read.note.title || target.title, text: displayText, searchAttempts: attempts, reason: 'comment not verified posted' };
   }

@@ -60,11 +60,11 @@ export interface CommentSchedulerDeps {
   /** 人设绑定判定（persona-driven-content-pipeline）：注入则触发前闸——未绑人设的账号不接管边端、不启动评论任务，绝不以默认人设代评。缺省→不闸（向后兼容旧构造 / 测试桩）。 */
   isPersonaBound?: (accountId: string) => boolean;
   /**
-   * 读账号「关联群聊引流码」（change account-group-chat-injection）：/comment group:on 时任务开始处**解析一次**，
-   * 缺码 → fail-closed（触发闸回黄色告警、本次不发）；有码 → 同一个已解析值一路带到注入（gate 与注入同源，无 TOCTOU）。
-   * 缺省 → 无法取码（group:on 时一律 fail-closed）。
+   * 读账号「联系方式」（change account-group-chat-injection）：/comment --contact 时任务开始处**解析一次**，
+   * 缺联系方式 → fail-closed（触发闸回黄色告警、本次不发）；有则同一个已解析值一路带到注入（gate 与注入同源，无 TOCTOU）。
+   * 缺省 → 无法取值（--contact 时一律 fail-closed）。
    */
-  getGroupChatInfo?: (accountId: string) => Promise<string | null>;
+  getContactInfo?: (accountId: string) => Promise<string | null>;
   /** 取精选样本喂搜索词生成（按账号；出错回 []）。 */
   selectCurated: (accountId: string, contentType: CuratedContentTypeFilter, limit: number) => Promise<CuratedSampleForTerms[]>;
   /** 账号绑定 LLM（计 token 归属该账号）。 */
@@ -180,7 +180,7 @@ export class CommentScheduler {
   /** 飞书 /comment 触发：返回「触发态」结构化回执；最终结果异步补发结果卡片。 */
   async triggerManual(
     accountId: string,
-    options?: { injectGroup?: boolean },
+    options?: { injectContact?: boolean },
   ): Promise<CommentCommandReceipt> {
     if (!accountId || accountId === 'default') {
       return { ok: false, level: 'error', title: '按需评论触发失败', message: '未解析到有效账号（绝不回落 default）' };
@@ -188,17 +188,17 @@ export class CommentScheduler {
     if (this.deps.isPersonaBound && !this.deps.isPersonaBound(accountId)) {
       return { ok: false, level: 'warning', title: '未触发按需评论', message: '该账号未绑定人设——请先到后台「人设」页设置；未绑人设不启动评论任务，绝不以默认人设代评。' };
     }
-    // 群聊引流码闸（change account-group-chat-injection）：group:on 时**解析一次**码——缺码 fail-closed（本次不发，
-    // 绝不静默降级成无码评论，镜像上面的 isPersonaBound 闸）；有码则用同一个已解析值注入（gate 与注入同源，无 TOCTOU）。
-    let groupChatCode: string | null = null;
-    if (options?.injectGroup) {
-      groupChatCode = this.deps.getGroupChatInfo ? await this.deps.getGroupChatInfo(accountId) : null;
-      if (!groupChatCode) {
+    // 联系方式闸（change account-group-chat-injection）：--contact 时**解析一次**——缺联系方式 fail-closed（本次不发，
+    // 绝不静默降级成无联系方式评论，镜像上面的 isPersonaBound 闸）；有则用同一个已解析值注入（gate 与注入同源，无 TOCTOU）。
+    let contactInfo: string | null = null;
+    if (options?.injectContact) {
+      contactInfo = this.deps.getContactInfo ? await this.deps.getContactInfo(accountId) : null;
+      if (!contactInfo) {
         return {
           ok: false,
           level: 'warning',
           title: '未触发按需评论',
-          message: '该账号未配置「关联群聊信息」——请先到后台账号页设置；要求引流但无码，本次不发（绝不发无码评论）。',
+          message: '该账号未配置「联系方式」——请先到后台账号页设置；要求带联系方式但未配，本次不发（绝不发无联系方式评论）。',
         };
       }
     }
@@ -247,10 +247,10 @@ export class CommentScheduler {
     this.running.add(accountId);
     const edgeId = conn.edgeId;
     const bus = conn.bus;
-    // 异步跑任务，命令立即回执（任务含人审轮询，不可同步等）。groupChatCode 已解析一次，带进任务用于注入（gate 同源）。
+    // 异步跑任务，命令立即回执（任务含人审轮询，不可同步等）。contactInfo 已解析一次，带进任务用于注入（gate 同源）。
     // catch：runTask 内部已兜任务期异常；此处兜「任务启动前」的防御性抛（如 gate 后人设被解绑 → getSoul 抛
     // no_persona，persona-driven-content-pipeline）——诚实记日志、不让未处理拒绝炸进程，绝不假成功。
-    void this.runTask(accountId, bus, edgeId, groupChatCode, platformProfile)
+    void this.runTask(accountId, bus, edgeId, contactInfo, platformProfile)
       .catch((err) =>
         (this.deps.logger ?? console).warn(
           `[comment-scheduler] 任务未能启动/异常中止 account=${accountId}：${(err as Error).message}`,
@@ -268,13 +268,13 @@ export class CommentScheduler {
 
   /**
    * 定向评论触发（change curated-note-actions）：管理后台精选页对指定笔记评论。
-   * 与 triggerManual 守卫同构（账号/人设/群码 fail-closed/单飞/边端在线），另加**去重前置**（已评过 → 诚实拒绝）。
+   * 与 triggerManual 守卫同构（账号/人设/联系方式 fail-closed/单飞/边端在线），另加**去重前置**（已评过 → 诚实拒绝）。
    * 目标定位为搜索驱动（标题截断作搜索词、综合排序+不限时间窗、结果内按 noteId 精确匹配），绝不导航存量 URL。
    */
   async triggerTargeted(
     accountId: string,
     target: { noteId: string; title: string },
-    options?: { injectGroup?: boolean },
+    options?: { injectContact?: boolean },
   ): Promise<CommentCommandReceipt & { reason?: string }> {
     if (!accountId || accountId === 'default') {
       return { ok: false, level: 'error', title: '定向评论触发失败', message: '未解析到有效账号（绝不回落 default）', reason: 'account_required' };
@@ -285,16 +285,16 @@ export class CommentScheduler {
     if (this.deps.isPersonaBound && !this.deps.isPersonaBound(accountId)) {
       return { ok: false, level: 'warning', title: '未触发定向评论', message: '该账号未绑定人设——请先到后台「人设」页设置；未绑人设不启动评论任务，绝不以默认人设代评。', reason: 'needs_persona' };
     }
-    let groupChatCode: string | null = null;
-    if (options?.injectGroup) {
-      groupChatCode = this.deps.getGroupChatInfo ? await this.deps.getGroupChatInfo(accountId) : null;
-      if (!groupChatCode) {
+    let contactInfo: string | null = null;
+    if (options?.injectContact) {
+      contactInfo = this.deps.getContactInfo ? await this.deps.getContactInfo(accountId) : null;
+      if (!contactInfo) {
         return {
           ok: false,
           level: 'warning',
           title: '未触发定向评论',
-          message: '该账号未配置「关联群聊信息」——请先到后台账号页设置；要求带群但无码，本次不发（绝不发无码评论，也不降级为内容评论）。',
-          reason: 'group_code_missing',
+          message: '该账号未配置「联系方式」——请先到后台账号页设置；要求带联系方式但未配，本次不发（绝不发无联系方式评论，也不降级为内容评论）。',
+          reason: 'contact_info_missing',
         };
       }
     }
@@ -354,7 +354,7 @@ export class CommentScheduler {
     }
 
     this.running.add(accountId);
-    void this.runTargetedTask(accountId, conn.bus, conn.edgeId, target, groupChatCode, platformProfile)
+    void this.runTargetedTask(accountId, conn.bus, conn.edgeId, target, contactInfo, platformProfile)
       .catch((err) =>
         (this.deps.logger ?? console).warn(
           `[comment-scheduler] 定向任务未能启动/异常中止 account=${accountId}：${(err as Error).message}`,
@@ -536,7 +536,7 @@ export class CommentScheduler {
     bus: EventBus,
     edgeId: string,
     target: { noteId: string; title: string },
-    groupChatCode: string | null,
+    contactInfo: string | null,
     platformProfile: CommentPlatformProfile,
   ): Promise<void> {
     const log = this.deps.logger ?? console;
@@ -549,7 +549,7 @@ export class CommentScheduler {
       approval: this.deps.approval,
       accountId,
       postProcessor: this.deps.postProcessorFor?.(accountId),
-      groupChatCode,
+      contactInfo,
       now: this.deps.now,
       logger: log,
     });
@@ -589,7 +589,7 @@ export class CommentScheduler {
     }
 
     try {
-      await this.deps.postResultCard?.(accountId, targetedOutcomeToReceipt(result, groupChatCode != null));
+      await this.deps.postResultCard?.(accountId, targetedOutcomeToReceipt(result, contactInfo != null));
     } catch (err) {
       log.warn(`[comment-scheduler] 定向结果卡片发送失败 account=${accountId}：${(err as Error).message}`);
     }
@@ -599,7 +599,7 @@ export class CommentScheduler {
     accountId: string,
     bus: EventBus,
     edgeId: string,
-    groupChatCode: string | null,
+    contactInfo: string | null,
     platformProfile: CommentPlatformProfile,
   ): Promise<void> {
     const log = this.deps.logger ?? console;
@@ -616,8 +616,8 @@ export class CommentScheduler {
       approval: this.deps.approval,
       accountId,
       postProcessor: this.deps.postProcessorFor?.(accountId),
-      // 群聊引流码（change account-group-chat-injection）：已在 triggerManual 解析一次（同源），非 null 时注入。
-      groupChatCode,
+      // 联系方式（change account-group-chat-injection）：已在 triggerManual 解析一次（同源），非 null 时注入。
+      contactInfo,
       now: this.deps.now,
       logger: log,
     });
@@ -644,7 +644,7 @@ export class CommentScheduler {
       pick: (cards) => picker.pick(cards),
       readNote: (card) => edge.readNote(card),
       composeAndApprove: (note, comments) => composeAndApprove(note, comments),
-      post: (noteId, text, groupChatCode) => edge.post(noteId, text, groupChatCode),
+      post: (noteId, text, contactInfo) => edge.post(noteId, text, contactInfo),
       recordCommented: (noteId) => edge.recordCommented(noteId),
     };
 
@@ -679,8 +679,8 @@ function noteLabel(title: string | undefined, prefix: string): string {
 }
 
 /** TargetedCommentResult → 结果卡片回执（change curated-note-actions；卡面可辨识为定向来源，绝不染绿）。 */
-export function targetedOutcomeToReceipt(r: TargetedCommentResult, withGroup: boolean): CommentResultReceipt {
-  const kind = withGroup ? '定向带群评论' : '定向内容评论';
+export function targetedOutcomeToReceipt(r: TargetedCommentResult, withContact: boolean): CommentResultReceipt {
+  const kind = withContact ? '定向带联系方式评论' : '定向内容评论';
   const target = noteLabel(r.noteTitle, '目标笔记');
   switch (r.outcome) {
     case 'commented':

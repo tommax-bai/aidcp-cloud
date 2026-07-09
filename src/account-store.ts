@@ -45,9 +45,9 @@ CREATE TABLE IF NOT EXISTS accounts (
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS nickname TEXT;
 -- 自愈式加列（change platform-abstraction-layer）：accounts.platform 是运行时平台事实源。
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS platform TEXT NOT NULL DEFAULT 'xiaohongshu';
--- 自愈式加列（change account-group-chat-injection，迁移 0027 文档伴随）：每账号「关联群聊引流码」，
--- 供 /comment group:on 注入引流。verbatim 存储——写入不 trim / 不截断（见 setGroupChatInfo），与 nickname / group_label 刻意相反。
-ALTER TABLE accounts ADD COLUMN IF NOT EXISTS group_chat_info TEXT;
+-- 自愈式加列（change account-group-chat-injection → generalize-contact-info，物理改名迁移 0036）：每账号「联系方式」，
+-- 供 /comment --contact 注入。verbatim 存储——写入不 trim / 不截断（见 setContactInfo），与 nickname / group_label 刻意相反。
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS contact_info TEXT;
 -- retire-default-account：不再 seed 'default' 占位行。账号父行由真实账号握手时 ensureAccount 幂等登记产生。
 `;
 
@@ -70,11 +70,11 @@ export type SetGroupLabelResult =
   | { ok: false; reason: 'account_not_found' | 'retired_account' };
 
 /**
- * setGroupChatInfo 结果（change account-group-chat-injection）：诚实可区分，同 setGroupLabel 形态——
+ * setContactInfo 结果（change account-group-chat-injection → generalize-contact-info）：诚实可区分，同 setGroupLabel 形态——
  * 成功回读真态；退役保留账号 / 无对应行以 ok:false + 具名 reason 返回，绝不静默成功。
  */
-export type SetGroupChatInfoResult =
-  | { ok: true; groupChatInfo: string | null }
+export type SetContactInfoResult =
+  | { ok: true; contactInfo: string | null }
   | { ok: false; reason: 'account_not_found' | 'retired_account' };
 
 /** AccountStateManager 依赖的最小存储接口（便于内存打桩、不依赖真 PG）。 */
@@ -109,17 +109,17 @@ export interface AccountStore {
    */
   setGroupLabel?(accountId: string, groupLabel: string | null): Promise<SetGroupLabelResult>;
   /**
-   * 写账号「关联群聊引流码」（change account-group-chat-injection）：单写、UPDATE-only（**不 seed 造行**）。
+   * 写账号「联系方式」（change account-group-chat-injection → generalize-contact-info）：单写、UPDATE-only（**不 seed 造行**）。
    * **verbatim——不 trim、不设长度上限、保留 emoji / 换行 / 首尾空白**（与 setGroupLabel 的 trim+64 截断刻意相反）；
    * 空 / 纯空白 / null → 写 NULL（清空）；退役保留账号与无对应行以可区分结果返回；写后经 RETURNING 回读真态。
    * 面板层只经此方法写，绝不 raw UPDATE。
    */
-  setGroupChatInfo?(accountId: string, groupChatInfo: string | null): Promise<SetGroupChatInfoResult>;
+  setContactInfo?(accountId: string, contactInfo: string | null): Promise<SetContactInfoResult>;
   /**
-   * 读账号「关联群聊引流码」（change account-group-chat-injection）：异步直读 PG，返回 verbatim 值 / null。
+   * 读账号「联系方式」（change account-group-chat-injection → generalize-contact-info）：异步直读 PG，返回 verbatim 值 / null。
    * 供 /comment 任务开始处解析一次（人工触发的低频路径，可 await PG，无需同步缓存）。缺行 / 库内 NULL → null。
    */
-  getGroupChatInfo?(accountId: string): Promise<string | null>;
+  getContactInfo?(accountId: string): Promise<string | null>;
   /**
    * 读账号分组标签 `group_label`（change feishu-per-team-notification-routing）：异步直读 PG，返回值 / null。
    * 供出站按团队路由（账号 → group_label → 目标群）解析一次。缺行 / 库内 NULL → null；读失败由调用方按「无团队路由」兜底（落默认群），绝不当致命错误。
@@ -284,39 +284,39 @@ export class PgAccountStore implements AccountStore {
   }
 
   /**
-   * 写「关联群聊引流码」（change account-group-chat-injection）：单写、UPDATE-only + RETURNING。
+   * 写「联系方式」（change account-group-chat-injection → generalize-contact-info）：单写、UPDATE-only + RETURNING。
    * - 退役保留账号 `default` 直接拒（不落库、不静默成功）；
    * - **verbatim**：仅用 trim 判空以决定「清空 vs 设值」，非空则**原样存**（不 trim 内容、不截断，保留 emoji / 换行 / 首尾空白）；
    * - 空 / 纯空白 / null → 写 NULL（清空）；
    * - 无对应行（0 rows）→ account_not_found，**绝不 seed 造幽灵行**；
    * - 返回 RETURNING 回读的真值（写后真态，绝不乐观 ok）。
    */
-  async setGroupChatInfo(
+  async setContactInfo(
     accountId: string,
-    groupChatInfo: string | null,
-  ): Promise<SetGroupChatInfoResult> {
+    contactInfo: string | null,
+  ): Promise<SetContactInfoResult> {
     if (accountId === RETIRED_ACCOUNT_ID) return { ok: false, reason: 'retired_account' };
-    const raw = groupChatInfo ?? '';
+    const raw = contactInfo ?? '';
     // verbatim：仅判空决定清空，非空原样存（含首尾空白 / emoji / 换行），绝不 trim 内容 / 截断。
     const value = raw.trim() === '' ? null : raw;
-    const { rows } = await this.pool.query<{ group_chat_info: string | null }>(
-      `UPDATE accounts SET group_chat_info = $2 WHERE account_id = $1 RETURNING group_chat_info`,
+    const { rows } = await this.pool.query<{ contact_info: string | null }>(
+      `UPDATE accounts SET contact_info = $2 WHERE account_id = $1 RETURNING contact_info`,
       [accountId, value],
     );
     if (rows.length === 0) return { ok: false, reason: 'account_not_found' };
-    return { ok: true, groupChatInfo: rows[0].group_chat_info };
+    return { ok: true, contactInfo: rows[0].contact_info };
   }
 
   /**
-   * 读「关联群聊引流码」（change account-group-chat-injection）：异步直读，返回 verbatim 值 / null。
+   * 读「联系方式」（change account-group-chat-injection → generalize-contact-info）：异步直读，返回 verbatim 值 / null。
    * /comment 任务开始处解析一次（低频人工路径，可 await PG）。缺行 / 库内 NULL → null。
    */
-  async getGroupChatInfo(accountId: string): Promise<string | null> {
-    const { rows } = await this.pool.query<{ group_chat_info: string | null }>(
-      `SELECT group_chat_info FROM accounts WHERE account_id = $1`,
+  async getContactInfo(accountId: string): Promise<string | null> {
+    const { rows } = await this.pool.query<{ contact_info: string | null }>(
+      `SELECT contact_info FROM accounts WHERE account_id = $1`,
       [accountId],
     );
-    return rows.length > 0 ? rows[0].group_chat_info ?? null : null;
+    return rows.length > 0 ? rows[0].contact_info ?? null : null;
   }
 
   /**

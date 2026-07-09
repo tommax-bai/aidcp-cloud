@@ -24,7 +24,7 @@ interface StubConfig {
   /** readNote 返回的详情 noteId（缺省=卡片 noteId）；null=读失败。 */
   detailNoteId?: string | null;
   composeText?: string | null;
-  groupChatCode?: string | null;
+  contactInfo?: string | null;
   postOk?: boolean;
 }
 
@@ -49,7 +49,7 @@ function makeSteps(cfg: StubConfig) {
     composeAndApprove: async () => {
       calls.compose++;
       if (cfg.composeText === null) return null;
-      return { text: cfg.composeText ?? '真诚评论', groupChatCode: cfg.groupChatCode ?? null };
+      return { text: cfg.composeText ?? '真诚评论', contactInfo: cfg.contactInfo ?? null };
     },
     post: async (noteId) => {
       calls.post.push(noteId);
@@ -136,8 +136,8 @@ test('发布未真成功 → post_failed，不记账', async () => {
   assert.deepEqual(calls.record, []); // 记账只挂真实回执
 });
 
-test('带群：合并终稿含群聊码（text\\n码），post 收到正文与码分离', async () => {
-  const { steps, calls } = makeSteps({ harvests: [[card(0, 'target-1')]], composeText: '正文', groupChatCode: 'CODE123' });
+test('带联系方式：合并终稿含联系方式（text\\n联系方式），post 收到正文与联系方式分离', async () => {
+  const { steps, calls } = makeSteps({ harvests: [[card(0, 'target-1')]], composeText: '正文', contactInfo: 'CODE123' });
   const r = await runTargetedCommentTask(steps, { noteId: 'target-1', searchTerm: 't' }, { logger: silent });
   assert.equal(r.outcome, 'commented');
   assert.equal(r.text, '正文\nCODE123');

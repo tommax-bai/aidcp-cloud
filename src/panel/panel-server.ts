@@ -717,11 +717,17 @@ function createRequestHandler(
       sendJson(res, 200, { route: result.route }); // 写后回读真态（route=null 表已清除）
       return;
     }
-    // 账号「关联群聊引流码」写（change account-group-chat-injection）：经账号存储单写（accounts 表拥有者），
+    // 账号「联系方式」写（change account-group-chat-injection → generalize-contact-info）：经账号存储单写（accounts 表拥有者），
     // **verbatim——不 trim / 不截断**；绝不 raw UPDATE、绝不乐观假成功；空归 NULL（清空）、无行 404、退役账号拒、写后回读真态。
-    if (method === 'PUT' && url.startsWith('/api/accounts/') && url.endsWith('/group-chat-info')) {
-      const accountId = decodeURIComponent(url.slice('/api/accounts/'.length, -'/group-chat-info'.length));
-      if (!deps.accountAttr?.setGroupChatInfo) {
+    // 过渡期同时受理新路径 /contact-info 与旧路径 /group-chat-info（滚动升级期旧 console 仍可能命中旧路径 + 旧 DTO 字段）。
+    if (
+      method === 'PUT' &&
+      url.startsWith('/api/accounts/') &&
+      (url.endsWith('/contact-info') || url.endsWith('/group-chat-info'))
+    ) {
+      const suffix = url.endsWith('/contact-info') ? '/contact-info' : '/group-chat-info';
+      const accountId = decodeURIComponent(url.slice('/api/accounts/'.length, -suffix.length));
+      if (!deps.accountAttr?.setContactInfo) {
         sendJson(res, 503, { error: 'unavailable' });
         return;
       }
@@ -732,21 +738,22 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
-      const { groupChatInfo } = (body ?? {}) as { groupChatInfo?: unknown };
-      // groupChatInfo 只接受 string | null | 缺省（缺省 / null / 空串 = 清空）；其它类型诚实拒。
-      if (groupChatInfo !== undefined && groupChatInfo !== null && typeof groupChatInfo !== 'string') {
-        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_group_chat_info' });
+      // DTO 字段 contactInfo（新契约）；过渡期同时受理旧字段 groupChatInfo。string | null | 缺省（缺省 / null / 空串 = 清空）；其它类型诚实拒。
+      const raw = (body ?? {}) as { contactInfo?: unknown; groupChatInfo?: unknown };
+      const contactInfo = raw.contactInfo !== undefined ? raw.contactInfo : raw.groupChatInfo;
+      if (contactInfo !== undefined && contactInfo !== null && typeof contactInfo !== 'string') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_contact_info' });
         return;
       }
       // verbatim：不 trim——原样透传给存储（存储只用 trim 判空决定清空 vs 设值）。
-      const info = typeof groupChatInfo === 'string' ? groupChatInfo : null;
-      const result = await deps.accountAttr.setGroupChatInfo(accountId, info);
+      const info = typeof contactInfo === 'string' ? contactInfo : null;
+      const result = await deps.accountAttr.setContactInfo(accountId, info);
       if (!result.ok) {
         if (result.reason === 'account_not_found') sendJson(res, 404, { error: 'account_not_found' });
         else sendJson(res, 400, { error: 'bad_request', reason: result.reason }); // retired_account
         return;
       }
-      sendJson(res, 200, { accountId, groupChatInfo: result.groupChatInfo });
+      sendJson(res, 200, { accountId, contactInfo: result.contactInfo });
       return;
     }
     // Facebook 定时评论配置写（change facebook-scheduled-comment 2.1）：关键词列表 + 容器列表。
@@ -1298,7 +1305,7 @@ function createRequestHandler(
       }
       const raw = (body ?? {}) as Record<string, unknown>;
       const patch: AccountContentSchedulePatch = {};
-      for (const k of ['autoEnabled', 'postEnabled', 'commentEnabled', 'groupCommentEnabled'] as const) {
+      for (const k of ['autoEnabled', 'postEnabled', 'commentEnabled', 'contactCommentEnabled'] as const) {
         const v = raw[k];
         if (v === undefined) continue;
         if (typeof v !== 'boolean') {
@@ -1321,12 +1328,12 @@ function createRequestHandler(
         }
         patch.commentDailyCap = raw.commentDailyCap;
       }
-      if (raw.groupCommentDailyCap !== undefined) {
-        if (typeof raw.groupCommentDailyCap !== 'number') {
+      if (raw.contactCommentDailyCap !== undefined) {
+        if (typeof raw.contactCommentDailyCap !== 'number') {
           sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
           return;
         }
-        patch.groupCommentDailyCap = raw.groupCommentDailyCap;
+        patch.contactCommentDailyCap = raw.contactCommentDailyCap;
       }
       if ('contentActiveMask' in raw) {
         const m = raw.contentActiveMask;
@@ -1339,11 +1346,11 @@ function createRequestHandler(
       const result = await deps.contentSchedule.setAccount(accountId, patch, verified.payload.sub);
       if (!result.ok) {
         if (result.reason === 'account_not_found') sendJson(res, 404, { error: 'account_not_found' });
-        else sendJson(res, 400, { error: 'bad_request', reason: result.reason }); // retired_account / invalid_value / no_valid_fields / no_group_code
+        else sendJson(res, 400, { error: 'bad_request', reason: result.reason }); // retired_account / invalid_value / no_valid_fields / no_contact_info
         return;
       }
-      // 一码一号放松（loosen-group-comment-shared-code）：共用群码放行但带 sharedGroupCodeWarning，前端如实提示防关联风险、绝不静默。
-      sendJson(res, 200, result.sharedGroupCodeWarning ? { ...result.row, sharedGroupCodeWarning: true } : result.row);
+      // 一码一号放松（loosen-group-comment-shared-code）：共用联系方式放行但带 sharedContactInfoWarning，前端如实提示防关联风险、绝不静默。
+      sendJson(res, 200, result.sharedContactInfoWarning ? { ...result.row, sharedContactInfoWarning: true } : result.row);
       return;
     }
 
@@ -1718,7 +1725,7 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
-      const parsed = (body ?? {}) as { accountId?: unknown; withGroup?: unknown; useReferenceImages?: unknown };
+      const parsed = (body ?? {}) as { accountId?: unknown; withContact?: unknown; useReferenceImages?: unknown };
       const accountId = typeof parsed.accountId === 'string' ? parsed.accountId.trim() : '';
       if (!accountId) {
         sendJson(res, 400, { error: 'bad_request', reason: 'account_required' });
@@ -1752,8 +1759,8 @@ function createRequestHandler(
         sendJson(res, 200, { triggered: false, reason: 'empty_title' });
         return;
       }
-      const withGroup = parsed.withGroup === true;
-      sendJson(res, 200, await deps.curatedActions.commentOnNote(accountId, row, withGroup));
+      const withContact = parsed.withContact === true;
+      sendJson(res, 200, await deps.curatedActions.commentOnNote(accountId, row, withContact));
       return;
     }
     if (method === 'GET' && url === '/api/curated/contents') {

@@ -17,7 +17,8 @@ import type { LlmKind, ThinkingModeApi } from '../config/role-catalog.js';
 import type { ModelEffectiveSource, PersonaSource } from './types.js';
 
 /** 面板 API 契约版本号。接口形状变更时递增。 */
-export const PANEL_API_VERSION = 3;
+// v4（change generalize-contact-info）：PanelAccount.groupChatInfo → contactInfo（DTO 字段改名）。
+export const PANEL_API_VERSION = 4;
 
 /**
  * PanelAccount 字段权威清单（console 镜像对拍此清单防漂移，#5/#6）。
@@ -30,7 +31,7 @@ export const PANEL_ACCOUNT_FIELDS = [
   'platform',
   'groupLabel',
   'machineLabel',
-  'groupChatInfo',
+  'contactInfo',
   'operatorStatus',
   'pausedAt',
   'riskStatus',

@@ -36,28 +36,28 @@ export interface ComposeApproveDeps {
   /** 可选精选参考召回（仅作灵感、撞则弃）；缺省/出错 → 无参考。 */
   getReferences?: (note: NoteForComment) => Promise<string[]>;
   /**
-   * 群聊引流码（change account-group-chat-injection）：非 null 时在去 AI 味 + 反照搬之后、人审之前 verbatim 追加。
-   * 由 CommentScheduler 在任务开始处解析一次（/comment group:on 且账号已配码；否则 null=不注入）。
+   * 联系方式（change account-group-chat-injection）：非 null 时在去 AI 味 + 反照搬之后、人审之前 verbatim 追加。
+   * 由 CommentScheduler 在任务开始处解析一次（/comment --contact 且账号已配联系方式；否则 null=不注入）。
    * 缺省 / null → 不注入（普通评论，零回归）。边缘保真（trim / 提及补全）由 edge 侧任务处置，此处保证云端「审=发」。
    */
-  groupChatCode?: string | null;
+  contactInfo?: string | null;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   logger?: Pick<Console, 'log' | 'warn'>;
 }
 
 /**
- * composeAndApprove 结果（change account-group-chat-injection）：正文与群聊码**分开**返回——
- * 边缘逐字符敲 `text`（正文），再单次整段插入 `groupChatCode`（串码，绕过 @/# 提及补全）。
- * 人审卡展示的是二者合并的完整终稿（审=发）。groupChatCode 为 null = 不注入（普通评论）。
+ * composeAndApprove 结果（change account-group-chat-injection）：正文与联系方式**分开**返回——
+ * 边缘逐字符敲 `text`（正文），再单次整段插入 `contactInfo`（联系方式，绕过 @/# 提及补全）。
+ * 人审卡展示的是二者合并的完整终稿（审=发）。contactInfo 为 null = 不注入（普通评论）。
  */
 export interface ComposeApproveResult {
   text: string;
-  groupChatCode: string | null;
+  contactInfo: string | null;
 }
 
 /**
- * 装配 composeAndApprove：返回「(note, 现场评论) → 授权通过的 {正文, 群聊码} / null」。
+ * 装配 composeAndApprove：返回「(note, 现场评论) → 授权通过的 {正文, 联系方式} / null」。
  */
 export function buildComposeAndApprove(
   deps: ComposeApproveDeps,
@@ -103,14 +103,14 @@ export function buildComposeAndApprove(
       return null;
     }
 
-    // ③ 群聊引流码（change account-group-chat-injection）：命中开关且有码时，正文（text）与码**分开**——
-    //    正文交边缘逐字符敲、码交边缘单次整段插入（绕过 @/# 提及补全）。此处只把二者的**合并终稿**送人审卡，
-    //    保证「人审看到的 = 边缘将拼出的」（AC-PUB 审=发）；码不参与上面的 overlapsAny 反照搬比对（只比正文）。
-    //    正文长度闸在 composeDraft 内、作用于正文草稿；码走整段插入、天然绕过（有意，码本身长）。
-    const code = deps.groupChatCode || null;
-    const reviewText = code ? `${text}\n${code}` : text; // 人审卡 = 正文 + 换行 + 码（边缘将逐字敲正文、整段插码拼出同一终稿）
+    // ③ 联系方式（change account-group-chat-injection）：命中开关且有联系方式时，正文（text）与联系方式**分开**——
+    //    正文交边缘逐字符敲、联系方式交边缘单次整段插入（绕过 @/# 提及补全）。此处只把二者的**合并终稿**送人审卡，
+    //    保证「人审看到的 = 边缘将拼出的」（AC-PUB 审=发）；联系方式不参与上面的 overlapsAny 反照搬比对（只比正文）。
+    //    正文长度闸在 composeDraft 内、作用于正文草稿；联系方式走整段插入、天然绕过（有意，联系方式本身长）。
+    const code = deps.contactInfo || null;
+    const reviewText = code ? `${text}\n${code}` : text; // 人审卡 = 正文 + 换行 + 联系方式（边缘将逐字敲正文、整段插联系方式拼出同一终稿）
     if (code) {
-      log.log(`[comment-compose] 群聊引流码待注入 note=${note.noteId}（正文逐字 + 码整段插入；人审卡展示合并终稿）`);
+      log.log(`[comment-compose] 联系方式待注入 note=${note.noteId}（正文逐字 + 联系方式整段插入；人审卡展示合并终稿）`);
     }
 
     // ④ 人审（AC-PUB）：未接线 / 超时 / 拒绝 → null（绝不裸发）。审的是 reviewText（含码合并终稿）。
@@ -145,7 +145,7 @@ export function buildComposeAndApprove(
       }
       if (approved) {
         log.log(`[comment-compose] 人审通过 note=${note.noteId} requestId=${requestId}`);
-        return { text, groupChatCode: code }; // 正文与码分开回给发送步骤（边缘分别处理）
+        return { text, contactInfo: code }; // 正文与联系方式分开回给发送步骤（边缘分别处理）
       }
       await sleep(pollMs);
     }

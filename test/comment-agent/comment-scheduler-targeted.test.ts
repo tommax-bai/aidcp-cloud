@@ -1,6 +1,6 @@
 /**
  * CommentScheduler.triggerTargeted 单测（change curated-note-actions：定向评论触发）。
- * 覆盖：各拒绝路径（账号/坏目标/人设/群码 fail-closed/单飞/去重前置/边端离线）带机器原因码、
+ * 覆盖：各拒绝路径（账号/坏目标/人设/联系方式 fail-closed/单飞/去重前置/边端离线）带机器原因码、
  * happy path 端到端（搜索用综合排序+不限时间窗、搜索词截断 ≤20 字、接管/恢复成对、
  * 结果卡片可辨识定向来源、发布成功后记账）、targetedOutcomeToReceipt 绝不染绿。
  */
@@ -102,11 +102,11 @@ describe('CommentScheduler.triggerTargeted 拒绝路径（机器原因码）', (
     assert.equal(takeovers, 0);
   });
 
-  it('带群但账号无群码 → warning / group_code_missing（fail-closed，绝不降级为内容评论）', async () => {
-    const s = new CommentScheduler(baseDeps({ getGroupChatInfo: async () => null }));
-    const r = await s.triggerTargeted('acc-1', target, { injectGroup: true });
+  it('带联系方式但账号无联系方式 → warning / contact_info_missing（fail-closed，绝不降级为内容评论）', async () => {
+    const s = new CommentScheduler(baseDeps({ getContactInfo: async () => null }));
+    const r = await s.triggerTargeted('acc-1', target, { injectContact: true });
     assert.equal(r.ok, false);
-    assert.equal(r.reason, 'group_code_missing');
+    assert.equal(r.reason, 'contact_info_missing');
   });
 
   it('去重前置：已评过该笔记 → warning / already_commented，不接管边端', async () => {
@@ -243,7 +243,7 @@ describe('CommentScheduler.triggerTargeted happy path', () => {
     assert.equal(s.isRunning('acc-1'), false);
   });
 
-  it('带群：群码走 compose 注入路径，结果卡标「定向带群评论」', async () => {
+  it('带联系方式：联系方式走 compose 注入路径，结果卡标「定向带联系方式评论」', async () => {
     const bus = new EventBus();
     const edge = fakeEdge(bus, 'note-1');
     const cardDone = deferred<{ ok: boolean; title: string }>();
@@ -251,18 +251,18 @@ describe('CommentScheduler.triggerTargeted happy path', () => {
       baseDeps({
         resolveConnection: () => ({ bus, edgeId: 'e1' }),
         pusher: edge.pusher,
-        getGroupChatInfo: async () => 'GROUP-CODE',
+        getContactInfo: async () => 'GROUP-CODE',
         postResultCard: (_a, receipt) => { cardDone.resolve(receipt); },
       }),
     );
-    const r = await s.triggerTargeted('acc-1', target, { injectGroup: true });
+    const r = await s.triggerTargeted('acc-1', target, { injectContact: true });
     assert.equal(r.ok, true);
     const receipt = await cardDone.promise;
     assert.equal(receipt.ok, true);
-    assert.match(receipt.title, /定向带群评论/);
+    assert.match(receipt.title, /定向带联系方式评论/);
     const comment = edge.pushed.find((e) => e.type === 'interaction.comment');
     assert.ok(comment);
-    assert.equal(comment.payload.groupChatCode, 'GROUP-CODE'); // 码整段注入（边端 insertText）
+    assert.equal(comment.payload.groupChatCode, 'GROUP-CODE'); // 线协议字段名仍为 groupChatCode；联系方式整段注入（边端 insertText）
   });
 });
 

@@ -207,65 +207,65 @@ test('parseCommand: /comment 无参 → action comment、nickname undefined（�
   assert.equal(cmd.nickname, undefined);
 });
 
-// ── change account-group-chat-injection：/comment 尾部引流开关 group:on/off ──
+// ── change generalize-contact-info：/comment 尾部联系方式开关 --contact（present=on，缺省=off；旧 group:on/off 已废） ──
 
-test('parseCommand: /comment <昵称> group:on → injectGroup true、昵称不含开关', () => {
-  const cmd = parseCommand('/comment 工程师大白 group:on');
+test('parseCommand: /comment <昵称> --contact → injectContact true、昵称不含开关', () => {
+  const cmd = parseCommand('/comment 工程师大白 --contact');
   assert.equal(cmd.action, 'comment');
   assert.equal(cmd.nickname, '工程师大白');
-  assert.equal(cmd.injectGroup, true);
+  assert.equal(cmd.injectContact, true);
 });
 
-test('parseCommand: /comment <昵称> group:off → injectGroup false', () => {
-  const cmd = parseCommand('/comment 工程师大白 group:off');
+test('parseCommand: 联系方式开关大小写不敏感（--CONTACT）', () => {
+  const cmd = parseCommand('/comment 工程师大白 --CONTACT');
   assert.equal(cmd.nickname, '工程师大白');
-  assert.equal(cmd.injectGroup, false);
+  assert.equal(cmd.injectContact, true);
 });
 
-test('parseCommand: 引流开关大小写不敏感（GROUP:ON）', () => {
-  const cmd = parseCommand('/comment 工程师大白 GROUP:ON');
-  assert.equal(cmd.nickname, '工程师大白');
-  assert.equal(cmd.injectGroup, true);
-});
-
-test('parseCommand: /comment 无开关 → injectGroup undefined、昵称完整（零回归）', () => {
+test('parseCommand: /comment 无开关 → injectContact undefined、昵称完整（零回归）', () => {
   const cmd = parseCommand('/comment 工程师大白');
   assert.equal(cmd.nickname, '工程师大白');
-  assert.equal(cmd.injectGroup, undefined);
+  assert.equal(cmd.injectContact, undefined);
 });
 
 test('parseCommand: 含空格昵称 + 尾部开关正确切分', () => {
-  const cmd = parseCommand('/comment 大白 工程师 group:on');
+  const cmd = parseCommand('/comment 大白 工程师 --contact');
   assert.equal(cmd.nickname, '大白 工程师');
-  assert.equal(cmd.injectGroup, true);
+  assert.equal(cmd.injectContact, true);
 });
 
-test('parseCommand: 开关只认末尾（trailing-only）——中间的 group:on-样 token 不当开关，并入昵称', () => {
-  const cmd = parseCommand('/comment group:on 工程师');
-  assert.equal(cmd.injectGroup, undefined); // 末尾是「工程师」，非开关
-  assert.equal(cmd.nickname, 'group:on 工程师'); // 整段作昵称（执行层再诚实解析/报错）
+test('parseCommand: 开关只认末尾（trailing-only）——中间的 --contact token 不当开关，并入昵称', () => {
+  const cmd = parseCommand('/comment --contact 工程师');
+  assert.equal(cmd.injectContact, undefined); // 末尾是「工程师」，非开关
+  assert.equal(cmd.nickname, '--contact 工程师'); // 整段作昵称（执行层再诚实解析/报错）
 });
 
-test('parseCommand: 仅 group:on 无昵称 → injectGroup true、nickname undefined（单账号引流）', () => {
-  const cmd = parseCommand('/comment group:on');
-  assert.equal(cmd.injectGroup, true);
+test('parseCommand: 仅 --contact 无昵称 → injectContact true、nickname undefined（单账号）', () => {
+  const cmd = parseCommand('/comment --contact');
+  assert.equal(cmd.injectContact, true);
   assert.equal(cmd.nickname, undefined);
 });
 
-test('CommandRouter: /comment group:on 把 injectGroup=true 透传给 comment 动作', async () => {
-  let seen: { nickname?: string; options?: { injectGroup?: boolean } } | null = null;
+test('parseCommand: 旧 group:on 已不识别 → 并入昵称、injectContact undefined（无向后兼容）', () => {
+  const cmd = parseCommand('/comment 工程师大白 group:on');
+  assert.equal(cmd.injectContact, undefined);
+  assert.equal(cmd.nickname, '工程师大白 group:on'); // 旧 token 被并入昵称，走既有找不到账号的诚实失败
+});
+
+test('CommandRouter: /comment --contact 把 injectContact=true 透传给 comment 动作', async () => {
+  let seen: { nickname?: string; options?: { injectContact?: boolean } } | null = null;
   const router = new CommandRouter({
     ...makeActions().actions,
-    comment: async (nickname?: string, options?: { injectGroup?: boolean }) => {
+    comment: async (nickname?: string, options?: { injectContact?: boolean }) => {
       seen = { nickname, options };
       return { ok: true as const, level: 'success' as const, title: '已触发', message: 'ok' };
     },
   });
-  await router.handle('/comment 工程师大白 group:on');
-  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectGroup: true } });
+  await router.handle('/comment 工程师大白 --contact');
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: true } });
 
   await router.handle('/comment 工程师大白');
-  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectGroup: undefined } });
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: undefined } });
 });
 
 test('CommandRouter: publish 编排失败 → 回执 ok:false / level:error（红 ❌，绝不再绿色）+ 透传失败原因', async () => {

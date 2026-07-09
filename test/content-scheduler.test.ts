@@ -34,7 +34,7 @@ function mk(overrides: Partial<State> = {}) {
   const calls: string[] = [];
   const state: State = {
     online: [ACC],
-    view: { autoEnabled: true, postEnabled: true, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, groupCommentEnabled: false, groupCommentDailyCap: 0, effectiveMask: FULL },
+    view: { autoEnabled: true, postEnabled: true, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL },
     risk: 'normal',
     posted: 0,
     pending: false,
@@ -98,7 +98,7 @@ test('content-scheduler: 幂等 — 同小时格两次 tick 只触发一次', as
 test('content-scheduler: fail-closed — 掩码 null / 非法 / 全休眠 一律不触发', async () => {
   for (const mask of [null, 'not-a-mask', DORMANT]) {
     const { scheduler, calls } = mk({
-      view: { autoEnabled: true, postEnabled: true, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, groupCommentEnabled: false, groupCommentDailyCap: 0, effectiveMask: mask },
+      view: { autoEnabled: true, postEnabled: true, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: mask },
     });
     await scheduler.onTick();
     assert.deepEqual(calls, [], `掩码=${String(mask)} 应不触发（fail-closed）`);
@@ -107,9 +107,9 @@ test('content-scheduler: fail-closed — 掩码 null / 非法 / 全休眠 一律
 
 test('content-scheduler: 开关闸 — 总开关/发帖开关关 或 日上限0 → 不触发', async () => {
   for (const view of [
-    { autoEnabled: false, postEnabled: true, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, groupCommentEnabled: false, groupCommentDailyCap: 0, effectiveMask: FULL },
-    { autoEnabled: true, postEnabled: false, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, groupCommentEnabled: false, groupCommentDailyCap: 0, effectiveMask: FULL },
-    { autoEnabled: true, postEnabled: true, postDailyCap: 0, commentEnabled: false, commentDailyCap: 0, groupCommentEnabled: false, groupCommentDailyCap: 0, effectiveMask: FULL },
+    { autoEnabled: false, postEnabled: true, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL },
+    { autoEnabled: true, postEnabled: false, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL },
+    { autoEnabled: true, postEnabled: true, postDailyCap: 0, commentEnabled: false, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL },
   ] as ContentScheduleView[]) {
     const { scheduler, calls } = mk({ view });
     await scheduler.onTick();
@@ -133,7 +133,7 @@ test('content-scheduler: 发帖全局忙 → 本槽顺延（不触发）', async
 
 test('content-scheduler: 日上限原子 — 已发+在途 >= cap 不触发；未达则触发', async () => {
   // cap=2：已发1 + 在途1 = 2 → 不触发
-  let r = mk({ posted: 1, pending: true, view: { autoEnabled: true, postEnabled: true, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, groupCommentEnabled: false, groupCommentDailyCap: 0, effectiveMask: FULL } });
+  let r = mk({ posted: 1, pending: true, view: { autoEnabled: true, postEnabled: true, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL } });
   await r.scheduler.onTick();
   assert.deepEqual(r.calls, [], '已发1+在途1>=cap2 → 不发');
 
@@ -143,7 +143,7 @@ test('content-scheduler: 日上限原子 — 已发+在途 >= cap 不触发；�
   assert.deepEqual(r.calls, [], '已发2>=cap2 → 不发');
 
   // cap=1：已发0+在途0 → 触发
-  r = mk({ posted: 0, pending: false, view: { autoEnabled: true, postEnabled: true, postDailyCap: 1, commentEnabled: false, commentDailyCap: 0, groupCommentEnabled: false, groupCommentDailyCap: 0, effectiveMask: FULL } });
+  r = mk({ posted: 0, pending: false, view: { autoEnabled: true, postEnabled: true, postDailyCap: 1, commentEnabled: false, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL } });
   await r.scheduler.onTick();
   assert.deepEqual(r.calls, [ACC], '未达上限 → 发');
 });
@@ -175,7 +175,7 @@ test('content-scheduler: 发帖全局串行 — 同 tick 内两账号撞同偏�
   const calls: string[] = [];
   const state: State = {
     online: [a, b],
-    view: { autoEnabled: true, postEnabled: true, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, groupCommentEnabled: false, groupCommentDailyCap: 0, effectiveMask: FULL },
+    view: { autoEnabled: true, postEnabled: true, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL },
     risk: 'normal',
     posted: 0,
     pending: false,
@@ -208,7 +208,7 @@ test('content-scheduler: 重入护栏 — 上轮未完时并发 tick 被跳过�
   const calls: string[] = [];
   const state: State = {
     online: [ACC],
-    view: { autoEnabled: true, postEnabled: true, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, groupCommentEnabled: false, groupCommentDailyCap: 0, effectiveMask: FULL },
+    view: { autoEnabled: true, postEnabled: true, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL },
     risk: 'normal',
     posted: 0,
     pending: false,
@@ -261,7 +261,7 @@ const C_NOW_HIT = new Date(2026, 0, 5, 10, C_OFFSET, 0);
 function mkC(overrides: Partial<CState> = {}) {
   const fired: string[] = []; // 'post:<id>' / 'comment:<id>'
   const st: CState = {
-    view: { autoEnabled: true, postEnabled: false, postDailyCap: 0, commentEnabled: true, commentDailyCap: 2, groupCommentEnabled: false, groupCommentDailyCap: 0, effectiveMask: FULL },
+    view: { autoEnabled: true, postEnabled: false, postDailyCap: 0, commentEnabled: true, commentDailyCap: 2, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL },
     commentBusy: false,
     commentSent: 0,
     nowMs: C_NOW_HIT.getTime(),
@@ -305,7 +305,7 @@ test('content-scheduler/comment: 动作幂等互不吞 — 发帖触发后同小
   // 两动作都开；先在 post 偏移分钟 tick（fire post），再把分钟拨到 comment 偏移 tick（fire comment）。
   assert.notEqual(OFFSET, C_OFFSET, '本账号两动作偏移恰好相同则换测试账号（哈希域 60，此账号已知不同）');
   const { scheduler, st, fired } = mkC({
-    view: { autoEnabled: true, postEnabled: true, postDailyCap: 2, commentEnabled: true, commentDailyCap: 2, groupCommentEnabled: false, groupCommentDailyCap: 0, effectiveMask: FULL },
+    view: { autoEnabled: true, postEnabled: true, postDailyCap: 2, commentEnabled: true, commentDailyCap: 2, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL },
     nowMs: NOW_HIT.getTime(), // post 偏移分钟
   });
   await scheduler.onTick();
@@ -339,8 +339,8 @@ test('content-scheduler/comment: 三件套未注入 — 评论开着也整体跳
 
 test('content-scheduler/comment: 开关闸 — commentEnabled 关或 cap 0 不触发', async () => {
   for (const view of [
-    { autoEnabled: true, postEnabled: false, postDailyCap: 0, commentEnabled: false, commentDailyCap: 2, groupCommentEnabled: false, groupCommentDailyCap: 0, effectiveMask: FULL },
-    { autoEnabled: true, postEnabled: false, postDailyCap: 0, commentEnabled: true, commentDailyCap: 0, groupCommentEnabled: false, groupCommentDailyCap: 0, effectiveMask: FULL },
+    { autoEnabled: true, postEnabled: false, postDailyCap: 0, commentEnabled: false, commentDailyCap: 2, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL },
+    { autoEnabled: true, postEnabled: false, postDailyCap: 0, commentEnabled: true, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL },
   ] as ContentScheduleView[]) {
     const { scheduler, fired } = mkC({ view });
     await scheduler.onTick();
@@ -348,9 +348,9 @@ test('content-scheduler/comment: 开关闸 — commentEnabled 关或 cap 0 不�
   }
 });
 
-// ── Phase 3（change content-schedule-group-comments）：群评动作 ─────────────────
+// ── Phase 3（change content-schedule-group-comments → generalize-contact-info）：带联系方式评论动作 ─────────────────
 
-const G_OFFSET = offsetMinute(ACC, BASE_DAY, 'group_comment');
+const G_OFFSET = offsetMinute(ACC, BASE_DAY, 'contact_comment');
 const G_NOW_HIT = new Date(2026, 0, 5, 10, G_OFFSET, 0);
 
 interface GState {
@@ -367,7 +367,7 @@ function mkG(overrides: Partial<GState> = {}) {
     view: {
       autoEnabled: true, postEnabled: false, postDailyCap: 0,
       commentEnabled: false, commentDailyCap: 0,
-      groupCommentEnabled: true, groupCommentDailyCap: 3, effectiveMask: FULL,
+      contactCommentEnabled: true, contactCommentDailyCap: 3, effectiveMask: FULL,
     },
     commentBusy: false,
     attempts: 0,
@@ -386,8 +386,8 @@ function mkG(overrides: Partial<GState> = {}) {
     isCommentBusy: () => st.commentBusy,
     ...(st.wired
       ? {
-          triggerGroupComment: (id: string) => { fired.push(`group:${id}`); return Promise.resolve(); },
-          groupAttemptsTodayCount: () => Promise.resolve(st.attempts),
+          triggerContactComment: (id: string) => { fired.push(`contact:${id}`); return Promise.resolve(); },
+          contactAttemptsTodayCount: () => Promise.resolve(st.attempts),
         }
       : {}),
     now: () => st.nowMs,
@@ -396,37 +396,37 @@ function mkG(overrides: Partial<GState> = {}) {
   return { scheduler: new ContentScheduler(deps), st, fired };
 }
 
-test('content-scheduler/group: happy path — 命中群评偏移分钟 → triggerGroupComment 一次', async () => {
+test('content-scheduler/contact: happy path — 命中带联系方式评论偏移分钟 → triggerContactComment 一次', async () => {
   const { scheduler, fired } = mkG();
   await scheduler.onTick();
-  assert.deepEqual(fired, [`group:${ACC}`]);
+  assert.deepEqual(fired, [`contact:${ACC}`]);
 });
 
-test('content-scheduler/group: 单飞复用评论机器 — isCommentBusy 时不触发', async () => {
+test('content-scheduler/contact: 单飞复用评论机器 — isCommentBusy 时不触发', async () => {
   const { scheduler, fired } = mkG({ commentBusy: true });
   await scheduler.onTick();
   assert.deepEqual(fired, []);
 });
 
-test('content-scheduler/group: 尝试型日上限 — attempts>=cap 不触发（被拒/无目标也占额度的保守方向）', async () => {
+test('content-scheduler/contact: 尝试型日上限 — attempts>=cap 不触发（被拒/无目标也占额度的保守方向）', async () => {
   const a = mkG({ attempts: 3 }); // cap=3
   await a.scheduler.onTick();
   assert.deepEqual(a.fired, [], '尝试满 3 → 不再触发');
   const b = mkG({ attempts: 2 });
   await b.scheduler.onTick();
-  assert.deepEqual(b.fired, [`group:${ACC}`]);
+  assert.deepEqual(b.fired, [`contact:${ACC}`]);
 });
 
-test('content-scheduler/group: 两件套未注入 — 群评开着也整体跳过（零回归、不炸）', async () => {
+test('content-scheduler/contact: 两件套未注入 — 带联系方式评论开着也整体跳过（零回归、不炸）', async () => {
   const { scheduler, fired } = mkG({ wired: false });
   await scheduler.onTick();
   assert.deepEqual(fired, []);
 });
 
-test('content-scheduler/group: 开关闸 — groupCommentEnabled 关或 cap 0 不触发', async () => {
+test('content-scheduler/contact: 开关闸 — contactCommentEnabled 关或 cap 0 不触发', async () => {
   for (const patch of [
-    { groupCommentEnabled: false, groupCommentDailyCap: 3 },
-    { groupCommentEnabled: true, groupCommentDailyCap: 0 },
+    { contactCommentEnabled: false, contactCommentDailyCap: 3 },
+    { contactCommentEnabled: true, contactCommentDailyCap: 0 },
   ]) {
     const { scheduler, fired } = mkG({
       view: {
@@ -440,13 +440,13 @@ test('content-scheduler/group: 开关闸 — groupCommentEnabled 关或 cap 0 �
   }
 });
 
-test('content-scheduler/group: 幂等独立 — 群评槽不被同小时其它动作吞（发帖先触发后群评照常）', async () => {
+test('content-scheduler/contact: 幂等独立 — 带联系方式评论槽不被同小时其它动作吞（发帖先触发后带联系方式评论照常）', async () => {
   assert.notEqual(OFFSET, G_OFFSET, '两动作偏移已知不同');
   const { scheduler, st, fired } = mkG({
     view: {
       autoEnabled: true, postEnabled: true, postDailyCap: 2,
       commentEnabled: false, commentDailyCap: 0,
-      groupCommentEnabled: true, groupCommentDailyCap: 3, effectiveMask: FULL,
+      contactCommentEnabled: true, contactCommentDailyCap: 3, effectiveMask: FULL,
     },
     nowMs: NOW_HIT.getTime(), // post 偏移分钟
   });
@@ -455,5 +455,5 @@ test('content-scheduler/group: 幂等独立 — 群评槽不被同小时其它�
   await new Promise((r) => setImmediate(r)); // settle 单飞
   st.nowMs = G_NOW_HIT.getTime();
   await scheduler.onTick();
-  assert.deepEqual(fired, [`post:${ACC}`, `group:${ACC}`], '发帖幂等键不吞群评槽');
+  assert.deepEqual(fired, [`post:${ACC}`, `contact:${ACC}`], '发帖幂等键不吞带联系方式评论槽');
 });

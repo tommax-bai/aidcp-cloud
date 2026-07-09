@@ -34,8 +34,8 @@ export interface PanelAccount {
   platform: string;
   groupLabel: string | null;
   machineLabel: string | null;
-  /** 关联群聊引流码（change account-group-chat-injection；verbatim，未配为 null）。供后台编辑 + /comment group:on 注入。 */
-  groupChatInfo: string | null;
+  /** 联系方式（change account-group-chat-injection → generalize-contact-info；verbatim，未配为 null）。供后台编辑 + /comment --contact 注入。 */
+  contactInfo: string | null;
   /** 运营暂停态（accounts.status，durable，区别于验证码 pausedEdges）。 */
   operatorStatus: 'active' | 'paused';
   pausedAt: number | null;
@@ -207,7 +207,7 @@ interface AccountJoinRow {
   platform: string;
   group_label: string | null;
   machine_label: string | null;
-  group_chat_info: string | null;
+  contact_info: string | null;
   operator_status: string;
   paused_at: Date | null;
   risk_status: string | null;
@@ -226,7 +226,7 @@ function toAccount(r: AccountJoinRow): PanelAccount {
     platform: r.platform,
     groupLabel: r.group_label,
     machineLabel: r.machine_label,
-    groupChatInfo: r.group_chat_info,
+    contactInfo: r.contact_info,
     operatorStatus: r.operator_status === 'paused' ? 'paused' : 'active',
     pausedAt: r.paused_at ? r.paused_at.getTime() : null,
     riskStatus: (r.risk_status as RiskStatus | null) ?? null,
@@ -332,7 +332,7 @@ function parseSourceReference(raw: unknown): PanelPublishSourceReference | null 
 
 const ACCOUNT_SELECT = `
   SELECT a.account_id, a.label, a.nickname, a.platform, a.group_label, a.machine_label,
-         a.group_chat_info,
+         a.contact_info,
          a.status AS operator_status, a.paused_at,
          r.status AS risk_status, r.quota_level AS risk_quota_level, r.signal_count,
          (pc.account_id IS NOT NULL AND btrim(pc.persona) <> '') AS persona_bound

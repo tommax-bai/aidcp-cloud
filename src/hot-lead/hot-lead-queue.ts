@@ -5,7 +5,7 @@
  * 按账号隔离。入队去重：队列内同 noteId 的 pending 不重复（本存储负责）；「本账号已评过」由角色在
  * 入队前用既有 risk_interactions 去重（存储不重复承担，避免双写风控数据）。
  *
- * 表随启动幂等自建、无迁移器（仿 group_comment_attempts）。红线：诚实——插入真实回读，不 seed 幽灵行。
+ * 表随启动幂等自建、无迁移器（仿 contact_comment_attempts）。红线：诚实——插入真实回读，不 seed 幽灵行。
  */
 import pg from 'pg';
 

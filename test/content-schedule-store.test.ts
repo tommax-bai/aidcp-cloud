@@ -20,10 +20,10 @@ function makePoolStub(opts: { accountExists?: boolean; myGroupCode?: string | nu
       if (s.startsWith('CREATE TABLE')) return { rows: [] };
       if (s.startsWith('SELECT content_active_mask')) return { rows: [] }; // init reload：全局无行
       if (s.startsWith('SELECT account_id, auto_enabled')) return { rows: [] }; // init reload：侧表无行
-      if (s.startsWith('SELECT group_chat_info FROM accounts')) {
-        return { rows: [{ group_chat_info: opts.myGroupCode ?? null }] };
+      if (s.startsWith('SELECT contact_info FROM accounts')) {
+        return { rows: [{ contact_info: opts.myGroupCode ?? null }] };
       }
-      if (s.startsWith('SELECT 1 FROM accounts WHERE group_chat_info')) {
+      if (s.startsWith('SELECT 1 FROM accounts WHERE contact_info')) {
         return { rows: opts.codeSharedByOther ? [{ '?column?': 1 }] : [] };
       }
       if (s.startsWith('SELECT 1 FROM accounts')) return { rows: accountExists ? [{ '?column?': 1 }] : [] };
@@ -35,7 +35,7 @@ function makePoolStub(opts: { accountExists?: boolean; myGroupCode?: string | nu
           rows: [{
             account_id: params[0], auto_enabled: params[1], post_enabled: params[2],
             post_daily_cap: params[3], comment_enabled: params[4], comment_daily_cap: params[5],
-            group_comment_enabled: params[6], group_comment_daily_cap: params[7],
+            contact_comment_enabled: params[6], contact_comment_daily_cap: params[7],
             content_active_mask: params[8],
             updated_at: new Date('2026-07-03T00:00:00Z'), updated_by: params[9],
           }],
@@ -64,8 +64,8 @@ test('store: 未配 = 完全不自动（零回归默认）', async () => {
     postDailyCap: 0,
     commentEnabled: false,
     commentDailyCap: 0,
-    groupCommentEnabled: false,
-    groupCommentDailyCap: 0,
+    contactCommentEnabled: false,
+    contactCommentDailyCap: 0,
     effectiveMask: null,
   });
   assert.equal(store.getGlobal(), null);
@@ -176,40 +176,40 @@ test('store/comment: 两新字段合法写回读；非法整块拒；部分补�
 });
 
 
-test('store/group: 群评 cap 硬上限 0..10（11/负/小数整块拒）；合法写回读（change content-schedule-group-comments）', async () => {
+test('store/contact: 带联系方式评论 cap 硬上限 0..10（11/负/小数整块拒）；合法写回读（change content-schedule-group-comments）', async () => {
   const { store, calls } = await makeStore({ myGroupCode: 'CODE-A' });
   const before = calls.length;
-  for (const patch of [{ groupCommentDailyCap: 11 }, { groupCommentDailyCap: -1 }, { groupCommentDailyCap: 1.5 }]) {
+  for (const patch of [{ contactCommentDailyCap: 11 }, { contactCommentDailyCap: -1 }, { contactCommentDailyCap: 1.5 }]) {
     const bad = await store.setAccount('acc-1', patch, 'op');
     assert.deepEqual(bad, { ok: false, reason: 'invalid_value' }, JSON.stringify(patch));
   }
-  assert.equal(calls.length, before, '非法群评补丁不触库');
-  const r = await store.setAccount('acc-1', { groupCommentEnabled: true, groupCommentDailyCap: 3 }, 'op');
+  assert.equal(calls.length, before, '非法带联系方式评论补丁不触库');
+  const r = await store.setAccount('acc-1', { contactCommentEnabled: true, contactCommentDailyCap: 3 }, 'op');
   assert.ok(r.ok);
-  if (r.ok) assert.deepEqual([r.row.groupCommentEnabled, r.row.groupCommentDailyCap], [true, 3]);
+  if (r.ok) assert.deepEqual([r.row.contactCommentEnabled, r.row.contactCommentDailyCap], [true, 3]);
 });
 
-test('store/group: 群码闸 — 无码硬拒 no_group_code、共用码放行+警告(loosen-group-comment-shared-code)、异码放行无警告、每次开启重跑', async () => {
-  // 无码 → no_group_code 硬拒（放松只针对「共用」，不针对「无码」）
+test('store/contact: 联系方式闸 — 无联系方式硬拒 no_contact_info、共用放行+警告(loosen-group-comment-shared-code)、异值放行无警告、每次开启重跑', async () => {
+  // 无码 → no_contact_info 硬拒（放松只针对「共用」，不针对「无码」）
   const noCode = await makeStore({ myGroupCode: null });
-  assert.deepEqual(await noCode.store.setAccount('acc-1', { groupCommentEnabled: true }, 'op'),
-    { ok: false, reason: 'no_group_code' });
-  // 同码他号 → 放行但带 sharedGroupCodeWarning（一码一号从硬阻断放松为放行+提示，绝不静默）
+  assert.deepEqual(await noCode.store.setAccount('acc-1', { contactCommentEnabled: true }, 'op'),
+    { ok: false, reason: 'no_contact_info' });
+  // 同码他号 → 放行但带 sharedContactInfoWarning（一码一号从硬阻断放松为放行+提示，绝不静默）
   const shared = await makeStore({ myGroupCode: 'CODE-A', codeSharedByOther: true });
-  const rs = await shared.store.setAccount('acc-1', { groupCommentEnabled: true }, 'op');
-  assert.ok(rs.ok, '共用群码不再硬拒');
-  assert.equal(rs.ok && rs.sharedGroupCodeWarning, true, '共用群码放行须带风险警告');
-  assert.equal(shared.store.getAccount('acc-1')?.groupCommentEnabled, true, '开关真落库');
+  const rs = await shared.store.setAccount('acc-1', { contactCommentEnabled: true }, 'op');
+  assert.ok(rs.ok, '共用联系方式不再硬拒');
+  assert.equal(rs.ok && rs.sharedContactInfoWarning, true, '共用联系方式放行须带风险警告');
+  assert.equal(shared.store.getAccount('acc-1')?.contactCommentEnabled, true, '开关真落库');
   // 异码 → 放行、无警告
   const okCase = await makeStore({ myGroupCode: 'CODE-A', codeSharedByOther: false });
-  const r = await okCase.store.setAccount('acc-1', { groupCommentEnabled: true }, 'op');
+  const r = await okCase.store.setAccount('acc-1', { contactCommentEnabled: true }, 'op');
   assert.ok(r.ok);
-  assert.equal(r.ok && r.sharedGroupCodeWarning, undefined, '独立群码无警告');
+  assert.equal(r.ok && r.sharedContactInfoWarning, undefined, '独立联系方式无警告');
   // 关闭开关不触发校验（enabled=false 写入无码也允许——只拦「开启」）
   const off = await makeStore({ myGroupCode: null });
-  const r2 = await off.store.setAccount('acc-1', { groupCommentEnabled: false }, 'op');
-  assert.ok(r2.ok, '关闭写入不过群码校验');
-  assert.equal(r2.ok && r2.sharedGroupCodeWarning, undefined, '关闭无警告');
+  const r2 = await off.store.setAccount('acc-1', { contactCommentEnabled: false }, 'op');
+  assert.ok(r2.ok, '关闭写入不过联系方式校验');
+  assert.equal(r2.ok && r2.sharedContactInfoWarning, undefined, '关闭无警告');
 });
 
 test('store/group: attempts 记录与当日计数（pool 桩验 SQL 形状）', async () => {
@@ -221,19 +221,19 @@ test('store/group: attempts 记录与当日计数（pool 桩验 SQL 形状）', 
       if (t.startsWith('CREATE TABLE')) return { rows: [] };
       if (t.startsWith('SELECT content_active_mask')) return { rows: [] };
       if (t.startsWith('SELECT account_id, auto_enabled')) return { rows: [] };
-      if (t.startsWith('INSERT INTO group_comment_attempts')) return { rows: [] };
-      if (t.startsWith('SELECT count(*)::text AS n FROM group_comment_attempts')) return { rows: [{ n: '2' }] };
+      if (t.startsWith('INSERT INTO contact_comment_attempts')) return { rows: [] };
+      if (t.startsWith('SELECT count(*)::text AS n FROM contact_comment_attempts')) return { rows: [{ n: '2' }] };
       throw new Error('未覆盖 SQL: ' + t.slice(0, 50));
     },
     end: async () => {},
   } as unknown as pg.Pool;
   const store = new ContentScheduleStore({ pool });
   await store.init();
-  await store.recordGroupCommentAttempt('acc-1');
-  const rec = seen.find((c) => c.sql.includes('INSERT INTO group_comment_attempts'));
+  await store.recordContactCommentAttempt('acc-1');
+  const rec = seen.find((c) => c.sql.includes('INSERT INTO contact_comment_attempts'));
   assert.deepEqual(rec?.params, ['acc-1']);
-  const n = await store.countGroupAttemptsToday('acc-1');
+  const n = await store.countContactAttemptsToday('acc-1');
   assert.equal(n, 2);
-  const cnt = seen.find((c) => c.sql.includes('count(*)::text AS n FROM group_comment_attempts'));
+  const cnt = seen.find((c) => c.sql.includes('count(*)::text AS n FROM contact_comment_attempts'));
   assert.match(cnt!.sql, /attempted_at >= .*AT TIME ZONE 'Asia\/Shanghai'/s);
 });

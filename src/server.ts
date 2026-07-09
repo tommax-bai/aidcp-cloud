@@ -1285,13 +1285,13 @@ async function main(): Promise<void> {
     },
     // 手动 /comment <昵称>（change comment-search-command）：按昵称解析账号 → 触发按需评论任务。
     // 回执据**触发结果**判 ok/level（开跑绿 / 未触发黄 / 失败红）；最终评/未评结果由 scheduler 异步补结果卡片。
-    comment: async (nickname?: string, options?: { injectGroup?: boolean }) => {
+    comment: async (nickname?: string, options?: { injectContact?: boolean }) => {
       if (!commentScheduler) {
         return { ok: false, level: 'error', title: '按需评论未就绪', message: '评论触发器未就绪（启动中或依赖不可用），未发起任务。' };
       }
       const acct = await resolveAccountByNickname(nickname); // 找不到/重名 → 抛错，runComment 走 fail 分支（红 ❌）
-      // injectGroup（change account-group-chat-injection）：group:on 时注入账号群聊码；缺码 fail-closed 由 scheduler 处置。
-      return commentScheduler.triggerManual(acct, { injectGroup: options?.injectGroup });
+      // injectContact（change generalize-contact-info）：--contact 时注入账号联系方式；缺联系方式 fail-closed 由 scheduler 处置。
+      return commentScheduler.triggerManual(acct, { injectContact: options?.injectContact });
     },
   };
   // 命令作用域（change feishu-per-team-notification-routing）：账号影响类命令只在「管理群」受理，外部 / 非管理群一律诚实拒。
@@ -1787,7 +1787,7 @@ async function main(): Promise<void> {
       hotLeadQueue,
       // 热度过滤阈值取值口：判定角色每次现读全局配置（后台改完热加载即时生效）。
       hotLeadGateConfig: () => hotLeadConfigStore.getGateConfig(),
-      // 引流线索「已评过」去重：复用 riskStore 的按账号互动去重（与自治评论/群评同一账本）。
+      // 引流线索「已评过」去重：复用 riskStore 的按账号互动去重（与自治评论/带联系方式评论同一账本）。
       hasCommentedForLead: (accountId, noteId) =>
         riskStore.hasInteraction(accountId, noteId, 'comment').catch(() => false),
       // 硬暂停闸（验证码/人工接管）：通知准入据此放弃巡视——硬暂停期连帧都不发。
@@ -2084,9 +2084,9 @@ async function main(): Promise<void> {
     // persona-driven-content-pipeline：/comment 触发前人设闸——未绑人设不接管边端、不启动评论任务（与浏览/发布同口径）。
     isPersonaBound: (accountId) => personaStore.getForAccount(accountId) !== null,
     getPlatform: (accountId) => accountStore?.getPlatform?.(accountId) ?? 'xiaohongshu',
-    // account-group-chat-injection：/comment group:on 时读账号群聊码（异步直读账号存储）；缺码由 scheduler fail-closed。
-    getGroupChatInfo: accountStore?.getGroupChatInfo
-      ? (accountId) => accountStore!.getGroupChatInfo!(accountId)
+    // account-group-chat-injection → generalize-contact-info：/comment --contact 时读账号联系方式（异步直读账号存储）；缺联系方式由 scheduler fail-closed。
+    getContactInfo: accountStore?.getContactInfo
+      ? (accountId) => accountStore!.getContactInfo!(accountId)
       : undefined,
     selectCurated: (accountId, type, limit) =>
       curatedContentStore
@@ -2314,20 +2314,20 @@ async function main(): Promise<void> {
               },
               isCommentBusy: (accountId: string) => commentScheduler!.isRunning(accountId),
               commentedTodayCount: (accountId: string) => riskStore.countInteractionsTodayForAccount(accountId, 'comment'),
-              // 群评两件套（change content-schedule-group-comments）：同一评论机器 + injectGroup，
+              // 带联系方式评论两件套（change content-schedule-group-comments → generalize-contact-info）：同一评论机器 + injectContact，
               // 尝试型持久日上限——触发回执 ok（任务真开跑）即记 attempt（被人审拒/无目标也占额度，保守方向）。
-              triggerGroupComment: async (accountId: string) => {
+              triggerContactComment: async (accountId: string) => {
                 const sendReceiptCard = async (level: 'warning' | 'error', title: string, message: string) => {
                   const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
                   if (!chatId) {
-                    console.warn(`[content-scheduler] 无可用飞书群，排期群评回执卡未发出 account=${accountId} title=${title}`);
+                    console.warn(`[content-scheduler] 无可用飞书群，排期带联系方式评论回执卡未发出 account=${accountId} title=${title}`);
                     return;
                   }
                   await messenger
                     .sendCard(
                       chatId,
                       buildCommandResultCard({
-                        command: '排期群评（自动）',
+                        command: '排期带联系方式评论（自动）',
                         ok: false,
                         level,
                         title,
@@ -2336,29 +2336,29 @@ async function main(): Promise<void> {
                         accountName: accountDisplayName(accountId),
                       }),
                     )
-                    .catch((e) => console.warn('[content-scheduler] 排期群评回执卡发送失败：', (e as Error).message));
+                    .catch((e) => console.warn('[content-scheduler] 排期带联系方式评论回执卡发送失败：', (e as Error).message));
                 };
                 try {
                   const controller = await resolveController(accountId);
                   if (!controller.canDo('comment')) {
-                    await sendReceiptCard('warning', '排期群评：配额拒绝，本槽未触发', `风控 canDo('comment')=false（自动路径必过配额；手动 /comment group:on 不受此限）`);
+                    await sendReceiptCard('warning', '排期带联系方式评论：配额拒绝，本槽未触发', `风控 canDo('comment')=false（自动路径必过配额；手动 /comment --contact 不受此限）`);
                     return;
                   }
-                  const receipt = await commentScheduler!.triggerManual(accountId, { injectGroup: true });
+                  const receipt = await commentScheduler!.triggerManual(accountId, { injectContact: true });
                   if (!receipt.ok) {
-                    // 触发未成（缺码 fail-closed / 离线 / 未绑人设 / 在跑）：透传回执如实回卡；不占尝试额度。
-                    await sendReceiptCard(receipt.level === 'error' ? 'error' : 'warning', `排期群评：${receipt.title}`, receipt.message);
+                    // 触发未成（缺联系方式 fail-closed / 离线 / 未绑人设 / 在跑）：透传回执如实回卡；不占尝试额度。
+                    await sendReceiptCard(receipt.level === 'error' ? 'error' : 'warning', `排期带联系方式评论：${receipt.title}`, receipt.message);
                     return;
                   }
                   // 任务真开跑 → 记一条持久 attempt（尝试型日上限；重启不清零、绝不超发）。终态结果卡评论链自补。
-                  await contentScheduleStore.recordGroupCommentAttempt(accountId).catch((e) =>
-                    console.warn('[content-scheduler] 群评 attempt 记录失败（上限将偏松，需关注）：', (e as Error).message),
+                  await contentScheduleStore.recordContactCommentAttempt(accountId).catch((e) =>
+                    console.warn('[content-scheduler] 带联系方式评论 attempt 记录失败（上限将偏松，需关注）：', (e as Error).message),
                   );
                 } catch (e) {
-                  await sendReceiptCard('error', '排期群评：触发异常', (e as Error).message);
+                  await sendReceiptCard('error', '排期带联系方式评论：触发异常', (e as Error).message);
                 }
               },
-              groupAttemptsTodayCount: (accountId: string) => contentScheduleStore.countGroupAttemptsToday(accountId),
+              contactAttemptsTodayCount: (accountId: string) => contentScheduleStore.countContactAttemptsToday(accountId),
             }
           : {}),
         logger: console,
@@ -2605,15 +2605,15 @@ async function main(): Promise<void> {
             },
             dispatchActive: () => dispatchActive,
           },
-          // 账号属性写入（change editable-account-group-label + account-group-chat-injection）：经账号存储单写；
-          // 存储未就绪 → 不注入，路由回 503。setGroupChatInfo 可选（存储方法存在时才挂，否则该子路由单独 503）。
+          // 账号属性写入（change editable-account-group-label + account-group-chat-injection → generalize-contact-info）：经账号存储单写；
+          // 存储未就绪 → 不注入，路由回 503。setContactInfo 可选（存储方法存在时才挂，否则该子路由单独 503）。
           accountAttr: accountStore?.setGroupLabel
             ? {
                 setGroupLabel: (accountId, label) => accountStore!.setGroupLabel!(accountId, label),
-                ...(accountStore.setGroupChatInfo
+                ...(accountStore.setContactInfo
                   ? {
-                      setGroupChatInfo: (accountId: string, info: string | null) =>
-                        accountStore!.setGroupChatInfo!(accountId, info),
+                      setContactInfo: (accountId: string, info: string | null) =>
+                        accountStore!.setContactInfo!(accountId, info),
                     }
                   : {}),
               }
@@ -2700,7 +2700,7 @@ async function main(): Promise<void> {
           // 单场会话上限配置（change session-limits-to-quota-layer）。按账号时长 + 互动预算可改 + 热加载 + 非乐观回真态。
           sessionLimits: sessionLimitPanel,
           hotLeadConfig: hotLeadConfigPanel,
-          // 引流待评候选队列消费（段二人审逐条）：列 pending + 对选中一条发带群码定向评论（复用 triggerTargeted+飞书人审=发），
+          // 引流待评候选队列消费（段二人审逐条）：列 pending + 对选中一条发带联系方式定向评论（复用 triggerTargeted+飞书人审=发），
           // ok 后置 actioned。仅在队列 + 评论机器都可用时提供，否则面板自然 503。
           ...(hotLeadQueue && commentScheduler
             ? {
@@ -2718,7 +2718,7 @@ async function main(): Promise<void> {
                     }));
                   },
                   comment: async (accountId: string, leadId: number, noteId: string, title: string) => {
-                    const r = await commentScheduler!.triggerTargeted(accountId, { noteId, title }, { injectGroup: true });
+                    const r = await commentScheduler!.triggerTargeted(accountId, { noteId, title }, { injectContact: true });
                     if (r.ok) {
                       await hotLeadQueue!.markActioned(leadId).catch(() => {});
                       return { ok: true as const };
@@ -2747,7 +2747,7 @@ async function main(): Promise<void> {
           // 精选内容后台管理（change curated-content-admin-page）。同一精选语料 store 实例：读=按账号列表/筛选面、写=删单条/清空壳行。
           // init 失败留 undefined 时面板自然 503，绝不崩边-云闭环。
           curatedContent: curatedContentStore,
-          // 精选笔记行级定向动作（change curated-note-actions）：参照洗稿创作 + 定向评论（内容/带群）。
+          // 精选笔记行级定向动作（change curated-note-actions）：参照洗稿创作 + 定向评论（内容/带联系方式）。
           // HTTP 只回**触发态**（生成段可达数分钟，不可同步等）；终态沿既有渠道（发布=待审草稿+人审卡+异步结果卡、
           // 评论=人审卡+定向终态结果卡）。域内拒绝回 triggered=false+机器原因码，绝不染绿。
           curatedActions: {
@@ -2805,12 +2805,12 @@ async function main(): Promise<void> {
               return { triggered: true }; // 触发已发起；HTTP 立即回触发态
 
             },
-            commentOnNote: async (accountId, row, withGroup) => {
+            commentOnNote: async (accountId, row, withContact) => {
               if (!commentScheduler) return { triggered: false, reason: 'comment_unready' };
               const r = await commentScheduler.triggerTargeted(
                 accountId,
                 { noteId: row.sourceId, title: row.title ?? '' },
-                { injectGroup: withGroup },
+                { injectContact: withContact },
               );
               return r.ok ? { triggered: true } : { triggered: false, reason: r.reason ?? 'rejected' };
             },
