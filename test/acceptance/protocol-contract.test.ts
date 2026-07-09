@@ -50,6 +50,7 @@ const ALL_MESSAGE_TYPES: Record<MessageType, true> = {
   'publish.command': true, 'publish.command.result': true,
   'page.scroll': true, 'interaction.like': true, 'interaction.collect': true, 'interaction.follow': true,
   'interaction.comment': true, 'interaction.like_comment': true,
+  'group.join': true,
   'navigation.back': true, 'note.browse_images': true, 'note.scroll_comments': true, 'profile.open': true,
   'page.cards': true, 'note.detail': true, 'profile.detail': true, 'action.completed': true,
   'notification.open': true, 'notification.browse_comments': true, 'notification.browse_likes': true,
@@ -66,8 +67,8 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     assert.equal(PROTOCOL_VERSION, 2);
   });
 
-  it('AC-PROTO-02 消息类型总数为 65（增删消息须同步两端 + 本断言）', () => {
-    assert.equal(ALL_TYPES.length, 65);
+  it('AC-PROTO-02 消息类型总数为 66（增删消息须同步两端 + 本断言）', () => {
+    assert.equal(ALL_TYPES.length, 66);
   });
 
   it('AC-PROTO-03 每个消息类型都能构造合法信封且版本一致', () => {

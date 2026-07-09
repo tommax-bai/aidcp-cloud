@@ -1,0 +1,228 @@
+import type { LlmCallOpts } from '../llm/qwen.js';
+import type { RoleName } from '../event-bus/types.js';
+import type { FacebookGroupJoinAuditRow } from '../comment-agent/facebook-group-store.js';
+
+export type FacebookJoinPreClickVerdict = 'instant_join' | 'gated_skip' | 'already_member' | 'ambiguous_skip';
+export type FacebookJoinPostClickVerdict = 'joined' | 'pending_gated' | 'failed';
+
+export interface FacebookGroupJoinObservation {
+  groupUrl?: string;
+  pageUrl?: string;
+  title?: string;
+  mainCtaText?: string | null;
+  mainCtaAria?: string | null;
+  headerText?: string | null;
+  modalText?: string | null;
+  membershipSignals?: string[];
+  loginRequired?: boolean;
+  captchaDetected?: boolean;
+  questionnaireRequired?: boolean;
+  pendingRequest?: boolean;
+  navError?: string | null;
+}
+
+export type FacebookGroupJoinJudgeResult =
+  | { phase: 'pre_click'; verdict: FacebookJoinPreClickVerdict; confidence: number; reason: string }
+  | { phase: 'post_click'; verdict: FacebookJoinPostClickVerdict; confidence: number; reason: string };
+
+export interface FacebookGroupJoinJudgeOptions {
+  llm?: { complete(prompt: string, opts?: LlmCallOpts): Promise<string> };
+  accountId?: string;
+  audit?: (row: FacebookGroupJoinAuditRow) => void;
+}
+
+const ROLE_NAME: RoleName = 'facebook_group_join_judge';
+
+function textOf(obs: FacebookGroupJoinObservation): string {
+  return [
+    obs.mainCtaText,
+    obs.mainCtaAria,
+    obs.headerText,
+    obs.modalText,
+    ...(obs.membershipSignals ?? []),
+  ]
+    .filter(Boolean)
+    .join('\n')
+    .toLowerCase();
+}
+
+function hasAny(text: string, needles: string[]): boolean {
+  return needles.some((n) => text.includes(n));
+}
+
+function hasMemberSignal(obs: FacebookGroupJoinObservation): boolean {
+  const cta = (obs.mainCtaText ?? '').trim().toLowerCase();
+  const aria = (obs.mainCtaAria ?? '').trim().toLowerCase();
+  if (['joined', 'leave group', '已加入', '退出小组'].some((s) => cta === s || aria === s)) return true;
+  return (obs.membershipSignals ?? []).some((signal) => {
+    const s = signal.toLowerCase();
+    return hasAny(s, ['you are now a member', 'member of this group', '已是成员', '你已加入']);
+  });
+}
+
+function parseConfidence(raw: unknown, fallback: number): number {
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(1, n));
+}
+
+export class FacebookGroupJoinJudge {
+  readonly roleName: RoleName = ROLE_NAME;
+  private readonly llm?: FacebookGroupJoinJudgeOptions['llm'];
+  private readonly accountId?: string;
+  private readonly audit?: (row: FacebookGroupJoinAuditRow) => void;
+
+  constructor(options: FacebookGroupJoinJudgeOptions = {}) {
+    this.llm = options.llm;
+    this.accountId = options.accountId;
+    this.audit = options.audit;
+  }
+
+  async evaluatePreClick(observation: FacebookGroupJoinObservation): Promise<FacebookGroupJoinJudgeResult> {
+    const deterministic = this.preClickDeterministic(observation);
+    const result = deterministic ?? (await this.askModel('pre_click', observation));
+    this.record(observation, result);
+    return result;
+  }
+
+  async evaluatePostClick(observation: FacebookGroupJoinObservation): Promise<FacebookGroupJoinJudgeResult> {
+    const deterministic = this.postClickDeterministic(observation);
+    const result = deterministic ?? (await this.askModel('post_click', observation));
+    this.record(observation, result);
+    return result;
+  }
+
+  private preClickDeterministic(obs: FacebookGroupJoinObservation): FacebookGroupJoinJudgeResult | null {
+    if (obs.loginRequired) return { phase: 'pre_click', verdict: 'ambiguous_skip', confidence: 1, reason: 'login_required' };
+    if (obs.captchaDetected) return { phase: 'pre_click', verdict: 'ambiguous_skip', confidence: 1, reason: 'captcha_detected' };
+    if (obs.navError) return { phase: 'pre_click', verdict: 'ambiguous_skip', confidence: 1, reason: `nav_error:${obs.navError}` };
+    const text = textOf(obs);
+    if (hasMemberSignal(obs)) {
+      return { phase: 'pre_click', verdict: 'already_member', confidence: 0.95, reason: 'member_signal' };
+    }
+    if (
+      obs.questionnaireRequired ||
+      obs.pendingRequest ||
+      hasAny(text, ['answer questions', 'membership questions', 'pending', 'approval', 'request to join', '回答问题', '待批准', '待审批', '申请加入'])
+    ) {
+      return { phase: 'pre_click', verdict: 'gated_skip', confidence: 0.95, reason: 'gated_or_questionnaire_signal' };
+    }
+    return null;
+  }
+
+  private postClickDeterministic(obs: FacebookGroupJoinObservation): FacebookGroupJoinJudgeResult | null {
+    if (obs.loginRequired) return { phase: 'post_click', verdict: 'failed', confidence: 1, reason: 'login_required' };
+    if (obs.captchaDetected) return { phase: 'post_click', verdict: 'failed', confidence: 1, reason: 'captcha_detected' };
+    if (obs.navError) return { phase: 'post_click', verdict: 'failed', confidence: 1, reason: `nav_error:${obs.navError}` };
+    const text = textOf(obs);
+    if (hasMemberSignal(obs)) {
+      return { phase: 'post_click', verdict: 'joined', confidence: 0.95, reason: 'member_signal' };
+    }
+    if (
+      obs.questionnaireRequired ||
+      obs.pendingRequest ||
+      hasAny(text, ['pending', 'approval', 'request sent', 'membership questions', '待批准', '待审批', '已申请', '回答问题'])
+    ) {
+      return { phase: 'post_click', verdict: 'pending_gated', confidence: 0.95, reason: 'pending_or_questionnaire_signal' };
+    }
+    return null;
+  }
+
+  private async askModel(
+    phase: 'pre_click' | 'post_click',
+    obs: FacebookGroupJoinObservation,
+  ): Promise<FacebookGroupJoinJudgeResult> {
+    if (!this.llm) {
+      return phase === 'pre_click'
+        ? { phase, verdict: 'ambiguous_skip', confidence: 0, reason: 'no_llm_fail_closed' }
+        : { phase, verdict: 'failed', confidence: 0, reason: 'no_llm_fail_closed' };
+    }
+    let raw: string;
+    try {
+      raw = await this.llm.complete(this.buildPrompt(phase, obs), { role: `browse:${ROLE_NAME}` });
+    } catch (err) {
+      return phase === 'pre_click'
+        ? { phase, verdict: 'ambiguous_skip', confidence: 0, reason: `llm_error:${(err as Error).message}` }
+        : { phase, verdict: 'failed', confidence: 0, reason: `llm_error:${(err as Error).message}` };
+    }
+    return this.parseModelResult(phase, raw);
+  }
+
+  private parseModelResult(phase: 'pre_click' | 'post_click', raw: string): FacebookGroupJoinJudgeResult {
+    const start = raw.indexOf('{');
+    const end = raw.lastIndexOf('}');
+    if (start < 0 || end <= start) {
+      return phase === 'pre_click'
+        ? { phase, verdict: 'ambiguous_skip', confidence: 0, reason: 'invalid_json' }
+        : { phase, verdict: 'failed', confidence: 0, reason: 'invalid_json' };
+    }
+    try {
+      const obj = JSON.parse(raw.slice(start, end + 1)) as Record<string, unknown>;
+      const verdict = typeof obj.verdict === 'string' ? obj.verdict : '';
+      const reason = typeof obj.reason === 'string' && obj.reason.trim() ? obj.reason.trim().slice(0, 240) : 'model_verdict';
+      const confidence = parseConfidence(obj.confidence, 0);
+      if (phase === 'pre_click') {
+        if (verdict === 'instant_join' && confidence >= 0.8) return { phase, verdict, confidence, reason };
+        if (verdict === 'gated_skip') return { phase, verdict, confidence, reason };
+        if (verdict === 'already_member') return { phase, verdict, confidence, reason };
+        return { phase, verdict: 'ambiguous_skip', confidence, reason: `fail_closed:${reason}` };
+      }
+      if (verdict === 'joined' && confidence >= 0.8) return { phase, verdict, confidence, reason };
+      if (verdict === 'pending_gated') return { phase, verdict, confidence, reason };
+      return { phase, verdict: 'failed', confidence, reason: `fail_closed:${reason}` };
+    } catch {
+      return phase === 'pre_click'
+        ? { phase, verdict: 'ambiguous_skip', confidence: 0, reason: 'invalid_json' }
+        : { phase, verdict: 'failed', confidence: 0, reason: 'invalid_json' };
+    }
+  }
+
+  private buildPrompt(phase: 'pre_click' | 'post_click', obs: FacebookGroupJoinObservation): string {
+    const allowed =
+      phase === 'pre_click'
+        ? 'instant_join | gated_skip | already_member | ambiguous_skip'
+        : 'joined | pending_gated | failed';
+    return `You classify a Facebook public group join observation.
+
+Rules:
+- Fail closed. If uncertain, choose ${phase === 'pre_click' ? 'ambiguous_skip' : 'failed'}.
+- Pre-click instant_join means clicking the visible Join control is likely to make this account a member immediately, without approval questions.
+- Approval gates, pending requests, membership questions, login, captcha, or unclear UI must not be treated as instant join.
+- Post-click joined means the account is now visibly a member.
+
+Phase: ${phase}
+Allowed verdicts: ${allowed}
+Observation JSON:
+${JSON.stringify(obs, null, 2)}
+
+Return JSON only:
+{"verdict":"...","confidence":0.0,"reason":"short evidence"}`;
+  }
+
+  private record(obs: FacebookGroupJoinObservation, result: FacebookGroupJoinJudgeResult): void {
+    if (!this.audit || !this.accountId) return;
+    try {
+      this.audit({
+        accountId: this.accountId,
+        groupUrl: obs.groupUrl ?? obs.pageUrl ?? null,
+        phase: result.phase,
+        outcome:
+          result.phase === 'pre_click'
+            ? result.verdict === 'instant_join'
+              ? 'shadow_observed'
+              : result.verdict
+            : result.verdict === 'pending_gated'
+              ? 'pending'
+              : result.verdict === 'failed'
+                ? 'join_failed'
+                : result.verdict,
+        verdict: result.verdict,
+        reason: result.reason,
+        shadow: true,
+        observation: obs,
+      });
+    } catch {
+      /* audit is best-effort */
+    }
+  }
+}

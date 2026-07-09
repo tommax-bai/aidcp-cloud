@@ -105,7 +105,7 @@ function sendAndRace<T>(
 export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
   searchInContainer(keyword: string, container: string): Promise<FacebookSearchStepResult>;
   openPost(url: string): Promise<FacebookOpenStepResult>;
-  submitComment(permalink: string, text: string): Promise<FacebookCommentStepResult>;
+  submitComment(permalink: string, text: string, groupChatCode?: string): Promise<FacebookCommentStepResult>;
 } {
   const timeout = deps.stepTimeoutMs ?? FACEBOOK_STEP_TIMEOUT_MS;
   const maxCandidates = deps.maxCandidates ?? DEFAULT_MAX_CANDIDATES;
@@ -189,7 +189,7 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
       return { ok: true, ...(outcome.postText ? { postText: outcome.postText } : {}), ...(outcome.comments ? { comments: outcome.comments } : {}) };
     },
 
-    async submitComment(permalink, text) {
+    async submitComment(permalink, text, groupChatCode) {
       const outcome = await sendAndRace<{ ok: boolean; reason?: string }>(
         deps.bus,
         [
@@ -203,7 +203,14 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
           },
         ],
         timeout,
-        () => push(makeEnvelope('interaction.comment', randomUUID(), Date.now(), { noteId: permalink, text } as never)),
+        () =>
+          push(
+            makeEnvelope('interaction.comment', randomUUID(), Date.now(), {
+              noteId: permalink,
+              text,
+              ...(groupChatCode && groupChatCode.length > 0 ? { groupChatCode } : {}),
+            } as never),
+          ),
       );
       if (outcome === null) {
         log.warn?.('[fb-edge-steps] comment 超时/离线');

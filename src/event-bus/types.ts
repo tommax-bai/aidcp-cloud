@@ -135,7 +135,7 @@ export interface EventMap {
   'session.started': { sessionId: string };
   'session.ended': { stats: SessionStats };
   // targetId（change interaction-feed-enrichment）：展示账本去重键——笔记动作=noteId，关注=authorId。noteId 保留（喂 likedNoteStore）。
-  'interaction.occurred': { action: 'view' | 'like' | 'collect' | 'follow' | 'comment' | 'comment_like'; accountId?: string; noteId?: string; targetId?: string };
+  'interaction.occurred': { action: 'view' | 'like' | 'collect' | 'follow' | 'comment' | 'comment_like' | 'join_group'; accountId?: string; noteId?: string; targetId?: string };
   'concept.discovered': { concepts: string[]; source: string };
   // Edge 上报事件（handler → RoleDispatcher）
   // accountId 穿透握手事件（multi-account-node-support D4）：决策层据此设该连接当前账号，不再钉死 default。
@@ -477,6 +477,7 @@ export type RoleName =
   | 'comment_de_ai_flavor'
   | 'comment_approval_gate'
   | 'comment_like_appraiser'
+  | 'facebook_group_join_judge'
   | 'valuable_comment_archivist'
   | 'curated_note_evaluator'
   | 'curated_comment_evaluator'

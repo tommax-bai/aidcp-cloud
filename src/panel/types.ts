@@ -17,6 +17,15 @@ import type {
   SetFacebookCommentConfigResult,
 } from '../config/facebook-comment-config-store.js';
 import type {
+  FacebookGroupAccountProgress,
+  FacebookGroupImportResult,
+  FacebookGroupMembershipRow,
+  FacebookGroupTargetInput,
+  FacebookGroupTargetListOptions,
+  FacebookGroupTargetListResult,
+  FacebookGroupTargetRow,
+} from '../comment-agent/facebook-group-store.js';
+import type {
   ContentScheduleCatalogRow,
   AccountContentSchedulePatch,
   SetContentGlobalResult,
@@ -174,6 +183,18 @@ export interface PanelDeps {
       patch: FacebookCommentConfigPatch,
       updatedBy: string,
     ): Promise<SetFacebookCommentConfigResult>;
+  };
+  /**
+   * Facebook group target catalog + assignment view (facebook-group-join-and-commenting Phase 0).
+   * Data/API only: no navigation, no Join click, no comment dispatch.
+   */
+  facebookGroupTargets?: {
+    importTargets(inputs: FacebookGroupTargetInput[], importBatch: string | null): Promise<FacebookGroupImportResult>;
+    listTargets(options?: FacebookGroupTargetListOptions): Promise<FacebookGroupTargetListResult>;
+    setEnabled(groupUrl: string, enabled: boolean): Promise<FacebookGroupTargetRow | null>;
+    accountProgress(): Promise<FacebookGroupAccountProgress[]>;
+    listAssignments(limit?: number): Promise<FacebookGroupMembershipRow[]>;
+    reclaimStaleAssignments(ttlMs: number): Promise<number>;
   };
   /**
    * 内容排期（change content-schedule-auto-publish，Phase 1 只发帖）。未注入则 /api/content-schedule* 返回 503。

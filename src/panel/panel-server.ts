@@ -32,9 +32,11 @@ import type { RiskSignalKind, RiskQuotaLevel } from '../risk/index.js';
 import { RISK_ACTIONS } from '../risk/index.js';
 import { isKnownRole } from '../config/role-catalog.js';
 import { isAllowedPlatformCredential } from '../config/platform-credentials.js';
+import type { FacebookGroupMembershipStatus, FacebookGroupTargetInput } from '../comment-agent/facebook-group-store.js';
 
 /** 登录/写体很小，限制请求体大小防滥用。 */
 const MAX_BODY_BYTES = 16 * 1024;
+const MAX_GROUP_IMPORT_BODY_BYTES = 2 * 1024 * 1024;
 
 function isCuratedSourcePostType(contentType: string): boolean {
   return contentType === 'image_text' || contentType === 'video';
@@ -47,17 +49,44 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
   res.end(buf);
 }
 
-async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
+async function readJsonBody(req: http.IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     const buf = chunk as Buffer;
     size += buf.length;
-    if (size > MAX_BODY_BYTES) throw new Error('body_too_large');
+    if (size > maxBytes) throw new Error('body_too_large');
     chunks.push(buf);
   }
   if (chunks.length === 0) return undefined;
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
+function parseGroupImportInputs(body: unknown): FacebookGroupTargetInput[] | null {
+  const raw = (body ?? {}) as Record<string, unknown>;
+  const inputs: FacebookGroupTargetInput[] = [];
+  if (typeof raw.text === 'string') {
+    for (const item of raw.text.split(/\s+/)) {
+      const url = item.trim();
+      if (url) inputs.push({ url });
+    }
+  }
+  if (Array.isArray(raw.urls)) {
+    for (const item of raw.urls) {
+      if (typeof item !== 'string') return null;
+      inputs.push({ url: item });
+    }
+  }
+  if (Array.isArray(raw.items)) {
+    for (const item of raw.items) {
+      if (!item || typeof item !== 'object') return null;
+      const o = item as Record<string, unknown>;
+      if (typeof o.url !== 'string') return null;
+      if (o.name !== undefined && o.name !== null && typeof o.name !== 'string') return null;
+      inputs.push({ url: o.url, name: (o.name as string | null | undefined) ?? null });
+    }
+  }
+  return inputs;
 }
 
 function createRequestHandler(
@@ -345,6 +374,134 @@ function createRequestHandler(
       sendJson(res, 200, { accounts: await deps.panelStore.listAccounts() });
       return;
     }
+    if (method === 'GET' && url === '/api/facebook/groups') {
+      if (!deps.facebookGroupTargets) {
+        sendJson(res, 503, { error: 'unavailable' });
+        return;
+      }
+      const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+      const rawStatus = query.get('status') ?? undefined;
+      const allowedStatuses = new Set<string>([
+        'unassigned',
+        'assigned',
+        'joining',
+        'joined',
+        'pending',
+        'gated',
+        'no_button',
+        'checkpoint',
+        'failed',
+        'left',
+      ]);
+      if (rawStatus && !allowedStatuses.has(rawStatus)) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'bad_status' });
+        return;
+      }
+      const enabledRaw = query.get('enabled');
+      const enabled = enabledRaw === null ? undefined : enabledRaw === 'true' ? true : enabledRaw === 'false' ? false : null;
+      if (enabled === null) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'bad_enabled' });
+        return;
+      }
+      sendJson(
+        res,
+        200,
+        await deps.facebookGroupTargets.listTargets({
+          limit: Number(query.get('limit') ?? 100),
+          offset: Number(query.get('offset') ?? 0),
+          ...(rawStatus ? { status: rawStatus as FacebookGroupMembershipStatus | 'unassigned' } : {}),
+          ...(typeof enabled === 'boolean' ? { enabled } : {}),
+        }),
+      );
+      return;
+    }
+    if (method === 'POST' && url === '/api/facebook/groups/import') {
+      if (!deps.facebookGroupTargets) {
+        sendJson(res, 503, { error: 'unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req, MAX_GROUP_IMPORT_BODY_BYTES);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const raw = (body ?? {}) as Record<string, unknown>;
+      const inputs = parseGroupImportInputs(body);
+      if (!inputs || inputs.length === 0) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'no_targets' });
+        return;
+      }
+      if (raw.importBatch !== undefined && raw.importBatch !== null && typeof raw.importBatch !== 'string') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'bad_import_batch' });
+        return;
+      }
+      sendJson(res, 200, await deps.facebookGroupTargets.importTargets(inputs, raw.importBatch as string | null | undefined ?? null));
+      return;
+    }
+    if (method === 'PATCH' && url === '/api/facebook/groups/enabled') {
+      if (!deps.facebookGroupTargets) {
+        sendJson(res, 503, { error: 'unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { groupUrl, enabled } = (body ?? {}) as Record<string, unknown>;
+      if (typeof groupUrl !== 'string' || typeof enabled !== 'boolean') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'bad_value' });
+        return;
+      }
+      const row = await deps.facebookGroupTargets.setEnabled(groupUrl, enabled);
+      if (!row) {
+        sendJson(res, 404, { error: 'not_found' });
+        return;
+      }
+      sendJson(res, 200, row);
+      return;
+    }
+    if (method === 'GET' && url === '/api/facebook/groups/progress') {
+      if (!deps.facebookGroupTargets) {
+        sendJson(res, 503, { error: 'unavailable' });
+        return;
+      }
+      sendJson(res, 200, { accounts: await deps.facebookGroupTargets.accountProgress() });
+      return;
+    }
+    if (method === 'GET' && url === '/api/facebook/groups/assignments') {
+      if (!deps.facebookGroupTargets) {
+        sendJson(res, 503, { error: 'unavailable' });
+        return;
+      }
+      const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+      sendJson(res, 200, { assignments: await deps.facebookGroupTargets.listAssignments(Number(query.get('limit') ?? 200)) });
+      return;
+    }
+    if (method === 'POST' && url === '/api/facebook/groups/reclaim-stale') {
+      if (!deps.facebookGroupTargets) {
+        sendJson(res, 503, { error: 'unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const ttlMs = (body as Record<string, unknown> | undefined)?.ttlMs ?? 30 * 60_000;
+      if (typeof ttlMs !== 'number' || !Number.isFinite(ttlMs) || ttlMs < 60_000) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'bad_ttl' });
+        return;
+      }
+      sendJson(res, 200, { reclaimed: await deps.facebookGroupTargets.reclaimStaleAssignments(ttlMs) });
+      return;
+    }
     // Facebook 定时评论配置读（change facebook-scheduled-comment 2.1）：必须在下面通配 GET /api/accounts/:id
     // 之前注册，否则会被当成 id=":id/facebook-comment-config" 吞掉。缺行返回空默认（供面板回显）。
     if (method === 'GET' && url.startsWith('/api/accounts/') && url.endsWith('/facebook-comment-config')) {
@@ -356,6 +513,19 @@ function createRequestHandler(
         return;
       }
       sendJson(res, 200, deps.facebookCommentConfig.get(accountId));
+      return;
+    }
+    if (method === 'GET' && url.startsWith('/api/accounts/') && url.endsWith('/facebook-group-progress')) {
+      const accountId = decodeURIComponent(
+        url.slice('/api/accounts/'.length, -'/facebook-group-progress'.length),
+      );
+      if (!deps.facebookGroupTargets) {
+        sendJson(res, 503, { error: 'unavailable' });
+        return;
+      }
+      if (!(await assertAccountExists(accountId, res))) return;
+      const progress = (await deps.facebookGroupTargets.accountProgress()).find((row) => row.accountId === accountId) ?? null;
+      sendJson(res, 200, { accountId, progress });
       return;
     }
     if (method === 'GET' && url.startsWith('/api/accounts/')) {

@@ -331,6 +331,59 @@ test('content-scheduler/comment: 日上限 — 已发>=cap 不触发；未达则
   assert.deepEqual(b.fired, [`comment:${ACC}`]);
 });
 
+test('content-scheduler/join: join 与 comment 共用账号级单飞，join 在跑时不并发评论', async () => {
+  const joinOffset = offsetMinute(ACC, BASE_DAY, 'join');
+  const joinNow = new Date(2026, 0, 5, 10, joinOffset, 0);
+  const fired: string[] = [];
+  const state = {
+    nowMs: joinNow.getTime(),
+    joinBusy: false,
+    joinedToday: 0,
+    commentBusy: false,
+    commentedToday: 0,
+  };
+  const deps: ContentSchedulerDeps = {
+    onlineAccounts: () => [ACC],
+    scheduleFor: () => ({
+      autoEnabled: true,
+      postEnabled: false,
+      postDailyCap: 0,
+      commentEnabled: true,
+      commentDailyCap: 2,
+      contactCommentEnabled: false,
+      contactCommentDailyCap: 0,
+      effectiveMask: FULL,
+    }),
+    riskStatus: () => 'normal',
+    postedTodayCount: () => Promise.resolve(0),
+    pendingAutonomousCount: () => Promise.resolve(0),
+    isPublishBusy: () => false,
+    triggerPost: () => Promise.resolve(),
+    triggerJoin: (id) => {
+      fired.push(`join:${id}`);
+      state.joinBusy = true;
+      return new Promise(() => {});
+    },
+    isJoinBusy: () => state.joinBusy,
+    joinedTodayCount: () => Promise.resolve(state.joinedToday),
+    joinDailyCap: () => 3,
+    triggerComment: (id) => {
+      fired.push(`comment:${id}`);
+      return Promise.resolve();
+    },
+    isCommentBusy: () => state.commentBusy,
+    commentedTodayCount: () => Promise.resolve(state.commentedToday),
+    now: () => state.nowMs,
+    logger: { warn: () => {} },
+  };
+  const scheduler = new ContentScheduler(deps);
+  await scheduler.onTick();
+  assert.deepEqual(fired, [`join:${ACC}`], 'join 槽先触发');
+  state.nowMs = C_NOW_HIT.getTime();
+  await scheduler.onTick();
+  assert.deepEqual(fired, [`join:${ACC}`], '同账号 join 未结束时，comment 槽被账号级 inFlight 拦下');
+});
+
 test('content-scheduler/comment: 三件套未注入 — 评论开着也整体跳过（零回归、不炸）', async () => {
   const { scheduler, fired } = mkC({ wired: false });
   await scheduler.onTick();

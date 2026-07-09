@@ -28,9 +28,9 @@ const acct: PanelAccount = {
 };
 
 const mockPanelStore: PanelStoreReader = {
-  todayTotals: async () => ({ like: 10, collect: 2, comment: 1, follow: 0, publish: 1, view: 40, comment_like: 0 }),
+  todayTotals: async () => ({ like: 10, collect: 2, comment: 1, follow: 0, publish: 1, view: 40, comment_like: 0, join_group: 0 }),
   todayTotalsByAccount: async () => [
-    { accountId: 'default', totals: { like: 10, collect: 2, comment: 1, follow: 0, publish: 1, view: 40, comment_like: 0 } },
+    { accountId: 'default', totals: { like: 10, collect: 2, comment: 1, follow: 0, publish: 1, view: 40, comment_like: 0, join_group: 0 } },
   ],
   todayPublishCount: async () => 1,
   likeRate: async () => ({ likes: 10, views: 40, rate: 0.25, healthy: true }),
