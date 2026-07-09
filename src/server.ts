@@ -1935,8 +1935,9 @@ async function main(): Promise<void> {
     logger: console,
   });
   // 渲染出口：lazy 工厂只在渲染旗标开时初始化（关=零加载零成本）；工厂失败→null，text_card 请求诚实降级生成式。
+  // change textcard-carousel-form-parity 阶段1：轮播旗标也触发加载（任一渲染旗标开即需渲染出口）。
   let textCardRenderer: TextCardRenderer | null = null;
-  if (process.env.AIDCP_PUBLISH_TEXTCARD_COVER === 'true') {
+  if (process.env.AIDCP_PUBLISH_TEXTCARD_COVER === 'true' || process.env.AIDCP_PUBLISH_TEXTCARD_CAROUSEL === 'true') {
     void createTextCardRenderer({ logger: console })
       .then((r) => {
         textCardRenderer = r;
@@ -1966,7 +1967,9 @@ async function main(): Promise<void> {
     sensor: coverFormSensor,
     // 帖级形态档影子服务（change textcard-carousel-form-parity，阶段0）：旗标关时不计算、byte-identical。
     profileService: postFormProfileService,
-    renderEnabled: () => process.env.AIDCP_PUBLISH_TEXTCARD_COVER === 'true',
+    // 渲染门（gate 3）：封面卡或轮播任一旗标开即放行决策+文案；轮播旗标（阶段1）门控 all_text_card 整帖多卡渲卡。
+    renderEnabled: () => process.env.AIDCP_PUBLISH_TEXTCARD_COVER === 'true' || process.env.AIDCP_PUBLISH_TEXTCARD_CAROUSEL === 'true',
+    carouselEnabled: () => process.env.AIDCP_PUBLISH_TEXTCARD_CAROUSEL === 'true',
     rendererAvailable: () => textCardRenderer !== null,
     ossAvailable: () => !!ossUploader,
   }));

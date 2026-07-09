@@ -65,6 +65,7 @@ interface RunOpts {
   sensor?: CoverFormSensor | null;
   profileService?: PostImageFormProfileService | null;
   renderEnabled?: boolean;
+  carouselEnabled?: boolean;
   rendererAvailable?: boolean;
   ossAvailable?: boolean;
   trigger?: TriggerInput;
@@ -90,6 +91,7 @@ function run(opts: RunOpts): Promise<{ plan: CoverCardPlan; llmCalls: string[] }
     sensor: opts.sensor,
     profileService: opts.profileService,
     renderEnabled: () => opts.renderEnabled ?? true,
+    carouselEnabled: () => opts.carouselEnabled ?? false,
     rendererAvailable: () => opts.rendererAvailable ?? true,
     ossAvailable: () => opts.ossAvailable ?? true,
     clock: opts.clockImpl ?? (() => 1700000000000),
@@ -320,5 +322,87 @@ describe('CoverCardWriterRole × 帖级形态档（change textcard-carousel-form
     assert.equal(plan.gateReason, 'form_not_text_card');
     assert.equal(plan.formProfile, 'generative');
     assert.equal(plan.formProfileGate, 'generative_cover_not_card');
+  });
+});
+
+describe('CoverCardWriterRole × 轮播整帖多卡（change textcard-carousel-form-parity 阶段1）', () => {
+  const ALL_CARD: PostFormProfileResult = {
+    profile: 'all_text_card',
+    gateReason: 'all_text_card',
+    perImageForms: [
+      { index: 0, form: 'text_card', source: 'vision' },
+      { index: 1, form: 'text_card', source: 'vision' },
+      { index: 2, form: 'text_card', source: 'vision' },
+    ],
+    innerSensed: 2,
+  };
+  // 3 张有效源图（referenceImagesForGeneration 计 3 → N=3）。
+  function trigger3(): TriggerInput {
+    const t = makeTrigger(true);
+    t.generateInput.referenceNote!.images = [0, 1, 2].map((i) => ({
+      index: i,
+      sourceUrl: `https://cdn.example/o${i}.webp`,
+      ossUrl: `https://oss.example/o${i}.webp`,
+      capturedAt: 1,
+    }));
+    return t;
+  }
+  const SET3 = JSON.stringify({
+    cards: [
+      { cardTitle: '三分钟搬走AI记忆', bullets: ['告别云端依赖'], tags: ['干货'] },
+      { cardTitle: '第一步装好环境', bullets: ['选对版本', '配好路径'], tags: [] },
+      { cardTitle: '第二步导入数据', bullets: ['备份先行', '逐条迁移'], tags: [] },
+    ],
+  });
+
+  test('all_text_card + 轮播旗标开 + 合法多卡 → cardSet 三张、coverForm text_card、card=cardSet[0]', async () => {
+    const { plan } = await run({
+      sensor: stubSensor({ status: 'detected', guess: guess('text_card', 0.9), cached: false }),
+      profileService: stubProfileService(ALL_CARD, true),
+      carouselEnabled: true,
+      trigger: trigger3(),
+      llmOutputs: [SET3],
+    });
+    assert.equal(plan.coverForm, 'text_card');
+    assert.equal(plan.gateReason, 'ok');
+    assert.equal(plan.cardSet?.length, 3);
+    assert.equal(plan.card?.title, '三分钟搬走AI记忆');
+    assert.equal(plan.cardSet?.[0]?.title, plan.card?.title, 'card 兼作 cardSet[0]');
+    assert.equal(plan.cardSet?.[2]?.title, '第二步导入数据');
+    assert.equal(plan.formProfile, 'all_text_card');
+  });
+
+  test('轮播旗标关（默认）→ 即使 all_text_card 也只走单封面卡（无 cardSet）', async () => {
+    const { plan } = await run({
+      sensor: stubSensor({ status: 'detected', guess: guess('text_card', 0.9), cached: false }),
+      profileService: stubProfileService(ALL_CARD, true),
+      carouselEnabled: false,
+      trigger: trigger3(),
+      llmOutputs: [GOOD_COPY], // 单封面卡路径
+    });
+    assert.equal(plan.coverForm, 'text_card');
+    assert.equal(plan.cardSet, undefined, '轮播关：不产 cardSet');
+    assert.equal(plan.formProfile, 'all_text_card', '影子形态档仍记录');
+  });
+
+  test('任一张逐字搬运（重试后仍违规）→ 整帖回落生成式 + formProfileGate=carousel_copy_failed', async () => {
+    // 第 2 张 bullet 与原正文 ≥12 字逐字重叠 → 违规；两版都违规 → 整帖回落。
+    const plagiar = JSON.stringify({
+      cards: [
+        { cardTitle: '正常封面卡片标题', bullets: ['正常要点'], tags: [] },
+        { cardTitle: '正常小标题', bullets: ['用某工具这段时间踩过的坑挑了5个'], tags: [] },
+        { cardTitle: '另一个小标题', bullets: ['正常要点二'], tags: [] },
+      ],
+    });
+    const { plan } = await run({
+      sensor: stubSensor({ status: 'detected', guess: guess('text_card', 0.9), cached: false }),
+      profileService: stubProfileService(ALL_CARD, true),
+      carouselEnabled: true,
+      trigger: trigger3(),
+      llmOutputs: [plagiar, plagiar], // 首发 + 重试都违规
+    });
+    assert.equal(plan.coverForm, 'generative', '整帖回落生成式（绝不只替换违规张）');
+    assert.equal(plan.cardSet, undefined);
+    assert.equal(plan.formProfileGate, 'carousel_copy_failed', '诚实记因');
   });
 });

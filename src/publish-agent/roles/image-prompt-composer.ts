@@ -78,11 +78,14 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
       plan.themes.map((theme) => this.composeTheme(theme, plan.styleHint, referenceImageGuidance)),
     );
 
-    // 去重护栏：按主体近重复比对，命中即丢——但永远保住第 0 张（封面位）。
+    // 轮播（change textcard-carousel-form-parity 阶段1）：cardSet 非空时**跳过去重**，保 imagePrompts 张数 =
+    // imageCount = cardSet 长度（每槽渲一张不同的卡、不存在近重复画面；生成式 prompt 仅作单槽渲染失败兜底）。
+    const carousel = !!input.coverPlan?.cardSet;
+    // 去重护栏：按主体近重复比对，命中即丢——但永远保住第 0 张（封面位）。轮播跳过。
     const kept: string[] = [];
     const keptTokens: Set<string>[] = [];
     composed.forEach((desc, idx) => {
-      if (idx === 0) {
+      if (carousel || idx === 0) {
         kept.push(desc);
         keptTokens.push(tokenize(desc));
         return;
@@ -142,6 +145,8 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
       ...(coverPlan?.formProfile ? { formProfile: coverPlan.formProfile } : {}),
       ...(coverPlan?.formProfileGate ? { formProfileGate: coverPlan.formProfileGate } : {}),
       ...(coverPlan?.perImageForms ? { perImageForms: coverPlan.perImageForms } : {}),
+      // 轮播多卡透传（阶段1）：cardSet 非空 = 整帖每槽渲文字卡；旗标关时 undefined，不新增键（零回归）。
+      ...(coverPlan?.cardSet ? { cardSet: coverPlan.cardSet } : {}),
     };
   }
 

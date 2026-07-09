@@ -913,3 +913,53 @@ export function buildCoverCardCopyPrompt(
   );
   return lines.join('\n');
 }
+
+// ─── 轮播多卡文案（change textcard-carousel-form-parity，阶段1）：一次产 N 张卡 ─────
+
+/**
+ * 轮播文字卡文案 prompt。一次产 N 张卡：card[0]=封面钩子卡、card[1..N-1]=正文段落卡（各承一段/一个要点簇）。
+ * 防搬运红线同封面卡：**只喂洗稿后的标题/正文/标签**，MUST NOT 注入原笔记任何文本
+ * （原文只在产后校验做重叠比对、不进生成上下文）。每张会被确定性排版渲染成一图，故约束长度条数。
+ * count = 目标卡数（对齐源稿有效图数）；LLM 自行把正文切成 N 张连贯的卡、顺序输出。
+ */
+export function buildCardSetPrompt(
+  title: string,
+  body: string,
+  tags: string[],
+  count: number,
+  tighten = false,
+): string {
+  const n = Math.max(2, Math.floor(count));
+  const preview = body.slice(0, 1600);
+  const lines = [
+    `你是小红书图文轮播的文案编辑。基于下面这篇笔记（标题+正文），产出一套 ${n} 张排版文字卡的文案，做成连贯的一篇图文轮播。`,
+    '',
+    '【笔记标题】',
+    title,
+    '',
+    '【正文】',
+    preview,
+    '',
+  ];
+  if (tags.length > 0) {
+    lines.push(`【候选标签】${tags.join('、')}`, '');
+  }
+  lines.push(
+    '【要求】',
+    `- 严格产出 ${n} 张卡，按封面→正文顺序输出，把正文主线切成连贯的 ${n - 1} 段承到第 2~${n} 张。`,
+    '- 第 1 张=封面钩子卡：cardTitle 8~16 字、钩子感强、口语化、不照抄笔记标题；bullets 可 0~3 条点题。',
+    '- 第 2 张起=正文段落卡：cardTitle 是这段的小标题（6~14 字）；bullets 1~5 条、每条 6~18 字，承载这一段的干货/步骤/要点，短句并列。',
+    '- 整套卡要覆盖正文主线、各卡内容不重复、连起来读得通；只用这篇笔记本身的内容，绝不新增笔记里没有的事实。',
+    '- 每张的 tags 0~3 个（不带 # 号），只能从候选标签挑或用正文核心词；某张没有清晰要点就给空数组，绝不硬凑。',
+    '- 全程不出现任何联系方式/价格/促销用语/平台名/作者名；不用 emoji。',
+  );
+  if (tighten) {
+    lines.push('- 【加严】上一版与原文重叠过多或含违规词：这次必须完全换表达方式重写，任一张逐字重复超过 8 字即不合格。');
+  }
+  lines.push(
+    '',
+    `【输出要求】严格只输出一个 JSON 对象，不要任何额外文字或代码块围栏；cards 数组长度必须正好 ${n}：`,
+    '{"cards": [{"cardTitle": "…", "bullets": ["…"], "tags": ["…"]}, …]}',
+  );
+  return lines.join('\n');
+}

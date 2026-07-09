@@ -217,3 +217,57 @@ describe('ImageGeneratorRole — 文字卡封面分支（change textcard-cover-f
     assert.equal(d.coverFormAudit?.coverForm, 'generative');
   });
 });
+
+describe('ImageGeneratorRole — 轮播整帖渲卡（change textcard-carousel-form-parity 阶段1）', () => {
+  const SET: CoverCardCopy[] = [
+    { title: '封面钩子卡', bullets: ['点题一'], tags: ['t'] },
+    { title: '正文段落一', bullets: ['要点A', '要点B'], tags: [] },
+    { title: '正文段落二', bullets: ['要点C'], tags: [] },
+  ];
+  function carouselPlan(prompts: string[], cards: (CoverCardCopy | null)[]): ImagePlan {
+    return { ...textCardPlan(prompts), cardSet: cards };
+  }
+
+  test('cardSet 三卡 → 每槽渲染 ${seq}.png、provider 不被调、cardRenderStatuses 全 rendered', async () => {
+    const providerPrompts: string[] = [];
+    const provider = { generate: async (p: string) => { providerPrompts.push(p); return { url: `https://cdn/${p}.png` } as ImageResult; } };
+    const { d, store } = await run(provider, carouselPlan(['g0', 'g1', 'g2'], SET), {
+      getTextCardRenderer: () => okRenderer(),
+    });
+    assert.deepEqual(d.imageUrls, [
+      'https://oss.test/publish/acct1/run1/0.png',
+      'https://oss.test/publish/acct1/run1/1.png',
+      'https://oss.test/publish/acct1/run1/2.png',
+    ], '三槽全为渲染卡、按 seq 保序');
+    assert.deepEqual(providerPrompts, [], '整帖渲卡时 provider 一次不调');
+    assert.deepEqual(d.coverFormAudit?.cardRenderStatuses, ['rendered', 'rendered', 'rendered']);
+    assert.ok(store.puts.includes('publish/acct1/run1/2.png'), 'seq 键无碰撞');
+  });
+
+  test('某槽渲染失败 → 只该槽回落生成式、其余仍渲染卡（不牵连、不裂全帖）', async () => {
+    const providerPrompts: string[] = [];
+    const provider = { generate: async (p: string) => { providerPrompts.push(p); return { url: `https://cdn/${p}.png` } as ImageResult; } };
+    // 第 1 张（正文段落一）渲染失败，其余成功。
+    const failingRenderer: TextCardRenderer = {
+      render: async (copy) => copy.title === '正文段落一'
+        ? ({ ok: false, reason: 'glyph_uncovered' } as TextCardRenderResult)
+        : ({ ok: true, png: Buffer.from('x'), meta: RENDER_META } as TextCardRenderResult),
+    };
+    const { d } = await run(provider, carouselPlan(['g0', 'g1', 'g2'], SET), { getTextCardRenderer: () => failingRenderer });
+    // 区分「渲染卡 vs 生成式」看 providerPrompts（生成式才调 provider）+ cardRenderStatuses；
+    // URL 无法区分：生成式经 relocate 也落 `${seq}.png`（同渲染键，但一槽只一种产出，无碰撞）。
+    assert.deepEqual(providerPrompts, ['g1'], '只失败的 1 槽走 provider（生成式），0/2 槽渲染卡不走');
+    assert.deepEqual(d.coverFormAudit?.cardRenderStatuses, ['rendered', 'render_failed_generative', 'rendered']);
+    assert.equal(d.imageUrls.length, 3, '三槽都有产出（不牵连、不裂全帖）');
+  });
+
+  test('渲染器不可用 + cardSet → 整帖回落生成式（不半途裂帧）', async () => {
+    const providerPrompts: string[] = [];
+    const provider = { generate: async (p: string) => { providerPrompts.push(p); return { url: `https://cdn/${p}.png` } as ImageResult; } };
+    const { d } = await run(provider, carouselPlan(['g0', 'g1', 'g2'], SET), { getTextCardRenderer: () => null });
+    // 渲染器不可用 → 整帖预检不渲染任何槽（不半途裂帧）→ 三槽全走 provider 生成式。
+    assert.deepEqual(providerPrompts, ['g0', 'g1', 'g2'], '三槽全走 provider（全生成式）');
+    assert.deepEqual(d.coverFormAudit?.cardRenderStatuses, ['render_failed_generative', 'render_failed_generative', 'render_failed_generative']);
+    assert.equal(d.imageUrls.length, 3);
+  });
+});

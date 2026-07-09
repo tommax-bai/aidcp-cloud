@@ -359,6 +359,8 @@ export interface CoverFormAudit {
   formProfile?: PostFormProfile;
   formProfileGate?: PostFormGateReason;
   perImageForms?: PerImageFormGuess[];
+  /** 轮播每槽渲染结局（change textcard-carousel-form-parity 阶段1）：仅整帖渲卡时非空；[0] 与 renderStatus 一致。 */
+  cardRenderStatuses?: CoverRenderStatus[];
 }
 
 export interface ImageReferenceAudit {
@@ -456,6 +458,11 @@ export interface ImagePlan {
   formProfile?: PostFormProfile;
   formProfileGate?: PostFormGateReason;
   perImageForms?: PerImageFormGuess[];
+  /**
+   * 轮播整帖多卡（change textcard-carousel-form-parity，阶段1）：仅 all_text_card + 轮播旗标开时非空。
+   * cardSet[i] 非空 = 第 i 槽由文字卡渲染（cardSet[0] 兼作封面）；缺/undefined = 该槽走生成式（旗标关时恒 undefined，零回归）。
+   */
+  cardSet?: (CoverCardCopy | null)[];
   plannedAt: number;
 }
 

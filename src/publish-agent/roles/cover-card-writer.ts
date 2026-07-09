@@ -9,8 +9,9 @@ import type {
   SensedCoverForm,
   ReferenceImageSnapshot,
 } from '../types.js';
-import { buildCoverCardCopyPrompt } from '../prompts.js';
+import { buildCoverCardCopyPrompt, buildCardSetPrompt, IMAGE_COUNT_HARD_MAX } from '../prompts.js';
 import { detectBannedPhrases } from '../post-processor.js';
+import { referenceImagesForGeneration } from '../reference-image-guidance.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
 import type { CoverFormSensor, CoverFormSenseResult } from '../cover-form-sensor.js';
 import type { PostImageFormProfileService } from '../post-image-form-profile.js';
@@ -73,6 +74,12 @@ export interface CoverCardWriterDeps {
    * 只把形态档写进计划（阶段0 不改渲染）。
    */
   profileService?: PostImageFormProfileService | null;
+  /**
+   * 轮播渲染旗标（AIDCP_PUBLISH_TEXTCARD_CAROUSEL，change textcard-carousel-form-parity 阶段1）：关（默认）=
+   * 形态档即使 all_text_card 也只走既有单封面卡（= 阶段0/card_cover 行为）。开 = all_text_card 帖一次多卡文案 →
+   * 整帖每槽渲文字卡（cardSet）；任一张违规整帖回落生成式。
+   */
+  carouselEnabled?: () => boolean;
   /** 渲染旗标（AIDCP_PUBLISH_TEXTCARD_COVER）；只门控决策+文案，不门控感知（影子模式）。 */
   renderEnabled?: () => boolean;
   /** 渲染出口就绪探针（工厂加载成功且字体校验过）。 */
@@ -105,9 +112,11 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
   private sensor: CoverFormSensor | null;
   private profileService: PostImageFormProfileService | null;
   private renderEnabled: () => boolean;
+  private carouselEnabled: () => boolean;
   private rendererAvailable: () => boolean;
   private ossAvailable: () => boolean;
   private minConfidence: number;
+  private maxImages: number;
 
   constructor(deps: CoverCardWriterDeps) {
     super({ logger: deps.logger, clock: deps.clock });
@@ -115,9 +124,13 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
     this.sensor = deps.sensor ?? null;
     this.profileService = deps.profileService ?? null;
     this.renderEnabled = deps.renderEnabled ?? (() => process.env.AIDCP_PUBLISH_TEXTCARD_COVER === 'true');
+    this.carouselEnabled = deps.carouselEnabled ?? (() => process.env.AIDCP_PUBLISH_TEXTCARD_CAROUSEL === 'true');
     this.rendererAvailable = deps.rendererAvailable ?? (() => false);
     this.ossAvailable = deps.ossAvailable ?? (() => false);
     this.minConfidence = deps.minConfidence ?? Number(process.env.AIDCP_COVER_FORM_MIN_CONFIDENCE ?? DEFAULT_MIN_CONFIDENCE);
+    // 轮播卡数上限（与 ImageSetPlanner 同源：env AIDCP_PUBLISH_MAX_IMAGES 默认 9，硬夹 ≤9），对齐源稿有效图数。
+    const rawMax = Number(process.env.AIDCP_PUBLISH_MAX_IMAGES);
+    this.maxImages = Math.max(1, Math.min(Number.isFinite(rawMax) && rawMax > 0 ? Math.floor(rawMax) : 9, IMAGE_COUNT_HARD_MAX));
   }
 
   protected extractInput(snapshot: Partial<PipelineFields>): WriterInput {
@@ -184,10 +197,31 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
       return attach(this.generativePlan('renderer_unavailable', sensedForm, sensedSource));
     }
 
-    // 全过：一次文案 LLM；违规带紧约束重试一次（只花角色闸剩余预算）。
-    // 候选标签取洗稿产物（input.tags）——原笔记话题绝不入生成上下文（防搬运）。
+    // 产后校验的原文（可读、不入生成上下文——防搬运 R2）；封面卡与轮播多卡共用。
     const originalTitle = referenceNote.title ?? '';
     const originalBody = referenceNote.body ?? '';
+
+    // 轮播分支（阶段1）：形态档 all_text_card + 轮播旗标开 → 一次多卡文案 → cardSet 整帖渲卡；
+    // 任一张违规/失败 → 整帖回落生成式（诚实记 carousel_copy_failed）。张数对齐源稿有效图数（同 ImageSetPlanner）。
+    if (profileFields.formProfile === 'all_text_card' && this.carouselEnabled()) {
+      const n = Math.min(referenceImagesForGeneration(images).length, this.maxImages);
+      if (n >= 2) {
+        const cards = await this.composeCardSetWithGuard(input, originalTitle, originalBody, referenceNote.author, n, startedAt);
+        if (cards) {
+          return attach(this.carouselPlan(cards, sensedForm, sensedSource));
+        }
+        this.logger.warn('[CoverCardWriter] 轮播多卡文案违规/失败，整帖回落生成式（carousel_copy_failed）');
+        return {
+          ...this.generativePlan('copy_llm_failed', sensedForm, sensedSource),
+          ...profileFields,
+          formProfileGate: 'carousel_copy_failed',
+        };
+      }
+      // n<2：单图帖无真轮播，落既有单封面卡路径。
+    }
+
+    // 全过：一次封面卡文案 LLM；违规带紧约束重试一次（只花角色闸剩余预算）。
+    // 候选标签取洗稿产物（input.tags）——原笔记话题绝不入生成上下文（防搬运）。
     try {
       const first = await this.composeCopy(input, input.tags, false, COPY_CALL_TIMEOUT_MS);
       let violation = first ? this.findViolation(first, originalTitle, originalBody, referenceNote.author) : 'llm 输出不可解析';
@@ -261,6 +295,105 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
     sensedSource: CoverCardPlan['sensedSource'],
   ): CoverCardPlan {
     return { coverForm: 'text_card', card, sensedForm, sensedSource, gateReason: 'ok', decidedAt: this.clock() };
+  }
+
+  /** 轮播计划（change textcard-carousel-form-parity 阶段1）：card[0] 兼作封面、cardSet 承整帖 N 张卡。 */
+  private carouselPlan(
+    cards: CoverCardCopy[],
+    sensedForm: SensedCoverForm,
+    sensedSource: CoverCardPlan['sensedSource'],
+  ): CoverCardPlan {
+    return {
+      coverForm: 'text_card',
+      card: cards[0],
+      cardSet: cards,
+      sensedForm,
+      sensedSource,
+      gateReason: 'ok',
+      decidedAt: this.clock(),
+    };
+  }
+
+  /**
+   * 轮播多卡文案 + 产后校验（防搬运）：一次多卡 LLM，每张过同一 findViolation；任一违规带紧约束重试一次
+   * （只花角色闸剩余预算）；仍违规/解析失败 → null（调用方整帖回落生成式，绝不只替换违规张、绝不发搬运卡）。
+   */
+  private async composeCardSetWithGuard(
+    input: WriterInput,
+    originalTitle: string,
+    originalBody: string,
+    author: string | undefined,
+    n: number,
+    startedAt: number,
+  ): Promise<CoverCardCopy[] | null> {
+    try {
+      const first = await this.composeCardSet(input, n, false, COPY_CALL_TIMEOUT_MS);
+      let violation = first ? this.findSetViolation(first, originalTitle, originalBody, author) : 'llm 输出不可解析或卡数不足';
+      if (first && !violation) return first;
+      const remaining = COVERCARD_TIMEOUT_MS - (this.clock() - startedAt) - 10_000;
+      if (remaining >= RETRY_MIN_BUDGET_MS) {
+        this.logger.warn(`[CoverCardWriter] 轮播多卡违规（${violation}），带紧约束重试一次（剩余预算 ${Math.round(remaining / 1000)}s）`);
+        const second = await this.composeCardSet(input, n, true, Math.min(COPY_CALL_TIMEOUT_MS, remaining));
+        violation = second ? this.findSetViolation(second, originalTitle, originalBody, author) : 'llm 输出不可解析或卡数不足';
+        if (second && !violation) return second;
+      } else {
+        this.logger.warn(`[CoverCardWriter] 剩余预算不足（<${RETRY_MIN_BUDGET_MS}ms），跳过轮播重试`);
+      }
+      this.logger.warn(`[CoverCardWriter] 轮播多卡仍违规（${violation}）`);
+      return null;
+    } catch (err) {
+      this.logger.warn(`[CoverCardWriter] 轮播多卡 LLM 失败: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }
+
+  /** 单次多卡文案调用 + 严格解析（cards 数组，每张 {cardTitle,bullets≤5,tags≤3}）；不足 2 张/无有效卡 → null。 */
+  private async composeCardSet(
+    input: WriterInput,
+    n: number,
+    tighten: boolean,
+    timeoutMs: number,
+  ): Promise<CoverCardCopy[] | null> {
+    const raw = await this.llmClient.chat(
+      [
+        { role: 'system', content: '你是小红书图文轮播文案编辑。严格返回JSON。' },
+        { role: 'user', content: buildCardSetPrompt(input.title, input.content, input.tags, n, tighten) },
+      ],
+      { timeoutMs },
+    );
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    let obj: { cards?: unknown };
+    try {
+      obj = JSON.parse(match[0]) as typeof obj;
+    } catch {
+      return null;
+    }
+    const rawCards = Array.isArray(obj.cards) ? obj.cards : [];
+    const cards: CoverCardCopy[] = [];
+    for (const c of rawCards.slice(0, n)) {
+      const o = (c ?? {}) as { cardTitle?: unknown; bullets?: unknown; tags?: unknown };
+      const title = String(o.cardTitle ?? '').trim();
+      if (!title) return null; // 任一张标题缺失 = 整套不合格（绝不半套）
+      const bullets = (Array.isArray(o.bullets) ? o.bullets : []).map((b) => String(b).trim()).filter(Boolean).slice(0, 5);
+      const tags = (Array.isArray(o.tags) ? o.tags : []).map((t) => String(t).trim().replace(/^#/, '')).filter(Boolean).slice(0, 3);
+      cards.push({ title, bullets, tags });
+    }
+    return cards.length >= 2 ? cards : null;
+  }
+
+  /** 逐张产后校验：任一张违规即返回该违规（整套回落）；全过返回 null。 */
+  private findSetViolation(
+    cards: CoverCardCopy[],
+    originalTitle: string,
+    originalBody: string,
+    author: string | undefined,
+  ): string | null {
+    for (let i = 0; i < cards.length; i++) {
+      const v = this.findViolation(cards[i], originalTitle, originalBody, author);
+      if (v) return `第 ${i + 1} 张：${v}`;
+    }
+    return null;
   }
 
   /** 单次文案调用 + 严格解析（核心字段缺失/类型不符 → null，绝不默认成功）。 */
