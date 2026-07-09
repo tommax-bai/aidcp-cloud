@@ -328,13 +328,19 @@ export class DefaultMessageHandler implements MessageHandler {
         // already_followed 是良性 no-op，失败 ok=false，均不计——只记真实发生的互动。
         if (
           result.ok &&
-          (result.action === 'like' || result.action === 'collect' || result.action === 'follow' || result.action === 'comment' || result.action === 'comment_like') &&
-          result.reason !== 'already_followed'
+          (result.action === 'like' || result.action === 'collect' || result.action === 'follow' || result.action === 'comment' || result.action === 'comment_like' || result.action === 'join_group') &&
+          result.reason !== 'already_followed' &&
+          (result.action !== 'join_group' || (result.clicked === true && result.reason !== 'already_member' && result.reason !== 'observation_only'))
         ) {
           // 展示账本目标 id（change interaction-feed-enrichment）：关注按作者（currentAuthorId），其余按笔记（currentNoteId）。
-          const targetId = result.action === 'follow' ? session.currentAuthorId : session.currentNoteId;
+          const targetId =
+            result.action === 'follow'
+              ? session.currentAuthorId
+              : result.action === 'join_group'
+                ? undefined
+                : session.currentNoteId;
           this.bus(session).emit('interaction.occurred', {
-            action: result.action as 'like' | 'collect' | 'follow' | 'comment' | 'comment_like',
+            action: result.action as 'like' | 'collect' | 'follow' | 'comment' | 'comment_like' | 'join_group',
             // accountId 从会话填（握手已保证存在）；缺失=上游缺陷，下游 consumer honest-fail 丢弃，绝不回落 default
             accountId: session.accountId,
             // noteId 从会话当前笔记填（V1 task 9.2）：编排已知当前笔记，喂 likedNoteStore + 按笔记互动历史。

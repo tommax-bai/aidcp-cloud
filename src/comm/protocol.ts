@@ -68,6 +68,7 @@ export type MessageType =
   | 'interaction.follow'   // 关注
   | 'interaction.comment'  // 发评论（浏览闭环写互动）
   | 'interaction.like_comment' // 给「别人的某条评论」点赞（详情页拟人微互动）
+  | 'group.join'           // Facebook 加群原子指令（独立 join 能力，绝不走 browse）
   | 'navigation.back'      // 返回上一页
   | 'note.browse_images'   // 浏览笔记图片
   | 'note.scroll_comments' // 滚动评论区
@@ -453,7 +454,7 @@ export interface PacingDefaultsPayload {
 }
 
 export interface RiskCanDoPayload {
-  action: 'view' | 'like' | 'collect' | 'comment' | 'follow' | 'publish' | 'comment_like';
+  action: 'view' | 'like' | 'collect' | 'comment' | 'follow' | 'publish' | 'comment_like' | 'join_group';
   accountId?: string;
 }
 
@@ -806,6 +807,19 @@ export interface InteractionCommentPayload {
   thinkMs?: number;
 }
 
+export interface GroupJoinPayload {
+  /** Facebook group canonical/full URL. Edge validates host/path before navigation. */
+  groupUrl: string;
+  /**
+   * false/absent = observe only. true = cloud has already judged the pre-click observation as safe
+   * and explicitly instructs edge to click Join once.
+   */
+  click?: boolean;
+  reason?: string;
+  /** 点击前犹豫时间中心值（毫秒，可选；由调用方计算，边缘只在真实点击前使用） */
+  thinkMs?: number;
+}
+
 /** cloud → edge：给详情页内某一条评论点赞。靠稳定锚点 commentAnchorId 定位，绝不按序号。 */
 export interface InteractionLikeCommentPayload {
   /** 目标评论的稳定 DOM 锚点（形如 comment-<id>）；边缘据此 getElementById 重新定位 */
@@ -950,6 +964,14 @@ export interface ActionCompletedPayload {
   action: string;
   ok: boolean;
   reason?: string;
+  /** 仅 group.join 回执携带：目标群 URL。 */
+  groupUrl?: string;
+  /** 仅 group.join 回执携带：点击前结构化观测。 */
+  observation?: unknown;
+  /** 仅 group.join 回执携带：点击后结构化观测。 */
+  postObservation?: unknown;
+  /** 仅 group.join 回执携带：本次 edge 是否真的点击过 Join。 */
+  clicked?: boolean;
   /** 仅 scroll_comments 回执携带：本次滚动终态视口抽到的候选评论清单（best-effort，可空） */
   candidates?: CommentCandidate[];
 }
@@ -1064,6 +1086,7 @@ export interface PayloadMap {
   'interaction.follow': InteractionFollowPayload;
   'interaction.comment': InteractionCommentPayload;
   'interaction.like_comment': InteractionLikeCommentPayload;
+  'group.join': GroupJoinPayload;
   'navigation.back': NavigationBackPayload;
   'note.browse_images': NoteBrowseImagesPayload;
   'note.scroll_comments': NoteScrollCommentsPayload;

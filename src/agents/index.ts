@@ -31,6 +31,14 @@ export { ProfileOpener } from './profile-opener.js';
 export { ProfileBrowser } from './profile-browser.js';
 export { FollowAgent } from './follow-agent.js';
 export type { FollowAgentOptions } from './follow-agent.js';
+export { FacebookGroupJoinJudge } from './facebook-group-join-judge.js';
+export type {
+  FacebookGroupJoinJudgeOptions,
+  FacebookGroupJoinJudgeResult,
+  FacebookGroupJoinObservation,
+  FacebookJoinPostClickVerdict,
+  FacebookJoinPreClickVerdict,
+} from './facebook-group-join-judge.js';
 
 // ─── Phase 5：搜索链路角色 ───
 export { SearchScroller, SEARCH_SCROLL_THRESHOLD } from './search-scroller.js';

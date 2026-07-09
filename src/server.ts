@@ -180,6 +180,12 @@ import { createResumeConfigPanel } from './config/resume-config-facade.js';
 import { ContentScheduleStore } from './config/content-schedule-store.js';
 import { FacebookCommentConfigStore } from './config/facebook-comment-config-store.js';
 import { FacebookCommentAuditStore } from './comment-agent/facebook-comment-audit-store.js';
+import {
+  FacebookGroupJoinAuditStore,
+  FacebookGroupMembershipStore,
+  FacebookGroupTargetStore,
+} from './comment-agent/facebook-group-store.js';
+import { FacebookGroupJoinScheduler } from './comment-agent/facebook-group-join-scheduler.js';
 import { ContentScheduler } from './orchestrator/content-scheduler.js';
 import { isWeekActiveAt } from './risk/session-limits.js';
 import { createRolePromptProvider } from './config/role-prompt-preview.js';
@@ -196,6 +202,22 @@ function readEnvPort(name: string): number | undefined {
   if (!value) return undefined;
   const port = Number(value);
   return Number.isInteger(port) && port > 0 ? port : undefined;
+}
+
+function readEnvNumber(name: string, fallback: number): number {
+  const value = readEnvString(name);
+  if (!value) return fallback;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function readEnvList(name: string): Set<string> {
+  return new Set(
+    (readEnvString(name) ?? '')
+      .split(',')
+      .map((v) => v.trim())
+      .filter(Boolean),
+  );
 }
 
 function objectKeyPart(value: string): string {
@@ -458,6 +480,29 @@ async function main(): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
+  // Facebook group join: operator target catalog, one-group-one-account assignment ledger,
+  // and best-effort join audit. Join loop is default-off and shadow-first.
+  const facebookGroupTargetStore = new FacebookGroupTargetStore({
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
+  const facebookGroupMembershipStore = new FacebookGroupMembershipStore({
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
+  const facebookGroupJoinAuditStore = new FacebookGroupJoinAuditStore({
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
   try {
     await modelConfigStore.init();
     await credentialStore.init();
@@ -471,6 +516,9 @@ async function main(): Promise<void> {
     await contentScheduleStore.init();
     await facebookCommentConfigStore.init();
     await facebookCommentAuditStore.init();
+    await facebookGroupTargetStore.init();
+    await facebookGroupMembershipStore.init();
+    await facebookGroupJoinAuditStore.init();
     console.log('[aidcp-cloud] 模型配置 + 凭据 + 角色配置 + 分类默认 + 安全限额 + 单场上限 + 续场配置存储已就绪（model_config / provider_credentials / role_config / category_config / quota_config / session_config / resume_config）');
   } catch (err) {
     console.warn('[aidcp-cloud] 模型/凭据/角色/分类/限额/续场配置存储初始化失败（回退代码默认模型 + env 密钥；限额/续场回退派生写死默认）:', (err as Error).message);
@@ -2187,6 +2235,35 @@ async function main(): Promise<void> {
       void facebookCommentAuditStore.append(row);
     },
     facebookResolveContainerName: (accountId, url, name) => facebookCommentConfigStore.resolveContainerName(accountId, url, name),
+    facebookCoverageConfigFor: async (accountId) => {
+      const allowlist = readEnvList('AIDCP_FB_GROUP_COVERAGE_ACCOUNTS');
+      if (!allowlist.has(accountId)) return { coverageEnabled: false, enabled: false, keywords: [], containers: [] };
+      const base = facebookCommentConfigStore.getForAccount(accountId);
+      const candidates = await facebookGroupMembershipStore.coverageCandidates(accountId, {
+        limit: readEnvNumber('AIDCP_FB_GROUP_COVERAGE_PICK_WINDOW', 5),
+        cooldownMs: readEnvNumber('AIDCP_FB_GROUP_COVERAGE_COOLDOWN_HOURS', 72) * 60 * 60 * 1000,
+        warmupMs: readEnvNumber('AIDCP_FB_GROUP_COVERAGE_WARMUP_HOURS', 24) * 60 * 60 * 1000,
+      });
+      const chosen = candidates.length > 0 ? candidates[Math.floor(Math.random() * candidates.length)] ?? null : null;
+      return {
+        coverageEnabled: true,
+        enabled: base.keywords.length > 0 && chosen !== null,
+        keywords: base.keywords,
+        containers: chosen ? [{ url: chosen.groupUrl }] : [],
+      };
+    },
+    facebookCoverageOnCommented: (accountId, groupUrl) =>
+      facebookGroupMembershipStore.markCoverageCommented(accountId, groupUrl, {
+        cooldownMs: readEnvNumber('AIDCP_FB_GROUP_COVERAGE_COOLDOWN_HOURS', 72) * 60 * 60 * 1000,
+      }),
+    facebookCoverageOnFailure: (accountId, groupUrl, reason) => {
+      if (reason === 'permission_gated' || reason === 'nav_error' || reason.startsWith('nav_error')) {
+        void facebookGroupMembershipStore.recordCoverageLeftSignal(accountId, groupUrl, reason, {
+          requiredConfirmations: Math.max(1, Math.trunc(readEnvNumber('AIDCP_FB_GROUP_LEFT_CONFIRMATIONS', 3))),
+          demoteNow: reason === 'nav_error' || reason.startsWith('nav_error'),
+        });
+      }
+    },
     postResultCard: async (accountId, receipt) => {
       const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
       if (!chatId) {
@@ -2206,6 +2283,28 @@ async function main(): Promise<void> {
         }),
       );
     },
+    logger: console,
+  });
+
+  const facebookGroupJoinAutoEnabled = (): boolean => readEnvString('AIDCP_FB_GROUP_JOIN_AUTO') === 'true';
+  const facebookGroupJoinShadow = (): boolean => readEnvString('AIDCP_FB_GROUP_JOIN_SHADOW') === 'true';
+  const facebookGroupJoinScheduler = new FacebookGroupJoinScheduler({
+    resolveConnection: (accountId) => runtimes?.runtimeForAccount(accountId) ?? null,
+    pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
+    targets: facebookGroupTargetStore,
+    memberships: facebookGroupMembershipStore,
+    audit: facebookGroupJoinAuditStore,
+    llmFor: (accountId) => ({ complete: (prompt, opts) => llm.complete(prompt, { ...opts, accountId }) }),
+    canJoin: async (accountId) => (await resolveController(accountId)).canDo('join_group'),
+    isFacebookAccount: async (accountId) => (await accountStore?.getPlatform?.(accountId)) === 'facebook',
+    pauseAccount: async (accountId, reason) => {
+      await accountState.pause(accountId);
+      console.warn(`[fb-group-join] account paused account=${accountId} reason=${reason}`);
+    },
+    autoEnabled: facebookGroupJoinAutoEnabled,
+    shadow: facebookGroupJoinShadow,
+    retryBackoffMs: readEnvNumber('AIDCP_FB_GROUP_JOIN_RETRY_BACKOFF_HOURS', 6) * 60 * 60 * 1000,
+    maxAttempts: Math.max(1, Math.trunc(readEnvNumber('AIDCP_FB_GROUP_JOIN_MAX_ATTEMPTS', 3))),
     logger: console,
   });
   console.log(
@@ -2404,6 +2503,13 @@ async function main(): Promise<void> {
               contactAttemptsTodayCount: (accountId: string) => contentScheduleStore.countContactAttemptsToday(accountId),
             }
           : {}),
+        triggerJoin: (accountId: string) => facebookGroupJoinScheduler.triggerScheduled(accountId),
+        isJoinBusy: (accountId: string) => facebookGroupJoinScheduler.isRunning(accountId),
+        joinedTodayCount: (accountId: string) => facebookGroupMembershipStore.countJoinedToday(accountId),
+        joinDailyCap: async (accountId: string) => {
+          if (!facebookGroupJoinAutoEnabled() && !facebookGroupJoinShadow()) return 0;
+          return (await resolveController(accountId)).effectiveQuotas().day.join_group;
+        },
         logger: console,
       });
       contentScheduler.start(60_000);
@@ -2684,6 +2790,14 @@ async function main(): Promise<void> {
             get: (accountId) => facebookCommentConfigStore.getForAccount(accountId),
             set: (accountId, patch, updatedBy) =>
               facebookCommentConfigStore.setAccount(accountId, patch, updatedBy),
+          },
+          facebookGroupTargets: {
+            importTargets: (inputs, importBatch) => facebookGroupTargetStore.importTargets(inputs, importBatch),
+            listTargets: (options) => facebookGroupTargetStore.listTargets(options),
+            setEnabled: (groupUrl, enabled) => facebookGroupTargetStore.setEnabled(groupUrl, enabled),
+            accountProgress: () => facebookGroupTargetStore.accountProgress(),
+            listAssignments: (limit) => facebookGroupMembershipStore.listAssignments(limit),
+            reclaimStaleAssignments: (ttlMs) => facebookGroupMembershipStore.reclaimStaleAssignments(ttlMs),
           },
           captchaAssist: captchaAssist.isAvailable() ? captchaAssist : undefined,
           // 模型与凭据配置（change console-model-provider-config + model-config-volcengine-provider）。明文密钥绝不经此回传。

@@ -414,12 +414,14 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     deps: CommentSchedulerDeps;
     audits: Audit[];
     posted: string[];
+    envelopes: Envelope[];
     dedupRecorded: string[];
     resolvedNames: Array<{ url: string; name: string }>;
     composeArgs: Array<{ keyword: string; container: string; postText?: string; comments?: string[] }>;
   } {
     const audits: Audit[] = [];
     const posted: string[] = [];
+    const envelopes: Envelope[] = [];
     const dedupRecorded: string[] = [];
     const resolvedNames: Array<{ url: string; name: string }> = [];
     const composeArgs: Array<{ keyword: string; container: string; postText?: string; comments?: string[] }> = [];
@@ -430,6 +432,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     const pusher = {
       pushToEdges: (envelope: unknown): number => {
         const env = envelope as Envelope;
+        envelopes.push(env);
         posted.push(env.type);
         if (env.type === 'search.execute') {
           if (cfg.searchFail) {
@@ -498,7 +501,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
       facebookCommentedToday: async () => 0,
       facebookAudit: (row) => audits.push(row),
     });
-    return { deps, audits, posted, dedupRecorded, resolvedNames, composeArgs };
+    return { deps, audits, posted, envelopes, dedupRecorded, resolvedNames, composeArgs };
   }
   const tick = () => new Promise((r) => setTimeout(r, 120));
 
@@ -513,6 +516,62 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     // 群名自动回填：边缘回传真名 → 调 resolveContainerName（url→真名）；审计用群名、不用 id。
     assert.deepEqual(resolvedNames, [{ url: 'https://www.facebook.com/groups/1', name: 'Puerto Rico Y Sus Encantos e Historia' }]);
     assert.equal(audits.at(-1)?.container, 'Puerto Rico Y Sus Encantos e Historia');
+  });
+
+  it('joined-group coverage：账号启用但无 eligible joined group → no_targets，绝不回退配置容器', async () => {
+    const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true } });
+    await new CommentScheduler({
+      ...deps,
+      facebookCoverageConfigFor: () => ({ coverageEnabled: true, enabled: false, keywords: ['咖啡'], containers: [] }),
+    }).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'no_targets');
+    assert.deepEqual(posted, []);
+  });
+
+  it('joined-group coverage：从 ledger 容器搜索，成功后回写 coverage cursor', async () => {
+    const { deps, audits, envelopes } = fbFlowDeps({ submit: { ok: true } });
+    const marked: Array<{ accountId: string; groupUrl: string }> = [];
+    await new CommentScheduler({
+      ...deps,
+      facebookCoverageConfigFor: () => ({
+        coverageEnabled: true,
+        enabled: true,
+        keywords: ['咖啡'],
+        containers: [{ url: 'https://www.facebook.com/groups/joined-1' }],
+      }),
+      facebookCoverageOnCommented: async (accountId, groupUrl) => {
+        marked.push({ accountId, groupUrl });
+      },
+    }).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    assert.equal(envelopes.find((e) => e.type === 'search.execute')?.payload.container, 'https://www.facebook.com/groups/joined-1');
+    assert.deepEqual(marked, [{ accountId: 'fb-1', groupUrl: 'https://www.facebook.com/groups/joined-1' }]);
+  });
+
+  it('FB contact comment：正文先过无人值守校验，联系方式只在人审后以 groupChatCode 下发', async () => {
+    const { deps, audits, envelopes } = fbFlowDeps({ submit: { ok: true } });
+    const approvals: Array<{ noteId: string; text: string }> = [];
+    await new CommentScheduler({
+      ...deps,
+      getContactInfo: async () => 'LINE ID: abc123',
+      approval: {
+        request: async (r) => {
+          approvals.push({ noteId: r.noteId, text: r.text });
+        },
+        isApproved: async () => true,
+        timeoutMs: 20,
+        pollMs: 1,
+      },
+    }).triggerManual('fb-1', { injectContact: true });
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    assert.equal(approvals[0].noteId, PERMALINK);
+    assert.equal(approvals[0].text, '这家手冲咖啡很不错\nLINE ID: abc123');
+    const submit = envelopes.find((e) => e.type === 'interaction.comment');
+    assert.equal(submit?.payload.text, '这家手冲咖啡很不错');
+    assert.equal(submit?.payload.groupChatCode, 'LINE ID: abc123');
   });
 
   it('读了再写：撰写发生在开帖之后，且吃到帖子正文 + 他人评论', async () => {

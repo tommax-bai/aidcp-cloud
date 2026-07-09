@@ -106,6 +106,7 @@ export const ROLE_CATALOG: RoleCatalogItem[] = [
   { roleId: 'browse:comment_reviewer', displayName: '是否翻评论区判定', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
   { roleId: 'browse:curated_comment_evaluator', displayName: '精选准入·评论评估', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false }, // 仅评论点赞+精选库时注册
   { roleId: 'browse:comment_like_appraiser', displayName: '评论点赞择选', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false }, // 仅 AIDCP_COMMENT_LIKE=true 时注册（线上已开）
+  { roleId: 'browse:facebook_group_join_judge', displayName: 'Facebook 加群门槛判定', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
   // D. 点赞 / 收藏
   { roleId: 'browse:interaction_appraiser', displayName: '点赞收藏判定', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
   // D2. 阅读后写作旁路（不阻塞互动/返回信息流；仅发布链路可用时注册）

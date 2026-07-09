@@ -71,6 +71,17 @@ export interface ContentSchedulerDeps {
   /** 该账号今日已发评论数（持久互动记录，Asia/Shanghai 自然日）。 */
   commentedTodayCount?(accountId: string): Promise<number>;
   /**
+   * Facebook 加群动作三件套（change facebook-group-join-and-commenting）。可选：任一未注入 → join 动作整体跳过（零回归）。
+   * triggerJoin 内部负责 kill switch / shadow / canDo('join_group') / lazy-claim / judge / ledger。
+   */
+  triggerJoin?(accountId: string): Promise<unknown>;
+  /** 该账号加群任务是否在跑（= FacebookGroupJoinScheduler.isRunning，单飞闸）。 */
+  isJoinBusy?(accountId: string): boolean;
+  /** 该账号今日已确认加入的群数（membership ledger joined_at，Asia/Shanghai 自然日）。 */
+  joinedTodayCount?(accountId: string): Promise<number>;
+  /** join_group 的日上限（通常来自 RiskController.effectiveQuotas().day.join_group）。 */
+  joinDailyCap?(accountId: string): number | Promise<number>;
+  /**
    * 联系评论两件套（change content-schedule-group-comments）。可选：任一未注入 → 该动作整体跳过（零回归）。
    * triggerContactComment 实现负责 canDo('comment') 配额闸 + triggerManual(injectContact:true) + 回执 ok 记持久 attempt +
    * 触发失败回黄卡（缺联系方式 fail-closed 由触发回执透传；终态结果卡评论链自补）。单飞复用 isCommentBusy（同一评论机器）。
@@ -164,9 +175,16 @@ export class ContentScheduler {
           if (this.deps.browseActiveAt && !this.deps.browseActiveAt(now)) continue;
           if (this.inFlight.has(accountId)) continue;
 
-          // 动作循环（post 在前：纯云端、不接管边端；每账号每 tick 至多 fire 一个动作）。
-          for (const action of ['post', 'comment', 'contact_comment'] as const) {
+          // 动作循环（post 在前：纯云端、不接管边端；join/comment/contact 共用账号级 inFlight，物理边端单槽）。
+          // join_group 与 comment 的最坏日活动量由 joinDailyCap + commentDailyCap 显式相加评估：
+          // 默认 normal=3 joins/day，若排期 commentDailyCap=8，则该账号自动互动上界 11/day；restricted/frozen 在 riskStatus 闸处停。
+          for (const action of ['post', 'join', 'comment', 'contact_comment'] as const) {
             if (action === 'post' && (!s.postEnabled || s.postDailyCap <= 0)) continue;
+            if (action === 'join') {
+              if (!this.deps.triggerJoin || !this.deps.isJoinBusy || !this.deps.joinedTodayCount || !this.deps.joinDailyCap) continue;
+              const joinCap = await this.deps.joinDailyCap(accountId);
+              if (joinCap <= 0) continue;
+            }
             if (action === 'comment') {
               if (!s.commentEnabled || s.commentDailyCap <= 0) continue;
               // 评论三件套未注入（如 commentScheduler 未建）→ 评论动作整体跳过（零回归）。
@@ -219,6 +237,17 @@ export class ContentScheduler {
               void this.deps
                 .triggerComment!(accountId)
                 .catch((e) => this.deps.logger?.warn(`[content-scheduler] triggerComment 异常 account=${accountId}：${(e as Error).message}`))
+                .finally(() => this.inFlight.delete(accountId));
+            } else if (action === 'join') {
+              if (this.deps.isJoinBusy!(accountId)) continue;
+              const [joined, cap] = await Promise.all([this.deps.joinedTodayCount!(accountId), this.deps.joinDailyCap!(accountId)]);
+              if (joined >= cap) continue;
+
+              this.lastFired.set(fireKey, cell);
+              this.inFlight.add(accountId);
+              void this.deps
+                .triggerJoin!(accountId)
+                .catch((e) => this.deps.logger?.warn(`[content-scheduler] triggerJoin 异常 account=${accountId}：${(e as Error).message}`))
                 .finally(() => this.inFlight.delete(accountId));
             } else {
               // 联系评论：单飞复用评论机器（同一 isRunning，评论/联系评论互斥天然成立）。

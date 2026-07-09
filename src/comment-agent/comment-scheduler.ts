@@ -46,6 +46,10 @@ import { validateFacebookComment } from './facebook-comment-validators.js';
 import type { EffectiveFacebookCommentConfig } from '../config/facebook-comment-config-store.js';
 import type { FacebookCommentAuditRow, FacebookCommentOutcome } from './facebook-comment-audit-store.js';
 
+export interface FacebookCoverageCommentConfig extends EffectiveFacebookCommentConfig {
+  coverageEnabled: boolean;
+}
+
 export interface CommentResultReceipt {
   ok: boolean;
   level: 'success' | 'warning' | 'error';
@@ -120,6 +124,13 @@ export interface CommentSchedulerDeps {
   facebookAudit?: (row: FacebookCommentAuditRow) => void;
   /** 回填容器真实群名（change facebook-container-display-name）：边缘搜索时读出真名 → 刷新配置容器名（人只看群名）。 */
   facebookResolveContainerName?: (accountId: string, url: string, name: string) => Promise<void> | void;
+  /**
+   * Facebook joined-group coverage source（change facebook-group-join-and-commenting）。返回 coverageEnabled=true 表示该账号
+   * 已进入 per-account allowlist；若 enabled=false 则必须 no-op，不能回退配置容器或全站搜索。
+   */
+  facebookCoverageConfigFor?: (accountId: string) => FacebookCoverageCommentConfig | Promise<FacebookCoverageCommentConfig>;
+  facebookCoverageOnCommented?: (accountId: string, groupUrl: string) => Promise<void> | void;
+  facebookCoverageOnFailure?: (accountId: string, groupUrl: string, reason: string) => Promise<void> | void;
   /** 选关键词/容器的随机源（测试注入定值；缺省 Math.random）。 */
   random?: () => number;
 }
@@ -234,7 +245,7 @@ export class CommentScheduler {
         };
       }
       this.running.add(accountId);
-      void this.runFacebookTargetedTask(accountId)
+      void this.runFacebookTargetedTask(accountId, { injectContact: options?.injectContact, contactInfo })
         .catch((err) =>
           (this.deps.logger ?? console).warn(
             `[comment-scheduler] FB 定向评论任务异常 account=${accountId}：${(err as Error).message}`,
@@ -349,7 +360,7 @@ export class CommentScheduler {
         };
       }
       this.running.add(accountId);
-      void this.runFacebookTargetedTask(accountId)
+      void this.runFacebookTargetedTask(accountId, { injectContact: options?.injectContact, contactInfo })
         .catch((err) =>
           (this.deps.logger ?? console).warn(
             `[comment-scheduler] FB 定向评论任务异常 account=${accountId}：${(err as Error).message}`,
@@ -391,7 +402,10 @@ export class CommentScheduler {
    * - 真发成功的风控计数走 interaction.occurred → RiskController.record('comment') 自动路径（handler.ts），
    *   **绝不在此重复 record**；本方法只在**提交派发前**打 attempted 去重标记（防重复真发 §5.4，与成功计数解耦）。
    */
-  private async runFacebookTargetedTask(accountId: string): Promise<void> {
+  private async runFacebookTargetedTask(
+    accountId: string,
+    options: { injectContact?: boolean; contactInfo?: string | null } = {},
+  ): Promise<void> {
     const d = this.deps;
     const rand = d.random ?? Math.random;
     const shadow = d.facebookShadow?.() ?? false;
@@ -407,8 +421,12 @@ export class CommentScheduler {
     // kill switch：既未开真发、也未开影子 → 整条功能关闭，静默不跑（不产审计噪音）。
     if (!autoEnabled && !shadow) return;
 
+    // joined-group coverage 是 per-account gate。启用后从 ledger 选容器；没有 eligible joined group 必须 no-op，不回退配置源。
+    const coverageCfg = await d.facebookCoverageConfigFor?.(accountId);
+    const usingCoverage = coverageCfg?.coverageEnabled === true;
+
     // 配置 fail-closed：关键词或容器任一为空 → 诚实 no-op。
-    const cfg: EffectiveFacebookCommentConfig = d.facebookConfigFor!(accountId);
+    const cfg: EffectiveFacebookCommentConfig = usingCoverage ? coverageCfg! : d.facebookConfigFor!(accountId);
     if (!cfg.enabled || cfg.keywords.length === 0 || cfg.containers.length === 0) {
       audit({ accountId, outcome: 'no_targets', shadow });
       return;
@@ -464,6 +482,7 @@ export class CommentScheduler {
     }
     if (!search.ok) {
       audit({ accountId, outcome: mapFacebookBlockOutcome(search.reason), reason: search.reason, shadow, keyword, container });
+      if (usingCoverage && search.reason) void d.facebookCoverageOnFailure?.(accountId, containerUrl, search.reason);
       return;
     }
     // 2) 选一个未评过的候选（防重复真发：跳过 dedup 已标记的 permalink）。
@@ -490,6 +509,7 @@ export class CommentScheduler {
     const open = await steps.openPost(target);
     if (!open.ok) {
       audit({ accountId, outcome: mapFacebookOpenOutcome(open.reason), reason: open.reason, shadow, keyword, container });
+      if (usingCoverage && open.reason) void d.facebookCoverageOnFailure?.(accountId, containerUrl, open.reason);
       return;
     }
     const postText = open.postText;
@@ -512,6 +532,26 @@ export class CommentScheduler {
       return;
     }
 
+    let groupChatCode: string | undefined;
+    if (options.injectContact) {
+      const contactInfo = options.contactInfo ?? null;
+      if (!contactInfo) {
+        audit({ accountId, outcome: 'compose_skipped', reason: 'contact_info_missing', shadow, keyword, container, textLength: v.text.length });
+        return;
+      }
+      const approved = await this.approveFacebookContactComment(accountId, {
+        permalink: target,
+        text: v.text,
+        contactInfo,
+        container,
+      });
+      if (!approved) {
+        audit({ accountId, outcome: 'compose_skipped', reason: 'approval_rejected_or_timeout', shadow, keyword, container, textLength: v.text.length });
+        return;
+      }
+      groupChatCode = approved.contactInfo;
+    }
+
     // 5) 影子：只读浏览 + 撰写 + 校验到此为止——绝不提交、不记风控/冷却、不按已发去重。
     if (shadow) {
       audit({ accountId, outcome: 'shadow_ok', shadow: true, keyword, container, textLength: v.text.length });
@@ -519,7 +559,7 @@ export class CommentScheduler {
     }
 
     // 6) 提交评论 + 服务器确认（边端 own-identity 收窄）。成功记风控走 interaction.occurred 自动路径，绝不在此重复 record。
-    const submit = await steps.submitComment(target, v.text);
+    const submit = await steps.submitComment(target, v.text, groupChatCode);
     // 防重复真发（BLOCKING §5.4）：仅在**真提交了**（成功 或 提交后确认不了 verification_ambiguous）时打去重标记——
     // 硬失败（权限门/找不到评论框/被拦/身份未知）没真点提交、无重复真发风险，不打标记（可重试、不白占当日上限）。
     // 该标记同时使 facebookCommentedToday 计入当日配额；仅计「真发过一次」的目标，不误伤硬失败重试。
@@ -527,6 +567,7 @@ export class CommentScheduler {
     if (reallySubmitted) await dedup.recordInteraction(target, 'comment').catch(() => {});
     if (submit.ok) {
       audit({ accountId, outcome: 'commented', shadow: false, keyword, container, textLength: v.text.length });
+      if (usingCoverage) void d.facebookCoverageOnCommented?.(accountId, containerUrl);
     } else {
       audit({
         accountId,
@@ -537,7 +578,51 @@ export class CommentScheduler {
         container,
         textLength: v.text.length,
       });
+      if (usingCoverage && submit.reason) void d.facebookCoverageOnFailure?.(accountId, containerUrl, submit.reason);
     }
+  }
+
+  private async approveFacebookContactComment(
+    accountId: string,
+    input: { permalink: string; text: string; contactInfo: string; container: string },
+  ): Promise<{ text: string; contactInfo: string } | null> {
+    const approval = this.deps.approval;
+    const log = this.deps.logger ?? console;
+    if (!approval) {
+      log.warn('[fb-comment] 联系评论人审口未接线 → 不发（绝不裸发）');
+      return null;
+    }
+    const now = this.deps.now ?? (() => Date.now());
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const requestId = `facebook-comment-${now()}`;
+    const reviewText = `${input.text}\n${input.contactInfo}`;
+    try {
+      await approval.request({
+        requestId,
+        noteId: input.permalink,
+        text: reviewText,
+        title: `Facebook 群组评论：${input.container}`,
+        authorName: 'Facebook',
+        accountId,
+      });
+    } catch (err) {
+      log.warn(`[fb-comment] 联系评论审批卡发送失败 account=${accountId}：${(err as Error).message}`);
+      return null;
+    }
+    const timeoutMs = approval.timeoutMs ?? 90_000;
+    const pollMs = approval.pollMs ?? 2_000;
+    const deadline = now() + timeoutMs;
+    while (now() <= deadline) {
+      let approved = false;
+      try {
+        approved = await approval.isApproved(requestId);
+      } catch {
+        approved = false;
+      }
+      if (approved) return { text: input.text, contactInfo: input.contactInfo };
+      await sleep(pollMs);
+    }
+    return null;
   }
 
   private async runTargetedTask(
