@@ -3,6 +3,22 @@ type Unsubscribe = () => void;
 
 export class PipelineContext<T extends Record<string, any>> {
   private state: Partial<T> = {};
+  /**
+   * 中止标记（change parallel-rewrite-drafts 僵尸轮拦截）：本轮对外收敛（含超时判 failed）后置位。
+   * 管线超时不取消在途角色链——超时后角色仍会接力；落库/发卡等对外副作用点 MUST 检查此位，
+   * 已对外报终态的轮次绝不再产生第二结局（一次触发两个结局 = 静默假成功变体）。
+   */
+  private aborted = false;
+
+  /** 置中止位（编排器在本轮收敛后调用；不可逆）。 */
+  markAborted(): void {
+    this.aborted = true;
+  }
+
+  /** 本轮是否已中止/收敛（副作用点检查用）。 */
+  isAborted(): boolean {
+    return this.aborted;
+  }
   private watchers: Map<string, Array<{ handler: WatchHandler; once: boolean }>> = new Map();
   private waitAllGroups: Array<{
     keys: string[];

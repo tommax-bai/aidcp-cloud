@@ -33,7 +33,8 @@ import {
 } from '../../src/publish-agent/roles/index.js';
 import { ApprovalGatekeeperRole } from '../../src/publish-agent/roles/approval-gatekeeper.js';
 import { PublishExecutorRole } from '../../src/publish-agent/roles/publish-executor.js';
-import type { TriggerInput } from '../../src/publish-agent/types.js';
+import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
+import type { PipelineFields, TriggerInput } from '../../src/publish-agent/types.js';
 
 const clock = () => 1700000000000;
 const silentLogger = { log() {}, warn() {}, error() {} };
@@ -279,20 +280,49 @@ describe('PublishOrchestrator', () => {
     assert.match(result.reason ?? '', /timed out/i, '超时失败带「为什么」（timed out），不再只给 failed');
   });
 
-  test('重复 trigger → 第二次被忽略（running 状态防重入）', async () => {
-    const { orchestrator } = buildFullPipeline({
+  test('僵尸轮拦截（change parallel-rewrite-drafts）：本轮收敛置中止标记后，迟到的 PublishExecutor 绝不落库、绝不发卡', async () => {
+    const inserted: unknown[] = [];
+    const executor = new PublishExecutorRole({
+      store: { insert: async (r: unknown) => { inserted.push(r); return 1; } } as any,
+      clock,
+      logger: silentLogger,
+    });
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('trigger', makeTriggerInput());
+    executor.register(ctx);
+    // 编排器超时收敛 → finally 置中止位；此后在途角色链仍会把发布门三键写齐（僵尸接力）。
+    ctx.markAborted();
+    ctx.write('gateDecision', { needsApproval: false, recommendedAction: 'auto_publish', reason: 'ok', decidedAt: clock() } as any);
+    ctx.write('titleSelection', { title: 'T', source: 'llm', decidedAt: clock() } as any);
+    ctx.write('publishMetadata', { topics: [], mentions: [], location: null, collection: null, visibility: 'public', permissions: { comment: 'allow', save: 'allow' }, mode: 'immediate', publishTime: null, compliance: {}, metadataScore: 0.5, decidedAt: clock() } as any);
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(inserted.length, 0, '中止轮绝不 INSERT 待审草稿（不穿透单飞键与容量帽、不出第二结局）');
+    assert.equal(ctx.get('publishResult')?.status, 'skipped');
+    assert.match(ctx.get('publishResult')?.reason ?? '', /run_aborted/);
+  });
+
+  test('并发 trigger（change parallel-rewrite-drafts：准入闸上移调度器 claim 层）→ 两轮并行各自完成、簿记互不串', async () => {
+    const { orchestrator, insertedRecords } = buildFullPipeline({
       scout: JSON.stringify({ shouldPublish: true, publishDirection: 'test', keyPoints: [], confidence: 0.5, reason: 'ok' }),
       creator: JSON.stringify({ title: 'T', content: 'c', tags: [], tone: 'casual', style: {} }),
       image: JSON.stringify({ imagePrompt: null }),
       assembler: JSON.stringify({ qualityScore: 60 }),
       gatekeeper: JSON.stringify({ needsApproval: false, recommendedAction: 'auto_publish', reason: 'ok' }),
-    });
+    }, { enableImage: true });
     const p1 = orchestrator.trigger(makeTriggerInput());
-    const result2 = await orchestrator.trigger(makeTriggerInput());
-    assert.equal(result2.status, 'skipped');
-    assert.equal(result2.runId, '');
-    const result1 = await p1;
-    assert.ok(['pending_approval', 'draft', 'needs_review', 'failed'].includes(result1.status));
+    const p2 = orchestrator.trigger(makeTriggerInput());
+    // 在跑期间观测：多 run 形状可见两轮，旧字段聚合为 running（旧版 console 不白屏）。
+    const during = orchestrator.getStatus();
+    assert.equal(during.status, 'running');
+    assert.equal(during.runs.length, 2, 'runs 列出两条并行管线');
+    const [result1, result2] = await Promise.all([p1, p2]);
+    assert.ok(['pending_approval', 'draft', 'needs_review'].includes(result1.status), `第一轮正常收敛（got ${result1.status}: ${result1.reason ?? ''}）`);
+    assert.ok(['pending_approval', 'draft', 'needs_review'].includes(result2.status), `第二轮同样正常收敛、绝不被第一轮拒绝或抹掉（got ${result2.status}: ${result2.reason ?? ''}）`);
+    assert.equal(insertedRecords.length, 2, '两轮各落各的待审草稿');
+    // 全部收敛后：注册表清空、旧字段回落最近终态。
+    const after = orchestrator.getStatus();
+    assert.equal(after.runs.length, 0);
+    assert.equal(after.status, 'completed');
   });
 
   test('AC-TITLE-FIDELITY / task0.2：TitleCreator 抛错 → 流水线即时 failed、未落库未发布（不干等 pipelineTimeoutMs）', async () => {

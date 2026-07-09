@@ -135,6 +135,20 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
   }
 
   protected async execute(input: ExecutorInput, context: PipelineContext<PipelineFields>): Promise<PublishResult> {
+    // 僵尸轮拦截（change parallel-rewrite-drafts）：管线超时不取消在途角色链，超时判 failed 后角色仍会
+    // 接力至此。本轮已对外收敛 → 绝不落库、绝不发卡（第二结局=静默假成功变体，且僵尸落库会穿透
+    // 调度器单飞键与容量帽）。已发生的模型/生图消耗为沉没成本、已如实记账。
+    if (context.isAborted()) {
+      this.logger.warn('[PublishExecutor] 本轮已收敛/中止（超时僵尸轮）→ 不落库、不发审批卡');
+      return {
+        recordId: null,
+        status: 'skipped',
+        dispatched: false,
+        envelope: null,
+        completedAt: this.clock(),
+        reason: 'run_aborted（超时僵尸轮拦截：本轮已对外报终态，不产生第二结局）',
+      };
+    }
     const { gateDecision, assembledContent, publishMetadata } = input;
     const title = this.resolveTitle(input.titleSelection, assembledContent);
     const accountId = this.accountIdFrom(context);
