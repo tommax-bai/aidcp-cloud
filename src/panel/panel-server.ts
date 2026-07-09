@@ -369,10 +369,12 @@ function createRequestHandler(
       return;
     }
     // 已发布历史（change publish-history-account-and-detail）：带账号/正文/详情链接，可选 ?accountId 过滤。
+    // ?status 服务端过滤（change parallel-rewrite-drafts）：待审集合完整可见，不受全局 LIMIT 50 窗口挤出。
     if (method === 'GET' && url === '/api/content/published') {
       const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
       const accountId = query.get('accountId') ?? undefined;
-      sendJson(res, 200, { items: await deps.panelStore.publishedHistory(50, accountId) });
+      const status = query.get('status') ?? undefined;
+      sendJson(res, 200, { items: await deps.panelStore.publishedHistory(50, accountId, status) });
       return;
     }
     if (method === 'GET' && url === '/api/content/queue') {

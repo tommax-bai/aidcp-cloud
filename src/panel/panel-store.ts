@@ -183,8 +183,8 @@ export interface PanelStoreReader {
   likeRate(): Promise<LikeRate>;
   listAccounts(): Promise<PanelAccount[]>;
   getAccount(accountId: string): Promise<PanelAccount | null>;
-  /** 已发布历史；可选按账号过滤（change publish-history-account-and-detail）。 */
-  publishedHistory(limit: number, accountId?: string): Promise<PanelPublish[]>;
+  /** 已发布历史；可选按账号/状态过滤（change publish-history-account-and-detail；status 见 parallel-rewrite-drafts）。 */
+  publishedHistory(limit: number, accountId?: string, status?: string): Promise<PanelPublish[]>;
   /** 告警列表（V1 task 9.5）；默认仅未解决。 */
   listAlerts(options?: { limit?: number; includeResolved?: boolean }): Promise<PanelAlert[]>;
   /** 按笔记互动历史（V1 task 9.2）；可按账号过滤。 */
@@ -432,14 +432,21 @@ export class PgPanelStore implements PanelStoreReader {
   /**
    * 已发布历史（change publish-history-account-and-detail）：带账号 + 正文 + 详情页链接；可选按账号过滤。
    * LEFT JOIN accounts 取展示名（label ?? account_id）；按账号过滤走 publish_log.account_id 索引（迁移 0005）。
+   * status 服务端过滤（change parallel-rewrite-drafts）：多候选草稿世界待审集合必须完整可见——
+   * 「全局最近 N 条再客户端过滤」的窗口会把老 pending 挤出视野，挑选入口面残缺。
    */
-  async publishedHistory(limit: number, accountId?: string): Promise<PanelPublish[]> {
+  async publishedHistory(limit: number, accountId?: string, status?: string): Promise<PanelPublish[]> {
     const params: unknown[] = [];
-    let where = '';
+    const conds: string[] = [];
     if (accountId) {
       params.push(accountId);
-      where = `WHERE pl.account_id = $${params.length}`;
+      conds.push(`pl.account_id = $${params.length}`);
     }
+    if (status) {
+      params.push(status);
+      conds.push(`pl.status = $${params.length}`);
+    }
+    const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : '';
     params.push(limit);
     const { rows } = await this.pool.query<{
       id: number;
