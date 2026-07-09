@@ -120,6 +120,8 @@ export interface HelloPayload {
   capabilities?: string[];
   /** 该边缘当前驱动的账号标识（用于风控归属与验证码事件定位；缺省视为默认账号） */
   accountId?: string;
+  /** 该账号的可读昵称；仅作展示补充，不参与身份确立或路由 */
+  accountNickname?: string;
   /** 人类可读的机器标签（如 "win-aliyun-3"），验证码卡片据此告诉运维去哪台机器处置 */
   machineLabel?: string;
   /** 远程桌面 / 可达地址（如 RDP/VNC 地址或跳板说明），用于人工远程处置 */

@@ -59,13 +59,17 @@ function makeHandler(llm: LlmClient, store: AnchorStore) {
 
 const dummyLlm: LlmClient = { complete: async () => '0' };
 
-test('hello → welcome，并记录 edgeId 到会话', async () => {
+test('hello → welcome，并记录 edgeId/账号昵称到会话', async () => {
   const h = makeHandler(dummyLlm, memStore());
   const s: EdgeSession = { sessionId: 'sX' };
-  const res = await h.handle(makeEnvelope('hello', 'h1', 1, { edgeId: 'edge-1', app: 'xhs' }), s);
+  const res = await h.handle(
+    makeEnvelope('hello', 'h1', 1, { edgeId: 'edge-1', app: 'xhs', accountNickname: '  Test User  ' }),
+    s,
+  );
   assert.equal(res?.type, 'welcome');
   assert.equal(s.edgeId, 'edge-1');
   assert.equal(s.app, 'xhs');
+  assert.equal(s.accountNickname, 'Test User');
 });
 
 test('ping → pong', async () => {

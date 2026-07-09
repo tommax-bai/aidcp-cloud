@@ -40,15 +40,20 @@ interface Harness {
   observerBus: EventBus;
   built: DispatcherBuildContext[];
   ensured: string[];
+  nicknameWrites: Array<{ accountId: string; nickname: string }>;
   configErrors: { edgeId?: string; message: string }[];
   closed: string[];
   dispatchers: FakeDispatcher[];
 }
 
-function makeHarness(platformByAccount: Record<string, PlatformId> = {}): Harness {
+function makeHarness(
+  platformByAccount: Record<string, PlatformId> = {},
+  nicknameByAccount: Record<string, string | null> = {},
+): Harness {
   const observerBus = new EventBus();
   const built: DispatcherBuildContext[] = [];
   const ensured: string[] = [];
+  const nicknameWrites: Array<{ accountId: string; nickname: string }> = [];
   const configErrors: { edgeId?: string; message: string }[] = [];
   const closed: string[] = [];
   const dispatchers: FakeDispatcher[] = [];
@@ -67,6 +72,11 @@ function makeHarness(platformByAccount: Record<string, PlatformId> = {}): Harnes
       if (platform && !(accountId in platformByAccount)) platformByAccount[accountId] = platform;
     },
     getAccountPlatform: async (accountId) => platformByAccount[accountId] ?? 'xiaohongshu',
+    getNickname: (accountId) => nicknameByAccount[accountId] ?? null,
+    setNickname: async (accountId, nickname) => {
+      nicknameWrites.push({ accountId, nickname });
+      nicknameByAccount[accountId] = nickname;
+    },
     onConfigError: (session, message) => {
       configErrors.push({ edgeId: session.edgeId, message });
     },
@@ -75,7 +85,7 @@ function makeHarness(platformByAccount: Record<string, PlatformId> = {}): Harnes
     },
     logger: silent,
   });
-  return { registry, observerBus, built, ensured, configErrors, closed, dispatchers };
+  return { registry, observerBus, built, ensured, nicknameWrites, configErrors, closed, dispatchers };
 }
 
 test('缺 accountId 握手被当配置错误拒绝：不建运行时、发配置告警、绝不偷映射 default', async () => {
@@ -168,6 +178,46 @@ test('facebook-scheduled-comment 2.8：facebook 连接的 dispatcher 上下文�
   const outcome = await h.registry.onHandshake({ sessionId: 's1', edgeId: 'eA', accountId: 'acctX', platform: 'facebook' });
   assert.equal(outcome.ok, true);
   assert.equal(h.built[0].platform, 'facebook');
+});
+
+test('facebook-scheduled-comment 2.9：hello 昵称在平台校验后写入空昵称账号', async () => {
+  const h = makeHarness({ fbA: 'facebook' });
+  const outcome = await h.registry.onHandshake({
+    sessionId: 's1',
+    edgeId: 'eFB',
+    accountId: 'fbA',
+    platform: 'facebook',
+    accountNickname: '  Test User  ',
+  });
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(h.nicknameWrites, [{ accountId: 'fbA', nickname: 'Test User' }]);
+});
+
+test('facebook-scheduled-comment 2.9：hello 昵称不覆盖已有昵称', async () => {
+  const h = makeHarness({ fbA: 'facebook' }, { fbA: 'Existing Name' });
+  const outcome = await h.registry.onHandshake({
+    sessionId: 's1',
+    edgeId: 'eFB',
+    accountId: 'fbA',
+    platform: 'facebook',
+    accountNickname: 'Test User',
+  });
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(h.nicknameWrites, []);
+});
+
+test('facebook-scheduled-comment 2.9：平台不匹配时不写 hello 昵称', async () => {
+  const h = makeHarness({ fbA: 'facebook' });
+  const outcome = await h.registry.onHandshake({
+    sessionId: 's1',
+    edgeId: 'eFB',
+    accountId: 'fbA',
+    platform: 'xiaohongshu',
+    accountNickname: 'Test User',
+  });
+  assert.equal(outcome.ok, false);
+  assert.equal((outcome as { code: string }).code, 'platform_mismatch');
+  assert.deepEqual(h.nicknameWrites, []);
 });
 
 test('未知 edge platform：配置错误拒绝，且不登记账号', async () => {

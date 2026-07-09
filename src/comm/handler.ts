@@ -369,6 +369,7 @@ export class DefaultMessageHandler implements MessageHandler {
     session.app = p.app;
     // 身份落到连接：用于风控归属与验证码事件定位（缺字段安全降级，卡片至少带 edgeId）。
     session.accountId = p.accountId;
+    session.accountNickname = typeof p.accountNickname === 'string' ? p.accountNickname.trim() || undefined : undefined;
     session.machineLabel = p.machineLabel;
     session.remoteAddr = p.remoteAddr;
     // 多租户握手（multi-account-node-support）：校验账号身份、登记新账号、建该连接运行时（私有总线 + RoleDispatcher）。

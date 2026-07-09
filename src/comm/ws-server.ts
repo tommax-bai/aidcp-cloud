@@ -29,6 +29,8 @@ export interface EdgeSession {
   app?: string;
   /** 该边缘当前驱动的账号（hello 上报，用于风控归属与验证码定位） */
   accountId?: string;
+  /** 账号可读昵称（hello 上报，仅作展示补充） */
+  accountNickname?: string;
   /** 人类可读机器标签（hello 上报，验证码卡片告诉运维去哪台机器） */
   machineLabel?: string;
   /** 远程桌面/可达地址（hello 上报，用于人工远程处置） */

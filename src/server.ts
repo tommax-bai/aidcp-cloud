@@ -1882,7 +1882,7 @@ async function main(): Promise<void> {
       // 注入即开启自动续场（生产）；缺行回落写死默认（rest 10% / 全天窗口 / 不限 / 看门狗轻推~2min·放弃 1h）。
       resumeConfigProvider: resumeConfigStore,
       // 登录账号真实昵称采集（change account-real-nickname）：同步读（进程内缓存，握手算「需采集」）+ 单写持久化。
-      // 经注入走 dispatcher 路径，**不**走被 revert 的 hello 摄取路径；无 PG → getNickname 恒 null、setNickname no-op。
+      // xhs 仍经 dispatcher/profile.detail 路径采集；Facebook 可在通过平台校验后由 hello 的 verified nickname 补充。
       getNickname: (accountId) => accountStore?.getNickname?.(accountId) ?? null,
       setNickname: (accountId, nickname) => accountStore?.setNickname?.(accountId, nickname),
     });
@@ -1900,6 +1900,8 @@ async function main(): Promise<void> {
       }
     },
     getAccountPlatform: async (accountId) => accountStore?.getPlatform?.(accountId) ?? 'xiaohongshu',
+    getNickname: (accountId) => accountStore?.getNickname?.(accountId) ?? null,
+    setNickname: (accountId, nickname) => accountStore?.setNickname?.(accountId, nickname),
     onConfigError,
     closeEdge: (sessionId) => server.closeEdge(sessionId),
     logger: console,

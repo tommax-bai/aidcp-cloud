@@ -52,6 +52,10 @@ export interface RuntimeRegistryDeps {
   ensureAccount: (accountId: string, platform?: PlatformId) => Promise<void>;
   /** 从 accounts.platform 读取账号平台；缺省用于测试/旧装配时按 xhs 处理。 */
   getAccountPlatform?: (accountId: string) => Promise<PlatformId>;
+  /** 同步读取账号昵称；用于避免 hello 展示名覆盖已有运营昵称。 */
+  getNickname?: (accountId: string) => string | null;
+  /** 写入账号昵称；必须只在账号已通过平台校验后调用。 */
+  setNickname?: (accountId: string, nickname: string) => Promise<void> | void;
   /** 缺/空 accountId → 配置错误告警（拒绝握手，不建会话、不偷映射 default）。 */
   onConfigError: (session: EdgeSession, message: string) => void | Promise<void>;
   /** 同 edgeId 重连顶替：收掉该 sessionId 的旧 ws（→ ws close → onDisconnect 拆除其运行时）。 */
@@ -131,6 +135,18 @@ export class ConnectionRuntimeRegistry {
       const message = `edge platform=${edgePlatform} 与账号 ${accountId} accounts.platform=${accountPlatform} 不一致，拒绝派活`;
       await this.deps.onConfigError(session, message);
       return { ok: false, code: 'platform_mismatch', message };
+    }
+
+    const helloNickname = session.accountNickname?.trim();
+    if (helloNickname && this.deps.setNickname) {
+      const existingNickname = this.deps.getNickname?.(accountId)?.trim() ?? '';
+      if (!existingNickname) {
+        try {
+          await Promise.resolve(this.deps.setNickname(accountId, helloNickname));
+        } catch (err) {
+          this.deps.logger?.warn?.(`[runtime] persist hello nickname failed for account=${accountId}: ${(err as Error).message}`);
+        }
+      }
     }
 
     // 同 edgeId 重连顶替（同一节点回来，不计为并行第二节点）：收掉该 edgeId 的旧连接。
