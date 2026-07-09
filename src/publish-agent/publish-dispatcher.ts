@@ -5,11 +5,13 @@
  *   取下发锁（按账号串行）→ 让位（结束该账号浏览）→ 从落库草稿重建发布输入 → 驱动指令序列 →
  *   回写结果 → 解除让位（经续场各闸起新浏览）。
  *
- * 红线：
+ * 红线（change parallel-rewrite-drafts 重述，授权仍是发布的必要条件）：
  * - AC-PUB：下发前 MUST 复核授权信号 approved===true，未授权绝不下发（纵深防御，触发源已写信号仍再核一遍）。
- * - 通过即切：授权到达即下发该草稿、不等自然空档。
+ * - 通过即切：授权到达即下发该草稿、不等自然空档。唯一例外=该账号处于下发熔断（连续序列失败触发）——
+ *   熔断只延后不放行不烧授权，人工再次批准（含 already-decided 重复批准）即确认清除、恢复 drain。
  * - 忠于冻结草稿：从 publish_log 读回标题/正文/图/元数据原样发，MUST NOT 重生成（陈旧亦照发）。
- * - 边缘离线：诚实 failed（不发指令、不伪造、不静默吞授权、不让位空转）。
+ * - 边缘离线（零副作用失败）：草稿回待审 + 作废本次授权信号 + 通知重批（不烧稿、不伪造、不静默吞授权、
+ *   不让位空转）；序列中途失败（页面状态未知）仍诚实 failed 终态、绝不自动重跑。
  * - 幂等 + 按账号单飞：同 recordId 重复触发不二次发布；同账号下发串行，绝不并发抢同一边缘。
  */
 
@@ -33,6 +35,14 @@ export interface ApprovalDecision {
   contentVersion: number;
 }
 
+/** 下发段运维通知（best-effort，绝不影响下发主链路）：离线回待审 / 熔断开启 / 熔断解除。 */
+export interface DispatchNotice {
+  kind: 'offline_requeued' | 'breaker_open' | 'breaker_cleared';
+  accountId: string;
+  recordId?: number;
+  title?: string | null;
+}
+
 export interface PublishDispatcherDeps {
   store: DispatchStore;
   sequencer: Pick<CommandSequencer, 'executePublishSequence'>;
@@ -51,6 +61,10 @@ export interface PublishDispatcherDeps {
    * 推给该账号的在线边缘。published 不经此通道（边缘 submit 成功处自知）。best-effort，绝不影响下发主链路。
    */
   notifyUiPublishState?: (accountId: string, recordId: number, state: 'approved' | 'failed', title?: string | null) => void;
+  /** 运维通知（飞书 best-effort）：离线回待审 / 熔断开启 / 熔断解除。 */
+  notifyDispatchEvent?: (notice: DispatchNotice) => void;
+  /** 同账号连续序列失败多少次触发熔断（默认 2）。 */
+  breakerThreshold?: number;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
 
@@ -63,12 +77,18 @@ export class PublishDispatcher {
   private readonly onPublishStart: (accountId: string) => void;
   private readonly onPublishEnd: (accountId: string) => void;
   private readonly notifyUiPublishState?: (accountId: string, recordId: number, state: 'approved' | 'failed', title?: string | null) => void;
+  private readonly notifyDispatchEvent?: (notice: DispatchNotice) => void;
+  private readonly breakerThreshold: number;
   private readonly logger: Pick<Console, 'log' | 'warn' | 'error'>;
 
   /** 同 recordId 在途去重（防重复点击/事件与兜底扫描双触发）。 */
   private readonly inFlight = new Set<number>();
   /** 按账号串行：每账号一条 Promise 链尾，新下发挂到链尾、绝不并发抢同一边缘。 */
   private readonly accountTail = new Map<string, Promise<void>>();
+  /** 熔断（防连环烧稿）：同账号连续序列失败计数（成功清零；内存态，重启即清=有界代价）。 */
+  private readonly consecutiveSeqFails = new Map<string, number>();
+  /** 熔断中的账号：停 drain 已批队列、新下发拒绝且不烧授权；人工批准确认清除。 */
+  private readonly openBreakers = new Set<string>();
 
   constructor(deps: PublishDispatcherDeps) {
     this.store = deps.store;
@@ -79,14 +99,55 @@ export class PublishDispatcher {
     this.onPublishStart = deps.onPublishStart;
     this.onPublishEnd = deps.onPublishEnd;
     this.notifyUiPublishState = deps.notifyUiPublishState;
+    this.notifyDispatchEvent = deps.notifyDispatchEvent;
+    this.breakerThreshold = Math.max(1, deps.breakerThreshold ?? 2);
     this.logger = deps.logger ?? console;
+  }
+
+  /** 该账号是否处于下发熔断（观测/预检提示用）。 */
+  isBreakerOpen(accountId: string): boolean {
+    return this.openBreakers.has(accountId);
+  }
+
+  /** 运维通知 best-effort 包装：通知层异常绝不打断下发主链路。 */
+  private notifyOps(notice: DispatchNotice): void {
+    try {
+      this.notifyDispatchEvent?.(notice);
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /** 序列失败记账：连续 N 次触发熔断（自愈不自残——停 drain 防连环烧掉整批获批草稿）。 */
+  private recordSeqFailure(accountId: string, recordId: number, title?: string | null): void {
+    const n = (this.consecutiveSeqFails.get(accountId) ?? 0) + 1;
+    this.consecutiveSeqFails.set(accountId, n);
+    if (n >= this.breakerThreshold && !this.openBreakers.has(accountId)) {
+      this.openBreakers.add(accountId);
+      this.logger.warn(
+        `[PublishDispatcher] 账号 ${accountId} 连续 ${n} 次下发序列失败 → 熔断开启：停 drain 已批队列、新下发拒绝且不烧授权；人工重新批准即确认恢复`,
+      );
+      this.notifyOps({ kind: 'breaker_open', accountId, recordId, title });
+    }
+  }
+
+  /** 人工批准确认（含 already-decided 重复批准）：熔断中即视为人工确认清除，并踢一次兜底扫描恢复 drain。 */
+  private confirmHumanApproval(accountId: string): boolean {
+    if (!this.openBreakers.has(accountId)) return false;
+    this.openBreakers.delete(accountId);
+    this.consecutiveSeqFails.delete(accountId);
+    this.logger.log(`[PublishDispatcher] 账号 ${accountId} 人工批准确认 → 熔断清除，恢复 drain 已批队列`);
+    this.notifyOps({ kind: 'breaker_cleared', accountId });
+    return true;
   }
 
   /**
    * 触发一条草稿的下发（幂等 + 按账号串行）。授权信号到达即调用。
    * 已在途的同 recordId 直接忽略；不存在/非待审的草稿安静跳过。
+   * opts.humanApproval：人工批准入口（飞书/面板，含 already-decided 重复批准）——熔断中即视为
+   * 人工确认清除熔断并踢兜底扫描恢复 drain；非人工路径（兜底扫描）在熔断中被拒且不烧授权。
    */
-  async dispatch(recordId: number): Promise<void> {
+  async dispatch(recordId: number, opts?: { humanApproval?: boolean }): Promise<void> {
     if (this.inFlight.has(recordId)) {
       this.logger.log(`[PublishDispatcher] recordId=${recordId} 已在下发途中，忽略重复触发`);
       return;
@@ -105,6 +166,13 @@ export class PublishDispatcher {
       return;
     }
 
+    const clearedBreaker = opts?.humanApproval ? this.confirmHumanApproval(accountId) : false;
+    if (this.openBreakers.has(accountId)) {
+      // 熔断中：新下发拒绝且不烧授权信号（信号原样保留，人工批准确认后由兜底扫描恢复 drain）。
+      this.logger.warn(`[PublishDispatcher] 账号 ${accountId} 下发熔断中，recordId=${recordId} 暂不下发（授权保留不烧）`);
+      return;
+    }
+
     this.inFlight.add(recordId);
     const prev = this.accountTail.get(accountId) ?? Promise.resolve();
     const run = prev
@@ -115,6 +183,10 @@ export class PublishDispatcher {
         if (this.accountTail.get(accountId) === run) this.accountTail.delete(accountId);
       });
     this.accountTail.set(accountId, run);
+    // 熔断刚被本次人工批准清除：踢一次兜底扫描，恢复 drain 该账号此前被跳过的已批队列。
+    if (clearedBreaker) {
+      void this.scanAndDispatchApproved().catch(() => {});
+    }
     return run;
   }
 
@@ -130,15 +202,21 @@ export class PublishDispatcher {
       this.logger.warn(`[PublishDispatcher] 兜底扫描列待审失败: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
+    // 逐条并发启动、不逐条串行 await（多稿同窗获批时一账号多篇背靠背下发不拖死跨账号扫描；
+    // 同账号内串行由 accountTail 保证，同 recordId 幂等由 inFlight 保证）。整体 allSettled 供测试/调用方等待收敛。
+    const launched: Array<Promise<void>> = [];
     for (const id of ids) {
       const decision = await this.readApproval(`publish-${id}`).catch(() => null);
       if (decision?.approved) {
         this.logger.log(`[PublishDispatcher] 兜底扫描发现已授权待审 recordId=${id} → 补触发下发`);
-        await this.dispatch(id).catch((e) =>
-          this.logger.warn(`[PublishDispatcher] 兜底下发 recordId=${id} 失败: ${e instanceof Error ? e.message : String(e)}`),
+        launched.push(
+          this.dispatch(id).catch((e) =>
+            this.logger.warn(`[PublishDispatcher] 兜底下发 recordId=${id} 失败: ${e instanceof Error ? e.message : String(e)}`),
+          ),
         );
       }
     }
+    await Promise.allSettled(launched);
   }
 
   /** 陪伴界面通知 best-effort 包装：通知层异常绝不打断下发主链路。 */
@@ -152,6 +230,11 @@ export class PublishDispatcher {
 
   /** 临界区：单条草稿的实际下发（已按账号串行进入）。 */
   private async runDispatch(recordId: number, accountId: string): Promise<void> {
+    // 入队后熔断才开启（同链前序项连败）的迟到项：同样跳过且不烧授权，防连环烧稿。
+    if (this.openBreakers.has(accountId)) {
+      this.logger.warn(`[PublishDispatcher] 账号 ${accountId} 下发熔断中，recordId=${recordId} 队内跳过（授权保留不烧）`);
+      return;
+    }
     const draft = await this.store.loadForDispatch(recordId);
     if (!draft) {
       this.logger.warn(`[PublishDispatcher] recordId=${recordId} 下发时草稿已不存在，跳过`);
@@ -197,14 +280,16 @@ export class PublishDispatcher {
       return;
     }
 
-    // 边缘离线 → 诚实 failed，不让位空转、不伪造、不静默吞授权。
+    // 边缘离线（零副作用失败，change parallel-rewrite-drafts）→ 草稿回待审 + 作废本次授权信号 + 通知重批。
+    // 不烧稿（保住生成+生图成本）、不让位空转、不伪造、不静默吞授权；边缘恢复后人工重批即可下发。
+    // 作废信号防两害：60s 兜底扫描对着离线边缘反复空转、以及边缘恢复后旧授权在无人知情时自动发出。
     const edgeId = this.resolveEdgeIdForAccount(accountId);
     if (!edgeId) {
-      await this.store.updateStatus(recordId, 'failed').catch(() => {});
-      this.logger.warn(`[PublishDispatcher] 账号 ${accountId} 无在线边缘节点，recordId=${recordId} 诚实 failed（不让位、不下发）`);
-      // 也通知陪伴界面（评审修正）：推送内部会重新解析在线边缘——若边缘在「判离线→写失败」的
-      // 间隙里恰好重连，failed 能送达；仍离线则推送层如实放弃（终态推送为一次性 best-effort）。
-      this.notifyUi(accountId, recordId, 'failed', draft.title);
+      await this.voidApprovalSignal(requestId).catch(() => {});
+      this.logger.warn(
+        `[PublishDispatcher] 账号 ${accountId} 无在线边缘节点，recordId=${recordId} 回待审（作废本次授权、通知重批；不烧稿、不让位、不下发）`,
+      );
+      this.notifyOps({ kind: 'offline_requeued', accountId, recordId, title: draft.title });
       return;
     }
 
@@ -230,6 +315,7 @@ export class PublishDispatcher {
       await this.store.markImagesAttached(recordId, result.attachedCount).catch(() => {});
 
       if (result.ok) {
+        this.consecutiveSeqFails.delete(accountId);
         if (result.postId) {
           await this.store.updatePostId(recordId, result.postId, result.postUrl).catch(() => {});
         } else {
@@ -237,14 +323,18 @@ export class PublishDispatcher {
         }
         this.logger.log(`[PublishDispatcher] recordId=${recordId} published postId=${result.postId ?? '(未抓到)'} edge=${edgeId}`);
       } else {
+        // 序列中途失败（页面状态未知）→ failed 终态、绝不自动重跑；计入熔断（连续 N 次停 drain 防连环烧稿）。
         await this.store.updateStatus(recordId, 'failed').catch(() => {});
         this.logger.warn(`[PublishDispatcher] recordId=${recordId} 下发失败 failedAt=${JSON.stringify(result.failedAt)}`);
         this.notifyUi(accountId, recordId, 'failed', draft.title);
+        this.recordSeqFailure(accountId, recordId, draft.title);
       }
     } catch (err) {
+      // 序列驱动异常（页面状态未知）→ 同序列失败处理：failed 终态 + 计入熔断。
       await this.store.updateStatus(recordId, 'failed').catch(() => {});
       this.logger.warn(`[PublishDispatcher] recordId=${recordId} 下发异常: ${err instanceof Error ? err.message : String(err)}`);
       this.notifyUi(accountId, recordId, 'failed', draft.title);
+      this.recordSeqFailure(accountId, recordId, draft.title);
     } finally {
       // 无论成功/失败/异常，经此唯一终止点解除让位 → 续场各闸起新浏览。
       this.onPublishEnd(accountId);

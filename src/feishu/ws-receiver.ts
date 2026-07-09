@@ -306,6 +306,15 @@ export class FeishuWsReceiver {
     if (!result.written) {
       // first-writer-wins：已被先前决定（飞书/Web/重复点击），不覆盖
       const alreadyApproved = result.alreadyDecided === true;
+      // already-decided 的重复「授权」也走人工批准入口（change parallel-rewrite-drafts）：
+      // 熔断中即确认清除、恢复 drain 该账号已批队列；非熔断时由下发段幂等闸自然吸收，绝不二次发布。
+      if (approved && alreadyApproved) {
+        try {
+          this.onApproved?.(parsed.requestId);
+        } catch (err) {
+          this.logger.warn('[feishu] onApproved（already-decided 重批确认）触发失败:', (err as Error).message);
+        }
+      }
       return {
         toast: {
           type: 'info',

@@ -1606,14 +1606,32 @@ async function main(): Promise<void> {
     // 陪伴界面：授权核实→approved、云端终判失败→failed 推给在线边缘（published 由边缘自知）。
     notifyUiPublishState: (accountId, recordId, state, title) =>
       uiSnapshotService.pushPublishState(accountId, recordId, state, title),
+    // 下发段运维通知（change parallel-rewrite-drafts）：离线回待审 / 熔断开启 / 熔断解除 → 默认群文本，best-effort。
+    notifyDispatchEvent: (notice) => {
+      void (async () => {
+        const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
+        if (!chatId) return;
+        const name = accountDisplayName(notice.accountId) ?? notice.accountId;
+        const ref = notice.recordId !== undefined ? `草稿 #${notice.recordId}${notice.title ? `「${notice.title}」` : ''}` : '';
+        const text =
+          notice.kind === 'offline_requeued'
+            ? `⚠️ 发布未执行：账号「${name}」边缘离线，${ref} 已退回待审（本次授权作废）。边缘恢复后请重新批准。`
+            : notice.kind === 'breaker_open'
+              ? `🔴 发布熔断：账号「${name}」连续下发失败（最近 ${ref}），已停止自动下发其已批草稿。排查边缘后重新批准任一草稿即恢复。`
+              : `🟢 发布熔断解除：账号「${name}」人工批准确认，恢复下发已批队列。`;
+        await messenger.sendText(chatId, text);
+      })().catch(() => {});
+    },
+    breakerThreshold: Number(process.env.AIDCP_PUBLISH_BREAKER_THRESHOLD ?? 2),
     logger: console,
   });
   // 审批授权 → 触发下发（仅 publish-<n> 走此路；评论审批 comment-<…> 不触发发帖下发）。
+  // humanApproval：人工批准入口（含 already-decided 重复批准）——熔断中即视为人工确认清除并恢复 drain。
   const triggerPublishDispatchOnApprove = (requestId: string): void => {
     const m = /^publish-(\d+)$/.exec(requestId);
     if (!m) return;
     publishDispatcher
-      .dispatch(Number(m[1]))
+      .dispatch(Number(m[1]), { humanApproval: true })
       .catch((e) => console.warn('[aidcp-cloud] publish dispatch err:', e instanceof Error ? e.message : String(e)));
   };
   // 陪伴界面：拒绝发布（飞书取消/面板拒绝首写成功）→ rejected 推给该账号在线边缘（仅 publish-<n>）。
@@ -2565,7 +2583,9 @@ async function main(): Promise<void> {
             const result = await writeApprovalSignal({ writeFile, readFile }, requestId, approved, payload);
             // 通过即切：后台「授权发布」首写成功即触发下发段（仅 publish-<n>）。取消不触发下发，
             // 但要通知陪伴界面 rejected（发布卡收起为「暂不发布」）。
-            if (approved && result.written) triggerPublishDispatchOnApprove(requestId);
+            // already-decided 的重复「授权」也走人工批准入口（change parallel-rewrite-drafts）：
+            // 熔断中即确认清除恢复 drain；非熔断时由 dispatch 幂等闸（inFlight/status/信号）自然吸收。
+            if (approved && (result.written || result.alreadyDecided === true)) triggerPublishDispatchOnApprove(requestId);
             else if (!approved && result.written) notifyPublishRejected(requestId);
             return result;
           },
