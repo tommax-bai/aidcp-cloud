@@ -74,7 +74,7 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
         const raw = await this.llmClient.chat([
           { role: 'system', content: '你是配图选题师。严格返回JSON。' },
           { role: 'user', content: buildImageSetPlanPrompt(input, this.maxImages, targetCount) },
-        ], { timeoutMs: IMAGE_SET_PLAN_TIMEOUT_MS });
+        ], { timeoutMs: IMAGE_SET_PLAN_TIMEOUT_MS, accountId: this.accountIdFrom(context) });
         return this.parse(raw);
       },
       { default: null, reason: 'ImageSetPlanner LLM failed' },

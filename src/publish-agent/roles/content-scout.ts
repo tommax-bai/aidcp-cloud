@@ -45,7 +45,7 @@ export class ContentScoutRole extends BasePublishRole<TriggerInput, ScoutDecisio
     return snapshot.trigger!;
   }
 
-  protected async execute(input: TriggerInput, _context: PipelineContext<PipelineFields>): Promise<ScoutDecision> {
+  protected async execute(input: TriggerInput, context: PipelineContext<PipelineFields>): Promise<ScoutDecision> {
     const prompt = buildScoutPrompt(input);
     const { result, usedFallback } = await executeWithFallback(
       async () => {
@@ -55,7 +55,7 @@ export class ContentScoutRole extends BasePublishRole<TriggerInput, ScoutDecisio
             { role: 'user', content: prompt },
           ],
           // 与角色闸同放宽，否则 QwenClient 默认 60s 会先 abort（角色闸放宽也没用，见 ContentCreator）。
-          { timeoutMs: SCOUT_TIMEOUT_MS },
+          { timeoutMs: SCOUT_TIMEOUT_MS, accountId: this.accountIdFrom(context) },
         );
         return this.parseOutput(raw);
       },

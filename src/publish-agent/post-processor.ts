@@ -30,8 +30,8 @@ const AI_SCORE_CAP = 4;
 export interface PostProcessorOptions {
   /** 命中多少个禁用项触发重写，默认 2 */
   rewriteThreshold?: number;
-  /** 重写器：给定正文 + 命中词，返回新正文；不传则不重写 */
-  rewrite?: (content: string, flagged: string[]) => Promise<string>;
+  /** 重写器：给定正文 + 命中词（+ 归账账号，见 process），返回新正文；不传则不重写 */
+  rewrite?: (content: string, flagged: string[], accountId?: string) => Promise<string>;
   /**
    * 额外的体裁专用禁用词（change humanize-interaction-prompts）：在发帖侧通用词表之外叠加。
    * 评论去 AI 味用它接入评论体裁客套句集；缺省为空——发帖侧行为完全不变。
@@ -67,7 +67,7 @@ export function aiScoreFromHits(hitCount: number): number {
 /** 去 AI 味后处理器。 */
 export class PostProcessor {
   private readonly rewriteThreshold: number;
-  private readonly rewriteFn?: (content: string, flagged: string[]) => Promise<string>;
+  private readonly rewriteFn?: (content: string, flagged: string[], accountId?: string) => Promise<string>;
   private readonly extraPhrases: string[];
 
   constructor(options: PostProcessorOptions = {}) {
@@ -78,10 +78,12 @@ export class PostProcessor {
 
   /**
    * 处理一段正文：检测 → （必要时）重写 → 复检。
+   * accountId（change parallel-rewrite-drafts 显式归账）：透传给重写器供模型调用按当轮账号记账；
+   * 缺省保持旧行为（评论侧调用方各有自己的归账通道，不受影响）。
    * @returns PostProcessResult；命中超阈且重写后仍超阈时 aiScore 较高，
    *          调用方据此决定 status='needs_review'。
    */
-  async process(content: string, exclamationMax = 1): Promise<PostProcessResult> {
+  async process(content: string, exclamationMax = 1, accountId?: string): Promise<PostProcessResult> {
     const firstHits = detectBannedPhrases(content, exclamationMax, this.extraPhrases);
 
     // 未达重写阈值：直接返回。
@@ -97,7 +99,7 @@ export class PostProcessor {
     // 达阈：重写一次。
     let rewritten: string;
     try {
-      rewritten = await this.rewriteFn(content, firstHits);
+      rewritten = await this.rewriteFn(content, firstHits, accountId);
     } catch {
       // 重写失败：退回原文，按首轮命中返回（交由上层标记审核）。
       return {

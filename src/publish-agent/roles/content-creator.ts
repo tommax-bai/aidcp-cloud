@@ -47,7 +47,7 @@ export class ContentCreatorRole extends BasePublishRole<CreatorInput, CreatedCon
     };
   }
 
-  protected async execute(input: CreatorInput, _context: PipelineContext<PipelineFields>): Promise<CreatedContent> {
+  protected async execute(input: CreatorInput, context: PipelineContext<PipelineFields>): Promise<CreatedContent> {
     const prompt = buildCreatorPrompt(input.scoutDecision, input.trigger);
     const raw = await executeWithRetry(
       async () => {
@@ -57,7 +57,7 @@ export class ContentCreatorRole extends BasePublishRole<CreatorInput, CreatedCon
             { role: 'user', content: prompt },
           ],
           // LLM 调用超时须与角色闸同放宽，否则 QwenClient 默认 30s 会先 abort（角色闸放宽也没用）。
-          { timeoutMs: CONTENT_TIMEOUT_MS },
+          { timeoutMs: CONTENT_TIMEOUT_MS, accountId: this.accountIdFrom(context) },
         );
       },
       { maxRetries: 2, initialDelayMs: 500, maxDelayMs: 5000, backoffMultiplier: 2 },

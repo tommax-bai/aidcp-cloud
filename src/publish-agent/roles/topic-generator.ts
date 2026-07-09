@@ -59,7 +59,7 @@ export class TopicGeneratorRole extends BasePublishRole<TopicGenInput, TopicCand
     return { body, persona };
   }
 
-  protected async execute(input: TopicGenInput, _context: PipelineContext<PipelineFields>): Promise<TopicCandidates> {
+  protected async execute(input: TopicGenInput, context: PipelineContext<PipelineFields>): Promise<TopicCandidates> {
     // 空正文（上游降级）→ 诚实空候选，不白调一次 LLM。
     if (input.body.trim().length === 0) {
       this.logger.warn('[TopicGenerator] 定稿正文为空 → 空候选');
@@ -73,7 +73,7 @@ export class TopicGeneratorRole extends BasePublishRole<TopicGenInput, TopicCand
             { role: 'user', content: buildTopicGenerationPrompt(input.body, input.persona) },
           ],
           // 角色闸同传进 chat，否则默认 30s 会先 abort。
-          { timeoutMs: TOPIC_TIMEOUT_MS },
+          { timeoutMs: TOPIC_TIMEOUT_MS, accountId: this.accountIdFrom(context) },
         );
         return this.parseTopics(raw);
       },

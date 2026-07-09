@@ -156,8 +156,8 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     }
   }
 
-  /** 发布账号：从触发上下文取真实账号；无则回落 'default'（单账号向后兼容）。 */
-  private accountIdFrom(context: PipelineContext<PipelineFields>): string {
+  /** 发布账号：从触发上下文取真实账号；无则回落 'default'（单账号向后兼容）。基类已有同名通用实现，此处保留 get('trigger') 取法并显式 override。 */
+  protected override accountIdFrom(context: PipelineContext<PipelineFields>): string {
     const trigger = context.get('trigger') as TriggerInput | undefined;
     return trigger?.accountId ?? 'default';
   }

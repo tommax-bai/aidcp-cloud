@@ -612,17 +612,13 @@ async function main(): Promise<void> {
       }
     },
   });
-  // 发布链 token 账号归属（fix llm-token-usage account attribution）：发布管线严格串行（PublishOrchestrator
-  // 单跑闸，同一时刻只跑一个账号），故用单槽「当前发布账号」即并发安全。由 onPublishStart/onPublishEnd 括起
-  // （见下方 publishOrchestrator 装配），把真实发布账号穿进发布角色的每次 LLM 调用，使记账不再全记 default。
-  const publishAccountRef = { current: 'default' };
-  // 把共享文本客户端按角色绑定成 thin wrapper（发布侧用；角色内部代码零改动）。
-  // 账号：调用方显式给则尊重，否则取当前发布账号（发布角色只在发布窗口内调用，窗口外回落 default 无害）。
+  // 发布链 token 账号归属（change parallel-rewrite-drafts 显式归账）：每个发布角色的 LLM 调用从当轮黑板
+  // 显式带 accountId（BasePublishRole.accountIdFrom），并发生成各轮各归各账。原「当前发布账号」进程级
+  // 单槽已退役——红线：MUST NOT 重新引入共享可变槽推断当前账号（并发轮互踩记账）。
+  // 把共享文本客户端按角色绑定成 thin wrapper（发布侧用）：只补 role，账号由调用方显式携带。
   const roleLlm = (roleId: string): ChatLlmClient => ({
-    complete: (prompt, opts) =>
-      llm.complete(prompt, { ...opts, role: opts?.role ?? roleId, accountId: opts?.accountId ?? publishAccountRef.current }),
-    chat: (messages, opts) =>
-      llm.chat(messages, { ...opts, role: opts?.role ?? roleId, accountId: opts?.accountId ?? publishAccountRef.current }),
+    complete: (prompt, opts) => llm.complete(prompt, { ...opts, role: opts?.role ?? roleId }),
+    chat: (messages, opts) => llm.chat(messages, { ...opts, role: opts?.role ?? roleId }),
   });
   const planner = new SimplePlanner({ llm });
   const cache = new PgAnchorCache({
@@ -829,14 +825,17 @@ async function main(): Promise<void> {
 
   // 去 AI 味后处理器
   const postProcessor = new PostProcessor({
-    rewrite: async (content, flagged) => {
+    rewrite: async (content, flagged, accountId) => {
       // change publish-prompt-preview：prompt 抽到 buildDeAiRewritePrompt（与后台只读预览同一份来源、防漂移）；
       // 带 role='publish:ContentCleaner' 使该重写按其后台模型/温度配置解析（否则配了是静默 no-op）。
       // change raise-model-call-timeouts-for-thinking-models：与 ContentCleaner 角色闸共用 CLEAN_TIMEOUT_MS，
       // 使该 complete() 的超时不短于角色闸（外层秒表绝不短于所包裹的模型预算、且底层 HTTP 同时限被真正中止）。
+      // change parallel-rewrite-drafts：显式带 accountId（由 ContentCleanerRole 从当轮黑板穿入）——
+      // 该调用不经 roleLlm 包装，是发布链归账覆盖面上唯一的非角色调用点。
       return llm.complete(buildDeAiRewritePrompt(content, flagged), {
         role: 'publish:ContentCleaner',
         timeoutMs: CLEAN_TIMEOUT_MS,
+        accountId,
       });
     },
   });
@@ -880,21 +879,20 @@ async function main(): Promise<void> {
     pipelineLogSink: publishPipelineLogStore,
   });
   // 发布让位/续场（下发段用）：让位 → 结束该账号浏览会话（不续场、独占边缘）；解除 → 经续场各闸起新浏览。
-  // 账号归属单槽：下发这一轮的 LLM/命令据此记账（下发段按账号串行，安全）。runtimes 前向引用（下方装配），
+  // 账号槽已退役（change parallel-rewrite-drafts）：下发段本身无 LLM 调用（视觉感知等显式带账号），
+  // 原「下发段写槽」还与并行生成段互踩记账（既存竞态），随槽一并根治。runtimes 前向引用（下方装配），
   // 闭包调用时已就绪（同既有 commandSequencer.pusher 前向模式）。
   const onPublishTakeoverStart = (accountId: string): void => {
-    publishAccountRef.current = accountId;
     runtimes?.endSessionForAccount(accountId, 'publish_takeover');
   };
   const onPublishTakeoverEnd = (accountId: string): void => {
-    publishAccountRef.current = 'default';
     runtimes?.resumeSessionForAccount(accountId);
   };
 
   // 按需评论让位/续场（change comment-search-command）：与发布同构——评论任务接管该账号边端（结束自动浏览、
   // 独占）；解除即续场。注意边端 session.end 只停浏览循环、不置终态，后续浏览类命令（search/open/comment）
-  // 会唤醒重启循环并被处理（见 browse-session.ts closing 注释）。LLM 记账经 scheduler 的 llmFor 显式带 accountId，
-  // 故此处不动 publishAccountRef。
+  // 会唤醒重启循环并被处理（见 browse-session.ts closing 注释）。LLM 记账经 scheduler 的 llmFor 显式带 accountId
+  // （与发布链显式归账同构）。
   // 手动 /comment 的评论**不计入风控配额**（人工授权，与 /publish 越过风控同理）：评论任务接管期间该账号在此集合，
   // `interaction.occurred` 的 `RiskController.record` 据此对 `comment` 动作跳过——不消耗自治评论预算、不动风控态。
   // 仍保留去重（risk_interactions，避免 /comment 重复评同一篇）与展示账本。接管已结束自治会话 → 该窗口唯一的
@@ -2196,19 +2194,9 @@ async function main(): Promise<void> {
       resolveSingleAccountId,
       // persona-driven-content-pipeline：发布前人设闸——未绑人设的账号拒绝发布，绝不以打包默认人设生成（与浏览侧 canStartSession 同口径）。
       isPersonaBound: (accountId) => personaStore.getForAccount(accountId) !== null,
-      // 生成段账号归账（fix publish LLM account=default）：发布生成段严格串行（PublishOrchestrator 单跑闸），
-      // 用单槽 publishAccountRef 把真实账号穿进发布角色每次 LLM 调用,使生成段记账不再全记 default。
-      // 与下发段 onPublishTakeoverStart 同构（前后括住、finally 复位）；两段不重叠,互不踩 ref。
-      orchestrator: {
-        trigger: async (input) => {
-          publishAccountRef.current = input.accountId ?? 'default';
-          try {
-            return await publishOrchestrator.trigger(input);
-          } finally {
-            publishAccountRef.current = 'default';
-          }
-        },
-      },
+      // 生成段账号归账（change parallel-rewrite-drafts）：账号随 TriggerInput.accountId 上黑板，
+      // 每个角色的 LLM 调用显式取之记账——无进程级槽、无括起复位，并发生成各轮各归各账。
+      orchestrator: publishOrchestrator,
       // 精选灵感语料（change curated-inspiration-corpus）：发帖创作正向素材来源；缺失则回落旧点赞素材路径。
       curatedStore: curatedContentStore,
       selectTopK: resolveCuratedGateConfig().selectTopK,

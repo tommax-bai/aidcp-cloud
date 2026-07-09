@@ -62,7 +62,7 @@ abstract class FaithfulReferenceRole<TInput, TOutput> extends BasePublishRole<TI
     return note;
   }
 
-  protected async chatJson(system: string, prompt: string): Promise<Record<string, unknown>> {
+  protected async chatJson(system: string, prompt: string, accountId: string): Promise<Record<string, unknown>> {
     const raw = await executeWithRetry(
       () =>
         this.llmClient.chat(
@@ -70,7 +70,8 @@ abstract class FaithfulReferenceRole<TInput, TOutput> extends BasePublishRole<TI
             { role: 'system', content: system },
             { role: 'user', content: prompt },
           ],
-          { timeoutMs: REFERENCE_TIMEOUT_MS },
+          // 显式归账（change parallel-rewrite-drafts）：并行生成各轮各归各账，不依赖进程级槽。
+          { timeoutMs: REFERENCE_TIMEOUT_MS, accountId },
         ),
       { maxRetries: 2, initialDelayMs: 500, maxDelayMs: 5000, backoffMultiplier: 2 },
     );
@@ -100,6 +101,7 @@ export class ReferenceAnalyzerRole extends FaithfulReferenceRole<TriggerInput, R
     const obj = await this.chatJson(
       '你是保真改写原稿分析员，只输出严格 JSON。',
       buildReferenceAnalysisPrompt(note, input.generateInput.soul),
+      input.accountId ?? 'default',
     );
     return {
       sourceId: note.sourceId,
@@ -143,6 +145,7 @@ export class FaithfulRewritePlannerRole extends FaithfulReferenceRole<PlannerInp
     const obj = await this.chatJson(
       '你是保真改写规划员，只输出严格 JSON。',
       buildFaithfulRewritePlanPrompt(input.analysis, note, input.trigger.generateInput.soul),
+      input.trigger.accountId ?? 'default',
     );
     return {
       titleDirection: stringValue(obj.titleDirection),
@@ -180,6 +183,7 @@ export class FaithfulDraftWriterRole extends FaithfulReferenceRole<DraftInput, F
     const obj = await this.chatJson(
       '你是保真改写正文写手，只输出严格 JSON。',
       buildFaithfulDraftPrompt(input.analysis, input.plan, note, input.trigger.generateInput.soul),
+      input.trigger.accountId ?? 'default',
     );
     return {
       title: stringValue(obj.title, note.title).slice(0, 20),
@@ -223,6 +227,7 @@ export class FidelityAuditorRole extends FaithfulReferenceRole<AuditInput, Creat
     const obj = await this.chatJson(
       '你是保真改写忠实度审核员，只输出严格 JSON。',
       buildFidelityAuditPrompt(input.analysis, input.plan, input.draft, note),
+      input.trigger.accountId ?? 'default',
     );
     const report: FidelityAuditReport = {
       pass: Boolean(obj.pass),

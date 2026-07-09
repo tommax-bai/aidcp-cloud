@@ -223,7 +223,7 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
     // 全过：一次封面卡文案 LLM；违规带紧约束重试一次（只花角色闸剩余预算）。
     // 候选标签取洗稿产物（input.tags）——原笔记话题绝不入生成上下文（防搬运）。
     try {
-      const first = await this.composeCopy(input, input.tags, false, COPY_CALL_TIMEOUT_MS);
+      const first = await this.composeCopy(input, input.tags, false, COPY_CALL_TIMEOUT_MS, this.accountIdFrom(context));
       let violation = first ? this.findViolation(first, originalTitle, originalBody, referenceNote.author) : 'llm 输出不可解析';
       if (first && !violation) {
         return attach(this.textCardPlan(first, sensedForm, sensedSource));
@@ -231,7 +231,7 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
       const remaining = COVERCARD_TIMEOUT_MS - (this.clock() - startedAt) - 10_000;
       if (remaining >= RETRY_MIN_BUDGET_MS) {
         this.logger.warn(`[CoverCardWriter] 卡面文案违规（${violation}），带紧约束重试一次（剩余预算 ${Math.round(remaining / 1000)}s）`);
-        const second = await this.composeCopy(input, input.tags, true, Math.min(COPY_CALL_TIMEOUT_MS, remaining));
+        const second = await this.composeCopy(input, input.tags, true, Math.min(COPY_CALL_TIMEOUT_MS, remaining), this.accountIdFrom(context));
         violation = second ? this.findViolation(second, originalTitle, originalBody, referenceNote.author) : 'llm 输出不可解析';
         if (second && !violation) {
           return attach(this.textCardPlan(second, sensedForm, sensedSource));
@@ -402,13 +402,14 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
     tags: string[],
     tighten: boolean,
     timeoutMs: number,
+    accountId: string,
   ): Promise<CoverCardCopy | null> {
     const raw = await this.llmClient.chat(
       [
         { role: 'system', content: '你是小红书封面文案编辑。严格返回JSON。' },
         { role: 'user', content: buildCoverCardCopyPrompt(input.title, input.content, tags, tighten) },
       ],
-      { timeoutMs },
+      { timeoutMs, accountId },
     );
     const match = raw.match(/\{[\s\S]*\}/);
     if (!match) return null;

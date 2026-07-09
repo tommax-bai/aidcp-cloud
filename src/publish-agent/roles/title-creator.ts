@@ -71,7 +71,7 @@ export class TitleCreatorRole extends BasePublishRole<TitleInput, TitleSelection
     };
   }
 
-  protected async execute(input: TitleInput, _context: PipelineContext<PipelineFields>): Promise<TitleSelection> {
+  protected async execute(input: TitleInput, context: PipelineContext<PipelineFields>): Promise<TitleSelection> {
     // 空正文（上游降级）→ 诚实空标题（XHS 允许空标题，绝不编造占位、也不白调一次 LLM）。
     if (input.body.trim().length === 0) {
       this.logger.warn('[TitleCreator] 定稿正文为空 → 写空标题（source=derived）');
@@ -94,7 +94,7 @@ export class TitleCreatorRole extends BasePublishRole<TitleInput, TitleSelection
             { role: 'user', content: nudge ? `${prompt}\n\n${nudge}` : prompt },
           ],
           // LLM 调用超时须与角色闸同放宽，否则 QwenClient 默认 30s 会先 abort。
-          { timeoutMs: TITLE_TIMEOUT_MS },
+          { timeoutMs: TITLE_TIMEOUT_MS, accountId: this.accountIdFrom(context) },
         );
         const title = this.parseTitle(raw); // 无可解析标题则抛
         candidate = title; // 即便不合规也留作候选，最终经 clamp 收口

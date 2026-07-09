@@ -74,8 +74,9 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
     const referenceImageGuidance = buildReferenceImageGuidance(snapshot);
 
     // 每主题一条中文主体描述（并行，保序；某条 LLM 失败退回主体文本 fallback，不让该张凭空消失）。
+    const accountId = this.accountIdFrom(context);
     const composed = await Promise.all(
-      plan.themes.map((theme) => this.composeTheme(theme, plan.styleHint, referenceImageGuidance)),
+      plan.themes.map((theme) => this.composeTheme(theme, plan.styleHint, referenceImageGuidance, accountId)),
     );
 
     // 轮播（change textcard-carousel-form-parity 阶段1）：cardSet 非空时**跳过去重**，保 imagePrompts 张数 =
@@ -151,12 +152,12 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
   }
 
   /** 单主题 → 中文主体描述；LLM 失败退回主体文本（该张不凭空消失，图像模型可吃中文主体）。 */
-  private async composeTheme(theme: ImageTheme, styleHint: string | null, referenceImageGuidance?: string | null): Promise<string> {
+  private async composeTheme(theme: ImageTheme, styleHint: string | null, referenceImageGuidance: string | null | undefined, accountId: string): Promise<string> {
     try {
       const raw = await this.llmClient.chat([
         { role: 'system', content: '你是文生图 prompt 工程师。严格返回JSON。' },
         { role: 'user', content: buildImagePromptComposerPrompt(theme, styleHint, referenceImageGuidance) },
-      ], { timeoutMs: IMAGE_PROMPT_TIMEOUT_MS });
+      ], { timeoutMs: IMAGE_PROMPT_TIMEOUT_MS, accountId });
       const match = raw.match(/\{[\s\S]*\}/);
       if (!match) throw new Error('no json');
       const obj = JSON.parse(match[0]) as { imagePrompt?: unknown };

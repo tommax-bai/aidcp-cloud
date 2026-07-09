@@ -1,5 +1,6 @@
 import { BasePublishRole } from './base-role.js';
 import type { RoleConfig } from './base-role.js';
+import type { PipelineContext } from '../pipeline-context.js';
 import type { PipelineFields, CreatedContent, PostCategory, ImageCategory } from '../types.js';
 import { IMAGE_CATEGORIES } from '../types.js';
 import { buildCategoryClassifierPrompt } from '../prompts.js';
@@ -44,14 +45,14 @@ export class CategoryClassifierRole extends BasePublishRole<CreatedContent, Post
     return snapshot.createdContent!;
   }
 
-  protected async execute(input: CreatedContent): Promise<PostCategory> {
+  protected async execute(input: CreatedContent, context: PipelineContext<PipelineFields>): Promise<PostCategory> {
     try {
       const raw = await this.llmClient.chat(
         [
           { role: 'system', content: '你是内容品类分类器。严格返回JSON。' },
           { role: 'user', content: buildCategoryClassifierPrompt(input.title, input.content) },
         ],
-        { timeoutMs: CLASSIFY_TIMEOUT_MS },
+        { timeoutMs: CLASSIFY_TIMEOUT_MS, accountId: this.accountIdFrom(context) },
       );
       const match = raw.match(/\{[\s\S]*\}/);
       if (!match) throw new Error('no json');

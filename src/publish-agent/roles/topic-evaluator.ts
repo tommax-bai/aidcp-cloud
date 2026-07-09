@@ -54,7 +54,7 @@ export class TopicEvaluatorRole extends BasePublishRole<TopicEvalInput, TopicSel
     };
   }
 
-  protected async execute(input: TopicEvalInput, _context: PipelineContext<PipelineFields>): Promise<TopicSelection> {
+  protected async execute(input: TopicEvalInput, context: PipelineContext<PipelineFields>): Promise<TopicSelection> {
     // 无候选 → 诚实空选择，不白调 LLM。
     if (input.candidates.length === 0) {
       return { selectedTopics: [], selectedAt: this.clock() };
@@ -67,7 +67,7 @@ export class TopicEvaluatorRole extends BasePublishRole<TopicEvalInput, TopicSel
             // 传空标题：评判只依据候选 + 定稿正文（正文为确定信号），不引入非确定就绪的标题。
             { role: 'user', content: buildTopicEvaluationPrompt(input.candidates, '', input.body) },
           ],
-          { timeoutMs: TOPIC_TIMEOUT_MS },
+          { timeoutMs: TOPIC_TIMEOUT_MS, accountId: this.accountIdFrom(context) },
         );
         return this.parseKept(raw);
       },

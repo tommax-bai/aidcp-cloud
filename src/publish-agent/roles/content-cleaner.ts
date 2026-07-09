@@ -5,9 +5,13 @@ import type { PipelineContext } from '../pipeline-context.js';
 import { executeWithFallback } from '../retry-strategy.js';
 import { exclamationMaxForTone } from '../post-processor.js';
 
-/** 去 AI 味后处理器接口（从原 ContentAssembler 迁出，server 注入 PostProcessor）。 */
+/**
+ * 去 AI 味后处理器接口（从原 ContentAssembler 迁出，server 注入 PostProcessor）。
+ * accountId（change parallel-rewrite-drafts 显式归账）：重写模型调用按当轮账号记账——该调用不经
+ * roleLlm 包装，是归账覆盖面上唯一的非角色调用点，缺省会记到占位账号。
+ */
 export interface PostProcessorLike {
-  process(content: string, exclamationMax?: number): Promise<PostProcessResult>;
+  process(content: string, exclamationMax?: number, accountId?: string): Promise<PostProcessResult>;
 }
 
 /**
@@ -47,11 +51,11 @@ export class ContentCleanerRole extends BasePublishRole<CreatedContent, CleanedC
     return snapshot.createdContent!;
   }
 
-  protected async execute(input: CreatedContent, _context: PipelineContext<PipelineFields>): Promise<CleanedContent> {
+  protected async execute(input: CreatedContent, context: PipelineContext<PipelineFields>): Promise<CleanedContent> {
     // 感叹号检测上限按本帖语气分档（与生成侧 buildCreatorPrompt 同一套口径）：生活/情感类放宽、专业/克制类保持严。
     const exclamationMax = exclamationMaxForTone(input.tone);
     const { result: pp, usedFallback } = await executeWithFallback(
-      () => this.postProcessor.process(input.content, exclamationMax),
+      () => this.postProcessor.process(input.content, exclamationMax, this.accountIdFrom(context)),
       {
         // 清洗失败降级：退回原文、按"无 AI 味检出"记 aiScore=0（如实标未重写），保证键必写不死锁。
         default: { content: input.content, aiScore: 0, rewritten: false, flaggedPhrases: [] } as PostProcessResult,

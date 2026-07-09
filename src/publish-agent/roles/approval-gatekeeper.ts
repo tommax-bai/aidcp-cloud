@@ -35,13 +35,13 @@ export class ApprovalGatekeeperRole extends BasePublishRole<AssembledContent, Ga
     return snapshot.assembledContent!;
   }
 
-  protected async execute(input: AssembledContent, _context: PipelineContext<PipelineFields>): Promise<GateDecision> {
+  protected async execute(input: AssembledContent, context: PipelineContext<PipelineFields>): Promise<GateDecision> {
     const { result, usedFallback } = await executeWithFallback(
       async () => {
         const raw = await this.llmClient.chat([
           { role: 'system', content: '你是发布审批决策者。严格返回JSON。' },
           { role: 'user', content: buildGatekeeperPrompt(input) },
-        ], { timeoutMs: GATE_TIMEOUT_MS });
+        ], { timeoutMs: GATE_TIMEOUT_MS, accountId: this.accountIdFrom(context) });
         return this.parseOutput(raw);
       },
       { default: this.getHardcodedDecision(input), reason: 'LLM gatekeeper failed' },

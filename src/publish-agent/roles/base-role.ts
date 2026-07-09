@@ -65,6 +65,14 @@ export abstract class BasePublishRole<TInput, TOutput> {
   /** 核心执行逻辑（子类实现） */
   protected abstract execute(input: TInput, context: PipelineContext<PipelineFields>): Promise<TOutput>;
 
+  /**
+   * 当轮账号（change parallel-rewrite-drafts 显式归账）：从黑板 trigger 快照取，供每次 LLM 调用
+   * 显式带 accountId 记账。并行生成各轮各归各账——MUST NOT 依赖任何进程级共享槽推断当前账号。
+   */
+  protected accountIdFrom(context: PipelineContext<PipelineFields>): string {
+    return context.snapshot().trigger?.accountId ?? 'default';
+  }
+
   /** 将产出写回 context 的哪个字段 */
   protected abstract readonly outputKey: keyof PipelineFields;
 

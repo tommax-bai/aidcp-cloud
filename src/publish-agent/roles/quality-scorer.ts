@@ -54,7 +54,7 @@ export class QualityScorerRole extends BasePublishRole<QualityScorerInput, Quali
     };
   }
 
-  protected async execute(input: QualityScorerInput, _context: PipelineContext<PipelineFields>): Promise<QualityReport> {
+  protected async execute(input: QualityScorerInput, context: PipelineContext<PipelineFields>): Promise<QualityReport> {
     const ppResult: PostProcessResult = {
       content: input.cleaned.content,
       aiScore: input.cleaned.aiScore,
@@ -67,7 +67,7 @@ export class QualityScorerRole extends BasePublishRole<QualityScorerInput, Quali
           { role: 'system', content: '你是内容质量评审员。严格返回JSON。' },
           // 评审对象必须是将发布文本：正文用清洗稿（未重写时与草稿相同）；标题/标签仍取定稿来源。
           { role: 'user', content: buildAssemblerPrompt({ ...input.created, content: input.cleaned.content }, ppResult, input.soul, input.category) },
-        ], { timeoutMs: QUALITY_TIMEOUT_MS });
+        ], { timeoutMs: QUALITY_TIMEOUT_MS, accountId: this.accountIdFrom(context) });
         return this.parseReviewOutput(raw);
       },
       // 降级：逐字沿用历史公式 round((1-aiScore)*70)（无 AI 味时基准 70；绝不硬编码满分）。见 design Open Questions。
