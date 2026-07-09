@@ -1583,6 +1583,8 @@ async function main(): Promise<void> {
     pusher: { pushToEdges: (env, edgeId) => server.pushToEdges(env, edgeId) },
     resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
     getNickname: (accountId) => accountStore?.getNickname?.(accountId) ?? null,
+    // 已绑人设信号（change persona-wizard-onboarding-fixes）：persona 存储权威判据，随 hello 快照下发。
+    isPersonaBound: (accountId) => personaStore.getForAccount(accountId) !== null,
     lastPublishedForAccount: (accountId) => publishLogStore.lastPublishedForAccount(accountId),
     pendingApprovalForAccount: (accountId) => publishLogStore.pendingApprovalForAccount(accountId),
     readApproval: readPublishApproval,

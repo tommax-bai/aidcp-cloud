@@ -34,6 +34,8 @@ export interface UiSnapshotDeps {
   resolveEdgeIdForAccount: (accountId: string) => string | null;
   /** 账号主数据昵称（AccountStore 同步缓存读）；无昵称返回 null（不发 identity）。 */
   getNickname?: (accountId: string) => string | null;
+  /** 该账号是否已绑人设（persona 存储权威判据）；用于 hello 快照下发 personaBound 信号（change persona-wizard-onboarding-fixes）。 */
+  isPersonaBound?: (accountId: string) => boolean;
   /** 最近一次成功发布摘要（PublishLogStore.lastPublishedForAccount）。 */
   lastPublishedForAccount?: (accountId: string) => Promise<{ title: string | null; at: number } | null>;
   /** 最新待审草稿（PublishLogStore.pendingApprovalForAccount）。 */
@@ -105,7 +107,11 @@ export class UiSnapshotService {
         : null;
       if (dailyUsage) payload.dailyUsage = dailyUsage;
 
-      if (!payload.account && !payload.lastPublish && !payload.publish && !payload.dailyUsage) return; // 全空不发包
+      // 已绑人设信号（change persona-wizard-onboarding-fixes）：仅为 true 时下发（守「全空不发包」/宁缺毋假），
+      // 边缘据此把已绑账号徽标翻「已设置」并跳过向导，修「已绑仍显示未设置」bug。
+      if (this.deps.isPersonaBound?.(accountId)) payload.personaBound = true;
+
+      if (!payload.account && !payload.lastPublish && !payload.publish && !payload.dailyUsage && !payload.personaBound) return; // 全空不发包
       const sent = this.push(accountId, edgeId, payload, 'hello快照');
       if (sent > 0 && dailyUsage) this.scheduleDailyUsageRefresh(accountId, edgeId, dailyUsage);
     } catch (err) {

@@ -461,10 +461,18 @@ export class DefaultMessageHandler implements MessageHandler {
     if (!idempotencyKey) {
       return makeEnvelope('persona.generate.result', env.id, this.clock(), { ok: false, reason: 'missing_idempotency_key' });
     }
+    // 轻量输入校验（change persona-wizard-onboarding-fixes）：垂类/兴趣自由文本引入弱注入面 → 有界爆炸面。
+    // 单项长度上限 + 条数上限，超限诚实拒绝、绝不把超长/超量文本原样喂进生成 prompt（accountId 已取握手绑定值、产物另经结构复验）。
+    const kws = (p.keywordSelections ?? []).filter((k) => typeof k === 'string');
+    const MAX_KEYWORDS = 24;
+    const MAX_KEYWORD_LEN = 40;
+    if (kws.length > MAX_KEYWORDS || kws.some((k) => k.length > MAX_KEYWORD_LEN)) {
+      return makeEnvelope('persona.generate.result', env.id, this.clock(), { ok: false, reason: 'input_too_large' });
+    }
     const cacheKey = `${accountId}:${idempotencyKey}`;
     let inflight = this.personaGenInflight.get(cacheKey);
     if (!inflight) {
-      inflight = this.runPersonaGenerate(accountId, idempotencyKey, p.keywordSelections ?? [])
+      inflight = this.runPersonaGenerate(accountId, idempotencyKey, kws)
         .then((res) => {
           // 成功结果保留缓存（重连/重试复用、防双计费）；失败逐出（允许客户重试）。
           if (!res.ok) this.personaGenInflight.delete(cacheKey);

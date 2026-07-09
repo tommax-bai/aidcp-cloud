@@ -24,6 +24,7 @@ import {
   type NoteOpenPayload,
   type PersonaGeneratePayload,
   type PersonaGenerateResultPayload,
+  type UiSnapshotPayload,
 } from '../../src/comm/protocol.js';
 
 /**
@@ -151,5 +152,12 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     const resBack = parseEnvelope(JSON.stringify(makeEnvelope('persona.generate.result', 'g-1', 1700000000000, res)));
     assert.equal((resBack!.payload as PersonaGenerateResultPayload).soulYaml, 'identity:\n  name: x');
     assert.equal((resBack!.payload as PersonaGenerateResultPayload).identitySummary, '美妆达人');
+  });
+
+  it('AC-PROTO-10 ui.snapshot personaBound 可选字段往返存活（change persona-wizard-onboarding-fixes）', () => {
+    // 加可选 personaBound（无新增 MessageType、计数仍 65）；typecheck 抓不到可选字段漂移，往返断言兜底。
+    const snap: UiSnapshotPayload = { account: { id: 'acc-1' }, personaBound: true };
+    const back = parseEnvelope(JSON.stringify(makeEnvelope('ui.snapshot', 's-1', 1700000000000, snap)));
+    assert.equal((back!.payload as UiSnapshotPayload).personaBound, true);
   });
 });

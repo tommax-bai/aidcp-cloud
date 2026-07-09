@@ -224,6 +224,12 @@ export interface UiSnapshotPayload {
   };
   /** Account-scoped today usage and optional current daily quota context for the companion UI. */
   dailyUsage?: UiDailyUsagePayload;
+  /**
+   * 该账号是否已绑人设（change persona-wizard-onboarding-fixes）：云端 isPersonaBound 权威判据，
+   * **仅为 true 时下发**（守「全空不发包」/「宁缺毋假」；缺省=边缘按本地默认「未设置」）。
+   * 边缘据此把已绑账号徽标翻「已设置」并跳过向导，修「已绑仍显示未设置」bug。
+   */
+  personaBound?: boolean;
 }
 
 /** 规划请求：高层自然语言目标 */
