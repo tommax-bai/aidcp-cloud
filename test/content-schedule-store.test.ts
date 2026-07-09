@@ -189,23 +189,27 @@ test('store/group: 群评 cap 硬上限 0..10（11/负/小数整块拒）；合�
   if (r.ok) assert.deepEqual([r.row.groupCommentEnabled, r.row.groupCommentDailyCap], [true, 3]);
 });
 
-test('store/group: 一码一号硬校验 — 无码拒 no_group_code、同码他号拒 shared_group_code、异码放行、每次开启重跑', async () => {
-  // 无码 → no_group_code
+test('store/group: 群码闸 — 无码硬拒 no_group_code、共用码放行+警告(loosen-group-comment-shared-code)、异码放行无警告、每次开启重跑', async () => {
+  // 无码 → no_group_code 硬拒（放松只针对「共用」，不针对「无码」）
   const noCode = await makeStore({ myGroupCode: null });
   assert.deepEqual(await noCode.store.setAccount('acc-1', { groupCommentEnabled: true }, 'op'),
     { ok: false, reason: 'no_group_code' });
-  // 同码他号 → shared_group_code（绝不仅告警放行）
+  // 同码他号 → 放行但带 sharedGroupCodeWarning（一码一号从硬阻断放松为放行+提示，绝不静默）
   const shared = await makeStore({ myGroupCode: 'CODE-A', codeSharedByOther: true });
-  assert.deepEqual(await shared.store.setAccount('acc-1', { groupCommentEnabled: true }, 'op'),
-    { ok: false, reason: 'shared_group_code' });
-  // 异码 → 放行
+  const rs = await shared.store.setAccount('acc-1', { groupCommentEnabled: true }, 'op');
+  assert.ok(rs.ok, '共用群码不再硬拒');
+  assert.equal(rs.ok && rs.sharedGroupCodeWarning, true, '共用群码放行须带风险警告');
+  assert.equal(shared.store.getAccount('acc-1')?.groupCommentEnabled, true, '开关真落库');
+  // 异码 → 放行、无警告
   const okCase = await makeStore({ myGroupCode: 'CODE-A', codeSharedByOther: false });
   const r = await okCase.store.setAccount('acc-1', { groupCommentEnabled: true }, 'op');
   assert.ok(r.ok);
+  assert.equal(r.ok && r.sharedGroupCodeWarning, undefined, '独立群码无警告');
   // 关闭开关不触发校验（enabled=false 写入无码也允许——只拦「开启」）
   const off = await makeStore({ myGroupCode: null });
   const r2 = await off.store.setAccount('acc-1', { groupCommentEnabled: false }, 'op');
-  assert.ok(r2.ok, '关闭写入不过一码一号校验');
+  assert.ok(r2.ok, '关闭写入不过群码校验');
+  assert.equal(r2.ok && r2.sharedGroupCodeWarning, undefined, '关闭无警告');
 });
 
 test('store/group: attempts 记录与当日计数（pool 桩验 SQL 形状）', async () => {

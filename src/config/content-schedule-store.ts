@@ -109,7 +109,15 @@ export type SetContentGlobalResult =
   | { ok: false; reason: 'invalid_value' | 'no_valid_fields' };
 
 export type SetAccountContentScheduleResult =
-  | { ok: true; row: AccountContentScheduleRow }
+  | {
+      ok: true;
+      row: AccountContentScheduleRow;
+      /**
+       * 开启自动群评时该群码与其它账号共用（一码一号从「硬阻断」放松为「放行 + 提示」，
+       * change loosen-group-comment-shared-code）。true 时上层须回一条防关联风险提示、绝不静默。
+       */
+      sharedGroupCodeWarning?: boolean;
+    }
   | {
       ok: false;
       reason:
@@ -117,8 +125,7 @@ export type SetAccountContentScheduleResult =
         | 'retired_account'
         | 'invalid_value'
         | 'no_valid_fields'
-        | 'no_group_code'
-        | 'shared_group_code';
+        | 'no_group_code';
     };
 
 export const CONTENT_SCHEDULE_SCHEMA_SQL = `
@@ -373,9 +380,11 @@ export class ContentScheduleStore {
     const exists = await this.pool.query(`SELECT 1 FROM accounts WHERE account_id = $1`, [accountId]);
     if (exists.rows.length === 0) return { ok: false, reason: 'account_not_found' };
 
-    // 一码一号开启硬校验（change content-schedule-group-comments）：每次 groupCommentEnabled=true 的写入都重跑。
-    // 无码 → no_group_code（没码开开关无意义，提前拦；触发时缺码 fail-closed 仍在，纵深）；
-    // 群码与任一其它账号 verbatim 相同 → shared_group_code（同码多账号 = 最强关联封号指纹，绝不仅告警放行）。
+    // 开启自动群评的群码闸（change content-schedule-group-comments；一码一号于 loosen-group-comment-shared-code
+    // 从「硬阻断」放松为「放行 + 提示」）：每次 groupCommentEnabled=true 的写入都重跑。
+    // 无码 → no_group_code 硬拒（没码开开关无意义，提前拦；触发时缺码 fail-closed 仍在，纵深）；
+    // 群码与其它账号共用 → 不再硬拒，置 sharedGroupCodeWarning 放行，防关联封号改由上层如实提示（绝不静默）。
+    let sharedGroupCodeWarning = false;
     if (patch.groupCommentEnabled === true) {
       const code = await this.pool.query<{ group_chat_info: string | null }>(
         `SELECT group_chat_info FROM accounts WHERE account_id = $1`,
@@ -387,7 +396,7 @@ export class ContentScheduleStore {
         `SELECT 1 FROM accounts WHERE group_chat_info = $1 AND account_id <> $2 LIMIT 1`,
         [myCode, accountId],
       );
-      if (shared.rows.length > 0) return { ok: false, reason: 'shared_group_code' };
+      if (shared.rows.length > 0) sharedGroupCodeWarning = true;
     }
 
     // 未传字段保持原值（原无行则取列默认 false/false/0/null）。
@@ -436,7 +445,7 @@ export class ContentScheduleStore {
           updatedBy,
         };
     this.accountCache.set(accountId, row);
-    return { ok: true, row };
+    return sharedGroupCodeWarning ? { ok: true, row, sharedGroupCodeWarning: true } : { ok: true, row };
   }
 
   /**

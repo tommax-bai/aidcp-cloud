@@ -1339,10 +1339,11 @@ function createRequestHandler(
       const result = await deps.contentSchedule.setAccount(accountId, patch, verified.payload.sub);
       if (!result.ok) {
         if (result.reason === 'account_not_found') sendJson(res, 404, { error: 'account_not_found' });
-        else sendJson(res, 400, { error: 'bad_request', reason: result.reason }); // retired_account / invalid_value / no_valid_fields / no_group_code / shared_group_code
+        else sendJson(res, 400, { error: 'bad_request', reason: result.reason }); // retired_account / invalid_value / no_valid_fields / no_group_code
         return;
       }
-      sendJson(res, 200, result.row);
+      // 一码一号放松（loosen-group-comment-shared-code）：共用群码放行但带 sharedGroupCodeWarning，前端如实提示防关联风险、绝不静默。
+      sendJson(res, 200, result.sharedGroupCodeWarning ? { ...result.row, sharedGroupCodeWarning: true } : result.row);
       return;
     }
 
