@@ -44,6 +44,9 @@ export interface FacebookSearchStepResult {
 export interface FacebookOpenStepResult {
   ok: boolean;
   reason?: string;
+  /** 帖子文字正文（图片帖常空）+ 顶部他人评论（change facebook-comment-read-before-write）——供撰写器读了再写。 */
+  postText?: string;
+  comments?: string[];
 }
 export interface FacebookCommentStepResult {
   ok: boolean;
@@ -55,7 +58,7 @@ interface PageCardsArrived {
   containerName?: string;
 }
 interface NoteDetailArrived {
-  detail: { noteId?: string };
+  detail: { noteId?: string; content?: string; comments?: string[] };
 }
 interface ActionCompleted {
   action: string;
@@ -151,14 +154,19 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
     },
 
     async openPost(url) {
-      const outcome = await sendAndRace<{ kind: 'detail' } | { kind: 'fail'; reason: string }>(
+      const outcome = await sendAndRace<
+        { kind: 'detail'; postText?: string; comments?: string[] } | { kind: 'fail'; reason: string }
+      >(
         deps.bus,
         [
           {
             event: 'note.detail.arrived',
             match: (data) => {
               const d = data as NoteDetailArrived;
-              return d.detail?.noteId === url ? { kind: 'detail' } : undefined;
+              if (d.detail?.noteId !== url) return undefined;
+              const postText = (d.detail.content ?? '').trim();
+              const comments = Array.isArray(d.detail.comments) ? d.detail.comments : [];
+              return { kind: 'detail', ...(postText ? { postText } : {}), ...(comments.length > 0 ? { comments } : {}) };
             },
           },
           {
@@ -178,7 +186,7 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
         return { ok: false, reason: 'timeout' };
       }
       if (outcome.kind === 'fail') return { ok: false, reason: outcome.reason };
-      return { ok: true };
+      return { ok: true, ...(outcome.postText ? { postText: outcome.postText } : {}), ...(outcome.comments ? { comments: outcome.comments } : {}) };
     },
 
     async submitComment(permalink, text) {

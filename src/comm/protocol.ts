@@ -900,6 +900,13 @@ export interface NoteDetailPayload {
   images?: NoteImagePayload[];
   /** Refresh-only detail after carousel browsing; cloud MUST NOT count it as a new view. */
   refreshOnly?: boolean;
+  /**
+   * 帖子下**他人评论**正文样本（change facebook-comment-read-before-write，可选）。
+   * Facebook 定向评论：撰写前从帖子评论区抽取顶部若干条他人评论正文（去作者名/界面词），云端据此让撰写器
+   * 顺着讨论、用**内容语言**写。best-effort、可空；边缘 MUST NOT 臆造。图片帖常无正文（`content` 空）时，
+   * 这些评论就是撰写的主要文字依据。
+   */
+  comments?: string[];
 }
 
 export interface ProfileDetailPayload {

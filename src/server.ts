@@ -2090,13 +2090,27 @@ async function main(): Promise<void> {
     facebookConfigFor: (accountId) => facebookCommentConfigStore.effectiveConfigFor(accountId),
     facebookAutoEnabled: () => readEnvString('AIDCP_FB_COMMENT_AUTO') === 'true',
     facebookShadow: () => readEnvString('AIDCP_FB_COMMENT_SHADOW') === 'true',
-    facebookCompose: async (accountId, { keyword }) => {
-      // 无人值守撰写（不走人审）：一次 LLM 调用产草稿，交给确定性校验器把关；完整去 AI 味/人设由 3.1 后续。
+    facebookCompose: async (accountId, { keyword, postText, comments }) => {
+      // 读了再写（change facebook-comment-read-before-write）：撰写器吃到帖子正文（图片帖常空）+ 顶部他人评论，
+      // 顺着讨论、用**内容语言**写（图片群里内容多是当地语言，而本号 FB 界面可能是中文——绝不跟界面语言）。
+      // 无人值守（不走人审），一次 LLM 调用产草稿，交给确定性校验器把关。
       try {
         const s = getSoul(accountId);
+        const others = (comments ?? []).slice(0, 6).map((c, i) => `${i + 1}. ${c}`).join('\n');
+        const hasBody = Boolean(postText && postText.trim());
+        const contextLines = [
+          hasBody ? `【帖子正文】\n${postText!.trim()}` : `【帖子正文】（这是一条图片/无文字正文的帖子）`,
+          others ? `【其他人的评论】\n${others}` : `【其他人的评论】（暂无可读评论）`,
+        ].join('\n\n');
         const prompt =
-          `你在 Facebook 上以「${s.identity.name}」（${s.identity.role}）的身份，针对话题「${keyword}」写一条自然、真诚的评论。` +
-          `要求：像真人随手留言，一两句即可；不要外链、不要 @、不要联系方式（微信/电话/邮箱）、不要营销话术、不要话题标签。只输出评论正文。`;
+          `你在 Facebook 上以「${s.identity.name}」（${s.identity.role}）的身份，在下面这条帖子下写一条自然、真诚的评论。\n\n` +
+          `${contextLines}\n\n` +
+          `要求：\n` +
+          `- **用与上面帖子正文/他人评论相同的语言写**（当地语言；除非原文本来就是中文，否则绝不要用中文）；\n` +
+          `- 顺着帖子和评论区的话茬自然回应，像真人随手留言，一两句即可；\n` +
+          `- 与话题「${keyword}」相关，但不要生硬堆砌关键词；\n` +
+          `- 不要外链、不要 @、不要联系方式（微信/电话/邮箱）、不要营销话术、不要话题标签；\n` +
+          `- 只输出评论正文。`;
         const text = await llm.complete(prompt, { accountId, role: 'facebook_comment_composer' } as never);
         const clean = String(text ?? '').trim();
         return clean || null;

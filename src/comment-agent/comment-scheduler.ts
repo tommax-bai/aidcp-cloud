@@ -102,8 +102,14 @@ export interface CommentSchedulerDeps {
   facebookAutoEnabled?: () => boolean;
   /** 影子模式（AIDCP_FB_COMMENT_SHADOW）：跑选词+撰写+校验+审计，但绝不提交、不记风控/冷却。 */
   facebookShadow?: () => boolean;
-  /** FB 评论撰写（无人值守，不走人审）：按关键词/容器产草稿；返回 null=撰写失败。 */
-  facebookCompose?: (accountId: string, ctx: { keyword: string; container: string }) => Promise<string | null>;
+  /**
+   * FB 评论撰写（无人值守，不走人审）：**读了再写**（change facebook-comment-read-before-write）——
+   * 按关键词/容器 + **帖子正文（图片帖常空）+ 顶部他人评论** 产草稿，顺着讨论、用**内容语言**写；返回 null=撰写失败。
+   */
+  facebookCompose?: (
+    accountId: string,
+    ctx: { keyword: string; container: string; postText?: string; comments?: string[] },
+  ) => Promise<string | null>;
   /** 真发路径风控闸：canDo('comment')。 */
   facebookCanComment?: (accountId: string) => Promise<boolean>;
   /** 真发路径日上限（当日已评数 / 上限）。 */
@@ -405,47 +411,32 @@ export class CommentScheduler {
     // 人类可读容器标签：已解析出的群名优先，否则暂用 url（下次搜索会自动回填真名）。审计/回执一律用它、不用裸 id。
     let container = chosen.name ?? chosen.url;
 
-    // 撰写（无人值守，不走人审）。
-    const draft = d.facebookCompose ? await d.facebookCompose(accountId, { keyword, container }) : null;
-    if (!draft || !draft.trim()) {
-      audit({ accountId, outcome: 'compose_skipped', reason: 'empty_compose', shadow, keyword, container });
+    // ── 读了再写（change facebook-comment-read-before-write）：撰写挪到开帖之后，吃到帖子正文+他人评论+内容语言 ──
+    // 影子与真发都需要「搜 → 开帖」读上下文；影子做只读浏览、到校验为止绝不提交，真发再往后走。
+
+    // 边端在线（连接可能在 trigger 后掉线；此路径无看门狗，靠每步有界超时兜底）。影子同样需要边端读帖。
+    const conn = d.resolveConnection(accountId);
+    if (!conn || !conn.edgeId) {
+      audit({ accountId, outcome: 'submit_failed', reason: 'edge_offline', shadow, keyword, container });
       return;
     }
 
-    // 只拒不修的确定性校验（llm-output-honesty）：任一违规 → compose_skipped 终局，绝不修复后发。
-    const v = validateFacebookComment(draft, { targetKeywords: [keyword] });
-    if (!v.ok) {
-      audit({ accountId, outcome: 'compose_skipped', reason: v.reason, shadow, keyword, container, textLength: draft.length });
-      return;
-    }
-
-    // 影子：到此为止——不提交、不记风控/冷却、不按已发去重。
-    if (shadow) {
-      audit({ accountId, outcome: 'shadow_ok', shadow: true, keyword, container, textLength: v.text.length });
-      return;
-    }
-
-    // ── 真发路径（autoEnabled）：先过风控 + 日上限闸（两入口统一在此收口） ──
-    if (d.facebookCanComment && !(await d.facebookCanComment(accountId))) {
-      audit({ accountId, outcome: 'quota_denied', reason: 'canDo', shadow: false, keyword, container });
-      return;
-    }
-    if (d.facebookDailyCap && d.facebookCommentedToday) {
-      const cap = d.facebookDailyCap(accountId);
-      const done = await d.facebookCommentedToday(accountId);
-      if (cap > 0 && done >= cap) {
-        audit({ accountId, outcome: 'quota_denied', reason: 'daily_cap', shadow: false, keyword, container });
+    // 真发路径先过风控 + 日上限闸（在浏览之前收口——被限额则不白跑一趟浏览）。影子跳过这两闸。
+    if (!shadow) {
+      if (d.facebookCanComment && !(await d.facebookCanComment(accountId))) {
+        audit({ accountId, outcome: 'quota_denied', reason: 'canDo', shadow: false, keyword, container });
         return;
+      }
+      if (d.facebookDailyCap && d.facebookCommentedToday) {
+        const cap = d.facebookDailyCap(accountId);
+        const done = await d.facebookCommentedToday(accountId);
+        if (cap > 0 && done >= cap) {
+          audit({ accountId, outcome: 'quota_denied', reason: 'daily_cap', shadow: false, keyword, container });
+          return;
+        }
       }
     }
 
-    // ── 真发接线（edge 4.x 评论能力 + 协议载荷 container/url + 有界超时）──
-    // 边端离线 → 诚实非成功（连接可能在 trigger 后掉线；此路径无看门狗，靠每步有界超时兜底）。
-    const conn = d.resolveConnection(accountId);
-    if (!conn || !conn.edgeId) {
-      audit({ accountId, outcome: 'submit_failed', reason: 'edge_offline', shadow: false, keyword, container, textLength: v.text.length });
-      return;
-    }
     const steps = buildFacebookEdgeSteps({
       bus: conn.bus,
       pusher: d.pusher,
@@ -463,7 +454,7 @@ export class CommentScheduler {
       void d.facebookResolveContainerName?.(accountId, containerUrl, search.containerName);
     }
     if (!search.ok) {
-      audit({ accountId, outcome: mapFacebookBlockOutcome(search.reason), reason: search.reason, shadow: false, keyword, container });
+      audit({ accountId, outcome: mapFacebookBlockOutcome(search.reason), reason: search.reason, shadow, keyword, container });
       return;
     }
     // 2) 选一个未评过的候选（防重复真发：跳过 dedup 已标记的 permalink）。
@@ -480,22 +471,48 @@ export class CommentScheduler {
         accountId,
         outcome: 'no_strong_candidate',
         reason: search.candidates.length === 0 ? 'no_candidates' : 'all_deduped',
-        shadow: false,
+        shadow,
         keyword,
         container,
       });
       return;
     }
-    // 3) 开帖（permalink 直驱详情页）。
+    // 3) 开帖（permalink 直驱详情页），读回帖子正文（图片帖常空）+ 顶部他人评论。
     const open = await steps.openPost(target);
     if (!open.ok) {
-      audit({ accountId, outcome: mapFacebookOpenOutcome(open.reason), reason: open.reason, shadow: false, keyword, container });
+      audit({ accountId, outcome: mapFacebookOpenOutcome(open.reason), reason: open.reason, shadow, keyword, container });
       return;
     }
-    // 4) 防重复真发（BLOCKING §5.4）：**提交派发前**即打 attempted 去重标记（与成功计数解耦）——
+    const postText = open.postText;
+    const comments = open.comments ?? [];
+
+    // 4) 读了再写：撰写器吃到 关键词 + 容器 + 帖子正文 + 他人评论，顺着讨论、用内容语言写。
+    const draft = d.facebookCompose
+      ? await d.facebookCompose(accountId, { keyword, container, ...(postText ? { postText } : {}), ...(comments.length > 0 ? { comments } : {}) })
+      : null;
+    if (!draft || !draft.trim()) {
+      audit({ accountId, outcome: 'compose_skipped', reason: 'empty_compose', shadow, keyword, container });
+      return;
+    }
+    // 只拒不修的确定性校验（llm-output-honesty）：相关性以「关键词 + 帖子正文 + 他人评论」为语境
+    //（评论既由这些产出、天然相关；仍守零重叠即拒的兜底）。任一违规 → compose_skipped 终局，绝不修复后发。
+    const relevanceCtx = [keyword, ...(postText ? [postText] : []), ...comments].filter(Boolean);
+    const v = validateFacebookComment(draft, { targetKeywords: relevanceCtx });
+    if (!v.ok) {
+      audit({ accountId, outcome: 'compose_skipped', reason: v.reason, shadow, keyword, container, textLength: draft.length });
+      return;
+    }
+
+    // 5) 影子：只读浏览 + 撰写 + 校验到此为止——绝不提交、不记风控/冷却、不按已发去重。
+    if (shadow) {
+      audit({ accountId, outcome: 'shadow_ok', shadow: true, keyword, container, textLength: v.text.length });
+      return;
+    }
+
+    // 6) 防重复真发（BLOCKING §5.4）：**提交派发前**即打 attempted 去重标记（与成功计数解耦）——
     //    确认假阴性/网络抖动时不会对同一目标重复真评；该标记同时使 facebookCommentedToday 计入当日配额（保守）。
     await dedup.recordInteraction(target, 'comment').catch(() => {});
-    // 5) 提交评论 + 服务器确认（边端 own-identity 收窄）。成功记风控走 interaction.occurred 自动路径，绝不在此重复 record。
+    // 7) 提交评论 + 服务器确认（边端 own-identity 收窄）。成功记风控走 interaction.occurred 自动路径，绝不在此重复 record。
     const submit = await steps.submitComment(target, v.text);
     if (submit.ok) {
       audit({ accountId, outcome: 'commented', shadow: false, keyword, container, textLength: v.text.length });

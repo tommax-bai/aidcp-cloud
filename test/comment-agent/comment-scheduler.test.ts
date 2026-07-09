@@ -283,9 +283,23 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
     const bus = new EventBus();
     const deps = baseDeps({
       getPlatform: () => 'facebook',
-      // 记录任何真发出去的 edge 命令（用来断言影子/未接入路径绝不下发提交）。
-      pusher: { pushToEdges: (env: unknown) => { posted.push((env as { type: string }).type); return 1; } },
+      // 记录真发出去的 edge 命令 + 按类型 emit 上报（读了再写：影子也要搜+开帖读上下文，故需 emit page.cards/note.detail）。
+      pusher: {
+        pushToEdges: (env: unknown) => {
+          const e = env as { type: string; payload?: Record<string, unknown> };
+          posted.push(e.type);
+          if (e.type === 'search.execute') {
+            bus.emit('page.cards.arrived', { cards: [{ index: 0, noteId: 'https://fb.com/g/1/posts/9' }], ts: 0 } as never);
+          } else if (e.type === 'note.open') {
+            bus.emit('note.detail.arrived', { detail: { noteId: (e.payload as { url?: string }).url, content: '', comments: ['原评论：手冲咖啡真香'] }, ts: 0 } as never);
+          } else if (e.type === 'interaction.comment') {
+            bus.emit('action.completed', { action: 'comment', ok: true, ts: 0 } as never);
+          }
+          return 1;
+        },
+      },
       resolveConnection: () => ({ bus, edgeId: 'e-fb' }),
+      stepTimeoutMs: 60,
       random: () => 0,
       facebookConfigFor: () => ({
         enabled: (over.keywords ?? ['咖啡']).length > 0 && (over.containers ?? ['g1']).length > 0,
@@ -305,18 +319,19 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
   }
   const tick = () => new Promise((r) => setTimeout(r, 15));
 
-  it('影子模式：撰写+校验通过 → 审计 shadow_ok，且绝不下发任何 edge 命令', async () => {
+  it('影子模式：只读浏览（搜+开帖）+撰写+校验通过 → 审计 shadow_ok，但绝不下发提交命令', async () => {
     const { deps, audits, posted } = fbDeps({ shadow: true });
     const r = await new CommentScheduler(deps).triggerManual('fb-1');
     assert.equal(r.ok, true);
     await tick();
-    assert.equal(audits.length, 1);
-    assert.equal(audits[0].outcome, 'shadow_ok');
-    assert.equal(audits[0].shadow, true);
-    assert.deepEqual(posted, [], '影子绝不下发提交命令');
+    assert.equal(audits.at(-1)?.outcome, 'shadow_ok');
+    assert.equal(audits.at(-1)?.shadow, true);
+    // 读了再写：影子会搜+开帖（只读），但绝不下发 interaction.comment（不提交）。
+    assert.deepEqual(posted, ['search.execute', 'note.open']);
+    assert.ok(!posted.includes('interaction.comment'), '影子绝不下发提交命令');
   });
 
-  it('配置空（无容器）→ fail-closed 审计 no_targets，不发', async () => {
+  it('配置空（无容器）→ fail-closed 审计 no_targets，浏览前即停、不发', async () => {
     const { deps, audits, posted } = fbDeps({ shadow: true, containers: [] });
     await new CommentScheduler(deps).triggerManual('fb-1');
     await tick();
@@ -324,21 +339,22 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
     assert.deepEqual(posted, []);
   });
 
-  it('校验器拒（含链接）→ 审计 compose_skipped（只拒不修），不发', async () => {
+  it('校验器拒（含链接）→ 审计 compose_skipped（只拒不修），绝不提交', async () => {
     const { deps, audits, posted } = fbDeps({ shadow: true, compose: '好文 https://spam.example 推荐' });
     await new CommentScheduler(deps).triggerManual('fb-1');
     await tick();
-    assert.equal(audits[0].outcome, 'compose_skipped');
-    assert.equal(audits[0].reason, 'contains_url');
-    assert.deepEqual(posted, []);
+    assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
+    assert.equal(audits.at(-1)?.reason, 'contains_url');
+    assert.ok(!posted.includes('interaction.comment'));
   });
 
-  it('撰写为空 → compose_skipped(empty_compose)', async () => {
-    const { deps, audits } = fbDeps({ shadow: true, compose: null });
+  it('撰写为空 → compose_skipped(empty_compose)，绝不提交', async () => {
+    const { deps, audits, posted } = fbDeps({ shadow: true, compose: null });
     await new CommentScheduler(deps).triggerManual('fb-1');
     await tick();
-    assert.equal(audits[0].outcome, 'compose_skipped');
-    assert.equal(audits[0].reason, 'empty_compose');
+    assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
+    assert.equal(audits.at(-1)?.reason, 'empty_compose');
+    assert.ok(!posted.includes('interaction.comment'));
   });
 
   it('kill switch 全关（auto=false, shadow=false）→ 静默不跑、无审计、不发', async () => {
@@ -391,17 +407,22 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     dropAfterTrigger?: boolean;
     /** 边缘回传的真实群名（undefined=默认 PR 群名，null=不回传）。 */
     containerName?: string | null;
+    /** 开帖回读的帖子正文/他人评论（读了再写：喂给撰写器）。 */
+    postText?: string;
+    comments?: string[];
   } = {}): {
     deps: CommentSchedulerDeps;
     audits: Audit[];
     posted: string[];
     dedupRecorded: string[];
     resolvedNames: Array<{ url: string; name: string }>;
+    composeArgs: Array<{ keyword: string; container: string; postText?: string; comments?: string[] }>;
   } {
     const audits: Audit[] = [];
     const posted: string[] = [];
     const dedupRecorded: string[] = [];
     const resolvedNames: Array<{ url: string; name: string }> = [];
+    const composeArgs: Array<{ keyword: string; container: string; postText?: string; comments?: string[] }> = [];
     const seen = new Set(cfg.seen ?? []);
     const bus = new EventBus();
     const candidates = cfg.candidates ?? [PERMALINK];
@@ -425,7 +446,17 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
           if (cfg.openOk === false) {
             bus.emit('action.completed', { action: 'open_note', ok: false, reason: cfg.openReason ?? 'editor_not_found', ts: 0 } as never);
           } else {
-            bus.emit('note.detail.arrived', { detail: { noteId: url, title: '', content: '', likeCount: 0, collectCount: 0 }, ts: 0 } as never);
+            bus.emit('note.detail.arrived', {
+              detail: {
+                noteId: url,
+                title: '',
+                content: cfg.postText ?? '',
+                likeCount: 0,
+                collectCount: 0,
+                ...(cfg.comments ? { comments: cfg.comments } : {}),
+              },
+              ts: 0,
+            } as never);
           }
         } else if (env.type === 'interaction.comment') {
           const s = cfg.submit ?? { ok: true };
@@ -458,13 +489,16 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
       facebookResolveContainerName: async (_acct: string, url: string, name: string) => {
         resolvedNames.push({ url, name });
       },
-      facebookCompose: async () => '这家手冲咖啡很不错',
+      facebookCompose: async (_a: string, ctx: { keyword: string; container: string; postText?: string; comments?: string[] }) => {
+        composeArgs.push(ctx);
+        return '这家手冲咖啡很不错';
+      },
       facebookCanComment: async () => true,
       facebookDailyCap: () => 5,
       facebookCommentedToday: async () => 0,
       facebookAudit: (row) => audits.push(row),
     });
-    return { deps, audits, posted, dedupRecorded, resolvedNames };
+    return { deps, audits, posted, dedupRecorded, resolvedNames, composeArgs };
   }
   const tick = () => new Promise((r) => setTimeout(r, 120));
 
@@ -479,6 +513,23 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     // 群名自动回填：边缘回传真名 → 调 resolveContainerName（url→真名）；审计用群名、不用 id。
     assert.deepEqual(resolvedNames, [{ url: 'https://www.facebook.com/groups/1', name: 'Puerto Rico Y Sus Encantos e Historia' }]);
     assert.equal(audits.at(-1)?.container, 'Puerto Rico Y Sus Encantos e Historia');
+  });
+
+  it('读了再写：撰写发生在开帖之后，且吃到帖子正文 + 他人评论', async () => {
+    const { deps, composeArgs, posted } = fbFlowDeps({
+      submit: { ok: true },
+      postText: 'Foto de Rio Piedras en los años 50',
+      comments: ['Y en esta época están en su máximo esplendor', 'Qué recuerdos'],
+    });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    // 撰写只发生一次，且在开帖（note.open）之后（命令序列证明顺序）。
+    assert.equal(composeArgs.length, 1);
+    assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
+    // 撰写器吃到了帖子正文 + 他人评论（读了再写）。
+    assert.equal(composeArgs[0].postText, 'Foto de Rio Piedras en los años 50');
+    assert.deepEqual(composeArgs[0].comments, ['Y en esta época están en su máximo esplendor', 'Qué recuerdos']);
+    assert.equal(composeArgs[0].keyword, '咖啡');
   });
 
   it('边缘未回传群名 → 不回填、审计退回 url（绝不编造名称）', async () => {
