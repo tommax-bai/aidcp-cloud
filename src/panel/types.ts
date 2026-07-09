@@ -268,6 +268,17 @@ export interface PanelDeps {
     setRoute(groupLabel: string, chatId: string | null, updatedBy: string | null): Promise<SetGroupRouteResult>;
   };
   /**
+   * 机器人所在群清单 provider（change feishu-bot-chat-name-display）：实时取飞书真实群名 + 标默认群 + 降级来源。
+   * 未注入则 `GET /api/bot-chats` 回落 `botChatStore.listActive()`（老形状、群名可能空）。
+   */
+  botChats?: {
+    list(): Promise<{
+      chats: Array<{ chatId: string; name: string | null; isDefault: boolean }>;
+      defaultChatId: string | null;
+      source: 'feishu' | 'store';
+    }>;
+  };
+  /**
    * 精选创作灵感语料的后台管理面（change curated-content-admin-page）。未注入则 /api/curated/* 返回 503。
    * 读=分页列表 + 筛选面（accountId 给定＝按账号；缺省＝全账号合并视图，每行带 account_id）；
    * 写=删单条 / 清空正文壳行（account_id 强制进 WHERE 防越权，删除按行账号路由）。

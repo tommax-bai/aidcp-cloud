@@ -1311,6 +1311,38 @@ async function main(): Promise<void> {
   );
   const commandRouter = new CommandRouter(actions, undefined, undefined, isCommandChatAuthorized);
   const messenger = new FeishuMessenger();
+  // 机器人所在群 provider（change feishu-bot-chat-name-display）：实时取飞书真实群名 + 标默认群 + 降级来源。
+  // 成功结果缓存 60s（避免每次开页打飞书）；失败（缺 im:chat:readonly 权限 / 网络）降级回 bot_chats 表、不缓存（下次自动重试）。
+  const botChatsProvider = (() => {
+    const TTL_MS = 60_000;
+    let cache: { at: number; view: { chats: Array<{ chatId: string; name: string | null; isDefault: boolean }>; defaultChatId: string | null; source: 'feishu' | 'store' } } | undefined;
+    return {
+      list: async () => {
+        const now = Date.now();
+        if (cache && now - cache.at < TTL_MS) return cache.view;
+        const resolvedDefault =
+          (await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console })) || null;
+        try {
+          const chats = await messenger.listChats();
+          const view = {
+            chats: chats.map((c) => ({ chatId: c.chatId, name: c.name, isDefault: c.chatId === resolvedDefault })),
+            defaultChatId: resolvedDefault,
+            source: 'feishu' as const,
+          };
+          cache = { at: now, view };
+          return view;
+        } catch (err) {
+          console.warn('[bot-chats] 飞书群列表取失败，降级 bot_chats 表（检查 im:chat:readonly 权限）:', (err as Error).message);
+          const active = await botChatStore.listActive();
+          return {
+            chats: active.map((c) => ({ chatId: c.chatId, name: c.chatName, isDefault: c.isDefault })),
+            defaultChatId: resolvedDefault ?? active.find((c) => c.isDefault)?.chatId ?? null,
+            source: 'store' as const,
+          };
+        }
+      },
+    };
+  })();
   // A 阶段1 发布指令编排器 / 验证码协助均经 edgeServer 推送（server 在下方构造，闭包运行时已就绪）。
   let edgeServer: EdgeCloudServer | undefined;
   const captchaAssist = new CaptchaAssistService({
@@ -2679,6 +2711,8 @@ async function main(): Promise<void> {
           // 团队 → 群路由配置面（change feishu-per-team-notification-routing）。同一 group_route store 实例：读=全部映射、写=按团队键 upsert/清除。
           // init 失败留 undefined 时面板自然 503，绝不崩闭环。botChatStore 已注入（GET /api/bot-chats 复用其 listActive）。
           notificationRoutes: groupRouteStore,
+          // 机器人所在群 provider（change feishu-bot-chat-name-display）：GET /api/bot-chats 实时取飞书真实群名 + 默认群标记。
+          botChats: botChatsProvider,
           // 精选内容后台管理（change curated-content-admin-page）。同一精选语料 store 实例：读=按账号列表/筛选面、写=删单条/清空壳行。
           // init 失败留 undefined 时面板自然 503，绝不崩边-云闭环。
           curatedContent: curatedContentStore,

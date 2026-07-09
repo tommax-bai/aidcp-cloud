@@ -15,10 +15,32 @@ import type { FeishuCard } from './types.js';
 const MESSAGE_ENDPOINT =
   'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id';
 
+/** 获取机器人所在群列表端点（change feishu-bot-chat-name-display）。 */
+const CHATS_ENDPOINT = 'https://open.feishu.cn/open-apis/im/v1/chats';
+
+/** 分页取群列表的最大页数上限（防异常无限翻页；100/页 × 20 = 2000 群，远超实际）。 */
+const MAX_CHAT_PAGES = 20;
+
 interface SendMessageResponse {
   code: number;
   msg: string;
   data?: { message_id?: string };
+}
+
+interface ListChatsResponse {
+  code: number;
+  msg: string;
+  data?: {
+    items?: Array<{ chat_id?: string; name?: string }>;
+    page_token?: string;
+    has_more?: boolean;
+  };
+}
+
+/** 一个机器人所在的群（真实群名，change feishu-bot-chat-name-display）。 */
+export interface FeishuChatSummary {
+  chatId: string;
+  name: string | null;
 }
 
 export interface FeishuMessengerOptions {
@@ -26,6 +48,8 @@ export interface FeishuMessengerOptions {
   tokenManager?: FeishuTokenManager;
   /** 消息发送端点，默认飞书国内站 */
   endpoint?: string;
+  /** 群列表端点，默认飞书国内站（测试注入） */
+  chatsEndpoint?: string;
   /** 注入 fetch（测试用），默认全局 fetch */
   fetchImpl?: typeof fetch;
 }
@@ -34,12 +58,44 @@ export interface FeishuMessengerOptions {
 export class FeishuMessenger {
   private readonly tokenManager: FeishuTokenManager;
   private readonly endpoint: string;
+  private readonly chatsEndpoint: string;
   private readonly fetchImpl: typeof fetch;
 
   constructor(options: FeishuMessengerOptions = {}) {
     this.tokenManager = options.tokenManager ?? new FeishuTokenManager();
     this.endpoint = options.endpoint ?? MESSAGE_ENDPOINT;
+    this.chatsEndpoint = options.chatsEndpoint ?? CHATS_ENDPOINT;
     this.fetchImpl = options.fetchImpl ?? fetch;
+  }
+
+  /**
+   * 列机器人所在的全部群（真实群名，change feishu-bot-chat-name-display）。
+   * 调飞书 `im/v1/chats`（需 `im:chat:readonly` 权限），分页取全（有界 MAX_CHAT_PAGES）。
+   * best-effort：HTTP 非 2xx / code≠0（如缺权限）抛错，由调用方降级回 bot_chats 表——绝不静默返回空冒充"无群"。
+   */
+  async listChats(): Promise<FeishuChatSummary[]> {
+    const token = await this.tokenManager.getToken();
+    const out: FeishuChatSummary[] = [];
+    let pageToken: string | undefined;
+    for (let page = 0; page < MAX_CHAT_PAGES; page++) {
+      const url = new URL(this.chatsEndpoint);
+      url.searchParams.set('page_size', '100');
+      if (pageToken) url.searchParams.set('page_token', pageToken);
+      const resp = await this.fetchImpl(url.toString(), {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!resp.ok) throw new Error(`飞书群列表请求失败：HTTP ${resp.status}`);
+      const data = (await resp.json()) as ListChatsResponse;
+      if (data.code !== 0) throw new Error(`飞书群列表获取失败：code=${data.code} msg=${data.msg}`);
+      for (const it of data.data?.items ?? []) {
+        if (!it.chat_id) continue;
+        out.push({ chatId: it.chat_id, name: (it.name ?? '').trim() || null });
+      }
+      if (!data.data?.has_more || !data.data?.page_token) break;
+      pageToken = data.data.page_token;
+    }
+    return out;
   }
 
   /** 发送交互式卡片到群 */

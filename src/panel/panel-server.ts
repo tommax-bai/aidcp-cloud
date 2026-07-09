@@ -475,11 +475,20 @@ function createRequestHandler(
       return;
     }
 
-    // 机器人当前所在群（change feishu-per-team-notification-routing）：供路由配置从真实所在群下拉选目标，
-    // 杜绝手贴 raw chat_id 贴错群（→ 跨客户 PII 泄漏）。目标为 opaque chat_id（非枚举）。
+    // 机器人当前所在群（change feishu-per-team-notification-routing / feishu-bot-chat-name-display）：
+    // 供路由配置从真实所在群下拉选目标（杜绝手贴 raw chat_id 贴错群 → 跨客户 PII 泄漏）。目标为 opaque chat_id（非枚举）。
+    // provider 注入时实时取飞书真实群名 + 标默认群 + 降级来源；未注入则回落 bot_chats 表（老形状、群名可能空）。
     if (method === 'GET' && url === '/api/bot-chats') {
-      const chats = await deps.botChatStore.listActive();
-      sendJson(res, 200, { chats });
+      if (deps.botChats) {
+        sendJson(res, 200, await deps.botChats.list());
+        return;
+      }
+      const active = await deps.botChatStore.listActive();
+      sendJson(res, 200, {
+        chats: active.map((c) => ({ chatId: c.chatId, name: c.chatName, isDefault: c.isDefault })),
+        defaultChatId: active.find((c) => c.isDefault)?.chatId ?? null,
+        source: 'store' as const,
+      });
       return;
     }
 
