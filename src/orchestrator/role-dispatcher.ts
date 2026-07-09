@@ -30,7 +30,6 @@ import { ValuableCommentArchivist } from '../agents/valuable-comment-archivist.j
 import { CuratedNoteEvaluator, type CuratedNoteSink } from '../agents/curated-note-evaluator.js';
 import { CuratedCommentEvaluator, type CuratedCommentSink } from '../agents/curated-comment-evaluator.js';
 import { HotLeadDetector } from '../hot-lead/hot-lead-detector.js';
-import type { HotLeadQueue } from '../hot-lead/hot-lead-queue.js';
 import type { HotLeadGateConfig } from '../hot-lead/heat-velocity.js';
 import type { ValuableCommentInput, ValuableCommentRef } from '../cache/valuable-comment-store.js';
 import { CommentComposer } from '../agents/comment-composer.js';
@@ -171,14 +170,23 @@ export interface RoleDispatcherOptions {
    */
   curatedStore?: CuratedNoteSink & CuratedCommentSink;
   /**
-   * 引流待评候选队列（change feed-hot-lead-group-comment）：注入则注册 hot_lead_detector（接稿件价值判定之后，
-   * quality.pass 命中热度闸即入队，只发现不发布）。缺省 → 不注册（仿 concept_extractor 仅资源可用时注册）。
+   * 引流线索自动触发（change feed-hot-lead-auto-group-comment）：注入 `fireAutoContactComment` 则注册 hot_lead_detector
+   * （接稿件价值判定之后，quality.pass 命中热度闸 + 账号开自动联系评论 + 过统一安全闸 → 自动触发带联系方式评论 → 飞书人审）。
+   * 缺省 → 不注册（仿 concept_extractor 仅资源可用时注册）。
    */
-  hotLeadQueue?: HotLeadQueue;
-  /** 引流线索热度闸阈值取值口（接后台全局配置 provider）；缺省用代码保守默认。 */
   hotLeadGateConfig?: () => HotLeadGateConfig;
-  /** 引流线索「已评过」去重口（接 riskStore.hasInteraction(accountId,noteId,'comment')）；缺则只靠队列内去重。 */
+  /** 账号是否开启自动联系评论（contactCommentEnabled）；缺则视为未开（不发，零回归）。 */
+  isAutoContactEnabled?: (accountId: string) => Promise<boolean>;
+  /** 引流线索「已评过」去重口（接 riskStore.hasInteraction(accountId,noteId,'comment')）。 */
   hasCommentedForLead?: (accountId: string, noteId: string) => Promise<boolean>;
+  /** 触发一条受闸自动联系评论（内部走 helper：canDo+子上限+record+triggerTargeted(injectContact)）。注入则注册 detector。 */
+  fireAutoContactComment?: (args: {
+    accountId: string;
+    noteId: string;
+    title: string;
+    velocity: number;
+    ageHours: number;
+  }) => Promise<{ fired: boolean; reason?: string }>;
   /**
    * 诚实人设启动闸（multi-account-node-support D3）：以「人设存储中是否存在该账号的人设行」为独立判据
    * （getForAccount!==null，**不走会回落默认的解析器**）。缺省 → 不设闸（向后兼容单账号）。default 账号硬豁免（见 canStartSession）。
@@ -291,9 +299,16 @@ export class RoleDispatcher {
   private readonly getCommentLikeDailyRemaining?: () => number;
   private readonly archiveValuableComment?: (input: ValuableCommentInput) => Promise<void>;
   private readonly curatedStore?: CuratedNoteSink & CuratedCommentSink;
-  private readonly hotLeadQueue?: HotLeadQueue;
   private readonly hotLeadGateConfig?: () => HotLeadGateConfig;
+  private readonly isAutoContactEnabled?: (accountId: string) => Promise<boolean>;
   private readonly hasCommentedForLead?: (accountId: string, noteId: string) => Promise<boolean>;
+  private readonly fireAutoContactComment?: (args: {
+    accountId: string;
+    noteId: string;
+    title: string;
+    velocity: number;
+    ageHours: number;
+  }) => Promise<{ fired: boolean; reason?: string }>;
   private readonly getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
   /** 已下发待回执的评论上下文：action.completed{comment} 据此扣额 + emit comment.done（→ 是否进主页评估）。 */
   private pendingComment: { noteId: string; sourcePageType: 'feed' | 'search'; actions: ('like' | 'collect')[]; text: string } | null = null;
@@ -393,9 +408,10 @@ export class RoleDispatcher {
     this.archiveValuableComment = options.archiveValuableComment;
     this.getCorpusReferences = options.getCorpusReferences;
     this.curatedStore = options.curatedStore;
-    this.hotLeadQueue = options.hotLeadQueue;
     this.hotLeadGateConfig = options.hotLeadGateConfig;
+    this.isAutoContactEnabled = options.isAutoContactEnabled;
     this.hasCommentedForLead = options.hasCommentedForLead;
+    this.fireAutoContactComment = options.fireAutoContactComment;
     this.isHardPaused = options.isHardPaused ?? (() => false);
     this.isPersonaBound = options.isPersonaBound;
     this.onSessionRejected = options.onSessionRejected;
@@ -729,15 +745,20 @@ export class RoleDispatcher {
       }
     }
 
-    // 引流线索评估（change feed-hot-lead-group-comment）：接稿件价值判定之后（订阅 quality.pass + note.detail.arrived）。
-    // 纯确定性、不调 LLM（故用 commonOptions 但不读 soul/llm）；仅在候选队列可用时注册（仿 curated / concept_extractor）。
-    if (this.hotLeadQueue) {
+    // 引流线索自动触发（change feed-hot-lead-auto-group-comment）：接稿件价值判定之后（订阅 quality.pass + note.detail.arrived）。
+    // 纯确定性、不调 LLM；仅在 fireAutoContactComment 注入时注册。账号未开自动联系评论 → 仅记日志、不发（零回归）。
+    if (this.fireAutoContactComment) {
       this.roles.push(
         new HotLeadDetector({
           ...commonOptions,
-          queue: this.hotLeadQueue,
           getAccountId: () => this.currentAccountId,
+          fireAutoContactComment: this.fireAutoContactComment,
+          getSessionCommentBudgetRemaining: () => this.budget?.comments ?? Number.POSITIVE_INFINITY,
+          consumeSessionCommentBudget: () => {
+            if (this.budget && this.budget.comments > 0) this.budget.comments -= 1;
+          },
           ...(this.hotLeadGateConfig ? { getGateConfig: this.hotLeadGateConfig } : {}),
+          ...(this.isAutoContactEnabled ? { isAutoContactEnabled: this.isAutoContactEnabled } : {}),
           ...(this.hasCommentedForLead ? { hasCommented: this.hasCommentedForLead } : {}),
         }),
       );

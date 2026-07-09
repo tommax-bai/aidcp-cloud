@@ -158,6 +158,12 @@ CREATE TABLE IF NOT EXISTS contact_comment_attempts (
   attempted_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_contact_comment_attempts_account ON contact_comment_attempts (account_id, attempted_at);
+-- 自愈加列（change feed-hot-lead-auto-group-comment）：审计维度——台账兼作「系统自动给哪些帖、因多热发了联系评论」记录。
+-- source: 'scheduled_comment' | 'scheduled_contact' | 'hot_lead'；浏览触发带 note_id + 速率快照，排期传 null。可空、对既有行零回归。
+ALTER TABLE contact_comment_attempts ADD COLUMN IF NOT EXISTS note_id TEXT;
+ALTER TABLE contact_comment_attempts ADD COLUMN IF NOT EXISTS source TEXT;
+ALTER TABLE contact_comment_attempts ADD COLUMN IF NOT EXISTS velocity DOUBLE PRECISION;
+ALTER TABLE contact_comment_attempts ADD COLUMN IF NOT EXISTS age_hours DOUBLE PRECISION;
 `;
 
 export interface ContentScheduleStoreOptions {
@@ -452,8 +458,14 @@ export class ContentScheduleStore {
    * 联系评论每日自动尝试台账（change content-schedule-group-comments）：触发回执 ok（任务真开跑）即记。
    * 尝试型上限的保守方向——被人审拒 / 无强相关目标也占额度；持久、重启不清零、绝不超发。
    */
-  async recordContactCommentAttempt(accountId: string): Promise<void> {
-    await this.pool.query(`INSERT INTO contact_comment_attempts (account_id) VALUES ($1)`, [accountId]);
+  async recordContactCommentAttempt(
+    accountId: string,
+    audit?: { source?: string; noteId?: string; velocity?: number; ageHours?: number },
+  ): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO contact_comment_attempts (account_id, source, note_id, velocity, age_hours) VALUES ($1, $2, $3, $4, $5)`,
+      [accountId, audit?.source ?? null, audit?.noteId ?? null, audit?.velocity ?? null, audit?.ageHours ?? null],
+    );
   }
 
   /** 该账号今日（Asia/Shanghai 自然日）联系评论自动尝试数。 */

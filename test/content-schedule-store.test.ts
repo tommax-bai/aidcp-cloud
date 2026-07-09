@@ -231,7 +231,12 @@ test('store/group: attempts 记录与当日计数（pool 桩验 SQL 形状）', 
   await store.init();
   await store.recordContactCommentAttempt('acc-1');
   const rec = seen.find((c) => c.sql.includes('INSERT INTO contact_comment_attempts'));
-  assert.deepEqual(rec?.params, ['acc-1']);
+  // change feed-hot-lead-auto-group-comment：审计列（source/note_id/velocity/age_hours），无审计时传 null。
+  assert.deepEqual(rec?.params, ['acc-1', null, null, null, null]);
+  const recAudit = seen.length; // 再记一条带审计快照，验列位
+  await store.recordContactCommentAttempt('acc-2', { source: 'hot_lead', noteId: 'n9', velocity: 2500, ageHours: 2 });
+  const rec2 = seen.slice(recAudit).find((c) => c.sql.includes('INSERT INTO contact_comment_attempts'));
+  assert.deepEqual(rec2?.params, ['acc-2', 'hot_lead', 'n9', 2500, 2]);
   const n = await store.countContactAttemptsToday('acc-1');
   assert.equal(n, 2);
   const cnt = seen.find((c) => c.sql.includes('count(*)::text AS n FROM contact_comment_attempts'));

@@ -34,7 +34,7 @@ import { shanghaiDayStartMs } from './time/shanghai-day.js';
 import { SimplePlanner } from './planner/index.js';
 import { PgAnchorCache, BotChatStore, GroupRouteStore, ConceptStore, LikedNoteStore, ValuableCommentStore, NotificationContactStore, InteractionFeedStore, CuratedContentStore, topicKeysFromTitle } from './cache/index.js';
 import type { CuratedReferenceImage, CuratedReferenceImageInput } from './cache/index.js';
-import { PgHotLeadQueue } from './hot-lead/hot-lead-queue.js';
+import { triggerGatedAutoComment } from './comment-agent/gated-auto-comment.js';
 import { resolveCuratedGateConfig } from './publish-agent/curated-gate.js';
 import {
   EdgeCloudServer,
@@ -769,23 +769,6 @@ async function main(): Promise<void> {
     console.warn('[aidcp-cloud] CuratedContentStore 初始化失败，精选灵感语料退化:', (err as Error).message);
   }
 
-  // 引流待评候选队列（change feed-hot-lead-group-comment）：浏览闭环发现的高热度速率帖沉淀于此、人审逐条消费。
-  // init 失败留 undefined（不注册 hot_lead_detector、闭环不变、绝不崩），仿 curatedContentStore。
-  let hotLeadQueue: PgHotLeadQueue | undefined;
-  try {
-    const hlq = new PgHotLeadQueue({
-      host: readEnvString('PGHOST'),
-      port: readEnvPort('PGPORT'),
-      database: readEnvString('PGDATABASE'),
-      user: readEnvString('PGUSER'),
-      password: readEnvString('PGPASSWORD'),
-    });
-    await hlq.init();
-    hotLeadQueue = hlq;
-    console.log('[aidcp-cloud] HotLeadQueue 已就绪（hot_lead_queue 表）');
-  } catch (err) {
-    console.warn('[aidcp-cloud] HotLeadQueue 初始化失败，引流线索发现退化:', (err as Error).message);
-  }
 
   // 「本账号最近观测到的笔记内容」缓存（change curated-inspiration-corpus）：collect 通常在 note.detail 之后、
   // 同访问内发生，自有收藏自动纳入精选时据此补建正文。仅留最近一条/账号，内存态、丢失无害（取不到则不补建空正文壳行）。
@@ -1799,13 +1782,38 @@ async function main(): Promise<void> {
       // 精选语料库（change curated-admission-eval-roles，Phase 3）：注入则注册两段式准入的模型评估角色
       // （正文 curated_note_evaluator + 评论 curated_comment_evaluator）。缺省（PG 不可用）→ 不注册。
       curatedStore: curatedContentStore,
-      // 引流待评候选队列（change feed-hot-lead-group-comment）：注入则注册 hot_lead_detector（接稿件价值判定之后）。
-      hotLeadQueue,
       // 热度过滤阈值取值口：判定角色每次现读全局配置（后台改完热加载即时生效）。
       hotLeadGateConfig: () => hotLeadConfigStore.getGateConfig(),
+      // 账号是否开启自动联系评论（contactCommentEnabled，默认关＝零回归）。
+      isAutoContactEnabled: async (accountId) =>
+        contentScheduleStore.effectiveScheduleFor(accountId).contactCommentEnabled,
       // 引流线索「已评过」去重：复用 riskStore 的按账号互动去重（与自治评论/联系评论同一账本）。
       hasCommentedForLead: (accountId, noteId) =>
         riskStore.hasInteraction(accountId, noteId, 'comment').catch(() => false),
+      // 引流线索自动触发（change feed-hot-lead-auto-group-comment）：过统一安全闸 → triggerTargeted(injectContact) → 飞书人审。
+      // 仅评论机器可用时注入（否则 detector 不注册）。helper 一处收口 canDo/子上限/记账（含 record('comment') 消费共用配额）。
+      ...(commentScheduler
+        ? {
+            fireAutoContactComment: (args: { accountId: string; noteId: string; title: string; velocity: number; ageHours: number }) =>
+              triggerGatedAutoComment(
+                {
+                  accountId: args.accountId,
+                  source: 'hot_lead',
+                  snapshot: { noteId: args.noteId, velocity: args.velocity, ageHours: args.ageHours },
+                  triggerFn: () =>
+                    commentScheduler!.triggerTargeted(args.accountId, { noteId: args.noteId, title: args.title }, { injectContact: true }),
+                },
+                {
+                  canComment: async (a) => (await resolveController(a)).canDo('comment'),
+                  recordComment: async (a) => (await resolveController(a)).record('comment'),
+                  countAttemptsToday: (a) => contentScheduleStore.countContactAttemptsToday(a),
+                  getDailyCap: async (a) => contentScheduleStore.effectiveScheduleFor(a).contactCommentDailyCap,
+                  recordAttempt: (a, source, snap) =>
+                    contentScheduleStore.recordContactCommentAttempt(a, { source, ...(snap ?? {}) }),
+                },
+              ),
+          }
+        : {}),
       // 硬暂停闸（验证码/人工接管）：通知准入据此放弃巡视——硬暂停期连帧都不发。
       isHardPaused: (edgeId) => (edgeId ? server.isEdgePaused(edgeId) : false),
       // 通知巡视发飞书（仅"评论和@"）：按本连接真实账号路由到其团队群（change feishu-per-team-notification-routing）——
@@ -2716,34 +2724,6 @@ async function main(): Promise<void> {
           // 单场会话上限配置（change session-limits-to-quota-layer）。按账号时长 + 互动预算可改 + 热加载 + 非乐观回真态。
           sessionLimits: sessionLimitPanel,
           hotLeadConfig: hotLeadConfigPanel,
-          // 引流待评候选队列消费（段二人审逐条）：列 pending + 对选中一条发带联系方式定向评论（复用 triggerTargeted+飞书人审=发），
-          // ok 后置 actioned。仅在队列 + 评论机器都可用时提供，否则面板自然 503。
-          ...(hotLeadQueue && commentScheduler
-            ? {
-                hotLeads: {
-                  list: async (accountId: string) => {
-                    const rows = await hotLeadQueue!.listPending(accountId);
-                    return rows.map((r) => ({
-                      id: r.id,
-                      noteId: r.noteId,
-                      title: r.snapshot.title,
-                      likeCount: r.snapshot.likeCount,
-                      velocity: r.snapshot.velocity,
-                      ageHours: r.snapshot.ageHours,
-                      discoveredAt: r.discoveredAt,
-                    }));
-                  },
-                  comment: async (accountId: string, leadId: number, noteId: string, title: string) => {
-                    const r = await commentScheduler!.triggerTargeted(accountId, { noteId, title }, { injectContact: true });
-                    if (r.ok) {
-                      await hotLeadQueue!.markActioned(leadId).catch(() => {});
-                      return { ok: true as const };
-                    }
-                    return { ok: false as const, reason: r.reason ?? 'rejected' };
-                  },
-                },
-              }
-            : {}),
           // 自动续场护栏 + 看门狗阈值配置（change session-auto-resume-with-excursions）。按账号可改 + 热加载 + 非乐观回真态。
           resumeConfig: resumeConfigPanel,
           // 角色 prompt 只读预览（change role-prompt-visibility）。纯读，无写路径。
