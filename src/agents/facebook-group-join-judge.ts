@@ -81,15 +81,19 @@ function hasMemberSignal(obs: FacebookGroupJoinObservation): boolean {
 }
 
 /** 主 CTA 是否为清晰的「加入」按钮（多语，contains；与边缘分类器同语料）。 */
+// 「加入」多语按钮词表（P1-6：与边缘 JOIN_CTA_LABELS 逐词对齐，补齐此前漂移缺失的 entrar al/no grupo / เข้าร่วม /
+// вступить / sertai / انضمام / انضم。edge / cloud 分离仓库故为第二副本——drift-guard 测试见 judge 测试，勿静默分叉）。
+const JUDGE_JOIN_LABELS = [
+  'join group', 'join', '加入小组', '加入群组', '加入社团', '加入', 'tham gia', 'únete', 'unirte', 'participar',
+  'entrar al grupo', 'entrar no grupo', 'gabung', 'bergabung', 'เข้าร่วม', 'rejoindre', 'beitreten', 'iscriviti',
+  'вступить', 'присоединиться', '참여', '가입', 'انضمام', 'انضم', 'sertai',
+];
+
 function hasJoinCta(obs: FacebookGroupJoinObservation): boolean {
-  const cta = (obs.mainCtaText ?? '').trim().toLowerCase();
-  const aria = (obs.mainCtaAria ?? '').trim().toLowerCase();
+  const cta = normJudge(obs.mainCtaText);
+  const aria = normJudge(obs.mainCtaAria);
   if (!cta && !aria) return false;
-  const JOIN = [
-    '加入小组', '加入群组', '加入社团', '加入', 'join group', 'join', 'tham gia', '참여', '가입',
-    'únete', 'unirte', 'participar', 'gabung', 'bergabung', 'rejoindre', 'beitreten', 'iscriviti', 'присоединиться',
-  ];
-  return JOIN.some((k) => cta.includes(k) || aria.includes(k));
+  return JUDGE_JOIN_LABELS.some((k) => cta.includes(k) || aria.includes(k));
 }
 
 function parseConfidence(raw: unknown, fallback: number): number {

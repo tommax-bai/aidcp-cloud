@@ -50,6 +50,7 @@ function makeHarness(opts: {
   const sessionBudgetCalls: string[] = [];
   const paused: string[] = [];
   const retryBackoffs: number[] = [];
+  const transientBackoffs: number[] = [];
   let llmIndex = 0;
 
   const targets = {
@@ -91,6 +92,15 @@ function makeHarness(opts: {
       membershipCalls.push(`retry:${groupUrl}:${reason}`);
       if (typeof options?.backoffMs === 'number') retryBackoffs.push(options.backoffMs);
       return 'retryable' as const;
+    },
+    markTransientRetry: async (
+      _accountId: string,
+      groupUrl: string,
+      reason: string,
+      options?: { backoffMs?: number },
+    ) => {
+      membershipCalls.push(`transient:${groupUrl}:${reason}`);
+      if (typeof options?.backoffMs === 'number') transientBackoffs.push(options.backoffMs);
     },
   };
   const audit = {
@@ -134,9 +144,10 @@ function makeHarness(opts: {
     autoEnabled: () => opts.auto ?? false,
     shadow: () => opts.shadow ?? false,
     stepTimeoutMs: 20,
+    random: () => 0, // 定值抖动 → 网络瞬态退避取下限 NETWORK_TRANSIENT_BACKOFF_MIN_MS（2min），测试确定性。
     logger: { warn: () => {}, log: () => {} },
   });
-  return { scheduler, sent, auditRows, membershipCalls, targetCalls, sessionBudgetCalls, paused, retryBackoffs, bus };
+  return { scheduler, sent, auditRows, membershipCalls, targetCalls, sessionBudgetCalls, paused, retryBackoffs, transientBackoffs, bus };
 }
 
 describe('FacebookGroupJoinScheduler', () => {
@@ -212,7 +223,7 @@ describe('FacebookGroupJoinScheduler', () => {
     assert.ok(h.auditRows.some((row) => row.outcome === 'quota_denied' && row.reason === 'session_budget'));
   });
 
-  it('P0-3: 租约异常 → 诚实可重试瞬态 + 短冷却，不假成功、不静默永久失败、不热循环', async () => {
+  it('P0-3/P1-5: 租约异常 → 网络瞬态短退避重试（markTransientRetry），不假成功/不永久失败/不计尝试上限/不暂停账号', async () => {
     const h = makeHarness({
       auto: true,
       leaseError: new EdgeTaskLeaseError('acquire_timeout', 'edge busy'),
@@ -223,13 +234,43 @@ describe('FacebookGroupJoinScheduler', () => {
     assert.equal(r.outcome, 'lease_unavailable:acquire_timeout');
     // 连租约都没拿到 → 未下发任何 group.join。
     assert.deepEqual(h.sent, []);
-    // 账本走可重试失败（非永久），且用短冷却（5min，非默认 6h）——堵住「status 停在 joining + cooldown 空 → 每 60s 心跳热循环」。
-    assert.ok(h.membershipCalls.includes(`retry:${GROUP}:lease_unavailable:acquire_timeout`));
+    // 走网络瞬态路径 markTransientRetry（非 markRetryableFailure）→ 不计入尝试上限；短退避取下限 2min（random=0）。
+    // 堵住「status 停 joining + cooldown 空 → 每 60s 心跳热循环」，且绝不因基础设施瞬态推向永久 failed。
+    assert.ok(h.membershipCalls.includes(`transient:${GROUP}:lease_unavailable:acquire_timeout`));
+    assert.ok(!h.membershipCalls.some((c) => c.startsWith(`retry:${GROUP}:`)));
     assert.ok(!h.membershipCalls.some((c) => c.startsWith(`outcome:${GROUP}:`) && c.endsWith(':failed')));
-    assert.deepEqual(h.retryBackoffs, [5 * 60_000]);
-    // 审计记为可重试；租约瞬态不是 login/captcha → 不触发账号暂停。
-    assert.ok(h.auditRows.some((row) => row.reason === 'lease_unavailable:acquire_timeout:retryable'));
-    assert.deepEqual(h.paused, []);
+    assert.deepEqual(h.transientBackoffs, [2 * 60_000]);
+    assert.ok(h.auditRows.some((row) => row.reason === 'lease_unavailable:acquire_timeout:transient_retry'));
+    assert.deepEqual(h.paused, []); // 租约瞬态不是 login/captcha → 不暂停账号
+  });
+
+  it('P1-5: observe 报 not_ready（慢渲染）→ 网络瞬态短退避重试，绝不喂判定角色/LLM、绝不落永久失败', async () => {
+    const h = makeHarness({
+      auto: true,
+      // 若未被拦截，preClickDeterministic 对该半成品页返回 null → 问 LLM（默认 ambiguous_skip）→ markOutcome('failed')。
+      llmVerdicts: ['{"verdict":"ambiguous_skip","confidence":0.2,"reason":"should not be asked"}'],
+      edge: (env, bus) => {
+        bus.emit('action.completed', {
+          action: 'join_group',
+          ok: false,
+          reason: 'not_ready',
+          groupUrl: env.payload.groupUrl,
+          clicked: false,
+          observation: { groupUrl: env.payload.groupUrl, documentReady: 'loading', actionNodeCount: 0 },
+          ts: 0,
+        } as never);
+      },
+    });
+    const r = await h.scheduler.triggerScheduled('acc-fb');
+    assert.equal(r.triggered, true);
+    assert.equal(r.outcome, 'not_ready'); // 被拦截为瞬态，而非 ambiguous_skip（= 证明没走 LLM 终局）
+    // 只发了 observe（click=false）一次，没有第二次 clickJoin。
+    assert.equal(h.sent.length, 1);
+    assert.equal(h.sent[0].payload.click, false);
+    // 走网络瞬态：markTransientRetry + 短退避 2min；绝无 markOutcome failed（不永久失败）。
+    assert.ok(h.membershipCalls.includes(`transient:${GROUP}:not_ready`));
+    assert.ok(!h.membershipCalls.some((c) => c.startsWith(`outcome:${GROUP}:`) && c.endsWith(':failed')));
+    assert.deepEqual(h.transientBackoffs, [2 * 60_000]);
   });
 
   it('real: instant pre-click + joined post-click 写 joined', async () => {

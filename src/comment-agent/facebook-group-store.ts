@@ -720,6 +720,34 @@ export class FacebookGroupMembershipStore {
     return rows[0]?.status ?? 'failed';
   }
 
+  /**
+   * 纯网络/渲染瞬态重试（change facebook-join-comment-resilience P1-5）：timeout / nav_error / lease_unavailable /
+   * not_ready / post_not_confirmed_slow 等——用短冷却快恢复，且 attempts 回退一格（抵消 markJoining 的 +1），
+   * status 永远保持 assigned（可重试），**绝不因网络慢/渲染慢把可加入的群推向永久 failed**（尝试上限只数真实加群失败）。
+   * 与 markRetryableFailure 的区别：后者用于账号级（登录/验证码）——计入 cap、长退避；本方法用于基础设施瞬态——不计 cap、短退避。
+   */
+  async markTransientRetry(
+    accountId: string,
+    groupUrlInput: string,
+    reason: string,
+    options: { backoffMs?: number } = {},
+  ): Promise<void> {
+    const groupUrl = canonicalFacebookGroupUrl(groupUrlInput);
+    if (!groupUrl) return;
+    const backoffSeconds = Math.max(1, Math.floor((options.backoffMs ?? 5 * 60_000) / 1000));
+    await this.pool.query(
+      `UPDATE facebook_group_membership
+       SET status = 'assigned',
+           attempts = GREATEST(0, attempts - 1),
+           last_attempt_at = now(),
+           last_reason = $3,
+           cooldown_until = now() + ($4::double precision * interval '1 second'),
+           updated_at = now()
+       WHERE account_id = $1 AND group_url = $2`,
+      [accountId, groupUrl, reason, backoffSeconds],
+    );
+  }
+
   async coverageCandidates(
     accountId: string,
     options: FacebookGroupCoverageCandidateOptions = {},

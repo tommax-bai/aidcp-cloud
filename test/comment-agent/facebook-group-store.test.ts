@@ -5,6 +5,7 @@ import {
   FACEBOOK_GROUP_JOIN_AUDIT_SCHEMA_SQL,
   FACEBOOK_GROUP_MEMBERSHIP_SCHEMA_SQL,
   FACEBOOK_GROUP_TARGET_SCHEMA_SQL,
+  FacebookGroupMembershipStore,
   FacebookGroupTargetStore,
   canonicalFacebookGroupUrl,
 } from '../../src/comment-agent/facebook-group-store.js';
@@ -222,4 +223,26 @@ test('facebook group schemas include one-group-one-account lock, coverage indexe
   assert.match(FACEBOOK_GROUP_MEMBERSHIP_SCHEMA_SQL, /idx_fb_group_membership_coverage/);
   assert.match(FACEBOOK_GROUP_JOIN_AUDIT_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS facebook_group_join_audit/);
   assert.match(FACEBOOK_GROUP_JOIN_AUDIT_SCHEMA_SQL, /observation JSONB/);
+});
+
+test('FacebookGroupMembershipStore.markTransientRetry: status=assigned + attempts 回退一格 + 短冷却（P1-5，不计尝试上限）', async () => {
+  let capturedSql = '';
+  let capturedParams: unknown[] = [];
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      capturedSql = sql;
+      capturedParams = params;
+      return { rows: [] };
+    },
+  } as unknown as pg.Pool;
+  const store = new FacebookGroupMembershipStore({ pool });
+  await store.markTransientRetry('acc-fb', 'https://www.facebook.com/groups/123', 'not_ready', { backoffMs: 120_000 });
+  // status 永远 assigned（可重试、绝不永久 failed）；attempts 回退抵消 markJoining 的 +1（瞬态不消耗 cap）；短冷却按 backoff。
+  assert.match(capturedSql, /status = 'assigned'/);
+  assert.match(capturedSql, /attempts = GREATEST\(0, attempts - 1\)/);
+  assert.match(capturedSql, /cooldown_until = now\(\) \+ \(\$4::double precision \* interval '1 second'\)/);
+  assert.equal(capturedParams[0], 'acc-fb');
+  assert.equal(capturedParams[1], 'https://www.facebook.com/groups/123');
+  assert.equal(capturedParams[2], 'not_ready');
+  assert.equal(capturedParams[3], 120); // backoffSeconds = 120_000ms / 1000
 });

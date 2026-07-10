@@ -78,3 +78,16 @@ test('P0-2: 非英中群本地语成员标签走确定性 already_member/joined�
   assert.equal(post.verdict, 'joined');
   assert.equal(calls, 0); // 全走确定性、未问模型
 });
+
+test('P1-6: 多语 Join CTA 走确定性 instant_join、不问 LLM（judge 词表与边缘对齐，drift guard）', async () => {
+  let calls = 0;
+  const judge = new FacebookGroupJoinJudge({ llm: { complete: async () => { calls++; return '{}'; } } });
+  for (const label of [
+    'Join group', '加入小组', 'Tham gia nhóm', 'Entrar no grupo', 'เข้าร่วมกลุ่ม',
+    'Вступить в группу', 'Sertai kumpulan', 'انضمام', 'Únete al grupo',
+  ]) {
+    const r = await judge.evaluatePreClick({ mainCtaText: label });
+    assert.equal(r.verdict, 'instant_join', `expected instant_join for "${label}"`);
+  }
+  assert.equal(calls, 0); // 全走确定性、未问模型（词表漂移会让某语种回落 LLM → 本断言失败）
+});

@@ -35,6 +35,8 @@ export interface FacebookGroupJoinSchedulerDeps {
   retryBackoffMs?: number;
   maxAttempts?: number;
   stepTimeoutMs?: number;
+  /** 网络瞬态退避抖动源（测试注入定值）；缺省 Math.random（P1-5）。 */
+  random?: () => number;
   logger?: Pick<Console, 'warn' | 'log'>;
 }
 
@@ -83,9 +85,16 @@ function isAccountTransient(reason: string): boolean {
   return reason === 'login_required' || reason === 'blocked_by_captcha';
 }
 
-// 租约瞬态短冷却（change facebook-join-comment-resilience，P0-3）：边端浏览器忙/离线/掉线是快恢复的基础设施瞬态，
-// 用远短于常规重试退避（默认 6h）的冷却，让被占的群很快能再试；仍诚实计冷却 + 审计，绝不因此假成功。
-const LEASE_RETRY_BACKOFF_MS = 5 * 60_000;
+// 网络/渲染瞬态短退避（change facebook-join-comment-resilience，P1-5）：边端浏览器忙/离线/掉线、导航异常、
+// 就绪/点击后慢渲染（not_ready / post_not_confirmed_slow）都是快恢复的基础设施瞬态。用分钟级 + 去相关抖动的
+// 短冷却（远短于账号级 6h），让被占/慢的群很快能再试；抖动防所有账号在同一 60s 心跳边界撞同一群（惊群）。
+const NETWORK_TRANSIENT_BACKOFF_MIN_MS = 2 * 60_000;
+const NETWORK_TRANSIENT_BACKOFF_MAX_MS = 8 * 60_000;
+function networkTransientBackoffMs(random: () => number): number {
+  const span = NETWORK_TRANSIENT_BACKOFF_MAX_MS - NETWORK_TRANSIENT_BACKOFF_MIN_MS;
+  const r = Math.max(0, Math.min(1, random()));
+  return NETWORK_TRANSIENT_BACKOFF_MIN_MS + Math.floor(r * span);
+}
 
 /** 把 withLease 抛出的租约异常映射为可重试的 lease_unavailable reason（带 code / 摘要供审计）。 */
 function leaseFailureReason(err: unknown): string {
@@ -93,16 +102,19 @@ function leaseFailureReason(err: unknown): string {
   return `lease_unavailable:${err instanceof Error ? err.message.slice(0, 60) : String(err)}`;
 }
 
-function isRetryableEdgeFailure(reason: string): boolean {
+// 纯网络/渲染瞬态：短退避 + **不计入尝试上限**（markTransientRetry），绝不因基础设施慢把可加入群永久 failed。
+function isNetworkTransient(reason: string): boolean {
   return (
-    isAccountTransient(reason) ||
     reason === 'timeout' ||
     reason === 'no_observation' ||
     reason === 'no_post_observation' ||
     reason.startsWith('nav_error') ||
-    reason.startsWith('lease_unavailable')
+    reason.startsWith('lease_unavailable') ||
+    reason.startsWith('not_ready') ||
+    reason.startsWith('post_not_confirmed_slow')
   );
 }
+
 
 export class FacebookGroupJoinScheduler {
   private readonly running = new Set<string>();
@@ -212,6 +224,12 @@ export class FacebookGroupJoinScheduler {
       await this.markEdgeFailure(accountId, assigned, observed.reason ?? 'no_observation');
       return { triggered: true, groupUrl: assigned.groupUrl, outcome: observed.reason ?? 'no_observation' };
     }
+    // P1-5：把 LLM 判定挡在「最小就绪」之后——观察是网络/渲染瞬态（not_ready / nav_error / 慢）时，直接走短退避重试，
+    // 绝不把「慢渲染的半成品页」喂给判定角色 → fail-closed ambiguous_skip → markOutcome('failed') 永久失败（本 change 治的主导路径）。
+    if (observed.reason && isNetworkTransient(observed.reason)) {
+      await this.markEdgeFailure(accountId, assigned, observed.reason);
+      return { triggered: true, groupUrl: assigned.groupUrl, outcome: observed.reason };
+    }
     const pre = await this.judge(accountId).evaluatePreClick(observed.observation);
     const preHandled = await this.handlePreVerdict(accountId, assigned, pre, observed.observation);
     if (preHandled) return preHandled;
@@ -232,6 +250,12 @@ export class FacebookGroupJoinScheduler {
     if (!postObservation) {
       await this.markEdgeFailure(accountId, assigned, clicked.reason ?? 'no_post_observation');
       return { triggered: true, groupUrl: assigned.groupUrl, outcome: clicked.reason ?? 'no_post_observation' };
+    }
+    // P1-5：点击后仍是网络/渲染瞬态（post_not_confirmed_slow / nav_error）→ 短退避重试，不喂判定角色落终局失败。
+    // 已成功的加入 clicked.reason 为空、走 handlePostVerdict；真失败（页面已就绪却无成员态）reason=join_failed 非瞬态、照常判定。
+    if (clicked.reason && isNetworkTransient(clicked.reason)) {
+      await this.markEdgeFailure(accountId, assigned, clicked.reason);
+      return { triggered: true, groupUrl: assigned.groupUrl, outcome: clicked.reason };
     }
     const post = await this.judge(accountId).evaluatePostClick(postObservation);
     return this.handlePostVerdict(accountId, assigned, post, postObservation, clicked.ok, edgeId);
@@ -349,17 +373,12 @@ export class FacebookGroupJoinScheduler {
   }
 
   private async markEdgeFailure(accountId: string, assigned: FacebookGroupMembershipRow, reason: string): Promise<void> {
-    if (isRetryableEdgeFailure(reason)) {
-      if (isAccountTransient(reason)) {
-        await this.deps.pauseAccount?.(accountId, `facebook_group_join:${reason}`);
-      }
-      // 租约瞬态用短冷却快恢复（P0-3）；其余可重试失败仍用常规退避（默认 6h）。
-      const backoffMs = reason.startsWith('lease_unavailable')
-        ? LEASE_RETRY_BACKOFF_MS
-        : this.deps.retryBackoffMs ?? 6 * 60 * 60 * 1000;
+    // 账号级瞬态（登录/验证码）：暂停账号 + 常规长退避（默认 6h）+ 计入尝试上限。
+    if (isAccountTransient(reason)) {
+      await this.deps.pauseAccount?.(accountId, `facebook_group_join:${reason}`);
       const retryStatus = await this.deps.memberships.markRetryableFailure(accountId, assigned.groupUrl, reason, {
         maxAttempts: this.deps.maxAttempts ?? 3,
-        backoffMs,
+        backoffMs: this.deps.retryBackoffMs ?? 6 * 60 * 60 * 1000,
       });
       await this.audit({
         accountId,
@@ -367,6 +386,21 @@ export class FacebookGroupJoinScheduler {
         outcome: outcomeForReason(reason),
         phase: 'scheduler',
         reason: retryStatus === 'failed' ? `${reason}:attempt_cap` : `${reason}:retryable`,
+        shadow: false,
+      });
+      return;
+    }
+    // 纯网络/渲染瞬态：分钟级抖动短退避 + **不计入尝试上限**（绝不因基础设施慢把可加入群永久 failed，本 change 治的主因）。
+    if (isNetworkTransient(reason)) {
+      await this.deps.memberships.markTransientRetry(accountId, assigned.groupUrl, reason, {
+        backoffMs: networkTransientBackoffMs(this.deps.random ?? Math.random),
+      });
+      await this.audit({
+        accountId,
+        groupUrl: assigned.groupUrl,
+        outcome: outcomeForReason(reason),
+        phase: 'scheduler',
+        reason: `${reason}:transient_retry`,
         shadow: false,
       });
       return;
