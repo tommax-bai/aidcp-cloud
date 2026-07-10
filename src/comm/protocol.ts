@@ -651,6 +651,31 @@ export interface CaptchaAssistClickPointPayload {
   label?: string;
 }
 
+/**
+ * Operator mouse trajectory sample (change captcha-assist-trajectory-replay).
+ * Normalized to the displayed snapshot image (same basis as click points).
+ */
+export interface CaptchaAssistTrajectorySamplePayload {
+  /** Normalized x on the displayed snapshot image, [0, 1]. */
+  x: number;
+  /** Normalized y, [0, 1]. */
+  y: number;
+  /** Milliseconds relative to the first sample (monotonic non-decreasing). */
+  t: number;
+}
+/**
+ * Captured operator trajectory to replay in the original browser
+ * (change captcha-assist-trajectory-replay). Points remain authoritative for WHERE the
+ * press lands; the trajectory only contributes HOW the cursor moved and WHEN it pressed.
+ */
+export interface CaptchaAssistTrajectoryPayload {
+  /** Schema version. */
+  v: 1;
+  /** Pointermove samples in time order. */
+  samples: CaptchaAssistTrajectorySamplePayload[];
+  /** For each points[i], the sample index at which that point was pressed. length === points.length. */
+  clicks: number[];
+}
 export interface CaptchaAssistClickPayload {
   /** 验证码人工恢复的 system_recovery 任务租约。 */
   taskId?: string;
@@ -659,6 +684,12 @@ export interface CaptchaAssistClickPayload {
   points: CaptchaAssistClickPointPayload[];
   requestedAt?: number;
   settleMs?: number;
+  /**
+   * Optional operator trajectory (change captcha-assist-trajectory-replay). Absent / invalid →
+   * edge falls back to the synthetic humanized path (change captcha-assist-humanize-click).
+   * Points stay authoritative for the press landing; edge clamps sampling/timing + adds jitter.
+   */
+  trajectory?: CaptchaAssistTrajectoryPayload;
 }
 
 export interface CaptchaAssistClickResultPayload {
@@ -670,6 +701,12 @@ export interface CaptchaAssistClickResultPayload {
   reason?: string;
   checkedAt: number;
   snapshot?: CaptchaAssistSnapshotPayload;
+  /**
+   * Which input mode actually drove the click (change captcha-assist-trajectory-replay):
+   * 'trajectory' = replayed operator trajectory, 'synthetic' = humanized synthetic path.
+   * Lets cloud/console correlate the outcome (cleared/still_blocked) with the input mode.
+   */
+  replayMode?: 'trajectory' | 'synthetic';
 }
 
 /** 请求在浏览器中发布一篇帖子（cloud → edge）。 */

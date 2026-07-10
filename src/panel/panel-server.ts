@@ -217,15 +217,22 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
-      const { snapshotId, points, settleMs } = (body ?? {}) as {
+      const { snapshotId, points, settleMs, trajectory } = (body ?? {}) as {
         snapshotId?: unknown;
         points?: unknown;
         settleMs?: unknown;
+        trajectory?: unknown;
       };
       if (typeof snapshotId !== 'string' || !Array.isArray(points)) {
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
+      // 轨迹（change captcha-assist-trajectory-replay）：只做粗形状把关，非对象即当无轨迹（可救透传，
+      // 深校验交 submitClick 的 sanitize，畸形则丢弃保留 points、绝不静默）。
+      const rawTrajectory =
+        trajectory && typeof trajectory === 'object' && !Array.isArray(trajectory)
+          ? (trajectory as import('../comm/protocol.js').CaptchaAssistTrajectoryPayload)
+          : undefined;
       const normalizedPoints = points.map((point) => point as { x?: unknown; y?: unknown; label?: unknown });
       if (
         normalizedPoints.some(
@@ -248,6 +255,7 @@ function createRequestHandler(
         })),
         actor: auth.actor,
         ...(typeof settleMs === 'number' && Number.isFinite(settleMs) ? { settleMs } : {}),
+        ...(rawTrajectory ? { trajectory: rawTrajectory } : {}),
       });
       if (!result.ok) {
         sendJson(res, captchaAssistStatus(result.reason), { error: result.reason, ...(result.incident ? { incident: result.incident } : {}) });

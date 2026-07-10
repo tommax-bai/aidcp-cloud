@@ -33,7 +33,7 @@ import type {
   SetAccountContentScheduleResult,
 } from '../config/content-schedule-store.js';
 import type { EventBus } from '../event-bus/index.js';
-import type { PacingOp } from '../comm/protocol.js';
+import type { PacingOp, CaptchaAssistTrajectoryPayload } from '../comm/protocol.js';
 import type {
   CaptchaAssistDispatchResult,
   CaptchaAssistIncidentView,
@@ -95,6 +95,8 @@ export interface PanelCaptchaAssist {
     points: { x: number; y: number; label?: string }[];
     actor: string;
     settleMs?: number;
+    /** 运营真实鼠标轨迹（change captcha-assist-trajectory-replay）；服务端 sanitize 不过则丢弃、保留 points。 */
+    trajectory?: CaptchaAssistTrajectoryPayload;
   }): Promise<CaptchaAssistDispatchResult>;
 }
 

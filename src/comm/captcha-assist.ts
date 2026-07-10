@@ -5,6 +5,7 @@ import {
   type CaptchaAssistCapturePayload,
   type CaptchaAssistClickPayload,
   type CaptchaAssistClickPointPayload,
+  type CaptchaAssistTrajectoryPayload,
   type CaptchaAssistClickResultPayload,
   type CaptchaAssistSnapshotPayload,
   type CaptchaDetectedPayload,
@@ -329,6 +330,8 @@ export class CaptchaAssistService {
     points: CaptchaAssistClickPointPayload[];
     actor: string;
     settleMs?: number;
+    /** 运营真实鼠标轨迹（change captcha-assist-trajectory-replay）；sanitize 不过则丢弃、保留 points 继续。 */
+    trajectory?: CaptchaAssistTrajectoryPayload;
   }): Promise<CaptchaAssistDispatchResult> {
     const incident = this.incidents.get(input.incidentId);
     if (!incident) return { ok: false, reason: 'not_found' };
@@ -364,6 +367,12 @@ export class CaptchaAssistService {
     }
 
     const now = this.clock();
+    // 轨迹透传守卫（change captcha-assist-trajectory-replay）：sanitize 通过才外发；畸形/超限则丢弃、
+    // 保留 points 继续（可观测：记日志，绝不静默丢）。边缘还会再校验一次（纵深）。
+    const cleanTrajectory = sanitizeTrajectoryForForward(input.trajectory, input.points.length);
+    if (input.trajectory && !cleanTrajectory) {
+      this.logger.warn(`[captcha-assist] 轨迹被丢弃（畸形/超限），保留 points 继续 incident=${input.incidentId}`);
+    }
     const payload: CaptchaAssistClickPayload = {
       ...(recoveryLease ? { taskId: recoveryLease.taskId } : {}),
       incidentId: input.incidentId,
@@ -371,6 +380,7 @@ export class CaptchaAssistService {
       points: input.points.map((p) => ({ x: p.x, y: p.y, ...(p.label ? { label: p.label } : {}) })),
       requestedAt: now,
       ...(typeof input.settleMs === 'number' && Number.isFinite(input.settleMs) ? { settleMs: input.settleMs } : {}),
+      ...(cleanTrajectory ? { trajectory: cleanTrajectory } : {}),
     };
     const sent = this.deps.pusher.pushToEdges(
       makeEnvelope('captcha.assist.click', `captcha-assist-click-${input.incidentId}-${now}`, now, payload),
@@ -514,6 +524,33 @@ function isValidPointList(points: CaptchaAssistClickPointPayload[]): boolean {
     points.length <= 8 &&
     points.every((point) => Number.isFinite(point.x) && Number.isFinite(point.y) && point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1)
   );
+}
+
+/** 云端最多透传的轨迹样本数（与边缘上限一致；超限=畸形→丢弃、保留 points）。 */
+const MAX_TRAJECTORY_SAMPLES = 250;
+
+/**
+ * 校验运营轨迹是否可透传给边缘（change captcha-assist-trajectory-replay）。任一不合法返回 null，
+ * 调用方丢弃轨迹、保留 points 继续（可观测，非静默）。边缘会再校验一次（纵深防御）。
+ * 校验与边缘 sanitizeTrajectory 同口径：v===1、样本非空且 ≤ MAX、坐标∈[0,1]、t 有限、
+ * clicks 长度===点数且每项为 [0,samples) 内整数。
+ */
+function sanitizeTrajectoryForForward(
+  traj: CaptchaAssistTrajectoryPayload | undefined,
+  pointsLen: number,
+): CaptchaAssistTrajectoryPayload | null {
+  if (!traj || traj.v !== 1) return null;
+  const { samples, clicks } = traj;
+  if (!Array.isArray(samples) || samples.length === 0 || samples.length > MAX_TRAJECTORY_SAMPLES) return null;
+  for (const s of samples) {
+    if (!s || !Number.isFinite(s.x) || !Number.isFinite(s.y) || !Number.isFinite(s.t)) return null;
+    if (s.x < 0 || s.x > 1 || s.y < 0 || s.y > 1) return null;
+  }
+  if (!Array.isArray(clicks) || clicks.length !== pointsLen) return null;
+  for (const c of clicks) {
+    if (!Number.isInteger(c) || c < 0 || c >= samples.length) return null;
+  }
+  return traj;
 }
 
 function encodeJson(value: unknown): string {

@@ -269,3 +269,60 @@ describe('CaptchaAssistService · live snapshot', () => {
     assert.equal(captures.length, 1, 'live 关闭时 noteViewerPresence 不发 capture');
   });
 });
+
+// ── 真实轨迹透传（change captcha-assist-trajectory-replay）─────────────────────
+
+describe('CaptchaAssistService · trajectory', () => {
+  const mkService = (sent: Envelope[]) =>
+    new CaptchaAssistService({
+      enabled: true,
+      publicBaseUrl: 'https://c.example',
+      tokenSecret: 's',
+      clock: () => 100,
+      idGen: () => 'cap-traj',
+      logger: silentLogger,
+      pusher: { pushToEdges: (env) => { sent.push(env); return 1; } },
+    });
+
+  it('有效轨迹随 click 透传给边缘', async () => {
+    const sent: Envelope[] = [];
+    const service = mkService(sent);
+    await service.onDetected({ edgeId: 'e', kind: 'captcha' }, { sessionId: 's', edgeId: 'e' }, 'restricted');
+    service.onSnapshot(snap('cap-traj', 'snap-1', 100));
+    sent.length = 0;
+
+    const r = await service.submitClick({
+      incidentId: 'cap-traj',
+      snapshotId: 'snap-1',
+      points: [{ x: 0.5, y: 0.5 }],
+      actor: 't',
+      trajectory: { v: 1, samples: [{ x: 0.1, y: 0.1, t: 0 }, { x: 0.5, y: 0.5, t: 50 }], clicks: [1] },
+    });
+    assert.equal(r.ok, true);
+    const clickEnv = sent.find((e) => e.type === 'captcha.assist.click')!;
+    const payload = clickEnv.payload as { trajectory?: { samples: unknown[] }; points: unknown[] };
+    assert.ok(payload.trajectory, '有效轨迹应透传');
+    assert.equal(payload.trajectory!.samples.length, 2);
+  });
+
+  it('畸形轨迹（clicks 长度不符）被丢弃、保留 points 继续', async () => {
+    const sent: Envelope[] = [];
+    const service = mkService(sent);
+    await service.onDetected({ edgeId: 'e', kind: 'captcha' }, { sessionId: 's', edgeId: 'e' }, 'restricted');
+    service.onSnapshot(snap('cap-traj', 'snap-1', 100));
+    sent.length = 0;
+
+    const r = await service.submitClick({
+      incidentId: 'cap-traj',
+      snapshotId: 'snap-1',
+      points: [{ x: 0.5, y: 0.5 }],
+      actor: 't',
+      trajectory: { v: 1, samples: [{ x: 0.1, y: 0.1, t: 0 }], clicks: [0, 0] }, // 长度 2 ≠ 点数 1
+    });
+    assert.equal(r.ok, true);
+    const clickEnv = sent.find((e) => e.type === 'captcha.assist.click')!;
+    const payload = clickEnv.payload as { trajectory?: unknown; points: unknown[] };
+    assert.equal(payload.trajectory, undefined, '畸形轨迹应被丢弃');
+    assert.equal(payload.points.length, 1, 'points 仍保留继续');
+  });
+});
