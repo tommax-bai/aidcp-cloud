@@ -55,7 +55,7 @@ import { buildPublishApprovalCard } from '../feishu/cards.js';
 import type { FeishuMessenger } from '../feishu/messenger.js';
 import type { BotChatStore } from '../cache/bot-chat-store.js';
 import { RiskController, SessionBudget, buildPacingSnapshot } from '../risk/index.js';
-import type { RiskAction, RiskStatus, PacingFloorProvider } from '../risk/index.js';
+import type { RiskAction, RiskStatus, RiskQuotaLevel, PacingFloorProvider } from '../risk/index.js';
 import type { PacingSnapshotPayload } from './protocol.js';
 import type { AccountStateManager } from '../account-state.js';
 
@@ -420,12 +420,16 @@ export class DefaultMessageHandler implements MessageHandler {
     const provider = this.deps.pacingFloors;
     if (!provider) return undefined;
     let status: RiskStatus = 'normal';
+    let quotaLevel: RiskQuotaLevel = 'normal';
     try {
-      status = this.controllerFor(session).getState().status;
+      const state = this.controllerFor(session).getState();
+      status = state.status;
+      quotaLevel = state.quotaLevel;
     } catch {
       status = 'normal';
+      quotaLevel = 'normal';
     }
-    return buildPacingSnapshot(status, provider);
+    return buildPacingSnapshot(status, quotaLevel, provider);
   }
 
   private onSessionBudgetRequest(env: Envelope, session: EdgeSession): Envelope {

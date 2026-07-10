@@ -19,7 +19,7 @@ const builtinProvider: PacingFloorProvider = {
 };
 
 test('buildPacingSnapshot：正常 → tempo=tempoForStatus + 四类操作 floor 全带', () => {
-  const snap = buildPacingSnapshot('normal', builtinProvider);
+  const snap = buildPacingSnapshot('normal', 'normal', builtinProvider);
   assert.ok(snap, '应返回快照');
   assert.equal(snap!.tempo, tempoForStatus('normal'));
   assert.equal(snap!.tempo, 1.0, 'normal tempo 逐位等于 1.0（钉死「现役恒 1.0 ≈ 尚未生效」）');
@@ -29,8 +29,14 @@ test('buildPacingSnapshot：正常 → tempo=tempoForStatus + 四类操作 floor
 });
 
 test('buildPacingSnapshot：tempo 随风控档单调放慢', () => {
-  assert.equal(buildPacingSnapshot('warned', builtinProvider)!.tempo, tempoForStatus('warned'));
-  assert.ok(buildPacingSnapshot('restricted', builtinProvider)!.tempo > buildPacingSnapshot('normal', builtinProvider)!.tempo);
+  assert.equal(buildPacingSnapshot('warned', 'normal', builtinProvider)!.tempo, tempoForStatus('warned'));
+  assert.ok(buildPacingSnapshot('restricted', 'normal', builtinProvider)!.tempo > buildPacingSnapshot('normal', 'normal', builtinProvider)!.tempo);
+});
+
+test('buildPacingSnapshot：conservative 配额档即便风控 normal 也放慢 tempo=1.3（quota→tempo）', () => {
+  assert.equal(buildPacingSnapshot('normal', 'conservative', builtinProvider)!.tempo, 1.3, '保守账号 status normal 下 tempo 取配额档 1.3');
+  assert.equal(buildPacingSnapshot('normal', 'aggressive', builtinProvider)!.tempo, 1.0, '激进只多做不提速：tempo 仍 1.0');
+  assert.equal(buildPacingSnapshot('restricted', 'conservative', builtinProvider)!.tempo, 1.6, 'status 更差时取更慢者 1.6（盖过配额档）');
 });
 
 test('buildPacingSnapshot：provider 抛错 → 返回 undefined（total 函数，绝不 brick 握手）', () => {
@@ -39,7 +45,7 @@ test('buildPacingSnapshot：provider 抛错 → 返回 undefined（total 函数�
       throw new Error('store down');
     },
   };
-  const snap = buildPacingSnapshot('normal', throwing);
+  const snap = buildPacingSnapshot('normal', 'normal', throwing);
   assert.equal(snap, undefined, 'provider 抛错必须回退 undefined、省略 pacing 字段');
 });
 
@@ -47,7 +53,7 @@ test('buildPacingSnapshot：provider 漏夹的越界值 → 快照防御性二�
   const leaky: PacingFloorProvider = {
     floorFor: (): PacingFloorPayload => ({ minMs: 0, maxMs: 999999 }),
   };
-  const snap = buildPacingSnapshot('normal', leaky)!;
+  const snap = buildPacingSnapshot('normal', 'normal', leaky)!;
   for (const op of PACING_OPS) {
     const f = snap.opFloorsMs[op]!;
     assert.ok(f.minMs >= OP_MIN_FLOOR[op] && f.minMs > 0, `${op} 快照 min 恒 ≥ 非零下限`);

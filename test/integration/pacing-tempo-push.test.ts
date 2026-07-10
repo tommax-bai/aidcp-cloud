@@ -14,7 +14,7 @@ import { RoleDispatcher, type EdgeCommand } from '../../src/orchestrator/role-di
 import { edgeCommandToEnvelope } from '../../src/comm/command-bridge.js';
 import { EventBus } from '../../src/event-bus/index.js';
 import type { Soul } from '../../src/soul/types.js';
-import type { RiskStatus } from '../../src/risk/types.js';
+import type { RiskStatus, RiskQuotaLevel } from '../../src/risk/types.js';
 
 const mockSoul: Soul = {
   identity: { name: 'T', role: 'r', background: 'b', tone: 't' },
@@ -22,7 +22,7 @@ const mockSoul: Soul = {
 };
 const mockLlm = { complete: async () => 'pass' };
 
-function setup(getRiskStatus: () => RiskStatus) {
+function setup(getRiskStatus: () => RiskStatus, getQuotaLevel?: () => RiskQuotaLevel) {
   const commands: EdgeCommand[] = [];
   const bus = new EventBus();
   const d = new RoleDispatcher({
@@ -31,6 +31,7 @@ function setup(getRiskStatus: () => RiskStatus) {
     eventBus: bus,
     sendCommand: (c) => commands.push(c),
     getRiskStatus,
+    getQuotaLevel,
     clock: () => 0,
   });
   d.setup();
@@ -69,6 +70,20 @@ describe('中途风控档位传播（pacing.update）', () => {
     const before2 = commands.length;
     triggerSend(bus); // 同档 warned：去抖，不再推
     assert.ok(!commands.slice(before2).some((c) => c.action === 'pacing_update'), '同档不应重复推（去抖）');
+  });
+
+  it('后台改配额档 normal→conservative → 下一次下发前推 pacing_update{1.3}（quota→tempo）', () => {
+    let quota: RiskQuotaLevel = 'normal';
+    const { bus, commands } = setup(() => 'normal', () => quota);
+    triggerSend(bus); // normal 状态 + normal 配额 → 生效 tempo 1.0，无 pacing_update
+    assert.ok(!commands.some((c) => c.action === 'pacing_update'), 'normal 期不推');
+
+    quota = 'conservative'; // 运营后台把配额档改保守
+    const before = commands.length;
+    triggerSend(bus);
+    const pu = commands.slice(before).find((c) => c.action === 'pacing_update');
+    assert.ok(pu, '配额档升保守后应推 pacing_update（生效 tempo 1.0→1.3）');
+    assert.equal((pu!.params as { tempo: number }).tempo, 1.3, '生效 tempo 取配额档 1.3');
   });
 
   it('pacing_update 经 command-bridge 产出 pacing.update envelope，透传数值 tempo', () => {

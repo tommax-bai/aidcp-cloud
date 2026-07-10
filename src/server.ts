@@ -1794,6 +1794,7 @@ async function main(): Promise<void> {
       accountPlatform: ctx.platform,
       // 指令级节奏：喂当前（该账号）风控状态，驱动 dwellMs/thinkMs 的 tempo。
       getRiskStatus: () => ctx.controller.getState().status,
+      getQuotaLevel: () => ctx.controller.getState().quotaLevel,
       pacingFloors: pacingConfigStore,
       // 互动前风控闸：按该连接真实账号的 controller 判定（不再钉死 default）。被拒诚实跳过。
       canInteract: (action) => ctx.controller.canDo(action),

@@ -12,7 +12,7 @@
  *   fatigue：会话后段（>0.7）放大停顿（§3.4）
  */
 
-import type { RiskStatus } from './types.js';
+import type { RiskStatus, RiskQuotaLevel } from './types.js';
 import type { PacingOp, PacingFloorPayload, PacingSnapshotPayload } from '../comm/protocol.js';
 
 /** read_time 模型系数（§3.2）。 */
@@ -150,10 +150,11 @@ function floorForComputation(op: PacingOp, provider?: PacingFloorProvider): Paci
  */
 export function buildPacingSnapshot(
   status: RiskStatus,
+  quotaLevel: RiskQuotaLevel,
   provider: PacingFloorProvider,
 ): PacingSnapshotPayload | undefined {
   try {
-    const tempo = tempoForStatus(status);
+    const tempo = effectiveTempo(status, quotaLevel);
     const opFloorsMs: Partial<Record<PacingOp, PacingFloorPayload>> = {};
     for (const op of PACING_OPS) {
       const { minMs, maxMs } = provider.floorFor(op);
@@ -182,6 +183,31 @@ export function tempoForStatus(status: RiskStatus): number {
 }
 
 /**
+ * 配额档（运营后台 setQuotaLevel 可配）→ 节奏乘子（change pacing-tempo-follows-quota-level）：
+ * conservative 放慢（同「被警告」量级），normal / aggressive 不改 tempo。
+ * aggressive 只放行更多配额、MUST NOT 提速到人类节奏基线以下（提速削弱抗检测头寸）。
+ */
+export function tempoForQuotaLevel(quotaLevel: RiskQuotaLevel): number {
+  switch (quotaLevel) {
+    case 'conservative':
+      return 1.3;
+    case 'normal':
+    case 'aggressive':
+      return 1.0;
+    default:
+      return 1.0;
+  }
+}
+
+/**
+ * 生效 tempo = 风控状态 tempo 与配额档 tempo **取更慢者**（两者皆 ≥1 放慢因子，谁更谨慎听谁）。
+ * 只会更慢、绝不更快（保守放慢、激进不提速）。默认 quotaLevel=normal 时退化为 tempoForStatus（零回归）。
+ */
+export function effectiveTempo(status: RiskStatus, quotaLevel: RiskQuotaLevel): number {
+  return Math.max(tempoForStatus(status), tempoForQuotaLevel(quotaLevel));
+}
+
+/**
  * 会话疲劳乘子（§3.4）：热身略慢、中段正常、后段放大停顿。
  * @param progress 会话进度 0..1（已用时长 / 时长上限）
  */
@@ -200,6 +226,8 @@ export interface DwellInput {
   /** 'read'=完整阅读路径；'glance'=无价值/返回路径，只扫一眼 */
   mode: 'read' | 'glance';
   status: RiskStatus;
+  /** 账号配额档（运营后台可配）；缺省 normal（对 tempo 无影响）。 */
+  quotaLevel?: RiskQuotaLevel;
   /** 会话进度 0..1 */
   progress: number;
   pacing?: PacingFloorProvider;
@@ -213,13 +241,15 @@ export function computeDwellMs(input: DwellInput): number {
   const { textLen, imgCount = 0, mode, status, progress } = input;
   const raw = READ.baseMs + READ.kTextMsPerChar * Math.max(0, textLen) + READ.kImgMs * Math.max(0, imgCount);
   const scaled = mode === 'glance' ? raw * GLANCE_FACTOR : raw;
-  const withTempo = scaled * tempoForStatus(status) * fatigueMultiplier(progress);
+  const withTempo = scaled * effectiveTempo(status, input.quotaLevel ?? 'normal') * fatigueMultiplier(progress);
   const floor = floorForComputation(mode === 'glance' ? 'content_glance' : 'content_read', input.pacing);
   return Math.round(clamp(withTempo, floor.minMs, floor.maxMs));
 }
 
 export interface ThinkInput {
   status: RiskStatus;
+  /** 账号配额档（运营后台可配）；缺省 normal（对 tempo 无影响）。 */
+  quotaLevel?: RiskQuotaLevel;
   /** 会话进度 0..1 */
   progress: number;
   /** 目标内容近期已评估过（熟悉）→ 思考时间按 FAMILIAR_DISCOUNT 折扣（仍夹非零下限）。 */
@@ -228,7 +258,7 @@ export interface ThinkInput {
 
 /** 计算动作前犹豫/感知时间中心值 thinkMs（边缘据此在执行前等待，并叠加抖动）。 */
 export function computeThinkMs(input: ThinkInput): number {
-  const withTempo = THINK_BASE_MS * tempoForStatus(input.status) * fatigueMultiplier(input.progress);
+  const withTempo = THINK_BASE_MS * effectiveTempo(input.status, input.quotaLevel ?? 'normal') * fatigueMultiplier(input.progress);
   if (input.familiar) {
     // 熟悉内容反应更快：降至约 1/3，但夹非零下限不秒退。
     return Math.round(Math.max(withTempo * FAMILIAR_DISCOUNT, THINK_FLOOR_MS));
@@ -246,6 +276,8 @@ export interface FeedFloorInput {
   /** 本次翻页新出现（未见过）的卡片数。 */
   newCount: number;
   status: RiskStatus;
+  /** 账号配额档（运营后台可配）；缺省 normal（对 tempo 无影响）。 */
+  quotaLevel?: RiskQuotaLevel;
   /** 会话进度 0..1 */
   progress: number;
   pacing?: PacingFloorProvider;
@@ -259,7 +291,7 @@ export function computeFeedFloorMs(input: FeedFloorInput): number {
   const n = Math.max(0, Math.floor(input.newCount));
   if (n === 0) return 0;
   const floor = floorForComputation('feed_card_read', input.pacing);
-  const withTempo = floor.minMs * n * tempoForStatus(input.status) * fatigueMultiplier(input.progress);
+  const withTempo = floor.minMs * n * effectiveTempo(input.status, input.quotaLevel ?? 'normal') * fatigueMultiplier(input.progress);
   return Math.round(clamp(withTempo, 0, floor.maxMs));
 }
 

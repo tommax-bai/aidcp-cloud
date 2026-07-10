@@ -5,6 +5,8 @@ import {
   computeThinkMs,
   computeFeedFloorMs,
   tempoForStatus,
+  tempoForQuotaLevel,
+  effectiveTempo,
   fatigueMultiplier,
   DWELL_FLOOR_MS,
   FEED_FLOOR,
@@ -131,4 +133,43 @@ test('computeFeedFloorMs：会话后段疲劳放大（同新卡数、未封顶�
   const mid = computeFeedFloorMs({ newCount: 2, status: 'normal', progress: 0.3 }); // fatigue=1.0
   const late = computeFeedFloorMs({ newCount: 2, status: 'normal', progress: 0.95 }); // fatigue>1
   assert.ok(late > mid, `late(${late}) 应 > mid(${mid})`);
+});
+
+// ======== pacing-tempo-follows-quota-level：配额档接进节奏 ========
+
+test('tempoForQuotaLevel / effectiveTempo：保守放慢、激进不提速、与 status 取更慢者', () => {
+  assert.equal(tempoForQuotaLevel('conservative'), 1.3);
+  assert.equal(tempoForQuotaLevel('normal'), 1.0);
+  assert.equal(tempoForQuotaLevel('aggressive'), 1.0);
+  assert.equal(effectiveTempo('normal', 'conservative'), 1.3, '配额档主导（status normal）');
+  assert.equal(effectiveTempo('normal', 'aggressive'), 1.0, '激进不提速');
+  assert.equal(effectiveTempo('restricted', 'conservative'), 1.6, 'status 主导（更慢者）');
+  assert.equal(effectiveTempo('warned', 'conservative'), 1.3, '相等取 1.3');
+  assert.equal(effectiveTempo('normal', 'normal'), tempoForStatus('normal'), '默认退化为 tempoForStatus（零回归）');
+});
+
+test('computeDwellMs/computeThinkMs：conservative 放慢、aggressive 不提速（status normal）', () => {
+  const base = { textLen: 500, mode: 'read' as const, status: 'normal' as const, progress: 0.4 };
+  const dNormal = computeDwellMs({ ...base, quotaLevel: 'normal' });
+  const dConservative = computeDwellMs({ ...base, quotaLevel: 'conservative' });
+  const dAggressive = computeDwellMs({ ...base, quotaLevel: 'aggressive' });
+  assert.ok(dConservative > dNormal, `保守应放慢 dwell（${dConservative} > ${dNormal}）`);
+  assert.equal(dAggressive, dNormal, '激进不提速：dwell 与 normal 相同');
+
+  const tNormal = computeThinkMs({ status: 'normal', quotaLevel: 'normal', progress: 0.4 });
+  const tConservative = computeThinkMs({ status: 'normal', quotaLevel: 'conservative', progress: 0.4 });
+  assert.ok(tConservative > tNormal, `保守应放慢 think（${tConservative} > ${tNormal}）`);
+});
+
+test('computeDwellMs：status 更差时配额档不再改变（被更大 status-tempo 盖过）', () => {
+  const base = { textLen: 500, mode: 'read' as const, status: 'restricted' as const, progress: 0.4 };
+  const dNormal = computeDwellMs({ ...base, quotaLevel: 'normal' });
+  const dConservative = computeDwellMs({ ...base, quotaLevel: 'conservative' });
+  assert.equal(dConservative, dNormal, 'restricted(1.6) 已 > conservative(1.3)，配额档不再叠加');
+});
+
+test('缺省 quotaLevel（不传）→ 退化为 tempoForStatus（向后兼容零回归）', () => {
+  const without = computeDwellMs({ textLen: 500, mode: 'read', status: 'normal', progress: 0.4 });
+  const withNormal = computeDwellMs({ textLen: 500, mode: 'read', status: 'normal', quotaLevel: 'normal', progress: 0.4 });
+  assert.equal(without, withNormal, '不传 quotaLevel 与传 normal 一致');
 });

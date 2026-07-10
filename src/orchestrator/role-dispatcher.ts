@@ -61,7 +61,7 @@ import { ExcursionResumer } from '../agents/excursion-resumer.js';
 import type { EdgeTaskLease, EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
 import type { BaseRole } from '../agents/base-role.js';
 import type { Soul } from '../soul/types.js';
-import { computeDwellMs, computeThinkMs, computeFeedFloorMs, tempoForStatus, type PacingFloorProvider } from '../risk/pacing.js';
+import { computeDwellMs, computeThinkMs, computeFeedFloorMs, effectiveTempo, type PacingFloorProvider } from '../risk/pacing.js';
 import { SearchFrequencyLimiter } from '../risk/search-frequency-limiter.js';
 import { InteractionGuard, isGuardedInteraction, type GuardAction } from '../risk/interaction-guard.js';
 import { ActionCooldownGate, type CooldownAction } from '../risk/action-cooldown.js';
@@ -79,7 +79,7 @@ import {
   isWithinActiveWindow,
   type ResumeConfigProvider,
 } from '../risk/resume-limits.js';
-import type { RiskStatus } from '../risk/types.js';
+import type { RiskStatus, RiskQuotaLevel } from '../risk/types.js';
 import type { ConceptPool } from '../event-bus/types.js';
 import type { NotificationItem } from '../comm/protocol.js';
 
@@ -133,6 +133,8 @@ export interface RoleDispatcherOptions {
    * 由 server 接线为 `() => riskController.getState().status`。
    */
   getRiskStatus?: () => RiskStatus;
+  /** 读取当前账号配额档（运营后台可配）；用于生效 tempo（与风控状态取更慢者）。缺省 normal。 */
+  getQuotaLevel?: () => RiskQuotaLevel;
   /** 后台节奏兜底配置 provider；用于内容阅读/feed 新卡阅读的云端时长计算。 */
   pacingFloors?: PacingFloorProvider;
   /**
@@ -307,6 +309,7 @@ export class RoleDispatcher {
   private readonly rawSendCommand: (command: EdgeCommand) => void;
   private readonly clock: () => number;
   private readonly getRiskStatus: () => RiskStatus;
+  private readonly getQuotaLevel: () => RiskQuotaLevel;
   /** 上次已推送给边缘的 tempo 档位（去抖基线）；构造期初始化为握手同源值，仅档位实变时经 pacing.update 补推。 */
   private lastPushedTempo = 1.0;
   private readonly pacingFloors?: PacingFloorProvider;
@@ -422,9 +425,10 @@ export class RoleDispatcher {
     this.edgeTaskLeases = options.edgeTaskLeases;
     this.clock = options.clock ?? Date.now;
     this.getRiskStatus = options.getRiskStatus ?? (() => 'normal');
-    // 去抖基线 = 握手 welcome 快照同源的初始 tempo（读风控态、异常回落 1.0）：会话初不冗余补推，仅后续档位实变才发。
+    this.getQuotaLevel = options.getQuotaLevel ?? (() => 'normal');
+    // 去抖基线 = 握手 welcome 快照同源的初始 tempo（读风控态 + 配额档取更慢者、异常回落 1.0）：会话初不冗余补推，仅后续档位实变才发。
     try {
-      this.lastPushedTempo = tempoForStatus(this.getRiskStatus());
+      this.lastPushedTempo = effectiveTempo(this.getRiskStatus(), this.getQuotaLevel());
     } catch {
       this.lastPushedTempo = 1.0;
     }
@@ -505,7 +509,7 @@ export class RoleDispatcher {
 
   /** 动作前犹豫时间中心值（随风控状态 + 会话进度缩放）。familiar=true 对近期已评估内容按 1/3 折扣。 */
   private thinkNow(familiar = false): number {
-    return computeThinkMs({ status: this.getRiskStatus(), progress: this.progress(), familiar });
+    return computeThinkMs({ status: this.getRiskStatus(), quotaLevel: this.getQuotaLevel(), progress: this.progress(), familiar });
   }
 
   /** 通知巡视命令（巡视期放行，浏览类命令被暂停出口扣住）。 */
@@ -591,7 +595,7 @@ export class RoleDispatcher {
   private maybePushTempo(): void {
     let tempo: number;
     try {
-      tempo = tempoForStatus(this.getRiskStatus());
+      tempo = effectiveTempo(this.getRiskStatus(), this.getQuotaLevel());
     } catch {
       return;
     }
@@ -648,6 +652,7 @@ export class RoleDispatcher {
       textLen: this.currentNote.content.length,
       mode,
       status: this.getRiskStatus(),
+      quotaLevel: this.getQuotaLevel(),
       progress: this.progress(),
       pacing: this.pacingFloors,
     });
@@ -1699,6 +1704,7 @@ export class RoleDispatcher {
           this.pendingFeedFloorMs = computeFeedFloorMs({
             newCount,
             status: this.getRiskStatus(),
+            quotaLevel: this.getQuotaLevel(),
             progress: this.progress(),
             pacing: this.pacingFloors,
           });
