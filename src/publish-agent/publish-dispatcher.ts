@@ -18,6 +18,7 @@
 import type { DispatchDraft } from './publish-log-store.js';
 import type { CommandSequencer } from './command-sequencer.js';
 import type { EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
+import type { EdgeTaskPriority } from '../comm/protocol.js';
 
 /** 下发段所需的落库读写子集。 */
 export interface DispatchStore {
@@ -175,10 +176,11 @@ export class PublishDispatcher {
     }
 
     this.inFlight.add(recordId);
+    const priority: EdgeTaskPriority = opts?.humanApproval ? 'human' : 'automatic';
     const prev = this.accountTail.get(accountId) ?? Promise.resolve();
     const run = prev
       .catch(() => {})
-      .then(() => this.runDispatch(recordId, accountId))
+      .then(() => this.runDispatch(recordId, accountId, priority))
       .finally(() => {
         this.inFlight.delete(recordId);
         if (this.accountTail.get(accountId) === run) this.accountTail.delete(accountId);
@@ -230,7 +232,7 @@ export class PublishDispatcher {
   }
 
   /** 临界区：单条草稿的实际下发（已按账号串行进入）。 */
-  private async runDispatch(recordId: number, accountId: string): Promise<void> {
+  private async runDispatch(recordId: number, accountId: string, priority: EdgeTaskPriority): Promise<void> {
     // 入队后熔断才开启（同链前序项连败）的迟到项：同样跳过且不烧授权，防连环烧稿。
     if (this.openBreakers.has(accountId)) {
       this.logger.warn(`[PublishDispatcher] 账号 ${accountId} 下发熔断中，recordId=${recordId} 队内跳过（授权保留不烧）`);
@@ -297,7 +299,7 @@ export class PublishDispatcher {
         {
           edgeId,
           kind: 'publish',
-          priority: 'human',
+          priority,
           leaseMs: Number(process.env.AIDCP_EDGE_PUBLISH_LEASE_MS ?? 10 * 60_000),
         },
         async (lease) => {

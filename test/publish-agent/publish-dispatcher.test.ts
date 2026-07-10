@@ -45,6 +45,7 @@ function harness(opts: {
   let postWrite: any;
   const attached: Array<{ id: number; count: number }> = [];
   const voided: string[] = [];
+  const leasePriorities: string[] = [];
   const store = {
     loadForDispatch: async (_id: number) => (opts.draft === undefined ? makeDraft() : opts.draft),
     updateStatus: async (id: number, status: string) => { statusUpdates.push({ id, status }); events.push(`status:${status}`); },
@@ -67,6 +68,7 @@ function harness(opts: {
     sequencer,
     edgeTaskLeases: {
       withLease: async (request, work) => {
+        leasePriorities.push(request.priority);
         events.push('lease:acquired');
         try {
           return await work({ taskId: 'task-publish-1', edgeId: request.edgeId, kind: request.kind, priority: request.priority });
@@ -86,7 +88,7 @@ function harness(opts: {
     notifyDispatchEvent: (n) => notices.push(n),
     logger: silentLogger,
   });
-  return { dispatcher, events, get seqInput() { return seqInput; }, statusUpdates, get postWrite() { return postWrite; }, attached, voided, notices };
+  return { dispatcher, events, get seqInput() { return seqInput; }, statusUpdates, get postWrite() { return postWrite; }, attached, voided, notices, leasePriorities };
 }
 
 describe('PublishDispatcher', () => {
@@ -105,8 +107,15 @@ describe('PublishDispatcher', () => {
     assert.equal(h.seqInput.cover, undefined, '本期不传 cover（封面=首张上传=平台默认）');
     assert.equal(h.seqInput.edgeId, 'edge-A');
     assert.equal(h.seqInput.approvedByUser, true);
+    assert.deepEqual(h.leasePriorities, ['automatic'], '兜底/非人工触发按 automatic 排队');
     assert.deepEqual(h.attached, [{ id: 7, count: 2 }], '如实标记真实附着数 K=2');
     assert.deepEqual(h.postWrite, { id: 7, postId: 'post_real', postUrl: undefined });
+  });
+
+  test('人工批准入口使用 human 优先级', async () => {
+    const h = harness({ approved: true, edgeId: 'edge-A' });
+    await h.dispatcher.dispatch(7, { humanApproval: true });
+    assert.deepEqual(h.leasePriorities, ['human']);
   });
 
   test('AC-PUB 红线：未授权 → 绝不让位、绝不驱动序列、不改态', async () => {
