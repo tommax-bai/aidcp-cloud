@@ -17,14 +17,33 @@ test('FacebookGroupJoinJudge pre-click skips already-member and gated observatio
   assert.equal(calls, 0);
 });
 
-test('FacebookGroupJoinJudge fails closed on low-confidence model instant_join', async () => {
+test('FacebookGroupJoinJudge fails closed on low-confidence model instant_join (no clear join CTA → LLM)', async () => {
   const judge = new FacebookGroupJoinJudge({
-    llm: { complete: async () => '{"verdict":"instant_join","confidence":0.4,"reason":"button visible only"}' },
+    llm: { complete: async () => '{"verdict":"instant_join","confidence":0.4,"reason":"unclear"}' },
   });
 
-  const result = await judge.evaluatePreClick({ mainCtaText: 'Join group', headerText: 'Public group' });
+  // 无清晰加入 CTA（"View" 非加入词）→ 不走确定性 instant_join → 交 LLM → 低置信 → fail-closed。
+  const result = await judge.evaluatePreClick({ mainCtaText: 'View', headerText: 'Public group' });
   assert.equal(result.verdict, 'ambiguous_skip');
   assert.match(result.reason, /fail_closed/);
+});
+
+test('FacebookGroupJoinJudge: clear Join CTA → deterministic instant_join, ignores documentReady=loading, no LLM', async () => {
+  let calls = 0;
+  const judge = new FacebookGroupJoinJudge({
+    llm: { complete: async () => { calls++; return '{"verdict":"ambiguous_skip","confidence":0.9,"reason":"loading"}'; } },
+  });
+  // 真机回归:清晰「加入小组」+ documentReady='loading'（诊断字段）→ 应确定性 instant_join,不问 LLM、不被 loading 影响。
+  const r = await judge.evaluatePreClick({
+    mainCtaText: '加入小组',
+    mainCtaAria: '加入小组',
+    headerText: 'Tuyển Dụng Hà Nam 公开小组',
+    // @ts-expect-error 诊断字段（边缘上报，云端类型未声明）——刻意验证它不影响判定
+    documentReady: 'loading',
+  });
+  assert.equal(r.verdict, 'instant_join');
+  assert.equal(r.reason, 'clear_join_cta');
+  assert.equal(calls, 0, 'clear join CTA 不问 LLM（不受 loading 诊断字段左右）');
 });
 
 test('FacebookGroupJoinJudge records audit rows without affecting verdict', async () => {
