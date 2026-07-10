@@ -6,7 +6,10 @@ export type PlatformCapability =
   | 'publish'
   | 'interact'
   | 'patrol'
-  | 'notification';
+  | 'notification'
+  // 'join'：Facebook 加群编排能力（change facebook-group-join-and-commenting）。加入是为了与 edge Facebook
+  // driver 的能力词表对齐（change facebook-browse-and-like-loop task 5.4：消除 join 词表错配）。
+  | 'join';
 
 export interface CommentPlatformProfile {
   platform: PlatformId;
@@ -104,9 +107,12 @@ export const PLATFORM_REGISTRY: Record<'xiaohongshu', PlatformRegistryEntry> &
     platform: 'facebook',
     app: 'fb',
     displayName: 'Facebook',
-    // 刻意只声明 'comment'，绝不含 'browse'：否则 edge 装配闸会把 xhs 浏览会话挂到 FB edge，
-    // 且云端 session-start 平台闸（canStartSession）正是靠「capabilities 不含 browse」拦下 FB 账号起 xhs 浏览循环。
-    capabilities: ['comment'],
+    // 声明 'browse'/'interact'（change facebook-browse-and-like-loop）：edge 侧已原子同落 FacebookBrowseSession，
+    // 装配闸解析到 FB 浏览会话而非 xhs BrowseSession，session-start 平台闸（canStartSession，见 role-dispatcher）
+    // 靠 `capabilities.includes('browse')` 放行 FB 账号起浏览闭环。'comment'/'join' 为既有定向评论/加群编排能力。
+    // 与 edge Facebook driver 的【编排能力子集】{browse, comment, interact, join} 逐字对齐（task 5.4）；
+    // edge 另有 'identity'/'overlay' 为 driver 运行时能力（读身份 / 监测浮层），非编排词表、不进本 registry。
+    capabilities: ['browse', 'comment', 'interact', 'join'],
     scheduler: {
       comment: {
         enabled: true,

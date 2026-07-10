@@ -25,7 +25,7 @@ test('commentProfileForPlatform: aliases resolve to xhs profile', () => {
   assert.equal(commentProfileForPlatform(undefined), XHS_COMMENT_PROFILE);
 });
 
-test('platform registry: facebook is registered as a comment-only platform (facebook-scheduled-comment)', () => {
+test('platform registry: facebook declares browse/interact/comment/join (facebook-browse-and-like-loop)', () => {
   assert.equal(normalizePlatformId('facebook'), 'facebook');
   assert.equal(normalizePlatformId('fb'), 'facebook');
   // facebook now resolves to its own comment profile (no longer throws).
@@ -33,9 +33,12 @@ test('platform registry: facebook is registered as a comment-only platform (face
   assert.equal(FB_COMMENT_PROFILE.siteName, 'Facebook');
   const fb = PLATFORM_REGISTRY.facebook;
   assert.ok(fb, 'facebook registry entry exists');
-  // v1 declares 'comment' only and MUST NOT declare 'browse' (else the edge assembly gate
-  // would attach the xhs browse session, and the cloud session-start platform gate relies on this).
+  // change facebook-browse-and-like-loop：'browse'/'interact' 已声明——edge 侧 FacebookBrowseSession 原子同落，
+  // 装配闸解析到 FB 浏览会话（非 xhs），session-start 平台闸靠 includes('browse') 放行 FB。
   assert.ok(fb!.capabilities.includes('comment'));
-  assert.ok(!fb!.capabilities.includes('browse'), 'facebook v1 must not declare browse capability');
+  assert.ok(fb!.capabilities.includes('browse'), 'facebook now declares browse (co-landed with FacebookBrowseSession)');
+  assert.ok(fb!.capabilities.includes('interact'));
+  // task 5.4：与 edge Facebook driver 的编排能力子集 {browse, comment, interact, join} 逐字对齐（消除 join 词表错配）。
+  assert.deepEqual([...fb!.capabilities], ['browse', 'comment', 'interact', 'join']);
   assert.equal(fb!.scheduler.comment.enabled, true);
 });

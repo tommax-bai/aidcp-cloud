@@ -520,9 +520,15 @@ describe('RoleDispatcher Integration', () => {
     assert.ok(recover, `open_note 失败后应下发兜底 scroll，实际=${JSON.stringify(commands)}`);
   });
 
-  // ─── facebook-scheduled-comment 2.8: 会话启动平台闸 ─────────────────
+  // ─── facebook-browse-and-like-loop 5.2: 会话启动平台闸对 Facebook 放行 ─────────────────
+  // 原 facebook-scheduled-comment 2.8 曾断言「FB 无 browse → 拒绝」；本 change 为 FB 声明 browse（edge 侧
+  // FacebookBrowseSession 原子同落），启动闸应【放行】FB 浏览闭环（spec 场景「Facebook account can start a
+  // browse session after capabilities are added」）。会话启动信号 = feed.entered{session_start}。
+  // 注：启动闸对「注册项不含 browse 的平台」仍诚实拒绝（gate 逻辑 role-dispatcher.ts 未改）；现有两个平台
+  // （xhs/facebook）均已声明 browse，故拒绝路径无可注册的无 browse 平台可被真机触发，由 gate 单行
+  // `capabilities.includes('browse')` 保证不变。
 
-  it('2.8: facebook 平台（无 browse 能力）→ 启动闸拒绝，不起 xhs 浏览会话（不发 feed.entered{session_start}）', async () => {
+  it('5.2: facebook 平台（已声明 browse）→ 启动闸放行，起浏览会话（发 feed.entered{session_start}）', async () => {
     const llm = createMockLlm(['{"verdict":"skip"}']);
     const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: () => {}, accountPlatform: 'facebook' });
     dispatcher.setCurrentAccountId('fb-acc');
@@ -531,7 +537,7 @@ describe('RoleDispatcher Integration', () => {
     dispatcher.bus.on('feed.entered', (p: unknown) => { starts.push(p); });
     dispatcher.tryStartSession(); // 经 canStartSession 平台闸
     await new Promise((r) => setTimeout(r, 10));
-    assert.equal(starts.length, 0, 'facebook 账号不应启动浏览会话');
+    assert.ok(starts.length >= 1, 'facebook 账号声明 browse 后应正常启动浏览会话（平台闸放行）');
   });
 
   it('2.8: 缺省/xiaohongshu 平台（含 browse）→ 启动闸放行，正常起会话', async () => {
