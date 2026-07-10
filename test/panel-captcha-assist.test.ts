@@ -52,6 +52,7 @@ async function loginAuth(base: string): Promise<Record<string, string>> {
 
 test('captcha assist API accepts scoped Feishu token and panel JWT with incident scoping', async () => {
   const calls: Array<{ op: string; actor: string; points?: unknown[] }> = [];
+  let presenceCount = 0;
   const deps = {
     edgeServer: { edgeCount: () => 0, onlineEdgeCount: () => 0 },
     eventBus: { onAny: () => () => {} },
@@ -62,6 +63,9 @@ test('captcha assist API accepts scoped Feishu token and panel JWT with incident
           ? ({ ok: true, incidentId: 'cap-1', iat: 1, exp: 9999 } as const)
           : ({ ok: false, reason: 'bad_signature' } as const),
       getIncident: (id: string) => (id === 'cap-1' ? incident : null),
+      noteViewerPresence: () => {
+        presenceCount += 1;
+      },
       requestCapture: async (id: string, actor: string) => {
         calls.push({ op: 'capture', actor });
         return { ok: true, sent: 1, incident: { ...incident, incidentId: id } } as const;
@@ -80,6 +84,8 @@ test('captcha assist API accepts scoped Feishu token and panel JWT with incident
     const scopedRead = await fetch(`${base}/api/captcha-assist/cap-1?token=good`);
     assert.equal(scopedRead.status, 200);
     assert.equal(((await scopedRead.json()) as { incident: CaptchaAssistIncidentView }).incident.snapshot?.snapshotId, 'snap-1');
+    // GET 即"运营在场"信号（change captcha-assist-live-snapshot）：必须触达 noteViewerPresence。
+    assert.ok(presenceCount >= 1, 'GET incident 应触发 noteViewerPresence 在场信号');
 
     const wrongScope = await fetch(`${base}/api/captcha-assist/cap-other?token=good`);
     assert.equal(wrongScope.status, 403);

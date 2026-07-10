@@ -588,6 +588,21 @@ export interface CaptchaAssistCapturePayload {
   maxImageWidth?: number;
   maxImageHeight?: number;
   quality?: number;
+  /**
+   * Live capture mode (change captcha-assist-live-snapshot). When present, edge runs a
+   * bounded, content-deduped, self-terminating capture loop and pushes a fresh
+   * `captcha.assist.snapshot` only when the challenge image changes — so the console shows
+   * a near-live challenge for self-refreshing / multi-step point-select captchas. Absent =
+   * today's single-shot capture (zero regression). Edge clamps every value to a safe band.
+   */
+  live?: {
+    /** Tick cadence hint in ms; edge clamps (e.g. 600..2000). */
+    intervalMs?: number;
+    /** Hard upper bound on total loop wall time in ms; edge clamps. */
+    maxDurationMs?: number;
+    /** Hard upper bound on tick count (iteration-bounded self-termination). */
+    maxFrames?: number;
+  };
 }
 
 export interface CaptchaAssistViewportPayload {

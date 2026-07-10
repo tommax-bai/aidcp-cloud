@@ -82,6 +82,8 @@ export interface PanelContentSchedule {
 export interface PanelCaptchaAssist {
   verifyToken(token: string | undefined): CaptchaAssistTokenVerifyResult;
   getIncident(incidentId: string): CaptchaAssistIncidentView | null;
+  /** 运营轮询即在场信号（change captcha-assist-live-snapshot）：窗口到期则重新武装 edge 实时循环。 */
+  noteViewerPresence(incidentId: string): void;
   requestCapture(
     incidentId: string,
     actor: string,

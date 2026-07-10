@@ -1367,6 +1367,14 @@ async function main(): Promise<void> {
     tokenSecret: readEnvString('AIDCP_CAPTCHA_ASSIST_TOKEN_SECRET') ?? readEnvString('AIDCP_PANEL_JWT_SECRET'),
     tokenTtlSeconds: readEnvPort('AIDCP_CAPTCHA_ASSIST_TOKEN_TTL_SECONDS') ?? 30 * 60,
     incidentTtlMs: (readEnvPort('AIDCP_CAPTCHA_ASSIST_INCIDENT_TTL_SECONDS') ?? 30 * 60) * 1000,
+    // 实时抓帧（change captcha-assist-live-snapshot）：默认关（=== 'true' 才开），开则 capture 带 live 字段、
+    // edge 进有界去重实时循环。intervalMs/maxDurationMs/maxFrames 只是 hint，edge 一律再钳制。
+    liveCapture: {
+      enabled: readEnvString('AIDCP_CAPTCHA_ASSIST_LIVE_ENABLED') === 'true',
+      intervalMs: readEnvPort('AIDCP_CAPTCHA_ASSIST_LIVE_INTERVAL_MS'),
+      maxDurationMs: readEnvPort('AIDCP_CAPTCHA_ASSIST_LIVE_MAX_DURATION_MS'),
+      maxFrames: readEnvPort('AIDCP_CAPTCHA_ASSIST_LIVE_MAX_FRAMES'),
+    },
     pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
     taskLeases: {
       acquire: (request) => edgeTaskLeases.acquire(request),

@@ -2,6 +2,7 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   makeEnvelope,
   type BlockingOverlaySnapshotPayload,
+  type CaptchaAssistCapturePayload,
   type CaptchaAssistClickPayload,
   type CaptchaAssistClickPointPayload,
   type CaptchaAssistClickResultPayload,
@@ -49,6 +50,11 @@ export interface CaptchaAssistIncidentView {
     sent: number;
     actor: string;
   };
+  /**
+   * 实时抓帧窗口截止时间（change captcha-assist-live-snapshot）：edge 的有界实时循环预计运行到此刻。
+   * 控制台据此亮"实时"指示；`clock() < liveUntil` 视为实时中。仅在 live 开启时置。
+   */
+  liveUntil?: number;
 }
 
 export interface CaptchaAssistDetectedResult {
@@ -89,12 +95,27 @@ export interface CaptchaAssistServiceDeps {
   getAccountName?: (accountId: string) => string | null | undefined;
   pusher: { pushToEdges(env: ReturnType<typeof makeEnvelope>, edgeId?: string): number };
   taskLeases?: Pick<EdgeTaskLeaseClient, 'acquire' | 'release'>;
+  /**
+   * 实时抓帧配置（change captcha-assist-live-snapshot）。enabled 时，capture 命令带 `live` 字段，
+   * edge 进入有界去重实时循环；关闭 = 今天的单次抓帧（零回归）。intervalMs/maxDurationMs/maxFrames
+   * 只是给 edge 的 hint，edge 一律再钳制到安全区间。
+   */
+  liveCapture?: {
+    enabled: boolean;
+    intervalMs?: number;
+    maxDurationMs?: number;
+    maxFrames?: number;
+  };
 }
 
 interface CaptchaAssistIncident extends CaptchaAssistIncidentView {}
 
 const DEFAULT_TOKEN_TTL_SECONDS = 30 * 60;
 const DEFAULT_INCIDENT_TTL_MS = 30 * 60_000;
+// 云端为每 incident 保留最近若干帧的 snapshotId（放宽提交校验用）。必须 ≤ 边缘帧环容量(8)，
+// 确保云端放行的 snapshotId 边缘一定还留着（否则云端放行、边缘已淘汰 → 白跑）。
+const RECENT_SNAPSHOT_IDS = 5;
+const DEFAULT_LIVE_MAX_DURATION_MS = 30_000;
 
 export class CaptchaAssistService {
   private readonly incidents = new Map<string, CaptchaAssistIncident>();
@@ -104,6 +125,8 @@ export class CaptchaAssistService {
   private readonly tokenTtlSeconds: number;
   private readonly incidentTtlMs: number;
   private readonly recoveryLeases = new Map<string, { lease: EdgeTaskLease; timer: ReturnType<typeof setTimeout> }>();
+  // 每 incident 最近 N 帧 snapshotId（newest last）：放宽 submitClick 校验，容纳运营点冻结的稍旧帧。
+  private readonly recentSnapshotIds = new Map<string, string[]>();
 
   constructor(private readonly deps: CaptchaAssistServiceDeps) {
     this.clock = deps.clock ?? Date.now;
@@ -176,6 +199,10 @@ export class CaptchaAssistService {
       return;
     }
     if (this.markExpiredIfNeeded(incident)) return;
+    // 迟到的实时帧 MUST NOT 把已清除/过期态复活为 ready（change captcha-assist-live-snapshot）：
+    // 实时循环是 800ms 自主抓帧，onCleared 之后仍可能有在途帧到达，无守卫会把 cleared 翻回 ready、
+    // 污染风控恢复语义。已终态的 incident 直接忽略入帧。
+    if (incident.status === 'cleared' || incident.status === 'expired') return;
     incident.snapshot = payload;
     incident.kind = payload.kind;
     incident.url = payload.url ?? incident.url;
@@ -183,6 +210,7 @@ export class CaptchaAssistService {
     incident.accountId = payload.accountId ?? incident.accountId;
     incident.updatedAt = this.clock();
     incident.status = 'ready';
+    this.rememberSnapshotId(payload.incidentId, payload.snapshotId);
   }
 
   onClickResult(payload: CaptchaAssistClickResultPayload): void {
@@ -221,11 +249,13 @@ export class CaptchaAssistService {
     incidentId: string,
     actor: string,
     reason: 'initial' | 'refresh' | 'retry' = 'refresh',
+    opts: { keepStatus?: boolean } = {},
   ): Promise<CaptchaAssistDispatchResult> {
     const incident = this.incidents.get(incidentId);
     if (!incident) return { ok: false, reason: 'not_found' };
     if (this.markExpiredIfNeeded(incident)) return { ok: false, reason: 'expired', incident };
     const now = this.clock();
+    const live = this.buildLiveHint();
     const sent = this.deps.pusher.pushToEdges(
       makeEnvelope('captcha.assist.capture', `captcha-assist-capture-${incidentId}-${now}`, now, {
         incidentId,
@@ -234,14 +264,63 @@ export class CaptchaAssistService {
         maxImageWidth: 1600,
         maxImageHeight: 1600,
         quality: 75,
+        ...(live ? { live } : {}),
       }),
       incident.edgeId,
     );
-    incident.status = sent > 0 ? 'capture_pending' : 'detected';
+    // keepStatus（在场 re-arm 用）：已在展示帧时不把状态降回 capture_pending，避免每窗口一次"截图中"闪烁。
+    const showing = incident.status === 'ready' || incident.status === 'still_blocked';
+    if (!(opts.keepStatus && showing)) {
+      incident.status = sent > 0 ? 'capture_pending' : 'detected';
+    }
+    if (live && sent > 0) {
+      const durationMs = this.deps.liveCapture?.maxDurationMs ?? DEFAULT_LIVE_MAX_DURATION_MS;
+      incident.liveUntil = now + durationMs;
+    }
     incident.updatedAt = now;
     incident.lastDispatch = { type: 'capture', requestedAt: now, sent, actor };
     if (sent <= 0) return { ok: false, reason: 'edge_offline', incident };
     return { ok: true, sent, incident };
+  }
+
+  /**
+   * 运营在场信号（change captcha-assist-live-snapshot）：控制台每次轮询 incident 即视为"人在处理页"。
+   * 实时窗口是有界的（edge 会自终止），仅靠一个固定盲目窗口会在运营到场前就结束。此处用免费的轮询信号
+   * 在窗口到期后重新武装 edge 实时循环——运营还在看就续，人一走轮询停、窗口自然过期、循环自终止。
+   * 关闭 live 或 incident 非可交互态时为 no-op（零回归）。
+   */
+  noteViewerPresence(incidentId: string): void {
+    if (!this.deps.liveCapture?.enabled) return;
+    const incident = this.incidents.get(incidentId);
+    if (!incident) return;
+    if (this.markExpiredIfNeeded(incident)) return;
+    if (!isInteractiveStatus(incident.status)) return;
+    // 仅当上一实时窗口已到期才重新武装（约每 maxDuration 一次），避免每次轮询都发 capture。
+    if (incident.liveUntil && this.clock() < incident.liveUntil) return;
+    void this.requestCapture(incidentId, 'viewer', 'refresh', { keepStatus: true });
+  }
+
+  private buildLiveHint(): CaptchaAssistCapturePayload['live'] {
+    const cfg = this.deps.liveCapture;
+    if (!cfg?.enabled) return undefined;
+    return {
+      ...(typeof cfg.intervalMs === 'number' ? { intervalMs: cfg.intervalMs } : {}),
+      ...(typeof cfg.maxDurationMs === 'number' ? { maxDurationMs: cfg.maxDurationMs } : {}),
+      ...(typeof cfg.maxFrames === 'number' ? { maxFrames: cfg.maxFrames } : {}),
+    };
+  }
+
+  private rememberSnapshotId(incidentId: string, snapshotId: string): void {
+    const ids = this.recentSnapshotIds.get(incidentId) ?? [];
+    // 去重后追加，环内保留最近 N 个。
+    const next = ids.filter((id) => id !== snapshotId);
+    next.push(snapshotId);
+    while (next.length > RECENT_SNAPSHOT_IDS) next.shift();
+    this.recentSnapshotIds.set(incidentId, next);
+  }
+
+  private isRecentSnapshot(incidentId: string, snapshotId: string): boolean {
+    return this.recentSnapshotIds.get(incidentId)?.includes(snapshotId) ?? false;
   }
 
   async submitClick(input: {
@@ -255,7 +334,10 @@ export class CaptchaAssistService {
     if (!incident) return { ok: false, reason: 'not_found' };
     if (this.markExpiredIfNeeded(incident)) return { ok: false, reason: 'expired', incident };
     if (!incident.snapshot) return { ok: false, reason: 'snapshot_required', incident };
-    if (incident.snapshot.snapshotId !== input.snapshotId) {
+    // 放宽陈旧守卫（change captcha-assist-live-snapshot）：实时循环会把 incident.snapshot 推进到最新，
+    // 运营提交的是被冻结的稍旧帧。接受"最新帧 或 最近 N 帧集内"的 snapshotId——否则实时开启后提交几乎
+    // 必撞 snapshot_mismatch、边缘帧环成死代码、白跑不降反升。边缘按被点帧自己的 crop 落点，坐标不错位。
+    if (incident.snapshot.snapshotId !== input.snapshotId && !this.isRecentSnapshot(input.incidentId, input.snapshotId)) {
       return { ok: false, reason: 'snapshot_mismatch', incident };
     }
     if (!isValidPointList(input.points)) {
@@ -418,6 +500,11 @@ export class CaptchaAssistService {
 function normalizeAccountName(name: string | null | undefined): string | undefined {
   const clean = name?.trim();
   return clean || undefined;
+}
+
+/** 可交互态（运营可能在处理页看/点）：非终态即可实时武装。cleared/expired/failed 不再武装。 */
+function isInteractiveStatus(status: CaptchaAssistIncidentStatus): boolean {
+  return status === 'detected' || status === 'capture_pending' || status === 'ready' || status === 'click_pending' || status === 'still_blocked';
 }
 
 function isValidPointList(points: CaptchaAssistClickPointPayload[]): boolean {

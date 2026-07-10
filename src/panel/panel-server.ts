@@ -187,6 +187,9 @@ function createRequestHandler(
     }
 
     if (method === 'GET' && parts.length === 1) {
+      // 轮询即"运营在场"（change captcha-assist-live-snapshot）：窗口到期则重新武装实时循环。
+      // 先记在场再取快照，使本次回包即反映 re-arm 后的 liveUntil。
+      deps.captchaAssist.noteViewerPresence(incidentId);
       const incident = deps.captchaAssist.getIncident(incidentId);
       if (!incident) {
         sendJson(res, 404, { error: 'not_found' });

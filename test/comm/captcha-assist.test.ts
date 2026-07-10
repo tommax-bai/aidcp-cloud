@@ -123,3 +123,149 @@ describe('CaptchaAssistService', () => {
     assert.equal(service.getIncident('cap-2')?.status, 'cleared');
   });
 });
+
+// ── 实时抓帧（change captcha-assist-live-snapshot）─────────────────────────────
+
+function snap(incidentId: string, snapshotId: string, now: number) {
+  return {
+    incidentId,
+    edgeId: 'edge-live',
+    snapshotId,
+    capturedAt: now,
+    kind: 'captcha' as const,
+    viewport: { width: 800, height: 600, deviceScaleFactor: 1 },
+    crop: { x: 0, y: 0, width: 800, height: 600 },
+    image: { mime: 'image/jpeg' as const, data: `d-${snapshotId}`, width: 800, height: 600 },
+  };
+}
+
+describe('CaptchaAssistService · live snapshot', () => {
+  it('迟到实时帧不复活已清除态', async () => {
+    const service = new CaptchaAssistService({
+      enabled: true,
+      publicBaseUrl: 'https://c.example',
+      tokenSecret: 's',
+      clock: () => 30_000,
+      idGen: () => 'cap-live-1',
+      logger: silentLogger,
+      pusher: { pushToEdges: () => 1 },
+    });
+    await service.onDetected({ edgeId: 'edge-live', kind: 'captcha' }, { sessionId: 's', edgeId: 'edge-live' }, 'restricted');
+    service.onSnapshot(snap('cap-live-1', 'snap-1', 30_100));
+    assert.equal(service.getIncident('cap-live-1')?.status, 'ready');
+    // 清除后，实时循环在途帧到达 → 必须被忽略，MUST NOT 翻回 ready。
+    service.onClickResult({ incidentId: 'cap-live-1', snapshotId: 'snap-1', status: 'cleared', checkedAt: 30_200 });
+    assert.equal(service.getIncident('cap-live-1')?.status, 'cleared');
+    service.onSnapshot(snap('cap-live-1', 'snap-late', 30_300));
+    assert.equal(service.getIncident('cap-live-1')?.status, 'cleared', '迟到帧不得复活为 ready');
+  });
+
+  it('submitClick 接受最近 N 帧内的稍旧 snapshotId，拒绝环外的', async () => {
+    const service = new CaptchaAssistService({
+      enabled: true,
+      publicBaseUrl: 'https://c.example',
+      tokenSecret: 's',
+      clock: () => 40_000,
+      idGen: () => 'cap-live-2',
+      logger: silentLogger,
+      pusher: { pushToEdges: () => 1 },
+    });
+    await service.onDetected({ edgeId: 'edge-live', kind: 'captcha' }, { sessionId: 's', edgeId: 'edge-live' }, 'restricted');
+    // 实时推进：snap-1 → snap-2 → snap-3（最新）。近期集 = [snap-1,snap-2,snap-3]。
+    service.onSnapshot(snap('cap-live-2', 'snap-1', 40_100));
+    service.onSnapshot(snap('cap-live-2', 'snap-2', 40_200));
+    service.onSnapshot(snap('cap-live-2', 'snap-3', 40_300));
+    // 环外 snapshotId → snapshot_mismatch（诚实拒绝，不盲点）。
+    const stale = await service.submitClick({ incidentId: 'cap-live-2', snapshotId: 'snap-unknown', points: [{ x: 0.5, y: 0.5 }], actor: 't' });
+    assert.equal(stale.ok, false);
+    assert.equal(stale.ok === false && stale.reason, 'snapshot_mismatch');
+    // 稍旧但在近期集内的 snap-1 → 放行（运营点的是被冻结的稍旧帧）。
+    const ok = await service.submitClick({ incidentId: 'cap-live-2', snapshotId: 'snap-1', points: [{ x: 0.5, y: 0.5 }], actor: 't' });
+    assert.equal(ok.ok, true, '近期集内的稍旧 snapshotId 应放行');
+  });
+
+  it('live 开启：capture 带 live hint 并置 liveUntil；关闭则零回归', async () => {
+    const sent: { env: Envelope }[] = [];
+    const withLive = new CaptchaAssistService({
+      enabled: true,
+      publicBaseUrl: 'https://c.example',
+      tokenSecret: 's',
+      clock: () => 50_000,
+      idGen: () => 'cap-live-3',
+      logger: silentLogger,
+      pusher: { pushToEdges: (env) => { sent.push({ env }); return 1; } },
+      liveCapture: { enabled: true, intervalMs: 900, maxDurationMs: 25_000, maxFrames: 40 },
+    });
+    await withLive.onDetected({ edgeId: 'edge-live', kind: 'captcha' }, { sessionId: 's', edgeId: 'edge-live' }, 'restricted');
+    const payload = sent[0].env.payload as { live?: { intervalMs?: number; maxDurationMs?: number; maxFrames?: number } };
+    assert.deepEqual(payload.live, { intervalMs: 900, maxDurationMs: 25_000, maxFrames: 40 });
+    assert.equal(withLive.getIncident('cap-live-3')?.liveUntil, 75_000);
+
+    const sentOff: Envelope[] = [];
+    const off = new CaptchaAssistService({
+      enabled: true,
+      publicBaseUrl: 'https://c.example',
+      tokenSecret: 's',
+      clock: () => 50_000,
+      idGen: () => 'cap-off',
+      logger: silentLogger,
+      pusher: { pushToEdges: (env) => { sentOff.push(env); return 1; } },
+      // liveCapture 未配 = 关闭。
+    });
+    await off.onDetected({ edgeId: 'edge-live', kind: 'captcha' }, { sessionId: 's', edgeId: 'edge-live' }, 'restricted');
+    assert.equal((sentOff[0].payload as { live?: unknown }).live, undefined, 'live 关闭时 capture 不带 live 字段');
+    assert.equal(off.getIncident('cap-off')?.liveUntil, undefined);
+  });
+
+  it('noteViewerPresence：窗口到期才重新武装；窗口内/终态/关闭均 no-op', async () => {
+    let now = 60_000;
+    const captures: number[] = [];
+    const service = new CaptchaAssistService({
+      enabled: true,
+      publicBaseUrl: 'https://c.example',
+      tokenSecret: 's',
+      clock: () => now,
+      idGen: () => 'cap-live-4',
+      logger: silentLogger,
+      pusher: { pushToEdges: (env) => { if (env.type === 'captcha.assist.capture') captures.push(now); return 1; } },
+      liveCapture: { enabled: true, maxDurationMs: 30_000 },
+    });
+    await service.onDetected({ edgeId: 'edge-live', kind: 'captcha' }, { sessionId: 's', edgeId: 'edge-live' }, 'restricted');
+    assert.equal(captures.length, 1); // 初始 capture
+    service.onSnapshot(snap('cap-live-4', 'snap-1', now)); // → ready，liveUntil=90_000
+
+    // 窗口内轮询 → 不重新武装。
+    now = 80_000;
+    service.noteViewerPresence('cap-live-4');
+    assert.equal(captures.length, 1, '窗口内不 re-arm');
+
+    // 窗口到期后轮询 → 重新武装一次。
+    now = 91_000;
+    service.noteViewerPresence('cap-live-4');
+    assert.equal(captures.length, 2, '窗口到期后 re-arm 一次');
+
+    // 终态（cleared）→ no-op。
+    service.onClickResult({ incidentId: 'cap-live-4', snapshotId: 'snap-1', status: 'cleared', checkedAt: now });
+    now = 200_000;
+    service.noteViewerPresence('cap-live-4');
+    assert.equal(captures.length, 2, 'cleared 后不再 re-arm');
+  });
+
+  it('noteViewerPresence：live 关闭时恒为 no-op（零回归）', async () => {
+    let now = 70_000;
+    const captures: number[] = [];
+    const service = new CaptchaAssistService({
+      enabled: true,
+      publicBaseUrl: 'https://c.example',
+      tokenSecret: 's',
+      clock: () => now,
+      idGen: () => 'cap-nolive',
+      logger: silentLogger,
+      pusher: { pushToEdges: (env) => { if (env.type === 'captcha.assist.capture') captures.push(now); return 1; } },
+    });
+    await service.onDetected({ edgeId: 'edge-live', kind: 'captcha' }, { sessionId: 's', edgeId: 'edge-live' }, 'restricted');
+    now = 200_000;
+    service.noteViewerPresence('cap-nolive');
+    assert.equal(captures.length, 1, 'live 关闭时 noteViewerPresence 不发 capture');
+  });
+});
