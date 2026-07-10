@@ -246,12 +246,16 @@ export interface CommentSchedulerDeps {
   facebookCoverageOnFailure?: (accountId: string, groupUrl: string, reason: string) => Promise<void> | void;
   /**
    * Facebook 手动「加群再评论」（change facebook-manual-join-comment）：让该账号加入**一个新群**并返回结果。
-   * 复用云端加群调度器 triggerScheduled（含 kill switch / 判定 fail-closed / 风控配额 / 账本）；outcome ∈
+   * 复用云端加群调度器 triggerScheduled（含 kill switch / 判定 fail-closed / 账本）；outcome ∈
    * {joined, already_member, gated_skip, pending, ambiguous_skip, join_failed, nav_error, no_button, ...}，triggered=false 时带 reason
-   * （disabled / edge_offline / running / quota_denied / session_budget / no_targets / not_facebook_account）。
-   * 缺省未注入 → /comment --join 诚实拒（加群未接线），绝不静默降级为普通评论。
+   * （disabled / edge_offline / running / no_targets / not_facebook_account；opts.manual=false 时另有 quota_denied / session_budget）。
+   * opts.manual=true（手动 /comment --join，change manual-comment-bypass-quota）：加群跳过配额闸（会话额度 + 风控速率/状态），
+   *   故手动路径**绝不**再回 quota_denied / session_budget；只守物理闸。缺省未注入 → /comment --join 诚实拒（加群未接线），绝不静默降级为普通评论。
    */
-  facebookJoinNewGroup?: (accountId: string) => Promise<{ triggered: boolean; reason?: string; groupUrl?: string; outcome?: string }>;
+  facebookJoinNewGroup?: (
+    accountId: string,
+    opts?: { manual?: boolean },
+  ) => Promise<{ triggered: boolean; reason?: string; groupUrl?: string; outcome?: string }>;
   /** 选关键词/容器的随机源（测试注入定值；缺省 Math.random）。 */
   random?: () => number;
 }
@@ -313,7 +317,7 @@ export class CommentScheduler {
   /** 飞书 /comment 触发：返回「触发态」结构化回执；最终结果异步补发结果卡片。 */
   async triggerManual(
     accountId: string,
-    options?: { injectContact?: boolean; priority?: EdgeTaskPriority; joinFirst?: boolean },
+    options?: { injectContact?: boolean; priority?: EdgeTaskPriority; joinFirst?: boolean; manualOverride?: boolean },
   ): Promise<CommentCommandReceipt> {
     if (!accountId || accountId === 'default') {
       return { ok: false, level: 'error', title: '按需评论触发失败', message: '未解析到有效账号（绝不回落 default）' };
@@ -386,7 +390,11 @@ export class CommentScheduler {
           };
         }
         this.running.add(accountId);
-        void this.runFacebookJoinThenComment(accountId, { injectContact: options?.injectContact, contactInfo })
+        void this.runFacebookJoinThenComment(accountId, {
+          injectContact: options?.injectContact,
+          contactInfo,
+          manualOverride: options?.manualOverride === true,
+        })
           .catch((err) =>
             (this.deps.logger ?? console).warn(
               `[comment-scheduler] FB 加群评论任务异常 account=${accountId}：${(err as Error).message}`,
@@ -403,7 +411,13 @@ export class CommentScheduler {
         };
       }
       this.running.add(accountId);
-      void this.runFacebookTargetedTask(accountId, { injectContact: options?.injectContact, contactInfo })
+      // 手动 /comment（本方法为飞书手动出口）：manualOverride 透传到评论体 → 真发路径跳过评论配额 / 日上限闸。
+      // 自动排期评论走独立入口（triggerTargeted / ContentScheduler），不带此旗标、配额照旧。
+      void this.runFacebookTargetedTask(accountId, {
+        injectContact: options?.injectContact,
+        contactInfo,
+        manualOverride: options?.manualOverride === true,
+      })
         .catch((err) =>
           (this.deps.logger ?? console).warn(
             `[comment-scheduler] FB 定向评论任务异常 account=${accountId}：${(err as Error).message}`,
@@ -573,7 +587,7 @@ export class CommentScheduler {
    */
   private async runFacebookTargetedTask(
     accountId: string,
-    options: { injectContact?: boolean; contactInfo?: string | null; overrideContainerUrl?: string } = {},
+    options: { injectContact?: boolean; contactInfo?: string | null; overrideContainerUrl?: string; manualOverride?: boolean } = {},
   ): Promise<FacebookCommentRunResult> {
     // 终态捕获（change facebook-manual-join-comment）：包一层把「最后一次审计」升级为返回值，供「加群 + 评论」
     // 合并结果卡取用；body 内所有 return; 保持 void 语义不动（普通 /comment / 排期路径零回归、只是丢弃返回值）。
@@ -605,7 +619,7 @@ export class CommentScheduler {
 
   private async runFacebookTargetedTaskBody(
     accountId: string,
-    options: { injectContact?: boolean; contactInfo?: string | null; overrideContainerUrl?: string },
+    options: { injectContact?: boolean; contactInfo?: string | null; overrideContainerUrl?: string; manualOverride?: boolean },
     audit: (row: FacebookCommentAuditRow) => void,
   ): Promise<void> {
     const d = this.deps;
@@ -661,7 +675,10 @@ export class CommentScheduler {
     }
 
     // 真发路径先过风控 + 日上限闸（在浏览之前收口——被限额则不白跑一趟浏览）。影子跳过这两闸。
-    if (!shadow) {
+    // 手动操作员命令（manualOverride，飞书 /comment）跳过这两个配额闸——含风控状态 + 速率配额 + 评论日上限，
+    // 与手动加群侧一致（用户定案 2026-07-10：手动命令不受配额限制、硬风控状态也强行）。自动排期评论 manualOverride=false、配额照旧。
+    // 注：成功的风控计数仍走 interaction.occurred → RiskController.record 自动路径（handler.ts），绕的是**前置闸**、不漏计。
+    if (!shadow && !options.manualOverride) {
       if (d.facebookCanComment && !(await d.facebookCanComment(accountId))) {
         audit({ accountId, outcome: 'quota_denied', reason: 'canDo', shadow: false, keyword, container });
         return;
@@ -800,12 +817,13 @@ export class CommentScheduler {
    */
   private async runFacebookJoinThenComment(
     accountId: string,
-    options: { injectContact?: boolean; contactInfo?: string | null } = {},
+    options: { injectContact?: boolean; contactInfo?: string | null; manualOverride?: boolean } = {},
   ): Promise<void> {
     const d = this.deps;
     let join: { triggered: boolean; reason?: string; groupUrl?: string; outcome?: string };
     try {
-      join = await d.facebookJoinNewGroup!(accountId);
+      // manual=true：手动 /comment --join 加群跳过配额闸（会话额度 + 风控速率/状态）。见 triggerScheduled 契约。
+      join = await d.facebookJoinNewGroup!(accountId, { manual: options.manualOverride === true });
     } catch (err) {
       await d.postResultCard?.(accountId, {
         ok: false,
@@ -822,10 +840,12 @@ export class CommentScheduler {
       return;
     }
     // 已加入（或已是成员）→ 在该新群里发一条评论。override 容器强制真发；contactInfo 已在 triggerManual 解析一次（gate 同源）。
+    // manualOverride 透传 → 群内评论亦跳过评论配额 / 日上限闸（整条链一致，绝不「加了群却被评论配额拦住」）。
     const comment = await this.runFacebookTargetedTask(accountId, {
       injectContact: options.injectContact,
       contactInfo: options.contactInfo ?? null,
       overrideContainerUrl: join.groupUrl,
+      manualOverride: options.manualOverride === true,
     });
     await d.postResultCard?.(accountId, joinCommentReceipt(join, comment, options.injectContact === true));
   }

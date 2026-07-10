@@ -96,7 +96,16 @@ export class FacebookGroupJoinScheduler {
     return this.running.has(accountId);
   }
 
-  async triggerScheduled(accountId: string): Promise<FacebookGroupJoinTriggerResult> {
+  /**
+   * @param opts.manual 手动操作员命令（飞书 `/comment --join`）：**跳过节奏 / 风控配额闸**——
+   *   canJoin（风控状态 restricted/frozen + 日/时/分速率配额）与 canUseSessionJoin（本场会话加群额度）均不拦。
+   *   人工授权即全权（用户定案 2026-07-10：手动命令不受配额限制、硬风控状态也强行执行），与已无配额闸的手动
+   *   XHS `/comment` 对齐。仍守物理 / 正确性闸：非 FB 账号 / 边端离线 / 单飞 running / 无目标 no_targets /
+   *   kill switch disabled / 影子 shadow。自动巡回（triggerJoin）不传 opts → manual=false → 配额闸照旧。
+   *   成功后仍照常 recordSessionJoin（账本诚实、绝不因绕闸而漏计，供自动巡回后续 pacing 取真实数）。
+   */
+  async triggerScheduled(accountId: string, opts?: { manual?: boolean }): Promise<FacebookGroupJoinTriggerResult> {
+    const manual = opts?.manual === true;
     if (!accountId || accountId === 'default') return { triggered: false, reason: 'account_required' };
     if (this.running.has(accountId)) return { triggered: false, reason: 'running' };
     this.running.add(accountId);
@@ -116,13 +125,16 @@ export class FacebookGroupJoinScheduler {
 
       if (shadow) return this.runShadow(accountId, conn.bus, conn.edgeId);
 
-      if (this.deps.canJoin && !(await this.deps.canJoin(accountId))) {
-        await this.audit({ accountId, outcome: 'quota_denied', phase: 'scheduler', reason: 'canDo', shadow: false });
-        return { triggered: false, reason: 'quota_denied' };
-      }
-      if (this.deps.canUseSessionJoin && !(await this.deps.canUseSessionJoin(accountId, conn.edgeId))) {
-        await this.audit({ accountId, outcome: 'quota_denied', phase: 'scheduler', reason: 'session_budget', shadow: false });
-        return { triggered: false, reason: 'session_budget' };
+      // 手动命令跳过配额闸（含风控状态 + 速率 + 会话额度）；自动巡回照旧受闸。
+      if (!manual) {
+        if (this.deps.canJoin && !(await this.deps.canJoin(accountId))) {
+          await this.audit({ accountId, outcome: 'quota_denied', phase: 'scheduler', reason: 'canDo', shadow: false });
+          return { triggered: false, reason: 'quota_denied' };
+        }
+        if (this.deps.canUseSessionJoin && !(await this.deps.canUseSessionJoin(accountId, conn.edgeId))) {
+          await this.audit({ accountId, outcome: 'quota_denied', phase: 'scheduler', reason: 'session_budget', shadow: false });
+          return { triggered: false, reason: 'session_budget' };
+        }
       }
       return this.runReal(accountId, conn.bus, conn.edgeId);
     } finally {

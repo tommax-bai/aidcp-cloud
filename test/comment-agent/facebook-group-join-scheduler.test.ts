@@ -236,6 +236,54 @@ describe('FacebookGroupJoinScheduler', () => {
     assert.deepEqual(h.sessionBudgetCalls, ['acc-fb:edge-fb']);
   });
 
+  it('manual: 配额闸全拒（canJoin=false + canUseSessionJoin=false）仍加群、成功后仍 recordSessionJoin（change manual-comment-bypass-quota）', async () => {
+    // 手动 /comment --join 是操作员命令 → 跳过风控速率/状态闸与会话额度闸；仍真加群、账本仍如实记录。
+    let call = 0;
+    const h = makeHarness({
+      auto: true,
+      canJoin: false, // 风控（状态/速率）拒
+      canUseSessionJoin: false, // 会话额度耗尽
+      llmVerdicts: ['{"verdict":"instant_join","confidence":0.9,"reason":"instant"}'],
+      edge: (env, bus) => {
+        call++;
+        if (call === 1) {
+          bus.emit('action.completed', {
+            action: 'join_group',
+            ok: false,
+            reason: 'observation_only',
+            groupUrl: env.payload.groupUrl,
+            clicked: false,
+            observation: { groupUrl: env.payload.groupUrl, mainCtaText: 'Join group' },
+            ts: 0,
+          } as never);
+          return;
+        }
+        bus.emit('action.completed', {
+          action: 'join_group',
+          ok: true,
+          groupUrl: env.payload.groupUrl,
+          clicked: true,
+          postObservation: { groupUrl: env.payload.groupUrl, mainCtaText: 'Joined', membershipSignals: ['You are now a member'] },
+          ts: 0,
+        } as never);
+      },
+    });
+    const r = await h.scheduler.triggerScheduled('acc-fb', { manual: true });
+    assert.equal(r.triggered, true);
+    assert.equal(r.outcome, 'joined', '配额被拒但手动命令仍真加群');
+    assert.ok(!h.auditRows.some((row) => row.reason === 'session_budget' || row.reason === 'canDo'), '手动路径绝不产 quota_denied 审计');
+    assert.deepEqual(h.sessionBudgetCalls, ['acc-fb:edge-fb'], '成功后仍 recordSessionJoin，账本诚实不漏计');
+  });
+
+  it('auto（非 manual）: canJoin=false → quota_denied 不下发（回归：manual 旗标不误伤自动巡回）', async () => {
+    const h = makeHarness({ auto: true, canJoin: false });
+    const r = await h.scheduler.triggerScheduled('acc-fb');
+    assert.equal(r.triggered, false);
+    assert.equal(r.reason, 'quota_denied');
+    assert.deepEqual(h.sent, []);
+    assert.ok(h.auditRows.some((row) => row.outcome === 'quota_denied' && row.reason === 'canDo'));
+  });
+
   it('real: login_required observation 暂停账号并保留 retryable assignment，不学习 group gated', async () => {
     const h = makeHarness({
       auto: true,

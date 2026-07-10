@@ -388,7 +388,9 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
     assert.deepEqual(posted, []);
   });
 
-  it('真发路径 canDo 拒 → quota_denied，不发', async () => {
+  // 注：以下两个 quota_denied 测试**不带** manualOverride → 模型的是「自动排期评论」路径（ContentScheduler 的 priority:automatic 调用），
+  // 此路径配额闸照旧。飞书手动 /comment 由 server.ts 显式带 manualOverride:true（见下方 change manual-comment-bypass-quota 用例）。
+  it('真发路径 canDo 拒 → quota_denied，不发（自动路径：无 manualOverride）', async () => {
     const { deps, audits, posted } = fbDeps({ auto: true, shadow: false, canComment: false });
     await new CommentScheduler(deps).triggerManual('fb-1');
     await tick();
@@ -397,12 +399,23 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
     assert.deepEqual(posted, []);
   });
 
-  it('真发路径日上限满 → quota_denied(daily_cap)', async () => {
+  it('真发路径日上限满 → quota_denied(daily_cap)（自动路径：无 manualOverride）', async () => {
     const { deps, audits } = fbDeps({ auto: true, shadow: false, cap: 2, done: 2 });
     await new CommentScheduler(deps).triggerManual('fb-1');
     await tick();
     assert.equal(audits[0].outcome, 'quota_denied');
     assert.equal(audits[0].reason, 'daily_cap');
+  });
+
+  // 回归：自动排期评论调用形态（ContentScheduler 传 priority:'automatic'、绝不带 manualOverride，见 server.ts）→ 配额闸照旧生效。
+  // 钉死不变量「只有飞书手动出口带 override」：若哪天 auto caller 误带了旗标，此断言会红。
+  it('自动调用形态（priority:automatic 无 manualOverride）→ canDo 拒仍 quota_denied，不发', async () => {
+    const { deps, audits, posted } = fbDeps({ auto: true, shadow: false, canComment: false });
+    await new CommentScheduler(deps).triggerManual('fb-1', { priority: 'automatic' });
+    await tick();
+    assert.equal(audits[0].outcome, 'quota_denied');
+    assert.equal(audits[0].reason, 'canDo');
+    assert.deepEqual(posted, [], '自动路径无 override → 配额被拒即不下发');
   });
 
   it('未注入 FB deps → 维持诚实拒绝（零回归）', async () => {
@@ -704,6 +717,56 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.equal(cards.at(-1)?.ok, true);
     assert.equal(cards.at(-1)?.level, 'success');
     assert.match(cards.at(-1)!.title, /加群 \+ 评论成功/);
+  });
+
+  // ── change manual-comment-bypass-quota：飞书手动 /comment（server.ts 带 manualOverride:true）跳过评论侧配额闸 ──
+
+  it('手动 override：评论 canDo（风控状态/速率）拒也照发 → commented（change manual-comment-bypass-quota）', async () => {
+    const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true } });
+    await new CommentScheduler({ ...deps, facebookCanComment: async () => false }).triggerManual('fb-1', { manualOverride: true });
+    await tick();
+    assert.ok(!audits.some((a) => a.outcome === 'quota_denied'), '手动命令绝不因风控/速率配额被拒');
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
+  });
+
+  it('手动 override：评论日上限满也照发 → commented（change manual-comment-bypass-quota）', async () => {
+    const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true } });
+    await new CommentScheduler({ ...deps, facebookDailyCap: () => 2, facebookCommentedToday: async () => 5 }).triggerManual('fb-1', {
+      manualOverride: true,
+    });
+    await tick();
+    assert.ok(!audits.some((a) => a.outcome === 'quota_denied'), '手动命令绝不因评论日上限被拒');
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    // 钉住真下发命令序列（不只信审计标签）：证明日上限旁路走到了真提交，绝非「假成功审计」。
+    assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
+  });
+
+  it('手动 override 不越权 kill switch：普通 /comment + manualOverride 但 AIDCP_FB_COMMENT_AUTO 关 → 仍静默 no-op（红线：override 只绕配额、不绕 kill switch）', async () => {
+    const { deps, posted } = fbFlowDeps({ submit: { ok: true } });
+    await new CommentScheduler({ ...deps, facebookAutoEnabled: () => false, facebookShadow: () => false }).triggerManual('fb-1', {
+      manualOverride: true,
+    });
+    await tick();
+    assert.deepEqual(posted, [], 'manualOverride 绕的是配额闸；kill switch 关时普通 FB 评论仍不跑（红线保留）');
+  });
+
+  it('手动 --join：manual 旗标透传加群调度器 + 群内评论侧亦跳过配额（整条链一致，change manual-comment-bypass-quota）', async () => {
+    const JOINED = 'https://www.facebook.com/groups/joined-manual';
+    const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true } });
+    let joinOpts: { manual?: boolean } | undefined;
+    await new CommentScheduler({
+      ...deps,
+      facebookCanComment: async () => false, // 评论配额拒 → 验证加群后群内评论侧也被 override 放行
+      facebookJoinNewGroup: async (_a, opts) => {
+        joinOpts = opts;
+        return { triggered: true, outcome: 'joined', groupUrl: JOINED };
+      },
+    }).triggerManual('fb-1', { joinFirst: true, manualOverride: true });
+    await tick();
+    assert.equal(joinOpts?.manual, true, '加群调度器收到 manual:true（加群侧亦跳过会话额度/风控配额）');
+    assert.equal(audits.at(-1)?.outcome, 'commented', '加群成功后群内评论亦跳过评论配额闸');
+    assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
   });
 
   it('加群评论 override 强制真发：kill switch AIDCP_FB_COMMENT_AUTO 关也评论（人工授权），仍过校验/确认', async () => {
