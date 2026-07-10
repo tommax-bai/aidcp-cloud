@@ -50,6 +50,28 @@ export const DEFAULT_ACTIVE_WINDOW = { startMin: 0, endMin: MINUTES_PER_DAY } as
 export const DEFAULT_DAILY_MAX_SESSIONS = 0;
 export const DEFAULT_DAILY_MAX_MINUTES = 0;
 
+/**
+ * Facebook 每日累计在线分钟默认（change account-nurture-discipline-spine §4.2）：360 = 6h。
+ * 养号「每天在线 0.5–6h」——FB 号在全局每日时长未设（0=不限）时回落这个非零安全日窗，防长挂。
+ */
+export const DEFAULT_FB_DAILY_ONLINE_MINUTES = 360;
+
+/**
+ * 计算某账号「有效每日在线分钟上限」（0 = 不限）。全局每日时长阈值是全局单例（`dailyCaps().maxMinutes`），
+ * 不分平台；本函数在其未显式设值（0）时给 Facebook 账号回落一个非零安全日窗，其它平台维持历史「不限」。
+ * 全局显式设值（>0）时以全局为准（运营意图优先，覆盖平台默认）。纯函数、可单测；platform 用字符串避免
+ * risk 层反向依赖 platform 层。
+ */
+export function effectiveDailyMaxMinutes(
+  globalMaxMinutes: number,
+  platform: string | undefined,
+  facebookDefaultMinutes: number = DEFAULT_FB_DAILY_ONLINE_MINUTES,
+): number {
+  if (globalMaxMinutes > 0) return globalMaxMinutes;
+  if (platform === 'facebook') return Math.max(0, facebookDefaultMinutes);
+  return 0;
+}
+
 export interface ActiveWindow {
   /** 窗口起（自午夜分钟数，0..1440）。 */
   startMin: number;

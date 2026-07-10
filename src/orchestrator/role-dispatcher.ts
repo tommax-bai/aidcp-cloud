@@ -74,8 +74,10 @@ import {
   type SessionLimitProvider,
 } from '../risk/session-limits.js';
 import {
+  DEFAULT_FB_DAILY_ONLINE_MINUTES,
   DEFAULT_IDLE_END_MS,
   DEFAULT_IDLE_NUDGE_MS,
+  effectiveDailyMaxMinutes,
   isWithinActiveWindow,
   type ResumeConfigProvider,
 } from '../risk/resume-limits.js';
@@ -221,6 +223,12 @@ export interface RoleDispatcherOptions {
    */
   accountPlatform?: PlatformId;
   /**
+   * Facebook 每日累计在线分钟默认（change account-nurture-discipline-spine §4.2）：全局每日时长阈值
+   * （dailyCaps().maxMinutes）未显式设值（0=不限）时，Facebook 账号回落这个非零安全日窗（养号「每天在线
+   * 0.5–6h」防长挂）。全局显式设值时以全局为准。缺省 DEFAULT_FB_DAILY_ONLINE_MINUTES。
+   */
+  facebookDailyOnlineMinutes?: number;
+  /**
    * 同账号并行（N:1）互动去重 guard（multi-account-node-support D7②）：按账号单例（同账号 N 连接共用）。
    * 下发互动前占坑去重，防两节点对同一笔记/作者重复点赞/关注/评论。缺省 → 不去重（单账号单节点向后兼容）。
    */
@@ -349,6 +357,8 @@ export class RoleDispatcher {
   private readonly isDispatchActive: () => boolean;
   /** 该连接账号平台（2.8 会话平台闸）；缺省不设闸。 */
   private readonly accountPlatform?: PlatformId;
+  /** Facebook 每日在线分钟默认（§4.2）；全局未设时 FB 账号回落此非零日窗。 */
+  private readonly facebookDailyOnlineMinutes: number;
   /** 同账号并行互动去重 guard（按账号单例）；缺省不去重。 */
   private readonly interactionGuard?: InteractionGuard;
   /** 动作冷却闸（engagement-restraint）；缺省不冷却。 */
@@ -454,6 +464,7 @@ export class RoleDispatcher {
     this.onSessionRejected = options.onSessionRejected;
     this.isDispatchActive = options.isDispatchActive ?? (() => true);
     this.accountPlatform = options.accountPlatform;
+    this.facebookDailyOnlineMinutes = options.facebookDailyOnlineMinutes ?? DEFAULT_FB_DAILY_ONLINE_MINUTES;
     this.interactionGuard = options.interactionGuard;
     this.cooldownGate = options.cooldownGate;
     this.sessionLimitProvider = options.sessionLimitProvider;
@@ -1321,7 +1332,9 @@ export class RoleDispatcher {
     const caps = this.resumeConfigProvider.dailyCaps(); // 阈值全局；计数 dailyTally 仍按账号按日
     const tally = this.dailyTally(account, now);
     if (caps.maxSessions > 0 && tally.sessions >= caps.maxSessions) return false; // 每日场数到顶
-    if (caps.maxMinutes > 0 && tally.browseMs >= caps.maxMinutes * 60_000) return false; // 每日时长到顶
+    // 每日在线时长（§4.2）：全局阈值优先；全局未设(0)时 FB 账号回落非零安全日窗（养号「每天在线 0.5-6h」）。
+    const maxMinutes = effectiveDailyMaxMinutes(caps.maxMinutes, this.accountPlatform, this.facebookDailyOnlineMinutes);
+    if (maxMinutes > 0 && tally.browseMs >= maxMinutes * 60_000) return false; // 每日时长到顶
     return true;
   }
 

@@ -1819,6 +1819,12 @@ async function main(): Promise<void> {
       eventBus: ctx.bus,
       // 该连接账号平台（facebook-scheduled-comment 2.8）：喂 session-start 平台闸，拦下无 browse 能力平台起 xhs 浏览循环。
       accountPlatform: ctx.platform,
+      // FB 每日在线时长预算（change account-nurture-discipline-spine §4.2）：全局每日时长未设(0)时 FB 账号
+      // 回落非零安全日窗（养号「每天在线 0.5-6h」防长挂）。AIDCP_FB_DAILY_ONLINE_MIN 覆盖；缺/非法 → dispatcher 默认 360。
+      facebookDailyOnlineMinutes:
+        Number.isFinite(Number(process.env.AIDCP_FB_DAILY_ONLINE_MIN)) && Number(process.env.AIDCP_FB_DAILY_ONLINE_MIN) >= 0
+          ? Number(process.env.AIDCP_FB_DAILY_ONLINE_MIN)
+          : undefined,
       // 指令级节奏：喂当前（该账号）风控状态，驱动 dwellMs/thinkMs 的 tempo。
       getRiskStatus: () => ctx.controller.getState().status,
       getQuotaLevel: () => ctx.controller.getState().quotaLevel,
