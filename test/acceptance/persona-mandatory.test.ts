@@ -115,6 +115,9 @@ describe('AC-PERSONA 人设必填（系统不存在默认/兜底人设）', () =
     const deps: CommentSchedulerDeps = {
       resolveConnection: () => ({ bus, edgeId: 'e1' }),
       pusher: { pushToEdges: () => 1 },
+      edgeTaskLeases: {
+        withLease: async (request, work) => work({ taskId: `task-${request.kind}`, edgeId: request.edgeId, kind: request.kind, priority: request.priority }),
+      },
       getSoul: () => mockSoul,
       isPersonaBound: () => false,
       selectCurated: async () => [],

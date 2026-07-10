@@ -58,6 +58,7 @@ import { NotificationDeduper } from '../agents/notification-deduper.js';
 import { NotificationNotifier } from '../agents/notification-notifier.js';
 import { NotificationReturnHome } from '../agents/notification-return-home.js';
 import { ExcursionResumer } from '../agents/excursion-resumer.js';
+import type { EdgeTaskLease, EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
 import type { BaseRole } from '../agents/base-role.js';
 import type { Soul } from '../soul/types.js';
 import { computeDwellMs, computeThinkMs, computeFeedFloorMs, type PacingFloorProvider } from '../risk/pacing.js';
@@ -122,6 +123,8 @@ export interface RoleDispatcherOptions {
   getSoul?: (accountId?: string) => Soul;
   llm: { complete(prompt: string, opts?: LlmCallOpts): Promise<string> };
   sendCommand: (command: EdgeCommand) => void;
+  /** 通知巡视的任务级执行权；缺省仅供旧测试兼容，生产必须注入。 */
+  edgeTaskLeases?: Pick<EdgeTaskLeaseClient, 'acquire' | 'release'>;
   clock?: () => number;
   /** 外部事件总线（共享 handler 发射的 Edge 上报事件），缺省创建独立实例 */
   eventBus?: EventBus;
@@ -330,6 +333,12 @@ export class RoleDispatcher {
   /** feed 翻页按新卡数算的待发停留兜底（feed-scroll-card-floor）：page.cards.arrived 覆盖写、feed.scrolled 消费后归零。 */
   private pendingFeedFloorMs = 0;
   private readonly isHardPaused: (edgeId?: string) => boolean;
+  private readonly edgeTaskLeases?: Pick<EdgeTaskLeaseClient, 'acquire' | 'release'>;
+  private currentEdgeId?: string;
+  private notificationTaskLease?: EdgeTaskLease;
+  private notificationTaskAcquire?: Promise<void>;
+  private notificationTaskEnding = false;
+  private pendingNotificationCommands: EdgeCommand[] = [];
   private readonly isPersonaBound?: (accountId: string) => boolean;
   private readonly onSessionRejected?: (accountId: string, reason: string) => void | Promise<void>;
   private readonly isDispatchActive: () => boolean;
@@ -408,6 +417,7 @@ export class RoleDispatcher {
     this.getSoulFn = options.getSoul;
     this.llm = options.llm;
     this.rawSendCommand = options.sendCommand;
+    this.edgeTaskLeases = options.edgeTaskLeases;
     this.clock = options.clock ?? Date.now;
     this.getRiskStatus = options.getRiskStatus ?? (() => 'normal');
     this.pacingFloors = options.pacingFloors;
@@ -499,6 +509,61 @@ export class RoleDispatcher {
       || action === 'notification_back_home';
   }
 
+  private beginNotificationTask(): void {
+    if (!this.edgeTaskLeases || this.notificationTaskLease || this.notificationTaskAcquire) return;
+    const edgeId = this.currentEdgeId;
+    if (!edgeId) {
+      this.pendingNotificationCommands = [];
+      this.eventBus.emit('action.completed', {
+        action: 'notification_back_home', ok: false, reason: 'task_acquire_missing_edge', ts: this.clock(),
+      });
+      return;
+    }
+    this.notificationTaskEnding = false;
+    this.notificationTaskAcquire = this.edgeTaskLeases
+      .acquire({ edgeId, kind: 'notification', priority: 'automatic', leaseMs: 2 * 60_000 })
+      .then(async (lease) => {
+        if (this.notificationTaskEnding) {
+          await this.edgeTaskLeases!.release(lease, 'cancelled').catch(() => {});
+          return;
+        }
+        this.notificationTaskLease = lease;
+        const queued = this.pendingNotificationCommands;
+        this.pendingNotificationCommands = [];
+        for (const command of queued) {
+          this.rawSendCommand({
+            ...command,
+            params: { ...(command.params ?? {}), taskId: lease.taskId },
+          });
+        }
+      })
+      .catch((err) => {
+        this.pendingNotificationCommands = [];
+        console.warn(`[RoleDispatcher] 通知巡视未取得 edge task lease：${(err as Error).message}`);
+        // 走既有 excursion resumer 失败出口，解除 browseSuspended，不永久挂起。
+        this.eventBus.emit('action.completed', {
+          action: 'notification_back_home', ok: false, reason: 'task_acquire_failed', ts: this.clock(),
+        });
+      })
+      .finally(() => {
+        this.notificationTaskAcquire = undefined;
+      });
+  }
+
+  private async endNotificationTask(): Promise<void> {
+    this.notificationTaskEnding = true;
+    this.pendingNotificationCommands = [];
+    const acquiring = this.notificationTaskAcquire;
+    if (acquiring) await acquiring.catch(() => {});
+    const lease = this.notificationTaskLease;
+    this.notificationTaskLease = undefined;
+    if (lease && this.edgeTaskLeases) {
+      await this.edgeTaskLeases.release(lease, 'completed').catch((err) => {
+        console.warn(`[RoleDispatcher] 通知巡视 task release 未确认：${(err as Error).message}`);
+      });
+    }
+  }
+
   private isQuotaSleepBypass(command: EdgeCommand): boolean {
     return command.action === 'session.end'
       || this.isExcursionCommand(command.action)
@@ -518,6 +583,16 @@ export class RoleDispatcher {
       !this.isQuotaSleepBypass(command)
     ) {
       return false; // 软暂停：丢弃 browse 命令（不入队、由 page.cards 续刷自然重来）
+    }
+    if (this.edgeTaskLeases && this.isExcursionCommand(command.action)) {
+      if (!this.notificationTaskLease) {
+        this.pendingNotificationCommands.push(command);
+        return true;
+      }
+      command = {
+        ...command,
+        params: { ...(command.params ?? {}), taskId: this.notificationTaskLease.taskId },
+      };
     }
     // 同账号并行（N:1）互动前按账号去重（D7②）：占坑——已在途/已完成则跳过下发（不假成功、不扣额）。
     // 覆盖 follow/comment/comment_like（无 per-note 落库去重）。缺目标键时放行（不去重）。
@@ -828,6 +903,7 @@ export class RoleDispatcher {
    * 启动闸在角色重订阅 / 指令翻译重连**之前**短路——未绑人设的账号不开浏览循环、不发巡刷信号（D3）。
    */
   private onHelloEvent(payload: { edgeId: string; accountId?: string; ts: number }): void {
+    this.currentEdgeId = payload.edgeId;
     if (payload.accountId) this.currentAccountId = payload.accountId;
     if (this.canStartSession()) {
       this.restartSession();
@@ -1023,6 +1099,7 @@ export class RoleDispatcher {
     this.cancelRestTimer();
     this.cancelWakeTimer();
     this.cancelViewQuotaSleep(false);
+    void this.endNotificationTask();
     if (!this.sessionActive) return;
     const account = this.currentAccountId;
     // 记当日累计浏览时长（含 excursion，仅供每日上限近似）。
@@ -1563,8 +1640,14 @@ export class RoleDispatcher {
       // 巡视进行中延期时限/动作数/配额判定（不打断巡视），结束时把巡视耗时从单场时长扣除。
       // 只暂停时限判定，**不冻空闲看门狗**（巡视上报自喂、卡死巡视由看门狗兜底）。token 用常量 'patrol'
       //（gatekeeper 以 ctx.excursionActive 闸禁并发巡视，全程至多一个活动巡视，常量 token 天然正确）。
-      this.eventBus.on('excursion.requested', () => this.sessionMonitor?.pauseClock('patrol')),
-      this.eventBus.on('excursion.ended', () => this.sessionMonitor?.resumeClock('patrol')),
+      this.eventBus.on('excursion.requested', () => {
+        this.sessionMonitor?.pauseClock('patrol');
+        this.beginNotificationTask();
+      }),
+      this.eventBus.on('excursion.ended', () => {
+        this.sessionMonitor?.resumeClock('patrol');
+        void this.endNotificationTask();
+      }),
 
       // Edge 上报可见卡片 → 更新数据并触发评估
       this.eventBus.on('page.cards.arrived', (payload) => {

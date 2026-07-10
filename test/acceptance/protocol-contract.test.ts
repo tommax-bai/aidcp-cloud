@@ -46,6 +46,8 @@ const ALL_MESSAGE_TYPES: Record<MessageType, true> = {
   'risk.captcha_detected': true, 'risk.captcha_cleared': true,
   'captcha.assist.capture': true, 'captcha.assist.snapshot': true,
   'captcha.assist.click': true, 'captcha.assist.click_result': true,
+  'edge.task.acquire': true, 'edge.task.acquired': true,
+  'edge.task.release': true, 'edge.task.released': true,
   'publish.approval_request': true, 'publish.request': true, 'publish.result': true,
   'publish.command': true, 'publish.command.result': true,
   'page.scroll': true, 'interaction.like': true, 'interaction.collect': true, 'interaction.follow': true,
@@ -67,8 +69,8 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     assert.equal(PROTOCOL_VERSION, 2);
   });
 
-  it('AC-PROTO-02 消息类型总数为 66（增删消息须同步两端 + 本断言）', () => {
-    assert.equal(ALL_TYPES.length, 66);
+  it('AC-PROTO-02 消息类型总数为 70（增删消息须同步两端 + 本断言）', () => {
+    assert.equal(ALL_TYPES.length, 70);
   });
 
   it('AC-PROTO-03 每个消息类型都能构造合法信封且版本一致', () => {

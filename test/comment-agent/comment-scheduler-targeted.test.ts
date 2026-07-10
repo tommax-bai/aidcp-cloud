@@ -64,6 +64,9 @@ function baseDeps(over: Partial<CommentSchedulerDeps> = {}): CommentSchedulerDep
   return {
     resolveConnection: () => ({ bus, edgeId: 'e1' }),
     pusher: fakeEdge(bus, 'note-1').pusher,
+    edgeTaskLeases: {
+      withLease: async (request, work) => work({ taskId: `task-${request.kind}`, edgeId: request.edgeId, kind: request.kind, priority: request.priority }),
+    },
     getSoul: () => soul,
     selectCurated: async () => [],
     llmFor: () => fakeLlm(),
@@ -148,7 +151,7 @@ describe('CommentScheduler.triggerTargeted 拒绝路径（机器原因码）', (
   it('并发双触发（同账号）→ 恰一个 ok:true，单飞闸原子（回归：dedup await 不得切开 has→add）', async () => {
     // dedup 查询用一个延迟 promise 模拟真实 PG 往返，制造 has→add 之间的可插入窗口。
     const bus = new EventBus();
-    let takeoverStarts = 0;
+    let leaseStarts = 0;
     const cardDones: Array<() => void> = [];
     const s = new CommentScheduler(
       baseDeps({
@@ -162,7 +165,12 @@ describe('CommentScheduler.triggerTargeted 拒绝路径（机器原因码）', (
           },
           recordInteraction: async () => {},
         }),
-        onTakeoverStart: () => { takeoverStarts += 1; },
+        edgeTaskLeases: {
+          withLease: async (request, work) => {
+            leaseStarts += 1;
+            return work({ taskId: `task-${request.kind}-${leaseStarts}`, edgeId: request.edgeId, kind: request.kind, priority: request.priority });
+          },
+        },
         postResultCard: () => { cardDones.shift()?.(); },
       }),
     );
@@ -172,7 +180,7 @@ describe('CommentScheduler.triggerTargeted 拒绝路径（机器原因码）', (
     assert.equal(oks.length, 1, '并发双触发必须恰有一个成功、一个被单飞闸拒');
     const rejected = [a, b].find((r) => !r.ok)!;
     assert.equal(rejected.reason, 'running');
-    assert.equal(takeoverStarts, 1, '只接管一次边端（不双接管同一账号）');
+    assert.equal(leaseStarts, 1, '只启动唯一任务的 prepare 租约（不双驱动同一账号）');
     await done; // 等唯一在跑任务收尾，防悬挂
   });
 
@@ -201,7 +209,7 @@ describe('CommentScheduler.triggerTargeted happy path', () => {
   it('端到端：综合排序+不限时间窗、搜索词截断、接管/恢复成对、结果卡定向可辨识、记账', async () => {
     const bus = new EventBus();
     const edge = fakeEdge(bus, 'note-1');
-    const takeovers: string[] = [];
+    const leaseKinds: string[] = [];
     const recorded: string[] = [];
     const cardDone = deferred<{ ok: boolean; level: string; title: string; message: string }>();
     const longTitle = '一二三四五六七八九十甲乙丙丁戊己庚辛壬癸子丑寅卯'; // 24 字 > 20 上限
@@ -210,8 +218,12 @@ describe('CommentScheduler.triggerTargeted happy path', () => {
         resolveConnection: () => ({ bus, edgeId: 'e1' }),
         pusher: edge.pusher,
         dedupFor: () => ({ hasInteracted: async () => false, recordInteraction: async (noteId) => { recorded.push(noteId); } }),
-        onTakeoverStart: (a) => takeovers.push(`start:${a}`),
-        onTakeoverEnd: (a) => takeovers.push(`end:${a}`),
+        edgeTaskLeases: {
+          withLease: async (request, work) => {
+            leaseKinds.push(request.kind);
+            return work({ taskId: `task-${request.kind}-${leaseKinds.length}`, edgeId: request.edgeId, kind: request.kind, priority: request.priority });
+          },
+        },
         postResultCard: (_a, receipt) => { cardDone.resolve(receipt); },
       }),
     );
@@ -237,7 +249,7 @@ describe('CommentScheduler.triggerTargeted happy path', () => {
     assert.ok(comment, '应下发 interaction.comment');
     assert.equal(comment.payload.noteId, 'note-1');
 
-    assert.deepEqual(takeovers, ['start:acc-1', 'end:acc-1']); // 接管/恢复成对
+    assert.deepEqual(leaseKinds, ['comment_prepare', 'comment_commit']);
     assert.deepEqual(recorded, ['note-1']); // 发布成功后记账
     await new Promise((r) => setImmediate(r)); // running 标志在任务 promise 的 finally 清，等一拍
     assert.equal(s.isRunning('acc-1'), false);
@@ -265,7 +277,7 @@ describe('CommentScheduler.triggerTargeted happy path', () => {
     assert.equal(comment.payload.groupChatCode, 'GROUP-CODE'); // 线协议字段名仍为 groupChatCode；联系方式整段注入（边端 insertText）
   });
 
-  it('当前笔记触发：复用 currentNote，不下发标题搜索/开笔记，最终结果回调为 commented', async () => {
+  it('当前笔记触发：prepare 复用 currentNote，commit 重新搜索/开笔记复检，最终为 commented', async () => {
     const bus = new EventBus();
     const edge = fakeEdge(bus, 'note-1');
     const cardDone = deferred<{ ok: boolean; message: string }>();
@@ -292,8 +304,8 @@ describe('CommentScheduler.triggerTargeted happy path', () => {
     assert.equal(receipt.ok, true);
     assert.match(receipt.message, /复用当前笔记上下文/);
     assert.deepEqual(finalOutcomes, ['commented']);
-    assert.equal(edge.pushed.some((e) => e.type === 'search.execute'), false);
-    assert.equal(edge.pushed.some((e) => e.type === 'note.open'), false);
+    assert.equal(edge.pushed.some((e) => e.type === 'search.execute'), true, 'commit 必须重新搜索稳定 noteId');
+    assert.equal(edge.pushed.some((e) => e.type === 'note.open'), true, 'commit 必须重新打开目标复检');
     assert.ok(edge.pushed.some((e) => e.type === 'note.scroll_comments'));
     assert.ok(edge.pushed.some((e) => e.type === 'interaction.comment'));
   });

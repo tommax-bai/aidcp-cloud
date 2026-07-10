@@ -49,6 +49,7 @@ describe('CaptchaAssistService', () => {
 
   it('snapshot makes incident ready, click dispatch validates snapshot and normalized points', async () => {
     const sent: Envelope[] = [];
+    const leaseEvents: string[] = [];
     const service = new CaptchaAssistService({
       enabled: true,
       publicBaseUrl: 'https://console.example',
@@ -57,6 +58,13 @@ describe('CaptchaAssistService', () => {
       idGen: () => 'cap-2',
       logger: silentLogger,
       pusher: { pushToEdges: (env) => { sent.push(env); return 1; } },
+      taskLeases: {
+        acquire: async (request) => {
+          leaseEvents.push(`acquire:${request.priority}`);
+          return { taskId: 'task-captcha-1', edgeId: request.edgeId, kind: request.kind, priority: request.priority };
+        },
+        release: async (lease) => { leaseEvents.push(`release:${lease.taskId}`); },
+      },
     });
     await service.onDetected({ edgeId: 'edge-2', kind: 'captcha' }, { sessionId: 's2', edgeId: 'edge-2' }, 'restricted');
 
@@ -91,6 +99,8 @@ describe('CaptchaAssistService', () => {
     });
     assert.equal(clicked.ok, true);
     assert.equal(sent.at(-1)?.type, 'captcha.assist.click');
+    assert.equal((sent.at(-1)?.payload as { taskId?: string }).taskId, 'task-captcha-1');
+    assert.deepEqual(leaseEvents, ['acquire:system_recovery']);
     assert.equal(service.getIncident('cap-2')?.status, 'click_pending');
 
     service.onClickResult({
@@ -100,6 +110,8 @@ describe('CaptchaAssistService', () => {
       checkedAt: 22_000,
       reason: 'captcha_visible',
     });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(leaseEvents, ['acquire:system_recovery', 'release:task-captcha-1']);
     assert.equal(service.getIncident('cap-2')?.status, 'still_blocked');
 
     service.onClickResult({

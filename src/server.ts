@@ -87,6 +87,7 @@ import {
   type PublishApprovalPreflightResult,
 } from './feishu/index.js';
 import { CommandSequencer } from './publish-agent/command-sequencer.js';
+import { EdgeTaskLeaseClient } from './comm/edge-task-lease-client.js';
 import { UiSnapshotService } from './comm/ui-snapshot.js';
 import type {
   UiDailyUsageAction,
@@ -909,33 +910,16 @@ async function main(): Promise<void> {
     // 角色执行日志写入口（死表 publish_pipeline_logs 激活）：每角色每次执行 best-effort 落一行。
     pipelineLogSink: publishPipelineLogStore,
   });
-  // 发布让位/续场（下发段用）：让位 → 结束该账号浏览会话（不续场、独占边缘）；解除 → 经续场各闸起新浏览。
-  // 账号槽已退役（change parallel-rewrite-drafts）：下发段本身无 LLM 调用（视觉感知等显式带账号），
-  // 原「下发段写槽」还与并行生成段互踩记账（既存竞态），随槽一并根治。runtimes 前向引用（下方装配），
-  // 闭包调用时已就绪（同既有 commandSequencer.pusher 前向模式）。
-  const onPublishTakeoverStart = (accountId: string): void => {
-    runtimes?.endSessionForAccount(accountId, 'publish_takeover');
-  };
-  const onPublishTakeoverEnd = (accountId: string): void => {
-    runtimes?.resumeSessionForAccount(accountId);
-  };
-
-  // 按需评论让位/续场（change comment-search-command）：与发布同构——评论任务接管该账号边端（结束自动浏览、
-  // 独占）；解除即续场。注意边端 session.end 只停浏览循环、不置终态，后续浏览类命令（search/open/comment）
-  // 会唤醒重启循环并被处理（见 browse-session.ts closing 注释）。LLM 记账经 scheduler 的 llmFor 显式带 accountId
-  // （与发布链显式归账同构）。
+  // 页面写执行权现由 EdgeTaskLeaseClient + edge EdgeTaskCoordinator 统一管理；发布/评论不再各自 end/resume 浏览。
   // 手动 /comment 的评论**不计入风控配额**（人工授权，与 /publish 越过风控同理）：评论任务接管期间该账号在此集合，
-  // `interaction.occurred` 的 `RiskController.record` 据此对 `comment` 动作跳过——不消耗自治评论预算、不动风控态。
-  // 仍保留去重（risk_interactions，避免 /comment 重复评同一篇）与展示账本。接管已结束自治会话 → 该窗口唯一的
-  // comment 即手动评论，故据接管态判定精准、绝不误伤自治评论计数。
+  // `interaction.occurred` 的 `RiskController.record` 据此对 `comment` 动作跳过。标记只覆盖获批后的 commit 租约，
+  // 不覆盖 prepare/LLM/人审，也不触发浏览会话生命周期；自动排期 priority=automatic 不进入集合、照常计配额。
   const manualCommentAccounts = new Set<string>();
   const onCommentTakeoverStart = (accountId: string): void => {
     manualCommentAccounts.add(accountId);
-    runtimes?.endSessionForAccount(accountId, 'comment_takeover');
   };
   const onCommentTakeoverEnd = (accountId: string): void => {
     manualCommentAccounts.delete(accountId);
-    runtimes?.resumeSessionForAccount(accountId);
   };
 
   // 事件总线
@@ -1375,6 +1359,7 @@ async function main(): Promise<void> {
   })();
   // A 阶段1 发布指令编排器 / 验证码协助均经 edgeServer 推送（server 在下方构造，闭包运行时已就绪）。
   let edgeServer: EdgeCloudServer | undefined;
+  let edgeTaskLeases!: EdgeTaskLeaseClient;
   const captchaAssist = new CaptchaAssistService({
     enabled: readEnvString('AIDCP_CAPTCHA_ASSIST_ENABLED') === 'true',
     publicBaseUrl: readEnvString('AIDCP_CAPTCHA_ASSIST_PUBLIC_BASE_URL') ?? readEnvString('AIDCP_PANEL_PUBLIC_BASE_URL'),
@@ -1382,6 +1367,10 @@ async function main(): Promise<void> {
     tokenTtlSeconds: readEnvPort('AIDCP_CAPTCHA_ASSIST_TOKEN_TTL_SECONDS') ?? 30 * 60,
     incidentTtlMs: (readEnvPort('AIDCP_CAPTCHA_ASSIST_INCIDENT_TTL_SECONDS') ?? 30 * 60) * 1000,
     pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
+    taskLeases: {
+      acquire: (request) => edgeTaskLeases.acquire(request),
+      release: (lease, outcome) => edgeTaskLeases.release(lease, outcome),
+    },
     logger: console,
     getAccountName: accountDisplayName,
   });
@@ -1404,6 +1393,13 @@ async function main(): Promise<void> {
   // A 阶段1 发布指令编排器：逐条下发 publish.command、按 recordId+seq 关联 publish.command.result。
   const commandSequencer = new CommandSequencer({
     pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
+    logger: console,
+  });
+  edgeTaskLeases = new EdgeTaskLeaseClient({
+    pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env, edgeId) : 0) },
+    acquireTimeoutMs: Number(process.env.AIDCP_EDGE_TASK_ACQUIRE_TIMEOUT_MS ?? 45_000),
+    releaseTimeoutMs: Number(process.env.AIDCP_EDGE_TASK_RELEASE_TIMEOUT_MS ?? 10_000),
+    defaultLeaseMs: Number(process.env.AIDCP_EDGE_TASK_LEASE_MS ?? 5 * 60_000),
     logger: console,
   });
   // AC-PUB 第1道 + 版本闸（edit-note-draft-before-publish）：按 requestId 读审批信号文件，
@@ -1463,6 +1459,7 @@ async function main(): Promise<void> {
     captcha,
     captchaAssist,
     commandSequencer,
+    edgeTaskLeases,
     // 建号自助人设（change edge-persona-keyword-generation）：persona.generate 生成器 + persona.persist 复用写入外观。
     personaGenerator,
     personaFacade: personaPanel,
@@ -1479,7 +1476,10 @@ async function main(): Promise<void> {
   const server = new EdgeCloudServer({
     port,
     handler,
-    onClose: (session) => runtimes?.onDisconnect(session),
+    onClose: (session) => {
+      if (session.edgeId) edgeTaskLeases.invalidateEdge(session.edgeId);
+      runtimes?.onDisconnect(session);
+    },
     // 握手注册完成（连接已可被推送、welcome 已回）→ 回填该账号的陪伴界面快照（昵称/最近发布/在途候审）。
     onEdgeRegistered: (session) => {
       void uiSnapshot?.pushHelloSnapshot(session.accountId, session.edgeId);
@@ -1623,11 +1623,10 @@ async function main(): Promise<void> {
   const publishDispatcher = new PublishDispatcher({
     store: publishLogStore,
     sequencer: commandSequencer,
+    edgeTaskLeases,
     resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
     readApproval: readPublishApproval,
     voidApprovalSignal,
-    onPublishStart: onPublishTakeoverStart,
-    onPublishEnd: onPublishTakeoverEnd,
     // 陪伴界面：授权核实→approved、云端终判失败→failed 推给在线边缘（published 由边缘自知）。
     notifyUiPublishState: (accountId, recordId, state, title) =>
       uiSnapshotService.pushPublishState(accountId, recordId, state, title),
@@ -1837,6 +1836,7 @@ async function main(): Promise<void> {
                       { noteId: args.noteId, title: args.title },
                       {
                         injectContact: true,
+                        priority: 'automatic',
                         currentNote: {
                           noteId: args.currentDetail.noteId,
                           title: args.currentDetail.title,
@@ -1896,6 +1896,7 @@ async function main(): Promise<void> {
           `[RoleDispatcher] sendCommand account=${ctx.accountId} edgeId=${ctx.edgeId ?? '-'} action=${command.action} sent=${sent}`,
         );
       },
+      edgeTaskLeases,
       // 诚实人设启动闸（D3）：以 persona_config 行存在为独立判据（不走会回落的解析器）；default 硬豁免（在
       // RoleDispatcher.canStartSession 内）；存储读不到 → false（fail-closed，诚实拒绝、不偷用默认人设）。
       isPersonaBound: (accountId) => personaStore.getForAccount(accountId) !== null,
@@ -2156,6 +2157,7 @@ async function main(): Promise<void> {
   commentScheduler = new CommentScheduler({
     resolveConnection: (accountId) => runtimes?.runtimeForAccount(accountId) ?? null,
     pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
+    edgeTaskLeases,
     getSoul,
     // persona-driven-content-pipeline：/comment 触发前人设闸——未绑人设不接管边端、不启动评论任务（与浏览/发布同口径）。
     isPersonaBound: (accountId) => personaStore.getForAccount(accountId) !== null,
@@ -2274,6 +2276,7 @@ async function main(): Promise<void> {
   const facebookGroupJoinScheduler = new FacebookGroupJoinScheduler({
     resolveConnection: (accountId) => runtimes?.runtimeForAccount(accountId) ?? null,
     pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
+    edgeTaskLeases,
     targets: facebookGroupTargetStore,
     memberships: facebookGroupMembershipStore,
     audit: facebookGroupJoinAuditStore,
@@ -2431,7 +2434,7 @@ async function main(): Promise<void> {
                     await sendReceiptCard('warning', '排期评论：配额拒绝，本槽未触发', `风控 canDo('comment')=false（自动路径必过配额；手动 /comment 不受此限）`);
                     return;
                   }
-                  const receipt = await commentScheduler!.triggerManual(accountId);
+                  const receipt = await commentScheduler!.triggerManual(accountId, { priority: 'automatic' });
                   if (!receipt.ok) {
                     // 触发未成（离线 / 未绑人设 / 已在跑等）：如实回执；终态卡不存在（任务没开跑）。
                     await sendReceiptCard(receipt.level === 'error' ? 'error' : 'warning', `排期评论：${receipt.title}`, receipt.message);
@@ -2473,7 +2476,7 @@ async function main(): Promise<void> {
                     await sendReceiptCard('warning', '排期联系评论：配额拒绝，本槽未触发', `风控 canDo('comment')=false（自动路径必过配额；手动 /comment --contact 不受此限）`);
                     return;
                   }
-                  const receipt = await commentScheduler!.triggerManual(accountId, { injectContact: true });
+                  const receipt = await commentScheduler!.triggerManual(accountId, { injectContact: true, priority: 'automatic' });
                   if (!receipt.ok) {
                     // 触发未成（缺联系方式 fail-closed / 离线 / 未绑人设 / 在跑）：透传回执如实回卡；不占尝试额度。
                     await sendReceiptCard(receipt.level === 'error' ? 'error' : 'warning', `排期联系评论：${receipt.title}`, receipt.message);

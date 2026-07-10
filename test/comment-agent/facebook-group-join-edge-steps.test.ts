@@ -27,7 +27,7 @@ function makePusher(
 }
 
 function steps(bus: EventBus, pusher: { pushToEdges: (e: unknown) => number }, stepTimeoutMs = 40) {
-  return buildFacebookGroupJoinEdgeSteps({ bus, pusher, edgeId: 'e-fb', stepTimeoutMs, logger: { warn: () => {} } });
+  return buildFacebookGroupJoinEdgeSteps({ bus, pusher, edgeId: 'e-fb', taskId: 'task-join-1', stepTimeoutMs, logger: { warn: () => {} } });
 }
 
 describe('buildFacebookGroupJoinEdgeSteps', () => {

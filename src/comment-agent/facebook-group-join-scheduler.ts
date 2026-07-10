@@ -15,10 +15,12 @@ import {
   FacebookGroupTargetStore,
 } from './facebook-group-store.js';
 import { buildFacebookGroupJoinEdgeSteps } from './facebook-group-join-edge-steps.js';
+import type { EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
 
 export interface FacebookGroupJoinSchedulerDeps {
   resolveConnection: (accountId: string) => { bus: EventBus; edgeId?: string } | null;
   pusher: EdgePusher;
+  edgeTaskLeases: Pick<EdgeTaskLeaseClient, 'withLease'>;
   targets: FacebookGroupTargetStore;
   memberships: FacebookGroupMembershipStore;
   audit: FacebookGroupJoinAuditStore;
@@ -134,8 +136,10 @@ export class FacebookGroupJoinScheduler {
       await this.audit({ accountId, outcome: 'no_targets', phase: 'shadow', shadow: true, reason: 'no_candidate' });
       return { triggered: false, reason: 'no_targets' };
     }
-    const steps = this.steps(bus, edgeId);
-    const observed = await steps.observeGroup(target.groupUrl);
+    const observed = await this.deps.edgeTaskLeases.withLease(
+      { edgeId, kind: 'group_join', priority: 'automatic', leaseMs: 2 * 60_000 },
+      (lease) => this.steps(bus, edgeId, lease.taskId).observeGroup(target.groupUrl),
+    );
     const observation = observed.observation;
     if (!observation) {
       await this.audit({
@@ -161,8 +165,10 @@ export class FacebookGroupJoinScheduler {
     await this.audit({ accountId, groupUrl: assigned.groupUrl, outcome: 'claimed', phase: 'scheduler', shadow: false });
     await this.deps.memberships.markJoining(accountId, assigned.groupUrl);
 
-    const steps = this.steps(bus, edgeId);
-    const observed = await steps.observeGroup(assigned.groupUrl);
+    const observed = await this.deps.edgeTaskLeases.withLease(
+      { edgeId, kind: 'group_join', priority: 'automatic', leaseMs: 2 * 60_000 },
+      (lease) => this.steps(bus, edgeId, lease.taskId).observeGroup(assigned.groupUrl),
+    );
     if (!observed.observation) {
       await this.markEdgeFailure(accountId, assigned, observed.reason ?? 'no_observation');
       return { triggered: true, groupUrl: assigned.groupUrl, outcome: observed.reason ?? 'no_observation' };
@@ -171,7 +177,11 @@ export class FacebookGroupJoinScheduler {
     const preHandled = await this.handlePreVerdict(accountId, assigned, pre, observed.observation);
     if (preHandled) return preHandled;
 
-    const clicked = await steps.clickJoin(assigned.groupUrl);
+    // 预判 LLM 已在租约外完成；真实点击重新申请任务租约，绝不长占浏览器。
+    const clicked = await this.deps.edgeTaskLeases.withLease(
+      { edgeId, kind: 'group_join', priority: 'automatic', leaseMs: 2 * 60_000 },
+      (lease) => this.steps(bus, edgeId, lease.taskId).clickJoin(assigned.groupUrl),
+    );
     const postObservation = clicked.postObservation ?? clicked.observation;
     if (!postObservation) {
       await this.markEdgeFailure(accountId, assigned, clicked.reason ?? 'no_post_observation');
@@ -329,10 +339,11 @@ export class FacebookGroupJoinScheduler {
     });
   }
 
-  private steps(bus: EventBus, edgeId: string) {
+  private steps(bus: EventBus, edgeId: string, taskId: string) {
     return buildFacebookGroupJoinEdgeSteps({
       bus,
       edgeId,
+      taskId,
       pusher: this.deps.pusher,
       ...(typeof this.deps.stepTimeoutMs === 'number' ? { stepTimeoutMs: this.deps.stepTimeoutMs } : {}),
       logger: this.deps.logger ?? console,

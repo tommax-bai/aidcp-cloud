@@ -298,6 +298,40 @@ describe('通知巡视 — 发命令暂停出口（软暂停）', () => {
     assert.ok(commands.filter((c) => c.action === 'scroll').length >= 1, '恢复后 browse 命令照常');
     d.endSession();
   });
+
+  it('生产租约路径：acquired 前缓存巡视命令，整趟携同一 taskId，ended 后释放', async () => {
+    const commands: EdgeCommand[] = [];
+    const releases: string[] = [];
+    let resolveAcquire!: (lease: { taskId: string; edgeId: string; kind: 'notification'; priority: 'automatic' }) => void;
+    const acquiring = new Promise<{ taskId: string; edgeId: string; kind: 'notification'; priority: 'automatic' }>(
+      (resolve) => { resolveAcquire = resolve; },
+    );
+    const d = new RoleDispatcher({
+      soul: mockSoul,
+      llm: { complete: async () => '' },
+      sendCommand: (command) => commands.push(command),
+      edgeTaskLeases: {
+        acquire: async () => acquiring,
+        release: async (lease) => { releases.push(lease.taskId); },
+      },
+    });
+    d.setup();
+    d.startSession();
+    d.bus.emit('edge.hello', { edgeId: 'edge-1', accountId: 'acc-1', ts: Date.now() });
+    d.bus.emit('excursion.requested', { epoch: 1, ts: Date.now() });
+    d.bus.emit('notification.opening', { epoch: 1, reason: 'open', ts: Date.now() });
+    await tick();
+    assert.equal(commands.some((command) => command.action === 'open_notifications'), false, 'acquired 前零业务命令');
+
+    resolveAcquire({ taskId: 'task-notification-1', edgeId: 'edge-1', kind: 'notification', priority: 'automatic' });
+    await tick();
+    const opened = commands.find((command) => command.action === 'open_notifications');
+    assert.equal(opened?.params?.taskId, 'task-notification-1');
+    d.bus.emit('excursion.ended', { epoch: 1, reason: 'test_complete', ts: Date.now() });
+    await tick();
+    assert.deepEqual(releases, ['task-notification-1']);
+    d.endSession();
+  });
 });
 
 describe('通知巡视 — 端到端闭环（假边缘）', () => {

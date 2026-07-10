@@ -17,6 +17,7 @@
 
 import type { DispatchDraft } from './publish-log-store.js';
 import type { CommandSequencer } from './command-sequencer.js';
+import type { EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
 
 /** 下发段所需的落库读写子集。 */
 export interface DispatchStore {
@@ -46,16 +47,18 @@ export interface DispatchNotice {
 export interface PublishDispatcherDeps {
   store: DispatchStore;
   sequencer: Pick<CommandSequencer, 'executePublishSequence'>;
+  /** 同一 edge/CDP 任务级执行权；业务命令仅在 acquired 回调内发送。 */
+  edgeTaskLeases: Pick<EdgeTaskLeaseClient, 'withLease'>;
   /** 解析绑定该账号的在线边缘节点 edgeId；无在线节点返回 null（→ 诚实 failed）。 */
   resolveEdgeIdForAccount: (accountId: string) => string | null;
   /** AC-PUB 复核 + 版本闸：按 requestId 读授权信号（approved + contentVersion）；无信号返回 null（未授权）。 */
   readApproval: (requestId: string) => Promise<ApprovalDecision | null>;
   /** edit-note-draft-before-publish：作废（删除）一份过期授权签名，令草稿回可重审。 */
   voidApprovalSignal: (requestId: string) => Promise<void>;
-  /** 让位：结束该账号浏览会话（标记不可续场）。 */
-  onPublishStart: (accountId: string) => void;
-  /** 解除让位：经续场各闸起新浏览会话（无论成功/失败/异常，经唯一保证终止点）。 */
-  onPublishEnd: (accountId: string) => void;
+  /** @deprecated 执行权现由 edgeTaskLeases 管理；保留可选形状兼容旧构造。 */
+  onPublishStart?: (accountId: string) => void;
+  /** @deprecated 不再由单功能 finally 无条件恢复浏览。 */
+  onPublishEnd?: (accountId: string) => void;
   /**
    * 陪伴界面通知（change edge-companion-ui 8.1，可选）：审批已核通过（approved）与云端终判失败（failed）
    * 推给该账号的在线边缘。published 不经此通道（边缘 submit 成功处自知）。best-effort，绝不影响下发主链路。
@@ -71,11 +74,10 @@ export interface PublishDispatcherDeps {
 export class PublishDispatcher {
   private readonly store: DispatchStore;
   private readonly sequencer: Pick<CommandSequencer, 'executePublishSequence'>;
+  private readonly edgeTaskLeases: Pick<EdgeTaskLeaseClient, 'withLease'>;
   private readonly resolveEdgeIdForAccount: (accountId: string) => string | null;
   private readonly readApproval: (requestId: string) => Promise<ApprovalDecision | null>;
   private readonly voidApprovalSignal: (requestId: string) => Promise<void>;
-  private readonly onPublishStart: (accountId: string) => void;
-  private readonly onPublishEnd: (accountId: string) => void;
   private readonly notifyUiPublishState?: (accountId: string, recordId: number, state: 'approved' | 'failed', title?: string | null) => void;
   private readonly notifyDispatchEvent?: (notice: DispatchNotice) => void;
   private readonly breakerThreshold: number;
@@ -93,11 +95,10 @@ export class PublishDispatcher {
   constructor(deps: PublishDispatcherDeps) {
     this.store = deps.store;
     this.sequencer = deps.sequencer;
+    this.edgeTaskLeases = deps.edgeTaskLeases;
     this.resolveEdgeIdForAccount = deps.resolveEdgeIdForAccount;
     this.readApproval = deps.readApproval;
     this.voidApprovalSignal = deps.voidApprovalSignal;
-    this.onPublishStart = deps.onPublishStart;
-    this.onPublishEnd = deps.onPublishEnd;
     this.notifyUiPublishState = deps.notifyUiPublishState;
     this.notifyDispatchEvent = deps.notifyDispatchEvent;
     this.breakerThreshold = Math.max(1, deps.breakerThreshold ?? 2);
@@ -269,9 +270,6 @@ export class PublishDispatcher {
       return;
     }
 
-    // 陪伴界面：授权已核实（AC-PUB + 版本闸双过）→ 推 approved（发布卡转「择时发布」）。
-    this.notifyUi(accountId, recordId, 'approved', draft.title);
-
     // 图文帖必须有图（executor 已拦，下发段再守一道；缺图诚实 failed）。
     if (draft.imageUrls.length === 0) {
       await this.store.updateStatus(recordId, 'failed').catch(() => {});
@@ -293,23 +291,36 @@ export class PublishDispatcher {
       return;
     }
 
-    // 让位 → 下发 → 解除让位（finally 唯一保证终止点）。
-    this.onPublishStart(accountId);
+    let sequenceStarted = false;
     try {
-      const result = await this.sequencer.executePublishSequence({
-        recordId,
-        title: draft.title ?? '',
-        content: draft.content,
-        // 话题取落库元数据的 topics（生成候审段经 recordMetadata 落库）；缺则空数组。
-        tags: draft.metadata?.topics ?? [],
-        // 多图：下发全部成功配图逐张上传（[0]=封面）。本期不传 cover——封面=首张上传=平台默认；
-        // 强发 set_cover 会踩 edge fail-closed 桩（coverActiveValidator 缺 anchor 必败、非 best-effort 整帖 failed）。
-        images: draft.imageUrls,
-        cover: undefined,
-        metadata: draft.metadata ?? undefined,
-        approvedByUser: true,
-        edgeId,
-      });
+      const result = await this.edgeTaskLeases.withLease(
+        {
+          edgeId,
+          kind: 'publish',
+          priority: 'human',
+          leaseMs: Number(process.env.AIDCP_EDGE_PUBLISH_LEASE_MS ?? 10 * 60_000),
+        },
+        async (lease) => {
+          // acquired 同时代表 edge 已 quiesced；此前不得推 approved/不得发送首条业务命令。
+          this.notifyUi(accountId, recordId, 'approved', draft.title);
+          sequenceStarted = true;
+          return this.sequencer.executePublishSequence({
+            taskId: lease.taskId,
+            recordId,
+            title: draft.title ?? '',
+            content: draft.content,
+            // 话题取落库元数据的 topics（生成候审段经 recordMetadata 落库）；缺则空数组。
+            tags: draft.metadata?.topics ?? [],
+            // 多图：下发全部成功配图逐张上传（[0]=封面）。本期不传 cover——封面=首张上传=平台默认；
+            // 强发 set_cover 会踩 edge fail-closed 桩（coverActiveValidator 缺 anchor 必败、非 best-effort 整帖 failed）。
+            images: draft.imageUrls,
+            cover: undefined,
+            metadata: draft.metadata ?? undefined,
+            approvedByUser: true,
+            edgeId,
+          });
+        },
+      );
 
       // 配图收口：如实标记真实附着张数 K（部分成功 K≥1 即有效帖；全失败 K=0）。
       await this.store.markImagesAttached(recordId, result.attachedCount).catch(() => {});
@@ -330,14 +341,20 @@ export class PublishDispatcher {
         this.recordSeqFailure(accountId, recordId, draft.title);
       }
     } catch (err) {
+      if (!sequenceStarted) {
+        // acquire 未确认 = 零业务命令副作用；作废授权回待审，绝不把协议过旧/离线烧成 failed。
+        await this.voidApprovalSignal(requestId).catch(() => {});
+        this.logger.warn(
+          `[PublishDispatcher] recordId=${recordId} 未取得 edge task lease，零命令下发、回待审: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        this.notifyOps({ kind: 'offline_requeued', accountId, recordId, title: draft.title });
+        return;
+      }
       // 序列驱动异常（页面状态未知）→ 同序列失败处理：failed 终态 + 计入熔断。
       await this.store.updateStatus(recordId, 'failed').catch(() => {});
       this.logger.warn(`[PublishDispatcher] recordId=${recordId} 下发异常: ${err instanceof Error ? err.message : String(err)}`);
       this.notifyUi(accountId, recordId, 'failed', draft.title);
       this.recordSeqFailure(accountId, recordId, draft.title);
-    } finally {
-      // 无论成功/失败/异常，经此唯一终止点解除让位 → 续场各闸起新浏览。
-      this.onPublishEnd(accountId);
     }
   }
 }

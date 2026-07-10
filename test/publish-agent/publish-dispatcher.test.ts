@@ -65,6 +65,16 @@ function harness(opts: {
   const dispatcher = new PublishDispatcher({
     store,
     sequencer,
+    edgeTaskLeases: {
+      withLease: async (request, work) => {
+        events.push('lease:acquired');
+        try {
+          return await work({ taskId: 'task-publish-1', edgeId: request.edgeId, kind: request.kind, priority: request.priority });
+        } finally {
+          events.push('lease:released');
+        }
+      },
+    },
     resolveEdgeIdForAccount: () => (opts.edgeId === undefined ? 'edge-A' : opts.edgeId),
     readApproval: async () =>
       (opts.approved ?? true)
@@ -80,12 +90,14 @@ function harness(opts: {
 }
 
 describe('PublishDispatcher', () => {
-  test('已授权 + 在线边缘 → 让位→重建发布输入→驱动序列→回写 published→解除让位', async () => {
+  test('已授权 + 在线边缘 → acquired→重建发布输入→驱动序列→释放→回写 published', async () => {
     const h = harness({ approved: true, edgeId: 'edge-A' });
     await h.dispatcher.dispatch(7);
 
-    // 时序：让位先于序列，解除让位在序列之后。
-    assert.deepEqual(h.events.filter((e) => ['start', 'seq', 'postId', 'end'].includes(e)), ['start', 'seq', 'postId', 'end']);
+    assert.deepEqual(
+      h.events.filter((e) => ['lease:acquired', 'seq', 'lease:released', 'postId'].includes(e)),
+      ['lease:acquired', 'seq', 'lease:released', 'postId'],
+    );
     // 重建：title/content 来自草稿；tags 来自 metadata.topics；多图来自 imageUrls 全集；本期不传 cover；edgeId 定向。
     assert.equal(h.seqInput.title, 'vLLM 部署踩坑');
     assert.deepEqual(h.seqInput.tags, ['vLLM', '大模型部署']);
@@ -122,11 +134,11 @@ describe('PublishDispatcher', () => {
     assert.equal(h.events.includes('start'), false);
   });
 
-  test('解除让位经唯一终止点：序列失败也调 onPublishEnd', async () => {
+  test('租约 finally：序列失败也释放执行权', async () => {
     const h = harness({ approved: true, edgeId: 'edge-A', seqResult: { ok: false, attachedCount: 0, failedAt: { seq: 5, kind: 'submit_publish', error: 'x' } } });
     await h.dispatcher.dispatch(7);
-    assert.equal(h.events.includes('start'), true);
-    assert.equal(h.events.includes('end'), true, '失败路径仍解除让位');
+    assert.equal(h.events.includes('lease:acquired'), true);
+    assert.equal(h.events.includes('lease:released'), true, '失败路径仍释放任务租约');
     assert.deepEqual(h.statusUpdates.at(-1), { id: 7, status: 'failed' }, '真失败如实 failed');
   });
 
@@ -202,6 +214,9 @@ describe('PublishDispatcher', () => {
           events.push(`seq:${input.recordId}`);
           return (await opts.seqResultFor?.(input.recordId)) ?? { ok: true, attachedCount: 1, postId: 'p' };
         },
+      },
+      edgeTaskLeases: {
+        withLease: async (request, work) => work({ taskId: 'task-publish-multi', edgeId: request.edgeId, kind: request.kind, priority: request.priority }),
       },
       resolveEdgeIdForAccount: () => 'edge-X',
       readApproval: async () => ({ approved: true, contentVersion: 0 }),

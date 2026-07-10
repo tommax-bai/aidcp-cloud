@@ -11,6 +11,7 @@ export interface FacebookGroupJoinEdgeStepsDeps {
   bus: EventBus;
   pusher: EdgePusher;
   edgeId: string;
+  taskId: string;
   stepTimeoutMs?: number;
   logger?: Pick<Console, 'warn'>;
 }
@@ -86,6 +87,7 @@ export function buildFacebookGroupJoinEdgeSteps(deps: FacebookGroupJoinEdgeSteps
       () =>
         push(
           makeEnvelope('group.join', randomUUID(), Date.now(), {
+            taskId: deps.taskId,
             groupUrl,
             click,
             ...(typeof thinkMs === 'number' ? { thinkMs } : {}),

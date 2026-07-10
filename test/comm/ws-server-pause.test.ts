@@ -63,7 +63,11 @@ test('暂停后普通指令被丢弃、session.end/ui.snapshot/captcha assist �
     points: [{ x: 0.5, y: 0.5 }],
   });
   assert.equal(s.pushToEdges(click, 'edge-1'), 1, 'captcha.assist.click 必达，绕过暂停闸');
-  const publish = makeEnvelope('publish.command', 'c6', 0, { recordId: 1, seq: 1, kind: 'submit_publish', params: {} });
+  const taskAcquire = makeEnvelope('edge.task.acquire', 'c5-task', 0, {
+    taskId: 'task-recovery', kind: 'system_recovery', priority: 'system_recovery', leaseMs: 60_000,
+  });
+  assert.equal(s.pushToEdges(taskAcquire, 'edge-1'), 1, 'system recovery task acquire 必达，绕过暂停闸');
+  const publish = makeEnvelope('publish.command', 'c6', 0, { taskId: 'task-publish-1', recordId: 1, seq: 1, kind: 'submit_publish', params: {} });
   assert.equal(s.pushToEdges(publish, 'edge-1'), 0, '发布页面动作仍必须被暂停闸拦截');
 
   s.resumeEdge('edge-1');

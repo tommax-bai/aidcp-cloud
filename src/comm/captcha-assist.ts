@@ -9,6 +9,7 @@ import {
   type CaptchaDetectedPayload,
 } from './protocol.js';
 import type { EdgeSession } from './ws-server.js';
+import type { EdgeTaskLease, EdgeTaskLeaseClient } from './edge-task-lease-client.js';
 
 export type CaptchaAssistIncidentStatus =
   | 'detected'
@@ -70,7 +71,9 @@ export type CaptchaAssistDispatchResult =
         | 'edge_offline'
         | 'snapshot_required'
         | 'snapshot_mismatch'
-        | 'invalid_points';
+        | 'invalid_points'
+        | 'task_busy'
+        | 'task_lease_failed';
       incident?: CaptchaAssistIncidentView;
     };
 
@@ -85,6 +88,7 @@ export interface CaptchaAssistServiceDeps {
   logger?: Pick<Console, 'error' | 'warn' | 'log'>;
   getAccountName?: (accountId: string) => string | null | undefined;
   pusher: { pushToEdges(env: ReturnType<typeof makeEnvelope>, edgeId?: string): number };
+  taskLeases?: Pick<EdgeTaskLeaseClient, 'acquire' | 'release'>;
 }
 
 interface CaptchaAssistIncident extends CaptchaAssistIncidentView {}
@@ -99,6 +103,7 @@ export class CaptchaAssistService {
   private readonly logger: Pick<Console, 'error' | 'warn' | 'log'>;
   private readonly tokenTtlSeconds: number;
   private readonly incidentTtlMs: number;
+  private readonly recoveryLeases = new Map<string, { lease: EdgeTaskLease; timer: ReturnType<typeof setTimeout> }>();
 
   constructor(private readonly deps: CaptchaAssistServiceDeps) {
     this.clock = deps.clock ?? Date.now;
@@ -202,6 +207,7 @@ export class CaptchaAssistService {
     } else {
       incident.status = 'failed';
     }
+    void this.releaseRecoveryLease(payload.incidentId, 'completed');
   }
 
   getIncident(incidentId: string): CaptchaAssistIncidentView | null {
@@ -255,9 +261,29 @@ export class CaptchaAssistService {
     if (!isValidPointList(input.points)) {
       return { ok: false, reason: 'invalid_points', incident };
     }
+    if (this.recoveryLeases.has(input.incidentId)) {
+      return { ok: false, reason: 'task_busy', incident };
+    }
+
+    let recoveryLease: EdgeTaskLease | undefined;
+    if (this.deps.taskLeases) {
+      try {
+        recoveryLease = await this.deps.taskLeases.acquire({
+          edgeId: incident.edgeId,
+          kind: 'system_recovery',
+          priority: 'system_recovery',
+          leaseMs: 60_000,
+          acquireTimeoutMs: 20_000,
+        });
+      } catch (err) {
+        this.logger.warn(`[captcha-assist] system recovery lease failed incident=${input.incidentId}: ${(err as Error).message}`);
+        return { ok: false, reason: 'task_lease_failed', incident };
+      }
+    }
 
     const now = this.clock();
     const payload: CaptchaAssistClickPayload = {
+      ...(recoveryLease ? { taskId: recoveryLease.taskId } : {}),
       incidentId: input.incidentId,
       snapshotId: input.snapshotId,
       points: input.points.map((p) => ({ x: p.x, y: p.y, ...(p.label ? { label: p.label } : {}) })),
@@ -271,8 +297,29 @@ export class CaptchaAssistService {
     incident.status = sent > 0 ? 'click_pending' : 'ready';
     incident.updatedAt = now;
     incident.lastDispatch = { type: 'click', requestedAt: now, sent, actor: input.actor };
-    if (sent <= 0) return { ok: false, reason: 'edge_offline', incident };
+    if (sent <= 0) {
+      if (recoveryLease) await this.deps.taskLeases?.release(recoveryLease, 'failed').catch(() => {});
+      return { ok: false, reason: 'edge_offline', incident };
+    }
+    if (recoveryLease) {
+      const timer = setTimeout(() => { void this.releaseRecoveryLease(input.incidentId, 'failed'); }, 60_000);
+      timer.unref?.();
+      this.recoveryLeases.set(input.incidentId, { lease: recoveryLease, timer });
+    }
     return { ok: true, sent, incident };
+  }
+
+  private async releaseRecoveryLease(
+    incidentId: string,
+    outcome: 'completed' | 'failed' | 'cancelled',
+  ): Promise<void> {
+    const held = this.recoveryLeases.get(incidentId);
+    if (!held) return;
+    this.recoveryLeases.delete(incidentId);
+    clearTimeout(held.timer);
+    await this.deps.taskLeases?.release(held.lease, outcome).catch((err) => {
+      this.logger.warn(`[captcha-assist] system recovery release failed incident=${incidentId}: ${(err as Error).message}`);
+    });
   }
 
   actionUrl(incidentId: string): string | undefined {

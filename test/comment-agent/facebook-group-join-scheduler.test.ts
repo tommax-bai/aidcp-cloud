@@ -99,6 +99,9 @@ function makeHarness(opts: {
   const scheduler = new FacebookGroupJoinScheduler({
     resolveConnection: () => ({ bus, edgeId: 'edge-fb' }),
     pusher,
+    edgeTaskLeases: {
+      withLease: async (request, work) => work({ taskId: `task-${request.kind}`, edgeId: request.edgeId, kind: request.kind, priority: request.priority }),
+    },
     targets: targets as never,
     memberships: memberships as never,
     audit: audit as never,

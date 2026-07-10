@@ -31,6 +31,8 @@ export interface SequencerPusher {
 /** 一次发布的编排输入（终稿 + 授权态；元数据维度本阶段占位预留）。 */
 export interface PublishSequenceInput {
   recordId: number;
+  /** 当前 edge 发布任务租约；整条序列逐条携同一 taskId。 */
+  taskId: string;
   title: string;
   content: string;
   tags: string[];
@@ -110,7 +112,7 @@ export class CommandSequencer {
     const cmds: PublishCommandPayload[] = [];
     let seq = 0;
     const add = (kind: PublishCommandKind, params: PublishCommandParams = {}) => {
-      cmds.push({ recordId: input.recordId, seq: seq++, kind, params });
+      cmds.push({ taskId: input.taskId, recordId: input.recordId, seq: seq++, kind, params });
     };
 
     add('navigate_entry');

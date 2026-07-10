@@ -35,6 +35,8 @@ import {
   type NotificationHomePayload,
   type NotificationItemsPayload,
   type PublishCommandResultPayload,
+  type EdgeTaskAcquiredPayload,
+  type EdgeTaskReleasedPayload,
   type PersonaGeneratePayload,
   type PersonaGenerateResultPayload,
   type PersonaPersistPayload,
@@ -42,6 +44,7 @@ import {
 import type { PersonaGenerator } from '../agents/persona-generator.js';
 import type { PanelPersonaConfig } from '../panel/types.js';
 import type { CommandSequencer } from '../publish-agent/command-sequencer.js';
+import type { EdgeTaskLeaseClient } from './edge-task-lease-client.js';
 import type { MessageHandler, EdgeSession, EdgePusher } from './ws-server.js';
 import type { CaptchaCoordinator } from './captcha-coordinator.js';
 import type { CaptchaAssistService } from './captcha-assist.js';
@@ -88,6 +91,8 @@ export interface HandlerDeps {
   captchaAssist?: Pick<CaptchaAssistService, 'onSnapshot' | 'onClickResult'>;
   /** A 阶段1 发布指令编排器：消费 publish.command.result 关联回报（未注入则忽略，向后兼容）。 */
   commandSequencer?: Pick<CommandSequencer, 'onResult'>;
+  /** task.acquired/released 关联器；未注入时回执仅忽略，兼容纯协议测试。 */
+  edgeTaskLeases?: Pick<EdgeTaskLeaseClient, 'onAcquired' | 'onReleased'>;
   // ── multi-account-node-support：按连接多租户路由 ─────────────────────────
   /**
    * 该连接的私有事件总线（缺省 → 回落 eventBus，单租户向后兼容）。入站事件发到此总线，
@@ -256,6 +261,12 @@ export class DefaultMessageHandler implements MessageHandler {
         return null;
       case 'captcha.assist.click_result':
         this.deps.captchaAssist?.onClickResult(env.payload as CaptchaAssistClickResultPayload);
+        return null;
+      case 'edge.task.acquired':
+        this.deps.edgeTaskLeases?.onAcquired(env.payload as EdgeTaskAcquiredPayload, session.edgeId);
+        return null;
+      case 'edge.task.released':
+        this.deps.edgeTaskLeases?.onReleased(env.payload as EdgeTaskReleasedPayload, session.edgeId);
         return null;
       case 'page.cards': {
         const { cards } = env.payload as PageCardsPayload;

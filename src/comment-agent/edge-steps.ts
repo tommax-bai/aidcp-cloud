@@ -41,6 +41,8 @@ export interface EdgeCommentStepsDeps {
   pusher: EdgePusher;
   /** 目标边端 edgeId（定向下发；解析见 CommentScheduler，离线则不启动任务）。 */
   edgeId: string;
+  /** 当前 comment_prepare/comment_commit 租约；所有页面写命令逐条携带。 */
+  taskId?: string;
   dedup: CommentDedup;
   /** 原生筛选：排序 / 时间窗（透传进 search.execute）。 */
   sort?: string;
@@ -112,7 +114,7 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
   post(noteId: string, text: string, contactInfo?: string | null): Promise<boolean>;
   recordCommented(noteId: string): Promise<void>;
 } {
-  const { bus, pusher, edgeId, dedup } = deps;
+  const { bus, pusher, edgeId, taskId, dedup } = deps;
   const timeout = deps.stepTimeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
   const maxCandidates = deps.maxCandidates ?? DEFAULT_MAX_CANDIDATES;
   const log = deps.logger ?? console;
@@ -126,7 +128,7 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
       'action.completed',
       (d) => d.action === 'scroll_comments',
       timeout,
-      () => push(makeEnvelope('note.scroll_comments', randomUUID(), Date.now(), { noteId, count: 2 })),
+      () => push(makeEnvelope('note.scroll_comments', randomUUID(), Date.now(), { taskId, noteId, count: 2 })),
     );
     const candidates = scrolled?.candidates ?? [];
     if (!scrolled) {
@@ -154,6 +156,7 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
         () =>
           push(
             makeEnvelope('search.execute', randomUUID(), Date.now(), {
+              taskId,
               keyword: term,
               source: 'manager',
               ...(deps.sort ? { sort: deps.sort as never } : {}),
@@ -198,7 +201,7 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
         'note.detail.arrived',
         (d) => d.detail?.noteId === noteId,
         timeout,
-        () => push(makeEnvelope('note.open', randomUUID(), Date.now(), { noteId })),
+        () => push(makeEnvelope('note.open', randomUUID(), Date.now(), { taskId, noteId })),
       );
       if (!detail) {
         log.warn(`[comment-edge] 开笔记 ${noteId} 无 note.detail（超时/边端离线）`);
@@ -231,6 +234,7 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
         () =>
           push(
             makeEnvelope('interaction.comment', randomUUID(), Date.now(), {
+              taskId,
               noteId,
               text,
               // 联系方式（account-group-chat-injection）：非空时边缘逐字敲 text 后整段插入此码（绕过 @/# 补全）。

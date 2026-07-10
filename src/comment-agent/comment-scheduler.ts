@@ -22,13 +22,9 @@ import { PostProcessor } from '../publish-agent/post-processor.js';
 import type { CommentApprovalPort } from '../agents/comment-approval-gate.js';
 import type { CommentCommandReceipt } from '../feishu/commands.js';
 import {
-  runCommentTask,
-  runTargetedCommentTask,
   type CommentTaskResult,
-  type CommentTaskSteps,
   type NoteForComment,
   type TargetedCommentResult,
-  type TargetedCommentSteps,
 } from './comment-task-runner.js';
 import { buildEdgeCommentSteps, type EdgePusher, type CommentDedup } from './edge-steps.js';
 import { buildFacebookEdgeSteps } from './facebook-edge-steps.js';
@@ -45,6 +41,8 @@ import {
 import { validateFacebookComment } from './facebook-comment-validators.js';
 import type { EffectiveFacebookCommentConfig } from '../config/facebook-comment-config-store.js';
 import type { FacebookCommentAuditRow, FacebookCommentOutcome } from './facebook-comment-audit-store.js';
+import type { EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
+import type { EdgeTaskPriority } from '../comm/protocol.js';
 
 export interface FacebookCoverageCommentConfig extends EffectiveFacebookCommentConfig {
   coverageEnabled: boolean;
@@ -61,6 +59,7 @@ export interface CommentSchedulerDeps {
   /** 解析该账号的连接运行时（私有总线 + 在线 edgeId）；null / 无 edgeId = 边端离线（honest 拒绝）。 */
   resolveConnection: (accountId: string) => { bus: EventBus; edgeId?: string } | null;
   pusher: EdgePusher;
+  edgeTaskLeases: Pick<EdgeTaskLeaseClient, 'withLease'>;
   getSoul: (accountId: string) => Soul;
   /** 人设绑定判定（persona-driven-content-pipeline）：注入则触发前闸——未绑人设的账号不接管边端、不启动评论任务，绝不以默认人设代评。缺省→不闸（向后兼容旧构造 / 测试桩）。 */
   isPersonaBound?: (accountId: string) => boolean;
@@ -80,10 +79,10 @@ export interface CommentSchedulerDeps {
   approval?: CommentApprovalPort;
   /** 去 AI 味处理器（可带账号 rewrite）；缺省仅扫描。 */
   postProcessorFor?: (accountId: string) => Pick<PostProcessor, 'process'>;
-  /** 接管该账号边端（结束自动浏览，独占）。 */
-  onTakeoverStart: (accountId: string) => void;
-  /** 任务结束恢复浏览。 */
-  onTakeoverEnd: (accountId: string) => void;
+  /** @deprecated 页面执行权改由 edgeTaskLeases 管理；保留可选形状兼容旧测试构造。 */
+  onTakeoverStart?: (accountId: string) => void;
+  /** @deprecated 不再由评论 finally 无条件恢复浏览。 */
+  onTakeoverEnd?: (accountId: string) => void;
   /** 任务跑完补发结果卡片（level 按结果，绝不染绿）。 */
   postResultCard?: (accountId: string, receipt: CommentResultReceipt) => Promise<void> | void;
   /** 原生筛选（缺省 most_collected / one_day）。 */
@@ -192,7 +191,7 @@ export class CommentScheduler {
   /** 飞书 /comment 触发：返回「触发态」结构化回执；最终结果异步补发结果卡片。 */
   async triggerManual(
     accountId: string,
-    options?: { injectContact?: boolean },
+    options?: { injectContact?: boolean; priority?: EdgeTaskPriority },
   ): Promise<CommentCommandReceipt> {
     if (!accountId || accountId === 'default') {
       return { ok: false, level: 'error', title: '按需评论触发失败', message: '未解析到有效账号（绝不回落 default）' };
@@ -262,7 +261,7 @@ export class CommentScheduler {
     // 异步跑任务，命令立即回执（任务含人审轮询，不可同步等）。contactInfo 已解析一次，带进任务用于注入（gate 同源）。
     // catch：runTask 内部已兜任务期异常；此处兜「任务启动前」的防御性抛（如 gate 后人设被解绑 → getSoul 抛
     // no_persona，persona-driven-content-pipeline）——诚实记日志、不让未处理拒绝炸进程，绝不假成功。
-    void this.runTask(accountId, bus, edgeId, contactInfo, platformProfile)
+    void this.runTask(accountId, bus, edgeId, contactInfo, platformProfile, options?.priority ?? 'human')
       .catch((err) =>
         (this.deps.logger ?? console).warn(
           `[comment-scheduler] 任务未能启动/异常中止 account=${accountId}：${(err as Error).message}`,
@@ -292,6 +291,8 @@ export class CommentScheduler {
       currentNote?: NoteForComment;
       /** 异步任务最终结果回调；用于自动联系评论在真正 commented 后再记风控配额。 */
       onResult?: (result: TargetedCommentResult) => Promise<void> | void;
+      /** 自动排期/热度触发用 automatic；人工入口缺省 human。 */
+      priority?: EdgeTaskPriority;
     },
   ): Promise<CommentCommandReceipt & { reason?: string }> {
     if (!accountId || accountId === 'default') {
@@ -372,7 +373,16 @@ export class CommentScheduler {
     }
 
     this.running.add(accountId);
-    void this.runTargetedTask(accountId, conn.bus, conn.edgeId, { ...target, currentNote: options?.currentNote }, contactInfo, platformProfile, options?.onResult)
+    void this.runTargetedTask(
+      accountId,
+      conn.bus,
+      conn.edgeId,
+      { ...target, currentNote: options?.currentNote },
+      contactInfo,
+      platformProfile,
+      options?.priority ?? 'human',
+      options?.onResult,
+    )
       .catch((err) =>
         (this.deps.logger ?? console).warn(
           `[comment-scheduler] 定向任务未能启动/异常中止 account=${accountId}：${(err as Error).message}`,
@@ -632,6 +642,7 @@ export class CommentScheduler {
     target: { noteId: string; title: string; currentNote?: NoteForComment },
     contactInfo: string | null,
     platformProfile: CommentPlatformProfile,
+    priority: EdgeTaskPriority,
     onResult?: (result: TargetedCommentResult) => Promise<void> | void,
   ): Promise<void> {
     const log = this.deps.logger ?? console;
@@ -649,39 +660,113 @@ export class CommentScheduler {
       logger: log,
     });
 
-    // 定向流程覆盖原生筛选：综合排序 + 不限时间窗（/comment 默认「最多收藏+一天内」会筛掉非当日老笔记）。
-    const edge = buildEdgeCommentSteps({
-      bus,
-      pusher: this.deps.pusher,
-      edgeId,
-      dedup: this.deps.dedupFor(accountId),
-      // Targeted title search relies on exact noteId matching; native filters add no value here.
-      stepTimeoutMs: this.deps.stepTimeoutMs,
-      logger: log,
-    });
-
-    const steps: TargetedCommentSteps = {
-      searchAndHarvest: (term) => edge.searchAndHarvest(term),
-      readNote: (card) => edge.readNote(card),
-      readCurrentNote: (note) => edge.readCurrentNote(note),
-      composeAndApprove: (note, comments) => composeAndApprove(note, comments),
-      post: (noteId, text, code) => edge.post(noteId, text, code),
-      recordCommented: (noteId) => edge.recordCommented(noteId),
-    };
-
     // 搜索词：标题截 ≤20 字（拟人逐字输入须守单步时限）；第二次尝试放宽为前 12 字。
     const searchTerm = target.title.trim().slice(0, TARGETED_SEARCH_TERM_MAX_LEN);
     const fallbackTerm = target.title.trim().slice(0, TARGETED_SEARCH_FALLBACK_LEN);
-
-    this.deps.onTakeoverStart(accountId);
     let result: TargetedCommentResult;
     try {
-      result = await runTargetedCommentTask(steps, { noteId: target.noteId, title: target.title, currentNote: target.currentNote, searchTerm, fallbackTerm }, { logger: log });
+      const dedup = this.deps.dedupFor(accountId);
+      const edgeFor = (taskId: string) =>
+        buildEdgeCommentSteps({
+          bus,
+          pusher: this.deps.pusher,
+          edgeId,
+          taskId,
+          dedup,
+          // Targeted title search relies on exact noteId matching; native filters add no value here.
+          stepTimeoutMs: this.deps.stepTimeoutMs,
+          logger: log,
+        });
+
+      let searchAttempts = 0;
+      const prepared = await this.deps.edgeTaskLeases.withLease(
+        { edgeId, kind: 'comment_prepare', priority, leaseMs: 2 * 60_000 },
+        async (lease) => {
+          const edge = edgeFor(lease.taskId);
+          if (target.currentNote) {
+            if (target.currentNote.noteId !== target.noteId) return null;
+            return edge.readCurrentNote(target.currentNote);
+          }
+          for (const term of [searchTerm, fallbackTerm]) {
+            searchAttempts++;
+            const cards = await edge.searchAndHarvest(term);
+            const card = cards.find((candidate) => candidate.noteId === target.noteId);
+            if (card) return edge.readNote(card);
+          }
+          return null;
+        },
+      );
+
+      if (!prepared || prepared.note.noteId !== target.noteId) {
+        result = target.currentNote
+          ? { outcome: 'read_failed', noteId: target.noteId, noteTitle: target.title, searchAttempts, reason: 'current note context unavailable' }
+          : { outcome: 'note_not_found', noteId: target.noteId, noteTitle: target.title, searchAttempts, reason: 'target not found during prepare' };
+      } else {
+        // LLM 撰写 + 飞书人审为 cloud-only；prepare 租约已经由 withLease finally 释放。
+        const composed = await composeAndApprove(prepared.note, prepared.comments);
+        if (!composed) {
+          result = {
+            outcome: 'compose_skipped',
+            noteId: target.noteId,
+            noteTitle: prepared.note.title || target.title,
+            searchAttempts,
+            reason: 'empty/unapproved/rejected',
+          };
+        } else {
+          const displayText = composed.contactInfo ? `${composed.text}\n${composed.contactInfo}` : composed.text;
+          let commitReason = 'comment not verified posted';
+          const posted = await this.withManualCommitMarker(
+            accountId,
+            priority,
+            () => this.deps.edgeTaskLeases.withLease(
+              { edgeId, kind: 'comment_commit', priority, leaseMs: 2 * 60_000 },
+              async (lease) => {
+                if (await dedup.hasInteracted(target.noteId, 'comment').catch(() => false)) {
+                  commitReason = 'already_commented_before_commit';
+                  return false;
+                }
+                const edge = edgeFor(lease.taskId);
+                // 人审期间页面已可继续浏览；commit 不信旧 DOM，必须重新搜索、打开并核对稳定 noteId。
+                for (const term of [searchTerm, fallbackTerm]) {
+                  const cards = await edge.searchAndHarvest(term);
+                  const card = cards.find((candidate) => candidate.noteId === target.noteId);
+                  if (!card) continue;
+                  const reopened = await edge.readNote(card);
+                  if (!reopened || reopened.note.noteId !== target.noteId) {
+                    commitReason = 'detail_note_mismatch_on_commit';
+                    return false;
+                  }
+                  return edge.post(target.noteId, composed.text, composed.contactInfo);
+                }
+                commitReason = 'target_not_found_on_commit';
+                return false;
+              },
+            ),
+          );
+          if (!posted) {
+            result = {
+              outcome: 'post_failed',
+              noteId: target.noteId,
+              noteTitle: prepared.note.title || target.title,
+              text: displayText,
+              searchAttempts,
+              reason: commitReason,
+            };
+          } else {
+            await dedup.recordInteraction(target.noteId, 'comment');
+            result = {
+              outcome: 'commented',
+              noteId: target.noteId,
+              noteTitle: prepared.note.title || target.title,
+              text: displayText,
+              searchAttempts,
+            };
+          }
+        }
+      }
     } catch (err) {
       log.warn(`[comment-scheduler] 定向任务异常 account=${accountId}：${(err as Error).message}`);
       result = { outcome: 'post_failed', noteId: target.noteId, searchAttempts: 0, reason: (err as Error).message };
-    } finally {
-      this.deps.onTakeoverEnd(accountId);
     }
 
     try {
@@ -703,6 +788,7 @@ export class CommentScheduler {
     edgeId: string,
     contactInfo: string | null,
     platformProfile: CommentPlatformProfile,
+    priority: EdgeTaskPriority,
   ): Promise<void> {
     const log = this.deps.logger ?? console;
     const soul = this.deps.getSoul(accountId);
@@ -724,48 +810,163 @@ export class CommentScheduler {
       logger: log,
     });
 
-    const edge = buildEdgeCommentSteps({
-      bus,
-      pusher: this.deps.pusher,
-      edgeId,
-      dedup: this.deps.dedupFor(accountId),
-      sort: this.deps.sort ?? platformProfile.search.defaultSort,
-      timeWindow: this.deps.timeWindow ?? platformProfile.search.defaultTimeWindow,
-      stepTimeoutMs: this.deps.stepTimeoutMs,
-      logger: log,
-    });
-
-    const steps: CommentTaskSteps = {
-      generateTerms: async () => {
-        const samples = await this.deps.selectCurated(accountId, 'source_post', 8).catch(() => []);
-        const r = await generator.generate(samples);
-        return r.terms;
-      },
-      searchAndHarvest: (term) => edge.searchAndHarvest(term),
-      filterUncommented: (cards) => edge.filterUncommented(cards),
-      pick: (cards) => picker.pick(cards),
-      readNote: (card) => edge.readNote(card),
-      composeAndApprove: (note, comments) => composeAndApprove(note, comments),
-      post: (noteId, text, contactInfo) => edge.post(noteId, text, contactInfo),
-      recordCommented: (noteId) => edge.recordCommented(noteId),
-    };
-
-    // 接管边端（独占）→ 跑任务 → finally 恢复浏览。
-    this.deps.onTakeoverStart(accountId);
     let result: CommentTaskResult;
     try {
-      result = await runCommentTask(steps, { maxTerms: this.deps.maxTerms, logger: log });
+      const dedup = this.deps.dedupFor(accountId);
+      const edgeFor = (taskId: string) =>
+        buildEdgeCommentSteps({
+          bus,
+          pusher: this.deps.pusher,
+          edgeId,
+          taskId,
+          dedup,
+          sort: this.deps.sort ?? platformProfile.search.defaultSort,
+          timeWindow: this.deps.timeWindow ?? platformProfile.search.defaultTimeWindow,
+          stepTimeoutMs: this.deps.stepTimeoutMs,
+          logger: log,
+        });
+
+      // 搜索词生成是 cloud-only LLM，边缘租约尚未申请。
+      const samples = await this.deps.selectCurated(accountId, 'source_post', 8).catch(() => []);
+      const terms = (await generator.generate(samples)).terms;
+      if (!terms.length) {
+        result = { outcome: 'no_terms', termsTried: 0 };
+      } else {
+        const maxTerms = this.deps.maxTerms ?? 5;
+        let tried = 0;
+        let final: CommentTaskResult | undefined;
+        for (const term of terms) {
+          if (tried >= maxTerms) break;
+          tried++;
+          // 搜索只是短 prepare 租约；候选 LLM 甄选不持浏览器。
+          const cards = await this.deps.edgeTaskLeases.withLease(
+            { edgeId, kind: 'comment_prepare', priority, leaseMs: 2 * 60_000 },
+            (lease) => edgeFor(lease.taskId).searchAndHarvest(term),
+          );
+          const fresh = [];
+          for (const card of cards) {
+            if (!card.noteId || (await dedup.hasInteracted(card.noteId, 'comment').catch(() => false))) continue;
+            fresh.push({ ...card, index: fresh.length });
+          }
+          if (!fresh.length) continue;
+
+          const picked = await picker.pick(fresh);
+          if (picked.pickIndex == null) continue;
+          const selected = fresh.find((card) => card.index === picked.pickIndex);
+          if (!selected?.noteId) continue;
+
+          // pick LLM 已结束；重新申请短 prepare，按稳定 noteId 复找、打开并读取正文/现场评论。
+          const prepared = await this.deps.edgeTaskLeases.withLease(
+            { edgeId, kind: 'comment_prepare', priority, leaseMs: 2 * 60_000 },
+            async (lease) => {
+              const edge = edgeFor(lease.taskId);
+              const current = await edge.searchAndHarvest(term);
+              const stable = current.find((card) => card.noteId === selected.noteId);
+              return stable ? edge.readNote(stable) : null;
+            },
+          );
+          if (!prepared || prepared.note.noteId !== selected.noteId) {
+            final = {
+              outcome: 'read_failed',
+              term,
+              noteId: selected.noteId,
+              noteTitle: selected.title,
+              termsTried: tried,
+              reason: 'target unavailable during prepare',
+            };
+            break;
+          }
+
+          // 撰写/去 AI 味/飞书人审全在租约外；拒绝或超时不会申请 commit。
+          const composed = await composeAndApprove(prepared.note, prepared.comments);
+          if (!composed) {
+            final = {
+              outcome: 'compose_skipped',
+              term,
+              noteId: selected.noteId,
+              noteTitle: prepared.note.title,
+              termsTried: tried,
+              reason: 'empty/unapproved/rejected',
+            };
+            break;
+          }
+          const displayText = composed.contactInfo ? `${composed.text}\n${composed.contactInfo}` : composed.text;
+          let commitReason = 'comment not verified posted';
+          const posted = await this.withManualCommitMarker(
+            accountId,
+            priority,
+            () => this.deps.edgeTaskLeases.withLease(
+              { edgeId, kind: 'comment_commit', priority, leaseMs: 2 * 60_000 },
+              async (lease) => {
+                if (await dedup.hasInteracted(selected.noteId!, 'comment').catch(() => false)) {
+                  commitReason = 'already_commented_before_commit';
+                  return false;
+                }
+                const edge = edgeFor(lease.taskId);
+                const current = await edge.searchAndHarvest(term);
+                const stable = current.find((card) => card.noteId === selected.noteId);
+                if (!stable) {
+                  commitReason = 'target_not_found_on_commit';
+                  return false;
+                }
+                const reopened = await edge.readNote(stable);
+                if (!reopened || reopened.note.noteId !== selected.noteId) {
+                  commitReason = 'detail_note_mismatch_on_commit';
+                  return false;
+                }
+                return edge.post(selected.noteId!, composed.text, composed.contactInfo);
+              },
+            ),
+          );
+          if (!posted) {
+            final = {
+              outcome: 'post_failed',
+              term,
+              noteId: selected.noteId,
+              noteTitle: prepared.note.title,
+              text: displayText,
+              termsTried: tried,
+              reason: commitReason,
+            };
+          } else {
+            await dedup.recordInteraction(selected.noteId, 'comment');
+            final = {
+              outcome: 'commented',
+              term,
+              noteId: selected.noteId,
+              noteTitle: prepared.note.title,
+              text: displayText,
+              termsTried: tried,
+            };
+          }
+          break;
+        }
+        result = final ?? { outcome: 'no_strong_candidate', termsTried: Math.min(terms.length, maxTerms) };
+      }
     } catch (err) {
       log.warn(`[comment-scheduler] 任务异常 account=${accountId}：${(err as Error).message}`);
       result = { outcome: 'post_failed', termsTried: 0, reason: (err as Error).message };
-    } finally {
-      this.deps.onTakeoverEnd(accountId);
     }
 
     try {
       await this.deps.postResultCard?.(accountId, outcomeToReceipt(result));
     } catch (err) {
       log.warn(`[comment-scheduler] 结果卡片发送失败 account=${accountId}：${(err as Error).message}`);
+    }
+  }
+
+  /** 人工评论沿用“不消耗自动评论配额”语义，但标记只覆盖真 commit，不再整段停止/恢复浏览。 */
+  private async withManualCommitMarker<T>(
+    accountId: string,
+    priority: EdgeTaskPriority,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    if (priority !== 'human') return work();
+    this.deps.onTakeoverStart?.(accountId);
+    try {
+      return await work();
+    } finally {
+      this.deps.onTakeoverEnd?.(accountId);
     }
   }
 }

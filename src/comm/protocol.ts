@@ -55,6 +55,11 @@ export type MessageType =
   | 'captcha.assist.snapshot' // edge → cloud：返回验证码现场截图和坐标映射
   | 'captcha.assist.click' // cloud → edge：把人工点位派发到原浏览器会话
   | 'captcha.assist.click_result' // edge → cloud：返回点击后的 fresh 复检结果
+  // —— Edge 页面写任务租约（同一 edge/CDP 单写）——
+  | 'edge.task.acquire' // cloud → edge：申请任务级执行权；edge quiesced 后才确认
+  | 'edge.task.acquired' // edge → cloud：执行权已授予，浏览已到命令安全边界
+  | 'edge.task.release' // cloud → edge：释放任务级执行权
+  | 'edge.task.released' // edge → cloud：释放已收敛
   // —— 发布编排（Publish Agent 驱动）——
   | 'publish.approval_request' // edge → cloud：请求发送发布审批卡片
   | 'publish.request' // cloud → edge：请求在浏览器中发布一篇帖子（v1 整页路径，地基阶段并行保留）
@@ -351,6 +356,8 @@ export interface BrowseScrollPayload {
 }
 
 export interface NoteOpenPayload {
+  /** 独占评论任务的租约所有者；普通浏览省略。 */
+  taskId?: string;
   noteId?: string;
   index?: number;
   reason?: string;
@@ -372,6 +379,8 @@ export interface NoteClosePayload {
 
 /** 让边缘执行一次搜索（cloud → edge）。 */
 export interface SearchExecutePayload {
+  /** 独占评论/维护任务的租约所有者；普通浏览省略。 */
+  taskId?: string;
   /** 搜索关键词 */
   keyword: string;
   /** 关键词来源策略（观测用） */
@@ -627,6 +636,8 @@ export interface CaptchaAssistClickPointPayload {
 }
 
 export interface CaptchaAssistClickPayload {
+  /** 验证码人工恢复的 system_recovery 任务租约。 */
+  taskId?: string;
   incidentId: string;
   snapshotId: string;
   points: CaptchaAssistClickPointPayload[];
@@ -709,6 +720,8 @@ export interface PublishCommandParams {
  * 注意：此 `recordId`（数字，PublishLogStore.insert 返回）与 AC-PUB 审批文件的 `requestId`（字符串）是两个不同的键。
  */
 export interface PublishCommandPayload {
+  /** 当前 edge 页面写任务租约；发布完整序列逐条携同一值。 */
+  taskId: string;
   /** 发布记录主键 */
   recordId: number;
   /** 指令在本次发布序列中的序号（从 0 递增） */
@@ -793,6 +806,8 @@ export interface InteractionFollowPayload {
 }
 
 export interface InteractionCommentPayload {
+  /** 评论 commit 任务租约。 */
+  taskId?: string;
   noteId: string;
   /** 评论正文（云端已撰写 / 去AI味 / 人审通过后下发）。边缘**逐字符拟人输入**这一段。 */
   text: string;
@@ -808,6 +823,8 @@ export interface InteractionCommentPayload {
 }
 
 export interface GroupJoinPayload {
+  /** 加群任务租约。 */
+  taskId?: string;
   /** Facebook group canonical/full URL. Edge validates host/path before navigation. */
   groupUrl: string;
   /**
@@ -849,6 +866,8 @@ export interface NoteBrowseImagesPayload {
 }
 
 export interface NoteScrollCommentsPayload {
+  /** 评论 prepare/commit 任务租约。 */
+  taskId?: string;
   noteId: string;
   /** 滚动评论区次数（由 Cloud 控制） */
   count?: number;
@@ -986,6 +1005,7 @@ export interface NotificationDetectedPayload {
 
 /** cloud → edge：导航到通知首页（仅导航；落地后边缘上报 notification.home 各类未读）。 */
 export interface NotificationOpenPayload {
+  taskId?: string;
   thinkMs?: number;
 }
 
@@ -1016,6 +1036,7 @@ export interface NotificationHomePayload {
 
 /** cloud → edge：进「评论和@」+ 滚动加载 + 抽取（→ notification.items）。 */
 export interface NotificationBrowseCommentsPayload {
+  taskId?: string;
   thinkMs?: number;
   /** 最多滚动加载次数（由 Cloud 控制） */
   scrollMax?: number;
@@ -1023,22 +1044,59 @@ export interface NotificationBrowseCommentsPayload {
 
 /** cloud → edge：进「赞和收藏」（v1 看一眼清未读，不抽取）。 */
 export interface NotificationBrowseLikesPayload {
+  taskId?: string;
   thinkMs?: number;
 }
 
 /** cloud → edge：进「新增关注」（v1 看一眼清未读，不抽取）。 */
 export interface NotificationBrowseFollowsPayload {
+  taskId?: string;
   thinkMs?: number;
 }
 
 /** cloud → edge：返回通知首页（落地后重报 notification.home）。 */
 export interface NotificationBackHomePayload {
+  taskId?: string;
   thinkMs?: number;
 }
 
 export interface ErrorPayload {
   code: string;
   message: string;
+}
+
+export type EdgeTaskKind =
+  | 'publish'
+  | 'comment_prepare'
+  | 'comment_commit'
+  | 'notification'
+  | 'group_join'
+  | 'system_recovery';
+
+export type EdgeTaskPriority = 'system_recovery' | 'human' | 'automatic';
+
+export interface EdgeTaskAcquirePayload {
+  taskId: string;
+  kind: EdgeTaskKind;
+  priority: EdgeTaskPriority;
+  /** 空闲租约时限；匹配业务命令可刷新，edge 仍受绝对上限保护。 */
+  leaseMs: number;
+}
+
+export interface EdgeTaskAcquiredPayload {
+  taskId: string;
+  kind: EdgeTaskKind;
+  cancelledBrowseCommands: number;
+}
+
+export interface EdgeTaskReleasePayload {
+  taskId: string;
+  outcome?: 'completed' | 'failed' | 'cancelled';
+}
+
+export interface EdgeTaskReleasedPayload {
+  taskId: string;
+  reason: 'released' | 'expired' | 'duplicate' | 'not_owner';
 }
 
 /** payload 类型映射（便于类型安全地构造/解析） */
@@ -1075,6 +1133,10 @@ export interface PayloadMap {
   'captcha.assist.snapshot': CaptchaAssistSnapshotPayload;
   'captcha.assist.click': CaptchaAssistClickPayload;
   'captcha.assist.click_result': CaptchaAssistClickResultPayload;
+  'edge.task.acquire': EdgeTaskAcquirePayload;
+  'edge.task.acquired': EdgeTaskAcquiredPayload;
+  'edge.task.release': EdgeTaskReleasePayload;
+  'edge.task.released': EdgeTaskReleasedPayload;
   'publish.request': PublishRequestPayload;
   'publish.result': PublishResultPayload;
   'publish.command': PublishCommandPayload;

@@ -65,6 +65,9 @@ function baseDeps(over: Partial<CommentSchedulerDeps> = {}): CommentSchedulerDep
   return {
     resolveConnection: () => ({ bus, edgeId: 'e1' }),
     pusher: fakeEdge(bus),
+    edgeTaskLeases: {
+      withLease: async (request, work) => work({ taskId: `task-${request.kind}`, edgeId: request.edgeId, kind: request.kind, priority: request.priority }),
+    },
     getSoul: () => soul,
     selectCurated: async () => [{ title: 'RAG 工程实战' }],
     llmFor: () => fakeLlm(),
@@ -119,9 +122,10 @@ describe('CommentScheduler.triggerManual', () => {
     assert.equal(takeovers, 0, '未绑人设绝不接管边端');
   });
 
-  it('触发成功 → ok:true / level:success；happy path 跑通：接管/恢复成对 + 结果卡片 success', async () => {
+  it('触发成功 → ok:true / level:success；prepare/commit 分段租约 + 结果卡片 success', async () => {
     const bus = new EventBus();
-    const takeovers: string[] = [];
+    const leaseKinds: string[] = [];
+    let activeLeases = 0;
     const recorded: string[] = [];
     const cardDone = deferred<{ ok: boolean; level: string; message: string }>();
     const s = new CommentScheduler(
@@ -129,8 +133,21 @@ describe('CommentScheduler.triggerManual', () => {
         resolveConnection: () => ({ bus, edgeId: 'e1' }),
         pusher: fakeEdge(bus),
         dedupFor: () => ({ hasInteracted: async () => false, recordInteraction: async (n) => { recorded.push(n); } }),
-        onTakeoverStart: () => takeovers.push('start'),
-        onTakeoverEnd: () => takeovers.push('end'),
+        edgeTaskLeases: {
+          withLease: async (request, work) => {
+            leaseKinds.push(request.kind);
+            activeLeases++;
+            try {
+              return await work({ taskId: `task-${request.kind}-${leaseKinds.length}`, edgeId: request.edgeId, kind: request.kind, priority: request.priority });
+            } finally {
+              activeLeases--;
+            }
+          },
+        },
+        approval: {
+          request: async () => { assert.equal(activeLeases, 0, '发人审卡前 prepare 已释放'); },
+          isApproved: async () => { assert.equal(activeLeases, 0, '等待/读取人审期间不持 edge 租约'); return true; },
+        },
         postResultCard: (_a, r) => { cardDone.resolve({ ok: r.ok, level: r.level, message: r.message }); },
       }),
     );
@@ -139,7 +156,7 @@ describe('CommentScheduler.triggerManual', () => {
     assert.equal(receipt.level, 'success');
 
     const card = await cardDone.promise;
-    assert.deepEqual(takeovers, ['start', 'end'], '接管→恢复成对');
+    assert.deepEqual(leaseKinds, ['comment_prepare', 'comment_prepare', 'comment_commit']);
     assert.deepEqual(recorded, ['n1'], '发布成功后记一笔去重');
     assert.equal(card.ok, true);
     assert.equal(card.level, 'success', '评了 → 结果卡片绿');

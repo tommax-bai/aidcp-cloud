@@ -26,6 +26,7 @@ function makeSequencer(responder: Responder, timeoutMs = 50) {
 }
 
 const input = (over: Partial<PublishSequenceInput> = {}): PublishSequenceInput => ({
+  taskId: 'task-publish-1',
   recordId: 1,
   title: 'T',
   content: 'C',

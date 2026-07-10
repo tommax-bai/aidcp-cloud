@@ -200,6 +200,8 @@ export class EdgeCloudServer implements EdgePusher {
     const bypassPause =
       env.type === 'session.end' ||
       env.type === 'ui.snapshot' ||
+      env.type === 'edge.task.acquire' ||
+      env.type === 'edge.task.release' ||
       env.type === 'captcha.assist.capture' ||
       env.type === 'captcha.assist.click';
     let sent = 0;
