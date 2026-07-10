@@ -18,6 +18,28 @@ import type { EdgePusher } from './edge-steps.js';
 export const FACEBOOK_STEP_TIMEOUT_MS = 28_000;
 const DEFAULT_MAX_CANDIDATES = 8;
 
+/**
+ * Facebook 评论提交步的**长度感知超时**（change facebook-join-comment-resilience，P0-1）。
+ * 边端提交 = 逐字拟人输入（text.length × median ~110ms）+ Enter + 等待（waitAfterSubmit 4s）+ reload +
+ * 等待（waitAfterReload 5s）+ own-identity 收窄校验。长评论在慢网下整段耗时会超过固定 28s 步超时 →
+ * 云端误判 `timeout` → 调度器 `reallySubmitted` 为假 → 不打去重标记 → 下一轮同帖再发一条**真评论**
+ *（平台可见重复）。故提交步超时按文案字符数放大；search/open 仍用固定 28s。上限对齐加群步（90s）防
+ * 边端真挂时无界等待——超上限仍诚实 `timeout`，绝不假成功。
+ */
+export const FACEBOOK_COMMENT_SUBMIT_BASE_MS = 18_000;
+export const FACEBOOK_COMMENT_SUBMIT_PER_CHAR_MS = 220;
+export const FACEBOOK_COMMENT_SUBMIT_MAX_MS = 90_000;
+
+/**
+ * 按评论字符数算提交步超时：`clamp(base + perChar×len, 传入步超时, 上限)`。
+ * len 按 code point 计（对齐边端 `Array.from` 逐字），单调不减；短评论回落到传入步超时（≥28s）。
+ */
+export function facebookCommentSubmitTimeoutMs(text: string, stepTimeoutMs: number): number {
+  const len = Array.from(text ?? '').length;
+  const derived = FACEBOOK_COMMENT_SUBMIT_BASE_MS + FACEBOOK_COMMENT_SUBMIT_PER_CHAR_MS * len;
+  return Math.min(FACEBOOK_COMMENT_SUBMIT_MAX_MS, Math.max(stepTimeoutMs, derived));
+}
+
 export interface FacebookEdgeStepsDeps {
   /** 该连接的私有事件总线（handler.ts 把边端上报 emit 到这里）。 */
   bus: EventBus;
@@ -190,6 +212,9 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
     },
 
     async submitComment(permalink, text, groupChatCode) {
+      // 长度感知超时（P0-1）：长评论逐字输入+提交后 reload/校验整段耗时可超固定 28s；用文案长度放大提交步超时，
+      // 让慢但成功的提交等到真实回执（ok / verification_ambiguous，两者都会打去重标记），杜绝「误判 timeout → 再发一条」。
+      const submitTimeout = facebookCommentSubmitTimeoutMs(text, timeout);
       const outcome = await sendAndRace<{ ok: boolean; reason?: string }>(
         deps.bus,
         [
@@ -202,7 +227,7 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
             },
           },
         ],
-        timeout,
+        submitTimeout,
         () =>
           push(
             makeEnvelope('interaction.comment', randomUUID(), Date.now(), {

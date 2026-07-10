@@ -14,8 +14,8 @@ import {
   FacebookGroupMembershipStore,
   FacebookGroupTargetStore,
 } from './facebook-group-store.js';
-import { buildFacebookGroupJoinEdgeSteps } from './facebook-group-join-edge-steps.js';
-import type { EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
+import { buildFacebookGroupJoinEdgeSteps, type FacebookGroupJoinStepResult } from './facebook-group-join-edge-steps.js';
+import { EdgeTaskLeaseError, type EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
 
 export interface FacebookGroupJoinSchedulerDeps {
   resolveConnection: (accountId: string) => { bus: EventBus; edgeId?: string } | null;
@@ -83,8 +83,25 @@ function isAccountTransient(reason: string): boolean {
   return reason === 'login_required' || reason === 'blocked_by_captcha';
 }
 
+// 租约瞬态短冷却（change facebook-join-comment-resilience，P0-3）：边端浏览器忙/离线/掉线是快恢复的基础设施瞬态，
+// 用远短于常规重试退避（默认 6h）的冷却，让被占的群很快能再试；仍诚实计冷却 + 审计，绝不因此假成功。
+const LEASE_RETRY_BACKOFF_MS = 5 * 60_000;
+
+/** 把 withLease 抛出的租约异常映射为可重试的 lease_unavailable reason（带 code / 摘要供审计）。 */
+function leaseFailureReason(err: unknown): string {
+  if (err instanceof EdgeTaskLeaseError) return `lease_unavailable:${err.code}`;
+  return `lease_unavailable:${err instanceof Error ? err.message.slice(0, 60) : String(err)}`;
+}
+
 function isRetryableEdgeFailure(reason: string): boolean {
-  return isAccountTransient(reason) || reason === 'timeout' || reason === 'no_observation' || reason === 'no_post_observation' || reason.startsWith('nav_error');
+  return (
+    isAccountTransient(reason) ||
+    reason === 'timeout' ||
+    reason === 'no_observation' ||
+    reason === 'no_post_observation' ||
+    reason.startsWith('nav_error') ||
+    reason.startsWith('lease_unavailable')
+  );
 }
 
 export class FacebookGroupJoinScheduler {
@@ -177,10 +194,20 @@ export class FacebookGroupJoinScheduler {
     await this.audit({ accountId, groupUrl: assigned.groupUrl, outcome: 'claimed', phase: 'scheduler', shadow: false });
     await this.deps.memberships.markJoining(accountId, assigned.groupUrl);
 
-    const observed = await this.deps.edgeTaskLeases.withLease(
-      { edgeId, kind: 'group_join', priority: 'automatic', leaseMs: 3 * 60_000 },
-      (lease) => this.steps(bus, edgeId, lease.taskId).observeGroup(assigned.groupUrl),
-    );
+    // P0-3：租约获取/掉线异常兜底。withLease 可抛 EdgeTaskLeaseError（edge_offline / acquire_timeout / edge_disconnected）；
+    // 不接住会绕过 markEdgeFailure，把成员账本留在 'joining'（cooldown 为空）→ 每 60s 心跳又把该行捞起重试、attempts++、
+    // 几次即撞上限被永久标 'failed'（真机热循环）。接住归为可重试瞬态 lease_unavailable：给短冷却 + 审计，绝不假成功。
+    let observed: FacebookGroupJoinStepResult;
+    try {
+      observed = await this.deps.edgeTaskLeases.withLease(
+        { edgeId, kind: 'group_join', priority: 'automatic', leaseMs: 3 * 60_000 },
+        (lease) => this.steps(bus, edgeId, lease.taskId).observeGroup(assigned.groupUrl),
+      );
+    } catch (err) {
+      const reason = leaseFailureReason(err);
+      await this.markEdgeFailure(accountId, assigned, reason);
+      return { triggered: true, groupUrl: assigned.groupUrl, outcome: reason };
+    }
     if (!observed.observation) {
       await this.markEdgeFailure(accountId, assigned, observed.reason ?? 'no_observation');
       return { triggered: true, groupUrl: assigned.groupUrl, outcome: observed.reason ?? 'no_observation' };
@@ -189,11 +216,18 @@ export class FacebookGroupJoinScheduler {
     const preHandled = await this.handlePreVerdict(accountId, assigned, pre, observed.observation);
     if (preHandled) return preHandled;
 
-    // 预判 LLM 已在租约外完成；真实点击重新申请任务租约，绝不长占浏览器。
-    const clicked = await this.deps.edgeTaskLeases.withLease(
-      { edgeId, kind: 'group_join', priority: 'automatic', leaseMs: 3 * 60_000 },
-      (lease) => this.steps(bus, edgeId, lease.taskId).clickJoin(assigned.groupUrl),
-    );
+    // 预判 LLM 已在租约外完成；真实点击重新申请任务租约，绝不长占浏览器。P0-3：同样兜住租约异常（此刻边端可能刚被别的任务抢占）。
+    let clicked: FacebookGroupJoinStepResult;
+    try {
+      clicked = await this.deps.edgeTaskLeases.withLease(
+        { edgeId, kind: 'group_join', priority: 'automatic', leaseMs: 3 * 60_000 },
+        (lease) => this.steps(bus, edgeId, lease.taskId).clickJoin(assigned.groupUrl),
+      );
+    } catch (err) {
+      const reason = leaseFailureReason(err);
+      await this.markEdgeFailure(accountId, assigned, reason);
+      return { triggered: true, groupUrl: assigned.groupUrl, outcome: reason };
+    }
     const postObservation = clicked.postObservation ?? clicked.observation;
     if (!postObservation) {
       await this.markEdgeFailure(accountId, assigned, clicked.reason ?? 'no_post_observation');
@@ -319,9 +353,13 @@ export class FacebookGroupJoinScheduler {
       if (isAccountTransient(reason)) {
         await this.deps.pauseAccount?.(accountId, `facebook_group_join:${reason}`);
       }
+      // 租约瞬态用短冷却快恢复（P0-3）；其余可重试失败仍用常规退避（默认 6h）。
+      const backoffMs = reason.startsWith('lease_unavailable')
+        ? LEASE_RETRY_BACKOFF_MS
+        : this.deps.retryBackoffMs ?? 6 * 60 * 60 * 1000;
       const retryStatus = await this.deps.memberships.markRetryableFailure(accountId, assigned.groupUrl, reason, {
         maxAttempts: this.deps.maxAttempts ?? 3,
-        backoffMs: this.deps.retryBackoffMs ?? 6 * 60 * 60 * 1000,
+        backoffMs,
       });
       await this.audit({
         accountId,

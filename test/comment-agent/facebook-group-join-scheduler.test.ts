@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { EventBus } from '../../src/event-bus/index.js';
 import { FacebookGroupJoinScheduler } from '../../src/comment-agent/facebook-group-join-scheduler.js';
+import { EdgeTaskLeaseError } from '../../src/comm/edge-task-lease-client.js';
 import type { FacebookGroupJoinAuditRow, FacebookGroupMembershipRow } from '../../src/comment-agent/facebook-group-store.js';
 
 interface Env {
@@ -38,6 +39,8 @@ function makeHarness(opts: {
   canUseSessionJoin?: boolean;
   llmVerdicts?: string[];
   edge?: (env: Env, bus: EventBus) => void;
+  /** 每次 withLease 抛出的租约异常（P0-3 测试用）；设置后 observe 步的 withLease 立即抛。 */
+  leaseError?: Error;
 } = {}) {
   const bus = new EventBus();
   const sent: Env[] = [];
@@ -46,6 +49,7 @@ function makeHarness(opts: {
   const targetCalls: string[] = [];
   const sessionBudgetCalls: string[] = [];
   const paused: string[] = [];
+  const retryBackoffs: number[] = [];
   let llmIndex = 0;
 
   const targets = {
@@ -78,8 +82,14 @@ function makeHarness(opts: {
     markOutcome: async (_accountId: string, groupUrl: string, status: string, reason: string) => {
       membershipCalls.push(`outcome:${groupUrl}:${status}:${reason}`);
     },
-    markRetryableFailure: async (_accountId: string, groupUrl: string, reason: string) => {
+    markRetryableFailure: async (
+      _accountId: string,
+      groupUrl: string,
+      reason: string,
+      options?: { maxAttempts?: number; backoffMs?: number },
+    ) => {
       membershipCalls.push(`retry:${groupUrl}:${reason}`);
+      if (typeof options?.backoffMs === 'number') retryBackoffs.push(options.backoffMs);
       return 'retryable' as const;
     },
   };
@@ -100,7 +110,10 @@ function makeHarness(opts: {
     resolveConnection: () => ({ bus, edgeId: 'edge-fb' }),
     pusher,
     edgeTaskLeases: {
-      withLease: async (request, work) => work({ taskId: `task-${request.kind}`, edgeId: request.edgeId, kind: request.kind, priority: request.priority }),
+      withLease: async (request, work) => {
+        if (opts.leaseError) throw opts.leaseError;
+        return work({ taskId: `task-${request.kind}`, edgeId: request.edgeId, kind: request.kind, priority: request.priority });
+      },
     },
     targets: targets as never,
     memberships: memberships as never,
@@ -123,7 +136,7 @@ function makeHarness(opts: {
     stepTimeoutMs: 20,
     logger: { warn: () => {}, log: () => {} },
   });
-  return { scheduler, sent, auditRows, membershipCalls, targetCalls, sessionBudgetCalls, paused, bus };
+  return { scheduler, sent, auditRows, membershipCalls, targetCalls, sessionBudgetCalls, paused, retryBackoffs, bus };
 }
 
 describe('FacebookGroupJoinScheduler', () => {
@@ -197,6 +210,26 @@ describe('FacebookGroupJoinScheduler', () => {
     assert.deepEqual(h.sent, []);
     assert.deepEqual(h.membershipCalls, []);
     assert.ok(h.auditRows.some((row) => row.outcome === 'quota_denied' && row.reason === 'session_budget'));
+  });
+
+  it('P0-3: 租约异常 → 诚实可重试瞬态 + 短冷却，不假成功、不静默永久失败、不热循环', async () => {
+    const h = makeHarness({
+      auto: true,
+      leaseError: new EdgeTaskLeaseError('acquire_timeout', 'edge busy'),
+    });
+    const r = await h.scheduler.triggerScheduled('acc-fb');
+    // 异常被接住（不外抛）、诚实回执 lease_unavailable（绝不假成功）。
+    assert.equal(r.triggered, true);
+    assert.equal(r.outcome, 'lease_unavailable:acquire_timeout');
+    // 连租约都没拿到 → 未下发任何 group.join。
+    assert.deepEqual(h.sent, []);
+    // 账本走可重试失败（非永久），且用短冷却（5min，非默认 6h）——堵住「status 停在 joining + cooldown 空 → 每 60s 心跳热循环」。
+    assert.ok(h.membershipCalls.includes(`retry:${GROUP}:lease_unavailable:acquire_timeout`));
+    assert.ok(!h.membershipCalls.some((c) => c.startsWith(`outcome:${GROUP}:`) && c.endsWith(':failed')));
+    assert.deepEqual(h.retryBackoffs, [5 * 60_000]);
+    // 审计记为可重试；租约瞬态不是 login/captcha → 不触发账号暂停。
+    assert.ok(h.auditRows.some((row) => row.reason === 'lease_unavailable:acquire_timeout:retryable'));
+    assert.deepEqual(h.paused, []);
   });
 
   it('real: instant pre-click + joined post-click 写 joined', async () => {

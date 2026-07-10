@@ -2,7 +2,14 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { EventBus } from '../../src/event-bus/index.js';
-import { buildFacebookEdgeSteps } from '../../src/comment-agent/facebook-edge-steps.js';
+import {
+  buildFacebookEdgeSteps,
+  facebookCommentSubmitTimeoutMs,
+  FACEBOOK_STEP_TIMEOUT_MS,
+  FACEBOOK_COMMENT_SUBMIT_BASE_MS,
+  FACEBOOK_COMMENT_SUBMIT_PER_CHAR_MS,
+  FACEBOOK_COMMENT_SUBMIT_MAX_MS,
+} from '../../src/comment-agent/facebook-edge-steps.js';
 
 interface Env {
   type: string;
@@ -122,5 +129,28 @@ describe('buildFacebookEdgeSteps', () => {
     const r = await steps(bus, pusher).submitComment('https://fb.com/g/1/posts/2', '很喜欢');
     assert.equal(r.ok, false);
     assert.equal(r.reason, 'verification_ambiguous');
+  });
+});
+
+describe('facebookCommentSubmitTimeoutMs（P0-1 长度感知提交超时）', () => {
+  const STEP = FACEBOOK_STEP_TIMEOUT_MS;
+  it('短评论回落到传入步超时（≥28s 下限，绝不缩短）', () => {
+    assert.equal(facebookCommentSubmitTimeoutMs('hi', STEP), STEP);
+    assert.equal(facebookCommentSubmitTimeoutMs('', STEP), STEP);
+  });
+  it('长评论按字符数放大、单调不减（让慢但成功的提交等到真回执→打去重、不重复真发）', () => {
+    const t100 = facebookCommentSubmitTimeoutMs('a'.repeat(100), STEP);
+    const t200 = facebookCommentSubmitTimeoutMs('a'.repeat(200), STEP);
+    assert.ok(t200 > t100);
+    assert.equal(t200, FACEBOOK_COMMENT_SUBMIT_BASE_MS + FACEBOOK_COMMENT_SUBMIT_PER_CHAR_MS * 200);
+  });
+  it('超长评论 clamp 到上限（防边端真挂时无界等待，超上限仍诚实 timeout）', () => {
+    assert.equal(facebookCommentSubmitTimeoutMs('a'.repeat(5000), STEP), FACEBOOK_COMMENT_SUBMIT_MAX_MS);
+  });
+  it('多字节按 code point 计（对齐边端 Array.from 逐字）', () => {
+    assert.equal(
+      facebookCommentSubmitTimeoutMs('中'.repeat(100), STEP),
+      FACEBOOK_COMMENT_SUBMIT_BASE_MS + FACEBOOK_COMMENT_SUBMIT_PER_CHAR_MS * 100,
+    );
   });
 });
