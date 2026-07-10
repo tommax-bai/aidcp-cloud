@@ -68,6 +68,7 @@ export type MessageType =
   | 'publish.command.result' // edge → cloud：回传单条发布指令的执行结果
   // —— 角色驱动指令（cloud → edge，RoleDispatcher 驱动）——
   | 'page.scroll'          // 页面滚动
+  | 'feed.refresh'         // 主 feed 深度到阈值后点右下「刷新」回顶换新批（cloud → edge）
   | 'interaction.like'     // 点赞
   | 'interaction.collect'  // 收藏
   | 'interaction.follow'   // 关注
@@ -784,6 +785,12 @@ export interface PageScrollPayload {
   dwellMs?: number;
 }
 
+export interface FeedRefreshPayload {
+  reason?: string;  // feed_refresh
+  /** 点击「刷新」前犹豫时间中心值（毫秒，可选，复用 action 档节奏） */
+  thinkMs?: number;
+}
+
 export interface InteractionLikePayload {
   noteId: string;
   reason?: string;
@@ -1143,6 +1150,7 @@ export interface PayloadMap {
   'publish.command.result': PublishCommandResultPayload;
   // 角色驱动指令
   'page.scroll': PageScrollPayload;
+  'feed.refresh': FeedRefreshPayload;
   'interaction.like': InteractionLikePayload;
   'interaction.collect': InteractionCollectPayload;
   'interaction.follow': InteractionFollowPayload;

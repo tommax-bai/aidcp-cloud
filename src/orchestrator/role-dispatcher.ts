@@ -258,7 +258,7 @@ export interface RoleDispatcherOptions {
 }
 
 export interface EdgeCommand {
-  action: 'scroll' | 'open_note' | 'close_note' | 'like' | 'collect' | 'follow' | 'comment' | 'comment_like' | 'search' | 'back' | 'browse_images' | 'scroll_comments' | 'profile_open' | 'open_notifications' | 'browse_notification_comments' | 'browse_notification_likes' | 'browse_notification_follows' | 'notification_back_home' | 'session.end';
+  action: 'scroll' | 'refresh' | 'open_note' | 'close_note' | 'like' | 'collect' | 'follow' | 'comment' | 'comment_like' | 'search' | 'back' | 'browse_images' | 'scroll_comments' | 'profile_open' | 'open_notifications' | 'browse_notification_comments' | 'browse_notification_likes' | 'browse_notification_follows' | 'notification_back_home' | 'session.end';
   params?: Record<string, unknown>;
   reason?: string;
 }
@@ -1400,6 +1400,12 @@ export class RoleDispatcher {
         );
       }),
 
+      // feed 深度到阈值 → 点右下「刷新」回顶换新批（change feed-refresh-on-depth）。
+      // 复用 action 档节奏（thinkMs 点前犹豫）；经 sendCommand 统一出口，软暂停期自动被抑制。
+      this.eventBus.on('feed.refresh.needed', () => {
+        this.sendCommand({ action: 'refresh', reason: 'feed_refresh', params: { thinkMs: this.thinkNow() } });
+      }),
+
       this.eventBus.on('search.scrolled', () => {
         this.sendCommand({ action: 'scroll', reason: 'search_scroll' });
       }),
@@ -1659,6 +1665,9 @@ export class RoleDispatcher {
             .map((c) => c.noteId)
             .filter((id): id is string => typeof id === 'string' && id.length > 0);
           const newCount = this.sessionContext.feedBatchNewCount(noteIds);
+          // feed 深度累计（change feed-refresh-on-depth）：累加本批新卡数，达阈值时 FeedScroller 改发刷新。
+          // 只在 feed 来源累加（搜索批不计），复用已算好的去重增量。
+          this.sessionContext.addFeedCardsBrowsed(newCount);
           this.pendingFeedFloorMs = computeFeedFloorMs({
             newCount,
             status: this.getRiskStatus(),

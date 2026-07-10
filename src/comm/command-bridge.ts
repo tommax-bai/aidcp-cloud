@@ -22,6 +22,9 @@ export function edgeCommandToEnvelope(command: EdgeCommand): Envelope {
     case 'scroll':
       // feed-scroll-card-floor：透传 params（如 dwellMs）；旧行为只带 reason 会丢弃 params。
       return createEnvelope('page.scroll', { reason: command.reason, ...command.params });
+    case 'refresh':
+      // feed 深度到阈值改点右下「刷新」回顶换新批（change feed-refresh-on-depth）；透传 thinkMs 等 params。
+      return createEnvelope('feed.refresh', { reason: command.reason, ...command.params });
     case 'open_note':
       return createEnvelope('note.open', command.params ?? {});
     case 'close_note':

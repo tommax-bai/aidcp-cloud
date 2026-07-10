@@ -17,6 +17,9 @@ export class SessionContext {
   private _sourcePageType: 'feed' | 'search' = 'feed';
   private _currentNoteId: string | null = null;
   private _consecutiveScrolls: number = 0;
+  /** 本会话累计已浏览的不重复 feed 卡数（change feed-refresh-on-depth）：达阈值改点右下「刷新」回顶换新批。
+   *  per-session（reset 归零，像 _consecutiveScrolls；不像 lastFeedNoteIds 跨轮保持）。 */
+  private _feedCardsBrowsed: number = 0;
   private _visitedNoteIds: Set<string> = new Set();
 
   /** 有界"近期已评估"卡片集合（按 recency，最多保留最近 N 个 noteId，超出淘汰最旧）。 */
@@ -67,6 +70,11 @@ export class SessionContext {
 
   incrementScrolls(): number { return ++this._consecutiveScrolls; }
   resetScrolls(): void { this._consecutiveScrolls = 0; }
+
+  /** 本会话累计已浏览 feed 卡数（change feed-refresh-on-depth）。 */
+  get feedCardsBrowsed(): number { return this._feedCardsBrowsed; }
+  addFeedCardsBrowsed(n: number): void { if (n > 0) this._feedCardsBrowsed += n; }
+  resetFeedCardsBrowsed(): void { this._feedCardsBrowsed = 0; }
 
   markVisited(noteId: string): void { this._visitedNoteIds.add(noteId); }
   isVisited(noteId: string): boolean { return this._visitedNoteIds.has(noteId); }
@@ -176,6 +184,7 @@ export class SessionContext {
     this._sourcePageType = 'feed';
     this._currentNoteId = null;
     this._consecutiveScrolls = 0;
+    this._feedCardsBrowsed = 0; // per-session feed 深度预算，重连即重置（change feed-refresh-on-depth）
     // 通知巡视瞬时态 + 暂停开关必清（断连/重连/结束后不残留 active/暂停，否则永久冻结浏览）
     this._excursion = SessionContext.freshExcursion();
     this._browseSuspended = false;

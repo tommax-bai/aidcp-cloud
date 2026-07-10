@@ -160,6 +160,14 @@ export interface FeedScrolledPayload {
   ts: number;
 }
 
+/** feed 浏览深度到阈值 → 改点右下「刷新」回顶换新批（change feed-refresh-on-depth）。
+ *  内部角色事件，非协议消息；由 FeedScroller 发、RoleDispatcher 翻译成 feed.refresh 命令。 */
+export interface FeedRefreshNeededPayload {
+  cardsBrowsed: number;
+  currentPageType: 'feed';
+  ts: number;
+}
+
 export interface SearchScrolledPayload {
   pageType: 'search';
   scrollCount: number;
@@ -395,6 +403,7 @@ export interface FeedEnteredPayload {
 // 角色事件映射
 export interface RoleEventMap {
   'feed.scrolled': FeedScrolledPayload;
+  'feed.refresh.needed': FeedRefreshNeededPayload;
   'search.scrolled': SearchScrolledPayload;
   'content.valuable': ContentValuablePayload;
   'content.no_valuable': ContentNoValuablePayload;
