@@ -50,13 +50,33 @@ function hasAny(text: string, needles: string[]): boolean {
   return needles.some((n) => text.includes(n));
 }
 
+// 成员/「已成为成员」多语词表（change facebook-join-comment-resilience P0-2；与边缘 MEMBER_CTA_LABELS /
+// MEMBER_MEMBERSHIP_PHRASES 同源。edge / cloud 分离仓库故为第二副本——漂移守卫测试留 P1-6，勿静默分叉）。
+const JUDGE_MEMBER_LABELS = [
+  'joined', 'leave group', '已加入', '退出小组', '退出群组', '退出社团', 'đã tham gia', 'rời nhóm',
+  'salir del grupo', 'keluar dari grup', 'quitter le groupe', 'gruppe verlassen', 'ออกจากกลุ่ม', '已是成员', '你已加入',
+];
+const JUDGE_MEMBER_PHRASES = [
+  'you are now a member', 'member of this group', '已是成员', '你已加入', 'ahora eres miembro', 'bạn đã là thành viên',
+];
+
+/** NFKC 归一 + 收敛空白 + 小写（与边缘 normLabel 对齐）。 */
+function normJudge(s: string | null | undefined): string {
+  return String(s ?? '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/**
+ * 是否已是成员（多语 contains，非精确 ===，P0-2）。旧 EN/ZH 精确实现对非英中群的本地语成员标签漏判 → 落到
+ * hasJoinCta 的子串误判为 instant_join（如「đã tham gia」含「tham gia」）。member 词表须先于 hasJoinCta 判（本文件
+ * preClickDeterministic / postClickDeterministic 均已如此），此处补齐多语识别使短路真正生效。仍须正向命中，绝不放宽。
+ */
 function hasMemberSignal(obs: FacebookGroupJoinObservation): boolean {
-  const cta = (obs.mainCtaText ?? '').trim().toLowerCase();
-  const aria = (obs.mainCtaAria ?? '').trim().toLowerCase();
-  if (['joined', 'leave group', '已加入', '退出小组'].some((s) => cta === s || aria === s)) return true;
+  const hit = (s: string): boolean => s.length > 0 && JUDGE_MEMBER_LABELS.some((k) => s.includes(k));
+  if (hit(normJudge(obs.mainCtaText)) || hit(normJudge(obs.mainCtaAria))) return true;
   return (obs.membershipSignals ?? []).some((signal) => {
-    const s = signal.toLowerCase();
-    return hasAny(s, ['you are now a member', 'member of this group', '已是成员', '你已加入']);
+    const s = normJudge(signal);
+    if (!s) return false;
+    return JUDGE_MEMBER_PHRASES.some((n) => s.includes(n)) || JUDGE_MEMBER_LABELS.some((k) => s.includes(k));
   });
 }
 

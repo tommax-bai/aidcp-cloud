@@ -64,3 +64,17 @@ test('FacebookGroupJoinJudge records audit rows without affecting verdict', asyn
   assert.equal(rows[0].outcome, 'joined');
   assert.equal(rows[0].verdict, 'joined');
 });
+
+test('P0-2: 非英中群本地语成员标签走确定性 already_member/joined，不问 LLM、不误判 instant_join', async () => {
+  let calls = 0;
+  const judge = new FacebookGroupJoinJudge({
+    llm: { complete: async () => { calls++; return '{}'; } },
+  });
+  // 越南语「Đã tham gia」(已加入) 含「tham gia」(加入) 子串——旧 EN/ZH 精确 hasMemberSignal 漏判 → 落 hasJoinCta 误判 instant_join。
+  const pre = await judge.evaluatePreClick({ mainCtaText: 'Đã tham gia' });
+  assert.equal(pre.verdict, 'already_member');
+  // 西语「Salir del grupo」(退出小组) = 已是成员：post-click 确定性判 joined。
+  const post = await judge.evaluatePostClick({ mainCtaText: 'Salir del grupo' });
+  assert.equal(post.verdict, 'joined');
+  assert.equal(calls, 0); // 全走确定性、未问模型
+});

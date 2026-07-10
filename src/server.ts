@@ -2261,7 +2261,9 @@ async function main(): Promise<void> {
       if (reason === 'permission_gated' || reason === 'nav_error' || reason.startsWith('nav_error')) {
         void facebookGroupMembershipStore.recordCoverageLeftSignal(accountId, groupUrl, reason, {
           requiredConfirmations: Math.max(1, Math.trunc(readEnvNumber('AIDCP_FB_GROUP_LEFT_CONFIRMATIONS', 3))),
-          demoteNow: reason === 'nav_error' || reason.startsWith('nav_error'),
+          // P0-4（change facebook-join-comment-resilience）：nav_error 是网络瞬态，不再即时驱逐——与 permission_gated 一样
+          // 要求达 requiredConfirmations 次确认才把已加入群降级为 left（left 不可复 claim，一次抖动即永久丢一个养熟的群）。
+          demoteNow: false,
         });
       }
     },
