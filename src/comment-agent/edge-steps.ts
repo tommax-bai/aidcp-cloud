@@ -89,6 +89,42 @@ function sendAndAwait<E>(
   });
 }
 
+/**
+ * 多事件竞态（happy-path 报文 vs 该步的诚实失败回执）：谁先命中用谁；超时 / 无送达 → null。
+ * 与 sendAndAwait 同语义，但可同时监听 page.cards.arrived 与 action.completed{action}——
+ * 让边端「未导航到结果页」的诚实回执被立刻消费（快速失败），而非干等满超时（消除 maxTerms×超时空转）。
+ * 与 facebook-edge-steps.sendAndRace 同款范式（change comment-search-nav-confirm）。
+ */
+function sendAndRace<T>(
+  bus: EventBus,
+  subscriptions: Array<{ event: 'page.cards.arrived' | 'note.detail.arrived' | 'action.completed'; match: (data: unknown) => T | undefined }>,
+  timeoutMs: number,
+  send: () => number,
+): Promise<T | null> {
+  return new Promise<T | null>((resolve) => {
+    let done = false;
+    const offs: Array<() => void> = [];
+    const finish = (v: T | null) => {
+      if (done) return;
+      done = true;
+      for (const off of offs) off();
+      clearTimeout(timer);
+      resolve(v);
+    };
+    for (const sub of subscriptions) {
+      offs.push(
+        bus.on(sub.event, (data) => {
+          const mapped = sub.match(data);
+          if (mapped !== undefined) finish(mapped);
+        }),
+      );
+    }
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    const sent = send();
+    if (sent <= 0) finish(null); // honest：无在线边端送达
+  });
+}
+
 interface PageCardsArrived {
   cards: Array<{ index?: number; title?: string; author?: string; likeCount?: number; collectCount?: number; noteId?: string }>;
 }
@@ -148,10 +184,27 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
 
   return {
     async searchAndHarvest(term: string): Promise<CommentCandidateCard[]> {
-      const arrived = await sendAndAwait<PageCardsArrived>(
+      // 竞速（change comment-search-nav-confirm）：page.cards.arrived（候选）vs
+      // action.completed{action:'search', ok:false}（边端诚实回失败，如未导航到结果页 not_on_search_page）。
+      // 谁先到用谁——边端诚实回执立即快速失败，不再干等满超时（消除多搜索词各等一遍的空转）。
+      const outcome = await sendAndRace<
+        { kind: 'cards'; cards: PageCardsArrived['cards'] } | { kind: 'fail'; reason: string }
+      >(
         bus,
-        'page.cards.arrived',
-        () => true,
+        [
+          {
+            event: 'page.cards.arrived',
+            match: (data) => ({ kind: 'cards', cards: (data as PageCardsArrived).cards ?? [] }),
+          },
+          {
+            event: 'action.completed',
+            match: (data) => {
+              const d = data as ActionCompleted;
+              if (d.action !== 'search' || d.ok) return undefined;
+              return { kind: 'fail', reason: d.reason ?? 'search_failed' };
+            },
+          },
+        ],
         timeout,
         () =>
           push(
@@ -164,12 +217,21 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
             }),
           ),
       );
-      if (!arrived) {
+      if (outcome === null) {
         log.warn(`[comment-edge] 搜索「${term}」无 page.cards（超时/边端离线）→ 空候选`);
         return [];
       }
+      if (outcome.kind === 'fail') {
+        // 边端在线、诚实回失败——独立真实结论，绝不冒充「离线」、绝不折叠成「无匹配笔记」（假归因红线）。
+        if (outcome.reason === 'not_on_search_page') {
+          log.warn(`[comment-edge] 搜索「${term}」未导航到结果页（nav 未确认，边端在线诚实回失败）→ 空候选`);
+        } else {
+          log.warn(`[comment-edge] 搜索「${term}」边端诚实回失败（${outcome.reason}）→ 空候选`);
+        }
+        return [];
+      }
       // 结果**顺序即原生排序序**（最多收藏）；只取带 noteId 的，封顶 maxCandidates。
-      return arrived.cards
+      return outcome.cards
         .filter((c) => c.noteId)
         .slice(0, maxCandidates)
         .map((c, i) => ({

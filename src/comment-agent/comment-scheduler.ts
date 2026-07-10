@@ -1110,7 +1110,9 @@ export class CommentScheduler {
               noteId: selected.noteId,
               noteTitle: selected.title,
               termsTried: tried,
-              reason: 'target unavailable during prepare',
+              // 真实原因（change comment-search-nav-confirm）：复检时目标已不在结果中——搜索页重排/翻走，
+              // 或复检那次搜索未导航到结果页。绝非「边端离线」。
+              reason: '复检时目标已不在搜索结果中（页面重排/未导航到结果页）',
             };
             break;
           }
@@ -1260,7 +1262,9 @@ export function outcomeToReceipt(r: CommentTaskResult): CommentResultReceipt {
     case 'compose_skipped':
       return { ok: false, level: 'warning', title: '按需评论未发出', message: `${selected}已选中，但撰写为空/未授权/超时，本次不发` };
     case 'read_failed':
-      return { ok: false, level: 'error', title: '按需评论失败', message: `${selected}已选中，但开笔记/读正文失败（边端超时或离线）` };
+      // 带真实原因（change comment-search-nav-confirm，对齐 post_failed / targetedOutcomeToReceipt）：
+      // 绝不一律硬编码「边端超时或离线」——边端在线的诚实失败绝不误报成离线（假归因红线）。
+      return { ok: false, level: 'error', title: '按需评论失败', message: `${selected}已选中，但开笔记/读正文失败${r.reason ? `（${r.reason}）` : ''}` };
     case 'post_failed':
       return { ok: false, level: 'error', title: '按需评论失败', message: `${selected}已选中，但发布未确认成功${r.reason ? `（${r.reason}）` : ''}` };
   }

@@ -281,6 +281,12 @@ describe('outcomeToReceipt（失败/未产出绝不染绿）', () => {
     assert.equal(outcomeToReceipt({ outcome: 'read_failed', noteId: 'n1', termsTried: 1 }).level, 'error');
     assert.equal(outcomeToReceipt({ outcome: 'post_failed', noteId: 'n1', termsTried: 1 }).level, 'error');
   });
+  // change comment-search-nav-confirm：read_failed 回执带真实 reason，绝不硬编码「边端超时或离线」（假归因红线）。
+  it('read_failed 回执带真实 reason、不冒充离线', () => {
+    const r = outcomeToReceipt({ outcome: 'read_failed', noteId: 'n1', noteTitle: 'X', termsTried: 1, reason: '复检时目标已不在搜索结果中（页面重排/未导航到结果页）' });
+    assert.match(r.message, /复检时目标已不在搜索结果中/, '应呈现真实原因');
+    assert.doesNotMatch(r.message, /边端超时或离线/, '绝不再硬编码「边端超时或离线」');
+  });
   it('未产出/失败一律 ok:false（不染绿）', () => {
     for (const o of ['no_terms', 'no_strong_candidate', 'compose_skipped', 'read_failed', 'post_failed'] as const) {
       assert.equal(outcomeToReceipt({ outcome: o, termsTried: 0 }).ok, false, `${o} 必须 ok:false`);

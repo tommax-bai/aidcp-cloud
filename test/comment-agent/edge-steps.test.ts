@@ -19,6 +19,7 @@ function makeEnv(
   opts: {
     offline?: boolean;
     silent?: boolean; // 收到命令但不回报（测超时）
+    searchFail?: { reason?: string }; // search.execute 回诚实失败 action.completed{search,ok:false}（未导航到结果页等）
     cards?: Array<{ title?: string; author?: string; collectCount?: number; noteId?: string }>;
     detail?: { title?: string; content?: string };
     comments?: Array<{ author?: string; text: string; likeCount?: number }>;
@@ -36,7 +37,11 @@ function makeEnv(
       if (opts.silent) return 1;
       // 同步模拟边端上报（订阅已先建立）。
       if (env.type === 'search.execute') {
-        bus.emit('page.cards.arrived', { cards: opts.cards ?? [], ts: Date.now() } as never);
+        if (opts.searchFail) {
+          bus.emit('action.completed', { action: 'search', ok: false, reason: opts.searchFail.reason, ts: Date.now() } as never);
+        } else {
+          bus.emit('page.cards.arrived', { cards: opts.cards ?? [], ts: Date.now() } as never);
+        }
       } else if (env.type === 'note.open') {
         const noteId = env.payload.noteId as string;
         bus.emit('note.detail.arrived', {
@@ -101,6 +106,19 @@ describe('buildEdgeCommentSteps', () => {
     const { pusher } = makeEnv(bus, { silent: true });
     const steps = buildEdgeCommentSteps({ bus, pusher, edgeId: 'e1', dedup: makeDedup(), stepTimeoutMs: 40 });
     assert.deepEqual(await steps.searchAndHarvest('x'), []);
+  });
+
+  // change comment-search-nav-confirm：边端诚实回 search ok:false（未导航到结果页）→ 消费回执快速空候选，
+  // 不干等满超时（消除 maxTerms×超时空转），且不冒充离线/无结果。
+  it('searchAndHarvest：边端诚实回 search ok:false（not_on_search_page）→ 快速空候选、不等超时', async () => {
+    const bus = new EventBus();
+    const { pusher } = makeEnv(bus, { searchFail: { reason: 'not_on_search_page' } });
+    const steps = buildEdgeCommentSteps({ bus, pusher, edgeId: 'e1', dedup: makeDedup(), stepTimeoutMs: 5000 });
+    const t0 = Date.now();
+    const cards = await steps.searchAndHarvest('x');
+    const elapsed = Date.now() - t0;
+    assert.deepEqual(cards, [], '诚实失败回执 → 空候选');
+    assert.ok(elapsed < 1000, `应消费诚实回执快速失败、不干等 5s 超时（实际 ${elapsed}ms）`);
   });
 
   it('filterUncommented：滤掉已评过的、index 重排', async () => {
