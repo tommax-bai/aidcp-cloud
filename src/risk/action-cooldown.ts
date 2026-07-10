@@ -27,19 +27,45 @@ export const COOLDOWN_MS: Readonly<Record<CooldownAction, number>> = {
   comment: 30 * 60_000,
 };
 
+export interface ActionCooldownGateOptions {
+  /**
+   * 进程启动时刻（ms，change account-nurture-discipline-spine §4.1）：重启冷启动静默期的起算点。
+   * 缺省 → 构造时刻。
+   */
+  startedAtMs?: number;
+  /**
+   * 重启冷启动静默期时长（ms）。0 = 关闭（历史行为，零回归）。
+   * 冷却记录为进程内内存态、重启即清零——若不设静默期，重启瞬间每类互动都「无历史 → 放行」，
+   * 一个账号可立刻把四类互动各打一发（burst），绕过本该有的最小间隔拟人节奏。静默窗内暂抑制该账号
+   * 本进程尚无成功记录的互动，窗口过即恢复正常冷却语义。只压 4 类互动，不拦浏览、不写风控终态。
+   */
+  restartQuietMs?: number;
+}
+
 export class ActionCooldownGate {
   /** account → (action → 上次真实成功的时间戳 ms)。 */
   private readonly lastByAccount = new Map<string, Map<CooldownAction, number>>();
+  private readonly startedAtMs: number;
+  private readonly restartQuietMs: number;
+
+  constructor(options: ActionCooldownGateOptions = {}) {
+    this.startedAtMs = options.startedAtMs ?? Date.now();
+    this.restartQuietMs = options.restartQuietMs ?? 0;
+  }
 
   /**
    * 该账号该动作是否已过冷却（可以下发）。
    * 无配置间隔的动作 → 放行；无历史记录（从未成功过）→ 放行。
+   * 重启冷启动静默期内（restartQuietMs>0 且尚在窗口）：该账号该动作本进程尚无成功记录 → 暂抑制（防重启 burst）。
    */
   canAct(accountId: string, action: CooldownAction, nowMs: number): boolean {
     const intervalMs = COOLDOWN_MS[action];
     if (intervalMs === undefined) return true; // 未配置冷却的动作不拦
     const lastTs = this.lastByAccount.get(accountId)?.get(action);
-    if (lastTs === undefined) return true; // 从未成功过 → 放行
+    if (lastTs === undefined) {
+      if (this.restartQuietMs > 0 && nowMs < this.startedAtMs + this.restartQuietMs) return false; // 静默期防 burst
+      return true; // 从未成功过 → 放行
+    }
     return nowMs - lastTs >= intervalMs;
   }
 
