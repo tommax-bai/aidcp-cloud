@@ -166,14 +166,6 @@ export function buildPacingSnapshot(
   }
 }
 
-/** 极薄会话默认块：仅供边缘自主动作与断连兜底，不含 read/pause/fatigue 系数。 */
-export interface PacingDefaults {
-  /** 全局节奏乘子（风控状态驱动） */
-  tempo: number;
-  /** 详情页最小停留下限区间 */
-  dwellFloorMs: { min: number; max: number };
-}
-
 /** 风控状态 → 全局节奏乘子 tempo（状态越差越慢）。 */
 export function tempoForStatus(status: RiskStatus): number {
   switch (status) {
@@ -269,14 +261,6 @@ export function computeFeedFloorMs(input: FeedFloorInput): number {
   const floor = floorForComputation('feed_card_read', input.pacing);
   const withTempo = floor.minMs * n * tempoForStatus(input.status) * fatigueMultiplier(input.progress);
   return Math.round(clamp(withTempo, 0, floor.maxMs));
-}
-
-/** 组装下发给 session.budget 的极薄默认块（仅兜底用）。 */
-export function buildPacingDefaults(status: RiskStatus): PacingDefaults {
-  return {
-    tempo: tempoForStatus(status),
-    dwellFloorMs: { ...DWELL_FLOOR_MS },
-  };
 }
 
 function clamp(value: number, min: number, max: number): number {

@@ -54,7 +54,7 @@ import type { EventBus } from '../event-bus/index.js';
 import { buildPublishApprovalCard } from '../feishu/cards.js';
 import type { FeishuMessenger } from '../feishu/messenger.js';
 import type { BotChatStore } from '../cache/bot-chat-store.js';
-import { RiskController, SessionBudget, buildPacingDefaults, buildPacingSnapshot } from '../risk/index.js';
+import { RiskController, SessionBudget, buildPacingSnapshot } from '../risk/index.js';
 import type { RiskAction, RiskStatus, PacingFloorProvider } from '../risk/index.js';
 import type { PacingSnapshotPayload } from './protocol.js';
 import type { AccountStateManager } from '../account-state.js';
@@ -434,8 +434,9 @@ export class DefaultMessageHandler implements MessageHandler {
     return makeEnvelope('session.budget', env.id, this.clock(), {
       ...budget.snapshot(),
       viewOnly: state.status === 'restricted' || state.status === 'frozen',
-      // 极薄节奏默认块（仅边缘自主动作 / 断连兜底用；内容相关时长随决策指令下发）
-      pacing: buildPacingDefaults(state.status),
+      // 注：曾在此挂极薄节奏默认块 pacing: buildPacingDefaults(...)，实为双死通道（边缘从不请求
+      // session.budget、也不消费该字段），已于 change pacing-fallback-hardening 移除；兜底默认唯一
+      // 下发路径为 welcome 快照，会话中途档位变化经 pacing.update 补推。
     });
   }
 

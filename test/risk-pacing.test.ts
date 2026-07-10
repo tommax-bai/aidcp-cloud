@@ -6,7 +6,6 @@ import {
   computeFeedFloorMs,
   tempoForStatus,
   fatigueMultiplier,
-  buildPacingDefaults,
   DWELL_FLOOR_MS,
   FEED_FLOOR,
   type PacingFloorProvider,
@@ -88,13 +87,6 @@ test('fatigueMultiplier：热身略慢、中段 1.0、后段放大', () => {
   assert.equal(fatigueMultiplier(0.4), 1.0); // 自然
   assert.ok(fatigueMultiplier(0.95) > 1.0); // 疲劳
   assert.ok(fatigueMultiplier(0.95) > fatigueMultiplier(0.75)); // 后段越走越慢
-});
-
-test('buildPacingDefaults：仅含 tempo 与 dwellFloorMs（不含内容系数）', () => {
-  const defaults = buildPacingDefaults('warned');
-  assert.equal(defaults.tempo, tempoForStatus('warned'));
-  assert.deepEqual(defaults.dwellFloorMs, { min: DWELL_FLOOR_MS.min, max: DWELL_FLOOR_MS.max });
-  assert.deepEqual(Object.keys(defaults).sort(), ['dwellFloorMs', 'tempo']);
 });
 
 // ======== feed-scroll-card-floor：按新卡数的翻页停留兜底 ========

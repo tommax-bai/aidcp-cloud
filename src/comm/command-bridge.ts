@@ -61,6 +61,9 @@ export function edgeCommandToEnvelope(command: EdgeCommand): Envelope {
       return createEnvelope('notification.back_home', command.params ?? {});
     case 'session.end':
       return createEnvelope('session.end', { reason: command.reason, ...command.params });
+    case 'pacing_update':
+      // 中途风控档位刷新（change pacing-fallback-hardening）：透传 { tempo }，边缘更新兜底节奏、不重置锚点。
+      return createEnvelope('pacing.update', command.params ?? {});
     default:
       throw new Error(`Unknown edge command action: ${(command as EdgeCommand).action}`);
   }

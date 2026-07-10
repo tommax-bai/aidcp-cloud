@@ -61,7 +61,7 @@ import { ExcursionResumer } from '../agents/excursion-resumer.js';
 import type { EdgeTaskLease, EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
 import type { BaseRole } from '../agents/base-role.js';
 import type { Soul } from '../soul/types.js';
-import { computeDwellMs, computeThinkMs, computeFeedFloorMs, type PacingFloorProvider } from '../risk/pacing.js';
+import { computeDwellMs, computeThinkMs, computeFeedFloorMs, tempoForStatus, type PacingFloorProvider } from '../risk/pacing.js';
 import { SearchFrequencyLimiter } from '../risk/search-frequency-limiter.js';
 import { InteractionGuard, isGuardedInteraction, type GuardAction } from '../risk/interaction-guard.js';
 import { ActionCooldownGate, type CooldownAction } from '../risk/action-cooldown.js';
@@ -258,7 +258,7 @@ export interface RoleDispatcherOptions {
 }
 
 export interface EdgeCommand {
-  action: 'scroll' | 'refresh' | 'open_note' | 'close_note' | 'like' | 'collect' | 'follow' | 'comment' | 'comment_like' | 'search' | 'back' | 'browse_images' | 'scroll_comments' | 'profile_open' | 'open_notifications' | 'browse_notification_comments' | 'browse_notification_likes' | 'browse_notification_follows' | 'notification_back_home' | 'session.end';
+  action: 'scroll' | 'refresh' | 'open_note' | 'close_note' | 'like' | 'collect' | 'follow' | 'comment' | 'comment_like' | 'search' | 'back' | 'browse_images' | 'scroll_comments' | 'profile_open' | 'open_notifications' | 'browse_notification_comments' | 'browse_notification_likes' | 'browse_notification_follows' | 'notification_back_home' | 'pacing_update' | 'session.end';
   params?: Record<string, unknown>;
   reason?: string;
 }
@@ -307,6 +307,8 @@ export class RoleDispatcher {
   private readonly rawSendCommand: (command: EdgeCommand) => void;
   private readonly clock: () => number;
   private readonly getRiskStatus: () => RiskStatus;
+  /** 上次已推送给边缘的 tempo 档位（去抖基线）；构造期初始化为握手同源值，仅档位实变时经 pacing.update 补推。 */
+  private lastPushedTempo = 1.0;
   private readonly pacingFloors?: PacingFloorProvider;
   private readonly canInteract: (action: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like') => boolean;
   private readonly canView: () => boolean;
@@ -420,6 +422,12 @@ export class RoleDispatcher {
     this.edgeTaskLeases = options.edgeTaskLeases;
     this.clock = options.clock ?? Date.now;
     this.getRiskStatus = options.getRiskStatus ?? (() => 'normal');
+    // 去抖基线 = 握手 welcome 快照同源的初始 tempo（读风控态、异常回落 1.0）：会话初不冗余补推，仅后续档位实变才发。
+    try {
+      this.lastPushedTempo = tempoForStatus(this.getRiskStatus());
+    } catch {
+      this.lastPushedTempo = 1.0;
+    }
     this.pacingFloors = options.pacingFloors;
     this.canInteract = options.canInteract ?? (() => true);
     this.canView = options.canView ?? (() => true);
@@ -574,7 +582,27 @@ export class RoleDispatcher {
    * 发命令的统一出口（软暂停闸）。巡视期（browseSuspended）扣住 browse 类命令——它们会从下次
    * page.cards 自行重来——只放行巡视命令与 session.end；非巡视期照常下发。所有翻译块都经此。
    */
+  /**
+   * 中途档位补推（change pacing-fallback-hardening）：会话稳定连接期间风控档位变化时，把新 tempo
+   * 经原始下发通道直发 `pacing.update` 给边缘（**不过**软暂停/配额/去重闸——控制消息不应被抑制、不占配额）。
+   * 去抖：仅当 tempo 相对上次已推送值变化才发；握手已下发初始值、构造期已设基线，故无变化不冗余。
+   * 经 `rawSendCommand`（不回流 `sendCommand`）→ 无递归。读风控态异常则跳过（不推、不改基线）。
+   */
+  private maybePushTempo(): void {
+    let tempo: number;
+    try {
+      tempo = tempoForStatus(this.getRiskStatus());
+    } catch {
+      return;
+    }
+    if (tempo === this.lastPushedTempo) return;
+    this.lastPushedTempo = tempo;
+    this.rawSendCommand({ action: 'pacing_update', params: { tempo } });
+  }
+
   private sendCommand(command: EdgeCommand): boolean {
+    // 中途档位补推：先于软暂停/配额/去重闸——控制消息不应被抑制、不占配额（见 maybePushTempo）。
+    this.maybePushTempo();
     if (this.viewQuotaSleeping && !this.isQuotaSleepBypass(command)) {
       return false; // 浏览额度休眠：不打开/滚动/互动，等窗口释放后重驱
     }

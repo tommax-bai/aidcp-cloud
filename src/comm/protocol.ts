@@ -69,6 +69,7 @@ export type MessageType =
   // —— 角色驱动指令（cloud → edge，RoleDispatcher 驱动）——
   | 'page.scroll'          // 页面滚动
   | 'feed.refresh'         // 主 feed 深度到阈值后点右下「刷新」回顶换新批（cloud → edge）
+  | 'pacing.update'        // 会话中途风控档位变化推送新 tempo（cloud → edge，pacing-fallback-hardening）
   | 'interaction.like'     // 点赞
   | 'interaction.collect'  // 收藏
   | 'interaction.follow'   // 关注
@@ -158,14 +159,24 @@ export interface PacingFloorPayload {
 /**
  * 节奏快照（cloud → edge，随 welcome 握手响应下发；change pacing-floor-config-min-interval）。
  * 承载全局节奏兜底：风控档标量 tempo（边缘乘算）+ 每类操作 floor 默认区间。可选、向后兼容
- * （旧端忽略）；缺失 / 某字段缺失时边缘逐字段回落内置非零默认，绝不零延迟。与 session.budget
- * 的 `PacingDefaultsPayload`（已废弃为下发路径的死通道）区分。
+ * （旧端忽略）；缺失 / 某字段缺失时边缘逐字段回落内置非零默认，绝不零延迟。
+ * 握手期采一次即固定；会话中途风控档位变化经独立 `pacing.update`（PacingUpdatePayload）实时补推。
  */
 export interface PacingSnapshotPayload {
   /** 风控档全局节奏乘子（normal=1.0 / warned=1.3 / restricted=1.6），边缘乘算 */
   tempo: number;
   /** 每类操作兜底 floor 默认区间（已含 clamp 护栏、非零）；逐字段可缺、边缘逐项回落内置默认 */
   opFloorsMs: Partial<Record<PacingOp, PacingFloorPayload>>;
+}
+
+/**
+ * 中途风控档位刷新（cloud → edge，change pacing-fallback-hardening）。会话稳定连接期间风控状态
+ * 迁移导致 tempo 变化时，云端在统一命令出口去抖推送一次；边缘据此更新兜底节奏所用 tempo，
+ * **不重置最小间隔锚点**（中途刷新 ≠ 重连）。可选、向后兼容（旧端忽略即用握手 tempo）。
+ */
+export interface PacingUpdatePayload {
+  /** 新的风控档全局节奏乘子（normal=1.0 / warned=1.3 / restricted=1.6），边缘乘算 */
+  tempo: number;
 }
 
 export interface WelcomePayload {
@@ -447,20 +458,9 @@ export interface SessionBudgetPayload {
   quotaLevel: 'conservative' | 'normal' | 'aggressive';
   viewOnly: boolean;
   startedAt: number;
-  /**
-   * 极薄节奏默认块（指令级节奏 Command Pacing）。可选、仅供边缘**自主动作 / 断连兜底**用；
-   * 内容相关的 read/pause/fatigue 系数**不**在此下发——它们收口在云端，随决策指令以
-   * `dwellMs`/`thinkMs` 下发。旧端忽略本字段并走内置默认。
-   */
-  pacing?: PacingDefaultsPayload;
-}
-
-/** session.budget 的兜底节奏默认（不含内容系数）。 */
-export interface PacingDefaultsPayload {
-  /** 全局节奏乘子（风控状态驱动：normal=1.0 / warned=1.3 / restricted=1.6） */
-  tempo: number;
-  /** 详情页最小停留下限区间（毫秒） */
-  dwellFloorMs: { min: number; max: number };
+  // 注：曾有极薄节奏默认块 `pacing?: PacingDefaultsPayload`（tempo + dwellFloorMs），供边缘自主动作 /
+  // 断连兜底用。实为双死通道（边缘从不请求 session.budget、也从不消费该字段），已于 change
+  // pacing-fallback-hardening 从协议移除；兜底默认唯一下发路径为 welcome 快照（PacingSnapshotPayload）。
 }
 
 export interface RiskCanDoPayload {
@@ -1166,6 +1166,7 @@ export interface PayloadMap {
   // 角色驱动指令
   'page.scroll': PageScrollPayload;
   'feed.refresh': FeedRefreshPayload;
+  'pacing.update': PacingUpdatePayload;
   'interaction.like': InteractionLikePayload;
   'interaction.collect': InteractionCollectPayload;
   'interaction.follow': InteractionFollowPayload;

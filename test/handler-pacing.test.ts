@@ -72,3 +72,15 @@ test('onHello：未注入 pacingFloors → welcome 省略 pacing（向后兼容�
   assert.equal(res?.type, 'welcome');
   assert.equal((res!.payload as WelcomePayload).pacing, undefined);
 });
+
+test('onSessionBudgetRequest：session.budget 回执不含 pacing 字段（pacing-fallback-hardening 移除死通道）', async () => {
+  const h = makeHandler();
+  const s: EdgeSession = { sessionId: 'sB', accountId: 'acc-1' };
+  const res = await h.handle(makeEnvelope('session.budget.request', 'b1', 1, {}), s);
+  assert.equal(res?.type, 'session.budget');
+  const payload = res!.payload as Record<string, unknown>;
+  assert.ok(!('pacing' in payload), 'session.budget 回执不应再含 pacing 字段（双死通道已移除）');
+  // 其余字段仍在（预算 + viewOnly），不受影响。
+  assert.equal(typeof payload.viewOnly, 'boolean');
+  assert.equal(typeof payload.maxActions, 'number');
+});
