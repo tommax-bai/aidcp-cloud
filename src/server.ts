@@ -2798,6 +2798,7 @@ async function main(): Promise<void> {
           facebookGroupTargets: {
             importTargets: (inputs, importBatch) => facebookGroupTargetStore.importTargets(inputs, importBatch),
             listTargets: (options) => facebookGroupTargetStore.listTargets(options),
+            listFacets: () => facebookGroupTargetStore.listFacets(),
             setEnabled: (groupUrl, enabled) => facebookGroupTargetStore.setEnabled(groupUrl, enabled),
             accountProgress: () => facebookGroupTargetStore.accountProgress(),
             listAssignments: (limit) => facebookGroupMembershipStore.listAssignments(limit),

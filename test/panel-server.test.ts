@@ -1142,3 +1142,125 @@ test('HTTP auth 续签 + 登出撤销（console-cloud-panel-hardening #24/#26）
     await h.close();
   }
 });
+
+test('HTTP Facebook group metadata filters, facets, and import validation', async () => {
+  let listOptions: unknown = null;
+  let importedInputs: unknown = null;
+  const groupDeps = {
+    ...deps,
+    facebookGroupTargets: {
+      listTargets: async (options: unknown) => {
+        listOptions = options;
+        return {
+          total: 1,
+          items: [
+            {
+              groupUrl: 'https://www.facebook.com/groups/group-a',
+              groupName: 'Group A',
+              region: '河南区域',
+              park: '同文1工业区',
+              direction: '机械和电气',
+              joinGating: 'unknown',
+              priority: 0,
+              enabled: true,
+              importBatch: 'batch-1',
+              createdAt: '2026-07-09T00:00:00.000Z',
+              updatedAt: '2026-07-09T00:00:00.000Z',
+              accountId: null,
+              membershipStatus: null,
+              joinedAt: null,
+              lastAttemptAt: null,
+              lastReason: null,
+              lastCommentedAt: null,
+              commentsTotal: 0,
+            },
+          ],
+        };
+      },
+      listFacets: async () => ({
+        regions: [{ region: '河南区域', parks: ['同文1工业区'] }],
+        directions: ['机械和电气'],
+      }),
+      importTargets: async (inputs: unknown, importBatch: string | null) => {
+        importedInputs = { inputs, importBatch };
+        return { imported: 1, updated: 0, duplicate: 0, invalid: 0, rows: [] };
+      },
+      setEnabled: async () => null,
+      accountProgress: async () => [],
+      listAssignments: async () => [],
+      reclaimStaleAssignments: async () => 0,
+    },
+  } as unknown as PanelDeps;
+  const h = await startPanelApi(groupDeps, makeConfig());
+  assert.equal(h.started, true);
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = (await login.json()) as { token: string };
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+
+    const list = await fetch(
+      `${base}/api/facebook/groups?enabled=true&status=joined&region=${encodeURIComponent('河南区域')}&park=${encodeURIComponent('同文1工业区')}&direction=${encodeURIComponent('机械和电气')}`,
+      { headers: auth },
+    );
+    assert.equal(list.status, 200);
+    assert.deepEqual(listOptions, {
+      limit: 100,
+      offset: 0,
+      status: 'joined',
+      enabled: true,
+      region: '河南区域',
+      park: '同文1工业区',
+      direction: '机械和电气',
+    });
+
+    const facets = await fetch(`${base}/api/facebook/groups/facets`, { headers: auth });
+    assert.equal(facets.status, 200);
+    assert.deepEqual(await facets.json(), {
+      regions: [{ region: '河南区域', parks: ['同文1工业区'] }],
+      directions: ['机械和电气'],
+    });
+
+    const imported = await fetch(`${base}/api/facebook/groups/import`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({
+        importBatch: 'batch-1',
+        items: [
+          {
+            url: 'https://www.facebook.com/groups/group-a?ref=share',
+            region: '河南区域',
+            park: '同文1工业区',
+            direction: '机械和电气',
+          },
+        ],
+      }),
+    });
+    assert.equal(imported.status, 200);
+    assert.deepEqual(importedInputs, {
+      importBatch: 'batch-1',
+      inputs: [
+        {
+          url: 'https://www.facebook.com/groups/group-a?ref=share',
+          name: null,
+          region: '河南区域',
+          park: '同文1工业区',
+          direction: '机械和电气',
+        },
+      ],
+    });
+
+    const bad = await fetch(`${base}/api/facebook/groups/import`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ items: [{ url: 'https://www.facebook.com/groups/group-a', region: 123 }] }),
+    });
+    assert.equal(bad.status, 400);
+  } finally {
+    await h.close();
+  }
+});

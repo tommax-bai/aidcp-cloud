@@ -65,6 +65,11 @@ async function readJsonBody(req: http.IncomingMessage, maxBytes = MAX_BODY_BYTES
 function parseGroupImportInputs(body: unknown): FacebookGroupTargetInput[] | null {
   const raw = (body ?? {}) as Record<string, unknown>;
   const inputs: FacebookGroupTargetInput[] = [];
+  const optionalString = (value: unknown): string | null | undefined => {
+    if (value === undefined) return undefined;
+    if (value === null) return null;
+    return typeof value === 'string' ? value : undefined;
+  };
   if (typeof raw.text === 'string') {
     for (const item of raw.text.split(/\s+/)) {
       const url = item.trim();
@@ -83,7 +88,19 @@ function parseGroupImportInputs(body: unknown): FacebookGroupTargetInput[] | nul
       const o = item as Record<string, unknown>;
       if (typeof o.url !== 'string') return null;
       if (o.name !== undefined && o.name !== null && typeof o.name !== 'string') return null;
-      inputs.push({ url: o.url, name: (o.name as string | null | undefined) ?? null });
+      const region = optionalString(o.region);
+      const park = optionalString(o.park);
+      const direction = optionalString(o.direction);
+      if (region === undefined && o.region !== undefined) return null;
+      if (park === undefined && o.park !== undefined) return null;
+      if (direction === undefined && o.direction !== undefined) return null;
+      inputs.push({
+        url: o.url,
+        name: (o.name as string | null | undefined) ?? null,
+        ...(region !== undefined ? { region } : {}),
+        ...(park !== undefined ? { park } : {}),
+        ...(direction !== undefined ? { direction } : {}),
+      });
     }
   }
   return inputs;
@@ -411,8 +428,19 @@ function createRequestHandler(
           offset: Number(query.get('offset') ?? 0),
           ...(rawStatus ? { status: rawStatus as FacebookGroupMembershipStatus | 'unassigned' } : {}),
           ...(typeof enabled === 'boolean' ? { enabled } : {}),
+          ...(query.get('region') ? { region: query.get('region') } : {}),
+          ...(query.get('park') ? { park: query.get('park') } : {}),
+          ...(query.get('direction') ? { direction: query.get('direction') } : {}),
         }),
       );
+      return;
+    }
+    if (method === 'GET' && url === '/api/facebook/groups/facets') {
+      if (!deps.facebookGroupTargets) {
+        sendJson(res, 503, { error: 'unavailable' });
+        return;
+      }
+      sendJson(res, 200, await deps.facebookGroupTargets.listFacets());
       return;
     }
     if (method === 'POST' && url === '/api/facebook/groups/import') {

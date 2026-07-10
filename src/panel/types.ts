@@ -20,6 +20,7 @@ import type {
   FacebookGroupAccountProgress,
   FacebookGroupImportResult,
   FacebookGroupMembershipRow,
+  FacebookGroupTargetFacets,
   FacebookGroupTargetInput,
   FacebookGroupTargetListOptions,
   FacebookGroupTargetListResult,
@@ -191,6 +192,7 @@ export interface PanelDeps {
   facebookGroupTargets?: {
     importTargets(inputs: FacebookGroupTargetInput[], importBatch: string | null): Promise<FacebookGroupImportResult>;
     listTargets(options?: FacebookGroupTargetListOptions): Promise<FacebookGroupTargetListResult>;
+    listFacets(): Promise<FacebookGroupTargetFacets>;
     setEnabled(groupUrl: string, enabled: boolean): Promise<FacebookGroupTargetRow | null>;
     accountProgress(): Promise<FacebookGroupAccountProgress[]>;
     listAssignments(limit?: number): Promise<FacebookGroupMembershipRow[]>;
