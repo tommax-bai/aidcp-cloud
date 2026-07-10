@@ -1297,13 +1297,14 @@ async function main(): Promise<void> {
     },
     // 手动 /comment <昵称>（change comment-search-command）：按昵称解析账号 → 触发按需评论任务。
     // 回执据**触发结果**判 ok/level（开跑绿 / 未触发黄 / 失败红）；最终评/未评结果由 scheduler 异步补结果卡片。
-    comment: async (nickname?: string, options?: { injectContact?: boolean }) => {
+    comment: async (nickname?: string, options?: { injectContact?: boolean; joinGroup?: boolean }) => {
       if (!commentScheduler) {
         return { ok: false, level: 'error', title: '按需评论未就绪', message: '评论触发器未就绪（启动中或依赖不可用），未发起任务。' };
       }
       const acct = await resolveAccountByNickname(nickname); // 找不到/重名 → 抛错，runComment 走 fail 分支（红 ❌）
       // injectContact（change generalize-contact-info）：--contact 时注入账号联系方式；缺联系方式 fail-closed 由 scheduler 处置。
-      return commentScheduler.triggerManual(acct, { injectContact: options?.injectContact });
+      // joinGroup（change facebook-manual-join-comment）：--join 时先加入一个新群、加入成功后在该新群里评论（仅 FB）。
+      return commentScheduler.triggerManual(acct, { injectContact: options?.injectContact, joinFirst: options?.joinGroup });
     },
   };
   // 命令作用域（change feishu-per-team-notification-routing）：账号影响类命令只在「管理群」受理，外部 / 非管理群一律诚实拒。
@@ -2249,6 +2250,9 @@ async function main(): Promise<void> {
         });
       }
     },
+    // 加群评论（change facebook-manual-join-comment）：/comment --join 复用云端加群调度器加入一个新群（含 kill switch /
+    // 判定 fail-closed / 风控配额 / 账本）。facebookGroupJoinScheduler 在本 CommentScheduler 之后构造——闭包运行时才取值（TDZ 安全）。
+    facebookJoinNewGroup: (accountId) => facebookGroupJoinScheduler.triggerScheduled(accountId),
     postResultCard: async (accountId, receipt) => {
       const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
       if (!chatId) {

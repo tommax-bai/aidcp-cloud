@@ -43,6 +43,12 @@ export interface ParsedCommand {
    * 缺省 undefined（= 关 = 今天的普通评论、零回归）。命中该字段时执行层把账号的「联系方式」注入本次评论。
    */
   injectContact?: boolean;
+  /**
+   * `/comment` 的加群开关（change facebook-manual-join-comment）：尾部 `--join` present → true、缺省 undefined（零回归）。
+   * 命中时执行层先让该账号加入**一个新群**（复用云端加群调度器），确认加入后再在该新群里发一条评论；仅 Facebook 账号有效。
+   * 可与 `--contact` 同时给（任意顺序）：加群 + 发一条带联系方式的评论（走既有人审通道）。
+   */
+  joinGroup?: boolean;
 }
 
 const HELP_TEXT = [
@@ -53,6 +59,8 @@ const HELP_TEXT = [
   '• `/publish <昵称>` — 触发该账号发帖（按昵称指定，发布前仍需人审）',
   '• `/comment <昵称>` — 触发该账号按需评论（搜最近一天最多收藏的强相关笔记，评论前仍需人审）',
   '• `/comment <昵称> --contact` — 同上，并在评论末尾注入该账号后台配置的「联系方式」（未配则拦下告警、不发）',
+  '• `/comment <昵称> --join` — 仅 Facebook：加入一个新群，加入成功后在该新群里发一条评论',
+  '• `/comment <昵称> --join --contact` — 加群 + 在新群里发一条带「联系方式」的评论（走人审；任意顺序）',
   '• `/publish-test [requestId]` — 发送测试审批卡片',
   '• `/bind` — 绑定当前群为默认审批群（开发中）',
   '',
@@ -120,18 +128,29 @@ export function parseCommand(text: string): ParsedCommand {
       // 缺省由执行层解析唯一真实账号（retire-default-account：绝不回落 default）。
       return { action: 'publish', nickname: args.join(' ').trim() || undefined, raw, args };
     case '/comment': {
-      // /comment <昵称> [--contact]：与 /publish 同构——`/comment ` 之后（去掉尾部联系方式开关）整段视为**昵称**。
-      // 联系方式开关（change generalize-contact-info）：**只认末尾** token `--contact`（大小写不敏感），present=开、缺省=关；
-      // 命中即剔除、其余 join 为昵称；trailing-only 避免把中间 token 误当开关而错切昵称。缺开关 → injectContact=undefined（关、零回归）。
-      // 无向后兼容：旧 `group:on/off` 不再识别，末尾若出现旧 token 会被并入昵称、走既有找不到账号的诚实失败。
+      // /comment <昵称> [--contact] [--join]：与 /publish 同构——`/comment ` 之后（去掉尾部开关）整段视为**昵称**。
+      // 尾开关（change generalize-contact-info + facebook-manual-join-comment）：**从末尾起**连续吃掉已知开关 token
+      // （`--contact` 注入联系方式、`--join` 加入一个新群再评论；均大小写不敏感、任意顺序），其余 join 为昵称；
+      // trailing-only：昵称中间出现的 flag 样式 token 不被吃掉、留作昵称一部分（避免误切昵称）。
+      // 缺开关 → undefined（关、零回归）。无向后兼容：旧 `group:on/off` 不再识别，会被并入昵称、走既有找不到账号的诚实失败。
       let commentArgs = args;
       let injectContact: boolean | undefined;
-      const lastToken = commentArgs[commentArgs.length - 1] ?? '';
-      if (/^--contact$/i.test(lastToken)) {
-        injectContact = true;
-        commentArgs = commentArgs.slice(0, -1);
+      let joinGroup: boolean | undefined;
+      while (commentArgs.length > 0) {
+        const lastToken = commentArgs[commentArgs.length - 1] ?? '';
+        if (/^--contact$/i.test(lastToken)) {
+          injectContact = true;
+          commentArgs = commentArgs.slice(0, -1);
+          continue;
+        }
+        if (/^--join$/i.test(lastToken)) {
+          joinGroup = true;
+          commentArgs = commentArgs.slice(0, -1);
+          continue;
+        }
+        break;
       }
-      return { action: 'comment', nickname: commentArgs.join(' ').trim() || undefined, injectContact, raw, args };
+      return { action: 'comment', nickname: commentArgs.join(' ').trim() || undefined, injectContact, joinGroup, raw, args };
     }
     case '/bind':
       return { action: 'bind', raw, args };
@@ -201,10 +220,13 @@ export interface CommandActions {
    *
    * options.injectContact（change generalize-contact-info）：true 时把账号「联系方式」注入本次评论；
    * 该账号未配联系方式 → 执行层 fail-closed（回黄色告警、本次不发），绝不静默发无联系方式评论。缺省 = 不注入 = 零回归。
+   *
+   * options.joinGroup（change facebook-manual-join-comment）：true 时先让该账号加入**一个新群**（复用云端加群调度器），
+   * 加入确认成功后再在该新群里发一条评论；仅 Facebook 账号有效、非 FB 诚实拒。可与 injectContact 同开（加群 + 带联系方式评论）。
    */
   comment?(
     nickname?: string,
-    options?: { injectContact?: boolean },
+    options?: { injectContact?: boolean; joinGroup?: boolean },
   ): Promise<CommentCommandReceipt> | CommentCommandReceipt;
   /** 绑定当前群为默认审批群 */
   bindChat?(record: BotChatRecord): Promise<void> | void;
@@ -324,7 +346,7 @@ export class CommandRouter {
       // nickname → 执行层按昵称解析真实账号（严格只认昵称）；解析失败 / 边端离线由执行层抛错、走 fail 分支。
       // 回执 ok/level/title/message 由执行层据**真实触发结果**给出（开跑绿、未触发黄、触发失败红），
       // 路由层不再一律当成功——杜绝「触发」被无脑染绿 ✅（评论任务最终结果另由结果卡片补达）。
-      const r = await this.actions.comment(cmd.nickname, { injectContact: cmd.injectContact });
+      const r = await this.actions.comment(cmd.nickname, { injectContact: cmd.injectContact, joinGroup: cmd.joinGroup });
       return {
         command: cmd.raw,
         ok: r.ok,

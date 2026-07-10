@@ -252,20 +252,66 @@ test('parseCommand: 旧 group:on 已不识别 → 并入昵称、injectContact u
   assert.equal(cmd.nickname, '工程师大白 group:on'); // 旧 token 被并入昵称，走既有找不到账号的诚实失败
 });
 
-test('CommandRouter: /comment --contact 把 injectContact=true 透传给 comment 动作', async () => {
-  let seen: { nickname?: string; options?: { injectContact?: boolean } } | null = null;
+// ── change facebook-manual-join-comment：/comment 尾部加群开关 --join（可与 --contact 任意顺序组合） ──
+
+test('parseCommand: /comment <昵称> --join → joinGroup true、injectContact undefined、昵称干净', () => {
+  const cmd = parseCommand('/comment 工程师大白 --join');
+  assert.equal(cmd.action, 'comment');
+  assert.equal(cmd.nickname, '工程师大白');
+  assert.equal(cmd.joinGroup, true);
+  assert.equal(cmd.injectContact, undefined);
+});
+
+test('parseCommand: /comment <昵称> --join --contact → 两开关都 true、昵称干净', () => {
+  const cmd = parseCommand('/comment 工程师大白 --join --contact');
+  assert.equal(cmd.nickname, '工程师大白');
+  assert.equal(cmd.joinGroup, true);
+  assert.equal(cmd.injectContact, true);
+});
+
+test('parseCommand: /comment <昵称> --contact --join → 顺序无关，两开关都 true', () => {
+  const cmd = parseCommand('/comment 工程师大白 --contact --join');
+  assert.equal(cmd.nickname, '工程师大白');
+  assert.equal(cmd.joinGroup, true);
+  assert.equal(cmd.injectContact, true);
+});
+
+test('parseCommand: 加群开关大小写不敏感（--JOIN）', () => {
+  const cmd = parseCommand('/comment 工程师大白 --JOIN');
+  assert.equal(cmd.nickname, '工程师大白');
+  assert.equal(cmd.joinGroup, true);
+});
+
+test('parseCommand: --join 也 trailing-only——中间的 --join token 不当开关，并入昵称', () => {
+  const cmd = parseCommand('/comment --join 工程师');
+  assert.equal(cmd.joinGroup, undefined); // 末尾是「工程师」，非开关
+  assert.equal(cmd.nickname, '--join 工程师');
+});
+
+test('parseCommand: 含空格昵称 + 尾部 --join --contact 正确切分', () => {
+  const cmd = parseCommand('/comment 大白 工程师 --join --contact');
+  assert.equal(cmd.nickname, '大白 工程师');
+  assert.equal(cmd.joinGroup, true);
+  assert.equal(cmd.injectContact, true);
+});
+
+test('CommandRouter: /comment --contact/--join 把开关透传给 comment 动作', async () => {
+  let seen: { nickname?: string; options?: { injectContact?: boolean; joinGroup?: boolean } } | null = null;
   const router = new CommandRouter({
     ...makeActions().actions,
-    comment: async (nickname?: string, options?: { injectContact?: boolean }) => {
+    comment: async (nickname?: string, options?: { injectContact?: boolean; joinGroup?: boolean }) => {
       seen = { nickname, options };
       return { ok: true as const, level: 'success' as const, title: '已触发', message: 'ok' };
     },
   });
   await router.handle('/comment 工程师大白 --contact');
-  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: true } });
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: true, joinGroup: undefined } });
 
   await router.handle('/comment 工程师大白');
-  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: undefined } });
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: undefined, joinGroup: undefined } });
+
+  await router.handle('/comment 工程师大白 --join --contact');
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: true, joinGroup: true } });
 });
 
 test('CommandRouter: publish 编排失败 → 回执 ok:false / level:error（红 ❌，绝不再绿色）+ 透传失败原因', async () => {

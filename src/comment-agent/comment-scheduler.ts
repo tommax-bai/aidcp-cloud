@@ -55,6 +55,110 @@ export interface CommentResultReceipt {
   message: string;
 }
 
+/**
+ * runFacebookTargetedTask 的终态（change facebook-manual-join-comment）：供「加群 + 评论」合并结果卡取用。
+ * 非 override 调用者（普通 /comment、排期评论）可忽略返回值——沿用既有 void 语义、零回归。
+ */
+export interface FacebookCommentRunResult {
+  outcome: FacebookCommentOutcome;
+  reason?: string;
+  container?: string;
+}
+
+/** 加群未成会员（未触发 / gated / pending / ambiguous / 失败）→ 诚实结果卡（不评论、绝不染绿）。 */
+export function joinOnlyReceipt(join: {
+  triggered: boolean;
+  reason?: string;
+  groupUrl?: string;
+  outcome?: string;
+}): CommentResultReceipt {
+  const g = join.groupUrl ? `（${join.groupUrl}）` : '';
+  if (!join.triggered) {
+    switch (join.reason) {
+      case 'disabled':
+        return { ok: false, level: 'warning', title: '未加群', message: '自动加群功能未开启（AIDCP_FB_GROUP_JOIN_AUTO=false）；未加群也未评论。' };
+      case 'edge_offline':
+        return { ok: false, level: 'error', title: '未加群', message: '该账号暂无在线边端；未加群也未评论。' };
+      case 'running':
+        return { ok: false, level: 'warning', title: '未加群', message: '该账号已有加群任务在跑，请等其结束；本次未加群也未评论。' };
+      case 'quota_denied':
+        return { ok: false, level: 'warning', title: '未加群', message: '加群配额已用尽（风控 日/时/分 上限）；未加群也未评论。' };
+      case 'session_budget':
+        return { ok: false, level: 'warning', title: '未加群', message: '本场会话加群额度已用尽；未加群也未评论。' };
+      case 'no_targets':
+        return { ok: false, level: 'warning', title: '未加群', message: '没有可加入的新群目标（目标库为空、均已加入或被排除）；未加群也未评论。' };
+      case 'not_facebook_account':
+        return { ok: false, level: 'warning', title: '未加群', message: '该账号非 Facebook 账号；加群评论仅支持 Facebook。' };
+      default:
+        return { ok: false, level: 'error', title: '未加群', message: `加群未触发（${join.reason ?? 'unknown'}）；未加群也未评论。` };
+    }
+  }
+  switch (join.outcome) {
+    case 'gated_skip':
+      return { ok: false, level: 'warning', title: '未加入该群', message: `目标群需审批加入${g}，判定为「审批门」已诚实跳过（不点、绝不留悬挂请求）；未评论。` };
+    case 'pending':
+      return { ok: false, level: 'warning', title: '加群待审批', message: `已点「加入」但该群需管理员审批${g}，状态 pending；通过后可再评论。本次未评论。` };
+    case 'ambiguous_skip':
+      return { ok: false, level: 'warning', title: '未加入该群', message: `加群前观察结果不明确${g}，fail-closed 跳过（绝不误点）；未评论。` };
+    case 'no_button':
+      return { ok: false, level: 'warning', title: '未加入该群', message: `未在群页找到「加入」按钮${g}；未评论。` };
+    case 'login_required':
+    case 'blocked_by_captcha':
+      return { ok: false, level: 'error', title: '加群受阻', message: `账号需要登录或遇到验证码${g}，已按流程暂停加群；未评论。` };
+    case 'nav_error':
+      return { ok: false, level: 'error', title: '加群失败', message: `打开群页失败${g}；未评论。` };
+    default:
+      return { ok: false, level: 'error', title: '加群失败', message: `加群未成功（${join.outcome ?? join.reason ?? 'unknown'}）${g}；未评论。` };
+  }
+}
+
+/** 已加群，将评论终态映射为人话原因（用于「已加群但未评论」黄卡）。 */
+export function commentOutcomeReason(c: FacebookCommentRunResult): string {
+  switch (c.outcome) {
+    case 'no_targets':
+      return c.reason === 'no_keywords' ? '该账号未配置 Facebook 评论关键词' : '群内无可评论目标';
+    case 'no_strong_candidate':
+      return '群内未找到合适的可评论帖子';
+    case 'compose_skipped':
+      if (c.reason === 'contact_info_missing') return '未配置联系方式';
+      if (c.reason === 'approval_rejected_or_timeout') return '人审未通过或超时';
+      if (c.reason === 'empty_compose') return '评论撰写为空';
+      return `评论未通过校验（${c.reason ?? ''}）`;
+    case 'login_required':
+      return '账号需要登录或遇到验证码';
+    case 'verification_ambiguous':
+      return '提交后无法确认评论已上墙';
+    case 'quota_denied':
+      return c.reason === 'daily_cap' ? '当日评论已达上限' : '评论配额不足';
+    default:
+      return `评论失败（${c.outcome}${c.reason ? ':' + c.reason : ''}）`;
+  }
+}
+
+/** 已加群 → 合并「加群 + 评论」结果卡（评上=绿；加了群没评上=黄，部分成功绝不染绿）。 */
+export function joinCommentReceipt(
+  join: { outcome?: string; groupUrl?: string },
+  comment: FacebookCommentRunResult,
+  withContact: boolean,
+): CommentResultReceipt {
+  const groupLabel = comment.container || join.groupUrl || '新群';
+  const joinedWord = join.outcome === 'already_member' ? '（已是该群成员）' : '已加入新群';
+  if (comment.outcome === 'commented') {
+    return {
+      ok: true,
+      level: 'success',
+      title: '加群 + 评论成功',
+      message: `${joinedWord}「${groupLabel}」，并已在群内发出一条${withContact ? '带联系方式的' : ''}评论（服务器已确认）。`,
+    };
+  }
+  return {
+    ok: false,
+    level: 'warning',
+    title: '已加群，但未评论',
+    message: `${joinedWord}「${groupLabel}」，但群内评论未发出：${commentOutcomeReason(comment)}。`,
+  };
+}
+
 export interface CommentSchedulerDeps {
   /** 解析该账号的连接运行时（私有总线 + 在线 edgeId）；null / 无 edgeId = 边端离线（honest 拒绝）。 */
   resolveConnection: (accountId: string) => { bus: EventBus; edgeId?: string } | null;
@@ -130,6 +234,14 @@ export interface CommentSchedulerDeps {
   facebookCoverageConfigFor?: (accountId: string) => FacebookCoverageCommentConfig | Promise<FacebookCoverageCommentConfig>;
   facebookCoverageOnCommented?: (accountId: string, groupUrl: string) => Promise<void> | void;
   facebookCoverageOnFailure?: (accountId: string, groupUrl: string, reason: string) => Promise<void> | void;
+  /**
+   * Facebook 手动「加群再评论」（change facebook-manual-join-comment）：让该账号加入**一个新群**并返回结果。
+   * 复用云端加群调度器 triggerScheduled（含 kill switch / 判定 fail-closed / 风控配额 / 账本）；outcome ∈
+   * {joined, already_member, gated_skip, pending, ambiguous_skip, join_failed, nav_error, no_button, ...}，triggered=false 时带 reason
+   * （disabled / edge_offline / running / quota_denied / session_budget / no_targets / not_facebook_account）。
+   * 缺省未注入 → /comment --join 诚实拒（加群未接线），绝不静默降级为普通评论。
+   */
+  facebookJoinNewGroup?: (accountId: string) => Promise<{ triggered: boolean; reason?: string; groupUrl?: string; outcome?: string }>;
   /** 选关键词/容器的随机源（测试注入定值；缺省 Math.random）。 */
   random?: () => number;
 }
@@ -191,7 +303,7 @@ export class CommentScheduler {
   /** 飞书 /comment 触发：返回「触发态」结构化回执；最终结果异步补发结果卡片。 */
   async triggerManual(
     accountId: string,
-    options?: { injectContact?: boolean; priority?: EdgeTaskPriority },
+    options?: { injectContact?: boolean; priority?: EdgeTaskPriority; joinFirst?: boolean },
   ): Promise<CommentCommandReceipt> {
     if (!accountId || accountId === 'default') {
       return { ok: false, level: 'error', title: '按需评论触发失败', message: '未解析到有效账号（绝不回落 default）' };
@@ -232,6 +344,16 @@ export class CommentScheduler {
       };
     }
 
+    // 加群评论（change facebook-manual-join-comment）：--join 仅 Facebook 有效。非 FB 账号诚实拒——绝不静默降级成普通评论。
+    if (options?.joinFirst && platformProfile.platform !== 'facebook') {
+      return {
+        ok: false,
+        level: 'warning',
+        title: '未触发加群评论',
+        message: '「加群评论」（--join）仅支持 Facebook 账号；该账号平台不支持，未加群也未评论。',
+      };
+    }
+
     // facebook-scheduled-comment 2.2：Facebook 走独立定向评论路径（关键词+容器，绝不回落 xhs 搜索）。
     // FB deps 注入时路由到 runFacebookTargetedTask（影子先行）；未注入则维持诚实拒绝（零回归）。
     if (platformProfile.platform === 'facebook') {
@@ -241,6 +363,33 @@ export class CommentScheduler {
           level: 'error',
           title: '按需评论触发失败',
           message: 'Facebook 定向评论执行尚未接入（facebook-scheduled-comment 2.2 待实装）；不回落 xhs 搜索流程',
+        };
+      }
+      // 加群评论（change facebook-manual-join-comment）：先加入一个新群、加入成功后在群内评论。人工授权、单飞、异步补合并结果卡。
+      if (options?.joinFirst) {
+        if (!this.deps.facebookJoinNewGroup) {
+          return {
+            ok: false,
+            level: 'error',
+            title: '未触发加群评论',
+            message: '加群能力未接线（facebookJoinNewGroup 未注入）；本次不加群也不评论。',
+          };
+        }
+        this.running.add(accountId);
+        void this.runFacebookJoinThenComment(accountId, { injectContact: options?.injectContact, contactInfo })
+          .catch((err) =>
+            (this.deps.logger ?? console).warn(
+              `[comment-scheduler] FB 加群评论任务异常 account=${accountId}：${(err as Error).message}`,
+            ),
+          )
+          .finally(() => this.running.delete(accountId));
+        return {
+          ok: true,
+          level: 'success',
+          title: '已触发「加群 + 评论」',
+          message: `已触发 Facebook 加群 + 评论：先加入一个新群，加入成功后在该新群里发一条评论${
+            options?.injectContact ? '（带联系方式，走飞书人审）' : ''
+          }；结果稍后回报。`,
         };
       }
       this.running.add(accountId);
@@ -414,39 +563,73 @@ export class CommentScheduler {
    */
   private async runFacebookTargetedTask(
     accountId: string,
-    options: { injectContact?: boolean; contactInfo?: string | null } = {},
-  ): Promise<void> {
-    const d = this.deps;
-    const rand = d.random ?? Math.random;
-    const shadow = d.facebookShadow?.() ?? false;
-    const autoEnabled = d.facebookAutoEnabled?.() ?? false;
+    options: { injectContact?: boolean; contactInfo?: string | null; overrideContainerUrl?: string } = {},
+  ): Promise<FacebookCommentRunResult> {
+    // 终态捕获（change facebook-manual-join-comment）：包一层把「最后一次审计」升级为返回值，供「加群 + 评论」
+    // 合并结果卡取用；body 内所有 return; 保持 void 语义不动（普通 /comment / 排期路径零回归、只是丢弃返回值）。
+    let last: FacebookCommentRunResult = { outcome: 'no_targets' };
     const audit = (row: FacebookCommentAuditRow) => {
+      last = {
+        outcome: row.outcome,
+        ...(row.reason ? { reason: row.reason } : {}),
+        ...(row.container ? { container: row.container } : last.container ? { container: last.container } : {}),
+      };
       try {
-        d.facebookAudit?.(row);
+        this.deps.facebookAudit?.(row);
       } catch {
         /* best-effort：审计绝不波及主链路 */
       }
     };
+    await this.runFacebookTargetedTaskBody(accountId, options, audit);
+    return last;
+  }
 
-    // kill switch：既未开真发、也未开影子 → 整条功能关闭，静默不跑（不产审计噪音）。
+  private async runFacebookTargetedTaskBody(
+    accountId: string,
+    options: { injectContact?: boolean; contactInfo?: string | null; overrideContainerUrl?: string },
+    audit: (row: FacebookCommentAuditRow) => void,
+  ): Promise<void> {
+    const d = this.deps;
+    const rand = d.random ?? Math.random;
+    // 加群评论 override（change facebook-manual-join-comment）：容器 = 人工授权「刚加入的群」→ **强制真发**，
+    // 绕过无人值守 kill switch / 影子（AIDCP_FB_COMMENT_AUTO / SHADOW）；否则「加了群却静默不评论」= 静默假成功红线。
+    // 仍守：硬校验 / 服务器确认 / canDo+日上限 / --contact 人审 / 单飞。普通 /comment 路径 manualTarget=undefined、行为不变。
+    const manualTarget = options.overrideContainerUrl?.trim() || undefined;
+    const shadow = manualTarget ? false : (d.facebookShadow?.() ?? false);
+    const autoEnabled = manualTarget ? true : (d.facebookAutoEnabled?.() ?? false);
+
+    // kill switch：既未开真发、也未开影子 → 整条功能关闭，静默不跑（不产审计噪音）。override 强制真发，此闸恒不触发。
     if (!autoEnabled && !shadow) return;
 
-    // joined-group coverage 是 per-account gate。启用后从 ledger 选容器；没有 eligible joined group 必须 no-op，不回退配置源。
-    const coverageCfg = await d.facebookCoverageConfigFor?.(accountId);
-    const usingCoverage = coverageCfg?.coverageEnabled === true;
-
-    // 配置 fail-closed：关键词或容器任一为空 → 诚实 no-op。
-    const cfg: EffectiveFacebookCommentConfig = usingCoverage ? coverageCfg! : d.facebookConfigFor!(accountId);
-    if (!cfg.enabled || cfg.keywords.length === 0 || cfg.containers.length === 0) {
+    // 容器/关键词来源：
+    // - override（加群评论）：容器 pin 到刚加入的群；关键词仍取账号 FB 配置；usingCoverage=true（账本回写该群）。缺关键词 → fail-closed no-op。
+    // - 否则：coverage per-account gate 启用 → 从 ledger 选容器；再否则 → 配置源。任一为空 → 诚实 no-op。
+    const coverageCfg = manualTarget ? undefined : await d.facebookCoverageConfigFor?.(accountId);
+    const usingCoverage = manualTarget ? true : coverageCfg?.coverageEnabled === true;
+    const cfg: EffectiveFacebookCommentConfig =
+      !manualTarget && usingCoverage ? coverageCfg! : d.facebookConfigFor!(accountId);
+    if (manualTarget) {
+      if (cfg.keywords.length === 0) {
+        audit({ accountId, outcome: 'no_targets', reason: 'no_keywords', shadow, container: manualTarget });
+        return;
+      }
+    } else if (!cfg.enabled || cfg.keywords.length === 0 || cfg.containers.length === 0) {
       audit({ accountId, outcome: 'no_targets', shadow });
       return;
     }
 
     const keyword = cfg.keywords[Math.floor(rand() * cfg.keywords.length)] ?? cfg.keywords[0];
-    const chosen = cfg.containers[Math.floor(rand() * cfg.containers.length)] ?? cfg.containers[0];
-    const containerUrl = chosen.url; // 功能主键：边缘据此站内搜（含群 id）
-    // 人类可读容器标签：已解析出的群名优先，否则暂用 url（下次搜索会自动回填真名）。审计/回执一律用它、不用裸 id。
-    let container = chosen.name ?? chosen.url;
+    let containerUrl: string;
+    let container: string;
+    if (manualTarget) {
+      containerUrl = manualTarget; // 功能主键：刚加入的群 url（边缘据此站内搜）
+      container = manualTarget; // 真名由 search.containerName 回填
+    } else {
+      const chosen = cfg.containers[Math.floor(rand() * cfg.containers.length)] ?? cfg.containers[0];
+      containerUrl = chosen.url; // 功能主键：边缘据此站内搜（含群 id）
+      // 人类可读容器标签：已解析出的群名优先，否则暂用 url（下次搜索会自动回填真名）。审计/回执一律用它、不用裸 id。
+      container = chosen.name ?? chosen.url;
+    }
 
     // ── 读了再写（change facebook-comment-read-before-write）：撰写挪到开帖之后，吃到帖子正文+他人评论+内容语言 ──
     // 影子与真发都需要「搜 → 开帖」读上下文；影子做只读浏览、到校验为止绝不提交，真发再往后走。
@@ -590,6 +773,42 @@ export class CommentScheduler {
       });
       if (usingCoverage && submit.reason) void d.facebookCoverageOnFailure?.(accountId, containerUrl, submit.reason);
     }
+  }
+
+  /**
+   * 加群 + 评论（change facebook-manual-join-comment）：先加入一个新群，加入确认成功（joined / already_member）后
+   * 在该新群里发一条评论（容器 pin 到该群、强制真发但仍过校验/验证/人审）。未成会员 → 不评论、诚实回卡。合并一张结果卡。
+   */
+  private async runFacebookJoinThenComment(
+    accountId: string,
+    options: { injectContact?: boolean; contactInfo?: string | null } = {},
+  ): Promise<void> {
+    const d = this.deps;
+    let join: { triggered: boolean; reason?: string; groupUrl?: string; outcome?: string };
+    try {
+      join = await d.facebookJoinNewGroup!(accountId);
+    } catch (err) {
+      await d.postResultCard?.(accountId, {
+        ok: false,
+        level: 'error',
+        title: '加群失败',
+        message: `加群调度异常：${(err as Error).message}；未评论。`,
+      });
+      return;
+    }
+    const isMember =
+      join.triggered && (join.outcome === 'joined' || join.outcome === 'already_member') && !!join.groupUrl;
+    if (!isMember) {
+      await d.postResultCard?.(accountId, joinOnlyReceipt(join));
+      return;
+    }
+    // 已加入（或已是成员）→ 在该新群里发一条评论。override 容器强制真发；contactInfo 已在 triggerManual 解析一次（gate 同源）。
+    const comment = await this.runFacebookTargetedTask(accountId, {
+      injectContact: options.injectContact,
+      contactInfo: options.contactInfo ?? null,
+      overrideContainerUrl: join.groupUrl,
+    });
+    await d.postResultCard?.(accountId, joinCommentReceipt(join, comment, options.injectContact === true));
   }
 
   private async approveFacebookContactComment(
