@@ -65,14 +65,23 @@ export interface FacebookCommentRunResult {
   container?: string;
 }
 
-/** 加群未成会员（未触发 / gated / pending / ambiguous / 失败）→ 诚实结果卡（不评论、绝不染绿）。 */
+/**
+ * 人类可读群名（回执/审计一律用群名、绝不显裸群 id/URL，见 facebook-scheduled-comment 约定）：
+ * 已解析出真名则用之；候选是裸 URL / 群链接 / 缺失 → 中性占位「目标群」。
+ */
+export function humanGroupLabel(candidate?: string): string {
+  const c = (candidate ?? '').trim();
+  if (!c || /^https?:\/\//i.test(c) || /facebook\.com\/groups\//i.test(c)) return '目标群';
+  return c;
+}
+
+/** 加群未成会员（未触发 / gated / pending / ambiguous / 失败）→ 诚实结果卡（不评论、绝不染绿；不显裸群 id/URL）。 */
 export function joinOnlyReceipt(join: {
   triggered: boolean;
   reason?: string;
   groupUrl?: string;
   outcome?: string;
 }): CommentResultReceipt {
-  const g = join.groupUrl ? `（${join.groupUrl}）` : '';
   if (!join.triggered) {
     switch (join.reason) {
       case 'disabled':
@@ -95,20 +104,20 @@ export function joinOnlyReceipt(join: {
   }
   switch (join.outcome) {
     case 'gated_skip':
-      return { ok: false, level: 'warning', title: '未加入该群', message: `目标群需审批加入${g}，判定为「审批门」已诚实跳过（不点、绝不留悬挂请求）；未评论。` };
+      return { ok: false, level: 'warning', title: '未加入该群', message: `目标群需审批加入，判定为「审批门」已诚实跳过（不点、绝不留悬挂请求）；未评论。` };
     case 'pending':
-      return { ok: false, level: 'warning', title: '加群待审批', message: `已点「加入」但该群需管理员审批${g}，状态 pending；通过后可再评论。本次未评论。` };
+      return { ok: false, level: 'warning', title: '加群待审批', message: `已点「加入」但该群需管理员审批，状态 pending；通过后可再评论。本次未评论。` };
     case 'ambiguous_skip':
-      return { ok: false, level: 'warning', title: '未加入该群', message: `加群前观察结果不明确${g}，fail-closed 跳过（绝不误点）；未评论。` };
+      return { ok: false, level: 'warning', title: '未加入该群', message: `加群前观察结果不明确，fail-closed 跳过（绝不误点）；未评论。` };
     case 'no_button':
-      return { ok: false, level: 'warning', title: '未加入该群', message: `未在群页找到「加入」按钮${g}；未评论。` };
+      return { ok: false, level: 'warning', title: '未加入该群', message: `未在群页找到「加入」按钮；未评论。` };
     case 'login_required':
     case 'blocked_by_captcha':
-      return { ok: false, level: 'error', title: '加群受阻', message: `账号需要登录或遇到验证码${g}，已按流程暂停加群；未评论。` };
+      return { ok: false, level: 'error', title: '加群受阻', message: `账号需要登录或遇到验证码，已按流程暂停加群；未评论。` };
     case 'nav_error':
-      return { ok: false, level: 'error', title: '加群失败', message: `打开群页失败${g}；未评论。` };
+      return { ok: false, level: 'error', title: '加群失败', message: `打开群页失败；未评论。` };
     default:
-      return { ok: false, level: 'error', title: '加群失败', message: `加群未成功（${join.outcome ?? join.reason ?? 'unknown'}）${g}；未评论。` };
+      return { ok: false, level: 'error', title: '加群失败', message: `加群未成功（${join.outcome ?? join.reason ?? 'unknown'}）；未评论。` };
   }
 }
 
@@ -141,7 +150,8 @@ export function joinCommentReceipt(
   comment: FacebookCommentRunResult,
   withContact: boolean,
 ): CommentResultReceipt {
-  const groupLabel = comment.container || join.groupUrl || '新群';
+  // 群名优先用评论侧回填的真名；裸 URL / 缺失 → 中性占位（回执绝不显裸群 id/URL）。join.groupUrl 恒为裸链接故不入回执。
+  const groupLabel = humanGroupLabel(comment.container);
   const joinedWord = join.outcome === 'already_member' ? '（已是该群成员）' : '已加入新群';
   if (comment.outcome === 'commented') {
     return {
@@ -580,7 +590,16 @@ export class CommentScheduler {
         /* best-effort：审计绝不波及主链路 */
       }
     };
-    await this.runFacebookTargetedTaskBody(accountId, options, audit);
+    try {
+      await this.runFacebookTargetedTaskBody(accountId, options, audit);
+    } catch (err) {
+      // 评论阶段意外抛出（如 PG 配额/风控读 reject、pusher 同步抛）→ 绝不静默丢：记一个诚实终态，
+      // 让调用方永远拿到 closure（加群评论合并卡不会在真加群后凭空消失）。普通 /comment 路径的 void().catch 照旧不炸进程。
+      (this.deps.logger ?? console).warn?.(
+        `[comment-scheduler] FB 评论任务异常 account=${accountId}：${(err as Error).message}`,
+      );
+      last = { outcome: 'submit_failed', reason: 'exception' };
+    }
     return last;
   }
 

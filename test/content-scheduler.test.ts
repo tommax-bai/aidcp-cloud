@@ -384,6 +384,53 @@ test('content-scheduler/join: join 与 comment 共用账号级单飞，join 在�
   assert.deepEqual(fired, [`join:${ACC}`], '同账号 join 未结束时，comment 槽被账号级 inFlight 拦下');
 });
 
+test('content-scheduler/cross-guard: 正在评论（isCommentBusy）→ 后台自动加群本 tick 跳过（change facebook-manual-join-comment）', async () => {
+  const joinOffset = offsetMinute(ACC, BASE_DAY, 'join');
+  const joinNow = new Date(2026, 0, 5, 10, joinOffset, 0);
+  const fired: string[] = [];
+  const deps: ContentSchedulerDeps = {
+    onlineAccounts: () => [ACC],
+    scheduleFor: () => ({ autoEnabled: true, postEnabled: false, postDailyCap: 0, commentEnabled: false, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL }),
+    riskStatus: () => 'normal',
+    postedTodayCount: () => Promise.resolve(0),
+    pendingAutonomousCount: () => Promise.resolve(0),
+    isPublishBusy: () => false,
+    triggerPost: () => Promise.resolve(),
+    triggerJoin: (id) => { fired.push(`join:${id}`); return Promise.resolve(); },
+    isJoinBusy: () => false,
+    joinedTodayCount: () => Promise.resolve(0),
+    joinDailyCap: () => 3,
+    isCommentBusy: () => true, // 手动 /comment（含 --join 的评论阶段）在跑
+    now: () => joinNow.getTime(),
+    logger: { warn: () => {} },
+  };
+  await new ContentScheduler(deps).onTick();
+  assert.deepEqual(fired, [], '正在评论 → 后台自动加群绝不抢同一物理边端');
+});
+
+test('content-scheduler/cross-guard: 正在加群（isJoinBusy）→ 后台自动评论本 tick 跳过（change facebook-manual-join-comment）', async () => {
+  const commentOffset = offsetMinute(ACC, BASE_DAY, 'comment');
+  const commentNow = new Date(2026, 0, 5, 10, commentOffset, 0);
+  const fired: string[] = [];
+  const deps: ContentSchedulerDeps = {
+    onlineAccounts: () => [ACC],
+    scheduleFor: () => ({ autoEnabled: true, postEnabled: false, postDailyCap: 0, commentEnabled: true, commentDailyCap: 2, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL }),
+    riskStatus: () => 'normal',
+    postedTodayCount: () => Promise.resolve(0),
+    pendingAutonomousCount: () => Promise.resolve(0),
+    isPublishBusy: () => false,
+    triggerPost: () => Promise.resolve(),
+    triggerComment: (id) => { fired.push(`comment:${id}`); return Promise.resolve(); },
+    isCommentBusy: () => false,
+    commentedTodayCount: () => Promise.resolve(0),
+    isJoinBusy: () => true, // 加群（含手动 --join 的加群阶段）在跑
+    now: () => commentNow.getTime(),
+    logger: { warn: () => {} },
+  };
+  await new ContentScheduler(deps).onTick();
+  assert.deepEqual(fired, [], '正在加群 → 后台自动评论绝不抢同一物理边端');
+});
+
 test('content-scheduler/comment: 三件套未注入 — 评论开着也整体跳过（零回归、不炸）', async () => {
   const { scheduler, fired } = mkC({ wired: false });
   await scheduler.onTick();

@@ -228,6 +228,9 @@ export class ContentScheduler {
             } else if (action === 'comment') {
               // 评论单飞：任务在跑不重触发（cap 的「在跑?1:0」项在此恒 0——在跑早被拦下）。
               if (this.deps.isCommentBusy!(accountId)) continue;
+              // 跨调度器互斥（change facebook-manual-join-comment）：该账号正在加群（含手动 /comment --join 的加群阶段）→ 本 tick 不再起评论，
+              // 让同一物理边端不被 join↔comment 交错驱动（isJoinBusy 未注入则不闸、零回归）。
+              if (this.deps.isJoinBusy?.(accountId)) continue;
               // 日上限原子：持久已发计数（评论管线任务内联等审 + 单飞，无排队草稿窗口，无需在途台账）。
               const sent = await this.deps.commentedTodayCount!(accountId);
               if (sent >= s.commentDailyCap) continue;
@@ -240,6 +243,9 @@ export class ContentScheduler {
                 .finally(() => this.inFlight.delete(accountId));
             } else if (action === 'join') {
               if (this.deps.isJoinBusy!(accountId)) continue;
+              // 跨调度器互斥（change facebook-manual-join-comment）：该账号正在评论（含手动 /comment [--join] 的评论阶段）→ 本 tick 不起加群，
+              // 后台自动加群绝不闯入正在进行的评论、抢同一物理边端（isCommentBusy 未注入则不闸、零回归）。
+              if (this.deps.isCommentBusy?.(accountId)) continue;
               const [joined, cap] = await Promise.all([this.deps.joinedTodayCount!(accountId), this.deps.joinDailyCap!(accountId)]);
               if (joined >= cap) continue;
 
@@ -252,6 +258,8 @@ export class ContentScheduler {
             } else {
               // 联系评论：单飞复用评论机器（同一 isRunning，评论/联系评论互斥天然成立）。
               if (this.deps.isCommentBusy!(accountId)) continue;
+              // 跨调度器互斥（change facebook-manual-join-comment）：正在加群 → 本 tick 不起联系评论（同一物理边端，isJoinBusy 未注入则不闸）。
+              if (this.deps.isJoinBusy?.(accountId)) continue;
               // 尝试型日上限：持久 attempts 台账（被拒/无目标也占额度，保守方向；重启不清零）。
               const attempts = await this.deps.contactAttemptsTodayCount!(accountId);
               if (attempts >= s.contactCommentDailyCap) continue;

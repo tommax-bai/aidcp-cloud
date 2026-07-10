@@ -6,7 +6,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventBus } from '../../src/event-bus/index.js';
-import { CommentScheduler, outcomeToReceipt } from '../../src/comment-agent/comment-scheduler.js';
+import { CommentScheduler, outcomeToReceipt, humanGroupLabel, joinOnlyReceipt, joinCommentReceipt } from '../../src/comment-agent/comment-scheduler.js';
 import type { CommentSchedulerDeps } from '../../src/comment-agent/comment-scheduler.js';
 import type { Soul } from '../../src/soul/types.js';
 
@@ -802,6 +802,23 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.deepEqual(posted, []);
   });
 
+  it('加群评论：评论阶段意外抛出（如配额读崩）→ 真加群后仍回一张诚实卡（绝不静默丢 closure）', async () => {
+    const JOINED = 'https://www.facebook.com/groups/joined-e';
+    const { deps } = fbFlowDeps({ submit: { ok: true } });
+    const cards: Array<{ ok: boolean; level: string; title: string }> = [];
+    await new CommentScheduler({
+      ...deps,
+      facebookCanComment: async () => { throw new Error('PG down'); }, // 评论阶段抛出
+      facebookJoinNewGroup: async () => ({ triggered: true, outcome: 'joined', groupUrl: JOINED }),
+      postResultCard: (_a, r) => { cards.push({ ok: r.ok, level: r.level, title: r.title }); },
+    }).triggerManual('fb-1', { joinFirst: true });
+    await tick();
+    assert.equal(cards.length, 1, '真加群后必须有 closure 卡，绝不静默丢');
+    assert.equal(cards[0].ok, false);
+    assert.equal(cards[0].level, 'warning');
+    assert.match(cards[0].title, /已加群，但未评论/);
+  });
+
   it('加群评论单飞：任务在跑时同账号第二条 /comment 被诚实拒（不并发双驱边端）', async () => {
     const { deps } = fbFlowDeps({ submit: { ok: true } });
     const gate = deferred();
@@ -817,5 +834,38 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.match(second.message, /已有评论任务在跑/);
     gate.resolve();
     await tick();
+  });
+});
+
+// ── change facebook-manual-join-comment：加群/评论结果卡绝不显裸群 id/URL（回执按群名，见 facebook-scheduled-comment 约定）──
+describe('join-comment 结果卡不泄露裸群 id/URL', () => {
+  const RAW = 'https://www.facebook.com/groups/1234567890';
+  it('humanGroupLabel：裸 URL/群链接/缺失 → 中性占位；真名 → 原样', () => {
+    assert.equal(humanGroupLabel(RAW), '目标群');
+    assert.equal(humanGroupLabel('https://www.facebook.com/groups/abc?x=1'), '目标群');
+    assert.equal(humanGroupLabel(''), '目标群');
+    assert.equal(humanGroupLabel(undefined), '目标群');
+    assert.equal(humanGroupLabel('Puerto Rico Y Sus Encantos'), 'Puerto Rico Y Sus Encantos');
+  });
+  it('joinOnlyReceipt（非会员结局）：即便 join 只带裸 groupUrl，卡文案也不含裸链接', () => {
+    for (const outcome of ['gated_skip', 'pending', 'ambiguous_skip', 'no_button', 'nav_error', 'join_failed']) {
+      const r = joinOnlyReceipt({ triggered: true, outcome, groupUrl: RAW });
+      assert.ok(!r.message.includes(RAW), `${outcome} 卡不应含裸群 URL`);
+      assert.ok(!r.message.includes('/groups/'), `${outcome} 卡不应含群 id 片段`);
+      assert.equal(r.ok, false);
+    }
+  });
+  it('joinCommentReceipt：评论侧容器仍是裸 URL（真名未回填）时 → 占位，不泄露 id', () => {
+    const r = joinCommentReceipt({ outcome: 'joined', groupUrl: RAW }, { outcome: 'no_strong_candidate', container: RAW }, false);
+    assert.ok(!r.message.includes(RAW));
+    assert.ok(!r.message.includes('/groups/'));
+    assert.match(r.message, /目标群/);
+    assert.equal(r.level, 'warning'); // 加了群没评上 = 黄，绝不染绿
+  });
+  it('joinCommentReceipt：评论成功且已回填真名 → 卡用真名、绿', () => {
+    const r = joinCommentReceipt({ outcome: 'joined' }, { outcome: 'commented', container: 'Café Lovers PR' }, true);
+    assert.match(r.message, /Café Lovers PR/);
+    assert.match(r.message, /带联系方式/);
+    assert.equal(r.level, 'success');
   });
 });
