@@ -137,7 +137,7 @@ export class FacebookGroupJoinScheduler {
       return { triggered: false, reason: 'no_targets' };
     }
     const observed = await this.deps.edgeTaskLeases.withLease(
-      { edgeId, kind: 'group_join', priority: 'automatic', leaseMs: 2 * 60_000 },
+      { edgeId, kind: 'group_join', priority: 'automatic', leaseMs: 3 * 60_000 },
       (lease) => this.steps(bus, edgeId, lease.taskId).observeGroup(target.groupUrl),
     );
     const observation = observed.observation;
@@ -166,7 +166,7 @@ export class FacebookGroupJoinScheduler {
     await this.deps.memberships.markJoining(accountId, assigned.groupUrl);
 
     const observed = await this.deps.edgeTaskLeases.withLease(
-      { edgeId, kind: 'group_join', priority: 'automatic', leaseMs: 2 * 60_000 },
+      { edgeId, kind: 'group_join', priority: 'automatic', leaseMs: 3 * 60_000 },
       (lease) => this.steps(bus, edgeId, lease.taskId).observeGroup(assigned.groupUrl),
     );
     if (!observed.observation) {
@@ -179,7 +179,7 @@ export class FacebookGroupJoinScheduler {
 
     // 预判 LLM 已在租约外完成；真实点击重新申请任务租约，绝不长占浏览器。
     const clicked = await this.deps.edgeTaskLeases.withLease(
-      { edgeId, kind: 'group_join', priority: 'automatic', leaseMs: 2 * 60_000 },
+      { edgeId, kind: 'group_join', priority: 'automatic', leaseMs: 3 * 60_000 },
       (lease) => this.steps(bus, edgeId, lease.taskId).clickJoin(assigned.groupUrl),
     );
     const postObservation = clicked.postObservation ?? clicked.observation;
