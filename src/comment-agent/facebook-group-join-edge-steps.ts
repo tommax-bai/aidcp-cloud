@@ -5,9 +5,10 @@ import type { EventBus } from '../event-bus/index.js';
 import type { EdgePusher } from './edge-steps.js';
 import type { FacebookGroupJoinObservation } from '../agents/facebook-group-join-judge.js';
 
-// 放长以配合边缘的宽松就绪/确认轮询（change fb-group-join-timeouts）：clickJoin 边缘端最坏 = 就绪轮询(20s)+点前稳定(2s)
-// +点击+点击后成员态确认轮询(45s) ≈ 70s+，故云端等边缘响应的步骤超时须显著大于它，否则 28s 先超时、把慢但成功的加群误判掉。
-export const FACEBOOK_GROUP_JOIN_STEP_TIMEOUT_MS = 90_000;
+// 放长以配合边缘的宽松就绪/确认轮询（change fb-group-join-timeouts）：clickJoin 边缘端最坏 = 就绪轮询(30s)+点前稳定(2s)
+// +点击+点击后成员态确认轮询(45s) ≈ 78.5s + CDP 往返，故云端等边缘响应的步骤超时须显著大于它、留足余量，
+// 否则先超时把「FB 很慢但其实加成功了」的加群误判掉。120s < 任务租约 3 分钟(180s)，安全。
+export const FACEBOOK_GROUP_JOIN_STEP_TIMEOUT_MS = 120_000;
 
 export interface FacebookGroupJoinEdgeStepsDeps {
   bus: EventBus;
