@@ -27,11 +27,17 @@ export interface FacebookGroupStoreOptions {
 export interface FacebookGroupTargetInput {
   url: string;
   name?: string | null;
+  region?: string | null;
+  park?: string | null;
+  direction?: string | null;
 }
 
 export interface FacebookGroupTargetRow {
   groupUrl: string;
   groupName: string | null;
+  region: string | null;
+  park: string | null;
+  direction: string | null;
   joinGating: FacebookGroupJoinGating;
   priority: number;
   enabled: boolean;
@@ -52,6 +58,7 @@ export interface FacebookGroupTargetListRow extends FacebookGroupTargetRow {
 
 export interface FacebookGroupImportResult {
   imported: number;
+  updated: number;
   duplicate: number;
   invalid: number;
   rows: FacebookGroupTargetRow[];
@@ -62,11 +69,24 @@ export interface FacebookGroupTargetListOptions {
   offset?: number;
   status?: FacebookGroupMembershipStatus | 'unassigned';
   enabled?: boolean;
+  region?: string | null;
+  park?: string | null;
+  direction?: string | null;
 }
 
 export interface FacebookGroupTargetListResult {
   items: FacebookGroupTargetListRow[];
   total: number;
+}
+
+export interface FacebookGroupRegionFacet {
+  region: string;
+  parks: string[];
+}
+
+export interface FacebookGroupTargetFacets {
+  regions: FacebookGroupRegionFacet[];
+  directions: string[];
 }
 
 export interface FacebookGroupAccountProgress {
@@ -134,6 +154,9 @@ export interface FacebookGroupJoinAuditRow {
 interface TargetDbRow {
   group_url: string;
   group_name: string | null;
+  region: string | null;
+  park: string | null;
+  direction: string | null;
   join_gating: FacebookGroupJoinGating;
   priority: number;
   enabled: boolean;
@@ -211,10 +234,18 @@ function normalizeName(name: string | null | undefined): string | null {
   return v ? v.slice(0, 200) : null;
 }
 
+function normalizeMeta(value: string | null | undefined): string | null {
+  const v = typeof value === 'string' ? value.trim() : '';
+  return v ? v.slice(0, 120) : null;
+}
+
 function toTargetRow(r: TargetDbRow): FacebookGroupTargetRow {
   return {
     groupUrl: r.group_url,
     groupName: r.group_name ?? null,
+    region: r.region ?? null,
+    park: r.park ?? null,
+    direction: r.direction ?? null,
     joinGating: r.join_gating,
     priority: Number(r.priority),
     enabled: r.enabled,
@@ -259,6 +290,9 @@ export const FACEBOOK_GROUP_TARGET_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS facebook_group_target (
   group_url    TEXT PRIMARY KEY,
   group_name   TEXT,
+  region       TEXT,
+  park         TEXT,
+  direction    TEXT,
   join_gating  TEXT NOT NULL DEFAULT 'unknown'
                CHECK (join_gating IN ('unknown','instant','gated')),
   priority     INTEGER NOT NULL DEFAULT 0,
@@ -269,6 +303,9 @@ CREATE TABLE IF NOT EXISTS facebook_group_target (
 );
 
 ALTER TABLE facebook_group_target ADD COLUMN IF NOT EXISTS group_name TEXT;
+ALTER TABLE facebook_group_target ADD COLUMN IF NOT EXISTS region TEXT;
+ALTER TABLE facebook_group_target ADD COLUMN IF NOT EXISTS park TEXT;
+ALTER TABLE facebook_group_target ADD COLUMN IF NOT EXISTS direction TEXT;
 ALTER TABLE facebook_group_target ADD COLUMN IF NOT EXISTS join_gating TEXT NOT NULL DEFAULT 'unknown';
 ALTER TABLE facebook_group_target ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE facebook_group_target ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT true;
@@ -278,6 +315,12 @@ ALTER TABLE facebook_group_target ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPT
 
 CREATE INDEX IF NOT EXISTS idx_fb_group_target_enabled_gating
   ON facebook_group_target (enabled, join_gating, priority DESC, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_fb_group_target_region_park
+  ON facebook_group_target (region, park)
+  WHERE region IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_fb_group_target_direction
+  ON facebook_group_target (direction)
+  WHERE direction IS NOT NULL;
 `;
 
 export const FACEBOOK_GROUP_MEMBERSHIP_SCHEMA_SQL = `
@@ -346,6 +389,8 @@ export class FacebookGroupTargetStore {
   ): Promise<FacebookGroupImportResult> {
     let invalid = 0;
     let duplicate = 0;
+    let updated = 0;
+    let imported = 0;
     const seen = new Set<string>();
     const rows: FacebookGroupTargetRow[] = [];
     for (const input of inputs) {
@@ -359,20 +404,42 @@ export class FacebookGroupTargetStore {
         continue;
       }
       seen.add(groupUrl);
+      const groupName = normalizeName(input.name);
+      const region = normalizeMeta(input.region);
+      const park = normalizeMeta(input.park);
+      const direction = normalizeMeta(input.direction);
       const { rows: inserted } = await this.pool.query<TargetDbRow>(
-        `INSERT INTO facebook_group_target (group_url, group_name, import_batch)
-         VALUES ($1, $2, $3)
+        `INSERT INTO facebook_group_target (group_url, group_name, region, park, direction, import_batch)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (group_url) DO NOTHING
-         RETURNING group_url, group_name, join_gating, priority, enabled, import_batch, created_at, updated_at`,
-        [groupUrl, normalizeName(input.name), importBatch],
+         RETURNING group_url, group_name, region, park, direction, join_gating, priority, enabled, import_batch, created_at, updated_at`,
+        [groupUrl, groupName, region, park, direction, importBatch],
       );
-      if (!inserted[0]) {
-        duplicate++;
+      if (inserted[0]) {
+        imported++;
+        rows.push(toTargetRow(inserted[0]));
         continue;
       }
-      rows.push(toTargetRow(inserted[0]));
+      const { rows: changed } = await this.pool.query<TargetDbRow>(
+        `UPDATE facebook_group_target
+         SET group_name = COALESCE($2, group_name),
+             region = COALESCE($3, region),
+             park = COALESCE($4, park),
+             direction = COALESCE($5, direction),
+             import_batch = COALESCE($6, import_batch),
+             updated_at = now()
+         WHERE group_url = $1
+         RETURNING group_url, group_name, region, park, direction, join_gating, priority, enabled, import_batch, created_at, updated_at`,
+        [groupUrl, groupName, region, park, direction, importBatch],
+      );
+      if (changed[0]) {
+        updated++;
+        rows.push(toTargetRow(changed[0]));
+      } else {
+        duplicate++;
+      }
     }
-    return { imported: rows.length, duplicate, invalid, rows };
+    return { imported, updated, duplicate, invalid, rows };
   }
 
   async setEnabled(groupUrlInput: string, enabled: boolean): Promise<FacebookGroupTargetRow | null> {
@@ -382,7 +449,7 @@ export class FacebookGroupTargetStore {
       `UPDATE facebook_group_target
        SET enabled = $2, updated_at = now()
        WHERE group_url = $1
-       RETURNING group_url, group_name, join_gating, priority, enabled, import_batch, created_at, updated_at`,
+       RETURNING group_url, group_name, region, park, direction, join_gating, priority, enabled, import_batch, created_at, updated_at`,
       [groupUrl, enabled],
     );
     return rows[0] ? toTargetRow(rows[0]) : null;
@@ -414,6 +481,21 @@ export class FacebookGroupTargetStore {
       values.push(options.status);
       where.push(`m.status = $${values.length}`);
     }
+    const region = normalizeMeta(options.region);
+    if (region) {
+      values.push(region);
+      where.push(`t.region = $${values.length}`);
+    }
+    const park = normalizeMeta(options.park);
+    if (park) {
+      values.push(park);
+      where.push(`t.park = $${values.length}`);
+    }
+    const direction = normalizeMeta(options.direction);
+    if (direction) {
+      values.push(direction);
+      where.push(`t.direction = $${values.length}`);
+    }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const count = await this.pool.query<{ total: string }>(
       `SELECT count(*)::text AS total
@@ -424,7 +506,7 @@ export class FacebookGroupTargetStore {
     );
     values.push(limit, offset);
     const { rows } = await this.pool.query<TargetListDbRow>(
-      `SELECT t.group_url, t.group_name, t.join_gating, t.priority, t.enabled, t.import_batch,
+      `SELECT t.group_url, t.group_name, t.region, t.park, t.direction, t.join_gating, t.priority, t.enabled, t.import_batch,
               t.created_at, t.updated_at,
               m.account_id, m.status AS membership_status, m.joined_at, m.last_attempt_at,
               m.last_reason, m.last_commented_at, m.comments_total
@@ -438,9 +520,42 @@ export class FacebookGroupTargetStore {
     return { items: rows.map(toListRow), total: Number(count.rows[0]?.total ?? 0) };
   }
 
+  async listFacets(): Promise<FacebookGroupTargetFacets> {
+    const [{ rows: regionRows }, { rows: directionRows }] = await Promise.all([
+      this.pool.query<{ region: string | null; park: string | null }>(
+        `SELECT DISTINCT region, park
+         FROM facebook_group_target
+         WHERE region IS NOT NULL
+         ORDER BY region ASC, park ASC NULLS LAST`,
+      ),
+      this.pool.query<{ direction: string | null }>(
+        `SELECT DISTINCT direction
+         FROM facebook_group_target
+         WHERE direction IS NOT NULL
+         ORDER BY direction ASC`,
+      ),
+    ]);
+    const byRegion = new Map<string, Set<string>>();
+    for (const row of regionRows) {
+      const region = normalizeMeta(row.region);
+      if (!region) continue;
+      const parks = byRegion.get(region) ?? new Set<string>();
+      const park = normalizeMeta(row.park);
+      if (park) parks.add(park);
+      byRegion.set(region, parks);
+    }
+    return {
+      regions: [...byRegion.entries()].map(([region, parks]) => ({
+        region,
+        parks: [...parks].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN')),
+      })),
+      directions: directionRows.map((row) => normalizeMeta(row.direction)).filter((v): v is string => !!v),
+    };
+  }
+
   async nextJoinCandidate(): Promise<FacebookGroupTargetRow | null> {
     const { rows } = await this.pool.query<TargetDbRow>(
-      `SELECT t.group_url, t.group_name, t.join_gating, t.priority, t.enabled, t.import_batch, t.created_at, t.updated_at
+      `SELECT t.group_url, t.group_name, t.region, t.park, t.direction, t.join_gating, t.priority, t.enabled, t.import_batch, t.created_at, t.updated_at
        FROM facebook_group_target t
        WHERE t.enabled = true
          AND t.join_gating IN ('unknown','instant')
