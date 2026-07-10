@@ -206,7 +206,7 @@ export interface RoleDispatcherOptions {
    * （getForAccount!==null，**不走会回落默认的解析器**）。缺省 → 不设闸（向后兼容单账号）。default 账号硬豁免（见 canStartSession）。
    */
   isPersonaBound?: (accountId: string) => boolean;
-  /** 账号未绑人设被诚实拒绝时回调（置 needs_persona_setup + 飞书告警）。 */
+  /** 账号未绑人设被诚实拒绝时回调（记录 needs_persona_setup 拒绝）。 */
   onSessionRejected?: (accountId: string, reason: string) => void | Promise<void>;
   /** 全局调度开关（面板 /dispatch）：false 时不启动浏览会话。缺省 → 恒 true。 */
   isDispatchActive?: () => boolean;
@@ -849,7 +849,7 @@ export class RoleDispatcher {
     if (!this.isDispatchActive()) return false;
     // facebook-scheduled-comment 2.8：平台不具备 browse 能力（如 Facebook v1 只声明 'comment'）→ 诚实拒绝启动
     // xhs 浏览角色循环。放在人设闸之前，避免 FB 账号被误判 needs_persona_setup。不复用 onSessionRejected
-    //（那会硬编码发「未绑人设」飞书告警并误报）；FB 账号不浏览是正常预期、非事故，只 console.warn。
+    //（那会硬编码按「未绑人设」拒绝并误报）；FB 账号不浏览是正常预期、非事故，只 console.warn。
     if (this.accountPlatform && !platformRegistryEntry(this.accountPlatform).capabilities.includes('browse')) {
       console.warn(
         `[RoleDispatcher] 账号 ${this.currentAccountId} 平台=${this.accountPlatform} 无 browse 能力 → 拒绝启动浏览会话（platform_no_browse）：不挂 xhs 浏览循环、不起看门狗`,

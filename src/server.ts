@@ -1003,11 +1003,10 @@ async function main(): Promise<void> {
   };
   // 人设面板外观（后台按账号编辑 + soul 校验 + 写非乐观回真态）。
   // auto-start-on-persona-bind：后台真绑定人设成功 → 唤醒该账号在线、被人设闸短路的节点就地开跑（无需重连）。
-  // runtimes / personaSetupAlerted 为后向声明，onBound 闭包仅在请求期（PUT 人设）才调用、装配早已完成（同 onPublishEnd 模式）。
+  // runtimes 为后向声明，onBound 闭包仅在请求期（PUT 人设）才调用、装配早已完成（同 onPublishEnd 模式）。
   const personaPanel = createPersonaPanel({
     store: personaStore,
     onBound: (accountId) => {
-      personaSetupAlerted.delete(accountId); // 清一次性告警去重，使日后「解绑→在线→再绑」仍能再次告警/唤醒
       runtimes?.startSessionForAccount(accountId);
     },
   });
@@ -1449,9 +1448,6 @@ async function main(): Promise<void> {
   let runtimes: ConnectionRuntimeRegistry | undefined;
   // 调度启停态（面板 /dispatch 全局开关）：false 时新 / 现有连接不启动浏览会话。
   let dispatchActive = true;
-  // 未绑人设告警去重（避免重连 / 空转 churn 反复刷飞书）：每账号每进程仅告警一次。
-  const personaSetupAlerted = new Set<string>();
-
   // 建号自助人设生成器（change edge-persona-keyword-generation）：复用共享 llm（按角色 browse:persona_generator
   // 解析模型/温度、按 accountId 记账），生成 persona.generate 的草稿。
   const personaGenerator = new PersonaGenerator({ llm });
@@ -1732,23 +1728,10 @@ async function main(): Promise<void> {
   };
 
   // ── 按连接多租户编排（multi-account-node-support D1/D2/D3/D4/D6）─────────────────
-  // 未绑人设 / 配置错误 → 飞书通知 + 后台状态（D6，不新增 cloud→edge 命令、不动协议）。
-  // 「needs_persona_setup 态」是派生字段（persona_config 行不存在即未绑），无需额外落库；这里只负责告警。
-  const onNeedsPersonaSetup = async (accountId: string, edgeId: string | undefined, reason: string): Promise<void> => {
+  // 未绑人设 → 仅记录拒绝日志；不再向飞书群发送 needs_persona_setup 提示。
+  // 「needs_persona_setup 态」是派生字段（persona_config 行不存在即未绑），无需额外落库。
+  const onNeedsPersonaSetup = (accountId: string, edgeId: string | undefined, reason: string): void => {
     console.warn(`[aidcp-cloud] 账号 ${accountId}（edge=${edgeId ?? '-'}）${reason}：未绑人设，拒绝启动浏览会话`);
-    if (personaSetupAlerted.has(accountId)) return; // 每账号每进程仅告警一次，避免空转 churn 刷屏
-    personaSetupAlerted.add(accountId);
-    try {
-      const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
-      if (chatId) {
-        await messenger.sendText(
-          chatId,
-          `⚠️ 账号 \`${accountId}\` 节点已上线但**未绑定人设**，已拒绝启动（needs_persona_setup）。\n请到后台「人设」页为该账号设置人设后，节点重连即可开始浏览。`,
-        );
-      }
-    } catch (err) {
-      console.error('[aidcp-cloud] needs_persona_setup 飞书告警发送失败:', (err as Error).message);
-    }
   };
   // 缺 / 空 accountId 握手 → 配置错误（拒绝握手在 handler/registry 完成，这里只发飞书把人叫去修启动器）。
   const onConfigError = async (session: { edgeId?: string; machineLabel?: string }, message: string): Promise<void> => {
