@@ -58,12 +58,28 @@ export const HOUR_BURST_CAP: ActionQuota = {
   join_group: 2,
 };
 
-export function deriveWindowQuotas(level: RiskQuotaLevel): WindowQuotas {
-  const day = DAILY_QUOTAS[level];
+export function deriveWindowQuotasFromDaily(day: ActionQuota): WindowQuotas {
   return {
     minute: mapQuota(day, (action, daily) => Math.max(1, Math.min(MINUTE_BURST_CAP[action], Math.ceil(daily / 20)))),
     hour: mapQuota(day, (action, daily) => Math.max(1, Math.min(HOUR_BURST_CAP[action], Math.ceil(daily / 4)))),
     day: { ...day },
+  };
+}
+
+export function deriveWindowQuotas(level: RiskQuotaLevel): WindowQuotas {
+  return deriveWindowQuotasFromDaily(DAILY_QUOTAS[level]);
+}
+
+/**
+ * Element-wise min of two window-quota sets (change account-nurture-discipline-spine).
+ * 用于把「账号年龄冷启动天花板」与「风控档缩放配额」在每窗口每动作取较紧者——
+ * min 语义保证年龄爬坡与风控降速(warned/restricted)两条闸同时生效、互不架空。
+ */
+export function minWindowQuotas(a: WindowQuotas, b: WindowQuotas): WindowQuotas {
+  return {
+    minute: mapQuota(a.minute, (action, value) => Math.min(value, b.minute[action])),
+    hour: mapQuota(a.hour, (action, value) => Math.min(value, b.hour[action])),
+    day: mapQuota(a.day, (action, value) => Math.min(value, b.day[action])),
   };
 }
 

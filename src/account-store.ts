@@ -129,6 +129,11 @@ export interface AccountStore {
   getPlatform?(accountId: string): Promise<PlatformId>;
   /** 按平台枚举账号；返回状态字段，调用方可据 active/paused 做调度闸。 */
   listByPlatform?(platform: PlatformId): Promise<PlatformAccountRecord[]>;
+  /**
+   * 读账号养号元数据（change account-nurture-discipline-spine）：created_at(epoch ms) + platform。
+   * 供风控冷启动配额爬坡按账号年龄现算天花板。缺行 / 无 created_at → null（调用方按「不叠冷启动」安全兜底）。
+   */
+  getNurtureMeta?(accountId: string): Promise<{ createdAt: number; platform: PlatformId } | null>;
   close?(): Promise<void>;
 }
 
@@ -342,6 +347,17 @@ export class PgAccountStore implements AccountStore {
     const platform = normalizePlatformId(rows[0]?.platform);
     if (rows.length > 0) this.platformCache.set(accountId, platform);
     return platform;
+  }
+
+  async getNurtureMeta(accountId: string): Promise<{ createdAt: number; platform: PlatformId } | null> {
+    if (accountId === RETIRED_ACCOUNT_ID) return null;
+    const { rows } = await this.pool.query<{ created_at: Date | null; platform: string | null }>(
+      `SELECT created_at, platform FROM accounts WHERE account_id = $1`,
+      [accountId],
+    );
+    const row = rows[0];
+    if (!row?.created_at) return null;
+    return { createdAt: row.created_at.getTime(), platform: normalizePlatformId(row.platform) };
   }
 
   async listByPlatform(platform: PlatformId): Promise<PlatformAccountRecord[]> {

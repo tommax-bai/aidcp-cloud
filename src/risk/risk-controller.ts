@@ -1,4 +1,5 @@
-import { deriveWindowQuotas, scaleWindowQuotas, zeroInteractionQuotas } from './quotas.js';
+import { coldStartDailyCap } from './cold-start-planner.js';
+import { deriveWindowQuotas, deriveWindowQuotasFromDaily, minWindowQuotas, scaleWindowQuotas, zeroInteractionQuotas } from './quotas.js';
 import { createRiskState, RiskStateMachine } from './risk-state-machine.js';
 import { SlidingWindowCounter, WINDOW_MS } from './sliding-window-counter.js';
 import type { QuotaProvider, RiskAction, RiskQuotaLevel, RiskSignal, RiskState, RiskStore, RiskWindow, WindowQuotas } from './types.js';
@@ -15,6 +16,18 @@ export interface RiskControllerOptions {
    * 缺省（不注入）→ 回落 deriveWindowQuotas 写死默认（与历史行为逐位一致，零回归）。只读、永不抛。
    */
   quotaProvider?: QuotaProvider;
+  /**
+   * 账号创建时刻（epoch ms，change account-nurture-discipline-spine）：用于按 created_at 现算
+   * 账号年龄→冷启动配额天花板。缺省（不注入）→ 不叠冷启动 clamp（零回归）。
+   */
+  createdAt?: number;
+  /** 账号平台（同上）：facebook → 更保守冷启动曲线；其它/缺省 → 小红书曲线。 */
+  platform?: string;
+  /**
+   * 冷启动爬坡旁路开关（默认 true = 开，安全方向）。false → 完全跳过冷启动 clamp，
+   * effectiveQuotas 逐位回落历史风控缩放行为（可 A/B + 秒回滚）。
+   */
+  coldStartRampEnabled?: boolean;
 }
 
 export interface CanDoResult {
@@ -31,6 +44,9 @@ export class RiskController {
   private readonly store?: RiskStore;
   private readonly minViewsForLikeRatio: number;
   private readonly quotaProvider?: QuotaProvider;
+  private readonly createdAt?: number;
+  private readonly platform?: string;
+  private readonly coldStartRampEnabled: boolean;
   private state: RiskState;
   /** 每账号串行化：所有改 state + saveState 的写经此链，避免并发 read-modify-write 丢更新（D7）。 */
   private mutationChain: Promise<unknown> = Promise.resolve();
@@ -45,6 +61,9 @@ export class RiskController {
     this.counter = new SlidingWindowCounter({ clock: this.clock });
     this.minViewsForLikeRatio = options.minViewsForLikeRatio ?? 10;
     this.quotaProvider = options.quotaProvider;
+    this.createdAt = options.createdAt;
+    this.platform = options.platform;
+    this.coldStartRampEnabled = options.coldStartRampEnabled ?? true;
   }
 
   static async create(options: RiskControllerOptions = {}): Promise<RiskController> {
@@ -157,10 +176,27 @@ export class RiskController {
     // 缩放 / 清零语义不变，只是基准数字来源换成 provider。
     const base = (level: RiskQuotaLevel): WindowQuotas =>
       this.quotaProvider?.windowQuotasFor(level) ?? deriveWindowQuotas(level);
-    if (this.state.status === 'warned') return scaleWindowQuotas(base('conservative'), 0.7);
-    if (this.state.status === 'restricted') return zeroInteractionQuotas(base('conservative'));
-    if (this.state.status === 'frozen') return scaleWindowQuotas(base('conservative'), 0);
-    return base(this.state.quotaLevel);
+    let riskScaled: WindowQuotas;
+    if (this.state.status === 'warned') riskScaled = scaleWindowQuotas(base('conservative'), 0.7);
+    else if (this.state.status === 'restricted') riskScaled = zeroInteractionQuotas(base('conservative'));
+    else if (this.state.status === 'frozen') riskScaled = scaleWindowQuotas(base('conservative'), 0);
+    else riskScaled = base(this.state.quotaLevel);
+    return this.applyColdStartClamp(riskScaled);
+  }
+
+  /**
+   * 账号年龄冷启动 clamp（change account-nurture-discipline-spine）：
+   * effectiveQuotas = min(冷启动当日天花板, 风控缩放配额)。取 min 保证「年龄爬坡」与
+   * 「风控降速(warned/restricted/frozen)」两条闸同时生效、谁更紧谁生效、互不架空。
+   * 旁路关 / 无 createdAt / 账号已毕业（超冷启动窗口）→ 原样返回风控缩放（逐位零回归）。
+   * 冷启动天花板走确定性 coldStartDailyCap（区间上界），绝不随机采样、逐调用稳定。
+   */
+  private applyColdStartClamp(riskScaled: WindowQuotas): WindowQuotas {
+    if (!this.coldStartRampEnabled || this.createdAt == null) return riskScaled;
+    const ageDays = Math.max(0, Math.floor((this.clock() - this.createdAt) / 86_400_000));
+    const cap = coldStartDailyCap(ageDays, this.platform);
+    if (!cap) return riskScaled;
+    return minWindowQuotas(riskScaled, deriveWindowQuotasFromDaily(cap));
   }
 
   counts() {

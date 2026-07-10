@@ -1008,7 +1008,17 @@ async function main(): Promise<void> {
   });
   // quotaConfigStore 作 QuotaProvider 注入：每账号 controller 的 effectiveQuotas 热加载读限额数字
   // （change safety-quota-config）；init 失败时其镜像为空 → 退化派生写死默认，绝不 brick。
-  const riskRegistry = new RiskControllerRegistry(riskStore, undefined, quotaConfigStore);
+  // 养号冷启动配额爬坡（change account-nurture-discipline-spine）：默认开（安全方向），
+  // AIDCP_COLDSTART_RAMP=false 可秒回滚。按 accounts.created_at + platform 现算账号年龄→冷启动天花板，
+  // effectiveQuotas=min(冷启动天花板, 风控缩放)。resolver 缺 / 失败 → 该账号不叠冷启动（零回归）。
+  const coldStartRampEnabled = process.env.AIDCP_COLDSTART_RAMP !== 'false';
+  const riskRegistry = new RiskControllerRegistry(riskStore, undefined, quotaConfigStore, {
+    coldStartRampEnabled,
+    nurtureMetaResolver: accountStore
+      ? (accountId) => accountStore!.getNurtureMeta?.(accountId) ?? Promise.resolve(null)
+      : undefined,
+  });
+  console.log(`[aidcp-cloud] 冷启动配额爬坡 ${coldStartRampEnabled ? '已开启' : '已禁用(AIDCP_COLDSTART_RAMP=false)'}`);
   // retire-default-account：不再建单租户全局 'default' controller；风控一律经 registry 按真实账号懒解析。
   const resolveController = (accountId: string): Promise<RiskController> => riskRegistry.getController(accountId);
   // 「唯一真实账号」解析（飞书无参 / 自动发帖用）：恰好一个真实账号 → 它，0 或多个 → null（honest-fail，绝不回落 default）。

@@ -1,4 +1,4 @@
-import type { ActionQuota, RiskAction } from './types.js';
+import { RISK_ACTIONS, type ActionQuota, type RiskAction } from './types.js';
 
 export type QuotaRange = Record<RiskAction, [number, number]>;
 
@@ -16,6 +16,36 @@ export const COLD_START_PLANS: ColdStartDayPlan[] = [
   { day: 6, quotas: { view: [80, 120], like: [10, 20], collect: [3, 5], comment: [1, 3], follow: [2, 3], publish: [0, 1], comment_like: [0, 2], join_group: [0, 1] } },
   { day: 7, quotas: { view: [80, 120], like: [10, 20], collect: [3, 5], comment: [1, 3], follow: [2, 3], publish: [0, 1], comment_like: [0, 2], join_group: [0, 1] } },
 ];
+
+/**
+ * Facebook 冷启动曲线（change account-nurture-discipline-spine）：比小红书更保守。
+ * FB 封号比小红书激进，养号教程要求「新号前几天低量、按天数逐步放开」。约束：
+ * D1-3 仅浏览 + 极少点赞、无评论无发布；comment 不早于 D3；publish/join_group 不早于 D5。
+ * collect / comment_like 是小红书特有语义，FB 无对应概念 → 恒 0。区间上界即当日天花板。
+ */
+export const FB_COLD_START_PLANS: ColdStartDayPlan[] = [
+  { day: 1, quotas: { view: [10, 20], like: [0, 2], collect: [0, 0], comment: [0, 0], follow: [0, 1], publish: [0, 0], comment_like: [0, 0], join_group: [0, 0] } },
+  { day: 2, quotas: { view: [15, 25], like: [0, 3], collect: [0, 0], comment: [0, 0], follow: [0, 1], publish: [0, 0], comment_like: [0, 0], join_group: [0, 0] } },
+  { day: 3, quotas: { view: [20, 35], like: [3, 6], collect: [0, 0], comment: [0, 1], follow: [1, 2], publish: [0, 0], comment_like: [0, 0], join_group: [0, 1] } },
+  { day: 4, quotas: { view: [25, 40], like: [5, 8], collect: [0, 0], comment: [1, 2], follow: [1, 2], publish: [0, 0], comment_like: [0, 0], join_group: [0, 1] } },
+  { day: 5, quotas: { view: [30, 50], like: [6, 12], collect: [0, 0], comment: [1, 3], follow: [2, 3], publish: [0, 1], comment_like: [0, 0], join_group: [1, 2] } },
+  { day: 6, quotas: { view: [40, 60], like: [8, 15], collect: [0, 0], comment: [2, 4], follow: [2, 4], publish: [0, 1], comment_like: [0, 0], join_group: [1, 2] } },
+  { day: 7, quotas: { view: [50, 70], like: [10, 18], collect: [0, 0], comment: [2, 5], follow: [3, 5], publish: [1, 1], comment_like: [0, 0], join_group: [1, 3] } },
+];
+
+/**
+ * 确定性冷启动当日配额天花板（change account-nurture-discipline-spine）。
+ * 用区间**上界**作当日天花板——`effectiveQuotas()` 每次调用都要现算, 绝不能像
+ * `quotaForAccountAge` 那样随机采样(会让配额逐调用抖动)。account 年龄超冷启动窗口(7天) → null(毕业)。
+ * platform === 'facebook' → 更保守 FB 曲线, 否则小红书曲线。
+ */
+export function coldStartDailyCap(accountAgeDays: number, platform?: string): ActionQuota | null {
+  const day = Math.floor(Math.max(0, accountAgeDays)) + 1;
+  const plans = platform === 'facebook' ? FB_COLD_START_PLANS : COLD_START_PLANS;
+  const plan = plans.find((candidate) => candidate.day === day);
+  if (!plan) return null;
+  return Object.fromEntries(RISK_ACTIONS.map((action) => [action, plan.quotas[action][1]])) as ActionQuota;
+}
 
 export interface ColdStartPlannerOptions {
   random?: () => number;
