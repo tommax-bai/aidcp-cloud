@@ -24,6 +24,7 @@ import type {
 } from './protocol.js';
 import type { EdgePusher, EdgeSession } from './ws-server.js';
 import type { CaptchaAssistDetectedResult } from './captcha-assist.js';
+import { isFacebookThrottleText } from './facebook-throttle-signals.js';
 
 export interface CaptchaAssistCoordinatorPort {
   onDetected(
@@ -81,7 +82,16 @@ export class CaptchaCoordinator {
     } else {
       try {
         const controller = await this.deps.resolveController(accountId);
-        await controller.applySignal({ kind: payload.kind === 'captcha' ? 'confirmed' : 'light' });
+        // Facebook 软阻断/限流浮层（"Action Blocked"/"we limit how often you can do this" 等，change
+        // account-nurture-discipline-spine §3）：激进退避——即便 kind='unknown'，只要 overlay 文案命中
+        // FB 限流词库，也把信号升级为 confirmed（→restricted，只留浏览），不足以靠 warned ×0.7 刹车。
+        // 只喂 applySignal 输入侧、不改状态机迁移表；终态仍云端 RiskController 单写。小红书 overlay 不命中 → 零回归。
+        const throttled = isFacebookThrottleText(payload.overlay?.text);
+        const signalKind = payload.kind === 'captcha' || throttled ? 'confirmed' : 'light';
+        if (throttled && payload.kind !== 'captcha') {
+          this.logger.log('[captcha] Facebook 限流软阻断信号命中 → 升级 restricted 退避', { edgeId, accountId });
+        }
+        await controller.applySignal({ kind: signalKind });
         status = controller.getState().status;
       } catch (err) {
         this.logger.error('[captcha] applySignal 失败:', err instanceof Error ? err.message : String(err));
