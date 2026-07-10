@@ -35,6 +35,7 @@ function makeHarness(opts: {
   auto?: boolean;
   shadow?: boolean;
   canJoin?: boolean;
+  canUseSessionJoin?: boolean;
   llmVerdicts?: string[];
   edge?: (env: Env, bus: EventBus) => void;
 } = {}) {
@@ -43,6 +44,7 @@ function makeHarness(opts: {
   const auditRows: FacebookGroupJoinAuditRow[] = [];
   const membershipCalls: string[] = [];
   const targetCalls: string[] = [];
+  const sessionBudgetCalls: string[] = [];
   const paused: string[] = [];
   let llmIndex = 0;
 
@@ -104,6 +106,11 @@ function makeHarness(opts: {
       complete: async () => opts.llmVerdicts?.[llmIndex++] ?? '{"verdict":"ambiguous_skip","confidence":0.2,"reason":"test"}',
     }),
     canJoin: async () => opts.canJoin ?? true,
+    canUseSessionJoin: async () => opts.canUseSessionJoin ?? true,
+    recordSessionJoin: async (accountId, edgeId) => {
+      sessionBudgetCalls.push(`${accountId}:${edgeId ?? ''}`);
+      return true;
+    },
     isFacebookAccount: async () => true,
     pauseAccount: async (accountId, reason) => {
       paused.push(`${accountId}:${reason}`);
@@ -113,7 +120,7 @@ function makeHarness(opts: {
     stepTimeoutMs: 20,
     logger: { warn: () => {}, log: () => {} },
   });
-  return { scheduler, sent, auditRows, membershipCalls, targetCalls, paused, bus };
+  return { scheduler, sent, auditRows, membershipCalls, targetCalls, sessionBudgetCalls, paused, bus };
 }
 
 describe('FacebookGroupJoinScheduler', () => {
@@ -176,6 +183,17 @@ describe('FacebookGroupJoinScheduler', () => {
     assert.deepEqual(h.sent.map((e) => e.payload.click), [false]);
     assert.ok(h.membershipCalls.includes(`outcome:${GROUP}:gated:gated_or_questionnaire_signal`));
     assert.ok(h.targetCalls.includes(`gating:${GROUP}:gated`));
+    assert.deepEqual(h.sessionBudgetCalls, []);
+  });
+
+  it('real: 单场加群预算耗尽时不 claim、不下发', async () => {
+    const h = makeHarness({ auto: true, canUseSessionJoin: false });
+    const r = await h.scheduler.triggerScheduled('acc-fb');
+    assert.equal(r.triggered, false);
+    assert.equal(r.reason, 'session_budget');
+    assert.deepEqual(h.sent, []);
+    assert.deepEqual(h.membershipCalls, []);
+    assert.ok(h.auditRows.some((row) => row.outcome === 'quota_denied' && row.reason === 'session_budget'));
   });
 
   it('real: instant pre-click + joined post-click 写 joined', async () => {
@@ -212,6 +230,7 @@ describe('FacebookGroupJoinScheduler', () => {
     assert.deepEqual(h.sent.map((e) => e.payload.click), [false, true]);
     assert.ok(h.membershipCalls.some((c) => c.startsWith(`joined:${GROUP}:member_signal`)));
     assert.ok(h.targetCalls.includes(`gating:${GROUP}:instant`));
+    assert.deepEqual(h.sessionBudgetCalls, ['acc-fb:edge-fb']);
   });
 
   it('real: login_required observation 暂停账号并保留 retryable assignment，不学习 group gated', async () => {

@@ -2296,6 +2296,10 @@ async function main(): Promise<void> {
     audit: facebookGroupJoinAuditStore,
     llmFor: (accountId) => ({ complete: (prompt, opts) => llm.complete(prompt, { ...opts, accountId }) }),
     canJoin: async (accountId) => (await resolveController(accountId)).canDo('join_group'),
+    canUseSessionJoin: (accountId, edgeId) =>
+      (runtimes?.remainingSessionBudgetForAccount(accountId, 'join_group', edgeId) ?? 0) > 0,
+    recordSessionJoin: (accountId, edgeId) =>
+      runtimes?.consumeSessionBudgetForAccount(accountId, 'join_group', edgeId) ?? false,
     isFacebookAccount: async (accountId) => (await accountStore?.getPlatform?.(accountId)) === 'facebook',
     pauseAccount: async (accountId, reason) => {
       await accountState.pause(accountId);
@@ -2663,7 +2667,7 @@ async function main(): Promise<void> {
   const quotaConfigPanel = createQuotaConfigPanel({ store: quotaConfigStore });
   // 操作兜底 floor 面板外观（change pacing-floor-config-min-interval）：四类操作生效兜底区间 + 写校验（展宽/CAP，非法整块拒）+ 非乐观回真态。
   const pacingConfigPanel = createPacingConfigPanel({ store: pacingConfigStore });
-  // 单场上限面板外观（全局单例，change restore-auto-resume-and-global-safety-config）：全局时长 + 六项预算回显 + 写校验（非法整块拒）+ 非乐观回真态。
+  // 单场上限面板外观（全局单例，change restore-auto-resume-and-global-safety-config）：全局时长 + 七项预算回显 + 写校验（非法整块拒）+ 非乐观回真态。
   const sessionLimitPanel = createSessionLimitPanel({ store: sessionConfigStore });
   // 引流线索热度过滤阈值面板外观（全局单例，change feed-hot-lead-group-comment）：三阈值回显 + 写校验（非法整块拒）+ 热加载。
   const hotLeadConfigPanel = createHotLeadConfigPanel({ store: hotLeadConfigStore });

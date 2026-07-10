@@ -98,6 +98,18 @@ export interface ViewQuotaDecision {
   retryAfterMs?: number;
 }
 
+export type SessionBudgetAction = 'like' | 'collect' | 'follow' | 'search' | 'comment' | 'comment_like' | 'join_group';
+
+const SESSION_BUDGET_ACTION_KEYS: Record<SessionBudgetAction, keyof SessionInteractionBudget> = {
+  like: 'likes',
+  collect: 'collects',
+  follow: 'follows',
+  search: 'searches',
+  comment: 'comments',
+  comment_like: 'comment_likes',
+  join_group: 'join_groups',
+};
+
 // ─── 公共接口 ────────────────────────────────────────────────────────────────
 
 export interface RoleDispatcherOptions {
@@ -575,6 +587,7 @@ export class RoleDispatcher {
       searches: 0,
       comments: 0,
       comment_likes: 0,
+      join_groups: 0,
     };
     if (!this.sessionActive) {
       return { active: false, totals: empty, quotas: this.freshBudget() };
@@ -589,6 +602,7 @@ export class RoleDispatcher {
         searches: Math.max(0, this.budgetInit.searches - this.budget.searches),
         comments: Math.max(0, this.budgetInit.comments - this.budget.comments),
         comment_likes: Math.max(0, this.budgetInit.comment_likes - this.budget.comment_likes),
+        join_groups: Math.max(0, this.budgetInit.join_groups - this.budget.join_groups),
       },
       quotas: { ...this.budgetInit },
     };
@@ -1255,14 +1269,20 @@ export class RoleDispatcher {
     this.currentNote = note;
   }
 
-  /** Edge 上报互动预算消耗 */
-  consumeBudget(action: 'like' | 'collect' | 'follow' | 'search' | 'comment' | 'comment_like'): void {
-    if (action === 'like' && this.budget.likes > 0) this.budget.likes--;
-    else if (action === 'collect' && this.budget.collects > 0) this.budget.collects--;
-    else if (action === 'follow' && this.budget.follows > 0) this.budget.follows--;
-    else if (action === 'search' && this.budget.searches > 0) this.budget.searches--;
-    else if (action === 'comment' && this.budget.comments > 0) this.budget.comments--;
-    else if (action === 'comment_like' && this.budget.comment_likes > 0) this.budget.comment_likes--;
+  /** 当前会话某动作剩余预算（join_group 供 Facebook 加群调度器在 cloud 侧消费）。 */
+  remainingBudget(action: SessionBudgetAction): number {
+    const key = SESSION_BUDGET_ACTION_KEYS[action];
+    return Math.max(0, Number(this.budget[key] ?? 0));
+  }
+
+  /** Edge / cloud 上报互动预算消耗。返回 true 表示本次确实扣减了预算。 */
+  consumeBudget(action: SessionBudgetAction): boolean {
+    const key = SESSION_BUDGET_ACTION_KEYS[action];
+    if (this.budget[key] > 0) {
+      this.budget[key]--;
+      return true;
+    }
+    return false;
   }
 
   /** 剩余关注配额（测试可观测）。 */

@@ -244,7 +244,7 @@ export interface PanelDeps {
   pacingConfig?: PanelPacingConfig;
   /**
    * 单场会话上限配置（全局单例，change restore-auto-resume-and-global-safety-config）。未注入则 /api/session-limits 返回 503。
-   * 全局编辑单场时长 + 六项互动预算、对所有账号生效；写非乐观回真态；非法整块拒（invalid_value），绝不部分落库；
+   * 全局编辑单场时长 + 七项互动预算、对所有账号生效；写非乐观回真态；非法整块拒（invalid_value），绝不部分落库；
    * 只动 session_config_global，不碰风控状态单写路径、不经协议。
    */
   sessionLimits?: PanelSessionLimits;
@@ -776,14 +776,14 @@ export interface PanelPacingConfig {
 }
 
 // ── 单场会话上限配置（全局单例，change restore-auto-resume-and-global-safety-config）──
-// 单份全局配置：单场时长（分钟）+ 六项互动预算（likes/collects/follows/searches/comments/comment_likes）。
+// 单份全局配置：单场时长（分钟）+ 七项互动预算（likes/collects/follows/searches/comments/comment_likes/join_groups）。
 // 对所有账号生效。库无行处以写死默认合成（overridden:false = 显示的是写死默认，即当前真生效）。
 
 /** 全局单场上限生效值 + 来源/审计（GET /api/session-limits 形状）。 */
 export interface SessionLimitView {
   /** 单场时长上限（分钟）。 */
   maxDurationMin: number;
-  /** 单场互动预算（六项）。 */
+  /** 单场互动预算（七项）。 */
   budget: SessionInteractionBudget;
   /** 收藏质量闸：收藏:赞 比例的分母 N（即 1:N；默认 3）。 */
   collectSaveLikeDenom: number;
@@ -806,6 +806,7 @@ export interface SessionLimitPatchInput {
   searches?: number;
   comments?: number;
   comment_likes?: number;
+  join_groups?: number;
   /** 收藏质量闸分母 N（1:N，需 >= 1）。 */
   collectSaveLikeDenom?: number;
   /** 关注质量闸分母 N（1:N，需 >= 1）。 */

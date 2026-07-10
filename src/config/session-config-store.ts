@@ -31,7 +31,7 @@ import {
 
 const { Pool } = pg;
 
-/** 全局单场上限行：时长 + 六项预算 + 两项互动质量比例分母 + 审计（面板回显用）。 */
+/** 全局单场上限行：时长 + 七项预算 + 两项互动质量比例分母 + 审计（面板回显用）。 */
 export interface SessionConfigRow {
   maxDurationMin: number;
   budget: SessionInteractionBudget;
@@ -54,6 +54,7 @@ export interface SessionConfigPatch {
   searches?: number;
   comments?: number;
   comment_likes?: number;
+  join_groups?: number;
   collectSaveLikeDenom?: number;
   followFansDenom?: number;
   activeWeekMask?: string;
@@ -69,6 +70,7 @@ CREATE TABLE IF NOT EXISTS session_config_global (
   budget_searches      INTEGER NOT NULL,
   budget_comments      INTEGER NOT NULL,
   budget_comment_likes INTEGER NOT NULL,
+  budget_join_groups   INTEGER NOT NULL DEFAULT 1,
   collect_save_like_denom INTEGER,
   follow_fans_denom       INTEGER,
   active_week_mask        TEXT,
@@ -86,6 +88,7 @@ export const SESSION_CONFIG_ALTER_SQL = `
 ALTER TABLE session_config_global ADD COLUMN IF NOT EXISTS collect_save_like_denom INTEGER;
 ALTER TABLE session_config_global ADD COLUMN IF NOT EXISTS follow_fans_denom INTEGER;
 ALTER TABLE session_config_global ADD COLUMN IF NOT EXISTS active_week_mask TEXT;
+ALTER TABLE session_config_global ADD COLUMN IF NOT EXISTS budget_join_groups INTEGER NOT NULL DEFAULT 1;
 `;
 
 export interface SessionConfigStoreOptions {
@@ -105,6 +108,7 @@ interface SessionDbRow {
   budget_searches: number | string;
   budget_comments: number | string;
   budget_comment_likes: number | string;
+  budget_join_groups: number | string;
   collect_save_like_denom: number | string | null;
   follow_fans_denom: number | string | null;
   active_week_mask: string | null;
@@ -153,7 +157,7 @@ export class SessionConfigStore implements SessionLimitProvider {
   private async reload(): Promise<void> {
     const { rows } = await this.pool.query<SessionDbRow>(
       `SELECT max_duration_min, budget_likes, budget_collects, budget_follows,
-              budget_searches, budget_comments, budget_comment_likes,
+              budget_searches, budget_comments, budget_comment_likes, budget_join_groups,
               collect_save_like_denom, follow_fans_denom, active_week_mask, updated_at, updated_by
          FROM session_config_global WHERE id = 1`,
     );
@@ -170,6 +174,7 @@ export class SessionConfigStore implements SessionLimitProvider {
         searches: Number(r.budget_searches),
         comments: Number(r.budget_comments),
         comment_likes: Number(r.budget_comment_likes),
+        join_groups: Number(r.budget_join_groups),
       },
       collectSaveLikeDenom: r.collect_save_like_denom == null ? null : Number(r.collect_save_like_denom),
       followFansDenom: r.follow_fans_denom == null ? null : Number(r.follow_fans_denom),
@@ -242,20 +247,21 @@ export class SessionConfigStore implements SessionLimitProvider {
 
     const { rows } = await this.pool.query<SessionDbRow>(
       `INSERT INTO session_config_global (id, max_duration_min, budget_likes, budget_collects,
-              budget_follows, budget_searches, budget_comments, budget_comment_likes,
+              budget_follows, budget_searches, budget_comments, budget_comment_likes, budget_join_groups,
               collect_save_like_denom, follow_fans_denom, active_week_mask, updated_at, updated_by)
-       VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), $11)
+       VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now(), $12)
        ON CONFLICT (id)
        DO UPDATE SET max_duration_min = EXCLUDED.max_duration_min,
                      budget_likes = EXCLUDED.budget_likes, budget_collects = EXCLUDED.budget_collects,
                      budget_follows = EXCLUDED.budget_follows, budget_searches = EXCLUDED.budget_searches,
                      budget_comments = EXCLUDED.budget_comments, budget_comment_likes = EXCLUDED.budget_comment_likes,
+                     budget_join_groups = EXCLUDED.budget_join_groups,
                      collect_save_like_denom = EXCLUDED.collect_save_like_denom,
                      follow_fans_denom = EXCLUDED.follow_fans_denom,
                      active_week_mask = EXCLUDED.active_week_mask,
                      updated_at = now(), updated_by = EXCLUDED.updated_by
        RETURNING max_duration_min, budget_likes, budget_collects, budget_follows,
-                 budget_searches, budget_comments, budget_comment_likes,
+                 budget_searches, budget_comments, budget_comment_likes, budget_join_groups,
                  collect_save_like_denom, follow_fans_denom, active_week_mask, updated_at, updated_by`,
       [
         nextDuration,
@@ -265,6 +271,7 @@ export class SessionConfigStore implements SessionLimitProvider {
         nextBudget.searches,
         nextBudget.comments,
         nextBudget.comment_likes,
+        nextBudget.join_groups,
         nextCollectDenom,
         nextFollowDenom,
         nextActiveWeekMask,

@@ -12,6 +12,7 @@ interface SeedRow {
   budget_searches: number;
   budget_comments: number;
   budget_comment_likes: number;
+  budget_join_groups?: number;
   collect_save_like_denom?: number | null;
   follow_fans_denom?: number | null;
   active_week_mask?: string | null;
@@ -20,7 +21,7 @@ interface SeedRow {
 /** 内存假 pool（全局单行）：路由 session_config_global 的建表 / SELECT(id=1) / upsert(RETURNING)；可注入写失败 + 脏行。 */
 function fakePool(seed?: SeedRow) {
   let row: (SeedRow & { updated_at: string; updated_by: string }) | null = seed
-    ? { ...seed, updated_at: '2026-06-25T00:00:00.000Z', updated_by: 'seed' }
+    ? { budget_join_groups: DEFAULT_SESSION_BUDGET.join_groups, ...seed, updated_at: '2026-06-25T00:00:00.000Z', updated_by: 'seed' }
     : null;
   let failWrite = false;
   const pool = {
@@ -29,7 +30,7 @@ function fakePool(seed?: SeedRow) {
       if (sql.includes('INSERT INTO session_config_global')) {
         if (failWrite) throw new Error('db down');
         // 入参顺序须与 store.set() 的 INSERT 占位符严格一致：
-        // [时长, 6 项预算, 收藏分母, 关注分母, 周历掩码, updated_by]（共 11 个）。
+        // [时长, 7 项预算, 收藏分母, 关注分母, 周历掩码, updated_by]（共 12 个）。
         const [
           max_duration_min,
           budget_likes,
@@ -38,12 +39,13 @@ function fakePool(seed?: SeedRow) {
           budget_searches,
           budget_comments,
           budget_comment_likes,
+          budget_join_groups,
           collect_save_like_denom,
           follow_fans_denom,
           active_week_mask,
           updated_by,
         ] = params as [
-          number, number, number, number, number, number, number,
+          number, number, number, number, number, number, number, number,
           number | null, number | null, string | null, string,
         ];
         row = {
@@ -54,6 +56,7 @@ function fakePool(seed?: SeedRow) {
           budget_searches,
           budget_comments,
           budget_comment_likes,
+          budget_join_groups,
           collect_save_like_denom,
           follow_fans_denom,
           active_week_mask,
@@ -85,7 +88,7 @@ test('命中全局行 → 时长 + 预算用库值', async () => {
   const store = new SessionConfigStore({ pool });
   await store.init();
   assert.equal(store.sessionDurationMs(), 25 * 60_000);
-  assert.deepEqual(store.sessionBudget(), { likes: 20, collects: 8, follows: 4, searches: 9, comments: 3, comment_likes: 6 });
+  assert.deepEqual(store.sessionBudget(), { likes: 20, collects: 8, follows: 4, searches: 9, comments: 3, comment_likes: 6, join_groups: 1 });
 });
 
 test('脏行：字段非法逐项回落写死默认（绝不 brick）', async () => {
@@ -116,6 +119,7 @@ test('set 后即时热加载（无需重启）+ 回真态含审计', async () =>
   assert.equal(row.updatedBy, 'alice');
   assert.equal(store.sessionDurationMs(), 20 * 60_000);
   assert.equal(store.sessionBudget().likes, 7);
+  assert.equal(store.sessionBudget().join_groups, DEFAULT_SESSION_BUDGET.join_groups);
   // 未传字段回落写死默认（列 NOT NULL）
   assert.equal(store.sessionBudget().collects, DEFAULT_SESSION_BUDGET.collects);
   assert.ok(store.getRow(), 'set 后 getRow 有行（overridden=true）');
@@ -130,7 +134,16 @@ test('部分写：未传字段保持原值（有原值）', async () => {
   await store.set({ likes: 99 }, 'a'); // 只改 likes
   assert.equal(store.sessionBudget().likes, 99);
   assert.equal(store.sessionBudget().collects, 6, '未传 collects 保持原值');
+  assert.equal(store.sessionBudget().join_groups, 1, '未传 join_groups 保持原值');
   assert.equal(store.sessionDurationMs(), 15 * 60_000, '未传时长保持原值');
+});
+
+test('set 加群预算 → 热加载即时生效', async () => {
+  const { pool } = fakePool();
+  const store = new SessionConfigStore({ pool });
+  await store.init();
+  await store.set({ join_groups: 2 }, 'alice');
+  assert.equal(store.sessionBudget().join_groups, 2);
 });
 
 test('写库失败 → 内存镜像不变（绝不镜像/库不一致）', async () => {

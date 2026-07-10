@@ -24,6 +24,8 @@ export interface FacebookGroupJoinSchedulerDeps {
   audit: FacebookGroupJoinAuditStore;
   llmFor?: (accountId: string) => RoleLlmLike;
   canJoin?: (accountId: string) => boolean | Promise<boolean>;
+  canUseSessionJoin?: (accountId: string, edgeId?: string) => boolean | Promise<boolean>;
+  recordSessionJoin?: (accountId: string, edgeId?: string) => boolean | Promise<boolean>;
   isFacebookAccount?: (accountId: string) => boolean | Promise<boolean>;
   pauseAccount?: (accountId: string, reason: string) => Promise<void> | void;
   autoEnabled?: () => boolean;
@@ -116,6 +118,10 @@ export class FacebookGroupJoinScheduler {
         await this.audit({ accountId, outcome: 'quota_denied', phase: 'scheduler', reason: 'canDo', shadow: false });
         return { triggered: false, reason: 'quota_denied' };
       }
+      if (this.deps.canUseSessionJoin && !(await this.deps.canUseSessionJoin(accountId, conn.edgeId))) {
+        await this.audit({ accountId, outcome: 'quota_denied', phase: 'scheduler', reason: 'session_budget', shadow: false });
+        return { triggered: false, reason: 'session_budget' };
+      }
       return this.runReal(accountId, conn.bus, conn.edgeId);
     } finally {
       this.running.delete(accountId);
@@ -172,7 +178,7 @@ export class FacebookGroupJoinScheduler {
       return { triggered: true, groupUrl: assigned.groupUrl, outcome: clicked.reason ?? 'no_post_observation' };
     }
     const post = await this.judge(accountId).evaluatePostClick(postObservation);
-    return this.handlePostVerdict(accountId, assigned, post, postObservation, clicked.ok);
+    return this.handlePostVerdict(accountId, assigned, post, postObservation, clicked.ok, edgeId);
   }
 
   private async handlePreVerdict(
@@ -232,6 +238,7 @@ export class FacebookGroupJoinScheduler {
     verdict: FacebookGroupJoinJudgeResult,
     observation: FacebookGroupJoinObservation,
     edgeOk: boolean,
+    edgeId: string,
   ): Promise<FacebookGroupJoinTriggerResult> {
     if (verdict.phase !== 'post_click') {
       await this.deps.memberships.markOutcome(accountId, assigned.groupUrl, 'failed', 'invalid_post_verdict');
@@ -240,6 +247,10 @@ export class FacebookGroupJoinScheduler {
     if (verdict.verdict === 'joined' && edgeOk) {
       await this.deps.memberships.markJoined(accountId, assigned.groupUrl, verdict.reason);
       await this.deps.targets.markJoinGating(assigned.groupUrl, 'instant');
+      const consumed = await this.deps.recordSessionJoin?.(accountId, edgeId);
+      if (consumed === false) {
+        this.deps.logger?.warn?.(`[fb-group-join-scheduler] joined but session join budget was already exhausted account=${accountId}`);
+      }
       await this.audit({
         accountId,
         groupUrl: assigned.groupUrl,

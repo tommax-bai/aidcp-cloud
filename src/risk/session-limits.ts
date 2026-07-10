@@ -2,14 +2,14 @@
  * 单场会话上限（安全限额层）—— change session-limits-to-quota-layer。
  *
  * 把「单场会话上限」从人设（soul.session_limits）/ 写死常量（RoleDispatcher.freshBudget）搬进安全限额层：
- * 单场时长 + 单场互动预算，按账号可后台编辑 + 热加载 + 绝不 brick。本模块只持**写死默认 + 类型 + 提供者接口**
+ * 单场时长 + 单场互动预算，全局后台编辑 + 热加载 + 绝不 brick。本模块只持**写死默认 + 类型 + 提供者接口**
  * （安全限额层 = 风控层，与 quotas.ts 同层）；落库 / 内存镜像由 src/config/session-config-store.ts 实现该接口。
  *
  * 零回归基线 = 平铺现值（用户 2026-06-24 拍板）：空表 / 缺行回落 时长 10min + 现 freshBudget 数字，
  * 与改造前逐位一致（**不是** v1 session-budget.ts 的 15/30/60 档位梯度——那是 v1 兼容路径、非现役闭环）。
  */
 
-/** 单场互动预算形态（对齐现役 RoleDispatcher.freshBudget 的六项；注意含 searches、不含 view/publish）。 */
+/** 单场互动预算形态（对齐现役 RoleDispatcher.freshBudget；注意含 searches/join_groups、不含 view/publish）。 */
 export interface SessionInteractionBudget {
   likes: number;
   collects: number;
@@ -17,6 +17,7 @@ export interface SessionInteractionBudget {
   searches: number;
   comments: number;
   comment_likes: number;
+  join_groups: number;
 }
 
 /** 单场互动预算的字段键（校验 / 遍历用，穷举与 SessionInteractionBudget 一致）。 */
@@ -27,6 +28,7 @@ export const SESSION_BUDGET_KEYS = [
   'searches',
   'comments',
   'comment_likes',
+  'join_groups',
 ] as const;
 
 export type SessionBudgetKey = (typeof SESSION_BUDGET_KEYS)[number];
@@ -45,6 +47,7 @@ export const DEFAULT_SESSION_BUDGET: Readonly<SessionInteractionBudget> = {
   searches: 5,
   comments: 2,
   comment_likes: 3,
+  join_groups: 1,
 };
 
 /** 单场上限数字的合理上限（校验用，防误填天文数字）。复用 quotas.ts 的 QUOTA_MAX 同量级。 */

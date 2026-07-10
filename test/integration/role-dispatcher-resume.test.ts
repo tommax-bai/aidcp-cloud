@@ -18,7 +18,7 @@ const mockSoul: Soul = {
   interests: { primary: ['AI'], secondary: [], seed_keywords: ['x'] },
 };
 
-const fixedBudget = () => ({ likes: 10, collects: 5, follows: 3, searches: 5, comments: 2, comment_likes: 3 });
+const fixedBudget = () => ({ likes: 10, collects: 5, follows: 3, searches: 5, comments: 2, comment_likes: 3, join_groups: 1 });
 
 function makeProvider(over?: Partial<ResumeConfigProvider>): ResumeConfigProvider {
   return {

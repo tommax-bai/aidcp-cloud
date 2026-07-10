@@ -73,7 +73,7 @@ describe('RoleDispatcher 单场互动预算来源（change session-limits-to-quo
   it('注入提供者 → 会话预算按提供者（更小预算更快耗尽 → 会话终止）', () => {
     const provider: SessionLimitProvider = {
       sessionDurationMs: () => DEFAULT_SESSION_DURATION_MS,
-      sessionBudget: () => ({ likes: 1, collects: 1, follows: 1, searches: 1, comments: 1, comment_likes: 1 }),
+      sessionBudget: () => ({ likes: 1, collects: 1, follows: 1, searches: 1, comments: 1, comment_likes: 1, join_groups: 1 }),
       collectSaveLikeRatio: () => 1 / 3,
       followFansRatio: () => 1 / 8,
       weekActiveMask: () => null, // 不限（全天活跃）
@@ -104,7 +104,7 @@ describe('RoleDispatcher 单场互动预算来源（change session-limits-to-quo
   it('sessionUsageSnapshot exposes inactive context and active used budget', () => {
     const provider: SessionLimitProvider = {
       sessionDurationMs: () => DEFAULT_SESSION_DURATION_MS,
-      sessionBudget: () => ({ likes: 2, collects: 1, follows: 1, searches: 1, comments: 1, comment_likes: 1 }),
+      sessionBudget: () => ({ likes: 2, collects: 1, follows: 1, searches: 1, comments: 1, comment_likes: 1, join_groups: 2 }),
       collectSaveLikeRatio: () => 1 / 3,
       followFansRatio: () => 1 / 8,
       weekActiveMask: () => null,
@@ -114,15 +114,20 @@ describe('RoleDispatcher 单场互动预算来源（change session-limits-to-quo
     assert.equal(snap.active, false);
     assert.equal(snap.totals.likes, 0);
     assert.equal(snap.quotas.likes, 2);
+    assert.equal(d.remainingBudget('join_group'), 2);
 
     d.setup();
     d.startSession();
     d.consumeBudget('like');
+    assert.equal(d.consumeBudget('join_group'), true);
     snap = d.sessionUsageSnapshot();
     assert.equal(snap.active, true);
     assert.equal(typeof snap.startedAt, 'number');
     assert.equal(snap.totals.likes, 1);
+    assert.equal(snap.totals.join_groups, 1);
     assert.equal(snap.quotas.likes, 2);
+    assert.equal(snap.quotas.join_groups, 2);
+    assert.equal(d.remainingBudget('join_group'), 1);
     d.endSession();
   });
 });

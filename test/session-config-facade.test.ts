@@ -90,6 +90,16 @@ test('set 合法 → 落库 + 回真态(overridden=true) + 仅写 session_config
   assert.equal(view.overridden, true);
 });
 
+test('set 加群预算合法 → 落库 + 回真态', async () => {
+  const { store, setCalls } = fakeStore();
+  const panel = createSessionLimitPanel({ store });
+  const r = await panel.set({ join_groups: 2 }, 'bob');
+  assert.equal(r.ok, true);
+  assert.equal(setCalls.length, 1);
+  const view = (r as { ok: true; view: { budget: SessionInteractionBudget } }).view;
+  assert.equal(view.budget.join_groups, 2);
+});
+
 test('非法数字（负 / 非整 / 超上限）→ invalid_value，整块拒不落库', async () => {
   const { store, setCalls } = fakeStore();
   const panel = createSessionLimitPanel({ store });

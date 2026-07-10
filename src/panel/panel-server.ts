@@ -1546,12 +1546,12 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
-      const { maxDurationMin, likes, collects, follows, searches, comments, comment_likes,
+      const { maxDurationMin, likes, collects, follows, searches, comments, comment_likes, join_groups,
               collectSaveLikeDenom, followFansDenom, activeWeekMask } =
         (body ?? {}) as Record<string, unknown>;
       // 各数字字段须为数字或缺省（缺省=该项不改）；类型不对直接 400（语义校验在 facade）。全局配置、无账号维度。
       const patch: SessionLimitPatchInput = {};
-      const numFields = ['maxDurationMin', 'likes', 'collects', 'follows', 'searches', 'comments', 'comment_likes',
+      const numFields = ['maxDurationMin', 'likes', 'collects', 'follows', 'searches', 'comments', 'comment_likes', 'join_groups',
         'collectSaveLikeDenom', 'followFansDenom'] as const;
       const rawNums: Record<string, unknown> = {
         maxDurationMin,
@@ -1561,6 +1561,7 @@ function createRequestHandler(
         searches,
         comments,
         comment_likes,
+        join_groups,
         collectSaveLikeDenom,
         followFansDenom,
       };

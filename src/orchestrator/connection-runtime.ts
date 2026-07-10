@@ -12,7 +12,7 @@
  * 编排上下文不再有「单一全局总线做跨连接协调」：连接之间结构上互不可见，新连接不重置他连接会话、不串号。
  */
 import { EventBus } from '../event-bus/index.js';
-import type { RoleDispatcher, SessionUsageSnapshot } from './role-dispatcher.js';
+import type { RoleDispatcher, SessionBudgetAction, SessionUsageSnapshot } from './role-dispatcher.js';
 import type { EdgeSession } from '../comm/ws-server.js';
 import type { RiskController } from '../risk/index.js';
 import { normalizePlatformId, type PlatformId } from '../platform/index.js';
@@ -286,6 +286,28 @@ export class ConnectionRuntimeRegistry {
       if (!fallback || snapshot.active) fallback = snapshot;
     }
     return fallback;
+  }
+
+  /** Remaining current single-session budget for an online account/edge. Missing runtime fails closed as 0. */
+  remainingSessionBudgetForAccount(accountId: string, action: SessionBudgetAction, edgeId?: string): number {
+    let fallback: ConnectionRuntime | null = null;
+    for (const rt of this.bySession.values()) {
+      if (rt.accountId !== accountId) continue;
+      if (edgeId && rt.edgeId === edgeId) return rt.dispatcher.remainingBudget(action);
+      if (!fallback || rt.dispatcher.active) fallback = rt;
+    }
+    return fallback?.dispatcher.remainingBudget(action) ?? 0;
+  }
+
+  /** Consume current single-session budget for an online account/edge. Returns false when missing or exhausted. */
+  consumeSessionBudgetForAccount(accountId: string, action: SessionBudgetAction, edgeId?: string): boolean {
+    let fallback: ConnectionRuntime | null = null;
+    for (const rt of this.bySession.values()) {
+      if (rt.accountId !== accountId) continue;
+      if (edgeId && rt.edgeId === edgeId) return rt.dispatcher.consumeBudget(action);
+      if (!fallback || rt.dispatcher.active) fallback = rt;
+    }
+    return fallback?.dispatcher.consumeBudget(action) ?? false;
   }
 
   /**

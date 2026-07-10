@@ -1,7 +1,7 @@
 /**
  * 单场会话上限面板外观（全局单例，change restore-auto-resume-and-global-safety-config）。
  *
- * 把「全局单场时长 + 六项互动预算回显」与「全局写（校验）」收口成可单测的外观，与 server 装配解耦。
+ * 把「全局单场时长 + 七项互动预算回显」与「全局写（校验）」收口成可单测的外观，与 server 装配解耦。
  * 不再有账号维度（用户 2026-06-27 拍板：取消账号、改全局通用，对所有账号生效）。
  *
  * 红线：写前校验每个数字（非负有限整数 + 合理上限；时长另需 >=1）；任一非法整块拒、
@@ -25,7 +25,7 @@ const isValidLimitNumber = (n: unknown): n is number =>
   typeof n === 'number' && Number.isInteger(n) && n >= 0 && n <= SESSION_LIMIT_MAX;
 
 export function createSessionLimitPanel(deps: SessionLimitFacadeDeps): PanelSessionLimits {
-  // 全局回显：时长 + 六项预算经提供者口取（无行 / 字段非法已逐项回落 → 显示=当前真生效）；
+  // 全局回显：时长 + 七项预算经提供者口取（无行 / 字段非法已逐项回落 → 显示=当前真生效）；
   // overridden 看库内是否存在全局行（false = 显示的是写死默认）。
   const buildView = (): SessionLimitView => {
     const row = deps.store.getRow();
