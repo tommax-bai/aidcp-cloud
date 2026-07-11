@@ -625,6 +625,66 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.deepEqual(marked, [{ accountId: 'fb-1', groupUrl: 'https://www.facebook.com/groups/joined-1' }]);
   });
 
+  it('放开时限兜底：coverage relaxed=true → 人审卡标题标注「未满足冷却/预热」交人把关', async () => {
+    const { deps, audits } = fbFlowDeps({ submit: { ok: true } });
+    const titles: string[] = [];
+    await new CommentScheduler({
+      ...deps,
+      facebookCoverageConfigFor: () => ({
+        coverageEnabled: true,
+        enabled: true,
+        keywords: ['咖啡'],
+        containers: [{ url: 'https://www.facebook.com/groups/joined-1' }],
+        relaxed: true,
+      }),
+      approval: { request: async (r) => { titles.push(r.title ?? ""); }, isApproved: async () => true, timeoutMs: 20, pollMs: 1 },
+    }).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    assert.match(titles[0]!, /未满足冷却\/预热/);
+    assert.match(titles[0]!, /放开时限选群/);
+  });
+
+  it('放开时限兜底：coverage relaxed 缺省 → 人审卡标题不带警示（零回归）', async () => {
+    const { deps, audits } = fbFlowDeps({ submit: { ok: true } });
+    const titles: string[] = [];
+    await new CommentScheduler({
+      ...deps,
+      facebookCoverageConfigFor: () => ({
+        coverageEnabled: true,
+        enabled: true,
+        keywords: ['咖啡'],
+        containers: [{ url: 'https://www.facebook.com/groups/joined-1' }],
+      }),
+      approval: { request: async (r) => { titles.push(r.title ?? ""); }, isApproved: async () => true, timeoutMs: 20, pollMs: 1 },
+    }).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    assert.ok(!/未满足冷却/.test(titles[0]!), '非 relaxed 不应带警示');
+  });
+
+  it('放开时限兜底：relaxed pick 仍受日上限约束——超额 → quota_denied、不发人审卡（只放开单群时限、不放开账号日量）', async () => {
+    const { deps, audits } = fbFlowDeps({ submit: { ok: true } });
+    const titles: string[] = [];
+    await new CommentScheduler({
+      ...deps,
+      facebookCoverageConfigFor: () => ({
+        coverageEnabled: true,
+        enabled: true,
+        keywords: ['咖啡'],
+        containers: [{ url: 'https://www.facebook.com/groups/joined-1' }],
+        relaxed: true,
+      }),
+      facebookDailyCap: () => 2,
+      facebookCommentedToday: async () => 5,
+      approval: { request: async (r) => { titles.push(r.title ?? ""); }, isApproved: async () => true, timeoutMs: 20, pollMs: 1 },
+    }).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'quota_denied');
+    assert.equal(audits.at(-1)?.reason, 'daily_cap');
+    assert.deepEqual(titles, []);
+  });
+
   it('FB contact comment：正文先过无人值守校验，联系方式只在人审后以 groupChatCode 下发', async () => {
     const { deps, audits, envelopes } = fbFlowDeps({ submit: { ok: true } });
     const approvals: Array<{ noteId: string; text: string }> = [];

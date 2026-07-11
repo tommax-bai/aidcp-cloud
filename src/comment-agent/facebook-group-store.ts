@@ -121,6 +121,12 @@ export interface FacebookGroupCoverageCandidateOptions {
   limit?: number;
   cooldownMs?: number;
   warmupMs?: number;
+  /**
+   * 放开时限兜底（change facebook-coverage-relax-and-keyword-space）：正常约束（预热/冷却）下无可评群时的降级选群。
+   * 只保留 `status='joined'`，丢弃预热 / 冷却 / cooldown_until 三重时限闸，仍按「最久没评优先」排序取窗口——
+   * 由飞书人审兜底把关（相应 pick 会在审核卡标注）。已降级为 left 的群 status≠joined 仍被排除，坏群不会被此路复活。
+   */
+  relaxed?: boolean;
 }
 
 export type FacebookGroupJoinAuditOutcome =
@@ -822,11 +828,27 @@ export class FacebookGroupMembershipStore {
     options: FacebookGroupCoverageCandidateOptions = {},
   ): Promise<FacebookGroupMembershipRow[]> {
     const limit = Math.min(Math.max(Math.trunc(options.limit ?? 5), 1), 50);
+    const cols = `account_id, group_url, status, assigned_at, joined_at, last_attempt_at, attempts,
+              last_reason, last_commented_at, cooldown_until, comments_total, left_confirmations, updated_at`;
+    // 放开时限兜底：丢弃预热 / 冷却 / cooldown_until 三重闸，只留 status='joined'，仍按「最久没评优先」取窗口。
+    // 上层仅在正常约束落空时才用它，并把 pick 标记为 relaxed 交人审把关（见 server.ts facebookCoverageConfigFor）。
+    if (options.relaxed === true) {
+      const { rows } = await this.pool.query<MembershipDbRow>(
+        `SELECT ${cols}
+         FROM facebook_group_membership
+         WHERE account_id = $1
+           AND status = 'joined'
+           AND joined_at IS NOT NULL
+         ORDER BY last_commented_at ASC NULLS FIRST, joined_at ASC, group_url ASC
+         LIMIT $2`,
+        [accountId, limit],
+      );
+      return rows.map(toMembershipRow);
+    }
     const cooldownSeconds = Math.max(0, Math.floor((options.cooldownMs ?? 72 * 60 * 60 * 1000) / 1000));
     const warmupSeconds = Math.max(0, Math.floor((options.warmupMs ?? 24 * 60 * 60 * 1000) / 1000));
     const { rows } = await this.pool.query<MembershipDbRow>(
-      `SELECT account_id, group_url, status, assigned_at, joined_at, last_attempt_at, attempts,
-              last_reason, last_commented_at, cooldown_until, comments_total, left_confirmations, updated_at
+      `SELECT ${cols}
        FROM facebook_group_membership
        WHERE account_id = $1
          AND status = 'joined'

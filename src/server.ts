@@ -2245,17 +2245,28 @@ async function main(): Promise<void> {
       const allowlist = readEnvList('AIDCP_FB_GROUP_COVERAGE_ACCOUNTS');
       if (!allowlist.has(accountId)) return { coverageEnabled: false, enabled: false, keywords: [], containers: [] };
       const base = facebookCommentConfigStore.getForAccount(accountId);
-      const candidates = await facebookGroupMembershipStore.coverageCandidates(accountId, {
-        limit: readEnvNumber('AIDCP_FB_GROUP_COVERAGE_PICK_WINDOW', 5),
+      const pickWindow = readEnvNumber('AIDCP_FB_GROUP_COVERAGE_PICK_WINDOW', 5);
+      let candidates = await facebookGroupMembershipStore.coverageCandidates(accountId, {
+        limit: pickWindow,
         cooldownMs: readEnvNumber('AIDCP_FB_GROUP_COVERAGE_COOLDOWN_HOURS', 72) * 60 * 60 * 1000,
         warmupMs: readEnvNumber('AIDCP_FB_GROUP_COVERAGE_WARMUP_HOURS', 24) * 60 * 60 * 1000,
       });
+      // 放开时限兜底（change facebook-coverage-relax-and-keyword-space）：正常约束下无可评群 → 默认降级放开预热/冷却，
+      // 选「最久没评」的加入群，仍守日上限与人审；relaxed pick 会在飞书审核卡标注「未满足冷却/预热」交人把关。
+      // AIDCP_FB_GROUP_COVERAGE_RELAX=false 可退回严格「无群则跳过」。账号无任何加入群 → 两级都空 → 诚实 no-op。
+      let relaxed = false;
+      const relaxWhenEmpty = readEnvString('AIDCP_FB_GROUP_COVERAGE_RELAX') !== 'false';
+      if (candidates.length === 0 && relaxWhenEmpty) {
+        candidates = await facebookGroupMembershipStore.coverageCandidates(accountId, { limit: pickWindow, relaxed: true });
+        relaxed = candidates.length > 0;
+      }
       const chosen = candidates.length > 0 ? candidates[Math.floor(Math.random() * candidates.length)] ?? null : null;
       return {
         coverageEnabled: true,
         enabled: base.keywords.length > 0 && chosen !== null,
         keywords: base.keywords,
         containers: chosen ? [{ url: chosen.groupUrl }] : [],
+        relaxed: chosen !== null ? relaxed : false,
       };
     },
     facebookCoverageOnCommented: (accountId, groupUrl) =>

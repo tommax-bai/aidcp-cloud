@@ -46,6 +46,11 @@ import type { EdgeTaskPriority } from '../comm/protocol.js';
 
 export interface FacebookCoverageCommentConfig extends EffectiveFacebookCommentConfig {
   coverageEnabled: boolean;
+  /**
+   * 放开时限兜底命中标记（change facebook-coverage-relax-and-keyword-space）：正常预热/冷却约束下无可评群、
+   * 降级放开时限选出的群 → true。仅用于在飞书人审卡标注「未满足冷却/预热」，不改变任何其它闸（日上限/人审照旧）。
+   */
+  relaxed?: boolean;
 }
 
 export interface CommentResultReceipt {
@@ -824,6 +829,8 @@ export class CommentScheduler {
         text: v.text,
         ...(contactInfo ? { contactInfo } : {}),
         container,
+        // 放开时限兜底选出的覆盖群 → 审核卡标注「未满足冷却/预热」交人把关。手动 pin 群路径 coverageCfg 为空、绝不标注。
+        ...(usingCoverage && coverageCfg?.relaxed ? { coverageRelaxed: true } : {}),
       });
       if (!approved) {
         audit({ accountId, outcome: 'compose_skipped', reason: 'approval_rejected_or_timeout', shadow: false, keyword, container, textLength: v.text.length });
@@ -905,7 +912,7 @@ export class CommentScheduler {
    */
   private async approveFacebookComment(
     accountId: string,
-    input: { permalink: string; text: string; contactInfo?: string | null; container: string },
+    input: { permalink: string; text: string; contactInfo?: string | null; container: string; coverageRelaxed?: boolean },
   ): Promise<{ text: string; contactInfo?: string } | null> {
     const approval = this.deps.approval;
     const log = this.deps.logger ?? console;
@@ -917,12 +924,16 @@ export class CommentScheduler {
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const requestId = `facebook-comment-${now()}`;
     const reviewText = input.contactInfo ? `${input.text}\n${input.contactInfo}` : input.text;
+    // 放开时限兜底选出的群 → 在标题标注，提醒审核人「这条是在无合规冷却/预热群时放开时限选的」，由人决定发或不发。
+    const title = input.coverageRelaxed
+      ? `Facebook 群组评论：${input.container}（⚠️ 未满足冷却/预热期，已放开时限选群，请人工确认）`
+      : `Facebook 群组评论：${input.container}`;
     try {
       await approval.request({
         requestId,
         noteId: input.permalink,
         text: reviewText,
-        title: `Facebook 群组评论：${input.container}`,
+        title,
         authorName: 'Facebook',
         accountId,
       });

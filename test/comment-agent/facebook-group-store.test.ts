@@ -246,3 +246,46 @@ test('FacebookGroupMembershipStore.markTransientRetry: status=assigned + attempt
   assert.equal(capturedParams[2], 'not_ready');
   assert.equal(capturedParams[3], 120); // backoffSeconds = 120_000ms / 1000
 });
+
+test('coverageCandidates: 正常查询保留预热/冷却/cooldown_until 三重时限闸', async () => {
+  let capturedSql = '';
+  let capturedParams: unknown[] = [];
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      capturedSql = sql;
+      capturedParams = params;
+      return { rows: [] };
+    },
+  } as unknown as pg.Pool;
+  const store = new FacebookGroupMembershipStore({ pool });
+  await store.coverageCandidates('acc-fb', { limit: 5, cooldownMs: 72 * 3600_000, warmupMs: 24 * 3600_000 });
+  // 三重时限闸都在：预热（joined_at）、cooldown_until、冷却（last_commented_at）。
+  assert.match(capturedSql, /joined_at <= now\(\)/);
+  assert.match(capturedSql, /cooldown_until IS NULL OR cooldown_until <= now\(\)/);
+  assert.match(capturedSql, /last_commented_at IS NULL OR last_commented_at <= now\(\)/);
+  assert.match(capturedSql, /ORDER BY last_commented_at ASC NULLS FIRST/);
+  assert.equal(capturedParams[0], 'acc-fb');
+});
+
+test('coverageCandidates: relaxed=true 放开时限——丢弃预热/冷却/cooldown_until 三闸、只留 status=joined + 最久没评排序', async () => {
+  let capturedSql = '';
+  let capturedParams: unknown[] = [];
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      capturedSql = sql;
+      capturedParams = params;
+      return { rows: [] };
+    },
+  } as unknown as pg.Pool;
+  const store = new FacebookGroupMembershipStore({ pool });
+  await store.coverageCandidates('acc-fb', { limit: 5, relaxed: true });
+  // 放开时限：三重时限闸（WHERE 子句）全部消失，坏群仍靠 status='joined' 排除（已降级为 left 的群 status≠joined）。
+  // 注：cooldown_until / last_commented_at 仍作为 SELECT 列名 / ORDER BY 出现，这里只断言它们不再作为时限过滤闸。
+  assert.doesNotMatch(capturedSql, /joined_at <= now\(\)/);
+  assert.doesNotMatch(capturedSql, /cooldown_until <= now\(\)/);
+  assert.doesNotMatch(capturedSql, /last_commented_at <= now\(\)/);
+  // 仍只选加入群，仍按「最久没评优先」排序取窗口。
+  assert.match(capturedSql, /status = 'joined'/);
+  assert.match(capturedSql, /ORDER BY last_commented_at ASC NULLS FIRST/);
+  assert.deepEqual(capturedParams, ['acc-fb', 5]);
+});
