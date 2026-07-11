@@ -19,6 +19,13 @@ export interface FacebookGroupJoinObservation {
   questionnaireRequired?: boolean;
   pendingRequest?: boolean;
   navError?: string | null;
+  /**
+   * L3 结构后置校验（change facebook-join-structural-verify；与边缘同名字段第二副本，随 observation 松通道流入）：
+   * 群主体内是否有可聚焦发帖/评论 composer（语言无关成员态信号）。
+   */
+  composerPresent?: boolean;
+  /** L3：群主体内是否有可见「加入」CTA。承重闸——joined 要求 composerPresent 且 joinCtaPresent 为 false（防非成员组假成功）。 */
+  joinCtaPresent?: boolean;
 }
 
 export type FacebookGroupJoinJudgeResult =
@@ -96,6 +103,21 @@ function hasJoinCta(obs: FacebookGroupJoinObservation): boolean {
   return JUDGE_JOIN_LABELS.some((k) => cta.includes(k) || aria.includes(k));
 }
 
+/**
+ * L3 结构确认加入（change facebook-join-structural-verify）——**承重 = 语言无关、点击可归因的「跃迁」**：composer 点前无、点后有。
+ * 修正后核心（对抗评审揪出）：不能只靠「点后无可见加入 CTA」当正向，因 joinCtaPresent 由词表派生、未覆盖语种会 fail-open→
+ * 非成员误判假成功。跃迁不依赖词表：非成员公开组点前已有 composer → 无跃迁不误判；`!joinCtaPresent` 仅 corroborating。
+ * 仅用于 post-click（有点击）；pre-click 无点击、绝不据结构判 already_member（会没点击就 markJoined、污染账本）。
+ * 与边缘 structuralJoinConfirmed 同源（edge/cloud 分离仓库、第二副本）。
+ */
+function structuralJoinConfirmed(
+  pre: FacebookGroupJoinObservation | undefined,
+  post: FacebookGroupJoinObservation,
+): boolean {
+  if (pre?.composerPresent === true) return false; // 点前已有 composer（如公开组对非成员）→ 非跃迁，绝不认
+  return post.composerPresent === true && post.joinCtaPresent !== true;
+}
+
 function parseConfidence(raw: unknown, fallback: number): number {
   const n = typeof raw === 'number' ? raw : Number(raw);
   if (!Number.isFinite(n)) return fallback;
@@ -121,8 +143,12 @@ export class FacebookGroupJoinJudge {
     return result;
   }
 
-  async evaluatePostClick(observation: FacebookGroupJoinObservation): Promise<FacebookGroupJoinJudgeResult> {
-    const deterministic = this.postClickDeterministic(observation);
+  async evaluatePostClick(
+    observation: FacebookGroupJoinObservation,
+    /** 同一次 click 内的点前观测——供 L3「跃迁」判据（composer 点前无、点后有）。缺省则跃迁不成立、结构不 joined。 */
+    preObservation?: FacebookGroupJoinObservation,
+  ): Promise<FacebookGroupJoinJudgeResult> {
+    const deterministic = this.postClickDeterministic(observation, preObservation);
     const result = deterministic ?? (await this.askModel('post_click', observation));
     this.record(observation, result);
     return result;
@@ -143,6 +169,8 @@ export class FacebookGroupJoinJudge {
     ) {
       return { phase: 'pre_click', verdict: 'gated_skip', confidence: 0.95, reason: 'gated_or_questionnaire_signal' };
     }
+    // L3：pre-click **不据结构判 already_member**（对抗评审揪出）——此处无点击，joinCtaPresent 词表派生会 fail-open，
+    // 结构 already_member 会没点击就 markJoined、污染账本、在没加入的群假评论。结构判定仅用于 post-click 的「跃迁」。
     // 已排除 登录/验证码/nav_error/成员/门槛/待审后，若有清晰的「加入」CTA → 确定性 instant_join（不问 LLM）。
     // 修复真机 fail-closed:LLM 因观察里的 documentReady='loading' 诊断字段对明明有「加入小组」的页面保守判 ambiguous。
     // 页面加载态不该左右加群判定;是否审批门在点击后揭示（post-click 有 pending/questionnaire 兜底，不会假成功）。
@@ -152,7 +180,10 @@ export class FacebookGroupJoinJudge {
     return null;
   }
 
-  private postClickDeterministic(obs: FacebookGroupJoinObservation): FacebookGroupJoinJudgeResult | null {
+  private postClickDeterministic(
+    obs: FacebookGroupJoinObservation,
+    preObs?: FacebookGroupJoinObservation,
+  ): FacebookGroupJoinJudgeResult | null {
     if (obs.loginRequired) return { phase: 'post_click', verdict: 'failed', confidence: 1, reason: 'login_required' };
     if (obs.captchaDetected) return { phase: 'post_click', verdict: 'failed', confidence: 1, reason: 'captcha_detected' };
     if (obs.navError) return { phase: 'post_click', verdict: 'failed', confidence: 1, reason: `nav_error:${obs.navError}` };
@@ -166,6 +197,11 @@ export class FacebookGroupJoinJudge {
       hasAny(text, ['pending', 'approval', 'request sent', 'membership questions', '待批准', '待审批', '已申请', '回答问题'])
     ) {
       return { phase: 'post_click', verdict: 'pending_gated', confidence: 0.95, reason: 'pending_or_questionnaire_signal' };
+    }
+    // L3 结构主判（承重 = 语言无关「跃迁」，pending/问卷之后）：composer 点前无、点后有 → 点击真让本账号成为成员 → joined。
+    // 消灭「重复加群」：未覆盖语种的加入不再落 LLM fail-closed→failed→重复。非成员公开组点前已有 composer → 无跃迁、不假成功。
+    if (structuralJoinConfirmed(preObs, obs)) {
+      return { phase: 'post_click', verdict: 'joined', confidence: 0.9, reason: 'structural_join_transition' };
     }
     return null;
   }
@@ -239,6 +275,9 @@ export class FacebookGroupJoinJudge {
       questionnaireRequired: obs.questionnaireRequired,
       pendingRequest: obs.pendingRequest,
       navError: obs.navError,
+      // L3 语言无关结构信号：群主体内有可聚焦发帖/评论框 + 是否仍有可见「加入」CTA（承重成员态判据）。
+      composerPresent: obs.composerPresent,
+      joinCtaPresent: obs.joinCtaPresent,
     };
     return `You classify a Facebook public group join observation.
 
@@ -248,6 +287,7 @@ Rules:
 - Approval gates, pending requests, membership questions, login, captcha, or unclear UI must not be treated as instant join.
 - A clear Join control (e.g. "加入小组" / "Join group" / "Tham gia") with no approval/pending/login/captcha signal is an instant_join; page load state is irrelevant.
 - Post-click joined means the account is now visibly a member.
+- Language-independent membership signal: composerPresent=true with joinCtaPresent=false (a focusable post/comment box in the group body and NO visible Join control) indicates membership even if the button text is in an unrecognized language. joinCtaPresent=true means the account is NOT yet a member (still shows a Join control), regardless of any composer.
 
 Phase: ${phase}
 Allowed verdicts: ${allowed}

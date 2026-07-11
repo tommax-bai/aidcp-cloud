@@ -338,7 +338,9 @@ export class FacebookGroupJoinScheduler {
       await this.markEdgeFailure(accountId, assigned, clicked.reason);
       return { triggered: true, groupUrl: assigned.groupUrl, outcome: clicked.reason };
     }
-    const post = await this.judge(accountId).evaluatePostClick(postObservation);
+    // L3：把同一次 click 的点前观测 clicked.observation 一并喂给裁判，供「跃迁」判据（composer 点前无、点后有）。
+    // postObservation 若回落为 clicked.observation（无 post），则 pre===post、跃迁不成立、结构不误 joined。
+    const post = await this.judge(accountId).evaluatePostClick(postObservation, clicked.observation);
     return this.handlePostVerdict(accountId, assigned, post, postObservation, clicked.ok, edgeId);
   }
 

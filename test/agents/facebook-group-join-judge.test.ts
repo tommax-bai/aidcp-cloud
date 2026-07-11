@@ -91,3 +91,50 @@ test('P1-6: 多语 Join CTA 走确定性 instant_join、不问 LLM（judge 词�
   }
   assert.equal(calls, 0); // 全走确定性、未问模型（词表漂移会让某语种回落 LLM → 本断言失败）
 });
+
+// ── change facebook-join-structural-verify（L3）：结构后置校验，承重=语言无关「跃迁」；消灭「重复加群」──
+test('L3: post-click 跃迁（点前无 composer→点后有、无可见加入 CTA、词表未命中语种）→ 确定性 joined，不问 LLM', async () => {
+  let calls = 0;
+  const judge = new FacebookGroupJoinJudge({ llm: { complete: async () => { calls++; return '{}'; } } });
+  const pre = { mainCtaText: 'Tham gia nhóm', composerPresent: false, joinCtaPresent: true }; // 点前非成员：无 composer、加入 CTA 在
+  const post = { mainCtaText: 'Đăng bài', composerPresent: true, joinCtaPresent: false }; // 点后 composer 出现=跃迁
+  const r = await judge.evaluatePostClick(post, pre);
+  assert.equal(r.verdict, 'joined');
+  assert.equal(r.reason, 'structural_join_transition');
+  assert.equal(calls, 0); // 结构确定性、未问模型
+});
+
+test('L3 红线: post-click 点前已有 composer（非成员公开组、无跃迁）→ 绝不结构 joined（防 fail-open false-positive）', async () => {
+  const judge = new FacebookGroupJoinJudge(); // 无 LLM → 落 fail-closed failed
+  const pre = { mainCtaText: '参加', composerPresent: true, joinCtaPresent: false }; // 点前公开组已渲染 composer；未覆盖语种致 joinCtaPresent=false
+  const post = { mainCtaText: '参加', composerPresent: true, joinCtaPresent: false };
+  const r = await judge.evaluatePostClick(post, pre);
+  assert.notEqual(r.verdict, 'joined'); // 点前已有 composer → structuralJoinConfirmed=false，绝不据 fail-open joinCtaPresent 假成功
+  assert.equal(r.verdict, 'failed');
+});
+
+test('L3: post-click composer 在但加入 CTA 仍可见（非成员）→ 绝不结构 joined（不假成功）', async () => {
+  const judge = new FacebookGroupJoinJudge();
+  const r = await judge.evaluatePostClick(
+    { mainCtaText: 'Tham gia nhóm', composerPresent: true, joinCtaPresent: true },
+    { composerPresent: false, joinCtaPresent: true },
+  );
+  assert.notEqual(r.verdict, 'joined'); // joinCtaPresent=true → 绝不假成功
+  assert.equal(r.verdict, 'failed');
+});
+
+test('L3: post-click pending 且渲染 composer 跃迁 → pending_gated（pending 先于结构 joined）', async () => {
+  const judge = new FacebookGroupJoinJudge();
+  const r = await judge.evaluatePostClick(
+    { pendingRequest: true, composerPresent: true, joinCtaPresent: false },
+    { composerPresent: false, joinCtaPresent: true },
+  );
+  assert.equal(r.verdict, 'pending_gated'); // pending 判据先于结构 joined
+});
+
+test('L3 红线: pre-click 有 composer 也绝不据结构判 already_member（无点击不 markJoined）', async () => {
+  const judge = new FacebookGroupJoinJudge(); // 无 LLM → 落 fail-closed ambiguous_skip
+  const pre = await judge.evaluatePreClick({ mainCtaText: '参加', composerPresent: true, joinCtaPresent: false });
+  assert.notEqual(pre.verdict, 'already_member'); // 已删除 pre-click 结构 already_member（防没点击就 markJoined 污染账本）
+  assert.equal(pre.verdict, 'ambiguous_skip');
+});
