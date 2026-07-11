@@ -262,6 +262,39 @@ test('parseCommand: /comment <昵称> --join → joinGroup true、injectContact 
   assert.equal(cmd.injectContact, undefined);
 });
 
+// ── change facebook-comment-review-and-targeted-join：/comment --join=<url> 加入指定群 ──
+test('parseCommand: /comment <昵称> --join=<url> → joinGroup true + joinGroupUrl 捕获、昵称干净', () => {
+  const cmd = parseCommand('/comment 工程师大白 --join=https://www.facebook.com/groups/901700573618044');
+  assert.equal(cmd.action, 'comment');
+  assert.equal(cmd.nickname, '工程师大白');
+  assert.equal(cmd.joinGroup, true);
+  assert.equal(cmd.joinGroupUrl, 'https://www.facebook.com/groups/901700573618044');
+  assert.equal(cmd.injectContact, undefined);
+});
+test('parseCommand: /comment <昵称> --join=<url> --contact（任意顺序）→ 都命中、昵称干净', () => {
+  const a = parseCommand('/comment 大白 --join=https://www.facebook.com/groups/abc --contact');
+  assert.equal(a.nickname, '大白');
+  assert.equal(a.joinGroup, true);
+  assert.equal(a.joinGroupUrl, 'https://www.facebook.com/groups/abc');
+  assert.equal(a.injectContact, true);
+  const b = parseCommand('/comment 大白 --contact --join=https://www.facebook.com/groups/abc');
+  assert.equal(b.nickname, '大白');
+  assert.equal(b.joinGroup, true);
+  assert.equal(b.joinGroupUrl, 'https://www.facebook.com/groups/abc');
+  assert.equal(b.injectContact, true);
+});
+test('parseCommand: bare --join 仍 joinGroupUrl undefined（零回归，走下一个库内群）', () => {
+  const cmd = parseCommand('/comment 大白 --join');
+  assert.equal(cmd.joinGroup, true);
+  assert.equal(cmd.joinGroupUrl, undefined);
+});
+test('parseCommand: --join=<url> 也 trailing-only——非末尾 token 并入昵称、不当开关', () => {
+  const cmd = parseCommand('/comment --join=https://www.facebook.com/groups/x 大白');
+  assert.equal(cmd.joinGroup, undefined);
+  assert.equal(cmd.joinGroupUrl, undefined);
+  assert.equal(cmd.nickname, '--join=https://www.facebook.com/groups/x 大白');
+});
+
 test('parseCommand: /comment <昵称> --join --contact → 两开关都 true、昵称干净', () => {
   const cmd = parseCommand('/comment 工程师大白 --join --contact');
   assert.equal(cmd.nickname, '工程师大白');
@@ -296,22 +329,28 @@ test('parseCommand: 含空格昵称 + 尾部 --join --contact 正确切分', () 
 });
 
 test('CommandRouter: /comment --contact/--join 把开关透传给 comment 动作', async () => {
-  let seen: { nickname?: string; options?: { injectContact?: boolean; joinGroup?: boolean } } | null = null;
+  let seen: { nickname?: string; options?: { injectContact?: boolean; joinGroup?: boolean; joinGroupUrl?: string } } | null = null;
   const router = new CommandRouter({
     ...makeActions().actions,
-    comment: async (nickname?: string, options?: { injectContact?: boolean; joinGroup?: boolean }) => {
+    comment: async (nickname?: string, options?: { injectContact?: boolean; joinGroup?: boolean; joinGroupUrl?: string }) => {
       seen = { nickname, options };
       return { ok: true as const, level: 'success' as const, title: '已触发', message: 'ok' };
     },
   });
   await router.handle('/comment 工程师大白 --contact');
-  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: true, joinGroup: undefined } });
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: true, joinGroup: undefined, joinGroupUrl: undefined } });
 
   await router.handle('/comment 工程师大白');
-  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: undefined, joinGroup: undefined } });
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: undefined, joinGroup: undefined, joinGroupUrl: undefined } });
 
   await router.handle('/comment 工程师大白 --join --contact');
-  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: true, joinGroup: true } });
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: true, joinGroup: true, joinGroupUrl: undefined } });
+
+  await router.handle('/comment 工程师大白 --join=https://www.facebook.com/groups/901700573618044');
+  assert.deepEqual(seen, {
+    nickname: '工程师大白',
+    options: { injectContact: undefined, joinGroup: true, joinGroupUrl: 'https://www.facebook.com/groups/901700573618044' },
+  });
 });
 
 test('CommandRouter: publish 编排失败 → 回执 ok:false / level:error（红 ❌，绝不再绿色）+ 透传失败原因', async () => {

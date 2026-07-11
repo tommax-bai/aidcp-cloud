@@ -442,6 +442,31 @@ export class FacebookGroupTargetStore {
     return { imported, updated, duplicate, invalid, rows };
   }
 
+  /**
+   * 确保目标行存在以兜住成员表 FK（change facebook-comment-review-and-targeted-join，`/comment --join=<url>`）：
+   * 新建行强制 `enabled=false`——nextJoinCandidate / claimNext 都要求 `enabled=true`，故这条**绝不**被自动加群扫到、
+   * 不外泄成对其它账号开放的公共加群目标。已存在则**原样返回、绝不升降级**既有 target（可能是运营导入的启用共享目标）。
+   * 非 Facebook 群 url → 返回 null。
+   */
+  async ensureTarget(urlInput: string): Promise<FacebookGroupTargetRow | null> {
+    const groupUrl = canonicalFacebookGroupUrl(urlInput);
+    if (!groupUrl) return null;
+    const { rows: inserted } = await this.pool.query<TargetDbRow>(
+      `INSERT INTO facebook_group_target (group_url, enabled)
+       VALUES ($1, false)
+       ON CONFLICT (group_url) DO NOTHING
+       RETURNING group_url, group_name, region, park, direction, join_gating, priority, enabled, import_batch, created_at, updated_at`,
+      [groupUrl],
+    );
+    if (inserted[0]) return toTargetRow(inserted[0]);
+    const { rows: existing } = await this.pool.query<TargetDbRow>(
+      `SELECT group_url, group_name, region, park, direction, join_gating, priority, enabled, import_batch, created_at, updated_at
+       FROM facebook_group_target WHERE group_url = $1`,
+      [groupUrl],
+    );
+    return existing[0] ? toTargetRow(existing[0]) : null;
+  }
+
   async setEnabled(groupUrlInput: string, enabled: boolean): Promise<FacebookGroupTargetRow | null> {
     const groupUrl = canonicalFacebookGroupUrl(groupUrlInput);
     if (!groupUrl) return null;
@@ -642,6 +667,50 @@ export class FacebookGroupMembershipStore {
       [accountId],
     );
     return rows[0] ? toMembershipRow(rows[0]) : null;
+  }
+
+  /**
+   * 认领**指定 url** 的成员行（change facebook-comment-review-and-targeted-join，`/comment --join=<url>`）。
+   * 因 `UNIQUE(group_url)`，一个群全局仅一行、只归一个账号：
+   * - 无行 → INSERT 归本账号（`assigned`），返回 `{row, ownedByOther:false}`；
+   * - 已存在且属**别的账号** → 返回 `{row, ownedByOther:true}`（诚实：不可双占，绝不冒充/抢改 account_id）；
+   * - 已存在且属本账号且 `status='joined'` → 原样返回（快路，调用方跳过边端）；
+   * - 已存在且属本账号但其它 status → 复位为 `assigned`（清 cooldown）供运营重试，返回刷新行。
+   * 非 Facebook 群 url → 返回 null。调用方须先 `targets.ensureTarget(url)` 保 FK。
+   */
+  async claimSpecific(
+    accountId: string,
+    urlInput: string,
+  ): Promise<{ row: FacebookGroupMembershipRow; ownedByOther: boolean } | null> {
+    const groupUrl = canonicalFacebookGroupUrl(urlInput);
+    if (!groupUrl) return null;
+    const cols = `account_id, group_url, status, assigned_at, joined_at, last_attempt_at, attempts,
+                  last_reason, last_commented_at, cooldown_until, comments_total, left_confirmations, updated_at`;
+    const { rows: inserted } = await this.pool.query<MembershipDbRow>(
+      `INSERT INTO facebook_group_membership (account_id, group_url, status, assigned_at, last_attempt_at, attempts)
+       VALUES ($1, $2, 'assigned', now(), now(), 0)
+       ON CONFLICT (group_url) DO NOTHING
+       RETURNING ${cols}`,
+      [accountId, groupUrl],
+    );
+    if (inserted[0]) return { row: toMembershipRow(inserted[0]), ownedByOther: false };
+    const { rows: existing } = await this.pool.query<MembershipDbRow>(
+      `SELECT ${cols} FROM facebook_group_membership WHERE group_url = $1`,
+      [groupUrl],
+    );
+    const row = existing[0];
+    if (!row) return null; // 竞态：刚被删 → 调用方按 invalid 诚实退
+    if (row.account_id !== accountId) return { row: toMembershipRow(row), ownedByOther: true };
+    if (row.status === 'joined') return { row: toMembershipRow(row), ownedByOther: false };
+    const { rows: reset } = await this.pool.query<MembershipDbRow>(
+      `UPDATE facebook_group_membership
+       SET status = 'assigned', assigned_at = COALESCE(assigned_at, now()), cooldown_until = NULL,
+           last_attempt_at = now(), updated_at = now()
+       WHERE account_id = $1 AND group_url = $2
+       RETURNING ${cols}`,
+      [accountId, groupUrl],
+    );
+    return { row: toMembershipRow(reset[0] ?? row), ownedByOther: false };
   }
 
   async currentAssignment(accountId: string): Promise<FacebookGroupMembershipRow | null> {

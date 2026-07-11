@@ -1297,18 +1297,20 @@ async function main(): Promise<void> {
     },
     // 手动 /comment <昵称>（change comment-search-command）：按昵称解析账号 → 触发按需评论任务。
     // 回执据**触发结果**判 ok/level（开跑绿 / 未触发黄 / 失败红）；最终评/未评结果由 scheduler 异步补结果卡片。
-    comment: async (nickname?: string, options?: { injectContact?: boolean; joinGroup?: boolean }) => {
+    comment: async (nickname?: string, options?: { injectContact?: boolean; joinGroup?: boolean; joinGroupUrl?: string }) => {
       if (!commentScheduler) {
         return { ok: false, level: 'error', title: '按需评论未就绪', message: '评论触发器未就绪（启动中或依赖不可用），未发起任务。' };
       }
       const acct = await resolveAccountByNickname(nickname); // 找不到/重名 → 抛错，runComment 走 fail 分支（红 ❌）
       // injectContact（change generalize-contact-info）：--contact 时注入账号联系方式；缺联系方式 fail-closed 由 scheduler 处置。
       // joinGroup（change facebook-manual-join-comment）：--join 时先加入一个新群、加入成功后在该新群里评论（仅 FB）。
+      // joinGroupUrl（change facebook-comment-review-and-targeted-join）：--join=<url> 时加入**指定群**（只归该账号）而非库内下一个。
       // manualOverride（change manual-comment-bypass-quota）：飞书手动 /comment 是操作员命令 → 加群 + 评论整条链跳过节奏 / 风控配额闸
       // （会话加群额度 + 加群速率 + 评论速率 + 评论日上限 + 硬风控状态），与已无配额闸的手动 XHS /comment 对齐；自动排期路径不带此旗标。
       return commentScheduler.triggerManual(acct, {
         injectContact: options?.injectContact,
         joinFirst: options?.joinGroup,
+        joinGroupUrl: options?.joinGroupUrl,
         manualOverride: true,
       });
     },
@@ -2201,6 +2203,9 @@ async function main(): Promise<void> {
     facebookConfigFor: (accountId) => facebookCommentConfigStore.effectiveConfigFor(accountId),
     facebookAutoEnabled: () => readEnvString('AIDCP_FB_COMMENT_AUTO') === 'true',
     facebookShadow: () => readEnvString('AIDCP_FB_COMMENT_SHADOW') === 'true',
+    // 人审全量闸（change facebook-comment-review-and-targeted-join）：默认开（!== 'false'）→ 不带联系方式的 FB 评论也走飞书人审；
+    // 只有显式 AIDCP_FB_COMMENT_REVIEW_ALL=false 才恢复「校验后直发」旧行为。注意与 auto 的 ==='true' 语义相反（这项默认开）。
+    facebookCommentReviewAll: () => readEnvString('AIDCP_FB_COMMENT_REVIEW_ALL') !== 'false',
     facebookCompose: async (accountId, { keyword, postText, comments }) => {
       // 读了再写（change facebook-comment-read-before-write）：撰写器吃到帖子正文（图片帖常空）+ 顶部他人评论，
       // 顺着讨论、用**内容语言**写（图片群里内容多是当地语言，而本号 FB 界面可能是中文——绝不跟界面语言）。
@@ -2270,6 +2275,8 @@ async function main(): Promise<void> {
     // 加群评论（change facebook-manual-join-comment）：/comment --join 复用云端加群调度器加入一个新群（含 kill switch /
     // 判定 fail-closed / 风控配额 / 账本）。facebookGroupJoinScheduler 在本 CommentScheduler 之后构造——闭包运行时才取值（TDZ 安全）。
     facebookJoinNewGroup: (accountId, opts) => facebookGroupJoinScheduler.triggerScheduled(accountId, opts),
+    // --join=<url>（change facebook-comment-review-and-targeted-join）：加入指定群、只归该账号（同一 TDZ-safe 闭包，scheduler 稍后构造）。
+    facebookJoinSpecificGroup: (accountId, groupUrl, opts) => facebookGroupJoinScheduler.joinSpecificGroup(accountId, groupUrl, opts),
     postResultCard: async (accountId, receipt) => {
       const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
       if (!chatId) {

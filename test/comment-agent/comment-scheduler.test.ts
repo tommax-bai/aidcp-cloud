@@ -554,6 +554,45 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.equal(audits.at(-1)?.container, 'Puerto Rico Y Sus Encantos e Historia');
   });
 
+  // ── Feature A（change facebook-comment-review-and-targeted-join）：所有 FB 评论走飞书人审（默认开、可 env 关） ──
+  it('Feature A 默认开：非联系评论也需人审——审批口未接线 → 不提交（compose_skipped/approval_rejected_or_timeout），绝不裸发', async () => {
+    const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true } });
+    await new CommentScheduler({ ...deps, approval: undefined }).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
+    assert.equal(audits.at(-1)?.reason, 'approval_rejected_or_timeout');
+    assert.ok(!posted.includes('interaction.comment'), '未接线人审 → 绝不提交评论');
+  });
+
+  it('Feature A 逃生门：AIDCP_FB_COMMENT_REVIEW_ALL=false → 非联系评论校验后直发、无人审、commented', async () => {
+    const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true } });
+    await new CommentScheduler({ ...deps, approval: undefined, facebookCommentReviewAll: () => false }).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
+  });
+
+  it('Feature A 红线：manualOverride 只绕配额、绝不绕人审——无 approval 仍不提交', async () => {
+    const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true } });
+    await new CommentScheduler({ ...deps, approval: undefined }).triggerManual('fb-1', { manualOverride: true });
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
+    assert.equal(audits.at(-1)?.reason, 'approval_rejected_or_timeout');
+    assert.ok(!posted.includes('interaction.comment'), 'manualOverride 不绕人审 → 无 approval 时绝不提交');
+  });
+
+  it('Feature A：非联系人审卡文本 = 纯正文、无尾部换行 / 无联系方式', async () => {
+    const { deps, audits } = fbFlowDeps({ submit: { ok: true } });
+    const cards: string[] = [];
+    await new CommentScheduler({
+      ...deps,
+      approval: { request: async (r) => { cards.push(r.text); }, isApproved: async () => true, timeoutMs: 20, pollMs: 1 },
+    }).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    assert.equal(cards[0], '这家手冲咖啡很不错');
+  });
+
   it('joined-group coverage：账号启用但无 eligible joined group → no_targets，绝不回退配置容器', async () => {
     const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true } });
     await new CommentScheduler({
@@ -717,6 +756,67 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.equal(cards.at(-1)?.ok, true);
     assert.equal(cards.at(-1)?.level, 'success');
     assert.match(cards.at(-1)!.title, /加群 \+ 评论成功/);
+  });
+
+  // ── Feature B（change facebook-comment-review-and-targeted-join）：/comment --join=<url> 加入指定群再评论 ──
+  it('Feature B：--join=<url> → 路由到 facebookJoinSpecificGroup（非 New），容器 pin 到该指定群', async () => {
+    const URL = 'https://www.facebook.com/groups/901700573618044';
+    const { deps, audits, envelopes } = fbFlowDeps({ submit: { ok: true } });
+    let specificArg: string | undefined;
+    let newCalled = 0;
+    await new CommentScheduler({
+      ...deps,
+      facebookJoinNewGroup: async () => { newCalled++; return { triggered: true, outcome: 'joined', groupUrl: 'other' }; },
+      facebookJoinSpecificGroup: async (_a, url) => { specificArg = url; return { triggered: true, outcome: 'joined', groupUrl: url }; },
+    }).triggerManual('fb-1', { joinFirst: true, joinGroupUrl: URL });
+    await tick();
+    assert.equal(specificArg, URL, '加入的是指定群 url');
+    assert.equal(newCalled, 0, '绝不回落到「下一个库内群」');
+    assert.equal(envelopes.find((e) => e.type === 'search.execute')?.payload.container, URL);
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+  });
+
+  it('Feature B：--join=<url> 已是成员（already_member）→ 直接在该群评论', async () => {
+    const URL = 'https://www.facebook.com/groups/901700573618044';
+    const { deps, audits, envelopes } = fbFlowDeps({ submit: { ok: true } });
+    await new CommentScheduler({
+      ...deps,
+      facebookJoinSpecificGroup: async (_a, url) => ({ triggered: true, outcome: 'already_member', groupUrl: url }),
+    }).triggerManual('fb-1', { joinFirst: true, joinGroupUrl: URL });
+    await tick();
+    assert.equal(envelopes.find((e) => e.type === 'search.execute')?.payload.container, URL);
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+  });
+
+  it('Feature B 红线：--join=<url> 但 facebookJoinSpecificGroup 未接线 → 诚实拒，绝不回落 New、不评论', async () => {
+    const URL = 'https://www.facebook.com/groups/901700573618044';
+    const { deps, posted } = fbFlowDeps({ submit: { ok: true } });
+    let newCalled = 0;
+    const r = await new CommentScheduler({
+      ...deps,
+      facebookJoinNewGroup: async () => { newCalled++; return { triggered: true, outcome: 'joined', groupUrl: 'other' }; },
+      facebookJoinSpecificGroup: undefined,
+    }).triggerManual('fb-1', { joinFirst: true, joinGroupUrl: URL });
+    await tick();
+    assert.equal(r.ok, false);
+    assert.match(r.message, /未接线/);
+    assert.equal(newCalled, 0, '未接线时绝不改加其它群');
+    assert.deepEqual(posted, [], '不评论');
+  });
+
+  it('Feature B：--join=<url> owned_by_other_account → 诚实黄卡、不评论', async () => {
+    const URL = 'https://www.facebook.com/groups/901700573618044';
+    const { deps, posted } = fbFlowDeps({ submit: { ok: true } });
+    const cards: Array<{ ok: boolean; title: string; message: string }> = [];
+    await new CommentScheduler({
+      ...deps,
+      facebookJoinSpecificGroup: async () => ({ triggered: false, reason: 'owned_by_other_account' }),
+      postResultCard: (_a, r) => { cards.push({ ok: r.ok, title: r.title, message: r.message }); },
+    }).triggerManual('fb-1', { joinFirst: true, joinGroupUrl: URL });
+    await tick();
+    assert.equal(cards.at(-1)?.ok, false);
+    assert.match(cards.at(-1)!.message, /其他账号/);
+    assert.deepEqual(posted, []);
   });
 
   // ── change manual-comment-bypass-quota：飞书手动 /comment（server.ts 带 manualOverride:true）跳过评论侧配额闸 ──

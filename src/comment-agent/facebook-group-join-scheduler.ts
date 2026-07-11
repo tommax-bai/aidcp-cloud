@@ -13,6 +13,7 @@ import {
   FacebookGroupJoinAuditStore,
   FacebookGroupMembershipStore,
   FacebookGroupTargetStore,
+  canonicalFacebookGroupUrl,
 } from './facebook-group-store.js';
 import { buildFacebookGroupJoinEdgeSteps, type FacebookGroupJoinStepResult } from './facebook-group-join-edge-steps.js';
 import { EdgeTaskLeaseError, type EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
@@ -171,6 +172,73 @@ export class FacebookGroupJoinScheduler {
     }
   }
 
+  /**
+   * 加入**指定 url** 的群，只归该账号（change facebook-comment-review-and-targeted-join，`/comment --join=<url>`）。
+   * 守 triggerScheduled 同序物理闸：account_required / url 合法 / 单飞 running / 非 FB / kill switch(disabled) / edge_offline；
+   * **绕**配额闸（canJoin 风控速率状态 + 会话额度，人工授权，与 --join manual 契约一致，成功仍照记 recordSessionJoin，账本不漏）。
+   * 已是成员（账本 status='joined'）→ already_member 快路，不走边端回合。
+   * url 非法 → invalid_group_url；群已归属别的账号 → owned_by_other_account（诚实，绝不冒充成员评论）。
+   */
+  async joinSpecificGroup(
+    accountId: string,
+    groupUrlInput: string,
+    _opts?: { manual?: boolean },
+  ): Promise<FacebookGroupJoinTriggerResult> {
+    if (!accountId || accountId === 'default') return { triggered: false, reason: 'account_required' };
+    const groupUrl = canonicalFacebookGroupUrl(groupUrlInput);
+    if (!groupUrl) return { triggered: false, reason: 'invalid_group_url' };
+    if (this.running.has(accountId)) return { triggered: false, reason: 'running' };
+    this.running.add(accountId);
+    try {
+      if (this.deps.isFacebookAccount && !(await this.deps.isFacebookAccount(accountId))) {
+        return { triggered: false, reason: 'not_facebook_account' };
+      }
+      const shadow = this.deps.shadow?.() ?? false;
+      const autoEnabled = this.deps.autoEnabled?.() ?? false;
+      if (!shadow && !autoEnabled) return { triggered: false, reason: 'disabled' };
+
+      const conn = this.deps.resolveConnection(accountId);
+      if (!conn || !conn.edgeId) {
+        await this.audit({ accountId, groupUrl, outcome: 'join_failed', phase: 'scheduler', reason: 'edge_offline', shadow });
+        return { triggered: false, reason: 'edge_offline' };
+      }
+      const bus = conn.bus;
+      const edgeId = conn.edgeId;
+
+      if (shadow) {
+        const observed = await this.deps.edgeTaskLeases.withLease(
+          { edgeId, kind: 'group_join', priority: 'automatic', leaseMs: 3 * 60_000 },
+          (lease) => this.steps(bus, edgeId, lease.taskId).observeGroup(groupUrl),
+        );
+        if (!observed.observation) {
+          await this.audit({ accountId, groupUrl, outcome: outcomeForReason(observed.reason), phase: 'shadow', shadow: true, reason: observed.reason ?? 'no_observation' });
+          return { triggered: true, groupUrl, outcome: observed.reason ?? 'no_observation' };
+        }
+        const verdict = await this.judge(accountId).evaluatePreClick(observed.observation);
+        return { triggered: true, groupUrl, outcome: verdict.verdict };
+      }
+
+      // 手动指定群：绕配额闸（canJoin + 会话额度），只守物理闸。先 ensureTarget（enabled=false 兜 FK、绝不外泄），再认领本账号成员行。
+      await this.deps.targets.ensureTarget(groupUrl);
+      const claim = await this.deps.memberships.claimSpecific(accountId, groupUrl);
+      if (!claim) {
+        await this.audit({ accountId, groupUrl, outcome: 'join_failed', phase: 'scheduler', reason: 'invalid_group_url', shadow: false });
+        return { triggered: false, reason: 'invalid_group_url' };
+      }
+      if (claim.ownedByOther) {
+        await this.audit({ accountId, groupUrl, outcome: 'join_failed', phase: 'scheduler', reason: 'owned_by_other_account', shadow: false });
+        return { triggered: false, reason: 'owned_by_other_account' };
+      }
+      if (claim.row.status === 'joined') {
+        await this.audit({ accountId, groupUrl, outcome: 'already_member', phase: 'pre_click', reason: 'already_joined_ledger', shadow: false });
+        return { triggered: true, groupUrl, outcome: 'already_member' };
+      }
+      return this.runAssignedJoin(accountId, bus, edgeId, claim.row);
+    } finally {
+      this.running.delete(accountId);
+    }
+  }
+
   private async runShadow(accountId: string, bus: EventBus, edgeId: string): Promise<FacebookGroupJoinTriggerResult> {
     const target = await this.deps.targets.nextJoinCandidate();
     if (!target) {
@@ -203,6 +271,19 @@ export class FacebookGroupJoinScheduler {
       await this.audit({ accountId, outcome: 'no_targets', phase: 'scheduler', shadow: false, reason: 'no_candidate' });
       return { triggered: false, reason: 'no_targets' };
     }
+    return this.runAssignedJoin(accountId, bus, edgeId, assigned);
+  }
+
+  /**
+   * 对**已确定的成员行**跑「观察 → 预判 → 点击 → 后判」加群流水线（change facebook-comment-review-and-targeted-join：
+   * 从 runReal 原样抽出，行为不变）。自动巡回（runReal，库内 claimNext）与手动指定群（joinSpecificGroup）共用此段。
+   */
+  private async runAssignedJoin(
+    accountId: string,
+    bus: EventBus,
+    edgeId: string,
+    assigned: FacebookGroupMembershipRow,
+  ): Promise<FacebookGroupJoinTriggerResult> {
     await this.audit({ accountId, groupUrl: assigned.groupUrl, outcome: 'claimed', phase: 'scheduler', shadow: false });
     await this.deps.memberships.markJoining(accountId, assigned.groupUrl);
 

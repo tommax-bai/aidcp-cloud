@@ -41,6 +41,9 @@ function makeHarness(opts: {
   edge?: (env: Env, bus: EventBus) => void;
   /** 每次 withLease 抛出的租约异常（P0-3 测试用）；设置后 observe 步的 withLease 立即抛。 */
   leaseError?: Error;
+  /** joinSpecificGroup（change facebook-comment-review-and-targeted-join）：claimSpecific 桩返回；缺省 → 该 url 的新 assigned 行。 */
+  claimSpecific?: (accountId: string, url: string) => { row: FacebookGroupMembershipRow; ownedByOther: boolean } | null;
+  isFacebookAccount?: boolean;
 } = {}) {
   const bus = new EventBus();
   const sent: Env[] = [];
@@ -67,12 +70,31 @@ function makeHarness(opts: {
     markJoinGating: async (groupUrl: string, gating: string) => {
       targetCalls.push(`gating:${groupUrl}:${gating}`);
     },
+    ensureTarget: async (url: string) => {
+      targetCalls.push(`ensure:${url}`);
+      return {
+        groupUrl: url,
+        groupName: null,
+        joinGating: 'unknown' as const,
+        priority: 0,
+        enabled: false, // 只归该账号：绝不外泄成公共自动加群目标
+        importBatch: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+    },
   };
   const memberships = {
     currentAssignment: async () => null,
     claimNext: async () => {
       membershipCalls.push('claim');
       return membership();
+    },
+    claimSpecific: async (accountId: string, url: string) => {
+      membershipCalls.push(`claimSpecific:${url}`);
+      return opts.claimSpecific
+        ? opts.claimSpecific(accountId, url)
+        : { row: membership({ groupUrl: url, status: 'assigned' }), ownedByOther: false };
     },
     markJoining: async (_accountId: string, groupUrl: string) => {
       membershipCalls.push(`joining:${groupUrl}`);
@@ -137,7 +159,7 @@ function makeHarness(opts: {
       sessionBudgetCalls.push(`${accountId}:${edgeId ?? ''}`);
       return true;
     },
-    isFacebookAccount: async () => true,
+    isFacebookAccount: async () => opts.isFacebookAccount ?? true,
     pauseAccount: async (accountId, reason) => {
       paused.push(`${accountId}:${reason}`);
     },
@@ -377,5 +399,86 @@ describe('FacebookGroupJoinScheduler', () => {
     assert.ok(h.membershipCalls.includes(`retry:${GROUP}:login_required`));
     assert.deepEqual(h.paused, ['acc-fb:facebook_group_join:login_required']);
     assert.deepEqual(h.targetCalls, [], '登录态问题是账号 transient，不学习 group gated');
+  });
+
+  // ── Feature B（change facebook-comment-review-and-targeted-join）：joinSpecificGroup 加入指定群、只归该账号 ──
+  const SPEC_URL = 'https://www.facebook.com/groups/901700573618044';
+  const memberEdge = (env: Env, bus: EventBus) => {
+    const click = env.payload.click === true;
+    bus.emit('action.completed', {
+      action: 'join_group',
+      ok: click, // observe: ok=false（observation_only，非瞬态）；click: ok=true
+      ...(click ? {} : { reason: 'observation_only' }),
+      groupUrl: env.payload.groupUrl,
+      clicked: click,
+      observation: { groupUrl: env.payload.groupUrl, mainCtaText: click ? 'Leave group' : 'Join group' },
+      ts: 0,
+    } as never);
+  };
+
+  it('joinSpecificGroup 新加入：ensureTarget(enabled=false) + claimSpecific + observe→click→joined', async () => {
+    const h = makeHarness({ auto: true, edge: memberEdge });
+    const r = await h.scheduler.joinSpecificGroup('acc-fb', SPEC_URL, { manual: true });
+    assert.equal(r.triggered, true);
+    assert.equal(r.outcome, 'joined');
+    assert.equal(r.groupUrl, SPEC_URL);
+    assert.ok(h.targetCalls.includes(`ensure:${SPEC_URL}`), 'ensureTarget 被调用（enabled=false、不外泄成公共目标）');
+    assert.ok(h.membershipCalls.includes(`claimSpecific:${SPEC_URL}`));
+    assert.ok(h.membershipCalls.includes(`joined:${SPEC_URL}:member_signal`));
+    assert.equal(h.sent[0].type, 'group.join');
+  });
+
+  it('joinSpecificGroup 已是成员（ledger status=joined）→ already_member 快路，绝不走边端', async () => {
+    const h = makeHarness({
+      auto: true,
+      claimSpecific: (_a, url) => ({ row: membership({ groupUrl: url, status: 'joined' }), ownedByOther: false }),
+    });
+    const r = await h.scheduler.joinSpecificGroup('acc-fb', SPEC_URL, { manual: true });
+    assert.equal(r.triggered, true);
+    assert.equal(r.outcome, 'already_member');
+    assert.deepEqual(h.sent, [], '已是成员 → 不下发 group.join');
+    assert.ok(h.targetCalls.includes(`ensure:${SPEC_URL}`));
+  });
+
+  it('joinSpecificGroup 群已归属别的账号 → owned_by_other_account，诚实拒、不下发、不冒充成员', async () => {
+    const h = makeHarness({
+      auto: true,
+      claimSpecific: (_a, url) => ({ row: membership({ groupUrl: url, status: 'joined' }), ownedByOther: true }),
+    });
+    const r = await h.scheduler.joinSpecificGroup('acc-fb', SPEC_URL, { manual: true });
+    assert.equal(r.triggered, false);
+    assert.equal(r.reason, 'owned_by_other_account');
+    assert.deepEqual(h.sent, []);
+  });
+
+  it('joinSpecificGroup url 非法 → invalid_group_url，不 ensure、不 claim、不下发', async () => {
+    const h = makeHarness({ auto: true });
+    const r = await h.scheduler.joinSpecificGroup('acc-fb', 'not-a-facebook-group', { manual: true });
+    assert.equal(r.triggered, false);
+    assert.equal(r.reason, 'invalid_group_url');
+    assert.deepEqual(h.sent, []);
+    assert.deepEqual(h.membershipCalls, []);
+    assert.deepEqual(h.targetCalls, []);
+  });
+
+  it('joinSpecificGroup kill switch 关（auto/shadow 皆 off）→ disabled，绝不越闸', async () => {
+    const h = makeHarness({ auto: false });
+    const r = await h.scheduler.joinSpecificGroup('acc-fb', SPEC_URL, { manual: true });
+    assert.equal(r.triggered, false);
+    assert.equal(r.reason, 'disabled');
+    assert.deepEqual(h.sent, []);
+  });
+
+  it('joinSpecificGroup 非 Facebook 账号 → not_facebook_account', async () => {
+    const h = makeHarness({ auto: true, isFacebookAccount: false });
+    const r = await h.scheduler.joinSpecificGroup('acc-fb', SPEC_URL, { manual: true });
+    assert.equal(r.triggered, false);
+    assert.equal(r.reason, 'not_facebook_account');
+  });
+
+  it('joinSpecificGroup 绕配额闸（canJoin/session 均拒）仍加入——人工授权，物理闸仍守', async () => {
+    const h = makeHarness({ auto: true, canJoin: false, canUseSessionJoin: false, edge: memberEdge });
+    const r = await h.scheduler.joinSpecificGroup('acc-fb', SPEC_URL, { manual: true });
+    assert.equal(r.outcome, 'joined', '手动指定群绕风控/会话配额，与 --join manual 契约一致');
   });
 });

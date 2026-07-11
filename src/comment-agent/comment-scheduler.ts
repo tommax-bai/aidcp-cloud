@@ -98,6 +98,10 @@ export function joinOnlyReceipt(join: {
         return { ok: false, level: 'warning', title: '未加群', message: '没有可加入的新群目标（目标库为空、均已加入或被排除）；未加群也未评论。' };
       case 'not_facebook_account':
         return { ok: false, level: 'warning', title: '未加群', message: '该账号非 Facebook 账号；加群评论仅支持 Facebook。' };
+      case 'invalid_group_url':
+        return { ok: false, level: 'warning', title: '未加群', message: '提供的群链接不是有效的 Facebook 群地址；未加群也未评论。' };
+      case 'owned_by_other_account':
+        return { ok: false, level: 'warning', title: '未加群', message: '该群已归属其他账号，无法为本账号加入同一群；未加群也未评论。' };
       default:
         return { ok: false, level: 'error', title: '未加群', message: `加群未触发（${join.reason ?? 'unknown'}）；未加群也未评论。` };
     }
@@ -221,6 +225,12 @@ export interface CommentSchedulerDeps {
   /** 影子模式（AIDCP_FB_COMMENT_SHADOW）：跑选词+撰写+校验+审计，但绝不提交、不记风控/冷却。 */
   facebookShadow?: () => boolean;
   /**
+   * 人审全量闸（AIDCP_FB_COMMENT_REVIEW_ALL !== 'false'，change facebook-comment-review-and-targeted-join）：
+   * 默认 true → 不带联系方式的 FB 评论也走飞书人审；显式 'false' 恢复旧行为（校验后直发）。缺省未注入 → 视为 true（默认开）。
+   * 影子仍在人审前 short-circuit；manualOverride 只绕配额、绝不绕人审（人是刹车）。
+   */
+  facebookCommentReviewAll?: () => boolean;
+  /**
    * FB 评论撰写（无人值守，不走人审）：**读了再写**（change facebook-comment-read-before-write）——
    * 按关键词/容器 + **帖子正文（图片帖常空）+ 顶部他人评论** 产草稿，顺着讨论、用**内容语言**写；返回 null=撰写失败。
    */
@@ -254,6 +264,18 @@ export interface CommentSchedulerDeps {
    */
   facebookJoinNewGroup?: (
     accountId: string,
+    opts?: { manual?: boolean },
+  ) => Promise<{ triggered: boolean; reason?: string; groupUrl?: string; outcome?: string }>;
+  /**
+   * Facebook 手动「加入指定群再评论」（change facebook-comment-review-and-targeted-join，`/comment --join=<url>`）：
+   * 加入**该指定 url** 的群，只归该账号（per-account 成员行、target 以 enabled=false 兜 FK，绝不外泄成公共自动加群目标）。
+   * 已是成员 → 直接返回 already_member 快路（不走边端回合）；结果 shape 同 facebookJoinNewGroup。
+   * triggered=false 另有 reason：invalid_group_url（链接非法）/ owned_by_other_account（该群已归属别的账号）。
+   * 缺省未注入 → `/comment --join=<url>` 诚实拒（加群未接线），**绝不**回落到 facebookJoinNewGroup 的「下一个库内群」。
+   */
+  facebookJoinSpecificGroup?: (
+    accountId: string,
+    groupUrl: string,
     opts?: { manual?: boolean },
   ) => Promise<{ triggered: boolean; reason?: string; groupUrl?: string; outcome?: string }>;
   /** 选关键词/容器的随机源（测试注入定值；缺省 Math.random）。 */
@@ -317,7 +339,7 @@ export class CommentScheduler {
   /** 飞书 /comment 触发：返回「触发态」结构化回执；最终结果异步补发结果卡片。 */
   async triggerManual(
     accountId: string,
-    options?: { injectContact?: boolean; priority?: EdgeTaskPriority; joinFirst?: boolean; manualOverride?: boolean },
+    options?: { injectContact?: boolean; priority?: EdgeTaskPriority; joinFirst?: boolean; joinGroupUrl?: string; manualOverride?: boolean },
   ): Promise<CommentCommandReceipt> {
     if (!accountId || accountId === 'default') {
       return { ok: false, level: 'error', title: '按需评论触发失败', message: '未解析到有效账号（绝不回落 default）' };
@@ -379,9 +401,20 @@ export class CommentScheduler {
           message: 'Facebook 定向评论执行尚未接入（facebook-scheduled-comment 2.2 待实装）；不回落 xhs 搜索流程',
         };
       }
-      // 加群评论（change facebook-manual-join-comment）：先加入一个新群、加入成功后在群内评论。人工授权、单飞、异步补合并结果卡。
+      // 加群评论（change facebook-manual-join-comment / facebook-comment-review-and-targeted-join）：
+      // 先加群、加入成功后在群内评论。--join（无 url）加下一个库内群；--join=<url> 加入**指定群**（只归该账号）。人工授权、单飞、异步补合并结果卡。
       if (options?.joinFirst) {
-        if (!this.deps.facebookJoinNewGroup) {
+        const targetedUrl = options?.joinGroupUrl;
+        // --join=<url> 走「加入指定群」路径，需 facebookJoinSpecificGroup 接线；未接线诚实拒，**绝不**回落到「下一个库内群」。
+        if (targetedUrl && !this.deps.facebookJoinSpecificGroup) {
+          return {
+            ok: false,
+            level: 'error',
+            title: '未触发加群评论',
+            message: '「加入指定群」能力未接线（facebookJoinSpecificGroup 未注入）；本次不加群也不评论，绝不改加其它群。',
+          };
+        }
+        if (!targetedUrl && !this.deps.facebookJoinNewGroup) {
           return {
             ok: false,
             level: 'error',
@@ -393,6 +426,7 @@ export class CommentScheduler {
         void this.runFacebookJoinThenComment(accountId, {
           injectContact: options?.injectContact,
           contactInfo,
+          ...(targetedUrl ? { joinGroupUrl: targetedUrl } : {}),
           manualOverride: options?.manualOverride === true,
         })
           .catch((err) =>
@@ -405,7 +439,9 @@ export class CommentScheduler {
           ok: true,
           level: 'success',
           title: '已触发「加群 + 评论」',
-          message: `已触发 Facebook 加群 + 评论：先加入一个新群，加入成功后在该新群里发一条评论${
+          message: `已触发 Facebook 加群 + 评论：${
+            targetedUrl ? '加入指定群' : '先加入一个新群'
+          }，加入成功（或已是成员）后在该群里发一条评论${
             options?.injectContact ? '（带联系方式，走飞书人审）' : ''
           }；结果稍后回报。`,
         };
@@ -761,30 +797,39 @@ export class CommentScheduler {
       return;
     }
 
+    // 4a) 联系方式 fail-closed（在影子闸前）：--contact 但账号没配联系方式 → 诚实退，绝不发无码评论。
     let groupChatCode: string | undefined;
+    let contactInfo: string | null = null;
     if (options.injectContact) {
-      const contactInfo = options.contactInfo ?? null;
+      contactInfo = options.contactInfo ?? null;
       if (!contactInfo) {
         audit({ accountId, outcome: 'compose_skipped', reason: 'contact_info_missing', shadow, keyword, container, textLength: v.text.length });
         return;
       }
-      const approved = await this.approveFacebookContactComment(accountId, {
-        permalink: target,
-        text: v.text,
-        contactInfo,
-        container,
-      });
-      if (!approved) {
-        audit({ accountId, outcome: 'compose_skipped', reason: 'approval_rejected_or_timeout', shadow, keyword, container, textLength: v.text.length });
-        return;
-      }
-      groupChatCode = approved.contactInfo;
     }
 
-    // 5) 影子：只读浏览 + 撰写 + 校验到此为止——绝不提交、不记风控/冷却、不按已发去重。
+    // 5) 影子：只读浏览 + 撰写 + 校验到此为止——绝不提交、不记风控/冷却、不按已发去重，也**绝不打扰人审**（永不发的干跑不发卡）。
     if (shadow) {
       audit({ accountId, outcome: 'shadow_ok', shadow: true, keyword, container, textLength: v.text.length });
       return;
+    }
+
+    // 5a) 人审闸（change facebook-comment-review-and-targeted-join）：带联系方式一律必审；不带联系方式在
+    // 人审全量闸（AIDCP_FB_COMMENT_REVIEW_ALL，默认开）下也必审。未接线/超时/拒 → 诚实退、绝不裸发、不打去重。
+    // manualOverride 只绕配额（见上），**绝不**在此绕人审——人是刹车。
+    const reviewAll = d.facebookCommentReviewAll?.() ?? true;
+    if (options.injectContact || reviewAll) {
+      const approved = await this.approveFacebookComment(accountId, {
+        permalink: target,
+        text: v.text,
+        ...(contactInfo ? { contactInfo } : {}),
+        container,
+      });
+      if (!approved) {
+        audit({ accountId, outcome: 'compose_skipped', reason: 'approval_rejected_or_timeout', shadow: false, keyword, container, textLength: v.text.length });
+        return;
+      }
+      if (contactInfo) groupChatCode = approved.contactInfo;
     }
 
     // 6) 提交评论 + 服务器确认（边端 own-identity 收窄）。成功记风控走 interaction.occurred 自动路径，绝不在此重复 record。
@@ -817,13 +862,16 @@ export class CommentScheduler {
    */
   private async runFacebookJoinThenComment(
     accountId: string,
-    options: { injectContact?: boolean; contactInfo?: string | null; manualOverride?: boolean } = {},
+    options: { injectContact?: boolean; contactInfo?: string | null; joinGroupUrl?: string; manualOverride?: boolean } = {},
   ): Promise<void> {
     const d = this.deps;
     let join: { triggered: boolean; reason?: string; groupUrl?: string; outcome?: string };
     try {
       // manual=true：手动 /comment --join 加群跳过配额闸（会话额度 + 风控速率/状态）。见 triggerScheduled 契约。
-      join = await d.facebookJoinNewGroup!(accountId, { manual: options.manualOverride === true });
+      // --join=<url>：加入**指定群**（只归该账号）；缺 url 时加下一个库内群。已在 triggerManual 保证对应 dep 已接线。
+      join = options.joinGroupUrl
+        ? await d.facebookJoinSpecificGroup!(accountId, options.joinGroupUrl, { manual: options.manualOverride === true })
+        : await d.facebookJoinNewGroup!(accountId, { manual: options.manualOverride === true });
     } catch (err) {
       await d.postResultCard?.(accountId, {
         ok: false,
@@ -850,20 +898,25 @@ export class CommentScheduler {
     await d.postResultCard?.(accountId, joinCommentReceipt(join, comment, options.injectContact === true));
   }
 
-  private async approveFacebookContactComment(
+  /**
+   * FB 评论飞书人审（change facebook-comment-review-and-targeted-join）：泛化自原联系评论人审——
+   * contactInfo 可选：无则人审卡只显正文（绝不留尾部空行），有则显「正文 + 换行 + 联系方式」（审=发）。
+   * 未接线/发卡失败/超时/拒 → 返回 null（绝不裸发）。返回值仅在有联系方式时带回 contactInfo。
+   */
+  private async approveFacebookComment(
     accountId: string,
-    input: { permalink: string; text: string; contactInfo: string; container: string },
-  ): Promise<{ text: string; contactInfo: string } | null> {
+    input: { permalink: string; text: string; contactInfo?: string | null; container: string },
+  ): Promise<{ text: string; contactInfo?: string } | null> {
     const approval = this.deps.approval;
     const log = this.deps.logger ?? console;
     if (!approval) {
-      log.warn('[fb-comment] 联系评论人审口未接线 → 不发（绝不裸发）');
+      log.warn('[fb-comment] 评论人审口未接线 → 不发（绝不裸发）');
       return null;
     }
     const now = this.deps.now ?? (() => Date.now());
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const requestId = `facebook-comment-${now()}`;
-    const reviewText = `${input.text}\n${input.contactInfo}`;
+    const reviewText = input.contactInfo ? `${input.text}\n${input.contactInfo}` : input.text;
     try {
       await approval.request({
         requestId,
@@ -874,7 +927,7 @@ export class CommentScheduler {
         accountId,
       });
     } catch (err) {
-      log.warn(`[fb-comment] 联系评论审批卡发送失败 account=${accountId}：${(err as Error).message}`);
+      log.warn(`[fb-comment] 评论审批卡发送失败 account=${accountId}：${(err as Error).message}`);
       return null;
     }
     const timeoutMs = approval.timeoutMs ?? 90_000;
@@ -887,7 +940,7 @@ export class CommentScheduler {
       } catch {
         approved = false;
       }
-      if (approved) return { text: input.text, contactInfo: input.contactInfo };
+      if (approved) return input.contactInfo ? { text: input.text, contactInfo: input.contactInfo } : { text: input.text };
       await sleep(pollMs);
     }
     return null;
