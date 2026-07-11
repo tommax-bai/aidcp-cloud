@@ -55,6 +55,14 @@ export interface ParsedCommand {
    * 与 `--contact` 可任意顺序同给。
    */
   joinGroupUrl?: string;
+  /**
+   * `/comment` 的强制开关（change manual-comment-force-flag）：尾部 `--force` present → true、缺省 undefined（零回归）。
+   * 命中时**仅手动命令路径**放开两道软筛选——① 相关性校验（小红书强相关甄选 + Facebook `weak_relevance`）；
+   * ② 每笔记/每帖去重（允许对已评过的目标再评一条）。一个开关同时放开这两项。
+   * MUST NOT 放开人审 / 内容安全校验（链接/联系方式/@提及/刷屏/长度）/ 边端诚实闸 / 账号隔离。
+   * 可与 `--contact` / `--join` 任意顺序组合。自动 / 排期路径绝不带此旗标。
+   */
+  force?: boolean;
 }
 
 const HELP_TEXT = [
@@ -68,6 +76,7 @@ const HELP_TEXT = [
   '• `/comment <昵称> --join` — 仅 Facebook：加入一个新群，加入成功后在该新群里发一条评论',
   '• `/comment <昵称> --join=<群链接>` — 仅 Facebook：加入指定的这个群（若已是成员则直接在群内评论），再发一条评论',
   '• `/comment <昵称> --join --contact` — 加群 + 在新群里发一条带「联系方式」的评论（走人审；任意顺序）',
+  '• `/comment <昵称> --force` — 跳过「强相关 + 已评过去重」两道软筛选（没强相关目标也评、已评过的也能再评）；仍走人审、仍拦链接/联系方式/刷屏；可与 --contact / --join 组合',
   '• `/publish-test [requestId]` — 发送测试审批卡片',
   '• `/bind` — 绑定当前群为默认审批群（开发中）',
   '',
@@ -144,10 +153,17 @@ export function parseCommand(text: string): ParsedCommand {
       let injectContact: boolean | undefined;
       let joinGroup: boolean | undefined;
       let joinGroupUrl: string | undefined;
+      let force: boolean | undefined;
       while (commentArgs.length > 0) {
         const lastToken = commentArgs[commentArgs.length - 1] ?? '';
         if (/^--contact$/i.test(lastToken)) {
           injectContact = true;
+          commentArgs = commentArgs.slice(0, -1);
+          continue;
+        }
+        // `--force`（change manual-comment-force-flag）：放开相关性 + 每笔记去重两道软筛选（仅手动路径），任意顺序可组合。
+        if (/^--force$/i.test(lastToken)) {
+          force = true;
           commentArgs = commentArgs.slice(0, -1);
           continue;
         }
@@ -162,7 +178,7 @@ export function parseCommand(text: string): ParsedCommand {
         }
         break;
       }
-      return { action: 'comment', nickname: commentArgs.join(' ').trim() || undefined, injectContact, joinGroup, joinGroupUrl, raw, args };
+      return { action: 'comment', nickname: commentArgs.join(' ').trim() || undefined, injectContact, joinGroup, joinGroupUrl, force, raw, args };
     }
     case '/bind':
       return { action: 'bind', raw, args };
@@ -238,10 +254,13 @@ export interface CommandActions {
    *
    * options.joinGroupUrl（change facebook-comment-review-and-targeted-join）：给定时加入**这个指定群**（只归该账号）而非库内下一个；
    * 已是成员则直接评论。缺省 = bare --join 的「下一个库内群」行为。
+   *
+   * options.force（change manual-comment-force-flag）：true 时放开**相关性 + 每笔记去重**两道软筛选（仅手动路径）——
+   * 没强相关目标也评、已评过的也能再评；MUST NOT 放开人审 / 内容安全校验 / 边端诚实闸。缺省 = 不放开 = 零回归。
    */
   comment?(
     nickname?: string,
-    options?: { injectContact?: boolean; joinGroup?: boolean; joinGroupUrl?: string },
+    options?: { injectContact?: boolean; joinGroup?: boolean; joinGroupUrl?: string; force?: boolean },
   ): Promise<CommentCommandReceipt> | CommentCommandReceipt;
   /** 绑定当前群为默认审批群 */
   bindChat?(record: BotChatRecord): Promise<void> | void;
@@ -361,7 +380,7 @@ export class CommandRouter {
       // nickname → 执行层按昵称解析真实账号（严格只认昵称）；解析失败 / 边端离线由执行层抛错、走 fail 分支。
       // 回执 ok/level/title/message 由执行层据**真实触发结果**给出（开跑绿、未触发黄、触发失败红），
       // 路由层不再一律当成功——杜绝「触发」被无脑染绿 ✅（评论任务最终结果另由结果卡片补达）。
-      const r = await this.actions.comment(cmd.nickname, { injectContact: cmd.injectContact, joinGroup: cmd.joinGroup, joinGroupUrl: cmd.joinGroupUrl });
+      const r = await this.actions.comment(cmd.nickname, { injectContact: cmd.injectContact, joinGroup: cmd.joinGroup, joinGroupUrl: cmd.joinGroupUrl, force: cmd.force });
       return {
         command: cmd.raw,
         ok: r.ok,

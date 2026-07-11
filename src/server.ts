@@ -1297,7 +1297,7 @@ async function main(): Promise<void> {
     },
     // 手动 /comment <昵称>（change comment-search-command）：按昵称解析账号 → 触发按需评论任务。
     // 回执据**触发结果**判 ok/level（开跑绿 / 未触发黄 / 失败红）；最终评/未评结果由 scheduler 异步补结果卡片。
-    comment: async (nickname?: string, options?: { injectContact?: boolean; joinGroup?: boolean; joinGroupUrl?: string }) => {
+    comment: async (nickname?: string, options?: { injectContact?: boolean; joinGroup?: boolean; joinGroupUrl?: string; force?: boolean }) => {
       if (!commentScheduler) {
         return { ok: false, level: 'error', title: '按需评论未就绪', message: '评论触发器未就绪（启动中或依赖不可用），未发起任务。' };
       }
@@ -1307,11 +1307,14 @@ async function main(): Promise<void> {
       // joinGroupUrl（change facebook-comment-review-and-targeted-join）：--join=<url> 时加入**指定群**（只归该账号）而非库内下一个。
       // manualOverride（change manual-comment-bypass-quota）：飞书手动 /comment 是操作员命令 → 加群 + 评论整条链跳过节奏 / 风控配额闸
       // （会话加群额度 + 加群速率 + 评论速率 + 评论日上限 + 硬风控状态），与已无配额闸的手动 XHS /comment 对齐；自动排期路径不带此旗标。
+      // force（change manual-comment-force-flag）：--force 时放开相关性 + 每笔记去重两道软筛选（仍守人审/安全校验/诚实闸）。
+      // 与 manualOverride **分开传**——manualOverride 只绕配额、force 只绕相关性/去重，二者独立语义，绝不合并。
       return commentScheduler.triggerManual(acct, {
         injectContact: options?.injectContact,
         joinFirst: options?.joinGroup,
         joinGroupUrl: options?.joinGroupUrl,
         manualOverride: true,
+        force: options?.force === true,
       });
     },
   };

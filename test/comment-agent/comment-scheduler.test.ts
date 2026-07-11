@@ -358,6 +358,115 @@ describe('outcomeToReceipt（失败/未产出绝不染绿）', () => {
   });
 });
 
+// ── change manual-comment-force-flag：/comment --force 放开「强相关 + 每笔记去重」两道软筛选（仅手动路径），仍守人审/安全校验 ──
+describe('CommentScheduler /comment --force (manual-comment-force-flag)', () => {
+  // 甄选角色判「无强相关」（pickIndex=null）；其余角色照常。
+  function llmNoStrong() {
+    return {
+      complete: async (_p: string, opts?: { role?: string }): Promise<string> => {
+        switch (opts?.role) {
+          case 'browse:comment_search_term_generator': return '{"terms":["RAG 实战"],"source":"curated"}';
+          case 'browse:comment_target_picker': return '{"pickIndex":null,"stronglyRelevantIndexes":[],"reason":"无强相关"}';
+          case 'browse:comment_composer': return '{"text":"这套检索链路很实在"}';
+          default: return '{}';
+        }
+      },
+    };
+  }
+
+  it('XHS 无 --force + 无强相关候选 → no_strong_candidate、不评（默认路径零回归）', async () => {
+    const bus = new EventBus();
+    const recorded: string[] = [];
+    const cardDone = deferred<{ ok: boolean; level: string }>();
+    const s = new CommentScheduler(baseDeps({
+      resolveConnection: () => ({ bus, edgeId: 'e1' }),
+      pusher: fakeEdge(bus),
+      llmFor: () => llmNoStrong(),
+      dedupFor: () => ({ hasInteracted: async () => false, recordInteraction: async (n) => { recorded.push(n); } }),
+      postResultCard: (_a, r) => { cardDone.resolve({ ok: r.ok, level: r.level }); },
+    }));
+    await s.triggerManual('acc-1'); // 无 force
+    const card = await cardDone.promise;
+    assert.equal(card.ok, false, '无强相关候选 → 默认不评');
+    assert.equal(card.level, 'warning');
+    assert.deepEqual(recorded, [], '没发评论、没记去重');
+  });
+
+  it('XHS --force + 无强相关候选 → 兜底选收藏最高的一篇并发布；触发回执标注 --force', async () => {
+    const bus = new EventBus();
+    const recorded: string[] = [];
+    const cardDone = deferred<{ ok: boolean; level: string }>();
+    const s = new CommentScheduler(baseDeps({
+      resolveConnection: () => ({ bus, edgeId: 'e1' }),
+      pusher: fakeEdge(bus),
+      llmFor: () => llmNoStrong(),
+      dedupFor: () => ({ hasInteracted: async () => false, recordInteraction: async (n) => { recorded.push(n); } }),
+      postResultCard: (_a, r) => { cardDone.resolve({ ok: r.ok, level: r.level }); },
+    }));
+    const receipt = await s.triggerManual('acc-1', { force: true });
+    assert.match(receipt.message, /--force/, '触发回执标注本次为 --force');
+    const card = await cardDone.promise;
+    assert.equal(card.ok, true, '--force 兜底选收藏最高的一篇 → 评了（不再 no_strong_candidate）');
+    assert.equal(card.level, 'success');
+    assert.deepEqual(recorded, ['n1'], '发布成功后仍记一笔去重');
+  });
+
+  it('XHS --force 但人审未通过 → 不发（force 只绕相关性/去重，绝不绕人审）', async () => {
+    const bus = new EventBus();
+    const recorded: string[] = [];
+    const cardDone = deferred<{ ok: boolean }>();
+    const s = new CommentScheduler(baseDeps({
+      resolveConnection: () => ({ bus, edgeId: 'e1' }),
+      pusher: fakeEdge(bus),
+      llmFor: () => llmNoStrong(),
+      dedupFor: () => ({ hasInteracted: async () => false, recordInteraction: async (n) => { recorded.push(n); } }),
+      approval: { timeoutMs: 50, request: async () => {}, isApproved: async () => false }, // 人审未通过
+      postResultCard: (_a, r) => { cardDone.resolve({ ok: r.ok }); },
+    }));
+    await s.triggerManual('acc-1', { force: true });
+    const card = await cardDone.promise;
+    assert.equal(card.ok, false, 'force 下人审未通过仍不发');
+    assert.deepEqual(recorded, [], '没发、没记去重（人是刹车）');
+  });
+
+  it('XHS --force 放开去重 → 已评过的笔记也能再评（默认路径会被去重挡下）', async () => {
+    // dedup 命中（已评过 n1）；picker 默认强相关（复用 baseDeps 的 fakeLlm）。
+    // 无 force：n1 在甄选前被去重滤掉 → 无候选 → no_strong_candidate、不评。
+    {
+      const bus = new EventBus();
+      const recorded: string[] = [];
+      const cardDone = deferred<{ ok: boolean }>();
+      const s = new CommentScheduler(baseDeps({
+        resolveConnection: () => ({ bus, edgeId: 'e1' }),
+        pusher: fakeEdge(bus),
+        dedupFor: () => ({ hasInteracted: async () => true, recordInteraction: async (n) => { recorded.push(n); } }),
+        postResultCard: (_a, r) => { cardDone.resolve({ ok: r.ok }); },
+      }));
+      await s.triggerManual('acc-1'); // 无 force
+      const card = await cardDone.promise;
+      assert.equal(card.ok, false, '默认路径：已评过被去重挡下、不评');
+      assert.deepEqual(recorded, [], '没再评');
+    }
+    // force：放开去重 → n1 仍入候选、被选中、再评成功。
+    {
+      const bus = new EventBus();
+      const recorded: string[] = [];
+      const cardDone = deferred<{ ok: boolean; level: string }>();
+      const s = new CommentScheduler(baseDeps({
+        resolveConnection: () => ({ bus, edgeId: 'e1' }),
+        pusher: fakeEdge(bus),
+        dedupFor: () => ({ hasInteracted: async () => true, recordInteraction: async (n) => { recorded.push(n); } }),
+        postResultCard: (_a, r) => { cardDone.resolve({ ok: r.ok, level: r.level }); },
+      }));
+      await s.triggerManual('acc-1', { force: true });
+      const card = await cardDone.promise;
+      assert.equal(card.ok, true, '--force 放开去重 → 已评过的也能再评');
+      assert.equal(card.level, 'success');
+      assert.deepEqual(recorded, ['n1'], '再评后仍记一笔去重（记账不变）');
+    }
+  });
+});
+
 // ── facebook-scheduled-comment 2.2/2.3：runFacebookTargetedTask 影子先行编排（纯云，物理不发） ──
 describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () => {
   type Audit = import('../../src/comment-agent/facebook-comment-audit-store.js').FacebookCommentAuditRow;
@@ -643,6 +752,53 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
     assert.equal(audits.at(-1)?.reason, 'approval_rejected_or_timeout');
     assert.ok(!posted.includes('interaction.comment'), 'manualOverride 不绕人审 → 无 approval 时绝不提交');
+  });
+
+  // ── change manual-comment-force-flag：FB --force 跳过 weak_relevance（仍守内容安全校验 + 人审 + 放开每帖去重） ──
+  it('FB 无 --force + 零重叠草稿 → weak_relevance、不发（默认路径零回归）', async () => {
+    const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true } });
+    await new CommentScheduler({ ...deps, facebookCompose: async () => '天气不错今天' }).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
+    assert.equal(audits.at(-1)?.reason, 'weak_relevance', '零重叠 → 默认路径判 weak_relevance');
+    assert.ok(!posted.includes('interaction.comment'));
+  });
+
+  it('FB --force → 跳过 weak_relevance：零重叠草稿也过相关性闸，经人审后真发 commented', async () => {
+    const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true } });
+    await new CommentScheduler({ ...deps, facebookCompose: async () => '天气不错今天' }).triggerManual('fb-1', { force: true });
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'commented', '--force 跳过 weak_relevance → 过相关性闸、人审通过后真发');
+    assert.ok(posted.includes('interaction.comment'));
+  });
+
+  it('FB --force 不放开内容安全校验 → 含链接草稿仍 compose_skipped/contains_url，绝不发', async () => {
+    const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true } });
+    await new CommentScheduler({ ...deps, facebookCompose: async () => '好文 https://spam.example 推荐' }).triggerManual('fb-1', { force: true });
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
+    assert.equal(audits.at(-1)?.reason, 'contains_url', 'force 只放开相关性，链接安全校验照拦');
+    assert.ok(!posted.includes('interaction.comment'));
+  });
+
+  it('FB --force 放开每帖去重 → 已评过的帖也能再评（默认路径 all_deduped 不评）', async () => {
+    // 无 force：唯一候选已评过 → all_deduped、不评。
+    {
+      const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true }, seen: [PERMALINK] });
+      await new CommentScheduler(deps).triggerManual('fb-1');
+      await tick();
+      assert.equal(audits.at(-1)?.outcome, 'no_strong_candidate');
+      assert.equal(audits.at(-1)?.reason, 'all_deduped');
+      assert.ok(!posted.includes('interaction.comment'));
+    }
+    // force：放开去重 → 取第一个候选、再评成功。
+    {
+      const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true }, seen: [PERMALINK] });
+      await new CommentScheduler(deps).triggerManual('fb-1', { force: true });
+      await tick();
+      assert.equal(audits.at(-1)?.outcome, 'commented', '--force 放开去重 → 已评过的帖再评');
+      assert.ok(posted.includes('interaction.comment'));
+    }
   });
 
   it('Feature A：非联系人审卡文本 = 纯正文、无尾部换行 / 无联系方式', async () => {

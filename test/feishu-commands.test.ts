@@ -328,29 +328,82 @@ test('parseCommand: 含空格昵称 + 尾部 --join --contact 正确切分', () 
   assert.equal(cmd.injectContact, true);
 });
 
-test('CommandRouter: /comment --contact/--join 把开关透传给 comment 动作', async () => {
-  let seen: { nickname?: string; options?: { injectContact?: boolean; joinGroup?: boolean; joinGroupUrl?: string } } | null = null;
+// ── change manual-comment-force-flag：/comment 尾部 --force（跳过相关性 + 每笔记去重；可与 --contact/--join 任意顺序组合） ──
+
+test('parseCommand: /comment <昵称> --force → force true、昵称干净、其余开关 undefined', () => {
+  const cmd = parseCommand('/comment 工程师大白 --force');
+  assert.equal(cmd.action, 'comment');
+  assert.equal(cmd.nickname, '工程师大白');
+  assert.equal(cmd.force, true);
+  assert.equal(cmd.injectContact, undefined);
+  assert.equal(cmd.joinGroup, undefined);
+});
+
+test('parseCommand: --force 大小写不敏感（--FORCE）', () => {
+  const cmd = parseCommand('/comment 工程师大白 --FORCE');
+  assert.equal(cmd.nickname, '工程师大白');
+  assert.equal(cmd.force, true);
+});
+
+test('parseCommand: /comment 无 --force → force undefined（零回归）', () => {
+  const cmd = parseCommand('/comment 工程师大白');
+  assert.equal(cmd.force, undefined);
+});
+
+test('parseCommand: --force 与 --contact/--join 任意顺序组合都命中、昵称干净', () => {
+  const a = parseCommand('/comment 大白 --join --contact --force');
+  assert.equal(a.nickname, '大白');
+  assert.equal(a.joinGroup, true);
+  assert.equal(a.injectContact, true);
+  assert.equal(a.force, true);
+  const b = parseCommand('/comment 大白 --force --contact --join');
+  assert.equal(b.nickname, '大白');
+  assert.equal(b.joinGroup, true);
+  assert.equal(b.injectContact, true);
+  assert.equal(b.force, true);
+  const c = parseCommand('/comment 大白 --force --join=https://www.facebook.com/groups/abc');
+  assert.equal(c.nickname, '大白');
+  assert.equal(c.joinGroup, true);
+  assert.equal(c.joinGroupUrl, 'https://www.facebook.com/groups/abc');
+  assert.equal(c.force, true);
+});
+
+test('parseCommand: --force 也 trailing-only——非末尾 token 并入昵称、不当开关', () => {
+  const cmd = parseCommand('/comment --force 工程师');
+  assert.equal(cmd.force, undefined); // 末尾是「工程师」，非开关
+  assert.equal(cmd.nickname, '--force 工程师');
+});
+
+test('CommandRouter: /comment --contact/--join/--force 把开关透传给 comment 动作', async () => {
+  let seen: { nickname?: string; options?: { injectContact?: boolean; joinGroup?: boolean; joinGroupUrl?: string; force?: boolean } } | null = null;
   const router = new CommandRouter({
     ...makeActions().actions,
-    comment: async (nickname?: string, options?: { injectContact?: boolean; joinGroup?: boolean; joinGroupUrl?: string }) => {
+    comment: async (nickname?: string, options?: { injectContact?: boolean; joinGroup?: boolean; joinGroupUrl?: string; force?: boolean }) => {
       seen = { nickname, options };
       return { ok: true as const, level: 'success' as const, title: '已触发', message: 'ok' };
     },
   });
   await router.handle('/comment 工程师大白 --contact');
-  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: true, joinGroup: undefined, joinGroupUrl: undefined } });
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: true, joinGroup: undefined, joinGroupUrl: undefined, force: undefined } });
 
   await router.handle('/comment 工程师大白');
-  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: undefined, joinGroup: undefined, joinGroupUrl: undefined } });
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: undefined, joinGroup: undefined, joinGroupUrl: undefined, force: undefined } });
 
   await router.handle('/comment 工程师大白 --join --contact');
-  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: true, joinGroup: true, joinGroupUrl: undefined } });
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: true, joinGroup: true, joinGroupUrl: undefined, force: undefined } });
 
   await router.handle('/comment 工程师大白 --join=https://www.facebook.com/groups/901700573618044');
   assert.deepEqual(seen, {
     nickname: '工程师大白',
-    options: { injectContact: undefined, joinGroup: true, joinGroupUrl: 'https://www.facebook.com/groups/901700573618044' },
+    options: { injectContact: undefined, joinGroup: true, joinGroupUrl: 'https://www.facebook.com/groups/901700573618044', force: undefined },
   });
+
+  // --force 透传（change manual-comment-force-flag），可与 --contact 组合
+  await router.handle('/comment 工程师大白 --force');
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: undefined, joinGroup: undefined, joinGroupUrl: undefined, force: true } });
+
+  await router.handle('/comment 工程师大白 --contact --force');
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: true, joinGroup: undefined, joinGroupUrl: undefined, force: true } });
 });
 
 test('CommandRouter: publish 编排失败 → 回执 ok:false / level:error（红 ❌，绝不再绿色）+ 透传失败原因', async () => {

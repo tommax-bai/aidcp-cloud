@@ -347,7 +347,7 @@ export class CommentScheduler {
   /** 飞书 /comment 触发：返回「触发态」结构化回执；最终结果异步补发结果卡片。 */
   async triggerManual(
     accountId: string,
-    options?: { injectContact?: boolean; priority?: EdgeTaskPriority; joinFirst?: boolean; joinGroupUrl?: string; manualOverride?: boolean },
+    options?: { injectContact?: boolean; priority?: EdgeTaskPriority; joinFirst?: boolean; joinGroupUrl?: string; manualOverride?: boolean; force?: boolean },
   ): Promise<CommentCommandReceipt> {
     if (!accountId || accountId === 'default') {
       return { ok: false, level: 'error', title: '按需评论触发失败', message: '未解析到有效账号（绝不回落 default）' };
@@ -436,6 +436,7 @@ export class CommentScheduler {
           contactInfo,
           ...(targetedUrl ? { joinGroupUrl: targetedUrl } : {}),
           manualOverride: options?.manualOverride === true,
+          force: options?.force === true,
         })
           .catch((err) =>
             (this.deps.logger ?? console).warn(
@@ -451,7 +452,7 @@ export class CommentScheduler {
             targetedUrl ? '加入指定群' : '先加入一个新群'
           }，加入成功（或已是成员）后在该群里发一条评论${
             options?.injectContact ? '（带联系方式，走飞书人审）' : ''
-          }；结果稍后回报。`,
+          }${options?.force ? '（--force：跳过相关性/去重）' : ''}；结果稍后回报。`,
         };
       }
       this.running.add(accountId);
@@ -461,6 +462,7 @@ export class CommentScheduler {
         injectContact: options?.injectContact,
         contactInfo,
         manualOverride: options?.manualOverride === true,
+        force: options?.force === true,
       })
         .catch((err) =>
           (this.deps.logger ?? console).warn(
@@ -469,7 +471,7 @@ export class CommentScheduler {
         )
         .finally(() => this.running.delete(accountId));
       const mode = this.deps.facebookShadow?.() ? '影子模式（不真发）' : '真发（按风控/冷却/上限闸）';
-      return { ok: true, level: 'success', title: '已触发 Facebook 定向评论', message: `已触发 Facebook 定向评论 · ${mode}；结果稍后回报` };
+      return { ok: true, level: 'success', title: '已触发 Facebook 定向评论', message: `已触发 Facebook 定向评论 · ${mode}${options?.force ? ' · --force（跳过相关性/去重）' : ''}；结果稍后回报` };
     }
 
     this.running.add(accountId);
@@ -478,7 +480,7 @@ export class CommentScheduler {
     // 异步跑任务，命令立即回执（任务含人审轮询，不可同步等）。contactInfo 已解析一次，带进任务用于注入（gate 同源）。
     // catch：runTask 内部已兜任务期异常；此处兜「任务启动前」的防御性抛（如 gate 后人设被解绑 → getSoul 抛
     // no_persona，persona-driven-content-pipeline）——诚实记日志、不让未处理拒绝炸进程，绝不假成功。
-    void this.runTask(accountId, bus, edgeId, contactInfo, platformProfile, options?.priority ?? 'human')
+    void this.runTask(accountId, bus, edgeId, contactInfo, platformProfile, options?.priority ?? 'human', options?.force === true)
       .catch((err) =>
         (this.deps.logger ?? console).warn(
           `[comment-scheduler] 任务未能启动/异常中止 account=${accountId}：${(err as Error).message}`,
@@ -490,7 +492,9 @@ export class CommentScheduler {
       ok: true,
       level: 'success',
       title: '已触发按需评论',
-      message: `已启动按需评论任务（搜「${defaultCommentSearchLabel(platformProfile)}」的强相关、未评过笔记；评论前仍需飞书人审 approved=true 才会真发；结果稍后回报）`,
+      message: options?.force
+        ? `已启动按需评论任务（--force：跳过「强相关」甄选与已评过去重——没强相关目标则选收藏最高的一篇、已评过的也可再评；评论前仍需飞书人审 approved=true 才会真发；结果稍后回报）`
+        : `已启动按需评论任务（搜「${defaultCommentSearchLabel(platformProfile)}」的强相关、未评过笔记；评论前仍需飞书人审 approved=true 才会真发；结果稍后回报）`,
     };
   }
 
@@ -631,7 +635,7 @@ export class CommentScheduler {
    */
   private async runFacebookTargetedTask(
     accountId: string,
-    options: { injectContact?: boolean; contactInfo?: string | null; overrideContainerUrl?: string; manualOverride?: boolean } = {},
+    options: { injectContact?: boolean; contactInfo?: string | null; overrideContainerUrl?: string; manualOverride?: boolean; force?: boolean } = {},
   ): Promise<FacebookCommentRunResult> {
     // 终态捕获（change facebook-manual-join-comment）：包一层把「最后一次审计」升级为返回值，供「加群 + 评论」
     // 合并结果卡取用；body 内所有 return; 保持 void 语义不动（普通 /comment / 排期路径零回归、只是丢弃返回值）。
@@ -663,7 +667,7 @@ export class CommentScheduler {
 
   private async runFacebookTargetedTaskBody(
     accountId: string,
-    options: { injectContact?: boolean; contactInfo?: string | null; overrideContainerUrl?: string; manualOverride?: boolean },
+    options: { injectContact?: boolean; contactInfo?: string | null; overrideContainerUrl?: string; manualOverride?: boolean; force?: boolean },
     audit: (row: FacebookCommentAuditRow) => void,
   ): Promise<void> {
     const d = this.deps;
@@ -759,12 +763,17 @@ export class CommentScheduler {
       return;
     }
     // 2) 选一个未评过的候选（防重复真发：跳过 dedup 已标记的 permalink）。
+    // --force（manual-comment-force-flag）：放开每帖去重，直接取第一个候选（已评过的也可再评）；否则跳过已评过的。
     let target: string | undefined;
-    for (const c of search.candidates) {
-      const seen = await dedup.hasInteracted(c.permalink, 'comment').catch(() => false);
-      if (!seen) {
-        target = c.permalink;
-        break;
+    if (options.force) {
+      target = search.candidates[0]?.permalink;
+    } else {
+      for (const c of search.candidates) {
+        const seen = await dedup.hasInteracted(c.permalink, 'comment').catch(() => false);
+        if (!seen) {
+          target = c.permalink;
+          break;
+        }
       }
     }
     if (!target) {
@@ -798,7 +807,9 @@ export class CommentScheduler {
     }
     // 只拒不修的确定性校验（llm-output-honesty）：相关性以「关键词 + 帖子正文 + 他人评论」为语境
     //（评论既由这些产出、天然相关；仍守零重叠即拒的兜底）。任一违规 → compose_skipped 终局，绝不修复后发。
-    const relevanceCtx = [keyword, ...(postText ? [postText] : []), ...comments].filter(Boolean);
+    // --force（manual-comment-force-flag）：传空 targetKeywords → 校验器 keywords.length>0 守卫使相关性分支 no-op；
+    // 但 url/联系方式/@提及/刷屏/长度/低信号等**安全校验**在其之前、照常执行（force 绝不放开安全校验）。
+    const relevanceCtx = options.force ? [] : [keyword, ...(postText ? [postText] : []), ...comments].filter(Boolean);
     const v = validateFacebookComment(draft, { targetKeywords: relevanceCtx });
     if (!v.ok) {
       audit({ accountId, outcome: 'compose_skipped', reason: v.reason, shadow, keyword, container, textLength: draft.length });
@@ -872,7 +883,7 @@ export class CommentScheduler {
    */
   private async runFacebookJoinThenComment(
     accountId: string,
-    options: { injectContact?: boolean; contactInfo?: string | null; joinGroupUrl?: string; manualOverride?: boolean } = {},
+    options: { injectContact?: boolean; contactInfo?: string | null; joinGroupUrl?: string; manualOverride?: boolean; force?: boolean } = {},
   ): Promise<void> {
     const d = this.deps;
     let join: { triggered: boolean; reason?: string; groupUrl?: string; outcome?: string };
@@ -904,6 +915,7 @@ export class CommentScheduler {
       contactInfo: options.contactInfo ?? null,
       overrideContainerUrl: join.groupUrl,
       manualOverride: options.manualOverride === true,
+      force: options.force === true,
     });
     await d.postResultCard?.(accountId, joinCommentReceipt(join, comment, options.injectContact === true));
   }
@@ -1114,6 +1126,9 @@ export class CommentScheduler {
     contactInfo: string | null,
     platformProfile: CommentPlatformProfile,
     priority: EdgeTaskPriority,
+    // change manual-comment-force-flag：--force 时放开「强相关甄选」与「每笔记去重」两道软筛选（仅手动路径）。
+    // 缺省 false → 默认/自动路径行为逐字不变（零回归）。仍守人审、边端诚实闸（发布前就地核对 noteId）、账号隔离。
+    force = false,
   ): Promise<void> {
     const log = this.deps.logger ?? console;
     const soul = this.deps.getSoul(accountId);
@@ -1184,14 +1199,22 @@ export class CommentScheduler {
                 const cards = await edge.searchAndHarvest(term);
                 const fresh: Array<CommentCandidateCard & { index: number }> = [];
                 for (const card of cards) {
-                  if (!card.noteId || (await dedup.hasInteracted(card.noteId, 'comment').catch(() => false))) continue;
+                  if (!card.noteId) continue;
+                  // --force（manual-comment-force-flag）：放开每笔记去重，已评过的仍入候选；否则跳过已评过的。
+                  if (!force && (await dedup.hasInteracted(card.noteId, 'comment').catch(() => false))) continue;
                   fresh.push({ ...card, index: fresh.length });
                 }
                 if (!fresh.length) return { next: true };
 
+                // 甄选：有强相关候选就用甄选角色的最优（收藏最高的强相关篇）。
+                // --force 且无强相关候选时，兜底在全体候选里按收藏数降序取第一（收藏最高的一篇），继续开帖而非换词/本次不评。
                 const picked = await picker.pick(fresh);
-                if (picked.pickIndex == null) return { next: true };
-                const selected = fresh.find((card) => card.index === picked.pickIndex);
+                let selected: (CommentCandidateCard & { index: number }) | undefined;
+                if (picked.pickIndex != null) {
+                  selected = fresh.find((card) => card.index === picked.pickIndex);
+                } else if (force) {
+                  selected = [...fresh].sort((a, b) => (b.collectCount ?? 0) - (a.collectCount ?? 0))[0];
+                }
                 if (!selected?.noteId) return { next: true };
 
                 // —— 选中即定：以下任何失败都结束任务（MUST NOT 复搜、换词或改评他篇）——
@@ -1214,7 +1237,8 @@ export class CommentScheduler {
                 }
                 const displayText = composed.contactInfo ? `${composed.text}\n${composed.contactInfo}` : composed.text;
 
-                if (await dedup.hasInteracted(selected.noteId, 'comment').catch(() => false)) {
+                // --force（manual-comment-force-flag）：跳过发布前去重复检，允许再评已评过的笔记；否则命中即诚实终止。
+                if (!force && (await dedup.hasInteracted(selected.noteId, 'comment').catch(() => false))) {
                   return { next: false, result: {
                     outcome: 'post_failed', term, noteId: selected.noteId, noteTitle: prepared.note.title,
                     text: displayText, termsTried: tried, reason: 'already_commented_before_commit',
