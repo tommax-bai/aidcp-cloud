@@ -1,6 +1,9 @@
 /**
  * buildComposeAndApprove 单测（change comment-search-command，撰写→去AI味→人审）。
- * 覆盖：撰写空→null、人审通过→返回文本、人审口未接线→null（不裸发）、人审超时→null、现场评论入撰写。
+ * change comment-keep-open-through-approval 收尾：返回改判别式 {approved:true,...} | {approved:false, reason}，
+ * 断言诚实区分「撰写为空」与「送审未获批」等跳过原因。
+ * 覆盖：撰写空→empty_compose、人审通过→返回文本、人审口未接线→approval_not_wired、
+ *       人审超时→approval_unapproved、撞参考→overlaps_reference、现场评论入撰写。
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -31,14 +34,14 @@ function approvalPort(approved: boolean, opts: { timeoutMs?: number; pollMs?: nu
 }
 
 describe('buildComposeAndApprove', () => {
-  it('撰写为空 → null，不发审批', async () => {
+  it('撰写为空 → approved:false/empty_compose，不发审批', async () => {
     let requested = false;
     const step = buildComposeAndApprove({
       composer: composer(null),
       approval: { request: async () => { requested = true; }, isApproved: async () => true },
       logger: { log: () => {}, warn: () => {} },
     });
-    assert.equal(await step(note, comments), null);
+    assert.deepEqual(await step(note, comments), { approved: false, reason: 'empty_compose' });
     assert.equal(requested, false);
   });
 
@@ -50,8 +53,9 @@ describe('buildComposeAndApprove', () => {
       logger: { log: () => {}, warn: () => {} },
     });
     const result = await step(note, comments);
-    assert.equal(result?.text, '这套检索链路很实在');
-    assert.equal(result?.contactInfo, null);
+    assert.ok(result.approved);
+    assert.equal(result.text, '这套检索链路很实在');
+    assert.equal(result.contactInfo, null);
     assert.deepEqual(seen, ['学到了', '求教程']);
   });
 
@@ -68,22 +72,23 @@ describe('buildComposeAndApprove', () => {
       logger: { log: () => {}, warn: () => {} },
     });
     const result = await step(note, comments);
-    assert.equal(result?.text, '这套检索链路很实在');
+    assert.ok(result.approved);
+    assert.equal(result.text, '这套检索链路很实在');
     assert.equal(request?.accountId, 'acc-01');
     assert.equal(request?.accountName, 'Tmax');
     assert.equal(request?.authorName, '开源老周');
   });
 
-  it('人审口未接线 → null（绝不裸发）', async () => {
+  it('人审口未接线 → approved:false/approval_not_wired（绝不裸发）', async () => {
     const step = buildComposeAndApprove({
       composer: composer('一条评论'),
       approval: undefined,
       logger: { log: () => {}, warn: () => {} },
     });
-    assert.equal(await step(note, comments), null);
+    assert.deepEqual(await step(note, comments), { approved: false, reason: 'approval_not_wired' });
   });
 
-  it('人审超时 → null', async () => {
+  it('人审超时 → approved:false/approval_unapproved', async () => {
     let t = 1000;
     const step = buildComposeAndApprove({
       composer: composer('一条评论'),
@@ -95,16 +100,39 @@ describe('buildComposeAndApprove', () => {
       sleep: async () => {},
       logger: { log: () => {}, warn: () => {} },
     });
-    assert.equal(await step(note, comments), null);
+    assert.deepEqual(await step(note, comments), { approved: false, reason: 'approval_unapproved' });
   });
 
-  it('清洗后为空（撰写只剩空白）→ null', async () => {
+  it('审批卡发送失败 → approved:false/approval_send_failed（绝不裸发）', async () => {
+    const step = buildComposeAndApprove({
+      composer: composer('一条评论'),
+      approval: {
+        request: async () => { throw new Error('feishu down'); },
+        isApproved: async () => true,
+      },
+      logger: { log: () => {}, warn: () => {} },
+    });
+    assert.deepEqual(await step(note, comments), { approved: false, reason: 'approval_send_failed' });
+  });
+
+  it('清洗后为空（撰写只剩空白）→ approved:false/empty_compose', async () => {
     const step = buildComposeAndApprove({
       composer: composer('   '),
       approval: approvalPort(true),
       logger: { log: () => {}, warn: () => {} },
     });
-    assert.equal(await step(note, comments), null);
+    assert.deepEqual(await step(note, comments), { approved: false, reason: 'empty_compose' });
+  });
+
+  it('与精选参考近似照搬 → approved:false/overlaps_reference（绝不照搬）', async () => {
+    const ref = '这套检索链路很实在';
+    const step = buildComposeAndApprove({
+      composer: composer(ref),
+      getReferences: async () => [ref], // 正文与参考逐字相同 → overlap
+      approval: approvalPort(true),
+      logger: { log: () => {}, warn: () => {} },
+    });
+    assert.deepEqual(await step(note, comments), { approved: false, reason: 'overlaps_reference' });
   });
 
   // ── change account-group-chat-injection → generalize-contact-info：联系方式 verbatim 注入 + 审=发 ──
@@ -125,8 +153,9 @@ describe('buildComposeAndApprove', () => {
     });
     const result = await step(note, comments);
     const merged = `这套检索链路很实在\n${code}`;
-    assert.equal(result?.text, '这套检索链路很实在'); // 正文（边缘逐字敲）
-    assert.equal(result?.contactInfo, code); // 码（边缘整段插入，verbatim）
+    assert.ok(result.approved);
+    assert.equal(result.text, '这套检索链路很实在'); // 正文（边缘逐字敲）
+    assert.equal(result.contactInfo, code); // 码（边缘整段插入，verbatim）
     assert.equal(approvedText, merged); // 人审卡展示合并终稿（AC-PUB 审=发）
   });
 
@@ -137,8 +166,9 @@ describe('buildComposeAndApprove', () => {
       logger: { log: () => {}, warn: () => {} },
     });
     const r1 = await step1(note, comments);
-    assert.equal(r1?.text, '这套检索链路很实在');
-    assert.equal(r1?.contactInfo, null);
+    assert.ok(r1.approved);
+    assert.equal(r1.text, '这套检索链路很实在');
+    assert.equal(r1.contactInfo, null);
 
     const step2 = buildComposeAndApprove({
       composer: composer('这套检索链路很实在'),
@@ -146,7 +176,9 @@ describe('buildComposeAndApprove', () => {
       approval: approvalPort(true),
       logger: { log: () => {}, warn: () => {} },
     });
-    assert.equal((await step2(note, comments))?.contactInfo, null);
+    const r2 = await step2(note, comments);
+    assert.ok(r2.approved);
+    assert.equal(r2.contactInfo, null);
   });
 
   it('码不参与反照搬：references 命中码不致弃发（overlap 只比正文）', async () => {
@@ -160,7 +192,8 @@ describe('buildComposeAndApprove', () => {
     });
     // 正文不撞参考 → 不弃发；码不进 overlap 比对；正文与码分开返回
     const r = await step(note, comments);
-    assert.equal(r?.text, '这套检索链路很实在');
-    assert.equal(r?.contactInfo, code);
+    assert.ok(r.approved);
+    assert.equal(r.text, '这套检索链路很实在');
+    assert.equal(r.contactInfo, code);
   });
 });

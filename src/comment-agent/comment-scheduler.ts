@@ -1029,13 +1029,13 @@ export class CommentScheduler {
       } else {
         // LLM 撰写 + 飞书人审为 cloud-only；prepare 租约已经由 withLease finally 释放。
         const composed = await composeAndApprove(prepared.note, prepared.comments);
-        if (!composed) {
+        if (!composed.approved) {
           result = {
             outcome: 'compose_skipped',
             noteId: target.noteId,
             noteTitle: prepared.note.title || target.title,
             searchAttempts,
-            reason: 'empty/unapproved/rejected',
+            reason: composed.reason,
           };
         } else {
           const displayText = composed.contactInfo ? `${composed.text}\n${composed.contactInfo}` : composed.text;
@@ -1206,10 +1206,10 @@ export class CommentScheduler {
 
                 // 撰写/去 AI 味/飞书人审——持锁不释放，浏览器停在该详情页等待。超时/被拒 → 结束。
                 const composed = await composeAndApprove(prepared.note, prepared.comments);
-                if (!composed) {
+                if (!composed.approved) {
                   return { next: false, result: {
                     outcome: 'compose_skipped', term, noteId: selected.noteId, noteTitle: prepared.note.title,
-                    termsTried: tried, reason: 'empty/unapproved/rejected',
+                    termsTried: tried, reason: composed.reason,
                   } };
                 }
                 const displayText = composed.contactInfo ? `${composed.text}\n${composed.contactInfo}` : composed.text;
@@ -1289,6 +1289,29 @@ function noteLabel(title: string | undefined, prefix: string): string {
   return clean ? `${prefix}《${clean}》` : `${prefix}（未获取标题）`;
 }
 
+/**
+ * compose_skipped 的判别原因 → 人话回执片段（change comment-keep-open-through-approval 收尾）。
+ * 诚实区分「撰写阶段就没稿」与「已出稿送审但没获批」——绝不再把后者误说成"撰写为空"（观测性红线：假归因）。
+ * 「拒绝」与「超时」在授权口层不可区分（先到先得信号只看 approved===true），合并表述为"超时或被拒"。
+ * reason 缺省（老结果 / 未知值）→ 回落旧的三合一措辞，向后兼容不炸。
+ */
+function composeSkipDetail(reason?: string): string {
+  switch (reason) {
+    case 'empty_compose':
+      return '模型未产出评论或清洗后为空，未发';
+    case 'overlaps_reference':
+      return '拟评与精选参考高度重合，弃发（绝不照搬）';
+    case 'approval_not_wired':
+      return '飞书人审口未接线，未发（绝不裸发）';
+    case 'approval_send_failed':
+      return '飞书审批卡发送失败，未发';
+    case 'approval_unapproved':
+      return '已撰写并送飞书人审，但审批时限内未点「同意发布」（超时或被拒），未发';
+    default:
+      return '撰写为空/未授权/超时，未发';
+  }
+}
+
 /** TargetedCommentResult → 结果卡片回执（change curated-note-actions；卡面可辨识为定向来源，绝不染绿）。 */
 export function targetedOutcomeToReceipt(r: TargetedCommentResult, withContact: boolean): CommentResultReceipt {
   const kind = withContact ? '定向联系评论' : '定向内容评论';
@@ -1301,7 +1324,7 @@ export function targetedOutcomeToReceipt(r: TargetedCommentResult, withContact: 
     case 'note_not_found':
       return { ok: false, level: 'warning', title: `${kind}未产出`, message: `搜索定位 ${r.searchAttempts} 次均未在结果中找到${target}（可能未被搜索收录），本次不评、绝不评「相似」笔记` };
     case 'compose_skipped':
-      return { ok: false, level: 'warning', title: `${kind}未发出`, message: `${currentContext ? '已确认当前' : '已定位'}${target}，但撰写为空/未授权/超时，本次不发` };
+      return { ok: false, level: 'warning', title: `${kind}未发出`, message: `${currentContext ? '已确认当前' : '已定位'}${target}，但${composeSkipDetail(r.reason)}` };
     case 'read_failed':
       return {
         ok: false,
@@ -1328,7 +1351,7 @@ export function outcomeToReceipt(r: CommentTaskResult): CommentResultReceipt {
     case 'no_strong_candidate':
       return { ok: false, level: 'warning', title: '按需评论未产出', message: `试过 ${r.termsTried} 个搜索词，没有「最近一天最多收藏、与人设强相关且没评过」的笔记，本次不评` };
     case 'compose_skipped':
-      return { ok: false, level: 'warning', title: '按需评论未发出', message: `${selected}已选中，但撰写为空/未授权/超时，本次不发` };
+      return { ok: false, level: 'warning', title: '按需评论未发出', message: `${selected}已选中，但${composeSkipDetail(r.reason)}` };
     case 'read_failed':
       // 带真实原因（change comment-search-nav-confirm，对齐 post_failed / targetedOutcomeToReceipt）：
       // 绝不一律硬编码「边端超时或离线」——边端在线的诚实失败绝不误报成离线（假归因红线）。

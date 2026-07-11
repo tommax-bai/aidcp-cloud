@@ -57,17 +57,35 @@ export interface ComposeApproveResult {
 }
 
 /**
- * 装配 composeAndApprove：返回「(note, 现场评论) → 授权通过的 {正文, 联系方式} / null」。
+ * 未发出的判别原因（change comment-keep-open-through-approval 收尾）：让回执诚实区分
+ * 「撰写阶段就没稿」与「已出稿送审但没获批」——绝不再把后者误说成"撰写为空"。
+ * 注：「拒绝」与「超时」在授权口层不可区分（先到先得 /tmp 信号只看 approved===true，"不发"不写独立拒绝信号），
+ * 故二者合并为单一 `approval_unapproved`（回执表述为"超时或被拒"）。
+ */
+export type ComposeSkipReason =
+  | 'empty_compose' // 模型未产出 / 去 AI 味清洗后为空
+  | 'overlaps_reference' // 与精选参考近似照搬 → 弃发
+  | 'approval_not_wired' // 人审口未接线
+  | 'approval_send_failed' // 审批卡发送失败
+  | 'approval_unapproved'; // 送审后审批时限内未获批（超时或被拒）
+
+/** composeAndApprove 结果：approved=true 带 {正文, 联系方式}；approved=false 带判别跳过原因（诚实回执）。 */
+export type ComposeApproveOutcome =
+  | ({ approved: true } & ComposeApproveResult)
+  | { approved: false; reason: ComposeSkipReason };
+
+/**
+ * 装配 composeAndApprove：返回「(note, 现场评论) → {approved:true, 正文, 联系方式} / {approved:false, reason}」。
  */
 export function buildComposeAndApprove(
   deps: ComposeApproveDeps,
-): (note: NoteForComment, comments: OnPageComment[]) => Promise<ComposeApproveResult | null> {
+): (note: NoteForComment, comments: OnPageComment[]) => Promise<ComposeApproveOutcome> {
   const postProcessor = deps.postProcessor ?? new PostProcessor({});
   const now = deps.now ?? (() => Date.now());
   const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   const log = deps.logger ?? console;
 
-  return async (note: NoteForComment, comments: OnPageComment[]): Promise<ComposeApproveResult | null> => {
+  return async (note: NoteForComment, comments: OnPageComment[]): Promise<ComposeApproveOutcome> => {
     const references = deps.getReferences ? await deps.getReferences(note).catch(() => []) : [];
     const onPageComments = comments.map((c) => c.text).filter(Boolean);
     const noteData: NoteData = {
@@ -83,7 +101,7 @@ export function buildComposeAndApprove(
     const draft = await deps.composer.composeDraft(noteData, { references, onPageComments });
     if (!draft) {
       log.log(`[comment-compose] 撰写为空/失败 note=${note.noteId} → 不发`);
-      return null;
+      return { approved: false, reason: 'empty_compose' };
     }
 
     // ② 去 AI 味（确定性，不抛）+ 反照搬。
@@ -96,11 +114,11 @@ export function buildComposeAndApprove(
     text = text.trim();
     if (!text) {
       log.log(`[comment-compose] 清洗后为空 note=${note.noteId} → 不发`);
-      return null;
+      return { approved: false, reason: 'empty_compose' };
     }
     if (references.length && overlapsAny(text, references)) {
       log.log(`[comment-compose] 与精选参考近似照搬 note=${note.noteId} → 弃发（绝不照搬）`);
-      return null;
+      return { approved: false, reason: 'overlaps_reference' };
     }
 
     // ③ 联系方式（change account-group-chat-injection）：命中开关且有联系方式时，正文（text）与联系方式**分开**——
@@ -116,7 +134,7 @@ export function buildComposeAndApprove(
     // ④ 人审（AC-PUB）：未接线 / 超时 / 拒绝 → null（绝不裸发）。审的是 reviewText（含码合并终稿）。
     if (!deps.approval) {
       log.warn(`[comment-compose] 评论人审口未接线 note=${note.noteId} → 不发（绝不裸发）`);
-      return null;
+      return { approved: false, reason: 'approval_not_wired' };
     }
     const requestId = `comment-${note.noteId}-${now()}`;
     try {
@@ -131,7 +149,7 @@ export function buildComposeAndApprove(
       });
     } catch (err) {
       log.warn(`[comment-compose] 审批卡发送失败 note=${note.noteId}：${(err as Error).message} → 不发`);
-      return null;
+      return { approved: false, reason: 'approval_send_failed' };
     }
     const timeoutMs = deps.approval.timeoutMs ?? 90_000;
     const pollMs = deps.approval.pollMs ?? 2_000;
@@ -145,11 +163,11 @@ export function buildComposeAndApprove(
       }
       if (approved) {
         log.log(`[comment-compose] 人审通过 note=${note.noteId} requestId=${requestId}`);
-        return { text, contactInfo: code }; // 正文与联系方式分开回给发送步骤（边缘分别处理）
+        return { approved: true, text, contactInfo: code }; // 正文与联系方式分开回给发送步骤（边缘分别处理）
       }
       await sleep(pollMs);
     }
     log.log(`[comment-compose] 人审超时（${timeoutMs}ms）note=${note.noteId} → 不发`);
-    return null;
+    return { approved: false, reason: 'approval_unapproved' };
   };
 }

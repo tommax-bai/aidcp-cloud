@@ -323,6 +323,24 @@ describe('outcomeToReceipt（失败/未产出绝不染绿）', () => {
     assert.equal(outcomeToReceipt({ outcome: 'no_terms', termsTried: 0 }).level, 'warning');
     assert.equal(outcomeToReceipt({ outcome: 'compose_skipped', noteId: 'n1', termsTried: 1 }).level, 'warning');
   });
+  // change comment-keep-open-through-approval 收尾：compose_skipped 回执按 reason 诚实区分——
+  // 「送审未获批」绝不再误说成"撰写为空"（否则运营看到有稿的失败卡却写"撰写为空"，假归因）。
+  it('compose_skipped 回执按 reason 诚实区分（送审未获批 ≠ 撰写为空）', () => {
+    const unapproved = outcomeToReceipt({ outcome: 'compose_skipped', noteId: 'n1', noteTitle: 'X', termsTried: 1, reason: 'approval_unapproved' });
+    assert.match(unapproved.message, /送飞书人审|超时或被拒/, '送审未获批应如实说明送审+未获批');
+    assert.doesNotMatch(unapproved.message, /模型未产出|撰写为空$/, '有稿送审的失败绝不误说成撰写为空');
+
+    const empty = outcomeToReceipt({ outcome: 'compose_skipped', noteId: 'n1', noteTitle: 'X', termsTried: 1, reason: 'empty_compose' });
+    assert.match(empty.message, /模型未产出|清洗后为空/, '撰写为空应如实说明未产出');
+
+    const notWired = outcomeToReceipt({ outcome: 'compose_skipped', noteId: 'n1', noteTitle: 'X', termsTried: 1, reason: 'approval_not_wired' });
+    assert.match(notWired.message, /人审口未接线/, '人审口未接线应如实说明');
+
+    // reason 缺省（老结果 / 未知）→ 回落旧措辞、向后兼容不炸。
+    const legacy = outcomeToReceipt({ outcome: 'compose_skipped', noteId: 'n1', termsTried: 1 });
+    assert.equal(legacy.level, 'warning');
+    assert.equal(legacy.ok, false);
+  });
   it('read_failed / post_failed → error（红）', () => {
     assert.equal(outcomeToReceipt({ outcome: 'read_failed', noteId: 'n1', termsTried: 1 }).level, 'error');
     assert.equal(outcomeToReceipt({ outcome: 'post_failed', noteId: 'n1', termsTried: 1 }).level, 'error');
