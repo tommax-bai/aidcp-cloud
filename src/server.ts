@@ -2242,8 +2242,12 @@ async function main(): Promise<void> {
     },
     facebookResolveContainerName: (accountId, url, name) => facebookCommentConfigStore.resolveContainerName(accountId, url, name),
     facebookCoverageConfigFor: async (accountId) => {
+      // 覆盖模式作用域（用户 2026-07-11：不用 per-account 白名单，一个全局开关让所有 FB 账号都走加入群覆盖评论，
+      // 先开、后续可能某时点关）：AIDCP_FB_GROUP_COVERAGE_ALL=true → 所有账号生效；旧 per-account 白名单
+      // AIDCP_FB_GROUP_COVERAGE_ACCOUNTS 保留为可选窄化入口（全局关时仍按名单放行），向后兼容、默认关时零回归。
+      const coverageAll = readEnvString('AIDCP_FB_GROUP_COVERAGE_ALL') === 'true';
       const allowlist = readEnvList('AIDCP_FB_GROUP_COVERAGE_ACCOUNTS');
-      if (!allowlist.has(accountId)) return { coverageEnabled: false, enabled: false, keywords: [], containers: [] };
+      if (!coverageAll && !allowlist.has(accountId)) return { coverageEnabled: false, enabled: false, keywords: [], containers: [] };
       const base = facebookCommentConfigStore.getForAccount(accountId);
       const pickWindow = readEnvNumber('AIDCP_FB_GROUP_COVERAGE_PICK_WINDOW', 5);
       let candidates = await facebookGroupMembershipStore.coverageCandidates(accountId, {
