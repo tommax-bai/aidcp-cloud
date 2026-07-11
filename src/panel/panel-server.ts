@@ -352,6 +352,128 @@ function createRequestHandler(
       sendJson(res, 200, { sub: verified.payload.sub, panelApiVersion: buildVersionPayload().panelApiVersion });
       return;
     }
+
+    // ── 对外客户管理（change edge-client-customer-auth）：受**内部** JWT 保护 ──────────
+    // 客户令牌用另一密钥,到不了这里（上方验签即 bad_signature）。列表/读取绝不含 key/hash；
+    // 明文 key 仅 create/rotate 一次性回显。未注入 clientUsers 则 503。
+    if (url === '/api/client-users' || url.startsWith('/api/client-users/')) {
+      if (!deps.clientUsers) {
+        sendJson(res, 503, { error: 'client_users_unavailable' });
+        return;
+      }
+      const store = deps.clientUsers;
+      const actor = verified.payload.sub;
+
+      if (method === 'GET' && url === '/api/client-users') {
+        sendJson(res, 200, { users: await store.listUsers() });
+        return;
+      }
+      if (method === 'POST' && url === '/api/client-users') {
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          sendJson(res, 400, { error: 'bad_request' });
+          return;
+        }
+        const { name } = (body ?? {}) as { name?: unknown };
+        if (typeof name !== 'string') {
+          sendJson(res, 400, { error: 'bad_request' });
+          return;
+        }
+        const r = await store.createUser(name, actor);
+        if (!r.ok) {
+          sendJson(res, r.reason === 'name_taken' ? 409 : 400, { error: r.reason });
+          return;
+        }
+        // 一次性回显明文 key（此后无接口读回）。
+        sendJson(res, 200, { user: r.user, key: r.plainKey });
+        return;
+      }
+      // /api/client-users/:id ...
+      const rest = url.slice('/api/client-users/'.length);
+      const [rawId, sub] = rest.split('/');
+      const userId = decodeURIComponent(rawId);
+      if (!userId) {
+        sendJson(res, 404, { error: 'not_found' });
+        return;
+      }
+      if (method === 'PATCH' && !sub) {
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          sendJson(res, 400, { error: 'bad_request' });
+          return;
+        }
+        const { name, status } = (body ?? {}) as { name?: unknown; status?: unknown };
+        const patch: { name?: string; status?: 'enabled' | 'disabled' } = {};
+        if (name !== undefined) {
+          if (typeof name !== 'string') {
+            sendJson(res, 400, { error: 'bad_request' });
+            return;
+          }
+          patch.name = name;
+        }
+        if (status !== undefined) {
+          if (status !== 'enabled' && status !== 'disabled') {
+            sendJson(res, 400, { error: 'bad_request' });
+            return;
+          }
+          patch.status = status;
+        }
+        const r = await store.updateUser(userId, patch, actor);
+        if (!r.ok) {
+          sendJson(res, r.reason === 'not_found' ? 404 : r.reason === 'name_taken' ? 409 : 400, { error: r.reason });
+          return;
+        }
+        sendJson(res, 200, { user: r.user });
+        return;
+      }
+      if (method === 'POST' && sub === 'rotate-key') {
+        const r = await store.rotateKey(userId);
+        if (!r.ok) {
+          sendJson(res, 404, { error: r.reason });
+          return;
+        }
+        sendJson(res, 200, { key: r.plainKey });
+        return;
+      }
+      if (method === 'GET' && sub === 'scope') {
+        sendJson(res, 200, { scope: await store.getScope(userId) });
+        return;
+      }
+      if (method === 'PUT' && sub === 'scope') {
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          sendJson(res, 400, { error: 'bad_request' });
+          return;
+        }
+        const { environments } = (body ?? {}) as { environments?: unknown };
+        if (!Array.isArray(environments)) {
+          sendJson(res, 400, { error: 'bad_request' });
+          return;
+        }
+        const items = environments
+          .filter((e): e is Record<string, unknown> => !!e && typeof e === 'object')
+          .map((e) => ({
+            envKey: typeof e.envKey === 'string' ? e.envKey : '',
+            label: typeof e.label === 'string' ? e.label : null,
+            platform: typeof e.platform === 'string' ? e.platform : null,
+          }));
+        const r = await store.setScope(userId, items, actor);
+        if (!r.ok) {
+          sendJson(res, 404, { error: r.reason });
+          return;
+        }
+        sendJson(res, 200, { scope: r.scope });
+        return;
+      }
+      sendJson(res, 404, { error: 'not_found' });
+      return;
+    }
     if (method === 'GET' && url === '/api/dashboard/summary') {
       const [totals, totalsByAccount, likeRate, accounts, todayPublishes, alerts] = await Promise.all([
         deps.panelStore.todayTotals(),

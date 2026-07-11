@@ -41,6 +41,7 @@ import type {
 } from '../comm/captcha-assist.js';
 import type { TokenRevocationStore } from './revocation.js';
 import type { PanelUser } from './auth.js';
+import type { ClientUserStore } from '../client-auth/client-user-store.js';
 import type {
   PanelStoreReader,
   TodayTotals,
@@ -323,6 +324,13 @@ export interface PanelDeps {
    * 绝不解除边缘暂停（resumeEdge，那是验证码清除点的事）；诚实回真实解决行数（0=没这条/已解决，1=已解决）。
    */
   alertStore?: Pick<AlertStore, 'resolveById'>;
+  /**
+   * 对外客户管理（change edge-client-customer-auth）。未注入则 `/api/client-users*` 返回 503。
+   * 内部 JWT 保护:客户 CRUD / 生成·轮换 key（一次性回明文）/ 环境归属整批替换。
+   * 红线:列表/读取绝不含 key/hash；客户令牌无法访问这些端点（物理隔离于客户鉴权服务）；写非乐观回真态。
+   * 同一 store 实例亦供客户鉴权服务做 auth/scope 读（单实例共享 PG 池）。
+   */
+  clientUsers?: ClientUserStore;
 }
 
 // ── 总览 DTO（change dashboard-refresh-clarity）─────────────────────────────────

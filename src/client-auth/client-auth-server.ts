@@ -1,0 +1,264 @@
+/**
+ * 对外客户鉴权 HTTP 服务（进程内、独立端口、**独立 JWT 密钥**）。change edge-client-customer-auth。
+ *
+ * 与内部面板（8090）**物理隔离**:独立 http.Server、独立路由表、独立 revocation、独立限流、
+ * 身份源为 client_users 表（非 env AIDCP_PANEL_USERS）。三条不变量：
+ *  - N1 密钥即边界：secret 独立且启动断言 ≠ 面板 secret（相等则拒启，见 startClientAuthApi）。
+ *  - N2 结构性无泄漏：环境读只有 store.listEnvScope(userId) 这一个 scoped 方法。
+ *  - N3 每请求回库复核 status：验签通过后再查 isEnabled(sub)，停用即时 401。
+ *
+ * 复用 panel/jwt.ts（signJwt/verifyJwt，独立 secret 即独立域）、panel/revocation.ts、panel/auth.ts:parseBearer。
+ * 启动失败一律 started=false 而非抛出，绝不连累边-云闭环与面板。
+ */
+
+import http from 'node:http';
+import { signJwt, verifyJwt } from '../panel/jwt.js';
+import { parseBearer } from '../panel/auth.js';
+import type { TokenRevocationStore } from '../panel/revocation.js';
+import type { ClientUserStore } from './client-user-store.js';
+import type { LoginRateLimiter } from './rate-limiter.js';
+
+const MAX_BODY_BYTES = 64 * 1024;
+
+export interface ClientAuthDeps {
+  store: ClientUserStore;
+  revocation: TokenRevocationStore;
+  rateLimiter: LoginRateLimiter;
+}
+
+export interface ClientAuthConfig {
+  port: number;
+  /** 客户令牌签名密钥（独立于面板）。 */
+  jwtSecret: string;
+  /** 面板密钥——仅用于启动断言 ≠（N1）；服务运行不使用它。 */
+  panelJwtSecret: string;
+  jwtTtlSeconds: number;
+  forbiddenPorts: number[];
+  logger?: Pick<Console, 'log' | 'warn' | 'error'>;
+}
+
+export type ClientAuthStartReason = 'forbidden_port' | 'missing_secret' | 'secret_collision' | 'listen_error';
+
+export interface ClientAuthHandle {
+  started: boolean;
+  reason?: ClientAuthStartReason;
+  detail?: string;
+  port?: number;
+  close(): Promise<void>;
+}
+
+function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
+  const payload = JSON.stringify(body);
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+  res.end(payload);
+}
+
+async function readJsonBody(req: http.IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => {
+      size += c.length;
+      if (size > maxBytes) {
+        reject(new Error('body_too_large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8').trim();
+      if (!raw) return resolve({});
+      try {
+        resolve(JSON.parse(raw));
+      } catch {
+        reject(new Error('bad_json'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+/** 取客户端源 IP（Nginx 注入 x-forwarded-for 首段；回落 socket 地址）。 */
+function clientIp(req: http.IncomingMessage): string {
+  const xff = req.headers['x-forwarded-for'];
+  if (typeof xff === 'string' && xff.length > 0) return xff.split(',')[0].trim();
+  return req.socket.remoteAddress ?? 'unknown';
+}
+
+function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
+  const logger = config.logger ?? console;
+
+  async function handleLogin(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    let body: unknown;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      sendJson(res, 400, { error: 'bad_request' });
+      return;
+    }
+    const { name, key } = (body ?? {}) as { name?: unknown; key?: unknown };
+    if (typeof name !== 'string' || typeof key !== 'string') {
+      sendJson(res, 400, { error: 'bad_request' });
+      return;
+    }
+    const ip = clientIp(req);
+    const dims = [`name:${name.trim()}`, `ip:${ip}`];
+    const wait = deps.rateLimiter.retryAfter(dims);
+    if (wait > 0) {
+      sendJson(res, 429, { error: 'rate_limited', retryAfter: wait });
+      return;
+    }
+    const result = await deps.store.verifyLogin(name, key);
+    if (!result.ok) {
+      deps.rateLimiter.recordFailure(dims);
+      // 统一不可区分错误（不区分 name 不存在 / 停用 / key 错），防枚举。
+      sendJson(res, 401, { error: 'invalid_credentials' });
+      return;
+    }
+    deps.rateLimiter.clear(dims);
+    const token = signJwt({ sub: result.userId }, config.jwtSecret, config.jwtTtlSeconds);
+    sendJson(res, 200, { token, expiresIn: config.jwtTtlSeconds });
+  }
+
+  async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const method = req.method ?? 'GET';
+    const url = (req.url ?? '/').split('?')[0];
+
+    // ── 公开端点 ──────────────────────────────────────────────
+    if (method === 'GET' && url === '/health') {
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+    if (method === 'POST' && url === '/login') {
+      await handleLogin(req, res);
+      return;
+    }
+
+    // ── 其余受客户令牌保护 ────────────────────────────────────
+    const token = parseBearer(req.headers.authorization);
+    if (!token) {
+      sendJson(res, 401, { error: 'unauthorized', reason: 'missing_token' });
+      return;
+    }
+    const verified = verifyJwt(token, config.jwtSecret);
+    if (!verified.valid) {
+      sendJson(res, 401, { error: 'unauthorized', reason: verified.reason });
+      return;
+    }
+    if (deps.revocation.isRevoked(verified.payload.jti)) {
+      sendJson(res, 401, { error: 'unauthorized', reason: 'revoked' });
+      return;
+    }
+    // N3：每请求回库复核启用态——停用/删除即时失效（范围/状态绝不内嵌令牌）。
+    const userId = verified.payload.sub;
+    if (!(await deps.store.isEnabled(userId))) {
+      sendJson(res, 401, { error: 'unauthorized', reason: 'disabled' });
+      return;
+    }
+
+    if (method === 'POST' && url === '/auth/refresh') {
+      const fresh = signJwt({ sub: userId }, config.jwtSecret, config.jwtTtlSeconds);
+      sendJson(res, 200, { token: fresh, expiresIn: config.jwtTtlSeconds });
+      return;
+    }
+    if (method === 'POST' && url === '/logout') {
+      deps.revocation.revoke(verified.payload.jti, verified.payload.exp);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+    if (method === 'GET' && url === '/me') {
+      sendJson(res, 200, { clientId: userId });
+      return;
+    }
+    // 权威过滤点：只返回该客户归属的环境（N2 scoped 读）。
+    if (method === 'GET' && url === '/my-environments') {
+      const scope = await deps.store.listEnvScope(userId);
+      sendJson(res, 200, { environments: scope.map((s) => ({ envKey: s.envKey, label: s.label, platform: s.platform })) });
+      return;
+    }
+    // 登录态新建/添加环境 → 自动归属当前客户。
+    if (method === 'POST' && url === '/environments') {
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { envKey, label, platform } = (body ?? {}) as { envKey?: unknown; label?: unknown; platform?: unknown };
+      if (typeof envKey !== 'string' || !envKey.trim()) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_env' });
+        return;
+      }
+      const r = await deps.store.attachEnv(
+        userId,
+        envKey,
+        typeof label === 'string' ? label : null,
+        typeof platform === 'string' ? platform : null,
+      );
+      if (!r.ok) {
+        sendJson(res, 400, { error: 'bad_request', reason: r.reason });
+        return;
+      }
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    sendJson(res, 404, { error: 'not_found' });
+  }
+
+  return (req: http.IncomingMessage, res: http.ServerResponse) => {
+    void handle(req, res).catch((err) => {
+      logger.warn(`[client-auth] 请求处理异常: ${(err as Error).message}`);
+      if (!res.headersSent) sendJson(res, 500, { error: 'internal_error' });
+    });
+  };
+}
+
+/**
+ * 启动客户鉴权 API。失败（保留端口 / 缺密钥 / 密钥与面板相同 / 端口占用）一律 started=false 而非抛出。
+ * N1 头号风险：secret 与面板相同则客户令牌能在内部面板验签通过 → 边界坍塌，故此处硬断言拒启。
+ */
+export function startClientAuthApi(deps: ClientAuthDeps, config: ClientAuthConfig): Promise<ClientAuthHandle> {
+  const logger = config.logger ?? console;
+  const noop = async (): Promise<void> => {};
+
+  if (config.forbiddenPorts.includes(config.port)) {
+    logger.warn(`[client-auth] 拒绝绑定保留端口 ${config.port}（forbidden_port）——客户鉴权未启动`);
+    return Promise.resolve({ started: false, reason: 'forbidden_port', port: config.port, close: noop });
+  }
+  if (!config.jwtSecret) {
+    logger.warn('[client-auth] 未配置 AIDCP_CLIENT_JWT_SECRET（missing_secret）——客户鉴权未启动');
+    return Promise.resolve({ started: false, reason: 'missing_secret', close: noop });
+  }
+  if (config.jwtSecret === config.panelJwtSecret) {
+    logger.error(
+      '[client-auth] AIDCP_CLIENT_JWT_SECRET 与面板密钥相同（secret_collision）——密钥即边界会坍塌,拒启客户鉴权',
+    );
+    return Promise.resolve({ started: false, reason: 'secret_collision', close: noop });
+  }
+
+  const server = http.createServer(createRequestHandler(deps, config));
+
+  return new Promise<ClientAuthHandle>((resolve) => {
+    server.once('error', (err: NodeJS.ErrnoException) => {
+      logger.warn(`[client-auth] listen 失败（${err.code ?? err.message}，非致命）——客户鉴权不可用`);
+      resolve({ started: false, reason: 'listen_error', detail: err.code ?? err.message, port: config.port, close: noop });
+    });
+    // 绑 127.0.0.1：与面板同款,由 Nginx 反代（TLS 终止 + 转发,注入 x-forwarded-for）;绝不裸暴露 HTTP 端口。
+    server.listen(config.port, '127.0.0.1', () => {
+      const addr = server.address();
+      const actualPort = typeof addr === 'object' && addr ? addr.port : config.port;
+      logger.log(`[client-auth] 客户鉴权 API 已监听 :${actualPort}（/login /my-environments，独立密钥）`);
+      resolve({
+        started: true,
+        port: actualPort,
+        close: async () => {
+          server.closeAllConnections?.();
+          await new Promise<void>((r) => server.close(() => r()));
+        },
+      });
+    });
+  });
+}

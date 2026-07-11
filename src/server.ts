@@ -156,6 +156,7 @@ import { PublishLogStore } from './publish-agent/publish-log-store.js';
 import { PublishPipelineLogStore } from './publish-agent/publish-pipeline-log-store.js';
 import { startPanelApi, parsePanelUsers, PgPanelStore } from './panel/index.js';
 import { TokenRevocationStore } from './panel/revocation.js';
+import { ClientUserStore, startClientAuthApi, LoginRateLimiter } from './client-auth/index.js';
 import { PgAlertStore } from './alerts/index.js';
 import { ModelConfigStore } from './config/model-config-store.js';
 import { RoleConfigStore } from './config/role-config-store.js';
@@ -504,6 +505,8 @@ async function main(): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
+  // 对外客户身份 + 客户↔环境归属（change edge-client-customer-auth）。独立表,与内部运营登录物理隔离。
+  const clientUserStore = new ClientUserStore();
   try {
     await modelConfigStore.init();
     await credentialStore.init();
@@ -520,6 +523,7 @@ async function main(): Promise<void> {
     await facebookGroupTargetStore.init();
     await facebookGroupMembershipStore.init();
     await facebookGroupJoinAuditStore.init();
+    await clientUserStore.init();
     console.log('[aidcp-cloud] 模型配置 + 凭据 + 角色配置 + 分类默认 + 安全限额 + 单场上限 + 续场配置存储已就绪（model_config / provider_credentials / role_config / category_config / quota_config / session_config / resume_config）');
   } catch (err) {
     console.warn('[aidcp-cloud] 模型/凭据/角色/分类/限额/续场配置存储初始化失败（回退代码默认模型 + env 密钥；限额/续场回退派生写死默认）:', (err as Error).message);
@@ -2749,6 +2753,8 @@ async function main(): Promise<void> {
   // ── 面板 API 层（管理后台后端，进程内、独立端口、JWT）──────────────────────
   // 未设置 AIDCP_PANEL_PORT 则禁用（默认不开新端口）；启动失败非致命，绝不连累边-云闭环。
   const panelPort = readEnvPort('AIDCP_PANEL_PORT');
+  // 对外客户鉴权端口（change edge-client-customer-auth）；未设则禁用（镜像面板端口门控）。提前读取以纳入面板自检。
+  const clientAuthPort = readEnvPort('AIDCP_CLIENT_AUTH_PORT');
   if (panelPort) {
     try {
       const panel = await startPanelApi(
@@ -3017,14 +3023,17 @@ async function main(): Promise<void> {
           // 告警手动解决（change alert-resolution-by-id）：复用同一告警存储单例（上方 L811 构造，init 失败为 undefined）。
           // 面板按 alert_id 勾销单条告警；未注入时路由自然 503。只闭合日志行，绝不碰风控单写 / edge 恢复。
           alertStore,
+          // 对外客户管理（change edge-client-customer-auth）：内部 JWT 保护的 /api/client-users*。同一 store 实例
+          // 亦供客户鉴权服务做 auth/scope 读（单实例共享池）。绝不回传 key/hash。
+          clientUsers: clientUserStore,
         },
         {
           port: panelPort,
           jwtSecret: readEnvString('AIDCP_PANEL_JWT_SECRET') ?? '',
           users: parsePanelUsers(readEnvString('AIDCP_PANEL_USERS')),
           jwtTtlSeconds: readEnvPort('AIDCP_PANEL_JWT_TTL_SECONDS') ?? 3600,
-          // 自检拒绝绑定：边-云 8787 / PG 5432 / 调试 8788 / 部署时经 env 补充的 isales 等端口。
-          forbiddenPorts: [port, debugPort, 5432, ...parseForbiddenPorts(readEnvString('AIDCP_PANEL_FORBIDDEN_PORTS'))],
+          // 自检拒绝绑定：边-云 8787 / PG 5432 / 调试 8788 / 客户鉴权端口 / 部署时经 env 补充的 isales 等端口。
+          forbiddenPorts: [port, debugPort, 5432, ...(clientAuthPort ? [clientAuthPort] : []), ...parseForbiddenPorts(readEnvString('AIDCP_PANEL_FORBIDDEN_PORTS'))],
           logger: console,
         },
       );
@@ -3040,6 +3049,41 @@ async function main(): Promise<void> {
     }
   } else {
     console.log('[aidcp-cloud] 面板 API 已禁用（未设置 AIDCP_PANEL_PORT）');
+  }
+
+  // ── 对外客户鉴权 API（change edge-client-customer-auth，独立端口 + 独立密钥）───────────
+  // 未设 AIDCP_CLIENT_AUTH_PORT 则禁用（默认不开）；启动失败非致命，绝不连累边-云闭环与面板。
+  // N1 头号风险：AIDCP_CLIENT_JWT_SECRET 与面板密钥相同则边界坍塌 → startClientAuthApi 内硬断言拒启。
+  if (clientAuthPort) {
+    try {
+      const clientAuth = await startClientAuthApi(
+        {
+          store: clientUserStore,
+          revocation: new TokenRevocationStore(), // 独立撤销黑名单，绝不共用面板的
+          rateLimiter: new LoginRateLimiter(),
+        },
+        {
+          port: clientAuthPort,
+          jwtSecret: readEnvString('AIDCP_CLIENT_JWT_SECRET') ?? '',
+          panelJwtSecret: readEnvString('AIDCP_PANEL_JWT_SECRET') ?? '',
+          jwtTtlSeconds: readEnvPort('AIDCP_CLIENT_JWT_TTL_SECONDS') ?? 900,
+          // 自检拒绝绑定：边-云 8787 / PG 5432 / 调试 8788 / 面板端口 / env 补充（isales 等）。
+          forbiddenPorts: [port, debugPort, 5432, ...(panelPort ? [panelPort] : []), ...parseForbiddenPorts(readEnvString('AIDCP_CLIENT_FORBIDDEN_PORTS'))],
+          logger: console,
+        },
+      );
+      if (clientAuth.started) {
+        console.log(`[aidcp-cloud] 客户鉴权 API 已启动（127.0.0.1:${clientAuth.port}，经 Nginx 反代）`);
+      } else {
+        console.warn(
+          `[aidcp-cloud] 客户鉴权 API 未启动（${clientAuth.reason}${clientAuth.detail ? ':' + clientAuth.detail : ''}）——边-云闭环与面板不受影响`,
+        );
+      }
+    } catch (err) {
+      console.warn('[aidcp-cloud] 客户鉴权 API 启动异常（非致命）:', (err as Error).message);
+    }
+  } else {
+    console.log('[aidcp-cloud] 客户鉴权 API 已禁用（未设置 AIDCP_CLIENT_AUTH_PORT）');
   }
 }
 
