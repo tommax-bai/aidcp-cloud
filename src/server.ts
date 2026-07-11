@@ -2292,7 +2292,7 @@ async function main(): Promise<void> {
     facebookJoinNewGroup: (accountId, opts) => facebookGroupJoinScheduler.triggerScheduled(accountId, opts),
     // --join=<url>（change facebook-comment-review-and-targeted-join）：加入指定群、只归该账号（同一 TDZ-safe 闭包，scheduler 稍后构造）。
     facebookJoinSpecificGroup: (accountId, groupUrl, opts) => facebookGroupJoinScheduler.joinSpecificGroup(accountId, groupUrl, opts),
-    postResultCard: async (accountId, receipt) => {
+    postResultCard: async (accountId, receipt, source) => {
       const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
       if (!chatId) {
         console.warn('[comment] 无可用飞书群，结果卡片未发出');
@@ -2301,7 +2301,8 @@ async function main(): Promise<void> {
       await messenger.sendCard(
         chatId,
         buildCommandResultCard({
-          command: '/comment',
+          // 触发来源可辨识（change comment-keep-open-through-approval）：自动排期评论 vs 人工 /comment。
+          command: source ?? '/comment',
           ok: receipt.ok,
           level: receipt.level,
           title: receipt.title,

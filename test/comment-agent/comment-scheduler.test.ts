@@ -122,7 +122,7 @@ describe('CommentScheduler.triggerManual', () => {
     assert.equal(takeovers, 0, '未绑人设绝不接管边端');
   });
 
-  it('触发成功 → ok:true / level:success；prepare/commit 分段租约 + 结果卡片 success', async () => {
+  it('触发成功 → ok:true / level:success；keep-open 单租约贯穿搜索→人审→发布 + 结果卡片 success', async () => {
     const bus = new EventBus();
     const leaseKinds: string[] = [];
     let activeLeases = 0;
@@ -145,8 +145,10 @@ describe('CommentScheduler.triggerManual', () => {
           },
         },
         approval: {
-          request: async () => { assert.equal(activeLeases, 0, '发人审卡前 prepare 已释放'); },
-          isApproved: async () => { assert.equal(activeLeases, 0, '等待/读取人审期间不持 edge 租约'); return true; },
+          // keep-open（change comment-keep-open-through-approval）：撰写/人审在持有租约内进行，
+          // 浏览器停在目标详情页不释放——审批期间 activeLeases 恒为 1（不再是旧的「审批前释放」）。
+          request: async () => { assert.equal(activeLeases, 1, 'keep-open：发人审卡时仍持 edge 租约（浏览器停在详情页）'); },
+          isApproved: async () => { assert.equal(activeLeases, 1, 'keep-open：等待/读取人审期间持锁不释放'); return true; },
         },
         postResultCard: (_a, r) => { cardDone.resolve({ ok: r.ok, level: r.level, message: r.message }); },
       }),
@@ -156,12 +158,56 @@ describe('CommentScheduler.triggerManual', () => {
     assert.equal(receipt.level, 'success');
 
     const card = await cardDone.promise;
-    assert.deepEqual(leaseKinds, ['comment_prepare', 'comment_prepare', 'comment_commit']);
+    assert.deepEqual(leaseKinds, ['comment_prepare'], 'keep-open：一条评论只申请一个持有租约（无 prepare 复搜 / commit 复搜）');
     assert.deepEqual(recorded, ['n1'], '发布成功后记一笔去重');
     assert.equal(card.ok, true);
     assert.equal(card.level, 'success', '评了 → 结果卡片绿');
     assert.match(card.message, /笔记《RAG 实战》/);
     assert.doesNotMatch(card.message, / n1 /);
+  });
+
+  // keep-open 核心不变量（change comment-keep-open-through-approval）：一条评论只搜一次、持锁贯穿人审、
+  // 人审拒绝 → 结束不复搜不换词。
+  it('keep-open：人审拒绝 → 只搜一次、单持有租约、诚实不发（不复搜、不换词）', async () => {
+    const bus = new EventBus();
+    const fe = fakeEdge(bus);
+    const leaseKinds: string[] = [];
+    let searchExecutes = 0;
+    let activeLeases = 0;
+    let maxActiveLeases = 0;
+    const cardDone = deferred<{ ok: boolean; level: string }>();
+    const s = new CommentScheduler(
+      baseDeps({
+        resolveConnection: () => ({ bus, edgeId: 'e1' }),
+        pusher: {
+          pushToEdges: (env: unknown) => {
+            if ((env as Envelope).type === 'search.execute') searchExecutes++;
+            return fe.pushToEdges(env);
+          },
+        },
+        edgeTaskLeases: {
+          withLease: async (request, work) => {
+            leaseKinds.push(request.kind);
+            activeLeases++; maxActiveLeases = Math.max(maxActiveLeases, activeLeases);
+            try {
+              return await work({ taskId: `t-${leaseKinds.length}`, edgeId: request.edgeId, kind: request.kind, priority: request.priority });
+            } finally { activeLeases--; }
+          },
+        },
+        approval: {
+          timeoutMs: 50, // 短超时：人审未通过（拒绝/超时）快速收敛，不真等 90s
+          request: async () => { assert.equal(activeLeases, 1, '发人审卡时持锁（浏览器停在详情页）'); },
+          isApproved: async () => { assert.equal(activeLeases, 1, '人审等待期持锁不释放'); return false; }, // 未通过
+        },
+        postResultCard: (_a, r) => { cardDone.resolve({ ok: r.ok, level: r.level }); },
+      }),
+    );
+    await s.triggerManual('acc-1');
+    const card = await cardDone.promise;
+    assert.equal(searchExecutes, 1, 'keep-open：一条评论只搜一次，人审拒绝也不复搜/不换词');
+    assert.deepEqual(leaseKinds, ['comment_prepare'], '单持有租约，无 commit 复搜租约');
+    assert.equal(maxActiveLeases, 1, '任意时刻至多一个持有租约');
+    assert.equal(card.ok, false, '拒绝 → 不发、诚实回执');
   });
 
   // ── change account-group-chat-injection → generalize-contact-info：--contact 缺联系方式 fail-closed + 有联系方式端到端注入 ──

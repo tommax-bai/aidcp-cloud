@@ -218,7 +218,9 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
           ),
       );
       if (outcome === null) {
-        log.warn(`[comment-edge] 搜索「${term}」无 page.cards（超时/边端离线）→ 空候选`);
+        // 措辞中性（change comment-keep-open-through-approval）：cloud 的步超时 race 无法区分「边端在跑筛选/慢渲」
+        // 与「边端真离线」——相邻租约常在 ~10s 有快速响应即证在线；故不再断言「边端离线」，避免误导下游。
+        log.warn(`[comment-edge] 搜索「${term}」无 page.cards（搜索超时/结果未就绪）→ 空候选`);
         return [];
       }
       if (outcome.kind === 'fail') {

@@ -16,7 +16,7 @@
 import type { EventBus } from '../event-bus/index.js';
 import type { Soul } from '../soul/types.js';
 import { CommentSearchTermGenerator, type RoleLlmLike } from '../agents/comment-search-term-generator.js';
-import { CommentTargetPicker } from '../agents/comment-target-picker.js';
+import { CommentTargetPicker, type CommentCandidateCard } from '../agents/comment-target-picker.js';
 import { CommentComposer } from '../agents/comment-composer.js';
 import { PostProcessor } from '../publish-agent/post-processor.js';
 import type { CommentApprovalPort } from '../agents/comment-approval-gate.js';
@@ -206,8 +206,11 @@ export interface CommentSchedulerDeps {
   onTakeoverStart?: (accountId: string) => void;
   /** @deprecated 不再由评论 finally 无条件恢复浏览。 */
   onTakeoverEnd?: (accountId: string) => void;
-  /** 任务跑完补发结果卡片（level 按结果，绝不染绿）。 */
-  postResultCard?: (accountId: string, receipt: CommentResultReceipt) => Promise<void> | void;
+  /**
+   * 任务跑完补发结果卡片（level 按结果，绝不染绿）。`source` 标注触发来源用于回执可辨识
+   * （change comment-keep-open-through-approval）：人工 `/comment` vs 自动排期评论——缺省视为 `/comment`。
+   */
+  postResultCard?: (accountId: string, receipt: CommentResultReceipt, source?: string) => Promise<void> | void;
   /** 原生筛选（缺省 most_collected / one_day）。 */
   sort?: string;
   timeWindow?: string;
@@ -1098,7 +1101,7 @@ export class CommentScheduler {
     }
 
     try {
-      await this.deps.postResultCard?.(accountId, targetedOutcomeToReceipt(result, contactInfo != null));
+      await this.deps.postResultCard?.(accountId, targetedOutcomeToReceipt(result, contactInfo != null), commentSourceLabel(priority));
     } catch (err) {
       log.warn(`[comment-scheduler] 定向结果卡片发送失败 account=${accountId}：${(err as Error).message}`);
     }
@@ -1155,115 +1158,88 @@ export class CommentScheduler {
         result = { outcome: 'no_terms', termsTried: 0 };
       } else {
         const maxTerms = this.deps.maxTerms ?? 5;
+        // keep-open（change comment-keep-open-through-approval）：一条评论对每个词只搜一次（发现）。
+        // 搜到合格候选后，在【同一个持有中的边端租约】内完成 pick → 读正文 → 撰写/飞书人审 → 发布——
+        // 审批期间【不释放边端】：EdgeTaskCoordinator 保证持锁期间自治浏览命令(canExecute(undefined)=false)
+        // 拿不到浏览器、不会把页面带走，故发布前无需再复搜关键词（根治 target_not_found_on_commit / read_failed，
+        // 见 2026-07-11 Tmax 故障）。「commit 不信旧 DOM」的新鲜度改由边端发布前【就地重读当前详情页 noteId】保证。
+        // leaseMs 覆盖 搜索(~30s)+pick(~5s)+读正文(~10s)+人审超时(90s)+发布(~15s) 最坏 ≈ 150s，留足 TTL 余量。
+        const KEEP_OPEN_LEASE_MS = 4 * 60_000;
         let tried = 0;
         let final: CommentTaskResult | undefined;
         for (const term of terms) {
           if (tried >= maxTerms) break;
           tried++;
-          // 搜索只是短 prepare 租约；候选 LLM 甄选不持浏览器。
-          const cards = await this.deps.edgeTaskLeases.withLease(
-            { edgeId, kind: 'comment_prepare', priority, leaseMs: 2 * 60_000 },
-            (lease) => edgeFor(lease.taskId).searchAndHarvest(term),
-          );
-          const fresh = [];
-          for (const card of cards) {
-            if (!card.noteId || (await dedup.hasInteracted(card.noteId, 'comment').catch(() => false))) continue;
-            fresh.push({ ...card, index: fresh.length });
-          }
-          if (!fresh.length) continue;
-
-          const picked = await picker.pick(fresh);
-          if (picked.pickIndex == null) continue;
-          const selected = fresh.find((card) => card.index === picked.pickIndex);
-          if (!selected?.noteId) continue;
-
-          // pick LLM 已结束；重新申请短 prepare，按稳定 noteId 复找、打开并读取正文/现场评论。
-          const prepared = await this.deps.edgeTaskLeases.withLease(
-            { edgeId, kind: 'comment_prepare', priority, leaseMs: 2 * 60_000 },
-            async (lease) => {
-              const edge = edgeFor(lease.taskId);
-              const current = await edge.searchAndHarvest(term);
-              const stable = current.find((card) => card.noteId === selected.noteId);
-              return stable ? edge.readNote(stable) : null;
-            },
-          );
-          if (!prepared || prepared.note.noteId !== selected.noteId) {
-            final = {
-              outcome: 'read_failed',
-              term,
-              noteId: selected.noteId,
-              noteTitle: selected.title,
-              termsTried: tried,
-              // 真实原因（change comment-search-nav-confirm）：复检时目标已不在结果中——搜索页重排/翻走，
-              // 或复检那次搜索未导航到结果页。绝非「边端离线」。
-              reason: '复检时目标已不在搜索结果中（页面重排/未导航到结果页）',
-            };
-            break;
-          }
-
-          // 撰写/去 AI 味/飞书人审全在租约外；拒绝或超时不会申请 commit。
-          const composed = await composeAndApprove(prepared.note, prepared.comments);
-          if (!composed) {
-            final = {
-              outcome: 'compose_skipped',
-              term,
-              noteId: selected.noteId,
-              noteTitle: prepared.note.title,
-              termsTried: tried,
-              reason: 'empty/unapproved/rejected',
-            };
-            break;
-          }
-          const displayText = composed.contactInfo ? `${composed.text}\n${composed.contactInfo}` : composed.text;
-          let commitReason = 'comment not verified posted';
-          const posted = await this.withManualCommitMarker(
+          // withManualCommitMarker 仅对 priority='human' 生效：发布期间把账号并入 manualCommentAccounts，
+          // 使该 comment 互动跳过风控配额（人工授权语义，change comment-search-command）。自动排期评论(automatic)
+          // 无标记 → 照常计入风控。标记覆盖整段持锁无副作用（仅 comment 互动事件受影响，只在发布时刻发生）。
+          const attempt = await this.withManualCommitMarker(
             accountId,
             priority,
-            () => this.deps.edgeTaskLeases.withLease(
-              { edgeId, kind: 'comment_commit', priority, leaseMs: 2 * 60_000 },
+            () => this.deps.edgeTaskLeases.withLease<{ next: true } | { next: false; result: CommentTaskResult }>(
+              { edgeId, kind: 'comment_prepare', priority, leaseMs: KEEP_OPEN_LEASE_MS },
               async (lease) => {
-                if (await dedup.hasInteracted(selected.noteId!, 'comment').catch(() => false)) {
-                  commitReason = 'already_commented_before_commit';
-                  return false;
-                }
                 const edge = edgeFor(lease.taskId);
-                const current = await edge.searchAndHarvest(term);
-                const stable = current.find((card) => card.noteId === selected.noteId);
-                if (!stable) {
-                  commitReason = 'target_not_found_on_commit';
-                  return false;
+                // 唯一一次真搜索（发现）。搜不到候选 → 换下一个词（多次搜索仅在此触发）。
+                const cards = await edge.searchAndHarvest(term);
+                const fresh: Array<CommentCandidateCard & { index: number }> = [];
+                for (const card of cards) {
+                  if (!card.noteId || (await dedup.hasInteracted(card.noteId, 'comment').catch(() => false))) continue;
+                  fresh.push({ ...card, index: fresh.length });
                 }
-                const reopened = await edge.readNote(stable);
-                if (!reopened || reopened.note.noteId !== selected.noteId) {
-                  commitReason = 'detail_note_mismatch_on_commit';
-                  return false;
+                if (!fresh.length) return { next: true };
+
+                const picked = await picker.pick(fresh);
+                if (picked.pickIndex == null) return { next: true };
+                const selected = fresh.find((card) => card.index === picked.pickIndex);
+                if (!selected?.noteId) return { next: true };
+
+                // —— 选中即定：以下任何失败都结束任务（MUST NOT 复搜、换词或改评他篇）——
+                // 打开仍在当前搜索结果页 DOM 里的这张卡（note.open{noteId}），不复搜。
+                const prepared = await edge.readNote(selected);
+                if (!prepared || prepared.note.noteId !== selected.noteId) {
+                  return { next: false, result: {
+                    outcome: 'read_failed', term, noteId: selected.noteId, noteTitle: selected.title, termsTried: tried,
+                    reason: '开笔记/读正文失败（当前页未命中目标）',
+                  } };
                 }
-                return edge.post(selected.noteId!, composed.text, composed.contactInfo);
+
+                // 撰写/去 AI 味/飞书人审——持锁不释放，浏览器停在该详情页等待。超时/被拒 → 结束。
+                const composed = await composeAndApprove(prepared.note, prepared.comments);
+                if (!composed) {
+                  return { next: false, result: {
+                    outcome: 'compose_skipped', term, noteId: selected.noteId, noteTitle: prepared.note.title,
+                    termsTried: tried, reason: 'empty/unapproved/rejected',
+                  } };
+                }
+                const displayText = composed.contactInfo ? `${composed.text}\n${composed.contactInfo}` : composed.text;
+
+                if (await dedup.hasInteracted(selected.noteId, 'comment').catch(() => false)) {
+                  return { next: false, result: {
+                    outcome: 'post_failed', term, noteId: selected.noteId, noteTitle: prepared.note.title,
+                    text: displayText, termsTried: tried, reason: 'already_commented_before_commit',
+                  } };
+                }
+                // 发布：边端在提交前【就地核对当前详情页 noteId】（interaction.comment 带 noteId），
+                // 页面被弹层顶掉/被导航离开/笔记已删 → 边端诚实回 ok:false → 不发（绝不在错笔记上发）。
+                const posted = await edge.post(selected.noteId, composed.text, composed.contactInfo);
+                if (!posted) {
+                  return { next: false, result: {
+                    outcome: 'post_failed', term, noteId: selected.noteId, noteTitle: prepared.note.title,
+                    text: displayText, termsTried: tried, reason: 'comment not verified posted',
+                  } };
+                }
+                await dedup.recordInteraction(selected.noteId, 'comment');
+                return { next: false, result: {
+                  outcome: 'commented', term, noteId: selected.noteId, noteTitle: prepared.note.title,
+                  text: displayText, termsTried: tried,
+                } };
               },
             ),
           );
-          if (!posted) {
-            final = {
-              outcome: 'post_failed',
-              term,
-              noteId: selected.noteId,
-              noteTitle: prepared.note.title,
-              text: displayText,
-              termsTried: tried,
-              reason: commitReason,
-            };
-          } else {
-            await dedup.recordInteraction(selected.noteId, 'comment');
-            final = {
-              outcome: 'commented',
-              term,
-              noteId: selected.noteId,
-              noteTitle: prepared.note.title,
-              text: displayText,
-              termsTried: tried,
-            };
-          }
-          break;
+          if (attempt.next) continue; // 该词无合格候选 → 换下一个词
+          final = attempt.result;
+          break; // 选中即定：成功/失败都结束本次任务
         }
         result = final ?? { outcome: 'no_strong_candidate', termsTried: Math.min(terms.length, maxTerms) };
       }
@@ -1273,7 +1249,7 @@ export class CommentScheduler {
     }
 
     try {
-      await this.deps.postResultCard?.(accountId, outcomeToReceipt(result));
+      await this.deps.postResultCard?.(accountId, outcomeToReceipt(result), commentSourceLabel(priority));
     } catch (err) {
       log.warn(`[comment-scheduler] 结果卡片发送失败 account=${accountId}：${(err as Error).message}`);
     }
@@ -1299,6 +1275,14 @@ export class CommentScheduler {
 export const TARGETED_SEARCH_TERM_MAX_LEN = XHS_COMMENT_PROFILE.search.targetedSearchTermMaxLength;
 /** 第二次尝试的放宽搜索词长度（前 12 字）。 */
 export const TARGETED_SEARCH_FALLBACK_LEN = XHS_COMMENT_PROFILE.search.targetedSearchFallbackLength;
+
+/**
+ * 结果卡触发来源标注（change comment-keep-open-through-approval）：`priority='automatic'` = 自动排期评论，
+ * 其余（`human`）= 人工 `/comment`。让终态回执可辨识来源，不再把自动排期一律标为「/comment」。
+ */
+export function commentSourceLabel(priority: EdgeTaskPriority): string {
+  return priority === 'automatic' ? '排期评论（自动）' : '/comment';
+}
 
 function noteLabel(title: string | undefined, prefix: string): string {
   const clean = title?.trim();
