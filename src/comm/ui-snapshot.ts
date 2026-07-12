@@ -19,7 +19,7 @@
  * pending_approval 的真候审/已批在途。即使 /tmp 信号丢失，已拒草稿也不会重新冒成 pending。
  */
 
-import { makeEnvelope, type Envelope, type UiDailyUsagePayload, type UiSnapshotPayload } from './protocol.js';
+import { makeEnvelope, type Envelope, type UiBrowserStandbyPayload, type UiDailyUsagePayload, type UiSnapshotPayload } from './protocol.js';
 import { randomUUID } from 'node:crypto';
 
 /** 云端可推送的发布审批状态（published 由边缘本地发射，不在此列）。 */
@@ -43,6 +43,7 @@ export interface UiSnapshotDeps {
   /** 读授权信号：null=未决（真候审）；approved=true=已批在途；false=已拒（hello 不回放）。 */
   readApproval?: (requestId: string) => Promise<{ approved: boolean } | null>;
   todayUsageForAccount?: (accountId: string, edgeId?: string) => Promise<UiDailyUsagePayload | null>;
+  browserStandbyForAccount?: (accountId: string, edgeId?: string) => Promise<UiBrowserStandbyPayload | null>;
   clock?: () => number;
   idGen?: () => string;
   setTimeoutFn?: typeof setTimeout;
@@ -107,11 +108,16 @@ export class UiSnapshotService {
         : null;
       if (dailyUsage) payload.dailyUsage = dailyUsage;
 
+      const browserStandby = this.deps.browserStandbyForAccount
+        ? await this.deps.browserStandbyForAccount(accountId, edgeId).catch(() => null)
+        : null;
+      if (browserStandby) payload.browserStandby = browserStandby;
+
       // 已绑人设信号（change persona-wizard-onboarding-fixes）：仅为 true 时下发（守「全空不发包」/宁缺毋假），
       // 边缘据此把已绑账号徽标翻「已设置」并跳过向导，修「已绑仍显示未设置」bug。
       if (this.deps.isPersonaBound?.(accountId)) payload.personaBound = true;
 
-      if (!payload.account && !payload.lastPublish && !payload.publish && !payload.dailyUsage && !payload.personaBound) return; // 全空不发包
+      if (!payload.account && !payload.lastPublish && !payload.publish && !payload.dailyUsage && !payload.browserStandby && !payload.personaBound) return; // 全空不发包
       const sent = this.push(accountId, edgeId, payload, 'hello快照');
       if (sent > 0 && dailyUsage) this.scheduleDailyUsageRefresh(accountId, edgeId, dailyUsage);
     } catch (err) {
@@ -141,15 +147,20 @@ export class UiSnapshotService {
   }
 
   async pushDailyUsageSnapshot(accountId: string, edgeId: string): Promise<void> {
-    if (!this.deps.todayUsageForAccount) return;
     try {
-      const dailyUsage = await this.deps.todayUsageForAccount(accountId, edgeId).catch(() => null);
-      if (!dailyUsage) {
+      const [dailyUsage, browserStandby] = await Promise.all([
+        this.deps.todayUsageForAccount ? this.deps.todayUsageForAccount(accountId, edgeId).catch(() => null) : Promise.resolve(null),
+        this.deps.browserStandbyForAccount ? this.deps.browserStandbyForAccount(accountId, edgeId).catch(() => null) : Promise.resolve(null),
+      ]);
+      if (!dailyUsage && !browserStandby) {
         this.cancelDailyUsageRefresh(accountId, edgeId);
         return;
       }
-      const sent = this.push(accountId, edgeId, { dailyUsage }, 'dailyUsage刷新');
-      if (sent > 0) this.scheduleDailyUsageRefresh(accountId, edgeId, dailyUsage);
+      const payload: UiSnapshotPayload = {};
+      if (dailyUsage) payload.dailyUsage = dailyUsage;
+      if (browserStandby) payload.browserStandby = browserStandby;
+      const sent = this.push(accountId, edgeId, payload, 'dailyUsage刷新');
+      if (sent > 0 && dailyUsage) this.scheduleDailyUsageRefresh(accountId, edgeId, dailyUsage);
       else this.cancelDailyUsageRefresh(accountId, edgeId);
     } catch (err) {
       this.cancelDailyUsageRefresh(accountId, edgeId);

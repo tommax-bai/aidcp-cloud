@@ -89,10 +89,12 @@ import {
 import { CommandSequencer } from './publish-agent/command-sequencer.js';
 import { EdgeTaskLeaseClient } from './comm/edge-task-lease-client.js';
 import { UiSnapshotService } from './comm/ui-snapshot.js';
+import { buildBrowserStandbyHint, resolveBrowserStandbyConfig } from './comm/browser-standby.js';
 import type {
   UiDailyUsageAction,
   UiDailyUsageCounts,
   UiDailyUsagePayload,
+  UiBrowserStandbyPayload,
   UiDailyUsageWindowStatus,
 } from './comm/protocol.js';
 import { PublishOrchestrator, PublishScheduler, PublishDispatcher } from './publish-agent/index.js';
@@ -1643,6 +1645,12 @@ async function main(): Promise<void> {
     return payload;
   };
 
+  const browserStandbyConfig = resolveBrowserStandbyConfig(process.env);
+  const buildBrowserStandbyForAccount = async (accountId: string, _edgeId?: string): Promise<UiBrowserStandbyPayload> => {
+    const controller = await riskRegistry.getController(accountId);
+    return buildBrowserStandbyHint(controller, { now: Date.now(), config: browserStandbyConfig });
+  };
+
   uiSnapshot = new UiSnapshotService({
     pusher: { pushToEdges: (env, edgeId) => server.pushToEdges(env, edgeId) },
     resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
@@ -1653,6 +1661,7 @@ async function main(): Promise<void> {
     pendingApprovalForAccount: (accountId) => publishLogStore.pendingApprovalForAccount(accountId),
     readApproval: readPublishApproval,
     todayUsageForAccount: buildTodayUsageForAccount,
+    browserStandbyForAccount: buildBrowserStandbyForAccount,
     logger: console,
   });
   const uiSnapshotService = uiSnapshot;
