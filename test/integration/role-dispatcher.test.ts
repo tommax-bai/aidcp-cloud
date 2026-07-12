@@ -520,6 +520,40 @@ describe('RoleDispatcher Integration', () => {
     assert.ok(recover, `open_note 失败后应下发兜底 scroll，实际=${JSON.stringify(commands)}`);
   });
 
+  it('action.completed scroll ok=false → 不递归触发兜底 scroll', async () => {
+    const commands: EdgeCommand[] = [];
+    const llm = createMockLlm(['{"verdict":"skip","reason":"x"}']);
+    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
+    dispatcher.setup();
+    dispatcher.startSession();
+
+    commands.length = 0;
+    dispatcher.bus.emit('action.completed', { action: 'scroll', ok: false, reason: 'no_target', ts: Date.now() });
+    await new Promise((r) => setTimeout(r, 10));
+
+    const recover = commands.find(
+      (c) => c.action === 'scroll' && String(c.reason ?? '').includes('recover_after_scroll_failed'),
+    );
+    assert.equal(recover, undefined, `scroll 失败不应递归下发兜底 scroll，实际=${JSON.stringify(commands)}`);
+  });
+
+  it('action.completed join_group ok=false → 不触发兜底 scroll', async () => {
+    const commands: EdgeCommand[] = [];
+    const llm = createMockLlm(['{"verdict":"skip","reason":"x"}']);
+    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
+    dispatcher.setup();
+    dispatcher.startSession();
+
+    commands.length = 0;
+    dispatcher.bus.emit('action.completed', { action: 'join_group', ok: false, reason: 'task_failed', ts: Date.now() });
+    await new Promise((r) => setTimeout(r, 10));
+
+    const recover = commands.find(
+      (c) => c.action === 'scroll' && String(c.reason ?? '').includes('recover_after_join_group_failed'),
+    );
+    assert.equal(recover, undefined, `join_group 失败不应下发兜底 scroll，实际=${JSON.stringify(commands)}`);
+  });
+
   // ─── facebook-browse-and-like-loop 5.2: 会话启动平台闸对 Facebook 放行 ─────────────────
   // 原 facebook-scheduled-comment 2.8 曾断言「FB 无 browse → 拒绝」；本 change 为 FB 声明 browse（edge 侧
   // FacebookBrowseSession 原子同落），启动闸应【放行】FB 浏览闭环（spec 场景「Facebook account can start a

@@ -1820,7 +1820,9 @@ export class RoleDispatcher {
           this.interactionRetry.delete(payload.action);
         }
         const noRecoverScroll =
+          payload.action === 'scroll' ||
           payload.action === 'follow' ||
+          payload.action === 'join_group' ||
           payload.action === 'browse_images' ||
           payload.action === 'scroll_comments' ||
           payload.action === 'comment' ||
