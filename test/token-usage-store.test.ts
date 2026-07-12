@@ -20,6 +20,42 @@ test('inferBillingProvider maps legacy unknown rows by model name', () => {
   assert.equal(inferBillingProvider('unknown', 'other-model'), 'unknown');
 });
 
+test('default pool uses PG environment config', async () => {
+  const original = {
+    DATABASE_URL: process.env.DATABASE_URL,
+    PGHOST: process.env.PGHOST,
+    PGPORT: process.env.PGPORT,
+    PGDATABASE: process.env.PGDATABASE,
+    PGUSER: process.env.PGUSER,
+    PGPASSWORD: process.env.PGPASSWORD,
+  };
+  let pool: pg.Pool | undefined;
+  try {
+    delete process.env.DATABASE_URL;
+    process.env.PGHOST = '10.9.8.7';
+    process.env.PGPORT = '15432';
+    process.env.PGDATABASE = 'usage_db';
+    process.env.PGUSER = 'usage_user';
+    process.env.PGPASSWORD = 'usage_password';
+
+    const store = new TokenUsageStore();
+    pool = (store as unknown as { pool: pg.Pool }).pool;
+    const options = pool.options as pg.PoolConfig;
+    assert.equal(options.host, '10.9.8.7');
+    assert.equal(options.port, 15432);
+    assert.equal(options.database, 'usage_db');
+    assert.equal(options.user, 'usage_user');
+    assert.equal(options.password, 'usage_password');
+    assert.equal(options.max, 4);
+  } finally {
+    await pool?.end();
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test('purgeOlderThan deletes old buckets and returns row count', async () => {
   const calls: Array<{ sql: string; params: unknown[] }> = [];
   const pool = {

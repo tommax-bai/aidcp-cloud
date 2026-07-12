@@ -1,5 +1,5 @@
 import pg from 'pg';
-import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { resolveEnvPgConfig } from '../cache/pg-config.js';
 
 const { Pool } = pg;
 
@@ -232,11 +232,7 @@ export class TokenUsageStore {
     this.pool =
       options.pool ??
       new Pool({
-        host: DEFAULT_PG_CONFIG.host,
-        port: DEFAULT_PG_CONFIG.port,
-        database: DEFAULT_PG_CONFIG.database,
-        user: DEFAULT_PG_CONFIG.user,
-        password: DEFAULT_PG_CONFIG.password,
+        ...resolveEnvPgConfig(),
         max: 4,
       });
     const envFlush = Number(process.env.AIDCP_TOKEN_FLUSH_MS);
