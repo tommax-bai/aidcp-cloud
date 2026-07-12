@@ -672,6 +672,31 @@ export class RoleDispatcher {
     });
   }
 
+  /**
+   * Facebook 首屏/滚动后的 noteId 可能因虚拟化或 permalink 水合重复，feed-scroll-card-floor 会算成 0。
+   * 给 FB feed/search 翻页一个保底扫屏停留，避免连续 skip 时 2 秒一滚。
+   */
+  private facebookScrollDwellMs(): number | undefined {
+    if (this.accountPlatform !== 'facebook') return undefined;
+    return computeFeedFloorMs({
+      newCount: 8,
+      status: this.getRiskStatus(),
+      quotaLevel: this.getQuotaLevel(),
+      progress: this.progress(),
+      pacing: this.pacingFloors,
+    });
+  }
+
+  private scrollDwellParams(floorMs: number): Record<string, unknown> | undefined {
+    const fbFloor = this.facebookScrollDwellMs() ?? 0;
+    const dwellMs = Math.max(floorMs, fbFloor);
+    return dwellMs > 0 ? { dwellMs } : undefined;
+  }
+
+  private emitSearchSkippedAfterIntercept(currentPageType: 'feed' | 'search', reason: string): void {
+    this.eventBus.emit('search.skipped', { currentPageType, reason, ts: this.clock() });
+  }
+
   /** 设置该连接（运行时）的当前账号（multi-account-node-support D4：去掉 default 钉死，由连接真实账号设入）。 */
   setCurrentAccountId(accountId: string): void {
     this.currentAccountId = accountId;
@@ -1469,11 +1494,8 @@ export class RoleDispatcher {
         // feed-scroll-card-floor：消费 page.cards.arrived 算好的停留兜底（floor>0 才挂 dwellMs），随即归零。
         const floor = this.pendingFeedFloorMs;
         this.pendingFeedFloorMs = 0;
-        this.sendCommand(
-          floor > 0
-            ? { action: 'scroll', reason: 'feed_scroll', params: { dwellMs: floor } }
-            : { action: 'scroll', reason: 'feed_scroll' },
-        );
+        const params = this.scrollDwellParams(floor);
+        this.sendCommand(params ? { action: 'scroll', reason: 'feed_scroll', params } : { action: 'scroll', reason: 'feed_scroll' });
       }),
 
       // feed 深度到阈值 → 点右下「刷新」回顶换新批（change feed-refresh-on-depth）。
@@ -1483,7 +1505,8 @@ export class RoleDispatcher {
       }),
 
       this.eventBus.on('search.scrolled', () => {
-        this.sendCommand({ action: 'scroll', reason: 'search_scroll' });
+        const params = this.scrollDwellParams(0);
+        this.sendCommand(params ? { action: 'scroll', reason: 'search_scroll', params } : { action: 'scroll', reason: 'search_scroll' });
       }),
 
       // idle 看门狗的恢复 nudge → 一次 scroll，重新驱动停滞的浏览循环（reason 仅作日志区分）。
@@ -1634,12 +1657,15 @@ export class RoleDispatcher {
         // 闸一：会话搜索预算。
         if (this.budget.searches <= 0) {
           console.log(`[RoleDispatcher] 搜索被拦截，跳过 keyword=${keyword} reason=budget_exhausted`);
+          this.emitSearchSkippedAfterIntercept(payload.currentPageType, 'budget_exhausted');
           return;
         }
         // 闸二：限频（每关键词每会话/每天上限）。
         const decision = this.searchLimiter.explain(keyword);
         if (!decision.allowed) {
-          console.log(`[RoleDispatcher] 搜索被拦截，跳过 keyword=${keyword} reason=${decision.reason}`);
+          const reason = decision.reason ?? 'search_limited';
+          console.log(`[RoleDispatcher] 搜索被拦截，跳过 keyword=${keyword} reason=${reason}`);
+          this.emitSearchSkippedAfterIntercept(payload.currentPageType, reason);
           return;
         }
         // 两道闸通过 → 记账 + 下发（如实带上 source）。

@@ -378,6 +378,8 @@ export interface SearchNeededPayload {
 export interface SearchApprovedPayload {
   keyword: string;
   reason: string;
+  /** 搜索需求来自哪个列表页；拦截/失败时按原始页型续滚，不能从 SearchExecutor 改后的上下文猜。 */
+  currentPageType: 'feed' | 'search';
   /**
    * 关键词来源策略（如实回报，供 SearchExecutePayload.source 填充）。
    * - `new_concept`：来自概念池 candidate（从浏览内容学到的新概念）

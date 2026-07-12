@@ -129,6 +129,32 @@ describe('RoleDispatcher Integration', () => {
     dispatcher.endSession();
   });
 
+  it('facebook: feed_scroll 即使新卡差分为 0 也携带拟人停留 dwellMs', async () => {
+    const commands: EdgeCommand[] = [];
+    const llm = createMockLlm([]);
+    const dispatcher = new RoleDispatcher({
+      soul: mockSoul,
+      llm,
+      sendCommand: (cmd) => commands.push(cmd),
+      accountPlatform: 'facebook',
+      getNickname: () => 'FB Name',
+    });
+    dispatcher.setCurrentAccountId('fb-acc');
+    dispatcher.setup();
+    dispatcher.startSession();
+
+    dispatcher.bus.emit('feed.scrolled', { pageType: 'feed', scrollCount: 1, ts: Date.now() });
+    await new Promise((r) => setTimeout(r, 10));
+
+    const scroll = commands.find((c) => c.action === 'scroll' && c.reason === 'feed_scroll');
+    assert.ok(scroll, '应下发 feed_scroll');
+    assert.ok(
+      typeof scroll!.params?.dwellMs === 'number' && (scroll!.params!.dwellMs as number) >= 3000,
+      `FB feed_scroll 应有 3s+ dwellMs 保底，实际=${JSON.stringify(scroll!.params)}`,
+    );
+    dispatcher.endSession();
+  });
+
   // ─── back_to_feed 透传 sourcePageType → targetPage ───────────
 
   it('back_to_feed: feed.entered{pageType} 透传为 navigation.back{targetPage}（搜索会话回搜索结果）', async () => {

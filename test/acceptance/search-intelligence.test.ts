@@ -140,7 +140,7 @@ describe('AC-SEARCH 概念池驱动的搜索智能', () => {
   it('AC-SEARCH-05 两道闸通过 → 下发 search（带 source）+ markSearched', () => {
     const { bus, commands, marked } = setupDispatcher();
 
-    bus.emit('search.approved', { keyword: '向量数据库', reason: 'r', source: 'new_concept', ts: 0 });
+    bus.emit('search.approved', { keyword: '向量数据库', reason: 'r', currentPageType: 'feed', source: 'new_concept', ts: 0 });
 
     const cmds = searchCmds(commands);
     assert.equal(cmds.length, 1, '应下发一条 search');
@@ -154,17 +154,21 @@ describe('AC-SEARCH 概念池驱动的搜索智能', () => {
     // 抽干搜索预算（freshBudget.searches=5）
     for (let i = 0; i < 5; i++) d.consumeBudget('search');
 
-    bus.emit('search.approved', { keyword: 'LLM Agent', reason: 'r', source: 'random_from_interests', ts: 0 });
+    bus.emit('search.approved', { keyword: 'LLM Agent', reason: 'r', currentPageType: 'feed', source: 'random_from_interests', ts: 0 });
 
     assert.equal(searchCmds(commands).length, 0, '预算耗尽必须不下发');
     assert.deepEqual(marked, [], '被拦时不得 markSearched');
+    assert.ok(
+      commands.some((c) => c.action === 'scroll' && c.reason === 'feed_scroll'),
+      '预算耗尽也应经 search.skipped 回到 feed_scroll，不能静默停住',
+    );
   });
 
   it('AC-SEARCH-07 限频拦截：同一关键词第二次被拦（默认 maxPerSession=1）', () => {
     const { bus, commands, marked } = setupDispatcher();
 
-    bus.emit('search.approved', { keyword: 'RAG 实战', reason: 'r', source: 'random_from_interests', ts: 0 });
-    bus.emit('search.approved', { keyword: 'RAG 实战', reason: 'r', source: 'random_from_interests', ts: 0 });
+    bus.emit('search.approved', { keyword: 'RAG 实战', reason: 'r', currentPageType: 'feed', source: 'random_from_interests', ts: 0 });
+    bus.emit('search.approved', { keyword: 'RAG 实战', reason: 'r', currentPageType: 'feed', source: 'random_from_interests', ts: 0 });
 
     assert.equal(searchCmds(commands).length, 1, '同词第二次应被限频闸拦下，仅下发一次');
     assert.deepEqual(marked, ['RAG 实战'], '仅第一次通过时 markSearched');

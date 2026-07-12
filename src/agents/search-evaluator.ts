@@ -108,6 +108,7 @@ export class SearchEvaluator extends BaseRole {
       this.emit('search.approved', {
         keyword: canonical,
         reason: result.reason,
+        currentPageType: payload.currentPageType,
         // 如实标注来源：概念池 candidate → new_concept；seed_keywords → random_from_interests。
         source: this.attributeSource(canonical, candidates, seedKeywords),
         ts: Date.now(),
