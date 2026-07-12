@@ -32,6 +32,11 @@ export interface InteractionAppraiserRoleOptions extends RoleOptions {
   getRemainingBudget: () => { likes: number; collects: number };
   /** 收藏质量闸比例（后台可配，热加载）；缺省回落 COLLECT_MIN_SAVE_LIKE_RATIO。 */
   getMinSaveLikeRatio?: () => number;
+  /**
+   * 平台/编排来源闸：返回 false 时不调 LLM、不 emit interaction.completed。
+   * 用于 Facebook 这类 shadow-first 平台，确保自然点赞只来自内容评估后的深读链。
+   */
+  isInteractionEligible?: (noteId: string, sourcePageType: 'feed' | 'search') => { ok: true } | { ok: false; reason: string };
 }
 
 export class InteractionAppraiserRole extends BaseRole {
@@ -40,6 +45,7 @@ export class InteractionAppraiserRole extends BaseRole {
   private readonly getNoteData: (noteId: string) => NoteData | null;
   private readonly getRemainingBudget: () => { likes: number; collects: number };
   private readonly getMinSaveLikeRatio?: () => number;
+  private readonly isInteractionEligible?: (noteId: string, sourcePageType: 'feed' | 'search') => { ok: true } | { ok: false; reason: string };
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: InteractionAppraiserRoleOptions) {
@@ -49,6 +55,7 @@ export class InteractionAppraiserRole extends BaseRole {
     this.getNoteData = options.getNoteData;
     this.getRemainingBudget = options.getRemainingBudget;
     this.getMinSaveLikeRatio = options.getMinSaveLikeRatio;
+    this.isInteractionEligible = options.isInteractionEligible;
   }
 
   subscribe(): void {
@@ -88,6 +95,11 @@ export class InteractionAppraiserRole extends BaseRole {
     if (!noteData) {
       // 故障：读完瞬间笔记数据取不到（feed 已滚动、currentNote 已被下一篇覆盖）。
       this.emitSkip(payload.noteId, payload.sourcePageType, 'note_data_unavailable');
+      return;
+    }
+    const eligibility = this.isInteractionEligible?.(payload.noteId, payload.sourcePageType);
+    if (eligibility && !eligibility.ok) {
+      this.emitSkip(payload.noteId, payload.sourcePageType, eligibility.reason);
       return;
     }
 

@@ -420,6 +420,9 @@ export class RoleDispatcher {
   // 数据存储（由 Edge 上报更新）
   private visibleCards: VisibleCard[] = [];
   private currentNote: NoteData | null = null;
+  /** Facebook 自然互动证据：必须先由 content_evaluator 选中，再由 content_curator 放行，interaction_appraiser 才能发 like。 */
+  private readonly facebookContentSelectedNoteIds = new Set<string>();
+  private readonly facebookQualityPassedNoteIds = new Set<string>();
   /** 当前会话剩余互动预算（从全局单场上限提供者派生，会话开始/重置时刷新）。 */
   private budget!: SessionInteractionBudget;
   /** 会话开始/重置时的预算快照（供比率闸：init−剩余；会话中途改预算不漂移）。 */
@@ -762,7 +765,14 @@ export class RoleDispatcher {
       new DeepReader({ ...commonOptions, getNoteData }),
       new CommentReviewer({ ...commonOptions, sessionContext: this.sessionContext, getNoteData }),
       new ContentCuratorRole({ ...commonOptions, sessionContext: this.sessionContext }),
-      new InteractionAppraiserRole({ ...commonOptions, sessionContext: this.sessionContext, getNoteData, getRemainingBudget, getMinSaveLikeRatio: () => this.collectMinSaveLikeRatio() }),
+      new InteractionAppraiserRole({
+        ...commonOptions,
+        sessionContext: this.sessionContext,
+        getNoteData,
+        getRemainingBudget,
+        getMinSaveLikeRatio: () => this.collectMinSaveLikeRatio(),
+        isInteractionEligible: (noteId) => this.facebookNaturalInteractionEligibility(noteId),
+      }),
       new AuthorEvaluator({ ...commonOptions, sessionContext: this.sessionContext, getNoteData }),
       // —— 发评论支线（接在互动完成与「是否进主页评估」之间）：评估→撰写→去AI味→循环内人审 ——
       new CommentAppraiser({
@@ -1049,6 +1059,7 @@ export class RoleDispatcher {
     this.budget = this.freshBudget();
     this.budgetInit = { ...this.budget };
     this.searchLimiter.resetSession();
+    this.clearFacebookNaturalInteractionEvidence();
     // 跨会话概念记忆：异步刷新，不阻塞 feed.entered（首次搜索发生在连刷阈值之后，届时池已就绪）。
     void this.refreshConceptPool();
     this.eventBus.emit('feed.entered', {
@@ -1118,6 +1129,7 @@ export class RoleDispatcher {
     // 清在途互动状态（change fix-interaction-and-comment-capture）：新场从干净的重试/去重态开始。
     this.interactionRetry.clear();
     this.pendingInteractionKeys.clear();
+    this.clearFacebookNaturalInteractionEvidence();
     // 重新订阅角色与接线（SessionMonitor.subscribe 重置 startedAt/actionCount）
     this.roles.forEach((r) => r.subscribe());
     this.setupCommandTranslation();
@@ -1156,6 +1168,7 @@ export class RoleDispatcher {
     // 清在途互动状态（change fix-interaction-and-comment-capture）：防上一场极晚到的回执驱动新场重发/误扣。
     this.interactionRetry.clear();
     this.pendingInteractionKeys.clear();
+    this.clearFacebookNaturalInteractionEvidence();
     console.log(`[RoleDispatcher] 会话结束: ${reason ?? 'manual'}`);
     // 仅「正常结束」且续场特性已开（注入提供者）才安排休息+续场。
     if (opts?.autoResumeEligible) this.armRestTimer(account, this.takePendingAutoResumeInMs());
@@ -1392,6 +1405,23 @@ export class RoleDispatcher {
     this.currentNote = note;
   }
 
+  private clearFacebookNaturalInteractionEvidence(): void {
+    this.facebookContentSelectedNoteIds.clear();
+    this.facebookQualityPassedNoteIds.clear();
+  }
+
+  private facebookNaturalInteractionEligibility(noteId: string): { ok: true } | { ok: false; reason: string } {
+    if (this.accountPlatform !== 'facebook') return { ok: true };
+    if (!noteId) return { ok: false, reason: 'fb_missing_note_id' };
+    if (!this.facebookContentSelectedNoteIds.has(noteId)) {
+      return { ok: false, reason: 'fb_content_not_selected' };
+    }
+    if (!this.facebookQualityPassedNoteIds.has(noteId)) {
+      return { ok: false, reason: 'fb_quality_not_passed' };
+    }
+    return { ok: true };
+  }
+
   /** 当前会话某动作剩余预算（join_group 供 Facebook 加群调度器在 cloud 侧消费）。 */
   remainingBudget(action: SessionBudgetAction): number {
     const key = SESSION_BUDGET_ACTION_KEYS[action];
@@ -1625,6 +1655,12 @@ export class RoleDispatcher {
         );
       }),
 
+      this.eventBus.on('quality.pass', (payload) => {
+        if (this.accountPlatform === 'facebook' && payload.noteId) {
+          this.facebookQualityPassedNoteIds.add(payload.noteId);
+        }
+      }),
+
       // 角色产出事件 → Edge 指令翻译
       this.eventBus.on('content.valuable', (payload) => {
         const viewDecision = this.explainView();
@@ -1636,7 +1672,14 @@ export class RoleDispatcher {
         // 否则 feed 在云端决策与 edge 执行之间滚动后，纯 index 寻址会开成同序号上的邻座（stale index）。
         // 熟悉度折扣：返回 feed 后再次打开一张近期已评估过的卡片 → 思考时间降至 1/3（首次打开仍全量）。
         const familiar = payload.noteId ? this.sessionContext.isRecentlyEvaluated(payload.noteId) : false;
-        this.sendCommand({ action: 'open_note', params: { index: payload.index, noteId: payload.noteId, thinkMs: this.thinkNow(familiar) }, reason: payload.reason });
+        const sent = this.sendCommand({
+          action: 'open_note',
+          params: { index: payload.index, noteId: payload.noteId, thinkMs: this.thinkNow(familiar) },
+          reason: payload.reason,
+        });
+        if (sent && this.accountPlatform === 'facebook' && payload.noteId) {
+          this.facebookContentSelectedNoteIds.add(payload.noteId);
+        }
       }),
 
       // content.no_valuable 不在此直接翻页：翻页由 FeedScroller / SearchScroller 角色独家处理

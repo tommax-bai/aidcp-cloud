@@ -540,6 +540,105 @@ describe('RoleDispatcher Integration', () => {
     assert.ok(starts.length >= 1, 'facebook 账号声明 browse 后应正常启动浏览会话（平台闸放行）');
   });
 
+  it('facebook: 没有内容评估证据时，reading.done 不会自然触发 like', async () => {
+    const commands: EdgeCommand[] = [];
+    const llm = createMockLlm(['{"action":"like","reason":"不该被调用"}']);
+    const dispatcher = new RoleDispatcher({
+      soul: mockSoul,
+      llm,
+      sendCommand: (cmd) => commands.push(cmd),
+      accountPlatform: 'facebook',
+      getNickname: () => 'FB Name',
+    });
+    const note = {
+      noteId: 'https://www.facebook.com/a/posts/pfbid0FB',
+      title: 'FB post',
+      content: 'content',
+      author: 'Alice',
+      likeCount: 10,
+      collectCount: 0,
+    };
+    dispatcher.setCurrentAccountId('fb-acc');
+    dispatcher.setup();
+    dispatcher.startSession();
+    dispatcher.updateNoteData(note);
+
+    const skipped: Array<{ reason?: string }> = [];
+    dispatcher.bus.on('interaction.skipped', (p) => { skipped.push(p); });
+    dispatcher.bus.emit('reading.done', {
+      noteId: note.noteId,
+      sourcePageType: 'feed',
+      imagesBrowsed: 0,
+      commentsRead: 0,
+      keyPoints: [],
+      readDurationMs: 100,
+      ts: Date.now(),
+    });
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.equal(llm.callCount, 0, '资格闸失败时不应调互动评估 LLM');
+    assert.equal(skipped.at(-1)?.reason, 'fb_content_not_selected');
+    assert.ok(!commands.some((c) => c.action === 'like'), '不应下发 like');
+    dispatcher.endSession();
+  });
+
+  it('facebook: content.valuable + quality.pass + interaction_appraiser=like → 才下发 like', async () => {
+    const commands: EdgeCommand[] = [];
+    const llm = createMockLlm([
+      '{"action":"like","reason":"符合人设"}',
+      '{"action":"like","reason":"符合人设"}',
+    ]);
+    const dispatcher = new RoleDispatcher({
+      soul: mockSoul,
+      llm,
+      sendCommand: (cmd) => commands.push(cmd),
+      accountPlatform: 'facebook',
+      getNickname: () => 'FB Name',
+    });
+    const note = {
+      noteId: 'https://www.facebook.com/a/posts/pfbid0FB',
+      title: 'FB post',
+      content: 'useful local post with enough detail',
+      author: 'Alice',
+      likeCount: 10,
+      collectCount: 0,
+    };
+    dispatcher.setCurrentAccountId('fb-acc');
+    dispatcher.setup();
+    dispatcher.startSession();
+    dispatcher.updateNoteData(note);
+
+    dispatcher.bus.emit('content.valuable', {
+      index: 0,
+      noteId: note.noteId,
+      title: note.title,
+      reason: '内容相关',
+      confidence: 0.9,
+      sourcePageType: 'feed',
+      ts: Date.now(),
+    });
+    dispatcher.bus.emit('quality.pass', {
+      noteId: note.noteId,
+      sourcePageType: 'feed',
+      reason: '详情有价值',
+      ts: Date.now(),
+    });
+    dispatcher.bus.emit('reading.done', {
+      noteId: note.noteId,
+      sourcePageType: 'feed',
+      imagesBrowsed: 0,
+      commentsRead: 0,
+      keyPoints: [],
+      readDurationMs: 100,
+      ts: Date.now(),
+    });
+    await new Promise((r) => setTimeout(r, 60));
+
+    assert.ok(commands.some((c) => c.action === 'open_note' && (c.params as { noteId?: string })?.noteId === note.noteId));
+    assert.ok(commands.some((c) => c.action === 'like' && (c.params as { noteId?: string })?.noteId === note.noteId));
+    dispatcher.endSession();
+  });
+
   it('2.8: 缺省/xiaohongshu 平台（含 browse）→ 启动闸放行，正常起会话', async () => {
     const llm = createMockLlm(['{"verdict":"skip"}']);
     const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: () => {}, accountPlatform: 'xiaohongshu' });

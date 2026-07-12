@@ -386,6 +386,49 @@ describe('InteractionAppraiserRole', () => {
     role.unsubscribe();
   });
 
+  it('资格闸失败 → 不调 LLM，直接 emit interaction.skipped', async () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    let llmCalls = 0;
+    const llm = {
+      complete: async () => {
+        llmCalls++;
+        return '{"action":"like","reason":"should not run"}';
+      },
+    };
+    const role = new InteractionAppraiserRole({
+      eventBus: bus,
+      soul: mockSoul,
+      llm,
+      sessionContext: ctx,
+      getNoteData: () => sampleNote,
+      getRemainingBudget: defaultBudget,
+      isInteractionEligible: () => ({ ok: false, reason: 'fb_content_not_selected' }),
+    });
+    role.subscribe();
+
+    let captured = null as InteractionSkippedPayload | null;
+    bus.on('interaction.skipped', (p) => { captured = p; });
+
+    bus.emit('reading.done', {
+      noteId: 'note_1',
+      sourcePageType: 'feed',
+      imagesBrowsed: 0,
+      commentsRead: 0,
+      keyPoints: [],
+      readDurationMs: 100,
+      ts: Date.now(),
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.equal(llmCalls, 0);
+    assert.ok(captured);
+    assert.equal(captured!.reason, 'fb_content_not_selected');
+
+    role.unsubscribe();
+  });
+
   it('笔记数据不可用 → emit interaction.skipped (note_data_unavailable)', async () => {
     const bus = new EventBus();
     const ctx = new SessionContext();
