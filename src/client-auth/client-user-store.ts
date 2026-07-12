@@ -44,6 +44,18 @@ CREATE TABLE IF NOT EXISTS client_env_scope (
   PRIMARY KEY (user_id, env_key)
 );
 CREATE INDEX IF NOT EXISTS client_env_scope_env_idx ON client_env_scope (env_key);
+-- 管理侧「环境注册表」（change client-user-env-registry）：系统已知的全部环境，**独立于归属**。
+-- 有此表前，后台「待分配」池只能从 client_env_scope 反推（= 只认识已分过的环境），无法表达「已导入但未分配给任何人」。
+-- 此表让环境可以只登记、不归属：一次性导入存量环境（source='import'）+ 边缘一连上来自动登记（source='auto'）都灌这里，
+-- 后台「待分配」= 本表 ∪ 归属表 的并集减去当前端用户已归属。env_key = 环境 profileId（不带 ads- 前缀，与 edge 口径一致）。
+CREATE TABLE IF NOT EXISTS client_environments (
+  env_key     TEXT        PRIMARY KEY,
+  label       TEXT,
+  platform    TEXT,
+  source      TEXT        NOT NULL DEFAULT 'import' CHECK (source IN ('import','auto','admin')),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 `;
 
 /** 客户视图（管理端读；**绝不含 key/hash/salt**）。 */
@@ -326,8 +338,45 @@ export class ClientUserStore {
   }
 
   /**
-   * 管理侧全局环境注册表：系统已知的全部环境（在 client_env_scope 出现过的 distinct env_key）+
-   * 每个环境被归属到的客户清单（含名）+ 归属人数。label/platform 取任一非空代表值（按 assigned_at 取最新）。
+   * 批量登记环境进管理侧注册表（change client-user-env-registry）。**不涉及归属**——只是让环境「被系统认识」，
+   * 从而出现在后台「待分配」池里供人工分配。用于：① 一次性导入存量环境（source='import'）；
+   * ② 边缘一连上来自动登记（source='auto'，见 server.ts onEdgeRegistered）；③ 后台手动登记（source='admin'）。
+   *
+   * 幂等 upsert：已存在则只用**非空**新值补 label/platform（COALESCE，不拿 null 覆盖既有好值）、bump updated_at；
+   * source 只在首次插入时定，冲突不降级。envKey 去空白 + 去重；空 envKey 跳过。返回实际写入的去重条数。
+   * **不做任何归属推断**——绝不误把环境塞给某个客户（fail-closed 归属边界不破）。
+   */
+  async registerEnvironments(
+    items: { envKey: string; label?: string | null; platform?: string | null }[],
+    source: 'import' | 'auto' | 'admin' = 'import',
+  ): Promise<number> {
+    const seen = new Set<string>();
+    const clean = items
+      .map((i) => ({
+        envKey: (i.envKey ?? '').trim(),
+        label: (i.label ?? '')?.toString().trim() || null,
+        platform: (i.platform ?? '')?.toString().trim() || null,
+      }))
+      .filter((i) => i.envKey && !seen.has(i.envKey) && (seen.add(i.envKey), true));
+    if (!clean.length) return 0;
+    for (const i of clean) {
+      await this.pool.query(
+        `INSERT INTO client_environments (env_key, label, platform, source, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, now(), now())
+         ON CONFLICT (env_key) DO UPDATE
+           SET label = COALESCE(EXCLUDED.label, client_environments.label),
+               platform = COALESCE(EXCLUDED.platform, client_environments.platform),
+               updated_at = now()`,
+        [i.envKey, i.label, i.platform, source],
+      );
+    }
+    return clean.length;
+  }
+
+  /**
+   * 管理侧全局环境注册表：系统已知的全部环境 + 每个环境被归属到的客户清单（含名）+ 归属人数。
+   * 环境全集 = 注册表 `client_environments` ∪ 已归属 `client_env_scope`（并集）——故**未分配给任何人的环境也会列出**
+   * （assigneeCount=0），这正是后台「待分配」池要的。label/platform 优先取归属行的最新非空值，回落注册表登记值。
    *
    * **红线（N2）**：这是**跨用户聚合**读，与「客户可达读只有吃 userId 的 scoped 方法」直接冲突——
    * **只准接入受内部 JWT 的 panel 端点（GET /api/client-environments），绝不注入 client-auth-server**，
@@ -341,14 +390,28 @@ export class ClientUserStore {
         platform: string | null;
         assignees: { userId: string; name: string }[] | null;
       }>(
-        `SELECT s.env_key,
-                (array_agg(s.label ORDER BY s.assigned_at DESC) FILTER (WHERE s.label IS NOT NULL))[1] AS label,
-                (array_agg(s.platform ORDER BY s.assigned_at DESC) FILTER (WHERE s.platform IS NOT NULL))[1] AS platform,
-                json_agg(json_build_object('userId', u.user_id, 'name', u.name) ORDER BY u.name) AS assignees
-         FROM client_env_scope s
-         JOIN client_users u ON u.user_id = s.user_id
-         GROUP BY s.env_key
-         ORDER BY s.env_key ASC`,
+        `WITH keys AS (
+           SELECT env_key FROM client_environments
+           UNION
+           SELECT env_key FROM client_env_scope
+         )
+         SELECT k.env_key,
+                COALESCE(
+                  (array_agg(s.label ORDER BY s.assigned_at DESC) FILTER (WHERE s.label IS NOT NULL))[1],
+                  max(e.label)
+                ) AS label,
+                COALESCE(
+                  (array_agg(s.platform ORDER BY s.assigned_at DESC) FILTER (WHERE s.platform IS NOT NULL))[1],
+                  max(e.platform)
+                ) AS platform,
+                json_agg(json_build_object('userId', u.user_id, 'name', u.name) ORDER BY u.name)
+                  FILTER (WHERE u.user_id IS NOT NULL) AS assignees
+         FROM keys k
+         LEFT JOIN client_environments e ON e.env_key = k.env_key
+         LEFT JOIN client_env_scope s ON s.env_key = k.env_key
+         LEFT JOIN client_users u ON u.user_id = s.user_id
+         GROUP BY k.env_key
+         ORDER BY k.env_key ASC`,
       );
       return rows.map((r) => {
         const assignees = (r.assignees ?? []).map((a) => ({ userId: a.userId, name: a.name }));

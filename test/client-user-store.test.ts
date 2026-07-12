@@ -79,3 +79,50 @@ test('listAllEnvironments: 非缺表错误照常抛出（不吞真故障）', as
   const store = new ClientUserStore({ pool });
   await assert.rejects(() => store.listAllEnvironments(), /connection refused/);
 });
+
+/**
+ * client-user-env-registry：`registerEnvironments`（环境注册表写路径）。锁我这段映射逻辑——
+ * 去空白 / 去重 / 跳空 envKey / 空串归 null / source 透传 / 每条一次 upsert / 返回去重条数。
+ * 真 upsert 的 COALESCE 不覆盖既有非空值、并集 listAllEnvironments 列出未分配环境等 SQL 语义靠真库核（簇 61）。
+ */
+function recordingPool() {
+  const calls: { sql: string; params?: unknown[] }[] = [];
+  const pool = {
+    query: async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      return { rows: [] };
+    },
+  } as unknown as pg.Pool;
+  return { pool, calls };
+}
+
+test('registerEnvironments: 去空白 + 去重 + 跳空，每条一次 upsert，返回去重条数', async () => {
+  const { pool, calls } = recordingPool();
+  const store = new ClientUserStore({ pool });
+  const n = await store.registerEnvironments([
+    { envKey: ' k1 ', label: ' 大白 ', platform: 'xiaohongshu' },
+    { envKey: 'k1', label: '重复应被去重' }, // 同 envKey → 去重
+    { envKey: '', label: '空跳过' }, // 空 envKey → 跳过
+    { envKey: 'k2', label: '', platform: '' }, // 空串 label/platform → null
+  ]);
+  assert.equal(n, 2);
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].sql, /INSERT INTO client_environments/);
+  assert.deepEqual(calls[0].params, ['k1', '大白', 'xiaohongshu', 'import']); // trim + 默认 source=import
+  assert.deepEqual(calls[1].params, ['k2', null, null, 'import']); // 空串归一为 null
+});
+
+test('registerEnvironments: 全空输入 → 0 次写、返回 0（绝不误发空 upsert）', async () => {
+  const { pool, calls } = recordingPool();
+  const store = new ClientUserStore({ pool });
+  const n = await store.registerEnvironments([{ envKey: '  ' }, { envKey: '' }]);
+  assert.equal(n, 0);
+  assert.equal(calls.length, 0);
+});
+
+test('registerEnvironments: source 显式传 auto 透传到参数（自动登记路径）', async () => {
+  const { pool, calls } = recordingPool();
+  const store = new ClientUserStore({ pool });
+  await store.registerEnvironments([{ envKey: 'k9' }], 'auto');
+  assert.deepEqual(calls[0].params, ['k9', null, null, 'auto']);
+});

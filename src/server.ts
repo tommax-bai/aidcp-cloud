@@ -1517,6 +1517,18 @@ async function main(): Promise<void> {
     // 握手注册完成（连接已可被推送、welcome 已回）→ 回填该账号的陪伴界面快照（昵称/最近发布/在途候审）。
     onEdgeRegistered: (session) => {
       void uiSnapshot?.pushHelloSnapshot(session.accountId, session.edgeId);
+      // 自动登记环境进管理侧注册表（change client-user-env-registry）：AdsPower 环境（edgeId=ads-<分身id>）一连上来
+      // 就进后台「待分配」池，供运营把它分给端用户——**只登记、不归属**（绝不误塞给某客户）。仅带 ads- 前缀的真实分身
+      // 环境登记；self-/host- 兜底 edge 不是可分配环境、跳过。env_key = 去掉 ads- 前缀（与 edge attach/过滤口径一致）。
+      const eid = session.edgeId;
+      if (eid && eid.startsWith('ads-')) {
+        void clientUserStore
+          .registerEnvironments(
+            [{ envKey: eid.slice('ads-'.length), label: session.accountNickname ?? null, platform: session.platform ?? null }],
+            'auto',
+          )
+          .catch((err) => console.warn(`[client-env] 自动登记环境失败 edge=${eid}: ${err instanceof Error ? err.message : String(err)}`));
+      }
     },
   });
   edgeServer = server;
