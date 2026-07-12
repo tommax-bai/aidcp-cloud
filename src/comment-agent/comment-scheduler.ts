@@ -226,7 +226,7 @@ export interface CommentSchedulerDeps {
   logger?: Pick<Console, 'log' | 'warn'>;
 
   // ── facebook-scheduled-comment 2.2/2.3：Facebook 定向评论执行（缺省全不注入 → FB 分支继续诚实拒绝，零回归） ──
-  /** 读该账号 FB 定向评论生效配置（关键词+容器，fail-closed：任一空则 enabled=false）。 */
+  /** 读该账号 FB 定向评论配置（关键词 + 正文模式 / 模板；目标群由 joined ledger 另选）。 */
   facebookConfigFor?: (accountId: string) => EffectiveFacebookCommentConfig;
   /** kill switch（AIDCP_FB_COMMENT_AUTO）：默认关；关且非影子 → 整条 FB 评论不跑。 */
   facebookAutoEnabled?: () => boolean;
@@ -256,8 +256,8 @@ export interface CommentSchedulerDeps {
   /** 回填容器真实群名（change facebook-container-display-name）：边缘搜索时读出真名 → 刷新配置容器名（人只看群名）。 */
   facebookResolveContainerName?: (accountId: string, url: string, name: string) => Promise<void> | void;
   /**
-   * Facebook joined-group coverage source（change facebook-group-join-and-commenting）。返回 coverageEnabled=true 表示该账号
-   * 已进入 per-account allowlist；若 enabled=false 则必须 no-op，不能回退配置容器或全站搜索。
+   * Facebook joined-group selector。正常 FB 评论的唯一容器来源；若 enabled=false 则必须 no-op，
+   * 不能回退 legacy 配置容器或全站搜索。
    */
   facebookCoverageConfigFor?: (accountId: string) => FacebookCoverageCommentConfig | Promise<FacebookCoverageCommentConfig>;
   facebookCoverageOnCommented?: (accountId: string, groupUrl: string) => Promise<void> | void;
@@ -682,31 +682,31 @@ export class CommentScheduler {
     // kill switch：既未开真发、也未开影子 → 整条功能关闭，静默不跑（不产审计噪音）。override 强制真发，此闸恒不触发。
     if (!autoEnabled && !shadow) return;
 
-    // 容器/关键词来源：
-    // - override（加群评论）：容器 pin 到刚加入的群；关键词仍取账号 FB 配置；usingCoverage=true（账本回写该群）。缺关键词 → fail-closed no-op。
-    // - 否则：coverage per-account gate 启用 → 从 ledger 选容器；再否则 → 配置源。任一为空 → 诚实 no-op。
-    const coverageCfg = manualTarget ? undefined : await d.facebookCoverageConfigFor?.(accountId);
-    const usingCoverage = manualTarget ? true : coverageCfg?.coverageEnabled === true;
-    const cfg: EffectiveFacebookCommentConfig =
-      !manualTarget && usingCoverage ? coverageCfg! : d.facebookConfigFor!(accountId);
-    if (manualTarget) {
-      if (cfg.keywords.length === 0) {
-        audit({ accountId, outcome: 'no_targets', reason: 'no_keywords', shadow, container: manualTarget });
-        return;
-      }
-    } else if (!cfg.enabled || cfg.keywords.length === 0 || cfg.containers.length === 0) {
-      audit({ accountId, outcome: 'no_targets', shadow });
+    const cfg = d.facebookConfigFor!(accountId);
+    if (cfg.keywords.length === 0) {
+      audit({ accountId, outcome: 'no_targets', reason: 'no_keywords', shadow, ...(manualTarget ? { container: manualTarget } : {}) });
+      return;
+    }
+    if (cfg.commentMode === 'template' && cfg.commentTemplates.length === 0) {
+      audit({ accountId, outcome: 'compose_skipped', reason: 'empty_template', shadow, ...(manualTarget ? { container: manualTarget } : {}) });
       return;
     }
 
     const keyword = cfg.keywords[Math.floor(rand() * cfg.keywords.length)] ?? cfg.keywords[0];
     let containerUrl: string;
     let container: string;
+    let coverageCfg: FacebookCoverageCommentConfig | undefined;
+    const usingCoverage = true;
     if (manualTarget) {
       containerUrl = manualTarget; // 功能主键：刚加入的群 url（边缘据此站内搜）
       container = manualTarget; // 真名由 search.containerName 回填
     } else {
-      const chosen = cfg.containers[Math.floor(rand() * cfg.containers.length)] ?? cfg.containers[0];
+      coverageCfg = await d.facebookCoverageConfigFor?.(accountId);
+      if (!coverageCfg?.enabled || coverageCfg.containers.length === 0) {
+        audit({ accountId, outcome: 'no_targets', shadow, keyword });
+        return;
+      }
+      const chosen = coverageCfg.containers[Math.floor(rand() * coverageCfg.containers.length)] ?? coverageCfg.containers[0];
       containerUrl = chosen.url; // 功能主键：边缘据此站内搜（含群 id）
       // 人类可读容器标签：已解析出的群名优先，否则暂用 url（下次搜索会自动回填真名）。审计/回执一律用它、不用裸 id。
       container = chosen.name ?? chosen.url;
@@ -750,7 +750,7 @@ export class CommentScheduler {
     });
     const dedup = d.dedupFor(accountId);
 
-    // 1) 容器内搜索候选帖（边端只在配置容器内搜、绝不全站）。用 url 下发。
+    // 1) 容器内搜索候选帖（边端只在 joined/pinned 群内搜、绝不全站）。用 url 下发。
     const search = await steps.searchInContainer(keyword, containerUrl);
     // 边缘回传的真实群名 → 回填配置容器名（人只看群名、不看 id）；本轮后续审计也改用真名。
     if (search.containerName) {
@@ -797,10 +797,12 @@ export class CommentScheduler {
     const postText = open.postText;
     const comments = open.comments ?? [];
 
-    // 4) 读了再写：撰写器吃到 关键词 + 容器 + 帖子正文 + 他人评论，顺着讨论、用内容语言写。
-    const draft = d.facebookCompose
-      ? await d.facebookCompose(accountId, { keyword, container, ...(postText ? { postText } : {}), ...(comments.length > 0 ? { comments } : {}) })
-      : null;
+    // 4) 正文来源：生成评论读了再写；模板评论只选账号模板，不调用 LLM。
+    const draft = cfg.commentMode === 'template'
+      ? (cfg.commentTemplates[Math.floor(rand() * cfg.commentTemplates.length)] ?? cfg.commentTemplates[0] ?? null)
+      : d.facebookCompose
+        ? await d.facebookCompose(accountId, { keyword, container, ...(postText ? { postText } : {}), ...(comments.length > 0 ? { comments } : {}) })
+        : null;
     if (!draft || !draft.trim()) {
       audit({ accountId, outcome: 'compose_skipped', reason: 'empty_compose', shadow, keyword, container });
       return;

@@ -19,8 +19,10 @@ function fakePool(opts: { accountExists?: boolean; returning?: unknown } = {}): 
           account_id: params[0],
           keywords: JSON.parse(String(params[1])),
           containers: JSON.parse(String(params[2])),
+          comment_mode: params[3],
+          comment_templates: JSON.parse(String(params[4])),
           updated_at: '2026-07-07T00:00:00.000Z',
-          updated_by: params[3],
+          updated_by: params[5],
         };
         return { rows: [row], rowCount: 1 };
       }
@@ -30,6 +32,8 @@ function fakePool(opts: { accountExists?: boolean; returning?: unknown } = {}): 
           account_id: params[0],
           keywords: [],
           containers: JSON.parse(String(params[1])),
+          comment_mode: 'generated',
+          comment_templates: [],
           updated_at: '2026-07-07T00:00:00.000Z',
           updated_by: 'panel:op',
         };
@@ -46,24 +50,37 @@ test('getForAccount: 缺行返回空默认（供面板回显）', () => {
   const { pool } = fakePool();
   const store = new FacebookCommentConfigStore({ pool });
   const row = store.getForAccount('acc-1');
-  assert.deepEqual(row, { accountId: 'acc-1', keywords: [], containers: [], updatedAt: null, updatedBy: null });
+  assert.deepEqual(row, {
+    accountId: 'acc-1',
+    keywords: [],
+    containers: [],
+    commentMode: 'generated',
+    commentTemplates: [],
+    updatedAt: null,
+    updatedBy: null,
+  });
 });
 
-test('effectiveConfigFor: fail-closed — 关键词或容器任一为空则不生效', async () => {
+test('effectiveConfigFor: fail-closed — 无关键词或模板模式无模板则不生效；容器不再决定启用', async () => {
   const { pool } = fakePool();
   const store = new FacebookCommentConfigStore({ pool });
   // 空配置
   assert.equal(store.effectiveConfigFor('acc-1').enabled, false);
-  // 只有关键词、无容器 → 不生效
+  // 只有关键词、无 legacy 容器 → 生成模式仍生效；目标群由 joined ledger 运行时选择。
   await store.setAccount('acc-1', { keywords: ['coffee'], containers: [] }, 'panel:op');
-  assert.equal(store.effectiveConfigFor('acc-1').enabled, false);
-  // 两者都非空 → 生效
-  await store.setAccount('acc-1', { keywords: ['coffee'], containers: ['group-123'] }, 'panel:op');
-  const eff = store.effectiveConfigFor('acc-1');
-  assert.equal(eff.enabled, true);
-  assert.deepEqual(eff.keywords, ['coffee']);
-  // 容器归一为 {url,name}；裸 url 字符串入参 → {url}（name 待边缘解析回填）。
-  assert.deepEqual(eff.containers, [{ url: 'group-123' }]);
+  const generated = store.effectiveConfigFor('acc-1');
+  assert.equal(generated.enabled, true);
+  assert.deepEqual(generated.keywords, ['coffee']);
+  assert.deepEqual(generated.containers, []);
+  assert.equal(generated.commentMode, 'generated');
+
+  await store.setAccount('acc-1', { commentMode: 'template', commentTemplates: [] }, 'panel:op');
+  assert.equal(store.effectiveConfigFor('acc-1').enabled, false, '模板模式无模板 → 不生效');
+  await store.setAccount('acc-1', { commentTemplates: ['Looks great'] }, 'panel:op');
+  const templated = store.effectiveConfigFor('acc-1');
+  assert.equal(templated.enabled, true);
+  assert.equal(templated.commentMode, 'template');
+  assert.deepEqual(templated.commentTemplates, ['Looks great']);
 });
 
 test('setAccount: sanitize（trim/去空串/去重），写 JSONB，写成功刷缓存', async () => {
@@ -87,6 +104,27 @@ test('setAccount: 部分补丁（只改容器）保留原关键词', async () =>
   const row = store.getForAccount('acc-1');
   assert.deepEqual(row.keywords, ['coffee'], '未传的关键词应保留原值');
   assert.deepEqual(row.containers, [{ url: 'g1' }, { url: 'g2' }]);
+});
+
+test('setAccount: mode/templates sanitize（trim/去空串/去重），部分补丁保留旧值', async () => {
+  const { calls, pool } = fakePool();
+  const store = new FacebookCommentConfigStore({ pool });
+  await store.setAccount(
+    'acc-1',
+    { keywords: ['coffee'], commentMode: 'template', commentTemplates: [' hi coffee ', 'hi coffee', '', 'nice coffee'] },
+    'panel:op',
+  );
+  let row = store.getForAccount('acc-1');
+  assert.equal(row.commentMode, 'template');
+  assert.deepEqual(row.commentTemplates, ['hi coffee', 'nice coffee']);
+  let ins = calls.find((c) => /INSERT INTO account_facebook_comment_config/.test(c.text))!;
+  assert.equal(ins.params[3], 'template');
+  assert.deepEqual(JSON.parse(String(ins.params[4])), ['hi coffee', 'nice coffee']);
+
+  await store.setAccount('acc-1', { keywords: ['tea'] }, 'panel:op');
+  row = store.getForAccount('acc-1');
+  assert.equal(row.commentMode, 'template', '未传 mode 应保留原值');
+  assert.deepEqual(row.commentTemplates, ['hi coffee', 'nice coffee'], '未传 templates 应保留原值');
 });
 
 test('容器向后兼容 + 群名：接受裸 url 与 {url,name}，按 url 去重；resolveContainerName 回填真名', async () => {
@@ -117,6 +155,10 @@ test('setAccount: 非法值（非字符串数组）整块拒 invalid_value，不
   assert.deepEqual(r1, { ok: false, reason: 'invalid_value' });
   const r2 = await store.setAccount('acc-1', { keywords: 'coffee' as unknown as string[] }, 'panel:op');
   assert.deepEqual(r2, { ok: false, reason: 'invalid_value' });
+  const r3 = await store.setAccount('acc-1', { commentMode: 'bad' as unknown as 'generated' }, 'panel:op');
+  assert.deepEqual(r3, { ok: false, reason: 'invalid_value' });
+  const r4 = await store.setAccount('acc-1', { commentTemplates: [123 as unknown as string] }, 'panel:op');
+  assert.deepEqual(r4, { ok: false, reason: 'invalid_value' });
 });
 
 test('setAccount: 无有效字段（空补丁）→ no_valid_fields', async () => {

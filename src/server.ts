@@ -213,15 +213,6 @@ function readEnvNumber(name: string, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
-function readEnvList(name: string): Set<string> {
-  return new Set(
-    (readEnvString(name) ?? '')
-      .split(',')
-      .map((v) => v.trim())
-      .filter(Boolean),
-  );
-}
-
 function objectKeyPart(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 96) || 'unknown';
 }
@@ -2283,13 +2274,9 @@ async function main(): Promise<void> {
     },
     facebookResolveContainerName: (accountId, url, name) => facebookCommentConfigStore.resolveContainerName(accountId, url, name),
     facebookCoverageConfigFor: async (accountId) => {
-      // 覆盖模式作用域（用户 2026-07-11：不用 per-account 白名单，一个全局开关让所有 FB 账号都走加入群覆盖评论，
-      // 先开、后续可能某时点关）：AIDCP_FB_GROUP_COVERAGE_ALL=true → 所有账号生效；旧 per-account 白名单
-      // AIDCP_FB_GROUP_COVERAGE_ACCOUNTS 保留为可选窄化入口（全局关时仍按名单放行），向后兼容、默认关时零回归。
-      const coverageAll = readEnvString('AIDCP_FB_GROUP_COVERAGE_ALL') === 'true';
-      const allowlist = readEnvList('AIDCP_FB_GROUP_COVERAGE_ACCOUNTS');
-      if (!coverageAll && !allowlist.has(accountId)) return { coverageEnabled: false, enabled: false, keywords: [], containers: [] };
-      const base = facebookCommentConfigStore.getForAccount(accountId);
+      // FB 配置不再手填群组；正常评论目标统一来自该账号已加入群组账本。仍保留原 warmup/cooldown
+      // 与 relaxed 兜底（最久没评优先），但不再要求 AIDCP_FB_GROUP_COVERAGE_ALL / allowlist 选中。
+      const base = facebookCommentConfigStore.effectiveConfigFor(accountId);
       const pickWindow = readEnvNumber('AIDCP_FB_GROUP_COVERAGE_PICK_WINDOW', 5);
       let candidates = await facebookGroupMembershipStore.coverageCandidates(accountId, {
         limit: pickWindow,
@@ -2308,9 +2295,11 @@ async function main(): Promise<void> {
       const chosen = candidates.length > 0 ? candidates[Math.floor(Math.random() * candidates.length)] ?? null : null;
       return {
         coverageEnabled: true,
-        enabled: base.keywords.length > 0 && chosen !== null,
+        enabled: base.enabled && chosen !== null,
         keywords: base.keywords,
         containers: chosen ? [{ url: chosen.groupUrl }] : [],
+        commentMode: base.commentMode,
+        commentTemplates: base.commentTemplates,
         relaxed: chosen !== null ? relaxed : false,
       };
     },
@@ -2862,7 +2851,7 @@ async function main(): Promise<void> {
             setGlobal: (mask, updatedBy) => contentScheduleStore.setGlobal({ contentActiveMask: mask }, updatedBy),
             setAccount: (accountId, patch, updatedBy) => contentScheduleStore.setAccount(accountId, patch, updatedBy),
           },
-          // 每账号 Facebook 定时评论配置（change facebook-scheduled-comment 2.1）：关键词 + 容器列表。
+          // 每账号 Facebook 定时评论配置：关键词 + 评论模式 / 模板；目标群来自 joined ledger。
           facebookCommentConfig: {
             get: (accountId) => facebookCommentConfigStore.getForAccount(accountId),
             set: (accountId, patch, updatedBy) =>

@@ -1,12 +1,11 @@
 /**
  * 每账号 Facebook 定时评论配置存储（account_facebook_comment_config 表，PostgreSQL）。
  *
- * change facebook-scheduled-comment（2.1，目标选定 2026-07-07 定为「关键词 + 限定容器」）：
- * 后台按账号配置【搜索关键词列表】+【允许的容器列表】（运营方自己的 / 已加入的 Facebook 主页、群）。
- * 执行时随机选一个关键词、只在某个配置容器内部搜索、挑帖评论。
+ * 后台按账号配置【搜索关键词列表】+【评论正文模式 / 模板】。
+ * 运行时容器来自账号已加入群组账本；legacy containers 仍保留用于回滚 / 旧数据读取。
  *
  * 安全不变量（复刻 QuotaConfigStore / ContentScheduleStore）：
- * - fail-closed：关键词或容器任一为空 → effectiveConfigFor().enabled=false（不生效、诚实 no-op）。
+ * - fail-closed：关键词为空，或模板模式无模板 → effectiveConfigFor().enabled=false（不生效、诚实 no-op）。
  * - 写库成功才刷内存镜像（避免「镜像已变、库未变」不一致）。
  * - 绝不造幽灵行：setAccount 写前校验 accounts 存在；退役保留账号拒。
  * - 非法值（非字符串数组）整块拒 invalid_value，不静默丢弃。
@@ -29,30 +28,38 @@ export interface FacebookContainer {
   name?: string;
 }
 
-/** 每账号配置行（面板回显用）。keywords 为字符串数组；containers 为 {url,name} 数组。 */
+export type FacebookCommentMode = 'generated' | 'template';
+
+/** 每账号配置行（面板回显用）。keywords 为字符串数组；containers 为 legacy {url,name} 数组。 */
 export interface FacebookCommentConfigRow {
   accountId: string;
   keywords: string[];
   containers: FacebookContainer[];
+  commentMode: FacebookCommentMode;
+  commentTemplates: string[];
   updatedAt: string | null;
   updatedBy: string | null;
 }
 
-/** 写补丁：未传的字段保持原值（面板可只改关键词或只改容器）。容器可传 url 字符串或 {url,name}。 */
+/** 写补丁：未传的字段保持原值。容器为 legacy 字段，仍接受 url 字符串或 {url,name} 兼容旧面板/回滚。 */
 export interface FacebookCommentConfigPatch {
   keywords?: string[];
   containers?: Array<string | FacebookContainer>;
+  commentMode?: FacebookCommentMode;
+  commentTemplates?: string[];
 }
 
 export type SetFacebookCommentConfigResult =
   | { ok: true; row: FacebookCommentConfigRow }
   | { ok: false; reason: 'account_not_found' | 'retired_account' | 'invalid_value' | 'no_valid_fields' };
 
-/** fail-closed 生效判定：仅在关键词与容器都非空时启用（单一判定点，供调度器与面板同源消费）。 */
+/** fail-closed 生效判定：关键词 + 正文模式配置（目标群由 joined ledger 另行选择）。 */
 export interface EffectiveFacebookCommentConfig {
   enabled: boolean;
   keywords: string[];
   containers: FacebookContainer[];
+  commentMode: FacebookCommentMode;
+  commentTemplates: string[];
 }
 
 export const FACEBOOK_COMMENT_CONFIG_SCHEMA_SQL = `
@@ -60,9 +67,13 @@ CREATE TABLE IF NOT EXISTS account_facebook_comment_config (
   account_id  TEXT PRIMARY KEY,
   keywords    JSONB NOT NULL DEFAULT '[]'::jsonb,
   containers  JSONB NOT NULL DEFAULT '[]'::jsonb,
+  comment_mode TEXT NOT NULL DEFAULT 'generated',
+  comment_templates JSONB NOT NULL DEFAULT '[]'::jsonb,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_by  TEXT
 );
+ALTER TABLE account_facebook_comment_config ADD COLUMN IF NOT EXISTS comment_mode TEXT NOT NULL DEFAULT 'generated';
+ALTER TABLE account_facebook_comment_config ADD COLUMN IF NOT EXISTS comment_templates JSONB NOT NULL DEFAULT '[]'::jsonb;
 `;
 
 export interface FacebookCommentConfigStoreOptions {
@@ -78,6 +89,8 @@ interface FbConfigDbRow {
   account_id: string;
   keywords: unknown;
   containers: unknown;
+  comment_mode?: unknown;
+  comment_templates?: unknown;
   updated_at: Date | string | null;
   updated_by: string | null;
 }
@@ -103,6 +116,16 @@ function sanitizeInput(raw: string[] | undefined): string[] | null | undefined {
   if (!Array.isArray(raw)) return null;
   if (!raw.every((x) => typeof x === 'string')) return null;
   return coerceList(raw);
+}
+
+function coerceCommentMode(raw: unknown): FacebookCommentMode {
+  return raw === 'template' ? 'template' : 'generated';
+}
+
+function sanitizeCommentMode(raw: FacebookCommentMode | undefined): FacebookCommentMode | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === 'generated' || raw === 'template') return raw;
+  return null;
 }
 
 /**
@@ -167,7 +190,8 @@ export class FacebookCommentConfigStore {
 
   private async reload(): Promise<void> {
     const { rows } = await this.pool.query<FbConfigDbRow>(
-      `SELECT account_id, keywords, containers, updated_at, updated_by FROM account_facebook_comment_config`,
+      `SELECT account_id, keywords, containers, comment_mode, comment_templates, updated_at, updated_by
+       FROM account_facebook_comment_config`,
     );
     const next = new Map<string, FacebookCommentConfigRow>();
     for (const r of rows) next.set(r.account_id, this.toRow(r));
@@ -179,6 +203,8 @@ export class FacebookCommentConfigStore {
       accountId: r.account_id,
       keywords: coerceList(r.keywords),
       containers: coerceContainers(r.containers),
+      commentMode: coerceCommentMode(r.comment_mode),
+      commentTemplates: coerceList(r.comment_templates),
       updatedAt: r.updated_at ? new Date(r.updated_at).toISOString() : null,
       updatedBy: r.updated_by ?? null,
     };
@@ -191,19 +217,24 @@ export class FacebookCommentConfigStore {
         accountId,
         keywords: [],
         containers: [],
+        commentMode: 'generated',
+        commentTemplates: [],
         updatedAt: null,
         updatedBy: null,
       }
     );
   }
 
-  /** 调度器消费点：fail-closed 收口——关键词与容器都非空才 enabled。 */
+  /** 调度器消费点：fail-closed 收口——目标群由 joined ledger 另行选择。 */
   effectiveConfigFor(accountId: string): EffectiveFacebookCommentConfig {
     const row = this.getForAccount(accountId);
+    const hasBodySource = row.commentMode === 'generated' || row.commentTemplates.length > 0;
     return {
-      enabled: row.keywords.length > 0 && row.containers.length > 0,
+      enabled: row.keywords.length > 0 && hasBodySource,
       keywords: row.keywords,
       containers: row.containers,
+      commentMode: row.commentMode,
+      commentTemplates: row.commentTemplates,
     };
   }
 
@@ -220,8 +251,19 @@ export class FacebookCommentConfigStore {
 
     const keywords = sanitizeInput(patch.keywords);
     const containers = sanitizeContainersInput(patch.containers);
-    if (keywords === null || containers === null) return { ok: false, reason: 'invalid_value' };
-    if (keywords === undefined && containers === undefined) return { ok: false, reason: 'no_valid_fields' };
+    const commentMode = sanitizeCommentMode(patch.commentMode);
+    const commentTemplates = sanitizeInput(patch.commentTemplates);
+    if (keywords === null || containers === null || commentMode === null || commentTemplates === null) {
+      return { ok: false, reason: 'invalid_value' };
+    }
+    if (
+      keywords === undefined &&
+      containers === undefined &&
+      commentMode === undefined &&
+      commentTemplates === undefined
+    ) {
+      return { ok: false, reason: 'no_valid_fields' };
+    }
 
     const exists = await this.pool.query(`SELECT 1 FROM accounts WHERE account_id = $1`, [accountId]);
     if (exists.rows.length === 0) return { ok: false, reason: 'account_not_found' };
@@ -230,17 +272,29 @@ export class FacebookCommentConfigStore {
     const current = this.getForAccount(accountId);
     const nextKeywords = keywords ?? current.keywords;
     const nextContainers = containers ?? current.containers;
+    const nextCommentMode = commentMode ?? current.commentMode;
+    const nextCommentTemplates = commentTemplates ?? current.commentTemplates;
 
     const { rows } = await this.pool.query<FbConfigDbRow>(
-      `INSERT INTO account_facebook_comment_config (account_id, keywords, containers, updated_at, updated_by)
-       VALUES ($1, $2::jsonb, $3::jsonb, now(), $4)
+      `INSERT INTO account_facebook_comment_config
+         (account_id, keywords, containers, comment_mode, comment_templates, updated_at, updated_by)
+       VALUES ($1, $2::jsonb, $3::jsonb, $4, $5::jsonb, now(), $6)
        ON CONFLICT (account_id) DO UPDATE
          SET keywords = EXCLUDED.keywords,
              containers = EXCLUDED.containers,
+             comment_mode = EXCLUDED.comment_mode,
+             comment_templates = EXCLUDED.comment_templates,
              updated_at = now(),
              updated_by = EXCLUDED.updated_by
-       RETURNING account_id, keywords, containers, updated_at, updated_by`,
-      [accountId, JSON.stringify(nextKeywords), JSON.stringify(nextContainers), updatedBy],
+       RETURNING account_id, keywords, containers, comment_mode, comment_templates, updated_at, updated_by`,
+      [
+        accountId,
+        JSON.stringify(nextKeywords),
+        JSON.stringify(nextContainers),
+        nextCommentMode,
+        JSON.stringify(nextCommentTemplates),
+        updatedBy,
+      ],
     );
     const row = this.toRow(rows[0]);
     this.cache.set(accountId, row); // 写库成功才刷镜像。
@@ -265,7 +319,7 @@ export class FacebookCommentConfigStore {
     try {
       const { rows } = await this.pool.query<FbConfigDbRow>(
         `UPDATE account_facebook_comment_config SET containers = $2::jsonb WHERE account_id = $1
-         RETURNING account_id, keywords, containers, updated_at, updated_by`,
+         RETURNING account_id, keywords, containers, comment_mode, comment_templates, updated_at, updated_by`,
         [accountId, JSON.stringify(nextContainers)],
       );
       if (rows[0]) this.cache.set(accountId, this.toRow(rows[0]));

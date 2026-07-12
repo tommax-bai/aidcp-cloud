@@ -472,6 +472,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
   type Audit = import('../../src/comment-agent/facebook-comment-audit-store.js').FacebookCommentAuditRow;
   function fbDeps(over: Partial<CommentSchedulerDeps> & {
     keywords?: string[]; containers?: string[]; auto?: boolean; shadow?: boolean;
+    commentMode?: 'generated' | 'template'; commentTemplates?: string[];
     compose?: string | null; canComment?: boolean; cap?: number; done?: number;
   } = {}): { deps: CommentSchedulerDeps; audits: Audit[]; posted: string[] } {
     const audits: Audit[] = [];
@@ -498,9 +499,19 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
       stepTimeoutMs: 60,
       random: () => 0,
       facebookConfigFor: () => ({
+        enabled: (over.keywords ?? ['咖啡']).length > 0 && ((over.commentMode ?? 'generated') === 'generated' || (over.commentTemplates ?? []).length > 0),
+        keywords: over.keywords ?? ['咖啡'],
+        containers: (over.containers ?? ['g1']).map((u) => ({ url: u })),
+        commentMode: over.commentMode ?? 'generated',
+        commentTemplates: over.commentTemplates ?? [],
+      }),
+      facebookCoverageConfigFor: () => ({
+        coverageEnabled: true,
         enabled: (over.keywords ?? ['咖啡']).length > 0 && (over.containers ?? ['g1']).length > 0,
         keywords: over.keywords ?? ['咖啡'],
         containers: (over.containers ?? ['g1']).map((u) => ({ url: u })),
+        commentMode: over.commentMode ?? 'generated',
+        commentTemplates: over.commentTemplates ?? [],
       }),
       facebookAutoEnabled: () => over.auto ?? false,
       facebookShadow: () => over.shadow ?? false,
@@ -527,7 +538,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
     assert.ok(!posted.includes('interaction.comment'), '影子绝不下发提交命令');
   });
 
-  it('配置空（无容器）→ fail-closed 审计 no_targets，浏览前即停、不发', async () => {
+  it('无 eligible joined group → fail-closed 审计 no_targets，浏览前即停、不发', async () => {
     const { deps, audits, posted } = fbDeps({ shadow: true, containers: [] });
     await new CommentScheduler(deps).triggerManual('fb-1');
     await tick();
@@ -612,6 +623,10 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     openReason?: string;
     submit?: { ok: boolean; reason?: string };
     seen?: string[];
+    coverageContainers?: string[];
+    coverageRelaxed?: boolean;
+    commentMode?: 'generated' | 'template';
+    commentTemplates?: string[];
     /** 连接在 trigger 通过后掉线：resolveConnection 首次（trigger 闸）返回连接、其后（真发内）返回 null。 */
     dropAfterTrigger?: boolean;
     /** 边缘回传的真实群名（undefined=默认 PR 群名，null=不回传）。 */
@@ -695,7 +710,22 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
           seen.add(noteId);
         },
       }),
-      facebookConfigFor: () => ({ enabled: true, keywords: ['咖啡'], containers: [{ url: 'https://www.facebook.com/groups/1' }] }),
+      facebookConfigFor: () => ({
+        enabled: true,
+        keywords: ['咖啡'],
+        containers: [{ url: 'https://www.facebook.com/groups/legacy-config' }],
+        commentMode: cfg.commentMode ?? 'generated',
+        commentTemplates: cfg.commentTemplates ?? [],
+      }),
+      facebookCoverageConfigFor: () => ({
+        coverageEnabled: true,
+        enabled: (cfg.coverageContainers ?? ['https://www.facebook.com/groups/1']).length > 0,
+        keywords: ['咖啡'],
+        containers: (cfg.coverageContainers ?? ['https://www.facebook.com/groups/1']).map((url) => ({ url })),
+        commentMode: cfg.commentMode ?? 'generated',
+        commentTemplates: cfg.commentTemplates ?? [],
+        ...(cfg.coverageRelaxed ? { relaxed: true } : {}),
+      }),
       facebookAutoEnabled: () => true,
       facebookShadow: () => false,
       facebookResolveContainerName: async (_acct: string, url: string, name: string) => {
@@ -817,7 +847,14 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true } });
     await new CommentScheduler({
       ...deps,
-      facebookCoverageConfigFor: () => ({ coverageEnabled: true, enabled: false, keywords: ['咖啡'], containers: [] }),
+      facebookCoverageConfigFor: () => ({
+        coverageEnabled: true,
+        enabled: false,
+        keywords: ['咖啡'],
+        containers: [],
+        commentMode: 'generated',
+        commentTemplates: [],
+      }),
     }).triggerManual('fb-1');
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'no_targets');
@@ -834,6 +871,8 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
         enabled: true,
         keywords: ['咖啡'],
         containers: [{ url: 'https://www.facebook.com/groups/joined-1' }],
+        commentMode: 'generated',
+        commentTemplates: [],
       }),
       facebookCoverageOnCommented: async (accountId, groupUrl) => {
         marked.push({ accountId, groupUrl });
@@ -855,6 +894,8 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
         enabled: true,
         keywords: ['咖啡'],
         containers: [{ url: 'https://www.facebook.com/groups/joined-1' }],
+        commentMode: 'generated',
+        commentTemplates: [],
         relaxed: true,
       }),
       approval: { request: async (r) => { titles.push(r.title ?? ""); }, isApproved: async () => true, timeoutMs: 20, pollMs: 1 },
@@ -875,6 +916,8 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
         enabled: true,
         keywords: ['咖啡'],
         containers: [{ url: 'https://www.facebook.com/groups/joined-1' }],
+        commentMode: 'generated',
+        commentTemplates: [],
       }),
       approval: { request: async (r) => { titles.push(r.title ?? ""); }, isApproved: async () => true, timeoutMs: 20, pollMs: 1 },
     }).triggerManual('fb-1');
@@ -893,6 +936,8 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
         enabled: true,
         keywords: ['咖啡'],
         containers: [{ url: 'https://www.facebook.com/groups/joined-1' }],
+        commentMode: 'generated',
+        commentTemplates: [],
         relaxed: true,
       }),
       facebookDailyCap: () => 2,
@@ -924,6 +969,75 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.equal(audits.at(-1)?.outcome, 'commented');
     assert.equal(approvals[0].noteId, PERMALINK);
     assert.equal(approvals[0].text, '这家手冲咖啡很不错\nLINE ID: abc123');
+    const submit = envelopes.find((e) => e.type === 'interaction.comment');
+    assert.equal(submit?.payload.text, '这家手冲咖啡很不错');
+    assert.equal(submit?.payload.groupChatCode, 'LINE ID: abc123');
+  });
+
+  it('模板模式：选账号模板作为正文，跳过 facebookCompose，仍走人审和提交', async () => {
+    const { deps, audits, envelopes } = fbFlowDeps({
+      submit: { ok: true },
+      commentMode: 'template',
+      commentTemplates: ['这家手冲咖啡很不错'],
+    });
+    let composeCalled = false;
+    const approvals: string[] = [];
+    await new CommentScheduler({
+      ...deps,
+      facebookCompose: async () => {
+        composeCalled = true;
+        return '模型正文不应使用';
+      },
+      approval: { request: async (r) => { approvals.push(r.text); }, isApproved: async () => true, timeoutMs: 20, pollMs: 1 },
+    }).triggerManual('fb-1');
+    await tick();
+    assert.equal(composeCalled, false);
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    assert.equal(approvals[0], '这家手冲咖啡很不错');
+    assert.equal(envelopes.find((e) => e.type === 'interaction.comment')?.payload.text, '这家手冲咖啡很不错');
+  });
+
+  it('模板模式：无模板 → compose_skipped(empty_template)，不搜索不提交', async () => {
+    const { deps, audits, posted } = fbFlowDeps({
+      submit: { ok: true },
+      commentMode: 'template',
+      commentTemplates: [],
+    });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
+    assert.equal(audits.at(-1)?.reason, 'empty_template');
+    assert.deepEqual(posted, []);
+  });
+
+  it('模板模式：模板正文含联系方式 → contains_contact，绝不靠 contact lane 救回', async () => {
+    const { deps, audits, posted } = fbFlowDeps({
+      submit: { ok: true },
+      commentMode: 'template',
+      commentTemplates: ['LINE ID: abc123'],
+    });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
+    assert.equal(audits.at(-1)?.reason, 'contains_contact');
+    assert.ok(!posted.includes('interaction.comment'));
+  });
+
+  it('模板联系评论：模板正文与账号联系方式分离，人审后以 groupChatCode 下发', async () => {
+    const { deps, audits, envelopes } = fbFlowDeps({
+      submit: { ok: true },
+      commentMode: 'template',
+      commentTemplates: ['这家手冲咖啡很不错'],
+    });
+    const approvals: string[] = [];
+    await new CommentScheduler({
+      ...deps,
+      getContactInfo: async () => 'LINE ID: abc123',
+      approval: { request: async (r) => { approvals.push(r.text); }, isApproved: async () => true, timeoutMs: 20, pollMs: 1 },
+    }).triggerManual('fb-1', { injectContact: true });
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    assert.equal(approvals[0], '这家手冲咖啡很不错\nLINE ID: abc123');
     const submit = envelopes.find((e) => e.type === 'interaction.comment');
     assert.equal(submit?.payload.text, '这家手冲咖啡很不错');
     assert.equal(submit?.payload.groupChatCode, 'LINE ID: abc123');

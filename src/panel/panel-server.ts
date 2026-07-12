@@ -1100,7 +1100,7 @@ function createRequestHandler(
       sendJson(res, 200, { accountId, contactInfo: result.contactInfo });
       return;
     }
-    // Facebook 定时评论配置写（change facebook-scheduled-comment 2.1）：关键词列表 + 容器列表。
+      // Facebook 定时评论配置写：关键词 + 评论模式 / 模板；legacy containers 仍接受以兼容旧面板/回滚。
     // 经独立 store 单写：非法整块拒、退役 / 无账号可区分、写后回读真态；绝不乐观假成功。
     if (method === 'PUT' && url.startsWith('/api/accounts/') && url.endsWith('/facebook-comment-config')) {
       const accountId = decodeURIComponent(
@@ -1117,13 +1117,20 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
-      const { keywords, containers } = (body ?? {}) as { keywords?: unknown; containers?: unknown };
+      const { keywords, containers, commentMode, commentTemplates } = (body ?? {}) as {
+        keywords?: unknown;
+        containers?: unknown;
+        commentMode?: unknown;
+        commentTemplates?: unknown;
+      };
       const result = await deps.facebookCommentConfig.set(
         accountId,
         {
           keywords: keywords as string[] | undefined,
           // 容器可传裸 url 字符串（向后兼容）或 {url,name}；store 侧 sanitize/coerce 统一处理。
           containers: containers as Array<string | { url: string; name?: string }> | undefined,
+          commentMode: commentMode as 'generated' | 'template' | undefined,
+          commentTemplates: commentTemplates as string[] | undefined,
         },
         `panel:${verified.payload.sub}`,
       );

@@ -178,7 +178,7 @@ export interface PanelDeps {
     setContactInfo?(accountId: string, contactInfo: string | null): Promise<SetContactInfoResult>;
   };
   /**
-   * 每账号 Facebook 定时评论配置（change facebook-scheduled-comment 2.1）：关键词列表 + 容器列表。
+   * 每账号 Facebook 定时评论配置：关键词 + 评论模式 / 模板；legacy containers 仍保留兼容。
    * 未注入则 `/api/accounts/:id/facebook-comment-config` 返回 503。经独立 store 单写：非法整块拒、
    * 退役 / 无账号以可区分结果返回、写后回读真态；绝不乐观假成功。
    */
