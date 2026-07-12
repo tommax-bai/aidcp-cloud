@@ -110,6 +110,27 @@ export class FeishuMessenger {
     return out;
   }
 
+  /** 按已知 chat_id 读取单群详情；用于群列表接口返回空时校验本地历史记录是否仍可被当前机器人访问。 */
+  async getChat(chatId: string): Promise<FeishuChatSummary> {
+    if (!chatId) throw new Error('飞书群详情获取失败：chatId 为空');
+    const token = await this.tokenManager.getToken();
+    const resp = await this.fetchImpl(`${this.chatsEndpoint}/${encodeURIComponent(chatId)}`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!resp.ok) throw new Error(`飞书群详情请求失败：HTTP ${resp.status}`);
+    const data = (await resp.json()) as {
+      code: number;
+      msg: string;
+      data?: { chat_id?: string; name?: string };
+    };
+    if (data.code !== 0) throw new Error(`飞书群详情获取失败：code=${data.code} msg=${data.msg}`);
+    return {
+      chatId: data.data?.chat_id || chatId,
+      name: (data.data?.name ?? '').trim() || null,
+    };
+  }
+
   /** 发送交互式卡片到群 */
   async sendCard(chatId: string, card: FeishuCard): Promise<void> {
     await this.send(chatId, 'interactive', JSON.stringify(card));

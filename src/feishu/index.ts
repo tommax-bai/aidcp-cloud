@@ -7,6 +7,7 @@ export * from './types.js';
 export * from './token.js';
 export * from './messenger.js';
 export * from './chat-target.js';
+export * from './bot-chats-provider.js';
 export * from './cards.js';
 export * from './commands.js';
 export * from './bot-chat-events.js';

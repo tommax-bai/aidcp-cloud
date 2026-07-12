@@ -87,3 +87,20 @@ test('uploadImageFromUrl：拒绝非图片或非 https，不上传', async () =>
   await assert.rejects(() => m.uploadImageFromUrl('https://cdn.test/a.txt'), /不是图片/);
   assert.equal(calls, 1);
 });
+
+test('getChat：按已知 chat_id 读取单群详情并归一群名', async () => {
+  const seen: string[] = [];
+  const fetchImpl = (async (input: string) => {
+    seen.push(input);
+    return jsonResp({ code: 0, msg: 'ok', data: { chat_id: 'oc_1', name: ' AI运营 ' } });
+  }) as unknown as typeof fetch;
+  const m = new FeishuMessenger({ tokenManager: fakeTokenManager, fetchImpl, chatsEndpoint: CHATS });
+  assert.deepEqual(await m.getChat('oc_1'), { chatId: 'oc_1', name: 'AI运营' });
+  assert.equal(seen[0], `${CHATS}/oc_1`);
+});
+
+test('getChat：code≠0 → 抛错，供调用方过滤不可读旧群', async () => {
+  const fetchImpl = (async () => jsonResp({ code: 232010, msg: 'Operator and chat can NOT be in different tenants.', data: {} }, true, 400)) as unknown as typeof fetch;
+  const m = new FeishuMessenger({ tokenManager: fakeTokenManager, fetchImpl, chatsEndpoint: CHATS });
+  await assert.rejects(() => m.getChat('oc_old'), /群详情获取失败.*232010/);
+});
