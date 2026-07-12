@@ -674,23 +674,30 @@ export class RoleDispatcher {
 
   /**
    * Facebook 首屏/滚动后的 noteId 可能因虚拟化或 permalink 水合重复，feed-scroll-card-floor 会算成 0。
-   * 给 FB feed/search 翻页一个保底扫屏停留，避免连续 skip 时 2 秒一滚。
+   * 给 FB feed/search 翻页一个更接近真人扫屏的保底停留，避免连续 skip 时 2 秒一滚。
    */
   private facebookScrollDwellMs(): number | undefined {
     if (this.accountPlatform !== 'facebook') return undefined;
-    return computeFeedFloorMs({
+    const cardFloor = computeFeedFloorMs({
       newCount: 8,
       status: this.getRiskStatus(),
       quotaLevel: this.getQuotaLevel(),
       progress: this.progress(),
       pacing: this.pacingFloors,
     });
+    const screenGlanceFloor = Math.round(7_000 * effectiveTempo(this.getRiskStatus(), this.getQuotaLevel()));
+    return Math.max(cardFloor, screenGlanceFloor);
   }
 
   private scrollDwellParams(floorMs: number): Record<string, unknown> | undefined {
     const fbFloor = this.facebookScrollDwellMs() ?? 0;
     const dwellMs = Math.max(floorMs, fbFloor);
     return dwellMs > 0 ? { dwellMs } : undefined;
+  }
+
+  private sendScrollCommand(reason: string, floorMs = 0): boolean {
+    const params = this.scrollDwellParams(floorMs);
+    return this.sendCommand(params ? { action: 'scroll', reason, params } : { action: 'scroll', reason });
   }
 
   private emitSearchSkippedAfterIntercept(currentPageType: 'feed' | 'search', reason: string): void {
@@ -1040,7 +1047,7 @@ export class RoleDispatcher {
   startOnPersonaBound(): void {
     if (this.sessionActive) return; // 已在跑 → 不打断、不重驱
     this.tryStartSession(); // 过启动闸（人设此刻已绑 → 放行）
-    if (this.sessionActive) this.sendCommand({ action: 'scroll', reason: 'resume_redrive' });
+    if (this.sessionActive) this.sendScrollCommand('resume_redrive');
   }
 
   /**
@@ -1237,7 +1244,7 @@ export class RoleDispatcher {
     }
     this.clearViewQuotaSleep(true);
     console.log(`[RoleDispatcher] view 配额已恢复 → 重驱浏览（account=${this.currentAccountId}）`);
-    if (this.sessionActive) this.sendCommand({ action: 'scroll', reason: 'resume_after_view_quota' });
+    if (this.sessionActive) this.sendScrollCommand('resume_after_view_quota');
   }
 
   private cancelViewQuotaSleep(resumeClock: boolean): void {
@@ -1354,7 +1361,7 @@ export class RoleDispatcher {
     // 不会自发重报 page.cards，故下发一次滚动唤醒（复用既有 scroll→page.scroll 通道，不新增协议；
     // 边端循环已停时据此重启）。仅续场路径发：fresh start 边端自驱、且本人昵称采集期 browseSuspended
     // 会经 sendCommand 软暂停闸自动扣住此滚动，二者不相扰。idle 看门狗的 nudge 仍作 ~2min 兜底。
-    if (this.sessionActive) this.sendCommand({ action: 'scroll', reason: 'resume_redrive' });
+    if (this.sessionActive) this.sendScrollCommand('resume_redrive');
   }
 
   /** 续场闸：调度开关 + 人设（canStartSession）+ 风控状态 + 活跃时段窗口 + 每日上限。 */
@@ -1494,8 +1501,7 @@ export class RoleDispatcher {
         // feed-scroll-card-floor：消费 page.cards.arrived 算好的停留兜底（floor>0 才挂 dwellMs），随即归零。
         const floor = this.pendingFeedFloorMs;
         this.pendingFeedFloorMs = 0;
-        const params = this.scrollDwellParams(floor);
-        this.sendCommand(params ? { action: 'scroll', reason: 'feed_scroll', params } : { action: 'scroll', reason: 'feed_scroll' });
+        this.sendScrollCommand('feed_scroll', floor);
       }),
 
       // feed 深度到阈值 → 点右下「刷新」回顶换新批（change feed-refresh-on-depth）。
@@ -1505,13 +1511,12 @@ export class RoleDispatcher {
       }),
 
       this.eventBus.on('search.scrolled', () => {
-        const params = this.scrollDwellParams(0);
-        this.sendCommand(params ? { action: 'scroll', reason: 'search_scroll', params } : { action: 'scroll', reason: 'search_scroll' });
+        this.sendScrollCommand('search_scroll');
       }),
 
       // idle 看门狗的恢复 nudge → 一次 scroll，重新驱动停滞的浏览循环（reason 仅作日志区分）。
       this.eventBus.on('session.idle_nudge', () => {
-        this.sendCommand({ action: 'scroll', reason: 'idle_recover_nudge' });
+        this.sendScrollCommand('idle_recover_nudge');
       }),
 
       // note.entered 不再发送指令：content.valuable 已经发送了带 index 的 open_note
@@ -1896,7 +1901,7 @@ export class RoleDispatcher {
           payload.action === 'collect';
         if (payload.ok === false && !noRecoverScroll && this.sessionActive) {
           console.log(`[RoleDispatcher] 动作失败兜底 → scroll（recover_after_${payload.action}_failed）`);
-          this.sendCommand({ action: 'scroll', reason: `recover_after_${payload.action}_failed` });
+          this.sendScrollCommand(`recover_after_${payload.action}_failed`);
         }
       }),
     );

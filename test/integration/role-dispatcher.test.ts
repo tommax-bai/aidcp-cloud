@@ -149,8 +149,8 @@ describe('RoleDispatcher Integration', () => {
     const scroll = commands.find((c) => c.action === 'scroll' && c.reason === 'feed_scroll');
     assert.ok(scroll, '应下发 feed_scroll');
     assert.ok(
-      typeof scroll!.params?.dwellMs === 'number' && (scroll!.params!.dwellMs as number) >= 3000,
-      `FB feed_scroll 应有 3s+ dwellMs 保底，实际=${JSON.stringify(scroll!.params)}`,
+      typeof scroll!.params?.dwellMs === 'number' && (scroll!.params!.dwellMs as number) >= 6000,
+      `FB feed_scroll 应有 6s+ dwellMs 保底，实际=${JSON.stringify(scroll!.params)}`,
     );
     dispatcher.endSession();
   });
@@ -544,6 +544,33 @@ describe('RoleDispatcher Integration', () => {
       (c) => c.action === 'scroll' && String(c.reason ?? '').includes('recover_after_open_note_failed'),
     );
     assert.ok(recover, `open_note 失败后应下发兜底 scroll，实际=${JSON.stringify(commands)}`);
+  });
+
+  it('facebook: 搜索失败恢复 scroll 也携带拟人停留 dwellMs', async () => {
+    const commands: EdgeCommand[] = [];
+    const llm = createMockLlm([]);
+    const dispatcher = new RoleDispatcher({
+      soul: mockSoul,
+      llm,
+      sendCommand: (cmd) => commands.push(cmd),
+      accountPlatform: 'facebook',
+      getNickname: () => 'FB Name',
+    });
+    dispatcher.setCurrentAccountId('fb-acc');
+    dispatcher.setup();
+    dispatcher.startSession();
+
+    commands.length = 0;
+    dispatcher.bus.emit('action.completed', { action: 'search', ok: false, reason: 'no_target', ts: Date.now() });
+    await new Promise((r) => setTimeout(r, 10));
+
+    const recover = commands.find((c) => c.action === 'scroll' && c.reason === 'recover_after_search_failed');
+    assert.ok(recover, `search 失败后应下发兜底 scroll，实际=${JSON.stringify(commands)}`);
+    assert.ok(
+      typeof recover!.params?.dwellMs === 'number' && (recover!.params!.dwellMs as number) >= 6000,
+      `FB search 恢复 scroll 应有 6s+ dwellMs 保底，实际=${JSON.stringify(recover!.params)}`,
+    );
+    dispatcher.endSession();
   });
 
   // ─── facebook-browse-and-like-loop 5.2: 会话启动平台闸对 Facebook 放行 ─────────────────
