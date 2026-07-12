@@ -226,6 +226,27 @@ export interface UiDailyUsagePayload {
   windows?: Partial<Record<UiDailyUsageWindow, UiDailyUsageWindowStatus>>;
 }
 
+export interface UiBrowserStandbyPayload {
+  /** Cloud-side switch after env/config resolution. */
+  enabled: boolean;
+  /** True only when the wait is deterministic, finite, and long enough for cold standby. */
+  eligible: boolean;
+  /** Machine-readable reason such as disabled/no_wait/short_wait/view_quota:hour. */
+  reason: string;
+  /** Milliseconds from generatedAt to the next forecasted eligible browser action. */
+  waitMs: number;
+  /** Epoch ms when cloud expects browser work to be eligible again. */
+  wakeAt: number;
+  /** Epoch ms used for the forecast calculation. */
+  generatedAt: number;
+  /** Deterministic source that produced this hint. */
+  source: 'risk' | 'session';
+  /** Cloud threshold used to decide eligibility. */
+  minWaitMs: number;
+  /** Suggested edge warmup before wakeAt. */
+  warmupMs: number;
+}
+
 export interface UiSnapshotPayload {
   /** 账号身份；nickname 为云端账号主数据里的小红书真实昵称（accounts.nickname），空/缺失时边缘不得转发 identity 事件 */
   account?: { id: string; nickname?: string };
@@ -246,6 +267,8 @@ export interface UiSnapshotPayload {
   };
   /** Account-scoped today usage and optional current daily quota context for the companion UI. */
   dailyUsage?: UiDailyUsagePayload;
+  /** Optional long-wait browser cold-standby hint; old edges ignore this field. */
+  browserStandby?: UiBrowserStandbyPayload;
   /**
    * 该账号是否已绑人设（change persona-wizard-onboarding-fixes）：云端 isPersonaBound 权威判据，
    * **仅为 true 时下发**（守「全空不发包」/「宁缺毋假」；缺省=边缘按本地默认「未设置」）。

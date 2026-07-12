@@ -117,6 +117,24 @@ test('ui-snapshot: daily usage alone is enough to send hello snapshot', async ()
   });
 });
 
+test('ui-snapshot: hello snapshot includes browser standby hint when available', async () => {
+  const browserStandby: UiSnapshotPayload['browserStandby'] = {
+    enabled: true,
+    eligible: true,
+    reason: 'view_quota:hour',
+    waitMs: 1_800_000,
+    wakeAt: 1730001801000,
+    generatedAt: 1730000001000,
+    source: 'risk',
+    minWaitMs: 1_200_000,
+    warmupMs: 90_000,
+  };
+  const { service, sent } = makeService({ browserStandbyForAccount: async () => browserStandby });
+  await service.pushHelloSnapshot('acc-1', 'edge-1');
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].env.payload.browserStandby, browserStandby);
+});
+
 test('ui-snapshot: daily usage refresh is scheduled and remains targeted', async () => {
   const dailyUsage: UiSnapshotPayload['dailyUsage'] = {
     asOf: 1730000001000,
@@ -171,6 +189,40 @@ test('ui-snapshot: daily usage refresh is scheduled and remains targeted', async
   timers[1].fn();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(sent.length, 2, 'offline refresh should not broadcast or keep pushing visible messages');
+});
+
+test('ui-snapshot: daily usage refresh forwards browser standby alongside usage', async () => {
+  const dailyUsage: UiSnapshotPayload['dailyUsage'] = {
+    asOf: 1730000001000,
+    totals: { view: 1, like: 0, collect: 0, comment: 0, follow: 0, publish: 0 },
+    windows: { minute: { totals: { view: 1 }, refreshAt: 1730000061000 } },
+  };
+  const browserStandby: UiSnapshotPayload['browserStandby'] = {
+    enabled: true,
+    eligible: false,
+    reason: 'short_wait',
+    waitMs: 30_000,
+    wakeAt: 1730000031000,
+    generatedAt: 1730000001000,
+    source: 'risk',
+    minWaitMs: 1_200_000,
+    warmupMs: 90_000,
+  };
+  const timers: Array<{ fn: () => void; delay: number }> = [];
+  const { service, sent } = makeService({
+    todayUsageForAccount: async () => dailyUsage,
+    browserStandbyForAccount: async () => browserStandby,
+    setTimeoutFn: ((fn: () => void, delay: number) => {
+      timers.push({ fn, delay });
+      return { unref() {} } as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+    clearTimeoutFn: (() => {}) as typeof clearTimeout,
+  });
+
+  await service.pushHelloSnapshot('acc-1', 'edge-1');
+  timers[0].fn();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(sent[1].env.payload, { dailyUsage, browserStandby });
 });
 
 test('ui-snapshot: 无昵称不发 identity 字段（宁缺毋假）', async () => {
