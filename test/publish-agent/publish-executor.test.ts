@@ -92,6 +92,69 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     assert.ok(JSON.stringify(sentCards[0]).includes('话题甲'), '审批卡话题取自 publishMetadata.topics');
   });
 
+  test('排期免审 → 写授权信号 + 触发下发段 + 发通知卡，不发送交互审批卡', async () => {
+    const insertedRecords: any[] = [];
+    const approvalSignals: any[] = [];
+    const dispatched: string[] = [];
+    const notifications: Array<{ chatId: string; card: any }> = [];
+    const role = new PublishExecutorRole({
+      store: { insert: async (r: any) => { insertedRecords.push(r); return 46; } },
+      messenger: {
+        sendApprovalCard: async () => {
+          throw new Error('interactive approval card should not be sent in auto_approve mode');
+        },
+        sendCard: async (chatId: string, card: any) => { notifications.push({ chatId, card }); },
+      },
+      botChatStore: { getDefaultChat: async () => ({ chatId: 'chat-1' }) },
+      writeApprovalSignal: async (requestId, approved, payload) => {
+        approvalSignals.push({ requestId, approved, payload });
+        return { written: true };
+      },
+      triggerApprovedDispatch: (requestId) => { dispatched.push(requestId); },
+      clock,
+      logger: silentLogger,
+    });
+
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('trigger', {
+      metrics: { hoursSinceLastPublish: 1, newConceptCount: 1, likedSinceLastPublish: 0 },
+      generateInput: { concepts: [], likedContents: [], soul: {} as any, recentPosts: [] },
+      recentPublished: [],
+      accountId: 'acc-test',
+      approvalMode: 'auto_approve',
+    } as any);
+    ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('publishMetadata', makePublishMetadata());
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const result = ctx.get('publishResult');
+    assert.equal(result?.recordId, 46);
+    assert.equal(result?.status, 'pending_approval');
+    assert.equal(result?.dispatched, false, '生成段仍不直接下发边缘，由审批信号触发下发段');
+    assert.equal(insertedRecords.length, 1);
+    assert.equal(insertedRecords[0].status, 'pending_approval');
+    assert.deepEqual(approvalSignals, [{
+      requestId: 'publish-46',
+      approved: true,
+      payload: {
+        title: 'vLLM 部署踩坑',
+        content: '昨天试了 vLLM 跑 14B，显存直接爆了',
+        tags: ['话题甲', '话题乙'],
+        contentVersion: 0,
+      },
+    }]);
+    assert.deepEqual(dispatched, ['publish-46']);
+    assert.equal(notifications.length, 1, '免审只发通知卡');
+    assert.equal(notifications[0].chatId, 'chat-1');
+    assert.ok(JSON.stringify(notifications[0].card).includes('排期发帖已免审提交'));
+    assert.equal(result?.approvalCard?.sent, true);
+    assert.equal(result?.approvalCard?.targetSource, 'default_chat');
+  });
+
   test('审批卡显示触发账号昵称，缺昵称时由卡片回落 accountId', async () => {
     const sentCards: any[] = [];
     const role = new PublishExecutorRole({

@@ -20,17 +20,21 @@
  */
 
 import { isValidWeekActiveMask, isWeekActiveAt } from '../risk/session-limits.js';
+import { actionModeEnabled, type ContentScheduleActionMode, type ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
 
 /** 调度器每 tick 现读的生效排期（effectiveMask 已由 store 解析：override ?? global）。 */
 export interface ContentScheduleView {
   autoEnabled: boolean;
   postEnabled: boolean;
+  postMode: ContentScheduleActionMode;
   postDailyCap: number;
   /** 自动评论开关 / 日上限（change content-schedule-comments）。 */
   commentEnabled: boolean;
+  commentMode: ContentScheduleActionMode;
   commentDailyCap: number;
   /** 自动联系评论开关 / 每日尝试上限（change content-schedule-group-comments）。 */
   contactCommentEnabled: boolean;
+  contactCommentMode: ContentScheduleActionMode;
   contactCommentDailyCap: number;
   effectiveMask: string | null;
 }
@@ -60,12 +64,12 @@ export interface ContentSchedulerDeps {
   browseActiveAt?(now: Date): boolean;
   /** 触发排期发帖：**fire-and-forget**——返回一个在生成完成/失败时 settle 的 promise，调度器只挂 finally、绝不 await。
    *  该实现负责走既有提议→人审→派发、并异步补飞书结果卡（成功/空槽/失败）。 */
-  triggerPost(accountId: string): Promise<unknown>;
+  triggerPost(accountId: string, approvalMode: ContentScheduleApprovalMode): Promise<unknown>;
   /**
    * 评论动作三件套（change content-schedule-comments）。可选：任一未注入 → 评论动作整体跳过（零回归）。
    * triggerComment 的实现负责 canDo('comment') 配额闸 + 调命令式评论入口 + 触发失败回黄卡（终态结果卡由评论链自补）。
    */
-  triggerComment?(accountId: string): Promise<unknown>;
+  triggerComment?(accountId: string, approvalMode: ContentScheduleApprovalMode): Promise<unknown>;
   /** 该账号评论任务是否在跑（= commentScheduler.isRunning，单飞闸）。 */
   isCommentBusy?(accountId: string): boolean;
   /** 该账号今日已发评论数（持久互动记录，Asia/Shanghai 自然日）。 */
@@ -86,7 +90,7 @@ export interface ContentSchedulerDeps {
    * triggerContactComment 实现负责 canDo('comment') 配额闸 + triggerManual(injectContact:true) + 回执 ok 记持久 attempt +
    * 触发失败回黄卡（缺联系方式 fail-closed 由触发回执透传；终态结果卡评论链自补）。单飞复用 isCommentBusy（同一评论机器）。
    */
-  triggerContactComment?(accountId: string): Promise<unknown>;
+  triggerContactComment?(accountId: string, approvalMode: ContentScheduleApprovalMode): Promise<unknown>;
   /** 该账号今日联系评论自动尝试数（持久 attempts 台账，Asia/Shanghai 自然日；尝试型上限）。 */
   contactAttemptsTodayCount?(accountId: string): Promise<number>;
   now?: () => number;
@@ -179,19 +183,19 @@ export class ContentScheduler {
           // join_group 与 comment 的最坏日活动量由 joinDailyCap + commentDailyCap 显式相加评估：
           // 默认 normal=3 joins/day，若排期 commentDailyCap=8，则该账号自动互动上界 11/day；restricted/frozen 在 riskStatus 闸处停。
           for (const action of ['post', 'join', 'comment', 'contact_comment'] as const) {
-            if (action === 'post' && (!s.postEnabled || s.postDailyCap <= 0)) continue;
+            if (action === 'post' && (!actionModeEnabled(s.postMode) || s.postDailyCap <= 0)) continue;
             if (action === 'join') {
               if (!this.deps.triggerJoin || !this.deps.isJoinBusy || !this.deps.joinedTodayCount || !this.deps.joinDailyCap) continue;
               const joinCap = await this.deps.joinDailyCap(accountId);
               if (joinCap <= 0) continue;
             }
             if (action === 'comment') {
-              if (!s.commentEnabled || s.commentDailyCap <= 0) continue;
+              if (!actionModeEnabled(s.commentMode) || s.commentDailyCap <= 0) continue;
               // 评论三件套未注入（如 commentScheduler 未建）→ 评论动作整体跳过（零回归）。
               if (!this.deps.triggerComment || !this.deps.isCommentBusy || !this.deps.commentedTodayCount) continue;
             }
             if (action === 'contact_comment') {
-              if (!s.contactCommentEnabled || s.contactCommentDailyCap <= 0) continue;
+              if (!actionModeEnabled(s.contactCommentMode) || s.contactCommentDailyCap <= 0) continue;
               // 联系评论两件套未注入（或评论机器缺）→ 该动作整体跳过（零回归）。
               if (!this.deps.triggerContactComment || !this.deps.isCommentBusy || !this.deps.contactAttemptsTodayCount) continue;
             }
@@ -215,11 +219,13 @@ export class ContentScheduler {
               ]);
               if (posted + pendingAuto >= s.postDailyCap) continue;
 
+              const postMode = s.postMode;
+              if (!actionModeEnabled(postMode)) continue;
               this.lastFired.set(fireKey, cell);
               this.inFlight.add(accountId);
               this.postFiring = true;
               void this.deps
-                .triggerPost(accountId)
+                .triggerPost(accountId, postMode)
                 .catch((e) => this.deps.logger?.warn(`[content-scheduler] triggerPost 异常 account=${accountId}：${(e as Error).message}`))
                 .finally(() => {
                   this.inFlight.delete(accountId);
@@ -235,10 +241,12 @@ export class ContentScheduler {
               const sent = await this.deps.commentedTodayCount!(accountId);
               if (sent >= s.commentDailyCap) continue;
 
+              const commentMode = s.commentMode;
+              if (!actionModeEnabled(commentMode)) continue;
               this.lastFired.set(fireKey, cell);
               this.inFlight.add(accountId);
               void this.deps
-                .triggerComment!(accountId)
+                .triggerComment!(accountId, commentMode)
                 .catch((e) => this.deps.logger?.warn(`[content-scheduler] triggerComment 异常 account=${accountId}：${(e as Error).message}`))
                 .finally(() => this.inFlight.delete(accountId));
             } else if (action === 'join') {
@@ -264,10 +272,12 @@ export class ContentScheduler {
               const attempts = await this.deps.contactAttemptsTodayCount!(accountId);
               if (attempts >= s.contactCommentDailyCap) continue;
 
+              const contactCommentMode = s.contactCommentMode;
+              if (!actionModeEnabled(contactCommentMode)) continue;
               this.lastFired.set(fireKey, cell);
               this.inFlight.add(accountId);
               void this.deps
-                .triggerContactComment!(accountId)
+                .triggerContactComment!(accountId, contactCommentMode)
                 .catch((e) => this.deps.logger?.warn(`[content-scheduler] triggerContactComment 异常 account=${accountId}：${(e as Error).message}`))
                 .finally(() => this.inFlight.delete(accountId));
             }

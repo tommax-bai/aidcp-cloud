@@ -28,6 +28,10 @@ export const CONTENT_POST_DAILY_CAP_MAX = 50;
 /** 联系评论日上限硬上界（change content-schedule-group-comments）：协同 spam 敏感动作，与 50 刻意分开；UI 建议 ≤3。 */
 export const CONTACT_COMMENT_DAILY_CAP_MAX = 10;
 
+export const CONTENT_SCHEDULE_ACTION_MODES = ['off', 'review', 'auto_approve'] as const;
+export type ContentScheduleActionMode = (typeof CONTENT_SCHEDULE_ACTION_MODES)[number];
+export type ContentScheduleApprovalMode = Exclude<ContentScheduleActionMode, 'off'>;
+
 /** 全局「内容可自动时段」行。contentActiveMask：168 格 '0'/'1'；null = 未配 = 全 0 = 不自动（fail-closed）。 */
 export interface ContentScheduleGlobalRow {
   contentActiveMask: string | null;
@@ -40,13 +44,16 @@ export interface AccountContentScheduleRow {
   accountId: string;
   autoEnabled: boolean;
   postEnabled: boolean;
+  postMode: ContentScheduleActionMode;
   postDailyCap: number;
   /** 自动评论开关（change content-schedule-comments）。 */
   commentEnabled: boolean;
+  commentMode: ContentScheduleActionMode;
   /** 评论日上限；0 = 不自动（与开关双保险）。 */
   commentDailyCap: number;
   /** 自动联系评论开关（change content-schedule-group-comments；开启须过一码一号硬校验）。 */
   contactCommentEnabled: boolean;
+  contactCommentMode: ContentScheduleActionMode;
   /** 联系评论每日自动尝试上限（0..10 硬上限；尝试型：被拒/无目标也占额度）。 */
   contactCommentDailyCap: number;
   contentActiveMask: string | null;
@@ -61,10 +68,13 @@ export interface ContentScheduleCatalogRow {
   nickname: string | null;
   autoEnabled: boolean;
   postEnabled: boolean;
+  postMode: ContentScheduleActionMode;
   postDailyCap: number;
   commentEnabled: boolean;
+  commentMode: ContentScheduleActionMode;
   commentDailyCap: number;
   contactCommentEnabled: boolean;
+  contactCommentMode: ContentScheduleActionMode;
   contactCommentDailyCap: number;
   /** 该账号是否已配联系方式（accounts.contact_info IS NOT NULL；联系评论开关的前置徽标）。 */
   hasContactInfo: boolean;
@@ -80,10 +90,13 @@ export interface ContentScheduleCatalogRow {
 export interface EffectiveContentSchedule {
   autoEnabled: boolean;
   postEnabled: boolean;
+  postMode: ContentScheduleActionMode;
   postDailyCap: number;
   commentEnabled: boolean;
+  commentMode: ContentScheduleActionMode;
   commentDailyCap: number;
   contactCommentEnabled: boolean;
+  contactCommentMode: ContentScheduleActionMode;
   contactCommentDailyCap: number;
   effectiveMask: string | null;
 }
@@ -95,10 +108,13 @@ export interface ContentScheduleGlobalPatch {
 export interface AccountContentSchedulePatch {
   autoEnabled?: boolean;
   postEnabled?: boolean;
+  postMode?: ContentScheduleActionMode;
   postDailyCap?: number;
   commentEnabled?: boolean;
+  commentMode?: ContentScheduleActionMode;
   commentDailyCap?: number;
   contactCommentEnabled?: boolean;
+  contactCommentMode?: ContentScheduleActionMode;
   contactCommentDailyCap?: number;
   /** 每账号时段覆盖：168 位 '0'/'1'，或 null=清空覆盖=继承全局。 */
   contentActiveMask?: string | null;
@@ -151,6 +167,25 @@ ALTER TABLE account_content_schedule ADD COLUMN IF NOT EXISTS comment_daily_cap 
 -- 自愈加列（change content-schedule-group-comments → generalize-contact-info，物理改名迁移 0036 文档伴随）：Phase 3 联系评论两列，默认 false/0 = 不自动。
 ALTER TABLE account_content_schedule ADD COLUMN IF NOT EXISTS contact_comment_enabled BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE account_content_schedule ADD COLUMN IF NOT EXISTS contact_comment_daily_cap INTEGER NOT NULL DEFAULT 0;
+-- 自愈加列（change content-schedule-auto-approve-mode）：动作三档。null 兼容旧库/旧代码，读侧从 boolean 推导；新代码写入时同步 boolean 视图。
+ALTER TABLE account_content_schedule ADD COLUMN IF NOT EXISTS post_mode TEXT;
+ALTER TABLE account_content_schedule ADD COLUMN IF NOT EXISTS comment_mode TEXT;
+ALTER TABLE account_content_schedule ADD COLUMN IF NOT EXISTS contact_comment_mode TEXT;
+UPDATE account_content_schedule SET post_mode = CASE WHEN post_enabled THEN 'review' ELSE 'off' END WHERE post_mode IS NULL;
+UPDATE account_content_schedule SET comment_mode = CASE WHEN comment_enabled THEN 'review' ELSE 'off' END WHERE comment_mode IS NULL;
+UPDATE account_content_schedule SET contact_comment_mode = CASE WHEN contact_comment_enabled THEN 'review' ELSE 'off' END WHERE contact_comment_mode IS NULL;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'account_content_schedule_post_mode_check') THEN
+    ALTER TABLE account_content_schedule ADD CONSTRAINT account_content_schedule_post_mode_check CHECK (post_mode IN ('off', 'review', 'auto_approve'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'account_content_schedule_comment_mode_check') THEN
+    ALTER TABLE account_content_schedule ADD CONSTRAINT account_content_schedule_comment_mode_check CHECK (comment_mode IN ('off', 'review', 'auto_approve'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'account_content_schedule_contact_comment_mode_check') THEN
+    ALTER TABLE account_content_schedule ADD CONSTRAINT account_content_schedule_contact_comment_mode_check CHECK (contact_comment_mode IN ('off', 'review', 'auto_approve'));
+  END IF;
+END $$;
 -- 联系评论每日自动尝试台账（尝试型持久日上限：触发回执 ok 即记；重启不清零、绝不超发）。
 CREATE TABLE IF NOT EXISTS contact_comment_attempts (
   id           BIGSERIAL PRIMARY KEY,
@@ -185,10 +220,13 @@ interface AccountDbRow {
   account_id: string;
   auto_enabled: boolean;
   post_enabled: boolean;
+  post_mode: string | null;
   post_daily_cap: number | string;
   comment_enabled: boolean;
+  comment_mode: string | null;
   comment_daily_cap: number | string;
   contact_comment_enabled: boolean;
+  contact_comment_mode: string | null;
   contact_comment_daily_cap: number | string;
   content_active_mask: string | null;
   updated_at: Date | string | null;
@@ -206,6 +244,23 @@ function validCap(n: unknown): n is number {
 /** 掩码补丁有效：null（清空）或 168 位 '0'/'1'。 */
 function validMaskPatch(m: unknown): m is string | null {
   return m === null || isValidWeekActiveMask(m);
+}
+
+export function isContentScheduleActionMode(v: unknown): v is ContentScheduleActionMode {
+  return typeof v === 'string' && (CONTENT_SCHEDULE_ACTION_MODES as readonly string[]).includes(v);
+}
+
+export function actionModeFromEnabled(enabled: boolean): ContentScheduleActionMode {
+  return enabled ? 'review' : 'off';
+}
+
+export function actionModeEnabled(mode: ContentScheduleActionMode): mode is ContentScheduleApprovalMode {
+  return mode !== 'off';
+}
+
+function actionModeFromDb(mode: string | null | undefined, enabled: boolean | null | undefined): ContentScheduleActionMode {
+  if (isContentScheduleActionMode(mode)) return mode;
+  return actionModeFromEnabled(enabled === true);
 }
 
 export class ContentScheduleStore {
@@ -240,6 +295,7 @@ export class ContentScheduleStore {
     const a = await this.pool.query<AccountDbRow>(
       `SELECT account_id, auto_enabled, post_enabled, post_daily_cap, comment_enabled, comment_daily_cap,
               contact_comment_enabled, contact_comment_daily_cap,
+              post_mode, comment_mode, contact_comment_mode,
               content_active_mask, updated_at, updated_by
          FROM account_content_schedule`,
     );
@@ -256,14 +312,20 @@ export class ContentScheduleStore {
   }
 
   private accountFromDb(r: AccountDbRow): AccountContentScheduleRow {
+    const postMode = actionModeFromDb(r.post_mode, r.post_enabled);
+    const commentMode = actionModeFromDb(r.comment_mode, r.comment_enabled);
+    const contactCommentMode = actionModeFromDb(r.contact_comment_mode, r.contact_comment_enabled);
     return {
       accountId: r.account_id,
       autoEnabled: r.auto_enabled === true,
-      postEnabled: r.post_enabled === true,
+      postEnabled: actionModeEnabled(postMode),
+      postMode,
       postDailyCap: Number(r.post_daily_cap),
-      commentEnabled: r.comment_enabled === true,
+      commentEnabled: actionModeEnabled(commentMode),
+      commentMode,
       commentDailyCap: Number(r.comment_daily_cap),
-      contactCommentEnabled: r.contact_comment_enabled === true,
+      contactCommentEnabled: actionModeEnabled(contactCommentMode),
+      contactCommentMode,
       contactCommentDailyCap: Number(r.contact_comment_daily_cap),
       contentActiveMask: r.content_active_mask ?? null,
       updatedAt: toIso(r.updated_at),
@@ -291,20 +353,26 @@ export class ContentScheduleStore {
       return {
         autoEnabled: false,
         postEnabled: false,
+        postMode: 'off',
         postDailyCap: 0,
         commentEnabled: false,
+        commentMode: 'off',
         commentDailyCap: 0,
         contactCommentEnabled: false,
+        contactCommentMode: 'off',
         contactCommentDailyCap: 0,
         effectiveMask: null,
       };
     return {
       autoEnabled: a.autoEnabled,
       postEnabled: a.postEnabled,
+      postMode: a.postMode,
       postDailyCap: a.postDailyCap,
       commentEnabled: a.commentEnabled,
+      commentMode: a.commentMode,
       commentDailyCap: a.commentDailyCap,
       contactCommentEnabled: a.contactCommentEnabled,
+      contactCommentMode: a.contactCommentMode,
       contactCommentDailyCap: a.contactCommentDailyCap,
       effectiveMask: a.contentActiveMask ?? this.globalCache?.contentActiveMask ?? null,
     };
@@ -353,6 +421,10 @@ export class ContentScheduleStore {
       if (typeof patch.postEnabled !== 'boolean') return { ok: false, reason: 'invalid_value' };
       hasField = true;
     }
+    if ('postMode' in patch) {
+      if (!isContentScheduleActionMode(patch.postMode)) return { ok: false, reason: 'invalid_value' };
+      hasField = true;
+    }
     if ('postDailyCap' in patch) {
       if (!validCap(patch.postDailyCap)) return { ok: false, reason: 'invalid_value' };
       hasField = true;
@@ -361,12 +433,20 @@ export class ContentScheduleStore {
       if (typeof patch.commentEnabled !== 'boolean') return { ok: false, reason: 'invalid_value' };
       hasField = true;
     }
+    if ('commentMode' in patch) {
+      if (!isContentScheduleActionMode(patch.commentMode)) return { ok: false, reason: 'invalid_value' };
+      hasField = true;
+    }
     if ('commentDailyCap' in patch) {
       if (!validCap(patch.commentDailyCap)) return { ok: false, reason: 'invalid_value' };
       hasField = true;
     }
     if ('contactCommentEnabled' in patch) {
       if (typeof patch.contactCommentEnabled !== 'boolean') return { ok: false, reason: 'invalid_value' };
+      hasField = true;
+    }
+    if ('contactCommentMode' in patch) {
+      if (!isContentScheduleActionMode(patch.contactCommentMode)) return { ok: false, reason: 'invalid_value' };
       hasField = true;
     }
     if ('contactCommentDailyCap' in patch) {
@@ -391,7 +471,10 @@ export class ContentScheduleStore {
     // 无联系方式 → no_contact_info 硬拒（没联系方式开开关无意义，提前拦；触发时缺联系方式 fail-closed 仍在，纵深）；
     // 联系方式与其它账号共用 → 不再硬拒，置 sharedContactInfoWarning 放行，防关联封号改由上层如实提示（绝不静默）。
     let sharedContactInfoWarning = false;
-    if (patch.contactCommentEnabled === true) {
+    const wantsContactComment = patch.contactCommentMode
+      ? actionModeEnabled(patch.contactCommentMode)
+      : patch.contactCommentEnabled === true;
+    if (wantsContactComment) {
       const code = await this.pool.query<{ contact_info: string | null }>(
         `SELECT contact_info FROM accounts WHERE account_id = $1`,
         [accountId],
@@ -408,11 +491,19 @@ export class ContentScheduleStore {
     // 未传字段保持原值（原无行则取列默认 false/false/0/null）。
     const prev = this.accountCache.get(accountId);
     const nextAuto = patch.autoEnabled ?? prev?.autoEnabled ?? false;
-    const nextPost = patch.postEnabled ?? prev?.postEnabled ?? false;
+    const nextPostMode =
+      patch.postMode ?? (patch.postEnabled !== undefined ? actionModeFromEnabled(patch.postEnabled) : prev?.postMode ?? 'off');
+    const nextPost = actionModeEnabled(nextPostMode);
     const nextCap = patch.postDailyCap ?? prev?.postDailyCap ?? 0;
-    const nextCommentEnabled = patch.commentEnabled ?? prev?.commentEnabled ?? false;
+    const nextCommentMode =
+      patch.commentMode ??
+      (patch.commentEnabled !== undefined ? actionModeFromEnabled(patch.commentEnabled) : prev?.commentMode ?? 'off');
+    const nextCommentEnabled = actionModeEnabled(nextCommentMode);
     const nextCommentCap = patch.commentDailyCap ?? prev?.commentDailyCap ?? 0;
-    const nextContactEnabled = patch.contactCommentEnabled ?? prev?.contactCommentEnabled ?? false;
+    const nextContactMode =
+      patch.contactCommentMode ??
+      (patch.contactCommentEnabled !== undefined ? actionModeFromEnabled(patch.contactCommentEnabled) : prev?.contactCommentMode ?? 'off');
+    const nextContactEnabled = actionModeEnabled(nextContactMode);
     const nextContactCap = patch.contactCommentDailyCap ?? prev?.contactCommentDailyCap ?? 0;
     const nextMask =
       'contentActiveMask' in patch ? patch.contentActiveMask ?? null : prev?.contentActiveMask ?? null;
@@ -420,8 +511,9 @@ export class ContentScheduleStore {
     const { rows } = await this.pool.query<AccountDbRow>(
       `INSERT INTO account_content_schedule
          (account_id, auto_enabled, post_enabled, post_daily_cap, comment_enabled, comment_daily_cap,
-          contact_comment_enabled, contact_comment_daily_cap, content_active_mask, updated_at, updated_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10)
+          contact_comment_enabled, contact_comment_daily_cap, post_mode, comment_mode, contact_comment_mode,
+          content_active_mask, updated_at, updated_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), $13)
        ON CONFLICT (account_id) DO UPDATE SET auto_enabled = EXCLUDED.auto_enabled,
                                               post_enabled = EXCLUDED.post_enabled,
                                               post_daily_cap = EXCLUDED.post_daily_cap,
@@ -429,11 +521,29 @@ export class ContentScheduleStore {
                                               comment_daily_cap = EXCLUDED.comment_daily_cap,
                                               contact_comment_enabled = EXCLUDED.contact_comment_enabled,
                                               contact_comment_daily_cap = EXCLUDED.contact_comment_daily_cap,
+                                              post_mode = EXCLUDED.post_mode,
+                                              comment_mode = EXCLUDED.comment_mode,
+                                              contact_comment_mode = EXCLUDED.contact_comment_mode,
                                               content_active_mask = EXCLUDED.content_active_mask,
                                               updated_at = now(), updated_by = EXCLUDED.updated_by
        RETURNING account_id, auto_enabled, post_enabled, post_daily_cap, comment_enabled, comment_daily_cap,
-                 contact_comment_enabled, contact_comment_daily_cap, content_active_mask, updated_at, updated_by`,
-      [accountId, nextAuto, nextPost, nextCap, nextCommentEnabled, nextCommentCap, nextContactEnabled, nextContactCap, nextMask, updatedBy],
+                 contact_comment_enabled, contact_comment_daily_cap, post_mode, comment_mode, contact_comment_mode,
+                 content_active_mask, updated_at, updated_by`,
+      [
+        accountId,
+        nextAuto,
+        nextPost,
+        nextCap,
+        nextCommentEnabled,
+        nextCommentCap,
+        nextContactEnabled,
+        nextContactCap,
+        nextPostMode,
+        nextCommentMode,
+        nextContactMode,
+        nextMask,
+        updatedBy,
+      ],
     );
     const row = rows[0]
       ? this.accountFromDb(rows[0])
@@ -441,10 +551,13 @@ export class ContentScheduleStore {
           accountId,
           autoEnabled: nextAuto,
           postEnabled: nextPost,
+          postMode: nextPostMode,
           postDailyCap: nextCap,
           commentEnabled: nextCommentEnabled,
+          commentMode: nextCommentMode,
           commentDailyCap: nextCommentCap,
           contactCommentEnabled: nextContactEnabled,
+          contactCommentMode: nextContactMode,
           contactCommentDailyCap: nextContactCap,
           contentActiveMask: nextMask,
           updatedAt: null,
@@ -489,10 +602,13 @@ export class ContentScheduleStore {
       nickname: string | null;
       auto_enabled: boolean | null;
       post_enabled: boolean | null;
+      post_mode: string | null;
       post_daily_cap: number | string | null;
       comment_enabled: boolean | null;
+      comment_mode: string | null;
       comment_daily_cap: number | string | null;
       contact_comment_enabled: boolean | null;
+      contact_comment_mode: string | null;
       contact_comment_daily_cap: number | string | null;
       has_contact_info: boolean;
       content_active_mask: string | null;
@@ -502,6 +618,7 @@ export class ContentScheduleStore {
       `SELECT a.account_id, a.label, a.nickname, (a.contact_info IS NOT NULL) AS has_contact_info,
               s.auto_enabled, s.post_enabled, s.post_daily_cap, s.comment_enabled, s.comment_daily_cap,
               s.contact_comment_enabled, s.contact_comment_daily_cap,
+              s.post_mode, s.comment_mode, s.contact_comment_mode,
               s.content_active_mask, s.updated_at, s.updated_by
          FROM accounts a
          LEFT JOIN account_content_schedule s ON s.account_id = a.account_id
@@ -512,16 +629,22 @@ export class ContentScheduleStore {
     return rows.map((r) => {
       const configured = r.auto_enabled !== null;
       const hasOverrideMask = r.content_active_mask != null;
+      const postMode = actionModeFromDb(r.post_mode, r.post_enabled);
+      const commentMode = actionModeFromDb(r.comment_mode, r.comment_enabled);
+      const contactCommentMode = actionModeFromDb(r.contact_comment_mode, r.contact_comment_enabled);
       return {
         accountId: r.account_id,
         label: r.label ?? null,
         nickname: r.nickname ?? null,
         autoEnabled: r.auto_enabled === true,
-        postEnabled: r.post_enabled === true,
+        postEnabled: actionModeEnabled(postMode),
+        postMode,
         postDailyCap: r.post_daily_cap == null ? 0 : Number(r.post_daily_cap),
-        commentEnabled: r.comment_enabled === true,
+        commentEnabled: actionModeEnabled(commentMode),
+        commentMode,
         commentDailyCap: r.comment_daily_cap == null ? 0 : Number(r.comment_daily_cap),
-        contactCommentEnabled: r.contact_comment_enabled === true,
+        contactCommentEnabled: actionModeEnabled(contactCommentMode),
+        contactCommentMode,
         contactCommentDailyCap: r.contact_comment_daily_cap == null ? 0 : Number(r.contact_comment_daily_cap),
         hasContactInfo: r.has_contact_info === true,
         maskSource: hasOverrideMask ? 'override' : 'global',

@@ -15,6 +15,7 @@
 import type { PublishResult, PublishSourceReference, ReferenceImageSnapshot, TriggerInput } from './types.js';
 import type { Soul } from '../soul/types.js';
 import type { CuratedContentTypeFilter, CuratedSelectItem } from '../cache/curated-content-store.js';
+import type { ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
 import { referenceImagesForGeneration, REFERENCE_IMAGE_MAX_COUNT } from './reference-image-guidance.js';
 
 /** 洗稿参照笔记（change curated-note-actions）：管理后台精选页人工指定，注入创作输入独立参照块。 */
@@ -322,7 +323,7 @@ export class PublishScheduler {
    * persona 绑定 + 风控 status===normal + canDo('publish') + 发布前人审（AC-PUB）。forced=false → ContentScout
    * 可诚实判「无新素材」而跳过（诚实空槽，非硬凑）。触发条件是「时段格 + 错峰命中」（由调度器判），不看概念阈值。
    */
-  async triggerScheduled(accountId: string): Promise<TriggerOutcome> {
+  async triggerScheduled(accountId: string, approvalMode: ContentScheduleApprovalMode = 'review'): Promise<TriggerOutcome> {
     if (this.d.isPersonaBound && !this.d.isPersonaBound(accountId)) {
       this.logger.warn(`[PublishScheduler] 排期扳机：账号 ${accountId} 未绑定人设 — 跳过，绝不以默认人设发布`);
       return { result: 'blocked', reason: 'needs_persona_setup' };
@@ -337,7 +338,14 @@ export class PublishScheduler {
       this.logger.warn(`[PublishScheduler] 排期扳机：账号 ${accountId} 风控拒绝(canDo=false) — 跳过`);
       return { result: 'blocked', reason: `risk_denied(status=${status})` };
     }
-    const { status: triggeredStatus, failureReason, approvalCard } = await this.doTrigger('scheduled_window', false, accountId);
+    const { status: triggeredStatus, failureReason, approvalCard } = await this.doTrigger(
+      'scheduled_window',
+      false,
+      accountId,
+      undefined,
+      undefined,
+      approvalMode,
+    );
     return { result: 'triggered', reason: 'scheduled_window', status: triggeredStatus, failureReason, approvalCard };
   }
 
@@ -417,6 +425,7 @@ export class PublishScheduler {
     accountId: string,
     referenceNote?: ReferenceNote,
     manualApprovalChatId?: string,
+    approvalMode?: ContentScheduleApprovalMode,
   ): Promise<{ status: string; failureReason?: string; approvalCard?: SchedulerApprovalCardResult }> {
     const dbPending = await this.dbPendingCount(accountId);
     const kind = referenceNote ? ('rewrite' as const) : ('autonomous' as const);
@@ -434,7 +443,7 @@ export class PublishScheduler {
       this.logger.warn(`[PublishScheduler] 触发被 claim 拒绝 account=${accountId} key=${key} reason=${claim.reason}`);
       return { status: 'skipped', failureReason: `${text}（${claim.reason}）` };
     }
-    return this.runClaimed(key, reason, forced, accountId, referenceNote, manualApprovalChatId);
+    return this.runClaimed(key, reason, forced, accountId, referenceNote, manualApprovalChatId, approvalMode);
   }
 
   /** claim 已持有的执行段：finally 覆盖含 buildTriggerInput 在内全程释放键（DB 瞬错不卡键）。 */
@@ -445,6 +454,7 @@ export class PublishScheduler {
     accountId: string,
     referenceNote?: ReferenceNote,
     manualApprovalChatId?: string,
+    approvalMode?: ContentScheduleApprovalMode,
   ): Promise<{ status: string; failureReason?: string; approvalCard?: SchedulerApprovalCardResult }> {
     try {
     const base = await this.buildTriggerInput(accountId);
@@ -474,6 +484,9 @@ export class PublishScheduler {
       : { ...base, forced };
     if (manualApprovalChatId?.trim()) {
       input.manualApprovalChatId = manualApprovalChatId.trim();
+    }
+    if (approvalMode) {
+      input.approvalMode = approvalMode;
     }
     this.logger.log(`[PublishScheduler] 触发发帖编排 reason=${reason} forced=${forced} account=${input.accountId} newConcepts=${input.metrics.newConceptCount} liked=${input.metrics.likedSinceLastPublish}`);
     const res = await this.d.orchestrator.trigger(input);

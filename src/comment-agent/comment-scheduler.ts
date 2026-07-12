@@ -28,7 +28,8 @@ import {
 } from './comment-task-runner.js';
 import { buildEdgeCommentSteps, type EdgePusher, type CommentDedup } from './edge-steps.js';
 import { buildFacebookEdgeSteps } from './facebook-edge-steps.js';
-import { buildComposeAndApprove } from './compose-approve.js';
+import { buildComposeAndApprove, type AutoApproveCommentNotification } from './compose-approve.js';
+import type { ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
 import type { CuratedSampleForTerms } from '../agents/comment-search-term-generator.js';
 import type { CuratedContentTypeFilter } from '../cache/curated-content-store.js';
 import {
@@ -200,6 +201,8 @@ export interface CommentSchedulerDeps {
   dedupFor: (accountId: string) => CommentDedup;
   /** 评论人审口（复用发帖 /tmp 信号机制）；未接线 → compose-approve 一律不发。 */
   approval?: CommentApprovalPort;
+  /** 排期免审通知口；auto_approve 未接线或发送失败则 fail-closed，不发评论。 */
+  autoApproveNotify?: AutoApproveCommentNotification;
   /** 去 AI 味处理器（可带账号 rewrite）；缺省仅扫描。 */
   postProcessorFor?: (accountId: string) => Pick<PostProcessor, 'process'>;
   /** @deprecated 页面执行权改由 edgeTaskLeases 管理；保留可选形状兼容旧测试构造。 */
@@ -347,7 +350,15 @@ export class CommentScheduler {
   /** 飞书 /comment 触发：返回「触发态」结构化回执；最终结果异步补发结果卡片。 */
   async triggerManual(
     accountId: string,
-    options?: { injectContact?: boolean; priority?: EdgeTaskPriority; joinFirst?: boolean; joinGroupUrl?: string; manualOverride?: boolean; force?: boolean },
+    options?: {
+      injectContact?: boolean;
+      priority?: EdgeTaskPriority;
+      joinFirst?: boolean;
+      joinGroupUrl?: string;
+      manualOverride?: boolean;
+      force?: boolean;
+      approvalMode?: ContentScheduleApprovalMode;
+    },
   ): Promise<CommentCommandReceipt> {
     if (!accountId || accountId === 'default') {
       return { ok: false, level: 'error', title: '按需评论触发失败', message: '未解析到有效账号（绝不回落 default）' };
@@ -437,6 +448,7 @@ export class CommentScheduler {
           ...(targetedUrl ? { joinGroupUrl: targetedUrl } : {}),
           manualOverride: options?.manualOverride === true,
           force: options?.force === true,
+          approvalMode: options?.approvalMode,
         })
           .catch((err) =>
             (this.deps.logger ?? console).warn(
@@ -463,6 +475,7 @@ export class CommentScheduler {
         contactInfo,
         manualOverride: options?.manualOverride === true,
         force: options?.force === true,
+        approvalMode: options?.approvalMode,
       })
         .catch((err) =>
           (this.deps.logger ?? console).warn(
@@ -480,7 +493,16 @@ export class CommentScheduler {
     // 异步跑任务，命令立即回执（任务含人审轮询，不可同步等）。contactInfo 已解析一次，带进任务用于注入（gate 同源）。
     // catch：runTask 内部已兜任务期异常；此处兜「任务启动前」的防御性抛（如 gate 后人设被解绑 → getSoul 抛
     // no_persona，persona-driven-content-pipeline）——诚实记日志、不让未处理拒绝炸进程，绝不假成功。
-    void this.runTask(accountId, bus, edgeId, contactInfo, platformProfile, options?.priority ?? 'human', options?.force === true)
+    void this.runTask(
+      accountId,
+      bus,
+      edgeId,
+      contactInfo,
+      platformProfile,
+      options?.priority ?? 'human',
+      options?.force === true,
+      options?.approvalMode,
+    )
       .catch((err) =>
         (this.deps.logger ?? console).warn(
           `[comment-scheduler] 任务未能启动/异常中止 account=${accountId}：${(err as Error).message}`,
@@ -514,6 +536,7 @@ export class CommentScheduler {
       onResult?: (result: TargetedCommentResult) => Promise<void> | void;
       /** 自动排期/热度触发用 automatic；人工入口缺省 human。 */
       priority?: EdgeTaskPriority;
+      approvalMode?: ContentScheduleApprovalMode;
     },
   ): Promise<CommentCommandReceipt & { reason?: string }> {
     if (!accountId || accountId === 'default') {
@@ -582,7 +605,11 @@ export class CommentScheduler {
         };
       }
       this.running.add(accountId);
-      void this.runFacebookTargetedTask(accountId, { injectContact: options?.injectContact, contactInfo })
+      void this.runFacebookTargetedTask(accountId, {
+        injectContact: options?.injectContact,
+        contactInfo,
+        approvalMode: options?.approvalMode,
+      })
         .catch((err) =>
           (this.deps.logger ?? console).warn(
             `[comment-scheduler] FB 定向评论任务异常 account=${accountId}：${(err as Error).message}`,
@@ -603,6 +630,7 @@ export class CommentScheduler {
       platformProfile,
       options?.priority ?? 'human',
       options?.onResult,
+      options?.approvalMode,
     )
       .catch((err) =>
         (this.deps.logger ?? console).warn(
@@ -635,7 +663,14 @@ export class CommentScheduler {
    */
   private async runFacebookTargetedTask(
     accountId: string,
-    options: { injectContact?: boolean; contactInfo?: string | null; overrideContainerUrl?: string; manualOverride?: boolean; force?: boolean } = {},
+    options: {
+      injectContact?: boolean;
+      contactInfo?: string | null;
+      overrideContainerUrl?: string;
+      manualOverride?: boolean;
+      force?: boolean;
+      approvalMode?: ContentScheduleApprovalMode;
+    } = {},
   ): Promise<FacebookCommentRunResult> {
     // 终态捕获（change facebook-manual-join-comment）：包一层把「最后一次审计」升级为返回值，供「加群 + 评论」
     // 合并结果卡取用；body 内所有 return; 保持 void 语义不动（普通 /comment / 排期路径零回归、只是丢弃返回值）。
@@ -667,7 +702,14 @@ export class CommentScheduler {
 
   private async runFacebookTargetedTaskBody(
     accountId: string,
-    options: { injectContact?: boolean; contactInfo?: string | null; overrideContainerUrl?: string; manualOverride?: boolean; force?: boolean },
+    options: {
+      injectContact?: boolean;
+      contactInfo?: string | null;
+      overrideContainerUrl?: string;
+      manualOverride?: boolean;
+      force?: boolean;
+      approvalMode?: ContentScheduleApprovalMode;
+    },
     audit: (row: FacebookCommentAuditRow) => void,
   ): Promise<void> {
     const d = this.deps;
@@ -847,7 +889,7 @@ export class CommentScheduler {
         container,
         // 放开时限兜底选出的覆盖群 → 审核卡标注「未满足冷却/预热」交人把关。手动 pin 群路径 coverageCfg 为空、绝不标注。
         ...(usingCoverage && coverageCfg?.relaxed ? { coverageRelaxed: true } : {}),
-      });
+      }, options.approvalMode);
       if (!approved) {
         audit({ accountId, outcome: 'compose_skipped', reason: 'approval_rejected_or_timeout', shadow: false, keyword, container, textLength: v.text.length });
         return;
@@ -885,7 +927,14 @@ export class CommentScheduler {
    */
   private async runFacebookJoinThenComment(
     accountId: string,
-    options: { injectContact?: boolean; contactInfo?: string | null; joinGroupUrl?: string; manualOverride?: boolean; force?: boolean } = {},
+    options: {
+      injectContact?: boolean;
+      contactInfo?: string | null;
+      joinGroupUrl?: string;
+      manualOverride?: boolean;
+      force?: boolean;
+      approvalMode?: ContentScheduleApprovalMode;
+    } = {},
   ): Promise<void> {
     const d = this.deps;
     let join: { triggered: boolean; reason?: string; groupUrl?: string; outcome?: string };
@@ -918,6 +967,7 @@ export class CommentScheduler {
       overrideContainerUrl: join.groupUrl,
       manualOverride: options.manualOverride === true,
       force: options.force === true,
+      approvalMode: options.approvalMode,
     });
     await d.postResultCard?.(accountId, joinCommentReceipt(join, comment, options.injectContact === true));
   }
@@ -930,13 +980,9 @@ export class CommentScheduler {
   private async approveFacebookComment(
     accountId: string,
     input: { permalink: string; text: string; contactInfo?: string | null; container: string; coverageRelaxed?: boolean },
+    approvalMode: ContentScheduleApprovalMode = 'review',
   ): Promise<{ text: string; contactInfo?: string } | null> {
-    const approval = this.deps.approval;
     const log = this.deps.logger ?? console;
-    if (!approval) {
-      log.warn('[fb-comment] 评论人审口未接线 → 不发（绝不裸发）');
-      return null;
-    }
     const now = this.deps.now ?? (() => Date.now());
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const requestId = `facebook-comment-${now()}`;
@@ -945,6 +991,34 @@ export class CommentScheduler {
     const title = input.coverageRelaxed
       ? `Facebook 群组评论：${input.container}（⚠️ 未满足冷却/预热期，已放开时限选群，请人工确认）`
       : `Facebook 群组评论：${input.container}`;
+    if (approvalMode === 'auto_approve') {
+      if (!this.deps.autoApproveNotify) {
+        log.warn('[fb-comment] 评论免审通知口未接线 → 不发（绝不无通知裸发）');
+        return null;
+      }
+      try {
+        await this.deps.autoApproveNotify({
+          requestId,
+          noteId: input.permalink,
+          text: reviewText,
+          title,
+          authorName: 'Facebook',
+          accountId,
+          contactIncluded: input.contactInfo != null,
+        });
+        log.log?.(`[fb-comment] 免审已通知并授权 account=${accountId} requestId=${requestId}`);
+        return input.contactInfo ? { text: input.text, contactInfo: input.contactInfo } : { text: input.text };
+      } catch (err) {
+        log.warn(`[fb-comment] 评论免审通知失败 account=${accountId}：${(err as Error).message}`);
+        return null;
+      }
+    }
+
+    const approval = this.deps.approval;
+    if (!approval) {
+      log.warn('[fb-comment] 评论人审口未接线 → 不发（绝不裸发）');
+      return null;
+    }
     try {
       await approval.request({
         requestId,
@@ -983,6 +1057,7 @@ export class CommentScheduler {
     platformProfile: CommentPlatformProfile,
     priority: EdgeTaskPriority,
     onResult?: (result: TargetedCommentResult) => Promise<void> | void,
+    approvalMode: ContentScheduleApprovalMode = 'review',
   ): Promise<void> {
     const log = this.deps.logger ?? console;
     const soul = this.deps.getSoul(accountId);
@@ -992,6 +1067,8 @@ export class CommentScheduler {
     const composeAndApprove = buildComposeAndApprove({
       composer,
       approval: this.deps.approval,
+      approvalMode,
+      autoApproveNotify: this.deps.autoApproveNotify,
       accountId,
       postProcessor: this.deps.postProcessorFor?.(accountId),
       contactInfo,
@@ -1131,6 +1208,7 @@ export class CommentScheduler {
     // change manual-comment-force-flag：--force 时放开「强相关甄选」与「每笔记去重」两道软筛选（仅手动路径）。
     // 缺省 false → 默认/自动路径行为逐字不变（零回归）。仍守人审、边端诚实闸（发布前就地核对 noteId）、账号隔离。
     force = false,
+    approvalMode: ContentScheduleApprovalMode = 'review',
   ): Promise<void> {
     const log = this.deps.logger ?? console;
     const soul = this.deps.getSoul(accountId);
@@ -1144,6 +1222,8 @@ export class CommentScheduler {
     const composeAndApprove = buildComposeAndApprove({
       composer,
       approval: this.deps.approval,
+      approvalMode,
+      autoApproveNotify: this.deps.autoApproveNotify,
       accountId,
       postProcessor: this.deps.postProcessorFor?.(accountId),
       // 联系方式（change account-group-chat-injection）：已在 triggerManual 解析一次（同源），非 null 时注入。

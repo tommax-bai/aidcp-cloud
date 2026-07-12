@@ -179,7 +179,7 @@ import { createHotLeadConfigPanel } from './config/hot-lead-config-facade.js';
 import { ResumeConfigStore } from './config/resume-config-store.js';
 import { createResumeConfigPanel } from './config/resume-config-facade.js';
 // 内容排期（change content-schedule-auto-publish，Phase 1 只发帖）：全局内容格 + 每账号排期存储 + 分钟心跳触发扇入。
-import { ContentScheduleStore } from './config/content-schedule-store.js';
+import { ContentScheduleStore, actionModeEnabled } from './config/content-schedule-store.js';
 import { FacebookCommentConfigStore } from './config/facebook-comment-config-store.js';
 import { FacebookCommentAuditStore } from './comment-agent/facebook-comment-audit-store.js';
 import {
@@ -1864,9 +1864,9 @@ async function main(): Promise<void> {
       curatedStore: curatedContentStore,
       // 热度过滤阈值取值口：判定角色每次现读全局配置（后台改完热加载即时生效）。
       hotLeadGateConfig: () => hotLeadConfigStore.getGateConfig(),
-      // 账号是否开启自动联系评论（contactCommentEnabled，默认关＝零回归）。
+      // 账号是否开启自动联系评论（off/review/auto_approve；默认关＝零回归）。
       isAutoContactEnabled: async (accountId) =>
-        contentScheduleStore.effectiveScheduleFor(accountId).contactCommentEnabled,
+        actionModeEnabled(contentScheduleStore.effectiveScheduleFor(accountId).contactCommentMode),
       // 引流线索「已评过」去重：复用 riskStore 的按账号互动去重（与自治评论/联系评论同一账本）。
       hasCommentedForLead: (accountId, noteId) =>
         riskStore.hasInteraction(accountId, noteId, 'comment').catch(() => false),
@@ -1881,12 +1881,14 @@ async function main(): Promise<void> {
                   source: 'hot_lead',
                   snapshot: { noteId: args.noteId, velocity: args.velocity, ageHours: args.ageHours },
                   triggerFn: async () => {
+                    const contactCommentMode = contentScheduleStore.effectiveScheduleFor(args.accountId).contactCommentMode;
                     const receipt = await commentScheduler!.triggerTargeted(
                       args.accountId,
                       { noteId: args.noteId, title: args.title },
                       {
                         injectContact: true,
                         priority: 'automatic',
+                        approvalMode: actionModeEnabled(contactCommentMode) ? contactCommentMode : 'review',
                         currentNote: {
                           noteId: args.currentDetail.noteId,
                           title: args.currentDetail.title,
@@ -2192,6 +2194,9 @@ async function main(): Promise<void> {
     messenger,
     botChatStore,
     getAccountName: accountDisplayName,
+    writeApprovalSignal: (requestId, approved, payload) =>
+      writeApprovalSignal({ writeFile, readFile }, requestId, approved, payload),
+    triggerApprovedDispatch: triggerPublishDispatchOnApprove,
     // 陪伴界面（edge-companion-ui 8.1）：候审即推 pending（发布卡自动展开到「等你确认」）。
     notifyPublishPending: (accountId, recordId, title) =>
       uiSnapshotService.pushPublishState(accountId, recordId, 'pending', title),
@@ -2229,6 +2234,30 @@ async function main(): Promise<void> {
         riskStore.recordInteraction(accountId, noteId, action, Date.now()).catch(() => {}),
     }),
     ...(commentApprovalEnabled ? { approval: commentApproval } : {}),
+    autoApproveNotify: async ({ requestId, noteId, text, title, authorName, accountId, accountName, contactIncluded }) => {
+      const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
+      if (!chatId) {
+        throw new Error('auto_approve_chat_not_configured');
+      }
+      const displayName = accountName?.trim() || (accountId ? accountDisplayName(accountId) : undefined);
+      const target = title?.trim() || authorName?.trim() || '目标内容';
+      const preview = text.replace(/\s+/g, ' ').trim().slice(0, 160) || '（空）';
+      await messenger.sendCard(
+        chatId,
+        buildCommandResultCard({
+          command: contactIncluded ? '排期联系评论（免审）' : '排期评论（免审）',
+          ok: true,
+          level: 'success',
+          title: contactIncluded ? '排期联系评论已免审提交' : '排期评论已免审提交',
+          message:
+            `后台排期已开启免审，评论终稿已生成并进入发布步骤；下发前仍会核对页面、去重和边端结果。\n` +
+            `**目标**：${target}\n**正文预览**：${preview}`,
+          accountId,
+          accountName: displayName,
+        }),
+      );
+      console.log(`[comment] 免审通知已发 account=${accountId ?? '-'} requestId=${requestId} note=${noteId}`);
+    },
     onTakeoverStart: onCommentTakeoverStart,
     onTakeoverEnd: onCommentTakeoverEnd,
     // ── facebook-scheduled-comment 2.2/2.3：FB 定向评论执行（影子先行；kill switch 默认关；真发边端能力待接入） ──
@@ -2423,20 +2452,26 @@ async function main(): Promise<void> {
         // 自动 ⊆ 活跃（用户拍板：浏览休眠格绝不自动发内容）：读浏览周历掩码，沿其 fail-open（未配=全天活跃=不限）。
         browseActiveAt: (now) => isWeekActiveAt(sessionConfigStore.weekActiveMask(), now),
         // fire-and-forget：调度器只发起；结果（成功/诚实空槽/失败）在此异步补一张飞书卡，绝不静默假成功。
-        triggerPost: async (accountId) => {
+        triggerPost: async (accountId, approvalMode) => {
           let ok = false;
           let level: 'success' | 'warning' | 'error' = 'error';
           let title = '排期发帖失败';
           let message = 'unknown';
           try {
-            const o = await publishScheduler!.triggerScheduled(accountId);
+            const o = await publishScheduler!.triggerScheduled(accountId, approvalMode);
             if (o.result === 'triggered') {
               const st = o.status;
               if (st === 'pending_approval' || st === 'published' || st === 'draft') {
                 ok = true;
                 level = 'success';
-                title = '排期发帖：草稿已生成，待飞书人审';
-                message = `status=${st}（真发仍须人审通过；未通过/超时一律不发）`;
+                title =
+                  approvalMode === 'auto_approve'
+                    ? '排期发帖：已按免审预授权提交'
+                    : '排期发帖：草稿已生成，待飞书人审';
+                message =
+                  approvalMode === 'auto_approve'
+                    ? `status=${st}（后台免审已自动授权；下发仍由发布派发器复核/执行）`
+                    : `status=${st}（真发仍须人审通过；未通过/超时一律不发）`;
               } else if (st === 'skipped') {
                 level = 'warning';
                 title = '排期发帖：本槽无新素材，本次不发';
@@ -2480,7 +2515,7 @@ async function main(): Promise<void> {
           ? {
               // 触发排期评论：自动路径 MUST 过 canDo('comment') 配额闸（手动 /comment 跳配额、人是刹车；自动无人在场）。
               // 触发回执非 ok（配额拒 / 离线 / 未绑人设 / 在跑）回黄卡如实说明；任务终态结果卡由评论链自补（postResultCard），此处绝不重复发。
-              triggerComment: async (accountId: string) => {
+              triggerComment: async (accountId: string, approvalMode) => {
                 const sendReceiptCard = async (level: 'warning' | 'error', title: string, message: string) => {
                   const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
                   if (!chatId) {
@@ -2508,7 +2543,7 @@ async function main(): Promise<void> {
                     await sendReceiptCard('warning', '排期评论：配额拒绝，本槽未触发', `风控 canDo('comment')=false（自动路径必过配额；手动 /comment 不受此限）`);
                     return;
                   }
-                  const receipt = await commentScheduler!.triggerManual(accountId, { priority: 'automatic' });
+                  const receipt = await commentScheduler!.triggerManual(accountId, { priority: 'automatic', approvalMode });
                   if (!receipt.ok) {
                     // 触发未成（离线 / 未绑人设 / 已在跑等）：如实回执；终态卡不存在（任务没开跑）。
                     await sendReceiptCard(receipt.level === 'error' ? 'error' : 'warning', `排期评论：${receipt.title}`, receipt.message);
@@ -2522,7 +2557,7 @@ async function main(): Promise<void> {
               commentedTodayCount: (accountId: string) => riskStore.countInteractionsTodayForAccount(accountId, 'comment'),
               // 联系评论两件套（change content-schedule-group-comments → generalize-contact-info）：同一评论机器 + injectContact，
               // 尝试型持久日上限——触发回执 ok（任务真开跑）即记 attempt（被人审拒/无目标也占额度，保守方向）。
-              triggerContactComment: async (accountId: string) => {
+              triggerContactComment: async (accountId: string, approvalMode) => {
                 const sendReceiptCard = async (level: 'warning' | 'error', title: string, message: string) => {
                   const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
                   if (!chatId) {
@@ -2550,7 +2585,11 @@ async function main(): Promise<void> {
                     await sendReceiptCard('warning', '排期联系评论：配额拒绝，本槽未触发', `风控 canDo('comment')=false（自动路径必过配额；手动 /comment --contact 不受此限）`);
                     return;
                   }
-                  const receipt = await commentScheduler!.triggerManual(accountId, { injectContact: true, priority: 'automatic' });
+                  const receipt = await commentScheduler!.triggerManual(accountId, {
+                    injectContact: true,
+                    priority: 'automatic',
+                    approvalMode,
+                  });
                   if (!receipt.ok) {
                     // 触发未成（缺联系方式 fail-closed / 离线 / 未绑人设 / 在跑）：透传回执如实回卡；不占尝试额度。
                     await sendReceiptCard(receipt.level === 'error' ? 'error' : 'warning', `排期联系评论：${receipt.title}`, receipt.message);

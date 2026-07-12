@@ -16,6 +16,7 @@ import { PostProcessor } from '../publish-agent/post-processor.js';
 import { overlapsAny } from '../agents/comment-de-ai-flavor.js';
 import type { CommentApprovalPort } from '../agents/comment-approval-gate.js';
 import type { NoteData } from '../agents/content-curator-role.js';
+import type { ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
 import type { NoteForComment, OnPageComment } from './comment-task-runner.js';
 
 /** 撰写口（CommentComposer.composeDraft 的窄接口，便于桩）。 */
@@ -23,12 +24,29 @@ export interface ComposerLike {
   composeDraft(note: NoteData, opts: { references?: string[]; onPageComments?: string[] }): Promise<string | null>;
 }
 
+export interface AutoApproveCommentNotificationInput {
+  requestId: string;
+  noteId: string;
+  text: string;
+  title?: string;
+  authorName?: string;
+  accountId?: string;
+  accountName?: string;
+  contactIncluded?: boolean;
+}
+
+export type AutoApproveCommentNotification = (input: AutoApproveCommentNotificationInput) => Promise<void>;
+
 export interface ComposeApproveDeps {
   composer: ComposerLike;
   /** 去 AI 味处理器；缺省 new PostProcessor({})（仅禁用词扫描、不改写）。可传带 rewrite 的实例。 */
   postProcessor?: Pick<PostProcessor, 'process'>;
   /** 人审端口；缺省（未接线）→ 一律不发（返回 null，绝不裸发）。 */
   approval?: CommentApprovalPort;
+  /** 排期审批模式；缺省 review。auto_approve 时发通知后直接授权，不等待交互审批。 */
+  approvalMode?: ContentScheduleApprovalMode;
+  /** 免审通知口；auto_approve 未接线或发送失败则 fail-closed，不发评论。 */
+  autoApproveNotify?: AutoApproveCommentNotification;
   /** 当前评论账号 id；仅用于人审卡展示。 */
   accountId?: string;
   /** 当前评论账号展示名/昵称；仅用于人审卡展示。 */
@@ -131,12 +149,38 @@ export function buildComposeAndApprove(
       log.log(`[comment-compose] 联系方式待注入 note=${note.noteId}（正文逐字 + 联系方式整段插入；人审卡展示合并终稿）`);
     }
 
-    // ④ 人审（AC-PUB）：未接线 / 超时 / 拒绝 → null（绝不裸发）。审的是 reviewText（含码合并终稿）。
+    // ④ 审批模式：review 走交互人审；auto_approve 发通知后直接授权。免审仍在生成/清洗/反照搬/联系方式拼接之后，
+    // 通知失败则 fail-closed，避免无通知裸发。
+    const requestId = `comment-${note.noteId}-${now()}`;
+    if (deps.approvalMode === 'auto_approve') {
+      if (!deps.autoApproveNotify) {
+        log.warn(`[comment-compose] 评论免审通知口未接线 note=${note.noteId} → 不发（绝不无通知裸发）`);
+        return { approved: false, reason: 'approval_send_failed' };
+      }
+      try {
+        await deps.autoApproveNotify({
+          requestId,
+          noteId: note.noteId,
+          text: reviewText,
+          title: note.title,
+          authorName: note.author,
+          accountId: deps.accountId,
+          accountName: deps.accountName,
+          contactIncluded: code != null,
+        });
+      } catch (err) {
+        log.warn(`[comment-compose] 评论免审通知失败 note=${note.noteId}：${(err as Error).message} → 不发`);
+        return { approved: false, reason: 'approval_send_failed' };
+      }
+      log.log(`[comment-compose] 免审已通知并授权 note=${note.noteId} requestId=${requestId}`);
+      return { approved: true, text, contactInfo: code };
+    }
+
+    // ⑤ 人审（AC-PUB）：未接线 / 超时 / 拒绝 → null（绝不裸发）。审的是 reviewText（含码合并终稿）。
     if (!deps.approval) {
       log.warn(`[comment-compose] 评论人审口未接线 note=${note.noteId} → 不发（绝不裸发）`);
       return { approved: false, reason: 'approval_not_wired' };
     }
-    const requestId = `comment-${note.noteId}-${now()}`;
     try {
       await deps.approval.request({
         requestId,

@@ -27,7 +27,10 @@ import type {
 import { startPanelWs, type PanelWsHandle } from './panel-ws.js';
 import type { PublishApprovalPayload } from '../feishu/index.js';
 import type { EditDraftPatch } from '../publish-agent/publish-log-store.js';
-import type { AccountContentSchedulePatch } from '../config/content-schedule-store.js';
+import {
+  isContentScheduleActionMode,
+  type AccountContentSchedulePatch,
+} from '../config/content-schedule-store.js';
 import type { RiskSignalKind, RiskQuotaLevel } from '../risk/index.js';
 import { RISK_ACTIONS } from '../risk/index.js';
 import { isKnownRole } from '../config/role-catalog.js';
@@ -1656,15 +1659,24 @@ function createRequestHandler(
       }
       const raw = (body ?? {}) as Record<string, unknown>;
       const patch: AccountContentSchedulePatch = {};
-      for (const k of ['autoEnabled', 'postEnabled', 'commentEnabled', 'contactCommentEnabled'] as const) {
-        const v = raw[k];
-        if (v === undefined) continue;
-        if (typeof v !== 'boolean') {
-          sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
-          return;
-        }
-        patch[k] = v;
-      }
+	      for (const k of ['autoEnabled', 'postEnabled', 'commentEnabled', 'contactCommentEnabled'] as const) {
+	        const v = raw[k];
+	        if (v === undefined) continue;
+	        if (typeof v !== 'boolean') {
+	          sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
+	          return;
+	        }
+	        patch[k] = v;
+	      }
+	      for (const k of ['postMode', 'commentMode', 'contactCommentMode'] as const) {
+	        const v = raw[k];
+	        if (v === undefined) continue;
+	        if (!isContentScheduleActionMode(v)) {
+	          sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
+	          return;
+	        }
+	        patch[k] = v;
+	      }
       if (raw.postDailyCap !== undefined) {
         if (typeof raw.postDailyCap !== 'number') {
           sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });

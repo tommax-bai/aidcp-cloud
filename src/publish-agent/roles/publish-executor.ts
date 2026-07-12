@@ -12,7 +12,9 @@ import type {
   ImageReferenceAudit,
 } from '../types.js';
 import type { PipelineContext } from '../pipeline-context.js';
-import { buildPublishApprovalCard } from '../../feishu/cards.js';
+import { buildCommandResultCard, buildPublishApprovalCard } from '../../feishu/cards.js';
+import type { PublishApprovalPayload } from '../../feishu/types.js';
+import type { ApprovalWriteResult } from '../../feishu/ws-receiver.js';
 import { clampTitle, firstSentence } from '../title-clamp.js';
 
 /**
@@ -56,6 +58,7 @@ export interface PublishLogStore {
 /** 飞书消息接口 */
 export interface ApprovalMessenger {
   sendApprovalCard(chatId: string, card: unknown): Promise<void>;
+  sendCard?(chatId: string, card: unknown): Promise<void>;
 }
 
 /** Bot 聊天存储接口 */
@@ -83,6 +86,14 @@ export interface PublishExecutorDeps {
   notifyPublishPending?: (accountId: string, recordId: number, title: string) => void;
   /** 账号展示名/昵称读取口；缺省时审批卡回落 accountId。 */
   getAccountName?: (accountId: string) => string | undefined;
+  /** 写发布授权信号；免审排期复用人审同一个 first-writer-wins 出口。 */
+  writeApprovalSignal?: (
+    requestId: string,
+    approved: boolean,
+    payload: PublishApprovalPayload,
+  ) => Promise<ApprovalWriteResult>;
+  /** 授权信号写入后触发既有下发段；免审不直接发布。 */
+  triggerApprovedDispatch?: (requestId: string) => void;
   /** 角色执行超时（毫秒，默认 30s）。只覆盖落库 + 发卡，无内联人审等待，故无需放大。 */
   roleTimeoutMs?: number;
   clock?: () => number;
@@ -104,6 +115,12 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
   private botChatStore?: BotChatStore;
   private notifyPublishPending?: (accountId: string, recordId: number, title: string) => void;
   private getAccountName?: (accountId: string) => string | undefined;
+  private writeApprovalSignal?: (
+    requestId: string,
+    approved: boolean,
+    payload: PublishApprovalPayload,
+  ) => Promise<ApprovalWriteResult>;
+  private triggerApprovedDispatch?: (requestId: string) => void;
 
   constructor(deps: PublishExecutorDeps) {
     super({ logger: deps.logger, clock: deps.clock });
@@ -112,6 +129,8 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     this.botChatStore = deps.botChatStore;
     this.notifyPublishPending = deps.notifyPublishPending;
     this.getAccountName = deps.getAccountName;
+    this.writeApprovalSignal = deps.writeApprovalSignal;
+    this.triggerApprovedDispatch = deps.triggerApprovedDispatch;
     // 发布门 = waitAll(['gateDecision','titleSelection','publishMetadata'])：标题没就绪不发布；标题 abort 不发布（黑板天然保证）。
     // change split-topic-roles：加 publishMetadata 为等待键——话题唯一真源为 publishMetadata.topics（finalTags 已恒空），
     //   卡/落库/下发三处话题一致，并消除原先 context.get('publishMetadata') 的取值竞态。
@@ -277,9 +296,26 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       await this.store.recordMetadata(recordId, metadataWithAudit, aiEnforced).catch(() => {});
     }
 
-    // 发飞书审批卡（带真实标题+正文+话题）。人审通过即触发下发段发「卡片上所审的这份草稿」（不重新生成）。
+    // 发飞书审批卡（review）或免审写授权信号 + 发通知卡（auto_approve）。二者都只产出待审草稿，
+    // 真正发布仍由审批信号触发的下发段完成。
     const requestId = `publish-${recordId}`;
-    const approvalCard = await this.trySendApprovalCard(assembled, title, requestId, topics, context, accountId);
+    const approvalMode = (context.get('trigger') as TriggerInput | undefined)?.approvalMode ?? 'review';
+    let approvalCard: ApprovalCardSendResult;
+    let approvalLog = '候审不让位、无超时';
+    if (approvalMode === 'auto_approve') {
+      const autoApproval = await this.tryAutoApprovePublish(assembled, title, requestId, topics, context, accountId, recordId);
+      if (autoApproval.authorized) {
+        approvalCard = autoApproval.notification;
+        approvalLog = '免审授权信号已写入，已触发下发段；通知不影响下发';
+      } else {
+        this.logger.warn(
+          `[PublishExecutor] 免审授权失败 recordId=${recordId} requestId=${requestId} error=${autoApproval.notification.error ?? '-'}，回退发送人审卡`,
+        );
+        approvalCard = await this.trySendApprovalCard(assembled, title, requestId, topics, context, accountId);
+      }
+    } else {
+      approvalCard = await this.trySendApprovalCard(assembled, title, requestId, topics, context, accountId);
+    }
 
     // 陪伴界面（edge-companion-ui 8.1）：候审状态推给在线边缘（发布卡自动展开到「等你确认」）。
     // 失败自吞（通知层 best-effort），绝不影响候审主链路。
@@ -292,8 +328,89 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     const cardStatus = approvalCard.sent
       ? `审批卡已发 source=${approvalCard.targetSource} chat=${approvalCard.targetChatId}`
       : `审批卡未送达 source=${approvalCard.targetSource}${approvalCard.error ? ` error=${approvalCard.error}` : ''}`;
-    this.logger.log(`[PublishExecutor] 草稿待审 recordId=${recordId} account=${accountId} requestId=${requestId}（${cardStatus}；候审不让位、无超时）`);
+    this.logger.log(`[PublishExecutor] 草稿待审 recordId=${recordId} account=${accountId} requestId=${requestId} mode=${approvalMode}（${cardStatus}；${approvalLog}）`);
     return { recordId, status: 'pending_approval', dispatched: false, envelope: null, completedAt: this.clock(), approvalCard };
+  }
+
+  private async tryAutoApprovePublish(
+    assembled: AssembledContent,
+    title: string,
+    requestId: string,
+    topics: string[],
+    context: PipelineContext<PipelineFields>,
+    accountId: string,
+    recordId: number,
+  ): Promise<{ authorized: boolean; notification: ApprovalCardSendResult }> {
+    if (!this.writeApprovalSignal) {
+      return { authorized: false, notification: { sent: false, targetSource: 'none', error: 'approval_signal_writer_not_configured' } };
+    }
+    const payload: PublishApprovalPayload = {
+      title,
+      content: assembled.finalContent,
+      tags: topics,
+      contentVersion: 0,
+    };
+    try {
+      const result = await this.writeApprovalSignal(requestId, true, payload);
+      const authorized = result.written || result.alreadyDecided === true;
+      if (authorized) {
+        this.triggerApprovedDispatch?.(requestId);
+      }
+      const notification = await this.trySendAutoApproveNotification(title, requestId, context, accountId, recordId, authorized);
+      if (!authorized) {
+        return {
+          authorized: false,
+          notification: {
+            ...notification,
+            error: notification.error ?? `approval_signal_already_decided(${String(result.alreadyDecided)})`,
+          },
+        };
+      }
+      return { authorized: true, notification };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`[PublishExecutor] 免审授权信号写入失败 requestId=${requestId}: ${message}`);
+      return { authorized: false, notification: { sent: false, targetSource: 'none', error: message } };
+    }
+  }
+
+  private async trySendAutoApproveNotification(
+    title: string,
+    requestId: string,
+    context: PipelineContext<PipelineFields>,
+    accountId: string,
+    recordId: number,
+    authorized: boolean,
+  ): Promise<ApprovalCardSendResult> {
+    if (!this.messenger) {
+      return { sent: false, targetSource: 'none', error: 'messenger_not_configured' };
+    }
+    const target = await this.resolveApprovalCardTarget(context);
+    if (!target.chatId) {
+      return { sent: false, targetSource: target.source, error: 'approval_chat_not_configured' };
+    }
+    const message = authorized
+      ? `后台排期已开启免审，草稿已自动授权并交由发布派发器继续执行。\n**草稿**：${recordId}\n**标题**：${title}`
+      : `后台排期尝试免审授权，但授权信号未生效。\n**草稿**：${recordId}\n**标题**：${title}`;
+    const card = buildCommandResultCard({
+      command: '排期发帖（免审）',
+      ok: authorized,
+      level: authorized ? 'success' : 'warning',
+      title: authorized ? '排期发帖已免审提交' : '排期发帖免审未生效',
+      message,
+      accountId,
+      accountName: this.getAccountName?.(accountId),
+    });
+    try {
+      const send = this.messenger.sendCard ?? this.messenger.sendApprovalCard;
+      await send.call(this.messenger, target.chatId, card);
+      this.logger.log(`[PublishExecutor] 免审通知已发 source=${target.source} chat=${target.chatId} requestId=${requestId}`);
+      return { sent: true, targetChatId: target.chatId, targetSource: target.source };
+    } catch (err) {
+      const messageText = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`[PublishExecutor] 发免审通知失败 source=${target.source} chat=${target.chatId}: ${messageText}`);
+      return { sent: false, targetChatId: target.chatId, targetSource: target.source, error: messageText };
+    }
   }
 
   private withReferenceImageAudit(

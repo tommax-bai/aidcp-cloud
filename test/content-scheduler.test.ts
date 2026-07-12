@@ -17,6 +17,28 @@ const OFFSET = offsetMinute(ACC, BASE_DAY, 'post');
 const NOW_HIT = new Date(2026, 0, 5, 10, OFFSET, 0);
 const NOW_MISS = new Date(2026, 0, 5, 10, (OFFSET + 1) % 60, 0);
 
+function scheduleView(overrides: Partial<ContentScheduleView> = {}): ContentScheduleView {
+  const next: ContentScheduleView = {
+    autoEnabled: true,
+    postEnabled: true,
+    postMode: 'review',
+    postDailyCap: 2,
+    commentEnabled: false,
+    commentMode: 'off',
+    commentDailyCap: 0,
+    contactCommentEnabled: false,
+    contactCommentMode: 'off',
+    contactCommentDailyCap: 0,
+    effectiveMask: FULL,
+    ...overrides,
+  };
+  if (overrides.postMode === undefined) next.postMode = next.postEnabled ? 'review' : 'off';
+  if (overrides.commentMode === undefined) next.commentMode = next.commentEnabled ? 'review' : 'off';
+  if (overrides.contactCommentMode === undefined)
+    next.contactCommentMode = next.contactCommentEnabled ? 'review' : 'off';
+  return next;
+}
+
 interface State {
   online: string[];
   view: ContentScheduleView;
@@ -34,7 +56,7 @@ function mk(overrides: Partial<State> = {}) {
   const calls: string[] = [];
   const state: State = {
     online: [ACC],
-    view: { autoEnabled: true, postEnabled: true, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL },
+    view: scheduleView(),
     risk: 'normal',
     posted: 0,
     pending: false,
@@ -82,6 +104,26 @@ test('content-scheduler: happy path — 命中偏移分钟 + 各闸通过 → �
   assert.deepEqual(calls, [ACC]);
 });
 
+test('content-scheduler: 三档模式透传 — postMode=auto_approve 下发给 triggerPost', async () => {
+  let seenMode: string | undefined;
+  const deps: ContentSchedulerDeps = {
+    onlineAccounts: () => [ACC],
+    scheduleFor: () => scheduleView({ postMode: 'auto_approve', postEnabled: true }),
+    riskStatus: () => 'normal',
+    postedTodayCount: () => Promise.resolve(0),
+    pendingAutonomousCount: () => Promise.resolve(0),
+    isPublishBusy: () => false,
+    triggerPost: (_id, mode) => {
+      seenMode = mode;
+      return Promise.resolve();
+    },
+    now: () => NOW_HIT.getTime(),
+    logger: { warn: () => {} },
+  };
+  await new ContentScheduler(deps).onTick();
+  assert.equal(seenMode, 'auto_approve');
+});
+
 test('content-scheduler: 分钟未命中偏移 → 不触发', async () => {
   const { scheduler, calls } = mk({ nowMs: NOW_MISS.getTime() });
   await scheduler.onTick();
@@ -96,21 +138,21 @@ test('content-scheduler: 幂等 — 同小时格两次 tick 只触发一次', as
 });
 
 test('content-scheduler: fail-closed — 掩码 null / 非法 / 全休眠 一律不触发', async () => {
-  for (const mask of [null, 'not-a-mask', DORMANT]) {
-    const { scheduler, calls } = mk({
-      view: { autoEnabled: true, postEnabled: true, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: mask },
-    });
+	  for (const mask of [null, 'not-a-mask', DORMANT]) {
+	    const { scheduler, calls } = mk({
+	      view: scheduleView({ effectiveMask: mask }),
+	    });
     await scheduler.onTick();
     assert.deepEqual(calls, [], `掩码=${String(mask)} 应不触发（fail-closed）`);
   }
 });
 
 test('content-scheduler: 开关闸 — 总开关/发帖开关关 或 日上限0 → 不触发', async () => {
-  for (const view of [
-    { autoEnabled: false, postEnabled: true, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL },
-    { autoEnabled: true, postEnabled: false, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL },
-    { autoEnabled: true, postEnabled: true, postDailyCap: 0, commentEnabled: false, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL },
-  ] as ContentScheduleView[]) {
+	  for (const view of [
+	    scheduleView({ autoEnabled: false, postEnabled: true }),
+	    scheduleView({ postEnabled: false }),
+	    scheduleView({ postDailyCap: 0 }),
+	  ]) {
     const { scheduler, calls } = mk({ view });
     await scheduler.onTick();
     assert.deepEqual(calls, []);
@@ -133,7 +175,7 @@ test('content-scheduler: 发帖全局忙 → 本槽顺延（不触发）', async
 
 test('content-scheduler: 日上限原子 — 已发+在途 >= cap 不触发；未达则触发', async () => {
   // cap=2：已发1 + 在途1 = 2 → 不触发
-  let r = mk({ posted: 1, pending: true, view: { autoEnabled: true, postEnabled: true, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL } });
+	  let r = mk({ posted: 1, pending: true, view: scheduleView() });
   await r.scheduler.onTick();
   assert.deepEqual(r.calls, [], '已发1+在途1>=cap2 → 不发');
 
@@ -143,7 +185,7 @@ test('content-scheduler: 日上限原子 — 已发+在途 >= cap 不触发；�
   assert.deepEqual(r.calls, [], '已发2>=cap2 → 不发');
 
   // cap=1：已发0+在途0 → 触发
-  r = mk({ posted: 0, pending: false, view: { autoEnabled: true, postEnabled: true, postDailyCap: 1, commentEnabled: false, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL } });
+	  r = mk({ posted: 0, pending: false, view: scheduleView({ postDailyCap: 1 }) });
   await r.scheduler.onTick();
   assert.deepEqual(r.calls, [ACC], '未达上限 → 发');
 });
@@ -173,9 +215,9 @@ test('content-scheduler: 发帖全局串行 — 同 tick 内两账号撞同偏�
   const nowMs = new Date(2026, 0, 5, 10, off, 0).getTime();
 
   const calls: string[] = [];
-  const state: State = {
-    online: [a, b],
-    view: { autoEnabled: true, postEnabled: true, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL },
+	  const state: State = {
+	    online: [a, b],
+	    view: scheduleView(),
     risk: 'normal',
     posted: 0,
     pending: false,
@@ -206,9 +248,9 @@ test('content-scheduler: 重入护栏 — 上轮未完时并发 tick 被跳过�
   const gate = new Promise<void>((res) => (release = res));
   // 让第一轮卡在 cap 检查（postedTodayCount 挂住），期间发第二轮 tick。
   const calls: string[] = [];
-  const state: State = {
-    online: [ACC],
-    view: { autoEnabled: true, postEnabled: true, postDailyCap: 2, commentEnabled: false, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL },
+	  const state: State = {
+	    online: [ACC],
+	    view: scheduleView(),
     risk: 'normal',
     posted: 0,
     pending: false,
@@ -259,9 +301,9 @@ const C_OFFSET = offsetMinute(ACC, BASE_DAY, 'comment');
 const C_NOW_HIT = new Date(2026, 0, 5, 10, C_OFFSET, 0);
 
 function mkC(overrides: Partial<CState> = {}) {
-  const fired: string[] = []; // 'post:<id>' / 'comment:<id>'
-  const st: CState = {
-    view: { autoEnabled: true, postEnabled: false, postDailyCap: 0, commentEnabled: true, commentDailyCap: 2, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL },
+	  const fired: string[] = []; // 'post:<id>' / 'comment:<id>'
+	  const st: CState = {
+	    view: scheduleView({ postEnabled: false, postDailyCap: 0, commentEnabled: true, commentDailyCap: 2 }),
     commentBusy: false,
     commentSent: 0,
     nowMs: C_NOW_HIT.getTime(),
@@ -304,8 +346,8 @@ test('content-scheduler/comment: happy path — 命中评论偏移分钟 → tri
 test('content-scheduler/comment: 动作幂等互不吞 — 发帖触发后同小时评论槽照常', async () => {
   // 两动作都开；先在 post 偏移分钟 tick（fire post），再把分钟拨到 comment 偏移 tick（fire comment）。
   assert.notEqual(OFFSET, C_OFFSET, '本账号两动作偏移恰好相同则换测试账号（哈希域 60，此账号已知不同）');
-  const { scheduler, st, fired } = mkC({
-    view: { autoEnabled: true, postEnabled: true, postDailyCap: 2, commentEnabled: true, commentDailyCap: 2, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL },
+	  const { scheduler, st, fired } = mkC({
+	    view: scheduleView({ postEnabled: true, postDailyCap: 2, commentEnabled: true, commentDailyCap: 2 }),
     nowMs: NOW_HIT.getTime(), // post 偏移分钟
   });
   await scheduler.onTick();
@@ -342,18 +384,9 @@ test('content-scheduler/join: join 与 comment 共用账号级单飞，join 在�
     commentBusy: false,
     commentedToday: 0,
   };
-  const deps: ContentSchedulerDeps = {
-    onlineAccounts: () => [ACC],
-    scheduleFor: () => ({
-      autoEnabled: true,
-      postEnabled: false,
-      postDailyCap: 0,
-      commentEnabled: true,
-      commentDailyCap: 2,
-      contactCommentEnabled: false,
-      contactCommentDailyCap: 0,
-      effectiveMask: FULL,
-    }),
+	const deps: ContentSchedulerDeps = {
+	  onlineAccounts: () => [ACC],
+	  scheduleFor: () => scheduleView({ postEnabled: false, postDailyCap: 0, commentEnabled: true, commentDailyCap: 2 }),
     riskStatus: () => 'normal',
     postedTodayCount: () => Promise.resolve(0),
     pendingAutonomousCount: () => Promise.resolve(0),
@@ -388,9 +421,9 @@ test('content-scheduler/cross-guard: 正在评论（isCommentBusy）→ 后台�
   const joinOffset = offsetMinute(ACC, BASE_DAY, 'join');
   const joinNow = new Date(2026, 0, 5, 10, joinOffset, 0);
   const fired: string[] = [];
-  const deps: ContentSchedulerDeps = {
-    onlineAccounts: () => [ACC],
-    scheduleFor: () => ({ autoEnabled: true, postEnabled: false, postDailyCap: 0, commentEnabled: false, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL }),
+	const deps: ContentSchedulerDeps = {
+	  onlineAccounts: () => [ACC],
+	  scheduleFor: () => scheduleView({ postEnabled: false, postDailyCap: 0 }),
     riskStatus: () => 'normal',
     postedTodayCount: () => Promise.resolve(0),
     pendingAutonomousCount: () => Promise.resolve(0),
@@ -412,9 +445,9 @@ test('content-scheduler/cross-guard: 正在加群（isJoinBusy）→ 后台自�
   const commentOffset = offsetMinute(ACC, BASE_DAY, 'comment');
   const commentNow = new Date(2026, 0, 5, 10, commentOffset, 0);
   const fired: string[] = [];
-  const deps: ContentSchedulerDeps = {
-    onlineAccounts: () => [ACC],
-    scheduleFor: () => ({ autoEnabled: true, postEnabled: false, postDailyCap: 0, commentEnabled: true, commentDailyCap: 2, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL }),
+	const deps: ContentSchedulerDeps = {
+	  onlineAccounts: () => [ACC],
+	  scheduleFor: () => scheduleView({ postEnabled: false, postDailyCap: 0, commentEnabled: true, commentDailyCap: 2 }),
     riskStatus: () => 'normal',
     postedTodayCount: () => Promise.resolve(0),
     pendingAutonomousCount: () => Promise.resolve(0),
@@ -438,10 +471,10 @@ test('content-scheduler/comment: 三件套未注入 — 评论开着也整体跳
 });
 
 test('content-scheduler/comment: 开关闸 — commentEnabled 关或 cap 0 不触发', async () => {
-  for (const view of [
-    { autoEnabled: true, postEnabled: false, postDailyCap: 0, commentEnabled: false, commentDailyCap: 2, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL },
-    { autoEnabled: true, postEnabled: false, postDailyCap: 0, commentEnabled: true, commentDailyCap: 0, contactCommentEnabled: false, contactCommentDailyCap: 0, effectiveMask: FULL },
-  ] as ContentScheduleView[]) {
+	for (const view of [
+	  scheduleView({ postEnabled: false, postDailyCap: 0, commentEnabled: false, commentDailyCap: 2 }),
+	  scheduleView({ postEnabled: false, postDailyCap: 0, commentEnabled: true, commentDailyCap: 0 }),
+	]) {
     const { scheduler, fired } = mkC({ view });
     await scheduler.onTick();
     assert.deepEqual(fired, []);
@@ -462,13 +495,14 @@ interface GState {
 }
 
 function mkG(overrides: Partial<GState> = {}) {
-  const fired: string[] = [];
-  const st: GState = {
-    view: {
-      autoEnabled: true, postEnabled: false, postDailyCap: 0,
-      commentEnabled: false, commentDailyCap: 0,
-      contactCommentEnabled: true, contactCommentDailyCap: 3, effectiveMask: FULL,
-    },
+	  const fired: string[] = [];
+	  const st: GState = {
+	    view: scheduleView({
+	      postEnabled: false,
+	      postDailyCap: 0,
+	      contactCommentEnabled: true,
+	      contactCommentDailyCap: 3,
+	    }),
     commentBusy: false,
     attempts: 0,
     nowMs: G_NOW_HIT.getTime(),
@@ -524,17 +558,17 @@ test('content-scheduler/contact: 两件套未注入 — 联系评论开着也整
 });
 
 test('content-scheduler/contact: 开关闸 — contactCommentEnabled 关或 cap 0 不触发', async () => {
-  for (const patch of [
-    { contactCommentEnabled: false, contactCommentDailyCap: 3 },
-    { contactCommentEnabled: true, contactCommentDailyCap: 0 },
-  ]) {
-    const { scheduler, fired } = mkG({
-      view: {
-        autoEnabled: true, postEnabled: false, postDailyCap: 0,
-        commentEnabled: false, commentDailyCap: 0,
-        effectiveMask: FULL, ...patch,
-      } as ContentScheduleView,
-    });
+	  for (const patch of [
+	    { contactCommentEnabled: false, contactCommentDailyCap: 3 },
+	    { contactCommentEnabled: true, contactCommentDailyCap: 0 },
+	  ]) {
+	    const { scheduler, fired } = mkG({
+	      view: scheduleView({
+	        postEnabled: false,
+	        postDailyCap: 0,
+	        ...patch,
+	      }),
+	    });
     await scheduler.onTick();
     assert.deepEqual(fired, []);
   }
@@ -542,12 +576,13 @@ test('content-scheduler/contact: 开关闸 — contactCommentEnabled 关或 cap 
 
 test('content-scheduler/contact: 幂等独立 — 联系评论槽不被同小时其它动作吞（发帖先触发后联系评论照常）', async () => {
   assert.notEqual(OFFSET, G_OFFSET, '两动作偏移已知不同');
-  const { scheduler, st, fired } = mkG({
-    view: {
-      autoEnabled: true, postEnabled: true, postDailyCap: 2,
-      commentEnabled: false, commentDailyCap: 0,
-      contactCommentEnabled: true, contactCommentDailyCap: 3, effectiveMask: FULL,
-    },
+	  const { scheduler, st, fired } = mkG({
+	    view: scheduleView({
+	      postEnabled: true,
+	      postDailyCap: 2,
+	      contactCommentEnabled: true,
+	      contactCommentDailyCap: 3,
+	    }),
     nowMs: NOW_HIT.getTime(), // post 偏移分钟
   });
   await scheduler.onTick();

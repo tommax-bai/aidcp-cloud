@@ -1,5 +1,6 @@
 import type { Soul } from '../soul/types.js';
 import type { CuratedReferenceImageFormGuess } from '../cache/curated-content-store.js';
+import type { ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
 
 // ─── 从 publish/types.ts 迁移的类型 ────────────────────────────────────────────
 
@@ -110,6 +111,8 @@ export interface PublishRecord {
 
 /** 触发器输入度量 */
 export interface TriggerInput {
+  /** 排期审批模式；缺省 review，手动触发保持原有人审语义。 */
+  approvalMode?: ContentScheduleApprovalMode;
   metrics: {
     hoursSinceLastPublish: number;
     newConceptCount: number;

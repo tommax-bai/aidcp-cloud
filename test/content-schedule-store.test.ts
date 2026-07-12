@@ -32,14 +32,15 @@ function makePoolStub(opts: { accountExists?: boolean; myGroupCode?: string | nu
       }
       if (s.startsWith('INSERT INTO account_content_schedule')) {
         return {
-          rows: [{
-            account_id: params[0], auto_enabled: params[1], post_enabled: params[2],
-            post_daily_cap: params[3], comment_enabled: params[4], comment_daily_cap: params[5],
-            contact_comment_enabled: params[6], contact_comment_daily_cap: params[7],
-            content_active_mask: params[8],
-            updated_at: new Date('2026-07-03T00:00:00Z'), updated_by: params[9],
-          }],
-        };
+	          rows: [{
+	            account_id: params[0], auto_enabled: params[1], post_enabled: params[2],
+	            post_daily_cap: params[3], comment_enabled: params[4], comment_daily_cap: params[5],
+	            contact_comment_enabled: params[6], contact_comment_daily_cap: params[7],
+	            post_mode: params[8], comment_mode: params[9], contact_comment_mode: params[10],
+	            content_active_mask: params[11],
+	            updated_at: new Date('2026-07-03T00:00:00Z'), updated_by: params[12],
+	          }],
+	        };
       }
       throw new Error(`pool stub 未覆盖的 SQL：${s.slice(0, 60)}`);
     },
@@ -59,13 +60,16 @@ test('store: 未配 = 完全不自动（零回归默认）', async () => {
   const { store } = await makeStore();
   const s = store.effectiveScheduleFor('acc-1');
   assert.deepEqual(s, {
-    autoEnabled: false,
-    postEnabled: false,
-    postDailyCap: 0,
-    commentEnabled: false,
-    commentDailyCap: 0,
-    contactCommentEnabled: false,
-    contactCommentDailyCap: 0,
+	    autoEnabled: false,
+	    postEnabled: false,
+	    postMode: 'off',
+	    postDailyCap: 0,
+	    commentEnabled: false,
+	    commentMode: 'off',
+	    commentDailyCap: 0,
+	    contactCommentEnabled: false,
+	    contactCommentMode: 'off',
+	    contactCommentDailyCap: 0,
     effectiveMask: null,
   });
   assert.equal(store.getGlobal(), null);

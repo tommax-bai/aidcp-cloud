@@ -59,7 +59,7 @@ describe('buildComposeAndApprove', () => {
     assert.deepEqual(seen, ['学到了', '求教程']);
   });
 
-  it('人审请求携带账号信息与用户昵称，供审批卡显示昵称', async () => {
+	  it('人审请求携带账号信息与用户昵称，供审批卡显示昵称', async () => {
     let request: { accountId?: string; accountName?: string; authorName?: string } | undefined;
     const step = buildComposeAndApprove({
       composer: composer('这套检索链路很实在'),
@@ -77,9 +77,45 @@ describe('buildComposeAndApprove', () => {
     assert.equal(request?.accountId, 'acc-01');
     assert.equal(request?.accountName, 'Tmax');
     assert.equal(request?.authorName, '开源老周');
+	  });
+
+  it('免审：通知成功后直接 approved，不调用交互审批', async () => {
+    let notified:
+      | { requestId: string; text: string; accountId?: string; accountName?: string; contactIncluded?: boolean }
+      | undefined;
+    let approvalRequested = false;
+    let approvalPolled = false;
+    const step = buildComposeAndApprove({
+      composer: composer('这套检索链路很实在'),
+      accountId: 'acc-01',
+      accountName: 'Tmax',
+      approvalMode: 'auto_approve',
+      autoApproveNotify: async (input) => {
+        notified = input;
+      },
+      approval: {
+        request: async () => {
+          approvalRequested = true;
+        },
+        isApproved: async () => {
+          approvalPolled = true;
+          return true;
+        },
+      },
+      logger: { log: () => {}, warn: () => {} },
+    });
+    const result = await step(note, comments);
+    assert.ok(result.approved);
+    assert.equal(result.text, '这套检索链路很实在');
+    assert.equal(notified?.text, '这套检索链路很实在');
+    assert.equal(notified?.accountId, 'acc-01');
+    assert.equal(notified?.accountName, 'Tmax');
+    assert.equal(notified?.contactIncluded, false);
+    assert.equal(approvalRequested, false);
+    assert.equal(approvalPolled, false);
   });
 
-  it('人审口未接线 → approved:false/approval_not_wired（绝不裸发）', async () => {
+	  it('人审口未接线 → approved:false/approval_not_wired（绝不裸发）', async () => {
     const step = buildComposeAndApprove({
       composer: composer('一条评论'),
       approval: undefined,
