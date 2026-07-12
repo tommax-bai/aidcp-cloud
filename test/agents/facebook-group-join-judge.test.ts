@@ -17,6 +17,42 @@ test('FacebookGroupJoinJudge pre-click skips already-member and gated observatio
   assert.equal(calls, 0);
 });
 
+test('pending-label-audit: 中文「取消请求」文本兜底 pre-click 判 gated_skip，不依赖 pendingRequest boolean', async () => {
+  let calls = 0;
+  const judge = new FacebookGroupJoinJudge({
+    llm: { complete: async () => { calls++; return '{}'; } },
+  });
+
+  for (const label of ['取消请求', '取消加入请求', '取消申请', '已发送请求']) {
+    const r = await judge.evaluatePreClick({ mainCtaText: label, pendingRequest: false });
+    assert.equal(r.verdict, 'gated_skip', `expected gated_skip for "${label}"`);
+    assert.equal(r.reason, 'gated_or_questionnaire_signal');
+  }
+  assert.equal(calls, 0);
+});
+
+test('pending-label-audit: 中文「取消请求」文本兜底 post-click 判 pending_gated，不依赖 pendingRequest boolean', async () => {
+  let calls = 0;
+  const judge = new FacebookGroupJoinJudge({
+    llm: { complete: async () => { calls++; return '{}'; } },
+  });
+
+  const r = await judge.evaluatePostClick({ mainCtaText: '取消请求', pendingRequest: false });
+  assert.equal(r.verdict, 'pending_gated');
+  assert.equal(r.reason, 'pending_or_questionnaire_signal');
+  assert.equal(calls, 0);
+});
+
+test('pending-label-audit: 裸「取消」不触发 pending/gated 确定性判定', async () => {
+  const judge = new FacebookGroupJoinJudge();
+
+  const pre = await judge.evaluatePreClick({ mainCtaText: '取消', pendingRequest: false });
+  assert.equal(pre.verdict, 'ambiguous_skip');
+
+  const post = await judge.evaluatePostClick({ mainCtaText: '取消', pendingRequest: false });
+  assert.equal(post.verdict, 'failed');
+});
+
 test('FacebookGroupJoinJudge fails closed on low-confidence model instant_join (no clear join CTA → LLM)', async () => {
   const judge = new FacebookGroupJoinJudge({
     llm: { complete: async () => '{"verdict":"instant_join","confidence":0.4,"reason":"unclear"}' },

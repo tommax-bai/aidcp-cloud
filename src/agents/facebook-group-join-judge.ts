@@ -165,7 +165,10 @@ export class FacebookGroupJoinJudge {
     if (
       obs.questionnaireRequired ||
       obs.pendingRequest ||
-      hasAny(text, ['answer questions', 'membership questions', 'pending', 'approval', 'request to join', '回答问题', '待批准', '待审批', '申请加入'])
+      hasAny(text, [
+        'answer questions', 'membership questions', 'pending', 'approval', 'request to join',
+        '回答问题', '待批准', '待审批', '申请加入', '取消请求', '取消加入请求', '取消申请', '已发送请求',
+      ])
     ) {
       return { phase: 'pre_click', verdict: 'gated_skip', confidence: 0.95, reason: 'gated_or_questionnaire_signal' };
     }
@@ -194,7 +197,10 @@ export class FacebookGroupJoinJudge {
     if (
       obs.questionnaireRequired ||
       obs.pendingRequest ||
-      hasAny(text, ['pending', 'approval', 'request sent', 'membership questions', '待批准', '待审批', '已申请', '回答问题'])
+      hasAny(text, [
+        'pending', 'approval', 'request sent', 'membership questions',
+        '待批准', '待审批', '已申请', '回答问题', '取消请求', '取消加入请求', '取消申请', '已发送请求',
+      ])
     ) {
       return { phase: 'post_click', verdict: 'pending_gated', confidence: 0.95, reason: 'pending_or_questionnaire_signal' };
     }
