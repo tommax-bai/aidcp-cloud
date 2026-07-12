@@ -66,6 +66,24 @@ export interface ClientEnvScopeRow {
   assignedAt: number;
 }
 
+/** 某环境被归属到的一个客户（管理侧全局注册表用；仅 userId + name，绝不含 key）。 */
+export interface ClientEnvAssignee {
+  userId: string;
+  name: string;
+}
+
+/**
+ * 管理侧全局环境注册表的一行（change client-user-env-picker）：系统已知的一个环境 + 它被分配给哪些客户。
+ * 跨用户聚合，**仅供内部 panel 端点消费**（见 listAllEnvironments 红线）。
+ */
+export interface ClientEnvironmentView {
+  envKey: string;
+  label: string | null;
+  platform: string | null;
+  assignees: ClientEnvAssignee[];
+  assigneeCount: number;
+}
+
 export type CreateUserResult =
   | { ok: true; user: ClientUserView; plainKey: string }
   | { ok: false; reason: 'invalid_name' | 'name_taken' };
@@ -305,6 +323,47 @@ export class ClientUserStore {
   /** 读某客户归属（管理端）。 */
   async getScope(userId: string): Promise<ClientEnvScopeRow[]> {
     return this.listEnvScope(userId);
+  }
+
+  /**
+   * 管理侧全局环境注册表：系统已知的全部环境（在 client_env_scope 出现过的 distinct env_key）+
+   * 每个环境被归属到的客户清单（含名）+ 归属人数。label/platform 取任一非空代表值（按 assigned_at 取最新）。
+   *
+   * **红线（N2）**：这是**跨用户聚合**读，与「客户可达读只有吃 userId 的 scoped 方法」直接冲突——
+   * **只准接入受内部 JWT 的 panel 端点（GET /api/client-environments），绝不注入 client-auth-server**，
+   * 否则客户可拿到跨客户归属、结构性泄漏。缺表（首启竞态）fail-closed 回落空数组。
+   */
+  async listAllEnvironments(): Promise<ClientEnvironmentView[]> {
+    try {
+      const { rows } = await this.pool.query<{
+        env_key: string;
+        label: string | null;
+        platform: string | null;
+        assignees: { userId: string; name: string }[] | null;
+      }>(
+        `SELECT s.env_key,
+                (array_agg(s.label ORDER BY s.assigned_at DESC) FILTER (WHERE s.label IS NOT NULL))[1] AS label,
+                (array_agg(s.platform ORDER BY s.assigned_at DESC) FILTER (WHERE s.platform IS NOT NULL))[1] AS platform,
+                json_agg(json_build_object('userId', u.user_id, 'name', u.name) ORDER BY u.name) AS assignees
+         FROM client_env_scope s
+         JOIN client_users u ON u.user_id = s.user_id
+         GROUP BY s.env_key
+         ORDER BY s.env_key ASC`,
+      );
+      return rows.map((r) => {
+        const assignees = (r.assignees ?? []).map((a) => ({ userId: a.userId, name: a.name }));
+        return {
+          envKey: r.env_key,
+          label: r.label,
+          platform: r.platform,
+          assignees,
+          assigneeCount: assignees.length,
+        };
+      });
+    } catch (err) {
+      if (isMissingTable(err)) return [];
+      throw err;
+    }
   }
 
   /**

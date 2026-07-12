@@ -353,6 +353,17 @@ function createRequestHandler(
       return;
     }
 
+    // 管理侧全局环境注册表（change client-user-env-picker）：受**内部** JWT。跨用户聚合读，
+    // **只在此处消费、绝不接客户鉴权服务**（守 N2：客户可达读仍只有吃 userId 的 scoped 方法）。
+    if (method === 'GET' && url === '/api/client-environments') {
+      if (!deps.clientUsers) {
+        sendJson(res, 503, { error: 'client_users_unavailable' });
+        return;
+      }
+      sendJson(res, 200, { environments: await deps.clientUsers.listAllEnvironments() });
+      return;
+    }
+
     // ── 对外客户管理（change edge-client-customer-auth）：受**内部** JWT 保护 ──────────
     // 客户令牌用另一密钥,到不了这里（上方验签即 bad_signature）。列表/读取绝不含 key/hash；
     // 明文 key 仅 create/rotate 一次性回显。未注入 clientUsers 则 503。
