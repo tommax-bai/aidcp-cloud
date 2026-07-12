@@ -142,7 +142,7 @@ test('startOnPersonaBound 人设仍未真绑 → 诚实不起、不发重驱（�
 
 test('未绑人设但库内真名空：登录即采真名（恰一次 profile_open{direct}），绝不浏览（无 open_note/like/scroll）——红线', () => {
   const { d, commands } = make({ isPersonaBound: () => false });
-  d.setCurrentAccountId('acctCap'); // 真实账号 + 库内昵称空（getNickname 缺省→null）→ pendingNicknameCapture=true
+  d.setCurrentAccountId('acctCap'); // XHS 真实账号启动 → pendingNicknameCapture=true，启动期刷新昵称
   d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'acctCap', ts: 1 }); // 启动闸拒绝浏览会话，但登录引导采集武装
   assert.equal(d.active, false, '未开浏览会话（不浏览）');
   // 边缘就绪（自发上报 page.cards）→ 驱动一次本人主页采集；浏览反应链未接线，绝不产生浏览指令

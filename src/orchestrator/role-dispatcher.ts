@@ -672,9 +672,10 @@ export class RoleDispatcher {
   /** 设置该连接（运行时）的当前账号（multi-account-node-support D4：去掉 default 钉死，由连接真实账号设入）。 */
   setCurrentAccountId(accountId: string): void {
     this.currentAccountId = accountId;
-    // 握手同步算「需采集登录账号真实昵称」（change account-real-nickname）：账号握手已保证为真实 userid，库内昵称 NULL 即采。
-    // 同步算（不 await PG）→ 存 SessionContext 布尔，杜绝会话开始再 await 留下的异步窗口（在途 page.cards 会插 open_note 绕路）。
-    this.sessionContext.setPendingNicknameCapture(this.getNickname(accountId) === null);
+    // XHS 启动期刷新登录账号真实昵称（unbind-persona-refresh-nickname）：账号握手已保证为真实 userid，
+    // 每次连接启动均武装一次已验证昵称采集；采到非空且与库内不同由 accountStore.setNickname 覆盖展示名。
+    // Facebook 走数字 id 校验后的 hello accountNickname 更新，不走 XHS profile_open 采集链路。
+    this.sessionContext.setPendingNicknameCapture(!this.accountPlatform || this.accountPlatform === 'xiaohongshu');
   }
 
   /** 当前账号（供测试 / 观测）。 */
@@ -914,6 +915,7 @@ export class RoleDispatcher {
       ...commonOptions,
       sessionContext: this.sessionContext,
       getAccountId: () => this.currentAccountId,
+      getNickname: this.getNickname,
       ...(this.setNickname ? { setNickname: this.setNickname } : {}),
       setTimeoutFn: this.setTimeoutFn,
       clearTimeoutFn: this.clearTimeoutFn,

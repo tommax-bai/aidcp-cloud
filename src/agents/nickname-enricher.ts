@@ -1,8 +1,8 @@
 /**
  * NicknameEnricher — 登录账号真实昵称采集角色（change account-real-nickname）。
  *
- * 职责（纯云端编排，edge 纯执行）：在「真实账号 + 库内昵称空」时，会话开始驱动一次本人主页访问采昵称、
- * 读回上报、单写持久化、干净回 feed。决策/编排全在此（铁律：edge 只执行原子操作、绝不判定）。
+ * 职责（纯云端编排，edge 纯执行）：XHS 真实账号启动任务时驱动一次本人主页访问采昵称，
+ * 读回上报、差异持久化、干净回 feed。决策/编排全在此（铁律：edge 只执行原子操作、绝不判定）。
  *
  * 消费事件：
  *   - feed.entered{trigger:'session_start'}：需采集 → 同一 tick 暂停自主浏览 + 置在途标记 + 武装 ~20s 超时
@@ -16,7 +16,8 @@
  * 在途标记仅用于 chokepoint 放行 self profile_open + 超时 + 防重复收尾，绝不用于持久化/隔离身份判定。
  *
  * 有界 / 幂等 / 中性：~20s 超时兜底（edge 静默/CDP 崩不困死会话，最坏滞留从 1h→~20s）；采空 K 次退避
- * （genuinely 抽不到的主页不永绕）；采到非空即置 pending=false（本连接此后不再绕）；profile_open 不触风控/预算/节奏。
+ * （genuinely 抽不到的主页不永绕）；采到非空后保留启动刷新开关，后续任务启动仍可检测昵称变化；
+ * profile_open 不触风控/预算/节奏。
  *
  * 不使用 LLM，纯确定性执行。
  */
@@ -30,6 +31,8 @@ export interface NicknameEnricherDeps {
   sessionContext: SessionContext;
   /** 该连接当前账号（= 本人主页 id）；会话开始时已由握手 setCurrentAccountId 设为真实账号。 */
   getAccountId: () => string;
+  /** 读取系统已记录昵称；用于启动刷新时避免同名重复写库。 */
+  getNickname?: (accountId: string) => string | null;
   /** 持久化昵称（拒空、单写 upsert）；缺省（无 PG）→ 不持久化。 */
   setNickname?: (accountId: string, nickname: string) => Promise<void> | void;
   /** 计时器注入（测试桩）；生产用全局 setTimeout/clearTimeout（unref，不阻进程退出）。 */
@@ -41,6 +44,7 @@ export class NicknameEnricher extends BaseRole {
   readonly roleName: RoleName = 'nickname_enricher';
   private readonly ctx: SessionContext;
   private readonly getAccountId: () => string;
+  private readonly getNicknameFn?: (accountId: string) => string | null;
   private readonly setNicknameFn?: (accountId: string, nickname: string) => Promise<void> | void;
   private readonly setTimeoutFn: (fn: () => void, ms: number) => unknown;
   private readonly clearTimeoutFn: (handle: unknown) => void;
@@ -52,6 +56,7 @@ export class NicknameEnricher extends BaseRole {
     super(options);
     this.ctx = options.sessionContext;
     this.getAccountId = options.getAccountId;
+    this.getNicknameFn = options.getNickname;
     this.setNicknameFn = options.setNickname;
     this.setTimeoutFn = options.setTimeoutFn ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimeoutFn = options.clearTimeoutFn ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
@@ -88,7 +93,7 @@ export class NicknameEnricher extends BaseRole {
 
   /** 武装采集（两触发共用）：守卫不过即 no-op；置挂起/在途/超时，命令延到边缘就绪（首个 page.cards）再发。 */
   private arm(via: string): void {
-    if (!this.ctx.pendingNicknameCapture) return; // 库内已有昵称 → 零扰动（已采过的不绕）
+    if (!this.ctx.pendingNicknameCapture) return; // 非 XHS 或本连接无需刷新 → 零扰动
     if (this.ctx.selfCaptureInFlight) return; // 已在采集中，不重入
     if (this.ctx.selfCaptureAttempts >= this.ctx.selfCaptureMaxAttempts) return; // 采空退避，不永绕
     const accountId = this.getAccountId();
@@ -127,12 +132,16 @@ export class NicknameEnricher extends BaseRole {
 
     const nick = (detail.nickname ?? '').trim();
     if (nick) {
-      // 单写持久化（拒空、不阻塞回 feed）：失败仅告警；采到 → 本连接此后 pending=false（幂等，不再绕）。
-      void Promise.resolve(this.setNicknameFn?.(accountId, nick)).catch((err) =>
-        this.log(`持久化昵称失败（不阻塞回 feed）account=${accountId}: ${(err as Error).message}`),
-      );
-      this.ctx.setPendingNicknameCapture(false);
-      this.log(`本人昵称采集成功 account=${accountId} nickname「${nick}」→ 已持久化、回 feed`);
+      // 单写持久化（拒空、不阻塞回 feed）：失败仅告警；pending 保持 true，让后续任务启动继续刷新昵称。
+      const current = (this.getNicknameFn?.(accountId) ?? '').trim();
+      if (current !== nick) {
+        void Promise.resolve(this.setNicknameFn?.(accountId, nick)).catch((err) =>
+          this.log(`持久化昵称失败（不阻塞回 feed）account=${accountId}: ${(err as Error).message}`),
+        );
+        this.log(`本人昵称采集成功 account=${accountId} nickname「${nick}」→ 已${current ? '更新' : '持久化'}、回 feed`);
+      } else {
+        this.log(`本人昵称采集成功 account=${accountId} nickname「${nick}」→ 与系统昵称一致，不重复写、回 feed`);
+      }
     } else {
       const n = this.ctx.incrementSelfCaptureAttempts();
       this.log(`本人昵称采集为空（诚实空不写，DB 保持 NULL 待重试）account=${accountId} 第 ${n}/${this.ctx.selfCaptureMaxAttempts} 次 → 回 feed`);

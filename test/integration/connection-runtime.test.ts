@@ -193,8 +193,21 @@ test('facebook-scheduled-comment 2.9：hello 昵称在平台校验后写入空�
   assert.deepEqual(h.nicknameWrites, [{ accountId: 'fbA', nickname: 'Test User' }]);
 });
 
-test('facebook-scheduled-comment 2.9：hello 昵称不覆盖已有昵称', async () => {
+test('facebook-scheduled-comment 2.9：hello 已验证昵称覆盖已有不同昵称', async () => {
   const h = makeHarness({ fbA: 'facebook' }, { fbA: 'Existing Name' });
+  const outcome = await h.registry.onHandshake({
+    sessionId: 's1',
+    edgeId: 'eFB',
+    accountId: 'fbA',
+    platform: 'facebook',
+    accountNickname: 'Test User',
+  });
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(h.nicknameWrites, [{ accountId: 'fbA', nickname: 'Test User' }]);
+});
+
+test('facebook-scheduled-comment 2.9：hello 昵称与已有昵称相同则不重复写', async () => {
+  const h = makeHarness({ fbA: 'facebook' }, { fbA: 'Test User' });
   const outcome = await h.registry.onHandshake({
     sessionId: 's1',
     edgeId: 'eFB',

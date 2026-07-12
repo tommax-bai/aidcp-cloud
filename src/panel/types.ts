@@ -698,7 +698,7 @@ export interface PersonaDetailView {
 
 export type PersonaSetResult =
   | { ok: true; view: PersonaConfigCatalogView }
-  | { ok: false; reason: 'unknown_account' | 'persona_invalid' | 'persona_required' };
+  | { ok: false; reason: 'unknown_account' | 'persona_invalid' };
 
 export interface PanelPersonaConfig {
   /** 账号 + 各自人设生效值/来源/审计（列出所有账号，含未绑定者）。 */
@@ -706,8 +706,8 @@ export interface PanelPersonaConfig {
   /** 单账号人设详情（编辑回显）；未知账号返回 null。 */
   getDetail(accountId: string): Promise<PersonaDetailView | null>;
   /**
-   * 写某账号人设。人设必填（persona-driven-content-pipeline）：空文本以 persona_required 诚实拒绝
-   * （不再有「清空回落」语义）；非法人设以 persona_invalid 诚实拒绝绝不落库。写后回真态目录。
+   * 写某账号人设。空文本保存为显式解绑（source=none）；非法人设以 persona_invalid 诚实拒绝绝不落库。
+   * 写后回真态目录。
    */
   setPersona(accountId: string, persona: string, updatedBy: string): Promise<PersonaSetResult>;
 }

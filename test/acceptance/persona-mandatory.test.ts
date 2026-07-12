@@ -1,10 +1,10 @@
 /**
- * 验收用例 AC-PERSONA-* — 人设必填 / 系统不存在默认兜底人设（change persona-driven-content-pipeline）。
+ * 验收用例 AC-PERSONA-* — 强制账号人设 / 系统不存在默认兜底人设（change persona-driven-content-pipeline）。
  *
  * 红线：账号无人设时，解析器返回明确「无人设」信号（null，绝不返回默认 soul）；
  * 浏览 / 发布 / 评论三类任务在入口诚实拒绝（实现层拒绝原因统一为 needs_persona_setup，
  * 即 spec 所称 no_persona 信号的落地口径），绝不以任何默认 / 替代人设运行；
- * 面板写入空人设被拒（persona_required），不存在「清空回落默认」。
+ * 面板写入空人设显式解绑，仍不存在「清空回落默认」。
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -39,7 +39,7 @@ const mockSoul: Soul = {
 
 const silent = { log() {}, warn() {}, error() {} };
 
-describe('AC-PERSONA 人设必填（系统不存在默认/兜底人设）', () => {
+describe('AC-PERSONA 强制账号人设（系统不存在默认/兜底人设）', () => {
   it('AC-PERSONA-1A 解析器：无人设/解析失败/无存储 → null 信号，绝不返回任何默认 soul、绝不抛', () => {
     // 无行 → null
     const noRow = createPersonaResolver({ store: { getForAccount: () => null } });
@@ -134,7 +134,7 @@ describe('AC-PERSONA 人设必填（系统不存在默认/兜底人设）', () =
     assert.equal(takeovers, 0, '未绑人设绝不接管边端');
   });
 
-  it('AC-PERSONA-1E 面板写入：空人设 persona_required 诚实拒绝、不落库（前端被绕过也挡住）', async () => {
+  it('AC-PERSONA-1E 面板写入：空人设显式解绑，回到未绑定且绝不回落默认', async () => {
     const rows = new Map<string, { accountId: string; persona: string; updatedAt: string | null; updatedBy: string | null }>();
     const store = {
       getRow: (id: string) => rows.get(id),
@@ -148,9 +148,11 @@ describe('AC-PERSONA 人设必填（系统不存在默认/兜底人设）', () =
       clear: async (id: string) => { rows.delete(id); },
     } as unknown as PersonaStore;
     const panel = createPersonaPanel({ store });
+    await panel.setPersona('acc-1', soulYaml, 'op');
+    assert.equal(rows.size, 1, '先有已绑定人设');
     const empty = await panel.setPersona('acc-1', '   ', 'op');
-    assert.deepEqual(empty, { ok: false, reason: 'persona_required' });
-    assert.equal(rows.size, 0, '空人设绝不落库');
+    assert.equal(empty.ok, true);
+    assert.equal(rows.size, 0, '空人设保存会删行解绑，不保留空白绑定');
     // 未绑账号在目录中如实标 none（不冒充任何默认人设为其生效人设）
     const catalog = await panel.getCatalog();
     assert.equal(catalog.accounts[0]?.source, 'none');

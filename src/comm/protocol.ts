@@ -518,7 +518,7 @@ export interface PersonaPersistPayload {
   soulYaml: string;
 }
 
-/** cloud → edge：持久化结果；失败带 reason（如 unknown_account / persona_required / persona_invalid）。 */
+/** cloud → edge：持久化结果；失败带 reason（如 unknown_account / persona_invalid）。 */
 export interface PersonaPersistResultPayload {
   ok: boolean;
   reason?: string;

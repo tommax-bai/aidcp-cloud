@@ -140,7 +140,7 @@ export class ConnectionRuntimeRegistry {
     const helloNickname = session.accountNickname?.trim();
     if (helloNickname && this.deps.setNickname) {
       const existingNickname = this.deps.getNickname?.(accountId)?.trim() ?? '';
-      if (!existingNickname) {
+      if (existingNickname !== helloNickname) {
         try {
           await Promise.resolve(this.deps.setNickname(accountId, helloNickname));
         } catch (err) {

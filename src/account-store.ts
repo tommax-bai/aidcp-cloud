@@ -257,7 +257,7 @@ export class PgAccountStore implements AccountStore {
        ON CONFLICT (account_id) DO UPDATE SET nickname = EXCLUDED.nickname`,
       [accountId, value],
     );
-    // 更新同步缓存：写后再握手（重连）即读到非空 → 不再重绕（幂等）。
+    // 更新同步缓存：后续握手 / UI 立即读到最新展示名；XHS 启动仍会继续检测平台昵称变化。
     this.nicknameCache.set(accountId, value);
   }
 

@@ -167,7 +167,7 @@ export class PersonaStore {
 
   /**
    * 清除某账号的人设（删行 → 该账号变为「未绑人设」，浏览/发布/评论入口将诚实拒绝其运行）。
-   * 写库成功才删镜像。注：面板 PUT 已不允许清空（人设必填），此方法仅供运维/测试直用。
+   * 写库成功才删镜像。面板 PUT 空文本会调用此方法完成显式解绑。
    */
   async clear(accountId: string): Promise<void> {
     await this.pool.query(`DELETE FROM persona_config WHERE account_id = $1`, [accountId]);

@@ -6,9 +6,8 @@
  *
  * 红线：写前用 soul 加载器校验，非法人设诚实拒绝（{ok:false, reason:'persona_invalid'}）——
  *       不落库、不刷镜像、绝不假成功。
- * persona-driven-content-pipeline：人设必填——空文本诚实拒绝（persona_required），不再有
- *       「清空回落默认」语义（系统不存在默认/兜底人设）；未绑账号在视图中如实标 none（未绑定），
- *       绝不把打包 soul.yaml 冒充为其生效人设。
+ * unbind-persona-refresh-nickname：空文本保存 = 显式解绑（删行 → source=none），不是回落默认；
+ *       未绑账号在视图中如实标 none（未绑定），绝不把打包 soul.yaml 冒充为其生效人设。
  */
 
 import { loadSoulFromYaml } from '../soul/index.js';
@@ -27,7 +26,7 @@ export interface PersonaFacadeDeps {
   /**
    * 真绑定（非空、非非法）成功后触发（change auto-start-on-persona-bind）：唤醒该账号在线、因未绑人设
    * 被启动闸短路的节点就地开跑，无需重连。fire-and-forget（调用方不 await、不阻塞 PUT 回真态）；
-   * 触发时 store 内存镜像已刷新（isPersonaBound 已为 true）。空文本 / 非法人设均被拒、不触发。
+   * 触发时 store 内存镜像已刷新（isPersonaBound 已为 true）。解绑 / 非法人设均不触发。
    */
   onBound?: (accountId: string) => void;
 }
@@ -88,10 +87,10 @@ export function createPersonaPanel(deps: PersonaFacadeDeps): PanelPersonaConfig 
       if (!(await deps.store.accountExists(accountId))) {
         return { ok: false, reason: 'unknown_account' };
       }
-      // 人设必填（persona-driven-content-pipeline）：空文本诚实拒绝，不清行、不落库——
-      // 不再有「清空回落默认」语义；前端被绕过也在此挡住。
+      // 空文本保存 = 显式解绑：删行后回真态 source=none；绝不保留空白行，也绝不回落默认人设。
       if (!(persona ?? '').trim()) {
-        return { ok: false, reason: 'persona_required' };
+        await deps.store.clear(accountId);
+        return { ok: true, view: await buildCatalog() };
       }
       // 写前校验：非法人设诚实拒绝、不落库、不刷镜像、不假成功（红线）。
       try {

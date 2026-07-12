@@ -98,22 +98,25 @@ test('setPersona：合法人设 → 落库 + 回真态目录（source=override�
   assert.equal(row.identityName, '新人设');
 });
 
-test('setPersona：空文本 → persona_required 诚实拒绝，不清行、不落库（人设必填，无「清空回落」）', async () => {
+test('setPersona：空文本 → 显式解绑，清行并回真态 source=none（绝不回落默认）', async () => {
   const { store, rows } = fakeStore({ override: { default: soulYaml('旧') } });
   const panel = createPersonaPanel({ store });
   const r = await panel.setPersona('default', '   ', 'a');
-  assert.deepEqual(r, { ok: false, reason: 'persona_required' });
-  assert.ok(rows.get('default')?.persona.includes('旧'), '既有绑定不被空提交清掉');
+  assert.equal(r.ok, true);
+  assert.equal(rows.has('default'), false, '既有绑定被显式解绑清掉');
+  const row = (r as { ok: true; view: { accounts: Array<{ accountId: string; source: string; identityName: string }> } }).view.accounts.find((a) => a.accountId === 'default')!;
+  assert.equal(row.source, 'none');
+  assert.equal(row.identityName, '');
 });
 
-test('setPersona：仅真绑定成功触发 onBound（空文本 / 非法 / 未知账号均不触发）— auto-start-on-persona-bind', async () => {
+test('setPersona：仅真绑定成功触发 onBound（解绑 / 非法 / 未知账号均不触发）— auto-start-on-persona-bind', async () => {
   const { store } = fakeStore({ accounts: [{ accountId: 'acc1', label: null }], override: { acc1: soulYaml('旧') } });
   const bound: string[] = [];
   const panel = createPersonaPanel({ store, onBound: (id) => bound.push(id) });
   await panel.setPersona('acc1', soulYaml('新'), 'a'); // 真绑定 → 触发
   assert.deepEqual(bound, ['acc1'], '真绑定成功 → onBound(accountId)');
   await panel.setPersona('acc1', 'identity: {}\ninterests: nope', 'a'); // 非法 → 不触发
-  await panel.setPersona('acc1', '   ', 'a'); // 空文本（persona_required 拒绝）→ 不触发
+  await panel.setPersona('acc1', '   ', 'a'); // 解绑 → 不触发
   await panel.setPersona('ghost', soulYaml('x'), 'a'); // 未知账号 → 不触发
-  assert.deepEqual(bound, ['acc1'], '空文本/非法/未知账号均不触发 onBound（绝不误唤醒）');
+  assert.deepEqual(bound, ['acc1'], '解绑/非法/未知账号均不触发 onBound（绝不误唤醒）');
 });

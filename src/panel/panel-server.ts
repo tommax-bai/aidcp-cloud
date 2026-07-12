@@ -1917,15 +1917,14 @@ function createRequestHandler(
         return;
       }
       const { persona } = (body ?? {}) as { persona?: unknown };
-      // persona 必须存在且为字符串；人设必填——空文本由 facade 以 persona_required 诚实拒绝
-      // （persona-driven-content-pipeline：不再有「清空回落默认」语义，前端被绕过也不落库）。
+      // persona 必须存在且为字符串；空文本由 facade 解释为显式解绑（删 persona_config 行 → source=none）。
       if (typeof persona !== 'string') {
         sendJson(res, 400, { error: 'bad_request', reason: 'persona_type' });
         return;
       }
       const result = await deps.persona.setPersona(accountId, persona, verified.payload.sub);
       if (!result.ok) {
-        // unknown_account→404；persona_invalid / persona_required→400（绝不落库、绝不假成功）。
+        // unknown_account→404；persona_invalid→400（绝不落库、绝不假成功）。
         sendJson(res, result.reason === 'unknown_account' ? 404 : 400, { error: result.reason });
         return;
       }

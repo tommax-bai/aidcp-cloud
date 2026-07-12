@@ -23,7 +23,7 @@ interface Harness {
   backToFeed: number;
 }
 
-function setup(opts: { accountId?: string } = {}): Harness {
+function setup(opts: { accountId?: string; nicknameByAccount?: Record<string, string | null> } = {}): Harness {
   const bus = new EventBus();
   const ctx = new SessionContext();
   const setCalls: { accountId: string; nickname: string }[] = [];
@@ -37,6 +37,7 @@ function setup(opts: { accountId?: string } = {}): Harness {
     soul: mockSoul,
     sessionContext: ctx,
     getAccountId: () => opts.accountId ?? REAL,
+    getNickname: (accountId) => opts.nicknameByAccount?.[accountId] ?? null,
     setNickname: (accountId, nickname) => { setCalls.push({ accountId, nickname }); },
     setTimeoutFn: (fn) => { timeoutCb = fn; return { id: 1 }; },
     clearTimeoutFn: () => { cleared = true; },
@@ -120,17 +121,45 @@ describe('NicknameEnricher（登录账号真实昵称采集，云端角色驱动
     assert.equal(h.ctx.browseSuspended, false);
   });
 
-  it('本人主页非空昵称到达 → 持久化 + pending=false(幂等) + 清在途 + 解暂停 + 回 feed（严格顺序）', () => {
+  it('本人主页非空昵称到达 → 持久化 + 保持后续启动可刷新 + 清在途 + 解暂停 + 回 feed（严格顺序）', () => {
     const h = setup();
     h.ctx.setPendingNicknameCapture(true);
     sessionStart(h.bus);
+    edgeReady(h.bus);
     selfDetail(h.bus, REAL, '工程师大白');
     assert.deepEqual(h.setCalls, [{ accountId: REAL, nickname: '工程师大白' }], '应单写持久化非空昵称');
-    assert.equal(h.ctx.pendingNicknameCapture, false, '采到 → 本连接此后不再绕（幂等）');
+    assert.equal(h.ctx.pendingNicknameCapture, true, '采到后仍保留启动刷新开关，后续任务启动继续检测昵称变化');
     assert.equal(h.ctx.selfCaptureInFlight, false, '应清在途标记');
     assert.equal(h.ctx.browseSuspended, false, '应解除暂停（在 emit back_to_feed 之前）');
     assert.equal(h.timerCleared(), true, '应取消超时');
     assert.equal(h.backToFeed, 1, '应回 feed 一次');
+
+    sessionStart(h.bus);
+    edgeReady(h.bus);
+    assert.equal(h.captures.length, 2, '下一次任务启动仍会重新检测昵称');
+  });
+
+  it('本人主页非空昵称到达但与系统昵称一致 → 不重复写库，仍按采集流程回 feed', () => {
+    const h = setup({ nicknameByAccount: { [REAL]: '工程师大白' } });
+    h.ctx.setPendingNicknameCapture(true);
+    sessionStart(h.bus);
+    edgeReady(h.bus);
+    selfDetail(h.bus, REAL, '工程师大白');
+    assert.equal(h.setCalls.length, 0, '昵称未变化不重复写库');
+    assert.equal(h.ctx.pendingNicknameCapture, true, '仍保留启动刷新开关');
+    assert.equal(h.ctx.selfCaptureInFlight, false, '应清在途标记');
+    assert.equal(h.ctx.browseSuspended, false, '应解除暂停');
+    assert.equal(h.backToFeed, 1, '仍回 feed 一次');
+  });
+
+  it('本人主页非空昵称到达且与系统昵称不同 → 更新系统昵称', () => {
+    const h = setup({ nicknameByAccount: { [REAL]: '旧昵称' } });
+    h.ctx.setPendingNicknameCapture(true);
+    sessionStart(h.bus);
+    edgeReady(h.bus);
+    selfDetail(h.bus, REAL, '新昵称');
+    assert.deepEqual(h.setCalls, [{ accountId: REAL, nickname: '新昵称' }], '昵称变化时应更新系统昵称');
+    assert.equal(h.backToFeed, 1, '更新后仍回 feed 一次');
   });
 
   it('本人主页空昵称（诚实空）→ 不写 + 尝试计数++ + 仍回 feed', () => {
@@ -202,7 +231,7 @@ describe('NicknameEnricher（登录账号真实昵称采集，云端角色驱动
     assert.equal(h.captures.length, 1, '边缘就绪后 emit 一次 self.profile.capture');
     selfDetail(h.bus, REAL, '测评酱');
     assert.deepEqual(h.setCalls, [{ accountId: REAL, nickname: '测评酱' }], '登录引导路径同样落库真名');
-    assert.equal(h.ctx.pendingNicknameCapture, false, '采到即幂等');
+    assert.equal(h.ctx.pendingNicknameCapture, true, '采到后仍保留启动刷新开关');
     assert.equal(h.backToFeed, 1, '回 feed 一次');
   });
 

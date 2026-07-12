@@ -44,8 +44,8 @@ export class SessionContext {
   private _notifiedItemKeys: Set<string> = new Set();
 
   // ─── 登录账号真实昵称采集（change account-real-nickname）─────────────────────────
-  /** 握手同步算的「需采集」判定（真实账号且库内 nickname 为 NULL）。per-connection 决策，
-   *  跨 browse-session 重启保持（**不**在 reset 清，否则重连后永不再采）；采到后由角色置 false。 */
+  /** 启动期昵称刷新判定。XHS 连接每次启动任务均置 true；非 XHS 平台置 false。
+   *  跨 browse-session 重启保持（**不**在 reset 清，否则重连后永不再采）。 */
   private _pendingNicknameCapture = false;
   /** 本人主页采集在途标记。**仅**用于 chokepoint 放行 self profile_open + 超时 + 防重复收尾，
    *  绝不用于持久化/隔离身份判定（身份恒由 detail.authorId===accountId 决定）。瞬时态——reset 必清。 */
@@ -192,6 +192,6 @@ export class SessionContext {
     if (this._selfCaptureTimer !== null) { clearTimeout(this._selfCaptureTimer); this._selfCaptureTimer = null; }
     this._selfCaptureInFlight = false;
     // 注意：visitedNoteIds / recentEvaluatedIds / notifiedItemKeys / lastFeedNoteIds 不重置，跨轮次保持；
-    //       pendingNicknameCapture / selfCaptureAttempts 是 per-connection 决策/预算，亦**不**在此清。
+    //       pendingNicknameCapture / selfCaptureAttempts 是 per-connection 刷新决策/预算，亦**不**在此清。
   }
 }
