@@ -21,6 +21,7 @@
 
 import { isValidWeekActiveMask, isWeekActiveAt } from '../risk/session-limits.js';
 import { actionModeEnabled, type ContentScheduleActionMode, type ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
+import type { PlatformId } from '../platform/index.js';
 
 /** 调度器每 tick 现读的生效排期（effectiveMask 已由 store 解析：override ?? global）。 */
 export interface ContentScheduleView {
@@ -54,6 +55,10 @@ export interface ContentSchedulerDeps {
    * （人工发起、由账号在途帽独立兜量）。
    */
   pendingAutonomousCount(accountId: string): Promise<number>;
+  /** 账号平台事实源；缺省 xiaohongshu。 */
+  getPlatform?(accountId: string): PlatformId | Promise<PlatformId>;
+  /** Facebook 发帖素材池可用 set 数；FB 排期发帖必须 >0。 */
+  availablePublishMediaCount?(accountId: string): Promise<number>;
   /** 该账号自主发帖轮是否在跑（change parallel-rewrite-drafts：账号粒度单飞；洗稿在途不让排期槽）。 */
   isPublishBusy(accountId: string): boolean;
   /**
@@ -221,6 +226,20 @@ export class ContentScheduler {
 
               const postMode = s.postMode;
               if (!actionModeEnabled(postMode)) continue;
+              const platform = this.deps.getPlatform ? await this.deps.getPlatform(accountId) : 'xiaohongshu';
+              if (platform === 'facebook') {
+                if (postMode === 'auto_approve') {
+                  this.deps.logger?.warn(`[content-scheduler] Facebook 发帖 MVP 不支持 auto_approve account=${accountId}，本槽跳过`);
+                  continue;
+                }
+                const available = this.deps.availablePublishMediaCount
+                  ? await this.deps.availablePublishMediaCount(accountId).catch(() => 0)
+                  : 0;
+                if (available <= 0) {
+                  this.deps.logger?.warn(`[content-scheduler] Facebook 发帖素材不足 account=${accountId}，本槽跳过`);
+                  continue;
+                }
+              }
               this.lastFired.set(fireKey, cell);
               this.inFlight.add(accountId);
               this.postFiring = true;

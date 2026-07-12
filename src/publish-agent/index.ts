@@ -11,6 +11,20 @@ export { PostProcessor, detectBannedPhrases, aiScoreFromHits } from './post-proc
 export type { PostProcessorOptions } from './post-processor.js';
 export { PublishLogStore, PUBLISH_SCHEMA_SQL } from './publish-log-store.js';
 export type { PublishLogStoreOptions, PublishLogSink, DispatchDraft } from './publish-log-store.js';
+export {
+  FacebookPublishMediaStore,
+  FacebookPublishMediaError,
+  FACEBOOK_PUBLISH_MEDIA_SCHEMA_SQL,
+  FACEBOOK_PUBLISH_MEDIA_STATUSES,
+} from './facebook-publish-media-store.js';
+export type {
+  FacebookPublishImageInput,
+  FacebookPublishImageSetView,
+  FacebookPublishImageView,
+  FacebookPublishMediaListView,
+  FacebookPublishMediaStatus,
+  FacebookPublishUploadResult,
+} from './facebook-publish-media-store.js';
 export type {
   PipelineFields,
   PipelineStatus,

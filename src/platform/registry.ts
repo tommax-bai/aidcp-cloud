@@ -110,9 +110,10 @@ export const PLATFORM_REGISTRY: Record<'xiaohongshu', PlatformRegistryEntry> &
     // 声明 'browse'/'interact'（change facebook-browse-and-like-loop）：edge 侧已原子同落 FacebookBrowseSession，
     // 装配闸解析到 FB 浏览会话而非 xhs BrowseSession，session-start 平台闸（canStartSession，见 role-dispatcher）
     // 靠 `capabilities.includes('browse')` 放行 FB 账号起浏览闭环。'comment'/'join' 为既有定向评论/加群编排能力。
-    // 与 edge Facebook driver 的【编排能力子集】{browse, comment, interact, join} 逐字对齐（task 5.4）；
+    // 'publish' 与 edge FacebookPublishExecutor 同落（facebook-post-publish）。
+    // 与 edge Facebook driver 的【编排能力子集】{browse, comment, publish, interact, join} 逐字对齐；
     // edge 另有 'identity'/'overlay' 为 driver 运行时能力（读身份 / 监测浮层），非编排词表、不进本 registry。
-    capabilities: ['browse', 'comment', 'interact', 'join'],
+    capabilities: ['browse', 'comment', 'publish', 'interact', 'join'],
     scheduler: {
       comment: {
         enabled: true,

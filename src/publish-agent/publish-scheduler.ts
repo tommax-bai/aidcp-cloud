@@ -16,6 +16,7 @@ import type { PublishResult, PublishSourceReference, ReferenceImageSnapshot, Tri
 import type { Soul } from '../soul/types.js';
 import type { CuratedContentTypeFilter, CuratedSelectItem } from '../cache/curated-content-store.js';
 import type { ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
+import type { PlatformId } from '../platform/index.js';
 import { referenceImagesForGeneration, REFERENCE_IMAGE_MAX_COUNT } from './reference-image-guidance.js';
 
 /** 洗稿参照笔记（change curated-note-actions）：管理后台精选页人工指定，注入创作输入独立参照块。 */
@@ -83,6 +84,8 @@ export interface PublishSchedulerDeps {
   resolveRisk: (accountId: string) => Promise<SchedulerRisk>;
   /** 解析「唯一真实账号」：恰好一个真实账号则返回它，0 或多个返回 null（自动 / 无参发布据此 honest-fail，绝不回落 default）。 */
   resolveSingleAccountId: () => Promise<string | null>;
+  /** 账号平台事实源；缺省 xiaohongshu。 */
+  getPlatform?: (accountId: string) => PlatformId | Promise<PlatformId>;
   /**
    * 人设绑定判定（persona-driven-content-pipeline）：注入则发布前闸——未绑人设的账号诚实拒绝，
    * 绝不以打包默认人设（回落 soul）生成内容。缺省（不注入）→ 不闸（向后兼容旧构造 / 测试桩）。
@@ -219,6 +222,7 @@ export class PublishScheduler {
         ? this.d.curatedStore.selectForCreation(accountId, 'comment', 3)
         : Promise.resolve([] as CuratedSelectItem[]),
     ]);
+    const platform = this.d.getPlatform ? await this.d.getPlatform(accountId) : 'xiaohongshu';
     const hoursSinceLastPublish = (this.clock() - baseline) / HOUR_MS;
     return {
       metrics: {
@@ -252,6 +256,7 @@ export class PublishScheduler {
       recentPublished,
       // 目标账号贯穿到落库（publish_log.account_id）与命令定向（retire-default-account：调用方已解析为真实账号，绝不 default）。
       accountId,
+      platform,
     };
   }
 

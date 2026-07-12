@@ -187,6 +187,58 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     assert.doesNotMatch(flat, /acc-test/);
   });
 
+  test('Facebook 审批卡上传并展示所选素材缩略图；单张失败不阻断发卡', async () => {
+    const sentCards: any[] = [];
+    const uploaded: string[] = [];
+    const warnings: string[] = [];
+    const role = new PublishExecutorRole({
+      store: { insert: async () => 42 },
+      messenger: {
+        uploadImageFromUrl: async (url: string) => {
+          uploaded.push(url);
+          if (url.endsWith('/b.png')) throw new Error('upload failed');
+          return 'img_key_a';
+        },
+        sendApprovalCard: async (_c: string, card: any) => { sentCards.push(card); },
+      },
+      botChatStore: { getDefaultChat: async () => ({ chatId: 'chat-1' }) },
+      clock,
+      logger: { ...silentLogger, warn: (...args: unknown[]) => warnings.push(args.map(String).join(' ')) },
+    });
+
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('trigger', {
+      metrics: { hoursSinceLastPublish: 1, newConceptCount: 1, likedSinceLastPublish: 0 },
+      generateInput: { concepts: [], likedContents: [], soul: {} as any, recentPosts: [] },
+      recentPublished: [],
+      accountId: 'fb-1',
+      platform: 'facebook',
+    } as any);
+    ctx.write('imageDirective', {
+      imagePrompt: null,
+      imageUrls: ['https://example.com/a.png', 'https://example.com/b.png'],
+      imageUrl: 'https://example.com/a.png',
+      imageStyle: null,
+      fallbackStrategy: 'skip',
+      directedAt: clock(),
+    } as any);
+    ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('publishMetadata', makePublishMetadata());
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.deepEqual(uploaded, ['https://example.com/a.png', 'https://example.com/b.png']);
+    assert.equal(sentCards.length, 1);
+    assert.equal(JSON.stringify(sentCards[0]).includes('2 张'), true);
+    const imageElements = sentCards[0].elements.filter((el: any) => el.tag === 'img');
+    assert.deepEqual(imageElements.map((el: any) => el.img_key), ['img_key_a']);
+    assert.match(warnings.join('\n'), /素材缩略图上传飞书失败/);
+    assert.equal(ctx.get('publishResult')?.approvalCard?.sent, true);
+  });
+
   test('手动飞书 publish source chat 优先于默认群', async () => {
     const sent: Array<{ chatId: string; card: any }> = [];
     const role = new PublishExecutorRole({

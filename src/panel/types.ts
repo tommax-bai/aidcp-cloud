@@ -17,6 +17,12 @@ import type {
   SetFacebookCommentConfigResult,
 } from '../config/facebook-comment-config-store.js';
 import type {
+  FacebookPublishImageInput,
+  FacebookPublishMediaListView,
+  FacebookPublishSetPatch,
+  FacebookPublishUploadResult,
+} from '../publish-agent/facebook-publish-media-store.js';
+import type {
   FacebookGroupAccountProgress,
   FacebookGroupImportResult,
   FacebookGroupMembershipRow,
@@ -189,6 +195,20 @@ export interface PanelDeps {
       patch: FacebookCommentConfigPatch,
       updatedBy: string,
     ): Promise<SetFacebookCommentConfigResult>;
+  };
+  /**
+   * 每账号 Facebook 发帖素材池（manual upload only）。未注入则 `/api/accounts/:id/facebook-publish-media`
+   * 返回 503；上传经对象存储，写前必须校验账号存在且 platform=facebook。
+   */
+  facebookPublishMedia?: {
+    list(accountId: string): Promise<FacebookPublishMediaListView>;
+    upload(
+      accountId: string,
+      files: FacebookPublishImageInput[],
+    ): Promise<{ results: FacebookPublishUploadResult[]; view: FacebookPublishMediaListView }>;
+    reorder(accountId: string, orderedSetIds: number[]): Promise<FacebookPublishMediaListView>;
+    updateSet(accountId: string, setId: number, patch: FacebookPublishSetPatch): Promise<unknown>;
+    deleteSet(accountId: string, setId: number): Promise<unknown>;
   };
   /**
    * Facebook group target catalog + assignment view (facebook-group-join-and-commenting Phase 0).

@@ -158,6 +158,7 @@ export function buildCommandResultCard(result: CommandResult): FeishuCard {
   const icon = level === 'success' ? '✅' : level === 'warning' ? '⚠️' : '❌';
   const acc = formatAccountDisplay(result.accountName, result.accountId);
   const accLine = acc ? `\n**账号**：${acc}` : '';
+  const platformLine = result.platformName ? `\n**平台**：${result.platformName}` : '';
   return {
     header: {
       template,
@@ -168,7 +169,7 @@ export function buildCommandResultCard(result: CommandResult): FeishuCard {
         tag: 'div',
         text: {
           tag: 'lark_md',
-          content: `**指令**：\`${result.command}\`${accLine}\n${result.message}`,
+          content: `**指令**：\`${result.command}\`${accLine}${platformLine}\n${result.message}`,
         },
       },
     ],
@@ -203,6 +204,22 @@ function buildPublishApprovalStateCard(
           {
             is_short: false,
             text: { tag: 'lark_md' as const, content: `**账号**\n${accountLabel}` },
+          },
+        ]
+      : []),
+    ...(payload.platformName
+      ? [
+          {
+            is_short: true,
+            text: { tag: 'lark_md' as const, content: `**平台**\n${payload.platformName}` },
+          },
+        ]
+      : []),
+    ...(typeof payload.mediaCount === 'number'
+      ? [
+          {
+            is_short: true,
+            text: { tag: 'lark_md' as const, content: `**素材**\n${payload.mediaCount} 张` },
           },
         ]
       : []),
@@ -268,6 +285,11 @@ function buildPublishApprovalStateCard(
         tag: 'div',
         fields,
       },
+      ...(payload.mediaImageKeys ?? []).slice(0, 3).map((imgKey, index) => ({
+        tag: 'img' as const,
+        img_key: imgKey,
+        alt: { tag: 'plain_text' as const, content: `发帖素材 ${index + 1}` },
+      })),
     ],
   };
 

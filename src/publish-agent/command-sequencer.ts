@@ -14,11 +14,12 @@
 import { makeEnvelope } from '../comm/protocol.js';
 import type {
   PublishCommandKind,
-  PublishCommandParams,
   PublishCommandPayload,
   PublishCommandResultPayload,
 } from '../comm/protocol.js';
+import type { PlatformId } from '../platform/index.js';
 import type { PublishMetadata } from './types.js';
+import { buildPublishCommandPlan } from './platform-profile.js';
 
 /**
  * 边缘推送接口（与 EdgeCloudServer.pushToEdges 同构）。
@@ -42,6 +43,8 @@ export interface PublishSequenceInput {
   cover?: string;
   /** 发帖元数据（stage-3 决策产物）：话题/@/地点/合集/可见范围/权限/合规/定时；下发为 edge 指令应用。 */
   metadata?: PublishMetadata;
+  /** 发布平台；缺省 xiaohongshu。 */
+  platform?: PlatformId;
   /** 是否已通过人审（AC-PUB）；false → 序列截止于提交前 */
   approvedByUser: boolean;
   /**
@@ -53,6 +56,7 @@ export interface PublishSequenceInput {
 
 export interface PublishSequenceResult {
   ok: boolean;
+  outcome: 'published_confirmed' | 'submitted_unconfirmed' | 'failed_before_submit';
   /** 成功时的真实平台 postId（来自 capture_postId 回报） */
   postId?: string;
   /** 成功时的小红书详情页分享 URL（带 xsec_token，来自 capture_postId 回报；边缘抓不到则 undefined） */
@@ -109,53 +113,18 @@ export class CommandSequencer {
 
   /** 终稿 → 有序指令序列。AC-PUB 第 2 道：未授权则截止于提交前。 */
   buildCommandSequence(input: PublishSequenceInput): PublishCommandPayload[] {
-    const cmds: PublishCommandPayload[] = [];
-    let seq = 0;
-    const add = (kind: PublishCommandKind, params: PublishCommandParams = {}) => {
-      cmds.push({ taskId: input.taskId, recordId: input.recordId, seq: seq++, kind, params });
-    };
-
-    add('navigate_entry');
-    add('select_mode');
-    // 配图先于正文：upload_image×N 逐张上传（多图，publish-multi-image）→ 执行期按真实成功数 K 记账（见 executePublishSequence）。
-    if (input.images) {
-      for (const url of input.images) add('upload_image', { imageUrl: url });
-    }
-    // 封面：仅 cover 且多图才下发 set_cover。本期下发段传 cover:undefined → 不触发（封面=首张上传=平台默认）；
-    // edge set_cover 仍 fail-closed 未校准，强发会 no_target→fail-fast 拖垮整条发布（task-0 实测）。留此分支供后续设封面那期。
-    if (input.cover && input.images && input.images.length > 1) add('set_cover', { imageUrl: input.cover });
-    add('fill_field', { fieldType: 'title', value: input.title });
-    add('fill_field', { fieldType: 'content', value: input.content });
-    for (const tag of input.tags) {
-      // 候选项云端预生成随 params 下发，边缘只定位点击（边轻云重）。
-      add('add_with_candidate', { candidateKind: 'topic', value: tag, candidates: [tag] });
-    }
-
-    // stage-4 元数据应用：把 stage-3 决策的元数据下发为 edge 指令（配图 upload_image 在后续 change）。
-    const md = input.metadata;
-    if (md) {
-      for (const mention of md.mentions) {
-        add('add_with_candidate', { candidateKind: 'mention', value: mention, candidates: [mention] });
-      }
-      if (md.location) add('add_with_candidate', { candidateKind: 'location', value: md.location, candidates: [md.location] });
-      if (md.collection) add('add_with_candidate', { candidateKind: 'collection', value: md.collection, candidates: [md.collection] });
-      // 可见范围（硬必选）+ 权限开关 + 合规声明（仅置位为 true 的声明）。
-      add('set_option', { optionKind: 'visibility', optionValue: md.visibility });
-      add('set_option', { optionKind: 'comment_permission', optionValue: md.permissions.comment });
-      add('set_option', { optionKind: 'save_permission', optionValue: md.permissions.save });
-      if (md.compliance.ai) add('set_option', { optionKind: 'declaration_ai', optionValue: 'true' });
-      if (md.compliance.ad) add('set_option', { optionKind: 'declaration_ad', optionValue: 'true' });
-      if (md.compliance.origin) add('set_option', { optionKind: 'declaration_origin', optionValue: 'true' });
-      // 定时发布（仅 scheduled 且有时刻）。
-      if (md.mode === 'scheduled' && md.publishTime) add('set_schedule', { publishTime: md.publishTime });
-    }
-
-    // AC-PUB 第 2 道闸：未授权 → 提交前截止，submit_publish / capture_postId 不入序列。
-    if (!input.approvedByUser) return cmds;
-
-    add('submit_publish');
-    add('capture_postId');
-    return cmds;
+    return buildPublishCommandPlan({
+      taskId: input.taskId,
+      recordId: input.recordId,
+      title: input.title,
+      content: input.content,
+      tags: input.tags,
+      images: input.images ?? [],
+      cover: input.cover,
+      metadata: input.metadata,
+      approvedByUser: input.approvedByUser,
+      platform: input.platform ?? 'xiaohongshu',
+    });
   }
 
   /**
@@ -191,7 +160,7 @@ export class CommandSequencer {
       // MUST 诚实 failed，绝不进 fill_field 假装纯文字继续（红线：不假成功）。uploadsAttempted<total 时仍在上传阶段前/中，不误触发。
       if (imagesRequested && uploadsAttempted >= totalImages && attachedCount === 0 && cmd.kind !== 'upload_image' && cmd.kind !== 'set_cover') {
         this.logger.warn(`[CommandSequencer] 全部配图失败（K=0）、图文帖无有效内容 → failed（触发于 seq=${cmd.seq}，归因末条 upload seq=${lastUploadSeq}）`);
-        return { ok: false, attachedCount: 0, failedAt: { seq: lastUploadSeq, kind: 'upload_image', error: 'all_images_failed' } };
+        return { ok: false, outcome: 'failed_before_submit', attachedCount: 0, failedAt: { seq: lastUploadSeq, kind: 'upload_image', error: 'all_images_failed' } };
       }
       // 无成功配图 → 不下发依赖首图的封面（红线：绝不在配图全失败后下发 set_cover）。
       if (cmd.kind === 'set_cover' && attachedCount === 0) {
@@ -223,7 +192,7 @@ export class CommandSequencer {
           continue;
         }
         this.logger.warn(`[CommandSequencer] seq=${cmd.seq} kind=${cmd.kind} 异常: ${error}`);
-        return { ok: false, attachedCount, failedAt: { seq: cmd.seq, kind: cmd.kind, error } };
+        return { ok: false, outcome: submitted ? 'submitted_unconfirmed' : 'failed_before_submit', attachedCount, failedAt: { seq: cmd.seq, kind: cmd.kind, error } };
       }
       if (!result.ok) {
         // 配图唯一放宽：upload_image 回 ok:false → 丢弃该张（不计入 K）、继续。
@@ -243,7 +212,7 @@ export class CommandSequencer {
           continue;
         }
         // 红线：核心步失败即停，后续不下发、不假成功。
-        return { ok: false, attachedCount, failedAt: { seq: cmd.seq, kind: cmd.kind, error: result.error ?? 'unknown' } };
+        return { ok: false, outcome: submitted ? 'submitted_unconfirmed' : 'failed_before_submit', attachedCount, failedAt: { seq: cmd.seq, kind: cmd.kind, error: result.error ?? 'unknown' } };
       }
       // 一张配图真实上传成功 → 计入尝试 + 计入 K。
       if (cmd.kind === 'upload_image') {
@@ -260,9 +229,15 @@ export class CommandSequencer {
 
     // 未授权 → 序列不含 submit → 未真正发布（红线：不假成功）。
     if (!submitted) {
-      return { ok: false, attachedCount, failedAt: { seq: -1, kind: 'submit_publish', error: 'not_approved' } };
+      return { ok: false, outcome: 'failed_before_submit', attachedCount, failedAt: { seq: -1, kind: 'submit_publish', error: 'not_approved' } };
     }
-    return { ok: true, attachedCount, postId, postUrl };
+    return {
+      ok: true,
+      outcome: postId ? 'published_confirmed' : 'submitted_unconfirmed',
+      attachedCount,
+      postId,
+      postUrl,
+    };
   }
 
   /**

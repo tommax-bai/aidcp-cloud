@@ -1,6 +1,7 @@
 import type { Soul } from '../soul/types.js';
 import type { CuratedReferenceImageFormGuess } from '../cache/curated-content-store.js';
 import type { ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
+import type { PlatformId } from '../platform/index.js';
 
 // ─── 从 publish/types.ts 迁移的类型 ────────────────────────────────────────────
 
@@ -98,6 +99,8 @@ export interface PublishRecord {
    * 缺省回落 'default'（单账号向后兼容）。让发布历史可真正按账号区分，不再恒为 DEFAULT。
    */
   accountId?: string;
+  /** Runtime platform for this publish record. Old rows/default callers are xiaohongshu. */
+  platform?: PlatformId;
   /**
    * 小红书详情页分享 URL（带 xsec_token 的完整链接），发布成功后由边缘抓取回报。
    * 抓不到则为 null（诚实置空，绝不用裸 id 拼打不开的假链接）。
@@ -177,6 +180,8 @@ export interface TriggerInput {
    * 与发布命令定向下发（路由到绑定该账号的在线边缘节点）。
    */
   accountId?: string;
+  /** Runtime platform of accountId. Defaults to xiaohongshu for legacy callers. */
+  platform?: PlatformId;
   /**
    * Manual Feishu command source conversation for publish approval routing.
    * When present, PublishExecutor sends the approval card here before considering the default approval group.
@@ -258,6 +263,12 @@ export interface ImageDirective {
   referenceImageStatus?: 'none' | 'used' | 'unsupported' | 'unavailable' | 'skipped';
   /** 封面形态审计（change textcard-cover-form）：决策来源 + 门禁原因 + 渲染结局；旧路径缺省。 */
   coverFormAudit?: CoverFormAudit;
+  /** Facebook 发帖 MVP：来自账号素材池的保留记录，不经过图片模型生成。 */
+  facebookMediaReservation?: {
+    setId: number;
+    reservationId: string;
+    imageIds: number[];
+  };
   directedAt: number;
 }
 
@@ -596,6 +607,7 @@ export interface ComplianceDecision {
 
 /** MetadataAggregator 汇合产出：发帖元数据（并行于 assembledContent，本阶段不应用到边缘）。 */
 export interface PublishMetadata {
+  platform?: PlatformId;
   topics: string[];
   mentions: string[];
   location: string | null;
@@ -612,6 +624,12 @@ export interface PublishMetadata {
   referenceImageAudit?: ImageReferenceAudit;
   /** 封面形态审计（change textcard-cover-form）；普通发布/历史行可为空。 */
   coverFormAudit?: CoverFormAudit;
+  /** Facebook 发帖素材池保留信息，供下发结果回写素材状态。 */
+  facebookMedia?: {
+    setId: number;
+    reservationId: string;
+    imageIds: number[];
+  };
   decidedAt: number;
 }
 

@@ -16,6 +16,7 @@ import { buildCommandResultCard, buildPublishApprovalCard } from '../../feishu/c
 import type { PublishApprovalPayload } from '../../feishu/types.js';
 import type { ApprovalWriteResult } from '../../feishu/ws-receiver.js';
 import { clampTitle, firstSentence } from '../title-clamp.js';
+import { publishProfileForPlatform } from '../platform-profile.js';
 
 /**
  * PublishExecutor —— 生成候审段的出口角色（change decouple-publish-generation-from-dispatch）。
@@ -47,6 +48,7 @@ export interface PublishLogStore {
     accountId?: string;
     /** 参照洗稿来稿快照；普通发布为空，绝不编造来源。 */
     sourceReference?: PublishSourceReference | null;
+    platform?: TriggerInput['platform'];
   }): Promise<number>;
   updateStatus?(id: number, status: string): Promise<void>;
   /** 发帖元数据落库 + 防篡改审计（供下发段重建发布输入 + 审计）。 */
@@ -59,6 +61,7 @@ export interface PublishLogStore {
 export interface ApprovalMessenger {
   sendApprovalCard(chatId: string, card: unknown): Promise<void>;
   sendCard?(chatId: string, card: unknown): Promise<void>;
+  uploadImageFromUrl?(url: string): Promise<string>;
 }
 
 /** Bot 聊天存储接口 */
@@ -171,6 +174,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     const { gateDecision, assembledContent, publishMetadata } = input;
     const title = this.resolveTitle(input.titleSelection, assembledContent);
     const accountId = this.accountIdFrom(context);
+    const platform = (context.get('trigger') as TriggerInput | undefined)?.platform ?? 'xiaohongshu';
     // change split-topic-roles：话题唯一真源 = publishMetadata.topics（finalTags 已恒空）；卡/落库/下发一律读它。
     const topics = publishMetadata?.topics ?? [];
 
@@ -179,7 +183,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       // 差别仅是 gatekeeper 的风险标注、由人在卡片上定夺；真正"不问就毙"的是 abort。
       case 'auto_publish':
       case 'manual_review':
-        return this.stageDraftForApproval(assembledContent, title, context, accountId, topics, publishMetadata);
+        return this.stageDraftForApproval(assembledContent, title, context, accountId, platform, topics, publishMetadata);
       case 'abort':
         return this.handleAbort(assembledContent, title, context, accountId, topics, gateDecision.reason);
       case 'retry':
@@ -240,6 +244,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     title: string,
     context: PipelineContext<PipelineFields>,
     accountId: string,
+    platform: TriggerInput['platform'],
     topics: string[],
     publishMetadata: PublishMetadata | undefined,
   ): Promise<PublishResult> {
@@ -261,6 +266,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
         sourceConcepts: lineage.sourceConcepts,
         sourceLikedIds: lineage.sourceLikedIds,
         accountId,
+        platform,
         sourceReference,
       });
       if (this.store.markImagesAttached) await this.store.markImagesAttached(failedId, 0).catch(() => {});
@@ -282,14 +288,18 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       sourceConcepts: lineage.sourceConcepts,
       sourceLikedIds: lineage.sourceLikedIds,
       accountId,
+      platform,
       sourceReference,
     });
 
     // 元数据落库 + 防篡改审计（aiEnforced && !ai 由 MetadataAggregator 已回正；此处如实记审计位）。
     // change split-topic-roles：publishMetadata 已是等待键，直接用入参（消除原 context.get 取值竞态）。
     if (publishMetadata && this.store.recordMetadata) {
-      const metadataWithAudit = this.withCoverFormAudit(
-        this.withReferenceImageAudit(publishMetadata, context, assembled.imageUrls.length),
+      const metadataWithAudit = this.withFacebookMediaReservation(
+        this.withCoverFormAudit(
+          this.withReferenceImageAudit({ ...publishMetadata, platform }, context, assembled.imageUrls.length),
+          context,
+        ),
         context,
       );
       const aiEnforced = metadataWithAudit.compliance.aiEnforced === true;
@@ -400,6 +410,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       message,
       accountId,
       accountName: this.getAccountName?.(accountId),
+      platformName: this.platformNameFrom(context),
     });
     try {
       const send = this.messenger.sendCard ?? this.messenger.sendApprovalCard;
@@ -421,6 +432,15 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     const audit = this.buildReferenceImageAudit(context, generatedCount);
     if (!audit) return metadata;
     return { ...metadata, referenceImageAudit: audit };
+  }
+
+  private withFacebookMediaReservation(
+    metadata: PublishMetadata,
+    context: PipelineContext<PipelineFields>,
+  ): PublishMetadata {
+    const reservation = context.get('imageDirective')?.facebookMediaReservation;
+    if (!reservation) return metadata;
+    return { ...metadata, facebookMedia: reservation };
   }
 
   /** 封面形态审计并列落库（change textcard-cover-form）：直取执行角色产出，缺省不编造。 */
@@ -489,6 +509,9 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
         tags: topics,
         accountId,
         accountName: this.getAccountName?.(accountId),
+        platformName: this.platformNameFrom(context),
+        mediaCount: this.mediaCountFrom(context),
+        mediaImageKeys: await this.mediaImageKeysFrom(assembled, context),
       });
       await this.messenger.sendApprovalCard(target.chatId, card);
       this.logger.log(`[PublishExecutor] 审批卡已发 source=${target.source} chat=${target.chatId} requestId=${requestId}`);
@@ -531,6 +554,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       qualityScore: assembled.qualityScore,
       aiScore: assembled.aiScore,
       accountId,
+      platform: (context.get('trigger') as TriggerInput | undefined)?.platform ?? 'xiaohongshu',
       sourceReference: this.sourceReferenceFrom(context, accountId),
     });
 
@@ -557,6 +581,36 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       completedAt: this.clock(),
       reason: '内容质量不达标、重试已用尽',
     };
+  }
+
+  private platformNameFrom(context: PipelineContext<PipelineFields>): string {
+    const platform = (context.get('trigger') as TriggerInput | undefined)?.platform ?? 'xiaohongshu';
+    return publishProfileForPlatform(platform).displayName;
+  }
+
+  private mediaCountFrom(context: PipelineContext<PipelineFields>): number | undefined {
+    const trigger = context.get('trigger') as TriggerInput | undefined;
+    if (trigger?.platform !== 'facebook') return undefined;
+    return context.get('imageDirective')?.imageUrls.length ?? 0;
+  }
+
+  private async mediaImageKeysFrom(
+    assembled: AssembledContent,
+    context: PipelineContext<PipelineFields>,
+  ): Promise<string[]> {
+    const trigger = context.get('trigger') as TriggerInput | undefined;
+    if (trigger?.platform !== 'facebook' || !this.messenger?.uploadImageFromUrl) return [];
+    const keys: string[] = [];
+    for (const url of assembled.imageUrls.slice(0, 3).filter(Boolean)) {
+      try {
+        const key = await this.messenger.uploadImageFromUrl(url);
+        if (key) keys.push(key);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`[PublishExecutor] Facebook 素材缩略图上传飞书失败：${message}`);
+      }
+    }
+    return keys;
   }
 
   protected override getDefaultOutput(): PublishResult {

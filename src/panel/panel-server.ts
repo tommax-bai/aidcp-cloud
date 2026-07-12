@@ -28,6 +28,11 @@ import { startPanelWs, type PanelWsHandle } from './panel-ws.js';
 import type { PublishApprovalPayload } from '../feishu/index.js';
 import type { EditDraftPatch } from '../publish-agent/publish-log-store.js';
 import {
+  FacebookPublishMediaError,
+  type FacebookPublishImageInput,
+  type FacebookPublishSetPatch,
+} from '../publish-agent/facebook-publish-media-store.js';
+import {
   isContentScheduleActionMode,
   type AccountContentSchedulePatch,
 } from '../config/content-schedule-store.js';
@@ -40,6 +45,7 @@ import type { FacebookGroupMembershipStatus, FacebookGroupTargetInput } from '..
 /** 登录/写体很小，限制请求体大小防滥用。 */
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_GROUP_IMPORT_BODY_BYTES = 2 * 1024 * 1024;
+const MAX_FB_PUBLISH_UPLOAD_BODY_BYTES = 64 * 1024 * 1024;
 
 function isCuratedSourcePostType(contentType: string): boolean {
   return contentType === 'image_text' || contentType === 'video';
@@ -107,6 +113,46 @@ function parseGroupImportInputs(body: unknown): FacebookGroupTargetInput[] | nul
     }
   }
   return inputs;
+}
+
+function parseFacebookPublishUploadFiles(body: unknown): FacebookPublishImageInput[] | null {
+  const raw = (body ?? {}) as Record<string, unknown>;
+  if (!Array.isArray(raw.files)) return null;
+  const files: FacebookPublishImageInput[] = [];
+  for (const item of raw.files) {
+    if (!item || typeof item !== 'object') return null;
+    const o = item as Record<string, unknown>;
+    if (typeof o.filename !== 'string') return null;
+    const rawBase64 = typeof o.dataBase64 === 'string' ? o.dataBase64 : typeof o.base64 === 'string' ? o.base64 : null;
+    if (!rawBase64) return null;
+    const cleanBase64 = rawBase64.includes(',') ? rawBase64.slice(rawBase64.indexOf(',') + 1) : rawBase64;
+    if (!/^[A-Za-z0-9+/=\s_-]+$/.test(cleanBase64)) return null;
+    files.push({
+      filename: o.filename,
+      contentType: typeof o.contentType === 'string' ? o.contentType : null,
+      bytes: Buffer.from(cleanBase64.replace(/\s+/g, ''), 'base64'),
+      captionHint: typeof o.captionHint === 'string' ? o.captionHint : null,
+    });
+  }
+  return files;
+}
+
+function facebookPublishMediaErrorStatus(reason: string): number {
+  if (reason === 'account_not_found' || reason === 'not_found') return 404;
+  if (reason === 'object_store_unavailable') return 503;
+  if (reason === 'body_too_large') return 413;
+  if (reason === 'status_locked') return 409;
+  if (reason === 'retired_account' || reason === 'non_facebook_account') return 409;
+  return 400;
+}
+
+function sendFacebookPublishMediaError(res: http.ServerResponse, err: unknown): void {
+  const reason = err instanceof FacebookPublishMediaError ? err.reason : 'unavailable';
+  sendJson(res, facebookPublishMediaErrorStatus(reason), {
+    error: reason,
+    reason,
+    ...(err instanceof Error && err.message !== reason ? { message: err.message } : {}),
+  });
 }
 
 function createRequestHandler(
@@ -688,6 +734,108 @@ function createRequestHandler(
         return;
       }
       sendJson(res, 200, deps.facebookCommentConfig.get(accountId));
+      return;
+    }
+    // Facebook 发帖素材池：必须在通配 GET /api/accounts/:id 之前注册。
+    if (url.startsWith('/api/accounts/') && url.includes('/facebook-publish-media')) {
+      if (!deps.facebookPublishMedia) {
+        sendJson(res, 503, { error: 'facebook_publish_media_unavailable' });
+        return;
+      }
+      const rest = url.slice('/api/accounts/'.length);
+      const marker = '/facebook-publish-media';
+      const idx = rest.indexOf(marker);
+      if (idx < 0) {
+        sendJson(res, 404, { error: 'not_found' });
+        return;
+      }
+      const accountId = decodeURIComponent(rest.slice(0, idx));
+      const tail = rest.slice(idx + marker.length);
+      try {
+        if (method === 'GET' && tail === '') {
+          sendJson(res, 200, await deps.facebookPublishMedia.list(accountId));
+          return;
+        }
+        if (method === 'POST' && tail === '/upload') {
+          let body: unknown;
+          try {
+            body = await readJsonBody(req, MAX_FB_PUBLISH_UPLOAD_BODY_BYTES);
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            sendJson(res, message === 'body_too_large' ? 413 : 400, { error: message === 'body_too_large' ? 'body_too_large' : 'bad_request' });
+            return;
+          }
+          const files = parseFacebookPublishUploadFiles(body);
+          if (!files || files.length === 0) {
+            sendJson(res, 400, { error: 'bad_request', reason: 'no_files' });
+            return;
+          }
+          sendJson(res, 200, await deps.facebookPublishMedia.upload(accountId, files));
+          return;
+        }
+        if (method === 'PUT' && tail === '/reorder') {
+          let body: unknown;
+          try {
+            body = await readJsonBody(req);
+          } catch {
+            sendJson(res, 400, { error: 'bad_request' });
+            return;
+          }
+          const ids = (body as Record<string, unknown> | undefined)?.orderedSetIds;
+          if (!Array.isArray(ids) || ids.some((id) => typeof id !== 'number')) {
+            sendJson(res, 400, { error: 'bad_request', reason: 'bad_order' });
+            return;
+          }
+          sendJson(res, 200, await deps.facebookPublishMedia.reorder(accountId, ids));
+          return;
+        }
+        const setMatch = tail.match(/^\/sets\/(\d+)$/);
+        if (setMatch && method === 'PATCH') {
+          let body: unknown;
+          try {
+            body = await readJsonBody(req);
+          } catch {
+            sendJson(res, 400, { error: 'bad_request' });
+            return;
+          }
+          const raw = (body ?? {}) as Record<string, unknown>;
+          const patch: FacebookPublishSetPatch = {};
+          if ('captionHint' in raw) {
+            if (raw.captionHint !== null && typeof raw.captionHint !== 'string') {
+              sendJson(res, 400, { error: 'bad_request', reason: 'bad_caption_hint' });
+              return;
+            }
+            patch.captionHint = raw.captionHint as string | null;
+          }
+          if ('status' in raw) {
+            if (raw.status !== 'available' && raw.status !== 'disabled' && raw.status !== 'deleted') {
+              sendJson(res, 400, { error: 'bad_request', reason: 'bad_status' });
+              return;
+            }
+            patch.status = raw.status;
+          }
+          const row = await deps.facebookPublishMedia.updateSet(accountId, Number(setMatch[1]), patch);
+          if (!row) {
+            sendJson(res, 404, { error: 'not_found' });
+            return;
+          }
+          sendJson(res, 200, row);
+          return;
+        }
+        if (setMatch && method === 'DELETE') {
+          const row = await deps.facebookPublishMedia.deleteSet(accountId, Number(setMatch[1]));
+          if (!row) {
+            sendJson(res, 404, { error: 'not_found' });
+            return;
+          }
+          sendJson(res, 200, row);
+          return;
+        }
+      } catch (err) {
+        sendFacebookPublishMediaError(res, err);
+        return;
+      }
+      sendJson(res, 404, { error: 'not_found' });
       return;
     }
     if (method === 'GET' && url.startsWith('/api/accounts/') && url.endsWith('/facebook-group-progress')) {

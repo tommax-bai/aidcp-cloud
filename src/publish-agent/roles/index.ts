@@ -14,6 +14,7 @@ export { CategoryClassifierRole } from './category-classifier.js';
 export { CoverCardWriterRole } from './cover-card-writer.js';
 export { ImageSetPlannerRole } from './image-set-planner.js';
 export { ImagePromptComposerRole } from './image-prompt-composer.js';
+export { FacebookMediaSelectorRole } from './facebook-media-selector.js';
 export { ImageGeneratorRole } from './image-generator.js';
 export { CoverSelectorRole } from './cover-selector.js';
 export { ContentCleanerRole, CLEAN_TIMEOUT_MS } from './content-cleaner.js';

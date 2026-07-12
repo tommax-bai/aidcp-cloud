@@ -7,6 +7,7 @@ import type { PanelConfig, PanelDeps } from '../src/panel/types.js';
 import type { PanelAccount, PanelStoreReader } from '../src/panel/panel-store.js';
 import { RiskController } from '../src/risk/index.js';
 import { TokenRevocationStore } from '../src/panel/revocation.js';
+import { FacebookPublishMediaError } from '../src/publish-agent/facebook-publish-media-store.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 
@@ -924,6 +925,179 @@ async function loginToken(base: string): Promise<string> {
   });
   return ((await login.json()) as { token: string }).token;
 }
+
+test('HTTP Facebook 发帖素材池：未注入 503 / 批量上传解析 / 排序与状态写路由', async () => {
+  const noMedia = await startPanelApi(deps, makeConfig());
+  try {
+    const base = `http://127.0.0.1:${noMedia.port}`;
+    const auth = { authorization: `Bearer ${await loginToken(base)}` };
+    const r = await fetch(`${base}/api/accounts/fb-1/facebook-publish-media`, { headers: auth });
+    assert.equal(r.status, 503);
+    assert.equal(((await r.json()) as { error: string }).error, 'facebook_publish_media_unavailable');
+  } finally {
+    await noMedia.close();
+  }
+
+  const calls: Array<{ fn: string; accountId: string; payload?: unknown }> = [];
+  const mediaView = () => ({
+    accountId: 'fb-1',
+    statusCounts: { available: 1, reserved: 0, used: 0, disabled: 0, deleted: 0, quarantine: 0 },
+    sets: [
+      {
+        id: 10,
+        accountId: 'fb-1',
+        status: 'available',
+        captionHint: null,
+        sortOrder: 1,
+        reservedBy: null,
+        reservedAt: null,
+        usedByPublishLogId: null,
+        lastError: null,
+        createdAt: '2026-07-12T00:00:00.000Z',
+        updatedAt: '2026-07-12T00:00:00.000Z',
+        images: [
+          {
+            id: 100,
+            setId: 10,
+            url: 'https://example.com/fb-1/one.png',
+            objectKey: 'facebook-publish-media/fb-1/one.png',
+            filename: 'one.png',
+            contentType: 'image/png',
+            byteSize: 4,
+            sha256: 'hash',
+            sortOrder: 1,
+            duplicateOfImageId: null,
+            createdAt: '2026-07-12T00:00:00.000Z',
+          },
+        ],
+      },
+    ],
+  });
+  const facebookPublishMedia = {
+    list: async (accountId: string) => {
+      calls.push({ fn: 'list', accountId });
+      return mediaView();
+    },
+    upload: async (accountId: string, files: Array<{ filename: string; contentType?: string | null; bytes: Buffer }>) => {
+      calls.push({
+        fn: 'upload',
+        accountId,
+        payload: files.map((file) => ({ filename: file.filename, contentType: file.contentType, bytes: [...file.bytes] })),
+      });
+      return {
+        results: files.map((file) => ({ ok: true as const, filename: file.filename, duplicate: false, set: mediaView().sets[0] })),
+        view: mediaView(),
+      };
+    },
+    reorder: async (accountId: string, orderedSetIds: number[]) => {
+      calls.push({ fn: 'reorder', accountId, payload: orderedSetIds });
+      return mediaView();
+    },
+    updateSet: async (accountId: string, setId: number, patch: unknown) => {
+      calls.push({ fn: 'updateSet', accountId, payload: { setId, patch } });
+      return { ...mediaView().sets[0], id: setId };
+    },
+    deleteSet: async (accountId: string, setId: number) => {
+      calls.push({ fn: 'deleteSet', accountId, payload: { setId } });
+      return { ...mediaView().sets[0], id: setId, status: 'deleted' };
+    },
+  };
+  const h = await startPanelApi({ ...(deps as object), facebookPublishMedia } as unknown as PanelDeps, makeConfig());
+  try {
+    const base = `http://127.0.0.1:${h.port}`;
+    const token = await loginToken(base);
+    const auth = { authorization: `Bearer ${token}` };
+    const authJson = { ...auth, 'content-type': 'application/json' };
+
+    const list = await fetch(`${base}/api/accounts/fb-1/facebook-publish-media`, { headers: auth });
+    assert.equal(list.status, 200);
+    assert.equal(((await list.json()) as { sets: unknown[] }).sets.length, 1);
+
+    const upload = await fetch(`${base}/api/accounts/fb-1/facebook-publish-media/upload`, {
+      method: 'POST',
+      headers: authJson,
+      body: JSON.stringify({
+        files: [
+          {
+            filename: 'one.png',
+            contentType: 'image/png',
+            dataBase64: Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString('base64'),
+          },
+          {
+            filename: 'two.jpg',
+            contentType: 'image/jpeg',
+            dataBase64: `data:image/jpeg;base64,${Buffer.from([0xff, 0xd8, 0xff]).toString('base64')}`,
+          },
+        ],
+      }),
+    });
+    assert.equal(upload.status, 200);
+    assert.deepEqual(calls.find((call) => call.fn === 'upload'), {
+      fn: 'upload',
+      accountId: 'fb-1',
+      payload: [
+        { filename: 'one.png', contentType: 'image/png', bytes: [0x89, 0x50, 0x4e, 0x47] },
+        { filename: 'two.jpg', contentType: 'image/jpeg', bytes: [0xff, 0xd8, 0xff] },
+      ],
+    });
+
+    const badUpload = await fetch(`${base}/api/accounts/fb-1/facebook-publish-media/upload`, {
+      method: 'POST',
+      headers: authJson,
+      body: JSON.stringify({ files: [] }),
+    });
+    assert.equal(badUpload.status, 400);
+    assert.equal(((await badUpload.json()) as { reason: string }).reason, 'no_files');
+
+    assert.equal(
+      (await fetch(`${base}/api/accounts/fb-1/facebook-publish-media/reorder`, {
+        method: 'PUT',
+        headers: authJson,
+        body: JSON.stringify({ orderedSetIds: [10] }),
+      })).status,
+      200,
+    );
+    assert.equal(
+      (await fetch(`${base}/api/accounts/fb-1/facebook-publish-media/sets/10`, {
+        method: 'PATCH',
+        headers: authJson,
+        body: JSON.stringify({ status: 'disabled' }),
+      })).status,
+      200,
+    );
+    assert.equal(
+      (await fetch(`${base}/api/accounts/fb-1/facebook-publish-media/sets/10`, {
+        method: 'DELETE',
+        headers: auth,
+      })).status,
+      200,
+    );
+  } finally {
+    await h.close();
+  }
+});
+
+test('HTTP Facebook 发帖素材池：素材依赖拒绝时响应带 reason', async () => {
+  const facebookPublishMedia = {
+    list: async () => {
+      throw new FacebookPublishMediaError('non_facebook_account');
+    },
+    upload: async () => ({ results: [], view: { accountId: 'fb-1', sets: [], statusCounts: {} } }),
+    reorder: async () => ({ accountId: 'fb-1', sets: [], statusCounts: {} }),
+    updateSet: async () => null,
+    deleteSet: async () => null,
+  };
+  const h = await startPanelApi({ ...(deps as object), facebookPublishMedia } as unknown as PanelDeps, makeConfig());
+  try {
+    const base = `http://127.0.0.1:${h.port}`;
+    const auth = { authorization: `Bearer ${await loginToken(base)}` };
+    const r = await fetch(`${base}/api/accounts/default/facebook-publish-media`, { headers: auth });
+    assert.equal(r.status, 409);
+    assert.deepEqual(await r.json(), { error: 'non_facebook_account', reason: 'non_facebook_account' });
+  } finally {
+    await h.close();
+  }
+});
 
 type SummaryByAccount = {
   totalsByAccount: { accountId: string; totals: Record<string, number>; quotas?: Record<string, number>; saturated?: string[] }[];

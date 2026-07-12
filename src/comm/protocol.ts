@@ -781,6 +781,8 @@ export interface PublishCommandPayload {
   seq: number;
   /** 指令种类 */
   kind: PublishCommandKind;
+  /** 发布平台；缺省按历史小红书命令处理。 */
+  platform?: 'xiaohongshu' | 'facebook';
   /** 指令参数 */
   params: PublishCommandParams;
   /** 边缘执行超时（毫秒，缺省由边缘兜底） */

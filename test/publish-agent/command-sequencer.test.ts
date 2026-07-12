@@ -178,6 +178,43 @@ describe('AC-CMD CommandSequencer（云端编排驱动）', () => {
     assert.deepEqual(cmds.map((c) => c.seq), [0, 1, 2, 3, 4, 5, 6, 7]);
   });
 
+  it('FB-PUBLISH-SEQ Facebook：个人 timeline 只发素材图+正文，不发 XHS 标题/话题/元数据命令', () => {
+    const { seq } = makeSequencer(() => null);
+    const cmds = seq.buildCommandSequence(input({
+      platform: 'facebook',
+      title: 'ignored title',
+      content: 'facebook body',
+      tags: ['topic'],
+      images: ['https://oss.example/fb.png'],
+      metadata: {
+        topics: ['topic'],
+        mentions: ['userA'],
+        location: '上海',
+        collection: '合集',
+        visibility: 'public',
+        permissions: { comment: 'allow', save: 'allow' },
+        mode: 'scheduled',
+        publishTime: 1800000000000,
+        compliance: { ai: true },
+        metadataScore: 1,
+        decidedAt: 0,
+      },
+    }));
+    assert.deepEqual(cmds.map((c) => c.kind), [
+      'navigate_entry',
+      'select_mode',
+      'upload_image',
+      'fill_field',
+      'submit_publish',
+      'capture_postId',
+    ]);
+    assert.equal(cmds.every((c) => c.platform === 'facebook'), true);
+    assert.equal(cmds[1].params.optionValue, 'facebook_personal_timeline');
+    assert.equal(cmds[3].params.fieldType, 'content');
+    assert.equal(cmds.some((c) => c.params.fieldType === 'title'), false);
+    assert.equal(cmds.some((c) => c.kind === 'add_with_candidate' || c.kind === 'set_option' || c.kind === 'set_schedule'), false);
+  });
+
   it('AC-CMD-SEQ-02 AC-PUB 第2道：未授权 → 序列截止于提交前（无 submit/capture）', () => {
     const { seq } = makeSequencer(() => null);
     const cmds = seq.buildCommandSequence(input({ approvedByUser: false }));

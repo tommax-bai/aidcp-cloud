@@ -15,6 +15,8 @@ import type { FeishuCard } from './types.js';
 const MESSAGE_ENDPOINT =
   'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id';
 
+const IMAGE_ENDPOINT = 'https://open.feishu.cn/open-apis/im/v1/images';
+
 /** 获取机器人所在群列表端点（change feishu-bot-chat-name-display）。 */
 const CHATS_ENDPOINT = 'https://open.feishu.cn/open-apis/im/v1/chats';
 
@@ -37,6 +39,12 @@ interface ListChatsResponse {
   };
 }
 
+interface UploadImageResponse {
+  code: number;
+  msg: string;
+  data?: { image_key?: string };
+}
+
 /** 一个机器人所在的群（真实群名，change feishu-bot-chat-name-display）。 */
 export interface FeishuChatSummary {
   chatId: string;
@@ -50,6 +58,8 @@ export interface FeishuMessengerOptions {
   endpoint?: string;
   /** 群列表端点，默认飞书国内站（测试注入） */
   chatsEndpoint?: string;
+  /** 图片上传端点，默认飞书国内站（测试注入） */
+  imageEndpoint?: string;
   /** 注入 fetch（测试用），默认全局 fetch */
   fetchImpl?: typeof fetch;
 }
@@ -59,12 +69,14 @@ export class FeishuMessenger {
   private readonly tokenManager: FeishuTokenManager;
   private readonly endpoint: string;
   private readonly chatsEndpoint: string;
+  private readonly imageEndpoint: string;
   private readonly fetchImpl: typeof fetch;
 
   constructor(options: FeishuMessengerOptions = {}) {
     this.tokenManager = options.tokenManager ?? new FeishuTokenManager();
     this.endpoint = options.endpoint ?? MESSAGE_ENDPOINT;
     this.chatsEndpoint = options.chatsEndpoint ?? CHATS_ENDPOINT;
+    this.imageEndpoint = options.imageEndpoint ?? IMAGE_ENDPOINT;
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
@@ -105,6 +117,44 @@ export class FeishuMessenger {
 
   async sendApprovalCard(chatId: string, card: FeishuCard): Promise<void> {
     await this.sendCard(chatId, card);
+  }
+
+  async uploadImageFromUrl(url: string): Promise<string> {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') throw new Error('飞书图片上传拒绝非 https URL');
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const resp = await this.fetchImpl(url, { signal: controller.signal });
+      if (!resp.ok) throw new Error(`飞书图片抓取失败：HTTP ${resp.status}`);
+      const contentType = (resp.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
+      if (!contentType.startsWith('image/')) throw new Error('飞书图片抓取失败：响应不是图片');
+      const arrayBuffer = await resp.arrayBuffer();
+      if (arrayBuffer.byteLength === 0) throw new Error('飞书图片抓取失败：空图片');
+      if (arrayBuffer.byteLength > 10 * 1024 * 1024) throw new Error('飞书图片抓取失败：图片超过 10MB');
+      return this.uploadImageBytes(arrayBuffer, contentType);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async uploadImageBytes(bytes: ArrayBuffer, contentType = 'image/png'): Promise<string> {
+    const token = await this.tokenManager.getToken();
+    const form = new FormData();
+    form.set('image_type', 'message');
+    form.set('image', new Blob([bytes], { type: contentType }), 'aidcp-facebook-publish-media');
+    const resp = await this.fetchImpl(this.imageEndpoint, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+    if (!resp.ok) throw new Error(`飞书图片上传失败：HTTP ${resp.status}`);
+    const data = (await resp.json()) as UploadImageResponse;
+    if (data.code !== 0 || !data.data?.image_key) {
+      throw new Error(`飞书图片上传失败：code=${data.code} msg=${data.msg}`);
+    }
+    return data.data.image_key;
   }
 
   /** 发送纯文本到群 */

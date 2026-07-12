@@ -95,7 +95,7 @@ import type {
   UiDailyUsagePayload,
   UiDailyUsageWindowStatus,
 } from './comm/protocol.js';
-import { PublishOrchestrator, PublishScheduler, PublishDispatcher } from './publish-agent/index.js';
+import { PublishOrchestrator, PublishScheduler, PublishDispatcher, FacebookPublishMediaStore } from './publish-agent/index.js';
 import { WanxiangClient } from './publish-agent/wanxiang-client.js';
 import { SeedreamClient } from './publish-agent/seedream-client.js';
 import { relocateImageToStore, type ObjectStore } from './storage/object-store.js';
@@ -129,6 +129,7 @@ import {
   CoverCardWriterRole,
   ImageSetPlannerRole,
   ImagePromptComposerRole,
+  FacebookMediaSelectorRole,
   ImageGeneratorRole,
   CoverSelectorRole,
   ContentCleanerRole,
@@ -948,6 +949,23 @@ async function main(): Promise<void> {
     return nickname || undefined;
   };
 
+  let facebookPublishMediaStore: FacebookPublishMediaStore | undefined;
+  try {
+    const store = new FacebookPublishMediaStore({
+      host: readEnvString('PGHOST'),
+      port: readEnvPort('PGPORT'),
+      database: readEnvString('PGDATABASE'),
+      user: readEnvString('PGUSER'),
+      password: readEnvString('PGPASSWORD'),
+      objectStore: ossUploader,
+    });
+    await store.init();
+    facebookPublishMediaStore = store;
+    console.log('[aidcp-cloud] FacebookPublishMediaStore 已就绪（account_facebook_publish_image_set / image）');
+  } catch (err) {
+    console.warn('[aidcp-cloud] FacebookPublishMediaStore 初始化失败，FB 发帖素材池不可用:', (err as Error).message);
+  }
+
   // ── 账号人设（change account-persona-config，stream F，迁移 0011）─────────────
   // 须在 accounts 表建好之后（persona_config FK 到 accounts）。
   // persona-driven-content-pipeline：系统不存在默认/兜底人设——PG 不可用 / init 失败时人设镜像为空，
@@ -1683,6 +1701,13 @@ async function main(): Promise<void> {
         await messenger.sendText(chatId, text);
       })().catch(() => {});
     },
+    facebookPublishMedia: facebookPublishMediaStore
+      ? {
+          releaseReservation: (setId, reservationId) => facebookPublishMediaStore!.releaseReservation(setId, reservationId),
+          markUsed: (setId, publishLogId) => facebookPublishMediaStore!.markUsed(setId, publishLogId),
+          quarantine: (setId, reason) => facebookPublishMediaStore!.quarantine(setId, reason),
+        }
+      : undefined,
     breakerThreshold: Number(process.env.AIDCP_PUBLISH_BREAKER_THRESHOLD ?? 2),
     logger: console,
   });
@@ -1705,6 +1730,15 @@ async function main(): Promise<void> {
       .then(async (draft) => {
         if (!draft || draft.status !== 'pending_approval') return;
         await publishLogStore.rejectPendingApproval(recordId);
+        if (draft.platform === 'facebook' && draft.metadata?.facebookMedia && facebookPublishMediaStore) {
+          await facebookPublishMediaStore
+            .releaseReservation(draft.metadata.facebookMedia.setId, draft.metadata.facebookMedia.reservationId)
+            .catch((err) =>
+              console.warn(
+                `[aidcp-cloud] Facebook 素材释放失败 recordId=${recordId}: ${err instanceof Error ? err.message : String(err)}`,
+              ),
+            );
+        }
         uiSnapshotService.pushPublishState(draft.accountId, recordId, 'rejected', draft.title);
       })
       .catch(() => {});
@@ -2104,6 +2138,12 @@ async function main(): Promise<void> {
   }));
   publishOrchestrator.registerRole(new ImageSetPlannerRole({ llmClient: roleLlm('publish:ImageSetPlanner') }));
   publishOrchestrator.registerRole(new ImagePromptComposerRole({ llmClient: roleLlm('publish:ImagePromptComposer') }));
+  if (facebookPublishMediaStore) {
+    publishOrchestrator.registerRole(new FacebookMediaSelectorRole({
+      mediaStore: facebookPublishMediaStore,
+      logger: console,
+    }));
+  }
   publishOrchestrator.registerRole(new ImageGeneratorRole({
     imageProvider,
     getProvider: () => modelConfigStore.getCached().imageProvider,
@@ -2175,6 +2215,7 @@ async function main(): Promise<void> {
           imageUrls: record.images,
           // 真实发布账号（change publish-history-account-and-detail）：来自触发上下文，缺省 'default'。
           accountId: record.accountId,
+          platform: record.platform,
           // 参照洗稿来稿快照；普通发布为空，内容页据此展示来源。
           sourceReference: record.sourceReference ?? null,
         });
@@ -2413,6 +2454,7 @@ async function main(): Promise<void> {
       publishLog: publishLogStore,
       resolveRisk: resolveController,
       resolveSingleAccountId,
+      getPlatform: (accountId) => accountStore?.getPlatform?.(accountId) ?? 'xiaohongshu',
       // persona-driven-content-pipeline：发布前人设闸——未绑人设的账号拒绝发布，绝不以打包默认人设生成（与浏览侧 canStartSession 同口径）。
       isPersonaBound: (accountId) => personaStore.getForAccount(accountId) !== null,
       // 生成段账号归账（change parallel-rewrite-drafts）：账号随 TriggerInput.accountId 上黑板，
@@ -2447,6 +2489,9 @@ async function main(): Promise<void> {
         // 日上限口径（change parallel-rewrite-drafts）：自主在途按真实条数计（防两张自动草稿都获批超发）；
         // 洗稿候选（source_reference 非空）不占排期日上限——由账号在途帽独立兜量，不堵 cap=1 账号的排期。
         pendingAutonomousCount: (accountId) => publishLogStore.countPendingAutonomousForAccount(accountId),
+        getPlatform: (accountId) => accountStore?.getPlatform?.(accountId) ?? 'xiaohongshu',
+        availablePublishMediaCount: (accountId) =>
+          facebookPublishMediaStore ? facebookPublishMediaStore.availableCount(accountId) : Promise.resolve(0),
         // 忙判定收窄为账号粒度自主单飞：洗稿在途不让排期槽（全局帽在 claim 层另行兜底）。
         isPublishBusy: (accountId) => publishScheduler?.isBusy(accountId) ?? false,
         // 自动 ⊆ 活跃（用户拍板：浏览休眠格绝不自动发内容）：读浏览周历掩码，沿其 fail-open（未配=全天活跃=不限）。
@@ -2890,6 +2935,17 @@ async function main(): Promise<void> {
             setGlobal: (mask, updatedBy) => contentScheduleStore.setGlobal({ contentActiveMask: mask }, updatedBy),
             setAccount: (accountId, patch, updatedBy) => contentScheduleStore.setAccount(accountId, patch, updatedBy),
           },
+          // Facebook 发帖素材池：手工上传图片，发帖从账号素材池保留，不调用图片模型。
+          facebookPublishMedia: facebookPublishMediaStore
+            ? {
+                list: (accountId) => facebookPublishMediaStore!.listForAccount(accountId),
+                upload: (accountId, files) => facebookPublishMediaStore!.uploadFiles(accountId, files),
+                reorder: (accountId, orderedSetIds) => facebookPublishMediaStore!.reorder(accountId, orderedSetIds),
+                updateSet: (accountId, setId, patch) => facebookPublishMediaStore!.updateSet(accountId, setId, patch),
+                deleteSet: (accountId, setId) =>
+                  facebookPublishMediaStore!.updateSet(accountId, setId, { status: 'deleted' }),
+              }
+            : undefined,
           // 每账号 Facebook 定时评论配置：关键词 + 评论模式 / 模板；目标群来自 joined ledger。
           facebookCommentConfig: {
             get: (accountId) => facebookCommentConfigStore.getForAccount(accountId),

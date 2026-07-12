@@ -25,7 +25,7 @@ test('commentProfileForPlatform: aliases resolve to xhs profile', () => {
   assert.equal(commentProfileForPlatform(undefined), XHS_COMMENT_PROFILE);
 });
 
-test('platform registry: facebook declares browse/interact/comment/join (facebook-browse-and-like-loop)', () => {
+test('platform registry: facebook declares browse/interact/comment/join/publish', () => {
   assert.equal(normalizePlatformId('facebook'), 'facebook');
   assert.equal(normalizePlatformId('fb'), 'facebook');
   // facebook now resolves to its own comment profile (no longer throws).
@@ -38,7 +38,8 @@ test('platform registry: facebook declares browse/interact/comment/join (faceboo
   assert.ok(fb!.capabilities.includes('comment'));
   assert.ok(fb!.capabilities.includes('browse'), 'facebook now declares browse (co-landed with FacebookBrowseSession)');
   assert.ok(fb!.capabilities.includes('interact'));
-  // task 5.4：与 edge Facebook driver 的编排能力子集 {browse, comment, interact, join} 逐字对齐（消除 join 词表错配）。
-  assert.deepEqual([...fb!.capabilities], ['browse', 'comment', 'interact', 'join']);
+  assert.ok(fb!.capabilities.includes('publish'), 'facebook publish co-landed with edge FacebookPublishExecutor');
+  // 与 edge Facebook driver 的编排能力子集 {browse, comment, publish, interact, join} 逐字对齐。
+  assert.deepEqual([...fb!.capabilities], ['browse', 'comment', 'publish', 'interact', 'join']);
   assert.equal(fb!.scheduler.comment.enabled, true);
 });

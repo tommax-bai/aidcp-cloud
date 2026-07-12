@@ -67,6 +67,12 @@ export interface PublishDispatcherDeps {
   notifyUiPublishState?: (accountId: string, recordId: number, state: 'approved' | 'failed', title?: string | null) => void;
   /** 运维通知（飞书 best-effort）：离线回待审 / 熔断开启 / 熔断解除。 */
   notifyDispatchEvent?: (notice: DispatchNotice) => void;
+  /** Facebook 发帖素材状态流转：确认成功 used、提交未确认 quarantine、提交前失败 release。 */
+  facebookPublishMedia?: {
+    releaseReservation(setId: number, reservationId?: string): Promise<boolean>;
+    markUsed(setId: number, publishLogId: number): Promise<boolean>;
+    quarantine(setId: number, reason: string): Promise<boolean>;
+  };
   /** 同账号连续序列失败多少次触发熔断（默认 2）。 */
   breakerThreshold?: number;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
@@ -81,6 +87,7 @@ export class PublishDispatcher {
   private readonly voidApprovalSignal: (requestId: string) => Promise<void>;
   private readonly notifyUiPublishState?: (accountId: string, recordId: number, state: 'approved' | 'failed', title?: string | null) => void;
   private readonly notifyDispatchEvent?: (notice: DispatchNotice) => void;
+  private readonly facebookPublishMedia?: NonNullable<PublishDispatcherDeps['facebookPublishMedia']>;
   private readonly breakerThreshold: number;
   private readonly logger: Pick<Console, 'log' | 'warn' | 'error'>;
 
@@ -102,6 +109,7 @@ export class PublishDispatcher {
     this.voidApprovalSignal = deps.voidApprovalSignal;
     this.notifyUiPublishState = deps.notifyUiPublishState;
     this.notifyDispatchEvent = deps.notifyDispatchEvent;
+    this.facebookPublishMedia = deps.facebookPublishMedia;
     this.breakerThreshold = Math.max(1, deps.breakerThreshold ?? 2);
     this.logger = deps.logger ?? console;
   }
@@ -231,6 +239,32 @@ export class PublishDispatcher {
     }
   }
 
+  private async settleFacebookMedia(
+    draft: DispatchDraft,
+    outcome: 'published_confirmed' | 'submitted_unconfirmed' | 'failed_before_submit',
+    recordId: number,
+    reason?: string,
+  ): Promise<void> {
+    if (draft.platform !== 'facebook') return;
+    const reservation = draft.metadata?.facebookMedia;
+    if (!reservation || !this.facebookPublishMedia) return;
+    try {
+      if (outcome === 'published_confirmed') {
+        await this.facebookPublishMedia.markUsed(reservation.setId, recordId);
+      } else if (outcome === 'submitted_unconfirmed') {
+        await this.facebookPublishMedia.quarantine(reservation.setId, reason ?? 'submitted_unconfirmed');
+      } else {
+        await this.facebookPublishMedia.releaseReservation(reservation.setId, reservation.reservationId);
+      }
+    } catch (err) {
+      this.logger.warn(
+        `[PublishDispatcher] Facebook 素材状态回写失败 recordId=${recordId} set=${reservation.setId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
   /** 临界区：单条草稿的实际下发（已按账号串行进入）。 */
   private async runDispatch(recordId: number, accountId: string, priority: EdgeTaskPriority): Promise<void> {
     // 入队后熔断才开启（同链前序项连败）的迟到项：同样跳过且不烧授权，防连环烧稿。
@@ -275,6 +309,7 @@ export class PublishDispatcher {
     // 图文帖必须有图（executor 已拦，下发段再守一道；缺图诚实 failed）。
     if (draft.imageUrls.length === 0) {
       await this.store.updateStatus(recordId, 'failed').catch(() => {});
+      await this.settleFacebookMedia(draft, 'failed_before_submit', recordId, 'draft_missing_images');
       this.logger.warn(`[PublishDispatcher] recordId=${recordId} 无配图，诚实 failed（不下发）`);
       this.notifyUi(accountId, recordId, 'failed', draft.title);
       return;
@@ -318,6 +353,7 @@ export class PublishDispatcher {
             images: draft.imageUrls,
             cover: undefined,
             metadata: draft.metadata ?? undefined,
+            platform: draft.platform ?? 'xiaohongshu',
             approvedByUser: true,
             edgeId,
           });
@@ -328,6 +364,7 @@ export class PublishDispatcher {
       await this.store.markImagesAttached(recordId, result.attachedCount).catch(() => {});
 
       if (result.ok) {
+        await this.settleFacebookMedia(draft, result.outcome, recordId, result.failedAt?.error);
         this.consecutiveSeqFails.delete(accountId);
         if (result.postId) {
           await this.store.updatePostId(recordId, result.postId, result.postUrl).catch(() => {});
@@ -337,6 +374,7 @@ export class PublishDispatcher {
         this.logger.log(`[PublishDispatcher] recordId=${recordId} published postId=${result.postId ?? '(未抓到)'} edge=${edgeId}`);
       } else {
         // 序列中途失败（页面状态未知）→ failed 终态、绝不自动重跑；计入熔断（连续 N 次停 drain 防连环烧稿）。
+        await this.settleFacebookMedia(draft, result.outcome, recordId, result.failedAt?.error);
         await this.store.updateStatus(recordId, 'failed').catch(() => {});
         this.logger.warn(`[PublishDispatcher] recordId=${recordId} 下发失败 failedAt=${JSON.stringify(result.failedAt)}`);
         this.notifyUi(accountId, recordId, 'failed', draft.title);
@@ -353,6 +391,7 @@ export class PublishDispatcher {
         return;
       }
       // 序列驱动异常（页面状态未知）→ 同序列失败处理：failed 终态 + 计入熔断。
+      await this.settleFacebookMedia(draft, 'submitted_unconfirmed', recordId, err instanceof Error ? err.message : String(err));
       await this.store.updateStatus(recordId, 'failed').catch(() => {});
       this.logger.warn(`[PublishDispatcher] recordId=${recordId} 下发异常: ${err instanceof Error ? err.message : String(err)}`);
       this.notifyUi(accountId, recordId, 'failed', draft.title);

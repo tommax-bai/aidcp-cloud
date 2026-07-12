@@ -136,6 +136,9 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
   }
 
   protected async execute(input: ImagePlan, context: PipelineContext<PipelineFields>): Promise<ImageDirective> {
+    if (context.snapshot().trigger?.platform === 'facebook') {
+      return context.get('imageDirective') ?? this.emptyDirective(input.fallbackStrategy);
+    }
     // 不开启 / 计划不配图 / 无 prompt → 直接空 directive（诚实纯文字，交下游 executor 判 failed）。
     if (!this.enableImageGeneration || !input.wantImage || input.imagePrompts.length === 0) {
       return this.emptyDirective(input.fallbackStrategy);

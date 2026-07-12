@@ -9,6 +9,7 @@ import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
 import { SHANGHAI_DAY_START_SQL } from '../time/shanghai-day.js';
 import type { PublishRecord, PublishStatus, PublishMetadata, Visibility } from './types.js';
 import { clampTitle } from './title-clamp.js';
+import { normalizePlatformId, type PlatformId } from '../platform/index.js';
 
 /** JSONB publish_metadata 解析：pg 驱动通常已解析为对象；兼容字符串形态；解析失败诚实置 null。 */
 function parsePublishMetadata(raw: unknown): PublishMetadata | null {
@@ -57,8 +58,10 @@ ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS images_attached_count INT NOT N
 --   account_id（迁移 0005 已加；此处补进 canonical SQL，使全新 init() 的库也有该列，insert 真正写入真实账号）；
 --   post_url（带 xsec_token 的完整详情页分享 URL，发布成功后回写；抓不到存 NULL）。
 ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS platform TEXT NOT NULL DEFAULT 'xiaohongshu';
 ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS post_url TEXT;
 CREATE INDEX IF NOT EXISTS idx_publish_log_account ON publish_log (account_id);
+CREATE INDEX IF NOT EXISTS idx_publish_log_platform ON publish_log (platform);
 -- decouple-publish-generation-from-dispatch：status 增加 'pending_approval'（生成候审段产物、待人审、未下发）。
 -- 既有表的 CHECK 约束需放开新取值（幂等：先 DROP IF EXISTS 默认约束名再以新集合重建）。无新表/新列。
 ALTER TABLE publish_log DROP CONSTRAINT IF EXISTS publish_log_status_check;
@@ -105,6 +108,7 @@ function toStatus(s: string): PublishStatus {
 export interface DispatchDraft {
   recordId: number;
   accountId: string;
+  platform?: PlatformId;
   title: string | null;
   content: string;
   /** 封面 URL（= imageUrls[0]，审计/向后兼容）；无图为 null。 */
@@ -180,8 +184,8 @@ export class PublishLogStore {
     const images = record.imageUrls ?? (record.imageUrl ? [record.imageUrl] : []);
     const coverUrl = record.imageUrl ?? images[0] ?? null;
     const { rows } = await this.pool.query<{ id: number }>(
-      `INSERT INTO publish_log (title, content, source_concepts, source_liked_ids, status, platform_post_id, image_url, images, images_attached, account_id, source_reference)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+      `INSERT INTO publish_log (title, content, source_concepts, source_liked_ids, status, platform_post_id, image_url, images, images_attached, account_id, platform, source_reference)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
        RETURNING id`,
       [
         record.title,
@@ -196,6 +200,7 @@ export class PublishLogStore {
         record.imagesAttached ?? false,
         // 发布账号：来自触发上下文；缺省回落 'default'（单账号向后兼容），让发布历史可真正按账号区分。
         record.accountId ?? 'default',
+        record.platform ?? 'xiaohongshu',
         record.sourceReference ? JSON.stringify(record.sourceReference) : null,
       ],
     );
@@ -281,6 +286,7 @@ export class PublishLogStore {
     const { rows } = await this.pool.query<{
       id: number;
       account_id: string | null;
+      platform: string | null;
       title: string | null;
       content: string;
       image_url: string | null;
@@ -289,7 +295,7 @@ export class PublishLogStore {
       status: string;
       content_version: number | string | null;
     }>(
-      `SELECT id, account_id, title, content, image_url, images, publish_metadata, status, content_version
+      `SELECT id, account_id, platform, title, content, image_url, images, publish_metadata, status, content_version
        FROM publish_log WHERE id = $1`,
       [recordId],
     );
@@ -302,6 +308,7 @@ export class PublishLogStore {
     return {
       recordId: r.id,
       accountId: r.account_id ?? 'default',
+      platform: normalizePlatformId(r.platform),
       title: r.title,
       content: r.content,
       imageUrl: r.image_url ?? imageUrls[0] ?? null,
