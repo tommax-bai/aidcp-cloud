@@ -48,7 +48,8 @@ const ALL_MESSAGE_TYPES: Record<MessageType, true> = {
   'captcha.assist.click': true, 'captcha.assist.click_result': true,
   'edge.task.acquire': true, 'edge.task.acquired': true,
   'edge.task.release': true, 'edge.task.released': true,
-  'publish.approval_request': true, 'publish.request': true, 'publish.result': true,
+  'publish.approval_request': true, 'publish.approval_action': true, 'publish.approval_action.result': true,
+  'publish.request': true, 'publish.result': true,
   'publish.command': true, 'publish.command.result': true,
   'page.scroll': true, 'feed.refresh': true, 'pacing.update': true, 'interaction.like': true, 'interaction.collect': true, 'interaction.follow': true,
   'interaction.comment': true, 'interaction.like_comment': true,
@@ -69,8 +70,8 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     assert.equal(PROTOCOL_VERSION, 2);
   });
 
-  it('AC-PROTO-02 消息类型总数为 72（增删消息须同步两端 + 本断言）', () => {
-    assert.equal(ALL_TYPES.length, 72);
+  it('AC-PROTO-02 消息类型总数为 74（增删消息须同步两端 + 本断言）', () => {
+    assert.equal(ALL_TYPES.length, 74);
   });
 
   it('AC-PROTO-03 每个消息类型都能构造合法信封且版本一致', () => {
@@ -158,7 +159,7 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
   });
 
   it('AC-PROTO-10 ui.snapshot personaBound 可选字段往返存活（change persona-wizard-onboarding-fixes）', () => {
-    // 加可选 personaBound（无新增 MessageType、计数仍 65）；typecheck 抓不到可选字段漂移，往返断言兜底。
+    // 加可选 personaBound（无新增 MessageType、计数随审批动作协议为 67）；typecheck 抓不到可选字段漂移，往返断言兜底。
     const snap: UiSnapshotPayload = { account: { id: 'acc-1' }, personaBound: true };
     const back = parseEnvelope(JSON.stringify(makeEnvelope('ui.snapshot', 's-1', 1700000000000, snap)));
     assert.equal((back!.payload as UiSnapshotPayload).personaBound, true);

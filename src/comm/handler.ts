@@ -21,6 +21,8 @@ import {
   type HelloPayload,
   type RemoteElement,
   type PublishApprovalRequestPayload,
+  type PublishApprovalActionPayload,
+  type PublishApprovalActionResultPayload,
   type RiskCanDoPayload,
   type RiskRecordPayload,
   type PageCardsPayload,
@@ -121,6 +123,11 @@ export interface HandlerDeps {
    * 未注入 → persona.persist 诚实回 { ok:false, reason:'unavailable' }（向后兼容）。
    */
   personaFacade?: Pick<PanelPersonaConfig, 'setPersona'>;
+  /** 客户端稿件预览内的发布/取消审批动作。未注入则诚实返回 unavailable。 */
+  publishApprovalAction?: (
+    payload: PublishApprovalActionPayload,
+    session: EdgeSession,
+  ) => Promise<PublishApprovalActionResultPayload>;
 }
 
 /** 把元素清单渲染成给 LLM 的编号列表（与 edge selector 一致的格式） */
@@ -240,6 +247,13 @@ export class DefaultMessageHandler implements MessageHandler {
       case 'publish.approval_request':
         await this.onPublishApprovalRequest(env, session);
         return null;
+      case 'publish.approval_action': {
+        const payload = env.payload as PublishApprovalActionPayload;
+        const result = this.deps.publishApprovalAction
+          ? await this.deps.publishApprovalAction(payload, session)
+          : { requestId: payload?.requestId ?? '', ok: false, reason: 'unavailable' };
+        return makeEnvelope('publish.approval_action.result', env.id, this.clock(), result);
+      }
       case 'session.budget.request':
         return this.onSessionBudgetRequest(env, session);
       case 'risk.canDo':

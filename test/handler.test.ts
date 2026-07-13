@@ -354,3 +354,29 @@ test('publish.approval_request → 调 sendApprovalCard', async () => {
   assert.equal(sent[0].chatId, 'oc_chat');
   assert.match(JSON.stringify(sent[0].card), /req-1/);
 });
+
+test('publish.approval_action → 返回客户端审批动作结果', async () => {
+  const h = new DefaultMessageHandler({
+    planner: new SimplePlanner(),
+    llm: dummyLlm,
+    cache: memStore(),
+    clock: fixedClock,
+    eventBus: new EventBus(),
+    publishApprovalAction: async (payload, connectedSession) => ({
+      requestId: payload.requestId,
+      ok: connectedSession.accountId === 'acc-test' && payload.approved,
+      state: payload.approved ? 'approved' : 'rejected',
+    }),
+  });
+  const res = await h.handle(
+    makeEnvelope('publish.approval_action', 'apa1', 1, {
+      requestId: 'publish-89',
+      approved: true,
+      contentVersion: 0,
+    }),
+    session,
+  );
+  assert.equal(res?.type, 'publish.approval_action.result');
+  assert.equal(res?.id, 'apa1');
+  assert.deepEqual(res?.payload, { requestId: 'publish-89', ok: true, state: 'approved' });
+});

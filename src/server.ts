@@ -1508,6 +1508,8 @@ async function main(): Promise<void> {
     // 建号自助人设（change edge-persona-keyword-generation）：persona.generate 生成器 + persona.persist 复用写入外观。
     personaGenerator,
     personaFacade: personaPanel,
+    // 该函数声明在下方审批装配段；用闭包延迟取值，避免 handler 初始化时触发 TDZ。
+    publishApprovalAction: (payload, session) => handlePublishApprovalAction(payload, session),
     // 多租户路由：私有总线（入站事件灌本连接通道）/ 握手建运行时 / 按连接真实账号解析 controller。
     busFor: (session) => runtimes!.busFor(session),
     onHandshake: (session) => runtimes!.onHandshake(session),
@@ -1798,6 +1800,66 @@ async function main(): Promise<void> {
       return { ok: false, reason: 'account_offline', accountId: draft.accountId };
     }
     return { ok: true, accountId: draft.accountId, edgeId };
+  };
+
+  // 客户端稿件预览内的审批动作：复用飞书/控制台同一份 first-writer-wins 信号，
+  // 并以连接握手的真实 accountId 校验归属，避免客户端传入任意 recordId 越权操作。
+  const handlePublishApprovalAction = async (
+    payload: import('./comm/protocol.js').PublishApprovalActionPayload,
+    session: import('./comm/ws-server.js').EdgeSession,
+  ): Promise<import('./comm/protocol.js').PublishApprovalActionResultPayload> => {
+    const requestId = typeof payload?.requestId === 'string' ? payload.requestId : '';
+    const match = /^publish-(\d+)$/.exec(requestId);
+    if (!match || typeof payload?.approved !== 'boolean') {
+      return { requestId, ok: false, reason: 'invalid_request' };
+    }
+    if (!session.accountId) return { requestId, ok: false, reason: 'account_unavailable' };
+
+    const recordId = Number(match[1]);
+    const draft = await publishLogStore.loadForDispatch(recordId).catch(() => null);
+    if (!draft) return { requestId, ok: false, reason: 'not_found' };
+    if (draft.accountId !== session.accountId) return { requestId, ok: false, reason: 'account_mismatch' };
+
+    const existing = await readPublishApproval(requestId);
+    if (existing) {
+      if (existing.approved !== payload.approved) return { requestId, ok: false, reason: 'already_decided' };
+      if (existing.approved) triggerPublishDispatchOnApprove(requestId);
+      return {
+        requestId,
+        ok: true,
+        state: existing.approved ? 'approved' : 'rejected',
+        alreadyDecided: true,
+      };
+    }
+    if (draft.status !== 'pending_approval') return { requestId, ok: false, reason: 'not_pending' };
+
+    if (payload.approved) {
+      const requestedVersion = Number.isInteger(payload.contentVersion) ? Number(payload.contentVersion) : 0;
+      if (requestedVersion !== draft.contentVersion) {
+        return { requestId, ok: false, reason: 'version_stale', currentVersion: draft.contentVersion };
+      }
+      const preflight = await preflightApprovePublish(requestId);
+      if (!preflight.ok) return { requestId, ok: false, reason: preflight.reason };
+    }
+
+    const tags = Array.isArray(draft.metadata?.topics)
+      ? draft.metadata.topics.filter((topic): topic is string => typeof topic === 'string')
+      : [];
+    const approvalPayload = {
+      title: draft.title ?? '',
+      content: draft.content,
+      tags,
+      contentVersion: draft.contentVersion,
+    };
+    const result = await writeApprovalSignal({ writeFile, readFile }, requestId, payload.approved, approvalPayload);
+    if (!result.written) {
+      if (result.alreadyDecided !== payload.approved) return { requestId, ok: false, reason: 'already_decided' };
+      if (payload.approved) triggerPublishDispatchOnApprove(requestId);
+      return { requestId, ok: true, state: payload.approved ? 'approved' : 'rejected', alreadyDecided: true };
+    }
+    if (payload.approved) triggerPublishDispatchOnApprove(requestId);
+    else notifyPublishRejected(requestId);
+    return { requestId, ok: true, state: payload.approved ? 'approved' : 'rejected' };
   };
 
   // 兜底补偿（at-least-once）：低频扫描已授权但未下发的待审草稿补触发（覆盖事件丢失）；靠 dispatch 幂等去重。

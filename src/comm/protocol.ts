@@ -62,6 +62,8 @@ export type MessageType =
   | 'edge.task.released' // edge → cloud：释放已收敛
   // —— 发布编排（Publish Agent 驱动）——
   | 'publish.approval_request' // edge → cloud：请求发送发布审批卡片
+  | 'publish.approval_action' // edge → cloud：客户端预览内提交发布/取消审批
+  | 'publish.approval_action.result' // cloud → edge：返回审批动作受理结果
   | 'publish.request' // cloud → edge：请求在浏览器中发布一篇帖子（v1 整页路径，地基阶段并行保留）
   | 'publish.result' // edge → cloud：发布结果回传（v1 整页路径）
   | 'publish.command' // cloud → edge：下发一条参数化发布原子指令（A 阶段1 指令驱动路径）
@@ -490,6 +492,24 @@ export interface PublishApprovalRequestPayload {
   tags: string[];
   /** 可选边缘节点标识（观测用） */
   edgeId?: string;
+}
+
+/** 客户端稿件预览内提交审批动作（edge → cloud）。 */
+export interface PublishApprovalActionPayload {
+  requestId: string;
+  approved: boolean;
+  /** 客户端所见的稿件版本；云端写审批信号前再次比对，守住“审=发”。 */
+  contentVersion?: number;
+}
+
+/** 客户端审批动作结果（cloud → edge）。 */
+export interface PublishApprovalActionResultPayload {
+  requestId: string;
+  ok: boolean;
+  state?: 'approved' | 'rejected';
+  alreadyDecided?: boolean;
+  reason?: string;
+  currentVersion?: number;
 }
 
 export interface SessionBudgetRequestPayload {
@@ -1229,6 +1249,8 @@ export interface PayloadMap {
   'search.execute': SearchExecutePayload;
   'session.end': SessionEndPayload;
   'publish.approval_request': PublishApprovalRequestPayload;
+  'publish.approval_action': PublishApprovalActionPayload;
+  'publish.approval_action.result': PublishApprovalActionResultPayload;
   'session.budget.request': SessionBudgetRequestPayload;
   'session.budget': SessionBudgetPayload;
   'risk.canDo': RiskCanDoPayload;
