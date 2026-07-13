@@ -129,6 +129,32 @@ describe('RoleDispatcher Integration', () => {
     dispatcher.endSession();
   });
 
+  it('facebook: feed_scroll 即使新卡差分为 0 也携带拟人停留 dwellMs', async () => {
+    const commands: EdgeCommand[] = [];
+    const llm = createMockLlm([]);
+    const dispatcher = new RoleDispatcher({
+      soul: mockSoul,
+      llm,
+      sendCommand: (cmd) => commands.push(cmd),
+      accountPlatform: 'facebook',
+      getNickname: () => 'FB Name',
+    });
+    dispatcher.setCurrentAccountId('fb-acc');
+    dispatcher.setup();
+    dispatcher.startSession();
+
+    dispatcher.bus.emit('feed.scrolled', { pageType: 'feed', scrollCount: 1, ts: Date.now() });
+    await new Promise((r) => setTimeout(r, 10));
+
+    const scroll = commands.find((c) => c.action === 'scroll' && c.reason === 'feed_scroll');
+    assert.ok(scroll, '应下发 feed_scroll');
+    assert.ok(
+      typeof scroll!.params?.dwellMs === 'number' && (scroll!.params!.dwellMs as number) >= 6000,
+      `FB feed_scroll 应有 6s+ dwellMs 保底，实际=${JSON.stringify(scroll!.params)}`,
+    );
+    dispatcher.endSession();
+  });
+
   // ─── back_to_feed 透传 sourcePageType → targetPage ───────────
 
   it('back_to_feed: feed.entered{pageType} 透传为 navigation.back{targetPage}（搜索会话回搜索结果）', async () => {
@@ -554,6 +580,33 @@ describe('RoleDispatcher Integration', () => {
     assert.equal(recover, undefined, `join_group 失败不应下发兜底 scroll，实际=${JSON.stringify(commands)}`);
   });
 
+  it('facebook: 搜索失败恢复 scroll 也携带拟人停留 dwellMs', async () => {
+    const commands: EdgeCommand[] = [];
+    const llm = createMockLlm([]);
+    const dispatcher = new RoleDispatcher({
+      soul: mockSoul,
+      llm,
+      sendCommand: (cmd) => commands.push(cmd),
+      accountPlatform: 'facebook',
+      getNickname: () => 'FB Name',
+    });
+    dispatcher.setCurrentAccountId('fb-acc');
+    dispatcher.setup();
+    dispatcher.startSession();
+
+    commands.length = 0;
+    dispatcher.bus.emit('action.completed', { action: 'search', ok: false, reason: 'no_target', ts: Date.now() });
+    await new Promise((r) => setTimeout(r, 10));
+
+    const recover = commands.find((c) => c.action === 'scroll' && c.reason === 'recover_after_search_failed');
+    assert.ok(recover, `search 失败后应下发兜底 scroll，实际=${JSON.stringify(commands)}`);
+    assert.ok(
+      typeof recover!.params?.dwellMs === 'number' && (recover!.params!.dwellMs as number) >= 6000,
+      `FB search 恢复 scroll 应有 6s+ dwellMs 保底，实际=${JSON.stringify(recover!.params)}`,
+    );
+    dispatcher.endSession();
+  });
+
   // ─── facebook-browse-and-like-loop 5.2: 会话启动平台闸对 Facebook 放行 ─────────────────
   // 原 facebook-scheduled-comment 2.8 曾断言「FB 无 browse → 拒绝」；本 change 为 FB 声明 browse（edge 侧
   // FacebookBrowseSession 原子同落），启动闸应【放行】FB 浏览闭环（spec 场景「Facebook account can start a
@@ -572,6 +625,105 @@ describe('RoleDispatcher Integration', () => {
     dispatcher.tryStartSession(); // 经 canStartSession 平台闸
     await new Promise((r) => setTimeout(r, 10));
     assert.ok(starts.length >= 1, 'facebook 账号声明 browse 后应正常启动浏览会话（平台闸放行）');
+  });
+
+  it('facebook: 没有内容评估证据时，reading.done 不会自然触发 like', async () => {
+    const commands: EdgeCommand[] = [];
+    const llm = createMockLlm(['{"action":"like","reason":"不该被调用"}']);
+    const dispatcher = new RoleDispatcher({
+      soul: mockSoul,
+      llm,
+      sendCommand: (cmd) => commands.push(cmd),
+      accountPlatform: 'facebook',
+      getNickname: () => 'FB Name',
+    });
+    const note = {
+      noteId: 'https://www.facebook.com/a/posts/pfbid0FB',
+      title: 'FB post',
+      content: 'content',
+      author: 'Alice',
+      likeCount: 10,
+      collectCount: 0,
+    };
+    dispatcher.setCurrentAccountId('fb-acc');
+    dispatcher.setup();
+    dispatcher.startSession();
+    dispatcher.updateNoteData(note);
+
+    const skipped: Array<{ reason?: string }> = [];
+    dispatcher.bus.on('interaction.skipped', (p) => { skipped.push(p); });
+    dispatcher.bus.emit('reading.done', {
+      noteId: note.noteId,
+      sourcePageType: 'feed',
+      imagesBrowsed: 0,
+      commentsRead: 0,
+      keyPoints: [],
+      readDurationMs: 100,
+      ts: Date.now(),
+    });
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.equal(llm.callCount, 0, '资格闸失败时不应调互动评估 LLM');
+    assert.equal(skipped.at(-1)?.reason, 'fb_content_not_selected');
+    assert.ok(!commands.some((c) => c.action === 'like'), '不应下发 like');
+    dispatcher.endSession();
+  });
+
+  it('facebook: content.valuable + quality.pass + interaction_appraiser=like → 才下发 like', async () => {
+    const commands: EdgeCommand[] = [];
+    const llm = createMockLlm([
+      '{"action":"like","reason":"符合人设"}',
+      '{"action":"like","reason":"符合人设"}',
+    ]);
+    const dispatcher = new RoleDispatcher({
+      soul: mockSoul,
+      llm,
+      sendCommand: (cmd) => commands.push(cmd),
+      accountPlatform: 'facebook',
+      getNickname: () => 'FB Name',
+    });
+    const note = {
+      noteId: 'https://www.facebook.com/a/posts/pfbid0FB',
+      title: 'FB post',
+      content: 'useful local post with enough detail',
+      author: 'Alice',
+      likeCount: 10,
+      collectCount: 0,
+    };
+    dispatcher.setCurrentAccountId('fb-acc');
+    dispatcher.setup();
+    dispatcher.startSession();
+    dispatcher.updateNoteData(note);
+
+    dispatcher.bus.emit('content.valuable', {
+      index: 0,
+      noteId: note.noteId,
+      title: note.title,
+      reason: '内容相关',
+      confidence: 0.9,
+      sourcePageType: 'feed',
+      ts: Date.now(),
+    });
+    dispatcher.bus.emit('quality.pass', {
+      noteId: note.noteId,
+      sourcePageType: 'feed',
+      reason: '详情有价值',
+      ts: Date.now(),
+    });
+    dispatcher.bus.emit('reading.done', {
+      noteId: note.noteId,
+      sourcePageType: 'feed',
+      imagesBrowsed: 0,
+      commentsRead: 0,
+      keyPoints: [],
+      readDurationMs: 100,
+      ts: Date.now(),
+    });
+    await new Promise((r) => setTimeout(r, 60));
+
+    assert.ok(commands.some((c) => c.action === 'open_note' && (c.params as { noteId?: string })?.noteId === note.noteId));
+    assert.ok(commands.some((c) => c.action === 'like' && (c.params as { noteId?: string })?.noteId === note.noteId));
+    dispatcher.endSession();
   });
 
   it('2.8: 缺省/xiaohongshu 平台（含 browse）→ 启动闸放行，正常起会话', async () => {

@@ -21,7 +21,7 @@ describe('SearchExecutor', () => {
     let captured = null as FeedEnteredPayload | null;
     bus.on('feed.entered', (p) => { captured = p; });
 
-    bus.emit('search.approved', { keyword: 'LLM Agent', reason: '概念池推荐', ts: Date.now() });
+    bus.emit('search.approved', { keyword: 'LLM Agent', reason: '概念池推荐', currentPageType: 'feed', ts: Date.now() });
 
     assert.ok(captured, 'should emit feed.entered');
     assert.equal(captured!.pageType, 'search');
@@ -36,8 +36,8 @@ describe('SearchExecutor', () => {
     const role = new SearchExecutor({ eventBus: bus, soul: mockSoul, sessionContext: ctx });
     role.subscribe();
 
-    bus.emit('search.approved', { keyword: 'LLM Agent', reason: '测试', ts: Date.now() });
-    bus.emit('search.approved', { keyword: 'RAG 实战', reason: '测试', ts: Date.now() });
+    bus.emit('search.approved', { keyword: 'LLM Agent', reason: '测试', currentPageType: 'feed', ts: Date.now() });
+    bus.emit('search.approved', { keyword: 'RAG 实战', reason: '测试', currentPageType: 'feed', ts: Date.now() });
 
     assert.deepEqual(role.searchedKeywords, ['LLM Agent', 'RAG 实战']);
 
@@ -56,7 +56,7 @@ describe('SearchExecutor', () => {
     const role = new SearchExecutor({ eventBus: bus, soul: mockSoul, sessionContext: ctx });
     role.subscribe();
 
-    bus.emit('search.approved', { keyword: 'LLM Agent', reason: '测试', ts: Date.now() });
+    bus.emit('search.approved', { keyword: 'LLM Agent', reason: '测试', currentPageType: 'feed', ts: Date.now() });
 
     assert.equal(ctx.consecutiveScrolls, 0, 'should reset consecutiveScrolls');
 
@@ -73,7 +73,7 @@ describe('SearchExecutor', () => {
     let captured = null as FeedEnteredPayload | null;
     bus.on('feed.entered', (p) => { captured = p; });
 
-    bus.emit('search.approved', { keyword: 'LLM Agent', reason: '测试', ts: Date.now() });
+    bus.emit('search.approved', { keyword: 'LLM Agent', reason: '测试', currentPageType: 'feed', ts: Date.now() });
     assert.equal(captured, null);
   });
 
@@ -83,7 +83,7 @@ describe('SearchExecutor', () => {
     const role = new SearchExecutor({ eventBus: bus, soul: mockSoul, sessionContext: ctx });
     role.subscribe();
 
-    bus.emit('search.approved', { keyword: 'LLM Agent', reason: '测试', ts: Date.now() });
+    bus.emit('search.approved', { keyword: 'LLM Agent', reason: '测试', currentPageType: 'feed', ts: Date.now() });
 
     const kw1 = role.searchedKeywords;
     kw1.push('hack');  // 修改副本
