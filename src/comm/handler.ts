@@ -61,6 +61,39 @@ import type { RiskAction, RiskStatus, RiskQuotaLevel, PacingFloorProvider } from
 import type { PacingSnapshotPayload } from './protocol.js';
 import type { AccountStateManager } from '../account-state.js';
 
+/**
+ * action.completed 的 action 是云端角色的关联键，正常值是 `browse_images` 而非
+ * `note.browse_images`。旧 edge 或平台会话若回传协议消息名，入口统一归一化，避免
+ * DeepReader / CommentReviewer 漏消费失败回执并让 dispatcher 在详情页错误补发 feed scroll。
+ */
+const LEGACY_ACTION_COMPLETION_ALIASES: Readonly<Record<string, string>> = {
+  'page.scroll': 'scroll',
+  'feed.refresh': 'refresh',
+  'interaction.like': 'like',
+  'interaction.collect': 'collect',
+  'interaction.follow': 'follow',
+  'interaction.comment': 'comment',
+  'interaction.like_comment': 'comment_like',
+  'search.execute': 'search',
+  'note.open': 'open_note',
+  'note.close': 'close',
+  'note.browse_images': 'browse_images',
+  'note.scroll_comments': 'scroll_comments',
+  'navigation.back': 'back',
+  'profile.open': 'profile_open',
+  'group.join': 'join_group',
+  'notification.open': 'open_notifications',
+  'notification.browse_comments': 'browse_notification_comments',
+  'notification.browse_likes': 'browse_notification_likes',
+  'notification.browse_follows': 'browse_notification_follows',
+  'notification.back_home': 'notification_back_home',
+  'pacing.update': 'pacing_update',
+};
+
+export function normalizeActionCompletedAction(action: string): string {
+  return LEGACY_ACTION_COMPLETION_ALIASES[action] ?? action;
+}
+
 /** 锚点缓存的最小接口（PgAnchorCache 实现它，单测可打桩） */
 export interface AnchorStore {
   get(actionId: string): Promise<import('./protocol.js').RemoteAnchor | null>;
@@ -347,7 +380,11 @@ export class DefaultMessageHandler implements MessageHandler {
         return null;
       }
       case 'action.completed': {
-        const result = env.payload as ActionCompletedPayload;
+        const rawResult = env.payload as ActionCompletedPayload;
+        const result: ActionCompletedPayload = {
+          ...rawResult,
+          action: normalizeActionCompletedAction(rawResult.action),
+        };
         this.bus(session).emit('action.completed', { ...result, ts: this.clock() });
         // 真实成功互动 → 驱动 RiskController 按账号计数（record 订在 interaction.occurred）。
         // already_followed 是良性 no-op，失败 ok=false，均不计——只记真实发生的互动。

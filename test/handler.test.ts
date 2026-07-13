@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DefaultMessageHandler } from '../src/comm/index.js';
+import { normalizeActionCompletedAction } from '../src/comm/handler.js';
 import type { AnchorStore } from '../src/comm/handler.js';
 import type { EdgeSession } from '../src/comm/ws-server.js';
 import { makeEnvelope, type RemoteAnchor } from '../src/comm/index.js';
@@ -56,6 +57,36 @@ function makeHandler(llm: LlmClient, store: AnchorStore) {
     eventBus: new EventBus(),
   });
 }
+
+test('action.completed protocol message aliases normalize to cloud action keys', () => {
+  const expected: Record<string, string> = {
+    'page.scroll': 'scroll',
+    'feed.refresh': 'refresh',
+    'interaction.like': 'like',
+    'interaction.collect': 'collect',
+    'interaction.follow': 'follow',
+    'interaction.comment': 'comment',
+    'interaction.like_comment': 'comment_like',
+    'search.execute': 'search',
+    'note.open': 'open_note',
+    'note.close': 'close',
+    'note.browse_images': 'browse_images',
+    'note.scroll_comments': 'scroll_comments',
+    'navigation.back': 'back',
+    'profile.open': 'profile_open',
+    'group.join': 'join_group',
+    'notification.open': 'open_notifications',
+    'notification.browse_comments': 'browse_notification_comments',
+    'notification.browse_likes': 'browse_notification_likes',
+    'notification.browse_follows': 'browse_notification_follows',
+    'notification.back_home': 'notification_back_home',
+    'pacing.update': 'pacing_update',
+  };
+  for (const [protocolType, action] of Object.entries(expected)) {
+    assert.equal(normalizeActionCompletedAction(protocolType), action, protocolType);
+  }
+  assert.equal(normalizeActionCompletedAction('new.command'), 'new.command');
+});
 
 const dummyLlm: LlmClient = { complete: async () => '0' };
 
