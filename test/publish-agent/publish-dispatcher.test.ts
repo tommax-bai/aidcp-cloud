@@ -8,6 +8,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { PublishDispatcher, type DispatchNotice } from '../../src/publish-agent/publish-dispatcher.js';
 import type { DispatchDraft } from '../../src/publish-agent/publish-log-store.js';
+import { EdgeTaskLeaseError } from '../../src/comm/edge-task-lease-client.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 
@@ -38,6 +39,7 @@ function harness(opts: {
   approvedVersion?: number;
   edgeId?: string | null;
   seqResult?: any;
+  leaseError?: Error;
 }) {
   const events: string[] = [];
   let seqInput: any;
@@ -69,6 +71,7 @@ function harness(opts: {
     edgeTaskLeases: {
       withLease: async (request, work) => {
         leasePriorities.push(request.priority);
+        if (opts.leaseError) throw opts.leaseError;
         events.push('lease:acquired');
         try {
           return await work({ taskId: 'task-publish-1', edgeId: request.edgeId, kind: request.kind, priority: request.priority });
@@ -134,6 +137,23 @@ describe('PublishDispatcher', () => {
     assert.equal(h.statusUpdates.length, 0, '不改态：草稿留待审可重批（不烧成 failed 终态）');
     assert.deepEqual(h.voided, ['publish-7'], '作废本次授权信号（防兜底扫描对离线空转/旧授权无人知情自动发出）');
     assert.deepEqual(h.notices, [{ kind: 'offline_requeued', accountId: 'acct-A', recordId: 7, title: 'vLLM 部署踩坑' }], '如实通知重批');
+  });
+
+  test('在线 edge 的 acquire 超时（零副作用）→ 回待审但不得误报离线', async () => {
+    const h = harness({
+      approved: true,
+      edgeId: 'edge-online',
+      leaseError: new EdgeTaskLeaseError('acquire_timeout', 'edge task acquire timeout taskId=task-timeout edge=edge-online'),
+    });
+    await h.dispatcher.dispatch(7);
+    assert.equal(h.events.includes('seq'), false, '未 acquired 前绝不驱动发布序列');
+    assert.equal(h.statusUpdates.length, 0, '草稿保持待审可重批');
+    assert.deepEqual(h.voided, ['publish-7'], '作废本次授权，避免旧授权自动重发');
+    assert.deepEqual(
+      h.notices,
+      [{ kind: 'acquire_timeout_requeued', accountId: 'acct-A', recordId: 7, title: 'vLLM 部署踩坑' }],
+      '接管超时必须是独立通知语义，不得混为边缘离线',
+    );
   });
 
   test('幂等：已 published 草稿 → 跳过，不二次发布', async () => {

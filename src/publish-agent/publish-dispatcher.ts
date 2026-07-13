@@ -17,7 +17,7 @@
 
 import type { DispatchDraft } from './publish-log-store.js';
 import type { CommandSequencer } from './command-sequencer.js';
-import type { EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
+import { EdgeTaskLeaseError, type EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
 import type { EdgeTaskPriority } from '../comm/protocol.js';
 
 /** 下发段所需的落库读写子集。 */
@@ -37,9 +37,9 @@ export interface ApprovalDecision {
   contentVersion: number;
 }
 
-/** 下发段运维通知（best-effort，绝不影响下发主链路）：离线回待审 / 熔断开启 / 熔断解除。 */
+/** 下发段运维通知（best-effort，绝不影响下发主链路）：离线/接管超时回待审 / 熔断开启 / 熔断解除。 */
 export interface DispatchNotice {
-  kind: 'offline_requeued' | 'breaker_open' | 'breaker_cleared';
+  kind: 'offline_requeued' | 'acquire_timeout_requeued' | 'breaker_open' | 'breaker_cleared';
   accountId: string;
   recordId?: number;
   title?: string | null;
@@ -65,7 +65,7 @@ export interface PublishDispatcherDeps {
    * 推给该账号的在线边缘。published 不经此通道（边缘 submit 成功处自知）。best-effort，绝不影响下发主链路。
    */
   notifyUiPublishState?: (accountId: string, recordId: number, state: 'approved' | 'failed', title?: string | null) => void;
-  /** 运维通知（飞书 best-effort）：离线回待审 / 熔断开启 / 熔断解除。 */
+  /** 运维通知（飞书 best-effort）：离线/接管超时回待审 / 熔断开启 / 熔断解除。 */
   notifyDispatchEvent?: (notice: DispatchNotice) => void;
   /** Facebook 发帖素材状态流转：确认成功 used、提交未确认 quarantine、提交前失败 release。 */
   facebookPublishMedia?: {
@@ -384,10 +384,13 @@ export class PublishDispatcher {
       if (!sequenceStarted) {
         // acquire 未确认 = 零业务命令副作用；作废授权回待审，绝不把协议过旧/离线烧成 failed。
         await this.voidApprovalSignal(requestId).catch(() => {});
+        const noticeKind = err instanceof EdgeTaskLeaseError && err.code === 'acquire_timeout'
+          ? 'acquire_timeout_requeued'
+          : 'offline_requeued';
         this.logger.warn(
           `[PublishDispatcher] recordId=${recordId} 未取得 edge task lease，零命令下发、回待审: ${err instanceof Error ? err.message : String(err)}`,
         );
-        this.notifyOps({ kind: 'offline_requeued', accountId, recordId, title: draft.title });
+        this.notifyOps({ kind: noticeKind, accountId, recordId, title: draft.title });
         return;
       }
       // 序列驱动异常（页面状态未知）→ 同序列失败处理：failed 终态 + 计入熔断。

@@ -1685,7 +1685,7 @@ async function main(): Promise<void> {
     // 陪伴界面：授权核实→approved、云端终判失败→failed 推给在线边缘（published 由边缘自知）。
     notifyUiPublishState: (accountId, recordId, state, title) =>
       uiSnapshotService.pushPublishState(accountId, recordId, state, title),
-    // 下发段运维通知（change parallel-rewrite-drafts）：离线回待审 / 熔断开启 / 熔断解除 → 默认群文本，best-effort。
+    // 下发段运维通知：离线/浏览器接管超时回待审 / 熔断开启 / 熔断解除 → 默认群文本，best-effort。
     notifyDispatchEvent: (notice) => {
       void (async () => {
         const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
@@ -1695,7 +1695,9 @@ async function main(): Promise<void> {
         const text =
           notice.kind === 'offline_requeued'
             ? `⚠️ 发布未执行：账号「${name}」边缘离线，${ref} 已退回待审（本次授权作废）。边缘恢复后请重新批准。`
-            : notice.kind === 'breaker_open'
+            : notice.kind === 'acquire_timeout_requeued'
+              ? `⚠️ 发布未执行：账号「${name}」客户端仍在线，但浏览器未在接管时限内完成暂停当前浏览，${ref} 已退回待审（本次授权作废，未下发发布命令）。请检查浏览器/CDP后重新批准。`
+              : notice.kind === 'breaker_open'
               ? `🔴 发布熔断：账号「${name}」连续下发失败（最近 ${ref}），已停止自动下发其已批草稿。排查边缘后重新批准任一草稿即恢复。`
               : `🟢 发布熔断解除：账号「${name}」人工批准确认，恢复下发已批队列。`;
         await messenger.sendText(chatId, text);
