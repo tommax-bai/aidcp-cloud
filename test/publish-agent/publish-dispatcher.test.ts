@@ -59,7 +59,7 @@ function harness(opts: {
     executePublishSequence: async (input: any) => {
       seqInput = input;
       events.push('seq');
-      return opts.seqResult ?? { ok: true, attachedCount: 2, postId: 'post_real' };
+      return opts.seqResult ?? { ok: true, outcome: 'published_confirmed', attachedCount: 2, postId: 'post_real' };
     },
   };
   // 授权所载版本：默认取草稿版本（版本一致）；显式传 approvedVersion 则模拟「授权后又被编辑」。
@@ -187,10 +187,15 @@ describe('PublishDispatcher', () => {
     assert.deepEqual(h.statusUpdates.at(-1), { id: 7, status: 'failed' }, '真失败如实 failed');
   });
 
-  test('提交成功但未抓到 postId → updateStatus published（不误判 failed）', async () => {
-    const h = harness({ approved: true, edgeId: 'edge-A', seqResult: { ok: true, attachedCount: 1 } });
+  test('提交后未抓到 postId → needs_review，绝不误记 published 或自动重试', async () => {
+    const h = harness({
+      approved: true,
+      edgeId: 'edge-A',
+      seqResult: { ok: true, outcome: 'submitted_unconfirmed', attachedCount: 1 },
+    });
     await h.dispatcher.dispatch(7);
-    assert.deepEqual(h.statusUpdates.at(-1), { id: 7, status: 'published' });
+    assert.deepEqual(h.statusUpdates.at(-1), { id: 7, status: 'needs_review' });
+    assert.equal(h.postWrite, undefined, '无 postId/permalink 绝不伪造发布确认');
   });
 
   test('草稿不存在 → 安静跳过', async () => {
@@ -257,7 +262,7 @@ describe('PublishDispatcher', () => {
       sequencer: {
         executePublishSequence: async (input: any) => {
           events.push(`seq:${input.recordId}`);
-          return (await opts.seqResultFor?.(input.recordId)) ?? { ok: true, attachedCount: 1, postId: 'p' };
+          return (await opts.seqResultFor?.(input.recordId)) ?? { ok: true, outcome: 'published_confirmed', attachedCount: 1, postId: 'p' };
         },
       },
       edgeTaskLeases: {
@@ -338,7 +343,7 @@ describe('PublishDispatcher', () => {
       drafts,
       seqResultFor: async (id) => {
         if (id === 1) await gateA; // A 慢发（模拟 1-3 分钟下发）
-        return { ok: true, attachedCount: 1, postId: 'p' };
+        return { ok: true, outcome: 'published_confirmed', attachedCount: 1, postId: 'p' };
       },
     });
     const scan = h.dispatcher.scanAndDispatchApproved();

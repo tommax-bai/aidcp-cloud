@@ -363,15 +363,20 @@ export class PublishDispatcher {
       // 配图收口：如实标记真实附着张数 K（部分成功 K≥1 即有效帖；全失败 K=0）。
       await this.store.markImagesAttached(recordId, result.attachedCount).catch(() => {});
 
-      if (result.ok) {
+      if (result.ok && result.outcome === 'published_confirmed') {
         await this.settleFacebookMedia(draft, result.outcome, recordId, result.failedAt?.error);
         this.consecutiveSeqFails.delete(accountId);
-        if (result.postId) {
-          await this.store.updatePostId(recordId, result.postId, result.postUrl).catch(() => {});
-        } else {
-          await this.store.updateStatus(recordId, 'published').catch(() => {});
-        }
-        this.logger.log(`[PublishDispatcher] recordId=${recordId} published postId=${result.postId ?? '(未抓到)'} edge=${edgeId}`);
+        await this.store.updatePostId(recordId, result.postId!, result.postUrl).catch(() => {});
+        this.logger.log(`[PublishDispatcher] recordId=${recordId} published postId=${result.postId} edge=${edgeId}`);
+      } else if (result.outcome === 'submitted_unconfirmed') {
+        // Post 已点击或页面已发生提交态，但未拿到 postId/permalink 的可靠确认。
+        // 绝不把它写成 published，也绝不能重试；素材隔离并留给人工核验。
+        await this.settleFacebookMedia(draft, result.outcome, recordId, result.failedAt?.error);
+        await this.store.updateStatus(recordId, 'needs_review').catch(() => {});
+        this.logger.warn(
+          `[PublishDispatcher] recordId=${recordId} submitted_unconfirmed，已转 needs_review（不自动重试）`,
+        );
+        this.notifyUi(accountId, recordId, 'failed', draft.title);
       } else {
         // 序列中途失败（页面状态未知）→ failed 终态、绝不自动重跑；计入熔断（连续 N 次停 drain 防连环烧稿）。
         await this.settleFacebookMedia(draft, result.outcome, recordId, result.failedAt?.error);
