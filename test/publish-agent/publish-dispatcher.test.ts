@@ -48,6 +48,7 @@ function harness(opts: {
   const attached: Array<{ id: number; count: number }> = [];
   const voided: string[] = [];
   const leasePriorities: string[] = [];
+  const uiStates: Array<{ accountId: string; recordId: number; state: string; title?: string | null }> = [];
   const store = {
     loadForDispatch: async (_id: number) => (opts.draft === undefined ? makeDraft() : opts.draft),
     updateStatus: async (id: number, status: string) => { statusUpdates.push({ id, status }); events.push(`status:${status}`); },
@@ -88,10 +89,11 @@ function harness(opts: {
     voidApprovalSignal: async (requestId: string) => { voided.push(requestId); events.push('void'); },
     onPublishStart: () => events.push('start'),
     onPublishEnd: () => events.push('end'),
+    notifyUiPublishState: (accountId, recordId, state, title) => uiStates.push({ accountId, recordId, state, title }),
     notifyDispatchEvent: (n) => notices.push(n),
     logger: silentLogger,
   });
-  return { dispatcher, events, get seqInput() { return seqInput; }, statusUpdates, get postWrite() { return postWrite; }, attached, voided, notices, leasePriorities };
+  return { dispatcher, events, get seqInput() { return seqInput; }, statusUpdates, get postWrite() { return postWrite; }, attached, voided, notices, leasePriorities, uiStates };
 }
 
 describe('PublishDispatcher', () => {
@@ -187,15 +189,16 @@ describe('PublishDispatcher', () => {
     assert.deepEqual(h.statusUpdates.at(-1), { id: 7, status: 'failed' }, '真失败如实 failed');
   });
 
-  test('提交后未抓到 postId → needs_review，绝不误记 published 或自动重试', async () => {
+  test('页面已提交但未抓到 postId → submitted，不报失败、不刷新或自动重试', async () => {
     const h = harness({
       approved: true,
       edgeId: 'edge-A',
       seqResult: { ok: true, outcome: 'submitted_unconfirmed', attachedCount: 1 },
     });
     await h.dispatcher.dispatch(7);
-    assert.deepEqual(h.statusUpdates.at(-1), { id: 7, status: 'needs_review' });
+    assert.deepEqual(h.statusUpdates.at(-1), { id: 7, status: 'submitted' });
     assert.equal(h.postWrite, undefined, '无 postId/permalink 绝不伪造发布确认');
+    assert.deepEqual(h.uiStates.at(-1), { accountId: 'acct-A', recordId: 7, state: 'submitted', title: 'vLLM 部署踩坑' });
   });
 
   test('草稿不存在 → 安静跳过', async () => {

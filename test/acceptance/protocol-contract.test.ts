@@ -200,4 +200,10 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     const back = parseEnvelope(JSON.stringify(makeEnvelope('ui.snapshot', 's-1', 1700000000000, snap)));
     assert.deepEqual((back!.payload as UiSnapshotPayload).browserStandby, snap.browserStandby);
   });
+
+  it('AC-PROTO-13 ui.snapshot submitted 表示页面已提交但链接待确认', () => {
+    const snap: UiSnapshotPayload = { publish: { state: 'submitted', title: '待链接确认的帖子', code: '#89' } };
+    const back = parseEnvelope(JSON.stringify(makeEnvelope('ui.snapshot', 's-3', 1700000000000, snap)));
+    assert.deepEqual((back!.payload as UiSnapshotPayload).publish, snap.publish);
+  });
 });

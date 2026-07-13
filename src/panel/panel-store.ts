@@ -397,7 +397,7 @@ export class PgPanelStore implements PanelStoreReader {
   async todayPublishCount(): Promise<number> {
     const { rows } = await this.pool.query<{ n: number }>(
       `SELECT COUNT(*)::int AS n FROM publish_log
-       WHERE status = 'published' AND published_at >= ${SHANGHAI_DAY_START_SQL}`,
+       WHERE status IN ('submitted', 'published') AND published_at >= ${SHANGHAI_DAY_START_SQL}`,
     );
     return rows[0]?.n ?? 0;
   }

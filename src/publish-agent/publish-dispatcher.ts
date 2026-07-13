@@ -61,10 +61,10 @@ export interface PublishDispatcherDeps {
   /** @deprecated 不再由单功能 finally 无条件恢复浏览。 */
   onPublishEnd?: (accountId: string) => void;
   /**
-   * 陪伴界面通知（change edge-companion-ui 8.1，可选）：审批已核通过（approved）与云端终判失败（failed）
-   * 推给该账号的在线边缘。published 不经此通道（边缘 submit 成功处自知）。best-effort，绝不影响下发主链路。
+   * 陪伴界面通知（change edge-companion-ui 8.1，可选）：审批已核通过（approved）、页面已提交待链接确认
+   * （submitted）与云端终判失败（failed）推给该账号的在线边缘。best-effort，绝不影响下发主链路。
    */
-  notifyUiPublishState?: (accountId: string, recordId: number, state: 'approved' | 'failed', title?: string | null) => void;
+  notifyUiPublishState?: (accountId: string, recordId: number, state: 'approved' | 'submitted' | 'failed', title?: string | null) => void;
   /** 运维通知（飞书 best-effort）：离线/接管超时回待审 / 熔断开启 / 熔断解除。 */
   notifyDispatchEvent?: (notice: DispatchNotice) => void;
   /** Facebook 发帖素材状态流转：确认成功 used、提交未确认 quarantine、提交前失败 release。 */
@@ -85,7 +85,7 @@ export class PublishDispatcher {
   private readonly resolveEdgeIdForAccount: (accountId: string) => string | null;
   private readonly readApproval: (requestId: string) => Promise<ApprovalDecision | null>;
   private readonly voidApprovalSignal: (requestId: string) => Promise<void>;
-  private readonly notifyUiPublishState?: (accountId: string, recordId: number, state: 'approved' | 'failed', title?: string | null) => void;
+  private readonly notifyUiPublishState?: (accountId: string, recordId: number, state: 'approved' | 'submitted' | 'failed', title?: string | null) => void;
   private readonly notifyDispatchEvent?: (notice: DispatchNotice) => void;
   private readonly facebookPublishMedia?: NonNullable<PublishDispatcherDeps['facebookPublishMedia']>;
   private readonly breakerThreshold: number;
@@ -231,7 +231,7 @@ export class PublishDispatcher {
   }
 
   /** 陪伴界面通知 best-effort 包装：通知层异常绝不打断下发主链路。 */
-  private notifyUi(accountId: string, recordId: number, state: 'approved' | 'failed', title?: string | null): void {
+  private notifyUi(accountId: string, recordId: number, state: 'approved' | 'submitted' | 'failed', title?: string | null): void {
     try {
       this.notifyUiPublishState?.(accountId, recordId, state, title);
     } catch {
@@ -369,14 +369,14 @@ export class PublishDispatcher {
         await this.store.updatePostId(recordId, result.postId!, result.postUrl).catch(() => {});
         this.logger.log(`[PublishDispatcher] recordId=${recordId} published postId=${result.postId} edge=${edgeId}`);
       } else if (result.outcome === 'submitted_unconfirmed') {
-        // Post 已点击或页面已发生提交态，但未拿到 postId/permalink 的可靠确认。
-        // 绝不把它写成 published，也绝不能重试；素材隔离并留给人工核验。
+        // 当前页面已确认提交，但未拿到同页 postId/permalink。
+        // 对用户是“已提交，待链接确认”，不是失败；仍不重试，素材隔离。
         await this.settleFacebookMedia(draft, result.outcome, recordId, result.failedAt?.error);
-        await this.store.updateStatus(recordId, 'needs_review').catch(() => {});
+        await this.store.updateStatus(recordId, 'submitted').catch(() => {});
         this.logger.warn(
-          `[PublishDispatcher] recordId=${recordId} submitted_unconfirmed，已转 needs_review（不自动重试）`,
+          `[PublishDispatcher] recordId=${recordId} submitted_unconfirmed，已转 submitted（不刷新、不自动重试）`,
         );
-        this.notifyUi(accountId, recordId, 'failed', draft.title);
+        this.notifyUi(accountId, recordId, 'submitted', draft.title);
       } else {
         // 序列中途失败（页面状态未知）→ failed 终态、绝不自动重跑；计入熔断（连续 N 次停 drain 防连环烧稿）。
         await this.settleFacebookMedia(draft, result.outcome, recordId, result.failedAt?.error);

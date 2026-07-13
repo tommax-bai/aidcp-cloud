@@ -3,12 +3,12 @@
  *
  * 职责：把「边缘看不到、只有云端知道」的界面数据经 `ui.snapshot` 定向推给该账号的在线边缘：
  *  - hello 注册完成后：全量快照（小红书昵称 + 最近成功发布摘要 + 在途候审/已批状态 + 待审稿件预览）；
- *  - 发布审批生命周期变化时：增量状态（pending / approved / rejected / failed）。
+ *  - 发布审批生命周期变化时：增量状态（pending / approved / submitted / rejected / failed）。
  *
  * 红线：
  *  - 宁缺毋假：无数据的字段不带；快照全空不发包；已拒草稿在 hello 快照不回放（拒绝时刻已实时推过，
  *    重启不翻旧账、无事件不造活跃）。
- *  - published 不经此通道（边缘在 submit 成功处自知并本地发射，避免双源重复）。
+ *  - published 不经此通道（边缘在同页取到 postId 后自知并本地发射，避免双源重复）。
  *  - 推送尽力而为：账号无在线边缘/连接刚断（sent=0）如实记日志放弃，绝不重试风暴。
  *    hello 快照可重建的只有**持久可查**的态（昵称/最近发布/候审 pending/已批 approved）；
  *    终态（rejected/failed）只在转移时刻推送一次，边缘离线错过即不回放——壳侧配套约定：
@@ -29,8 +29,8 @@ import {
 } from './protocol.js';
 import { randomUUID } from 'node:crypto';
 
-/** 云端可推送的发布审批状态（published 由边缘本地发射，不在此列）。 */
-export type PublishUiState = 'pending' | 'approved' | 'rejected' | 'failed';
+/** 云端可推送的发布审批状态（published 由边缘同页取到 postId 后本地发射，不在此列）。 */
+export type PublishUiState = 'pending' | 'approved' | 'submitted' | 'rejected' | 'failed';
 type TimerHandle = ReturnType<typeof setTimeout>;
 
 const MIN_DAILY_USAGE_REFRESH_DELAY_MS = 1_000;

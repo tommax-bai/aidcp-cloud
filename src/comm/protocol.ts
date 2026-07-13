@@ -257,12 +257,12 @@ export interface UiSnapshotPayload {
   /** 当前待审稿件的只读预览；正文/配图来自 publish_log，原稿信息不随客户端契约下发。 */
   publishPreview?: UiPublishPreviewPayload;
   /**
-   * 发布审批状态。云端只推边缘看不到的状态（pending/approved/rejected/failed 终判）；
-   * published 由边缘在提交成功处自知、不经此通道；reminded 仅在真的再次提醒后才推——
+   * 发布审批状态。云端只推边缘看不到的状态（pending/approved/submitted/rejected/failed）；
+   * published 由边缘在同页取得帖子 ID 后自知、不经此通道；reminded 仅在真的再次提醒后才推——
    * 云端当前无再提醒机制，故此值现阶段不会出现（枚举保留，绝不谎称已提醒）。
    */
   publish?: {
-    state: 'pending' | 'reminded' | 'approved' | 'published' | 'rejected' | 'failed';
+    state: 'pending' | 'reminded' | 'approved' | 'submitted' | 'published' | 'rejected' | 'failed';
     title?: string;
     /** 界面「编号」对暗号用，与飞书审批卡「编号」字段一致（取发布记录 id，如 "#83"） */
     code?: string;

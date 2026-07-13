@@ -42,10 +42,11 @@ export interface PostProcessResult {
 /**
  * 发布记录状态。
  * `pending_approval`（change decouple-publish-generation-from-dispatch）：终稿已生成、落库待人审、尚未下发。
- * 生成候审段产出即此态；人审授权 → 下发段（→ published/failed），运营显式否决 → needs_review（终态、不下发）。
+ * 生成候审段产出即此态；人审授权 → 下发段（→ submitted/published/failed），运营显式否决 → needs_review（终态、不下发）。
+ * `submitted` 表示页面已接受提交、但尚未从同页取得稳定帖子 ID/permalink；它不重试，且在节流与去重中按一次已发生的发布计数。
  * 取消审批超时后此态可无限期停留，绝不超时自毁/改判/自动发布（AC-PUB）。
  */
-export type PublishStatus = 'draft' | 'pending_approval' | 'published' | 'failed' | 'needs_review';
+export type PublishStatus = 'draft' | 'pending_approval' | 'submitted' | 'published' | 'failed' | 'needs_review';
 
 /** 单条参照洗稿来稿快照（publish-reference-source-panel）：供发布历史审计与后台查看，触发时冻结。 */
 export interface PublishSourceReference {
@@ -662,7 +663,7 @@ export interface GateDecision {
  */
 export interface PublishResult {
   recordId: number | null;
-  status: 'draft' | 'pending_approval' | 'published' | 'needs_review' | 'failed' | 'skipped';
+  status: 'draft' | 'pending_approval' | 'submitted' | 'published' | 'needs_review' | 'failed' | 'skipped';
   dispatched: boolean;
   envelope: unknown | null;
   completedAt: number;

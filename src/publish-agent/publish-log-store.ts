@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS publish_log (
   source_concepts  TEXT[] NOT NULL DEFAULT '{}',
   source_liked_ids INT[] DEFAULT '{}',
   status           TEXT NOT NULL DEFAULT 'draft'
-                   CHECK (status IN ('draft','pending_approval','published','failed','needs_review')),
+                   CHECK (status IN ('draft','pending_approval','submitted','published','failed','needs_review')),
   platform_post_id TEXT,
   publish_metadata JSONB,
   ai_enforced      BOOLEAN NOT NULL DEFAULT false,
@@ -66,7 +66,7 @@ CREATE INDEX IF NOT EXISTS idx_publish_log_platform ON publish_log (platform);
 -- 既有表的 CHECK 约束需放开新取值（幂等：先 DROP IF EXISTS 默认约束名再以新集合重建）。无新表/新列。
 ALTER TABLE publish_log DROP CONSTRAINT IF EXISTS publish_log_status_check;
 ALTER TABLE publish_log ADD CONSTRAINT publish_log_status_check
-  CHECK (status IN ('draft','pending_approval','published','failed','needs_review'));
+  CHECK (status IN ('draft','pending_approval','submitted','published','failed','needs_review'));
 -- edit-note-draft-before-publish：待审草稿就地编辑的「审=发」凭证 + 谁/何时审计。
 --   content_version：每行内容版本号（真列、非塞 JSONB，令版本闸是原子 WHERE 谓词）；既有行回填 0；每次成功编辑 +1。
 --   edited_by / edited_at：最后一次编辑者（JWT 主体）与时间；仅「谁/何时」，非 diff 日志。
@@ -97,7 +97,7 @@ interface PublishRow {
 }
 
 function toStatus(s: string): PublishStatus {
-  return s === 'published' || s === 'failed' || s === 'needs_review' || s === 'pending_approval' ? s : 'draft';
+  return s === 'submitted' || s === 'published' || s === 'failed' || s === 'needs_review' || s === 'pending_approval' ? s : 'draft';
 }
 
 /**
@@ -311,10 +311,10 @@ export class PublishLogStore {
     ]);
   }
 
-  /** 最近一次发布的时间戳（毫秒）；无记录返回 null。供 PublishScheduler 概念积累扳机基准。 */
+  /** 最近一次已发生发布的时间戳（毫秒）；submitted 也计入，防止确认缺链接时过早再发。 */
   async getMostRecentPublishTime(): Promise<number | null> {
     const { rows } = await this.pool.query<{ ts: string | null }>(
-      `SELECT extract(epoch from max(published_at)) * 1000 AS ts FROM publish_log WHERE status = 'published'`,
+      `SELECT extract(epoch from max(published_at)) * 1000 AS ts FROM publish_log WHERE status IN ('submitted', 'published')`,
     );
     const ts = rows[0]?.ts;
     return ts == null ? null : Number(ts);
@@ -328,10 +328,10 @@ export class PublishLogStore {
     return rows.map((r) => r.id);
   }
 
-  /** 取最近 n 篇已发布帖子的正文（供生成时避免重复话题）。 */
+  /** 取最近 n 篇已发生发布的正文（submitted 也参与，避免确认缺链接时撞题重发）。 */
   async recentPublishedContents(limit = 3): Promise<string[]> {
     const { rows } = await this.pool.query<{ content: string }>(
-      `SELECT content FROM publish_log WHERE status = 'published'
+      `SELECT content FROM publish_log WHERE status IN ('submitted', 'published')
        ORDER BY published_at DESC LIMIT $1`,
       [limit],
     );
@@ -590,14 +590,14 @@ export class PublishLogStore {
   }
 
   /**
-   * 该账号今日（Asia/Shanghai 自然日 00:00 起）已发布数（change content-schedule-auto-publish）。
-   * 供内容排期日上限判定——**持久已发历史**（重启不清零），与在途 hasPendingApprovalForAccount 相加做原子上限、防 TOCTOU 超发。
+   * 该账号今日（Asia/Shanghai 自然日 00:00 起）已发生发布数（change content-schedule-auto-publish）。
+   * `submitted` 也计入，供内容排期日上限判定，防止链接暂缺时越过节流再发。
    * 显式 Asia/Shanghai 下界，对齐风控 day quota 与客户端 today 用量口径。
    */
   async countPublishedTodayForAccount(accountId: string): Promise<number> {
     const { rows } = await this.pool.query<{ n: string }>(
       `SELECT count(*)::text AS n FROM publish_log
-        WHERE account_id = $1 AND status = 'published' AND published_at >= ${SHANGHAI_DAY_START_SQL}`,
+        WHERE account_id = $1 AND status IN ('submitted', 'published') AND published_at >= ${SHANGHAI_DAY_START_SQL}`,
       [accountId],
     );
     return Number(rows[0]?.n ?? '0');
@@ -606,7 +606,7 @@ export class PublishLogStore {
   async countPublishedSinceForAccount(accountId: string, since: number): Promise<number> {
     const { rows } = await this.pool.query<{ n: string }>(
       `SELECT count(*)::text AS n FROM publish_log
-        WHERE account_id = $1 AND status = 'published' AND published_at >= to_timestamp($2 / 1000.0)`,
+        WHERE account_id = $1 AND status IN ('submitted', 'published') AND published_at >= to_timestamp($2 / 1000.0)`,
       [accountId, since],
     );
     return Number(rows[0]?.n ?? '0');

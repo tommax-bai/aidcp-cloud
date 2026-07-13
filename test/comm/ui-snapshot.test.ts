@@ -303,6 +303,12 @@ test('ui-snapshot: pushPublishState 定向推状态；无在线边缘如实放�
   assert.equal(offline.sent.length, 0, '无在线边缘绝不广播');
 });
 
+test('ui-snapshot: submitted 明确表示页面已提交但链接待确认', () => {
+  const { service, sent } = makeService();
+  service.pushPublishState('acc-1', 89, 'submitted', '待链接确认的帖子');
+  assert.deepEqual(sent[0].env.payload.publish, { state: 'submitted', code: '#89', title: '待链接确认的帖子' });
+});
+
 test('ui-snapshot: 快照数据源抛错 / pusher 抛错 → 自吞不外抛（绝不影响发布主链路）', async () => {
   const { service } = makeService({
     lastPublishedForAccount: async () => {

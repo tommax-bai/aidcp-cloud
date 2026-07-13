@@ -17,5 +17,6 @@ test('countPublishedTodayForAccount: 今日发布数按 Asia/Shanghai 自然日�
   const count = await store.countPublishedTodayForAccount('acc-1');
   assert.equal(count, 2);
   assert.deepEqual(seen[0].params, ['acc-1']);
+  assert.match(seen[0].sql, /status IN \('submitted', 'published'\)/);
   assert.match(seen[0].sql, /published_at >= .*AT TIME ZONE 'Asia\/Shanghai'/s);
 });

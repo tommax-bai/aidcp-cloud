@@ -2303,7 +2303,7 @@ async function main(): Promise<void> {
           sourceConcepts: record.sourceConcepts ?? [],
           sourceLikedIds: record.sourceLikedIds ?? [],
           // decouple-publish-generation-from-dispatch：生成候审段落 'pending_approval'（待人审、未下发）。
-          status: record.status as 'draft' | 'pending_approval' | 'published' | 'failed' | 'needs_review',
+          status: record.status as 'draft' | 'pending_approval' | 'submitted' | 'published' | 'failed' | 'needs_review',
           // 审计用 image_url（封面=首张）+ 多图全集 images（下发段读回逐张上传）；真实附着数插入时 0，上传成功后由 markImagesAttached 置真实 K。
           imageUrl: record.imageUrl,
           imageUrls: record.images,
@@ -2315,7 +2315,7 @@ async function main(): Promise<void> {
         });
       },
       async updateStatus(id, status) {
-        await publishLogStore.updateStatus(id, status as 'draft' | 'pending_approval' | 'published' | 'failed' | 'needs_review');
+        await publishLogStore.updateStatus(id, status as 'draft' | 'pending_approval' | 'submitted' | 'published' | 'failed' | 'needs_review');
       },
       // stage-4 元数据落库 + 防篡改审计（供下发段重建发布输入 + 审计）。
       async recordMetadata(id, metadata, aiEnforced) {
