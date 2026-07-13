@@ -36,6 +36,14 @@ function makePool(platform: string | null = 'facebook'): { pool: pg.Pool; putKey
       for (const s of sets.filter((row) => row.account_id === params?.[0])) counts.set(s.status, (counts.get(s.status) ?? 0) + 1);
       return { rows: [...counts.entries()].map(([status, n]) => ({ status, n: String(n) })), rowCount: counts.size };
     }
+    if (/UPDATE account_facebook_publish_image_set\s+SET status = 'quarantine'/.test(text)) {
+      const row = sets.find((s) => Number(s.id) === params?.[0] && s.status !== 'deleted');
+      if (!row) return { rows: [], rowCount: 0 };
+      row.status = 'quarantine';
+      row.last_error = params?.[1] ?? null;
+      row.updated_at = '2026-07-12T00:01:00.000Z';
+      return { rows: [], rowCount: 1 };
+    }
     if (/FROM account_facebook_publish_image/.test(text) && /set_id = ANY/.test(text)) {
       const ids = new Set(params?.[0] as number[]);
       return { rows: images.filter((img) => ids.has(Number(img.set_id))), rowCount: images.length };
@@ -77,6 +85,21 @@ function makePool(platform: string | null = 'facebook'): { pool: pg.Pool; putKey
           created_at: '2026-07-12T00:00:00.000Z',
         };
         images.push(row);
+        return { rows: [row], rowCount: 1 };
+      }
+      if (/UPDATE account_facebook_publish_image_set\s+SET caption_hint = \$3, status = \$4/.test(text)) {
+        const row = sets.find((s) => s.account_id === params?.[0] && Number(s.id) === params?.[1]);
+        if (!row) return { rows: [], rowCount: 0 };
+        row.caption_hint = params?.[2] ?? null;
+        row.status = params?.[3];
+        row.updated_at = '2026-07-12T00:02:00.000Z';
+        return { rows: [row], rowCount: 1 };
+      }
+      if (/UPDATE account_facebook_publish_image_set\s+SET status = 'deleted'/.test(text)) {
+        const row = sets.find((s) => s.account_id === params?.[0] && Number(s.id) === params?.[1]);
+        if (!row) return { rows: [], rowCount: 0 };
+        row.status = 'deleted';
+        row.updated_at = '2026-07-12T00:03:00.000Z';
         return { rows: [row], rowCount: 1 };
       }
       return queryImpl(text, params);
@@ -133,4 +156,39 @@ test('FacebookPublishMediaStore: upload fails honestly when object store is unav
   ]);
   assert.deepEqual(result.results, [{ ok: false, filename: 'cover.png', reason: 'object_store_unavailable' }]);
   assert.equal(result.view.sets.length, 0);
+});
+
+test('FacebookPublishMediaStore: quarantined media can be manually confirmed, edited, and deleted', async () => {
+  const backing = makePool('facebook');
+  const store = new FacebookPublishMediaStore({
+    pool: backing.pool,
+    objectStore: {
+      put: async (key) => ({ url: `https://oss.example/${key}` }),
+    },
+    idGen: () => 'fixed',
+  });
+
+  const uploaded = await store.uploadFiles('fb-1', [
+    { filename: 'cover.png', contentType: 'image/png', bytes: PNG_BYTES },
+  ]);
+  assert.equal(uploaded.results[0].ok, true);
+  const setId = uploaded.view.sets[0].id;
+
+  assert.equal(await store.quarantine(setId, 'submitted_unconfirmed'), true);
+  const quarantined = await store.listForAccount('fb-1');
+  assert.equal(quarantined.sets[0].status, 'quarantine');
+
+  const confirmed = await store.updateSet('fb-1', setId, {
+    status: 'available',
+    captionHint: ' reviewed ',
+  });
+  assert.equal(confirmed?.status, 'available');
+  assert.equal(confirmed?.captionHint, 'reviewed');
+
+  assert.equal(await store.quarantine(setId, 'operator_review'), true);
+  const deleted = await store.deleteSet('fb-1', setId);
+  assert.equal(deleted?.status, 'deleted');
+  const afterDelete = await store.listForAccount('fb-1');
+  assert.equal(afterDelete.sets.length, 0);
+  assert.equal(afterDelete.statusCounts.deleted, 1);
 });

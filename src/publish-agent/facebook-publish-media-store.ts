@@ -329,7 +329,7 @@ export class FacebookPublishMediaStore {
         return null;
       }
       const current = statusFromDb(row.status);
-      if (current === 'reserved' || current === 'quarantine' || current === 'used') {
+      if (current === 'reserved' || current === 'used') {
         throw new FacebookPublishMediaError('status_locked');
       }
       const nextCaption = hasCaption ? normalizeCaption(patch.captionHint) : row.caption_hint;
@@ -340,6 +340,43 @@ export class FacebookPublishMediaStore {
           WHERE account_id = $1 AND id = $2
           RETURNING *`,
         [accountId, setId, nextCaption, nextStatus],
+      );
+      await client.query('COMMIT');
+      const hydrated = await this.hydrateSets(upd.rows);
+      return hydrated[0] ?? null;
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  async deleteSet(accountId: string, setId: number): Promise<FacebookPublishImageSetView | null> {
+    await this.assertFacebookAccount(accountId);
+    if (!Number.isInteger(setId) || setId <= 0) throw new FacebookPublishMediaError('invalid_value');
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const sel = await client.query<ImageSetRow>(
+        `SELECT * FROM account_facebook_publish_image_set WHERE account_id = $1 AND id = $2 FOR UPDATE`,
+        [accountId, setId],
+      );
+      const row = sel.rows[0];
+      if (!row) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const current = statusFromDb(row.status);
+      if (current === 'reserved' || current === 'used') {
+        throw new FacebookPublishMediaError('status_locked');
+      }
+      const upd = await client.query<ImageSetRow>(
+        `UPDATE account_facebook_publish_image_set
+          SET status = 'deleted', updated_at = now()
+          WHERE account_id = $1 AND id = $2
+          RETURNING *`,
+        [accountId, setId],
       );
       await client.query('COMMIT');
       const hydrated = await this.hydrateSets(upd.rows);
