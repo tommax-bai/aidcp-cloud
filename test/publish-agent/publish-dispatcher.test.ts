@@ -156,6 +156,22 @@ describe('PublishDispatcher', () => {
     );
   });
 
+  test('edge 明确拒绝：浏览器控制不可用（零副作用）→ 回待审且通知不得混为离线或接管超时', async () => {
+    const h = harness({
+      approved: true,
+      edgeId: 'edge-online',
+      leaseError: new EdgeTaskLeaseError('edge_unhealthy', 'browser control unavailable'),
+    });
+    await h.dispatcher.dispatch(7);
+    assert.equal(h.events.includes('seq'), false, '未 acquired 前绝不驱动发布序列');
+    assert.equal(h.statusUpdates.length, 0, '草稿保持待审可重批');
+    assert.deepEqual(h.voided, ['publish-7']);
+    assert.deepEqual(
+      h.notices,
+      [{ kind: 'cdp_unhealthy_requeued', accountId: 'acct-A', recordId: 7, title: 'vLLM 部署踩坑' }],
+    );
+  });
+
   test('幂等：已 published 草稿 → 跳过，不二次发布', async () => {
     const h = harness({ approved: true, draft: makeDraft({ status: 'published' }) });
     await h.dispatcher.dispatch(7);

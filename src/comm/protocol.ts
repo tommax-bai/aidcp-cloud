@@ -1203,7 +1203,8 @@ export interface EdgeTaskReleasePayload {
 
 export interface EdgeTaskReleasedPayload {
   taskId: string;
-  reason: 'released' | 'expired' | 'duplicate' | 'not_owner';
+  /** `cdp_unhealthy` = edge is connected but cannot safely control its browser. */
+  reason: 'released' | 'expired' | 'duplicate' | 'not_owner' | 'cdp_unhealthy';
 }
 
 /** payload 类型映射（便于类型安全地构造/解析） */

@@ -39,7 +39,7 @@ export interface ApprovalDecision {
 
 /** 下发段运维通知（best-effort，绝不影响下发主链路）：离线/接管超时回待审 / 熔断开启 / 熔断解除。 */
 export interface DispatchNotice {
-  kind: 'offline_requeued' | 'acquire_timeout_requeued' | 'breaker_open' | 'breaker_cleared';
+  kind: 'offline_requeued' | 'acquire_timeout_requeued' | 'cdp_unhealthy_requeued' | 'breaker_open' | 'breaker_cleared';
   accountId: string;
   recordId?: number;
   title?: string | null;
@@ -386,7 +386,9 @@ export class PublishDispatcher {
         await this.voidApprovalSignal(requestId).catch(() => {});
         const noticeKind = err instanceof EdgeTaskLeaseError && err.code === 'acquire_timeout'
           ? 'acquire_timeout_requeued'
-          : 'offline_requeued';
+          : err instanceof EdgeTaskLeaseError && err.code === 'edge_unhealthy'
+            ? 'cdp_unhealthy_requeued'
+            : 'offline_requeued';
         this.logger.warn(
           `[PublishDispatcher] recordId=${recordId} 未取得 edge task lease，零命令下发、回待审: ${err instanceof Error ? err.message : String(err)}`,
         );

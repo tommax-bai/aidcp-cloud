@@ -31,7 +31,7 @@ export interface EdgeTaskLeaseRequest {
 
 export class EdgeTaskLeaseError extends Error {
   constructor(
-    public readonly code: 'edge_offline' | 'acquire_timeout' | 'release_timeout' | 'edge_disconnected',
+    public readonly code: 'edge_offline' | 'edge_unhealthy' | 'acquire_timeout' | 'release_timeout' | 'edge_disconnected',
     message: string,
   ) {
     super(message);
@@ -192,6 +192,15 @@ export class EdgeTaskLeaseClient {
   }
 
   onReleased(payload: EdgeTaskReleasedPayload, edgeId?: string): void {
+    const acquiring = this.acquiring.get(payload.taskId);
+    if (acquiring && edgeId && acquiring.edgeId === edgeId && payload.reason === 'cdp_unhealthy') {
+      this.acquiring.delete(payload.taskId);
+      clearTimeout(acquiring.timer);
+      acquiring.reject(new EdgeTaskLeaseError(
+        'edge_unhealthy',
+        `edge task rejected because browser control is unavailable taskId=${payload.taskId} edge=${edgeId}`,
+      ));
+    }
     const pending = this.releasing.get(payload.taskId);
     if (pending && edgeId && pending.edgeId === edgeId) {
       this.releasing.delete(payload.taskId);

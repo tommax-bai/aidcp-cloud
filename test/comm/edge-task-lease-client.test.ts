@@ -67,6 +67,28 @@ describe('EdgeTaskLeaseClient', () => {
     );
   });
 
+  it('edge 明确报告 CDP 控制不可用时立即失败，不等待 acquire 超时或错误释放', async () => {
+    const pushed: Envelope[] = [];
+    const client = new EdgeTaskLeaseClient({
+      pusher: { pushToEdges: (envelope) => { pushed.push(envelope); return 1; } },
+      idGen: () => 'unhealthy-task',
+      acquireTimeoutMs: 10_000,
+      logger: { log() {}, warn() {} },
+    });
+    let ran = false;
+    const acquiring = client.withLease(
+      { edgeId: 'edge-1', kind: 'publish', priority: 'human' },
+      async () => { ran = true; },
+    );
+    client.onReleased({ taskId: 'unhealthy-task', reason: 'cdp_unhealthy' }, 'edge-1');
+    await assert.rejects(
+      acquiring,
+      (error: unknown) => error instanceof EdgeTaskLeaseError && error.code === 'edge_unhealthy',
+    );
+    assert.equal(ran, false);
+    assert.deepEqual(pushed.map((envelope) => envelope.type), ['edge.task.acquire']);
+  });
+
   it('acquire 超时立即 release，迟到 acquired 时重复 release 清理无主租约', async () => {
     const pushed: Envelope[] = [];
     const client = new EdgeTaskLeaseClient({
