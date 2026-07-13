@@ -231,6 +231,8 @@ export interface UiSnapshotPayload {
   account?: { id: string; nickname?: string };
   /** 最近一次成功发布的摘要；at = epoch ms（来源 publish_log.published_at，为草稿入库时间近似） */
   lastPublish?: { title: string; at: number };
+  /** 当前待审稿件的只读预览；正文/配图来自 publish_log，原稿信息不随客户端契约下发。 */
+  publishPreview?: UiPublishPreviewPayload;
   /**
    * 发布审批状态。云端只推边缘看不到的状态（pending/approved/rejected/failed 终判）；
    * published 由边缘在提交成功处自知、不经此通道；reminded 仅在真的再次提醒后才推——
@@ -250,6 +252,25 @@ export interface UiSnapshotPayload {
    * 边缘据此把已绑账号徽标翻「已设置」并跳过向导，修「已绑仍显示未设置」bug。
    */
   personaBound?: boolean;
+}
+
+/** 陪伴客户端展示用的稿件快照；审批状态仍由同包内的 publish 字段单独表达。 */
+export interface UiPublishPreviewPayload {
+  recordId: number;
+  code: string;
+  kind: 'rewrite' | 'generated';
+  title: string;
+  content: string;
+  topics: string[];
+  images: string[];
+  contentVersion: number;
+  updatedAt: number;
+  imageReferenceAudit?: {
+    requestedCount: number;
+    usableCount: number;
+    status: 'none' | 'used' | 'unsupported' | 'unavailable' | 'skipped';
+    generatedCount: number;
+  };
 }
 
 /** 规划请求：高层自然语言目标 */

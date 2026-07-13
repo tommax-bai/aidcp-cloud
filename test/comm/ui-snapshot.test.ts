@@ -200,6 +200,28 @@ test('ui-snapshot: 待审草稿无授权信号 → hello 快照带 pending（发
   assert.deepEqual(sent[0].env.payload.publish, { state: 'pending', code: '#83', title: '候审笔记' });
 });
 
+test('ui-snapshot: hello 快照同时带待审稿件预览，且不携带原稿字段', async () => {
+  const preview: NonNullable<UiSnapshotPayload['publishPreview']> = {
+    recordId: 89,
+    code: '#89',
+    kind: 'rewrite',
+    title: '洗稿后的标题',
+    content: '洗稿后的正文',
+    topics: ['生活方式', '周末去哪儿'],
+    images: ['https://cdn.example.com/1.jpg'],
+    contentVersion: 0,
+    updatedAt: 1730000000000,
+  };
+  const { service, sent } = makeService({
+    pendingPublishPreviewForAccount: async () => preview,
+    readApproval: async () => null,
+  });
+  await service.pushHelloSnapshot('acc-1', 'edge-1');
+  assert.deepEqual(sent[0].env.payload.publishPreview, preview);
+  assert.deepEqual(sent[0].env.payload.publish, { state: 'pending', code: '#89', title: '洗稿后的标题' });
+  assert.equal('source' in sent[0].env.payload.publishPreview!, false);
+});
+
 test('ui-snapshot: 已授权在途 → hello 快照带 approved；已拒 → 不回放（重启不翻旧账）', async () => {
   const approvedCase = makeService({
     pendingApprovalForAccount: async () => ({ id: 84, title: 'T' }),

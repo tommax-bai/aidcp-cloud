@@ -2,7 +2,7 @@
  * UiSnapshotService —— 陪伴界面数据下发（change edge-companion-ui 8.1）。
  *
  * 职责：把「边缘看不到、只有云端知道」的界面数据经 `ui.snapshot` 定向推给该账号的在线边缘：
- *  - hello 注册完成后：全量快照（小红书昵称 + 最近成功发布摘要 + 在途候审/已批状态）；
+ *  - hello 注册完成后：全量快照（小红书昵称 + 最近成功发布摘要 + 在途候审/已批状态 + 待审稿件预览）；
  *  - 发布审批生命周期变化时：增量状态（pending / approved / rejected / failed）。
  *
  * 红线：
@@ -19,7 +19,13 @@
  * pending_approval 的真候审/已批在途。即使 /tmp 信号丢失，已拒草稿也不会重新冒成 pending。
  */
 
-import { makeEnvelope, type Envelope, type UiDailyUsagePayload, type UiSnapshotPayload } from './protocol.js';
+import {
+  makeEnvelope,
+  type Envelope,
+  type UiDailyUsagePayload,
+  type UiPublishPreviewPayload,
+  type UiSnapshotPayload,
+} from './protocol.js';
 import { randomUUID } from 'node:crypto';
 
 /** 云端可推送的发布审批状态（published 由边缘本地发射，不在此列）。 */
@@ -40,6 +46,8 @@ export interface UiSnapshotDeps {
   lastPublishedForAccount?: (accountId: string) => Promise<{ title: string | null; at: number } | null>;
   /** 最新待审草稿（PublishLogStore.pendingApprovalForAccount）。 */
   pendingApprovalForAccount?: (accountId: string) => Promise<{ id: number; title: string | null } | null>;
+  /** 最新待审稿件完整预览；不包含原稿来源字段。 */
+  pendingPublishPreviewForAccount?: (accountId: string) => Promise<UiPublishPreviewPayload | null>;
   /** 读授权信号：null=未决（真候审）；approved=true=已批在途；false=已拒（hello 不回放）。 */
   readApproval?: (requestId: string) => Promise<{ approved: boolean } | null>;
   todayUsageForAccount?: (accountId: string, edgeId?: string) => Promise<UiDailyUsagePayload | null>;
@@ -88,12 +96,16 @@ export class UiSnapshotService {
       const last = await this.deps.lastPublishedForAccount?.(accountId)?.catch(() => null);
       if (last?.title && Number.isFinite(last.at)) payload.lastPublish = { title: last.title, at: last.at };
 
-      const pending = await this.deps.pendingApprovalForAccount?.(accountId)?.catch(() => null);
+      const preview = await this.deps.pendingPublishPreviewForAccount?.(accountId)?.catch(() => null);
+      const pending = preview
+        ? { id: preview.recordId, title: preview.title || null }
+        : await this.deps.pendingApprovalForAccount?.(accountId)?.catch(() => null);
       if (pending) {
         const decision = (await this.deps.readApproval?.(`publish-${pending.id}`)?.catch(() => null)) ?? null;
         // 无信号=真候审；已批=下发在途；已拒=不回放（拒绝时刻已实时推过）。
         const state: PublishUiState | null = decision == null ? 'pending' : decision.approved ? 'approved' : null;
         if (state) {
+          if (preview) payload.publishPreview = preview;
           payload.publish = {
             state,
             code: publishUiCode(pending.id),
@@ -111,7 +123,7 @@ export class UiSnapshotService {
       // 边缘据此把已绑账号徽标翻「已设置」并跳过向导，修「已绑仍显示未设置」bug。
       if (this.deps.isPersonaBound?.(accountId)) payload.personaBound = true;
 
-      if (!payload.account && !payload.lastPublish && !payload.publish && !payload.dailyUsage && !payload.personaBound) return; // 全空不发包
+      if (!payload.account && !payload.lastPublish && !payload.publish && !payload.publishPreview && !payload.dailyUsage && !payload.personaBound) return; // 全空不发包
       const sent = this.push(accountId, edgeId, payload, 'hello快照');
       if (sent > 0 && dailyUsage) this.scheduleDailyUsageRefresh(accountId, edgeId, dailyUsage);
     } catch (err) {
@@ -136,6 +148,22 @@ export class UiSnapshotService {
     } catch (err) {
       this.logger.warn(
         `[ui-snapshot] ${state} 推送异常 account=${accountId} recordId=${recordId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /** 将当前待审稿件预览定向推给绑定账号的在线边缘。 */
+  pushPublishPreview(accountId: string, preview: UiPublishPreviewPayload): void {
+    try {
+      const edgeId = this.deps.resolveEdgeIdForAccount(accountId);
+      if (!edgeId) {
+        this.logger.log(`[ui-snapshot] 预览推送放弃：账号 ${accountId} 无在线边缘（recordId=${preview.recordId}）`);
+        return;
+      }
+      this.push(accountId, edgeId, { publishPreview: preview }, 'publishPreview');
+    } catch (err) {
+      this.logger.warn(
+        `[ui-snapshot] 预览推送异常 account=${accountId} recordId=${preview.recordId}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }

@@ -1113,6 +1113,7 @@ function createRequestHandler(
         sendJson(res, status, { error: result.reason });
         return;
       }
+      deps.notifyPublishPreviewChanged?.(recordId);
       sendJson(res, 200, {
         recordId,
         contentVersion: result.contentVersion,

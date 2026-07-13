@@ -1669,11 +1669,30 @@ async function main(): Promise<void> {
     isPersonaBound: (accountId) => personaStore.getForAccount(accountId) !== null,
     lastPublishedForAccount: (accountId) => publishLogStore.lastPublishedForAccount(accountId),
     pendingApprovalForAccount: (accountId) => publishLogStore.pendingApprovalForAccount(accountId),
+    pendingPublishPreviewForAccount: async (accountId) => {
+      return toUiPublishPreview(await publishLogStore.pendingPublishPreviewForAccount(accountId));
+    },
     readApproval: readPublishApproval,
     todayUsageForAccount: buildTodayUsageForAccount,
     logger: console,
   });
   const uiSnapshotService = uiSnapshot;
+
+  function toUiPublishPreview(preview: Awaited<ReturnType<PublishLogStore['pendingPublishPreviewForAccount']>>) {
+    if (!preview) return null;
+    return {
+      recordId: preview.id,
+      code: `#${preview.id}`,
+      kind: preview.kind,
+      title: preview.title ?? '',
+      content: preview.content,
+      topics: preview.topics,
+      images: preview.images,
+      contentVersion: preview.contentVersion,
+      updatedAt: preview.updatedAt,
+      ...(preview.imageReferenceAudit ? { imageReferenceAudit: preview.imageReferenceAudit } : {}),
+    };
+  }
 
   const publishDispatcher = new PublishDispatcher({
     store: publishLogStore,
@@ -2242,7 +2261,24 @@ async function main(): Promise<void> {
     triggerApprovedDispatch: triggerPublishDispatchOnApprove,
     // 陪伴界面（edge-companion-ui 8.1）：候审即推 pending（发布卡自动展开到「等你确认」）。
     notifyPublishPending: (accountId, recordId, title) =>
-      uiSnapshotService.pushPublishState(accountId, recordId, 'pending', title),
+      {
+        uiSnapshotService.pushPublishState(accountId, recordId, 'pending', title);
+        void publishLogStore.pendingPublishPreviewForAccount(accountId).then((preview) => {
+          if (!preview) return;
+          uiSnapshotService.pushPublishPreview(accountId, {
+            recordId: preview.id,
+            code: `#${preview.id}`,
+            kind: preview.kind,
+            title: preview.title ?? '',
+            content: preview.content,
+            topics: preview.topics,
+            images: preview.images,
+            contentVersion: preview.contentVersion,
+            updatedAt: preview.updatedAt,
+            ...(preview.imageReferenceAudit ? { imageReferenceAudit: preview.imageReferenceAudit } : {}),
+          });
+        }).catch((err) => console.warn(`[ui-snapshot] 预览读取失败 recordId=${recordId}: ${err instanceof Error ? err.message : String(err)}`));
+      },
     // decouple-publish-generation-from-dispatch：executor 只落库待审 + 发审批卡，不再内联等审/下发，
     // 故不再注入 sequencer / isApproved / approvalWaitMs / pusher。超时只覆盖落库+发卡（默认 30s）。
     roleTimeoutMs: Number(process.env.AIDCP_PUBLISH_ROLE_TIMEOUT_MS ?? 30_000),
@@ -2878,6 +2914,13 @@ async function main(): Promise<void> {
               publishLogStore.editDraft(recordId, expectedVersion, patch, editor),
             liveVersion: readLiveContentVersion,
             hasDecision: async (recordId) => (await readPublishApproval(`publish-${recordId}`)) !== null,
+          },
+          notifyPublishPreviewChanged: (recordId) => {
+            void publishLogStore.pendingPublishPreviewForRecord(recordId).then((preview) => {
+              if (!preview) return;
+              const uiPreview = toUiPublishPreview(preview);
+              if (uiPreview) uiSnapshotService.pushPublishPreview(preview.accountId, uiPreview);
+            }).catch((err) => console.warn(`[ui-snapshot] 编辑后预览刷新失败 recordId=${recordId}: ${err instanceof Error ? err.message : String(err)}`));
           },
           commandActions: {
             pause: async (accountId) => {

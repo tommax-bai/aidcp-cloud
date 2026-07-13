@@ -151,6 +151,8 @@ export interface PanelDeps {
     /** 该草稿是否已有授权决定在途（签名文件已存在）；编辑端点据此 fast-fail already_decided。 */
     hasDecision(recordId: number): Promise<boolean>;
   };
+  /** 待审稿件被后台编辑后，刷新绑定 edge 的只读稿件预览（best-effort）。 */
+  notifyPublishPreviewChanged?: (recordId: number) => void;
   /** 账号命令（durable，与飞书 actions 共享 accountState 底层）；返回真实结果（resume 带恢复 edge 数）。 */
   commandActions: {
     pause(accountId: string): Promise<{ accountId: string; status: 'paused' }>;

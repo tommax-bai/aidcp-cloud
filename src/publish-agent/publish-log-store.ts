@@ -122,6 +122,66 @@ export interface DispatchDraft {
   contentVersion: number;
 }
 
+/** 陪伴客户端所需的当前待审稿件快照；不包含原稿标题、作者、正文或链接。 */
+export interface PendingPublishPreview {
+  id: number;
+  accountId: string;
+  kind: 'rewrite' | 'generated';
+  title: string | null;
+  content: string;
+  topics: string[];
+  images: string[];
+  contentVersion: number;
+  updatedAt: number;
+  imageReferenceAudit?: {
+    requestedCount: number;
+    usableCount: number;
+    status: 'none' | 'used' | 'unsupported' | 'unavailable' | 'skipped';
+    generatedCount: number;
+  };
+}
+
+interface PendingPublishPreviewRow {
+  id: number;
+  account_id: string;
+  title: string | null;
+  content: string;
+  images: string[] | null;
+  image_url: string | null;
+  publish_metadata: unknown;
+  content_version: number | string | null;
+  edited_at: Date | null;
+  published_at: Date;
+  source_reference: unknown;
+}
+
+function toPendingPublishPreview(row: PendingPublishPreviewRow): PendingPublishPreview {
+  const metadata = parsePublishMetadata(row.publish_metadata);
+  const audit = metadata?.referenceImageAudit ?? null;
+  const auditStatus = audit?.status ?? 'none';
+  const imageReferenceAudit: PendingPublishPreview['imageReferenceAudit'] = ['none', 'used', 'unsupported', 'unavailable', 'skipped'].includes(auditStatus)
+    ? {
+        requestedCount: Number.isFinite(Number(audit?.requestedCount)) ? Number(audit?.requestedCount) : 0,
+        usableCount: Number.isFinite(Number(audit?.usableCount)) ? Number(audit?.usableCount) : 0,
+        status: auditStatus as NonNullable<PendingPublishPreview['imageReferenceAudit']>['status'],
+        generatedCount: Number.isFinite(Number(audit?.generatedCount)) ? Number(audit?.generatedCount) : 0,
+      }
+    : undefined;
+  const images = (row.images ?? []).length > 0 ? row.images! : row.image_url ? [row.image_url] : [];
+  return {
+    id: row.id,
+    accountId: row.account_id,
+    kind: row.source_reference != null ? 'rewrite' : 'generated',
+    title: row.title,
+    content: row.content,
+    topics: Array.isArray(metadata?.topics) ? metadata.topics.filter((topic): topic is string => typeof topic === 'string') : [],
+    images,
+    contentVersion: Number(row.content_version ?? 0),
+    updatedAt: (row.edited_at ?? row.published_at).getTime(),
+    ...(imageReferenceAudit ? { imageReferenceAudit } : {}),
+  };
+}
+
 /**
  * 待审草稿编辑补丁（edit-note-draft-before-publish）：本期仅正文文本 + 文本类元数据可编辑。
  * 未出现的键 = 不改（保留原值）；深合并只动 visibility/topics，其余元数据键逐字保留。
@@ -582,6 +642,32 @@ export class PublishLogStore {
     );
     const r = rows[0];
     return r ? { id: r.id, title: r.title ?? null } : null;
+  }
+
+  /** 陪伴客户端稿件预览：读取当前账号最新待审行的最终标题/正文/话题/配图与版本。 */
+  async pendingPublishPreviewForAccount(accountId: string): Promise<PendingPublishPreview | null> {
+    const { rows } = await this.pool.query<PendingPublishPreviewRow>(
+      `SELECT id, account_id, title, content, images, image_url, publish_metadata, content_version,
+              edited_at, published_at, source_reference
+       FROM publish_log
+       WHERE account_id = $1 AND status = 'pending_approval'
+       ORDER BY id DESC LIMIT 1`,
+      [accountId],
+    );
+    return rows[0] ? toPendingPublishPreview(rows[0]) : null;
+  }
+
+  /** 按记录号读取待审预览，供后台编辑成功后即时刷新绑定客户端。 */
+  async pendingPublishPreviewForRecord(recordId: number): Promise<PendingPublishPreview | null> {
+    const { rows } = await this.pool.query<PendingPublishPreviewRow>(
+      `SELECT id, account_id, title, content, images, image_url, publish_metadata, content_version,
+              edited_at, published_at, source_reference
+       FROM publish_log
+       WHERE id = $1 AND status = 'pending_approval'
+       LIMIT 1`,
+      [recordId],
+    );
+    return rows[0] ? toPendingPublishPreview(rows[0]) : null;
   }
 
   /** 取最近一条发布记录（任意状态），用于计算距上次发布时长。 */
