@@ -164,7 +164,25 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     assert.equal((back!.payload as UiSnapshotPayload).personaBound, true);
   });
 
-  it('AC-PROTO-11 ui.snapshot browserStandby 可选字段往返存活（change browser-cold-standby-next-action）', () => {
+  it('AC-PROTO-11 ui.snapshot 稿件预览字段往返存活', () => {
+    const snap: UiSnapshotPayload = {
+      publishPreview: {
+        recordId: 89,
+        code: '#89',
+        kind: 'rewrite',
+        title: '洗稿标题',
+        content: '洗稿正文',
+        topics: ['生活'],
+        images: ['https://cdn.example.com/1.jpg'],
+        contentVersion: 0,
+        updatedAt: 1730000000000,
+      },
+    };
+    const back = parseEnvelope(JSON.stringify(makeEnvelope('ui.snapshot', 's-2', 1700000000000, snap)));
+    assert.deepEqual((back!.payload as UiSnapshotPayload).publishPreview, snap.publishPreview);
+  });
+
+  it('AC-PROTO-12 ui.snapshot browserStandby 可选字段往返存活（change browser-cold-standby-next-action）', () => {
     const snap: UiSnapshotPayload = {
       browserStandby: {
         enabled: true,
