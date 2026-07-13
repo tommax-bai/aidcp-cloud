@@ -46,6 +46,11 @@ interface Pending<T> {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface CancelledAcquire {
+  edgeId: string;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 export interface EdgeTaskLeaseClientOptions {
   pusher: EdgeTaskLeasePusher;
   idGen?: () => string;
@@ -72,6 +77,7 @@ export class EdgeTaskLeaseClient {
   private readonly acquiring = new Map<string, Pending<EdgeTaskAcquiredPayload>>();
   private readonly releasing = new Map<string, Pending<EdgeTaskReleasedPayload>>();
   private readonly active = new Map<string, EdgeTaskLease>();
+  private readonly cancelledAcquires = new Map<string, CancelledAcquire>();
 
   constructor(options: EdgeTaskLeaseClientOptions) {
     this.pusher = options.pusher;
@@ -85,16 +91,20 @@ export class EdgeTaskLeaseClient {
 
   acquire(request: EdgeTaskLeaseRequest): Promise<EdgeTaskLease> {
     const taskId = this.idGen();
+    const timeoutMs = request.acquireTimeoutMs ?? this.acquireTimeoutMs;
     const payload: EdgeTaskAcquirePayload = {
       taskId,
       kind: request.kind,
       priority: request.priority,
       leaseMs: request.leaseMs ?? this.defaultLeaseMs,
+      acquireTimeoutMs: timeoutMs,
     };
     return new Promise<EdgeTaskLease>((resolve, reject) => {
-      const timeoutMs = request.acquireTimeoutMs ?? this.acquireTimeoutMs;
       const timer = setTimeout(() => {
+        const pending = this.acquiring.get(taskId);
+        if (!pending) return;
         this.acquiring.delete(taskId);
+        this.cancelAcquire(taskId, pending.edgeId, payload.leaseMs);
         reject(new EdgeTaskLeaseError('acquire_timeout', `edge task acquire timeout taskId=${taskId} edge=${request.edgeId}`));
       }, timeoutMs);
       timer.unref?.();
@@ -164,7 +174,15 @@ export class EdgeTaskLeaseClient {
 
   onAcquired(payload: EdgeTaskAcquiredPayload, edgeId?: string): void {
     const pending = this.acquiring.get(payload.taskId);
-    if (!pending || !edgeId || pending.edgeId !== edgeId) return;
+    if (!pending) {
+      const cancelled = this.cancelledAcquires.get(payload.taskId);
+      if (cancelled && edgeId && cancelled.edgeId === edgeId) {
+        this.logger.warn(`[edge-task] late acquired; cancelling stale taskId=${payload.taskId} edge=${edgeId}`);
+        this.pushRelease(payload.taskId, edgeId);
+      }
+      return;
+    }
+    if (!edgeId || pending.edgeId !== edgeId) return;
     this.acquiring.delete(payload.taskId);
     clearTimeout(pending.timer);
     pending.resolve(payload);
@@ -179,6 +197,11 @@ export class EdgeTaskLeaseClient {
       this.releasing.delete(payload.taskId);
       clearTimeout(pending.timer);
       pending.resolve(payload);
+    }
+    const cancelled = this.cancelledAcquires.get(payload.taskId);
+    if (cancelled && edgeId && cancelled.edgeId === edgeId) {
+      clearTimeout(cancelled.timer);
+      this.cancelledAcquires.delete(payload.taskId);
     }
     this.active.delete(payload.taskId);
     this.logger.log(`[edge-task] released taskId=${payload.taskId} edge=${edgeId ?? '-'} reason=${payload.reason}`);
@@ -201,5 +224,29 @@ export class EdgeTaskLeaseClient {
     for (const [taskId, lease] of this.active) {
       if (lease.edgeId === edgeId) this.active.delete(taskId);
     }
+    for (const [taskId, cancelled] of this.cancelledAcquires) {
+      if (cancelled.edgeId !== edgeId) continue;
+      clearTimeout(cancelled.timer);
+      this.cancelledAcquires.delete(taskId);
+    }
+  }
+
+  private cancelAcquire(taskId: string, edgeId: string, leaseMs: number): void {
+    const existing = this.cancelledAcquires.get(taskId);
+    if (existing) clearTimeout(existing.timer);
+    const timer = setTimeout(() => {
+      this.cancelledAcquires.delete(taskId);
+    }, Math.max(this.defaultLeaseMs, leaseMs));
+    timer.unref?.();
+    this.cancelledAcquires.set(taskId, { edgeId, timer });
+    this.pushRelease(taskId, edgeId);
+  }
+
+  private pushRelease(taskId: string, edgeId: string): void {
+    const sent = this.pusher.pushToEdges(
+      makeEnvelope('edge.task.release', `task-release-${taskId}`, this.clock(), { taskId, outcome: 'failed' }),
+      edgeId,
+    );
+    if (sent <= 0) this.logger.warn(`[edge-task] stale task release delivered to 0 edges taskId=${taskId} edge=${edgeId}`);
   }
 }

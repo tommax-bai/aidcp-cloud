@@ -7,6 +7,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventBus } from '../../src/event-bus/index.js';
 import { CommentScheduler, outcomeToReceipt, humanGroupLabel, joinOnlyReceipt, joinCommentReceipt } from '../../src/comment-agent/comment-scheduler.js';
+import { EdgeTaskLeaseError } from '../../src/comm/edge-task-lease-client.js';
 import type { CommentSchedulerDeps } from '../../src/comment-agent/comment-scheduler.js';
 import type { Soul } from '../../src/soul/types.js';
 
@@ -345,6 +346,13 @@ describe('outcomeToReceipt（失败/未产出绝不染绿）', () => {
     assert.equal(outcomeToReceipt({ outcome: 'read_failed', noteId: 'n1', termsTried: 1 }).level, 'error');
     assert.equal(outcomeToReceipt({ outcome: 'post_failed', noteId: 'n1', termsTried: 1 }).level, 'error');
   });
+  it('not_started → error，明确未搜索、未选中、未发布', () => {
+    const r = outcomeToReceipt({ outcome: 'not_started', termsTried: 0, reason: 'edge task acquire timeout' });
+    assert.equal(r.ok, false);
+    assert.equal(r.level, 'error');
+    assert.match(r.message, /未搜索、未选中笔记、未发布评论/);
+    assert.doesNotMatch(r.message, /已选中笔记|发布未确认成功/);
+  });
   // change comment-search-nav-confirm：read_failed 回执带真实 reason，绝不硬编码「边端超时或离线」（假归因红线）。
   it('read_failed 回执带真实 reason、不冒充离线', () => {
     const r = outcomeToReceipt({ outcome: 'read_failed', noteId: 'n1', noteTitle: 'X', termsTried: 1, reason: '复检时目标已不在搜索结果中（页面重排/未导航到结果页）' });
@@ -352,9 +360,40 @@ describe('outcomeToReceipt（失败/未产出绝不染绿）', () => {
     assert.doesNotMatch(r.message, /边端超时或离线/, '绝不再硬编码「边端超时或离线」');
   });
   it('未产出/失败一律 ok:false（不染绿）', () => {
-    for (const o of ['no_terms', 'no_strong_candidate', 'compose_skipped', 'read_failed', 'post_failed'] as const) {
+    for (const o of ['not_started', 'no_terms', 'no_strong_candidate', 'compose_skipped', 'read_failed', 'post_failed'] as const) {
       assert.equal(outcomeToReceipt({ outcome: o, termsTried: 0 }).ok, false, `${o} 必须 ok:false`);
     }
+  });
+});
+
+describe('CommentScheduler edge acquire failure', () => {
+  it('排期同用的任务路径在 acquire timeout 后不下发搜索，结果卡诚实说明未开始', async () => {
+    const cardDone = deferred<{ ok: boolean; title: string; message: string }>();
+    let searchCommands = 0;
+    const s = new CommentScheduler(
+      baseDeps({
+        pusher: {
+          pushToEdges: (envelope: unknown) => {
+            if ((envelope as Envelope).type === 'search.execute') searchCommands++;
+            return 1;
+          },
+        },
+        edgeTaskLeases: {
+          withLease: async () => {
+            throw new EdgeTaskLeaseError('acquire_timeout', 'edge task acquire timeout taskId=task-1 edge=e1');
+          },
+        },
+        postResultCard: (_accountId, receipt) => { cardDone.resolve(receipt); },
+      }),
+    );
+
+    const trigger = await s.triggerManual('acc-1');
+    assert.equal(trigger.ok, true);
+    const card = await cardDone.promise;
+    assert.equal(searchCommands, 0);
+    assert.equal(card.title, '按需评论未开始');
+    assert.match(card.message, /未搜索、未选中笔记、未发布评论/);
+    assert.doesNotMatch(card.message, /已选中笔记|发布未确认成功/);
   });
 });
 

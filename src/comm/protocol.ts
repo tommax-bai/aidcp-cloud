@@ -1142,6 +1142,8 @@ export interface EdgeTaskAcquirePayload {
   priority: EdgeTaskPriority;
   /** 空闲租约时限；匹配业务命令可刷新，edge 仍受绝对上限保护。 */
   leaseMs: number;
+  /** edge 本地等待 quiesce 的上限；届满仍未获授时取消该排队申请。 */
+  acquireTimeoutMs?: number;
 }
 
 export interface EdgeTaskAcquiredPayload {

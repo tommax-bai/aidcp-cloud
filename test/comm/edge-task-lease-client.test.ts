@@ -23,7 +23,7 @@ describe('EdgeTaskLeaseClient', () => {
     assert.equal(ran, false);
     assert.equal(pushed[0]?.type, 'edge.task.acquire');
     assert.deepEqual(pushed[0]?.payload as EdgeTaskAcquirePayload, {
-      taskId: 'task-1', kind: 'publish', priority: 'human', leaseMs: 60_000,
+      taskId: 'task-1', kind: 'publish', priority: 'human', leaseMs: 60_000, acquireTimeoutMs: 1_000,
     });
 
     client.onAcquired({ taskId: 'task-1', kind: 'publish', cancelledBrowseCommands: 3 }, 'edge-1');
@@ -65,5 +65,27 @@ describe('EdgeTaskLeaseClient', () => {
       acquiring,
       (error: unknown) => error instanceof EdgeTaskLeaseError && error.code === 'edge_disconnected',
     );
+  });
+
+  it('acquire 超时立即 release，迟到 acquired 时重复 release 清理无主租约', async () => {
+    const pushed: Envelope[] = [];
+    const client = new EdgeTaskLeaseClient({
+      pusher: { pushToEdges: (envelope) => { pushed.push(envelope); return 1; } },
+      idGen: () => 'late-task',
+      acquireTimeoutMs: 5,
+      logger: { log() {}, warn() {} },
+    });
+
+    const acquiring = client.acquire({ edgeId: 'edge-1', kind: 'comment_prepare', priority: 'automatic' });
+    await assert.rejects(
+      acquiring,
+      (error: unknown) => error instanceof EdgeTaskLeaseError && error.code === 'acquire_timeout',
+    );
+    assert.deepEqual(pushed.map((envelope) => envelope.type), ['edge.task.acquire', 'edge.task.release']);
+    assert.deepEqual(pushed[1]?.payload as EdgeTaskReleasePayload, { taskId: 'late-task', outcome: 'failed' });
+
+    client.onAcquired({ taskId: 'late-task', kind: 'comment_prepare', cancelledBrowseCommands: 0 }, 'edge-1');
+    assert.deepEqual(pushed.map((envelope) => envelope.type), ['edge.task.acquire', 'edge.task.release', 'edge.task.release']);
+    client.onReleased({ taskId: 'late-task', reason: 'released' }, 'edge-1');
   });
 });

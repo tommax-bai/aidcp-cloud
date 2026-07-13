@@ -42,7 +42,7 @@ import {
 import { validateFacebookComment } from './facebook-comment-validators.js';
 import type { EffectiveFacebookCommentConfig } from '../config/facebook-comment-config-store.js';
 import type { FacebookCommentAuditRow, FacebookCommentOutcome } from './facebook-comment-audit-store.js';
-import type { EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
+import { EdgeTaskLeaseError, type EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
 import type { EdgeTaskPriority } from '../comm/protocol.js';
 
 export interface FacebookCoverageCommentConfig extends EffectiveFacebookCommentConfig {
@@ -1351,7 +1351,9 @@ export class CommentScheduler {
       }
     } catch (err) {
       log.warn(`[comment-scheduler] 任务异常 account=${accountId}：${(err as Error).message}`);
-      result = { outcome: 'post_failed', termsTried: 0, reason: (err as Error).message };
+      result = isEdgeTaskAcquireFailure(err)
+        ? { outcome: 'not_started', termsTried: 0, reason: err.message }
+        : { outcome: 'post_failed', termsTried: 0, reason: (err as Error).message };
     }
 
     try {
@@ -1452,6 +1454,8 @@ export function outcomeToReceipt(r: CommentTaskResult): CommentResultReceipt {
   switch (r.outcome) {
     case 'commented':
       return { ok: true, level: 'success', title: '按需评论已发出', message: `已在${commented}下发表评论：「${r.text ?? ''}」（搜索词「${r.term ?? ''}」，试 ${r.termsTried} 个词）` };
+    case 'not_started':
+      return { ok: false, level: 'error', title: '按需评论未开始', message: `浏览器未能接管，本次未搜索、未选中笔记、未发布评论${r.reason ? `（${r.reason}）` : ''}` };
     case 'no_terms':
       return { ok: false, level: 'warning', title: '按需评论未产出', message: '未能生成搜索词（人设与精选集都为空），本次不评' };
     case 'no_strong_candidate':
@@ -1465,4 +1469,9 @@ export function outcomeToReceipt(r: CommentTaskResult): CommentResultReceipt {
     case 'post_failed':
       return { ok: false, level: 'error', title: '按需评论失败', message: `${selected}已选中，但发布未确认成功${r.reason ? `（${r.reason}）` : ''}` };
   }
+}
+
+function isEdgeTaskAcquireFailure(err: unknown): err is EdgeTaskLeaseError {
+  return err instanceof EdgeTaskLeaseError
+    && (err.code === 'acquire_timeout' || err.code === 'edge_offline' || err.code === 'edge_disconnected');
 }

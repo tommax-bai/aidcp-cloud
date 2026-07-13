@@ -63,6 +63,7 @@ export interface CommentTaskSteps {
 
 export type CommentTaskOutcome =
   | 'commented' // 成功评了一篇
+  | 'not_started' // 尚未接管 edge，未执行搜索/选中/发布
   | 'no_terms' // 一个搜索词都没生成（人设/精选都空）
   | 'no_strong_candidate' // 所有词试完/达上限仍无强相关未评过的候选
   | 'read_failed' // 命中后开笔记/读正文失败
