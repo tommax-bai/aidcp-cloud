@@ -377,4 +377,48 @@ describe('AuthorEvaluator', () => {
     assert.equal(worthEmitted, false);
     assert.equal(skippedEmitted, false);
   });
+
+  // change platform-orchestration-capability-gates（C4）：canVisitProfile=false（平台不访主页）时，本角色只产
+  // profile.skipped（保「评论结算→返回 feed」的桥），绝不评估、绝不产 profile.worth_visiting（主页子链结构不触发）。
+  it('C4：canVisitProfile=false ⇒ comment.done 只产 profile.skipped(platform_no_profile_visit)、绝不 worth_visiting、不调 LLM', async () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    let llmCalls = 0;
+    const llm = { complete: async () => { llmCalls++; return '{"verdict":"visit","reason":"x"}'; } };
+    const role = new AuthorEvaluator({
+      eventBus: bus,
+      soul: mockSoul,
+      llm,
+      sessionContext: ctx,
+      getNoteData: () => sampleNote,
+      canVisitProfile: () => false,
+    });
+    role.subscribe();
+
+    let worth = false;
+    let skipped = null as ProfileSkippedPayload | null;
+    bus.on('profile.worth_visiting', () => { worth = true; });
+    bus.on('profile.skipped', (p) => { skipped = p; });
+
+    bus.emit('comment.done', { noteId: 'note_1', sourcePageType: 'feed', actions: ['like'], ok: true, ts: Date.now() });
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.equal(worth, false, '不访主页 ⇒ 绝不 worth_visiting（主页子链不触发）');
+    assert.ok(skipped, '仍产 profile.skipped（返回 feed 的桥保留）');
+    assert.equal(skipped!.reason, 'platform_no_profile_visit');
+    assert.equal(llmCalls, 0, '最前短路 ⇒ 省 LLM 调用');
+  });
+
+  it('C4：canVisitProfile 缺省(=()=>true) ⇒ 逐位等今天（visit 判定照常 worth_visiting）', async () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    const llm = { complete: async () => '{"verdict":"visit","reason":"作者专业"}' };
+    const role = new AuthorEvaluator({ eventBus: bus, soul: mockSoul, llm, sessionContext: ctx, getNoteData: () => sampleNote });
+    role.subscribe();
+    let worth = false;
+    bus.on('profile.worth_visiting', () => { worth = true; });
+    bus.emit('comment.done', { noteId: 'note_1', sourcePageType: 'feed', actions: ['like'], ok: true, ts: Date.now() });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(worth, true, '缺省 canVisitProfile ⇒ 正常 worth_visiting（零回归）');
+  });
 });

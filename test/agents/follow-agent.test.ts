@@ -325,4 +325,34 @@ describe('FollowAgent', () => {
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(emitted, false);
   });
+
+  // change platform-orchestration-capability-gates（C4）：canFollow=false（平台不关注）时跳过关注动作，
+  // 但**仍产 profile.done**（主页子链返回信号，缺席会断返回链）；且不调 LLM。
+  it('C4：canFollow=false ⇒ profile.browsed 只产 profile.done(followed=false)、不关注、不调 LLM', async () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    let llmCalls = 0;
+    const llm = { complete: async () => { llmCalls++; return '{"verdict":"follow","reason":"x"}'; } };
+    const role = new FollowAgent({
+      eventBus: bus,
+      soul: mockSoul,
+      llm,
+      sessionContext: ctx,
+      getRemainingFollows: () => 3,
+      canFollow: () => false,
+    });
+    role.subscribe();
+
+    let done = null as ProfileDonePayload | null;
+    bus.on('profile.done', (p) => { done = p; });
+
+    bus.emit('profile.browsed', {
+      authorId: 'a1', sourcePageType: 'feed', postsCount: 10, followersCount: 5000, likesCollects: 100, extracted: true, ts: Date.now(),
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.ok(done, '仍产 profile.done（保主页子链返回）');
+    assert.equal(done!.followed, false, '不关注');
+    assert.equal(llmCalls, 0, '最前短路 ⇒ 省 LLM 调用');
+  });
 });

@@ -24,12 +24,18 @@ export interface FollowAgentOptions extends RoleOptions {
   getRemainingFollows: () => number;
   /** 关注质量闸比例（后台可配，热加载）；缺省回落 FOLLOW_MIN_FANS_ENGAGEMENT_RATIO。 */
   getMinFansRatio?: () => number;
+  /**
+   * 平台是否关注作者（change platform-orchestration-capability-gates）。缺省 () => true（=今天）。
+   * false ⇒ 跳过关注动作，但**仍产 profile.done**（主页子链的返回信号，缺席会断返回链）。
+   */
+  canFollow?: () => boolean;
 }
 
 export class FollowAgent extends BaseRole {
   readonly roleName: RoleName = 'follow_agent';
   private readonly getRemainingFollows: () => number;
   private readonly getMinFansRatio?: () => number;
+  private readonly canFollow: () => boolean;
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: FollowAgentOptions) {
@@ -37,6 +43,7 @@ export class FollowAgent extends BaseRole {
     if (!options.llm) throw new Error('FollowAgent 需要 LlmClient');
     this.getRemainingFollows = options.getRemainingFollows;
     this.getMinFansRatio = options.getMinFansRatio;
+    this.canFollow = options.canFollow ?? (() => true);
   }
 
   subscribe(): void {
@@ -53,6 +60,17 @@ export class FollowAgent extends BaseRole {
   // ─── 事件处理 ─────────────────────────────────────────────
 
   private async onProfileBrowsed(payload: ProfileBrowsedPayload): Promise<void> {
+    // C4 能力闸：平台不关注 ⇒ 跳过关注动作，但仍产 profile.done 保主页子链返回。缺省 canFollow=()=>true ⇒ 零回归。
+    // 注：对当前两平台（小红书关注 / FB 主页子链结构不触发）此支实为惰性；给 follow⇒profile_visit 分裂类平台留正确出口。
+    if (!this.canFollow()) {
+      this.emit('profile.done', {
+        authorId: payload.authorId,
+        sourcePageType: payload.sourcePageType,
+        followed: false,
+        ts: Date.now(),
+      });
+      return;
+    }
     const remaining = this.getRemainingFollows();
 
     // 配额耗尽，直接 skip

@@ -17,12 +17,23 @@ export type NoteScopedAction =
   | 'scroll_comments';
 
 /**
- * 编排能力词：v1 只保留**有真消费者**的两个（唯一消费者铁律，避免「声明了没人读」）。
- * - browse       消费者 = role-dispatcher 会话启动闸（canStartSession）。
- * - feed_refresh 消费者 = FeedScroller 构造（深度到阈值是否改点「刷新」）。
- * follow / profile_visit / patrol / notification 在 C4 追加**并同批接线消费者**，本 change 不含。
+ * 编排能力词：只保留**有真消费者**的词（唯一消费者铁律，避免「声明了没人读」）。
+ * - browse        消费者 = role-dispatcher 会话启动闸（canStartSession）。
+ * - feed_refresh  消费者 = FeedScroller 构造（深度到阈值是否改点「刷新」）。
+ * - patrol/notification 消费者 = role-dispatcher setup() 的 canPatrol()（两者皆支持才注册 12 通知巡视角色）。
+ * - profile_visit 消费者 = role-dispatcher setup() 的 canVisitProfile()（gate ProfileOpener 注册 + 注入 AuthorEvaluator：
+ *                 不支持则永不产 profile.worth_visiting，只产 profile.skipped，主页子链结构性不触发）。
+ * - follow        消费者 = FollowAgent（注入 canFollow：不支持则跳过关注、仍产 profile.done 保返回链）。
+ * **不变量**：follow ⇒ profile_visit ⇒ browse（关注前必先访主页；主页访问是浏览的子能力）。v1 两平台皆满足
+ * （小红书四词全支持 / Facebook 四词全不支持）；新增「访主页但不关注」类平台时须保 follow⇒profile_visit。
  */
-export type OrchestrationCapability = 'browse' | 'feed_refresh';
+export type OrchestrationCapability =
+  | 'browse'
+  | 'feed_refresh'
+  | 'follow'
+  | 'profile_visit'
+  | 'patrol'
+  | 'notification';
 
 /** 支持声明：不支持必带非空 reason（治「靠数值巧合不发」）。 */
 export type NoteSupport = { supported: true } | { supported: false; reason: string };
@@ -147,7 +158,15 @@ export const PLATFORM_REGISTRY: Record<'xiaohongshu', PlatformRegistryEntry> &
     noteActions: XHS_NOTE_ACTIONS,
     // 小红书 read/like/comment 全在详情页完成（今天的唯一形态）。
     noteSurfaces: { read_content: 'detail', like: 'detail', comment: 'detail' },
-    capabilities: { browse: { supported: true }, feed_refresh: { supported: true } },
+    // 小红书四类编排能力全支持（=今天：巡视 / 访主页 / 关注 / 通知俱在）。C4 追加 follow/profile_visit/patrol/notification。
+    capabilities: {
+      browse: { supported: true },
+      feed_refresh: { supported: true },
+      follow: { supported: true },
+      profile_visit: { supported: true },
+      patrol: { supported: true },
+      notification: { supported: true },
+    },
     pacing: {},
     scheduler: {
       comment: {
@@ -173,9 +192,21 @@ export const PLATFORM_REGISTRY: Record<'xiaohongshu', PlatformRegistryEntry> &
     // 本 like 值当前无独立云端消费者（无 resolveLikeSurface），设 'feed' 仅为语义一致 + 未来预留。
     // 回滚（不需重发桌面客户端）：把值改回 'detail' 重部署 cloud，或边缘启动器 AIDCP_FB_BROWSE_AUTO≠on 停真互动。
     noteSurfaces: { read_content: 'feed', like: 'feed', comment: 'detail' },
-    // feed_refresh 声明 supported（=今天 FeedScroller 对 FB 照常发 refresh）；FB 的「受控重新导航」实现在 C2，
-    // 本 change 只声明能力、不改实现 ⇒ 零行为。
-    capabilities: { browse: { supported: true }, feed_refresh: { supported: true } },
+    // feed_refresh 声明 supported（=今天 FeedScroller 对 FB 照常发 refresh）；FB 的「受控重新导航」实现在 C2。
+    // C4：FB 不做通知巡视（不上报 notification.detected）/ 不访作者主页 / 不关注（edge FB driver 无 profile/follow 执行器）
+    // ⇒ patrol/notification/profile_visit/follow 显式不支持 + reason；据此不注册 12 巡视角色 + ProfileOpener，
+    // 且 AuthorEvaluator 短路只产 profile.skipped（主页子链结构不触发）。ProfileBrowser/AuthorEvaluator/FollowAgent
+    // 仍注册：AuthorEvaluator 是评论后返回 feed 的桥、FollowAgent 的 profile.done 是主页子链返回信号（皆须常在）；
+    // ProfileBrowser 恒注册纯为无害（FB 经 canVisitProfile 结构不访作者主页；本人昵称采集另由永久接线的
+    // NicknameEnricher 独立消费，ProfileBrowser 对本人 early-return，两者不相干）。
+    capabilities: {
+      browse: { supported: true },
+      feed_refresh: { supported: true },
+      follow: { supported: false, reason: 'no_follow_actuator' },
+      profile_visit: { supported: false, reason: 'no_profile_actuator' },
+      patrol: { supported: false, reason: 'no_notification_patrol' },
+      notification: { supported: false, reason: 'no_notification_surface' },
+    },
     // 泛化旧 facebookScrollDwellMs 的 7s 扫屏地板（虚拟化/permalink 水合导致 newCount 常算成 0 时的保底停留）。
     pacing: { feedScrollDwellFloorMs: 7_000 },
     scheduler: {

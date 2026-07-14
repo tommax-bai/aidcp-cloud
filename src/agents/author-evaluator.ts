@@ -15,17 +15,25 @@ import type { RoleName, CommentDonePayload, CommentSkippedPayload } from '../eve
 export interface AuthorEvaluatorOptions extends RoleOptions {
   sessionContext: SessionContext;
   getNoteData: (noteId: string) => NoteData | null;
+  /**
+   * 平台是否访作者主页（change platform-orchestration-capability-gates）。缺省 () => true（=今天）。
+   * false ⇒ 本角色只产 profile.skipped（触发 BackToFeed 返回 feed，评论→返回 feed 的桥保留），
+   * 绝不产 profile.worth_visiting ⇒ 主页子链（ProfileOpener/ProfileBrowser/FollowAgent）结构性不触发。
+   */
+  canVisitProfile?: () => boolean;
 }
 
 export class AuthorEvaluator extends BaseRole {
   readonly roleName: RoleName = 'author_evaluator';
   private readonly getNoteData: (noteId: string) => NoteData | null;
+  private readonly canVisitProfile: () => boolean;
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: AuthorEvaluatorOptions) {
     super(options);
     if (!options.llm) throw new Error('AuthorEvaluator 需要 LlmClient');
     this.getNoteData = options.getNoteData;
+    this.canVisitProfile = options.canVisitProfile ?? (() => true);
   }
 
   subscribe(): void {
@@ -45,6 +53,17 @@ export class AuthorEvaluator extends BaseRole {
   // ─── 事件处理 ─────────────────────────────────────────────
 
   private async onCommentResolved(payload: CommentDonePayload | CommentSkippedPayload): Promise<void> {
+    // C4 能力闸：平台不访主页 ⇒ 只产 profile.skipped（BackToFeed 据此返回 feed，桥保留），绝不评估、绝不产
+    // worth_visiting（主页子链结构不触发）。放最前：省 getNoteData + LLM 调用。缺省 canVisitProfile=()=>true ⇒ 零回归。
+    if (!this.canVisitProfile()) {
+      this.emit('profile.skipped', {
+        noteId: payload.noteId,
+        sourcePageType: payload.sourcePageType,
+        reason: 'platform_no_profile_visit',
+        ts: Date.now(),
+      });
+      return;
+    }
     const noteData = this.getNoteData(payload.noteId);
     if (!noteData) {
       this.emit('profile.skipped', {

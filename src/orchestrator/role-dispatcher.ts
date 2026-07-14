@@ -744,6 +744,29 @@ export class RoleDispatcher {
   }
 
   /**
+   * 平台是否做通知巡视（gate 12 通知巡视角色注册；change platform-orchestration-capability-gates）。
+   * 需**同时**支持 notification（有通知面可巡）与 patrol（做巡视外出）；任一不支持 ⇒ 不注册整套巡视子系统。
+   * fail-open：无平台 / 查表失败 ⇒ true（=今天注册，绝不因查表失败静默砍小红书巡视）。
+   */
+  private canPatrol(): boolean {
+    if (!this.accountPlatform) return true;
+    return (
+      isOrchestrationCapabilitySupported(this.accountPlatform, 'notification') &&
+      isOrchestrationCapabilitySupported(this.accountPlatform, 'patrol')
+    );
+  }
+
+  /** 平台是否访作者主页（gate ProfileOpener 注册 + 注入 AuthorEvaluator 抑制 profile.worth_visiting；fail-open）。 */
+  private canVisitProfile(): boolean {
+    return !this.accountPlatform || isOrchestrationCapabilitySupported(this.accountPlatform, 'profile_visit');
+  }
+
+  /** 平台是否关注作者（注入 FollowAgent：不支持则跳过关注、仍产 profile.done 保返回链；fail-open）。 */
+  private canFollow(): boolean {
+    return !this.accountPlatform || isOrchestrationCapabilitySupported(this.accountPlatform, 'follow');
+  }
+
+  /**
    * 版本偏斜闸后的**有效**读 surface（change facebook-feed-inline-browse 灰度接线）。
    * registry 声明 read_content='feed'（就地读）**且本连接边缘声明 inline_targeting**（含 inline reader 的重打包）
    * 才生效；老边端 / 未重打包回落 'detail' ⇒ 永不收到 surface:'feed'、逐位等于今天。
@@ -925,7 +948,10 @@ export class RoleDispatcher {
         getMinSaveLikeRatio: () => this.collectMinSaveLikeRatio(),
         isInteractionEligible: (noteId) => this.facebookNaturalInteractionEligibility(noteId),
       }),
-      new AuthorEvaluator({ ...commonOptions, sessionContext: this.sessionContext, getNoteData }),
+      // AuthorEvaluator 恒注册（它是「评论结算 → 返回 feed」的桥，emit profile.skipped 触发 BackToFeed，非纯主页角色）。
+      // 注入 canVisitProfile：平台不访主页时它只产 profile.skipped、绝不产 profile.worth_visiting ⇒ 主页子链结构不触发，
+      // 桥保留（零 loop 停摆）。change platform-orchestration-capability-gates。
+      new AuthorEvaluator({ ...commonOptions, sessionContext: this.sessionContext, getNoteData, canVisitProfile: () => this.canVisitProfile() }),
       // —— 发评论支线（接在互动完成与「是否进主页评估」之间）：评估→撰写→去AI味→循环内人审 ——
       new CommentAppraiser({
         ...commonOptions,
@@ -966,11 +992,15 @@ export class RoleDispatcher {
       ...(commentLikeEnabled && this.archiveValuableComment
         ? [new ValuableCommentArchivist({ ...commonOptions, getNoteData, archive: this.archiveValuableComment })]
         : []),
-      new ProfileOpener(commonOptions),
+      // ProfileOpener 只订 profile.worth_visiting（本人昵称采集走独立的 profile_open{direct}、不经此角色）⇒ 平台不访主页时
+      // 安全不注册（AuthorEvaluator 已抑制 worth_visiting，本就永不触发）。change platform-orchestration-capability-gates。
+      ...(this.canVisitProfile() ? [new ProfileOpener(commonOptions)] : []),
+      // ProfileBrowser 恒注册（无害）：它处理作者主页的 profile.detail.arrived；FB 经 canVisitProfile 结构不访作者主页
+      // ⇒ 对 FB 实为惰性。本人昵称采集不经此角色（另由永久接线的 NicknameEnricher 消费，ProfileBrowser 对本人 early-return）。
       new ProfileBrowser(commonOptions),
-      // 登录账号真实昵称采集体已移出会话角色集、改为 setup() 永久接线：
-      // 只消费完整浏览器启动后首批 page.cards 的 startupId，不随 hello/reconnect/session_start 武装。
-      new FollowAgent({ ...commonOptions, sessionContext: this.sessionContext, getRemainingFollows: () => this.budget.follows, getMinFansRatio: () => this.followMinFansRatio() }),
+      // FollowAgent 恒注册（其 profile.done 是主页子链的返回信号，缺席会断返回链）；注入 canFollow：平台不关注时
+      // 跳过关注动作、仍产 profile.done 保返回链。FB 因主页子链结构不触发，实为惰性；小红书正常关注。
+      new FollowAgent({ ...commonOptions, sessionContext: this.sessionContext, getRemainingFollows: () => this.budget.follows, getMinFansRatio: () => this.followMinFansRatio(), canFollow: () => this.canFollow() }),
       new SearchScroller(commonOptions, this.sessionContext),
       new SearchEvaluator({
         ...commonOptions,
@@ -995,18 +1025,25 @@ export class RoleDispatcher {
         clock: this.clock,
       }),
       // —— 通知巡视（消息查看）12 角色：检测→准入→暂停→开首页→分诊→按类浏览→分类→去重→发飞书→返回→恢复 ——
-      new NotificationGatekeeper({ ...commonOptions, isHardPaused: this.isHardPaused }, this.sessionContext),
-      new BrowseSuspender(commonOptions, this.sessionContext),
-      new NotificationHomeOpener(commonOptions, this.sessionContext),
-      new NotificationTriage(commonOptions, this.sessionContext),
-      new NotificationCommentBrowser(commonOptions, this.sessionContext),
-      new NotificationLikeBrowser(commonOptions, this.sessionContext),
-      new NotificationFollowBrowser(commonOptions, this.sessionContext),
-      new NotificationClassifier(commonOptions, this.sessionContext),
-      new NotificationDeduper(commonOptions, this.sessionContext),
-      new NotificationNotifier({ ...commonOptions, notify: this.notifyComments }, this.sessionContext),
-      new NotificationReturnHome(commonOptions, this.sessionContext),
-      new ExcursionResumer(commonOptions, this.sessionContext),
+      // 整套子系统由 NotificationGatekeeper 收 notification.detected 唯一触发（excursion.requested 亦仅它 emit）；
+      // 平台无通知面（如 Facebook 不上报 notification.detected）时全套惰性。C4：canPatrol()（notification && patrol）
+      // 不支持则整套不注册（fail-open：无平台/查表失败仍注册=今天，绝不静默砍小红书巡视）。
+      ...(this.canPatrol()
+        ? [
+            new NotificationGatekeeper({ ...commonOptions, isHardPaused: this.isHardPaused }, this.sessionContext),
+            new BrowseSuspender(commonOptions, this.sessionContext),
+            new NotificationHomeOpener(commonOptions, this.sessionContext),
+            new NotificationTriage(commonOptions, this.sessionContext),
+            new NotificationCommentBrowser(commonOptions, this.sessionContext),
+            new NotificationLikeBrowser(commonOptions, this.sessionContext),
+            new NotificationFollowBrowser(commonOptions, this.sessionContext),
+            new NotificationClassifier(commonOptions, this.sessionContext),
+            new NotificationDeduper(commonOptions, this.sessionContext),
+            new NotificationNotifier({ ...commonOptions, notify: this.notifyComments }, this.sessionContext),
+            new NotificationReturnHome(commonOptions, this.sessionContext),
+            new ExcursionResumer(commonOptions, this.sessionContext),
+          ]
+        : []),
     ];
 
     // 概念抽取角色：仅在概念池可用时注册（PG 不可用则不抽取，搜索退化为仅 seed_keywords）。
