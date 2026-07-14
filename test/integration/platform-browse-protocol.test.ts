@@ -8,7 +8,7 @@ import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { RoleDispatcher } from '../../src/orchestrator/role-dispatcher.js';
 import type { EdgeCommand } from '../../src/orchestrator/role-dispatcher.js';
-import type { PlatformId } from '../../src/platform/index.js';
+import type { PlatformId, Surface } from '../../src/platform/index.js';
 import { PLATFORM_REGISTRY } from '../../src/platform/registry.js';
 import { EventBus } from '../../src/event-bus/index.js';
 import type { Soul } from '../../src/soul/types.js';
@@ -31,6 +31,9 @@ function setup(
   opts?: {
     onApprovedNotDelivered?: (i: { noteId: string; reason?: string }) => void;
     commentApproval?: { request: (input: unknown) => Promise<void>; isApproved: (id: string) => Promise<boolean> };
+    // 边缘是否声明 inline_targeting（就地读/赞版本偏斜闸，change facebook-feed-inline-browse）。
+    // 默认 false = 老边端/今天：即便 registry read_content='feed'，effectiveReadSurface 仍回落 detail。
+    inlineTargeting?: boolean;
   },
 ) {
   const commands: EdgeCommand[] = [];
@@ -43,6 +46,7 @@ function setup(
     accountPlatform,
     sendCommand: (c) => commands.push(c),
     clock: () => 0,
+    ...(opts?.inlineTargeting ? { hasInlineTargeting: () => true } : {}),
     ...(opts?.onApprovedNotDelivered ? { notifyApprovedNotDelivered: opts.onApprovedNotDelivered } : {}),
     ...(opts?.commentApproval ? { commentApproval: opts.commentApproval } : {}),
   });
@@ -54,15 +58,18 @@ function setup(
 const actionsOf = (commands: EdgeCommand[]) => commands.map((c) => c.action);
 
 describe('C1b 回执驱动两步评论迁移（模拟 C2：FB read=feed / comment=detail）', () => {
+  // 存原值再翻（robust to C2 把 registry 默认翻到 feed：afterEach 恢复原值、绝不硬写 detail 污染共享单例）。
+  let originalReadSurface: Surface;
   beforeEach(() => {
+    originalReadSurface = PLATFORM_REGISTRY.facebook!.noteSurfaces.read_content;
     PLATFORM_REGISTRY.facebook!.noteSurfaces.read_content = 'feed';
   });
   afterEach(() => {
-    PLATFORM_REGISTRY.facebook!.noteSurfaces.read_content = 'detail';
+    PLATFORM_REGISTRY.facebook!.noteSurfaces.read_content = originalReadSurface;
   });
 
   it('commentSurface≠readSurface ⇒ 先 open_note{purpose:navigate}，待落地才发 comment', () => {
-    const { bus, commands } = setup('facebook');
+    const { bus, commands } = setup('facebook', { inlineTargeting: true });
     const base = commands.length;
     bus.emit('comment.approved', { noteId: 'note-42', sourcePageType: 'feed', actions: ['like'], text: 'hi', ts: 0 });
     const afterApprove = commands.slice(base);
@@ -81,7 +88,7 @@ describe('C1b 回执驱动两步评论迁移（模拟 C2：FB read=feed / commen
   it('navigate 步失败 ⇒ 不发 comment + 显式回报操作员 + comment.done{ok:false}', () => {
     const reports: { noteId: string; reason?: string }[] = [];
     const done: { ok: boolean }[] = [];
-    const { bus, commands } = setup('facebook', { onApprovedNotDelivered: (i) => { reports.push(i); } });
+    const { bus, commands } = setup('facebook', { inlineTargeting: true, onApprovedNotDelivered: (i) => { reports.push(i); } });
     bus.on('comment.done', (p) => { done.push({ ok: p.ok }); });
     bus.emit('comment.approved', { noteId: 'note-42', sourcePageType: 'feed', actions: ['like'], text: 'hi', ts: 0 });
     const before = commands.length;
@@ -95,7 +102,7 @@ describe('C1b 回执驱动两步评论迁移（模拟 C2：FB read=feed / commen
 
   it('navigate ok 但回执缺派生 noteId ⇒ fail-closed 判失败（绝不把已批准评论发到未证实目标）', () => {
     const reports: { noteId: string; reason?: string }[] = [];
-    const { bus, commands } = setup('facebook', { onApprovedNotDelivered: (i) => { reports.push(i); } });
+    const { bus, commands } = setup('facebook', { inlineTargeting: true, onApprovedNotDelivered: (i) => { reports.push(i); } });
     bus.emit('comment.approved', { noteId: 'note-42', sourcePageType: 'feed', actions: ['like'], text: 'hi', ts: 0 });
     const before = commands.length;
     // observation.surface=detail 但**无 noteId** ⇒ 未证实落地目标 ⇒ 不发 comment。
@@ -116,13 +123,15 @@ describe('C1b 迁移阶段 0 零行为（真实平台 surface 相等 ⇒ 不迁�
     assert.ok(!actionsOf(after).includes('open_note'), 'surface 相等 ⇒ 结构性不迁移，不发 navigate open_note');
   });
 
-  it('facebook（stage 0 read=detail）：comment.approved ⇒ 直接发 comment、无迁移', () => {
+  it('facebook 未声明 inline_targeting（老边端/阶段 0）：read 回落 detail ⇒ 直接发 comment、无迁移', () => {
+    // 不传 inlineTargeting ⇒ effectiveReadSurface 回落 detail（无论 registry 是 detail 还是已翻 feed）。
+    // 版本偏斜闸：未重打包的边缘逐位等今天，绝不被迁移撕成两步。
     const { bus, commands } = setup('facebook');
     const base = commands.length;
     bus.emit('comment.approved', { noteId: 'note-42', sourcePageType: 'feed', actions: ['like'], text: 'hi', ts: 0 });
     const after = commands.slice(base);
-    assert.ok(actionsOf(after).includes('comment'), 'FB 阶段 0 直发 comment（零回归）');
-    assert.ok(!actionsOf(after).includes('open_note'), '阶段 0 两 surface 皆 detail ⇒ 不迁移');
+    assert.ok(actionsOf(after).includes('comment'), 'FB 老边端直发 comment（零回归）');
+    assert.ok(!actionsOf(after).includes('open_note'), '老边端 read=detail ⇒ 不迁移');
   });
 });
 
@@ -165,15 +174,17 @@ describe('C1b 审批在途抑制 idle nudge（不复用 pauseClock）', () => {
 });
 
 describe('C1b feed-surface no_target(stale) ⇒ 重扫换批（模拟 C2 read=feed）', () => {
+  let originalReadSurface: Surface;
   beforeEach(() => {
+    originalReadSurface = PLATFORM_REGISTRY.facebook!.noteSurfaces.read_content;
     PLATFORM_REGISTRY.facebook!.noteSurfaces.read_content = 'feed';
   });
   afterEach(() => {
-    PLATFORM_REGISTRY.facebook!.noteSurfaces.read_content = 'detail';
+    PLATFORM_REGISTRY.facebook!.noteSurfaces.read_content = originalReadSurface;
   });
 
   it('facebook feed-surface like no_target ⇒ 发 rescan 滚动', () => {
-    const { bus, commands } = setup('facebook');
+    const { bus, commands } = setup('facebook', { inlineTargeting: true });
     const base = commands.length;
     bus.emit('action.completed', { action: 'like', ok: false, reason: 'no_target', ts: 0 });
     const after = commands.slice(base);
@@ -192,5 +203,59 @@ describe('C1b feed-surface no_target(stale) ⇒ 重扫换批（模拟 C2 read=fe
       !after.some((c) => c.action === 'scroll' && c.reason === 'rescan_after_stale_target'),
       'detail-surface ⇒ 不进 feed 重扫分支（零回归，like 仍在 noRecoverScroll 内不误滚详情页）',
     );
+  });
+});
+
+// change facebook-feed-inline-browse（C2 就地读云端接线）：content.valuable ⇒ open_note 是否携 surface:'feed'。
+// 这是「开关打开」的命令脊柱——effectiveReadSurface==='feed'（registry 翻转 + 边缘声明 inline_targeting）才带
+// surface，让边缘就地展开读；否则省略字段 ⇒ 边缘走 detail（逐位等今天）。含版本偏斜闸与 XHS 零回归两反例。
+describe('C2 就地读接线：content.valuable ⇒ open_note surface（版本偏斜闸）', () => {
+  let originalReadSurface: Surface;
+  beforeEach(() => {
+    originalReadSurface = PLATFORM_REGISTRY.facebook!.noteSurfaces.read_content;
+    PLATFORM_REGISTRY.facebook!.noteSurfaces.read_content = 'feed';
+  });
+  afterEach(() => {
+    PLATFORM_REGISTRY.facebook!.noteSurfaces.read_content = originalReadSurface;
+  });
+
+  const emitValuable = (bus: EventBus) =>
+    bus.emit('content.valuable', {
+      index: 0,
+      noteId: 'note-1',
+      title: 't',
+      reason: '内容相关',
+      confidence: 0.9,
+      sourcePageType: 'feed',
+      ts: 0,
+    });
+  const openNoteOf = (commands: EdgeCommand[], base: number) =>
+    commands.slice(base).find((c) => c.action === 'open_note');
+
+  it('registry feed + 边缘声明 inline_targeting ⇒ open_note 携 surface:feed（就地读）', () => {
+    const { bus, commands } = setup('facebook', { inlineTargeting: true });
+    const base = commands.length;
+    emitValuable(bus);
+    const open = openNoteOf(commands, base);
+    assert.ok(open, 'open_note 已发');
+    assert.equal(open!.params?.surface, 'feed', '就地读 ⇒ 携 surface:feed');
+  });
+
+  it('registry feed 但边缘未声明 inline_targeting（老边端）⇒ open_note 省略 surface（=今天 detail）', () => {
+    const { bus, commands } = setup('facebook'); // 无 inlineTargeting
+    const base = commands.length;
+    emitValuable(bus);
+    const open = openNoteOf(commands, base);
+    assert.ok(open, 'open_note 已发');
+    assert.equal(open!.params?.surface, undefined, '老边端 ⇒ 无 surface 字段（版本偏斜闸回落 detail、逐位不变）');
+  });
+
+  it('xhs（registry detail）+ 边缘声明 inline_targeting ⇒ 仍省略 surface（零回归）', () => {
+    const { bus, commands } = setup('xiaohongshu', { inlineTargeting: true });
+    const base = commands.length;
+    emitValuable(bus);
+    const open = openNoteOf(commands, base);
+    assert.ok(open, 'open_note 已发');
+    assert.equal(open!.params?.surface, undefined, 'xhs read=detail ⇒ 永不携 surface（能力不改 registry 值）');
   });
 });

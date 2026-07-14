@@ -40,6 +40,11 @@ export interface DispatcherBuildContext {
   edgeId?: string;
   /** 该连接账号的运行时平台（facebook-scheduled-comment 2.8）：喂 dispatcher 的 session-start 平台闸。缺省按 xhs（不设闸）。 */
   platform?: PlatformId;
+  /**
+   * 边缘握手声明的能力位（change facebook-feed-inline-browse）：喂 dispatcher 的就地读/赞版本偏斜闸
+   * （含 inline_targeting 才对该连接开 surface:'feed'）。本连接握手快照，重连按新连接重建。
+   */
+  capabilities?: string[];
 }
 
 export interface RuntimeRegistryDeps {
@@ -186,7 +191,7 @@ export class ConnectionRuntimeRegistry {
       },
     };
 
-    runtime.dispatcher = this.deps.buildDispatcher({ bus, controller, accountId, edgeId: session.edgeId, platform: accountPlatform });
+    runtime.dispatcher = this.deps.buildDispatcher({ bus, controller, accountId, edgeId: session.edgeId, platform: accountPlatform, capabilities: session.capabilities });
     runtime.dispatcher.setCurrentAccountId(accountId);
     runtime.dispatcher.setup();
     this.bySession.set(session.sessionId, runtime);

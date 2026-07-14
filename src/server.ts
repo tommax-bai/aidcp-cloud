@@ -2049,6 +2049,10 @@ async function main(): Promise<void> {
       eventBus: ctx.bus,
       // 该连接账号平台（facebook-scheduled-comment 2.8）：喂 session-start 平台闸，拦下无 browse 能力平台起 xhs 浏览循环。
       accountPlatform: ctx.platform,
+      // 就地读/赞版本偏斜闸（change facebook-feed-inline-browse）：本连接边缘声明 inline_targeting 才对其开
+      // effectiveReadSurface='feed'（就地读命令 + feed 循环闭合 + 评论迁移 + no_target 重扫）。老边端 / 未重打包
+      // 回落 detail ⇒ 逐位等今天。快照本连接握手能力（重连按新连接重建、天然刷新）。
+      hasInlineTargeting: () => (ctx.capabilities ?? []).includes('inline_targeting'),
       // FB 每日在线时长预算（change account-nurture-discipline-spine §4.2）：全局每日时长未设(0)时 FB 账号
       // 回落非零安全日窗（养号「每天在线 0.5-6h」防长挂）。AIDCP_FB_DAILY_ONLINE_MIN 覆盖；缺/非法 → dispatcher 默认 360。
       facebookDailyOnlineMinutes:

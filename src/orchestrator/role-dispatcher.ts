@@ -23,6 +23,7 @@ import {
   loopClosure,
   type PlatformId,
   type NoteScopedAction,
+  type Surface,
 } from '../platform/index.js';
 import type { LlmCallOpts } from '../llm/qwen.js';
 import { SessionContext } from '../agents/session-context.js';
@@ -242,6 +243,13 @@ export interface RoleDispatcherOptions {
    */
   accountPlatform?: PlatformId;
   /**
+   * 本连接边缘是否声明 `inline_targeting`（change facebook-feed-inline-browse 灰度接线）。就地读/赞的
+   * 版本偏斜闸：registry 声明 read_content='feed' 时，**仅对声明该能力的边缘**（含 inline reader 的重打包）
+   * 生效；老边端 / 未重打包回落 detail ⇒ 永不收到 surface:'feed'、逐位等于今天。由 server 快照本连接握手能力
+   * 注入（重连按新连接重建、天然刷新）。缺省 → 恒 false（无就地读，=今天，保护测试与旧装配）。
+   */
+  hasInlineTargeting?: () => boolean;
+  /**
    * Facebook 每日累计在线分钟默认（change account-nurture-discipline-spine §4.2）：全局每日时长阈值
    * （dailyCaps().maxMinutes）未显式设值（0=不限）时，Facebook 账号回落这个非零安全日窗（养号「每天在线
    * 0.5–6h」防长挂）。全局显式设值时以全局为准。缺省 DEFAULT_FB_DAILY_ONLINE_MINUTES。
@@ -387,6 +395,8 @@ export class RoleDispatcher {
   private readonly isDispatchActive: () => boolean;
   /** 该连接账号平台（2.8 会话平台闸）；缺省不设闸。 */
   private readonly accountPlatform?: PlatformId;
+  /** 本连接边缘是否声明 inline_targeting（就地读/赞版本偏斜闸）；缺省 false = 老边端逐位等今天。 */
+  private readonly hasInlineTargeting: () => boolean;
   /** Facebook 每日在线分钟默认（§4.2）；全局未设时 FB 账号回落此非零日窗。 */
   private readonly facebookDailyOnlineMinutes: number;
   /** 同账号并行互动去重 guard（按账号单例）；缺省不去重。 */
@@ -498,6 +508,7 @@ export class RoleDispatcher {
     this.onSessionRejected = options.onSessionRejected;
     this.isDispatchActive = options.isDispatchActive ?? (() => true);
     this.accountPlatform = options.accountPlatform;
+    this.hasInlineTargeting = options.hasInlineTargeting ?? (() => false);
     this.facebookDailyOnlineMinutes = options.facebookDailyOnlineMinutes ?? DEFAULT_FB_DAILY_ONLINE_MINUTES;
     this.interactionGuard = options.interactionGuard;
     this.cooldownGate = options.cooldownGate;
@@ -733,14 +744,26 @@ export class RoleDispatcher {
   }
 
   /**
+   * 版本偏斜闸后的**有效**读 surface（change facebook-feed-inline-browse 灰度接线）。
+   * registry 声明 read_content='feed'（就地读）**且本连接边缘声明 inline_targeting**（含 inline reader 的重打包）
+   * 才生效；老边端 / 未重打包回落 'detail' ⇒ 永不收到 surface:'feed'、逐位等于今天。
+   * 全部控制流（下发 surface / 循环闭合 / 评论迁移触发 / feed no_target 重扫）一律读本方法，**不读**裸
+   * resolveReadSurface——使「云端以为 feed、边缘却在 detail」这类不一致结构性不可能发生。
+   */
+  private effectiveReadSurface(): Surface {
+    const declared = resolveReadSurface(this.accountPlatform);
+    return declared === 'feed' && !this.hasInlineTargeting() ? 'detail' : declared;
+  }
+
+  /**
    * 循环闭合读静态表（change platform-registry-shape）：读完一篇返回列表用 back 还是继续 scroll。
-   * 一律读 resolveReadSurface(平台) + per-note 迁移标志，**绝不读运行时 observedSurface**（消时序竞态）。
-   * 小红书 / 阶段 0 FB read=detail 且迁移不可达 ⇒ 恒 back，零回归。
+   * 一律读 effectiveReadSurface（版本偏斜后）+ per-note 迁移标志，**绝不读运行时 observedSurface**（消时序竞态）。
+   * 小红书 / 阶段 0 FB read=detail（或 feed 但老边端）且迁移不可达 ⇒ 恒 back，零回归。
    */
   private shouldCloseWithScroll(): boolean {
     return (
       loopClosure(
-        resolveReadSurface(this.accountPlatform),
+        this.effectiveReadSurface(),
         this.sessionContext.currentNoteMigratedToDetail,
       ) === 'scroll'
     );
@@ -1750,8 +1773,9 @@ export class RoleDispatcher {
         }
         // 回执驱动两步评论迁移（change platform-browse-protocol）：评论 surface≠读 surface（如 FB 就地读、评论进详情）
         // ⇒ 先 open_note{purpose:'navigate'} 把浏览器带到详情、等其 action.completed 落地确认后才发 comment。
-        // 阶段 0（XHS/FB 两 surface 皆 detail）⇒ 相等 ⇒ 结构性不可达 ⇒ 逐位走下方直发路径（零回归）。
-        if (resolveCommentSurface(this.accountPlatform) !== resolveReadSurface(this.accountPlatform)) {
+        // 读侧用 effectiveReadSurface（版本偏斜后）：就地读打开时评论必迁移；老边端 read 回落 detail ⇒ 与 comment 相等
+        // ⇒ 结构性不可达（=今天，逐位直发）。XHS 两 surface 皆 detail ⇒ 恒相等 ⇒ 零回归。
+        if (resolveCommentSurface(this.accountPlatform) !== this.effectiveReadSurface()) {
           this.pendingMigration = {
             noteId: payload.noteId,
             sourcePageType: payload.sourcePageType,
@@ -1913,9 +1937,18 @@ export class RoleDispatcher {
         // 否则 feed 在云端决策与 edge 执行之间滚动后，纯 index 寻址会开成同序号上的邻座（stale index）。
         // 熟悉度折扣：返回 feed 后再次打开一张近期已评估过的卡片 → 思考时间降至 1/3（首次打开仍全量）。
         const familiar = payload.noteId ? this.sessionContext.isRecentlyEvaluated(payload.noteId) : false;
+        // 就地读 surface（change facebook-feed-inline-browse 灰度接线）：effectiveReadSurface==='feed'
+        // （registry 翻转 read_content='feed' 且本连接边缘声明 inline_targeting）才带 surface:'feed'，让边缘就地
+        // 展开读全文；否则**省略字段** ⇒ 边缘按缺省走 detail（=今天，逐位不变、老边端零回归）。
+        const openParams: Record<string, unknown> = {
+          index: payload.index,
+          noteId: payload.noteId,
+          thinkMs: this.thinkNow(familiar),
+        };
+        if (this.effectiveReadSurface() === 'feed') openParams.surface = 'feed';
         const sent = this.sendCommand({
           action: 'open_note',
-          params: { index: payload.index, noteId: payload.noteId, thinkMs: this.thinkNow(familiar) },
+          params: openParams,
           reason: payload.reason,
         });
         if (sent && this.accountPlatform === 'facebook' && payload.noteId) {
@@ -2021,11 +2054,12 @@ export class RoleDispatcher {
       // note.detail/page.cards，事件循环会因无触发而死等；统一以一次 scroll 续刷兜底。
       this.eventBus.on('action.completed', (payload) => {
         console.log(`[RoleDispatcher] action.completed: ${payload.action} ok=${payload.ok}`);
-        // observedSurface 仅审计（change platform-browse-protocol）：回执回声 surface 与静态期望不符 → warn（检测漂移）；
-        // 绝不参与控制流（控制流一律读静态 resolveReadSurface，见 shouldCloseWithScroll）。阶段 0 无 surface 回声 ⇒ 惰性。
+        // observedSurface 仅审计（change platform-browse-protocol）：回执回声 surface 与期望不符 → warn（检测漂移）；
+        // 绝不参与控制流（控制流一律读 effectiveReadSurface，见 shouldCloseWithScroll）。期望取版本偏斜后的有效值：
+        // 老边端 read 回落 detail 时期望亦 detail，避免对未开就地读的边缘误报漂移。阶段 0 无 surface 回声 ⇒ 惰性。
         if (typeof payload.observation === 'object' && payload.observation !== null) {
           const echoed = (payload.observation as { surface?: unknown }).surface;
-          const expected = resolveReadSurface(this.accountPlatform);
+          const expected = this.effectiveReadSurface();
           if (typeof echoed === 'string' && echoed !== expected) {
             console.warn(
               `[RoleDispatcher] observedSurface 漂移：回声=${echoed} 期望=${expected} action=${payload.action}（仅审计、不改控制流）`,
@@ -2075,13 +2109,14 @@ export class RoleDispatcher {
           return;
         }
         // 信息流就地互动目标已从 DOM 消失（change platform-browse-protocol）：no_target(stale) 视快照过期 ⇒ 重扫换批重选，
-        // MUST NOT 计互动配额失败（budget 只按 ok:true 扣，天然不烧）。阶段 0 详情页 like/collect（readSurface==='detail'）⇒ 不触发。
+        // MUST NOT 计互动配额失败（budget 只按 ok:true 扣，天然不烧）。仅就地读态（effectiveReadSurface==='feed'）触发；
+        // 详情页 like/collect（读 detail 或老边端回落 detail）⇒ 不触发（=今天）。
         if (
           payload.ok === false &&
           (payload.action === 'like' || payload.action === 'collect') &&
           typeof payload.reason === 'string' &&
           payload.reason.startsWith('no_target') &&
-          resolveReadSurface(this.accountPlatform) === 'feed' &&
+          this.effectiveReadSurface() === 'feed' &&
           this.sessionActive
         ) {
           this.interactionRetry.delete(payload.action);
