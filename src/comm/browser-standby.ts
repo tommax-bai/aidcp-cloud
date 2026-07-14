@@ -67,6 +67,13 @@ export interface BuildBrowserStandbyHintOptions {
   config?: BrowserStandbyConfig;
   /** 续场闸裁决；缺省（边缘离线 / 无 dispatcher）→ 只按风控判，行为与本 change 之前一致。 */
   resumeGate?: ResumeGateVerdict | null;
+  /**
+   * **解除当前阻塞是否需要浏览器**（当前唯一来源：该边缘正卡在验证码上，运维必须在那个浏览器里操作）。
+   *
+   * 这是准入判据「解除这个阻塞需不需要浏览器」的**「需要」那一半**。为 true 时一票否决、绝不让位——
+   * 关掉一个正等着人去解验证码的浏览器，是把资源回收做成了自残。
+   */
+  needsBrowserToUnblock?: boolean;
 }
 
 export function resolveBrowserStandbyConfig(env: NodeJS.ProcessEnv = process.env): BrowserStandbyConfig {
@@ -127,6 +134,22 @@ export function buildBrowserStandbyHint(
     payload(reason, Math.max(config.revisitMs ?? DEFAULT_BROWSER_STANDBY_REVISIT_MS, config.minWaitMs), true, hintSource);
 
   if (!config.enabled) return payload('disabled', 0, false);
+
+  // ── 「解除阻塞需要浏览器」闸：压在所有来源之前，一票否决 ──────────────────────────────────
+  //
+  // 这是本模块整条判据的**大前提**，不是某一个来源的特例。change standby-covers-idle-waits 把准入判据换成
+  // 「解除这个阻塞需不需要浏览器」，却漏了把「需要」这一半接上输入——于是判据只剩下半边，谁都当成「不需要」。
+  //
+  // 后果是可达且严重的（对抗评审逐环坐实）：验证码上报 → 云端把风控信号升为 confirmed → 状态机 normal
+  // → **restricted** → 续场闸判停工 → 本模块判「该让位」→ 而 `ui.snapshot` 是**有意豁免验证码暂停闸**的
+  //（它是界面数据、不是页面命令），提示照样送达 → **把运维正要去解验证码的那个浏览器关掉**。
+  // 边缘那道 overlayBlocked 闸挡不住：它会被「浏览循环结束」或任意统计更新清掉。
+  //
+  // 而且范围比 restricted 更宽：验证码期间，排期外 / 时长满 这些停工原因**同样**会让位——因为产出提示时
+  // 根本没人问过「这个边缘是不是正卡在验证码上」。所以闸必须压在最前面，而不是补在 restricted 那一支。
+  //
+  // 权威事实由云端持有（ws-server 的验证码暂停集合，检测到即置位、解除 / 人工恢复才清），不依赖边缘自报。
+  if (options.needsBrowserToUnblock) return payload('hard_blocker', 0, false);
 
   const decision = source.explain(STANDBY_ACTION);
   if (!decision.allowed) {

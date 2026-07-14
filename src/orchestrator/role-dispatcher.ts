@@ -1101,24 +1101,41 @@ export class RoleDispatcher {
    * 人设存储读不到时 isPersonaBound 返回 false（fail-closed）→ 一并诚实拒绝。
    */
   private canStartSession(): boolean {
-    if (!this.isDispatchActive()) return false;
+    const verdict = this.sessionStartVerdict();
+    if (verdict === 'ok') return true;
     // facebook-scheduled-comment 2.8：平台不具备 browse 能力（如 Facebook v1 只声明 'comment'）→ 诚实拒绝启动
-    // xhs 浏览角色循环。放在人设闸之前，避免 FB 账号被误判 needs_persona_setup。不复用 onSessionRejected
+    // xhs 浏览角色循环。判在人设闸之前，避免 FB 账号被误判 needs_persona_setup。不复用 onSessionRejected
     //（那会硬编码按「未绑人设」拒绝并误报）；FB 账号不浏览是正常预期、非事故，只 console.warn。
-    if (this.accountPlatform && !isOrchestrationCapabilitySupported(this.accountPlatform, 'browse')) {
+    if (verdict === 'platform_no_browse') {
       console.warn(
         `[RoleDispatcher] 账号 ${this.currentAccountId} 平台=${this.accountPlatform} 无 browse 能力 → 拒绝启动浏览会话（platform_no_browse）：不挂 xhs 浏览循环、不起看门狗`,
       );
       return false;
     }
-    if (this.isPersonaBound && !this.isPersonaBound(this.currentAccountId)) {
+    if (verdict === 'needs_persona_setup') {
       console.warn(
         `[RoleDispatcher] 账号 ${this.currentAccountId} 未绑定人设 → 拒绝启动浏览会话（needs_persona_setup）：不开循环、不发巡刷信号`,
       );
       void this.onSessionRejected?.(this.currentAccountId, 'needs_persona_setup');
       return false;
     }
-    return true;
+    return false; // dispatch_inactive：调度开关关着，静默即可（既有行为，无告警）
+  }
+
+  /**
+   * 会话启动闸的**纯判定**——不打日志、不发回调（change standby-captcha-must-not-yield）。
+   *
+   * 拆出来是因为 `resumeGateSnapshot()` 是**只读**裁决，却被 `ui.snapshot` 那条约 60s 的周期链每跳调用一次。
+   * 它若直接复用带副作用的 `canStartSession()`，未绑人设 / 无 browse 能力的账号就会**每分钟**刷一行告警、并
+   * **每分钟触发一次「会话被拒」回调**——一个只读方法不该有这种脉冲。
+   */
+  private sessionStartVerdict(): 'ok' | 'dispatch_inactive' | 'platform_no_browse' | 'needs_persona_setup' {
+    if (!this.isDispatchActive()) return 'dispatch_inactive';
+    if (this.accountPlatform && !isOrchestrationCapabilitySupported(this.accountPlatform, 'browse')) {
+      return 'platform_no_browse';
+    }
+    if (this.isPersonaBound && !this.isPersonaBound(this.currentAccountId)) return 'needs_persona_setup';
+    return 'ok';
   }
 
   /** 外部触发会话启动（经启动闸）：供面板恢复调度 / 显式启动用；已在跑则不重复。 */
@@ -1467,7 +1484,8 @@ export class RoleDispatcher {
 
   /** 续场闸：调度开关 + 人设（canStartSession）+ 风控状态 + 活跃时段窗口 + 每日上限。 */
   private canAutoResume(account: string): boolean {
-    return !this.resumeGate(account, this.clock()).blocked;
+    // announce=true：这是**真的在尝试续场**，未绑人设时必须照旧发出「需要设置人设」信号（既有行为，不可静默）。
+    return !this.resumeGate(account, this.clock(), true).blocked;
   }
 
   /**
@@ -1484,8 +1502,13 @@ export class RoleDispatcher {
    * `not_ready`（调度未开 / 人设未绑 / 无续场配置提供者）**不是「没活干」**，而是「还没准备好」——它 MUST NOT
    * 产出待机提示（人设绑定等动作可能要用到浏览器）。
    */
-  private resumeGate(account: string, now: number): ResumeGateVerdict {
-    if (!this.canStartSession()) return { blocked: true, reason: 'not_ready' }; // dispatchActive + 人设绑定
+  private resumeGate(account: string, now: number, announce: boolean): ResumeGateVerdict {
+    // announce 区分两类调用方（change standby-captcha-must-not-yield）：
+    //  - 真的在尝试续场（canAutoResume）→ true：未绑人设时照旧告警 + 发「需要设置人设」信号，行为零变化。
+    //  - 只读裁决（resumeGateSnapshot，被 ~60s 周期链每跳调用）→ false：**绝不能**每分钟刷一行告警、
+    //    更不能每分钟触发一次「会话被拒」回调。一个只读方法不该有这种脉冲。
+    const ready = announce ? this.canStartSession() : this.sessionStartVerdict() === 'ok';
+    if (!ready) return { blocked: true, reason: 'not_ready' };
     const weekMask = this.sessionLimitProvider?.weekActiveMask() ?? null;
     if (!isWeekActiveAt(weekMask, new Date(now))) {
       // 「可活跃时间」周历闸（全局，change weekly-active-window）。整周全关 → msUntilNextActive 回 null（无恢复时刻）。
@@ -1522,7 +1545,7 @@ export class RoleDispatcher {
 
   /** 公开只读裁决（供云端产出浏览器冷待机提示）。只读、无副作用（dailyTally 的换日重置除外，与既有闸同源）。 */
   resumeGateSnapshot(now: number = this.clock()): ResumeGateVerdict {
-    return this.resumeGate(this.currentAccountId, now);
+    return this.resumeGate(this.currentAccountId, now, false);
   }
 
   /** 取/重置某账号当日续场计数（按本地日界重置）。 */

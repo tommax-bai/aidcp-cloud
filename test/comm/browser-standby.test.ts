@@ -85,14 +85,73 @@ test('browser-standby: 冻结账号 SHALL 让出槽位（旧判据把它排除�
   assert.ok(hint.waitMs >= 5 * 60_000, '回访跨度至少要跨过门槛，否则边缘会当成短等待拒绝待机');
 });
 
-test('browser-standby: 需要浏览器才能解除的阻塞 MUST NOT 让位', () => {
-  // 验证码 / 登录 / 人工在浏览器里介入 / 未知状态 —— 关掉浏览器就没法解除了。
-  for (const reason of ['captcha_required', 'login_required', 'unknown_scheduler_state']) {
+test('browser-standby: 未知的非配额阻塞 MUST NOT 让位（兜底：不认识就不动）', () => {
+  // **这条测试证明不了「验证码不让位」。** 下面这些 reason 是构造出来的：生产环境的 explain('view') 只可能
+  // 回 allowed / 'state:frozen' / 'quota:*'（risk-controller.ts），所以它守的是一段生产不可达的兜底分支。
+  // 上一版台账把它当成「验证码不让位」的覆盖——那是不实的记账，真正的验证码路径见下面 needsBrowserToUnblock 那几条。
+  for (const reason of ['some_unknown_blocker', 'ratio:like_view']) {
     const hint = buildBrowserStandbyHint(source({ reason }), { now: 1_000, config: CFG });
     assert.equal(hint.eligible, false, `${reason} 绝不能让位`);
     assert.equal(hint.reason, 'hard_blocker');
     assert.equal(hint.waitMs, 0);
   }
+});
+
+// ─── 验证码：真正可达的那条路（change standby-captcha-must-not-yield）──────────────────────
+//
+// 验证码上报 → 云端信号升为 confirmed → 状态机 normal → **restricted** → 续场闸判停工 → 待机判定说「该让位」。
+// 而 ui.snapshot **有意豁免**验证码暂停闸（它是界面数据、不是页面命令），提示照样送到那个卡着验证码的边缘。
+// 于是浏览器会在运维正被要求去解验证码时被关掉。这是 standby-covers-idle-waits 引入的可达回归。
+
+test('browser-standby: 边缘卡在验证码上 → MUST NOT 让位（哪怕 restricted 已判停工）', () => {
+  const hint = buildBrowserStandbyHint(source({ allowed: true, status: 'restricted' }), {
+    now: 1_000,
+    config: CFG,
+    resumeGate: { blocked: true, reason: 'risk_state' }, // 验证码把它打成了 restricted
+    needsBrowserToUnblock: true, // 云端权威事实：这个边缘正卡在验证码上
+  });
+  assert.equal(hint.eligible, false, '绝不能关掉运维正要去解验证码的那个浏览器');
+  assert.equal(hint.reason, 'hard_blocker');
+  assert.equal(hint.waitMs, 0);
+});
+
+test('browser-standby: 验证码期间任何停工原因都不让位（闸压在所有来源之前）', () => {
+  // 范围比 restricted 更宽：验证码期间账号同样可能「排期外」「时长满」「配额耗尽」——这些原本都会让位。
+  const now = 1_000_000;
+  const gates = [
+    ['排期外', { blocked: true, reason: 'active_window', resumeAt: now + 8 * 3_600_000 }],
+    ['时长满', { blocked: true, reason: 'daily_minutes', resumeAt: now + 5 * 3_600_000 }],
+    ['整周全关', { blocked: true, reason: 'week' }],
+  ] as const;
+  for (const [label, gate] of gates) {
+    const hint = buildBrowserStandbyHint(source({ allowed: true }), {
+      now,
+      config: CFG,
+      resumeGate: gate,
+      needsBrowserToUnblock: true,
+    });
+    assert.equal(hint.eligible, false, `${label} + 验证码 → 绝不让位`);
+    assert.equal(hint.reason, 'hard_blocker');
+  }
+  // 配额耗尽走的是另一条分支，同样必须被压住。
+  const quota = buildBrowserStandbyHint(source({ waits: { hour: 42 * 60_000 } }), {
+    now,
+    config: CFG,
+    needsBrowserToUnblock: true,
+  });
+  assert.equal(quota.eligible, false, '配额耗尽 + 验证码 → 绝不让位');
+  assert.equal(quota.reason, 'hard_blocker');
+});
+
+test('browser-standby: 验证码解除后恢复正常让位（闸不得永久禁用让位）', () => {
+  const hint = buildBrowserStandbyHint(source({ allowed: true, status: 'restricted' }), {
+    now: 1_000,
+    config: CFG,
+    resumeGate: { blocked: true, reason: 'risk_state' },
+    needsBrowserToUnblock: false, // 验证码已解
+  });
+  assert.equal(hint.eligible, true);
+  assert.equal(hint.reason, 'risk_state:restricted');
 });
 
 test('browser-standby: short quota wait remains ineligible', () => {

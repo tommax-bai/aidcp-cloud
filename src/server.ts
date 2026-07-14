@@ -1721,7 +1721,18 @@ async function main(): Promise<void> {
     // 待机判定——过去它们完全不产出提示，账号安静下来了、浏览器却一直开着占 700MB。
     // 拿不到（边缘离线 / 无 dispatcher）→ null → 退化为只按风控判，即本 change 之前的行为（安全方向：不让位）。
     const resumeGate = runtimes?.resumeGateForAccount(accountId, edgeId) ?? null;
-    return buildBrowserStandbyHint(controller, { now: Date.now(), config: browserStandbyConfig, resumeGate });
+    // 「解除阻塞需要浏览器」一票否决（change standby-captcha-must-not-yield）：边缘正卡在验证码上时绝不让位。
+    // 验证码会把账号打成 restricted，而 restricted 是让位触发器之一——不接这道闸，就会去关掉运维正要解验证码的
+    // 那个浏览器。这里用云端权威的暂停集合（检测到验证码即置位、解除才清），不依赖边缘自报的浮层标志（那个会被
+    // 「浏览循环结束」清掉）。edgeId 缺省时按账号解析，解析不到 → false（无从判断则不阻断既有行为）。
+    const targetEdgeId = edgeId ?? server.resolveEdgeIdForAccount(accountId) ?? undefined;
+    const needsBrowserToUnblock = targetEdgeId ? server.isEdgePaused(targetEdgeId) : false;
+    return buildBrowserStandbyHint(controller, {
+      now: Date.now(),
+      config: browserStandbyConfig,
+      resumeGate,
+      needsBrowserToUnblock,
+    });
   };
 
   uiSnapshot = new UiSnapshotService({
