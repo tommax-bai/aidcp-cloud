@@ -29,6 +29,12 @@ export interface PersonaFacadeDeps {
    * 触发时 store 内存镜像已刷新（isPersonaBound 已为 true）。解绑 / 非法人设均不触发。
    */
   onBound?: (accountId: string) => void;
+  /**
+   * 绑定**或解绑**落库成功后触发（change persona-bound-tristate）：把新的人设绑定态即时推给在线边缘，
+   * 让客户端的「已设置 / 未设置」不必等到下一次握手才更新（解绑尤其要紧——不推的话客户端会一直显示
+   * 「已设置」，而云端其实已经按未绑停掉这个号）。fire-and-forget，绝不影响 PUT 回真态。
+   */
+  onChanged?: (accountId: string) => void;
 }
 
 export function createPersonaPanel(deps: PersonaFacadeDeps): PanelPersonaConfig {
@@ -90,6 +96,11 @@ export function createPersonaPanel(deps: PersonaFacadeDeps): PanelPersonaConfig 
       // 空文本保存 = 显式解绑：删行后回真态 source=none；绝不保留空白行，也绝不回落默认人设。
       if (!(persona ?? '').trim()) {
         await deps.store.clear(accountId);
+        try {
+          deps.onChanged?.(accountId); // 解绑即时推给在线边缘（否则客户端会一直显示「已设置」）
+        } catch {
+          /* best-effort：不影响解绑回真态 */
+        }
         return { ok: true, view: await buildCatalog() };
       }
       // 写前校验：非法人设诚实拒绝、不落库、不刷镜像、不假成功（红线）。
@@ -103,6 +114,11 @@ export function createPersonaPanel(deps: PersonaFacadeDeps): PanelPersonaConfig 
       // isPersonaBound 此刻已为 true）。绑定本身已成功，开跑触发失败绝不让 PUT 报错（fire-and-forget + 吞错）。
       try {
         deps.onBound?.(accountId);
+      } catch {
+        /* best-effort：不影响绑定回真态 */
+      }
+      try {
+        deps.onChanged?.(accountId); // 绑定即时推给在线边缘（客户端不必等下次握手才翻「已设置」）
       } catch {
         /* best-effort：不影响绑定回真态 */
       }

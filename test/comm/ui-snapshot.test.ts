@@ -334,3 +334,45 @@ test('ui-snapshot: accountId/edgeId 缺失时 hello 快照直接跳过', async (
 test('ui-snapshot: publishUiCode 与飞书卡编号同源（#<记录id>）', () => {
   assert.equal(publishUiCode(83), '#83');
 });
+
+// ── 人设绑定态三态（change persona-bound-tristate）──────────────────────────────────────────
+// 云端是人设状态的唯一权威写方：true / false 都下发，且这个零 I/O 的 bit 绝不排在几轮 PG 往返之后。
+// 旧契约「仅 true 时下发」把「云端说没有」与「云端还没说」压成边缘侧同一个值，导致已设置人设的账号被误弹向导。
+
+test('ui-snapshot: personaBound=true 先于重快照单独下发（不排在 DB 往返之后）', async () => {
+  const { service, sent } = makeService({
+    isPersonaBound: () => true,
+    // 重快照的 DB 往返很慢：绑定态绝不能被它拖住（真机上就是这段延迟造成误弹）。
+    lastPublishedForAccount: async () => {
+      await new Promise((r) => setTimeout(r, 30));
+      return { title: '上一篇笔记', at: 1730000000000 };
+    },
+  });
+  await service.pushHelloSnapshot('acc-1', 'edge-1');
+  assert.equal(sent[0].env.payload.personaBound, true, '第一包就必须带绑定态');
+  assert.equal(Object.keys(sent[0].env.payload).length, 1, '绑定态单独成包，不与慢快照耦合');
+  assert.equal(sent[1].env.payload.personaBound, undefined, '后面的重快照不再重复带');
+});
+
+test('ui-snapshot: personaBound=false 同样下发（权威「未绑」绝不吞掉）', async () => {
+  const { service, sent } = makeService({ isPersonaBound: () => false });
+  await service.pushHelloSnapshot('acc-1', 'edge-1');
+  assert.equal(sent[0].env.payload.personaBound, false, '云端有资格诚实地说「这个账号没有人设」');
+});
+
+test('ui-snapshot: 绑定/解绑后即时重推绑定态（不必等下一次握手）', async () => {
+  let bound = false;
+  const { service, sent } = makeService({ isPersonaBound: () => bound });
+  bound = true;
+  service.pushPersonaBound('acc-1');
+  assert.equal(sent.at(-1)!.env.payload.personaBound, true);
+  bound = false; // 清空人设保存 = 显式解绑
+  service.pushPersonaBound('acc-1');
+  assert.equal(sent.at(-1)!.env.payload.personaBound, false, '解绑必须推下去，否则客户端一直显示「已设置」');
+});
+
+test('ui-snapshot: 账号无在线边缘时绑定态如实放弃，绝不广播、绝不外抛', () => {
+  const { service, sent } = makeService({ isPersonaBound: () => true, resolveEdgeIdForAccount: () => null });
+  service.pushPersonaBound('acc-1');
+  assert.equal(sent.length, 0);
+});

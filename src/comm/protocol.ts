@@ -272,9 +272,11 @@ export interface UiSnapshotPayload {
   /** Optional long-wait browser cold-standby hint; old edges ignore this field. */
   browserStandby?: UiBrowserStandbyPayload;
   /**
-   * 该账号是否已绑人设（change persona-wizard-onboarding-fixes）：云端 isPersonaBound 权威判据，
-   * **仅为 true 时下发**（守「全空不发包」/「宁缺毋假」；缺省=边缘按本地默认「未设置」）。
-   * 边缘据此把已绑账号徽标翻「已设置」并跳过向导，修「已绑仍显示未设置」bug。
+   * 该账号是否已绑人设（云端 isPersonaBound 为权威判据）。**三态语义**（change persona-bound-tristate）：
+   *   true    = 云端确认已绑；false = 云端确认未绑；**字段缺省 = 未知（云端还没说）**。
+   * 云端是人设状态的唯一权威写方，故 true / false **都下发**；边缘 MUST NOT 把「未知」当「未绑」——
+   * 弹人设向导只能由权威的 false 触发，绝不能由「等了一会儿还没收到」触发。
+   * 旧契约（仅 true 时下发）把「云端说没有」与「云端还没说」压成同一个值，导致已设置人设的账号被反复误弹。
    */
   personaBound?: boolean;
 }

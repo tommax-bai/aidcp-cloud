@@ -89,6 +89,10 @@ export class UiSnapshotService {
    */
   async pushHelloSnapshot(accountId: string | undefined, edgeId: string | undefined): Promise<void> {
     if (!accountId || !edgeId) return;
+    // 人设绑定态先单独发一包（红线：这个 bit 是零 I/O 的内存判据，绝不能排在下面五个 PG/fs 往返之后）。
+    // 边缘客户端拿它决定「要不要弹人设向导」；它每晚到一毫秒，客户端就多一毫秒分不清「云端说没有」和
+    // 「云端还没说」。真机上快照迟到 → 已设置人设的账号被误弹向导（工程师大白）。
+    this.pushPersonaBound(accountId, edgeId);
     try {
       const payload: UiSnapshotPayload = {};
 
@@ -126,16 +130,35 @@ export class UiSnapshotService {
         : null;
       if (browserStandby) payload.browserStandby = browserStandby;
 
-      // 已绑人设信号（change persona-wizard-onboarding-fixes）：仅为 true 时下发（守「全空不发包」/宁缺毋假），
-      // 边缘据此把已绑账号徽标翻「已设置」并跳过向导，修「已绑仍显示未设置」bug。
-      if (this.deps.isPersonaBound?.(accountId)) payload.personaBound = true;
-
-      if (!payload.account && !payload.lastPublish && !payload.publish && !payload.publishPreview && !payload.dailyUsage && !payload.browserStandby && !payload.personaBound) return; // 全空不发包
+      // 人设绑定态已在本方法开头单独先发（见那里的注释），此处不再重复带上。
+      if (!payload.account && !payload.lastPublish && !payload.publish && !payload.publishPreview && !payload.dailyUsage && !payload.browserStandby) return; // 全空不发包
       const sent = this.push(accountId, edgeId, payload, 'hello快照');
       if (sent > 0 && dailyUsage) this.scheduleDailyUsageRefresh(accountId, edgeId, dailyUsage);
     } catch (err) {
       this.logger.warn(
         `[ui-snapshot] hello 快照构建失败 account=${accountId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * 人设绑定态推送：**true 与 false 都发**（change persona-bound-tristate）。
+   *
+   * 云端是人设状态的唯一权威写方，它有资格诚实地说「这个账号没有人设」。旧契约「仅为 true 时下发」把
+   * 「云端说没有」和「云端还没说」压成了边缘侧同一个 false，于是边缘只能靠一个 6 秒宽限去猜——猜错就
+   * 给已设置人设的账号弹向导。三态（true / false / 缺省=未知）让「未知」在类型上就无法触发弹窗。
+   *
+   * 绑定 / 解绑后即时重推，不必等下一次握手（否则客户端里「清空人设=解绑」要到重启才可见）。
+   */
+  pushPersonaBound(accountId: string, edgeId?: string): void {
+    try {
+      if (!accountId || !this.deps.isPersonaBound) return;
+      const target = edgeId ?? this.deps.resolveEdgeIdForAccount(accountId);
+      if (!target) return; // 无在线边缘：如实放弃，下次握手补
+      this.push(accountId, target, { personaBound: this.deps.isPersonaBound(accountId) }, 'personaBound');
+    } catch (err) {
+      this.logger.warn(
+        `[ui-snapshot] personaBound 推送异常 account=${accountId}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }

@@ -1021,6 +1021,10 @@ async function main(): Promise<void> {
     onBound: (accountId) => {
       runtimes?.startSessionForAccount(accountId);
     },
+    // 绑定 / 解绑都即时把新的绑定态推给在线边缘（uiSnapshot 同为后向声明，闭包只在请求期才调用）。
+    onChanged: (accountId) => {
+      uiSnapshot?.pushPersonaBound(accountId);
+    },
   });
 
   // RiskController 注册表（V1 task 9.1）：每账号一个 controller、单写 PER ACCOUNT、共享 PgRiskStore。
