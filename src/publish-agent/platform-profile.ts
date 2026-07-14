@@ -1,5 +1,6 @@
 import { normalizePlatformId, type PlatformId } from '../platform/index.js';
 import type { PublishCommandKind, PublishCommandParams, PublishCommandPayload } from '../comm/protocol.js';
+import { computeFillTimeoutMs, DEFAULT_FILL_BUDGET, type FillBudgetConfig } from './fill-budget.js';
 import type { PublishMetadata } from './types.js';
 
 export type PublishImageSource = 'generated' | 'account_pool';
@@ -53,13 +54,15 @@ export interface BuildPublishCommandPlanInput {
   metadata?: PublishMetadata;
   approvedByUser: boolean;
   platform?: PlatformId;
+  /** Facebook 正文填写的单步预算配置；缺省用 DEFAULT_FILL_BUDGET。小红书路径不受影响。 */
+  fillBudget?: FillBudgetConfig;
 }
 
 export function buildPublishCommandPlan(input: BuildPublishCommandPlanInput): PublishCommandPayload[] {
   const profile = publishProfileForPlatform(input.platform);
   const cmds: PublishCommandPayload[] = [];
   let seq = 0;
-  const add = (kind: PublishCommandKind, params: PublishCommandParams = {}) => {
+  const add = (kind: PublishCommandKind, params: PublishCommandParams = {}, timeoutMs?: number) => {
     cmds.push({
       taskId: input.taskId,
       recordId: input.recordId,
@@ -67,6 +70,7 @@ export function buildPublishCommandPlan(input: BuildPublishCommandPlanInput): Pu
       kind,
       params,
       platform: profile.platform,
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
     });
   };
 
@@ -75,7 +79,13 @@ export function buildPublishCommandPlan(input: BuildPublishCommandPlanInput): Pu
   for (const url of input.images) add('upload_image', { imageUrl: url });
 
   if (profile.platform === 'facebook') {
-    add('fill_field', { fieldType: 'content', value: input.content });
+    // FB 正文逐字输入（编辑器拒整段灌入）：O(n) 的输入不能撞常数墙，预算随正文长度伸缩下发。
+    // 边缘据此自我掐表、超时清场诚实回报；云端只多等一点点兜底（见 CommandSequencer.resultSlackMs）。
+    add(
+      'fill_field',
+      { fieldType: 'content', value: input.content },
+      computeFillTimeoutMs(input.content, input.fillBudget ?? DEFAULT_FILL_BUDGET),
+    );
     if (!input.approvedByUser) return cmds;
     add('submit_publish');
     add('capture_postId');

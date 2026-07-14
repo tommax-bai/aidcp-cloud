@@ -87,6 +87,7 @@ import {
   type PublishApprovalPreflightResult,
 } from './feishu/index.js';
 import { CommandSequencer } from './publish-agent/command-sequencer.js';
+import { clampFillBudgetToLease, DEFAULT_FILL_BUDGET } from './publish-agent/fill-budget.js';
 import { EdgeTaskLeaseClient } from './comm/edge-task-lease-client.js';
 import { UiSnapshotService } from './comm/ui-snapshot.js';
 import { buildBrowserStandbyHint, resolveBrowserStandbyConfig } from './comm/browser-standby.js';
@@ -1453,8 +1454,22 @@ async function main(): Promise<void> {
       resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console }),
   });
   // A 阶段1 发布指令编排器：逐条下发 publish.command、按 recordId+seq 关联 publish.command.result。
+  // FB 正文逐字输入：填写这一步的预算随正文长度伸缩下发；上限按发布租约 TTL 收敛，
+  // 免得边缘在打字途中单方面过期租约、恢复浏览循环去滚半写的编辑器。
+  const publishLeaseMs = Number(process.env.AIDCP_EDGE_PUBLISH_LEASE_MS ?? 10 * 60_000);
+  const fillBudget = clampFillBudgetToLease(
+    {
+      baseMs: readEnvNumber('AIDCP_PUBLISH_FILL_BASE_MS', DEFAULT_FILL_BUDGET.baseMs),
+      perCharMs: readEnvNumber('AIDCP_PUBLISH_FILL_PER_CHAR_MS', DEFAULT_FILL_BUDGET.perCharMs),
+      maxMs: readEnvNumber('AIDCP_PUBLISH_FILL_MAX_MS', DEFAULT_FILL_BUDGET.maxMs),
+    },
+    publishLeaseMs,
+    (message) => console.warn(`[aidcp-cloud] ${message}`),
+  );
   const commandSequencer = new CommandSequencer({
     pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
+    fillBudget,
+    resultSlackMs: readEnvNumber('AIDCP_PUBLISH_RESULT_SLACK_MS', 8_000),
     logger: console,
   });
   edgeTaskLeases = new EdgeTaskLeaseClient({

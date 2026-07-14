@@ -20,6 +20,13 @@ import type {
 import type { PlatformId } from '../platform/index.js';
 import type { PublishMetadata } from './types.js';
 import { buildPublishCommandPlan } from './platform-profile.js';
+import {
+  DEFAULT_FILL_BUDGET,
+  isContentTooLong,
+  maxFillChars,
+  contentCharCount,
+  type FillBudgetConfig,
+} from './fill-budget.js';
 
 /**
  * 边缘推送接口（与 EdgeCloudServer.pushToEdges 同构）。
@@ -82,6 +89,14 @@ export interface CommandSequencerDeps {
    * 使慢/过期 URL 时边缘先返回干净 ok:false（降级纯文字），而非把整条序列拖到云端超时中断。
    */
   uploadTimeoutMs?: number;
+  /**
+   * 指令自带执行预算（`PublishCommandPayload.timeoutMs`）时，云端在其上多等的兜底余量（毫秒，缺省 8s）。
+   * 语义反转的关键：边缘按下发的预算掐表、必定先答，云端这条 timer 于是从「正常路径」退化成
+   * 「边缘真的死了」的兜底。指令**不带**预算时（小红书全路径）一律走旧的常数窗口，零回归。
+   */
+  resultSlackMs?: number;
+  /** Facebook 正文填写的单步预算配置；缺省 DEFAULT_FILL_BUDGET。 */
+  fillBudget?: FillBudgetConfig;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
 
@@ -99,6 +114,8 @@ export class CommandSequencer {
   private readonly clock: () => number;
   private readonly timeoutMs: number;
   private readonly uploadTimeoutMs: number;
+  private readonly resultSlackMs: number;
+  private readonly fillBudget: FillBudgetConfig;
   private readonly logger: Pick<Console, 'log' | 'warn' | 'error'>;
   private readonly pending = new Map<string, Pending>();
 
@@ -108,6 +125,8 @@ export class CommandSequencer {
     this.clock = deps.clock ?? Date.now;
     this.timeoutMs = deps.timeoutMs ?? 30_000;
     this.uploadTimeoutMs = deps.uploadTimeoutMs ?? 60_000;
+    this.resultSlackMs = deps.resultSlackMs ?? 8_000;
+    this.fillBudget = deps.fillBudget ?? DEFAULT_FILL_BUDGET;
     this.logger = deps.logger ?? console;
   }
 
@@ -124,6 +143,7 @@ export class CommandSequencer {
       metadata: input.metadata,
       approvedByUser: input.approvedByUser,
       platform: input.platform ?? 'xiaohongshu',
+      fillBudget: this.fillBudget,
     });
   }
 
@@ -137,6 +157,21 @@ export class CommandSequencer {
    * - 仅当未请求配图（无图流，前向兼容）才存在"纯文字继续"路径。
    */
   async executePublishSequence(input: PublishSequenceInput): Promise<PublishSequenceResult> {
+    // FB 正文逐字输入：超出预算上限所能打完的长度 → 诚实失败，MUST NOT 截断正文发出去。
+    // 触发即说明内容生成侧越界（管线设计区间 200–500 字），要修的是那头，不是在这里悄悄砍。
+    if ((input.platform ?? 'xiaohongshu') === 'facebook' && isContentTooLong(input.content, this.fillBudget)) {
+      const chars = contentCharCount(input.content);
+      const limit = maxFillChars(this.fillBudget);
+      this.logger.warn(
+        `[CommandSequencer] recordId=${input.recordId} 正文 ${chars} 字超出 Facebook 逐字输入上限 ${limit} 字 → 诚实 failed（不截断）`,
+      );
+      return {
+        ok: false,
+        outcome: 'failed_before_submit',
+        attachedCount: 0,
+        failedAt: { seq: -1, kind: 'fill_field', error: `content_too_long: ${chars}>${limit}` },
+      };
+    }
     const sequence = this.buildCommandSequence(input);
     const imagesRequested = !!(input.images && input.images.length);
     const totalImages = imagesRequested ? input.images!.length : 0;
@@ -247,8 +282,14 @@ export class CommandSequencer {
   sendAndWaitResult(cmd: PublishCommandPayload, edgeId?: string): Promise<PublishCommandResultPayload> {
     const key = `${cmd.recordId}:${cmd.seq}`;
     const envelope = makeEnvelope('publish.command', this.idGen(), this.clock(), cmd);
-    // upload_image 用更宽超时，给边缘「下载+CDP+后置校验」留足空间先返回干净 ok:false（见 uploadTimeoutMs 说明）。
-    const waitMs = cmd.kind === 'upload_image' ? this.uploadTimeoutMs : this.timeoutMs;
+    // 指令自带执行预算（FB 正文按长度伸缩）→ 云端等「预算 + 兜底余量」，边缘必定先答，孤儿执行由构造消失。
+    // 不带预算（小红书全路径）→ 逐字节沿用旧常数窗口：upload_image 用更宽超时，给边缘
+    // 「下载+CDP+后置校验」留足空间先返回干净 ok:false（见 uploadTimeoutMs 说明）。
+    const waitMs = cmd.timeoutMs !== undefined
+      ? cmd.timeoutMs + this.resultSlackMs
+      : cmd.kind === 'upload_image'
+        ? this.uploadTimeoutMs
+        : this.timeoutMs;
     return new Promise<PublishCommandResultPayload>((resolve, reject) => {
       const timeoutHandle = setTimeout(() => {
         this.pending.delete(key);
