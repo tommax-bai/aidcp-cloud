@@ -951,6 +951,19 @@ async function main(): Promise<void> {
     return nickname || undefined;
   };
 
+  // 账号作用域出站的**唯一**群解析入口（change feishu-route-account-cards-by-team）：账号 → group_label → 团队群，
+  // 未绑定 / 任一层读失败一律回落默认群链、绝不静默丢。
+  // 依赖必须在此一处注入：逐处手工装配时漏传 groupRouteStore，解析器会「合法地」判定无团队路由 → 落默认群 →
+  // 投递成功、无异常、无 config-gap 日志，与「未接线」现象上不可区分（正是本 change 要修的那类静默失败）。
+  const resolveAccountChatId = (accountId: string | undefined): Promise<string> =>
+    resolveChatIdForAccount(accountId, {
+      accountStore,
+      groupRouteStore,
+      botChatStore,
+      fallbackChatId: process.env.FEISHU_CHAT_ID,
+      logger: console,
+    });
+
   let facebookPublishMediaStore: FacebookPublishMediaStore | undefined;
   try {
     const store = new FacebookPublishMediaStore({
@@ -2050,13 +2063,7 @@ async function main(): Promise<void> {
       // 账号 → group_label → group_route.chat_id 命中即投；未绑定 / 读失败一律回落默认群、绝不静默丢。
       // 这是本 change 的核心投递点（账号的平台入站消息 = 各团队要收的"消息"）；其余审批卡 / 运维告警仍走默认群（面向运营方）。
       notifyComments: async (items) => {
-        const chatId = await resolveChatIdForAccount(ctx.accountId, {
-          accountStore,
-          groupRouteStore,
-          botChatStore,
-          fallbackChatId: process.env.FEISHU_CHAT_ID,
-          logger: console,
-        });
+        const chatId = await resolveAccountChatId(ctx.accountId);
         if (!chatId) {
           console.error(`[notification] 无可用飞书群，评论/@ 通知未发出 account=${ctx.accountId}`);
           return;
@@ -2387,7 +2394,8 @@ async function main(): Promise<void> {
     }),
     ...(commentApprovalEnabled ? { approval: commentApproval } : {}),
     autoApproveNotify: async ({ requestId, noteId, text, title, authorName, accountId, accountName, contactIncluded }) => {
-      const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
+      // 账号业务结果卡：按账号路由到团队群（未绑定 / 读失败回落默认群）。
+      const chatId = await resolveAccountChatId(accountId);
       if (!chatId) {
         throw new Error('auto_approve_chat_not_configured');
       }
@@ -2504,7 +2512,9 @@ async function main(): Promise<void> {
     // --join=<url>（change facebook-comment-review-and-targeted-join）：加入指定群、只归该账号（同一 TDZ-safe 闭包，scheduler 稍后构造）。
     facebookJoinSpecificGroup: (accountId, groupUrl, opts) => facebookGroupJoinScheduler.joinSpecificGroup(accountId, groupUrl, opts),
     postResultCard: async (accountId, receipt, source) => {
-      const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
+      // 账号业务结果卡：按账号路由到团队群（含人工 /comment 的终态卡——它同样是该账号的运营结果；
+      // 命令的受理回执与人审卡仍在管理群，操作员的命令闭环不断）。
+      const chatId = await resolveAccountChatId(accountId);
       if (!chatId) {
         console.warn('[comment] 无可用飞书群，结果卡片未发出');
         return;
@@ -2646,7 +2656,8 @@ async function main(): Promise<void> {
           } catch (e) {
             message = (e as Error).message;
           }
-          const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
+          // 账号业务结果卡：按账号路由到团队群（未绑定 / 读失败回落默认群）。
+          const chatId = await resolveAccountChatId(accountId);
           if (!chatId) {
             console.warn(`[content-scheduler] 无可用飞书群，排期结果卡未发出 account=${accountId} title=${title}`);
             return;
@@ -2673,7 +2684,7 @@ async function main(): Promise<void> {
               // 触发回执非 ok（配额拒 / 离线 / 未绑人设 / 在跑）回黄卡如实说明；任务终态结果卡由评论链自补（postResultCard），此处绝不重复发。
               triggerComment: async (accountId: string, approvalMode) => {
                 const sendReceiptCard = async (level: 'warning' | 'error', title: string, message: string) => {
-                  const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
+                  const chatId = await resolveAccountChatId(accountId);
                   if (!chatId) {
                     console.warn(`[content-scheduler] 无可用飞书群，排期评论回执卡未发出 account=${accountId} title=${title}`);
                     return;
@@ -2715,7 +2726,7 @@ async function main(): Promise<void> {
               // 尝试型持久日上限——触发回执 ok（任务真开跑）即记 attempt（被人审拒/无目标也占额度，保守方向）。
               triggerContactComment: async (accountId: string, approvalMode) => {
                 const sendReceiptCard = async (level: 'warning' | 'error', title: string, message: string) => {
-                  const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
+                  const chatId = await resolveAccountChatId(accountId);
                   if (!chatId) {
                     console.warn(`[content-scheduler] 无可用飞书群，排期联系评论回执卡未发出 account=${accountId} title=${title}`);
                     return;
@@ -3205,7 +3216,8 @@ async function main(): Promise<void> {
                     receipt = { ok: false, level: 'warning', title: '参照创作未产出', message: `账号 \`${accountLabel}\`「${sourceLabel}」编排状态 skipped${o.failureReason ? `（${o.failureReason}）` : ''}` };
                   }
                   if (!receipt) return;
-                  const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
+                  // 账号业务结果卡：按账号路由到团队群（未绑定 / 读失败回落默认群）。
+                  const chatId = await resolveAccountChatId(accountId);
                   if (!chatId) return;
                   await messenger.sendCard(
                     chatId,

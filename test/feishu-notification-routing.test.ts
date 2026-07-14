@@ -78,6 +78,32 @@ test('无 accountId（无归属告警）→ 直接默认群', async () => {
   assert.equal(await resolveChatIdForAccount(undefined, d), 'oc_default');
 });
 
+// change feishu-route-account-cards-by-team：账号业务结果卡也经此解析器投递，
+// 故「依赖缺失」的降级面必须钉死——启动时路由 / 账号存储 init 失败留 undefined，绝不能崩投递闭包、绝不静默丢卡。
+test('红线：groupRouteStore 未注入（启动 init 失败）→ 全体账号落默认群，等价空表', async () => {
+  const warns: string[] = [];
+  const chatId = await resolveChatIdForAccount('acc-6', {
+    accountStore: { getGroupLabel: async () => 'teamA' },
+    groupRouteStore: undefined,
+    botChatStore: { getDefaultChat: async () => null },
+    fallbackChatId: 'oc_default',
+    logger: { warn: (...a: unknown[]) => warns.push(a.map(String).join(' ')) },
+  });
+  assert.equal(chatId, 'oc_default');
+  assert.ok(warns.some((w) => w.includes('config-gap')), '缺路由存储时仍应留 config-gap 线索');
+});
+
+test('红线：accountStore 未注入 → 落默认群，绝不抛入投递闭包', async () => {
+  const chatId = await resolveChatIdForAccount('acc-7', {
+    accountStore: undefined,
+    groupRouteStore: { getRoute: async () => 'oc_team_a' },
+    botChatStore: { getDefaultChat: async () => null },
+    fallbackChatId: 'oc_default',
+    logger: console,
+  });
+  assert.equal(chatId, 'oc_default');
+});
+
 // ── GroupRouteStore（注入桩池，无需真实 PG）─────────────────────────────
 interface Rec { sql: string; params: unknown[] }
 function fakePool(opts: { returning?: Record<string, unknown>[]; getRows?: Record<string, unknown>[]; getError?: { code: string } } = {}) {
