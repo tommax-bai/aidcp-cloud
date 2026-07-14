@@ -140,7 +140,7 @@ export interface EventMap {
   // Edge 上报事件（handler → RoleDispatcher）
   // accountId 穿透握手事件（multi-account-node-support D4）：决策层据此设该连接当前账号，不再钉死 default。
   'edge.hello': { edgeId: string; accountId?: string; ts: number };
-  'page.cards.arrived': { cards: PageCardsData[]; ts: number };
+  'page.cards.arrived': { cards: PageCardsData[]; startupId?: string; ts: number };
   // accountId（change interaction-feed-enrichment）：tee 到全局观测总线后，元数据 upsert 需按真实账号归属（缺则保留键）。
   'note.detail.arrived': { detail: NoteDetailData; accountId?: string; ts: number };
   /** Refresh-only note detail carrying newly observed carousel images; consumers MUST NOT count it as a new view. */

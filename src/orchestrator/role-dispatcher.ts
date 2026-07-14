@@ -259,7 +259,7 @@ export interface RoleDispatcherOptions {
   randomFn?: () => number;
   /**
    * 同步读账号昵称（change account-real-nickname）：返回 string|null（库内 NULL/未知=null）。
-   * **同步**——握手时同步算「需采集」判定（不 await PG，杜绝异步窗口让 page.cards 插进采集绕路）。
+   * **同步**——采集收尾时做差异写库判定（不 await PG，避免阻塞回 feed）。
    * 由 server 注入读 AccountStore 进程内缓存；缺省 → 恒 null（无 PG 退化）。
    */
   getNickname?: (accountId: string) => string | null;
@@ -370,7 +370,7 @@ export class RoleDispatcher {
   private readonly setTimeoutFn: (fn: () => void, ms: number) => unknown;
   private readonly clearTimeoutFn: (handle: unknown) => void;
   private readonly randomFn: () => number;
-  /** 同步读账号昵称（change account-real-nickname）：握手同步算「需采集」用；缺省恒 null。 */
+  /** 同步读账号昵称（change account-real-nickname）：采集收尾差异写库用；缺省恒 null。 */
   private readonly getNickname: (accountId: string) => string | null;
   /** 持久化账号昵称（change account-real-nickname）：nickname_enricher 采到非空时调；缺省 → 不持久化。 */
   private readonly setNickname?: (accountId: string, nickname: string) => Promise<void> | void;
@@ -388,8 +388,8 @@ export class RoleDispatcher {
   /** 本次正常结束已对边端公布的续场休息时长；随后 armRestTimer 复用，避免 UI 与真实计时器漂移。 */
   private pendingAutoResumeInMs: number | undefined;
   /**
-   * 登录账号真实昵称采集体（change nickname-capture-on-login）：在 setup() 永久接线、独立于浏览会话，
-   * 故未绑人设、被启动闸拦下的账号登录后仍能采一次真名（采集是登录引导固定步骤，不被人设闸阻断）。
+   * 登录账号真实昵称采集体：在 setup() 永久接线、独立于浏览会话，
+   * 但只由完整浏览器启动后的首批 page.cards{startupId} 触发，不由 hello/session_start 触发。
    */
   private nicknameEnricher?: NicknameEnricher;
   /** 已下发占坑、待回执释放的互动键（按动作）：action.completed 据此 complete / releaseFailed。 */
@@ -707,10 +707,6 @@ export class RoleDispatcher {
   /** 设置该连接（运行时）的当前账号（multi-account-node-support D4：去掉 default 钉死，由连接真实账号设入）。 */
   setCurrentAccountId(accountId: string): void {
     this.currentAccountId = accountId;
-    // XHS 启动期刷新登录账号真实昵称（unbind-persona-refresh-nickname）：账号握手已保证为真实 userid，
-    // 每次连接启动均武装一次已验证昵称采集；采到非空且与库内不同由 accountStore.setNickname 覆盖展示名。
-    // Facebook 走数字 id 校验后的 hello accountNickname 更新，不走 XHS profile_open 采集链路。
-    this.sessionContext.setPendingNicknameCapture(!this.accountPlatform || this.accountPlatform === 'xiaohongshu');
   }
 
   /** 当前账号（供测试 / 观测）。 */
@@ -849,8 +845,8 @@ export class RoleDispatcher {
         : []),
       new ProfileOpener(commonOptions),
       new ProfileBrowser(commonOptions),
-      // 登录账号真实昵称采集体已移出会话角色集、改为 setup() 永久接线（change nickname-capture-on-login）：
-      // 采真名是登录引导固定步骤，不随浏览会话起止、不被人设闸阻断。见下方 setup() 内构造 this.nicknameEnricher。
+      // 登录账号真实昵称采集体已移出会话角色集、改为 setup() 永久接线：
+      // 只消费完整浏览器启动后首批 page.cards 的 startupId，不随 hello/reconnect/session_start 武装。
       new FollowAgent({ ...commonOptions, sessionContext: this.sessionContext, getRemainingFollows: () => this.budget.follows, getMinFansRatio: () => this.followMinFansRatio() }),
       new SearchScroller(commonOptions, this.sessionContext),
       new SearchEvaluator({
@@ -948,15 +944,14 @@ export class RoleDispatcher {
       | SessionMonitorRole
       | undefined;
 
-    // 登录账号真实昵称采集（change nickname-capture-on-login）：从「浏览会话开始」解耦为【登录引导固定步骤】。
-    // 采集体 + 其本人主页命令出口**永久接线**（独立于浏览会话；它依赖的 page.cards/profile.detail 由 handler 无条件上总线），
-    // 故未绑人设、被启动闸拦下的账号登录后仍能采一次真名；但**绝不**接浏览反应链（contentEvaluator 等仍只在会话激活订阅）——
-    // 未绑人设账号采完即闲置、不在默认人设上空跑（红线）。采集体全程自守（库内已有真名/占位账号/在途/采空退避即 no-op）、
-    // 风控/预算中性，故 permanently 订阅安全。绑了人设的账号行为不变（会话开始的 session_start 仍触发同一采集体）。
+    // 登录账号真实昵称采集：只由完整浏览器启动后的首批 page.cards{startupId} 触发。
+    // hello / reconnect / session_start 都不再武装采集，避免冷待机云端恢复反复打断浏览器。
+    // 采集体 + 其本人主页命令出口永久接线；真正采集由 startupId 去重和平台闸控制。
     this.nicknameEnricher = new NicknameEnricher({
       ...commonOptions,
       sessionContext: this.sessionContext,
       getAccountId: () => this.currentAccountId,
+      isCaptureEligible: () => this.isDispatchActive() && (!this.accountPlatform || this.accountPlatform === 'xiaohongshu'),
       getNickname: this.getNickname,
       ...(this.setNickname ? { setNickname: this.setNickname } : {}),
       setTimeoutFn: this.setTimeoutFn,
@@ -997,10 +992,6 @@ export class RoleDispatcher {
       this.restartSession();
       return;
     }
-    // 启动闸拦下（未绑人设）：仍把「采登录账号真实昵称」当登录引导固定步骤跑一次——不开浏览会话、不挂浏览
-    // 反应链（红线，见 setup() 注释），只驱动一次本人主页采集（change nickname-capture-on-login）。
-    // 调度全局停（!isDispatchActive）则连采集也不驱动边端（运营显式暂停一切）。
-    if (this.isDispatchActive()) this.nicknameEnricher?.armLoginCapture();
   }
 
   /**

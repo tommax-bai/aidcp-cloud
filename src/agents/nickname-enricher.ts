@@ -5,8 +5,9 @@
  * 读回上报、差异持久化、干净回 feed。决策/编排全在此（铁律：edge 只执行原子操作、绝不判定）。
  *
  * 消费事件：
- *   - feed.entered{trigger:'session_start'}：需采集 → 同一 tick 暂停自主浏览 + 置在途标记 + 武装 ~20s 超时
- *     + emit self.profile.capture（dispatcher 翻译为 profile_open{direct:true}）。
+ *   - page.cards.arrived{startupId}：每个完整 Edge/browser 启动代号的首批 cards 才触发一次昵称采集；
+ *     同一 tick 暂停自主浏览 + 置在途标记 + 武装 ~20s 超时 + emit self.profile.capture
+ *     （dispatcher 翻译为 profile_open{direct:true}）。
  *   - profile.detail.arrived（本人=detail.authorId===连接 accountId）：取消超时 → setNickname(非空) →
  *     清标记 → 解除暂停 → emit feed.entered{back_to_feed}（严格顺序，design D5）。
  * 产出事件：self.profile.capture（云端内部）、feed.entered{back_to_feed}。
@@ -16,7 +17,7 @@
  * 在途标记仅用于 chokepoint 放行 self profile_open + 超时 + 防重复收尾，绝不用于持久化/隔离身份判定。
  *
  * 有界 / 幂等 / 中性：~20s 超时兜底（edge 静默/CDP 崩不困死会话，最坏滞留从 1h→~20s）；采空 K 次退避
- * （genuinely 抽不到的主页不永绕）；采到非空后保留启动刷新开关，后续任务启动仍可检测昵称变化；
+ * （genuinely 抽不到的主页不永绕）；采到非空后仅等下一个完整启动代号再检测昵称变化；
  * profile_open 不触风控/预算/节奏。
  *
  * 不使用 LLM，纯确定性执行。
@@ -25,12 +26,14 @@
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import { SessionContext } from './session-context.js';
-import type { RoleName, FeedEnteredPayload, ProfileDetailData } from '../event-bus/types.js';
+import type { RoleName, ProfileDetailData } from '../event-bus/types.js';
 
 export interface NicknameEnricherDeps {
   sessionContext: SessionContext;
   /** 该连接当前账号（= 本人主页 id）；会话开始时已由握手 setCurrentAccountId 设为真实账号。 */
   getAccountId: () => string;
+  /** 是否允许本连接做启动期昵称采集；XHS=true，Facebook 等平台=false。 */
+  isCaptureEligible?: () => boolean;
   /** 读取系统已记录昵称；用于启动刷新时避免同名重复写库。 */
   getNickname?: (accountId: string) => string | null;
   /** 持久化昵称（拒空、单写 upsert）；缺省（无 PG）→ 不持久化。 */
@@ -44,6 +47,7 @@ export class NicknameEnricher extends BaseRole {
   readonly roleName: RoleName = 'nickname_enricher';
   private readonly ctx: SessionContext;
   private readonly getAccountId: () => string;
+  private readonly isCaptureEligible: () => boolean;
   private readonly getNicknameFn?: (accountId: string) => string | null;
   private readonly setNicknameFn?: (accountId: string, nickname: string) => Promise<void> | void;
   private readonly setTimeoutFn: (fn: () => void, ms: number) => unknown;
@@ -51,11 +55,14 @@ export class NicknameEnricher extends BaseRole {
   private unsubscribers: (() => void)[] = [];
   /** 采集已武装、等边缘就绪（首个 page.cards.arrived）再下发命令；下发后置 false。 */
   private awaitingEdgeReady = false;
+  private readonly consumedStartupIds = new Set<string>();
+  private readonly consumedStartupOrder: string[] = [];
 
   constructor(options: RoleOptions & NicknameEnricherDeps) {
     super(options);
     this.ctx = options.sessionContext;
     this.getAccountId = options.getAccountId;
+    this.isCaptureEligible = options.isCaptureEligible ?? (() => true);
     this.getNicknameFn = options.getNickname;
     this.setNicknameFn = options.setNickname;
     this.setTimeoutFn = options.setTimeoutFn ?? ((fn, ms) => setTimeout(fn, ms));
@@ -64,8 +71,7 @@ export class NicknameEnricher extends BaseRole {
 
   subscribe(): void {
     this.unsubscribers.push(
-      this.eventBus.on('feed.entered', (p) => this.onFeedEntered(p)),
-      this.eventBus.on('page.cards.arrived', () => this.onEdgeReady()),
+      this.eventBus.on('page.cards.arrived', (p) => this.onPageCardsArrived(p)),
       this.eventBus.on('profile.detail.arrived', (p) => this.onDetailArrived(p.detail, p.accountId)),
     );
   }
@@ -76,42 +82,42 @@ export class NicknameEnricher extends BaseRole {
     this.clearTimer();
   }
 
-  // ─── 触发：登录引导（armLoginCapture）或浏览会话开始（feed.entered{session_start}）→ 武装一次本人主页采集 ───
-  // change nickname-capture-on-login：采真名是登录后的固定步骤，从「浏览会话开始」解耦——未绑人设、不开浏览会话也照采。
-  private onFeedEntered(payload: FeedEnteredPayload): void {
-    if (payload.trigger !== 'session_start') return;
-    this.arm('会话开始');
+  private onPageCardsArrived(payload: { startupId?: string }): void {
+    const startupId = typeof payload.startupId === 'string' ? payload.startupId.trim() : '';
+    if (startupId) this.armStartupCapture(startupId);
+    this.onEdgeReady();
   }
 
-  /**
-   * 登录引导触发（change nickname-capture-on-login）：边端登录确立身份后，云端直接武装一次本人主页采集，
-   * 不经浏览会话、不被人设闸阻断（dispatcher 在启动闸拦下未绑人设账号时调用）。与 session_start 路径共用 arm()。
-   */
-  armLoginCapture(): void {
-    this.arm('登录引导');
-  }
-
-  /** 武装采集（两触发共用）：守卫不过即 no-op；置挂起/在途/超时，命令延到边缘就绪（首个 page.cards）再发。 */
-  private arm(via: string): void {
-    if (!this.ctx.pendingNicknameCapture) return; // 非 XHS 或本连接无需刷新 → 零扰动
+  /** 完整启动首批 page.cards 触发：守卫不过即 no-op；同一 startupId 只消费一次。 */
+  private armStartupCapture(startupId: string): void {
+    if (!this.isCaptureEligible()) return; // 非 XHS 平台零扰动
+    if (this.consumedStartupIds.has(startupId)) return; // 同一浏览器启动代号只采一次
     if (this.ctx.selfCaptureInFlight) return; // 已在采集中，不重入
     if (this.ctx.selfCaptureAttempts >= this.ctx.selfCaptureMaxAttempts) return; // 采空退避，不永绕
     const accountId = this.getAccountId();
     if (!accountId) return; // honest-fail：缺账号不采（retire-default-account：default 已退役，无占位账号需跳过）
+    this.rememberStartupId(startupId);
 
     // 同步置「挂起浏览 + 在途标记 + 武装超时」：立刻挡住 R3 窗口（在途 page.cards 驱动的 open_note 被 chokepoint 丢弃），
     // 并让通知巡视准入据 selfCaptureInFlight 让位（二者都要独占边缘：进本人主页 vs 进通知页）。
+    this.ctx.setPendingNicknameCapture(true);
     this.ctx.setBrowseSuspended(true);
     this.ctx.setSelfCaptureInFlight(true);
     this.awaitingEdgeReady = true;
     this.armTimeout(); // 兜底：即便边缘从不报 page.cards（静默 / 未登录），~20s 也恢复、不困死。
-    // 命令延到「边缘就绪」再发：触发点（session_start / 登录 hello）都在握手同步窗口内——此刻边缘既未登记进
-    // 可推送表（ws-server edges.set 在 await routeMessage 之后 → sent=0），也仍在初始扫 feed（命令循环未起 → 命令被丢）。
-    // 故等首个 page.cards.arrived（初始扫描完、进命令循环、已登记）再 emit → profile_open 真送达且被执行。
-    this.log(`${via}，需采登录账号昵称 account=${accountId} → 待边缘就绪（首个 page.cards）即驱动本人主页直驱`);
+    this.log(`完整启动首批 page.cards startup=${startupId}，需采登录账号昵称 account=${accountId} → 驱动本人主页直驱`);
   }
 
-  /** 边缘就绪信号（首个 page.cards.arrived：初始扫描完、进命令循环、已登记可推送）→ 此刻下发采集命令。 */
+  private rememberStartupId(startupId: string): void {
+    this.consumedStartupIds.add(startupId);
+    this.consumedStartupOrder.push(startupId);
+    while (this.consumedStartupOrder.length > 50) {
+      const old = this.consumedStartupOrder.shift();
+      if (old) this.consumedStartupIds.delete(old);
+    }
+  }
+
+  /** 边缘就绪信号（带 startupId 的首个 page.cards.arrived）→ 此刻下发采集命令。 */
   private onEdgeReady(): void {
     if (!this.awaitingEdgeReady || !this.ctx.selfCaptureInFlight) return; // 未武装 / 已收尾 → 不发
     this.awaitingEdgeReady = false;

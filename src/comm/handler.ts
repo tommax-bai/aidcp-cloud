@@ -316,8 +316,8 @@ export class DefaultMessageHandler implements MessageHandler {
         this.deps.edgeTaskLeases?.onReleased(env.payload as EdgeTaskReleasedPayload, session.edgeId);
         return null;
       case 'page.cards': {
-        const { cards } = env.payload as PageCardsPayload;
-        this.bus(session).emit('page.cards.arrived', { cards, ts: this.clock() });
+        const { cards, startupId } = env.payload as PageCardsPayload;
+        this.bus(session).emit('page.cards.arrived', { cards, ...(startupId ? { startupId } : {}), ts: this.clock() });
         return null;
       }
       case 'note.detail': {

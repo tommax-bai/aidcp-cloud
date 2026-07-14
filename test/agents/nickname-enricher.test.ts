@@ -23,7 +23,7 @@ interface Harness {
   backToFeed: number;
 }
 
-function setup(opts: { accountId?: string; nicknameByAccount?: Record<string, string | null> } = {}): Harness {
+function setup(opts: { accountId?: string; nicknameByAccount?: Record<string, string | null>; captureEligible?: boolean } = {}): Harness {
   const bus = new EventBus();
   const ctx = new SessionContext();
   const setCalls: { accountId: string; nickname: string }[] = [];
@@ -37,6 +37,7 @@ function setup(opts: { accountId?: string; nicknameByAccount?: Record<string, st
     soul: mockSoul,
     sessionContext: ctx,
     getAccountId: () => opts.accountId ?? REAL,
+    isCaptureEligible: () => opts.captureEligible ?? true,
     getNickname: (accountId) => opts.nicknameByAccount?.[accountId] ?? null,
     setNickname: (accountId, nickname) => { setCalls.push({ accountId, nickname }); },
     setTimeoutFn: (fn) => { timeoutCb = fn; return { id: 1 }; },
@@ -58,8 +59,11 @@ function setup(opts: { accountId?: string; nicknameByAccount?: Record<string, st
 function sessionStart(bus: EventBus): void {
   bus.emit('feed.entered', { pageType: 'feed', trigger: 'session_start', ts: Date.now() });
 }
-/** 边缘就绪信号：首个 page.cards.arrived（初始扫描完、进命令循环、已登记可推送）。 */
-function edgeReady(bus: EventBus): void {
+/** 新 edge 的首批 page.cards.arrived 会携带完整启动代号 startupId。 */
+function edgeReady(bus: EventBus, startupId = 'startup-1'): void {
+  bus.emit('page.cards.arrived', { cards: [], startupId, ts: Date.now() });
+}
+function oldEdgeCards(bus: EventBus): void {
   bus.emit('page.cards.arrived', { cards: [], ts: Date.now() });
 }
 function selfDetail(bus: EventBus, accountId: string, nickname?: string): void {
@@ -71,43 +75,37 @@ function selfDetail(bus: EventBus, accountId: string, nickname?: string): void {
 }
 
 describe('NicknameEnricher（登录账号真实昵称采集，云端角色驱动）', () => {
-  it('会话开始 + 需采集 → 同步暂停浏览/置在途/武装超时；命令延到边缘就绪(首个 page.cards)再 emit（修 sent=0 + 命令循环未起）', () => {
+  it('完整启动首批 page.cards{startupId} → 同步暂停浏览/置在途/武装超时并 emit 采集命令', () => {
     const h = setup();
-    h.ctx.setPendingNicknameCapture(true);
-    sessionStart(h.bus);
+    edgeReady(h.bus);
     // 状态同步置好（立刻挡 R3 窗口 + 让通知巡视让位）
     assert.equal(h.ctx.browseSuspended, true, '应同步暂停自主浏览');
     assert.equal(h.ctx.selfCaptureInFlight, true, '应同步置在途标记');
-    // 命令延后：会话开始时边缘还没就绪（未登记可推送 + 初始扫描中命令循环未起），不发
-    assert.equal(h.captures.length, 0, 'emit 应延到边缘就绪，不在握手窗口/初始扫描期发（否则 sent=0 或被丢）');
-    edgeReady(h.bus); // 首个 page.cards.arrived
-    assert.equal(h.captures.length, 1, '边缘就绪后应 emit 一次 self.profile.capture');
+    assert.equal(h.captures.length, 1, '首批 cards 后应 emit 一次 self.profile.capture');
     assert.equal(h.captures[0].accountId, REAL);
   });
 
-  it('边缘就绪前采集被收尾（reset/超时清掉在途）→ 就绪信号不再 emit（防误发）', () => {
+  it('旧 edge 无 startupId 的 page.cards 不触发昵称采集', () => {
     const h = setup();
-    h.ctx.setPendingNicknameCapture(true);
     sessionStart(h.bus);
-    h.ctx.setSelfCaptureInFlight(false); // 模拟就绪前被 reset/超时清掉
-    edgeReady(h.bus);
-    assert.equal(h.captures.length, 0, 'in-flight 已清 → 就绪信号不发命令');
+    oldEdgeCards(h.bus);
+    assert.equal(h.captures.length, 0, '缺 startupId → 无法证明完整启动，不采集');
+    assert.equal(h.ctx.browseSuspended, false);
+    assert.equal(h.ctx.selfCaptureInFlight, false);
   });
 
-  it('边缘就绪信号去重：多次 page.cards 只触发一次采集命令', () => {
+  it('同一个 startupId 的多次 page.cards 只触发一次采集命令', () => {
     const h = setup();
-    h.ctx.setPendingNicknameCapture(true);
-    sessionStart(h.bus);
-    edgeReady(h.bus);
-    edgeReady(h.bus);
-    edgeReady(h.bus);
-    assert.equal(h.captures.length, 1, '首个 page.cards 后 awaitingEdgeReady 置 false，后续不再发');
+    edgeReady(h.bus, 'startup-a');
+    selfDetail(h.bus, REAL, '工程师大白');
+    edgeReady(h.bus, 'startup-a');
+    edgeReady(h.bus, 'startup-a');
+    assert.equal(h.captures.length, 1, 'startupId 已消费，后续同代号不再发');
   });
 
-  it('会话开始 + 无需采集（pending=false）→ 零扰动', () => {
-    const h = setup();
-    // pending 默认 false
-    sessionStart(h.bus);
+  it('非 XHS 平台即使带 startupId 也零扰动', () => {
+    const h = setup({ captureEligible: false });
+    edgeReady(h.bus);
     assert.equal(h.captures.length, 0);
     assert.equal(h.ctx.browseSuspended, false);
     assert.equal(h.ctx.selfCaptureInFlight, false);
@@ -115,34 +113,29 @@ describe('NicknameEnricher（登录账号真实昵称采集，云端角色驱动
 
   it('缺账号（空 accountId）→ honest-fail 绝不采（retire-default-account：default 已退役，无占位账号需特判）', () => {
     const h = setup({ accountId: '' });
-    h.ctx.setPendingNicknameCapture(true); // 即便 pending 被误置
-    sessionStart(h.bus);
+    edgeReady(h.bus);
     assert.equal(h.captures.length, 0);
     assert.equal(h.ctx.browseSuspended, false);
   });
 
   it('本人主页非空昵称到达 → 持久化 + 保持后续启动可刷新 + 清在途 + 解暂停 + 回 feed（严格顺序）', () => {
     const h = setup();
-    h.ctx.setPendingNicknameCapture(true);
-    sessionStart(h.bus);
-    edgeReady(h.bus);
+    edgeReady(h.bus, 'startup-a');
     selfDetail(h.bus, REAL, '工程师大白');
     assert.deepEqual(h.setCalls, [{ accountId: REAL, nickname: '工程师大白' }], '应单写持久化非空昵称');
-    assert.equal(h.ctx.pendingNicknameCapture, true, '采到后仍保留启动刷新开关，后续任务启动继续检测昵称变化');
+    assert.equal(h.ctx.pendingNicknameCapture, true, '采到后记录本连接曾执行启动期昵称采集');
     assert.equal(h.ctx.selfCaptureInFlight, false, '应清在途标记');
     assert.equal(h.ctx.browseSuspended, false, '应解除暂停（在 emit back_to_feed 之前）');
     assert.equal(h.timerCleared(), true, '应取消超时');
     assert.equal(h.backToFeed, 1, '应回 feed 一次');
 
     sessionStart(h.bus);
-    edgeReady(h.bus);
-    assert.equal(h.captures.length, 2, '下一次任务启动仍会重新检测昵称');
+    edgeReady(h.bus, 'startup-b');
+    assert.equal(h.captures.length, 2, '完整浏览器重启（新 startupId）才会重新检测昵称');
   });
 
   it('本人主页非空昵称到达但与系统昵称一致 → 不重复写库，仍按采集流程回 feed', () => {
     const h = setup({ nicknameByAccount: { [REAL]: '工程师大白' } });
-    h.ctx.setPendingNicknameCapture(true);
-    sessionStart(h.bus);
     edgeReady(h.bus);
     selfDetail(h.bus, REAL, '工程师大白');
     assert.equal(h.setCalls.length, 0, '昵称未变化不重复写库');
@@ -154,8 +147,6 @@ describe('NicknameEnricher（登录账号真实昵称采集，云端角色驱动
 
   it('本人主页非空昵称到达且与系统昵称不同 → 更新系统昵称', () => {
     const h = setup({ nicknameByAccount: { [REAL]: '旧昵称' } });
-    h.ctx.setPendingNicknameCapture(true);
-    sessionStart(h.bus);
     edgeReady(h.bus);
     selfDetail(h.bus, REAL, '新昵称');
     assert.deepEqual(h.setCalls, [{ accountId: REAL, nickname: '新昵称' }], '昵称变化时应更新系统昵称');
@@ -164,8 +155,7 @@ describe('NicknameEnricher（登录账号真实昵称采集，云端角色驱动
 
   it('本人主页空昵称（诚实空）→ 不写 + 尝试计数++ + 仍回 feed', () => {
     const h = setup();
-    h.ctx.setPendingNicknameCapture(true);
-    sessionStart(h.bus);
+    edgeReady(h.bus);
     selfDetail(h.bus, REAL, '   '); // 空白
     assert.equal(h.setCalls.length, 0, '空昵称绝不写（不覆盖真名、DB 保持 NULL 待重试）');
     assert.equal(h.ctx.selfCaptureAttempts, 1, '采空尝试计数应 +1');
@@ -176,8 +166,7 @@ describe('NicknameEnricher（登录账号真实昵称采集，云端角色驱动
 
   it('他人主页 detail（authorId ≠ accountId）→ 角色忽略（不写、不回 feed、保持在途）', () => {
     const h = setup();
-    h.ctx.setPendingNicknameCapture(true);
-    sessionStart(h.bus);
+    edgeReady(h.bus);
     // 普通作者浏览的 detail
     h.bus.emit('profile.detail.arrived', {
       detail: { authorId: 'other-author', postsCount: 10, followersCount: 100, extracted: true, nickname: '别人' },
@@ -191,8 +180,7 @@ describe('NicknameEnricher（登录账号真实昵称采集，云端角色驱动
 
   it('~20s 超时（edge 静默）→ 清在途 + 解暂停 + 回 feed', () => {
     const h = setup();
-    h.ctx.setPendingNicknameCapture(true);
-    sessionStart(h.bus);
+    edgeReady(h.bus);
     h.fireTimeout();
     assert.equal(h.ctx.selfCaptureInFlight, false);
     assert.equal(h.ctx.browseSuspended, false);
@@ -201,8 +189,7 @@ describe('NicknameEnricher（登录账号真实昵称采集，云端角色驱动
 
   it('超时在本人 detail 收尾之后触发 → 空响（不重复回 feed）', () => {
     const h = setup();
-    h.ctx.setPendingNicknameCapture(true);
-    sessionStart(h.bus);
+    edgeReady(h.bus);
     selfDetail(h.bus, REAL, '工程师大白'); // 先收尾（backToFeed=1, inFlight=false）
     h.fireTimeout(); // 迟到的超时
     assert.equal(h.backToFeed, 1, '超时空响，不二次回 feed');
@@ -210,41 +197,10 @@ describe('NicknameEnricher（登录账号真实昵称采集，云端角色驱动
 
   it('K 次采空后退避：达上限的会话开始不再驱动采集', () => {
     const h = setup();
-    h.ctx.setPendingNicknameCapture(true);
     // 模拟已累计到上限
     for (let i = 0; i < h.ctx.selfCaptureMaxAttempts; i++) h.ctx.incrementSelfCaptureAttempts();
-    sessionStart(h.bus);
+    edgeReady(h.bus);
     assert.equal(h.captures.length, 0, '达 K 上限 → 不再绕（退避）');
     assert.equal(h.ctx.browseSuspended, false);
-  });
-
-  // ── change nickname-capture-on-login：采真名从「浏览会话开始」解耦为「登录引导固定步骤」──
-  it('登录引导触发（armLoginCapture，无 session_start）→ 同款采集流程：武装→边缘就绪 emit→落库回 feed（解耦人设闸）', () => {
-    const h = setup();
-    h.ctx.setPendingNicknameCapture(true);
-    // 不发 session_start —— 直接登录引导触发（未绑人设、不开浏览会话也照采）
-    h.role.armLoginCapture();
-    assert.equal(h.ctx.browseSuspended, true, '应同步暂停');
-    assert.equal(h.ctx.selfCaptureInFlight, true, '应同步置在途');
-    assert.equal(h.captures.length, 0, 'emit 延到边缘就绪');
-    edgeReady(h.bus); // 首个 page.cards.arrived
-    assert.equal(h.captures.length, 1, '边缘就绪后 emit 一次 self.profile.capture');
-    selfDetail(h.bus, REAL, '测评酱');
-    assert.deepEqual(h.setCalls, [{ accountId: REAL, nickname: '测评酱' }], '登录引导路径同样落库真名');
-    assert.equal(h.ctx.pendingNicknameCapture, true, '采到后仍保留启动刷新开关');
-    assert.equal(h.backToFeed, 1, '回 feed 一次');
-  });
-
-  it('登录引导触发：无需采集(pending=false)→零扰动；缺账号（空 accountId）→ honest-fail 绝不采', () => {
-    const h1 = setup();
-    h1.role.armLoginCapture(); // pending 默认 false
-    assert.equal(h1.captures.length, 0, 'pending=false → 零扰动');
-    assert.equal(h1.ctx.browseSuspended, false);
-
-    const h2 = setup({ accountId: '' });
-    h2.ctx.setPendingNicknameCapture(true); // 即便误置
-    h2.role.armLoginCapture();
-    assert.equal(h2.captures.length, 0, '缺账号 honest-fail 绝不采');
-    assert.equal(h2.ctx.browseSuspended, false);
   });
 });

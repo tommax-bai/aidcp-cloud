@@ -138,16 +138,17 @@ test('startOnPersonaBound 人设仍未真绑 → 诚实不起、不发重驱（�
   d.endSession();
 });
 
-// ─── change nickname-capture-on-login：采真名是登录引导固定步骤，不被人设闸阻断（但绝不浏览，守红线）───
+// ─── 昵称采集：只在完整启动后的首批 page.cards{startupId} 触发；不被人设闸阻断（但绝不浏览，守红线）───
 
-test('未绑人设但库内真名空：登录即采真名（恰一次 profile_open{direct}），绝不浏览（无 open_note/like/scroll）——红线', () => {
+test('未绑人设但库内真名空：首批 startup page.cards 采真名（恰一次 profile_open{direct}），绝不浏览（无 open_note/like/scroll）——红线', () => {
   const { d, commands } = make({ isPersonaBound: () => false });
-  d.setCurrentAccountId('acctCap'); // XHS 真实账号启动 → pendingNicknameCapture=true，启动期刷新昵称
-  d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'acctCap', ts: 1 }); // 启动闸拒绝浏览会话，但登录引导采集武装
+  d.setCurrentAccountId('acctCap');
+  d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'acctCap', ts: 1 }); // 启动闸拒绝浏览会话；hello 本身不再武装采集
   assert.equal(d.active, false, '未开浏览会话（不浏览）');
-  // 边缘就绪（自发上报 page.cards）→ 驱动一次本人主页采集；浏览反应链未接线，绝不产生浏览指令
+  // 完整启动后的首批 page.cards → 驱动一次本人主页采集；浏览反应链未接线，绝不产生浏览指令
   d.bus.emit('page.cards.arrived', {
     cards: [{ index: 0, title: '测试笔记', likeCount: 100, collectCount: 10, noteId: 'n1' }],
+    startupId: 'startup-1',
     ts: 2,
   });
   const profileOpens = commands.filter((c) => c.action === 'profile_open');
@@ -159,9 +160,9 @@ test('未绑人设但库内真名空：登录即采真名（恰一次 profile_op
 
 test('全局调度关闭：未绑人设账号登录也不采真名（运营显式暂停一切，连边端都不驱动）', () => {
   const { d, commands } = make({ isPersonaBound: () => false, isDispatchActive: () => false });
-  d.setCurrentAccountId('acctCap'); // pendingNicknameCapture=true
+  d.setCurrentAccountId('acctCap');
   d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'acctCap', ts: 1 });
-  d.bus.emit('page.cards.arrived', { cards: [], ts: 2 });
-  assert.equal(commands.length, 0, '调度全局停 → 连登录引导采集也不驱动');
+  d.bus.emit('page.cards.arrived', { cards: [], startupId: 'startup-1', ts: 2 });
+  assert.equal(commands.length, 0, '调度全局停 → 连启动期昵称采集也不驱动');
   d.endSession();
 });

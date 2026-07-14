@@ -98,8 +98,8 @@ export interface AccountStore {
   setNickname?(accountId: string, nickname: string): Promise<void>;
   /**
    * 同步读账号昵称（change account-real-nickname）：读 init() 预热 + setNickname 写后更新的进程内缓存，
-   * 返回 string|null（缺行/库内 NULL=null）。**同步**是为握手时同步算「需采集」判定、不留 await PG 的异步窗口
-   * （否则在途 page.cards 会驱动 open_note 插进采集绕路，R3-MAJOR）。缺省 → 调用方按 null 处理。
+   * 返回 string|null（缺行/库内 NULL=null）。**同步**是为采集收尾做差异写库判定，
+   * 不让 PG await 阻塞回 feed。缺省 → 调用方按 null 处理。
    */
   getNickname?(accountId: string): string | null;
   /**
@@ -160,7 +160,7 @@ interface AccountPlatformRow extends AccountRow {
 export class PgAccountStore implements AccountStore {
   private readonly pool: pg.Pool;
   /** 账号昵称的进程内同步缓存（change account-real-nickname）：init() 预热全表 + setNickname 写后更新。
-   *  供握手同步算「需采集」判定，避免 await PG 的异步窗口；缺键=未知 → getNickname 返回 null。 */
+   *  供采集收尾做差异写库判定；缺键=未知 → getNickname 返回 null。 */
   private readonly nicknameCache = new Map<string, string | null>();
   /** 账号平台缓存（init 预热 + getPlatform 回填）。accounts.platform 是事实源，缓存只做读路径加速。 */
   private readonly platformCache = new Map<string, PlatformId>();
