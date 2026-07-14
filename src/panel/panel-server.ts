@@ -41,6 +41,7 @@ import { RISK_ACTIONS } from '../risk/index.js';
 import { isKnownRole } from '../config/role-catalog.js';
 import { isAllowedPlatformCredential } from '../config/platform-credentials.js';
 import type { FacebookGroupMembershipStatus, FacebookGroupTargetInput } from '../comment-agent/facebook-group-store.js';
+import { readDownloadsManifest } from './downloads-manifest.js';
 
 /** 登录/写体很小，限制请求体大小防滥用。 */
 const MAX_BODY_BYTES = 16 * 1024;
@@ -399,6 +400,14 @@ function createRequestHandler(
 
     if (method === 'GET' && url === '/api/me') {
       sendJson(res, 200, { sub: verified.payload.sub, panelApiVersion: buildVersionPayload().panelApiVersion });
+      return;
+    }
+
+    // 边缘客户端安装包清单（change downloads-manifest-from-host）：**现扫本机 downloads 目录**得出，
+    // 绝不由 console 源码写死版本号——那个数字描述的是「哪台机器上放了哪个包」，写进源码就对另一台机器撒谎。
+    // 目录不可读 / 空 → 诚实返回空清单（前端显示「暂无可用安装包」），绝不编造版本、绝不给未经证实的链接。
+    if (method === 'GET' && url === '/api/downloads') {
+      sendJson(res, 200, await readDownloadsManifest());
       return;
     }
 
