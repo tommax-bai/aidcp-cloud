@@ -66,8 +66,11 @@ test('platform registry: noteActions fully cover every action with non-empty rea
 test('platform registry: browse capability is a Record and xhs browse stays supported (startup gate)', () => {
   assert.equal(PLATFORM_REGISTRY.xiaohongshu.capabilities.browse.supported, true);
   assert.equal(PLATFORM_REGISTRY.facebook!.capabilities.browse.supported, true);
-  // stage-0：两平台 read/like/comment 均在 detail（=今天）；FB collect 显式不支持 + reason。
-  assert.equal(PLATFORM_REGISTRY.facebook!.noteSurfaces.read_content, 'detail');
+  // change facebook-feed-inline-browse「开关打开」：FB read/like 翻到 feed（就地读/赞），comment 仍 detail；
+  // XHS 全 detail 不变。FB collect 仍显式不支持 + reason。
+  assert.equal(PLATFORM_REGISTRY.facebook!.noteSurfaces.read_content, 'feed');
+  assert.equal(PLATFORM_REGISTRY.facebook!.noteSurfaces.comment, 'detail');
+  assert.equal(PLATFORM_REGISTRY.xiaohongshu.noteSurfaces.read_content, 'detail');
   const fbCollect = PLATFORM_REGISTRY.facebook!.noteActions.collect;
   assert.equal(fbCollect.supported, false);
 });

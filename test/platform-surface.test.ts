@@ -10,11 +10,13 @@ import {
   platformFeedScrollFloorMs,
 } from '../src/platform/index.js';
 
-test('surface resolvers: xhs + fb read/comment both on detail at stage 0', () => {
+test('surface resolvers: xhs read/comment on detail; fb read=feed (就地读已开) / comment=detail', () => {
   assert.equal(resolveReadSurface('xiaohongshu'), 'detail');
-  assert.equal(resolveReadSurface('facebook'), 'detail');
+  // change facebook-feed-inline-browse「开关打开」：FB registry read_content 翻到 feed（就地读）。注意这是
+  // **registry 声明值**；实际是否对某连接生效还要过版本偏斜闸（边缘声明 inline_targeting，见 dispatcher effectiveReadSurface）。
+  assert.equal(resolveReadSurface('facebook'), 'feed');
   assert.equal(resolveCommentSurface('xiaohongshu'), 'detail');
-  assert.equal(resolveCommentSurface('facebook'), 'detail');
+  assert.equal(resolveCommentSurface('facebook'), 'detail', '评论仍必进详情页（P5）⇒ 与 read=feed 不等 ⇒ 触发迁移');
 });
 
 test('surface resolvers fail open to detail on unknown/undefined platform', () => {

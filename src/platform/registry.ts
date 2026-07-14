@@ -166,9 +166,13 @@ export const PLATFORM_REGISTRY: Record<'xiaohongshu', PlatformRegistryEntry> &
     // capabilities 只登记**有云端消费者**的编排词（browse / feed_refresh），comment/publish/interact/join 的
     // 编排接线各在其专属路径（定向评论调度器 / FacebookPublishExecutor / 互动闸），不作零消费者声明。
     noteActions: FB_NOTE_ACTIONS,
-    // 阶段 0：read/like/comment 仍声明在详情页（=今天，零行为）。C2 旗标翻转 read/like→'feed'（就地读/赞），
-    // comment 留 'detail'（评论必进详情页，P5 已证）。本 change 不翻。
-    noteSurfaces: { read_content: 'detail', like: 'detail', comment: 'detail' },
+    // 就地读/赞已开（change facebook-feed-inline-browse 灰度「开关打开」）：read/like='feed'（首页就地展开读全文 +
+    // 逐帖 react），comment 留 'detail'（评论必进详情页，P5 已证 ⇒ 读=feed 与评=detail 不等 ⇒ 回执驱动两步迁移）。
+    // 版本偏斜闸（effectiveReadSurface）：仅对声明 inline_targeting 的边缘生效，老边端 / 未重打包回落 detail=今天。
+    // 注：like 的实际执行 surface 由边缘按 DOM 作用域自判（dialog→detail / feed→feed），云端归账键 read_content；
+    // 本 like 值当前无独立云端消费者（无 resolveLikeSurface），设 'feed' 仅为语义一致 + 未来预留。
+    // 回滚（不需重发桌面客户端）：把值改回 'detail' 重部署 cloud，或边缘启动器 AIDCP_FB_BROWSE_AUTO≠on 停真互动。
+    noteSurfaces: { read_content: 'feed', like: 'feed', comment: 'detail' },
     // feed_refresh 声明 supported（=今天 FeedScroller 对 FB 照常发 refresh）；FB 的「受控重新导航」实现在 C2，
     // 本 change 只声明能力、不改实现 ⇒ 零行为。
     capabilities: { browse: { supported: true }, feed_refresh: { supported: true } },
