@@ -185,6 +185,7 @@ export interface TargetedCommentTarget {
 
 export type TargetedCommentOutcome =
   | 'commented' // 成功评在目标笔记上
+  | 'not_started' // 尚未接管 edge（租约没拿到），未搜索/未定位目标/未发布
   | 'note_not_found' // 有界搜索尝试用尽，返回卡片中始终无目标 noteId
   | 'read_failed' // 命中后开笔记/读正文失败（含详情 noteId 与目标不一致）
   | 'compose_skipped' // 撰写为空/未授权/被拒

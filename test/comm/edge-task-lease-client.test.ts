@@ -111,3 +111,37 @@ describe('EdgeTaskLeaseClient', () => {
     client.onReleased({ taskId: 'late-task', reason: 'released' }, 'edge-1');
   });
 });
+
+// ── change honest-lease-failure-receipts ──
+// 受理超时的默认值曾被注入点（server.ts）的一个硬编码回落值 `?? 45_000` 永远盖住：change
+// browser-slot-scheduling 把类默认从 45s 抬到 200s，却漏改了那行 → 修复一行都没生效，typecheck 毫无反应。
+// 现在注入点不再写回落值，生效值只认这里的类默认。这条断言守住「默认容得下边缘 180s 的浏览器唤醒死线」。
+describe('EdgeTaskLeaseClient 受理超时默认值（honest-lease-failure-receipts）', () => {
+  const EDGE_WAKE_DEADLINE_MS = 180_000; // aidcp-edge 为停泊账号原地重开浏览器的死线
+
+  it('未显式配置时，随 acquire 下发的受理超时必须容得下一次浏览器唤醒', async () => {
+    const pushed: Envelope[] = [];
+    const client = new EdgeTaskLeaseClient({
+      pusher: { pushToEdges: (envelope) => { pushed.push(envelope); return 1; } },
+      idGen: () => 'task-wake',
+      logger: { log() {}, warn() {} },
+      // 刻意不传 acquireTimeoutMs —— 模拟未设 env 的部署环境。
+    });
+
+    const done = client.withLease(
+      { edgeId: 'edge-1', kind: 'comment_prepare', priority: 'automatic' },
+      async (lease) => lease.taskId,
+    );
+    const acquire = pushed[0]?.payload as EdgeTaskAcquirePayload;
+    assert.ok(
+      (acquire.acquireTimeoutMs ?? 0) > EDGE_WAKE_DEADLINE_MS,
+      `未配置时的受理超时（${acquire.acquireTimeoutMs}ms）必须 > 边缘唤醒死线 ${EDGE_WAKE_DEADLINE_MS}ms，`
+        + '否则停泊账号在浏览器正常唤醒的途中就会被云端提前判死',
+    );
+
+    client.onAcquired({ taskId: 'task-wake', kind: 'comment_prepare', cancelledBrowseCommands: 0 }, 'edge-1');
+    await tick();
+    client.onReleased({ taskId: 'task-wake', reason: 'released' }, 'edge-1');
+    assert.equal(await done, 'task-wake');
+  });
+});

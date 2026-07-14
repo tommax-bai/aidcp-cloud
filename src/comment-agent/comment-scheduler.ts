@@ -1189,7 +1189,11 @@ export class CommentScheduler {
       }
     } catch (err) {
       log.warn(`[comment-scheduler] 定向任务异常 account=${accountId}：${(err as Error).message}`);
-      result = { outcome: 'post_failed', noteId: target.noteId, searchAttempts: 0, reason: (err as Error).message };
+      // 租约没拿到 = 零命令下发：未搜索、未定位目标、未发布。与排期链同口径判「未开始」，
+      // 绝不复用「已定位/发布未确认」那套措辞——那会让运营去目标笔记下找一条根本不存在的评论。
+      result = isEdgeTaskAcquireFailure(err)
+        ? { outcome: 'not_started', noteId: target.noteId, searchAttempts: 0, reason: leaseFailureDetail(err) }
+        : { outcome: 'post_failed', noteId: target.noteId, searchAttempts: 0, reason: (err as Error).message };
     }
 
     try {
@@ -1362,12 +1366,7 @@ export class CommentScheduler {
       log.warn(`[comment-scheduler] 任务异常 account=${accountId}：${(err as Error).message}`);
       if (isEdgeTaskAcquireFailure(err)) {
         leaseFailureCode = err.code;
-        // 「浏览器停泊唤不醒」与「边端离线」必须分开说：前者可恢复（下一分钟可能就叫得醒），后者是掉线。
-        // 把停泊读成离线会误导运维去查一个根本没断的连接。
-        const detail = err.code === 'browser_wake_failed'
-          ? '该账号浏览器处于待机、且未能在唤醒死线内起来（可恢复，稍后自动重试）'
-          : err.message;
-        result = { outcome: 'not_started', termsTried: 0, reason: detail };
+        result = { outcome: 'not_started', termsTried: 0, reason: leaseFailureDetail(err) };
       } else {
         result = { outcome: 'post_failed', termsTried: 0, reason: (err as Error).message };
       }
@@ -1464,6 +1463,9 @@ export function targetedOutcomeToReceipt(r: TargetedCommentResult, withContact: 
   switch (r.outcome) {
     case 'commented':
       return { ok: true, level: 'success', title: `${kind}已发出`, message: `已在${target}下发表评论：「${r.text ?? ''}」（${positioning}）` };
+    case 'not_started':
+      // 零命令下发。**刻意不带 target**：报出一个具体的目标笔记，会让运营以为那篇笔记下可能已经有评论了。
+      return { ok: false, level: 'error', title: `${kind}未开始`, message: `浏览器未能接管，本次未搜索、未定位目标笔记、未发布评论${r.reason ? `（${r.reason}）` : ''}` };
     case 'note_not_found':
       return { ok: false, level: 'warning', title: `${kind}未产出`, message: `搜索定位 ${r.searchAttempts} 次均未在结果中找到${target}（可能未被搜索收录），本次不评、绝不评「相似」笔记` };
     case 'compose_skipped':
@@ -1506,11 +1508,33 @@ export function outcomeToReceipt(r: CommentTaskResult): CommentResultReceipt {
   }
 }
 
+/**
+ * 租约**没拿到** ⇒ 任务体一行没跑、零命令下发 ⇒「根本没开始」。
+ *
+ * 判据是「**任务体是否已经执行过**」，不是一张逐码枚举的白名单——白名单在这里漏过两次
+ * （`browser_wake_failed`、`edge_unhealthy`），且 typecheck 永远抓不到：往 code 联合类型里加成员是
+ * **变宽**，既有的 `===` 比较仍然合法。所以反过来写成**补集**：不认识的码默认按「未开始」处理，
+ * 让沉默的遗漏偏向诚实的一侧，而不是偏向「谎称笔记已选中、评论可能已发出」。
+ *
+ * `release_timeout` 是唯一的排除项：它发生在 `withLease` 的 work **之后**，那时评论**可能已经真的发出去了**。
+ * 把它算成「未开始」会是反向的谎，还会错误地归还排期小时格 → 诱发**重复评论**。
+ * （实践上它到不了这个 catch——withLease 的 finally 把释放异常吞成 warn——但判定必须自洽，不能靠调用链的偶然性。）
+ */
 function isEdgeTaskAcquireFailure(err: unknown): err is EdgeTaskLeaseError {
-  return err instanceof EdgeTaskLeaseError
-    && (err.code === 'acquire_timeout'
-      || err.code === 'edge_offline'
-      || err.code === 'edge_disconnected'
-      // 浏览器停泊且唤不醒（change browser-slot-scheduling）：同样是「根本没开始」——未搜索、未选中、未发布。
-      || err.code === 'browser_wake_failed');
+  return err instanceof EdgeTaskLeaseError && err.code !== 'release_timeout';
+}
+
+/**
+ * 接管失败原因按**处置语义**分档，而不是按错误码分档：运维看完这句话就知道该去做什么。
+ * 「浏览器驱不动」与「边端离线」是相反的两件事——混说会让人去查一个根本没断的连接。
+ */
+function leaseFailureDetail(err: EdgeTaskLeaseError): string {
+  switch (err.code) {
+    case 'edge_unhealthy':
+      return '该账号边端在线、连接正常，但浏览器控制面不可用（驱不动浏览器）；需检查或重启该环境的客户端';
+    case 'browser_wake_failed':
+      return '该账号浏览器处于待机、且未能在唤醒死线内起来（可恢复，稍后自动重试）';
+    default:
+      return err.message;
+  }
 }

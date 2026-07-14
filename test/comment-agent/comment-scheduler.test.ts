@@ -395,6 +395,83 @@ describe('CommentScheduler edge acquire failure', () => {
     assert.match(card.message, /未搜索、未选中笔记、未发布评论/);
     assert.doesNotMatch(card.message, /已选中笔记|发布未确认成功/);
   });
+
+  // ── change honest-lease-failure-receipts ──
+  // 这个判定曾是一张**逐码白名单**，漏过两次（browser_wake_failed、然后 edge_unhealthy），而 typecheck
+  // 永远抓不到——往 code 联合类型里加成员是**变宽**、不是变窄。这几条断言是唯一的机械守卫，别删。
+
+  it('edge_unhealthy（浏览器驱不动）→ not_started + 零命令下发 + 归还小时格，绝不谎称已选中', async () => {
+    const cardDone = deferred<{ ok: boolean; title: string; message: string }>();
+    const notStarted: Array<{ action: string; reason: string }> = [];
+    let searchCommands = 0;
+    const s = new CommentScheduler(
+      baseDeps({
+        pusher: {
+          pushToEdges: (envelope: unknown) => {
+            if ((envelope as Envelope).type === 'search.execute') searchCommands++;
+            return 1;
+          },
+        },
+        edgeTaskLeases: {
+          withLease: async () => {
+            throw new EdgeTaskLeaseError(
+              'edge_unhealthy',
+              'edge task rejected because browser control is unavailable taskId=task-1 edge=e1',
+            );
+          },
+        },
+        onScheduledTaskNotStarted: (_accountId, action, reason) => { notStarted.push({ action, reason }); },
+        postResultCard: (_accountId, receipt) => { cardDone.resolve(receipt); },
+      }),
+    );
+
+    // priority='automatic' = 排期路径；小时格回流闸只对它生效。
+    const trigger = await s.triggerManual('acc-1', { priority: 'automatic' });
+    assert.equal(trigger.ok, true);
+    const card = await cardDone.promise;
+
+    assert.equal(searchCommands, 0, '租约没拿到 ⇒ 一条业务命令都不该下发');
+    assert.equal(card.title, '按需评论未开始');
+    assert.match(card.message, /未搜索、未选中笔记、未发布评论/);
+    assert.doesNotMatch(card.message, /已选中笔记|发布未确认成功/, '零命令下发，绝不谎称笔记已选中 / 评论可能已发出');
+    // 归因分档：驱不动浏览器 ≠ 掉线。说成离线会让运维去查一个根本没断的连接。
+    assert.match(card.message, /浏览器控制面不可用/);
+    assert.doesNotMatch(card.message, /离线/);
+    // 小时格必须退回去——否则这一小时的排期名额零动作白烧、且不重试。
+    assert.deepEqual(notStarted, [{ action: 'comment', reason: 'edge_unhealthy' }]);
+  });
+
+  it('release_timeout → 绝不判 not_started（work 已跑过、评论可能已真发出；归还小时格会诱发重复评论）', async () => {
+    const cardDone = deferred<{ title: string; message: string }>();
+    const notStarted: string[] = [];
+    const s = new CommentScheduler(
+      baseDeps({
+        edgeTaskLeases: {
+          withLease: async () => {
+            throw new EdgeTaskLeaseError('release_timeout', 'edge task release timed out taskId=task-1 edge=e1');
+          },
+        },
+        onScheduledTaskNotStarted: (_a, action) => { notStarted.push(action); },
+        postResultCard: (_accountId, receipt) => { cardDone.resolve(receipt); },
+      }),
+    );
+
+    await s.triggerManual('acc-1', { priority: 'automatic' });
+    const card = await cardDone.promise;
+    assert.notEqual(card.title, '按需评论未开始', 'release_timeout 发生在 work 之后，绝不是「未开始」');
+    assert.deepEqual(notStarted, [], '绝不归还小时格——重试会造成重复评论');
+  });
+
+  it('browser_wake_failed 的回执标明可恢复（与「驱不动」分档说）', () => {
+    const r = outcomeToReceipt({
+      outcome: 'not_started',
+      termsTried: 0,
+      reason: '该账号浏览器处于待机、且未能在唤醒死线内起来（可恢复，稍后自动重试）',
+    });
+    assert.equal(r.ok, false);
+    assert.match(r.message, /可恢复/);
+    assert.doesNotMatch(r.message, /已选中笔记|发布未确认成功/);
+  });
 });
 
 // ── change manual-comment-force-flag：/comment --force 放开「强相关 + 每笔记去重」两道软筛选（仅手动路径），仍守人审/安全校验 ──

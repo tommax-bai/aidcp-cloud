@@ -225,6 +225,20 @@ function readEnvNumber(name: string, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/**
+ * 「有 env 用 env，没有就交给被注入方的类默认」——给那些**默认值必须只有一处事实源**的参数用。
+ *
+ * 用 `Number(process.env.X ?? <硬编码>)` 会在注入点复制一份默认值，从此两处必须手工同步；一旦只改了
+ * 类默认、忘了注入点，注入点的旧值会**永远覆盖**新默认，修复零生效且 typecheck 毫无反应
+ * （change browser-slot-scheduling 的受理超时 45s→200s 就是这么废掉的）。
+ */
+function readEnvNumberOrUndefined(name: string): number | undefined {
+  const value = readEnvString(name);
+  if (!value) return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 function objectKeyPart(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 96) || 'unknown';
 }
@@ -1468,7 +1482,10 @@ async function main(): Promise<void> {
   });
   edgeTaskLeases = new EdgeTaskLeaseClient({
     pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env, edgeId) : 0) },
-    acquireTimeoutMs: Number(process.env.AIDCP_EDGE_TASK_ACQUIRE_TIMEOUT_MS ?? 45_000),
+    // 受理超时必须容得下边缘为停泊账号原地重开浏览器（死线 180s）。生效值只认 EdgeTaskLeaseClient 的
+    // 类默认（200s），这里**绝不**再写一个硬编码回落值——上一次就是因为抬了类默认却没改这行，45s 把
+    // 200s 永远盖住，那次修复一行都没生效。
+    acquireTimeoutMs: readEnvNumberOrUndefined('AIDCP_EDGE_TASK_ACQUIRE_TIMEOUT_MS'),
     releaseTimeoutMs: Number(process.env.AIDCP_EDGE_TASK_RELEASE_TIMEOUT_MS ?? 10_000),
     defaultLeaseMs: Number(process.env.AIDCP_EDGE_TASK_LEASE_MS ?? 5 * 60_000),
     logger: console,

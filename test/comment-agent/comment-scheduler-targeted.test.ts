@@ -329,3 +329,37 @@ describe('targetedOutcomeToReceipt（绝不染绿）', () => {
     assert.equal(targetedOutcomeToReceipt({ outcome: 'post_failed', noteId: 'n', noteTitle: '目标笔记标题', searchAttempts: 1 }, false).level, 'error');
   });
 });
+
+// ── change honest-lease-failure-receipts ──
+// 定向链此前的 catch **完全没有租约分类**：六种租约错误码全压成 post_failed，回执还带上一个具体的目标
+// 笔记——运营会去那篇笔记下找一条根本不存在的评论。这里钉死「租约没拿到 = 未开始 + 不点名笔记」。
+describe('定向评论：租约接管失败必须诚实报「未开始」（honest-lease-failure-receipts）', () => {
+  it('回执不宣称已定位目标，也绝不带出目标笔记标识', () => {
+    const r = targetedOutcomeToReceipt(
+      {
+        outcome: 'not_started',
+        noteId: 'n-secret',
+        noteTitle: '目标笔记标题',
+        searchAttempts: 0,
+        reason: '该账号边端在线、连接正常，但浏览器控制面不可用（驱不动浏览器）；需检查或重启该环境的客户端',
+      },
+      false,
+    );
+    assert.equal(r.ok, false);
+    assert.equal(r.level, 'error');
+    assert.match(r.message, /未搜索、未定位目标笔记、未发布评论/);
+    assert.doesNotMatch(r.message, /已定位|已确认当前|发布未确认成功/, '零命令下发，绝不用「已定位/发布未确认」措辞');
+    assert.doesNotMatch(r.message, /目标笔记标题|n-secret/, '绝不点名笔记——会让运营以为那篇下面可能已有评论');
+    assert.match(r.message, /浏览器控制面不可用/);
+    assert.doesNotMatch(r.message, /离线/, '驱不动浏览器 ≠ 掉线');
+  });
+
+  it('联系评论型同样走「未开始」，且不染绿', () => {
+    const r = targetedOutcomeToReceipt(
+      { outcome: 'not_started', noteId: 'n', searchAttempts: 0, reason: 'x' },
+      true,
+    );
+    assert.equal(r.ok, false);
+    assert.match(r.title, /定向联系评论未开始/);
+  });
+});
