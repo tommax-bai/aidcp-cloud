@@ -219,6 +219,18 @@ export class ContentScheduler {
       });
   }
 
+  /**
+   * 外部回流「这次任务根本没开始」（change browser-slot-scheduling）。
+   *
+   * 触发回执只能告诉我们「有没有派出去」；接管边端失败（浏览器停泊唤不醒 / acquire 超时 / 边端掉线）
+   * 发生在**任务已经异步跑起来之后**，那时小时格早被记为已消耗。评论管线跑完发现 not_started 时调这里，
+   * 把这一小时的名额还回来。
+   */
+  reportNotStarted(accountId: string, action: string, reason: string): void {
+    const cell = hourCellKey(new Date(this.now()));
+    this.releaseHourCell(accountId, action, `${accountId}|${action}`, cell, reason);
+  }
+
   /** 归还小时格并打开小时内重试窗（仅当它仍是本次占住的那一格；跨小时或已被后续触发改写则不动）。 */
   private releaseHourCell(accountId: string, action: string, fireKey: string, cell: string, reason: string): void {
     if (this.lastFired.get(fireKey) !== cell) return;

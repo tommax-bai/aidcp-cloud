@@ -1258,8 +1258,13 @@ export interface EdgeTaskReleasePayload {
 
 export interface EdgeTaskReleasedPayload {
   taskId: string;
-  /** `cdp_unhealthy` = edge is connected but cannot safely control its browser. */
-  reason: 'released' | 'expired' | 'duplicate' | 'not_owner' | 'cdp_unhealthy';
+  /**
+   * `cdp_unhealthy` = edge is connected and the browser is present, but control is not safe to take.
+   * `browser_wake_failed` = the browser was deliberately parked (cold standby) and could not be woken
+   *   within the wake deadline. MUST NOT be conflated with `cdp_unhealthy`: parking is a recoverable
+   *   absence we caused ourselves, not a fault of the browser (change browser-slot-scheduling).
+   */
+  reason: 'released' | 'expired' | 'duplicate' | 'not_owner' | 'cdp_unhealthy' | 'browser_wake_failed';
 }
 
 /** payload 类型映射（便于类型安全地构造/解析） */

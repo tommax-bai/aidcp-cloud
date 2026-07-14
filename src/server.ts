@@ -1255,6 +1255,11 @@ async function main(): Promise<void> {
   let publishScheduler: PublishScheduler | undefined;
   // 按需评论触发器（change comment-search-command；下方实例化，actions.comment 运行时引用，前向安全）。
   let commentScheduler: CommentScheduler | undefined;
+  /**
+   * 晚绑定的排期调度器引用（change browser-slot-scheduling）：评论管线要在任务跑完、发现「根本没开始」时
+   * 把这一小时的名额还回去；但它构造得比 ContentScheduler 早（后者依赖它），只能这样回指。
+   */
+  let contentSchedulerRef: ContentScheduler | undefined;
 
   // 飞书事件接收（官方 SDK 长连接，主动连飞书，无需公网 IP / HTTP 端口）
   // MVP：账号启停/查询动作先打桩（后续接云端调度器 → plan.request）
@@ -2414,6 +2419,10 @@ async function main(): Promise<void> {
   // + 边端步骤（搜索原生筛选/开笔记翻评论/发布/去重）+ 撰写人审 → 有界换词重试；接管边端跑、finally 恢复浏览，
   // 结果异步补结果卡片（level 按结果、绝不染绿）。纯增量、不依赖概念池；边端离线/任一步失败 honest-fail。
   commentScheduler = new CommentScheduler({
+    // 排期任务「根本没开始」→ 归还这一小时的名额（change browser-slot-scheduling）。
+    // 晚绑定：ContentScheduler 在下面才建（它依赖 commentScheduler），这里只能持一个引用。
+    onScheduledTaskNotStarted: (accountId, action, reason) =>
+      contentSchedulerRef?.reportNotStarted(accountId, action, reason),
     resolveConnection: (accountId) => runtimes?.runtimeForAccount(accountId) ?? null,
     pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
     edgeTaskLeases,
@@ -2647,7 +2656,7 @@ async function main(): Promise<void> {
     // 与旧 AIDCP_PUBLISH_AUTO 单账号扳机**无条件互斥**：内容排期开则旧扳机确定性不启（防错时双触发→同日双草稿超发），不留 fallback。
     const contentScheduleAutoOn = readEnvString('AIDCP_CONTENT_SCHEDULE_AUTO') === 'true';
     if (contentScheduleAutoOn) {
-      const contentScheduler = new ContentScheduler({
+      const contentScheduler: ContentScheduler = new ContentScheduler({
         onlineAccounts: () => runtimes?.onlineAccountIds() ?? [],
         scheduleFor: (accountId) => contentScheduleStore.effectiveScheduleFor(accountId),
         riskStatus: async (accountId) => (await resolveController(accountId)).getState().status,
@@ -2859,6 +2868,7 @@ async function main(): Promise<void> {
         },
         logger: console,
       });
+      contentSchedulerRef = contentScheduler; // 供评论管线回流「没开始」，见 onScheduledTaskNotStarted
       contentScheduler.start(60_000);
       console.log('[aidcp-cloud] ContentScheduler 已启动（每分钟心跳、按账号错峰；旧 AIDCP_PUBLISH_AUTO 扳机已被互斥关闭）');
       if (readEnvString('AIDCP_PUBLISH_AUTO') === 'true') {

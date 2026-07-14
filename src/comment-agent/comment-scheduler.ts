@@ -214,6 +214,12 @@ export interface CommentSchedulerDeps {
    * （change comment-keep-open-through-approval）：人工 `/comment` vs 自动排期评论——缺省视为 `/comment`。
    */
   postResultCard?: (accountId: string, receipt: CommentResultReceipt, source?: string) => Promise<void> | void;
+  /**
+   * 排期任务「根本没开始」（未接管边端：浏览器停泊唤不醒 / acquire 超时 / 边端掉线）时回调一次
+   * （change browser-slot-scheduling）。排期调度器据此**归还这一小时的名额**并在小时内有界重试。
+   * 只对自动排期任务回调；手动 /comment 与排期名额无关。
+   */
+  onScheduledTaskNotStarted?: (accountId: string, action: 'comment' | 'contact_comment', reason: string) => void;
   /** 原生筛选（缺省 most_collected / one_day）。 */
   sort?: string;
   timeWindow?: string;
@@ -1234,6 +1240,8 @@ export class CommentScheduler {
     });
 
     let result: CommentTaskResult;
+    /** 接管边端失败时的机器可读码（change browser-slot-scheduling），供排期调度器判是否归还小时格。 */
+    let leaseFailureCode: string | undefined;
     try {
       const dedup = this.deps.dedupFor(accountId);
       const edgeFor = (taskId: string) =>
@@ -1352,9 +1360,35 @@ export class CommentScheduler {
       }
     } catch (err) {
       log.warn(`[comment-scheduler] 任务异常 account=${accountId}：${(err as Error).message}`);
-      result = isEdgeTaskAcquireFailure(err)
-        ? { outcome: 'not_started', termsTried: 0, reason: err.message }
-        : { outcome: 'post_failed', termsTried: 0, reason: (err as Error).message };
+      if (isEdgeTaskAcquireFailure(err)) {
+        leaseFailureCode = err.code;
+        // 「浏览器停泊唤不醒」与「边端离线」必须分开说：前者可恢复（下一分钟可能就叫得醒），后者是掉线。
+        // 把停泊读成离线会误导运维去查一个根本没断的连接。
+        const detail = err.code === 'browser_wake_failed'
+          ? '该账号浏览器处于待机、且未能在唤醒死线内起来（可恢复，稍后自动重试）'
+          : err.message;
+        result = { outcome: 'not_started', termsTried: 0, reason: detail };
+      } else {
+        result = { outcome: 'post_failed', termsTried: 0, reason: (err as Error).message };
+      }
+    }
+
+    // 「根本没开始」回流给排期调度器（change browser-slot-scheduling）。
+    //
+    // 为什么必须在这里而不是触发回执那儿：接管边端失败（浏览器停泊唤不醒 / acquire 超时 / 边端掉线）发生在
+    // **任务已经异步跑起来之后**——那时触发回执早就回了 ok、小时格早就被记为已消耗了。不回流，这一小时就白白
+    // 烧掉；而排期开火窗口每小时只有固定的那一分钟，相位不利时账号会整天一次都触发不了。
+    if (result.outcome === 'not_started' && priority === 'automatic') {
+      try {
+        // contactInfo 非空 = 本次是联系评论（injectContact），两者的排期名额是分开的小时格。
+        this.deps.onScheduledTaskNotStarted?.(
+          accountId,
+          contactInfo ? 'contact_comment' : 'comment',
+          leaseFailureCode ?? 'not_started',
+        );
+      } catch (err) {
+        log.warn(`[comment-scheduler] onScheduledTaskNotStarted 回调异常：${(err as Error).message}`);
+      }
     }
 
     try {
@@ -1474,5 +1508,9 @@ export function outcomeToReceipt(r: CommentTaskResult): CommentResultReceipt {
 
 function isEdgeTaskAcquireFailure(err: unknown): err is EdgeTaskLeaseError {
   return err instanceof EdgeTaskLeaseError
-    && (err.code === 'acquire_timeout' || err.code === 'edge_offline' || err.code === 'edge_disconnected');
+    && (err.code === 'acquire_timeout'
+      || err.code === 'edge_offline'
+      || err.code === 'edge_disconnected'
+      // 浏览器停泊且唤不醒（change browser-slot-scheduling）：同样是「根本没开始」——未搜索、未选中、未发布。
+      || err.code === 'browser_wake_failed');
 }

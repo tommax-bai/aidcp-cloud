@@ -31,7 +31,14 @@ export interface EdgeTaskLeaseRequest {
 
 export class EdgeTaskLeaseError extends Error {
   constructor(
-    public readonly code: 'edge_offline' | 'edge_unhealthy' | 'acquire_timeout' | 'release_timeout' | 'edge_disconnected',
+    public readonly code:
+      | 'edge_offline'
+      | 'edge_unhealthy'
+      /** 浏览器停泊且未能在唤醒死线内起来。**可恢复**（下一次可能就叫得醒），与 edge_unhealthy 区分。 */
+      | 'browser_wake_failed'
+      | 'acquire_timeout'
+      | 'release_timeout'
+      | 'edge_disconnected',
     message: string,
   ) {
     super(message);
@@ -61,7 +68,16 @@ export interface EdgeTaskLeaseClientOptions {
   logger?: Pick<Console, 'log' | 'warn'>;
 }
 
-const DEFAULT_ACQUIRE_TIMEOUT_MS = 45_000;
+/**
+ * 受理超时（change browser-slot-scheduling）：必须**容得下一次浏览器唤醒**。
+ *
+ * 边缘现在会为停泊账号原地重开浏览器：冷启 30–90s + 串行启动队列的排队时间，死线 180s。45 秒的旧默认
+ * 值会在边缘**正在正常唤醒**的过程中先超时——任务被判失败，而浏览器一分钟后才起来、无人认领。
+ *
+ * 200s = 边缘 180s 唤醒死线 + 余量。超时并不是发现故障的主要手段：边缘掉线由连接层立刻发现，控制面
+ * 故障（cdp_unhealthy）与唤醒失败（browser_wake_failed）都是**即时回执**，这条超时只兜「边缘完全失声」。
+ */
+const DEFAULT_ACQUIRE_TIMEOUT_MS = 200_000;
 const DEFAULT_RELEASE_TIMEOUT_MS = 10_000;
 const DEFAULT_LEASE_MS = 5 * 60_000;
 
@@ -199,6 +215,17 @@ export class EdgeTaskLeaseClient {
       acquiring.reject(new EdgeTaskLeaseError(
         'edge_unhealthy',
         `edge task rejected because browser control is unavailable taskId=${payload.taskId} edge=${edgeId}`,
+      ));
+    }
+    // 浏览器停泊且唤不醒（change browser-slot-scheduling）：与 edge_unhealthy 明确区分——前者是**可恢复**的
+    // （浏览器是边缘自己收起来的，下一分钟可能就叫得醒），后者是控制面故障。排期调度器据此归还小时格并重试；
+    // 混为一谈会让运维去查一个根本没坏的连接。
+    if (acquiring && edgeId && acquiring.edgeId === edgeId && payload.reason === 'browser_wake_failed') {
+      this.acquiring.delete(payload.taskId);
+      clearTimeout(acquiring.timer);
+      acquiring.reject(new EdgeTaskLeaseError(
+        'browser_wake_failed',
+        `edge task rejected because the parked browser could not be woken taskId=${payload.taskId} edge=${edgeId}`,
       ));
     }
     const pending = this.releasing.get(payload.taskId);
