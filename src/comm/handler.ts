@@ -23,6 +23,8 @@ import {
   type PublishApprovalRequestPayload,
   type PublishApprovalActionPayload,
   type PublishApprovalActionResultPayload,
+  type PublishDraftImageRemovePayload,
+  type PublishDraftImageRemoveResultPayload,
   type RiskCanDoPayload,
   type RiskRecordPayload,
   type PageCardsPayload,
@@ -161,6 +163,11 @@ export interface HandlerDeps {
     payload: PublishApprovalActionPayload,
     session: EdgeSession,
   ) => Promise<PublishApprovalActionResultPayload>;
+  /** 客户端稿件预览内删除待审稿件的某张配图。未注入则诚实返回 unavailable。 */
+  publishDraftImageRemove?: (
+    payload: PublishDraftImageRemovePayload,
+    session: EdgeSession,
+  ) => Promise<PublishDraftImageRemoveResultPayload>;
 }
 
 /** 把元素清单渲染成给 LLM 的编号列表（与 edge selector 一致的格式） */
@@ -286,6 +293,13 @@ export class DefaultMessageHandler implements MessageHandler {
           ? await this.deps.publishApprovalAction(payload, session)
           : { requestId: payload?.requestId ?? '', ok: false, reason: 'unavailable' };
         return makeEnvelope('publish.approval_action.result', env.id, this.clock(), result);
+      }
+      case 'publish.draft_image_remove': {
+        const payload = env.payload as PublishDraftImageRemovePayload;
+        const result = this.deps.publishDraftImageRemove
+          ? await this.deps.publishDraftImageRemove(payload, session)
+          : { requestId: payload?.requestId ?? '', ok: false, reason: 'unavailable' };
+        return makeEnvelope('publish.draft_image_remove.result', env.id, this.clock(), result);
       }
       case 'session.budget.request':
         return this.onSessionBudgetRequest(env, session);

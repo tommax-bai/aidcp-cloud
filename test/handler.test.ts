@@ -411,3 +411,55 @@ test('publish.approval_action → 返回客户端审批动作结果', async () =
   assert.equal(res?.id, 'apa1');
   assert.deepEqual(res?.payload, { requestId: 'publish-89', ok: true, state: 'approved' });
 });
+
+test('publish.draft_image_remove → 按信封 id 回删配图结果（写后真态）', async () => {
+  const h = new DefaultMessageHandler({
+    planner: new SimplePlanner(),
+    llm: dummyLlm,
+    cache: memStore(),
+    clock: fixedClock,
+    eventBus: new EventBus(),
+    publishDraftImageRemove: async (payload, connectedSession) => ({
+      requestId: payload.requestId,
+      ok: connectedSession.accountId === 'acc-test',
+      images: ['https://o/a.jpg'],
+      contentVersion: payload.contentVersion + 1,
+    }),
+  });
+  const res = await h.handle(
+    makeEnvelope('publish.draft_image_remove', 'dir1', 1, {
+      requestId: 'publish-89',
+      contentVersion: 0,
+      imageUrl: 'https://o/b.jpg',
+    }),
+    session,
+  );
+  assert.equal(res?.type, 'publish.draft_image_remove.result');
+  assert.equal(res?.id, 'dir1');
+  assert.deepEqual(res?.payload, {
+    requestId: 'publish-89',
+    ok: true,
+    images: ['https://o/a.jpg'],
+    contentVersion: 1,
+  });
+});
+
+test('publish.draft_image_remove 未注入依赖 → 诚实 unavailable（绝不静默丢弃）', async () => {
+  const h = new DefaultMessageHandler({
+    planner: new SimplePlanner(),
+    llm: dummyLlm,
+    cache: memStore(),
+    clock: fixedClock,
+    eventBus: new EventBus(),
+  });
+  const res = await h.handle(
+    makeEnvelope('publish.draft_image_remove', 'dir2', 1, {
+      requestId: 'publish-89',
+      contentVersion: 0,
+      imageUrl: 'https://o/b.jpg',
+    }),
+    session,
+  );
+  assert.equal(res?.type, 'publish.draft_image_remove.result');
+  assert.deepEqual(res?.payload, { requestId: 'publish-89', ok: false, reason: 'unavailable' });
+});

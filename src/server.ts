@@ -88,6 +88,7 @@ import {
   type PublishApprovalPreflightResult,
 } from './feishu/index.js';
 import { CommandSequencer } from './publish-agent/command-sequencer.js';
+import { createPublishDraftImageRemoveHandler } from './publish-agent/draft-image-remove.js';
 import {
   clampFillBudgetToLease,
   DEFAULT_FILL_BUDGET,
@@ -1530,6 +1531,7 @@ async function main(): Promise<void> {
     personaFacade: personaPanel,
     // 该函数声明在下方审批装配段；用闭包延迟取值，避免 handler 初始化时触发 TDZ。
     publishApprovalAction: (payload, session) => handlePublishApprovalAction(payload, session),
+    publishDraftImageRemove: (payload, session) => handlePublishDraftImageRemove(payload, session),
     // 多租户路由：私有总线（入站事件灌本连接通道）/ 握手建运行时 / 按连接真实账号解析 controller。
     busFor: (session) => runtimes!.busFor(session),
     onHandshake: (session) => runtimes!.onHandshake(session),
@@ -1829,6 +1831,37 @@ async function main(): Promise<void> {
 
   // 客户端稿件预览内的审批动作：复用飞书/控制台同一份 first-writer-wins 信号，
   // 并以连接握手的真实 accountId 校验归属，避免客户端传入任意 recordId 越权操作。
+  /**
+   * 待审草稿内容变更后重推预览快照（后台就地编辑 / 客户端删配图共用）。
+   * best-effort：账号无在线边缘或下发未达即丢弃、不重试——故调用方 MUST NOT 把它当作唯一刷新手段
+   * （客户端删配图以应答回带的写后真态为主刷新路径）。
+   */
+  const refreshPublishPreview = (recordId: number): void => {
+    void publishLogStore
+      .pendingPublishPreviewForRecord(recordId)
+      .then((preview) => {
+        if (!preview) return;
+        const uiPreview = toUiPublishPreview(preview);
+        if (uiPreview) uiSnapshotService.pushPublishPreview(preview.accountId, uiPreview);
+      })
+      .catch((err) =>
+        console.warn(
+          `[ui-snapshot] 编辑后预览刷新失败 recordId=${recordId}: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+  };
+
+  // 客户端预览内删配图（change client-preview-image-delete）：闸序与红线在 draft-image-remove.ts（可单测），
+  // 这里只做接线——读草稿 / 探审批签名 / 既有单写 editDraft / 读活版本 / 重推预览。
+  const handlePublishDraftImageRemove = createPublishDraftImageRemoveHandler({
+    loadDraft: (recordId) => publishLogStore.loadForDispatch(recordId),
+    readApproval: (requestId) => readPublishApproval(requestId),
+    editDraft: (recordId, expectedVersion, patch, editor) =>
+      publishLogStore.editDraft(recordId, expectedVersion, patch, editor),
+    readLiveVersion: (recordId) => readLiveContentVersion(recordId),
+    refreshPreview: (recordId) => refreshPublishPreview(recordId),
+  });
+
   const handlePublishApprovalAction = async (
     payload: import('./comm/protocol.js').PublishApprovalActionPayload,
     session: import('./comm/ws-server.js').EdgeSession,
@@ -3011,13 +3044,7 @@ async function main(): Promise<void> {
             liveVersion: readLiveContentVersion,
             hasDecision: async (recordId) => (await readPublishApproval(`publish-${recordId}`)) !== null,
           },
-          notifyPublishPreviewChanged: (recordId) => {
-            void publishLogStore.pendingPublishPreviewForRecord(recordId).then((preview) => {
-              if (!preview) return;
-              const uiPreview = toUiPublishPreview(preview);
-              if (uiPreview) uiSnapshotService.pushPublishPreview(preview.accountId, uiPreview);
-            }).catch((err) => console.warn(`[ui-snapshot] 编辑后预览刷新失败 recordId=${recordId}: ${err instanceof Error ? err.message : String(err)}`));
-          },
+          notifyPublishPreviewChanged: (recordId) => refreshPublishPreview(recordId),
           commandActions: {
             pause: async (accountId) => {
               await accountState.pause(accountId);

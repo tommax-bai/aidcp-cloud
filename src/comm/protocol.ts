@@ -64,6 +64,8 @@ export type MessageType =
   | 'publish.approval_request' // edge → cloud：请求发送发布审批卡片
   | 'publish.approval_action' // edge → cloud：客户端预览内提交发布/取消审批
   | 'publish.approval_action.result' // cloud → edge：返回审批动作受理结果
+  | 'publish.draft_image_remove' // edge → cloud：客户端预览内删除待审稿件的某张配图
+  | 'publish.draft_image_remove.result' // cloud → edge：返回删配图结果（含写后真态）
   | 'publish.request' // cloud → edge：请求在浏览器中发布一篇帖子（v1 整页路径，地基阶段并行保留）
   | 'publish.result' // edge → cloud：发布结果回传（v1 整页路径）
   | 'publish.command' // cloud → edge：下发一条参数化发布原子指令（A 阶段1 指令驱动路径）
@@ -511,6 +513,32 @@ export interface PublishApprovalActionResultPayload {
   state?: 'approved' | 'rejected';
   alreadyDecided?: boolean;
   reason?: string;
+  currentVersion?: number;
+}
+
+/**
+ * 客户端稿件预览内删除待审稿件的某张配图（edge → cloud）。
+ * 只表达“删这一张”的意图：保留子集由云端在库内真态上算出，绝不采信客户端提交的列表。
+ */
+export interface PublishDraftImageRemovePayload {
+  requestId: string;
+  /** 客户端所见的稿件版本；云端落库前比对，守住“审=发”。 */
+  contentVersion: number;
+  /** 待删的那张配图 URL；MUST 是该稿当前 images 的成员（只删不注入）。 */
+  imageUrl: string;
+}
+
+/** 客户端删配图结果（cloud → edge）。ok:true 仅代表“该配图已从待审稿件移除”，不代表已发布。 */
+export interface PublishDraftImageRemoveResultPayload {
+  requestId: string;
+  ok: boolean;
+  /** 成功：写后回读的真态配图（保序）。 */
+  images?: string[];
+  /** 成功：自增后的稿件版本。 */
+  contentVersion?: number;
+  /** 失败：可区分拒因（invalid_request/account_unavailable/not_found/account_mismatch/already_decided/not_pending/version_stale/image_not_found/last_image/unavailable）。 */
+  reason?: string;
+  /** version_stale 时回带库内活版本。 */
   currentVersion?: number;
 }
 
@@ -1258,6 +1286,8 @@ export interface PayloadMap {
   'publish.approval_request': PublishApprovalRequestPayload;
   'publish.approval_action': PublishApprovalActionPayload;
   'publish.approval_action.result': PublishApprovalActionResultPayload;
+  'publish.draft_image_remove': PublishDraftImageRemovePayload;
+  'publish.draft_image_remove.result': PublishDraftImageRemoveResultPayload;
   'session.budget.request': SessionBudgetRequestPayload;
   'session.budget': SessionBudgetPayload;
   'risk.canDo': RiskCanDoPayload;
