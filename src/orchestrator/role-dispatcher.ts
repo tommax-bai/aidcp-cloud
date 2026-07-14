@@ -1254,6 +1254,11 @@ export class RoleDispatcher {
     // 清在途互动状态（change fix-interaction-and-comment-capture）：新场从干净的重试/去重态开始。
     this.interactionRetry.clear();
     this.pendingInteractionKeys.clear();
+    // 跨会话残留清理（change platform-browse-protocol）：迁移在途 / 审批在途标志不得跨会话粘连。
+    // **生产的会话(重)启动统一走 restartSession**（edge hello / 绑人设自启 / 续场 / 面板），startSession 仅测试用——
+    // 故此处的清理才是生产实际生效的那一份（红线修复：防审批标志卡死跨会话粘连、迁移在途被后续 open_note 误消费）。
+    this.pendingMigration = null;
+    this.approvalInFlight = false;
     this.clearFacebookNaturalInteractionEvidence();
     // 重新订阅角色与接线（SessionMonitor.subscribe 重置 startedAt/actionCount）
     this.roles.forEach((r) => r.subscribe());
@@ -1620,8 +1625,12 @@ export class RoleDispatcher {
 
       // 审批在途标志起点（change platform-browse-protocol）：comment.cleared（去 AI 味完成、即将进人审）置位。
       // 由 comment.approved / comment.skipped 清位（人审终局）。浏览闭环严格串行 ⇒ 无重叠审批窗。
+      // **只在人审口真接线时置位**（红线修复）：人审口未接线（默认支持配置）时 CommentApprovalGate 在同一
+      // comment.cleared emit 内**同步** skip → 嵌套 emit comment.skipped 先于本处理器把标志清回 false；若这里
+      // 无条件置 true 会「卡死 true」永久抑制 idle_nudge（真实 XHS 回归）。未接线=从不真等人审 ⇒ 无需抑制。
+      // 接线态 gate 先 `await approval.request`（微任务挂起、不同步 skip）⇒ 本处理器先置 true、终局再清，循环正确。
       this.eventBus.on('comment.cleared', () => {
-        this.approvalInFlight = true;
+        if (this.commentApproval) this.approvalInFlight = true;
       }),
 
       // 审批被跳过/拒绝/超时 → 清审批在途标志（终局之一）。
@@ -1965,8 +1974,10 @@ export class RoleDispatcher {
             typeof payload.observation === 'object' && payload.observation !== null
               ? (payload.observation as { surface?: unknown }).surface
               : undefined;
+          // fail-closed（红线加固）：spec 要求 detail-surface 观测**且 noteId 匹配**才算落地。缺派生 noteId 也判失败
+          // ⇒ 不发评论、回报操作员（绝不把已批准评论发到未经证实的目标）。C2 边缘 navigate 回执 MUST 带派生 noteId。
           const landed =
-            payload.ok === true && echoedSurface === 'detail' && (!payload.noteId || payload.noteId === mig.noteId);
+            payload.ok === true && echoedSurface === 'detail' && !!payload.noteId && payload.noteId === mig.noteId;
           if (landed) {
             this.sessionContext.markNoteMigratedToDetail();
             this.pendingComment = { noteId: mig.noteId, sourcePageType: mig.sourcePageType, actions: mig.actions, text: mig.text };
