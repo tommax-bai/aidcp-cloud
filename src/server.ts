@@ -1715,9 +1715,13 @@ async function main(): Promise<void> {
   };
 
   const browserStandbyConfig = resolveBrowserStandbyConfig(process.env);
-  const buildBrowserStandbyForAccount = async (accountId: string, _edgeId?: string): Promise<UiBrowserStandbyPayload> => {
+  const buildBrowserStandbyForAccount = async (accountId: string, edgeId?: string): Promise<UiBrowserStandbyPayload> => {
     const controller = await riskRegistry.getController(accountId);
-    return buildBrowserStandbyHint(controller, { now: Date.now(), config: browserStandbyConfig });
+    // 续场闸裁决（change standby-covers-idle-waits）：把「排期外 / 周历关闭 / 每日时长满 / 冻结」这几类停工也接进
+    // 待机判定——过去它们完全不产出提示，账号安静下来了、浏览器却一直开着占 700MB。
+    // 拿不到（边缘离线 / 无 dispatcher）→ null → 退化为只按风控判，即本 change 之前的行为（安全方向：不让位）。
+    const resumeGate = runtimes?.resumeGateForAccount(accountId, edgeId) ?? null;
+    return buildBrowserStandbyHint(controller, { now: Date.now(), config: browserStandbyConfig, resumeGate });
   };
 
   uiSnapshot = new UiSnapshotService({

@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { UiSnapshotService, publishUiCode } from '../../src/comm/ui-snapshot.js';
-import type { Envelope, UiSnapshotPayload } from '../../src/comm/protocol.js';
+import type { Envelope, UiBrowserStandbyPayload, UiSnapshotPayload } from '../../src/comm/protocol.js';
 
 interface Sent {
   env: Envelope<UiSnapshotPayload>;
@@ -223,6 +223,60 @@ test('ui-snapshot: daily usage refresh forwards browser standby alongside usage'
   timers[0].fn();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(sent[1].env.payload, { dailyUsage, browserStandby });
+});
+
+// ─── 周期链是冷待机账号唯一的唤醒路径（change standby-covers-idle-waits）───────────────────
+//
+// 待机期间边缘的核心进程与云端连接不断，账号一恢复可工作，下一跳提示即 eligible=false、边缘据此唤醒。
+// 链一断，一个已经让出槽位的账号就再也醒不过来 —— 尤其是冻结账号：它压根没有「配额窗口将释放」这回事，
+// 旧实现里既没有它的 dailyUsage 刷新时刻、也就没有下一跳。
+
+test('ui-snapshot: 今日用量为空但待机提示在场 → 周期链 MUST NOT 断（否则让位的账号永远醒不过来）', async () => {
+  const browserStandby: UiBrowserStandbyPayload = {
+    enabled: true,
+    eligible: true,
+    reason: 'risk_state:frozen',
+    waitMs: 6 * 3_600_000,
+    wakeAt: 1730000001000 + 6 * 3_600_000,
+    generatedAt: 1730000001000,
+    source: 'risk',
+    minWaitMs: 300_000,
+    warmupMs: 90_000,
+  };
+  const timers: Array<{ fn: () => void; delay: number }> = [];
+  const { service } = makeService({
+    todayUsageForAccount: async () => null, // 用量缺失 —— 旧实现在这里 cancel 掉整条链
+    browserStandbyForAccount: async () => browserStandby,
+    setTimeoutFn: ((fn: () => void, delay: number) => {
+      timers.push({ fn, delay });
+      return { unref() {} } as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+    clearTimeoutFn: (() => {}) as typeof clearTimeout,
+  });
+
+  await service.pushHelloSnapshot('acc-1', 'edge-1');
+  assert.equal(timers.length, 1, 'hello 必须起链：待机提示在场却不排下一跳 = 把账号睡死');
+  assert.ok(timers[0].delay > 0 && timers[0].delay <= 60_000, '保底续跳间隔约 60s');
+
+  // 到点触发一次 → 链必须自己续上，而不是就此结束。
+  timers[0].fn();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(timers.length, 2, '周期链必须自己续自己');
+});
+
+test('ui-snapshot: 用量与待机提示都缺 → 如实收链（不凭空造活跃）', async () => {
+  const timers: Array<{ fn: () => void; delay: number }> = [];
+  const { service } = makeService({
+    todayUsageForAccount: async () => null,
+    browserStandbyForAccount: async () => null,
+    setTimeoutFn: ((fn: () => void, delay: number) => {
+      timers.push({ fn, delay });
+      return { unref() {} } as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+    clearTimeoutFn: (() => {}) as typeof clearTimeout,
+  });
+  await service.pushHelloSnapshot('acc-1', 'edge-1');
+  assert.equal(timers.length, 0, '两者皆无 → 无需周期链');
 });
 
 test('ui-snapshot: 无昵称不发 identity 字段（宁缺毋假）', async () => {

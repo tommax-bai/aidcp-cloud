@@ -35,6 +35,13 @@ type TimerHandle = ReturnType<typeof setTimeout>;
 
 const MIN_DAILY_USAGE_REFRESH_DELAY_MS = 1_000;
 
+/**
+ * 待机提示在场时的保底续跳间隔（change standby-covers-idle-waits）。
+ * 与今日用量分钟窗的既有实际节奏（约 60s）一致，故不引入额外推送负载；它的作用是让链在
+ * 「今日用量缺失 / 没有窗口带刷新时刻」时**仍然活着**——那是冷待机账号唯一的唤醒路径。
+ */
+const STANDBY_REFRESH_INTERVAL_MS = 60_000;
+
 export interface UiSnapshotDeps {
   pusher: { pushToEdges(env: Envelope, edgeId?: string): number };
   /** 解析绑定该账号的在线边缘 edgeId；无在线节点返回 null（推送如实放弃）。 */
@@ -133,7 +140,8 @@ export class UiSnapshotService {
       // 人设绑定态已在本方法开头单独先发（见那里的注释），此处不再重复带上。
       if (!payload.account && !payload.lastPublish && !payload.publish && !payload.publishPreview && !payload.dailyUsage && !payload.browserStandby) return; // 全空不发包
       const sent = this.push(accountId, edgeId, payload, 'hello快照');
-      if (sent > 0 && dailyUsage) this.scheduleDailyUsageRefresh(accountId, edgeId, dailyUsage);
+      // hello 是这条周期链的唯一起点。待机提示在场却不起链 = 该账号一旦让位待机就再也醒不过来。
+      if (sent > 0) this.scheduleSnapshotRefresh(accountId, edgeId, dailyUsage ?? null, Boolean(browserStandby));
     } catch (err) {
       this.logger.warn(
         `[ui-snapshot] hello 快照构建失败 account=${accountId}: ${err instanceof Error ? err.message : String(err)}`,
@@ -212,7 +220,9 @@ export class UiSnapshotService {
       if (dailyUsage) payload.dailyUsage = dailyUsage;
       if (browserStandby) payload.browserStandby = browserStandby;
       const sent = this.push(accountId, edgeId, payload, 'dailyUsage刷新');
-      if (sent > 0 && dailyUsage) this.scheduleDailyUsageRefresh(accountId, edgeId, dailyUsage);
+      // 重排下一跳的条件是「推送成功 **且**（今日用量 **或** 待机提示 任一存在）」。
+      // 旧条件只看今日用量 —— 待机提示还在、链却已死（change standby-covers-idle-waits）。
+      if (sent > 0) this.scheduleSnapshotRefresh(accountId, edgeId, dailyUsage, Boolean(browserStandby));
       else this.cancelDailyUsageRefresh(accountId, edgeId);
     } catch (err) {
       this.cancelDailyUsageRefresh(accountId, edgeId);
@@ -231,8 +241,30 @@ export class UiSnapshotService {
     return sent;
   }
 
-  private scheduleDailyUsageRefresh(accountId: string, edgeId: string, dailyUsage: UiDailyUsagePayload): void {
-    const refreshAt = nextDailyUsageRefreshAt(dailyUsage, this.clock());
+  /**
+   * 排下一跳快照刷新。
+   *
+   * **这条自己续自己的链是冷待机账号唯一的唤醒路径**（change standby-covers-idle-waits）：待机期间边缘的核心进程
+   * 与云端连接不断，账号一旦恢复可工作，下一跳提示即 `eligible=false`，边缘据此唤醒浏览器。链一断，一个让出了
+   * 槽位的账号就再也醒不过来——尤其是**冻结账号**，它压根没有「配额窗口将释放」这回事。
+   *
+   * 故链有待机提示在场时 MUST NOT 断。旧实现有两条断裂路径，都会静默把账号睡死：
+   *  ① 今日用量为空 → 调用方直接 cancel（已在调用处修）；
+   *  ② 今日用量在场、但没有任何窗口带着未来的刷新时刻 → 这里 `refreshAt === undefined` → 不排、链断。
+   * 现在：待机提示在场时保底按 `STANDBY_REFRESH_INTERVAL_MS` 续跳；两者都在则取更早的那个。
+   */
+  private scheduleSnapshotRefresh(
+    accountId: string,
+    edgeId: string,
+    dailyUsage: UiDailyUsagePayload | null,
+    hasStandby: boolean,
+  ): void {
+    const now = this.clock();
+    const usageAt = dailyUsage ? nextDailyUsageRefreshAt(dailyUsage, now) : undefined;
+    const standbyAt = hasStandby ? now + STANDBY_REFRESH_INTERVAL_MS : undefined;
+    const refreshAt = usageAt === undefined
+      ? standbyAt
+      : standbyAt === undefined ? usageAt : Math.min(usageAt, standbyAt);
     this.cancelDailyUsageRefresh(accountId, edgeId);
     if (refreshAt === undefined) return;
     const delay = Math.max(MIN_DAILY_USAGE_REFRESH_DELAY_MS, Math.ceil(refreshAt - this.clock()));

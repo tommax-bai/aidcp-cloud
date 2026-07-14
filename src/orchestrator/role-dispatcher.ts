@@ -89,8 +89,11 @@ import {
   DEFAULT_IDLE_NUDGE_MS,
   effectiveDailyMaxMinutes,
   isWithinActiveWindow,
+  nextActiveWindowStartAt,
+  nextLocalDayStartAt,
   type ResumeConfigProvider,
 } from '../risk/resume-limits.js';
+import type { ResumeGateVerdict } from '../comm/browser-standby.js';
 import type { RiskStatus, RiskQuotaLevel } from '../risk/types.js';
 import type { ConceptPool } from '../event-bus/types.js';
 import type { NotificationItem } from '../comm/protocol.js';
@@ -1464,21 +1467,62 @@ export class RoleDispatcher {
 
   /** 续场闸：调度开关 + 人设（canStartSession）+ 风控状态 + 活跃时段窗口 + 每日上限。 */
   private canAutoResume(account: string): boolean {
-    if (!this.canStartSession()) return false; // dispatchActive + 人设绑定
-    const now = this.clock();
-    if (!this.isWithinActiveWeek(now)) return false; // 「可活跃时间」周历闸（全局，change weekly-active-window）
+    return !this.resumeGate(account, this.clock()).blocked;
+  }
+
+  /**
+   * 续场闸的**结构化裁决**（change standby-covers-idle-waits）：与 canAutoResume 同一套判据，多回「为什么停」
+   * 与「何时恢复」。`canAutoResume` 已改为基于本方法实现，**两套判据在结构上不可能漂移**。
+   *
+   * 这是「停工」与「让出浏览器槽位」两套判断接上线的那根线：过去只有风控配额耗尽会让边缘关浏览器，
+   * 而排期外 / 时长满 / 冻结这几类停工完全不产出待机提示——账号安静下来了，浏览器却一直开着占 700MB。
+   *
+   * `resumeAt` 缺省 = **算不出恢复时刻**（当前有二：风控 restricted/frozen——全仓无人调用自动恢复、唯一出口是
+   * 运营手动；周历整周全关——运营显式停号）。调用方 MUST NOT 据此伪造一个恢复时刻，见 browser-standby.ts 的
+   * 「回访」语义。
+   *
+   * `not_ready`（调度未开 / 人设未绑 / 无续场配置提供者）**不是「没活干」**，而是「还没准备好」——它 MUST NOT
+   * 产出待机提示（人设绑定等动作可能要用到浏览器）。
+   */
+  private resumeGate(account: string, now: number): ResumeGateVerdict {
+    if (!this.canStartSession()) return { blocked: true, reason: 'not_ready' }; // dispatchActive + 人设绑定
+    const weekMask = this.sessionLimitProvider?.weekActiveMask() ?? null;
+    if (!isWeekActiveAt(weekMask, new Date(now))) {
+      // 「可活跃时间」周历闸（全局，change weekly-active-window）。整周全关 → msUntilNextActive 回 null（无恢复时刻）。
+      const ms = msUntilNextActive(weekMask, now);
+      return typeof ms === 'number'
+        ? { blocked: true, reason: 'week', resumeAt: now + ms }
+        : { blocked: true, reason: 'week' };
+    }
     const risk = this.getRiskStatus();
-    if (risk === 'restricted' || risk === 'frozen') return false; // 撞风控不续
-    if (!this.resumeConfigProvider) return false; // 无提供者 = 特性关
+    // 撞风控不续。无恢复时刻：状态机虽有恢复常量与 recoverIfEligible，但全仓无人调用、也从不发恢复信号。
+    if (risk === 'restricted' || risk === 'frozen') return { blocked: true, reason: 'risk_state' };
+    if (!this.resumeConfigProvider) return { blocked: true, reason: 'not_ready' }; // 无提供者 = 特性关
     const win = this.resumeConfigProvider.activeWindow();
-    if (!isWithinActiveWindow(this.minuteOfDay(now), win)) return false; // 过活跃时段窗口（全局，旧每日窗口）
+    if (!isWithinActiveWindow(this.minuteOfDay(now), win)) {
+      // 过活跃时段窗口（全局，旧每日窗口）。
+      const at = nextActiveWindowStartAt(now, win);
+      return typeof at === 'number'
+        ? { blocked: true, reason: 'active_window', resumeAt: at }
+        : { blocked: true, reason: 'active_window' };
+    }
     const caps = this.resumeConfigProvider.dailyCaps(); // 阈值全局；计数 dailyTally 仍按账号按日
     const tally = this.dailyTally(account, now);
-    if (caps.maxSessions > 0 && tally.sessions >= caps.maxSessions) return false; // 每日场数到顶
+    // 每日额度按 localDayKey（**服务器本地**日界）重置 → 恢复时刻只能用 nextLocalDayStartAt，绝不能用上海日界。
+    if (caps.maxSessions > 0 && tally.sessions >= caps.maxSessions) {
+      return { blocked: true, reason: 'daily_sessions', resumeAt: nextLocalDayStartAt(now) };
+    }
     // 每日在线时长（§4.2）：全局阈值优先；全局未设(0)时 FB 账号回落非零安全日窗（养号「每天在线 0.5-6h」）。
     const maxMinutes = effectiveDailyMaxMinutes(caps.maxMinutes, this.accountPlatform, this.facebookDailyOnlineMinutes);
-    if (maxMinutes > 0 && tally.browseMs >= maxMinutes * 60_000) return false; // 每日时长到顶
-    return true;
+    if (maxMinutes > 0 && tally.browseMs >= maxMinutes * 60_000) {
+      return { blocked: true, reason: 'daily_minutes', resumeAt: nextLocalDayStartAt(now) };
+    }
+    return { blocked: false };
+  }
+
+  /** 公开只读裁决（供云端产出浏览器冷待机提示）。只读、无副作用（dailyTally 的换日重置除外，与既有闸同源）。 */
+  resumeGateSnapshot(now: number = this.clock()): ResumeGateVerdict {
+    return this.resumeGate(this.currentAccountId, now);
   }
 
   /** 取/重置某账号当日续场计数（按本地日界重置）。 */

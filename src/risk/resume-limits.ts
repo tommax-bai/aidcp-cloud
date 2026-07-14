@@ -117,3 +117,40 @@ export function isWithinActiveWindow(nowMinOfDay: number, win: ActiveWindow): bo
   if (startMin < endMin) return nowMinOfDay >= startMin && nowMinOfDay < endMin;
   return nowMinOfDay >= startMin || nowMinOfDay < endMin; // 跨午夜
 }
+
+/**
+ * 「下一个活跃时段窗口开始」的绝对时刻（change standby-covers-idle-waits）。
+ *
+ * **仅在 `isWithinActiveWindow(...) === false` 时有意义**——窗口外才谈得上「下一次何时开」。全天不限的
+ * 两个分支永不阻塞，返回 undefined。
+ *
+ * 规则：下一次出现 `startMin` 的**本地**时刻；今日的已过则取明日同一时刻。**该规则对跨午夜窗口
+ * （start > end）同样正确**——跨午夜窗口只在 `endMin <= now < startMin` 时才判为窗口外，此时今日的
+ * `startMin` 必然仍在未来，直接命中，走不到「明日」那一支。
+ *
+ * 时区口径 = 服务器本地时区（与调用方 `minuteOfDay` 一致）。
+ */
+export function nextActiveWindowStartAt(nowMs: number, win: ActiveWindow): number | undefined {
+  const { startMin, endMin } = win;
+  if (startMin === endMin) return undefined; // 全天不限
+  if (startMin <= 0 && endMin >= MINUTES_PER_DAY) return undefined; // 全天不限
+  const now = new Date(nowMs);
+  const at = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0).getTime() + startMin * 60_000;
+  if (at > nowMs) return at;
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0).getTime() + startMin * 60_000;
+}
+
+/**
+ * 「下一个本地日界」的绝对时刻（change standby-covers-idle-waits）。
+ *
+ * **红线：MUST NOT 用上海日界（`time/shanghai-day.ts`）替代本函数。** 本仓并存两套日界口径——风控滑动窗口
+ * 与 UI 今日用量按**上海**日界，而**续场计数（`dailyTally` / `localDayKey`）按服务器本地日界**。每日续场
+ * 场数 / 分钟上限「何时重置」只能按后者算；进程 TZ 一旦不是 Asia/Shanghai，混用就会算错恢复时刻——让账号
+ * 提前醒来空转，或睡过头错过整个活跃日。
+ *
+ * 用 `new Date(y, m, d + 1)` 而非 `+24h`，与 `localDayKey` 的 `getFullYear/getMonth/getDate` 逐字对齐。
+ */
+export function nextLocalDayStartAt(nowMs: number): number {
+  const d = new Date(nowMs);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0, 0, 0).getTime();
+}

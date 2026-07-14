@@ -14,6 +14,7 @@
 import { EventBus } from '../event-bus/index.js';
 import type { RoleDispatcher, SessionBudgetAction, SessionUsageSnapshot } from './role-dispatcher.js';
 import type { EdgeSession } from '../comm/ws-server.js';
+import type { ResumeGateVerdict } from '../comm/browser-standby.js';
 import type { RiskController } from '../risk/index.js';
 import { normalizePlatformId, type PlatformId } from '../platform/index.js';
 
@@ -284,6 +285,23 @@ export class ConnectionRuntimeRegistry {
       const snapshot = rt.dispatcher.sessionUsageSnapshot();
       if (edgeId && rt.edgeId === edgeId) return snapshot;
       if (!fallback || snapshot.active) fallback = snapshot;
+    }
+    return fallback;
+  }
+
+  /**
+   * 续场闸的只读裁决（change standby-covers-idle-waits）：供云端产出浏览器冷待机提示。
+   *
+   * 边缘离线 / 无 dispatcher → 返回 null，待机提示退化为「只按风控判」（= 本 change 之前的行为）。这是安全的
+   * 方向：拿不到裁决时**不**让位，宁可多占一会儿浏览器，也不凭空关掉一个我们看不清状态的环境。
+   */
+  resumeGateForAccount(accountId: string, edgeId?: string): ResumeGateVerdict | null {
+    let fallback: ResumeGateVerdict | null = null;
+    for (const rt of this.bySession.values()) {
+      if (rt.accountId !== accountId) continue;
+      const verdict = rt.dispatcher.resumeGateSnapshot();
+      if (edgeId && rt.edgeId === edgeId) return verdict;
+      if (!fallback || rt.dispatcher.active) fallback = verdict;
     }
     return fallback;
   }
