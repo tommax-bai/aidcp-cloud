@@ -234,6 +234,8 @@ export interface ReadingImagesDonePayload {
   noteId: string;
   sourcePageType: 'feed' | 'search';
   imagesBrowsed: number;
+  /** 未看图的诚实原因（如平台不支持 browse_images 时的 'surface_unsupported'）；正常路径不带。 */
+  reason?: string;
   ts: number;
 }
 

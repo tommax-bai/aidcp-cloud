@@ -16,6 +16,12 @@ export interface ExcursionState {
 export class SessionContext {
   private _sourcePageType: 'feed' | 'search' = 'feed';
   private _currentNoteId: string | null = null;
+  /**
+   * 当前笔记是否已从列表迁移进详情页（change platform-registry-shape：为「就地读」平台的评论迁移做闭合判据）。
+   * 由云端**发出迁移命令时**置位（非边缘 echo），随当前笔记切换自动重置。就地读平台走过迁移 ⇒ 循环闭合必 back。
+   * 小红书 / 阶段 0 FB 从不迁移（read=comment surface 相等），恒 false ⇒ 恒 back，零行为。
+   */
+  private _currentNoteMigratedToDetail = false;
   private _consecutiveScrolls: number = 0;
   /** 本会话累计已浏览的不重复 feed 卡数（change feed-refresh-on-depth）：达阈值改点右下「刷新」回顶换新批。
    *  per-session（reset 归零，像 _consecutiveScrolls；不像 lastFeedNoteIds 跨轮保持）。 */
@@ -66,7 +72,16 @@ export class SessionContext {
   get consecutiveScrolls(): number { return this._consecutiveScrolls; }
 
   setSourcePageType(type: 'feed' | 'search'): void { this._sourcePageType = type; }
-  setCurrentNoteId(id: string | null): void { this._currentNoteId = id; }
+  setCurrentNoteId(id: string | null): void {
+    // 笔记切换即重置迁移标志（per-note 语义）：新笔记从未迁移。
+    if (id !== this._currentNoteId) this._currentNoteMigratedToDetail = false;
+    this._currentNoteId = id;
+  }
+
+  /** 当前笔记是否已迁移进详情页（就地读平台评论迁移的闭合判据）。 */
+  get currentNoteMigratedToDetail(): boolean { return this._currentNoteMigratedToDetail; }
+  /** 云端发出迁移命令时置位（非边缘 echo）。随笔记切换 / reset 自动清。 */
+  markNoteMigratedToDetail(): void { this._currentNoteMigratedToDetail = true; }
 
   incrementScrolls(): number { return ++this._consecutiveScrolls; }
   resetScrolls(): void { this._consecutiveScrolls = 0; }
@@ -183,6 +198,7 @@ export class SessionContext {
   reset(): void {
     this._sourcePageType = 'feed';
     this._currentNoteId = null;
+    this._currentNoteMigratedToDetail = false;
     this._consecutiveScrolls = 0;
     this._feedCardsBrowsed = 0; // per-session feed 深度预算，重连即重置（change feed-refresh-on-depth）
     // 通知巡视瞬时态 + 暂停开关必清（断连/重连/结束后不残留 active/暂停，否则永久冻结浏览）

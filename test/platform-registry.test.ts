@@ -8,11 +8,21 @@ import {
   defaultCommentSearchLabel,
   normalizePlatformId,
 } from '../src/platform/index.js';
+import type { NoteScopedAction, PlatformRegistryEntry } from '../src/platform/index.js';
+
+const NOTE_SCOPED_ACTIONS: NoteScopedAction[] = [
+  'read_content',
+  'like',
+  'collect',
+  'comment',
+  'comment_like',
+  'browse_images',
+  'scroll_comments',
+];
 
 test('platform registry: xhs entry carries current comment defaults', () => {
   const xhs = PLATFORM_REGISTRY.xiaohongshu;
   assert.equal(xhs.app, 'xhs');
-  assert.ok(xhs.capabilities.includes('comment'));
   assert.equal(xhs.scheduler.comment.defaultSort, 'most_collected');
   assert.equal(xhs.scheduler.comment.defaultTimeWindow, 'one_day');
   assert.equal(xhs.comment.maxCommentLength, 50);
@@ -25,21 +35,39 @@ test('commentProfileForPlatform: aliases resolve to xhs profile', () => {
   assert.equal(commentProfileForPlatform(undefined), XHS_COMMENT_PROFILE);
 });
 
-test('platform registry: facebook declares browse/interact/comment/join/publish', () => {
+test('platform registry: facebook resolves to its own comment profile', () => {
   assert.equal(normalizePlatformId('facebook'), 'facebook');
   assert.equal(normalizePlatformId('fb'), 'facebook');
   // facebook now resolves to its own comment profile (no longer throws).
   assert.equal(commentProfileForPlatform('facebook'), FB_COMMENT_PROFILE);
   assert.equal(FB_COMMENT_PROFILE.siteName, 'Facebook');
-  const fb = PLATFORM_REGISTRY.facebook;
-  assert.ok(fb, 'facebook registry entry exists');
-  // change facebook-browse-and-like-loop：'browse'/'interact' 已声明——edge 侧 FacebookBrowseSession 原子同落，
-  // 装配闸解析到 FB 浏览会话（非 xhs），session-start 平台闸靠 includes('browse') 放行 FB。
-  assert.ok(fb!.capabilities.includes('comment'));
-  assert.ok(fb!.capabilities.includes('browse'), 'facebook now declares browse (co-landed with FacebookBrowseSession)');
-  assert.ok(fb!.capabilities.includes('interact'));
-  assert.ok(fb!.capabilities.includes('publish'), 'facebook publish co-landed with edge FacebookPublishExecutor');
-  // 与 edge Facebook driver 的编排能力子集 {browse, comment, publish, interact, join} 逐字对齐。
-  assert.deepEqual([...fb!.capabilities], ['browse', 'comment', 'publish', 'interact', 'join']);
-  assert.equal(fb!.scheduler.comment.enabled, true);
+  assert.ok(PLATFORM_REGISTRY.facebook, 'facebook registry entry exists');
+  assert.equal(PLATFORM_REGISTRY.facebook!.scheduler.comment.enabled, true);
+});
+
+// change platform-registry-shape：能力/surface 表全覆盖断言（typecheck 已逼每格声明，运行时再守 reason 非空与形状）。
+test('platform registry: noteActions fully cover every action with non-empty reasons when unsupported', () => {
+  const entries: PlatformRegistryEntry[] = [PLATFORM_REGISTRY.xiaohongshu, PLATFORM_REGISTRY.facebook!];
+  for (const entry of entries) {
+    for (const action of NOTE_SCOPED_ACTIONS) {
+      const support = entry.noteActions[action];
+      assert.ok(support, `${entry.platform} 缺 noteActions.${action} 声明`);
+      if (!support.supported) {
+        assert.ok(support.reason.length > 0, `${entry.platform}.${action} 不支持却无 reason`);
+      }
+    }
+    // surface 只对 read/like/comment 三个动作声明。
+    assert.ok(entry.noteSurfaces.read_content);
+    assert.ok(entry.noteSurfaces.like);
+    assert.ok(entry.noteSurfaces.comment);
+  }
+});
+
+test('platform registry: browse capability is a Record and xhs browse stays supported (startup gate)', () => {
+  assert.equal(PLATFORM_REGISTRY.xiaohongshu.capabilities.browse.supported, true);
+  assert.equal(PLATFORM_REGISTRY.facebook!.capabilities.browse.supported, true);
+  // stage-0：两平台 read/like/comment 均在 detail（=今天）；FB collect 显式不支持 + reason。
+  assert.equal(PLATFORM_REGISTRY.facebook!.noteSurfaces.read_content, 'detail');
+  const fbCollect = PLATFORM_REGISTRY.facebook!.noteActions.collect;
+  assert.equal(fbCollect.supported, false);
 });

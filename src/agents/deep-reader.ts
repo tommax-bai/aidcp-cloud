@@ -22,6 +22,11 @@ export interface DeepReaderOptions extends RoleOptions {
   getNoteData: (noteId: string) => NoteData | null;
   /** 随机源（注入便于测试确定性），默认 Math.random。 */
   random?: () => number;
+  /**
+   * 平台是否支持「浏览多图」（change platform-registry-shape，注入闭包，**fail-open**：查表失败返 true）。
+   * 角色只经此闭包感知平台能力，绝不 import registry / 出现 platform==='x'。缺省视为支持（老行为）。
+   */
+  canBrowseImages?: () => boolean;
 }
 
 /** 短正文（更可能是图文/图集笔记）→ 更可能翻图；长正文（文字向）→ 较少翻图。 */
@@ -43,6 +48,7 @@ export class DeepReader extends BaseRole {
   readonly roleName: RoleName = 'deep_reader';
   private readonly getNoteData: (noteId: string) => NoteData | null;
   private readonly random: () => number;
+  private readonly canBrowseImages: () => boolean;
   private unsubscribers: (() => void)[] = [];
   /** 等待 browse_images 回执的在途上下文（单飞：一次只深读一篇）。 */
   private pending: { noteId: string; sourcePageType: 'feed' | 'search'; count: number } | null = null;
@@ -51,6 +57,7 @@ export class DeepReader extends BaseRole {
     super(options);
     this.getNoteData = options.getNoteData;
     this.random = options.random ?? Math.random;
+    this.canBrowseImages = options.canBrowseImages ?? (() => true);
   }
 
   subscribe(): void {
@@ -69,6 +76,18 @@ export class DeepReader extends BaseRole {
   // ─── 事件处理 ─────────────────────────────────────────────
 
   private onQualityPass(payload: QualityPassPayload): void {
+    // 平台能力短路（fail-open）：不支持「浏览多图」的平台如实直接进入评论阶段——不下发 browse_images、
+    // 不做无效往返，诚实回报 imagesBrowsed:0 + reason，绝不伪造已看图。
+    if (!this.canBrowseImages()) {
+      this.emit('reading.images_done', {
+        noteId: payload.noteId,
+        sourcePageType: payload.sourcePageType,
+        imagesBrowsed: 0,
+        reason: 'surface_unsupported',
+        ts: Date.now(),
+      });
+      return;
+    }
     const note = this.getNoteData(payload.noteId);
     const plan = this.planBrowse(note);
 

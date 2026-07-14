@@ -13,7 +13,16 @@
 
 import { EventBus } from '../event-bus/index.js';
 import type { NoteDetailData } from '../event-bus/types.js';
-import { platformRegistryEntry, type PlatformId } from '../platform/index.js';
+import {
+  isNoteActionSupported,
+  noteActionRefusalReason,
+  isOrchestrationCapabilitySupported,
+  platformFeedScrollFloorMs,
+  resolveReadSurface,
+  loopClosure,
+  type PlatformId,
+  type NoteScopedAction,
+} from '../platform/index.js';
 import type { LlmCallOpts } from '../llm/qwen.js';
 import { SessionContext } from '../agents/session-context.js';
 import { ContentEvaluator } from '../agents/content-evaluator.js';
@@ -657,6 +666,51 @@ export class RoleDispatcher {
   }
 
   /**
+   * note-scoped 动作的唯一显式拒绝点（change platform-registry-shape）：平台声明该动作 unsupported ⇒
+   * 根本不下发 + 审计 reason（不占往返、不占 LLM、不假成功）。**fail-open**：registry 查不到/异常 ⇒ 照常
+   * 下发（今天行为），绝不静默砍支持平台。like/collect/comment/comment_like/browse_images/scroll_comments 经此。
+   */
+  private sendNoteScopedCommand(action: NoteScopedAction, command: EdgeCommand): boolean {
+    if (this.accountPlatform && !isNoteActionSupported(this.accountPlatform, action)) {
+      const reason = noteActionRefusalReason(this.accountPlatform, action) ?? 'unsupported';
+      console.log(
+        `[RoleDispatcher] note-scoped 动作被平台能力闸拒绝：action=${action} platform=${this.accountPlatform} reason=${reason}（不下发、不占配额）`,
+      );
+      return false;
+    }
+    return this.sendCommand(command);
+  }
+
+  /** 平台是否支持「浏览多图」（注入给 DeepReader；fail-open：无平台/查表失败 ⇒ true）。 */
+  private canBrowseImages(): boolean {
+    return !this.accountPlatform || isNoteActionSupported(this.accountPlatform, 'browse_images');
+  }
+
+  /** 平台是否支持「滚动评论区」（注入给 CommentReviewer；fail-open）。 */
+  private canScrollComments(): boolean {
+    return !this.accountPlatform || isNoteActionSupported(this.accountPlatform, 'scroll_comments');
+  }
+
+  /** 平台是否支持 feed 刷新（gate FeedScroller 构造；fail-open）。 */
+  private canRefresh(): boolean {
+    return !this.accountPlatform || isOrchestrationCapabilitySupported(this.accountPlatform, 'feed_refresh');
+  }
+
+  /**
+   * 循环闭合读静态表（change platform-registry-shape）：读完一篇返回列表用 back 还是继续 scroll。
+   * 一律读 resolveReadSurface(平台) + per-note 迁移标志，**绝不读运行时 observedSurface**（消时序竞态）。
+   * 小红书 / 阶段 0 FB read=detail 且迁移不可达 ⇒ 恒 back，零回归。
+   */
+  private shouldCloseWithScroll(): boolean {
+    return (
+      loopClosure(
+        resolveReadSurface(this.accountPlatform),
+        this.sessionContext.currentNoteMigratedToDetail,
+      ) === 'scroll'
+    );
+  }
+
+  /**
    * 当前笔记的停留时长中心值（随正文长度 + 风控状态 + 进度缩放）。
    * 无当前笔记（如非详情页返回）时返回 undefined，由边缘走默认兜底。
    */
@@ -673,11 +727,14 @@ export class RoleDispatcher {
   }
 
   /**
-   * Facebook 首屏/滚动后的 noteId 可能因虚拟化或 permalink 水合重复，feed-scroll-card-floor 会算成 0。
-   * 给 FB feed/search 翻页一个更接近真人扫屏的保底停留，避免连续 skip 时 2 秒一滚。
+   * feed/search 翻页的平台保底停留（泛化自旧 facebookScrollDwellMs；平台地板由 registry 的
+   * pacing.feedScrollDwellFloorMs 声明，替代裸 platform==='facebook' 分支）。某些平台首屏/滚动后 noteId
+   * 因虚拟化或 permalink 水合重复、feed-scroll-card-floor 会算成 0，给一个更接近真人扫屏的保底、避免 2 秒一滚。
+   * 未声明地板的平台（如小红书）返回 undefined，走内置默认。
    */
-  private facebookScrollDwellMs(): number | undefined {
-    if (this.accountPlatform !== 'facebook') return undefined;
+  private feedScrollDwellMs(): number | undefined {
+    const floorMs = platformFeedScrollFloorMs(this.accountPlatform);
+    if (floorMs === undefined) return undefined;
     const cardFloor = computeFeedFloorMs({
       newCount: 8,
       status: this.getRiskStatus(),
@@ -685,12 +742,12 @@ export class RoleDispatcher {
       progress: this.progress(),
       pacing: this.pacingFloors,
     });
-    const screenGlanceFloor = Math.round(7_000 * effectiveTempo(this.getRiskStatus(), this.getQuotaLevel()));
+    const screenGlanceFloor = Math.round(floorMs * effectiveTempo(this.getRiskStatus(), this.getQuotaLevel()));
     return Math.max(cardFloor, screenGlanceFloor);
   }
 
   private scrollDwellParams(floorMs: number): Record<string, unknown> | undefined {
-    const fbFloor = this.facebookScrollDwellMs() ?? 0;
+    const fbFloor = this.feedScrollDwellMs() ?? 0;
     const dwellMs = Math.max(floorMs, fbFloor);
     return dwellMs > 0 ? { dwellMs } : undefined;
   }
@@ -788,11 +845,18 @@ export class RoleDispatcher {
 
     this.roles = [
       contentEvaluator,
-      new FeedScroller(commonOptions, this.sessionContext),
+      // feed_refresh 能力闸（fail-open）：仅平台**显式**声明不支持刷新时禁用 FeedScroller 的刷新支线
+      //（enabled:false）；支持 / 查表失败 ⇒ 不传 config，沿用 FeedScroller 的 env 默认（不覆盖 kill-switch）。
+      new FeedScroller(commonOptions, this.sessionContext, this.canRefresh() ? undefined : { enabled: false }),
       new NoteOpener(commonOptions, this.sessionContext),
       new BackToFeed(commonOptions, this.sessionContext),
-      new DeepReader({ ...commonOptions, getNoteData }),
-      new CommentReviewer({ ...commonOptions, sessionContext: this.sessionContext, getNoteData }),
+      new DeepReader({ ...commonOptions, getNoteData, canBrowseImages: () => this.canBrowseImages() }),
+      new CommentReviewer({
+        ...commonOptions,
+        sessionContext: this.sessionContext,
+        getNoteData,
+        canScrollComments: () => this.canScrollComments(),
+      }),
       new ContentCuratorRole({ ...commonOptions, sessionContext: this.sessionContext }),
       new InteractionAppraiserRole({
         ...commonOptions,
@@ -1005,7 +1069,7 @@ export class RoleDispatcher {
     // facebook-scheduled-comment 2.8：平台不具备 browse 能力（如 Facebook v1 只声明 'comment'）→ 诚实拒绝启动
     // xhs 浏览角色循环。放在人设闸之前，避免 FB 账号被误判 needs_persona_setup。不复用 onSessionRejected
     //（那会硬编码按「未绑人设」拒绝并误报）；FB 账号不浏览是正常预期、非事故，只 console.warn。
-    if (this.accountPlatform && !platformRegistryEntry(this.accountPlatform).capabilities.includes('browse')) {
+    if (this.accountPlatform && !isOrchestrationCapabilitySupported(this.accountPlatform, 'browse')) {
       console.warn(
         `[RoleDispatcher] 账号 ${this.currentAccountId} 平台=${this.accountPlatform} 无 browse 能力 → 拒绝启动浏览会话（platform_no_browse）：不挂 xhs 浏览循环、不起看门狗`,
       );
@@ -1532,7 +1596,7 @@ export class RoleDispatcher {
           // 互动前犹豫时间（time directive）：边缘据此在执行前等待并叠抖动。
           // change fix-interaction-and-comment-capture：预算不再在下发时乐观扣（失败/去重跳过不该烧预算），
           // 改按 action.completed{ok:true} 扣（对齐 follow/comment）；此处仅登记重试上下文（noteId + 次数）。
-          const sent = this.sendCommand({ action, params: { noteId: payload.noteId, thinkMs: this.thinkNow() } });
+          const sent = this.sendNoteScopedCommand(action, { action, params: { noteId: payload.noteId, thinkMs: this.thinkNow() } });
           if (sent && (action === 'like' || action === 'collect')) {
             this.interactionRetry.set(action, { noteId: payload.noteId, attempts: 0 });
           }
@@ -1559,7 +1623,7 @@ export class RoleDispatcher {
           actions: payload.actions,
           text: payload.text,
         };
-        this.sendCommand({ action: 'comment', params: { noteId: payload.noteId, text: payload.text, thinkMs: this.thinkNow() } });
+        this.sendNoteScopedCommand('comment', { action: 'comment', params: { noteId: payload.noteId, text: payload.text, thinkMs: this.thinkNow() } });
       }),
 
       // 进作者主页：专用 profile_open 指令（取代 open_note{type:'profile'}——
@@ -1571,7 +1635,7 @@ export class RoleDispatcher {
       // 深读：多图浏览意图 → browse_images 指令（dwellMs 按正文量级，thinkMs 为开始前犹豫）。
       this.eventBus.on('reading.browse_images', (payload) => {
         const dwellMs = this.dwellForCurrentNote('glance');
-        this.sendCommand({
+        this.sendNoteScopedCommand('browse_images', {
           action: 'browse_images',
           params: { noteId: payload.noteId, count: payload.count, thinkMs: this.thinkNow(), ...(dwellMs === undefined ? {} : { dwellMs }) },
         });
@@ -1580,7 +1644,7 @@ export class RoleDispatcher {
       // 深读：评论浏览意图 → scroll_comments 指令。
       this.eventBus.on('reading.scroll_comments', (payload) => {
         const dwellMs = this.dwellForCurrentNote('glance');
-        this.sendCommand({
+        this.sendNoteScopedCommand('scroll_comments', {
           action: 'scroll_comments',
           params: { noteId: payload.noteId, count: payload.count, thinkMs: this.thinkNow(), ...(dwellMs === undefined ? {} : { dwellMs }) },
         });
@@ -1598,7 +1662,7 @@ export class RoleDispatcher {
           console.log('[RoleDispatcher] 评论赞会话预算已耗尽，跳过');
           return;
         }
-        this.sendCommand({
+        this.sendNoteScopedCommand('comment_like', {
           action: 'comment_like',
           params: { noteId: payload.noteId, commentAnchorId: payload.commentAnchorId, thinkMs: this.thinkNow() },
         });
@@ -1639,6 +1703,12 @@ export class RoleDispatcher {
 
       this.eventBus.on('feed.entered', (payload) => {
         if (payload.trigger === 'back_to_feed') {
+          // 就地读平台（read surface='feed' 且未迁移详情）读完从未离开列表 ⇒ 用 scroll 续刷、不 back（back 会
+          // 误离开 feed）。读静态表 + per-note 迁移标志，绝不读 observedSurface。小红书 / 阶段 0 FB ⇒ 恒 back。
+          if (this.shouldCloseWithScroll()) {
+            this.sendScrollCommand('feed_inline_continue');
+            return;
+          }
           // 返回前停留下限（time directive）：笔记已被打开并阅读过（curator 关卡），按 read 量级
           // 给停留，治「无价值秒退」。无当前笔记时 dwellMs=undefined，边缘走内置默认兜底。
           const dwellMs = this.dwellForCurrentNote('read');

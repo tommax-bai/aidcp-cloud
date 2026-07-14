@@ -1,15 +1,31 @@
 export type PlatformId = 'xiaohongshu' | 'facebook';
 
-export type PlatformCapability =
-  | 'browse'
+/**
+ * Surface = 编排是否**离开列表**，不是页面形态。dialog / drawer / modal / overlay / profile
+ * 都是 driver 内部细节，**绝不进本 enum**（change platform-registry-shape §不做）。
+ */
+export type Surface = 'feed' | 'detail';
+
+/** 云端逐帖（note-scoped）动作全集：registry 对每个平台**全覆盖**表态，typecheck 逼每格声明。 */
+export type NoteScopedAction =
+  | 'read_content'
+  | 'like'
+  | 'collect'
   | 'comment'
-  | 'publish'
-  | 'interact'
-  | 'patrol'
-  | 'notification'
-  // 'join'：Facebook 加群编排能力（change facebook-group-join-and-commenting）。加入是为了与 edge Facebook
-  // driver 的能力词表对齐（change facebook-browse-and-like-loop task 5.4：消除 join 词表错配）。
-  | 'join';
+  | 'comment_like'
+  | 'browse_images'
+  | 'scroll_comments';
+
+/**
+ * 编排能力词：v1 只保留**有真消费者**的两个（唯一消费者铁律，避免「声明了没人读」）。
+ * - browse       消费者 = role-dispatcher 会话启动闸（canStartSession）。
+ * - feed_refresh 消费者 = FeedScroller 构造（深度到阈值是否改点「刷新」）。
+ * follow / profile_visit / patrol / notification 在 C4 追加**并同批接线消费者**，本 change 不含。
+ */
+export type OrchestrationCapability = 'browse' | 'feed_refresh';
+
+/** 支持声明：不支持必带非空 reason（治「靠数值巧合不发」）。 */
+export type NoteSupport = { supported: true } | { supported: false; reason: string };
 
 export interface CommentPlatformProfile {
   platform: PlatformId;
@@ -34,7 +50,17 @@ export interface PlatformRegistryEntry {
   platform: PlatformId;
   app: string;
   displayName: string;
-  capabilities: readonly PlatformCapability[];
+  /** 概念1：逐帖动作是否支持（全覆盖 Record）。唯一消费者 = dispatcher 的 sendNoteScopedCommand（唯一拒绝点 + 审计）。 */
+  noteActions: Record<NoteScopedAction, NoteSupport>;
+  /**
+   * 概念2：动作在哪个 surface 执行（只对「离不离开列表是真问题」的 3 个动作建模；给 collect/browse_images
+   * 编造 surface = 假抽象）。唯一读者 = surface.ts 的 resolveReadSurface / resolveCommentSurface 纯函数。
+   */
+  noteSurfaces: Record<'read_content' | 'like' | 'comment', Surface>;
+  /** 编排能力（只保留有真消费者的词）。 */
+  capabilities: Record<OrchestrationCapability, NoteSupport>;
+  /** 节奏平台参数：feed 翻页停留地板（消费者 = dispatcher 泛化后的 feedScrollDwellMs，替代旧的 facebook 裸分支）。 */
+  pacing: { feedScrollDwellFloorMs?: number };
   scheduler: {
     comment: {
       enabled: boolean;
@@ -87,13 +113,42 @@ export const FB_COMMENT_PROFILE: CommentPlatformProfile = {
   },
 };
 
+/** 小红书 v1 逐帖动作全支持。 */
+const XHS_NOTE_ACTIONS: Record<NoteScopedAction, NoteSupport> = {
+  read_content: { supported: true },
+  like: { supported: true },
+  collect: { supported: true },
+  comment: { supported: true },
+  comment_like: { supported: true },
+  browse_images: { supported: true },
+  scroll_comments: { supported: true },
+};
+
+/**
+ * Facebook v1 逐帖动作。read/like/comment 支持；collect 无「收藏」概念；comment_like / 深读两动作 v1 未实装
+ * ——**显式声明不支持 + reason**，dispatcher 侧据此不下发（不再靠 collectCount 恒 0 的数值巧合、不做无效往返/无效 LLM）。
+ */
+const FB_NOTE_ACTIONS: Record<NoteScopedAction, NoteSupport> = {
+  read_content: { supported: true },
+  like: { supported: true },
+  comment: { supported: true },
+  collect: { supported: false, reason: 'no_collect_concept' },
+  comment_like: { supported: false, reason: 'v1_unimplemented' },
+  browse_images: { supported: false, reason: 'v1_unimplemented' },
+  scroll_comments: { supported: false, reason: 'v1_unimplemented' },
+};
+
 export const PLATFORM_REGISTRY: Record<'xiaohongshu', PlatformRegistryEntry> &
   Partial<Record<PlatformId, PlatformRegistryEntry>> = {
   xiaohongshu: {
     platform: 'xiaohongshu',
     app: 'xhs',
     displayName: '小红书',
-    capabilities: ['browse', 'comment', 'publish', 'interact', 'patrol', 'notification'],
+    noteActions: XHS_NOTE_ACTIONS,
+    // 小红书 read/like/comment 全在详情页完成（今天的唯一形态）。
+    noteSurfaces: { read_content: 'detail', like: 'detail', comment: 'detail' },
+    capabilities: { browse: { supported: true }, feed_refresh: { supported: true } },
+    pacing: {},
     scheduler: {
       comment: {
         enabled: true,
@@ -107,13 +162,18 @@ export const PLATFORM_REGISTRY: Record<'xiaohongshu', PlatformRegistryEntry> &
     platform: 'facebook',
     app: 'fb',
     displayName: 'Facebook',
-    // 声明 'browse'/'interact'（change facebook-browse-and-like-loop）：edge 侧已原子同落 FacebookBrowseSession，
-    // 装配闸解析到 FB 浏览会话而非 xhs BrowseSession，session-start 平台闸（canStartSession，见 role-dispatcher）
-    // 靠 `capabilities.includes('browse')` 放行 FB 账号起浏览闭环。'comment'/'join' 为既有定向评论/加群编排能力。
-    // 'publish' 与 edge FacebookPublishExecutor 同落（facebook-post-publish）。
-    // 与 edge Facebook driver 的【编排能力子集】{browse, comment, publish, interact, join} 逐字对齐；
-    // edge 另有 'identity'/'overlay' 为 driver 运行时能力（读身份 / 监测浮层），非编排词表、不进本 registry。
-    capabilities: ['browse', 'comment', 'publish', 'interact', 'join'],
+    // edge Facebook driver 的【编排能力子集】= {browse, comment, publish, interact, join}；本 registry 的
+    // capabilities 只登记**有云端消费者**的编排词（browse / feed_refresh），comment/publish/interact/join 的
+    // 编排接线各在其专属路径（定向评论调度器 / FacebookPublishExecutor / 互动闸），不作零消费者声明。
+    noteActions: FB_NOTE_ACTIONS,
+    // 阶段 0：read/like/comment 仍声明在详情页（=今天，零行为）。C2 旗标翻转 read/like→'feed'（就地读/赞），
+    // comment 留 'detail'（评论必进详情页，P5 已证）。本 change 不翻。
+    noteSurfaces: { read_content: 'detail', like: 'detail', comment: 'detail' },
+    // feed_refresh 声明 supported（=今天 FeedScroller 对 FB 照常发 refresh）；FB 的「受控重新导航」实现在 C2，
+    // 本 change 只声明能力、不改实现 ⇒ 零行为。
+    capabilities: { browse: { supported: true }, feed_refresh: { supported: true } },
+    // 泛化旧 facebookScrollDwellMs 的 7s 扫屏地板（虚拟化/permalink 水合导致 newCount 常算成 0 时的保底停留）。
+    pacing: { feedScrollDwellFloorMs: 7_000 },
     scheduler: {
       comment: {
         enabled: true,

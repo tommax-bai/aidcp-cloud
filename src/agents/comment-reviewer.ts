@@ -21,12 +21,18 @@ import type { RoleName, ReadingImagesDonePayload } from '../event-bus/types.js';
 export interface CommentReviewerOptions extends RoleOptions {
   sessionContext: SessionContext;
   getNoteData: (noteId: string) => NoteData | null;
+  /**
+   * 平台是否支持「滚动评论区」（change platform-registry-shape，注入闭包，**fail-open**：查表失败返 true）。
+   * 角色只经此闭包感知平台能力，绝不 import registry / 出现 platform==='x'。缺省视为支持（老行为）。
+   */
+  canScrollComments?: () => boolean;
 }
 
 export class CommentReviewer extends BaseRole {
   readonly roleName: RoleName = 'comment_reviewer';
   private readonly sessionContext: SessionContext;
   private readonly getNoteData: (noteId: string) => NoteData | null;
+  private readonly canScrollComments: () => boolean;
   private unsubscribers: (() => void)[] = [];
   /** 等待 scroll_comments 回执的在途上下文（单飞：一次只深读一篇）。 */
   private pending: { noteId: string; sourcePageType: 'feed' | 'search'; imagesBrowsed: number; count: number } | null = null;
@@ -36,6 +42,7 @@ export class CommentReviewer extends BaseRole {
     if (!options.llm) throw new Error('CommentReviewer 需要 LlmClient');
     this.sessionContext = options.sessionContext;
     this.getNoteData = options.getNoteData;
+    this.canScrollComments = options.canScrollComments ?? (() => true);
   }
 
   subscribe(): void {
@@ -54,6 +61,12 @@ export class CommentReviewer extends BaseRole {
   // ─── 事件处理 ─────────────────────────────────────────────
 
   private async onImagesDone(payload: ReadingImagesDonePayload): Promise<void> {
+    // 平台能力短路（fail-open）：不支持「滚动评论区」的平台如实直接推进——不调用 LLM 判定、不下发
+    // scroll_comments，诚实 commentsRead:0，绝不伪造已读评论。
+    if (!this.canScrollComments()) {
+      this.emitReadingDone(payload.noteId, payload.sourcePageType, payload.imagesBrowsed, 0);
+      return;
+    }
     const note = this.getNoteData(payload.noteId);
     let read = false;
     if (note) {
