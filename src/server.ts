@@ -2757,7 +2757,10 @@ async function main(): Promise<void> {
                   }
                   const receipt = await commentScheduler!.triggerManual(accountId, { priority: 'automatic', approvalMode });
                   if (!receipt.ok) {
-                    // 触发未成（离线 / 未绑人设 / 已在跑等）：如实回执；终态卡不存在（任务没开跑）。
+                    // 瞬时未开始（边端离线 / 浏览器唤醒失败 / 租约不可得）：归还小时格、由调度器在本小时内有界重试。
+                    // 此处**不发卡**——重试期间每次都发卡就是每分钟刷一张告警；放弃时由 onCellAbandoned 统一发一张。
+                    if (receipt.code) return { started: false, reason: receipt.code };
+                    // 持久性未触发（未绑人设 / 缺联系方式 / 已在跑）：重试无用，照旧烧掉本格并如实回卡。
                     await sendReceiptCard(receipt.level === 'error' ? 'error' : 'warning', `排期评论：${receipt.title}`, receipt.message);
                   }
                   // ok=任务已开跑：不发卡（评论链任务结束自补终态结果卡，避免双卡）。
@@ -2803,7 +2806,9 @@ async function main(): Promise<void> {
                     approvalMode,
                   });
                   if (!receipt.ok) {
-                    // 触发未成（缺联系方式 fail-closed / 离线 / 未绑人设 / 在跑）：透传回执如实回卡；不占尝试额度。
+                    // 瞬时未开始：归还小时格、本小时内有界重试；不发卡（放弃时统一发一张）。不占尝试额度。
+                    if (receipt.code) return { started: false, reason: receipt.code };
+                    // 持久性未触发（缺联系方式 fail-closed / 未绑人设 / 在跑）：透传回执如实回卡；不占尝试额度。
                     await sendReceiptCard(receipt.level === 'error' ? 'error' : 'warning', `排期联系评论：${receipt.title}`, receipt.message);
                     return;
                   }
@@ -2824,6 +2829,33 @@ async function main(): Promise<void> {
         joinDailyCap: async (accountId: string) => {
           if (!facebookGroupJoinAutoEnabled() && !facebookGroupJoinShadow()) return 0;
           return (await resolveController(accountId)).effectiveQuotas().day.join_group;
+        },
+        /**
+         * 本小时格的有界重试用尽 → 发**一张**放弃卡（change browser-slot-scheduling）。
+         * 重试期间刻意不发卡，否则边端离线一小时就是一串每分钟的告警噪声。
+         */
+        onCellAbandoned: (accountId: string, action: string, reason: string) => {
+          void (async () => {
+            const chatId = await resolveAccountChatId(accountId);
+            if (!chatId) {
+              console.warn(`[content-scheduler] 无可用飞书群，放弃卡未发出 account=${accountId} action=${action} reason=${reason}`);
+              return;
+            }
+            await messenger
+              .sendCard(
+                chatId,
+                buildCommandResultCard({
+                  command: `排期${action === 'comment' ? '评论' : action === 'contact_comment' ? '联系评论' : action === 'join' ? '加群' : '发帖'}（自动）`,
+                  ok: false,
+                  level: 'warning',
+                  title: '本小时未能开始，已放弃',
+                  message: `多次尝试后仍未接管边端（原因：${reason}）。本小时未搜索、未选中、未发布；下一个小时格会重新尝试。`,
+                  accountId,
+                  accountName: accountDisplayName(accountId),
+                }),
+              )
+              .catch((e) => console.warn('[content-scheduler] 放弃卡发送失败：', (e as Error).message));
+          })();
         },
         logger: console,
       });

@@ -592,3 +592,82 @@ test('content-scheduler/contact: 幂等独立 — 联系评论槽不被同小时
   await scheduler.onTick();
   assert.deepEqual(fired, [`post:${ACC}`, `contact:${ACC}`], '发帖幂等键不吞联系评论槽');
 });
+
+// ---------------------------------------------------------------------------
+// change browser-slot-scheduling：未开始的失败绝不烧掉小时格
+//
+// 为什么关键：开火窗口每小时只有错峰的那一分钟，且那一分钟全天固定。浏览器被冷待机收起时的
+// 开关周期又被滚动小时窗锁成整 60 分钟——相位一旦不利，「先记名额、后执行」会让账号整天一次都触发不了。
+// ---------------------------------------------------------------------------
+
+/** 让 fire() 挂在 trigger promise 上的 then/finally 跑完（onTick 刻意不 await 触发）。 */
+const settle = () => new Promise((r) => setImmediate(r));
+
+function mkRetry(triggerImpl: (id: string) => Promise<unknown>) {
+  const calls: string[] = [];
+  const abandoned: Array<{ action: string; reason: string }> = [];
+  const state = { nowMs: NOW_HIT.getTime() };
+  const deps: ContentSchedulerDeps = {
+    onlineAccounts: () => [ACC],
+    scheduleFor: () => scheduleView(),
+    riskStatus: () => 'normal',
+    postedTodayCount: () => Promise.resolve(0),
+    pendingAutonomousCount: () => Promise.resolve(0),
+    isPublishBusy: () => false,
+    triggerPost: (id) => {
+      calls.push(id);
+      return triggerImpl(id);
+    },
+    onCellAbandoned: (_id, action, reason) => abandoned.push({ action, reason }),
+    now: () => state.nowMs,
+    logger: { warn: () => {} },
+  };
+  return { scheduler: new ContentScheduler(deps), state, calls, abandoned };
+}
+
+test('content-scheduler: 未开始的失败归还小时格，本小时非偏移分钟也可重试', async () => {
+  const { scheduler, state, calls } = mkRetry(() => Promise.resolve({ started: false, reason: 'edge_offline' }));
+
+  await scheduler.onTick(); // 命中偏移分钟 → 触发一次，但边端离线、没开跑
+  await settle();
+  assert.deepEqual(calls, [ACC]);
+
+  // 下一分钟（非偏移分钟）：旧行为会被分钟闸挡掉、且名额已被烧掉 → 整小时废掉。现在应放行重试。
+  state.nowMs = new Date(2026, 0, 5, 10, (OFFSET + 1) % 60, 0).getTime();
+  await scheduler.onTick();
+  await settle();
+  assert.deepEqual(calls, [ACC, ACC], '未开始 → 本小时内可再试');
+});
+
+test('content-scheduler: 重试有界 — 用尽后诚实放弃、整格只回一张卡', async () => {
+  const { scheduler, state, calls, abandoned } = mkRetry(() => Promise.resolve({ started: false, reason: 'browser_wake_failed' }));
+
+  // 首次 + 5 次重试 = 6 次触发；此后本小时格不再试。
+  for (let i = 0; i < 12; i++) {
+    state.nowMs = new Date(2026, 0, 5, 10, (OFFSET + i) % 60, 0).getTime();
+    await scheduler.onTick();
+    await settle();
+  }
+  assert.equal(calls.length, 6, '首次 + 5 次有界重试；绝不无界重叫');
+  assert.deepEqual(abandoned, [{ action: 'post', reason: 'browser_wake_failed' }], '整格只回一张放弃卡');
+});
+
+test('content-scheduler: 已开跑 / 抛异常都不归还名额（绝不重复发）', async () => {
+  const started = mkRetry(() => Promise.resolve({ started: true }));
+  started.state.nowMs = NOW_HIT.getTime();
+  await started.scheduler.onTick();
+  await settle();
+  started.state.nowMs = new Date(2026, 0, 5, 10, (OFFSET + 1) % 60, 0).getTime();
+  await started.scheduler.onTick();
+  await settle();
+  assert.deepEqual(started.calls, [ACC], '真开跑 → 同小时格不重触发');
+
+  // 异常可能发生在动作已经真实落地之后（评论已发出、回卡失败）→ 保守不归还，宁可少发绝不重发。
+  const threw = mkRetry(() => Promise.reject(new Error('boom')));
+  await threw.scheduler.onTick();
+  await settle();
+  threw.state.nowMs = new Date(2026, 0, 5, 10, (OFFSET + 1) % 60, 0).getTime();
+  await threw.scheduler.onTick();
+  await settle();
+  assert.deepEqual(threw.calls, [ACC], '异常不归还名额');
+});

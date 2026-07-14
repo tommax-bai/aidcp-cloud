@@ -385,7 +385,8 @@ export class CommentScheduler {
     }
     const conn = this.deps.resolveConnection(accountId);
     if (!conn || !conn.edgeId) {
-      return { ok: false, level: 'error', title: '按需评论触发失败', message: '该账号暂无在线边端' };
+      // 瞬时失败：边端可能马上回来（重连 / 冷待机唤醒中）。code 让排期调度器归还小时格、在本小时内有界重试。
+      return { ok: false, level: 'error', title: '按需评论触发失败', message: '该账号暂无在线边端', code: 'edge_offline' };
     }
     let platformProfile: CommentPlatformProfile;
     try {

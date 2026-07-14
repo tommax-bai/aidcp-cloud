@@ -98,8 +98,37 @@ export interface ContentSchedulerDeps {
   triggerContactComment?(accountId: string, approvalMode: ContentScheduleApprovalMode): Promise<unknown>;
   /** 该账号今日联系评论自动尝试数（持久 attempts 台账，Asia/Shanghai 自然日；尝试型上限）。 */
   contactAttemptsTodayCount?(accountId: string): Promise<number>;
+  /**
+   * 本小时格的有界重试全部用尽、诚实放弃时回调一次（change browser-slot-scheduling）。
+   *
+   * 为什么在这里、而不是每次未开始都回卡：瞬时失败会在本小时内重试，每次都发卡 = 每分钟刷一张告警。
+   * 一个小时格只发**一张**放弃卡，运维看到的就是「这一小时没做成，原因是 X」，不是一串噪声。
+   */
+  onCellAbandoned?(accountId: string, action: string, reason: string): void;
   now?: () => number;
   logger?: { warn: (m: string) => void; info?: (m: string) => void };
+}
+
+/**
+ * 触发回执（change browser-slot-scheduling）：触发实现 MAY 返回它来如实声明「本次根本没开跑」。
+ *
+ * 为什么需要：小时格是**每小时只有一分钟**的开火窗口（分钟错峰），而那一分钟**全天固定**。若一次
+ * 「根本没开跑」的失败（边缘离线 / 浏览器停泊唤醒失败 / 租约不可得 / 配额拒）也把这小时的名额烧掉，
+ * 相位一旦不利，账号会**整天一次都触发不了**。started=false ⇒ 归还小时格，本小时剩余分钟可再试。
+ *
+ * 未返回该形状的触发（老实现 / 返回任意值）一律按「已开跑」处理——零回归、保守方向。
+ */
+export interface ScheduleTriggerOutcome {
+  /** false = 本次未开始任何业务动作（未搜索、未选中、未发布）；名额可归还。 */
+  started: boolean;
+  /** 机器可读的未开始原因（如 edge_offline / browser_wake_failed / lease_unavailable / quota_denied）。 */
+  reason?: string;
+}
+
+function notStartedReason(result: unknown): string | undefined {
+  if (!result || typeof result !== 'object') return undefined;
+  const outcome = result as ScheduleTriggerOutcome;
+  return outcome.started === false ? (outcome.reason ?? 'not_started') : undefined;
 }
 
 /** 稳定字符串哈希（djb2），→ 无符号 32 位。纯函数、可复现。 */
@@ -127,6 +156,9 @@ export function offsetMinute(accountId: string, day: Date, action: string): numb
   return hash32(`${accountId}|${localDayKey(day)}|${action}`) % 60;
 }
 
+/** 「未开始」后，同一小时格内最多再试几次（有界；一个起不来的边缘不得被叫醒 59 次）。 */
+const MAX_RETRIES_PER_CELL = 5;
+
 export class ContentScheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
   private tickRunning = false;
@@ -140,11 +172,81 @@ export class ContentScheduler {
   private readonly inFlight = new Set<string>();
   /** 幂等：`account|action` → 上次触发的小时格键（每动作独立，发帖触发不吞同小时评论槽）。 */
   private readonly lastFired = new Map<string, string>();
+  /**
+   * 小时内重试窗（change browser-slot-scheduling）：`account|action` → { 小时格, 剩余重试次数 }。
+   *
+   * 归还小时格只是**必要**条件——开火窗口本身每小时只有错峰的那一分钟，光归还名额、下一分钟仍不开火，
+   * 名额就白还了。所以「未开始」之后在**本小时格内**打开重试窗：任意分钟都可再试，直到成功或次数用尽。
+   * 有界（MAX_RETRIES_PER_CELL）是刚性的：否则一个起不来的边缘会在一小时里被反复叫醒 59 次。
+   */
+  private readonly retry = new Map<string, { cell: string; left: number }>();
 
   constructor(private readonly deps: ContentSchedulerDeps) {}
 
   private now(): number {
     return this.deps.now?.() ?? Date.now();
+  }
+
+  /**
+   * 触发一个动作（change browser-slot-scheduling）。
+   *
+   * 小时格**先乐观占住**——在途期间它是「同格不重触发」的第二道闸（第一道是 inFlight / isXxxBusy 单飞）。
+   * 触发若如实声明「根本没开跑」（started=false）则**归还小时格**：本小时剩余分钟可再试。
+   *
+   * 抛异常**不归还**：异常可能发生在业务动作已经真实落地之后（如评论已发出、回卡失败）。宁可这一小时
+   * 少发一次，也绝不重复发——「自愈不自残」的保守侧。
+   */
+  private fire(
+    accountId: string,
+    action: string,
+    fireKey: string,
+    cell: string,
+    run: () => Promise<unknown>,
+    onSettled?: () => void,
+  ): void {
+    this.lastFired.set(fireKey, cell);
+    this.inFlight.add(accountId);
+    void run()
+      .then((result) => {
+        const reason = notStartedReason(result);
+        if (reason === undefined) this.retry.delete(fireKey); // 真开跑了 → 关掉重试窗
+        else this.releaseHourCell(accountId, action, fireKey, cell, reason);
+      })
+      .catch((e) => this.deps.logger?.warn(`[content-scheduler] trigger:${action} 异常 account=${accountId}：${(e as Error).message}`))
+      .finally(() => {
+        this.inFlight.delete(accountId);
+        onSettled?.();
+      });
+  }
+
+  /** 归还小时格并打开小时内重试窗（仅当它仍是本次占住的那一格；跨小时或已被后续触发改写则不动）。 */
+  private releaseHourCell(accountId: string, action: string, fireKey: string, cell: string, reason: string): void {
+    if (this.lastFired.get(fireKey) !== cell) return;
+    const prev = this.retry.get(fireKey);
+    const left = prev && prev.cell === cell ? prev.left : MAX_RETRIES_PER_CELL;
+    if (left <= 0) {
+      // 重试用尽：本小时格保持已消耗（诚实放弃，绝不无界重叫）。整格只在此处回一张卡。
+      this.deps.logger?.warn(
+        `[content-scheduler] 触发未开始且本小时重试已用尽，放弃本格 account=${accountId} action=${action} cell=${cell} reason=${reason}`,
+      );
+      try {
+        this.deps.onCellAbandoned?.(accountId, action, reason);
+      } catch (e) {
+        this.deps.logger?.warn(`[content-scheduler] onCellAbandoned 回调异常：${(e as Error).message}`);
+      }
+      return;
+    }
+    this.retry.set(fireKey, { cell, left: left - 1 });
+    this.lastFired.delete(fireKey);
+    this.deps.logger?.warn(
+      `[content-scheduler] 触发未开始，归还小时格 account=${accountId} action=${action} cell=${cell} reason=${reason}（本小时剩余 ${left} 次重试）`,
+    );
+  }
+
+  /** 本 tick 是否放行该动作：命中错峰分钟，或落在「未开始」后打开的小时内重试窗。 */
+  private shouldFireNow(accountId: string, action: string, fireKey: string, cell: string, now: Date, minute: number): boolean {
+    if (minute === offsetMinute(accountId, now, action)) return true;
+    return this.retry.get(fireKey)?.cell === cell;
   }
 
   /** 启动每分钟心跳。 */
@@ -204,10 +306,10 @@ export class ContentScheduler {
               // 联系评论两件套未注入（或评论机器缺）→ 该动作整体跳过（零回归）。
               if (!this.deps.triggerContactComment || !this.deps.isCommentBusy || !this.deps.contactAttemptsTodayCount) continue;
             }
-            // 分钟错峰（按动作独立哈希，动作间自然岔开）。
-            if (minute !== offsetMinute(accountId, now, action)) continue;
             // 幂等：每动作独立小时格键（发帖触发绝不吞同小时评论槽）。
             const fireKey = `${accountId}|${action}`;
+            // 分钟错峰（按动作独立哈希，动作间自然岔开）；「未开始」后本小时格内的重试窗同样放行。
+            if (!this.shouldFireNow(accountId, action, fireKey, cell, now, minute)) continue;
             if (this.lastFired.get(fireKey) === cell) continue;
             // 风控 normal 闸（账号级，靠后放：仅命中分钟才付 async 成本）。
             if ((await this.deps.riskStatus(accountId)) !== 'normal') break;
@@ -240,16 +342,17 @@ export class ContentScheduler {
                   continue;
                 }
               }
-              this.lastFired.set(fireKey, cell);
-              this.inFlight.add(accountId);
               this.postFiring = true;
-              void this.deps
-                .triggerPost(accountId, postMode)
-                .catch((e) => this.deps.logger?.warn(`[content-scheduler] triggerPost 异常 account=${accountId}：${(e as Error).message}`))
-                .finally(() => {
-                  this.inFlight.delete(accountId);
+              this.fire(
+                accountId,
+                action,
+                fireKey,
+                cell,
+                () => this.deps.triggerPost(accountId, postMode),
+                () => {
                   this.postFiring = false;
-                });
+                },
+              );
             } else if (action === 'comment') {
               // 评论单飞：任务在跑不重触发（cap 的「在跑?1:0」项在此恒 0——在跑早被拦下）。
               if (this.deps.isCommentBusy!(accountId)) continue;
@@ -262,12 +365,7 @@ export class ContentScheduler {
 
               const commentMode = s.commentMode;
               if (!actionModeEnabled(commentMode)) continue;
-              this.lastFired.set(fireKey, cell);
-              this.inFlight.add(accountId);
-              void this.deps
-                .triggerComment!(accountId, commentMode)
-                .catch((e) => this.deps.logger?.warn(`[content-scheduler] triggerComment 异常 account=${accountId}：${(e as Error).message}`))
-                .finally(() => this.inFlight.delete(accountId));
+              this.fire(accountId, action, fireKey, cell, () => this.deps.triggerComment!(accountId, commentMode));
             } else if (action === 'join') {
               if (this.deps.isJoinBusy!(accountId)) continue;
               // 跨调度器互斥（change facebook-manual-join-comment）：该账号正在评论（含手动 /comment [--join] 的评论阶段）→ 本 tick 不起加群，
@@ -276,12 +374,7 @@ export class ContentScheduler {
               const [joined, cap] = await Promise.all([this.deps.joinedTodayCount!(accountId), this.deps.joinDailyCap!(accountId)]);
               if (joined >= cap) continue;
 
-              this.lastFired.set(fireKey, cell);
-              this.inFlight.add(accountId);
-              void this.deps
-                .triggerJoin!(accountId)
-                .catch((e) => this.deps.logger?.warn(`[content-scheduler] triggerJoin 异常 account=${accountId}：${(e as Error).message}`))
-                .finally(() => this.inFlight.delete(accountId));
+              this.fire(accountId, action, fireKey, cell, () => this.deps.triggerJoin!(accountId));
             } else {
               // 联系评论：单飞复用评论机器（同一 isRunning，评论/联系评论互斥天然成立）。
               if (this.deps.isCommentBusy!(accountId)) continue;
@@ -293,12 +386,7 @@ export class ContentScheduler {
 
               const contactCommentMode = s.contactCommentMode;
               if (!actionModeEnabled(contactCommentMode)) continue;
-              this.lastFired.set(fireKey, cell);
-              this.inFlight.add(accountId);
-              void this.deps
-                .triggerContactComment!(accountId, contactCommentMode)
-                .catch((e) => this.deps.logger?.warn(`[content-scheduler] triggerContactComment 异常 account=${accountId}：${(e as Error).message}`))
-                .finally(() => this.inFlight.delete(accountId));
+              this.fire(accountId, action, fireKey, cell, () => this.deps.triggerContactComment!(accountId, contactCommentMode));
             }
             break; // 每账号每 tick 至多一动作（防同分钟双动作抢边端）。
           }

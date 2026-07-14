@@ -214,6 +214,12 @@ export interface CommentCommandReceipt {
   level: CommandResultLevel;
   title: string;
   message: string;
+  /**
+   * 机器可读的未触发原因（change browser-slot-scheduling）。仅**瞬时、值得在同一小时格内重试**的原因才置位
+   * （`edge_offline` / `browser_wake_failed` / `lease_unavailable`）；持久性拒绝（未绑人设 / 缺联系方式 / 配额到顶）
+   * 刻意不置位——重试它们无用，只会每分钟刷一张飞书告警卡。缺省 = 不可重试（沿旧行为，零回归）。
+   */
+  code?: string;
 }
 
 export interface PublishCommandOptions {
