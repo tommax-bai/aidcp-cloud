@@ -8,6 +8,7 @@ import { CommentComposer } from '../../src/agents/comment-composer.js';
 import type { NoteData } from '../../src/agents/content-curator-role.js';
 import type { Soul } from '../../src/soul/types.js';
 import { EventBus } from '../../src/event-bus/index.js';
+import { FB_COMMENT_PROFILE, type CommentPlatformProfile } from '../../src/platform/registry.js';
 
 const soul: Soul = {
   identity: { name: 'TestBot', role: 'AI研发工程师', background: 'x', tone: '理性' },
@@ -16,12 +17,16 @@ const soul: Soul = {
 
 const note: NoteData = { noteId: 'n1', title: 'RAG 工程实战', content: '正文内容', likeCount: 10, collectCount: 5 };
 
-function makeComposer(complete: (p: string) => string | Promise<string>) {
+function makeComposer(
+  complete: (p: string) => string | Promise<string>,
+  platformProfile?: CommentPlatformProfile,
+) {
   let lastPrompt = '';
   const composer = new CommentComposer({
     eventBus: new EventBus(),
     soul,
     getNoteData: () => note,
+    ...(platformProfile ? { platformProfile } : {}),
     llm: {
       complete: async (p) => {
         lastPrompt = p;
@@ -71,5 +76,59 @@ describe('CommentComposer.composeDraft', () => {
     const { composer } = makeComposer(() => '{"text":"@某人 说得对"}');
     const draft = await composer.composeDraft(note);
     assert.ok(draft && !draft.includes('@'));
+  });
+});
+
+describe('CommentComposer 平台词汇与语言规则（change platform-vocabulary-and-thresholds 1.2/2.2）', () => {
+  const fbNote: NoteData = { noteId: 'p1', title: '', content: '', likeCount: 300, collectCount: 0 };
+
+  it('小红书 profile（缺省）：prompt 用「笔记」、无语言规则、上限 50 字（逐字节零回归）', async () => {
+    const { composer, getPrompt } = makeComposer(() => '{"text":"学到了"}');
+    await composer.composeDraft(note);
+    const p = getPrompt();
+    assert.match(p, /为下面这篇你认可的笔记写/);
+    assert.match(p, /当前笔记：/);
+    assert.match(p, /最多 50 字/);
+    assert.doesNotMatch(p, /帖子/);
+    assert.doesNotMatch(p, /当地语言/);
+  });
+
+  it('Facebook profile：prompt 用「帖子」、带语言规则、上限 500 字', async () => {
+    const { composer, getPrompt } = makeComposer(() => '{"text":"nice one"}', FB_COMMENT_PROFILE);
+    await composer.composeDraft({ ...fbNote, content: 'a real english post body' });
+    const p = getPrompt();
+    assert.match(p, /为下面这篇你认可的帖子写/);
+    assert.match(p, /当前帖子：/);
+    assert.match(p, /最多 500 字/);
+    assert.match(p, /当地语言/);
+    assert.match(p, /除非原文本来就是中文，否则绝不要用中文/);
+  });
+
+  it('Facebook 空正文帖：诚实说明无文字正文 + 禁臆造画面，不渲染空标题行', async () => {
+    const { composer, getPrompt } = makeComposer(() => '{"decline":"nothing_genuine"}', FB_COMMENT_PROFILE);
+    await composer.composeDraft(fbNote, { onPageComments: ['great post', 'love this'] });
+    const p = getPrompt();
+    assert.match(p, /没有文字正文/);
+    assert.match(p, /别臆造里面有什么/);
+    assert.doesNotMatch(p, /标题：\n/); // 空标题不渲染成 "标题：" 空行
+  });
+
+  it('note.comments 自动进 prompt（FB 由 note.detail 带回，无需显式传 onPageComments）', async () => {
+    const { composer, getPrompt } = makeComposer(() => '{"text":"agreed"}', FB_COMMENT_PROFILE);
+    await composer.composeDraft({ ...fbNote, content: '', comments: ['this helped me', 'same here'] });
+    const p = getPrompt();
+    assert.match(p, /这条帖子现有的评论/);
+    assert.match(p, /this helped me/);
+  });
+
+  it('显式 onPageComments 覆盖 note.comments（命令路径优先）', async () => {
+    const { composer, getPrompt } = makeComposer(() => '{"text":"ok"}', FB_COMMENT_PROFILE);
+    await composer.composeDraft(
+      { ...fbNote, content: 'body', comments: ['from-note'] },
+      { onPageComments: ['explicit-arg'] },
+    );
+    const p = getPrompt();
+    assert.match(p, /explicit-arg/);
+    assert.doesNotMatch(p, /from-note/);
   });
 });

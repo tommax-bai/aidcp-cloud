@@ -43,6 +43,11 @@ export interface CommentPlatformProfile {
   siteName: string;
   contentName: string;
   maxCommentLength: number;
+  /**
+   * 撰写语言约束：只在「内容语言 ≠ 账号母语」的平台声明；缺省 = 不渲染该条（小红书 prompt 逐字不变）。
+   * 单一词表铁律：这是 profile 的一个字段，绝不为语言另开第二张表。
+   */
+  composeLanguageRule?: string;
   metrics: {
     like: string;
     collect: string;
@@ -109,6 +114,10 @@ export const FB_COMMENT_PROFILE: CommentPlatformProfile = {
   contentName: '帖子',
   // 软上界：Facebook 评论无 50 字硬限，这里给一个自然评论的保守上限，真实约束由确定性校验器执行。
   maxCommentLength: 500,
+  // FB 的帖子多为当地语言（英/泰/越/印尼…）。浏览闭环撰写器此前无任何语言约束、prompt 全中文 ⇒ 会往
+  // 当地语言的群里丢中文评论。定向评论路径（server.ts facebookCompose）早有这条规则，此处补齐同口径。
+  composeLanguageRule:
+    '**用与帖子正文 / 现有评论相同的语言写**（当地语言）；除非原文本来就是中文，否则绝不要用中文',
   metrics: {
     like: '赞',
     collect: '', // Facebook 无「收藏」概念；FB 定向评论路径不使用该字段，占位满足类型。

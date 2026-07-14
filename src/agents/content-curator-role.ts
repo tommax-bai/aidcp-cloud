@@ -26,6 +26,9 @@ export interface NoteData {
   /** 详情页作者区关注按钮当下真实态（change skip-profile-visit-if-followed）：已关注/互关→true。
    *  由 note.detail 透传，AuthorEvaluator 据此在评估进主页前短路已关注作者。缺省→原流程。 */
   authorFollowed?: boolean;
+  /** 帖子下他人评论正文样本（change platform-vocabulary-and-thresholds 2.1）：撰写器据此贴合评论区语境。
+   *  Facebook 走 note.detail 透传；小红书由 dispatcher 从 scroll_comments 回执候选归集。缺省→撰写只看正文。 */
+  comments?: string[];
 }
 
 export interface ContentCuratorRoleOptions extends RoleOptions {

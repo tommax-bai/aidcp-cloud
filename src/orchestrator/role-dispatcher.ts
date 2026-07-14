@@ -329,6 +329,9 @@ export interface NoteData {
   /** 详情页作者区关注按钮当下真实态（change skip-profile-visit-if-followed）：已关注/互关→true。
    *  updateNoteData 从 note.detail 透传，AuthorEvaluator 据此在评估进主页前短路。缺省→原流程。 */
   authorFollowed?: boolean;
+  /** 帖子下他人评论正文样本（change platform-vocabulary-and-thresholds 2.1）：撰写器据此贴合评论区语境。
+   *  Facebook 由 note.detail 直接透传；小红书 note.detail 不带评论，由 scroll_comments 回执候选归集到当前笔记。 */
+  comments?: string[];
 }
 
 // ─── RoleDispatcher ─────────────────────────────────────────────────────────
@@ -2169,6 +2172,19 @@ export class RoleDispatcher {
           console.log('[RoleDispatcher] feed-surface 互动 no_target(stale) → 快照过期，重扫换批重选');
           this.sendScrollCommand('rescan_after_stale_target');
           return;
+        }
+        // 现场评论归集（change platform-vocabulary-and-thresholds 2.1）：小红书的 note.detail 不带评论，
+        // 评论区正文只在 scroll_comments 回执的 candidates 里。归到当前笔记上，供撰写器贴合评论区语境
+        // （Facebook 不走这里——其 note.detail 直接带 comments）。只认属于当前笔记的回执，采到多少记多少。
+        if (
+          payload.action === 'scroll_comments' &&
+          payload.ok === true &&
+          payload.candidates?.length &&
+          this.currentNote &&
+          (!payload.noteId || payload.noteId === this.currentNote.noteId)
+        ) {
+          const texts = payload.candidates.map((c) => c.text).filter((t): t is string => Boolean(t && t.trim()));
+          if (texts.length) this.currentNote.comments = texts;
         }
         // 冷却时间戳（engagement-restraint）：仅在真实成功（ok:true）时落；下发失败不起算（不白占冷却窗）。
         // follow 排除 already_followed 良性 no-op（与「no-op 不烧配额」同口径，不算一次真关注）。

@@ -92,7 +92,10 @@ export class CommentComposer extends BaseRole {
 
     let raw: string;
     try {
-      raw = await this.decide(this.buildPrompt(note, references, [], { reason: payload.reason, actions: payload.actions }));
+      // 现场评论（change platform-vocabulary-and-thresholds 2.1）：Facebook 由 note.detail 直接带回、
+      // 小红书由 dispatcher 从 scroll_comments 回执归集。采不到即空 ⇒ prompt 与今天一致。
+      const onPageComments = (note.comments ?? []).filter(Boolean).slice(0, 6);
+      raw = await this.decide(this.buildPrompt(note, references, onPageComments, { reason: payload.reason, actions: payload.actions }));
     } catch {
       this.skip(payload, 'llm_error');
       return;
@@ -151,7 +154,8 @@ export class CommentComposer extends BaseRole {
     opts: { references?: string[]; onPageComments?: string[] } = {},
   ): Promise<string | null> {
     const references = (opts.references ?? []).filter(Boolean).slice(0, 3);
-    const onPageComments = (opts.onPageComments ?? []).filter(Boolean).slice(0, 6);
+    // 显式传入优先；未传则回落到笔记自带的现场评论（Facebook note.detail 直接带回）。
+    const onPageComments = (opts.onPageComments ?? note.comments ?? []).filter(Boolean).slice(0, 6);
     let raw: string;
     try {
       raw = await this.decide(this.buildPrompt(note, references, onPageComments));
@@ -166,31 +170,40 @@ export class CommentComposer extends BaseRole {
   }
 
   private buildPrompt(note: NoteData, references: string[] = [], onPageComments: string[] = [], ctx: ComposeContext = {}): string {
+    // 平台词汇（change platform-vocabulary-and-thresholds 1.2）：内容名词随平台取（小红书=笔记 / Facebook=帖子）。
+    // 缺省 profile = 小红书 ⇒ 本 prompt 对小红书逐字节不变。
+    const { contentName, maxCommentLength, composeLanguageRule } = this.platformProfile;
     const refBlock = references.length
       ? `\n参考（仅作灵感，体会真人怎么留言；【严禁照抄/改写句子】，只借角度与口吻）：\n${references.map((r, i) => `${i + 1}. ${r}`).join('\n')}\n`
       : '';
     // 现场评论块（change comment-search-command）：让评论贴合这条笔记下大家正在聊的，别重复别人已说过的。
     const liveBlock = onPageComments.length
-      ? `\n这条笔记现有的评论（体会大家在聊什么、从哪个角度切入；别重复别人已说过的，也别照抄）：\n${onPageComments.map((c, i) => `${i + 1}. ${c}`).join('\n')}\n`
+      ? `\n这条${contentName}现有的评论（体会大家在聊什么、从哪个角度切入；别重复别人已说过的，也别照抄）：\n${onPageComments.map((c, i) => `${i + 1}. ${c}`).join('\n')}\n`
       : '';
     // 语境穿透（change humanize-interaction-prompts）：刚做了什么互动 + 评估角色为何觉得值得评。
     const actLine = ctx.actions && ctx.actions.length ? `你刚${interactionLabel(ctx.actions)}这篇。` : '';
     const reasonLine = ctx.reason ? `你觉得它值得评，是因为：${ctx.reason}` : '';
     const ctxBlock = actLine || reasonLine ? `\n${[actLine, reasonLine].filter(Boolean).join('')}\n` : '';
+    // 语言约束（change platform-vocabulary-and-thresholds 2.2）：只有声明了该规则的平台才渲染这条 bullet。
+    const langLine = composeLanguageRule ? `\n- ${composeLanguageRule}；` : '';
+    // 空正文（Facebook 图片帖常无正文）：诚实说明「没有文字正文」，并禁止臆造画面内容——不写「标题：」空行。
+    // 现场评论此时就是唯一文字依据；连评论也没有 ⇒ 模型应走 decline，绝不硬凑。
+    const titleLine = note.title.trim() ? `\n标题：${note.title}` : '';
+    const bodyLine = note.content.trim()
+      ? `\n内容：${note.content}`
+      : `\n内容：（这条${contentName}没有文字正文，只有图片/视频。你看不到画面，别臆造里面有什么；只能就着上面的评论区语境写，没有可写的就诚实弃权）`;
     return `${this.personaHeader()}
-为下面这篇你认可的笔记写**一条**评论。${ctxBlock}
+为下面这篇你认可的${contentName}写**一条**评论。${ctxBlock}
 要求：
-- 像真人随手留言，真诚、不营销不客套；一般就一两句，可以更短、更随口（最多 ${this.platformProfile.maxCommentLength} 字）；
-- 贴这篇笔记的具体内容，别泛泛而谈；
+- 像真人随手留言，真诚、不营销不客套；一般就一两句，可以更短、更随口（最多 ${maxCommentLength} 字）；
+- 贴这篇${contentName}的具体内容，别泛泛而谈；${langLine}
 - 怎么切入你自己定，挑最自然的一种、别每条都一个套路：接一句真实共鸣 / 问一个你真想问的问题 / 讲一句你相关的经历 / 一句纯情绪的短评；
 - 用你的人格语气；不要 emoji 堆砌、不要 AI 腔（如「值得一提」「总而言之」「感谢分享」这类客套）；
 - **不要出现 @ 提及**、不要话题标签、不要外链；
 - 如果这篇你其实没有真东西可说、只挤得出客套话，就别硬写。
 ${refBlock}${liveBlock}
-当前笔记：
-作者：${note.author ?? '未知'}
-标题：${note.title}
-内容：${note.content}
+当前${contentName}：
+作者：${note.author ?? '未知'}${titleLine}${bodyLine}
 
 只输出JSON：有真东西想说 → {"text":"你的评论"}；实在没有真东西可说 → {"decline":"nothing_genuine"}`;
   }

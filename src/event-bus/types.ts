@@ -36,6 +36,13 @@ export interface NoteDetailData {
   images?: NoteImagePayload[];
   /** Refresh-only image snapshot; not a new view and not a normal browse-detail decision event. */
   refreshOnly?: boolean;
+  /**
+   * 帖子下他人评论正文样本（change platform-vocabulary-and-thresholds 2.1）：边缘就地读 / 详情深读采到多少报多少，
+   * 采不到即缺省——MUST NOT 伪造。Facebook 图片帖常无正文，这些评论是撰写的主要文字依据。
+   * 协议早有此字段（protocol.ts NoteDetailPayload.comments）、边缘 FB 三条路径均已上报，此前只因本事件类型
+   * 未声明而在云端被静默丢弃。小红书的 note.detail 不带评论，其现场评论走 action.completed{scroll_comments}.candidates。
+   */
+  comments?: string[];
 }
 
 export interface ProfileDetailData {

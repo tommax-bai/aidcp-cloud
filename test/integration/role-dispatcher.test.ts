@@ -737,4 +737,59 @@ describe('RoleDispatcher Integration', () => {
     await new Promise((r) => setTimeout(r, 10));
     assert.ok(starts.length >= 1, 'xhs 账号应正常启动会话（平台闸不拦）');
   });
+
+  // ─── 现场评论归集（change platform-vocabulary-and-thresholds 2.1）─────────────
+  // 小红书 note.detail 不带评论，评论区正文只在 scroll_comments 回执的 candidates 里；dispatcher 应把它
+  // 归到当前笔记上，供撰写器贴合评论区语境。以「撰写 prompt 是否含该评论文本」端到端验证 harvest→compose。
+  describe('scroll_comments 现场评论归集 → 撰写语境', () => {
+    /** 起一个活跃会话 + 捕获所有撰写 prompt（撰写器经 commonOptions 用同一 llm）。 */
+    function makeHarvestFixture() {
+      const prompts: string[] = [];
+      const llm = {
+        complete: async (p: string): Promise<string> => {
+          prompts.push(p);
+          return '{"decline":"nothing_genuine"}'; // 只关心 prompt，不需要真草稿
+        },
+      };
+      const note = { noteId: 'note_0', title: '测试笔记', content: '正文', likeCount: 100, collectCount: 50 };
+      const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: () => {} });
+      dispatcher.setup();
+      dispatcher.updateNoteData(note);
+      dispatcher.startSession();
+      return { dispatcher, prompts };
+    }
+
+    it('scroll_comments 候选归到当前笔记 → 撰写 prompt 带上这些评论', async () => {
+      const { dispatcher, prompts } = makeHarvestFixture();
+      dispatcher.bus.emit('action.completed', {
+        action: 'scroll_comments', ok: true, noteId: 'note_0',
+        candidates: [
+          { anchorId: 'c1', text: '这个分块策略学到了' },
+          { anchorId: 'c2', text: '召回怎么调' },
+          { anchorId: 'c3', text: '   ' }, // 空白评论应被过滤
+        ],
+        ts: Date.now(),
+      });
+      dispatcher.bus.emit('comment.appraised', { noteId: 'note_0', sourcePageType: 'feed', actions: ['like'], ts: Date.now() });
+      await new Promise((r) => setTimeout(r, 20));
+      const composePrompt = prompts.find((p) => /现有的评论/.test(p));
+      assert.ok(composePrompt, '撰写 prompt 应含现场评论块');
+      assert.match(composePrompt!, /这个分块策略学到了/);
+      assert.match(composePrompt!, /召回怎么调/);
+      dispatcher.endSession();
+    });
+
+    it('回执 noteId 与当前笔记不符 → 不归集（不污染别的笔记语境）', async () => {
+      const { dispatcher, prompts } = makeHarvestFixture();
+      dispatcher.bus.emit('action.completed', {
+        action: 'scroll_comments', ok: true, noteId: 'other_note',
+        candidates: [{ anchorId: 'c1', text: '错配笔记的评论' }],
+        ts: Date.now(),
+      });
+      dispatcher.bus.emit('comment.appraised', { noteId: 'note_0', sourcePageType: 'feed', actions: ['like'], ts: Date.now() });
+      await new Promise((r) => setTimeout(r, 20));
+      assert.ok(!prompts.some((p) => /错配笔记的评论/.test(p)), '错配 noteId 的评论绝不进撰写 prompt');
+      dispatcher.endSession();
+    });
+  });
 });
