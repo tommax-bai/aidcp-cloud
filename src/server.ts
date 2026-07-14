@@ -87,7 +87,13 @@ import {
   type PublishApprovalPreflightResult,
 } from './feishu/index.js';
 import { CommandSequencer } from './publish-agent/command-sequencer.js';
-import { clampFillBudgetToLease, DEFAULT_FILL_BUDGET } from './publish-agent/fill-budget.js';
+import {
+  clampFillBudgetToLease,
+  DEFAULT_FILL_BUDGET,
+  DEFAULT_PUBLISH_LEASE_MS,
+  sanitizeFillBudget,
+  warnIfFillBudgetUnusable,
+} from './publish-agent/fill-budget.js';
 import { EdgeTaskLeaseClient } from './comm/edge-task-lease-client.js';
 import { UiSnapshotService } from './comm/ui-snapshot.js';
 import { buildBrowserStandbyHint, resolveBrowserStandbyConfig } from './comm/browser-standby.js';
@@ -1456,16 +1462,21 @@ async function main(): Promise<void> {
   // A 阶段1 发布指令编排器：逐条下发 publish.command、按 recordId+seq 关联 publish.command.result。
   // FB 正文逐字输入：填写这一步的预算随正文长度伸缩下发；上限按发布租约 TTL 收敛，
   // 免得边缘在打字途中单方面过期租约、恢复浏览循环去滚半写的编辑器。
-  const publishLeaseMs = Number(process.env.AIDCP_EDGE_PUBLISH_LEASE_MS ?? 10 * 60_000);
+  const warnBudget = (message: string): void => console.warn(`[aidcp-cloud] ${message}`);
+  const publishLeaseMs = readEnvNumber('AIDCP_EDGE_PUBLISH_LEASE_MS', DEFAULT_PUBLISH_LEASE_MS);
   const fillBudget = clampFillBudgetToLease(
-    {
-      baseMs: readEnvNumber('AIDCP_PUBLISH_FILL_BASE_MS', DEFAULT_FILL_BUDGET.baseMs),
-      perCharMs: readEnvNumber('AIDCP_PUBLISH_FILL_PER_CHAR_MS', DEFAULT_FILL_BUDGET.perCharMs),
-      maxMs: readEnvNumber('AIDCP_PUBLISH_FILL_MAX_MS', DEFAULT_FILL_BUDGET.maxMs),
-    },
+    sanitizeFillBudget(
+      {
+        baseMs: readEnvNumber('AIDCP_PUBLISH_FILL_BASE_MS', DEFAULT_FILL_BUDGET.baseMs),
+        perCharMs: readEnvNumber('AIDCP_PUBLISH_FILL_PER_CHAR_MS', DEFAULT_FILL_BUDGET.perCharMs),
+        maxMs: readEnvNumber('AIDCP_PUBLISH_FILL_MAX_MS', DEFAULT_FILL_BUDGET.maxMs),
+      },
+      warnBudget,
+    ),
     publishLeaseMs,
-    (message) => console.warn(`[aidcp-cloud] ${message}`),
+    warnBudget,
   );
+  warnIfFillBudgetUnusable(fillBudget, warnBudget);
   const commandSequencer = new CommandSequencer({
     pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
     fillBudget,
@@ -1556,7 +1567,12 @@ async function main(): Promise<void> {
     port,
     handler,
     onClose: (session) => {
-      if (session.edgeId) edgeTaskLeases.invalidateEdge(session.edgeId);
+      if (session.edgeId) {
+        edgeTaskLeases.invalidateEdge(session.edgeId);
+        // 在途发布指令一并诚实失败：正文填写的等待窗口随长度伸缩（可达数分钟），
+        // 边缘一死若还傻等满预算，该账号后面所有已审稿件都被堵在串行队列里。
+        commandSequencer.invalidateEdge(session.edgeId);
+      }
       runtimes?.onDisconnect(session);
     },
     // 握手注册完成（连接已可被推送、welcome 已回）→ 回填该账号的陪伴界面快照（昵称/最近发布/在途候审）。

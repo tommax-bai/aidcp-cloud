@@ -8,6 +8,8 @@ import {
   DEFAULT_FILL_BUDGET,
   isContentTooLong,
   maxFillChars,
+  sanitizeFillBudget,
+  warnIfFillBudgetUnusable,
 } from '../../src/publish-agent/fill-budget.js';
 import type { PublishCommandPayload, PublishCommandResultPayload } from '../../src/comm/protocol.js';
 
@@ -126,5 +128,59 @@ describe('正文填写单步预算（FB 逐字输入 vs 固定单步墙）', () 
     } finally {
       (globalThis as { setTimeout: unknown }).setTimeout = realSetTimeout;
     }
+  });
+});
+
+describe('预算配置的失效模式（复审补洞）', () => {
+  it('非法配置一律回落默认值并告警——绝不让 NaN/0 污染下发的预算', () => {
+    const warnings: string[] = [];
+    const w = (m: string) => warnings.push(m);
+
+    // perCharMs=0 会让「可打完的上限」变成无穷 → 诚实长度闸整个失效。
+    assert.deepEqual(sanitizeFillBudget({ baseMs: 20_000, perCharMs: 0, maxMs: 240_000 }, w).perCharMs, 250);
+    // 任一项 NaN 都会一路污染到 timeoutMs，让云端 setTimeout(NaN) 立刻触发 → 孤儿打字级联复活。
+    assert.deepEqual(sanitizeFillBudget({ baseMs: NaN, perCharMs: NaN, maxMs: NaN }, w), DEFAULT_FILL_BUDGET);
+    // maxMs 不大于 baseMs → 一个字都打不了。
+    assert.equal(sanitizeFillBudget({ baseMs: 20_000, perCharMs: 250, maxMs: 5_000 }, w).maxMs, 240_000);
+    assert.ok(warnings.length >= 4);
+  });
+
+  it('租约非法（NaN/负）时按默认租约算天花板，绝不把 NaN 传下去', () => {
+    const warnings: string[] = [];
+    const clamped = clampFillBudgetToLease(DEFAULT_FILL_BUDGET, NaN, (m) => warnings.push(m));
+    assert.equal(Number.isFinite(clamped.maxMs), true);
+    assert.equal(clamped.maxMs, DEFAULT_FILL_BUDGET.maxMs, '默认 600s 租约容得下 240s 上限');
+    assert.equal(warnings.length, 1);
+  });
+
+  it('CommandSequencer 自己也挡一道：非法预算不会变成 NaN 的 timeoutMs', () => {
+    const { seq } = makeSequencer({ fillBudget: { baseMs: NaN, perCharMs: 0, maxMs: NaN }, logger: { log() {}, warn() {}, error() {} } });
+    const fb = seq.buildCommandSequence(input({ platform: 'facebook', content: '字'.repeat(300), images: ['a'] }));
+    const fill = fb.find((c) => c.kind === 'fill_field');
+    assert.equal(Number.isFinite(fill?.timeoutMs), true);
+    assert.equal(fill?.timeoutMs, 20_000 + 300 * 250);
+  });
+
+  it('有效正文上限低于管线设计区间 → 启动时吼出来，并指向配置而非内容生成', () => {
+    const warnings: string[] = [];
+    // 60s 租约 → 上限 24s → 只能打 16 字：每一篇 FB 帖都会以 content_too_long 失败。
+    const tiny = clampFillBudgetToLease(DEFAULT_FILL_BUDGET, 60_000, () => {});
+    assert.equal(maxFillChars(tiny), 16);
+    warnIfFillBudgetUnusable(tiny, (m) => warnings.push(m));
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /配置问题、不是内容生成问题/);
+    // 正常配置不该吼。
+    warnIfFillBudgetUnusable(DEFAULT_FILL_BUDGET, () => assert.fail('正常配置不该告警'));
+  });
+
+  it('边缘断开 → 在途发布指令立刻诚实失败，不空等满预算（否则堵死该账号的串行队列）', async () => {
+    const seq = new CommandSequencer({ pusher: { pushToEdges: () => 1 }, clock: () => 0, logger: { log() {}, warn() {}, error() {} } });
+    const pending = seq.sendAndWaitResult(
+      { taskId: 't', recordId: 9, seq: 0, kind: 'fill_field', params: {}, platform: 'facebook', timeoutMs: 240_000 },
+      'edge-a',
+    );
+    seq.invalidateEdge('edge-b'); // 别的节点断开，不该动它
+    seq.invalidateEdge('edge-a');
+    await assert.rejects(pending, /edge disconnected/);
   });
 });

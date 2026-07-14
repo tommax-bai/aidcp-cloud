@@ -25,6 +25,7 @@ import {
   isContentTooLong,
   maxFillChars,
   contentCharCount,
+  sanitizeFillBudget,
   type FillBudgetConfig,
 } from './fill-budget.js';
 
@@ -103,6 +104,8 @@ export interface CommandSequencerDeps {
 interface Pending {
   commandId: string;
   sentAt: number;
+  /** 该指令定向到的边缘节点；该节点断开即可立刻诚实失败，不必空等满预算。 */
+  edgeId?: string;
   resolve: (r: PublishCommandResultPayload) => void;
   reject: (e: Error) => void;
   timeoutHandle: ReturnType<typeof setTimeout>;
@@ -126,8 +129,10 @@ export class CommandSequencer {
     this.timeoutMs = deps.timeoutMs ?? 30_000;
     this.uploadTimeoutMs = deps.uploadTimeoutMs ?? 60_000;
     this.resultSlackMs = deps.resultSlackMs ?? 8_000;
-    this.fillBudget = deps.fillBudget ?? DEFAULT_FILL_BUDGET;
     this.logger = deps.logger ?? console;
+    // 兜底校验：非法预算（NaN / 0 / 负）会一路污染到下发的 timeoutMs，让云端等待窗口退化成
+    // 「立刻超时」——正是本模块要消灭的孤儿打字级联。构造处已 sanitize，这里再挡一道。
+    this.fillBudget = sanitizeFillBudget(deps.fillBudget ?? DEFAULT_FILL_BUDGET, (m) => this.logger.warn(m));
   }
 
   /** 终稿 → 有序指令序列。AC-PUB 第 2 道：未授权则截止于提交前。 */
@@ -162,8 +167,11 @@ export class CommandSequencer {
     if ((input.platform ?? 'xiaohongshu') === 'facebook' && isContentTooLong(input.content, this.fillBudget)) {
       const chars = contentCharCount(input.content);
       const limit = maxFillChars(this.fillBudget);
+      // 上限低于管线设计区间（200–500 字）时，真凶是预算/租约配置而非内容生成——把话说清楚，
+      // 别让运维照着「内容太长」去砍 prompt。
+      const hint = limit < 600 ? '（上限异常低：真凶多半是预算/租约配置，先查 AIDCP_PUBLISH_FILL_* 与 AIDCP_EDGE_PUBLISH_LEASE_MS）' : '';
       this.logger.warn(
-        `[CommandSequencer] recordId=${input.recordId} 正文 ${chars} 字超出 Facebook 逐字输入上限 ${limit} 字 → 诚实 failed（不截断）`,
+        `[CommandSequencer] recordId=${input.recordId} 正文 ${chars} 字超出 Facebook 逐字输入上限 ${limit} 字 → 诚实 failed（不截断）${hint}`,
       );
       return {
         ok: false,
@@ -295,7 +303,7 @@ export class CommandSequencer {
         this.pending.delete(key);
         reject(new Error(`publish.command timeout seq=${cmd.seq} kind=${cmd.kind}`));
       }, waitMs);
-      this.pending.set(key, { commandId: envelope.id, sentAt: this.clock(), resolve, reject, timeoutHandle });
+      this.pending.set(key, { commandId: envelope.id, sentAt: this.clock(), edgeId, resolve, reject, timeoutHandle });
 
       const sent = this.pusher.pushToEdges(envelope, edgeId);
       if (sent <= 0) {
@@ -304,6 +312,23 @@ export class CommandSequencer {
         reject(new Error(`publish.command not dispatched (no edge) seq=${cmd.seq} kind=${cmd.kind}`));
       }
     });
+  }
+
+  /**
+   * 边缘节点断开：立刻诚实失败该节点上所有在途指令，不必空等满预算。
+   *
+   * 必要性：正文填写的等待窗口现在随长度伸缩（可达数分钟），而发布是按账号串行的——
+   * 边缘一死，若还傻等满预算，该账号后面所有已审稿件都跟着被堵在队列里。
+   * 边缘自己在断连时也会作废在途发布，所以这里失败是如实反映、不是抢跑。
+   */
+  invalidateEdge(edgeId: string): void {
+    for (const [key, pending] of this.pending) {
+      if (pending.edgeId !== edgeId) continue;
+      clearTimeout(pending.timeoutHandle);
+      this.pending.delete(key);
+      this.logger.warn(`[CommandSequencer] 边缘 ${edgeId} 断开 → 在途指令 key=${key} 诚实失败`);
+      pending.reject(new Error(`publish.command edge disconnected edgeId=${edgeId} key=${key}`));
+    }
   }
 
   /** 收到 publish.command.result：按 recordId+seq 关联 resolve（envelope.id 仅日志、不参与查找）。 */
