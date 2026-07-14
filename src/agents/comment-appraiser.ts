@@ -14,6 +14,7 @@ import type { RoleOptions } from './base-role.js';
 import type { NoteData } from './content-curator-role.js';
 import { tieredInterests } from './persona-format.js';
 import { interactionLabel } from './interaction-label.js';
+import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/registry.js';
 import type { RoleName, InteractionCompletedPayload } from '../event-bus/types.js';
 
 /**
@@ -42,6 +43,9 @@ export interface CommentAppraiserOptions extends RoleOptions {
    * 未到点直接 skip，避免白走撰写 / 去 AI 味 / 飞书人审。
    */
   getCommentCooldownOk?: () => boolean;
+  /** 平台词汇 profile（change platform-vocabulary-and-thresholds）；缺省小红书 = 今天。用于站点名/内容名词/
+   *  指标名词去硬编码 + 门槛平台化（无收藏概念平台放宽收藏合取支）。 */
+  platformProfile?: CommentPlatformProfile;
 }
 
 export class CommentAppraiser extends BaseRole {
@@ -50,6 +54,7 @@ export class CommentAppraiser extends BaseRole {
   private readonly getRemainingComments: () => number;
   private readonly getDailyRemaining?: () => number;
   private readonly getCommentCooldownOk?: () => boolean;
+  private readonly platformProfile: CommentPlatformProfile;
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: CommentAppraiserOptions) {
@@ -59,6 +64,7 @@ export class CommentAppraiser extends BaseRole {
     this.getRemainingComments = options.getRemainingComments;
     this.getDailyRemaining = options.getDailyRemaining;
     this.getCommentCooldownOk = options.getCommentCooldownOk;
+    this.platformProfile = options.platformProfile ?? XHS_COMMENT_PROFILE;
   }
 
   subscribe(): void {
@@ -103,8 +109,12 @@ export class CommentAppraiser extends BaseRole {
       this.skip(payload, 'note_data_unavailable');
       return;
     }
-    // 硬数值阈值（engagement-restraint）：点赞 > MIN_LIKES 且（收藏 > MIN_COLLECTS 或 点赞 > HIGH_LIKES 的高热爆帖豁免）才达门槛，否则调 LLM 前即跳过。
-    const collectOk = note.collectCount > COMMENT_MIN_COLLECTS || note.likeCount > COMMENT_HIGH_LIKES;
+    // 硬数值阈值（engagement-restraint）：主条件 = 点赞 > MIN_LIKES（**恒保留**，绝不退化为无门槛）。
+    // 收藏合取支平台化（change platform-vocabulary-and-thresholds）：有收藏概念的平台（小红书）仍需
+    // 收藏 > MIN_COLLECTS 或 点赞 > HIGH_LIKES 的高热豁免；**无收藏概念的平台**（Facebook：metrics.collect==='' 且
+    // collectCount 恒 0）放宽收藏合取支为 true（否则 collectOk 退化成只认 >10000 赞、正常热度帖恒不评=旧 bug）。
+    const hasCollect = this.platformProfile.metrics.collect !== '';
+    const collectOk = !hasCollect || note.collectCount > COMMENT_MIN_COLLECTS || note.likeCount > COMMENT_HIGH_LIKES;
     if (!(note.likeCount > COMMENT_MIN_LIKES && collectOk)) {
       this.skip(payload, 'below_comment_threshold');
       return;
@@ -153,25 +163,28 @@ export class CommentAppraiser extends BaseRole {
   private personaHeader(): string {
     const { identity, interests, behavior_guidelines: bg } = this.soul;
     const lines = [`你是「${identity.name}」，${identity.role}。${identity.background}`, `语气：${identity.tone}`, `兴趣：${tieredInterests(interests)}`];
-    if (bg?.style) lines.push(`你平时逛小红书的风格：${bg.style}`);
+    if (bg?.style) lines.push(`你平时逛${this.platformProfile.siteName}的风格：${bg.style}`);
     return lines.join('\n');
   }
 
   private buildPrompt(note: NoteData, actions: ('like' | 'collect')[] = []): string {
+    const p = this.platformProfile;
+    // 指标行：无收藏概念平台（收藏名词为空）只渲染点赞，绝不显示误导的「收藏：0」。
+    const metricsLine = `${p.metrics.like}数：${note.likeCount}${p.metrics.collect ? `，${p.metrics.collect}数：${note.collectCount}` : ''}`;
     return `${this.personaHeader()}
 
-你刚${interactionLabel(actions)}这篇笔记，现在在想「要不要在下面留一条评论」。
+你刚${interactionLabel(actions)}这篇${p.contentName}，现在在想「要不要在下面留一条评论」。
 
 评论是你最慎重的互动——多数时候你只看不评，只在真有话想说、且内容够好时才开口。
 你什么时候会评：
 - 这篇确实是被很多人认可的好内容（热度明显偏高）；
 - 你对它真有共鸣、有具体的话能说，能自然接上一句；
-- 反过来：普通 / 冷清的笔记、你其实没真东西可说、只能说「学到了 / 感谢分享」这类客套的，一律不评。
+- 反过来：普通 / 冷清的${p.contentName}、你其实没真东西可说、只能说「学到了 / 感谢分享」这类客套的，一律不评。
 
-当前笔记：
+当前${p.contentName}：
 标题：${note.title}
 内容：${note.content}
-点赞数：${note.likeCount}，收藏数：${note.collectCount}
+${metricsLine}
 
 只输出JSON：
 要评：{"comment":true,"reason":"你真正想说的那句话的由头"}

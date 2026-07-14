@@ -112,4 +112,20 @@ describe('DeepReader（多图判定）', () => {
     bus.emit('quality.pass', { noteId: 'note_1', sourcePageType: 'feed', reason: 'ok', ts: Date.now() });
     assert.equal(emitted, false);
   });
+
+  // change platform-vocabulary-and-thresholds：空正文帖（如 Facebook 图片帖常无正文）按图文主导处理（提高翻图概率），
+  // 不再被旧 `textLen > 0` 守卫误判为「长正文」低翻图。random=0.5 下：图文主导概率(0.7)>0.5 ⇒ 翻图；旧逻辑长正文概率(0.4)<0.5 ⇒ 不翻。
+  it('空正文帖 + random=0.5 → 按图文主导翻图（旧逻辑会误判长正文而不翻）', () => {
+    const bus = new EventBus();
+    const emptyBody: NoteData = { noteId: 'note_1', title: 't', content: '', likeCount: 10, collectCount: 0 };
+    const role = new DeepReader({ eventBus: bus, soul: mockSoul, getNoteData: () => emptyBody, random: () => 0.5 });
+    role.subscribe();
+
+    let intent = null as ReadingBrowseImagesPayload | null;
+    bus.on('reading.browse_images', (p) => { intent = p; });
+    bus.emit('quality.pass', { noteId: 'note_1', sourcePageType: 'feed', reason: 'ok', ts: Date.now() });
+
+    assert.ok(intent, '空正文按图文主导 ⇒ 翻图概率高于阈值 ⇒ emit reading.browse_images');
+    role.unsubscribe();
+  });
 });

@@ -21,6 +21,7 @@ import {
   resolveReadSurface,
   resolveCommentSurface,
   loopClosure,
+  commentProfileForPlatform,
   type PlatformId,
   type NoteScopedAction,
   type Surface,
@@ -909,7 +910,15 @@ export class RoleDispatcher {
       complete: (prompt: string, opts?: LlmCallOpts): Promise<string> =>
         this.llm.complete(prompt, { ...opts, accountId: opts?.accountId ?? this.currentAccountId }),
     };
-    const commonOptions = { eventBus: this.eventBus, getSoul: () => this.resolveSoul(), llm: accountBoundLlm };
+    // 平台词汇 profile（change platform-vocabulary-and-thresholds C3）：按本连接账号平台解析站点名 / 内容名词 /
+    // 指标名词，随 commonOptions 注入所有浏览闭环角色（缺该字段的角色因 spread 豁免 excess-check、天然忽略）。
+    // 浏览闭环角色据此去「小红书 / 笔记 / 收藏」硬编码；缺省（无平台）回落小红书 profile = 今天。
+    const commonOptions = {
+      eventBus: this.eventBus,
+      getSoul: () => this.resolveSoul(),
+      llm: accountBoundLlm,
+      platformProfile: commentProfileForPlatform(this.accountPlatform),
+    };
     // 详情页「评论点赞」特性总开关（默认关；线上灰度时置 AIDCP_COMMENT_LIKE=true）。
     // 关闭时：既不注册 CommentLikeAppraiser、也不接线 comment_like.intended 下发——彻底惰性。
     const commentLikeEnabled = process.env.AIDCP_COMMENT_LIKE === 'true';

@@ -15,6 +15,7 @@ import type { RoleOptions } from './base-role.js';
 import { SessionContext } from './session-context.js';
 import { tieredInterests } from './persona-format.js';
 import type { RoleName } from '../event-bus/types.js';
+import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/registry.js';
 
 /**
  * 受控好奇心豁免概率（change humanize-interaction-prompts）：小概率在某一轮选卡里追加
@@ -35,10 +36,16 @@ export interface VisibleCard {
   isVideo?: boolean;
 }
 
+/** 平台词汇 profile（change platform-vocabulary-and-thresholds）：由 dispatcher 随 commonOptions 注入；缺省回落小红书 = 今天。 */
+export interface ContentEvaluatorOptions extends RoleOptions {
+  platformProfile?: CommentPlatformProfile;
+}
+
 export class ContentEvaluator extends BaseRole {
   readonly roleName: RoleName = 'content_evaluator';
   private readonly ctx: SessionContext;
   private readonly random: () => number;
+  private readonly platformProfile: CommentPlatformProfile;
   private unsubscribers: (() => void)[] = [];
 
   /** 当前屏可见卡片（由外部注入或通过事件 payload 提供） */
@@ -47,10 +54,11 @@ export class ContentEvaluator extends BaseRole {
   /** 评估在途标记：避免一批 page.cards 触发多个并发评估 → 多条 open_note */
   private _evaluating = false;
 
-  constructor(options: RoleOptions, ctx: SessionContext, random: () => number = Math.random) {
+  constructor(options: ContentEvaluatorOptions, ctx: SessionContext, random: () => number = Math.random) {
     super(options);
     this.ctx = ctx;
     this.random = random;
+    this.platformProfile = options.platformProfile ?? XHS_COMMENT_PROFILE;
     if (!options.llm) throw new Error('ContentEvaluator 需要 LlmClient');
   }
 
@@ -180,7 +188,9 @@ export class ContentEvaluator extends BaseRole {
     const cardList = cards
       .map((c, i) => {
         const videoTag = c.isVideo ? ' [视频]' : '';
-        return `[${i}] "${c.title}"${videoTag} by ${c.author ?? '未知'} 👍${c.likeCount} ⭐${c.collectCount}${c.coverDesc ? ` (${c.coverDesc})` : ''}`;
+        // 无「收藏」概念的平台（如 Facebook）不渲染收藏指标，避免出现「⭐0」这类幻影数据。
+        const collectTag = this.platformProfile.metrics.collect ? ` ⭐${c.collectCount}` : '';
+        return `[${i}] "${c.title}"${videoTag} by ${c.author ?? '未知'} 👍${c.likeCount}${collectTag}${c.coverDesc ? ` (${c.coverDesc})` : ''}`;
       })
       .join('\n');
 
@@ -189,18 +199,23 @@ export class ContentEvaluator extends BaseRole {
       ? '\n（这一屏你心情不错，也可以纯粹因为某个标题有意思就点开一篇兴趣之外的内容——但仍要是真觉得有意思，不硬凑；品牌安全底线照样适用。）'
       : '';
 
+    // 指标名词（change platform-vocabulary-and-thresholds）：无「收藏」概念的平台（如 Facebook）只提点赞类指标。
+    const metricsHint = this.platformProfile.metrics.collect
+      ? `${this.platformProfile.metrics.like}/${this.platformProfile.metrics.collect}数`
+      : `${this.platformProfile.metrics.like}数`;
+
     return `你是「${identity.name}」，${identity.role}。
 背景：${identity.background}
 兴趣领域：${interestsStr}
 
-你正在小红书${pageType === 'feed' ? '推荐页' : '搜索结果页'}刷着，从下面这些卡片里挑一张你最想点开的。
+你正在${this.platformProfile.siteName}${pageType === 'feed' ? '推荐页' : '搜索结果页'}刷着，从下面这些卡片里挑一张你最想点开的。
 
 可见卡片：
 ${cardList}
 
 你怎么挑：
 1. 先看标题跟你的兴趣对不对味——这是最主要的
-2. 点赞/收藏数看看就好，不必非得高互动
+2. ${metricsHint}看看就好，不必非得高互动
 3. 标 [视频] 的你自己定要不要看（视频也可能有料）
 4. 已经看过的都过滤掉了，这些都是没看过的
 5. 挑一张你真正最想深入看的

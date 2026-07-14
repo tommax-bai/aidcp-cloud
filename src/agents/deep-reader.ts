@@ -134,7 +134,10 @@ export class DeepReader extends BaseRole {
   private planBrowse(note: NoteData | null): { count: number; reason: string } | null {
     const textLen = note?.content?.length ?? 0;
     const engagement = (note?.likeCount ?? 0) + (note?.collectCount ?? 0) * 1.5;
-    const imageLed = textLen > 0 && textLen < SHORT_BODY_THRESHOLD;
+    // 图文主导判定（change platform-vocabulary-and-thresholds）：**含空正文**（textLen===0）——空正文几乎必是图 /
+    // 视频主导帖（如 Facebook 图片帖常无正文），旧 `textLen > 0` 守卫把它误判为「长正文」低翻图，既漏看图又违反
+    // 「数据缺失≠低质量」。故短正文阈值下含 0：空 / 短正文都按图文主导（提高翻图概率），长正文仍走少量看图。
+    const imageLed = textLen < SHORT_BODY_THRESHOLD;
     const highQuality = engagement >= 300 || (imageLed && engagement >= 80);
     const prob = highQuality ? 0.9 : imageLed ? BROWSE_PROB_SHORT : BROWSE_PROB_LONG;
     if (this.random() >= prob) return null;

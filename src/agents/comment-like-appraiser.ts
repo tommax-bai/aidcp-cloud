@@ -21,12 +21,15 @@ import type { NoteData } from './content-curator-role.js';
 import { tieredInterests } from './persona-format.js';
 import type { CommentCandidate } from '../comm/protocol.js';
 import type { RoleName, ReadingScrollCommentsPayload } from '../event-bus/types.js';
+import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/index.js';
 
 /** 点赞哲学兜底（soul 缺 behavior_guidelines 时）：选择性、只在真戳到时点。 */
 const LIKE_PRINCIPLE_FALLBACK = '只在真有共鸣 / 觉得有意思 / 学到东西时才点；平淡的、随手认同的不点';
 
 export interface CommentLikeAppraiserOptions extends RoleOptions {
   getNoteData: (noteId: string) => NoteData | null;
+  /** 平台词汇画像（站名 / 内容名 / 指标名）；缺省回落小红书。 */
+  platformProfile?: CommentPlatformProfile;
   /** 每场会话「评论赞」硬上限剩余（预算闸） */
   getRemainingCommentLikes: () => number;
   /** 本场已发生的 笔记赞 / 评论赞 计数（频率比率闸：评论赞数 ≈ 笔记赞数的 ratio） */
@@ -53,6 +56,7 @@ interface LikePick {
 export class CommentLikeAppraiser extends BaseRole {
   readonly roleName: RoleName = 'comment_like_appraiser';
   private readonly getNoteData: (noteId: string) => NoteData | null;
+  private readonly platformProfile: CommentPlatformProfile;
   private readonly getRemainingCommentLikes: () => number;
   private readonly getSessionLikeCounts: () => { noteLikes: number; commentLikes: number };
   private readonly getCommentLikeDailyRemaining?: () => number;
@@ -69,6 +73,7 @@ export class CommentLikeAppraiser extends BaseRole {
     super(options);
     if (!options.llm) throw new Error('CommentLikeAppraiser 需要 LlmClient');
     this.getNoteData = options.getNoteData;
+    this.platformProfile = options.platformProfile ?? XHS_COMMENT_PROFILE;
     this.getRemainingCommentLikes = options.getRemainingCommentLikes;
     this.getSessionLikeCounts = options.getSessionLikeCounts;
     this.getCommentLikeDailyRemaining = options.getCommentLikeDailyRemaining;
@@ -194,7 +199,7 @@ export class CommentLikeAppraiser extends BaseRole {
 
   private buildPrompt(note: NoteData | null, usable: CommentCandidate[]): string {
     const noteBlock = note
-      ? `当前笔记：\n标题：${note.title}\n内容：${note.content}`
+      ? `当前${this.platformProfile.contentName}：\n标题：${note.title}\n内容：${note.content}`
       : '（正文暂不可用，只凭评论判断）';
     const list = usable
       .map((c, i) => `${i + 1}. ${c.author ? `@${c.author}：` : ''}${c.text}`)
@@ -202,7 +207,7 @@ export class CommentLikeAppraiser extends BaseRole {
 
     return `${this.personaHeader()}
 
-你正在看一篇小红书笔记的评论区，像真人一样**偶尔**会给某条特别戳到你的评论点个赞。
+你正在看一篇${this.platformProfile.siteName}${this.platformProfile.contentName}的评论区，像真人一样**偶尔**会给某条特别戳到你的评论点个赞。
 多数时候不必点；只在确有一条评论**按你上面的点赞标准**真的戳到你时，才点它一个。
 
 ${noteBlock}

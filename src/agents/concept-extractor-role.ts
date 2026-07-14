@@ -14,6 +14,7 @@
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { NoteDetailData, RoleName } from '../event-bus/types.js';
+import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/registry.js';
 
 /** 概念写入下游（ConceptStore 的最小契约，便于注入桩单测）。 */
 export interface ConceptSink {
@@ -24,12 +25,15 @@ export interface ConceptExtractorRoleOptions extends RoleOptions {
   conceptStore: ConceptSink;
   /** 每篇笔记最多抽取的关键词数（默认 3）。 */
   maxKeywords?: number;
+  /** 平台词汇画像（站点名/内容名词等）；缺省回落小红书。 */
+  platformProfile?: CommentPlatformProfile;
 }
 
 export class ConceptExtractorRole extends BaseRole {
   readonly roleName: RoleName = 'concept_extractor';
   private readonly conceptStore: ConceptSink;
   private readonly maxKeywords: number;
+  private readonly platformProfile: CommentPlatformProfile;
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: ConceptExtractorRoleOptions) {
@@ -37,6 +41,7 @@ export class ConceptExtractorRole extends BaseRole {
     if (!options.llm) throw new Error('ConceptExtractorRole 需要 LlmClient');
     this.conceptStore = options.conceptStore;
     this.maxKeywords = options.maxKeywords ?? 3;
+    this.platformProfile = options.platformProfile ?? XHS_COMMENT_PROFILE;
   }
 
   subscribe(): void {
@@ -104,18 +109,18 @@ export class ConceptExtractorRole extends BaseRole {
     const interestsStr = [...interests.primary, ...interests.secondary].join('、');
 
     return `你是「${identity.name}」，${identity.role}。
-你在阅读一篇小红书笔记，请从中抽取**可用作搜索关键词的领域/话题概念名词**，用于后续主动检索同领域优质内容。
+你在阅读一篇${this.platformProfile.siteName}${this.platformProfile.contentName}，请从中抽取**可用作搜索关键词的领域/话题概念名词**，用于后续主动检索同领域优质内容。
 
 你的兴趣领域：${interestsStr}
 
-笔记标题：${note.title}
-笔记正文：${note.content}
+${this.platformProfile.contentName}标题：${note.title}
+${this.platformProfile.contentName}正文：${note.content}
 
 抽取要求：
-- 抽**具体的领域/话题概念名词**（可作搜索词，依笔记所属领域而定——如工具、方法、地点、品类、菜式、玩法等），不限技术领域。
+- 抽**具体的领域/话题概念名词**（可作搜索词，依${this.platformProfile.contentName}所属领域而定——如工具、方法、地点、品类、菜式、玩法等），不限技术领域。
 - 与你兴趣领域相关、有检索价值的优先。
 - 最多 ${this.maxKeywords} 个，按价值排序；宁缺毋滥。
-- **如果笔记里没有值得检索的概念（如纯情绪宣泄/广告/无信息），返回空数组 []。不要编造、不要凑数。**
+- **如果${this.platformProfile.contentName}里没有值得检索的概念（如纯情绪宣泄/广告/无信息），返回空数组 []。不要编造、不要凑数。**
 
 只输出 JSON 数组（不要输出其他内容）：
 ["概念1","概念2"]

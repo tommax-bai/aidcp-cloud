@@ -17,6 +17,7 @@ import type { SessionContext } from './session-context.js';
 import type { NoteData } from './content-curator-role.js';
 import { tieredInterests } from './persona-format.js';
 import type { RoleName, ReadingImagesDonePayload } from '../event-bus/types.js';
+import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/index.js';
 
 export interface CommentReviewerOptions extends RoleOptions {
   sessionContext: SessionContext;
@@ -26,6 +27,8 @@ export interface CommentReviewerOptions extends RoleOptions {
    * 角色只经此闭包感知平台能力，绝不 import registry / 出现 platform==='x'。缺省视为支持（老行为）。
    */
   canScrollComments?: () => boolean;
+  /** 平台词表（站点名 / 内容名 / 互动指标）：缺省小红书，由 dispatcher 经 commonOptions 注入。 */
+  platformProfile?: CommentPlatformProfile;
 }
 
 export class CommentReviewer extends BaseRole {
@@ -33,6 +36,7 @@ export class CommentReviewer extends BaseRole {
   private readonly sessionContext: SessionContext;
   private readonly getNoteData: (noteId: string) => NoteData | null;
   private readonly canScrollComments: () => boolean;
+  private readonly platformProfile: CommentPlatformProfile;
   private unsubscribers: (() => void)[] = [];
   /** 等待 scroll_comments 回执的在途上下文（单飞：一次只深读一篇）。 */
   private pending: { noteId: string; sourcePageType: 'feed' | 'search'; imagesBrowsed: number; count: number } | null = null;
@@ -43,6 +47,7 @@ export class CommentReviewer extends BaseRole {
     this.sessionContext = options.sessionContext;
     this.getNoteData = options.getNoteData;
     this.canScrollComments = options.canScrollComments ?? (() => true);
+    this.platformProfile = options.platformProfile ?? XHS_COMMENT_PROFILE;
   }
 
   subscribe(): void {
@@ -138,22 +143,22 @@ export class CommentReviewer extends BaseRole {
   private personaHeader(): string {
     const { identity, interests, behavior_guidelines: bg } = this.soul;
     const lines = [`你是「${identity.name}」，${identity.role}。${identity.background}`, `语气：${identity.tone}`, `兴趣：${tieredInterests(interests)}`];
-    if (bg?.style) lines.push(`你平时逛小红书的风格：${bg.style}`);
+    if (bg?.style) lines.push(`你平时逛${this.platformProfile.siteName}的风格：${bg.style}`);
     return lines.join('\n');
   }
 
   private buildPrompt(note: NoteData): string {
     const visited = this.sessionContext.visitedCount;
-    const stateLine = visited > 0 ? `\n（本场你已经看过 ${visited} 篇笔记了。）\n` : '';
+    const stateLine = visited > 0 ? `\n（本场你已经看过 ${visited} 篇${this.platformProfile.contentName}了。）\n` : '';
 
     return `${this.personaHeader()}
 
-你刚看完这篇笔记的正文，在想**要不要顺手翻一翻评论区**——像真人一样，有时想看看大家怎么说，有时刷过就算了。
+你刚看完这篇${this.platformProfile.contentName}的正文，在想**要不要顺手翻一翻评论区**——像真人一样，有时想看看大家怎么说，有时刷过就算了。
 ${stateLine}
-笔记信息：
+${this.platformProfile.contentName}信息：
 标题：${note.title}
 内容：${note.content}
-点赞：${note.likeCount}，收藏：${note.collectCount}
+${this.platformProfile.metrics.like}：${note.likeCount}${this.platformProfile.metrics.collect ? `，${this.platformProfile.metrics.collect}：${note.collectCount}` : ''}
 
 你怎么定：
 - 话题跟你兴趣对味、或者互动量挺高（评论区可能有意思）→ 想看看；

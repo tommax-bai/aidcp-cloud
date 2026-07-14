@@ -8,6 +8,8 @@ import assert from 'node:assert/strict';
 import { EventBus } from '../../src/event-bus/index.js';
 import { CommentAppraiser } from '../../src/agents/comment-appraiser.js';
 import type { NoteData } from '../../src/agents/content-curator-role.js';
+import { FB_COMMENT_PROFILE } from '../../src/platform/registry.js';
+import type { CommentPlatformProfile } from '../../src/platform/registry.js';
 import type { Soul } from '../../src/soul/types.js';
 
 const soul: Soul = {
@@ -19,7 +21,7 @@ const trigger = { noteId: 'n1', sourcePageType: 'feed' as const, actions: ['like
 const mkNote = (likeCount: number, collectCount: number): NoteData => ({ noteId: 'n1', title: 't', content: 'c', author: 'a', likeCount, collectCount });
 
 /** 跑一次评估，返回 {appraised, skipped, llmCalled}。 */
-async function run(note: NoteData, opts: { cooldownOk?: boolean } = {}) {
+async function run(note: NoteData, opts: { cooldownOk?: boolean; platformProfile?: CommentPlatformProfile } = {}) {
   const bus = new EventBus();
   let llmCalled = false;
   const role = new CommentAppraiser({
@@ -29,6 +31,7 @@ async function run(note: NoteData, opts: { cooldownOk?: boolean } = {}) {
     getNoteData: () => note,
     getRemainingComments: () => 2,
     ...(opts.cooldownOk === undefined ? {} : { getCommentCooldownOk: () => opts.cooldownOk! }),
+    ...(opts.platformProfile ? { platformProfile: opts.platformProfile } : {}),
   });
   role.subscribe();
   let appraised: any = null;
@@ -96,5 +99,32 @@ describe('CommentAppraiser 评论冷却早判', () => {
     const r = await run(mkNote(5000, 1000), { cooldownOk: true });
     assert.ok(r.appraised);
     assert.equal(r.llmCalled, true);
+  });
+});
+
+// change platform-vocabulary-and-thresholds：无收藏概念平台（Facebook，metrics.collect==='' 且 collectCount 恒 0）
+// 放宽收藏合取支 = true，主 like 门槛（>300）恒保留、绝不退化为无门槛。修「FB 只有万赞爆帖能评」的旧 bug。
+describe('CommentAppraiser 门槛平台化（无收藏概念平台放宽收藏合取支）', () => {
+  it('FB 正常热度帖（500 赞 / 0 藏）→ 达标进入 LLM（旧逻辑会因 collectOk 退化成只认 >10000 赞而 skip）', async () => {
+    const r = await run(mkNote(500, 0), { platformProfile: FB_COMMENT_PROFILE });
+    assert.ok(r.appraised, 'FB 无收藏概念 ⇒ 收藏合取支放宽 ⇒ 正常热度帖过门槛');
+    assert.equal(r.llmCalled, true);
+  });
+
+  it('FB 低热度帖（300 赞 / 0 藏）→ below_comment_threshold（主 like 门槛保留、绝不无门槛）', async () => {
+    const r = await run(mkNote(300, 0), { platformProfile: FB_COMMENT_PROFILE });
+    assert.equal(r.skipped?.reason, 'below_comment_threshold', '放宽收藏支 ≠ 无门槛：赞不足仍被拦');
+    assert.equal(r.llmCalled, false);
+  });
+
+  it('FB 高热度帖（301 赞 / 0 藏）→ 达标（严格大于主 like 门槛）', async () => {
+    const r = await run(mkNote(301, 0), { platformProfile: FB_COMMENT_PROFILE });
+    assert.ok(r.appraised);
+  });
+
+  it('小红书（有收藏概念）不受影响：500 赞 / 50 藏 → 仍 below_comment_threshold（收藏<100、非超高热）', async () => {
+    // 缺省 profile = 小红书；显式再验一次零回归：收藏合取支不放宽。
+    const r = await run(mkNote(500, 50));
+    assert.equal(r.skipped?.reason, 'below_comment_threshold', '有收藏平台零回归');
   });
 });

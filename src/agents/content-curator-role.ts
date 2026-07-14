@@ -14,6 +14,7 @@ import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { SessionContext } from './session-context.js';
 import type { RoleName } from '../event-bus/types.js';
+import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/registry.js';
 
 export interface NoteData {
   noteId: string;
@@ -29,17 +30,21 @@ export interface NoteData {
 
 export interface ContentCuratorRoleOptions extends RoleOptions {
   sessionContext: SessionContext;
+  /** 平台词表（站名/内容名/指标）：dispatcher 经 commonOptions 注入，缺省回落小红书。 */
+  platformProfile?: CommentPlatformProfile;
 }
 
 export class ContentCuratorRole extends BaseRole {
   readonly roleName: RoleName = 'content_curator';
   private readonly sessionContext: SessionContext;
+  private readonly platformProfile: CommentPlatformProfile;
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: ContentCuratorRoleOptions) {
     super(options);
     if (!options.llm) throw new Error('ContentCuratorRole 需要 LlmClient');
     this.sessionContext = options.sessionContext;
+    this.platformProfile = options.platformProfile ?? XHS_COMMENT_PROFILE;
   }
 
   subscribe(): void {
@@ -121,19 +126,19 @@ export class ContentCuratorRole extends BaseRole {
 
     return `你是「${identity.name}」，${identity.role}。
 你的兴趣：${interestsStr}
-你在快速判断：这篇小红书笔记**要不要继续看**（不是评内容好坏，只是粗筛）。
+你在快速判断：这篇${this.platformProfile.siteName}${this.platformProfile.contentName}**要不要继续看**（不是评内容好坏，只是粗筛）。
 
-笔记信息：
+${this.platformProfile.contentName}信息：
 标题：${note.title}
 内容：${note.content}
 作者：${note.author ?? '未知'}
-点赞：${note.likeCount}，收藏：${note.collectCount}
+${this.platformProfile.metrics.like}：${note.likeCount}${this.platformProfile.metrics.collect ? `，${this.platformProfile.metrics.collect}：${note.collectCount}` : ''}
 
 判断口径（偏挑剔，只放真正相关且有内容的）：
-- 只有**话题与你的兴趣明显相关、且笔记真有信息 / 观点 / 经验**时才 pass。
+- 只有**话题与你的兴趣明显相关、且${this.platformProfile.contentName}真有信息 / 观点 / 经验**时才 pass。
 - 这几类一律 close_note：纯广告/带货导流、通篇空话毫无信息、只蹭热点的标题党、与你的兴趣只是擦边或完全无关、纯情绪宣泄无实质内容。
-- **正文为空或很短不等于质量差**：可能是图文/视频笔记，正文本就少；不要仅因正文短而 close（仍按话题相关度与信息量判断）。
-- **拿不准时倾向 close**，宁缺毋滥——把宝贵的互动额度留给真正相关有价值的笔记。
+- **正文为空或很短不等于质量差**：可能是图文/视频${this.platformProfile.contentName}，正文本就少；不要仅因正文短而 close（仍按话题相关度与信息量判断）。
+- **拿不准时倾向 close**，宁缺毋滥——把宝贵的互动额度留给真正相关有价值的${this.platformProfile.contentName}。
 
 只输出JSON：{"action":"pass","reason":"简短原因","confidence":0.7}
 或（仅明显垃圾）：{"action":"close_note","reason":"简短原因","confidence":0.7}`;
