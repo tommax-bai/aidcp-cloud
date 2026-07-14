@@ -19,6 +19,7 @@ import {
   isOrchestrationCapabilitySupported,
   platformFeedScrollFloorMs,
   resolveReadSurface,
+  resolveCommentSurface,
   loopClosure,
   type PlatformId,
   type NoteScopedAction,
@@ -184,6 +185,12 @@ export interface RoleDispatcherOptions {
    * 由 server 接线为复用 messenger + isPublishApproved（评论专属 requestId 命名空间）。
    */
   commentApproval?: CommentApprovalPort;
+  /**
+   * 「已批准未送达」操作员回报（change platform-browse-protocol）：评论迁移的 navigate 步失败 ⇒ 不发评论、
+   * 显式回报操作员（人审成本已付）。缺省（未接线）→ 仅 warn 日志。阶段 0 迁移结构性不可达 ⇒ 从不触发。
+   * 迁移灰度开启（C2）时由 server 接线到飞书出口。
+   */
+  notifyApprovedNotDelivered?: (input: { noteId: string; reason?: string }) => void | Promise<void>;
   /** 该账号当日剩余评论上限（后台配置）。缺省 → 仅会话评论预算 + 风控配额生效。 */
   getCommentDailyRemaining?: () => number;
   /** 该账号当日剩余「评论赞」配额（接 riskController.dailyRemaining('comment_like')）。 */
@@ -334,6 +341,7 @@ export class RoleDispatcher {
   private readonly canView: () => boolean;
   private readonly explainView: () => ViewQuotaDecision;
   private readonly commentApproval?: CommentApprovalPort;
+  private readonly notifyApprovedNotDelivered?: (input: { noteId: string; reason?: string }) => void | Promise<void>;
   private readonly getCommentDailyRemaining?: () => number;
   private readonly getCommentLikeDailyRemaining?: () => number;
   private readonly archiveValuableComment?: (input: ValuableCommentInput) => Promise<void>;
@@ -352,6 +360,16 @@ export class RoleDispatcher {
   private readonly getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
   /** 已下发待回执的评论上下文：action.completed{comment} 据此扣额 + emit comment.done（→ 是否进主页评估）。 */
   private pendingComment: { noteId: string; sourcePageType: 'feed' | 'search'; actions: ('like' | 'collect')[]; text: string } | null = null;
+  /**
+   * 回执驱动两步评论迁移（change platform-browse-protocol）：commentSurface≠readSurface 时先发 open_note{purpose:'navigate'}，
+   * 待其 action.completed{ok, observation.surface:'detail', noteId 匹配} 才发 comment。阶段 0 两 surface 相等 ⇒ 结构性不可达。
+   */
+  private pendingMigration: { noteId: string; sourcePageType: 'feed' | 'search'; actions: ('like' | 'collect')[]; text: string } | null = null;
+  /**
+   * 审批在途标志（change platform-browse-protocol）：comment.cleared 置、comment.approved/comment.skipped 清。
+   * dispatcher 的 idle_nudge 翻译器据此抑制滚动，避免人审等待期把账号滚离目标。**不复用 pauseClock**（其不冻 idle）。
+   */
+  private approvalInFlight = false;
   /** feed 翻页按新卡数算的待发停留兜底（feed-scroll-card-floor）：page.cards.arrived 覆盖写、feed.scrolled 消费后归零。 */
   private pendingFeedFloorMs = 0;
   private readonly isHardPaused: (edgeId?: string) => boolean;
@@ -462,6 +480,7 @@ export class RoleDispatcher {
       return allowed ? { allowed } : { allowed, reason: 'view_quota_exhausted' };
     });
     this.commentApproval = options.commentApproval;
+    this.notifyApprovedNotDelivered = options.notifyApprovedNotDelivered;
     this.getCommentDailyRemaining = options.getCommentDailyRemaining;
     this.getCommentLikeDailyRemaining = options.getCommentLikeDailyRemaining;
     this.archiveValuableComment = options.archiveValuableComment;
@@ -679,6 +698,20 @@ export class RoleDispatcher {
       return false;
     }
     return this.sendCommand(command);
+  }
+
+  /**
+   * 「已批准未送达」操作员回报（change platform-browse-protocol）：评论迁移 navigate 步失败 ⇒ 评论没发出，
+   * 但人审成本已付 ⇒ 显式回报操作员。接线 notifyApprovedNotDelivered 则走飞书出口；缺省仅 warn 日志（阶段 0 不触发）。
+   */
+  private reportApprovedNotDelivered(noteId: string, reason?: string): void {
+    if (this.notifyApprovedNotDelivered) {
+      void Promise.resolve(this.notifyApprovedNotDelivered({ noteId, ...(reason ? { reason } : {}) })).catch((err) => {
+        console.warn(`[RoleDispatcher] 已批准未送达回报失败：${(err as Error).message}`);
+      });
+      return;
+    }
+    console.warn(`[RoleDispatcher] 已批准未送达（未接线操作员回报口，仅日志）note=${noteId} reason=${reason ?? 'nav_failed'}`);
   }
 
   /** 平台是否支持「浏览多图」（注入给 DeepReader；fail-open：无平台/查表失败 ⇒ true）。 */
@@ -1149,6 +1182,9 @@ export class RoleDispatcher {
     this.budgetInit = { ...this.budget };
     this.searchLimiter.resetSession();
     this.clearFacebookNaturalInteractionEvidence();
+    // 跨会话残留清理（change platform-browse-protocol）：迁移在途 / 审批在途标志不得跨会话粘连。
+    this.pendingMigration = null;
+    this.approvalInFlight = false;
     // 跨会话概念记忆：异步刷新，不阻塞 feed.entered（首次搜索发生在连刷阈值之后，届时池已就绪）。
     void this.refreshConceptPool();
     this.eventBus.emit('feed.entered', {
@@ -1572,8 +1608,25 @@ export class RoleDispatcher {
       }),
 
       // idle 看门狗的恢复 nudge → 一次 scroll，重新驱动停滞的浏览循环（reason 仅作日志区分）。
+      // 审批在途抑制（change platform-browse-protocol）：人审等待窗内 idle_nudge MUST NOT 翻译成滚动，
+      // 否则会把账号从待评论目标滚离（**不复用 pauseClock**——其不冻 idle 计时；这里只门控翻译）。
       this.eventBus.on('session.idle_nudge', () => {
+        if (this.approvalInFlight) {
+          console.log('[RoleDispatcher] idle_nudge 落审批在途窗内 → 抑制（不滚动，保持在目标上）');
+          return;
+        }
         this.sendScrollCommand('idle_recover_nudge');
+      }),
+
+      // 审批在途标志起点（change platform-browse-protocol）：comment.cleared（去 AI 味完成、即将进人审）置位。
+      // 由 comment.approved / comment.skipped 清位（人审终局）。浏览闭环严格串行 ⇒ 无重叠审批窗。
+      this.eventBus.on('comment.cleared', () => {
+        this.approvalInFlight = true;
+      }),
+
+      // 审批被跳过/拒绝/超时 → 清审批在途标志（终局之一）。
+      this.eventBus.on('comment.skipped', () => {
+        this.approvalInFlight = false;
       }),
 
       // note.entered 不再发送指令：content.valuable 已经发送了带 index 的 open_note
@@ -1606,6 +1659,8 @@ export class RoleDispatcher {
       // 人审通过的评论 → 下发 comment 指令。风控闸：被拒则诚实跳过（不下发、不扣额），仍 emit comment.skipped 走「是否进主页评估」。
       // 配额改由 action.completed 真实回执扣减（对齐 follow）。
       this.eventBus.on('comment.approved', (payload) => {
+        // 审批终局之一：清审批在途标志（恢复 idle_nudge 翻译）。
+        this.approvalInFlight = false;
         if (!this.canInteract('comment')) {
           console.log(`[RoleDispatcher] 评论被风控拦截，跳过 note=${payload.noteId}`);
           this.eventBus.emit('comment.skipped', {
@@ -1614,6 +1669,22 @@ export class RoleDispatcher {
             actions: payload.actions,
             reason: 'risk_blocked',
             ts: this.clock(),
+          });
+          return;
+        }
+        // 回执驱动两步评论迁移（change platform-browse-protocol）：评论 surface≠读 surface（如 FB 就地读、评论进详情）
+        // ⇒ 先 open_note{purpose:'navigate'} 把浏览器带到详情、等其 action.completed 落地确认后才发 comment。
+        // 阶段 0（XHS/FB 两 surface 皆 detail）⇒ 相等 ⇒ 结构性不可达 ⇒ 逐位走下方直发路径（零回归）。
+        if (resolveCommentSurface(this.accountPlatform) !== resolveReadSurface(this.accountPlatform)) {
+          this.pendingMigration = {
+            noteId: payload.noteId,
+            sourcePageType: payload.sourcePageType,
+            actions: payload.actions,
+            text: payload.text,
+          };
+          this.sendCommand({
+            action: 'open_note',
+            params: { noteId: payload.noteId, purpose: 'navigate', thinkMs: this.thinkNow() },
           });
           return;
         }
@@ -1874,6 +1945,72 @@ export class RoleDispatcher {
       // note.detail/page.cards，事件循环会因无触发而死等；统一以一次 scroll 续刷兜底。
       this.eventBus.on('action.completed', (payload) => {
         console.log(`[RoleDispatcher] action.completed: ${payload.action} ok=${payload.ok}`);
+        // observedSurface 仅审计（change platform-browse-protocol）：回执回声 surface 与静态期望不符 → warn（检测漂移）；
+        // 绝不参与控制流（控制流一律读静态 resolveReadSurface，见 shouldCloseWithScroll）。阶段 0 无 surface 回声 ⇒ 惰性。
+        if (typeof payload.observation === 'object' && payload.observation !== null) {
+          const echoed = (payload.observation as { surface?: unknown }).surface;
+          const expected = resolveReadSurface(this.accountPlatform);
+          if (typeof echoed === 'string' && echoed !== expected) {
+            console.warn(
+              `[RoleDispatcher] observedSurface 漂移：回声=${echoed} 期望=${expected} action=${payload.action}（仅审计、不改控制流）`,
+            );
+          }
+        }
+        // 回执驱动评论迁移·第二步（change platform-browse-protocol）：navigate 步回执落地目标详情 ⇒ 才发 comment；
+        // 未落地 ⇒ 绝不在当前页发评论（fail-closed）+ 显式回报操作员。阶段 0 pendingMigration 恒 null（迁移不可达）⇒ 不触发。
+        if (this.pendingMigration && payload.action === 'open_note') {
+          const mig = this.pendingMigration;
+          this.pendingMigration = null;
+          const echoedSurface =
+            typeof payload.observation === 'object' && payload.observation !== null
+              ? (payload.observation as { surface?: unknown }).surface
+              : undefined;
+          const landed =
+            payload.ok === true && echoedSurface === 'detail' && (!payload.noteId || payload.noteId === mig.noteId);
+          if (landed) {
+            this.sessionContext.markNoteMigratedToDetail();
+            this.pendingComment = { noteId: mig.noteId, sourcePageType: mig.sourcePageType, actions: mig.actions, text: mig.text };
+            this.sendNoteScopedCommand('comment', {
+              action: 'comment',
+              params: { noteId: mig.noteId, text: mig.text, thinkMs: this.thinkNow() },
+            });
+          } else {
+            console.warn(
+              `[RoleDispatcher] 评论迁移 navigate 失败 → 不发评论、回报操作员 note=${mig.noteId} reason=${payload.reason ?? 'nav_failed'}`,
+            );
+            this.reportApprovedNotDelivered(mig.noteId, payload.reason);
+            this.eventBus.emit('comment.done', {
+              noteId: mig.noteId,
+              sourcePageType: mig.sourcePageType,
+              actions: mig.actions,
+              ok: false,
+              ts: this.clock(),
+            });
+          }
+          return;
+        }
+        // feed 到底自愈（change platform-browse-protocol）：feed_exhausted 回执立即映射 refresh，避免转 idle → 240s nudge 循环。
+        // 阶段 0 边缘不上报 feed_exhausted ⇒ 惰性；feed_refresh 能力关时 canRefresh()===false ⇒ 不误发。
+        if (payload.reason === 'feed_exhausted' && this.canRefresh() && this.sessionActive) {
+          console.log('[RoleDispatcher] feed_exhausted → 立即刷新换新批（避免 idle 空转）');
+          this.sendCommand({ action: 'refresh', reason: 'feed_exhausted_refresh', params: { thinkMs: this.thinkNow() } });
+          return;
+        }
+        // 信息流就地互动目标已从 DOM 消失（change platform-browse-protocol）：no_target(stale) 视快照过期 ⇒ 重扫换批重选，
+        // MUST NOT 计互动配额失败（budget 只按 ok:true 扣，天然不烧）。阶段 0 详情页 like/collect（readSurface==='detail'）⇒ 不触发。
+        if (
+          payload.ok === false &&
+          (payload.action === 'like' || payload.action === 'collect') &&
+          typeof payload.reason === 'string' &&
+          payload.reason.startsWith('no_target') &&
+          resolveReadSurface(this.accountPlatform) === 'feed' &&
+          this.sessionActive
+        ) {
+          this.interactionRetry.delete(payload.action);
+          console.log('[RoleDispatcher] feed-surface 互动 no_target(stale) → 快照过期，重扫换批重选');
+          this.sendScrollCommand('rescan_after_stale_target');
+          return;
+        }
         // 冷却时间戳（engagement-restraint）：仅在真实成功（ok:true）时落；下发失败不起算（不白占冷却窗）。
         // follow 排除 already_followed 良性 no-op（与「no-op 不烧配额」同口径，不算一次真关注）。
         if (payload.ok === true) {

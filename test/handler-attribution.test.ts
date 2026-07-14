@@ -6,6 +6,7 @@ import { makeEnvelope } from '../src/comm/protocol.js';
 import { EventBus } from '../src/event-bus/index.js';
 import { SimplePlanner } from '../src/planner/index.js';
 import type { LlmClient } from '../src/llm/qwen.js';
+import { PLATFORM_REGISTRY } from '../src/platform/registry.js';
 
 const noopCache = {
   get: async () => null,
@@ -128,4 +129,123 @@ test('未见 note.detail 时 noteId 不带（不编造）（V1 9.2）', async ()
   );
   assert.equal(got.length, 1);
   assert.equal(got[0].noteId, undefined);
+});
+
+// ── change platform-browse-protocol（C1b）：归账仲裁 ─────────────────────────────
+// 阶段 0（readSurface 恒 detail、edge 不发派生 noteId/observation）⇒ 恒回落 currentNoteId=今天行为（上方既有测试覆盖）。
+// 以下坐实仲裁的三条新分支：派生 noteId 优先、feed-surface 拒记账（版本偏斜闸）、独立见证比对。
+
+test('C1b：回执带派生 noteId ⇒ 用派生 id（不回落 currentNoteId）', async () => {
+  const eventBus = new EventBus();
+  const got = capture(eventBus);
+  const handler = makeHandler(eventBus);
+  const session: EdgeSession = { sessionId: 's-derived', accountId: 'acc-x', platform: 'xiaohongshu' };
+  await handler.handle(
+    makeEnvelope('note.detail', 'nd', 1, { noteId: 'note-42', title: 't', content: 'c', likeCount: 0, collectCount: 0 }),
+    session,
+  );
+  await handler.handle(
+    makeEnvelope('action.completed', 'ac', 1, { action: 'like', ok: true, noteId: 'derived-9' }),
+    session,
+  );
+  const like = got.find((e) => e.action === 'like');
+  assert.ok(like, 'like 已发射');
+  assert.equal(like!.noteId, 'derived-9', '派生 noteId 优先于 currentNoteId');
+});
+
+test('C1b：feed-surface + 声明 inline_targeting + 回执缺派生 noteId ⇒ 拒写血缘（noteId 不带）、风控仍计数', async () => {
+  const original = PLATFORM_REGISTRY.facebook!.noteSurfaces.read_content;
+  PLATFORM_REGISTRY.facebook!.noteSurfaces.read_content = 'feed'; // 模拟 C2：FB 就地读
+  try {
+    const eventBus = new EventBus();
+    const got = capture(eventBus);
+    const handler = makeHandler(eventBus);
+    const session: EdgeSession = {
+      sessionId: 's-feed-refuse', accountId: 'acc-fb', platform: 'facebook',
+      capabilities: ['inline_targeting'], currentNoteId: 'note-42',
+    };
+    await handler.handle(
+      makeEnvelope('action.completed', 'ac', 1, { action: 'like', ok: true }),
+      session,
+    );
+    const like = got.find((e) => e.action === 'like');
+    assert.ok(like, 'like 仍发射 → 风控按真实发生计数');
+    assert.equal(like!.noteId, undefined, 'feed-surface 缺派生 noteId ⇒ 拒写血缘、不回落 currentNoteId');
+  } finally {
+    PLATFORM_REGISTRY.facebook!.noteSurfaces.read_content = original;
+  }
+});
+
+test('C1b：feed-surface 但边缘未声明 inline_targeting（老边端）⇒ 版本偏斜闸不启用，回落 currentNoteId', async () => {
+  const original = PLATFORM_REGISTRY.facebook!.noteSurfaces.read_content;
+  PLATFORM_REGISTRY.facebook!.noteSurfaces.read_content = 'feed';
+  try {
+    const eventBus = new EventBus();
+    const got = capture(eventBus);
+    const handler = makeHandler(eventBus);
+    const session: EdgeSession = {
+      sessionId: 's-old-edge', accountId: 'acc-fb', platform: 'facebook', currentNoteId: 'note-42',
+    };
+    await handler.handle(
+      makeEnvelope('action.completed', 'ac', 1, { action: 'like', ok: true }),
+      session,
+    );
+    const like = got.find((e) => e.action === 'like');
+    assert.equal(like!.noteId, 'note-42', '老边端（未声明能力）⇒ 逐位回落 currentNoteId，绝不误拒');
+  } finally {
+    PLATFORM_REGISTRY.facebook!.noteSurfaces.read_content = original;
+  }
+});
+
+test('C1b：独立见证与选中卡不符 ⇒ target_mismatch，拒写血缘（noteId 不带）、风控仍计数', async () => {
+  const eventBus = new EventBus();
+  const got = capture(eventBus);
+  const handler = makeHandler(eventBus);
+  const session: EdgeSession = { sessionId: 's-mismatch', accountId: 'acc-x', platform: 'xiaohongshu' };
+  // 选中卡：Alice / Hello world
+  await handler.handle(
+    makeEnvelope('page.cards', 'pc', 1, {
+      cards: [{ index: 0, title: 'Hello world', author: 'Alice', likeCount: 5, collectCount: 1, noteId: 'note-42' }],
+    }),
+    session,
+  );
+  await handler.handle(
+    makeEnvelope('note.detail', 'nd', 1, { noteId: 'note-42', title: 'Hello world', content: 'c', likeCount: 5, collectCount: 1 }),
+    session,
+  );
+  // 回执见证：Bob / Totally different —— 与选中卡不符
+  await handler.handle(
+    makeEnvelope('action.completed', 'ac', 1, {
+      action: 'like', ok: true, observation: { author: 'Bob', textPreviewHead: 'Totally different' },
+    }),
+    session,
+  );
+  const like = got.find((e) => e.action === 'like');
+  assert.ok(like, 'like 仍发射 → 风控按真实发生计数（数量真实、目标存疑不猜血缘）');
+  assert.equal(like!.noteId, undefined, '见证不符 ⇒ 拒写 liked_notes 血缘');
+});
+
+test('C1b：独立见证与选中卡相符 ⇒ 血缘正常写（noteId=选中卡）', async () => {
+  const eventBus = new EventBus();
+  const got = capture(eventBus);
+  const handler = makeHandler(eventBus);
+  const session: EdgeSession = { sessionId: 's-match', accountId: 'acc-x', platform: 'xiaohongshu' };
+  await handler.handle(
+    makeEnvelope('page.cards', 'pc', 1, {
+      cards: [{ index: 0, title: 'Hello world', author: 'Alice', likeCount: 5, collectCount: 1, noteId: 'note-42' }],
+    }),
+    session,
+  );
+  await handler.handle(
+    makeEnvelope('note.detail', 'nd', 1, { noteId: 'note-42', title: 'Hello world', content: 'c', likeCount: 5, collectCount: 1 }),
+    session,
+  );
+  await handler.handle(
+    makeEnvelope('action.completed', 'ac', 1, {
+      action: 'like', ok: true, observation: { author: 'Alice', textPreviewHead: 'Hello' },
+    }),
+    session,
+  );
+  const like = got.find((e) => e.action === 'like');
+  assert.equal(like!.noteId, 'note-42', '见证相符 ⇒ 血缘按选中卡写');
 });

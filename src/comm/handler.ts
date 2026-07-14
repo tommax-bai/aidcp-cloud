@@ -60,6 +60,7 @@ import type { FeishuMessenger } from '../feishu/messenger.js';
 import type { BotChatStore } from '../cache/bot-chat-store.js';
 import { RiskController, SessionBudget, buildPacingSnapshot } from '../risk/index.js';
 import type { RiskAction, RiskStatus, RiskQuotaLevel, PacingFloorProvider } from '../risk/index.js';
+import { resolveReadSurface } from '../platform/index.js';
 import type { PacingSnapshotPayload } from './protocol.js';
 import type { AccountStateManager } from '../account-state.js';
 
@@ -199,6 +200,11 @@ export function buildSelectionPrompt(goal: string, elements: RemoteElement[]): s
   ].join('\n');
 }
 
+/** 非空、非数组的普通对象判定（用于收窄 action.completed 的 observation 独立见证包）。 */
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
 /** 从模型输出解析整数编号 */
 export function parseIndex(raw: string): number | null {
   const m = raw.match(/-?\d+/);
@@ -218,6 +224,12 @@ export class DefaultMessageHandler implements MessageHandler {
    */
   private readonly personaGenInflight = new Map<string, Promise<PersonaGenerateResultPayload>>();
 
+  /**
+   * 灰度回滚计数（change platform-browse-protocol）：独立见证与选中卡不符（target_mismatch）累计次数。
+   * 聚合指标（跨连接），供信息流就地点赞灰度期观测「点错卡」率；只增不控制流。
+   */
+  private targetMismatchCount = 0;
+
   constructor(private readonly deps: HandlerDeps) {
     this.clock = deps.clock ?? Date.now;
     this.serverVersion = deps.serverVersion ?? '0.1.0';
@@ -233,6 +245,69 @@ export class DefaultMessageHandler implements MessageHandler {
   /** 该连接真实账号的 RiskController；未接线则回落注入的单一 controller（向后兼容）。 */
   private controllerFor(session: EdgeSession): RiskController {
     return this.deps.resolveController?.(session) ?? this.riskController;
+  }
+
+  /**
+   * note-scoped 互动（like/collect）的血缘归账仲裁（change platform-browse-protocol）。
+   * 返回写入 interaction.occurred 的 noteId（undefined=拒写血缘；风控仍按真实发生计数、不写 liked_notes 血缘）。
+   * 阶段 0（readSurface 恒 detail、无派生 noteId、无 observation）逐位回落 session.currentNoteId=今天行为。
+   *
+   * 优先级：
+   *  1) 回执带独立见证 observation ⇒ 逐字段比对选中卡：不符=target_mismatch⇒拒写血缘+审计+灰度回滚计数；
+   *     相符=选中卡被独立见证证实⇒用派生 noteId ?? currentNoteId；查不到选中卡=无法证实⇒拒写（fail-closed）。
+   *  2) 无 observation 但带派生 noteId ⇒ 用派生 noteId（信息流就地互动的权威被点 id）。
+   *  3) 无 observation 无派生 noteId 且 readSurface==='feed' 且边缘声明 inline_targeting ⇒ 拒写血缘+审计
+   *     （feed 上无法证实点了哪张，MUST NOT 回落 currentNoteId——版本偏斜闸）。
+   *  4) 其余（详情页 / 老边端）⇒ session.currentNoteId（今天行为，零回归）。
+   */
+  private attributeNoteScopedNoteId(
+    session: EdgeSession,
+    result: ActionCompletedPayload,
+    readSurface: 'feed' | 'detail',
+  ): string | undefined {
+    const derived = typeof result.noteId === 'string' && result.noteId.length > 0 ? result.noteId : undefined;
+    if (isRecord(result.observation)) {
+      const verdict = this.witnessVerdict(session, result.observation);
+      if (verdict === 'mismatch') {
+        this.targetMismatchCount += 1;
+        this.logger.warn(
+          `[comm] 互动 target_mismatch：独立见证与选中卡不符 → 拒写血缘（风控仍计数）action=${result.action} mismatchCount=${this.targetMismatchCount}`,
+        );
+        return undefined;
+      }
+      if (verdict === 'match') return derived ?? session.currentNoteId;
+      // 'unknown'：回执带见证却定位不到选中卡 → 无法证实归属，fail-closed 拒写血缘（绝不猜）。
+      this.logger.warn('[comm] 互动带独立见证却无匹配选中卡 → 拒写血缘（无法证实归属）');
+      return undefined;
+    }
+    if (derived) return derived;
+    if (readSurface === 'feed' && (session.capabilities ?? []).includes('inline_targeting')) {
+      this.logger.warn(
+        `[comm] feed-surface 互动回执缺派生 noteId → 拒记账（不回落 currentNoteId）action=${result.action}`,
+      );
+      return undefined;
+    }
+    return session.currentNoteId;
+  }
+
+  /**
+   * 逐字段比对回执独立见证（现读被点 article）与最近一批 page.cards 里的选中卡（编排本意要点的那张，
+   * 按 session.currentNoteId 在 lastCards 中定位）。author / textPreviewHead 任一实证不符 ⇒ 'mismatch'；
+   * 定位不到选中卡 ⇒ 'unknown'；否则 'match'。字段缺失不下负面结论（缺席≠不符）。
+   */
+  private witnessVerdict(
+    session: EdgeSession,
+    observation: Record<string, unknown>,
+  ): 'match' | 'mismatch' | 'unknown' {
+    const selected = session.lastCards?.find((c) => c.noteId && c.noteId === session.currentNoteId);
+    if (!selected) return 'unknown';
+    const obsAuthor = typeof observation.author === 'string' ? observation.author.trim() : undefined;
+    const cardAuthor = typeof selected.author === 'string' ? selected.author.trim() : undefined;
+    if (obsAuthor && cardAuthor && obsAuthor !== cardAuthor) return 'mismatch';
+    const obsHead = typeof observation.textPreviewHead === 'string' ? observation.textPreviewHead.trim() : undefined;
+    const cardTitle = typeof selected.title === 'string' ? selected.title.trim() : undefined;
+    if (obsHead && cardTitle && !obsHead.startsWith(cardTitle) && !cardTitle.startsWith(obsHead)) return 'mismatch';
+    return 'match';
   }
 
   async handle(
@@ -331,6 +406,9 @@ export class DefaultMessageHandler implements MessageHandler {
         return null;
       case 'page.cards': {
         const { cards, startupId } = env.payload as PageCardsPayload;
+        // 留存最近一批卡快照（change platform-browse-protocol）：note-scoped 互动回执带独立见证 observation 时，
+        // 归账仲裁据此逐字段比对选中卡（信息流就地点赞防点错卡）。详情页/无 observation 时不消费——阶段 0 惰性。
+        session.lastCards = cards;
         this.bus(session).emit('page.cards.arrived', { cards, ...(startupId ? { startupId } : {}), ts: this.clock() });
         return null;
       }
@@ -408,20 +486,28 @@ export class DefaultMessageHandler implements MessageHandler {
           result.reason !== 'already_followed' &&
           (result.action !== 'join_group' || (result.clicked === true && result.reason !== 'already_member' && result.reason !== 'observation_only'))
         ) {
-          // 展示账本目标 id（change interaction-feed-enrichment）：关注按作者（currentAuthorId），其余按笔记（currentNoteId）。
+          // 血缘归账 noteId（change platform-browse-protocol）：like/collect 走独立见证仲裁（派生 id / 见证比对 /
+          // feed-surface 拒记账），follow/comment/comment_like/join_group 保持 currentNoteId（今天行为，逐位不变）。
+          // 阶段 0（readSurface 恒 detail、无派生 id、无 observation）⇒ 仲裁恒回落 currentNoteId ⇒ 零回归。
+          const readSurface = resolveReadSurface(session.platform);
+          const attributedNoteId =
+            result.action === 'like' || result.action === 'collect'
+              ? this.attributeNoteScopedNoteId(session, result, readSurface)
+              : session.currentNoteId;
+          // 展示账本目标 id（change interaction-feed-enrichment）：关注按作者（currentAuthorId），其余按笔记。
           const targetId =
             result.action === 'follow'
               ? session.currentAuthorId
               : result.action === 'join_group'
                 ? undefined
-                : session.currentNoteId;
+                : attributedNoteId;
           this.bus(session).emit('interaction.occurred', {
             action: result.action as 'like' | 'collect' | 'follow' | 'comment' | 'comment_like' | 'join_group',
             // accountId 从会话填（握手已保证存在）；缺失=上游缺陷，下游 consumer honest-fail 丢弃，绝不回落 default
             accountId: session.accountId,
-            // noteId 从会话当前笔记填（V1 task 9.2）：编排已知当前笔记，喂 likedNoteStore + 按笔记互动历史。
-            // like/collect 总在 note.detail 之后发生，故 currentNoteId 即被互动笔记；缺则不带（如 follow 在主页）。
-            ...(session.currentNoteId ? { noteId: session.currentNoteId } : {}),
+            // noteId：归账仲裁产出（拒写血缘时为 undefined，此时省略字段——风控仍计数、liked_notes 不写）。
+            // like/collect 总在 note.detail 之后（详情页）或就地互动后发生；缺则不带（如 follow 在主页）。
+            ...(attributedNoteId ? { noteId: attributedNoteId } : {}),
             // targetId：喂展示账本 interaction_feed（笔记动作=noteId，关注=authorId）。
             ...(targetId ? { targetId } : {}),
           });
@@ -449,6 +535,8 @@ export class DefaultMessageHandler implements MessageHandler {
     session.edgeId = p.edgeId;
     session.platform = p.platform;
     session.app = p.app;
+    // 边缘能力位（change platform-browse-protocol）：含 inline_targeting 时启用 feed-surface 归账版本偏斜闸。
+    session.capabilities = Array.isArray(p.capabilities) ? p.capabilities : undefined;
     // 身份落到连接：用于风控归属与验证码事件定位（缺字段安全降级，卡片至少带 edgeId）。
     session.accountId = p.accountId;
     session.accountNickname = typeof p.accountNickname === 'string' ? p.accountNickname.trim() || undefined : undefined;

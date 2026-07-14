@@ -18,6 +18,7 @@ import {
   parseEnvelope,
   type Envelope,
   type MessageType,
+  type PageCardsPayload,
 } from './protocol.js';
 
 /** 单条边缘连接的会话上下文 */
@@ -46,6 +47,17 @@ export interface EdgeSession {
    * 用于在 action.completed 发射 follow 的 interaction.occurred 时补 targetId（关注按作者归属，无当前笔记）。
    */
   currentAuthorId?: string;
+  /**
+   * 边缘握手声明的能力位（hello.capabilities，change platform-browse-protocol）。含 `inline_targeting` 时
+   * 表示该边缘会在信息流就地互动回执里派生 noteId；用于 feed-surface 归账的版本偏斜闸（缺派生 id 则拒记账，
+   * 不回落 currentNoteId）。缺省=不声明（老边端），feed-surface 拒记账闸对其不启用。
+   */
+  capabilities?: string[];
+  /**
+   * 最近一批 page.cards 快照（change platform-browse-protocol）：note-scoped 互动回执带独立见证 observation 时，
+   * 云端据此逐字段比对选中卡是否即实际被点 article（信息流就地点赞防点错卡）。详情页/无 observation 时不消费。
+   */
+  lastCards?: PageCardsPayload['cards'];
 }
 
 /**

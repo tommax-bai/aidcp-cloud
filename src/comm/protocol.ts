@@ -429,6 +429,17 @@ export interface NoteOpenPayload {
    * 缺省 = 走原有 index/noteId 卡片定位（小红书浏览闭环旧行为，向后兼容）。
    */
   url?: string;
+  /**
+   * 浏览读取所在界面（change platform-browse-protocol，可选）。'detail'=导航进详情页读取（今天默认）；
+   * 'feed'=在信息流就地展开读取、不离开列表（Facebook 就地浏览，旗标+能力 gated）。缺省='detail'⇒逐位等价。
+   */
+  surface?: 'feed' | 'detail';
+  /**
+   * 打开目的（change platform-browse-protocol，可选）。'read'=打开并上报 note.detail（今天默认）；
+   * 'navigate'=只把浏览器带到该详情页供后续评论迁移，MUST NOT 上报 note.detail（避免用 0 覆盖真实反应数），
+   * 只回 action.completed{ok, observation, noteId}。缺省='read'。
+   */
+  purpose?: 'read' | 'navigate';
   /** 打开前犹豫 / 感知时间中心值（毫秒，可选；时间指令见 §角色驱动指令） */
   thinkMs?: number;
 }
@@ -1143,9 +1154,20 @@ export interface ActionCompletedPayload {
   action: string;
   ok: boolean;
   reason?: string;
+  /**
+   * 被实际作用的内容规范 id（change platform-browse-protocol，可选）。MUST 由边缘从**实际被点的 article DOM**
+   * 重新派生规范 postId，MUST NOT 复制命令 payload。缺省时详情页回执回落会话当前笔记（老边端零回归）、
+   * 信息流就地回执缺此则拒记账（不回落 currentNoteId）。
+   */
+  noteId?: string;
   /** 仅 group.join 回执携带：目标群 URL。 */
   groupUrl?: string;
-  /** 仅 group.join 回执携带：点击前结构化观测。 */
+  /**
+   * 结构化观测（action-discriminated，可选，类型保持 unknown、按 action 收窄）：group.join 携带点击前观测；
+   * note-scoped 互动（like/collect）回执携带独立见证包
+   * {surface?;listKey?;author?;textPreviewHead?;reactionText?;articleIndex?}（现读被点 article），
+   * 供云端归账仲裁逐字段比对选中卡。勿在此处收窄类型（会破坏 group.join 的既有用法）。
+   */
   observation?: unknown;
   /** 仅 group.join 回执携带：点击后结构化观测。 */
   postObservation?: unknown;

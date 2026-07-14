@@ -146,7 +146,9 @@ export interface EventMap {
   /** Refresh-only note detail carrying newly observed carousel images; consumers MUST NOT count it as a new view. */
   'note.image_snapshot.arrived': { detail: NoteDetailData; accountId?: string; ts: number };
   'profile.detail.arrived': { detail: ProfileDetailData; accountId?: string; ts: number };
-  'action.completed': { action: string; ok: boolean; reason?: string; ts: number; candidates?: CommentCandidate[] };
+  // noteId/observation（change platform-browse-protocol）：边缘从被点 article 派生的规范 id + 独立见证包（现读被点卡）。
+  // 归账仲裁（handler.ts）与迁移落地确认 / observedSurface 审计（dispatcher）消费；缺省=今天行为（回落 currentNoteId）。
+  'action.completed': { action: string; ok: boolean; reason?: string; ts: number; candidates?: CommentCandidate[]; noteId?: string; observation?: unknown };
   // 会话控制事件
   'session.should_end': { reason: string; ts: number };
 }
