@@ -60,8 +60,13 @@ test('0041 adds durable recovery/offboarding and releases only account-level amb
   assert.match(sql, /CREATE TABLE IF NOT EXISTS interaction_offboards/);
   assert.match(sql, /purge_due_at[\s\S]*30 days/);
   assert.match(sql, /CREATE TABLE IF NOT EXISTS interaction_offboard_audit/);
+  assert.match(sql, /uq_interaction_send_attempts_dispatching_account[\s\S]*WHERE status IN \('created','dispatched'\)/);
   assert.match(sql, /DROP INDEX IF EXISTS uq_interaction_send_attempts_active_account/);
-  assert.match(sql, /uq_interaction_send_attempts_active_account[\s\S]*WHERE status IN \('created','dispatched'\)/);
+  assert.ok(
+    sql.indexOf('CREATE UNIQUE INDEX IF NOT EXISTS uq_interaction_send_attempts_dispatching_account')
+      < sql.indexOf('DROP INDEX IF EXISTS uq_interaction_send_attempts_active_account'),
+    'replacement account serialization index must exist before the legacy index is removed',
+  );
   assert.match(sql, /reconciliation_state[\s\S]*result_replayed[\s\S]*not_found[\s\S]*binding_conflict/);
   assert.doesNotMatch(sql, /content_text|final_text|cookie|credential/i,
     'offboard audit/migration must not copy message bodies, reply text or credentials');

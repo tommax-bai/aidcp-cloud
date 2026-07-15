@@ -8,10 +8,13 @@ ALTER TABLE interaction_send_attempts
 
 -- An ambiguous attempt remains active for its own job (no blind resend), but it
 -- must not serialize every later job for the account forever.
-DROP INDEX IF EXISTS uq_interaction_send_attempts_active_account;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_interaction_send_attempts_active_account
+-- Install the replacement before removing the legacy, stricter predicate. If
+-- deployment stops between the two statements the account remains fail-closed;
+-- there is never a window without created/dispatched serialization.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_interaction_send_attempts_dispatching_account
   ON interaction_send_attempts (account_id)
   WHERE status IN ('created','dispatched');
+DROP INDEX IF EXISTS uq_interaction_send_attempts_active_account;
 
 CREATE TABLE IF NOT EXISTS interaction_offboards (
   offboard_id              TEXT PRIMARY KEY,
