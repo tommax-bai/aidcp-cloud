@@ -20,6 +20,8 @@ function makeEnv(
     offline?: boolean;
     silent?: boolean; // 收到命令但不回报（测超时）
     searchFail?: { reason?: string }; // search.execute 回诚实失败 action.completed{search,ok:false}（未导航到结果页等）
+    openFail?: { reason?: string }; // note.open 回诚实失败 action.completed{open_note,ok:false}（弹层不弹/抽取失败等）
+    openReportsCards?: boolean; // note.open 后目标卡被回收 → 边端重报 page.cards（而非 note.detail）
     cards?: Array<{ title?: string; author?: string; collectCount?: number; noteId?: string }>;
     detail?: { title?: string; content?: string };
     comments?: Array<{ author?: string; text: string; likeCount?: number }>;
@@ -44,16 +46,22 @@ function makeEnv(
         }
       } else if (env.type === 'note.open') {
         const noteId = env.payload.noteId as string;
-        bus.emit('note.detail.arrived', {
-          detail: {
-            noteId,
-            title: opts.detail?.title ?? '标题',
-            content: opts.detail?.content ?? '正文',
-            likeCount: 10,
-            collectCount: 5,
-          },
-          ts: Date.now(),
-        } as never);
+        if (opts.openFail) {
+          bus.emit('action.completed', { action: 'open_note', ok: false, reason: opts.openFail.reason, ts: Date.now() } as never);
+        } else if (opts.openReportsCards) {
+          bus.emit('page.cards.arrived', { cards: opts.cards ?? [], ts: Date.now() } as never);
+        } else {
+          bus.emit('note.detail.arrived', {
+            detail: {
+              noteId,
+              title: opts.detail?.title ?? '标题',
+              content: opts.detail?.content ?? '正文',
+              likeCount: 10,
+              collectCount: 5,
+            },
+            ts: Date.now(),
+          } as never);
+        }
       } else if (env.type === 'note.scroll_comments') {
         bus.emit('action.completed', { action: 'scroll_comments', ok: opts.scrollOk ?? true, reason: opts.scrollReason, candidates: opts.comments ?? [], ts: Date.now() } as never);
       } else if (env.type === 'interaction.comment') {
@@ -170,6 +178,32 @@ describe('buildEdgeCommentSteps', () => {
     const { pusher } = makeEnv(bus, { silent: true });
     const steps = buildEdgeCommentSteps({ bus, pusher, edgeId: 'e1', dedup: makeDedup(), stepTimeoutMs: 40 });
     assert.equal(await steps.readNote({ index: 0, noteId: 'a', title: 'x' }), null);
+  });
+
+  // change comment-readnote-fastfail：开笔记失败边端诚实回 action.completed{open_note,ok:false}（弹层不弹等）→
+  // 云端竞速消费、立即 null，不干等满单步超时（不再 28s 空等 + 不冒充离线）。
+  it('readNote：边端诚实回 open_note ok:false → 立即 null、不等超时', async () => {
+    const bus = new EventBus();
+    const { pusher } = makeEnv(bus, { openFail: { reason: 'modal_timeout' } });
+    const steps = buildEdgeCommentSteps({ bus, pusher, edgeId: 'e1', dedup: makeDedup(), stepTimeoutMs: 5000 });
+    const t0 = Date.now();
+    const r = await steps.readNote({ index: 0, noteId: 'a', title: 'x' });
+    const elapsed = Date.now() - t0;
+    assert.equal(r, null, '开笔记诚实失败 → null');
+    assert.ok(elapsed < 1000, `应消费 open_note ok:false 快速失败、不干等 5s 超时（实际 ${elapsed}ms）`);
+  });
+
+  // change comment-readnote-fastfail：目标卡被虚拟列表回收、边端重报 page.cards（而非目标 note.detail）→
+  // 云端竞速消费、立即 null，不干等满单步超时。
+  it('readNote：目标卡被回收、边端重报 page.cards → 立即 null、不等超时', async () => {
+    const bus = new EventBus();
+    const { pusher } = makeEnv(bus, { openReportsCards: true, cards: [{ noteId: 'z', title: '别的卡' }] });
+    const steps = buildEdgeCommentSteps({ bus, pusher, edgeId: 'e1', dedup: makeDedup(), stepTimeoutMs: 5000 });
+    const t0 = Date.now();
+    const r = await steps.readNote({ index: 0, noteId: 'a', title: 'x' });
+    const elapsed = Date.now() - t0;
+    assert.equal(r, null, '重报卡片（目标不在当前页）→ null');
+    assert.ok(elapsed < 1000, `应消费重报 page.cards 快速失败、不干等 5s 超时（实际 ${elapsed}ms）`);
   });
 
   it('post：真回执 ok:true → true', async () => {

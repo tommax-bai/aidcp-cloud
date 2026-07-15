@@ -260,24 +260,57 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
     async readNote(card: CommentCandidateCard): Promise<{ note: NoteForComment; comments: OnPageComment[] } | null> {
       if (!card.noteId) return null;
       const noteId = card.noteId;
-      const detail = await sendAndAwait<NoteDetailArrived>(
+      // 竞速三路（change comment-readnote-fastfail，对齐 searchAndHarvest 的 sendAndRace）：
+      //  ① note.detail.arrived 且 noteId 匹配 = 成功；
+      //  ② action.completed{open_note, ok:false} = 边端诚实回失败（弹层不弹/抽取失败/墙钟耗尽/无 noteId 找不到卡）；
+      //  ③ page.cards.arrived = 目标卡已被回收、边端重报卡片（开不了）。
+      // 任一失败信号先到即**快速失败**、不干等满单步超时；失败原因如实（绝不把边端在线的诚实失败冒充「超时/边端离线」）。
+      const outcome = await sendAndRace<
+        { kind: 'detail'; detail: NoteDetailArrived['detail'] } | { kind: 'fail'; reason: string }
+      >(
         bus,
-        'note.detail.arrived',
-        (d) => d.detail?.noteId === noteId,
+        [
+          {
+            event: 'note.detail.arrived',
+            match: (data) => {
+              const d = data as NoteDetailArrived;
+              return d.detail?.noteId === noteId ? { kind: 'detail', detail: d.detail } : undefined;
+            },
+          },
+          {
+            event: 'action.completed',
+            match: (data) => {
+              const d = data as ActionCompleted;
+              if (d.action !== 'open_note' || d.ok) return undefined;
+              return { kind: 'fail', reason: d.reason ?? 'open_note_failed' };
+            },
+          },
+          {
+            // 开笔记命令后收到重报卡片而非目标详情 = 目标卡已不在当前页。
+            event: 'page.cards.arrived',
+            match: () => ({ kind: 'fail', reason: 'target_not_on_page' }),
+          },
+        ],
         timeout,
         () => push(makeEnvelope('note.open', randomUUID(), Date.now(), { taskId, noteId })),
       );
-      if (!detail) {
-        log.warn(`[comment-edge] 开笔记 ${noteId} 无 note.detail（超时/边端离线）`);
+      if (outcome === null) {
+        // 措辞中性：步超时 race 无法区分「边端在跑/慢渲」与「真离线」——不断言离线（对齐 searchAndHarvest）。
+        log.warn(`[comment-edge] 开笔记 ${noteId} 无回执（超时/结果未就绪）`);
+        return null;
+      }
+      if (outcome.kind === 'fail') {
+        // 边端在线、诚实回失败——独立真实结论，绝不冒充「离线」。
+        log.warn(`[comment-edge] 开笔记 ${noteId} 边端诚实回失败（${outcome.reason}）→ 不评`);
         return null;
       }
       const note: NoteForComment = {
-        noteId: detail.detail.noteId,
-        title: detail.detail.title,
-        content: detail.detail.content,
-        author: detail.detail.author,
-        likeCount: detail.detail.likeCount,
-        collectCount: detail.detail.collectCount,
+        noteId: outcome.detail.noteId,
+        title: outcome.detail.title,
+        content: outcome.detail.content,
+        author: outcome.detail.author,
+        likeCount: outcome.detail.likeCount,
+        collectCount: outcome.detail.collectCount,
       };
       // 翻两屏评论区采现场评论（best-effort：抓不到 → 空，不致命）。
       // change fix-interaction-and-comment-capture：区分「采集失败」（ok:false：没找到可滚容器/滚不动/异常）
