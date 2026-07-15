@@ -13,8 +13,13 @@ import type { RoleOptions } from './base-role.js';
 import { SessionContext } from './session-context.js';
 import type { RoleName, ContentNoValuablePayload, SearchSkippedPayload } from '../event-bus/types.js';
 
-/** 连续滚动 N 次无收获后触发搜索的阈值 */
-export const SEARCH_THRESHOLD = 5;
+/** 连续滚动 N 屏无收获后触发搜索的阈值（change bounded-search-excursion：5→20，更耐心地留在首页；
+ *  env `AIDCP_FEED_SEARCH_THRESHOLD` 可调，非法回落 20）。FB 每屏约 1–3 张卡，20 屏≈20–60 张、
+ *  落在 60 张 feed 刷新阈值之内 → 搜索仍会触发。 */
+export const SEARCH_THRESHOLD = ((): number => {
+  const raw = Number(process.env.AIDCP_FEED_SEARCH_THRESHOLD);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 20;
+})();
 
 /** feed 浏览深度到阈值改点右下「刷新」（change feed-refresh-on-depth）。默认开启，仅显式 'false' 关（kill-switch）。 */
 const FEED_REFRESH_ENABLED = process.env.AIDCP_FEED_REFRESH !== 'false';

@@ -16,6 +16,14 @@ import type { RoleName, ContentNoValuablePayload, SearchSkippedPayload } from '.
 /** 搜索结果页连续滚动阈值（与 FeedScroller 共享同一默认值） */
 export const SEARCH_SCROLL_THRESHOLD = 5;
 
+/** 一次搜索行程在搜索结果页累计浏览到 N 张不重复卡片后回首页（change bounded-search-excursion）。
+ *  env `AIDCP_SEARCH_HOME_RETURN_AFTER` 可调，非法回落 20。计数按不重复新卡差分累计，
+ *  故「搜索页一篇都点不开」的空转也计入、同样在达阈值时回首页（不卡死）。 */
+export const SEARCH_HOME_RETURN_AFTER = ((): number => {
+  const raw = Number(process.env.AIDCP_SEARCH_HOME_RETURN_AFTER);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 20;
+})();
+
 export class SearchScroller extends BaseRole {
   readonly roleName: RoleName = 'search_scroller';
   private readonly ctx: SessionContext;

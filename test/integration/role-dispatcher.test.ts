@@ -8,6 +8,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { RoleDispatcher } from '../../src/orchestrator/role-dispatcher.js';
 import type { EdgeCommand } from '../../src/orchestrator/role-dispatcher.js';
+import { SEARCH_THRESHOLD } from '../../src/agents/feed-scroller.js';
 import type { Soul } from '../../src/soul/types.js';
 import type { EventBus } from '../../src/event-bus/index.js';
 
@@ -181,13 +182,10 @@ describe('RoleDispatcher Integration', () => {
 
   it('路径B: 连续无价值滚动 → search.needed → SearchEvaluator → search.approved → SearchExecutor → feed.entered(search)', async () => {
     const commands: EdgeCommand[] = [];
-    // ContentEvaluator 5次返回 skip，SearchEvaluator 返回 search
+    // ContentEvaluator 连续 SEARCH_THRESHOLD 次返回 skip（触发搜索阈值，change bounded-search-excursion 后为 20），
+    // 随后 SearchEvaluator 返回 search。用常量而非硬编码 5，使本用例对阈值调整稳健。
     const llm = createMockLlm([
-      '{"verdict":"skip","reason":"不相关"}',
-      '{"verdict":"skip","reason":"不相关"}',
-      '{"verdict":"skip","reason":"不相关"}',
-      '{"verdict":"skip","reason":"不相关"}',
-      '{"verdict":"skip","reason":"不相关"}',
+      ...Array.from({ length: SEARCH_THRESHOLD }, () => '{"verdict":"skip","reason":"不相关"}'),
       '{"verdict":"search","keyword":"GPT","reason":"需要搜索新内容"}',
     ]);
     const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
@@ -205,8 +203,8 @@ describe('RoleDispatcher Integration', () => {
 
     dispatcher.startSession();
 
-    // 模拟 Edge 反馈循环：5次卡片上报触发评估
-    for (let i = 0; i < 5; i++) {
+    // 模拟 Edge 反馈循环：SEARCH_THRESHOLD 次卡片上报触发评估（同一 noteId → feedCardsBrowsed 恒 1、不触发 60 张刷新）
+    for (let i = 0; i < SEARCH_THRESHOLD; i++) {
       dispatcher.bus.emit('page.cards.arrived', { cards, ts: Date.now() });
       await new Promise((r) => setTimeout(r, 20));
     }

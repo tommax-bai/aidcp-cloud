@@ -52,7 +52,7 @@ import { ProfileOpener } from '../agents/profile-opener.js';
 import { ProfileBrowser } from '../agents/profile-browser.js';
 import { NicknameEnricher } from '../agents/nickname-enricher.js';
 import { FollowAgent, FOLLOW_MIN_FANS_ENGAGEMENT_RATIO } from '../agents/follow-agent.js';
-import { SearchScroller } from '../agents/search-scroller.js';
+import { SearchScroller, SEARCH_HOME_RETURN_AFTER } from '../agents/search-scroller.js';
 import { SearchEvaluator } from '../agents/search-evaluator.js';
 import { SearchExecutor } from '../agents/search-executor.js';
 import { ConceptExtractorRole, type ConceptSink } from '../agents/concept-extractor-role.js';
@@ -1992,6 +1992,10 @@ export class RoleDispatcher {
         const params: Record<string, unknown> = { keyword };
         if (payload.source) params.source = payload.source;
         this.sendCommand({ action: 'search', params });
+        // change bounded-search-excursion（#2 修页型自指 bug）：唯一权威写入点——**真正下发了搜索指令**
+        // 才把当前列表页型标为 search（被上面两道闸拦下、未下发的搜索绝不到这里，故不会误翻转）。
+        // 由此搜索结果页被 SearchScroller 正确驱动、搜索卡不再计入 feed 深度；回首页时在 page.cards 处标回 feed。
+        this.sessionContext.setSourcePageType('search');
         // 跨会话标记已搜（fire-and-forget，失败不影响本次下发）。
         this.conceptStore?.markSearched(keyword).catch((err) =>
           console.warn(`[RoleDispatcher] markSearched 失败 keyword=${keyword}: ${err instanceof Error ? err.message : String(err)}`),
@@ -2120,6 +2124,29 @@ export class RoleDispatcher {
             progress: this.progress(),
             pacing: this.pacingFloors,
           });
+        } else if (this.sessionContext.sourcePageType === 'search') {
+          // change bounded-search-excursion（#3 搜索行程有界退出）：搜索结果页累计浏览的不重复卡数达阈值 → 回首页。
+          // 用独立的搜索卡差分基准（不污染 feed 集合）；差分累计天然覆盖「搜索页一篇都点不开」的空转（照样计卡）。
+          const searchNoteIds = payload.cards
+            .map((c) => c.noteId)
+            .filter((id): id is string => typeof id === 'string' && id.length > 0);
+          this.sessionContext.addSearchCardsBrowsed(this.sessionContext.searchBatchNewCount(searchNoteIds));
+          if (
+            this.sessionContext.searchCardsBrowsed >= SEARCH_HOME_RETURN_AFTER &&
+            this.canRefresh() &&
+            this.sessionActive
+          ) {
+            // 结束搜索行程：标回 feed + 清搜索/滚动/feed 深度计数，复用既有 refresh（回顶换首页）指令回首页。
+            // canRefresh()===false 的平台诚实降级（不回首页、继续评估当前页），绝不伪造已回首页。
+            const cardsSeen = this.sessionContext.searchCardsBrowsed;
+            this.sessionContext.setSourcePageType('feed');
+            this.sessionContext.resetSearchCardsBrowsed();
+            this.sessionContext.resetScrolls();
+            this.sessionContext.resetFeedCardsBrowsed();
+            console.log(`[RoleDispatcher] 搜索行程累计 ${cardsSeen} 张卡 ≥ ${SEARCH_HOME_RETURN_AFTER} → 回首页（search_home_return）`);
+            this.sendCommand({ action: 'refresh', reason: 'search_home_return', params: { thinkMs: this.thinkNow() } });
+            return; // 已发回首页指令：跳过对本批搜索卡的评估（正离开搜索页）
+          }
         }
         void this.contentEvaluator?.evaluate(this.sessionContext.sourcePageType);
       }),

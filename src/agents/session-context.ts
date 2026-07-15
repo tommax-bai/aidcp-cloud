@@ -38,6 +38,12 @@ export class SessionContext {
    */
   private _lastFeedNoteIds: Set<string> = new Set();
 
+  /** 本会话当前搜索行程累计已浏览的不重复"搜索结果"卡数（change bounded-search-excursion）：达阈值回首页、
+   *  结束一次搜索行程。per-search-excursion（回首页 / reset 归零）。与 _feedCardsBrowsed 完全分离、互不干扰。 */
+  private _searchCardsBrowsed: number = 0;
+  /** 上一批搜索结果可见卡的 noteId 集合（搜索卡差分基准，独立于 _lastFeedNoteIds）：回首页 / reset 时清。 */
+  private _lastSearchNoteIds: Set<string> = new Set();
+
   /** 通知巡视瞬时状态（reset 必清——断连/结束后绝不残留 active/暂停，否则永久冻结浏览）。 */
   private _excursion: ExcursionState = SessionContext.freshExcursion();
   /** 浏览暂停开关（巡视期扣住 browse 类命令）。存此处 → reset 一并清，断连不冻结。 */
@@ -90,6 +96,27 @@ export class SessionContext {
   get feedCardsBrowsed(): number { return this._feedCardsBrowsed; }
   addFeedCardsBrowsed(n: number): void { if (n > 0) this._feedCardsBrowsed += n; }
   resetFeedCardsBrowsed(): void { this._feedCardsBrowsed = 0; }
+
+  /** 当前搜索行程累计已浏览"搜索结果"卡数（change bounded-search-excursion）。 */
+  get searchCardsBrowsed(): number { return this._searchCardsBrowsed; }
+  addSearchCardsBrowsed(n: number): void { if (n > 0) this._searchCardsBrowsed += n; }
+  /** 结束一次搜索行程：清累计数与搜索卡差分基准（回首页时调）。 */
+  resetSearchCardsBrowsed(): void {
+    this._searchCardsBrowsed = 0;
+    this._lastSearchNoteIds = new Set();
+  }
+
+  /**
+   * 算本批相对"上一批搜索结果卡"的新卡数（不在上一批集合中的去重数量），随即用本批 noteId 覆盖基准集合。
+   * 与 feedBatchNewCount 同构但用独立的搜索基准，故 feed/search 差分互不污染。缺 noteId 的卡由调用方剔除、计为非新卡。
+   */
+  searchBatchNewCount(noteIds: string[]): number {
+    const incoming = new Set(noteIds);
+    let newCount = 0;
+    for (const id of incoming) if (!this._lastSearchNoteIds.has(id)) newCount++;
+    this._lastSearchNoteIds = incoming;
+    return newCount;
+  }
 
   markVisited(noteId: string): void { this._visitedNoteIds.add(noteId); }
   isVisited(noteId: string): boolean { return this._visitedNoteIds.has(noteId); }
@@ -201,6 +228,8 @@ export class SessionContext {
     this._currentNoteMigratedToDetail = false;
     this._consecutiveScrolls = 0;
     this._feedCardsBrowsed = 0; // per-session feed 深度预算，重连即重置（change feed-refresh-on-depth）
+    this._searchCardsBrowsed = 0; // per-search-excursion 搜索卡预算，重连即重置（change bounded-search-excursion）
+    this._lastSearchNoteIds = new Set(); // 搜索卡差分基准随重连清（对齐 _searchCardsBrowsed 生命周期）
     // 通知巡视瞬时态 + 暂停开关必清（断连/重连/结束后不残留 active/暂停，否则永久冻结浏览）
     this._excursion = SessionContext.freshExcursion();
     this._browseSuspended = false;
