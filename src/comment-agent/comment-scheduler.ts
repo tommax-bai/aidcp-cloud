@@ -799,141 +799,170 @@ export class CommentScheduler {
       }
     }
 
-    const steps = buildFacebookEdgeSteps({
-      bus: conn.bus,
-      pusher: d.pusher,
-      edgeId: conn.edgeId,
-      ...(typeof d.stepTimeoutMs === 'number' ? { stepTimeoutMs: d.stepTimeoutMs } : {}),
-      logger: d.logger ?? console,
-    });
-    const dedup = d.dedupFor(accountId);
+    // ── keep-open 边端租约（change facebook-manual-comment-keepopen-lease）──
+    // 把「搜索 → 开帖 → 撰写 → 飞书人审 → 提交」整段包进一个持续持有的租约，**贯穿人审等待窗口不释放边端**——
+    // 否则同一会话并发的自治浏览闭环会在审批阻塞期把页面滚回首页（其 page.scroll/返回无 taskId、边端空闲时放行），
+    // 审批通过后目标帖已不在页 → 提交时 own-identity 收窄评论框失败 editor_not_found（真机事故 2026-07-15）。
+    // priority 按手动/排期派生（与小红书 keep-open 同口径）。steps **必须**用 lease.taskId 构建：边端 FB 命令入口
+    // 按 canExecute(payload.taskId) 无差别门控——持租约期无 taskId 命令一律被挡，评论自己的命令不带 taskId 会被自锁挡死。
+    const FB_KEEP_OPEN_LEASE_MS = 4 * 60_000;
+    const priority: EdgeTaskPriority = options.manualOverride ? 'human' : 'automatic';
+    // conn.edgeId / conn.bus 在此已过 `!conn || !conn.edgeId` 守卫（narrowed 为非空）；捕成 const 供闭包用——
+    // 控制流收窄不穿透嵌套闭包，闭包内直接读 conn.edgeId 会被 TS 当 string|undefined。
+    const leaseEdgeId = conn.edgeId;
+    const connBus = conn.bus;
+    try {
+      await this.deps.edgeTaskLeases.withLease(
+        { edgeId: leaseEdgeId, kind: 'comment_prepare', priority, leaseMs: FB_KEEP_OPEN_LEASE_MS },
+        async (lease) => {
+          const steps = buildFacebookEdgeSteps({
+            bus: connBus,
+            pusher: d.pusher,
+            edgeId: leaseEdgeId,
+            taskId: lease.taskId,
+            ...(typeof d.stepTimeoutMs === 'number' ? { stepTimeoutMs: d.stepTimeoutMs } : {}),
+            logger: d.logger ?? console,
+          });
+          const dedup = d.dedupFor(accountId);
 
-    // 1) 容器内搜索候选帖（边端只在 joined/pinned 群内搜、绝不全站）。用 url 下发。
-    const search = await steps.searchInContainer(keyword, containerUrl);
-    // 边缘回传的真实群名 → 回填配置容器名（人只看群名、不看 id）；本轮后续审计也改用真名。
-    if (search.containerName) {
-      container = search.containerName;
-      void d.facebookResolveContainerName?.(accountId, containerUrl, search.containerName);
-    }
-    if (!search.ok) {
-      audit({ accountId, outcome: mapFacebookBlockOutcome(search.reason), reason: search.reason, shadow, keyword, container });
-      if (usingCoverage && search.reason) void d.facebookCoverageOnFailure?.(accountId, containerUrl, search.reason);
-      return;
-    }
-    // 2) 选一个未评过的候选（防重复真发：跳过 dedup 已标记的 permalink）。
-    // --force（manual-comment-force-flag）：放开每帖去重，直接取第一个候选（已评过的也可再评）；否则跳过已评过的。
-    let target: string | undefined;
-    if (options.force) {
-      target = search.candidates[0]?.permalink;
-    } else {
-      for (const c of search.candidates) {
-        const seen = await dedup.hasInteracted(c.permalink, 'comment').catch(() => false);
-        if (!seen) {
-          target = c.permalink;
-          break;
-        }
-      }
-    }
-    if (!target) {
-      audit({
-        accountId,
-        outcome: 'no_strong_candidate',
-        reason: search.candidates.length === 0 ? 'no_candidates' : 'all_deduped',
-        shadow,
-        keyword,
-        container,
-      });
-      return;
-    }
-    // 3) 开帖（permalink 直驱详情页），读回帖子正文（图片帖常空）+ 顶部他人评论。
-    const open = await steps.openPost(target);
-    if (!open.ok) {
-      audit({ accountId, outcome: mapFacebookOpenOutcome(open.reason), reason: open.reason, shadow, keyword, container });
-      if (usingCoverage && open.reason) void d.facebookCoverageOnFailure?.(accountId, containerUrl, open.reason);
-      return;
-    }
-    const postText = open.postText;
-    const comments = open.comments ?? [];
+          // 1) 容器内搜索候选帖（边端只在 joined/pinned 群内搜、绝不全站）。用 url 下发。
+          const search = await steps.searchInContainer(keyword, containerUrl);
+          // 边缘回传的真实群名 → 回填配置容器名（人只看群名、不看 id）；本轮后续审计也改用真名。
+          if (search.containerName) {
+            container = search.containerName;
+            void d.facebookResolveContainerName?.(accountId, containerUrl, search.containerName);
+          }
+          if (!search.ok) {
+            audit({ accountId, outcome: mapFacebookBlockOutcome(search.reason), reason: search.reason, shadow, keyword, container });
+            if (usingCoverage && search.reason) void d.facebookCoverageOnFailure?.(accountId, containerUrl, search.reason);
+            return;
+          }
+          // 2) 选一个未评过的候选（防重复真发：跳过 dedup 已标记的 permalink）。
+          // --force（manual-comment-force-flag）：放开每帖去重，直接取第一个候选（已评过的也可再评）；否则跳过已评过的。
+          let target: string | undefined;
+          if (options.force) {
+            target = search.candidates[0]?.permalink;
+          } else {
+            for (const c of search.candidates) {
+              const seen = await dedup.hasInteracted(c.permalink, 'comment').catch(() => false);
+              if (!seen) {
+                target = c.permalink;
+                break;
+              }
+            }
+          }
+          if (!target) {
+            audit({
+              accountId,
+              outcome: 'no_strong_candidate',
+              reason: search.candidates.length === 0 ? 'no_candidates' : 'all_deduped',
+              shadow,
+              keyword,
+              container,
+            });
+            return;
+          }
+          // 3) 开帖（permalink 直驱详情页），读回帖子正文（图片帖常空）+ 顶部他人评论。
+          const open = await steps.openPost(target);
+          if (!open.ok) {
+            audit({ accountId, outcome: mapFacebookOpenOutcome(open.reason), reason: open.reason, shadow, keyword, container });
+            if (usingCoverage && open.reason) void d.facebookCoverageOnFailure?.(accountId, containerUrl, open.reason);
+            return;
+          }
+          const postText = open.postText;
+          const comments = open.comments ?? [];
 
-    // 4) 正文来源：生成评论读了再写；模板评论只选账号模板，不调用 LLM。
-    const draft = cfg.commentMode === 'template'
-      ? (cfg.commentTemplates[Math.floor(rand() * cfg.commentTemplates.length)] ?? cfg.commentTemplates[0] ?? null)
-      : d.facebookCompose
-        ? await d.facebookCompose(accountId, { keyword, container, ...(postText ? { postText } : {}), ...(comments.length > 0 ? { comments } : {}) })
-        : null;
-    if (!draft || !draft.trim()) {
-      audit({ accountId, outcome: 'compose_skipped', reason: 'empty_compose', shadow, keyword, container });
-      return;
-    }
-    // 只拒不修的确定性校验（llm-output-honesty）：相关性以「关键词 + 帖子正文 + 他人评论」为语境
-    //（评论既由这些产出、天然相关；仍守零重叠即拒的兜底）。任一违规 → compose_skipped 终局，绝不修复后发。
-    // --force（manual-comment-force-flag）：传空 targetKeywords → 校验器 keywords.length>0 守卫使相关性分支 no-op；
-    // 但 url/联系方式/@提及/刷屏/长度/低信号等**安全校验**在其之前、照常执行（force 绝不放开安全校验）。
-    const relevanceCtx = options.force ? [] : [keyword, ...(postText ? [postText] : []), ...comments].filter(Boolean);
-    const v = validateFacebookComment(draft, { targetKeywords: relevanceCtx });
-    if (!v.ok) {
-      audit({ accountId, outcome: 'compose_skipped', reason: v.reason, shadow, keyword, container, textLength: draft.length });
-      return;
-    }
+          // 4) 正文来源：生成评论读了再写；模板评论只选账号模板，不调用 LLM。
+          const draft = cfg.commentMode === 'template'
+            ? (cfg.commentTemplates[Math.floor(rand() * cfg.commentTemplates.length)] ?? cfg.commentTemplates[0] ?? null)
+            : d.facebookCompose
+              ? await d.facebookCompose(accountId, { keyword, container, ...(postText ? { postText } : {}), ...(comments.length > 0 ? { comments } : {}) })
+              : null;
+          if (!draft || !draft.trim()) {
+            audit({ accountId, outcome: 'compose_skipped', reason: 'empty_compose', shadow, keyword, container });
+            return;
+          }
+          // 只拒不修的确定性校验（llm-output-honesty）：相关性以「关键词 + 帖子正文 + 他人评论」为语境
+          //（评论既由这些产出、天然相关；仍守零重叠即拒的兜底）。任一违规 → compose_skipped 终局，绝不修复后发。
+          // --force（manual-comment-force-flag）：传空 targetKeywords → 校验器 keywords.length>0 守卫使相关性分支 no-op；
+          // 但 url/联系方式/@提及/刷屏/长度/低信号等**安全校验**在其之前、照常执行（force 绝不放开安全校验）。
+          const relevanceCtx = options.force ? [] : [keyword, ...(postText ? [postText] : []), ...comments].filter(Boolean);
+          const v = validateFacebookComment(draft, { targetKeywords: relevanceCtx });
+          if (!v.ok) {
+            audit({ accountId, outcome: 'compose_skipped', reason: v.reason, shadow, keyword, container, textLength: draft.length });
+            return;
+          }
 
-    // 4a) 联系方式 fail-closed（在影子闸前）：--contact 但账号没配联系方式 → 诚实退，绝不发无码评论。
-    let groupChatCode: string | undefined;
-    let contactInfo: string | null = null;
-    if (options.injectContact) {
-      contactInfo = options.contactInfo ?? null;
-      if (!contactInfo) {
-        audit({ accountId, outcome: 'compose_skipped', reason: 'contact_info_missing', shadow, keyword, container, textLength: v.text.length });
+          // 4a) 联系方式 fail-closed（在影子闸前）：--contact 但账号没配联系方式 → 诚实退，绝不发无码评论。
+          let groupChatCode: string | undefined;
+          let contactInfo: string | null = null;
+          if (options.injectContact) {
+            contactInfo = options.contactInfo ?? null;
+            if (!contactInfo) {
+              audit({ accountId, outcome: 'compose_skipped', reason: 'contact_info_missing', shadow, keyword, container, textLength: v.text.length });
+              return;
+            }
+          }
+
+          // 5) 影子：只读浏览 + 撰写 + 校验到此为止——绝不提交、不记风控/冷却、不按已发去重，也**绝不打扰人审**（永不发的干跑不发卡）。
+          if (shadow) {
+            audit({ accountId, outcome: 'shadow_ok', shadow: true, keyword, container, textLength: v.text.length });
+            return;
+          }
+
+          // 5a) 人审闸（change facebook-comment-review-and-targeted-join）：带联系方式一律必审；不带联系方式在
+          // 人审全量闸（AIDCP_FB_COMMENT_REVIEW_ALL，默认开）下也必审。未接线/超时/拒 → 诚实退、绝不裸发、不打去重。
+          // manualOverride 只绕配额（见上），**绝不**在此绕人审——人是刹车。持锁不释放，浏览器停在目标帖等待人审。
+          const reviewAll = d.facebookCommentReviewAll?.() ?? true;
+          if (options.injectContact || reviewAll) {
+            const approved = await this.approveFacebookComment(accountId, {
+              permalink: target,
+              text: v.text,
+              ...(contactInfo ? { contactInfo } : {}),
+              container,
+              // 放开时限兜底选出的覆盖群 → 审核卡标注「未满足冷却/预热」交人把关。手动 pin 群路径 coverageCfg 为空、绝不标注。
+              ...(usingCoverage && coverageCfg?.relaxed ? { coverageRelaxed: true } : {}),
+            }, options.approvalMode);
+            if (!approved) {
+              audit({ accountId, outcome: 'compose_skipped', reason: 'approval_rejected_or_timeout', shadow: false, keyword, container, textLength: v.text.length });
+              return;
+            }
+            if (contactInfo) groupChatCode = approved.contactInfo;
+          }
+
+          // 6) 提交评论 + 服务器确认（边端 own-identity 收窄）。成功记风控走 interaction.occurred 自动路径，绝不在此重复 record。
+          // 提交被更高优先级任务抢占 / 边端失配 taskId 静默丢弃 → submitComment 超时回 ok:false → 走 else 诚实非提交（不打去重、可重试）。
+          const submit = await steps.submitComment(target, v.text, groupChatCode);
+          // 防重复真发（BLOCKING §5.4）：仅在**真提交了**（成功 或 提交后确认不了 verification_ambiguous）时打去重标记——
+          // 硬失败（权限门/找不到评论框/被拦/身份未知）没真点提交、无重复真发风险，不打标记（可重试、不白占当日上限）。
+          // 该标记同时使 facebookCommentedToday 计入当日配额；仅计「真发过一次」的目标，不误伤硬失败重试。
+          const reallySubmitted = submit.ok || submit.reason === 'verification_ambiguous';
+          if (reallySubmitted) await dedup.recordInteraction(target, 'comment').catch(() => {});
+          if (submit.ok) {
+            audit({ accountId, outcome: 'commented', shadow: false, keyword, container, textLength: v.text.length });
+            if (usingCoverage) void d.facebookCoverageOnCommented?.(accountId, containerUrl);
+          } else {
+            audit({
+              accountId,
+              outcome: mapFacebookSubmitOutcome(submit.reason),
+              reason: submit.reason,
+              shadow: false,
+              keyword,
+              container,
+              textLength: v.text.length,
+            });
+            if (usingCoverage && submit.reason) void d.facebookCoverageOnFailure?.(accountId, containerUrl, submit.reason);
+          }
+        },
+      );
+    } catch (err) {
+      // 拿不到边端租约（边端无响应/被占，acquire 超时）→ 诚实非提交终态，不打去重、可重试（绝不静默假成功）。
+      // 其它异常（含 release_timeout：work 已跑完、评论可能已发）交外层 runFacebookTargetedTask wrapper 记诚实终态。
+      if (isEdgeTaskAcquireFailure(err)) {
+        audit({ accountId, outcome: 'submit_failed', reason: `edge_lease_${leaseFailureDetail(err)}`, shadow, keyword, container });
         return;
       }
-    }
-
-    // 5) 影子：只读浏览 + 撰写 + 校验到此为止——绝不提交、不记风控/冷却、不按已发去重，也**绝不打扰人审**（永不发的干跑不发卡）。
-    if (shadow) {
-      audit({ accountId, outcome: 'shadow_ok', shadow: true, keyword, container, textLength: v.text.length });
-      return;
-    }
-
-    // 5a) 人审闸（change facebook-comment-review-and-targeted-join）：带联系方式一律必审；不带联系方式在
-    // 人审全量闸（AIDCP_FB_COMMENT_REVIEW_ALL，默认开）下也必审。未接线/超时/拒 → 诚实退、绝不裸发、不打去重。
-    // manualOverride 只绕配额（见上），**绝不**在此绕人审——人是刹车。
-    const reviewAll = d.facebookCommentReviewAll?.() ?? true;
-    if (options.injectContact || reviewAll) {
-      const approved = await this.approveFacebookComment(accountId, {
-        permalink: target,
-        text: v.text,
-        ...(contactInfo ? { contactInfo } : {}),
-        container,
-        // 放开时限兜底选出的覆盖群 → 审核卡标注「未满足冷却/预热」交人把关。手动 pin 群路径 coverageCfg 为空、绝不标注。
-        ...(usingCoverage && coverageCfg?.relaxed ? { coverageRelaxed: true } : {}),
-      }, options.approvalMode);
-      if (!approved) {
-        audit({ accountId, outcome: 'compose_skipped', reason: 'approval_rejected_or_timeout', shadow: false, keyword, container, textLength: v.text.length });
-        return;
-      }
-      if (contactInfo) groupChatCode = approved.contactInfo;
-    }
-
-    // 6) 提交评论 + 服务器确认（边端 own-identity 收窄）。成功记风控走 interaction.occurred 自动路径，绝不在此重复 record。
-    const submit = await steps.submitComment(target, v.text, groupChatCode);
-    // 防重复真发（BLOCKING §5.4）：仅在**真提交了**（成功 或 提交后确认不了 verification_ambiguous）时打去重标记——
-    // 硬失败（权限门/找不到评论框/被拦/身份未知）没真点提交、无重复真发风险，不打标记（可重试、不白占当日上限）。
-    // 该标记同时使 facebookCommentedToday 计入当日配额；仅计「真发过一次」的目标，不误伤硬失败重试。
-    const reallySubmitted = submit.ok || submit.reason === 'verification_ambiguous';
-    if (reallySubmitted) await dedup.recordInteraction(target, 'comment').catch(() => {});
-    if (submit.ok) {
-      audit({ accountId, outcome: 'commented', shadow: false, keyword, container, textLength: v.text.length });
-      if (usingCoverage) void d.facebookCoverageOnCommented?.(accountId, containerUrl);
-    } else {
-      audit({
-        accountId,
-        outcome: mapFacebookSubmitOutcome(submit.reason),
-        reason: submit.reason,
-        shadow: false,
-        keyword,
-        container,
-        textLength: v.text.length,
-      });
-      if (usingCoverage && submit.reason) void d.facebookCoverageOnFailure?.(accountId, containerUrl, submit.reason);
+      throw err;
     }
   }
 

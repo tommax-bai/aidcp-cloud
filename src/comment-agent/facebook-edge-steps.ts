@@ -46,6 +46,13 @@ export interface FacebookEdgeStepsDeps {
   pusher: EdgePusher;
   /** 定向边端 edgeId（缺失/离线 → pushToEdges 命中 0 → 诚实 offline）。 */
   edgeId: string;
+  /**
+   * keep-open 边端租约的 taskId（change facebook-manual-comment-keepopen-lease）：**必须**随每条 FB 评论命令下发。
+   * 边端 FB 命令入口按 `canExecute(payload.taskId)` 无差别门控（`aidcp-edge/src/main.ts:873`）——持租约期内无 taskId 的
+   * 命令一律被挡，故本任务的评论命令若不带匹配 taskId 会被自己持有的租约一起挡死（自锁）。缺省（无租约的旧构造/测试）→
+   * 命令不带 taskId、边端空闲时照常放行（零回归）。
+   */
+  taskId?: string;
   stepTimeoutMs?: number;
   maxCandidates?: number;
   logger?: Pick<Console, 'log' | 'warn'>;
@@ -165,7 +172,7 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
           },
         ],
         timeout,
-        () => push(makeEnvelope('search.execute', randomUUID(), Date.now(), { keyword, source: 'manager', container } as never)),
+        () => push(makeEnvelope('search.execute', randomUUID(), Date.now(), { keyword, source: 'manager', container, ...(deps.taskId ? { taskId: deps.taskId } : {}) } as never)),
       );
       if (outcome === null) {
         log.warn?.('[fb-edge-steps] search 超时/离线');
@@ -201,7 +208,7 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
           },
         ],
         timeout,
-        () => push(makeEnvelope('note.open', randomUUID(), Date.now(), { url } as never)),
+        () => push(makeEnvelope('note.open', randomUUID(), Date.now(), { url, ...(deps.taskId ? { taskId: deps.taskId } : {}) } as never)),
       );
       if (outcome === null) {
         log.warn?.('[fb-edge-steps] open 超时/离线');
@@ -234,6 +241,7 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
               noteId: permalink,
               text,
               ...(groupChatCode && groupChatCode.length > 0 ? { groupChatCode } : {}),
+              ...(deps.taskId ? { taskId: deps.taskId } : {}),
             } as never),
           ),
       );

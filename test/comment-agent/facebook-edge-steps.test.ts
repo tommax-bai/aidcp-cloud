@@ -154,3 +154,34 @@ describe('facebookCommentSubmitTimeoutMs（P0-1 长度感知提交超时）', ()
     );
   });
 });
+
+describe('buildFacebookEdgeSteps — keep-open 租约 taskId 透传（change facebook-manual-comment-keepopen-lease）', () => {
+  it('三条命令 search.execute / note.open / interaction.comment 都带 lease taskId（否则被自己的租约挡死）', async () => {
+    const bus = new EventBus();
+    const { pusher, sent } = makePusher((env) => {
+      if (env.type === 'search.execute') bus.emit('page.cards.arrived', { cards: [{ noteId: 'p1' }], ts: 0 } as never);
+      else if (env.type === 'note.open') bus.emit('note.detail.arrived', { detail: { noteId: 'p1', content: '正文' }, ts: 0 } as never);
+      else if (env.type === 'interaction.comment') bus.emit('action.completed', { action: 'comment', ok: true, ts: 0 } as never);
+    });
+    const s = buildFacebookEdgeSteps({ bus, pusher, edgeId: 'e-fb', taskId: 'task-xyz', stepTimeoutMs: 40, logger: { log: () => {}, warn: () => {} } });
+    await s.searchInContainer('咖啡', 'https://www.facebook.com/groups/1');
+    await s.openPost('p1');
+    await s.submitComment('p1', '这篇不错');
+    for (const t of ['search.execute', 'note.open', 'interaction.comment']) {
+      const env = sent.find((e) => e.type === t);
+      assert.ok(env, `应下发 ${t}`);
+      assert.equal(env!.payload.taskId, 'task-xyz', `${t} 必须带 lease taskId`);
+    }
+  });
+
+  it('无 taskId（无租约旧构造）→ 命令不带 taskId 字段（零回归）', async () => {
+    const bus = new EventBus();
+    const { pusher, sent } = makePusher((env) => {
+      if (env.type === 'search.execute') bus.emit('page.cards.arrived', { cards: [{ noteId: 'p1' }], ts: 0 } as never);
+    });
+    await steps(bus, pusher).searchInContainer('咖啡', 'https://www.facebook.com/groups/1');
+    const env = sent.find((e) => e.type === 'search.execute');
+    assert.ok(env);
+    assert.equal('taskId' in env!.payload, false, '无租约构造不应带 taskId');
+  });
+});

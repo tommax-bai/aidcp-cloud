@@ -873,6 +873,68 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.equal(audits.at(-1)?.container, 'Puerto Rico Y Sus Encantos e Historia');
   });
 
+  // ── change facebook-manual-comment-keepopen-lease：keep-open 租约贯穿人审、三命令透传 taskId ──
+  it('keep-open 租约包住 search→open→submit（kind=comment_prepare 单次），三命令都带 lease taskId', async () => {
+    const base = fbFlowDeps({ submit: { ok: true } });
+    const leaseReqs: Array<{ kind: string; priority: string }> = [];
+    const deps: CommentSchedulerDeps = {
+      ...base.deps,
+      edgeTaskLeases: {
+        withLease: async (request, work) => {
+          leaseReqs.push({ kind: request.kind, priority: request.priority });
+          return work({ taskId: 'fb-task-1', edgeId: request.edgeId, kind: request.kind, priority: request.priority });
+        },
+      },
+    };
+    await new CommentScheduler(deps).triggerManual('fb-1', { manualOverride: true });
+    await tick();
+    assert.equal(base.audits.at(-1)?.outcome, 'commented');
+    // 全段只申请一次 comment_prepare 租约（不是每步各申请）
+    assert.deepEqual(leaseReqs.map((r) => r.kind), ['comment_prepare']);
+    // 手动操作员命令 → human priority
+    assert.equal(leaseReqs[0].priority, 'human');
+    // 三条命令都带 lease taskId（否则边端持租约期把评论自己的命令也挡死 → 自锁）
+    for (const t of ['search.execute', 'note.open', 'interaction.comment']) {
+      const env = base.envelopes.find((e) => e.type === t);
+      assert.ok(env, `应下发 ${t}`);
+      assert.equal((env!.payload as { taskId?: string }).taskId, 'fb-task-1', `${t} 必须带 lease taskId`);
+    }
+  });
+
+  it('自动路径（无 manualOverride）→ 租约 priority=automatic', async () => {
+    const base = fbFlowDeps({ submit: { ok: true } });
+    const priorities: string[] = [];
+    const deps: CommentSchedulerDeps = {
+      ...base.deps,
+      edgeTaskLeases: {
+        withLease: async (request, work) => {
+          priorities.push(request.priority);
+          return work({ taskId: 'fb-task-2', edgeId: request.edgeId, kind: request.kind, priority: request.priority });
+        },
+      },
+    };
+    await new CommentScheduler(deps).triggerManual('fb-1'); // 无 manualOverride
+    await tick();
+    assert.deepEqual(priorities, ['automatic']);
+  });
+
+  it('租约 acquire 超时 → 诚实非提交（不 commented、不下发搜索、不打去重），绝不静默假成功', async () => {
+    const base = fbFlowDeps({ submit: { ok: true } });
+    let searchCommands = 0;
+    const deps: CommentSchedulerDeps = {
+      ...base.deps,
+      pusher: { pushToEdges: (env: unknown) => { if ((env as Envelope).type === 'search.execute') searchCommands++; return 1; } },
+      edgeTaskLeases: {
+        withLease: async () => { throw new EdgeTaskLeaseError('acquire_timeout', 'edge task acquire timeout taskId=t edge=e-fb'); },
+      },
+    };
+    await new CommentScheduler(deps).triggerManual('fb-1', { manualOverride: true });
+    await tick();
+    assert.equal(searchCommands, 0, '拿不到租约 → 不下发搜索');
+    assert.notEqual(base.audits.at(-1)?.outcome, 'commented');
+    assert.equal(base.dedupRecorded.length, 0, '未提交 → 不打去重（可重试）');
+  });
+
   // ── Feature A（change facebook-comment-review-and-targeted-join）：所有 FB 评论走飞书人审（默认开、可 env 关） ──
   it('Feature A 默认开：非联系评论也需人审——审批口未接线 → 不提交（compose_skipped/approval_rejected_or_timeout），绝不裸发', async () => {
     const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true } });
