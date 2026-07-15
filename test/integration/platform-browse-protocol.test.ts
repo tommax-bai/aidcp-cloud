@@ -145,15 +145,16 @@ describe('C1b feed 自愈：feed_exhausted ⇒ 立即 refresh', () => {
   });
 });
 
-describe('C1b 审批在途抑制 idle nudge（不复用 pauseClock）', () => {
-  it('接线态 xhs：真在等人审时 idle_nudge ⇒ 不滚动；审批终局后 ⇒ 恢复滚动', () => {
-    // 接线态：comment.cleared → gate.onCleared 挂在 `await request`（不同步 skip）⇒ dispatcher 置 approvalInFlight。
-    const { bus, commands } = setup('xiaohongshu', { commentApproval: hangingApproval });
-    bus.emit('comment.cleared', { noteId: 'note-42', sourcePageType: 'feed', actions: ['like'], text: 'hi', ts: 0 });
+describe('C1b 评论支线在途抑制 idle nudge（change comment-approval-target-hold：起点前移至 comment.appraised）', () => {
+  it('评论支线在途（撰写窗起、早于 comment.cleared）idle_nudge ⇒ 不滚动；终局后 ⇒ 恢复滚动', () => {
+    // 起点前移到 comment.appraised（确立要评）：覆盖撰写 / 去 AI 味 / 审批全程，撰写窗不再裸奔。
+    const { bus, commands, d } = setup('xiaohongshu', { commentApproval: hangingApproval });
+    d.updateNoteData({ noteId: 'note-42', title: 't', content: '正文正文', likeCount: 500, collectCount: 0 });
+    bus.emit('comment.appraised', { noteId: 'note-42', sourcePageType: 'feed', actions: ['like'], ts: 0 });
     const beforeNudge = commands.length;
     bus.emit('session.idle_nudge', { reason: 'idle', ts: 0 });
-    assert.equal(commands.length, beforeNudge, '真审批在途 ⇒ idle_nudge 被抑制、不把账号滚离目标');
-    // 审批终局（手动 emit comment.approved 清标志；同时发出 comment 指令）
+    assert.equal(commands.length, beforeNudge, '评论支线在途 ⇒ idle_nudge 被抑制、不把账号滚离目标');
+    // 审批终局（approved 先清在途标志再发 comment 指令）
     bus.emit('comment.approved', { noteId: 'note-42', sourcePageType: 'feed', actions: ['like'], text: 'hi', ts: 0 });
     const beforeNudge2 = commands.length; // 已含 approved 触发的 comment 指令
     bus.emit('session.idle_nudge', { reason: 'idle', ts: 0 });
@@ -161,14 +162,15 @@ describe('C1b 审批在途抑制 idle nudge（不复用 pauseClock）', () => {
     assert.equal(commands[commands.length - 1].action, 'scroll');
   });
 
-  it('未接线态（默认）xhs：comment.cleared ⇒ gate 同步 skip、绝不卡死抑制，idle_nudge 照常滚动（Finding 1 回归修复）', () => {
-    // 人审口未接线（默认支持配置）：CommentApprovalGate 在同一 emit 内同步 skip → comment.skipped。
-    // 修复前 comment.cleared 无条件置 true 会被嵌套 skip 清后再置回 true「卡死」⇒ idle_nudge 永久被抑制。
-    const { bus, commands } = setup('xiaohongshu'); // 无 commentApproval
-    bus.emit('comment.cleared', { noteId: 'n', sourcePageType: 'feed', actions: ['like'], text: 't', ts: 0 });
+  it('comment.appraised 的 noteId 与 currentNote 不符（composer 会同步 !note skip）⇒ 不置在途、idle_nudge 照常滚动（防卡死）', () => {
+    // 起点前移后的防卡死守卫：只在 currentNote 命中时置位（= composer 走 await、不同步 skip）。
+    // 不命中 ⇒ composer 同步 emit comment.skipped 先于本处理器；若无条件置真则永久抑制卡死浏览。
+    const { bus, commands, d } = setup('xiaohongshu');
+    d.updateNoteData({ noteId: 'note-42', title: 't', content: '正文正文', likeCount: 500, collectCount: 0 });
+    bus.emit('comment.appraised', { noteId: 'OTHER', sourcePageType: 'feed', actions: ['like'], ts: 0 });
     const before = commands.length;
     bus.emit('session.idle_nudge', { reason: 'idle', ts: 0 });
-    assert.equal(commands.length, before + 1, '未接线=从不真等人审 ⇒ 不抑制，idle_nudge 恢复滚动（防卡死回归）');
+    assert.equal(commands.length, before + 1, '未进入在途暂停态 ⇒ idle_nudge 照常滚动（防卡死回归）');
     assert.equal(commands[commands.length - 1].action, 'scroll');
   });
 });

@@ -828,4 +828,91 @@ describe('RoleDispatcher Integration', () => {
       dispatcher.endSession();
     });
   });
+
+  // ─── 评论支线在途暂停态（change comment-approval-target-hold）──────────────
+  // 触发评论、进人审时把账号钉在待评论帖上：经 sendCommand 统一出口扣住一切离页命令，
+  // 覆盖撰写/去AI味/审批全程；终局先解除再下发评论；配合 pauseClock 推迟窗内 should_end。
+  describe('评论支线在途暂停态（钉在待评论帖上等审批）', () => {
+    function seed(commands: EdgeCommand[], opts: Record<string, unknown> = {}): RoleDispatcher {
+      const llm = createMockLlm([]); // composer 会 await（不同步 skip），本组测试均同步断言、不等其 resolve
+      const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd), ...opts });
+      dispatcher.setup();
+      dispatcher.updateNoteData({ noteId: 'n1', title: 't', content: '正文正文正文', likeCount: 500, collectCount: 0 });
+      dispatcher.startSession();
+      commands.length = 0; // 清掉开场命令（feed.entered 等）
+      return dispatcher;
+    }
+
+    it('(a) 撰写窗内并行点赞回 no_target(stale) → 不重扫滚屏（FB feed 就地读）', () => {
+      const commands: EdgeCommand[] = [];
+      const dispatcher = seed(commands, { accountPlatform: 'facebook', hasInlineTargeting: () => true });
+      // 确立要评本帖 → 进入在途暂停态（撰写窗，comment.cleared 尚未发出）
+      dispatcher.bus.emit('comment.appraised', { noteId: 'n1', sourcePageType: 'feed', actions: ['like'], ts: Date.now() });
+      // 并行点赞在就地卡上回 no_target（卡位移）
+      dispatcher.bus.emit('action.completed', { action: 'like', ok: false, reason: 'no_target', ts: Date.now() });
+      const rescan = commands.filter((c) => c.action === 'scroll' && c.reason === 'rescan_after_stale_target');
+      assert.equal(rescan.length, 0, `评论支线在途不应重扫滚屏（会把待评论帖滚走），实际=${rescan.length}`);
+      dispatcher.endSession();
+    });
+
+    it('(b) 审批窗内 idle_nudge / feed.scrolled / refresh 全被扣住；终局后恢复', () => {
+      const commands: EdgeCommand[] = [];
+      const dispatcher = seed(commands);
+      dispatcher.bus.emit('comment.appraised', { noteId: 'n1', sourcePageType: 'feed', actions: ['like'], ts: Date.now() });
+      // 窗内各类会离开待评论帖的触发均不下发
+      dispatcher.bus.emit('session.idle_nudge', { reason: 'idle_recover_nudge', ts: Date.now() });
+      dispatcher.bus.emit('feed.scrolled', { pageType: 'feed', scrollCount: 1, ts: Date.now() });
+      dispatcher.bus.emit('feed.refresh.needed', { cardsBrowsed: 20, currentPageType: 'feed', ts: Date.now() });
+      const moved = commands.filter((c) =>
+        (c.action === 'scroll' && (c.reason === 'idle_recover_nudge' || c.reason === 'feed_scroll')) ||
+        c.action === 'refresh');
+      assert.equal(moved.length, 0, `在途窗内不得下发任何移动命令，实际=${moved.length}（${moved.map((c) => c.reason).join(',')}）`);
+      // 终局（超时跳过）→ 解除在途 + 恢复
+      dispatcher.bus.emit('comment.skipped', { noteId: 'n1', sourcePageType: 'feed', actions: ['like'], reason: 'approval_timeout', ts: Date.now() });
+      commands.length = 0;
+      dispatcher.bus.emit('session.idle_nudge', { reason: 'idle_recover_nudge', ts: Date.now() });
+      const resumed = commands.filter((c) => c.action === 'scroll' && c.reason === 'idle_recover_nudge');
+      assert.equal(resumed.length, 1, `终局后 idle_nudge 应恢复翻译为 scroll，实际=${resumed.length}`);
+      dispatcher.endSession();
+    });
+
+    it('(c) comment.appraised 暂停时钟(comment_subline)、终局恢复时钟（should_end 延后到评论支线终局）', () => {
+      const commands: EdgeCommand[] = [];
+      const dispatcher = seed(commands);
+      const sm = (dispatcher as unknown as { sessionMonitor: { pauseClock(r: string): void; resumeClock(r: string): void } }).sessionMonitor;
+      const paused: string[] = [];
+      const resumed: string[] = [];
+      const op = sm.pauseClock.bind(sm);
+      const or = sm.resumeClock.bind(sm);
+      sm.pauseClock = (r: string) => { paused.push(r); op(r); };
+      sm.resumeClock = (r: string) => { resumed.push(r); or(r); };
+      dispatcher.bus.emit('comment.appraised', { noteId: 'n1', sourcePageType: 'feed', actions: ['like'], ts: Date.now() });
+      assert.ok(paused.includes('comment_subline'), 'comment.appraised 应暂停时钟(comment_subline) 以延后窗内 should_end');
+      dispatcher.bus.emit('comment.skipped', { noteId: 'n1', sourcePageType: 'feed', actions: ['like'], reason: 'approval_timeout', ts: Date.now() });
+      assert.ok(resumed.includes('comment_subline'), '评论支线终局应恢复时钟(comment_subline)');
+      dispatcher.endSession();
+    });
+
+    it('(c2) currentNote 不匹配（composer 会同步 skip）→ 不置在途标志、不卡死浏览', () => {
+      const commands: EdgeCommand[] = [];
+      const dispatcher = seed(commands);
+      // 对「非当前笔记」触发 appraised：composer 同步 !note skip，若无条件置标志会卡死永久抑制
+      dispatcher.bus.emit('comment.appraised', { noteId: 'OTHER', sourcePageType: 'feed', actions: ['like'], ts: Date.now() });
+      dispatcher.bus.emit('session.idle_nudge', { reason: 'idle_recover_nudge', ts: Date.now() });
+      const scroll = commands.filter((c) => c.action === 'scroll' && c.reason === 'idle_recover_nudge');
+      assert.equal(scroll.length, 1, `未进入在途暂停态时 idle_nudge 应照常翻译为 scroll（不卡死），实际=${scroll.length}`);
+      dispatcher.endSession();
+    });
+
+    it('(d) 终局(approved)先清在途标志再下发评论 → 评论命令不被自己的暂停态扣住（XHS 直发）', () => {
+      const commands: EdgeCommand[] = [];
+      const dispatcher = seed(commands, { accountPlatform: 'xiaohongshu' });
+      dispatcher.bus.emit('comment.appraised', { noteId: 'n1', sourcePageType: 'feed', actions: ['like'], ts: Date.now() });
+      dispatcher.bus.emit('comment.approved', { noteId: 'n1', sourcePageType: 'feed', actions: ['like'], text: '真的学到了', ts: Date.now() });
+      const commentCmd = commands.filter((c) => c.action === 'comment');
+      assert.equal(commentCmd.length, 1, `approved 后应下发 1 条评论命令（先清标志再发），实际=${commentCmd.length}`);
+      assert.equal((commentCmd[0].params as { text?: string })?.text, '真的学到了');
+      dispatcher.endSession();
+    });
+  });
 });
