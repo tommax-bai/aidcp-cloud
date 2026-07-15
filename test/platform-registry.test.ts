@@ -74,3 +74,13 @@ test('platform registry: browse capability is a Record and xhs browse stays supp
   const fbCollect = PLATFORM_REGISTRY.facebook!.noteActions.collect;
   assert.equal(fbCollect.supported, false);
 });
+
+test('platform registry: delegated actions declare XHS stable and Facebook beta/unsupported boundaries', () => {
+  assert.equal(PLATFORM_REGISTRY.xiaohongshu.delegatedActions.publish_from_inspiration.level, 'supported');
+  assert.equal(PLATFORM_REGISTRY.facebook!.delegatedActions.publish_post.level, 'beta');
+  const inspiration = PLATFORM_REGISTRY.facebook!.delegatedActions.publish_from_inspiration;
+  assert.equal(inspiration.level, 'unsupported');
+  assert.ok('reason' in inspiration && inspiration.reason.length > 0);
+  const curated = PLATFORM_REGISTRY.facebook!.delegatedActions.comment_curated;
+  assert.equal(curated.level, 'unsupported');
+});

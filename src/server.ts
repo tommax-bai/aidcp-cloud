@@ -180,6 +180,18 @@ import { PostProcessor } from './publish-agent/post-processor.js';
 import { PublishLogStore } from './publish-agent/publish-log-store.js';
 import { PublishPipelineLogStore } from './publish-agent/publish-pipeline-log-store.js';
 import { startPanelApi, parsePanelUsers, PgPanelStore } from './panel/index.js';
+import {
+  PgDelegatedTaskStore,
+  DelegatedTaskService,
+  DelegatedTaskWorker,
+  createDelegatedExecutorRouter,
+  type DelegatedTask,
+} from './delegated-task/index.js';
+import {
+  buildDelegatedTaskConfirmationCard,
+  buildDelegatedTaskProgressCard,
+  handleDelegatedTaskCardAction,
+} from './feishu/delegated-task-card.js';
 import { TokenRevocationStore } from './panel/revocation.js';
 import { ClientUserStore, startClientAuthApi, LoginRateLimiter } from './client-auth/index.js';
 import { PgAlertStore } from './alerts/index.js';
@@ -992,6 +1004,96 @@ async function main(): Promise<void> {
     return nickname || undefined;
   };
 
+  // Unified user-delegated task control plane. If PG/account facts are unavailable, all public write entries fail closed.
+  let delegatedTaskStore: PgDelegatedTaskStore | undefined;
+  let delegatedTaskService: DelegatedTaskService | undefined;
+  if (accountStore) {
+    try {
+      const store = new PgDelegatedTaskStore({
+        host: readEnvString('PGHOST'),
+        port: readEnvPort('PGPORT'),
+        database: readEnvString('PGDATABASE'),
+        user: readEnvString('PGUSER'),
+        password: readEnvString('PGPASSWORD'),
+      });
+      await store.init();
+      delegatedTaskStore = store;
+      delegatedTaskService = new DelegatedTaskService({
+        store,
+        listAccounts: async () => Promise.all((await accountStore!.listAll()).map(async (row) => ({
+          accountId: row.accountId,
+          nickname: accountStore!.getNickname?.(row.accountId) ?? null,
+          platform: await accountStore!.getPlatform?.(row.accountId) ?? 'xiaohongshu',
+          status: row.status,
+        }))),
+        prepareTarget: async (intent, account) => {
+          if (intent.action === 'approve_candidate' || intent.action === 'reject_candidate' || intent.action === 'modify_candidate') {
+            const recordId = Number(intent.targetConstraints?.candidateId);
+            if (!Number.isInteger(recordId) || recordId <= 0) {
+              return { ok: false, code: 'candidate_target_required', message: '请提供有效候选稿编号。' };
+            }
+            const draft = await publishLogStore.loadForDispatch(recordId);
+            if (!draft || draft.accountId !== account.accountId || draft.platform !== account.platform) {
+              return { ok: false, code: 'candidate_not_found_or_mismatch', message: '候选稿不存在或不属于该账号/平台。' };
+            }
+            if (draft.status !== 'pending_approval') {
+              return { ok: false, code: 'candidate_not_pending', message: `候选稿当前状态为 ${draft.status}，不能创建该操作。` };
+            }
+            return {
+              ok: true,
+              targetConstraints: {
+                ...(intent.targetConstraints ?? {}),
+                candidateId: String(recordId),
+                candidateVersion: draft.contentVersion,
+                candidateTitle: draft.title ?? '',
+              },
+            };
+          }
+          if (intent.action === 'comment_curated') {
+            const curatedId = Number(intent.targetConstraints?.curatedId);
+            const row = Number.isInteger(curatedId) && curatedContentStore
+              ? await curatedContentStore.getOneForAccount(curatedId, account.accountId)
+              : null;
+            if (!row || (row.contentType !== 'image_text' && row.contentType !== 'video') || !row.title?.trim()) {
+              return { ok: false, code: 'curated_target_unavailable', message: '指定精选内容不存在、归属不符或缺少可定位标题。' };
+            }
+            return {
+              ok: true,
+              targetConstraints: {
+                ...(intent.targetConstraints ?? {}), curatedId, noteId: row.sourceId, title: row.title,
+              },
+            };
+          }
+          return { ok: true };
+        },
+        validateTarget: async (task) => {
+          if (task.action === 'approve_candidate' || task.action === 'reject_candidate' || task.action === 'modify_candidate') {
+            const recordId = Number(task.targetConstraints.candidateId);
+            const expectedVersion = Number(task.targetConstraints.candidateVersion);
+            const draft = await publishLogStore.loadForDispatch(recordId);
+            if (!draft || draft.accountId !== task.accountId || draft.platform !== task.platform) {
+              return { ok: false, code: 'candidate_not_found_or_mismatch', message: '候选稿已不存在或归属/平台已变化。' };
+            }
+            if (draft.contentVersion !== expectedVersion) {
+              return { ok: false, code: 'candidate_version_conflict', message: `候选稿已更新到 v${draft.contentVersion}，请重新确认。` };
+            }
+          }
+          const curatedId = Number(task.targetConstraints.curatedId ?? task.sourceConstraints.curatedId);
+          if (Number.isInteger(curatedId) && curatedId > 0) {
+            const row = curatedContentStore ? await curatedContentStore.getOneForAccount(curatedId, task.accountId) : null;
+            if (!row || row.sourceId !== String(task.targetConstraints.noteId ?? task.sourceConstraints.sourceId ?? '')) {
+              return { ok: false, code: 'curated_target_changed', message: '精选目标已删除或身份发生变化，不能改选相似内容。' };
+            }
+          }
+          return { ok: true };
+        },
+      });
+      console.log('[aidcp-cloud] DelegatedTaskStore 已就绪（统一用户委托任务控制面）');
+    } catch (err) {
+      console.warn('[aidcp-cloud] DelegatedTaskStore 初始化失败，公共写入口 fail-closed:', (err as Error).message);
+    }
+  }
+
   // 账号作用域出站的**唯一**群解析入口（change feishu-route-account-cards-by-team）：账号 → group_label → 团队群，
   // 未绑定 / 任一层读失败一律回落默认群链、绝不静默丢。
   // 依赖必须在此一处注入：逐处手工装配时漏传 groupRouteStore，解析器会「合法地」判定无团队路由 → 落默认群 →
@@ -1371,6 +1473,40 @@ async function main(): Promise<void> {
       console.log(`[feishu] 已恢复账号：${acct}（恢复 edge 数=${resumedEdges}）`);
     },
     bindChat: (record) => botChatStore.setDefault(record),
+    delegate: async (text, context) => {
+      if (!delegatedTaskService) throw new Error('委托任务服务未就绪，未执行任何写操作。');
+      const result = await delegatedTaskService.createFromText(text, { sourceRef: context?.messageId ?? context?.chatId });
+      if (result.kind === 'control') {
+        const req = result.request;
+        const task = req.action === 'pause'
+          ? await delegatedTaskService.pause(req.taskId)
+          : req.action === 'resume'
+            ? await delegatedTaskService.resume(req.taskId)
+            : req.action === 'cancel'
+              ? await delegatedTaskService.cancel(req.taskId)
+              : await delegatedTaskService.get(req.taskId);
+        return {
+          command: text,
+          ok: true,
+          title: '委托任务当前状态',
+          message: `任务 ${task.id} 当前为 ${task.status}，真实完成 ${task.progress.successCount}/${task.targetSuccessCount}。`,
+          accountId: task.accountId,
+          accountName: task.accountName,
+          platformName: task.platform,
+          card: buildDelegatedTaskProgressCard(task),
+        };
+      }
+      return {
+        command: text,
+        ok: true,
+        title: result.created ? '委托任务待确认' : '已存在相同待确认任务',
+        message: '确认前不会执行任何平台写动作。',
+        accountId: result.task.accountId,
+        accountName: result.task.accountName,
+        platformName: result.task.platform,
+        card: buildDelegatedTaskConfirmationCard(result.confirmation),
+      };
+    },
     // 手动 /publish <昵称>：越过风控 canDo（人工授权），发布前飞书人审仍铁定生效（AC-PUB）。
     // 按昵称解析目标账号（严格只认昵称）→ 落 publish_log.account_id + 命令定向到该账号在线节点；缺省 → 唯一真实账号。
     // 回执据**真实编排终态**判 ok/level：成功（已生成进人审）=绿、未触发/未产出=黄、失败/不可用=红，并把失败原因带进正文。
@@ -2827,6 +2963,8 @@ async function main(): Promise<void> {
           facebookPublishMediaStore ? facebookPublishMediaStore.availableCount(accountId) : Promise.resolve(0),
         // 忙判定收窄为账号粒度自主单飞：洗稿在途不让排期槽（全局帽在 claim 层另行兜底）。
         isPublishBusy: (accountId) => publishScheduler?.isBusy(accountId) ?? false,
+        delegatedOwnershipBusy: (accountId, family) =>
+          delegatedTaskStore?.hasActiveOwnership(accountId, family) ?? false,
         // 自动 ⊆ 活跃（用户拍板：浏览休眠格绝不自动发内容）：读浏览周历掩码，沿其 fail-open（未配=全天活跃=不限）。
         browseActiveAt: (now) => isWeekActiveAt(sessionConfigStore.weekActiveMask(), now),
         // fire-and-forget：调度器只发起；结果（成功/诚实空槽/失败）在此异步补一张飞书卡，绝不静默假成功。
@@ -3067,6 +3205,91 @@ async function main(): Promise<void> {
   } else {
     console.warn('[aidcp-cloud] PublishScheduler 未建（ConceptStore/LikedNoteStore 不可用），发帖触发不可用');
   }
+
+  // DelegatedTask execution is late-bound after both schedulers and PublishDispatcher are ready.
+  if (delegatedTaskStore && delegatedTaskService && commentScheduler && publishScheduler) {
+    const loadCandidate = async (recordId: number) => {
+      const draft = await publishLogStore.loadForDispatch(recordId);
+      return draft
+        ? {
+            recordId: draft.recordId,
+            accountId: draft.accountId,
+            platform: draft.platform ?? 'xiaohongshu',
+            status: draft.status,
+            contentVersion: draft.contentVersion,
+            title: draft.title,
+            content: draft.content,
+            images: draft.imageUrls,
+          }
+        : null;
+    };
+    const delegatedExecutors = createDelegatedExecutorRouter({
+      comments: commentScheduler,
+      publishes: publishScheduler,
+      loadCandidate,
+      approveCandidate: async (candidate) => {
+        const draft = await publishLogStore.loadForDispatch(candidate.recordId);
+        if (!draft || draft.contentVersion !== candidate.contentVersion) return loadCandidate(candidate.recordId);
+        const requestId = `publish-${candidate.recordId}`;
+        const preflight = await preflightApprovePublish(requestId);
+        if (!preflight.ok) throw new Error(`candidate_deferred:${preflight.reason}`);
+        const tags = Array.isArray(draft.metadata?.topics)
+          ? draft.metadata.topics.filter((item): item is string => typeof item === 'string')
+          : [];
+        const result = await writeApprovalSignal({ writeFile, readFile }, requestId, true, {
+          title: draft.title ?? '', content: draft.content, tags, contentVersion: draft.contentVersion,
+        });
+        if (!result.written && result.alreadyDecided !== true) throw new Error('candidate_already_rejected');
+        await publishDispatcher.dispatch(candidate.recordId, { humanApproval: true });
+        return loadCandidate(candidate.recordId);
+      },
+      rejectCandidate: async (candidate) => {
+        const draft = await publishLogStore.loadForDispatch(candidate.recordId);
+        if (!draft || draft.contentVersion !== candidate.contentVersion) return loadCandidate(candidate.recordId);
+        const requestId = `publish-${candidate.recordId}`;
+        const tags = Array.isArray(draft.metadata?.topics)
+          ? draft.metadata.topics.filter((item): item is string => typeof item === 'string')
+          : [];
+        const result = await writeApprovalSignal({ writeFile, readFile }, requestId, false, {
+          title: draft.title ?? '', content: draft.content, tags, contentVersion: draft.contentVersion,
+        });
+        if (!result.written && result.alreadyDecided !== false) throw new Error('candidate_already_approved');
+        await publishLogStore.rejectPendingApproval(candidate.recordId);
+        notifyPublishRejected(requestId);
+        return loadCandidate(candidate.recordId);
+      },
+      modifyCandidate: async (candidate, patch) => {
+        const result = await publishLogStore.editDraft(candidate.recordId, candidate.contentVersion, patch, 'delegated-task');
+        if (!result.ok) throw new Error(`candidate_edit_${result.reason}`);
+        refreshPublishPreview(candidate.recordId);
+        return loadCandidate(candidate.recordId);
+      },
+      terminalWaitMs: readEnvNumber('AIDCP_DELEGATED_TASK_TERMINAL_WAIT_MS', 4 * 60_000),
+    });
+    const worker = new DelegatedTaskWorker({
+      store: delegatedTaskStore,
+      executorFor: delegatedExecutors.executorFor,
+      externalBusy: delegatedExecutors.externalBusy,
+      platformStillMatches: async (task) => (await accountStore?.getPlatform?.(task.accountId)) === task.platform,
+      onTaskUpdated: async (task: DelegatedTask) => {
+        if (!['waiting_approval', 'partially_completed', 'completed', 'cancelled', 'failed'].includes(task.status)) return;
+        const chatId = await resolveAccountChatId(task.accountId);
+        if (!chatId) return;
+        await messenger.sendCard(chatId, buildDelegatedTaskProgressCard(task)).catch((err) =>
+          console.warn(`[delegated-task] 进度卡发送失败 task=${task.id}: ${(err as Error).message}`),
+        );
+      },
+      logger: console,
+    });
+    if (readEnvString('AIDCP_DELEGATED_TASK_WORKER') !== 'false') {
+      worker.start(readEnvNumber('AIDCP_DELEGATED_TASK_POLL_MS', 5_000));
+      console.log('[aidcp-cloud] DelegatedTaskWorker 已启动（automatic priority；安全边界 pause/cancel）');
+    } else {
+      console.warn('[aidcp-cloud] DelegatedTaskWorker 已禁用（任务可确认但不会执行）');
+    }
+  } else if (delegatedTaskService) {
+    console.warn('[aidcp-cloud] DelegatedTask 执行器未就绪（评论或发布 scheduler 缺失）；任务服务保持 fail-visible');
+  }
   // 旧 TODO(temp) /debug/publish 调试口已删除（A 阶段4）：发帖只经 PublishScheduler 三扳机 + 发布前人审。
   const feishuReceiver = new FeishuWsReceiver({
     commandRouter,
@@ -3079,6 +3302,9 @@ async function main(): Promise<void> {
     // 不一致 → 不写签名、回「请到控制台重新审批」替换卡（云端无法主动刷新已发出的老卡片）。
     readLiveContentVersion,
     preflightApprovePublish: (requestId) => preflightApprovePublish(requestId),
+    onDelegatedTaskAction: (value) => delegatedTaskService
+      ? handleDelegatedTaskCardAction(delegatedTaskService, value)
+      : Promise.resolve(null),
   });
   if (isFeishuWsEnabled()) {
     try {
@@ -3226,6 +3452,7 @@ async function main(): Promise<void> {
             password: readEnvString('PGPASSWORD'),
           }),
           publishOrchestrator,
+          delegatedTasks: delegatedTaskService,
           preflightApprovePublish: (requestId) => preflightApprovePublish(requestId),
           writeApprovalSignal: async (requestId, approved, payload) => {
             const result = await writeApprovalSignal({ writeFile, readFile }, requestId, approved, payload);
@@ -3527,6 +3754,7 @@ async function main(): Promise<void> {
           store: clientUserStore,
           revocation: new TokenRevocationStore(), // 独立撤销黑名单，绝不共用面板的
           rateLimiter: new LoginRateLimiter(),
+          delegatedTasks: delegatedTaskService,
         },
         {
           port: clientAuthPort,

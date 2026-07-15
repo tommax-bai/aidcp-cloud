@@ -315,7 +315,10 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     const approvalMode = (context.get('trigger') as TriggerInput | undefined)?.approvalMode ?? 'review';
     let approvalCard: ApprovalCardSendResult;
     let approvalLog = '候审不让位、无超时';
-    if (approvalMode === 'auto_approve') {
+    if (approvalMode === 'draft_only') {
+      approvalCard = { sent: false, targetSource: 'none' };
+      approvalLog = '仅生成候选、暂不发布（未发审批卡、未写授权信号）';
+    } else if (approvalMode === 'auto_approve') {
       const autoApproval = await this.tryAutoApprovePublish(assembled, title, requestId, topics, context, accountId, recordId);
       if (autoApproval.authorized) {
         approvalCard = autoApproval.notification;

@@ -564,3 +564,37 @@ test('matchAccountByNickname: 空昵称 → not_found（不静默命中）', () 
   const r = matchAccountByNickname('   ', [{ accountId: 'id-a', nickname: '小白' }]);
   assert.equal(r.ok === false && r.reason, 'not_found');
 });
+
+test('CommandRouter: 自然语言与旧写命令统一进入委托确认，messageId 原样传入做幂等', async () => {
+  const calls: Array<{ text: string; context?: { chatId?: string; messageId?: string } }> = [];
+  const router = new CommandRouter({
+    ...makeActions().actions,
+    delegate: (text, context) => {
+      calls.push({ text, context });
+      return { command: text, ok: true, level: 'warning', title: '请确认用户委托任务', message: '尚未执行' };
+    },
+  });
+  const natural = await router.handle('让晚风今天完成 5 条有效评论', { chatId: 'oc_admin', messageId: 'om_1' });
+  const legacy = await router.handle('/publish 晚风', { chatId: 'oc_admin', messageId: 'om_2' });
+  assert.equal(natural.title, '请确认用户委托任务');
+  assert.equal(legacy.title, '请确认用户委托任务');
+  assert.deepEqual(calls, [
+    { text: '让晚风今天完成 5 条有效评论', context: { chatId: 'oc_admin', messageId: 'om_1' } },
+    { text: '/publish 晚风', context: { chatId: 'oc_admin', messageId: 'om_2' } },
+  ]);
+});
+
+test('CommandRouter: 非管理群自然语言委托被权限闸拒绝，delegate 零调用', async () => {
+  let delegated = 0;
+  const router = new CommandRouter({
+    ...makeActions().actions,
+    delegate: () => {
+      delegated++;
+      return { command: 'x', ok: true, level: 'warning', title: '不应发生', message: '' };
+    },
+  }, undefined, undefined, () => false);
+  const result = await router.handle('让晚风完成 3 条评论', { chatId: 'oc_customer' });
+  assert.equal(result.ok, false);
+  assert.match(result.title, /无权/);
+  assert.equal(delegated, 0);
+});

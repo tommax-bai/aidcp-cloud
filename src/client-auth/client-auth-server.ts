@@ -17,6 +17,8 @@ import { parseBearer } from '../panel/auth.js';
 import type { TokenRevocationStore } from '../panel/revocation.js';
 import type { ClientUserStore } from './client-user-store.js';
 import type { LoginRateLimiter } from './rate-limiter.js';
+import { DelegatedTaskServiceError, type DelegatedTaskService } from '../delegated-task/service.js';
+import type { DelegatedTaskIntent } from '../delegated-task/types.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -24,6 +26,8 @@ export interface ClientAuthDeps {
   store: ClientUserStore;
   revocation: TokenRevocationStore;
   rateLimiter: LoginRateLimiter;
+  /** Customer-scoped delegated tasks. Every route re-checks env ownership from the DB. */
+  delegatedTasks?: DelegatedTaskService;
 }
 
 export interface ClientAuthConfig {
@@ -123,7 +127,8 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
 
   async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const method = req.method ?? 'GET';
-    const url = (req.url ?? '/').split('?')[0];
+    const rawUrl = req.url ?? '/';
+    const url = rawUrl.split('?')[0];
 
     // ── 公开端点 ──────────────────────────────────────────────
     if (method === 'GET' && url === '/health') {
@@ -202,6 +207,103 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         return;
       }
       sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    // Edge task entry is bound to the selected environment. Scope is read from
+    // client_env_scope on every request; accountId is never accepted as an
+    // unverified cross-customer selector.
+    if (url === '/delegated-tasks' && method === 'GET') {
+      if (!deps.delegatedTasks) {
+        sendJson(res, 503, { error: 'delegated_tasks_unavailable' });
+        return;
+      }
+      const envKey = (new URL(rawUrl, 'http://localhost').searchParams.get('envKey') ?? '').trim();
+      const scope = await deps.store.listEnvScope(userId);
+      if (!envKey || !scope.some((item) => item.envKey === envKey)) {
+        sendJson(res, 403, { error: 'environment_not_owned' });
+        return;
+      }
+      sendJson(res, 200, { tasks: await deps.delegatedTasks.list({ accountId: envKey, limit: 50 }) });
+      return;
+    }
+    if (url === '/delegated-tasks/draft' && method === 'POST') {
+      if (!deps.delegatedTasks) {
+        sendJson(res, 503, { error: 'delegated_tasks_unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const raw = (body ?? {}) as Partial<DelegatedTaskIntent> & { envKey?: unknown };
+      const envKey = typeof raw.envKey === 'string' ? raw.envKey.trim() : '';
+      const scope = await deps.store.listEnvScope(userId);
+      if (!envKey || !scope.some((item) => item.envKey === envKey)) {
+        sendJson(res, 403, { error: 'environment_not_owned' });
+        return;
+      }
+      try {
+        const result = await deps.delegatedTasks.createDraft({
+          ...raw as DelegatedTaskIntent,
+          accountId: envKey,
+          source: 'edge',
+          sourceRef: typeof raw.sourceRef === 'string' && raw.sourceRef.trim()
+            ? raw.sourceRef.trim()
+            : `edge:${envKey}:${Date.now()}`,
+        });
+        sendJson(res, result.created ? 201 : 200, result);
+      } catch (err) {
+        if (err instanceof DelegatedTaskServiceError) {
+          sendJson(res, err.status, { error: err.code, message: err.message });
+        } else {
+          throw err;
+        }
+      }
+      return;
+    }
+    const taskAction = /^\/delegated-tasks\/([^/]+)\/(confirm|pause|resume|cancel)$/.exec(url);
+    if (taskAction && method === 'POST') {
+      if (!deps.delegatedTasks) {
+        sendJson(res, 503, { error: 'delegated_tasks_unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      try {
+        const taskId = decodeURIComponent(taskAction[1]);
+        const task = await deps.delegatedTasks.get(taskId);
+        const scope = await deps.store.listEnvScope(userId);
+        if (!scope.some((item) => item.envKey === task.accountId)) {
+          sendJson(res, 403, { error: 'environment_not_owned' });
+          return;
+        }
+        const raw = (body ?? {}) as { version?: unknown };
+        const version = typeof raw.version === 'number' ? raw.version : undefined;
+        const action = taskAction[2];
+        const updated = action === 'confirm'
+          ? await deps.delegatedTasks.confirm(taskId, version ?? -1)
+          : action === 'pause'
+            ? await deps.delegatedTasks.pause(taskId, version)
+            : action === 'resume'
+              ? await deps.delegatedTasks.resume(taskId, version)
+              : await deps.delegatedTasks.cancel(taskId, version);
+        sendJson(res, 200, { task: updated });
+      } catch (err) {
+        if (err instanceof DelegatedTaskServiceError) {
+          sendJson(res, err.status, { error: err.code, message: err.message });
+        } else {
+          throw err;
+        }
+      }
       return;
     }
 

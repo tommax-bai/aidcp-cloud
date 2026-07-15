@@ -10,6 +10,8 @@ import { startPanelApi } from '../src/panel/panel-server.js';
 import { parsePanelUsers } from '../src/panel/auth.js';
 import type { PanelConfig, PanelDeps } from '../src/panel/types.js';
 import type { CuratedPanelRow } from '../src/cache/curated-content-store.js';
+import { MemoryDelegatedTaskStore } from '../src/delegated-task/store.js';
+import { DelegatedTaskService } from '../src/delegated-task/service.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 
@@ -66,8 +68,8 @@ async function loginAuth(base: string): Promise<Record<string, string>> {
   return { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
 }
 
-test('HTTP 精选行级动作：503/400/404/类型约束/empty_body/empty_title/触发透传', async () => {
-  // ① 注入 curatedContent 但未注入 curatedActions → 503。
+test('HTTP 精选行级动作：拒绝路径不变；合法写只生成结构化确认任务，确认前零副作用', async () => {
+  // ① 注入 curatedContent 但未注入 DelegatedTask 服务 → 503。
   const rows = new Map<string, CuratedPanelRow | null>();
   const curatedMock = {
     listForPanel: async () => ({ items: [], total: 0 }),
@@ -88,21 +90,13 @@ test('HTTP 精选行级动作：503/400/404/类型约束/empty_body/empty_title/
   }
 
   // ② 完整注入：透传与各拒绝路径。
-  const actionCalls: Array<{ fn: string; accountId: string; rowId: number; withContact?: boolean; useReferenceImages?: boolean }> = [];
-  const actionsMock = {
-    createPostFromNote: async (accountId: string, r2: CuratedPanelRow, options?: { useReferenceImages?: boolean }) => {
-      const call: { fn: string; accountId: string; rowId: number; useReferenceImages?: boolean } = { fn: 'create', accountId, rowId: r2.id };
-      if (typeof options?.useReferenceImages === 'boolean') call.useReferenceImages = options.useReferenceImages;
-      actionCalls.push(call);
-      return { triggered: true };
-    },
-    commentOnNote: async (accountId: string, r2: CuratedPanelRow, withContact: boolean) => {
-      actionCalls.push({ fn: 'comment', accountId, rowId: r2.id, withContact });
-      return withContact ? { triggered: false, reason: 'contact_info_missing' } : { triggered: true };
-    },
-  };
+  const taskStore = new MemoryDelegatedTaskStore();
+  const delegatedTasks = new DelegatedTaskService({
+    store: taskStore,
+    listAccounts: async () => [{ accountId: 'acc-1', nickname: '晚风', platform: 'xiaohongshu' }],
+  });
   const h = await startPanelApi(
-    { ...(baseDeps as object), curatedContent: curatedMock, curatedActions: actionsMock } as unknown as PanelDeps,
+    { ...(baseDeps as object), curatedContent: curatedMock, delegatedTasks } as unknown as PanelDeps,
     makeConfig(),
   );
   const base = `http://127.0.0.1:${h.port}`;
@@ -146,37 +140,44 @@ test('HTTP 精选行级动作：503/400/404/类型约束/empty_body/empty_title/
     const noTitle = await post('/api/curated/contents/10/comment', { accountId: 'acc-1' });
     assert.equal(noTitle.status, 200);
     assert.deepEqual(await noTitle.json(), { triggered: false, reason: 'empty_title' });
-    assert.equal(actionCalls.length, 0, '以上拒绝路径都不该触达动作实现');
+    assert.equal((await delegatedTasks.list()).length, 0, '以上拒绝路径都不应创建任务或触达写动作');
 
-    // 正常触发：create-post 透传行；comment 透传 withContact 与域内拒绝原因码。
+    // 合法入口只创建 awaiting_confirmation；来源快照、版本约束和 withContact 原样锁进任务。
     rows.set('7:acc-1', row());
     const created = await post('/api/curated/contents/7/create-post', { accountId: 'acc-1' });
-    assert.equal(created.status, 200);
-    assert.deepEqual(await created.json(), { triggered: true });
+    assert.equal(created.status, 201);
+    const createdTask = (await created.json()) as { task: { status: string; action: string; progress: { attemptCount: number }; sourceConstraints: Record<string, unknown> } };
+    assert.equal(createdTask.task.status, 'awaiting_confirmation');
+    assert.equal(createdTask.task.action, 'publish_post');
+    assert.equal(createdTask.task.progress.attemptCount, 0);
+    assert.equal(createdTask.task.sourceConstraints.sourceId, 'note-42');
     rows.set('12:acc-1', row({
       id: 12,
       referenceImages: [{ index: 0, sourceUrl: 'https://img.test/a.jpg', captureStatus: 'url_only', capturedAt: 1 }],
     }));
     const createdTextOnly = await post('/api/curated/contents/12/create-post', { accountId: 'acc-1', useReferenceImages: false });
-    assert.equal(createdTextOnly.status, 200);
-    assert.deepEqual(await createdTextOnly.json(), { triggered: true });
+    assert.equal(createdTextOnly.status, 201);
+    const textOnlyTask = (await createdTextOnly.json()) as { task: { sourceConstraints: Record<string, unknown> } };
+    assert.equal(textOnlyTask.task.sourceConstraints.useReferenceImages, false);
 
     const contentComment = await post('/api/curated/contents/7/comment', { accountId: 'acc-1' });
-    assert.deepEqual(await contentComment.json(), { triggered: true });
+    assert.equal(contentComment.status, 201);
+    const commentTask = (await contentComment.json()) as { task: { status: string; action: string; targetConstraints: Record<string, unknown> } };
+    assert.equal(commentTask.task.status, 'awaiting_confirmation');
+    assert.equal(commentTask.task.action, 'comment_curated');
+    assert.equal(commentTask.task.targetConstraints.noteId, 'note-42');
+    assert.equal(commentTask.task.targetConstraints.withContact, false);
 
     const contactComment = await post('/api/curated/contents/7/comment', { accountId: 'acc-1', withContact: true });
-    assert.deepEqual(await contactComment.json(), { triggered: false, reason: 'contact_info_missing' });
+    assert.equal(contactComment.status, 201);
+    const contactTask = (await contactComment.json()) as { task: { targetConstraints: Record<string, unknown> } };
+    assert.equal(contactTask.task.targetConstraints.withContact, true);
 
     const videoComment = await post('/api/curated/contents/11/comment', { accountId: 'acc-1' });
-    assert.deepEqual(await videoComment.json(), { triggered: true });
-
-    assert.deepEqual(actionCalls, [
-      { fn: 'create', accountId: 'acc-1', rowId: 7 },
-      { fn: 'create', accountId: 'acc-1', rowId: 12, useReferenceImages: false },
-      { fn: 'comment', accountId: 'acc-1', rowId: 7, withContact: false },
-      { fn: 'comment', accountId: 'acc-1', rowId: 7, withContact: true },
-      { fn: 'comment', accountId: 'acc-1', rowId: 11, withContact: false },
-    ]);
+    assert.equal(videoComment.status, 201);
+    const tasks = await delegatedTasks.list();
+    assert.equal(tasks.length, 5);
+    assert.ok(tasks.every((task) => task.status === 'awaiting_confirmation' && task.progress.attemptCount === 0));
   } finally {
     await h.close();
   }

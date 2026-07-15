@@ -887,10 +887,15 @@ export class CuratedContentStore {
     accountId: string,
     contentType: CuratedContentTypeFilter,
     limit: number,
+    opts?: { updatedSinceMs?: number },
   ): Promise<CuratedSelectItem[]> {
     const params: unknown[] = [accountId];
     const conds = ['account_id = $1'];
     appendContentTypeFilter(conds, params, contentType);
+    if (opts?.updatedSinceMs !== undefined) {
+      params.push(new Date(opts.updatedSinceMs));
+      conds.push(`updated_at >= $${params.length}`);
+    }
     params.push(limit);
     const limitIdx = params.length;
     const { rows } = await this.pool.query<CuratedRow>(

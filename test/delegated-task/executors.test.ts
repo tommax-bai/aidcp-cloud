@@ -1,0 +1,109 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createDelegatedExecutorRouter, type CandidateSnapshot } from '../../src/delegated-task/executors.js';
+import type { DelegatedTask, DelegatedTaskAttempt } from '../../src/delegated-task/types.js';
+
+function task(overrides: Partial<DelegatedTask> = {}): DelegatedTask {
+  return {
+    id: 'task-1', accountId: 'xhs-1', accountName: '小萝北', platform: 'xiaohongshu',
+    action: 'comment_batch', actionFamily: 'comment', targetSuccessCount: 3, maxAttempts: 6,
+    deadlineAt: Date.now() + 60_000, notBefore: Date.now(), executionWindow: { mode: 'immediate' },
+    sourceConstraints: {}, targetConstraints: {}, approvalMode: 'review', priority: 'normal', source: 'api', sourceRef: null,
+    status: 'executing', progress: { successCount: 0, attemptCount: 1, skippedCount: 0, failureCount: 0 },
+    currentStep: null, terminalOutcome: null, pauseRequested: false, cancelRequested: false, nextEligibleAt: null,
+    claimToken: 'claim', claimExpiresAt: Date.now() + 60_000, dedupeKey: 'dedupe', version: 1,
+    createdAt: Date.now(), updatedAt: Date.now(), confirmedAt: Date.now(), completedAt: null,
+    ...overrides,
+  };
+}
+
+const attempt: DelegatedTaskAttempt = {
+  id: 'attempt-1', taskId: 'task-1', ordinal: 1, targetKey: 'target-1', status: 'dispatched',
+  verificationKind: null, evidenceRef: null, reason: null, preparedAt: Date.now(), dispatchedAt: Date.now(), finishedAt: null,
+};
+
+function candidate(overrides: Partial<CandidateSnapshot> = {}): CandidateSnapshot {
+  return {
+    recordId: 42, accountId: 'xhs-1', platform: 'xiaohongshu', status: 'pending_approval',
+    contentVersion: 3, title: '原题', content: '原文', images: ['one.jpg', 'two.jpg'], ...overrides,
+  };
+}
+
+test('batch comments always use automatic quota semantics while legacy single comment retains manual compatibility', async () => {
+  const calls: Array<{ priority: string; manualOverride: boolean; force: boolean }> = [];
+  const router = createDelegatedExecutorRouter({
+    comments: {
+      triggerManual: async (_accountId, options) => {
+        calls.push({ priority: options.priority, manualOverride: options.manualOverride, force: options.force });
+        await options.onResult({ outcome: 'commented', noteId: 'note-1' });
+        return { ok: true, message: 'started' };
+      },
+      triggerTargeted: async () => ({ ok: false, message: 'unused' }),
+      isRunning: () => false,
+    },
+    publishes: { triggerDelegated: async () => ({ result: 'blocked', reason: 'unused' }), isBusy: () => false },
+    loadCandidate: async () => null,
+    approveCandidate: async () => null,
+    rejectCandidate: async () => null,
+    modifyCandidate: async () => null,
+  });
+  const batch = await router.executorFor(task()).execute(task(), attempt);
+  assert.equal(batch.kind, 'success');
+  assert.deepEqual(calls[0], { priority: 'automatic', manualOverride: false, force: false });
+
+  const legacy = task({ source: 'legacy_command', targetSuccessCount: 1, targetConstraints: { manualSingle: true, force: true } });
+  await router.executorFor(legacy).execute(legacy, attempt);
+  assert.deepEqual(calls[1], { priority: 'human', manualOverride: true, force: true });
+});
+
+test('Facebook shadow observation is skipped and never counted as a verified comment', async () => {
+  const router = createDelegatedExecutorRouter({
+    comments: {
+      triggerManual: async (_accountId, options) => {
+        await options.onResult({ outcome: 'shadow_ok', reason: 'shadow_no_submit' });
+        return { ok: true, message: 'shadow' };
+      },
+      triggerTargeted: async () => ({ ok: false, message: 'unused' }),
+      isRunning: () => false,
+    },
+    publishes: { triggerDelegated: async () => ({ result: 'blocked', reason: 'unused' }), isBusy: () => false },
+    loadCandidate: async () => null,
+    approveCandidate: async () => null,
+    rejectCandidate: async () => null,
+    modifyCandidate: async () => null,
+  });
+  const fb = task({ platform: 'facebook', action: 'facebook_group_comment', actionFamily: 'comment', targetSuccessCount: 1 });
+  assert.deepEqual(await router.executorFor(fb).execute(fb, attempt), { kind: 'skipped', reason: 'shadow_no_submit' });
+});
+
+test('candidate modification is CAS-bound and carries the requested retained-image subset', async () => {
+  let writtenPatch: { title?: string; content?: string; images?: string[] } | null = null;
+  const before = candidate();
+  const router = createDelegatedExecutorRouter({
+    comments: {
+      triggerManual: async () => ({ ok: false, message: 'unused' }),
+      triggerTargeted: async () => ({ ok: false, message: 'unused' }),
+      isRunning: () => false,
+    },
+    publishes: { triggerDelegated: async () => ({ result: 'blocked', reason: 'unused' }), isBusy: () => false },
+    loadCandidate: async () => before,
+    approveCandidate: async () => null,
+    rejectCandidate: async () => null,
+    modifyCandidate: async (_draft, patch) => {
+      writtenPatch = patch;
+      return candidate({ contentVersion: 4, images: patch.images ?? before.images });
+    },
+  });
+  const modify = task({
+    action: 'modify_candidate', actionFamily: 'candidate_control', targetSuccessCount: 1, maxAttempts: 1,
+    targetConstraints: { candidateId: '42', candidateVersion: 3, images: ['one.jpg'] },
+  });
+  const result = await router.executorFor(modify).execute(modify, attempt);
+  assert.equal(result.kind, 'success');
+  assert.deepEqual(writtenPatch, { images: ['one.jpg'] });
+
+  const stale = task({ ...modify, targetConstraints: { ...modify.targetConstraints, candidateVersion: 2 } });
+  assert.deepEqual(await router.executorFor(stale).execute(stale, attempt), {
+    kind: 'failed', reason: 'candidate_version_conflict(current=3)', retryable: false,
+  });
+});

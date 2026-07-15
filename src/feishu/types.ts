@@ -154,6 +154,8 @@ export interface CommandResult {
   accountName?: string;
   /** 发布/命令平台展示名。 */
   platformName?: string;
+  /** Optional purpose-built card (for example a DelegatedTask confirmation card). */
+  card?: FeishuCard;
 }
 
 export interface PublishApprovalPayload {

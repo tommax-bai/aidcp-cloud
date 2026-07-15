@@ -61,6 +61,8 @@ export interface ContentSchedulerDeps {
   availablePublishMediaCount?(accountId: string): Promise<number>;
   /** 该账号自主发帖轮是否在跑（change parallel-rewrite-drafts：账号粒度单飞；洗稿在途不让排期槽）。 */
   isPublishBusy(accountId: string): boolean;
+  /** Active delegated ownership wins over periodic work for the same account/action family. Busy skips do not consume a slot. */
+  delegatedOwnershipBusy?(accountId: string, family: 'comment' | 'publish'): boolean | Promise<boolean>;
   /**
    * 当前是否在「可活跃时间」（浏览周历掩码）内 —— **自动内容时窗 ⊆ 活跃时段** 的强制闸（用户拍板：
    * 休眠格绝不自动发内容，账号"睡着"的时段准点发帖本身就是不自然信号）。语义沿浏览掩码的 fail-open
@@ -317,6 +319,13 @@ export class ContentScheduler {
               if (!actionModeEnabled(s.contactCommentMode) || s.contactCommentDailyCap <= 0) continue;
               // 联系评论两件套未注入（或评论机器缺）→ 该动作整体跳过（零回归）。
               if (!this.deps.triggerContactComment || !this.deps.isCommentBusy || !this.deps.contactAttemptsTodayCount) continue;
+            }
+            const delegatedFamily = action === 'post' ? 'publish' : 'comment';
+            if (this.deps.delegatedOwnershipBusy && await this.deps.delegatedOwnershipBusy(accountId, delegatedFamily)) {
+              this.deps.logger?.info?.(
+                `[content-scheduler] 委托任务持有 ownership，排期诚实让位 account=${accountId} family=${delegatedFamily}`,
+              );
+              continue;
             }
             // 幂等：每动作独立小时格键（发帖触发绝不吞同小时评论槽）。
             const fireKey = `${accountId}|${action}`;

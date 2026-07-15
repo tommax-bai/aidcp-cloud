@@ -62,6 +62,7 @@ import type { BillingPriceRefreshResult } from '../metrics/billing-price-refresh
 import type { NotificationContact, NotificationContactManual } from '../cache/notification-contact-store.js';
 import type { ThinkingMode, ThinkingModeApi } from '../config/role-catalog.js';
 import type { AlertStore } from '../alerts/index.js';
+import type { DelegatedTaskService } from '../delegated-task/service.js';
 
 /** 全局「内容可自动时段」视图（GET /api/content-schedule/global）。overridden = 库有行。 */
 export interface ContentScheduleGlobalView {
@@ -120,6 +121,8 @@ export interface PanelDeps {
   panelStore: PanelStoreReader;
   /** 发布编排器 in-flight 队列状态（/api/content/queue）。 */
   publishOrchestrator: { getStatus(): { status: string; snapshot: unknown } };
+  /** Unified public-write confirmation/task API. When absent, delegated endpoints fail closed with 503. */
+  delegatedTasks?: Pick<DelegatedTaskService, 'createDraft' | 'confirm' | 'list' | 'get' | 'pause' | 'resume' | 'cancel'>;
   /** 发布审批写回（first-writer-wins，与飞书共享信号文件契约 AC-PUB-*）；返回 written/alreadyDecided，绝不 published。 */
   writeApprovalSignal: (
     requestId: string,

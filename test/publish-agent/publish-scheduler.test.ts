@@ -19,19 +19,23 @@ interface Knobs {
   /** 编排器返回的非正常原因（failed/skipped 时填，验证沿链路 surface）。 */
   orchestratorReason?: string;
   personaBound?: boolean;
+  conceptKeywords?: string[];
+  likedItems?: Array<{ id: number; title: string; summary: string; author: string }>;
+  curatedItems?: any[];
 }
 
 function build(k: Knobs = {}) {
   const triggered: string[] = [];
   const inputs: any[] = [];
+  const curatedCalls: Array<{ contentType: string; updatedSinceMs?: number }> = [];
   const deps: PublishSchedulerDeps = {
     conceptStore: {
       countNewSince: async () => k.newConcepts ?? 0,
-      getNewConceptsSince: async () => ['LLM Agent', 'RAG'],
+      getNewConceptsSince: async () => k.conceptKeywords ?? ['LLM Agent', 'RAG'],
     },
     likedStore: {
       countSince: async () => 1,
-      recentSince: async () => [{ id: 7, title: 'RAG 实战', summary: '分块', author: '老王' }],
+      recentSince: async () => k.likedItems ?? [{ id: 7, title: 'RAG 实战', summary: '分块', author: '老王' }],
     },
     publishLog: {
       getMostRecentPublishTime: async () => (k.lastPublishMs === undefined ? null : k.lastPublishMs),
@@ -42,12 +46,18 @@ function build(k: Knobs = {}) {
     isPersonaBound: k.personaBound === undefined ? undefined : () => k.personaBound === true,
     orchestrator: { trigger: async (input) => { triggered.push(JSON.stringify(input.metrics)); inputs.push(input); return { status: k.orchestratorStatus ?? 'draft', reason: k.orchestratorReason }; } },
     soul: {} as PublishSchedulerDeps['soul'],
+    curatedStore: {
+      selectForCreation: async (_accountId, contentType, _limit, opts) => {
+        curatedCalls.push({ contentType, ...(opts?.updatedSinceMs === undefined ? {} : { updatedSinceMs: opts.updatedSinceMs }) });
+        return contentType === 'source_post' ? (k.curatedItems ?? []) : [];
+      },
+    },
     conceptThreshold: k.conceptThreshold ?? 5,
     minHoursBetween: k.minHoursBetween ?? 24,
     clock: () => T,
     logger: silent,
   };
-  return { scheduler: new PublishScheduler(deps), triggered, inputs };
+  return { scheduler: new PublishScheduler(deps), triggered, inputs, curatedCalls };
 }
 
 describe('AC-PUB-SCHED PublishScheduler 三扳机', () => {
@@ -145,6 +155,25 @@ describe('AC-PUB-SCHED PublishScheduler 三扳机', () => {
     const scheduled = build({ newConcepts: 0, canDo: true });
     await scheduled.scheduler.triggerScheduled('acc-test');
     assert.equal(scheduled.inputs[0].manualApprovalChatId, undefined);
+  });
+
+  it('参考今日灵感只召回上海自然日内素材，今日无任何灵感时诚实跳过', async () => {
+    const withToday = build({
+      conceptKeywords: [],
+      likedItems: [],
+      curatedItems: [{ sourceId: 'today-1', contentType: 'image_text', title: '今日', body: '素材', topics: [], likeCount: 1, collectCount: 1, botLiked: false, botCollected: false, referenceImages: [] }],
+    });
+    const outcome = await withToday.scheduler.triggerDelegated('acc-test', { action: 'publish_from_inspiration' });
+    assert.equal(outcome.result, 'triggered');
+    assert.equal(withToday.triggered.length, 1);
+    assert.deepEqual(new Set(withToday.curatedCalls.map((call) => call.updatedSinceMs)), new Set([1699977600000]));
+
+    const emptyToday = build({ conceptKeywords: [], likedItems: [], curatedItems: [] });
+    const skipped = await emptyToday.scheduler.triggerDelegated('acc-test', { action: 'publish_from_inspiration' });
+    assert.equal(skipped.result, 'triggered');
+    assert.equal(skipped.result === 'triggered' && skipped.status, 'skipped');
+    assert.equal(skipped.result === 'triggered' && skipped.failureReason, 'today_inspiration_unavailable');
+    assert.equal(emptyToday.triggered.length, 0, '无今日素材绝不调用生成编排硬凑');
   });
 });
 

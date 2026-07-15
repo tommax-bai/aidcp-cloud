@@ -6,6 +6,8 @@ import type { ClientUserStore, ClientEnvScopeRow } from '../src/client-auth/clie
 import { LoginRateLimiter } from '../src/client-auth/rate-limiter.js';
 import { TokenRevocationStore } from '../src/panel/revocation.js';
 import { verifyJwt } from '../src/panel/jwt.js';
+import { MemoryDelegatedTaskStore } from '../src/delegated-task/store.js';
+import { DelegatedTaskService } from '../src/delegated-task/service.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 const CLIENT_SECRET = 'client-secret-xyz';
@@ -204,6 +206,58 @@ test('POST /environments 自动归属当前客户,随即出现在 /my-environmen
       const r = await fetch(`${base}/my-environments`, { headers: { authorization: `Bearer ${token}` } });
       const { environments } = (await r.json()) as { environments: { envKey: string }[] };
       assert.deepEqual(environments.map((e) => e.envKey), ['p9']);
+    },
+  );
+});
+
+test('Edge delegated-task routes bind every read/write to the customer-owned environment', async () => {
+  const fx = makeFakeStore();
+  fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
+  fx.scope.set('u1', [{ envKey: 'p1', label: '小萝北', platform: 'xiaohongshu', source: 'admin', assignedAt: 0 }]);
+  const taskStore = new MemoryDelegatedTaskStore();
+  const delegatedTasks = new DelegatedTaskService({
+    store: taskStore,
+    listAccounts: async () => [
+      { accountId: 'p1', nickname: '小萝北', platform: 'xiaohongshu', status: 'active' },
+      { accountId: 'p2', nickname: '别人的账号', platform: 'xiaohongshu', status: 'active' },
+    ],
+  });
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), delegatedTasks },
+    baseConfig(0),
+    async (base) => {
+      const login = await (
+        await fetch(`${base}/login`, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'acme', key: 'ck_secret' }),
+        })
+      ).json();
+      const token = (login as { token: string }).token;
+      const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+      const rejected = await fetch(`${base}/delegated-tasks/draft`, {
+        method: 'POST', headers, body: JSON.stringify({ envKey: 'p2', action: 'publish_post' }),
+      });
+      assert.equal(rejected.status, 403);
+
+      const created = await fetch(`${base}/delegated-tasks/draft`, {
+        method: 'POST', headers, body: JSON.stringify({
+          envKey: 'p1', action: 'comment_batch', targetSuccessCount: 2, maxAttempts: 4,
+          deadlineAt: Date.now() + 60_000, executionWindow: { mode: 'immediate' },
+          sourceConstraints: {}, targetConstraints: {}, approvalMode: 'review', priority: 'normal',
+        }),
+      });
+      assert.equal(created.status, 201);
+      const receipt = await created.json() as { task: { id: string; accountId: string; source: string; version: number } };
+      assert.equal(receipt.task.accountId, 'p1');
+      assert.equal(receipt.task.source, 'edge');
+
+      const confirmed = await fetch(`${base}/delegated-tasks/${receipt.task.id}/confirm`, {
+        method: 'POST', headers, body: JSON.stringify({ version: receipt.task.version }),
+      });
+      assert.equal(confirmed.status, 200);
+      const listed = await fetch(`${base}/delegated-tasks?envKey=p1`, { headers });
+      const listBody = await listed.json() as { tasks: Array<{ id: string; accountId: string }> };
+      assert.deepEqual(listBody.tasks.map((task) => [task.id, task.accountId]), [[receipt.task.id, 'p1']]);
+      assert.equal((await fetch(`${base}/delegated-tasks?envKey=p2`, { headers })).status, 403);
     },
   );
 });

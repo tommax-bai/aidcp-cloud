@@ -71,6 +71,9 @@ export interface FacebookCommentRunResult {
   container?: string;
 }
 
+/** Stable terminal observation used by queued delegated tasks; only verified `commented` is a success. */
+export type CommentTerminalObservation = CommentTaskResult | FacebookCommentRunResult;
+
 /**
  * 人类可读群名（回执/审计一律用群名、绝不显裸群 id/URL，见 facebook-scheduled-comment 约定）：
  * 已解析出真名则用之；候选是裸 URL / 群链接 / 缺失 → 中性占位「目标群」。
@@ -364,6 +367,8 @@ export class CommentScheduler {
       manualOverride?: boolean;
       force?: boolean;
       approvalMode?: ContentScheduleApprovalMode;
+      /** Async terminal observation. Existing callers may omit it; queued tasks use it for honest accounting. */
+      onResult?: (result: CommentTerminalObservation) => Promise<void> | void;
     },
   ): Promise<CommentCommandReceipt> {
     if (!accountId || accountId === 'default') {
@@ -457,6 +462,7 @@ export class CommentScheduler {
           force: options?.force === true,
           approvalMode: options?.approvalMode,
         })
+          .then((result) => options?.onResult?.(result))
           .catch((err) =>
             (this.deps.logger ?? console).warn(
               `[comment-scheduler] FB 加群评论任务异常 account=${accountId}：${(err as Error).message}`,
@@ -484,6 +490,7 @@ export class CommentScheduler {
         force: options?.force === true,
         approvalMode: options?.approvalMode,
       })
+        .then((result) => options?.onResult?.(result))
         .catch((err) =>
           (this.deps.logger ?? console).warn(
             `[comment-scheduler] FB 定向评论任务异常 account=${accountId}：${(err as Error).message}`,
@@ -509,6 +516,7 @@ export class CommentScheduler {
       options?.priority ?? 'human',
       options?.force === true,
       options?.approvalMode,
+      options?.onResult,
     )
       .catch((err) =>
         (this.deps.logger ?? console).warn(
@@ -942,7 +950,7 @@ export class CommentScheduler {
       force?: boolean;
       approvalMode?: ContentScheduleApprovalMode;
     } = {},
-  ): Promise<void> {
+  ): Promise<FacebookCommentRunResult> {
     const d = this.deps;
     let join: { triggered: boolean; reason?: string; groupUrl?: string; outcome?: string };
     try {
@@ -958,13 +966,13 @@ export class CommentScheduler {
         title: '加群失败',
         message: `加群调度异常：${(err as Error).message}；未评论。`,
       });
-      return;
+      return { outcome: 'submit_failed', reason: `join_exception:${(err as Error).message}` };
     }
     const isMember =
       join.triggered && (join.outcome === 'joined' || join.outcome === 'already_member') && !!join.groupUrl;
     if (!isMember) {
       await d.postResultCard?.(accountId, joinOnlyReceipt(join));
-      return;
+      return { outcome: 'no_targets', reason: `join_${join.reason ?? join.outcome ?? 'not_completed'}` };
     }
     // 已加入（或已是成员）→ 在该新群里发一条评论。override 容器强制真发；contactInfo 已在 triggerManual 解析一次（gate 同源）。
     // manualOverride 透传 → 群内评论亦跳过评论配额 / 日上限闸（整条链一致，绝不「加了群却被评论配额拦住」）。
@@ -977,6 +985,7 @@ export class CommentScheduler {
       approvalMode: options.approvalMode,
     });
     await d.postResultCard?.(accountId, joinCommentReceipt(join, comment, options.injectContact === true));
+    return comment;
   }
 
   /**
@@ -1220,6 +1229,7 @@ export class CommentScheduler {
     // 缺省 false → 默认/自动路径行为逐字不变（零回归）。仍守人审、边端诚实闸（发布前就地核对 noteId）、账号隔离。
     force = false,
     approvalMode: ContentScheduleApprovalMode = 'review',
+    onResult?: (result: CommentTerminalObservation) => Promise<void> | void,
   ): Promise<void> {
     const log = this.deps.logger ?? console;
     const soul = this.deps.getSoul(accountId);
@@ -1388,6 +1398,13 @@ export class CommentScheduler {
       } catch (err) {
         log.warn(`[comment-scheduler] onScheduledTaskNotStarted 回调异常：${(err as Error).message}`);
       }
+    }
+
+
+    try {
+      await onResult?.(result);
+    } catch (err) {
+      log.warn(`[comment-scheduler] 终态观察回调失败 account=${accountId}：${(err as Error).message}`);
     }
 
     try {

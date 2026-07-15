@@ -126,7 +126,7 @@ export interface PublishRecord {
 /** 触发器输入度量 */
 export interface TriggerInput {
   /** 排期审批模式；缺省 review，手动触发保持原有人审语义。 */
-  approvalMode?: ContentScheduleApprovalMode;
+  approvalMode?: ContentScheduleApprovalMode | 'draft_only';
   metrics: {
     hoursSinceLastPublish: number;
     newConceptCount: number;

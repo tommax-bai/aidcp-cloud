@@ -8,6 +8,8 @@ import type { PanelAccount, PanelStoreReader } from '../src/panel/panel-store.js
 import { RiskController } from '../src/risk/index.js';
 import { TokenRevocationStore } from '../src/panel/revocation.js';
 import { FacebookPublishMediaError } from '../src/publish-agent/facebook-publish-media-store.js';
+import { MemoryDelegatedTaskStore } from '../src/delegated-task/store.js';
+import { DelegatedTaskService } from '../src/delegated-task/service.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 
@@ -1434,6 +1436,59 @@ test('HTTP Facebook group metadata filters, facets, and import validation', asyn
       body: JSON.stringify({ items: [{ url: 'https://www.facebook.com/groups/group-a', region: 123 }] }),
     });
     assert.equal(bad.status, 400);
+  } finally {
+    await h.close();
+  }
+});
+
+test('HTTP DelegatedTask API: draft/confirm/list/cancel all require task version and never execute at draft time', async () => {
+  const taskStore = new MemoryDelegatedTaskStore();
+  const delegatedTasks = new DelegatedTaskService({
+    store: taskStore,
+    listAccounts: async () => [{ accountId: 'default', nickname: '晚风', platform: 'xiaohongshu' }],
+  });
+  const h = await startPanelApi({ ...deps, delegatedTasks } as PanelDeps, makeConfig());
+  assert.equal(h.started, true);
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = (await login.json()) as { token: string };
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+    const draftResponse = await fetch(`${base}/api/delegated-tasks/draft`, {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({
+        accountId: 'default', action: 'comment_batch', targetSuccessCount: 3, maxAttempts: 5,
+        deadlineAt: Date.now() + 86_400_000, executionWindow: { mode: 'immediate' },
+        sourceConstraints: {}, targetConstraints: {}, approvalMode: 'review', priority: 'normal', sourceRef: 'panel-test-1',
+      }),
+    });
+    assert.equal(draftResponse.status, 201);
+    const draft = (await draftResponse.json()) as { task: { id: string; version: number; status: string; progress: { attemptCount: number } } };
+    assert.equal(draft.task.status, 'awaiting_confirmation');
+    assert.equal(draft.task.progress.attemptCount, 0, '生成确认卡不得执行任何一次尝试');
+
+    const stale = await fetch(`${base}/api/delegated-tasks/${draft.task.id}/confirm`, {
+      method: 'POST', headers: auth, body: JSON.stringify({ version: draft.task.version + 1 }),
+    });
+    assert.equal(stale.status, 409);
+    const confirmedResponse = await fetch(`${base}/api/delegated-tasks/${draft.task.id}/confirm`, {
+      method: 'POST', headers: auth, body: JSON.stringify({ version: draft.task.version }),
+    });
+    assert.equal(confirmedResponse.status, 200);
+    const confirmed = (await confirmedResponse.json()) as { task: { version: number; status: string } };
+    assert.equal(confirmed.task.status, 'queued');
+
+    const list = await fetch(`${base}/api/delegated-tasks?accountId=default`, { headers: auth });
+    assert.equal(list.status, 200);
+    assert.match(JSON.stringify(await list.json()), new RegExp(draft.task.id));
+    const cancelled = await fetch(`${base}/api/delegated-tasks/${draft.task.id}/cancel`, {
+      method: 'POST', headers: auth, body: JSON.stringify({ version: confirmed.task.version }),
+    });
+    assert.equal(cancelled.status, 200);
+    assert.equal(((await cancelled.json()) as { task: { status: string } }).task.status, 'cancelled');
   } finally {
     await h.close();
   }

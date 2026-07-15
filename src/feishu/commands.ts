@@ -270,6 +270,11 @@ export interface CommandActions {
   ): Promise<CommentCommandReceipt> | CommentCommandReceipt;
   /** 绑定当前群为默认审批群 */
   bindChat?(record: BotChatRecord): Promise<void> | void;
+  /** Unified natural-language / legacy-write ingestion. Returns a confirmation or task-status card, never a direct write. */
+  delegate?(
+    text: string,
+    context?: { chatId?: string; messageId?: string },
+  ): Promise<CommandResult> | CommandResult;
 }
 
 export interface PublishTestOptions {
@@ -302,11 +307,15 @@ export class CommandRouter {
   ) {}
 
   /** 处理一条文本指令，返回回执（CommandResult，交给 cards 渲染卡片） */
-  async handle(text: string, context?: { chatId?: string }): Promise<CommandResult> {
+  async handle(text: string, context?: { chatId?: string; messageId?: string }): Promise<CommandResult> {
     const cmd = parseCommand(text);
+    const trimmed = text.trim();
+    const naturalBusinessGoal = !trimmed.startsWith('/') &&
+      /(?:评论|发布|发稿|稿件|候选稿|暂停任务|恢复任务|取消任务|查看任务|优先执行|安全空档)/.test(trimmed);
+    const delegatedText = cmd.action === 'help' && (/^\/task\b/i.test(trimmed) || naturalBusinessGoal);
     // 作用域闸（change feishu-per-team-notification-routing）：非管理群不受理会影响账号的命令
     // （发帖 / 评论 / 启停 / 绑定 / 测试卡）；help 放行（无害）。诚实拒、绝不静默假受理。
-    if (cmd.action !== 'help' && this.isChatAuthorized && !this.isChatAuthorized(context?.chatId)) {
+    if ((cmd.action !== 'help' || delegatedText) && this.isChatAuthorized && !this.isChatAuthorized(context?.chatId)) {
       return {
         command: cmd.raw || text,
         ok: false,
@@ -325,19 +334,34 @@ export class CommandRouter {
       case 'publish-test':
         return this.runPublishTest(cmd, context?.chatId);
       case 'publish':
-        return this.runPublish(cmd, context?.chatId);
+        return this.actions.delegate ? this.runDelegated(cmd.raw, context) : this.runPublish(cmd, context?.chatId);
       case 'comment':
-        return this.runComment(cmd);
+        return this.actions.delegate ? this.runDelegated(cmd.raw, context) : this.runComment(cmd);
       case 'bind':
         return this.runBind(cmd, context?.chatId);
       case 'help':
       default:
+        if (delegatedText && this.actions.delegate) return this.runDelegated(cmd.raw || text, context);
         return {
           command: cmd.raw || '/help',
           ok: false,
           title: '需要帮助',
           message: `${cmd.hint ? cmd.hint + '\n\n' : ''}${HELP_TEXT}`,
         };
+    }
+  }
+
+  private async runDelegated(text: string, context?: { chatId?: string; messageId?: string }): Promise<CommandResult> {
+    try {
+      return await this.actions.delegate!(text, context);
+    } catch (err) {
+      return {
+        command: text,
+        ok: false,
+        level: 'warning',
+        title: '委托任务需要补充信息',
+        message: (err as Error).message ?? String(err),
+      };
     }
   }
 

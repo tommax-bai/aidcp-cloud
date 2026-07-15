@@ -75,6 +75,11 @@ export interface FeishuWsReceiverOptions {
     requestId: string,
     payload: PublishApprovalPayload,
   ) => Promise<PublishApprovalPreflightResult>;
+  /** DelegatedTask card callback. Return null when the value is not a delegated-task action. */
+  onDelegatedTaskAction?: (value: unknown) => Promise<{
+    toast: { type: 'success' | 'error' | 'info'; content: string };
+    card?: unknown;
+  } | null>;
 }
 
 interface ApprovalActionValue {
@@ -200,6 +205,7 @@ export class FeishuWsReceiver {
     requestId: string,
     payload: PublishApprovalPayload,
   ) => Promise<PublishApprovalPreflightResult>;
+  private readonly onDelegatedTaskAction?: FeishuWsReceiverOptions['onDelegatedTaskAction'];
   private wsClient?: lark.WSClient;
 
   constructor(options: FeishuWsReceiverOptions) {
@@ -213,6 +219,7 @@ export class FeishuWsReceiver {
     this.onRejected = options.onRejected;
     this.readLiveContentVersion = options.readLiveContentVersion;
     this.preflightApprovePublish = options.preflightApprovePublish;
+    this.onDelegatedTaskAction = options.onDelegatedTaskAction;
   }
 
   /**
@@ -233,10 +240,10 @@ export class FeishuWsReceiver {
     // 「发帖未产出／已有一轮在运行中」卡）。终态结果卡照旧异步补发、honest-status 判级不变；
     // 不插入「任务启动中」中间卡。重复执行由发帖并发闸兜底（本层不自建去重）。
     void this.commandRouter
-      .handle(text, { chatId: message.chat_id })
+      .handle(text, { chatId: message.chat_id, messageId: message.message_id })
       .then((result) => {
         if (this.messenger) {
-          return this.messenger.sendCard(message.chat_id, buildCommandResultCard(result));
+          return this.messenger.sendCard(message.chat_id, result.card ?? buildCommandResultCard(result));
         }
       })
       .catch((err) => {
@@ -249,6 +256,10 @@ export class FeishuWsReceiver {
     toast: { type: 'success' | 'error' | 'info'; content: string };
     card?: unknown;
   }> {
+    if (this.onDelegatedTaskAction) {
+      const delegated = await this.onDelegatedTaskAction(value);
+      if (delegated) return delegated;
+    }
     const parsed = parseApprovalActionValue(value);
     if (!parsed) {
       return {

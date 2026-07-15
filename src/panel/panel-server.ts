@@ -42,6 +42,8 @@ import { isKnownRole } from '../config/role-catalog.js';
 import { isAllowedPlatformCredential } from '../config/platform-credentials.js';
 import type { FacebookGroupMembershipStatus, FacebookGroupTargetInput } from '../comment-agent/facebook-group-store.js';
 import { readDownloadsManifest } from './downloads-manifest.js';
+import { DelegatedTaskServiceError } from '../delegated-task/service.js';
+import type { DelegatedTaskIntent, JsonValue } from '../delegated-task/types.js';
 
 /** 登录/写体很小，限制请求体大小防滥用。 */
 const MAX_BODY_BYTES = 16 * 1024;
@@ -57,6 +59,14 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
   res.statusCode = status;
   res.setHeader('content-type', 'application/json; charset=utf-8');
   res.end(buf);
+}
+
+function sendDelegatedTaskError(res: http.ServerResponse, err: unknown): void {
+  if (err instanceof DelegatedTaskServiceError) {
+    sendJson(res, err.status, { error: err.code, message: err.message });
+    return;
+  }
+  sendJson(res, 500, { error: 'delegated_task_error', message: (err as Error).message ?? String(err) });
 }
 
 async function readJsonBody(req: http.IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<unknown> {
@@ -400,6 +410,70 @@ function createRequestHandler(
 
     if (method === 'GET' && url === '/api/me') {
       sendJson(res, 200, { sub: verified.payload.sub, panelApiVersion: buildVersionPayload().panelApiVersion });
+      return;
+    }
+
+    // ── 用户委托任务：所有公共写操作先 draft，再以 task id + version 显式确认 ─────────────
+    if (url === '/api/delegated-tasks' || url.startsWith('/api/delegated-tasks/')) {
+      const service = deps.delegatedTasks;
+      if (!service) {
+        sendJson(res, 503, { error: 'delegated_tasks_unavailable' });
+        return;
+      }
+      try {
+        if (method === 'GET' && url === '/api/delegated-tasks') {
+          const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
+          const accountId = query.get('accountId')?.trim() || undefined;
+          const limitRaw = Number(query.get('limit') ?? 50);
+          const limit = Number.isInteger(limitRaw) ? Math.min(200, Math.max(1, limitRaw)) : 50;
+          sendJson(res, 200, { tasks: await service.list({ accountId, limit }) });
+          return;
+        }
+        if (method === 'POST' && url === '/api/delegated-tasks/draft') {
+          const body = (await readJsonBody(req)) as Partial<DelegatedTaskIntent> | undefined;
+          if (!body || typeof body !== 'object' || typeof body.action !== 'string') {
+            sendJson(res, 400, { error: 'bad_request', reason: 'task_intent_required' });
+            return;
+          }
+          const result = await service.createDraft({
+            ...body,
+            source: body.source === 'edge' || body.source === 'api' ? body.source : 'console',
+          } as DelegatedTaskIntent);
+          sendJson(res, result.created ? 201 : 200, result);
+          return;
+        }
+        const rest = url.slice('/api/delegated-tasks/'.length);
+        const [rawId, operation] = rest.split('/');
+        const taskId = decodeURIComponent(rawId ?? '');
+        if (!/^[0-9a-f-]{36}$/i.test(taskId)) {
+          sendJson(res, 400, { error: 'bad_request', reason: 'invalid_task_id' });
+          return;
+        }
+        if (method === 'GET' && !operation) {
+          sendJson(res, 200, { task: await service.get(taskId) });
+          return;
+        }
+        if (method === 'POST' && operation && ['confirm', 'pause', 'resume', 'cancel'].includes(operation)) {
+          const body = (await readJsonBody(req)) as { version?: unknown } | undefined;
+          const version = body?.version;
+          if (!Number.isInteger(version)) {
+            sendJson(res, 400, { error: 'bad_request', reason: 'version_required' });
+            return;
+          }
+          const task = operation === 'confirm'
+            ? await service.confirm(taskId, Number(version))
+            : operation === 'pause'
+              ? await service.pause(taskId, Number(version))
+              : operation === 'resume'
+                ? await service.resume(taskId, Number(version))
+                : await service.cancel(taskId, Number(version));
+          sendJson(res, 200, { task });
+          return;
+        }
+        sendJson(res, 404, { error: 'not_found' });
+      } catch (err) {
+        sendDelegatedTaskError(res, err);
+      }
       return;
     }
 
@@ -2186,9 +2260,9 @@ function createRequestHandler(
     // ── 精选笔记行级定向动作（change curated-note-actions）────────────────────────
     // POST /api/curated/contents/:id/create-post（参照洗稿创作）与 POST /api/curated/contents/:id/comment（定向评论）。
     // 行加载走 getOneForAccount（account_id 进 WHERE 防越权）；仅 note 行开放（comment 行未存源 noteId 无法定位）。
-    // 响应为**触发态**回执 {triggered, reason?}：域内拒绝 200+false+机器原因码；结构性错误才用 4xx/503。
+    // 响应为 awaiting_confirmation task；确认前不接管边端、不生成、不发布。
     if (method === 'POST' && url.startsWith('/api/curated/contents/') && (url.endsWith('/create-post') || url.endsWith('/comment'))) {
-      if (!deps.curatedContent || !deps.curatedActions) {
+      if (!deps.curatedContent || !deps.delegatedTasks) {
         sendJson(res, 503, { error: 'curated_actions_unavailable' });
         return;
       }
@@ -2227,8 +2301,41 @@ function createRequestHandler(
           sendJson(res, 200, { triggered: false, reason: 'empty_body' });
           return;
         }
-        const useReferenceImages = typeof parsed.useReferenceImages === 'boolean' ? parsed.useReferenceImages : undefined;
-        sendJson(res, 200, await deps.curatedActions.createPostFromNote(accountId, row, { useReferenceImages }));
+        const useReferenceImages = parsed.useReferenceImages === true;
+        try {
+          const result = await deps.delegatedTasks.createDraft({
+            accountId,
+            action: 'publish_post',
+            targetSuccessCount: 1,
+            maxAttempts: 2,
+            deadlineAt: Date.now() + 24 * 60 * 60 * 1000,
+            executionWindow: { mode: 'immediate' },
+            source: 'console',
+            sourceRef: `curated:${id}:create-post`,
+            sourceConstraints: {
+              curatedId: id,
+              sourceId: row.sourceId,
+              title: row.title ?? '',
+              body: row.body ?? '',
+              author: row.author ?? '',
+              sourceUrl: row.sourceUrl ?? '',
+              topics: row.topics,
+              useReferenceImages,
+              ...(useReferenceImages && row.referenceImages.length > 0
+                ? { referenceImages: JSON.parse(JSON.stringify(row.referenceImages)) as JsonValue }
+                : {}),
+              ...(useReferenceImages && row.visualAnalysis
+                ? { visualAnalysis: JSON.parse(JSON.stringify(row.visualAnalysis)) as JsonValue }
+                : {}),
+            },
+            targetConstraints: {},
+            approvalMode: 'review',
+            priority: 'normal',
+          });
+          sendJson(res, result.created ? 201 : 200, result);
+        } catch (err) {
+          sendDelegatedTaskError(res, err);
+        }
         return;
       }
       if (!isCuratedSourcePostType(row.contentType)) {
@@ -2241,7 +2348,25 @@ function createRequestHandler(
         return;
       }
       const withContact = parsed.withContact === true;
-      sendJson(res, 200, await deps.curatedActions.commentOnNote(accountId, row, withContact));
+      try {
+        const result = await deps.delegatedTasks.createDraft({
+          accountId,
+          action: 'comment_curated',
+          targetSuccessCount: 1,
+          maxAttempts: 2,
+          deadlineAt: Date.now() + 24 * 60 * 60 * 1000,
+          executionWindow: { mode: 'immediate' },
+          source: 'console',
+          sourceRef: `curated:${id}:comment`,
+          sourceConstraints: {},
+          targetConstraints: { curatedId: id, noteId: row.sourceId, title: row.title ?? '', withContact },
+          approvalMode: 'review',
+          priority: 'normal',
+        });
+        sendJson(res, result.created ? 201 : 200, result);
+      } catch (err) {
+        sendDelegatedTaskError(res, err);
+      }
       return;
     }
     if (method === 'GET' && url === '/api/curated/contents') {
