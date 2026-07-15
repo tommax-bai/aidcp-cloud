@@ -28,6 +28,7 @@ function makeEnv(
     scrollOk?: boolean; // scroll_comments 回执 ok（默认 true）；false 模拟采集失败（no_scroll/no_target）
     scrollReason?: string;
     postOk?: boolean;
+    postReason?: string; // 7.6：comment 回执 reason（submitted_unconfirmed / preempted_by_task / …）
   },
 ) {
   const sentTypes: string[] = [];
@@ -65,7 +66,7 @@ function makeEnv(
       } else if (env.type === 'note.scroll_comments') {
         bus.emit('action.completed', { action: 'scroll_comments', ok: opts.scrollOk ?? true, reason: opts.scrollReason, candidates: opts.comments ?? [], ts: Date.now() } as never);
       } else if (env.type === 'interaction.comment') {
-        bus.emit('action.completed', { action: 'comment', ok: opts.postOk ?? true, ts: Date.now() } as never);
+        bus.emit('action.completed', { action: 'comment', ok: opts.postOk ?? true, reason: opts.postReason, ts: Date.now() } as never);
       }
       return 1;
     },
@@ -206,25 +207,39 @@ describe('buildEdgeCommentSteps', () => {
     assert.ok(elapsed < 1000, `应消费重报 page.cards 快速失败、不干等 5s 超时（实际 ${elapsed}ms）`);
   });
 
-  it('post：真回执 ok:true → true', async () => {
+  it('post：真回执 ok:true → confirmed', async () => {
     const bus = new EventBus();
     const { pusher } = makeEnv(bus, { postOk: true });
     const steps = buildEdgeCommentSteps({ bus, pusher, edgeId: 'e1', dedup: makeDedup() });
-    assert.equal(await steps.post('a', '一条评论'), true);
+    assert.deepEqual(await steps.post('a', '一条评论'), { status: 'confirmed' });
   });
 
-  it('post：回执 ok:false → false（不假成功）', async () => {
+  it('post：回执 ok:false 无 reason → not_dispatched（提交前失败，可重排）', async () => {
     const bus = new EventBus();
     const { pusher } = makeEnv(bus, { postOk: false });
     const steps = buildEdgeCommentSteps({ bus, pusher, edgeId: 'e1', dedup: makeDedup() });
-    assert.equal(await steps.post('a', 'x'), false);
+    assert.deepEqual(await steps.post('a', 'x'), { status: 'not_dispatched', reason: undefined });
   });
 
-  it('post：边端离线 → false', async () => {
+  it('post：边端离线（超时无回报）→ not_dispatched', async () => {
     const bus = new EventBus();
     const { pusher } = makeEnv(bus, { offline: true });
     const steps = buildEdgeCommentSteps({ bus, pusher, edgeId: 'e1', dedup: makeDedup() });
-    assert.equal(await steps.post('a', 'x'), false);
+    assert.equal((await steps.post('a', 'x')).status, 'not_dispatched');
+  });
+
+  it('7.6 post：ok:false + reason=submitted_unconfirmed → submitted_unconfirmed（可能已发出，上游写去重不重投）', async () => {
+    const bus = new EventBus();
+    const { pusher } = makeEnv(bus, { postOk: false, postReason: 'submitted_unconfirmed' });
+    const steps = buildEdgeCommentSteps({ bus, pusher, edgeId: 'e1', dedup: makeDedup() });
+    assert.deepEqual(await steps.post('a', 'x'), { status: 'submitted_unconfirmed' });
+  });
+
+  it('7.6 post：ok:false + reason=preempted_by_task → preempted（提交前被抢占，放弃本轮不写去重）', async () => {
+    const bus = new EventBus();
+    const { pusher } = makeEnv(bus, { postOk: false, postReason: 'preempted_by_task' });
+    const steps = buildEdgeCommentSteps({ bus, pusher, edgeId: 'e1', dedup: makeDedup() });
+    assert.deepEqual(await steps.post('a', 'x'), { status: 'preempted', reason: 'preempted_by_task' });
   });
 
   it('recordCommented：记一笔到 dedup', async () => {

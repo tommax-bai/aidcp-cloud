@@ -939,6 +939,15 @@ export interface PublishCommandResultPayload {
   kind: PublishCommandKind;
   /** 是否成功 */
   ok: boolean;
+  /**
+   * 提交类命令专用：底层「按下」事件是否已真正派发到平台控制端口。
+   * 仅在提交动作（发布提交 / 评论提交 / 加群点击 / 回车）把 press 事件发出去的那一刻置 true；
+   * center 查找失败、no_target、打字中途被抢占等「压根没点」的失败保持 undefined/false。
+   * 红线：当 `ok===false` 但 `submitDispatched===true` 时，帖子/评论可能已发出——cloud MUST 按
+   *「已提交待确认」（submitted_unconfirmed）处置，绝不判 failed_before_submit、绝不自动重投（会双发）；
+   * 反之 `ok===false && !submitDispatched` 才是「提交前失败」，可安全保持待审重投（change lease-strict-preemption）。
+   */
+  submitDispatched?: boolean;
   /** 成功时的产出值（如 capture_postId 的真实 postId） */
   value?: string;
   /**
@@ -1318,8 +1327,34 @@ export interface EdgeTaskReleasedPayload {
    * `browser_wake_failed` = the browser was deliberately parked (cold standby) and could not be woken
    *   within the wake deadline. MUST NOT be conflated with `cdp_unhealthy`: parking is a recoverable
    *   absence we caused ourselves, not a fault of the browser (change browser-slot-scheduling).
+   * `preempted_by_task` = the running task's lease was released because a strictly higher-priority task
+   *   preempted it (change lease-strict-preemption). Cloud MUST treat this as "not a failure": keep the
+   *   preempted work pending and re-run it after the preemptor releases — never write a terminal failed
+   *   state and never count it toward the publish circuit breaker.
+   * `window_busy` = the preemption/acquire request is refused because the current holder is inside a
+   *   non-preemptible commit window (a submit is already in flight). This is NOT a failure of either
+   *   task; `windowRemainingMs` carries the holder's remaining window budget so cloud can wait exactly
+   *   that long before re-queuing the acquire, instead of spinning (change lease-strict-preemption).
+   * `yield_timeout` = the held writer received the cancel signal but did not stop within the bounded
+   *   quiesce budget → treated as a control-plane fault. The lease/queue is torn down; recovery is a
+   *   MANUAL operator action ("restart the browser client"), not self-healing (change lease-strict-preemption).
    */
-  reason: 'released' | 'expired' | 'duplicate' | 'not_owner' | 'cdp_unhealthy' | 'browser_wake_failed';
+  reason:
+    | 'released'
+    | 'expired'
+    | 'duplicate'
+    | 'not_owner'
+    | 'cdp_unhealthy'
+    | 'browser_wake_failed'
+    | 'preempted_by_task'
+    | 'window_busy'
+    | 'yield_timeout';
+  /**
+   * `window_busy` only: the current holder's remaining commit-window budget in milliseconds. Present so
+   * cloud can wait precisely and re-queue the acquire rather than poll-spin the preemptor
+   * (change lease-strict-preemption). Omitted for every other reason.
+   */
+  windowRemainingMs?: number;
 }
 
 /** payload 类型映射（便于类型安全地构造/解析） */

@@ -105,3 +105,21 @@ describe('like/collect 预算按真成功回执扣', () => {
     assert.equal(likeBudget(d), before - 1, '重试成功只扣一次');
   });
 });
+
+// change lease-strict-preemption 7.8：被抢占是调度事件、不是动作失败——原因级短路插在按动作名匹配的
+// 兜底滚动抑制名单之前，open_note/refresh/profile_open 等不在名单里的动作也绝不因被抢占而触发恢复滚动（滚到抢占方页面）。
+describe('7.8 被抢占动作原因级短路（不兜底滚动、不重试、不计失败）', () => {
+  for (const reason of ['preempted_by_task', 'task_lease_mismatch', 'window_busy', 'yield_timeout'] as const) {
+    it(`open_note 失败 reason=${reason} → 绝不发兜底滚动`, () => {
+      const { bus, commands } = setup();
+      bus.emit('action.completed', { action: 'open_note', ok: false, reason, ts: 0 });
+      assert.ok(!actionsOf(commands).includes('scroll'), '被抢占的 open_note 绝不触发恢复滚动');
+    });
+  }
+
+  it('对照：open_note 非抢占失败(modal_timeout) 仍照常发一次恢复滚动（零回归）', () => {
+    const { bus, commands } = setup();
+    bus.emit('action.completed', { action: 'open_note', ok: false, reason: 'modal_timeout', ts: 0 });
+    assert.ok(actionsOf(commands).includes('scroll'), '真实失败仍需恢复滚动续刷（open_note 不在抑制名单）');
+  });
+});

@@ -76,6 +76,37 @@ test('Facebook shadow observation is skipped and never counted as a verified com
   assert.deepEqual(await router.executorFor(fb).execute(fb, attempt), { kind: 'skipped', reason: 'shadow_no_submit' });
 });
 
+// 复核 HIGH-2（change lease-strict-preemption 7.6）：委托执行器必须认下评论新增的两态，绝不落 failed/retryable 重入。
+function routerWithCommentOutcome(outcome: string, reason?: string) {
+  return createDelegatedExecutorRouter({
+    comments: {
+      triggerManual: async (_accountId, options) => {
+        await options.onResult({ outcome, reason, noteId: 'note-1' } as never);
+        return { ok: true, message: 'started' };
+      },
+      triggerTargeted: async () => ({ ok: false, message: 'unused' }),
+      isRunning: () => false,
+    },
+    publishes: { triggerDelegated: async () => ({ result: 'blocked', reason: 'unused' }), isBusy: () => false },
+    loadCandidate: async () => null,
+    approveCandidate: async () => null,
+    rejectCandidate: async () => null,
+    modifyCandidate: async () => null,
+  });
+}
+
+test('submitted_unconfirmed 评论 → submitted_unknown（绝不重试；防 worker 重入 → 重复评论，--force 更甚）', async () => {
+  const router = routerWithCommentOutcome('submitted_unconfirmed', 'comment submitted but unconfirmed');
+  const r = await router.executorFor(task()).execute(task(), attempt);
+  assert.equal(r.kind, 'submitted_unknown', '提交已派发未确认 = 已提交未知，MUST NOT retryable(那会重复评论)');
+});
+
+test('preempted 评论 → deferred（未发出、退避重试，绝不立刻对着仍被占用的浏览器空转）', async () => {
+  const router = routerWithCommentOutcome('preempted', 'preempted:preempted_by_task');
+  const r = await router.executorFor(task()).execute(task(), attempt);
+  assert.equal(r.kind, 'deferred', '被抢占＝未发出、可安全稍后重试');
+});
+
 test('candidate modification is CAS-bound and carries the requested retained-image subset', async () => {
   let writtenPatch: { title?: string; content?: string; images?: string[] } | null = null;
   const before = candidate();

@@ -17,6 +17,7 @@ import type {
   PublishCommandPayload,
   PublishCommandResultPayload,
 } from '../comm/protocol.js';
+import { CommandPreemptedError, isPreemptionReason, type PreemptionReason } from '../comm/preemption.js';
 import type { PlatformId } from '../platform/index.js';
 import type { PublishMetadata } from './types.js';
 import { buildPublishCommandPlan } from './platform-profile.js';
@@ -60,11 +61,25 @@ export interface PublishSequenceInput {
    * 不广播；缺省（旧路径/单边缘）则广播（向后兼容）。云端已据目标账号解析出在线节点（无节点则在 executor 诚实失败、不入此序列）。
    */
   edgeId?: string;
+  /**
+   * 7.1 HOLE-13：不可逆提交命令（submit_publish）**下发前**的回调，触发一次。下发段据此把「已开始」标志
+   * 下移到真正的提交点——在此之前（导航 / 选栏目 / 上传配图 / 填字段，spec 定义为平台侧零副作用）若因意外抛错
+   * 收敛，MUST 按零副作用回待审、不烧成 failed（今天在拿到租约瞬间即置真 → 零副作用失败被判终态 + 熔断 +1）。
+   */
+  onFirstSideEffect?: () => void;
 }
 
 export interface PublishSequenceResult {
   ok: boolean;
-  outcome: 'published_confirmed' | 'submitted_unconfirmed' | 'failed_before_submit';
+  /**
+   * 终局四态（change lease-strict-preemption 批 C 新增 `preempted`）：
+   * - `published_confirmed`：已提交且抓到 postId。
+   * - `submitted_unconfirmed`：提交动作已派发但未拿到确认（含提交后被抢占）——页面态 submitted、绝不重投。
+   * - `failed_before_submit`：提交前真失败——可安全烧待审重投。
+   * - `preempted`：提交前被严格高档位抢占（零平台副作用）——**保持待审、不写 failed、不计熔断、事件驱动重投**，
+   *   下发段（publish-dispatcher）MUST 单独分支处置，绝不并入 failed_before_submit（否则被抢占的稿被烧成不可逆 failed）。
+   */
+  outcome: 'published_confirmed' | 'submitted_unconfirmed' | 'failed_before_submit' | 'preempted';
   /** 成功时的真实平台 postId（来自 capture_postId 回报） */
   postId?: string;
   /** 成功时的小红书详情页分享 URL（带 xsec_token，来自 capture_postId 回报；边缘抓不到则 undefined） */
@@ -104,6 +119,8 @@ export interface CommandSequencerDeps {
 interface Pending {
   commandId: string;
   sentAt: number;
+  /** 该指令所属的 edge 页面写任务租约；7.5 抢占中断按此 taskId 精确就地 reject 在途指令。 */
+  taskId: string;
   /** 该指令定向到的边缘节点；该节点断开即可立刻诚实失败，不必空等满预算。 */
   edgeId?: string;
   resolve: (r: PublishCommandResultPayload) => void;
@@ -212,6 +229,8 @@ export class CommandSequencer {
       }
       // 记录末条 upload seq（发送前即记；供上方 K===0 早停诚实归因）。
       if (cmd.kind === 'upload_image') lastUploadSeq = cmd.seq;
+      // 7.1 HOLE-13：提交点击（唯一的不可逆平台副作用）下发前置「已开始」标志，让此前的零副作用意外失败可回待审。
+      if (cmd.kind === 'submit_publish') input.onFirstSideEffect?.();
 
       let result: PublishCommandResultPayload;
       try {
@@ -235,7 +254,15 @@ export class CommandSequencer {
           continue;
         }
         this.logger.warn(`[CommandSequencer] seq=${cmd.seq} kind=${cmd.kind} 异常: ${error}`);
-        return { ok: false, outcome: submitted ? 'submitted_unconfirmed' : 'failed_before_submit', attachedCount, failedAt: { seq: cmd.seq, kind: cmd.kind, error } };
+        // 7.5 就地 reject 以 CommandPreemptedError 形态到达：按类型判抢占（reason + submitDispatched），
+        // 绝不当作普通超时/断连烧成 failed。非抢占异常（超时/断连/送达 0）保持旧语义。
+        const preempted = err instanceof CommandPreemptedError ? err : null;
+        return {
+          ok: false,
+          outcome: this.classifyFailureOutcome(submitted, preempted?.submitDispatched ?? false, preempted?.reason),
+          attachedCount,
+          failedAt: { seq: cmd.seq, kind: cmd.kind, error },
+        };
       }
       if (!result.ok) {
         // 配图唯一放宽：upload_image 回 ok:false → 丢弃该张（不计入 K）、继续。
@@ -254,8 +281,14 @@ export class CommandSequencer {
           this.logger.warn(`[CommandSequencer] ${cmd.kind} 失败但 best-effort 跳过 seq=${cmd.seq}: ${result.error ?? 'unknown'}`);
           continue;
         }
-        // 红线：核心步失败即停，后续不下发、不假成功。
-        return { ok: false, outcome: submitted ? 'submitted_unconfirmed' : 'failed_before_submit', attachedCount, failedAt: { seq: cmd.seq, kind: cmd.kind, error: result.error ?? 'unknown' } };
+        // 红线：核心步失败即停，后续不下发、不假成功。分档见 classifyFailureOutcome
+        // （提交已派发→submitted_unconfirmed；抢占原因→preempted；余→failed_before_submit）。
+        return {
+          ok: false,
+          outcome: this.classifyFailureOutcome(submitted, result.submitDispatched === true, result.error),
+          attachedCount,
+          failedAt: { seq: cmd.seq, kind: cmd.kind, error: result.error ?? 'unknown' },
+        };
       }
       // 一张配图真实上传成功 → 计入尝试 + 计入 K。
       if (cmd.kind === 'upload_image') {
@@ -284,6 +317,43 @@ export class CommandSequencer {
   }
 
   /**
+   * 提交前失败分档（change lease-strict-preemption 批 C）。三态优先级，顺序不可乱：
+   * ① 提交动作已派发（前序 submit 已 ok:true，或本条回执带 submitDispatched）→ `submitted_unconfirmed`：
+   *    帖子/评论可能已发出，绝不重投（防双发）。**压过抢占判据**——提交后被抢占仍是「已提交待确认」。
+   * ② 抢占类原因（preempted_by_task / task_lease_mismatch / …）→ `preempted`：提交前零副作用、保持待审、事件驱动重投。
+   * ③ 其余提交前失败 → `failed_before_submit`：可安全烧待审重投（content_too_long / all_images_failed / not_approved 等）。
+   */
+  private classifyFailureOutcome(
+    submitted: boolean,
+    submitDispatchedNow: boolean,
+    reason: string | undefined,
+  ): PublishSequenceResult['outcome'] {
+    if (submitted || submitDispatchedNow) return 'submitted_unconfirmed';
+    // yield_timeout（写者收到取消仍不停手＝控制面故障）：页面状态**未知**——卡死的写者可能仍会走完提交按下。
+    // MUST NOT 当作「提交前零副作用」的 preempted 去自动重投（否则卡死写者最终按下提交 → 双发）。按「已提交待确认」
+    // 终态处置（不重投、不烧稿），控制面回收 / 请运营重启客户端由边缘掉线侧信号驱动（spec 10.4）。
+    if (reason === 'yield_timeout') return 'submitted_unconfirmed';
+    if (isPreemptionReason(reason)) return 'preempted';
+    return 'failed_before_submit';
+  }
+
+  /**
+   * 7.5 活跃租约中断：抢占方释放到达时，就地 reject 属于该 taskId 的在飞 publish.command——
+   * 使 executePublishSequence 的 catch 按 `CommandPreemptedError` 归入 preempted / submitted_unconfirmed，
+   * **绝不 unwind executePublishSequence**（否则丢失 submitted 判据 → 提交后被抢的已发稿被重投双发）。
+   * 无匹配在途指令时为 no-op（抢占发生在命令间隙，下一条命令会以 task_lease_mismatch 收敛）。
+   */
+  preemptTask(taskId: string, reason: PreemptionReason, submitDispatched = false): void {
+    for (const [key, pending] of this.pending) {
+      if (pending.taskId !== taskId) continue;
+      clearTimeout(pending.timeoutHandle);
+      this.pending.delete(key);
+      this.logger.warn(`[CommandSequencer] taskId=${taskId} 被抢占（${reason}）→ 在途指令 key=${key} 就地作废`);
+      pending.reject(new CommandPreemptedError(reason, submitDispatched));
+    }
+  }
+
+  /**
    * 下发一条 publish.command 并等待其 result（按 recordId+seq 关联 + 超时清理）。
    * edgeId 指定则定向到该节点；缺省广播（向后兼容）。送达数为 0（含定向到的节点已离线）→ 诚实 reject（不假成功）。
    */
@@ -303,7 +373,7 @@ export class CommandSequencer {
         this.pending.delete(key);
         reject(new Error(`publish.command timeout seq=${cmd.seq} kind=${cmd.kind}`));
       }, waitMs);
-      this.pending.set(key, { commandId: envelope.id, sentAt: this.clock(), edgeId, resolve, reject, timeoutHandle });
+      this.pending.set(key, { commandId: envelope.id, sentAt: this.clock(), taskId: cmd.taskId, edgeId, resolve, reject, timeoutHandle });
 
       const sent = this.pusher.pushToEdges(envelope, edgeId);
       if (sent <= 0) {

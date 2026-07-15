@@ -22,6 +22,7 @@ import { PostProcessor } from '../publish-agent/post-processor.js';
 import type { CommentApprovalPort } from '../agents/comment-approval-gate.js';
 import type { CommentCommandReceipt } from '../feishu/commands.js';
 import {
+  type CommentPostResult,
   type CommentTaskResult,
   type NoteForComment,
   type TargetedCommentResult,
@@ -1146,16 +1147,14 @@ export class CommentScheduler {
           };
         } else {
           const displayText = composed.contactInfo ? `${composed.text}\n${composed.contactInfo}` : composed.text;
-          let commitReason = 'comment not verified posted';
-          const posted = await this.withManualCommitMarker(
+          const posted = await this.withManualCommitMarker<CommentPostResult>(
             accountId,
             priority,
             () => this.deps.edgeTaskLeases.withLease(
               { edgeId, kind: 'comment_commit', priority, leaseMs: 2 * 60_000 },
-              async (lease) => {
+              async (lease): Promise<CommentPostResult> => {
                 if (await dedup.hasInteracted(target.noteId, 'comment').catch(() => false)) {
-                  commitReason = 'already_commented_before_commit';
-                  return false;
+                  return { status: 'not_dispatched', reason: 'already_commented_before_commit' };
                 }
                 const edge = edgeFor(lease.taskId);
                 // 人审期间页面已可继续浏览；commit 不信旧 DOM，必须重新搜索、打开并核对稳定 noteId。
@@ -1165,34 +1164,26 @@ export class CommentScheduler {
                   if (!card) continue;
                   const reopened = await edge.readNote(card);
                   if (!reopened || reopened.note.noteId !== target.noteId) {
-                    commitReason = 'detail_note_mismatch_on_commit';
-                    return false;
+                    return { status: 'not_dispatched', reason: 'detail_note_mismatch_on_commit' };
                   }
                   return edge.post(target.noteId, composed.text, composed.contactInfo);
                 }
-                commitReason = 'target_not_found_on_commit';
-                return false;
+                return { status: 'not_dispatched', reason: 'target_not_found_on_commit' };
               },
             ),
           );
-          if (!posted) {
-            result = {
-              outcome: 'post_failed',
-              noteId: target.noteId,
-              noteTitle: prepared.note.title || target.title,
-              text: displayText,
-              searchAttempts,
-              reason: commitReason,
-            };
+          const base = { noteId: target.noteId, noteTitle: prepared.note.title || target.title, text: displayText, searchAttempts } as const;
+          if (posted.status === 'preempted') {
+            // 7.6：提交前被抢占 → 放弃本轮（不写去重、不重建重搜、不本轮重试），运营需重敲一次。
+            result = { outcome: 'preempted', ...base, reason: `preempted:${posted.reason}` };
+          } else if (posted.status === 'not_dispatched') {
+            result = { outcome: 'post_failed', ...base, reason: posted.reason ?? 'comment not verified posted' };
           } else {
+            // confirmed ∪ submitted_unconfirmed = 提交已派发 → 必写去重（防重复评论）。
             await dedup.recordInteraction(target.noteId, 'comment');
-            result = {
-              outcome: 'commented',
-              noteId: target.noteId,
-              noteTitle: prepared.note.title || target.title,
-              text: displayText,
-              searchAttempts,
-            };
+            result = posted.status === 'submitted_unconfirmed'
+              ? { outcome: 'submitted_unconfirmed', ...base, reason: 'comment submitted but unconfirmed' }
+              : { outcome: 'commented', ...base };
           }
         }
       }
@@ -1352,17 +1343,19 @@ export class CommentScheduler {
                 // 发布：边端在提交前【就地核对当前详情页 noteId】（interaction.comment 带 noteId），
                 // 页面被弹层顶掉/被导航离开/笔记已删 → 边端诚实回 ok:false → 不发（绝不在错笔记上发）。
                 const posted = await edge.post(selected.noteId, composed.text, composed.contactInfo);
-                if (!posted) {
-                  return { next: false, result: {
-                    outcome: 'post_failed', term, noteId: selected.noteId, noteTitle: prepared.note.title,
-                    text: displayText, termsTried: tried, reason: 'comment not verified posted',
-                  } };
+                const pbase = { term, noteId: selected.noteId, noteTitle: prepared.note.title, text: displayText, termsTried: tried } as const;
+                if (posted.status === 'preempted') {
+                  // 7.6：提交前被抢占 → 放弃本轮（不写去重、不换词重试）。
+                  return { next: false, result: { outcome: 'preempted', ...pbase, reason: `preempted:${posted.reason}` } };
                 }
+                if (posted.status === 'not_dispatched') {
+                  return { next: false, result: { outcome: 'post_failed', ...pbase, reason: posted.reason ?? 'comment not verified posted' } };
+                }
+                // confirmed ∪ submitted_unconfirmed = 提交已派发 → 必写去重（防重复评论）。
                 await dedup.recordInteraction(selected.noteId, 'comment');
-                return { next: false, result: {
-                  outcome: 'commented', term, noteId: selected.noteId, noteTitle: prepared.note.title,
-                  text: displayText, termsTried: tried,
-                } };
+                return { next: false, result: posted.status === 'submitted_unconfirmed'
+                  ? { outcome: 'submitted_unconfirmed', ...pbase, reason: 'comment submitted but unconfirmed' }
+                  : { outcome: 'commented', ...pbase } };
               },
             ),
           );
@@ -1496,6 +1489,12 @@ export function targetedOutcomeToReceipt(r: TargetedCommentResult, withContact: 
           ? `${target}当前上下文不可用，本次不搜索兜底${r.reason ? `（${r.reason}）` : ''}`
           : `已定位${target}，但开笔记/读正文失败${r.reason ? `（${r.reason}）` : ''}`,
       };
+    case 'submitted_unconfirmed':
+      // 提交已派发但未确认：可能已发出——不染绿、也不误判失败，明确不重试（7.6，防双发）。
+      return { ok: false, level: 'warning', title: `${kind}已提交待确认`, message: `${target}评论已提交但未能确认成功，可能已发出——本次不重试${r.reason ? `（${r.reason}）` : ''}` };
+    case 'preempted':
+      // 提交前被更高优先任务抢占：本轮放弃（未发出），运营可稍后重敲（7.6）。
+      return { ok: false, level: 'warning', title: `${kind}被打断`, message: `${target}被更高优先任务打断，本轮放弃、稍后可重试${r.reason ? `（${r.reason}）` : ''}` };
     case 'post_failed':
       return { ok: false, level: 'error', title: `${kind}失败`, message: `${target}评论发布未确认成功${r.reason ? `（${r.reason}）` : ''}` };
   }
@@ -1520,6 +1519,10 @@ export function outcomeToReceipt(r: CommentTaskResult): CommentResultReceipt {
       // 带真实原因（change comment-search-nav-confirm，对齐 post_failed / targetedOutcomeToReceipt）：
       // 绝不一律硬编码「边端超时或离线」——边端在线的诚实失败绝不误报成离线（假归因红线）。
       return { ok: false, level: 'error', title: '按需评论失败', message: `${selected}已选中，但开笔记/读正文失败${r.reason ? `（${r.reason}）` : ''}` };
+    case 'submitted_unconfirmed':
+      return { ok: false, level: 'warning', title: '按需评论已提交待确认', message: `${commented}评论已提交但未能确认成功，可能已发出——本次不重试${r.reason ? `（${r.reason}）` : ''}` };
+    case 'preempted':
+      return { ok: false, level: 'warning', title: '按需评论被打断', message: `${selected}已选中，但被更高优先任务打断，本轮放弃、稍后可重试${r.reason ? `（${r.reason}）` : ''}` };
     case 'post_failed':
       return { ok: false, level: 'error', title: '按需评论失败', message: `${selected}已选中，但发布未确认成功${r.reason ? `（${r.reason}）` : ''}` };
   }
@@ -1538,7 +1541,11 @@ export function outcomeToReceipt(r: CommentTaskResult): CommentResultReceipt {
  * （实践上它到不了这个 catch——withLease 的 finally 把释放异常吞成 warn——但判定必须自洽，不能靠调用链的偶然性。）
  */
 function isEdgeTaskAcquireFailure(err: unknown): err is EdgeTaskLeaseError {
-  return err instanceof EdgeTaskLeaseError && err.code !== 'release_timeout';
+  // 补集判据（不认识的码默认「未开始」偏诚实一侧）。排除项＝那些「任务体可能已执行/绝不可自动重试」的码：
+  // - release_timeout：发生在 work 之后，评论可能已发出，判 not_started 会反向说谎 + 错误归还小时格 → 重复评论。
+  // - yield_timeout（7.5）：控制面故障，通向人工重启浏览器客户端（§10.4），绝不自动重试——判 not_started 会
+  //   归还小时格 + 下轮重触发，对着一台卡死的浏览器空转成环。走 else 分支落 post_failed（诚实错误卡、不重试）。
+  return err instanceof EdgeTaskLeaseError && err.code !== 'release_timeout' && err.code !== 'yield_timeout';
 }
 
 /**

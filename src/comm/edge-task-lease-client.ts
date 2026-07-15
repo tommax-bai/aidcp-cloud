@@ -9,6 +9,7 @@ import {
   type EdgeTaskReleasedPayload,
   type Envelope,
 } from './protocol.js';
+import type { PreemptionReason } from './preemption.js';
 
 export interface EdgeTaskLeasePusher {
   pushToEdges(envelope: Envelope, edgeId?: string): number;
@@ -38,8 +39,18 @@ export class EdgeTaskLeaseError extends Error {
       | 'browser_wake_failed'
       | 'acquire_timeout'
       | 'release_timeout'
-      | 'edge_disconnected',
+      | 'edge_disconnected'
+      /** 7.5：抢占撞上持有者不可逆提交窗口——**可恢复**，windowRemainingMs 带剩余预算供精确重排（不空转轮询）。 */
+      | 'window_busy'
+      /** 7.5：写者收到取消仍不停手＝控制面故障——**不可恢复**，通向人工重启浏览器客户端（§10.4），绝不自动重试。 */
+      | 'yield_timeout',
     message: string,
+    /**
+     * `window_busy` 专用：持有者剩余提交窗口预算（毫秒）。**保留字段，当前无消费者**——window_busy 的 acquire
+     * 失败今天走各调用方既有的「按计划下一轮重触发 / 有界退避」（非空转），尚未实装「按此值精确重排」。
+     * 精确重排消费者列入 change 延后清单（7.5 尾巴），落地时在此值上挂 setTimeout 重排 acquire。
+     */
+    public readonly windowRemainingMs?: number,
   ) {
     super(message);
     this.name = 'EdgeTaskLeaseError';
@@ -66,6 +77,12 @@ export interface EdgeTaskLeaseClientOptions {
   releaseTimeoutMs?: number;
   defaultLeaseMs?: number;
   logger?: Pick<Console, 'log' | 'warn'>;
+  /**
+   * 7.5 活跃租约中断：收到**活跃**租约（正在 withLease 跑）的抢占释放（preempted_by_task / yield_timeout）时回调，
+   * 让持有方就地中断在飞命令——发布经 command-sequencer.preemptTask reject 在途 publish.command（交序列器归类、
+   * **绝不 unwind withLease**）；巡视经 role-dispatcher 收敛。无该回调则退化为今天的「仅 active.delete」（work 靠命令回执/超时兜底收敛）。
+   */
+  onActiveLeasePreempted?: (taskId: string, edgeId: string, reason: PreemptionReason) => void;
 }
 
 /**
@@ -90,6 +107,7 @@ export class EdgeTaskLeaseClient {
   private readonly releaseTimeoutMs: number;
   private readonly defaultLeaseMs: number;
   private readonly logger: Pick<Console, 'log' | 'warn'>;
+  private readonly onActiveLeasePreempted?: (taskId: string, edgeId: string, reason: PreemptionReason) => void;
   private readonly acquiring = new Map<string, Pending<EdgeTaskAcquiredPayload>>();
   private readonly releasing = new Map<string, Pending<EdgeTaskReleasedPayload>>();
   private readonly active = new Map<string, EdgeTaskLease>();
@@ -103,6 +121,7 @@ export class EdgeTaskLeaseClient {
     this.releaseTimeoutMs = options.releaseTimeoutMs ?? DEFAULT_RELEASE_TIMEOUT_MS;
     this.defaultLeaseMs = options.defaultLeaseMs ?? DEFAULT_LEASE_MS;
     this.logger = options.logger ?? console;
+    this.onActiveLeasePreempted = options.onActiveLeasePreempted;
   }
 
   acquire(request: EdgeTaskLeaseRequest): Promise<EdgeTaskLease> {
@@ -227,6 +246,36 @@ export class EdgeTaskLeaseClient {
         'browser_wake_failed',
         `edge task rejected because the parked browser could not be woken taskId=${payload.taskId} edge=${edgeId}`,
       ));
+    }
+    // 7.5 抢占撞上持有者的不可逆提交窗口：challenger 的 acquire 被拒——**可恢复**，带剩余预算供精确重排（不空转轮询）。
+    if (acquiring && edgeId && acquiring.edgeId === edgeId && payload.reason === 'window_busy') {
+      this.acquiring.delete(payload.taskId);
+      clearTimeout(acquiring.timer);
+      acquiring.reject(new EdgeTaskLeaseError(
+        'window_busy',
+        `edge task acquire refused: holder inside commit window taskId=${payload.taskId} edge=${edgeId}`,
+        payload.windowRemainingMs,
+      ));
+    }
+    // 7.5 写者收到取消仍不停手＝控制面故障：challenger 的 acquire 被拒——**不可恢复**，通向人工重启客户端（§10.4）、绝不自动重试。
+    if (acquiring && edgeId && acquiring.edgeId === edgeId && payload.reason === 'yield_timeout') {
+      this.acquiring.delete(payload.taskId);
+      clearTimeout(acquiring.timer);
+      acquiring.reject(new EdgeTaskLeaseError(
+        'yield_timeout',
+        `edge task acquire refused: held writer would not yield (control-plane fault) taskId=${payload.taskId} edge=${edgeId}`,
+      ));
+    }
+    // 7.5 活跃租约中断：一个**正在跑**的租约（在 active、非本方发起 release、非 acquiring）被边缘以抢占原因释放——
+    // 通知持有方就地中断在飞命令（发布 → command-sequencer.preemptTask；巡视 → role-dispatcher），**绝不 unwind withLease**。
+    // 在 active.delete 之前触发：此时该任务仍可辨识为「活跃被抢」。
+    if (
+      edgeId &&
+      this.active.get(payload.taskId)?.edgeId === edgeId &&
+      !this.releasing.has(payload.taskId) &&
+      (payload.reason === 'preempted_by_task' || payload.reason === 'yield_timeout')
+    ) {
+      this.onActiveLeasePreempted?.(payload.taskId, edgeId, payload.reason);
     }
     const pending = this.releasing.get(payload.taskId);
     if (pending && edgeId && pending.edgeId === edgeId) {

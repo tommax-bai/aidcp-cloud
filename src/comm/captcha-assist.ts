@@ -117,6 +117,13 @@ const DEFAULT_INCIDENT_TTL_MS = 30 * 60_000;
 // 确保云端放行的 snapshotId 边缘一定还留着（否则云端放行、边缘已淘汰 → 白跑）。
 const RECENT_SNAPSHOT_IDS = 5;
 const DEFAULT_LIVE_MAX_DURATION_MS = 30_000;
+/**
+ * 7.10（change lease-strict-preemption）：验证码协助（system_recovery）取回执的受理超时。
+ * 20s→45s——必须容得下被抢者最长的不可逆提交窗口（≈20s）+ 取消停手 + 让位交接 + 一个消息往返，
+ * 否则边缘还在合法交接、云端已判死走人（11.8 参数一致性：云端受理预算 > 最长提交窗口）。
+ * 与边缘排队默认 45s（5.6）对齐成一致的受理预算阶梯。
+ */
+const CAPTCHA_ASSIST_ACQUIRE_TIMEOUT_MS = 45_000;
 
 export class CaptchaAssistService {
   private readonly incidents = new Map<string, CaptchaAssistIncident>();
@@ -358,7 +365,7 @@ export class CaptchaAssistService {
           kind: 'system_recovery',
           priority: 'system_recovery',
           leaseMs: 60_000,
-          acquireTimeoutMs: 20_000,
+          acquireTimeoutMs: CAPTCHA_ASSIST_ACQUIRE_TIMEOUT_MS,
         });
       } catch (err) {
         this.logger.warn(`[captcha-assist] system recovery lease failed incident=${input.incidentId}: ${(err as Error).message}`);

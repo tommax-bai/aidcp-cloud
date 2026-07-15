@@ -39,7 +39,16 @@ export interface ApprovalDecision {
 
 /** 下发段运维通知（best-effort，绝不影响下发主链路）：离线/接管超时回待审 / 熔断开启 / 熔断解除。 */
 export interface DispatchNotice {
-  kind: 'offline_requeued' | 'acquire_timeout_requeued' | 'cdp_unhealthy_requeued' | 'breaker_open' | 'breaker_cleared';
+  kind:
+    | 'offline_requeued'
+    | 'acquire_timeout_requeued'
+    | 'cdp_unhealthy_requeued'
+    | 'breaker_open'
+    | 'breaker_cleared'
+    /** 7.3：验证码硬暂停期该 edge 收不到发布命令 → 零副作用回待审（不烧稿、保留授权）。 */
+    | 'edge_paused_requeued'
+    /** 7.2：同一稿连续被抢占达阈值 → 停自动重投、待运营处理（仍保持待审、绝不烧稿）。 */
+    | 'preempted_exhausted';
   accountId: string;
   recordId?: number;
   title?: string | null;
@@ -52,6 +61,12 @@ export interface PublishDispatcherDeps {
   edgeTaskLeases: Pick<EdgeTaskLeaseClient, 'withLease'>;
   /** 解析绑定该账号的在线边缘节点 edgeId；无在线节点返回 null（→ 诚实 failed）。 */
   resolveEdgeIdForAccount: (accountId: string) => string | null;
+  /**
+   * 7.3：该 edge 是否处于验证码硬暂停态（ws-server pausedEdges）。暂停期发布命令不在下发豁免名单、
+   * 投递必为 0 → 会被序列器 reject 烧成不可逆 failed。下发前先闸：暂停即零副作用回待审、保留授权、不烧稿。
+   * 未注入（旧构造/测试）→ 视为从不暂停，行为不变。
+   */
+  isEdgePaused?: (edgeId: string) => boolean;
   /** AC-PUB 复核 + 版本闸：按 requestId 读授权信号（approved + contentVersion）；无信号返回 null（未授权）。 */
   readApproval: (requestId: string) => Promise<ApprovalDecision | null>;
   /** edit-note-draft-before-publish：作废（删除）一份过期授权签名，令草稿回可重审。 */
@@ -75,6 +90,14 @@ export interface PublishDispatcherDeps {
   };
   /** 同账号连续序列失败多少次触发熔断（默认 2）。 */
   breakerThreshold?: number;
+  /** 7.2：同一稿连续被抢占多少次后停自动重投 + 通知运营（默认 3）。 */
+  preemptRedispatchMax?: number;
+  /**
+   * 7.1 事件驱动重投调度器（可注入，缺省 setTimeout）。被抢占的稿在当前下发收尾后重触发一次
+   * `dispatch(recordId)`，其 withLease 会在租约队列上等抢占方释放（事件驱动、非 60s 盲投）。
+   * 延迟仅用于让当前 dispatch 的 inFlight 清理先跑完；测试可注入同步桩。
+   */
+  scheduleRedispatch?: (fn: () => void) => void;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
 
@@ -83,12 +106,15 @@ export class PublishDispatcher {
   private readonly sequencer: Pick<CommandSequencer, 'executePublishSequence'>;
   private readonly edgeTaskLeases: Pick<EdgeTaskLeaseClient, 'withLease'>;
   private readonly resolveEdgeIdForAccount: (accountId: string) => string | null;
+  private readonly isEdgePaused?: (edgeId: string) => boolean;
   private readonly readApproval: (requestId: string) => Promise<ApprovalDecision | null>;
   private readonly voidApprovalSignal: (requestId: string) => Promise<void>;
   private readonly notifyUiPublishState?: (accountId: string, recordId: number, state: 'approved' | 'submitted' | 'failed', title?: string | null) => void;
   private readonly notifyDispatchEvent?: (notice: DispatchNotice) => void;
   private readonly facebookPublishMedia?: NonNullable<PublishDispatcherDeps['facebookPublishMedia']>;
   private readonly breakerThreshold: number;
+  private readonly preemptRedispatchMax: number;
+  private readonly scheduleRedispatch: (fn: () => void) => void;
   private readonly logger: Pick<Console, 'log' | 'warn' | 'error'>;
 
   /** 同 recordId 在途去重（防重复点击/事件与兜底扫描双触发）。 */
@@ -99,18 +125,28 @@ export class PublishDispatcher {
   private readonly consecutiveSeqFails = new Map<string, number>();
   /** 熔断中的账号：停 drain 已批队列、新下发拒绝且不烧授权；人工批准确认清除。 */
   private readonly openBreakers = new Set<string>();
+  /**
+   * 7.2 抢占计数（按 recordId）：被抢占不计熔断（拆掉了唯一那道刹车），必须补一道独立退避——
+   * 同一稿连续被抢占达阈值 → 停自动重投 + 通知运营（仍保持待审、绝不烧稿）。成功/真失败终态即清零。
+   */
+  private readonly consecutivePreemptions = new Map<number, number>();
+  /** 7.3：已就「验证码硬暂停」通知过运维的 recordId——防 60s 兜底扫描每轮对同一暂停重复 ping 运维（只在进入暂停态时发一次）。 */
+  private readonly pausedNotified = new Set<number>();
 
   constructor(deps: PublishDispatcherDeps) {
     this.store = deps.store;
     this.sequencer = deps.sequencer;
     this.edgeTaskLeases = deps.edgeTaskLeases;
     this.resolveEdgeIdForAccount = deps.resolveEdgeIdForAccount;
+    this.isEdgePaused = deps.isEdgePaused;
     this.readApproval = deps.readApproval;
     this.voidApprovalSignal = deps.voidApprovalSignal;
     this.notifyUiPublishState = deps.notifyUiPublishState;
     this.notifyDispatchEvent = deps.notifyDispatchEvent;
     this.facebookPublishMedia = deps.facebookPublishMedia;
     this.breakerThreshold = Math.max(1, deps.breakerThreshold ?? 2);
+    this.preemptRedispatchMax = Math.max(1, deps.preemptRedispatchMax ?? 3);
+    this.scheduleRedispatch = deps.scheduleRedispatch ?? ((fn) => { const t = setTimeout(fn, 0); (t as { unref?: () => void }).unref?.(); });
     this.logger = deps.logger ?? console;
   }
 
@@ -139,6 +175,35 @@ export class PublishDispatcher {
       );
       this.notifyOps({ kind: 'breaker_open', accountId, recordId, title });
     }
+  }
+
+  /**
+   * 7.1 + 7.2 被抢占后的事件驱动重投：被抢占的稿保持待审、授权仍在，重触发一次 `dispatch(recordId)`——
+   * 其 withLease 的 acquire 会在租约队列上**等抢占方释放**（事件驱动、非 60s 盲投；抢占方多为秒级的手动评论/加群）。
+   * 7.2 退避：同一稿连续被抢占达阈值 → 停自动重投 + 通知运营（仍保持待审、绝不烧稿），防抢占方长时间占用时无限重投空转。
+   * 延到当前 dispatch 的 inFlight 清理之后再触发（scheduleRedispatch 默认 setTimeout(0)）。
+   */
+  private schedulePreemptedRedispatch(recordId: number, accountId: string, title?: string | null): void {
+    const n = (this.consecutivePreemptions.get(recordId) ?? 0) + 1;
+    this.consecutivePreemptions.set(recordId, n);
+    if (n >= this.preemptRedispatchMax) {
+      this.consecutivePreemptions.delete(recordId);
+      // 达阈值停自动重投：**作废本次授权签名**，否则草稿仍 pending_approval + 授权仍在 → 60s 兜底扫描每轮把它
+      // 重新捞起再爆一轮重投（退避形同虚设 + 反复 ping 运营），且「人工再批即恢复」的提示就成了空话。作废后
+      // 兜底扫描不再自动补投，运营重新批准才恢复——退避才真正生效。草稿仍 pending_approval、绝不烧成 failed。
+      void this.voidApprovalSignal(`publish-${recordId}`).catch(() => {});
+      this.logger.warn(
+        `[PublishDispatcher] recordId=${recordId} 连续被抢占 ${n} 次 → 停自动重投、作废授权、通知运营（保持待审、绝不烧稿；人工再批即恢复）`,
+      );
+      this.notifyOps({ kind: 'preempted_exhausted', accountId, recordId, title });
+      return;
+    }
+    this.logger.log(`[PublishDispatcher] recordId=${recordId} 被抢占第 ${n} 次 → 事件驱动重投（排队等抢占方释放）`);
+    this.scheduleRedispatch(() => {
+      void this.dispatch(recordId).catch((e) =>
+        this.logger.warn(`[PublishDispatcher] 被抢占重投 recordId=${recordId} 失败: ${e instanceof Error ? e.message : String(e)}`),
+      );
+    });
   }
 
   /** 人工批准确认（含 already-decided 重复批准）：熔断中即视为人工确认清除，并踢一次兜底扫描恢复 drain。 */
@@ -184,7 +249,11 @@ export class PublishDispatcher {
     }
 
     this.inFlight.add(recordId);
-    const priority: EdgeTaskPriority = opts?.humanApproval ? 'human' : 'automatic';
+    // 9.1（用户 2026-07-14 拍板）：一切发布一律自动档，不论触发路径（人审入口 / 兜底扫描 / 事件驱动重投）。
+    // 发布是异步队列作业，批准完人就走了、没人在线等回执 → 不给人工档。人工档只留「运营在线等回执」的动作
+    // （手动评论 / 手动加群 / 客户端内审批即时动作）。opts.humanApproval 仍保留——它另驱动熔断解除
+    // （confirmHumanApproval），只是不再据此定租约档位。同时消灭「同稿因触发路径不同而档位不同 + 重投降级」两个反 aging 缺陷。
+    const priority: EdgeTaskPriority = 'automatic';
     const prev = this.accountTail.get(accountId) ?? Promise.resolve();
     const run = prev
       .catch(() => {})
@@ -241,7 +310,7 @@ export class PublishDispatcher {
 
   private async settleFacebookMedia(
     draft: DispatchDraft,
-    outcome: 'published_confirmed' | 'submitted_unconfirmed' | 'failed_before_submit',
+    outcome: 'published_confirmed' | 'submitted_unconfirmed' | 'failed_before_submit' | 'preempted',
     recordId: number,
     reason?: string,
   ): Promise<void> {
@@ -328,6 +397,24 @@ export class PublishDispatcher {
       return;
     }
 
+    // 7.3 验证码硬暂停闸：暂停期该 edge 收不到发布命令（不在 ws-server 下发豁免名单）→ 投递必为 0 →
+    // 序列器立即 reject → 会被烧成不可逆 failed + 熔断 +1。下发前先闸：暂停即零副作用回待审、不烧稿、不计熔断。
+    // 与离线分支不同：验证码暂停是**瞬态**（解完即恢复），故**不作废授权**——留待兜底扫描在恢复后重投。
+    if (this.isEdgePaused?.(edgeId)) {
+      this.logger.warn(
+        `[PublishDispatcher] 账号 ${accountId} edge ${edgeId} 处于验证码硬暂停 → recordId=${recordId} 保持待审、不下发（零副作用、保留授权）`,
+      );
+      // 只在**进入**暂停态时通知一次；60s 兜底扫描每轮重命中同一暂停不再重复 ping 运维。暂停解除后本记录下次
+      // 走到下方非暂停路径会清标记、重新武装。
+      if (!this.pausedNotified.has(recordId)) {
+        this.pausedNotified.add(recordId);
+        this.notifyOps({ kind: 'edge_paused_requeued', accountId, recordId, title: draft.title });
+      }
+      return;
+    }
+    // 非暂停路径：清「已通知暂停」标记（暂停已解除，重新武装下次暂停的一次性通知）。
+    this.pausedNotified.delete(recordId);
+
     let sequenceStarted = false;
     try {
       const result = await this.edgeTaskLeases.withLease(
@@ -340,7 +427,6 @@ export class PublishDispatcher {
         async (lease) => {
           // acquired 同时代表 edge 已 quiesced；此前不得推 approved/不得发送首条业务命令。
           this.notifyUi(accountId, recordId, 'approved', draft.title);
-          sequenceStarted = true;
           return this.sequencer.executePublishSequence({
             taskId: lease.taskId,
             recordId,
@@ -356,6 +442,9 @@ export class PublishDispatcher {
             platform: draft.platform ?? 'xiaohongshu',
             approvedByUser: true,
             edgeId,
+            // 7.1 HOLE-13：把「已开始」下移到提交点击真正下发前——此前的导航/上传/填字段皆平台零副作用，
+            // 若因意外抛错收敛，走下方 !sequenceStarted 分支零副作用回待审，不烧成 failed + 熔断。
+            onFirstSideEffect: () => { sequenceStarted = true; },
           });
         },
       );
@@ -366,20 +455,31 @@ export class PublishDispatcher {
       if (result.ok && result.outcome === 'published_confirmed') {
         await this.settleFacebookMedia(draft, result.outcome, recordId, result.failedAt?.error);
         this.consecutiveSeqFails.delete(accountId);
+        this.consecutivePreemptions.delete(recordId);
         await this.store.updatePostId(recordId, result.postId!, result.postUrl).catch(() => {});
         this.logger.log(`[PublishDispatcher] recordId=${recordId} published postId=${result.postId} edge=${edgeId}`);
       } else if (result.outcome === 'submitted_unconfirmed') {
         // 当前页面已确认提交，但未拿到同页 postId/permalink。
         // 对用户是“已提交，待链接确认”，不是失败；仍不重试，素材隔离。
         await this.settleFacebookMedia(draft, result.outcome, recordId, result.failedAt?.error);
+        this.consecutivePreemptions.delete(recordId);
         await this.store.updateStatus(recordId, 'submitted').catch(() => {});
         this.logger.warn(
           `[PublishDispatcher] recordId=${recordId} submitted_unconfirmed，已转 submitted（不刷新、不自动重试）`,
         );
         this.notifyUi(accountId, recordId, 'submitted', draft.title);
+      } else if (result.outcome === 'preempted') {
+        // 7.1 被抢占（严格高档位打断，提交前零副作用）≠ 失败：保持待审（**不写任何终态**，留 pending_approval）、
+        // 保留授权签名（不 voidApprovalSignal）、FB 素材归还而非隔离、**不计熔断**。交抢占方释放后事件驱动重投。
+        await this.settleFacebookMedia(draft, 'preempted', recordId, result.failedAt?.error);
+        this.logger.warn(
+          `[PublishDispatcher] recordId=${recordId} 被抢占（${result.failedAt?.error ?? 'preempted'}）→ 保持待审、保留授权、事件驱动重投（不烧稿、不计熔断）`,
+        );
+        this.schedulePreemptedRedispatch(recordId, accountId, draft.title);
       } else {
         // 序列中途失败（页面状态未知）→ failed 终态、绝不自动重跑；计入熔断（连续 N 次停 drain 防连环烧稿）。
         await this.settleFacebookMedia(draft, result.outcome, recordId, result.failedAt?.error);
+        this.consecutivePreemptions.delete(recordId);
         await this.store.updateStatus(recordId, 'failed').catch(() => {});
         this.logger.warn(`[PublishDispatcher] recordId=${recordId} 下发失败 failedAt=${JSON.stringify(result.failedAt)}`);
         this.notifyUi(accountId, recordId, 'failed', draft.title);
@@ -401,7 +501,9 @@ export class PublishDispatcher {
         return;
       }
       // 序列驱动异常（页面状态未知）→ 同序列失败处理：failed 终态 + 计入熔断。
+      // 注：抢占以 preempted **结果**回来（在 command-sequencer 的 catch 内收敛为结果、绝不 unwind），故此处不会是抢占。
       await this.settleFacebookMedia(draft, 'submitted_unconfirmed', recordId, err instanceof Error ? err.message : String(err));
+      this.consecutivePreemptions.delete(recordId);
       await this.store.updateStatus(recordId, 'failed').catch(() => {});
       this.logger.warn(`[PublishDispatcher] recordId=${recordId} 下发异常: ${err instanceof Error ? err.message : String(err)}`);
       this.notifyUi(accountId, recordId, 'failed', draft.title);

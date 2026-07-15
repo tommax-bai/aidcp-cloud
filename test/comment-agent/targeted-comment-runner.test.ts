@@ -61,7 +61,8 @@ function makeSteps(cfg: StubConfig) {
     },
     post: async (noteId) => {
       calls.post.push(noteId);
-      return cfg.postOk ?? true;
+      // 7.6 三态：postOk 缺省/true → confirmed（写去重）；false → not_dispatched（→ post_failed）。
+      return (cfg.postOk ?? true) ? { status: 'confirmed' as const } : { status: 'not_dispatched' as const };
     },
     recordCommented: async (noteId) => {
       calls.record.push(noteId);

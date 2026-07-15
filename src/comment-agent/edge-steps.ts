@@ -17,9 +17,10 @@
 
 import { randomUUID } from 'node:crypto';
 import { makeEnvelope } from '../comm/protocol.js';
+import { isPreemptionReason } from '../comm/preemption.js';
 import type { EventBus } from '../event-bus/index.js';
 import type { CommentCandidateCard } from '../agents/comment-target-picker.js';
-import type { NoteForComment, OnPageComment } from './comment-task-runner.js';
+import type { CommentPostResult, NoteForComment, OnPageComment } from './comment-task-runner.js';
 
 /**
  * 边端推送（与 EdgeCloudServer.pushToEdges 同构）。
@@ -147,7 +148,7 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
   filterUncommented(cards: CommentCandidateCard[]): Promise<CommentCandidateCard[]>;
   readNote(card: CommentCandidateCard): Promise<{ note: NoteForComment; comments: OnPageComment[] } | null>;
   readCurrentNote(note: NoteForComment): Promise<{ note: NoteForComment; comments: OnPageComment[] } | null>;
-  post(noteId: string, text: string, contactInfo?: string | null): Promise<boolean>;
+  post(noteId: string, text: string, contactInfo?: string | null): Promise<CommentPostResult>;
   recordCommented(noteId: string): Promise<void>;
 } {
   const { bus, pusher, edgeId, taskId, dedup } = deps;
@@ -322,7 +323,7 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
 
     readCurrentNote,
 
-    async post(noteId: string, text: string, contactInfo?: string | null): Promise<boolean> {
+    async post(noteId: string, text: string, contactInfo?: string | null): Promise<CommentPostResult> {
       const completed = await sendAndAwait<ActionCompleted>(
         bus,
         'action.completed',
@@ -341,9 +342,13 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
             }),
           ),
       );
-      const ok = !!completed?.ok;
-      if (!ok) log.warn(`[comment-edge] 发评论 ${noteId} 未真成功：${completed?.reason ?? '超时/边端离线'}`);
-      return ok;
+      // 三态归一（7.6/HOLE-8）：确认成功 / 提交已派发未确认（可能已发出，写去重不重投）/ 被抢占（放弃本轮）/ 压根没发出。
+      if (completed?.ok === true) return { status: 'confirmed' };
+      const reason = completed?.reason;
+      if (reason === 'submitted_unconfirmed') return { status: 'submitted_unconfirmed' };
+      if (isPreemptionReason(reason)) return { status: 'preempted', reason };
+      log.warn(`[comment-edge] 发评论 ${noteId} 未确认发出：${reason ?? '超时/边端离线'}`);
+      return { status: 'not_dispatched', reason: reason ?? undefined };
     },
 
     async recordCommented(noteId: string): Promise<void> {

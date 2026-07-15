@@ -51,6 +51,7 @@ function makeHarness(opts: {
   const membershipCalls: string[] = [];
   const targetCalls: string[] = [];
   const sessionBudgetCalls: string[] = [];
+  const leasePriorities: string[] = [];
   const paused: string[] = [];
   const retryBackoffs: number[] = [];
   const transientBackoffs: number[] = [];
@@ -143,6 +144,7 @@ function makeHarness(opts: {
     pusher,
     edgeTaskLeases: {
       withLease: async (request, work) => {
+        leasePriorities.push(request.priority);
         if (opts.leaseError) throw opts.leaseError;
         return work({ taskId: `task-${request.kind}`, edgeId: request.edgeId, kind: request.kind, priority: request.priority });
       },
@@ -169,7 +171,7 @@ function makeHarness(opts: {
     random: () => 0, // 定值抖动 → 网络瞬态退避取下限 NETWORK_TRANSIENT_BACKOFF_MIN_MS（2min），测试确定性。
     logger: { warn: () => {}, log: () => {} },
   });
-  return { scheduler, sent, auditRows, membershipCalls, targetCalls, sessionBudgetCalls, paused, retryBackoffs, transientBackoffs, bus };
+  return { scheduler, sent, auditRows, membershipCalls, targetCalls, sessionBudgetCalls, leasePriorities, paused, retryBackoffs, transientBackoffs, bus };
 }
 
 describe('FacebookGroupJoinScheduler', () => {
@@ -378,6 +380,30 @@ describe('FacebookGroupJoinScheduler', () => {
     assert.equal(r.reason, 'quota_denied');
     assert.deepEqual(h.sent, []);
     assert.ok(h.auditRows.some((row) => row.outcome === 'quota_denied' && row.reason === 'canDo'));
+  });
+
+  it('7.11 手动触发的加群一路带 human 档到租约（严格三档下不被别的 human 任务抢占）', async () => {
+    const h = makeHarness({
+      auto: true,
+      edge: (env, bus) => {
+        bus.emit('action.completed', { action: 'join_group', ok: true, reason: undefined, groupUrl: env.payload.groupUrl, clicked: true, ts: 0 } as never);
+      },
+    });
+    await h.scheduler.triggerScheduled('acc-fb', { manual: true });
+    assert.ok(h.leasePriorities.length > 0, '至少取一次租约（observe/click）');
+    assert.ok(h.leasePriorities.every((p) => p === 'human'), '手动加群全程 human 档');
+  });
+
+  it('7.11 自动巡回的加群仍 automatic 档（人工旗标不误伤自动路径）', async () => {
+    const h = makeHarness({
+      auto: true,
+      edge: (env, bus) => {
+        bus.emit('action.completed', { action: 'join_group', ok: true, reason: undefined, groupUrl: env.payload.groupUrl, clicked: true, ts: 0 } as never);
+      },
+    });
+    await h.scheduler.triggerScheduled('acc-fb');
+    assert.ok(h.leasePriorities.length > 0);
+    assert.ok(h.leasePriorities.every((p) => p === 'automatic'), '自动加群全程 automatic 档');
   });
 
   it('real: login_required observation 暂停账号并保留 retryable assignment，不学习 group gated', async () => {

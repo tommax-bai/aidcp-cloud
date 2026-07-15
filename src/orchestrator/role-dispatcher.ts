@@ -71,6 +71,7 @@ import { NotificationNotifier } from '../agents/notification-notifier.js';
 import { NotificationReturnHome } from '../agents/notification-return-home.js';
 import { ExcursionResumer } from '../agents/excursion-resumer.js';
 import type { EdgeTaskLease, EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
+import { isPreemptionReason } from '../comm/preemption.js';
 import type { BaseRole } from '../agents/base-role.js';
 import type { Soul } from '../soul/types.js';
 import { computeDwellMs, computeThinkMs, computeFeedFloorMs, effectiveTempo, type PacingFloorProvider } from '../risk/pacing.js';
@@ -2163,6 +2164,14 @@ export class RoleDispatcher {
       // note.detail/page.cards，事件循环会因无触发而死等；统一以一次 scroll 续刷兜底。
       this.eventBus.on('action.completed', (payload) => {
         console.log(`[RoleDispatcher] action.completed: ${payload.action} ok=${payload.ok}`);
+        // 7.8（change lease-strict-preemption；co-deploy 于 edge §8.1 批 D 之前必落）：被抢占是**调度事件**、不是动作失败。
+        // 原因级短路 MUST 插在按动作名匹配的 noRecoverScroll 名单**之前**——open_note / refresh / profile_open 不在名单里、
+        // 仅靠动作名匹配会漏网，一旦边缘补上诚实回执就会触发一次恢复滚动、滚到抢占方页面。被抢占：不兜底滚动、不重试、
+        // 不清计数、不计互动失败与配额、不 emit comment.done（否则把评论供线终结成「已投但失败」）。留待抢占方释放后自然重决策。
+        if (payload.ok === false && isPreemptionReason(payload.reason)) {
+          console.log(`[RoleDispatcher] 动作 ${payload.action} 被抢占（${payload.reason}）→ 原因级短路：不兜底滚动、不重试、不计失败与配额`);
+          return;
+        }
         // observedSurface 仅审计（change platform-browse-protocol）：回执回声 surface 与期望不符 → warn（检测漂移）；
         // 绝不参与控制流（控制流一律读 effectiveReadSurface，见 shouldCloseWithScroll）。期望取版本偏斜后的有效值：
         // 老边端 read 回落 detail 时期望亦 detail，避免对未开就地读的边缘误报漂移。阶段 0 无 surface 回声 ⇒ 惰性。
