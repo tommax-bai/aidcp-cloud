@@ -53,12 +53,15 @@ test('DelegatedTask card duplicate confirm is idempotent and returns the same qu
   const value = { action: 'delegated_task_confirm', taskId: receipt.task.id, version: receipt.task.version };
   const first = await handleDelegatedTaskCardAction(service, value);
   assert.equal(first?.toast.type, 'success');
+  // card.action.trigger 回调响应的 card 必须包成 { type: 'raw', data }，否则飞书回错误 200672。
+  assert.equal(first?.card?.type, 'raw', '确认回调必须回 raw 包裹卡片，防 200672 回归');
   const firstTask = await service.get(receipt.task.id);
   assert.equal(firstTask.status, 'queued');
   const duplicate = await handleDelegatedTaskCardAction(service, value);
   assert.equal(duplicate?.toast.type, 'success');
+  assert.equal(duplicate?.card?.type, 'raw', '重复确认回调同样必须回 raw 包裹卡片');
   const live = await service.get(receipt.task.id);
   assert.equal(live.version, firstTask.version, '重复确认不重复排队、不再次增长版本');
-  assert.match(JSON.stringify(duplicate?.card), /queued/);
+  assert.match(JSON.stringify(duplicate?.card?.data), /queued/);
   assert.match(JSON.stringify(buildDelegatedTaskProgressCard(live)), /成功/);
 });

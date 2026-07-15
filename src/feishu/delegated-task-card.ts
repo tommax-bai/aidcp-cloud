@@ -114,7 +114,7 @@ export function buildDelegatedTaskProgressCard(task: DelegatedTask): FeishuCard 
 export async function handleDelegatedTaskCardAction(
   service: DelegatedTaskService,
   value: unknown,
-): Promise<{ toast: { type: 'success' | 'error' | 'info'; content: string }; card?: FeishuCard } | null> {
+): Promise<{ toast: { type: 'success' | 'error' | 'info'; content: string }; card?: { type: 'raw'; data: FeishuCard } } | null> {
   const parsed = parseDelegatedTaskCardAction(value);
   if (!parsed) return null;
   try {
@@ -136,13 +136,15 @@ export async function handleDelegatedTaskCardAction(
           : parsed.action === 'delegated_task_resume'
             ? '已恢复排队'
             : '已刷新任务状态';
-    return { toast: { type: 'success', content }, card: buildDelegatedTaskProgressCard(task) };
+    // card.action.trigger 回调响应里的 card 必须按新版卡片协议包成 { type: 'raw', data }——
+    // 直接回裸 FeishuCard 会触发飞书错误 200672（与发布审批卡同源，见 18c6f2b / feishu-publish-approval-e2e.md）。
+    return { toast: { type: 'success', content }, card: { type: 'raw', data: buildDelegatedTaskProgressCard(task) } };
   } catch (err) {
     const known = err instanceof DelegatedTaskServiceError;
     return {
       toast: { type: known && err.code === 'version_conflict' ? 'info' : 'error', content: (err as Error).message },
       ...(known && err.code === 'version_conflict'
-        ? { card: buildDelegatedTaskProgressCard(await service.get(parsed.taskId)) }
+        ? { card: { type: 'raw' as const, data: buildDelegatedTaskProgressCard(await service.get(parsed.taskId)) } }
         : {}),
     };
   }
