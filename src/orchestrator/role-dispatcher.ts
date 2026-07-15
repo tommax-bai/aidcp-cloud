@@ -1705,13 +1705,18 @@ export class RoleDispatcher {
   private facebookNaturalInteractionEligibility(noteId: string): { ok: true } | { ok: false; reason: string } {
     if (this.accountPlatform !== 'facebook') return { ok: true };
     if (!noteId) return { ok: false, reason: 'fb_missing_note_id' };
-    // 归一到帖规范身份键再比对：见证两集合的 noteId 来自 page.cards / note.detail 两种形态，裸字符串匹配会漂移误挡。
+    // 归一到帖规范身份键再比对：见证集合的 noteId 来自 page.cards / note.detail 两种形态，裸字符串会漂移（防御性加固）。
     const key = facebookPostKey(noteId);
     const selected = this.facebookContentSelectedNoteIds.has(key);
-    const passed = this.facebookQualityPassedNoteIds.has(key);
-    console.log(`[fb-gate] eligibility key=${key} selected=${selected} passed=${passed} raw=${noteId}`);
+    const passed = this.facebookQualityPassedNoteIds.has(key); // 仅观测（见下：不再硬闸）
+    console.log(`[fb-gate] eligibility key=${key} selected=${selected} passed(advisory)=${passed} raw=${noteId}`);
     if (!selected) return { ok: false, reason: 'fb_content_not_selected' };
-    if (!passed) return { ok: false, reason: 'fb_quality_not_passed' };
+    // **不再硬闸「已放行」集合**（change facebook-natural-interaction-gate-key，真机取证根因）：interaction_appraiser 由
+    // reading.done 触发，而 reading.done 只可能在 content_curator quality.pass → deep_reader → comment_reviewer 链走通后
+    // 发出——**能走到点赞判定，本身就证明 curator 已放行**。且「已放行」集合的写入是 quality.pass 的**同级订阅者**，FB
+    // （不看图 / 不滚评论）下 deep_reader 在自己的 quality.pass 处理器里**同步**一路驱动到本资格检查，早于同级的集合写入
+    // → 检查时集合恒为空 → 曾**恒判 fb_quality_not_passed、系统性挡掉全部点赞**（取证：eligibility passed=false 紧接着
+    // 才打 [fb-gate] quality_passed add）。故「已选中」+「已走到点赞判定」即为充分的自然互动证据；「已放行」集合降级为观测。
     return { ok: true };
   }
 
