@@ -11,6 +11,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ConceptStore, BotChatStore, GroupRoute, SetGroupRouteResult } from '../cache/index.js';
 import type { CuratedContentTypeFilter, CuratedPanelListResult, CuratedPanelRow, CuratedFacets } from '../cache/index.js';
 import type { PublishLogStore, EditDraftPatch, EditDraftResult } from '../publish-agent/publish-log-store.js';
+import type { QueueStatusLike } from './publish-stage-lifecycle.js';
 import type { SetGroupLabelResult, SetContactInfoResult } from '../account-store.js';
 import type {
   FacebookCommentConfigRow,
@@ -125,7 +126,9 @@ export interface PanelDeps {
   /** 只读查询层（dashboard / accounts / content / analytics 聚合）。 */
   panelStore: PanelStoreReader;
   /** 发布编排器 in-flight 队列状态（/api/content/queue）。 */
-  publishOrchestrator: { getStatus(): { status: string; snapshot: unknown } };
+  publishOrchestrator: { getStatus(): QueueStatusLike };
+  /** 发布下发段只读在途集合；未注入时面板保守地只显示待审，不猜测已批准。 */
+  publishDispatcher?: { getInFlightRecordIds(): number[] };
   /** Unified public-write confirmation/task API. When absent, delegated endpoints fail closed with 503. */
   delegatedTasks?: Pick<DelegatedTaskService, 'createDraft' | 'confirm' | 'list' | 'get' | 'pause' | 'resume' | 'cancel'>;
   /** 发布审批写回（first-writer-wins，与飞书共享信号文件契约 AC-PUB-*）；返回 written/alreadyDecided，绝不 published。 */

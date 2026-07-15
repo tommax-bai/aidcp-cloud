@@ -44,6 +44,7 @@ import type { FacebookGroupMembershipStatus, FacebookGroupTargetInput } from '..
 import { readDownloadsManifest } from './downloads-manifest.js';
 import { DelegatedTaskServiceError } from '../delegated-task/service.js';
 import type { DelegatedTaskIntent, JsonValue } from '../delegated-task/types.js';
+import { buildPublishLifecycle } from './publish-stage-lifecycle.js';
 
 /** 登录/写体很小，限制请求体大小防滥用。 */
 const MAX_BODY_BYTES = 16 * 1024;
@@ -960,7 +961,19 @@ function createRequestHandler(
       return;
     }
     if (method === 'GET' && url === '/api/content/queue') {
-      sendJson(res, 200, deps.publishOrchestrator.getStatus());
+      const queue = deps.publishOrchestrator.getStatus();
+      const [pending, recent] = await Promise.all([
+        // 待审集合必须按状态独立查询，不能被最近 50 条全局历史挤出。
+        deps.panelStore.publishedHistory(50, undefined, 'pending_approval'),
+        deps.panelStore.publishedHistory(10),
+      ]);
+      const lifecycle = buildPublishLifecycle({
+        queue,
+        pending,
+        recent,
+        inFlightRecordIds: deps.publishDispatcher?.getInFlightRecordIds() ?? [],
+      });
+      sendJson(res, 200, { ...queue, lifecycle });
       return;
     }
     if (method === 'GET' && url === '/api/analytics/like-rate') {

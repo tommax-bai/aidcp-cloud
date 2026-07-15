@@ -256,8 +256,13 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
     assert.equal(pub.items.length, 1);
     const queue = (await (await fetch(`${base}/api/content/queue`, { headers: auth })).json()) as {
       status: string;
+      lifecycle: { status: string; active: unknown[]; recent: Array<{ status: string; stages: unknown[] }> };
     };
     assert.equal(queue.status, 'idle');
+    assert.equal(queue.lifecycle.status, 'idle');
+    assert.equal(queue.lifecycle.active.length, 0, '终态发布记录不得进入活跃稿件');
+    assert.equal(queue.lifecycle.recent[0].status, 'published');
+    assert.equal(queue.lifecycle.recent[0].stages.length, 8, '面板 API 返回八阶段投影');
     const lr = (await (await fetch(`${base}/api/analytics/like-rate`, { headers: auth })).json()) as {
       healthy: boolean;
     };

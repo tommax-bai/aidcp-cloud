@@ -3688,6 +3688,7 @@ async function main(): Promise<void> {
             password: readEnvString('PGPASSWORD'),
           }),
           publishOrchestrator,
+          publishDispatcher,
           delegatedTasks: delegatedTaskService,
           preflightApprovePublish: (requestId) => preflightApprovePublish(requestId),
           writeApprovalSignal: async (requestId, approved, payload) => {

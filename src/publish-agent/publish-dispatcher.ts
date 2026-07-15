@@ -155,6 +155,15 @@ export class PublishDispatcher {
     return this.openBreakers.has(accountId);
   }
 
+  /**
+   * 管理后台只读观测：当前已经进入 dispatcher 单飞集合的发布记录。
+   * 返回副本，调用方不能借此修改 inFlight；这里只证明“已批准并正在排队/下发”，
+   * 不臆造 CommandSequencer 内部的逐命令进度。
+   */
+  getInFlightRecordIds(): number[] {
+    return [...this.inFlight];
+  }
+
   /** 运维通知 best-effort 包装：通知层异常绝不打断下发主链路。 */
   private notifyOps(notice: DispatchNotice): void {
     try {
