@@ -2,6 +2,7 @@ import type { Soul } from '../soul/types.js';
 import type { CuratedReferenceImageFormGuess } from '../cache/curated-content-store.js';
 import type { ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
 import type { PlatformId } from '../platform/index.js';
+import type { TextCardSourceStyle } from '../render/text-card.js';
 import type {
   ReferenceVisualAnalysis,
   VisualGenerationRoute,
@@ -480,6 +481,8 @@ export interface ImagePlan {
   visualRoutes?: VisualGenerationRoute[];
   /** 每槽实际风格来源，与 imagePrompts 下标对齐。 */
   visualStyleSources?: Array<'reference_analysis' | 'category_fallback'>;
+  /** 每槽确定性文字卡的来源设计令牌；null 表示该槽保持现有账号模板。 */
+  textCardStyles?: Array<TextCardSourceStyle | null>;
   /**
    * 封面形态盖章透传（change textcard-cover-form）：composer 把 coverCardPlan 原样盖进计划，
    * 使配图计划仍是「唯一完整指令」——执行器只读 plan、绝不二次读环境旗标（防决策/执行裂脑）。

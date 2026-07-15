@@ -24,7 +24,14 @@ import {
   layoutTextCard,
   type TextCardLayoutModel,
 } from './text-card-layout.js';
-import { selectTheme, type ThemeSelection } from './palettes.js';
+import {
+  PALETTES,
+  selectTheme,
+  type Decoration,
+  type LayoutVariant,
+  type PaletteKey,
+  type ThemeSelection,
+} from './palettes.js';
 import {
   DEFAULT_FONT_ASSETS_DIR,
   createTextMetrics,
@@ -57,6 +64,11 @@ export interface TextCardRenderMeta {
   truncated: boolean;
   sanitized: boolean;
   reductions: string[];
+  styleSource?: 'reference_analysis';
+  backgroundTreatment?: TextCardBackgroundTreatment;
+  backgroundPattern?: TextCardBackgroundPattern;
+  bulletPresentation?: TextCardBulletPresentation;
+  pageMarker?: string;
 }
 
 /** 渲染显式结果：成功带 PNG 字节 + meta；失败带原因枚举（绝不静默假成功）。 */
@@ -64,10 +76,33 @@ export type TextCardRenderResult =
   | { ok: true; png: Buffer; meta: TextCardRenderMeta }
   | { ok: false; reason: 'invalid_copy' | 'glyph_uncovered' | 'render_failed'; detail?: string };
 
-/** 主题种子：accountId 定色板+版式，postKey（sourceId 或标题哈希）只定装饰；绝不含随机令牌。 */
+export type TextCardBackgroundTreatment = 'solid' | 'soft_gradient';
+export type TextCardBackgroundPattern = 'none' | 'fine_grid' | 'dot_grid';
+export type TextCardBulletPresentation = 'plain' | 'cards' | 'numbered_cards' | 'callout';
+
+/**
+ * 来源视觉分析派生出的白名单设计令牌。只允许内部枚举和分页位置，类型层禁止原图 URL、像素、坐标和 OCR 文本进入 renderer。
+ */
+export interface TextCardSourceStyle {
+  source: 'reference_analysis';
+  paletteKey: PaletteKey;
+  layout: LayoutVariant;
+  decoration: Decoration;
+  backgroundTreatment: TextCardBackgroundTreatment;
+  backgroundPattern: TextCardBackgroundPattern;
+  bulletPresentation: TextCardBulletPresentation;
+  showPageMarker: boolean;
+  pageIndex: number;
+  pageTotal: number;
+  wordAwareCjk: boolean;
+  fidelityMode: 'balanced' | 'strict';
+}
+
+/** 主题种子：缺省仍由 accountId/postKey 决定；来源风格存在时只接受上述白名单设计令牌。 */
 export interface TextCardSeed {
   accountId: string;
   postKey: string;
+  sourceStyle?: TextCardSourceStyle;
 }
 
 /** 渲染器公开契约（独立注入依赖；勿实现生图提供方接口、勿进路由表——design D11）。 */
@@ -202,16 +237,91 @@ function decorationNodes(theme: ThemeSelection): SatoriNode[] {
   return [];
 }
 
+function fineGridNodes(theme: ThemeSelection): SatoriNode[] {
+  const nodes: SatoriNode[] = [];
+  for (let x = 0; x <= CANVAS_WIDTH; x += 90) {
+    nodes.push({
+      type: 'div',
+      props: {
+        style: {
+          position: 'absolute', left: x, top: 0, width: 1, height: CANVAS_HEIGHT,
+          backgroundColor: theme.palette.bgAccent, opacity: 0.45,
+        },
+      },
+    });
+  }
+  for (let y = 0; y <= CANVAS_HEIGHT; y += 90) {
+    nodes.push({
+      type: 'div',
+      props: {
+        style: {
+          position: 'absolute', left: 0, top: y, width: CANVAS_WIDTH, height: 1,
+          backgroundColor: theme.palette.bgAccent, opacity: 0.45,
+        },
+      },
+    });
+  }
+  return nodes;
+}
+
+function sourceTheme(seed: TextCardSeed): ThemeSelection {
+  const fallback = selectTheme(seed.accountId, seed.postKey);
+  const style = seed.sourceStyle;
+  if (!style) return fallback;
+  const palette = PALETTES.find((candidate) => candidate.key === style.paletteKey) ?? fallback.palette;
+  const decoration = style.backgroundPattern === 'dot_grid' ? 'dot-grid' : style.decoration;
+  return {
+    themeKey: `${palette.key}:${style.layout}:${decoration}:reference`,
+    palette,
+    layout: style.layout,
+    decoration,
+  };
+}
+
+function cardBackgroundNode(top: number, height: number, theme: ThemeSelection): SatoriNode {
+  return {
+    type: 'div',
+    props: {
+      style: {
+        position: 'absolute',
+        left: CANVAS_PADDING - 24,
+        top,
+        width: CANVAS_WIDTH - (CANVAS_PADDING - 24) * 2,
+        height,
+        borderRadius: 20,
+        backgroundColor: theme.palette.bg,
+        border: `2px solid ${theme.palette.bgAccent}`,
+      },
+    },
+  };
+}
+
 /** 由布局模型 + 主题拼 satori 元素树（satori 只做盒子定位，断行已在布局层完成）。 */
-function buildCardTree(model: TextCardLayoutModel, theme: ThemeSelection): SatoriNode {
-  const children: SatoriNode[] = [...decorationNodes(theme)];
+function buildCardTree(
+  model: TextCardLayoutModel,
+  theme: ThemeSelection,
+  copy: TextCardCopy,
+  sourceStyle?: TextCardSourceStyle,
+): SatoriNode {
+  const children: SatoriNode[] = [
+    ...(sourceStyle?.backgroundPattern === 'fine_grid' ? fineGridNodes(theme) : []),
+    ...decorationNodes(theme),
+  ];
   const { palette } = theme;
+  const headerReserve = sourceStyle?.showPageMarker ? 64 : 0;
   // poster 版式：内容块整体垂直居中；editorial：顶对齐。
   const contentTop =
-    CANVAS_PADDING +
+    CANVAS_PADDING + headerReserve +
     (theme.layout === 'poster'
-      ? Math.max(0, Math.floor((CONTENT_HEIGHT - model.contentHeight) / 2))
+      ? Math.max(0, Math.floor((CONTENT_HEIGHT - headerReserve - model.contentHeight) / 2))
       : 0);
+
+  if (sourceStyle?.showPageMarker) {
+    const label = (copy.tags[0] ?? 'NOTE').replace(/^#+/, '').slice(0, 16) || 'NOTE';
+    const page = `${String(sourceStyle.pageIndex + 1).padStart(2, '0')} / ${String(sourceStyle.pageTotal).padStart(2, '0')}`;
+    children.push(textLineNode(label, CANVAS_PADDING, 48, 36, 28, 700, palette.title));
+    children.push(textLineNode(page, CANVAS_WIDTH - CANVAS_PADDING - 132, 48, 36, 28, 700, palette.accent));
+  }
 
   model.title.lines.forEach((line, index) => {
     children.push(
@@ -229,12 +339,39 @@ function buildCardTree(model: TextCardLayoutModel, theme: ThemeSelection): Sator
 
   if (model.bullets) {
     let y = contentTop + model.bullets.offsetY;
-    for (const item of model.bullets.items) {
+    const presentation = sourceStyle?.bulletPresentation ?? 'plain';
+    if (presentation === 'callout') {
+      const blockHeight = model.bullets.items.reduce(
+        (sum, item, index) => sum + item.lines.length * model.bullets!.lineHeightPx + (index > 0 ? model.bullets!.gap : 0),
+        0,
+      );
+      children.push(cardBackgroundNode(y - 20, blockHeight + 40, theme));
+    }
+    for (let itemIndex = 0; itemIndex < model.bullets.items.length; itemIndex++) {
+      const item = model.bullets.items[itemIndex];
+      const itemHeight = item.lines.length * model.bullets.lineHeightPx;
+      if (presentation === 'cards' || presentation === 'numbered_cards') {
+        children.push(cardBackgroundNode(y - 14, itemHeight + 28, theme));
+      }
+      if (presentation === 'numbered_cards') {
+        children.push({
+          type: 'div',
+          props: {
+            style: {
+              position: 'absolute', left: CANVAS_PADDING, top: y + 3, width: 58, height: 58,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 14,
+              backgroundColor: palette.accent, color: palette.bg, fontFamily: FONT_FAMILY,
+              fontSize: 30, fontWeight: 700, lineHeight: 1,
+            },
+            children: String(itemIndex + 1),
+          },
+        });
+      }
       for (const line of item.lines) {
         children.push(
           textLineNode(
             line,
-            CANVAS_PADDING,
+            CANVAS_PADDING + (presentation === 'numbered_cards' ? 82 : 0),
             y,
             model.bullets.lineHeightPx,
             model.bullets.fontSize,
@@ -296,6 +433,9 @@ function buildCardTree(model: TextCardLayoutModel, theme: ThemeSelection): Sator
         width: CANVAS_WIDTH,
         height: CANVAS_HEIGHT,
         backgroundColor: palette.bg,
+        ...(sourceStyle?.backgroundTreatment === 'soft_gradient'
+          ? { backgroundImage: `linear-gradient(135deg, ${palette.bg} 0%, #FFFFFF 52%, ${palette.bgAccent} 100%)` }
+          : {}),
         fontFamily: FONT_FAMILY,
       },
       children,
@@ -319,10 +459,19 @@ class SatoriTextCardRenderer implements TextCardRendererInternal {
   }
 
   async renderRaw(copy: TextCardCopy, seed: TextCardSeed): Promise<TextCardRenderRaw> {
-    const theme = selectTheme(seed.accountId, seed.postKey);
+    const theme = sourceTheme(seed);
+    const sourceStyle = seed.sourceStyle;
+    const headerReserve = sourceStyle?.showPageMarker ? 64 : 0;
     const model = layoutTextCard(
       { title: copy.title, bullets: copy.bullets, tags: copy.tags },
       this.metrics,
+      sourceStyle
+        ? {
+            contentHeightPx: CONTENT_HEIGHT - headerReserve,
+            wordAwareCjk: sourceStyle.wordAwareCjk,
+            bulletContentWidthPx: sourceStyle.bulletPresentation === 'numbered_cards' ? CANVAS_WIDTH - CANVAS_PADDING * 2 - 82 : undefined,
+          }
+        : undefined,
     );
     if (!model.ok) {
       return { ok: false, reason: model.reason, detail: model.detail };
@@ -337,10 +486,21 @@ class SatoriTextCardRenderer implements TextCardRendererInternal {
       truncated: model.truncated,
       sanitized: model.sanitized,
       reductions: model.reductions,
+      ...(sourceStyle
+        ? {
+            styleSource: 'reference_analysis' as const,
+            backgroundTreatment: sourceStyle.backgroundTreatment,
+            backgroundPattern: sourceStyle.backgroundPattern,
+            bulletPresentation: sourceStyle.bulletPresentation,
+            ...(sourceStyle.showPageMarker
+              ? { pageMarker: `${sourceStyle.pageIndex + 1}/${sourceStyle.pageTotal}` }
+              : {}),
+          }
+        : {}),
     };
 
     try {
-      const tree = buildCardTree(model, theme);
+      const tree = buildCardTree(model, theme, copy, sourceStyle);
       const svg = await this.satori(tree, {
         width: CANVAS_WIDTH,
         height: CANVAS_HEIGHT,

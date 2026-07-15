@@ -48,6 +48,7 @@ export interface VisualReferenceAnalyzerDeps {
   getProvider: () => string;
   annotate?: (rowId: number, analysis: ReferenceVisualAnalysis, anchors: VisualAnalysisAnchor[]) => Promise<boolean>;
   timeoutMs?: number;
+  specialistBatchSize?: number;
   clock?: () => number;
   logger?: Pick<Console, 'warn' | 'log'>;
 }
@@ -189,6 +190,35 @@ function parseClusters(value: unknown, frameCount: number): VisualStyleCluster[]
 
 interface CoarseFrame extends Omit<VisualFrameSpec, 'details'> {}
 
+interface SetFrame extends Omit<CoarseFrame, 'common'> {}
+
+function parseSetFrames(value: unknown, anchors: VisualAnalysisAnchor[]): SetFrame[] | null {
+  if (!Array.isArray(value) || value.length !== anchors.length) return null;
+  const byIndex = new Map<number, SetFrame>();
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const o = raw as Record<string, unknown>;
+    const sourceArrayIndex = Number(o.sourceArrayIndex);
+    const anchor = anchors[sourceArrayIndex];
+    const confidence = finiteUnit(o.confidence);
+    const clusterId = cleanString(o.clusterId);
+    if (!anchor || !isKind(o.kind) || confidence === null || !clusterId || byIndex.has(sourceArrayIndex)) return null;
+    byIndex.set(sourceArrayIndex, {
+      sourceArrayIndex,
+      sourceIndex: anchor.sourceIndex,
+      kind: o.kind,
+      confidence,
+      clusterId,
+      sequenceRole: enumValue(
+        o.sequenceRole,
+        ['cover', 'detail', 'step', 'comparison', 'summary', 'support'] as const,
+        sourceArrayIndex === 0 ? 'cover' : 'support',
+      ),
+    });
+  }
+  return anchors.map((_, i) => byIndex.get(i)!).filter(Boolean);
+}
+
 function parseCoarseFrames(value: unknown, anchors: VisualAnalysisAnchor[], requireAll = true): CoarseFrame[] | null {
   if (
     !Array.isArray(value) ||
@@ -268,11 +298,11 @@ function parseDetails(value: unknown, expectedFamily: VisualFrameDetails['family
 
 function setPrompt(): string {
   return `你是整组视觉参考分析师。分析按顺序给出的图片，严格只输出一个 JSON 对象。
-目标：理解整组视觉语言和每张画面结构，供后续原创配图保持构图/风格关系。禁止 OCR，禁止抄写或概括图片中的具体文字/数值/账号/水印；禁止猜摄影师、相机型号或精确 EXIF。
+目标：轻量判断整组视觉语言、风格簇、顺序角色和每张视觉类型。逐图构图细节由下一阶段专家补齐，本轮禁止输出 common/details，以降低大图集延迟。禁止 OCR，禁止抄写或概括图片中的具体文字/数值/账号/水印；禁止猜摄影师、相机型号或精确 EXIF。
 
 视觉类型只能是：${REFERENCE_VISUAL_KINDS.join(' | ')}。
 输出：
-{"setStyleBible":{"summary":"","palette":[],"colorTemperature":"warm|cool|neutral|mixed","contrast":"low|medium|high|mixed","visualDensity":"sparse|balanced|dense|mixed","whitespace":"","hierarchy":"","mood":[],"texture":[],"continuityRules":[],"avoid":[]},"styleClusters":[{"id":"c1","label":"","frameIndexes":[0],"summary":"","palette":[],"traits":[]}],"frames":[{"sourceArrayIndex":0,"kind":"...","confidence":0.0,"clusterId":"c1","sequenceRole":"cover|detail|step|comparison|summary|support","common":{"aspectRatio":"","subject":"只描述视觉主体，不引用图中文字","composition":"","focalHierarchy":"","palette":[],"lightingOrContrast":"","negativeSpace":"","texture":"","mood":"","avoid":[]}}]}
+{"setStyleBible":{"summary":"","palette":[],"colorTemperature":"warm|cool|neutral|mixed","contrast":"low|medium|high|mixed","visualDensity":"sparse|balanced|dense|mixed","whitespace":"","hierarchy":"","mood":[],"texture":[],"continuityRules":[],"avoid":[]},"styleClusters":[{"id":"c1","label":"","frameIndexes":[0],"summary":"","palette":[],"traits":[]}],"frames":[{"sourceArrayIndex":0,"kind":"...","confidence":0.0,"clusterId":"c1","sequenceRole":"cover|detail|step|comparison|summary|support"}]}
 frames 必须与输入图片等量且 sourceArrayIndex 覆盖 0..N-1。`;
 }
 
@@ -285,8 +315,22 @@ function specialistPrompt(family: VisualFrameDetails['family'], indexes: number[
     infographic: '{"family":"infographic","chartType":"","encodings":[],"axesLegend":"","annotationDensity":"","dataInkRatio":"","narrativeOrder":""}',
     collage: '{"family":"collage","regions":[{"region":"","kind":"视觉类型枚举","role":""}],"layering":"","overlap":"","unifyingTreatment":""}',
   };
-  return `你是 ${family} 视觉结构专家。只分析标签中的 sourceArrayIndex=${indexes.join(',')}，严格返回 JSON：{"frames":[{"sourceArrayIndex":0,"details":${schemas[family]}}]}。
+  const common = '{"aspectRatio":"","subject":"只描述视觉主体，不引用图中文字","composition":"","focalHierarchy":"","palette":[],"lightingOrContrast":"","negativeSpace":"","texture":"","mood":"","avoid":[]}';
+  return `你是 ${family} 视觉结构专家。只分析标签中的 sourceArrayIndex=${indexes.join(',')}，严格返回 JSON：{"frames":[{"sourceArrayIndex":0,"common":${common},"details":${schemas[family]}}]}。
 禁止 OCR、禁止输出图片具体文字/数值/账号/水印。摄影只能描述可观察观感，不猜相机型号、摄影师或精确 EXIF。frames 必须与本组图片等量。`;
+}
+
+function envPositiveInt(name: string): number | undefined {
+  const raw = process.env[name]?.trim();
+  if (!raw) return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
+}
+
+function chunks<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
 }
 
 function messagesForImages(prompt: string, anchors: VisualAnalysisAnchor[]): VisionChatMessage[] {
@@ -350,7 +394,16 @@ export function normalizeReferenceVisualAnalysis(value: unknown): ReferenceVisua
 }
 
 export function createVisualReferenceAnalyzer(deps: VisualReferenceAnalyzerDeps): VisualReferenceAnalyzer {
-  const timeoutMs = deps.timeoutMs ?? 90_000;
+  const timeoutMs = deps.timeoutMs && deps.timeoutMs > 0
+    ? Math.floor(deps.timeoutMs)
+    : envPositiveInt('AIDCP_REFERENCE_VISUAL_TIMEOUT_MS') ?? 120_000;
+  const configuredBatchSize = deps.specialistBatchSize && deps.specialistBatchSize > 0
+    ? Math.floor(deps.specialistBatchSize)
+    : envPositiveInt('AIDCP_REFERENCE_VISUAL_SPECIALIST_BATCH_SIZE') ?? 3;
+  const specialistBatchSize = Math.min(
+    9,
+    configuredBatchSize,
+  );
   const clock = deps.clock ?? Date.now;
 
   return {
@@ -386,8 +439,8 @@ export function createVisualReferenceAnalyzer(deps: VisualReferenceAnalyzerDeps)
       const setObj = extractJson(setRaw);
       const bible = parseStyleBible(setObj?.setStyleBible);
       const clusters = parseClusters(setObj?.styleClusters, anchors.length);
-      const coarseFrames = parseCoarseFrames(setObj?.frames, anchors);
-      if (!bible || !clusters || !coarseFrames) {
+      const setFrames = parseSetFrames(setObj?.frames, anchors);
+      if (!bible || !clusters || !setFrames) {
         return emptyAnalysis('unavailable', anchors.length, {
           cacheKey,
           provider,
@@ -396,12 +449,15 @@ export function createVisualReferenceAnalyzer(deps: VisualReferenceAnalyzerDeps)
         });
       }
 
-      const grouped = new Map<VisualFrameDetails['family'], CoarseFrame[]>();
-      for (const frame of coarseFrames) {
+      const grouped = new Map<VisualFrameDetails['family'], SetFrame[]>();
+      for (const frame of setFrames) {
         const family = familyForKind(frame.kind);
         grouped.set(family, [...(grouped.get(family) ?? []), frame]);
       }
-      const detailResults = await Promise.all([...grouped.entries()].map(async ([family, frames]) => {
+      const specialistJobs = [...grouped.entries()].flatMap(([family, frames]) =>
+        chunks(frames, specialistBatchSize).map((batch) => ({ family, frames: batch })),
+      );
+      const detailResults = await Promise.all(specialistJobs.map(async ({ family, frames }) => {
         const groupAnchors = frames.map((frame) => anchors[frame.sourceArrayIndex]);
         try {
           const raw = await deps.vision.chatVision(messagesForImages(specialistPrompt(family, frames.map((f) => f.sourceArrayIndex)), groupAnchors), {
@@ -411,31 +467,32 @@ export function createVisualReferenceAnalyzer(deps: VisualReferenceAnalyzerDeps)
           });
           const obj = extractJson(raw);
           if (!Array.isArray(obj?.frames) || obj.frames.length !== frames.length) throw new Error('specialist frame count mismatch');
-          const parsed = new Map<number, VisualFrameDetails>();
+          const parsed = new Map<number, VisualFrameSpec>();
           for (const item of obj.frames) {
             if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('specialist item invalid');
             const record = item as Record<string, unknown>;
             const index = Number(record.sourceArrayIndex);
             const expected = frames.find((frame) => frame.sourceArrayIndex === index);
             const details = expected ? parseDetails(record.details, familyForKind(expected.kind)) : null;
-            if (!expected || !details || parsed.has(index)) throw new Error('specialist details invalid');
-            parsed.set(index, details);
+            const common = parseCommon(record.common);
+            if (!expected || !common || !details || parsed.has(index)) throw new Error('specialist details invalid');
+            parsed.set(index, { ...expected, common, details });
           }
           return { parsed, error: null as string | null };
         } catch (err) {
-          return { parsed: new Map<number, VisualFrameDetails>(), error: `${family}: ${compactError(err)}` };
+          return { parsed: new Map<number, VisualFrameSpec>(), error: `${family}: ${compactError(err)}` };
         }
       }));
 
-      const details = new Map<number, VisualFrameDetails>();
+      const detailedFrames = new Map<number, VisualFrameSpec>();
       const errors: string[] = [];
       for (const result of detailResults) {
-        result.parsed.forEach((value, key) => details.set(key, value));
+        result.parsed.forEach((value, key) => detailedFrames.set(key, value));
         if (result.error) errors.push(result.error);
       }
-      const frameSpecs: VisualFrameSpec[] = coarseFrames.flatMap((frame) => {
-        const detail = details.get(frame.sourceArrayIndex);
-        return detail ? [{ ...frame, details: detail }] : [];
+      const frameSpecs = setFrames.flatMap((frame) => {
+        const detailed = detailedFrames.get(frame.sourceArrayIndex);
+        return detailed ? [detailed] : [];
       });
       if (frameSpecs.length === 0) {
         return emptyAnalysis('unavailable', anchors.length, { cacheKey, provider, model, error: errors.join('; ') || 'all specialist analyses failed' });

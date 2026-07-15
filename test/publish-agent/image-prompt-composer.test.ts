@@ -34,7 +34,7 @@ function run(
   ctx.write('postCategory', { category, classifiedAt: clock() });
   ctx.write('coverCardPlan', coverPlan);
   ctx.write('referenceVisualAnalysis', {
-    status: 'disabled', schemaVersion: 'visual-reference-v1', cacheKey: null, provider: null, model: null,
+    status: 'disabled', schemaVersion: 'visual-reference-v2', cacheKey: null, provider: null, model: null,
     analyzedAt: null, sourceCount: 0,
   });
   ctx.write('imageSetPlan', plan);
@@ -120,7 +120,7 @@ describe('ImagePromptComposerRole（配图指令，仅桩 LLM、不依赖图源�
       } }, metrics: {}, recentPublished: [],
     } as unknown as TriggerInput;
     const analysis: ReferenceVisualAnalysis = {
-      status: 'analyzed', schemaVersion: 'visual-reference-v1', cacheKey: 'k', provider: 'p', model: 'm', analyzedAt: 1, sourceCount: 1,
+      status: 'analyzed', schemaVersion: 'visual-reference-v2', cacheKey: 'k', provider: 'p', model: 'm', analyzedAt: 1, sourceCount: 1,
       setStyleBible: { summary: '冷色硬光极简静物', palette: ['冷蓝'], colorTemperature: 'cool', contrast: 'high', visualDensity: 'sparse', whitespace: '大面积留白', hierarchy: '单主体', mood: ['克制'], texture: ['金属'], continuityRules: ['冷色统一'], avoid: ['水印'] },
       styleClusters: [{ id: 'c1', label: '冷蓝', frameIndexes: [0], summary: '冷蓝硬光', palette: ['冷蓝'], traits: ['极简'] }],
       frameSpecs: [{
@@ -145,6 +145,77 @@ describe('ImagePromptComposerRole（配图指令，仅桩 LLM、不依赖图源�
     assert.doesNotMatch(plan.imagePrompts[0], /food photography/, '源风格不被食品通用暖色档覆盖');
     assert.deepEqual(plan.referenceBindings?.[0].references, [{ sourceArrayIndex: 0, sourceIndex: 7, url: 'https://secret.ref/a.jpg', role: 'primary' }]);
     assert.equal(plan.visualStyleSources?.[0], 'reference_analysis');
+  });
+
+  test('文字卡反推派生白名单设计令牌并随 ImagePlan 逐槽下发', async () => {
+    const llm = { chat: async () => JSON.stringify({ imagePrompt: '原创知识卡内容' }), complete: async () => '' };
+    const trigger = {
+      accountId: 'a', generateInput: { referenceNote: {
+        sourceId: 'cards', title: 't', body: 'b', topics: [],
+        images: [{ index: 0, sourceUrl: 'https://ref.test/0.jpg' }],
+      } },
+    } as unknown as TriggerInput;
+    const analysis: ReferenceVisualAnalysis = {
+      status: 'analyzed', schemaVersion: 'visual-reference-v2', cacheKey: 'k2', provider: 'p', model: 'm', analyzedAt: 1, sourceCount: 1,
+      setStyleBible: {
+        summary: '薄荷绿渐变细网格知识卡', palette: ['薄荷绿', '米白'], colorTemperature: 'cool', contrast: 'medium',
+        visualDensity: 'balanced', whitespace: '下半留白', hierarchy: '标题、圆角卡片、分页', mood: ['理性'], texture: ['细网格'],
+        continuityRules: ['统一分页'], avoid: ['水印'],
+      },
+      styleClusters: [{ id: 'c1', label: '知识卡', frameIndexes: [0], summary: '薄荷网格与圆角卡片', palette: ['薄荷绿'], traits: ['分页'] }],
+      frameSpecs: [{
+        sourceArrayIndex: 0, sourceIndex: 0, kind: 'text_layout', confidence: 0.96, clusterId: 'c1', sequenceRole: 'cover',
+        common: {
+          aspectRatio: '3:4', subject: '知识卡', composition: '标题与圆角信息卡', focalHierarchy: '标题优先', palette: ['薄荷绿'],
+          lightingOrContrast: '中等对比', negativeSpace: '下部留白', texture: '细网格', mood: '理性', avoid: [],
+        },
+        details: {
+          family: 'text_layout', grid: '细方格', textBlockRatio: '中等', hierarchy: '标题与卡片', alignment: '左对齐',
+          weightContrast: '粗细对比', colorBlocks: '圆角信息卡', decorations: '分页标记',
+        },
+      }],
+    };
+    const card = { title: '奖励难给？看模型自进化', bullets: ['动态生成评分标准'], tags: ['强化学习'] };
+    const coverPlan: CoverCardPlan = {
+      coverForm: 'text_card', card, cardSet: [card], sensedForm: 'text_card', sensedSource: 'vision', gateReason: 'ok', decidedAt: clock(),
+    };
+    const role = new ImagePromptComposerRole({ llmClient: llm as never, sourceStyleEnabled: () => true, bindingEnabled: () => true, clock, logger: silentLogger });
+    const ctx = new PipelineContext<PipelineFields>();
+    role.register(ctx);
+    ctx.write('trigger', trigger);
+    ctx.write('postCategory', { category: 'tech', classifiedAt: clock() });
+    ctx.write('coverCardPlan', coverPlan);
+    ctx.write('referenceVisualAnalysis', analysis);
+    ctx.write('imageSetPlan', setPlan([{ subject: 'EvoRubric', sourceArrayIndex: 0, sourceIndex: 0 }]));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const plan = ctx.get('imagePlan')!;
+    assert.equal(plan.textCardStyles?.[0]?.paletteKey, 'mint');
+    assert.equal(plan.textCardStyles?.[0]?.backgroundPattern, 'fine_grid');
+    assert.equal(plan.textCardStyles?.[0]?.bulletPresentation, 'callout');
+    assert.equal(plan.visualRoutes?.[0], 'deterministic_text_card');
+    assert.equal(plan.visualStyleSources?.[0], 'reference_analysis');
+  });
+
+  test('反推 unavailable 继续透传到执行审计，不降成 none', async () => {
+    const llm = { chat: async () => JSON.stringify({ imagePrompt: 'fallback scene' }), complete: async () => '' };
+    const role = new ImagePromptComposerRole({ llmClient: llm as never, sourceStyleEnabled: () => true, bindingEnabled: () => true, clock, logger: silentLogger });
+    const ctx = new PipelineContext<PipelineFields>();
+    role.register(ctx);
+    ctx.write('trigger', {
+      accountId: 'a', generateInput: { referenceNote: { sourceId: 'n', images: [{ index: 0, sourceUrl: 'https://ref.test/0.jpg' }] } },
+    } as unknown as TriggerInput);
+    ctx.write('postCategory', { category: 'tech', classifiedAt: clock() });
+    ctx.write('coverCardPlan', generativeCoverPlan());
+    ctx.write('referenceVisualAnalysis', {
+      status: 'unavailable', schemaVersion: 'visual-reference-v2', cacheKey: 'failed-k', provider: 'p', model: 'm',
+      analyzedAt: null, sourceCount: 1, error: 'vision timeout',
+    });
+    ctx.write('imageSetPlan', setPlan([{ subject: 'fallback', sourceArrayIndex: 0, sourceIndex: 0 }]));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const plan = ctx.get('imagePlan')!;
+    assert.equal(plan.referenceVisualAnalysis?.status, 'unavailable');
+    assert.equal(plan.referenceVisualAnalysis?.error, 'vision timeout');
+    assert.equal(plan.visualStyleSources?.[0], 'category_fallback');
   });
 
   test('近重复主体 → 丢弃，但永远保住第 0 张（wantImage:true → ≥1）', async () => {

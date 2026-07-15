@@ -2302,7 +2302,7 @@ async function main(): Promise<void> {
         /* metrics never breaks llm */
       }
     },
-    timeoutMs: Number(process.env.AIDCP_REFERENCE_VISUAL_TIMEOUT_MS ?? 90_000),
+    timeoutMs: Number(process.env.AIDCP_REFERENCE_VISUAL_TIMEOUT_MS ?? 120_000),
   });
   const visualReferenceAnalyzer = createVisualReferenceAnalyzer({
     vision: referenceVisualVision,

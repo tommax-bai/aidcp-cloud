@@ -9,8 +9,9 @@ import type { ObjectStore } from '../../storage/object-store.js';
 import { relocateImageToStore } from '../../storage/object-store.js';
 import { IMAGE_COUNT_HARD_MAX } from '../prompts.js';
 import { referenceImageUrl, referenceImagesForGeneration } from '../reference-image-guidance.js';
-import type { TextCardRenderer, TextCardRenderMeta } from '../../render/text-card.js';
+import type { TextCardRenderer, TextCardRenderMeta, TextCardSourceStyle } from '../../render/text-card.js';
 import type { VisualFidelityAuditor } from '../visual-fidelity-auditor.js';
+import { strengthenTextCardSourceStyle } from '../text-card-source-style.js';
 import type {
   VisualAuditAttempt,
   VisualFrameSpec,
@@ -180,6 +181,12 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     // 每槽卡面文案（对齐 imagePrompts 下标）：cardSet[i] 优先；否则仅 0 号用既有单封面卡。
     const cardForSlot = (i: number): CoverCardCopy | null =>
       input.cardSet?.[i] ?? (i === 0 && input.coverForm === 'text_card' ? input.coverCard ?? null : null);
+    const postKeyForSlot = (i: number, retry = false): string => {
+      const card = cardForSlot(i);
+      const base = sourceId ?? card?.title ?? `slot-${i}`;
+      const slotKey = input.cardSet ? `${base}#${i}` : base;
+      return retry ? `${slotKey}#fidelity-retry` : slotKey;
+    };
     const anyCardWanted = input.imagePrompts.some((_, i) => !!cardForSlot(i));
 
     // 整帖预检：渲染器/OSS 不可用 → 一张卡都不渲（全生成式，不半途裂帧）。可用则每槽独立结算、并发预渲染。
@@ -189,9 +196,13 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
         const card = cardForSlot(i);
         if (!card) return Promise.resolve<{ url: string; meta: TextCardRenderMeta } | null>(null);
         // 单封面卡（非轮播）保持既有种子 = 来源标识（零视觉churn）；轮播每槽附 #seq 使各卡装饰各异。
-        const base = sourceId ?? card.title;
-        const postKey = input.cardSet ? `${base}#${i}` : base;
-        return this.renderCardAt(renderer!, card, { accountId, runToken, seq: i }, postKey);
+        return this.renderCardAt(
+          renderer!,
+          card,
+          { accountId, runToken, seq: i },
+          postKeyForSlot(i),
+          input.textCardStyles?.[i] ?? undefined,
+        );
       });
       rr.forEach((r, i) => (renderedCards[i] = r));
     } else if (anyCardWanted && !canRenderCards) {
@@ -203,21 +214,31 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     // 风格已并入品类风格档写进 prompt；provider 侧再拼「，风格：<enum>」会与风格档冲突、劣化 Seedream。
     // 某槽渲染成功即直接用渲染结果替换（不前插不移位），该槽不再走 provider；失败该槽走生成式。
     const auditing = this.auditEnabled() && !!this.visualAuditor;
-    const results = await mapWithConcurrency(input.imagePrompts, this.concurrency, (prompt, i) => {
-      const rc = renderedCards[i];
-      if (rc) return Promise.resolve<ImageGenerationOutcome>({
-        url: rc.url,
-        referenceStatus: 'skipped',
-        ...(auditing ? { auditAttempts: [{ status: 'skipped', reason: 'deterministic text-card renderer', auditedAt: this.clock() }] } : {}),
-      });
+    const results = await mapWithConcurrency(input.imagePrompts, this.concurrency, async (prompt, i) => {
       const binding = input.referenceBindings?.find((item) => item.slot === i);
       const comparisonBinding = binding ?? legacyBinding(i, referenceUrls);
-      const slotReferenceUrls = binding ? binding.references.map((item) => item.url) : referenceUrls;
-      if (!auditing) return this.generateOne(prompt, { accountId, runToken, seq: i }, slotReferenceUrls, binding?.references);
       const primary = comparisonBinding.references.find((item) => item.role === 'primary');
       const expected = primary
         ? input.referenceVisualAnalysis?.frameSpecs?.find((frame) => frame.sourceArrayIndex === primary.sourceArrayIndex)
         : undefined;
+      const rc = renderedCards[i];
+      if (rc) {
+        if (!auditing) return { url: rc.url, referenceStatus: 'skipped' } satisfies ImageGenerationOutcome;
+        const card = cardForSlot(i)!;
+        return this.auditRenderedCard(
+          rc,
+          renderer!,
+          card,
+          { accountId, runToken, seq: i },
+          postKeyForSlot(i, true),
+          input.textCardStyles?.[i] ?? undefined,
+          primary?.url,
+          expected,
+          (retried) => { renderedCards[i] = retried; },
+        );
+      }
+      const slotReferenceUrls = binding ? binding.references.map((item) => item.url) : referenceUrls;
+      if (!auditing) return this.generateOne(prompt, { accountId, runToken, seq: i }, slotReferenceUrls, binding?.references);
       return this.generateWithAudit(prompt, { accountId, runToken, seq: i }, slotReferenceUrls, binding?.references, primary?.url, expected);
     });
     const imageUrls = results.map((r) => r.url).filter((url): url is string => !!url);
@@ -293,6 +314,7 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     card: CoverCardCopy,
     keyCtx: { accountId: string; runToken: string; seq: number },
     postKey: string,
+    sourceStyle?: TextCardSourceStyle,
   ): Promise<{ url: string; meta: TextCardRenderMeta } | null> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -300,7 +322,7 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
         (async (): Promise<{ url: string; meta: TextCardRenderMeta } | null> => {
           const res = await renderer.render(
             { title: card.title, bullets: card.bullets, tags: card.tags },
-            { accountId: keyCtx.accountId, postKey },
+            { accountId: keyCtx.accountId, postKey, ...(sourceStyle ? { sourceStyle } : {}) },
           );
           if (!res.ok) {
             this.logger.warn(`[ImageGenerator] 文字卡渲染失败 seq=${keyCtx.seq}（${res.reason}${res.detail ? `: ${res.detail}` : ''}），该槽回落生成式`);
@@ -315,7 +337,7 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
             this.logger.warn(`[ImageGenerator] 文字卡 OSS 直传未返回 URL seq=${keyCtx.seq}，该槽回落生成式`);
             return null;
           }
-          this.logger.log(`[ImageGenerator] 文字卡渲染成功 seq=${keyCtx.seq} theme=${res.meta.themeKey}${res.meta.truncated ? ' truncated' : ''}${res.meta.sanitized ? ' sanitized' : ''}`);
+          this.logger.log(`[ImageGenerator] 文字卡渲染成功 seq=${keyCtx.seq} theme=${res.meta.themeKey}${sourceStyle ? ` fidelity=${sourceStyle.fidelityMode}` : ''}${res.meta.truncated ? ' truncated' : ''}${res.meta.sanitized ? ' sanitized' : ''}`);
           return { url, meta: res.meta };
         })(),
         new Promise<null>((resolve) => {
@@ -331,6 +353,56 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     } finally {
       if (timer) clearTimeout(timer);
     }
+  }
+
+  private async auditRenderedCard(
+    rendered: { url: string; meta: TextCardRenderMeta },
+    renderer: TextCardRenderer,
+    card: CoverCardCopy,
+    keyCtx: { accountId: string; runToken: string; seq: number },
+    retryPostKey: string,
+    sourceStyle: TextCardSourceStyle | undefined,
+    primaryUrl: string | undefined,
+    expectedFrame: VisualFrameSpec | undefined,
+    onRerender: (rendered: { url: string; meta: TextCardRenderMeta }) => void,
+  ): Promise<ImageGenerationOutcome> {
+    if (!primaryUrl || !this.visualAuditor) {
+      return {
+        url: rendered.url,
+        referenceStatus: 'skipped',
+        auditAttempts: [{ status: 'skipped', reason: 'no primary reference for visual comparison', auditedAt: this.clock() }],
+      };
+    }
+    const attempts: VisualAuditAttempt[] = [];
+    let current = rendered;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const audit = await this.visualAuditor.audit({
+        accountId: keyCtx.accountId,
+        referenceUrl: primaryUrl,
+        generatedUrl: current.url,
+        expectedFrame,
+      });
+      attempts.push(audit);
+      if (audit.status === 'passed' || audit.status === 'unverified') {
+        return { url: current.url, referenceStatus: 'skipped', auditAttempts: attempts };
+      }
+      if (attempt === 0) {
+        if (!sourceStyle) {
+          return { url: null, referenceStatus: 'skipped', auditAttempts: attempts };
+        }
+        const rerendered = await this.renderCardAt(
+          renderer,
+          card,
+          keyCtx,
+          retryPostKey,
+          strengthenTextCardSourceStyle(sourceStyle),
+        );
+        if (!rerendered) return { url: null, referenceStatus: 'skipped', auditAttempts: attempts };
+        current = rerendered;
+        onRerender(rerendered);
+      }
+    }
+    return { url: null, referenceStatus: 'skipped', auditAttempts: attempts };
   }
 
   protected override getDefaultOutput(): ImageDirective {
@@ -502,8 +574,7 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
       const attempts = outcome.auditAttempts ?? [];
       const last = attempts[attempts.length - 1];
       let finalStatus: VisualSlotAudit['finalStatus'];
-      if (renderedCards[slot]) finalStatus = 'skipped';
-      else if (!outcome.url && attempts.some((item) => item.status === 'failed')) finalStatus = 'discarded';
+      if (!outcome.url && attempts.some((item) => item.status === 'failed')) finalStatus = 'discarded';
       else if (!outcome.url) finalStatus = 'failed';
       else if (last?.status === 'passed') finalStatus = 'passed';
       else if (last?.status === 'unverified') finalStatus = 'unverified';

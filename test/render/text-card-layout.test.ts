@@ -72,6 +72,21 @@ test('有空格可断时绝不从 Latin 词中间折行', () => {
   }
 });
 
+test('来源文字卡启用中文词组断行时，不把“模型”拆成跨行的“模/型”', () => {
+  const res = assertOk(layoutTextCard(
+    { title: '奖励难给？ 看模型自进化评分标准', bullets: [], tags: [] },
+    metrics,
+    { wordAwareCjk: true },
+  ));
+  for (let i = 0; i < res.title.lines.length - 1; i++) {
+    assert.notEqual(
+      `${res.title.lines[i].slice(-1)}/${res.title.lines[i + 1][0]}`,
+      '模/型',
+      `word split across lines: ${JSON.stringify(res.title.lines)}`,
+    );
+  }
+});
+
 test('单个 Latin 词自身超行宽时允许字形边界内折且不超预算', () => {
   const title = 'supercalifragilisticexpialidocious2026notasinglespace 效率工具全解析';
   const res = assertOk(layoutTextCard({ title, bullets: [], tags: [] }, metrics));

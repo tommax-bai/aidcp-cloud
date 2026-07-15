@@ -2,7 +2,7 @@
  * 参照洗稿的整组视觉语义。刻意与 OCR/原图文字转写分离：这里描述视觉结构，不承载原图具体文案。
  */
 
-export const VISUAL_ANALYSIS_SCHEMA_VERSION = 'visual-reference-v1';
+export const VISUAL_ANALYSIS_SCHEMA_VERSION = 'visual-reference-v2';
 
 export const REFERENCE_VISUAL_KINDS = [
   'portrait_photo',

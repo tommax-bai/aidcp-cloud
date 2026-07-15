@@ -5,7 +5,9 @@ import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
 import type { PipelineFields, ImagePlan, TriggerInput, CoverCardCopy } from '../../src/publish-agent/types.js';
 import type { ImageResult } from '../../src/publish-agent/image-provider.js';
 import type { ObjectStore, PutOptions, PutResult } from '../../src/storage/object-store.js';
-import type { TextCardRenderer, TextCardRenderResult } from '../../src/render/text-card.js';
+import type { TextCardRenderer, TextCardRenderResult, TextCardSourceStyle } from '../../src/render/text-card.js';
+import type { VisualFidelityAuditor } from '../../src/publish-agent/visual-fidelity-auditor.js';
+import type { VisualAuditAttempt } from '../../src/publish-agent/visual-reference-types.js';
 
 const clock = () => 1700000000000;
 const silentLogger = { log() {}, warn() {}, error() {} };
@@ -269,5 +271,127 @@ describe('ImageGeneratorRole — 轮播整帖渲卡（change textcard-carousel-f
     assert.deepEqual(providerPrompts, ['g0', 'g1', 'g2'], '三槽全走 provider（全生成式）');
     assert.deepEqual(d.coverFormAudit?.cardRenderStatuses, ['render_failed_generative', 'render_failed_generative', 'render_failed_generative']);
     assert.equal(d.imageUrls.length, 3);
+  });
+});
+
+describe('ImageGeneratorRole — 确定性文字卡视觉保真审计', () => {
+  const SOURCE_STYLE: TextCardSourceStyle = {
+    source: 'reference_analysis', paletteKey: 'mint', layout: 'editorial', decoration: 'none',
+    backgroundTreatment: 'soft_gradient', backgroundPattern: 'fine_grid', bulletPresentation: 'cards',
+    showPageMarker: true, pageIndex: 0, pageTotal: 1, wordAwareCjk: true, fidelityMode: 'balanced',
+  };
+  const FRAME = {
+    sourceArrayIndex: 0, sourceIndex: 0, kind: 'text_layout' as const, confidence: 0.95, clusterId: 'c1', sequenceRole: 'cover' as const,
+    common: {
+      aspectRatio: '3:4', subject: '知识卡', composition: '顶部标题与圆角信息卡', focalHierarchy: '标题优先',
+      palette: ['薄荷绿'], lightingOrContrast: '中等对比', negativeSpace: '下部留白', texture: '细网格', mood: '理性', avoid: [],
+    },
+    details: {
+      family: 'text_layout' as const, grid: '细网格', textBlockRatio: '中等', hierarchy: '标题与卡片', alignment: '左对齐',
+      weightContrast: '粗细对比', colorBlocks: '圆角卡片', decorations: '分页',
+    },
+  };
+
+  function auditedPlan(): ImagePlan {
+    return {
+      ...textCardPlan(['g0']),
+      cardSet: [CARD],
+      referenceBindings: [{
+        slot: 0, mode: 'slot', references: [{ sourceArrayIndex: 0, sourceIndex: 0, url: 'https://ref.test/0.png', role: 'primary' }],
+        primarySourceArrayIndex: 0, primarySourceIndex: 0,
+      }],
+      referenceVisualAnalysis: {
+        status: 'analyzed', schemaVersion: 'visual-reference-v2', cacheKey: 'k', provider: 'p', model: 'm', analyzedAt: 1,
+        sourceCount: 1, setStyleBible: {
+          summary: '薄荷知识卡', palette: ['薄荷绿'], colorTemperature: 'cool', contrast: 'medium', visualDensity: 'balanced',
+          whitespace: '下部留白', hierarchy: '标题与卡片', mood: ['理性'], texture: ['网格'], continuityRules: ['分页'], avoid: [],
+        },
+        styleClusters: [{ id: 'c1', label: '知识卡', frameIndexes: [0], summary: '薄荷知识卡', palette: ['薄荷绿'], traits: ['网格'] }],
+        frameSpecs: [FRAME],
+      },
+      visualRoutes: ['deterministic_text_card'],
+      visualStyleSources: ['reference_analysis'],
+      textCardStyles: [SOURCE_STYLE],
+    };
+  }
+
+  function auditorSequence(sequence: VisualAuditAttempt[]): { auditor: VisualFidelityAuditor; calls: string[] } {
+    const calls: string[] = [];
+    return {
+      calls,
+      auditor: {
+        audit: async (input) => {
+          calls.push(input.generatedUrl);
+          const next = sequence.shift();
+          assert.ok(next, 'unexpected audit call');
+          return next;
+        },
+      },
+    };
+  }
+
+  test('渲染成功后仍比较主参考；通过时记录 passed 而不是 skipped', async () => {
+    const audit = auditorSequence([{ status: 'passed', reason: '结构与色彩一致', auditedAt: clock() }]);
+    const providerPrompts: string[] = [];
+    const { d } = await run(
+      { generate: async (p: string) => { providerPrompts.push(p); return { url: `https://cdn/${p}.png` } as ImageResult; } },
+      auditedPlan(),
+      { getTextCardRenderer: () => okRenderer(), visualAuditor: audit.auditor, auditEnabled: () => true },
+    );
+    assert.equal(providerPrompts.length, 0);
+    assert.equal(audit.calls.length, 1);
+    assert.equal(d.visualReferenceAudit?.slots[0].finalStatus, 'passed');
+    assert.equal(d.visualReferenceAudit?.slots[0].attempts[0].status, 'passed');
+    assert.equal(d.visualReferenceAudit?.slots[0].providerReferenceStatus, 'skipped');
+  });
+
+  test('首次失败以严格来源令牌重渲染一次，第二次通过即保留', async () => {
+    const audit = auditorSequence([
+      { status: 'failed', reason: '构图偏差', auditedAt: clock() },
+      { status: 'passed', reason: '修正后通过', auditedAt: clock() },
+    ]);
+    const modes: string[] = [];
+    const renderer: TextCardRenderer = {
+      render: async (_copy, seed) => {
+        modes.push(seed.sourceStyle?.fidelityMode ?? 'none');
+        return { ok: true, png: Buffer.from(`png-${modes.length}`), meta: RENDER_META };
+      },
+    };
+    const { d, store } = await run(
+      { generate: async () => ({ url: null }) },
+      auditedPlan(),
+      { getTextCardRenderer: () => renderer, visualAuditor: audit.auditor, auditEnabled: () => true },
+    );
+    assert.deepEqual(modes, ['balanced', 'strict']);
+    assert.equal(store.puts.filter((key) => key.endsWith('/0.png')).length, 2, '同槽覆盖式重渲染两次');
+    assert.equal(d.visualReferenceAudit?.slots[0].attempts.length, 2);
+    assert.equal(d.visualReferenceAudit?.slots[0].finalStatus, 'passed');
+    assert.equal(d.imageUrls.length, 1);
+  });
+
+  test('两次审计仍失败则丢槽，保留两次失败记录', async () => {
+    const audit = auditorSequence([
+      { status: 'failed', reason: '色彩偏差', auditedAt: clock() },
+      { status: 'failed', reason: '版式仍偏差', auditedAt: clock() },
+    ]);
+    const { d } = await run(
+      { generate: async () => ({ url: null }) },
+      auditedPlan(),
+      { getTextCardRenderer: () => okRenderer(), visualAuditor: audit.auditor, auditEnabled: () => true },
+    );
+    assert.equal(d.imageUrls.length, 0);
+    assert.equal(d.visualReferenceAudit?.slots[0].finalStatus, 'discarded');
+    assert.deepEqual(d.visualReferenceAudit?.slots[0].attempts.map((item) => item.status), ['failed', 'failed']);
+  });
+
+  test('审计模型不可用时保留文字卡并诚实标 unverified', async () => {
+    const audit = auditorSequence([{ status: 'unverified', reason: 'vision timeout', auditedAt: clock() }]);
+    const { d } = await run(
+      { generate: async () => ({ url: null }) },
+      auditedPlan(),
+      { getTextCardRenderer: () => okRenderer(), visualAuditor: audit.auditor, auditEnabled: () => true },
+    );
+    assert.equal(d.imageUrls.length, 1);
+    assert.equal(d.visualReferenceAudit?.slots[0].finalStatus, 'unverified');
   });
 });

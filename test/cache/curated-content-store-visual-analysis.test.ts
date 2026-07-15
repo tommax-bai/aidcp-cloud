@@ -5,7 +5,7 @@ import { CuratedContentStore } from '../../src/cache/curated-content-store.js';
 import type { ReferenceVisualAnalysis } from '../../src/publish-agent/visual-reference-types.js';
 
 const analysis: ReferenceVisualAnalysis = {
-  status: 'analyzed', schemaVersion: 'visual-reference-v1', cacheKey: 'cache', provider: 'dashscope', model: 'qwen3.7-plus', analyzedAt: 1000, sourceCount: 1,
+  status: 'analyzed', schemaVersion: 'visual-reference-v2', cacheKey: 'cache', provider: 'dashscope', model: 'qwen3.7-plus', analyzedAt: 1000, sourceCount: 1,
   setStyleBible: { summary: '极简', palette: ['白'], colorTemperature: 'neutral', contrast: 'medium', visualDensity: 'sparse', whitespace: '多', hierarchy: '单一', mood: ['安静'], texture: ['纸'], continuityRules: ['统一'], avoid: ['水印'] },
   styleClusters: [{ id: 'c1', label: '极简', frameIndexes: [0], summary: '极简', palette: ['白'], traits: ['留白'] }],
   frameSpecs: [{

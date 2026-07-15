@@ -11,6 +11,7 @@ import type {
   VisualReferenceBinding,
 } from '../visual-reference-types.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
+import { deriveTextCardSourceStyle } from '../text-card-source-style.js';
 
 /**
  * ImagePromptComposer — 配图「指令」（change publish-multi-image；change category-adaptive-images-and-judgment 起按品类风格档）。
@@ -137,6 +138,16 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
     const profile = resolveStyleProfile(input.category);
     const styleSources: Array<'reference_analysis' | 'category_fallback'> = [];
     const visualRoutes: VisualGenerationRoute[] = [];
+    const textCardStyles = kept.map((entry, slot) => {
+      const frame = analysisUsable ? frameForTheme(input.visualAnalysis!, entry.theme) : undefined;
+      const deterministicCard = !!(
+        input.coverPlan?.cardSet?.[entry.originalIndex] ??
+        (entry.originalIndex === 0 && input.coverPlan?.coverForm === 'text_card' && input.coverPlan.card)
+      );
+      return deterministicCard && frame
+        ? deriveTextCardSourceStyle(frame, input.visualAnalysis!, slot, kept.length) ?? null
+        : null;
+    });
     const imagePrompts = kept.map((entry, slot) => {
       const frame = analysisUsable ? frameForTheme(input.visualAnalysis!, entry.theme) : undefined;
       styleSources.push(frame ? 'reference_analysis' : 'category_fallback');
@@ -149,6 +160,9 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
     const referenceBindings = slotBindingEnabled
       ? buildSlotBindings(kept.map((entry) => entry.theme), referenceImages)
       : undefined;
+    const exposedAnalysis = input.visualAnalysis && !['disabled', 'none'].includes(input.visualAnalysis.status)
+      ? input.visualAnalysis
+      : undefined;
 
     return this.stampCover(
       {
@@ -159,8 +173,9 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
         fallbackStrategy: 'skip',
         ...(referenceImages.length > 0 ? { referenceImages } : {}),
         ...(referenceBindings ? { referenceBindings } : {}),
-        ...(analysisUsable ? { referenceVisualAnalysis: input.visualAnalysis } : {}),
-        ...(analysisUsable || slotBindingEnabled ? { visualRoutes, visualStyleSources: styleSources } : {}),
+        ...(exposedAnalysis ? { referenceVisualAnalysis: exposedAnalysis } : {}),
+        ...(analysisUsable || slotBindingEnabled || exposedAnalysis ? { visualRoutes, visualStyleSources: styleSources } : {}),
+        ...(textCardStyles.some(Boolean) ? { textCardStyles } : {}),
         plannedAt: this.clock(),
       },
       input.coverPlan,

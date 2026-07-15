@@ -12,7 +12,7 @@ import {
   hexToRgb,
   selectTheme,
 } from '../../src/render/index.js';
-import type { TextCardCopy, TextCardRenderer } from '../../src/render/index.js';
+import type { TextCardCopy, TextCardRenderer, TextCardSourceStyle } from '../../src/render/index.js';
 import type { TextCardRendererInternal } from '../../src/render/text-card.js';
 
 // 端到端：真 satori + 真 @resvg/resvg-js + 仓内字体资产（pin 版本 golden）。
@@ -92,6 +92,40 @@ test('不同账号 → 不同色板 → 产物字节互异', async () => {
   assert.ok(a.ok && b.ok);
   assert.ok(!a.png.equals(b.png), 'different accounts must not produce identical cards');
   assert.notEqual(a.meta.paletteKey, b.meta.paletteKey);
+});
+
+test('来源设计令牌覆盖账号模板，并渲染网格、信息卡和分页元数据', async () => {
+  const renderer = (await mustCreateRenderer()) as TextCardRendererInternal;
+  const sourceStyle: TextCardSourceStyle = {
+    source: 'reference_analysis',
+    paletteKey: 'mint',
+    layout: 'editorial',
+    decoration: 'none',
+    backgroundTreatment: 'soft_gradient',
+    backgroundPattern: 'fine_grid',
+    bulletPresentation: 'numbered_cards',
+    showPageMarker: true,
+    pageIndex: 1,
+    pageTotal: 7,
+    wordAwareCjk: true,
+    fidelityMode: 'balanced',
+  };
+  const raw = await renderer.renderRaw(
+    {
+      title: '核心逻辑：自我迭代闭环',
+      bullets: ['同一模型分饰两角', '先生成答案后定标', '验证标准反哺训练'],
+      tags: ['算法原理'],
+    },
+    { accountId: 'acct-oat-default', postKey: 'note-source', sourceStyle },
+  );
+  assert.ok(raw.ok, `render failed: ${JSON.stringify(raw)}`);
+  assert.equal(raw.meta.paletteKey, 'mint');
+  assert.equal(raw.meta.styleSource, 'reference_analysis');
+  assert.equal(raw.meta.backgroundPattern, 'fine_grid');
+  assert.equal(raw.meta.bulletPresentation, 'numbered_cards');
+  assert.equal(raw.meta.pageMarker, '2/7');
+  assert.match(raw.meta.themeKey, /^mint:editorial:/);
+  assert.match(raw.svg, /<linearGradient/);
 });
 
 test('标题带 emoji → 剥离后照常渲染且 meta.sanitized=true', async () => {

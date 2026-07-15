@@ -108,13 +108,24 @@ export interface TextCardLayoutFailure {
 
 export type TextCardLayoutResult = TextCardLayoutModel | TextCardLayoutFailure;
 
-/** 可选约束（测试缝/未来页脚占位）：仅允许收紧垂直预算，生产路径不传。 */
+/** 可选约束；缺省值保持历史渲染逐字节不变。 */
 export interface TextCardLayoutOptions {
   contentHeightPx?: number;
+  /** 来源文字卡风格开启时，按中文词组断行，避免把“模型”等词拆到两行。 */
+  wordAwareCjk?: boolean;
+  /** 编号卡为左侧序号徽标预留宽度。 */
+  bulletContentWidthPx?: number;
 }
 
 /** 断行单元：Latin 字母/数字连成的词不可从中折断（有空格可断时），其余（CJK 等）逐字可断。 */
-function splitUnits(text: string): string[] {
+function splitUnits(text: string, wordAwareCjk = false): string[] {
+  if (wordAwareCjk) {
+    const segmenter = new Intl.Segmenter('zh-CN', { granularity: 'word' });
+    return [...segmenter.segment(text)].flatMap(({ segment, isWordLike }) => {
+      if (isWordLike) return [segment];
+      return Array.from(segment);
+    });
+  }
   const units: string[] = [];
   let latinRun = '';
   for (const ch of text) {
@@ -149,8 +160,9 @@ function wrapText(
   maxWidth: number,
   maxLines: number,
   metrics: TextMetrics,
+  wordAwareCjk = false,
 ): WrapOutcome {
-  const units = splitUnits(text);
+  const units = splitUnits(text, wordAwareCjk);
   const lines: string[] = [];
   let current = '';
   const fits = (s: string): boolean =>
@@ -233,19 +245,22 @@ function layoutBullets(
   bullets: string[],
   maxLines: number,
   metrics: TextMetrics,
+  maxWidth: number,
+  wordAwareCjk: boolean,
 ): WrappedBullet[] {
   return bullets.map((bullet) => {
     const { lines, overflowText } = wrapText(
       bullet,
       BULLET_FONT_SIZE,
       BULLET_WEIGHT,
-      CONTENT_WIDTH,
+      maxWidth,
       maxLines,
       metrics,
+      wordAwareCjk,
     );
     if (overflowText !== null) {
       lines.push(
-        truncateToWidth(overflowText, BULLET_FONT_SIZE, BULLET_WEIGHT, CONTENT_WIDTH, metrics),
+        truncateToWidth(overflowText, BULLET_FONT_SIZE, BULLET_WEIGHT, maxWidth, metrics),
       );
     }
     return { lines };
@@ -268,6 +283,8 @@ export function layoutTextCard(
   options?: TextCardLayoutOptions,
 ): TextCardLayoutResult {
   const contentHeight = options?.contentHeightPx ?? CONTENT_HEIGHT;
+  const wordAwareCjk = options?.wordAwareCjk ?? false;
+  const bulletContentWidth = Math.max(320, Math.min(CONTENT_WIDTH, options?.bulletContentWidthPx ?? CONTENT_WIDTH));
   const reductions: string[] = [];
   let sanitized = false;
 
@@ -327,6 +344,7 @@ export function layoutTextCard(
       CONTENT_WIDTH,
       TITLE_MAX_LINES,
       metrics,
+      wordAwareCjk,
     );
     if (overflowText === null) {
       titleFontSize = size;
@@ -374,7 +392,13 @@ export function layoutTextCard(
   let totalHeight = 0;
   // 阶梯至多 3 步，循环有界（迭代限界纪律：绝不依赖时钟推进）。
   for (let step = 0; step < 4; step++) {
-    bulletItems = layoutBullets(bulletsIn.slice(0, maxBullets), bulletMaxLines, metrics);
+    bulletItems = layoutBullets(
+      bulletsIn.slice(0, maxBullets),
+      bulletMaxLines,
+      metrics,
+      bulletContentWidth,
+      wordAwareCjk,
+    );
     const bulletsH = bulletsHeight(bulletItems, bulletLineHeightPx);
     totalHeight =
       titleHeight +

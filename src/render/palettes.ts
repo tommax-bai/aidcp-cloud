@@ -27,7 +27,7 @@ export interface Palette {
 }
 
 /** 8 套浅底高对比色板（cream/oat/pale-blue/pale-green/blush/lavender/warm-gray/mint）。 */
-export const PALETTES: readonly Palette[] = [
+export const PALETTES = [
   {
     key: 'cream',
     bg: '#FBF4E4',
@@ -100,7 +100,9 @@ export const PALETTES: readonly Palette[] = [
     pillBg: '#D8ECE2',
     pillText: '#284B40',
   },
-] as const;
+] as const satisfies readonly Palette[];
+
+export type PaletteKey = (typeof PALETTES)[number]['key'];
 
 /** 版式：editorial=顶对齐；poster=内容块整体垂直居中。 */
 export const LAYOUT_VARIANTS = ['editorial', 'poster'] as const;

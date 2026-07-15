@@ -5,7 +5,7 @@ import type { ReferenceVisualAnalysis } from '../visual-reference-types.js';
 import { VISUAL_ANALYSIS_SCHEMA_VERSION } from '../visual-reference-types.js';
 import type { VisualReferenceAnalyzer } from '../visual-reference-analyzer.js';
 
-const VISUAL_ANALYZER_ROLE_TIMEOUT_MS = Number(process.env.AIDCP_REFERENCE_VISUAL_ROLE_TIMEOUT_MS ?? 210_000);
+const VISUAL_ANALYZER_ROLE_TIMEOUT_MS = Number(process.env.AIDCP_REFERENCE_VISUAL_ROLE_TIMEOUT_MS ?? 300_000);
 
 export class VisualReferenceAnalyzerRole extends BasePublishRole<TriggerInput, ReferenceVisualAnalysis> {
   readonly config: RoleConfig = {
