@@ -12,6 +12,10 @@ import type {
 } from '../visual-reference-types.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
 import { deriveTextCardSourceStyle } from '../text-card-source-style.js';
+import {
+  ensureContentVisualCategory,
+  formatContentVisualCategoryBrief,
+} from '../content-visual-brief.js';
 
 /**
  * ImagePromptComposer — 配图「指令」（change publish-multi-image；change category-adaptive-images-and-judgment 起按品类风格档）。
@@ -101,8 +105,22 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
 
     // 每主题一条中文主体描述（并行，保序；某条 LLM 失败退回主体文本 fallback，不让该张凭空消失）。
     const accountId = this.accountIdFrom(context);
+    const directedThemes = plan.themes.map((theme) => {
+      const frame = analysisUsable ? frameForTheme(input.visualAnalysis!, theme) : undefined;
+      if (!theme.contentVisualBrief || !frame) return theme;
+      return {
+        ...theme,
+        contentVisualBrief: ensureContentVisualCategory(theme.contentVisualBrief, {
+          subject: theme.subject,
+          intent: theme.intent,
+          title: theme.subject,
+          content: theme.intent ?? '',
+          tone: theme.contentVisualBrief.emotion,
+        }, frame.kind),
+      };
+    });
     const composed = await Promise.all(
-      plan.themes.map((theme) => {
+      directedThemes.map((theme) => {
         const frame = analysisUsable ? frameForTheme(input.visualAnalysis!, theme) : undefined;
         const guidance = frame
           ? buildVisualFrameGuidance(frame, input.visualAnalysis!)
@@ -120,7 +138,7 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
     const keptTokens: Set<string>[] = [];
     composed.forEach((desc, idx) => {
       if (carousel || slotBindingEnabled || idx === 0) {
-        kept.push({ desc, theme: plan.themes[idx], originalIndex: idx });
+        kept.push({ desc, theme: directedThemes[idx], originalIndex: idx });
         keptTokens.push(tokenize(desc));
         return;
       }
@@ -130,7 +148,7 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
         this.logger.log(`[ImagePromptComposer] 近重复主体丢弃第 ${idx} 张（不补不复用）`);
         return;
       }
-      kept.push({ desc, theme: plan.themes[idx], originalIndex: idx });
+      kept.push({ desc, theme: directedThemes[idx], originalIndex: idx });
       keptTokens.push(tks);
     });
 
@@ -245,7 +263,7 @@ export function buildVisualFrameGuidance(frame: VisualFrameSpec, analysis: Refer
   const cluster = analysis.styleClusters?.find((item) => item.id === frame.clusterId);
   return [
     '以下是视觉模型对主参考图的结构化反推，只用于原创重构；不要复制原图、人物身份、文字、数字、账号、水印、品牌或平台标识。',
-    '职责边界：这里仅提供画面类型、镜头/景别、构图、光影、色调和材质。若人物神态、视线、动作或姿态与正文视觉 brief 冲突，必须以正文 brief 为准。',
+    '职责边界：这里仅提供画面类型、景别/网格、构图、光影、色调、材质与抽象风格。人物表演、文字层级、图表关系、场景事件、物件状态、隐喻、UI 任务和拼贴分区以正文分类 brief 为准。',
     `视觉类型：${frame.kind}；序列角色：${frame.sequenceRole}`,
     `主体：${frame.common.subject}`,
     `构图：${frame.common.composition}；视觉层级：${frame.common.focalHierarchy}`,
@@ -261,7 +279,7 @@ function buildSourceStylePrompt(frame: VisualFrameSpec, analysis: ReferenceVisua
   const bible = analysis.setStyleBible;
   const cluster = analysis.styleClusters?.find((item) => item.id === frame.clusterId);
   return [
-    '原创视觉重构，参考图只约束画面类型、景别、构图关系、光影、色调、材质与抽象风格；人物神态、视线、动作和姿态以正文视觉 brief 为最高优先级',
+    '原创视觉重构，参考图只约束画面类型、景别/网格、构图关系、光影、色调、材质与抽象风格；具体人物表演、信息层级、关系、事件、物件状态、隐喻、界面任务和分区叙事以正文分类 brief 为最高优先级',
     `类型 ${frame.kind}，${frame.common.composition}，${frame.common.focalHierarchy}`,
     `${frame.common.lightingOrContrast}，${frame.common.texture}，${frame.common.mood}`,
     `配色 ${frame.common.palette.join('、') || bible?.palette.join('、') || '协调配色'}`,
@@ -289,6 +307,7 @@ function fallbackThemeDescription(theme: ImageTheme): string {
     brief.gazeDirection,
     brief.headAngle,
     brief.bodyLanguage,
+    brief.categoryBrief ? formatContentVisualCategoryBrief(brief.categoryBrief) : '',
     brief.avoid.length ? `避免${brief.avoid.join('、')}` : '',
   ].filter(Boolean).join('，');
 }

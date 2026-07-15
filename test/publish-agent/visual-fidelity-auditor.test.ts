@@ -43,12 +43,40 @@ describe('VisualFidelityAuditor', () => {
         narrativeMoment: '情绪涌来后自我整理', emotion: '脆弱但不崩溃', emotionIntensity: 0.65,
         action: '缓慢呼吸', environment: '安静室内', facialExpression: '眉眼游离、嘴角克制',
         gazeDirection: '侧视', headAngle: '微侧', bodyLanguage: '肩颈放松', avoid: ['标准商业微笑'],
+        categoryBrief: {
+          kind: 'portrait_photo', facialExpression: '眉眼游离、嘴角克制', gazeDirection: '侧视', headAngle: '微侧',
+          bodyLanguage: '肩颈放松', gesture: '手部放松', poseEnergy: '低唤醒但有张力',
+        },
       },
     });
     assert.equal(out.status, 'failed');
     assert.equal(out.scores?.contentAlignment, 0.42);
     assert.match(prompt, /人物表演与叙事语义最高优先级/);
+    assert.match(prompt, /类型=人物摄影/);
     assert.match(prompt, /标准商业微笑/);
+  });
+
+  test('信息图审计读取分类关系和禁止编造数字边界', async () => {
+    let prompt = '';
+    const vision: VisionLlmClient = { chatVision: async (messages) => {
+      const content = messages[0].content;
+      prompt = Array.isArray(content) && content[0]?.type === 'text' ? content[0].text : '';
+      return payload({ scores: { form: 0.9, subject: 0.85, composition: 0.8, color: 0.82, style: 0.79, contentAlignment: 0.88 } });
+    } };
+    const out = await createVisualFidelityAuditor({ vision }).audit({
+      accountId: 'a', referenceUrl: 'r', generatedUrl: 'g',
+      contentVisualBrief: {
+        narrativeMoment: '解释反馈闭环', emotion: '理性', emotionIntensity: 0.4, action: '从生成走向验证', environment: '信息图', avoid: [],
+        categoryBrief: {
+          kind: 'infographic_chart', claim: '标准随反馈更新', relationship: '闭环', entities: ['答案', '标准'],
+          direction: '顺时针', steps: ['生成', '验证', '训练'], dataPolicy: '正文无数字，使用无数值关系图',
+        },
+      },
+    });
+    assert.equal(out.status, 'passed');
+    assert.match(prompt, /类型=图表信息图/);
+    assert.match(prompt, /不得编造.*数字/);
+    assert.match(prompt, /分类 brief 的专用内容语义/);
   });
 
   test('有正文视觉 brief 但响应缺 contentAlignment → 诚实 unverified', async () => {

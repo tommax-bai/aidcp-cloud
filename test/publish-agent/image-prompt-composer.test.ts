@@ -161,17 +161,30 @@ describe('ImagePromptComposerRole（配图指令，仅桩 LLM、不依赖图源�
     ctx.write('postCategory', { category: 'food', classifiedAt: clock() });
     ctx.write('coverCardPlan', generativeCoverPlan());
     ctx.write('referenceVisualAnalysis', analysis);
-    ctx.write('imageSetPlan', setPlan([{ subject: '产品', sourceArrayIndex: 0, sourceIndex: 7 }]));
+    ctx.write('imageSetPlan', setPlan([{
+      subject: '产品', intent: '表现使用后留下的真实痕迹', sourceArrayIndex: 0, sourceIndex: 7,
+      contentVisualBrief: {
+        narrativeMoment: '刚完成一次使用', emotion: '克制', emotionIntensity: 0.35,
+        action: '物件刚被放回桌面', environment: '安静工作台', avoid: ['无关人物摆拍'],
+        categoryBrief: {
+          kind: 'scene_photo', timeAndWeather: '室内白天', location: '工作台', humanPresence: '无人',
+          eventTrace: '刚放下物件', spatialRelationship: '近景主体', motionLevel: '低动态',
+        },
+      },
+    }]));
     await new Promise((resolve) => setTimeout(resolve, 60));
     const plan = ctx.get('imagePlan')!;
     assert.match(userPrompt, /视觉模型对主参考图的结构化反推/);
     assert.match(userPrompt, /人物神态、视线、动作或姿态与正文视觉 brief 冲突/);
+    assert.match(userPrompt, /类型=静物摄影/);
+    assert.match(userPrompt, /核心物件=产品/);
     assert.doesNotMatch(userPrompt, /secret\.ref/, '结构化指导不得把 URL 写入文本 prompt');
     assert.match(plan.imagePrompts[0], /冷色硬光|硬侧光高对比/);
     assert.match(plan.imagePrompts[0], /no source-person likeness/);
     assert.doesNotMatch(plan.imagePrompts[0], /food photography/, '源风格不被食品通用暖色档覆盖');
     assert.deepEqual(plan.referenceBindings?.[0].references, [{ sourceArrayIndex: 0, sourceIndex: 7, url: 'https://secret.ref/a.jpg', role: 'primary' }]);
     assert.equal(plan.visualStyleSources?.[0], 'reference_analysis');
+    assert.equal(plan.contentVisualBriefs?.[0]?.categoryBrief?.kind, 'still_life_photo', '来源帧纠正 planner 无法看图时的类型判断');
   });
 
   test('文字卡反推派生白名单设计令牌并随 ImagePlan 逐槽下发', async () => {

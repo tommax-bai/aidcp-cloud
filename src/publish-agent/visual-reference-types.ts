@@ -185,8 +185,104 @@ export type VisualGenerationRoute =
   | 'specialized_generative'
   | 'region_guided_generative';
 
+export type ContentVisualCategoryKind = ReferenceVisualKind;
+
+export interface PortraitContentBrief {
+  kind: 'portrait_photo';
+  facialExpression: string;
+  gazeDirection: string;
+  headAngle: string;
+  bodyLanguage: string;
+  gesture: string;
+  poseEnergy: string;
+}
+
+export interface TextLayoutContentBrief {
+  kind: 'text_layout';
+  coreMessage: string;
+  informationHierarchy: string[];
+  emphasisTerms: string[];
+  readingOrder: string;
+  informationDensity: string;
+  cardStructure: string;
+}
+
+export interface InfographicContentBrief {
+  kind: 'infographic_chart';
+  claim: string;
+  relationship: string;
+  entities: string[];
+  direction: string;
+  steps: string[];
+  dataPolicy: string;
+}
+
+export interface ScenePhotoContentBrief {
+  kind: 'scene_photo';
+  timeAndWeather: string;
+  location: string;
+  humanPresence: string;
+  eventTrace: string;
+  spatialRelationship: string;
+  motionLevel: string;
+}
+
+export interface StillLifeContentBrief {
+  kind: 'still_life_photo';
+  primaryObjects: string[];
+  usageState: string;
+  objectRelationship: string;
+  lifeTrace: string;
+  materialFocus: string;
+  handInteraction: string;
+}
+
+export interface IllustrationContentBrief {
+  kind: 'illustration_3d';
+  coreMetaphor: string;
+  characterRelationship: string;
+  symbols: string[];
+  motionDirection: string;
+  exaggerationLevel: string;
+  storyStage: string;
+}
+
+export interface UiDocumentContentBrief {
+  kind: 'ui_document';
+  userTask: string;
+  interfaceState: string;
+  componentHierarchy: string[];
+  interactionPath: string[];
+  informationFocus: string;
+  fidelityLabel: string;
+}
+
+export interface CollageContentRegion {
+  role: string;
+  content: string;
+  priority: string;
+}
+
+export interface CollageContentBrief {
+  kind: 'collage_mixed';
+  regions: CollageContentRegion[];
+  readingOrder: string;
+  primarySecondaryRatio: string;
+  continuityElements: string[];
+}
+
+export type ContentVisualCategoryBrief =
+  | PortraitContentBrief
+  | TextLayoutContentBrief
+  | InfographicContentBrief
+  | ScenePhotoContentBrief
+  | StillLifeContentBrief
+  | IllustrationContentBrief
+  | UiDocumentContentBrief
+  | CollageContentBrief;
+
 /**
- * 洗稿正文为单个配图槽给出的视觉导演 brief。参考图管摄影语言，本 brief 管人物表演与叙事语义。
+ * 洗稿正文为单个配图槽给出的视觉导演 brief。参考图管形式/风格，本 brief 管具体叙事语义。
  * 所有字段只来自洗稿后的正文，不承载来源图片 OCR、身份或像素信息。
  */
 export interface ContentVisualBrief {
@@ -199,6 +295,8 @@ export interface ContentVisualBrief {
   gazeDirection?: string;
   headAngle?: string;
   bodyLanguage?: string;
+  /** 按目标画面类型承载专用内容语义；历史记录可缺省。 */
+  categoryBrief?: ContentVisualCategoryBrief;
   avoid: string[];
 }
 

@@ -2,7 +2,12 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { ImageSetPlannerRole } from '../../src/publish-agent/roles/image-set-planner.js';
 import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
-import { buildContentVisualExcerpt, buildImageSetPlanPrompt } from '../../src/publish-agent/prompts.js';
+import {
+  buildCardSetPrompt,
+  buildContentVisualExcerpt,
+  buildCoverCardCopyPrompt,
+  buildImageSetPlanPrompt,
+} from '../../src/publish-agent/prompts.js';
 import type { PipelineFields, CreatedContent } from '../../src/publish-agent/types.js';
 
 const clock = () => 1700000000000;
@@ -50,7 +55,7 @@ describe('ImageSetPlannerRole（图集选题，仅桩 LLM、不依赖图源）',
     assert.equal(plan.styleHint, '科技扁平');
   });
 
-  test('内容视觉导演 brief 严格解析并夹住情绪强度，人物表演字段随槽位保留', async () => {
+  test('内容视觉导演 brief 严格解析并夹住情绪强度，人物分类字段随槽位保留', async () => {
     const llm = { chat: async () => JSON.stringify({
       imageCount: 1,
       themes: [{
@@ -60,6 +65,10 @@ describe('ImageSetPlannerRole（图集选题，仅桩 LLM、不依赖图源）',
           narrativeMoment: '情绪涌来后正在自我整理', emotion: '脆弱但不崩溃', emotionIntensity: 1.4,
           action: '短暂停顿并缓慢呼吸', environment: '深色访谈空间', facialExpression: '嘴角克制、眉眼游离',
           gazeDirection: '侧视', headAngle: '微侧下沉', bodyLanguage: '肩颈放松、身体偏向一侧',
+          categoryBrief: {
+            kind: 'portrait_photo', facialExpression: '嘴角克制、眉眼游离', gazeDirection: '侧视', headAngle: '微侧下沉',
+            bodyLanguage: '肩颈放松、身体偏向一侧', gesture: '手部自然下垂', poseEnergy: '低唤醒但有行动张力',
+          },
           avoid: ['证件照式正面端坐', '标准商业微笑'],
         },
       }],
@@ -67,6 +76,9 @@ describe('ImageSetPlannerRole（图集选题，仅桩 LLM、不依赖图源）',
     const plan = await run(llm, 1);
     assert.equal(plan.themes[0].contentVisualBrief?.emotionIntensity, 1);
     assert.equal(plan.themes[0].contentVisualBrief?.facialExpression, '嘴角克制、眉眼游离');
+    assert.equal(plan.themes[0].contentVisualBrief?.categoryBrief?.kind, 'portrait_photo');
+    assert.equal(plan.themes[0].contentVisualBrief?.categoryBrief?.kind === 'portrait_photo'
+      ? plan.themes[0].contentVisualBrief.categoryBrief.gesture : '', '手部自然下垂');
     assert.deepEqual(plan.themes[0].contentVisualBrief?.avoid, ['证件照式正面端坐', '标准商业微笑']);
   });
 
@@ -188,5 +200,24 @@ describe('buildImageSetPlanPrompt — 固定张数措辞（rewrite-image-count-p
     const prompt = buildImageSetPlanPrompt({ ...created, content: body }, 1, 1);
     assert.match(prompt, /正文语义摘录/);
     assert.doesNotMatch(prompt, /正文前 400 字/);
+  });
+
+  test('文字卡文案也读取有界首中尾语义，并显式要求结论、层级、重点、阅读顺序和密度', () => {
+    const body = `${'开头背景'.repeat(300)}中段关键转折${'中段分析'.repeat(300)}结尾行动结论${'尾声'.repeat(100)}`;
+    for (const prompt of [
+      buildCoverCardCopyPrompt('动态评分标准', body, ['强化学习']),
+      buildCardSetPrompt('动态评分标准', body, ['强化学习'], 4),
+    ]) {
+      assert.match(prompt, /【开头】/);
+      assert.match(prompt, /【中段】/);
+      assert.match(prompt, /【结尾】/);
+      assert.match(prompt, /中段关键转折/);
+      assert.match(prompt, /结尾行动结论/);
+      assert.match(prompt, /核心结论/);
+      assert.match(prompt, /信息层级/);
+      assert.match(prompt, /重点词/);
+      assert.match(prompt, /阅读顺序/);
+      assert.match(prompt, /信息密度/);
+    }
   });
 });

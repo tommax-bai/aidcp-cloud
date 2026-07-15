@@ -20,6 +20,7 @@ import type {
   ImageTheme,
 } from './types.js';
 import { IMAGE_CATEGORIES } from './types.js';
+import { categorySafetyInstruction, formatContentVisualCategoryBrief } from './content-visual-brief.js';
 import type { Soul } from '../soul/types.js';
 
 /**
@@ -729,15 +730,24 @@ export function buildImageSetPlanPrompt(createdContent: CreatedContent, maxImage
     themesRequirement,
     '- subject 用中文业务语言描述画面主体（不要写英文 prompt、不要写风格词——风格由系统统一注入）。',
     '- intent（可选）：这张图想传达的要点，给后续生成更多上下文。',
-    '- contentVisualBrief：每张必填。narrativeMoment 写这一帧对应的正文叙事瞬间；emotion 写复合情绪而不是泛泛“开心/难过”；emotionIntensity 为 0~1；action/environment 写正在发生的动作与环境；avoid 写这帧必须避免的错位表达。',
-    '- 如果画面有人物，contentVisualBrief 还必须填写 facialExpression、gazeDirection、headAngle、bodyLanguage，用眉眼/嘴角/视线/肩颈/身体重心等可观察语言表达；禁止只写“自然”“端正”“好看”。如果不涉及人物，这四项可省略。',
+    '- contentVisualBrief：每张必填公共字段。narrativeMoment 写正文叙事瞬间；emotion 写复合情绪；emotionIntensity 为 0~1；action/environment 写动作与环境；avoid 写必须避免的错位表达。',
+    '- contentVisualBrief.categoryBrief：每张必须按目标画面类型填且只能选一个 kind。字段如下：',
+    '  - portrait_photo：facialExpression, gazeDirection, headAngle, bodyLanguage, gesture, poseEnergy。',
+    '  - text_layout：coreMessage, informationHierarchy[], emphasisTerms[], readingOrder, informationDensity, cardStructure。',
+    '  - infographic_chart：claim, relationship, entities[], direction, steps[], dataPolicy；正文无可靠数字时必须明确无数值表达。',
+    '  - scene_photo：timeAndWeather, location, humanPresence, eventTrace, spatialRelationship, motionLevel。',
+    '  - still_life_photo：primaryObjects[], usageState, objectRelationship, lifeTrace, materialFocus, handInteraction。',
+    '  - illustration_3d：coreMetaphor, characterRelationship, symbols[], motionDirection, exaggerationLevel, storyStage。',
+    '  - ui_document：userTask, interfaceState, componentHierarchy[], interactionPath[], informationFocus, fidelityLabel；正文未证明的功能标为概念示意。',
+    '  - collage_mixed：regions[{role,content,priority}], readingOrder, primarySecondaryRatio, continuityElements[]。',
+    '- 分类字段写正文要表达的具体信息，禁止用“与正文一致”“自然”“好看”等空话代替；禁止编造正文没有的数据、产品能力、事件或物件状态。',
     '- 对情绪、访谈、成长、冲突类正文，主动避免证件照式正面端坐、标准商业微笑、僵硬直视等会抹平正文张力的姿态，除非正文明确需要。',
     '- styleHint（可选）：整体风格倾向的中文描述（如「科技扁平」「手绘温暖」），供参考，可省。',
     '- 主体之间应有区分、共同服务于文章叙事；不要重复同一画面。',
     '',
     '【输出要求】',
     '严格只输出一个 JSON 对象，不要任何额外文字或代码块围栏。格式如下：',
-    '{"wantImage":true,"imageCount":1,"themes":[{"subject":"访谈中的人物情绪瞬间","intent":"表现脆弱与行动力并存","contentVisualBrief":{"narrativeMoment":"情绪涌来后正在自我整理","emotion":"脆弱、敏感但没有崩溃","emotionIntensity":0.65,"action":"短暂停顿并缓慢呼吸","environment":"安静的深色访谈空间","facialExpression":"眉眼略有疲惫和游离，嘴角克制，不是职业微笑","gazeDirection":"轻微侧视，不直视镜头","headAngle":"头部微侧并轻轻下沉","bodyLanguage":"肩颈放松，身体略向一侧倾斜","avoid":["证件照式正面端坐","标准商业微笑","僵硬直视镜头"]}}],"styleHint":"克制的人像摄影"}',
+    '{"wantImage":true,"imageCount":1,"themes":[{"subject":"访谈中的人物情绪瞬间","intent":"表现脆弱与行动力并存","contentVisualBrief":{"narrativeMoment":"情绪涌来后正在自我整理","emotion":"脆弱、敏感但没有崩溃","emotionIntensity":0.65,"action":"短暂停顿并缓慢呼吸","environment":"安静的深色访谈空间","categoryBrief":{"kind":"portrait_photo","facialExpression":"眉眼略有疲惫和游离，嘴角克制","gazeDirection":"轻微侧视","headAngle":"头部微侧并轻轻下沉","bodyLanguage":"肩颈放松，身体略向一侧倾斜","gesture":"手部自然放松","poseEnergy":"低唤醒但有内在行动张力"},"avoid":["证件照式正面端坐","标准商业微笑","僵硬直视镜头"]}}],"styleHint":"克制的人像摄影"}',
   ].join('\n');
 }
 
@@ -765,13 +775,18 @@ export function buildImagePromptComposerPrompt(theme: ImageTheme, styleHint: str
       ...(brief.gazeDirection ? [`视线：${brief.gazeDirection}`] : []),
       ...(brief.headAngle ? [`头部角度：${brief.headAngle}`] : []),
       ...(brief.bodyLanguage ? [`肢体语言：${brief.bodyLanguage}`] : []),
+      ...(brief.categoryBrief ? [
+        `分类语义：${formatContentVisualCategoryBrief(brief.categoryBrief)}`,
+        `分类安全约束：${categorySafetyInstruction(brief.categoryBrief)}`,
+      ] : []),
       ...(brief.avoid.length ? [`必须避免：${brief.avoid.join('；')}`] : []),
     ] : []),
     ...(styleHint ? [`整体风格倾向（参考，可忽略）：${styleHint}`] : []),
     ...(referenceImageGuidance ? ['', 'Reference image guidance:', referenceImageGuidance] : []),
     '',
     '【要求】',
-    '- imagePrompt: 一句中文，描述画面主体、动作/场景与构图，与主题强相关。人物神态/视线/姿态必须服从正文 brief；参考图中的人物情绪或姿态与正文冲突时，正文 brief 胜出。',
+    '- imagePrompt: 一句中文，完整落实公共 brief 与分类 brief。人物表演、文字层级、图表关系、场景事件、物件状态、插画隐喻、UI 任务或拼贴分区必须服从正文；参考图只提供形式与风格。',
+    '- 若参考图的人物神态、视线、动作或姿态与正文视觉 brief 冲突，正文 brief 胜出；其他类型的文字结构、关系、事件、物件状态、隐喻、任务或分区冲突也同样以正文为准。',
     '- 人物必须是与参考人物无关的虚构主体，可以按正文需要清晰露脸，但不得对应来源真人/名人身份或保留其五官相似度，也不得保留品牌 logo 或平台标识。',
     '- 把 brief 的 avoid 转成明确的“避免……”约束写进 imagePrompt；不含画内文字或水印。',
     '',
@@ -920,14 +935,14 @@ export function buildCoverCardCopyPrompt(
   tags: string[],
   tighten = false,
 ): string {
-  const preview = body.slice(0, 800);
+  const preview = buildContentVisualExcerpt(body, 1200);
   const lines = [
     '你是小红书封面文字卡的文案编辑。基于下面这篇笔记（标题+正文），提炼一张封面文字卡的文案。',
     '',
     '【笔记标题】',
     title,
     '',
-    '【正文前 800 字】',
+    '【正文语义摘录（短文完整；长文首/中/尾）】',
     preview,
     '',
   ];
@@ -938,6 +953,8 @@ export function buildCoverCardCopyPrompt(
     '【要求】',
     '- cardTitle：封面主标题，8~16 个字，钩子感强、口语化，不照抄笔记标题（换个说法）。',
     '- bullets：0~5 条要点，每条 6~14 个字，短句、并列结构；正文没有清晰要点就给空数组，绝不硬凑。',
+    '- 先确定核心结论和信息层级，再按“标题→核心结论→支撑要点”组织阅读顺序；重点词来自正文主张。',
+    '- 信息密度必须匹配正文：正文有多个有效要点时不得只给一个大标题和无意义大面积留白。',
     '- tags：0~3 个标签词（不带 # 号），只能从候选标签挑或用正文里的核心词。',
     '- 全部文案必须来自这篇笔记本身的内容，绝不新增笔记里没有的事实。',
     '- 不出现任何联系方式/价格/促销用语/平台名/作者名；不用 emoji。',
@@ -969,7 +986,7 @@ export function buildCardSetPrompt(
   tighten = false,
 ): string {
   const n = Math.max(2, Math.floor(count));
-  const preview = body.slice(0, 1600);
+  const preview = buildContentVisualExcerpt(body, 2000);
   const lines = [
     `你是小红书图文轮播的文案编辑。基于下面这篇笔记（标题+正文），产出一套 ${n} 张排版文字卡的文案，做成连贯的一篇图文轮播。`,
     '',
@@ -989,6 +1006,8 @@ export function buildCardSetPrompt(
     '- 第 1 张=封面钩子卡：cardTitle 8~16 字、钩子感强、口语化、不照抄笔记标题；bullets 可 0~3 条点题。',
     '- 第 2 张起=正文段落卡：cardTitle 是这段的小标题（6~14 字）；bullets 1~5 条、每条 6~18 字，承载这一段的干货/步骤/要点，短句并列。',
     '- 整套卡要覆盖正文主线、各卡内容不重复、连起来读得通；只用这篇笔记本身的内容，绝不新增笔记里没有的事实。',
+    '- 每张先确定本页核心结论、信息层级和重点词；整套阅读顺序必须覆盖正文开头、中段转折与结尾结论。',
+    '- 信息密度匹配正文，不得用空泛大标题或装饰性留白代替正文要点。',
     '- 每张的 tags 0~3 个（不带 # 号），只能从候选标签挑或用正文核心词；某张没有清晰要点就给空数组，绝不硬凑。',
     '- 全程不出现任何联系方式/价格/促销用语/平台名/作者名；不用 emoji。',
   );
