@@ -11,8 +11,8 @@
  * - 转义只用解析器认得的两种：`"` → `\"`、换行 → `\n`（与 parseScalar 的反解逐字对应，解析器不识别 `\\`，故不转义反斜杠）；
  * - 非空字符串数组用块状列表 `- "..."`；空数组用行内流式 `[]`（避免"键无子项"被解析成 null 触发 reqStringArray 报错）。
  *
- * 只序列化生成器会产出的字段（identity / interests / 可选 behavior_guidelines）；
- * 刻意不产 legacy 的 engagement_rules / browse_patterns（下游无消费、loader 允许缺省）。
+ * 序列化生成器会产出的字段（identity / interests / 可选 behavior_guidelines），并保留调用方显式带入的
+ * mandatory_interactions（站立授权不能在 round-trip 中静默丢失）。仍刻意不产 legacy engagement_rules / browse_patterns。
  * 调用方 MUST 对产出做 loadSoulFromYaml round-trip 自校验（防序列化漂移）。
  */
 
@@ -61,6 +61,21 @@ export function serializeSoul(soul: Soul): string {
   lines.push(...emitStringListField('primary', soul.interests.primary, '  ', '    '));
   lines.push(...emitStringListField('secondary', soul.interests.secondary, '  ', '    '));
   lines.push(...emitStringListField('seed_keywords', soul.interests.seed_keywords, '  ', '    '));
+
+  if (soul.mandatory_interactions) {
+    if (soul.mandatory_interactions.length === 0) {
+      lines.push('mandatory_interactions: []');
+    } else {
+      lines.push('mandatory_interactions:');
+      for (const rule of soul.mandatory_interactions) {
+        lines.push(`  - id: ${quoteScalar(rule.id)}`);
+        lines.push(`    when: ${quoteScalar(rule.when)}`);
+        lines.push(...emitStringListField('actions', rule.actions, '    ', '      '));
+        if (rule.comment_guidance) lines.push(`    comment_guidance: ${quoteScalar(rule.comment_guidance)}`);
+        if (rule.comment_approval) lines.push(`    comment_approval: ${quoteScalar(rule.comment_approval)}`);
+      }
+    }
+  }
 
   if (soul.behavior_guidelines) {
     const bg = soul.behavior_guidelines;

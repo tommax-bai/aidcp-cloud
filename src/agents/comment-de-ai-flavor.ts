@@ -82,6 +82,7 @@ export class CommentDeAiFlavor extends BaseRole {
         sourcePageType: payload.sourcePageType,
         actions: payload.actions,
         reason: 'cleaned_empty',
+        ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
         ts: Date.now(),
       });
       return;
@@ -104,6 +105,7 @@ export class CommentDeAiFlavor extends BaseRole {
           sourcePageType: payload.sourcePageType,
           actions: payload.actions,
           reason: 'overlaps_reference',
+          ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
           ts: Date.now(),
         });
         return;
@@ -115,6 +117,7 @@ export class CommentDeAiFlavor extends BaseRole {
       sourcePageType: payload.sourcePageType,
       actions: payload.actions,
       text,
+      ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
       ts: Date.now(),
     });
   }

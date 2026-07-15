@@ -16,7 +16,7 @@
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { NoteData } from './content-curator-role.js';
-import type { RoleName, QualityPassPayload } from '../event-bus/types.js';
+import type { MandatoryInteractionContext, RoleName, QualityPassPayload } from '../event-bus/types.js';
 
 export interface DeepReaderOptions extends RoleOptions {
   getNoteData: (noteId: string) => NoteData | null;
@@ -51,7 +51,7 @@ export class DeepReader extends BaseRole {
   private readonly canBrowseImages: () => boolean;
   private unsubscribers: (() => void)[] = [];
   /** 等待 browse_images 回执的在途上下文（单飞：一次只深读一篇）。 */
-  private pending: { noteId: string; sourcePageType: 'feed' | 'search'; count: number } | null = null;
+  private pending: { noteId: string; sourcePageType: 'feed' | 'search'; count: number; mandatoryInteraction?: MandatoryInteractionContext } | null = null;
 
   constructor(options: DeepReaderOptions) {
     super(options);
@@ -84,6 +84,7 @@ export class DeepReader extends BaseRole {
         sourcePageType: payload.sourcePageType,
         imagesBrowsed: 0,
         reason: 'surface_unsupported',
+        ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
         ts: Date.now(),
       });
       return;
@@ -96,6 +97,7 @@ export class DeepReader extends BaseRole {
         noteId: payload.noteId,
         sourcePageType: payload.sourcePageType,
         count: plan.count,
+        ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
       };
       this.log(`决定浏览多图（count≈${plan.count}，${plan.reason}）`);
       this.emit('reading.browse_images', {
@@ -110,6 +112,7 @@ export class DeepReader extends BaseRole {
         noteId: payload.noteId,
         sourcePageType: payload.sourcePageType,
         imagesBrowsed: 0,
+        ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
         ts: Date.now(),
       });
     }
@@ -124,6 +127,7 @@ export class DeepReader extends BaseRole {
       noteId: ctx.noteId,
       sourcePageType: ctx.sourcePageType,
       imagesBrowsed: actual,
+      ...(ctx.mandatoryInteraction ? { mandatoryInteraction: ctx.mandatoryInteraction } : {}),
       ts: Date.now(),
     });
   }

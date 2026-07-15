@@ -20,6 +20,12 @@ const soul: Soul = {
 const note: NoteData = { noteId: 'n1', title: '高热度精品', content: '真有干货', author: 'guru', likeCount: 1200, collectCount: 400 };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const trigger = { noteId: 'n1', sourcePageType: 'feed' as const, actions: ['like'] as ('like' | 'collect')[], ts: 0 };
+const mandatoryInteraction = {
+  ruleId: 'vietnam-recruitment',
+  actions: ['like', 'comment'] as ('like' | 'comment')[],
+  commentGuidance: 'Bình luận bằng tiếng Việt và hỏi về lương.',
+  commentApproval: 'auto_approve' as const,
+};
 
 describe('CommentAppraiser', () => {
   it('comment:true → comment.appraised（带 actions）', async () => {
@@ -103,6 +109,49 @@ describe('CommentComposer', () => {
     await sleep(30);
     assert.equal(skipped?.reason, 'compose_empty');
   });
+
+  it('mandatory 首次弃权 → 按规则指引补写一次并透传上下文', async () => {
+    const bus = new EventBus();
+    const prompts: string[] = [];
+    const role = new CommentComposer({
+      eventBus: bus,
+      soul,
+      llm: { complete: async (prompt) => {
+        prompts.push(prompt);
+        return prompts.length === 1 ? '{"decline":"nothing_genuine"}' : '{"text":"Cho mình hỏi ca làm và mức lương thế nào ạ?"}';
+      } },
+      getNoteData: () => note,
+    });
+    role.subscribe();
+    let composed: any = null;
+    bus.on('comment.composed', (p) => { composed = p; });
+    bus.emit('comment.appraised', { ...trigger, mandatoryInteraction, ts: Date.now() });
+    await sleep(40);
+    assert.equal(prompts.length, 2);
+    assert.match(prompts[0], /Bình luận bằng tiếng Việt/);
+    assert.match(prompts[1], /唯一一次补写/);
+    assert.equal(composed?.mandatoryInteraction?.ruleId, 'vietnam-recruitment');
+    assert.match(composed?.draft ?? '', /ca làm/);
+  });
+
+  it('mandatory 两次都弃权 → 诚实 skip，不造模板', async () => {
+    const bus = new EventBus();
+    let calls = 0;
+    const role = new CommentComposer({
+      eventBus: bus,
+      soul,
+      llm: { complete: async () => { calls++; return '{"decline":"nothing_genuine"}'; } },
+      getNoteData: () => note,
+    });
+    role.subscribe();
+    let skipped: any = null;
+    bus.on('comment.skipped', (p) => { skipped = p; });
+    bus.emit('comment.appraised', { ...trigger, mandatoryInteraction, ts: Date.now() });
+    await sleep(40);
+    assert.equal(calls, 2);
+    assert.equal(skipped?.reason, 'nothing_genuine');
+    assert.equal(skipped?.mandatoryInteraction?.ruleId, 'vietnam-recruitment');
+  });
 });
 
 describe('CommentDeAiFlavor（脱 LLM 也可跑）', () => {
@@ -175,6 +224,49 @@ describe('CommentApprovalGate', () => {
     bus.emit('comment.cleared', { ...trigger, text: '学到了', ts: Date.now() });
     await sleep(30);
     assert.equal(skipped?.reason, 'approval_timeout');
+    assert.equal(approved, false);
+  });
+
+  it('mandatory auto_approve → 先通知成功再 approved，不调用逐条审批', async () => {
+    const bus = new EventBus();
+    let notice: any = null;
+    let reviewCalled = false;
+    const role = new CommentApprovalGate({
+      eventBus: bus,
+      soul,
+      approval: { request: async () => { reviewCalled = true; }, isApproved: async () => false },
+      autoApproveNotify: async (input) => { notice = input; },
+      getAccountId: () => 'acc-fb',
+      getAccountName: () => 'Tianxing Bai',
+      getNoteTitle: () => note.title,
+      now: () => 123,
+    });
+    role.subscribe();
+    let approved: any = null;
+    bus.on('comment.approved', (p) => { approved = p; });
+    bus.emit('comment.cleared', { ...trigger, text: 'Cho mình hỏi còn tuyển không ạ?', mandatoryInteraction, ts: Date.now() });
+    await sleep(30);
+    assert.equal(reviewCalled, false);
+    assert.equal(notice?.text, 'Cho mình hỏi còn tuyển không ạ?');
+    assert.equal(notice?.accountName, 'Tianxing Bai');
+    assert.equal(approved?.mandatoryInteraction?.ruleId, 'vietnam-recruitment');
+  });
+
+  it('mandatory auto_approve 通知失败 → fail-closed，不 approved', async () => {
+    const bus = new EventBus();
+    const role = new CommentApprovalGate({
+      eventBus: bus,
+      soul,
+      autoApproveNotify: async () => { throw new Error('chat unavailable'); },
+    });
+    role.subscribe();
+    let skipped: any = null;
+    let approved = false;
+    bus.on('comment.skipped', (p) => { skipped = p; });
+    bus.on('comment.approved', () => { approved = true; });
+    bus.emit('comment.cleared', { ...trigger, text: 'Còn tuyển không ạ?', mandatoryInteraction, ts: Date.now() });
+    await sleep(30);
+    assert.equal(skipped?.reason, 'auto_approve_notice_failed');
     assert.equal(approved, false);
   });
 });

@@ -29,6 +29,26 @@ export interface EngagementRules {
   comment_trigger: string[];
 }
 
+/** 账号显式声明的确定性互动动作。只允许已有 note-scoped 写动作。 */
+export type MandatoryInteractionAction = 'like' | 'comment';
+
+/** 评论授权模式：review=逐条人审；auto_approve=人设站立授权，但仍须先发免审通知。 */
+export type MandatoryCommentApproval = 'review' | 'auto_approve';
+
+/**
+ * 结构化强制互动规则（change facebook-mandatory-recruitment-interaction）。
+ *
+ * `when` 由详情粗筛 LLM 对真实全文做一次语义确认；命中后 actions 不再进入普通“要不要互动”判定。
+ * comment 必须与 like 同配，保持既有“先发生互动再进评论支线”的事件合同。
+ */
+export interface MandatoryInteractionRule {
+  id: string;
+  when: string;
+  actions: MandatoryInteractionAction[];
+  comment_guidance?: string;
+  comment_approval?: MandatoryCommentApproval;
+}
+
 /** 浏览状态机中，search 状态的关键词来源 */
 export type SearchSource =
   | 'extract_from_liked'
@@ -81,6 +101,8 @@ export interface Soul {
   interests: SoulInterests;
   /** 传统互动规则（向后兼容，ManagerAgent 中已弱化） */
   engagement_rules?: EngagementRules;
+  /** 运营员显式配置的确定性互动规则；缺省=完全沿用普通互动链。 */
+  mandatory_interactions?: MandatoryInteractionRule[];
   /** 传统浏览状态机（向后兼容） */
   browse_patterns?: BrowsePatterns;
   /** 行为习惯偏好（新版 ManagerAgent 使用） */

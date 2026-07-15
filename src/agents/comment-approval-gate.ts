@@ -33,9 +33,21 @@ export interface CommentApprovalPort {
   pollMs?: number;
 }
 
+export interface CommentApprovalNoticeInput {
+  requestId: string;
+  noteId: string;
+  text: string;
+  title?: string;
+  authorName?: string;
+  accountId?: string;
+  accountName?: string;
+}
+
 export interface CommentApprovalGateOptions extends RoleOptions {
   /** 人审端口；缺省（未接线）→ 一律 comment.skipped（绝不裸发）。 */
   approval?: CommentApprovalPort;
+  /** 结构化 mandatory auto_approve 的免审通知口；先通知成功才授权，缺失/失败 fail-closed。 */
+  autoApproveNotify?: (input: CommentApprovalNoticeInput) => Promise<void>;
   /** 当前账号 id；仅用于审批卡展示，缺省则卡片不显示账号。 */
   getAccountId?: () => string | null | undefined;
   /** 当前账号展示名/昵称；仅用于审批卡展示，缺省时由发卡端按 accountId 兜底。 */
@@ -51,6 +63,7 @@ export interface CommentApprovalGateOptions extends RoleOptions {
 export class CommentApprovalGate extends BaseRole {
   readonly roleName: RoleName = 'comment_approval_gate';
   private readonly approval?: CommentApprovalPort;
+  private readonly autoApproveNotify?: (input: CommentApprovalNoticeInput) => Promise<void>;
   private readonly getAccountId?: () => string | null | undefined;
   private readonly getAccountName?: () => string | null | undefined;
   private readonly getNoteTitle?: (noteId: string) => string | null;
@@ -62,6 +75,7 @@ export class CommentApprovalGate extends BaseRole {
   constructor(options: CommentApprovalGateOptions) {
     super(options);
     this.approval = options.approval;
+    this.autoApproveNotify = options.autoApproveNotify;
     this.getAccountId = options.getAccountId;
     this.getAccountName = options.getAccountName;
     this.getNoteTitle = options.getNoteTitle;
@@ -87,11 +101,45 @@ export class CommentApprovalGate extends BaseRole {
       sourcePageType: payload.sourcePageType,
       actions: payload.actions,
       reason,
+      ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
       ts: this.now(),
     });
   }
 
   private async onCleared(payload: CommentClearedPayload): Promise<void> {
+    const mandatoryAutoApprove = payload.mandatoryInteraction?.actions.includes('comment') === true &&
+      payload.mandatoryInteraction.commentApproval === 'auto_approve';
+    const title = this.getNoteTitle?.(payload.noteId) ?? undefined;
+    const authorName = this.getNoteAuthor?.(payload.noteId) ?? undefined;
+    const accountId = this.getAccountId?.() ?? undefined;
+    const accountName = this.getAccountName?.() ?? undefined;
+    const requestId = `comment-${payload.noteId}-${this.now()}`;
+
+    if (mandatoryAutoApprove) {
+      if (!this.autoApproveNotify) {
+        this.log(`mandatory auto_approve 通知口未接线，绝不裸发 note=${payload.noteId}`);
+        this.skip(payload, 'auto_approve_notice_failed');
+        return;
+      }
+      try {
+        await this.autoApproveNotify({ requestId, noteId: payload.noteId, text: payload.text, title, authorName, accountId, accountName });
+      } catch (err) {
+        this.log(`mandatory auto_approve 通知失败：${(err as Error).message}`);
+        this.skip(payload, 'auto_approve_notice_failed');
+        return;
+      }
+      this.log(`mandatory auto_approve 已通知并授权 rule=${payload.mandatoryInteraction!.ruleId} note=${payload.noteId}`);
+      this.emit('comment.approved', {
+        noteId: payload.noteId,
+        sourcePageType: payload.sourcePageType,
+        actions: payload.actions,
+        text: payload.text,
+        mandatoryInteraction: payload.mandatoryInteraction,
+        ts: this.now(),
+      });
+      return;
+    }
+
     // 红线：审批口未接线 → 绝不裸发。
     if (!this.approval) {
       this.log('评论人审口未接线，本篇不发（绝不裸发）');
@@ -99,15 +147,10 @@ export class CommentApprovalGate extends BaseRole {
       return;
     }
 
-    const requestId = `comment-${payload.noteId}-${this.now()}`;
     const timeoutMs = this.approval.timeoutMs ?? 90_000;
     const pollMs = this.approval.pollMs ?? 2_000;
 
     // 解析笔记标题和作者昵称供人识别（取不到 → 卡片显示未获取，不展示内部 id）。
-    const title = this.getNoteTitle?.(payload.noteId) ?? undefined;
-    const authorName = this.getNoteAuthor?.(payload.noteId) ?? undefined;
-    const accountId = this.getAccountId?.() ?? undefined;
-    const accountName = this.getAccountName?.() ?? undefined;
     try {
       await this.approval.request({ requestId, noteId: payload.noteId, text: payload.text, title, authorName, accountId, accountName });
     } catch (err) {
@@ -130,6 +173,7 @@ export class CommentApprovalGate extends BaseRole {
           sourcePageType: payload.sourcePageType,
           actions: payload.actions,
           text: payload.text,
+          ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
           ts: this.now(),
         });
         return;

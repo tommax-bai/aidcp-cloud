@@ -16,7 +16,7 @@ import type { RoleOptions } from './base-role.js';
 import type { SessionContext } from './session-context.js';
 import type { NoteData } from './content-curator-role.js';
 import { tieredInterests } from './persona-format.js';
-import type { RoleName, ReadingImagesDonePayload } from '../event-bus/types.js';
+import type { MandatoryInteractionContext, RoleName, ReadingImagesDonePayload } from '../event-bus/types.js';
 import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/index.js';
 
 export interface CommentReviewerOptions extends RoleOptions {
@@ -39,7 +39,7 @@ export class CommentReviewer extends BaseRole {
   private readonly platformProfile: CommentPlatformProfile;
   private unsubscribers: (() => void)[] = [];
   /** 等待 scroll_comments 回执的在途上下文（单飞：一次只深读一篇）。 */
-  private pending: { noteId: string; sourcePageType: 'feed' | 'search'; imagesBrowsed: number; count: number } | null = null;
+  private pending: { noteId: string; sourcePageType: 'feed' | 'search'; imagesBrowsed: number; count: number; mandatoryInteraction?: MandatoryInteractionContext } | null = null;
 
   constructor(options: CommentReviewerOptions) {
     super(options);
@@ -69,7 +69,7 @@ export class CommentReviewer extends BaseRole {
     // 平台能力短路（fail-open）：不支持「滚动评论区」的平台如实直接推进——不调用 LLM 判定、不下发
     // scroll_comments，诚实 commentsRead:0，绝不伪造已读评论。
     if (!this.canScrollComments()) {
-      this.emitReadingDone(payload.noteId, payload.sourcePageType, payload.imagesBrowsed, 0);
+      this.emitReadingDone(payload.noteId, payload.sourcePageType, payload.imagesBrowsed, 0, payload.mandatoryInteraction);
       return;
     }
     const note = this.getNoteData(payload.noteId);
@@ -90,6 +90,7 @@ export class CommentReviewer extends BaseRole {
         sourcePageType: payload.sourcePageType,
         imagesBrowsed: payload.imagesBrowsed,
         count,
+        ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
       };
       this.emit('reading.scroll_comments', {
         noteId: payload.noteId,
@@ -98,7 +99,7 @@ export class CommentReviewer extends BaseRole {
         ts: Date.now(),
       });
     } else {
-      this.emitReadingDone(payload.noteId, payload.sourcePageType, payload.imagesBrowsed, 0);
+      this.emitReadingDone(payload.noteId, payload.sourcePageType, payload.imagesBrowsed, 0, payload.mandatoryInteraction);
     }
   }
 
@@ -106,7 +107,7 @@ export class CommentReviewer extends BaseRole {
     if (payload.action !== 'scroll_comments' || !this.pending) return;
     const ctx = this.pending;
     this.pending = null;
-    this.emitReadingDone(ctx.noteId, ctx.sourcePageType, ctx.imagesBrowsed, payload.ok ? this.parseScrolledCount(payload.reason, 1) : 0);
+    this.emitReadingDone(ctx.noteId, ctx.sourcePageType, ctx.imagesBrowsed, payload.ok ? this.parseScrolledCount(payload.reason, 1) : 0, ctx.mandatoryInteraction);
   }
 
   private emitReadingDone(
@@ -114,6 +115,7 @@ export class CommentReviewer extends BaseRole {
     sourcePageType: 'feed' | 'search',
     imagesBrowsed: number,
     commentsRead: number,
+    mandatoryInteraction?: MandatoryInteractionContext,
   ): void {
     this.emit('reading.done', {
       noteId,
@@ -122,6 +124,7 @@ export class CommentReviewer extends BaseRole {
       commentsRead,
       keyPoints: [],
       readDurationMs: 0,
+      ...(mandatoryInteraction ? { mandatoryInteraction } : {}),
       ts: Date.now(),
     });
   }

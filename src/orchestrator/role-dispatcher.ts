@@ -12,7 +12,7 @@
  */
 
 import { EventBus } from '../event-bus/index.js';
-import type { NoteDetailData } from '../event-bus/types.js';
+import type { MandatoryInteractionContext, NoteDetailData } from '../event-bus/types.js';
 import {
   isNoteActionSupported,
   noteActionRefusalReason,
@@ -47,7 +47,7 @@ import type { HotLeadGateConfig } from '../hot-lead/heat-velocity.js';
 import type { ValuableCommentInput, ValuableCommentRef } from '../cache/valuable-comment-store.js';
 import { CommentComposer } from '../agents/comment-composer.js';
 import { CommentDeAiFlavor } from '../agents/comment-de-ai-flavor.js';
-import { CommentApprovalGate, type CommentApprovalPort } from '../agents/comment-approval-gate.js';
+import { CommentApprovalGate, type CommentApprovalNoticeInput, type CommentApprovalPort } from '../agents/comment-approval-gate.js';
 import { ProfileOpener } from '../agents/profile-opener.js';
 import { ProfileBrowser } from '../agents/profile-browser.js';
 import { NicknameEnricher } from '../agents/nickname-enricher.js';
@@ -214,6 +214,8 @@ export interface RoleDispatcherOptions {
    * 由 server 接线为复用 messenger + isPublishApproved（评论专属 requestId 命名空间）。
    */
   commentApproval?: CommentApprovalPort;
+  /** 结构化 mandatory auto_approve 免审通知；通知成功才放行，缺省 fail-closed。 */
+  commentAutoApproveNotify?: (input: CommentApprovalNoticeInput) => Promise<void>;
   /**
    * 「已批准未送达」操作员回报（change platform-browse-protocol）：评论迁移的 navigate 步失败 ⇒ 不发评论、
    * 显式回报操作员（人审成本已付）。缺省（未接线）→ 仅 warn 日志。阶段 0 迁移结构性不可达 ⇒ 从不触发。
@@ -380,6 +382,7 @@ export class RoleDispatcher {
   private readonly canView: () => boolean;
   private readonly explainView: () => ViewQuotaDecision;
   private readonly commentApproval?: CommentApprovalPort;
+  private readonly commentAutoApproveNotify?: (input: CommentApprovalNoticeInput) => Promise<void>;
   private readonly notifyApprovedNotDelivered?: (input: { noteId: string; reason?: string }) => void | Promise<void>;
   private readonly getCommentDailyRemaining?: () => number;
   private readonly getCommentLikeDailyRemaining?: () => number;
@@ -398,12 +401,12 @@ export class RoleDispatcher {
   }) => Promise<{ fired: boolean; reason?: string }>;
   private readonly getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
   /** 已下发待回执的评论上下文：action.completed{comment} 据此扣额 + emit comment.done（→ 是否进主页评估）。 */
-  private pendingComment: { noteId: string; sourcePageType: 'feed' | 'search'; actions: ('like' | 'collect')[]; text: string } | null = null;
+  private pendingComment: { noteId: string; sourcePageType: 'feed' | 'search'; actions: ('like' | 'collect')[]; text: string; mandatoryInteraction?: MandatoryInteractionContext } | null = null;
   /**
    * 回执驱动两步评论迁移（change platform-browse-protocol）：commentSurface≠readSurface 时先发 open_note{purpose:'navigate'}，
    * 待其 action.completed{ok, observation.surface:'detail', noteId 匹配} 才发 comment。阶段 0 两 surface 相等 ⇒ 结构性不可达。
    */
-  private pendingMigration: { noteId: string; sourcePageType: 'feed' | 'search'; actions: ('like' | 'collect')[]; text: string } | null = null;
+  private pendingMigration: { noteId: string; sourcePageType: 'feed' | 'search'; actions: ('like' | 'collect')[]; text: string; mandatoryInteraction?: MandatoryInteractionContext } | null = null;
   /**
    * 审批在途标志（change platform-browse-protocol）：comment.cleared 置、comment.approved/comment.skipped 清。
    * dispatcher 的 idle_nudge 翻译器据此抑制滚动，避免人审等待期把账号滚离目标。**不复用 pauseClock**（其不冻 idle）。
@@ -521,6 +524,7 @@ export class RoleDispatcher {
       return allowed ? { allowed } : { allowed, reason: 'view_quota_exhausted' };
     });
     this.commentApproval = options.commentApproval;
+    this.commentAutoApproveNotify = options.commentAutoApproveNotify;
     this.notifyApprovedNotDelivered = options.notifyApprovedNotDelivered;
     this.getCommentDailyRemaining = options.getCommentDailyRemaining;
     this.getCommentLikeDailyRemaining = options.getCommentLikeDailyRemaining;
@@ -1006,6 +1010,7 @@ export class RoleDispatcher {
       new CommentApprovalGate({
         ...commonOptions,
         ...(this.commentApproval ? { approval: this.commentApproval } : {}),
+        ...(this.commentAutoApproveNotify ? { autoApproveNotify: this.commentAutoApproveNotify } : {}),
         getAccountId: () => this.currentAccountId,
         getAccountName: () => this.getNickname(this.currentAccountId),
         getNoteTitle: (id) => getNoteData(id)?.title ?? null,
@@ -1805,8 +1810,10 @@ export class RoleDispatcher {
       // comment.cleared emit 内**同步** skip → 嵌套 emit comment.skipped 先于本处理器把标志清回 false；若这里
       // 无条件置 true 会「卡死 true」永久抑制 idle_nudge（真实 XHS 回归）。未接线=从不真等人审 ⇒ 无需抑制。
       // 接线态 gate 先 `await approval.request`（微任务挂起、不同步 skip）⇒ 本处理器先置 true、终局再清，循环正确。
-      this.eventBus.on('comment.cleared', () => {
-        if (this.commentApproval) this.approvalInFlight = true;
+      this.eventBus.on('comment.cleared', (payload) => {
+        const mandatoryAuto = payload.mandatoryInteraction?.actions.includes('comment') === true &&
+          payload.mandatoryInteraction.commentApproval === 'auto_approve';
+        if (!mandatoryAuto && this.commentApproval) this.approvalInFlight = true;
       }),
 
       // 审批被跳过/拒绝/超时 → 清审批在途标志（终局之一）。
@@ -1826,7 +1833,8 @@ export class RoleDispatcher {
             continue;
           }
           // 冷却闸（engagement-restraint）：未到点诚实跳过——不下发、不扣 budget（与风控拦截同口径，红线：不假成功）。
-          if (!this.cooldownPasses(action)) {
+          const mandatoryAction = action === 'like' && payload.mandatoryInteraction?.actions.includes('like') === true;
+          if (!mandatoryAction && !this.cooldownPasses(action)) {
             // 原本完全静默(直接 continue)→ 补一行稳定 token,让「冷却吞掉的互动」也可见。
             console.log(`[interaction_appraiser] skip reason=cooldown action=${action} note=${payload.noteId}`);
             continue;
@@ -1853,6 +1861,7 @@ export class RoleDispatcher {
             sourcePageType: payload.sourcePageType,
             actions: payload.actions,
             reason: 'risk_blocked',
+            ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
             ts: this.clock(),
           });
           return;
@@ -1867,6 +1876,7 @@ export class RoleDispatcher {
             sourcePageType: payload.sourcePageType,
             actions: payload.actions,
             text: payload.text,
+            ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
           };
           this.sendCommand({
             action: 'open_note',
@@ -1879,6 +1889,7 @@ export class RoleDispatcher {
           sourcePageType: payload.sourcePageType,
           actions: payload.actions,
           text: payload.text,
+          ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
         };
         this.sendNoteScopedCommand('comment', { action: 'comment', params: { noteId: payload.noteId, text: payload.text, thinkMs: this.thinkNow() } });
       }),
@@ -2206,7 +2217,13 @@ export class RoleDispatcher {
             payload.ok === true && echoedSurface === 'detail' && !!payload.noteId && payload.noteId === mig.noteId;
           if (landed) {
             this.sessionContext.markNoteMigratedToDetail();
-            this.pendingComment = { noteId: mig.noteId, sourcePageType: mig.sourcePageType, actions: mig.actions, text: mig.text };
+            this.pendingComment = {
+              noteId: mig.noteId,
+              sourcePageType: mig.sourcePageType,
+              actions: mig.actions,
+              text: mig.text,
+              ...(mig.mandatoryInteraction ? { mandatoryInteraction: mig.mandatoryInteraction } : {}),
+            };
             this.sendNoteScopedCommand('comment', {
               action: 'comment',
               params: { noteId: mig.noteId, text: mig.text, thinkMs: this.thinkNow() },
@@ -2221,6 +2238,7 @@ export class RoleDispatcher {
               sourcePageType: mig.sourcePageType,
               actions: mig.actions,
               ok: false,
+              ...(mig.mandatoryInteraction ? { mandatoryInteraction: mig.mandatoryInteraction } : {}),
               ts: this.clock(),
             });
           }
@@ -2307,6 +2325,7 @@ export class RoleDispatcher {
             sourcePageType: pc.sourcePageType,
             actions: pc.actions,
             ok: payload.ok === true,
+            ...(pc.mandatoryInteraction ? { mandatoryInteraction: pc.mandatoryInteraction } : {}),
             ts: this.clock(),
           });
         }

@@ -14,7 +14,7 @@ import type { RoleOptions } from './base-role.js';
 import type { NoteData } from './content-curator-role.js';
 import { tieredInterests } from './persona-format.js';
 import { interactionLabel } from './interaction-label.js';
-import type { RoleName, CommentAppraisedPayload } from '../event-bus/types.js';
+import type { MandatoryInteractionContext, RoleName, CommentAppraisedPayload } from '../event-bus/types.js';
 import { topicKeysFromTitle, type ValuableCommentRef } from '../cache/valuable-comment-store.js';
 import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/index.js';
 
@@ -24,6 +24,10 @@ interface ComposeContext {
   reason?: string;
   /** 本次对该笔记的真实互动（like / collect）。 */
   actions?: ('like' | 'collect')[];
+  /** 详情确认的强制规则：注入具体写作指引，并禁止普通语义弃权。 */
+  mandatoryInteraction?: MandatoryInteractionContext;
+  /** mandatory 首次无效后的唯一一次补写。 */
+  retry?: boolean;
 }
 
 export const DEFAULT_MAX_COMMENT_LEN = XHS_COMMENT_PROFILE.maxCommentLength;
@@ -68,6 +72,7 @@ export class CommentComposer extends BaseRole {
       sourcePageType: payload.sourcePageType,
       actions: payload.actions,
       reason,
+      ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
       ts: Date.now(),
     });
   }
@@ -90,30 +95,46 @@ export class CommentComposer extends BaseRole {
       }
     }
 
-    let raw: string;
-    try {
-      // 现场评论（change platform-vocabulary-and-thresholds 2.1）：Facebook 由 note.detail 直接带回、
-      // 小红书由 dispatcher 从 scroll_comments 回执归集。采不到即空 ⇒ prompt 与今天一致。
-      const onPageComments = (note.comments ?? []).filter(Boolean).slice(0, 6);
-      raw = await this.decide(this.buildPrompt(note, references, onPageComments, { reason: payload.reason, actions: payload.actions }));
-    } catch {
-      this.skip(payload, 'llm_error');
-      return;
-    }
+    // 现场评论（change platform-vocabulary-and-thresholds 2.1）：Facebook 由 note.detail 直接带回、
+    // 小红书由 dispatcher 从 scroll_comments 回执归集。采不到即空 ⇒ prompt 与今天一致。
+    const onPageComments = (note.comments ?? []).filter(Boolean).slice(0, 6);
+    const attempts = payload.mandatoryInteraction ? 2 : 1;
+    let draft: string | null = null;
+    let failureReason = 'llm_error';
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      let raw: string;
+      try {
+        raw = await this.decide(this.buildPrompt(note, references, onPageComments, {
+          reason: payload.reason,
+          actions: payload.actions,
+          mandatoryInteraction: payload.mandatoryInteraction,
+          retry: attempt > 0,
+        }));
+      } catch {
+        failureReason = 'llm_error';
+        continue;
+      }
 
-    const parsed = this.parseOutput(raw);
-    // 语义弃权（change humanize-interaction-prompts）：写不出真东西时诚实不写，绝不硬凑客套话。
-    if (parsed.decline) {
-      this.skip(payload, 'nothing_genuine');
-      return;
+      const parsed = this.parseOutput(raw);
+      // 普通路径维持“写不出则弃权”；mandatory 最多补写一次，仍失败就诚实 skip，不塞模板。
+      if (parsed.decline) {
+        failureReason = 'nothing_genuine';
+        continue;
+      }
+      const candidate = this.sanitize(parsed.text);
+      if (!candidate) {
+        failureReason = 'compose_empty';
+        continue;
+      }
+      if (candidate.length > this.platformProfile.maxCommentLength) {
+        failureReason = 'compose_too_long';
+        continue;
+      }
+      draft = candidate;
+      break;
     }
-    const draft = this.sanitize(parsed.text);
     if (!draft) {
-      this.skip(payload, 'compose_empty');
-      return;
-    }
-    if (draft.length > this.platformProfile.maxCommentLength) {
-      this.skip(payload, 'compose_too_long');
+      this.skip(payload, failureReason);
       return;
     }
 
@@ -123,6 +144,7 @@ export class CommentComposer extends BaseRole {
       actions: payload.actions,
       draft,
       ...(references.length ? { references } : {}),
+      ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
       ts: Date.now(),
     });
   }
@@ -184,6 +206,10 @@ export class CommentComposer extends BaseRole {
     const actLine = ctx.actions && ctx.actions.length ? `你刚${interactionLabel(ctx.actions)}这篇。` : '';
     const reasonLine = ctx.reason ? `你觉得它值得评，是因为：${ctx.reason}` : '';
     const ctxBlock = actLine || reasonLine ? `\n${[actLine, reasonLine].filter(Boolean).join('')}\n` : '';
+    const mandatory = ctx.mandatoryInteraction;
+    const mandatoryBlock = mandatory
+      ? `\n这篇已由详情全文确认命中账号强制规则「${mandatory.ruleId}」。本次必须写出一条贴合正文的评论，不得选择弃权。\n评论指引：${mandatory.commentGuidance ?? '紧扣正文，写一条自然、具体的真人评论。'}${ctx.retry ? '\n上一次输出无效；这是唯一一次补写，请只给合法、非空、不过长的具体评论。' : ''}\n`
+      : '';
     // 语言约束（change platform-vocabulary-and-thresholds 2.2）：只有声明了该规则的平台才渲染这条 bullet。
     const langLine = composeLanguageRule ? `\n- ${composeLanguageRule}；` : '';
     // 空正文（Facebook 图片帖常无正文）：诚实说明「没有文字正文」，并禁止臆造画面内容——不写「标题：」空行。
@@ -193,19 +219,19 @@ export class CommentComposer extends BaseRole {
       ? `\n内容：${note.content}`
       : `\n内容：（这条${contentName}没有文字正文，只有图片/视频。你看不到画面，别臆造里面有什么；只能就着上面的评论区语境写，没有可写的就诚实弃权）`;
     return `${this.personaHeader()}
-为下面这篇你认可的${contentName}写**一条**评论。${ctxBlock}
+为下面这篇你认可的${contentName}写**一条**评论。${ctxBlock}${mandatoryBlock}
 要求：
 - 像真人随手留言，真诚、不营销不客套；一般就一两句，可以更短、更随口（最多 ${maxCommentLength} 字）；
 - 贴这篇${contentName}的具体内容，别泛泛而谈；${langLine}
 - 怎么切入你自己定，挑最自然的一种、别每条都一个套路：接一句真实共鸣 / 问一个你真想问的问题 / 讲一句你相关的经历 / 一句纯情绪的短评；
 - 用你的人格语气；不要 emoji 堆砌、不要 AI 腔（如「值得一提」「总而言之」「感谢分享」这类客套）；
 - **不要出现 @ 提及**、不要话题标签、不要外链；
-- 如果这篇你其实没有真东西可说、只挤得出客套话，就别硬写。
+- ${mandatory ? '本篇已获强制规则确认，不提供弃权出口；必须依据正文和指引写具体内容，仍不得编造正文没有的信息。' : '如果这篇你其实没有真东西可说、只挤得出客套话，就别硬写。'}
 ${refBlock}${liveBlock}
 当前${contentName}：
 作者：${note.author ?? '未知'}${titleLine}${bodyLine}
 
-只输出JSON：有真东西想说 → {"text":"你的评论"}；实在没有真东西可说 → {"decline":"nothing_genuine"}`;
+只输出JSON：${mandatory ? '{"text":"你的评论"}' : '有真东西想说 → {"text":"你的评论"}；实在没有真东西可说 → {"decline":"nothing_genuine"}'}`;
   }
 
   /** 解析撰写输出：JSON {text} → 文本；JSON {decline} → 弃权；否则退化为首个非空行当文本。 */

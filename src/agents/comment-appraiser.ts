@@ -84,11 +84,32 @@ export class CommentAppraiser extends BaseRole {
       sourcePageType: payload.sourcePageType,
       actions: payload.actions,
       reason,
+      ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
       ts: Date.now(),
     });
   }
 
   private async onInteractionCompleted(payload: InteractionCompletedPayload): Promise<void> {
+    const mandatory = payload.mandatoryInteraction;
+    if (mandatory?.actions.includes('comment')) {
+      const note = this.getNoteData(payload.noteId);
+      if (!note) {
+        this.skip(payload, 'note_data_unavailable');
+        return;
+      }
+      // 显式结构化规则命中：跳过普通会话/日预闸、冷却、热度与“要不要评”LLM。
+      // 真正下发前的 RiskController.canDo('comment') 仍由 dispatcher 守住。
+      this.log(`mandatory_match rule=${mandatory.ruleId} → force comment compose`);
+      this.emit('comment.appraised', {
+        noteId: payload.noteId,
+        sourcePageType: payload.sourcePageType,
+        actions: payload.actions,
+        reason: `mandatory_rule:${mandatory.ruleId}`,
+        mandatoryInteraction: mandatory,
+        ts: Date.now(),
+      });
+      return;
+    }
     // 数量闸（最便宜阶段）：会话预算 + 每日上限取小，任一耗尽即不评。
     if (this.getRemainingComments() <= 0) {
       this.skip(payload, 'no_comment_budget');

@@ -3,6 +3,7 @@
  */
 
 import type { CommentCandidate, Envelope, NoteImagePayload, NotificationItem } from '../comm/protocol.js';
+import type { MandatoryCommentApproval, MandatoryInteractionAction } from '../soul/types.js';
 
 // Agent 角色枚举
 export type AgentRole = 'session_monitor' | 'feed_scanner' | 'content_curator' | 'interaction_appraiser' | 'comment_reviewer';
@@ -205,10 +206,19 @@ export interface NoteEnteredPayload {
   ts: number;
 }
 
+/** 详情全文已确认的结构化强制互动上下文；随因果 payload 透传，避免同级订阅共享态竞态。 */
+export interface MandatoryInteractionContext {
+  ruleId: string;
+  actions: MandatoryInteractionAction[];
+  commentGuidance?: string;
+  commentApproval?: MandatoryCommentApproval;
+}
+
 export interface QualityPassPayload {
   noteId: string;
   sourcePageType: 'feed' | 'search';
   reason: string;
+  mandatoryInteraction?: MandatoryInteractionContext;
   ts: number;
 }
 
@@ -226,6 +236,7 @@ export interface ReadingDonePayload {
   commentsRead: number;
   keyPoints: string[];
   readDurationMs: number;
+  mandatoryInteraction?: MandatoryInteractionContext;
   ts: number;
 }
 
@@ -245,6 +256,7 @@ export interface ReadingImagesDonePayload {
   imagesBrowsed: number;
   /** 未看图的诚实原因（如平台不支持 browse_images 时的 'surface_unsupported'）；正常路径不带。 */
   reason?: string;
+  mandatoryInteraction?: MandatoryInteractionContext;
   ts: number;
 }
 
@@ -261,6 +273,7 @@ export interface InteractionCompletedPayload {
   noteId: string;
   sourcePageType: 'feed' | 'search';
   actions: ('like' | 'collect')[];
+  mandatoryInteraction?: MandatoryInteractionContext;
   ts: number;
 }
 
@@ -281,6 +294,7 @@ export interface CommentAppraisedPayload {
   /** 评估角色判「值得评」的理由（change humanize-interaction-prompts）：穿透给撰写角色作语境，
    *  让撰写不必从零重推切入点。可选、向后兼容——无 reason 时撰写 prompt 省略该片段。 */
   reason?: string;
+  mandatoryInteraction?: MandatoryInteractionContext;
   ts: number;
 }
 
@@ -291,6 +305,7 @@ export interface CommentComposedPayload {
   draft: string;
   /** 撰写时取用的语料库参考评论原文（comment-like-on-detail B）；供 de-ai 撞车护栏判近似照搬。可空。 */
   references?: string[];
+  mandatoryInteraction?: MandatoryInteractionContext;
   ts: number;
 }
 
@@ -299,6 +314,7 @@ export interface CommentClearedPayload {
   sourcePageType: 'feed' | 'search';
   actions: ('like' | 'collect')[];
   text: string;
+  mandatoryInteraction?: MandatoryInteractionContext;
   ts: number;
 }
 
@@ -307,6 +323,7 @@ export interface CommentApprovedPayload {
   sourcePageType: 'feed' | 'search';
   actions: ('like' | 'collect')[];
   text: string;
+  mandatoryInteraction?: MandatoryInteractionContext;
   ts: number;
 }
 
@@ -316,6 +333,7 @@ export interface CommentDonePayload {
   sourcePageType: 'feed' | 'search';
   actions: ('like' | 'collect')[];
   ok: boolean;
+  mandatoryInteraction?: MandatoryInteractionContext;
   ts: number;
 }
 
@@ -325,6 +343,7 @@ export interface CommentSkippedPayload {
   sourcePageType: 'feed' | 'search';
   actions: ('like' | 'collect')[];
   reason: string;
+  mandatoryInteraction?: MandatoryInteractionContext;
   ts: number;
 }
 

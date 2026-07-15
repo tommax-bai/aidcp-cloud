@@ -15,6 +15,9 @@ import type { RoleOptions } from './base-role.js';
 import type { SessionContext } from './session-context.js';
 import type { RoleName } from '../event-bus/types.js';
 import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/registry.js';
+import type { Soul } from '../soul/types.js';
+import type { MandatoryInteractionContext } from '../event-bus/types.js';
+import { mandatoryInteractionContext, mandatoryInteractionPrompt } from './mandatory-interaction.js';
 
 export interface NoteData {
   noteId: string;
@@ -66,8 +69,10 @@ export class ContentCuratorRole extends BaseRole {
   private async onNoteDetailArrived(payload: { detail: NoteData; ts: number }): Promise<void> {
     const noteData = payload.detail;
     const sourcePageType = this.sessionContext.sourcePageType;
+    // 一次判定固定一份人设快照，避免 LLM 在途期间热更新导致 prompt 与 rule-id 校验来自两版配置。
+    const soul = this.soul;
 
-    const prompt = this.buildPrompt(noteData);
+    const prompt = this.buildPrompt(noteData, soul);
     let raw: string;
     try {
       raw = await this.decide(prompt);
@@ -81,7 +86,7 @@ export class ContentCuratorRole extends BaseRole {
       return;
     }
 
-    const result = this.parseOutput(raw);
+    const result = this.parseOutput(raw, soul);
     if (!result) {
       this.emit('quality.reject', {
         noteId: noteData.noteId,
@@ -97,6 +102,7 @@ export class ContentCuratorRole extends BaseRole {
         noteId: noteData.noteId,
         sourcePageType,
         reason: result.reason,
+        ...(result.mandatoryInteraction ? { mandatoryInteraction: result.mandatoryInteraction } : {}),
         ts: Date.now(),
       });
     } else {
@@ -113,22 +119,30 @@ export class ContentCuratorRole extends BaseRole {
 
   /** 只读预览（change role-prompt-visibility）：用最小示例数据 + 真实人设渲染真实 prompt，仅供后台查看；不改 buildPrompt 逻辑。 */
   previewPrompt(): string {
-    return this.buildPrompt({ noteId: '<示例noteId>', title: '<示例标题>', content: '<示例正文，运行时为真实笔记内容>', author: '<示例作者>', likeCount: 0, collectCount: 0 });
+    return this.buildPrompt({ noteId: '<示例noteId>', title: '<示例标题>', content: '<示例正文，运行时为真实笔记内容>', author: '<示例作者>', likeCount: 0, collectCount: 0 }, this.soul);
   }
 
   /** 只读人设来源片段（change prompt-viewer-persona-source）：与 buildPrompt 同源拼接，仅供查看器定位标注；不改 buildPrompt。 */
   personaSegments(): string[] {
     const { identity, interests } = this.soul;
     const interestsStr = [...interests.primary, ...interests.secondary].join('、');
-    return [`你是「${identity.name}」，${identity.role}。\n你的兴趣：${interestsStr}`];
+    const mandatory = mandatoryInteractionPrompt(this.soul);
+    return [
+      `你是「${identity.name}」，${identity.role}。\n你的兴趣：${interestsStr}`,
+      ...(mandatory ? [`账号显式强制互动规则：\n${mandatory}`] : []),
+    ];
   }
 
-  private buildPrompt(note: NoteData): string {
-    const { identity, interests } = this.soul;
+  private buildPrompt(note: NoteData, soul: Soul): string {
+    const { identity, interests } = soul;
     const interestsStr = [...interests.primary, ...interests.secondary].join('、');
+    const mandatory = mandatoryInteractionPrompt(soul);
+    const mandatoryBlock = mandatory
+      ? `\n\n账号显式强制互动规则：\n${mandatory}\n判断优先级：\n- 用当前详情全文确认规则是否命中；命中时必须 action=pass，并把精确 id 写入 mandatoryRuleId，后续动作不再由普通互动模型否决。\n- 强制规则绝不覆盖全局品牌安全：政治敏感、色情低俗、赌博、违法或明显不良导向仍必须 close_note，且不得返回 mandatoryRuleId。\n- 未命中规则时不要输出 mandatoryRuleId，继续按下面普通粗筛口径判断。`
+      : '';
 
     return `你是「${identity.name}」，${identity.role}。
-你的兴趣：${interestsStr}
+你的兴趣：${interestsStr}${mandatoryBlock}
 你在快速判断：这篇${this.platformProfile.siteName}${this.platformProfile.contentName}**要不要继续看**（不是评内容好坏，只是粗筛）。
 
 ${this.platformProfile.contentName}信息：
@@ -143,13 +157,13 @@ ${this.platformProfile.metrics.like}：${note.likeCount}${this.platformProfile.m
 - **正文为空或很短不等于质量差**：可能是图文/视频${this.platformProfile.contentName}，正文本就少；不要仅因正文短而 close（仍按话题相关度与信息量判断）。
 - **拿不准时倾向 close**，宁缺毋滥——把宝贵的互动额度留给真正相关有价值的${this.platformProfile.contentName}。
 
-只输出JSON：{"action":"pass","reason":"简短原因","confidence":0.7}
-或（仅明显垃圾）：{"action":"close_note","reason":"简短原因","confidence":0.7}`;
+只输出JSON：${mandatory ? '{"action":"pass","mandatoryRuleId":"命中的精确规则id","reason":"简短原因"}\n或（普通通过）：' : ''}{"action":"pass","reason":"简短原因","confidence":0.7}
+或（关闭）：{"action":"close_note","reason":"简短原因","confidence":0.7}`;
   }
 
   // ─── 输出解析 ───────────────────────────────────────────────
 
-  private parseOutput(raw: string): CuratorResult | null {
+  private parseOutput(raw: string, soul: Soul): CuratorResult | null {
     const start = raw.indexOf('{');
     const end = raw.lastIndexOf('}');
     if (start < 0 || end <= start) return null;
@@ -171,8 +185,13 @@ ${this.platformProfile.metrics.like}：${note.likeCount}${this.platformProfile.m
 
     const action = o.action as 'close_note' | 'pass';
     const reason = typeof o.reason === 'string' ? o.reason : 'content_evaluated';
+    const mandatoryRuleId = typeof o.mandatoryRuleId === 'string' ? o.mandatoryRuleId : undefined;
+    const mandatory = mandatoryInteractionContext(soul, mandatoryRuleId);
+    // 模型声称命中但 id 不在当前人设、或一边 close 一边声称强制命中 → fail-closed。
+    if (mandatoryRuleId && !mandatory) return null;
+    if (mandatory && action !== 'pass') return null;
 
-    return { action, reason };
+    return { action, reason, ...(mandatory ? { mandatoryInteraction: mandatory } : {}) };
   }
 }
 
@@ -181,4 +200,5 @@ ${this.platformProfile.metrics.like}：${note.likeCount}${this.platformProfile.m
 interface CuratorResult {
   action: 'close_note' | 'pass';
   reason: string;
+  mandatoryInteraction?: MandatoryInteractionContext;
 }

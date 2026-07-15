@@ -77,6 +77,27 @@ test('set 后 getForAccount 即时热加载（无需重启）+ 回真态含审�
   assert.ok(store.getForAccount('default')?.includes('账号A'));
 });
 
+test('结构化 mandatory_interactions 经 store 热加载后由 resolver 原样解析', async () => {
+  const { pool } = fakePool();
+  const store = new PersonaStore({ pool });
+  await store.init();
+  const persona = `${soulYaml('Tianxing Bai')}
+mandatory_interactions:
+  - id: "vietnam-recruitment"
+    when: "Bài đăng tuyển dụng hoặc tuyển người tại Việt Nam"
+    actions:
+      - "like"
+      - "comment"
+    comment_guidance: "Bình luận bằng tiếng Việt và hỏi về công việc."
+    comment_approval: "auto_approve"
+`;
+  await store.set('default', persona, 'codex');
+
+  const resolved = createPersonaResolver({ store })('default');
+  assert.deepEqual(resolved?.mandatory_interactions?.[0]?.actions, ['like', 'comment']);
+  assert.equal(resolved?.mandatory_interactions?.[0]?.comment_approval, 'auto_approve');
+});
+
 test('空白文本视作无覆盖（getForAccount 返回 null）', async () => {
   const { pool } = fakePool({ persona: { default: '   ' } });
   const store = new PersonaStore({ pool });

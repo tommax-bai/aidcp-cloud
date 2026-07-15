@@ -17,6 +17,7 @@ import type { SessionContext } from './session-context.js';
 import type { NoteData } from './content-curator-role.js';
 import { tieredInterests } from './persona-format.js';
 import type { RoleName, ReadingDonePayload } from '../event-bus/types.js';
+import { mandatoryInteractionPrompt } from './mandatory-interaction.js';
 
 /**
  * 收藏硬数值阈值（engagement-restraint）：仅当笔记「收藏数 / 点赞数 ≥ 此比例」（默认 1/3）才收藏。
@@ -83,6 +84,30 @@ export class InteractionAppraiserRole extends BaseRole {
   }
 
   private async onReadingDone(payload: ReadingDonePayload): Promise<void> {
+    const mandatory = payload.mandatoryInteraction;
+    if (mandatory?.actions.includes('like')) {
+      // 详情全文已确认的显式规则：不再让普通 LLM / 会话软预算二次否决。
+      // 但笔记真实数据和 Facebook“先被内容链选中”的来源证据仍是硬前提，不能靠伪造事件绕开。
+      if (!this.getNoteData(payload.noteId)) {
+        this.emitSkip(payload.noteId, payload.sourcePageType, 'note_data_unavailable');
+        return;
+      }
+      const eligibility = this.isInteractionEligible?.(payload.noteId, payload.sourcePageType);
+      if (eligibility && !eligibility.ok) {
+        this.emitSkip(payload.noteId, payload.sourcePageType, eligibility.reason);
+        return;
+      }
+      this.log(`mandatory_match rule=${mandatory.ruleId} → force like intent`);
+      this.emit('interaction.completed', {
+        noteId: payload.noteId,
+        sourcePageType: payload.sourcePageType,
+        actions: ['like'],
+        mandatoryInteraction: mandatory,
+        ts: Date.now(),
+      });
+      this.sessionContext.recordInteraction('mandatory:like');
+      return;
+    }
     const budget = this.getRemainingBudget();
 
     // 无预算可用，直接 skip（设计内克制：预算耗尽）。
@@ -164,7 +189,8 @@ export class InteractionAppraiserRole extends BaseRole {
     const collectionPrinciple = bg?.collection_principle ?? COLLECT_PRINCIPLE_FALLBACK;
     const likePrinciple = bg?.like_principle ?? LIKE_PRINCIPLE_FALLBACK;
     const interestsStr = tieredInterests(interests);
-    return [`你是「${identity.name}」，${identity.role}。${identity.background}\n语气：${identity.tone}\n\n你的兴趣：${interestsStr}\n收藏标准：${collectionPrinciple}\n点赞标准：${likePrinciple}`];
+    const mandatory = mandatoryInteractionPrompt(this.soul);
+    return [`你是「${identity.name}」，${identity.role}。${identity.background}\n语气：${identity.tone}\n\n你的兴趣：${interestsStr}\n收藏标准：${collectionPrinciple}\n点赞标准：${likePrinciple}${mandatory ? `\n账号强制规则（仅上游已确认命中时走确定性旁路；到达本普通 prompt 代表未命中）：\n${mandatory}` : ''}`];
   }
 
   private buildPrompt(note: NoteData, ctx: ReadingContext): string {
@@ -172,6 +198,7 @@ export class InteractionAppraiserRole extends BaseRole {
     const collectionPrinciple = bg?.collection_principle ?? COLLECT_PRINCIPLE_FALLBACK;
     const likePrinciple = bg?.like_principle ?? LIKE_PRINCIPLE_FALLBACK;
     const interestsStr = tieredInterests(interests);
+    const mandatory = mandatoryInteractionPrompt(this.soul);
     const experienceBlock = buildExperienceBlock(ctx);
     const stateBlock = buildStateBlock(ctx);
 
@@ -184,6 +211,7 @@ export class InteractionAppraiserRole extends BaseRole {
 你的兴趣：${interestsStr}
 收藏标准：${collectionPrinciple}
 点赞标准：${likePrinciple}
+${mandatory ? `账号强制规则（仅上游详情已确认命中时由代码直接执行；本次既然进入普通判定，就不得自行把它当成已命中）：\n${mandatory}\n` : ''}
 
 当前笔记：
 标题：${note.title}

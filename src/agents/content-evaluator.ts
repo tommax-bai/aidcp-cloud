@@ -16,6 +16,7 @@ import { SessionContext } from './session-context.js';
 import { tieredInterests } from './persona-format.js';
 import type { RoleName } from '../event-bus/types.js';
 import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/registry.js';
+import { mandatoryInteractionPrompt } from './mandatory-interaction.js';
 
 /**
  * 受控好奇心豁免概率（change humanize-interaction-prompts）：小概率在某一轮选卡里追加
@@ -178,12 +179,17 @@ export class ContentEvaluator extends BaseRole {
   /** 只读人设来源片段（change prompt-viewer-persona-source）：与 buildPrompt 同源拼接，仅供查看器定位标注；不改 buildPrompt。 */
   personaSegments(): string[] {
     const { identity, interests } = this.soul;
-    return [`你是「${identity.name}」，${identity.role}。\n背景：${identity.background}\n兴趣领域：${tieredInterests(interests)}`];
+    const mandatory = mandatoryInteractionPrompt(this.soul);
+    return [
+      `你是「${identity.name}」，${identity.role}。\n背景：${identity.background}\n兴趣领域：${tieredInterests(interests)}`,
+      ...(mandatory ? [`账号显式强制互动规则：\n${mandatory}`] : []),
+    ];
   }
 
   private buildPrompt(cards: VisibleCard[], pageType: string, curious = false): string {
     const { identity, interests } = this.soul;
     const interestsStr = tieredInterests(interests);
+    const mandatory = mandatoryInteractionPrompt(this.soul);
 
     const cardList = cards
       .map((c, i) => {
@@ -204,9 +210,13 @@ export class ContentEvaluator extends BaseRole {
       ? `${this.platformProfile.metrics.like}/${this.platformProfile.metrics.collect}数`
       : `${this.platformProfile.metrics.like}数`;
 
+    const mandatoryBlock = mandatory
+      ? `\n\n账号显式强制互动规则（优先级高于普通兴趣挑选）：\n${mandatory}\n如果本屏有卡片看起来可能命中任一规则，优先选它打开，让详情全文做最终确认；只凭卡片看不清时可以打开，但不得臆造已经命中。品牌安全底线仍优先于强制规则。`
+      : '';
+
     return `你是「${identity.name}」，${identity.role}。
 背景：${identity.background}
-兴趣领域：${interestsStr}
+兴趣领域：${interestsStr}${mandatoryBlock}
 
 你正在${this.platformProfile.siteName}${pageType === 'feed' ? '推荐页' : '搜索结果页'}刷着，从下面这些卡片里挑一张你最想点开的。
 
