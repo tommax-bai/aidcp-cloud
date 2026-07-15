@@ -156,6 +156,12 @@ export interface CommandResult {
   platformName?: string;
   /** Optional purpose-built card (for example a DelegatedTask confirmation card). */
   card?: FeishuCard;
+  /**
+   * 静默受理：不发任何卡片（仅保留「已读」表情回应）。用于精确旧命令直接排队——命令被接受即入队，
+   * 结果由该任务自身的正常业务结果卡承担，无需额外队列提示。仅对**成功受理**生效；解析失败 / 权限拒
+   * 仍照常回卡（诚实拒绝绝不静默）。
+   */
+  silent?: boolean;
 }
 
 export interface PublishApprovalPayload {

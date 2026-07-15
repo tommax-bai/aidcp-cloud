@@ -187,7 +187,7 @@ import {
   createDelegatedExecutorRouter,
   type DelegatedTask,
 } from './delegated-task/index.js';
-import { DelegatedTaskNotificationGate } from './delegated-task/notification.js';
+import { DelegatedTaskNotificationGate, delegatedPublishOutcomeReceipt } from './delegated-task/notification.js';
 import {
   buildDelegatedTaskConfirmationCard,
   buildDelegatedTaskProgressCard,
@@ -1570,17 +1570,18 @@ async function main(): Promise<void> {
         };
       }
       // 精确旧命令（/publish、/comment）直接排队、不出确认卡：解析无歧义，二次确认是冗余点击。
-      // 自然语言委托仍出确认卡（账号/数量/截止靠推断、可能解析错）。两条路径的内容/评论人审都不变。
+      // 且**静默受理**——不发队列提示卡，只留已读表情；结果由任务自身的正常业务结果卡回报（评论结果卡 /
+      // 发帖人审卡）。自然语言委托仍出确认卡（账号/数量/截止靠推断、可能解析错）。两路的内容/评论人审都不变。
       if (result.autoQueued) {
         return {
           command: text,
           ok: true,
-          title: result.created ? '委托任务已直接排队' : '已存在相同任务',
-          message: '精确命令无需二次确认，已直接入队；内容发布 / 评论前仍保留人审。',
+          title: '委托任务已直接排队',
+          message: '精确命令已直接入队；结果由任务自身的结果卡回报。',
           accountId: result.task.accountId,
           accountName: result.task.accountName,
           platformName: result.task.platform,
-          card: buildDelegatedTaskProgressCard(result.task),
+          silent: true,
         };
       }
       return {
@@ -3490,15 +3491,27 @@ async function main(): Promise<void> {
       externalBusy: delegatedExecutors.externalBusy,
       platformStillMatches: async (task) => (await accountStore?.getPlatform?.(task.accountId)) === task.platform,
       onTaskUpdated: async (task: DelegatedTask) => {
-        if (!['waiting_approval', 'partially_completed', 'completed', 'cancelled', 'failed'].includes(task.status)) return;
+        // 委托层不再主动推送任务进度卡（change feishu-delegated-suppress-progress-cards）：结果由每类任务
+        // 自己的正常业务结果卡承担（评论链 postResultCard / 发帖人审卡自证成功）。唯一兜底＝发帖类终态失败
+        // 无独立结果卡，补一张避免静默（红线：绝不静默失败）。
+        const receipt = delegatedPublishOutcomeReceipt(task);
+        if (!receipt) return;
         if (!delegatedTaskNotificationGate.shouldSend(task)) return;
         const chatId = await resolveAccountChatId(task.accountId);
         if (!chatId) return;
         try {
-          await messenger.sendCard(chatId, buildDelegatedTaskProgressCard(task));
+          await messenger.sendCard(chatId, buildCommandResultCard({
+            command: '发帖',
+            ok: false,
+            level: receipt.level,
+            title: receipt.title,
+            message: receipt.message,
+            accountId: task.accountId,
+            accountName: accountDisplayName(task.accountId),
+          }));
           delegatedTaskNotificationGate.markSent(task);
         } catch (err) {
-          console.warn(`[delegated-task] 进度卡发送失败 task=${task.id}: ${(err as Error).message}`);
+          console.warn(`[delegated-task] 发帖失败结果卡发送失败 task=${task.id}: ${(err as Error).message}`);
         }
       },
       logger: console,

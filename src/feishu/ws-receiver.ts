@@ -242,6 +242,8 @@ export class FeishuWsReceiver {
     void this.commandRouter
       .handle(text, { chatId: message.chat_id, messageId: message.message_id })
       .then((result) => {
+        // 静默受理（精确命令直接排队）：不发卡，只留已读表情；结果由任务自身的业务结果卡回报。
+        if (result.silent) return;
         if (this.messenger) {
           return this.messenger.sendCard(message.chat_id, result.card ?? buildCommandResultCard(result));
         }
