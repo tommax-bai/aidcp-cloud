@@ -24,8 +24,9 @@ export interface RiskControllerOptions {
   /** 账号平台（同上）：facebook → 更保守冷启动曲线；其它/缺省 → 小红书曲线。 */
   platform?: string;
   /**
-   * 冷启动爬坡旁路开关（默认 true = 开，安全方向）。false → 完全跳过冷启动 clamp，
-   * effectiveQuotas 逐位回落历史风控缩放行为（可 A/B + 秒回滚）。
+   * 冷启动爬坡开关（默认 **false = 关**，change disable-account-age-coldstart-ramp）。
+   * 关（默认）→ 完全跳过冷启动 clamp，effectiveQuotas 直接走安全限额配置（不按账号年龄压低）。
+   * true → opt-in 启用逐日养号爬坡（effectiveQuotas=min(冷启动天花板, 风控缩放)），供养号需要时回退。
    */
   coldStartRampEnabled?: boolean;
 }
@@ -63,7 +64,7 @@ export class RiskController {
     this.quotaProvider = options.quotaProvider;
     this.createdAt = options.createdAt;
     this.platform = options.platform;
-    this.coldStartRampEnabled = options.coldStartRampEnabled ?? true;
+    this.coldStartRampEnabled = options.coldStartRampEnabled ?? false;
   }
 
   static async create(options: RiskControllerOptions = {}): Promise<RiskController> {
