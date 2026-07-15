@@ -29,6 +29,7 @@ interface StubConfig {
   readNull?: boolean;
   composeText?: string | null;
   postOk?: boolean;
+  postResult?: import('../../src/comment-agent/comment-task-runner.js').CommentPostResult;
 }
 
 function makeSteps(cfg: StubConfig) {
@@ -78,7 +79,9 @@ function makeSteps(cfg: StubConfig) {
     },
     post: async () => {
       calls.post++;
-      return cfg.postOk ?? true;
+      // 7.6 三态：显式 postResult 优先；否则 postOk 缺省/true → confirmed（写去重）；false → not_dispatched（→ post_failed，不记账）。
+      if (cfg.postResult) return cfg.postResult;
+      return (cfg.postOk ?? true) ? { status: 'confirmed' as const } : { status: 'not_dispatched' as const };
     },
     recordCommented: async (noteId) => {
       calls.record.push(noteId);
@@ -195,6 +198,26 @@ describe('runCommentTask 有界换词重试', () => {
     const r = await runCommentTask(steps, { logger: silent });
     assert.equal(r.outcome, 'post_failed');
     assert.deepEqual(calls.record, [], '未真发布不记账');
+  });
+
+  it('7.6/HOLE-8 提交已派发未确认 → submitted_unconfirmed 且**必写去重**（防下次排期重复评论）', async () => {
+    const { steps, calls } = makeSteps({
+      picks: [{ pickIndex: 0, stronglyRelevantIndexes: [0], reason: 'ok' }],
+      postResult: { status: 'submitted_unconfirmed' },
+    });
+    const r = await runCommentTask(steps, { logger: silent });
+    assert.equal(r.outcome, 'submitted_unconfirmed');
+    assert.equal(calls.record.length, 1, '提交已派发（可能已发出）→ 写去重，绝不让下次排期重触发');
+  });
+
+  it('7.6 命中后提交前被抢占 → preempted 且**不写去重**（未发出、放弃本轮不重试）', async () => {
+    const { steps, calls } = makeSteps({
+      picks: [{ pickIndex: 0, stronglyRelevantIndexes: [0], reason: 'ok' }],
+      postResult: { status: 'preempted', reason: 'preempted_by_task' },
+    });
+    const r = await runCommentTask(steps, { logger: silent });
+    assert.equal(r.outcome, 'preempted');
+    assert.deepEqual(calls.record, [], '提交前被抢占＝未发出，不写去重');
   });
 
   it('pickIndex 指向不存在的卡片 → 换词', async () => {

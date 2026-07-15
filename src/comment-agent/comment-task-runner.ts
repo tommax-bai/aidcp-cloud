@@ -19,6 +19,22 @@
 
 import type { CommentCandidateCard, PickResult } from '../agents/comment-target-picker.js';
 
+/**
+ * 发评论的三态结果（change lease-strict-preemption 7.6 / HOLE-8）。旧版 `post(): Promise<boolean>` 把
+ * 「提交按下已派发但未确认」塌成 false → post_failed → 去重账本不写 → 下次排期重触发 = **重复评论**。升级为三态，
+ * 去重写入门改为「提交已派发（confirmed ∪ submitted_unconfirmed）」而非 ok===true。判据是边缘 action.completed.reason
+ * 字符串（评论路径无 submitDispatched 布尔位；submitted_unconfirmed 为 XHS 提交后未确认，verification_ambiguous 为 FB 同义）。
+ */
+export type CommentPostResult =
+  /** 边缘确认真发出（ok:true）。写去重、记 commented。 */
+  | { status: 'confirmed' }
+  /** 提交按下已派发但未确认（reason=submitted_unconfirmed）——可能已发出：写去重、**绝不重投**（防双发）。 */
+  | { status: 'submitted_unconfirmed' }
+  /** 提交前被抢占（reason 属抢占类）——放弃本轮：不写去重、不重建、不本轮换词重试。 */
+  | { status: 'preempted'; reason: string }
+  /** 压根没发出（超时 / 边端离线 / 其它未成功回执）——提交前，可安全按 post_failed 处置、下次排期再评。 */
+  | { status: 'not_dispatched'; reason?: string };
+
 /** 开笔记后读到的正文 + 现场评论（喂撰写）。 */
 export interface NoteForComment {
   noteId: string;
@@ -55,14 +71,16 @@ export interface CommentTaskSteps {
     note: NoteForComment,
     comments: OnPageComment[],
   ): Promise<{ text: string; contactInfo: string | null } | null>;
-  /** 发布评论（interaction.comment + 真回执校验）；正文逐字、联系方式整段插入；返回是否真成功。 */
-  post(noteId: string, text: string, contactInfo?: string | null): Promise<boolean>;
+  /** 发布评论（interaction.comment + 真回执校验）；正文逐字、联系方式整段插入；返回三态（7.6/HOLE-8）。 */
+  post(noteId: string, text: string, contactInfo?: string | null): Promise<CommentPostResult>;
   /** 发布成功后记一笔「已评论」（供下次去重）。 */
   recordCommented(noteId: string): Promise<void>;
 }
 
 export type CommentTaskOutcome =
   | 'commented' // 成功评了一篇
+  | 'submitted_unconfirmed' // 命中并提交已派发但未确认——可能已发出、已写去重、绝不重投（7.6）
+  | 'preempted' // 命中后提交前被抢占——放弃本轮、不重建不重试（7.6）
   | 'not_started' // 尚未接管 edge，未执行搜索/选中/发布
   | 'no_terms' // 一个搜索词都没生成（人设/精选都空）
   | 'no_strong_candidate' // 所有词试完/达上限仍无强相关未评过的候选
@@ -141,13 +159,23 @@ export async function runCommentTask(
     }
     // 结果卡 / 日志展示的是合并终稿（正文 + 换行 + 联系方式），= 人审通过、边缘将拼出的文本。
     const displayText = composed.contactInfo ? `${composed.text}\n${composed.contactInfo}` : composed.text;
-    const ok = await steps.post(card.noteId, composed.text, composed.contactInfo);
-    if (!ok) {
-      return { outcome: 'post_failed', term, noteId: card.noteId, noteTitle: read.note.title, text: displayText, termsTried: tried, reason: 'comment not verified posted' };
+    const posted = await steps.post(card.noteId, composed.text, composed.contactInfo);
+    const base = { term, noteId: card.noteId, noteTitle: read.note.title, text: displayText, termsTried: tried } as const;
+    if (posted.status === 'preempted') {
+      // 提交前被抢占：放弃本轮（不写去重、不换词重试、不假失败），90s 人审沉没，运营需重敲一次（7.6）。
+      return { outcome: 'preempted', ...base, reason: `preempted:${posted.reason}` };
     }
+    if (posted.status === 'not_dispatched') {
+      return { outcome: 'post_failed', ...base, reason: posted.reason ?? 'comment not verified posted' };
+    }
+    // confirmed ∪ submitted_unconfirmed = 提交已派发 → 必写去重（防重复评论）。
     await steps.recordCommented(card.noteId);
+    if (posted.status === 'submitted_unconfirmed') {
+      // 提交已派发但未确认：已写去重、绝不重投（防双发）。
+      return { outcome: 'submitted_unconfirmed', ...base, reason: 'comment submitted but unconfirmed' };
+    }
     log.log(`[comment-task] 已评论 note=${card.noteId}（词「${term}」，尝试 ${tried} 个词）`);
-    return { outcome: 'commented', term, noteId: card.noteId, noteTitle: read.note.title, text: displayText, termsTried: tried };
+    return { outcome: 'commented', ...base };
   }
 
   log.log(`[comment-task] 试过 ${tried} 个搜索词仍无强相关未评过候选 → 诚实结束、本次不评`);
@@ -185,6 +213,8 @@ export interface TargetedCommentTarget {
 
 export type TargetedCommentOutcome =
   | 'commented' // 成功评在目标笔记上
+  | 'submitted_unconfirmed' // 提交已派发但未确认——可能已发出、已写去重、绝不重投（7.6）
+  | 'preempted' // 命中后提交前被抢占——放弃本轮、不重建不重试（7.6）
   | 'not_started' // 尚未接管 edge（租约没拿到），未搜索/未定位目标/未发布
   | 'note_not_found' // 有界搜索尝试用尽，返回卡片中始终无目标 noteId
   | 'read_failed' // 命中后开笔记/读正文失败（含详情 noteId 与目标不一致）
@@ -264,11 +294,19 @@ export async function runTargetedCommentTask(
     return { outcome: 'compose_skipped', noteId: target.noteId, noteTitle: read.note.title || target.title, searchAttempts: attempts, reason: 'empty/unapproved/rejected' };
   }
   const displayText = composed.contactInfo ? `${composed.text}\n${composed.contactInfo}` : composed.text;
-  const ok = await steps.post(target.noteId, composed.text, composed.contactInfo);
-  if (!ok) {
-    return { outcome: 'post_failed', noteId: target.noteId, noteTitle: read.note.title || target.title, text: displayText, searchAttempts: attempts, reason: 'comment not verified posted' };
+  const posted = await steps.post(target.noteId, composed.text, composed.contactInfo);
+  const base = { noteId: target.noteId, noteTitle: read.note.title || target.title, text: displayText, searchAttempts: attempts } as const;
+  if (posted.status === 'preempted') {
+    return { outcome: 'preempted', ...base, reason: `preempted:${posted.reason}` };
   }
+  if (posted.status === 'not_dispatched') {
+    return { outcome: 'post_failed', ...base, reason: posted.reason ?? 'comment not verified posted' };
+  }
+  // confirmed ∪ submitted_unconfirmed = 提交已派发 → 必写去重（防重复评论）。
   await steps.recordCommented(target.noteId);
+  if (posted.status === 'submitted_unconfirmed') {
+    return { outcome: 'submitted_unconfirmed', ...base, reason: 'comment submitted but unconfirmed' };
+  }
   log.log(`[targeted-comment] 已评论 note=${target.noteId}（${attempts > 0 ? `${attempts} 次搜索定位` : '复用当前笔记上下文'}）`);
-  return { outcome: 'commented', noteId: target.noteId, noteTitle: read.note.title || target.title, text: displayText, searchAttempts: attempts };
+  return { outcome: 'commented', ...base };
 }
