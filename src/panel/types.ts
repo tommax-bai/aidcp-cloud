@@ -7,6 +7,7 @@
  */
 
 import type { RiskController, RiskQuotaLevel, RiskAction, SessionInteractionBudget } from '../risk/index.js';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ConceptStore, BotChatStore, GroupRoute, SetGroupRouteResult } from '../cache/index.js';
 import type { CuratedContentTypeFilter, CuratedPanelListResult, CuratedPanelRow, CuratedFacets } from '../cache/index.js';
 import type { PublishLogStore, EditDraftPatch, EditDraftResult } from '../publish-agent/publish-log-store.js';
@@ -109,6 +110,10 @@ export interface PanelCaptchaAssist {
 }
 
 export interface PanelDeps {
+  /** 视频号互动配置 internal API；仍复用 panel JWT，但在域内按显式 grants 再次 fail-closed。 */
+  interactionInternalApi?: {
+    handle(req: IncomingMessage, res: ServerResponse, actor: string): Promise<boolean>;
+  };
   /** 令牌撤销黑名单（change console-cloud-panel-hardening #26）；未注入则登出/撤销不生效（向后兼容）。 */
   revocation?: TokenRevocationStore;
   publishLogStore: PublishLogStore;
@@ -506,7 +511,7 @@ export type ModelEffectiveSource = 'override' | 'category' | 'default' | 'image'
 export interface RoleConfigRowView {
   roleId: string;
   displayName: string;
-  group: 'browse' | 'publish';
+  group: 'browse' | 'publish' | 'interaction';
   /** 所属分类（稳定 key，与 category_config.category_id 一致）。 */
   category: string;
   llmKind: 'text' | 'image' | 'vision' | 'none';

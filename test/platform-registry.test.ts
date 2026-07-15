@@ -47,7 +47,11 @@ test('platform registry: facebook resolves to its own comment profile', () => {
 
 // change platform-registry-shape：能力/surface 表全覆盖断言（typecheck 已逼每格声明，运行时再守 reason 非空与形状）。
 test('platform registry: noteActions fully cover every action with non-empty reasons when unsupported', () => {
-  const entries: PlatformRegistryEntry[] = [PLATFORM_REGISTRY.xiaohongshu, PLATFORM_REGISTRY.facebook!];
+  const entries: PlatformRegistryEntry[] = [
+    PLATFORM_REGISTRY.xiaohongshu,
+    PLATFORM_REGISTRY.facebook!,
+    PLATFORM_REGISTRY.wechat_channels!,
+  ];
   for (const entry of entries) {
     for (const action of NOTE_SCOPED_ACTIONS) {
       const support = entry.noteActions[action];
@@ -83,4 +87,14 @@ test('platform registry: delegated actions declare XHS stable and Facebook beta/
   assert.ok('reason' in inspiration && inspiration.reason.length > 0);
   const curated = PLATFORM_REGISTRY.facebook!.delegatedActions.comment_curated;
   assert.equal(curated.level, 'unsupported');
+});
+
+test('platform registry: Video Channels is inbox-only and exposes no proactive delegated action', () => {
+  const channels = PLATFORM_REGISTRY.wechat_channels!;
+  assert.equal(channels.scheduler.comment.enabled, false);
+  assert.equal(channels.noteActions.comment.supported, false);
+  for (const support of Object.values(channels.delegatedActions)) {
+    assert.equal(support.level, 'unsupported');
+    assert.equal('reason' in support && support.reason, 'interaction_inbox_only');
+  }
 });

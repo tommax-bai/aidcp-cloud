@@ -139,3 +139,17 @@ test('默认关：小红书年轻号（Day1）也直接走安全 normal 配额�
   const xhsDay1 = new RiskController({ initialState: state('normal', 'normal'), clock: () => NOW, createdAt: NOW });
   assert.deepEqual(xhsDay1.effectiveQuotas(), deriveWindowQuotas('normal'));
 });
+
+test('视频号 dm_reply 默认仍为 0，但显式 quota override 不被旧浏览冷启动曲线夹回 0', () => {
+  const override = deriveWindowQuotas('normal');
+  override.minute.dm_reply = 1;
+  override.hour.dm_reply = 3;
+  override.day.dm_reply = 10;
+  const c = new RiskController({
+    initialState: state('normal', 'normal'), clock: () => NOW, createdAt: NOW,
+    platform: 'wechat_channels', quotaProvider: { windowQuotasFor: () => override },
+  });
+  assert.deepEqual({ minute: c.effectiveQuotas().minute.dm_reply, hour: c.effectiveQuotas().hour.dm_reply,
+    day: c.effectiveQuotas().day.dm_reply }, { minute: 1, hour: 3, day: 10 });
+  assert.equal(deriveWindowQuotas('normal').day.dm_reply, 0, '无 override 的 fallback 仍须关闭');
+});

@@ -1,6 +1,7 @@
 import type { PlatformId, DelegatedAction } from '../platform/index.js';
 
 export type { DelegatedAction };
+export type DelegatedPlatformId = Exclude<PlatformId, 'wechat_channels'>;
 
 export const DELEGATED_TASK_STATUSES = [
   'draft',
@@ -46,7 +47,7 @@ export interface DelegatedTask {
   id: string;
   accountId: string;
   accountName: string;
-  platform: PlatformId;
+  platform: DelegatedPlatformId;
   action: DelegatedAction;
   actionFamily: DelegatedActionFamily;
   targetSuccessCount: number;

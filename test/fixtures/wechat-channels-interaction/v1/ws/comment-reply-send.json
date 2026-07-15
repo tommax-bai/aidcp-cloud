@@ -1,0 +1,25 @@
+{
+  "v": 2,
+  "type": "interaction.reply.send",
+  "id": "reply-comment-envelope-001",
+  "ts": 1784044810000,
+  "payload": {
+    "jobId": "job_comment_100",
+    "attemptId": "attempt_comment_100_1",
+    "idempotencyKey": "e0e055e5abfced94f0e808eb5745a36b5f9f7aecc75c2d0377f5b2f692ae2ae9",
+    "envKey": "env_wc_demo",
+    "accountId": "acct_wc_demo",
+    "platform": "wechat_channels",
+    "channel": "comment",
+    "target": {
+      "threadExternalId": "comment_msg_100",
+      "inboundMessageExternalId": "comment_msg_100",
+      "parentExternalId": null
+    },
+    "content": {
+      "type": "text",
+      "text": "谢谢你的喜欢，欢迎继续交流。"
+    },
+    "expiresAt": 1784045110000
+  }
+}

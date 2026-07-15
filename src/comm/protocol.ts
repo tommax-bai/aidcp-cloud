@@ -10,6 +10,16 @@
  * 该文件是边-云两侧的唯一契约来源（edge 侧可复制或引用同名定义）。
  */
 
+import type {
+  InteractionAuthReopenPayload,
+  InteractionAuthStatusPayload,
+  InteractionReplyResultPayload,
+  InteractionReplySendPayload,
+  InteractionSyncAckPayload,
+  InteractionSyncBatchPayload,
+  InteractionSyncRequestPayload,
+} from '../interactions/types.js';
+
 /** 协议版本号 */
 export const PROTOCOL_VERSION = 2;
 
@@ -102,6 +112,14 @@ export type MessageType =
   | 'persona.generate.result' // cloud → edge：返回 soul.yaml/身份摘要或失败原因
   | 'persona.persist'         // edge → cloud：请求持久化确认后的 soul.yaml
   | 'persona.persist.result'  // cloud → edge：持久化结果
+  // —— 通用入站互动域（Session 00 frozen v1；capability=interaction_inbox_v1）——
+  | 'interaction.auth.status' // edge → cloud：平台登录态与能力快照
+  | 'interaction.sync.batch' // edge → cloud：评论/私信增量批次
+  | 'interaction.sync.ack' // cloud → edge：事务持久化后的批次确认
+  | 'interaction.reply.result' // edge → cloud：回复发送/核验终态
+  | 'interaction.sync.request' // cloud → edge：按渠道请求同步
+  | 'interaction.reply.send' // cloud → edge：下发唯一 attempt 的文本回复
+  | 'interaction.auth.reopen' // cloud → edge：请求重开登录/挑战处理入口
   // —— 通用 ——
   | 'error' // 任一方 → 对方：错误信息
   | 'ping'
@@ -187,6 +205,8 @@ export interface WelcomePayload {
   /** 云端分配的会话 id */
   sessionId: string;
   serverVersion: string;
+  /** 云端确认启用的握手能力；只回显双方都支持的 capability。 */
+  capabilities?: string[];
   /**
    * 节奏快照（change pacing-floor-config-min-interval）：tempo + 每类操作兜底 floor 区间。
    * 可选、向后兼容（旧端忽略）；边缘据此做操作间最小间隔 gating 与详情页停留兜底。
@@ -1380,6 +1400,13 @@ export interface PayloadMap {
   'persona.generate.result': PersonaGenerateResultPayload;
   'persona.persist': PersonaPersistPayload;
   'persona.persist.result': PersonaPersistResultPayload;
+  'interaction.auth.status': InteractionAuthStatusPayload;
+  'interaction.sync.batch': InteractionSyncBatchPayload;
+  'interaction.sync.ack': InteractionSyncAckPayload;
+  'interaction.reply.result': InteractionReplyResultPayload;
+  'interaction.sync.request': InteractionSyncRequestPayload;
+  'interaction.reply.send': InteractionReplySendPayload;
+  'interaction.auth.reopen': InteractionAuthReopenPayload;
   error: ErrorPayload;
   ping: Record<string, never>;
   pong: Record<string, never>;

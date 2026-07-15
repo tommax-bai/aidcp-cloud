@@ -1,0 +1,67 @@
+{
+  "flowId": "walkthrough-comment-confirmed-001",
+  "channel": "comment",
+  "purpose": "证明评论从 capability 协商、拉取、ack、生成、人工批准到确认发送的契约闭环。",
+  "steps": [
+    {
+      "order": 1,
+      "actor": "edge",
+      "fixture": "../ws/hello.json",
+      "expect": ["hello 声明 wechat_channels 与 interaction_inbox_v1。"]
+    },
+    {
+      "order": 2,
+      "actor": "cloud",
+      "fixture": "../ws/welcome.json",
+      "expect": ["welcome 回显 interaction_inbox_v1 后双方才启用新增消息。"]
+    },
+    {
+      "order": 3,
+      "actor": "edge",
+      "fixture": "../ws/comment-sync-batch.json",
+      "expect": ["batchId 与游标可重放。", "externalMessageId 在账号和渠道范围内稳定。"]
+    },
+    {
+      "order": 4,
+      "actor": "cloud",
+      "fixture": "../ws/comment-sync-ack.json",
+      "expect": ["只有持久化成功后才 ack acceptedCursor。"]
+    },
+    {
+      "order": 5,
+      "actor": "ai",
+      "fixture": "../ai/classifier-comment-input.json",
+      "expect": ["AI 只收到最小必要文本上下文。"]
+    },
+    {
+      "order": 6,
+      "actor": "ai",
+      "fixture": "../ai/reviewer-comment-output.json",
+      "expect": ["review_before_send 模式下 low risk 也不自动发送。"]
+    },
+    {
+      "order": 7,
+      "actor": "customer_api",
+      "fixture": "../customer-api/comment-detail-response.json",
+      "expect": ["客户看到可编辑草稿、版本号与可读来源。"]
+    },
+    {
+      "order": 8,
+      "actor": "cloud",
+      "fixture": "../ws/comment-reply-send.json",
+      "expect": ["发送指令带最终正文、幂等键和 comment 风控动作。"]
+    },
+    {
+      "order": 9,
+      "actor": "edge",
+      "fixture": "../ws/comment-reply-result-confirmed.json",
+      "expect": ["仅页面证据确认后返回 confirmed 和 externalMessageId。"]
+    }
+  ],
+  "finalAssertions": [
+    "reply job 允许 approval_required -> approved -> queued -> sending -> sent。",
+    "同一 inbound message 只有一个活动 reply job。",
+    "相同幂等键不会创建第二次平台写入。",
+    "写开关默认关闭，本 fixture 只证明契约而不声明真实发送已执行。"
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "data": {
+    "accountId": "acct_wc_demo",
+    "configVersion": 1,
+    "matchedRule": {
+      "ruleId": "rule_comment_thanks",
+      "reason": "命中 gratitude 意图和 text 消息类型。"
+    },
+    "template": {
+      "templateId": "template_comment_thanks",
+      "templateVersion": 1,
+      "renderedText": "谢谢示例观众的喜欢，欢迎继续交流。"
+    },
+    "polish": {
+      "before": "谢谢示例观众的喜欢，欢迎继续交流。",
+      "after": "谢谢你的喜欢，欢迎继续交流。",
+      "fallbackUsed": false,
+      "meaningChanged": false,
+      "introducedClaims": []
+    },
+    "risk": {
+      "level": "low",
+      "tags": [],
+      "reasons": []
+    },
+    "action": "review_required"
+  },
+  "meta": {
+    "requestId": "internal-preview-001",
+    "asOf": 1784044844000
+  }
+}

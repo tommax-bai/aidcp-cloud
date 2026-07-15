@@ -477,6 +477,8 @@ function createRequestHandler(
       return;
     }
 
+    if (deps.interactionInternalApi && await deps.interactionInternalApi.handle(req, res, verified.payload.sub)) return;
+
     // 边缘客户端安装包清单（change downloads-manifest-from-host）：**现扫本机 downloads 目录**得出，
     // 绝不由 console 源码写死版本号——那个数字描述的是「哪台机器上放了哪个包」，写进源码就对另一台机器撒谎。
     // 目录不可读 / 空 → 诚实返回空清单（前端显示「暂无可用安装包」），绝不编造版本、绝不给未经证实的链接。

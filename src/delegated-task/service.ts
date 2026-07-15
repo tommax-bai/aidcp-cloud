@@ -92,7 +92,7 @@ export function delegatedTaskDedupeKey(input: {
 }
 
 function platformLabel(platform: PlatformId): string {
-  return platform === 'facebook' ? 'Facebook' : '小红书';
+  return platform === 'facebook' ? 'Facebook' : platform === 'wechat_channels' ? '微信视频号' : '小红书';
 }
 
 function constraintRows(task: DelegatedTask): string[] {
@@ -169,6 +169,11 @@ export class DelegatedTaskService {
       const prepared = await this.deps.prepareTarget(intent, account);
       if (!prepared.ok) throw new DelegatedTaskServiceError(prepared.code, prepared.message, 409);
       if (prepared.targetConstraints) preparedIntent = { ...intent, targetConstraints: prepared.targetConstraints };
+    }
+    // The inbox-only platform deliberately has no delegated execution path or
+    // delegated_tasks persistence value. Keep that domain boundary explicit.
+    if (account.platform === 'wechat_channels') {
+      throw new DelegatedTaskServiceError('unsupported_action', '微信视频号仅支持入站互动回复工作流。', 422);
     }
     const support = this.capability(account.platform, preparedIntent.action);
     if (support.level === 'unsupported') {

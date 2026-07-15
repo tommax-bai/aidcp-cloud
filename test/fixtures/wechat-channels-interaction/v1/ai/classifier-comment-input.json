@@ -1,0 +1,13 @@
+{
+  "role": "reply_intent_classifier",
+  "requestId": "ai-classifier-comment-001",
+  "accountId": "acct_wc_demo",
+  "inbound": {
+    "channel": "comment",
+    "messageType": "text",
+    "text": "这个视频很有帮助，谢谢分享。",
+    "userName": "示例观众",
+    "videoTitle": "示例视频标题",
+    "recentMessages": []
+  }
+}

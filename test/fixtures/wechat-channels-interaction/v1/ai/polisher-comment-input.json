@@ -1,0 +1,22 @@
+{
+  "role": "reply_polisher",
+  "requestId": "ai-polisher-comment-001",
+  "accountId": "acct_wc_demo",
+  "inbound": {
+    "channel": "comment",
+    "messageType": "text",
+    "text": "这个视频很有帮助，谢谢分享。",
+    "userName": "示例观众",
+    "videoTitle": "示例视频标题",
+    "recentMessages": []
+  },
+  "renderedText": "谢谢示例观众的喜欢，欢迎继续交流。",
+  "profile": {
+    "tone": ["friendly", "concise"],
+    "maxLength": 200,
+    "allowEmoji": true,
+    "allowLinks": false,
+    "blockedPhrases": ["绝对有效"],
+    "requiredDisclaimer": null
+  }
+}

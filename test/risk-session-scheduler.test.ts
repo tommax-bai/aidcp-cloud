@@ -76,8 +76,8 @@ test('TimeScheduler 启动时间使用名义起点 +-30min 高斯抖动', () => 
 
 test('ColdStartPlanner 根据账号年龄返回 Day1-7 配额覆盖，Day8+ 返回 null', () => {
   const planner = new ColdStartPlanner({ random: () => 0.999 });
-  assert.deepEqual(planner.quotaForAccountAge(0), { view: 50, like: 3, collect: 1, comment: 0, follow: 1, publish: 0, comment_like: 0, join_group: 0 });
-  assert.deepEqual(planner.quotaForAccountAge(2), { view: 80, like: 10, collect: 3, comment: 1, follow: 2, publish: 0, comment_like: 1, join_group: 0 });
-  assert.deepEqual(planner.quotaForAccountAge(5), { view: 120, like: 20, collect: 5, comment: 3, follow: 3, publish: 1, comment_like: 2, join_group: 1 });
+  assert.deepEqual(planner.quotaForAccountAge(0), { view: 50, like: 3, collect: 1, comment: 0, follow: 1, publish: 0, comment_like: 0, join_group: 0, dm_reply: 0 });
+  assert.deepEqual(planner.quotaForAccountAge(2), { view: 80, like: 10, collect: 3, comment: 1, follow: 2, publish: 0, comment_like: 1, join_group: 0, dm_reply: 0 });
+  assert.deepEqual(planner.quotaForAccountAge(5), { view: 120, like: 20, collect: 5, comment: 3, follow: 3, publish: 1, comment_like: 2, join_group: 1, dm_reply: 0 });
   assert.equal(planner.quotaForAccountAge(7), null);
 });

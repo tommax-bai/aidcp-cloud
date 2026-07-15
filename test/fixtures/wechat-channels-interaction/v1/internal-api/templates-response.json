@@ -1,0 +1,37 @@
+{
+  "data": {
+    "accountId": "acct_wc_demo",
+    "currentVersion": 1,
+    "items": [
+      {
+        "templateId": "template_comment_thanks",
+        "channel": "comment",
+        "name": "评论感谢",
+        "content": "谢谢 {{user_name}} 的喜欢，欢迎继续交流。",
+        "enabled": true,
+        "archived": false,
+        "templateVersion": 1,
+        "variables": ["user_name"],
+        "updatedAt": 1784044720000,
+        "updatedBy": "admin_demo"
+      },
+      {
+        "templateId": "template_dm_greeting",
+        "channel": "dm",
+        "name": "私信问候",
+        "content": "你好 {{user_name}}，感谢联系 {{account_name}}，我们会尽快回复。",
+        "enabled": true,
+        "archived": false,
+        "templateVersion": 1,
+        "variables": ["user_name", "account_name"],
+        "updatedAt": 1784044721000,
+        "updatedBy": "admin_demo"
+      }
+    ],
+    "nextCursor": null
+  },
+  "meta": {
+    "requestId": "internal-templates-001",
+    "asOf": 1784044841000
+  }
+}

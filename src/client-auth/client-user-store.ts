@@ -197,6 +197,27 @@ export class ClientUserStore {
   }
 
   /**
+   * 客户是否显式拥有某环境。客户侧所有带 envKey 的业务请求必须先走这里；
+   * 缺表、空参数或未归属一律 false，避免用全量环境列表做内存过滤而意外放宽权限。
+   */
+  async ownsEnv(userId: string, envKey: string): Promise<boolean> {
+    const key = (envKey ?? '').trim();
+    if (!userId || !key) return false;
+    try {
+      const { rows } = await this.pool.query<{ owned: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM client_env_scope WHERE user_id = $1 AND env_key = $2
+         ) AS owned`,
+        [userId, key],
+      );
+      return rows[0]?.owned === true;
+    } catch (err) {
+      if (isMissingTable(err)) return false;
+      throw err;
+    }
+  }
+
+  /**
    * 客户端登录态新建/添加环境 → 自动归属当前客户（source=client；UPSERT，刷新 label/platform）。
    * 只写自己 userId 的行,天然不越权。
    */

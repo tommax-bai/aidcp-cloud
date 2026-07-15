@@ -1,0 +1,11 @@
+{
+  "v": 2,
+  "type": "welcome",
+  "id": "hello-wc-001",
+  "ts": 1784044800100,
+  "payload": {
+    "sessionId": "session-wc-001",
+    "serverVersion": "contract-fixture",
+    "capabilities": ["interaction_inbox_v1"]
+  }
+}

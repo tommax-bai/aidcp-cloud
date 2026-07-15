@@ -1,0 +1,13 @@
+{
+  "data": {
+    "envKey": "env_wc_demo",
+    "accountId": "acct_wc_demo",
+    "action": "sync",
+    "actionRequestId": "sync-request-comment-001",
+    "status": "accepted"
+  },
+  "meta": {
+    "requestId": "customer-sync-api-001",
+    "asOf": 1784044838000
+  }
+}

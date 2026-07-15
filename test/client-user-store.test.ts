@@ -126,3 +126,24 @@ test('registerEnvironments: source 显式传 auto 透传到参数（自动登记
   await store.registerEnvironments([{ envKey: 'k9' }], 'auto');
   assert.deepEqual(calls[0].params, ['k9', null, null, 'auto']);
 });
+
+test('ownsEnv: user A only owns rows explicitly scoped to user A', async () => {
+  const pool = fakePool((sql, params) => {
+    assert.match(sql, /WHERE user_id = \$1 AND env_key = \$2/);
+    return { rows: [{ owned: params?.[0] === 'user-a' && params?.[1] === 'env-a' }] };
+  });
+  const store = new ClientUserStore({ pool });
+  assert.equal(await store.ownsEnv('user-a', 'env-a'), true);
+  assert.equal(await store.ownsEnv('user-a', 'env-b'), false);
+  assert.equal(await store.ownsEnv('user-b', 'env-a'), false);
+});
+
+test('ownsEnv: missing ownership table fails closed', async () => {
+  const pool = fakePool(() => {
+    const err = new Error('relation "client_env_scope" does not exist') as Error & { code: string };
+    err.code = '42P01';
+    throw err;
+  });
+  const store = new ClientUserStore({ pool });
+  assert.equal(await store.ownsEnv('user-a', 'env-a'), false);
+});

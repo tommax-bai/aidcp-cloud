@@ -1,0 +1,92 @@
+{
+  "data": {
+    "envKey": "env_wc_demo",
+    "accountId": "acct_wc_demo",
+    "platform": "wechat_channels",
+    "auth": {
+      "status": "active",
+      "browserState": "closed",
+      "reasonCode": null,
+      "checkedAt": 1784044801000,
+      "capabilities": {
+        "commentsRead": true,
+        "commentsReply": true,
+        "dmRead": true,
+        "dmSendText": true,
+        "dmSendImage": false
+      }
+    },
+    "thread": {
+      "id": "thread_dm_200",
+      "platform": "wechat_channels",
+      "accountId": "acct_wc_demo",
+      "envKey": "env_wc_demo",
+      "channel": "dm",
+      "externalThreadId": "dm-thread-200",
+      "sourceExternalId": null,
+      "sourceTitle": null,
+      "sourceCoverUrl": null,
+      "participant": {
+        "externalId": "viewer-demo-002",
+        "displayName": "示例私信用户",
+        "avatarUrl": null
+      },
+      "status": "waiting_review",
+      "lastMessageAt": 1784044802500,
+      "lastSyncedAt": 1784044803100
+    },
+    "messages": [
+      {
+        "id": "msg_dm_200",
+        "threadId": "thread_dm_200",
+        "direction": "inbound",
+        "externalMessageId": "dm_msg_200",
+        "externalParentId": null,
+        "externalRootId": null,
+        "messageType": "text",
+        "contentText": "你好，我想进一步了解。",
+        "attachmentMeta": null,
+        "lifecycle": "active",
+        "platformCreatedAt": 1784044802500
+      }
+    ],
+    "replyJob": {
+      "id": "job_dm_200",
+      "inboundMessageId": "msg_dm_200",
+      "state": "ambiguous",
+      "version": 8,
+      "matchedRuleId": "rule_dm_greeting",
+      "configVersion": 1,
+      "template": {
+        "templateId": "template_dm_greeting",
+        "templateVersion": 1
+      },
+      "renderedText": "你好，感谢联系，我们会尽快回复。",
+      "polishedText": null,
+      "finalText": "你好，感谢联系，我们会尽快回复。",
+      "riskLevel": "unknown",
+      "riskReasons": ["unknown"],
+      "approvalActor": "operator_demo",
+      "approvedAt": 1784044819000,
+      "idempotencyKey": "3f56684a4cbfece4b9a31e7e16dbe103184d5e047cac807e067c99bfec8d573b",
+      "updatedAt": 1784044825000
+    },
+    "sendAttempt": {
+      "id": "attempt_dm_200_1",
+      "replyJobId": "job_dm_200",
+      "attemptNo": 1,
+      "idempotencyKey": "3f56684a4cbfece4b9a31e7e16dbe103184d5e047cac807e067c99bfec8d573b",
+      "status": "ambiguous",
+      "verificationStatus": "pending",
+      "externalMessageId": null,
+      "errorCode": "INTERACTION_UPSTREAM_UNAVAILABLE",
+      "startedAt": 1784044820000,
+      "finishedAt": 1784044825000
+    },
+    "nextCursor": null
+  },
+  "meta": {
+    "requestId": "customer-dm-detail-001",
+    "asOf": 1784044837000
+  }
+}

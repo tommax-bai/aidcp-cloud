@@ -10,6 +10,7 @@ export const DAILY_QUOTAS: Record<RiskQuotaLevel, ActionQuota> = {
     publish: 1,
     comment_like: 3,
     join_group: 1,
+    dm_reply: 0,
   },
   normal: {
     view: 150,
@@ -20,6 +21,7 @@ export const DAILY_QUOTAS: Record<RiskQuotaLevel, ActionQuota> = {
     publish: 1,
     comment_like: 6,
     join_group: 3,
+    dm_reply: 0,
   },
   aggressive: {
     view: 300,
@@ -30,6 +32,7 @@ export const DAILY_QUOTAS: Record<RiskQuotaLevel, ActionQuota> = {
     publish: 2,
     comment_like: 12,
     join_group: 5,
+    dm_reply: 0,
   },
 };
 
@@ -45,6 +48,7 @@ export const MINUTE_BURST_CAP: ActionQuota = {
   publish: 1,
   comment_like: 1,
   join_group: 1,
+  dm_reply: 0,
 };
 
 export const HOUR_BURST_CAP: ActionQuota = {
@@ -56,12 +60,13 @@ export const HOUR_BURST_CAP: ActionQuota = {
   publish: 2,
   comment_like: 3,
   join_group: 2,
+  dm_reply: 0,
 };
 
 export function deriveWindowQuotasFromDaily(day: ActionQuota): WindowQuotas {
   return {
-    minute: mapQuota(day, (action, daily) => Math.max(1, Math.min(MINUTE_BURST_CAP[action], Math.ceil(daily / 20)))),
-    hour: mapQuota(day, (action, daily) => Math.max(1, Math.min(HOUR_BURST_CAP[action], Math.ceil(daily / 4)))),
+    minute: mapQuota(day, (action, daily) => daily <= 0 ? 0 : Math.max(1, Math.min(MINUTE_BURST_CAP[action], Math.ceil(daily / 20)))),
+    hour: mapQuota(day, (action, daily) => daily <= 0 ? 0 : Math.max(1, Math.min(HOUR_BURST_CAP[action], Math.ceil(daily / 4)))),
     day: { ...day },
   };
 }

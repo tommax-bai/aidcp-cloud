@@ -1,0 +1,16 @@
+{
+  "v": 2,
+  "type": "interaction.sync.request",
+  "id": "sync-request-envelope-001",
+  "ts": 1784044801500,
+  "payload": {
+    "requestId": "sync-request-comment-001",
+    "envKey": "env_wc_demo",
+    "accountId": "acct_wc_demo",
+    "platform": "wechat_channels",
+    "channel": "comment",
+    "scopeExternalId": "video-demo-001",
+    "reason": "user_requested",
+    "requestedAt": 1784044801500
+  }
+}

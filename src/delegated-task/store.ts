@@ -3,6 +3,7 @@ import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
 import type {
   DelegatedActionFamily,
+  DelegatedPlatformId,
   DelegatedTask,
   DelegatedTaskAttempt,
   DelegatedTaskIntent,
@@ -99,7 +100,7 @@ CREATE INDEX IF NOT EXISTS idx_delegated_task_attempts_reconcile
 export interface DelegatedTaskCreate extends DelegatedTaskIntent {
   accountId: string;
   accountName: string;
-  platform: 'xiaohongshu' | 'facebook';
+  platform: DelegatedPlatformId;
   dedupeKey: string;
 }
 
@@ -137,7 +138,7 @@ interface TaskRow {
   id: string;
   account_id: string;
   account_name: string;
-  platform: 'xiaohongshu' | 'facebook';
+  platform: DelegatedPlatformId;
   action: DelegatedTask['action'];
   action_family: DelegatedActionFamily;
   target_success_count: number;

@@ -1,0 +1,48 @@
+{
+  "data": {
+    "accountId": "acct_wc_demo",
+    "currentVersion": 1,
+    "profiles": [
+      {
+        "channel": "comment",
+        "selfName": "示例品牌",
+        "userAddress": "你",
+        "tone": ["friendly", "concise"],
+        "maxLength": 200,
+        "allowEmoji": true,
+        "allowLinks": false,
+        "blockedPhrases": ["绝对有效"],
+        "disallowedClaims": ["未验证的效果承诺"],
+        "requiredDisclaimer": null,
+        "variableFallbacks": {
+          "user_name": "朋友",
+          "video_title": "这条视频",
+          "account_name": "我们",
+          "support_channel": "人工客服"
+        }
+      },
+      {
+        "channel": "dm",
+        "selfName": "示例品牌客服",
+        "userAddress": "你",
+        "tone": ["professional", "friendly"],
+        "maxLength": 500,
+        "allowEmoji": false,
+        "allowLinks": false,
+        "blockedPhrases": ["保证退款"],
+        "disallowedClaims": ["代替人工完成订单决策"],
+        "requiredDisclaimer": "如需处理账户或订单，请转人工核验。",
+        "variableFallbacks": {
+          "user_name": "朋友",
+          "video_title": "相关视频",
+          "account_name": "我们",
+          "support_channel": "人工客服"
+        }
+      }
+    ]
+  },
+  "meta": {
+    "requestId": "internal-profiles-001",
+    "asOf": 1784044843000
+  }
+}

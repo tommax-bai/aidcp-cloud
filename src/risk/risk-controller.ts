@@ -197,7 +197,15 @@ export class RiskController {
     const ageDays = Math.max(0, Math.floor((this.clock() - this.createdAt) / 86_400_000));
     const cap = coldStartDailyCap(ageDays, this.platform);
     if (!cap) return riskScaled;
-    return minWindowQuotas(riskScaled, deriveWindowQuotasFromDaily(cap));
+    const windowCap = deriveWindowQuotasFromDaily(cap);
+    // 视频号入站回复由独立全局/账号/channel 门禁和显式 quota_config 控制；旧浏览冷启动曲线
+    // 没有 dm_reply 语义，不能把运营明确配置的非零额度再次夹成 0。
+    if (this.platform === 'wechat_channels') {
+      windowCap.minute.dm_reply = riskScaled.minute.dm_reply;
+      windowCap.hour.dm_reply = riskScaled.hour.dm_reply;
+      windowCap.day.dm_reply = riskScaled.day.dm_reply;
+    }
+    return minWindowQuotas(riskScaled, windowCap);
   }
 
   counts() {

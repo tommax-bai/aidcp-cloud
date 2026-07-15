@@ -1,0 +1,21 @@
+{
+  "role": "reply_risk_reviewer",
+  "requestId": "ai-reviewer-comment-001",
+  "accountId": "acct_wc_demo",
+  "inbound": {
+    "channel": "comment",
+    "messageType": "text",
+    "text": "这个视频很有帮助，谢谢分享。",
+    "userName": "示例观众",
+    "videoTitle": "示例视频标题",
+    "recentMessages": []
+  },
+  "renderedText": "谢谢示例观众的喜欢，欢迎继续交流。",
+  "candidateText": "谢谢你的喜欢，欢迎继续交流。",
+  "meaningChanged": false,
+  "introducedClaims": [],
+  "policy": {
+    "mode": "review_before_send",
+    "hardRiskTags": ["refund", "personal_data", "legal", "medical", "minor_safety", "unknown"]
+  }
+}

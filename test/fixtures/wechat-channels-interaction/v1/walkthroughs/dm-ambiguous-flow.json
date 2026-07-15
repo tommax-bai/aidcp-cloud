@@ -1,0 +1,49 @@
+{
+  "flowId": "walkthrough-dm-ambiguous-001",
+  "channel": "dm",
+  "purpose": "证明私信发送结果不确定时 fail closed，不把派发当成功，也不自动重试。",
+  "steps": [
+    {
+      "order": 1,
+      "actor": "edge",
+      "fixture": "../ws/dm-sync-batch.json",
+      "expect": ["只同步 text 私信正文；图片发送能力保持 false。"]
+    },
+    {
+      "order": 2,
+      "actor": "cloud",
+      "fixture": "../ws/dm-sync-ack.json",
+      "expect": ["Cloud 持久化后推进 dm 游标。"]
+    },
+    {
+      "order": 3,
+      "actor": "customer_api",
+      "fixture": "../customer-api/job-action-request.json",
+      "expect": ["批准或发送动作必须带 expectedVersion。"]
+    },
+    {
+      "order": 4,
+      "actor": "cloud",
+      "fixture": "../ws/dm-reply-send.json",
+      "expect": ["发送指令使用 dm_reply 风控动作与稳定幂等键。"]
+    },
+    {
+      "order": 5,
+      "actor": "edge",
+      "fixture": "../ws/dm-reply-result-ambiguous.json",
+      "expect": ["无法确认落地时结果必须是 ambiguous。", "Cloud 不自动重投。"]
+    },
+    {
+      "order": 6,
+      "actor": "customer_api",
+      "fixture": "../customer-api/dm-detail-ambiguous-response.json",
+      "expect": ["客户看到结果待人工核验，而不是成功。"]
+    }
+  ],
+  "finalAssertions": [
+    "reply job 停在 ambiguous，只有人工核验能继续处置。",
+    "ambiguous 不计为 sent，也不触发自动重试。",
+    "dm AI polish 默认关闭。",
+    "dm_send_text fallback 配额为 0，配置未显式放开时不可写。"
+  ]
+}

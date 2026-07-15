@@ -1,0 +1,50 @@
+{
+  "v": 2,
+  "type": "interaction.sync.batch",
+  "id": "sync-comment-envelope-001",
+  "ts": 1784044802000,
+  "payload": {
+    "batchId": "batch-comment-001",
+    "requestId": "sync-request-comment-001",
+    "envKey": "env_wc_demo",
+    "accountId": "acct_wc_demo",
+    "platform": "wechat_channels",
+    "channel": "comment",
+    "scopeExternalId": "video-demo-001",
+    "cursorBefore": null,
+    "cursorAfter": "comment-cursor-001",
+    "hasMore": false,
+    "threads": [
+      {
+        "externalThreadId": "comment_msg_100",
+        "sourceExternalId": "video-demo-001",
+        "sourceTitle": "示例视频标题",
+        "sourceCoverUrl": "https://example.invalid/assets/video-demo-001.jpg",
+        "participant": {
+          "externalId": "viewer-demo-001",
+          "displayName": "示例观众",
+          "avatarUrl": null
+        },
+        "updatedAt": 1784044799000
+      }
+    ],
+    "messages": [
+      {
+        "externalThreadId": "comment_msg_100",
+        "externalMessageId": "comment_msg_100",
+        "direction": "inbound",
+        "externalParentId": null,
+        "externalRootId": "comment_msg_100",
+        "messageType": "text",
+        "contentText": "这个视频很有帮助，谢谢分享。",
+        "attachmentMeta": null,
+        "lifecycle": "active",
+        "platformCreatedAt": 1784044799000,
+        "rawMetaSanitized": {
+          "likeCount": 2
+        }
+      }
+    ],
+    "observedAt": 1784044802000
+  }
+}

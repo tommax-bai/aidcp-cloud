@@ -1,0 +1,55 @@
+{
+  "data": {
+    "envKey": "env_wc_demo",
+    "accountId": "acct_wc_demo",
+    "platform": "wechat_channels",
+    "auth": {
+      "status": "active",
+      "browserState": "closed",
+      "reasonCode": null,
+      "checkedAt": 1784044801000,
+      "capabilities": {
+        "commentsRead": true,
+        "commentsReply": true,
+        "dmRead": true,
+        "dmSendText": true,
+        "dmSendImage": false
+      }
+    },
+    "items": [
+      {
+        "threadId": "thread_comment_100",
+        "messageId": "msg_comment_100",
+        "channel": "comment",
+        "participantName": "示例观众",
+        "participantAvatarUrl": null,
+        "previewText": "这个视频很有帮助，谢谢分享。",
+        "sourceTitle": "示例视频标题",
+        "lastMessageAt": 1784044799000,
+        "unread": true,
+        "riskLevel": "low",
+        "jobState": "approval_required",
+        "jobVersion": 3
+      },
+      {
+        "threadId": "thread_dm_200",
+        "messageId": "msg_dm_200",
+        "channel": "dm",
+        "participantName": "示例私信用户",
+        "participantAvatarUrl": null,
+        "previewText": "你好，我想进一步了解。",
+        "sourceTitle": null,
+        "lastMessageAt": 1784044802500,
+        "unread": false,
+        "riskLevel": "unknown",
+        "jobState": "ambiguous",
+        "jobVersion": 8
+      }
+    ],
+    "nextCursor": null
+  },
+  "meta": {
+    "requestId": "customer-list-request-001",
+    "asOf": 1784044835000
+  }
+}

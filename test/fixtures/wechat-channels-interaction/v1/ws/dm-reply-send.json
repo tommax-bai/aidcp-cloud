@@ -1,0 +1,25 @@
+{
+  "v": 2,
+  "type": "interaction.reply.send",
+  "id": "reply-dm-envelope-001",
+  "ts": 1784044820000,
+  "payload": {
+    "jobId": "job_dm_200",
+    "attemptId": "attempt_dm_200_1",
+    "idempotencyKey": "3f56684a4cbfece4b9a31e7e16dbe103184d5e047cac807e067c99bfec8d573b",
+    "envKey": "env_wc_demo",
+    "accountId": "acct_wc_demo",
+    "platform": "wechat_channels",
+    "channel": "dm",
+    "target": {
+      "threadExternalId": "dm-thread-200",
+      "inboundMessageExternalId": "dm_msg_200",
+      "parentExternalId": null
+    },
+    "content": {
+      "type": "text",
+      "text": "你好，感谢联系，我们会尽快回复。"
+    },
+    "expiresAt": 1784045120000
+  }
+}

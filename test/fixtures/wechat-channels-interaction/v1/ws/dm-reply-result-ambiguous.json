@@ -1,0 +1,22 @@
+{
+  "v": 2,
+  "type": "interaction.reply.result",
+  "id": "reply-dm-envelope-001",
+  "ts": 1784044825000,
+  "payload": {
+    "jobId": "job_dm_200",
+    "attemptId": "attempt_dm_200_1",
+    "idempotencyKey": "3f56684a4cbfece4b9a31e7e16dbe103184d5e047cac807e067c99bfec8d573b",
+    "envKey": "env_wc_demo",
+    "accountId": "acct_wc_demo",
+    "platform": "wechat_channels",
+    "channel": "dm",
+    "status": "ambiguous",
+    "externalMessageId": null,
+    "errorCategory": "transient_network",
+    "errorCode": "INTERACTION_UPSTREAM_UNAVAILABLE",
+    "verification": "not_verified",
+    "retryAfterMs": null,
+    "finishedAt": 1784044825000
+  }
+}

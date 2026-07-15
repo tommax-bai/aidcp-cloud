@@ -281,3 +281,39 @@ test('登录限流:连续失败后 429', async () => {
     },
   );
 });
+
+test('interaction customer API is invoked only after JWT verification and enabled-user recheck', async () => {
+  const fx = makeFakeStore();
+  fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
+  const actors: string[] = [];
+  const interactionApi = {
+    async handle(_req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse, userId: string) {
+      actors.push(userId);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { envKey: 'env-a', accountId: 'acct-a' }, meta: { requestId: 'r1', asOf: 1 } }));
+      return true;
+    },
+  };
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), interactionApi },
+    baseConfig(0),
+    async (base) => {
+      const anonymous = await fetch(`${base}/environments/env-a/interactions`);
+      assert.equal(anonymous.status, 401);
+      assert.deepEqual(actors, []);
+      const login = await (await fetch(`${base}/login`, { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'acme', key: 'ck_secret' }) })).json() as { token: string };
+      const accepted = await fetch(`${base}/environments/env-a/interactions`, {
+        headers: { authorization: `Bearer ${login.token}` },
+      });
+      assert.equal(accepted.status, 200);
+      assert.deepEqual(actors, ['u1']);
+      fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'disabled' });
+      const disabled = await fetch(`${base}/environments/env-a/interactions`, {
+        headers: { authorization: `Bearer ${login.token}` },
+      });
+      assert.equal(disabled.status, 401);
+      assert.deepEqual(actors, ['u1']);
+    },
+  );
+});

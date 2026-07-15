@@ -1,4 +1,4 @@
-export type PlatformId = 'xiaohongshu' | 'facebook';
+export type PlatformId = 'xiaohongshu' | 'facebook' | 'wechat_channels';
 
 /**
  * Surface = 编排是否**离开列表**，不是页面形态。dialog / drawer / modal / overlay / profile
@@ -144,6 +144,18 @@ const FACEBOOK_DELEGATED_ACTIONS: Record<DelegatedAction, DelegatedActionSupport
   },
 };
 
+const WECHAT_CHANNELS_DELEGATED_ACTIONS: Record<DelegatedAction, DelegatedActionSupport> = {
+  comment_batch: { level: 'unsupported', reason: 'interaction_inbox_only' },
+  publish_post: { level: 'unsupported', reason: 'interaction_inbox_only' },
+  publish_from_inspiration: { level: 'unsupported', reason: 'interaction_inbox_only' },
+  comment_curated: { level: 'unsupported', reason: 'interaction_inbox_only' },
+  generate_candidates: { level: 'unsupported', reason: 'interaction_inbox_only' },
+  approve_candidate: { level: 'unsupported', reason: 'interaction_inbox_only' },
+  reject_candidate: { level: 'unsupported', reason: 'interaction_inbox_only' },
+  modify_candidate: { level: 'unsupported', reason: 'interaction_inbox_only' },
+  facebook_group_comment: { level: 'unsupported', reason: 'interaction_inbox_only' },
+};
+
 export const XHS_COMMENT_PROFILE: CommentPlatformProfile = {
   platform: 'xiaohongshu',
   siteName: '小红书',
@@ -190,6 +202,19 @@ export const FB_COMMENT_PROFILE: CommentPlatformProfile = {
   },
 };
 
+/** 视频号只接入新的入站 interaction 域；主动浏览/养号 composer 明确不支持。 */
+export const WECHAT_CHANNELS_COMMENT_PROFILE: CommentPlatformProfile = {
+  platform: 'wechat_channels',
+  siteName: '微信视频号',
+  contentName: '视频',
+  maxCommentLength: 500,
+  metrics: { like: '赞', collect: '' },
+  search: {
+    defaultSort: 'none', defaultSortLabel: '不支持', defaultTimeWindow: 'none',
+    defaultTimeWindowLabel: '不支持', targetedSearchTermMaxLength: 0, targetedSearchFallbackLength: 0,
+  },
+};
+
 /** 小红书 v1 逐帖动作全支持。 */
 const XHS_NOTE_ACTIONS: Record<NoteScopedAction, NoteSupport> = {
   read_content: { supported: true },
@@ -213,6 +238,16 @@ const FB_NOTE_ACTIONS: Record<NoteScopedAction, NoteSupport> = {
   comment_like: { supported: false, reason: 'v1_unimplemented' },
   browse_images: { supported: false, reason: 'v1_unimplemented' },
   scroll_comments: { supported: false, reason: 'v1_unimplemented' },
+};
+
+const WECHAT_CHANNELS_NOTE_ACTIONS: Record<NoteScopedAction, NoteSupport> = {
+  read_content: { supported: false, reason: 'interaction_inbox_only' },
+  like: { supported: false, reason: 'interaction_inbox_only' },
+  collect: { supported: false, reason: 'interaction_inbox_only' },
+  comment: { supported: false, reason: 'dedicated_reply_workflow_only' },
+  comment_like: { supported: false, reason: 'interaction_inbox_only' },
+  browse_images: { supported: false, reason: 'interaction_inbox_only' },
+  scroll_comments: { supported: false, reason: 'interaction_inbox_only' },
 };
 
 export const PLATFORM_REGISTRY: Record<'xiaohongshu', PlatformRegistryEntry> &
@@ -286,12 +321,32 @@ export const PLATFORM_REGISTRY: Record<'xiaohongshu', PlatformRegistryEntry> &
     delegatedActions: FACEBOOK_DELEGATED_ACTIONS,
     comment: FB_COMMENT_PROFILE,
   },
+  wechat_channels: {
+    platform: 'wechat_channels',
+    app: 'wechat_channels',
+    displayName: '微信视频号',
+    noteActions: WECHAT_CHANNELS_NOTE_ACTIONS,
+    noteSurfaces: { read_content: 'detail', like: 'detail', comment: 'detail' },
+    capabilities: {
+      browse: { supported: false, reason: 'interaction_inbox_only' },
+      feed_refresh: { supported: false, reason: 'interaction_inbox_only' },
+      follow: { supported: false, reason: 'interaction_inbox_only' },
+      profile_visit: { supported: false, reason: 'interaction_inbox_only' },
+      patrol: { supported: false, reason: 'interaction_inbox_only' },
+      notification: { supported: false, reason: 'interaction_inbox_only' },
+    },
+    pacing: {},
+    scheduler: { comment: { enabled: false, defaultSort: 'none', defaultTimeWindow: 'none' } },
+    delegatedActions: WECHAT_CHANNELS_DELEGATED_ACTIONS,
+    comment: WECHAT_CHANNELS_COMMENT_PROFILE,
+  },
 };
 
 export function normalizePlatformId(raw: string | null | undefined): PlatformId {
   const value = (raw ?? 'xiaohongshu').trim().toLowerCase();
   if (!value || value === 'xhs' || value === 'redbook' || value === 'xiaohongshu') return 'xiaohongshu';
   if (value === 'facebook' || value === 'fb') return 'facebook';
+  if (value === 'wechat_channels' || value === 'wechat-channels' || value === 'channels') return 'wechat_channels';
   throw new Error(`unsupported platform=${raw}`);
 }
 

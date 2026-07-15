@@ -55,6 +55,22 @@ test('rejects Facebook arbitrary URL and inspiration publish', async () => {
   );
 });
 
+test('rejects Video Channels delegated writes because the platform is inbox-only', async () => {
+  const { service: svc, store } = service([
+    { accountId: 'wc-1', nickname: '视频号客服', platform: 'wechat_channels', status: 'active' },
+  ]);
+  await assert.rejects(
+    () => svc.createDraft({
+      accountName: '视频号客服', action: 'publish_post', targetSuccessCount: 1, maxAttempts: 1,
+      deadlineAt: NOW + 86_400_000, source: 'feishu',
+    }),
+    (err: unknown) => err instanceof DelegatedTaskServiceError
+      && err.code === 'unsupported_action'
+      && err.message.includes('仅支持入站互动回复工作流'),
+  );
+  assert.deepEqual(await store.list(), []);
+});
+
 test('nickname ambiguity fails closed', async () => {
   const { service: svc } = service([
     { accountId: 'a', nickname: '同名', platform: 'xiaohongshu' as const },

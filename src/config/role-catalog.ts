@@ -11,7 +11,7 @@
  * 温度仅对生成 / 改写类开放（判定类强依赖确定性结构化输出，温度高会让下游 JSON 解析变脆）。
  */
 
-export type RoleGroup = 'browse' | 'publish';
+export type RoleGroup = 'browse' | 'publish' | 'interaction';
 // 'vision'（change textcard-cover-form）：多模态视觉角色。v1 仅展示——模型经 env 两层解析
 // （AIDCP_COVER_FORM_MODEL → 代码默认），不开面板写入（isModelConfigurable 仍只放行 text）。
 export type LlmKind = 'text' | 'image' | 'vision' | 'none';
@@ -49,6 +49,8 @@ export function isValidThinkingModePatch(v: string | null | undefined): boolean 
 export type RoleCategory =
   | 'browse_judge' // 浏览·判定类（确定性结构化输出，不调温度）
   | 'browse_compose' // 浏览·撰写改写类（生成/改写，可调温度）
+  | 'interaction_judge' // 入站客服·意图/风险判定（专用角色，不复用主动浏览评论角色）
+  | 'interaction_compose' // 入站客服·模板语义内润色
   | 'publish_create' // 发布·创作类（选题/正文/标题/配图规划）
   | 'publish_gate' // 发布·裁决类（评分/审批）
   | 'image'; // 图像类（imageModel 全局，不参与文本分类默认）
@@ -78,9 +80,11 @@ export interface CategoryCatalogItem {
 export const CATEGORY_CATALOG: CategoryCatalogItem[] = [
   { categoryId: 'browse_judge', displayName: '浏览 · 判定类', order: 1 },
   { categoryId: 'browse_compose', displayName: '浏览 · 撰写改写类', order: 2 },
-  { categoryId: 'publish_create', displayName: '发布 · 生成规划类', order: 3 },
-  { categoryId: 'publish_gate', displayName: '发布 · 分析评审类', order: 4 },
-  { categoryId: 'image', displayName: '图像类', order: 5 },
+  { categoryId: 'interaction_judge', displayName: '收件箱 · 判定审核类', order: 3 },
+  { categoryId: 'interaction_compose', displayName: '收件箱 · 润色类', order: 4 },
+  { categoryId: 'publish_create', displayName: '发布 · 生成规划类', order: 5 },
+  { categoryId: 'publish_gate', displayName: '发布 · 分析评审类', order: 6 },
+  { categoryId: 'image', displayName: '图像类', order: 7 },
 ];
 
 /**
@@ -89,6 +93,11 @@ export const CATEGORY_CATALOG: CategoryCatalogItem[] = [
  * 发布配图执行为图像模型（imageModel 全局配置，本期不在此 per-role 覆盖，仅列出以区分类型）。
  */
 export const ROLE_CATALOG: RoleCatalogItem[] = [
+  // 冻结 interaction v1 的三个专用角色 ID。这里保持原名，不套 browse/publish 前缀，
+  // 使 role_config、用量归账与 Session 00 contract 使用同一个稳定标识。
+  { roleId: 'reply_intent_classifier', displayName: '收件箱 · 意图分类', group: 'interaction', category: 'interaction_judge', llmKind: 'text', tunableTemperature: false },
+  { roleId: 'reply_polisher', displayName: '收件箱 · 模板润色', group: 'interaction', category: 'interaction_compose', llmKind: 'text', tunableTemperature: true },
+  { roleId: 'reply_risk_reviewer', displayName: '收件箱 · 回复风险复核', group: 'interaction', category: 'interaction_judge', llmKind: 'text', tunableTemperature: false },
   // 数组序 = 用户访问小红书的先后（浏览闭环真实触发链路：见 role-dispatcher + 各 agent 订阅的事件）。
   // 后台「角色配置页」按此数组序渲染（API 原样透出、前端不再重排）。分类（category）仅作行内标签、
   // 不再是排序键——「判定类」贯穿整个浏览流程、与访问顺序天然冲突，故取访问顺序、分类降级为标签。

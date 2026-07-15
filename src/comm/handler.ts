@@ -59,10 +59,20 @@ import { buildPublishApprovalCard } from '../feishu/cards.js';
 import type { FeishuMessenger } from '../feishu/messenger.js';
 import type { BotChatStore } from '../cache/bot-chat-store.js';
 import { RiskController, SessionBudget, buildPacingSnapshot } from '../risk/index.js';
-import type { RiskAction, RiskStatus, RiskQuotaLevel, PacingFloorProvider } from '../risk/index.js';
+import type { RiskStatus, RiskQuotaLevel, PacingFloorProvider } from '../risk/index.js';
 import { resolveReadSurface } from '../platform/index.js';
 import type { PacingSnapshotPayload } from './protocol.js';
 import type { AccountStateManager } from '../account-state.js';
+import { parseAuthStatusPayload, parseReplyResultPayload, parseSyncBatchPayload } from '../interactions/contract.js';
+import {
+  INTERACTION_CAPABILITY,
+  INTERACTION_PLATFORM,
+  InteractionError,
+  type InteractionAuthStatusPayload,
+  type InteractionReplyResultPayload,
+  type InteractionSyncAckPayload,
+  type InteractionSyncBatchPayload,
+} from '../interactions/types.js';
 
 /**
  * action.completed 的 action 是云端角色的关联键，正常值是 `browse_images` 而非
@@ -175,6 +185,12 @@ export interface HandlerDeps {
     payload: PublishDraftImageRemovePayload,
     session: EdgeSession,
   ) => Promise<PublishDraftImageRemoveResultPayload>;
+  /** 冻结 interaction v1 入站消费端；未注入时 capability 不在 welcome 中启用。 */
+  interactionInbox?: {
+    onAuthStatus(payload: InteractionAuthStatusPayload): Promise<void>;
+    onSyncBatch(payload: InteractionSyncBatchPayload): Promise<InteractionSyncAckPayload>;
+    onReplyResult(payload: InteractionReplyResultPayload): Promise<void>;
+  };
 }
 
 /** 把元素清单渲染成给 LLM 的编号列表（与 edge selector 一致的格式） */
@@ -326,6 +342,12 @@ export class DefaultMessageHandler implements MessageHandler {
         return this.onHello(env, session);
       case 'ping':
         return makeEnvelope('pong', env.id, this.clock(), {});
+      case 'interaction.auth.status':
+        return this.onInteractionAuthStatus(env, session);
+      case 'interaction.sync.batch':
+        return this.onInteractionSyncBatch(env, session);
+      case 'interaction.reply.result':
+        return this.onInteractionReplyResult(env, session);
       case 'plan.request':
         return this.onPlan(env, pusher);
       case 'select.request':
@@ -564,11 +586,92 @@ export class DefaultMessageHandler implements MessageHandler {
     return makeEnvelope('welcome', env.id, this.clock(), {
       sessionId: session.sessionId,
       serverVersion: this.serverVersion,
+      capabilities: this.deps.interactionInbox && (session.capabilities ?? []).includes(INTERACTION_CAPABILITY)
+        ? [INTERACTION_CAPABILITY]
+        : undefined,
       // 节奏快照（change pacing-floor-config-min-interval）：tempo + 每类操作兜底 floor 区间。
       // 纯读风控 status（不写风控态）；握手早于风控态建立 / 解析失败 → 回落 normal(tempo=1.0)。
       // buildPacingSnapshot 是 total 函数：provider 抛错一律返 undefined，绝不 brick 握手。
       pacing: this.buildWelcomePacing(session),
     });
+  }
+
+  private interactionAvailable(session: EdgeSession): boolean {
+    return !!this.deps.interactionInbox && (session.capabilities ?? []).includes(INTERACTION_CAPABILITY);
+  }
+
+  private interactionScopeMatches(session: EdgeSession, accountId: string): boolean {
+    return !!session.accountId && session.accountId === accountId && session.platform === INTERACTION_PLATFORM;
+  }
+
+  private async onInteractionAuthStatus(env: Envelope, session: EdgeSession): Promise<Envelope | null> {
+    if (!this.interactionAvailable(session)) {
+      return makeEnvelope('error', env.id, this.clock(), {
+        code: 'INTERACTION_FEATURE_DISABLED', message: 'interaction_inbox_v1 capability 未协商。',
+      });
+    }
+    const payload = parseAuthStatusPayload(env.payload);
+    if (!payload) return makeEnvelope('error', env.id, this.clock(), {
+      code: 'INTERACTION_VALIDATION_FAILED', message: 'interaction.auth.status payload 不合法。',
+    });
+    if (!this.interactionScopeMatches(session, payload.accountId)) {
+      return makeEnvelope('error', env.id, this.clock(), {
+        code: 'INTERACTION_SCOPE_MISMATCH', message: '连接账号/平台与 payload 不匹配。',
+      });
+    }
+    try {
+      await this.deps.interactionInbox!.onAuthStatus(payload);
+      return null;
+    } catch (error) {
+      const code = error instanceof InteractionError ? error.code : 'INTERACTION_INTERNAL_ERROR';
+      return makeEnvelope('error', env.id, this.clock(), { code, message: 'interaction.auth.status 未持久化。' });
+    }
+  }
+
+  private async onInteractionSyncBatch(env: Envelope, session: EdgeSession): Promise<Envelope> {
+    const raw = env.payload && typeof env.payload === 'object' ? env.payload as Record<string, unknown> : {};
+    const rejected = (code: InteractionSyncAckPayload['errorCode']): Envelope => makeEnvelope(
+      'interaction.sync.ack', env.id, this.clock(), {
+        batchId: typeof raw.batchId === 'string' && raw.batchId ? raw.batchId : 'invalid',
+        envKey: typeof raw.envKey === 'string' && raw.envKey ? raw.envKey : 'invalid',
+        accountId: typeof raw.accountId === 'string' && raw.accountId ? raw.accountId : 'invalid',
+        platform: INTERACTION_PLATFORM,
+        channel: raw.channel === 'dm' ? 'dm' : 'comment',
+        scopeExternalId: typeof raw.scopeExternalId === 'string' ? raw.scopeExternalId : null,
+        status: 'rejected', cursorAfter: null, persisted: { threads: 0, messages: 0 },
+        errorCode: code, receivedAt: this.clock(),
+      },
+    );
+    if (!this.interactionAvailable(session)) return rejected('INTERACTION_FEATURE_DISABLED');
+    const payload = parseSyncBatchPayload(env.payload);
+    if (!payload) return rejected('INTERACTION_VALIDATION_FAILED');
+    if (!this.interactionScopeMatches(session, payload.accountId)) return rejected('INTERACTION_SCOPE_MISMATCH');
+    try {
+      const ack = await this.deps.interactionInbox!.onSyncBatch(payload);
+      return makeEnvelope('interaction.sync.ack', env.id, this.clock(), ack);
+    } catch (error) {
+      return rejected(error instanceof InteractionError ? error.code : 'INTERACTION_INTERNAL_ERROR');
+    }
+  }
+
+  private async onInteractionReplyResult(env: Envelope, session: EdgeSession): Promise<Envelope | null> {
+    if (!this.interactionAvailable(session)) return makeEnvelope('error', env.id, this.clock(), {
+      code: 'INTERACTION_FEATURE_DISABLED', message: 'interaction_inbox_v1 capability 未协商。',
+    });
+    const payload = parseReplyResultPayload(env.payload);
+    if (!payload) return makeEnvelope('error', env.id, this.clock(), {
+      code: 'INTERACTION_VALIDATION_FAILED', message: 'interaction.reply.result payload 不合法。',
+    });
+    if (!this.interactionScopeMatches(session, payload.accountId)) return makeEnvelope('error', env.id, this.clock(), {
+      code: 'INTERACTION_SCOPE_MISMATCH', message: '连接账号/平台与 payload 不匹配。',
+    });
+    try {
+      await this.deps.interactionInbox!.onReplyResult(payload);
+      return null;
+    } catch (error) {
+      const code = error instanceof InteractionError ? error.code : 'INTERACTION_INTERNAL_ERROR';
+      return makeEnvelope('error', env.id, this.clock(), { code, message: 'interaction.reply.result 未接收。' });
+    }
   }
 
   /**
@@ -605,7 +708,7 @@ export class DefaultMessageHandler implements MessageHandler {
 
   private onRiskCanDo(env: Envelope, session: EdgeSession): Envelope {
     const p = env.payload as RiskCanDoPayload;
-    const action = p.action as RiskAction;
+    const action = p.action;
     const result = this.controllerFor(session).explain(action);
     return makeEnvelope('risk.canDo.result', env.id, this.clock(), {
       action,
@@ -616,7 +719,7 @@ export class DefaultMessageHandler implements MessageHandler {
 
   private async onRiskRecord(env: Envelope, session: EdgeSession): Promise<Envelope> {
     const p = env.payload as RiskRecordPayload;
-    const action = p.action as RiskAction;
+    const action = p.action;
     const recorded = await this.controllerFor(session).record(action);
     return makeEnvelope('risk.record.result', env.id, this.clock(), {
       action,

@@ -28,6 +28,9 @@ export interface ClientAuthDeps {
   rateLimiter: LoginRateLimiter;
   /** Customer-scoped delegated tasks. Every route re-checks env ownership from the DB. */
   delegatedTasks?: DelegatedTaskService;
+  interactionApi?: {
+    handle(req: http.IncomingMessage, res: http.ServerResponse, userId: string): Promise<boolean>;
+  };
 }
 
 export interface ClientAuthConfig {
@@ -306,6 +309,8 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       }
       return;
     }
+
+    if (deps.interactionApi && await deps.interactionApi.handle(req, res, userId)) return;
 
     sendJson(res, 404, { error: 'not_found' });
   }

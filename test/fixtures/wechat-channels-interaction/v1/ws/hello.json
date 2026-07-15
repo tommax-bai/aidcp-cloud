@@ -1,0 +1,16 @@
+{
+  "v": 2,
+  "type": "hello",
+  "id": "hello-wc-001",
+  "ts": 1784044800000,
+  "payload": {
+    "edgeId": "ads-demo-profile",
+    "platform": "wechat_channels",
+    "app": "wechat_channels",
+    "capabilities": ["identity", "overlay", "auth.browser_sidecar", "interaction_inbox_v1"],
+    "accountId": "acct_wc_demo",
+    "accountNickname": "示例视频号",
+    "machineLabel": "dev-mac-demo",
+    "remoteAddr": "operator-managed"
+  }
+}

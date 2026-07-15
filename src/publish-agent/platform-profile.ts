@@ -7,7 +7,7 @@ export type PublishImageSource = 'generated' | 'account_pool';
 export type PublishTargetKind = 'xhs_note' | 'facebook_personal_timeline';
 
 export interface PublishPlatformProfile {
-  platform: PlatformId;
+  platform: Exclude<PlatformId, 'wechat_channels'>;
   displayName: string;
   imageSource: PublishImageSource;
   imageRequired: boolean;
@@ -40,7 +40,9 @@ export const FACEBOOK_PUBLISH_PROFILE: PublishPlatformProfile = {
 };
 
 export function publishProfileForPlatform(platform: string | null | undefined): PublishPlatformProfile {
-  return normalizePlatformId(platform) === 'facebook' ? FACEBOOK_PUBLISH_PROFILE : XHS_PUBLISH_PROFILE;
+  const normalized = normalizePlatformId(platform);
+  if (normalized === 'wechat_channels') throw new Error('wechat_channels_publish_uses_interaction_reply_protocol');
+  return normalized === 'facebook' ? FACEBOOK_PUBLISH_PROFILE : XHS_PUBLISH_PROFILE;
 }
 
 export interface BuildPublishCommandPlanInput {

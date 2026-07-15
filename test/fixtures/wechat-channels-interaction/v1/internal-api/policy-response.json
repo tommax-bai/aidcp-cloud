@@ -1,0 +1,42 @@
+{
+  "data": {
+    "head": {
+      "accountId": "acct_wc_demo",
+      "platform": "wechat_channels",
+      "currentVersion": 1,
+      "draftVersion": 1,
+      "publishedVersion": null,
+      "updatedAt": 1784044710000,
+      "updatedBy": "admin_demo"
+    },
+    "policy": {
+      "mode": "review_before_send",
+      "generateDrafts": true,
+      "sendReplies": false,
+      "channels": {
+        "comment": {
+          "enabled": true,
+          "aiPolishEnabled": true,
+          "allowAutoSend": false
+        },
+        "dm": {
+          "enabled": true,
+          "aiPolishEnabled": false,
+          "allowAutoSend": false
+        }
+      },
+      "rateLimits": {
+        "accountPerMinute": 2,
+        "accountPerHour": 20,
+        "accountPerDay": 100,
+        "threadCooldownSeconds": 60,
+        "newLoginCooldownSeconds": 600,
+        "consecutiveFailureLimit": 3
+      }
+    }
+  },
+  "meta": {
+    "requestId": "internal-policy-001",
+    "asOf": 1784044840000
+  }
+}

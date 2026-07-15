@@ -231,6 +231,18 @@ import { isWeekActiveAt } from './risk/session-limits.js';
 import { createRolePromptProvider } from './config/role-prompt-preview.js';
 import { CredentialStore } from './config/credential-store.js';
 import type { ModelConfigView } from './panel/types.js';
+import {
+  InteractionStore,
+  ReplyConfigStore,
+  ReplyAiService,
+  ReplyWorkflow,
+  InteractionInboxService,
+  InteractionSendOrchestrator,
+  InteractionCustomerApi,
+  InteractionInternalApi,
+  InteractionMetrics,
+  parseInteractionPanelGrants,
+} from './interactions/index.js';
 
 function readEnvString(name: string): string | undefined {
   const value = process.env[name];
@@ -1237,6 +1249,62 @@ async function main(): Promise<void> {
   };
   console.log('[aidcp-cloud] RiskControllerRegistry 已就绪（按真实账号懒解析，PgRiskStore 持久化）');
 
+  // Session 02：独立入站互动域。0039 未部署时只禁用本能力，不拖垮原有浏览/发布链。
+  const interactionMetrics = new InteractionMetrics();
+  let interactionStore: InteractionStore | undefined;
+  let replyConfigStore: ReplyConfigStore | undefined;
+  let replyWorkflow: ReplyWorkflow | undefined;
+  let interactionInbox: InteractionInboxService | undefined;
+  let interactionSender: InteractionSendOrchestrator | undefined;
+  try {
+    interactionStore = new InteractionStore();
+    replyConfigStore = new ReplyConfigStore();
+    await interactionStore.init();
+    await replyConfigStore.init();
+    const interactionAiTimeoutMs = Math.max(1_000, readEnvNumber('AIDCP_INTERACTION_AI_TIMEOUT_MS', 20_000));
+    const resetClassifying = await interactionStore.recoverStalledClassifyingJobs(Date.now() - interactionAiTimeoutMs * 2);
+    interactionMetrics.gauge('interaction_recovered_classifying_jobs', resetClassifying);
+    const replyAi = new ReplyAiService(
+      llm,
+      interactionAiTimeoutMs,
+    );
+    replyWorkflow = new ReplyWorkflow(interactionStore, replyConfigStore, replyAi, {
+      dmAiEnabled: readEnvString('AIDCP_INTERACTION_DM_AI_ENABLED')?.toLocaleLowerCase() === 'true',
+      canAutoQueue: async (context, snapshot, preview) =>
+        interactionSender?.canAutoQueueDraft(context, snapshot, preview) ?? false,
+    });
+    interactionInbox = new InteractionInboxService({
+      store: interactionStore,
+      configs: replyConfigStore,
+      workflow: replyWorkflow,
+      controllerFor: (accountId) => riskRegistry.getController(accountId),
+      metrics: interactionMetrics,
+      dispatchAuto: (input) => {
+        if (!interactionSender) throw new Error('interaction_sender_unavailable');
+        return interactionSender.dispatchQueued(input);
+      },
+    });
+    const recovery = await interactionStore.recoverableAttemptIds();
+    interactionMetrics.gauge('interaction_recoverable_attempts', recovery.length);
+    if (recovery.length) {
+      console.warn(`[interaction] 启动发现 ${recovery.length} 个待核验 attempt；保留原 idempotency，等待 Edge result，绝不盲重发`);
+    }
+    await interactionStore.purgeExpiredContent();
+    const interactionRetentionTimer = setInterval(() => {
+      void interactionStore?.purgeExpiredContent().catch((error) =>
+        console.warn(`[interaction] retention 失败: ${error instanceof Error ? error.message : String(error)}`));
+    }, 24 * 60 * 60 * 1_000);
+    interactionRetentionTimer.unref?.();
+    console.log('[aidcp-cloud] 入站 interaction 域已就绪（0039 / frozen v1；写总开关默认关闭）');
+  } catch (error) {
+    await Promise.allSettled([interactionStore?.close(), replyConfigStore?.close()]);
+    interactionStore = undefined;
+    replyConfigStore = undefined;
+    replyWorkflow = undefined;
+    interactionInbox = undefined;
+    console.warn(`[aidcp-cloud] 入站 interaction 域未启用: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   // 数据保留清理（change console-cloud-panel-hardening #21/#22/#23）：面板只读查询打在追加型表上，
   // 零保留策略会使全表扫描成本随运行时长单调恶化 → 日频清理三表过期行（各表独立 try/catch，
   // 一个失败不拖累其它、绝不逃逸崩进程；只删各自表、不碰风控单写/发布链/edge）。
@@ -1753,6 +1821,7 @@ async function main(): Promise<void> {
     // 节奏兜底 floor 提供者（change pacing-floor-config-min-interval）：welcome 握手现读组装 pacing 快照下发
     // （PUT 后下次握手即新值 = 热加载）。init 失败也安全：空镜像 → floorFor 逐项回落 BUILTIN_FLOOR 内置默认。
     pacingFloors: pacingConfigStore,
+    interactionInbox,
   });
   // 陪伴界面快照层（edge-companion-ui 8.1）：前向引用（服务实例在 server 起后构造，同 pusher 闭包模式）。
   const server = new EdgeCloudServer({
@@ -1785,8 +1854,78 @@ async function main(): Promise<void> {
     },
   });
   edgeServer = server;
+  interactionSender = interactionStore && replyConfigStore
+    ? new InteractionSendOrchestrator({
+      store: interactionStore,
+      configs: replyConfigStore,
+      pusher: server,
+      controllerFor: (accountId) => riskRegistry.getController(accountId),
+      metrics: interactionMetrics,
+    })
+    : undefined;
+  const interactionPanelGrants = parseInteractionPanelGrants(readEnvString('AIDCP_INTERACTION_PANEL_GRANTS'));
+  const interactionInternalApi = interactionStore && replyConfigStore && replyWorkflow
+    ? new InteractionInternalApi({
+      store: interactionStore,
+      configs: replyConfigStore,
+      workflow: replyWorkflow,
+      grantsFor: (actor) => interactionPanelGrants.get(actor) ?? new Set(),
+      cursorSecret: readEnvString('AIDCP_PANEL_JWT_SECRET') ?? '',
+    })
+    : undefined;
+  const clientCursorSecret = readEnvString('AIDCP_CLIENT_JWT_SECRET');
+  const interactionCustomerApi = interactionStore && replyWorkflow && interactionSender && clientCursorSecret
+    ? new InteractionCustomerApi({
+      users: clientUserStore,
+      store: interactionStore,
+      workflow: replyWorkflow,
+      sender: interactionSender,
+      cursorSecret: clientCursorSecret,
+    })
+    : undefined;
   await server.start();
   console.log(`[aidcp-cloud] 边-云 WebSocket 服务端已监听 :${port}`);
+
+  if (interactionStore && replyWorkflow && interactionSender) {
+    let recoveryRunning = false;
+    const drainInteractionRecovery = async (): Promise<void> => {
+      if (recoveryRunning || !interactionStore || !replyWorkflow || !interactionSender) return;
+      recoveryRunning = true;
+      try {
+        const drafts = await interactionStore.pendingGenerationJobs();
+        for (const ref of drafts) {
+          try {
+            const job = await replyWorkflow.generate({
+              accountId: ref.accountId, envKey: ref.envKey, jobId: ref.jobId,
+              expectedVersion: ref.version, actor: 'system',
+            });
+            if (job.state === 'queued') {
+              await interactionSender.dispatchQueued({ accountId: ref.accountId, envKey: ref.envKey,
+                jobId: ref.jobId, expectedVersion: job.version });
+            }
+          } catch {
+            interactionMetrics.increment('interaction_recovery_total', { stage: 'generation', status: 'deferred' });
+          }
+        }
+        const queued = await interactionStore.pendingQueuedJobs();
+        for (const ref of queued) {
+          try {
+            await interactionSender.dispatchQueued({ accountId: ref.accountId, envKey: ref.envKey,
+              jobId: ref.jobId, expectedVersion: ref.version });
+          } catch {
+            interactionMetrics.increment('interaction_recovery_total', { stage: 'dispatch', status: 'deferred' });
+          }
+        }
+        interactionMetrics.gauge('interaction_recovery_pending_drafts', drafts.length);
+        interactionMetrics.gauge('interaction_recovery_pending_queued', queued.length);
+      } finally {
+        recoveryRunning = false;
+      }
+    };
+    const interactionRecoveryTimer = setInterval(() => void drainInteractionRecovery(), 30_000);
+    interactionRecoveryTimer.unref?.();
+    void drainInteractionRecovery();
+  }
 
   // ── 发布下发段（change decouple-publish-generation-from-dispatch）──────────────
   // 由人审授权信号到达触发（通过即切）。唯一碰边缘、唯一让位浏览的阶段：让位 → 从落库草稿重建发布输入 →
@@ -3211,18 +3350,21 @@ async function main(): Promise<void> {
   if (delegatedTaskStore && delegatedTaskService && commentScheduler && publishScheduler) {
     const loadCandidate = async (recordId: number) => {
       const draft = await publishLogStore.loadForDispatch(recordId);
-      return draft
-        ? {
-            recordId: draft.recordId,
-            accountId: draft.accountId,
-            platform: draft.platform ?? 'xiaohongshu',
-            status: draft.status,
-            contentVersion: draft.contentVersion,
-            title: draft.title,
-            content: draft.content,
-            images: draft.imageUrls,
-          }
-        : null;
+      if (!draft) return null;
+      const platform = draft.platform ?? 'xiaohongshu';
+      // Delegated candidates belong to the existing proactive publishing
+      // domain. Video Channels is intentionally inbox-only in this session.
+      if (platform === 'wechat_channels') return null;
+      return {
+        recordId: draft.recordId,
+        accountId: draft.accountId,
+        platform,
+        status: draft.status,
+        contentVersion: draft.contentVersion,
+        title: draft.title,
+        content: draft.content,
+        images: draft.imageUrls,
+      };
     };
     const delegatedExecutors = createDelegatedExecutorRouter({
       comments: commentScheduler,
@@ -3443,6 +3585,7 @@ async function main(): Promise<void> {
     try {
       const panel = await startPanelApi(
         {
+          interactionInternalApi,
           revocation: new TokenRevocationStore(),
           riskRegistry,
           publishLogStore,
@@ -3761,6 +3904,7 @@ async function main(): Promise<void> {
           revocation: new TokenRevocationStore(), // 独立撤销黑名单，绝不共用面板的
           rateLimiter: new LoginRateLimiter(),
           delegatedTasks: delegatedTaskService,
+          interactionApi: interactionCustomerApi,
         },
         {
           port: clientAuthPort,

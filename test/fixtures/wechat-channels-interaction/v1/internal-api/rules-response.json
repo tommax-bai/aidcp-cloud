@@ -1,0 +1,61 @@
+{
+  "data": {
+    "accountId": "acct_wc_demo",
+    "currentVersion": 1,
+    "items": [
+      {
+        "ruleId": "rule_comment_thanks",
+        "channel": "comment",
+        "name": "感谢类评论",
+        "priority": 100,
+        "enabled": true,
+        "conditions": {
+          "keywordsAny": ["谢谢", "有帮助"],
+          "intentsAny": ["gratitude"],
+          "sourceExternalIds": [],
+          "messageTypes": ["text"],
+          "workHours": null
+        },
+        "actions": {
+          "templateId": "template_comment_thanks",
+          "polish": true,
+          "allowAutoSend": false,
+          "forceHumanTags": []
+        },
+        "updatedAt": 1784044730000,
+        "updatedBy": "admin_demo"
+      },
+      {
+        "ruleId": "rule_dm_greeting",
+        "channel": "dm",
+        "name": "普通私信问候",
+        "priority": 100,
+        "enabled": true,
+        "conditions": {
+          "keywordsAny": ["你好", "了解"],
+          "intentsAny": ["general_question"],
+          "sourceExternalIds": [],
+          "messageTypes": ["text"],
+          "workHours": {
+            "timezone": "Asia/Shanghai",
+            "start": "09:00",
+            "end": "18:00"
+          }
+        },
+        "actions": {
+          "templateId": "template_dm_greeting",
+          "polish": false,
+          "allowAutoSend": false,
+          "forceHumanTags": ["unknown"]
+        },
+        "updatedAt": 1784044731000,
+        "updatedBy": "admin_demo"
+      }
+    ],
+    "nextCursor": null
+  },
+  "meta": {
+    "requestId": "internal-rules-001",
+    "asOf": 1784044842000
+  }
+}

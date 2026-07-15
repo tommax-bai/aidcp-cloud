@@ -1,0 +1,14 @@
+{
+  "v": 2,
+  "type": "interaction.auth.reopen",
+  "id": "auth-reopen-envelope-001",
+  "ts": 1784044830000,
+  "payload": {
+    "requestId": "auth-reopen-request-001",
+    "envKey": "env_wc_demo",
+    "accountId": "acct_wc_demo",
+    "platform": "wechat_channels",
+    "reason": "user_requested",
+    "requestedAt": 1784044830000
+  }
+}

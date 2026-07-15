@@ -1,0 +1,19 @@
+{
+  "data": {
+    "accountId": "acct_wc_demo",
+    "platform": "wechat_channels",
+    "version": 1,
+    "commentsReadEnabled": true,
+    "commentsReplyEnabled": false,
+    "dmReadEnabled": true,
+    "dmSendTextEnabled": false,
+    "dmSendImageEnabled": false,
+    "writePaused": true,
+    "updatedAt": 1784044700000,
+    "updatedBy": "admin_demo"
+  },
+  "meta": {
+    "requestId": "internal-runtime-controls-001",
+    "asOf": 1784044839000
+  }
+}

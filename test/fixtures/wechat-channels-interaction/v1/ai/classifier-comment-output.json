@@ -1,0 +1,7 @@
+{
+  "role": "reply_intent_classifier",
+  "intent": "gratitude",
+  "confidence": 0.98,
+  "riskTags": [],
+  "reasons": ["用户明确表达感谢。"]
+}

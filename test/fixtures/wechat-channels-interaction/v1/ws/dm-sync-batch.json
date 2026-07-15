@@ -1,0 +1,68 @@
+{
+  "v": 2,
+  "type": "interaction.sync.batch",
+  "id": "sync-dm-envelope-001",
+  "ts": 1784044803000,
+  "payload": {
+    "batchId": "batch-dm-001",
+    "requestId": "sync-request-dm-001",
+    "envKey": "env_wc_demo",
+    "accountId": "acct_wc_demo",
+    "platform": "wechat_channels",
+    "channel": "dm",
+    "scopeExternalId": null,
+    "cursorBefore": "dm-cursor-000",
+    "cursorAfter": "dm-cursor-001",
+    "hasMore": false,
+    "threads": [
+      {
+        "externalThreadId": "dm-thread-200",
+        "sourceExternalId": null,
+        "sourceTitle": null,
+        "sourceCoverUrl": null,
+        "participant": {
+          "externalId": "viewer-demo-002",
+          "displayName": "示例私信用户",
+          "avatarUrl": null
+        },
+        "updatedAt": 1784044802500
+      }
+    ],
+    "messages": [
+      {
+        "externalThreadId": "dm-thread-200",
+        "externalMessageId": "dm-image-199",
+        "direction": "inbound",
+        "externalParentId": null,
+        "externalRootId": null,
+        "messageType": "image",
+        "contentText": null,
+        "attachmentMeta": {
+          "mimeType": "image/jpeg",
+          "width": 800,
+          "height": 600,
+          "url": "https://example.invalid/assets/dm-image-199.jpg"
+        },
+        "lifecycle": "active",
+        "platformCreatedAt": 1784044802400,
+        "rawMetaSanitized": {}
+      },
+      {
+        "externalThreadId": "dm-thread-200",
+        "externalMessageId": "dm_msg_200",
+        "direction": "inbound",
+        "externalParentId": null,
+        "externalRootId": null,
+        "messageType": "text",
+        "contentText": "你好，我想进一步了解。",
+        "attachmentMeta": null,
+        "lifecycle": "active",
+        "platformCreatedAt": 1784044802500,
+        "rawMetaSanitized": {
+          "sessionType": 1
+        }
+      }
+    ],
+    "observedAt": 1784044803000
+  }
+}

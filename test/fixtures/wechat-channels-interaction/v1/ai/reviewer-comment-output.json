@@ -1,0 +1,7 @@
+{
+  "role": "reply_risk_reviewer",
+  "riskLevel": "low",
+  "riskTags": [],
+  "reasons": [],
+  "allowAutoSend": false
+}

@@ -1,0 +1,27 @@
+{
+  "v": 2,
+  "type": "interaction.auth.status",
+  "id": "auth-status-001",
+  "ts": 1784044801000,
+  "payload": {
+    "envKey": "env_wc_demo",
+    "accountId": "acct_wc_demo",
+    "platform": "wechat_channels",
+    "status": "active",
+    "browserState": "closed",
+    "capabilities": {
+      "commentsRead": true,
+      "commentsReply": true,
+      "dmRead": true,
+      "dmSendText": true,
+      "dmSendImage": false
+    },
+    "identity": {
+      "externalId": "finder_demo_public",
+      "displayName": "示例视频号",
+      "identityHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "checkedAt": 1784044801000,
+    "reasonCode": null
+  }
+}

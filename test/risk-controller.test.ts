@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { DAILY_QUOTAS, RiskController, SlidingWindowCounter, deriveWindowQuotas } from '../src/risk/index.js';
 
 test('三档每日配额符合 risk-control 第 6 节', () => {
-  assert.deepEqual(DAILY_QUOTAS.conservative, { view: 80, like: 20, collect: 10, comment: 3, follow: 5, publish: 1, comment_like: 3, join_group: 1 });
-  assert.deepEqual(DAILY_QUOTAS.normal, { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1, comment_like: 6, join_group: 3 });
-  assert.deepEqual(DAILY_QUOTAS.aggressive, { view: 300, like: 100, collect: 50, comment: 15, follow: 30, publish: 2, comment_like: 12, join_group: 5 });
+  assert.deepEqual(DAILY_QUOTAS.conservative, { view: 80, like: 20, collect: 10, comment: 3, follow: 5, publish: 1, comment_like: 3, join_group: 1, dm_reply: 0 });
+  assert.deepEqual(DAILY_QUOTAS.normal, { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1, comment_like: 6, join_group: 3, dm_reply: 0 });
+  assert.deepEqual(DAILY_QUOTAS.aggressive, { view: 300, like: 100, collect: 50, comment: 15, follow: 30, publish: 2, comment_like: 12, join_group: 5, dm_reply: 0 });
 });
 
 test('dailyRemaining: comment 按当日配额递减、用尽即 0（评论每日上限预闸源）', async () => {

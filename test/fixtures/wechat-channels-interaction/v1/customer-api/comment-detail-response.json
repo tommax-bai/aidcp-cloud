@@ -1,0 +1,81 @@
+{
+  "data": {
+    "envKey": "env_wc_demo",
+    "accountId": "acct_wc_demo",
+    "platform": "wechat_channels",
+    "auth": {
+      "status": "active",
+      "browserState": "closed",
+      "reasonCode": null,
+      "checkedAt": 1784044801000,
+      "capabilities": {
+        "commentsRead": true,
+        "commentsReply": true,
+        "dmRead": true,
+        "dmSendText": true,
+        "dmSendImage": false
+      }
+    },
+    "thread": {
+      "id": "thread_comment_100",
+      "platform": "wechat_channels",
+      "accountId": "acct_wc_demo",
+      "envKey": "env_wc_demo",
+      "channel": "comment",
+      "externalThreadId": "comment_msg_100",
+      "sourceExternalId": "video-demo-001",
+      "sourceTitle": "示例视频标题",
+      "sourceCoverUrl": "https://example.invalid/assets/video-demo-001.jpg",
+      "participant": {
+        "externalId": "viewer-demo-001",
+        "displayName": "示例观众",
+        "avatarUrl": null
+      },
+      "status": "waiting_review",
+      "lastMessageAt": 1784044799000,
+      "lastSyncedAt": 1784044802100
+    },
+    "messages": [
+      {
+        "id": "msg_comment_100",
+        "threadId": "thread_comment_100",
+        "direction": "inbound",
+        "externalMessageId": "comment_msg_100",
+        "externalParentId": null,
+        "externalRootId": "comment_msg_100",
+        "messageType": "text",
+        "contentText": "这个视频很有帮助，谢谢分享。",
+        "attachmentMeta": null,
+        "lifecycle": "active",
+        "platformCreatedAt": 1784044799000
+      }
+    ],
+    "replyJob": {
+      "id": "job_comment_100",
+      "inboundMessageId": "msg_comment_100",
+      "state": "approval_required",
+      "version": 3,
+      "matchedRuleId": "rule_comment_thanks",
+      "configVersion": 1,
+      "template": {
+        "templateId": "template_comment_thanks",
+        "templateVersion": 1
+      },
+      "renderedText": "谢谢你的喜欢，欢迎继续交流。",
+      "polishedText": "谢谢你的喜欢，欢迎继续交流。",
+      "finalText": "谢谢你的喜欢，欢迎继续交流。",
+      "riskLevel": "low",
+      "riskReasons": [],
+      "approvalActor": null,
+      "approvedAt": null,
+      "idempotencyKey": null,
+      "updatedAt": 1784044809000
+    },
+    "sendAttempt": null,
+    "nextCursor": null
+  },
+  "meta": {
+    "requestId": "customer-comment-detail-001",
+    "asOf": 1784044836000
+  }
+}

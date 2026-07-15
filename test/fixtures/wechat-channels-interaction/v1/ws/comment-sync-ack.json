@@ -1,0 +1,22 @@
+{
+  "v": 2,
+  "type": "interaction.sync.ack",
+  "id": "sync-comment-envelope-001",
+  "ts": 1784044802100,
+  "payload": {
+    "batchId": "batch-comment-001",
+    "envKey": "env_wc_demo",
+    "accountId": "acct_wc_demo",
+    "platform": "wechat_channels",
+    "channel": "comment",
+    "scopeExternalId": "video-demo-001",
+    "status": "accepted",
+    "cursorAfter": "comment-cursor-001",
+    "persisted": {
+      "threads": 1,
+      "messages": 1
+    },
+    "errorCode": null,
+    "receivedAt": 1784044802100
+  }
+}
