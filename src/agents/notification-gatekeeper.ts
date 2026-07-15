@@ -55,6 +55,9 @@ export class NotificationGatekeeper extends BaseRole {
   unsubscribe(): void {
     for (const u of this.unsubscribers) u();
     this.unsubscribers = [];
+    // 会话重启不跨场残留待补跑巡视（角色实例持久、setup 只重订阅）：否则上一场 mid-approval 让位的陈旧 epoch
+    // 会在新一场首个 comment 终局被 retryDeferred 误触发一次 spurious 巡视。
+    this.deferredForComment = null;
   }
 
   private admit(epoch: number, edgeId?: string): void {

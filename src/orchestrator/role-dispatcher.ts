@@ -2252,11 +2252,14 @@ export class RoleDispatcher {
           // 早于 comment.done/skipped 的补发点 ⇒ 若其为评论支线在飞命令，resumeClock('comment_subline') 永不触发、
           // pauseClock 永冻 → should_end 被无限延期。此处解除时钟暂停并清在飞评论态（避免悬挂 pending 劫持后续无关回执），
           // **仍尊重抢占语义**：不 emit comment.done（不把评论终结成「已投但失败」）、不发恢复滚动、不重试、不计配额。
-          // resumeClock 对未置 reason 幂等 no-op（非评论动作被抢占时零副作用）。
-          if (payload.action === 'comment' && this.pendingComment) this.pendingComment = null;
-          if (payload.action === 'open_note' && this.pendingMigration) this.pendingMigration = null;
-          this.commentInflight = false;
-          this.sessionMonitor?.resumeClock('comment_subline');
+          // **只在被抢占的是评论支线命令（comment / 迁移 open_note）时解冻**：评论支线在途期唯一在飞的换页命令就是这二者
+          // （其余离页命令已被 commentInflight 闸扣住）；非评论动作（如 like/scroll）被抢占绝不误清一个正当在途的 commentInflight。
+          if (payload.action === 'comment' || payload.action === 'open_note') {
+            if (payload.action === 'comment') this.pendingComment = null;
+            if (payload.action === 'open_note') this.pendingMigration = null;
+            this.commentInflight = false;
+            this.sessionMonitor?.resumeClock('comment_subline');
+          }
           return;
         }
         // observedSurface 仅审计（change platform-browse-protocol）：回执回声 surface 与期望不符 → warn（检测漂移）；
