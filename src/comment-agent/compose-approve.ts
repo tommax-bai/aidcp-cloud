@@ -15,6 +15,7 @@
 import { PostProcessor } from '../publish-agent/post-processor.js';
 import { overlapsAny } from '../agents/comment-de-ai-flavor.js';
 import type { CommentApprovalPort } from '../agents/comment-approval-gate.js';
+import { buildCommentApprovalRequestId } from '../agents/comment-approval-request-id.js';
 import type { NoteData } from '../agents/content-curator-role.js';
 import type { ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
 import type { NoteForComment, OnPageComment } from './comment-task-runner.js';
@@ -151,7 +152,7 @@ export function buildComposeAndApprove(
 
     // ④ 审批模式：review 走交互人审；auto_approve 发通知后直接授权。免审仍在生成/清洗/反照搬/联系方式拼接之后，
     // 通知失败则 fail-closed，避免无通知裸发。
-    const requestId = `comment-${note.noteId}-${now()}`;
+    const requestId = buildCommentApprovalRequestId(note.noteId, now());
     if (deps.approvalMode === 'auto_approve') {
       if (!deps.autoApproveNotify) {
         log.warn(`[comment-compose] 评论免审通知口未接线 note=${note.noteId} → 不发（绝不无通知裸发）`);

@@ -12,6 +12,7 @@
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { RoleName, CommentClearedPayload } from '../event-bus/types.js';
+import { buildCommentApprovalRequestId } from './comment-approval-request-id.js';
 
 /** 评论人审端口：发卡 + 查授权信号（复用发帖 messenger + isPublishApproved，换评论 requestId 命名空间）。 */
 export interface CommentApprovalPort {
@@ -113,7 +114,7 @@ export class CommentApprovalGate extends BaseRole {
     const authorName = this.getNoteAuthor?.(payload.noteId) ?? undefined;
     const accountId = this.getAccountId?.() ?? undefined;
     const accountName = this.getAccountName?.() ?? undefined;
-    const requestId = `comment-${payload.noteId}-${this.now()}`;
+    const requestId = buildCommentApprovalRequestId(payload.noteId, this.now());
 
     if (mandatoryAutoApprove) {
       if (!this.autoApproveNotify) {
