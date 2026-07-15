@@ -60,6 +60,18 @@ test('natural-language business goal still requires the confirmation card (not a
   assert.equal(res.task.source, 'feishu');
 });
 
+test('structured console source auto-confirms and queues directly (no confirmation card)', async () => {
+  const { service: svc } = service();
+  const res = await svc.createDraft({
+    accountName: '小萝北', action: 'publish_post', targetSuccessCount: 1, maxAttempts: 2,
+    deadlineAt: NOW + 86_400_000, source: 'console',
+  });
+  assert.equal(res.autoQueued, true);
+  assert.equal(res.task.status, 'queued');
+  assert.equal(res.task.source, 'console');
+  assert.equal(res.task.approvalMode, 'review'); // 人审不受影响：仍在下游内容审批
+});
+
 test('dedupe returns the same active task', async () => {
   const { service: svc } = service();
   const a = await svc.createFromText('让小萝北完成 2 条有效评论');

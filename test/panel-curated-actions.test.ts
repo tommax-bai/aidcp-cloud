@@ -68,7 +68,7 @@ async function loginAuth(base: string): Promise<Record<string, string>> {
   return { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
 }
 
-test('HTTP 精选行级动作：拒绝路径不变；合法写只生成结构化确认任务，确认前零副作用', async () => {
+test('HTTP 精选行级动作：拒绝路径不变；合法写直接确认入队（console 精确入口不出确认卡），执行前零副作用', async () => {
   // ① 注入 curatedContent 但未注入 DelegatedTask 服务 → 503。
   const rows = new Map<string, CuratedPanelRow | null>();
   const curatedMock = {
@@ -142,12 +142,13 @@ test('HTTP 精选行级动作：拒绝路径不变；合法写只生成结构化
     assert.deepEqual(await noTitle.json(), { triggered: false, reason: 'empty_title' });
     assert.equal((await delegatedTasks.list()).length, 0, '以上拒绝路径都不应创建任务或触达写动作');
 
-    // 合法入口只创建 awaiting_confirmation；来源快照、版本约束和 withContact 原样锁进任务。
+    // console 精确入口直接确认入队（不出确认卡）；来源快照、版本约束和 withContact 原样锁进任务；
+    // 入队 ≠ 执行：worker 未跑，attemptCount 仍为 0、无边端接管 / 生成 / 发布。
     rows.set('7:acc-1', row());
     const created = await post('/api/curated/contents/7/create-post', { accountId: 'acc-1' });
     assert.equal(created.status, 201);
     const createdTask = (await created.json()) as { task: { status: string; action: string; progress: { attemptCount: number }; sourceConstraints: Record<string, unknown> } };
-    assert.equal(createdTask.task.status, 'awaiting_confirmation');
+    assert.equal(createdTask.task.status, 'queued');
     assert.equal(createdTask.task.action, 'publish_post');
     assert.equal(createdTask.task.progress.attemptCount, 0);
     assert.equal(createdTask.task.sourceConstraints.sourceId, 'note-42');
@@ -163,7 +164,7 @@ test('HTTP 精选行级动作：拒绝路径不变；合法写只生成结构化
     const contentComment = await post('/api/curated/contents/7/comment', { accountId: 'acc-1' });
     assert.equal(contentComment.status, 201);
     const commentTask = (await contentComment.json()) as { task: { status: string; action: string; targetConstraints: Record<string, unknown> } };
-    assert.equal(commentTask.task.status, 'awaiting_confirmation');
+    assert.equal(commentTask.task.status, 'queued');
     assert.equal(commentTask.task.action, 'comment_curated');
     assert.equal(commentTask.task.targetConstraints.noteId, 'note-42');
     assert.equal(commentTask.task.targetConstraints.withContact, false);
@@ -177,7 +178,7 @@ test('HTTP 精选行级动作：拒绝路径不变；合法写只生成结构化
     assert.equal(videoComment.status, 201);
     const tasks = await delegatedTasks.list();
     assert.equal(tasks.length, 5);
-    assert.ok(tasks.every((task) => task.status === 'awaiting_confirmation' && task.progress.attemptCount === 0));
+    assert.ok(tasks.every((task) => task.status === 'queued' && task.progress.attemptCount === 0));
   } finally {
     await h.close();
   }

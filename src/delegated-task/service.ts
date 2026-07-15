@@ -146,27 +146,18 @@ export class DelegatedTaskService {
     const parsed = parseDelegatedText(text, { now: this.now(), source: 'feishu', sourceRef: opts?.sourceRef });
     if (!parsed.ok) throw new DelegatedTaskServiceError(parsed.code, parsed.message);
     if (parsed.kind === 'control') return { kind: 'control', request: parsed };
+    // Auto-confirm vs confirmation card is decided inside createDraft by `source`: only natural language
+    // (`feishu`) keeps the confirmation card; `legacy_command` slash commands auto-queue. createFromText
+    // only ever produces 'feishu' or 'legacy_command' intents, so this just passes the decision through.
     const created = await this.createDraft({ ...parsed.intent, accountName: parsed.nickname });
-    // Precise legacy slash commands (/publish, /comment) resolve to a single explicit target with nothing
-    // left to disambiguate — the structured confirmation card would only add a redundant click, so we
-    // auto-confirm and queue directly. Natural-language goals (source 'feishu') still surface the
-    // confirmation card because account / target count / deadline / attempts were *inferred* from prose
-    // and can be misparsed; the card is the "did I understand you right" checkpoint. This does NOT weaken
-    // downstream human review: publish/comment keep approvalMode 'review', so the per-content 人审 card
-    // still fires before any platform write, and ambiguous-nickname resolution still fails closed.
-    if (parsed.intent.source === 'legacy_command') {
-      const task = created.task.status === 'awaiting_confirmation'
-        ? await this.confirm(created.task.id, created.task.version)
-        : created.task;
-      return { kind: 'task', task, confirmation: created.confirmation, created: created.created, autoQueued: true };
-    }
-    return { kind: 'task', ...created, autoQueued: false };
+    return { kind: 'task', ...created };
   }
 
   async createDraft(intent: DelegatedTaskIntent): Promise<{
     task: DelegatedTask;
     confirmation: DelegatedTaskConfirmationSummary;
     created: boolean;
+    autoQueued: boolean;
   }> {
     const errors = validateDelegatedTaskIntent(intent, this.now());
     if (errors.length > 0) throw new DelegatedTaskServiceError(errors[0], `任务参数不完整：${errors.join(', ')}`);
@@ -217,7 +208,18 @@ export class DelegatedTaskService {
       }),
     };
     const result = await this.deps.store.createDraft(create);
-    return { ...result, confirmation: buildDelegatedTaskConfirmation(result.task, support) };
+    const confirmation = buildDelegatedTaskConfirmation(result.task, support);
+    // 确认卡只服务于自然语言（`feishu`）入口——账号 / 数量 / 截止 / 尝试均为从散文**推断**、可能解析错，
+    // 需要人过目确认。其余都是结构化精确入口（console 行级动作 / edge 快捷入口 / api / legacy slash），
+    // 参数已显式给定、无可推断歧义 → 直接确认入队、不出确认卡。人审不受影响：仍在下游内容 / 评论审批处，
+    // 昵称歧义仍在 resolveAccount 处 fail-closed。
+    if (intent.source !== 'feishu') {
+      const task = result.task.status === 'awaiting_confirmation'
+        ? await this.confirm(result.task.id, result.task.version)
+        : result.task;
+      return { task, confirmation, created: result.created, autoQueued: true };
+    }
+    return { task: result.task, confirmation, created: result.created, autoQueued: false };
   }
 
   async confirm(taskId: string, version: number): Promise<DelegatedTask> {

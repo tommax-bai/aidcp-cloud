@@ -1441,7 +1441,7 @@ test('HTTP Facebook group metadata filters, facets, and import validation', asyn
   }
 });
 
-test('HTTP DelegatedTask API: draft/confirm/list/cancel all require task version and never execute at draft time', async () => {
+test('HTTP DelegatedTask API: console draft auto-queues (no confirm card), control ops require version, never executes at draft time', async () => {
   const taskStore = new MemoryDelegatedTaskStore();
   const delegatedTasks = new DelegatedTaskService({
     store: taskStore,
@@ -1467,25 +1467,21 @@ test('HTTP DelegatedTask API: draft/confirm/list/cancel all require task version
     });
     assert.equal(draftResponse.status, 201);
     const draft = (await draftResponse.json()) as { task: { id: string; version: number; status: string; progress: { attemptCount: number } } };
-    assert.equal(draft.task.status, 'awaiting_confirmation');
-    assert.equal(draft.task.progress.attemptCount, 0, '生成确认卡不得执行任何一次尝试');
+    // console 精确入口直接确认入队（不出确认卡）；入队 ≠ 执行——worker 未跑，attemptCount 仍为 0。
+    assert.equal(draft.task.status, 'queued');
+    assert.equal(draft.task.progress.attemptCount, 0, '直接入队不得执行任何一次尝试');
 
-    const stale = await fetch(`${base}/api/delegated-tasks/${draft.task.id}/confirm`, {
+    // 控制操作仍需正确 version：陈旧 version 的 cancel → 409。
+    const stale = await fetch(`${base}/api/delegated-tasks/${draft.task.id}/cancel`, {
       method: 'POST', headers: auth, body: JSON.stringify({ version: draft.task.version + 1 }),
     });
     assert.equal(stale.status, 409);
-    const confirmedResponse = await fetch(`${base}/api/delegated-tasks/${draft.task.id}/confirm`, {
-      method: 'POST', headers: auth, body: JSON.stringify({ version: draft.task.version }),
-    });
-    assert.equal(confirmedResponse.status, 200);
-    const confirmed = (await confirmedResponse.json()) as { task: { version: number; status: string } };
-    assert.equal(confirmed.task.status, 'queued');
 
     const list = await fetch(`${base}/api/delegated-tasks?accountId=default`, { headers: auth });
     assert.equal(list.status, 200);
     assert.match(JSON.stringify(await list.json()), new RegExp(draft.task.id));
     const cancelled = await fetch(`${base}/api/delegated-tasks/${draft.task.id}/cancel`, {
-      method: 'POST', headers: auth, body: JSON.stringify({ version: confirmed.task.version }),
+      method: 'POST', headers: auth, body: JSON.stringify({ version: draft.task.version }),
     });
     assert.equal(cancelled.status, 200);
     assert.equal(((await cancelled.json()) as { task: { status: string } }).task.status, 'cancelled');
