@@ -1548,7 +1548,12 @@ async function main(): Promise<void> {
     bindChat: (record) => botChatStore.setDefault(record),
     delegate: async (text, context) => {
       if (!delegatedTaskService) throw new Error('委托任务服务未就绪，未执行任何写操作。');
-      const result = await delegatedTaskService.createFromText(text, { sourceRef: context?.messageId ?? context?.chatId });
+      // change restore-delegated-command-card-origin-chat：命令来源会话专取 chatId（私聊=p2p 会话、群=群 id），
+      // 与偏向 messageId、参与去重键的 sourceRef 解耦，作为委托任务操作员向卡片（审批 / 终态）的投递目标。
+      const result = await delegatedTaskService.createFromText(text, {
+        sourceRef: context?.messageId ?? context?.chatId,
+        originChatId: context?.chatId,
+      });
       if (result.kind === 'control') {
         const req = result.request;
         const task = req.action === 'pause'
@@ -3497,8 +3502,14 @@ async function main(): Promise<void> {
         const receipt = delegatedPublishOutcomeReceipt(task);
         if (!receipt) return;
         if (!delegatedTaskNotificationGate.shouldSend(task)) return;
-        const chatId = await resolveAccountChatId(task.accountId);
+        // change restore-delegated-command-card-origin-chat：命令触发的委托发帖，终态失败卡回来源会话（操作员触发、
+        // 操作员收结果）；无来源会话（自动 / 排期 / 旧行）补集式回落账号→团队群路由，零回归。
+        const originChatId = task.originChatId?.trim();
+        const chatId = originChatId || (await resolveAccountChatId(task.accountId));
         if (!chatId) return;
+        console.log(
+          `[delegated-task] 发帖终态失败卡 task=${task.id} account=${task.accountId} sink=${originChatId ? 'origin' : 'account_team'}`,
+        );
         try {
           await messenger.sendCard(chatId, buildCommandResultCard({
             command: '发帖',

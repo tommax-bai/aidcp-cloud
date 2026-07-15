@@ -8,7 +8,7 @@ function task(overrides: Partial<DelegatedTask> = {}): DelegatedTask {
     id: 'task-1', accountId: 'xhs-1', accountName: '小萝北', platform: 'xiaohongshu',
     action: 'comment_batch', actionFamily: 'comment', targetSuccessCount: 3, maxAttempts: 6,
     deadlineAt: Date.now() + 60_000, notBefore: Date.now(), executionWindow: { mode: 'immediate' },
-    sourceConstraints: {}, targetConstraints: {}, approvalMode: 'review', priority: 'normal', source: 'api', sourceRef: null,
+    sourceConstraints: {}, targetConstraints: {}, approvalMode: 'review', priority: 'normal', source: 'api', sourceRef: null, originChatId: null,
     status: 'executing', progress: { successCount: 0, attemptCount: 1, skippedCount: 0, failureCount: 0 },
     currentStep: null, terminalOutcome: null, pauseRequested: false, cancelRequested: false, nextEligibleAt: null,
     claimToken: 'claim', claimExpiresAt: Date.now() + 60_000, dedupeKey: 'dedupe', version: 1,
@@ -137,4 +137,36 @@ test('candidate modification is CAS-bound and carries the requested retained-ima
   assert.deepEqual(await router.executorFor(stale).execute(stale, attempt), {
     kind: 'failed', reason: 'candidate_version_conflict(current=3)', retryable: false,
   });
+});
+
+// change restore-delegated-command-card-origin-chat：命令来源会话 → 审批卡目标（manual_source）。
+test('delegated publish threads originChatId to the publish port as manualApprovalChatId, and omits it when absent', async () => {
+  const calls: Array<{ manualApprovalChatId?: string }> = [];
+  const router = createDelegatedExecutorRouter({
+    comments: {
+      triggerManual: async () => ({ ok: true, message: 'unused' }),
+      triggerTargeted: async () => ({ ok: false, message: 'unused' }),
+      isRunning: () => false,
+    },
+    publishes: {
+      triggerDelegated: async (_accountId, opts) => {
+        calls.push({ manualApprovalChatId: opts.manualApprovalChatId });
+        return { result: 'triggered', reason: 'delegated_publish_post', status: 'pending_approval', recordId: 7 };
+      },
+      isBusy: () => false,
+    },
+    loadCandidate: async () => null,
+    approveCandidate: async () => null,
+    rejectCandidate: async () => null,
+    modifyCandidate: async () => null,
+  });
+
+  const withOrigin = task({ action: 'publish_post', actionFamily: 'publish', originChatId: 'oc_private_P' });
+  const r1 = await router.executorFor(withOrigin).execute(withOrigin, attempt);
+  assert.equal(r1.kind, 'waiting_approval');
+  assert.equal(calls[0].manualApprovalChatId, 'oc_private_P');
+
+  const noOrigin = task({ action: 'publish_post', actionFamily: 'publish', originChatId: null });
+  await router.executorFor(noOrigin).execute(noOrigin, attempt);
+  assert.equal(calls[1].manualApprovalChatId, undefined);
 });

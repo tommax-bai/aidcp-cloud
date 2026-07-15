@@ -139,11 +139,11 @@ export class DelegatedTaskService {
     this.now = deps.now ?? Date.now;
   }
 
-  async createFromText(text: string, opts?: { sourceRef?: string }): Promise<
+  async createFromText(text: string, opts?: { sourceRef?: string; originChatId?: string }): Promise<
     | { kind: 'task'; task: DelegatedTask; confirmation: DelegatedTaskConfirmationSummary; created: boolean; autoQueued: boolean }
     | { kind: 'control'; request: Extract<ParsedDelegatedRequest, { ok: true; kind: 'control' }> }
   > {
-    const parsed = parseDelegatedText(text, { now: this.now(), source: 'feishu', sourceRef: opts?.sourceRef });
+    const parsed = parseDelegatedText(text, { now: this.now(), source: 'feishu', sourceRef: opts?.sourceRef, originChatId: opts?.originChatId });
     if (!parsed.ok) throw new DelegatedTaskServiceError(parsed.code, parsed.message);
     if (parsed.kind === 'control') return { kind: 'control', request: parsed };
     // Auto-confirm vs confirmation card is decided inside createDraft by `source`: only natural language

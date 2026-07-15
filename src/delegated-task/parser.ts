@@ -11,6 +11,8 @@ export interface ParseDelegatedTextOptions {
   now?: number;
   source?: DelegatedTaskIntent['source'];
   sourceRef?: string;
+  /** 命令来源会话（飞书 chatId），随所有 intent 透传；缺省 → 回落既有路由。 */
+  originChatId?: string;
 }
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -88,6 +90,7 @@ function baseIntent(
     priority: /优先(?:执行|处理)?/.test(text) ? 'high' : 'normal',
     source: opts.source ?? 'feishu',
     ...(opts.sourceRef ? { sourceRef: opts.sourceRef } : {}),
+    ...(opts.originChatId ? { originChatId: opts.originChatId } : {}),
   };
 }
 

@@ -373,6 +373,11 @@ export class PublishScheduler {
       action: 'publish_post' | 'publish_from_inspiration' | 'generate_candidates';
       approvalMode?: NonNullable<TriggerInput['approvalMode']>;
       referenceNote?: ReferenceNote;
+      /**
+       * change restore-delegated-command-card-origin-chat：命令来源会话 → 审批卡目标（manual_source）。
+       * 缺省（自动 / 无来源会话）→ 审批卡回落默认审批群，既有行为逐字不变。
+       */
+      manualApprovalChatId?: string;
     },
   ): Promise<TriggerOutcome> {
     if (this.d.isPersonaBound && !this.d.isPersonaBound(accountId)) {
@@ -389,7 +394,7 @@ export class PublishScheduler {
       true,
       accountId,
       opts.referenceNote,
-      undefined,
+      opts.manualApprovalChatId,
       opts.approvalMode ?? 'review',
       inspirationSinceMs,
     );

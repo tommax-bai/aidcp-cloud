@@ -59,6 +59,9 @@ CREATE TABLE IF NOT EXISTS delegated_tasks (
   created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- change restore-delegated-command-card-origin-chat：命令来源会话（操作员向卡片投递目标）。
+-- 无迁移器、schema 启动自建；幂等 ADD COLUMN，旧行为 NULL = 回落既有默认 / 团队路由，零回归。
+ALTER TABLE delegated_tasks ADD COLUMN IF NOT EXISTS origin_chat_id TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_delegated_tasks_active_dedupe
   ON delegated_tasks(dedupe_key)
   WHERE status IN ('draft','awaiting_confirmation','queued','planning','waiting_approval','executing','deferred');
@@ -152,6 +155,7 @@ interface TaskRow {
   priority: DelegatedTask['priority'];
   source: DelegatedTask['source'];
   source_ref: string | null;
+  origin_chat_id: string | null;
   status: DelegatedTaskStatus;
   success_count: number;
   attempt_count: number;
@@ -207,6 +211,7 @@ function mapTask(r: TaskRow): DelegatedTask {
     priority: r.priority,
     source: r.source,
     sourceRef: r.source_ref,
+    originChatId: r.origin_chat_id,
     status: r.status,
     progress: {
       successCount: Number(r.success_count),
@@ -281,6 +286,7 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
       input.executionWindow ?? { mode: 'immediate' }, input.sourceConstraints ?? {}, input.targetConstraints ?? {},
       input.approvalMode ?? (input.action === 'generate_candidates' ? 'draft_only' : 'review'),
       input.priority ?? 'normal', input.source, input.sourceRef ?? null, input.dedupeKey,
+      input.originChatId ?? null,
     ];
     try {
       const { rows } = await this.pool.query<TaskRow>(
@@ -288,8 +294,8 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
            id, account_id, account_name, platform, action, action_family,
            target_success_count, max_attempts, deadline_at, not_before, execution_window,
            source_constraints, target_constraints, approval_mode, priority, source, source_ref,
-           status, dedupe_key
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'awaiting_confirmation',$18)
+           status, dedupe_key, origin_chat_id
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'awaiting_confirmation',$18,$19)
          RETURNING *`,
         values,
       );
@@ -601,6 +607,7 @@ export class MemoryDelegatedTaskStore implements DelegatedTaskStore {
       sourceConstraints: input.sourceConstraints ?? {}, targetConstraints: input.targetConstraints ?? {},
       approvalMode: input.approvalMode ?? (input.action === 'generate_candidates' ? 'draft_only' : 'review'),
       priority: input.priority ?? 'normal', source: input.source, sourceRef: input.sourceRef ?? null,
+      originChatId: input.originChatId ?? null,
       status: 'awaiting_confirmation', progress: { successCount: 0, attemptCount: 0, skippedCount: 0, failureCount: 0 },
       currentStep: null, terminalOutcome: null, pauseRequested: false, cancelRequested: false,
       nextEligibleAt: null, claimToken: null, claimExpiresAt: null, dedupeKey: input.dedupeKey,

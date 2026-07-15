@@ -39,6 +39,27 @@ test('legacy /publish slash command auto-confirms and queues directly (no confir
   assert.equal(res.task.approvalMode, 'review');
 });
 
+// change restore-delegated-command-card-origin-chat：命令来源会话被捕获、持久化、与 sourceRef 解耦。
+test('command origin chat is captured, round-trips through the store, and is distinct from sourceRef', async () => {
+  const { store, service: svc } = service();
+  const res = await svc.createFromText('/publish 小萝北', { sourceRef: 'om_message_123', originChatId: 'oc_private_P' });
+  assert.equal(res.kind, 'task');
+  if (res.kind !== 'task') return;
+  assert.equal(res.task.originChatId, 'oc_private_P');
+  assert.equal(res.task.sourceRef, 'om_message_123'); // 来源会话与偏向 messageId 的 sourceRef 解耦
+  const reloaded = await store.get(res.task.id);
+  assert.equal(reloaded?.originChatId, 'oc_private_P');
+});
+
+test('non-command task has null originChatId (falls back to existing default / team routing)', async () => {
+  const { service: svc } = service();
+  const res = await svc.createDraft({
+    accountName: '小萝北', action: 'publish_post', targetSuccessCount: 1, maxAttempts: 2,
+    deadlineAt: NOW + 86_400_000, source: 'console',
+  });
+  assert.equal(res.task.originChatId, null);
+});
+
 test('legacy /comment slash command auto-confirms and queues directly', async () => {
   const { service: svc } = service();
   const res = await svc.createFromText('/comment 小萝北');

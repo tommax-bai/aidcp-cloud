@@ -61,6 +61,12 @@ export interface DelegatedTask {
   priority: DelegatedTaskPriority;
   source: DelegatedTaskSource;
   sourceRef: string | null;
+  /**
+   * 命令来源会话（飞书 `chatId`）。change restore-delegated-command-card-origin-chat：
+   * 与偏向 messageId、参与去重键的 `sourceRef` 解耦，专职操作员向卡片（审批卡 / 终态结果卡）的投递目标。
+   * 命令触发（私聊 / 群）→ 该会话；非飞书入口（console/api/edge）→ null → 回落既有默认 / 团队路由。
+   */
+  originChatId: string | null;
   status: DelegatedTaskStatus;
   progress: DelegatedTaskProgress;
   currentStep: string | null;
@@ -94,6 +100,8 @@ export interface DelegatedTaskIntent {
   priority?: DelegatedTaskPriority;
   source: DelegatedTaskSource;
   sourceRef?: string;
+  /** 命令来源会话（飞书 chatId）；仅命令入口带值，其余入口缺省 → 回落既有路由。 */
+  originChatId?: string;
 }
 
 export type DelegatedVerificationKind =

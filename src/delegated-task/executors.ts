@@ -38,6 +38,11 @@ export interface DelegatedPublishPort {
       action: 'publish_post' | 'publish_from_inspiration' | 'generate_candidates';
       approvalMode?: 'review' | 'auto_approve' | 'draft_only';
       referenceNote?: ReferenceNote;
+      /**
+       * change restore-delegated-command-card-origin-chat：命令来源会话，透传成审批卡目标（manual_source）。
+       * 缺省 → 审批卡回落默认审批群（既有行为、零回归）。
+       */
+      manualApprovalChatId?: string;
     },
   ): Promise<TriggerOutcome>;
   isBusy(accountId?: string): boolean;
@@ -301,6 +306,8 @@ export function createDelegatedExecutorRouter(deps: DelegatedExecutorDeps): {
           action: task.action,
           approvalMode: approvalMode(task),
           ...(referenceNote(task) ? { referenceNote: referenceNote(task)! } : {}),
+          // 命令来源会话 → 审批卡回来源会话（私聊 / 群）；无来源会话 → 回落默认审批群。
+          ...(task.originChatId ? { manualApprovalChatId: task.originChatId } : {}),
         }));
       }
 
