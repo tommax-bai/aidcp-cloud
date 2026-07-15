@@ -17,6 +17,7 @@ import {
 } from './facebook-group-store.js';
 import { buildFacebookGroupJoinEdgeSteps, type FacebookGroupJoinStepResult } from './facebook-group-join-edge-steps.js';
 import { EdgeTaskLeaseError, type EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
+import type { EdgeTaskPriority } from '../comm/protocol.js';
 
 export interface FacebookGroupJoinSchedulerDeps {
   resolveConnection: (accountId: string) => { bus: EventBus; edgeId?: string } | null;
@@ -136,6 +137,8 @@ export class FacebookGroupJoinScheduler {
    */
   async triggerScheduled(accountId: string, opts?: { manual?: boolean }): Promise<FacebookGroupJoinTriggerResult> {
     const manual = opts?.manual === true;
+    // 7.11：人工触发的加群把档位一路传下去——严格三档下运营手动敲的加群若停在 automatic，会被另一条 human 任务抢占。
+    const gear: EdgeTaskPriority = manual ? 'human' : 'automatic';
     if (!accountId || accountId === 'default') return { triggered: false, reason: 'account_required' };
     if (this.running.has(accountId)) return { triggered: false, reason: 'running' };
     this.running.add(accountId);
@@ -153,7 +156,7 @@ export class FacebookGroupJoinScheduler {
         return { triggered: false, reason: 'edge_offline' };
       }
 
-      if (shadow) return this.runShadow(accountId, conn.bus, conn.edgeId);
+      if (shadow) return this.runShadow(accountId, conn.bus, conn.edgeId, gear);
 
       // 手动命令跳过配额闸（含风控状态 + 速率 + 会话额度）；自动巡回照旧受闸。
       if (!manual) {
@@ -166,7 +169,7 @@ export class FacebookGroupJoinScheduler {
           return { triggered: false, reason: 'session_budget' };
         }
       }
-      return this.runReal(accountId, conn.bus, conn.edgeId);
+      return this.runReal(accountId, conn.bus, conn.edgeId, gear);
     } finally {
       this.running.delete(accountId);
     }
@@ -182,8 +185,10 @@ export class FacebookGroupJoinScheduler {
   async joinSpecificGroup(
     accountId: string,
     groupUrlInput: string,
-    _opts?: { manual?: boolean },
+    opts?: { manual?: boolean },
   ): Promise<FacebookGroupJoinTriggerResult> {
+    // 7.11：手动指定群（/comment --join=<url>）把 human 档一路传到租约——否则运营手动加群仍停 automatic，会被别的 human 任务抢占。
+    const gear: EdgeTaskPriority = opts?.manual === true ? 'human' : 'automatic';
     if (!accountId || accountId === 'default') return { triggered: false, reason: 'account_required' };
     const groupUrl = canonicalFacebookGroupUrl(groupUrlInput);
     if (!groupUrl) return { triggered: false, reason: 'invalid_group_url' };
@@ -207,7 +212,7 @@ export class FacebookGroupJoinScheduler {
 
       if (shadow) {
         const observed = await this.deps.edgeTaskLeases.withLease(
-          { edgeId, kind: 'group_join', priority: 'automatic', leaseMs: 3 * 60_000 },
+          { edgeId, kind: 'group_join', priority: gear, leaseMs: 3 * 60_000 },
           (lease) => this.steps(bus, edgeId, lease.taskId).observeGroup(groupUrl),
         );
         if (!observed.observation) {
@@ -233,20 +238,20 @@ export class FacebookGroupJoinScheduler {
         await this.audit({ accountId, groupUrl, outcome: 'already_member', phase: 'pre_click', reason: 'already_joined_ledger', shadow: false });
         return { triggered: true, groupUrl, outcome: 'already_member' };
       }
-      return this.runAssignedJoin(accountId, bus, edgeId, claim.row);
+      return this.runAssignedJoin(accountId, bus, edgeId, claim.row, gear);
     } finally {
       this.running.delete(accountId);
     }
   }
 
-  private async runShadow(accountId: string, bus: EventBus, edgeId: string): Promise<FacebookGroupJoinTriggerResult> {
+  private async runShadow(accountId: string, bus: EventBus, edgeId: string, gear: EdgeTaskPriority): Promise<FacebookGroupJoinTriggerResult> {
     const target = await this.deps.targets.nextJoinCandidate();
     if (!target) {
       await this.audit({ accountId, outcome: 'no_targets', phase: 'shadow', shadow: true, reason: 'no_candidate' });
       return { triggered: false, reason: 'no_targets' };
     }
     const observed = await this.deps.edgeTaskLeases.withLease(
-      { edgeId, kind: 'group_join', priority: 'automatic', leaseMs: 3 * 60_000 },
+      { edgeId, kind: 'group_join', priority: gear, leaseMs: 3 * 60_000 },
       (lease) => this.steps(bus, edgeId, lease.taskId).observeGroup(target.groupUrl),
     );
     const observation = observed.observation;
@@ -265,13 +270,13 @@ export class FacebookGroupJoinScheduler {
     return { triggered: true, groupUrl: target.groupUrl, outcome: verdict.verdict };
   }
 
-  private async runReal(accountId: string, bus: EventBus, edgeId: string): Promise<FacebookGroupJoinTriggerResult> {
+  private async runReal(accountId: string, bus: EventBus, edgeId: string, gear: EdgeTaskPriority): Promise<FacebookGroupJoinTriggerResult> {
     const assigned = (await this.deps.memberships.currentAssignment(accountId)) ?? (await this.deps.memberships.claimNext(accountId));
     if (!assigned) {
       await this.audit({ accountId, outcome: 'no_targets', phase: 'scheduler', shadow: false, reason: 'no_candidate' });
       return { triggered: false, reason: 'no_targets' };
     }
-    return this.runAssignedJoin(accountId, bus, edgeId, assigned);
+    return this.runAssignedJoin(accountId, bus, edgeId, assigned, gear);
   }
 
   /**
@@ -283,6 +288,7 @@ export class FacebookGroupJoinScheduler {
     bus: EventBus,
     edgeId: string,
     assigned: FacebookGroupMembershipRow,
+    gear: EdgeTaskPriority,
   ): Promise<FacebookGroupJoinTriggerResult> {
     await this.audit({ accountId, groupUrl: assigned.groupUrl, outcome: 'claimed', phase: 'scheduler', shadow: false });
     await this.deps.memberships.markJoining(accountId, assigned.groupUrl);
@@ -293,7 +299,7 @@ export class FacebookGroupJoinScheduler {
     let observed: FacebookGroupJoinStepResult;
     try {
       observed = await this.deps.edgeTaskLeases.withLease(
-        { edgeId, kind: 'group_join', priority: 'automatic', leaseMs: 3 * 60_000 },
+        { edgeId, kind: 'group_join', priority: gear, leaseMs: 3 * 60_000 },
         (lease) => this.steps(bus, edgeId, lease.taskId).observeGroup(assigned.groupUrl),
       );
     } catch (err) {
@@ -319,7 +325,7 @@ export class FacebookGroupJoinScheduler {
     let clicked: FacebookGroupJoinStepResult;
     try {
       clicked = await this.deps.edgeTaskLeases.withLease(
-        { edgeId, kind: 'group_join', priority: 'automatic', leaseMs: 3 * 60_000 },
+        { edgeId, kind: 'group_join', priority: gear, leaseMs: 3 * 60_000 },
         (lease) => this.steps(bus, edgeId, lease.taskId).clickJoin(assigned.groupUrl),
       );
     } catch (err) {
