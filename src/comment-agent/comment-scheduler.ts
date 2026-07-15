@@ -805,7 +805,12 @@ export class CommentScheduler {
     // 审批通过后目标帖已不在页 → 提交时 own-identity 收窄评论框失败 editor_not_found（真机事故 2026-07-15）。
     // priority 按手动/排期派生（与小红书 keep-open 同口径）。steps **必须**用 lease.taskId 构建：边端 FB 命令入口
     // 按 canExecute(payload.taskId) 无差别门控——持租约期无 taskId 命令一律被挡，评论自己的命令不带 taskId 会被自锁挡死。
-    const FB_KEEP_OPEN_LEASE_MS = 4 * 60_000;
+    // leaseMs 必须**严格覆盖**持锁期最坏的纯云耗时——否则边端 idle 计时（只由到达的 FB 命令 touch，见 canExecute/armExpiry）
+    // 会在 note.open 与 interaction.comment 之间过期、finishActive('expired') 解冻自治浏览 → 页面被滚走、已授权评论的
+    // 提交命令被挡（对抗复核 wf_933f178c 确证）。窗内两段纯云无命令：撰写（成功可逼近 LLM 天花板 ~180s）+ 飞书人审（≤90s）。
+    // 故取 6min 严格 > (撰写 ~180s + 人审 90s + 搜索/开帖 + 往返余量)，远低于边端 30min 绝对上限。
+    // 注：小红书 keep-open（:1307 的 4min）同样只按 ~150s 预算、未含撰写，存在同一薄裕度隐患——本 change 不动它（越界），登记 backlog。
+    const FB_KEEP_OPEN_LEASE_MS = 6 * 60_000;
     const priority: EdgeTaskPriority = options.manualOverride ? 'human' : 'automatic';
     // conn.edgeId / conn.bus 在此已过 `!conn || !conn.edgeId` 守卫（narrowed 为非空）；捕成 const 供闭包用——
     // 控制流收窄不穿透嵌套闭包，闭包内直接读 conn.edgeId 会被 TS 当 string|undefined。

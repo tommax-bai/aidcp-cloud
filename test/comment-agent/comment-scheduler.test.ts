@@ -876,12 +876,12 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
   // ── change facebook-manual-comment-keepopen-lease：keep-open 租约贯穿人审、三命令透传 taskId ──
   it('keep-open 租约包住 search→open→submit（kind=comment_prepare 单次），三命令都带 lease taskId', async () => {
     const base = fbFlowDeps({ submit: { ok: true } });
-    const leaseReqs: Array<{ kind: string; priority: string }> = [];
+    const leaseReqs: Array<{ kind: string; priority: string; leaseMs?: number }> = [];
     const deps: CommentSchedulerDeps = {
       ...base.deps,
       edgeTaskLeases: {
         withLease: async (request, work) => {
-          leaseReqs.push({ kind: request.kind, priority: request.priority });
+          leaseReqs.push({ kind: request.kind, priority: request.priority, leaseMs: request.leaseMs });
           return work({ taskId: 'fb-task-1', edgeId: request.edgeId, kind: request.kind, priority: request.priority });
         },
       },
@@ -893,6 +893,9 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.deepEqual(leaseReqs.map((r) => r.kind), ['comment_prepare']);
     // 手动操作员命令 → human priority
     assert.equal(leaseReqs[0].priority, 'human');
+    // leaseMs 必须严格 > 撰写(~180s LLM 天花板) + 人审(90s)：否则边端 idle 计时在 note.open→comment 的纯云窗内过期、
+    // 解冻自治浏览把页面滚走、已授权评论提交被挡（对抗复核 wf_933f178c）。
+    assert.ok((leaseReqs[0].leaseMs ?? 0) > 180_000 + 90_000, `keep-open leaseMs 必须严格覆盖撰写+人审最坏耗时，实际=${leaseReqs[0].leaseMs}`);
     // 三条命令都带 lease taskId（否则边端持租约期把评论自己的命令也挡死 → 自锁）
     for (const t of ['search.execute', 'note.open', 'interaction.comment']) {
       const env = base.envelopes.find((e) => e.type === t);
