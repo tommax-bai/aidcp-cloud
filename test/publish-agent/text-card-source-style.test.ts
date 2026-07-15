@@ -8,7 +8,7 @@ import type { ReferenceVisualAnalysis, VisualFrameSpec } from '../../src/publish
 
 const analysis: ReferenceVisualAnalysis = {
   status: 'analyzed',
-  schemaVersion: 'visual-reference-v2',
+  schemaVersion: 'visual-reference-v3',
   cacheKey: 'k',
   provider: 'dashscope',
   model: 'qwen3.7-plus',

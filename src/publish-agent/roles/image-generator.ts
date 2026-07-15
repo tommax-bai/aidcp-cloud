@@ -221,6 +221,7 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
       const expected = primary
         ? input.referenceVisualAnalysis?.frameSpecs?.find((frame) => frame.sourceArrayIndex === primary.sourceArrayIndex)
         : undefined;
+      const contentVisualBrief = input.contentVisualBriefs?.[i] ?? undefined;
       const rc = renderedCards[i];
       if (rc) {
         if (!auditing) return { url: rc.url, referenceStatus: 'skipped' } satisfies ImageGenerationOutcome;
@@ -234,12 +235,21 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
           input.textCardStyles?.[i] ?? undefined,
           primary?.url,
           expected,
+          undefined,
           (retried) => { renderedCards[i] = retried; },
         );
       }
       const slotReferenceUrls = binding ? binding.references.map((item) => item.url) : referenceUrls;
       if (!auditing) return this.generateOne(prompt, { accountId, runToken, seq: i }, slotReferenceUrls, binding?.references);
-      return this.generateWithAudit(prompt, { accountId, runToken, seq: i }, slotReferenceUrls, binding?.references, primary?.url, expected);
+      return this.generateWithAudit(
+        prompt,
+        { accountId, runToken, seq: i },
+        slotReferenceUrls,
+        binding?.references,
+        primary?.url,
+        expected,
+        contentVisualBrief,
+      );
     });
     const imageUrls = results.map((r) => r.url).filter((url): url is string => !!url);
 
@@ -364,6 +374,7 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     sourceStyle: TextCardSourceStyle | undefined,
     primaryUrl: string | undefined,
     expectedFrame: VisualFrameSpec | undefined,
+    contentVisualBrief: NonNullable<ImagePlan['contentVisualBriefs']>[number] | undefined,
     onRerender: (rendered: { url: string; meta: TextCardRenderMeta }) => void,
   ): Promise<ImageGenerationOutcome> {
     if (!primaryUrl || !this.visualAuditor) {
@@ -381,10 +392,16 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
         referenceUrl: primaryUrl,
         generatedUrl: current.url,
         expectedFrame,
+        ...(contentVisualBrief ? { contentVisualBrief } : {}),
       });
       attempts.push(audit);
-      if (audit.status === 'passed' || audit.status === 'unverified') {
+      if (audit.status === 'passed') {
         return { url: current.url, referenceStatus: 'skipped', auditAttempts: attempts };
+      }
+      if (audit.status === 'unverified') {
+        return attempts.slice(0, -1).some((item) => item.status === 'failed')
+          ? { url: null, referenceStatus: 'skipped', auditAttempts: attempts }
+          : { url: current.url, referenceStatus: 'skipped', auditAttempts: attempts };
       }
       if (attempt === 0) {
         if (!sourceStyle) {
@@ -453,6 +470,7 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     referenceRoles: VisualReferenceBindingItem[] | undefined,
     primaryUrl: string | undefined,
     expectedFrame: VisualFrameSpec | undefined,
+    contentVisualBrief: NonNullable<ImagePlan['contentVisualBriefs']>[number] | undefined,
   ): Promise<ImageGenerationOutcome> {
     if (!primaryUrl || !this.visualAuditor) {
       const outcome = await this.generateOne(prompt, keyCtx, referenceUrls, referenceRoles);
@@ -473,10 +491,16 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
         referenceUrl: primaryUrl,
         generatedUrl: generated.url,
         expectedFrame,
+        ...(contentVisualBrief ? { contentVisualBrief } : {}),
       });
       attempts.push(audit);
-      if (audit.status === 'passed' || audit.status === 'unverified') {
+      if (audit.status === 'passed') {
         return { ...generated, auditAttempts: attempts };
+      }
+      if (audit.status === 'unverified') {
+        return attempts.slice(0, -1).some((item) => item.status === 'failed')
+          ? { url: null, referenceStatus: lastStatus, auditAttempts: attempts }
+          : { ...generated, auditAttempts: attempts };
       }
       if (attempt === 0) {
         nextPrompt = `${prompt}\n产后视觉审核未通过，请重生成并修正：${audit.retryGuidance ?? audit.reason}。保持原创，不复制原图文字、水印或像素细节。`;
@@ -588,6 +612,7 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
         outputUrl: outcome.url,
         finalStatus,
         attempts,
+        ...(input.contentVisualBriefs?.[slot] ? { contentVisualBrief: input.contentVisualBriefs[slot]! } : {}),
       };
     });
     return {

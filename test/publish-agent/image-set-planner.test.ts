@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { ImageSetPlannerRole } from '../../src/publish-agent/roles/image-set-planner.js';
 import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
-import { buildImageSetPlanPrompt } from '../../src/publish-agent/prompts.js';
+import { buildContentVisualExcerpt, buildImageSetPlanPrompt } from '../../src/publish-agent/prompts.js';
 import type { PipelineFields, CreatedContent } from '../../src/publish-agent/types.js';
 
 const clock = () => 1700000000000;
@@ -48,6 +48,26 @@ describe('ImageSetPlannerRole（图集选题，仅桩 LLM、不依赖图源）',
     assert.equal(plan.themes.length, 3);
     assert.equal(plan.themes[0].subject, '架构', '[0]=钩子图/封面位');
     assert.equal(plan.styleHint, '科技扁平');
+  });
+
+  test('内容视觉导演 brief 严格解析并夹住情绪强度，人物表演字段随槽位保留', async () => {
+    const llm = { chat: async () => JSON.stringify({
+      imageCount: 1,
+      themes: [{
+        subject: '访谈中的人物情绪瞬间',
+        intent: '脆弱与行动力并存',
+        contentVisualBrief: {
+          narrativeMoment: '情绪涌来后正在自我整理', emotion: '脆弱但不崩溃', emotionIntensity: 1.4,
+          action: '短暂停顿并缓慢呼吸', environment: '深色访谈空间', facialExpression: '嘴角克制、眉眼游离',
+          gazeDirection: '侧视', headAngle: '微侧下沉', bodyLanguage: '肩颈放松、身体偏向一侧',
+          avoid: ['证件照式正面端坐', '标准商业微笑'],
+        },
+      }],
+    }), complete: async () => '' };
+    const plan = await run(llm, 1);
+    assert.equal(plan.themes[0].contentVisualBrief?.emotionIntensity, 1);
+    assert.equal(plan.themes[0].contentVisualBrief?.facialExpression, '嘴角克制、眉眼游离');
+    assert.deepEqual(plan.themes[0].contentVisualBrief?.avoid, ['证件照式正面端坐', '标准商业微笑']);
   });
 
   test('越界张数 → 夹到 maxImages（themes 随之裁到 count）', async () => {
@@ -154,5 +174,19 @@ describe('buildImageSetPlanPrompt — 固定张数措辞（rewrite-image-count-p
     const p = buildImageSetPlanPrompt(created, 9);
     assert.ok(p.includes('建议') && p.includes('范围 1~9'), '非洗稿维持内容驱动措辞');
     assert.ok(!p.includes('固定配'), '不含固定张数措辞');
+  });
+
+  test('长正文使用有界首/中/尾摘录，视觉导演能看到中段转折和结尾结论', () => {
+    const body = `${'开'.repeat(700)}中段情绪转折${'中'.repeat(700)}结尾行动结论${'尾'.repeat(100)}`;
+    const excerpt = buildContentVisualExcerpt(body, 600);
+    assert.ok(excerpt.length <= 600);
+    assert.match(excerpt, /【开头】/);
+    assert.match(excerpt, /【中段】/);
+    assert.match(excerpt, /【结尾】/);
+    assert.match(excerpt, /中段情绪转折/);
+    assert.match(excerpt, /结尾行动结论/);
+    const prompt = buildImageSetPlanPrompt({ ...created, content: body }, 1, 1);
+    assert.match(prompt, /正文语义摘录/);
+    assert.doesNotMatch(prompt, /正文前 400 字/);
   });
 });

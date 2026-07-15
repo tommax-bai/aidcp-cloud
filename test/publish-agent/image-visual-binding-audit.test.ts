@@ -18,6 +18,11 @@ function bindings(): VisualReferenceBinding[] {
 }
 
 function makePlan(): ImagePlan {
+  const brief = {
+    narrativeMoment: '情绪涌来后自我整理', emotion: '脆弱但不崩溃', emotionIntensity: 0.65,
+    action: '缓慢呼吸', environment: '深色访谈空间', facialExpression: '眉眼游离、嘴角克制',
+    gazeDirection: '侧视', headAngle: '微侧', bodyLanguage: '肩颈放松', avoid: ['标准商业微笑'],
+  };
   return {
     wantImage: true, imagePrompts: ['p0', 'p1'], imageStyle: null, imageCount: 2, fallbackStrategy: 'skip',
     referenceImages: [
@@ -25,7 +30,7 @@ function makePlan(): ImagePlan {
       { index: 11, sourceUrl: 'https://ref/1.jpg' },
     ],
     referenceBindings: bindings(), visualRoutes: ['generative', 'generative'],
-    visualStyleSources: ['reference_analysis', 'reference_analysis'], plannedAt: clock(),
+    visualStyleSources: ['reference_analysis', 'reference_analysis'], contentVisualBriefs: [brief, brief], plannedAt: clock(),
   };
 }
 
@@ -77,6 +82,24 @@ describe('ImageGenerator slot binding + visual audit', () => {
     assert.equal(out.visualReferenceAudit?.slots[0].attempts.length, 2);
   });
 
+  test('正文视觉 brief 传入审计并写入逐槽 metadata', async () => {
+    const one: ImagePlan = {
+      ...makePlan(), imagePrompts: ['p0'], imageCount: 1, referenceBindings: bindings().slice(0, 1),
+      visualRoutes: ['generative'], visualStyleSources: ['reference_analysis'], contentVisualBriefs: makePlan().contentVisualBriefs?.slice(0, 1),
+    };
+    let seen: VisualAuditInput['contentVisualBrief'];
+    const out = await run(
+      { generate: async () => ({ url: 'https://out/x.jpg', referenceStatus: 'used' as const }) },
+      one,
+      (_n, input) => {
+        seen = input.contentVisualBrief;
+        return { status: 'passed', reason: 'ok', auditedAt: 1 };
+      },
+    );
+    assert.equal(seen?.facialExpression, '眉眼游离、嘴角克制');
+    assert.equal(out.visualReferenceAudit?.slots[0].contentVisualBrief?.emotion, '脆弱但不崩溃');
+  });
+
   test('两次失败丢弃该槽；模型不可用则保留但标 unverified', async () => {
     const one: ImagePlan = { ...makePlan(), imagePrompts: ['p0'], imageCount: 1, referenceBindings: bindings().slice(0, 1), visualRoutes: ['generative'], visualStyleSources: ['reference_analysis'] };
     const provider = { generate: async () => ({ url: 'https://out/x.jpg', referenceStatus: 'used' as const }) };
@@ -87,6 +110,28 @@ describe('ImageGenerator slot binding + visual audit', () => {
     const unverified = await run(provider, one, () => ({ status: 'unverified', reason: 'vision down', auditedAt: 1 }));
     assert.deepEqual(unverified.imageUrls, ['https://out/x.jpg']);
     assert.equal(unverified.visualReferenceAudit?.slots[0].finalStatus, 'unverified');
+  });
+
+  test('首次已失败后第二次审计 unverified → 丢槽，未知结果不得覆盖已知风险', async () => {
+    const one: ImagePlan = {
+      ...makePlan(), imagePrompts: ['p0'], imageCount: 1, referenceBindings: bindings().slice(0, 1),
+      visualRoutes: ['generative'], visualStyleSources: ['reference_analysis'], contentVisualBriefs: makePlan().contentVisualBriefs?.slice(0, 1),
+    };
+    const attempts: VisualAuditAttempt[] = [
+      {
+        status: 'failed', reason: '可识别真人', auditedAt: 1,
+        risks: { recognizableRealPerson: true, garbledText: false, watermark: false, copiedText: false, originalityRisk: 'high' },
+      },
+      { status: 'unverified', reason: 'vision timeout', auditedAt: 2 },
+    ];
+    const out = await run(
+      { generate: async () => ({ url: 'https://out/x.jpg', referenceStatus: 'used' as const }) },
+      one,
+      (n) => attempts[n],
+    );
+    assert.deepEqual(out.imageUrls, []);
+    assert.deepEqual(out.visualReferenceAudit?.slots[0].attempts.map((item) => item.status), ['failed', 'unverified']);
+    assert.equal(out.visualReferenceAudit?.slots[0].finalStatus, 'discarded');
   });
 
   test('审计开但逐槽绑定尚未启用时，使用旧参考组最后一张作主参考而非静默跳过', async () => {

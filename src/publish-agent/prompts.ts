@@ -17,6 +17,7 @@ import type {
   ReferenceAnalysis,
   FaithfulRewritePlan,
   FaithfulDraft,
+  ImageTheme,
 } from './types.js';
 import { IMAGE_CATEGORIES } from './types.js';
 import type { Soul } from '../soul/types.js';
@@ -673,13 +674,32 @@ export function buildCategoryClassifierPrompt(title: string, body: string): stri
 /** 配图张数上限（硬夹 ≤9，小红书图文帖硬约束；env AIDCP_PUBLISH_MAX_IMAGES 只在角色侧再夹一次）。 */
 export const IMAGE_COUNT_HARD_MAX = 9;
 
+const CONTENT_VISUAL_EXCERPT_MAX = 2400;
+
+/**
+ * 为视觉导演构造有界正文摘录。短正文完整保留；长正文等量采首/中/尾，避免只截开头丢失情绪转折。
+ */
+export function buildContentVisualExcerpt(content: string, maxChars = CONTENT_VISUAL_EXCERPT_MAX): string {
+  const normalized = content.trim();
+  const limit = Math.max(300, Math.floor(maxChars));
+  if (normalized.length <= limit) return normalized;
+  const labels = '\n【中段】\n\n【结尾】\n';
+  const segmentSize = Math.max(80, Math.floor((limit - labels.length - 6) / 3));
+  const middleStart = Math.max(segmentSize, Math.floor((normalized.length - segmentSize) / 2));
+  return [
+    `【开头】${normalized.slice(0, segmentSize)}`,
+    `【中段】${normalized.slice(middleStart, middleStart + segmentSize)}`,
+    `【结尾】${normalized.slice(-segmentSize)}`,
+  ].join('\n').slice(0, limit);
+}
+
 /**
  * ImageSetPlanner prompt — 图集选题（读正文决定张数 + 每张主题 + 风格倾向）。
  * 纯内容决策：只产「要不要图 / 几张 / 每张画什么主体（业务语言）」，不产万相 prompt、不碰图源。
  * 输出 JSON: { wantImage, imageCount, themes:[{subject,intent}], styleHint }
  */
 export function buildImageSetPlanPrompt(createdContent: CreatedContent, maxImages: number, exactCount?: number): string {
-  const contentPreview = createdContent.content.slice(0, 400);
+  const contentPreview = buildContentVisualExcerpt(createdContent.content);
   const cap = Math.max(1, Math.min(maxImages, IMAGE_COUNT_HARD_MAX));
   // 洗稿场景钉死张数（对齐源稿图片数）：夹进 [1, cap]；非洗稿不传、维持内容驱动的建议区间。
   const fixed = exactCount !== undefined ? Math.max(1, Math.min(Math.floor(exactCount), cap)) : undefined;
@@ -693,12 +713,12 @@ export function buildImageSetPlanPrompt(createdContent: CreatedContent, maxImage
       : '- themes: 与 imageCount 等长的数组，每项一个主体（如「整体架构示意」「踩坑前后对比」「实际使用场景」），第 0 张是最抓眼的钩子图/封面。';
 
   return [
-    '你是一个小红书图文帖的配图选题师。读文章标题与正文，决定这篇帖子配几张图、每张图分别画什么主体，让图文形成叙事递进。',
+    '你是一个小红书图文帖的配图选题师兼内容视觉导演。读文章标题与正文语义摘录，决定每张图画什么，并把正文情绪转译为可执行的画面表演，让图文形成叙事递进。',
     '',
     '【文章标题】',
     createdContent.title,
     '',
-    '【正文前 400 字】',
+    '【正文语义摘录（短文完整；长文为首/中/尾）】',
     contentPreview,
     '',
     '【文风类型】',
@@ -709,32 +729,51 @@ export function buildImageSetPlanPrompt(createdContent: CreatedContent, maxImage
     themesRequirement,
     '- subject 用中文业务语言描述画面主体（不要写英文 prompt、不要写风格词——风格由系统统一注入）。',
     '- intent（可选）：这张图想传达的要点，给后续生成更多上下文。',
+    '- contentVisualBrief：每张必填。narrativeMoment 写这一帧对应的正文叙事瞬间；emotion 写复合情绪而不是泛泛“开心/难过”；emotionIntensity 为 0~1；action/environment 写正在发生的动作与环境；avoid 写这帧必须避免的错位表达。',
+    '- 如果画面有人物，contentVisualBrief 还必须填写 facialExpression、gazeDirection、headAngle、bodyLanguage，用眉眼/嘴角/视线/肩颈/身体重心等可观察语言表达；禁止只写“自然”“端正”“好看”。如果不涉及人物，这四项可省略。',
+    '- 对情绪、访谈、成长、冲突类正文，主动避免证件照式正面端坐、标准商业微笑、僵硬直视等会抹平正文张力的姿态，除非正文明确需要。',
     '- styleHint（可选）：整体风格倾向的中文描述（如「科技扁平」「手绘温暖」），供参考，可省。',
     '- 主体之间应有区分、共同服务于文章叙事；不要重复同一画面。',
     '',
     '【输出要求】',
     '严格只输出一个 JSON 对象，不要任何额外文字或代码块围栏。格式如下：',
-    '{"wantImage": true, "imageCount": 3, "themes": [{"subject": "整体架构示意", "intent": "让读者先看到全貌"}, {"subject": "踩坑前后对比"}, {"subject": "实际部署场景"}], "styleHint": "科技扁平"}',
+    '{"wantImage":true,"imageCount":1,"themes":[{"subject":"访谈中的人物情绪瞬间","intent":"表现脆弱与行动力并存","contentVisualBrief":{"narrativeMoment":"情绪涌来后正在自我整理","emotion":"脆弱、敏感但没有崩溃","emotionIntensity":0.65,"action":"短暂停顿并缓慢呼吸","environment":"安静的深色访谈空间","facialExpression":"眉眼略有疲惫和游离，嘴角克制，不是职业微笑","gazeDirection":"轻微侧视，不直视镜头","headAngle":"头部微侧并轻轻下沉","bodyLanguage":"肩颈放松，身体略向一侧倾斜","avoid":["证件照式正面端坐","标准商业微笑","僵硬直视镜头"]}}],"styleHint":"克制的人像摄影"}',
   ].join('\n');
 }
 
 /**
- * ImagePromptComposer prompt — 把「一张图的主题」翻成一条万相文生图 prompt（英文主体描述）。
+ * ImagePromptComposer prompt — 把「一张图的主题 + 正文视觉 brief」翻成一条万相中文文生图 prompt。
  * 只产主体描述；风格基底由系统在 composer 角色侧拼接（IMAGE_STYLE_BASE），不让 LLM 产风格/负向词。
  * 输出 JSON: { imagePrompt, imageStyle }
  */
-export function buildImagePromptComposerPrompt(theme: { subject: string; intent?: string }, styleHint: string | null, referenceImageGuidance?: string | null): string {
+export function buildImagePromptComposerPrompt(theme: ImageTheme, styleHint: string | null, referenceImageGuidance?: string | null): string {
+  const brief = theme.contentVisualBrief;
   return [
-    '你是文生图 prompt 工程师。把下面这张配图的中文主题，写成一句【中文】画面主体描述——只描述"画什么"（主体 + 一个正在发生的动作/使用场景 + 环境），不要写风格、不要写画质词、不要写 no text 之类负向约束（这些系统会按内容品类统一补）。保留中文、不要翻成英文（图像模型原生支持中文、更贴中文语境）。',
+    '你是文生图 prompt 工程师。把下面这张配图的中文主题和正文视觉导演 brief，写成一句【中文】画面主体描述。必须写清主体、正在发生的动作/场景；人物画面还必须落到可观察的眉眼/嘴角、视线、头部角度和肢体语言。不要写风格、画质词或通用 no-text 约束（系统另行补齐）。保留中文、不要翻成英文。',
     '',
     '【这张图的主题】',
     `主体：${theme.subject}`,
     ...(theme.intent ? [`要点：${theme.intent}`] : []),
+    ...(brief ? [
+      '',
+      '【正文视觉导演 brief（语义与人物表演的最高优先级）】',
+      `叙事瞬间：${brief.narrativeMoment}`,
+      `情绪：${brief.emotion}；强度：${brief.emotionIntensity}`,
+      `动作：${brief.action}`,
+      `环境：${brief.environment}`,
+      ...(brief.facialExpression ? [`表情：${brief.facialExpression}`] : []),
+      ...(brief.gazeDirection ? [`视线：${brief.gazeDirection}`] : []),
+      ...(brief.headAngle ? [`头部角度：${brief.headAngle}`] : []),
+      ...(brief.bodyLanguage ? [`肢体语言：${brief.bodyLanguage}`] : []),
+      ...(brief.avoid.length ? [`必须避免：${brief.avoid.join('；')}`] : []),
+    ] : []),
     ...(styleHint ? [`整体风格倾向（参考，可忽略）：${styleHint}`] : []),
     ...(referenceImageGuidance ? ['', 'Reference image guidance:', referenceImageGuidance] : []),
     '',
     '【要求】',
-    '- imagePrompt: 一句中文，描述画面主体、动作/场景与构图，与主题强相关；不含任何文字/水印/真人正脸。',
+    '- imagePrompt: 一句中文，描述画面主体、动作/场景与构图，与主题强相关。人物神态/视线/姿态必须服从正文 brief；参考图中的人物情绪或姿态与正文冲突时，正文 brief 胜出。',
+    '- 人物必须是与参考人物无关的虚构主体，可以按正文需要清晰露脸，但不得对应来源真人/名人身份或保留其五官相似度，也不得保留品牌 logo 或平台标识。',
+    '- 把 brief 的 avoid 转成明确的“避免……”约束写进 imagePrompt；不含画内文字或水印。',
     '',
     '【输出要求】',
     '严格只输出一个 JSON 对象，不要任何额外文字或代码块围栏。格式如下：',

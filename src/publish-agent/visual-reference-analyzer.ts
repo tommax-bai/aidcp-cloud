@@ -260,7 +260,11 @@ function familyForKind(kind: ReferenceVisualKind): VisualFrameDetails['family'] 
 
 function requiredDetailFields(family: VisualFrameDetails['family']): string[] {
   switch (family) {
-    case 'photo': return ['cameraAngle', 'focalLengthFeel', 'depthOfField', 'focus', 'light', 'colorGrade', 'grainSharpness'];
+    case 'photo': return [
+      'cameraAngle', 'focalLengthFeel', 'depthOfField', 'focus', 'light', 'colorGrade', 'grainSharpness',
+      'facialExpression', 'gazeDirection', 'headAngle', 'bodyPose', 'gesture', 'poseEnergy',
+      'emotionalValence', 'emotionalArousal',
+    ];
     case 'illustration': return ['medium', 'strokeOrRender', 'shapeLanguage', 'outline', 'materials', 'lightingModel', 'perspective', 'detailLevel'];
     case 'text_layout': return ['grid', 'textBlockRatio', 'hierarchy', 'alignment', 'weightContrast', 'colorBlocks', 'decorations'];
     case 'ui_document': return ['viewport', 'grid', 'componentDensity', 'bordersRadius', 'informationZones', 'depth', 'background'];
@@ -308,7 +312,7 @@ frames 必须与输入图片等量且 sourceArrayIndex 覆盖 0..N-1。`;
 
 function specialistPrompt(family: VisualFrameDetails['family'], indexes: number[]): string {
   const schemas: Record<VisualFrameDetails['family'], string> = {
-    photo: '{"family":"photo","cameraAngle":"","focalLengthFeel":"只给观感/区间，不猜型号","depthOfField":"","focus":"","light":"自然光/硬光/柔光/逆光等","colorGrade":"","grainSharpness":""}',
+    photo: '{"family":"photo","cameraAngle":"","focalLengthFeel":"只给观感/区间，不猜型号","depthOfField":"","focus":"","light":"自然光/硬光/柔光/逆光等","colorGrade":"","grainSharpness":"","facialExpression":"人物可观察眉眼与嘴角；无人则写无人物","gazeDirection":"视线方向；无人则写不适用","headAngle":"头部角度；无人则写不适用","bodyPose":"身体姿态；无人则写不适用","gesture":"手势/动作；无人则写不适用","poseEnergy":"静态/松弛/紧绷/动态等可观察能量","emotionalValence":"正向/中性/负向的可观察效价，不猜内心","emotionalArousal":"低/中/高唤醒度的可观察表现"}',
     illustration: '{"family":"illustration","medium":"","strokeOrRender":"","shapeLanguage":"","outline":"","materials":"","lightingModel":"","perspective":"","detailLevel":""}',
     text_layout: '{"family":"text_layout","grid":"","textBlockRatio":"","hierarchy":"","alignment":"","weightContrast":"","colorBlocks":"","decorations":""}',
     ui_document: '{"family":"ui_document","viewport":"","grid":"","componentDensity":"","bordersRadius":"","informationZones":"","depth":"","background":""}',

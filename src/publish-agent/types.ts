@@ -4,6 +4,7 @@ import type { ContentScheduleApprovalMode } from '../config/content-schedule-sto
 import type { PlatformId } from '../platform/index.js';
 import type { TextCardSourceStyle } from '../render/text-card.js';
 import type {
+  ContentVisualBrief,
   ReferenceVisualAnalysis,
   VisualGenerationRoute,
   VisualReferenceAudit,
@@ -443,6 +444,8 @@ export interface ImageTheme {
   subject: string;
   /** 意图/要点（可选，给 prompt 工程更多上下文）。 */
   intent?: string;
+  /** 正文视觉导演给本槽的叙事/情绪/人物表演约束。 */
+  contentVisualBrief?: ContentVisualBrief;
   /** 洗稿图集的源图绑定位置；普通发布缺省。 */
   sourceArrayIndex?: number;
   /** 源快照自带 index（审计可读，不作为数组寻址）。 */
@@ -483,6 +486,8 @@ export interface ImagePlan {
   visualStyleSources?: Array<'reference_analysis' | 'category_fallback'>;
   /** 每槽确定性文字卡的来源设计令牌；null 表示该槽保持现有账号模板。 */
   textCardStyles?: Array<TextCardSourceStyle | null>;
+  /** 与 imagePrompts 下标对齐；null 表示该槽未取得有效正文视觉 brief。 */
+  contentVisualBriefs?: Array<ContentVisualBrief | null>;
   /**
    * 封面形态盖章透传（change textcard-cover-form）：composer 把 coverCardPlan 原样盖进计划，
    * 使配图计划仍是「唯一完整指令」——执行器只读 plan、绝不二次读环境旗标（防决策/执行裂脑）。

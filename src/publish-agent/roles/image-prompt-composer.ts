@@ -157,6 +157,7 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
         : slot === 0 ? profile.coverStyleBase : profile.styleBase;
       return `${entry.desc}. ${style}`;
     });
+    const contentVisualBriefs = kept.map((entry) => entry.theme.contentVisualBrief ?? null);
     const referenceBindings = slotBindingEnabled
       ? buildSlotBindings(kept.map((entry) => entry.theme), referenceImages)
       : undefined;
@@ -176,6 +177,7 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
         ...(exposedAnalysis ? { referenceVisualAnalysis: exposedAnalysis } : {}),
         ...(analysisUsable || slotBindingEnabled || exposedAnalysis ? { visualRoutes, visualStyleSources: styleSources } : {}),
         ...(textCardStyles.some(Boolean) ? { textCardStyles } : {}),
+        ...(contentVisualBriefs.some(Boolean) ? { contentVisualBriefs } : {}),
         plannedAt: this.clock(),
       },
       input.coverPlan,
@@ -227,7 +229,7 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
       return description;
     } catch (err) {
       this.logger.warn(`[ImagePromptComposer] 主题「${theme.subject}」LLM 失败，退回主体文本: ${err instanceof Error ? err.message : String(err)}`);
-      return theme.intent ? `${theme.subject}，${theme.intent}` : theme.subject;
+      return fallbackThemeDescription(theme);
     }
   }
 }
@@ -242,7 +244,8 @@ function frameForTheme(analysis: ReferenceVisualAnalysis, theme: ImageTheme): Vi
 export function buildVisualFrameGuidance(frame: VisualFrameSpec, analysis: ReferenceVisualAnalysis): string {
   const cluster = analysis.styleClusters?.find((item) => item.id === frame.clusterId);
   return [
-    '以下是视觉模型对主参考图的结构化反推，只用于原创重构；不要复制原图、文字、数字、账号、水印或标识。',
+    '以下是视觉模型对主参考图的结构化反推，只用于原创重构；不要复制原图、人物身份、文字、数字、账号、水印、品牌或平台标识。',
+    '职责边界：这里仅提供画面类型、镜头/景别、构图、光影、色调和材质。若人物神态、视线、动作或姿态与正文视觉 brief 冲突，必须以正文 brief 为准。',
     `视觉类型：${frame.kind}；序列角色：${frame.sequenceRole}`,
     `主体：${frame.common.subject}`,
     `构图：${frame.common.composition}；视觉层级：${frame.common.focalHierarchy}`,
@@ -258,14 +261,35 @@ function buildSourceStylePrompt(frame: VisualFrameSpec, analysis: ReferenceVisua
   const bible = analysis.setStyleBible;
   const cluster = analysis.styleClusters?.find((item) => item.id === frame.clusterId);
   return [
-    '原创视觉重构，保持主参考图的画面类型、构图关系、视觉层级与抽象风格，但更换具体表达并避免像素级复刻',
+    '原创视觉重构，参考图只约束画面类型、景别、构图关系、光影、色调、材质与抽象风格；人物神态、视线、动作和姿态以正文视觉 brief 为最高优先级',
     `类型 ${frame.kind}，${frame.common.composition}，${frame.common.focalHierarchy}`,
     `${frame.common.lightingOrContrast}，${frame.common.texture}，${frame.common.mood}`,
     `配色 ${frame.common.palette.join('、') || bible?.palette.join('、') || '协调配色'}`,
     cluster?.summary ?? '',
     bible?.continuityRules.join('，') ?? '',
     cover ? '顶部保留干净标题留白（标题后期叠加）' : '',
-    'vertical 3:4, no copied text, no watermark, no logo, no QR code, no realistic recognizable face unless explicitly required by the rewritten content',
+    frame.kind === 'portrait_photo'
+      ? '人物必须身份泛化为与来源人物无关的虚构成年人，可以按正文需要清晰露脸，但不得对应来源真人/名人身份或保留其五官相似度；不得出现来源品牌 logo 或平台标识'
+      : '',
+    'vertical 3:4, no copied text, no watermark, no logo, no QR code, fictional visible person allowed when required by the rewritten content, no source-person likeness, no celebrity likeness',
+  ].filter(Boolean).join('，');
+}
+
+function fallbackThemeDescription(theme: ImageTheme): string {
+  const brief = theme.contentVisualBrief;
+  if (!brief) return theme.intent ? `${theme.subject}，${theme.intent}` : theme.subject;
+  return [
+    theme.subject,
+    theme.intent,
+    brief.narrativeMoment,
+    `${brief.emotion}，情绪强度 ${brief.emotionIntensity}`,
+    brief.action,
+    brief.environment,
+    brief.facialExpression,
+    brief.gazeDirection,
+    brief.headAngle,
+    brief.bodyLanguage,
+    brief.avoid.length ? `避免${brief.avoid.join('、')}` : '',
   ].filter(Boolean).join('，');
 }
 

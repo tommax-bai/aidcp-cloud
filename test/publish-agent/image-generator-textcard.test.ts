@@ -301,7 +301,7 @@ describe('ImageGeneratorRole — 确定性文字卡视觉保真审计', () => {
         primarySourceArrayIndex: 0, primarySourceIndex: 0,
       }],
       referenceVisualAnalysis: {
-        status: 'analyzed', schemaVersion: 'visual-reference-v2', cacheKey: 'k', provider: 'p', model: 'm', analyzedAt: 1,
+        status: 'analyzed', schemaVersion: 'visual-reference-v3', cacheKey: 'k', provider: 'p', model: 'm', analyzedAt: 1,
         sourceCount: 1, setStyleBible: {
           summary: '薄荷知识卡', palette: ['薄荷绿'], colorTemperature: 'cool', contrast: 'medium', visualDensity: 'balanced',
           whitespace: '下部留白', hierarchy: '标题与卡片', mood: ['理性'], texture: ['网格'], continuityRules: ['分页'], avoid: [],
@@ -312,6 +312,10 @@ describe('ImageGeneratorRole — 确定性文字卡视觉保真审计', () => {
       visualRoutes: ['deterministic_text_card'],
       visualStyleSources: ['reference_analysis'],
       textCardStyles: [SOURCE_STYLE],
+      contentVisualBriefs: [{
+        narrativeMoment: '解释核心机制', emotion: '理性克制', emotionIntensity: 0.4,
+        action: '阅读信息卡', environment: '知识卡版式', avoid: ['无关装饰'],
+      }],
     };
   }
 
@@ -331,7 +335,13 @@ describe('ImageGeneratorRole — 确定性文字卡视觉保真审计', () => {
   }
 
   test('渲染成功后仍比较主参考；通过时记录 passed 而不是 skipped', async () => {
+    let auditBrief: unknown = 'not-called';
     const audit = auditorSequence([{ status: 'passed', reason: '结构与色彩一致', auditedAt: clock() }]);
+    const originalAudit = audit.auditor.audit.bind(audit.auditor);
+    audit.auditor.audit = async (input) => {
+      auditBrief = input.contentVisualBrief;
+      return originalAudit(input);
+    };
     const providerPrompts: string[] = [];
     const { d } = await run(
       { generate: async (p: string) => { providerPrompts.push(p); return { url: `https://cdn/${p}.png` } as ImageResult; } },
@@ -343,6 +353,8 @@ describe('ImageGeneratorRole — 确定性文字卡视觉保真审计', () => {
     assert.equal(d.visualReferenceAudit?.slots[0].finalStatus, 'passed');
     assert.equal(d.visualReferenceAudit?.slots[0].attempts[0].status, 'passed');
     assert.equal(d.visualReferenceAudit?.slots[0].providerReferenceStatus, 'skipped');
+    assert.equal(auditBrief, undefined, '确定性文字卡不靠 OCR 计算正文一致性');
+    assert.equal(d.visualReferenceAudit?.slots[0].contentVisualBrief?.emotion, '理性克制', 'metadata 仍保留正文 brief');
   });
 
   test('首次失败以严格来源令牌重渲染一次，第二次通过即保留', async () => {
@@ -393,5 +405,20 @@ describe('ImageGeneratorRole — 确定性文字卡视觉保真审计', () => {
     );
     assert.equal(d.imageUrls.length, 1);
     assert.equal(d.visualReferenceAudit?.slots[0].finalStatus, 'unverified');
+  });
+
+  test('文字卡首次失败后第二次审计 unverified 仍丢槽，不让未知覆盖已知失败', async () => {
+    const audit = auditorSequence([
+      { status: 'failed', reason: '版式偏差', auditedAt: clock() },
+      { status: 'unverified', reason: 'vision timeout', auditedAt: clock() },
+    ]);
+    const { d } = await run(
+      { generate: async () => ({ url: null }) },
+      auditedPlan(),
+      { getTextCardRenderer: () => okRenderer(), visualAuditor: audit.auditor, auditEnabled: () => true },
+    );
+    assert.equal(d.imageUrls.length, 0);
+    assert.equal(d.visualReferenceAudit?.slots[0].finalStatus, 'discarded');
+    assert.deepEqual(d.visualReferenceAudit?.slots[0].attempts.map((item) => item.status), ['failed', 'unverified']);
   });
 });

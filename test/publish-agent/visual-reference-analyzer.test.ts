@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import type { VisionChatMessage, VisionLlmClient } from '../../src/llm/vision.js';
 import {
   createVisualReferenceAnalyzer,
+  normalizeReferenceVisualAnalysis,
   visualAnalysisCacheKey,
 } from '../../src/publish-agent/visual-reference-analyzer.js';
 import type { ReferenceVisualAnalysis } from '../../src/publish-agent/visual-reference-types.js';
@@ -38,6 +39,9 @@ function photoOutput(): string {
   return JSON.stringify({ frames: [{ sourceArrayIndex: 0, common: common('半身人物轮廓'), details: {
     family: 'photo', cameraAngle: '平视', focalLengthFeel: '中焦观感', depthOfField: '浅景深', focus: '主体眼部区域',
     light: '柔和侧光', colorGrade: '冷色低饱和', grainSharpness: '轻微颗粒、中等锐度',
+    facialExpression: '眉眼放松、嘴角轻微上扬', gazeDirection: '侧视画外', headAngle: '头部微侧',
+    bodyPose: '肩颈放松的头肩像', gesture: '无明显手势', poseEnergy: '低能量松弛',
+    emotionalValence: '轻微正向', emotionalArousal: '低唤醒',
   } }] });
 }
 
@@ -70,6 +74,8 @@ describe('VisualReferenceAnalyzer', () => {
     assert.equal(out.frameSpecs?.length, 2);
     assert.deepEqual(out.frameSpecs?.map((f) => f.sourceIndex), [4, 8]);
     assert.equal(out.frameSpecs?.[0].details.family, 'photo');
+    assert.equal(out.frameSpecs?.[0].details.family === 'photo' ? out.frameSpecs[0].details.gazeDirection : '', '侧视画外');
+    assert.equal(out.frameSpecs?.[0].details.family === 'photo' ? out.frameSpecs[0].details.poseEnergy : '', '低能量松弛');
     assert.equal(out.frameSpecs?.[1].details.family, 'ui_document');
     assert.equal('focalLengthFeel' in out.frameSpecs![1].details, false, 'UI 不应硬套摄影参数');
     assert.equal(vision.calls.length, 3, '整组一次 + 两个 specialist family');
@@ -80,17 +86,30 @@ describe('VisualReferenceAnalyzer', () => {
     assert.doesNotMatch(allPrompts, /photo\.jpg/, 'URL 只作为 image_url，不写进提示文本');
   });
 
+  test('v2 历史反推缓存失效，避免缺少人物神态维度的旧结果继续复用', () => {
+    const oldCache = {
+      status: 'unavailable', schemaVersion: 'visual-reference-v2', cacheKey: 'old', provider: 'dashscope', model: 'qwen3.7-plus',
+      analyzedAt: 888, sourceCount: 1, error: 'legacy cache',
+    };
+    assert.equal(normalizeReferenceVisualAnalysis(oldCache), undefined);
+  });
+
   test('cacheKey 命中直接复用，零视觉调用', async () => {
     const vision = new QueueVision([]);
     const cacheKey = visualAnalysisCacheKey(images, 'dashscope', 'qwen3.7-plus');
     const cached: ReferenceVisualAnalysis = {
-      status: 'analyzed', schemaVersion: 'visual-reference-v2', cacheKey, provider: 'dashscope', model: 'qwen3.7-plus',
+      status: 'analyzed', schemaVersion: 'visual-reference-v3', cacheKey, provider: 'dashscope', model: 'qwen3.7-plus',
       analyzedAt: 888, sourceCount: 2, setStyleBible: bible as ReferenceVisualAnalysis['setStyleBible'],
       styleClusters: [{ id: 'c1', label: '蓝灰组', frameIndexes: [0, 1], summary: '统一', palette: ['蓝灰'], traits: [] }],
       frameSpecs: [
         {
           sourceArrayIndex: 0, sourceIndex: 4, kind: 'portrait_photo', confidence: 0.9, clusterId: 'c1', sequenceRole: 'cover', common: common('人物'),
-          details: { family: 'photo', cameraAngle: '平视', focalLengthFeel: '中焦', depthOfField: '浅', focus: '主体', light: '柔光', colorGrade: '冷色', grainSharpness: '轻颗粒' },
+          details: {
+            family: 'photo', cameraAngle: '平视', focalLengthFeel: '中焦', depthOfField: '浅', focus: '主体',
+            light: '柔光', colorGrade: '冷色', grainSharpness: '轻颗粒', facialExpression: '克制微笑',
+            gazeDirection: '侧视', headAngle: '微侧', bodyPose: '肩颈放松', gesture: '无', poseEnergy: '低',
+            emotionalValence: '正向', emotionalArousal: '低',
+          },
         },
         {
           sourceArrayIndex: 1, sourceIndex: 8, kind: 'ui_document', confidence: 0.9, clusterId: 'c1', sequenceRole: 'detail', common: common('界面'),

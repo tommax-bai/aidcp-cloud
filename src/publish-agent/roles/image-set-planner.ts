@@ -6,6 +6,7 @@ import { buildImageSetPlanPrompt, IMAGE_COUNT_HARD_MAX } from '../prompts.js';
 import { referenceImagesForGeneration } from '../reference-image-guidance.js';
 import { executeWithFallback } from '../retry-strategy.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
+import type { ContentVisualBrief } from '../visual-reference-types.js';
 
 /**
  * ImageSetPlanner — 配图「选题」（change publish-multi-image，从旧 ImagePlanner 拆出 Step 1）。
@@ -102,7 +103,10 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
     const subject = (input.title || '文章主题').slice(0, 24);
     const count = targetCount ?? 1;
     const themes = Array.from({ length: count }, (_, i) => this.bindSource(
-      { subject: i === 0 ? `${subject} 主题示意` : `${subject} 补充图 ${i + 1}` },
+      this.withFallbackBrief(
+        { subject: i === 0 ? `${subject} 主题示意` : `${subject} 补充图 ${i + 1}` },
+        input,
+      ),
       sourceImages?.[i],
       i,
     ));
@@ -125,7 +129,7 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
     while (themes.length < count) {
       themes.push({ subject: `${(input.title || '文章主题').slice(0, 16)} 补充图 ${themes.length + 1}` });
     }
-    const boundThemes = themes.map((theme, i) => this.bindSource(theme, sourceImages?.[i], i));
+    const boundThemes = themes.map((theme, i) => this.bindSource(this.withFallbackBrief(theme, input), sourceImages?.[i], i));
     return { wantImage: true, imageCount: boundThemes.length, themes: boundThemes, styleHint: p.styleHint, plannedAt: this.clock() };
   }
 
@@ -150,8 +154,13 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
     const themes: ImageTheme[] = themesRaw
       .map((t: unknown): ImageTheme => {
         if (typeof t === 'string') return { subject: t.trim() };
-        const o = (t ?? {}) as { subject?: unknown; intent?: unknown };
-        return { subject: String(o.subject ?? '').trim(), intent: o.intent ? String(o.intent) : undefined };
+        const o = (t ?? {}) as { subject?: unknown; intent?: unknown; contentVisualBrief?: unknown };
+        const contentVisualBrief = parseContentVisualBrief(o.contentVisualBrief);
+        return {
+          subject: String(o.subject ?? '').trim(),
+          intent: o.intent ? String(o.intent).trim() : undefined,
+          ...(contentVisualBrief ? { contentVisualBrief } : {}),
+        };
       })
       .filter((t) => t.subject.length > 0);
     if (themes.length === 0) throw new Error('ImageSetPlanner: no valid themes');
@@ -159,4 +168,69 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
     const imageCount = Number.isFinite(rawCount) && rawCount > 0 ? Math.floor(rawCount) : themes.length;
     return { imageCount, themes, styleHint: obj.styleHint ? String(obj.styleHint) : null };
   }
+
+  private withFallbackBrief(theme: ImageTheme, input: CreatedContent): ImageTheme {
+    if (theme.contentVisualBrief) return theme;
+    const context = `${theme.subject} ${theme.intent ?? ''} ${input.title} ${input.content.slice(0, 800)}`;
+    const personLikely = /人物|人像|访谈|男人|女人|男生|女生|他|她|情绪|表情|肖像/.test(context);
+    return {
+      ...theme,
+      contentVisualBrief: {
+        narrativeMoment: theme.intent || theme.subject,
+        emotion: input.tone || '与正文语气一致',
+        emotionIntensity: 0.5,
+        action: theme.intent || `自然呈现${theme.subject}`,
+        environment: '与正文叙事语境一致',
+        ...(personLikely
+          ? {
+              facialExpression: '与正文情绪一致的非摆拍表情',
+              gazeDirection: '不默认僵硬直视镜头',
+              headAngle: '自然偏转而非证件照式完全正面',
+              bodyLanguage: '肩颈和身体重心体现正文张力',
+            }
+          : {}),
+        avoid: personLikely
+          ? ['证件照式正面端坐', '标准商业微笑', '僵硬直视镜头', '与正文无关的摆拍']
+          : ['与正文无关的摆拍或装饰'],
+      },
+    };
+  }
+}
+
+function compactString(value: unknown, max = 240): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  return normalized ? normalized.slice(0, max) : null;
+}
+
+function parseContentVisualBrief(value: unknown): ContentVisualBrief | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const o = value as Record<string, unknown>;
+  const narrativeMoment = compactString(o.narrativeMoment);
+  const emotion = compactString(o.emotion);
+  const action = compactString(o.action);
+  const environment = compactString(o.environment);
+  const intensity = Number(o.emotionIntensity);
+  if (!narrativeMoment || !emotion || !action || !environment || !Number.isFinite(intensity)) return undefined;
+  const avoid = Array.isArray(o.avoid)
+    ? o.avoid.map((item) => compactString(item, 120)).filter((item): item is string => !!item).slice(0, 8)
+    : [];
+  const optional = (key: 'facialExpression' | 'gazeDirection' | 'headAngle' | 'bodyLanguage'): string | undefined =>
+    compactString(o[key]) ?? undefined;
+  const facialExpression = optional('facialExpression');
+  const gazeDirection = optional('gazeDirection');
+  const headAngle = optional('headAngle');
+  const bodyLanguage = optional('bodyLanguage');
+  return {
+    narrativeMoment,
+    emotion,
+    emotionIntensity: Math.max(0, Math.min(1, intensity)),
+    action,
+    environment,
+    ...(facialExpression ? { facialExpression } : {}),
+    ...(gazeDirection ? { gazeDirection } : {}),
+    ...(headAngle ? { headAngle } : {}),
+    ...(bodyLanguage ? { bodyLanguage } : {}),
+    avoid,
+  };
 }

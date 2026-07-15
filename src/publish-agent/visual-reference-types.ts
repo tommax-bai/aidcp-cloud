@@ -2,7 +2,7 @@
  * 参照洗稿的整组视觉语义。刻意与 OCR/原图文字转写分离：这里描述视觉结构，不承载原图具体文案。
  */
 
-export const VISUAL_ANALYSIS_SCHEMA_VERSION = 'visual-reference-v2';
+export const VISUAL_ANALYSIS_SCHEMA_VERSION = 'visual-reference-v3';
 
 export const REFERENCE_VISUAL_KINDS = [
   'portrait_photo',
@@ -63,6 +63,15 @@ export interface PhotoVisualDetails {
   light: string;
   colorGrade: string;
   grainSharpness: string;
+  /** 人物摄影的可观察表演；无人画面使用“无人物/不适用”，不得猜内心或身份。 */
+  facialExpression: string;
+  gazeDirection: string;
+  headAngle: string;
+  bodyPose: string;
+  gesture: string;
+  poseEnergy: string;
+  emotionalValence: string;
+  emotionalArousal: string;
 }
 
 export interface IllustrationVisualDetails {
@@ -176,12 +185,31 @@ export type VisualGenerationRoute =
   | 'specialized_generative'
   | 'region_guided_generative';
 
+/**
+ * 洗稿正文为单个配图槽给出的视觉导演 brief。参考图管摄影语言，本 brief 管人物表演与叙事语义。
+ * 所有字段只来自洗稿后的正文，不承载来源图片 OCR、身份或像素信息。
+ */
+export interface ContentVisualBrief {
+  narrativeMoment: string;
+  emotion: string;
+  emotionIntensity: number;
+  action: string;
+  environment: string;
+  facialExpression?: string;
+  gazeDirection?: string;
+  headAngle?: string;
+  bodyLanguage?: string;
+  avoid: string[];
+}
+
 export interface VisualAuditScores {
   form: number;
   subject: number;
   composition: number;
   color: number;
   style: number;
+  /** 有 contentVisualBrief 时存在；历史记录与无 brief 路径可缺省。 */
+  contentAlignment?: number;
 }
 
 export interface VisualAuditRisks {
@@ -210,6 +238,8 @@ export interface VisualSlotAudit {
   outputUrl: string | null;
   finalStatus: 'passed' | 'failed' | 'unverified' | 'skipped' | 'discarded';
   attempts: VisualAuditAttempt[];
+  /** 本槽正文视觉导演 brief；历史记录可缺省。 */
+  contentVisualBrief?: ContentVisualBrief;
 }
 
 export interface VisualReferenceAudit {
