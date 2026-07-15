@@ -6,6 +6,7 @@ export * from './reply-config-store.js';
 export * from './reply-ai.js';
 export * from './reply-workflow.js';
 export * from './send-orchestrator.js';
+export * from './offboarding-service.js';
 export * from './interaction-inbox-service.js';
 export * from './interaction-customer-api.js';
 export * from './interaction-internal-api.js';

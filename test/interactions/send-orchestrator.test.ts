@@ -139,3 +139,27 @@ test('approved command is persisted as one attempt and dispatched to one account
     content: { type: 'text', text: '谢谢你的喜欢，欢迎继续交流。' }, expiresAt: now + 120_000,
   });
 });
+
+test('startup/reconnect recovery emits verification-only reconcile and never replays reply.send', async () => {
+  const pushed: Envelope[] = [];
+  const base = context('sending');
+  const command = {
+    jobId: base.job.id, attemptId: 'attempt-recover-1', idempotencyKey: 'a'.repeat(64),
+    envKey: base.thread.envKey, accountId: base.thread.accountId, platform: 'wechat_channels' as const,
+    channel: base.thread.channel, target: { threadExternalId: base.thread.externalThreadId,
+      inboundMessageExternalId: base.message.externalMessageId, parentExternalId: base.message.externalParentId },
+    content: { type: 'text' as const, text: base.job.finalText! }, expiresAt: now,
+  };
+  const sender = new InteractionSendOrchestrator({
+    store: { recoverableAttempts: async () => [{ accountId: base.thread.accountId, envKey: base.thread.envKey,
+      status: 'dispatched', command }] } as unknown as InteractionStore,
+    configs: {} as ReplyConfigStore,
+    pusher: { pushToEdges: (envelope: Envelope, edgeId?: string) => {
+      assert.equal(edgeId, 'edge-recovery'); pushed.push(envelope); return 1;
+    } } as EdgePusher,
+    controllerFor: () => undefined, metrics: new InteractionMetrics(), env: {}, clock: () => now,
+  });
+  assert.equal(await sender.reconcileRecoverable(base.thread.accountId, 'edge-recovery'), 1);
+  assert.deepEqual(pushed.map((envelope) => envelope.type), ['interaction.reply.reconcile']);
+  assert.deepEqual((pushed[0].payload as { attempts: Array<{ command: unknown }> }).attempts[0].command, command);
+});

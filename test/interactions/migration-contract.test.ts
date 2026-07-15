@@ -4,6 +4,7 @@ import { test } from 'node:test';
 
 const migrationUrl = new URL('../../migrations/0039_interaction_inbox.sql', import.meta.url);
 const authorityMigrationUrl = new URL('../../migrations/0040_customer_env_authority.sql', import.meta.url);
+const recoveryMigrationUrl = new URL('../../migrations/0041_interaction_recovery_offboarding.sql', import.meta.url);
 
 test('0039 creates the dedicated inbound domain and never writes outbound interaction_feed', async () => {
   const sql = await readFile(migrationUrl, 'utf8');
@@ -52,4 +53,16 @@ test('0040 archives/removes customer self-claims and freezes globally unique act
   assert.match(sql, /DELETE FROM client_env_scope WHERE source = 'client'/);
   assert.match(sql, /client_env_scope_authoritative_source[\s\S]*CHECK \(source = 'admin'\)/);
   assert.match(sql, /CREATE UNIQUE INDEX IF NOT EXISTS uq_client_env_scope_active_env[\s\S]*ON client_env_scope \(env_key\)/);
+});
+
+test('0041 adds durable recovery/offboarding and releases only account-level ambiguous serialization', async () => {
+  const sql = await readFile(recoveryMigrationUrl, 'utf8');
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS interaction_offboards/);
+  assert.match(sql, /purge_due_at[\s\S]*30 days/);
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS interaction_offboard_audit/);
+  assert.match(sql, /DROP INDEX IF EXISTS uq_interaction_send_attempts_active_account/);
+  assert.match(sql, /uq_interaction_send_attempts_active_account[\s\S]*WHERE status IN \('created','dispatched'\)/);
+  assert.match(sql, /reconciliation_state[\s\S]*result_replayed[\s\S]*not_found[\s\S]*binding_conflict/);
+  assert.doesNotMatch(sql, /content_text|final_text|cookie|credential/i,
+    'offboard audit/migration must not copy message bodies, reply text or credentials');
 });

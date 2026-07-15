@@ -13,7 +13,13 @@
 import type {
   InteractionAuthReopenPayload,
   InteractionAuthStatusPayload,
+  InteractionOffboardAckPayload,
+  InteractionOffboardCommandPayload,
+  InteractionOffboardResultPayload,
+  InteractionReplyReconcilePayload,
+  InteractionReplyReconcileResultPayload,
   InteractionReplyResultPayload,
+  InteractionReplyResultAckPayload,
   InteractionReplySendPayload,
   InteractionSyncAckPayload,
   InteractionSyncBatchPayload,
@@ -117,9 +123,15 @@ export type MessageType =
   | 'interaction.sync.batch' // edge → cloud：评论/私信增量批次
   | 'interaction.sync.ack' // cloud → edge：事务持久化后的批次确认
   | 'interaction.reply.result' // edge → cloud：回复发送/核验终态
+  | 'interaction.reply.result.ack' // cloud → edge：持久结果确认；ack 后才清 Edge outbox
+  | 'interaction.reply.reconcile' // cloud → edge：仅核验既有 attempt，绝不触发新平台写
+  | 'interaction.reply.reconcile.result' // edge → cloud：重放/缺失/绑定冲突观察
   | 'interaction.sync.request' // cloud → edge：按渠道请求同步
   | 'interaction.reply.send' // cloud → edge：下发唯一 attempt 的文本回复
   | 'interaction.auth.reopen' // cloud → edge：请求重开登录/挑战处理入口
+  | 'interaction.offboard.command' // cloud → edge：撤权后清理所属加密会话
+  | 'interaction.offboard.result' // edge → cloud：可重放的凭证清理结果
+  | 'interaction.offboard.ack' // cloud → edge：结果持久化确认；ack 后清 Edge outbox
   // —— 通用 ——
   | 'error' // 任一方 → 对方：错误信息
   | 'ping'
@@ -207,6 +219,8 @@ export interface WelcomePayload {
   serverVersion: string;
   /** 云端确认启用的握手能力；只回显双方都支持的 capability。 */
   capabilities?: string[];
+  /** 账号级恢复屏障；协商 offboarding 时缺失/true 都要求 Edge 保持 connector 停止。 */
+  interactionRecovery?: { offboardPending: boolean };
   /**
    * 节奏快照（change pacing-floor-config-min-interval）：tempo + 每类操作兜底 floor 区间。
    * 可选、向后兼容（旧端忽略）；边缘据此做操作间最小间隔 gating 与详情页停留兜底。
@@ -1439,9 +1453,15 @@ export interface PayloadMap {
   'interaction.sync.batch': InteractionSyncBatchPayload;
   'interaction.sync.ack': InteractionSyncAckPayload;
   'interaction.reply.result': InteractionReplyResultPayload;
+  'interaction.reply.result.ack': InteractionReplyResultAckPayload;
+  'interaction.reply.reconcile': InteractionReplyReconcilePayload;
+  'interaction.reply.reconcile.result': InteractionReplyReconcileResultPayload;
   'interaction.sync.request': InteractionSyncRequestPayload;
   'interaction.reply.send': InteractionReplySendPayload;
   'interaction.auth.reopen': InteractionAuthReopenPayload;
+  'interaction.offboard.command': InteractionOffboardCommandPayload;
+  'interaction.offboard.result': InteractionOffboardResultPayload;
+  'interaction.offboard.ack': InteractionOffboardAckPayload;
   error: ErrorPayload;
   ping: Record<string, never>;
   pong: Record<string, never>;

@@ -238,10 +238,13 @@ import {
   ReplyWorkflow,
   InteractionInboxService,
   InteractionSendOrchestrator,
+  InteractionOffboardingService,
   InteractionCustomerApi,
   InteractionInternalApi,
   InteractionMetrics,
   parseInteractionPanelGrants,
+  INTERACTION_OFFBOARDING_CAPABILITY,
+  INTERACTION_REPLY_RECOVERY_CAPABILITY,
 } from './interactions/index.js';
 
 function readEnvString(name: string): string | undefined {
@@ -1256,6 +1259,7 @@ async function main(): Promise<void> {
   let replyWorkflow: ReplyWorkflow | undefined;
   let interactionInbox: InteractionInboxService | undefined;
   let interactionSender: InteractionSendOrchestrator | undefined;
+  let interactionOffboarding: InteractionOffboardingService | undefined;
   try {
     interactionStore = new InteractionStore();
     replyConfigStore = new ReplyConfigStore();
@@ -1857,6 +1861,21 @@ async function main(): Promise<void> {
     // 握手注册完成（连接已可被推送、welcome 已回）→ 回填该账号的陪伴界面快照（昵称/最近发布/在途候审）。
     onEdgeRegistered: (session) => {
       void uiSnapshot?.pushHelloSnapshot(session.accountId, session.edgeId);
+      if (session.accountId && session.edgeId) {
+        void (async () => {
+          const capabilities = new Set(session.capabilities ?? []);
+          const pendingOffboards = capabilities.has(INTERACTION_OFFBOARDING_CAPABILITY)
+            ? await interactionStore?.pendingOffboards(session.accountId!, 1) ?? []
+            : [];
+          if (pendingOffboards.length > 0) {
+            await interactionOffboarding?.dispatchPending(session.accountId!, session.edgeId!);
+          } else if (capabilities.has(INTERACTION_REPLY_RECOVERY_CAPABILITY)) {
+            await interactionSender?.reconcileRecoverable(session.accountId!, session.edgeId!);
+          }
+        })().catch((error) => console.warn(
+          `[interaction] Edge 恢复编排失败 account=${session.accountId}: ${error instanceof Error ? error.message : String(error)}`,
+        ));
+      }
       // 自动登记环境进管理侧注册表（change client-user-env-registry）：AdsPower 环境（edgeId=ads-<分身id>）一连上来
       // 就进后台「待分配」池，供运营把它分给端用户——**只登记、不归属**（绝不误塞给某客户）。仅带 ads- 前缀的真实分身
       // 环境登记；self-/host- 兜底 edge 不是可分配环境、跳过。env_key = 去掉 ads- 前缀（与 edge attach/过滤口径一致）。
@@ -1880,6 +1899,9 @@ async function main(): Promise<void> {
       controllerFor: (accountId) => riskRegistry.getController(accountId),
       metrics: interactionMetrics,
     })
+    : undefined;
+  interactionOffboarding = interactionStore
+    ? new InteractionOffboardingService({ store: interactionStore, pusher: server, metrics: interactionMetrics })
     : undefined;
   const interactionPanelGrants = parseInteractionPanelGrants(readEnvString('AIDCP_INTERACTION_PANEL_GRANTS'));
   const interactionInternalApi = interactionStore && replyConfigStore && replyWorkflow
@@ -1943,6 +1965,28 @@ async function main(): Promise<void> {
     const interactionRecoveryTimer = setInterval(() => void drainInteractionRecovery(), 30_000);
     interactionRecoveryTimer.unref?.();
     void drainInteractionRecovery();
+  }
+  if (interactionOffboarding) {
+    let offboardRetryRunning = false;
+    const retryOffboards = (): void => {
+      if (offboardRetryRunning) return;
+      offboardRetryRunning = true;
+      void interactionOffboarding?.retryPending()
+        .catch((error) => console.warn(
+          `[interaction] offboard retry 失败: ${error instanceof Error ? error.message : String(error)}`,
+        ))
+        .finally(() => { offboardRetryRunning = false; });
+    };
+    retryOffboards();
+    const offboardRetryTimer = setInterval(retryOffboards, 60_000);
+    offboardRetryTimer.unref?.();
+    const purgeOffboards = (): void => {
+      void interactionOffboarding?.purgeDue().catch((error) =>
+        console.warn(`[interaction] offboard purge 失败: ${error instanceof Error ? error.message : String(error)}`));
+    };
+    purgeOffboards();
+    const offboardPurgeTimer = setInterval(purgeOffboards, 60 * 60 * 1_000);
+    offboardPurgeTimer.unref?.();
   }
 
   // ── 发布下发段（change decouple-publish-generation-from-dispatch）──────────────
@@ -3898,6 +3942,10 @@ async function main(): Promise<void> {
           // 对外客户管理（change edge-client-customer-auth）：内部 JWT 保护的 /api/client-users*。同一 store 实例
           // 亦供客户鉴权服务做 auth/scope 读（单实例共享池）。绝不回传 key/hash。
           clientUsers: clientUserStore,
+          onClientOffboardCreated: async (offboard) => {
+            const edgeId = server.resolveEdgeIdForAccount(offboard.accountId);
+            if (edgeId) await interactionOffboarding?.dispatchPending(offboard.accountId, edgeId);
+          },
         },
         {
           port: panelPort,
@@ -3935,6 +3983,10 @@ async function main(): Promise<void> {
           rateLimiter: new LoginRateLimiter(),
           delegatedTasks: delegatedTaskService,
           interactionApi: interactionCustomerApi,
+          onOffboardCreated: async (offboard) => {
+            const edgeId = server.resolveEdgeIdForAccount(offboard.accountId);
+            if (edgeId) await interactionOffboarding?.dispatchPending(offboard.accountId, edgeId);
+          },
         },
         {
           port: clientAuthPort,

@@ -175,6 +175,48 @@ test('deterministic intent-to-risk mapping overrides an under-classified refund 
   assert.equal(preview.requiresApproval, true);
 });
 
+test('deceptive AI safety self-report cannot bypass deterministic claim gate or human review', async () => {
+  const outputs = [
+    { role: 'reply_intent_classifier', intent: 'gratitude', confidence: 0.99, riskTags: [], reasons: [] },
+    { role: 'reply_polisher', polishedText: '本周五折，支持无条件退款。', meaningChanged: false,
+      introducedClaims: [], riskTags: [] },
+    { role: 'reply_risk_reviewer', riskLevel: 'low', riskTags: [], reasons: [], allowAutoSend: true },
+  ];
+  const ai = new ReplyAiService({ complete: async () => JSON.stringify(outputs.shift()) }, 100);
+  const config = snapshot();
+  config.policy.mode = 'auto_safe';
+  config.policy.channels.comment.allowAutoSend = true;
+  config.rules = [{ ...rule('deceptive-polish', 1),
+    actions: { templateId: template.templateId, polish: true, allowAutoSend: true, forceHumanTags: [] } }];
+  const workflow = new ReplyWorkflow({} as InteractionStore, {} as ReplyConfigStore, ai);
+  const preview = await workflow.buildPreview(config, inbound, null);
+  assert.equal(preview.finalText, '本周五折，支持无条件退款。');
+  assert.equal(preview.meaningChanged, false);
+  assert.deepEqual(preview.introducedClaims, []);
+  assert.equal(preview.riskLevel, 'high');
+  assert.ok(preview.riskReasons.includes('promotion'));
+  assert.ok(preview.riskReasons.includes('refund'));
+  assert.equal(preview.requiresApproval, true);
+});
+
+test('auto candidate is limited to unchanged deterministic template output', async () => {
+  const outputs = [
+    { role: 'reply_intent_classifier', intent: 'gratitude', confidence: 0.99, riskTags: [], reasons: [] },
+    { role: 'reply_risk_reviewer', riskLevel: 'low', riskTags: [], reasons: [], allowAutoSend: true },
+  ];
+  const ai = new ReplyAiService({ complete: async () => JSON.stringify(outputs.shift()) }, 100);
+  const config = snapshot();
+  config.policy.mode = 'auto_safe';
+  config.policy.channels.comment.allowAutoSend = true;
+  config.rules = [{ ...rule('template-only', 1),
+    actions: { templateId: template.templateId, polish: false, allowAutoSend: true, forceHumanTags: [] } }];
+  const workflow = new ReplyWorkflow({} as InteractionStore, {} as ReplyConfigStore, ai);
+  const preview = await workflow.buildPreview(config, inbound, null);
+  assert.equal(preview.finalText, preview.renderedText);
+  assert.equal(preview.requiresApproval, false);
+  assert.equal(preview.riskLevel, 'low');
+});
+
 test('explicit regenerate can recover a failed job, while inactive auth blocks before CAS mutation', async () => {
   const context: ScopedJobContext = {
     thread: { id: 'thread-a', platform: 'wechat_channels', accountId: 'acct_wc_demo', envKey: 'env-a',

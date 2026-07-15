@@ -12,10 +12,12 @@
  */
 
 import http from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { signJwt, verifyJwt } from '../panel/jwt.js';
 import { parseBearer } from '../panel/auth.js';
 import type { TokenRevocationStore } from '../panel/revocation.js';
 import type { ClientUserStore } from './client-user-store.js';
+import type { ClientOffboardView } from './client-user-store.js';
 import type { LoginRateLimiter } from './rate-limiter.js';
 import { DelegatedTaskServiceError, type DelegatedTaskService } from '../delegated-task/service.js';
 import type { DelegatedTaskIntent } from '../delegated-task/types.js';
@@ -31,6 +33,7 @@ export interface ClientAuthDeps {
   interactionApi?: {
     handle(req: http.IncomingMessage, res: http.ServerResponse, userId: string): Promise<boolean>;
   };
+  onOffboardCreated?: (offboard: ClientOffboardView) => Promise<void>;
 }
 
 export interface ClientAuthConfig {
@@ -195,6 +198,29 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         return;
       }
       sendJson(res, 403, { error: 'forbidden', reason: 'environment_assignment_admin_only' });
+      return;
+    }
+    const environmentOffboard = /^\/environments\/([^/]+)$/.exec(url);
+    if (method === 'DELETE' && environmentOffboard) {
+      const envKey = decodeURIComponent(environmentOffboard[1]).trim();
+      const result = await deps.store.beginEnvironmentOffboard(userId, envKey);
+      if (!result.ok) {
+        sendJson(res, result.reason === 'disabled' ? 401 : result.reason === 'not_authorized' ? 404 : 409,
+          { error: result.reason });
+        return;
+      }
+      await deps.onOffboardCreated?.(result.offboard);
+      sendJson(res, 202, { data: result.offboard, meta: { requestId: randomUUID(), asOf: Date.now() } });
+      return;
+    }
+    const offboardStatus = /^\/offboarding\/([^/]+)$/.exec(url);
+    if (method === 'GET' && offboardStatus) {
+      const offboard = await deps.store.getOffboard(userId, decodeURIComponent(offboardStatus[1]));
+      if (!offboard) {
+        sendJson(res, 404, { error: 'not_found' });
+        return;
+      }
+      sendJson(res, 200, { data: offboard, meta: { requestId: randomUUID(), asOf: Date.now() } });
       return;
     }
 

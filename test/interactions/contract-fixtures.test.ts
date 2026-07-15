@@ -1,12 +1,18 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { DefaultMessageHandler, parseEnvelope } from '../../src/comm/index.js';
+import { DefaultMessageHandler, makeEnvelope, parseEnvelope } from '../../src/comm/index.js';
 import type { AnchorStore } from '../../src/comm/handler.js';
 import type { EdgeSession } from '../../src/comm/ws-server.js';
 import { EventBus } from '../../src/event-bus/index.js';
 import { SimplePlanner } from '../../src/planner/index.js';
-import { parseAuthStatusPayload, parseReplyResultPayload, parseSyncBatchPayload } from '../../src/interactions/contract.js';
+import {
+  parseAuthStatusPayload,
+  parseOffboardResultPayload,
+  parseReplyReconcileResultPayload,
+  parseReplyResultPayload,
+  parseSyncBatchPayload,
+} from '../../src/interactions/contract.js';
 import type {
   InteractionAuthStatusPayload,
   InteractionReplyResultPayload,
@@ -41,12 +47,16 @@ test('frozen v1 WS fixtures are accepted by strict Cloud consumers', async () =>
   const confirmed = await fixture('comment-reply-result-confirmed.json');
   const ambiguous = await fixture('dm-reply-result-ambiguous.json');
   const dmBatch = await fixture('dm-sync-batch.json');
+  const reconcileResult = await fixture('reply-reconcile-result.json');
+  const offboardResult = await fixture('offboard-result.json');
 
   assert.ok(parseAuthStatusPayload(auth.payload));
   assert.ok(parseSyncBatchPayload(batch.payload));
   assert.ok(parseReplyResultPayload(confirmed.payload));
   assert.ok(parseReplyResultPayload(ambiguous.payload));
   assert.ok(parseSyncBatchPayload(dmBatch.payload));
+  assert.ok(parseReplyReconcileResultPayload(reconcileResult.payload));
+  assert.ok(parseOffboardResultPayload(offboardResult.payload));
 
   assert.equal(parseSyncBatchPayload({ ...(batch.payload as object), unexpected: true }), null,
     '冻结 payload 对额外字段 fail closed');
@@ -61,6 +71,12 @@ test('frozen v1 WS fixtures are accepted by strict Cloud consumers', async () =>
     'comment-reply-send.json': 'interaction.reply.send', 'dm-reply-send.json': 'interaction.reply.send',
     'comment-reply-result-confirmed.json': 'interaction.reply.result',
     'dm-reply-result-ambiguous.json': 'interaction.reply.result',
+    'comment-reply-result-ack.json': 'interaction.reply.result.ack',
+    'reply-reconcile.json': 'interaction.reply.reconcile',
+    'reply-reconcile-result.json': 'interaction.reply.reconcile.result',
+    'offboard-command.json': 'interaction.offboard.command',
+    'offboard-result.json': 'interaction.offboard.result',
+    'offboard-ack.json': 'interaction.offboard.ack',
   };
   for (const [name, type] of Object.entries(expectedTypes)) {
     const envelope = await fixture(name);
@@ -94,13 +110,21 @@ test('mock Edge hello → sync batch/ack → confirmed result uses frozen v1 map
           errorCode: null, receivedAt: 1784044802100,
         };
       },
-      onReplyResult: async (payload: InteractionReplyResultPayload) => { seen.push('result'); result = payload; },
+      onReplyResult: async (payload: InteractionReplyResultPayload) => {
+        seen.push('result'); result = payload; return { duplicate: false };
+      },
+      onReplyReconcileResult: async () => {},
+      onOffboardResult: async () => ({ duplicate: false }),
+      hasPendingOffboard: async () => false,
     },
   });
   const session: EdgeSession = { sessionId: 'mock-edge-session' };
   const hello = await handler.handle(await fixture('hello.json'), session);
   assert.equal(hello?.type, 'welcome');
-  assert.deepEqual((hello?.payload as { capabilities?: string[] }).capabilities, ['interaction_inbox_v1']);
+  assert.deepEqual((hello?.payload as { capabilities?: string[] }).capabilities,
+    ['interaction_inbox_v1', 'interaction_reply_recovery_v1', 'interaction_offboarding_v1']);
+  assert.deepEqual((hello?.payload as { interactionRecovery?: unknown }).interactionRecovery,
+    { offboardPending: false });
 
   const auth = await handler.handle(await fixture('auth-status-active.json'), session);
   assert.equal(auth, null);
@@ -109,7 +133,7 @@ test('mock Edge hello → sync batch/ack → confirmed result uses frozen v1 map
   assert.equal((ack?.payload as InteractionSyncAckPayload).status, 'accepted');
   assert.equal((ack?.payload as InteractionSyncAckPayload).persisted.messages, 1);
   const confirmed = await handler.handle(await fixture('comment-reply-result-confirmed.json'), session);
-  assert.equal(confirmed, null);
+  assert.equal(confirmed?.type, 'interaction.reply.result.ack');
   assert.equal(persisted!.batchId, 'batch-comment-001');
   assert.equal(result!.status, 'confirmed');
   assert.deepEqual(seen, ['auth', 'batch', 'result']);
@@ -123,7 +147,9 @@ test('mock Edge scope mismatch is rejected without persisting batch', async () =
     interactionInbox: {
       onAuthStatus: async () => {},
       onSyncBatch: async () => { called = true; throw new Error('must not run'); },
-      onReplyResult: async () => {},
+      onReplyResult: async () => ({ duplicate: false }),
+      onReplyReconcileResult: async () => {},
+      onOffboardResult: async () => ({ duplicate: false }),
     },
   });
   const session: EdgeSession = {
@@ -134,4 +160,48 @@ test('mock Edge scope mismatch is rejected without persisting batch', async () =
   assert.equal((ack?.payload as InteractionSyncAckPayload).status, 'rejected');
   assert.equal((ack?.payload as InteractionSyncAckPayload).errorCode, 'INTERACTION_SCOPE_MISMATCH');
   assert.equal(called, false);
+});
+
+test('durable reply/offboard results receive scope-bound duplicate-safe acknowledgements', async () => {
+  let replyCalls = 0;
+  let reconcileCalls = 0;
+  let offboardCalls = 0;
+  const handler = new DefaultMessageHandler({
+    planner: new SimplePlanner(), llm: { complete: async () => '0' }, cache: cache(),
+    clock: () => 1784044900000, eventBus: new EventBus(),
+    interactionInbox: {
+      onAuthStatus: async () => {},
+      onSyncBatch: async () => { throw new Error('unused'); },
+      onReplyResult: async () => ({ duplicate: replyCalls++ > 0 }),
+      onReplyReconcileResult: async () => { reconcileCalls++; },
+      onOffboardResult: async () => ({ duplicate: offboardCalls++ > 0 }),
+    },
+  });
+  const session: EdgeSession = { sessionId: 'recovery-edge', accountId: 'acct_wc_demo', platform: 'wechat_channels',
+    capabilities: ['interaction_inbox_v1', 'interaction_reply_recovery_v1', 'interaction_offboarding_v1'] };
+  const baseResult = (await fixture('comment-reply-result-confirmed.json')).payload as InteractionReplyResultPayload;
+  const first = await handler.handle(makeEnvelope('interaction.reply.result', 'result-1', 1, baseResult), session);
+  const duplicate = await handler.handle(makeEnvelope('interaction.reply.result', 'result-2', 2, baseResult), session);
+  assert.equal(first?.type, 'interaction.reply.result.ack');
+  assert.equal((first?.payload as { status: string }).status, 'accepted');
+  assert.equal((duplicate?.payload as { status: string }).status, 'duplicate');
+  assert.equal(first?.id, 'result-1');
+
+  const reconcile = await handler.handle(makeEnvelope('interaction.reply.reconcile.result', 'reconcile-1', 3, {
+    reconcileId: 'reconcile-1', envKey: baseResult.envKey, accountId: baseResult.accountId,
+    platform: 'wechat_channels', attempts: [{ jobId: baseResult.jobId, attemptId: baseResult.attemptId,
+      idempotencyKey: baseResult.idempotencyKey, state: 'result_replayed', observedAt: 3 }], finishedAt: 3,
+  }), session);
+  assert.equal(reconcile, null);
+  assert.equal(reconcileCalls, 1);
+
+  const offboardPayload = { offboardId: 'offboard-1', envKey: baseResult.envKey, accountId: baseResult.accountId,
+    platform: 'wechat_channels' as const, status: 'cleared' as const, errorCode: null, finishedAt: 4 };
+  const offboard = await handler.handle(makeEnvelope('interaction.offboard.result', 'offboard-result-1', 4,
+    offboardPayload), session);
+  const offboardDuplicate = await handler.handle(makeEnvelope('interaction.offboard.result', 'offboard-result-2', 5,
+    offboardPayload), session);
+  assert.equal(offboard?.type, 'interaction.offboard.ack');
+  assert.equal((offboard?.payload as { status: string }).status, 'accepted');
+  assert.equal((offboardDuplicate?.payload as { status: string }).status, 'duplicate');
 });

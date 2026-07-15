@@ -160,6 +160,24 @@ export function validateFinalReplyText(profile: ReplyProfile, text: string): Val
   return issues;
 }
 
+/**
+ * Deterministic high-risk claim gate. This deliberately does not consume any
+ * model-reported `meaningChanged` / `introducedClaims` / `riskLevel` field.
+ * Matches force human review; they are not a semantic classifier and therefore
+ * prefer a conservative false positive over an unsafe automatic promise.
+ */
+export function deterministicClaimTags(text: string): RiskTag[] {
+  const patterns: ReadonlyArray<readonly [RiskTag, RegExp]> = [
+    ['pricing', /(?:[¥￥$]\s*\d|(?:\d+(?:\.\d+)?|[零一二三四五六七八九十百千万两]+)\s*(?:元|块钱|rmb|cny|usd)|价格|售价|价钱|多少钱|price\b)/iu],
+    ['promotion', /(?:(?:\d(?:\.\d)?|[一二三四五六七八九十])\s*折|折扣|优惠|促销|活动价|满减|立减|买一送一|赠品|优惠券|coupon|discount|promotion|\bsale\b)/iu],
+    ['refund', /(?:退款|退货|无条件退|全额退|包退|refund|return\s+policy)/iu],
+    ['order', /(?:订单|下单|付款|支付|发货|\border(?:\s+(?:id|number|status))?\b)/iu],
+    ['after_sales', /(?:售后|保修|质保|维修|换货|after[ -]?sales|warranty)/iu],
+    ['introduced_claim', /(?:补偿|赔偿|赔付|返现|补发|赠送|compensat(?:e|ion)|cashback)/iu],
+  ];
+  return [...new Set(patterns.filter(([, pattern]) => pattern.test(text)).map(([tag]) => tag))];
+}
+
 function variablesIn(content: string): string[] {
   return [...content.matchAll(PLACEHOLDER)].map((match) => match[1]);
 }

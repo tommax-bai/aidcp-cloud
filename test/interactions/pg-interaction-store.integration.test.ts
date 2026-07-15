@@ -30,6 +30,9 @@ test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recov
         interaction_messages,interaction_threads,interaction_sync_batches,interaction_sync_cursors,
         interaction_auth_state,interaction_runtime_controls
         RESTART IDENTITY CASCADE`);
+      await pool.query(`INSERT INTO accounts(account_id,label,platform) VALUES
+        ('acct_wc_demo','mock Edge account','wechat_channels')
+        ON CONFLICT (account_id) DO UPDATE SET platform=EXCLUDED.platform`);
       await store.init();
       await store.upsertAuthStatus({
         envKey: 'env_wc_demo', accountId: 'acct_wc_demo', platform: 'wechat_channels', status: 'active',

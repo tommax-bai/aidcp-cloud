@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import pg from 'pg';
 import { ClientUserStore } from '../../src/client-auth/client-user-store.js';
+import { InteractionStore } from '../../src/interactions/interaction-store.js';
 
 const connectionString = process.env.AIDCP_INTERACTION_TEST_DATABASE_URL;
 
@@ -11,7 +12,8 @@ test('PostgreSQL: authoritative env ownership is unique and cross-customer inter
     const users = new ClientUserStore({ pool });
     try {
       await users.init();
-      await pool.query(`TRUNCATE client_env_scope, client_users, client_environments RESTART IDENTITY CASCADE`);
+      await pool.query(`TRUNCATE interaction_offboard_audit,interaction_offboards,
+        client_env_scope_audit,client_env_scope,client_users,client_environments RESTART IDENTITY CASCADE`);
       await pool.query(`DELETE FROM interaction_auth_state WHERE account_id IN ('acct-auth-a','acct-auth-b')`);
       await pool.query(`INSERT INTO accounts(account_id,label,platform) VALUES
         ('acct-auth-a','A','wechat_channels'),('acct-auth-b','B','wechat_channels')
@@ -79,6 +81,99 @@ test('PostgreSQL: authoritative env ownership is unique and cross-customer inter
       await pool.query(`UPDATE client_users SET status='disabled' WHERE user_id='user-a'`);
       const disabled = await users.withAuthorizedInteractionScope('user-a', 'env-auth-race', async () => 'never');
       assert.deepEqual(disabled, { ok: false, reason: 'disabled' });
+    } finally {
+      await pool.end();
+    }
+  });
+
+test('PostgreSQL: unbind/termination revoke first, retry offline cleanup, tombstone after exact Edge result and purge by deadline',
+  { skip: !connectionString }, async () => {
+    const pool = new pg.Pool({ connectionString });
+    const users = new ClientUserStore({ pool });
+    const interactions = new InteractionStore({ pool, clock: () => 1_784_044_830_000 });
+    try {
+      await users.init();
+      await interactions.init();
+      await pool.query(`TRUNCATE interaction_offboard_audit,interaction_offboards,
+        client_env_scope_audit,client_env_scope,client_users,client_environments RESTART IDENTITY CASCADE`);
+      await pool.query(`DELETE FROM interaction_auth_state
+        WHERE account_id IN ('acct-offboard-a','acct-offboard-b','acct-term-a','acct-term-b')`);
+      await pool.query(`INSERT INTO accounts(account_id,label,platform) VALUES
+        ('acct-offboard-a','offboard-a','wechat_channels'),('acct-offboard-b','offboard-b','wechat_channels'),
+        ('acct-term-a','term-a','wechat_channels'),('acct-term-b','term-b','wechat_channels')
+        ON CONFLICT (account_id) DO UPDATE SET platform=EXCLUDED.platform`);
+      await pool.query(`INSERT INTO client_users(user_id,name,key_hash,key_salt,status) VALUES
+        ('user-offboard-a','offboard-user-a','hash','salt','enabled'),
+        ('user-offboard-b','offboard-user-b','hash','salt','enabled'),
+        ('user-term','terminated-user','hash','salt','enabled')`);
+      await users.registerEnvironments([
+        { envKey: 'env-offboard-a', platform: 'wechat_channels' },
+        { envKey: 'env-offboard-b', platform: 'wechat_channels' },
+        { envKey: 'env-term-a', platform: 'wechat_channels' },
+        { envKey: 'env-term-b', platform: 'wechat_channels' },
+      ], 'admin');
+      await pool.query(`INSERT INTO interaction_auth_state
+        (platform,account_id,env_key,status,browser_state,capabilities,identity,checked_at)
+        VALUES
+        ('wechat_channels','acct-offboard-a','env-offboard-a','active','closed','{}'::jsonb,'{"externalId":"secret-id"}'::jsonb,now()),
+        ('wechat_channels','acct-offboard-b','env-offboard-b','active','closed','{}'::jsonb,NULL,now()),
+        ('wechat_channels','acct-term-a','env-term-a','active','closed','{}'::jsonb,NULL,now()),
+        ('wechat_channels','acct-term-b','env-term-b','active','closed','{}'::jsonb,NULL,now())
+        ON CONFLICT (platform,account_id) DO UPDATE SET env_key=EXCLUDED.env_key,status='active',identity=EXCLUDED.identity`);
+      assert.equal((await users.setScope('user-offboard-a', [{ envKey: 'env-offboard-a' }], 'admin')).ok, true);
+      assert.equal((await users.setScope('user-offboard-b', [{ envKey: 'env-offboard-b' }], 'admin')).ok, true);
+      assert.equal((await users.setScope('user-term', [{ envKey: 'env-term-a' }, { envKey: 'env-term-b' }], 'admin')).ok, true);
+
+      const started = await users.beginEnvironmentOffboard('user-offboard-a', 'env-offboard-a');
+      assert.equal(started.ok, true);
+      if (!started.ok) return;
+      assert.equal(started.offboard.state, 'pending_edge');
+      assert.equal((await users.withAuthorizedInteractionScope('user-offboard-a', 'env-offboard-a', async () => true)).ok, false,
+        'scope must be revoked before Edge cleanup');
+      assert.equal((await interactions.pendingOffboards('acct-offboard-a')).length, 1,
+        'offline Edge leaves a durable pending cleanup');
+      const disabled = (await pool.query<{ status: string }>(`SELECT status FROM interaction_auth_state
+        WHERE account_id='acct-offboard-a'`)).rows[0];
+      assert.equal(disabled.status, 'disabled');
+
+      const failed = await interactions.applyOffboardResult({
+        offboardId: started.offboard.offboardId, envKey: 'env-offboard-a', accountId: 'acct-offboard-a',
+        platform: 'wechat_channels', status: 'failed', errorCode: 'INTERACTION_UPSTREAM_UNAVAILABLE',
+        finishedAt: 1_784_044_831_000,
+      });
+      assert.equal(failed.duplicate, false);
+      assert.equal((await interactions.pendingOffboards('acct-offboard-a'))[0].state, 'pending_edge');
+      const cleared = await interactions.applyOffboardResult({
+        offboardId: started.offboard.offboardId, envKey: 'env-offboard-a', accountId: 'acct-offboard-a',
+        platform: 'wechat_channels', status: 'cleared', errorCode: null, finishedAt: 1_784_044_832_000,
+      });
+      assert.equal(cleared.duplicate, false);
+      assert.equal((await interactions.applyOffboardResult({
+        offboardId: started.offboard.offboardId, envKey: 'env-offboard-a', accountId: 'acct-offboard-a',
+        platform: 'wechat_channels', status: 'cleared', errorCode: null, finishedAt: 1_784_044_832_000,
+      })).duplicate, true);
+      assert.equal((await users.getOffboard('user-offboard-a', started.offboard.offboardId))?.state, 'tombstoned');
+      assert.equal((await pool.query<{ identity: unknown }>(`SELECT identity FROM interaction_auth_state
+        WHERE account_id='acct-offboard-a'`)).rows[0].identity, null);
+
+      await pool.query(`UPDATE interaction_offboards SET purge_due_at=to_timestamp(1)
+        WHERE offboard_id=$1`, [started.offboard.offboardId]);
+      assert.equal(await interactions.purgeDueOffboards(1_784_044_833_000), 1);
+      assert.equal((await users.getOffboard('user-offboard-a', started.offboard.offboardId))?.state, 'purged');
+      assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM interaction_auth_state
+        WHERE account_id='acct-offboard-a'`)).rows[0].n, 0);
+
+      const terminated = await users.updateUser('user-term', { status: 'disabled' }, 'admin-termination');
+      assert.equal(terminated.ok, true);
+      if (!terminated.ok) return;
+      assert.equal(terminated.offboards.length, 2);
+      assert.deepEqual(terminated.offboards.map((item) => item.reason), ['customer_terminated', 'customer_terminated']);
+      assert.equal((await users.listEnvScope('user-term')).length, 0);
+      assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM interaction_offboard_audit
+        WHERE user_id='user-term' AND event='access_revoked' AND status='pending_edge'`)).rows[0].n, 2);
+      const auditColumns = (await pool.query<{ column_name: string }>(`SELECT column_name FROM information_schema.columns
+        WHERE table_name='interaction_offboard_audit' ORDER BY column_name`)).rows.map((row) => row.column_name);
+      assert.equal(auditColumns.some((name) => /content|text|cookie|credential|template/i.test(name)), false);
     } finally {
       await pool.end();
     }

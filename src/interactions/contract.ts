@@ -5,6 +5,8 @@ import {
   type InteractionAuthStatusPayload,
   type InteractionChannel,
   type InteractionMessageType,
+  type InteractionOffboardResultPayload,
+  type InteractionReplyReconcileResultPayload,
   type InteractionReplyResultPayload,
   type InteractionSyncBatchPayload,
   type RiskTag,
@@ -193,6 +195,33 @@ export function parseReplyResultPayload(value: unknown): InteractionReplyResultP
     return null;
   }
   return value as unknown as InteractionReplyResultPayload;
+}
+
+export function parseReplyReconcileResultPayload(value: unknown): InteractionReplyReconcileResultPayload | null {
+  if (!isRecord(value) || !exactKeys(value, ['reconcileId', 'envKey', 'accountId', 'platform', 'attempts', 'finishedAt'])) {
+    return null;
+  }
+  if (!id(value.reconcileId) || !id(value.envKey) || !id(value.accountId) || value.platform !== INTERACTION_PLATFORM ||
+      !Array.isArray(value.attempts) || value.attempts.length < 1 || value.attempts.length > 100 ||
+      !timestamp(value.finishedAt)) return null;
+  for (const item of value.attempts) {
+    if (!isRecord(item) || !exactKeys(item, ['jobId', 'attemptId', 'idempotencyKey', 'state', 'observedAt']) ||
+        !id(item.jobId) || !id(item.attemptId) || typeof item.idempotencyKey !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(item.idempotencyKey) ||
+        !['result_replayed', 'not_found', 'binding_conflict'].includes(item.state as string) ||
+        !timestamp(item.observedAt)) return null;
+  }
+  return value as unknown as InteractionReplyReconcileResultPayload;
+}
+
+export function parseOffboardResultPayload(value: unknown): InteractionOffboardResultPayload | null {
+  if (!isRecord(value) || !exactKeys(value,
+    ['offboardId', 'envKey', 'accountId', 'platform', 'status', 'errorCode', 'finishedAt'])) return null;
+  if (!id(value.offboardId) || !id(value.envKey) || !id(value.accountId) || value.platform !== INTERACTION_PLATFORM ||
+      !['cleared', 'already_cleared', 'failed'].includes(value.status as string) ||
+      !(value.errorCode === null || ERROR_CODES.has(value.errorCode as string)) || !timestamp(value.finishedAt)) return null;
+  if (value.status === 'failed' ? value.errorCode === null : value.errorCode !== null) return null;
+  return value as unknown as InteractionOffboardResultPayload;
 }
 
 export function isRiskTag(value: unknown): value is RiskTag {

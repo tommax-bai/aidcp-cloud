@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { makeEnvelope } from '../comm/protocol.js';
 import type { EdgePusher } from '../comm/ws-server.js';
 import type { ReplyConfigStore } from './reply-config-store.js';
-import { validateFinalReplyText } from './reply-config.js';
+import { deterministicClaimTags, validateFinalReplyText } from './reply-config.js';
 import type { InteractionStore } from './interaction-store.js';
 import type { InteractionMetrics } from './metrics.js';
 import type { ReplyPreviewResult } from './reply-workflow.js';
@@ -87,7 +87,10 @@ export class InteractionSendOrchestrator {
           !snapshot.policy.channels[context.thread.channel].enabled ||
           !snapshot.policy.channels[context.thread.channel].allowAutoSend) return downgrade('policy');
       if (preview.requiresApproval || preview.riskLevel !== 'low' || preview.meaningChanged ||
-          preview.introducedClaims.length || preview.riskReasons.length) return downgrade('risk');
+          preview.introducedClaims.length || preview.riskReasons.length ||
+          preview.finalText !== preview.renderedText || deterministicClaimTags(preview.finalText ?? '').length) {
+        return downgrade('risk');
+      }
       const controls = await this.deps.store.getRuntimeControls(context.thread.accountId);
       if (controls.envKey !== context.thread.envKey || controls.writePaused || controls.circuitOpenedAt !== null) {
         return downgrade('runtime_controls');
@@ -159,7 +162,8 @@ export class InteractionSendOrchestrator {
     const auto = context.job.approvalActor === null;
     if (auto && (!this.autoAllowlist.has(accountId) || snapshot.policy.mode !== 'auto_safe' ||
         !snapshot.policy.channels[context.thread.channel].allowAutoSend || context.job.riskLevel !== 'low' ||
-        context.job.meaningChanged || context.job.introducedClaims.length || context.job.riskReasons.length)) {
+        context.job.meaningChanged || context.job.introducedClaims.length || context.job.riskReasons.length ||
+        context.job.finalText !== context.job.renderedText || deterministicClaimTags(context.job.finalText).length)) {
       this.blocked('INTERACTION_APPROVAL_REQUIRED', '自动发送条件未全部满足。', 409);
     }
     const action = context.thread.channel === 'comment' ? 'comment' : 'dm_reply';
@@ -252,6 +256,27 @@ export class InteractionSendOrchestrator {
     await this.deps.store.markAttemptDispatched(input.accountId, input.envKey, created.attempt.id);
     this.deps.metrics.increment('interaction_send_attempt_total', { status: 'dispatched', channel: gated.context.thread.channel });
     return { job: created.job, attemptId: created.attempt.id };
+  }
+
+  /** Reconcile only carries existing attempt identities to Edge's verification-only route. */
+  async reconcileRecoverable(accountId: string, edgeId: string): Promise<number> {
+    const refs = await this.deps.store.recoverableAttempts(accountId, 100);
+    let dispatched = 0;
+    const byEnv = new Map<string, typeof refs>();
+    for (const ref of refs) byEnv.set(ref.envKey, [...(byEnv.get(ref.envKey) ?? []), ref]);
+    for (const [envKey, scoped] of byEnv) {
+      const reconcileId = randomUUID();
+      const sent = this.deps.pusher.pushToEdges(makeEnvelope('interaction.reply.reconcile', reconcileId, this.clock(), {
+        reconcileId, envKey, accountId, platform: INTERACTION_PLATFORM,
+        attempts: scoped.map((ref) => ({ cloudStatus: ref.status, command: ref.command })),
+        requestedAt: this.clock(),
+      }), edgeId);
+      if (sent === 1) dispatched += scoped.length;
+      this.deps.metrics.increment('interaction_reply_reconcile_dispatch_total', {
+        status: sent === 1 ? 'dispatched' : 'deferred', count: String(scoped.length),
+      });
+    }
+    return dispatched;
   }
 
   async requestSync(

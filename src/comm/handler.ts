@@ -63,13 +63,25 @@ import type { RiskStatus, RiskQuotaLevel, PacingFloorProvider } from '../risk/in
 import { resolveReadSurface } from '../platform/index.js';
 import type { PacingSnapshotPayload } from './protocol.js';
 import type { AccountStateManager } from '../account-state.js';
-import { parseAuthStatusPayload, parseReplyResultPayload, parseSyncBatchPayload } from '../interactions/contract.js';
+import {
+  parseAuthStatusPayload,
+  parseOffboardResultPayload,
+  parseReplyReconcileResultPayload,
+  parseReplyResultPayload,
+  parseSyncBatchPayload,
+} from '../interactions/contract.js';
 import {
   INTERACTION_CAPABILITY,
+  INTERACTION_OFFBOARDING_CAPABILITY,
   INTERACTION_PLATFORM,
+  INTERACTION_REPLY_RECOVERY_CAPABILITY,
   InteractionError,
   type InteractionAuthStatusPayload,
+  type InteractionOffboardAckPayload,
+  type InteractionOffboardResultPayload,
+  type InteractionReplyReconcileResultPayload,
   type InteractionReplyResultPayload,
+  type InteractionReplyResultAckPayload,
   type InteractionSyncAckPayload,
   type InteractionSyncBatchPayload,
 } from '../interactions/types.js';
@@ -189,7 +201,10 @@ export interface HandlerDeps {
   interactionInbox?: {
     onAuthStatus(payload: InteractionAuthStatusPayload): Promise<void>;
     onSyncBatch(payload: InteractionSyncBatchPayload): Promise<InteractionSyncAckPayload>;
-    onReplyResult(payload: InteractionReplyResultPayload): Promise<void>;
+    onReplyResult(payload: InteractionReplyResultPayload): Promise<{ duplicate: boolean }>;
+    onReplyReconcileResult(payload: InteractionReplyReconcileResultPayload): Promise<void>;
+    onOffboardResult(payload: InteractionOffboardResultPayload): Promise<{ duplicate: boolean }>;
+    hasPendingOffboard?(accountId: string): Promise<boolean>;
   };
 }
 
@@ -348,6 +363,10 @@ export class DefaultMessageHandler implements MessageHandler {
         return this.onInteractionSyncBatch(env, session);
       case 'interaction.reply.result':
         return this.onInteractionReplyResult(env, session);
+      case 'interaction.reply.reconcile.result':
+        return this.onInteractionReplyReconcileResult(env, session);
+      case 'interaction.offboard.result':
+        return this.onInteractionOffboardResult(env, session);
       case 'plan.request':
         return this.onPlan(env, pusher);
       case 'select.request':
@@ -583,12 +602,25 @@ export class DefaultMessageHandler implements MessageHandler {
     }
     // 通知该连接决策层：上线 → 携 accountId emit edge.hello（进私有通道）触发会话启动（经诚实人设/调度闸 D3）。
     this.bus(session).emit('edge.hello', { edgeId: p.edgeId, accountId: session.accountId, ts: this.clock() });
+    const negotiatedCapabilities = this.deps.interactionInbox
+      ? [INTERACTION_CAPABILITY, INTERACTION_REPLY_RECOVERY_CAPABILITY, INTERACTION_OFFBOARDING_CAPABILITY]
+        .filter((capability) => (session.capabilities ?? []).includes(capability))
+      : undefined;
+    let offboardPending: boolean | undefined;
+    if (negotiatedCapabilities?.includes(INTERACTION_OFFBOARDING_CAPABILITY)) {
+      try {
+        offboardPending = !session.accountId || !this.deps.interactionInbox?.hasPendingOffboard
+          ? true
+          : await this.deps.interactionInbox.hasPendingOffboard(session.accountId);
+      } catch {
+        offboardPending = true;
+      }
+    }
     return makeEnvelope('welcome', env.id, this.clock(), {
       sessionId: session.sessionId,
       serverVersion: this.serverVersion,
-      capabilities: this.deps.interactionInbox && (session.capabilities ?? []).includes(INTERACTION_CAPABILITY)
-        ? [INTERACTION_CAPABILITY]
-        : undefined,
+      capabilities: negotiatedCapabilities,
+      interactionRecovery: offboardPending === undefined ? undefined : { offboardPending },
       // 节奏快照（change pacing-floor-config-min-interval）：tempo + 每类操作兜底 floor 区间。
       // 纯读风控 status（不写风控态）；握手早于风控态建立 / 解析失败 → 回落 normal(tempo=1.0)。
       // buildPacingSnapshot 是 total 函数：provider 抛错一律返 undefined，绝不 brick 握手。
@@ -602,6 +634,10 @@ export class DefaultMessageHandler implements MessageHandler {
 
   private interactionScopeMatches(session: EdgeSession, accountId: string): boolean {
     return !!session.accountId && session.accountId === accountId && session.platform === INTERACTION_PLATFORM;
+  }
+
+  private interactionExtensionAvailable(session: EdgeSession, capability: string): boolean {
+    return this.interactionAvailable(session) && (session.capabilities ?? []).includes(capability);
   }
 
   private async onInteractionAuthStatus(env: Envelope, session: EdgeSession): Promise<Envelope | null> {
@@ -662,15 +698,72 @@ export class DefaultMessageHandler implements MessageHandler {
     if (!payload) return makeEnvelope('error', env.id, this.clock(), {
       code: 'INTERACTION_VALIDATION_FAILED', message: 'interaction.reply.result payload 不合法。',
     });
+    const recovery = this.interactionExtensionAvailable(session, INTERACTION_REPLY_RECOVERY_CAPABILITY);
+    const ack = (status: InteractionReplyResultAckPayload['status'], errorCode: InteractionReplyResultAckPayload['errorCode']): Envelope =>
+      makeEnvelope('interaction.reply.result.ack', env.id, this.clock(), {
+        jobId: payload.jobId, attemptId: payload.attemptId, idempotencyKey: payload.idempotencyKey,
+        envKey: payload.envKey, accountId: payload.accountId, platform: INTERACTION_PLATFORM,
+        status, errorCode, receivedAt: this.clock(),
+      });
+    if (!this.interactionScopeMatches(session, payload.accountId)) return recovery
+      ? ack('rejected', 'INTERACTION_SCOPE_MISMATCH')
+      : makeEnvelope('error', env.id, this.clock(), {
+        code: 'INTERACTION_SCOPE_MISMATCH', message: '连接账号/平台与 payload 不匹配。',
+      });
+    try {
+      const applied = await this.deps.interactionInbox!.onReplyResult(payload);
+      return recovery ? ack(applied.duplicate ? 'duplicate' : 'accepted', null) : null;
+    } catch (error) {
+      const code = error instanceof InteractionError ? error.code : 'INTERACTION_INTERNAL_ERROR';
+      return recovery ? ack('rejected', code) :
+        makeEnvelope('error', env.id, this.clock(), { code, message: 'interaction.reply.result 未接收。' });
+    }
+  }
+
+  private async onInteractionReplyReconcileResult(env: Envelope, session: EdgeSession): Promise<Envelope | null> {
+    if (!this.interactionExtensionAvailable(session, INTERACTION_REPLY_RECOVERY_CAPABILITY)) {
+      return makeEnvelope('error', env.id, this.clock(), {
+        code: 'INTERACTION_FEATURE_DISABLED', message: 'interaction_reply_recovery_v1 capability 未协商。',
+      });
+    }
+    const payload = parseReplyReconcileResultPayload(env.payload);
+    if (!payload) return makeEnvelope('error', env.id, this.clock(), {
+      code: 'INTERACTION_VALIDATION_FAILED', message: 'interaction.reply.reconcile.result payload 不合法。',
+    });
     if (!this.interactionScopeMatches(session, payload.accountId)) return makeEnvelope('error', env.id, this.clock(), {
-      code: 'INTERACTION_SCOPE_MISMATCH', message: '连接账号/平台与 payload 不匹配。',
+      code: 'INTERACTION_SCOPE_MISMATCH', message: '连接账号/平台与恢复 payload 不匹配。',
     });
     try {
-      await this.deps.interactionInbox!.onReplyResult(payload);
+      await this.deps.interactionInbox!.onReplyReconcileResult(payload as InteractionReplyReconcileResultPayload);
       return null;
     } catch (error) {
       const code = error instanceof InteractionError ? error.code : 'INTERACTION_INTERNAL_ERROR';
-      return makeEnvelope('error', env.id, this.clock(), { code, message: 'interaction.reply.result 未接收。' });
+      return makeEnvelope('error', env.id, this.clock(), { code, message: '恢复观察未接收。' });
+    }
+  }
+
+  private async onInteractionOffboardResult(env: Envelope, session: EdgeSession): Promise<Envelope> {
+    const raw = env.payload && typeof env.payload === 'object' ? env.payload as Record<string, unknown> : {};
+    if (!this.interactionExtensionAvailable(session, INTERACTION_OFFBOARDING_CAPABILITY)) {
+      return makeEnvelope('error', env.id, this.clock(), {
+        code: 'INTERACTION_FEATURE_DISABLED', message: 'interaction_offboarding_v1 capability 未协商。',
+      });
+    }
+    const payload = parseOffboardResultPayload(raw);
+    if (!payload) return makeEnvelope('error', env.id, this.clock(), {
+      code: 'INTERACTION_VALIDATION_FAILED', message: 'interaction.offboard.result payload 不合法。',
+    });
+    const ack = (status: InteractionOffboardAckPayload['status'], errorCode: InteractionOffboardAckPayload['errorCode']): Envelope =>
+      makeEnvelope('interaction.offboard.ack', env.id, this.clock(), {
+        offboardId: payload.offboardId, envKey: payload.envKey, accountId: payload.accountId,
+        platform: INTERACTION_PLATFORM, status, errorCode, receivedAt: this.clock(),
+      });
+    if (!this.interactionScopeMatches(session, payload.accountId)) return ack('rejected', 'INTERACTION_SCOPE_MISMATCH');
+    try {
+      const applied = await this.deps.interactionInbox!.onOffboardResult(payload as InteractionOffboardResultPayload);
+      return ack(applied.duplicate ? 'duplicate' : 'accepted', null);
+    } catch (error) {
+      return ack('rejected', error instanceof InteractionError ? error.code : 'INTERACTION_INTERNAL_ERROR');
     }
   }
 

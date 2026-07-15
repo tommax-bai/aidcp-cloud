@@ -1,5 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { forcedHumanRisk, matchReplyRule, renderReplyTemplate, validateFinalReplyText, validateReplyConfig } from './reply-config.js';
+import {
+  deterministicClaimTags,
+  forcedHumanRisk,
+  matchReplyRule,
+  renderReplyTemplate,
+  validateFinalReplyText,
+  validateReplyConfig,
+} from './reply-config.js';
 import type { ReplyConfigStore } from './reply-config-store.js';
 import { ReplyAiService, type AiFallback } from './reply-ai.js';
 import type { InteractionStore } from './interaction-store.js';
@@ -247,6 +254,7 @@ export class ReplyWorkflow {
       })
       : { value: { role: 'reply_polisher' as const, polishedText: rendered, meaningChanged: false,
         introducedClaims: [], riskTags: [] as RiskTag[] }, fallback: 'none' as const };
+    const aiPolishInvoked = aiAllowed && rule.actions.polish && snapshot.policy.channels[inbound.channel].aiPolishEnabled;
     const polishedCandidate = polish.value.polishedText;
     const candidateIssues = validateFinalReplyText(profile, polishedCandidate);
     const candidate = candidateIssues.length ? rendered : polishedCandidate;
@@ -262,6 +270,7 @@ export class ReplyWorkflow {
     if (candidateIssues.some((issue) => issue.code !== 'link_forbidden' && issue.code !== 'disallowed_claim')) {
       deterministicTags.push('unknown');
     }
+    deterministicTags.push(...deterministicClaimTags(candidate));
     const reviewer = aiAllowed
       ? await this.ai.review({
         role: 'reply_risk_reviewer', requestId: this.requestId(), accountId: snapshot.accountId, inbound,
@@ -277,7 +286,8 @@ export class ReplyWorkflow {
       deterministicTags, rule.actions.forceHumanTags, fallbackRisk);
     const hasHardRisk = allTags.some((tag) => tag !== 'unknown' && HARD.has(tag));
     const requiresApproval = forcedHumanRisk(rule, allTags) || reviewer.value.riskLevel !== 'low' ||
-      !reviewer.value.allowAutoSend || !rule.actions.allowAutoSend || allTags.some((tag) => HARD.has(tag));
+      !reviewer.value.allowAutoSend || !rule.actions.allowAutoSend || allTags.some((tag) => HARD.has(tag)) ||
+      aiPolishInvoked || candidate !== rendered;
     return {
       matchedRuleId: rule.ruleId,
       templateId: template.templateId,

@@ -1,0 +1,11 @@
+{
+  "v": 2,
+  "type": "interaction.offboard.command",
+  "id": "offboard-envelope-001",
+  "ts": 1784044830000,
+  "payload": {
+    "offboardId": "offboard-001", "envKey": "env_wc_demo", "accountId": "acct_wc_demo",
+    "platform": "wechat_channels", "reason": "environment_unbind",
+    "requestedAt": 1784044830000, "expiresAt": 1786550430000
+  }
+}

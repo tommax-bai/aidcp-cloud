@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startClientAuthApi } from '../src/client-auth/client-auth-server.js';
 import type { ClientAuthConfig, ClientAuthDeps } from '../src/client-auth/client-auth-server.js';
-import type { ClientUserStore, ClientEnvScopeRow } from '../src/client-auth/client-user-store.js';
+import type { ClientUserStore, ClientEnvScopeRow, ClientOffboardView } from '../src/client-auth/client-user-store.js';
 import { LoginRateLimiter } from '../src/client-auth/rate-limiter.js';
 import { TokenRevocationStore } from '../src/panel/revocation.js';
 import { verifyJwt } from '../src/panel/jwt.js';
@@ -18,9 +18,11 @@ function makeFakeStore(): {
   store: ClientUserStore;
   users: Map<string, { userId: string; key: string; status: 'enabled' | 'disabled' }>;
   scope: Map<string, ClientEnvScopeRow[]>;
+  offboards: Map<string, ClientOffboardView>;
 } {
   const users = new Map<string, { userId: string; key: string; status: 'enabled' | 'disabled' }>();
   const scope = new Map<string, ClientEnvScopeRow[]>();
+  const offboards = new Map<string, ClientOffboardView>();
   const fake = {
     async verifyLogin(name: string, key: string) {
       const u = users.get(name.trim());
@@ -34,8 +36,21 @@ function makeFakeStore(): {
     async listEnvScope(userId: string) {
       return scope.get(userId) ?? [];
     },
+    async beginEnvironmentOffboard(userId: string, envKey: string) {
+      const owned = (scope.get(userId) ?? []).find((item) => item.envKey === envKey);
+      if (!owned) return { ok: false as const, reason: 'not_authorized' as const };
+      const offboard: ClientOffboardView = { offboardId: `offboard-${envKey}`, envKey,
+        accountId: `account-${envKey}`, state: 'pending_edge', reason: 'environment_unbind',
+        requestedAt: 10, purgeDueAt: 20 };
+      scope.set(userId, (scope.get(userId) ?? []).filter((item) => item.envKey !== envKey));
+      offboards.set(`${userId}:${offboard.offboardId}`, offboard);
+      return { ok: true as const, offboard };
+    },
+    async getOffboard(userId: string, offboardId: string) {
+      return offboards.get(`${userId}:${offboardId}`) ?? null;
+    },
   };
-  return { store: fake as unknown as ClientUserStore, users, scope };
+  return { store: fake as unknown as ClientUserStore, users, scope, offboards };
 }
 
 function baseConfig(port: number, overrides: Partial<ClientAuthConfig> = {}): ClientAuthConfig {
@@ -204,6 +219,41 @@ test('客户 A 不得通过 POST /environments attach 或读取客户 B 的环�
       assert.deepEqual(fx.scope.get('user-b')?.map((e) => e.envKey), ['env-b']);
     },
   );
+});
+
+test('客户只能解绑自己的环境，且响应可轮询 pending/offline 清理真态', async () => {
+  const fx = makeFakeStore();
+  fx.users.set('alice', { userId: 'user-a', key: 'ck_alice', status: 'enabled' });
+  fx.users.set('bob', { userId: 'user-b', key: 'ck_bob', status: 'enabled' });
+  fx.scope.set('user-b', [{ envKey: 'env-b', label: 'Bob 环境', platform: 'wechat_channels', source: 'admin', assignedAt: 0 }]);
+  const dispatched: string[] = [];
+  await withServer({ store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(),
+    onOffboardCreated: async (offboard) => { dispatched.push(offboard.offboardId); } }, baseConfig(0), async (base) => {
+    const login = async (name: string, key: string): Promise<string> => {
+      const response = await fetch(`${base}/login`, { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name, key }) });
+      return ((await response.json()) as { token: string }).token;
+    };
+    const alice = await login('alice', 'ck_alice');
+    const bob = await login('bob', 'ck_bob');
+    assert.equal((await fetch(`${base}/environments/env-b`, { method: 'DELETE',
+      headers: { authorization: `Bearer ${alice}` } })).status, 404);
+    const removed = await fetch(`${base}/environments/env-b`, { method: 'DELETE',
+      headers: { authorization: `Bearer ${bob}` } });
+    assert.equal(removed.status, 202);
+    const body = await removed.json() as { data: ClientOffboardView; meta: { requestId: string; asOf: number } };
+    assert.equal(body.data.state, 'pending_edge');
+    assert.equal(body.data.envKey, 'env-b');
+    assert.equal(body.data.accountId, 'account-env-b');
+    assert.equal(typeof body.meta.requestId, 'string');
+    assert.equal(typeof body.meta.asOf, 'number');
+    assert.deepEqual(dispatched, ['offboard-env-b']);
+    const status = await fetch(`${base}/offboarding/offboard-env-b`, {
+      headers: { authorization: `Bearer ${bob}` },
+    });
+    assert.equal(status.status, 200);
+    assert.equal(((await status.json()) as { data: ClientOffboardView }).data.state, 'pending_edge');
+  });
 });
 
 test('Edge delegated-task routes bind every read/write to the customer-owned environment', async () => {

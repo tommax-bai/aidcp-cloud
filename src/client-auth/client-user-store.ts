@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS client_env_scope_audit (
   assigned_at  TIMESTAMPTZ NOT NULL,
   revoked_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   revoked_by   TEXT,
-  reason       TEXT        NOT NULL CHECK (reason IN ('legacy_self_claim','scope_replaced')),
+  reason       TEXT        NOT NULL CHECK (reason IN ('legacy_self_claim','scope_replaced','environment_unbind','customer_terminated','admin_revoked')),
   UNIQUE (user_id, env_key, assigned_at, reason)
 );
 CREATE INDEX IF NOT EXISTS client_env_scope_audit_scope_idx
@@ -151,11 +151,26 @@ export type CreateUserResult =
 
 export type RotateKeyResult = { ok: true; plainKey: string } | { ok: false; reason: 'not_found' };
 
-export type MutateUserResult = { ok: true; user: ClientUserView } | { ok: false; reason: 'not_found' | 'invalid_name' | 'name_taken' };
+export type MutateUserResult = { ok: true; user: ClientUserView; offboards: ClientOffboardView[] } |
+  { ok: false; reason: 'not_found' | 'invalid_name' | 'name_taken' | 'offboard_binding_missing' };
 
 export type SetScopeResult =
-  | { ok: true; scope: ClientEnvScopeRow[] }
-  | { ok: false; reason: 'not_found' | 'unknown_environment' | 'env_already_assigned'; envKey?: string };
+  | { ok: true; scope: ClientEnvScopeRow[]; offboards: ClientOffboardView[] }
+  | { ok: false; reason: 'not_found' | 'unknown_environment' | 'env_already_assigned' | 'offboard_binding_missing' | 'offboard_in_progress'; envKey?: string };
+
+export interface ClientOffboardView {
+  offboardId: string;
+  envKey: string;
+  accountId: string;
+  state: 'pending_edge' | 'dispatched' | 'tombstoned' | 'purged';
+  reason: 'environment_unbind' | 'customer_terminated' | 'admin_revoked';
+  requestedAt: number;
+  purgeDueAt: number;
+}
+
+export type BeginOffboardResult =
+  | { ok: true; offboard: ClientOffboardView }
+  | { ok: false; reason: 'disabled' | 'not_authorized' | 'offboard_binding_missing' };
 
 export type InteractionScopeAuthorization<T> =
   | { ok: true; accountId: string; value: T }
@@ -174,6 +189,107 @@ export class ClientUserStore {
 
   constructor(options: ClientUserStoreOptions = {}) {
     this.pool = options.pool ?? new Pool(resolveEnvPgConfig());
+  }
+
+  private async enqueueOffboard(
+    client: pg.PoolClient,
+    input: { userId: string; envKey: string; accountId: string; reason: ClientOffboardView['reason']; actor: string | null },
+  ): Promise<ClientOffboardView> {
+    const offboardId = crypto.randomUUID();
+    const inserted = await client.query<{
+      offboard_id: string; env_key: string; account_id: string; state: ClientOffboardView['state'];
+      reason: ClientOffboardView['reason']; requested_at: Date; purge_due_at: Date;
+    }>(
+      `INSERT INTO interaction_offboards
+         (offboard_id,platform,account_id,env_key,user_id,reason,state,requested_at,purge_due_at,updated_at)
+       VALUES ($1,'wechat_channels',$2,$3,$4,$5,'pending_edge',now(),now()+interval '29 days',now())
+       ON CONFLICT (platform,env_key) WHERE state <> 'purged' DO UPDATE
+         SET updated_at=interaction_offboards.updated_at
+       RETURNING offboard_id,env_key,account_id,state,reason,requested_at,purge_due_at`,
+      [offboardId, input.accountId, input.envKey, input.userId, input.reason],
+    );
+    const row = inserted.rows[0];
+    if (!row || row.account_id !== input.accountId) throw new Error('offboard_scope_conflict');
+    await client.query(
+      `UPDATE interaction_runtime_controls SET comments_read_enabled=false,comments_reply_enabled=false,
+          dm_read_enabled=false,dm_send_text_enabled=false,dm_send_image_enabled=false,write_paused=true,
+          version=version+1,updated_at=now(),updated_by=$3
+        WHERE platform='wechat_channels' AND account_id=$1 AND env_key=$2`,
+      [input.accountId, input.envKey, input.actor ?? 'offboarding'],
+    );
+    await client.query(
+      `UPDATE interaction_auth_state SET status='disabled',capabilities=$3::jsonb,
+          reason_code='INTERACTION_FEATURE_DISABLED',checked_at=now(),updated_at=now()
+        WHERE platform='wechat_channels' AND account_id=$1 AND env_key=$2`,
+      [input.accountId, input.envKey, JSON.stringify({ commentsRead: false, commentsReply: false,
+        dmRead: false, dmSendText: false, dmSendImage: false })],
+    );
+    await client.query(
+      `INSERT INTO interaction_offboard_audit
+         (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
+       VALUES ($1,$2,'wechat_channels',$3,$4,$5,'access_revoked','pending_edge')`,
+      [crypto.randomUUID(), row.offboard_id, input.accountId, input.envKey, input.userId],
+    );
+    return { offboardId: row.offboard_id, envKey: row.env_key, accountId: row.account_id,
+      state: row.state, reason: row.reason, requestedAt: row.requested_at.getTime(), purgeDueAt: row.purge_due_at.getTime() };
+  }
+
+  /** Customer-authorized relinquish: revoke scope and stop Cloud sync/write in the same transaction as durable offboard creation. */
+  async beginEnvironmentOffboard(userId: string, envKey: string): Promise<BeginOffboardResult> {
+    const key = (envKey ?? '').trim();
+    if (!userId || !key) return { ok: false, reason: 'not_authorized' };
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const user = await client.query<{ status: string }>(
+        `SELECT status FROM client_users WHERE user_id=$1 FOR UPDATE`, [userId],
+      );
+      if (user.rows[0]?.status !== 'enabled') {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: user.rows[0] ? 'disabled' : 'not_authorized' };
+      }
+      const binding = await client.query<{ account_id: string; label: string | null; platform: string | null;
+        source: string; assigned_by: string | null; assigned_at: Date }>(
+        `SELECT a.account_id,s.label,s.platform,s.source,s.assigned_by,s.assigned_at
+           FROM client_env_scope s
+           JOIN client_environments e ON e.env_key=s.env_key AND e.platform='wechat_channels'
+           JOIN interaction_auth_state a ON a.env_key=s.env_key AND a.platform='wechat_channels'
+          WHERE s.user_id=$1 AND s.env_key=$2 AND s.source='admin'
+          FOR UPDATE OF s,e,a`, [userId, key],
+      );
+      const row = binding.rows[0];
+      if (!row) {
+        const owned = await client.query(`SELECT 1 FROM client_env_scope WHERE user_id=$1 AND env_key=$2`, [userId, key]);
+        await client.query('ROLLBACK');
+        return { ok: false, reason: owned.rows[0] ? 'offboard_binding_missing' : 'not_authorized' };
+      }
+      const offboard = await this.enqueueOffboard(client, { userId, envKey: key, accountId: row.account_id,
+        reason: 'environment_unbind', actor: `client:${userId}` });
+      await client.query(
+        `INSERT INTO client_env_scope_audit
+           (user_id,env_key,label,platform,source,assigned_by,assigned_at,revoked_at,revoked_by,reason)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,now(),$8,'environment_unbind')
+         ON CONFLICT (user_id,env_key,assigned_at,reason) DO NOTHING`,
+        [userId, key, row.label, row.platform, row.source, row.assigned_by, row.assigned_at, `client:${userId}`],
+      );
+      await client.query(`DELETE FROM client_env_scope WHERE user_id=$1 AND env_key=$2 AND source='admin'`, [userId, key]);
+      await client.query('COMMIT');
+      return { ok: true, offboard };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally { client.release(); }
+  }
+
+  async getOffboard(userId: string, offboardId: string): Promise<ClientOffboardView | null> {
+    const { rows } = await this.pool.query<{
+      offboard_id: string; env_key: string; account_id: string; state: ClientOffboardView['state'];
+      reason: ClientOffboardView['reason']; requested_at: Date; purge_due_at: Date;
+    }>(`SELECT offboard_id,env_key,account_id,state,reason,requested_at,purge_due_at
+          FROM interaction_offboards WHERE offboard_id=$1 AND user_id=$2`, [offboardId, userId]);
+    const row = rows[0];
+    return row ? { offboardId: row.offboard_id, envKey: row.env_key, accountId: row.account_id,
+      state: row.state, reason: row.reason, requestedAt: row.requested_at.getTime(), purgeDueAt: row.purge_due_at.getTime() } : null;
   }
 
   async init(): Promise<void> {
@@ -411,26 +527,71 @@ export class ClientUserStore {
     patch: { name?: string; status?: 'enabled' | 'disabled' },
     updatedBy: string | null,
   ): Promise<MutateUserResult> {
-    const current = await this.viewOf(userId);
-    if (!current) return { ok: false, reason: 'not_found' };
-    let name = current.name;
-    if (patch.name !== undefined) {
-      const t = patch.name.trim();
-      if (!t || t.length > 64) return { ok: false, reason: 'invalid_name' };
-      if (t !== current.name) {
-        const dup = await this.pool.query(`SELECT 1 FROM client_users WHERE name = $1 AND user_id <> $2`, [t, userId]);
-        if (dup.rows.length > 0) return { ok: false, reason: 'name_taken' };
+    const offboards: ClientOffboardView[] = [];
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const locked = await client.query<{ name: string; status: 'enabled' | 'disabled' }>(
+        `SELECT name,status FROM client_users WHERE user_id=$1 FOR UPDATE`, [userId],
+      );
+      const current = locked.rows[0];
+      if (!current) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'not_found' };
       }
-      name = t;
-    }
-    const status = patch.status ?? current.status;
-    void updatedBy;
-    await this.pool.query(
-      `UPDATE client_users SET name = $2, status = $3, updated_at = now() WHERE user_id = $1`,
-      [userId, name, status],
-    );
+      let name = current.name;
+      if (patch.name !== undefined) {
+        const trimmed = patch.name.trim();
+        if (!trimmed || trimmed.length > 64) {
+          await client.query('ROLLBACK');
+          return { ok: false, reason: 'invalid_name' };
+        }
+        const duplicate = await client.query(`SELECT 1 FROM client_users WHERE name=$1 AND user_id<>$2`, [trimmed, userId]);
+        if (duplicate.rows[0]) {
+          await client.query('ROLLBACK');
+          return { ok: false, reason: 'name_taken' };
+        }
+        name = trimmed;
+      }
+      const status = patch.status ?? current.status;
+      if (current.status === 'enabled' && status === 'disabled') {
+        const scopes = await client.query<{
+          env_key: string; label: string | null; platform: string | null; source: string;
+          assigned_by: string | null; assigned_at: Date; registry_platform: string | null; account_id: string | null;
+        }>(`SELECT s.env_key,s.label,s.platform,s.source,s.assigned_by,s.assigned_at,
+                   e.platform AS registry_platform,a.account_id
+              FROM client_env_scope s
+              LEFT JOIN client_environments e ON e.env_key=s.env_key
+              LEFT JOIN interaction_auth_state a ON a.env_key=s.env_key AND a.platform='wechat_channels'
+             WHERE s.user_id=$1 AND s.source='admin' FOR UPDATE OF s`, [userId]);
+        for (const scope of scopes.rows) {
+          if (scope.platform !== 'wechat_channels' && scope.registry_platform !== 'wechat_channels') continue;
+          if (!scope.account_id) {
+            await client.query('ROLLBACK');
+            return { ok: false, reason: 'offboard_binding_missing' };
+          }
+          offboards.push(await this.enqueueOffboard(client, { userId, envKey: scope.env_key, accountId: scope.account_id,
+            reason: 'customer_terminated', actor: updatedBy }));
+        }
+        await client.query(
+          `INSERT INTO client_env_scope_audit
+             (user_id,env_key,label,platform,source,assigned_by,assigned_at,revoked_at,revoked_by,reason)
+           SELECT user_id,env_key,label,platform,source,assigned_by,assigned_at,now(),$2,'customer_terminated'
+             FROM client_env_scope WHERE user_id=$1 AND source='admin'
+           ON CONFLICT (user_id,env_key,assigned_at,reason) DO NOTHING`, [userId, updatedBy],
+        );
+        await client.query(`DELETE FROM client_env_scope WHERE user_id=$1 AND source='admin'`, [userId]);
+      }
+      await client.query(`UPDATE client_users SET name=$2,status=$3,updated_at=now() WHERE user_id=$1`,
+        [userId, name, status]);
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if ((error as { code?: string })?.code === '23505') return { ok: false, reason: 'name_taken' };
+      throw error;
+    } finally { client.release(); }
     const user = await this.viewOf(userId);
-    return { ok: true, user: user! };
+    return { ok: true, user: user!, offboards };
   }
 
   /** 轮换 key：换 hash+盐、bump rotated_at；旧 key 立即失效，回显一次新明文。 */
@@ -553,6 +714,7 @@ export class ClientUserStore {
     items: { envKey: string; label?: string | null; platform?: string | null }[],
     assignedBy: string | null,
   ): Promise<SetScopeResult> {
+    const offboards: ClientOffboardView[] = [];
     const seen = new Set<string>();
     const clean = items
       .map((i) => (i.envKey ?? '').trim())
@@ -566,6 +728,11 @@ export class ClientUserStore {
         await client.query('ROLLBACK');
         return { ok: false, reason: 'not_found' };
       }
+      const current = await client.query<{
+        env_key: string; label: string | null; platform: string | null; source: string;
+        assigned_by: string | null; assigned_at: Date;
+      }>(`SELECT env_key,label,platform,source,assigned_by,assigned_at
+            FROM client_env_scope WHERE user_id=$1 AND source='admin' FOR UPDATE`, [userId]);
       const registered = clean.length
         ? await client.query<{ env_key: string; label: string | null; platform: string | null }>(
             `SELECT env_key, label, platform FROM client_environments
@@ -580,6 +747,15 @@ export class ClientUserStore {
         return { ok: false, reason: 'unknown_environment', envKey: unknown };
       }
       if (clean.length) {
+        const purging = await client.query<{ env_key: string }>(
+          `SELECT env_key FROM interaction_offboards
+            WHERE env_key=ANY($1::text[]) AND platform='wechat_channels' AND state <> 'purged'
+            ORDER BY env_key LIMIT 1 FOR UPDATE`, [clean],
+        );
+        if (purging.rows[0]) {
+          await client.query('ROLLBACK');
+          return { ok: false, reason: 'offboard_in_progress', envKey: purging.rows[0].env_key };
+        }
         const conflict = await client.query<{ env_key: string }>(
           `SELECT env_key FROM client_env_scope
            WHERE env_key = ANY($1::text[]) AND user_id <> $2
@@ -592,15 +768,32 @@ export class ClientUserStore {
           return { ok: false, reason: 'env_already_assigned', envKey: conflict.rows[0].env_key };
         }
       }
+      const removed = current.rows.filter((row) => !clean.includes(row.env_key));
+      for (const row of removed) {
+        const registry = registeredByKey.get(row.env_key) ?? (await client.query<{ env_key: string; platform: string | null }>(
+          `SELECT env_key,platform FROM client_environments WHERE env_key=$1 FOR UPDATE`, [row.env_key],
+        )).rows[0];
+        if (registry?.platform !== 'wechat_channels' && row.platform !== 'wechat_channels') continue;
+        const binding = await client.query<{ account_id: string }>(
+          `SELECT account_id FROM interaction_auth_state
+            WHERE platform='wechat_channels' AND env_key=$1 FOR UPDATE`, [row.env_key],
+        );
+        if (!binding.rows[0]) {
+          await client.query('ROLLBACK');
+          return { ok: false, reason: 'offboard_binding_missing', envKey: row.env_key };
+        }
+        offboards.push(await this.enqueueOffboard(client, { userId, envKey: row.env_key, accountId: binding.rows[0].account_id,
+          reason: 'admin_revoked', actor: assignedBy }));
+      }
       await client.query(
         `INSERT INTO client_env_scope_audit
            (user_id, env_key, label, platform, source, assigned_by, assigned_at,
             revoked_at, revoked_by, reason)
          SELECT user_id, env_key, label, platform, source, assigned_by, assigned_at,
-                now(), $2, 'scope_replaced'
+                now(), $2, CASE WHEN env_key = ANY($3::text[]) THEN 'scope_replaced' ELSE 'admin_revoked' END
          FROM client_env_scope WHERE user_id = $1 AND source = 'admin'
          ON CONFLICT (user_id, env_key, assigned_at, reason) DO NOTHING`,
-        [userId, assignedBy],
+        [userId, assignedBy, clean],
       );
       await client.query(`DELETE FROM client_env_scope WHERE user_id = $1 AND source = 'admin'`, [userId]);
       for (const envKey of clean) {
@@ -629,7 +822,7 @@ export class ClientUserStore {
     } finally {
       client.release();
     }
-    return { ok: true, scope: await this.listEnvScope(userId) };
+    return { ok: true, scope: await this.listEnvScope(userId), offboards };
   }
 
   async close(): Promise<void> {

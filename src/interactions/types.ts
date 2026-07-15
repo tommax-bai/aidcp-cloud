@@ -2,6 +2,8 @@
 
 export const INTERACTION_PLATFORM = 'wechat_channels' as const;
 export const INTERACTION_CAPABILITY = 'interaction_inbox_v1' as const;
+export const INTERACTION_REPLY_RECOVERY_CAPABILITY = 'interaction_reply_recovery_v1' as const;
+export const INTERACTION_OFFBOARDING_CAPABILITY = 'interaction_offboarding_v1' as const;
 
 export type InteractionPlatform = typeof INTERACTION_PLATFORM;
 export type InteractionChannel = 'comment' | 'dm';
@@ -262,6 +264,77 @@ export interface InteractionReplyResultPayload {
   verification: 'platform_ack' | 'history_lookup' | 'comment_lookup' | 'not_verified';
   retryAfterMs: number | null;
   finishedAt: number;
+}
+
+export interface InteractionReplyResultAckPayload {
+  jobId: string;
+  attemptId: string;
+  idempotencyKey: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  status: 'accepted' | 'duplicate' | 'rejected';
+  errorCode: InteractionErrorCode | null;
+  receivedAt: number;
+}
+
+export interface InteractionReplyReconcilePayload {
+  reconcileId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  attempts: Array<{
+    cloudStatus: 'created' | 'dispatched' | 'ambiguous';
+    command: InteractionReplySendPayload;
+  }>;
+  requestedAt: number;
+}
+
+export interface InteractionReplyReconcileResultPayload {
+  reconcileId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  attempts: Array<{
+    jobId: string;
+    attemptId: string;
+    idempotencyKey: string;
+    state: 'result_replayed' | 'not_found' | 'binding_conflict';
+    observedAt: number;
+  }>;
+  finishedAt: number;
+}
+
+export type InteractionOffboardReason = 'environment_unbind' | 'customer_terminated' | 'admin_revoked';
+
+export interface InteractionOffboardCommandPayload {
+  offboardId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  reason: InteractionOffboardReason;
+  requestedAt: number;
+  expiresAt: number;
+}
+
+export interface InteractionOffboardResultPayload {
+  offboardId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  status: 'cleared' | 'already_cleared' | 'failed';
+  errorCode: InteractionErrorCode | null;
+  finishedAt: number;
+}
+
+export interface InteractionOffboardAckPayload {
+  offboardId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  status: 'accepted' | 'duplicate' | 'rejected';
+  errorCode: InteractionErrorCode | null;
+  receivedAt: number;
 }
 
 export interface ThreadView {

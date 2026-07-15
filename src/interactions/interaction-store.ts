@@ -8,7 +8,10 @@ import {
   type InteractionChannel,
   type InteractionErrorCode,
   type InteractionListItem,
+  type InteractionOffboardResultPayload,
+  type InteractionReplyReconcileResultPayload,
   type InteractionReplyResultPayload,
+  type InteractionReplySendPayload,
   type InteractionSyncAckPayload,
   type InteractionSyncBatchPayload,
   type MessageView,
@@ -57,6 +60,23 @@ export interface RecoverableJobRef {
   envKey: string;
   jobId: string;
   version: number;
+}
+
+export interface RecoverableAttemptRef {
+  accountId: string;
+  envKey: string;
+  status: 'created' | 'dispatched' | 'ambiguous';
+  command: InteractionReplySendPayload;
+}
+
+export interface PendingOffboardRef {
+  offboardId: string;
+  accountId: string;
+  envKey: string;
+  reason: 'environment_unbind' | 'customer_terminated' | 'admin_revoked';
+  state: 'pending_edge' | 'dispatched';
+  requestedAt: number;
+  purgeDueAt: number;
 }
 
 export interface DetailResult {
@@ -253,9 +273,15 @@ export class InteractionStore {
   async init(): Promise<void> {
     const { rows } = await this.pool.query<{ present: boolean }>(
       `SELECT to_regclass('public.interaction_threads') IS NOT NULL
-          AND to_regclass('public.interaction_reply_configs') IS NOT NULL AS present`,
+          AND to_regclass('public.interaction_reply_configs') IS NOT NULL
+          AND to_regclass('public.interaction_offboards') IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='interaction_send_attempts'
+              AND column_name='reconciliation_state'
+          ) AS present`,
     );
-    if (rows[0]?.present !== true) throw new Error('interaction_schema_missing_run_0039');
+    if (rows[0]?.present !== true) throw new Error('interaction_schema_missing_run_0041');
   }
 
   async upsertAuthStatus(payload: InteractionAuthStatusPayload): Promise<void> {
@@ -263,6 +289,22 @@ export class InteractionStore {
     try {
       await client.query('BEGIN');
       await this.assertAccountScope(client, payload.accountId, payload.envKey, false);
+      const offboard = await client.query<{ offboard_id: string; state: string }>(
+        `SELECT offboard_id,state FROM interaction_offboards
+          WHERE platform=$1 AND account_id=$2 AND env_key=$3 AND state <> 'purged' FOR SHARE`,
+        [payload.platform, payload.accountId, payload.envKey],
+      );
+      if (offboard.rows[0]) {
+        await client.query(
+          `INSERT INTO interaction_offboard_audit
+             (event_id,offboard_id,platform,account_id,env_key,event,status)
+           VALUES ($1,$2,$3,$4,$5,'auth_status_ignored',$6)`,
+          [this.idGen('audit'), offboard.rows[0].offboard_id, payload.platform, payload.accountId,
+            payload.envKey, offboard.rows[0].state],
+        );
+        await client.query('COMMIT');
+        return;
+      }
       await client.query(
         `INSERT INTO interaction_auth_state
           (platform, account_id, env_key, status, browser_state, capabilities, identity, reason_code, checked_at, active_since, updated_at)
@@ -780,13 +822,11 @@ export class InteractionStore {
       }
       const activeAccount = await client.query<{ status: SendAttemptView['status'] }>(
         `SELECT status FROM interaction_send_attempts
-          WHERE account_id=$1 AND status IN ('created','dispatched','ambiguous') LIMIT 1 FOR UPDATE`,
+          WHERE account_id=$1 AND status IN ('created','dispatched') LIMIT 1 FOR UPDATE`,
         [input.accountId],
       );
       if (activeAccount.rows[0]) {
-        const ambiguous = activeAccount.rows[0].status === 'ambiguous';
-        throw new InteractionError(ambiguous ? 'INTERACTION_SEND_AMBIGUOUS' : 'INTERACTION_STATE_CONFLICT',
-          ambiguous ? '账号存在待核验发送，禁止创建新发送。' : '账号已有发送尝试在进行中。', 409);
+        throw new InteractionError('INTERACTION_STATE_CONFLICT', '账号已有发送尝试在进行中。', 409);
       }
       const active = await client.query<{ status: string }>(
         `SELECT status FROM interaction_send_attempts WHERE reply_job_id=$1 AND status IN ('created','dispatched','ambiguous')`,
@@ -1086,11 +1126,234 @@ export class InteractionStore {
     };
   }
 
-  async recoverableAttemptIds(): Promise<string[]> {
-    const { rows } = await this.pool.query<{ id: string }>(
-      `SELECT id FROM interaction_send_attempts WHERE status IN ('created','dispatched','ambiguous') ORDER BY started_at ASC`,
+  async recoverableAttempts(accountId?: string, limit = 100): Promise<RecoverableAttemptRef[]> {
+    const { rows } = await this.pool.query<{
+      account_id: string; env_key: string; status: RecoverableAttemptRef['status']; job_id: string;
+      attempt_id: string; idempotency_key: string; channel: InteractionChannel; external_thread_id: string;
+      external_message_id: string; external_parent_id: string | null; final_text: string; started_at: Date;
+    }>(
+      `SELECT a.account_id,a.env_key,a.status,j.id AS job_id,a.id AS attempt_id,a.idempotency_key,a.channel,
+              t.external_thread_id,m.external_message_id,m.external_parent_id,j.final_text,a.started_at
+         FROM interaction_send_attempts a
+         JOIN interaction_reply_jobs j ON j.id=a.reply_job_id AND j.account_id=a.account_id AND j.env_key=a.env_key
+         JOIN interaction_messages m ON m.id=j.inbound_message_id
+         JOIN interaction_threads t ON t.id=m.thread_id
+        WHERE a.status IN ('created','dispatched','ambiguous') AND j.final_text IS NOT NULL
+          AND ($1::text IS NULL OR a.account_id=$1)
+        ORDER BY a.started_at ASC,a.id ASC LIMIT $2`,
+      [accountId ?? null, Math.min(Math.max(limit, 1), 100)],
     );
-    return rows.map((row) => row.id);
+    return rows.map((row) => ({
+      accountId: row.account_id, envKey: row.env_key, status: row.status,
+      command: {
+        jobId: row.job_id, attemptId: row.attempt_id, idempotencyKey: row.idempotency_key,
+        envKey: row.env_key, accountId: row.account_id, platform: INTERACTION_PLATFORM, channel: row.channel,
+        target: { threadExternalId: row.external_thread_id, inboundMessageExternalId: row.external_message_id,
+          parentExternalId: row.external_parent_id },
+        content: { type: 'text', text: row.final_text }, expiresAt: row.started_at.getTime() + 120_000,
+      },
+    }));
+  }
+
+  async recoverableAttemptIds(): Promise<string[]> {
+    return (await this.recoverableAttempts()).map((ref) => ref.command.attemptId);
+  }
+
+  async applyReplyReconcileResult(payload: InteractionReplyReconcileResultPayload): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const observation of payload.attempts) {
+        const attempts = await client.query<{ status: SendAttemptView['status']; reply_job_id: string }>(
+          `SELECT status,reply_job_id FROM interaction_send_attempts
+            WHERE id=$1 AND idempotency_key=$2 AND account_id=$3 AND env_key=$4 FOR UPDATE`,
+          [observation.attemptId, observation.idempotencyKey, payload.accountId, payload.envKey],
+        );
+        const attempt = attempts.rows[0];
+        if (!attempt || attempt.reply_job_id !== observation.jobId) {
+          throw new InteractionError('INTERACTION_SCOPE_MISMATCH', '恢复观察与发送尝试不匹配。', 409);
+        }
+        await client.query(
+          `UPDATE interaction_send_attempts SET reconciliation_state=$2,last_reconciled_at=to_timestamp($3/1000.0)
+            WHERE id=$1`, [observation.attemptId, observation.state, observation.observedAt],
+        );
+        if (['confirmed', 'failed'].includes(attempt.status) || observation.state === 'result_replayed') continue;
+        if (observation.state === 'not_found' && attempt.status === 'created') {
+          await client.query(
+            `UPDATE interaction_send_attempts SET status='failed',verification_status='not_found',
+                error_category='transient_network',error_code='INTERACTION_UPSTREAM_UNAVAILABLE',retryable=true,finished_at=now()
+              WHERE id=$1`, [observation.attemptId],
+          );
+          await client.query(
+            `UPDATE interaction_reply_jobs SET state='failed',version=version+1,
+                last_error_code='INTERACTION_UPSTREAM_UNAVAILABLE',updated_at=now()
+              WHERE id=$1 AND state='sending'`, [observation.jobId],
+          );
+        } else {
+          await client.query(
+            `UPDATE interaction_send_attempts SET status='ambiguous',verification_status='not_found',
+                error_category='verification_failed',error_code='INTERACTION_SEND_AMBIGUOUS',retryable=false,finished_at=now()
+              WHERE id=$1 AND status IN ('created','dispatched','ambiguous')`, [observation.attemptId],
+          );
+          await client.query(
+            `UPDATE interaction_reply_jobs SET state='ambiguous',version=version+1,
+                last_error_code='INTERACTION_SEND_AMBIGUOUS',updated_at=now()
+              WHERE id=$1 AND state='sending'`, [observation.jobId],
+          );
+        }
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally { client.release(); }
+  }
+
+  async pendingOffboards(accountId?: string, limit = 100): Promise<PendingOffboardRef[]> {
+    const { rows } = await this.pool.query<{
+      offboard_id: string; account_id: string; env_key: string; reason: PendingOffboardRef['reason'];
+      state: PendingOffboardRef['state']; requested_at: Date; purge_due_at: Date;
+    }>(`SELECT offboard_id,account_id,env_key,reason,state,requested_at,purge_due_at
+          FROM interaction_offboards WHERE state IN ('pending_edge','dispatched')
+            AND ($1::text IS NULL OR account_id=$1)
+          ORDER BY requested_at ASC,offboard_id ASC LIMIT $2`,
+      [accountId ?? null, Math.min(Math.max(limit, 1), 100)]);
+    return rows.map((row) => ({ offboardId: row.offboard_id, accountId: row.account_id,
+      envKey: row.env_key, reason: row.reason, state: row.state,
+      requestedAt: row.requested_at.getTime(), purgeDueAt: row.purge_due_at.getTime() }));
+  }
+
+  async markOffboardDispatched(offboardId: string, accountId: string, envKey: string): Promise<void> {
+    const { rowCount } = await this.pool.query(
+      `UPDATE interaction_offboards SET state='dispatched',dispatch_attempts=dispatch_attempts+1,
+          last_dispatched_at=now(),updated_at=now()
+        WHERE offboard_id=$1 AND account_id=$2 AND env_key=$3 AND state IN ('pending_edge','dispatched')`,
+      [offboardId, accountId, envKey],
+    );
+    if (!rowCount) throw new InteractionError('INTERACTION_STATE_CONFLICT', '解绑任务已不允许派发。', 409);
+  }
+
+  async applyOffboardResult(payload: InteractionOffboardResultPayload): Promise<{ duplicate: boolean }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query<{ state: string; edge_result_status: string | null; user_id: string | null }>(
+        `SELECT state,edge_result_status,user_id FROM interaction_offboards
+          WHERE offboard_id=$1 AND account_id=$2 AND env_key=$3 AND platform=$4 FOR UPDATE`,
+        [payload.offboardId, payload.accountId, payload.envKey, payload.platform],
+      );
+      const offboard = rows[0];
+      if (!offboard) throw new InteractionError('INTERACTION_SCOPE_MISMATCH', '解绑结果与任务 scope 不匹配。', 409);
+      if ((offboard.state === 'tombstoned' || offboard.state === 'purged') &&
+          offboard.edge_result_status === payload.status) {
+        await client.query('COMMIT');
+        return { duplicate: true };
+      }
+      if (!['pending_edge', 'dispatched'].includes(offboard.state)) {
+        throw new InteractionError('INTERACTION_STATE_CONFLICT', '解绑结果不允许推进当前任务。', 409);
+      }
+      if (payload.status === 'failed') {
+        await client.query(
+          `UPDATE interaction_offboards SET state='pending_edge',edge_result_status='failed',last_error_code=$2,updated_at=now()
+            WHERE offboard_id=$1`, [payload.offboardId, payload.errorCode],
+        );
+        await client.query(
+          `INSERT INTO interaction_offboard_audit
+             (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
+           VALUES ($1,$2,$3,$4,$5,$6,'edge_cleanup_failed','pending_edge')`,
+          [this.idGen('audit'), payload.offboardId, payload.platform, payload.accountId, payload.envKey, offboard.user_id],
+        );
+        await client.query('COMMIT');
+        return { duplicate: false };
+      }
+      await client.query(
+        `UPDATE interaction_offboards SET state='tombstoned',edge_result_status=$2,last_error_code=NULL,
+            edge_cleared_at=to_timestamp($3/1000.0),tombstoned_at=now(),updated_at=now()
+          WHERE offboard_id=$1`, [payload.offboardId, payload.status, payload.finishedAt],
+      );
+      await client.query(
+        `UPDATE interaction_auth_state SET status='disabled',capabilities=$3::jsonb,identity=NULL,
+            reason_code='INTERACTION_FEATURE_DISABLED',offboarded_at=now(),updated_at=now()
+          WHERE platform=$1 AND account_id=$2 AND env_key=$4`,
+        [payload.platform, payload.accountId, JSON.stringify({ commentsRead: false, commentsReply: false,
+          dmRead: false, dmSendText: false, dmSendImage: false }), payload.envKey],
+      );
+      await client.query(
+        `UPDATE interaction_messages SET content_text=NULL,attachment_meta=NULL,raw_meta_sanitized='{}'::jsonb,
+            lifecycle='hidden',updated_at=now() WHERE account_id=$1 AND env_key=$2`,
+        [payload.accountId, payload.envKey],
+      );
+      await client.query(
+        `UPDATE interaction_reply_jobs SET rendered_text=NULL,polished_text=NULL,final_text=NULL,
+            introduced_claims='[]'::jsonb,updated_at=now() WHERE account_id=$1 AND env_key=$2`,
+        [payload.accountId, payload.envKey],
+      );
+      await client.query(
+        `UPDATE interaction_threads SET status='closed',participant_external_id=NULL,participant_name=NULL,
+            participant_avatar_url=NULL,source_title=NULL,source_cover_url=NULL,updated_at=now()
+          WHERE account_id=$1 AND env_key=$2`, [payload.accountId, payload.envKey],
+      );
+      await client.query(
+        `INSERT INTO interaction_offboard_audit
+           (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
+         VALUES ($1,$2,$3,$4,$5,$6,'cloud_tombstoned','tombstoned')`,
+        [this.idGen('audit'), payload.offboardId, payload.platform, payload.accountId, payload.envKey, offboard.user_id],
+      );
+      await client.query('COMMIT');
+      return { duplicate: false };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally { client.release(); }
+  }
+
+  async purgeDueOffboards(now = this.clock()): Promise<number> {
+    let purged = 0;
+    while (true) {
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+        const due = await client.query<{
+          offboard_id: string; account_id: string; env_key: string; user_id: string | null;
+        }>(`SELECT offboard_id,account_id,env_key,user_id FROM interaction_offboards
+              WHERE state='tombstoned' AND purge_due_at <= to_timestamp($1/1000.0)
+              ORDER BY purge_due_at ASC,offboard_id ASC LIMIT 1 FOR UPDATE SKIP LOCKED`, [now]);
+        const row = due.rows[0];
+        if (!row) {
+          await client.query('COMMIT');
+          break;
+        }
+        await client.query(`DELETE FROM interaction_threads WHERE account_id=$1 AND env_key=$2`, [row.account_id, row.env_key]);
+        await client.query(`DELETE FROM interaction_sync_batches WHERE account_id=$1 AND env_key=$2`, [row.account_id, row.env_key]);
+        await client.query(`DELETE FROM interaction_sync_cursors WHERE account_id=$1 AND env_key=$2`, [row.account_id, row.env_key]);
+        await client.query(`DELETE FROM interaction_api_requests WHERE account_id=$1 AND env_key=$2`, [row.account_id, row.env_key]);
+        await client.query(`DELETE FROM reply_templates WHERE account_id=$1`, [row.account_id]);
+        await client.query(`DELETE FROM reply_rules WHERE account_id=$1`, [row.account_id]);
+        await client.query(`DELETE FROM account_reply_profiles WHERE account_id=$1`, [row.account_id]);
+        await client.query(`DELETE FROM interaction_reply_config_versions WHERE account_id=$1`, [row.account_id]);
+        await client.query(`DELETE FROM interaction_reply_configs WHERE account_id=$1`, [row.account_id]);
+        await client.query(`DELETE FROM interaction_auth_state WHERE account_id=$1 AND env_key=$2`, [row.account_id, row.env_key]);
+        await client.query(`DELETE FROM interaction_runtime_controls WHERE account_id=$1`, [row.account_id]);
+        const updated = await client.query(
+          `UPDATE interaction_offboards SET state='purged',purged_at=now(),updated_at=now()
+            WHERE offboard_id=$1 AND state='tombstoned'`, [row.offboard_id],
+        );
+        if (updated.rowCount) {
+          await client.query(
+            `INSERT INTO interaction_offboard_audit
+               (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
+             VALUES ($1,$2,'wechat_channels',$3,$4,$5,'cloud_purged','purged')`,
+            [this.idGen('audit'), row.offboard_id, row.account_id, row.env_key, row.user_id],
+          );
+          purged++;
+        }
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally { client.release(); }
+    }
+    return purged;
   }
 
   /** AI 途中进程退出没有外部写副作用；旧 classifying 可安全回 new 后以新 version 重跑。 */

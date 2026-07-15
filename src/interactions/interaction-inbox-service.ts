@@ -6,6 +6,8 @@ import type { ReplyConfigStore } from './reply-config-store.js';
 import type {
   InteractionChannel,
   InteractionAuthStatusPayload,
+  InteractionOffboardResultPayload,
+  InteractionReplyReconcileResultPayload,
   InteractionReplyResultPayload,
   InteractionSyncAckPayload,
   InteractionSyncBatchPayload,
@@ -64,7 +66,7 @@ export class InteractionInboxService {
     return result.ack;
   }
 
-  async onReplyResult(payload: InteractionReplyResultPayload): Promise<void> {
+  async onReplyResult(payload: InteractionReplyResultPayload): Promise<{ duplicate: boolean }> {
     const applied = await this.deps.store.applyReplyResult(payload);
     this.deps.metrics.increment('interaction_reply_result_total', { channel: payload.channel, status: payload.status });
     const context = await this.deps.store.getJobContext(payload.accountId, payload.envKey, payload.jobId);
@@ -90,5 +92,23 @@ export class InteractionInboxService {
     } else if (payload.status === 'failed' && !applied.duplicate) {
       await this.deps.store.noteSendOutcome(payload.accountId, false, failureLimit);
     }
+    return { duplicate: applied.duplicate };
+  }
+
+  async onReplyReconcileResult(payload: InteractionReplyReconcileResultPayload): Promise<void> {
+    await this.deps.store.applyReplyReconcileResult(payload);
+    for (const observation of payload.attempts) {
+      this.deps.metrics.increment('interaction_reply_reconcile_total', { state: observation.state });
+    }
+  }
+
+  async onOffboardResult(payload: InteractionOffboardResultPayload): Promise<{ duplicate: boolean }> {
+    const applied = await this.deps.store.applyOffboardResult(payload);
+    this.deps.metrics.increment('interaction_offboard_result_total', { status: payload.status });
+    return applied;
+  }
+
+  async hasPendingOffboard(accountId: string): Promise<boolean> {
+    return (await this.deps.store.pendingOffboards(accountId, 1)).length > 0;
   }
 }

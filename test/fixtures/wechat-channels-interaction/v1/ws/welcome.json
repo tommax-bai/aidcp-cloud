@@ -6,6 +6,7 @@
   "payload": {
     "sessionId": "session-wc-001",
     "serverVersion": "contract-fixture",
-    "capabilities": ["interaction_inbox_v1"]
+    "capabilities": ["interaction_inbox_v1", "interaction_reply_recovery_v1", "interaction_offboarding_v1"],
+    "interactionRecovery": { "offboardPending": false }
   }
 }

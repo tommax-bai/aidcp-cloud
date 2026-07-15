@@ -361,6 +361,7 @@ export interface PanelDeps {
    * 同一 store 实例亦供客户鉴权服务做 auth/scope 读（单实例共享 PG 池）。
    */
   clientUsers?: ClientUserStore;
+  onClientOffboardCreated?: (offboard: import('../client-auth/client-user-store.js').ClientOffboardView) => Promise<void>;
 }
 
 // ── 总览 DTO（change dashboard-refresh-clarity）─────────────────────────────────

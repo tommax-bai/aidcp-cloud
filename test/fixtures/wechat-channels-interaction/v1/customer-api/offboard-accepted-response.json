@@ -1,0 +1,8 @@
+{
+  "data": {
+    "offboardId": "offboard-001", "envKey": "env_wc_demo", "accountId": "acct_wc_demo",
+    "state": "pending_edge", "reason": "environment_unbind",
+    "requestedAt": 1784044830000, "purgeDueAt": 1786550430000
+  },
+  "meta": { "requestId": "customer-offboard-001", "asOf": 1784044830000 }
+}

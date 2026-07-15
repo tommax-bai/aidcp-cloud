@@ -572,6 +572,7 @@ function createRequestHandler(
           sendJson(res, r.reason === 'not_found' ? 404 : r.reason === 'name_taken' ? 409 : 400, { error: r.reason });
           return;
         }
+        for (const offboard of r.offboards) await deps.onClientOffboardCreated?.(offboard);
         sendJson(res, 200, { user: r.user });
         return;
       }
@@ -610,10 +611,12 @@ function createRequestHandler(
           }));
         const r = await store.setScope(userId, items, actor);
         if (!r.ok) {
-          const status = r.reason === 'not_found' ? 404 : r.reason === 'env_already_assigned' ? 409 : 422;
+          const status = r.reason === 'not_found' ? 404 :
+            r.reason === 'env_already_assigned' || r.reason === 'offboard_in_progress' ? 409 : 422;
           sendJson(res, status, { error: r.reason, ...(r.envKey ? { envKey: r.envKey } : {}) });
           return;
         }
+        for (const offboard of r.offboards) await deps.onClientOffboardCreated?.(offboard);
         sendJson(res, 200, { scope: r.scope });
         return;
       }
