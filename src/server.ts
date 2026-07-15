@@ -1565,6 +1565,20 @@ async function main(): Promise<void> {
           card: buildDelegatedTaskProgressCard(task),
         };
       }
+      // 精确旧命令（/publish、/comment）直接排队、不出确认卡：解析无歧义，二次确认是冗余点击。
+      // 自然语言委托仍出确认卡（账号/数量/截止靠推断、可能解析错）。两条路径的内容/评论人审都不变。
+      if (result.autoQueued) {
+        return {
+          command: text,
+          ok: true,
+          title: result.created ? '委托任务已直接排队' : '已存在相同任务',
+          message: '精确命令无需二次确认，已直接入队；内容发布 / 评论前仍保留人审。',
+          accountId: result.task.accountId,
+          accountName: result.task.accountName,
+          platformName: result.task.platform,
+          card: buildDelegatedTaskProgressCard(result.task),
+        };
+      }
       return {
         command: text,
         ok: true,

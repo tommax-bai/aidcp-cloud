@@ -25,6 +25,41 @@ test('creates awaiting confirmation and confirm is idempotent while stale versio
   assert.equal(repeated.status, 'queued');
 });
 
+test('legacy /publish slash command auto-confirms and queues directly (no confirmation card)', async () => {
+  const { service: svc } = service();
+  const res = await svc.createFromText('/publish 小萝北');
+  assert.equal(res.kind, 'task');
+  if (res.kind !== 'task') return;
+  assert.equal(res.autoQueued, true);
+  assert.equal(res.task.status, 'queued');
+  assert.equal(res.task.source, 'legacy_command');
+  assert.equal(res.task.action, 'publish_post');
+  assert.equal(res.task.targetSuccessCount, 1);
+  // 人审未被削弱：发布保留 review 审批模式，逐篇内容人审在下游仍会触发。
+  assert.equal(res.task.approvalMode, 'review');
+});
+
+test('legacy /comment slash command auto-confirms and queues directly', async () => {
+  const { service: svc } = service();
+  const res = await svc.createFromText('/comment 小萝北');
+  assert.equal(res.kind, 'task');
+  if (res.kind !== 'task') return;
+  assert.equal(res.autoQueued, true);
+  assert.equal(res.task.status, 'queued');
+  assert.equal(res.task.action, 'comment_batch');
+  assert.equal(res.task.approvalMode, 'review');
+});
+
+test('natural-language business goal still requires the confirmation card (not auto-queued)', async () => {
+  const { service: svc } = service();
+  const res = await svc.createFromText('让小萝北发布一篇稿件');
+  assert.equal(res.kind, 'task');
+  if (res.kind !== 'task') return;
+  assert.equal(res.autoQueued, false);
+  assert.equal(res.task.status, 'awaiting_confirmation');
+  assert.equal(res.task.source, 'feishu');
+});
+
 test('dedupe returns the same active task', async () => {
   const { service: svc } = service();
   const a = await svc.createFromText('让小萝北完成 2 条有效评论');

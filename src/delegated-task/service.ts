@@ -140,14 +140,27 @@ export class DelegatedTaskService {
   }
 
   async createFromText(text: string, opts?: { sourceRef?: string }): Promise<
-    | { kind: 'task'; task: DelegatedTask; confirmation: DelegatedTaskConfirmationSummary; created: boolean }
+    | { kind: 'task'; task: DelegatedTask; confirmation: DelegatedTaskConfirmationSummary; created: boolean; autoQueued: boolean }
     | { kind: 'control'; request: Extract<ParsedDelegatedRequest, { ok: true; kind: 'control' }> }
   > {
     const parsed = parseDelegatedText(text, { now: this.now(), source: 'feishu', sourceRef: opts?.sourceRef });
     if (!parsed.ok) throw new DelegatedTaskServiceError(parsed.code, parsed.message);
     if (parsed.kind === 'control') return { kind: 'control', request: parsed };
     const created = await this.createDraft({ ...parsed.intent, accountName: parsed.nickname });
-    return { kind: 'task', ...created };
+    // Precise legacy slash commands (/publish, /comment) resolve to a single explicit target with nothing
+    // left to disambiguate — the structured confirmation card would only add a redundant click, so we
+    // auto-confirm and queue directly. Natural-language goals (source 'feishu') still surface the
+    // confirmation card because account / target count / deadline / attempts were *inferred* from prose
+    // and can be misparsed; the card is the "did I understand you right" checkpoint. This does NOT weaken
+    // downstream human review: publish/comment keep approvalMode 'review', so the per-content 人审 card
+    // still fires before any platform write, and ambiguous-nickname resolution still fails closed.
+    if (parsed.intent.source === 'legacy_command') {
+      const task = created.task.status === 'awaiting_confirmation'
+        ? await this.confirm(created.task.id, created.task.version)
+        : created.task;
+      return { kind: 'task', task, confirmation: created.confirmation, created: created.created, autoQueued: true };
+    }
+    return { kind: 'task', ...created, autoQueued: false };
   }
 
   async createDraft(intent: DelegatedTaskIntent): Promise<{
