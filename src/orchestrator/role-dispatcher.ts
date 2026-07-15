@@ -1143,11 +1143,18 @@ export class RoleDispatcher {
     // 登录账号真实昵称采集：只由完整浏览器启动后的首批 page.cards{startupId} 触发。
     // hello / reconnect / session_start 都不再武装采集，避免冷待机云端恢复反复打断浏览器。
     // 采集体 + 其本人主页命令出口永久接线；真正采集由 startupId 去重和平台闸控制。
+    // 平台闸（change facebook-nickname-capture-timing）：时机统一到「首个 feed 卡片」这套、放宽到 XHS + Facebook；
+    // 读法按平台分叉——XHS 进本人主页读、Facebook 就地读（边端对 profile_open{direct} 就地读身份、不导航）。
+    // 未知平台仍 fail-open 放行（与既有语义一致）。
     this.nicknameEnricher = new NicknameEnricher({
       ...commonOptions,
       sessionContext: this.sessionContext,
       getAccountId: () => this.currentAccountId,
-      isCaptureEligible: () => this.isDispatchActive() && (!this.accountPlatform || this.accountPlatform === 'xiaohongshu'),
+      isCaptureEligible: () =>
+        this.isDispatchActive() &&
+        (!this.accountPlatform ||
+          this.accountPlatform === 'xiaohongshu' ||
+          this.accountPlatform === 'facebook'),
       getNickname: this.getNickname,
       ...(this.setNickname ? { setNickname: this.setNickname } : {}),
       setTimeoutFn: this.setTimeoutFn,

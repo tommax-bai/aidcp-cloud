@@ -156,6 +156,44 @@ describe('RoleDispatcher Integration', () => {
     dispatcher.endSession();
   });
 
+  it('facebook: 首批 page.cards{startupId} 武装本人昵称采集（profile_open direct）+ 本人 detail 差异写库（change facebook-nickname-capture-timing）', async () => {
+    const commands: EdgeCommand[] = [];
+    const setCalls: { accountId: string; nickname: string }[] = [];
+    const llm = createMockLlm([]);
+    const dispatcher = new RoleDispatcher({
+      soul: mockSoul,
+      llm,
+      sendCommand: (cmd) => commands.push(cmd),
+      accountPlatform: 'facebook',
+      getNickname: () => null,
+      setNickname: (accountId, nickname) => { setCalls.push({ accountId, nickname }); },
+    });
+    dispatcher.setCurrentAccountId('fb-acc');
+    dispatcher.setup();
+    dispatcher.startSession();
+
+    // 时机统一：FB 与 XHS 同样在「完整浏览器启动后首批 page.cards{startupId}」武装本人昵称采集。
+    dispatcher.bus.emit('page.cards.arrived', { cards: [], startupId: 'fb-startup-1', ts: Date.now() });
+    await new Promise((r) => setTimeout(r, 10));
+
+    const profileOpen = commands.find(
+      (c) => c.action === 'profile_open' && (c.params as { direct?: boolean } | undefined)?.direct === true,
+    );
+    assert.ok(profileOpen, 'FB 首批 page.cards{startupId} 应武装本人昵称采集、下发 profile_open{direct}');
+    assert.equal((profileOpen!.params as { authorId?: string }).authorId, 'fb-acc', 'direct 采集应指向本连接账号');
+
+    // 边缘就地读回本人 detail（authorId === 连接 accountId、非空昵称）→ 云端差异写库。
+    dispatcher.bus.emit('profile.detail.arrived', {
+      detail: { authorId: 'fb-acc', postsCount: 0, followersCount: 0, extracted: false, nickname: '真实FB昵称' },
+      accountId: 'fb-acc',
+      ts: Date.now(),
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(setCalls, [{ accountId: 'fb-acc', nickname: '真实FB昵称' }], 'FB 就地读回的非空昵称应差异写库');
+
+    dispatcher.endSession();
+  });
+
   // ─── back_to_feed 透传 sourcePageType → targetPage ───────────
 
   it('back_to_feed: feed.entered{pageType} 透传为 navigation.back{targetPage}（搜索会话回搜索结果）', async () => {
