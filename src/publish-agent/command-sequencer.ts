@@ -329,6 +329,10 @@ export class CommandSequencer {
     reason: string | undefined,
   ): PublishSequenceResult['outcome'] {
     if (submitted || submitDispatchedNow) return 'submitted_unconfirmed';
+    // yield_timeout（写者收到取消仍不停手＝控制面故障）：页面状态**未知**——卡死的写者可能仍会走完提交按下。
+    // MUST NOT 当作「提交前零副作用」的 preempted 去自动重投（否则卡死写者最终按下提交 → 双发）。按「已提交待确认」
+    // 终态处置（不重投、不烧稿），控制面回收 / 请运营重启客户端由边缘掉线侧信号驱动（spec 10.4）。
+    if (reason === 'yield_timeout') return 'submitted_unconfirmed';
     if (isPreemptionReason(reason)) return 'preempted';
     return 'failed_before_submit';
   }

@@ -382,11 +382,11 @@ describe('PublishDispatcher', () => {
     assert.equal(h.notices.some((n) => n.kind === 'preempted_exhausted'), false, '未达退避阈值');
   });
 
-  test('7.2 同稿连续被抢占达阈值 → 停自动重投 + 通知运营 preempted_exhausted（仍保持待审、绝不烧稿）', async () => {
+  test('7.2 同稿连续被抢占达阈值 → 停自动重投 + 作废授权 + 通知运营（仍保持待审、绝不烧稿；防 60s 扫描再捞起重投）', async () => {
     const h = harness({ approved: true, edgeId: 'edge-A', preemptRedispatchMax: 1, seqResult: { ok: false, outcome: 'preempted', attachedCount: 0, failedAt: { seq: 3, kind: 'fill_field', error: 'preempted_by_task' } } });
     await h.dispatcher.dispatch(7);
     assert.equal(h.statusUpdates.length, 0, '仍保持待审、绝不烧稿');
-    assert.deepEqual(h.voided, [], '仍保留授权');
+    assert.deepEqual(h.voided, ['publish-7'], '达阈值须作废授权：否则 60s 兜底扫描每轮再捞起爆一轮重投，退避形同虚设');
     assert.equal(h.redispatched.length, 0, '达阈值 → 不再调度自动重投');
     assert.equal(h.notices.some((n) => n.kind === 'preempted_exhausted'), true, '通知运营已停自动重投');
   });

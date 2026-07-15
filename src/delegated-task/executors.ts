@@ -103,6 +103,15 @@ function commentResult(result: CommentTerminalObservation | TargetedCommentResul
   if (result.outcome === 'verification_ambiguous') {
     return { kind: 'submitted_unknown', reason: result.reason ?? 'comment_submission_unverified' };
   }
+  // 7.6（change lease-strict-preemption）：XHS 提交已派发但未确认——与 FB 的 verification_ambiguous 同义：
+  // 评论可能已发出、去重账本已写 → MUST 终结为「已提交未知」、**绝不重试**（否则 worker 重入 → 重复评论，--force 更甚）。
+  if (result.outcome === 'submitted_unconfirmed') {
+    return { kind: 'submitted_unknown', reason: result.reason ?? 'comment_submitted_unconfirmed' };
+  }
+  // 提交前被抢占：未发出、未写去重 → 重试安全，但退避 30s（不立刻对着仍被占用的浏览器空转）。
+  if (result.outcome === 'preempted') {
+    return { kind: 'deferred', reason: result.reason ?? 'comment_preempted', retryAt: Date.now() + 30_000 };
+  }
   if (
     result.outcome === 'no_terms' || result.outcome === 'no_strong_candidate' || result.outcome === 'no_targets' ||
     result.outcome === 'compose_skipped' || result.outcome === 'shadow_ok' || result.outcome === 'note_not_found'

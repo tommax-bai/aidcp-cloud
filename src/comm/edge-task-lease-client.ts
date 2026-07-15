@@ -45,7 +45,11 @@ export class EdgeTaskLeaseError extends Error {
       /** 7.5：写者收到取消仍不停手＝控制面故障——**不可恢复**，通向人工重启浏览器客户端（§10.4），绝不自动重试。 */
       | 'yield_timeout',
     message: string,
-    /** `window_busy` 专用：持有者剩余提交窗口预算（毫秒），供调用方精确重排 acquire、不空转。 */
+    /**
+     * `window_busy` 专用：持有者剩余提交窗口预算（毫秒）。**保留字段，当前无消费者**——window_busy 的 acquire
+     * 失败今天走各调用方既有的「按计划下一轮重触发 / 有界退避」（非空转），尚未实装「按此值精确重排」。
+     * 精确重排消费者列入 change 延后清单（7.5 尾巴），落地时在此值上挂 setTimeout 重排 acquire。
+     */
     public readonly windowRemainingMs?: number,
   ) {
     super(message);

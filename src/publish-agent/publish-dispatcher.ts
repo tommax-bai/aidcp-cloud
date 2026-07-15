@@ -130,6 +130,8 @@ export class PublishDispatcher {
    * 同一稿连续被抢占达阈值 → 停自动重投 + 通知运营（仍保持待审、绝不烧稿）。成功/真失败终态即清零。
    */
   private readonly consecutivePreemptions = new Map<number, number>();
+  /** 7.3：已就「验证码硬暂停」通知过运维的 recordId——防 60s 兜底扫描每轮对同一暂停重复 ping 运维（只在进入暂停态时发一次）。 */
+  private readonly pausedNotified = new Set<number>();
 
   constructor(deps: PublishDispatcherDeps) {
     this.store = deps.store;
@@ -186,8 +188,12 @@ export class PublishDispatcher {
     this.consecutivePreemptions.set(recordId, n);
     if (n >= this.preemptRedispatchMax) {
       this.consecutivePreemptions.delete(recordId);
+      // 达阈值停自动重投：**作废本次授权签名**，否则草稿仍 pending_approval + 授权仍在 → 60s 兜底扫描每轮把它
+      // 重新捞起再爆一轮重投（退避形同虚设 + 反复 ping 运营），且「人工再批即恢复」的提示就成了空话。作废后
+      // 兜底扫描不再自动补投，运营重新批准才恢复——退避才真正生效。草稿仍 pending_approval、绝不烧成 failed。
+      void this.voidApprovalSignal(`publish-${recordId}`).catch(() => {});
       this.logger.warn(
-        `[PublishDispatcher] recordId=${recordId} 连续被抢占 ${n} 次 → 停自动重投、通知运营（保持待审、绝不烧稿；人工再批即恢复）`,
+        `[PublishDispatcher] recordId=${recordId} 连续被抢占 ${n} 次 → 停自动重投、作废授权、通知运营（保持待审、绝不烧稿；人工再批即恢复）`,
       );
       this.notifyOps({ kind: 'preempted_exhausted', accountId, recordId, title });
       return;
@@ -398,9 +404,16 @@ export class PublishDispatcher {
       this.logger.warn(
         `[PublishDispatcher] 账号 ${accountId} edge ${edgeId} 处于验证码硬暂停 → recordId=${recordId} 保持待审、不下发（零副作用、保留授权）`,
       );
-      this.notifyOps({ kind: 'edge_paused_requeued', accountId, recordId, title: draft.title });
+      // 只在**进入**暂停态时通知一次；60s 兜底扫描每轮重命中同一暂停不再重复 ping 运维。暂停解除后本记录下次
+      // 走到下方非暂停路径会清标记、重新武装。
+      if (!this.pausedNotified.has(recordId)) {
+        this.pausedNotified.add(recordId);
+        this.notifyOps({ kind: 'edge_paused_requeued', accountId, recordId, title: draft.title });
+      }
       return;
     }
+    // 非暂停路径：清「已通知暂停」标记（暂停已解除，重新武装下次暂停的一次性通知）。
+    this.pausedNotified.delete(recordId);
 
     let sequenceStarted = false;
     try {

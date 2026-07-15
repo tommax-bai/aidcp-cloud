@@ -352,6 +352,15 @@ describe('AC-PREEMPT 被抢占分档（change lease-strict-preemption 批 C：�
     assert.equal(seq.pendingCount, 0);
   });
 
+  it('AC-PREEMPT-8 yield_timeout（控制面故障）→ submitted_unconfirmed，绝不 preempted 自动重投（防卡死写者最终提交 → 双发）', async () => {
+    // 复核 HIGH-1：写者收到取消仍不停手＝页面状态未知（可能仍会走完提交）→ 按已提交待确认处置、绝不重投。
+    const { seq } = makeSequencer(() => null);
+    const p = seq.executePublishSequence(input({ tags: [] }));
+    seq.preemptTask('task-publish-1', 'yield_timeout');
+    const r = await p;
+    assert.equal(r.outcome, 'submitted_unconfirmed', 'yield_timeout MUST NOT 归 preempted（那会自动重投双发）');
+  });
+
   it('AC-PREEMPT-6 真实业务失败仍 failed_before_submit（no_target 非抢占，零回归）', async () => {
     const { seq } = makeSequencer((cmd) =>
       cmd.kind === 'fill_field' ? fail(cmd, { error: 'no_target' }) : okFor(cmd),
