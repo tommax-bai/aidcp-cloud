@@ -117,6 +117,21 @@ test('ui-snapshot: daily usage alone is enough to send hello snapshot', async ()
   });
 });
 
+test('ui-snapshot: 首作状态切换可单独即时推送 dailyUsage', async () => {
+  const dailyUsage: NonNullable<UiSnapshotPayload['dailyUsage']> = {
+    asOf: 1730000001000,
+    totals: { view: 7 },
+    firstPost: { state: 'generating', viewed: 7, target: 20, startedAt: 1730000000000, sourceId: 'note-1' },
+  };
+  const { service, sent } = makeService({ todayUsageForAccount: async () => dailyUsage });
+
+  await service.pushDailyUsage('acc-1');
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].edgeId, 'edge-1');
+  assert.deepEqual(sent[0].env.payload, { dailyUsage });
+});
+
 test('ui-snapshot: hello snapshot includes browser standby hint when available', async () => {
   const browserStandby: UiSnapshotPayload['browserStandby'] = {
     enabled: true,

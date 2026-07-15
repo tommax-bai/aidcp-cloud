@@ -24,6 +24,7 @@ import {
   type NoteOpenPayload,
   type PersonaGeneratePayload,
   type PersonaGenerateResultPayload,
+  type PersonaPersistResultPayload,
   type UiSnapshotPayload,
 } from '../../src/comm/protocol.js';
 
@@ -206,5 +207,29 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     const snap: UiSnapshotPayload = { publish: { state: 'submitted', title: '待链接确认的帖子', code: '#89' } };
     const back = parseEnvelope(JSON.stringify(makeEnvelope('ui.snapshot', 's-3', 1700000000000, snap)));
     assert.deepEqual((back!.payload as UiSnapshotPayload).publish, snap.publish);
+  });
+
+  it('AC-PROTO-14 首作引导标记与首轮进度可以在协议中往返', () => {
+    const result: PersonaPersistResultPayload = { ok: true, firstPostOnboarding: true };
+    const resultBack = parseEnvelope(
+      JSON.stringify(makeEnvelope('persona.persist.result', 's-4', 1700000000000, result)),
+    );
+    assert.equal((resultBack!.payload as PersonaPersistResultPayload).firstPostOnboarding, true);
+
+    const snap: UiSnapshotPayload = {
+      dailyUsage: {
+        asOf: 1700000000000,
+        totals: { view: 7 },
+        firstPost: {
+          state: 'generating',
+          viewed: 7,
+          target: 20,
+          startedAt: 1700000000000,
+          sourceId: 'note-1',
+        },
+      },
+    };
+    const snapBack = parseEnvelope(JSON.stringify(makeEnvelope('ui.snapshot', 's-5', 1700000000000, snap)));
+    assert.deepEqual((snapBack!.payload as UiSnapshotPayload).dailyUsage?.firstPost, snap.dailyUsage?.firstPost);
   });
 });

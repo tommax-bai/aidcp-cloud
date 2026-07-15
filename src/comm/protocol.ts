@@ -227,6 +227,17 @@ export interface UiDailyUsagePayload {
   quotas?: UiDailyUsageCounts;
   /** Backward-compatible alias for the day window saturated actions. */
   saturated?: UiDailyUsageAction[];
+  /**
+   * First-persona onboarding projection. Present only while the lifetime first-post
+   * flow is searching/generating; `target=20` is UI expectation, never a quota.
+   */
+  firstPost?: {
+    state: 'searching' | 'generating';
+    viewed: number;
+    target: 20;
+    startedAt: number;
+    sourceId?: string;
+  };
   windows?: Partial<Record<UiDailyUsageWindow, UiDailyUsageWindowStatus>>;
 }
 
@@ -627,6 +638,8 @@ export interface PersonaPersistPayload {
 export interface PersonaPersistResultPayload {
   ok: boolean;
   reason?: string;
+  /** true only when this persist created the account's lifetime first-post onboarding row. */
+  firstPostOnboarding?: boolean;
 }
 
 /**

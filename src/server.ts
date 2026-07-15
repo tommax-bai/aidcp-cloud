@@ -33,7 +33,9 @@ import { startRetentionSweeper } from './panel/retention-sweeper.js';
 import { shanghaiDayStartMs } from './time/shanghai-day.js';
 import { SimplePlanner } from './planner/index.js';
 import { PgAnchorCache, BotChatStore, GroupRouteStore, ConceptStore, LikedNoteStore, ValuableCommentStore, NotificationContactStore, InteractionFeedStore, CuratedContentStore, topicKeysFromTitle } from './cache/index.js';
-import type { CuratedReferenceImage, CuratedReferenceImageInput } from './cache/index.js';
+import type { CuratedReferenceImage, CuratedReferenceImageInput, CuratedSourceAdmission } from './cache/index.js';
+import { FirstPostOnboardingStore } from './onboarding/first-post-onboarding-store.js';
+import { FirstPostOnboardingCoordinator } from './onboarding/first-post-onboarding-coordinator.js';
 import { triggerGatedAutoComment } from './comment-agent/gated-auto-comment.js';
 import { resolveCuratedGateConfig } from './publish-agent/curated-gate.js';
 import {
@@ -745,6 +747,10 @@ async function main(): Promise<void> {
   } catch (err) {
     console.warn('[aidcp-cloud] PublishLogStore 初始化失败:', (err as Error).message);
   }
+  // 晚绑定：精选存储在发布调度器与首作状态存储之前构造，回调运行时两者已完成装配。
+  let publishScheduler: PublishScheduler | undefined;
+  let firstPostCoordinator: FirstPostOnboardingCoordinator | undefined;
+  let uiSnapshot: UiSnapshotService | undefined;
 
   // 点赞笔记存储（liked_notes 表，发帖来源血缘）。init 失败留 undefined（血缘退化、不阻塞启动）。
   let likedNoteStore: LikedNoteStore | undefined;
@@ -841,6 +847,7 @@ async function main(): Promise<void> {
       user: readEnvString('PGUSER'),
       password: readEnvString('PGPASSWORD'),
       ...(ossUploader ? { referenceImageRelocator: createCuratedReferenceImageRelocator(ossUploader) } : {}),
+      onSourceAdmitted: (source: CuratedSourceAdmission) => firstPostCoordinator?.onSourceAdmitted(source),
       logger: console,
     });
     await ccs.init();
@@ -1034,6 +1041,33 @@ async function main(): Promise<void> {
       '[aidcp-cloud] 人设存储初始化失败 → 所有账号视为未绑人设、入口闸诚实拒绝运行（fail-closed，绝不回落默认人设）:',
       (err as Error).message,
     );
+  }
+  // 首作新人状态（change persona-first-post-onboarding）：账号首次绑定时只建一次，后续解绑/更新不重置。
+  // 存储不可用时不展示带自动生成承诺的引导；普通人设/浏览/发布链继续按既有逻辑工作。
+  let firstPostOnboardingStore: FirstPostOnboardingStore | undefined;
+  try {
+    const store = new FirstPostOnboardingStore({
+      host: readEnvString('PGHOST'),
+      port: readEnvPort('PGPORT'),
+      database: readEnvString('PGDATABASE'),
+      user: readEnvString('PGUSER'),
+      password: readEnvString('PGPASSWORD'),
+    });
+    await store.init();
+    firstPostOnboardingStore = store;
+    firstPostCoordinator = new FirstPostOnboardingCoordinator({
+      store,
+      countPendingForAccount: (accountId) => publishLogStore.countPendingForAccount(accountId),
+      beginRewrite: (accountId, referenceNote, options) => {
+        if (!publishScheduler) throw new Error('publish_unready');
+        return publishScheduler.tryBeginRewrite(accountId, referenceNote, options);
+      },
+      onStateChanged: (accountId) => uiSnapshot?.pushDailyUsage(accountId),
+      logger: console,
+    });
+    console.log('[aidcp-cloud] FirstPostOnboardingStore 已就绪（首次人设 → 首条精选 → 参照创作）');
+  } catch (err) {
+    console.warn('[aidcp-cloud] 首作新人状态初始化失败，首次作品自动生成链路禁用:', (err as Error).message);
   }
   // 按账号解析人设的取值口（派发 / 发布热路径用；永不抛）。persona-driven-content-pipeline：
   // 无人设/解析失败 → resolvePersona 返回 null（明确「无人设」信号）；浏览/发布/评论入口闸
@@ -1276,8 +1310,7 @@ async function main(): Promise<void> {
     console.log('[aidcp-cloud] PacingSaturationAlerter 已就绪（撞突发窗 → 低优先级运维告警）');
   }
 
-  // A 阶段4 发帖触发器（下方实例化；actions.publish 运行时引用，前向安全）。
-  let publishScheduler: PublishScheduler | undefined;
+  // A 阶段4 发帖触发器已在发布日志之后前向声明；actions.publish / 首作精选回调运行时引用。
   // 按需评论触发器（change comment-search-command；下方实例化，actions.comment 运行时引用，前向安全）。
   let commentScheduler: CommentScheduler | undefined;
   /**
@@ -1562,6 +1595,17 @@ async function main(): Promise<void> {
     // 建号自助人设（change edge-persona-keyword-generation）：persona.generate 生成器 + persona.persist 复用写入外观。
     personaGenerator,
     personaFacade: personaPanel,
+    firstPostOnboarding: firstPostOnboardingStore
+      ? {
+          armFirstBind: async (accountId) => {
+            // 只有精选入口与既有参照创作调度器都就绪，才向客户端承诺这条自动首作链。
+            if (!curatedContentStore || !publishScheduler) return false;
+            const created = await firstPostOnboardingStore!.armFirstBind(accountId);
+            if (created) void uiSnapshot?.pushDailyUsage(accountId);
+            return created;
+          },
+        }
+      : undefined,
     // 该函数声明在下方审批装配段；用闭包延迟取值，避免 handler 初始化时触发 TDZ。
     publishApprovalAction: (payload, session) => handlePublishApprovalAction(payload, session),
     publishDraftImageRemove: (payload, session) => handlePublishDraftImageRemove(payload, session),
@@ -1574,7 +1618,6 @@ async function main(): Promise<void> {
     pacingFloors: pacingConfigStore,
   });
   // 陪伴界面快照层（edge-companion-ui 8.1）：前向引用（服务实例在 server 起后构造，同 pusher 闭包模式）。
-  let uiSnapshot: UiSnapshotService | undefined;
   const server = new EdgeCloudServer({
     port,
     handler,
@@ -1682,6 +1725,26 @@ async function main(): Promise<void> {
     };
 
     const payload: UiDailyUsagePayload = { asOf, totals: dayTotals, windows };
+    if (firstPostOnboardingStore) {
+      try {
+        const firstPost = await firstPostOnboardingStore.get(accountId);
+        if (firstPost && (firstPost.state === 'searching' || firstPost.state === 'generating')) {
+          const sinceTotals = await riskStore.totalsForAccountSince(accountId, firstPost.startedAt);
+          const viewed = Number.isFinite(sinceTotals.view) ? Math.max(0, Math.floor(Number(sinceTotals.view))) : 0;
+          payload.firstPost = {
+            state: firstPost.state,
+            viewed,
+            target: 20,
+            startedAt: firstPost.startedAt,
+            ...(firstPost.sourceId ? { sourceId: firstPost.sourceId } : {}),
+          };
+        }
+      } catch (err) {
+        console.warn(
+          `[aidcp-cloud] first-post usage read failed account=${accountId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
     try {
       const controller = await riskRegistry.getController(accountId);
       const effective = controller.effectiveQuotas();

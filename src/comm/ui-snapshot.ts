@@ -171,6 +171,26 @@ export class UiSnapshotService {
     }
   }
 
+  /**
+   * Push only the current usage projection after an onboarding state transition.
+   * This keeps the first-post `searching → generating → generated(absent)` UI timely
+   * without restarting the hello refresh chain or fabricating renderer-local facts.
+   */
+  async pushDailyUsage(accountId: string, edgeId?: string): Promise<void> {
+    try {
+      if (!accountId || !this.deps.todayUsageForAccount) return;
+      const target = edgeId ?? this.deps.resolveEdgeIdForAccount(accountId);
+      if (!target) return;
+      const dailyUsage = await this.deps.todayUsageForAccount(accountId, target).catch(() => null);
+      if (!dailyUsage) return;
+      this.push(accountId, target, { dailyUsage }, 'dailyUsage');
+    } catch (err) {
+      this.logger.warn(
+        `[ui-snapshot] dailyUsage 推送异常 account=${accountId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   /** 发布审批状态实时推送。账号无在线边缘时如实放弃（持久态由下次 hello 快照补）。 */
   pushPublishState(accountId: string, recordId: number, state: PublishUiState, title?: string | null): void {
     try {

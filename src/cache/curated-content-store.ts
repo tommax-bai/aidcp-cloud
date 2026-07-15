@@ -125,6 +125,19 @@ export interface CuratedActionContent {
   referenceImages?: CuratedReferenceImageInput[];
 }
 
+/** Successful non-empty source admission, used by the first-post onboarding trigger. */
+export interface CuratedSourceAdmission {
+  accountId: string;
+  contentType: CuratedSourceContentType;
+  sourceId: string;
+  title?: string;
+  body: string;
+  author?: string;
+  sourceUrl?: string;
+  topics: string[];
+  referenceImages: CuratedReferenceImage[];
+}
+
 /** 召回给创作侧的一条灵感。 */
 export interface CuratedSelectItem {
   sourceId: string;
@@ -197,6 +210,8 @@ export interface CuratedContentStoreOptions {
   retentionMax?: number;
   referenceImageLimit?: number;
   referenceImageRelocator?: CuratedReferenceImageRelocator;
+  /** Best-effort callback after a non-empty image/video source is durably admitted. */
+  onSourceAdmitted?: (source: CuratedSourceAdmission) => void | Promise<void>;
   logger?: Pick<Console, 'warn'>;
 }
 
@@ -509,12 +524,14 @@ export class CuratedContentStore {
   private readonly retentionMax: number;
   private readonly referenceImageLimit: number;
   private readonly referenceImageRelocator?: CuratedReferenceImageRelocator;
+  private readonly onSourceAdmitted?: (source: CuratedSourceAdmission) => void | Promise<void>;
   private readonly logger?: Pick<Console, 'warn'>;
 
   constructor(options: CuratedContentStoreOptions = {}) {
     this.retentionMax = options.retentionMax ?? 1000;
     this.referenceImageLimit = clampReferenceImageLimit(options.referenceImageLimit);
     this.referenceImageRelocator = options.referenceImageRelocator;
+    this.onSourceAdmitted = options.onSourceAdmitted;
     this.logger = options.logger;
     this.pool =
       options.pool ??
@@ -546,6 +563,17 @@ export class CuratedContentStore {
     } catch (err) {
       this.logger?.warn?.(`[CuratedContentStore] reference image relocation failed: ${(err as Error).message}`);
       return normalized;
+    }
+  }
+
+  private notifySourceAdmitted(source: CuratedSourceAdmission): void {
+    if (!this.onSourceAdmitted) return;
+    try {
+      void Promise.resolve(this.onSourceAdmitted(source)).catch((err) => {
+        this.logger?.warn?.(`[CuratedContentStore] source admission callback failed: ${(err as Error).message}`);
+      });
+    } catch (err) {
+      this.logger?.warn?.(`[CuratedContentStore] source admission callback failed: ${(err as Error).message}`);
     }
   }
 
@@ -604,6 +632,19 @@ export class CuratedContentStore {
       ],
     );
     await this.trimToRetention(obs.accountId);
+    if (obs.contentType === 'image_text' || obs.contentType === 'video') {
+      this.notifySourceAdmitted({
+        accountId: obs.accountId,
+        contentType: obs.contentType,
+        sourceId: obs.sourceId,
+        ...(obs.title ? { title: obs.title } : {}),
+        body,
+        ...(obs.author ? { author: obs.author } : {}),
+        ...(obs.sourceUrl ? { sourceUrl: obs.sourceUrl } : {}),
+        topics: obs.topics,
+        referenceImages,
+      });
+    }
   }
 
   async refreshReferenceImages(
@@ -793,6 +834,17 @@ export class CuratedContentStore {
         'bot_collect',
       ],
     );
+    this.notifySourceAdmitted({
+      accountId,
+      contentType: mediaType,
+      sourceId,
+      ...(content?.title ? { title: content.title } : {}),
+      body,
+      ...(content?.author ? { author: content.author } : {}),
+      ...(content?.sourceUrl ? { sourceUrl: content.sourceUrl } : {}),
+      topics: content?.topics ?? [],
+      referenceImages,
+    });
   }
 
   /**

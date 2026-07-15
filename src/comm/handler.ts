@@ -159,6 +159,12 @@ export interface HandlerDeps {
    * 未注入 → persona.persist 诚实回 { ok:false, reason:'unavailable' }（向后兼容）。
    */
   personaFacade?: Pick<PanelPersonaConfig, 'setPersona'>;
+  /**
+   * Durable first-post onboarding state. `armFirstBind` returns true only when this
+   * persist created the account's lifetime row; unavailable storage disables the
+   * promise instead of showing a UI whose automatic follow-up cannot run.
+   */
+  firstPostOnboarding?: { armFirstBind(accountId: string): Promise<boolean> };
   /** 客户端稿件预览内的发布/取消审批动作。未注入则诚实返回 unavailable。 */
   publishApprovalAction?: (
     payload: PublishApprovalActionPayload,
@@ -697,11 +703,21 @@ export class DefaultMessageHandler implements MessageHandler {
       p.soulYaml ?? '',
       `edge-onboarding:${session.accountId}`,
     );
+    let firstPostOnboarding = false;
+    if (result.ok && this.deps.firstPostOnboarding) {
+      try {
+        firstPostOnboarding = await this.deps.firstPostOnboarding.armFirstBind(session.accountId);
+      } catch (err) {
+        // Persona persistence already succeeded. Do not roll it back, but also do
+        // not promise an automatic first-post flow whose durable state was not armed.
+        this.logger.warn(`[persona] 首作引导状态建立失败 account=${session.accountId}: ${(err as Error).message}`);
+      }
+    }
     return makeEnvelope(
       'persona.persist.result',
       env.id,
       this.clock(),
-      result.ok ? { ok: true } : { ok: false, reason: result.reason },
+      result.ok ? { ok: true, firstPostOnboarding } : { ok: false, reason: result.reason },
     );
   }
 

@@ -201,4 +201,35 @@ describe('handler persona.generate 幂等去重', () => {
     assert.equal((r?.payload as { reason?: string }).reason, 'unknown_account');
     assert.equal(calls, 0);
   });
+
+  it('persona.persist 只在账号首次建立持久首作状态时返回一次性引导标记', async () => {
+    let armCalls = 0;
+    const handler = new DefaultMessageHandler({
+      planner: { plan: async () => ({ steps: [], reason: '' }) } as never,
+      llm: { complete: async () => '' } as never,
+      cache: {
+        get: async () => null,
+        recordHit: async () => {},
+        recordFailure: async () => {},
+        stage: async () => {},
+        confirmStaged: async () => ({ promoted: false, successes: 0, needed: 0 }),
+        dropStaged: async () => {},
+      } as never,
+      eventBus: { emit: () => {}, on: () => {} } as never,
+      personaFacade: { setPersona: async () => ({ ok: true }) } as never,
+      firstPostOnboarding: { armFirstBind: async () => (++armCalls === 1) },
+    });
+    const session = { accountId: 'acc-1', edgeId: 'edge-1' } as never;
+    const first = await handler.handle(
+      makeEnvelope('persona.persist', 'persist-1', 1700000000000, { accountId: 'acc-1', soulYaml: 'identity: {}' }),
+      session,
+    );
+    const update = await handler.handle(
+      makeEnvelope('persona.persist', 'persist-2', 1700000000001, { accountId: 'acc-1', soulYaml: 'identity: {}' }),
+      session,
+    );
+
+    assert.deepEqual(first?.payload, { ok: true, firstPostOnboarding: true });
+    assert.deepEqual(update?.payload, { ok: true, firstPostOnboarding: false });
+  });
 });

@@ -84,6 +84,32 @@ test('upsertObservation：INSERT...ON CONFLICT DO UPDATE，含 dedup_key、不�
   assert.equal(params[13], 'high_quality');
 });
 
+test('非空源帖进入精选后回调首作链路；评论与空正文不触发', async () => {
+  const { pool } = capturingPool();
+  const admitted: unknown[] = [];
+  const store = new CuratedContentStore({
+    pool,
+    onSourceAdmitted: (source) => { admitted.push(source); },
+  });
+
+  await store.upsertObservation(baseObs);
+  await store.upsertObservation({ ...baseObs, contentType: 'comment', sourceId: 'comment-1' });
+  await store.upsertObservation({ ...baseObs, sourceId: 'empty-1', body: '   ' });
+
+  assert.equal(admitted.length, 1);
+  assert.deepEqual(admitted[0], {
+    accountId: 'acc-1',
+    contentType: 'image_text',
+    sourceId: 'note-9',
+    title: '标题',
+    body: '正文内容',
+    author: '作者甲',
+    sourceUrl: 'https://x/explore/note-9?xsec_token=t',
+    topics: ['ai', '编程'],
+    referenceImages: [],
+  });
+});
+
 test('reference images are normalized, deduped, relocated, and stored as JSONB', async () => {
   const { pool, calls } = capturingPool();
   const relocatedInputs: unknown[] = [];
