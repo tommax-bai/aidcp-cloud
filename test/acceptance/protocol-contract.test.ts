@@ -26,6 +26,8 @@ import {
   type PersonaGenerateResultPayload,
   type PersonaPersistResultPayload,
   type UiSnapshotPayload,
+  type EdgeTaskReleasedPayload,
+  type PublishCommandResultPayload,
 } from '../../src/comm/protocol.js';
 
 /**
@@ -231,5 +233,30 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     };
     const snapBack = parseEnvelope(JSON.stringify(makeEnvelope('ui.snapshot', 's-5', 1700000000000, snap)));
     assert.deepEqual((snapBack!.payload as UiSnapshotPayload).dailyUsage?.firstPost, snap.dailyUsage?.firstPost);
+  });
+
+  it('AC-PROTO-15 edge.task.released 抢占类原因字符串往返存活（裸值，typecheck 抓不到两端漂移）', () => {
+    // 三个新增释放原因是裸联合字符串，两端 protocol.ts 各写一份、typecheck 不跨端校验
+    // → 手写往返把值焊死；任一端漏改/拼错，该端本断言即红（change lease-strict-preemption 6.4）。
+    for (const reason of ['preempted_by_task', 'window_busy', 'yield_timeout'] as const) {
+      const payload: EdgeTaskReleasedPayload = { taskId: 't-14', reason };
+      const back = parseEnvelope(JSON.stringify(makeEnvelope('edge.task.released', 'r-14', 1700000000000, payload)));
+      assert.equal((back!.payload as EdgeTaskReleasedPayload).reason, reason);
+    }
+    // window_busy 专用剩余预算字段随包往返存活——「不让抢占者空等」的事实源。
+    const busy: EdgeTaskReleasedPayload = { taskId: 't-14b', reason: 'window_busy', windowRemainingMs: 8_500 };
+    const back = parseEnvelope(JSON.stringify(makeEnvelope('edge.task.released', 'r-14b', 1700000000000, busy)));
+    assert.equal((back!.payload as EdgeTaskReleasedPayload).windowRemainingMs, 8_500);
+  });
+
+  it('AC-PROTO-16 publish.command.result 已派发提交位往返存活（区分「已点未确认」与「压根没点」）', () => {
+    // 已派发但未确认：ok=false 且 submitDispatched=true → 云端必须按「已提交待确认」处置、绝不烧 failed。
+    const dispatched: PublishCommandResultPayload = { recordId: 1, seq: 2, kind: 'submit_publish', ok: false, submitDispatched: true };
+    const back = parseEnvelope(JSON.stringify(makeEnvelope('publish.command.result', 'p-15', 1700000000000, dispatched)));
+    assert.equal((back!.payload as PublishCommandResultPayload).submitDispatched, true);
+    // 压根没点：字段缺省 → undefined，往返后仍不出现（云端据此判提交前失败可安全重投）。
+    const notDispatched: PublishCommandResultPayload = { recordId: 1, seq: 3, kind: 'submit_publish', ok: false };
+    const back2 = parseEnvelope(JSON.stringify(makeEnvelope('publish.command.result', 'p-15b', 1700000000000, notDispatched)));
+    assert.equal((back2!.payload as PublishCommandResultPayload).submitDispatched, undefined);
   });
 });
