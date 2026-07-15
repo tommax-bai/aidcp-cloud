@@ -34,15 +34,6 @@ function makeFakeStore(): {
     async listEnvScope(userId: string) {
       return scope.get(userId) ?? [];
     },
-    async attachEnv(userId: string, envKey: string, label: string | null, platform: string | null) {
-      if (!envKey.trim()) return { ok: false as const, reason: 'invalid_env' as const };
-      const list = scope.get(userId) ?? [];
-      if (!list.some((s) => s.envKey === envKey)) {
-        list.push({ envKey, label, platform, source: 'client', assignedAt: 0 });
-      }
-      scope.set(userId, list);
-      return { ok: true as const };
-    },
   };
   return { store: fake as unknown as ClientUserStore, users, scope };
 }
@@ -182,9 +173,11 @@ test('N3: 登录后被停用,下次请求即 401 disabled', async () => {
   );
 });
 
-test('POST /environments 自动归属当前客户,随即出现在 /my-environments', async () => {
+test('客户 A 不得通过 POST /environments attach 或读取客户 B 的环境', async () => {
   const fx = makeFakeStore();
-  fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
+  fx.users.set('alice', { userId: 'user-a', key: 'ck_alice', status: 'enabled' });
+  fx.users.set('bob', { userId: 'user-b', key: 'ck_bob', status: 'enabled' });
+  fx.scope.set('user-b', [{ envKey: 'env-b', label: 'Bob 环境', platform: 'wechat_channels', source: 'admin', assignedAt: 0 }]);
   await withServer(
     { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter() },
     baseConfig(0),
@@ -193,19 +186,22 @@ test('POST /environments 自动归属当前客户,随即出现在 /my-environmen
         await fetch(`${base}/login`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ name: 'acme', key: 'ck_secret' }),
+          body: JSON.stringify({ name: 'alice', key: 'ck_alice' }),
         })
       ).json();
       const token = (login as { token: string }).token;
       const add = await fetch(`${base}/environments`, {
         method: 'POST',
         headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ envKey: 'p9', label: '新环境', platform: 'facebook' }),
+        body: JSON.stringify({ envKey: 'env-b', label: '伪造环境', platform: 'wechat_channels' }),
       });
-      assert.equal(add.status, 200);
+      assert.equal(add.status, 403);
+      assert.deepEqual(await add.json(), { error: 'forbidden', reason: 'environment_assignment_admin_only' });
       const r = await fetch(`${base}/my-environments`, { headers: { authorization: `Bearer ${token}` } });
       const { environments } = (await r.json()) as { environments: { envKey: string }[] };
-      assert.deepEqual(environments.map((e) => e.envKey), ['p9']);
+      assert.deepEqual(environments, []);
+      assert.deepEqual(fx.scope.get('user-a'), undefined);
+      assert.deepEqual(fx.scope.get('user-b')?.map((e) => e.envKey), ['env-b']);
     },
   );
 });

@@ -3,7 +3,7 @@
  *
  * 与内部运营 console 的登录体系**物理隔离**：独立表、独立密钥（见 client-auth-server）。承载：
  *  - `client_users`：客户身份（name 唯一、key 以 scrypt+盐 hash、启用状态、轮换时间）。
- *  - `client_env_scope`：客户可见环境的**显式归属**（fail-closed：未归属环境不属于任何客户）。
+ *  - `client_env_scope`：由内部管理员授予的客户↔环境归属（fail-closed + 每环境全局唯一 active owner）。
  *    env_key = 环境 profileId（AdsPower 分身 id；edge 本地即知、云端见为 edgeId=ads-<profileId>），
  *    刻意**不加 FK 到 accounts**（避免与账号单写者 / ensureAccount 时序耦合）。label/platform 冗余以便后台展示。
  *
@@ -56,6 +56,55 @@ CREATE TABLE IF NOT EXISTS client_environments (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS client_env_scope_audit (
+  audit_id     BIGSERIAL   PRIMARY KEY,
+  user_id      TEXT        NOT NULL,
+  env_key      TEXT        NOT NULL,
+  label        TEXT,
+  platform     TEXT,
+  source       TEXT        NOT NULL CHECK (source IN ('admin','client')),
+  assigned_by  TEXT,
+  assigned_at  TIMESTAMPTZ NOT NULL,
+  revoked_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  revoked_by   TEXT,
+  reason       TEXT        NOT NULL CHECK (reason IN ('legacy_self_claim','scope_replaced')),
+  UNIQUE (user_id, env_key, assigned_at, reason)
+);
+CREATE INDEX IF NOT EXISTS client_env_scope_audit_scope_idx
+  ON client_env_scope_audit (user_id, env_key, revoked_at DESC);
+DO $$
+BEGIN
+  LOCK TABLE client_env_scope IN SHARE ROW EXCLUSIVE MODE;
+  INSERT INTO client_environments (env_key, label, platform, source, created_at, updated_at)
+  SELECT DISTINCT ON (env_key) env_key, label, platform, 'import', assigned_at, now()
+  FROM client_env_scope
+  ORDER BY env_key, assigned_at DESC
+  ON CONFLICT (env_key) DO UPDATE
+    SET label = COALESCE(client_environments.label, EXCLUDED.label),
+        platform = COALESCE(client_environments.platform, EXCLUDED.platform),
+        updated_at = now();
+  INSERT INTO client_env_scope_audit
+    (user_id, env_key, label, platform, source, assigned_by, assigned_at, revoked_at, revoked_by, reason)
+  SELECT user_id, env_key, label, platform, source, assigned_by, assigned_at,
+         now(), 'schema:init', 'legacy_self_claim'
+  FROM client_env_scope WHERE source = 'client'
+  ON CONFLICT (user_id, env_key, assigned_at, reason) DO NOTHING;
+  DELETE FROM client_env_scope WHERE source = 'client';
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'client_env_scope'::regclass
+      AND conname = 'client_env_scope_authoritative_source'
+  ) THEN
+    ALTER TABLE client_env_scope
+      ADD CONSTRAINT client_env_scope_authoritative_source
+      CHECK (source = 'admin') NOT VALID;
+  END IF;
+END $$;
+ALTER TABLE client_env_scope VALIDATE CONSTRAINT client_env_scope_authoritative_source;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_client_env_scope_active_env
+  ON client_env_scope (env_key);
+CREATE INDEX IF NOT EXISTS client_env_scope_active_user_idx
+  ON client_env_scope (user_id, assigned_at);
 `;
 
 /** 客户视图（管理端读；**绝不含 key/hash/salt**）。 */
@@ -103,6 +152,14 @@ export type CreateUserResult =
 export type RotateKeyResult = { ok: true; plainKey: string } | { ok: false; reason: 'not_found' };
 
 export type MutateUserResult = { ok: true; user: ClientUserView } | { ok: false; reason: 'not_found' | 'invalid_name' | 'name_taken' };
+
+export type SetScopeResult =
+  | { ok: true; scope: ClientEnvScopeRow[] }
+  | { ok: false; reason: 'not_found' | 'unknown_environment' | 'env_already_assigned'; envKey?: string };
+
+export type InteractionScopeAuthorization<T> =
+  | { ok: true; accountId: string; value: T }
+  | { ok: false; reason: 'disabled' | 'not_authorized' };
 
 function isMissingTable(err: unknown): boolean {
   return (err as { code?: string })?.code === '42P01';
@@ -169,7 +226,7 @@ export class ClientUserStore {
     }
   }
 
-  /** 某客户可见环境清单（**唯一吃 userId 的 scoped 读**，N2）；缺表 → 空。 */
+  /** 某客户可见环境清单。只返回内部管理员授予且未撤销的权威归属；缺表 → 空。 */
   async listEnvScope(userId: string): Promise<ClientEnvScopeRow[]> {
     try {
       const { rows } = await this.pool.query<{
@@ -180,14 +237,16 @@ export class ClientUserStore {
         assigned_at: Date;
       }>(
         `SELECT env_key, label, platform, source, assigned_at
-         FROM client_env_scope WHERE user_id = $1 ORDER BY assigned_at ASC`,
+         FROM client_env_scope
+         WHERE user_id = $1 AND source = 'admin'
+         ORDER BY assigned_at ASC`,
         [userId],
       );
       return rows.map((r) => ({
         envKey: r.env_key,
         label: r.label,
         platform: r.platform,
-        source: r.source === 'client' ? 'client' : 'admin',
+        source: 'admin',
         assignedAt: r.assigned_at.getTime(),
       }));
     } catch (err) {
@@ -206,7 +265,9 @@ export class ClientUserStore {
     try {
       const { rows } = await this.pool.query<{ owned: boolean }>(
         `SELECT EXISTS (
-           SELECT 1 FROM client_env_scope WHERE user_id = $1 AND env_key = $2
+           SELECT 1 FROM client_env_scope
+           WHERE user_id = $1 AND env_key = $2
+             AND source = 'admin'
          ) AS owned`,
         [userId, key],
       );
@@ -218,26 +279,56 @@ export class ClientUserStore {
   }
 
   /**
-   * 客户端登录态新建/添加环境 → 自动归属当前客户（source=client；UPSERT，刷新 label/platform）。
-   * 只写自己 userId 的行,天然不越权。
+   * 在一个数据库事务和共享锁范围内校验客户 interaction 请求的完整边界：
+   * enabled user + active authoritative env ownership + env/account/platform binding。
+   * operation 在锁仍持有时执行，避免启停、换归属或账号重绑发生 TOCTOU。
    */
-  async attachEnv(
+  async withAuthorizedInteractionScope<T>(
     userId: string,
     envKey: string,
-    label: string | null,
-    platform: string | null,
-  ): Promise<{ ok: true } | { ok: false; reason: 'invalid_env' }> {
+    operation: (scope: { accountId: string }) => Promise<T>,
+  ): Promise<InteractionScopeAuthorization<T>> {
     const key = (envKey ?? '').trim();
-    if (!key) return { ok: false, reason: 'invalid_env' };
-    await this.pool.query(
-      `INSERT INTO client_env_scope (user_id, env_key, label, platform, source, assigned_by, assigned_at)
-       VALUES ($1, $2, $3, $4, 'client', $1, now())
-       ON CONFLICT (user_id, env_key) DO UPDATE
-       SET label = COALESCE(EXCLUDED.label, client_env_scope.label),
-           platform = COALESCE(EXCLUDED.platform, client_env_scope.platform)`,
-      [userId, key, (label ?? '').trim() || null, (platform ?? '').trim() || null],
-    );
-    return { ok: true };
+    if (!userId || !key) return { ok: false, reason: 'not_authorized' };
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const user = await client.query<{ status: string }>(
+        `SELECT status FROM client_users WHERE user_id = $1 FOR SHARE`,
+        [userId],
+      );
+      if (user.rows[0]?.status !== 'enabled') {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'disabled' };
+      }
+      const binding = await client.query<{ account_id: string }>(
+        `SELECT a.account_id
+         FROM client_env_scope s
+         JOIN client_environments e ON e.env_key = s.env_key
+         JOIN interaction_auth_state a
+           ON a.env_key = s.env_key AND a.platform = e.platform
+         JOIN accounts acc
+           ON acc.account_id = a.account_id AND acc.platform = a.platform
+         WHERE s.user_id = $1 AND s.env_key = $2
+           AND s.source = 'admin'
+         FOR SHARE OF s, e, a, acc`,
+        [userId, key],
+      );
+      const accountId = binding.rows[0]?.account_id;
+      if (!accountId) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'not_authorized' };
+      }
+      const value = await operation({ accountId });
+      await client.query('COMMIT');
+      return { ok: true, accountId, value };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      if (isMissingTable(err)) return { ok: false, reason: 'not_authorized' };
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   // ── 管理侧（供 panel /api/client-users*；受内部 JWT）────────────────────
@@ -253,7 +344,8 @@ export class ClientUserStore {
       env_count: string;
     }>(
       `SELECT u.user_id, u.name, u.status, u.rotated_at, u.created_at, u.updated_at,
-              (SELECT count(*) FROM client_env_scope s WHERE s.user_id = u.user_id) AS env_count
+              (SELECT count(*) FROM client_env_scope s
+               WHERE s.user_id = u.user_id AND s.source = 'admin') AS env_count
        FROM client_users u WHERE u.user_id = $1`,
       [userId],
     );
@@ -429,7 +521,8 @@ export class ClientUserStore {
                   FILTER (WHERE u.user_id IS NOT NULL) AS assignees
          FROM keys k
          LEFT JOIN client_environments e ON e.env_key = k.env_key
-         LEFT JOIN client_env_scope s ON s.env_key = k.env_key
+         LEFT JOIN client_env_scope s
+           ON s.env_key = k.env_key AND s.source = 'admin'
          LEFT JOIN client_users u ON u.user_id = s.user_id
          GROUP BY k.env_key
          ORDER BY k.env_key ASC`,
@@ -451,34 +544,87 @@ export class ClientUserStore {
   }
 
   /**
-   * 整批替换某客户归属（管理端；事务 delete+insert，绝不部分落库）。
-   * items 为 {envKey,label?,platform?} 列表;source 标 admin。
+   * 整批替换某客户归属。只接受权威注册表已有环境；label/platform 从注册表读取，
+   * 不信任调用者提交的元数据。事务锁住 user + registry + active grants，保证一个环境
+   * 只有一个 active owner，且不会与客户 interaction 请求发生 TOCTOU。
    */
   async setScope(
     userId: string,
     items: { envKey: string; label?: string | null; platform?: string | null }[],
     assignedBy: string | null,
-  ): Promise<{ ok: true; scope: ClientEnvScopeRow[] } | { ok: false; reason: 'not_found' }> {
-    const exists = await this.pool.query(`SELECT 1 FROM client_users WHERE user_id = $1`, [userId]);
-    if (exists.rows.length === 0) return { ok: false, reason: 'not_found' };
+  ): Promise<SetScopeResult> {
     const seen = new Set<string>();
     const clean = items
-      .map((i) => ({ envKey: (i.envKey ?? '').trim(), label: (i.label ?? '')?.toString().trim() || null, platform: (i.platform ?? '')?.toString().trim() || null }))
-      .filter((i) => i.envKey && !seen.has(i.envKey) && (seen.add(i.envKey), true));
+      .map((i) => (i.envKey ?? '').trim())
+      .filter((envKey) => envKey && !seen.has(envKey) && (seen.add(envKey), true))
+      .sort();
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query(`DELETE FROM client_env_scope WHERE user_id = $1`, [userId]);
-      for (const i of clean) {
+      const user = await client.query(`SELECT 1 FROM client_users WHERE user_id = $1 FOR UPDATE`, [userId]);
+      if (user.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'not_found' };
+      }
+      const registered = clean.length
+        ? await client.query<{ env_key: string; label: string | null; platform: string | null }>(
+            `SELECT env_key, label, platform FROM client_environments
+             WHERE env_key = ANY($1::text[]) ORDER BY env_key FOR UPDATE`,
+            [clean],
+          )
+        : { rows: [] };
+      const registeredByKey = new Map(registered.rows.map((row) => [row.env_key, row]));
+      const unknown = clean.find((envKey) => !registeredByKey.has(envKey));
+      if (unknown) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'unknown_environment', envKey: unknown };
+      }
+      if (clean.length) {
+        const conflict = await client.query<{ env_key: string }>(
+          `SELECT env_key FROM client_env_scope
+           WHERE env_key = ANY($1::text[]) AND user_id <> $2
+             AND source = 'admin'
+           ORDER BY env_key LIMIT 1 FOR UPDATE`,
+          [clean, userId],
+        );
+        if (conflict.rows[0]) {
+          await client.query('ROLLBACK');
+          return { ok: false, reason: 'env_already_assigned', envKey: conflict.rows[0].env_key };
+        }
+      }
+      await client.query(
+        `INSERT INTO client_env_scope_audit
+           (user_id, env_key, label, platform, source, assigned_by, assigned_at,
+            revoked_at, revoked_by, reason)
+         SELECT user_id, env_key, label, platform, source, assigned_by, assigned_at,
+                now(), $2, 'scope_replaced'
+         FROM client_env_scope WHERE user_id = $1 AND source = 'admin'
+         ON CONFLICT (user_id, env_key, assigned_at, reason) DO NOTHING`,
+        [userId, assignedBy],
+      );
+      await client.query(`DELETE FROM client_env_scope WHERE user_id = $1 AND source = 'admin'`, [userId]);
+      for (const envKey of clean) {
+        const environment = registeredByKey.get(envKey)!;
         await client.query(
-          `INSERT INTO client_env_scope (user_id, env_key, label, platform, source, assigned_by, assigned_at)
-           VALUES ($1, $2, $3, $4, 'admin', $5, now())`,
-          [userId, i.envKey, i.label, i.platform, assignedBy],
+          `INSERT INTO client_env_scope
+             (user_id, env_key, label, platform, source, assigned_by, assigned_at)
+           VALUES ($1, $2, $3, $4, 'admin', $5, now())
+           ON CONFLICT (user_id, env_key) DO UPDATE
+             SET label = EXCLUDED.label,
+                 platform = EXCLUDED.platform,
+                 source = 'admin',
+                 assigned_by = EXCLUDED.assigned_by,
+                 assigned_at = now()`,
+          [userId, envKey, environment.label, environment.platform, assignedBy],
         );
       }
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK');
+      if ((err as { code?: string; constraint?: string })?.code === '23505' &&
+          (err as { constraint?: string })?.constraint === 'uq_client_env_scope_active_env') {
+        return { ok: false, reason: 'env_already_assigned' };
+      }
       throw err;
     } finally {
       client.release();

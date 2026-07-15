@@ -15,20 +15,31 @@ const job: ReplyJobView = {
   approvedAt: null, idempotencyKey: null, updatedAt: 1784044800000,
 };
 
-test('customer API keeps env ownership, frozen interaction routes and env/account/asOf response context', async () => {
+test('customer API transactionally binds enabled user + owned env + account on every read/action', async () => {
   let mutationCalls = 0;
-  let accountLookupCalls = 0;
+  let listCalls = 0;
+  let authorizedOperations = 0;
   const users = {
-    ownsEnv: async (userId: string, envKey: string) => userId === 'user-a' && envKey === 'env-a',
+    withAuthorizedInteractionScope: async <T>(
+      userId: string,
+      envKey: string,
+      operation: (scope: { accountId: string }) => Promise<T>,
+    ) => {
+      if (userId === 'disabled-user') return { ok: false as const, reason: 'disabled' as const };
+      const accountId = userId === 'user-a' && envKey === 'env-a' ? 'acct-a'
+        : userId === 'user-b' && envKey === 'env-b' ? 'acct-b' : null;
+      if (!accountId) return { ok: false as const, reason: 'not_authorized' as const };
+      authorizedOperations += 1;
+      return { ok: true as const, accountId, value: await operation({ accountId }) };
+    },
   } as unknown as ClientUserStore;
   const store = {
-    accountForEnv: async () => { accountLookupCalls += 1; return { accountId: 'acct-a', envKey: 'env-a' }; },
     transitionMessageJob: async (input: { messageId: string }) => {
       mutationCalls += 1;
       assert.equal(input.messageId, 'message-a');
       return job;
     },
-    listInteractions: async () => ({ items: [], next: null }),
+    listInteractions: async () => { listCalls += 1; return { items: [], next: null }; },
     getAuth: async () => ({
       envKey: 'env-a', accountId: 'acct-a', platform: 'wechat_channels', status: 'active', browserState: 'closed',
       capabilities: { commentsRead: true, commentsReply: true, dmRead: true, dmSendText: true, dmSendImage: false },
@@ -53,8 +64,26 @@ test('customer API keeps env ownership, frozen interaction routes and env/accoun
       body: JSON.stringify({ expectedVersion: 1 }),
     });
     assert.equal(denied.status, 404);
-    assert.equal(accountLookupCalls, 0, 'ownership must be checked before env→account resolution');
     assert.equal(mutationCalls, 0);
+    assert.equal(authorizedOperations, 0, 'denied ownership must not enter the business operation');
+
+    const crossTenantRead = await fetch(`${base}/environments/env-b/interactions`, {
+      headers: { 'x-test-user': 'user-a' },
+    });
+    assert.equal(crossTenantRead.status, 404);
+    assert.equal(listCalls, 0);
+    const crossTenantAct = await fetch(`${base}/environments/env-b/interactions/message-b/ignore`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-test-user': 'user-a' },
+      body: JSON.stringify({ expectedVersion: 1 }),
+    });
+    assert.equal(crossTenantAct.status, 404);
+    assert.equal(mutationCalls, 0);
+
+    const disabled = await fetch(`${base}/environments/env-a/interactions`, {
+      headers: { 'x-test-user': 'disabled-user' },
+    });
+    assert.equal(disabled.status, 401);
+    assert.equal(listCalls, 0);
 
     const invalid = await fetch(`${base}/environments/env-a/interactions/message-a/ignore`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-test-user': 'user-a' },
@@ -80,6 +109,7 @@ test('customer API keeps env ownership, frozen interaction routes and env/accoun
     const listBody = await list.json() as { data: { envKey: string; accountId: string }; meta: { asOf: number } };
     assert.deepEqual([listBody.data.envKey, listBody.data.accountId, listBody.meta.asOf],
       ['env-a', 'acct-a', 1784044800000]);
+    assert.equal(listCalls, 1);
 
     const unknownQuery = await fetch(`${base}/environments/env-a/interactions?unexpected=1`,
       { headers: { 'x-test-user': 'user-a' } });

@@ -129,14 +129,22 @@ export class InteractionCustomerApi {
       }
       if (parts.length < 3 || parts[0] !== 'environments' || !['interactions', 'replies'].includes(parts[2])) return false;
       const envKey = parts[1];
-      // ownership 先判，未归属与资源不存在统一 404，不回显 accountId。
-      if (!(await this.deps.users.ownsEnv(userId, envKey))) throw new InteractionError('INTERACTION_NOT_FOUND', '资源不存在。', 404);
-      const scope = await this.deps.store.accountForEnv(envKey);
-      if (!scope) throw new InteractionError('INTERACTION_NOT_FOUND', '资源不存在。', 404);
-      const accountId = scope.accountId;
-      const handled = await this.route(req, res, url, parts, userId, envKey, accountId, requestId);
-      if (!handled) throw new InteractionError('INTERACTION_NOT_FOUND', '接口不存在。', 404);
-      return handled;
+      // 完整授权边界在一个数据库事务内完成并持锁到业务操作结束：enabled user、
+      // authoritative env ownership、interaction account/platform binding 缺一不可。
+      const authorized = await this.deps.users.withAuthorizedInteractionScope(
+        userId,
+        envKey,
+        async ({ accountId }) => this.route(req, res, url, parts, userId, envKey, accountId, requestId),
+      );
+      if (!authorized.ok) {
+        if (authorized.reason === 'disabled') {
+          throw new InteractionError('INTERACTION_AUTH_REQUIRED', '客户身份已停用。', 401);
+        }
+        // 未归属、归属已撤销、环境未登记或账号绑定不匹配统一 404，不泄漏资源存在性。
+        throw new InteractionError('INTERACTION_NOT_FOUND', '资源不存在。', 404);
+      }
+      if (!authorized.value) throw new InteractionError('INTERACTION_NOT_FOUND', '接口不存在。', 404);
+      return true;
     } catch (error) {
       this.sendError(res, requestId, error);
       return true;

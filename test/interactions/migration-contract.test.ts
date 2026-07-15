@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 
 const migrationUrl = new URL('../../migrations/0039_interaction_inbox.sql', import.meta.url);
+const authorityMigrationUrl = new URL('../../migrations/0040_customer_env_authority.sql', import.meta.url);
 
 test('0039 creates the dedicated inbound domain and never writes outbound interaction_feed', async () => {
   const sql = await readFile(migrationUrl, 'utf8');
@@ -41,4 +42,14 @@ test('0039 scope indexes and CAS columns keep accountId/envKey on reads and writ
   assert.match(sql, /FOREIGN KEY \(thread_id, account_id, env_key\)[\s\S]*interaction_threads\(id, account_id, env_key\)/);
   assert.match(sql, /FOREIGN KEY \(inbound_message_id, account_id, env_key\)[\s\S]*interaction_messages\(id, account_id, env_key\)/);
   assert.match(sql, /FOREIGN KEY \(reply_job_id, account_id, env_key\)[\s\S]*interaction_reply_jobs\(id, account_id, env_key\)/);
+});
+
+test('0040 archives/removes customer self-claims and freezes globally unique active env ownership', async () => {
+  const sql = await readFile(authorityMigrationUrl, 'utf8');
+  assert.match(sql, /INSERT INTO client_environments[\s\S]*FROM client_env_scope/,
+    'legacy environment metadata must be preserved in the authoritative registry');
+  assert.match(sql, /INSERT INTO client_env_scope_audit[\s\S]*legacy_self_claim/);
+  assert.match(sql, /DELETE FROM client_env_scope WHERE source = 'client'/);
+  assert.match(sql, /client_env_scope_authoritative_source[\s\S]*CHECK \(source = 'admin'\)/);
+  assert.match(sql, /CREATE UNIQUE INDEX IF NOT EXISTS uq_client_env_scope_active_env[\s\S]*ON client_env_scope \(env_key\)/);
 });

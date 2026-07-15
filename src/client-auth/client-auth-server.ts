@@ -185,31 +185,16 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       sendJson(res, 200, { environments: scope.map((s) => ({ envKey: s.envKey, label: s.label, platform: s.platform })) });
       return;
     }
-    // 登录态新建/添加环境 → 自动归属当前客户。
+    // 环境归属只能来自内部权威注册表 + 管理员分配。保留旧路由用于明确拒绝
+    // 老客户端，绝不把客户提交的 envKey 写入归属表。
     if (method === 'POST' && url === '/environments') {
-      let body: unknown;
       try {
-        body = await readJsonBody(req);
+        await readJsonBody(req);
       } catch {
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
-      const { envKey, label, platform } = (body ?? {}) as { envKey?: unknown; label?: unknown; platform?: unknown };
-      if (typeof envKey !== 'string' || !envKey.trim()) {
-        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_env' });
-        return;
-      }
-      const r = await deps.store.attachEnv(
-        userId,
-        envKey,
-        typeof label === 'string' ? label : null,
-        typeof platform === 'string' ? platform : null,
-      );
-      if (!r.ok) {
-        sendJson(res, 400, { error: 'bad_request', reason: r.reason });
-        return;
-      }
-      sendJson(res, 200, { ok: true });
+      sendJson(res, 403, { error: 'forbidden', reason: 'environment_assignment_admin_only' });
       return;
     }
 

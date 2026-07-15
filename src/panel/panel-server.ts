@@ -610,7 +610,8 @@ function createRequestHandler(
           }));
         const r = await store.setScope(userId, items, actor);
         if (!r.ok) {
-          sendJson(res, 404, { error: r.reason });
+          const status = r.reason === 'not_found' ? 404 : r.reason === 'env_already_assigned' ? 409 : 422;
+          sendJson(res, status, { error: r.reason, ...(r.envKey ? { envKey: r.envKey } : {}) });
           return;
         }
         sendJson(res, 200, { scope: r.scope });

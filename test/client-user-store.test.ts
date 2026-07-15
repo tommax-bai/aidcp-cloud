@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { ClientUserStore } from '../src/client-auth/client-user-store.js';
+import { CLIENT_USERS_SCHEMA_SQL, ClientUserStore } from '../src/client-auth/client-user-store.js';
 
 /**
  * client-user-env-picker：`listAllEnvironments` 的**映射逻辑**单测（行 → ClientEnvironmentView）。
@@ -27,10 +27,7 @@ test('listAllEnvironments: 行映射为视图，assigneeCount = assignees 长度
           env_key: 'p2',
           label: null,
           platform: null,
-          assignees: [
-            { userId: 'u1', name: 'A' },
-            { userId: 'u2', name: 'B' },
-          ],
+          assignees: [{ userId: 'u2', name: 'B' }],
         },
       ],
     };
@@ -45,10 +42,10 @@ test('listAllEnvironments: 行映射为视图，assigneeCount = assignees 长度
     assignees: [{ userId: 'u1', name: 'A' }],
     assigneeCount: 1,
   });
-  assert.equal(envs[1].assigneeCount, 2); // 多人
+  assert.equal(envs[1].assigneeCount, 1); // 全局唯一 active owner
   assert.deepEqual(
     envs[1].assignees.map((a) => a.name),
-    ['A', 'B'],
+    ['B'],
   );
 });
 
@@ -130,6 +127,7 @@ test('registerEnvironments: source 显式传 auto 透传到参数（自动登记
 test('ownsEnv: user A only owns rows explicitly scoped to user A', async () => {
   const pool = fakePool((sql, params) => {
     assert.match(sql, /WHERE user_id = \$1 AND env_key = \$2/);
+    assert.match(sql, /source = 'admin'/);
     return { rows: [{ owned: params?.[0] === 'user-a' && params?.[1] === 'env-a' }] };
   });
   const store = new ClientUserStore({ pool });
@@ -146,4 +144,69 @@ test('ownsEnv: missing ownership table fails closed', async () => {
   });
   const store = new ClientUserStore({ pool });
   assert.equal(await store.ownsEnv('user-a', 'env-a'), false);
+});
+
+test('schema archives and removes legacy customer claims, then enforces one authoritative owner per env', () => {
+  assert.match(CLIENT_USERS_SCHEMA_SQL, /INSERT INTO client_env_scope_audit[\s\S]*legacy_self_claim/);
+  assert.match(CLIENT_USERS_SCHEMA_SQL, /DELETE FROM client_env_scope WHERE source = 'client'/);
+  assert.match(CLIENT_USERS_SCHEMA_SQL, /client_env_scope_authoritative_source[\s\S]*CHECK \(source = 'admin'\)/);
+  assert.match(CLIENT_USERS_SCHEMA_SQL, /CREATE UNIQUE INDEX IF NOT EXISTS uq_client_env_scope_active_env/);
+  assert.match(CLIENT_USERS_SCHEMA_SQL, /ON client_env_scope \(env_key\)/);
+});
+
+test('listEnvScope ignores client self-claims and revoked assignments', async () => {
+  const pool = fakePool((sql) => {
+    assert.match(sql, /user_id = \$1 AND source = 'admin'/);
+    return { rows: [] };
+  });
+  const store = new ClientUserStore({ pool });
+  assert.deepEqual(await store.listEnvScope('user-a'), []);
+});
+
+test('withAuthorizedInteractionScope holds complete authorization locks through operation and commit', async () => {
+  const calls: string[] = [];
+  let released = false;
+  const client = {
+    query: async (sql: string) => {
+      calls.push(sql);
+      if (/SELECT status FROM client_users/.test(sql)) return { rows: [{ status: 'enabled' }] };
+      if (/FROM client_env_scope s/.test(sql)) return { rows: [{ account_id: 'acct-a' }] };
+      return { rows: [] };
+    },
+    release: () => { released = true; },
+  };
+  const pool = { connect: async () => client } as unknown as pg.Pool;
+  const store = new ClientUserStore({ pool });
+  const result = await store.withAuthorizedInteractionScope('user-a', 'env-a', async ({ accountId }) => {
+    assert.equal(accountId, 'acct-a');
+    assert.equal(calls.at(-1)?.includes('FOR SHARE OF s, e, a, acc'), true);
+    assert.equal(calls.some((sql) => sql === 'COMMIT'), false, 'operation runs before transaction commit');
+    return 'done';
+  });
+  assert.deepEqual(result, { ok: true, accountId: 'acct-a', value: 'done' });
+  assert.equal(calls[0], 'BEGIN');
+  assert.match(calls[1], /client_users[\s\S]*FOR SHARE/);
+  assert.equal(calls.at(-1), 'COMMIT');
+  assert.equal(released, true);
+});
+
+test('withAuthorizedInteractionScope fails closed on env/account binding mismatch without running operation', async () => {
+  let operationCalls = 0;
+  const calls: string[] = [];
+  const client = {
+    query: async (sql: string) => {
+      calls.push(sql);
+      if (/SELECT status FROM client_users/.test(sql)) return { rows: [{ status: 'enabled' }] };
+      return { rows: [] };
+    },
+    release() {},
+  };
+  const pool = { connect: async () => client } as unknown as pg.Pool;
+  const store = new ClientUserStore({ pool });
+  const result = await store.withAuthorizedInteractionScope('user-a', 'env-b', async () => {
+    operationCalls += 1;
+  });
+  assert.deepEqual(result, { ok: false, reason: 'not_authorized' });
+  assert.equal(operationCalls, 0);
+  assert.equal(calls.at(-1), 'ROLLBACK');
 });
