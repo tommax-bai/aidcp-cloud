@@ -110,6 +110,29 @@ const EMPTY_CONCEPT_POOL: ConceptPool = { known: [], candidates: [], source: new
 const VIEW_QUOTA_RECHECK_FALLBACK_MS = 60_000;
 const VIEW_QUOTA_WAKE_GRACE_MS = 250;
 
+/**
+ * 提取 Facebook 帖子的**规范身份键**（数字帖 id），用于「自然互动见证」两个集合（已选中 / 已放行）的**去形态匹配**。
+ *
+ * 真机 bug（change facebook-natural-interaction-gate-key）：「已选中」集合的 noteId 来自 page.cards 卡（一种形态），
+ * 「已放行」集合的 noteId 来自 note.detail（另一种形态：带不带尾斜杠 / __cft__ 追踪参数 / posts vs multi_permalinks），
+ * 同一帖两处字符串不同 → 裸 Set 精确匹配 miss → interaction_appraiser 恒判 fb_quality_not_passed、点赞被系统性挡掉。
+ * 归一到帖 id 后同帖两形态匹配一致。派生不出（未知形态）则回退原字符串（诚实降级，绝不合并未知帖）。
+ * 覆盖：`?multi_permalinks=P` / `?story_fbid=P` / `/posts/P` / `/groups/G/posts/P` / `/videos|reel|permalink/P`。
+ */
+export function facebookPostKey(noteId: string | undefined | null): string {
+  if (!noteId) return '';
+  try {
+    const url = new URL(noteId, 'https://www.facebook.com/');
+    const q = url.searchParams.get('multi_permalinks') || url.searchParams.get('story_fbid');
+    if (q) return q;
+    const m = url.pathname.match(/\/(?:posts|videos|reel|permalink)\/([^/?#]+)/i);
+    if (m) return m[1];
+    return noteId;
+  } catch {
+    return noteId;
+  }
+}
+
 export interface ViewQuotaDecision {
   allowed: boolean;
   reason?: string;
@@ -1682,12 +1705,13 @@ export class RoleDispatcher {
   private facebookNaturalInteractionEligibility(noteId: string): { ok: true } | { ok: false; reason: string } {
     if (this.accountPlatform !== 'facebook') return { ok: true };
     if (!noteId) return { ok: false, reason: 'fb_missing_note_id' };
-    if (!this.facebookContentSelectedNoteIds.has(noteId)) {
-      return { ok: false, reason: 'fb_content_not_selected' };
-    }
-    if (!this.facebookQualityPassedNoteIds.has(noteId)) {
-      return { ok: false, reason: 'fb_quality_not_passed' };
-    }
+    // 归一到帖规范身份键再比对：见证两集合的 noteId 来自 page.cards / note.detail 两种形态，裸字符串匹配会漂移误挡。
+    const key = facebookPostKey(noteId);
+    const selected = this.facebookContentSelectedNoteIds.has(key);
+    const passed = this.facebookQualityPassedNoteIds.has(key);
+    console.log(`[fb-gate] eligibility key=${key} selected=${selected} passed=${passed} raw=${noteId}`);
+    if (!selected) return { ok: false, reason: 'fb_content_not_selected' };
+    if (!passed) return { ok: false, reason: 'fb_quality_not_passed' };
     return { ok: true };
   }
 
@@ -1971,7 +1995,9 @@ export class RoleDispatcher {
 
       this.eventBus.on('quality.pass', (payload) => {
         if (this.accountPlatform === 'facebook' && payload.noteId) {
-          this.facebookQualityPassedNoteIds.add(payload.noteId);
+          const key = facebookPostKey(payload.noteId);
+          this.facebookQualityPassedNoteIds.add(key);
+          console.log(`[fb-gate] quality_passed add key=${key} raw=${payload.noteId}`);
         }
       }),
 
@@ -2001,7 +2027,9 @@ export class RoleDispatcher {
           reason: payload.reason,
         });
         if (sent && this.accountPlatform === 'facebook' && payload.noteId) {
-          this.facebookContentSelectedNoteIds.add(payload.noteId);
+          const key = facebookPostKey(payload.noteId);
+          this.facebookContentSelectedNoteIds.add(key);
+          console.log(`[fb-gate] content_selected add key=${key} raw=${payload.noteId}`);
         }
       }),
 
