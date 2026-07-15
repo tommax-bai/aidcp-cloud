@@ -141,6 +141,19 @@ export class CommentAppraiser extends BaseRole {
       return;
     }
 
+    // 评论支线在途起点·前移一格（change comment-approval-target-hold）：便宜阈值全过、即将调 LLM 判定值不值得评。
+    // dispatcher 据此提前把账号钉在待评论帖上，覆盖 appraiser-LLM 这段（否则并行点赞 no_target 重扫会把目标帖滚走）。
+    // 未过阈者已在上面同步 skip、不到这里 ⇒ 不置在途标志、不过度抑制正常浏览。由既有 comment.skipped/approved 清位。
+    // **必须排到微任务**：本角色订阅早于 dispatcher，若同步 emit，dispatcher 的 comment.appraising 处理器会先于它自己的
+    // interaction.completed 处理器把 commentInflight 置真 → 把**本次**待发的 like/collect 命令一并扣住（回归：路径F collect 丢失）。
+    // 微任务把置位排到本次同步 emit 之后（届时 like/collect 已下发），仍远早于点赞回执的边缘往返 ⇒ 覆盖 appraiser 窗、不误伤互动下发。
+    queueMicrotask(() => this.emit('comment.appraising', {
+      noteId: payload.noteId,
+      sourcePageType: payload.sourcePageType,
+      actions: payload.actions,
+      ts: Date.now(),
+    }));
+
     let raw: string;
     try {
       raw = await this.decide(this.buildPrompt(note, payload.actions));

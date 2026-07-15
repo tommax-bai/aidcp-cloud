@@ -914,5 +914,66 @@ describe('RoleDispatcher Integration', () => {
       assert.equal((commentCmd[0].params as { text?: string })?.text, '真的学到了');
       dispatcher.endSession();
     });
+
+    // ── 对抗性复核修复回归（review wf_71b324de：preemption / 迁移抑制 / 巡视让位 / appraiser 窗）──
+    it('(e) 被抢占的评论回执 ⇒ 解除 comment_subline 暂停 + 清 pendingComment + 不恢复滚动', () => {
+      const commands: EdgeCommand[] = [];
+      const dispatcher = seed(commands, { accountPlatform: 'xiaohongshu' });
+      const sm = (dispatcher as unknown as { sessionMonitor: { resumeClock(r: string): void } }).sessionMonitor;
+      const resumed: string[] = [];
+      const or = sm.resumeClock.bind(sm);
+      sm.resumeClock = (r: string) => { resumed.push(r); or(r); };
+      dispatcher.bus.emit('comment.appraised', { noteId: 'n1', sourcePageType: 'feed', actions: ['like'], ts: Date.now() });
+      dispatcher.bus.emit('comment.approved', { noteId: 'n1', sourcePageType: 'feed', actions: ['like'], text: 'hi', ts: Date.now() });
+      const before = commands.length;
+      dispatcher.bus.emit('action.completed', { action: 'comment', ok: false, reason: 'preempted_by_task', ts: Date.now() });
+      assert.ok(resumed.includes('comment_subline'), '被抢占的评论回执应解除 comment_subline 时钟暂停（防永冻 should_end）');
+      assert.equal((dispatcher as unknown as { pendingComment: unknown }).pendingComment, null, '被抢占后清 pendingComment（不留悬挂）');
+      assert.equal(commands.slice(before).filter((c) => c.action === 'scroll').length, 0, '被抢占不发恢复滚动（尊重抢占语义）');
+      dispatcher.endSession();
+    });
+
+    it('(f) FB 迁移 open_note 被软暂停拦下 ⇒ 清 pendingMigration + 收敛评论支线（不永冻时钟）', () => {
+      const commands: EdgeCommand[] = [];
+      const dispatcher = seed(commands, { accountPlatform: 'facebook', hasInlineTargeting: () => true });
+      const sm = (dispatcher as unknown as { sessionMonitor: { resumeClock(r: string): void } }).sessionMonitor;
+      const resumed: string[] = [];
+      const or = sm.resumeClock.bind(sm);
+      sm.resumeClock = (r: string) => { resumed.push(r); or(r); };
+      dispatcher.bus.emit('comment.appraised', { noteId: 'n1', sourcePageType: 'feed', actions: ['like'], ts: Date.now() });
+      // 模拟审批期并发通知巡视的软暂停
+      (dispatcher as unknown as { sessionContext: { setBrowseSuspended(b: boolean): void } }).sessionContext.setBrowseSuspended(true);
+      const before = commands.length;
+      dispatcher.bus.emit('comment.approved', { noteId: 'n1', sourcePageType: 'feed', actions: ['like'], text: 'hi', ts: Date.now() });
+      assert.equal(commands.slice(before).filter((c) => c.action === 'open_note').length, 0, '软暂停期迁移 open_note 不下发');
+      assert.equal((dispatcher as unknown as { pendingMigration: unknown }).pendingMigration, null, '迁移被拦下 ⇒ 清 pendingMigration（不留孤儿劫持后续回执）');
+      assert.ok(resumed.includes('comment_subline'), '迁移被拦下应收敛评论支线、解除时钟暂停（不永冻 should_end）');
+      dispatcher.endSession();
+    });
+
+    it('(g) 评论支线在途 ⇒ 通知巡视让位（不开通知页）；评论结算后补跑', async () => {
+      const commands: EdgeCommand[] = [];
+      const dispatcher = seed(commands, { accountPlatform: 'xiaohongshu' });
+      dispatcher.bus.emit('comment.appraised', { noteId: 'n1', sourcePageType: 'feed', actions: ['like'], ts: Date.now() });
+      const before = commands.length;
+      dispatcher.bus.emit('notification.detected.arrived', { epoch: 1, unreadCount: 3, ts: Date.now() });
+      assert.equal(commands.slice(before).filter((c) => c.action === 'open_notifications').length, 0, '评论支线在途 ⇒ 巡视让位、不把账号导离待评论帖');
+      // 评论结算（跳过）→ 微任务补跑被让位的巡视
+      dispatcher.bus.emit('comment.skipped', { noteId: 'n1', sourcePageType: 'feed', actions: ['like'], reason: 'approval_timeout', ts: Date.now() });
+      await new Promise((r) => setTimeout(r, 5));
+      assert.ok(commands.some((c) => c.action === 'open_notifications'), '评论结算后被让位的巡视补跑（open_notifications），未读不被永久搁置');
+      dispatcher.endSession();
+    });
+
+    it('(h) comment.appraising（评估-LLM 起）即进入在途暂停态，覆盖 appraiser 残留窗', () => {
+      const commands: EdgeCommand[] = [];
+      const dispatcher = seed(commands, { accountPlatform: 'facebook', hasInlineTargeting: () => true });
+      // 仅到 comment.appraising（尚未 appraised）：appraiser-LLM 判定进行中
+      dispatcher.bus.emit('comment.appraising', { noteId: 'n1', sourcePageType: 'feed', actions: ['like'], ts: Date.now() });
+      dispatcher.bus.emit('action.completed', { action: 'like', ok: false, reason: 'no_target', ts: Date.now() });
+      const rescan = commands.filter((c) => c.action === 'scroll' && c.reason === 'rescan_after_stale_target');
+      assert.equal(rescan.length, 0, 'comment.appraising 后 appraiser 窗内并行点赞 no_target 不重扫（覆盖残留窗）');
+      dispatcher.endSession();
+    });
   });
 });

@@ -667,6 +667,17 @@ export class RoleDispatcher {
     }
   }
 
+  /**
+   * 进入评论支线在途暂停态（change comment-approval-target-hold）：置 commentInflight（经 sendCommand 扣住一切离页命令）
+   * + pauseClock（推迟窗内 should_end）。只在 currentNote 命中该 noteId 时置位（守卫下游同 tick 同步 skip 卡死，见调用处注释）。
+   * comment.appraising / comment.appraised 两入口共用；幂等（布尔 + pauseReasons Set），终局单次 resumeClock 解除。
+   */
+  private enterCommentSubline(noteId: string): void {
+    if (this.currentNote?.noteId !== noteId) return;
+    this.commentInflight = true;
+    this.sessionMonitor?.pauseClock('comment_subline');
+  }
+
   private isQuotaSleepBypass(command: EdgeCommand): boolean {
     return command.action === 'session.end'
       || this.isExcursionCommand(command.action)
@@ -1080,7 +1091,7 @@ export class RoleDispatcher {
       // 不支持则整套不注册（fail-open：无平台/查表失败仍注册=今天，绝不静默砍小红书巡视）。
       ...(this.canPatrol()
         ? [
-            new NotificationGatekeeper({ ...commonOptions, isHardPaused: this.isHardPaused }, this.sessionContext),
+            new NotificationGatekeeper({ ...commonOptions, isHardPaused: this.isHardPaused, isCommentInflight: () => this.commentInflight }, this.sessionContext),
             new BrowseSuspender(commonOptions, this.sessionContext),
             new NotificationHomeOpener(commonOptions, this.sessionContext),
             new NotificationTriage(commonOptions, this.sessionContext),
@@ -1813,23 +1824,19 @@ export class RoleDispatcher {
         this.sendScrollCommand('idle_recover_nudge');
       }),
 
-      // 评论支线在途起点（change comment-approval-target-hold）：comment.appraised（确立要评、即将撰写）置位，
-      // 覆盖撰写 / 去 AI 味 / 审批全程，把账号钉在待评论帖上；由 comment.approved（下发前）/ comment.skipped 清位。
-      // 前移到 comment.appraised（而非旧的 comment.cleared）：撰写窗内并行点赞回 no_target 的重扫滚屏是主要滚走源，
-      // 旧起点太晚、撰写这几秒裸奔。浏览闭环严格串行（返回 feed 必等评论支线终局）⇒ 无重叠窗。
-      // 取代旧的 comment.cleared→approvalInFlight（含 mandatory persona 的 auto_approve 豁免）：mandatory 强制评论也走
-      // comment.appraised（comment-appraiser force-compose 分支），故本起点同样覆盖之；auto_approve 的免人审逻辑仍在
-      // CommentApprovalGate（未动），此处只负责「钉在帖上」，auto_approve 时窗极短（gate 立即通过）、无副作用。
-      // **只在 composer 不会同 tick 同步 skip 时置位**（防「卡死 true」永久抑制，镜像旧 comment.cleared 的防御）：
-      // comment_composer 订阅早于本 dispatcher、其唯一同步 skip 是 note 数据缺失（!note）。currentNote 命中当前 noteId
-      // ⇒ composer 走 await、本处理器后置为真、终局再清，循环正确；未命中 ⇒ composer 同步 emit comment.skipped 先清标志，
-      // 此时不置真、避免置真后无人清（浏览被扣住无法前进 → 无后续互动 → 无终局 → 永久卡死）。
-      this.eventBus.on('comment.appraised', (payload) => {
-        if (this.currentNote?.noteId === payload.noteId) {
-          this.commentInflight = true;
-          this.sessionMonitor?.pauseClock('comment_subline');
-        }
-      }),
+      // 评论支线在途起点（change comment-approval-target-hold）：把账号钉在待评论帖上，覆盖评估-LLM / 撰写 / 去 AI 味 / 审批全程，
+      // 由 comment.approved（下发前）/ comment.skipped 清位。起点前移到评论支线最早稳定信号（comment.appraising：便宜阈值全过、
+      // 即将调 LLM 判定；与 comment.appraised 二者都置、幂等），因为撰写窗内并行点赞回 no_target 的重扫滚屏是主要滚走源、旧的
+      // comment.cleared 起点太晚。取代旧的 comment.cleared→approvalInFlight（含 mandatory persona 的 auto_approve 豁免）：
+      // mandatory 强制评论也走 comment.appraised（comment-appraiser force-compose 分支），故本起点同样覆盖之；auto_approve 的
+      // 免人审逻辑仍在 CommentApprovalGate（未动），此处只负责「钉在帖上」、auto_approve 时窗极短（gate 立即通过）无副作用。
+      // 浏览闭环严格串行（返回 feed 必等评论支线终局）⇒ 无重叠窗。
+      // **只在下游不会同 tick 同步 skip 时置位**（防「卡死 true」永久抑制，镜像旧 comment.cleared 的防御）：以 currentNote 命中
+      // 当前 noteId 为守卫——命中 ⇒ appraiser/composer 均走 await（唯一同步 skip 是 note 数据缺失），本处理器后置为真、终局再清；
+      // 未命中 ⇒ 下游同步 emit comment.skipped 先清标志，此时不置真、避免置真后无人清（浏览被扣住无法前进 → 无终局 → 永久卡死）。
+      // pauseClock('comment_subline') refcount by reason、幂等；两个入口重复置真/暂停均无副作用，终局单次 resumeClock 解除。
+      this.eventBus.on('comment.appraising', (payload) => this.enterCommentSubline(payload.noteId)),
+      this.eventBus.on('comment.appraised', (payload) => this.enterCommentSubline(payload.noteId)),
 
       // 评论支线终局之一（跳过/拒绝/超时/撰写弃权）→ 清在途标志 + 恢复时钟（末次解除会补发延期的 should_end）。
       this.eventBus.on('comment.skipped', () => {
@@ -1904,10 +1911,24 @@ export class RoleDispatcher {
             text: payload.text,
             ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
           };
-          this.sendCommand({
+          const migrateSent = this.sendCommand({
             action: 'open_note',
             params: { noteId: payload.noteId, purpose: 'navigate', thinkMs: this.thinkNow() },
           });
+          if (!migrateSent) {
+            // 迁移 open_note 被软暂停（如并发通知巡视 browseSuspended）/ 配额闸拦下（未真正下发）→ 诚实收敛：
+            // 清 pendingMigration（不等永不到来的回执，也防悬挂 pendingMigration 劫持后续无关 open_note 完成回执）、
+            // emit comment.skipped 触发 resumeClock('comment_subline')。与直发路径的守卫对称
+            // （change comment-approval-target-hold）：否则评论支线无终局 → 时钟永冻 should_end。
+            this.pendingMigration = null;
+            this.eventBus.emit('comment.skipped', {
+              noteId: payload.noteId,
+              sourcePageType: payload.sourcePageType,
+              actions: payload.actions,
+              reason: 'comment_migration_suppressed',
+              ts: this.clock(),
+            });
+          }
           return;
         }
         this.pendingComment = {
@@ -2227,6 +2248,15 @@ export class RoleDispatcher {
         // 不清计数、不计互动失败与配额、不 emit comment.done（否则把评论供线终结成「已投但失败」）。留待抢占方释放后自然重决策。
         if (payload.ok === false && isPreemptionReason(payload.reason)) {
           console.log(`[RoleDispatcher] 动作 ${payload.action} 被抢占（${payload.reason}）→ 原因级短路：不兜底滚动、不重试、不计失败与配额`);
+          // 评论支线时钟不泄漏（change comment-approval-target-hold）：被抢占的 comment/open_note{navigate} 在此短路 return，
+          // 早于 comment.done/skipped 的补发点 ⇒ 若其为评论支线在飞命令，resumeClock('comment_subline') 永不触发、
+          // pauseClock 永冻 → should_end 被无限延期。此处解除时钟暂停并清在飞评论态（避免悬挂 pending 劫持后续无关回执），
+          // **仍尊重抢占语义**：不 emit comment.done（不把评论终结成「已投但失败」）、不发恢复滚动、不重试、不计配额。
+          // resumeClock 对未置 reason 幂等 no-op（非评论动作被抢占时零副作用）。
+          if (payload.action === 'comment' && this.pendingComment) this.pendingComment = null;
+          if (payload.action === 'open_note' && this.pendingMigration) this.pendingMigration = null;
+          this.commentInflight = false;
+          this.sessionMonitor?.resumeClock('comment_subline');
           return;
         }
         // observedSurface 仅审计（change platform-browse-protocol）：回执回声 surface 与期望不符 → warn（检测漂移）；
@@ -2263,10 +2293,25 @@ export class RoleDispatcher {
               text: mig.text,
               ...(mig.mandatoryInteraction ? { mandatoryInteraction: mig.mandatoryInteraction } : {}),
             };
-            this.sendNoteScopedCommand('comment', {
+            const migCommentSent = this.sendNoteScopedCommand('comment', {
               action: 'comment',
               params: { noteId: mig.noteId, text: mig.text, thinkMs: this.thinkNow() },
             });
+            if (!migCommentSent) {
+              // navigate 已落地，但第二步 comment 被去重/配额/软暂停闸拦下（未真正下发）→ 诚实收敛：清 pendingComment、
+              // 回报操作员 + emit comment.done{ok:false} 触发 resumeClock('comment_subline')（change comment-approval-target-hold）。
+              // 否则评论支线无终局、时钟永冻 should_end。mandatoryInteraction 透传（与下方 nav-failed 分支一致）。
+              this.pendingComment = null;
+              this.reportApprovedNotDelivered(mig.noteId, payload.reason);
+              this.eventBus.emit('comment.done', {
+                noteId: mig.noteId,
+                sourcePageType: mig.sourcePageType,
+                actions: mig.actions,
+                ok: false,
+                ...(mig.mandatoryInteraction ? { mandatoryInteraction: mig.mandatoryInteraction } : {}),
+                ts: this.clock(),
+              });
+            }
           } else {
             console.warn(
               `[RoleDispatcher] 评论迁移 navigate 失败 → 不发评论、回报操作员 note=${mig.noteId} reason=${payload.reason ?? 'nav_failed'}`,

@@ -287,6 +287,16 @@ export interface InteractionSkippedPayload {
 // —— 发评论支线（评估→撰写→去AI味→审批→下发；接在互动完成与「是否进主页评估」之间）——
 // 所有事件携带原 like/collect actions，供 AuthorEvaluator 在评论支线终结后构 prompt。
 
+/** 评估角色过完便宜阈值闸、即将调 LLM 判定是否值得评（change comment-approval-target-hold）：
+ *  dispatcher 据此提前把账号钉在待评论帖上，覆盖 appraiser-LLM 这段残留窗（否则并行点赞 no_target
+ *  重扫会把目标帖滚走）。仅便宜阈值全过者才 emit，未过阈者同步 skip、不会置在途标志（不过度抑制）。 */
+export interface CommentAppraisingPayload {
+  noteId: string;
+  sourcePageType: 'feed' | 'search';
+  actions: ('like' | 'collect')[];
+  ts: number;
+}
+
 export interface CommentAppraisedPayload {
   noteId: string;
   sourcePageType: 'feed' | 'search';
@@ -448,6 +458,7 @@ export interface RoleEventMap {
   'reading.done': ReadingDonePayload;
   'interaction.completed': InteractionCompletedPayload;
   'interaction.skipped': InteractionSkippedPayload;
+  'comment.appraising': CommentAppraisingPayload;
   'comment.appraised': CommentAppraisedPayload;
   'comment.composed': CommentComposedPayload;
   'comment.cleared': CommentClearedPayload;
