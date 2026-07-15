@@ -45,6 +45,7 @@ test('init 建表幂等（DDL 含 IF NOT EXISTS 与索引）', async () => {
   assert.match(calls[0].sql, /CREATE TABLE IF NOT EXISTS curated_content/);
   assert.match(calls[0].sql, /content_type IN \('image_text','video','comment'\)/);
   assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS reference_images JSONB/);
+  assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS visual_analysis JSONB/);
   assert.match(calls[0].sql, /content_type = 'image_text'/);
   assert.match(calls[0].sql, /dedup_key\s+TEXT NOT NULL UNIQUE/);
   assert.match(calls[0].sql, /CREATE INDEX IF NOT EXISTS .* USING GIN\(topics\)/);
@@ -65,6 +66,7 @@ test('upsertObservation：INSERT...ON CONFLICT DO UPDATE，含 dedup_key、不�
   assert.match(sql, /counts_captured_at = now\(\)/);
   assert.match(sql, /admit_reason\s+= EXCLUDED\.admit_reason/);
   assert.match(sql, /updated_at\s+= now\(\)/);
+  assert.match(sql, /WHEN EXCLUDED\.reference_images = curated_content\.reference_images THEN curated_content\.visual_analysis/, '图片锚未变化时保留反推缓存');
   // 绝不在 DO UPDATE 里触碰 bot_liked / bot_collected（不抹掉已置的自有动作标记）。
   assert.doesNotMatch(sql, /bot_liked\s*=/);
   assert.doesNotMatch(sql, /bot_collected\s*=/);

@@ -456,6 +456,28 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
       imageStyle: null,
       fallbackStrategy: 'skip',
       referenceImageStatus: 'unsupported',
+      visualReferenceAudit: {
+        analysisStatus: 'partial',
+        analysisCacheKey: 'visual-cache-1',
+        bindingMode: 'slot',
+        auditEnabled: true,
+        slots: [{
+          slot: 0,
+          binding: {
+            slot: 0,
+            mode: 'slot',
+            references: [{ sourceArrayIndex: 0, sourceIndex: 0, url: 'https://ref.test/1.webp', role: 'primary' }],
+            primarySourceArrayIndex: 0,
+            primarySourceIndex: 0,
+          },
+          route: 'generative',
+          styleSource: 'reference_analysis',
+          providerReferenceStatus: 'used',
+          outputUrl: 'https://example.com/a.png',
+          attempts: [],
+          finalStatus: 'unverified',
+        }],
+      },
       directedAt: 0,
     });
     role.register(ctx);
@@ -479,6 +501,28 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
       providerClaimedUsed: false,
       generatedCount: 2,
     });
+    assert.deepEqual(recordedMeta[0].metadata.visualReferenceAudit, {
+      analysisStatus: 'partial',
+      analysisCacheKey: 'visual-cache-1',
+      bindingMode: 'slot',
+      auditEnabled: true,
+      slots: [{
+        slot: 0,
+        binding: {
+          slot: 0,
+          mode: 'slot',
+          references: [{ sourceArrayIndex: 0, sourceIndex: 0, url: 'https://ref.test/1.webp', role: 'primary' }],
+          primarySourceArrayIndex: 0,
+          primarySourceIndex: 0,
+        },
+        route: 'generative',
+        styleSource: 'reference_analysis',
+        providerReferenceStatus: 'used',
+        outputUrl: 'https://example.com/a.png',
+        attempts: [],
+        finalStatus: 'unverified',
+      }],
+    }, '逐槽视觉核验原样并列落库');
   });
 
   test('参考图 provider 返回 used → publishMetadata.referenceImageAudit 标记 providerClaimedUsed=true', async () => {

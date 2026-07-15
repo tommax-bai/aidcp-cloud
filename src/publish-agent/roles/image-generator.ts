@@ -10,6 +10,15 @@ import { relocateImageToStore } from '../../storage/object-store.js';
 import { IMAGE_COUNT_HARD_MAX } from '../prompts.js';
 import { referenceImageUrl, referenceImagesForGeneration } from '../reference-image-guidance.js';
 import type { TextCardRenderer, TextCardRenderMeta } from '../../render/text-card.js';
+import type { VisualFidelityAuditor } from '../visual-fidelity-auditor.js';
+import type {
+  VisualAuditAttempt,
+  VisualFrameSpec,
+  VisualReferenceAudit,
+  VisualReferenceBinding,
+  VisualReferenceBindingItem,
+  VisualSlotAudit,
+} from '../visual-reference-types.js';
 
 /**
  * ImageGenerator — 配图「执行」（change publish-multi-image：单图 → 并行多图）。
@@ -44,6 +53,7 @@ const DEFAULT_MAX_IMAGES = 9;
 interface ImageGenerationOutcome {
   url: string | null;
   referenceStatus?: 'used' | 'unsupported' | 'unavailable' | 'skipped';
+  auditAttempts?: VisualAuditAttempt[];
 }
 
 export interface ImageUsageRecord {
@@ -83,6 +93,10 @@ export interface ImageGeneratorDeps {
   getTextCardRenderer?: () => TextCardRenderer | null;
   /** 渲染+字节直传内层闸（毫秒，缺省 env AIDCP_TEXTCARD_RENDER_TIMEOUT_MS，默认 30s）。 */
   renderTimeoutMs?: number;
+  /** 产后视觉比较服务；是否执行另由 auditEnabled 门控。 */
+  visualAuditor?: VisualFidelityAuditor;
+  /** 默认按 AIDCP_VISUAL_FIDELITY_AUDIT 动态读取，关时零视觉调用且不改旧输出。 */
+  auditEnabled?: () => boolean;
   clock?: () => number;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
@@ -102,6 +116,8 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
   private getModel: () => string;
   private getTextCardRenderer?: () => TextCardRenderer | null;
   private renderTimeoutMs: number;
+  private visualAuditor?: VisualFidelityAuditor;
+  private auditEnabled: () => boolean;
 
   constructor(deps: ImageGeneratorDeps) {
     super({ logger: deps.logger, clock: deps.clock });
@@ -114,6 +130,8 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     this.getProvider = deps.getProvider ?? (() => 'unknown');
     this.getModel = deps.getModel ?? (() => 'unknown');
     this.getTextCardRenderer = deps.getTextCardRenderer;
+    this.visualAuditor = deps.visualAuditor;
+    this.auditEnabled = deps.auditEnabled ?? (() => process.env.AIDCP_VISUAL_FIDELITY_AUDIT === 'true');
     this.renderTimeoutMs = deps.renderTimeoutMs ?? envInt('AIDCP_TEXTCARD_RENDER_TIMEOUT_MS', DEFAULT_TEXTCARD_RENDER_TIMEOUT_MS);
     this.perImageTimeoutMs = deps.perImageTimeoutMs ?? envInt('AIDCP_PUBLISH_PER_IMAGE_TIMEOUT_MS', DEFAULT_PER_IMAGE_TIMEOUT_MS);
     const maxImages = Math.max(1, Math.min(deps.maxImages ?? envInt('AIDCP_PUBLISH_MAX_IMAGES', DEFAULT_MAX_IMAGES), IMAGE_COUNT_HARD_MAX));
@@ -123,10 +141,11 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     // 每图任务自超时（不 hang），execute 恒在此总闸前结算 → 总闸只作病态兜底，绝不吃掉部分成功。
     const waves = Math.ceil(maxImages / this.concurrency);
     const renderBudget = deps.getTextCardRenderer ? this.renderTimeoutMs : 0;
+    const auditBudget = deps.visualAuditor ? (this.perImageTimeoutMs + 120_000) : 0;
     this.config = {
       name: 'ImageGenerator',
       watchKeys: ['imagePlan'],
-      timeoutMs: this.perImageTimeoutMs * waves + renderBudget + 20_000,
+      timeoutMs: (this.perImageTimeoutMs + auditBudget) * waves + renderBudget + 20_000,
       fallback: 'skip',
     };
   }
@@ -183,10 +202,23 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     // 去第二风格源（change category-adaptive-images-and-judgment）：不再把 imageStyle 枚举传给 provider——
     // 风格已并入品类风格档写进 prompt；provider 侧再拼「，风格：<enum>」会与风格档冲突、劣化 Seedream。
     // 某槽渲染成功即直接用渲染结果替换（不前插不移位），该槽不再走 provider；失败该槽走生成式。
+    const auditing = this.auditEnabled() && !!this.visualAuditor;
     const results = await mapWithConcurrency(input.imagePrompts, this.concurrency, (prompt, i) => {
       const rc = renderedCards[i];
-      if (rc) return Promise.resolve<ImageGenerationOutcome>({ url: rc.url, referenceStatus: 'skipped' });
-      return this.generateOne(prompt, { accountId, runToken, seq: i }, referenceUrls);
+      if (rc) return Promise.resolve<ImageGenerationOutcome>({
+        url: rc.url,
+        referenceStatus: 'skipped',
+        ...(auditing ? { auditAttempts: [{ status: 'skipped', reason: 'deterministic text-card renderer', auditedAt: this.clock() }] } : {}),
+      });
+      const binding = input.referenceBindings?.find((item) => item.slot === i);
+      const comparisonBinding = binding ?? legacyBinding(i, referenceUrls);
+      const slotReferenceUrls = binding ? binding.references.map((item) => item.url) : referenceUrls;
+      if (!auditing) return this.generateOne(prompt, { accountId, runToken, seq: i }, slotReferenceUrls, binding?.references);
+      const primary = comparisonBinding.references.find((item) => item.role === 'primary');
+      const expected = primary
+        ? input.referenceVisualAnalysis?.frameSpecs?.find((frame) => frame.sourceArrayIndex === primary.sourceArrayIndex)
+        : undefined;
+      return this.generateWithAudit(prompt, { accountId, runToken, seq: i }, slotReferenceUrls, binding?.references, primary?.url, expected);
     });
     const imageUrls = results.map((r) => r.url).filter((url): url is string => !!url);
 
@@ -205,6 +237,11 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     const renderStatus: CoverRenderStatus = cardRenderStatuses[0] ?? 'not_attempted';
     const renderedCover = renderedCards[0]; // renderMeta 回放（0 号）。
 
+    const shouldWriteVisualAudit = !!input.referenceBindings || !!input.referenceVisualAnalysis || auditing;
+    const visualReferenceAudit = shouldWriteVisualAudit
+      ? this.buildVisualReferenceAudit(input, results, renderedCards, referenceUrls, auditing)
+      : undefined;
+
     return {
       imagePrompt: input.imagePrompts[0] ?? null,
       imageUrls,
@@ -213,6 +250,7 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
       fallbackStrategy: imageUrls.length > 0 ? 'skip' : input.fallbackStrategy,
       ...(referenceImages.length > 0 ? { referenceImages } : {}),
       referenceImageStatus: this.summarizeReferenceStatus(referenceUrls, results),
+      ...(visualReferenceAudit ? { visualReferenceAudit } : {}),
       ...(input.coverGate
         ? {
             coverFormAudit: {
@@ -307,6 +345,7 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     prompt: string,
     keyCtx: { accountId: string; runToken: string; seq: number },
     referenceUrls: string[],
+    referenceRoles?: VisualReferenceBindingItem[],
   ): Promise<ImageGenerationOutcome> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let usageRecorded = false;
@@ -317,7 +356,7 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     };
     try {
       return await Promise.race<ImageGenerationOutcome>([
-        this.produceAndRelocate(prompt, keyCtx, referenceUrls, recordAttempt),
+        this.produceAndRelocate(prompt, keyCtx, referenceUrls, referenceRoles, recordAttempt),
         new Promise<ImageGenerationOutcome>((resolve) => {
           timer = setTimeout(() => {
             this.logger.warn(`[ImageGenerator] 单张超时 ${this.perImageTimeoutMs}ms，诚实落空`);
@@ -335,6 +374,45 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     }
   }
 
+  private async generateWithAudit(
+    prompt: string,
+    keyCtx: { accountId: string; runToken: string; seq: number },
+    referenceUrls: string[],
+    referenceRoles: VisualReferenceBindingItem[] | undefined,
+    primaryUrl: string | undefined,
+    expectedFrame: VisualFrameSpec | undefined,
+  ): Promise<ImageGenerationOutcome> {
+    if (!primaryUrl || !this.visualAuditor) {
+      const outcome = await this.generateOne(prompt, keyCtx, referenceUrls, referenceRoles);
+      return {
+        ...outcome,
+        auditAttempts: [{ status: 'skipped', reason: 'no primary reference for visual comparison', auditedAt: this.clock() }],
+      };
+    }
+    const attempts: VisualAuditAttempt[] = [];
+    let lastStatus: ImageGenerationOutcome['referenceStatus'];
+    let nextPrompt = prompt;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const generated = await this.generateOne(nextPrompt, keyCtx, referenceUrls, referenceRoles);
+      lastStatus = generated.referenceStatus;
+      if (!generated.url) return { ...generated, auditAttempts: attempts };
+      const audit = await this.visualAuditor.audit({
+        accountId: keyCtx.accountId,
+        referenceUrl: primaryUrl,
+        generatedUrl: generated.url,
+        expectedFrame,
+      });
+      attempts.push(audit);
+      if (audit.status === 'passed' || audit.status === 'unverified') {
+        return { ...generated, auditAttempts: attempts };
+      }
+      if (attempt === 0) {
+        nextPrompt = `${prompt}\n产后视觉审核未通过，请重生成并修正：${audit.retryGuidance ?? audit.reason}。保持原创，不复制原图文字、水印或像素细节。`;
+      }
+    }
+    return { url: null, referenceStatus: lastStatus, auditAttempts: attempts };
+  }
+
   /**
    * 出图 → （若注入 ossUploader）转存 OSS 换稳定公网 URL。
    * - 未注入 ossUploader：直接回 provider 临时 URL（**零回归**，与集成前一致）。
@@ -344,6 +422,7 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     prompt: string,
     keyCtx: { accountId: string; runToken: string; seq: number },
     referenceUrls: string[],
+    referenceRoles: VisualReferenceBindingItem[] | undefined,
     recordAttempt: (ok: boolean) => void,
   ): Promise<ImageGenerationOutcome> {
     let res: ImageResult;
@@ -351,7 +430,14 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
       res = await this.imageProvider.generate(
         prompt,
         undefined,
-        referenceUrls.length > 0 ? { referenceImages: referenceUrls } : undefined,
+        referenceUrls.length > 0
+          ? {
+              referenceImages: referenceUrls,
+              ...(referenceRoles?.length
+                ? { referenceRoles: referenceRoles.map((item) => ({ url: item.url, role: item.role, sourceIndex: item.sourceIndex })) }
+                : {}),
+            }
+          : undefined,
       );
       recordAttempt(!!res.url);
     } catch (err) {
@@ -403,6 +489,45 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     return 'skipped';
   }
 
+  private buildVisualReferenceAudit(
+    input: ImagePlan,
+    outcomes: ImageGenerationOutcome[],
+    renderedCards: Array<{ url: string; meta: TextCardRenderMeta } | null>,
+    legacyUrls: string[],
+    auditEnabled: boolean,
+  ): VisualReferenceAudit {
+    const slots: VisualSlotAudit[] = input.imagePrompts.map((_, slot) => {
+      const binding = input.referenceBindings?.find((item) => item.slot === slot) ?? legacyBinding(slot, legacyUrls);
+      const outcome = outcomes[slot] ?? { url: null, referenceStatus: binding.references.length ? 'unavailable' : 'skipped' };
+      const attempts = outcome.auditAttempts ?? [];
+      const last = attempts[attempts.length - 1];
+      let finalStatus: VisualSlotAudit['finalStatus'];
+      if (renderedCards[slot]) finalStatus = 'skipped';
+      else if (!outcome.url && attempts.some((item) => item.status === 'failed')) finalStatus = 'discarded';
+      else if (!outcome.url) finalStatus = 'failed';
+      else if (last?.status === 'passed') finalStatus = 'passed';
+      else if (last?.status === 'unverified') finalStatus = 'unverified';
+      else finalStatus = 'skipped';
+      return {
+        slot,
+        route: input.visualRoutes?.[slot] ?? (renderedCards[slot] ? 'deterministic_text_card' : 'generative'),
+        styleSource: input.visualStyleSources?.[slot] ?? 'category_fallback',
+        binding,
+        providerReferenceStatus: outcome.referenceStatus ?? (binding.references.length ? 'unsupported' : 'skipped'),
+        outputUrl: outcome.url,
+        finalStatus,
+        attempts,
+      };
+    });
+    return {
+      analysisStatus: input.referenceVisualAnalysis?.status ?? 'none',
+      analysisCacheKey: input.referenceVisualAnalysis?.cacheKey ?? null,
+      bindingMode: input.referenceBindings ? 'slot' : legacyUrls.length > 0 ? 'legacy_all' : 'none',
+      auditEnabled,
+      slots,
+    };
+  }
+
   private emptyDirective(fallbackStrategy: ImageDirective['fallbackStrategy']): ImageDirective {
     return {
       imagePrompt: null,
@@ -413,6 +538,21 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
       directedAt: this.clock(),
     };
   }
+}
+
+function legacyBinding(slot: number, urls: string[]): VisualReferenceBinding {
+  return {
+    slot,
+    mode: 'legacy_all',
+    references: urls.map((url, sourceArrayIndex) => ({
+      sourceArrayIndex,
+      sourceIndex: sourceArrayIndex,
+      url,
+      role: sourceArrayIndex === urls.length - 1 ? 'primary' : 'style',
+    })),
+    primarySourceArrayIndex: urls.length > 0 ? urls.length - 1 : null,
+    primarySourceIndex: urls.length > 0 ? urls.length - 1 : null,
+  };
 }
 
 /** 有界并发 map，结果保序（results[i] 对应 items[i]）。每个 fn 自处理异常、不抛，故池不中断。 */

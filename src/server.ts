@@ -125,6 +125,16 @@ import {
   resolveCoverFormModel,
   resolveCoverFormProvider,
 } from './publish-agent/cover-form-sensor.js';
+import {
+  createVisualReferenceAnalyzer,
+  resolveReferenceVisualModel,
+  resolveReferenceVisualProvider,
+} from './publish-agent/visual-reference-analyzer.js';
+import {
+  createVisualFidelityAuditor,
+  resolveVisualAuditModel,
+  resolveVisualAuditProvider,
+} from './publish-agent/visual-fidelity-auditor.js';
 // change textcard-carousel-form-parity（阶段0 影子）：帖级形态档服务（封面先行 + 内页有界并发判形）。
 import { createPostImageFormProfileService } from './publish-agent/post-image-form-profile.js';
 import { createTextCardRenderer, type TextCardRenderer } from './render/text-card.js';
@@ -137,6 +147,7 @@ import {
   FaithfulDraftWriterRole,
   FidelityAuditorRole,
   CategoryClassifierRole,
+  VisualReferenceAnalyzerRole,
   CoverCardWriterRole,
   ImageSetPlannerRole,
   ImagePromptComposerRole,
@@ -2276,6 +2287,50 @@ async function main(): Promise<void> {
     getModel: resolveCoverFormModel,
     getProvider: resolveCoverFormProvider,
   });
+  // 整组视觉反推使用独立模型解析与旗标；默认关闭。角色恒写键，开后缓存到精选行且不抬 updated_at。
+  const referenceVisualVision = new OpenAiCompatVisionClient({
+    getModel: resolveReferenceVisualModel,
+    getProvider: resolveReferenceVisualProvider,
+    providerRuntime,
+    onCall: (info) => {
+      console.log(
+        `[llm] account=${info.accountId ?? '-'} role=${info.role ?? '-'} provider=${info.provider ?? '-'} model=${info.model} ms=${info.ms} ok=${info.ok} tokens=${info.totalTokens ?? 0}`,
+      );
+      try {
+        tokenUsageStore.add(info);
+      } catch {
+        /* metrics never breaks llm */
+      }
+    },
+    timeoutMs: Number(process.env.AIDCP_REFERENCE_VISUAL_TIMEOUT_MS ?? 90_000),
+  });
+  const visualReferenceAnalyzer = createVisualReferenceAnalyzer({
+    vision: referenceVisualVision,
+    enabled: () => process.env.AIDCP_REFERENCE_VISUAL_ANALYSIS === 'true',
+    getModel: resolveReferenceVisualModel,
+    getProvider: resolveReferenceVisualProvider,
+    ...(curatedContentStore
+      ? { annotate: curatedContentStore.annotateReferenceVisualAnalysis.bind(curatedContentStore) }
+      : {}),
+    logger: console,
+  });
+  const visualAuditVision = new OpenAiCompatVisionClient({
+    getModel: resolveVisualAuditModel,
+    getProvider: resolveVisualAuditProvider,
+    providerRuntime,
+    onCall: (info) => {
+      console.log(
+        `[llm] account=${info.accountId ?? '-'} role=${info.role ?? '-'} provider=${info.provider ?? '-'} model=${info.model} ms=${info.ms} ok=${info.ok} tokens=${info.totalTokens ?? 0}`,
+      );
+      try {
+        tokenUsageStore.add(info);
+      } catch {
+        /* metrics never breaks llm */
+      }
+    },
+    timeoutMs: Number(process.env.AIDCP_VISUAL_AUDIT_TIMEOUT_MS ?? 60_000),
+  });
+  const visualFidelityAuditor = createVisualFidelityAuditor({ vision: visualAuditVision });
   // 帖级形态档服务（change textcard-carousel-form-parity，阶段0 影子）：AIDCP_POST_FORM_PROFILE 默认关。
   // 开=CoverCardWriter 复用封面感知结果 + 对内页 senseAt 有界并发判形、只把形态档写审计（不改渲染）；关=不计算、byte-identical。
   // 依赖感知旗标 AIDCP_COVER_FORM_SENSING（senseAt 受同一 enabled 门控；感知关时形态档恒 generative）。
@@ -2311,6 +2366,7 @@ async function main(): Promise<void> {
   // 选题读正文定张数+主题（配强模型）；指令把主题翻成万相 prompt（配便宜模型）；执行并行出多图；封面恒取首张。
   // 品类判定（change category-adaptive-images-and-judgment）：读正文判品类，供配图选题风格档 + 质量评审复用；flash 可后台配。
   publishOrchestrator.registerRole(new CategoryClassifierRole({ llmClient: roleLlm('publish:CategoryClassifier') }));
+  publishOrchestrator.registerRole(new VisualReferenceAnalyzerRole(visualReferenceAnalyzer, { logger: console }));
   // 封面形态决策（textcard-cover-form）：恒写 coverCardPlan（composer waitAll 三键依赖）；门禁序内感知独立于渲染旗标（影子模式）。
   publishOrchestrator.registerRole(new CoverCardWriterRole({
     llmClient: roleLlm('publish:CoverCardWriter'),
@@ -2363,6 +2419,8 @@ async function main(): Promise<void> {
     ossUploader,
     // change textcard-cover-form：文字卡渲染出口（工厂异步就绪故取 getter）；执行器只读 plan+依赖可用性，不二次读旗标。
     getTextCardRenderer: () => textCardRenderer,
+    visualAuditor: visualFidelityAuditor,
+    auditEnabled: () => process.env.AIDCP_VISUAL_FIDELITY_AUDIT === 'true',
   }));
   publishOrchestrator.registerRole(new CoverSelectorRole());
   // 后处理：清洗（ContentCleaner）→ AI味分（AiFlavorScorer）/ 质量分（QualityScorer）
@@ -3312,6 +3370,7 @@ async function main(): Promise<void> {
                   capturedAt: Date.now(),
                   ...(row.author ? { author: row.author } : {}),
                   ...(useReferenceImages && row.referenceImages.length > 0 ? { images: row.referenceImages } : {}),
+                  ...(useReferenceImages && row.visualAnalysis ? { visualAnalysis: row.visualAnalysis } : {}),
                 },
                 { dbPendingCount },
               );

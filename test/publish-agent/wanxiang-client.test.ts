@@ -113,6 +113,26 @@ describe('WanxiangClient', () => {
     assert.equal(submitBody.parameters.watermark, false);
   });
 
+  test('显式 referenceRoles 时辅助锚在前、primary 最后，并在文本中说明图序角色', async () => {
+    const capture = { bodies: [] as string[] };
+    const fetchImpl = mockFetch([
+      { ok: true, json: async () => ({ output: { task_id: 'task-role', task_status: 'PENDING' } }) },
+      { ok: true, json: async () => ({ output: { task_id: 'task-role', task_status: 'SUCCEEDED', choices: [{ message: { content: [{ image: 'https://cdn/out.png' }] } }] } }) },
+    ], capture);
+    const client = new WanxiangClient({ apiKey: 'k', pollIntervalMs: 1, maxPollAttempts: 2, logger: silentLogger, fetchImpl: fetchImpl as any });
+    await client.generate('原创重构', undefined, {
+      referenceImages: ['https://ref/primary.jpg', 'https://ref/style.jpg'],
+      referenceRoles: [
+        { url: 'https://ref/primary.jpg', role: 'primary', sourceIndex: 0 },
+        { url: 'https://ref/style.jpg', role: 'style', sourceIndex: 1 },
+      ],
+    });
+    const content = JSON.parse(capture.bodies[0]).input.messages[0].content;
+    assert.deepEqual(content.slice(0, 2), [{ image: 'https://ref/style.jpg' }, { image: 'https://ref/primary.jpg' }]);
+    assert.match(content[2].text, /图1=整组抽象风格锚/);
+    assert.match(content[2].text, /图2=本槽主参考/);
+  });
+
   test('referenceImages 路径提交失败时标记 unavailable，不伪装 used', async () => {
     const fetchImpl = mockFetch([
       {

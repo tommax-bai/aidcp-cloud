@@ -133,6 +133,8 @@ export const ROLE_CATALOG: RoleCatalogItem[] = [
   { roleId: 'publish:CategoryClassifier', displayName: '配图品类判定', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: false },
   // change textcard-cover-form：封面形态感知（vision，模型经 env 配置、面板只读展示）+ 文字卡文案（text，可配模型）。
   { roleId: 'publish:CoverFormSensor', displayName: '封面形态感知（模型经 env 配置）', group: 'publish', category: 'publish_create', llmKind: 'vision', tunableTemperature: false },
+  { roleId: 'publish:VisualReferenceAnalyzer', displayName: '整组视觉反推（模型经 env 配置）', group: 'publish', category: 'publish_create', llmKind: 'vision', tunableTemperature: false },
+  { roleId: 'publish:VisualFidelityAuditor', displayName: '配图视觉保真审核（模型经 env 配置）', group: 'publish', category: 'publish_gate', llmKind: 'vision', tunableTemperature: false },
   { roleId: 'publish:CoverCardWriter', displayName: '封面文字卡文案', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
   { roleId: 'publish:ImageSetPlanner', displayName: '配图选题（张数+主题）', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },
   { roleId: 'publish:ImagePromptComposer', displayName: '配图指令（主题→万相prompt）', group: 'publish', category: 'publish_create', llmKind: 'text', tunableTemperature: true },

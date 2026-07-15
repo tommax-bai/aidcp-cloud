@@ -2,6 +2,12 @@ import type { Soul } from '../soul/types.js';
 import type { CuratedReferenceImageFormGuess } from '../cache/curated-content-store.js';
 import type { ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
 import type { PlatformId } from '../platform/index.js';
+import type {
+  ReferenceVisualAnalysis,
+  VisualGenerationRoute,
+  VisualReferenceAudit,
+  VisualReferenceBinding,
+} from './visual-reference-types.js';
 
 // ─── 从 publish/types.ts 迁移的类型 ────────────────────────────────────────────
 
@@ -168,6 +174,8 @@ export interface TriggerInput {
       sourceReference?: PublishSourceReference;
       /** Original note images as generation guidance only; never publish/reuse originals directly. */
       images?: ReferenceImageSnapshot[];
+      /** Cached whole-set visual analysis. Contains visual structure only; never OCR/source copy. */
+      visualAnalysis?: ReferenceVisualAnalysis;
     };
     soul: Soul;
     recentPosts: string[];
@@ -264,6 +272,8 @@ export interface ImageDirective {
   referenceImageStatus?: 'none' | 'used' | 'unsupported' | 'unavailable' | 'skipped';
   /** 封面形态审计（change textcard-cover-form）：决策来源 + 门禁原因 + 渲染结局；旧路径缺省。 */
   coverFormAudit?: CoverFormAudit;
+  /** 逐槽 source→output 绑定与产后保真审计；旧记录/旗标关可缺省。 */
+  visualReferenceAudit?: VisualReferenceAudit;
   /** Facebook 发帖 MVP：来自账号素材池的保留记录，不经过图片模型生成。 */
   facebookMediaReservation?: {
     setId: number;
@@ -432,6 +442,10 @@ export interface ImageTheme {
   subject: string;
   /** 意图/要点（可选，给 prompt 工程更多上下文）。 */
   intent?: string;
+  /** 洗稿图集的源图绑定位置；普通发布缺省。 */
+  sourceArrayIndex?: number;
+  /** 源快照自带 index（审计可读，不作为数组寻址）。 */
+  sourceIndex?: number;
 }
 
 /**
@@ -458,6 +472,14 @@ export interface ImagePlan {
   imageCount: number;
   fallbackStrategy: ImageDirective['fallbackStrategy'];
   referenceImages?: ReferenceImageSnapshot[];
+  /** 逐槽参考绑定；旗标关闭时缺省，ImageGenerator 保持 legacy all-reference 行为。 */
+  referenceBindings?: VisualReferenceBinding[];
+  /** 本次反推快照，供执行审计和面板回放；不存在时走品类风格兜底。 */
+  referenceVisualAnalysis?: ReferenceVisualAnalysis;
+  /** 每槽生成路由，与 imagePrompts 下标对齐。 */
+  visualRoutes?: VisualGenerationRoute[];
+  /** 每槽实际风格来源，与 imagePrompts 下标对齐。 */
+  visualStyleSources?: Array<'reference_analysis' | 'category_fallback'>;
   /**
    * 封面形态盖章透传（change textcard-cover-form）：composer 把 coverCardPlan 原样盖进计划，
    * 使配图计划仍是「唯一完整指令」——执行器只读 plan、绝不二次读环境旗标（防决策/执行裂脑）。
@@ -625,6 +647,8 @@ export interface PublishMetadata {
   referenceImageAudit?: ImageReferenceAudit;
   /** 封面形态审计（change textcard-cover-form）；普通发布/历史行可为空。 */
   coverFormAudit?: CoverFormAudit;
+  /** 参照图逐槽绑定与生成后视觉核验；普通发布/历史行可为空。 */
+  visualReferenceAudit?: VisualReferenceAudit;
   /** Facebook 发帖素材池保留信息，供下发结果回写素材状态。 */
   facebookMedia?: {
     setId: number;
@@ -705,6 +729,8 @@ export interface PipelineFields {
   contentType: ContentType;
   // 配图品类（change category-adaptive-images-and-judgment）：CategoryClassifier 读正文判一次，配图选题 + 质量评审复用。
   postCategory: PostCategory;
+  // 参照图整组视觉反推（image-postcheck-vision-model）：角色恒写 disabled/none/analyzed/partial/unavailable。
+  referenceVisualAnalysis: ReferenceVisualAnalysis;
   // 配图链路三角色（change publish-multi-image）：选题 → 指令 → 生成。
   imageSetPlan: ImageSetPlan;
   // 封面形态决策（change textcard-cover-form）：CoverCardWriter 恒写；composer waitAll 三键合流。

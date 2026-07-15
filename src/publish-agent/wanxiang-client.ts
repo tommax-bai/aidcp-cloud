@@ -98,7 +98,10 @@ export class WanxiangClient implements ImageProvider {
 
   /** 生成图片：提交任务 + 轮询结果 */
   async generate(prompt: string, style?: string, options?: ImageGenerateOptions): Promise<ImageResult> {
-    const referenceImages = normalizeReferenceImages(options?.referenceImages);
+    const explicitRoles = Array.isArray(options?.referenceRoles) && options.referenceRoles.length > 0;
+    const normalizedRoles = normalizeReferenceRoles(options?.referenceRoles, options?.referenceImages);
+    // Wan 的 1K/2K 输出比例跟随最后一张输入图；辅助锚在前、primary 在最后。
+    const referenceImages = normalizedRoles.map((item) => item.url);
     const referenceMode = referenceImages.length > 0;
     const withReferenceStatus = (result: ImageResult, status: NonNullable<ImageResult['referenceStatus']>): ImageResult =>
       referenceMode ? { ...result, referenceStatus: status, referenceUsed: status === 'used' } : result;
@@ -110,7 +113,7 @@ export class WanxiangClient implements ImageProvider {
     }
 
     // 1. 提交生成任务
-    const submitResult = await this.submitTask(prompt, style, referenceImages);
+    const submitResult = await this.submitTask(prompt, style, normalizedRoles, explicitRoles);
     if (submitResult.error) {
       return withReferenceStatus(submitResult, 'unavailable');
     }
@@ -122,12 +125,21 @@ export class WanxiangClient implements ImageProvider {
   }
 
   /** 提交异步生成任务 */
-  private async submitTask(prompt: string, style: string | undefined, referenceImages: string[]): Promise<ImageResult> {
+  private async submitTask(
+    prompt: string,
+    style: string | undefined,
+    references: Array<{ url: string; role: 'style' | 'identity' | 'primary'; sourceIndex: number }>,
+    explicitRoles: boolean,
+  ): Promise<ImageResult> {
     // wan2.7 无独立 style 参数：风格并入提示词文本。
-    const text = style ? `${prompt}，风格：${style}` : prompt;
-    const content: WanxiangContentItem[] = [...referenceImages.map((image) => ({ image })), { text }];
+    const roleGuide = explicitRoles && references.length > 0
+      ? `参考图角色：${references.map((item, i) => `图${i + 1}=${item.role === 'primary' ? '本槽主参考，优先保持构图/主体关系' : item.role === 'identity' ? '身份一致性锚' : '整组抽象风格锚'}`).join('；')}。只做原创重构，不复制原图文字、水印或像素细节。`
+      : '';
+    const styledPrompt = style ? `${prompt}，风格：${style}` : prompt;
+    const text = roleGuide ? `${roleGuide}\n${styledPrompt}` : styledPrompt;
+    const content: WanxiangContentItem[] = [...references.map((item) => ({ image: item.url })), { text }];
     const parameters: Record<string, unknown> = {
-      size: referenceImages.length > 0 ? this.referenceSize : this.defaultSize,
+      size: references.length > 0 ? this.referenceSize : this.defaultSize,
       n: 1,
       watermark: false,
     };
@@ -229,6 +241,29 @@ export class WanxiangClient implements ImageProvider {
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
+}
+
+function normalizeReferenceRoles(
+  roles: ImageGenerateOptions['referenceRoles'],
+  fallbackImages: ImageGenerateOptions['referenceImages'],
+): Array<{ url: string; role: 'style' | 'identity' | 'primary'; sourceIndex: number }> {
+  if (Array.isArray(roles) && roles.length > 0) {
+    const seen = new Set<string>();
+    const normalized = roles.flatMap((item, index) => {
+      const url = typeof item?.url === 'string' ? item.url.trim() : '';
+      if (!url || seen.has(url)) return [];
+      seen.add(url);
+      const role = item.role === 'style' || item.role === 'identity' || item.role === 'primary' ? item.role : 'style';
+      const sourceIndex = Number.isInteger(item.sourceIndex) ? item.sourceIndex : index;
+      return [{ url, role, sourceIndex }];
+    }).slice(0, 9);
+    return normalized.sort((a, b) => Number(a.role === 'primary') - Number(b.role === 'primary'));
+  }
+  return normalizeReferenceImages(fallbackImages).map((url, sourceIndex, all) => ({
+    url,
+    sourceIndex,
+    role: sourceIndex === all.length - 1 ? 'primary' as const : 'style' as const,
+  }));
 }
 
 function normalizeReferenceImages(images: string[] | undefined): string[] {

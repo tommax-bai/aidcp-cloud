@@ -296,8 +296,11 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     // change split-topic-roles：publishMetadata 已是等待键，直接用入参（消除原 context.get 取值竞态）。
     if (publishMetadata && this.store.recordMetadata) {
       const metadataWithAudit = this.withFacebookMediaReservation(
-        this.withCoverFormAudit(
-          this.withReferenceImageAudit({ ...publishMetadata, platform }, context, assembled.imageUrls.length),
+        this.withVisualReferenceAudit(
+          this.withCoverFormAudit(
+            this.withReferenceImageAudit({ ...publishMetadata, platform }, context, assembled.imageUrls.length),
+            context,
+          ),
           context,
         ),
         context,
@@ -448,6 +451,13 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     const audit = context.get('imageDirective')?.coverFormAudit;
     if (!audit) return metadata;
     return { ...metadata, coverFormAudit: audit };
+  }
+
+  /** 逐槽参考绑定与视觉核验原样并列落库；缺省不编造。 */
+  private withVisualReferenceAudit(metadata: PublishMetadata, context: PipelineContext<PipelineFields>): PublishMetadata {
+    const audit = context.get('imageDirective')?.visualReferenceAudit;
+    if (!audit) return metadata;
+    return { ...metadata, visualReferenceAudit: audit };
   }
 
   private buildReferenceImageAudit(

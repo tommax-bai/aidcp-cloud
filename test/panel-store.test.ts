@@ -215,6 +215,13 @@ test('publishedHistory 映射参照洗稿来稿快照；普通发布来源为 nu
             providerClaimedUsed: false,
             generatedCount: 3,
           },
+          visualReferenceAudit: {
+            analysisStatus: 'partial',
+            analysisCacheKey: 'visual-cache-1',
+            bindingMode: 'slot',
+            auditEnabled: true,
+            slots: [],
+          },
         },
         source_reference: sourceReference,
       },
@@ -250,6 +257,14 @@ test('publishedHistory 映射参照洗稿来稿快照；普通发布来源为 nu
     providerClaimedUsed: false,
     generatedCount: 3,
   });
+  assert.deepEqual(rows[0].visualReferenceAudit, {
+    analysisStatus: 'partial',
+    analysisCacheKey: 'visual-cache-1',
+    bindingMode: 'slot',
+    auditEnabled: true,
+    slots: [],
+  });
   assert.equal(rows[1].sourceReference, null);
   assert.equal(rows[1].imageReferenceAudit, null);
+  assert.equal(rows[1].visualReferenceAudit, null);
 });

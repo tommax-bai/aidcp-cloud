@@ -89,6 +89,7 @@ describe('ImageSetPlannerRole — 洗稿张数对齐源稿（rewrite-image-count
     assert.equal(plan.imageCount, 5, '对齐源稿有效图数 5');
     assert.equal(plan.themes.length, 5, '补齐到 5 项');
     assert.equal(plan.themes[0].subject, '钩子', '图 0 钩子/封面位保留');
+    assert.deepEqual(plan.themes.map((t) => t.sourceArrayIndex), [0, 1, 2, 3, 4], '源图顺序盖进主题');
   });
 
   test('洗稿源 12 张（超上限 9）→ 夹回 9', async () => {
@@ -118,10 +119,22 @@ describe('ImageSetPlannerRole — 洗稿张数对齐源稿（rewrite-image-count
     assert.equal(plan.imageCount, 9, '非洗稿在上限内由内容驱动，最多 9');
   });
 
-  test('洗稿 + LLM 失败 → 降级仍只 1 张（不按源数凑泛图）', async () => {
+  test('洗稿 + LLM 失败 → 仍保持源图槽数和顺序，避免参照绑定缩水', async () => {
     const llm = { chat: async () => { throw new Error('LLM down'); }, complete: async () => '' };
     const plan = await runWithSource(llm, usableSrc(9), 9, 2600);
-    assert.equal(plan.imageCount, 1, 'LLM 失败诚实降级 1 张，不强凑源数');
+    assert.equal(plan.imageCount, 9, '参照洗稿失败兜底仍对齐 9 个源槽');
+    assert.deepEqual(plan.themes.map((t) => t.sourceArrayIndex), Array.from({ length: 9 }, (_, i) => i));
+  });
+
+  test('1/3/8/9 图均建立等量、保序 source slot', async (t) => {
+    for (const count of [1, 3, 8, 9]) {
+      await t.test(`${count} images`, async () => {
+        const llm = { chat: async () => JSON.stringify({ imageCount: count, themes: Array.from({ length: count }, (_, i) => ({ subject: `t${i}` })), styleHint: null }), complete: async () => '' };
+        const plan = await runWithSource(llm, usableSrc(count), 9);
+        assert.equal(plan.imageCount, count);
+        assert.deepEqual(plan.themes.map((theme) => theme.sourceArrayIndex), Array.from({ length: count }, (_, i) => i));
+      });
+    }
   });
 });
 

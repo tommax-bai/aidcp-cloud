@@ -20,6 +20,7 @@ import {
 } from '../risk/index.js';
 import type { FeedAction } from '../cache/interaction-feed-store.js';
 import type { AlertSeverity } from '../feishu/types.js';
+import type { VisualReferenceAudit } from '../publish-agent/visual-reference-types.js';
 
 const { Pool } = pg;
 
@@ -117,6 +118,8 @@ export interface PanelPublish {
   imageReferenceAudit: PanelImageReferenceAudit | null;
   /** 封面形态审计（change textcard-cover-form）；普通发布/历史行为 null。 */
   coverFormAudit: PanelCoverFormAudit | null;
+  /** source→slot→output 与产后视觉核验；普通发布/历史行为 null。 */
+  visualReferenceAudit?: VisualReferenceAudit | null;
   /** 参照洗稿来稿快照；普通发布为 null。 */
   sourceReference: PanelPublishSourceReference | null;
 }
@@ -296,6 +299,16 @@ function parseCoverFormAudit(raw: unknown): PanelCoverFormAudit | null {
         }
       : null,
   };
+}
+
+function parseVisualReferenceAudit(raw: unknown): VisualReferenceAudit | null {
+  const meta = parseJsonObject(raw);
+  const audit = parseJsonObject(meta?.visualReferenceAudit);
+  if (!audit || !Array.isArray(audit.slots)) return null;
+  if (!['disabled', 'none', 'analyzed', 'partial', 'unavailable'].includes(String(audit.analysisStatus))) return null;
+  if (!['slot', 'legacy_all', 'none'].includes(String(audit.bindingMode))) return null;
+  // 逐槽字段由发布域强类型生成；面板只做顶层白名单和 null-safe，避免历史脏行拖垮整页。
+  return audit as unknown as VisualReferenceAudit;
 }
 
 function parseSourceReference(raw: unknown): PanelPublishSourceReference | null {
@@ -491,6 +504,7 @@ export class PgPanelStore implements PanelStoreReader {
       imagesAttachedCount: Number(r.images_attached_count ?? 0),
       imageReferenceAudit: parseImageReferenceAudit(r.publish_metadata),
       coverFormAudit: parseCoverFormAudit(r.publish_metadata),
+      visualReferenceAudit: parseVisualReferenceAudit(r.publish_metadata),
       sourceReference: parseSourceReference(r.source_reference),
     }));
   }

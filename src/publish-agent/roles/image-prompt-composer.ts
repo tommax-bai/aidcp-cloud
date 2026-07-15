@@ -3,7 +3,13 @@ import type { RoleConfig } from './base-role.js';
 import type { PipelineContext } from '../pipeline-context.js';
 import type { PipelineFields, ImageSetPlan, ImagePlan, ImageTheme, ImageCategory, CoverCardPlan } from '../types.js';
 import { buildImagePromptComposerPrompt, resolveStyleProfile } from '../prompts.js';
-import { buildReferenceImageGuidance, referenceImagesForGeneration, referenceImagesFromSnapshot } from '../reference-image-guidance.js';
+import { buildReferenceImageGuidance, referenceImageUrl, referenceImagesForGeneration, referenceImagesFromSnapshot } from '../reference-image-guidance.js';
+import type {
+  ReferenceVisualAnalysis,
+  VisualFrameSpec,
+  VisualGenerationRoute,
+  VisualReferenceBinding,
+} from '../visual-reference-types.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
 
 /**
@@ -28,32 +34,46 @@ interface ComposerInput {
   plan: ImageSetPlan;
   category: ImageCategory;
   coverPlan: CoverCardPlan | undefined;
+  visualAnalysis: ReferenceVisualAnalysis | undefined;
 }
 
 export interface ImagePromptComposerDeps {
   llmClient: ChatLlmClient;
   /** 近重复 Jaccard 阈值（主体 token 集），≥ 此值判近重复丢弃（默认 0.85）。 */
   dedupThreshold?: number;
+  /** 源风格是否替代通用品类风格；默认按 env 动态读取。 */
+  sourceStyleEnabled?: () => boolean;
+  /** 是否建立逐槽参考绑定；默认按 env 动态读取。 */
+  bindingEnabled?: () => boolean;
   clock?: () => number;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
 
 export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, ImagePlan> {
-  readonly config: RoleConfig = {
-    name: 'ImagePromptComposer',
-    watchKeys: ['imageSetPlan', 'postCategory', 'coverCardPlan'],
-    waitAll: true,
-    timeoutMs: IMAGE_PROMPT_TIMEOUT_MS,
-    fallback: 'default',
-  };
+  readonly config: RoleConfig;
   protected readonly outputKey = 'imagePlan' as const;
   private llmClient: ChatLlmClient;
   private dedupThreshold: number;
+  private sourceStyleEnabled: () => boolean;
+  private bindingEnabled: () => boolean;
 
   constructor(deps: ImagePromptComposerDeps) {
     super({ logger: deps.logger, clock: deps.clock });
     this.llmClient = deps.llmClient;
     this.dedupThreshold = deps.dedupThreshold ?? 0.85;
+    this.sourceStyleEnabled = deps.sourceStyleEnabled ?? (() => process.env.AIDCP_REFERENCE_SOURCE_STYLE === 'true');
+    this.bindingEnabled = deps.bindingEnabled ?? (() => process.env.AIDCP_REFERENCE_VISUAL_BINDING === 'true');
+    // 影子分析不能拖慢现有发布链：只有源风格真正参与 prompt 时才把分析键纳入 waitAll。
+    // flag-off 也因此不依赖新角色是否注册，旧编排器保持零回归。
+    this.config = {
+      name: 'ImagePromptComposer',
+      watchKeys: this.sourceStyleEnabled()
+        ? ['imageSetPlan', 'postCategory', 'coverCardPlan', 'referenceVisualAnalysis']
+        : ['imageSetPlan', 'postCategory', 'coverCardPlan'],
+      waitAll: true,
+      timeoutMs: IMAGE_PROMPT_TIMEOUT_MS,
+      fallback: 'default',
+    };
   }
 
   protected extractInput(snapshot: Partial<PipelineFields>): ComposerInput {
@@ -61,6 +81,7 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
       plan: snapshot.imageSetPlan!,
       category: snapshot.postCategory?.category ?? 'general',
       coverPlan: snapshot.coverCardPlan,
+      visualAnalysis: snapshot.referenceVisualAnalysis,
     };
   }
 
@@ -71,23 +92,34 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
     }
     const snapshot = context.snapshot();
     const referenceImages = referenceImagesForGeneration(referenceImagesFromSnapshot(snapshot));
-    const referenceImageGuidance = buildReferenceImageGuidance(snapshot);
+    const analysisUsable =
+      this.sourceStyleEnabled() &&
+      (input.visualAnalysis?.status === 'analyzed' || input.visualAnalysis?.status === 'partial') &&
+      !!input.visualAnalysis.frameSpecs?.length;
+    const legacyReferenceImageGuidance = buildReferenceImageGuidance(snapshot);
 
     // 每主题一条中文主体描述（并行，保序；某条 LLM 失败退回主体文本 fallback，不让该张凭空消失）。
     const accountId = this.accountIdFrom(context);
     const composed = await Promise.all(
-      plan.themes.map((theme) => this.composeTheme(theme, plan.styleHint, referenceImageGuidance, accountId)),
+      plan.themes.map((theme) => {
+        const frame = analysisUsable ? frameForTheme(input.visualAnalysis!, theme) : undefined;
+        const guidance = frame
+          ? buildVisualFrameGuidance(frame, input.visualAnalysis!)
+          : legacyReferenceImageGuidance;
+        return this.composeTheme(theme, plan.styleHint, guidance, accountId);
+      }),
     );
 
     // 轮播（change textcard-carousel-form-parity 阶段1）：cardSet 非空时**跳过去重**，保 imagePrompts 张数 =
     // imageCount = cardSet 长度（每槽渲一张不同的卡、不存在近重复画面；生成式 prompt 仅作单槽渲染失败兜底）。
     const carousel = !!input.coverPlan?.cardSet;
+    const slotBindingEnabled = this.bindingEnabled() && referenceImages.length > 0;
     // 去重护栏：按主体近重复比对，命中即丢——但永远保住第 0 张（封面位）。轮播跳过。
-    const kept: string[] = [];
+    const kept: Array<{ desc: string; theme: ImageTheme; originalIndex: number }> = [];
     const keptTokens: Set<string>[] = [];
     composed.forEach((desc, idx) => {
-      if (carousel || idx === 0) {
-        kept.push(desc);
+      if (carousel || slotBindingEnabled || idx === 0) {
+        kept.push({ desc, theme: plan.themes[idx], originalIndex: idx });
         keptTokens.push(tokenize(desc));
         return;
       }
@@ -97,15 +129,26 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
         this.logger.log(`[ImagePromptComposer] 近重复主体丢弃第 ${idx} 张（不补不复用）`);
         return;
       }
-      kept.push(desc);
+      kept.push({ desc, theme: plan.themes[idx], originalIndex: idx });
       keptTokens.push(tks);
     });
 
     // 拼本帖品类风格档（系统注入，非 LLM 产）：图0封面变体、图1..N内页 styleBase，逐字复用守帧内一致。
     const profile = resolveStyleProfile(input.category);
-    const imagePrompts = kept.map(
-      (desc, i) => `${desc}. ${i === 0 ? profile.coverStyleBase : profile.styleBase}`,
-    );
+    const styleSources: Array<'reference_analysis' | 'category_fallback'> = [];
+    const visualRoutes: VisualGenerationRoute[] = [];
+    const imagePrompts = kept.map((entry, slot) => {
+      const frame = analysisUsable ? frameForTheme(input.visualAnalysis!, entry.theme) : undefined;
+      styleSources.push(frame ? 'reference_analysis' : 'category_fallback');
+      visualRoutes.push(routeForFrame(frame, !!(input.coverPlan?.cardSet?.[entry.originalIndex] ?? (entry.originalIndex === 0 && input.coverPlan?.coverForm === 'text_card' && input.coverPlan.card))));
+      const style = frame
+        ? buildSourceStylePrompt(frame, input.visualAnalysis!, slot === 0)
+        : slot === 0 ? profile.coverStyleBase : profile.styleBase;
+      return `${entry.desc}. ${style}`;
+    });
+    const referenceBindings = slotBindingEnabled
+      ? buildSlotBindings(kept.map((entry) => entry.theme), referenceImages)
+      : undefined;
 
     return this.stampCover(
       {
@@ -115,6 +158,9 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
         imageCount: imagePrompts.length,
         fallbackStrategy: 'skip',
         ...(referenceImages.length > 0 ? { referenceImages } : {}),
+        ...(referenceBindings ? { referenceBindings } : {}),
+        ...(analysisUsable ? { referenceVisualAnalysis: input.visualAnalysis } : {}),
+        ...(analysisUsable || slotBindingEnabled ? { visualRoutes, visualStyleSources: styleSources } : {}),
         plannedAt: this.clock(),
       },
       input.coverPlan,
@@ -169,6 +215,69 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
       return theme.intent ? `${theme.subject}，${theme.intent}` : theme.subject;
     }
   }
+}
+
+function frameForTheme(analysis: ReferenceVisualAnalysis, theme: ImageTheme): VisualFrameSpec | undefined {
+  if (theme.sourceArrayIndex === undefined) return undefined;
+  const frame = analysis.frameSpecs?.find((candidate) => candidate.sourceArrayIndex === theme.sourceArrayIndex);
+  return frame && frame.confidence >= 0.55 ? frame : undefined;
+}
+
+/** 只描述结构与抽象风格，刻意不含 URL/原图具体文字。 */
+export function buildVisualFrameGuidance(frame: VisualFrameSpec, analysis: ReferenceVisualAnalysis): string {
+  const cluster = analysis.styleClusters?.find((item) => item.id === frame.clusterId);
+  return [
+    '以下是视觉模型对主参考图的结构化反推，只用于原创重构；不要复制原图、文字、数字、账号、水印或标识。',
+    `视觉类型：${frame.kind}；序列角色：${frame.sequenceRole}`,
+    `主体：${frame.common.subject}`,
+    `构图：${frame.common.composition}；视觉层级：${frame.common.focalHierarchy}`,
+    `色彩：${frame.common.palette.join('、') || '未指定'}；光影/对比：${frame.common.lightingOrContrast}`,
+    `留白：${frame.common.negativeSpace}；质感：${frame.common.texture}；氛围：${frame.common.mood}`,
+    `类型专用结构：${JSON.stringify(frame.details)}`,
+    ...(cluster ? [`所属风格簇：${cluster.summary}`] : []),
+    ...(analysis.setStyleBible ? [`整组视觉语言：${analysis.setStyleBible.summary}`] : []),
+  ].join('\n');
+}
+
+function buildSourceStylePrompt(frame: VisualFrameSpec, analysis: ReferenceVisualAnalysis, cover: boolean): string {
+  const bible = analysis.setStyleBible;
+  const cluster = analysis.styleClusters?.find((item) => item.id === frame.clusterId);
+  return [
+    '原创视觉重构，保持主参考图的画面类型、构图关系、视觉层级与抽象风格，但更换具体表达并避免像素级复刻',
+    `类型 ${frame.kind}，${frame.common.composition}，${frame.common.focalHierarchy}`,
+    `${frame.common.lightingOrContrast}，${frame.common.texture}，${frame.common.mood}`,
+    `配色 ${frame.common.palette.join('、') || bible?.palette.join('、') || '协调配色'}`,
+    cluster?.summary ?? '',
+    bible?.continuityRules.join('，') ?? '',
+    cover ? '顶部保留干净标题留白（标题后期叠加）' : '',
+    'vertical 3:4, no copied text, no watermark, no logo, no QR code, no realistic recognizable face unless explicitly required by the rewritten content',
+  ].filter(Boolean).join('，');
+}
+
+function buildSlotBindings(
+  themes: ImageTheme[],
+  images: ReturnType<typeof referenceImagesForGeneration>,
+): VisualReferenceBinding[] {
+  return themes.map((theme, slot) => {
+    const sourceArrayIndex = theme.sourceArrayIndex ?? slot;
+    const image = images[sourceArrayIndex];
+    const url = image ? referenceImageUrl(image) : null;
+    const sourceIndex = image && Number.isInteger(image.index) ? image.index : sourceArrayIndex;
+    return {
+      slot,
+      mode: 'slot',
+      references: url ? [{ sourceArrayIndex, sourceIndex, url, role: 'primary' as const }] : [],
+      primarySourceArrayIndex: url ? sourceArrayIndex : null,
+      primarySourceIndex: url ? sourceIndex : null,
+    };
+  });
+}
+
+function routeForFrame(frame: VisualFrameSpec | undefined, deterministicCard: boolean): VisualGenerationRoute {
+  if (deterministicCard) return 'deterministic_text_card';
+  if (frame?.kind === 'ui_document' || frame?.kind === 'infographic_chart') return 'specialized_generative';
+  if (frame?.kind === 'collage_mixed') return 'region_guided_generative';
+  return 'generative';
 }
 
 /** 归一化为 token 集（小写、只留字母数字与 CJK、按空白切）。 */

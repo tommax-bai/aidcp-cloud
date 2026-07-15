@@ -20,6 +20,9 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from './pg-anchor-cache.js';
+import type { ReferenceVisualAnalysis } from '../publish-agent/visual-reference-types.js';
+import type { VisualAnalysisAnchor } from '../publish-agent/visual-reference-analyzer.js';
+import { normalizeReferenceVisualAnalysis } from '../publish-agent/visual-reference-analyzer.js';
 
 const { Pool } = pg;
 
@@ -135,6 +138,7 @@ export interface CuratedSelectItem {
   botLiked: boolean;
   botCollected: boolean;
   referenceImages: CuratedReferenceImage[];
+  visualAnalysis?: ReferenceVisualAnalysis;
 }
 
 /**
@@ -162,6 +166,7 @@ export interface CuratedPanelRow {
   firstSeenAt: number;
   updatedAt: number;
   referenceImages: CuratedReferenceImage[];
+  visualAnalysis?: ReferenceVisualAnalysis;
 }
 
 /** 面板列表结果：当前筛选下的一页行 + 一致的总条数（供分页器）。 */
@@ -213,6 +218,7 @@ CREATE TABLE IF NOT EXISTS curated_content (
   comment_count      INT,
   counts_captured_at TIMESTAMPTZ,
   reference_images   JSONB NOT NULL DEFAULT '[]'::jsonb,
+  visual_analysis    JSONB,
   bot_liked          BOOLEAN NOT NULL DEFAULT false,
   bot_collected      BOOLEAN NOT NULL DEFAULT false,
   admit_reason       TEXT,
@@ -220,6 +226,7 @@ CREATE TABLE IF NOT EXISTS curated_content (
   updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE curated_content ADD COLUMN IF NOT EXISTS reference_images JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE curated_content ADD COLUMN IF NOT EXISTS visual_analysis JSONB;
 CREATE INDEX IF NOT EXISTS idx_curated_content_topics ON curated_content USING GIN(topics);
 CREATE INDEX IF NOT EXISTS idx_curated_content_account_updated ON curated_content (account_id, updated_at DESC);
 
@@ -442,6 +449,7 @@ interface CuratedRow {
   bot_liked: boolean;
   bot_collected: boolean;
   reference_images: unknown;
+  visual_analysis: unknown;
 }
 
 /** 面板列表用的完整 snake-case 行（含 id 与全字段；total_count 来自 COUNT(*) OVER()）。 */
@@ -466,10 +474,12 @@ interface CuratedPanelDbRow {
   updated_at: Date;
   total_count?: number | string;
   reference_images: unknown;
+  visual_analysis: unknown;
 }
 
 /** snake-case 行 → 面板 camelCase 视图（时间戳转 epoch ms、INT 诚实置空）。 */
 function rowToPanelView(r: CuratedPanelDbRow): CuratedPanelRow {
+  const visualAnalysis = normalizeReferenceVisualAnalysis(r.visual_analysis);
   return {
     id: r.id,
     accountId: r.account_id,
@@ -490,6 +500,7 @@ function rowToPanelView(r: CuratedPanelDbRow): CuratedPanelRow {
     firstSeenAt: r.first_seen_at.getTime(),
     updatedAt: r.updated_at.getTime(),
     referenceImages: parseReferenceImages(r.reference_images),
+    ...(visualAnalysis ? { visualAnalysis } : {}),
   };
 }
 
@@ -564,6 +575,11 @@ export class CuratedContentStore {
                                 WHEN EXCLUDED.reference_images = '[]'::jsonb THEN curated_content.reference_images
                                 ELSE EXCLUDED.reference_images
                               END,
+         visual_analysis    = CASE
+                                WHEN EXCLUDED.reference_images = '[]'::jsonb THEN curated_content.visual_analysis
+                                WHEN EXCLUDED.reference_images = curated_content.reference_images THEN curated_content.visual_analysis
+                                ELSE NULL
+                              END,
          like_count         = EXCLUDED.like_count,
          collect_count      = EXCLUDED.collect_count,
          comment_count      = EXCLUDED.comment_count,
@@ -601,6 +617,7 @@ export class CuratedContentStore {
     const { rowCount } = await this.pool.query(
       `UPDATE curated_content
           SET reference_images = $4::jsonb,
+              visual_analysis = NULL,
               updated_at = now()
         WHERE account_id = $1
           AND source_id = $2
@@ -655,6 +672,59 @@ export class CuratedContentStore {
           AND (reference_images #> ARRAY[$2::text, 'capturedAt'] IS NULL
                OR reference_images #> ARRAY[$2::text, 'capturedAt'] = to_jsonb($4::bigint))`,
       [rowId, String(index), JSON.stringify(normalized), normalized.detectedFor],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
+  /**
+   * 整组视觉分析缓存回写。只写 visual_analysis、不抬 updated_at；WHERE 同语句核对本次实际分析的
+   * 前 N 张有序图片锚（index/capturedAt/usableUrl），浏览闭环若已换图则弃写，避免旧分析覆盖新素材。
+   */
+  async annotateReferenceVisualAnalysis(
+    rowId: number,
+    analysis: ReferenceVisualAnalysis,
+    anchors: VisualAnalysisAnchor[],
+  ): Promise<boolean> {
+    const normalized = normalizeReferenceVisualAnalysis(analysis);
+    if (
+      !normalized ||
+      (normalized.status !== 'analyzed' && normalized.status !== 'partial') ||
+      !Number.isInteger(rowId) ||
+      rowId <= 0 ||
+      anchors.length === 0 ||
+      anchors.length > 9
+    ) return false;
+    const expected = anchors.map((anchor) => ({
+      sourceArrayIndex: anchor.sourceArrayIndex,
+      sourceIndex: anchor.sourceIndex,
+      capturedAt: anchor.capturedAt,
+      url: anchor.url,
+    }));
+    const { rowCount } = await this.pool.query(
+      `UPDATE curated_content
+          SET visual_analysis = $2::jsonb
+        WHERE id = $1
+          AND (
+            SELECT COALESCE(
+              jsonb_agg(
+                jsonb_build_object(
+                  'sourceArrayIndex', src.usable_pos - 1,
+                  'sourceIndex', COALESCE((src.item->>'index')::int, src.usable_pos - 1),
+                  'capturedAt', COALESCE((src.item->>'capturedAt')::bigint, 0),
+                  'url', COALESCE(NULLIF(src.item->>'ossUrl', ''), src.item->>'sourceUrl')
+                ) ORDER BY src.pos
+              ),
+              '[]'::jsonb
+            )
+            FROM (
+              SELECT item, pos, row_number() OVER (ORDER BY pos) AS usable_pos
+                FROM jsonb_array_elements(reference_images) WITH ORDINALITY AS images(item, pos)
+               WHERE COALESCE(NULLIF(item->>'ossUrl', ''), NULLIF(item->>'sourceUrl', '')) IS NOT NULL
+               ORDER BY pos
+               LIMIT $4
+            ) src
+          ) = $3::jsonb`,
+      [rowId, JSON.stringify(normalized), JSON.stringify(expected), anchors.length],
     );
     return (rowCount ?? 0) > 0;
   }
@@ -773,7 +843,7 @@ export class CuratedContentStore {
     const limitIdx = params.length;
     const { rows } = await this.pool.query<CuratedRow>(
       `SELECT source_id, content_type, title, body, author, topics,
-              like_count, collect_count, bot_liked, bot_collected, reference_images
+              like_count, collect_count, bot_liked, bot_collected, reference_images, visual_analysis
        FROM curated_content
        WHERE ${conds.join(' AND ')}
        ORDER BY (CASE WHEN bot_collected THEN 2 ELSE 0 END + CASE WHEN bot_liked THEN 1 ELSE 0 END) DESC,
@@ -783,19 +853,23 @@ export class CuratedContentStore {
        LIMIT $${limitIdx}`,
       params,
     );
-    return rows.map((r) => ({
-      sourceId: r.source_id,
-      contentType: normalizeContentType(r.content_type),
-      title: r.title ?? '',
-      body: r.body ?? '',
-      author: r.author ?? undefined,
-      topics: r.topics ?? [],
-      likeCount: toNumOrNull(r.like_count),
-      collectCount: toNumOrNull(r.collect_count),
-      botLiked: r.bot_liked,
-      botCollected: r.bot_collected,
-      referenceImages: parseReferenceImages(r.reference_images),
-    }));
+    return rows.map((r) => {
+      const visualAnalysis = normalizeReferenceVisualAnalysis(r.visual_analysis);
+      return {
+        sourceId: r.source_id,
+        contentType: normalizeContentType(r.content_type),
+        title: r.title ?? '',
+        body: r.body ?? '',
+        author: r.author ?? undefined,
+        topics: r.topics ?? [],
+        likeCount: toNumOrNull(r.like_count),
+        collectCount: toNumOrNull(r.collect_count),
+        botLiked: r.bot_liked,
+        botCollected: r.bot_collected,
+        referenceImages: parseReferenceImages(r.reference_images),
+        ...(visualAnalysis ? { visualAnalysis } : {}),
+      };
+    });
   }
 
   // ── 后台管理（change curated-content-admin-page）：只读检索 + 治理写 ──────────────
@@ -835,6 +909,7 @@ export class CuratedContentStore {
       const { rows } = await this.pool.query<CuratedPanelDbRow>(
         `SELECT id, account_id, content_type, source_id, title, body, author, source_url, topics,
                 like_count, collect_count, comment_count, counts_captured_at, reference_images,
+                visual_analysis,
                 bot_liked, bot_collected, admit_reason, first_seen_at, updated_at,
                 COUNT(*) OVER() AS total_count
          FROM curated_content
@@ -915,6 +990,7 @@ export class CuratedContentStore {
       const { rows } = await this.pool.query<CuratedPanelDbRow>(
         `SELECT id, account_id, content_type, source_id, title, body, author, source_url, topics,
                 like_count, collect_count, comment_count, counts_captured_at, reference_images,
+                visual_analysis,
                 bot_liked, bot_collected, admit_reason, first_seen_at, updated_at
          FROM curated_content
          WHERE id = $1 AND account_id = $2`,

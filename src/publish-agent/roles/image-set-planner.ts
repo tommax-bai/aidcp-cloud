@@ -1,7 +1,7 @@
 import { BasePublishRole } from './base-role.js';
 import type { RoleConfig } from './base-role.js';
 import type { PipelineContext } from '../pipeline-context.js';
-import type { PipelineFields, CreatedContent, ImageSetPlan, ImageTheme } from '../types.js';
+import type { PipelineFields, CreatedContent, ImageSetPlan, ImageTheme, ReferenceImageSnapshot } from '../types.js';
 import { buildImageSetPlanPrompt, IMAGE_COUNT_HARD_MAX } from '../prompts.js';
 import { referenceImagesForGeneration } from '../reference-image-guidance.js';
 import { executeWithFallback } from '../retry-strategy.js';
@@ -66,7 +66,8 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
     // 洗稿对齐（rewrite-image-count-parity）：源参照笔记有效图 ≥1 张 → 目标张数 = clamp(有效源图数, 1, maxImages)；
     // 有效口径同生图参考图（referenceImagesForGeneration）。非洗稿 / 无有效源图 → undefined，维持内容驱动。
     const refImages = context.snapshot().trigger?.generateInput?.referenceNote?.images ?? [];
-    const usableSourceCount = referenceImagesForGeneration(refImages).length;
+    const usableSourceImages = referenceImagesForGeneration(refImages);
+    const usableSourceCount = usableSourceImages.length;
     const targetCount = usableSourceCount >= 1 ? Math.min(usableSourceCount, this.maxImages) : undefined;
 
     const { result, usedFallback } = await executeWithFallback<ParsedPlan | null>(
@@ -82,9 +83,9 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
 
     if (usedFallback || !result) {
       this.logger.warn('[ImageSetPlanner] LLM 失败，降级朝更少图退（1 张通用主题）');
-      return this.degradePlan(input);
+      return this.degradePlan(input, targetCount, usableSourceImages);
     }
-    return this.buildPlan(result, input, targetCount);
+    return this.buildPlan(result, input, targetCount, usableSourceImages);
   }
 
   protected override getDefaultOutput(): ImageSetPlan {
@@ -93,12 +94,27 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
   }
 
   /** LLM 失败降级：图文帖必须有图 → 保 1 张，主体取标题（通用示意）。 */
-  private degradePlan(input: CreatedContent): ImageSetPlan {
+  private degradePlan(
+    input: CreatedContent,
+    targetCount?: number,
+    sourceImages: ReferenceImageSnapshot[] = [],
+  ): ImageSetPlan {
     const subject = (input.title || '文章主题').slice(0, 24);
-    return { wantImage: true, imageCount: 1, themes: [{ subject: `${subject} 主题示意` }], styleHint: null, plannedAt: this.clock() };
+    const count = targetCount ?? 1;
+    const themes = Array.from({ length: count }, (_, i) => this.bindSource(
+      { subject: i === 0 ? `${subject} 主题示意` : `${subject} 补充图 ${i + 1}` },
+      sourceImages?.[i],
+      i,
+    ));
+    return { wantImage: true, imageCount: themes.length, themes, styleHint: null, plannedAt: this.clock() };
   }
 
-  private buildPlan(p: ParsedPlan, input: CreatedContent, targetCount?: number): ImageSetPlan {
+  private buildPlan(
+    p: ParsedPlan,
+    input: CreatedContent,
+    targetCount?: number,
+    sourceImages: ReferenceImageSnapshot[] = [],
+  ): ImageSetPlan {
     // 洗稿对齐时张数钉死为 targetCount（已 ≤ maxImages）；否则取 LLM 判断值夹 [1, maxImages]。
     const count =
       targetCount !== undefined
@@ -109,7 +125,21 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
     while (themes.length < count) {
       themes.push({ subject: `${(input.title || '文章主题').slice(0, 16)} 补充图 ${themes.length + 1}` });
     }
-    return { wantImage: true, imageCount: themes.length, themes, styleHint: p.styleHint, plannedAt: this.clock() };
+    const boundThemes = themes.map((theme, i) => this.bindSource(theme, sourceImages?.[i], i));
+    return { wantImage: true, imageCount: boundThemes.length, themes: boundThemes, styleHint: p.styleHint, plannedAt: this.clock() };
+  }
+
+  private bindSource(
+    theme: ImageTheme,
+    image: ReferenceImageSnapshot | undefined,
+    sourceArrayIndex: number,
+  ): ImageTheme {
+    if (!image) return theme;
+    return {
+      ...theme,
+      sourceArrayIndex,
+      sourceIndex: Number.isInteger(image.index) ? image.index : sourceArrayIndex,
+    };
   }
 
   private parse(raw: string): ParsedPlan {
