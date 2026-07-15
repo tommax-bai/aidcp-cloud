@@ -699,7 +699,12 @@ export function buildContentVisualExcerpt(content: string, maxChars = CONTENT_VI
  * 纯内容决策：只产「要不要图 / 几张 / 每张画什么主体（业务语言）」，不产万相 prompt、不碰图源。
  * 输出 JSON: { wantImage, imageCount, themes:[{subject,intent}], styleHint }
  */
-export function buildImageSetPlanPrompt(createdContent: CreatedContent, maxImages: number, exactCount?: number): string {
+export function buildImageSetPlanPrompt(
+  createdContent: CreatedContent,
+  maxImages: number,
+  exactCount?: number,
+  autonomousPlanning = false,
+): string {
   const contentPreview = buildContentVisualExcerpt(createdContent.content);
   const cap = Math.max(1, Math.min(maxImages, IMAGE_COUNT_HARD_MAX));
   // 洗稿场景钉死张数（对齐源稿图片数）：夹进 [1, cap]；非洗稿不传、维持内容驱动的建议区间。
@@ -712,6 +717,13 @@ export function buildImageSetPlanPrompt(createdContent: CreatedContent, maxImage
     fixed !== undefined
       ? `- themes: 必须给正好 ${fixed} 项，每项一个主体（如「整体架构示意」「踩坑前后对比」「实际使用场景」），第 0 张是最抓眼的钩子图/封面。`
       : '- themes: 与 imageCount 等长的数组，每项一个主体（如「整体架构示意」「踩坑前后对比」「实际使用场景」），第 0 张是最抓眼的钩子图/封面。';
+  const autonomousRequirements = autonomousPlanning
+    ? [
+        '- visualSetBrief：自主创作必填。narrativeArc 写整组从钩子到结论的推进；continuityRules[] 写跨槽统一的色彩/主体/符号规则；typeMixRationale 解释类型组合为何服务正文，禁止为了多样而硬凑类型。',
+        '- themes[].slotRole：自主创作每张必填且只能取 cover_hook|context|problem|explanation|evidence|process|contrast|action|conclusion；第 0 张必须 cover_hook，最后一张优先 conclusion。',
+        '- slotRole 回答这张图为什么存在，categoryBrief.kind 回答用什么视觉形式；同类图片可以重复，但槽位职责和具体内容不得重复。',
+      ]
+    : [];
 
   return [
     '你是一个小红书图文帖的配图选题师兼内容视觉导演。读文章标题与正文语义摘录，决定每张图画什么，并把正文情绪转译为可执行的画面表演，让图文形成叙事递进。',
@@ -728,6 +740,7 @@ export function buildImageSetPlanPrompt(createdContent: CreatedContent, maxImage
     '【选题要求】',
     countRequirement,
     themesRequirement,
+    ...autonomousRequirements,
     '- subject 用中文业务语言描述画面主体（不要写英文 prompt、不要写风格词——风格由系统统一注入）。',
     '- intent（可选）：这张图想传达的要点，给后续生成更多上下文。',
     '- contentVisualBrief：每张必填公共字段。narrativeMoment 写正文叙事瞬间；emotion 写复合情绪；emotionIntensity 为 0~1；action/environment 写动作与环境；avoid 写必须避免的错位表达。',
@@ -747,7 +760,9 @@ export function buildImageSetPlanPrompt(createdContent: CreatedContent, maxImage
     '',
     '【输出要求】',
     '严格只输出一个 JSON 对象，不要任何额外文字或代码块围栏。格式如下：',
-    '{"wantImage":true,"imageCount":1,"themes":[{"subject":"访谈中的人物情绪瞬间","intent":"表现脆弱与行动力并存","contentVisualBrief":{"narrativeMoment":"情绪涌来后正在自我整理","emotion":"脆弱、敏感但没有崩溃","emotionIntensity":0.65,"action":"短暂停顿并缓慢呼吸","environment":"安静的深色访谈空间","categoryBrief":{"kind":"portrait_photo","facialExpression":"眉眼略有疲惫和游离，嘴角克制","gazeDirection":"轻微侧视","headAngle":"头部微侧并轻轻下沉","bodyLanguage":"肩颈放松，身体略向一侧倾斜","gesture":"手部自然放松","poseEnergy":"低唤醒但有内在行动张力"},"avoid":["证件照式正面端坐","标准商业微笑","僵硬直视镜头"]}}],"styleHint":"克制的人像摄影"}',
+    autonomousPlanning
+      ? '{"wantImage":true,"imageCount":2,"visualSetBrief":{"narrativeArc":"先用情绪钩子建立共鸣，再给出行动结论","continuityRules":["统一克制的低饱和色彩","重复使用呼吸与光线作为视觉锚"],"typeMixRationale":"人物呈现情绪，文字卡承载结论"},"themes":[{"slotRole":"cover_hook","subject":"访谈中的人物情绪瞬间","intent":"表现脆弱与行动力并存","contentVisualBrief":{"narrativeMoment":"情绪涌来后正在自我整理","emotion":"脆弱、敏感但没有崩溃","emotionIntensity":0.65,"action":"短暂停顿并缓慢呼吸","environment":"安静的深色访谈空间","categoryBrief":{"kind":"portrait_photo","facialExpression":"眉眼略有疲惫和游离，嘴角克制","gazeDirection":"轻微侧视","headAngle":"头部微侧并轻轻下沉","bodyLanguage":"肩颈放松，身体略向一侧倾斜","gesture":"手部自然放松","poseEnergy":"低唤醒但有内在行动张力"},"avoid":["证件照式正面端坐","标准商业微笑"]}},{"slotRole":"conclusion","subject":"把情绪转化为行动","contentVisualBrief":{"narrativeMoment":"完成自我整理后开始行动","emotion":"克制而坚定","emotionIntensity":0.55,"action":"列出下一步行动","environment":"清晰的信息卡","categoryBrief":{"kind":"text_layout","coreMessage":"先照顾情绪，再迈出一步","informationHierarchy":["结论","行动"],"emphasisTerms":["照顾情绪","迈出一步"],"readingOrder":"结论到行动","informationDensity":"中等","cardStructure":"结论区加行动区"},"avoid":["空泛口号"]}}],"styleHint":"克制统一"}'
+      : '{"wantImage":true,"imageCount":1,"themes":[{"subject":"访谈中的人物情绪瞬间","intent":"表现脆弱与行动力并存","contentVisualBrief":{"narrativeMoment":"情绪涌来后正在自我整理","emotion":"脆弱、敏感但没有崩溃","emotionIntensity":0.65,"action":"短暂停顿并缓慢呼吸","environment":"安静的深色访谈空间","categoryBrief":{"kind":"portrait_photo","facialExpression":"眉眼略有疲惫和游离，嘴角克制","gazeDirection":"轻微侧视","headAngle":"头部微侧并轻轻下沉","bodyLanguage":"肩颈放松，身体略向一侧倾斜","gesture":"手部自然放松","poseEnergy":"低唤醒但有内在行动张力"},"avoid":["证件照式正面端坐","标准商业微笑","僵硬直视镜头"]}}],"styleHint":"克制的人像摄影"}',
   ].join('\n');
 }
 
@@ -756,7 +771,12 @@ export function buildImageSetPlanPrompt(createdContent: CreatedContent, maxImage
  * 只产主体描述；风格基底由系统在 composer 角色侧拼接（IMAGE_STYLE_BASE），不让 LLM 产风格/负向词。
  * 输出 JSON: { imagePrompt, imageStyle }
  */
-export function buildImagePromptComposerPrompt(theme: ImageTheme, styleHint: string | null, referenceImageGuidance?: string | null): string {
+export function buildImagePromptComposerPrompt(
+  theme: ImageTheme,
+  styleHint: string | null,
+  referenceImageGuidance?: string | null,
+  visualSetBrief?: { narrativeArc: string; continuityRules: string[]; typeMixRationale: string } | null,
+): string {
   const brief = theme.contentVisualBrief;
   return [
     '你是文生图 prompt 工程师。把下面这张配图的中文主题和正文视觉导演 brief，写成一句【中文】画面主体描述。必须写清主体、正在发生的动作/场景；人物画面还必须落到可观察的眉眼/嘴角、视线、头部角度和肢体语言。不要写风格、画质词或通用 no-text 约束（系统另行补齐）。保留中文、不要翻成英文。',
@@ -764,6 +784,14 @@ export function buildImagePromptComposerPrompt(theme: ImageTheme, styleHint: str
     '【这张图的主题】',
     `主体：${theme.subject}`,
     ...(theme.intent ? [`要点：${theme.intent}`] : []),
+    ...(theme.slotRole ? [`槽位职责：${theme.slotRole}`] : []),
+    ...(visualSetBrief ? [
+      '',
+      '【整组图集策略】',
+      `叙事弧：${visualSetBrief.narrativeArc}`,
+      `连续性：${visualSetBrief.continuityRules.join('；')}`,
+      `类型组合理由：${visualSetBrief.typeMixRationale}`,
+    ] : []),
     ...(brief ? [
       '',
       '【正文视觉导演 brief（语义与人物表演的最高优先级）】',

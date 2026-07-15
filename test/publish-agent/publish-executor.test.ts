@@ -463,6 +463,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
         auditEnabled: true,
         slots: [{
           slot: 0,
+          auditMode: 'reference_fidelity',
           binding: {
             slot: 0,
             mode: 'slot',
@@ -508,6 +509,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
       auditEnabled: true,
       slots: [{
         slot: 0,
+        auditMode: 'reference_fidelity',
         binding: {
           slot: 0,
           mode: 'slot',

@@ -90,6 +90,54 @@ describe('VisualFidelityAuditor', () => {
     assert.equal(out.status, 'unverified');
   });
 
+  test('无参考图时按槽位、分类与正文做 content_alignment，来源复制检查显式不适用', async () => {
+    let prompt = '';
+    let imageCount = 0;
+    const vision: VisionLlmClient = { chatVision: async (messages) => {
+      const content = messages[0].content;
+      if (Array.isArray(content)) {
+        prompt = content[0]?.type === 'text' ? content[0].text : '';
+        imageCount = content.filter((item) => item.type === 'image_url').length;
+      }
+      return payload({
+        scores: { form: 0.9, subject: 0.88, composition: 0.82, color: 0.8, style: 0.84, contentAlignment: 0.91 },
+        risks: {
+          recognizableRealPerson: false, garbledText: false, watermark: false, copiedText: false,
+          copyCheck: 'not_applicable', originalityRisk: 'low',
+        },
+      });
+    } };
+    const out = await createVisualFidelityAuditor({ vision, minScore: 0.7 }).audit({
+      accountId: 'a', generatedUrl: 'https://g', expectedKind: 'infographic_chart', slotRole: 'explanation',
+      contentVisualBrief: {
+        narrativeMoment: '解释反馈闭环', emotion: '理性', emotionIntensity: 0.4, action: '沿闭环阅读', environment: '信息图', avoid: ['编造数字'],
+        categoryBrief: {
+          kind: 'infographic_chart', claim: '反馈推动改进', relationship: '循环', entities: ['生成', '验证', '改进'],
+          direction: '顺时针', steps: ['生成', '验证', '改进'], dataPolicy: '无数值关系图',
+        },
+      },
+    });
+    assert.equal(out.status, 'passed');
+    assert.equal(out.risks?.copyCheck, 'not_applicable');
+    assert.equal(imageCount, 1, '无来源模式只提交生成图');
+    assert.match(prompt, /没有来源图片/);
+    assert.match(prompt, /槽位职责=explanation/);
+    assert.match(prompt, /不得声称做过来源相似或复制比较/);
+  });
+
+  test('无参考图响应未声明 copyCheck=not_applicable 时诚实 unverified', async () => {
+    const vision: VisionLlmClient = { chatVision: async () => payload({
+      scores: { form: 0.9, subject: 0.9, composition: 0.9, color: 0.9, style: 0.9, contentAlignment: 0.9 },
+    }) };
+    const out = await createVisualFidelityAuditor({ vision }).audit({
+      accountId: 'a', generatedUrl: 'https://g', expectedKind: 'scene_photo', slotRole: 'context',
+      contentVisualBrief: {
+        narrativeMoment: '进入场景', emotion: '平静', emotionIntensity: 0.3, action: '观察', environment: '工作室', avoid: [],
+      },
+    });
+    assert.equal(out.status, 'unverified');
+  });
+
   test('模型报错/脏 JSON 诚实 unverified，绝不假 pass', async () => {
     const down: VisionLlmClient = { chatVision: async () => { throw new Error('vision down'); } };
     assert.equal((await createVisualFidelityAuditor({ vision: down }).audit({ accountId: 'a', referenceUrl: 'r', generatedUrl: 'g' })).status, 'unverified');

@@ -7,6 +7,11 @@ import { referenceImagesForGeneration } from '../reference-image-guidance.js';
 import { executeWithFallback } from '../retry-strategy.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
 import {
+  VISUAL_SLOT_ROLES,
+  type VisualSetBrief,
+  type VisualSlotRole,
+} from '../visual-reference-types.js';
+import {
   createFallbackContentVisualBrief,
   ensureContentVisualCategory,
   normalizeContentVisualBrief,
@@ -44,6 +49,54 @@ interface ParsedPlan {
   imageCount: number;
   themes: ImageTheme[];
   styleHint: string | null;
+  visualSetBrief?: VisualSetBrief;
+}
+
+const SLOT_ROLE_SET = new Set<string>(VISUAL_SLOT_ROLES);
+const MIDDLE_SLOT_ROLES: VisualSlotRole[] = ['context', 'problem', 'explanation', 'evidence', 'process', 'contrast', 'action'];
+
+function compact(value: unknown, max = 300): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  return normalized ? normalized.slice(0, max) : null;
+}
+
+function normalizeSlotRole(value: unknown): VisualSlotRole | undefined {
+  return typeof value === 'string' && SLOT_ROLE_SET.has(value) ? value as VisualSlotRole : undefined;
+}
+
+function fallbackSlotRole(index: number, count: number): VisualSlotRole {
+  if (index === 0 || count <= 1) return 'cover_hook';
+  if (index === count - 1) return 'conclusion';
+  const position = Math.floor(((index - 1) * MIDDLE_SLOT_ROLES.length) / Math.max(1, count - 2));
+  return MIDDLE_SLOT_ROLES[Math.min(position, MIDDLE_SLOT_ROLES.length - 1)];
+}
+
+function fallbackVisualSetBrief(input: CreatedContent): VisualSetBrief {
+  const title = compact(input.title, 60) ?? '文章主题';
+  const tone = compact(input.tone, 60) ?? '正文';
+  return {
+    narrativeArc: `用封面钩子引出“${title}”，中间按正文展开语境、问题与解释，最后收束到结论或行动。`,
+    continuityRules: [
+      `整组保持“${tone}”的情绪基调`,
+      `重复使用与“${title}”相关的核心主体或视觉符号`,
+      '保持竖版 3:4、清楚主次和一致的信息密度',
+    ],
+    typeMixRationale: '按各槽职责选择最能承载正文的视觉类型，不为表面多样编造数据、界面、人物或场景。',
+    source: 'fallback',
+  };
+}
+
+function normalizeVisualSetBrief(value: unknown): VisualSetBrief | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const o = value as Record<string, unknown>;
+  const narrativeArc = compact(o.narrativeArc, 500);
+  const typeMixRationale = compact(o.typeMixRationale, 400);
+  const continuityRules = Array.isArray(o.continuityRules)
+    ? o.continuityRules.map((item) => compact(item, 180)).filter((item): item is string => !!item).slice(0, 8)
+    : [];
+  if (!narrativeArc || !typeMixRationale || continuityRules.length === 0) return undefined;
+  return { narrativeArc, continuityRules, typeMixRationale, source: 'model' };
 }
 
 export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSetPlan> {
@@ -70,7 +123,9 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
   protected async execute(input: CreatedContent, context: PipelineContext<PipelineFields>): Promise<ImageSetPlan> {
     // 洗稿对齐（rewrite-image-count-parity）：源参照笔记有效图 ≥1 张 → 目标张数 = clamp(有效源图数, 1, maxImages)；
     // 有效口径同生图参考图（referenceImagesForGeneration）。非洗稿 / 无有效源图 → undefined，维持内容驱动。
-    const refImages = context.snapshot().trigger?.generateInput?.referenceNote?.images ?? [];
+    const referenceNote = context.snapshot().trigger?.generateInput?.referenceNote;
+    const autonomous = !referenceNote;
+    const refImages = referenceNote?.images ?? [];
     const usableSourceImages = referenceImagesForGeneration(refImages);
     const usableSourceCount = usableSourceImages.length;
     const targetCount = usableSourceCount >= 1 ? Math.min(usableSourceCount, this.maxImages) : undefined;
@@ -79,7 +134,7 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
       async () => {
         const raw = await this.llmClient.chat([
           { role: 'system', content: '你是配图选题师。严格返回JSON。' },
-          { role: 'user', content: buildImageSetPlanPrompt(input, this.maxImages, targetCount) },
+          { role: 'user', content: buildImageSetPlanPrompt(input, this.maxImages, targetCount, autonomous) },
         ], { timeoutMs: IMAGE_SET_PLAN_TIMEOUT_MS, accountId: this.accountIdFrom(context) });
         return this.parse(raw);
       },
@@ -88,9 +143,9 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
 
     if (usedFallback || !result) {
       this.logger.warn('[ImageSetPlanner] LLM 失败，降级朝更少图退（1 张通用主题）');
-      return this.degradePlan(input, targetCount, usableSourceImages);
+      return this.degradePlan(input, targetCount, usableSourceImages, autonomous);
     }
-    return this.buildPlan(result, input, targetCount, usableSourceImages);
+    return this.buildPlan(result, input, targetCount, usableSourceImages, autonomous);
   }
 
   protected override getDefaultOutput(): ImageSetPlan {
@@ -103,18 +158,29 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
     input: CreatedContent,
     targetCount?: number,
     sourceImages: ReferenceImageSnapshot[] = [],
+    autonomous = false,
   ): ImageSetPlan {
     const subject = (input.title || '文章主题').slice(0, 24);
     const count = targetCount ?? 1;
     const themes = Array.from({ length: count }, (_, i) => this.bindSource(
       this.withFallbackBrief(
-        { subject: i === 0 ? `${subject} 主题示意` : `${subject} 补充图 ${i + 1}` },
+        {
+          subject: i === 0 ? `${subject} 主题示意` : `${subject} 补充图 ${i + 1}`,
+          ...(autonomous ? { slotRole: fallbackSlotRole(i, count) } : {}),
+        },
         input,
       ),
       sourceImages?.[i],
       i,
     ));
-    return { wantImage: true, imageCount: themes.length, themes, styleHint: null, plannedAt: this.clock() };
+    return {
+      wantImage: true,
+      imageCount: themes.length,
+      themes,
+      styleHint: null,
+      ...(autonomous ? { visualSetBrief: fallbackVisualSetBrief(input) } : {}),
+      plannedAt: this.clock(),
+    };
   }
 
   private buildPlan(
@@ -122,6 +188,7 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
     input: CreatedContent,
     targetCount?: number,
     sourceImages: ReferenceImageSnapshot[] = [],
+    autonomous = false,
   ): ImageSetPlan {
     // 洗稿对齐时张数钉死为 targetCount（已 ≤ maxImages）；否则取 LLM 判断值夹 [1, maxImages]。
     const count =
@@ -133,8 +200,22 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
     while (themes.length < count) {
       themes.push({ subject: `${(input.title || '文章主题').slice(0, 16)} 补充图 ${themes.length + 1}` });
     }
-    const boundThemes = themes.map((theme, i) => this.bindSource(this.withFallbackBrief(theme, input), sourceImages?.[i], i));
-    return { wantImage: true, imageCount: boundThemes.length, themes: boundThemes, styleHint: p.styleHint, plannedAt: this.clock() };
+    const boundThemes = themes.map((theme, i) => this.bindSource(
+      this.withFallbackBrief(
+        autonomous ? { ...theme, slotRole: theme.slotRole ?? fallbackSlotRole(i, count) } : theme,
+        input,
+      ),
+      sourceImages?.[i],
+      i,
+    ));
+    return {
+      wantImage: true,
+      imageCount: boundThemes.length,
+      themes: boundThemes,
+      styleHint: p.styleHint,
+      ...(autonomous ? { visualSetBrief: p.visualSetBrief ?? fallbackVisualSetBrief(input) } : {}),
+      plannedAt: this.clock(),
+    };
   }
 
   private bindSource(
@@ -153,16 +234,18 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
   private parse(raw: string): ParsedPlan {
     const match = raw.match(/\{[\s\S]*\}/);
     if (!match) throw new Error('No JSON in ImageSetPlanner output');
-    const obj = JSON.parse(match[0]) as { imageCount?: unknown; themes?: unknown; styleHint?: unknown };
+    const obj = JSON.parse(match[0]) as { imageCount?: unknown; themes?: unknown; styleHint?: unknown; visualSetBrief?: unknown };
     const themesRaw = Array.isArray(obj.themes) ? obj.themes : [];
     const themes: ImageTheme[] = themesRaw
       .map((t: unknown): ImageTheme => {
         if (typeof t === 'string') return { subject: t.trim() };
-        const o = (t ?? {}) as { subject?: unknown; intent?: unknown; contentVisualBrief?: unknown };
+        const o = (t ?? {}) as { subject?: unknown; intent?: unknown; slotRole?: unknown; contentVisualBrief?: unknown };
         const contentVisualBrief = normalizeContentVisualBrief(o.contentVisualBrief);
+        const slotRole = normalizeSlotRole(o.slotRole);
         return {
           subject: String(o.subject ?? '').trim(),
           intent: o.intent ? String(o.intent).trim() : undefined,
+          ...(slotRole ? { slotRole } : {}),
           ...(contentVisualBrief ? { contentVisualBrief } : {}),
         };
       })
@@ -170,7 +253,13 @@ export class ImageSetPlannerRole extends BasePublishRole<CreatedContent, ImageSe
     if (themes.length === 0) throw new Error('ImageSetPlanner: no valid themes');
     const rawCount = Number(obj.imageCount);
     const imageCount = Number.isFinite(rawCount) && rawCount > 0 ? Math.floor(rawCount) : themes.length;
-    return { imageCount, themes, styleHint: obj.styleHint ? String(obj.styleHint) : null };
+    const visualSetBrief = normalizeVisualSetBrief(obj.visualSetBrief);
+    return {
+      imageCount,
+      themes,
+      styleHint: obj.styleHint ? String(obj.styleHint) : null,
+      ...(visualSetBrief ? { visualSetBrief } : {}),
+    };
   }
 
   private withFallbackBrief(theme: ImageTheme, input: CreatedContent): ImageTheme {

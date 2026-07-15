@@ -61,7 +61,7 @@ function run(
   provider: { generate: (p: string, s?: string, o?: unknown) => Promise<ImageResult> },
   p: ImagePlan,
   extras: Partial<ImageGeneratorDeps> & { store?: FakeStore } = {},
-  opts: { waitMs?: number; sourceId?: string } = {},
+  opts: { waitMs?: number; sourceId?: string; autonomous?: boolean } = {},
 ) {
   const store = extras.store ?? new FakeStore();
   const role = new ImageGeneratorRole({
@@ -80,10 +80,12 @@ function run(
   } as ImageGeneratorDeps);
   const ctx = new PipelineContext<PipelineFields>();
   role.register(ctx);
-  ctx.write('trigger', {
-    accountId: 'acct1',
-    generateInput: { referenceNote: { sourceId: opts.sourceId ?? 'note-9' } },
-  } as unknown as TriggerInput);
+  ctx.write('trigger', (opts.autonomous
+    ? { accountId: 'acct1', generateInput: {} }
+    : {
+        accountId: 'acct1',
+        generateInput: { referenceNote: { sourceId: opts.sourceId ?? 'note-9' } },
+      }) as unknown as TriggerInput);
   ctx.write('imagePlan', p);
   return new Promise<{ d: NonNullable<PipelineFields['imageDirective']>; store: FakeStore }>((resolve) =>
     setTimeout(() => resolve({ d: ctx.get('imageDirective')!, store }), opts.waitMs ?? 300),
@@ -420,5 +422,56 @@ describe('ImageGeneratorRole — 确定性文字卡视觉保真审计', () => {
     assert.equal(d.imageUrls.length, 0);
     assert.equal(d.visualReferenceAudit?.slots[0].finalStatus, 'discarded');
     assert.deepEqual(d.visualReferenceAudit?.slots[0].attempts.map((item) => item.status), ['failed', 'unverified']);
+  });
+
+  test('自主创作文字卡无来源也按正文核验，首次失败后确定性重渲染一次', async () => {
+    const audit = auditorSequence([
+      { status: 'failed', reason: '信息层级不清', auditedAt: clock() },
+      { status: 'passed', reason: '重渲染后通过', auditedAt: clock() },
+    ]);
+    const plan: ImagePlan = {
+      ...textCardPlan(['g0']),
+      cardSet: [CARD],
+      visualRoutes: ['deterministic_text_card'],
+      visualStyleSources: ['category_fallback'],
+      slotRoles: ['conclusion'],
+      visualSetBrief: {
+        narrativeArc: '从问题收束到行动结论', continuityRules: ['统一米白底与冷蓝重点色'],
+        typeMixRationale: '文字卡承载最终行动', source: 'model',
+      },
+      contentVisualBriefs: [{
+        narrativeMoment: '给出可执行结论', emotion: '坚定', emotionIntensity: 0.45,
+        action: '读取行动清单', environment: '结论卡片', avoid: ['空泛口号'],
+        categoryBrief: {
+          kind: 'text_layout', coreMessage: '先查配置再查权限', informationHierarchy: ['结论', '行动'],
+          emphasisTerms: ['配置', '权限'], readingOrder: '结论到行动', informationDensity: '中等', cardStructure: '标题加两条行动',
+        },
+      }],
+    };
+    const seenModes: Array<{ reference?: string; role?: string }> = [];
+    const originalAudit = audit.auditor.audit.bind(audit.auditor);
+    audit.auditor.audit = async (input) => {
+      seenModes.push({ reference: input.referenceUrl, role: input.slotRole });
+      return originalAudit(input);
+    };
+    const { d, store } = await run(
+      { generate: async () => ({ url: null }) },
+      plan,
+      {
+        getTextCardRenderer: () => okRenderer(),
+        visualAuditor: audit.auditor,
+        autonomousAuditEnabled: () => true,
+      },
+      { autonomous: true },
+    );
+    assert.equal(audit.calls.length, 2);
+    assert.deepEqual(seenModes, [
+      { reference: undefined, role: 'conclusion' },
+      { reference: undefined, role: 'conclusion' },
+    ]);
+    assert.equal(store.puts.filter((key) => key.endsWith('/0.png')).length, 2);
+    assert.equal(d.visualReferenceAudit?.slots[0].auditMode, 'content_alignment');
+    assert.equal(d.visualReferenceAudit?.slots[0].finalStatus, 'passed');
+    assert.equal(d.imageUrls.length, 1);
   });
 });

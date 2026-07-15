@@ -79,6 +79,43 @@ describe('ImagePromptComposerRole（配图指令，仅桩 LLM、不依赖图源�
     assert.match(plan.imagePrompts[0], /避免证件照式正面端坐/);
   });
 
+  test('自主创作把整组叙事、槽位职责和分类路由盖进最终计划', async () => {
+    let userPrompt = '';
+    const llm = { chat: async (messages: Array<{ content: string }>) => {
+      userPrompt = messages[1].content;
+      return JSON.stringify({ imagePrompt: '无数值闭环关系图，从问题流向验证再回到改进' });
+    }, complete: async () => '' };
+    const visualSetBrief = {
+      narrativeArc: '先指出问题，再解释闭环，最后给行动',
+      continuityRules: ['统一冷蓝和米白', '重复使用环形箭头'],
+      typeMixRationale: '关系图负责解释抽象因果',
+      source: 'model' as const,
+    };
+    const inputPlan: ImageSetPlan = {
+      ...setPlan([{
+        subject: '反馈闭环',
+        slotRole: 'explanation',
+        contentVisualBrief: {
+          narrativeMoment: '解释生成、验证与改进的循环', emotion: '理性', emotionIntensity: 0.35,
+          action: '沿闭环阅读', environment: '无数值信息图', avoid: ['编造百分比'],
+          categoryBrief: {
+            kind: 'infographic_chart', claim: '反馈推动标准更新', relationship: '循环', entities: ['生成', '验证', '改进'],
+            direction: '顺时针', steps: ['生成', '验证', '改进'], dataPolicy: '正文无数字，只画无数值关系',
+          },
+        },
+      }]),
+      visualSetBrief,
+    };
+    const plan = await run(llm, inputPlan, 60, 'knowledge');
+    assert.match(userPrompt, /整组图集策略/);
+    assert.match(userPrompt, /槽位职责：explanation/);
+    assert.match(userPrompt, /统一冷蓝和米白/);
+    assert.deepEqual(plan.slotRoles, ['explanation']);
+    assert.deepEqual(plan.visualSetBrief, visualSetBrief);
+    assert.equal(plan.visualRoutes?.[0], 'specialized_generative');
+    assert.equal(plan.visualStyleSources?.[0], 'category_fallback');
+  });
+
   test('reference images are included as visual guidance and preserved on ImagePlan', async () => {
     let userPrompt = '';
     const referenceImages = Array.from({ length: 10 }, (_, i) => ({

@@ -38,11 +38,16 @@ async function run(
   provider: { generate(prompt: string, style?: string, options?: ImageGenerateOptions): Promise<ImageResult> },
   plan: ImagePlan,
   audit?: (n: number, input: VisualAuditInput) => VisualAuditAttempt,
+  autonomousAudit = false,
 ) {
   let calls = 0;
   const role = new ImageGeneratorRole({
     imageProvider: provider, perImageTimeoutMs: 200, maxImages: 2, concurrency: 2, clock, logger,
-    ...(audit ? { visualAuditor: { audit: async (input: VisualAuditInput) => audit(calls++, input) }, auditEnabled: () => true } : {}),
+    ...(audit ? {
+      visualAuditor: { audit: async (input: VisualAuditInput) => audit(calls++, input) },
+      auditEnabled: () => true,
+      autonomousAuditEnabled: () => autonomousAudit,
+    } : {}),
   });
   const ctx = new PipelineContext<PipelineFields>();
   role.register(ctx);
@@ -141,6 +146,7 @@ describe('ImageGenerator slot binding + visual audit', () => {
       { generate: async () => ({ url: 'https://out/legacy.jpg', referenceStatus: 'used' as const }) },
       plan,
       (_n, input) => {
+        assert.ok(input.referenceUrl);
         references.push(input.referenceUrl);
         return { status: 'passed', reason: 'ok', auditedAt: 1 };
       },
@@ -148,5 +154,55 @@ describe('ImageGenerator slot binding + visual audit', () => {
     assert.deepEqual(references, ['https://ref/1.jpg', 'https://ref/1.jpg']);
     assert.equal(out.visualReferenceAudit?.bindingMode, 'legacy_all');
     assert.deepEqual(out.visualReferenceAudit?.slots.map((slot) => slot.finalStatus), ['passed', 'passed']);
+  });
+
+  test('自主创作无参考图时执行 content_alignment，失败后按正文边界重生成一次', async () => {
+    const prompts: string[] = [];
+    const plan: ImagePlan = {
+      wantImage: true,
+      imagePrompts: ['反馈闭环关系图'],
+      imageStyle: null,
+      imageCount: 1,
+      fallbackStrategy: 'skip',
+      visualRoutes: ['specialized_generative'],
+      visualStyleSources: ['category_fallback'],
+      slotRoles: ['explanation'],
+      visualSetBrief: {
+        narrativeArc: '从问题推进到解释和行动', continuityRules: ['统一冷蓝色', '复用环形箭头'],
+        typeMixRationale: '信息图承担因果解释', source: 'model',
+      },
+      contentVisualBriefs: [{
+        narrativeMoment: '解释反馈闭环', emotion: '理性', emotionIntensity: 0.4, action: '沿闭环阅读', environment: '无数值信息图', avoid: ['编造数字'],
+        categoryBrief: {
+          kind: 'infographic_chart', claim: '反馈推动改进', relationship: '循环', entities: ['生成', '验证', '改进'],
+          direction: '顺时针', steps: ['生成', '验证', '改进'], dataPolicy: '正文无数字，只画无数值关系',
+        },
+      }],
+      plannedAt: clock(),
+    };
+    const auditInputs: VisualAuditInput[] = [];
+    const attempts: VisualAuditAttempt[] = [
+      { status: 'failed', reason: '关系层级不清', retryGuidance: '加强循环箭头和主次', auditedAt: 1 },
+      { status: 'passed', reason: '已修正', auditedAt: 2 },
+    ];
+    const out = await run(
+      { generate: async (prompt) => { prompts.push(prompt); return { url: `https://out/${prompts.length}.jpg`, referenceStatus: 'skipped' }; } },
+      plan,
+      (n, input) => {
+        auditInputs.push(input);
+        return attempts[n];
+      },
+      true,
+    );
+    assert.equal(prompts.length, 2);
+    assert.match(prompts[1], /严格服从槽位职责、目标类型与正文视觉 brief/);
+    assert.equal(auditInputs[0].referenceUrl, undefined);
+    assert.equal(auditInputs[0].expectedKind, 'infographic_chart');
+    assert.equal(auditInputs[0].slotRole, 'explanation');
+    assert.equal(out.visualReferenceAudit?.bindingMode, 'none');
+    assert.equal(out.visualReferenceAudit?.slots[0].auditMode, 'content_alignment');
+    assert.equal(out.visualReferenceAudit?.slots[0].finalStatus, 'passed');
+    assert.equal(out.visualReferenceAudit?.slots[0].slotRole, 'explanation');
+    assert.equal(out.visualReferenceAudit?.visualSetBrief?.source, 'model');
   });
 });

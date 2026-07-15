@@ -9,6 +9,8 @@ import type {
   VisualGenerationRoute,
   VisualReferenceAudit,
   VisualReferenceBinding,
+  VisualSetBrief,
+  VisualSlotRole,
 } from './visual-reference-types.js';
 
 // ─── 从 publish/types.ts 迁移的类型 ────────────────────────────────────────────
@@ -446,6 +448,8 @@ export interface ImageTheme {
   intent?: string;
   /** 正文视觉导演给本槽的叙事/情绪/人物表演约束。 */
   contentVisualBrief?: ContentVisualBrief;
+  /** 本槽在文章级图集叙事中的职责；自主创作必有，历史/旧洗稿可缺省。 */
+  slotRole?: VisualSlotRole;
   /** 洗稿图集的源图绑定位置；普通发布缺省。 */
   sourceArrayIndex?: number;
   /** 源快照自带 index（审计可读，不作为数组寻址）。 */
@@ -464,6 +468,8 @@ export interface ImageSetPlan {
   themes: ImageTheme[];
   /** 整体风格倾向（业务语言，供 prompt 工程参考；非最终 imageStyle 枚举）。 */
   styleHint: string | null;
+  /** 自主创作文章级图集策略；模型失败/漏字段时保守兜底，洗稿可缺省。 */
+  visualSetBrief?: VisualSetBrief;
   plannedAt: number;
 }
 
@@ -488,6 +494,10 @@ export interface ImagePlan {
   textCardStyles?: Array<TextCardSourceStyle | null>;
   /** 与 imagePrompts 下标对齐；null 表示该槽未取得有效正文视觉 brief。 */
   contentVisualBriefs?: Array<ContentVisualBrief | null>;
+  /** 与 imagePrompts 下标对齐的槽位职责；历史/洗稿旧路径可缺省。 */
+  slotRoles?: Array<VisualSlotRole | null>;
+  /** 自主创作文章级图集策略，供 prompt、审计和面板解释。 */
+  visualSetBrief?: VisualSetBrief;
   /**
    * 封面形态盖章透传（change textcard-cover-form）：composer 把 coverCardPlan 原样盖进计划，
    * 使配图计划仍是「唯一完整指令」——执行器只读 plan、绝不二次读环境旗标（防决策/执行裂脑）。

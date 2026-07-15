@@ -55,6 +55,41 @@ describe('ImageSetPlannerRole（图集选题，仅桩 LLM、不依赖图源）',
     assert.equal(plan.styleHint, '科技扁平');
   });
 
+  test('自主创作生成文章级视觉策略、固定槽位职责，并与每槽视觉类型分开保存', async () => {
+    const llm = { chat: async () => JSON.stringify({
+      imageCount: 2,
+      visualSetBrief: {
+        narrativeArc: '先呈现部署受阻，再用关系图解释解决路径',
+        continuityRules: ['统一冷蓝色', '复用终端窗口符号'],
+        typeMixRationale: '场景图承载问题，信息图解释因果关系',
+      },
+      themes: [
+        { slotRole: 'cover_hook', subject: '部署失败现场' },
+        { slotRole: 'explanation', subject: '依赖与显存关系图' },
+      ],
+    }), complete: async () => '' };
+    const plan = await run(llm, 2);
+    assert.equal(plan.visualSetBrief?.source, 'model');
+    assert.match(plan.visualSetBrief?.narrativeArc ?? '', /部署受阻/);
+    assert.deepEqual(plan.themes.map((theme) => theme.slotRole), ['cover_hook', 'explanation']);
+    assert.ok(plan.themes.every((theme) => theme.contentVisualBrief?.categoryBrief?.kind));
+  });
+
+  test('自主创作模型漏文章策略或给非法职责时使用确定性保守兜底', async () => {
+    const llm = { chat: async () => JSON.stringify({
+      imageCount: 3,
+      themes: [
+        { slotRole: 'invalid', subject: '封面' },
+        { subject: '解释' },
+        { subject: '收束' },
+      ],
+    }), complete: async () => '' };
+    const plan = await run(llm, 3);
+    assert.equal(plan.visualSetBrief?.source, 'fallback');
+    assert.deepEqual(plan.themes.map((theme) => theme.slotRole), ['cover_hook', 'context', 'conclusion']);
+    assert.ok((plan.visualSetBrief?.continuityRules.length ?? 0) >= 1);
+  });
+
   test('内容视觉导演 brief 严格解析并夹住情绪强度，人物分类字段随槽位保留', async () => {
     const llm = { chat: async () => JSON.stringify({
       imageCount: 1,
@@ -186,6 +221,16 @@ describe('buildImageSetPlanPrompt — 固定张数措辞（rewrite-image-count-p
     const p = buildImageSetPlanPrompt(created, 9);
     assert.ok(p.includes('建议') && p.includes('范围 1~9'), '非洗稿维持内容驱动措辞');
     assert.ok(!p.includes('固定配'), '不含固定张数措辞');
+  });
+
+  test('自主创作 prompt 同时要求文章级策略、槽位职责和八类专用参数', () => {
+    const p = buildImageSetPlanPrompt(created, 9, undefined, true);
+    assert.match(p, /visualSetBrief/);
+    assert.match(p, /themes\[\]\.slotRole/);
+    assert.match(p, /cover_hook\|context\|problem/);
+    assert.match(p, /portrait_photo/);
+    assert.match(p, /collage_mixed/);
+    assert.match(p, /slotRole 回答这张图为什么存在/);
   });
 
   test('长正文使用有界首/中/尾摘录，视觉导演能看到中段转折和结尾结论', () => {

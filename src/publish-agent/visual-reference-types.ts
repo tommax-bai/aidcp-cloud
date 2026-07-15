@@ -187,6 +187,28 @@ export type VisualGenerationRoute =
 
 export type ContentVisualCategoryKind = ReferenceVisualKind;
 
+export const VISUAL_SLOT_ROLES = [
+  'cover_hook',
+  'context',
+  'problem',
+  'explanation',
+  'evidence',
+  'process',
+  'contrast',
+  'action',
+  'conclusion',
+] as const;
+
+export type VisualSlotRole = (typeof VISUAL_SLOT_ROLES)[number];
+
+export interface VisualSetBrief {
+  narrativeArc: string;
+  continuityRules: string[];
+  typeMixRationale: string;
+  /** model=模型完整返回；fallback=缺失/非法/失败后的确定性保守策略。 */
+  source: 'model' | 'fallback';
+}
+
 export interface PortraitContentBrief {
   kind: 'portrait_photo';
   facialExpression: string;
@@ -282,8 +304,8 @@ export type ContentVisualCategoryBrief =
   | CollageContentBrief;
 
 /**
- * 洗稿正文为单个配图槽给出的视觉导演 brief。参考图管形式/风格，本 brief 管具体叙事语义。
- * 所有字段只来自洗稿后的正文，不承载来源图片 OCR、身份或像素信息。
+ * 发布正文为单个配图槽给出的视觉导演 brief。参照洗稿时参考图管形式/风格，本 brief 管具体叙事语义；
+ * 自主创作时本 brief 与槽位职责共同构成内容真源。所有字段只来自最终正文，不承载来源图片 OCR、身份或像素信息。
  */
 export interface ContentVisualBrief {
   narrativeMoment: string;
@@ -315,8 +337,12 @@ export interface VisualAuditRisks {
   garbledText: boolean;
   watermark: boolean;
   copiedText: boolean;
+  /** 无来源图的原创内容审计不能判断“是否复制来源”，必须显式标不适用。历史记录缺省视为 evaluated。 */
+  copyCheck?: 'evaluated' | 'not_applicable';
   originalityRisk: 'low' | 'medium' | 'high';
 }
+
+export type VisualAuditMode = 'reference_fidelity' | 'content_alignment' | 'skipped';
 
 export interface VisualAuditAttempt {
   status: 'passed' | 'failed' | 'unverified' | 'skipped';
@@ -329,6 +355,9 @@ export interface VisualAuditAttempt {
 
 export interface VisualSlotAudit {
   slot: number;
+  auditMode: VisualAuditMode;
+  /** 本槽在整组叙事中的职责；历史/洗稿旧记录可缺省。 */
+  slotRole?: VisualSlotRole;
   route: VisualGenerationRoute;
   styleSource: 'reference_analysis' | 'category_fallback';
   binding: VisualReferenceBinding;
@@ -345,5 +374,7 @@ export interface VisualReferenceAudit {
   analysisCacheKey: string | null;
   bindingMode: 'slot' | 'legacy_all' | 'none';
   auditEnabled: boolean;
+  /** 自主创作的文章级图集策略；历史和参照洗稿可缺省。 */
+  visualSetBrief?: VisualSetBrief;
   slots: VisualSlotAudit[];
 }

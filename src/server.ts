@@ -2484,6 +2484,7 @@ async function main(): Promise<void> {
     getTextCardRenderer: () => textCardRenderer,
     visualAuditor: visualFidelityAuditor,
     auditEnabled: () => process.env.AIDCP_VISUAL_FIDELITY_AUDIT === 'true',
+    autonomousAuditEnabled: () => process.env.AIDCP_AUTONOMOUS_VISUAL_AUDIT === 'true',
   }));
   publishOrchestrator.registerRole(new CoverSelectorRole());
   // 后处理：清洗（ContentCleaner）→ AI味分（AiFlavorScorer）/ 质量分（QualityScorer）

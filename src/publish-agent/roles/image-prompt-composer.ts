@@ -125,7 +125,7 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
         const guidance = frame
           ? buildVisualFrameGuidance(frame, input.visualAnalysis!)
           : legacyReferenceImageGuidance;
-        return this.composeTheme(theme, plan.styleHint, guidance, accountId);
+        return this.composeTheme(theme, plan.styleHint, guidance, accountId, plan.visualSetBrief);
       }),
     );
 
@@ -169,13 +169,18 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
     const imagePrompts = kept.map((entry, slot) => {
       const frame = analysisUsable ? frameForTheme(input.visualAnalysis!, entry.theme) : undefined;
       styleSources.push(frame ? 'reference_analysis' : 'category_fallback');
-      visualRoutes.push(routeForFrame(frame, !!(input.coverPlan?.cardSet?.[entry.originalIndex] ?? (entry.originalIndex === 0 && input.coverPlan?.coverForm === 'text_card' && input.coverPlan.card))));
+      visualRoutes.push(routeForFrame(
+        frame,
+        !!(input.coverPlan?.cardSet?.[entry.originalIndex] ?? (entry.originalIndex === 0 && input.coverPlan?.coverForm === 'text_card' && input.coverPlan.card)),
+        entry.theme.contentVisualBrief?.categoryBrief?.kind,
+      ));
       const style = frame
         ? buildSourceStylePrompt(frame, input.visualAnalysis!, slot === 0)
         : slot === 0 ? profile.coverStyleBase : profile.styleBase;
       return `${entry.desc}. ${style}`;
     });
     const contentVisualBriefs = kept.map((entry) => entry.theme.contentVisualBrief ?? null);
+    const slotRoles = kept.map((entry) => entry.theme.slotRole ?? null);
     const referenceBindings = slotBindingEnabled
       ? buildSlotBindings(kept.map((entry) => entry.theme), referenceImages)
       : undefined;
@@ -193,9 +198,13 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
         ...(referenceImages.length > 0 ? { referenceImages } : {}),
         ...(referenceBindings ? { referenceBindings } : {}),
         ...(exposedAnalysis ? { referenceVisualAnalysis: exposedAnalysis } : {}),
-        ...(analysisUsable || slotBindingEnabled || exposedAnalysis ? { visualRoutes, visualStyleSources: styleSources } : {}),
+        ...(analysisUsable || slotBindingEnabled || exposedAnalysis || contentVisualBriefs.some(Boolean)
+          ? { visualRoutes, visualStyleSources: styleSources }
+          : {}),
         ...(textCardStyles.some(Boolean) ? { textCardStyles } : {}),
         ...(contentVisualBriefs.some(Boolean) ? { contentVisualBriefs } : {}),
+        ...(slotRoles.some(Boolean) ? { slotRoles } : {}),
+        ...(plan.visualSetBrief ? { visualSetBrief: plan.visualSetBrief } : {}),
         plannedAt: this.clock(),
       },
       input.coverPlan,
@@ -233,11 +242,17 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
   }
 
   /** 单主题 → 中文主体描述；LLM 失败退回主体文本（该张不凭空消失，图像模型可吃中文主体）。 */
-  private async composeTheme(theme: ImageTheme, styleHint: string | null, referenceImageGuidance: string | null | undefined, accountId: string): Promise<string> {
+  private async composeTheme(
+    theme: ImageTheme,
+    styleHint: string | null,
+    referenceImageGuidance: string | null | undefined,
+    accountId: string,
+    visualSetBrief: ImageSetPlan['visualSetBrief'],
+  ): Promise<string> {
     try {
       const raw = await this.llmClient.chat([
         { role: 'system', content: '你是文生图 prompt 工程师。严格返回JSON。' },
-        { role: 'user', content: buildImagePromptComposerPrompt(theme, styleHint, referenceImageGuidance) },
+        { role: 'user', content: buildImagePromptComposerPrompt(theme, styleHint, referenceImageGuidance, visualSetBrief) },
       ], { timeoutMs: IMAGE_PROMPT_TIMEOUT_MS, accountId });
       const match = raw.match(/\{[\s\S]*\}/);
       if (!match) throw new Error('no json');
@@ -247,7 +262,7 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
       return description;
     } catch (err) {
       this.logger.warn(`[ImagePromptComposer] 主题「${theme.subject}」LLM 失败，退回主体文本: ${err instanceof Error ? err.message : String(err)}`);
-      return fallbackThemeDescription(theme);
+      return fallbackThemeDescription(theme, visualSetBrief);
     }
   }
 }
@@ -293,12 +308,15 @@ function buildSourceStylePrompt(frame: VisualFrameSpec, analysis: ReferenceVisua
   ].filter(Boolean).join('，');
 }
 
-function fallbackThemeDescription(theme: ImageTheme): string {
+function fallbackThemeDescription(theme: ImageTheme, visualSetBrief?: ImageSetPlan['visualSetBrief']): string {
   const brief = theme.contentVisualBrief;
   if (!brief) return theme.intent ? `${theme.subject}，${theme.intent}` : theme.subject;
   return [
     theme.subject,
     theme.intent,
+    theme.slotRole ? `槽位职责${theme.slotRole}` : '',
+    visualSetBrief?.narrativeArc,
+    visualSetBrief?.continuityRules.join('，'),
     brief.narrativeMoment,
     `${brief.emotion}，情绪强度 ${brief.emotionIntensity}`,
     brief.action,
@@ -331,10 +349,15 @@ function buildSlotBindings(
   });
 }
 
-function routeForFrame(frame: VisualFrameSpec | undefined, deterministicCard: boolean): VisualGenerationRoute {
+function routeForFrame(
+  frame: VisualFrameSpec | undefined,
+  deterministicCard: boolean,
+  contentKind?: NonNullable<NonNullable<ImageTheme['contentVisualBrief']>['categoryBrief']>['kind'],
+): VisualGenerationRoute {
   if (deterministicCard) return 'deterministic_text_card';
-  if (frame?.kind === 'ui_document' || frame?.kind === 'infographic_chart') return 'specialized_generative';
-  if (frame?.kind === 'collage_mixed') return 'region_guided_generative';
+  const kind = frame?.kind ?? contentKind;
+  if (kind === 'ui_document' || kind === 'infographic_chart') return 'specialized_generative';
+  if (kind === 'collage_mixed') return 'region_guided_generative';
   return 'generative';
 }
 
