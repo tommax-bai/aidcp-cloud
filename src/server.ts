@@ -1668,6 +1668,10 @@ async function main(): Promise<void> {
     acquireTimeoutMs: readEnvNumberOrUndefined('AIDCP_EDGE_TASK_ACQUIRE_TIMEOUT_MS'),
     releaseTimeoutMs: Number(process.env.AIDCP_EDGE_TASK_RELEASE_TIMEOUT_MS ?? 10_000),
     defaultLeaseMs: Number(process.env.AIDCP_EDGE_TASK_LEASE_MS ?? 5 * 60_000),
+    // 7.5 活跃租约中断：某活跃租约被边缘以抢占原因释放 → 就地 reject 属于该 taskId 的在飞 publish.command，
+    // 交序列器按 preempted / submitted_unconfirmed 归类、**绝不 unwind executePublishSequence**（防提交后被抢重投双发）。
+    // 无对应在途发布指令时为 no-op（巡视/评论任务的收敛走各自命令回执 + 8.2/7.7 路径）。
+    onActiveLeasePreempted: (taskId, _edgeId, reason) => commandSequencer.preemptTask(taskId, reason),
     logger: console,
   });
   // AC-PUB 第1道 + 版本闸（edit-note-draft-before-publish）：按 requestId 读审批信号文件，
@@ -1984,6 +1988,8 @@ async function main(): Promise<void> {
     sequencer: commandSequencer,
     edgeTaskLeases,
     resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
+    // 7.3：该 edge 是否处于验证码硬暂停（发布命令不在下发豁免名单 → 暂停期投递必为 0）。暂停即零副作用回待审、不烧稿。
+    isEdgePaused: (edgeId) => (edgeServer ? edgeServer.isEdgePaused(edgeId) : false),
     readApproval: readPublishApproval,
     voidApprovalSignal,
     // 陪伴界面：授权核实→approved、云端终判失败→failed 推给在线边缘（published 由边缘自知）。
@@ -2005,6 +2011,10 @@ async function main(): Promise<void> {
                 ? `⚠️ 发布未执行：账号「${name}」客户端仍在线，但浏览器控制暂不可用，${ref} 已退回待审（本次授权作废，未下发发布命令）。请恢复或重启浏览器客户端后重新批准。`
               : notice.kind === 'breaker_open'
               ? `🔴 发布熔断：账号「${name}」连续下发失败（最近 ${ref}），已停止自动下发其已批草稿。排查边缘后重新批准任一草稿即恢复。`
+              : notice.kind === 'edge_paused_requeued'
+              ? `⏸️ 发布暂缓：账号「${name}」正处于验证码/风控暂停，${ref} 暂不下发、仍待审（授权保留）。验证码解除后会自动重投，无需重新批准。`
+              : notice.kind === 'preempted_exhausted'
+              ? `⚠️ 发布反复被打断：账号「${name}」${ref} 连续多次被更高优先任务抢占，已暂停自动重投、仍保持待审（未烧稿）。稍后手动重新批准即可再次尝试。`
               : `🟢 发布熔断解除：账号「${name}」人工批准确认，恢复下发已批队列。`;
         await messenger.sendText(chatId, text);
       })().catch(() => {});

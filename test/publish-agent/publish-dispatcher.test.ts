@@ -40,8 +40,14 @@ function harness(opts: {
   edgeId?: string | null;
   seqResult?: any;
   leaseError?: Error;
+  /** 7.3：注入验证码硬暂停闸。 */
+  isEdgePaused?: (edgeId: string) => boolean;
+  /** 7.2：同稿连续被抢占达此阈值停自动重投（缺省 3）。 */
+  preemptRedispatchMax?: number;
 }) {
   const events: string[] = [];
+  /** 7.1：被抢占事件驱动重投的调度器捕获（不自动跑，测试手动泵/断言次数）。 */
+  const redispatched: Array<() => void> = [];
   let seqInput: any;
   const statusUpdates: Array<{ id: number; status: string }> = [];
   let postWrite: any;
@@ -82,6 +88,9 @@ function harness(opts: {
       },
     },
     resolveEdgeIdForAccount: () => (opts.edgeId === undefined ? 'edge-A' : opts.edgeId),
+    isEdgePaused: opts.isEdgePaused,
+    preemptRedispatchMax: opts.preemptRedispatchMax,
+    scheduleRedispatch: (fn) => { redispatched.push(fn); },
     readApproval: async () =>
       (opts.approved ?? true)
         ? { approved: true, contentVersion: opts.approvedVersion ?? draftVersion }
@@ -93,7 +102,7 @@ function harness(opts: {
     notifyDispatchEvent: (n) => notices.push(n),
     logger: silentLogger,
   });
-  return { dispatcher, events, get seqInput() { return seqInput; }, statusUpdates, get postWrite() { return postWrite; }, attached, voided, notices, leasePriorities, uiStates };
+  return { dispatcher, events, get seqInput() { return seqInput; }, statusUpdates, get postWrite() { return postWrite; }, attached, voided, notices, leasePriorities, uiStates, redispatched };
 }
 
 describe('PublishDispatcher', () => {
@@ -117,10 +126,12 @@ describe('PublishDispatcher', () => {
     assert.deepEqual(h.postWrite, { id: 7, postId: 'post_real', postUrl: undefined });
   });
 
-  test('人工批准入口使用 human 优先级', async () => {
+  test('9.1：一切发布一律 automatic 档，人工批准入口也不再抬到 human', async () => {
+    // change lease-strict-preemption 9.1（用户 2026-07-14 拍板）：发布是异步队列作业、没人在线等回执，
+    // 一律自动档——消灭「同稿因触发路径不同而档位不同 + 重投降级」两个反 aging 缺陷。humanApproval 仍保留（另驱动熔断解除）。
     const h = harness({ approved: true, edgeId: 'edge-A' });
     await h.dispatcher.dispatch(7, { humanApproval: true });
-    assert.deepEqual(h.leasePriorities, ['human']);
+    assert.deepEqual(h.leasePriorities, ['automatic']);
   });
 
   test('AC-PUB 红线：未授权 → 绝不让位、绝不驱动序列、不改态', async () => {
@@ -356,5 +367,37 @@ describe('PublishDispatcher', () => {
     assert.equal(h.events.includes('seq:1'), true, 'A 已启动（被 gate 挡在序列内）');
     releaseA();
     await scan;
+  });
+
+  // ── 被抢占 ≠ 失败（change lease-strict-preemption 批 C 7.1/7.2/7.3）──────────────────
+  test('7.1 outcome=preempted → 保持待审（不写终态）、保留授权（不作废）、不计熔断、事件驱动重投', async () => {
+    const h = harness({ approved: true, edgeId: 'edge-A', seqResult: { ok: false, outcome: 'preempted', attachedCount: 0, failedAt: { seq: 3, kind: 'fill_field', error: 'preempted_by_task' } } });
+    await h.dispatcher.dispatch(7);
+    assert.equal(h.events.includes('seq'), true, '已驱动序列（被抢占发生在序列中途）');
+    assert.equal(h.statusUpdates.length, 0, '绝不写任何终态：草稿留 pending_approval（failed 不可逆，被抢占绝不烧）');
+    assert.deepEqual(h.voided, [], '保留授权签名（不 void）→ 重投可再过 AC-PUB');
+    assert.equal(h.notices.some((n) => n.kind === 'breaker_open'), false, '被抢占不计熔断');
+    assert.equal(h.dispatcher.isBreakerOpen('acct-A'), false);
+    assert.equal(h.redispatched.length, 1, '调度一次事件驱动重投（排队等抢占方释放）');
+    assert.equal(h.notices.some((n) => n.kind === 'preempted_exhausted'), false, '未达退避阈值');
+  });
+
+  test('7.2 同稿连续被抢占达阈值 → 停自动重投 + 通知运营 preempted_exhausted（仍保持待审、绝不烧稿）', async () => {
+    const h = harness({ approved: true, edgeId: 'edge-A', preemptRedispatchMax: 1, seqResult: { ok: false, outcome: 'preempted', attachedCount: 0, failedAt: { seq: 3, kind: 'fill_field', error: 'preempted_by_task' } } });
+    await h.dispatcher.dispatch(7);
+    assert.equal(h.statusUpdates.length, 0, '仍保持待审、绝不烧稿');
+    assert.deepEqual(h.voided, [], '仍保留授权');
+    assert.equal(h.redispatched.length, 0, '达阈值 → 不再调度自动重投');
+    assert.equal(h.notices.some((n) => n.kind === 'preempted_exhausted'), true, '通知运营已停自动重投');
+  });
+
+  test('7.3 验证码硬暂停 → 零副作用回待审（不驱动序列、不写终态、保留授权、通知 edge_paused_requeued）', async () => {
+    const h = harness({ approved: true, edgeId: 'edge-A', isEdgePaused: () => true });
+    await h.dispatcher.dispatch(7);
+    assert.equal(h.events.includes('seq'), false, '暂停期绝不驱动序列（投递必为 0，会被烧 failed）');
+    assert.equal(h.events.includes('lease:acquired'), false, '暂停期不取租约');
+    assert.equal(h.statusUpdates.length, 0, '不写终态：草稿留待审');
+    assert.deepEqual(h.voided, [], '瞬态暂停不作废授权（解除后自动重投）');
+    assert.equal(h.notices.some((n) => n.kind === 'edge_paused_requeued'), true);
   });
 });

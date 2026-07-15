@@ -298,3 +298,72 @@ describe('AC-CMD CommandSequencer（云端编排驱动）', () => {
     assert.equal(seq.pendingCount, 0, '超时后 pending 必须清理');
   });
 });
+
+describe('AC-PREEMPT 被抢占分档（change lease-strict-preemption 批 C：被抢占 ≠ 失败）', () => {
+  const fail = (cmd: PublishCommandPayload, over: Partial<PublishCommandResultPayload>): PublishCommandResultPayload => ({
+    recordId: cmd.recordId,
+    seq: cmd.seq,
+    kind: cmd.kind,
+    ok: false,
+    ...over,
+  });
+
+  it('AC-PREEMPT-1 submit_publish 回 ok:false + submitDispatched → submitted_unconfirmed（6.2/HOLE-2：不烧 failed_before_submit）', async () => {
+    // 提交按下已派发但确认失败（post_validate_failed）：帖子可能已发出 → 已提交待确认终态、绝不重投。
+    const { seq } = makeSequencer((cmd) =>
+      cmd.kind === 'submit_publish' ? fail(cmd, { error: 'post_validate_failed', submitDispatched: true }) : okFor(cmd),
+    );
+    const r = await seq.executePublishSequence(input({ tags: [] }));
+    assert.equal(r.ok, false);
+    assert.equal(r.outcome, 'submitted_unconfirmed');
+  });
+
+  it('AC-PREEMPT-2 核心步回 ok:false + error=preempted_by_task → preempted（独立终局、绝不并入 failed_before_submit）', async () => {
+    const { seq } = makeSequencer((cmd) =>
+      cmd.kind === 'fill_field' ? fail(cmd, { error: 'preempted_by_task' }) : okFor(cmd),
+    );
+    const r = await seq.executePublishSequence(input({ tags: [] }));
+    assert.equal(r.outcome, 'preempted');
+  });
+
+  it('AC-PREEMPT-3 task_lease_mismatch 亦归 preempted（命令到达时租约已不在＝提交前零副作用）', async () => {
+    const { seq } = makeSequencer((cmd) =>
+      cmd.kind === 'navigate_entry' ? fail(cmd, { error: 'task_lease_mismatch' }) : okFor(cmd),
+    );
+    const r = await seq.executePublishSequence(input({ tags: [] }));
+    assert.equal(r.outcome, 'preempted');
+  });
+
+  it('AC-PREEMPT-4 submitDispatched 压过抢占：submit ok:false + submitDispatched + preempted_by_task → submitted_unconfirmed（防双发）', async () => {
+    // 提交后被抢占仍是「已提交待确认」——已派发的按下绝不因抢占而重投。
+    const { seq } = makeSequencer((cmd) =>
+      cmd.kind === 'submit_publish' ? fail(cmd, { error: 'preempted_by_task', submitDispatched: true }) : okFor(cmd),
+    );
+    const r = await seq.executePublishSequence(input({ tags: [] }));
+    assert.equal(r.outcome, 'submitted_unconfirmed');
+  });
+
+  it('AC-PREEMPT-5 preemptTask 就地 reject 在飞指令 → preempted（catch 按类型归类、不 unwind、pending 清零）', async () => {
+    const { seq } = makeSequencer(() => null); // 首条命令不回报 → 挂 pending
+    const p = seq.executePublishSequence(input({ tags: [] }));
+    seq.preemptTask('task-publish-1', 'preempted_by_task');
+    const r = await p;
+    assert.equal(r.outcome, 'preempted');
+    assert.equal(seq.pendingCount, 0);
+  });
+
+  it('AC-PREEMPT-6 真实业务失败仍 failed_before_submit（no_target 非抢占，零回归）', async () => {
+    const { seq } = makeSequencer((cmd) =>
+      cmd.kind === 'fill_field' ? fail(cmd, { error: 'no_target' }) : okFor(cmd),
+    );
+    const r = await seq.executePublishSequence(input({ tags: [] }));
+    assert.equal(r.outcome, 'failed_before_submit');
+  });
+
+  it('AC-PREEMPT-7 onFirstSideEffect 恰在 submit_publish 下发前触发一次（HOLE-13「已开始」下移）', async () => {
+    let fired = 0;
+    const { seq } = makeSequencer((cmd) => okFor(cmd));
+    await seq.executePublishSequence(input({ tags: [], onFirstSideEffect: () => { fired++; } }));
+    assert.equal(fired, 1);
+  });
+});
