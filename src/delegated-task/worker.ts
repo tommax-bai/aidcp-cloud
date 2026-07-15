@@ -108,9 +108,7 @@ export class DelegatedTaskWorker {
 
     if (fresh.currentStep === 'reconcile_waiting_approval') {
       if (!executor.reconcileWaitingApproval) {
-        return this.update(await this.deps.store.releaseClaim(fresh.id, token, 'waiting_approval', {
-          nextEligibleAt: this.now() + this.retryDelayMs, step: 'waiting_approval', reason: 'approval_still_pending',
-        }));
+        return this.deps.store.releaseWaitingApprovalClaim(fresh.id, token, this.now() + this.retryDelayMs);
       }
       const result = await executor.reconcileWaitingApproval(fresh);
       const unsettled = await this.deps.store.listUnsettledAttempts(fresh.id);
@@ -203,9 +201,7 @@ export class DelegatedTaskWorker {
     attempt?: DelegatedTaskAttempt,
   ): Promise<DelegatedTask | null> {
     if (result.kind === 'waiting_approval') {
-      return this.update(await this.deps.store.releaseClaim(task.id, token, 'waiting_approval', {
-        nextEligibleAt: this.now() + this.retryDelayMs, step: 'waiting_approval', reason: result.reason,
-      }));
+      return this.deps.store.releaseWaitingApprovalClaim(task.id, token, this.now() + this.retryDelayMs);
     }
     if (result.kind === 'success') {
       const latest = attempt

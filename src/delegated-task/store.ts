@@ -119,6 +119,7 @@ export interface DelegatedTaskStore {
   claimNext(opts: { workerId: string; leaseMs: number; now?: number }): Promise<DelegatedTask | null>;
   markExecuting(id: string, claimToken: string, step: string): Promise<DelegatedTask | null>;
   releaseClaim(id: string, claimToken: string, nextStatus: DelegatedTaskStatus, opts?: { nextEligibleAt?: number; step?: string; reason?: string }): Promise<DelegatedTask | null>;
+  releaseWaitingApprovalClaim(id: string, claimToken: string, nextEligibleAt: number): Promise<DelegatedTask | null>;
   startAttempt(taskId: string, claimToken: string, targetKey: string): Promise<DelegatedTaskAttempt>;
   markAttemptDispatched(attemptId: string): Promise<void>;
   annotateAttempt(attemptId: string, verificationKind: DelegatedVerificationKind, evidenceRef: string, reason?: string): Promise<void>;
@@ -353,9 +354,12 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
          ORDER BY CASE priority WHEN 'high' THEN 0 ELSE 1 END, deadline_at ASC, created_at ASC
          FOR UPDATE SKIP LOCKED LIMIT 1
        )
-       UPDATE delegated_tasks t SET status='planning', claim_token=$2, claim_expires_at=$3,
+       UPDATE delegated_tasks t SET
+         status=CASE WHEN t.status='waiting_approval' THEN t.status ELSE 'planning' END,
+         claim_token=$2, claim_expires_at=$3,
          current_step=CASE WHEN t.status='waiting_approval' THEN 'reconcile_waiting_approval' ELSE 'planning' END,
-         updated_at=$1, version=version+1
+         updated_at=$1,
+         version=CASE WHEN t.status='waiting_approval' THEN t.version ELSE t.version+1 END
        FROM candidate WHERE t.id=candidate.id RETURNING t.*`,
       [now, token, expires],
     );
@@ -388,6 +392,16 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
     );
     if (rows[0]) await this.event(id, 'claim_released', before.status, nextStatus, { reason: opts.reason ?? null });
     return rows[0] ? mapTask(rows[0]) : null;
+  }
+
+  async releaseWaitingApprovalClaim(id: string, claimToken: string, nextEligibleAt: number): Promise<DelegatedTask | null> {
+    const { rows } = await this.pool.query<TaskRow>(
+      `UPDATE delegated_tasks SET claim_token=NULL, claim_expires_at=NULL,
+         next_eligible_at=$3, current_step='waiting_approval', updated_at=now()
+       WHERE id=$1 AND claim_token=$2 AND status='waiting_approval' RETURNING *`,
+      [id, claimToken, new Date(nextEligibleAt)],
+    );
+    return rows[0] ? mapTask(rows[0]) : this.get(id);
   }
 
   async startAttempt(taskId: string, claimToken: string, targetKey: string): Promise<DelegatedTaskAttempt> {
@@ -625,7 +639,12 @@ export class MemoryDelegatedTaskStore implements DelegatedTaskStore {
     const t = candidates[0];
     if (!t) return null;
     const fromWaiting = t.status === 'waiting_approval';
-    this.mutate(t, { status: 'planning', claimToken: `${opts.workerId}:${randomUUID()}`, claimExpiresAt: now + opts.leaseMs, currentStep: fromWaiting ? 'reconcile_waiting_approval' : 'planning' });
+    const claim = { claimToken: `${opts.workerId}:${randomUUID()}`, claimExpiresAt: now + opts.leaseMs };
+    if (fromWaiting) {
+      Object.assign(t, claim, { currentStep: 'reconcile_waiting_approval', updatedAt: now });
+    } else {
+      this.mutate(t, { ...claim, status: 'planning', currentStep: 'planning' });
+    }
     return structuredClone(t);
   }
 
@@ -641,6 +660,19 @@ export class MemoryDelegatedTaskStore implements DelegatedTaskStore {
     if (!t || t.claimToken !== token) return t ? structuredClone(t) : null;
     assertTaskTransition(t.status, nextStatus);
     this.mutate(t, { status: nextStatus, claimToken: null, claimExpiresAt: null, nextEligibleAt: opts.nextEligibleAt ?? null, currentStep: opts.step ?? null });
+    return structuredClone(t);
+  }
+
+  async releaseWaitingApprovalClaim(id: string, token: string, nextEligibleAt: number): Promise<DelegatedTask | null> {
+    const t = this.tasks.get(id);
+    if (!t || t.claimToken !== token || t.status !== 'waiting_approval') return t ? structuredClone(t) : null;
+    Object.assign(t, {
+      claimToken: null,
+      claimExpiresAt: null,
+      nextEligibleAt,
+      currentStep: 'waiting_approval',
+      updatedAt: Date.now(),
+    });
     return structuredClone(t);
   }
 

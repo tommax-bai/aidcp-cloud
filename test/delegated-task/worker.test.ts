@@ -59,18 +59,111 @@ test('pause request made during an action takes effect only after that action se
 
 test('candidate persisted does not count as publish success while waiting approval', async () => {
   const store = new MemoryDelegatedTaskStore();
-  const now = 3_000_000;
+  let now = 3_000_000;
   const task = await confirmedTask(store, now, { action: 'publish_post', targetSuccessCount: 1, maxAttempts: 1 });
+  const updates: DelegatedTask[] = [];
   const executor: DelegatedTaskExecutor = {
     targetKey: () => 'draft-1',
     execute: async () => ({ kind: 'waiting_approval', evidenceRef: 'draft-1' }),
   };
-  const worker = new DelegatedTaskWorker({ store, executorFor: () => executor, now: () => now, claimLeaseMs: 10_000 });
+  const worker = new DelegatedTaskWorker({
+    store,
+    executorFor: () => executor,
+    now: () => now,
+    retryDelayMs: 1_000,
+    claimLeaseMs: 10_000,
+    onTaskUpdated: (updated) => { updates.push(updated); },
+  });
   await worker.tick();
   const waiting = await store.get(task.id);
   assert.equal(waiting?.status, 'waiting_approval');
   assert.equal(waiting?.progress.successCount, 0);
   assert.equal(waiting?.progress.attemptCount, 1);
+  assert.equal(updates.length, 1);
+
+  const waitingVersion = waiting!.version;
+  now += 2_000;
+  await worker.tick();
+  const stillWaiting = await store.get(task.id);
+  assert.equal(stillWaiting?.status, 'waiting_approval');
+  assert.equal(stillWaiting?.version, waitingVersion);
+  assert.equal(stillWaiting?.progress.attemptCount, 1);
+  assert.equal(updates.length, 1);
+});
+
+test('waiting approval claim keeps version stable and recovers after lease expiry', async () => {
+  const store = new MemoryDelegatedTaskStore();
+  let now = 3_100_000;
+  const task = await confirmedTask(store, now, { action: 'publish_post', targetSuccessCount: 1, maxAttempts: 1 });
+  const executor: DelegatedTaskExecutor = {
+    targetKey: () => 'draft-lease',
+    execute: async () => ({ kind: 'waiting_approval', evidenceRef: 'draft-lease' }),
+  };
+  const worker = new DelegatedTaskWorker({ store, executorFor: () => executor, now: () => now, retryDelayMs: 1_000, claimLeaseMs: 10_000 });
+  await worker.tick();
+  const waiting = (await store.get(task.id))!;
+  now += 2_000;
+
+  const firstClaim = (await store.claimNext({ workerId: 'worker-a', leaseMs: 10_000, now }))!;
+  assert.equal(firstClaim.status, 'waiting_approval');
+  assert.equal(firstClaim.version, waiting.version);
+  assert.equal(await store.claimNext({ workerId: 'worker-b', leaseMs: 10_000, now: now + 1 }), null);
+
+  now += 10_001;
+  const recovered = (await store.claimNext({ workerId: 'worker-b', leaseMs: 10_000, now }))!;
+  assert.equal(recovered.status, 'waiting_approval');
+  assert.equal(recovered.version, waiting.version);
+  const released = await store.releaseWaitingApprovalClaim(recovered.id, recovered.claimToken!, now + 1_000);
+  assert.equal(released?.version, waiting.version);
+  assert.equal(released?.claimToken, null);
+});
+
+test('approval result change leaves silent wait and emits completed update', async () => {
+  const store = new MemoryDelegatedTaskStore();
+  let now = 3_200_000;
+  const task = await confirmedTask(store, now, { action: 'publish_post', targetSuccessCount: 1, maxAttempts: 1 });
+  const updates: DelegatedTask[] = [];
+  const executor: DelegatedTaskExecutor = {
+    targetKey: () => 'draft-approved',
+    execute: async () => ({ kind: 'waiting_approval', evidenceRef: 'draft-approved' }),
+    reconcileWaitingApproval: async () => ({ kind: 'success', verificationKind: 'platform_publish_confirmed', evidenceRef: 'post-1' }),
+  };
+  const worker = new DelegatedTaskWorker({
+    store,
+    executorFor: () => executor,
+    now: () => now,
+    retryDelayMs: 1_000,
+    claimLeaseMs: 10_000,
+    onTaskUpdated: (updated) => { updates.push(updated); },
+  });
+  await worker.tick();
+  now += 2_000;
+  await worker.tick();
+  const completed = await store.get(task.id);
+  assert.equal(completed?.status, 'completed');
+  assert.equal(completed?.progress.successCount, 1);
+  assert.deepEqual(updates.map((updated) => updated.status), ['waiting_approval', 'completed']);
+});
+
+test('silent waiting release cannot overwrite a concurrent cancellation', async () => {
+  const store = new MemoryDelegatedTaskStore();
+  let now = 3_300_000;
+  const task = await confirmedTask(store, now, { action: 'publish_post', targetSuccessCount: 1, maxAttempts: 1 });
+  const executor: DelegatedTaskExecutor = {
+    targetKey: () => 'draft-cancelled',
+    execute: async () => ({ kind: 'waiting_approval', evidenceRef: 'draft-cancelled' }),
+    reconcileWaitingApproval: async (waiting) => {
+      await store.requestCancel(waiting.id);
+      return { kind: 'waiting_approval', evidenceRef: 'draft-cancelled' };
+    },
+  };
+  const worker = new DelegatedTaskWorker({ store, executorFor: () => executor, now: () => now, retryDelayMs: 1_000, claimLeaseMs: 10_000 });
+  await worker.tick();
+  now += 2_000;
+  await worker.tick();
+  const cancelled = await store.get(task.id);
+  assert.equal(cancelled?.status, 'cancelled');
+  assert.equal(cancelled?.progress.attemptCount, 1);
 });
 
 test('reconciles dispatched attempt before any retry', async () => {

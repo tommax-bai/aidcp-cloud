@@ -187,6 +187,7 @@ import {
   createDelegatedExecutorRouter,
   type DelegatedTask,
 } from './delegated-task/index.js';
+import { DelegatedTaskNotificationGate } from './delegated-task/notification.js';
 import {
   buildDelegatedTaskConfirmationCard,
   buildDelegatedTaskProgressCard,
@@ -3266,6 +3267,7 @@ async function main(): Promise<void> {
       },
       terminalWaitMs: readEnvNumber('AIDCP_DELEGATED_TASK_TERMINAL_WAIT_MS', 4 * 60_000),
     });
+    const delegatedTaskNotificationGate = new DelegatedTaskNotificationGate();
     const worker = new DelegatedTaskWorker({
       store: delegatedTaskStore,
       executorFor: delegatedExecutors.executorFor,
@@ -3273,11 +3275,15 @@ async function main(): Promise<void> {
       platformStillMatches: async (task) => (await accountStore?.getPlatform?.(task.accountId)) === task.platform,
       onTaskUpdated: async (task: DelegatedTask) => {
         if (!['waiting_approval', 'partially_completed', 'completed', 'cancelled', 'failed'].includes(task.status)) return;
+        if (!delegatedTaskNotificationGate.shouldSend(task)) return;
         const chatId = await resolveAccountChatId(task.accountId);
         if (!chatId) return;
-        await messenger.sendCard(chatId, buildDelegatedTaskProgressCard(task)).catch((err) =>
-          console.warn(`[delegated-task] 进度卡发送失败 task=${task.id}: ${(err as Error).message}`),
-        );
+        try {
+          await messenger.sendCard(chatId, buildDelegatedTaskProgressCard(task));
+          delegatedTaskNotificationGate.markSent(task);
+        } catch (err) {
+          console.warn(`[delegated-task] 进度卡发送失败 task=${task.id}: ${(err as Error).message}`);
+        }
       },
       logger: console,
     });
