@@ -52,8 +52,57 @@ describe('mandatory interaction dispatch safety', () => {
     dispatcher.endSession('test');
   });
 
+  it('mandatory like+comment 先下发点赞，再进入评论钉页保护', async () => {
+    const { dispatcher, commands } = makeDispatcher(() => true);
+    dispatcher.updateNoteData({
+      noteId: 'fb-job',
+      title: 'Tuyển dụng công nhân',
+      content: 'Công ty đang tuyển công nhân tại Hà Nam.',
+      author: 'Việc Làm Hà Nam',
+      likeCount: 0,
+      collectCount: 0,
+    });
+    let commentAppraised = false;
+    const logs: string[] = [];
+    const originalLog = console.log;
+    dispatcher.bus.on('comment.appraised', () => { commentAppraised = true; });
+    console.log = (...args: unknown[]) => { logs.push(args.map(String).join(' ')); };
+    try {
+      dispatcher.bus.emit('interaction.completed', {
+        noteId: 'fb-job',
+        sourcePageType: 'feed',
+        actions: ['like'],
+        mandatoryInteraction,
+        ts: now,
+      });
+
+      const likes = commands.filter((command) => command.action === 'like');
+      assert.equal(likes.length, 1, '同帖强制评论不得在当前同步事件内吞掉点赞命令');
+      assert.equal(likes[0]?.params?.noteId, 'fb-job');
+      assert.equal(commentAppraised, false, '评论钉页必须延后到当前 interaction.completed 分发结束后');
+
+      await Promise.resolve();
+      assert.equal(commentAppraised, true, '点赞已入队后应立即进入评论支线，不引入可见等待');
+      dispatcher.bus.emit('feed.scrolled', { pageType: 'feed', scrollCount: 1, ts: now });
+      assert.ok(
+        logs.some((line) => line.includes('command.suppressed reason=comment_inflight action=scroll')),
+        '钉页期间被抑制的命令必须留下稳定 reason 日志',
+      );
+    } finally {
+      console.log = originalLog;
+      dispatcher.endSession('test');
+    }
+  });
+
   it('RiskController 硬闸拒绝时 mandatory like 仍诚实不下发', () => {
     const { dispatcher, commands } = makeDispatcher(() => false);
+    dispatcher.updateNoteData({
+      noteId: 'fb-job',
+      title: 'Tuyển dụng công nhân',
+      content: 'Công ty đang tuyển công nhân tại Hà Nam.',
+      likeCount: 0,
+      collectCount: 0,
+    });
     dispatcher.bus.emit('interaction.completed', {
       noteId: 'fb-job',
       sourcePageType: 'feed',

@@ -100,14 +100,17 @@ export class CommentAppraiser extends BaseRole {
       // 显式结构化规则命中：跳过普通会话/日预闸、冷却、热度与“要不要评”LLM。
       // 真正下发前的 RiskController.canDo('comment') 仍由 dispatcher 守住。
       this.log(`mandatory_match rule=${mandatory.ruleId} → force comment compose`);
-      this.emit('comment.appraised', {
+      // 与下方普通评论的 comment.appraising 一样排到微任务：本角色比 dispatcher 的
+      // interaction.completed 指令翻译更早订阅；若同步 emit，comment.appraised 会先把
+      // commentInflight 置真，导致同一 mandatory 规则的 like 尚未下发就被钉页闸吞掉。
+      queueMicrotask(() => this.emit('comment.appraised', {
         noteId: payload.noteId,
         sourcePageType: payload.sourcePageType,
         actions: payload.actions,
         reason: `mandatory_rule:${mandatory.ruleId}`,
         mandatoryInteraction: mandatory,
         ts: Date.now(),
-      });
+      }));
       return;
     }
     // 数量闸（最便宜阶段）：会话预算 + 每日上限取小，任一耗尽即不评。

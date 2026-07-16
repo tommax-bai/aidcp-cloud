@@ -732,6 +732,10 @@ export class RoleDispatcher {
       // 评论支线在途（change comment-approval-target-hold）：钉在待评论帖上，扣住一切会离页的 browse/互动命令
       // （stale-target 重扫 / idle_nudge 滚屏 / open_note 换帖 / refresh / feed 续滚）。session.end 与 excursion 仍放行。
       // 与 browseSuspended 并列取并集：巡视/昵称采集用 browseSuspended（布尔），评论支线用本标志（dispatcher 私有），互不覆盖。
+      const noteId = typeof command.params?.noteId === 'string' ? command.params.noteId : '-';
+      console.log(
+        `[RoleDispatcher] command.suppressed reason=comment_inflight action=${command.action} note=${noteId} account=${this.currentAccountId}`,
+      );
       return false;
     }
     if (
