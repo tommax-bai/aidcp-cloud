@@ -70,6 +70,11 @@ import { PersonaGenerator } from './agents/persona-generator.js';
 import { CommentTargetPicker } from './agents/comment-target-picker.js';
 import { buildCommentApprovalCard } from './feishu/comment-approval-card.js';
 import { buildCommandResultCard } from './feishu/cards.js';
+import {
+  buildMandatoryCommentOutcomeCard,
+  buildMandatoryCommentPreAuthorizationCard,
+} from './feishu/mandatory-comment-cards.js';
+import type { MandatoryCommentOutcomeNoticeInput } from './orchestrator/role-dispatcher.js';
 import { CommentScheduler } from './comment-agent/comment-scheduler.js';
 import { loadSoul, type Soul } from './soul/index.js';
 
@@ -2452,24 +2457,35 @@ async function main(): Promise<void> {
     const chatId = await resolveAccountChatId(input.accountId);
     if (!chatId) throw new Error('auto_approve_chat_not_configured');
     const displayName = input.accountName?.trim() || (input.accountId ? accountDisplayName(input.accountId) : undefined);
-    const target = input.title?.trim() || input.authorName?.trim() || '目标内容';
-    const preview = input.text.replace(/\s+/g, ' ').trim().slice(0, 160) || '（空）';
     const mandatory = source === 'mandatory_persona';
     await messenger.sendCard(
       chatId,
-      buildCommandResultCard({
-        command: mandatory ? '人设强制互动评论（免审授权）' : input.contactIncluded ? '排期联系评论（免审）' : '排期评论（免审）',
-        ok: true,
-        level: 'success',
-        title: mandatory ? '人设强制互动评论已免审授权' : input.contactIncluded ? '排期联系评论已免审提交' : '排期评论已免审提交',
-        message:
-          `${mandatory ? '该账号的人设结构化规则已明确授权此类内容必评，评论终稿已生成；接下来仍需通过风控、页面、去重和边端真实回执核验，只有平台确认后才算成功' : '后台排期已开启免审，评论终稿已生成并进入发布步骤；下发前仍会核对页面、去重和边端结果'}。\n` +
-          `**目标**：${target}\n**正文预览**：${preview}`,
-        accountId: input.accountId,
-        accountName: displayName,
-      }),
+      mandatory
+        ? buildMandatoryCommentPreAuthorizationCard({ ...input, accountName: displayName })
+        : buildCommandResultCard({
+            command: input.contactIncluded ? '排期联系评论（免审）' : '排期评论（免审）',
+            ok: true,
+            level: 'success',
+            title: input.contactIncluded ? '排期联系评论已免审提交' : '排期评论已免审提交',
+            message:
+              `后台排期已开启免审，评论终稿已生成并进入发布步骤；下发前仍会核对页面、去重和边端结果。\n` +
+              `**目标**：${input.title?.trim() || input.authorName?.trim() || '目标内容'}\n` +
+              `**正文预览**：${input.text.replace(/\s+/g, ' ').trim().slice(0, 160) || '（空）'}`,
+            accountId: input.accountId,
+            accountName: displayName,
+          }),
     );
     console.log(`[comment] 免审通知已发 source=${source} account=${input.accountId ?? '-'} requestId=${input.requestId} note=${input.noteId}`);
+  };
+
+  const notifyMandatoryCommentOutcome = async (input: MandatoryCommentOutcomeNoticeInput): Promise<void> => {
+    const chatId = await resolveAccountChatId(input.accountId);
+    if (!chatId) throw new Error('mandatory_comment_outcome_chat_not_configured');
+    const displayName = input.accountName?.trim() || (input.accountId ? accountDisplayName(input.accountId) : undefined);
+    await messenger.sendCard(chatId, buildMandatoryCommentOutcomeCard({ ...input, accountName: displayName }));
+    console.log(
+      `[comment] mandatory 终态通知已发 outcome=${input.outcome} account=${input.accountId ?? '-'} requestId=${input.requestId} note=${input.noteId}`,
+    );
   };
 
   // ── 按连接多租户编排（multi-account-node-support D1/D2/D3/D4/D6）─────────────────
@@ -2551,12 +2567,14 @@ async function main(): Promise<void> {
       pacingFloors: pacingConfigStore,
       // 互动前风控闸：按该连接真实账号的 controller 判定（不再钉死 default）。被拒诚实跳过。
       canInteract: (action) => ctx.controller.canDo(action),
+      explainInteract: (action) => ctx.controller.explain(action),
       // 浏览前风控闸：view 配额耗尽时不再打开下一篇笔记，按窗口释放时间休眠后重驱。
       explainView: () => ctx.controller.explain('view'),
       // 评论人审端口（env 闸开启时注入；未开启 → 评论一律诚实跳过、不发）。
       ...(commentApprovalEnabled ? { commentApproval } : {}),
       // 人设 mandatory auto_approve 独立于逐条人审 env，但仍必须先通知成功；通知失败由 gate fail-closed。
       commentAutoApproveNotify: (input) => notifyAutoApprovedComment(input, 'mandatory_persona'),
+      notifyMandatoryCommentOutcome,
       // 评论 / 评论赞当日配额预闸：按该账号 controller 当日剩余。
       getCommentDailyRemaining: () => ctx.controller.dailyRemaining('comment'),
       getCommentLikeDailyRemaining: () => ctx.controller.dailyRemaining('comment_like'),

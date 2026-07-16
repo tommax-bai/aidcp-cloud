@@ -11,7 +11,7 @@
 
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
-import type { RoleName, CommentClearedPayload } from '../event-bus/types.js';
+import type { RoleName, CommentApprovalTrace, CommentClearedPayload } from '../event-bus/types.js';
 import { buildCommentApprovalRequestId } from './comment-approval-request-id.js';
 
 /** 评论人审端口：发卡 + 查授权信号（复用发帖 messenger + isPublishApproved，换评论 requestId 命名空间）。 */
@@ -130,12 +130,20 @@ export class CommentApprovalGate extends BaseRole {
         return;
       }
       this.log(`mandatory auto_approve 已通知并授权 rule=${payload.mandatoryInteraction!.ruleId} note=${payload.noteId}`);
+      const approvalTrace: CommentApprovalTrace = {
+        requestId,
+        ...(accountId ? { accountId } : {}),
+        ...(accountName ? { accountName } : {}),
+        ...(title ? { title } : {}),
+        ...(authorName ? { authorName } : {}),
+      };
       this.emit('comment.approved', {
         noteId: payload.noteId,
         sourcePageType: payload.sourcePageType,
         actions: payload.actions,
         text: payload.text,
         mandatoryInteraction: payload.mandatoryInteraction,
+        approvalTrace,
         ts: this.now(),
       });
       return;

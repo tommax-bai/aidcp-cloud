@@ -74,6 +74,30 @@ describe('CommentAppraiser', () => {
     await sleep(30);
     assert.equal(skipped?.reason, 'daily_cap_reached');
   });
+
+  it('mandatory 风控预检拒绝 → 不调 LLM、不进入撰写，微任务后诚实 skip', async () => {
+    const bus = new EventBus();
+    let llmCalled = false;
+    const role = new CommentAppraiser({
+      eventBus: bus,
+      soul,
+      llm: { complete: async () => { llmCalled = true; return '{"comment":true}'; } },
+      getNoteData: () => note,
+      getRemainingComments: () => 0,
+      getMandatoryRiskDecision: () => ({ allowed: false, reason: 'quota:minute', retryAfterMs: 20_000 }),
+    });
+    role.subscribe();
+    let appraised: any = null;
+    const skipped: any[] = [];
+    bus.on('comment.appraised', (p) => { appraised = p; });
+    bus.on('comment.skipped', (p) => { skipped.push(p); });
+    bus.emit('interaction.completed', { ...trigger, mandatoryInteraction, ts: Date.now() });
+    assert.equal(skipped.length, 0, 'skip 应排到微任务，给同级 mandatory like 留出先下发顺序');
+    await Promise.resolve();
+    assert.equal(skipped[0]?.reason, 'risk_preflight:quota:minute');
+    assert.equal(appraised, null);
+    assert.equal(llmCalled, false);
+  });
 });
 
 describe('CommentComposer', () => {
@@ -250,6 +274,10 @@ describe('CommentApprovalGate', () => {
     assert.equal(notice?.text, 'Cho mình hỏi còn tuyển không ạ?');
     assert.equal(notice?.accountName, 'Tianxing Bai');
     assert.equal(approved?.mandatoryInteraction?.ruleId, 'vietnam-recruitment');
+    assert.equal(approved?.approvalTrace?.requestId, notice?.requestId);
+    assert.equal(approved?.approvalTrace?.accountId, 'acc-fb');
+    assert.equal(approved?.approvalTrace?.accountName, 'Tianxing Bai');
+    assert.equal(approved?.approvalTrace?.title, note.title);
   });
 
   it('mandatory auto_approve 通知失败 → fail-closed，不 approved', async () => {

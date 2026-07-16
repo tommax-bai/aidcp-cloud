@@ -17,7 +17,10 @@ const mandatoryInteraction: MandatoryInteractionContext = {
 };
 const now = 1_000_000;
 
-function makeDispatcher(canInteract: () => boolean): { dispatcher: RoleDispatcher; commands: EdgeCommand[] } {
+function makeDispatcher(
+  canInteract: () => boolean,
+  explainInteract?: () => { allowed: boolean; reason?: string; retryAfterMs?: number },
+): { dispatcher: RoleDispatcher; commands: EdgeCommand[] } {
   const commands: EdgeCommand[] = [];
   const cooldownGate = new ActionCooldownGate({ startedAtMs: 0, restartQuietMs: 0 });
   cooldownGate.markActed('acc-fb', 'like', now - 1_000);
@@ -26,6 +29,7 @@ function makeDispatcher(canInteract: () => boolean): { dispatcher: RoleDispatche
     llm: { complete: async () => '{"verdict":"skip","reason":"unused"}' },
     sendCommand: (command) => { commands.push(command); },
     canInteract,
+    ...(explainInteract ? { explainInteract } : {}),
     cooldownGate,
     clock: () => now,
   });
@@ -112,6 +116,38 @@ describe('mandatory interaction dispatch safety', () => {
     });
 
     assert.equal(commands.some((command) => command.action === 'like'), false);
+    dispatcher.endSession('test');
+  });
+
+  it('comment 预检拒绝时先发 mandatory like，但不进入评论生成/通知链', async () => {
+    const { dispatcher, commands } = makeDispatcher(
+      () => true,
+      () => ({ allowed: false, reason: 'quota:minute', retryAfterMs: 30_000 }),
+    );
+    dispatcher.updateNoteData({
+      noteId: 'fb-job',
+      title: 'Tuyển dụng công nhân',
+      content: 'Công ty đang tuyển công nhân tại Hà Nam.',
+      author: 'Việc Làm Hà Nam',
+      likeCount: 0,
+      collectCount: 0,
+    });
+    const appraised: unknown[] = [];
+    const skipped: { reason: string }[] = [];
+    dispatcher.bus.on('comment.appraised', (payload) => { appraised.push(payload); });
+    dispatcher.bus.on('comment.skipped', (payload) => { skipped.push(payload); });
+    dispatcher.bus.emit('interaction.completed', {
+      noteId: 'fb-job',
+      sourcePageType: 'feed',
+      actions: ['like'],
+      mandatoryInteraction,
+      ts: now,
+    });
+    assert.equal(commands.filter((command) => command.action === 'like').length, 1);
+    await Promise.resolve();
+    assert.equal(appraised.length, 0);
+    assert.equal(skipped[0]?.reason, 'risk_preflight:quota:minute');
+    assert.equal(commands.some((command) => command.action === 'comment'), false);
     dispatcher.endSession('test');
   });
 });

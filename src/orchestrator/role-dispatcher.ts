@@ -12,7 +12,7 @@
  */
 
 import { EventBus } from '../event-bus/index.js';
-import type { MandatoryInteractionContext, NoteDetailData } from '../event-bus/types.js';
+import type { CommentApprovalTrace, MandatoryInteractionContext, NoteDetailData } from '../event-bus/types.js';
 import {
   isNoteActionSupported,
   noteActionRefusalReason,
@@ -140,6 +140,30 @@ export interface ViewQuotaDecision {
   retryAfterMs?: number;
 }
 
+export type MandatoryCommentOutcome = 'confirmed' | 'pending' | 'failed' | 'unknown';
+
+/** mandatory auto_approve 评论的操作员终态通知；同一 requestId 最多上报一次。 */
+export interface MandatoryCommentOutcomeNoticeInput {
+  requestId: string;
+  noteId: string;
+  text: string;
+  outcome: MandatoryCommentOutcome;
+  reason?: string;
+  accountId?: string;
+  accountName?: string;
+  title?: string;
+  authorName?: string;
+}
+
+interface PendingCommentDelivery {
+  noteId: string;
+  sourcePageType: 'feed' | 'search';
+  actions: ('like' | 'collect')[];
+  text: string;
+  mandatoryInteraction?: MandatoryInteractionContext;
+  approvalTrace?: CommentApprovalTrace;
+}
+
 export type SessionBudgetAction = 'like' | 'collect' | 'follow' | 'search' | 'comment' | 'comment_like' | 'join_group';
 
 const SESSION_BUDGET_ACTION_KEYS: Record<SessionBudgetAction, keyof SessionInteractionBudget> = {
@@ -183,6 +207,8 @@ export interface RoleDispatcherOptions {
    * 由 server 接线为 `(action) => riskController.canDo(action)`。被拒则诚实跳过（不下发、不扣 budget）。
    */
   canInteract?: (action: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like') => boolean;
+  /** 互动风控解释口；mandatory 评论预检和最终闸共用同一 RiskController 判定来源。 */
+  explainInteract?: (action: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like') => ViewQuotaDecision;
   /** 浏览前风控闸：兼容旧测试/旧装配；优先使用 explainView。 */
   canView?: () => boolean;
   /**
@@ -222,6 +248,10 @@ export interface RoleDispatcherOptions {
    * 迁移灰度开启（C2）时由 server 接线到飞书出口。
    */
   notifyApprovedNotDelivered?: (input: { noteId: string; reason?: string }) => void | Promise<void>;
+  /** mandatory auto_approve 评论的平台终态通知口；同一 requestId 最多调用一次。 */
+  notifyMandatoryCommentOutcome?: (input: MandatoryCommentOutcomeNoticeInput) => void | Promise<void>;
+  /** mandatory 预授权到平台终态的最长等待；缺省 120s。 */
+  mandatoryCommentOutcomeTimeoutMs?: number;
   /** 该账号当日剩余评论上限（后台配置）。缺省 → 仅会话评论预算 + 风控配额生效。 */
   getCommentDailyRemaining?: () => number;
   /** 该账号当日剩余「评论赞」配额（接 riskController.dailyRemaining('comment_like')）。 */
@@ -379,11 +409,14 @@ export class RoleDispatcher {
   private lastPushedTempo = 1.0;
   private readonly pacingFloors?: PacingFloorProvider;
   private readonly canInteract: (action: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like') => boolean;
+  private readonly explainInteract: (action: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like') => ViewQuotaDecision;
   private readonly canView: () => boolean;
   private readonly explainView: () => ViewQuotaDecision;
   private readonly commentApproval?: CommentApprovalPort;
   private readonly commentAutoApproveNotify?: (input: CommentApprovalNoticeInput) => Promise<void>;
   private readonly notifyApprovedNotDelivered?: (input: { noteId: string; reason?: string }) => void | Promise<void>;
+  private readonly notifyMandatoryCommentOutcome?: (input: MandatoryCommentOutcomeNoticeInput) => void | Promise<void>;
+  private readonly mandatoryCommentOutcomeTimeoutMs: number;
   private readonly getCommentDailyRemaining?: () => number;
   private readonly getCommentLikeDailyRemaining?: () => number;
   private readonly archiveValuableComment?: (input: ValuableCommentInput) => Promise<void>;
@@ -401,12 +434,16 @@ export class RoleDispatcher {
   }) => Promise<{ fired: boolean; reason?: string }>;
   private readonly getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
   /** 已下发待回执的评论上下文：action.completed{comment} 据此扣额 + emit comment.done（→ 是否进主页评估）。 */
-  private pendingComment: { noteId: string; sourcePageType: 'feed' | 'search'; actions: ('like' | 'collect')[]; text: string; mandatoryInteraction?: MandatoryInteractionContext } | null = null;
+  private pendingComment: PendingCommentDelivery | null = null;
   /**
    * 回执驱动两步评论迁移（change platform-browse-protocol）：commentSurface≠readSurface 时先发 open_note{purpose:'navigate'}，
    * 待其 action.completed{ok, observation.surface:'detail', noteId 匹配} 才发 comment。阶段 0 两 surface 相等 ⇒ 结构性不可达。
    */
-  private pendingMigration: { noteId: string; sourcePageType: 'feed' | 'search'; actions: ('like' | 'collect')[]; text: string; mandatoryInteraction?: MandatoryInteractionContext } | null = null;
+  private pendingMigration: PendingCommentDelivery | null = null;
+  /** mandatory 预授权评论的有界终态等待计时器。 */
+  private mandatoryCommentOutcomeTimer: unknown;
+  /** requestId 级幂等：不论成功、失败还是未知，同一次预授权只尝试一次终态通知。 */
+  private readonly reportedMandatoryCommentRequests = new Set<string>();
   /**
    * 评论支线在途标志（change comment-approval-target-hold）：comment.appraised（确立要评）置、
    * comment.approved（下发前）/comment.skipped 清。覆盖撰写 / 去 AI 味 / 审批全程，把账号钉在待评论帖上。
@@ -521,6 +558,10 @@ export class RoleDispatcher {
     }
     this.pacingFloors = options.pacingFloors;
     this.canInteract = options.canInteract ?? (() => true);
+    this.explainInteract = options.explainInteract ?? ((action) => {
+      const allowed = this.canInteract(action);
+      return allowed ? { allowed } : { allowed, reason: 'risk_blocked' };
+    });
     this.canView = options.canView ?? (() => true);
     this.explainView = options.explainView ?? (() => {
       const allowed = this.canView();
@@ -529,6 +570,8 @@ export class RoleDispatcher {
     this.commentApproval = options.commentApproval;
     this.commentAutoApproveNotify = options.commentAutoApproveNotify;
     this.notifyApprovedNotDelivered = options.notifyApprovedNotDelivered;
+    this.notifyMandatoryCommentOutcome = options.notifyMandatoryCommentOutcome;
+    this.mandatoryCommentOutcomeTimeoutMs = Math.max(1, options.mandatoryCommentOutcomeTimeoutMs ?? 120_000);
     this.getCommentDailyRemaining = options.getCommentDailyRemaining;
     this.getCommentLikeDailyRemaining = options.getCommentLikeDailyRemaining;
     this.archiveValuableComment = options.archiveValuableComment;
@@ -806,6 +849,104 @@ export class RoleDispatcher {
     console.warn(`[RoleDispatcher] 已批准未送达（未接线操作员回报口，仅日志）note=${noteId} reason=${reason ?? 'nav_failed'}`);
   }
 
+  private mandatoryApprovalTrace(delivery: PendingCommentDelivery): CommentApprovalTrace | null {
+    const mandatory = delivery.mandatoryInteraction;
+    if (
+      mandatory?.commentApproval !== 'auto_approve' ||
+      !mandatory.actions.includes('comment') ||
+      !delivery.approvalTrace?.requestId
+    ) {
+      return null;
+    }
+    return delivery.approvalTrace;
+  }
+
+  /**
+   * 预授权只是“允许尝试”，不是平台成功。这里以 requestId 幂等地补一张且仅一张终态卡；
+   * 通知失败只告警，不反向伪造平台状态，也不重试刷屏。
+   */
+  private reportMandatoryCommentOutcome(
+    delivery: PendingCommentDelivery,
+    outcome: MandatoryCommentOutcome,
+    reason?: string,
+  ): void {
+    const trace = this.mandatoryApprovalTrace(delivery);
+    if (!trace || this.reportedMandatoryCommentRequests.has(trace.requestId)) return;
+    this.reportedMandatoryCommentRequests.add(trace.requestId);
+    // dispatcher 可能常驻数月；保留最近一批 requestId 足以挡迟到回执，避免幂等集合无界增长。
+    if (this.reportedMandatoryCommentRequests.size > 2_000) {
+      const oldest = this.reportedMandatoryCommentRequests.values().next().value;
+      if (oldest) this.reportedMandatoryCommentRequests.delete(oldest);
+    }
+    if (!this.notifyMandatoryCommentOutcome) {
+      console.warn(
+        `[RoleDispatcher] mandatory 评论终态通知口未接线 requestId=${trace.requestId} outcome=${outcome} reason=${reason ?? '-'}`,
+      );
+      return;
+    }
+    try {
+      const notification = this.notifyMandatoryCommentOutcome({
+        requestId: trace.requestId,
+        noteId: delivery.noteId,
+        text: delivery.text,
+        outcome,
+        ...(reason ? { reason } : {}),
+        ...(trace.accountId ? { accountId: trace.accountId } : {}),
+        ...(trace.accountName ? { accountName: trace.accountName } : {}),
+        ...(trace.title ? { title: trace.title } : {}),
+        ...(trace.authorName ? { authorName: trace.authorName } : {}),
+      });
+      void Promise.resolve(notification).catch((err) => {
+        console.warn(
+          `[RoleDispatcher] mandatory 评论终态通知失败 requestId=${trace.requestId}: ${(err as Error).message}`,
+        );
+      });
+    } catch (err) {
+      console.warn(
+        `[RoleDispatcher] mandatory 评论终态通知失败 requestId=${trace.requestId}: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  private clearMandatoryCommentOutcomeTimer(): void {
+    if (this.mandatoryCommentOutcomeTimer === undefined) return;
+    this.clearTimeoutFn(this.mandatoryCommentOutcomeTimer);
+    this.mandatoryCommentOutcomeTimer = undefined;
+  }
+
+  private armMandatoryCommentOutcomeTimer(delivery: PendingCommentDelivery): void {
+    const trace = this.mandatoryApprovalTrace(delivery);
+    if (!trace) return;
+    this.clearMandatoryCommentOutcomeTimer();
+    this.mandatoryCommentOutcomeTimer = this.setTimeoutFn(() => {
+      this.mandatoryCommentOutcomeTimer = undefined;
+      const pending = this.pendingComment ?? this.pendingMigration;
+      if (!pending || this.mandatoryApprovalTrace(pending)?.requestId !== trace.requestId) return;
+      this.pendingComment = null;
+      this.pendingMigration = null;
+      this.reportMandatoryCommentOutcome(pending, 'unknown', 'receipt_timeout');
+      this.eventBus.emit('comment.done', {
+        noteId: pending.noteId,
+        sourcePageType: pending.sourcePageType,
+        actions: pending.actions,
+        ok: false,
+        reason: 'receipt_timeout',
+        ...(pending.mandatoryInteraction ? { mandatoryInteraction: pending.mandatoryInteraction } : {}),
+        ts: this.clock(),
+      });
+    }, this.mandatoryCommentOutcomeTimeoutMs);
+    (this.mandatoryCommentOutcomeTimer as { unref?: () => void } | undefined)?.unref?.();
+  }
+
+  /** 掉线/重启/会话结束时不把“边缘没回执”误报成功；只发 unknown，不再驱动浏览链。 */
+  private settlePendingMandatoryCommentAsUnknown(reason: string): void {
+    const pending = this.pendingComment ?? this.pendingMigration;
+    this.clearMandatoryCommentOutcomeTimer();
+    if (pending) this.reportMandatoryCommentOutcome(pending, 'unknown', reason);
+    this.pendingComment = null;
+    this.pendingMigration = null;
+  }
+
   /** 平台是否支持「浏览多图」（注入给 DeepReader；fail-open：无平台/查表失败 ⇒ true）。 */
   private canBrowseImages(): boolean {
     return !this.accountPlatform || isNoteActionSupported(this.accountPlatform, 'browse_images');
@@ -1046,6 +1187,8 @@ export class RoleDispatcher {
         ...(this.getCommentDailyRemaining ? { getDailyRemaining: this.getCommentDailyRemaining } : {}),
         // 评论冷却前置到评估阶段（engagement-restraint）：按当前账号查冷却闸（无 gate 时恒放行）。
         getCommentCooldownOk: () => this.cooldownPasses('comment'),
+        // mandatory 评论仍跳过普通策略门，但在生成正文/发预授权卡之前先读最终风控同源解释。
+        getMandatoryRiskDecision: () => this.explainInteract('comment'),
       }),
       new CommentComposer({
         ...commonOptions,
@@ -1339,6 +1482,7 @@ export class RoleDispatcher {
     this.cancelRestTimer();
     this.cancelWakeTimer();
     this.cancelViewQuotaSleep(false);
+    this.settlePendingMandatoryCommentAsUnknown('session_restarted');
     // 幂等：已活跃则先拆旧订阅，避免重复接线（正常路径下 setup 后首次启动无需拆除）。
     if (this.sessionActive) {
       this.roles.forEach((r) => r.unsubscribe());
@@ -1357,7 +1501,6 @@ export class RoleDispatcher {
     this.searchLimiter.resetSession();
     this.clearFacebookNaturalInteractionEvidence();
     // 跨会话残留清理（change platform-browse-protocol）：迁移在途 / 审批在途标志不得跨会话粘连。
-    this.pendingMigration = null;
     this.commentInflight = false;
     // 跨会话概念记忆：异步刷新，不阻塞 feed.entered（首次搜索发生在连刷阈值之后，届时池已就绪）。
     void this.refreshConceptPool();
@@ -1411,6 +1554,7 @@ export class RoleDispatcher {
     this.cancelRestTimer();
     this.cancelWakeTimer();
     this.cancelViewQuotaSleep(false);
+    this.settlePendingMandatoryCommentAsUnknown('session_restarted');
     // 若仍活跃，先拆除旧订阅，避免重复注册
     if (this.sessionActive) {
       this.roles.forEach((r) => r.unsubscribe());
@@ -1431,7 +1575,6 @@ export class RoleDispatcher {
     // 跨会话残留清理（change platform-browse-protocol）：迁移在途 / 审批在途标志不得跨会话粘连。
     // **生产的会话(重)启动统一走 restartSession**（edge hello / 绑人设自启 / 续场 / 面板），startSession 仅测试用——
     // 故此处的清理才是生产实际生效的那一份（红线修复：防审批标志卡死跨会话粘连、迁移在途被后续 open_note 误消费）。
-    this.pendingMigration = null;
     this.commentInflight = false;
     this.clearFacebookNaturalInteractionEvidence();
     // 重新订阅角色与接线（SessionMonitor.subscribe 重置 startedAt/actionCount）
@@ -1459,6 +1602,8 @@ export class RoleDispatcher {
     this.cancelRestTimer();
     this.cancelWakeTimer();
     this.cancelViewQuotaSleep(false);
+    this.settlePendingMandatoryCommentAsUnknown(`session_ended:${reason ?? 'manual'}`);
+    this.commentInflight = false;
     void this.endNotificationTask();
     if (!this.sessionActive) return;
     const account = this.currentAccountId;
@@ -1913,13 +2058,24 @@ export class RoleDispatcher {
         // 时钟不在此恢复：resumeClock 会补发延期的 should_end；须晚于评论真正下发（见 comment.done），
         // 否则补发的 session.end 会抢在（FB 两步迁移的）评论之前结束会话、废掉已授权评论。
         this.commentInflight = false;
-        if (!this.canInteract('comment')) {
-          console.log(`[RoleDispatcher] 评论被风控拦截，跳过 note=${payload.noteId}`);
+        const approvedDelivery: PendingCommentDelivery = {
+          noteId: payload.noteId,
+          sourcePageType: payload.sourcePageType,
+          actions: payload.actions,
+          text: payload.text,
+          ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
+          ...(payload.approvalTrace ? { approvalTrace: payload.approvalTrace } : {}),
+        };
+        const risk = this.explainInteract('comment');
+        if (!risk.allowed) {
+          const reason = `risk:${risk.reason ?? 'risk_blocked'}`;
+          console.log(`[RoleDispatcher] 评论被风控拦截，跳过 note=${payload.noteId} reason=${reason}`);
+          this.reportMandatoryCommentOutcome(approvedDelivery, 'failed', reason);
           this.eventBus.emit('comment.skipped', {
             noteId: payload.noteId,
             sourcePageType: payload.sourcePageType,
             actions: payload.actions,
-            reason: 'risk_blocked',
+            reason,
             ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
             ts: this.clock(),
           });
@@ -1930,13 +2086,8 @@ export class RoleDispatcher {
         // 读侧用 effectiveReadSurface（版本偏斜后）：就地读打开时评论必迁移；老边端 read 回落 detail ⇒ 与 comment 相等
         // ⇒ 结构性不可达（=今天，逐位直发）。XHS 两 surface 皆 detail ⇒ 恒相等 ⇒ 零回归。
         if (resolveCommentSurface(this.accountPlatform) !== this.effectiveReadSurface()) {
-          this.pendingMigration = {
-            noteId: payload.noteId,
-            sourcePageType: payload.sourcePageType,
-            actions: payload.actions,
-            text: payload.text,
-            ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
-          };
+          this.pendingMigration = approvedDelivery;
+          this.armMandatoryCommentOutcomeTimer(approvedDelivery);
           const migrateSent = this.sendCommand({
             action: 'open_note',
             params: { noteId: payload.noteId, purpose: 'navigate', thinkMs: this.thinkNow() },
@@ -1947,34 +2098,35 @@ export class RoleDispatcher {
             // emit comment.skipped 触发 resumeClock('comment_subline')。与直发路径的守卫对称
             // （change comment-approval-target-hold）：否则评论支线无终局 → 时钟永冻 should_end。
             this.pendingMigration = null;
+            this.clearMandatoryCommentOutcomeTimer();
+            this.reportMandatoryCommentOutcome(approvedDelivery, 'failed', 'comment_migration_suppressed');
             this.eventBus.emit('comment.skipped', {
               noteId: payload.noteId,
               sourcePageType: payload.sourcePageType,
               actions: payload.actions,
               reason: 'comment_migration_suppressed',
+              ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
               ts: this.clock(),
             });
           }
           return;
         }
-        this.pendingComment = {
-          noteId: payload.noteId,
-          sourcePageType: payload.sourcePageType,
-          actions: payload.actions,
-          text: payload.text,
-          ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
-        };
+        this.pendingComment = approvedDelivery;
+        this.armMandatoryCommentOutcomeTimer(approvedDelivery);
         const commentSent = this.sendNoteScopedCommand('comment', { action: 'comment', params: { noteId: payload.noteId, text: payload.text, thinkMs: this.thinkNow() } });
         if (!commentSent) {
           // 评论命令被去重/配额/软暂停闸拦下（未真正下发）→ 诚实收敛评论支线：清 pendingComment（不等永不到来的回执）、
           // emit comment.skipped 走「是否进主页评估」。否则评论支线无终局 → resumeClock('comment_subline') 永不调用、
           // 时钟永冻 should_end（change comment-approval-target-hold）；且旧行为下会话卡死在此帖直到看门狗。
           this.pendingComment = null;
+          this.clearMandatoryCommentOutcomeTimer();
+          this.reportMandatoryCommentOutcome(approvedDelivery, 'failed', 'comment_dispatch_suppressed');
           this.eventBus.emit('comment.skipped', {
             noteId: payload.noteId,
             sourcePageType: payload.sourcePageType,
             actions: payload.actions,
             reason: 'comment_dispatch_suppressed',
+            ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
             ts: this.clock(),
           });
         }
@@ -2281,6 +2433,9 @@ export class RoleDispatcher {
           // **只在被抢占的是评论支线命令（comment / 迁移 open_note）时解冻**：评论支线在途期唯一在飞的换页命令就是这二者
           // （其余离页命令已被 commentInflight 闸扣住）；非评论动作（如 like/scroll）被抢占绝不误清一个正当在途的 commentInflight。
           if (payload.action === 'comment' || payload.action === 'open_note') {
+            const preempted = payload.action === 'comment' ? this.pendingComment : this.pendingMigration;
+            if (preempted) this.reportMandatoryCommentOutcome(preempted, 'unknown', 'preempted_by_task');
+            this.clearMandatoryCommentOutcomeTimer();
             if (payload.action === 'comment') this.pendingComment = null;
             if (payload.action === 'open_note') this.pendingMigration = null;
             this.commentInflight = false;
@@ -2321,6 +2476,7 @@ export class RoleDispatcher {
               actions: mig.actions,
               text: mig.text,
               ...(mig.mandatoryInteraction ? { mandatoryInteraction: mig.mandatoryInteraction } : {}),
+              ...(mig.approvalTrace ? { approvalTrace: mig.approvalTrace } : {}),
             };
             const migCommentSent = this.sendNoteScopedCommand('comment', {
               action: 'comment',
@@ -2331,12 +2487,15 @@ export class RoleDispatcher {
               // 回报操作员 + emit comment.done{ok:false} 触发 resumeClock('comment_subline')（change comment-approval-target-hold）。
               // 否则评论支线无终局、时钟永冻 should_end。mandatoryInteraction 透传（与下方 nav-failed 分支一致）。
               this.pendingComment = null;
-              this.reportApprovedNotDelivered(mig.noteId, payload.reason);
+              this.clearMandatoryCommentOutcomeTimer();
+              this.reportMandatoryCommentOutcome(mig, 'failed', 'comment_dispatch_suppressed');
+              if (!this.mandatoryApprovalTrace(mig)) this.reportApprovedNotDelivered(mig.noteId, payload.reason);
               this.eventBus.emit('comment.done', {
                 noteId: mig.noteId,
                 sourcePageType: mig.sourcePageType,
                 actions: mig.actions,
                 ok: false,
+                reason: 'comment_dispatch_suppressed',
                 ...(mig.mandatoryInteraction ? { mandatoryInteraction: mig.mandatoryInteraction } : {}),
                 ts: this.clock(),
               });
@@ -2345,12 +2504,16 @@ export class RoleDispatcher {
             console.warn(
               `[RoleDispatcher] 评论迁移 navigate 失败 → 不发评论、回报操作员 note=${mig.noteId} reason=${payload.reason ?? 'nav_failed'}`,
             );
-            this.reportApprovedNotDelivered(mig.noteId, payload.reason);
+            const reason = payload.reason ?? 'nav_failed';
+            this.clearMandatoryCommentOutcomeTimer();
+            this.reportMandatoryCommentOutcome(mig, 'failed', reason);
+            if (!this.mandatoryApprovalTrace(mig)) this.reportApprovedNotDelivered(mig.noteId, payload.reason);
             this.eventBus.emit('comment.done', {
               noteId: mig.noteId,
               sourcePageType: mig.sourcePageType,
               actions: mig.actions,
               ok: false,
+              reason,
               ...(mig.mandatoryInteraction ? { mandatoryInteraction: mig.mandatoryInteraction } : {}),
               ts: this.clock(),
             });
@@ -2439,12 +2602,25 @@ export class RoleDispatcher {
         if (payload.action === 'comment' && this.pendingComment) {
           const pc = this.pendingComment;
           this.pendingComment = null;
-          if (payload.ok === true) this.consumeBudget('comment');
+          this.clearMandatoryCommentOutcomeTimer();
+          const pendingApproval = payload.reason === 'pending_group_approval';
+          const ambiguous = payload.reason === 'submitted_unconfirmed' || payload.reason === 'verification_ambiguous';
+          if (pendingApproval) {
+            this.reportMandatoryCommentOutcome(pc, 'pending', payload.reason);
+          } else if (payload.ok === true) {
+            this.reportMandatoryCommentOutcome(pc, 'confirmed', payload.reason);
+          } else if (ambiguous) {
+            this.reportMandatoryCommentOutcome(pc, 'unknown', payload.reason);
+          } else {
+            this.reportMandatoryCommentOutcome(pc, 'failed', payload.reason ?? 'edge_failed');
+          }
+          if (payload.ok === true && !pendingApproval) this.consumeBudget('comment');
           this.eventBus.emit('comment.done', {
             noteId: pc.noteId,
             sourcePageType: pc.sourcePageType,
             actions: pc.actions,
-            ok: payload.ok === true,
+            ok: payload.ok === true && !pendingApproval,
+            ...(payload.reason ? { reason: payload.reason } : {}),
             ...(pc.mandatoryInteraction ? { mandatoryInteraction: pc.mandatoryInteraction } : {}),
             ts: this.clock(),
           });
