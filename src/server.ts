@@ -4008,6 +4008,7 @@ async function main(): Promise<void> {
           rateLimiter: new LoginRateLimiter(),
           delegatedTasks: delegatedTaskService,
           curatedContent: curatedContentStore,
+          referenceDraftCountForAccount: (accountId) => publishLogStore.countReferenceDraftsForAccount(accountId),
           interactionApi: interactionCustomerApi,
           onOffboardCreated: async (offboard) => {
             const edgeId = server.resolveEdgeIdForAccount(offboard.accountId);

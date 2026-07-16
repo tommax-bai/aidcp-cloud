@@ -33,6 +33,8 @@ export interface ClientAuthDeps {
   delegatedTasks?: DelegatedTaskService;
   /** Account-scoped curated reads. HTTP responses are projected through an explicit customer DTO below. */
   curatedContent?: Pick<CuratedContentStore, 'listForClient' | 'getOneForAccount'>;
+  /** Account-scoped count of publish_log rows that have a persisted source_reference. */
+  referenceDraftCountForAccount?: (accountId: string) => Promise<number>;
   interactionApi?: {
     handle(req: http.IncomingMessage, res: http.ServerResponse, userId: string): Promise<boolean>;
   };
@@ -271,14 +273,28 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         sendJson(res, 400, { error: 'bad_request', reason: 'invalid_pagination' });
         return;
       }
-      const result = await deps.curatedContent.listForClient(envKey, {
-        creatableOnly: mode === 'creatable',
-        limit,
-        offset,
-      });
+      const referenceDraftCountPromise: Promise<number | null> = deps.referenceDraftCountForAccount
+        ? deps.referenceDraftCountForAccount(envKey)
+            .then((count) => (Number.isFinite(count) && count >= 0 ? Math.floor(count) : null))
+            .catch((err) => {
+              logger.warn(
+                `[client-auth] reference draft count unavailable env=${envKey}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+              return null;
+            })
+        : Promise.resolve(null);
+      const [result, referenceDraftCount] = await Promise.all([
+        deps.curatedContent.listForClient(envKey, {
+          creatableOnly: mode === 'creatable',
+          limit,
+          offset,
+        }),
+        referenceDraftCountPromise,
+      ]);
       sendJson(res, 200, {
         items: result.items.map(toClientCuratedListItem),
         total: result.total,
+        ...(referenceDraftCount !== null ? { referenceDraftCount } : {}),
         limit,
         offset,
       });

@@ -590,6 +590,20 @@ export class PublishLogStore {
   }
 
   /**
+   * 该账号已经真实形成的参照稿总数。
+   * `source_reference` 只在参照内容已经写入 publish_log 时存在，因此排队中但尚未生成的委派任务不会被提前计数；
+   * 后续审批或下发状态不抹去“曾经成稿”这一事实，故不按 status 过滤。
+   */
+  async countReferenceDraftsForAccount(accountId: string): Promise<number> {
+    const { rows } = await this.pool.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM publish_log
+        WHERE account_id = $1 AND source_reference IS NOT NULL`,
+      [accountId],
+    );
+    return Number(rows[0]?.n ?? '0');
+  }
+
+  /**
    * 该账号今日（Asia/Shanghai 自然日 00:00 起）已发生发布数（change content-schedule-auto-publish）。
    * `submitted` 也计入，供内容排期日上限判定，防止链接暂缺时越过节流再发。
    * 显式 Asia/Shanghai 下界，对齐风控 day quota 与客户端 today 用量口径。

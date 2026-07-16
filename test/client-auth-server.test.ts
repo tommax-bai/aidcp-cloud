@@ -399,6 +399,7 @@ test('客户灵感库按环境归属隔离、最小披露，并在归属撤销�
     ...overrides,
   });
   const reads: Array<{ kind: string; accountId: string; id?: number; options?: unknown }> = [];
+  const draftCountReads: string[] = [];
   const curatedContent = {
     async listForClient(accountId: string, options: { creatableOnly: boolean; limit: number; offset: number }) {
       reads.push({ kind: 'list', accountId, options });
@@ -415,6 +416,10 @@ test('客户灵感库按环境归属隔离、最小披露，并在归属撤销�
       revocation: new TokenRevocationStore(),
       rateLimiter: new LoginRateLimiter(),
       curatedContent,
+      referenceDraftCountForAccount: async (accountId) => {
+        draftCountReads.push(accountId);
+        return 7;
+      },
     },
     baseConfig(0),
     async (base) => {
@@ -430,8 +435,9 @@ test('客户灵感库按环境归属隔离、最小披露，并在归属撤销�
 
       const listed = await fetch(`${base}/curated-contents?envKey=p1&mode=creatable&limit=12&offset=24`, { headers });
       assert.equal(listed.status, 200);
-      const listBody = await listed.json() as { items: Array<Record<string, unknown>>; total: number; limit: number; offset: number };
+      const listBody = await listed.json() as { items: Array<Record<string, unknown>>; total: number; referenceDraftCount: number; limit: number; offset: number };
       assert.equal(listBody.total, 1);
+      assert.equal(listBody.referenceDraftCount, 7);
       assert.equal(listBody.limit, 12);
       assert.equal(listBody.offset, 24);
       assert.equal(listBody.items[0].likeCount, null);
@@ -447,6 +453,7 @@ test('客户灵感库按环境归属隔离、最小披露，并在归属撤销�
         accountId: 'p1',
         options: { creatableOnly: true, limit: 12, offset: 24 },
       });
+      assert.deepEqual(draftCountReads, ['p1'], '成稿汇总只能读取已授权的当前账号');
 
       const detail = await fetch(`${base}/curated-contents/7?envKey=p1`, { headers });
       assert.equal(detail.status, 200);
