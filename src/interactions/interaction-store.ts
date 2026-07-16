@@ -293,6 +293,9 @@ export class InteractionStore {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      // Same lock as ClientUserStore.beginEnvironmentOffboard: first-auth and
+      // customer unbind must observe one serial order for an environment.
+      await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, [`interaction-env:${payload.envKey}`]);
       await this.assertAccountScope(client, payload.accountId, payload.envKey, false);
       const offboard = await client.query<{ offboard_id: string; state: string }>(
         `SELECT offboard_id,state FROM interaction_offboards

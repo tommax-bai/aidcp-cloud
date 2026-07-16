@@ -222,3 +222,90 @@ test('PostgreSQL: unbind/termination revoke first, retry offline cleanup, tombst
       await pool.end();
     }
   });
+
+test('PostgreSQL: provisioned video environment without an auth binding gets terminal offboard while legacy missing binding stays closed',
+  { skip: !connectionString }, async () => {
+    const pool = new pg.Pool({ connectionString });
+    const users = new ClientUserStore({ pool });
+    const interactions = new InteractionStore({ pool });
+    try {
+      await users.init();
+      await interactions.init();
+      await pool.query(`TRUNCATE interaction_offboard_audit,interaction_offboards,
+        client_env_provisioning_intents,client_env_scope_audit,client_env_scope,client_users,client_environments RESTART IDENTITY CASCADE`);
+      await pool.query(`INSERT INTO client_users(user_id,name,key_hash,key_salt,status) VALUES
+        ('user-provisioned-unbound','provisioned-unbound','hash','salt','enabled'),
+        ('user-legacy-unbound','legacy-unbound','hash','salt','enabled')`);
+
+      const intent = await users.createProvisioningIntent('user-provisioned-unbound');
+      assert.equal(intent.ok, true);
+      if (!intent.ok) return;
+      const completed = await users.completeProvisioningIntent('user-provisioned-unbound', {
+        intentId: intent.intentId,
+        proof: intent.proof,
+        envKey: 'env-provisioned-unbound',
+        label: '尚未登录的视频号环境',
+        platform: 'wechat_channels',
+      });
+      assert.equal(completed.ok, true);
+
+      const terminal = await users.beginEnvironmentOffboard('user-provisioned-unbound', 'env-provisioned-unbound');
+      assert.equal(terminal.ok, true);
+      if (!terminal.ok) return;
+      assert.equal(terminal.offboard.state, 'tombstoned');
+      assert.equal(terminal.offboard.accountId, 'env-provisioned-unbound');
+      assert.equal((await users.listEnvScope('user-provisioned-unbound')).length, 0,
+        'authoritative ownership is revoked in the same transaction');
+      assert.equal((await interactions.pendingOffboards('env-provisioned-unbound')).length, 0,
+        'terminal no-binding offboard must never be dispatched as credential cleanup');
+      assert.equal((await users.getOffboard('user-provisioned-unbound', terminal.offboard.offboardId))?.state, 'tombstoned');
+      const terminalRow = (await pool.query<{
+        state: string; account_id: string; tombstoned: boolean; purged: boolean;
+      }>(`SELECT state,account_id,tombstoned_at IS NOT NULL AS tombstoned,purged_at IS NOT NULL AS purged
+            FROM interaction_offboards WHERE offboard_id=$1`, [terminal.offboard.offboardId])).rows[0];
+      assert.deepEqual(terminalRow, {
+        state: 'tombstoned', account_id: 'env-provisioned-unbound', tombstoned: true, purged: false,
+      });
+      assert.deepEqual((await pool.query<{ event: string; status: string }>(
+        `SELECT event,status FROM interaction_offboard_audit WHERE offboard_id=$1 ORDER BY event`,
+        [terminal.offboard.offboardId],
+      )).rows, [
+        { event: 'access_revoked', status: 'tombstoned' },
+        { event: 'unbound_cleanup_not_required', status: 'tombstoned' },
+      ]);
+      await pool.query(`INSERT INTO accounts(account_id,label,platform) VALUES
+        ('env-provisioned-unbound','late first auth','wechat_channels')
+        ON CONFLICT (account_id) DO UPDATE SET platform=EXCLUDED.platform`);
+      await interactions.upsertAuthStatus({
+        envKey: 'env-provisioned-unbound',
+        accountId: 'env-provisioned-unbound',
+        platform: 'wechat_channels',
+        status: 'active',
+        browserState: 'open',
+        capabilities: { commentsRead: true, commentsReply: false, dmRead: false, dmSendText: false, dmSendImage: false },
+        identity: null,
+        runtimeControlsVersion: 0,
+        checkedAt: Date.now(),
+        reasonCode: null,
+      });
+      assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM interaction_auth_state
+        WHERE env_key='env-provisioned-unbound'`)).rows[0].n, 0,
+      'tombstone must reject a late first-auth status instead of recreating the binding');
+      assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM interaction_offboard_audit
+        WHERE offboard_id=$1 AND event='auth_status_ignored' AND status='tombstoned'`,
+      [terminal.offboard.offboardId])).rows[0].n, 1);
+
+      await users.registerEnvironments([
+        { envKey: 'env-legacy-unbound', label: '存量视频号环境', platform: 'wechat_channels' },
+      ], 'admin');
+      assert.equal((await users.setScope('user-legacy-unbound', [{ envKey: 'env-legacy-unbound' }], 'admin')).ok, true);
+      assert.deepEqual(
+        await users.beginEnvironmentOffboard('user-legacy-unbound', 'env-legacy-unbound'),
+        { ok: false, reason: 'offboard_binding_missing' },
+      );
+      assert.deepEqual((await users.listEnvScope('user-legacy-unbound')).map((row) => row.envKey),
+        ['env-legacy-unbound'], 'missing legacy binding must not silently revoke ownership');
+    } finally {
+      await pool.end();
+    }
+  });

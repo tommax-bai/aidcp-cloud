@@ -276,6 +276,46 @@ export class ClientUserStore {
       state: row.state, reason: row.reason, requestedAt: row.requested_at.getTime(), purgeDueAt: row.purge_due_at.getTime() };
   }
 
+  /**
+   * A provisioned environment that never acquired an interaction binding has no
+   * Cloud/Edge interaction credential scope to drain. Persist an explicit terminal
+   * offboard before revoking ownership so Electron can still require authoritative
+   * Cloud truth before deleting the physical profile.
+   *
+   * accountId uses the environment's reserved account namespace. This does not
+   * create an account or auth binding, and tombstoned rows are never dispatched.
+   */
+  private async enqueueProvisionedUnboundOffboard(
+    client: pg.PoolClient,
+    input: { userId: string; envKey: string },
+  ): Promise<ClientOffboardView> {
+    const offboardId = crypto.randomUUID();
+    const accountId = input.envKey;
+    const inserted = await client.query<{
+      offboard_id: string; env_key: string; account_id: string; state: ClientOffboardView['state'];
+      reason: ClientOffboardView['reason']; requested_at: Date; purge_due_at: Date;
+    }>(
+      `INSERT INTO interaction_offboards
+       (offboard_id,platform,account_id,env_key,user_id,reason,state,requested_at,
+          tombstoned_at,purge_due_at,updated_at)
+       VALUES ($1,'wechat_channels',$2,$3,$4,'environment_unbind','tombstoned',now(),now(),now()+interval '29 days',now())
+       RETURNING offboard_id,env_key,account_id,state,reason,requested_at,purge_due_at`,
+      [offboardId, accountId, input.envKey, input.userId],
+    );
+    const row = inserted.rows[0];
+    if (!row) throw new Error('offboard_terminal_insert_failed');
+    await client.query(
+      `INSERT INTO interaction_offboard_audit
+         (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
+       VALUES
+         ($1,$3,'wechat_channels',$4,$5,$6,'access_revoked','tombstoned'),
+         ($2,$3,'wechat_channels',$4,$5,$6,'unbound_cleanup_not_required','tombstoned')`,
+      [crypto.randomUUID(), crypto.randomUUID(), row.offboard_id, accountId, input.envKey, input.userId],
+    );
+    return { offboardId: row.offboard_id, envKey: row.env_key, accountId: row.account_id,
+      state: row.state, reason: row.reason, requestedAt: row.requested_at.getTime(), purgeDueAt: row.purge_due_at.getTime() };
+  }
+
   /** Customer-authorized relinquish: revoke scope and stop Cloud sync/write in the same transaction as durable offboard creation. */
   async beginEnvironmentOffboard(userId: string, envKey: string): Promise<BeginOffboardResult> {
     const key = (envKey ?? '').trim();
@@ -290,23 +330,47 @@ export class ClientUserStore {
         await client.query('ROLLBACK');
         return { ok: false, reason: user.rows[0] ? 'disabled' : 'not_authorized' };
       }
-      const binding = await client.query<{ account_id: string; label: string | null; platform: string | null;
+      // Serialize first-auth status creation with unbind for the same environment.
+      // Without this lock, an auth row could race in after the no-binding check.
+      await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, [`interaction-env:${key}`]);
+      const scope = await client.query<{ label: string | null; platform: string | null;
         source: string; assigned_by: string | null; assigned_at: Date }>(
-        `SELECT a.account_id,s.label,s.platform,s.source,s.assigned_by,s.assigned_at
+        `SELECT s.label,s.platform,s.source,s.assigned_by,s.assigned_at
            FROM client_env_scope s
            JOIN client_environments e ON e.env_key=s.env_key AND e.platform='wechat_channels'
-           JOIN interaction_auth_state a ON a.env_key=s.env_key AND a.platform='wechat_channels'
           WHERE s.user_id=$1 AND s.env_key=$2 AND s.source='admin'
-          FOR UPDATE OF s,e,a`, [userId, key],
+          FOR UPDATE OF s,e`, [userId, key],
       );
-      const row = binding.rows[0];
+      const row = scope.rows[0];
       if (!row) {
         const owned = await client.query(`SELECT 1 FROM client_env_scope WHERE user_id=$1 AND env_key=$2`, [userId, key]);
         await client.query('ROLLBACK');
         return { ok: false, reason: owned.rows[0] ? 'offboard_binding_missing' : 'not_authorized' };
       }
-      const offboard = await this.enqueueOffboard(client, { userId, envKey: key, accountId: row.account_id,
-        reason: 'environment_unbind', actor: `client:${userId}` });
+      const binding = await client.query<{ account_id: string }>(
+        `SELECT account_id FROM interaction_auth_state
+          WHERE env_key=$1 AND platform='wechat_channels' FOR UPDATE`, [key],
+      );
+      let offboard: ClientOffboardView;
+      if (binding.rows[0]) {
+        offboard = await this.enqueueOffboard(client, { userId, envKey: key, accountId: binding.rows[0].account_id,
+          reason: 'environment_unbind', actor: `client:${userId}` });
+      } else {
+        // Only the original continuous client-provision grant may use the no-binding terminal path.
+        // A legacy/admin grant with a missing binding remains fail-closed so corruption is not hidden.
+        const provisioned = await client.query(
+          `SELECT 1 FROM client_env_provisioning_intents i
+            WHERE i.user_id=$1 AND i.completed_env_key=$2 AND i.state='completed'
+              AND $3='client-provision:' || i.intent_id::text
+            FOR UPDATE`,
+          [userId, key, row.assigned_by],
+        );
+        if (!provisioned.rows[0]) {
+          await client.query('ROLLBACK');
+          return { ok: false, reason: 'offboard_binding_missing' };
+        }
+        offboard = await this.enqueueProvisionedUnboundOffboard(client, { userId, envKey: key });
+      }
       await client.query(
         `INSERT INTO client_env_scope_audit
            (user_id,env_key,label,platform,source,assigned_by,assigned_at,revoked_at,revoked_by,reason)
