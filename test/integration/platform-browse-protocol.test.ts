@@ -85,6 +85,33 @@ describe('C1b 回执驱动两步评论迁移（模拟 C2：FB read=feed / commen
     assert.equal(afterReceipt[0].params?.noteId, 'note-42');
   });
 
+  // change fb-comment-migration-hold：迁移在途窗口内并发 browse 命令 MUST 被扣住。否则 page.scroll 落到边缘
+  // 会经 ensureFeed 看到当前 surface 是详情/群帖固定链、把浏览器整页拽回首页 ⇒ 迁移拿不到详情、已批准评论被丢。
+  it('迁移在途 ⇒ 并发 page.scroll 被扣住（钉在待迁移帖），迁移 open_note{navigate} 与后续 comment 仍放行', () => {
+    const { bus, commands, d } = setup('facebook', { inlineTargeting: true });
+    const send = d as unknown as { sendScrollCommand(reason: string, floorMs?: number): boolean };
+
+    // 第一步：comment.approved ⇒ 置 pendingMigration + 下发迁移 open_note{navigate}（评论支线命令，豁免自身暂停）。
+    const base = commands.length;
+    bus.emit('comment.approved', { noteId: 'note-42', sourcePageType: 'feed', actions: ['like'], text: 'hi', ts: 0 });
+    const afterApprove = commands.slice(base);
+    assert.deepEqual(actionsOf(afterApprove), ['open_note'], '迁移第一步下发 open_note{navigate}');
+    assert.equal(afterApprove[0].params?.purpose, 'navigate', '迁移 open_note 携 purpose=navigate（评论支线命令放行）');
+
+    // 迁移在途窗口内：并发的 browse 滚动 MUST 被扣住（返回 false、绝不下发到边缘）。
+    const beforeScroll = commands.length;
+    const scrollSent = send.sendScrollCommand('idle_nudge');
+    assert.equal(scrollSent, false, 'pendingMigration 在途 ⇒ 并发 scroll 被扣住（sendCommand 返回 false）');
+    assert.equal(commands.length, beforeScroll, '被扣住的 scroll 绝不下发到边缘（commands 无新增）');
+
+    // 第二步：navigate 落地 ⇒ 清 pendingMigration、后续 comment 放行（评论支线命令豁免；此刻闸已解除亦放行）。
+    const beforeReceipt = commands.length;
+    bus.emit('action.completed', { action: 'open_note', ok: true, observation: { surface: 'detail' }, noteId: 'note-42', ts: 0 });
+    const afterReceipt = commands.slice(beforeReceipt);
+    assert.deepEqual(actionsOf(afterReceipt), ['comment'], 'navigate 落地后 comment 放行下发（迁移窗口内未被 scroll 拽回首页）');
+    assert.equal(afterReceipt[0].params?.noteId, 'note-42');
+  });
+
   it('navigate 步失败 ⇒ 不发 comment + 显式回报操作员 + comment.done{ok:false}', () => {
     const reports: { noteId: string; reason?: string }[] = [];
     const done: { ok: boolean }[] = [];

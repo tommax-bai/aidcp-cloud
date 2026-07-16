@@ -685,6 +685,16 @@ export class RoleDispatcher {
   }
 
   /**
+   * 评论支线自己的命令（change fb-comment-migration-hold）：两步迁移的 navigate open 与随后的授权 comment。
+   * 它们是迁移在途暂停要保护的对象，MUST 豁免自身暂停——否则会被自己设的 pendingMigration 闸扣住而静默丢弃。
+   */
+  private isCommentSublineCommand(command: EdgeCommand): boolean {
+    return command.action === 'comment'
+      || (command.action === 'open_note'
+        && (command.params as { purpose?: string } | undefined)?.purpose === 'navigate');
+  }
+
+  /**
    * 发命令的统一出口（软暂停闸）。巡视期（browseSuspended）扣住 browse 类命令——它们会从下次
    * page.cards 自行重来——只放行巡视命令与 session.end；非巡视期照常下发。所有翻译块都经此。
    */
@@ -722,6 +732,18 @@ export class RoleDispatcher {
       // 评论支线在途（change comment-approval-target-hold）：钉在待评论帖上，扣住一切会离页的 browse/互动命令
       // （stale-target 重扫 / idle_nudge 滚屏 / open_note 换帖 / refresh / feed 续滚）。session.end 与 excursion 仍放行。
       // 与 browseSuspended 并列取并集：巡视/昵称采集用 browseSuspended（布尔），评论支线用本标志（dispatcher 私有），互不覆盖。
+      return false;
+    }
+    if (
+      this.pendingMigration
+      && !this.isQuotaSleepBypass(command)
+      && !this.isCommentSublineCommand(command)
+    ) {
+      // 评论迁移在途（change fb-comment-migration-hold）：钉在待迁移帖上，扣住一切会离页的 browse/互动命令
+      // （page.scroll / 换帖 open_note / refresh / feed 续滚 / stale-target 重扫）——否则迁移落地前后并发的
+      // scroll 会经 ensureFeed 把浏览器整页拽回首页、迁移拿不到详情、已批准评论被丢。本评论支线自己的
+      // 迁移 open_note{purpose:'navigate'} 与后续 comment 经 isCommentSublineCommand 放行。pendingMigration
+      // 已在所有终局（落地回执/migrateSent=false/reset/suppression/preempt）清空，故此闸不会泄漏钉死会话。
       return false;
     }
     if (this.edgeTaskLeases && this.isExcursionCommand(command.action)) {
