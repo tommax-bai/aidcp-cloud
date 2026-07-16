@@ -91,6 +91,23 @@ test('账号控制是本机安全状态，验证码暂停期间仍须定向下�
   await s.close();
 });
 
+test('浏览器前后台控制在验证码暂停期间仍须定向下发', async () => {
+  const s = new EdgeCloudServer({ handler: helloHandler, port: 0, clock: () => 0 });
+  await s.start();
+  const port = s.address()!;
+  const edge = await connectEdge(port, 'edge-browser', 'acc-1', ['interaction_browser_control_v1']);
+  s.pauseEdge('edge-browser');
+  const control = makeEnvelope('interaction.browser.control', 'browser-control-1', 0, {
+    requestId: 'browser-control-1', accountId: 'acc-1', envKey: 'env-1', platform: 'wechat_channels',
+    action: 'open', requestedAt: 0,
+  });
+  assert.equal(s.pushToEdges(control, 'edge-browser'), 1);
+  const [data] = (await once(edge, 'message')) as [Buffer | string];
+  assert.equal(JSON.parse(data.toString()).type, 'interaction.browser.control');
+  edge.close();
+  await s.close();
+});
+
 test('带目标 edgeId 只命中目标那一台，其余在线 edge 不被误投', async () => {
   const s = new EdgeCloudServer({ handler: helloHandler, port: 0, clock: () => 0 });
   await s.start();

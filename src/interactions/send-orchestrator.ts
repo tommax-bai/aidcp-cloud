@@ -8,8 +8,10 @@ import type { InteractionMetrics } from './metrics.js';
 import type { ReplyPreviewResult } from './reply-workflow.js';
 import {
   INTERACTION_PLATFORM,
+  INTERACTION_BROWSER_CONTROL_CAPABILITY,
   InteractionError,
   type InteractionAuthReopenPayload,
+  type InteractionBrowserControlPayload,
   type InteractionChannel,
   type InteractionSyncRequestPayload,
   type ReplyConfigSnapshot,
@@ -313,6 +315,32 @@ export class InteractionSendOrchestrator {
     const payload: InteractionAuthReopenPayload = { ...input, requestId, platform: INTERACTION_PLATFORM, requestedAt: this.clock() };
     if (this.deps.pusher.pushToEdges(makeEnvelope('interaction.auth.reopen', requestId, this.clock(), payload), edgeId) !== 1) {
       throw new InteractionError('INTERACTION_UPSTREAM_UNAVAILABLE', '登录重开请求未送达唯一 Edge。', 503, true);
+    }
+    return requestId;
+  }
+
+  requestBrowserControl(input: Omit<InteractionBrowserControlPayload, 'requestId' | 'requestedAt' | 'platform'>): string {
+    const requestId = randomUUID();
+    const edgeId = this.deps.pusher.resolveEdgeIdForAccount?.(
+      input.accountId,
+      INTERACTION_BROWSER_CONTROL_CAPABILITY,
+    ) ?? null;
+    if (!edgeId) {
+      throw new InteractionError(
+        'INTERACTION_UPSTREAM_UNAVAILABLE',
+        '账号当前没有支持浏览器前台控制的在线 Edge。',
+        503,
+        true,
+      );
+    }
+    const payload: InteractionBrowserControlPayload = {
+      ...input,
+      requestId,
+      platform: INTERACTION_PLATFORM,
+      requestedAt: this.clock(),
+    };
+    if (this.deps.pusher.pushToEdges(makeEnvelope('interaction.browser.control', requestId, this.clock(), payload), edgeId) !== 1) {
+      throw new InteractionError('INTERACTION_UPSTREAM_UNAVAILABLE', '浏览器控制请求未送达唯一 Edge。', 503, true);
     }
     return requestId;
   }

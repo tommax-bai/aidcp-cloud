@@ -13,6 +13,7 @@
 import type {
   InteractionAuthReopenPayload,
   InteractionAuthStatusPayload,
+  InteractionBrowserControlPayload,
   InteractionOffboardAckPayload,
   InteractionOffboardCommandPayload,
   InteractionOffboardResultPayload,
@@ -130,6 +131,7 @@ export type MessageType =
   | 'interaction.sync.request' // cloud → edge：按渠道请求同步
   | 'interaction.reply.send' // cloud → edge：下发唯一 attempt 的文本回复
   | 'interaction.auth.reopen' // cloud → edge：请求重开登录/挑战处理入口
+  | 'interaction.browser.control' // cloud → edge：授权有效时打开可见 sidecar / 转回 API-only
   | 'interaction.runtime.controls' // cloud → edge：按账号下发版本化有效能力
   | 'interaction.offboard.command' // cloud → edge：撤权后清理所属加密会话
   | 'interaction.offboard.result' // edge → cloud：可重放的凭证清理结果
@@ -1463,6 +1465,7 @@ export interface PayloadMap {
   'interaction.sync.request': InteractionSyncRequestPayload;
   'interaction.reply.send': InteractionReplySendPayload;
   'interaction.auth.reopen': InteractionAuthReopenPayload;
+  'interaction.browser.control': InteractionBrowserControlPayload;
   'interaction.runtime.controls': InteractionRuntimeControlsPayload;
   'interaction.offboard.command': InteractionOffboardCommandPayload;
   'interaction.offboard.result': InteractionOffboardResultPayload;

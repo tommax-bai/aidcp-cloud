@@ -72,6 +72,7 @@ import {
 } from '../interactions/contract.js';
 import {
   INTERACTION_CAPABILITY,
+  INTERACTION_BROWSER_CONTROL_CAPABILITY,
   INTERACTION_OFFBOARDING_CAPABILITY,
   INTERACTION_PLATFORM,
   INTERACTION_REPLY_RECOVERY_CAPABILITY,
@@ -626,6 +627,7 @@ export class DefaultMessageHandler implements MessageHandler {
           INTERACTION_CAPABILITY,
           INTERACTION_REPLY_RECOVERY_CAPABILITY,
           INTERACTION_OFFBOARDING_CAPABILITY,
+          INTERACTION_BROWSER_CONTROL_CAPABILITY,
           ...(this.deps.interactionRuntimeControls ? [INTERACTION_RUNTIME_CONTROLS_CAPABILITY] : []),
         ]
         .filter((capability) => (session.capabilities ?? []).includes(capability))

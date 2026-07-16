@@ -66,6 +66,7 @@ test('frozen v1 WS fixtures are accepted by strict Cloud consumers', async () =>
   const expectedTypes: Record<string, string> = {
     'hello.json': 'hello', 'welcome.json': 'welcome', 'auth-status-active.json': 'interaction.auth.status',
     'auth-reopen.json': 'interaction.auth.reopen', 'sync-request.json': 'interaction.sync.request',
+    'browser-control-open.json': 'interaction.browser.control',
     'comment-sync-batch.json': 'interaction.sync.batch', 'dm-sync-batch.json': 'interaction.sync.batch',
     'comment-sync-ack.json': 'interaction.sync.ack', 'dm-sync-ack.json': 'interaction.sync.ack',
     'comment-reply-send.json': 'interaction.reply.send', 'dm-reply-send.json': 'interaction.reply.send',
@@ -122,7 +123,8 @@ test('mock Edge hello → sync batch/ack → confirmed result uses frozen v1 map
   const hello = await handler.handle(await fixture('hello.json'), session);
   assert.equal(hello?.type, 'welcome');
   assert.deepEqual((hello?.payload as { capabilities?: string[] }).capabilities,
-    ['interaction_inbox_v1', 'interaction_reply_recovery_v1', 'interaction_offboarding_v1']);
+    ['interaction_inbox_v1', 'interaction_reply_recovery_v1', 'interaction_offboarding_v1',
+      'interaction_browser_control_v1']);
   assert.deepEqual((hello?.payload as { interactionRecovery?: unknown }).interactionRecovery,
     { offboardPending: false });
 

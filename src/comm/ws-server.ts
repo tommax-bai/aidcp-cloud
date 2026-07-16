@@ -215,6 +215,7 @@ export class EdgeCloudServer implements EdgePusher {
       env.type === 'edge.task.acquire' ||
       env.type === 'edge.task.release' ||
       env.type === 'interaction.runtime.controls' ||
+      env.type === 'interaction.browser.control' ||
       env.type === 'captcha.assist.capture' ||
       env.type === 'captcha.assist.click';
     let sent = 0;

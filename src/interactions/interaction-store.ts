@@ -1466,7 +1466,7 @@ export class InteractionStore {
   }
 
   async claimApiRequest(input: {
-    actor: string; action: 'send' | 'sync' | 'auth_reopen'; idempotencyKey: string;
+    actor: string; action: 'send' | 'sync' | 'auth_reopen' | 'browser_control'; idempotencyKey: string;
     accountId: string; envKey: string; resourceId?: string | null;
   }): Promise<{ requestId: string; fresh: boolean; response: unknown | null }> {
     const requestId = this.idGen('request');

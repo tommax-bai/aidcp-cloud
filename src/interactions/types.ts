@@ -5,6 +5,7 @@ export const INTERACTION_CAPABILITY = 'interaction_inbox_v1' as const;
 export const INTERACTION_REPLY_RECOVERY_CAPABILITY = 'interaction_reply_recovery_v1' as const;
 export const INTERACTION_OFFBOARDING_CAPABILITY = 'interaction_offboarding_v1' as const;
 export const INTERACTION_RUNTIME_CONTROLS_CAPABILITY = 'interaction_runtime_controls_v1' as const;
+export const INTERACTION_BROWSER_CONTROL_CAPABILITY = 'interaction_browser_control_v1' as const;
 
 export type InteractionPlatform = typeof INTERACTION_PLATFORM;
 export type InteractionChannel = 'comment' | 'dm';
@@ -215,6 +216,15 @@ export interface InteractionAuthReopenPayload {
   accountId: string;
   platform: InteractionPlatform;
   reason: 'user_requested' | 'auth_expired' | 'identity_mismatch' | 'challenge_required';
+  requestedAt: number;
+}
+
+export interface InteractionBrowserControlPayload {
+  requestId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  action: 'open' | 'close';
   requestedAt: number;
 }
 

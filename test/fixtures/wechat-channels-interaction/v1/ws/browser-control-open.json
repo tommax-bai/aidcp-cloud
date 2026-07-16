@@ -1,0 +1,14 @@
+{
+  "v": 2,
+  "type": "interaction.browser.control",
+  "id": "browser-control-envelope-001",
+  "ts": 1784044845000,
+  "payload": {
+    "requestId": "browser-control-request-001",
+    "envKey": "env_wc_demo",
+    "accountId": "acct_wc_demo",
+    "platform": "wechat_channels",
+    "action": "open",
+    "requestedAt": 1784044845000
+  }
+}

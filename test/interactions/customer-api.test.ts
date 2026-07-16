@@ -19,6 +19,10 @@ test('customer API transactionally binds enabled user + owned env + account on e
   let mutationCalls = 0;
   let listCalls = 0;
   let authorizedOperations = 0;
+  let browserDispatchCalls = 0;
+  let browserClaimCalls = 0;
+  let completedBrowserResponse: unknown = null;
+  let authStatus = 'active';
   const users = {
     withAuthorizedInteractionScope: async <T>(
       userId: string,
@@ -41,7 +45,7 @@ test('customer API transactionally binds enabled user + owned env + account on e
     },
     listInteractions: async () => { listCalls += 1; return { items: [], next: null }; },
     getAuth: async () => ({
-      envKey: 'env-a', accountId: 'acct-a', platform: 'wechat_channels', status: 'active', browserState: 'closed',
+      envKey: 'env-a', accountId: 'acct-a', platform: 'wechat_channels', status: authStatus, browserState: 'closed',
       capabilities: { commentsRead: true, commentsReply: true, dmRead: true, dmSendText: true, dmSendImage: false },
       identity: null, runtimeControlsVersion: 0, checkedAt: 1, reasonCode: null,
     }),
@@ -52,9 +56,25 @@ test('customer API transactionally binds enabled user + owned env + account on e
       consecutiveFailures: 0, circuitOpenedAt: null, lastConfirmedAt: null,
       updatedAt: 1, updatedBy: 'admin',
     }),
+    claimApiRequest: async (input: { action: string; idempotencyKey: string; accountId: string; envKey: string; resourceId?: string }) => {
+      browserClaimCalls += 1;
+      assert.deepEqual(input, {
+        actor: 'client:user-a', action: 'browser_control', idempotencyKey: 'browser-key',
+        accountId: 'acct-a', envKey: 'env-a', resourceId: 'open',
+      });
+      return { requestId: 'browser-claim-1', fresh: completedBrowserResponse === null, response: completedBrowserResponse };
+    },
+    completeApiRequest: async (_requestId: string, response: unknown) => { completedBrowserResponse = response; },
   } as unknown as InteractionStore;
+  const sender = {
+    requestBrowserControl: (input: { accountId: string; envKey: string; action: string }) => {
+      browserDispatchCalls += 1;
+      assert.deepEqual(input, { accountId: 'acct-a', envKey: 'env-a', action: 'open' });
+      return 'browser-control-request-1';
+    },
+  } as unknown as InteractionSendOrchestrator;
   const api = new InteractionCustomerApi({ users, store, workflow: {} as ReplyWorkflow,
-    sender: {} as InteractionSendOrchestrator, cursorSecret: 'test-cursor-secret', clock: () => 1784044800000 });
+    sender, cursorSecret: 'test-cursor-secret', clock: () => 1784044800000 });
   const server = http.createServer((req, res) => {
     const actor = typeof req.headers['x-test-user'] === 'string' ? req.headers['x-test-user'] : 'user-b';
     void api.handle(req, res, actor).then((handled) => {
@@ -131,6 +151,53 @@ test('customer API transactionally binds enabled user + owned env + account on e
     const malformedPath = await fetch(`${base}/environments/%ZZ/interactions`,
       { headers: { 'x-test-user': 'user-a' } });
     assert.equal(malformedPath.status, 422);
+
+    const deniedBrowser = await fetch(`${base}/environments/env-a/interactions/browser`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-test-user': 'user-b', 'idempotency-key': 'browser-key' },
+      body: JSON.stringify({ action: 'open' }),
+    });
+    assert.equal(deniedBrowser.status, 404);
+    assert.equal(browserDispatchCalls, 0);
+
+    const invalidBrowser = await fetch(`${base}/environments/env-a/interactions/browser`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-test-user': 'user-a', 'idempotency-key': 'browser-key' },
+      body: JSON.stringify({ action: 'focus' }),
+    });
+    assert.equal(invalidBrowser.status, 422);
+    assert.equal(browserDispatchCalls, 0);
+
+    authStatus = 'reauth_required';
+    const inactiveBrowser = await fetch(`${base}/environments/env-a/interactions/browser`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-test-user': 'user-a', 'idempotency-key': 'browser-key' },
+      body: JSON.stringify({ action: 'open' }),
+    });
+    assert.equal(inactiveBrowser.status, 409);
+    assert.equal(browserDispatchCalls, 0);
+    authStatus = 'active';
+
+    const acceptedBrowser = await fetch(`${base}/environments/env-a/interactions/browser`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-test-user': 'user-a', 'idempotency-key': 'browser-key' },
+      body: JSON.stringify({ action: 'open' }),
+    });
+    assert.equal(acceptedBrowser.status, 200);
+    const acceptedBrowserBody = await acceptedBrowser.json() as { data: {
+      envKey: string; accountId: string; action: string; browserAction: string; actionRequestId: string; status: string;
+    } };
+    assert.deepEqual(acceptedBrowserBody.data, {
+      envKey: 'env-a', accountId: 'acct-a', action: 'browser_control', browserAction: 'open',
+      actionRequestId: 'browser-control-request-1', status: 'accepted',
+    });
+    assert.equal(browserDispatchCalls, 1);
+
+    const duplicateBrowser = await fetch(`${base}/environments/env-a/interactions/browser`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-test-user': 'user-a', 'idempotency-key': 'browser-key' },
+      body: JSON.stringify({ action: 'open' }),
+    });
+    assert.equal(duplicateBrowser.status, 200);
+    assert.deepEqual(await duplicateBrowser.json(), acceptedBrowserBody);
+    assert.equal(browserDispatchCalls, 1, '同一幂等键不得重复派发浏览器控制');
+    assert.equal(browserClaimCalls, 2);
+
     const unknownInteractionRoute = await fetch(`${base}/environments/env-a/interactions/not-a-route`,
       { method: 'POST', headers: { 'x-test-user': 'user-a' } });
     assert.equal(unknownInteractionRoute.status, 404);

@@ -341,6 +341,29 @@ export class InteractionCustomerApi {
       sendJson(res, 200, response);
       return true;
     }
+    if (parts[2] === 'interactions' && parts.length === 4 && method === 'POST' && parts[3] === 'browser') {
+      onlyQuery(url, []);
+      const key = this.idempotencyKey(req);
+      const body = await readBody(req);
+      if (!onlyKeys(body, ['action']) || (body.action !== 'open' && body.action !== 'close')) {
+        throw new InteractionError('INTERACTION_VALIDATION_FAILED', '浏览器 action 必须为 open 或 close。', 422);
+      }
+      const action = body.action;
+      const auth = await this.deps.store.getAuth(accountId, envKey);
+      if (!auth || auth.status !== 'active') {
+        throw new InteractionError('INTERACTION_AUTH_REQUIRED', '仅登录有效的环境可控制浏览器前后台。', 409);
+      }
+      const claim = await this.deps.store.claimApiRequest({ actor: `client:${userId}`, action: 'browser_control',
+        idempotencyKey: key, accountId, envKey, resourceId: action });
+      if (claim.response) { sendJson(res, 200, claim.response); return true; }
+      const actionRequestId = this.deps.sender.requestBrowserControl({ accountId, envKey, action });
+      const response = this.envelope(requestId, this.clock(), {
+        envKey, accountId, action: 'browser_control', browserAction: action, actionRequestId, status: 'accepted',
+      });
+      await this.deps.store.completeApiRequest(claim.requestId, response);
+      sendJson(res, 200, response);
+      return true;
+    }
     return false;
   }
 
