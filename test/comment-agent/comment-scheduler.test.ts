@@ -6,7 +6,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventBus } from '../../src/event-bus/index.js';
-import { CommentScheduler, outcomeToReceipt, humanGroupLabel, joinOnlyReceipt, joinCommentReceipt } from '../../src/comment-agent/comment-scheduler.js';
+import { CommentScheduler, outcomeToReceipt, humanGroupLabel, joinOnlyReceipt, joinCommentReceipt, commentOutcomeReason } from '../../src/comment-agent/comment-scheduler.js';
 import { EdgeTaskLeaseError } from '../../src/comm/edge-task-lease-client.js';
 import type { CommentSchedulerDeps } from '../../src/comment-agent/comment-scheduler.js';
 import type { Soul } from '../../src/soul/types.js';
@@ -1611,5 +1611,19 @@ describe('join-comment 结果卡不泄露裸群 id/URL', () => {
     assert.match(r.message, /Café Lovers PR/);
     assert.match(r.message, /带联系方式/);
     assert.equal(r.level, 'success');
+  });
+
+  // change facebook-comment-participation-gate：群参与审批入群闸 = 未上墙、待管理员批准（诚实、非绿、非去重）。
+  it('commentOutcomeReason：pending_group_approval → 「待管理员批准、未上墙」人话', () => {
+    const msg = commentOutcomeReason({ outcome: 'pending_group_approval' });
+    assert.match(msg, /管理员批准/);
+    assert.match(msg, /未上墙/);
+  });
+  it('joinCommentReceipt：评论撞群参与审批闸 → 黄卡（绝不染绿），说明待管理员批准', () => {
+    const r = joinCommentReceipt({ outcome: 'joined' }, { outcome: 'pending_group_approval', container: 'PR Café' }, false);
+    assert.equal(r.level, 'warning');
+    assert.equal(r.ok, false);
+    assert.match(r.message, /管理员批准/);
+    assert.match(r.message, /PR Café/);
   });
 });

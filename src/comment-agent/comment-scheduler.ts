@@ -151,6 +151,8 @@ export function commentOutcomeReason(c: FacebookCommentRunResult): string {
       return '账号需要登录或遇到验证码';
     case 'verification_ambiguous':
       return '提交后无法确认评论已上墙';
+    case 'pending_group_approval':
+      return '该群需管理员批准参与后才能评论（评论未上墙，待人工处理）';
     case 'quota_denied':
       return c.reason === 'daily_cap' ? '当日评论已达上限' : '评论配额不足';
     default:
@@ -337,6 +339,10 @@ function mapFacebookSubmitOutcome(reason?: string): FacebookCommentOutcome {
       return 'login_required';
     case 'verification_ambiguous':
       return 'verification_ambiguous';
+    case 'pending_group_approval':
+      // 群参与审批入群闸：评论未上墙、待管理员批准。**绝不**塌进 verification_ambiguous（那读作「可能已发出」+ 写去重）——
+      // 这里评论确未发出，须自成一档诚实终态（不染绿、不去重、可待批准后重试）。
+      return 'pending_group_approval';
     default:
       return 'submit_failed'; // identity_unknown / editor_not_found / submit_control_* / marker_not_accepted / timeout
   }
