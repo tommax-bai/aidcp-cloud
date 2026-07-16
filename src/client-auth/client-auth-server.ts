@@ -21,6 +21,7 @@ import type { ClientOffboardView } from './client-user-store.js';
 import type { LoginRateLimiter } from './rate-limiter.js';
 import { DelegatedTaskServiceError, type DelegatedTaskService } from '../delegated-task/service.js';
 import type { DelegatedTaskIntent } from '../delegated-task/types.js';
+import { clampClientApprovalMode } from '../delegated-task/types.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -265,6 +266,8 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
           ...raw as DelegatedTaskIntent,
           accountId: envKey,
           source: 'edge',
+          // change delegated-approvalmode-clamp：客户端体不可信，绝不放行 auto_approve（否则免审绕过审批闸）。
+          approvalMode: clampClientApprovalMode(raw.approvalMode),
           sourceRef: typeof raw.sourceRef === 'string' && raw.sourceRef.trim()
             ? raw.sourceRef.trim()
             : `edge:${envKey}:${Date.now()}`,

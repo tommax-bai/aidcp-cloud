@@ -44,6 +44,7 @@ import type { FacebookGroupMembershipStatus, FacebookGroupTargetInput } from '..
 import { readDownloadsManifest } from './downloads-manifest.js';
 import { DelegatedTaskServiceError } from '../delegated-task/service.js';
 import type { DelegatedTaskIntent, JsonValue } from '../delegated-task/types.js';
+import { clampClientApprovalMode } from '../delegated-task/types.js';
 import { buildPublishLifecycle } from './publish-stage-lifecycle.js';
 
 /** 登录/写体很小，限制请求体大小防滥用。 */
@@ -439,6 +440,8 @@ function createRequestHandler(
           const result = await service.createDraft({
             ...body,
             source: body.source === 'edge' || body.source === 'api' ? body.source : 'console',
+            // change delegated-approvalmode-clamp：客户端体不可信，绝不放行 auto_approve（否则免审绕过审批闸）。
+            approvalMode: clampClientApprovalMode(body.approvalMode),
           } as DelegatedTaskIntent);
           sendJson(res, result.created ? 201 : 200, result);
           return;

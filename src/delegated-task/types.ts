@@ -184,6 +184,19 @@ export function actionFamilyFor(action: DelegatedAction): DelegatedActionFamily 
   }
 }
 
+/**
+ * change delegated-approvalmode-clamp：客户端请求体（panel / edge 建草稿路由）的 approvalMode 不可信——
+ * **绝不放行 `auto_approve`**，否则结构化入口可自带免审、把内容审批两道闸全绕过（免审本应只由账号级后台开关授予）。
+ * 规则：缺省保持 undefined（交由 store 按 action 取默认，如 generate_candidates → draft_only）；显式 `draft_only`
+ * 放行（仅生成候选、不落平台）；其余（含 `auto_approve` 与任何未来新模式）一律夹成 `review`。
+ * 服务端自建 intent（如洗稿 curated 调用已显式传 `review`、飞书 parser 已硬编码 `review`）不经此路、不受影响。
+ */
+export function clampClientApprovalMode(mode: unknown): DelegatedApprovalMode | undefined {
+  if (mode === undefined || mode === null) return undefined;
+  if (mode === 'draft_only') return 'draft_only';
+  return 'review';
+}
+
 export function validateDelegatedTaskIntent(intent: DelegatedTaskIntent, now = Date.now()): string[] {
   const errors: string[] = [];
   if (!Number.isInteger(intent.targetSuccessCount) || intent.targetSuccessCount < 1) errors.push('invalid_target_success_count');
