@@ -497,6 +497,47 @@ test('listForPanel：无筛选时仅按账号；空结果 total 兜底 0', async
   assert.deepEqual(out, { items: [], total: 0 });
 });
 
+test('listForClient：可创作条件在 SQL 层过滤，分页边界收口且 total 与当前条件一致', async () => {
+  const { pool, calls } = controllablePool(() => ({
+    rows: [{ ...panelDbRow, like_count: null, collect_count: 0, total_count: '23' }],
+  }));
+  const store = new CuratedContentStore({ pool });
+  const out = await store.listForClient('acc-1', { creatableOnly: true, limit: 999, offset: -5 });
+
+  assert.match(calls[0].sql, /WHERE account_id = \$1/);
+  assert.match(calls[0].sql, /content_type = 'image_text'/);
+  assert.match(calls[0].sql, /BTRIM\(COALESCE\(body, ''\)\) <> ''/);
+  assert.match(calls[0].sql, /COUNT\(\*\) OVER\(\) AS total_count/);
+  assert.match(calls[0].sql, /LIMIT \$2 OFFSET \$3/);
+  assert.deepEqual(calls[0].params, ['acc-1', 50, 0]);
+  assert.equal(out.total, 23);
+  assert.equal(out.items[0].likeCount, null, '缺失计数必须保持 null');
+  assert.equal(out.items[0].collectCount, 0, '真实 0 必须保持 0');
+});
+
+test('listForClient：全部模式不加可创作条件；缺表诚实回落为空', async () => {
+  const ok = controllablePool(() => ({ rows: [] }));
+  const store = new CuratedContentStore({ pool: ok.pool });
+  assert.deepEqual(await store.listForClient('acc-1', { creatableOnly: false, limit: 20, offset: 40 }), {
+    items: [],
+    total: 0,
+  });
+  assert.doesNotMatch(ok.calls[0].sql, /content_type = 'image_text'/);
+  assert.doesNotMatch(ok.calls[0].sql, /BTRIM/);
+  assert.deepEqual(ok.calls[0].params, ['acc-1', 20, 40]);
+
+  const missing = controllablePool(() => {
+    const err = new Error('relation does not exist') as Error & { code: string };
+    err.code = '42P01';
+    throw err;
+  });
+  const missingStore = new CuratedContentStore({ pool: missing.pool });
+  assert.deepEqual(await missingStore.listForClient('acc-1', { creatableOnly: true, limit: 20, offset: 0 }), {
+    items: [],
+    total: 0,
+  });
+});
+
 test('listForPanel：缺 accountId（全账号视图）不加 account_id 过滤，仍可叠类型过滤', async () => {
   const { pool, calls } = controllablePool(() => ({ rows: [panelDbRow] }));
   const store = new CuratedContentStore({ pool });

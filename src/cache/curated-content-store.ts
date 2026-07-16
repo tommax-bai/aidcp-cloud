@@ -188,6 +188,12 @@ export interface CuratedPanelListResult {
   total: number;
 }
 
+/** 客户端灵感库分页结果。行仍是 store 内部投影；HTTP 层必须再做最小披露映射。 */
+export interface CuratedClientListResult {
+  items: CuratedPanelRow[];
+  total: number;
+}
+
 /** 面板筛选面：驱动筛选下拉 + 清理前影响预览（按账号）。 */
 export interface CuratedFacets {
   /** 该账号实际出现的纳入原因去重 + 各自计数 + 携机器人点赞/收藏标记的高权重行数。 */
@@ -977,6 +983,47 @@ export class CuratedContentStore {
       );
       const total = rows.length > 0 ? Number(rows[0].total_count) : 0;
       return { items: rows.map(rowToPanelView), total };
+    } catch (err) {
+      if ((err as { code?: string }).code === '42P01') return { items: [], total: 0 };
+      throw err;
+    }
+  }
+
+  /**
+   * 客户端灵感库列表（严格按账号）。
+   * creatableOnly 条件下推 SQL 后再 COUNT/LIMIT/OFFSET，避免先分页后过滤造成空页和错误 total。
+   * limit/offset 在 store 再收口，防调用方遗漏边界；缺表仍诚实降级为空。
+   */
+  async listForClient(
+    accountId: string,
+    opts: { creatableOnly: boolean; limit: number; offset: number },
+  ): Promise<CuratedClientListResult> {
+    const limit = Number.isFinite(opts.limit) ? Math.max(1, Math.min(50, Math.floor(opts.limit))) : 20;
+    const offset = Number.isFinite(opts.offset) ? Math.max(0, Math.floor(opts.offset)) : 0;
+    const params: unknown[] = [accountId];
+    const conds = ['account_id = $1'];
+    if (opts.creatableOnly) {
+      conds.push(`content_type = 'image_text'`);
+      conds.push(`BTRIM(COALESCE(body, '')) <> ''`);
+    }
+    params.push(limit, offset);
+    try {
+      const { rows } = await this.pool.query<CuratedPanelDbRow>(
+        `SELECT id, account_id, content_type, source_id, title, body, author, source_url, topics,
+                like_count, collect_count, comment_count, counts_captured_at, reference_images,
+                visual_analysis,
+                bot_liked, bot_collected, admit_reason, first_seen_at, updated_at,
+                COUNT(*) OVER() AS total_count
+         FROM curated_content
+         WHERE ${conds.join(' AND ')}
+         ORDER BY updated_at DESC
+         LIMIT $2 OFFSET $3`,
+        params,
+      );
+      return {
+        items: rows.map(rowToPanelView),
+        total: rows.length > 0 ? Number(rows[0].total_count) : 0,
+      };
     } catch (err) {
       if ((err as { code?: string }).code === '42P01') return { items: [], total: 0 };
       throw err;

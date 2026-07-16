@@ -4007,6 +4007,7 @@ async function main(): Promise<void> {
           revocation: new TokenRevocationStore(), // 独立撤销黑名单，绝不共用面板的
           rateLimiter: new LoginRateLimiter(),
           delegatedTasks: delegatedTaskService,
+          curatedContent: curatedContentStore,
           interactionApi: interactionCustomerApi,
           onOffboardCreated: async (offboard) => {
             const edgeId = server.resolveEdgeIdForAccount(offboard.accountId);

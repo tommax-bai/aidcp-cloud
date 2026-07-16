@@ -8,6 +8,7 @@ import { TokenRevocationStore } from '../src/panel/revocation.js';
 import { verifyJwt } from '../src/panel/jwt.js';
 import { MemoryDelegatedTaskStore } from '../src/delegated-task/store.js';
 import { DelegatedTaskService } from '../src/delegated-task/service.js';
+import type { CuratedPanelRow } from '../src/cache/curated-content-store.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 const CLIENT_SECRET = 'client-secret-xyz';
@@ -360,6 +361,198 @@ test('interaction customer API is invoked only after JWT verification and enable
       });
       assert.equal(disabled.status, 401);
       assert.deepEqual(actors, ['u1']);
+    },
+  );
+});
+
+test('客户灵感库按环境归属隔离、最小披露，并在归属撤销后即时拒绝', async () => {
+  const fx = makeFakeStore();
+  fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
+  fx.scope.set('u1', [{ envKey: 'p1', label: '小萝北', platform: 'xiaohongshu', source: 'admin', assignedAt: 0 }]);
+  const row = (overrides: Partial<CuratedPanelRow> = {}): CuratedPanelRow => ({
+    id: 7,
+    accountId: 'p1',
+    contentType: 'image_text',
+    sourceId: 'note-7',
+    title: '值得参考的标题',
+    body: '这是一段值得参考的正文',
+    author: '作者甲',
+    sourceUrl: 'https://example.test/note-7',
+    topics: ['效率'],
+    likeCount: null,
+    collectCount: 0,
+    commentCount: 3,
+    countsCapturedAt: null,
+    botLiked: false,
+    botCollected: true,
+    admitReason: 'internal-only-reason',
+    firstSeenAt: 10,
+    updatedAt: 20,
+    referenceImages: [{
+      index: 0,
+      sourceUrl: 'https://img.test/source.jpg',
+      ossUrl: 'https://img.test/stored.jpg',
+      captureStatus: 'stored',
+      capturedAt: 11,
+      formGuess: { form: 'photo', confidence: 0.9, detectedAt: 12, detectedFor: 11, model: 'internal-model' },
+    }],
+    ...overrides,
+  });
+  const reads: Array<{ kind: string; accountId: string; id?: number; options?: unknown }> = [];
+  const curatedContent = {
+    async listForClient(accountId: string, options: { creatableOnly: boolean; limit: number; offset: number }) {
+      reads.push({ kind: 'list', accountId, options });
+      return { items: [row()], total: 1 };
+    },
+    async getOneForAccount(id: number, accountId: string) {
+      reads.push({ kind: 'detail', accountId, id });
+      return id === 7 && accountId === 'p1' ? row() : null;
+    },
+  };
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      curatedContent,
+    },
+    baseConfig(0),
+    async (base) => {
+      const login = await (await fetch(`${base}/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'acme', key: 'ck_secret' }),
+      })).json() as { token: string };
+      const headers = { authorization: `Bearer ${login.token}` };
+
+      assert.equal((await fetch(`${base}/curated-contents?envKey=p2` , { headers })).status, 403);
+      assert.equal(reads.length, 0, '未归属环境不得触达精选 store');
+
+      const listed = await fetch(`${base}/curated-contents?envKey=p1&mode=creatable&limit=12&offset=24`, { headers });
+      assert.equal(listed.status, 200);
+      const listBody = await listed.json() as { items: Array<Record<string, unknown>>; total: number; limit: number; offset: number };
+      assert.equal(listBody.total, 1);
+      assert.equal(listBody.limit, 12);
+      assert.equal(listBody.offset, 24);
+      assert.equal(listBody.items[0].likeCount, null);
+      assert.equal(listBody.items[0].collectCount, 0);
+      assert.equal(listBody.items[0].body, undefined, '列表只回正文摘要');
+      assert.equal(typeof listBody.items[0].bodyPreview, 'string');
+      assert.equal(listBody.items[0].accountId, undefined);
+      assert.equal(listBody.items[0].admitReason, undefined);
+      const image = (listBody.items[0].referenceImages as Array<Record<string, unknown>>)[0];
+      assert.equal(image.formGuess, undefined, '客户 DTO 不泄漏模型内部诊断');
+      assert.deepEqual(reads[0], {
+        kind: 'list',
+        accountId: 'p1',
+        options: { creatableOnly: true, limit: 12, offset: 24 },
+      });
+
+      const detail = await fetch(`${base}/curated-contents/7?envKey=p1`, { headers });
+      assert.equal(detail.status, 200);
+      assert.equal(((await detail.json()) as { item: { body: string } }).item.body, '这是一段值得参考的正文');
+      assert.equal((await fetch(`${base}/curated-contents/99?envKey=p1`, { headers })).status, 404);
+
+      fx.scope.set('u1', []);
+      assert.equal((await fetch(`${base}/curated-contents/7?envKey=p1`, { headers })).status, 403);
+      assert.equal(reads.filter((read) => read.kind === 'detail').length, 2, '撤权后不得再触达单行 store');
+    },
+  );
+});
+
+test('客户参考创作只用服务端精选快照，图文/文字模式排队回执诚实', async () => {
+  const fx = makeFakeStore();
+  fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
+  fx.scope.set('u1', [{ envKey: 'p1', label: '小萝北', platform: 'xiaohongshu', source: 'admin', assignedAt: 0 }]);
+  const baseRow: CuratedPanelRow = {
+    id: 7,
+    accountId: 'p1',
+    contentType: 'image_text',
+    sourceId: 'server-note',
+    title: '服务端标题',
+    body: '服务端正文',
+    author: '服务端作者',
+    sourceUrl: 'https://example.test/server-note',
+    topics: ['服务端话题'],
+    likeCount: 1,
+    collectCount: 2,
+    commentCount: 3,
+    countsCapturedAt: 1,
+    botLiked: false,
+    botCollected: true,
+    admitReason: 'high_quality',
+    firstSeenAt: 1,
+    updatedAt: 2,
+    referenceImages: [{ index: 0, sourceUrl: 'https://img.test/server.jpg', captureStatus: 'url_only', capturedAt: 1 }],
+  };
+  const rows = new Map<number, CuratedPanelRow>([
+    [7, baseRow],
+    [8, { ...baseRow, id: 8, sourceId: 'server-note-8' }],
+    [9, { ...baseRow, id: 9, contentType: 'video' }],
+    [10, { ...baseRow, id: 10, body: '  ' }],
+    [11, { ...baseRow, id: 11, referenceImages: [] }],
+  ]);
+  const curatedContent = {
+    async listForClient() { return { items: [], total: 0 }; },
+    async getOneForAccount(id: number, accountId: string) { return accountId === 'p1' ? rows.get(id) ?? null : null; },
+  };
+  const taskStore = new MemoryDelegatedTaskStore();
+  const delegatedTasks = new DelegatedTaskService({
+    store: taskStore,
+    listAccounts: async () => [{ accountId: 'p1', nickname: '小萝北', platform: 'xiaohongshu', status: 'active' }],
+  });
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      curatedContent,
+      delegatedTasks,
+    },
+    baseConfig(0),
+    async (base) => {
+      const login = await (await fetch(`${base}/login`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'acme', key: 'ck_secret' }),
+      })).json() as { token: string };
+      const headers = { authorization: `Bearer ${login.token}`, 'content-type': 'application/json' };
+      const create = (id: number, body: Record<string, unknown>) => fetch(`${base}/curated-contents/${id}/create-post`, {
+        method: 'POST', headers, body: JSON.stringify(body),
+      });
+
+      assert.equal((await create(7, { envKey: 'p2', useReferenceImages: false })).status, 403);
+      assert.equal((await create(7, { envKey: 'p1' })).status, 400);
+      assert.deepEqual(await (await create(9, { envKey: 'p1', useReferenceImages: false })).json(), {
+        triggered: false, reason: 'image_text_only',
+      });
+      assert.deepEqual(await (await create(10, { envKey: 'p1', useReferenceImages: false })).json(), {
+        triggered: false, reason: 'empty_body',
+      });
+      assert.deepEqual(await (await create(11, { envKey: 'p1', useReferenceImages: true })).json(), {
+        triggered: false, reason: 'reference_images_unavailable',
+      });
+
+      const textReceipt = await create(7, {
+        envKey: 'p1',
+        useReferenceImages: false,
+        body: '客户端伪造正文',
+        referenceImages: ['https://evil.test/image.jpg'],
+        accountId: 'p2',
+      });
+      assert.equal(textReceipt.status, 201);
+      const textTask = (await textReceipt.json()) as { task: { status: string; source: string; sourceConstraints: Record<string, unknown> } };
+      assert.equal(textTask.task.status, 'queued');
+      assert.equal(textTask.task.source, 'edge');
+      assert.equal(textTask.task.sourceConstraints.body, '服务端正文');
+      assert.equal(textTask.task.sourceConstraints.useReferenceImages, false);
+      assert.equal(textTask.task.sourceConstraints.referenceImages, undefined);
+
+      const imageReceipt = await create(8, { envKey: 'p1', useReferenceImages: true });
+      assert.equal(imageReceipt.status, 201);
+      const imageTask = (await imageReceipt.json()) as { task: { status: string; sourceConstraints: Record<string, unknown> } };
+      assert.equal(imageTask.task.status, 'queued');
+      assert.equal(imageTask.task.sourceConstraints.useReferenceImages, true);
+      assert.deepEqual(imageTask.task.sourceConstraints.referenceImages, baseRow.referenceImages);
+      assert.equal((await taskStore.list({ accountId: 'p1', limit: 20 })).length, 2, '拒绝路径不得创建任务');
     },
   );
 });

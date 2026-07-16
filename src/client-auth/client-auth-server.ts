@@ -20,7 +20,8 @@ import type { ClientUserStore } from './client-user-store.js';
 import type { ClientOffboardView } from './client-user-store.js';
 import type { LoginRateLimiter } from './rate-limiter.js';
 import { DelegatedTaskServiceError, type DelegatedTaskService } from '../delegated-task/service.js';
-import type { DelegatedTaskIntent } from '../delegated-task/types.js';
+import type { DelegatedTaskIntent, JsonValue } from '../delegated-task/types.js';
+import type { CuratedContentStore, CuratedPanelRow, CuratedReferenceImage } from '../cache/curated-content-store.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -30,6 +31,8 @@ export interface ClientAuthDeps {
   rateLimiter: LoginRateLimiter;
   /** Customer-scoped delegated tasks. Every route re-checks env ownership from the DB. */
   delegatedTasks?: DelegatedTaskService;
+  /** Account-scoped curated reads. HTTP responses are projected through an explicit customer DTO below. */
+  curatedContent?: Pick<CuratedContentStore, 'listForClient' | 'getOneForAccount'>;
   interactionApi?: {
     handle(req: http.IncomingMessage, res: http.ServerResponse, userId: string): Promise<boolean>;
   };
@@ -94,6 +97,61 @@ function clientIp(req: http.IncomingMessage): string {
   const xff = req.headers['x-forwarded-for'];
   if (typeof xff === 'string' && xff.length > 0) return xff.split(',')[0].trim();
   return req.socket.remoteAddress ?? 'unknown';
+}
+
+function parseIntegerQuery(value: string | null, fallback: number, min: number, max: number): number | null {
+  if (value === null || value === '') return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) return null;
+  return parsed;
+}
+
+function toClientReferenceImage(image: CuratedReferenceImage): Record<string, unknown> {
+  return {
+    index: image.index,
+    sourceUrl: image.sourceUrl,
+    ...(image.ossUrl ? { ossUrl: image.ossUrl } : {}),
+    ...(typeof image.width === 'number' ? { width: image.width } : {}),
+    ...(typeof image.height === 'number' ? { height: image.height } : {}),
+    ...(image.alt ? { alt: image.alt } : {}),
+    captureStatus: image.captureStatus,
+    capturedAt: image.capturedAt,
+  };
+}
+
+function isCreatableCuratedRow(row: CuratedPanelRow): boolean {
+  return row.contentType === 'image_text' && Boolean(row.body?.trim());
+}
+
+/** Explicit allowlist: never serialize the store row directly into the customer token domain. */
+function toClientCuratedListItem(row: CuratedPanelRow): Record<string, unknown> {
+  const body = row.body?.trim() ?? '';
+  return {
+    id: row.id,
+    contentType: row.contentType,
+    title: row.title,
+    bodyPreview: body.length > 180 ? `${body.slice(0, 180)}…` : body,
+    author: row.author,
+    sourceUrl: row.sourceUrl,
+    topics: row.topics,
+    likeCount: row.likeCount,
+    collectCount: row.collectCount,
+    commentCount: row.commentCount,
+    botLiked: row.botLiked,
+    botCollected: row.botCollected,
+    referenceImages: row.referenceImages.map(toClientReferenceImage),
+    creatable: isCreatableCuratedRow(row),
+    updatedAt: row.updatedAt,
+  };
+}
+
+function toClientCuratedDetail(row: CuratedPanelRow): Record<string, unknown> {
+  return {
+    ...toClientCuratedListItem(row),
+    body: row.body,
+    firstSeenAt: row.firstSeenAt,
+    countsCapturedAt: row.countsCapturedAt,
+  };
 }
 
 function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
@@ -186,6 +244,155 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
     if (method === 'GET' && url === '/my-environments') {
       const scope = await deps.store.listEnvScope(userId);
       sendJson(res, 200, { environments: scope.map((s) => ({ envKey: s.envKey, label: s.label, platform: s.platform })) });
+      return;
+    }
+
+    // 客户灵感库：每个读写都回库复核 envKey 归属；绝不接受 accountId 或复用内部面板路由。
+    if (method === 'GET' && url === '/curated-contents') {
+      if (!deps.curatedContent) {
+        sendJson(res, 503, { error: 'curated_content_unavailable' });
+        return;
+      }
+      const query = new URL(rawUrl, 'http://localhost').searchParams;
+      const envKey = (query.get('envKey') ?? '').trim();
+      const scope = await deps.store.listEnvScope(userId);
+      if (!envKey || !scope.some((item) => item.envKey === envKey)) {
+        sendJson(res, 403, { error: 'environment_not_owned' });
+        return;
+      }
+      const mode = query.get('mode') ?? 'creatable';
+      if (mode !== 'creatable' && mode !== 'all') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_mode' });
+        return;
+      }
+      const limit = parseIntegerQuery(query.get('limit'), 20, 1, 50);
+      const offset = parseIntegerQuery(query.get('offset'), 0, 0, 1_000_000);
+      if (limit === null || offset === null) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_pagination' });
+        return;
+      }
+      const result = await deps.curatedContent.listForClient(envKey, {
+        creatableOnly: mode === 'creatable',
+        limit,
+        offset,
+      });
+      sendJson(res, 200, {
+        items: result.items.map(toClientCuratedListItem),
+        total: result.total,
+        limit,
+        offset,
+      });
+      return;
+    }
+    const curatedCreatePost = /^\/curated-contents\/([^/]+)\/create-post$/.exec(url);
+    if (method === 'POST' && curatedCreatePost) {
+      if (!deps.curatedContent || !deps.delegatedTasks) {
+        sendJson(res, 503, { error: 'curated_actions_unavailable' });
+        return;
+      }
+      const id = Number(decodeURIComponent(curatedCreatePost[1]));
+      if (!Number.isInteger(id) || id <= 0) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_id' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const raw = (body ?? {}) as { envKey?: unknown; useReferenceImages?: unknown };
+      const envKey = typeof raw.envKey === 'string' ? raw.envKey.trim() : '';
+      if (typeof raw.useReferenceImages !== 'boolean') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'reference_mode_required' });
+        return;
+      }
+      const scope = await deps.store.listEnvScope(userId);
+      if (!envKey || !scope.some((item) => item.envKey === envKey)) {
+        sendJson(res, 403, { error: 'environment_not_owned' });
+        return;
+      }
+      const row = await deps.curatedContent.getOneForAccount(id, envKey);
+      if (!row) {
+        sendJson(res, 404, { error: 'not_found' });
+        return;
+      }
+      if (row.contentType !== 'image_text') {
+        sendJson(res, 200, { triggered: false, reason: 'image_text_only' });
+        return;
+      }
+      if (!row.body?.trim()) {
+        sendJson(res, 200, { triggered: false, reason: 'empty_body' });
+        return;
+      }
+      if (raw.useReferenceImages && row.referenceImages.length === 0) {
+        sendJson(res, 200, { triggered: false, reason: 'reference_images_unavailable' });
+        return;
+      }
+      try {
+        const result = await deps.delegatedTasks.createDraft({
+          accountId: envKey,
+          action: 'publish_post',
+          targetSuccessCount: 1,
+          maxAttempts: 2,
+          deadlineAt: Date.now() + 24 * 60 * 60 * 1000,
+          executionWindow: { mode: 'immediate' },
+          source: 'edge',
+          sourceRef: `edge:curated:${envKey}:${id}:create-post`,
+          sourceConstraints: {
+            curatedId: id,
+            sourceId: row.sourceId,
+            title: row.title ?? '',
+            body: row.body,
+            author: row.author ?? '',
+            sourceUrl: row.sourceUrl ?? '',
+            topics: row.topics,
+            useReferenceImages: raw.useReferenceImages,
+            ...(raw.useReferenceImages
+              ? { referenceImages: JSON.parse(JSON.stringify(row.referenceImages)) as JsonValue }
+              : {}),
+            ...(raw.useReferenceImages && row.visualAnalysis
+              ? { visualAnalysis: JSON.parse(JSON.stringify(row.visualAnalysis)) as JsonValue }
+              : {}),
+          },
+          targetConstraints: {},
+          approvalMode: 'review',
+          priority: 'normal',
+        });
+        sendJson(res, result.created ? 201 : 200, result);
+      } catch (err) {
+        if (err instanceof DelegatedTaskServiceError) {
+          sendJson(res, err.status, { error: err.code, message: err.message });
+        } else {
+          throw err;
+        }
+      }
+      return;
+    }
+    const curatedDetail = /^\/curated-contents\/([^/]+)$/.exec(url);
+    if (method === 'GET' && curatedDetail) {
+      if (!deps.curatedContent) {
+        sendJson(res, 503, { error: 'curated_content_unavailable' });
+        return;
+      }
+      const id = Number(decodeURIComponent(curatedDetail[1]));
+      if (!Number.isInteger(id) || id <= 0) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_id' });
+        return;
+      }
+      const envKey = (new URL(rawUrl, 'http://localhost').searchParams.get('envKey') ?? '').trim();
+      const scope = await deps.store.listEnvScope(userId);
+      if (!envKey || !scope.some((item) => item.envKey === envKey)) {
+        sendJson(res, 403, { error: 'environment_not_owned' });
+        return;
+      }
+      const row = await deps.curatedContent.getOneForAccount(id, envKey);
+      if (!row) {
+        sendJson(res, 404, { error: 'not_found' });
+        return;
+      }
+      sendJson(res, 200, { item: toClientCuratedDetail(row) });
       return;
     }
     // 环境归属只能来自内部权威注册表 + 管理员分配。保留旧路由用于明确拒绝
