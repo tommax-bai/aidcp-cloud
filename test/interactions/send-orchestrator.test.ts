@@ -97,7 +97,7 @@ test('approved command is persisted as one attempt and dispatched to one account
         browserState: 'closed', capabilities: { commentsRead: true, commentsReply: true, dmRead: true,
           dmSendText: true, dmSendImage: false },
         identity: { externalId: 'finder', displayName: '示例视频号', identityHash: `sha256:${'1'.repeat(64)}` },
-        checkedAt: now - 1_000, reasonCode: null,
+        runtimeControlsVersion: 0, checkedAt: now - 1_000, reasonCode: null,
       },
     }),
     sendWindowCounts: async () => ({ minute: 0, hour: 0, day: 0, lastThreadSendAt: null }),

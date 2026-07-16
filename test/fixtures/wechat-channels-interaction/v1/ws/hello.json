@@ -7,7 +7,7 @@
     "edgeId": "ads-demo-profile",
     "platform": "wechat_channels",
     "app": "wechat_channels",
-    "capabilities": ["identity", "overlay", "auth.browser_sidecar", "interaction_inbox_v1", "interaction_reply_recovery_v1", "interaction_offboarding_v1"],
+    "capabilities": ["identity", "overlay", "auth.browser_sidecar", "interaction_inbox_v1", "interaction_reply_recovery_v1", "interaction_offboarding_v1", "interaction_runtime_controls_v1"],
     "accountId": "acct_wc_demo",
     "accountNickname": "示例视频号",
     "machineLabel": "dev-mac-demo",

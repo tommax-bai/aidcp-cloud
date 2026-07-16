@@ -39,7 +39,7 @@ test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recov
         browserState: 'closed', capabilities: { commentsRead: true, commentsReply: true, dmRead: true,
           dmSendText: true, dmSendImage: false },
         identity: { externalId: 'finder_demo_public', displayName: '示例视频号', identityHash: `sha256:${'1'.repeat(64)}` },
-        checkedAt: 1784044000000, reasonCode: null,
+        runtimeControlsVersion: 0, checkedAt: 1784044000000, reasonCode: null,
       });
       const fixture = JSON.parse(await readFile(new URL('../fixtures/wechat-channels-interaction/v1/ws/comment-sync-batch.json', import.meta.url), 'utf8')) as { payload: unknown };
       const payload = parseSyncBatchPayload(fixture.payload);
@@ -322,7 +322,7 @@ test('PostgreSQL mock Edge E2E: sync → list/detail → generate/approve/send �
         status: 'active', browserState: 'closed', capabilities: { commentsRead: true, commentsReply: true,
           dmRead: false, dmSendText: false, dmSendImage: false },
         identity: { externalId: 'finder-e2e', displayName: 'E2E 账号', identityHash: `sha256:${'e'.repeat(64)}` },
-        checkedAt: attemptGate.now, reasonCode: null });
+        runtimeControlsVersion: 0, checkedAt: attemptGate.now, reasonCode: null });
       await store.updateRuntimeControls({ accountId: 'acct_wc_e2e', expectedVersion: 0, actor: 'admin',
         commentsReadEnabled: true, commentsReplyEnabled: true, dmReadEnabled: false, dmSendTextEnabled: false,
         dmSendImageEnabled: false, writePaused: false });

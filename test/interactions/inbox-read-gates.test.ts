@@ -14,7 +14,7 @@ const auth = {
   browserState: 'closed' as const,
   capabilities: { commentsRead: true, commentsReply: true, dmRead: true, dmSendText: true, dmSendImage: false as const },
   identity: { externalId: 'finder-a', displayName: '账号 A', identityHash: `sha256:${'a'.repeat(64)}` },
-  checkedAt: 1, reasonCode: null,
+  runtimeControlsVersion: 0, checkedAt: 1, reasonCode: null,
 };
 const controls = {
   accountId: 'acct-a', platform: 'wechat_channels' as const, envKey: 'env-a', version: 1,

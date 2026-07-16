@@ -5,6 +5,7 @@ import { test } from 'node:test';
 const migrationUrl = new URL('../../migrations/0039_interaction_inbox.sql', import.meta.url);
 const authorityMigrationUrl = new URL('../../migrations/0040_customer_env_authority.sql', import.meta.url);
 const recoveryMigrationUrl = new URL('../../migrations/0041_interaction_recovery_offboarding.sql', import.meta.url);
+const runtimeControlMigrationUrl = new URL('../../migrations/0042_interaction_runtime_control_application.sql', import.meta.url);
 
 test('0039 creates the dedicated inbound domain and never writes outbound interaction_feed', async () => {
   const sql = await readFile(migrationUrl, 'utf8');
@@ -70,4 +71,11 @@ test('0041 adds durable recovery/offboarding and releases only account-level amb
   assert.match(sql, /reconciliation_state[\s\S]*result_replayed[\s\S]*not_found[\s\S]*binding_conflict/);
   assert.doesNotMatch(sql, /content_text|final_text|cookie|credential/i,
     'offboard audit/migration must not copy message bodies, reply text or credentials');
+});
+
+test('0042 persists the exact runtime-control version Edge reports as applied', async () => {
+  const sql = await readFile(runtimeControlMigrationUrl, 'utf8');
+  assert.match(sql, /ALTER TABLE interaction_auth_state/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS runtime_controls_version INTEGER/);
+  assert.match(sql, /runtime_controls_version IS NULL OR runtime_controls_version >= 0/);
 });

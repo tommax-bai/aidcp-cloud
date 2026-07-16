@@ -43,7 +43,14 @@ test('customer API transactionally binds enabled user + owned env + account on e
     getAuth: async () => ({
       envKey: 'env-a', accountId: 'acct-a', platform: 'wechat_channels', status: 'active', browserState: 'closed',
       capabilities: { commentsRead: true, commentsReply: true, dmRead: true, dmSendText: true, dmSendImage: false },
-      identity: null, checkedAt: 1, reasonCode: null,
+      identity: null, runtimeControlsVersion: 0, checkedAt: 1, reasonCode: null,
+    }),
+    getRuntimeControls: async () => ({
+      accountId: 'acct-a', platform: 'wechat_channels', envKey: 'env-a', version: 1,
+      commentsReadEnabled: true, commentsReplyEnabled: true, dmReadEnabled: true,
+      dmSendTextEnabled: true, dmSendImageEnabled: false, writePaused: false,
+      consecutiveFailures: 0, circuitOpenedAt: null, lastConfirmedAt: null,
+      updatedAt: 1, updatedBy: 'admin',
     }),
   } as unknown as InteractionStore;
   const api = new InteractionCustomerApi({ users, store, workflow: {} as ReplyWorkflow,
@@ -106,10 +113,17 @@ test('customer API transactionally binds enabled user + owned env + account on e
 
     const list = await fetch(`${base}/environments/env-a/interactions`, { headers: { 'x-test-user': 'user-a' } });
     assert.equal(list.status, 200);
-    const listBody = await list.json() as { data: { envKey: string; accountId: string }; meta: { asOf: number } };
+    const listBody = await list.json() as { data: { envKey: string; accountId: string; auth: {
+      runtimeControls: { storedVersion: number; edgeAppliedVersion: number | null; applicationStatus: string };
+    } }; meta: { asOf: number } };
     assert.deepEqual([listBody.data.envKey, listBody.data.accountId, listBody.meta.asOf],
       ['env-a', 'acct-a', 1784044800000]);
     assert.equal(listCalls, 1);
+    assert.deepEqual(listBody.data.auth.runtimeControls,
+      { storedVersion: 1, edgeAppliedVersion: 0, applicationStatus: 'pending', stored: {
+        commentsReadEnabled: true, commentsReplyEnabled: true, dmReadEnabled: true,
+        dmSendTextEnabled: true, dmSendImageEnabled: false, writePaused: false,
+      } });
 
     const unknownQuery = await fetch(`${base}/environments/env-a/interactions?unexpected=1`,
       { headers: { 'x-test-user': 'user-a' } });

@@ -143,6 +143,7 @@ export class InteractionInternalApi {
     workflow: ReplyWorkflow;
     grantsFor: (actor: string) => ReadonlySet<InteractionGrant>;
     cursorSecret: string;
+    onRuntimeControlsUpdated?: (controls: RuntimeControls) => Promise<{ delivered: number }>;
     clock?: () => number;
   }) {
     this.clock = deps.clock ?? Date.now;
@@ -222,7 +223,16 @@ export class InteractionInternalApi {
           dmSendTextEnabled: body.dmSendTextEnabled as boolean,
           dmSendImageEnabled: false,
           writePaused: body.writePaused as boolean });
-        this.ok(res, requestId, publicControls(controls));
+        let delivered = 0;
+        try {
+          delivered = (await this.deps.onRuntimeControlsUpdated?.(controls))?.delivered ?? 0;
+        } catch {
+          // The CAS/audit commit is authoritative; socket delivery failure converges on the next hello.
+        }
+        this.ok(res, requestId, {
+          ...publicControls(controls),
+          edgeDelivery: { status: delivered === 1 ? 'enqueued' : 'deferred', delivered },
+        });
         return;
       }
     }

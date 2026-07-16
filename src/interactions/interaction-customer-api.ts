@@ -55,13 +55,36 @@ function publicJob(job: ScopedJobContext['job'] | ReplyJobView): ReplyJobView {
   return view;
 }
 
-function authSummary(auth: NonNullable<Awaited<ReturnType<InteractionStore['getAuth']>>>) {
+function authSummary(
+  auth: NonNullable<Awaited<ReturnType<InteractionStore['getAuth']>>>,
+  controls: Awaited<ReturnType<InteractionStore['getRuntimeControls']>>,
+) {
+  const appliedVersion = auth.runtimeControlsVersion;
+  const applicationStatus = appliedVersion === controls.version
+    ? 'applied'
+    : appliedVersion === null || appliedVersion < controls.version ? 'pending' : 'stale';
   return {
     status: auth.status,
     browserState: auth.browserState,
     reasonCode: auth.reasonCode,
     checkedAt: auth.checkedAt,
     capabilities: auth.capabilities,
+    identity: auth.identity
+      ? { displayName: auth.identity.displayName, identityHash: auth.identity.identityHash }
+      : null,
+    runtimeControls: {
+      storedVersion: controls.version,
+      edgeAppliedVersion: appliedVersion,
+      applicationStatus,
+      stored: {
+        commentsReadEnabled: controls.commentsReadEnabled,
+        commentsReplyEnabled: controls.commentsReplyEnabled,
+        dmReadEnabled: controls.dmReadEnabled,
+        dmSendTextEnabled: controls.dmSendTextEnabled,
+        dmSendImageEnabled: false as const,
+        writePaused: controls.writePaused,
+      },
+    },
   };
 }
 
@@ -184,16 +207,17 @@ export class InteractionCustomerApi {
       const token = url.searchParams.get('cursor');
       const cursor = token ? this.cursors.decode(token, { kind: 'list', envKey }) : null;
       const asOf = cursor?.asOf ?? this.clock();
-      const [result, auth] = await Promise.all([
+      const [result, auth, controls] = await Promise.all([
         this.deps.store.listInteractions({ accountId, envKey, asOf, limit, channel, state,
           before: cursor ? { lastMessageAt: cursor.time, id: cursor.id } : undefined }),
         this.deps.store.getAuth(accountId, envKey),
+        this.deps.store.getRuntimeControls(accountId),
       ]);
       if (!auth) throw new InteractionError('INTERACTION_UPSTREAM_UNAVAILABLE', '平台登录状态尚不可用。', 503);
       const nextCursor = result.next ? this.cursors.encode({ kind: 'list', envKey, asOf,
         time: result.next.lastMessageAt, id: result.next.id }) : null;
       this.ok(res, requestId, asOf, { envKey, accountId, platform: INTERACTION_PLATFORM,
-        auth: authSummary(auth), items: result.items, nextCursor });
+        auth: authSummary(auth, controls), items: result.items, nextCursor });
       return true;
     }
     if (parts[2] === 'interactions' && parts.length === 4 && method === 'GET') {
@@ -202,16 +226,17 @@ export class InteractionCustomerApi {
       const token = url.searchParams.get('cursor');
       const cursor = token ? this.cursors.decode(token, { kind: 'detail', envKey, resourceId: threadId }) : null;
       const asOf = cursor?.asOf ?? this.clock();
-      const [detail, auth] = await Promise.all([
+      const [detail, auth, controls] = await Promise.all([
         this.deps.store.getDetail(accountId, envKey, threadId, 100,
           cursor ? { platformCreatedAt: cursor.time, id: cursor.id } : undefined),
         this.deps.store.getAuth(accountId, envKey),
+        this.deps.store.getRuntimeControls(accountId),
       ]);
       if (!detail) throw new InteractionError('INTERACTION_NOT_FOUND', '资源不存在。', 404);
       if (!auth) throw new InteractionError('INTERACTION_UPSTREAM_UNAVAILABLE', '平台登录状态尚不可用。', 503);
       const nextCursor = detail.next ? this.cursors.encode({ kind: 'detail', envKey, resourceId: threadId, asOf,
         time: detail.next.platformCreatedAt, id: detail.next.id }) : null;
-      this.ok(res, requestId, asOf, { envKey, accountId, platform: INTERACTION_PLATFORM, auth: authSummary(auth),
+      this.ok(res, requestId, asOf, { envKey, accountId, platform: INTERACTION_PLATFORM, auth: authSummary(auth, controls),
         thread: detail.thread, messages: detail.messages, replyJob: detail.replyJob,
         sendAttempt: detail.sendAttempt, nextCursor });
       return true;

@@ -139,6 +139,40 @@ test('mock Edge hello → sync batch/ack → confirmed result uses frozen v1 map
   assert.deepEqual(seen, ['auth', 'batch', 'result']);
 });
 
+test('runtime-controls negotiation includes a scoped welcome snapshot and provider failure is all-off', async () => {
+  const makeHandler = (fails: boolean) => new DefaultMessageHandler({
+    planner: new SimplePlanner(), llm: { complete: async () => '0' }, cache: cache(),
+    clock: () => 1784044802100, eventBus: new EventBus(),
+    interactionInbox: {
+      onAuthStatus: async () => {}, onSyncBatch: async () => { throw new Error('unused'); },
+      onReplyResult: async () => ({ duplicate: false }), onReplyReconcileResult: async () => {},
+      onOffboardResult: async () => ({ duplicate: false }), hasPendingOffboard: async () => false,
+    },
+    interactionRuntimeControls: {
+      getSnapshot: async (accountId) => {
+        if (fails) throw new Error('pg unavailable');
+        return {
+          accountId, envKey: 'env_wc_demo', version: 7,
+          commentsReadEnabled: true, commentsReplyEnabled: false,
+          dmReadEnabled: true, dmSendTextEnabled: false, dmSendImageEnabled: false,
+        };
+      },
+    },
+  });
+  const ok = await makeHandler(false).handle(await fixture('hello.json'), { sessionId: 'controls-ok' });
+  assert.deepEqual((ok?.payload as { interactionRuntime?: unknown }).interactionRuntime, {
+    accountId: 'acct_wc_demo', envKey: 'env_wc_demo', version: 7,
+    commentsReadEnabled: true, commentsReplyEnabled: false,
+    dmReadEnabled: true, dmSendTextEnabled: false, dmSendImageEnabled: false,
+  });
+  const failed = await makeHandler(true).handle(await fixture('hello.json'), { sessionId: 'controls-failed' });
+  assert.deepEqual((failed?.payload as { interactionRuntime?: unknown }).interactionRuntime, {
+    accountId: 'acct_wc_demo', envKey: 'acct_wc_demo', version: 0,
+    commentsReadEnabled: false, commentsReplyEnabled: false,
+    dmReadEnabled: false, dmSendTextEnabled: false, dmSendImageEnabled: false,
+  });
+});
+
 test('mock Edge scope mismatch is rejected without persisting batch', async () => {
   let called = false;
   const handler = new DefaultMessageHandler({

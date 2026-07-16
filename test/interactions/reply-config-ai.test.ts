@@ -238,7 +238,7 @@ test('explicit regenerate can recover a failed job, while inactive auth blocks b
       status: 'active' as const, browserState: 'closed' as const,
       capabilities: { commentsRead: true, commentsReply: true, dmRead: true, dmSendText: true, dmSendImage: false as const },
       identity: { externalId: 'finder', displayName: '账号', identityHash: `sha256:${'1'.repeat(64)}` },
-      checkedAt: now, reasonCode: null }),
+      runtimeControlsVersion: 0, checkedAt: now, reasonCode: null }),
     transitionJob: async (input: { from: string[]; to: string }) => {
       transitions.push({ from: input.from, to: input.to });
       return { ...context.job, state: input.to, version: input.to === 'classifying' ? 5 : 6 };

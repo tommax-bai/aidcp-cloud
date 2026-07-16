@@ -45,6 +45,7 @@ import {
   CaptchaAssistService,
   edgeCommandToEnvelope,
   type Envelope,
+  makeEnvelope,
 } from './comm/index.js';
 
 
@@ -245,7 +246,10 @@ import {
   parseInteractionPanelGrants,
   INTERACTION_OFFBOARDING_CAPABILITY,
   INTERACTION_REPLY_RECOVERY_CAPABILITY,
+  INTERACTION_RUNTIME_CONTROLS_CAPABILITY,
+  type InteractionRuntimeControlsPayload,
 } from './interactions/index.js';
+import { projectRuntimeControls } from './interactions/runtime-controls-provider.js';
 
 function readEnvString(name: string): string | undefined {
   const value = process.env[name];
@@ -1812,6 +1816,20 @@ async function main(): Promise<void> {
   // 建号自助人设生成器（change edge-persona-keyword-generation）：复用共享 llm（按角色 browse:persona_generator
   // 解析模型/温度、按 accountId 记账），生成 persona.generate 的草稿。
   const personaGenerator = new PersonaGenerator({ llm });
+  const interactionGlobalWriteEnabled = ['1', 'true', 'yes', 'on'].includes(
+    (readEnvString('AIDCP_INTERACTION_WRITE_ENABLED') ?? '').toLowerCase(),
+  );
+  const interactionRuntimeControls = interactionStore && interactionInbox
+    ? {
+        getSnapshot: async (accountId: string): Promise<InteractionRuntimeControlsPayload> => {
+          return projectRuntimeControls({
+            getRuntimeControls: (id) => interactionStore!.getRuntimeControls(id),
+            hasPendingOffboard: (id) => interactionInbox!.hasPendingOffboard(id),
+            globalWriteEnabled: interactionGlobalWriteEnabled,
+          }, accountId);
+        },
+      }
+    : undefined;
   const handler = new DefaultMessageHandler({
     planner,
     llm,
@@ -1850,6 +1868,7 @@ async function main(): Promise<void> {
     // （PUT 后下次握手即新值 = 热加载）。init 失败也安全：空镜像 → floorFor 逐项回落 BUILTIN_FLOOR 内置默认。
     pacingFloors: pacingConfigStore,
     interactionInbox,
+    interactionRuntimeControls,
   });
   // 陪伴界面快照层（edge-companion-ui 8.1）：前向引用（服务实例在 server 起后构造，同 pusher 闭包模式）。
   const server = new EdgeCloudServer({
@@ -1917,6 +1936,21 @@ async function main(): Promise<void> {
       workflow: replyWorkflow,
       grantsFor: (actor) => interactionPanelGrants.get(actor) ?? new Set(),
       cursorSecret: readEnvString('AIDCP_PANEL_JWT_SECRET') ?? '',
+      onRuntimeControlsUpdated: async (controls) => {
+        if (!interactionRuntimeControls) return { delivered: 0 };
+        const edgeId = server.resolveEdgeIdForAccount(
+          controls.accountId,
+          INTERACTION_RUNTIME_CONTROLS_CAPABILITY,
+        );
+        if (!edgeId) return { delivered: 0 };
+        const payload = await interactionRuntimeControls.getSnapshot(controls.accountId);
+        return {
+          delivered: server.pushToEdges(
+            makeEnvelope('interaction.runtime.controls', `runtime-controls-${controls.accountId}-${controls.version}`, Date.now(), payload),
+            edgeId,
+          ),
+        };
+      },
     })
     : undefined;
   const clientCursorSecret = readEnvString('AIDCP_CLIENT_JWT_SECRET');

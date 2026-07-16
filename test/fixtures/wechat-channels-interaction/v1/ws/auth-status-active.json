@@ -16,6 +16,7 @@
       "dmSendText": true,
       "dmSendImage": false
     },
+    "runtimeControlsVersion": 7,
     "identity": {
       "externalId": "finder_demo_public",
       "displayName": "示例视频号",

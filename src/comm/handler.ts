@@ -75,6 +75,7 @@ import {
   INTERACTION_OFFBOARDING_CAPABILITY,
   INTERACTION_PLATFORM,
   INTERACTION_REPLY_RECOVERY_CAPABILITY,
+  INTERACTION_RUNTIME_CONTROLS_CAPABILITY,
   InteractionError,
   type InteractionAuthStatusPayload,
   type InteractionOffboardAckPayload,
@@ -82,6 +83,7 @@ import {
   type InteractionReplyReconcileResultPayload,
   type InteractionReplyResultPayload,
   type InteractionReplyResultAckPayload,
+  type InteractionRuntimeControlsPayload,
   type InteractionSyncAckPayload,
   type InteractionSyncBatchPayload,
 } from '../interactions/types.js';
@@ -205,6 +207,23 @@ export interface HandlerDeps {
     onReplyReconcileResult(payload: InteractionReplyReconcileResultPayload): Promise<void>;
     onOffboardResult(payload: InteractionOffboardResultPayload): Promise<{ duplicate: boolean }>;
     hasPendingOffboard?(accountId: string): Promise<boolean>;
+  };
+  /** Versioned account controls included in welcome only after capability negotiation. */
+  interactionRuntimeControls?: {
+    getSnapshot(accountId: string): Promise<InteractionRuntimeControlsPayload>;
+  };
+}
+
+function disabledInteractionRuntimeControls(accountId: string): InteractionRuntimeControlsPayload {
+  return {
+    accountId,
+    envKey: accountId,
+    version: 0,
+    commentsReadEnabled: false,
+    commentsReplyEnabled: false,
+    dmReadEnabled: false,
+    dmSendTextEnabled: false,
+    dmSendImageEnabled: false,
   };
 }
 
@@ -603,7 +622,12 @@ export class DefaultMessageHandler implements MessageHandler {
     // 通知该连接决策层：上线 → 携 accountId emit edge.hello（进私有通道）触发会话启动（经诚实人设/调度闸 D3）。
     this.bus(session).emit('edge.hello', { edgeId: p.edgeId, accountId: session.accountId, ts: this.clock() });
     const negotiatedCapabilities = this.deps.interactionInbox
-      ? [INTERACTION_CAPABILITY, INTERACTION_REPLY_RECOVERY_CAPABILITY, INTERACTION_OFFBOARDING_CAPABILITY]
+      ? [
+          INTERACTION_CAPABILITY,
+          INTERACTION_REPLY_RECOVERY_CAPABILITY,
+          INTERACTION_OFFBOARDING_CAPABILITY,
+          ...(this.deps.interactionRuntimeControls ? [INTERACTION_RUNTIME_CONTROLS_CAPABILITY] : []),
+        ]
         .filter((capability) => (session.capabilities ?? []).includes(capability))
       : undefined;
     let offboardPending: boolean | undefined;
@@ -616,11 +640,20 @@ export class DefaultMessageHandler implements MessageHandler {
         offboardPending = true;
       }
     }
+    let interactionRuntime: InteractionRuntimeControlsPayload | undefined;
+    if (negotiatedCapabilities?.includes(INTERACTION_RUNTIME_CONTROLS_CAPABILITY) && session.accountId) {
+      try {
+        interactionRuntime = await this.deps.interactionRuntimeControls!.getSnapshot(session.accountId);
+      } catch {
+        interactionRuntime = disabledInteractionRuntimeControls(session.accountId);
+      }
+    }
     return makeEnvelope('welcome', env.id, this.clock(), {
       sessionId: session.sessionId,
       serverVersion: this.serverVersion,
       capabilities: negotiatedCapabilities,
       interactionRecovery: offboardPending === undefined ? undefined : { offboardPending },
+      interactionRuntime,
       // 节奏快照（change pacing-floor-config-min-interval）：tempo + 每类操作兜底 floor 区间。
       // 纯读风控 status（不写风控态）；握手早于风控态建立 / 解析失败 → 回落 normal(tempo=1.0)。
       // buildPacingSnapshot 是 total 函数：provider 抛错一律返 undefined，绝不 brick 握手。

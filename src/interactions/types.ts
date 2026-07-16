@@ -4,6 +4,7 @@ export const INTERACTION_PLATFORM = 'wechat_channels' as const;
 export const INTERACTION_CAPABILITY = 'interaction_inbox_v1' as const;
 export const INTERACTION_REPLY_RECOVERY_CAPABILITY = 'interaction_reply_recovery_v1' as const;
 export const INTERACTION_OFFBOARDING_CAPABILITY = 'interaction_offboarding_v1' as const;
+export const INTERACTION_RUNTIME_CONTROLS_CAPABILITY = 'interaction_runtime_controls_v1' as const;
 
 export type InteractionPlatform = typeof INTERACTION_PLATFORM;
 export type InteractionChannel = 'comment' | 'dm';
@@ -191,6 +192,7 @@ export interface InteractionAuthStatusPayload {
   status: InteractionAuthStatus;
   browserState: InteractionBrowserState;
   capabilities: EffectiveCapabilities;
+  runtimeControlsVersion: number | null;
   identity: { externalId: string; displayName: string; identityHash: string } | null;
   checkedAt: number;
   reasonCode: InteractionErrorCode | null;
@@ -528,6 +530,18 @@ export interface RuntimeControls {
   lastConfirmedAt: number | null;
   updatedAt: number;
   updatedBy: string;
+}
+
+/** Effective Cloud -> Edge projection. Stored controls remain available through admin APIs. */
+export interface InteractionRuntimeControlsPayload {
+  accountId: string;
+  envKey: string;
+  version: number;
+  commentsReadEnabled: boolean;
+  commentsReplyEnabled: boolean;
+  dmReadEnabled: boolean;
+  dmSendTextEnabled: boolean;
+  dmSendImageEnabled: false;
 }
 
 export interface MinimalInbound {

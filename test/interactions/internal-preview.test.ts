@@ -7,6 +7,65 @@ import type { ReplyConfigStore } from '../../src/interactions/reply-config-store
 import type { ReplyWorkflow } from '../../src/interactions/reply-workflow.js';
 import type { ReplyConfigSnapshot } from '../../src/interactions/types.js';
 
+test('runtime-control CAS reports online delivery separately from persisted success', async () => {
+  let updates = 0;
+  let deliveries = 0;
+  let edgeOnline = true;
+  const controls = {
+    accountId: 'acct_wc_demo', platform: 'wechat_channels' as const, envKey: 'env_wc_demo', version: 8,
+    commentsReadEnabled: true, commentsReplyEnabled: false, dmReadEnabled: true,
+    dmSendTextEnabled: false, dmSendImageEnabled: false as const, writePaused: true,
+    consecutiveFailures: 0, circuitOpenedAt: null, lastConfirmedAt: null,
+    updatedAt: 1784044800000, updatedBy: 'admin',
+  };
+  const api = new InteractionInternalApi({
+    store: {
+      updateRuntimeControls: async () => { updates += 1; return controls; },
+    } as unknown as InteractionStore,
+    configs: {} as ReplyConfigStore,
+    workflow: {} as ReplyWorkflow,
+    grantsFor: () => new Set(['interaction.config.edit']),
+    cursorSecret: 'internal-test-cursor-secret',
+    onRuntimeControlsUpdated: async (value) => {
+      deliveries += 1;
+      assert.equal(value.version, 8);
+      if (!edgeOnline) throw new Error('edge offline');
+      return { delivered: 1 };
+    },
+    clock: () => 1784044800000,
+  });
+  const server = http.createServer((req, res) => { void api.handle(req, res, 'admin'); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/accounts/acct_wc_demo/interaction-runtime-controls`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedVersion: 7, commentsReadEnabled: true, commentsReplyEnabled: false,
+        dmReadEnabled: true, dmSendTextEnabled: false, dmSendImageEnabled: false, writePaused: true }),
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { data: { version: number; edgeDelivery: { status: string; delivered: number } } };
+    assert.equal(body.data.version, 8);
+    assert.deepEqual(body.data.edgeDelivery, { status: 'enqueued', delivered: 1 });
+    assert.equal(updates, 1);
+    assert.equal(deliveries, 1);
+
+    edgeOnline = false;
+    const offline = await fetch(`http://127.0.0.1:${address.port}/api/accounts/acct_wc_demo/interaction-runtime-controls`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedVersion: 8, commentsReadEnabled: true, commentsReplyEnabled: false,
+        dmReadEnabled: true, dmSendTextEnabled: false, dmSendImageEnabled: false, writePaused: true }),
+    });
+    assert.equal(offline.status, 200, 'socket delivery failure must not roll back the authoritative CAS');
+    const offlineBody = await offline.json() as { data: { edgeDelivery: { status: string; delivered: number } } };
+    assert.deepEqual(offlineBody.data.edgeDelivery, { status: 'deferred', delivered: 0 });
+    assert.equal(updates, 2);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test('Console preview is read-only: no reply job and no WS command are created', async () => {
   const snapshot = {
     accountId: 'acct_wc_demo', platform: 'wechat_channels', configVersion: 7, state: 'draft',

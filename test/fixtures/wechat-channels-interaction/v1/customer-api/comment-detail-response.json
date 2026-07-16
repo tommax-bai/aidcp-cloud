@@ -14,6 +14,23 @@
         "dmRead": true,
         "dmSendText": true,
         "dmSendImage": false
+      },
+      "identity": {
+        "displayName": "示例视频号",
+        "identityHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "runtimeControls": {
+        "storedVersion": 7,
+        "edgeAppliedVersion": 7,
+        "applicationStatus": "applied",
+        "stored": {
+          "commentsReadEnabled": true,
+          "commentsReplyEnabled": true,
+          "dmReadEnabled": true,
+          "dmSendTextEnabled": true,
+          "dmSendImageEnabled": false,
+          "writePaused": false
+        }
       }
     },
     "thread": {
