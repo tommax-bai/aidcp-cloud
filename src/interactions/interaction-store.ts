@@ -46,7 +46,7 @@ export interface ListQuery {
   asOf: number;
   limit: number;
   channel?: InteractionChannel;
-  state?: ReplyJobState;
+  state?: ReplyJobState | 'pending';
   before?: { lastMessageAt: number; id: string };
 }
 
@@ -575,7 +575,13 @@ export class InteractionStore {
     const params: unknown[] = [query.accountId, query.envKey, new Date(query.asOf), query.limit + 1];
     let where = `t.account_id=$1 AND t.env_key=$2 AND t.last_message_at <= $3`;
     if (query.channel) { params.push(query.channel); where += ` AND t.channel=$${params.length}`; }
-    if (query.state) { params.push(query.state); where += ` AND j.state=$${params.length}`; }
+    if (query.state === 'pending') {
+      params.push(['new','classifying','draft_ready','approval_required','approved','queued','sending','failed','ambiguous']);
+      where += ` AND j.state=ANY($${params.length}::text[])`;
+    } else if (query.state) {
+      params.push(query.state);
+      where += ` AND j.state=$${params.length}`;
+    }
     if (query.before) {
       params.push(new Date(query.before.lastMessageAt), query.before.id);
       where += ` AND (t.last_message_at,t.id) < ($${params.length - 1},$${params.length})`;

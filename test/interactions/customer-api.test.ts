@@ -3,7 +3,7 @@ import http from 'node:http';
 import { test } from 'node:test';
 import type { ClientUserStore } from '../../src/client-auth/client-user-store.js';
 import { InteractionCustomerApi } from '../../src/interactions/interaction-customer-api.js';
-import type { InteractionStore } from '../../src/interactions/interaction-store.js';
+import type { InteractionStore, ListQuery } from '../../src/interactions/interaction-store.js';
 import type { InteractionSendOrchestrator } from '../../src/interactions/send-orchestrator.js';
 import type { ReplyConfigStore } from '../../src/interactions/reply-config-store.js';
 import type { ReplyWorkflow } from '../../src/interactions/reply-workflow.js';
@@ -19,6 +19,7 @@ const job: ReplyJobView = {
 test('customer API transactionally binds enabled user + owned env + account on every read/action', async () => {
   let mutationCalls = 0;
   let listCalls = 0;
+  let lastListState: ListQuery['state'];
   let authorizedOperations = 0;
   let browserDispatchCalls = 0;
   let browserClaimCalls = 0;
@@ -51,7 +52,11 @@ test('customer API transactionally binds enabled user + owned env + account on e
       assert.equal(input.messageId, 'message-a');
       return job;
     },
-    listInteractions: async () => { listCalls += 1; return { items: [], next: null }; },
+    listInteractions: async (query: ListQuery) => {
+      listCalls += 1;
+      lastListState = query.state;
+      return { items: [], next: null };
+    },
     getAuth: async () => ({
       envKey: 'env-a', accountId: 'acct-a', platform: 'wechat_channels', status: authStatus, browserState: 'closed',
       capabilities: { commentsRead: true, commentsReply: true, dmRead: true, dmSendText: true, dmSendImage: false },
@@ -182,6 +187,11 @@ test('customer API transactionally binds enabled user + owned env + account on e
     assert.deepEqual([listBody.data.envKey, listBody.data.accountId, listBody.meta.asOf],
       ['env-a', 'acct-a', 1784044800000]);
     assert.equal(listCalls, 1);
+    const pendingList = await fetch(`${base}/environments/env-a/interactions?state=pending`, {
+      headers: { 'x-test-user': 'user-a' },
+    });
+    assert.equal(pendingList.status, 200);
+    assert.equal(lastListState, 'pending');
     assert.deepEqual(listBody.data.replyConfig,
       { status: 'published', currentVersion: 4, draftVersion: null, publishedVersion: 4 });
     assert.deepEqual(listBody.data.auth.runtimeControls,

@@ -228,10 +228,12 @@ export class InteractionCustomerApi {
       const channel = channelRaw === 'comment' || channelRaw === 'dm' ? channelRaw : undefined;
       const stateRaw = url.searchParams.get('state');
       const states: ReplyJobState[] = ['new','classifying','draft_ready','approval_required','approved','queued','sending','sent','failed','ambiguous','ignored','escalated'];
-      if (stateRaw !== null && !states.includes(stateRaw as ReplyJobState)) {
+      if (stateRaw !== null && stateRaw !== 'pending' && !states.includes(stateRaw as ReplyJobState)) {
         throw new InteractionError('INTERACTION_VALIDATION_FAILED', 'state 不合法。', 422);
       }
-      const state = stateRaw && states.includes(stateRaw as ReplyJobState) ? stateRaw as ReplyJobState : undefined;
+      const state = stateRaw === 'pending'
+        ? 'pending' as const
+        : stateRaw && states.includes(stateRaw as ReplyJobState) ? stateRaw as ReplyJobState : undefined;
       const token = url.searchParams.get('cursor');
       const cursor = token ? this.cursors.decode(token, { kind: 'list', envKey }) : null;
       const asOf = cursor?.asOf ?? this.clock();
