@@ -170,3 +170,39 @@ test('delegated publish threads originChatId to the publish port as manualApprov
   await router.executorFor(noOrigin).execute(noOrigin, attempt);
   assert.equal(calls[1].manualApprovalChatId, undefined);
 });
+
+// change delegated-executor-operator-authority-parity：精确 /publish（legacy_command + manualSingle）＝操作员全权，
+// 透传 operatorOverride:true 越风控（人审仍在下游）；自然语言 / 结构化发帖一律 governed（不置该标志）。
+test('delegated publish sets operatorOverride only for the precise legacy_command class, not NL/structured', async () => {
+  const calls: Array<{ operatorOverride?: boolean }> = [];
+  const router = createDelegatedExecutorRouter({
+    comments: {
+      triggerManual: async () => ({ ok: true, message: 'unused' }),
+      triggerTargeted: async () => ({ ok: false, message: 'unused' }),
+      isRunning: () => false,
+    },
+    publishes: {
+      triggerDelegated: async (_accountId, opts) => {
+        calls.push({ operatorOverride: opts.operatorOverride });
+        return { result: 'triggered', reason: 'delegated_publish_post', status: 'pending_approval', recordId: 9 };
+      },
+      isBusy: () => false,
+    },
+    loadCandidate: async () => null,
+    approveCandidate: async () => null,
+    rejectCandidate: async () => null,
+    modifyCandidate: async () => null,
+  });
+
+  const precise = task({ action: 'publish_post', actionFamily: 'publish', source: 'legacy_command', targetSuccessCount: 1, targetConstraints: { manualSingle: true } });
+  await router.executorFor(precise).execute(precise, attempt);
+  assert.equal(calls[0].operatorOverride, true);
+
+  const nl = task({ action: 'publish_post', actionFamily: 'publish', source: 'feishu' });
+  await router.executorFor(nl).execute(nl, attempt);
+  assert.equal(calls[1].operatorOverride, undefined);
+
+  const structured = task({ action: 'publish_post', actionFamily: 'publish', source: 'edge' });
+  await router.executorFor(structured).execute(structured, attempt);
+  assert.equal(calls[2].operatorOverride, undefined);
+});

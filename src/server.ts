@@ -187,7 +187,7 @@ import {
   createDelegatedExecutorRouter,
   type DelegatedTask,
 } from './delegated-task/index.js';
-import { DelegatedTaskNotificationGate, delegatedPublishOutcomeReceipt } from './delegated-task/notification.js';
+import { DelegatedTaskNotificationGate, delegatedTaskFailureReceipt } from './delegated-task/notification.js';
 import {
   buildDelegatedTaskConfirmationCard,
   buildDelegatedTaskProgressCard,
@@ -3497,22 +3497,24 @@ async function main(): Promise<void> {
       platformStillMatches: async (task) => (await accountStore?.getPlatform?.(task.accountId)) === task.platform,
       onTaskUpdated: async (task: DelegatedTask) => {
         // 委托层不再主动推送任务进度卡（change feishu-delegated-suppress-progress-cards）：结果由每类任务
-        // 自己的正常业务结果卡承担（评论链 postResultCard / 发帖人审卡自证成功）。唯一兜底＝发帖类终态失败
-        // 无独立结果卡，补一张避免静默（红线：绝不静默失败）。
-        const receipt = delegatedPublishOutcomeReceipt(task);
+        // 自己的正常业务结果卡承担（评论链 postResultCard / 发帖人审卡自证成功）。兜底＝没有独立结果卡的终态失败
+        // 补一张避免静默（红线：绝不静默失败）——发帖类终态失败，以及评论类「起跑前触发闸失败」（评论链从未起跑、
+        // 未发过结果卡；change delegated-executor-operator-authority-parity）。
+        const receipt = delegatedTaskFailureReceipt(task);
         if (!receipt) return;
         if (!delegatedTaskNotificationGate.shouldSend(task)) return;
-        // change restore-delegated-command-card-origin-chat：命令触发的委托发帖，终态失败卡回来源会话（操作员触发、
-        // 操作员收结果）；无来源会话（自动 / 排期 / 旧行）补集式回落账号→团队群路由，零回归。
+        // change restore-delegated-command-card-origin-chat：命令触发的终态卡回来源会话（操作员触发、操作员收结果）；
+        // 无来源会话（自动 / 排期 / 旧行）补集式回落账号→团队群路由，零回归。
         const originChatId = task.originChatId?.trim();
         const chatId = originChatId || (await resolveAccountChatId(task.accountId));
         if (!chatId) return;
+        const commandLabel = task.actionFamily === 'comment' ? '评论' : '发帖';
         console.log(
-          `[delegated-task] 发帖终态失败卡 task=${task.id} account=${task.accountId} sink=${originChatId ? 'origin' : 'account_team'}`,
+          `[delegated-task] ${commandLabel}终态失败卡 task=${task.id} account=${task.accountId} sink=${originChatId ? 'origin' : 'account_team'}`,
         );
         try {
           await messenger.sendCard(chatId, buildCommandResultCard({
-            command: '发帖',
+            command: commandLabel,
             ok: false,
             level: receipt.level,
             title: receipt.title,
@@ -3522,7 +3524,7 @@ async function main(): Promise<void> {
           }));
           delegatedTaskNotificationGate.markSent(task);
         } catch (err) {
-          console.warn(`[delegated-task] 发帖失败结果卡发送失败 task=${task.id}: ${(err as Error).message}`);
+          console.warn(`[delegated-task] ${commandLabel}失败结果卡发送失败 task=${task.id}: ${(err as Error).message}`);
         }
       },
       logger: console,
