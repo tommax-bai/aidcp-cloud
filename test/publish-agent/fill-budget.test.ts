@@ -65,11 +65,13 @@ describe('正文填写单步预算（FB 逐字输入 vs 固定单步墙）', () 
     assert.deepEqual(clampFillBudgetToLease(DEFAULT_FILL_BUDGET, 600_000), DEFAULT_FILL_BUDGET);
   });
 
-  it('Facebook 的 fill_field 带预算下发；小红书全路径不带（30s 常数窗口零回归）', () => {
+  it('Facebook 的 select_mode/fill_field 带各自预算；小红书全路径不带（30s 常数窗口零回归）', () => {
     const { seq } = makeSequencer();
 
     const fb = seq.buildCommandSequence(input({ platform: 'facebook', content: '字'.repeat(300), images: ['a'] }));
+    const fbSelect = fb.find((c) => c.kind === 'select_mode');
     const fbFill = fb.find((c) => c.kind === 'fill_field');
+    assert.equal(fbSelect?.timeoutMs, 40_000);
     assert.equal(fbFill?.timeoutMs, 20_000 + 300 * 250);
 
     const xhs = seq.buildCommandSequence(input({ platform: 'xiaohongshu', content: '字'.repeat(300), images: ['a'] }));
@@ -120,9 +122,22 @@ describe('正文填写单步预算（FB 逐字输入 vs 固定单步墙）', () 
         .catch(() => {});
       assert.equal(timers.at(-1), 95_000 + 8_000);
 
+      await seq
+        .sendAndWaitResult({
+          taskId: 't',
+          recordId: 1,
+          seq: 1,
+          kind: 'select_mode',
+          params: { optionKind: 'target', optionValue: 'facebook_personal_timeline' },
+          platform: 'facebook',
+          timeoutMs: 40_000,
+        })
+        .catch(() => {});
+      assert.equal(timers.at(-1), 40_000 + 8_000);
+
       // 不带预算（小红书）→ 逐字节沿用旧的 30s 常数窗口，绝不叠余量。
       await seq
-        .sendAndWaitResult({ taskId: 't', recordId: 1, seq: 1, kind: 'fill_field', params: {}, platform: 'xiaohongshu' })
+        .sendAndWaitResult({ taskId: 't', recordId: 1, seq: 2, kind: 'fill_field', params: {}, platform: 'xiaohongshu' })
         .catch(() => {});
       assert.equal(timers.at(-1), 30_000);
     } finally {
