@@ -40,7 +40,11 @@ export interface CaptchaCoordinatorDeps {
   resolveController: (accountId: string) => Promise<RiskController>;
   messenger?: Pick<FeishuMessenger, 'sendCard'>;
   /** 解析目标飞书群（注入，便于与发布审批共用解析口径）。 */
-  resolveChatId: () => Promise<string>;
+  /**
+   * 目标群解析（change unify-card-routing-origin-then-team）：传入告警归属账号 → 该账号团队群 → 默认群。
+   * accountId 缺省（解析不到归属账号）→ 默认群，绝不臆造账号作用域。
+   */
+  resolveChatId: (accountId?: string) => Promise<string>;
   logger?: Pick<Console, 'error' | 'warn' | 'log'>;
   clock?: () => number;
   /** 同一 edge 验证码告警的冷却窗（毫秒），默认 10 分钟，防 edge 循环验证码刷屏。 */
@@ -196,7 +200,7 @@ export class CaptchaCoordinator {
 
     let chatId = '';
     try {
-      chatId = await this.deps.resolveChatId();
+      chatId = await this.deps.resolveChatId(accountId);
     } catch (err) {
       this.logger.warn('[captcha] 解析目标群失败:', err instanceof Error ? err.message : String(err));
     }

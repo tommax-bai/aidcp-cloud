@@ -89,6 +89,7 @@ import {
   isFeishuWsEnabled,
   resolveDefaultChatId,
   resolveChatIdForAccount,
+  resolveCardTarget,
   getApprovalSignalPath,
   writeApprovalSignal,
   matchAccountByNickname,
@@ -1133,6 +1134,22 @@ async function main(): Promise<void> {
       logger: console,
     });
 
+  // 一切出站卡片 / 告警的**唯一**目标解析入口（change unify-card-routing-origin-then-team）：
+  // 来源会话（命令触发）→ 账号团队群 → 默认群。同上，依赖只在此一处注入。
+  // 新增发送点一律走这里：内联 resolveDefaultChatId / getDefaultChat / FEISHU_CHAT_ID 会绕过
+  // config-gap 诊断，让「没接线」与「配错了」在运营视角不可区分。
+  const resolveCardChatId = (originChatId: string | undefined | null, accountId: string | undefined): Promise<string> =>
+    resolveCardTarget(
+      { originChatId, accountId },
+      {
+        accountStore,
+        groupRouteStore,
+        botChatStore,
+        fallbackChatId: process.env.FEISHU_CHAT_ID,
+        logger: console,
+      },
+    );
+
   let facebookPublishMediaStore: FacebookPublishMediaStore | undefined;
   try {
     const store = new FacebookPublishMediaStore({
@@ -1736,8 +1753,8 @@ async function main(): Promise<void> {
     alertStore,
     getAccountName: accountDisplayName,
     assist: captchaAssist,
-    resolveChatId: () =>
-      resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console }),
+    // change unify-card-routing-origin-then-team：验证码告警按账号路由到团队群（无账号 → 默认群）。
+    resolveChatId: (accountId) => resolveCardChatId(undefined, accountId),
   });
   // A 阶段1 发布指令编排器：逐条下发 publish.command、按 recordId+seq 关联 publish.command.result。
   // FB 正文逐字输入：填写这一步的预算随正文长度伸缩下发；上限按发布租约 TTL 收敛，
@@ -1842,6 +1859,8 @@ async function main(): Promise<void> {
     cache,
     messenger,
     botChatStore,
+    // change unify-card-routing-origin-then-team：边缘发起的发布审批卡也走统一解析（账号团队群 → 默认群）。
+    resolveCardChatId,
     approvalChatId: process.env.FEISHU_CHAT_ID,
     eventBus,
     accountState,
@@ -2239,10 +2258,11 @@ async function main(): Promise<void> {
     // 陪伴界面：授权核实→approved、云端终判失败→failed 推给在线边缘（published 由边缘自知）。
     notifyUiPublishState: (accountId, recordId, state, title) =>
       uiSnapshotService.pushPublishState(accountId, recordId, state, title),
-    // 下发段运维通知：离线/浏览器接管超时/CDP 控制不可用回待审 / 熔断开启 / 熔断解除 → 默认群文本，best-effort。
+    // 下发段运维通知：离线/浏览器接管超时/CDP 控制不可用回待审 / 熔断开启 / 熔断解除，best-effort。
+    // change unify-card-routing-origin-then-team：文案本就账号作用域（渲染了账号名）→ 按账号路由到团队群。
     notifyDispatchEvent: (notice) => {
       void (async () => {
-        const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
+        const chatId = await resolveCardChatId(undefined, notice.accountId);
         if (!chatId) return;
         const name = accountDisplayName(notice.accountId) ?? notice.accountId;
         const ref = notice.recordId !== undefined ? `草稿 #${notice.recordId}${notice.title ? `「${notice.title}」` : ''}` : '';
@@ -2436,8 +2456,10 @@ async function main(): Promise<void> {
   // 90s 超时 < idle 看门狗 idleNudgeMs(130s)，故审批等待期不会触发 idle nudge，无需显式暂停态。
   const commentApprovalEnabled = process.env.AIDCP_COMMENT_APPROVAL === 'true';
   const commentApproval: CommentApprovalPort = {
-    request: async ({ requestId, noteId, text, title, authorName, accountId, accountName }) => {
-      const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
+    request: async ({ requestId, noteId, text, title, authorName, accountId, accountName, originChatId }) => {
+      // change unify-card-routing-origin-then-team：来源会话（命令触发）→ 账号团队群 → 默认群。
+      // 此前这里写死默认群：命令触发的卡不回来源会话、自动化的卡不进账号团队群——同一行造成两个报障现象。
+      const chatId = await resolveCardChatId(originChatId, accountId);
       if (!chatId) {
         console.error('[comment] 无可用飞书群，评论审批卡未发出（将超时跳过、不发）');
         return;
@@ -2452,10 +2474,10 @@ async function main(): Promise<void> {
 
   /** comment auto_approve 统一“先通知、后授权”出口；自然浏览与排期只换可读文案，失败都向上抛并 fail-closed。 */
   const notifyAutoApprovedComment = async (
-    input: CommentApprovalNoticeInput & { contactIncluded?: boolean },
+    input: CommentApprovalNoticeInput & { contactIncluded?: boolean; originChatId?: string },
     source: 'mandatory_persona' | 'scheduled',
   ): Promise<void> => {
-    const chatId = await resolveAccountChatId(input.accountId);
+    const chatId = await resolveCardChatId(input.originChatId, input.accountId);
     if (!chatId) throw new Error('auto_approve_chat_not_configured');
     const displayName = input.accountName?.trim() || (input.accountId ? accountDisplayName(input.accountId) : undefined);
     const mandatory = source === 'mandatory_persona';
@@ -2976,6 +2998,9 @@ async function main(): Promise<void> {
     },
     messenger,
     botChatStore,
+    // change unify-card-routing-origin-then-team：审批卡目标走统一解析（来源会话 → 账号团队群 → 默认群）。
+    // 无来源会话的自动 / 排期发帖由此进入账号团队群，不再一律落默认群。
+    resolveCardChatId,
     getAccountName: accountDisplayName,
     writeApprovalSignal: (requestId, approved, payload) =>
       writeApprovalSignal({ writeFile, readFile }, requestId, approved, payload),
@@ -3132,10 +3157,10 @@ async function main(): Promise<void> {
     facebookJoinNewGroup: (accountId, opts) => facebookGroupJoinScheduler.triggerScheduled(accountId, opts),
     // --join=<url>（change facebook-comment-review-and-targeted-join）：加入指定群、只归该账号（同一 TDZ-safe 闭包，scheduler 稍后构造）。
     facebookJoinSpecificGroup: (accountId, groupUrl, opts) => facebookGroupJoinScheduler.joinSpecificGroup(accountId, groupUrl, opts),
-    postResultCard: async (accountId, receipt, source) => {
-      // 账号业务结果卡：按账号路由到团队群（含人工 /comment 的终态卡——它同样是该账号的运营结果；
-      // 命令的受理回执与人审卡仍在管理群，操作员的命令闭环不断）。
-      const chatId = await resolveAccountChatId(accountId);
+    postResultCard: async (accountId, receipt, source, originChatId) => {
+      // change unify-card-routing-origin-then-team：来源会话（手动 /comment）→ 账号团队群（自动排期）→ 默认群。
+      // 与该任务的审批卡同一解析、同一目标——此前两张卡走两段不同代码、两种兜底，正是「两卡两群」的机制根因。
+      const chatId = await resolveCardChatId(originChatId, accountId);
       if (!chatId) {
         console.warn('[comment] 无可用飞书群，结果卡片未发出');
         return;

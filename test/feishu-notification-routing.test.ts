@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { resolveChatIdForAccount } from '../src/feishu/chat-target.js';
+import { resolveChatIdForAccount, resolveCardTarget } from '../src/feishu/chat-target.js';
 import { GroupRouteStore } from '../src/cache/group-route-store.js';
 import { CommandRouter, type CommandActions } from '../src/feishu/commands.js';
 
@@ -191,4 +191,44 @@ test('作用域闸：未注入（旧装配 / 测试）→ 放行全部（零回�
   const r = await router.handle('/status acc-1', { chatId: 'oc_whatever' });
   assert.equal(r.ok, true);
   assert.deepEqual(calls, ['status:acc-1']);
+});
+
+// ── resolveCardTarget：统一三档（change unify-card-routing-origin-then-team）─────────────
+// 红线：回落必须是**补集**（来源会话为空 → 团队路由 → 默认群），绝不按卡类型白名单枚举。
+
+test('来源会话优先于团队路由（命令触发 → 回下命令的会话）', async () => {
+  const { d } = deps({ groupLabel: 'tom', route: 'oc_team_tom' });
+  const chatId = await resolveCardTarget({ originChatId: 'oc_private_p', accountId: 'acc-1' }, d);
+  assert.equal(chatId, 'oc_private_p');
+});
+
+test('无来源会话 → 落账号团队群（自动化：排期 / 自然浏览 / 覆盖模式）', async () => {
+  const { d } = deps({ groupLabel: 'tom', route: 'oc_team_tom' });
+  const chatId = await resolveCardTarget({ accountId: 'acc-1' }, d);
+  assert.equal(chatId, 'oc_team_tom');
+});
+
+test('来源会话为空白串 → 视为无来源会话、落团队群（不得因空白串短路成默认群）', async () => {
+  const { d } = deps({ groupLabel: 'tom', route: 'oc_team_tom' });
+  const chatId = await resolveCardTarget({ originChatId: '   ', accountId: 'acc-1' }, d);
+  assert.equal(chatId, 'oc_team_tom');
+});
+
+test('无来源会话 + 账号未绑团队 → 回默认群，绝不丢卡', async () => {
+  const { d } = deps({ groupLabel: null });
+  const chatId = await resolveCardTarget({ accountId: 'acc-2' }, d);
+  assert.equal(chatId, 'oc_default');
+});
+
+test('无来源会话 + 团队路由读失败 → 回默认群且不外抛（异常绝不炸进投递闭包）', async () => {
+  const { d, warns } = deps({ groupLabel: 'tom', routeThrows: true });
+  const chatId = await resolveCardTarget({ accountId: 'acc-1' }, d);
+  assert.equal(chatId, 'oc_default');
+  assert.ok(warns.some((w) => w.includes('group_route 查询失败')));
+});
+
+test('无来源会话 + 无归属账号（握手 config-error 类）→ 默认群，不臆造账号作用域', async () => {
+  const { d } = deps({ groupLabel: 'tom', route: 'oc_team_tom' });
+  const chatId = await resolveCardTarget({}, d);
+  assert.equal(chatId, 'oc_default');
 });

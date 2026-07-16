@@ -219,7 +219,16 @@ export interface CommentSchedulerDeps {
    * 任务跑完补发结果卡片（level 按结果，绝不染绿）。`source` 标注触发来源用于回执可辨识
    * （change comment-keep-open-through-approval）：人工 `/comment` vs 自动排期评论——缺省视为 `/comment`。
    */
-  postResultCard?: (accountId: string, receipt: CommentResultReceipt, source?: string) => Promise<void> | void;
+  postResultCard?: (
+    accountId: string,
+    receipt: CommentResultReceipt,
+    source?: string,
+    /**
+     * 命令来源会话（change unify-card-routing-origin-then-team）：手动 `/comment` 的终态结果卡回下命令的
+     * 那个会话，与其审批卡同投一处（防「两卡两群」）。缺省（自动排期）→ 回落账号团队群 → 默认群。
+     */
+    originChatId?: string,
+  ) => Promise<void> | void;
   /**
    * 排期任务「根本没开始」（未接管边端：浏览器停泊唤不醒 / acquire 超时 / 边端掉线）时回调一次
    * （change browser-slot-scheduling）。排期调度器据此**归还这一小时的名额**并在小时内有界重试。
@@ -374,6 +383,8 @@ export class CommentScheduler {
       manualOverride?: boolean;
       force?: boolean;
       approvalMode?: ContentScheduleApprovalMode;
+      /** 命令来源会话（change unify-card-routing-origin-then-team）：审批卡 / 终态卡回下命令的会话；缺省 → 账号团队群 → 默认群。 */
+      originChatId?: string;
       /** Async terminal observation. Existing callers may omit it; queued tasks use it for honest accounting. */
       onResult?: (result: CommentTerminalObservation) => Promise<void> | void;
     },
@@ -468,6 +479,8 @@ export class CommentScheduler {
           manualOverride: options?.manualOverride === true,
           force: options?.force === true,
           approvalMode: options?.approvalMode,
+        ...(options?.originChatId ? { originChatId: options.originChatId } : {}),
+          ...(options?.originChatId ? { originChatId: options.originChatId } : {}),
         })
           .then((result) => options?.onResult?.(result))
           .catch((err) =>
@@ -496,6 +509,7 @@ export class CommentScheduler {
         manualOverride: options?.manualOverride === true,
         force: options?.force === true,
         approvalMode: options?.approvalMode,
+        ...(options?.originChatId ? { originChatId: options.originChatId } : {}),
       })
         .then((result) => options?.onResult?.(result))
         .catch((err) =>
@@ -524,6 +538,7 @@ export class CommentScheduler {
       options?.force === true,
       options?.approvalMode,
       options?.onResult,
+      options?.originChatId,
     )
       .catch((err) =>
         (this.deps.logger ?? console).warn(
@@ -559,6 +574,8 @@ export class CommentScheduler {
       /** 自动排期/热度触发用 automatic；人工入口缺省 human。 */
       priority?: EdgeTaskPriority;
       approvalMode?: ContentScheduleApprovalMode;
+      /** 命令来源会话（change unify-card-routing-origin-then-team）：审批卡 / 终态卡回下命令的会话；缺省 → 账号团队群 → 默认群。 */
+      originChatId?: string;
     },
   ): Promise<CommentCommandReceipt & { reason?: string }> {
     if (!accountId || accountId === 'default') {
@@ -631,6 +648,7 @@ export class CommentScheduler {
         injectContact: options?.injectContact,
         contactInfo,
         approvalMode: options?.approvalMode,
+        ...(options?.originChatId ? { originChatId: options.originChatId } : {}),
       })
         .catch((err) =>
           (this.deps.logger ?? console).warn(
@@ -653,6 +671,7 @@ export class CommentScheduler {
       options?.priority ?? 'human',
       options?.onResult,
       options?.approvalMode,
+      options?.originChatId,
     )
       .catch((err) =>
         (this.deps.logger ?? console).warn(
@@ -692,6 +711,8 @@ export class CommentScheduler {
       manualOverride?: boolean;
       force?: boolean;
       approvalMode?: ContentScheduleApprovalMode;
+      /** 命令来源会话（change unify-card-routing-origin-then-team）：审批卡 / 终态卡回下命令的会话；缺省 → 账号团队群 → 默认群。 */
+      originChatId?: string;
     } = {},
   ): Promise<FacebookCommentRunResult> {
     // 终态捕获（change facebook-manual-join-comment）：包一层把「最后一次审计」升级为返回值，供「加群 + 评论」
@@ -731,6 +752,8 @@ export class CommentScheduler {
       manualOverride?: boolean;
       force?: boolean;
       approvalMode?: ContentScheduleApprovalMode;
+      /** 命令来源会话（change unify-card-routing-origin-then-team）：审批卡 / 终态卡回下命令的会话；缺省 → 账号团队群 → 默认群。 */
+      originChatId?: string;
     },
     audit: (row: FacebookCommentAuditRow) => void,
   ): Promise<void> {
@@ -933,7 +956,7 @@ export class CommentScheduler {
               container,
               // 放开时限兜底选出的覆盖群 → 审核卡标注「未满足冷却/预热」交人把关。手动 pin 群路径 coverageCfg 为空、绝不标注。
               ...(usingCoverage && coverageCfg?.relaxed ? { coverageRelaxed: true } : {}),
-            }, options.approvalMode);
+            }, options.approvalMode, options.originChatId);
             if (!approved) {
               audit({ accountId, outcome: 'compose_skipped', reason: 'approval_rejected_or_timeout', shadow: false, keyword, container, textLength: v.text.length });
               return;
@@ -990,6 +1013,8 @@ export class CommentScheduler {
       manualOverride?: boolean;
       force?: boolean;
       approvalMode?: ContentScheduleApprovalMode;
+      /** 命令来源会话（change unify-card-routing-origin-then-team）：审批卡 / 终态卡回下命令的会话；缺省 → 账号团队群 → 默认群。 */
+      originChatId?: string;
     } = {},
   ): Promise<FacebookCommentRunResult> {
     const d = this.deps;
@@ -1006,13 +1031,13 @@ export class CommentScheduler {
         level: 'error',
         title: '加群失败',
         message: `加群调度异常：${(err as Error).message}；未评论。`,
-      });
+      }, undefined, options.originChatId);
       return { outcome: 'submit_failed', reason: `join_exception:${(err as Error).message}` };
     }
     const isMember =
       join.triggered && (join.outcome === 'joined' || join.outcome === 'already_member') && !!join.groupUrl;
     if (!isMember) {
-      await d.postResultCard?.(accountId, joinOnlyReceipt(join));
+      await d.postResultCard?.(accountId, joinOnlyReceipt(join), undefined, options.originChatId);
       return { outcome: 'no_targets', reason: `join_${join.reason ?? join.outcome ?? 'not_completed'}` };
     }
     // 已加入（或已是成员）→ 在该新群里发一条评论。override 容器强制真发；contactInfo 已在 triggerManual 解析一次（gate 同源）。
@@ -1024,8 +1049,9 @@ export class CommentScheduler {
       manualOverride: options.manualOverride === true,
       force: options.force === true,
       approvalMode: options.approvalMode,
+      ...(options.originChatId ? { originChatId: options.originChatId } : {}),
     });
-    await d.postResultCard?.(accountId, joinCommentReceipt(join, comment, options.injectContact === true));
+    await d.postResultCard?.(accountId, joinCommentReceipt(join, comment, options.injectContact === true), undefined, options.originChatId);
     return comment;
   }
 
@@ -1038,6 +1064,7 @@ export class CommentScheduler {
     accountId: string,
     input: { permalink: string; text: string; contactInfo?: string | null; container: string; coverageRelaxed?: boolean },
     approvalMode: ContentScheduleApprovalMode = 'review',
+    originChatId?: string,
   ): Promise<{ text: string; contactInfo?: string } | null> {
     const log = this.deps.logger ?? console;
     const now = this.deps.now ?? (() => Date.now());
@@ -1062,6 +1089,7 @@ export class CommentScheduler {
           authorName: 'Facebook',
           accountId,
           contactIncluded: input.contactInfo != null,
+          ...(originChatId ? { originChatId } : {}),
         });
         log.log?.(`[fb-comment] 免审已通知并授权 account=${accountId} requestId=${requestId}`);
         return input.contactInfo ? { text: input.text, contactInfo: input.contactInfo } : { text: input.text };
@@ -1084,6 +1112,7 @@ export class CommentScheduler {
         title,
         authorName: 'Facebook',
         accountId,
+        ...(originChatId ? { originChatId } : {}),
       });
     } catch (err) {
       log.warn(`[fb-comment] 评论审批卡发送失败 account=${accountId}：${(err as Error).message}`);
@@ -1115,6 +1144,7 @@ export class CommentScheduler {
     priority: EdgeTaskPriority,
     onResult?: (result: TargetedCommentResult) => Promise<void> | void,
     approvalMode: ContentScheduleApprovalMode = 'review',
+    originChatId?: string,
   ): Promise<void> {
     const log = this.deps.logger ?? console;
     const soul = this.deps.getSoul(accountId);
@@ -1125,6 +1155,7 @@ export class CommentScheduler {
       composer,
       approval: this.deps.approval,
       approvalMode,
+      ...(originChatId ? { originChatId } : {}),
       autoApproveNotify: this.deps.autoApproveNotify,
       accountId,
       postProcessor: this.deps.postProcessorFor?.(accountId),
@@ -1243,7 +1274,7 @@ export class CommentScheduler {
     }
 
     try {
-      await this.deps.postResultCard?.(accountId, targetedOutcomeToReceipt(result, contactInfo != null), commentSourceLabel(priority));
+      await this.deps.postResultCard?.(accountId, targetedOutcomeToReceipt(result, contactInfo != null), commentSourceLabel(priority), originChatId);
     } catch (err) {
       log.warn(`[comment-scheduler] 定向结果卡片发送失败 account=${accountId}：${(err as Error).message}`);
     }
@@ -1261,6 +1292,7 @@ export class CommentScheduler {
     force = false,
     approvalMode: ContentScheduleApprovalMode = 'review',
     onResult?: (result: CommentTerminalObservation) => Promise<void> | void,
+    originChatId?: string,
   ): Promise<void> {
     const log = this.deps.logger ?? console;
     const soul = this.deps.getSoul(accountId);
@@ -1275,6 +1307,7 @@ export class CommentScheduler {
       composer,
       approval: this.deps.approval,
       approvalMode,
+      ...(originChatId ? { originChatId } : {}),
       autoApproveNotify: this.deps.autoApproveNotify,
       accountId,
       postProcessor: this.deps.postProcessorFor?.(accountId),
@@ -1441,7 +1474,7 @@ export class CommentScheduler {
     }
 
     try {
-      await this.deps.postResultCard?.(accountId, outcomeToReceipt(result), commentSourceLabel(priority));
+      await this.deps.postResultCard?.(accountId, outcomeToReceipt(result), commentSourceLabel(priority), originChatId);
     } catch (err) {
       log.warn(`[comment-scheduler] 结果卡片发送失败 account=${accountId}：${(err as Error).message}`);
     }

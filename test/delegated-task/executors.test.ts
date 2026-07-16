@@ -206,3 +206,69 @@ test('delegated publish sets operatorOverride only for the precise legacy_comman
   await router.executorFor(structured).execute(structured, attempt);
   assert.equal(calls[2].operatorOverride, undefined);
 });
+
+// change unify-card-routing-origin-then-team：来源会话必须真的从委托任务传到评论调度器。
+// 光测解析器不够——上一次「只修发帖那一半」正是因为执行器的评论分支把值丢在地上，解析器再对也没用。
+test('command-triggered comment tasks forward originChatId to every comment branch', async () => {
+  const seen: Array<string | undefined> = [];
+  const router = createDelegatedExecutorRouter({
+    comments: {
+      triggerManual: async (_accountId, options) => {
+        seen.push(options.originChatId);
+        await options.onResult({ outcome: 'commented', noteId: 'note-1' });
+        return { ok: true, message: 'started' };
+      },
+      triggerTargeted: async (_accountId, _target, options) => {
+        seen.push(options.originChatId);
+        await options.onResult({ outcome: 'commented', noteId: 'note-1', searchAttempts: 1 });
+        return { ok: true, message: 'started' };
+      },
+      isRunning: () => false,
+    },
+    publishes: { triggerDelegated: async () => ({ result: 'blocked', reason: 'unused' }), isBusy: () => false },
+    loadCandidate: async () => null,
+    approveCandidate: async () => null,
+    rejectCandidate: async () => null,
+    modifyCandidate: async () => null,
+  });
+
+  const batch = task({ originChatId: 'oc_private_p' });
+  await router.executorFor(batch).execute(batch, attempt);
+
+  const fb = task({
+    action: 'facebook_group_comment', platform: 'facebook', originChatId: 'oc_private_p',
+    targetConstraints: { groupUrl: 'https://www.facebook.com/groups/1' },
+  });
+  await router.executorFor(fb).execute(fb, attempt);
+
+  const curated = task({
+    action: 'comment_curated', originChatId: 'oc_private_p',
+    targetConstraints: { noteId: 'note-9', title: '标题' },
+  });
+  await router.executorFor(curated).execute(curated, attempt);
+
+  assert.deepEqual(seen, ['oc_private_p', 'oc_private_p', 'oc_private_p']);
+});
+
+test('automatic comment tasks carry no originChatId, so cards fall back to the account team route', async () => {
+  const seen: Array<string | undefined> = [];
+  const router = createDelegatedExecutorRouter({
+    comments: {
+      triggerManual: async (_accountId, options) => {
+        seen.push(options.originChatId);
+        await options.onResult({ outcome: 'commented', noteId: 'note-1' });
+        return { ok: true, message: 'started' };
+      },
+      triggerTargeted: async () => ({ ok: false, message: 'unused' }),
+      isRunning: () => false,
+    },
+    publishes: { triggerDelegated: async () => ({ result: 'blocked', reason: 'unused' }), isBusy: () => false },
+    loadCandidate: async () => null,
+    approveCandidate: async () => null,
+    rejectCandidate: async () => null,
+    modifyCandidate: async () => null,
+  });
+  const auto = task({ originChatId: null });
+  await router.executorFor(auto).execute(auto, attempt);
+  assert.deepEqual(seen, [undefined]);
+});

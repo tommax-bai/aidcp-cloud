@@ -141,6 +141,12 @@ export interface HandlerDeps {
   cache: AnchorStore;
   messenger?: Pick<FeishuMessenger, 'sendApprovalCard'>;
   botChatStore?: Pick<BotChatStore, 'getDefaultChat'>;
+  /**
+   * 卡片目标统一解析（change unify-card-routing-origin-then-team）：来源会话 → 账号团队群 → 默认群。
+   * 注入后取代下面 botChatStore.getDefaultChat 的默认群兜底——边缘发起的发布审批卡由此按会话账号
+   * 进入团队群。未注入（桩 / 旧构造）→ 保持既有默认群链，行为逐字不变。
+   */
+  resolveCardChatId?: (originChatId: string | undefined, accountId: string | undefined) => Promise<string>;
   approvalChatId?: string;
   logger?: Pick<Console, 'error' | 'warn' | 'log'>;
   clock?: () => number;
@@ -1056,21 +1062,33 @@ export class DefaultMessageHandler implements MessageHandler {
       edgeId: payload.edgeId ?? session.edgeId,
       sessionId: session.sessionId,
     });
-    let defaultChat = null;
-    try {
-      defaultChat = await this.deps.botChatStore?.getDefaultChat();
-      this.logger.log('[comm] publish.approval_request 默认群查询完成:', {
+    // change unify-card-routing-origin-then-team：优先走统一解析（本路径无命令来源会话 → 落账号团队群
+    // → 默认群；解析器内部已把未绑团队 / 读失败补集回落，绝不外抛）。未注入解析器时保持既有默认群链。
+    let chatId = '';
+    if (this.deps.resolveCardChatId) {
+      chatId = await this.deps.resolveCardChatId(undefined, session.accountId);
+      this.logger.log('[comm] publish.approval_request 目标群解析完成:', {
         requestId: payload.requestId,
-        defaultChatId: defaultChat?.chatId ?? null,
-        defaultChatName: defaultChat?.chatName ?? null,
+        accountId: session.accountId ?? null,
+        chatId: chatId || null,
       });
-    } catch (error) {
-      this.logger.warn('[comm] publish.approval_request 默认群查询失败，回退 FEISHU_CHAT_ID:', {
-        requestId: payload.requestId,
-        message: error instanceof Error ? error.message : String(error),
-      });
+    } else {
+      let defaultChat = null;
+      try {
+        defaultChat = await this.deps.botChatStore?.getDefaultChat();
+        this.logger.log('[comm] publish.approval_request 默认群查询完成:', {
+          requestId: payload.requestId,
+          defaultChatId: defaultChat?.chatId ?? null,
+          defaultChatName: defaultChat?.chatName ?? null,
+        });
+      } catch (error) {
+        this.logger.warn('[comm] publish.approval_request 默认群查询失败，回退 FEISHU_CHAT_ID:', {
+          requestId: payload.requestId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+      chatId = defaultChat?.chatId ?? this.deps.approvalChatId ?? process.env.FEISHU_CHAT_ID ?? '';
     }
-    const chatId = defaultChat?.chatId ?? this.deps.approvalChatId ?? process.env.FEISHU_CHAT_ID ?? '';
     if (!chatId) {
       const message = '未配置默认审批群：请先在目标飞书群发送 /bind 设为默认审批群，或配置 FEISHU_CHAT_ID 作为兜底。';
       this.logger.error('[comm] publish.approval_request 缺少目标群:', {
@@ -1085,8 +1103,8 @@ export class DefaultMessageHandler implements MessageHandler {
         requestId: payload.requestId,
         edgeId: payload.edgeId ?? session.edgeId,
         chatId,
-        source: defaultChat?.chatId ? 'bot_chats.default' : this.deps.approvalChatId || process.env.FEISHU_CHAT_ID ? 'env.FEISHU_CHAT_ID' : 'none',
-        chatName: defaultChat?.chatName ?? null,
+        // 只声称走了哪条解析路径；落点如实由 chatId 呈现（account_scope 内部可能已补集回落默认群）。
+        source: this.deps.resolveCardChatId ? 'account_scope' : 'default_chat_chain',
       });
       await this.deps.messenger.sendApprovalCard(
         chatId,

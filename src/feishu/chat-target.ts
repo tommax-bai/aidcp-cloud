@@ -84,3 +84,27 @@ export async function resolveChatIdForAccount(
   );
   return resolveDefaultChatId(deps);
 }
+
+/**
+ * 一切出站卡片 / 告警的统一目标解析（change unify-card-routing-origin-then-team）。
+ *
+ * 补集式三档：**来源会话（命令触发）→ 账号团队群 → 默认群**。层叠在上面两个不动的解析之上。
+ *
+ * 红线一：回落必须是**补集**（`来源会话为空 → 团队路由`，`团队路由未命中 → 默认群`），
+ * 绝不写成「哪些卡类型允许走团队路由」的白名单——白名单在新增卡类型时静默漏配，
+ * 而漏配与配错在运营视角不可区分（feishu-per-team-notification-routing 归档教训 1）。
+ *
+ * 红线二：任何一层读失败绝不外抛进调用方的投递闭包（异常静默作废整张卡 = 静默假成功）。
+ *
+ * 已接受的暴露面（见 spec feishu-notification-routing）：审批回调只认卡内 requestId、
+ * 不校验点按者与来源群，故「谁看得见审批卡＝谁能批准」；group_route 无内部 / 外部标记，
+ * 本解析对全部已映射团队一视同仁。映射外部客户群 = 把批准按钮交给客户，系统内无闸可拦。
+ */
+export async function resolveCardTarget(
+  scope: { originChatId?: string | null; accountId?: string },
+  deps: AccountChatTargetDeps,
+): Promise<string> {
+  const origin = scope.originChatId?.trim();
+  if (origin) return origin;
+  return resolveChatIdForAccount(scope.accountId, deps);
+}

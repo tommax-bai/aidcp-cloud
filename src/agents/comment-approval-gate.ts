@@ -25,6 +25,12 @@ export interface CommentApprovalPort {
     authorName?: string;
     accountId?: string;
     accountName?: string;
+    /**
+     * 命令来源会话（change unify-card-routing-origin-then-team）：由飞书命令创建的委托评论任务
+     * 透传其 originChatId，审批卡回下命令的那个会话。缺省（自然浏览闭环 / 排期等无来源会话的
+     * 自动化路径）→ 发卡端补集回落账号团队群 → 默认群。
+     */
+    originChatId?: string;
   }): Promise<void>;
   /** 查 /tmp 先到先得授权信号；仅 approved===true 视为已授权。 */
   isApproved(requestId: string): Promise<boolean>;

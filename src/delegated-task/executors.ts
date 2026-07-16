@@ -16,6 +16,11 @@ export interface DelegatedCommentPort {
       approvalMode: 'review' | 'auto_approve';
       joinFirst?: boolean;
       joinGroupUrl?: string;
+      /**
+       * change unify-card-routing-origin-then-team：命令来源会话，透传成评论审批卡 + 终态结果卡的目标。
+       * 与 DelegatedPublishPort.manualApprovalChatId 对称。缺省 → 补集回落账号团队群 → 默认群。
+       */
+      originChatId?: string;
       onResult: (result: CommentTerminalObservation) => Promise<void> | void;
     },
   ): Promise<{ ok: boolean; message: string; code?: string }>;
@@ -25,6 +30,8 @@ export interface DelegatedCommentPort {
     options: {
       priority: 'automatic';
       approvalMode: 'review' | 'auto_approve';
+      /** change unify-card-routing-origin-then-team：同 triggerManual，命令来源会话透传成卡片目标。 */
+      originChatId?: string;
       onResult: (result: TargetedCommentResult) => Promise<void> | void;
     },
   ): Promise<{ ok: boolean; message: string; reason?: string }>;
@@ -292,6 +299,8 @@ export function createDelegatedExecutorRouter(deps: DelegatedExecutorDeps): {
           manualOverride: legacySingle,
           force: legacySingle && task.targetConstraints.force === true,
           approvalMode: commentApprovalMode(task),
+          // 命令来源会话 → 审批卡与终态卡都回来源会话（私聊 / 群）；无来源会话 → 回落账号团队群 → 默认群。
+          ...(task.originChatId ? { originChatId: task.originChatId } : {}),
           ...(task.action === 'facebook_group_comment' ? {
             joinFirst: true,
             ...(constraintString(task, 'groupUrl') ? { joinGroupUrl: constraintString(task, 'groupUrl')! } : {}),
@@ -304,7 +313,10 @@ export function createDelegatedExecutorRouter(deps: DelegatedExecutorDeps): {
         const title = constraintString(task, 'title');
         if (!noteId || !title) return { kind: 'failed', reason: 'curated_target_snapshot_missing', retryable: false };
         return awaitComment((onResult) => deps.comments.triggerTargeted(task.accountId, { noteId, title }, {
-          priority: 'automatic', approvalMode: commentApprovalMode(task), onResult,
+          priority: 'automatic',
+          approvalMode: commentApprovalMode(task),
+          ...(task.originChatId ? { originChatId: task.originChatId } : {}),
+          onResult,
         }));
       }
       if (
