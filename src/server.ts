@@ -194,6 +194,7 @@ import {
   type DelegatedTask,
 } from './delegated-task/index.js';
 import { DelegatedTaskNotificationGate, delegatedTaskFailureReceipt } from './delegated-task/notification.js';
+import { platformRegistryEntry } from './platform/index.js';
 import {
   buildDelegatedTaskConfirmationCard,
   buildDelegatedTaskProgressCard,
@@ -3573,6 +3574,9 @@ async function main(): Promise<void> {
             message: receipt.message,
             accountId: task.accountId,
             accountName: accountDisplayName(task.accountId),
+            // change delegated-terminal-failure-reason：平台名 additive 补齐（cards.ts 的 platformLine 是
+            // 现成条件片段）——多账号多平台并行时，光有昵称不够定位是哪条线出的事。
+            platformName: platformRegistryEntry(task.platform).displayName,
           }));
           delegatedTaskNotificationGate.markSent(task);
         } catch (err) {

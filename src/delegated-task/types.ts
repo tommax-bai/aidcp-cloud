@@ -110,7 +110,20 @@ export type DelegatedVerificationKind =
   | 'candidate_persisted'
   | 'candidate_version_updated'
   | 'submitted_unknown'
-  | 'not_dispatched';
+  /**
+   * 执行器**跑过**、但没派发平台写入（如评论链搜了词、开了笔记，最终判定无强候选而不评）。
+   * 浏览器动过——只是没落下写入。
+   */
+  | 'not_dispatched'
+  /**
+   * 执行器**根本没跑**：动作真正发生前就被让开（风控 / 并发占用等 → deferred）。
+   *
+   * change delegated-terminal-failure-reason：它与 `not_dispatched` 的分野是**有没有碰过平台**，
+   * 而这正是终态回执能否说「均未真正开始」的唯一凭据。二者从前都记 `not_dispatched`，于是「让开」
+   * 与「跑了但没写」不可分——据此说「未真正开始」就是在断言拿不出证据的事（红线：绝不编造）。
+   * 与 `not_dispatched` 一样不计成功。
+   */
+  | 'not_started';
 
 export type DelegatedAttemptStatus =
   | 'prepared'
@@ -247,6 +260,7 @@ export function verificationCountsAsSuccess(action: DelegatedAction, kind: Deleg
       return action === 'approve_candidate' || action === 'reject_candidate' || action === 'modify_candidate';
     case 'submitted_unknown':
     case 'not_dispatched':
+    case 'not_started':
       return false;
   }
 }
