@@ -5,6 +5,7 @@ import type { ClientUserStore } from '../../src/client-auth/client-user-store.js
 import { InteractionCustomerApi } from '../../src/interactions/interaction-customer-api.js';
 import type { InteractionStore } from '../../src/interactions/interaction-store.js';
 import type { InteractionSendOrchestrator } from '../../src/interactions/send-orchestrator.js';
+import type { ReplyConfigStore } from '../../src/interactions/reply-config-store.js';
 import type { ReplyWorkflow } from '../../src/interactions/reply-workflow.js';
 import type { ReplyJobView } from '../../src/interactions/types.js';
 
@@ -23,6 +24,13 @@ test('customer API transactionally binds enabled user + owned env + account on e
   let browserClaimCalls = 0;
   let completedBrowserResponse: unknown = null;
   let authStatus = 'active';
+  let controlsVersion = 1;
+  let controlsState = {
+    commentsReadEnabled: true, commentsReplyEnabled: true, dmReadEnabled: true,
+    dmSendTextEnabled: true, dmSendImageEnabled: false as const, writePaused: false,
+  };
+  let readControlUpdates = 0;
+  let runtimeDeliveries = 0;
   const users = {
     withAuthorizedInteractionScope: async <T>(
       userId: string,
@@ -50,12 +58,28 @@ test('customer API transactionally binds enabled user + owned env + account on e
       identity: null, runtimeControlsVersion: 0, checkedAt: 1, reasonCode: null,
     }),
     getRuntimeControls: async () => ({
-      accountId: 'acct-a', platform: 'wechat_channels', envKey: 'env-a', version: 1,
-      commentsReadEnabled: true, commentsReplyEnabled: true, dmReadEnabled: true,
-      dmSendTextEnabled: true, dmSendImageEnabled: false, writePaused: false,
+      accountId: 'acct-a', platform: 'wechat_channels', envKey: 'env-a', version: controlsVersion, ...controlsState,
       consecutiveFailures: 0, circuitOpenedAt: null, lastConfirmedAt: null,
       updatedAt: 1, updatedBy: 'admin',
     }),
+    updateRuntimeControls: async (input: Record<string, unknown>) => {
+      readControlUpdates += 1;
+      assert.equal(input.expectedVersion, controlsVersion);
+      assert.equal(input.commentsReplyEnabled, true, 'customer update must preserve comment write');
+      assert.equal(input.dmSendTextEnabled, true, 'customer update must preserve dm write');
+      assert.equal(input.writePaused, false, 'customer update must preserve write pause');
+      controlsVersion += 1;
+      controlsState = {
+        ...controlsState,
+        commentsReadEnabled: input.commentsReadEnabled as boolean,
+        dmReadEnabled: input.dmReadEnabled as boolean,
+      };
+      return {
+        accountId: 'acct-a', platform: 'wechat_channels' as const, envKey: 'env-a', version: controlsVersion,
+        ...controlsState, consecutiveFailures: 0, circuitOpenedAt: null, lastConfirmedAt: null,
+        updatedAt: 2, updatedBy: 'client:user-a',
+      };
+    },
     claimApiRequest: async (input: { action: string; idempotencyKey: string; accountId: string; envKey: string; resourceId?: string }) => {
       browserClaimCalls += 1;
       assert.deepEqual(input, {
@@ -73,8 +97,25 @@ test('customer API transactionally binds enabled user + owned env + account on e
       return 'browser-control-request-1';
     },
   } as unknown as InteractionSendOrchestrator;
-  const api = new InteractionCustomerApi({ users, store, workflow: {} as ReplyWorkflow,
-    sender, cursorSecret: 'test-cursor-secret', clock: () => 1784044800000 });
+  let replyConfigHead: {
+    accountId: string; platform: 'wechat_channels'; currentVersion: number;
+    draftVersion: number | null; publishedVersion: number | null; updatedAt: number; updatedBy: string;
+  } | null | 'error' = {
+    accountId: 'acct-a', platform: 'wechat_channels', currentVersion: 4,
+    draftVersion: null, publishedVersion: 4, updatedAt: 1, updatedBy: 'admin',
+  };
+  const configs = {
+    getHead: async () => {
+      if (replyConfigHead === 'error') throw new Error('reply config unavailable');
+      return replyConfigHead;
+    },
+  } as unknown as ReplyConfigStore;
+  const api = new InteractionCustomerApi({ users, store, configs, workflow: {} as ReplyWorkflow,
+    sender, onRuntimeControlsUpdated: async (controls) => {
+      runtimeDeliveries += 1;
+      assert.equal(controls.version, controlsVersion);
+      return { delivered: 1 };
+    }, cursorSecret: 'test-cursor-secret', clock: () => 1784044800000 });
   const server = http.createServer((req, res) => {
     const actor = typeof req.headers['x-test-user'] === 'string' ? req.headers['x-test-user'] : 'user-b';
     void api.handle(req, res, actor).then((handled) => {
@@ -133,17 +174,85 @@ test('customer API transactionally binds enabled user + owned env + account on e
 
     const list = await fetch(`${base}/environments/env-a/interactions`, { headers: { 'x-test-user': 'user-a' } });
     assert.equal(list.status, 200);
-    const listBody = await list.json() as { data: { envKey: string; accountId: string; auth: {
+    const listBody = await list.json() as { data: { envKey: string; accountId: string; replyConfig: {
+      status: string; currentVersion: number | null; draftVersion: number | null; publishedVersion: number | null;
+    }; auth: {
       runtimeControls: { storedVersion: number; edgeAppliedVersion: number | null; applicationStatus: string };
     } }; meta: { asOf: number } };
     assert.deepEqual([listBody.data.envKey, listBody.data.accountId, listBody.meta.asOf],
       ['env-a', 'acct-a', 1784044800000]);
     assert.equal(listCalls, 1);
+    assert.deepEqual(listBody.data.replyConfig,
+      { status: 'published', currentVersion: 4, draftVersion: null, publishedVersion: 4 });
     assert.deepEqual(listBody.data.auth.runtimeControls,
       { storedVersion: 1, edgeAppliedVersion: 0, applicationStatus: 'pending', stored: {
         commentsReadEnabled: true, commentsReplyEnabled: true, dmReadEnabled: true,
         dmSendTextEnabled: true, dmSendImageEnabled: false, writePaused: false,
       } });
+
+    replyConfigHead = null;
+    const missingConfigList = await fetch(`${base}/environments/env-a/interactions`, {
+      headers: { 'x-test-user': 'user-a' },
+    });
+    const missingConfigBody = await missingConfigList.json() as { data: { replyConfig: Record<string, unknown> } };
+    assert.deepEqual(missingConfigBody.data.replyConfig,
+      { status: 'missing', currentVersion: null, draftVersion: null, publishedVersion: null });
+
+    replyConfigHead = {
+      accountId: 'acct-a', platform: 'wechat_channels', currentVersion: 5,
+      draftVersion: 5, publishedVersion: null, updatedAt: 2, updatedBy: 'admin',
+    };
+    const draftConfigList = await fetch(`${base}/environments/env-a/interactions`, {
+      headers: { 'x-test-user': 'user-a' },
+    });
+    const draftConfigBody = await draftConfigList.json() as { data: { replyConfig: Record<string, unknown> } };
+    assert.deepEqual(draftConfigBody.data.replyConfig,
+      { status: 'draft_only', currentVersion: 5, draftVersion: 5, publishedVersion: null });
+
+    replyConfigHead = 'error';
+    const unknownConfigList = await fetch(`${base}/environments/env-a/interactions`, {
+      headers: { 'x-test-user': 'user-a' },
+    });
+    const unknownConfigBody = await unknownConfigList.json() as { data: { replyConfig: Record<string, unknown> } };
+    assert.deepEqual(unknownConfigBody.data.replyConfig,
+      { status: 'unknown', currentVersion: null, draftVersion: null, publishedVersion: null });
+    replyConfigHead = {
+      accountId: 'acct-a', platform: 'wechat_channels', currentVersion: 4,
+      draftVersion: null, publishedVersion: 4, updatedAt: 1, updatedBy: 'admin',
+    };
+
+    const invalidReadControls = await fetch(`${base}/environments/env-a/interactions/read-controls`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', 'x-test-user': 'user-a' },
+      body: JSON.stringify({ expectedVersion: 1, commentsReadEnabled: true, dmReadEnabled: true, writePaused: false }),
+    });
+    assert.equal(invalidReadControls.status, 422);
+    assert.equal(readControlUpdates, 0);
+
+    const deniedReadControls = await fetch(`${base}/environments/env-a/interactions/read-controls`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', 'x-test-user': 'user-b' },
+      body: JSON.stringify({ expectedVersion: 1, commentsReadEnabled: false, dmReadEnabled: false }),
+    });
+    assert.equal(deniedReadControls.status, 404);
+    assert.equal(readControlUpdates, 0);
+
+    const readControls = await fetch(`${base}/environments/env-a/interactions/read-controls`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', 'x-test-user': 'user-a' },
+      body: JSON.stringify({ expectedVersion: 1, commentsReadEnabled: false, dmReadEnabled: true }),
+    });
+    assert.equal(readControls.status, 200);
+    const readControlsBody = await readControls.json() as { data: {
+      auth: { runtimeControls: { storedVersion: number; applicationStatus: string; stored: Record<string, boolean> } };
+      edgeDelivery: { status: string; delivered: number }; replyConfig: { status: string };
+    } };
+    assert.equal(readControlsBody.data.auth.runtimeControls.storedVersion, 2);
+    assert.equal(readControlsBody.data.auth.runtimeControls.applicationStatus, 'pending');
+    assert.equal(readControlsBody.data.auth.runtimeControls.stored.commentsReadEnabled, false);
+    assert.equal(readControlsBody.data.auth.runtimeControls.stored.commentsReplyEnabled, true);
+    assert.equal(readControlsBody.data.auth.runtimeControls.stored.dmSendTextEnabled, true);
+    assert.deepEqual(readControlsBody.data.edgeDelivery, { status: 'enqueued', delivered: 1 });
+    assert.equal(readControlsBody.data.replyConfig.status, 'published');
+    assert.equal(readControlUpdates, 1);
+    assert.equal(runtimeDeliveries, 1);
 
     const unknownQuery = await fetch(`${base}/environments/env-a/interactions?unexpected=1`,
       { headers: { 'x-test-user': 'user-a' } });

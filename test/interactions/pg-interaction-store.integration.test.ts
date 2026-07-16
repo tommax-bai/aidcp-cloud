@@ -210,11 +210,29 @@ test('PostgreSQL: immutable template/config versions, publish CAS and fail-close
     const configs = new ReplyConfigStore({ pool });
     try {
       await pool.query(`INSERT INTO accounts(account_id,label,platform) VALUES
-        ('acct_wc_demo','demo','wechat_channels'),('acct_wc_other','other','wechat_channels')
+        ('acct_wc_demo','demo','wechat_channels'),('acct_wc_other','other','wechat_channels'),
+        ('acct_wc_init','init','wechat_channels'),('acct_xhs_init','xhs','xiaohongshu')
         ON CONFLICT (account_id) DO UPDATE SET platform=EXCLUDED.platform`);
       await pool.query(`TRUNCATE reply_rules,reply_templates,account_reply_profiles,
         interaction_reply_config_versions,interaction_reply_configs RESTART IDENTITY CASCADE`);
       await configs.init();
+      const initialized = await configs.initialize('acct_wc_init', 0, 'admin');
+      assert.equal(initialized.configVersion, 1);
+      assert.equal(initialized.state, 'draft');
+      assert.equal(initialized.policy.mode, 'draft_only');
+      assert.equal(initialized.policy.generateDrafts, false);
+      assert.equal(initialized.policy.sendReplies, false);
+      assert.deepEqual(initialized.templates, []);
+      assert.deepEqual(initialized.rules, []);
+      assert.deepEqual(initialized.profiles.map((profile) => profile.channel).sort(), ['comment', 'dm']);
+      const initializedHead = await configs.getHead('acct_wc_init');
+      assert.deepEqual({ currentVersion: initializedHead?.currentVersion, draftVersion: initializedHead?.draftVersion,
+        publishedVersion: initializedHead?.publishedVersion }, { currentVersion: 1, draftVersion: 1, publishedVersion: null });
+      await assert.rejects(configs.initialize('acct_wc_init', 0, 'late-admin'),
+        (error: unknown) => (error as { code?: string }).code === 'INTERACTION_VERSION_CONFLICT');
+      await assert.rejects(configs.initialize('acct_xhs_init', 0, 'admin'),
+        (error: unknown) => (error as { code?: string }).code === 'INTERACTION_NOT_FOUND');
+      assert.ok((await configs.listAudit('acct_wc_init', 10)).some((item) => item.action === 'config_initialized'));
       const policy = {
         mode: 'review_before_send' as const, generateDrafts: true, sendReplies: true,
         channels: {

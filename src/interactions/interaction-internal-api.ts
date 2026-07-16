@@ -41,7 +41,7 @@ export function parseInteractionPanelGrants(raw: string | undefined): Map<string
 
 const KNOWN_SUFFIXES = new Set([
   'interaction-runtime-controls', 'interaction-reply-policy', 'reply-templates', 'reply-rules',
-  'reply-profile', 'reply-preview', 'reply-config/publish', 'reply-config/audit',
+  'reply-profile', 'reply-preview', 'reply-config/initialize', 'reply-config/publish', 'reply-config/audit',
 ]);
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
@@ -235,6 +235,17 @@ export class InteractionInternalApi {
         });
         return;
       }
+    }
+    if (suffix === 'reply-config/initialize' && method === 'POST') {
+      this.require(actor, 'interaction.config.edit');
+      const body = await readBody(req);
+      if (!onlyKeys(body, ['expectedVersion']) || expectedVersion(body) !== 0) {
+        throw new InteractionError('INTERACTION_VALIDATION_FAILED', '初始化请求必须使用 expectedVersion=0。', 422);
+      }
+      const snapshot = await this.deps.configs.initialize(accountId, 0, actor);
+      const head = await this.deps.configs.getHead(accountId);
+      this.ok(res, requestId, { head, initializedVersion: snapshot.configVersion });
+      return;
     }
     if (suffix === 'interaction-reply-policy') {
       if (method === 'GET') {

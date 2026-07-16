@@ -66,6 +66,63 @@ test('runtime-control CAS reports online delivery separately from persisted succ
   }
 });
 
+test('missing reply config is initialized only by an explicit safe-draft action', async () => {
+  let initializeCalls = 0;
+  const snapshot = {
+    accountId: 'acct_wc_demo', platform: 'wechat_channels', configVersion: 1, state: 'draft',
+    policy: {
+      mode: 'draft_only', generateDrafts: false, sendReplies: false,
+      channels: {
+        comment: { enabled: false, aiPolishEnabled: false, allowAutoSend: false },
+        dm: { enabled: false, aiPolishEnabled: false, allowAutoSend: false },
+      },
+      rateLimits: { accountPerMinute: 0, accountPerHour: 0, accountPerDay: 0,
+        threadCooldownSeconds: 60, newLoginCooldownSeconds: 600, consecutiveFailureLimit: 3 },
+    },
+    templates: [], rules: [], profiles: [], createdAt: 1, createdBy: 'admin', publishedAt: null, publishedBy: null,
+  } satisfies ReplyConfigSnapshot;
+  const api = new InteractionInternalApi({
+    store: {} as InteractionStore,
+    configs: {
+      initialize: async (_accountId: string, expected: number) => {
+        initializeCalls += 1;
+        assert.equal(expected, 0);
+        return snapshot;
+      },
+      getHead: async () => ({ accountId: 'acct_wc_demo', platform: 'wechat_channels', currentVersion: 1,
+        draftVersion: 1, publishedVersion: null, updatedAt: 1, updatedBy: 'admin' }),
+    } as unknown as ReplyConfigStore,
+    workflow: {} as ReplyWorkflow,
+    grantsFor: () => new Set(['interaction.config.edit']),
+    cursorSecret: 'internal-test-cursor-secret',
+    clock: () => 1784044800000,
+  });
+  const server = http.createServer((req, res) => { void api.handle(req, res, 'admin'); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const base = `http://127.0.0.1:${address.port}/api/accounts/acct_wc_demo/reply-config/initialize`;
+    const invalid = await fetch(base, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedVersion: 1 }) });
+    assert.equal(invalid.status, 422);
+    assert.equal(initializeCalls, 0);
+
+    const response = await fetch(base, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedVersion: 0 }) });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { data: { head: { currentVersion: number; draftVersion: number; publishedVersion: null }; initializedVersion: number } };
+    assert.deepEqual(body.data, {
+      head: { accountId: 'acct_wc_demo', platform: 'wechat_channels', currentVersion: 1, draftVersion: 1,
+        publishedVersion: null, updatedAt: 1, updatedBy: 'admin' },
+      initializedVersion: 1,
+    });
+    assert.equal(initializeCalls, 1);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test('Console preview is read-only: no reply job and no WS command are created', async () => {
   const snapshot = {
     accountId: 'acct_wc_demo', platform: 'wechat_channels', configVersion: 7, state: 'draft',

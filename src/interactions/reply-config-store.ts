@@ -173,7 +173,7 @@ export class ReplyConfigStore {
     accountId: string,
     expectedVersion: number,
     actor: string,
-    action: 'draft_saved' | 'template_archived',
+    action: 'draft_saved' | 'template_archived' | 'config_initialized',
     entityType: string,
     entityId: string | null,
     mutation: DraftMutation,
@@ -275,6 +275,11 @@ export class ReplyConfigStore {
     } finally {
       client.release();
     }
+  }
+
+  async initialize(accountId: string, expectedVersion: number, actor: string): Promise<ReplyConfigSnapshot> {
+    return this.createDraft(accountId, expectedVersion, actor, 'config_initialized', 'config', accountId,
+      async () => undefined);
   }
 
   async savePolicy(accountId: string, expectedVersion: number, actor: string, policy: ReplyPolicy): Promise<ReplyConfigSnapshot> {
@@ -448,7 +453,7 @@ export class ReplyConfigStore {
     }>(
       `SELECT event_id,actor,action,config_version,entity_type,entity_id,summary,labels,created_at
          FROM interaction_audit_events WHERE platform=$1 AND account_id=$2
-          AND action IN ('draft_saved','template_archived','config_published','previewed')
+          AND action IN ('draft_saved','template_archived','config_initialized','config_published','previewed')
           AND entity_type IN ('policy','template','rule','profile','config','preview')
           AND config_version IS NOT NULL ${cursor}
         ORDER BY created_at DESC,event_id DESC LIMIT $3`, params,
@@ -465,7 +470,7 @@ export class ReplyConfigStore {
     queryable: Pick<pg.Pool, 'query'> | Pick<pg.PoolClient, 'query'>,
     accountId: string,
     actor: string,
-    action: 'draft_saved' | 'template_archived' | 'config_published' | 'previewed',
+    action: 'draft_saved' | 'template_archived' | 'config_initialized' | 'config_published' | 'previewed',
     configVersion: number,
     entityType: string,
     entityId: string | null,

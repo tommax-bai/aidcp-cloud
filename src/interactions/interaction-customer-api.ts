@@ -3,11 +3,13 @@ import type http from 'node:http';
 import type { ClientUserStore } from '../client-auth/client-user-store.js';
 import type { InteractionStore } from './interaction-store.js';
 import type { InteractionSendOrchestrator } from './send-orchestrator.js';
+import type { ReplyConfigStore } from './reply-config-store.js';
 import type { ReplyWorkflow } from './reply-workflow.js';
 import {
   INTERACTION_PLATFORM,
   InteractionError,
   type InteractionChannel,
+  type RuntimeControls,
   type ReplyJobState,
   type ReplyJobView,
   type ScopedJobContext,
@@ -88,6 +90,30 @@ function authSummary(
   };
 }
 
+type ReplyConfigProjection = {
+  status: 'missing' | 'draft_only' | 'published' | 'unknown';
+  currentVersion: number | null;
+  draftVersion: number | null;
+  publishedVersion: number | null;
+};
+
+async function replyConfigSummary(configs: ReplyConfigStore, accountId: string): Promise<ReplyConfigProjection> {
+  try {
+    const head = await configs.getHead(accountId);
+    if (!head) {
+      return { status: 'missing', currentVersion: null, draftVersion: null, publishedVersion: null };
+    }
+    return {
+      status: head.publishedVersion === null ? 'draft_only' : 'published',
+      currentVersion: head.currentVersion,
+      draftVersion: head.draftVersion,
+      publishedVersion: head.publishedVersion,
+    };
+  } catch {
+    return { status: 'unknown', currentVersion: null, draftVersion: null, publishedVersion: null };
+  }
+}
+
 interface CursorPayload {
   kind: 'list' | 'detail';
   envKey: string;
@@ -132,8 +158,10 @@ export class InteractionCustomerApi {
   constructor(private readonly deps: {
     users: ClientUserStore;
     store: InteractionStore;
+    configs: ReplyConfigStore;
     workflow: ReplyWorkflow;
     sender: InteractionSendOrchestrator;
+    onRuntimeControlsUpdated?: (controls: RuntimeControls) => Promise<{ delivered: number }>;
     cursorSecret: string;
     clock?: () => number;
   }) {
@@ -207,17 +235,18 @@ export class InteractionCustomerApi {
       const token = url.searchParams.get('cursor');
       const cursor = token ? this.cursors.decode(token, { kind: 'list', envKey }) : null;
       const asOf = cursor?.asOf ?? this.clock();
-      const [result, auth, controls] = await Promise.all([
+      const [result, auth, controls, replyConfig] = await Promise.all([
         this.deps.store.listInteractions({ accountId, envKey, asOf, limit, channel, state,
           before: cursor ? { lastMessageAt: cursor.time, id: cursor.id } : undefined }),
         this.deps.store.getAuth(accountId, envKey),
         this.deps.store.getRuntimeControls(accountId),
+        replyConfigSummary(this.deps.configs, accountId),
       ]);
       if (!auth) throw new InteractionError('INTERACTION_UPSTREAM_UNAVAILABLE', '平台登录状态尚不可用。', 503);
       const nextCursor = result.next ? this.cursors.encode({ kind: 'list', envKey, asOf,
         time: result.next.lastMessageAt, id: result.next.id }) : null;
       this.ok(res, requestId, asOf, { envKey, accountId, platform: INTERACTION_PLATFORM,
-        auth: authSummary(auth, controls), items: result.items, nextCursor });
+        auth: authSummary(auth, controls), replyConfig, items: result.items, nextCursor });
       return true;
     }
     if (parts[2] === 'interactions' && parts.length === 4 && method === 'GET') {
@@ -226,19 +255,64 @@ export class InteractionCustomerApi {
       const token = url.searchParams.get('cursor');
       const cursor = token ? this.cursors.decode(token, { kind: 'detail', envKey, resourceId: threadId }) : null;
       const asOf = cursor?.asOf ?? this.clock();
-      const [detail, auth, controls] = await Promise.all([
+      const [detail, auth, controls, replyConfig] = await Promise.all([
         this.deps.store.getDetail(accountId, envKey, threadId, 100,
           cursor ? { platformCreatedAt: cursor.time, id: cursor.id } : undefined),
         this.deps.store.getAuth(accountId, envKey),
         this.deps.store.getRuntimeControls(accountId),
+        replyConfigSummary(this.deps.configs, accountId),
       ]);
       if (!detail) throw new InteractionError('INTERACTION_NOT_FOUND', '资源不存在。', 404);
       if (!auth) throw new InteractionError('INTERACTION_UPSTREAM_UNAVAILABLE', '平台登录状态尚不可用。', 503);
       const nextCursor = detail.next ? this.cursors.encode({ kind: 'detail', envKey, resourceId: threadId, asOf,
         time: detail.next.platformCreatedAt, id: detail.next.id }) : null;
-      this.ok(res, requestId, asOf, { envKey, accountId, platform: INTERACTION_PLATFORM, auth: authSummary(auth, controls),
+      this.ok(res, requestId, asOf, { envKey, accountId, platform: INTERACTION_PLATFORM, auth: authSummary(auth, controls), replyConfig,
         thread: detail.thread, messages: detail.messages, replyJob: detail.replyJob,
         sendAttempt: detail.sendAttempt, nextCursor });
+      return true;
+    }
+    if (parts[2] === 'interactions' && parts.length === 4 && parts[3] === 'read-controls' && method === 'PUT') {
+      onlyQuery(url, []);
+      const body = await readBody(req);
+      if (!onlyKeys(body, ['expectedVersion','commentsReadEnabled','dmReadEnabled']) ||
+          !Number.isInteger(body.expectedVersion) || (body.expectedVersion as number) < 0 ||
+          typeof body.commentsReadEnabled !== 'boolean' || typeof body.dmReadEnabled !== 'boolean') {
+        throw new InteractionError('INTERACTION_VALIDATION_FAILED', '互动读取开关请求不合法。', 422);
+      }
+      const current = await this.deps.store.getRuntimeControls(accountId);
+      if (current.envKey !== envKey) {
+        throw new InteractionError('INTERACTION_SCOPE_MISMATCH', '环境与账号运行控制不匹配。', 409);
+      }
+      const controls = await this.deps.store.updateRuntimeControls({
+        accountId,
+        expectedVersion: body.expectedVersion as number,
+        actor: `client:${userId}`,
+        commentsReadEnabled: body.commentsReadEnabled,
+        commentsReplyEnabled: current.commentsReplyEnabled,
+        dmReadEnabled: body.dmReadEnabled,
+        dmSendTextEnabled: current.dmSendTextEnabled,
+        dmSendImageEnabled: false,
+        writePaused: current.writePaused,
+      });
+      let delivered = 0;
+      try {
+        delivered = (await this.deps.onRuntimeControlsUpdated?.(controls))?.delivered ?? 0;
+      } catch {
+        // Stored CAS is authoritative; reconnect converges through the existing runtime-controls snapshot.
+      }
+      const [auth, replyConfig] = await Promise.all([
+        this.deps.store.getAuth(accountId, envKey),
+        replyConfigSummary(this.deps.configs, accountId),
+      ]);
+      if (!auth) throw new InteractionError('INTERACTION_UPSTREAM_UNAVAILABLE', '平台登录状态尚不可用。', 503);
+      this.ok(res, requestId, this.clock(), {
+        envKey,
+        accountId,
+        platform: INTERACTION_PLATFORM,
+        auth: authSummary(auth, controls),
+        replyConfig,
+        edgeDelivery: { status: delivered === 1 ? 'enqueued' : 'deferred', delivered },
+      });
       return true;
     }
     if (parts[2] === 'replies' && parts.length === 5 && method === 'POST') {

@@ -1954,6 +1954,21 @@ async function main(): Promise<void> {
     ? new InteractionOffboardingService({ store: interactionStore, pusher: server, metrics: interactionMetrics })
     : undefined;
   const interactionPanelGrants = parseInteractionPanelGrants(readEnvString('AIDCP_INTERACTION_PANEL_GRANTS'));
+  const deliverInteractionRuntimeControls = async (controls: import('./interactions/types.js').RuntimeControls): Promise<{ delivered: number }> => {
+    if (!interactionRuntimeControls) return { delivered: 0 };
+    const edgeId = server.resolveEdgeIdForAccount(
+      controls.accountId,
+      INTERACTION_RUNTIME_CONTROLS_CAPABILITY,
+    );
+    if (!edgeId) return { delivered: 0 };
+    const payload = await interactionRuntimeControls.getSnapshot(controls.accountId);
+    return {
+      delivered: server.pushToEdges(
+        makeEnvelope('interaction.runtime.controls', `runtime-controls-${controls.accountId}-${controls.version}`, Date.now(), payload),
+        edgeId,
+      ),
+    };
+  };
   const interactionInternalApi = interactionStore && replyConfigStore && replyWorkflow
     ? new InteractionInternalApi({
       store: interactionStore,
@@ -1961,30 +1976,18 @@ async function main(): Promise<void> {
       workflow: replyWorkflow,
       grantsFor: (actor) => interactionPanelGrants.get(actor) ?? new Set(),
       cursorSecret: readEnvString('AIDCP_PANEL_JWT_SECRET') ?? '',
-      onRuntimeControlsUpdated: async (controls) => {
-        if (!interactionRuntimeControls) return { delivered: 0 };
-        const edgeId = server.resolveEdgeIdForAccount(
-          controls.accountId,
-          INTERACTION_RUNTIME_CONTROLS_CAPABILITY,
-        );
-        if (!edgeId) return { delivered: 0 };
-        const payload = await interactionRuntimeControls.getSnapshot(controls.accountId);
-        return {
-          delivered: server.pushToEdges(
-            makeEnvelope('interaction.runtime.controls', `runtime-controls-${controls.accountId}-${controls.version}`, Date.now(), payload),
-            edgeId,
-          ),
-        };
-      },
+      onRuntimeControlsUpdated: deliverInteractionRuntimeControls,
     })
     : undefined;
   const clientCursorSecret = readEnvString('AIDCP_CLIENT_JWT_SECRET');
-  const interactionCustomerApi = interactionStore && replyWorkflow && interactionSender && clientCursorSecret
+  const interactionCustomerApi = interactionStore && replyConfigStore && replyWorkflow && interactionSender && clientCursorSecret
     ? new InteractionCustomerApi({
       users: clientUserStore,
       store: interactionStore,
+      configs: replyConfigStore,
       workflow: replyWorkflow,
       sender: interactionSender,
+      onRuntimeControlsUpdated: deliverInteractionRuntimeControls,
       cursorSecret: clientCursorSecret,
     })
     : undefined;
