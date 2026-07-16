@@ -6,6 +6,7 @@ const migrationUrl = new URL('../../migrations/0039_interaction_inbox.sql', impo
 const authorityMigrationUrl = new URL('../../migrations/0040_customer_env_authority.sql', import.meta.url);
 const recoveryMigrationUrl = new URL('../../migrations/0041_interaction_recovery_offboarding.sql', import.meta.url);
 const runtimeControlMigrationUrl = new URL('../../migrations/0042_interaction_runtime_control_application.sql', import.meta.url);
+const provisioningMigrationUrl = new URL('../../migrations/0043_client_env_provisioning_intents.sql', import.meta.url);
 
 test('0039 creates the dedicated inbound domain and never writes outbound interaction_feed', async () => {
   const sql = await readFile(migrationUrl, 'utf8');
@@ -78,4 +79,16 @@ test('0042 persists the exact runtime-control version Edge reports as applied', 
   assert.match(sql, /ALTER TABLE interaction_auth_state/);
   assert.match(sql, /ADD COLUMN IF NOT EXISTS runtime_controls_version INTEGER/);
   assert.match(sql, /runtime_controls_version IS NULL OR runtime_controls_version >= 0/);
+});
+
+test('0043 adds one-time provisioning intents without weakening authoritative unique ownership', async () => {
+  const sql = await readFile(provisioningMigrationUrl, 'utf8');
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS client_env_provisioning_intents/);
+  assert.match(sql, /proof_hash\s+CHAR\(64\)\s+NOT NULL/);
+  assert.match(sql, /state IN \('pending','completed','expired'\)/);
+  assert.match(sql, /completed_env_key/);
+  assert.match(sql, /client_env_scope_authoritative_source is required/);
+  assert.match(sql, /uq_client_env_scope_active_env is required/);
+  assert.doesNotMatch(sql, /ALTER TABLE client_env_scope[\s\S]*DROP CONSTRAINT|DROP INDEX[\s\S]*uq_client_env_scope_active_env/,
+    'provisioning must not weaken admin-only source or global unique owner');
 });

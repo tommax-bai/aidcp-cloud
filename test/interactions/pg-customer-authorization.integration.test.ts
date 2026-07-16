@@ -13,7 +13,7 @@ test('PostgreSQL: authoritative env ownership is unique and cross-customer inter
     try {
       await users.init();
       await pool.query(`TRUNCATE interaction_offboard_audit,interaction_offboards,
-        client_env_scope_audit,client_env_scope,client_users,client_environments RESTART IDENTITY CASCADE`);
+        client_env_provisioning_intents,client_env_scope_audit,client_env_scope,client_users,client_environments RESTART IDENTITY CASCADE`);
       await pool.query(`DELETE FROM interaction_auth_state WHERE account_id IN ('acct-auth-a','acct-auth-b')`);
       await pool.query(`INSERT INTO accounts(account_id,label,platform) VALUES
         ('acct-auth-a','A','wechat_channels'),('acct-auth-b','B','wechat_channels')
@@ -78,6 +78,50 @@ test('PostgreSQL: authoritative env ownership is unique and cross-customer inter
       assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM client_env_scope
         WHERE env_key='env-auth-race' AND source='admin'`)).rows[0].n, 1);
 
+      const provision = await users.createProvisioningIntent('user-a');
+      assert.equal(provision.ok, true);
+      if (!provision.ok) return;
+      const completed = await users.completeProvisioningIntent('user-a', {
+        intentId: provision.intentId, proof: provision.proof, envKey: 'env-auth-provisioned',
+        label: '客户端新建', platform: 'facebook',
+      });
+      assert.equal(completed.ok, true);
+      if (!completed.ok) return;
+      assert.equal(completed.idempotent, false);
+      const retried = await users.completeProvisioningIntent('user-a', {
+        intentId: provision.intentId, proof: provision.proof, envKey: 'env-auth-provisioned',
+        label: '客户端新建', platform: 'facebook',
+      });
+      assert.equal(retried.ok && retried.idempotent, true);
+      assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM client_env_scope
+        WHERE env_key='env-auth-provisioned' AND user_id='user-a' AND source='admin'`)).rows[0].n, 1);
+      const storedProof = (await pool.query<{ proof_hash: string }>(
+        `SELECT proof_hash FROM client_env_provisioning_intents WHERE intent_id=$1`, [provision.intentId],
+      )).rows[0].proof_hash;
+      assert.notEqual(storedProof, provision.proof);
+      assert.match(storedProof, /^[a-f0-9]{64}$/);
+
+      const bobIntent = await users.createProvisioningIntent('user-b');
+      assert.equal(bobIntent.ok, true);
+      if (!bobIntent.ok) return;
+      assert.deepEqual(await users.completeProvisioningIntent('user-b', {
+        intentId: bobIntent.intentId, proof: bobIntent.proof, envKey: 'env-auth-provisioned',
+        label: '伪造认领', platform: 'facebook',
+      }), { ok: false, reason: 'environment_already_registered' });
+      assert.equal((await users.listEnvScope('user-b')).some((row) => row.envKey === 'env-auth-provisioned'), false);
+
+      const mismatchIntent = await users.createProvisioningIntent('user-a');
+      assert.equal(mismatchIntent.ok, true);
+      if (!mismatchIntent.ok) return;
+      assert.equal((await users.completeProvisioningIntent('user-a', {
+        intentId: mismatchIntent.intentId, proof: mismatchIntent.proof, envKey: 'env-auth-first',
+        label: null, platform: 'xiaohongshu',
+      })).ok, true);
+      assert.deepEqual(await users.completeProvisioningIntent('user-a', {
+        intentId: mismatchIntent.intentId, proof: mismatchIntent.proof, envKey: 'env-auth-second',
+        label: null, platform: 'xiaohongshu',
+      }), { ok: false, reason: 'intent_target_mismatch' });
+
       await pool.query(`UPDATE client_users SET status='disabled' WHERE user_id='user-a'`);
       const disabled = await users.withAuthorizedInteractionScope('user-a', 'env-auth-race', async () => 'never');
       assert.deepEqual(disabled, { ok: false, reason: 'disabled' });
@@ -95,7 +139,7 @@ test('PostgreSQL: unbind/termination revoke first, retry offline cleanup, tombst
       await users.init();
       await interactions.init();
       await pool.query(`TRUNCATE interaction_offboard_audit,interaction_offboards,
-        client_env_scope_audit,client_env_scope,client_users,client_environments RESTART IDENTITY CASCADE`);
+        client_env_provisioning_intents,client_env_scope_audit,client_env_scope,client_users,client_environments RESTART IDENTITY CASCADE`);
       await pool.query(`DELETE FROM interaction_auth_state
         WHERE account_id IN ('acct-offboard-a','acct-offboard-b','acct-term-a','acct-term-b')`);
       await pool.query(`INSERT INTO accounts(account_id,label,platform) VALUES
