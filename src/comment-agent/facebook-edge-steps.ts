@@ -19,12 +19,29 @@ export const FACEBOOK_STEP_TIMEOUT_MS = 28_000;
 const DEFAULT_MAX_CANDIDATES = 8;
 
 /**
+ * Facebook 评论**开帖步**超时（change fb-comment-open-hydration-window）。
+ *
+ * 分工是「边端先答」：边端自我掐表跑完有界窗口后如实回 `open_failed`，云端这道只做兜底上界——
+ * 云端先掐表只会把一个诚实的 `open_failed` 改判成 `timeout`（经 `mapFacebookOpenOutcome` 塌进同一个
+ * `no_strong_candidate`、运营看到的卡片一模一样），等于把诊断信息烧掉却没救回任何一条评论。
+ *
+ * 边端开帖最坏耗时（`aidcp-edge/src/facebook/comment-executor.ts` openPost）：
+ *   settle 2.5s + 详情水合窗 22 轮×600ms ≈ 12.6s + 评论框催拉 6 轮×(滚动 + 4 探测×600ms) ≈ 12s
+ *   + 约 26 次 CDP eval 往返 ≈ 3s  ≈ **30s** —— 已超固定 28s，故开帖步必须脱离 `FACEBOOK_STEP_TIMEOUT_MS`。
+ * 取 45s = 最坏 ~30s + 余量，仍远在加群步上限（90s）内、绝不无界等待；超此上限仍诚实 `timeout`。
+ *
+ * **搜索步继续用 `FACEBOOK_STEP_TIMEOUT_MS`（28s）**：它的探测跑在 `editorScrollRounds` 循环内、每轮仍是 4 轮预算，
+ * 预算未变，不跟着放宽。改边端详情窗（`postDetailProbeRounds`）须同步复算此值。
+ */
+export const FACEBOOK_OPEN_STEP_TIMEOUT_MS = 45_000;
+
+/**
  * Facebook 评论提交步的**长度感知超时**（change facebook-join-comment-resilience，P0-1）。
  * 边端提交 = 逐字拟人输入（text.length × median ~110ms）+ Enter + 等待（waitAfterSubmit 4s）+ reload +
  * 等待（waitAfterReload 5s）+ own-identity 收窄校验。长评论在慢网下整段耗时会超过固定 28s 步超时 →
  * 云端误判 `timeout` → 调度器 `reallySubmitted` 为假 → 不打去重标记 → 下一轮同帖再发一条**真评论**
- *（平台可见重复）。故提交步超时按文案字符数放大；search/open 仍用固定 28s。上限对齐加群步（90s）防
- * 边端真挂时无界等待——超上限仍诚实 `timeout`，绝不假成功。
+ *（平台可见重复）。故提交步超时按文案字符数放大；search 仍用固定 28s（open 见
+ * `FACEBOOK_OPEN_STEP_TIMEOUT_MS`）。上限对齐加群步（90s）防边端真挂时无界等待——超上限仍诚实 `timeout`，绝不假成功。
  */
 export const FACEBOOK_COMMENT_SUBMIT_BASE_MS = 18_000;
 export const FACEBOOK_COMMENT_SUBMIT_PER_CHAR_MS = 220;
@@ -137,6 +154,9 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
   submitComment(permalink: string, text: string, groupChatCode?: string): Promise<FacebookCommentStepResult>;
 } {
   const timeout = deps.stepTimeoutMs ?? FACEBOOK_STEP_TIMEOUT_MS;
+  // 开帖步专用上界（边端先答，见 FACEBOOK_OPEN_STEP_TIMEOUT_MS）。与上一行同形：显式注入优先（测试用小值快速验超时），
+  // 未注入才取 45s 默认——生产未注入（server.ts 不传 stepTimeoutMs），故实际取 45s。
+  const openTimeout = deps.stepTimeoutMs ?? FACEBOOK_OPEN_STEP_TIMEOUT_MS;
   const maxCandidates = deps.maxCandidates ?? DEFAULT_MAX_CANDIDATES;
   const log = deps.logger ?? console;
   const push = (env: unknown): number => deps.pusher.pushToEdges(env, deps.edgeId);
@@ -207,7 +227,9 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
             },
           },
         ],
-        timeout,
+        // 开帖步专用上界：边端的详情水合窗（22 轮）+ 评论框催拉最坏 ≈30s > 固定 28s。用 28s 会把边端诚实的
+        // open_failed 改判成 timeout（两者塌进同一 outcome、卡片无差别），故让边端先答。
+        openTimeout,
         () => push(makeEnvelope('note.open', randomUUID(), Date.now(), { url, ...(deps.taskId ? { taskId: deps.taskId } : {}) } as never)),
       );
       if (outcome === null) {
