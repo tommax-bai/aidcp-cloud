@@ -1626,4 +1626,29 @@ describe('join-comment 结果卡不泄露裸群 id/URL', () => {
     assert.match(r.message, /管理员批准/);
     assert.match(r.message, /PR Café/);
   });
+
+  // change facebook-comment-lifecycle-verify：平台已拒绝 = 确定未上墙、终局（诚实、非绿、非去重、留人工）。
+  it('commentOutcomeReason：comment_rejected → 「已拒绝、未上墙、需人工」人话（不与 ambiguous 同文案）', () => {
+    const msg = commentOutcomeReason({ outcome: 'comment_rejected' });
+    assert.match(msg, /拒绝/);
+    assert.match(msg, /未上墙/);
+    assert.equal(/无法确认/.test(msg), false, '被拒是确定的，绝不能说成「无法确认」（那读作可能已发出）');
+  });
+  it('joinCommentReceipt：评论被平台拒绝 → 黄卡（绝不染绿）', () => {
+    const r = joinCommentReceipt({ outcome: 'joined' }, { outcome: 'comment_rejected', container: 'PR Café' }, false);
+    assert.equal(r.level, 'warning');
+    assert.equal(r.ok, false);
+    assert.match(r.message, /拒绝/);
+    assert.match(r.message, /PR Café/);
+  });
+  it('🔴 comment_rejected 绝不进 reallySubmitted 去重白名单（被拒没上墙，去重=白烧目标帖）', () => {
+    // 与 comment-scheduler.ts 的 `submit.ok || submit.reason === 'verification_ambiguous'` 同源。
+    const reallySubmitted = (submit: { ok: boolean; reason?: string }) =>
+      submit.ok || submit.reason === 'verification_ambiguous';
+    assert.equal(reallySubmitted({ ok: false, reason: 'comment_rejected' }), false, '被拒 → 不打去重、目标帖可留人工');
+    // 既有两档语义不变（回归）。
+    assert.equal(reallySubmitted({ ok: true }), true);
+    assert.equal(reallySubmitted({ ok: false, reason: 'verification_ambiguous' }), true);
+    assert.equal(reallySubmitted({ ok: false, reason: 'pending_group_approval' }), false);
+  });
 });
