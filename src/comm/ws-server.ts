@@ -78,6 +78,11 @@ export interface EdgePusher {
    * 可选成员：EdgeCloudServer 概念实现；旧测试桩不实现亦满足接口（发布定向退回广播旧行为）。
    */
   resolveEdgeIdForAccount?(accountId: string, requiredCapability?: string): string | null;
+  /**
+   * 反向解析：某边缘连接此刻在跑哪个账号（change account-level-slow-start）。
+   * 只认 OPEN + 非 stale；**多条即诚实失败返回 null，MUST NOT 任取其一**。
+   */
+  resolveAccountIdForEdge?(edgeId: string): string | null;
   /** 当前已登记（完成 hello）的边缘连接总数 */
   edgeCount(): number;
   /** 真实在线的边缘数：已登记 AND 近期有心跳（staleness 校验，绝不把死连接当在线）。 */
@@ -296,6 +301,33 @@ export class EdgeCloudServer implements EdgePusher {
     if (matches.length === 0) return null;
     if (matches.length > 1) {
       console.warn(`[ws-server] 账号 ${accountId} 有 ${matches.length} 条在线连接，定向发布取最早登记者 edgeId=${matches[0]}（其余=${matches.slice(1).join(',')}）`);
+    }
+    return matches[0];
+  }
+
+  /**
+   * 反向解析：某边缘连接此刻在跑哪个账号（change account-level-slow-start）。
+   * 与 resolveEdgeIdForAccount 同一循环、判据反过来（只认 OPEN + 非 stale）。
+   *
+   * **多条即诚实失败（返回 null），MUST NOT 任取其一**：与定向发布刻意不同——那边取最早登记者是
+   * 「总得发给一个」的取舍；这边是账号级风控配置的写入目标，猜错就是把慢启动加到别人的号上。
+   * 客户只能改「自己环境上此刻正在跑的那个账号」，解析不出即如实 409。
+   */
+  resolveAccountIdForEdge(edgeId: string): string | null {
+    const now = this.clock();
+    const matches: string[] = [];
+    for (const conn of this.edges.values()) {
+      if (conn.session.edgeId !== edgeId) continue;
+      if (conn.ws.readyState !== WebSocket.OPEN || now - conn.lastSeen >= this.staleAfterMs) continue;
+      const accountId = conn.session.accountId;
+      if (!accountId) continue;
+      if (!matches.includes(accountId)) matches.push(accountId);
+    }
+    if (matches.length !== 1) {
+      if (matches.length > 1) {
+        console.warn(`[ws-server] edgeId=${edgeId} 有 ${matches.length} 个不同账号在线（${matches.join(',')}），慢启动写入拒绝猜测`);
+      }
+      return null;
     }
     return matches[0];
   }

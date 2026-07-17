@@ -2174,6 +2174,10 @@ async function main(): Promise<void> {
       const hourQuotas = pickDailyUsageCounts(effective.hour);
       const dayQuotas = pickDailyUsageCounts(effective.day);
       payload.quotaLevel = controller.getState().quotaLevel;
+      // 慢启动投影（change account-level-slow-start）：**必须从同一个 controller 实例取**，
+      // 绝不从 store 另读一次——这是唯一能防「徽章说 D7、clamp 已按 D8 放行」的机制。
+      // controller 内部 slowStartView() 与 clamp 共用同一个 anchor 解析 + 同一次 clock()。
+      payload.slowStart = controller.slowStartView();
       const minuteWindow = makeUsageWindow(minuteTotals, minuteQuotas, {
         startedAt: minuteSince,
         windowMs: minuteWindowMs,
@@ -4112,6 +4116,26 @@ async function main(): Promise<void> {
           curatedContent: curatedContentStore,
           referenceDraftCountForAccount: (accountId) => publishLogStore.countReferenceDraftsForAccount(accountId),
           interactionApi: interactionCustomerApi,
+          // 账号级慢启动写入（change account-level-slow-start）：envKey → edgeId → 活会话反查 accountId。
+          // envKey→edgeId 是确定性映射（边缘 fleet 用 `ads-${profileId}` 作 edgeId，客户端的 envKey 即 profileId）。
+          // accountId 全程由云端解析，客户端永不提交。
+          slowStart: {
+            setForEnv: async (envKey, enabled) => {
+              if (!accountStore?.setSlowStart) return { ok: false as const, reason: 'unavailable' as const };
+              const accountId = server.resolveAccountIdForEdge(`ads-${envKey}`);
+              // 解析不出 = 该环境此刻没有唯一在跑的账号 → 如实 409，绝不猜一个写进去。
+              if (!accountId) return { ok: false as const, reason: 'edge_offline' as const };
+              const written = await accountStore.setSlowStart(accountId, enabled, Date.now());
+              if (!written.ok) return { ok: false as const, reason: written.reason };
+              // 写后真态从**同一个 controller** 取：provider 现读 → 这里读到的就是此刻真正生效的。
+              const controller = await riskRegistry.getController(accountId);
+              return {
+                ok: true as const,
+                slowStart: controller.slowStartView(),
+                dayQuotas: pickDailyUsageCounts(controller.effectiveQuotas().day) as Record<string, number>,
+              };
+            },
+          },
           onOffboardCreated: async (offboard) => {
             const edgeId = server.resolveEdgeIdForAccount(offboard.accountId);
             if (edgeId) await interactionOffboarding?.dispatchPending(offboard.accountId, edgeId);

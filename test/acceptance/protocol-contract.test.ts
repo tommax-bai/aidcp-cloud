@@ -267,4 +267,53 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     const back2 = parseEnvelope(JSON.stringify(makeEnvelope('publish.command.result', 'p-15b', 1700000000000, notDispatched)));
     assert.equal((back2!.payload as PublishCommandResultPayload).submitDispatched, undefined);
   });
+
+  it('AC-PROTO-17 ui.snapshot dailyUsage.slowStart 往返存活（payload 字段漂移 typecheck 完全抓不到）', () => {
+    // 两份 protocol.ts 的机械保障只覆盖 MessageType 穷举，**payload 可选字段漂移一个都抓不到
+    // ——而且已经漏过**：inspirationSummary 只活在 edge 侧，cloud 全仓含 test 零命中，
+    // 客户端在渲染一个云端从未发过的字段。故此处手写往返把 slowStart 的每个字段焊死：
+    // 任一端漏改 / 拼错 / 少一个键，该端本断言即红。
+    const active: UiSnapshotPayload = {
+      dailyUsage: {
+        asOf: 1700000000000,
+        totals: { view: 7 },
+        slowStart: { state: 'active', day: 3, totalDays: 7, since: 1699920000000, binding: true, eligible: true },
+      },
+    };
+    const back = parseEnvelope(JSON.stringify(makeEnvelope('ui.snapshot', 'ss-1', 1700000000000, active)));
+    assert.deepEqual((back!.payload as UiSnapshotPayload).dailyUsage?.slowStart, active.dailyUsage?.slowStart);
+
+    // binding=false（勾了但当前档位已更严、一格没压）必须能如实往返——它是一个被明说的态，
+    // 不是缺省。若它在传输中退化成 undefined，UI 会把「没压」渲染成「正在压低」。
+    const notBinding: UiSnapshotPayload = {
+      dailyUsage: {
+        asOf: 1700000000000,
+        totals: { view: 7 },
+        slowStart: { state: 'active', day: 5, totalDays: 7, binding: false, eligible: true },
+      },
+    };
+    const back2 = parseEnvelope(JSON.stringify(makeEnvelope('ui.snapshot', 'ss-2', 1700000000000, notBinding)));
+    assert.equal((back2!.payload as UiSnapshotPayload).dailyUsage?.slowStart?.binding, false);
+
+    // 三个 ineligibleReason 是裸联合字符串，两端各写一份 → 逐个焊死。
+    for (const reason of ['platform_unsupported', 'platform_unknown', 'globally_disabled'] as const) {
+      const snap: UiSnapshotPayload = {
+        dailyUsage: { asOf: 1700000000000, totals: {}, slowStart: { state: 'off', totalDays: 7, eligible: false, ineligibleReason: reason } },
+      };
+      const b = parseEnvelope(JSON.stringify(makeEnvelope('ui.snapshot', 'ss-3', 1700000000000, snap)));
+      assert.equal((b!.payload as UiSnapshotPayload).dailyUsage?.slowStart?.ineligibleReason, reason);
+    }
+
+    // 毕业态：day 缺省、state=graduated —— 必须显式告知而非静默消失。
+    const graduated: UiSnapshotPayload = {
+      dailyUsage: { asOf: 1700000000000, totals: {}, slowStart: { state: 'graduated', totalDays: 7, since: 1699315200000, eligible: true } },
+    };
+    const back3 = parseEnvelope(JSON.stringify(makeEnvelope('ui.snapshot', 'ss-4', 1700000000000, graduated)));
+    assert.deepEqual((back3!.payload as UiSnapshotPayload).dailyUsage?.slowStart, graduated.dailyUsage?.slowStart);
+
+    // 字段整体缺省 = 未知（云端还没说）→ 往返后仍不出现；边缘据此整行不渲染，MUST NOT 当「关」。
+    const absent: UiSnapshotPayload = { dailyUsage: { asOf: 1700000000000, totals: {} } };
+    const back4 = parseEnvelope(JSON.stringify(makeEnvelope('ui.snapshot', 'ss-5', 1700000000000, absent)));
+    assert.equal((back4!.payload as UiSnapshotPayload).dailyUsage?.slowStart, undefined);
+  });
 });

@@ -23,6 +23,7 @@ import { DelegatedTaskServiceError, type DelegatedTaskService } from '../delegat
 import type { DelegatedTaskIntent, JsonValue } from '../delegated-task/types.js';
 import { clampClientApprovalMode } from '../delegated-task/types.js';
 import type { CuratedContentStore, CuratedPanelRow, CuratedReferenceImage } from '../cache/curated-content-store.js';
+import type { UiSlowStartPayload } from '../comm/protocol.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -38,6 +39,20 @@ export interface ClientAuthDeps {
   referenceDraftCountForAccount?: (accountId: string) => Promise<number>;
   interactionApi?: {
     handle(req: http.IncomingMessage, res: http.ServerResponse, userId: string): Promise<boolean>;
+  };
+  /**
+   * 账号级慢启动写入（change account-level-slow-start）。
+   *
+   * **accountId 由云端经活会话映射解析、客户端永不提交**——红线已成文：accountId is never
+   * accepted as an unverified cross-customer selector。客户只能改「自己环境上此刻正在跑的那个账号」：
+   * ownership 由 ownsEnv(userId, envKey) 判定（管理员授予的 env_key），accountId 由 envKey→edgeId→
+   * 活连接反查，解析不出即 409。
+   */
+  slowStart?: {
+    setForEnv(envKey: string, enabled: boolean): Promise<
+      | { ok: true; slowStart: UiSlowStartPayload; dayQuotas: Record<string, number> }
+      | { ok: false; reason: 'edge_offline' | 'account_not_found' | 'retired_account' | 'unavailable' }
+    >;
   };
   onOffboardCreated?: (offboard: ClientOffboardView) => Promise<void>;
 }
@@ -258,6 +273,66 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
     if (method === 'GET' && url === '/my-environments') {
       const scope = await deps.store.listEnvScope(userId);
       sendJson(res, 200, { environments: scope.map((s) => ({ envKey: s.envKey, label: s.label, platform: s.platform })) });
+      return;
+    }
+
+    // 账号级慢启动开关（change account-level-slow-start）：env-scoped 写。
+    //
+    // **绝不走 WS 写**：ws-server 全文无鉴权，session.accountId 是边缘 hello 里自报的字符串
+    // ——改一个字符串就能替别人关慢启动。这里 ownership 由管理员授予的 env_key 判定（fail-closed），
+    // accountId 由云端经活会话映射解析、客户端永不提交。
+    //
+    // **「边缘不在线就改不了」不是缺陷**：慢启动状态本身就搭在 ui.snapshot.dailyUsage 上，
+    // 边缘离线时这张卡本来就不更新、开关本来就该禁用——两者是同一件事，不额外损失。
+    if (method === 'PUT' && /^\/environments\/[^/]+\/slow-start$/.test(url)) {
+      const envKey = decodeURIComponent(url.split('/')[2] ?? '').trim();
+      if (!deps.slowStart) {
+        sendJson(res, 503, { error: 'slow_start_unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      // 严格 onlyKeys：绝不接受 accountId 之类的跨客户选择器混进来。
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const keys = Object.keys(body as object);
+      const enabled = (body as { enabled?: unknown }).enabled;
+      if (keys.length !== 1 || keys[0] !== 'enabled' || typeof enabled !== 'boolean') {
+        sendJson(res, 422, { error: 'validation_failed', reason: 'only_enabled_boolean_accepted' });
+        return;
+      }
+      // 授权 fail-closed：envKey 必须属于该客户。
+      if (!envKey || !(await deps.store.ownsEnv(userId, envKey))) {
+        sendJson(res, 403, { error: 'environment_not_owned' });
+        return;
+      }
+      const result = await deps.slowStart.setForEnv(envKey, enabled);
+      if (!result.ok) {
+        if (result.reason === 'edge_offline') {
+          sendJson(res, 409, { error: 'edge_offline', message: '该环境当前未连接，暂时无法更改。' });
+          return;
+        }
+        if (result.reason === 'unavailable') {
+          sendJson(res, 503, { error: 'slow_start_unavailable' });
+          return;
+        }
+        sendJson(res, 404, { error: result.reason });
+        return;
+      }
+      // 回执带写后真态 + 生效后的当日上限。**不做「已保存 vs 已下发本机」二态**：慢启动的执行体
+      // 就在云端 effectiveQuotas 内，provider 现读做对了 → PUT 200 = 本云端已生效。
+      // 照抄一个不存在的状态同样是撒谎。（两者绑定：若把 provider 偷懒做成构造期读入，这句立刻变谎言。）
+      sendJson(res, 200, {
+        data: { envKey, slowStart: result.slowStart, dayQuotas: result.dayQuotas },
+        meta: { requestId: randomUUID(), asOf: Date.now() },
+      });
       return;
     }
 
