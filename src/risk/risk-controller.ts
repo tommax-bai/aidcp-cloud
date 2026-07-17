@@ -176,18 +176,35 @@ export class RiskController {
     return this.counter.retryAfterMs(action, window, quota);
   }
 
+  /**
+   * 记下一次**已经真实发生**的动作，并回答「它在不在策略内」。
+   *
+   * **两个问题，两个答案，别混**（change risk-record-actuated-facts）：
+   * - **返回值**答「这个动作在策略内吗」——被 `canDo` 拒时仍返 `false`（背压语义逐字不变，红线不变：
+   *   绝不 `applySignal`、绝不自升威胁态；change decouple-quota-hit-from-risk）。
+   * - **计数器**答「这个动作发生过吗」——**无条件写入**。
+   *
+   * 本方法的调用点全都是**事后回执**（边缘回报「我已在真实页面上做完了」之后才驱动）。此时再判一次
+   * 「该账号现在还允许做这个吗」并据此**不写**，销毁的只有证据，改变不了已发生的事：拒绝记录一次真实
+   * 点击，并不能把它变回没点过。**「该不该做」MUST 在下发前判定**——那道预闸是唯一能真正阻止动作的
+   * 地方，且每条自动路径都已过它；这里的事后重判只在预闸失效的缝里开火（运营手动绕闸、飞行途中状态
+   * 翻转、突发窗在预闸与回执之间被填满、并发），而那正是真相最要紧的时候。
+   *
+   * 少记真实活动量与谎报成功同属不诚实（前者是后者的镜像）：计数器同时是配额分母的来源，少记会让
+   * 后续 `canDo` **误以为尚有余量**而放行更多真实动作——紧窗口的拒绝会就此污染松窗口的账本。
+   *
+   * ⚠️ **求值顺序不可换**：`canDo` 读的就是这个计数器。必须**先取判定、再写入**——先写后判会把刚写的
+   * 这一笔算进自己，撞顶那一次的返回值会从 `false` 翻成 `true`。
+   *
+   * 注：某条路径若确实不该消耗预算，正确表达是**在接线层显式不驱动本方法**，而不是让它内部静默丢弃
+   * ——后者使「豁免」与「丢数」不可区分。
+   */
   async record(action: RiskAction): Promise<boolean> {
-    // 撞自己的速率配额是「节奏背压」，不是风控信号：被拒只返 false（canDo 已拦住动作），
-    // 绝不 applySignal 自升威胁态（change decouple-quota-hit-from-risk）。威胁态只由平台可观测
-    // 信号（验证码/阻断浮层/运营手动）驱动。过载节奏的可见性改由接线层（server.ts 的
-    // interaction.occurred）经 explain() 判 quota:hour/minute 发低优先级运维告警。
-    if (!this.canDo(action)) {
-      return false;
-    }
+    const allowed = this.canDo(action);
     const now = this.clock();
     this.counter.record(action, now);
     await this.store?.appendCounter(this.accountId, action, now);
-    return true;
+    return allowed;
   }
 
   getState(): RiskState {

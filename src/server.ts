@@ -1388,29 +1388,33 @@ async function main(): Promise<void> {
       return;
     }
     const accountId = evt.accountId;
-    // 手动 /comment 的评论不计入风控配额（人工授权，change comment-search-command）：评论任务接管期间的 `comment`
-    // 跳过 RiskController.record——不消耗自治评论预算、不动风控态。自治评论照常计数；去重(risk_interactions)与
-    // 展示账本(interaction_feed)不受影响（各自在下方/其他消费者处理）。
-    const skipRiskRecord = evt.action === 'comment' && manualCommentAccounts.has(accountId);
-    // 按 accountId 路由到对应账号 controller（record 内部再过 canDo）。
-    if (!skipRiskRecord) {
-      riskRegistry
-        .getController(accountId)
-        .then(async (c) => {
-          const recorded = await c.record(evt.action);
-          // 配额饱和改道（change decouple-quota-hit-from-risk）：record 被拒且原因是突发窗（小时/分钟）
-          // 过载 → 发低优先级运维告警（每日窗静默、只背压）。风控状态在 record 内部已不再被撞配额改动。
-          if (!recorded && pacingAlerter) {
-            const reason = c.explain(evt.action).reason;
-            if (reason === 'quota:hour' || reason === 'quota:minute') {
-              pacingAlerter.maybe(accountId, evt.action, reason === 'quota:hour' ? 'hour' : 'minute');
-            }
+    // 手动命令（/comment 等）**跳过的是配额闸，不是这本账**（用户裁决 2026-07-17，change
+    // risk-record-actuated-facts）：平台照样看见了运营手动做的那一下，它照样消耗该账号在平台眼里的
+    // 活动预算，故照常 record、照常被后续 canDo 读到（自治动作据此被拦是预期结果）。
+    // 「不被 canDo 阻断」的豁免在下发侧、逐字不动；此前这里以「人工授权」为由整个跳过 record，
+    // 使「豁免」与「丢数」不可区分——已摘除。
+    const manualSource = evt.action === 'comment' && manualCommentAccounts.has(accountId);
+    riskRegistry
+      .getController(accountId)
+      .then(async (c) => {
+        // 节奏告警判据 MUST 取自**写入前**的判定：record 现在无条件写入（既成事实照记），
+        // 写完再问 explain 读到的是**含这一笔**的新状态，已不是那次动作当时面对的状态。
+        // 该值与 record 的返回值同源（都是写入前的 canDo），故告警行为与改动前逐位一致。
+        const verdict = pacingAlerter && !manualSource ? c.explain(evt.action) : undefined;
+        await c.record(evt.action);
+        // 配额饱和改道（change decouple-quota-hit-from-risk）：撞突发窗（小时/分钟）→ 发低优先级
+        // 运维告警（每日窗静默、只背压）。风控状态不因撞配额而改动。
+        // 手动来源不发此告警（运营存心为之，「节奏过载」对他是噪声不是信号）——此前它靠「整个跳过
+        // record」顺带获得静默，现改为**在告警侧显式排除**，行为不变而账变诚实。
+        if (verdict && !verdict.allowed && pacingAlerter) {
+          if (verdict.reason === 'quota:hour' || verdict.reason === 'quota:minute') {
+            pacingAlerter.maybe(accountId, evt.action, verdict.reason === 'quota:hour' ? 'hour' : 'minute');
           }
-        })
-        .catch((err) => {
-          console.warn('[aidcp-cloud] RiskController record error:', err);
-        });
-    }
+        }
+      })
+      .catch((err) => {
+        console.warn('[aidcp-cloud] RiskController record error:', err);
+      });
     // A 阶段4 来源血缘：真实点赞落 liked_notes（noteId 才落；详情缺则空字段如实，不编造）。
     if (evt.action === 'like' && evt.noteId && likedNoteStore) {
       likedNoteStore.recordLike(evt.noteId).catch((err) => {
@@ -2339,6 +2343,11 @@ async function main(): Promise<void> {
     isEdgePaused: (edgeId) => (edgeServer ? edgeServer.isEdgePaused(edgeId) : false),
     readApproval: readPublishApproval,
     voidApprovalSignal,
+    // 发布记账（change risk-record-actuated-facts）：真发出去了才记，与 publish_log 权威口径同轴。
+    // 此前 record('publish') 全仓零调用点 ⇒ 发布计数器恒 0 ⇒ 发布日配额从未开过火。
+    recordPublish: async (accountId) => {
+      await (await resolveController(accountId)).record('publish');
+    },
     // 陪伴界面：授权核实→approved、云端终判失败→failed 推给在线边缘（published 由边缘自知）。
     notifyUiPublishState: (accountId, recordId, state, title) =>
       uiSnapshotService.pushPublishState(accountId, recordId, state, title),

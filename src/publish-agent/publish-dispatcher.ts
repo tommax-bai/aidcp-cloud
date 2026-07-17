@@ -88,6 +88,21 @@ export interface PublishDispatcherDeps {
     markUsed(setId: number, publishLogId: number): Promise<boolean>;
     quarantine(setId: number, reason: string): Promise<boolean>;
   };
+  /**
+   * 发布记账（change risk-record-actuated-facts）：一条稿**真的发出去了**之后驱动风控计数。
+   *
+   * 此前 `record('publish')` **全仓零调用点**，而它是 `risk_counters` 的唯一写入者 ⇒ 发布计数器恒 0
+   * ⇒ `canDo('publish')` 的配额分支永不开火 ⇒ **发布日配额是装饰品**（发布实际只受状态闸 + 发布前
+   * 人审 + 排期日上限约束）。
+   *
+   * **判据 = 与 `publish_log` 的权威口径逐字相同**（`status IN ('submitted','published')`，即下方
+   * `published_confirmed` 与 `submitted_unconfirmed` 两个分支）——如此后台按 `publish_log` 算出的发布数
+   * 与风控计数**应当永远对得上**，对不上即有 bug（白送的交叉校验）。**MUST NOT 凭下发即记**：下发是
+   * 意图，可能被抢占 / 边缘离线 / 中途失败。
+   *
+   * 手动 `/publish` 同样记（用户裁决：手动跳过的是**闸**，不是**账**）。缺省不注入 ⇒ 不记（零回归）。
+   */
+  recordPublish?: (accountId: string) => Promise<void>;
   /** 同账号连续序列失败多少次触发熔断（默认 2）。 */
   breakerThreshold?: number;
   /** 7.2：同一稿连续被抢占多少次后停自动重投 + 通知运营（默认 3）。 */
@@ -112,6 +127,7 @@ export class PublishDispatcher {
   private readonly notifyUiPublishState?: (accountId: string, recordId: number, state: 'approved' | 'submitted' | 'failed', title?: string | null) => void;
   private readonly notifyDispatchEvent?: (notice: DispatchNotice) => void;
   private readonly facebookPublishMedia?: NonNullable<PublishDispatcherDeps['facebookPublishMedia']>;
+  private readonly recordPublish?: (accountId: string) => Promise<void>;
   private readonly breakerThreshold: number;
   private readonly preemptRedispatchMax: number;
   private readonly scheduleRedispatch: (fn: () => void) => void;
@@ -133,6 +149,23 @@ export class PublishDispatcher {
   /** 7.3：已就「验证码硬暂停」通知过运维的 recordId——防 60s 兜底扫描每轮对同一暂停重复 ping 运维（只在进入暂停态时发一次）。 */
   private readonly pausedNotified = new Set<number>();
 
+  /**
+   * 发布真发出后记一笔风控计数（change risk-record-actuated-facts）。
+   *
+   * **best-effort**：这是**事后账**，绝不能反过来动摇已经成功的发布终态——记账失败只告警。
+   * 未注入 `recordPublish` ⇒ 不记（零回归）。
+   */
+  private async recordActuatedPublish(accountId: string, recordId: number): Promise<void> {
+    if (!this.recordPublish) return;
+    try {
+      await this.recordPublish(accountId);
+    } catch (err) {
+      this.logger.warn(
+        `[PublishDispatcher] recordId=${recordId} 发布已成功但风控记账失败（配额将偏松，需关注）：${(err as Error).message}`,
+      );
+    }
+  }
+
   constructor(deps: PublishDispatcherDeps) {
     this.store = deps.store;
     this.sequencer = deps.sequencer;
@@ -143,6 +176,7 @@ export class PublishDispatcher {
     this.voidApprovalSignal = deps.voidApprovalSignal;
     this.notifyUiPublishState = deps.notifyUiPublishState;
     this.notifyDispatchEvent = deps.notifyDispatchEvent;
+    this.recordPublish = deps.recordPublish;
     this.facebookPublishMedia = deps.facebookPublishMedia;
     this.breakerThreshold = Math.max(1, deps.breakerThreshold ?? 2);
     this.preemptRedispatchMax = Math.max(1, deps.preemptRedispatchMax ?? 3);
@@ -466,6 +500,9 @@ export class PublishDispatcher {
         this.consecutiveSeqFails.delete(accountId);
         this.consecutivePreemptions.delete(recordId);
         await this.store.updatePostId(recordId, result.postId!, result.postUrl).catch(() => {});
+        // 发布记账（change risk-record-actuated-facts）：发出去了 ⇒ 平台看见了 ⇒ 记。与 publish_log 的
+        // 权威口径同轴（published）。best-effort：记账失败绝不影响已成功的发布终态。
+        await this.recordActuatedPublish(accountId, recordId);
         this.logger.log(`[PublishDispatcher] recordId=${recordId} published postId=${result.postId} edge=${edgeId}`);
       } else if (result.outcome === 'submitted_unconfirmed') {
         // 当前页面已确认提交，但未拿到同页 postId/permalink。
@@ -473,6 +510,9 @@ export class PublishDispatcher {
         await this.settleFacebookMedia(draft, result.outcome, recordId, result.failedAt?.error);
         this.consecutivePreemptions.delete(recordId);
         await this.store.updateStatus(recordId, 'submitted').catch(() => {});
+        // 与上面 published 同理：页面已确认提交 ⇒ 平台收到了这条帖 ⇒ 记。拿没拿到链接是「平台对我们已做
+        // 之事的回答」，MUST NOT 决定这次动作算不算数——与 publish_log 把 submitted 计入日上限同轴。
+        await this.recordActuatedPublish(accountId, recordId);
         this.logger.warn(
           `[PublishDispatcher] recordId=${recordId} submitted_unconfirmed，已转 submitted（不刷新、不自动重试）`,
         );

@@ -94,14 +94,27 @@ export class InteractionInboxService {
       await this.deps.store.noteSendOutcome(payload.accountId, true, failureLimit);
       if (applied.confirmedNeedsRiskRecord && await this.deps.store.claimRiskRecord(payload.attemptId)) {
         try {
-          const recorded = await (await this.deps.controllerFor(payload.accountId))?.record(riskActionForChannel(payload.channel));
-          if (!recorded) {
+          // 此处是 `status === 'confirmed'`——**平台已确认这条回复发出去了**。它已经发生，故必须记下。
+          // 占位（claim）的释放判据是「**有没有写成**」，MUST NOT 是「策略允不允许」（change
+          // risk-record-actuated-facts）：record 现在无条件写入既成事实，其返回值只答「在不在策略内」。
+          // 若照旧按返回值释放占位，重放会**再写一次** ⇒ 真实重复计数。
+          const controller = await this.deps.controllerFor(payload.accountId);
+          if (!controller) {
+            // 没拿到 controller ⇒ 什么都没写 ⇒ 释放占位、留给重放（这才是真故障）。
             await this.deps.store.releaseRiskRecordClaim(payload.attemptId);
-            this.deps.metrics.increment('interaction_risk_record_total', { status: 'denied', channel: payload.channel });
+            this.deps.metrics.increment('interaction_risk_record_total', { status: 'failed', channel: payload.channel });
           } else {
-            this.deps.metrics.increment('interaction_risk_record_total', { status: 'recorded', channel: payload.channel });
+            const withinPolicy = await controller.record(riskActionForChannel(payload.channel));
+            // 写已经发生 ⇒ 占位保留（绝不释放）。返回值只用来分辨这条回复是否超了策略——
+            // 那是**观测**，不是「没记下」。注：`dm_reply` 三档配额默认 0（占位而非真上限，
+            // quota_config 覆盖是其唯一启用路径）⇒ 该标签今天预期恒为 over_policy。
+            this.deps.metrics.increment('interaction_risk_record_total', {
+              status: withinPolicy ? 'recorded' : 'recorded_over_policy',
+              channel: payload.channel,
+            });
           }
         } catch {
+          // 真抛错才释放占位（PG 故障等）——与「策略拒绝」是两回事，此前二者被收敛成同一处理、下游分不出。
           await this.deps.store.releaseRiskRecordClaim(payload.attemptId);
           this.deps.metrics.increment('interaction_risk_record_total', { status: 'failed', channel: payload.channel });
         }
