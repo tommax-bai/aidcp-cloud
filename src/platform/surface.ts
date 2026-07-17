@@ -1,11 +1,17 @@
 /**
  * Surface / 能力静态解析器（change platform-registry-shape C1a）。
  *
- * 全部**纯函数**、**全部 fail-open**：registry 查不到 / 抛异常 ⇒ 回落到「今天行为」（读/评在 detail、动作放行、
- * 能力可用），绝不因查表失败静默砍掉一个支持平台。控制流一律读这里的静态表，**不读**运行时 observedSurface。
+ * 全部**纯函数**、**全部 fail-safe 到「今天行为」**：registry 查不到 / 抛异常 ⇒ 回落到今天（读/评在 detail、
+ * 动作放行、能力可用），绝不因查表失败静默砍掉一个支持平台。控制流一律读这里的静态表，**不读**运行时
+ * observedSurface。
+ *
+ * 注意「今天行为」不等于「一律放行」：对 change platform-honest-usage-metrics 引入的、今天客户端根本没有的
+ * 指标（join_group），「今天行为」是**不发**——查表失败时照样不发。fail-safe 的方向永远由「现状是什么」
+ * 决定，不由某个全局默认决定。详见 omitUnsupportedUsageMetrics。
  */
 import { platformRegistryEntry } from './registry.js';
 import type { NoteScopedAction, NoteSupport, OrchestrationCapability, Surface } from './registry.js';
+import { UI_DAILY_USAGE_ACTIONS } from '../comm/protocol.js';
 import type { UiDailyUsageAction, UiDailyUsageCounts } from '../comm/protocol.js';
 
 /** read_content 在哪个 surface 完成。fail-open = 'detail'（今天所有平台都先开详情）。 */
@@ -72,72 +78,111 @@ export function isOrchestrationCapabilitySupported(
 }
 
 /**
- * 客户端用量上限的声明来源（change platform-honest-usage-caps）。
+ * 客户端用量指标的声明来源（change platform-honest-usage-caps → platform-honest-usage-metrics）。
  *
- * 六个客户端指标键各自映射到 registry 的哪张矩阵。**两张矩阵都要查**：`collect` 的不支持声明在 noteActions、
+ * 每个客户端指标键映射到 registry 的哪张矩阵。**两张矩阵都要查**：`collect` 的不支持声明在 noteActions、
  * `follow` 的在 capabilities——只查一张会结构性看不见另一半（FB 会带着一个与收藏逐位同构的谎上线）。
  * `publish` 两张矩阵都没有（FB registry 注释自陈：编排词只登记「有云端消费者」的，publish 的接线在
- * FacebookPublishExecutor 专属路径）⇒ 声明为 'none' = **永不摘**，而不是靠「查不到」碰巧不摘。
+ * FacebookPublishExecutor 专属路径）⇒ 声明为 'none' = **永不动**，而不是靠「查不到」碰巧不动。
  *
- * 全覆盖 Record：新增第七个客户端指标键时，typecheck 逼调用方**当场表态**它的支持性从哪读——
+ * `statusQuo` 是本表第二个字段，也是最容易被下一个人漏掉的那个：**它记的是「本规则不存在时，客户端有没有
+ * 这一格」**。fail-safe 的方向由它决定，而不是由某个全局的 fail-open 常量决定：
+ *   - `'supplied'`（既有六键，今天就在屏幕上）⇒ 只有**显式 supported:false** 才摘。
+ *   - `'absent'`（如 join_group，今天屏幕上根本没有）⇒ 只有**显式 supported:true** 才加。
+ * 这两条看起来相反，其实是同一条：**只有显式声明才能改变现状**。若给 'absent' 的键沿用 'supplied' 的
+ * fail-open，平台未知的账号会凭空长出一个「加群」格——用一个新谎去治一个旧谎。
+ *
+ * 全覆盖 Record：新增指标键时，typecheck 逼调用方**当场表态**它的支持性从哪读、它的现状是哪个——
  * 这是本表存在的主要理由（载荷类型是宽松的 Partial<Record<…>>，漏一个键 typecheck 一声不吭）。
  */
-type UsageCapSupportSource =
+type UsageMetricDeclaration =
   | { matrix: 'note'; action: NoteScopedAction }
   | { matrix: 'capability'; capability: OrchestrationCapability }
   | { matrix: 'none' };
 
-const USAGE_CAP_SUPPORT_SOURCE: Record<UiDailyUsageAction, UsageCapSupportSource> = {
-  view: { matrix: 'note', action: 'read_content' },
-  like: { matrix: 'note', action: 'like' },
-  collect: { matrix: 'note', action: 'collect' },
-  comment: { matrix: 'note', action: 'comment' },
-  follow: { matrix: 'capability', capability: 'follow' },
-  publish: { matrix: 'none' },
+interface UsageMetricSupportSource {
+  /** 本规则之前，客户端有没有这一格。决定 fail-safe 的方向，见上方注释。 */
+  statusQuo: 'supplied' | 'absent';
+  declaration: UsageMetricDeclaration;
+}
+
+const USAGE_METRIC_SUPPORT_SOURCE: Record<UiDailyUsageAction, UsageMetricSupportSource> = {
+  view: { statusQuo: 'supplied', declaration: { matrix: 'note', action: 'read_content' } },
+  like: { statusQuo: 'supplied', declaration: { matrix: 'note', action: 'like' } },
+  collect: { statusQuo: 'supplied', declaration: { matrix: 'note', action: 'collect' } },
+  comment: { statusQuo: 'supplied', declaration: { matrix: 'note', action: 'comment' } },
+  follow: { statusQuo: 'supplied', declaration: { matrix: 'capability', capability: 'follow' } },
+  publish: { statusQuo: 'supplied', declaration: { matrix: 'none' } },
+  join_group: { statusQuo: 'absent', declaration: { matrix: 'capability', capability: 'group_join' } },
 };
 
 /**
- * 平台感知的用量上限投影（change platform-honest-usage-caps）：摘掉「该平台结构上做不到的动作」的上限。
+ * 「本规则不存在时该发什么」——每一条 fail-safe 路径的落点。
  *
- * 云端不得供给它自己不可能兑现的上限——FB 收到「收藏 25/天」「关注 15/天」，客户端据此画出 `/25` +
- * 永远 0% 的进度条 = edge-companion-ui 明禁的 fabricated caps。判据 100% 来自 registry 既有声明。
+ * ⚠️ 这里**不能**图省事 `return counts`。入参是 pickDailyUsageCounts 的产物、七键全物化，其中
+ * join_group 的现状是「客户端根本没有这一格」⇒ 原样返回会把加群指标泄给平台未知的账号（小红书没有群）。
+ * 「保持现状」= 留下现状本就在发的键、丢掉现状本就没有的键，而不是「原样透传」。
  *
- * **只摘上限、绝不碰计数**：计数照发（客户端继续渲染「收藏 0」，只是不再有分母、进度条与完成态）。
- *
- * **本函数是只读消费者、不是第二道闸**（platform-browse-surface）：它只塑造「告诉客户端可以做什么」，
- * MUST NOT 下发 / 拒绝 / 取消任何命令，唯一审计拒绝点仍是 dispatch wrapper。
- *
- * **同步、纯、永不抛**：内部自兜 try/catch ⇒ fail-open 由函数自证，不依赖调用点记得包 try。
- * 平台为空 / 未知 / 查表抛异常 ⇒ **原样返回入参**（照发全部上限 = 本规则存在之前的行为）。
- * 摘掉一个上限只能由**显式的 supported:false 声明**造成，绝不能由「没查到」造成。
- *
- * **调用顺序**：必须在 pickDailyUsageCounts 之后。那一步把六键无条件物化（缺失 → 0），若先摘再 pick，
- * 摘掉的键会被补回 `0`，而 quotaSaturation 会算出 `totals(0) >= cap(0)` ⇒ 把该动作标成 saturated ⇒
- * 客户端渲染「0/0 今日计划已完成」——正是本 change 要除掉的那个谎，早一行重新引入。
+ * 本函数不查 registry、不抛。
  */
-export function omitUnsupportedUsageCaps(
+function statusQuoUsageMetrics(counts: UiDailyUsageCounts): UiDailyUsageCounts {
+  const out: UiDailyUsageCounts = {};
+  for (const action of UI_DAILY_USAGE_ACTIONS) {
+    if (USAGE_METRIC_SUPPORT_SOURCE[action].statusQuo !== 'supplied') continue;
+    const value = counts[action];
+    if (value !== undefined) out[action] = value;
+  }
+  return out;
+}
+
+/**
+ * 平台感知的用量指标投影（change platform-honest-usage-metrics，扩自 platform-honest-usage-caps）：
+ * 摘掉「该平台结构上做不到的动作」的**整个指标**（上限**与**计数），并放出「该平台真做、且风控真记账」的指标。
+ *
+ * 前身只摘上限、刻意留计数，理由是「计数是事实、只有承诺会撒谎」。**那个理由在结构不支持的动作上不成立**：
+ * FB 的「收藏 0」不是观测，是 pickDailyUsageCounts 对一个不存在的动作**物化**出来的常量。它读作「今天还没
+ * 收藏」、暗示明天会有数字，而真相是「这个平台没有收藏」。它与那条永远 0% 的进度条是同一个谎的两半。
+ *
+ * 反向同理：加群是 FB 真做、真烧日配额（均衡档 3/天）、后台用量表真在显示的动作。客户端看不见它，
+ * 等于对同一个账号，两块屏幕说不同的话。
+ *
+ * **本函数是只读消费者、不是第二道闸**（platform-browse-surface）：它只塑造「告诉客户端账号在做什么」，
+ * MUST NOT 下发 / 拒绝 / 取消任何命令。唯一审计拒绝点仍是 dispatch wrapper；加群的闸仍在 join scheduler。
+ *
+ * **同步、纯、永不抛**：内部自兜 try/catch ⇒ fail-safe 由函数自证，不依赖调用点记得包 try。
+ * 平台为空 / 未知 / 查表抛异常 ⇒ 回落 statusQuoUsageMetrics（**不是**原样返回入参，理由见该函数注释）。
+ * 摘掉一个既有指标只能由**显式 supported:false** 造成；放出一个新指标只能由**显式 supported:true** 造成。
+ * 两者都绝不能由「没查到」造成。
+ *
+ * **调用顺序**：必须在 pickDailyUsageCounts 之后。那一步把全部键无条件物化（缺失 → 0），若先摘再 pick，
+ * 摘掉的键会被补回 `0`，而 quotaSaturation 会算出 `totals(0) >= cap(0)` ⇒ 把该动作标成 saturated ⇒
+ * 客户端渲染「0/0 今日计划已完成」——正是本 change 要除掉的那个谎，早一行重新引入。typecheck 全绿。
+ */
+export function omitUnsupportedUsageMetrics(
   platform: string | null | undefined,
-  quotas: UiDailyUsageCounts,
+  counts: UiDailyUsageCounts,
 ): UiDailyUsageCounts {
   try {
-    // 平台未知（镜像缺键 / 未登记）⇒ 不摘。fail-open 的第一道：绝不因「不知道」而扣掉一个上限。
-    if (platform === null || platform === undefined || platform === '') return quotas;
+    // 平台未知（镜像缺键 / 未登记）⇒ 保持现状。**这道 early return 必须在 platformRegistryEntry 之前**：
+    // normalizePlatformId 对缺失值静默回落小红书，直接查表会把「不知道」当成「是小红书」。
+    if (platform === null || platform === undefined || platform === '') return statusQuoUsageMetrics(counts);
     const entry = platformRegistryEntry(platform);
     const out: UiDailyUsageCounts = {};
-    for (const action of Object.keys(USAGE_CAP_SUPPORT_SOURCE) as UiDailyUsageAction[]) {
-      const cap = quotas[action];
-      if (cap === undefined) continue;
-      const source = USAGE_CAP_SUPPORT_SOURCE[action];
+    for (const action of UI_DAILY_USAGE_ACTIONS) {
+      const value = counts[action];
+      if (value === undefined) continue;
+      const { statusQuo, declaration } = USAGE_METRIC_SUPPORT_SOURCE[action];
       let support: NoteSupport | undefined;
-      if (source.matrix === 'note') support = entry.noteActions[source.action];
-      else if (source.matrix === 'capability') support = entry.capabilities[source.capability];
-      // 只摘**显式声明不支持**的；缺声明（'none' / 表里没这格）⇒ 照发。
-      if (support && support.supported === false) continue;
-      out[action] = cap;
+      if (declaration.matrix === 'note') support = entry.noteActions[declaration.action];
+      else if (declaration.matrix === 'capability') support = entry.capabilities[declaration.capability];
+      const keep = statusQuo === 'supplied'
+        ? support?.supported !== false // 现状=有：只有显式不支持才摘；缺声明（'none' / 表里没这格）⇒ 照发。
+        : support?.supported === true; // 现状=无：只有显式支持才加；缺声明 ⇒ 不加。
+      if (keep) out[action] = value;
     }
     return out;
   } catch {
-    return quotas;
+    return statusQuoUsageMetrics(counts);
   }
 }
 

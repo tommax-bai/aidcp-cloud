@@ -108,6 +108,9 @@ import {
 import { EdgeTaskLeaseClient } from './comm/edge-task-lease-client.js';
 import { UiSnapshotService } from './comm/ui-snapshot.js';
 import { buildBrowserStandbyHint, resolveBrowserStandbyConfig } from './comm/browser-standby.js';
+// 客户端指标键清单的**单一来源**（change platform-honest-usage-metrics）：联集由它派生。
+// 别在本文件另写一份数组——那正是本 change 删掉的东西（加键时 typecheck 一声不吭）。
+import { UI_DAILY_USAGE_ACTIONS } from './comm/protocol.js';
 import type {
   UiDailyUsageAction,
   UiDailyUsageCounts,
@@ -195,7 +198,7 @@ import {
   type DelegatedTask,
 } from './delegated-task/index.js';
 import { DelegatedTaskNotificationGate, delegatedTaskFailureReceipt } from './delegated-task/notification.js';
-import { omitUnsupportedUsageCaps, platformRegistryEntry } from './platform/index.js';
+import { omitUnsupportedUsageMetrics, platformRegistryEntry } from './platform/index.js';
 import {
   buildDelegatedTaskConfirmationCard,
   buildDelegatedTaskProgressCard,
@@ -332,8 +335,14 @@ function createCuratedReferenceImageRelocator(store: ObjectStore) {
   };
 }
 
-const UI_DAILY_USAGE_ACTIONS: UiDailyUsageAction[] = ['view', 'like', 'collect', 'comment', 'follow', 'publish'];
-
+/**
+ * ⚠️ 全部指标键**无条件物化**（缺失 → 0）。任何平台投影都必须跑在**本函数之后**，绝不在之前——
+ * 先摘再 pick 会把摘掉的键补回 `0`，quotaSaturation 随即算出 `totals(0) >= cap(0)` ⇒ 标 saturated ⇒
+ * 客户端渲染「0/0 今日计划已完成」，typecheck 全绿。见 omitUnsupportedUsageMetrics 的调用顺序注释。
+ *
+ * 键名与风控动作名逐字同名（含 join_group）⇒ 本函数可直读风控 totals，无 UI↔风控映射表。
+ * 清单来自 protocol.ts 的单一来源，勿在此另写一份。
+ */
 function pickDailyUsageCounts(source: Partial<Record<string, number>>): UiDailyUsageCounts {
   const counts: UiDailyUsageCounts = {};
   for (const action of UI_DAILY_USAGE_ACTIONS) {
@@ -2114,7 +2123,8 @@ async function main(): Promise<void> {
     const hourSince = asOf - 60 * 60_000;
     const nextUsageRefreshAt = asOf + minuteWindowMs;
     // 平台按**同步镜像**现读（change platform-honest-usage-caps）：init() 全表预热 + 新账号入库回填。
-    // undefined = 未知（缺键）⇒ 下游 omitUnsupportedUsageCaps 不摘任何上限 = 本规则之前的行为。
+    // undefined = 未知（缺键）⇒ 下游 omitUnsupportedUsageMetrics 保持现状：既有指标一个不摘、
+    // 加群指标一个不加（change platform-honest-usage-metrics）。
     // 刻意不用 getPlatform()：那条缺值回落小红书（把「不知道」说成「是小红书」），且是 await PG。
     const accountPlatform = accountStore?.platformFor?.(accountId);
     const sessionUsage = runtimes?.sessionUsageForAccount(accountId, edgeId) ?? null;
@@ -2143,19 +2153,30 @@ async function main(): Promise<void> {
       publishLogStore.countPublishedTodayForAccount(accountId),
     ]);
 
-    const minuteTotals = pickDailyUsageCounts(minuteRiskTotals);
-    minuteTotals.publish = minutePublishCount;
-    const hourTotals = pickDailyUsageCounts(hourRiskTotals);
-    hourTotals.publish = hourPublishCount;
-    const dayTotals = pickDailyUsageCounts(dayRiskTotals);
-    dayTotals.publish = dayPublishCount;
+    // 计数面也按平台投影（change platform-honest-usage-metrics）。三条纪律，缺一条就复活一个谎：
+    // ① **投影永远是最后一步**——先 pick 物化、再覆盖 publish，最后才摘。顺序颠倒 ⇒ 摘掉的键被补回 0
+    //    ⇒ quotaSaturation 算 `0 >= 0` ⇒「0/0 今日计划已完成」。
+    // ② **四个计数面一个都不能漏**（session / minute / hour / day）。漏一个 = 同一个账号在同屏的两处
+    //    互相打脸：KPI 格诚实地没有收藏，正下方的窗口条却列着「收藏 0」。session 面尤其容易漏——它的
+    //    预算来自另一套零平台维度的全局配置，且是窗口列表的第一条。
+    // ③ 投影**只塑形、不算数**：它不改任何一个数字，只决定哪些键出现在载荷里。
+    const projectTotals = (totals: UiDailyUsageCounts): UiDailyUsageCounts =>
+      omitUnsupportedUsageMetrics(accountPlatform, totals);
+    const withPublish = (totals: UiDailyUsageCounts, publishCount: number): UiDailyUsageCounts => {
+      totals.publish = publishCount;
+      return totals;
+    };
 
-    const sessionTotals = completeSessionUsageCounts(sessionUsage?.totals ?? {}, sessionRiskTotals, sessionPublishCount);
+    const minuteTotals = projectTotals(withPublish(pickDailyUsageCounts(minuteRiskTotals), minutePublishCount));
+    const hourTotals = projectTotals(withPublish(pickDailyUsageCounts(hourRiskTotals), hourPublishCount));
+    const dayTotals = projectTotals(withPublish(pickDailyUsageCounts(dayRiskTotals), dayPublishCount));
+    const sessionTotals = projectTotals(
+      completeSessionUsageCounts(sessionUsage?.totals ?? {}, sessionRiskTotals, sessionPublishCount),
+    );
     // 「本轮计划」窗口也是一个客户端上限面（change platform-honest-usage-caps）：session 预算是全局单例
     // （session_config_global，零平台维度）⇒ 不摘的话 FB 会在 KPI 格显示诚实的「收藏 0」、而正下方的
     // 窗口条同屏显示「收藏 0/5」带进度条。两处同源同谎，必须一起摘。
-    const sessionQuotas = omitUnsupportedUsageCaps(
-      accountPlatform,
+    const sessionQuotas = projectTotals(
       pickSessionUsageCounts(sessionUsage?.quotas ?? sessionConfigStore.sessionBudget()),
     );
     const windows: NonNullable<UiDailyUsagePayload['windows']> = {
@@ -2210,9 +2231,9 @@ async function main(): Promise<void> {
       // 平台过滤**永远是最后一步**（change platform-honest-usage-caps）：先让 effectiveQuotas 算完该发多少
       // （含风控缩放与慢启动 min(曲线, 档位) 压低），最后再把这个平台结构上发不出的摘掉。顺序颠倒则
       // 慢启动曲线会对一个不存在的动作做 clamp 运算。且必须在 pickDailyUsageCounts **之后**——见该函数注释。
-      const minuteQuotas = omitUnsupportedUsageCaps(accountPlatform, pickDailyUsageCounts(effective.minute));
-      const hourQuotas = omitUnsupportedUsageCaps(accountPlatform, pickDailyUsageCounts(effective.hour));
-      const dayQuotas = omitUnsupportedUsageCaps(accountPlatform, pickDailyUsageCounts(effective.day));
+      const minuteQuotas = projectTotals(pickDailyUsageCounts(effective.minute));
+      const hourQuotas = projectTotals(pickDailyUsageCounts(effective.hour));
+      const dayQuotas = projectTotals(pickDailyUsageCounts(effective.day));
       payload.quotaLevel = controller.getState().quotaLevel;
       // 慢启动投影（change account-level-slow-start）：**必须从同一个 controller 实例取**，
       // 绝不从 store 另读一次——这是唯一能防「徽章说 D7、clamp 已按 D8 放行」的机制。
@@ -4181,7 +4202,7 @@ async function main(): Promise<void> {
                 // 与 ui.snapshot 的上限投影同源同规则（change platform-honest-usage-caps）：这份回执也过客户
                 // 端信任边界。不一起摘 = 同名同源的两份上限一份诚实一份撒谎，而两边都是宽松 Record<string,number>、
                 // typecheck 抓不到这种漂移。
-                dayQuotas: omitUnsupportedUsageCaps(
+                dayQuotas: omitUnsupportedUsageMetrics(
                   accountStore.platformFor?.(accountId),
                   pickDailyUsageCounts(controller.effectiveQuotas().day),
                 ) as Record<string, number>,

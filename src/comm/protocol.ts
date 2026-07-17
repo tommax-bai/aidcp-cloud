@@ -239,7 +239,28 @@ export interface WelcomePayload {
  * 发送时机：① 边缘 hello 注册完成后回填全量快照；② 发布审批生命周期变化时增量推送。
  * 红线：字段全部可选、缺失=云端无该数据；边缘 MUST NOT 以占位/猜测补全（宁缺毋假）。
  */
-export type UiDailyUsageAction = 'view' | 'like' | 'collect' | 'comment' | 'follow' | 'publish';
+/**
+ * 客户端指标键的**单一来源**（change platform-honest-usage-metrics）：联集从本数组派生，消费方
+ * （server.ts 的 pickDailyUsageCounts / quotaSaturation）直接 import 本数组，不再各自手写一份清单。
+ *
+ * 键名与风控动作名（RISK_ACTIONS）**逐字同名**，故 `pickDailyUsageCounts(riskTotals)` 可直读、零映射。
+ * 起短别名（如 join）就要一张裸 string 对裸 string 的 UI↔风控映射表——`action.completed.action` 已经
+ * 用两侧各 21 条这样的映射证明过：那种表 typecheck 一声不吭，回错名不报错，只是角色永远等不到回执。
+ *
+ * ⚠️ 本联集的漂移 **`Record<MessageType,true>` 那道穷举抓不到**（它只穷举消息类型，本类型是载荷字段）。
+ * 两份 protocol.ts 仍靠 CLAUDE.md §2 的逐字一致纪律；edge 的 main.cjs 是纯 JS、另有一份手写数组，
+ * 靠 test/electron 的穿透断言钉住——漏加键的症状是「云端发了、界面不显示、没有任何报错」。
+ */
+export const UI_DAILY_USAGE_ACTIONS = [
+  'view',
+  'like',
+  'collect',
+  'comment',
+  'follow',
+  'publish',
+  'join_group',
+] as const;
+export type UiDailyUsageAction = (typeof UI_DAILY_USAGE_ACTIONS)[number];
 export type UiDailyUsageCounts = Partial<Record<UiDailyUsageAction, number>>;
 export type UiDailyUsageWindow = 'session' | 'minute' | 'hour' | 'day';
 
