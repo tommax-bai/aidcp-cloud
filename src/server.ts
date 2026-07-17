@@ -1327,6 +1327,11 @@ async function main(): Promise<void> {
       workflow: replyWorkflow,
       controllerFor: (accountId) => riskRegistry.getController(accountId),
       metrics: interactionMetrics,
+      ...(accountStore ? {
+        getNickname: (accountId: string) => accountStore.getNickname?.(accountId),
+        setNickname: (accountId: string, nickname: string) => accountStore.setNickname?.(accountId, nickname),
+      } : {}),
+      logger: console,
       dispatchAuto: (input) => {
         if (!interactionSender) throw new Error('interaction_sender_unavailable');
         return interactionSender.dispatchQueued(input);

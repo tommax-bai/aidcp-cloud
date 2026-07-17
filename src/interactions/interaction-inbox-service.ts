@@ -22,6 +22,9 @@ export class InteractionInboxService {
     controllerFor: (accountId: string) => InteractionRiskController | undefined | Promise<InteractionRiskController | undefined>;
     metrics: InteractionMetrics;
     dispatchAuto?: (input: { accountId: string; envKey: string; jobId: string; expectedVersion: number }) => Promise<unknown>;
+    getNickname?: (accountId: string) => string | null | undefined;
+    setNickname?: (accountId: string, nickname: string) => Promise<void> | void;
+    logger?: Pick<Console, 'warn'>;
   }) {}
 
   private async ensureReadable(accountId: string, envKey: string, channel: InteractionChannel): Promise<void> {
@@ -44,6 +47,20 @@ export class InteractionInboxService {
   async onAuthStatus(payload: InteractionAuthStatusPayload): Promise<void> {
     await this.deps.store.upsertAuthStatus(payload);
     this.deps.metrics.increment('interaction_auth_status_total', { status: payload.status });
+
+    const nickname = payload.status === 'active' ? payload.identity?.displayName.trim() : '';
+    if (!nickname || !this.deps.setNickname) return;
+    if (this.deps.getNickname?.(payload.accountId)?.trim() === nickname) return;
+
+    try {
+      await Promise.resolve(this.deps.setNickname(payload.accountId, nickname));
+      this.deps.metrics.increment('interaction_account_nickname_total', { status: 'updated' });
+    } catch (error) {
+      this.deps.metrics.increment('interaction_account_nickname_total', { status: 'failed' });
+      this.deps.logger?.warn(
+        `[interaction] account nickname enrichment failed account=${payload.accountId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   async onSyncBatch(payload: InteractionSyncBatchPayload): Promise<InteractionSyncAckPayload> {
