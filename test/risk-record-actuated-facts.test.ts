@@ -115,12 +115,31 @@ test('零回归：额度内的动作，返回值与计数逐位不变', async ()
 test('view 记账后点赞比例规则真正生效（此处的丢弃方向是反的：少记 view = 更宽松）', async () => {
   // likeRatioAllowsNextLike: views < minViewsForLikeRatio ⇒ 直接放行（整条规则被跳过）。
   // 故 view 被少记会跌破阈值、让规则失效 —— 诚实记 view 才让它真正开火。
-  const { c } = makeController({ minViewsForLikeRatio: 10 });
-  for (let i = 0; i < 10; i += 1) await c.record('view');
+  //
+  // ⚠️ 这条测试必须断言 explain() 的 **reason**，不能只断言 canDo() 的布尔：explain 的窗口循环
+  // （minute→hour→day）在比例规则**之前**返回，normal 档 like 分钟窗只有 3
+  // （max(1, min(MINUTE_BURST_CAP=4, ceil(50/20)=3))）⇒ 同一时刻连点 4 次会先撞 quota:minute，
+  // 比例规则根本跑不到。此前本测试正是这么写的：断言 canDo=false 恒成立，**把比例规则整条删掉也照样绿**
+  // （已用突变测试坐实）。故必须先推进时钟排空突发窗，再断言 reason。
+  const { c, advance } = makeController({ minViewsForLikeRatio: 10 });
+  for (let i = 0; i < 10; i += 1) {
+    await c.record('view');
+    advance(60_001); // 排空 view 的分钟窗，确保 10 次都真的落进当日计数
+  }
   assert.equal(c.counts().day.view, 10, 'view 如实累加');
   // 10 次浏览 ⇒ 比例规则开始生效：projected (0+1)/10 = 0.1 <= 0.35 ⇒ 仍允许
-  assert.equal(c.canDo('like'), true);
-  for (let i = 0; i < 4; i += 1) await c.record('like');
-  // projected (4+1)/10 = 0.5 > 0.35 ⇒ 规则真的拦住了
-  assert.equal(c.canDo('like'), false, '比例规则生效——改动前 view 若被丢到不足阈值，这条规则整个不开火');
+  assert.equal(c.explain('like').allowed, true);
+  for (let i = 0; i < 4; i += 1) {
+    await c.record('like');
+    advance(3_600_001); // 排空 like 的分钟/小时突发窗，逼比例规则成为唯一可能的拒因
+  }
+  // projected (4+1)/10 = 0.5 > 0.35 ⇒ 规则真的拦住了。断言 reason 而非布尔：
+  // 布尔会被任何一个窗口满足，reason 只有比例规则能给。
+  const verdict = c.explain('like');
+  assert.equal(verdict.allowed, false);
+  assert.equal(
+    verdict.reason,
+    'ratio:like_view',
+    '拦住它的必须是**比例规则本身**，不是顺带撞上的突发窗——改动前 view 被丢到不足阈值时，这条规则整个不开火',
+  );
 });

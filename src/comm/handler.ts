@@ -562,8 +562,10 @@ export class DefaultMessageHandler implements MessageHandler {
         //     在点击前先失败）clicked 非 true，天然不计——无需任何 reason 分支。
         //   注：`ok` 这一轴仍逐位管着其余五个动作，MUST NOT 整条删除（删了 = 失败的点赞/评论被记成真互动，
         //   直接踩「绝不静默假成功」红线）。这里只把 join_group 从它的合取下解出来。
-        //   注：本闸只决定 emit；真正的计数在 interaction.occurred 的订阅者里（record 内部还会再过一次 canDo，
-        //   故账号被限 / 配额已耗尽时仍不落数）。
+        //   注：本闸只决定 emit；真正的计数在 interaction.occurred 的订阅者里。**emit 即落数**——
+        //   record 已改为无条件写入既成事实（change risk-record-actuated-facts），账号被限 / 配额已耗尽
+        //   时它照样记下（只是返回 false 表示「超策略」）。此前它会在那两种情况下静默丢弃，那是本闸
+        //   上一层的同一个病：拿「该不该」去回答「有没有」。
         if (
           (result.ok || result.action === 'join_group') &&
           (result.action === 'like' || result.action === 'collect' || result.action === 'follow' || result.action === 'comment' || result.action === 'comment_like' || result.action === 'join_group') &&

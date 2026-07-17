@@ -706,7 +706,10 @@ export class CommentScheduler {
    *   容器内搜索 → 选未评候选 → 开帖 → 提交并「服务器确认」。每步有界超时（此路径无巡视看门狗）。
    *
    * 红线：
-   * - 绝不走 onCommentTakeoverStart（那会把账号塞进 manualCommentAccounts 跳过风控计数，违反 2.4）。
+   * - 绝不走 onCommentTakeoverStart（那会把账号塞进 manualCommentAccounts）。**注意本条的理由已经换了**
+   *   （change risk-record-actuated-facts）：该集合**不再跳过风控计数**（手动跳过的是闸、不是账），
+   *   如今它只抑制节奏饱和告警。故本红线不再是「防漏计」，而是「本路径是**自动**真发、不是运营手动，
+   *   不该冒充人工来源去吞掉告警」。结论不变，依据变了——别按旧理由推翻它。
    * - 真发成功的风控计数走 interaction.occurred → RiskController.record('comment') 自动路径（handler.ts），
    *   **绝不在此重复 record**；本方法只在**提交派发前**打 attempted 去重标记（防重复真发 §5.4，与成功计数解耦）。
    */
@@ -1367,8 +1370,9 @@ export class CommentScheduler {
           if (tried >= maxTerms) break;
           tried++;
           // withManualCommitMarker 仅对 priority='human' 生效：发布期间把账号并入 manualCommentAccounts，
-          // 使该 comment 互动跳过风控配额（人工授权语义，change comment-search-command）。自动排期评论(automatic)
-          // 无标记 → 照常计入风控。标记覆盖整段持锁无副作用（仅 comment 互动事件受影响，只在发布时刻发生）。
+          // 标记「这条评论来自运营手动命令」。**它不再让评论跳过风控计数**（change risk-record-actuated-facts：
+          // 人工授权豁免的是配额闸、不是那本账 —— 平台照样看见了这条评论，它照常计入、照常吃自治评论预算）；
+          // 如今该标记只抑制节奏饱和告警。标记覆盖整段持锁无副作用（仅 comment 互动事件受影响，只在发布时刻发生）。
           const attempt = await this.withManualCommitMarker(
             accountId,
             priority,
@@ -1492,7 +1496,12 @@ export class CommentScheduler {
     }
   }
 
-  /** 人工评论沿用“不消耗自动评论配额”语义，但标记只覆盖真 commit，不再整段停止/恢复浏览。 */
+  /**
+   * 人工评论标记：只覆盖真 commit，不整段停止/恢复浏览。
+   *
+   * **语义已变**（change risk-record-actuated-facts）：人工评论**照常消耗**自动评论配额——手动跳过的是
+   * 配额**闸**（不被 canDo('comment') 阻断），不是那本**账**。本标记如今只用于抑制节奏饱和告警。
+   */
   private async withManualCommitMarker<T>(
     accountId: string,
     priority: EdgeTaskPriority,

@@ -999,9 +999,14 @@ async function main(): Promise<void> {
     pipelineLogSink: publishPipelineLogStore,
   });
   // 页面写执行权现由 EdgeTaskLeaseClient + edge EdgeTaskCoordinator 统一管理；发布/评论不再各自 end/resume 浏览。
-  // 手动 /comment 的评论**不计入风控配额**（人工授权，与 /publish 越过风控同理）：评论任务接管期间该账号在此集合，
-  // `interaction.occurred` 的 `RiskController.record` 据此对 `comment` 动作跳过。标记只覆盖获批后的 commit 租约，
-  // 不覆盖 prepare/LLM/人审，也不触发浏览会话生命周期；自动排期 priority=automatic 不进入集合、照常计配额。
+  // 手动 /comment 接管期间该账号在此集合。**它标的是「这条评论来自运营手动命令」，不是「它不算数」**
+  // （change risk-record-actuated-facts）：人工授权豁免的是**配额闸**（不被 canDo('comment') 阻断，
+  // 那道豁免在下发侧），**不是那本账**——平台照样看见了这条评论，故它照常 record、照常吃自治评论预算
+  // （用户裁决 2026-07-17）。此前 `interaction.occurred` 的订阅者据此**整个跳过 record**，使「豁免」与
+  // 「丢数」不可区分；现已摘除，本集合只剩一个用途：**抑制节奏饱和告警**（运营存心为之，「节奏过载」
+  // 对他是噪声不是信号）。标记只覆盖获批后的 commit 租约，不覆盖 prepare/LLM/人审，也不触发浏览会话
+  // 生命周期；自动排期 priority=automatic 不进入集合。
+  // 注：只覆盖 XHS 手动评论（withManualCommitMarker 那条路）；FB 手动 /comment 从不进本集合。
   const manualCommentAccounts = new Set<string>();
   const onCommentTakeoverStart = (accountId: string): void => {
     manualCommentAccounts.add(accountId);
@@ -1379,7 +1384,7 @@ async function main(): Promise<void> {
   // 改道成低优先级运维告警。alertStore 就绪后（见下方）赋值；闭包在事件触发时读取，故此处先声明。
   let pacingAlerter: PacingSaturationAlerter | undefined;
 
-  // RiskController 订阅跨模块事件：真实互动发生时按账号计数（record 内部再过 canDo）。
+  // RiskController 订阅跨模块事件：真实发生的动作按账号计数（record 无条件写入既成事实，其返回值只答「在不在策略内」）。
   eventBus.on('interaction.occurred', (evt) => {
     // retire-default-account：账号归因 honest-fail —— 缺 accountId（握手已保证存在）即丢弃该事件 + 告警，
     // 绝不回落保留键 default（杜绝脏流量记到退役账号名下）。
