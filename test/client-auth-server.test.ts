@@ -10,6 +10,7 @@ import { MemoryDelegatedTaskStore } from '../src/delegated-task/store.js';
 import { DelegatedTaskService } from '../src/delegated-task/service.js';
 import type { CuratedPanelRow } from '../src/cache/curated-content-store.js';
 import { CuratedContentUnavailableError } from '../src/cache/curated-content-store.js';
+import type { UiSlowStartPayload } from '../src/comm/protocol.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 const CLIENT_SECRET = 'client-secret-xyz';
@@ -885,6 +886,256 @@ test('读离线可用，不可逆写离线诚实拒绝(binding_unverified)且零
       });
       assert.equal(draft.status, 409);
       assert.equal((await taskStore.list({ accountId: ACCT_P1, limit: 20 })).length, 0, '离线写绝不落库');
+    },
+  );
+});
+
+// ── 慢启动读写：离线可读写、accountId 由持久绑定解析、诚实失败（change slow-start-offline-toggle）─────────
+
+/**
+ * 慢启动读写 dep 假体。**记录每次写的 (accountId, enabled)**——本 change 的核心断言就是「accountId 来自
+ * 持久绑定、不来自活会话」，故写目标必须被观测到。真态由回调产出（云端算），离线与否与它无关。
+ */
+function makeSlowStartDep(opts: {
+  failWrite?: 'account_not_found' | 'retired_account' | 'unavailable';
+  viewNull?: boolean;
+} = {}): { dep: NonNullable<ClientAuthDeps['slowStart']>; writes: { accountId: string; enabled: boolean }[]; views: string[] } {
+  const writes: { accountId: string; enabled: boolean }[] = [];
+  const views: string[] = [];
+  const dayQuotas: Record<string, number> = { view: 20, like: 8, comment: 3, follow: 2, publish: 1 };
+  const viewFor = (enabled: boolean): UiSlowStartPayload => enabled
+    ? { state: 'active', day: 1, totalDays: 7, since: 1_700_000_000_000, binding: true, eligible: true }
+    : { state: 'off', totalDays: 7, eligible: true };
+  const dep = {
+    async setForEnv(accountId: string, enabled: boolean) {
+      writes.push({ accountId, enabled });
+      if (opts.failWrite) return { ok: false as const, reason: opts.failWrite };
+      return { ok: true as const, slowStart: viewFor(enabled), dayQuotas };
+    },
+    async viewForAccount(accountId: string) {
+      views.push(accountId);
+      if (opts.viewNull) return null;
+      return { slowStart: viewFor(true), dayQuotas };
+    },
+  };
+  return { dep, writes, views };
+}
+
+/** 建一个拥有环境 p1 的已登录客户（p2 归属他人 u2，用于非所有者 fail-closed）。 */
+function ownerOfP1(): ReturnType<typeof makeFakeStore> {
+  const fx = makeFakeStore();
+  fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
+  fx.scope.set('u1', [{ envKey: 'p1', label: 'a', platform: 'facebook', source: 'admin', assignedAt: 0 }]);
+  fx.scope.set('u2', [{ envKey: 'p2', label: 'b', platform: 'facebook', source: 'admin', assignedAt: 0 }]);
+  return fx;
+}
+
+test('慢启动写：边缘离线 + 有持久绑定 → 写入成功、目标 accountId 来自绑定、回执带写后真态', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const { dep, writes } = makeSlowStartDep();
+  await withServer(
+    // resolveEdgeIdForAccount 恒 null = 边缘完全离线（含从未启动）；写路由**不该**碰它 → 仍成功。
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), slowStart: dep, resolveEdgeIdForAccount: () => null },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/slow-start`, { method: 'PUT', headers, body: JSON.stringify({ enabled: true }) });
+      assert.equal(res.status, 200);
+      const body = await res.json() as { data: { envKey: string; slowStart: UiSlowStartPayload; dayQuotas: Record<string, number> } };
+      assert.equal(body.data.envKey, 'p1');
+      assert.equal(body.data.slowStart.state, 'active');
+      assert.ok(body.data.dayQuotas && typeof body.data.dayQuotas === 'object');
+      // accountId 来自持久绑定（ACCT_P1），**不是** envKey 'p1'、也不靠任何活会话反查。
+      assert.deepEqual(writes, [{ accountId: ACCT_P1, enabled: true }]);
+    },
+  );
+});
+
+test('慢启动写：环境无绑定 → 409 binding_unknown 且不写入', async () => {
+  const fx = ownerOfP1(); // p1 归属 u1，但 fx.bindings 未设 → 无绑定
+  const { dep, writes } = makeSlowStartDep();
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), slowStart: dep },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/slow-start`, { method: 'PUT', headers, body: JSON.stringify({ enabled: true }) });
+      assert.equal(res.status, 409);
+      assert.equal((await res.json() as { error: string }).error, 'binding_unknown');
+      assert.equal(writes.length, 0, '未解析出账号绝不写入');
+    },
+  );
+});
+
+test('慢启动写：绑定查询失败 → 503，且 MUST NOT 是 binding_unknown', async () => {
+  const fx = ownerOfP1();
+  // 绑定读因 DB 不可达失败（缺表 42P01 等）→ store 返回 binding_unavailable。
+  (fx.store as unknown as { resolveBoundAccountForEnv: unknown }).resolveBoundAccountForEnv =
+    async () => ({ ok: false as const, reason: 'binding_unavailable' as const });
+  const { dep, writes } = makeSlowStartDep();
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), slowStart: dep },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/slow-start`, { method: 'PUT', headers, body: JSON.stringify({ enabled: true }) });
+      assert.equal(res.status, 503, '查不成 ≠ 没绑定');
+      assert.notEqual((await res.json() as { error: string }).error, 'binding_unknown');
+      assert.equal(writes.length, 0);
+    },
+  );
+});
+
+test('慢启动写：请求体夹带 accountId / since / quotaLevel 一律整块拒（422，不写入）', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const { dep, writes } = makeSlowStartDep();
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), slowStart: dep },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      for (const extra of [{ accountId: ACCT_P1 }, { since: 1 }, { quotaLevel: 'aggressive' }]) {
+        const res = await fetch(`${base}/environments/p1/slow-start`, {
+          method: 'PUT', headers, body: JSON.stringify({ enabled: true, ...extra }),
+        });
+        assert.equal(res.status, 422, `夹带 ${Object.keys(extra)[0]} 必须整块拒`);
+        assert.equal((await res.json() as { error: string }).error, 'validation_failed');
+      }
+      assert.equal(writes.length, 0, '任何夹带都不写入');
+    },
+  );
+});
+
+test('慢启动写：非所有者 fail-closed（403）且不泄露账号身份', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p2', ACCT_P1); // p2 归属 u2、且有绑定——但 u1 不拥有它
+  const { dep, writes } = makeSlowStartDep();
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), slowStart: dep },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p2/slow-start`, { method: 'PUT', headers, body: JSON.stringify({ enabled: true }) });
+      assert.equal(res.status, 403);
+      const text = await res.text();
+      assert.doesNotMatch(text, new RegExp(ACCT_P1), '回包绝不泄露账号身份');
+      assert.equal(writes.length, 0);
+    },
+  );
+});
+
+test('慢启动写：{enabled:false} 走到写目标（accountId,false），回执无「已保存/待下发边缘」二态', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const { dep, writes } = makeSlowStartDep();
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), slowStart: dep },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/slow-start`, { method: 'PUT', headers, body: JSON.stringify({ enabled: false }) });
+      assert.equal(res.status, 200);
+      assert.deepEqual(writes, [{ accountId: ACCT_P1, enabled: false }]);
+      const body = await res.json() as { data: Record<string, unknown> };
+      // data 仅 envKey / slowStart / dayQuotas——慢启动执行体在云端、写入成功即已生效，绝无「待下发边缘」态。
+      assert.deepEqual(Object.keys(body.data).sort(), ['dayQuotas', 'envKey', 'slowStart']);
+      const flat = JSON.stringify(body);
+      for (const banned of ['saved', 'applied', 'edgeDelivery', 'enqueued', 'deferred', '待下发', '已保存', '待应用']) {
+        assert.doesNotMatch(flat, new RegExp(banned), `回执绝不含二态措辞 ${banned}`);
+      }
+    },
+  );
+});
+
+test('慢启动读：从未连接的环境读到真态，回包无 accountId', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const { dep, views } = makeSlowStartDep();
+  await withServer(
+    // 读路由**不该**碰 resolveEdgeIdForAccount（活体佐证只对不可逆写）；恒 null 佐证读与边缘在线无关。
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), slowStart: dep, resolveEdgeIdForAccount: () => null },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/slow-start`, { headers });
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.doesNotMatch(text, new RegExp(ACCT_P1), '读回包 MUST NOT 含 accountId');
+      const body = JSON.parse(text) as { data: { envKey: string; slowStart: UiSlowStartPayload; dayQuotas: Record<string, number> } };
+      assert.equal(body.data.envKey, 'p1');
+      assert.equal(body.data.slowStart.state, 'active');
+      assert.ok(body.data.dayQuotas);
+      assert.deepEqual(views, [ACCT_P1]);
+    },
+  );
+});
+
+test('慢启动读：未绑定环境 → binding_unknown 诚实投影，不编造 state/day/since/totalDays', async () => {
+  const fx = ownerOfP1(); // p1 owned, 无绑定
+  const { dep, views } = makeSlowStartDep();
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), slowStart: dep },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/slow-start`, { headers });
+      assert.equal(res.status, 200);
+      const body = await res.json() as { data: { envKey: string; slowStart: Record<string, unknown> } };
+      assert.deepEqual(body.data.slowStart, { eligible: false, ineligibleReason: 'binding_unknown' });
+      for (const forged of ['state', 'day', 'since', 'totalDays']) {
+        assert.equal(forged in body.data.slowStart, false, `没账号即不知平台，MUST NOT 编造 ${forged}`);
+      }
+      assert.equal(views.length, 0, '没绑定 → 不取 controller（无账号可取）');
+    },
+  );
+});
+
+test('慢启动读：非所有者 fail-closed（403）且不泄露账号身份', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p2', ACCT_P1);
+  const { dep } = makeSlowStartDep();
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), slowStart: dep },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p2/slow-start`, { headers });
+      assert.equal(res.status, 403);
+      assert.doesNotMatch(await res.text(), new RegExp(ACCT_P1));
+    },
+  );
+});
+
+test('慢启动读：绑定查询失败 → 503，MUST NOT 降级为 binding_unknown 或空投影', async () => {
+  const fx = ownerOfP1();
+  (fx.store as unknown as { resolveBoundAccountForEnv: unknown }).resolveBoundAccountForEnv =
+    async () => ({ ok: false as const, reason: 'binding_unavailable' as const });
+  const { dep } = makeSlowStartDep();
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), slowStart: dep },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/slow-start`, { headers });
+      assert.equal(res.status, 503);
+      assert.notEqual((await res.json() as { error: string }).error, 'binding_unknown');
+    },
+  );
+});
+
+test('慢启动读：controller 取用失败（viewForAccount 返回 null）→ 503，不返回看似正常的空投影', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const { dep } = makeSlowStartDep({ viewNull: true });
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), slowStart: dep },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/slow-start`, { headers });
+      assert.equal(res.status, 503);
     },
   );
 });

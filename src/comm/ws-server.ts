@@ -77,11 +77,6 @@ export interface EdgePusher {
    */
   resolveEdgeIdForAccount?(accountId: string, requiredCapability?: string): string | null;
   /**
-   * 反向解析：某边缘连接此刻在跑哪个账号（change account-level-slow-start）。
-   * 只认 OPEN + 非 stale；**多条即诚实失败返回 null，MUST NOT 任取其一**。
-   */
-  resolveAccountIdForEdge?(edgeId: string): string | null;
-  /**
    * 该 edgeId 当前在线连接声明的能力位（change captcha-assist-text-answer，验证码键入 fail-closed 闸）。
    * 只认 OPEN + 非 stale 连接，返回其 hello.capabilities；无在线连接则 undefined（「连接状态未知」，与「在线但
    * 没声明」区分——后者返回不含目标能力的数组）。绝不用 onDetected 快照——incident 可能比连接活得久。
@@ -310,33 +305,6 @@ export class EdgeCloudServer implements EdgePusher {
     return matches[0];
   }
 
-  /**
-   * 反向解析：某边缘连接此刻在跑哪个账号（change account-level-slow-start）。
-   * 与 resolveEdgeIdForAccount 同一循环、判据反过来（只认 OPEN + 非 stale）。
-   *
-   * **多条即诚实失败（返回 null），MUST NOT 任取其一**：与定向发布刻意不同——那边取最早登记者是
-   * 「总得发给一个」的取舍；这边是账号级风控配置的写入目标，猜错就是把慢启动加到别人的号上。
-   * 客户只能改「自己环境上此刻正在跑的那个账号」，解析不出即如实 409。
-   */
-  resolveAccountIdForEdge(edgeId: string): string | null {
-    const now = this.clock();
-    const matches: string[] = [];
-    for (const conn of this.edges.values()) {
-      if (conn.session.edgeId !== edgeId) continue;
-      if (conn.ws.readyState !== WebSocket.OPEN || now - conn.lastSeen >= this.staleAfterMs) continue;
-      const accountId = conn.session.accountId;
-      if (!accountId) continue;
-      if (!matches.includes(accountId)) matches.push(accountId);
-    }
-    if (matches.length !== 1) {
-      if (matches.length > 1) {
-        console.warn(`[ws-server] edgeId=${edgeId} 有 ${matches.length} 个不同账号在线（${matches.join(',')}），慢启动写入拒绝猜测`);
-      }
-      return null;
-    }
-    return matches[0];
-  }
-
   edgeCapabilities(edgeId: string): string[] | undefined {
     const now = this.clock();
     for (const conn of this.edges.values()) {
@@ -348,6 +316,7 @@ export class EdgeCloudServer implements EdgePusher {
     // 无 OPEN + 非 stale 连接 = 连接状态未知 → undefined（调用方 fail-closed）。
     return undefined;
   }
+
 
   private onConnection(ws: WebSocket): void {
     const session: EdgeSession = { sessionId: this.sessionIdGen() };

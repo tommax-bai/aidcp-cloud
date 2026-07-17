@@ -173,6 +173,10 @@ test('schema archives and removes legacy customer claims, then enforces one auth
   assert.match(CLIENT_USERS_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS client_env_provisioning_intents/);
   assert.match(CLIENT_USERS_SCHEMA_SQL, /proof_hash\s+CHAR\(64\)\s+NOT NULL/);
   assert.match(CLIENT_USERS_SCHEMA_SQL, /state IN \('pending','completed','expired'\)/);
+  // PK 单值（change slow-start-offline-toggle，迁移自已删除的 ws-server-resolve-account「多账号即拒绝猜测」）：
+  // client_environments.env_key 是主键 ⇒ 一个环境至多一行 ⇒ 至多一个绑定账号 ⇒「同一环境解析出多个账号、
+  // 须拒绝猜测」的路径**结构上不存在**。这正是慢启动写路由从活会话反查改到持久绑定后歧义消失的根据。
+  assert.match(CLIENT_USERS_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS client_environments\s*\([\s\S]*?env_key\s+TEXT\s+PRIMARY KEY/);
   assert.match(CLIENT_USERS_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS client_env_revocation_holds/);
   assert.match(CLIENT_USERS_SCHEMA_SQL, /env_key\s+TEXT\s+NOT NULL UNIQUE/);
   assert.match(CLIENT_USERS_SCHEMA_SQL, /client_env_scope_cleanup_hold_guard/);

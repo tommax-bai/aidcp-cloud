@@ -41,7 +41,7 @@ export interface ClientAuthDeps {
   referenceDraftCountForAccount?: (accountId: string) => Promise<number>;
   /**
    * 环境→edgeId 活会话反查（change curated-envkey-account-binding，D5 活体佐证）。返回 `ads-<envKey>` 或 null。
-   * **刻意用 resolveEdgeIdForAccount（幸存者），绝不用 resolveAccountIdForEdge（将被慢启动 change 删除）**——
+   * **刻意用 resolveEdgeIdForAccount（幸存者）；反方向的 resolveAccountIdForEdge 已被慢启动 change 删除**——
    * 给后者新增调用方会把那次删除卡死。仅用于不可逆写（create-post / 建委托任务）的绑定活体佐证；读路由绝不用。
    */
   resolveEdgeIdForAccount?: (accountId: string) => string | null;
@@ -49,17 +49,24 @@ export interface ClientAuthDeps {
     handle(req: http.IncomingMessage, res: http.ServerResponse, userId: string): Promise<boolean>;
   };
   /**
-   * 账号级慢启动写入（change account-level-slow-start）。
+   * 账号级慢启动读写（change account-level-slow-start；离线可读写 change slow-start-offline-toggle）。
    *
-   * **accountId 由云端经活会话映射解析、客户端永不提交**——红线已成文：accountId is never
-   * accepted as an unverified cross-customer selector。客户只能改「自己环境上此刻正在跑的那个账号」：
-   * ownership 由 ownsEnv(userId, envKey) 判定（管理员授予的 env_key），accountId 由 envKey→edgeId→
-   * 活连接反查，解析不出即 409。
+   * **accountId 由路由经持久绑定解析、客户端永不提交**——红线已成文：accountId is never accepted as an
+   * unverified cross-customer selector。客户只能改「自己环境上已绑定的那个账号」：ownership + 绑定 + accounts
+   * 存在 + 跨客户争用由 store.resolveBoundAccountForEnv(userId, envKey) 一次现读完成（**不依赖边缘在线**，
+   * 绑定持久在库），本回调只拿着已解析出的 accountId 写入 / 读回同一个 controller 的真态。
+   *
+   * `setForEnv` 的执行体在云端配额计算内、经运行时现读生效 ⇒ 云端写入成功即为已生效，绝无「待下发边缘」态。
+   * `viewForAccount` 为不依赖边缘的读投影（GET /environments/:envKey/slow-start）：与写路由 / ui.snapshot 同一个
+   * controller 产出（同一 anchor、同一次 clock）；DB 不可达即 null → 路由 503（绝不降级成看似正常的空投影）。
    */
   slowStart?: {
-    setForEnv(envKey: string, enabled: boolean): Promise<
+    setForEnv(accountId: string, enabled: boolean): Promise<
       | { ok: true; slowStart: UiSlowStartPayload; dayQuotas: Record<string, number> }
-      | { ok: false; reason: 'edge_offline' | 'account_not_found' | 'retired_account' | 'unavailable' }
+      | { ok: false; reason: 'account_not_found' | 'retired_account' | 'unavailable' }
+    >;
+    viewForAccount(accountId: string): Promise<
+      { slowStart: UiSlowStartPayload; dayQuotas: Record<string, number> } | null
     >;
   };
   onOffboardCreated?: (offboard: ClientOffboardView) => Promise<void>;
@@ -208,7 +215,7 @@ function sendBindingFailure(res: http.ServerResponse, reason: Exclude<ResolvedBi
  * 绑定是上一次握手的事实、可能陈旧——对**读**（幂等、可回头）无所谓，对**不可逆写**（发布出去收不回）MUST 佐证。
  *
  * 判据 = `resolveEdgeIdForAccount(boundAccountId) === 'ads-' + envKey`：语义正是「我解析出的账号此刻是否正跑在这个
- * 环境上」。**用幸存者 resolveEdgeIdForAccount，绝不用将被删的 resolveAccountIdForEdge**。多连接时前者取最早登记者
+ * 环境上」。**用幸存者 resolveEdgeIdForAccount；反方向的 resolveAccountIdForEdge 已被慢启动 change 删除**。多连接时前者取最早登记者
  * ⇒ 可能误拒；误拒可接受（fail-closed + 有日志），误放不可接受。dep 缺失 ⇒ 无法佐证 ⇒ fail-closed。
  * **MUST NOT 用于读路由**——在读上要求边缘在线正是本 change 修的那个缺陷本身。
  */
@@ -310,14 +317,18 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       return;
     }
 
-    // 账号级慢启动开关（change account-level-slow-start）：env-scoped 写。
+    // 账号级慢启动开关（change account-level-slow-start；**离线可读写** change slow-start-offline-toggle）：env-scoped。
     //
-    // **绝不走 WS 写**：ws-server 全文无鉴权，session.accountId 是边缘 hello 里自报的字符串
-    // ——改一个字符串就能替别人关慢启动。这里 ownership 由管理员授予的 env_key 判定（fail-closed），
-    // accountId 由云端经活会话映射解析、客户端永不提交。
+    // **绝不走 WS 写**（仍成立）：ws-server 全文无鉴权，session.accountId 是边缘 hello 里自报的字符串
+    // ——改一个字符串就能替别人关慢启动。**accountId 由云端解析、客户端永不提交**（仍成立）。
     //
-    // **「边缘不在线就改不了」不是缺陷**：慢启动状态本身就搭在 ui.snapshot.dailyUsage 上，
-    // 边缘离线时这张卡本来就不更新、开关本来就该禁用——两者是同一件事，不额外损失。
+    // **原作者「边缘不在线就改不了不是缺陷」的论断已被用户裁定推翻**（change slow-start-offline-toggle）：
+    // 那半个论点里为真的只是「用量计数来自 ui.snapshot.dailyUsage、边缘离线时确实陈旧」；但慢启动**真态**
+    // （state/day/since/binding 与当日上限）是**纯云端**算出的（controller.slowStartView + effectiveQuotas，
+    // 零边缘输入），写入的执行体也在云端配额计算内、经运行时现读生效。真态与用量是共用一张卡的两条独立通路，
+    // 「离线不刷新」只打到用量那半条、打不到真态。而运营做「接下来这一程按不按曲线放量」的决定，最自然的时刻
+    // 恰恰是浏览器还没起来时。因此 accountId 改由**持久绑定**解析（resolveBoundAccountForEnv，离线可解、
+    // env_key 为 PK ⇒ 至多一个账号），不再要求边缘在线；离线时卡上仍诚实呈现「真态新鲜 + 用量标注为可能陈旧」。
     if (method === 'PUT' && /^\/environments\/[^/]+\/slow-start$/.test(url)) {
       const envKey = decodeURIComponent(url.split('/')[2] ?? '').trim();
       if (!deps.slowStart) {
@@ -331,7 +342,8 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
-      // 严格 onlyKeys：绝不接受 accountId 之类的跨客户选择器混进来。
+      // 严格 onlyKeys：绝不接受 accountId / since / quotaLevel 之类的跨客户选择器混进来（先于绑定解析，
+      // 坏 body 一律 422，不因 ownership 差异漏出状态码侧信道）。
       if (!body || typeof body !== 'object' || Array.isArray(body)) {
         sendJson(res, 400, { error: 'bad_request' });
         return;
@@ -342,17 +354,16 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         sendJson(res, 422, { error: 'validation_failed', reason: 'only_enabled_boolean_accepted' });
         return;
       }
-      // 授权 fail-closed：envKey 必须属于该客户。
-      if (!envKey || !(await deps.store.ownsEnv(userId, envKey))) {
-        sendJson(res, 403, { error: 'environment_not_owned' });
+      // accountId 经**持久绑定**解析（不依赖边缘在线）：ownership + 绑定 + accounts 存在 + 跨客户争用一次现读。
+      // 未解析 MUST 响亮回报——environment_not_owned(403，不泄露账号) / binding_unknown(409) /
+      // binding_conflict(409，安全事件，与 unknown 分码) / binding_unavailable(503)——绝不猜账号、绝不 200-空。
+      const bound = await deps.store.resolveBoundAccountForEnv(userId, envKey);
+      if (!bound.ok) {
+        sendBindingFailure(res, bound.reason);
         return;
       }
-      const result = await deps.slowStart.setForEnv(envKey, enabled);
+      const result = await deps.slowStart.setForEnv(bound.accountId, enabled);
       if (!result.ok) {
-        if (result.reason === 'edge_offline') {
-          sendJson(res, 409, { error: 'edge_offline', message: '该环境当前未连接，暂时无法更改。' });
-          return;
-        }
         if (result.reason === 'unavailable') {
           sendJson(res, 503, { error: 'slow_start_unavailable' });
           return;
@@ -365,6 +376,44 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       // 照抄一个不存在的状态同样是撒谎。（两者绑定：若把 provider 偷懒做成构造期读入，这句立刻变谎言。）
       sendJson(res, 200, {
         data: { envKey, slowStart: result.slowStart, dayQuotas: result.dayQuotas },
+        meta: { requestId: randomUUID(), asOf: Date.now() },
+      });
+      return;
+    }
+
+    // 不依赖边缘的慢启动读（change slow-start-offline-toggle，GET /environments/:envKey/slow-start）：
+    // 让从未连过云端、因而没有活快照的环境也能把这一行渲染出来（否则客户端整行不渲染 = 用户无从分辨
+    // 是没支持 / 坏了 / 在等他做什么）。同一份持久绑定解析、同一 ownership fail-closed、同一个 controller 产出。
+    if (method === 'GET' && /^\/environments\/[^/]+\/slow-start$/.test(url)) {
+      const envKey = decodeURIComponent(url.split('/')[2] ?? '').trim();
+      if (!deps.slowStart) {
+        sendJson(res, 503, { error: 'slow_start_unavailable' });
+        return;
+      }
+      const bound = await deps.store.resolveBoundAccountForEnv(userId, envKey);
+      if (!bound.ok) {
+        // binding_unknown 在**读**路由上是一等**可见态**（不是错误）：没有账号即回一个诚实的不可用投影，
+        // 让客户端把这一行渲染出来并给出可行动的下一步。**MUST NOT 编造 state/day/since/totalDays**——
+        // 没账号即不知平台，任何默认值都是伪造。其余（not_owned 403 / conflict 409 / unavailable 503）仍是硬失败。
+        if (bound.reason === 'binding_unknown') {
+          sendJson(res, 200, {
+            data: { envKey, slowStart: { eligible: false, ineligibleReason: 'binding_unknown' } },
+            meta: { requestId: randomUUID(), asOf: Date.now() },
+          });
+          return;
+        }
+        sendBindingFailure(res, bound.reason);
+        return;
+      }
+      const view = await deps.slowStart.viewForAccount(bound.accountId);
+      if (!view) {
+        // controller 取用失败（DB 不可达等）→ 503，**绝不**降级成看似正常的空投影或 binding_unknown。
+        sendJson(res, 503, { error: 'slow_start_unavailable' });
+        return;
+      }
+      // 回包 MUST NOT 含 accountId（读路由不得开侧门泄露账号身份，与「非所有者 fail-closed」同口径）。
+      sendJson(res, 200, {
+        data: { envKey, slowStart: view.slowStart, dayQuotas: view.dayQuotas },
         meta: { requestId: randomUUID(), asOf: Date.now() },
       });
       return;

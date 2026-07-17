@@ -4229,6 +4229,19 @@ async function main(): Promise<void> {
   // N1 头号风险：AIDCP_CLIENT_JWT_SECRET 与面板密钥相同则边界坍塌 → startClientAuthApi 内硬断言拒启。
   if (clientAuthPort) {
     try {
+      // 慢启动读写共用的投影产出（change account-level-slow-start / slow-start-offline-toggle）：与 ui.snapshot
+      // 的慢启动投影**同一个 controller**（同一 anchor 解析、同一次 clock）→ 徽章天数与生效上限同源同规则。
+      // dayQuotas 亦过客户端信任边界，与 ui.snapshot 上限投影同规则剥去平台不支持项（change platform-honest-usage-caps）。
+      const buildSlowStartView = async (accountId: string) => {
+        const controller = await riskRegistry.getController(accountId);
+        return {
+          slowStart: controller.slowStartView(),
+          dayQuotas: omitUnsupportedUsageMetrics(
+            accountStore?.platformFor?.(accountId),
+            pickDailyUsageCounts(controller.effectiveQuotas().day),
+          ) as Record<string, number>,
+        };
+      };
       const clientAuth = await startClientAuthApi(
         {
           store: clientUserStore,
@@ -4238,33 +4251,28 @@ async function main(): Promise<void> {
           curatedContent: curatedContentStore,
           referenceDraftCountForAccount: (accountId) => publishLogStore.countReferenceDraftsForAccount(accountId),
           // D5 活体佐证（change curated-envkey-account-binding）：不可逆写要求绑定账号此刻活在该环境上。
-          // 幸存者 resolveEdgeIdForAccount（account→edge），绝不用将被慢启动 change 删除的 resolveAccountIdForEdge。
+          // 幸存者 resolveEdgeIdForAccount（account→edge）；反方向的 resolveAccountIdForEdge 已被慢启动 change 删除。
           resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
           interactionApi: interactionCustomerApi,
-          // 账号级慢启动写入（change account-level-slow-start）：envKey → edgeId → 活会话反查 accountId。
-          // envKey→edgeId 是确定性映射（边缘 fleet 用 `ads-${profileId}` 作 edgeId，客户端的 envKey 即 profileId）。
-          // accountId 全程由云端解析，客户端永不提交。
+          // 账号级慢启动读写（change account-level-slow-start；**离线可读写** change slow-start-offline-toggle）。
+          // accountId 由路由经**持久绑定**（resolveBoundAccountForEnv）解析后传入——不再靠活会话反查，故边缘离线
+          // （含从未启动）也能读写。本回调只拿着已解析出的 accountId 做写入 / 读回同一个 controller 的真态。
           slowStart: {
-            setForEnv: async (envKey, enabled) => {
+            setForEnv: async (accountId, enabled) => {
               if (!accountStore?.setSlowStart) return { ok: false as const, reason: 'unavailable' as const };
-              const accountId = server.resolveAccountIdForEdge(`ads-${envKey}`);
-              // 解析不出 = 该环境此刻没有唯一在跑的账号 → 如实 409，绝不猜一个写进去。
-              if (!accountId) return { ok: false as const, reason: 'edge_offline' as const };
               const written = await accountStore.setSlowStart(accountId, enabled, Date.now());
               if (!written.ok) return { ok: false as const, reason: written.reason };
               // 写后真态从**同一个 controller** 取：provider 现读 → 这里读到的就是此刻真正生效的。
-              const controller = await riskRegistry.getController(accountId);
-              return {
-                ok: true as const,
-                slowStart: controller.slowStartView(),
-                // 与 ui.snapshot 的上限投影同源同规则（change platform-honest-usage-caps）：这份回执也过客户
-                // 端信任边界。不一起摘 = 同名同源的两份上限一份诚实一份撒谎，而两边都是宽松 Record<string,number>、
-                // typecheck 抓不到这种漂移。
-                dayQuotas: omitUnsupportedUsageMetrics(
-                  accountStore.platformFor?.(accountId),
-                  pickDailyUsageCounts(controller.effectiveQuotas().day),
-                ) as Record<string, number>,
-              };
+              return { ok: true as const, ...(await buildSlowStartView(accountId)) };
+            },
+            // 不依赖边缘的读投影（GET /environments/:envKey/slow-start）：与写路由 / ui.snapshot 同一个 controller
+            // 产出。DB 不可达 / controller 取用失败即 null → 路由 503（绝不降级成看似正常的空投影）。
+            viewForAccount: async (accountId) => {
+              try {
+                return await buildSlowStartView(accountId);
+              } catch {
+                return null;
+              }
             },
           },
           onOffboardCreated: async (offboard) => {
