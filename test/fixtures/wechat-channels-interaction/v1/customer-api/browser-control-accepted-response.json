@@ -1,0 +1,14 @@
+{
+  "data": {
+    "envKey": "env_wc_demo",
+    "accountId": "acct_wc_demo",
+    "action": "browser_control",
+    "browserAction": "open",
+    "actionRequestId": "browser-control-request-001",
+    "status": "accepted"
+  },
+  "meta": {
+    "requestId": "customer-browser-control-api-001",
+    "asOf": 1784044845000
+  }
+}

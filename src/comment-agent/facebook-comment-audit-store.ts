@@ -24,6 +24,7 @@ export type FacebookCommentOutcome =
   | 'login_required' // 登录失效 / checkpoint
   | 'submit_failed' // 提交失败
   | 'verification_ambiguous' // 提交后无法确认
+  | 'pending_group_approval' // 群参与审批入群闸：评论未上墙、待管理员批准（未真发、绝不染绿/去重）
   | 'not_wired'; // 真发执行尚未接入（当前）
 
 export interface FacebookCommentAuditRow {

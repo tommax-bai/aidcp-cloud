@@ -97,7 +97,7 @@ test('approved command is persisted as one attempt and dispatched to one account
         browserState: 'closed', capabilities: { commentsRead: true, commentsReply: true, dmRead: true,
           dmSendText: true, dmSendImage: false },
         identity: { externalId: 'finder', displayName: '示例视频号', identityHash: `sha256:${'1'.repeat(64)}` },
-        checkedAt: now - 1_000, reasonCode: null,
+        runtimeControlsVersion: 0, checkedAt: now - 1_000, reasonCode: null,
       },
     }),
     sendWindowCounts: async () => ({ minute: 0, hour: 0, day: 0, lastThreadSendAt: null }),
@@ -162,4 +162,62 @@ test('startup/reconnect recovery emits verification-only reconcile and never rep
   assert.equal(await sender.reconcileRecoverable(base.thread.accountId, 'edge-recovery'), 1);
   assert.deepEqual(pushed.map((envelope) => envelope.type), ['interaction.reply.reconcile']);
   assert.deepEqual((pushed[0].payload as { attempts: Array<{ command: unknown }> }).attempts[0].command, command);
+});
+
+test('browser foreground control requires the negotiated capability and pushes an exact scope-bound command', () => {
+  const pushed: Envelope[] = [];
+  const resolutions: Array<[string, string | undefined]> = [];
+  const sender = new InteractionSendOrchestrator({
+    store: {} as InteractionStore,
+    configs: {} as ReplyConfigStore,
+    pusher: {
+      resolveEdgeIdForAccount: (accountId: string, capability?: string) => {
+        resolutions.push([accountId, capability]);
+        return capability === 'interaction_browser_control_v1' ? 'edge-browser-control' : null;
+      },
+      pushToEdges: (envelope: Envelope, edgeId?: string) => {
+        assert.equal(edgeId, 'edge-browser-control');
+        pushed.push(envelope);
+        return 1;
+      },
+    } as EdgePusher,
+    controllerFor: () => undefined,
+    metrics: new InteractionMetrics(),
+    env: {},
+    clock: () => now,
+  });
+
+  const requestId = sender.requestBrowserControl({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo', action: 'open' });
+  assert.deepEqual(resolutions, [['acct_wc_demo', 'interaction_browser_control_v1']]);
+  assert.equal(pushed[0].type, 'interaction.browser.control');
+  assert.deepEqual(pushed[0].payload, {
+    requestId,
+    envKey: 'env_wc_demo',
+    accountId: 'acct_wc_demo',
+    platform: 'wechat_channels',
+    action: 'open',
+    requestedAt: now,
+  });
+});
+
+test('browser foreground control fails honestly when only an old Edge is online', () => {
+  const sender = new InteractionSendOrchestrator({
+    store: {} as InteractionStore,
+    configs: {} as ReplyConfigStore,
+    pusher: {
+      resolveEdgeIdForAccount: () => null,
+      pushToEdges: () => 0,
+      edgeCount: () => 1,
+      onlineEdgeCount: () => 1,
+      pauseEdge: () => {},
+      resumeEdge: () => {},
+    },
+    controllerFor: () => undefined,
+    metrics: new InteractionMetrics(), env: {}, clock: () => now,
+  });
+  assert.throws(
+    () => sender.requestBrowserControl({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo', action: 'close' }),
+    (error: unknown) => (error as { code?: string; httpStatus?: number }).code === 'INTERACTION_UPSTREAM_UNAVAILABLE'
+      && (error as { httpStatus?: number }).httpStatus === 503,
+  );
 });

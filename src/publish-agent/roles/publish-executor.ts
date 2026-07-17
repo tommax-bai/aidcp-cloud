@@ -69,7 +69,9 @@ export interface BotChatStore {
   getDefaultChat(): Promise<{ chatId: string } | null>;
 }
 
-type ApprovalCardTargetSource = 'manual_source' | 'default_chat' | 'none';
+// 与 publish-agent/types.ts 的 PublishResult['approvalCard'].targetSource **逐字一致**（漂移 typecheck 抓不到）。
+// 标的是哪条解析路径产出了目标、不是落点（落点看 targetChatId）。
+type ApprovalCardTargetSource = 'manual_source' | 'account_scope' | 'default_chat' | 'none';
 
 interface ApprovalCardSendResult {
   sent: boolean;
@@ -82,6 +84,12 @@ export interface PublishExecutorDeps {
   store: PublishLogStore;
   messenger?: ApprovalMessenger;
   botChatStore?: BotChatStore;
+  /**
+   * 审批卡目标统一解析（change unify-card-routing-origin-then-team）：来源会话 → 账号团队群 → 默认群。
+   * 注入后**取代** botChatStore.getDefaultChat 兜底——自动 / 排期发帖的审批卡由此进入账号团队群，
+   * 而非一律落默认群。未注入（旧构造 / 桩）→ 退回 getDefaultChat，行为逐字不变。
+   */
+  resolveCardChatId?: (originChatId: string | undefined, accountId: string | undefined) => Promise<string>;
   /**
    * 陪伴界面通知（change edge-companion-ui 8.1，可选）：草稿落库候审 + 审批卡已发后，
    * 把 pending 状态推给该账号的在线边缘（发布卡自动展开）。绝不阻塞/影响发布主链路。
@@ -116,6 +124,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
   private store: PublishLogStore;
   private messenger?: ApprovalMessenger;
   private botChatStore?: BotChatStore;
+  private resolveCardChatId?: (originChatId: string | undefined, accountId: string | undefined) => Promise<string>;
   private notifyPublishPending?: (accountId: string, recordId: number, title: string) => void;
   private getAccountName?: (accountId: string) => string | undefined;
   private writeApprovalSignal?: (
@@ -130,6 +139,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     this.store = deps.store;
     this.messenger = deps.messenger;
     this.botChatStore = deps.botChatStore;
+    this.resolveCardChatId = deps.resolveCardChatId;
     this.notifyPublishPending = deps.notifyPublishPending;
     this.getAccountName = deps.getAccountName;
     this.writeApprovalSignal = deps.writeApprovalSignal;
@@ -543,6 +553,15 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     const trigger = context.get('trigger') as TriggerInput | undefined;
     const manualChatId = trigger?.manualApprovalChatId?.trim();
     if (manualChatId) return { chatId: manualChatId, source: 'manual_source' };
+
+    // change unify-card-routing-origin-then-team：无来源会话（自动 / 排期 / 面板 / 边缘）不再直落默认群，
+    // 先按账号团队路由。解析器内部已把「未绑团队 / 未命中 / 读失败」补集回落到默认群链——故 account_scope
+    // 只声称「走了账号作用域这条解析路径」，落点是团队群还是默认群由 targetChatId 如实呈现，绝不冒称。
+    if (this.resolveCardChatId) {
+      const chatId = await this.resolveCardChatId(undefined, trigger?.accountId);
+      if (chatId) return { chatId, source: 'account_scope' };
+      return { source: 'none' };
+    }
 
     const chat = await this.botChatStore?.getDefaultChat();
     if (chat?.chatId) return { chatId: chat.chatId, source: 'default_chat' };

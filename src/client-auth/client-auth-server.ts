@@ -21,6 +21,7 @@ import type { ClientOffboardView } from './client-user-store.js';
 import type { LoginRateLimiter } from './rate-limiter.js';
 import { DelegatedTaskServiceError, type DelegatedTaskService } from '../delegated-task/service.js';
 import type { DelegatedTaskIntent, JsonValue } from '../delegated-task/types.js';
+import { clampClientApprovalMode } from '../delegated-task/types.js';
 import type { CuratedContentStore, CuratedPanelRow, CuratedReferenceImage } from '../cache/curated-content-store.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -427,6 +428,73 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       sendJson(res, 200, { item: toClientCuratedDetail(row) });
       return;
     }
+    // 官方 Electron 主进程的窄创建例外：先取一次性 intent，再用本次 user/create 的真实 envKey 完成。
+    // proof 不写日志、不进入 renderer；普通 attach 路由仍在下方固定 403。
+    if (method === 'POST' && url === '/environment-provisioning/intents') {
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body as object).length !== 0) {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const result = await deps.store.createProvisioningIntent(userId);
+      if (!result.ok) {
+        sendJson(res, result.reason === 'disabled' ? 401 : 503, { error: result.reason });
+        return;
+      }
+      sendJson(res, 201, {
+        data: { intentId: result.intentId, proof: result.proof, expiresAt: result.expiresAt },
+        meta: { requestId: randomUUID(), asOf: Date.now() },
+      });
+      return;
+    }
+    if (method === 'POST' && url === '/environment-provisioning/complete') {
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const raw = body as Record<string, unknown>;
+      const allowed = new Set(['intentId', 'proof', 'envKey', 'label', 'platform']);
+      if (Object.keys(raw).some((key) => !allowed.has(key)) ||
+          typeof raw.intentId !== 'string' || typeof raw.proof !== 'string' ||
+          typeof raw.envKey !== 'string' || (raw.label != null && typeof raw.label !== 'string') ||
+          typeof raw.platform !== 'string') {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const result = await deps.store.completeProvisioningIntent(userId, {
+        intentId: raw.intentId,
+        proof: raw.proof,
+        envKey: raw.envKey,
+        label: raw.label as string | null | undefined,
+        platform: raw.platform,
+      });
+      if (!result.ok) {
+        const status = result.reason === 'disabled' ? 401 :
+          result.reason === 'invalid_intent' ? 404 :
+            result.reason === 'intent_expired' ? 410 :
+              result.reason === 'invalid_environment' ? 400 : 409;
+        sendJson(res, status, { error: result.reason });
+        return;
+      }
+      sendJson(res, result.idempotent ? 200 : 201, {
+        data: { environment: result.environment, idempotent: result.idempotent },
+        meta: { requestId: randomUUID(), asOf: Date.now() },
+      });
+      return;
+    }
     // 环境归属只能来自内部权威注册表 + 管理员分配。保留旧路由用于明确拒绝
     // 老客户端，绝不把客户提交的 envKey 写入归属表。
     if (method === 'POST' && url === '/environments') {
@@ -504,6 +572,8 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
           ...raw as DelegatedTaskIntent,
           accountId: envKey,
           source: 'edge',
+          // change delegated-approvalmode-clamp：客户端体不可信，绝不放行 auto_approve（否则免审绕过审批闸）。
+          approvalMode: clampClientApprovalMode(raw.approvalMode),
           sourceRef: typeof raw.sourceRef === 'string' && raw.sourceRef.trim()
             ? raw.sourceRef.trim()
             : `edge:${envKey}:${Date.now()}`,

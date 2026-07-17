@@ -45,6 +45,7 @@ import {
   CaptchaAssistService,
   edgeCommandToEnvelope,
   type Envelope,
+  makeEnvelope,
 } from './comm/index.js';
 
 
@@ -69,6 +70,11 @@ import { PersonaGenerator } from './agents/persona-generator.js';
 import { CommentTargetPicker } from './agents/comment-target-picker.js';
 import { buildCommentApprovalCard } from './feishu/comment-approval-card.js';
 import { buildCommandResultCard } from './feishu/cards.js';
+import {
+  buildMandatoryCommentOutcomeCard,
+  buildMandatoryCommentPreAuthorizationCard,
+} from './feishu/mandatory-comment-cards.js';
+import type { MandatoryCommentOutcomeNoticeInput } from './orchestrator/role-dispatcher.js';
 import { CommentScheduler } from './comment-agent/comment-scheduler.js';
 import { loadSoul, type Soul } from './soul/index.js';
 
@@ -83,6 +89,7 @@ import {
   isFeishuWsEnabled,
   resolveDefaultChatId,
   resolveChatIdForAccount,
+  resolveCardTarget,
   getApprovalSignalPath,
   writeApprovalSignal,
   matchAccountByNickname,
@@ -187,7 +194,8 @@ import {
   createDelegatedExecutorRouter,
   type DelegatedTask,
 } from './delegated-task/index.js';
-import { DelegatedTaskNotificationGate, delegatedPublishOutcomeReceipt } from './delegated-task/notification.js';
+import { DelegatedTaskNotificationGate, delegatedTaskFailureReceipt } from './delegated-task/notification.js';
+import { platformRegistryEntry } from './platform/index.js';
 import {
   buildDelegatedTaskConfirmationCard,
   buildDelegatedTaskProgressCard,
@@ -245,7 +253,10 @@ import {
   parseInteractionPanelGrants,
   INTERACTION_OFFBOARDING_CAPABILITY,
   INTERACTION_REPLY_RECOVERY_CAPABILITY,
+  INTERACTION_RUNTIME_CONTROLS_CAPABILITY,
+  type InteractionRuntimeControlsPayload,
 } from './interactions/index.js';
+import { projectRuntimeControls } from './interactions/runtime-controls-provider.js';
 
 function readEnvString(name: string): string | undefined {
   const value = process.env[name];
@@ -1123,6 +1134,22 @@ async function main(): Promise<void> {
       logger: console,
     });
 
+  // 一切出站卡片 / 告警的**唯一**目标解析入口（change unify-card-routing-origin-then-team）：
+  // 来源会话（命令触发）→ 账号团队群 → 默认群。同上，依赖只在此一处注入。
+  // 新增发送点一律走这里：内联 resolveDefaultChatId / getDefaultChat / FEISHU_CHAT_ID 会绕过
+  // config-gap 诊断，让「没接线」与「配错了」在运营视角不可区分。
+  const resolveCardChatId = (originChatId: string | undefined | null, accountId: string | undefined): Promise<string> =>
+    resolveCardTarget(
+      { originChatId, accountId },
+      {
+        accountStore,
+        groupRouteStore,
+        botChatStore,
+        fallbackChatId: process.env.FEISHU_CHAT_ID,
+        logger: console,
+      },
+    );
+
   let facebookPublishMediaStore: FacebookPublishMediaStore | undefined;
   try {
     const store = new FacebookPublishMediaStore({
@@ -1726,8 +1753,8 @@ async function main(): Promise<void> {
     alertStore,
     getAccountName: accountDisplayName,
     assist: captchaAssist,
-    resolveChatId: () =>
-      resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console }),
+    // change unify-card-routing-origin-then-team：验证码告警按账号路由到团队群（无账号 → 默认群）。
+    resolveChatId: (accountId) => resolveCardChatId(undefined, accountId),
   });
   // A 阶段1 发布指令编排器：逐条下发 publish.command、按 recordId+seq 关联 publish.command.result。
   // FB 正文逐字输入：填写这一步的预算随正文长度伸缩下发；上限按发布租约 TTL 收敛，
@@ -1812,12 +1839,28 @@ async function main(): Promise<void> {
   // 建号自助人设生成器（change edge-persona-keyword-generation）：复用共享 llm（按角色 browse:persona_generator
   // 解析模型/温度、按 accountId 记账），生成 persona.generate 的草稿。
   const personaGenerator = new PersonaGenerator({ llm });
+  const interactionGlobalWriteEnabled = ['1', 'true', 'yes', 'on'].includes(
+    (readEnvString('AIDCP_INTERACTION_WRITE_ENABLED') ?? '').toLowerCase(),
+  );
+  const interactionRuntimeControls = interactionStore && interactionInbox
+    ? {
+        getSnapshot: async (accountId: string): Promise<InteractionRuntimeControlsPayload> => {
+          return projectRuntimeControls({
+            getRuntimeControls: (id) => interactionStore!.getRuntimeControls(id),
+            hasPendingOffboard: (id) => interactionInbox!.hasPendingOffboard(id),
+            globalWriteEnabled: interactionGlobalWriteEnabled,
+          }, accountId);
+        },
+      }
+    : undefined;
   const handler = new DefaultMessageHandler({
     planner,
     llm,
     cache,
     messenger,
     botChatStore,
+    // change unify-card-routing-origin-then-team：边缘发起的发布审批卡也走统一解析（账号团队群 → 默认群）。
+    resolveCardChatId,
     approvalChatId: process.env.FEISHU_CHAT_ID,
     eventBus,
     accountState,
@@ -1850,6 +1893,7 @@ async function main(): Promise<void> {
     // （PUT 后下次握手即新值 = 热加载）。init 失败也安全：空镜像 → floorFor 逐项回落 BUILTIN_FLOOR 内置默认。
     pacingFloors: pacingConfigStore,
     interactionInbox,
+    interactionRuntimeControls,
   });
   // 陪伴界面快照层（edge-companion-ui 8.1）：前向引用（服务实例在 server 起后构造，同 pusher 闭包模式）。
   const server = new EdgeCloudServer({
@@ -1910,6 +1954,21 @@ async function main(): Promise<void> {
     ? new InteractionOffboardingService({ store: interactionStore, pusher: server, metrics: interactionMetrics })
     : undefined;
   const interactionPanelGrants = parseInteractionPanelGrants(readEnvString('AIDCP_INTERACTION_PANEL_GRANTS'));
+  const deliverInteractionRuntimeControls = async (controls: import('./interactions/types.js').RuntimeControls): Promise<{ delivered: number }> => {
+    if (!interactionRuntimeControls) return { delivered: 0 };
+    const edgeId = server.resolveEdgeIdForAccount(
+      controls.accountId,
+      INTERACTION_RUNTIME_CONTROLS_CAPABILITY,
+    );
+    if (!edgeId) return { delivered: 0 };
+    const payload = await interactionRuntimeControls.getSnapshot(controls.accountId);
+    return {
+      delivered: server.pushToEdges(
+        makeEnvelope('interaction.runtime.controls', `runtime-controls-${controls.accountId}-${controls.version}`, Date.now(), payload),
+        edgeId,
+      ),
+    };
+  };
   const interactionInternalApi = interactionStore && replyConfigStore && replyWorkflow
     ? new InteractionInternalApi({
       store: interactionStore,
@@ -1917,15 +1976,18 @@ async function main(): Promise<void> {
       workflow: replyWorkflow,
       grantsFor: (actor) => interactionPanelGrants.get(actor) ?? new Set(),
       cursorSecret: readEnvString('AIDCP_PANEL_JWT_SECRET') ?? '',
+      onRuntimeControlsUpdated: deliverInteractionRuntimeControls,
     })
     : undefined;
   const clientCursorSecret = readEnvString('AIDCP_CLIENT_JWT_SECRET');
-  const interactionCustomerApi = interactionStore && replyWorkflow && interactionSender && clientCursorSecret
+  const interactionCustomerApi = interactionStore && replyConfigStore && replyWorkflow && interactionSender && clientCursorSecret
     ? new InteractionCustomerApi({
       users: clientUserStore,
       store: interactionStore,
+      configs: replyConfigStore,
       workflow: replyWorkflow,
       sender: interactionSender,
+      onRuntimeControlsUpdated: deliverInteractionRuntimeControls,
       cursorSecret: clientCursorSecret,
     })
     : undefined;
@@ -2199,10 +2261,11 @@ async function main(): Promise<void> {
     // 陪伴界面：授权核实→approved、云端终判失败→failed 推给在线边缘（published 由边缘自知）。
     notifyUiPublishState: (accountId, recordId, state, title) =>
       uiSnapshotService.pushPublishState(accountId, recordId, state, title),
-    // 下发段运维通知：离线/浏览器接管超时/CDP 控制不可用回待审 / 熔断开启 / 熔断解除 → 默认群文本，best-effort。
+    // 下发段运维通知：离线/浏览器接管超时/CDP 控制不可用回待审 / 熔断开启 / 熔断解除，best-effort。
+    // change unify-card-routing-origin-then-team：文案本就账号作用域（渲染了账号名）→ 按账号路由到团队群。
     notifyDispatchEvent: (notice) => {
       void (async () => {
-        const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
+        const chatId = await resolveCardChatId(undefined, notice.accountId);
         if (!chatId) return;
         const name = accountDisplayName(notice.accountId) ?? notice.accountId;
         const ref = notice.recordId !== undefined ? `草稿 #${notice.recordId}${notice.title ? `「${notice.title}」` : ''}` : '';
@@ -2396,8 +2459,10 @@ async function main(): Promise<void> {
   // 90s 超时 < idle 看门狗 idleNudgeMs(130s)，故审批等待期不会触发 idle nudge，无需显式暂停态。
   const commentApprovalEnabled = process.env.AIDCP_COMMENT_APPROVAL === 'true';
   const commentApproval: CommentApprovalPort = {
-    request: async ({ requestId, noteId, text, title, authorName, accountId, accountName }) => {
-      const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
+    request: async ({ requestId, noteId, text, title, authorName, accountId, accountName, originChatId }) => {
+      // change unify-card-routing-origin-then-team：来源会话（命令触发）→ 账号团队群 → 默认群。
+      // 此前这里写死默认群：命令触发的卡不回来源会话、自动化的卡不进账号团队群——同一行造成两个报障现象。
+      const chatId = await resolveCardChatId(originChatId, accountId);
       if (!chatId) {
         console.error('[comment] 无可用飞书群，评论审批卡未发出（将超时跳过、不发）');
         return;
@@ -2412,30 +2477,41 @@ async function main(): Promise<void> {
 
   /** comment auto_approve 统一“先通知、后授权”出口；自然浏览与排期只换可读文案，失败都向上抛并 fail-closed。 */
   const notifyAutoApprovedComment = async (
-    input: CommentApprovalNoticeInput & { contactIncluded?: boolean },
+    input: CommentApprovalNoticeInput & { contactIncluded?: boolean; originChatId?: string },
     source: 'mandatory_persona' | 'scheduled',
   ): Promise<void> => {
-    const chatId = await resolveAccountChatId(input.accountId);
+    const chatId = await resolveCardChatId(input.originChatId, input.accountId);
     if (!chatId) throw new Error('auto_approve_chat_not_configured');
     const displayName = input.accountName?.trim() || (input.accountId ? accountDisplayName(input.accountId) : undefined);
-    const target = input.title?.trim() || input.authorName?.trim() || '目标内容';
-    const preview = input.text.replace(/\s+/g, ' ').trim().slice(0, 160) || '（空）';
     const mandatory = source === 'mandatory_persona';
     await messenger.sendCard(
       chatId,
-      buildCommandResultCard({
-        command: mandatory ? '人设强制互动评论（免审授权）' : input.contactIncluded ? '排期联系评论（免审）' : '排期评论（免审）',
-        ok: true,
-        level: 'success',
-        title: mandatory ? '人设强制互动评论已免审授权' : input.contactIncluded ? '排期联系评论已免审提交' : '排期评论已免审提交',
-        message:
-          `${mandatory ? '该账号的人设结构化规则已明确授权此类内容必评，评论终稿已生成；接下来仍需通过风控、页面、去重和边端真实回执核验，只有平台确认后才算成功' : '后台排期已开启免审，评论终稿已生成并进入发布步骤；下发前仍会核对页面、去重和边端结果'}。\n` +
-          `**目标**：${target}\n**正文预览**：${preview}`,
-        accountId: input.accountId,
-        accountName: displayName,
-      }),
+      mandatory
+        ? buildMandatoryCommentPreAuthorizationCard({ ...input, accountName: displayName })
+        : buildCommandResultCard({
+            command: input.contactIncluded ? '排期联系评论（免审）' : '排期评论（免审）',
+            ok: true,
+            level: 'success',
+            title: input.contactIncluded ? '排期联系评论已免审提交' : '排期评论已免审提交',
+            message:
+              `后台排期已开启免审，评论终稿已生成并进入发布步骤；下发前仍会核对页面、去重和边端结果。\n` +
+              `**目标**：${input.title?.trim() || input.authorName?.trim() || '目标内容'}\n` +
+              `**正文预览**：${input.text.replace(/\s+/g, ' ').trim().slice(0, 160) || '（空）'}`,
+            accountId: input.accountId,
+            accountName: displayName,
+          }),
     );
     console.log(`[comment] 免审通知已发 source=${source} account=${input.accountId ?? '-'} requestId=${input.requestId} note=${input.noteId}`);
+  };
+
+  const notifyMandatoryCommentOutcome = async (input: MandatoryCommentOutcomeNoticeInput): Promise<void> => {
+    const chatId = await resolveAccountChatId(input.accountId);
+    if (!chatId) throw new Error('mandatory_comment_outcome_chat_not_configured');
+    const displayName = input.accountName?.trim() || (input.accountId ? accountDisplayName(input.accountId) : undefined);
+    await messenger.sendCard(chatId, buildMandatoryCommentOutcomeCard({ ...input, accountName: displayName }));
+    console.log(
+      `[comment] mandatory 终态通知已发 outcome=${input.outcome} account=${input.accountId ?? '-'} requestId=${input.requestId} note=${input.noteId}`,
+    );
   };
 
   // ── 按连接多租户编排（multi-account-node-support D1/D2/D3/D4/D6）─────────────────
@@ -2517,12 +2593,14 @@ async function main(): Promise<void> {
       pacingFloors: pacingConfigStore,
       // 互动前风控闸：按该连接真实账号的 controller 判定（不再钉死 default）。被拒诚实跳过。
       canInteract: (action) => ctx.controller.canDo(action),
+      explainInteract: (action) => ctx.controller.explain(action),
       // 浏览前风控闸：view 配额耗尽时不再打开下一篇笔记，按窗口释放时间休眠后重驱。
       explainView: () => ctx.controller.explain('view'),
       // 评论人审端口（env 闸开启时注入；未开启 → 评论一律诚实跳过、不发）。
       ...(commentApprovalEnabled ? { commentApproval } : {}),
       // 人设 mandatory auto_approve 独立于逐条人审 env，但仍必须先通知成功；通知失败由 gate fail-closed。
       commentAutoApproveNotify: (input) => notifyAutoApprovedComment(input, 'mandatory_persona'),
+      notifyMandatoryCommentOutcome,
       // 评论 / 评论赞当日配额预闸：按该账号 controller 当日剩余。
       getCommentDailyRemaining: () => ctx.controller.dailyRemaining('comment'),
       getCommentLikeDailyRemaining: () => ctx.controller.dailyRemaining('comment_like'),
@@ -2923,6 +3001,9 @@ async function main(): Promise<void> {
     },
     messenger,
     botChatStore,
+    // change unify-card-routing-origin-then-team：审批卡目标走统一解析（来源会话 → 账号团队群 → 默认群）。
+    // 无来源会话的自动 / 排期发帖由此进入账号团队群，不再一律落默认群。
+    resolveCardChatId,
     getAccountName: accountDisplayName,
     writeApprovalSignal: (requestId, approved, payload) =>
       writeApprovalSignal({ writeFile, readFile }, requestId, approved, payload),
@@ -3079,10 +3160,10 @@ async function main(): Promise<void> {
     facebookJoinNewGroup: (accountId, opts) => facebookGroupJoinScheduler.triggerScheduled(accountId, opts),
     // --join=<url>（change facebook-comment-review-and-targeted-join）：加入指定群、只归该账号（同一 TDZ-safe 闭包，scheduler 稍后构造）。
     facebookJoinSpecificGroup: (accountId, groupUrl, opts) => facebookGroupJoinScheduler.joinSpecificGroup(accountId, groupUrl, opts),
-    postResultCard: async (accountId, receipt, source) => {
-      // 账号业务结果卡：按账号路由到团队群（含人工 /comment 的终态卡——它同样是该账号的运营结果；
-      // 命令的受理回执与人审卡仍在管理群，操作员的命令闭环不断）。
-      const chatId = await resolveAccountChatId(accountId);
+    postResultCard: async (accountId, receipt, source, originChatId) => {
+      // change unify-card-routing-origin-then-team：来源会话（手动 /comment）→ 账号团队群（自动排期）→ 默认群。
+      // 与该任务的审批卡同一解析、同一目标——此前两张卡走两段不同代码、两种兜底，正是「两卡两群」的机制根因。
+      const chatId = await resolveCardChatId(originChatId, accountId);
       if (!chatId) {
         console.warn('[comment] 无可用飞书群，结果卡片未发出');
         return;
@@ -3497,32 +3578,37 @@ async function main(): Promise<void> {
       platformStillMatches: async (task) => (await accountStore?.getPlatform?.(task.accountId)) === task.platform,
       onTaskUpdated: async (task: DelegatedTask) => {
         // 委托层不再主动推送任务进度卡（change feishu-delegated-suppress-progress-cards）：结果由每类任务
-        // 自己的正常业务结果卡承担（评论链 postResultCard / 发帖人审卡自证成功）。唯一兜底＝发帖类终态失败
-        // 无独立结果卡，补一张避免静默（红线：绝不静默失败）。
-        const receipt = delegatedPublishOutcomeReceipt(task);
+        // 自己的正常业务结果卡承担（评论链 postResultCard / 发帖人审卡自证成功）。兜底＝没有独立结果卡的终态失败
+        // 补一张避免静默（红线：绝不静默失败）——发帖类终态失败，以及评论类「起跑前触发闸失败」（评论链从未起跑、
+        // 未发过结果卡；change delegated-executor-operator-authority-parity）。
+        const receipt = delegatedTaskFailureReceipt(task);
         if (!receipt) return;
         if (!delegatedTaskNotificationGate.shouldSend(task)) return;
-        // change restore-delegated-command-card-origin-chat：命令触发的委托发帖，终态失败卡回来源会话（操作员触发、
-        // 操作员收结果）；无来源会话（自动 / 排期 / 旧行）补集式回落账号→团队群路由，零回归。
+        // change restore-delegated-command-card-origin-chat：命令触发的终态卡回来源会话（操作员触发、操作员收结果）；
+        // 无来源会话（自动 / 排期 / 旧行）补集式回落账号→团队群路由，零回归。
         const originChatId = task.originChatId?.trim();
         const chatId = originChatId || (await resolveAccountChatId(task.accountId));
         if (!chatId) return;
+        const commandLabel = task.actionFamily === 'comment' ? '评论' : '发帖';
         console.log(
-          `[delegated-task] 发帖终态失败卡 task=${task.id} account=${task.accountId} sink=${originChatId ? 'origin' : 'account_team'}`,
+          `[delegated-task] ${commandLabel}终态失败卡 task=${task.id} account=${task.accountId} sink=${originChatId ? 'origin' : 'account_team'}`,
         );
         try {
           await messenger.sendCard(chatId, buildCommandResultCard({
-            command: '发帖',
+            command: commandLabel,
             ok: false,
             level: receipt.level,
             title: receipt.title,
             message: receipt.message,
             accountId: task.accountId,
             accountName: accountDisplayName(task.accountId),
+            // change delegated-terminal-failure-reason：平台名 additive 补齐（cards.ts 的 platformLine 是
+            // 现成条件片段）——多账号多平台并行时，光有昵称不够定位是哪条线出的事。
+            platformName: platformRegistryEntry(task.platform).displayName,
           }));
           delegatedTaskNotificationGate.markSent(task);
         } catch (err) {
-          console.warn(`[delegated-task] 发帖失败结果卡发送失败 task=${task.id}: ${(err as Error).message}`);
+          console.warn(`[delegated-task] ${commandLabel}失败结果卡发送失败 task=${task.id}: ${(err as Error).message}`);
         }
       },
       logger: console,

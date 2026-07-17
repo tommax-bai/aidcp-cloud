@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { DelegatedTaskStore } from './store.js';
 import type { DelegatedTask, DelegatedTaskAttempt, DelegatedVerificationKind } from './types.js';
 import { honestTerminalStatus, isTerminalTaskStatus } from './types.js';
+import { humanizeAttemptReason } from './reason-humanize.js';
 
 export type DelegatedExecutionResult =
   | { kind: 'success'; verificationKind: DelegatedVerificationKind; evidenceRef: string }
@@ -164,7 +165,9 @@ export class DelegatedTaskWorker {
   ): Promise<DelegatedTask | null> {
     if (result.kind === 'deferred') {
       if (!reconciling && attempt.status === 'prepared') {
-        await this.deps.store.finishAttempt(attempt.id, { status: 'skipped', verificationKind: 'not_dispatched', reason: result.reason });
+        // `not_started`（非 `not_dispatched`）：让开发生在动作真正开始前，执行器根本没跑、浏览器没碰过平台。
+        // 这是终态回执说「均未真正开始」的唯一凭据——两者从前都记 not_dispatched，与「跑了但没写」不可分。
+        await this.deps.store.finishAttempt(attempt.id, { status: 'skipped', verificationKind: 'not_started', reason: result.reason });
       }
       return this.update(await this.deps.store.releaseClaim(task.id, token, 'deferred', {
         nextEligibleAt: result.retryAt, step: 'deferred', reason: result.reason,
@@ -249,8 +252,10 @@ export class DelegatedTaskWorker {
       }));
     }
     if (fatalReason) {
+      // 非重试终态也要说人话：`needs_persona_setup` 这类码正是**只走这条路**（blocked → retryable:false），
+      // 从不经预算终态——只在 finishBudget 接人话化，等于白名单里最常见的那几条永远吐生码给运营。
       return this.update(await this.deps.store.complete(fresh.id, token, honestTerminalStatus(fresh.progress, 'failure'), {
-        code: 'non_retryable_failure', message: fatalReason,
+        code: 'non_retryable_failure', message: humanizeAttemptReason(fatalReason) || fatalReason,
       }));
     }
     if (fresh.progress.attemptCount >= fresh.maxAttempts) return this.finishBudget(fresh, token, 'max_attempts');
@@ -260,11 +265,61 @@ export class DelegatedTaskWorker {
     }));
   }
 
+  /**
+   * 预算终态的记账句：「为什么停」。它**不是**失败原因——见 budgetFailureSuffix。
+   */
+  private budgetHeadline(task: DelegatedTask, reason: 'deadline' | 'max_attempts'): string {
+    return `${reason === 'deadline' ? '已到截止时间' : '已达到最大尝试次数'}；真实完成 ${task.progress.successCount}/${task.targetSuccessCount}。`;
+  }
+
+  /**
+   * 预算终态的「为什么没成」尾巴（change delegated-terminal-failure-reason）。
+   *
+   * 「已达到最大尝试次数」是预算耗尽的记账，不是失败原因；只给记账等同于静默失败——卡发出来了，
+   * 但运营无法判断该重试、该改配置还是该等。原因在 attempt settle 时即已持久化，这里读回来。
+   *
+   * 取「最后一条已 settle 且带原因的非成功 attempt」。成功的 attempt 不带 reason，故该判据天然选中
+   * 最后一次未成；未 settle 的（prepared / dispatched）排除在外——它们的 reason 可能只是审批中的注解。
+   * 读不到原因就返回空串，由调用方保持原样，**绝不补一句「原因未知，可能是…」的推测**。
+   */
+  private async budgetFailureSuffix(task: DelegatedTask): Promise<string> {
+    let attempts: DelegatedTaskAttempt[];
+    try {
+      attempts = await this.deps.store.listAttempts(task.id);
+    } catch (err) {
+      // 读原因失败绝不能连累终态收敛：退回「只有记账」的既有行为，如实记日志。
+      this.logger.warn(`[delegated-task] 读取 attempt 原因失败 task=${task.id}: ${(err as Error).message}`);
+      return '';
+    }
+    const settled = attempts.filter((a) => a.status !== 'prepared' && a.status !== 'dispatched');
+    const lastUnsuccessful = [...settled]
+      .reverse()
+      .find((a) => a.status !== 'succeeded' && (a.reason ?? '').trim());
+    const why = lastUnsuccessful ? humanizeAttemptReason(lastUnsuccessful.reason ?? '') : '';
+    if (!why) return '';
+    // 原因串的收尾标点各家不一（中文句常自带「。」，机器码 / 英文异常没有）。先剥掉尾标点再由本方法
+    // 统一收句，免得拼出「…未生成稿件。（共 2 次尝试）」这种断句。
+    const core = why.replace(/[。！？.!?]+$/, '');
+    // 「均未真正开始」是一个**关于平台没被碰过的断言**，只能由证据支撑，不能由计数器推断：
+    // `skipped` 同时覆盖「让开、执行器没跑」(not_started) 与「执行器跑了、搜了词开了页、最终判定不写」
+    // (not_dispatched)，二者 skippedCount 一样。靠 `skippedCount === attemptCount` 断言等于说了拿不出
+    // 证据的话（红线：绝不编造）。故判据 = 每一条已 settle 的 attempt 都留下了 not_started 证据。
+    const neverStarted = settled.length > 0 && settled.every((a) => a.verificationKind === 'not_started');
+    if (neverStarted) {
+      return `${settled.length} 次均未真正开始：${core}。`;
+    }
+    // 其余一律只报最后一次未成；多于一次时标注总次数。不做原因聚类统计（YAGNI）。
+    return settled.length > 1
+      ? `最后一次未成原因：${core}（共 ${settled.length} 次尝试）。`
+      : `最后一次未成原因：${core}。`;
+  }
+
   private async finishBudget(task: DelegatedTask, token: string, reason: 'deadline' | 'max_attempts'): Promise<DelegatedTask | null> {
     const status = honestTerminalStatus(task.progress, reason);
+    const suffix = await this.budgetFailureSuffix(task);
     return this.update(await this.deps.store.complete(task.id, token, status, {
       code: reason,
-      message: `${reason === 'deadline' ? '已到截止时间' : '已达到最大尝试次数'}；真实完成 ${task.progress.successCount}/${task.targetSuccessCount}。`,
+      message: `${this.budgetHeadline(task, reason)}${suffix}`,
       remainingCount: Math.max(0, task.targetSuccessCount - task.progress.successCount),
     }));
   }
@@ -283,10 +338,29 @@ export class DelegatedTaskWorker {
     for (const task of tasks) {
       if (isTerminalTaskStatus(task.status) || task.status === 'awaiting_confirmation' || task.deadlineAt > now) continue;
       if (task.claimToken && task.claimExpiresAt && task.claimExpiresAt > now) continue;
-      await this.deps.store.complete(task.id, null, honestTerminalStatus(task.progress, 'deadline'), {
-        code: 'deadline', message: `已到截止时间；真实完成 ${task.progress.successCount}/${task.targetSuccessCount}。`,
-        remainingCount: Math.max(0, task.targetSuccessCount - task.progress.successCount),
-      });
+      const remainingCount = Math.max(0, task.targetSuccessCount - task.progress.successCount);
+      // 派发在途、租约却已失效（进程重启 / 15min 租约过期）：那条命令**可能已经在平台上写入了**，
+      // 结果未知。绝不能以「干净失败」终结、更不能叠一个来自更早尝试的、听着很确定的原因——那是
+      // 反向的假确定性（红线：绝不编造）。processClaimed 对同一状态走的是 submitted_result_unknown
+      // 那支（见上），expireDueTasks 从前没有对应分支——本 change 让到期终态开始发卡，这个洞就
+      // 从「只脏了面板」升级成「向运营谎报失败」，故一并补。
+      const inFlight = (await this.deps.store.listUnsettledAttempts(task.id)).some((a) => a.status === 'dispatched');
+      if (inFlight) {
+        await this.update(await this.deps.store.complete(task.id, null, honestTerminalStatus(task.progress, 'failure'), {
+          code: 'submitted_result_unknown',
+          message: `${this.budgetHeadline(task, 'deadline')}最后一次派发到期仍未收到结果，平台是否已写入未知；为防重复未自动重试。`,
+          submittedUnknown: true,
+          remainingCount,
+        }));
+        continue;
+      }
+      const suffix = await this.budgetFailureSuffix(task);
+      // this.update：终态失败卡的唯一投递路径（onTaskUpdated 只由 update 触发）。从前这里裸调
+      // store.complete → 到期失败**一张卡都不发**、纯静默（红线：绝不静默失败）。
+      await this.update(await this.deps.store.complete(task.id, null, honestTerminalStatus(task.progress, 'deadline'), {
+        code: 'deadline', message: `${this.budgetHeadline(task, 'deadline')}${suffix}`,
+        remainingCount,
+      }));
     }
   }
 

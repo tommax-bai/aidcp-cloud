@@ -152,6 +152,19 @@ test('schema archives and removes legacy customer claims, then enforces one auth
   assert.match(CLIENT_USERS_SCHEMA_SQL, /client_env_scope_authoritative_source[\s\S]*CHECK \(source = 'admin'\)/);
   assert.match(CLIENT_USERS_SCHEMA_SQL, /CREATE UNIQUE INDEX IF NOT EXISTS uq_client_env_scope_active_env/);
   assert.match(CLIENT_USERS_SCHEMA_SQL, /ON client_env_scope \(env_key\)/);
+  assert.match(CLIENT_USERS_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS client_env_provisioning_intents/);
+  assert.match(CLIENT_USERS_SCHEMA_SQL, /proof_hash\s+CHAR\(64\)\s+NOT NULL/);
+  assert.match(CLIENT_USERS_SCHEMA_SQL, /state IN \('pending','completed','expired'\)/);
+});
+
+test('completeProvisioningIntent rejects malformed intent/proof before touching PostgreSQL', async () => {
+  const pool = fakePool(() => {
+    assert.fail('malformed provisioning credentials must fail before any query');
+  });
+  const store = new ClientUserStore({ pool });
+  assert.deepEqual(await store.completeProvisioningIntent('user-a', {
+    intentId: 'not-a-uuid', proof: 'short', envKey: 'fresh-env', platform: 'facebook',
+  }), { ok: false, reason: 'invalid_intent' });
 });
 
 test('listEnvScope ignores client self-claims and revoked assignments', async () => {

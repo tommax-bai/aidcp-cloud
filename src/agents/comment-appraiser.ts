@@ -6,7 +6,7 @@
  * 产出事件：comment.appraised（要评）或 comment.skipped（不评/无配额/无数据）
  *
  * 数量闸（最便宜阶段就拦）：会话评论预算 + 可选的每账号每日上限（min 取小，配置层下一阶段接入）。
- * 风控 canDo('comment') 在下发前由 RoleDispatcher 再把一道闸；本角色不重复。
+ * mandatory 评论在编排前做一次只读风控预检，真正下发前 RoleDispatcher 仍保留最终风控闸。
  */
 
 import { BaseRole } from './base-role.js';
@@ -43,6 +43,8 @@ export interface CommentAppraiserOptions extends RoleOptions {
    * 未到点直接 skip，避免白走撰写 / 去 AI 味 / 飞书人审。
    */
   getCommentCooldownOk?: () => boolean;
+  /** mandatory 评论编排前的只读风控预检；缺省放行以兼容旧装配。 */
+  getMandatoryRiskDecision?: () => { allowed: boolean; reason?: string; retryAfterMs?: number };
   /** 平台词汇 profile（change platform-vocabulary-and-thresholds）；缺省小红书 = 今天。用于站点名/内容名词/
    *  指标名词去硬编码 + 门槛平台化（无收藏概念平台放宽收藏合取支）。 */
   platformProfile?: CommentPlatformProfile;
@@ -54,6 +56,7 @@ export class CommentAppraiser extends BaseRole {
   private readonly getRemainingComments: () => number;
   private readonly getDailyRemaining?: () => number;
   private readonly getCommentCooldownOk?: () => boolean;
+  private readonly getMandatoryRiskDecision?: () => { allowed: boolean; reason?: string; retryAfterMs?: number };
   private readonly platformProfile: CommentPlatformProfile;
   private unsubscribers: (() => void)[] = [];
 
@@ -64,6 +67,7 @@ export class CommentAppraiser extends BaseRole {
     this.getRemainingComments = options.getRemainingComments;
     this.getDailyRemaining = options.getDailyRemaining;
     this.getCommentCooldownOk = options.getCommentCooldownOk;
+    this.getMandatoryRiskDecision = options.getMandatoryRiskDecision;
     this.platformProfile = options.platformProfile ?? XHS_COMMENT_PROFILE;
   }
 
@@ -97,17 +101,33 @@ export class CommentAppraiser extends BaseRole {
         this.skip(payload, 'note_data_unavailable');
         return;
       }
-      // 显式结构化规则命中：跳过普通会话/日预闸、冷却、热度与“要不要评”LLM。
-      // 真正下发前的 RiskController.canDo('comment') 仍由 dispatcher 守住。
+      // 显式结构化规则命中：跳过普通会话/日预闸、冷却、热度与“要不要评”LLM；但在昂贵的
+      // 撰写 / 去 AI 味 / 飞书预授权卡之前先读一次最终风控同源判定。这里不做配额预占，真正
+      // 下发前 dispatcher 仍会二次判定，覆盖预检与执行之间状态变化。
+      const risk = this.getMandatoryRiskDecision?.();
+      if (risk && !risk.allowed) {
+        const reason = risk.reason ?? 'risk_blocked';
+        this.log(
+          `mandatory_preflight skip reason=${reason} note=${payload.noteId}` +
+            (typeof risk.retryAfterMs === 'number' ? ` retryAfterMs=${risk.retryAfterMs}` : ''),
+        );
+        // 与 comment.appraised 同样排到微任务：dispatcher 的同级 interaction.completed 订阅
+        // 先把本条 mandatory like 发出，再让评论支线诚实收敛。
+        queueMicrotask(() => this.skip(payload, `risk_preflight:${reason}`));
+        return;
+      }
       this.log(`mandatory_match rule=${mandatory.ruleId} → force comment compose`);
-      this.emit('comment.appraised', {
+      // 与下方普通评论的 comment.appraising 一样排到微任务：本角色比 dispatcher 的
+      // interaction.completed 指令翻译更早订阅；若同步 emit，comment.appraised 会先把
+      // commentInflight 置真，导致同一 mandatory 规则的 like 尚未下发就被钉页闸吞掉。
+      queueMicrotask(() => this.emit('comment.appraised', {
         noteId: payload.noteId,
         sourcePageType: payload.sourcePageType,
         actions: payload.actions,
         reason: `mandatory_rule:${mandatory.ruleId}`,
         mandatoryInteraction: mandatory,
         ts: Date.now(),
-      });
+      }));
       return;
     }
     // 数量闸（最便宜阶段）：会话预算 + 每日上限取小，任一耗尽即不评。

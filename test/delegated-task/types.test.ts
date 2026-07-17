@@ -3,10 +3,22 @@ import assert from 'node:assert/strict';
 import {
   actionFamilyFor,
   canTransitionTask,
+  clampClientApprovalMode,
   honestTerminalStatus,
   validateDelegatedTaskIntent,
   verificationCountsAsSuccess,
 } from '../../src/delegated-task/types.js';
+
+// change delegated-approvalmode-clamp：客户端体不可信——绝不放行 auto_approve；缺省保 undefined 交 store 默认；
+// draft_only 放行；其余（含 auto_approve / 未来新模式）夹成 review。
+test('clampClientApprovalMode never lets a client body self-declare auto_approve', () => {
+  assert.equal(clampClientApprovalMode('auto_approve'), 'review');
+  assert.equal(clampClientApprovalMode('review'), 'review');
+  assert.equal(clampClientApprovalMode('draft_only'), 'draft_only');
+  assert.equal(clampClientApprovalMode(undefined), undefined);
+  assert.equal(clampClientApprovalMode(null), undefined);
+  assert.equal(clampClientApprovalMode('something_new'), 'review');
+});
 
 test('delegated task state machine keeps terminal states terminal and supports honest partial completion', () => {
   assert.equal(canTransitionTask('awaiting_confirmation', 'queued'), true);

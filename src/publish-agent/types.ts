@@ -714,11 +714,20 @@ export interface PublishResult {
    * 仅在 failed / timeout / skipped 等非正常出口填充，供上层（飞书回执）surface「为什么」，不再只给一个干瘪状态。
    */
   reason?: string;
-  /** Approval card delivery attempt for pending drafts; omitted when no card should be sent. */
+  /**
+   * Approval card delivery attempt for pending drafts; omitted when no card should be sent.
+   *
+   * `targetSource` 标的是**哪条解析路径**产出了目标，不是落在了哪个群（落点看 `targetChatId`）：
+   * `manual_source`=命令来源会话；`account_scope`=账号作用域解析（团队路由，未命中时其内部已补集回落
+   * 默认群链）；`default_chat`=直取默认群（未注入统一解析的旧构造 / 桩）。
+   *
+   * 红线：本联合与 publish-executor 的 ApprovalCardTargetSource **必须逐字一致**。两份枚举漂移时
+   * 项目 typecheck 抓不到（executor 那个返回值未标注类型），运行时会产出此处声明不存在的值。
+   */
   approvalCard?: {
     sent: boolean;
     targetChatId?: string;
-    targetSource: 'manual_source' | 'default_chat' | 'none';
+    targetSource: 'manual_source' | 'account_scope' | 'default_chat' | 'none';
     error?: string;
   };
 }

@@ -72,9 +72,11 @@ import {
 } from '../interactions/contract.js';
 import {
   INTERACTION_CAPABILITY,
+  INTERACTION_BROWSER_CONTROL_CAPABILITY,
   INTERACTION_OFFBOARDING_CAPABILITY,
   INTERACTION_PLATFORM,
   INTERACTION_REPLY_RECOVERY_CAPABILITY,
+  INTERACTION_RUNTIME_CONTROLS_CAPABILITY,
   InteractionError,
   type InteractionAuthStatusPayload,
   type InteractionOffboardAckPayload,
@@ -82,6 +84,7 @@ import {
   type InteractionReplyReconcileResultPayload,
   type InteractionReplyResultPayload,
   type InteractionReplyResultAckPayload,
+  type InteractionRuntimeControlsPayload,
   type InteractionSyncAckPayload,
   type InteractionSyncBatchPayload,
 } from '../interactions/types.js';
@@ -138,6 +141,12 @@ export interface HandlerDeps {
   cache: AnchorStore;
   messenger?: Pick<FeishuMessenger, 'sendApprovalCard'>;
   botChatStore?: Pick<BotChatStore, 'getDefaultChat'>;
+  /**
+   * 卡片目标统一解析（change unify-card-routing-origin-then-team）：来源会话 → 账号团队群 → 默认群。
+   * 注入后取代下面 botChatStore.getDefaultChat 的默认群兜底——边缘发起的发布审批卡由此按会话账号
+   * 进入团队群。未注入（桩 / 旧构造）→ 保持既有默认群链，行为逐字不变。
+   */
+  resolveCardChatId?: (originChatId: string | undefined, accountId: string | undefined) => Promise<string>;
   approvalChatId?: string;
   logger?: Pick<Console, 'error' | 'warn' | 'log'>;
   clock?: () => number;
@@ -205,6 +214,23 @@ export interface HandlerDeps {
     onReplyReconcileResult(payload: InteractionReplyReconcileResultPayload): Promise<void>;
     onOffboardResult(payload: InteractionOffboardResultPayload): Promise<{ duplicate: boolean }>;
     hasPendingOffboard?(accountId: string): Promise<boolean>;
+  };
+  /** Versioned account controls included in welcome only after capability negotiation. */
+  interactionRuntimeControls?: {
+    getSnapshot(accountId: string): Promise<InteractionRuntimeControlsPayload>;
+  };
+}
+
+function disabledInteractionRuntimeControls(accountId: string): InteractionRuntimeControlsPayload {
+  return {
+    accountId,
+    envKey: accountId,
+    version: 0,
+    commentsReadEnabled: false,
+    commentsReplyEnabled: false,
+    dmReadEnabled: false,
+    dmSendTextEnabled: false,
+    dmSendImageEnabled: false,
   };
 }
 
@@ -603,7 +629,13 @@ export class DefaultMessageHandler implements MessageHandler {
     // 通知该连接决策层：上线 → 携 accountId emit edge.hello（进私有通道）触发会话启动（经诚实人设/调度闸 D3）。
     this.bus(session).emit('edge.hello', { edgeId: p.edgeId, accountId: session.accountId, ts: this.clock() });
     const negotiatedCapabilities = this.deps.interactionInbox
-      ? [INTERACTION_CAPABILITY, INTERACTION_REPLY_RECOVERY_CAPABILITY, INTERACTION_OFFBOARDING_CAPABILITY]
+      ? [
+          INTERACTION_CAPABILITY,
+          INTERACTION_REPLY_RECOVERY_CAPABILITY,
+          INTERACTION_OFFBOARDING_CAPABILITY,
+          INTERACTION_BROWSER_CONTROL_CAPABILITY,
+          ...(this.deps.interactionRuntimeControls ? [INTERACTION_RUNTIME_CONTROLS_CAPABILITY] : []),
+        ]
         .filter((capability) => (session.capabilities ?? []).includes(capability))
       : undefined;
     let offboardPending: boolean | undefined;
@@ -616,11 +648,20 @@ export class DefaultMessageHandler implements MessageHandler {
         offboardPending = true;
       }
     }
+    let interactionRuntime: InteractionRuntimeControlsPayload | undefined;
+    if (negotiatedCapabilities?.includes(INTERACTION_RUNTIME_CONTROLS_CAPABILITY) && session.accountId) {
+      try {
+        interactionRuntime = await this.deps.interactionRuntimeControls!.getSnapshot(session.accountId);
+      } catch {
+        interactionRuntime = disabledInteractionRuntimeControls(session.accountId);
+      }
+    }
     return makeEnvelope('welcome', env.id, this.clock(), {
       sessionId: session.sessionId,
       serverVersion: this.serverVersion,
       capabilities: negotiatedCapabilities,
       interactionRecovery: offboardPending === undefined ? undefined : { offboardPending },
+      interactionRuntime,
       // 节奏快照（change pacing-floor-config-min-interval）：tempo + 每类操作兜底 floor 区间。
       // 纯读风控 status（不写风控态）；握手早于风控态建立 / 解析失败 → 回落 normal(tempo=1.0)。
       // buildPacingSnapshot 是 total 函数：provider 抛错一律返 undefined，绝不 brick 握手。
@@ -1021,21 +1062,33 @@ export class DefaultMessageHandler implements MessageHandler {
       edgeId: payload.edgeId ?? session.edgeId,
       sessionId: session.sessionId,
     });
-    let defaultChat = null;
-    try {
-      defaultChat = await this.deps.botChatStore?.getDefaultChat();
-      this.logger.log('[comm] publish.approval_request 默认群查询完成:', {
+    // change unify-card-routing-origin-then-team：优先走统一解析（本路径无命令来源会话 → 落账号团队群
+    // → 默认群；解析器内部已把未绑团队 / 读失败补集回落，绝不外抛）。未注入解析器时保持既有默认群链。
+    let chatId = '';
+    if (this.deps.resolveCardChatId) {
+      chatId = await this.deps.resolveCardChatId(undefined, session.accountId);
+      this.logger.log('[comm] publish.approval_request 目标群解析完成:', {
         requestId: payload.requestId,
-        defaultChatId: defaultChat?.chatId ?? null,
-        defaultChatName: defaultChat?.chatName ?? null,
+        accountId: session.accountId ?? null,
+        chatId: chatId || null,
       });
-    } catch (error) {
-      this.logger.warn('[comm] publish.approval_request 默认群查询失败，回退 FEISHU_CHAT_ID:', {
-        requestId: payload.requestId,
-        message: error instanceof Error ? error.message : String(error),
-      });
+    } else {
+      let defaultChat = null;
+      try {
+        defaultChat = await this.deps.botChatStore?.getDefaultChat();
+        this.logger.log('[comm] publish.approval_request 默认群查询完成:', {
+          requestId: payload.requestId,
+          defaultChatId: defaultChat?.chatId ?? null,
+          defaultChatName: defaultChat?.chatName ?? null,
+        });
+      } catch (error) {
+        this.logger.warn('[comm] publish.approval_request 默认群查询失败，回退 FEISHU_CHAT_ID:', {
+          requestId: payload.requestId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+      chatId = defaultChat?.chatId ?? this.deps.approvalChatId ?? process.env.FEISHU_CHAT_ID ?? '';
     }
-    const chatId = defaultChat?.chatId ?? this.deps.approvalChatId ?? process.env.FEISHU_CHAT_ID ?? '';
     if (!chatId) {
       const message = '未配置默认审批群：请先在目标飞书群发送 /bind 设为默认审批群，或配置 FEISHU_CHAT_ID 作为兜底。';
       this.logger.error('[comm] publish.approval_request 缺少目标群:', {
@@ -1050,8 +1103,8 @@ export class DefaultMessageHandler implements MessageHandler {
         requestId: payload.requestId,
         edgeId: payload.edgeId ?? session.edgeId,
         chatId,
-        source: defaultChat?.chatId ? 'bot_chats.default' : this.deps.approvalChatId || process.env.FEISHU_CHAT_ID ? 'env.FEISHU_CHAT_ID' : 'none',
-        chatName: defaultChat?.chatName ?? null,
+        // 只声称走了哪条解析路径；落点如实由 chatId 呈现（account_scope 内部可能已补集回落默认群）。
+        source: this.deps.resolveCardChatId ? 'account_scope' : 'default_chat_chain',
       });
       await this.deps.messenger.sendApprovalCard(
         chatId,

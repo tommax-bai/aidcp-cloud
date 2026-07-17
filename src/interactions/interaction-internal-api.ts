@@ -41,7 +41,7 @@ export function parseInteractionPanelGrants(raw: string | undefined): Map<string
 
 const KNOWN_SUFFIXES = new Set([
   'interaction-runtime-controls', 'interaction-reply-policy', 'reply-templates', 'reply-rules',
-  'reply-profile', 'reply-preview', 'reply-config/publish', 'reply-config/audit',
+  'reply-profile', 'reply-preview', 'reply-config/initialize', 'reply-config/publish', 'reply-config/audit',
 ]);
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
@@ -143,6 +143,7 @@ export class InteractionInternalApi {
     workflow: ReplyWorkflow;
     grantsFor: (actor: string) => ReadonlySet<InteractionGrant>;
     cursorSecret: string;
+    onRuntimeControlsUpdated?: (controls: RuntimeControls) => Promise<{ delivered: number }>;
     clock?: () => number;
   }) {
     this.clock = deps.clock ?? Date.now;
@@ -222,9 +223,29 @@ export class InteractionInternalApi {
           dmSendTextEnabled: body.dmSendTextEnabled as boolean,
           dmSendImageEnabled: false,
           writePaused: body.writePaused as boolean });
-        this.ok(res, requestId, publicControls(controls));
+        let delivered = 0;
+        try {
+          delivered = (await this.deps.onRuntimeControlsUpdated?.(controls))?.delivered ?? 0;
+        } catch {
+          // The CAS/audit commit is authoritative; socket delivery failure converges on the next hello.
+        }
+        this.ok(res, requestId, {
+          ...publicControls(controls),
+          edgeDelivery: { status: delivered === 1 ? 'enqueued' : 'deferred', delivered },
+        });
         return;
       }
+    }
+    if (suffix === 'reply-config/initialize' && method === 'POST') {
+      this.require(actor, 'interaction.config.edit');
+      const body = await readBody(req);
+      if (!onlyKeys(body, ['expectedVersion']) || expectedVersion(body) !== 0) {
+        throw new InteractionError('INTERACTION_VALIDATION_FAILED', '初始化请求必须使用 expectedVersion=0。', 422);
+      }
+      const snapshot = await this.deps.configs.initialize(accountId, 0, actor);
+      const head = await this.deps.configs.getHead(accountId);
+      this.ok(res, requestId, { head, initializedVersion: snapshot.configVersion });
+      return;
     }
     if (suffix === 'interaction-reply-policy') {
       if (method === 'GET') {

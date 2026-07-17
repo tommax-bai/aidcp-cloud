@@ -40,7 +40,11 @@ export interface CaptchaCoordinatorDeps {
   resolveController: (accountId: string) => Promise<RiskController>;
   messenger?: Pick<FeishuMessenger, 'sendCard'>;
   /** 解析目标飞书群（注入，便于与发布审批共用解析口径）。 */
-  resolveChatId: () => Promise<string>;
+  /**
+   * 目标群解析（change unify-card-routing-origin-then-team）：传入告警归属账号 → 该账号团队群 → 默认群。
+   * accountId 缺省（解析不到归属账号）→ 默认群，绝不臆造账号作用域。
+   */
+  resolveChatId: (accountId?: string) => Promise<string>;
   logger?: Pick<Console, 'error' | 'warn' | 'log'>;
   clock?: () => number;
   /** 同一 edge 验证码告警的冷却窗（毫秒），默认 10 分钟，防 edge 循环验证码刷屏。 */
@@ -77,6 +81,10 @@ export class CaptchaCoordinator {
     // ① 风控态迁移（云端单写，retire-default-account：按真实账号解析 controller，绝不回落全局 default）。
     //    captcha=强信号→restricted；unknown=弱信号→warned。缺账号=上游缺陷，honest-fail 跳过迁移 + 告警。
     let status = 'unknown';
+    // change fb-throttle-popup-zh-frequency-copy：throttled 此前是 else 块内的 const、从未逃出作用域
+    // ⇒ 一次**确凿的平台限流**被发成 P1「未知阻断弹窗」、与随便什么不明弹层同款，运营无从区分、面板
+    // 无法按类型过滤。提到与 status 同层，透传给 maybeAlert。
+    let throttled = false;
     if (!accountId) {
       this.logger.warn('[captcha] detected 缺 accountId（握手应已保证）— 跳过风控迁移，绝不回落 default');
     } else {
@@ -86,7 +94,7 @@ export class CaptchaCoordinator {
         // account-nurture-discipline-spine §3）：激进退避——即便 kind='unknown'，只要 overlay 文案命中
         // FB 限流词库，也把信号升级为 confirmed（→restricted，只留浏览），不足以靠 warned ×0.7 刹车。
         // 只喂 applySignal 输入侧、不改状态机迁移表；终态仍云端 RiskController 单写。小红书 overlay 不命中 → 零回归。
-        const throttled = isFacebookThrottleText(payload.overlay?.text);
+        throttled = isFacebookThrottleText(payload.overlay?.text);
         const signalKind = payload.kind === 'captcha' || throttled ? 'confirmed' : 'light';
         if (throttled && payload.kind !== 'captcha') {
           this.logger.log('[captcha] Facebook 限流软阻断信号命中 → 升级 restricted 退避', { edgeId, accountId });
@@ -119,7 +127,7 @@ export class CaptchaCoordinator {
     });
 
     // ③ 去重冷却后发飞书告警。
-    await this.maybeAlert(payload, session, edgeId, accountId, status, assistActionUrl);
+    await this.maybeAlert(payload, session, edgeId, accountId, status, assistActionUrl, throttled);
   }
 
   async onCleared(
@@ -135,7 +143,9 @@ export class CaptchaCoordinator {
       this.logger.error('[captcha] 标记云端协助事件已清除失败:', err instanceof Error ? err.message : String(err));
     }
     // 清除冷却记录：下次验证码可立即再次告警（一次新事件不被旧冷却压住）。
-    if (edgeId) this.lastAlertAt.delete(edgeId);
+    // 冷却键已按 edge+type 分维（见 maybeAlert），故须清掉该 edge 的**全部**类型，否则裸 edgeId 删不中
+    // 任何键、冷却残留 ⇒ 清除后紧接的新事件被旧冷却压住、告警连 alerts 记录都不落。
+    if (edgeId) this.clearCooldown(edgeId);
     // 验证码清除点：按 edge 解决其未解决告警（V1 task 9.5）。
     if (edgeId && this.deps.alertStore) {
       try {
@@ -152,6 +162,14 @@ export class CaptchaCoordinator {
     // 风控态不自动回滚：由状态机恢复窗口或飞书人工恢复命令驱动降级。
   }
 
+  /** 清掉该 edge 在**所有告警类型**上的冷却记录（键为 `${edgeId}:${type}`）。 */
+  private clearCooldown(edgeId: string): void {
+    const prefix = `${edgeId}:`;
+    for (const key of [...this.lastAlertAt.keys()]) {
+      if (key.startsWith(prefix)) this.lastAlertAt.delete(key);
+    }
+  }
+
   private async maybeAlert(
     payload: CaptchaDetectedPayload,
     session: EdgeSession,
@@ -159,19 +177,33 @@ export class CaptchaCoordinator {
     accountId: string | undefined,
     status: string,
     assistActionUrl?: string,
+    throttled = false,
   ): Promise<void> {
     if (!this.deps.messenger) return;
-    const key = edgeId ?? 'unknown-edge';
+    // change fb-throttle-popup-zh-frequency-copy：type 决定告警面貌，故先于冷却算出。
+    // 确凿的平台限流独立成型：P0 + 专属标题 + 独立 type（面板可过滤）；未命中语义判据的未知遮罩仍走
+    // 既有泛化 P1/'block'，行为不变。type 取值不需要 DB 迁移（alerts.type 为裸 TEXT 无 CHECK；只有
+    // severity 被约束在 P0–P3）。
+    const type = throttled ? 'fb_throttle' : payload.kind === 'captcha' ? 'captcha' : 'block';
+    const severity: AlertSeverity = throttled || payload.kind === 'captcha' ? 'P0' : 'P1';
+    const title = throttled
+      ? 'Facebook 限流阻断'
+      : payload.kind === 'captcha'
+        ? '验证码弹出'
+        : '未知阻断弹窗';
+
+    // 冷却按 **edge + 告警类型** 分维：此前只按 edge、不分类型 ⇒ 10min 窗内先到一张验证码告警，限流告警
+    // 会被整条吞掉。又因落库动作在本闸**之后**，跨类型吞没会同时导致「卡片不发」**与**「alerts 记录不落」
+    // ——分维同时修好这两者。同类型的去重冷却行为不变。
+    const key = cooldownKey(edgeId, type);
     const now = this.clock();
     const last = this.lastAlertAt.get(key);
     if (last !== undefined && now - last < this.cooldownMs) {
-      this.logger.log('[captcha] 冷却窗内，跳过重复告警', { edgeId: key, sinceMs: now - last });
+      this.logger.log('[captcha] 冷却窗内，跳过重复告警', { edgeId: edgeId ?? UNKNOWN_EDGE, type, sinceMs: now - last });
       return;
     }
     this.lastAlertAt.set(key, now);
 
-    const severity: AlertSeverity = payload.kind === 'captcha' ? 'P0' : 'P1';
-    const title = payload.kind === 'captcha' ? '验证码弹出' : '未知阻断弹窗';
     const detail = buildCaptchaAlertDetail(payload, session, edgeId, status, Boolean(assistActionUrl));
 
     // 告警落库（V1 task 9.5）：与飞书投递解耦——即便无群/发送失败，告警事件仍被记录。
@@ -180,7 +212,7 @@ export class CaptchaCoordinator {
         await this.deps.alertStore.raise(
           {
             severity,
-            type: payload.kind === 'captcha' ? 'captcha' : 'block',
+            type,
             accountId,
             edgeId,
             title,
@@ -196,12 +228,12 @@ export class CaptchaCoordinator {
 
     let chatId = '';
     try {
-      chatId = await this.deps.resolveChatId();
+      chatId = await this.deps.resolveChatId(accountId);
     } catch (err) {
       this.logger.warn('[captcha] 解析目标群失败:', err instanceof Error ? err.message : String(err));
     }
     if (!chatId) {
-      this.logger.error('[captcha] 无可用飞书群，告警未发出', { edgeId: key });
+      this.logger.error('[captcha] 无可用飞书群，告警未发出', { edgeId: edgeId ?? UNKNOWN_EDGE, type });
       return;
     }
 
@@ -216,12 +248,19 @@ export class CaptchaCoordinator {
 
     try {
       await this.deps.messenger.sendCard(chatId, buildAlertCard(alert));
-      this.logger.log('[captcha] 飞书告警已发', { edgeId: key, chatId, severity: alert.severity });
+      this.logger.log('[captcha] 飞书告警已发', { edgeId: edgeId ?? UNKNOWN_EDGE, chatId, type, severity: alert.severity });
     } catch (err) {
       // 红线：发送失败记录、不静默吞。
       this.logger.error('[captcha] 飞书告警发送失败:', err instanceof Error ? err.message : String(err));
     }
   }
+}
+
+const UNKNOWN_EDGE = 'unknown-edge';
+
+/** 冷却键：edge + 告警类型，避免一种阻断类型的告警在冷却窗内吞没另一种。 */
+function cooldownKey(edgeId: string | undefined, type: string): string {
+  return `${edgeId ?? UNKNOWN_EDGE}:${type}`;
 }
 
 function normalizeAccountName(name: string | null | undefined): string | undefined {

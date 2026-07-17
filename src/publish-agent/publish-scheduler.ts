@@ -364,7 +364,11 @@ export class PublishScheduler {
   }
 
   /**
-   * User-delegated publish: an explicit goal may force content generation, but never bypasses account risk.
+   * User-delegated publish. 默认 governed：受管路径，非 normal / canDo 拒发时诚实 blocked（自然语言目标、
+   * 结构化 edge/console/api 草稿走这条，风控闸不放）。
+   * operatorOverride=true（仅精确 /publish 斜杠命令、操作员全权授权）：越过风控 status/canDo，等价老 triggerManual——
+   * 但**发布前飞书人审（AC-PUB）仍强制**，越权只越风控/配额、绝不越人审。scope 由调用方（executor）限定为
+   * `source==='legacy_command' && manualSingle`，绝不扩到自然语言 / 结构化发帖（否则 edge 结构化发帖会跳风控）。
    * Pending approval is a persisted candidate, not a verified platform publish.
    */
   async triggerDelegated(
@@ -378,6 +382,8 @@ export class PublishScheduler {
        * 缺省（自动 / 无来源会话）→ 审批卡回落默认审批群，既有行为逐字不变。
        */
       manualApprovalChatId?: string;
+      /** change delegated-executor-operator-authority-parity：仅精确 /publish 命令置 true，越风控保人审。 */
+      operatorOverride?: boolean;
     },
   ): Promise<TriggerOutcome> {
     if (this.d.isPersonaBound && !this.d.isPersonaBound(accountId)) {
@@ -385,8 +391,12 @@ export class PublishScheduler {
     }
     const risk = await this.d.resolveRisk(accountId);
     const status = risk.getState().status;
-    if (status !== 'normal') return { result: 'blocked', reason: `risk_status(${status})` };
-    if (!risk.canDo('publish')) return { result: 'blocked', reason: `risk_denied(status=${status})` };
+    if (opts.operatorOverride) {
+      this.logger.log(`[PublishScheduler] 委托手动发布 account=${accountId}：越过风控 canDo（精确 /publish 人工授权），发布前飞书人审仍生效`);
+    } else {
+      if (status !== 'normal') return { result: 'blocked', reason: `risk_status(${status})` };
+      if (!risk.canDo('publish')) return { result: 'blocked', reason: `risk_denied(status=${status})` };
+    }
     const reason = `delegated_${opts.action}`;
     const inspirationSinceMs = opts.action === 'publish_from_inspiration' ? shanghaiDayStartMs(this.clock()) : undefined;
     const out = await this.doTrigger(

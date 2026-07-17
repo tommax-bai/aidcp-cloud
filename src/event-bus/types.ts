@@ -214,6 +214,15 @@ export interface MandatoryInteractionContext {
   commentApproval?: MandatoryCommentApproval;
 }
 
+/** mandatory auto_approve 的一次性通知/终态关联键；仅携操作员可读展示上下文。 */
+export interface CommentApprovalTrace {
+  requestId: string;
+  accountId?: string;
+  accountName?: string;
+  title?: string;
+  authorName?: string;
+}
+
 export interface QualityPassPayload {
   noteId: string;
   sourcePageType: 'feed' | 'search';
@@ -334,6 +343,8 @@ export interface CommentApprovedPayload {
   actions: ('like' | 'collect')[];
   text: string;
   mandatoryInteraction?: MandatoryInteractionContext;
+  /** mandatory auto_approve 从预授权通知穿透到平台终态回执的关联上下文。 */
+  approvalTrace?: CommentApprovalTrace;
   ts: number;
 }
 
@@ -343,6 +354,8 @@ export interface CommentDonePayload {
   sourcePageType: 'feed' | 'search';
   actions: ('like' | 'collect')[];
   ok: boolean;
+  /** 平台或调度层的诚实终结原因；缺省保持旧消费者兼容。 */
+  reason?: string;
   mandatoryInteraction?: MandatoryInteractionContext;
   ts: number;
 }

@@ -34,6 +34,8 @@ export interface AutoApproveCommentNotificationInput {
   accountId?: string;
   accountName?: string;
   contactIncluded?: boolean;
+  /** 命令来源会话（change unify-card-routing-origin-then-team）；缺省 → 回落账号团队群 → 默认群。 */
+  originChatId?: string;
 }
 
 export type AutoApproveCommentNotification = (input: AutoApproveCommentNotificationInput) => Promise<void>;
@@ -52,6 +54,12 @@ export interface ComposeApproveDeps {
   accountId?: string;
   /** 当前评论账号展示名/昵称；仅用于人审卡展示。 */
   accountName?: string;
+  /**
+   * 命令来源会话（change unify-card-routing-origin-then-team）：由飞书命令创建的委托评论任务透传，
+   * 人审卡 / 免审通知卡回下命令的那个会话。缺省（排期 / 自然浏览等自动化）→ 发卡端补集回落
+   * 账号团队群 → 默认群。此处只负责**带到发卡端**，不参与撰写与授权判定。
+   */
+  originChatId?: string;
   /** 可选精选参考召回（仅作灵感、撞则弃）；缺省/出错 → 无参考。 */
   getReferences?: (note: NoteForComment) => Promise<string[]>;
   /**
@@ -168,6 +176,7 @@ export function buildComposeAndApprove(
           accountId: deps.accountId,
           accountName: deps.accountName,
           contactIncluded: code != null,
+          ...(deps.originChatId ? { originChatId: deps.originChatId } : {}),
         });
       } catch (err) {
         log.warn(`[comment-compose] 评论免审通知失败 note=${note.noteId}：${(err as Error).message} → 不发`);
@@ -191,6 +200,7 @@ export function buildComposeAndApprove(
         authorName: note.author,
         accountId: deps.accountId,
         accountName: deps.accountName,
+        ...(deps.originChatId ? { originChatId: deps.originChatId } : {}),
       });
     } catch (err) {
       log.warn(`[comment-compose] 审批卡发送失败 note=${note.noteId}：${(err as Error).message} → 不发`);

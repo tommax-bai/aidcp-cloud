@@ -39,7 +39,7 @@ test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recov
         browserState: 'closed', capabilities: { commentsRead: true, commentsReply: true, dmRead: true,
           dmSendText: true, dmSendImage: false },
         identity: { externalId: 'finder_demo_public', displayName: '示例视频号', identityHash: `sha256:${'1'.repeat(64)}` },
-        checkedAt: 1784044000000, reasonCode: null,
+        runtimeControlsVersion: 0, checkedAt: 1784044000000, reasonCode: null,
       });
       const fixture = JSON.parse(await readFile(new URL('../fixtures/wechat-channels-interaction/v1/ws/comment-sync-batch.json', import.meta.url), 'utf8')) as { payload: unknown };
       const payload = parseSyncBatchPayload(fixture.payload);
@@ -210,11 +210,29 @@ test('PostgreSQL: immutable template/config versions, publish CAS and fail-close
     const configs = new ReplyConfigStore({ pool });
     try {
       await pool.query(`INSERT INTO accounts(account_id,label,platform) VALUES
-        ('acct_wc_demo','demo','wechat_channels'),('acct_wc_other','other','wechat_channels')
+        ('acct_wc_demo','demo','wechat_channels'),('acct_wc_other','other','wechat_channels'),
+        ('acct_wc_init','init','wechat_channels'),('acct_xhs_init','xhs','xiaohongshu')
         ON CONFLICT (account_id) DO UPDATE SET platform=EXCLUDED.platform`);
       await pool.query(`TRUNCATE reply_rules,reply_templates,account_reply_profiles,
         interaction_reply_config_versions,interaction_reply_configs RESTART IDENTITY CASCADE`);
       await configs.init();
+      const initialized = await configs.initialize('acct_wc_init', 0, 'admin');
+      assert.equal(initialized.configVersion, 1);
+      assert.equal(initialized.state, 'draft');
+      assert.equal(initialized.policy.mode, 'draft_only');
+      assert.equal(initialized.policy.generateDrafts, false);
+      assert.equal(initialized.policy.sendReplies, false);
+      assert.deepEqual(initialized.templates, []);
+      assert.deepEqual(initialized.rules, []);
+      assert.deepEqual(initialized.profiles.map((profile) => profile.channel).sort(), ['comment', 'dm']);
+      const initializedHead = await configs.getHead('acct_wc_init');
+      assert.deepEqual({ currentVersion: initializedHead?.currentVersion, draftVersion: initializedHead?.draftVersion,
+        publishedVersion: initializedHead?.publishedVersion }, { currentVersion: 1, draftVersion: 1, publishedVersion: null });
+      await assert.rejects(configs.initialize('acct_wc_init', 0, 'late-admin'),
+        (error: unknown) => (error as { code?: string }).code === 'INTERACTION_VERSION_CONFLICT');
+      await assert.rejects(configs.initialize('acct_xhs_init', 0, 'admin'),
+        (error: unknown) => (error as { code?: string }).code === 'INTERACTION_NOT_FOUND');
+      assert.ok((await configs.listAudit('acct_wc_init', 10)).some((item) => item.action === 'config_initialized'));
       const policy = {
         mode: 'review_before_send' as const, generateDrafts: true, sendReplies: true,
         channels: {
@@ -322,7 +340,7 @@ test('PostgreSQL mock Edge E2E: sync → list/detail → generate/approve/send �
         status: 'active', browserState: 'closed', capabilities: { commentsRead: true, commentsReply: true,
           dmRead: false, dmSendText: false, dmSendImage: false },
         identity: { externalId: 'finder-e2e', displayName: 'E2E 账号', identityHash: `sha256:${'e'.repeat(64)}` },
-        checkedAt: attemptGate.now, reasonCode: null });
+        runtimeControlsVersion: 0, checkedAt: attemptGate.now, reasonCode: null });
       await store.updateRuntimeControls({ accountId: 'acct_wc_e2e', expectedVersion: 0, actor: 'admin',
         commentsReadEnabled: true, commentsReplyEnabled: true, dmReadEnabled: false, dmSendTextEnabled: false,
         dmSendImageEnabled: false, writePaused: false });

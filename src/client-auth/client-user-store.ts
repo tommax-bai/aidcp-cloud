@@ -56,6 +56,23 @@ CREATE TABLE IF NOT EXISTS client_environments (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- 客户端程序化新建的短时一次性意图。proof 只以 SHA-256 落库；完成动作仍由 Cloud
+-- 在事务内写权威注册表 + active owner，旧 customer attach 路径不复活。
+CREATE TABLE IF NOT EXISTS client_env_provisioning_intents (
+  intent_id         UUID        PRIMARY KEY,
+  user_id           TEXT        NOT NULL REFERENCES client_users(user_id) ON DELETE CASCADE,
+  proof_hash        CHAR(64)    NOT NULL,
+  state             TEXT        NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','completed','expired')),
+  expires_at        TIMESTAMPTZ NOT NULL,
+  completed_env_key TEXT,
+  completed_at      TIMESTAMPTZ,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK ((state = 'completed') = (completed_env_key IS NOT NULL AND completed_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS client_env_provisioning_intents_user_idx
+  ON client_env_provisioning_intents (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS client_env_provisioning_intents_expiry_idx
+  ON client_env_provisioning_intents (expires_at) WHERE state = 'pending';
 CREATE TABLE IF NOT EXISTS client_env_scope_audit (
   audit_id     BIGSERIAL   PRIMARY KEY,
   user_id      TEXT        NOT NULL,
@@ -158,6 +175,15 @@ export type SetScopeResult =
   | { ok: true; scope: ClientEnvScopeRow[]; offboards: ClientOffboardView[] }
   | { ok: false; reason: 'not_found' | 'unknown_environment' | 'env_already_assigned' | 'offboard_binding_missing' | 'offboard_in_progress'; envKey?: string };
 
+export type CreateProvisioningIntentResult =
+  | { ok: true; intentId: string; proof: string; expiresAt: number }
+  | { ok: false; reason: 'disabled' | 'schema_unavailable' };
+
+export type CompleteProvisioningIntentResult =
+  | { ok: true; environment: ClientEnvScopeRow; idempotent: boolean }
+  | { ok: false; reason: 'disabled' | 'invalid_intent' | 'intent_expired' | 'intent_target_mismatch' |
+      'invalid_environment' | 'environment_already_registered' | 'env_already_assigned' };
+
 export interface ClientOffboardView {
   offboardId: string;
   envKey: string;
@@ -178,6 +204,22 @@ export type InteractionScopeAuthorization<T> =
 
 function isMissingTable(err: unknown): boolean {
   return (err as { code?: string })?.code === '42P01';
+}
+
+const PROVISIONING_INTENT_TTL_MS = 10 * 60 * 1000;
+const ENV_KEY_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const PROVISIONING_INTENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const PROVISIONING_PROOF_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const PROVISIONING_PLATFORMS = new Set(['xiaohongshu', 'facebook', 'wechat_channels']);
+
+function provisioningProofHash(proof: string): string {
+  return crypto.createHash('sha256').update(proof, 'utf8').digest('hex');
+}
+
+function provisioningProofMatches(proof: string, expectedHash: string): boolean {
+  const actual = Buffer.from(provisioningProofHash(proof), 'hex');
+  const expected = Buffer.from(String(expectedHash || ''), 'hex');
+  return actual.length === expected.length && actual.length > 0 && crypto.timingSafeEqual(actual, expected);
 }
 
 export interface ClientUserStoreOptions {
@@ -234,6 +276,46 @@ export class ClientUserStore {
       state: row.state, reason: row.reason, requestedAt: row.requested_at.getTime(), purgeDueAt: row.purge_due_at.getTime() };
   }
 
+  /**
+   * A provisioned environment that never acquired an interaction binding has no
+   * Cloud/Edge interaction credential scope to drain. Persist an explicit terminal
+   * offboard before revoking ownership so Electron can still require authoritative
+   * Cloud truth before deleting the physical profile.
+   *
+   * accountId uses the environment's reserved account namespace. This does not
+   * create an account or auth binding, and tombstoned rows are never dispatched.
+   */
+  private async enqueueProvisionedUnboundOffboard(
+    client: pg.PoolClient,
+    input: { userId: string; envKey: string },
+  ): Promise<ClientOffboardView> {
+    const offboardId = crypto.randomUUID();
+    const accountId = input.envKey;
+    const inserted = await client.query<{
+      offboard_id: string; env_key: string; account_id: string; state: ClientOffboardView['state'];
+      reason: ClientOffboardView['reason']; requested_at: Date; purge_due_at: Date;
+    }>(
+      `INSERT INTO interaction_offboards
+       (offboard_id,platform,account_id,env_key,user_id,reason,state,requested_at,
+          tombstoned_at,purge_due_at,updated_at)
+       VALUES ($1,'wechat_channels',$2,$3,$4,'environment_unbind','tombstoned',now(),now(),now()+interval '29 days',now())
+       RETURNING offboard_id,env_key,account_id,state,reason,requested_at,purge_due_at`,
+      [offboardId, accountId, input.envKey, input.userId],
+    );
+    const row = inserted.rows[0];
+    if (!row) throw new Error('offboard_terminal_insert_failed');
+    await client.query(
+      `INSERT INTO interaction_offboard_audit
+         (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
+       VALUES
+         ($1,$3,'wechat_channels',$4,$5,$6,'access_revoked','tombstoned'),
+         ($2,$3,'wechat_channels',$4,$5,$6,'unbound_cleanup_not_required','tombstoned')`,
+      [crypto.randomUUID(), crypto.randomUUID(), row.offboard_id, accountId, input.envKey, input.userId],
+    );
+    return { offboardId: row.offboard_id, envKey: row.env_key, accountId: row.account_id,
+      state: row.state, reason: row.reason, requestedAt: row.requested_at.getTime(), purgeDueAt: row.purge_due_at.getTime() };
+  }
+
   /** Customer-authorized relinquish: revoke scope and stop Cloud sync/write in the same transaction as durable offboard creation. */
   async beginEnvironmentOffboard(userId: string, envKey: string): Promise<BeginOffboardResult> {
     const key = (envKey ?? '').trim();
@@ -248,23 +330,47 @@ export class ClientUserStore {
         await client.query('ROLLBACK');
         return { ok: false, reason: user.rows[0] ? 'disabled' : 'not_authorized' };
       }
-      const binding = await client.query<{ account_id: string; label: string | null; platform: string | null;
+      // Serialize first-auth status creation with unbind for the same environment.
+      // Without this lock, an auth row could race in after the no-binding check.
+      await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, [`interaction-env:${key}`]);
+      const scope = await client.query<{ label: string | null; platform: string | null;
         source: string; assigned_by: string | null; assigned_at: Date }>(
-        `SELECT a.account_id,s.label,s.platform,s.source,s.assigned_by,s.assigned_at
+        `SELECT s.label,s.platform,s.source,s.assigned_by,s.assigned_at
            FROM client_env_scope s
            JOIN client_environments e ON e.env_key=s.env_key AND e.platform='wechat_channels'
-           JOIN interaction_auth_state a ON a.env_key=s.env_key AND a.platform='wechat_channels'
           WHERE s.user_id=$1 AND s.env_key=$2 AND s.source='admin'
-          FOR UPDATE OF s,e,a`, [userId, key],
+          FOR UPDATE OF s,e`, [userId, key],
       );
-      const row = binding.rows[0];
+      const row = scope.rows[0];
       if (!row) {
         const owned = await client.query(`SELECT 1 FROM client_env_scope WHERE user_id=$1 AND env_key=$2`, [userId, key]);
         await client.query('ROLLBACK');
         return { ok: false, reason: owned.rows[0] ? 'offboard_binding_missing' : 'not_authorized' };
       }
-      const offboard = await this.enqueueOffboard(client, { userId, envKey: key, accountId: row.account_id,
-        reason: 'environment_unbind', actor: `client:${userId}` });
+      const binding = await client.query<{ account_id: string }>(
+        `SELECT account_id FROM interaction_auth_state
+          WHERE env_key=$1 AND platform='wechat_channels' FOR UPDATE`, [key],
+      );
+      let offboard: ClientOffboardView;
+      if (binding.rows[0]) {
+        offboard = await this.enqueueOffboard(client, { userId, envKey: key, accountId: binding.rows[0].account_id,
+          reason: 'environment_unbind', actor: `client:${userId}` });
+      } else {
+        // Only the original continuous client-provision grant may use the no-binding terminal path.
+        // A legacy/admin grant with a missing binding remains fail-closed so corruption is not hidden.
+        const provisioned = await client.query(
+          `SELECT 1 FROM client_env_provisioning_intents i
+            WHERE i.user_id=$1 AND i.completed_env_key=$2 AND i.state='completed'
+              AND $3='client-provision:' || i.intent_id::text
+            FOR UPDATE`,
+          [userId, key, row.assigned_by],
+        );
+        if (!provisioned.rows[0]) {
+          await client.query('ROLLBACK');
+          return { ok: false, reason: 'offboard_binding_missing' };
+        }
+        offboard = await this.enqueueProvisionedUnboundOffboard(client, { userId, envKey: key });
+      }
       await client.query(
         `INSERT INTO client_env_scope_audit
            (user_id,env_key,label,platform,source,assigned_by,assigned_at,revoked_at,revoked_by,reason)
@@ -368,6 +474,154 @@ export class ClientUserStore {
     } catch (err) {
       if (isMissingTable(err)) return [];
       throw err;
+    }
+  }
+
+  /**
+   * 为当前 enabled 客户签发一个 10 分钟、一次性的程序化建号意图。proof 只回显本次，
+   * 数据库只存 hash；过期 pending 行 opportunistic 标 expired，不删除 completed 审计真态。
+   */
+  async createProvisioningIntent(userId: string): Promise<CreateProvisioningIntentResult> {
+    if (!userId) return { ok: false, reason: 'disabled' };
+    const intentId = crypto.randomUUID();
+    const proof = crypto.randomBytes(32).toString('base64url');
+    const proofHash = provisioningProofHash(proof);
+    try {
+      await this.pool.query(
+        `UPDATE client_env_provisioning_intents
+            SET state='expired'
+          WHERE state='pending' AND expires_at <= now()`,
+      );
+      const { rows } = await this.pool.query<{ expires_at: Date }>(
+        `INSERT INTO client_env_provisioning_intents
+           (intent_id,user_id,proof_hash,state,expires_at,created_at)
+         SELECT $1,u.user_id,$2,'pending',now()+($3::double precision * interval '1 millisecond'),now()
+           FROM client_users u
+          WHERE u.user_id=$4 AND u.status='enabled'
+         RETURNING expires_at`,
+        [intentId, proofHash, PROVISIONING_INTENT_TTL_MS, userId],
+      );
+      if (!rows[0]) return { ok: false, reason: 'disabled' };
+      return { ok: true, intentId, proof, expiresAt: rows[0].expires_at.getTime() };
+    } catch (error) {
+      if (isMissingTable(error)) return { ok: false, reason: 'schema_unavailable' };
+      throw error;
+    }
+  }
+
+  /**
+   * Cloud 权威完成“本次程序化新建”：锁 user+intent，核 proof/TTL，再在同一事务中登记
+   * 从未出现过的 envKey、写入唯一 active owner、标记 intent completed。任何拒绝均不部分落库。
+   */
+  async completeProvisioningIntent(
+    userId: string,
+    input: { intentId: string; proof: string; envKey: string; label?: string | null; platform?: string | null },
+  ): Promise<CompleteProvisioningIntentResult> {
+    const intentId = String(input.intentId || '').trim();
+    const proof = String(input.proof || '');
+    const envKey = String(input.envKey || '').trim();
+    const label = String(input.label || '').trim().slice(0, 256) || null;
+    const platformText = String(input.platform || '').trim().toLowerCase();
+    const platform = PROVISIONING_PLATFORMS.has(platformText) ? platformText : null;
+    if (!userId) return { ok: false, reason: 'disabled' };
+    if (!PROVISIONING_INTENT_ID_PATTERN.test(intentId) || !PROVISIONING_PROOF_PATTERN.test(proof)) {
+      return { ok: false, reason: 'invalid_intent' };
+    }
+    if (!ENV_KEY_PATTERN.test(envKey) || !platform) {
+      return { ok: false, reason: 'invalid_environment' };
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const user = await client.query<{ status: string }>(
+        `SELECT status FROM client_users WHERE user_id=$1 FOR UPDATE`, [userId],
+      );
+      if (user.rows[0]?.status !== 'enabled') {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'disabled' };
+      }
+      const intentResult = await client.query<{
+        proof_hash: string; state: 'pending' | 'completed' | 'expired'; expires_at: Date;
+        completed_env_key: string | null; completed_at: Date | null;
+      }>(
+        `SELECT proof_hash,state,expires_at,completed_env_key,completed_at
+           FROM client_env_provisioning_intents
+          WHERE intent_id=$1 AND user_id=$2
+          FOR UPDATE`,
+        [intentId, userId],
+      );
+      const intent = intentResult.rows[0];
+      if (!intent || !provisioningProofMatches(proof, intent.proof_hash)) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'invalid_intent' };
+      }
+      if (intent.state === 'completed') {
+        if (intent.completed_env_key !== envKey) {
+          await client.query('ROLLBACK');
+          return { ok: false, reason: 'intent_target_mismatch' };
+        }
+        const existing = await client.query<{
+          env_key: string; label: string | null; platform: string | null; assigned_at: Date;
+        }>(
+          `SELECT env_key,label,platform,assigned_at
+             FROM client_env_scope
+            WHERE user_id=$1 AND env_key=$2 AND source='admin'`,
+          [userId, envKey],
+        );
+        await client.query('COMMIT');
+        const row = existing.rows[0];
+        if (!row) return { ok: false, reason: 'env_already_assigned' };
+        return { ok: true, idempotent: true, environment: { envKey: row.env_key, label: row.label,
+          platform: row.platform, source: 'admin', assignedAt: row.assigned_at.getTime() } };
+      }
+      if (intent.state === 'expired' || intent.expires_at.getTime() <= Date.now()) {
+        await client.query(
+          `UPDATE client_env_provisioning_intents SET state='expired'
+            WHERE intent_id=$1 AND state='pending'`, [intentId],
+        );
+        await client.query('COMMIT');
+        return { ok: false, reason: 'intent_expired' };
+      }
+
+      const registered = await client.query<{ env_key: string }>(
+        `INSERT INTO client_environments (env_key,label,platform,source,created_at,updated_at)
+         VALUES ($1,$2,$3,'auto',now(),now())
+         ON CONFLICT (env_key) DO NOTHING
+         RETURNING env_key`,
+        [envKey, label, platform],
+      );
+      if (!registered.rows[0]) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'environment_already_registered' };
+      }
+      const assigned = await client.query<{
+        env_key: string; label: string | null; platform: string | null; assigned_at: Date;
+      }>(
+        `INSERT INTO client_env_scope
+           (user_id,env_key,label,platform,source,assigned_by,assigned_at)
+         VALUES ($1,$2,$3,$4,'admin',$5,now())
+         RETURNING env_key,label,platform,assigned_at`,
+        [userId, envKey, label, platform, `client-provision:${intentId}`],
+      );
+      await client.query(
+        `UPDATE client_env_provisioning_intents
+            SET state='completed',completed_env_key=$2,completed_at=now()
+          WHERE intent_id=$1 AND state='pending'`,
+        [intentId, envKey],
+      );
+      await client.query('COMMIT');
+      const row = assigned.rows[0];
+      return { ok: true, idempotent: false, environment: { envKey: row.env_key, label: row.label,
+        platform: row.platform, source: 'admin', assignedAt: row.assigned_at.getTime() } };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if ((error as { code?: string; constraint?: string })?.code === '23505') {
+        return { ok: false, reason: 'env_already_assigned' };
+      }
+      throw error;
+    } finally {
+      client.release();
     }
   }
 

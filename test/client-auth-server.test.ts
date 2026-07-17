@@ -20,10 +20,14 @@ function makeFakeStore(): {
   users: Map<string, { userId: string; key: string; status: 'enabled' | 'disabled' }>;
   scope: Map<string, ClientEnvScopeRow[]>;
   offboards: Map<string, ClientOffboardView>;
+  registered: Set<string>;
 } {
   const users = new Map<string, { userId: string; key: string; status: 'enabled' | 'disabled' }>();
   const scope = new Map<string, ClientEnvScopeRow[]>();
   const offboards = new Map<string, ClientOffboardView>();
+  const registered = new Set<string>();
+  const intents = new Map<string, { userId: string; proof: string; expiresAt: number; envKey?: string }>();
+  let nextIntent = 1;
   const fake = {
     async verifyLogin(name: string, key: string) {
       const u = users.get(name.trim());
@@ -36,6 +40,39 @@ function makeFakeStore(): {
     },
     async listEnvScope(userId: string) {
       return scope.get(userId) ?? [];
+    },
+    async createProvisioningIntent(userId: string) {
+      const enabled = [...users.values()].some((user) => user.userId === userId && user.status === 'enabled');
+      if (!enabled) return { ok: false as const, reason: 'disabled' as const };
+      const intentId = `intent-${nextIntent++}`;
+      const proof = `proof-${intentId}`;
+      const expiresAt = Date.now() + 600_000;
+      intents.set(intentId, { userId, proof, expiresAt });
+      return { ok: true as const, intentId, proof, expiresAt };
+    },
+    async completeProvisioningIntent(userId: string, input: {
+      intentId: string; proof: string; envKey: string; label?: string | null; platform?: string | null;
+    }) {
+      const intent = intents.get(input.intentId);
+      if (!intent || intent.userId !== userId || intent.proof !== input.proof) {
+        return { ok: false as const, reason: 'invalid_intent' as const };
+      }
+      if (intent.envKey && intent.envKey !== input.envKey) {
+        return { ok: false as const, reason: 'intent_target_mismatch' as const };
+      }
+      if (intent.envKey === input.envKey) {
+        const environment = (scope.get(userId) ?? []).find((item) => item.envKey === input.envKey)!;
+        return { ok: true as const, environment, idempotent: true };
+      }
+      if (registered.has(input.envKey) || [...scope.values()].some((items) => items.some((item) => item.envKey === input.envKey))) {
+        return { ok: false as const, reason: 'environment_already_registered' as const };
+      }
+      registered.add(input.envKey);
+      intent.envKey = input.envKey;
+      const environment: ClientEnvScopeRow = { envKey: input.envKey, label: input.label ?? null,
+        platform: input.platform ?? null, source: 'admin', assignedAt: Date.now() };
+      scope.set(userId, [...(scope.get(userId) ?? []), environment]);
+      return { ok: true as const, environment, idempotent: false };
     },
     async beginEnvironmentOffboard(userId: string, envKey: string) {
       const owned = (scope.get(userId) ?? []).find((item) => item.envKey === envKey);
@@ -51,7 +88,7 @@ function makeFakeStore(): {
       return offboards.get(`${userId}:${offboardId}`) ?? null;
     },
   };
-  return { store: fake as unknown as ClientUserStore, users, scope, offboards };
+  return { store: fake as unknown as ClientUserStore, users, scope, offboards, registered };
 }
 
 function baseConfig(port: number, overrides: Partial<ClientAuthConfig> = {}): ClientAuthConfig {
@@ -161,6 +198,84 @@ test('/my-environments 只返回本客户归属(N2 权威过滤)', async () => {
       // 无令牌 → 401
       const anon = await fetch(`${base}/my-environments`);
       assert.equal(anon.status, 401);
+    },
+  );
+});
+
+test('官方新建 intent 可原子完成当前客户归属，重试幂等且旧 attach 仍拒绝', async () => {
+  const fx = makeFakeStore();
+  fx.users.set('alice', { userId: 'user-a', key: 'ck_alice', status: 'enabled' });
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter() },
+    baseConfig(0),
+    async (base) => {
+      const login = await (await fetch(`${base}/login`, { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'alice', key: 'ck_alice' }) })).json() as { token: string };
+      const headers = { authorization: `Bearer ${login.token}`, 'content-type': 'application/json' };
+      const issued = await fetch(`${base}/environment-provisioning/intents`, {
+        method: 'POST', headers, body: '{}',
+      });
+      assert.equal(issued.status, 201);
+      const intent = (await issued.json()) as { data: { intentId: string; proof: string } };
+      const completionBody = JSON.stringify({ intentId: intent.data.intentId, proof: intent.data.proof,
+        envKey: 'fresh-env-1', label: '新环境', platform: 'facebook' });
+      const completed = await fetch(`${base}/environment-provisioning/complete`, {
+        method: 'POST', headers, body: completionBody,
+      });
+      assert.equal(completed.status, 201);
+      assert.equal(((await completed.json()) as { data: { idempotent: boolean } }).data.idempotent, false);
+      assert.deepEqual((fx.scope.get('user-a') ?? []).map((item) => item.envKey), ['fresh-env-1']);
+
+      const retried = await fetch(`${base}/environment-provisioning/complete`, {
+        method: 'POST', headers, body: completionBody,
+      });
+      assert.equal(retried.status, 200);
+      assert.equal(((await retried.json()) as { data: { idempotent: boolean } }).data.idempotent, true);
+      assert.equal((fx.scope.get('user-a') ?? []).length, 1);
+
+      const attach = await fetch(`${base}/environments`, {
+        method: 'POST', headers, body: JSON.stringify({ envKey: 'arbitrary-existing-env' }),
+      });
+      assert.equal(attach.status, 403);
+      assert.deepEqual(await attach.json(), { error: 'forbidden', reason: 'environment_assignment_admin_only' });
+    },
+  );
+});
+
+test('创建完成不能认领已登记环境，也不能把同一 intent 换到第二个 envKey', async () => {
+  const fx = makeFakeStore();
+  fx.users.set('alice', { userId: 'user-a', key: 'ck_alice', status: 'enabled' });
+  fx.registered.add('existing-env');
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter() },
+    baseConfig(0),
+    async (base) => {
+      const login = await (await fetch(`${base}/login`, { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'alice', key: 'ck_alice' }) })).json() as { token: string };
+      const headers = { authorization: `Bearer ${login.token}`, 'content-type': 'application/json' };
+      const intent = (await (await fetch(`${base}/environment-provisioning/intents`, {
+        method: 'POST', headers, body: '{}',
+      })).json()) as { data: { intentId: string; proof: string } };
+      const existing = await fetch(`${base}/environment-provisioning/complete`, { method: 'POST', headers,
+        body: JSON.stringify({ intentId: intent.data.intentId, proof: intent.data.proof,
+          envKey: 'existing-env', label: '', platform: 'xiaohongshu' }) });
+      assert.equal(existing.status, 409);
+      assert.equal(((await existing.json()) as { error: string }).error, 'environment_already_registered');
+      assert.deepEqual(fx.scope.get('user-a'), undefined);
+
+      const freshIntent = (await (await fetch(`${base}/environment-provisioning/intents`, {
+        method: 'POST', headers, body: '{}',
+      })).json()) as { data: { intentId: string; proof: string } };
+      const first = await fetch(`${base}/environment-provisioning/complete`, { method: 'POST', headers,
+        body: JSON.stringify({ intentId: freshIntent.data.intentId, proof: freshIntent.data.proof,
+          envKey: 'fresh-a', label: '', platform: 'xiaohongshu' }) });
+      assert.equal(first.status, 201);
+      const switched = await fetch(`${base}/environment-provisioning/complete`, { method: 'POST', headers,
+        body: JSON.stringify({ intentId: freshIntent.data.intentId, proof: freshIntent.data.proof,
+          envKey: 'fresh-b', label: '', platform: 'xiaohongshu' }) });
+      assert.equal(switched.status, 409);
+      assert.equal(((await switched.json()) as { error: string }).error, 'intent_target_mismatch');
+      assert.deepEqual((fx.scope.get('user-a') ?? []).map((item) => item.envKey), ['fresh-a']);
     },
   );
 });

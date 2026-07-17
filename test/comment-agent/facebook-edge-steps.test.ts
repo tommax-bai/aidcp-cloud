@@ -6,6 +6,7 @@ import {
   buildFacebookEdgeSteps,
   facebookCommentSubmitTimeoutMs,
   FACEBOOK_STEP_TIMEOUT_MS,
+  FACEBOOK_OPEN_STEP_TIMEOUT_MS,
   FACEBOOK_COMMENT_SUBMIT_BASE_MS,
   FACEBOOK_COMMENT_SUBMIT_PER_CHAR_MS,
   FACEBOOK_COMMENT_SUBMIT_MAX_MS,
@@ -183,5 +184,39 @@ describe('buildFacebookEdgeSteps — keep-open 租约 taskId 透传（change fac
     const env = sent.find((e) => e.type === 'search.execute');
     assert.ok(env);
     assert.equal('taskId' in env!.payload, false, '无租约构造不应带 taskId');
+  });
+});
+
+describe('开帖步超时上界（change fb-comment-open-hydration-window）', () => {
+  it('开帖步上界必须容纳边端详情水合窗最坏耗时，且严格大于固定步超时（边端先答）', () => {
+    // 边端 openPost 最坏 ≈ settle 2.5s + 详情窗 22 轮×600ms(12.6s) + 催拉 6×(滚动+4 探测×600ms)(≈12s) + CDP 往返(≈3s) ≈ 30s。
+    // 低于此值 → 云端先掐表，把边端诚实的 open_failed 改判成 timeout（塌进同一 outcome、运营看到的卡片一模一样）。
+    const EDGE_WORST_CASE_MS = 30_000;
+    assert.ok(
+      FACEBOOK_OPEN_STEP_TIMEOUT_MS >= EDGE_WORST_CASE_MS,
+      `开帖步上界 ${FACEBOOK_OPEN_STEP_TIMEOUT_MS}ms 必须 >= 边端最坏 ${EDGE_WORST_CASE_MS}ms，否则边端答不完`,
+    );
+    assert.ok(
+      FACEBOOK_OPEN_STEP_TIMEOUT_MS > FACEBOOK_STEP_TIMEOUT_MS,
+      '开帖步必须脱离固定 28s（那正是本 change 的成因）',
+    );
+    // 仍有界：对齐加群步 90s 上限，绝不无界等待。
+    assert.ok(FACEBOOK_OPEN_STEP_TIMEOUT_MS <= FACEBOOK_COMMENT_SUBMIT_MAX_MS, '开帖步上界不得超过 90s 无界化');
+  });
+
+  it('搜索步不跟着放宽：仍用固定 28s（其探测在催拉循环内、预算未变）', () => {
+    assert.equal(FACEBOOK_STEP_TIMEOUT_MS, 28_000);
+  });
+
+  it('显式注入 stepTimeoutMs 时开帖步按注入值走（测试可快速验超时，不被 45s 默认拖死）', async () => {
+    const bus = new EventBus();
+    const { pusher } = makePusher(() => {
+      /* 边端不回执 → 走超时路径 */
+    });
+    const t0 = Date.now();
+    const r = await steps(bus, pusher, 40).openPost('https://www.facebook.com/groups/1/posts/2');
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'timeout');
+    assert.ok(Date.now() - t0 < 5_000, '注入值必须优先于 45s 默认，否则整个测试套会被拖垮');
   });
 });

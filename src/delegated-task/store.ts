@@ -129,6 +129,14 @@ export interface DelegatedTaskStore {
   annotateAttempt(attemptId: string, verificationKind: DelegatedVerificationKind, evidenceRef: string, reason?: string): Promise<void>;
   finishAttempt(attemptId: string, result: AttemptFinish): Promise<DelegatedTask>;
   listUnsettledAttempts(taskId: string): Promise<DelegatedTaskAttempt[]>;
+  /**
+   * 全部 attempt（含已 settle 的 succeeded / skipped / failed / submitted_unknown），按 ordinal 升序。
+   *
+   * change delegated-terminal-failure-reason：终态回执要说「为什么没成」，原因就躺在已 settle 的
+   * attempt 的 `reason` 里——而 `listUnsettledAttempts` 按构造只返回 prepared / dispatched，对已 settle
+   * 的 failed / skipped 恒返回 []，恰好排除掉要读的那些。故另开此读路径，勿改前者（对账链依赖其语义）。
+   */
+  listAttempts(taskId: string): Promise<DelegatedTaskAttempt[]>;
   requestPause(id: string, version?: number): Promise<DelegatedTask | null>;
   resume(id: string, version?: number): Promise<DelegatedTask | null>;
   requestCancel(id: string, version?: number): Promise<DelegatedTask | null>;
@@ -487,6 +495,14 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
     return rows.map(mapAttempt);
   }
 
+  async listAttempts(taskId: string): Promise<DelegatedTaskAttempt[]> {
+    const { rows } = await this.pool.query<AttemptRow>(
+      `SELECT * FROM delegated_task_attempts WHERE task_id=$1 ORDER BY ordinal`,
+      [taskId],
+    );
+    return rows.map(mapAttempt);
+  }
+
   async requestPause(id: string, version?: number): Promise<DelegatedTask | null> {
     const task = await this.get(id);
     if (!task || isTerminalTaskStatus(task.status) || (version !== undefined && task.version !== version)) return task;
@@ -731,6 +747,13 @@ export class MemoryDelegatedTaskStore implements DelegatedTaskStore {
 
   async listUnsettledAttempts(taskId: string): Promise<DelegatedTaskAttempt[]> {
     return [...this.attempts.values()].filter((a) => a.taskId === taskId && (a.status === 'prepared' || a.status === 'dispatched')).map((a) => structuredClone(a));
+  }
+
+  async listAttempts(taskId: string): Promise<DelegatedTaskAttempt[]> {
+    return [...this.attempts.values()]
+      .filter((a) => a.taskId === taskId)
+      .sort((a, b) => a.ordinal - b.ordinal)
+      .map((a) => structuredClone(a));
   }
 
   async requestPause(id: string, version?: number): Promise<DelegatedTask | null> {

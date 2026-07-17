@@ -110,7 +110,20 @@ export type DelegatedVerificationKind =
   | 'candidate_persisted'
   | 'candidate_version_updated'
   | 'submitted_unknown'
-  | 'not_dispatched';
+  /**
+   * 执行器**跑过**、但没派发平台写入（如评论链搜了词、开了笔记，最终判定无强候选而不评）。
+   * 浏览器动过——只是没落下写入。
+   */
+  | 'not_dispatched'
+  /**
+   * 执行器**根本没跑**：动作真正发生前就被让开（风控 / 并发占用等 → deferred）。
+   *
+   * change delegated-terminal-failure-reason：它与 `not_dispatched` 的分野是**有没有碰过平台**，
+   * 而这正是终态回执能否说「均未真正开始」的唯一凭据。二者从前都记 `not_dispatched`，于是「让开」
+   * 与「跑了但没写」不可分——据此说「未真正开始」就是在断言拿不出证据的事（红线：绝不编造）。
+   * 与 `not_dispatched` 一样不计成功。
+   */
+  | 'not_started';
 
 export type DelegatedAttemptStatus =
   | 'prepared'
@@ -184,6 +197,19 @@ export function actionFamilyFor(action: DelegatedAction): DelegatedActionFamily 
   }
 }
 
+/**
+ * change delegated-approvalmode-clamp：客户端请求体（panel / edge 建草稿路由）的 approvalMode 不可信——
+ * **绝不放行 `auto_approve`**，否则结构化入口可自带免审、把内容审批两道闸全绕过（免审本应只由账号级后台开关授予）。
+ * 规则：缺省保持 undefined（交由 store 按 action 取默认，如 generate_candidates → draft_only）；显式 `draft_only`
+ * 放行（仅生成候选、不落平台）；其余（含 `auto_approve` 与任何未来新模式）一律夹成 `review`。
+ * 服务端自建 intent（如洗稿 curated 调用已显式传 `review`、飞书 parser 已硬编码 `review`）不经此路、不受影响。
+ */
+export function clampClientApprovalMode(mode: unknown): DelegatedApprovalMode | undefined {
+  if (mode === undefined || mode === null) return undefined;
+  if (mode === 'draft_only') return 'draft_only';
+  return 'review';
+}
+
 export function validateDelegatedTaskIntent(intent: DelegatedTaskIntent, now = Date.now()): string[] {
   const errors: string[] = [];
   if (!Number.isInteger(intent.targetSuccessCount) || intent.targetSuccessCount < 1) errors.push('invalid_target_success_count');
@@ -234,6 +260,7 @@ export function verificationCountsAsSuccess(action: DelegatedAction, kind: Deleg
       return action === 'approve_candidate' || action === 'reject_candidate' || action === 'modify_candidate';
     case 'submitted_unknown':
     case 'not_dispatched':
+    case 'not_started':
       return false;
   }
 }

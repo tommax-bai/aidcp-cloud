@@ -210,6 +210,7 @@ describe('AC-CMD CommandSequencer（云端编排驱动）', () => {
     ]);
     assert.equal(cmds.every((c) => c.platform === 'facebook'), true);
     assert.equal(cmds[1].params.optionValue, 'facebook_personal_timeline');
+    assert.equal(cmds[1].timeoutMs, 40_000, 'Facebook select_mode 必须给 edge 完整 composer deadline');
     assert.equal(cmds[3].params.fieldType, 'content');
     assert.equal(cmds.some((c) => c.params.fieldType === 'title'), false);
     assert.equal(cmds.some((c) => c.kind === 'add_with_candidate' || c.kind === 'set_option' || c.kind === 'set_schedule'), false);

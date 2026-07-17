@@ -150,15 +150,22 @@ export function parseSyncBatchPayload(value: unknown): InteractionSyncBatchPaylo
 
 export function parseAuthStatusPayload(value: unknown): InteractionAuthStatusPayload | null {
   if (!isRecord(value)) return null;
-  if (!exactKeys(value, [
+  const required = [
     'envKey', 'accountId', 'platform', 'status', 'browserState', 'capabilities',
     'identity', 'checkedAt', 'reasonCode',
-  ])) return null;
+  ];
+  const keys = Object.keys(value);
+  if (!required.every((key) => key in value) ||
+      keys.some((key) => !required.includes(key) && key !== 'runtimeControlsVersion')) return null;
+  const runtimeControlsVersion = value.runtimeControlsVersion === undefined || value.runtimeControlsVersion === null
+    ? null
+    : value.runtimeControlsVersion;
   if (
     !id(value.envKey) || !id(value.accountId) || value.platform !== INTERACTION_PLATFORM ||
     !AUTH_STATUSES.has(value.status as string) || !BROWSER_STATES.has(value.browserState as string) ||
     !capabilities(value.capabilities) || !timestamp(value.checkedAt) ||
-    !(value.reasonCode === null || AUTH_REASON_CODES.has(value.reasonCode as string))
+    !(value.reasonCode === null || AUTH_REASON_CODES.has(value.reasonCode as string)) ||
+    !(runtimeControlsVersion === null || (Number.isInteger(runtimeControlsVersion) && (runtimeControlsVersion as number) >= 0))
   ) return null;
   if (value.identity !== null) {
     if (!isRecord(value.identity) || !exactKeys(value.identity, ['externalId', 'displayName', 'identityHash'])) return null;
@@ -168,7 +175,7 @@ export function parseAuthStatusPayload(value: unknown): InteractionAuthStatusPay
       typeof value.identity.identityHash !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(value.identity.identityHash)
     ) return null;
   }
-  return value as unknown as InteractionAuthStatusPayload;
+  return { ...value, runtimeControlsVersion } as unknown as InteractionAuthStatusPayload;
 }
 
 export function parseReplyResultPayload(value: unknown): InteractionReplyResultPayload | null {

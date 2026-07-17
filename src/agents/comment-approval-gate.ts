@@ -11,7 +11,7 @@
 
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
-import type { RoleName, CommentClearedPayload } from '../event-bus/types.js';
+import type { RoleName, CommentApprovalTrace, CommentClearedPayload } from '../event-bus/types.js';
 import { buildCommentApprovalRequestId } from './comment-approval-request-id.js';
 
 /** 评论人审端口：发卡 + 查授权信号（复用发帖 messenger + isPublishApproved，换评论 requestId 命名空间）。 */
@@ -25,6 +25,12 @@ export interface CommentApprovalPort {
     authorName?: string;
     accountId?: string;
     accountName?: string;
+    /**
+     * 命令来源会话（change unify-card-routing-origin-then-team）：由飞书命令创建的委托评论任务
+     * 透传其 originChatId，审批卡回下命令的那个会话。缺省（自然浏览闭环 / 排期等无来源会话的
+     * 自动化路径）→ 发卡端补集回落账号团队群 → 默认群。
+     */
+    originChatId?: string;
   }): Promise<void>;
   /** 查 /tmp 先到先得授权信号；仅 approved===true 视为已授权。 */
   isApproved(requestId: string): Promise<boolean>;
@@ -130,12 +136,20 @@ export class CommentApprovalGate extends BaseRole {
         return;
       }
       this.log(`mandatory auto_approve 已通知并授权 rule=${payload.mandatoryInteraction!.ruleId} note=${payload.noteId}`);
+      const approvalTrace: CommentApprovalTrace = {
+        requestId,
+        ...(accountId ? { accountId } : {}),
+        ...(accountName ? { accountName } : {}),
+        ...(title ? { title } : {}),
+        ...(authorName ? { authorName } : {}),
+      };
       this.emit('comment.approved', {
         noteId: payload.noteId,
         sourcePageType: payload.sourcePageType,
         actions: payload.actions,
         text: payload.text,
         mandatoryInteraction: payload.mandatoryInteraction,
+        approvalTrace,
         ts: this.now(),
       });
       return;

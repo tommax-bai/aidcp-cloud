@@ -46,7 +46,7 @@ export interface ListQuery {
   asOf: number;
   limit: number;
   channel?: InteractionChannel;
-  state?: ReplyJobState;
+  state?: ReplyJobState | 'pending';
   before?: { lastMessageAt: number; id: string };
 }
 
@@ -279,15 +279,23 @@ export class InteractionStore {
             SELECT 1 FROM information_schema.columns
             WHERE table_schema='public' AND table_name='interaction_send_attempts'
               AND column_name='reconciliation_state'
+          )
+          AND EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='interaction_auth_state'
+              AND column_name='runtime_controls_version'
           ) AS present`,
     );
-    if (rows[0]?.present !== true) throw new Error('interaction_schema_missing_run_0041');
+    if (rows[0]?.present !== true) throw new Error('interaction_schema_missing_run_0042');
   }
 
   async upsertAuthStatus(payload: InteractionAuthStatusPayload): Promise<void> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      // Same lock as ClientUserStore.beginEnvironmentOffboard: first-auth and
+      // customer unbind must observe one serial order for an environment.
+      await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, [`interaction-env:${payload.envKey}`]);
       await this.assertAccountScope(client, payload.accountId, payload.envKey, false);
       const offboard = await client.query<{ offboard_id: string; state: string }>(
         `SELECT offboard_id,state FROM interaction_offboards
@@ -307,12 +315,14 @@ export class InteractionStore {
       }
       await client.query(
         `INSERT INTO interaction_auth_state
-          (platform, account_id, env_key, status, browser_state, capabilities, identity, reason_code, checked_at, active_since, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,to_timestamp($9/1000.0),
-                 CASE WHEN $4='active' THEN to_timestamp($9/1000.0) ELSE NULL END,now())
+          (platform, account_id, env_key, status, browser_state, capabilities, identity, reason_code,
+           runtime_controls_version, checked_at, active_since, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9,to_timestamp($10/1000.0),
+                 CASE WHEN $4='active' THEN to_timestamp($10/1000.0) ELSE NULL END,now())
          ON CONFLICT (platform, account_id) DO UPDATE SET
            env_key=EXCLUDED.env_key, status=EXCLUDED.status, browser_state=EXCLUDED.browser_state,
            capabilities=EXCLUDED.capabilities, identity=EXCLUDED.identity, reason_code=EXCLUDED.reason_code,
+           runtime_controls_version=EXCLUDED.runtime_controls_version,
            checked_at=EXCLUDED.checked_at,
            active_since=CASE
              WHEN EXCLUDED.status <> 'active' THEN NULL
@@ -321,7 +331,7 @@ export class InteractionStore {
            END, updated_at=now()`,
         [payload.platform, payload.accountId, payload.envKey, payload.status, payload.browserState,
           JSON.stringify(payload.capabilities), payload.identity ? JSON.stringify(payload.identity) : null,
-          payload.reasonCode, payload.checkedAt],
+          payload.reasonCode, payload.runtimeControlsVersion, payload.checkedAt],
       );
       await client.query(
         `INSERT INTO interaction_runtime_controls (platform, account_id, env_key, updated_by)
@@ -531,9 +541,9 @@ export class InteractionStore {
     const { rows } = await this.pool.query<{
       status: InteractionAuthStatusPayload['status']; browser_state: InteractionAuthStatusPayload['browserState'];
       capabilities: InteractionAuthStatusPayload['capabilities']; identity: InteractionAuthStatusPayload['identity'];
-      checked_at: Date; reason_code: InteractionErrorCode | null;
+      runtime_controls_version: number | null; checked_at: Date; reason_code: InteractionErrorCode | null;
     }>(
-      `SELECT status,browser_state,capabilities,identity,checked_at,reason_code
+      `SELECT status,browser_state,capabilities,identity,runtime_controls_version,checked_at,reason_code
          FROM interaction_auth_state WHERE platform=$1 AND account_id=$2 AND env_key=$3`,
       [INTERACTION_PLATFORM, accountId, envKey],
     );
@@ -542,6 +552,7 @@ export class InteractionStore {
     return {
       envKey, accountId, platform: INTERACTION_PLATFORM, status: row.status,
       browserState: row.browser_state, capabilities: row.capabilities, identity: row.identity,
+      runtimeControlsVersion: row.runtime_controls_version === null ? null : Number(row.runtime_controls_version),
       checkedAt: epoch(row.checked_at), reasonCode: row.reason_code,
     };
   }
@@ -564,7 +575,13 @@ export class InteractionStore {
     const params: unknown[] = [query.accountId, query.envKey, new Date(query.asOf), query.limit + 1];
     let where = `t.account_id=$1 AND t.env_key=$2 AND t.last_message_at <= $3`;
     if (query.channel) { params.push(query.channel); where += ` AND t.channel=$${params.length}`; }
-    if (query.state) { params.push(query.state); where += ` AND j.state=$${params.length}`; }
+    if (query.state === 'pending') {
+      params.push(['new','classifying','draft_ready','approval_required','approved','queued','sending','failed','ambiguous']);
+      where += ` AND j.state=ANY($${params.length}::text[])`;
+    } else if (query.state) {
+      params.push(query.state);
+      where += ` AND j.state=$${params.length}`;
+    }
     if (query.before) {
       params.push(new Date(query.before.lastMessageAt), query.before.id);
       where += ` AND (t.last_message_at,t.id) < ($${params.length - 1},$${params.length})`;
@@ -1455,7 +1472,7 @@ export class InteractionStore {
   }
 
   async claimApiRequest(input: {
-    actor: string; action: 'send' | 'sync' | 'auth_reopen'; idempotencyKey: string;
+    actor: string; action: 'send' | 'sync' | 'auth_reopen' | 'browser_control'; idempotencyKey: string;
     accountId: string; envKey: string; resourceId?: string | null;
   }): Promise<{ requestId: string; fresh: boolean; response: unknown | null }> {
     const requestId = this.idGen('request');

@@ -6,7 +6,17 @@
   "payload": {
     "sessionId": "session-wc-001",
     "serverVersion": "contract-fixture",
-    "capabilities": ["interaction_inbox_v1", "interaction_reply_recovery_v1", "interaction_offboarding_v1"],
-    "interactionRecovery": { "offboardPending": false }
+    "capabilities": ["interaction_inbox_v1", "interaction_reply_recovery_v1", "interaction_offboarding_v1", "interaction_runtime_controls_v1", "interaction_browser_control_v1"],
+    "interactionRecovery": { "offboardPending": false },
+    "interactionRuntime": {
+      "accountId": "acct_wc_demo",
+      "envKey": "env_wc_demo",
+      "version": 7,
+      "commentsReadEnabled": true,
+      "commentsReplyEnabled": false,
+      "dmReadEnabled": true,
+      "dmSendTextEnabled": false,
+      "dmSendImageEnabled": false
+    }
   }
 }

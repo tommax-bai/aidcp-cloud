@@ -16,6 +16,11 @@ export interface DelegatedCommentPort {
       approvalMode: 'review' | 'auto_approve';
       joinFirst?: boolean;
       joinGroupUrl?: string;
+      /**
+       * change unify-card-routing-origin-then-team：命令来源会话，透传成评论审批卡 + 终态结果卡的目标。
+       * 与 DelegatedPublishPort.manualApprovalChatId 对称。缺省 → 补集回落账号团队群 → 默认群。
+       */
+      originChatId?: string;
       onResult: (result: CommentTerminalObservation) => Promise<void> | void;
     },
   ): Promise<{ ok: boolean; message: string; code?: string }>;
@@ -25,6 +30,8 @@ export interface DelegatedCommentPort {
     options: {
       priority: 'automatic';
       approvalMode: 'review' | 'auto_approve';
+      /** change unify-card-routing-origin-then-team：同 triggerManual，命令来源会话透传成卡片目标。 */
+      originChatId?: string;
       onResult: (result: TargetedCommentResult) => Promise<void> | void;
     },
   ): Promise<{ ok: boolean; message: string; reason?: string }>;
@@ -43,6 +50,8 @@ export interface DelegatedPublishPort {
        * 缺省 → 审批卡回落默认审批群（既有行为、零回归）。
        */
       manualApprovalChatId?: string;
+      /** change delegated-executor-operator-authority-parity：仅精确 /publish 命令置 true，越风控保人审。 */
+      operatorOverride?: boolean;
     },
   ): Promise<TriggerOutcome>;
   isBusy(accountId?: string): boolean;
@@ -247,7 +256,9 @@ export function createDelegatedExecutorRouter(deps: DelegatedExecutorDeps): {
         if (receipt.code === 'edge_offline' || receipt.reason === 'running') {
           reject(new Error(`deferred:${receipt.code ?? receipt.reason}`));
         } else {
-          reject(new Error(`not_started:${receipt.reason ?? receipt.code ?? receipt.message}`));
+          // 起跑前触发闸失败（人设未绑 / 联系方式缺 / 非 FB 带 --join / FB 未接线 / 平台画像失败）：
+          // 携带人类可读文案（message 优先），供委托层补一张诚实失败卡（红线：绝不静默失败）。
+          reject(new Error(`not_started:${receipt.message ?? receipt.reason ?? receipt.code}`));
         }
       }).catch(reject);
     });
@@ -258,6 +269,11 @@ export function createDelegatedExecutorRouter(deps: DelegatedExecutorDeps): {
       if (message.startsWith('deferred:')) return { kind: 'deferred', reason: message, retryAt: now() + 30_000 };
       if (message === 'comment_terminal_timeout') {
         return { kind: 'submitted_unknown', reason: '评论任务已触发但未在时限内收到终态；为防重复不自动重试。' };
+      }
+      // 触发闸失败＝永久性配置问题（人设 / 联系方式 / 平台不支持 / 未接线）：不重试、以非重试失败终结，
+      // 由委托层在终态补一张诚实卡（评论链此时从未起跑、postResultCard 不会发）。
+      if (message.startsWith('not_started:')) {
+        return { kind: 'failed', reason: message.slice('not_started:'.length), retryable: false };
       }
       return { kind: 'failed', reason: message, retryable: true };
     } finally {
@@ -283,6 +299,8 @@ export function createDelegatedExecutorRouter(deps: DelegatedExecutorDeps): {
           manualOverride: legacySingle,
           force: legacySingle && task.targetConstraints.force === true,
           approvalMode: commentApprovalMode(task),
+          // 命令来源会话 → 审批卡与终态卡都回来源会话（私聊 / 群）；无来源会话 → 回落账号团队群 → 默认群。
+          ...(task.originChatId ? { originChatId: task.originChatId } : {}),
           ...(task.action === 'facebook_group_comment' ? {
             joinFirst: true,
             ...(constraintString(task, 'groupUrl') ? { joinGroupUrl: constraintString(task, 'groupUrl')! } : {}),
@@ -295,16 +313,24 @@ export function createDelegatedExecutorRouter(deps: DelegatedExecutorDeps): {
         const title = constraintString(task, 'title');
         if (!noteId || !title) return { kind: 'failed', reason: 'curated_target_snapshot_missing', retryable: false };
         return awaitComment((onResult) => deps.comments.triggerTargeted(task.accountId, { noteId, title }, {
-          priority: 'automatic', approvalMode: commentApprovalMode(task), onResult,
+          priority: 'automatic',
+          approvalMode: commentApprovalMode(task),
+          ...(task.originChatId ? { originChatId: task.originChatId } : {}),
+          onResult,
         }));
       }
       if (
         task.action === 'publish_post' || task.action === 'publish_from_inspiration' ||
         task.action === 'generate_candidates'
       ) {
+        // change delegated-executor-operator-authority-parity：精确 /publish 斜杠命令（source legacy_command +
+        // manualSingle）＝操作员全权，越风控/配额但保人审——与评论分支 legacySingle→manualOverride 对称。
+        // 自然语言（feishu）/ 结构化（edge/console/api）发帖一律留 governed（不置 operatorOverride），风控闸不放。
+        const operatorOverride = task.source === 'legacy_command' && task.targetConstraints.manualSingle === true;
         return publishResult(task, await deps.publishes.triggerDelegated(task.accountId, {
           action: task.action,
           approvalMode: approvalMode(task),
+          ...(operatorOverride ? { operatorOverride: true } : {}),
           ...(referenceNote(task) ? { referenceNote: referenceNote(task)! } : {}),
           // 命令来源会话 → 审批卡回来源会话（私聊 / 群）；无来源会话 → 回落默认审批群。
           ...(task.originChatId ? { manualApprovalChatId: task.originChatId } : {}),

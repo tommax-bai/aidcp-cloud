@@ -6,6 +6,9 @@ import type { PublishMetadata } from './types.js';
 export type PublishImageSource = 'generated' | 'account_pool';
 export type PublishTargetKind = 'xhs_note' | 'facebook_personal_timeline';
 
+/** Edge uses this as the total home-trigger + composer-open deadline. */
+const FACEBOOK_COMPOSER_OPEN_TIMEOUT_MS = 40_000;
+
 export interface PublishPlatformProfile {
   platform: Exclude<PlatformId, 'wechat_channels'>;
   displayName: string;
@@ -77,7 +80,11 @@ export function buildPublishCommandPlan(input: BuildPublishCommandPlanInput): Pu
   };
 
   add('navigate_entry');
-  add('select_mode', { optionKind: 'target', optionValue: profile.target });
+  add(
+    'select_mode',
+    { optionKind: 'target', optionValue: profile.target },
+    profile.platform === 'facebook' ? FACEBOOK_COMPOSER_OPEN_TIMEOUT_MS : undefined,
+  );
   for (const url of input.images) add('upload_image', { imageUrl: url });
 
   if (profile.platform === 'facebook') {

@@ -13,6 +13,7 @@
 import type {
   InteractionAuthReopenPayload,
   InteractionAuthStatusPayload,
+  InteractionBrowserControlPayload,
   InteractionOffboardAckPayload,
   InteractionOffboardCommandPayload,
   InteractionOffboardResultPayload,
@@ -21,6 +22,7 @@ import type {
   InteractionReplyResultPayload,
   InteractionReplyResultAckPayload,
   InteractionReplySendPayload,
+  InteractionRuntimeControlsPayload,
   InteractionSyncAckPayload,
   InteractionSyncBatchPayload,
   InteractionSyncRequestPayload,
@@ -129,6 +131,8 @@ export type MessageType =
   | 'interaction.sync.request' // cloud → edge：按渠道请求同步
   | 'interaction.reply.send' // cloud → edge：下发唯一 attempt 的文本回复
   | 'interaction.auth.reopen' // cloud → edge：请求重开登录/挑战处理入口
+  | 'interaction.browser.control' // cloud → edge：授权有效时打开可见 sidecar / 转回 API-only
+  | 'interaction.runtime.controls' // cloud → edge：按账号下发版本化有效能力
   | 'interaction.offboard.command' // cloud → edge：撤权后清理所属加密会话
   | 'interaction.offboard.result' // edge → cloud：可重放的凭证清理结果
   | 'interaction.offboard.ack' // cloud → edge：结果持久化确认；ack 后清 Edge outbox
@@ -221,6 +225,8 @@ export interface WelcomePayload {
   capabilities?: string[];
   /** 账号级恢复屏障；协商 offboarding 时缺失/true 都要求 Edge 保持 connector 停止。 */
   interactionRecovery?: { offboardPending: boolean };
+  /** Negotiated account-scoped effective controls; missing remains fail-closed on Edge. */
+  interactionRuntime?: InteractionRuntimeControlsPayload;
   /**
    * 节奏快照（change pacing-floor-config-min-interval）：tempo + 每类操作兜底 floor 区间。
    * 可选、向后兼容（旧端忽略）；边缘据此做操作间最小间隔 gating 与详情页停留兜底。
@@ -1459,6 +1465,8 @@ export interface PayloadMap {
   'interaction.sync.request': InteractionSyncRequestPayload;
   'interaction.reply.send': InteractionReplySendPayload;
   'interaction.auth.reopen': InteractionAuthReopenPayload;
+  'interaction.browser.control': InteractionBrowserControlPayload;
+  'interaction.runtime.controls': InteractionRuntimeControlsPayload;
   'interaction.offboard.command': InteractionOffboardCommandPayload;
   'interaction.offboard.result': InteractionOffboardResultPayload;
   'interaction.offboard.ack': InteractionOffboardAckPayload;

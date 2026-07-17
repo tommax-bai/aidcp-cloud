@@ -77,7 +77,7 @@ export interface EdgePusher {
    * （调用方据此诚实失败、绝不广播）。同账号多连接取确定性单目标（最早登记者）并记日志。
    * 可选成员：EdgeCloudServer 概念实现；旧测试桩不实现亦满足接口（发布定向退回广播旧行为）。
    */
-  resolveEdgeIdForAccount?(accountId: string): string | null;
+  resolveEdgeIdForAccount?(accountId: string, requiredCapability?: string): string | null;
   /** 当前已登记（完成 hello）的边缘连接总数 */
   edgeCount(): number;
   /** 真实在线的边缘数：已登记 AND 近期有心跳（staleness 校验，绝不把死连接当在线）。 */
@@ -214,6 +214,8 @@ export class EdgeCloudServer implements EdgePusher {
       env.type === 'ui.snapshot' ||
       env.type === 'edge.task.acquire' ||
       env.type === 'edge.task.release' ||
+      env.type === 'interaction.runtime.controls' ||
+      env.type === 'interaction.browser.control' ||
       env.type === 'captcha.assist.capture' ||
       env.type === 'captcha.assist.click';
     let sent = 0;
@@ -280,14 +282,16 @@ export class EdgeCloudServer implements EdgePusher {
    * 去掉「目标为 default 时把未声明账号也算上」的 legacy 兼容）。同账号多条在线连接 → 取最早登记者（Map 插入序）并记日志。
    * 无在线节点返回 null（调用方据此诚实失败、绝不广播）。
    */
-  resolveEdgeIdForAccount(accountId: string): string | null {
+  resolveEdgeIdForAccount(accountId: string, requiredCapability?: string): string | null {
     const now = this.clock();
     const matches: string[] = [];
     for (const conn of this.edges.values()) {
       const eid = conn.session.edgeId;
       if (!eid) continue;
       if (conn.ws.readyState !== WebSocket.OPEN || now - conn.lastSeen >= this.staleAfterMs) continue;
-      if (conn.session.accountId === accountId) matches.push(eid);
+      if (conn.session.accountId !== accountId) continue;
+      if (requiredCapability && !(conn.session.capabilities ?? []).includes(requiredCapability)) continue;
+      matches.push(eid);
     }
     if (matches.length === 0) return null;
     if (matches.length > 1) {
