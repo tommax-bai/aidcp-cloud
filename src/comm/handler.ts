@@ -552,10 +552,20 @@ export class DefaultMessageHandler implements MessageHandler {
           action: normalizeActionCompletedAction(rawResult.action),
         };
         this.bus(session).emit('action.completed', { ...result, ts: this.clock() });
-        // 真实成功互动 → 驱动 RiskController 按账号计数（record 订在 interaction.occurred）。
-        // already_followed 是良性 no-op，失败 ok=false，均不计——只记真实发生的互动。
+        // 真实发生的动作 → 驱动 RiskController 按账号计数（record 订在 interaction.occurred）。
+        // 判据分两轴（change fb-join-quota-counts-attempts）：
+        //   · like/collect/follow/comment/comment_like —— ok=true 才算真实互动（already_followed 是良性 no-op，不计）。
+        //   · join_group —— 配额是**风控预算**，计的是「真的抵达 Facebook 的入群动作」，故判据是 clicked 而非 ok：
+        //     clicked=true 是边缘**事后回执**说它在真实页面上点了（既成事实）；ok 只是平台对我们**已做之事**的回答
+        //     （批了 / 待管理员审批 / 要答题），MUST NOT 决定这次动作算不算数。于是点了但待审批（ok:false,
+        //     clicked:true）照计；没抵达平台的（点前就已待审批 / already_member / observation_only / 导航登录
+        //     在点击前先失败）clicked 非 true，天然不计——无需任何 reason 分支。
+        //   注：`ok` 这一轴仍逐位管着其余五个动作，MUST NOT 整条删除（删了 = 失败的点赞/评论被记成真互动，
+        //   直接踩「绝不静默假成功」红线）。这里只把 join_group 从它的合取下解出来。
+        //   注：本闸只决定 emit；真正的计数在 interaction.occurred 的订阅者里（record 内部还会再过一次 canDo，
+        //   故账号被限 / 配额已耗尽时仍不落数）。
         if (
-          result.ok &&
+          (result.ok || result.action === 'join_group') &&
           (result.action === 'like' || result.action === 'collect' || result.action === 'follow' || result.action === 'comment' || result.action === 'comment_like' || result.action === 'join_group') &&
           result.reason !== 'already_followed' &&
           (result.action !== 'join_group' || (result.clicked === true && result.reason !== 'already_member' && result.reason !== 'observation_only'))
