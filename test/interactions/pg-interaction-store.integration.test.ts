@@ -45,6 +45,21 @@ test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recov
       const payload = parseSyncBatchPayload(fixture.payload);
       assert.ok(payload);
 
+      const futureBatch: InteractionSyncBatchPayload = {
+        ...payload,
+        batchId: 'batch-future-thread',
+        threads: [{ ...payload.threads[0], externalThreadId: 'thread-future', updatedAt: payload.observedAt + 300_001 }],
+        messages: [{ ...payload.messages[0], externalThreadId: 'thread-future', externalMessageId: 'message-future' }],
+      };
+      await assert.rejects(
+        store.ingestBatch(futureBatch),
+        (error: unknown) => (error as { code?: string; httpStatus?: number; message?: string }).code === 'INTERACTION_VALIDATION_FAILED'
+          && (error as { httpStatus?: number }).httpStatus === 422
+          && (error as { message?: string }).message?.includes('thread-future') === true,
+      );
+      assert.equal((await pool.query(`SELECT count(*)::int AS n FROM interaction_sync_batches WHERE batch_id='batch-future-thread'`)).rows[0].n, 0);
+      assert.equal((await pool.query(`SELECT count(*)::int AS n FROM interaction_threads WHERE external_thread_id='thread-future'`)).rows[0].n, 0);
+
       const duplicates = await Promise.all([store.ingestBatch(payload), store.ingestBatch(payload)]);
       assert.deepEqual(duplicates.map((result) => result.ack.status).sort(), ['accepted', 'duplicate']);
       assert.equal((await pool.query(`SELECT count(*)::int AS n FROM interaction_messages`)).rows[0].n, 1);
@@ -186,6 +201,17 @@ test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recov
       await store.markAttemptDispatched('acct_wc_demo', 'env_wc_demo', failedAttempt.attempt.id);
       // 上一行应幂等成功：权威 Edge result 可以抢在 created→dispatched 持久化之前到达。
       assert.equal((await store.getJobContext('acct_wc_demo', 'env_wc_demo', failedJobId))?.job.state, 'failed');
+      await pool.query(`UPDATE interaction_reply_jobs SET state='queued',version=version+1 WHERE id=$1`, [failedJobId]);
+      const retryContext = await store.getJobContext('acct_wc_demo', 'env_wc_demo', failedJobId);
+      assert.ok(retryContext);
+      const retryAttempt = await store.createAttempt({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo',
+        jobId: failedJobId, expectedVersion: retryContext.job.version, idempotencyKey: failedKey, ...attemptGate });
+      assert.equal(retryAttempt.attempt.attemptNo, 2, 'a terminal attempt must release the deterministic idempotency key');
+      await store.markDispatchDeferred('acct_wc_demo', 'env_wc_demo', retryAttempt.attempt.id,
+        'INTERACTION_UPSTREAM_UNAVAILABLE');
+      assert.equal((await store.getJobContext('acct_wc_demo', 'env_wc_demo', failedJobId))?.job.state, 'queued');
+      assert.ok((await store.pendingQueuedJobs()).some((job) => job.jobId === failedJobId),
+        'a zero-delivery attempt must not remain in the active exclusion set');
       await pool.query(`UPDATE interaction_reply_jobs SET state='approval_required',version=5,expires_at=NULL WHERE id=$1`, [failedJobId]);
       const approvals = await Promise.allSettled([
         store.transitionJob({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo', jobId: failedJobId,

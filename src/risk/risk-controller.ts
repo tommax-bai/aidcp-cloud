@@ -12,6 +12,10 @@ import type { AccountNurtureProvider, QuotaProvider, RiskAction, RiskQuotaLevel,
  */
 export const SLOW_START_PLATFORMS: readonly string[] = ['facebook', 'xiaohongshu'];
 
+function supportsSlowStart(platform: string | null | undefined): platform is string {
+  return platform != null && SLOW_START_PLATFORMS.includes(platform);
+}
+
 /** 逐位比较两份配额：clamped 是否至少在一处严格小于 base（即 clamp 真收紧了）。 */
 function isStrictlyTighter(clamped: WindowQuotas, base: WindowQuotas): boolean {
   const windows: RiskWindow[] = ['minute', 'hour', 'day'];
@@ -281,17 +285,10 @@ export class RiskController {
     const anchor = this.resolveNurtureAnchor();
     if (!anchor) return riskScaled;
     const platform = this.nurtureProvider?.platformFor(this.accountId);
-    if (platform == null) return riskScaled;
+    if (!supportsSlowStart(platform)) return riskScaled;
     const cap = coldStartDailyCap(this.dayIndexFor(anchor, this.clock()) - 1, platform);
     if (!cap) return riskScaled;
     const windowCap = deriveWindowQuotasFromDaily(cap);
-    // 视频号入站回复由独立全局/账号/channel 门禁和显式 quota_config 控制；旧浏览冷启动曲线
-    // 没有 dm_reply 语义，不能把运营明确配置的非零额度再次夹成 0。
-    if (platform === 'wechat_channels') {
-      windowCap.minute.dm_reply = riskScaled.minute.dm_reply;
-      windowCap.hour.dm_reply = riskScaled.hour.dm_reply;
-      windowCap.day.dm_reply = riskScaled.day.dm_reply;
-    }
     return minWindowQuotas(riskScaled, windowCap);
   }
 
@@ -310,14 +307,13 @@ export class RiskController {
       return { state: 'off', totalDays, eligible: false, ineligibleReason: 'globally_disabled' };
     }
     const anchor = this.resolveNurtureAnchor();
-    // env 旁路不是「账号级慢启动」——它没有账号级开关，UI MUST NOT 把它显示成用户勾过的东西。
-    if (!anchor || anchor.source !== 'account') return { state: 'off', totalDays, eligible: true };
+    if (!anchor) return { state: 'off', totalDays, eligible: true };
 
     const platform = this.nurtureProvider?.platformFor(this.accountId);
     if (platform == null) {
       return { state: 'off', totalDays, since: anchor.since, eligible: false, ineligibleReason: 'platform_unknown' };
     }
-    if (!SLOW_START_PLATFORMS.includes(platform)) {
+    if (!supportsSlowStart(platform)) {
       return {
         state: 'off',
         totalDays,
@@ -326,6 +322,8 @@ export class RiskController {
         ineligibleReason: 'platform_unsupported',
       };
     }
+    // env 旁路不是「账号级慢启动」——它没有账号级开关，UI MUST NOT 把它显示成用户勾过的东西。
+    if (anchor.source !== 'account') return { state: 'off', totalDays, eligible: true };
 
     const now = this.clock();
     const day = this.dayIndexFor(anchor, now);

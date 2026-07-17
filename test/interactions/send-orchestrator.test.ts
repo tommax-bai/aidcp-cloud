@@ -58,6 +58,31 @@ function config(): ReplyConfigSnapshot {
   };
 }
 
+function sendableStore(overrides: Record<string, unknown> = {}): InteractionStore {
+  const base = context('queued');
+  return {
+    getJobContext: async () => base,
+    getRuntimeControls: async () => ({
+      accountId: 'acct_wc_demo', platform: 'wechat_channels', envKey: 'env_wc_demo', version: 1,
+      commentsReadEnabled: true, commentsReplyEnabled: true, dmReadEnabled: true, dmSendTextEnabled: true,
+      dmSendImageEnabled: false, writePaused: false, consecutiveFailures: 0, circuitOpenedAt: null,
+      lastConfirmedAt: null, updatedAt: now, updatedBy: 'admin',
+    }),
+    getSendAuthGate: async () => ({
+      activeSince: now - 700_000,
+      auth: {
+        envKey: 'env_wc_demo', accountId: 'acct_wc_demo', platform: 'wechat_channels', status: 'active',
+        browserState: 'closed', capabilities: { commentsRead: true, commentsReply: true, dmRead: true,
+          dmSendText: true, dmSendImage: false },
+        identity: { externalId: 'finder', displayName: '示例视频号', identityHash: `sha256:${'1'.repeat(64)}` },
+        runtimeControlsVersion: 0, checkedAt: now - 1_000, reasonCode: null,
+      },
+    }),
+    sendWindowCounts: async () => ({ minute: 0, hour: 0, day: 0, lastThreadSendAt: null }),
+    ...overrides,
+  } as unknown as InteractionStore;
+}
+
 test('reply idempotency key exactly matches the frozen UTF-8 formula fixture', () => {
   assert.equal(replyIdempotencyKey(context()), 'e0e055e5abfced94f0e808eb5745a36b5f9f7aecc75c2d0377f5b2f692ae2ae9');
 });
@@ -150,6 +175,62 @@ test('approved command is persisted as one attempt and dispatched to one account
     target: { threadExternalId: 'comment_msg_100', inboundMessageExternalId: 'comment_msg_100', parentExternalId: null },
     content: { type: 'text', text: '谢谢你的喜欢，欢迎继续交流。' }, expiresAt: now + 120_000,
   });
+});
+
+test('paused Edge defers before creating an attempt and preserves the queued job', async () => {
+  let createCalls = 0;
+  let pushes = 0;
+  const sender = new InteractionSendOrchestrator({
+    store: sendableStore({ createAttempt: async () => { createCalls += 1; throw new Error('must not create'); } }),
+    configs: { getSnapshot: async () => config() } as unknown as ReplyConfigStore,
+    pusher: {
+      resolveEdgeIdForAccount: () => 'edge-paused',
+      pushToEdges: () => { pushes += 1; return 1; },
+    } as unknown as EdgePusher,
+    isEdgePaused: () => true,
+    controllerFor: () => ({ explain: () => ({ allowed: true }), record: async () => true }),
+    metrics: new InteractionMetrics(), env: { AIDCP_INTERACTION_WRITE_ENABLED: 'true' }, clock: () => now,
+  });
+
+  await assert.rejects(
+    sender.dispatchQueued({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo', jobId: 'job_comment_100', expectedVersion: 4 }),
+    (error: unknown) => (error as { code?: string; httpStatus?: number; retryable?: boolean }).code === 'INTERACTION_UPSTREAM_UNAVAILABLE'
+      && (error as { httpStatus?: number }).httpStatus === 503
+      && (error as { retryable?: boolean }).retryable === true,
+  );
+  assert.equal(createCalls, 0);
+  assert.equal(pushes, 0);
+  assert.equal((await sendableStore().getJobContext('acct_wc_demo', 'env_wc_demo', 'job_comment_100'))?.job.state, 'queued');
+});
+
+test('zero delivery releases the attempt back to queued through the deferred path', async () => {
+  const base = context('queued');
+  let deferredAttemptId: string | null = null;
+  const sender = new InteractionSendOrchestrator({
+    store: sendableStore({
+      createAttempt: async (input: { idempotencyKey: string }) => ({
+        job: { ...base.job, state: 'sending' as const, version: 5, idempotencyKey: input.idempotencyKey },
+        attempt: { id: 'attempt-zero', replyJobId: base.job.id, attemptNo: 1, idempotencyKey: input.idempotencyKey,
+          status: 'created' as const, verificationStatus: 'not_needed' as const, externalMessageId: null,
+          errorCode: null, startedAt: now, finishedAt: null },
+      }),
+      markDispatchDeferred: async (_accountId: string, _envKey: string, attemptId: string) => {
+        deferredAttemptId = attemptId;
+      },
+    }),
+    configs: { getSnapshot: async () => config() } as unknown as ReplyConfigStore,
+    pusher: { resolveEdgeIdForAccount: () => 'edge-closing', pushToEdges: () => 0 } as unknown as EdgePusher,
+    controllerFor: () => ({ explain: () => ({ allowed: true }), record: async () => true }),
+    metrics: new InteractionMetrics(), env: { AIDCP_INTERACTION_WRITE_ENABLED: 'true' }, clock: () => now,
+  });
+
+  await assert.rejects(
+    sender.dispatchQueued({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo', jobId: 'job_comment_100', expectedVersion: 4 }),
+    (error: unknown) => (error as { code?: string; httpStatus?: number; retryable?: boolean }).code === 'INTERACTION_UPSTREAM_UNAVAILABLE'
+      && (error as { httpStatus?: number }).httpStatus === 503
+      && (error as { retryable?: boolean }).retryable === true,
+  );
+  assert.equal(deferredAttemptId, 'attempt-zero');
 });
 
 test('startup/reconnect recovery emits verification-only reconcile and never replays reply.send', async () => {

@@ -189,6 +189,22 @@ test('平台不支持（视频号，design D12）：eligible=false + ineligibleR
   assert.equal(view.ineligibleReason, 'platform_unsupported');
 });
 
+test('env 旁路不能绕过平台准入：视频号逐位保留风控配额且投影同样标记不支持', () => {
+  const base = deriveWindowQuotas('normal');
+  base.minute.dm_reply = 1;
+  base.hour.dm_reply = 2;
+  base.day.dm_reply = 5;
+  const c = controllerAt(new NurtureStub('wechat_channels', null, NOW), NOW, {
+    coldStartRampEnabled: true,
+    quotaProvider: { windowQuotasFor: () => base },
+  });
+  assert.deepEqual(c.effectiveQuotas(), base);
+  assert.ok(c.effectiveQuotas().day.comment > 0);
+  assert.ok(c.effectiveQuotas().day.dm_reply > 0);
+  assert.equal(c.slowStartView().eligible, false);
+  assert.equal(c.slowStartView().ineligibleReason, 'platform_unsupported');
+});
+
 // ── 3.6 两路径不合成（design D4）──
 // 合成一次就把 FB 车队夹回 view=70——正是 07-15 判为根因的那个上限。
 

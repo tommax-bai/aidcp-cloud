@@ -166,6 +166,12 @@ test('PostgreSQL: unbind/termination revoke first, retry offline cleanup, tombst
         ('wechat_channels','acct-term-a','env-term-a','active','closed','{}'::jsonb,NULL,now()),
         ('wechat_channels','acct-term-b','env-term-b','active','closed','{}'::jsonb,NULL,now())
         ON CONFLICT (platform,account_id) DO UPDATE SET env_key=EXCLUDED.env_key,status='active',identity=EXCLUDED.identity`);
+      await pool.query(`INSERT INTO interaction_runtime_controls
+        (platform,account_id,env_key,comments_read_enabled,comments_reply_enabled,dm_read_enabled,
+         dm_send_text_enabled,dm_send_image_enabled,write_paused,updated_by)
+        VALUES ('wechat_channels','acct-offboard-a',NULL,true,true,true,true,false,false,'admin')
+        ON CONFLICT (platform,account_id) DO UPDATE SET env_key=NULL,comments_read_enabled=true,
+          comments_reply_enabled=true,dm_read_enabled=true,dm_send_text_enabled=true,write_paused=false`);
       assert.equal((await users.setScope('user-offboard-a', [{ envKey: 'env-offboard-a' }], 'admin')).ok, true);
       assert.equal((await users.setScope('user-offboard-b', [{ envKey: 'env-offboard-b' }], 'admin')).ok, true);
       assert.equal((await users.setScope('user-term', [{ envKey: 'env-term-a' }, { envKey: 'env-term-b' }], 'admin')).ok, true);
@@ -199,6 +205,15 @@ test('PostgreSQL: unbind/termination revoke first, retry offline cleanup, tombst
       const disabled = (await pool.query<{ status: string }>(`SELECT status FROM interaction_auth_state
         WHERE account_id='acct-offboard-a'`)).rows[0];
       assert.equal(disabled.status, 'disabled');
+      const revokedControls = (await pool.query<{
+        env_key: string | null; comments_read_enabled: boolean; comments_reply_enabled: boolean;
+        dm_read_enabled: boolean; dm_send_text_enabled: boolean; write_paused: boolean;
+      }>(`SELECT env_key,comments_read_enabled,comments_reply_enabled,dm_read_enabled,dm_send_text_enabled,write_paused
+            FROM interaction_runtime_controls WHERE platform='wechat_channels' AND account_id='acct-offboard-a'`)).rows[0];
+      assert.deepEqual(revokedControls, {
+        env_key: null, comments_read_enabled: false, comments_reply_enabled: false,
+        dm_read_enabled: false, dm_send_text_enabled: false, write_paused: true,
+      }, 'revocation must use account identity even when runtime controls have no env binding');
 
       const failed = await interactions.applyOffboardResult({
         offboardId: started.offboard.offboardId, envKey: 'env-offboard-a', accountId: 'acct-offboard-a',
@@ -226,6 +241,28 @@ test('PostgreSQL: unbind/termination revoke first, retry offline cleanup, tombst
       assert.equal((await users.getOffboard('user-offboard-a', started.offboard.offboardId))?.state, 'purged');
       assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM interaction_auth_state
         WHERE account_id='acct-offboard-a'`)).rows[0].n, 0);
+
+      await pool.query(`CREATE OR REPLACE FUNCTION aidcp_test_skip_auth_revoke() RETURNS trigger AS $$
+        BEGIN
+          IF OLD.account_id='acct-offboard-b' AND NEW.status='disabled' THEN RETURN NULL; END IF;
+          RETURN NEW;
+        END;
+      $$ LANGUAGE plpgsql`);
+      await pool.query(`CREATE TRIGGER aidcp_test_skip_auth_revoke
+        BEFORE UPDATE ON interaction_auth_state FOR EACH ROW EXECUTE FUNCTION aidcp_test_skip_auth_revoke()`);
+      try {
+        await assert.rejects(
+          users.beginEnvironmentOffboard('user-offboard-b', 'env-offboard-b'),
+          /interaction_auth_state_revoke_missed/,
+        );
+        assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM interaction_offboards
+          WHERE account_id='acct-offboard-b'`)).rows[0].n, 0, 'failed revocation must roll back the offboard row');
+        assert.equal((await users.listEnvScope('user-offboard-b')).length, 1,
+          'failed revocation must not remove authoritative ownership');
+      } finally {
+        await pool.query(`DROP TRIGGER IF EXISTS aidcp_test_skip_auth_revoke ON interaction_auth_state`);
+        await pool.query(`DROP FUNCTION IF EXISTS aidcp_test_skip_auth_revoke()`);
+      }
 
       const noEdgeReceipt = await users.beginEnvironmentOffboard('user-offboard-b', 'env-offboard-b');
       assert.equal(noEdgeReceipt.ok, true);
@@ -400,6 +437,12 @@ test('PostgreSQL: admin revocation removes ownership before cleanup and late bin
           dmSendText: false, dmSendImage: false }, identity: null, runtimeControlsVersion: 0,
         checkedAt: Date.now(), reasonCode: null,
       });
+      await pool.query(`INSERT INTO interaction_runtime_controls
+        (platform,account_id,env_key,comments_read_enabled,comments_reply_enabled,dm_read_enabled,
+         dm_send_text_enabled,dm_send_image_enabled,write_paused,updated_by)
+        VALUES ('wechat_channels','acct-revoke-late','env-revoke-missing',true,true,true,true,false,false,'admin')
+        ON CONFLICT (platform,account_id) DO UPDATE SET env_key=EXCLUDED.env_key,comments_read_enabled=true,
+          comments_reply_enabled=true,dm_read_enabled=true,dm_send_text_enabled=true,write_paused=false`);
       assert.equal((await users.setScope('user-revoke-owner', [
         { envKey: 'env-revoke-bound' }, { envKey: 'env-revoke-missing' },
       ], 'admin')).ok, true);
@@ -420,6 +463,15 @@ test('PostgreSQL: admin revocation removes ownership before cleanup and late bin
       );
       assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM client_env_revocation_holds
         WHERE env_key='env-revoke-missing'`)).rows[0].n, 1, 'retry must not duplicate the hold');
+      const heldControls = (await pool.query<{
+        comments_read_enabled: boolean; comments_reply_enabled: boolean; dm_read_enabled: boolean;
+        dm_send_text_enabled: boolean; write_paused: boolean;
+      }>(`SELECT comments_read_enabled,comments_reply_enabled,dm_read_enabled,dm_send_text_enabled,write_paused
+            FROM interaction_runtime_controls WHERE account_id='acct-revoke-late'`)).rows[0];
+      assert.deepEqual(heldControls, {
+        comments_read_enabled: false, comments_reply_enabled: false, dm_read_enabled: false,
+        dm_send_text_enabled: false, write_paused: true,
+      }, 'a cleanup hold must revoke known account capabilities in the same transaction');
       const blocked = await users.setScope('user-revoke-next', [{ envKey: 'env-revoke-missing' }], 'admin');
       assert.deepEqual(blocked, { ok: false, reason: 'cleanup_in_progress', envKey: 'env-revoke-missing' });
       await assert.rejects(pool.query(`INSERT INTO client_env_scope(user_id,env_key,source)
@@ -435,6 +487,7 @@ test('PostgreSQL: admin revocation removes ownership before cleanup and late bin
           dmSendText: false, dmSendImage: false }, identity: null, runtimeControlsVersion: 0,
         checkedAt: Date.now(), reasonCode: null,
       });
+      assert.equal(await users.hasPendingRevocationHold('acct-revoke-late'), true);
       const fixture = JSON.parse(await readFile(new URL('../fixtures/wechat-channels-interaction/v1/ws/comment-sync-batch.json',
         import.meta.url), 'utf8')) as { payload: unknown };
       const parsed = parseSyncBatchPayload(fixture.payload);
@@ -447,6 +500,10 @@ test('PostgreSQL: admin revocation removes ownership before cleanup and late bin
         [['env-revoke-missing', 'acct-revoke-late', 'admin_revoked']]);
       assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM client_env_revocation_holds
         WHERE env_key='env-revoke-missing'`)).rows[0].n, 0);
+      assert.equal(await users.hasPendingRevocationHold('acct-revoke-late'), false);
+      assert.equal((await pool.query<{ comments_read_enabled: boolean }>(`SELECT comments_read_enabled
+        FROM interaction_runtime_controls WHERE account_id='acct-revoke-late'`)).rows[0].comments_read_enabled, false,
+      'late binding materialization must keep capabilities closed');
       assert.deepEqual(await users.setScope('user-revoke-next', [{ envKey: 'env-revoke-missing' }], 'admin'),
         { ok: false, reason: 'offboard_in_progress', envKey: 'env-revoke-missing' });
 

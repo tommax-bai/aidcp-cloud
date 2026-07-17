@@ -56,6 +56,7 @@ export class InteractionSendOrchestrator {
     store: InteractionStore;
     configs: ReplyConfigStore;
     pusher: EdgePusher;
+    isEdgePaused?: (edgeId: string) => boolean;
     controllerFor: (accountId: string) => InteractionRiskController | undefined | Promise<InteractionRiskController | undefined>;
     metrics: InteractionMetrics;
     env?: NodeJS.ProcessEnv;
@@ -214,6 +215,10 @@ export class InteractionSendOrchestrator {
       this.deps.metrics.increment('interaction_send_blocked_total', { code: 'INTERACTION_UPSTREAM_UNAVAILABLE', reason: 'edge_offline' });
       throw new InteractionError('INTERACTION_UPSTREAM_UNAVAILABLE', '账号当前没有在线 Edge。', 503, true);
     }
+    if (this.deps.isEdgePaused?.(edgeId)) {
+      this.deps.metrics.increment('interaction_send_blocked_total', { code: 'INTERACTION_UPSTREAM_UNAVAILABLE', reason: 'edge_paused' });
+      throw new InteractionError('INTERACTION_UPSTREAM_UNAVAILABLE', '账号 Edge 正处于验证码暂停，稍后自动重试。', 503, true);
+    }
     const now = this.clock();
     const created = await this.deps.store.createAttempt({
       ...input, idempotencyKey, rateLimits: gated.snapshot.policy.rateLimits, now,
@@ -246,8 +251,8 @@ export class InteractionSendOrchestrator {
       throw new InteractionError('INTERACTION_SEND_AMBIGUOUS', '回复命令下发结果不确定，已停止自动重试。', 409);
     }
     if (sent === 0) {
-      await this.deps.store.markDispatchFailed(input.accountId, input.envKey, created.attempt.id, 'INTERACTION_UPSTREAM_UNAVAILABLE');
-      this.deps.metrics.increment('interaction_send_attempt_total', { status: 'failed', reason: 'not_delivered' });
+      await this.deps.store.markDispatchDeferred(input.accountId, input.envKey, created.attempt.id, 'INTERACTION_UPSTREAM_UNAVAILABLE');
+      this.deps.metrics.increment('interaction_send_attempt_total', { status: 'deferred', reason: 'not_delivered' });
       throw new InteractionError('INTERACTION_UPSTREAM_UNAVAILABLE', '回复命令未送达唯一 Edge。', 503, true);
     }
     if (sent !== 1) {

@@ -3,6 +3,7 @@ import type { InteractionRuntimeControlsPayload, RuntimeControls } from './types
 export interface RuntimeControlsProjectionDeps {
   getRuntimeControls(accountId: string): Promise<RuntimeControls>;
   hasPendingOffboard(accountId: string): Promise<boolean>;
+  hasPendingRevocationHold(accountId: string): Promise<boolean>;
   globalWriteEnabled: boolean;
 }
 
@@ -12,10 +13,13 @@ export async function projectRuntimeControls(
   accountId: string,
 ): Promise<InteractionRuntimeControlsPayload> {
   const controls = await deps.getRuntimeControls(accountId);
-  const envKey = controls.envKey?.trim() || accountId;
-  const offboardPending = await deps.hasPendingOffboard(accountId);
+  const envKey = controls.envKey?.trim() ?? '';
+  const [offboardPending, revocationHoldPending] = await Promise.all([
+    deps.hasPendingOffboard(accountId),
+    deps.hasPendingRevocationHold(accountId),
+  ]);
   const scopeValid = controls.accountId === accountId && envKey.length > 0;
-  const readAllowed = scopeValid && !offboardPending;
+  const readAllowed = scopeValid && !offboardPending && !revocationHoldPending;
   const writeAllowed = readAllowed && deps.globalWriteEnabled && !controls.writePaused;
   return {
     accountId,

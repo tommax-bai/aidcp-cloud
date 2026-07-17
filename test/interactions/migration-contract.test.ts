@@ -8,6 +8,7 @@ const recoveryMigrationUrl = new URL('../../migrations/0041_interaction_recovery
 const runtimeControlMigrationUrl = new URL('../../migrations/0042_interaction_runtime_control_application.sql', import.meta.url);
 const provisioningMigrationUrl = new URL('../../migrations/0043_client_env_provisioning_intents.sql', import.meta.url);
 const storeCircuitMigrationUrl = new URL('../../migrations/0045_wechat_store_and_circuit.sql', import.meta.url);
+const activeIdempotencyMigrationUrl = new URL('../../migrations/0046_interaction_idempotency_active_unique.sql', import.meta.url);
 
 test('0039 creates the dedicated inbound domain and never writes outbound interaction_feed', async () => {
   const sql = await readFile(migrationUrl, 'utf8');
@@ -98,4 +99,13 @@ test('0045 indexes every non-terminal offboard state for time-bounded Cloud purg
   const sql = await readFile(storeCircuitMigrationUrl, 'utf8');
   assert.match(sql, /DROP INDEX IF EXISTS idx_interaction_offboards_purge/);
   assert.match(sql, /WHERE state IN \('pending_edge','dispatched','tombstoned'\)/);
+});
+
+test('0046 limits idempotency uniqueness to active attempts and removes the unused retryable marker', async () => {
+  const sql = await readFile(activeIdempotencyMigrationUrl, 'utf8');
+  assert.match(sql, /DROP CONSTRAINT IF EXISTS interaction_send_attempts_idempotency_key_key/);
+  assert.match(sql, /uq_interaction_send_attempts_active_idem[\s\S]*idempotency_key[\s\S]*WHERE status IN \('created','dispatched','ambiguous'\)/);
+  assert.match(sql, /DROP COLUMN IF EXISTS retryable/);
+  assert.doesNotMatch(sql, /DROP[^\n]*idempotency_key[^\n]*CHECK/i,
+    'the deterministic idempotency key format check must remain in place');
 });

@@ -27,6 +27,7 @@ import {
 } from './types.js';
 
 const { Pool } = pg;
+const SYNC_THREAD_FUTURE_SKEW_MS = 5 * 60 * 1_000;
 
 type Queryable = Pick<pg.Pool, 'query'> | Pick<pg.PoolClient, 'query'>;
 
@@ -290,9 +291,19 @@ export class InteractionStore {
             SELECT 1 FROM information_schema.columns
             WHERE table_schema='public' AND table_name='interaction_auth_state'
               AND column_name='runtime_controls_version'
+          )
+          AND EXISTS (
+            SELECT 1 FROM pg_indexes
+            WHERE schemaname='public' AND tablename='interaction_send_attempts'
+              AND indexname='uq_interaction_send_attempts_active_idem'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='interaction_send_attempts'
+              AND column_name='retryable'
           ) AS present`,
     );
-    if (rows[0]?.present !== true) throw new Error('interaction_schema_missing_run_0042');
+    if (rows[0]?.present !== true) throw new Error('interaction_schema_missing_run_0046');
   }
 
   async upsertAuthStatus(payload: InteractionAuthStatusPayload): Promise<void> {
@@ -359,6 +370,15 @@ export class InteractionStore {
   }
 
   async ingestBatch(payload: InteractionSyncBatchPayload): Promise<IngestResult> {
+    const latestAllowedThreadTime = payload.observedAt + SYNC_THREAD_FUTURE_SKEW_MS;
+    const futureThread = payload.threads.find((thread) => thread.updatedAt > latestAllowedThreadTime);
+    if (futureThread) {
+      throw new InteractionError(
+        'INTERACTION_VALIDATION_FAILED',
+        `线程 ${futureThread.externalThreadId} 的更新时间 ${futureThread.updatedAt} 超过批次观测时间 ${payload.observedAt} 的允许偏移。`,
+        422,
+      );
+    }
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -981,7 +1001,19 @@ export class InteractionStore {
     } catch (error) {
       await client.query('ROLLBACK');
       if ((error as { code?: string }).code === '23505') {
-        throw new InteractionError('INTERACTION_STATE_CONFLICT', '已有发送尝试在进行中。', 409);
+        const active = await client.query(
+          `SELECT 1 FROM interaction_send_attempts
+            WHERE reply_job_id=$1 AND status IN ('created','dispatched','ambiguous') LIMIT 1`,
+          [input.jobId],
+        );
+        if (active.rows[0]) {
+          throw new InteractionError('INTERACTION_STATE_CONFLICT', '已有发送尝试在进行中。', 409);
+        }
+        throw new InteractionError(
+          'INTERACTION_STATE_CONFLICT',
+          '发送幂等键冲突，但当前任务没有活跃发送尝试。',
+          409,
+        );
       }
       throw error;
     } finally {
@@ -1012,13 +1044,37 @@ export class InteractionStore {
       await client.query('BEGIN');
       const { rows } = await client.query<{ reply_job_id: string }>(
         `UPDATE interaction_send_attempts SET status='failed',verification_status='not_found',error_code=$4,
-             error_category='internal_error',retryable=true,finished_at=now()
+             error_category='internal_error',finished_at=now()
           WHERE id=$1 AND account_id=$2 AND env_key=$3 AND status='created' RETURNING reply_job_id`,
         [attemptId, accountId, envKey, code],
       );
       if (rows[0]) {
         await client.query(
           `UPDATE interaction_reply_jobs SET state='failed',version=version+1,last_error_code=$2,updated_at=now()
+            WHERE id=$1 AND state='sending'`, [rows[0].reply_job_id, code],
+        );
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally { client.release(); }
+  }
+
+  /** A zero-delivery result proves the command stayed local, so release the attempt and requeue the job. */
+  async markDispatchDeferred(accountId: string, envKey: string, attemptId: string, code: InteractionErrorCode): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query<{ reply_job_id: string }>(
+        `UPDATE interaction_send_attempts SET status='failed',verification_status='not_found',error_code=$4,
+             error_category='transient_network',finished_at=now()
+          WHERE id=$1 AND account_id=$2 AND env_key=$3 AND status='created' RETURNING reply_job_id`,
+        [attemptId, accountId, envKey, code],
+      );
+      if (rows[0]) {
+        await client.query(
+          `UPDATE interaction_reply_jobs SET state='queued',version=version+1,last_error_code=$2,updated_at=now()
             WHERE id=$1 AND state='sending'`, [rows[0].reply_job_id, code],
         );
       }
@@ -1036,7 +1092,7 @@ export class InteractionStore {
       await client.query('BEGIN');
       const { rows } = await client.query<{ reply_job_id: string }>(
         `UPDATE interaction_send_attempts SET status='ambiguous',verification_status='pending',error_code=$4,
-             error_category='transient_network',retryable=false,finished_at=now()
+             error_category='transient_network',finished_at=now()
           WHERE id=$1 AND account_id=$2 AND env_key=$3 AND status='created' RETURNING reply_job_id`,
         [attemptId, accountId, envKey, code],
       );
@@ -1081,11 +1137,11 @@ export class InteractionStore {
         payload.verification === 'not_verified' ? 'not_found' : 'confirmed';
       await client.query(
         `UPDATE interaction_send_attempts SET status=$6,verification_status=$7,external_message_id=$8,
-             error_category=$9,error_code=$10,retryable=$11,finished_at=to_timestamp($12/1000.0)
+             error_category=$9,error_code=$10,finished_at=to_timestamp($11/1000.0)
           WHERE id=$1 AND idempotency_key=$2 AND account_id=$3 AND env_key=$4 AND channel=$5`,
         [payload.attemptId, payload.idempotencyKey, payload.accountId, payload.envKey, payload.channel,
           targetStatus, verification, payload.externalMessageId, payload.errorCategory, payload.errorCode,
-          payload.status === 'failed' && ['transient_network','rate_limited'].includes(payload.errorCategory ?? ''), payload.finishedAt],
+          payload.finishedAt],
       );
       const jobState: ReplyJobState = payload.status === 'confirmed' ? 'sent' : payload.status;
       const job = await client.query<{ id: string }>(
@@ -1344,7 +1400,7 @@ export class InteractionStore {
         if (observation.state === 'not_found' && attempt.status === 'created') {
           await client.query(
             `UPDATE interaction_send_attempts SET status='failed',verification_status='not_found',
-                error_category='transient_network',error_code='INTERACTION_UPSTREAM_UNAVAILABLE',retryable=true,finished_at=now()
+                error_category='transient_network',error_code='INTERACTION_UPSTREAM_UNAVAILABLE',finished_at=now()
               WHERE id=$1`, [observation.attemptId],
           );
           await client.query(
@@ -1355,7 +1411,7 @@ export class InteractionStore {
         } else {
           await client.query(
             `UPDATE interaction_send_attempts SET status='ambiguous',verification_status='not_found',
-                error_category='verification_failed',error_code='INTERACTION_SEND_AMBIGUOUS',retryable=false,finished_at=now()
+                error_category='verification_failed',error_code='INTERACTION_SEND_AMBIGUOUS',finished_at=now()
               WHERE id=$1 AND status IN ('created','dispatched','ambiguous')`, [observation.attemptId],
           );
           await client.query(

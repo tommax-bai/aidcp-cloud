@@ -16,6 +16,7 @@ function controls(overrides: Partial<RuntimeControls> = {}): RuntimeControls {
 test('runtime controls projection keeps reads but closes writes when global write is off', async () => {
   const snapshot = await projectRuntimeControls({
     getRuntimeControls: async () => controls(), hasPendingOffboard: async () => false,
+    hasPendingRevocationHold: async () => false,
     globalWriteEnabled: false,
   }, 'env_wc_a');
   assert.deepEqual(snapshot, {
@@ -28,6 +29,7 @@ test('runtime controls projection keeps reads but closes writes when global writ
 test('runtime controls projection closes every capability during offboarding', async () => {
   const snapshot = await projectRuntimeControls({
     getRuntimeControls: async () => controls(), hasPendingOffboard: async () => true,
+    hasPendingRevocationHold: async () => false,
     globalWriteEnabled: true,
   }, 'env_wc_a');
   assert.equal(snapshot.commentsReadEnabled, false);
@@ -39,19 +41,35 @@ test('runtime controls projection closes every capability during offboarding', a
 test('runtime controls projection preserves stored env mismatch so Edge rejects the scope', async () => {
   const snapshot = await projectRuntimeControls({
     getRuntimeControls: async () => controls({ envKey: 'env_wc_b' }), hasPendingOffboard: async () => false,
+    hasPendingRevocationHold: async () => false,
     globalWriteEnabled: true,
   }, 'env_wc_a');
   assert.equal(snapshot.accountId, 'env_wc_a');
   assert.equal(snapshot.envKey, 'env_wc_b');
 });
 
-test('runtime controls projection respects writePaused and falls back before first bind', async () => {
+test('runtime controls projection fails closed without inventing an environment before first bind', async () => {
   const snapshot = await projectRuntimeControls({
     getRuntimeControls: async () => controls({ envKey: null, writePaused: true }),
-    hasPendingOffboard: async () => false, globalWriteEnabled: true,
+    hasPendingOffboard: async () => false, hasPendingRevocationHold: async () => false,
+    globalWriteEnabled: true,
   }, 'env_wc_a');
-  assert.equal(snapshot.envKey, 'env_wc_a');
-  assert.equal(snapshot.commentsReadEnabled, true);
+  assert.equal(snapshot.envKey, '');
+  assert.equal(snapshot.commentsReadEnabled, false);
   assert.equal(snapshot.commentsReplyEnabled, false);
+  assert.equal(snapshot.dmReadEnabled, false);
+  assert.equal(snapshot.dmSendTextEnabled, false);
+});
+
+test('runtime controls projection closes every capability while a revocation hold is pending', async () => {
+  const snapshot = await projectRuntimeControls({
+    getRuntimeControls: async () => controls(),
+    hasPendingOffboard: async () => false,
+    hasPendingRevocationHold: async () => true,
+    globalWriteEnabled: true,
+  }, 'env_wc_a');
+  assert.equal(snapshot.commentsReadEnabled, false);
+  assert.equal(snapshot.commentsReplyEnabled, false);
+  assert.equal(snapshot.dmReadEnabled, false);
   assert.equal(snapshot.dmSendTextEnabled, false);
 });

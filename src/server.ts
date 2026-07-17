@@ -1870,6 +1870,7 @@ async function main(): Promise<void> {
           return projectRuntimeControls({
             getRuntimeControls: (id) => interactionStore!.getRuntimeControls(id),
             hasPendingOffboard: (id) => interactionInbox!.hasPendingOffboard(id),
+            hasPendingRevocationHold: (id) => clientUserStore.hasPendingRevocationHold(id),
             globalWriteEnabled: interactionGlobalWriteEnabled,
           }, accountId);
         },
@@ -1968,6 +1969,7 @@ async function main(): Promise<void> {
       store: interactionStore,
       configs: replyConfigStore,
       pusher: server,
+      isEdgePaused: (edgeId) => server.isEdgePaused(edgeId),
       controllerFor: (accountId) => riskRegistry.getController(accountId),
       metrics: interactionMetrics,
     })

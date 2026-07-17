@@ -280,6 +280,40 @@ export class ClientUserStore {
     return { kind: 'offboard_pending', ...offboard };
   }
 
+  private async revokeInteractionAccess(
+    client: pg.PoolClient,
+    input: { accountId: string; actor: string | null; requireAuthState: boolean },
+  ): Promise<void> {
+    const controls = await client.query(
+      `UPDATE interaction_runtime_controls SET comments_read_enabled=false,comments_reply_enabled=false,
+          dm_read_enabled=false,dm_send_text_enabled=false,dm_send_image_enabled=false,write_paused=true,
+          version=version+1,updated_at=now(),updated_by=$2
+        WHERE platform='wechat_channels' AND account_id=$1
+        RETURNING account_id`,
+      [input.accountId, input.actor ?? 'offboarding'],
+    );
+    if ((controls.rowCount ?? 0) === 0) {
+      const existing = await client.query(
+        `SELECT 1 FROM interaction_runtime_controls
+          WHERE platform='wechat_channels' AND account_id=$1 FOR UPDATE`,
+        [input.accountId],
+      );
+      if (existing.rows[0]) throw new Error('interaction_runtime_controls_revoke_missed');
+    }
+
+    const auth = await client.query(
+      `UPDATE interaction_auth_state SET status='disabled',capabilities=$2::jsonb,
+          reason_code='INTERACTION_FEATURE_DISABLED',checked_at=now(),updated_at=now()
+        WHERE platform='wechat_channels' AND account_id=$1
+        RETURNING account_id`,
+      [input.accountId, JSON.stringify({ commentsRead: false, commentsReply: false,
+        dmRead: false, dmSendText: false, dmSendImage: false })],
+    );
+    if ((auth.rowCount ?? 0) === 0 && input.requireAuthState) {
+      throw new Error('interaction_auth_state_revoke_missed');
+    }
+  }
+
   private async enqueueCleanupHold(
     client: pg.PoolClient,
     input: { userId: string; envKey: string; reason: ClientCleanupHoldView['reason']; actor: string | null },
@@ -298,6 +332,19 @@ export class ClientUserStore {
     );
     const row = rows[0];
     if (!row) throw new Error('revocation_hold_insert_failed');
+    const identities = await client.query<{ account_id: string }>(
+      `SELECT account_id FROM interaction_runtime_controls
+        WHERE platform='wechat_channels' AND env_key=$1
+        ORDER BY account_id LIMIT 2 FOR UPDATE`,
+      [input.envKey],
+    );
+    if (identities.rows.length === 1) {
+      await this.revokeInteractionAccess(client, {
+        accountId: identities.rows[0].account_id,
+        actor: input.actor,
+        requireAuthState: false,
+      });
+    }
     return {
       kind: 'binding_missing', revocationId: row.revocation_id, envKey: row.env_key,
       state: 'binding_missing', reason: row.reason, requestedAt: row.requested_at.getTime(),
@@ -323,20 +370,11 @@ export class ClientUserStore {
     );
     const row = inserted.rows[0];
     if (!row || row.account_id !== input.accountId) throw new Error('offboard_scope_conflict');
-    await client.query(
-      `UPDATE interaction_runtime_controls SET comments_read_enabled=false,comments_reply_enabled=false,
-          dm_read_enabled=false,dm_send_text_enabled=false,dm_send_image_enabled=false,write_paused=true,
-          version=version+1,updated_at=now(),updated_by=$3
-        WHERE platform='wechat_channels' AND account_id=$1 AND env_key=$2`,
-      [input.accountId, input.envKey, input.actor ?? 'offboarding'],
-    );
-    await client.query(
-      `UPDATE interaction_auth_state SET status='disabled',capabilities=$3::jsonb,
-          reason_code='INTERACTION_FEATURE_DISABLED',checked_at=now(),updated_at=now()
-        WHERE platform='wechat_channels' AND account_id=$1 AND env_key=$2`,
-      [input.accountId, input.envKey, JSON.stringify({ commentsRead: false, commentsReply: false,
-        dmRead: false, dmSendText: false, dmSendImage: false })],
-    );
+    await this.revokeInteractionAccess(client, {
+      accountId: input.accountId,
+      actor: input.actor,
+      requireAuthState: true,
+    });
     await client.query(
       `INSERT INTO interaction_offboard_audit
          (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
@@ -1264,6 +1302,19 @@ export class ClientUserStore {
       }
     }
     return offboards;
+  }
+
+  async hasPendingRevocationHold(accountId: string): Promise<boolean> {
+    const { rows } = await this.pool.query<{ present: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1
+           FROM interaction_auth_state a
+           JOIN client_env_revocation_holds h ON h.env_key=a.env_key
+          WHERE a.platform='wechat_channels' AND a.account_id=$1
+       ) AS present`,
+      [accountId],
+    );
+    return rows[0]?.present === true;
   }
 
   async close(): Promise<void> {
