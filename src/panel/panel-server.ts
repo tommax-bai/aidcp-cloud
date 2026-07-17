@@ -46,6 +46,7 @@ import { DelegatedTaskServiceError } from '../delegated-task/service.js';
 import type { DelegatedTaskIntent, JsonValue } from '../delegated-task/types.js';
 import { clampClientApprovalMode } from '../delegated-task/types.js';
 import { buildPublishLifecycle } from './publish-stage-lifecycle.js';
+import { CuratedContentUnavailableError } from '../cache/curated-content-store.js';
 
 /** 登录/写体很小，限制请求体大小防滥用。 */
 const MAX_BODY_BYTES = 16 * 1024;
@@ -2468,6 +2469,13 @@ function createRequestHandler(
 
   return (req, res) => {
     void handle(req, res).catch((err) => {
+      // 缺表/改名（42P01）由精选只读方法抛 typed error：诚实回 503（服务不可用），落进面板「加载中/暂无数据/
+      // 服务不可用」三态的第三态，绝不回落空池、绝不 500（change curated-envkey-account-binding，D6；覆盖
+      // 列表 / 筛选面 / 单行读取三处只读调用点）。只有精选只读方法抛此类型，故此处映射精确无副作用。
+      if (err instanceof CuratedContentUnavailableError) {
+        if (!res.headersSent) sendJson(res, 503, { error: 'curated_unavailable' });
+        return;
+      }
       logger.warn(`[panel] 请求处理异常: ${(err as Error).message}`);
       if (!res.headersSent) sendJson(res, 500, { error: 'internal_error' });
     });

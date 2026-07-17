@@ -32,7 +32,7 @@ import { createBillingPriceRefresh } from './metrics/billing-price-refresh.js';
 import { startRetentionSweeper } from './panel/retention-sweeper.js';
 import { shanghaiDayStartMs } from './time/shanghai-day.js';
 import { SimplePlanner } from './planner/index.js';
-import { PgAnchorCache, BotChatStore, GroupRouteStore, ConceptStore, LikedNoteStore, ValuableCommentStore, NotificationContactStore, InteractionFeedStore, CuratedContentStore, topicKeysFromTitle } from './cache/index.js';
+import { PgAnchorCache, BotChatStore, GroupRouteStore, ConceptStore, LikedNoteStore, ValuableCommentStore, NotificationContactStore, InteractionFeedStore, CuratedContentStore, CuratedContentUnavailableError, topicKeysFromTitle } from './cache/index.js';
 import type { CuratedReferenceImage, CuratedReferenceImageInput, CuratedSourceAdmission } from './cache/index.js';
 import { FirstPostOnboardingStore } from './onboarding/first-post-onboarding-store.js';
 import { FirstPostOnboardingCoordinator } from './onboarding/first-post-onboarding-coordinator.js';
@@ -1093,9 +1093,18 @@ async function main(): Promise<void> {
           }
           if (intent.action === 'comment_curated') {
             const curatedId = Number(intent.targetConstraints?.curatedId);
-            const row = Number.isInteger(curatedId) && curatedContentStore
-              ? await curatedContentStore.getOneForAccount(curatedId, account.accountId)
-              : null;
+            let row: Awaited<ReturnType<CuratedContentStore['getOneForAccount']>> = null;
+            try {
+              row = Number.isInteger(curatedId) && curatedContentStore
+                ? await curatedContentStore.getOneForAccount(curatedId, account.accountId)
+                : null;
+            } catch (err) {
+              // 缺表/改名（42P01）：诚实回「服务不可用」，MUST NOT 复用 curated_target_unavailable（那句是「这行不存在」= 谎）。
+              if (err instanceof CuratedContentUnavailableError) {
+                return { ok: false, code: 'curated_content_unavailable', message: '精选内容存储暂不可用，请稍后重试。' };
+              }
+              throw err;
+            }
             if (!row || (row.contentType !== 'image_text' && row.contentType !== 'video') || !row.title?.trim()) {
               return { ok: false, code: 'curated_target_unavailable', message: '指定精选内容不存在、归属不符或缺少可定位标题。' };
             }
@@ -1122,7 +1131,16 @@ async function main(): Promise<void> {
           }
           const curatedId = Number(task.targetConstraints.curatedId ?? task.sourceConstraints.curatedId);
           if (Number.isInteger(curatedId) && curatedId > 0) {
-            const row = curatedContentStore ? await curatedContentStore.getOneForAccount(curatedId, task.accountId) : null;
+            let row: Awaited<ReturnType<CuratedContentStore['getOneForAccount']>> = null;
+            try {
+              row = curatedContentStore ? await curatedContentStore.getOneForAccount(curatedId, task.accountId) : null;
+            } catch (err) {
+              // 缺表/改名（42P01）：诚实回「服务不可用」，MUST NOT 复用 curated_target_changed（那句是「已删/已变」= 谎）。
+              if (err instanceof CuratedContentUnavailableError) {
+                return { ok: false, code: 'curated_content_unavailable', message: '精选内容存储暂不可用，请稍后重试。' };
+              }
+              throw err;
+            }
             if (!row || row.sourceId !== String(task.targetConstraints.noteId ?? task.sourceConstraints.sourceId ?? '')) {
               return { ok: false, code: 'curated_target_changed', message: '精选目标已删除或身份发生变化，不能改选相似内容。' };
             }
@@ -1543,6 +1561,18 @@ async function main(): Promise<void> {
     await as.init();
     alertStore = as;
     console.log('[aidcp-cloud] AlertStore 已就绪（alerts 表）');
+    // D5 跨客户绑定冲突告警（change curated-envkey-account-binding）：clientUserStore 在 alertStore 之前构造，
+    // 故此处事后接线到既有告警存储（非仅 console.warn）。冲突 = 安全事件（另一客户的账号被自报身份争用）→ P1。
+    clientUserStore.setBindingConflictAlertSink((alert) => {
+      void as.raise({
+        severity: 'P1',
+        type: 'env_binding_conflict',
+        accountId: alert.accountId,
+        title: '环境→账号绑定跨客户冲突（已 fail-closed 拒写）',
+        detail: `env_key=${alert.envKey} 尝试绑定账号 ${alert.accountId}，但该账号已绑在归属其他客户的环境上；`
+          + `本次绑定写被拒、既有绑定不变（owner=${alert.ownerUserId ?? '⊥'}）。`,
+      }).catch((err) => console.warn(`[client-env] 绑定冲突告警落库失败: ${err instanceof Error ? err.message : String(err)}`));
+    });
   } catch (err) {
     console.warn('[aidcp-cloud] AlertStore 初始化失败，告警不落库（飞书告警仍发）:', (err as Error).message);
   }
@@ -1974,7 +2004,14 @@ async function main(): Promise<void> {
       if (eid && eid.startsWith('ads-')) {
         void clientUserStore
           .registerEnvironments(
-            [{ envKey: eid.slice('ads-'.length), label: session.accountNickname ?? null, platform: session.platform ?? null }],
+            // 环境→账号绑定（change curated-envkey-account-binding）：session.accountId 就在同一 session 对象里；
+            // 该钩子按构造安全（welcome 已回发后触发、fire-and-forget + .catch），加此字段结构上不可能拒掉一次握手。
+            [{
+              envKey: eid.slice('ads-'.length),
+              label: session.accountNickname ?? null,
+              platform: session.platform ?? null,
+              accountId: session.accountId ?? null,
+            }],
             'auto',
           )
           .catch((err) => console.warn(`[client-env] 自动登记环境失败 edge=${eid}: ${err instanceof Error ? err.message : String(err)}`));
@@ -4196,6 +4233,9 @@ async function main(): Promise<void> {
           delegatedTasks: delegatedTaskService,
           curatedContent: curatedContentStore,
           referenceDraftCountForAccount: (accountId) => publishLogStore.countReferenceDraftsForAccount(accountId),
+          // D5 活体佐证（change curated-envkey-account-binding）：不可逆写要求绑定账号此刻活在该环境上。
+          // 幸存者 resolveEdgeIdForAccount（account→edge），绝不用将被慢启动 change 删除的 resolveAccountIdForEdge。
+          resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
           interactionApi: interactionCustomerApi,
           // 账号级慢启动写入（change account-level-slow-start）：envKey → edgeId → 活会话反查 accountId。
           // envKey→edgeId 是确定性映射（边缘 fleet 用 `ads-${profileId}` 作 edgeId，客户端的 envKey 即 profileId）。

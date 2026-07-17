@@ -525,6 +525,21 @@ function rowToPanelView(r: CuratedPanelDbRow): CuratedPanelRow {
   };
 }
 
+/**
+ * 底层精选表缺失 / 不可读（PostgreSQL `42P01`）时由只读方法抛出的 typed error。
+ *
+ * **红线（change curated-envkey-account-binding）**：此前 4 个只读方法把「表不存在」翻译成「没有数据」
+ * （回空列表 / null）——那被上层如实画成「暂无数据 / 精选池还是空的」，让一处存储故障对运营呈现为一个
+ * 和善的空池，与「MUST NOT 静默假成功」红线同质，只是穿了「优雅降级」的外衣。改为抛此 typed error，
+ * 由每个调用方映射为诚实的 503（服务不可用），MUST NOT 回落为空结果、MUST NOT 回落为「未找到」。
+ */
+export class CuratedContentUnavailableError extends Error {
+  constructor(readonly operation: string) {
+    super(`curated content store unavailable (missing table) during ${operation}`);
+    this.name = 'CuratedContentUnavailableError';
+  }
+}
+
 export class CuratedContentStore {
   private readonly pool: pg.Pool;
   private readonly retentionMax: number;
@@ -938,13 +953,15 @@ export class CuratedContentStore {
   // ── 后台管理（change curated-content-admin-page）：只读检索 + 治理写 ──────────────
   // 红线：治理写（deleteOne / clearEmptyBody）把 account_id 写进 WHERE 防越权（id 是全局 SERIAL，故账号必填）；
   //      只读检索（listForPanel / facetsForPanel）accountId 给定＝按账号过滤、缺省＝全账号合并视图（每行携 account_id、
-  //      删除仍按行账号防越权）；缺表（42P01）只读路径优雅降空，不抛 500。
+  //      删除仍按行账号防越权）；缺表（42P01）只读路径抛 CuratedContentUnavailableError，由调用方映射 503——
+  //      **绝不回落空结果**（change curated-envkey-account-binding：缺表回空 = 把故障画成「暂无数据」的红线）。
 
   /**
    * 面板列表（分页只读）。
    * accountId 给定＝按该账号过滤；缺省（undefined/空）＝全账号合并视图（运营便利，每行带 account_id、删除仍按行账号防越权）。
    * 动态 WHERE 拼 account_id（可选）+ content_type / admit_reason 精确过滤，按 updated_at DESC，
-   * COUNT(*) OVER() 同查询取回当前筛选总数。空结果集 total 兜底 0；缺表 42P01 → {items:[],total:0} 降级。
+   * COUNT(*) OVER() 同查询取回当前筛选总数。空结果集 total 兜底 0；缺表 42P01 → 抛
+   * CuratedContentUnavailableError（服务不可用），**绝不回落空结果**（change curated-envkey-account-binding）。
    */
   async listForPanel(
     accountId: string | undefined,
@@ -984,7 +1001,7 @@ export class CuratedContentStore {
       const total = rows.length > 0 ? Number(rows[0].total_count) : 0;
       return { items: rows.map(rowToPanelView), total };
     } catch (err) {
-      if ((err as { code?: string }).code === '42P01') return { items: [], total: 0 };
+      if ((err as { code?: string }).code === '42P01') throw new CuratedContentUnavailableError('listForPanel');
       throw err;
     }
   }
@@ -992,7 +1009,8 @@ export class CuratedContentStore {
   /**
    * 客户端灵感库列表（严格按账号）。
    * creatableOnly 条件下推 SQL 后再 COUNT/LIMIT/OFFSET，避免先分页后过滤造成空页和错误 total。
-   * limit/offset 在 store 再收口，防调用方遗漏边界；缺表仍诚实降级为空。
+   * limit/offset 在 store 再收口，防调用方遗漏边界；缺表抛 CuratedContentUnavailableError（服务不可用），
+   * **绝不回落空结果**（change curated-envkey-account-binding：缺表回空正是本 change 要杀的红线字符串）。
    *
    * total 必须是「当前筛选条件下的服务端一致总数」，与本页取到几行无关：
    * `COUNT(*) OVER()` 只在有行时才回得来，offset 越过末尾（列表缩短 / 陈旧页码）时窗口函数无行可算，
@@ -1035,7 +1053,7 @@ export class CuratedContentStore {
       );
       return { items: [], total: Number(countRows[0]?.total_count ?? '0') };
     } catch (err) {
-      if ((err as { code?: string }).code === '42P01') return { items: [], total: 0 };
+      if ((err as { code?: string }).code === '42P01') throw new CuratedContentUnavailableError('listForClient');
       throw err;
     }
   }
@@ -1043,7 +1061,8 @@ export class CuratedContentStore {
   /**
    * 面板筛选面：纳入原因去重 + 各自计数 + 携双标记的高权重行数 + 笔记/评论计数。
    * accountId 给定＝按该账号；缺省（undefined/空）＝全账号合并统计（驱动全账号视图下的筛选下拉）。
-   * 驱动筛选下拉（不硬编码原因）与清理前影响预览。缺表 42P01 → 空降级。
+   * 驱动筛选下拉（不硬编码原因）与清理前影响预览。缺表 42P01 → 抛 CuratedContentUnavailableError
+   * （服务不可用），**绝不回落空降级**（change curated-envkey-account-binding）。
    */
   async facetsForPanel(accountId?: string): Promise<CuratedFacets> {
     const where = accountId ? 'WHERE account_id = $1' : '';
@@ -1087,9 +1106,7 @@ export class CuratedContentStore {
         commentCount,
       };
     } catch (err) {
-      if ((err as { code?: string }).code === '42P01') {
-        return { admitReasons: [], imageTextCount: 0, videoCount: 0, noteCount: 0, commentCount: 0 };
-      }
+      if ((err as { code?: string }).code === '42P01') throw new CuratedContentUnavailableError('facetsForPanel');
       throw err;
     }
   }
@@ -1097,7 +1114,9 @@ export class CuratedContentStore {
   /**
    * 读单行（行级动作用，change curated-note-actions）。
    * account_id 必进 WHERE 防越权（同 deleteOne：id 是全局 SERIAL，仅凭 id 不可触别账号行）。
-   * 未命中/跨账号不匹配 → null；缺表 42P01 → null 优雅降级，不抛 500。
+   * 未命中/跨账号不匹配 → null；缺表 42P01 → 抛 CuratedContentUnavailableError（服务不可用），
+   * **绝不回落 null**（change curated-envkey-account-binding：缺表回 null 被上层译成「未找到」= 谎，
+   * 该行可能存在）。注意此方法**共享**给 client-auth / panel / server 校验多处，改降级行为须同步全部调用点。
    */
   async getOneForAccount(id: number, accountId: string): Promise<CuratedPanelRow | null> {
     try {
@@ -1112,7 +1131,7 @@ export class CuratedContentStore {
       );
       return rows.length > 0 ? rowToPanelView(rows[0]) : null;
     } catch (err) {
-      if ((err as { code?: string }).code === '42P01') return null;
+      if ((err as { code?: string }).code === '42P01') throw new CuratedContentUnavailableError('getOneForAccount');
       throw err;
     }
   }

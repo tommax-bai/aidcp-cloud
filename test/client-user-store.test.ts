@@ -122,8 +122,9 @@ test('registerEnvironments: 去空白 + 去重 + 跳空，每条一次 upsert，
   assert.equal(n, 2);
   assert.equal(calls.length, 2);
   assert.match(calls[0].sql, /INSERT INTO client_environments/);
-  assert.deepEqual(calls[0].params, ['k1', '大白', 'xiaohongshu', 'import']); // trim + 默认 source=import
-  assert.deepEqual(calls[1].params, ['k2', null, null, 'import']); // 空串归一为 null
+  // 第 5 个参数 = account_id 绑定（change curated-envkey-account-binding）；无 accountId 的 item → null（不动既有绑定）。
+  assert.deepEqual(calls[0].params, ['k1', '大白', 'xiaohongshu', 'import', null]); // trim + 默认 source=import
+  assert.deepEqual(calls[1].params, ['k2', null, null, 'import', null]); // 空串归一为 null
 });
 
 test('registerEnvironments: 全空输入 → 0 次写、返回 0（绝不误发空 upsert）', async () => {
@@ -138,7 +139,7 @@ test('registerEnvironments: source 显式传 auto 透传到参数（自动登记
   const { pool, calls } = recordingPool();
   const store = new ClientUserStore({ pool });
   await store.registerEnvironments([{ envKey: 'k9' }], 'auto');
-  assert.deepEqual(calls[0].params, ['k9', null, null, 'auto']);
+  assert.deepEqual(calls[0].params, ['k9', null, null, 'auto', null]);
 });
 
 test('ownsEnv: user A only owns rows explicitly scoped to user A', async () => {
@@ -243,4 +244,100 @@ test('withAuthorizedInteractionScope fails closed on env/account binding mismatc
   assert.deepEqual(result, { ok: false, reason: 'not_authorized' });
   assert.equal(operationCalls, 0);
   assert.equal(calls.at(-1), 'ROLLBACK');
+});
+
+// ── 环境→账号绑定（change curated-envkey-account-binding）───────────────────────────
+// 真 SQL 的绑定合并 / D5 双闸 / accounts JOIN 悬空 fail-closed 靠真库核（簇 61，见文件头同理）；
+// 这里锁桩可验的那几段：退役归一、COALESCE 方向（防 FB 昵称回归形状）、D5 写闸拒写 + 告警、判别式映射。
+
+/** 支持 connect() 事务路径的假 pool：按 SQL 内容分派返回值，records 收 upsert 参数。 */
+function txPool(dispatch: (sql: string, params?: unknown[]) => { rows: unknown[] }) {
+  const calls: { sql: string; params?: unknown[] }[] = [];
+  const client = {
+    query: async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      return dispatch(sql, params);
+    },
+    release() {},
+  };
+  const pool = { connect: async () => client, query: client.query } as unknown as pg.Pool;
+  return { pool, calls };
+}
+
+test('registerEnvironments: 退役保留账号 default 归一为 null（不写绑定、走非事务路径）', async () => {
+  const { pool, calls } = recordingPool();
+  const store = new ClientUserStore({ pool });
+  await store.registerEnvironments([{ envKey: 'k1', accountId: 'default' }], 'auto');
+  // 归一为 null ⇒ 不触发事务 D5 闸，直接一条 upsert；account_id 参数 = null（COALESCE 下等价「没有新值」）。
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].sql, /INSERT INTO client_environments/);
+  assert.deepEqual(calls[0].params, ['k1', null, null, 'auto', null]);
+});
+
+test('registerEnvironments: 带真实 accountId 走事务、无冲突则写绑定，且合并是「新值才覆盖」', async () => {
+  const { pool, calls } = txPool((sql) => {
+    if (/AS conflict/.test(sql)) return { rows: [{ conflict: false }] };
+    return { rows: [] };
+  });
+  const store = new ClientUserStore({ pool });
+  await store.registerEnvironments([{ envKey: 'k1', accountId: 'acct-24hex' }], 'auto');
+  const upsert = calls.find((c) => /INSERT INTO client_environments/.test(c.sql))!;
+  assert.deepEqual(upsert.params, ['k1', null, null, 'auto', 'acct-24hex']);
+  // 红线：合并 MUST 为「来了新值才覆盖」，MUST NOT 为「当前为空才写」（后者=FB 昵称回归形状）。
+  assert.match(upsert.sql, /account_id = COALESCE\(EXCLUDED\.account_id, client_environments\.account_id\)/);
+  assert.doesNotMatch(upsert.sql, /account_id = COALESCE\(client_environments\.account_id, EXCLUDED\.account_id\)/);
+  // 事务包裹（不牵连握手由调用侧 fire-and-forget 保证；此处锁 BEGIN/COMMIT 成对）。
+  assert.equal(calls[0].sql, 'BEGIN');
+  assert.equal(calls.at(-1)!.sql, 'COMMIT');
+});
+
+test('registerEnvironments: D5 写闸——跨客户冲突则拒写绑定(account_id→null)+告警，label/platform 照登记', async () => {
+  const { pool, calls } = txPool((sql) => {
+    if (/AS conflict/.test(sql)) return { rows: [{ conflict: true }] };
+    return { rows: [] };
+  });
+  const store = new ClientUserStore({ pool });
+  const alerts: { envKey: string; accountId: string }[] = [];
+  store.setBindingConflictAlertSink((a) => alerts.push({ envKey: a.envKey, accountId: a.accountId }));
+  await store.registerEnvironments([{ envKey: 'k1', label: '大白', platform: 'facebook', accountId: 'victim-acct' }], 'auto');
+  const upsert = calls.find((c) => /INSERT INTO client_environments/.test(c.sql))!;
+  // 绑定被拒写（account_id=null 交给 COALESCE 保留既有），但 label/platform 照常登记。
+  assert.deepEqual(upsert.params, ['k1', '大白', 'facebook', 'auto', null]);
+  assert.deepEqual(alerts, [{ envKey: 'k1', accountId: 'victim-acct' }]);
+});
+
+test('resolveBoundAccountForEnv: 判别式映射（owned/bound/dangling/contended/unavailable）', async () => {
+  const make = (row: unknown) => new ClientUserStore({ pool: fakePool(() => ({ rows: [row] })) });
+  assert.deepEqual(
+    await make({ owned: true, bound_account: 'acct-x', account_exists: true, contended: false })
+      .resolveBoundAccountForEnv('u1', 'p1'),
+    { ok: true, accountId: 'acct-x' });
+  assert.deepEqual(
+    await make({ owned: false, bound_account: null, account_exists: false, contended: false })
+      .resolveBoundAccountForEnv('u1', 'p1'),
+    { ok: false, reason: 'environment_not_owned' });
+  assert.deepEqual(
+    await make({ owned: true, bound_account: null, account_exists: false, contended: false })
+      .resolveBoundAccountForEnv('u1', 'p1'),
+    { ok: false, reason: 'binding_unknown' });
+  assert.deepEqual( // 悬空绑定（accounts 无此行）→ 读时 fail-closed 归入 binding_unknown
+    await make({ owned: true, bound_account: 'acct-x', account_exists: false, contended: false })
+      .resolveBoundAccountForEnv('u1', 'p1'),
+    { ok: false, reason: 'binding_unknown' });
+  assert.deepEqual( // 争用是安全事件，与 binding_unknown 分码
+    await make({ owned: true, bound_account: 'acct-x', account_exists: true, contended: true })
+      .resolveBoundAccountForEnv('u1', 'p1'),
+    { ok: false, reason: 'binding_conflict' });
+  const missingTable = new ClientUserStore({ pool: fakePool(() => { const e = new Error('no table') as Error & { code: string }; e.code = '42P01'; throw e; }) });
+  assert.deepEqual(await missingTable.resolveBoundAccountForEnv('u1', 'p1'), { ok: false, reason: 'binding_unavailable' });
+});
+
+test('isAccountReachableByUser: 反向判别（ok / 争用 fail-closed / 不可达）', async () => {
+  const make = (row: unknown) => new ClientUserStore({ pool: fakePool(() => ({ rows: [row] })) });
+  assert.deepEqual(await make({ owned_bound: true, contended: false }).isAccountReachableByUser('u1', 'acct-x'),
+    { ok: true, accountId: 'acct-x' });
+  assert.deepEqual(await make({ owned_bound: true, contended: true }).isAccountReachableByUser('u1', 'acct-x'),
+    { ok: false, reason: 'binding_conflict' });
+  assert.deepEqual(await make({ owned_bound: false, contended: false }).isAccountReachableByUser('u1', 'acct-x'),
+    { ok: false, reason: 'environment_not_owned' });
 });

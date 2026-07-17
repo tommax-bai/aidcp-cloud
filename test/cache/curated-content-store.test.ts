@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import type pg from 'pg';
 import {
   CuratedContentStore,
+  CuratedContentUnavailableError,
   normalizeCuratedReferenceImages,
   type CuratedObservation,
 } from '../../src/cache/curated-content-store.js';
@@ -515,7 +516,7 @@ test('listForClient：可创作条件在 SQL 层过滤，分页边界收口且 t
   assert.equal(out.items[0].collectCount, 0, '真实 0 必须保持 0');
 });
 
-test('listForClient：全部模式不加可创作条件；缺表诚实回落为空', async () => {
+test('listForClient：全部模式不加可创作条件；缺表抛 CuratedContentUnavailableError（绝不回落空）', async () => {
   const ok = controllablePool(() => ({ rows: [] }));
   const store = new CuratedContentStore({ pool: ok.pool });
   assert.deepEqual(await store.listForClient('acc-1', { creatableOnly: false, limit: 20, offset: 0 }), {
@@ -527,16 +528,17 @@ test('listForClient：全部模式不加可创作条件；缺表诚实回落为�
   assert.deepEqual(ok.calls[0].params, ['acc-1', 20, 0]);
   assert.equal(ok.calls.length, 1, 'offset=0 的零行就是真零条，不必补 COUNT');
 
+  // change curated-envkey-account-binding：缺表 MUST 抛 typed error（由调用方映射 503），MUST NOT 回落空。
   const missing = controllablePool(() => {
     const err = new Error('relation does not exist') as Error & { code: string };
     err.code = '42P01';
     throw err;
   });
   const missingStore = new CuratedContentStore({ pool: missing.pool });
-  assert.deepEqual(await missingStore.listForClient('acc-1', { creatableOnly: true, limit: 20, offset: 0 }), {
-    items: [],
-    total: 0,
-  });
+  await assert.rejects(
+    () => missingStore.listForClient('acc-1', { creatableOnly: true, limit: 20, offset: 0 }),
+    CuratedContentUnavailableError,
+  );
 });
 
 test('listForClient：offset 越过末尾时补 COUNT 拿真实总数，绝不把「本页无行」谎报成「零条」', async () => {
@@ -591,15 +593,14 @@ test('facetsForPanel：缺 accountId（全账号视图）不加 account_id 过�
   assert.deepEqual(out.admitReasons[0], { admitReason: 'collect_floor', count: 9, botActionCount: 4 });
 });
 
-test('listForPanel：缺表 42P01 → 优雅降级 {items:[],total:0}', async () => {
+test('listForPanel：缺表 42P01 → 抛 CuratedContentUnavailableError（绝不回落空池）', async () => {
   const { pool } = controllablePool(() => {
     const err = new Error('relation does not exist') as Error & { code: string };
     err.code = '42P01';
     throw err;
   });
   const store = new CuratedContentStore({ pool });
-  const out = await store.listForPanel('acc-1', { limit: 10, offset: 0 });
-  assert.deepEqual(out, { items: [], total: 0 });
+  await assert.rejects(() => store.listForPanel('acc-1', { limit: 10, offset: 0 }), CuratedContentUnavailableError);
 });
 
 test('facetsForPanel：纳入原因去重+计数+高权重行数 与 笔记/评论计数，均按账号', async () => {
@@ -668,12 +669,12 @@ test('getOneForAccount：跨账号/不存在 → null（越权被隔离，不泄
   assert.equal(await store.getOneForAccount(999, 'acc-1'), null);
 });
 
-test('getOneForAccount：缺表 42P01 → null 优雅降级，不抛 500', async () => {
+test('getOneForAccount：缺表 42P01 → 抛 CuratedContentUnavailableError（绝不回落 null=「未找到」谎）', async () => {
   const { pool } = controllablePool(() => {
     const err = new Error('missing') as Error & { code?: string };
     err.code = '42P01';
     throw err;
   });
   const store = new CuratedContentStore({ pool });
-  assert.equal(await store.getOneForAccount(1, 'acc-1'), null);
+  await assert.rejects(() => store.getOneForAccount(1, 'acc-1'), CuratedContentUnavailableError);
 });

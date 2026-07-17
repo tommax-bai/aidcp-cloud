@@ -9,10 +9,15 @@ import { verifyJwt } from '../src/panel/jwt.js';
 import { MemoryDelegatedTaskStore } from '../src/delegated-task/store.js';
 import { DelegatedTaskService } from '../src/delegated-task/service.js';
 import type { CuratedPanelRow } from '../src/cache/curated-content-store.js';
+import { CuratedContentUnavailableError } from '../src/cache/curated-content-store.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 const CLIENT_SECRET = 'client-secret-xyz';
 const PANEL_SECRET = 'panel-secret-abc';
+
+// 真实平台账号 id（24-hex）——**故意与 envKey 'p1' 不同**：本 bug 的整个成因就是「拿 8 字符环境编号当 24-hex
+// 账号 id 查库」。夹具里两者必须取不同的值，否则这些测试什么都证明不了（这正是旧夹具把错误契约固化的地方）。
+const ACCT_P1 = '63e2ff0500000000260049ce';
 
 /** 内存假 store，仅实现 client-auth-server 用到的方法。 */
 function makeFakeStore(): {
@@ -21,13 +26,31 @@ function makeFakeStore(): {
   scope: Map<string, ClientEnvScopeRow[]>;
   offboards: Map<string, ClientOffboardView>;
   registered: Set<string>;
+  /** envKey → 绑定的真实平台账号 id（change curated-envkey-account-binding）。 */
+  bindings: Map<string, string>;
 } {
   const users = new Map<string, { userId: string; key: string; status: 'enabled' | 'disabled' }>();
   const scope = new Map<string, ClientEnvScopeRow[]>();
   const offboards = new Map<string, ClientOffboardView>();
   const registered = new Set<string>();
+  const bindings = new Map<string, string>();
   const intents = new Map<string, { userId: string; proof: string; expiresAt: number; envKey?: string }>();
   let nextIntent = 1;
+
+  // owner(envKey)：哪个客户归属了这个环境（0-或-1，与真 store 的 client_env_scope source='admin' 唯一索引一致）。
+  const ownerOf = (envKey: string): string | null => {
+    for (const [uid, rows] of scope.entries()) if (rows.some((r) => r.envKey === envKey)) return uid;
+    return null;
+  };
+  // D5 跨客户争用：该账号是否绑在归属**不同客户**的另一个环境上（无主环境不参与，与真 store 一致）。
+  const contendedAcrossCustomers = (accountId: string, userId: string): boolean => {
+    for (const [envKey, boundAccount] of bindings.entries()) {
+      if (boundAccount !== accountId) continue;
+      const owner = ownerOf(envKey);
+      if (owner !== null && owner !== userId) return true;
+    }
+    return false;
+  };
   const fake = {
     async verifyLogin(name: string, key: string) {
       const u = users.get(name.trim());
@@ -40,6 +63,25 @@ function makeFakeStore(): {
     },
     async listEnvScope(userId: string) {
       return scope.get(userId) ?? [];
+    },
+    // 环境→账号绑定解析（change curated-envkey-account-binding，正向判别式）。
+    async resolveBoundAccountForEnv(userId: string, envKey: string) {
+      const key = (envKey ?? '').trim();
+      const owned = (scope.get(userId) ?? []).some((item) => item.envKey === key);
+      if (!key || !owned) return { ok: false as const, reason: 'environment_not_owned' as const };
+      const bound = bindings.get(key);
+      if (!bound) return { ok: false as const, reason: 'binding_unknown' as const };
+      if (contendedAcrossCustomers(bound, userId)) return { ok: false as const, reason: 'binding_conflict' as const };
+      return { ok: true as const, accountId: bound };
+    },
+    // 反向：某账号是否可被该客户经其某环境触达（供任务动作归属判定）。同源争用闸。
+    async isAccountReachableByUser(userId: string, accountId: string) {
+      const acct = (accountId ?? '').trim();
+      if (!acct) return { ok: false as const, reason: 'environment_not_owned' as const };
+      if (contendedAcrossCustomers(acct, userId)) return { ok: false as const, reason: 'binding_conflict' as const };
+      const ownedBound = (scope.get(userId) ?? []).some((item) => bindings.get(item.envKey) === acct);
+      if (ownedBound) return { ok: true as const, accountId: acct };
+      return { ok: false as const, reason: 'environment_not_owned' as const };
     },
     async createProvisioningIntent(userId: string) {
       const enabled = [...users.values()].some((user) => user.userId === userId && user.status === 'enabled');
@@ -88,7 +130,7 @@ function makeFakeStore(): {
       return offboards.get(`${userId}:${offboardId}`) ?? null;
     },
   };
-  return { store: fake as unknown as ClientUserStore, users, scope, offboards, registered };
+  return { store: fake as unknown as ClientUserStore, users, scope, offboards, registered, bindings };
 }
 
 function baseConfig(port: number, overrides: Partial<ClientAuthConfig> = {}): ClientAuthConfig {
@@ -376,16 +418,22 @@ test('Edge delegated-task routes bind every read/write to the customer-owned env
   const fx = makeFakeStore();
   fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
   fx.scope.set('u1', [{ envKey: 'p1', label: '小萝北', platform: 'xiaohongshu', source: 'admin', assignedAt: 0 }]);
+  // 环境 p1 绑定真实账号 ACCT_P1（≠ envKey）；任务读写一律以绑定账号落库/查询。
+  fx.bindings.set('p1', ACCT_P1);
   const taskStore = new MemoryDelegatedTaskStore();
   const delegatedTasks = new DelegatedTaskService({
     store: taskStore,
     listAccounts: async () => [
-      { accountId: 'p1', nickname: '小萝北', platform: 'xiaohongshu', status: 'active' },
-      { accountId: 'p2', nickname: '别人的账号', platform: 'xiaohongshu', status: 'active' },
+      { accountId: ACCT_P1, nickname: '小萝北', platform: 'xiaohongshu', status: 'active' },
+      { accountId: 'acct-other', nickname: '别人的账号', platform: 'xiaohongshu', status: 'active' },
     ],
   });
   await withServer(
-    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), delegatedTasks },
+    {
+      store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), delegatedTasks,
+      // D5 活体佐证：绑定账号此刻活在环境 p1 上（resolveEdgeIdForAccount(ACCT_P1) === 'ads-p1'）。
+      resolveEdgeIdForAccount: (accountId) => (accountId === ACCT_P1 ? 'ads-p1' : null),
+    },
     baseConfig(0),
     async (base) => {
       const login = await (
@@ -409,7 +457,9 @@ test('Edge delegated-task routes bind every read/write to the customer-owned env
       });
       assert.equal(created.status, 201);
       const receipt = await created.json() as { task: { id: string; accountId: string; source: string; version: number } };
-      assert.equal(receipt.task.accountId, 'p1');
+      // 任务落在**绑定账号**上，绝不是 envKey——旧夹具把两者写成同一个值，正是本 bug 被固化的地方。
+      assert.equal(receipt.task.accountId, ACCT_P1);
+      assert.notEqual(receipt.task.accountId, 'p1');
       assert.equal(receipt.task.source, 'edge');
 
       const confirmed = await fetch(`${base}/delegated-tasks/${receipt.task.id}/confirm`, {
@@ -418,7 +468,7 @@ test('Edge delegated-task routes bind every read/write to the customer-owned env
       assert.equal(confirmed.status, 200);
       const listed = await fetch(`${base}/delegated-tasks?envKey=p1`, { headers });
       const listBody = await listed.json() as { tasks: Array<{ id: string; accountId: string }> };
-      assert.deepEqual(listBody.tasks.map((task) => [task.id, task.accountId]), [[receipt.task.id, 'p1']]);
+      assert.deepEqual(listBody.tasks.map((task) => [task.id, task.accountId]), [[receipt.task.id, ACCT_P1]]);
       assert.equal((await fetch(`${base}/delegated-tasks?envKey=p2`, { headers })).status, 403);
     },
   );
@@ -484,9 +534,10 @@ test('客户灵感库按环境归属隔离、最小披露，并在归属撤销�
   const fx = makeFakeStore();
   fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
   fx.scope.set('u1', [{ envKey: 'p1', label: '小萝北', platform: 'xiaohongshu', source: 'admin', assignedAt: 0 }]);
+  fx.bindings.set('p1', ACCT_P1);
   const row = (overrides: Partial<CuratedPanelRow> = {}): CuratedPanelRow => ({
     id: 7,
-    accountId: 'p1',
+    accountId: ACCT_P1,
     contentType: 'image_text',
     sourceId: 'note-7',
     title: '值得参考的标题',
@@ -522,7 +573,7 @@ test('客户灵感库按环境归属隔离、最小披露，并在归属撤销�
     },
     async getOneForAccount(id: number, accountId: string) {
       reads.push({ kind: 'detail', accountId, id });
-      return id === 7 && accountId === 'p1' ? row() : null;
+      return id === 7 && accountId === ACCT_P1 ? row() : null;
     },
   };
   await withServer(
@@ -563,12 +614,14 @@ test('客户灵感库按环境归属隔离、最小披露，并在归属撤销�
       assert.equal(listBody.items[0].admitReason, undefined);
       const image = (listBody.items[0].referenceImages as Array<Record<string, unknown>>)[0];
       assert.equal(image.formGuess, undefined, '客户 DTO 不泄漏模型内部诊断');
+      // 传给 store 的账号参数 MUST 是**绑定账号**、MUST NOT 是请求里的 envKey——这是本 bug 的直接反例。
       assert.deepEqual(reads[0], {
         kind: 'list',
-        accountId: 'p1',
+        accountId: ACCT_P1,
         options: { creatableOnly: true, limit: 12, offset: 24 },
       });
-      assert.deepEqual(draftCountReads, ['p1'], '成稿汇总只能读取已授权的当前账号');
+      assert.notEqual(reads[0].accountId, 'p1', 'store 收到的绝不能是 envKey');
+      assert.deepEqual(draftCountReads, [ACCT_P1], '成稿汇总只能读取已授权账号的绑定账号，绝不是 envKey');
 
       const detail = await fetch(`${base}/curated-contents/7?envKey=p1`, { headers });
       assert.equal(detail.status, 200);
@@ -586,9 +639,10 @@ test('客户参考创作只用服务端精选快照，图文/文字模式排队�
   const fx = makeFakeStore();
   fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
   fx.scope.set('u1', [{ envKey: 'p1', label: '小萝北', platform: 'xiaohongshu', source: 'admin', assignedAt: 0 }]);
+  fx.bindings.set('p1', ACCT_P1);
   const baseRow: CuratedPanelRow = {
     id: 7,
-    accountId: 'p1',
+    accountId: ACCT_P1,
     contentType: 'image_text',
     sourceId: 'server-note',
     title: '服务端标题',
@@ -634,12 +688,12 @@ test('客户参考创作只用服务端精选快照，图文/文字模式排队�
   ]);
   const curatedContent = {
     async listForClient() { return { items: [], total: 0 }; },
-    async getOneForAccount(id: number, accountId: string) { return accountId === 'p1' ? rows.get(id) ?? null : null; },
+    async getOneForAccount(id: number, accountId: string) { return accountId === ACCT_P1 ? rows.get(id) ?? null : null; },
   };
   const taskStore = new MemoryDelegatedTaskStore();
   const delegatedTasks = new DelegatedTaskService({
     store: taskStore,
-    listAccounts: async () => [{ accountId: 'p1', nickname: '小萝北', platform: 'xiaohongshu', status: 'active' }],
+    listAccounts: async () => [{ accountId: ACCT_P1, nickname: '小萝北', platform: 'xiaohongshu', status: 'active' }],
   });
   await withServer(
     {
@@ -648,6 +702,8 @@ test('客户参考创作只用服务端精选快照，图文/文字模式排队�
       rateLimiter: new LoginRateLimiter(),
       curatedContent,
       delegatedTasks,
+      // D5 活体佐证：绑定账号此刻活在环境 p1 上。
+      resolveEdgeIdForAccount: (accountId) => (accountId === ACCT_P1 ? 'ads-p1' : null),
     },
     baseConfig(0),
     async (base) => {
@@ -687,8 +743,8 @@ test('客户参考创作只用服务端精选快照，图文/文字模式排队�
       assert.equal(textTask.status, 'queued');
       assert.equal(textBody.created, true);
 
-      // 「只用服务端快照」仍须成立——但改由服务端任务行证明，不再靠回包自证。
-      const [textStored] = await taskStore.list({ accountId: 'p1', limit: 20 });
+      // 「只用服务端快照」仍须成立——但改由服务端任务行证明，不再靠回包自证。任务落在绑定账号（≠ envKey）上。
+      const [textStored] = await taskStore.list({ accountId: ACCT_P1, limit: 20 });
       assert.equal(textStored.source, 'edge');
       assert.equal(textStored.sourceConstraints.body, '服务端正文', '客户端伪造正文必须被忽略');
       assert.equal(textStored.sourceConstraints.useReferenceImages, false);
@@ -707,10 +763,128 @@ test('客户参考创作只用服务端精选快照，图文/文字模式排队�
       }
 
       // 服务端任务行仍须带上完整参考图快照（下游 referenceNote 要用），只是不外泄。
-      const stored = await taskStore.list({ accountId: 'p1', limit: 20 });
+      const stored = await taskStore.list({ accountId: ACCT_P1, limit: 20 });
       const imageStored = stored.find((t) => t.sourceConstraints.curatedId === 8)!;
       assert.deepEqual(imageStored.sourceConstraints.referenceImages, baseRow.referenceImages);
       assert.equal(stored.length, 2, '拒绝路径不得创建任务');
+    },
+  );
+});
+
+// ── 绑定解析：诚实失败、绝不 200-空；离线读可用、离线写拒绝（change curated-envkey-account-binding）─────
+
+/** 建一个已登录、拥有环境 p1 的客户端会话，返回 base + headers。 */
+async function loggedIn(fx: ReturnType<typeof makeFakeStore>, deps: ClientAuthDeps, base: string) {
+  const login = await (await fetch(`${base}/login`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'acme', key: 'ck_secret' }),
+  })).json() as { token: string };
+  void fx; void deps;
+  return { authorization: `Bearer ${login.token}`, 'content-type': 'application/json' };
+}
+
+test('绑定未知与跨客户争用互相可区分，且都绝不呈现为 200-空', async () => {
+  const fx = makeFakeStore();
+  fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
+  // u1 拥有 p1（未绑定）与 p3（绑定被 u2 的 p2 争用）。
+  fx.scope.set('u1', [
+    { envKey: 'p1', label: 'a', platform: 'xiaohongshu', source: 'admin', assignedAt: 0 },
+    { envKey: 'p3', label: 'c', platform: 'xiaohongshu', source: 'admin', assignedAt: 0 },
+  ]);
+  fx.scope.set('u2', [{ envKey: 'p2', label: 'b', platform: 'xiaohongshu', source: 'admin', assignedAt: 0 }]);
+  fx.bindings.set('p2', ACCT_P1);
+  fx.bindings.set('p3', ACCT_P1); // 与 p2 同账号但归属不同客户 → 争用
+  let listForClientCalls = 0;
+  const curatedContent = {
+    async listForClient() { listForClientCalls += 1; return { items: [], total: 0 }; },
+    async getOneForAccount() { return null; },
+  };
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), curatedContent },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const unknown = await fetch(`${base}/curated-contents?envKey=p1`, { headers });
+      assert.equal(unknown.status, 409);
+      assert.equal((await unknown.json() as { error: string }).error, 'binding_unknown');
+      const conflict = await fetch(`${base}/curated-contents?envKey=p3`, { headers });
+      assert.equal(conflict.status, 409);
+      assert.equal((await conflict.json() as { error: string }).error, 'binding_conflict');
+      // 两者码不同（安全事件不被埋进日常噪声），且都绝不触达 store、绝不 200-空。
+      assert.equal(listForClientCalls, 0, '不可解析绝不触达精选 store，更不回 200-空');
+    },
+  );
+});
+
+test('缺表(42P01)→ 503 curated_content_unavailable，读路径绝不空池', async () => {
+  const fx = makeFakeStore();
+  fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
+  fx.scope.set('u1', [{ envKey: 'p1', label: 'a', platform: 'xiaohongshu', source: 'admin', assignedAt: 0 }]);
+  fx.bindings.set('p1', ACCT_P1);
+  const curatedContent = {
+    async listForClient(): Promise<never> { throw new CuratedContentUnavailableError('listForClient'); },
+    async getOneForAccount(): Promise<never> { throw new CuratedContentUnavailableError('getOneForAccount'); },
+  };
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), curatedContent },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const list = await fetch(`${base}/curated-contents?envKey=p1`, { headers });
+      assert.equal(list.status, 503);
+      assert.equal((await list.json() as { error: string }).error, 'curated_content_unavailable');
+      const detail = await fetch(`${base}/curated-contents/7?envKey=p1`, { headers });
+      assert.equal(detail.status, 503);
+    },
+  );
+});
+
+test('读离线可用，不可逆写离线诚实拒绝(binding_unverified)且零任务落库', async () => {
+  const fx = makeFakeStore();
+  fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
+  fx.scope.set('u1', [{ envKey: 'p1', label: 'a', platform: 'xiaohongshu', source: 'admin', assignedAt: 0 }]);
+  fx.bindings.set('p1', ACCT_P1);
+  const detailRow = { id: 7, accountId: ACCT_P1, contentType: 'image_text', sourceId: 'n7', title: 't',
+    body: 'b', author: '', sourceUrl: '', topics: [], likeCount: null, collectCount: 0, commentCount: 0,
+    countsCapturedAt: null, botLiked: false, botCollected: false, admitReason: 'x', firstSeenAt: 1, updatedAt: 2,
+    referenceImages: [] } as unknown as CuratedPanelRow;
+  const curatedContent = {
+    async listForClient() { return { items: [detailRow], total: 1 }; },
+    async getOneForAccount(id: number, accountId: string) { return id === 7 && accountId === ACCT_P1 ? detailRow : null; },
+  };
+  const taskStore = new MemoryDelegatedTaskStore();
+  const delegatedTasks = new DelegatedTaskService({
+    store: taskStore,
+    listAccounts: async () => [{ accountId: ACCT_P1, nickname: 'n', platform: 'xiaohongshu', status: 'active' }],
+  });
+  await withServer(
+    {
+      store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(),
+      curatedContent, delegatedTasks,
+      // 边缘完全离线：resolveEdgeIdForAccount 恒 null → 活体佐证不成立。
+      resolveEdgeIdForAccount: () => null,
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      // 读：list + detail 均正常返回（边缘离线不影响读——绝不把活体前置抄到读路由上）。
+      assert.equal((await fetch(`${base}/curated-contents?envKey=p1`, { headers })).status, 200);
+      assert.equal((await fetch(`${base}/curated-contents/7?envKey=p1`, { headers })).status, 200);
+      assert.equal((await fetch(`${base}/delegated-tasks?envKey=p1`, { headers })).status, 200);
+      // 不可逆写：离线拒绝、零任务落库。
+      const createPost = await fetch(`${base}/curated-contents/7/create-post`, {
+        method: 'POST', headers, body: JSON.stringify({ envKey: 'p1', useReferenceImages: false }),
+      });
+      assert.equal(createPost.status, 409);
+      assert.equal((await createPost.json() as { error: string }).error, 'binding_unverified');
+      const draft = await fetch(`${base}/delegated-tasks/draft`, {
+        method: 'POST', headers, body: JSON.stringify({
+          envKey: 'p1', action: 'publish_post', targetSuccessCount: 1, maxAttempts: 2,
+          deadlineAt: Date.now() + 60_000, executionWindow: { mode: 'immediate' },
+          sourceConstraints: {}, targetConstraints: {}, approvalMode: 'review', priority: 'normal',
+        }),
+      });
+      assert.equal(draft.status, 409);
+      assert.equal((await taskStore.list({ accountId: ACCT_P1, limit: 20 })).length, 0, '离线写绝不落库');
     },
   );
 });

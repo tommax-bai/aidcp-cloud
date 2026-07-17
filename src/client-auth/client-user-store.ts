@@ -19,8 +19,46 @@ import crypto from 'node:crypto';
 import pg from 'pg';
 import { resolveEnvPgConfig } from '../cache/pg-config.js';
 import { generateKey, hashKey, verifyKey, decoyVerify } from './key.js';
+import { RETIRED_ACCOUNT_ID } from '../account-store.js';
 
 const { Pool } = pg;
+
+/**
+ * 环境→账号绑定解析结果（change curated-envkey-account-binding）。
+ *
+ * **MUST 为判别式，MUST NOT 为 `string | null`**——null 会立刻退化回「不知道为什么，就当没有数据」，
+ * 正是本 change 修的那个红线。四种不可解析各自诚实回报且**互相可区分**：
+ * - environment_not_owned：该环境不归属该客户（403）
+ * - binding_unknown：该环境尚未上报过登录账号 / 悬空绑定（accounts 无此行）→ 日常态（409），连一次云端即自愈
+ * - binding_conflict：跨客户争用，fail-closed → **安全事件**（409，与 binding_unknown 分码，绝不埋进噪声）
+ * - binding_unavailable：注册表读不到（缺表 42P01）（503）
+ */
+export type ResolvedBinding =
+  | { ok: true; accountId: string }
+  | { ok: false; reason: 'environment_not_owned' | 'binding_unknown' | 'binding_conflict' | 'binding_unavailable' };
+
+/** D5 跨客户绑定冲突告警载荷（走既有告警通道，非仅 console.warn）。 */
+export interface EnvBindingConflictAlert {
+  envKey: string;
+  accountId: string;
+  /** 本次 env 的归属客户（未归属＝null）。 */
+  ownerUserId: string | null;
+}
+
+/**
+ * D5 读侧争用闸的核心谓词：某账号是否同时绑在**归属不同客户**的环境上。
+ *
+ * **正反两个方向（env→account 与 account→reachable）逐字复用这一段**，MUST NOT 各写一遍——两个方向都是
+ * 裸 string，漂移了 typecheck 抓不到。`s2.user_id <> $userParam`：只认**已归属且 owner 不同**的环境（无 owner
+ * 的环境没有 s2 行、不参与，与写闸口径一致——无主环境本就读不到任何东西）。
+ */
+function contendedAcrossCustomersSql(accountExpr: string, userParam: string): string {
+  return `EXISTS (
+    SELECT 1 FROM client_environments e2
+    JOIN client_env_scope s2 ON s2.env_key = e2.env_key AND s2.source = 'admin'
+    WHERE e2.account_id = ${accountExpr} AND s2.user_id <> ${userParam}
+  )`;
+}
 
 export const CLIENT_USERS_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS client_users (
@@ -56,6 +94,14 @@ CREATE TABLE IF NOT EXISTS client_environments (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- 环境→账号绑定（change curated-envkey-account-binding）：每次成功握手把该环境**上一次登录声明的平台账号 id**
+-- 落这里，使「这个环境上跑的是哪个账号」成为**不要求边缘此刻在线**即可回答的事实（envKey 与 accountId 是可证不交
+-- 的两个键空间）。**故意不写 REFERENCES accounts(account_id)**：clientUserStore.init() 跑在 PgAccountStore 构造之前，
+-- 全新库上 accounts 表尚不存在、加 FK 必抛——完整性改由**读侧每次 JOIN accounts**（悬空绑定读时 fail-closed）承担，
+-- 见 resolveBoundAccountForEnv。这是真实取舍（少了写时完整性），不是「初始化顺序禁止加列」。
+ALTER TABLE client_environments ADD COLUMN IF NOT EXISTS account_id TEXT;
+-- D5 跨客户争用闸要按 account_id 反查「还有哪些 env 也绑了同一账号」，故加账号索引。
+CREATE INDEX IF NOT EXISTS client_environments_account_idx ON client_environments (account_id);
 -- 客户端程序化新建的短时一次性意图。proof 只以 SHA-256 落库；完成动作仍由 Cloud
 -- 在事务内写权威注册表 + active owner，旧 customer attach 路径不复活。
 CREATE TABLE IF NOT EXISTS client_env_provisioning_intents (
@@ -992,9 +1038,16 @@ export class ClientUserStore {
    * 幂等 upsert：已存在则只用**非空**新值补 label/platform（COALESCE，不拿 null 覆盖既有好值）、bump updated_at；
    * source 只在首次插入时定，冲突不降级。envKey 去空白 + 去重；空 envKey 跳过。返回实际写入的去重条数。
    * **不做任何归属推断**——绝不误把环境塞给某个客户（fail-closed 归属边界不破）。
+   *
+   * 环境→账号绑定（change curated-envkey-account-binding）：item 可带 accountId（握手声明的平台账号 id）。
+   * 合并语义 = **「来了新值才覆盖」**：`account_id = COALESCE(EXCLUDED.account_id, current)`。
+   * **MUST NOT** 写成 `COALESCE(current, EXCLUDED.account_id)`（=「当前为空才写」）——那是 2026-07-12 修掉的
+   * FB 昵称回归的形状，会把环境永远钉死在第一个登录账号上，而换号登录是常规运营动作。
+   * 退役保留账号 id（'default'）归一为「没有新值」（不写成绑定、也不擦既有绑定）。
+   * D5 写闸：绑定写前若该账号已绑在**归属不同客户**的另一 env 上 → 拒写绑定（label/platform 照常登记）+ 告警。
    */
   async registerEnvironments(
-    items: { envKey: string; label?: string | null; platform?: string | null }[],
+    items: { envKey: string; label?: string | null; platform?: string | null; accountId?: string | null }[],
     source: 'import' | 'auto' | 'admin' = 'import',
   ): Promise<number> {
     const seen = new Set<string>();
@@ -1003,21 +1056,184 @@ export class ClientUserStore {
         envKey: (i.envKey ?? '').trim(),
         label: (i.label ?? '')?.toString().trim() || null,
         platform: (i.platform ?? '')?.toString().trim() || null,
+        // 退役保留账号 id 归一为 null ⇒ 在 COALESCE 下等价「没有新值」（与 account-store 拒登记退役 id 一致）。
+        accountId: this.normalizeBindingAccountId(i.accountId),
       }))
       .filter((i) => i.envKey && !seen.has(i.envKey) && (seen.add(i.envKey), true));
     if (!clean.length) return 0;
     for (const i of clean) {
-      await this.pool.query(
-        `INSERT INTO client_environments (env_key, label, platform, source, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, now(), now())
-         ON CONFLICT (env_key) DO UPDATE
-           SET label = COALESCE(EXCLUDED.label, client_environments.label),
-               platform = COALESCE(EXCLUDED.platform, client_environments.platform),
-               updated_at = now()`,
-        [i.envKey, i.label, i.platform, source],
-      );
+      let accountId = i.accountId;
+      if (accountId) {
+        // D5 写闸：同一事务内先查跨客户争用，冲突则拒写绑定（accountId→null，label/platform 照常）+ 告警。
+        const client = await this.pool.connect();
+        try {
+          await client.query('BEGIN');
+          const owner = await this.ownerOfEnv(client, i.envKey);
+          const conflicted = await this.bindingConflictsAcrossCustomers(client, i.envKey, accountId, owner);
+          if (conflicted) {
+            this.emitBindingConflict({ envKey: i.envKey, accountId, ownerUserId: owner });
+            accountId = null;
+          }
+          await this.upsertEnvironment(client, i.envKey, i.label, i.platform, source, accountId);
+          await client.query('COMMIT');
+        } catch (err) {
+          await client.query('ROLLBACK');
+          throw err;
+        } finally {
+          client.release();
+        }
+      } else {
+        await this.upsertEnvironment(this.pool, i.envKey, i.label, i.platform, source, null);
+      }
     }
     return clean.length;
+  }
+
+  /** 绑定账号 id 归一：去空白，退役保留账号（'default'）视作「没有新值」→ null。 */
+  private normalizeBindingAccountId(accountId?: string | null): string | null {
+    const v = (accountId ?? '').toString().trim();
+    if (!v || v === RETIRED_ACCOUNT_ID) return null;
+    return v;
+  }
+
+  /** 环境的归属客户（`client_env_scope` source='admin'，0-或-1）；无主返回 null。 */
+  private async ownerOfEnv(exec: pg.Pool | pg.PoolClient, envKey: string): Promise<string | null> {
+    const { rows } = await exec.query<{ user_id: string }>(
+      `SELECT user_id FROM client_env_scope WHERE env_key = $1 AND source = 'admin'`,
+      [envKey],
+    );
+    return rows[0]?.user_id ?? null;
+  }
+
+  /**
+   * D5 写闸判据：该 accountId 是否已绑在**另一个** env 上、且那个 env 的 owner 与本次 owner **不同**。
+   * 用 `IS DISTINCT FROM` 处理无主（NULL=⊥）：⊥ 与任何真实客户都判不同（fail-closed）；两个 ⊥ 判相同
+   * （无所谓——无主环境读侧本就读不到任何东西，读闸兜底）。
+   */
+  private async bindingConflictsAcrossCustomers(
+    exec: pg.Pool | pg.PoolClient, envKey: string, accountId: string, owner: string | null,
+  ): Promise<boolean> {
+    const { rows } = await exec.query<{ conflict: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1
+         FROM client_environments e2
+         WHERE e2.account_id = $1
+           AND e2.env_key <> $2
+           AND (SELECT user_id FROM client_env_scope s2 WHERE s2.env_key = e2.env_key AND s2.source = 'admin')
+               IS DISTINCT FROM $3::text
+       ) AS conflict`,
+      [accountId, envKey, owner],
+    );
+    return rows[0]?.conflict === true;
+  }
+
+  /** 单环境 upsert（含账号绑定合并）；exec 可为 pool 或事务 client。 */
+  private async upsertEnvironment(
+    exec: pg.Pool | pg.PoolClient,
+    envKey: string, label: string | null, platform: string | null,
+    source: 'import' | 'auto' | 'admin', accountId: string | null,
+  ): Promise<void> {
+    await exec.query(
+      `INSERT INTO client_environments (env_key, label, platform, source, account_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, now(), now())
+       ON CONFLICT (env_key) DO UPDATE
+         SET label = COALESCE(EXCLUDED.label, client_environments.label),
+             platform = COALESCE(EXCLUDED.platform, client_environments.platform),
+             account_id = COALESCE(EXCLUDED.account_id, client_environments.account_id),
+             updated_at = now()`,
+      [envKey, label, platform, source, accountId],
+    );
+  }
+
+  private bindingConflictSink?: (alert: EnvBindingConflictAlert) => void;
+
+  /**
+   * 注入 D5 跨客户绑定冲突告警通道（走既有告警存储，非仅 console.warn）。
+   * clientUserStore 在 alertStore 之前构造，故用 setter 事后接线（server.ts 在 alertStore 就绪后调用）。
+   */
+  setBindingConflictAlertSink(sink: (alert: EnvBindingConflictAlert) => void): void {
+    this.bindingConflictSink = sink;
+  }
+
+  private emitBindingConflict(alert: EnvBindingConflictAlert): void {
+    console.warn(
+      `[client-env] D5 跨客户绑定冲突：拒绝把账号 ${alert.accountId} 绑到 env=${alert.envKey}`
+      + `（owner=${alert.ownerUserId ?? '⊥'}）——既有绑定不变`,
+    );
+    try {
+      this.bindingConflictSink?.(alert);
+    } catch (err) {
+      console.warn(`[client-env] 绑定冲突告警下发失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * 环境→账号绑定解析（change curated-envkey-account-binding，正向）。
+   *
+   * **一条现读查询同时做四件事**：① 归属闸（client_env_scope source='admin'）② 取绑定 ③ JOIN accounts 让悬空绑定
+   * 读时 fail-closed（替代做不到的 FK）④ 跨客户争用（读闸，与写闸正交——写闸看不见事后改归属造出的冲突）。
+   * 每次请求现读，对齐「改归属即时生效」（范围绝不内嵌令牌）。返回判别式，绝不返回 string|null。
+   */
+  async resolveBoundAccountForEnv(userId: string, envKey: string): Promise<ResolvedBinding> {
+    const key = (envKey ?? '').trim();
+    if (!userId || !key) return { ok: false, reason: 'environment_not_owned' };
+    try {
+      const { rows } = await this.pool.query<{
+        owned: boolean; bound_account: string | null; account_exists: boolean; contended: boolean;
+      }>(
+        `SELECT
+           EXISTS(SELECT 1 FROM client_env_scope s
+                  WHERE s.user_id = $1 AND s.env_key = $2 AND s.source = 'admin') AS owned,
+           e.account_id AS bound_account,
+           CASE WHEN e.account_id IS NOT NULL
+                THEN EXISTS(SELECT 1 FROM accounts acc WHERE acc.account_id = e.account_id)
+                ELSE false END AS account_exists,
+           CASE WHEN e.account_id IS NOT NULL
+                THEN ${contendedAcrossCustomersSql('e.account_id', '$1')}
+                ELSE false END AS contended
+         FROM (SELECT $2::text AS env_key) k
+         LEFT JOIN client_environments e ON e.env_key = k.env_key`,
+        [userId, key],
+      );
+      const r = rows[0];
+      if (!r || !r.owned) return { ok: false, reason: 'environment_not_owned' };
+      if (r.bound_account == null) return { ok: false, reason: 'binding_unknown' };
+      // 争用是安全事件，优先于悬空 fail-closed 报出（两者都 fail-closed，但争用要被运维识别）。
+      if (r.contended) return { ok: false, reason: 'binding_conflict' };
+      // 悬空绑定（accounts 无此行）：读时 fail-closed，归入日常态 binding_unknown（下次握手 ensureAccount 重建即自愈）。
+      if (!r.account_exists) return { ok: false, reason: 'binding_unknown' };
+      return { ok: true, accountId: r.bound_account };
+    } catch (err) {
+      if (isMissingTable(err)) return { ok: false, reason: 'binding_unavailable' };
+      throw err;
+    }
+  }
+
+  /**
+   * 反向：某账号是否可被该客户经其某个环境触达（供委托任务动作的归属判定）。
+   * **MUST 由与 resolveBoundAccountForEnv 相同的绑定+归属+争用逻辑派生**（复用 contendedAcrossCustomersSql），
+   * MUST NOT 另写一份——两个方向都是裸 string，漂移了 typecheck 抓不到。争用时 fail-closed（binding_conflict）。
+   */
+  async isAccountReachableByUser(userId: string, accountId: string): Promise<ResolvedBinding> {
+    const acct = (accountId ?? '').trim();
+    if (!userId || !acct) return { ok: false, reason: 'environment_not_owned' };
+    try {
+      const { rows } = await this.pool.query<{ owned_bound: boolean; contended: boolean }>(
+        `SELECT
+           EXISTS(SELECT 1 FROM client_environments e
+                  JOIN client_env_scope s ON s.env_key = e.env_key AND s.source = 'admin'
+                  WHERE e.account_id = $2 AND s.user_id = $1) AS owned_bound,
+           ${contendedAcrossCustomersSql('$2', '$1')} AS contended`,
+        [userId, acct],
+      );
+      const r = rows[0];
+      if (r?.contended) return { ok: false, reason: 'binding_conflict' };
+      if (r?.owned_bound) return { ok: true, accountId: acct };
+      return { ok: false, reason: 'environment_not_owned' };
+    } catch (err) {
+      if (isMissingTable(err)) return { ok: false, reason: 'binding_unavailable' };
+      throw err;
+    }
   }
 
   /**

@@ -23,6 +23,8 @@ import { DelegatedTaskServiceError, type DelegatedTaskService } from '../delegat
 import type { DelegatedTaskIntent, JsonValue } from '../delegated-task/types.js';
 import { clampClientApprovalMode } from '../delegated-task/types.js';
 import type { CuratedContentStore, CuratedPanelRow, CuratedReferenceImage } from '../cache/curated-content-store.js';
+import { CuratedContentUnavailableError } from '../cache/curated-content-store.js';
+import type { ResolvedBinding } from './client-user-store.js';
 import type { UiSlowStartPayload } from '../comm/protocol.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -37,6 +39,12 @@ export interface ClientAuthDeps {
   curatedContent?: Pick<CuratedContentStore, 'listForClient' | 'getOneForAccount'>;
   /** Account-scoped count of publish_log rows that have a persisted source_reference. */
   referenceDraftCountForAccount?: (accountId: string) => Promise<number>;
+  /**
+   * 环境→edgeId 活会话反查（change curated-envkey-account-binding，D5 活体佐证）。返回 `ads-<envKey>` 或 null。
+   * **刻意用 resolveEdgeIdForAccount（幸存者），绝不用 resolveAccountIdForEdge（将被慢启动 change 删除）**——
+   * 给后者新增调用方会把那次删除卡死。仅用于不可逆写（create-post / 建委托任务）的绑定活体佐证；读路由绝不用。
+   */
+  resolveEdgeIdForAccount?: (accountId: string) => string | null;
   interactionApi?: {
     handle(req: http.IncomingMessage, res: http.ServerResponse, userId: string): Promise<boolean>;
   };
@@ -181,6 +189,32 @@ function toClientCuratedDetail(row: CuratedPanelRow): Record<string, unknown> {
  */
 function toClientTaskReceipt(task: { id: string; status: string; version: number }): Record<string, unknown> {
   return { id: task.id, status: task.status, version: task.version };
+}
+
+/**
+ * 绑定解析失败 → HTTP（change curated-envkey-account-binding）。**绝不回 200-空**：把失败谎报成「你没有数据」
+ * 与谎报成成功同为不诚实。`binding_unknown`（日常态，连一次云端即自愈）与 `binding_conflict`（跨客户争用，
+ * 安全事件）**码不同**，绝不合并——合成一个码就是把告警埋进日常噪声。
+ */
+function sendBindingFailure(res: http.ServerResponse, reason: Exclude<ResolvedBinding, { ok: true }>['reason']): void {
+  const status = reason === 'environment_not_owned' ? 403
+    : reason === 'binding_unavailable' ? 503
+      : 409; // binding_unknown / binding_conflict
+  sendJson(res, status, { error: reason });
+}
+
+/**
+ * D5 活体佐证（change curated-envkey-account-binding，ESSENTIAL）：解析出的绑定账号此刻**真的活在该环境上**吗。
+ * 绑定是上一次握手的事实、可能陈旧——对**读**（幂等、可回头）无所谓，对**不可逆写**（发布出去收不回）MUST 佐证。
+ *
+ * 判据 = `resolveEdgeIdForAccount(boundAccountId) === 'ads-' + envKey`：语义正是「我解析出的账号此刻是否正跑在这个
+ * 环境上」。**用幸存者 resolveEdgeIdForAccount，绝不用将被删的 resolveAccountIdForEdge**。多连接时前者取最早登记者
+ * ⇒ 可能误拒；误拒可接受（fail-closed + 有日志），误放不可接受。dep 缺失 ⇒ 无法佐证 ⇒ fail-closed。
+ * **MUST NOT 用于读路由**——在读上要求边缘在线正是本 change 修的那个缺陷本身。
+ */
+function attestLiveBinding(deps: ClientAuthDeps, boundAccountId: string, envKey: string): boolean {
+  const edgeId = deps.resolveEdgeIdForAccount?.(boundAccountId) ?? null;
+  return edgeId === `ads-${envKey}`;
 }
 
 function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
@@ -344,11 +378,6 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       }
       const query = new URL(rawUrl, 'http://localhost').searchParams;
       const envKey = (query.get('envKey') ?? '').trim();
-      const scope = await deps.store.listEnvScope(userId);
-      if (!envKey || !scope.some((item) => item.envKey === envKey)) {
-        sendJson(res, 403, { error: 'environment_not_owned' });
-        return;
-      }
       const mode = query.get('mode') ?? 'creatable';
       if (mode !== 'creatable' && mode !== 'all') {
         sendJson(res, 400, { error: 'bad_request', reason: 'invalid_mode' });
@@ -360,8 +389,16 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         sendJson(res, 400, { error: 'bad_request', reason: 'invalid_pagination' });
         return;
       }
+      // 环境→账号绑定解析（唯一入口）：归属闸 + 绑定 + accounts 存在 + 跨客户争用一次现读。
+      // 未解析 MUST 响亮回报，**绝不 200-空**（本 change 存在的理由）；store 也永不用 envKey 当 accountId 查。
+      const bound = await deps.store.resolveBoundAccountForEnv(userId, envKey);
+      if (!bound.ok) {
+        sendBindingFailure(res, bound.reason);
+        return;
+      }
+      const accountId = bound.accountId;
       const referenceDraftCountPromise: Promise<number | null> = deps.referenceDraftCountForAccount
-        ? deps.referenceDraftCountForAccount(envKey)
+        ? deps.referenceDraftCountForAccount(accountId)
             .then((count) => (Number.isFinite(count) && count >= 0 ? Math.floor(count) : null))
             .catch((err) => {
               logger.warn(
@@ -371,7 +408,7 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
             })
         : Promise.resolve(null);
       const [result, referenceDraftCount] = await Promise.all([
-        deps.curatedContent.listForClient(envKey, {
+        deps.curatedContent.listForClient(accountId, {
           creatableOnly: mode === 'creatable',
           limit,
           offset,
@@ -411,12 +448,14 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         sendJson(res, 400, { error: 'bad_request', reason: 'reference_mode_required' });
         return;
       }
-      const scope = await deps.store.listEnvScope(userId);
-      if (!envKey || !scope.some((item) => item.envKey === envKey)) {
-        sendJson(res, 403, { error: 'environment_not_owned' });
+      const bound = await deps.store.resolveBoundAccountForEnv(userId, envKey);
+      if (!bound.ok) {
+        sendBindingFailure(res, bound.reason);
         return;
       }
-      const row = await deps.curatedContent.getOneForAccount(id, envKey);
+      const accountId = bound.accountId;
+      // 读（含内容适配性判定）离线可用；不可逆写（createDraft）才在下方要求 D5 活体佐证。
+      const row = await deps.curatedContent.getOneForAccount(id, accountId);
       if (!row) {
         sendJson(res, 404, { error: 'not_found' });
         return;
@@ -433,9 +472,14 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         sendJson(res, 200, { triggered: false, reason: 'reference_images_unavailable' });
         return;
       }
+      // D5 活体佐证：不可逆发布 MUST 由活会话佐证绑定，否则诚实「尚未开始」——绝不创建任何任务、绝不记为失败尝试。
+      if (!attestLiveBinding(deps, accountId, envKey)) {
+        sendJson(res, 409, { error: 'binding_unverified', message: '暂时无法确认该环境当前登录的账号，请让该环境连上云端后重试。' });
+        return;
+      }
       try {
         const result = await deps.delegatedTasks.createDraft({
-          accountId: envKey,
+          accountId,
           action: 'publish_post',
           targetSuccessCount: 1,
           maxAttempts: 2,
@@ -490,12 +534,12 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         return;
       }
       const envKey = (new URL(rawUrl, 'http://localhost').searchParams.get('envKey') ?? '').trim();
-      const scope = await deps.store.listEnvScope(userId);
-      if (!envKey || !scope.some((item) => item.envKey === envKey)) {
-        sendJson(res, 403, { error: 'environment_not_owned' });
+      const bound = await deps.store.resolveBoundAccountForEnv(userId, envKey);
+      if (!bound.ok) {
+        sendBindingFailure(res, bound.reason);
         return;
       }
-      const row = await deps.curatedContent.getOneForAccount(id, envKey);
+      const row = await deps.curatedContent.getOneForAccount(id, bound.accountId);
       if (!row) {
         sendJson(res, 404, { error: 'not_found' });
         return;
@@ -615,12 +659,12 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         return;
       }
       const envKey = (new URL(rawUrl, 'http://localhost').searchParams.get('envKey') ?? '').trim();
-      const scope = await deps.store.listEnvScope(userId);
-      if (!envKey || !scope.some((item) => item.envKey === envKey)) {
-        sendJson(res, 403, { error: 'environment_not_owned' });
+      const bound = await deps.store.resolveBoundAccountForEnv(userId, envKey);
+      if (!bound.ok) {
+        sendBindingFailure(res, bound.reason);
         return;
       }
-      sendJson(res, 200, { tasks: await deps.delegatedTasks.list({ accountId: envKey, limit: 50 }) });
+      sendJson(res, 200, { tasks: await deps.delegatedTasks.list({ accountId: bound.accountId, limit: 50 }) });
       return;
     }
     if (url === '/delegated-tasks/draft' && method === 'POST') {
@@ -637,15 +681,21 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       }
       const raw = (body ?? {}) as Partial<DelegatedTaskIntent> & { envKey?: unknown };
       const envKey = typeof raw.envKey === 'string' ? raw.envKey.trim() : '';
-      const scope = await deps.store.listEnvScope(userId);
-      if (!envKey || !scope.some((item) => item.envKey === envKey)) {
-        sendJson(res, 403, { error: 'environment_not_owned' });
+      const bound = await deps.store.resolveBoundAccountForEnv(userId, envKey);
+      if (!bound.ok) {
+        sendBindingFailure(res, bound.reason);
+        return;
+      }
+      const accountId = bound.accountId;
+      // D5 活体佐证：建委托任务是不可逆写，MUST 由活会话佐证绑定，否则诚实拒绝、绝不创建任务。
+      if (!attestLiveBinding(deps, accountId, envKey)) {
+        sendJson(res, 409, { error: 'binding_unverified', message: '暂时无法确认该环境当前登录的账号，请让该环境连上云端后重试。' });
         return;
       }
       try {
         const result = await deps.delegatedTasks.createDraft({
           ...raw as DelegatedTaskIntent,
-          accountId: envKey,
+          accountId,
           source: 'edge',
           // change delegated-approvalmode-clamp：客户端体不可信，绝不放行 auto_approve（否则免审绕过审批闸）。
           approvalMode: clampClientApprovalMode(raw.approvalMode),
@@ -679,9 +729,11 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       try {
         const taskId = decodeURIComponent(taskAction[1]);
         const task = await deps.delegatedTasks.get(taskId);
-        const scope = await deps.store.listEnvScope(userId);
-        if (!scope.some((item) => item.envKey === task.accountId)) {
-          sendJson(res, 403, { error: 'environment_not_owned' });
+        // 反向归属判定：该客户是否经其某环境绑定到该任务的账号（由与正向解析同源的绑定+归属+争用逻辑派生）。
+        // 旧的 `scope.some(item.envKey === task.accountId)` 恒不匹配（两个键空间）→ 对正当所有者回 403 = 诬告。
+        const reachable = await deps.store.isAccountReachableByUser(userId, task.accountId);
+        if (!reachable.ok) {
+          sendBindingFailure(res, reachable.reason);
           return;
         }
         const raw = (body ?? {}) as { version?: unknown };
@@ -712,6 +764,12 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
 
   return (req: http.IncomingMessage, res: http.ServerResponse) => {
     void handle(req, res).catch((err) => {
+      // 缺表/改名（42P01）由只读方法抛 typed error：诚实回 503，绝不回落空结果、绝不 500（change
+      // curated-envkey-account-binding，D6）。只有精选只读方法抛此类型，故此处映射精确无副作用。
+      if (err instanceof CuratedContentUnavailableError) {
+        if (!res.headersSent) sendJson(res, 503, { error: 'curated_content_unavailable' });
+        return;
+      }
       logger.warn(`[client-auth] 请求处理异常: ${(err as Error).message}`);
       if (!res.headersSent) sendJson(res, 500, { error: 'internal_error' });
     });
