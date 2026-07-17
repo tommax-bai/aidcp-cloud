@@ -29,7 +29,6 @@ export interface CaptchaAssistIncidentView {
   accountId?: string;
   accountName?: string;
   machineLabel?: string;
-  remoteAddr?: string;
   kind: 'captcha' | 'unknown';
   status: CaptchaAssistIncidentStatus;
   riskStatus?: string;
@@ -44,12 +43,24 @@ export interface CaptchaAssistIncidentView {
     reason?: string;
     checkedAt: number;
     snapshotId?: string;
+    /** 本次回执的输入模式（change captcha-assist-text-answer）：'click' 纯点击 / 'click_type' 含键入。 */
+    inputMode?: CaptchaAssistClickResultPayload['inputMode'];
+    /** 键入取证（change captcha-assist-text-answer）；**绝不含答案本身**（design D10）。 */
+    typeReport?: CaptchaAssistClickResultPayload['typeReport'];
+    /**
+     * 版本偏斜检测（change captcha-assist-text-answer，design D8 第二道）：下发了 text 但回执 inputMode
+     * 不是 click_type ⇒ 老边缘忽略了 text、只点了 points（能力闸没拦住的漏网 = 闸自己错了）。控制台据此
+     * 告知运营"该机器客户端版本过旧、键入未执行"，而不是把只点击的结果当键入成功。
+     */
+    textNotExecuted?: boolean;
   };
   lastDispatch?: {
     type: 'capture' | 'click';
     requestedAt: number;
     sent: number;
     actor: string;
+    /** 本次下发的答案字符数（change captcha-assist-text-answer）：**只记多少个，never what**（design D10）。 */
+    textLen?: number;
   };
   /**
    * 实时抓帧窗口截止时间（change captcha-assist-live-snapshot）：edge 的有界实时循环预计运行到此刻。
@@ -80,7 +91,12 @@ export type CaptchaAssistDispatchResult =
         | 'snapshot_mismatch'
         | 'invalid_points'
         | 'task_busy'
-        | 'task_lease_failed';
+        | 'task_lease_failed'
+        // 键入答案闸（change captcha-assist-text-answer）：
+        | 'invalid_text' // 空 / 超长 / 表外字符 —— 整单拒绝（400）
+        | 'text_requires_single_focus_point' // 带 text 但落点不是恰好 1 个（400）
+        | 'edge_lacks_text_capability' // 在线但未声明 captcha_assist_text_v1（409，客户端太旧）
+        | 'edge_capability_unknown'; // 查不到在线连接、能力未知（409，fail-closed）
       incident?: CaptchaAssistIncidentView;
     };
 
@@ -94,7 +110,15 @@ export interface CaptchaAssistServiceDeps {
   idGen?: () => string;
   logger?: Pick<Console, 'error' | 'warn' | 'log'>;
   getAccountName?: (accountId: string) => string | null | undefined;
-  pusher: { pushToEdges(env: ReturnType<typeof makeEnvelope>, edgeId?: string): number };
+  pusher: {
+    pushToEdges(env: ReturnType<typeof makeEnvelope>, edgeId?: string): number;
+    /**
+     * 键入能力 fail-closed 闸（change captcha-assist-text-answer，design D8/6.4）：**live 查当前连接**声明的
+     * 能力位。undefined = 无在线连接（「连接状态未知」）；返回不含 captcha_assist_text_v1 的数组 = 「在线但没声明」。
+     * 绝不用 onDetected 快照——incident 可能比连接活得久。
+     */
+    edgeCapabilities?(edgeId: string): string[] | undefined;
+  };
   taskLeases?: Pick<EdgeTaskLeaseClient, 'acquire' | 'release'>;
   /**
    * 实时抓帧配置（change captcha-assist-live-snapshot）。enabled 时，capture 命令带 `live` 字段，
@@ -166,7 +190,6 @@ export class CaptchaAssistService {
     incident.accountId = accountId ?? incident.accountId;
     incident.accountName = accountId ? normalizeAccountName(this.deps.getAccountName?.(accountId)) : incident.accountName;
     incident.machineLabel = session.machineLabel ?? incident.machineLabel;
-    incident.remoteAddr = session.remoteAddr ?? incident.remoteAddr;
     incident.riskStatus = status || incident.riskStatus;
     incident.updatedAt = now;
     incident.expiresAt = now + this.incidentTtlMs;
@@ -229,11 +252,19 @@ export class CaptchaAssistService {
     }
     if (payload.snapshot) this.onSnapshot(payload.snapshot);
     const now = this.clock();
+    // 版本偏斜检测（change captcha-assist-text-answer，design D8 第二道）：下发了 text（textLen>0）却回执
+    // inputMode 不是 click_type ⇒ 老边缘忽略了 text、只点了 points（能力闸漏网 = 闸自己错了）。标记以便
+    // 控制台告知"客户端太旧、键入未执行"，而不是把只点击的结果当键入成功。typeReport 绝不含答案本身（D10）。
+    const dispatchedText = (incident.lastDispatch?.textLen ?? 0) > 0;
+    const textNotExecuted = dispatchedText && payload.inputMode !== 'click_type';
     incident.lastResult = {
       status: payload.status,
       ...(payload.reason ? { reason: payload.reason } : {}),
       checkedAt: payload.checkedAt,
       ...(payload.snapshotId ? { snapshotId: payload.snapshotId } : {}),
+      ...(payload.inputMode ? { inputMode: payload.inputMode } : {}),
+      ...(payload.typeReport ? { typeReport: payload.typeReport } : {}),
+      ...(textNotExecuted ? { textNotExecuted: true } : {}),
     };
     incident.updatedAt = now;
     if (payload.status === 'cleared' || payload.status === 'not_blocked') {
@@ -241,6 +272,7 @@ export class CaptchaAssistService {
     } else if (payload.status === 'still_blocked' || payload.status === 'stale_snapshot') {
       incident.status = 'still_blocked';
     } else {
+      // failed / invalid_target / no_target（change captcha-assist-text-answer：点空了）都归 failed。
       incident.status = 'failed';
     }
     void this.releaseRecoveryLease(payload.incidentId, 'completed');
@@ -339,6 +371,13 @@ export class CaptchaAssistService {
     settleMs?: number;
     /** 运营真实鼠标轨迹（change captcha-assist-trajectory-replay）；sanitize 不过则丢弃、保留 points 继续。 */
     trajectory?: CaptchaAssistTrajectoryPayload;
+    /**
+     * 验证码答案明文（change captcha-assist-text-answer）。SENSITIVE：**只活在本调用栈**，装进 envelope 即发走；
+     * MUST NOT 写进 incident / logger / lastResult / lastDispatch / URL（design D10）。下方只留 textLen（字符数）。
+     */
+    text?: string;
+    /** 键入后的提交手势（change captcha-assist-text-answer）：只 'enter'。 */
+    submit?: 'enter';
   }): Promise<CaptchaAssistDispatchResult> {
     const incident = this.incidents.get(input.incidentId);
     if (!incident) return { ok: false, reason: 'not_found' };
@@ -352,6 +391,30 @@ export class CaptchaAssistService {
     }
     if (!isValidPointList(input.points)) {
       return { ok: false, reason: 'invalid_points', incident };
+    }
+    // ── 键入答案闸（change captcha-assist-text-answer）：全部**在租约获取之前**，畸形=整单拒绝 ──────────
+    // 明文答案边界（design D10）：input.text 只活在本调用栈；此处校验的是它，但绝不把它写进任何持久结构，
+    // 下方只记 textLen。**与 trajectory 策略刻意相反**：trajectory 畸形→丢装饰、保留 points 继续；text 畸形
+    // →整单拒绝——「悄悄丢掉你的打字、只帮你点一下」正是红线要禁的静默假成功形态。
+    const text = typeof input.text === 'string' ? input.text : undefined;
+    if (text !== undefined) {
+      if (!isValidCaptchaText(text)) {
+        return { ok: false, reason: 'invalid_text', incident };
+      }
+      // v1 形状：带 text ⇒ 恰好 1 个落点（聚焦那个框）。多点会让"提交按钮"落点在聚焦滚动后失效（design D4）。
+      if (input.points.length !== 1) {
+        return { ok: false, reason: 'text_requires_single_focus_point', incident };
+      }
+      // 能力闸 fail-closed（design D8）：老边缘会忽略 text、只点 points、照常回 cleared = 教科书级静默假成功，
+      // 两份 protocol.ts 一致性与 typecheck 都抓不到。live 查当前连接（不用 onDetected 快照——incident 可能
+      // 比连接活得久）。undefined=无在线连接（连接状态未知）；数组不含该位=在线但没声明。二者都 fail-closed。
+      const caps = this.deps.pusher.edgeCapabilities?.(incident.edgeId);
+      if (caps === undefined) {
+        return { ok: false, reason: 'edge_capability_unknown', incident };
+      }
+      if (!caps.includes('captcha_assist_text_v1')) {
+        return { ok: false, reason: 'edge_lacks_text_capability', incident };
+      }
     }
     if (this.recoveryLeases.has(input.incidentId)) {
       return { ok: false, reason: 'task_busy', incident };
@@ -388,14 +451,19 @@ export class CaptchaAssistService {
       requestedAt: now,
       ...(typeof input.settleMs === 'number' && Number.isFinite(input.settleMs) ? { settleMs: input.settleMs } : {}),
       ...(cleanTrajectory ? { trajectory: cleanTrajectory } : {}),
+      // 明文答案随信封发走（design D10）：只此一处出现，装进 envelope 即离开进程内可持久面。
+      ...(text !== undefined ? { text } : {}),
+      ...(input.submit === 'enter' ? { submit: 'enter' as const } : {}),
     };
     const sent = this.deps.pusher.pushToEdges(
       makeEnvelope('captcha.assist.click', `captcha-assist-click-${input.incidentId}-${now}`, now, payload),
       incident.edgeId,
     );
+    // incident 状态机不动（design D8/6.8）：键入复用 click_pending，不加 input_pending ⇒ console 两张 Record 表零改动。
     incident.status = sent > 0 ? 'click_pending' : 'ready';
     incident.updatedAt = now;
-    incident.lastDispatch = { type: 'click', requestedAt: now, sent, actor: input.actor };
+    // textLen 只记「多少个字符」，never what（design D10）。
+    incident.lastDispatch = { type: 'click', requestedAt: now, sent, actor: input.actor, ...(text !== undefined ? { textLen: text.length } : {}) };
     if (sent <= 0) {
       if (recoveryLease) await this.deps.taskLeases?.release(recoveryLease, 'failed').catch(() => {});
       return { ok: false, reason: 'edge_offline', incident };
@@ -480,7 +548,6 @@ export class CaptchaAssistService {
       edgeId,
       ...(accountId ? { accountId, accountName: normalizeAccountName(this.deps.getAccountName?.(accountId)) } : {}),
       ...(session.machineLabel ? { machineLabel: session.machineLabel } : {}),
-      ...(session.remoteAddr ? { remoteAddr: session.remoteAddr } : {}),
       kind: payload.kind,
       status: 'detected',
       riskStatus: 'restricted',
@@ -531,6 +598,22 @@ function isValidPointList(points: CaptchaAssistClickPointPayload[]): boolean {
     points.length <= 8 &&
     points.every((point) => Number.isFinite(point.x) && Number.isFinite(point.y) && point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1)
   );
+}
+
+/** 答案上界（与边缘 CAPTCHA_TEXT_MAX_LEN 一致）。 */
+const CAPTCHA_TEXT_MAX_LEN = 24;
+
+/**
+ * 验证码答案校验（change captcha-assist-text-answer）：长度 1..24 + 仅 ASCII 可见字符 [0x20,0x7E]。
+ * 与边缘 validateCaptchaText 同口径（两仓各写一份，非共享模块）。畸形=整单拒绝（design D10）。
+ */
+function isValidCaptchaText(text: string): boolean {
+  if (typeof text !== 'string' || text.length === 0 || text.length > CAPTCHA_TEXT_MAX_LEN) return false;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code < 0x20 || code > 0x7e) return false;
+  }
+  return true;
 }
 
 /** 云端最多透传的轨迹样本数（与边缘上限一致；超限=畸形→丢弃、保留 points）。 */

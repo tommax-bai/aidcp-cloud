@@ -34,8 +34,6 @@ export interface EdgeSession {
   accountNickname?: string;
   /** 人类可读机器标签（hello 上报，验证码卡片告诉运维去哪台机器） */
   machineLabel?: string;
-  /** 远程桌面/可达地址（hello 上报，用于人工远程处置） */
-  remoteAddr?: string;
   /**
    * 当前会话正在浏览的笔记 id（随 note.detail / note.content 戳；V1 task 9.2）。
    * 用于在 action.completed 发射 interaction.occurred 时补 noteId（编排已知当前笔记），
@@ -83,6 +81,13 @@ export interface EdgePusher {
    * 只认 OPEN + 非 stale；**多条即诚实失败返回 null，MUST NOT 任取其一**。
    */
   resolveAccountIdForEdge?(edgeId: string): string | null;
+  /**
+   * 该 edgeId 当前在线连接声明的能力位（change captcha-assist-text-answer，验证码键入 fail-closed 闸）。
+   * 只认 OPEN + 非 stale 连接，返回其 hello.capabilities；无在线连接则 undefined（「连接状态未知」，与「在线但
+   * 没声明」区分——后者返回不含目标能力的数组）。绝不用 onDetected 快照——incident 可能比连接活得久。
+   * 可选成员：旧测试桩不实现亦满足接口（键入闸对无此方法的 pusher 走 undefined 分支 fail-closed）。
+   */
+  edgeCapabilities?(edgeId: string): string[] | undefined;
   /** 当前已登记（完成 hello）的边缘连接总数 */
   edgeCount(): number;
   /** 真实在线的边缘数：已登记 AND 近期有心跳（staleness 校验，绝不把死连接当在线）。 */
@@ -330,6 +335,18 @@ export class EdgeCloudServer implements EdgePusher {
       return null;
     }
     return matches[0];
+  }
+
+  edgeCapabilities(edgeId: string): string[] | undefined {
+    const now = this.clock();
+    for (const conn of this.edges.values()) {
+      if (conn.session.edgeId !== edgeId) continue;
+      if (conn.ws.readyState !== WebSocket.OPEN || now - conn.lastSeen >= this.staleAfterMs) continue;
+      // 在线连接：返回其声明的能力位（可能不含目标能力 = 在线但没声明）。缺省视为空数组，不返回 undefined。
+      return conn.session.capabilities ?? [];
+    }
+    // 无 OPEN + 非 stale 连接 = 连接状态未知 → undefined（调用方 fail-closed）。
+    return undefined;
   }
 
   private onConnection(ws: WebSocket): void {

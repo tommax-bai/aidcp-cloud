@@ -45,7 +45,7 @@ class FakeMessenger {
 const silentLogger = { error() {}, warn() {}, log() {} };
 
 function makeSession(over: Partial<EdgeSession> = {}): EdgeSession {
-  return { sessionId: 's1', edgeId: 'edge-1', accountId: 'acc-1', machineLabel: 'win-aliyun-3', remoteAddr: 'rdp://1.2.3.4', ...over };
+  return { sessionId: 's1', edgeId: 'edge-1', accountId: 'acc-1', machineLabel: 'win-aliyun-3', ...over };
 }
 
 describe('CaptchaCoordinator', () => {
@@ -84,10 +84,10 @@ describe('CaptchaCoordinator', () => {
     const headerTitle = (card.header?.title as { content: string }).content;
     assert.match(headerTitle, /P0/);
     assert.match(headerTitle, /验证码弹出/);
-    // detail 含机器与远程地址，便于人工定位
+    // detail 含机器标签，便于人工定位（change captcha-assist-text-answer：已移除背后无能力的「远程地址」行，design D13）。
     const detail = (card.elements[0] as { text: { content: string } }).text.content;
     assert.match(detail, /win-aliyun-3/);
-    assert.match(detail, /rdp:\/\/1\.2\.3\.4/);
+    assert.doesNotMatch(detail, /远程地址/, '「远程地址」入口已随远程桌面能力一并移除');
   });
 
   it('unknown → 账号置 warned（更温和）+ 发卡(P1)', async () => {

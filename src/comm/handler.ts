@@ -627,7 +627,6 @@ export class DefaultMessageHandler implements MessageHandler {
     session.accountId = p.accountId;
     session.accountNickname = typeof p.accountNickname === 'string' ? p.accountNickname.trim() || undefined : undefined;
     session.machineLabel = p.machineLabel;
-    session.remoteAddr = p.remoteAddr;
     // 多租户握手（multi-account-node-support）：校验账号身份、登记新账号、建该连接运行时（私有总线 + RoleDispatcher）。
     // 缺/空 accountId → 配置错误拒绝握手（不回 welcome、不建会话、绝不偷映射成 default 开跑，D4）。
     const outcome = (await this.deps.onHandshake?.(session)) ?? ({ ok: true } as const);

@@ -107,6 +107,13 @@ export interface PanelCaptchaAssist {
     settleMs?: number;
     /** 运营真实鼠标轨迹（change captcha-assist-trajectory-replay）；服务端 sanitize 不过则丢弃、保留 points。 */
     trajectory?: CaptchaAssistTrajectoryPayload;
+    /**
+     * 验证码答案明文（change captcha-assist-text-answer）。SENSITIVE：只透传给服务端装进 envelope，
+     * MUST NOT 落日志/库/incident/URL（design D10）。键入与点击共用同一 scoped-token 授权面，无新增身份闸。
+     */
+    text?: string;
+    /** 键入后的提交手势（change captcha-assist-text-answer）：只 'enter'。 */
+    submit?: 'enter';
   }): Promise<CaptchaAssistDispatchResult>;
 }
 

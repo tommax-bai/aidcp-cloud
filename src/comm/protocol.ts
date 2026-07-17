@@ -170,8 +170,6 @@ export interface HelloPayload {
   accountNickname?: string;
   /** 人类可读的机器标签（如 "win-aliyun-3"），验证码卡片据此告诉运维去哪台机器处置 */
   machineLabel?: string;
-  /** 远程桌面 / 可达地址（如 RDP/VNC 地址或跳板说明），用于人工远程处置 */
-  remoteAddr?: string;
 }
 
 /**
@@ -884,6 +882,34 @@ export interface CaptchaAssistTrajectoryPayload {
   /** For each points[i], the sample index at which that point was pressed. length === points.length. */
   clicks: number[];
 }
+/**
+ * Focus classification carried back in the type report (change captcha-assist-text-answer).
+ * `editable` = INPUT/TEXTAREA/contentEditable that can be cleared + read back (strongest proof);
+ * `opaque` = any other element holding focus (iframe / canvas / tabindex container — typed but
+ * unverifiable); `none` = no focus landed (structural failure ⇒ no_target, zero dispatch).
+ */
+export type CaptchaAssistFocusTier = 'editable' | 'opaque' | 'none';
+
+/**
+ * Honest forensics of a text-typing assist (change captcha-assist-text-answer).
+ * MUST NOT ever carry the answer itself — only who/when/how-many-shaped facts. Lets the operator
+ * distinguish «the answer was wrong» from «nothing was typed» (the whole point of this change).
+ */
+export interface CaptchaAssistTypeReportPayload {
+  /** Focus tier at the moment characters were about to be dispatched. */
+  focus: CaptchaAssistFocusTier;
+  /** Tag of the focused element ('INPUT' / 'IFRAME' / 'CANVAS' …). For forensics only; MUST NOT branch on it. */
+  focusTag?: string;
+  /** Clear outcome: 'verified' = read-back confirmed empty; 'attempted' = cleared best-effort but unreadable. */
+  cleared?: 'verified' | 'attempted';
+  /** Characters actually dispatched. Report truthfully — never `typed || text.length`. */
+  typed: number;
+  /** Read-back verdict (editable only): 'match'/'mismatch'; 'unverifiable' when focus was opaque. */
+  verified?: 'match' | 'mismatch' | 'unverifiable';
+  /** Whether Enter was actually dispatched. */
+  submitted: boolean;
+}
+
 export interface CaptchaAssistClickPayload {
   /** 验证码人工恢复的 system_recovery 任务租约。 */
   taskId?: string;
@@ -898,6 +924,21 @@ export interface CaptchaAssistClickPayload {
    * Points stay authoritative for the press landing; edge clamps sampling/timing + adds jitter.
    */
   trajectory?: CaptchaAssistTrajectoryPayload;
+  /**
+   * Optional captcha answer to type into the focused field (change captcha-assist-text-answer).
+   * Present ⇒ `points` MUST be exactly one (the field to focus). Edge types it with real keyboard
+   * events (never Input.insertText), clears the field first, then submits via Enter if requested.
+   *
+   * SENSITIVE — this is the plaintext answer. MUST NOT be logged / persisted / echoed in any result
+   * or incident / put in a URL (same rule as `image.data`). It lives only on the submitClick call
+   * stack, is packed into the envelope, and is gone; audit keeps actor + when + charCount, never what.
+   *
+   * Actions-DSL seam (design D1): if a real multi-field form ever appears, promote `text`/`submit`
+   * to `actions: (Click|Type|Key|Clear)[]` and derive `points` as the click sub-sequence. Not built now.
+   */
+  text?: string;
+  /** Submit gesture after typing (change captcha-assist-text-answer). Only 'enter' — follows focus, immune to scroll. */
+  submit?: 'enter';
 }
 
 export interface CaptchaAssistClickResultPayload {
@@ -905,7 +946,7 @@ export interface CaptchaAssistClickResultPayload {
   snapshotId?: string;
   edgeId?: string;
   accountId?: string;
-  status: 'cleared' | 'still_blocked' | 'stale_snapshot' | 'not_blocked' | 'invalid_target' | 'failed';
+  status: 'cleared' | 'still_blocked' | 'stale_snapshot' | 'not_blocked' | 'invalid_target' | 'no_target' | 'failed';
   reason?: string;
   checkedAt: number;
   snapshot?: CaptchaAssistSnapshotPayload;
@@ -915,6 +956,14 @@ export interface CaptchaAssistClickResultPayload {
    * Lets cloud/console correlate the outcome (cleared/still_blocked) with the input mode.
    */
   replayMode?: 'trajectory' | 'synthetic';
+  /**
+   * Whether this assist typed an answer (change captcha-assist-text-answer). 'click' = points only
+   * (today's behavior); 'click_type' = focus + type + optional submit. Cloud uses it to detect
+   * version skew: dispatched text but got back `inputMode !== 'click_type'` ⇒ old edge silently dropped it.
+   */
+  inputMode?: 'click' | 'click_type';
+  /** Honest type-report (change captcha-assist-text-answer). Never carries the answer itself. */
+  typeReport?: CaptchaAssistTypeReportPayload;
 }
 
 /** 请求在浏览器中发布一篇帖子（cloud → edge）。 */

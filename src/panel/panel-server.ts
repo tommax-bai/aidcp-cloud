@@ -26,6 +26,7 @@ import type {
 } from './types.js';
 import { startPanelWs, type PanelWsHandle } from './panel-ws.js';
 import type { PublishApprovalPayload } from '../feishu/index.js';
+import type { CaptchaAssistDispatchResult } from '../comm/captcha-assist.js';
 import type { EditDraftPatch } from '../publish-agent/publish-log-store.js';
 import {
   FacebookPublishMediaError,
@@ -225,9 +226,27 @@ function createRequestHandler(
     return { ok: true, actor: 'captcha-assist-token' };
   }
 
+  // 穷举表（change captcha-assist-text-answer，7.2）：把原 if 链 + default 换成 Record<reason, number>，
+  // reason union 一加成员 typecheck 立刻红——防新增拒绝码悄悄回落到 409 default 让运营看不懂。
+  type CaptchaAssistDispatchReason = Extract<CaptchaAssistDispatchResult, { ok: false }>['reason'];
+  const CAPTCHA_ASSIST_HTTP_STATUS: Record<CaptchaAssistDispatchReason, number> = {
+    not_found: 404,
+    expired: 409,
+    edge_offline: 409,
+    snapshot_required: 409,
+    snapshot_mismatch: 409,
+    invalid_points: 400,
+    task_busy: 409,
+    task_lease_failed: 409,
+    invalid_text: 400,
+    text_requires_single_focus_point: 400,
+    edge_lacks_text_capability: 409,
+    edge_capability_unknown: 409,
+  };
   function captchaAssistStatus(reason: string | undefined): number {
-    if (reason === 'not_found') return 404;
-    if (reason === 'invalid_points') return 400;
+    if (reason && reason in CAPTCHA_ASSIST_HTTP_STATUS) {
+      return CAPTCHA_ASSIST_HTTP_STATUS[reason as CaptchaAssistDispatchReason];
+    }
     return 409;
   }
 
@@ -280,16 +299,23 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
-      const { snapshotId, points, settleMs, trajectory } = (body ?? {}) as {
+      const { snapshotId, points, settleMs, trajectory, text, submit } = (body ?? {}) as {
         snapshotId?: unknown;
         points?: unknown;
         settleMs?: unknown;
         trajectory?: unknown;
+        text?: unknown;
+        submit?: unknown;
       };
       if (typeof snapshotId !== 'string' || !Array.isArray(points)) {
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
+      // 键入答案（change captcha-assist-text-answer，7.1）：不新增 verb、不新增身份闸——键入与点击共用同一
+      // scoped-token 授权面（design D9）。深校验（charset/长度/单点/能力）全在 submitClick 内，畸形整单拒绝。
+      // text 非法类型（非 string）当缺省丢弃，交 submitClick 判纯点击；submit 只认字面量 'enter'。
+      const answerText = typeof text === 'string' ? text : undefined;
+      const submitGesture = submit === 'enter' ? ('enter' as const) : undefined;
       // 轨迹（change captcha-assist-trajectory-replay）：只做粗形状把关，非对象即当无轨迹（可救透传，
       // 深校验交 submitClick 的 sanitize，畸形则丢弃保留 points、绝不静默）。
       const rawTrajectory =
@@ -319,6 +345,8 @@ function createRequestHandler(
         actor: auth.actor,
         ...(typeof settleMs === 'number' && Number.isFinite(settleMs) ? { settleMs } : {}),
         ...(rawTrajectory ? { trajectory: rawTrajectory } : {}),
+        ...(answerText !== undefined ? { text: answerText } : {}),
+        ...(submitGesture ? { submit: submitGesture } : {}),
       });
       if (!result.ok) {
         sendJson(res, captchaAssistStatus(result.reason), { error: result.reason, ...(result.incident ? { incident: result.incident } : {}) });

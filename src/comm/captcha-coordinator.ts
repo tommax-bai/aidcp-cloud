@@ -4,7 +4,7 @@
  * detected：
  *   ① 据 kind 迁移归属账号风控态（captcha=强信号→restricted；unknown=弱信号→warned）——账号风控终态云端单写；
  *   ② 按 edge 暂停下发（pusher.pauseEdge，session.end 不受影响，见 ws-server）；
- *   ③ 去重冷却后发飞书 notify-only 告警（含账号 / 机器 / 远程地址），发送失败记录不静默。
+ *   ③ 去重冷却后发飞书 notify-only 告警（含账号 / 机器 / Edge），发送失败记录不静默。
  * cleared：
  *   解除该 edge 暂停（pusher.resumeEdge）；风控态不自动回滚（由状态机恢复窗口 / 人工恢复驱动）。
  *
@@ -53,7 +53,7 @@ export interface CaptchaCoordinatorDeps {
   alertStore?: Pick<AlertStore, 'raise' | 'resolveByEdge'>;
   /** 账号展示名读取。仅用于飞书卡片文案；账号归属仍使用 accountId。 */
   getAccountName?: (accountId: string) => string | null | undefined;
-  /** 云端协助处置通道。未注入或未配置时保留原远程桌面处置行为。 */
+  /** 云端协助处置通道。未注入或未配置时飞书卡只发 notify-only 告警、不带协助链接。 */
   assist?: CaptchaAssistCoordinatorPort;
 }
 
@@ -280,7 +280,6 @@ function buildCaptchaAlertDetail(
   const lines = [
     `**类别**：${payload.kind === 'captcha' ? '验证码挑战' : '未知阻断弹窗'}`,
     `**机器**：${machine}`,
-    session.remoteAddr ? `**远程地址**：${session.remoteAddr}` : '',
     `**Edge**：${edgeId ?? '未知'}`,
     `**风控态**：已置 ${status}`,
     firstUrl ? `**首次检测 URL**：${firstUrl}` : '',

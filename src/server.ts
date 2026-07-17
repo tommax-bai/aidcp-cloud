@@ -1802,7 +1802,11 @@ async function main(): Promise<void> {
       maxDurationMs: readEnvPort('AIDCP_CAPTCHA_ASSIST_LIVE_MAX_DURATION_MS'),
       maxFrames: readEnvPort('AIDCP_CAPTCHA_ASSIST_LIVE_MAX_FRAMES'),
     },
-    pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
+    pusher: {
+      pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0),
+      // 键入能力 fail-closed 闸（change captcha-assist-text-answer，design D8）：live 查当前连接声明的能力位。
+      edgeCapabilities: (edgeId) => (edgeServer ? edgeServer.edgeCapabilities(edgeId) : undefined),
+    },
     taskLeases: {
       acquire: (request) => edgeTaskLeases.acquire(request),
       release: (lease, outcome) => edgeTaskLeases.release(lease, outcome),

@@ -26,7 +26,6 @@ describe('CaptchaAssistService', () => {
       edgeId: 'edge-1',
       accountId: 'acc-1',
       machineLabel: 'ads-k1e0awu5',
-      remoteAddr: 'rdp://ads-k1e0awu5',
     };
     const detected = await service.onDetected({ edgeId: 'edge-1', kind: 'captcha', url: 'https://x' }, session, 'restricted');
 
@@ -37,7 +36,6 @@ describe('CaptchaAssistService', () => {
     assert.equal(sent[0].env.type, 'captcha.assist.capture');
     assert.equal(service.getIncident('cap-1')?.status, 'capture_pending');
     assert.equal(service.getIncident('cap-1')?.machineLabel, 'ads-k1e0awu5');
-    assert.equal(service.getIncident('cap-1')?.remoteAddr, 'rdp://ads-k1e0awu5');
     assert.equal(service.getIncident('cap-1')?.riskStatus, 'restricted');
 
     const token = new URL(detected!.actionUrl).searchParams.get('token') ?? '';
@@ -324,5 +322,136 @@ describe('CaptchaAssistService · trajectory', () => {
     const payload = clickEnv.payload as { trajectory?: unknown; points: unknown[] };
     assert.equal(payload.trajectory, undefined, '畸形轨迹应被丢弃');
     assert.equal(payload.points.length, 1, 'points 仍保留继续');
+  });
+});
+
+describe('CaptchaAssistService · text answer（change captcha-assist-text-answer）', () => {
+  // caps 省略 = edgeCapabilities 未接（undefined 路径）；传数组 = live 返回该能力集。
+  const mkTextService = (sent: Envelope[], caps?: string[]) =>
+    new CaptchaAssistService({
+      enabled: true,
+      publicBaseUrl: 'https://c.example',
+      tokenSecret: 's',
+      clock: () => 100,
+      idGen: () => 'cap-text',
+      logger: silentLogger,
+      pusher: {
+        pushToEdges: (env) => { sent.push(env); return 1; },
+        ...(caps !== undefined ? { edgeCapabilities: () => caps } : {}),
+      },
+    });
+
+  const seed = async (service: CaptchaAssistService): Promise<void> => {
+    await service.onDetected({ edgeId: 'e', kind: 'captcha' }, { sessionId: 's', edgeId: 'e' }, 'restricted');
+    service.onSnapshot(snap('cap-text', 'snap-1', 100));
+  };
+
+  const base = { incidentId: 'cap-text', snapshotId: 'snap-1', points: [{ x: 0.5, y: 0.5 }], actor: 'op', submit: 'enter' as const };
+
+  it('畸形答案（空/超长/表外字符）→ invalid_text，整单拒绝、绝不下发', async () => {
+    for (const text of ['', 'x'.repeat(25), '验证']) {
+      const sent: Envelope[] = [];
+      const service = mkTextService(sent, ['captcha_assist_text_v1']);
+      await seed(service);
+      sent.length = 0;
+      const r = await service.submitClick({ ...base, text });
+      assert.equal(r.ok, false);
+      if (!r.ok) assert.equal(r.reason, 'invalid_text');
+      assert.equal(sent.length, 0, '畸形答案绝不下发（绝不"只帮你点一下"）');
+    }
+  });
+
+  it('带 text 但落点不是恰好 1 个 → text_requires_single_focus_point，不下发', async () => {
+    const sent: Envelope[] = [];
+    const service = mkTextService(sent, ['captcha_assist_text_v1']);
+    await seed(service);
+    sent.length = 0;
+    const r = await service.submitClick({ ...base, points: [{ x: 0.3, y: 0.3 }, { x: 0.6, y: 0.6 }], text: 'ab' });
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.equal(r.reason, 'text_requires_single_focus_point');
+    assert.equal(sent.length, 0);
+  });
+
+  it('能力闸 fail-closed：未声明→edge_lacks_text_capability，连接未知→edge_capability_unknown，皆不下发', async () => {
+    // 在线但没声明该能力。
+    const s1: Envelope[] = [];
+    const svc1 = mkTextService(s1, ['identity', 'overlay']);
+    await seed(svc1); s1.length = 0;
+    const r1 = await svc1.submitClick({ ...base, text: 'ab3' });
+    assert.equal(r1.ok, false);
+    if (!r1.ok) assert.equal(r1.reason, 'edge_lacks_text_capability');
+    assert.equal(s1.length, 0, '未声明能力时命令绝不下发');
+
+    // 无在线连接（edgeCapabilities 未接 = undefined）。
+    const s2: Envelope[] = [];
+    const svc2 = mkTextService(s2); // 不传 caps ⇒ edgeCapabilities 缺 ⇒ undefined
+    await seed(svc2); s2.length = 0;
+    const r2 = await svc2.submitClick({ ...base, text: 'ab3' });
+    assert.equal(r2.ok, false);
+    if (!r2.ok) assert.equal(r2.reason, 'edge_capability_unknown');
+    assert.equal(s2.length, 0);
+  });
+
+  it('声明了能力 → 下发且 payload 带 text/submit；纯点击零回归（不查能力）', async () => {
+    const sent: Envelope[] = [];
+    const service = mkTextService(sent, ['captcha_assist_text_v1']);
+    await seed(service);
+    sent.length = 0;
+
+    const r = await service.submitClick({ ...base, text: 'AB3x' });
+    assert.equal(r.ok, true);
+    const clickEnv = sent.find((e) => e.type === 'captcha.assist.click')!;
+    const payload = clickEnv.payload as { text?: string; submit?: string };
+    assert.equal(payload.text, 'AB3x');
+    assert.equal(payload.submit, 'enter');
+
+    // 纯点击（无 text）绝不经能力闸——即便能力缺失也照常下发（零回归）。
+    const sent2: Envelope[] = [];
+    const svcNoCap = mkTextService(sent2); // 无 edgeCapabilities
+    await seed(svcNoCap); sent2.length = 0;
+    const r2 = await svcNoCap.submitClick({ incidentId: 'cap-text', snapshotId: 'snap-1', points: [{ x: 0.5, y: 0.5 }], actor: 'op' });
+    assert.equal(r2.ok, true, '纯点击不查能力，零回归');
+  });
+
+  it('明文答案边界（D10）：incident / lastDispatch 只留 textLen，绝不含答案本身', async () => {
+    const sent: Envelope[] = [];
+    const service = mkTextService(sent, ['captcha_assist_text_v1']);
+    await seed(service);
+    await service.submitClick({ ...base, text: 'S3cr3tAns' });
+    const incident = service.getIncident('cap-text')!;
+    assert.equal(incident.lastDispatch?.textLen, 9, 'lastDispatch 只记字符数');
+    assert.doesNotMatch(JSON.stringify(incident), /S3cr3tAns/, '答案明文绝不落进 incident 任何字段');
+  });
+
+  it('版本偏斜：下发了 text 但回执 inputMode≠click_type ⇒ 标 textNotExecuted', async () => {
+    const sent: Envelope[] = [];
+    const service = mkTextService(sent, ['captcha_assist_text_v1']);
+    await seed(service);
+    await service.submitClick({ ...base, text: 'ab3' });
+    // 老边缘忽略了 text、只点了 points，回执 inputMode 缺失（视作 'click'）。
+    service.onClickResult({ incidentId: 'cap-text', snapshotId: 'snap-1', status: 'cleared', checkedAt: 200 });
+    assert.equal(service.getIncident('cap-text')?.lastResult?.textNotExecuted, true);
+  });
+
+  it('回执 no_target / typeReport 透传：状态归 failed，typeReport 原样带回', async () => {
+    const sent: Envelope[] = [];
+    const service = mkTextService(sent, ['captcha_assist_text_v1']);
+    await seed(service);
+    await service.submitClick({ ...base, text: 'ab3' });
+    service.onClickResult({
+      incidentId: 'cap-text',
+      snapshotId: 'snap-1',
+      status: 'no_target',
+      reason: 'focus_not_landed',
+      checkedAt: 200,
+      inputMode: 'click_type',
+      typeReport: { focus: 'none', typed: 0, submitted: false },
+    });
+    const inc = service.getIncident('cap-text')!;
+    assert.equal(inc.status, 'failed');
+    assert.equal(inc.lastResult?.status, 'no_target');
+    assert.equal(inc.lastResult?.inputMode, 'click_type');
+    assert.deepEqual(inc.lastResult?.typeReport, { focus: 'none', typed: 0, submitted: false });
+    assert.equal(inc.lastResult?.textNotExecuted, undefined, 'inputMode=click_type ⇒ 无偏斜标记');
   });
 });
