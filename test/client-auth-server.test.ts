@@ -490,8 +490,26 @@ test('客户参考创作只用服务端精选快照，图文/文字模式排队�
     admitReason: 'high_quality',
     firstSeenAt: 1,
     updatedAt: 2,
-    referenceImages: [{ index: 0, sourceUrl: 'https://img.test/server.jpg', captureStatus: 'url_only', capturedAt: 1 }],
-  };
+    // 真实行必带服务端内部诊断：formGuess（判图模型名/厂商）+ visualAnalysis（视觉模型与风格描述）。
+    // 空 fixture 会让「不泄漏」断言空过——本 change 的 create-post 回包泄漏正是这样漏掉的。
+    referenceImages: [{
+      index: 0,
+      sourceUrl: 'https://img.test/server.jpg',
+      captureStatus: 'url_only',
+      capturedAt: 1,
+      formGuess: { form: 'photo', confidence: 0.87, detectedAt: 3, detectedFor: 1, model: 'internal-vision-model', provider: 'internal-vendor' },
+    }],
+    visualAnalysis: {
+      status: 'analyzed',
+      schemaVersion: '1',
+      cacheKey: 'internal-cache-key',
+      provider: 'internal-vendor',
+      model: 'internal-vision-model',
+      analyzedAt: 4,
+      sourceCount: 1,
+      error: '内部风格描述（绝不外泄）',
+    },
+  } as unknown as CuratedPanelRow;
   const rows = new Map<number, CuratedPanelRow>([
     [7, baseRow],
     [8, { ...baseRow, id: 8, sourceId: 'server-note-8' }],
@@ -546,20 +564,38 @@ test('客户参考创作只用服务端精选快照，图文/文字模式排队�
         accountId: 'p2',
       });
       assert.equal(textReceipt.status, 201);
-      const textTask = (await textReceipt.json()) as { task: { status: string; source: string; sourceConstraints: Record<string, unknown> } };
-      assert.equal(textTask.task.status, 'queued');
-      assert.equal(textTask.task.source, 'edge');
-      assert.equal(textTask.task.sourceConstraints.body, '服务端正文');
-      assert.equal(textTask.task.sourceConstraints.useReferenceImages, false);
-      assert.equal(textTask.task.sourceConstraints.referenceImages, undefined);
+      // 回包只是排队回执：客户拿到的字段必须收口，绝不含 sourceConstraints / confirmation。
+      const textBody = (await textReceipt.json()) as Record<string, unknown>;
+      assert.deepEqual(Object.keys(textBody).sort(), ['created', 'task', 'triggered']);
+      const textTask = textBody.task as Record<string, unknown>;
+      assert.deepEqual(Object.keys(textTask).sort(), ['id', 'status', 'version']);
+      assert.equal(textTask.status, 'queued');
+      assert.equal(textBody.created, true);
+
+      // 「只用服务端快照」仍须成立——但改由服务端任务行证明，不再靠回包自证。
+      const [textStored] = await taskStore.list({ accountId: 'p1', limit: 20 });
+      assert.equal(textStored.source, 'edge');
+      assert.equal(textStored.sourceConstraints.body, '服务端正文', '客户端伪造正文必须被忽略');
+      assert.equal(textStored.sourceConstraints.useReferenceImages, false);
+      assert.equal(textStored.sourceConstraints.referenceImages, undefined);
 
       const imageReceipt = await create(8, { envKey: 'p1', useReferenceImages: true });
       assert.equal(imageReceipt.status, 201);
-      const imageTask = (await imageReceipt.json()) as { task: { status: string; sourceConstraints: Record<string, unknown> } };
-      assert.equal(imageTask.task.status, 'queued');
-      assert.equal(imageTask.task.sourceConstraints.useReferenceImages, true);
-      assert.deepEqual(imageTask.task.sourceConstraints.referenceImages, baseRow.referenceImages);
-      assert.equal((await taskStore.list({ accountId: 'p1', limit: 20 })).length, 2, '拒绝路径不得创建任务');
+      const imageBody = (await imageReceipt.json()) as Record<string, unknown>;
+      assert.deepEqual(Object.keys(imageBody).sort(), ['created', 'task', 'triggered']);
+      assert.equal((imageBody.task as Record<string, unknown>).status, 'queued');
+
+      // 内部视觉诊断绝不出现在客户域的任何一层（整包序列化后全文查，防新增字段再开口子）。
+      const imageWire = JSON.stringify(imageBody);
+      for (const secret of ['internal-vision-model', 'internal-vendor', 'internal-cache-key', 'formGuess', 'visualAnalysis', '内部风格描述']) {
+        assert.equal(imageWire.includes(secret), false, `客户回包泄漏内部诊断：${secret}`);
+      }
+
+      // 服务端任务行仍须带上完整参考图快照（下游 referenceNote 要用），只是不外泄。
+      const stored = await taskStore.list({ accountId: 'p1', limit: 20 });
+      const imageStored = stored.find((t) => t.sourceConstraints.curatedId === 8)!;
+      assert.deepEqual(imageStored.sourceConstraints.referenceImages, baseRow.referenceImages);
+      assert.equal(stored.length, 2, '拒绝路径不得创建任务');
     },
   );
 });

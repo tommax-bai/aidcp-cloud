@@ -993,6 +993,11 @@ export class CuratedContentStore {
    * 客户端灵感库列表（严格按账号）。
    * creatableOnly 条件下推 SQL 后再 COUNT/LIMIT/OFFSET，避免先分页后过滤造成空页和错误 total。
    * limit/offset 在 store 再收口，防调用方遗漏边界；缺表仍诚实降级为空。
+   *
+   * total 必须是「当前筛选条件下的服务端一致总数」，与本页取到几行无关：
+   * `COUNT(*) OVER()` 只在有行时才回得来，offset 越过末尾（列表缩短 / 陈旧页码）时窗口函数无行可算，
+   * 若直接兜 0 就会把「本页没有行」谎报成「该账号一条都没有」，UI 据此显示「精选池还是空的」。
+   * 故零行且 offset>0 时补一次独立 COUNT 拿真实总数；offset=0 的零行才是真的零条。
    */
   async listForClient(
     accountId: string,
@@ -1020,10 +1025,15 @@ export class CuratedContentStore {
          LIMIT $2 OFFSET $3`,
         params,
       );
-      return {
-        items: rows.map(rowToPanelView),
-        total: rows.length > 0 ? Number(rows[0].total_count) : 0,
-      };
+      if (rows.length > 0) {
+        return { items: rows.map(rowToPanelView), total: Number(rows[0].total_count) };
+      }
+      if (offset === 0) return { items: [], total: 0 };
+      const { rows: countRows } = await this.pool.query<{ total_count: string }>(
+        `SELECT COUNT(*)::text AS total_count FROM curated_content WHERE ${conds.join(' AND ')}`,
+        [accountId],
+      );
+      return { items: [], total: Number(countRows[0]?.total_count ?? '0') };
     } catch (err) {
       if ((err as { code?: string }).code === '42P01') return { items: [], total: 0 };
       throw err;

@@ -591,13 +591,20 @@ export class PublishLogStore {
 
   /**
    * 该账号已经真实形成的参照稿总数。
-   * `source_reference` 只在参照内容已经写入 publish_log 时存在，因此排队中但尚未生成的委派任务不会被提前计数；
-   * 后续审批或下发状态不抹去“曾经成稿”这一事实，故不按 status 过滤。
+   * `source_reference` 只在参照内容已经写入 publish_log 时存在，因此排队中但尚未生成的委派任务不会被提前计数。
+   *
+   * 必须排除 `failed`：PublishExecutor 有两条**出生即 failed** 的路径同样写 source_reference——
+   * M=0 全部生图失败（roles/publish-executor.ts «诚实 failed，不落待审、不发审批卡»）与合规/质量闸否决。
+   * 这两类行从未成稿、客户从未见过，计入即把「没生成的稿」谎报成「已成稿」（静默假成功红线）。
+   *
+   * 已知保守偏差（宁可少报、绝不虚报）：先到 pending_approval 又被 PublishDispatcher 置 failed 的行
+   * （下发失败/异常）确实「曾经成稿」，此处一并少计。当前 schema 无「是否到过待审」的列，
+   * 无法在 SQL 层区分「出生即 failed」与「成稿后失败」；宁可少报也不虚报。
    */
   async countReferenceDraftsForAccount(accountId: string): Promise<number> {
     const { rows } = await this.pool.query<{ n: string }>(
       `SELECT count(*)::text AS n FROM publish_log
-        WHERE account_id = $1 AND source_reference IS NOT NULL`,
+        WHERE account_id = $1 AND source_reference IS NOT NULL AND status <> 'failed'`,
       [accountId],
     );
     return Number(rows[0]?.n ?? '0');

@@ -518,13 +518,14 @@ test('listForClient：可创作条件在 SQL 层过滤，分页边界收口且 t
 test('listForClient：全部模式不加可创作条件；缺表诚实回落为空', async () => {
   const ok = controllablePool(() => ({ rows: [] }));
   const store = new CuratedContentStore({ pool: ok.pool });
-  assert.deepEqual(await store.listForClient('acc-1', { creatableOnly: false, limit: 20, offset: 40 }), {
+  assert.deepEqual(await store.listForClient('acc-1', { creatableOnly: false, limit: 20, offset: 0 }), {
     items: [],
     total: 0,
   });
   assert.doesNotMatch(ok.calls[0].sql, /content_type = 'image_text'/);
   assert.doesNotMatch(ok.calls[0].sql, /BTRIM/);
-  assert.deepEqual(ok.calls[0].params, ['acc-1', 20, 40]);
+  assert.deepEqual(ok.calls[0].params, ['acc-1', 20, 0]);
+  assert.equal(ok.calls.length, 1, 'offset=0 的零行就是真零条，不必补 COUNT');
 
   const missing = controllablePool(() => {
     const err = new Error('relation does not exist') as Error & { code: string };
@@ -536,6 +537,21 @@ test('listForClient：全部模式不加可创作条件；缺表诚实回落为�
     items: [],
     total: 0,
   });
+});
+
+test('listForClient：offset 越过末尾时补 COUNT 拿真实总数，绝不把「本页无行」谎报成「零条」', async () => {
+  // 页码陈旧 / 列表缩短：窗口函数无行可算 → 必须另查一次真实总数，否则 UI 会显示「精选池还是空的」。
+  const { pool, calls } = controllablePool((sql: string) =>
+    /COUNT\(\*\)::text/.test(sql) ? { rows: [{ total_count: '23' }] } : { rows: [] });
+  const store = new CuratedContentStore({ pool });
+  const out = await store.listForClient('acc-1', { creatableOnly: true, limit: 12, offset: 96 });
+
+  assert.deepEqual(out.items, []);
+  assert.equal(out.total, 23, '本页无行 ≠ 该账号零条');
+  assert.equal(calls.length, 2, '零行且 offset>0 必须补一次独立 COUNT');
+  assert.match(calls[1].sql, /SELECT COUNT\(\*\)::text AS total_count FROM curated_content/);
+  assert.match(calls[1].sql, /content_type = 'image_text'/, '补的 COUNT 必须沿用同一筛选条件');
+  assert.deepEqual(calls[1].params, ['acc-1'], '补的 COUNT 不带 limit/offset');
 });
 
 test('listForPanel：缺 accountId（全账号视图）不加 account_id 过滤，仍可叠类型过滤', async () => {

@@ -156,6 +156,17 @@ function toClientCuratedDetail(row: CuratedPanelRow): Record<string, unknown> {
   };
 }
 
+/**
+ * 参考创作排队回执：同 list/detail 一样是显式白名单。
+ * 绝不回 `createDraft` 的整个结果——那里的 `task.sourceConstraints` 与
+ * `confirmation.constraints` 携带服务端内部诊断（参考图的 formGuess.model/provider、
+ * visualAnalysis 的 provider/model/cacheKey/风格描述），正是 list/detail DTO 特意剥掉的字段。
+ * 客户端只需要「排没排上队 + 哪个任务」，据此收口到最小字段。
+ */
+function toClientTaskReceipt(task: { id: string; status: string; version: number }): Record<string, unknown> {
+  return { id: task.id, status: task.status, version: task.version };
+}
+
 function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
   const logger = config.logger ?? console;
 
@@ -376,7 +387,12 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
           approvalMode: 'review',
           priority: 'normal',
         });
-        sendJson(res, result.created ? 201 : 200, result);
+        // 最小披露：只回排队回执，绝不把整个 task/confirmation 原样回给客户域。
+        sendJson(res, result.created ? 201 : 200, {
+          triggered: true,
+          created: result.created,
+          task: toClientTaskReceipt(result.task),
+        });
       } catch (err) {
         if (err instanceof DelegatedTaskServiceError) {
           sendJson(res, err.status, { error: err.code, message: err.message });

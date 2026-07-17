@@ -36,5 +36,7 @@ test('countReferenceDraftsForAccount: 只按账号与真实 source_reference 统
   assert.deepEqual(seen[0].params, ['acc-1']);
   assert.match(seen[0].sql, /account_id = \$1/);
   assert.match(seen[0].sql, /source_reference IS NOT NULL/);
-  assert.doesNotMatch(seen[0].sql, /status\s*=/);
+  // PublishExecutor 有两条「出生即 failed」且照样写 source_reference 的路径（M=0 全部生图失败 / 合规闸否决）。
+  // 这些从未成稿、客户从未见过，计入即把没生成的稿谎报成「已成稿」。必须在 SQL 层排除。
+  assert.match(seen[0].sql, /status <> 'failed'/, 'failed 行必须排除，否则「已成稿」被从未生成的稿件灌水');
 });
