@@ -153,6 +153,8 @@ export function commentOutcomeReason(c: FacebookCommentRunResult): string {
       return '提交后无法确认评论已上墙';
     case 'pending_group_approval':
       return '该群需管理员批准参与后才能评论（评论未上墙，待人工处理）';
+    case 'comment_rejected':
+      return 'Facebook 已拒绝该评论（未上墙，需人工处理）';
     case 'quota_denied':
       return c.reason === 'daily_cap' ? '当日评论已达上限' : '评论配额不足';
     default:
@@ -352,6 +354,12 @@ function mapFacebookSubmitOutcome(reason?: string): FacebookCommentOutcome {
       // 群参与审批入群闸：评论未上墙、待管理员批准。**绝不**塌进 verification_ambiguous（那读作「可能已发出」+ 写去重）——
       // 这里评论确未发出，须自成一档诚实终态（不染绿、不去重、可待批准后重试）。
       return 'pending_group_approval';
+    case 'comment_rejected':
+      // 平台已拒绝（change facebook-comment-lifecycle-verify；真机 2026-07-17 坐实被拒行 `… 已拒绝 查看反馈`）：
+      // 评论**确定未上墙、终局**。**绝不**塌进 verification_ambiguous——那读作「可能已发出」**且会打去重**，
+      // 等于把一个确定失败当成可能成功、还顺手把目标帖永久烧掉；也**绝不**塌进 pending_group_approval（那是可等、
+      // 批准后可重试，而被拒是终局、重试无意义）。自成一档：不染绿、不去重（`reallySubmitted` 白名单不含本档）、留人工。
+      return 'comment_rejected';
     default:
       return 'submit_failed'; // identity_unknown / editor_not_found / submit_control_* / marker_not_accepted / timeout
   }
@@ -970,6 +978,10 @@ export class CommentScheduler {
           // 防重复真发（BLOCKING §5.4）：仅在**真提交了**（成功 或 提交后确认不了 verification_ambiguous）时打去重标记——
           // 硬失败（权限门/找不到评论框/被拦/身份未知）没真点提交、无重复真发风险，不打标记（可重试、不白占当日上限）。
           // 该标记同时使 facebookCommentedToday 计入当日配额；仅计「真发过一次」的目标，不误伤硬失败重试。
+          //
+          // 🔴 这是**白名单**（只有列出的两档打去重），新增 outcome 默认落在闸外 = 不去重（安全侧）。
+          // `comment_rejected` MUST NOT 进这个白名单：平台已明确拒绝该评论、它**没有上墙**，打去重等于
+          // 把目标帖永久烧掉（再不会重试）却什么都没发出去。加档时请守住这条（change facebook-comment-lifecycle-verify）。
           const reallySubmitted = submit.ok || submit.reason === 'verification_ambiguous';
           if (reallySubmitted) await dedup.recordInteraction(target, 'comment').catch(() => {});
           if (submit.ok) {
