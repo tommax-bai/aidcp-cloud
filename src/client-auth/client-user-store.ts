@@ -89,6 +89,33 @@ CREATE TABLE IF NOT EXISTS client_env_scope_audit (
 );
 CREATE INDEX IF NOT EXISTS client_env_scope_audit_scope_idx
   ON client_env_scope_audit (user_id, env_key, revoked_at DESC);
+-- 管理员撤权必须先收回客户访问；若 interaction account binding 缺失，不能伪造 accountId
+-- 或假称已清理。该 hold 只记录最小定位/审计字段，并在 binding 后到时转成既有 offboard。
+CREATE TABLE IF NOT EXISTS client_env_revocation_holds (
+  revocation_id UUID        PRIMARY KEY,
+  env_key       TEXT        NOT NULL UNIQUE,
+  user_id       TEXT        NOT NULL,
+  reason        TEXT        NOT NULL CHECK (reason IN ('customer_terminated','admin_revoked')),
+  revoked_by    TEXT,
+  requested_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS client_env_revocation_holds_requested_idx
+  ON client_env_revocation_holds (requested_at, env_key);
+-- 数据库级 guard 保护回滚/旧二进制：hold 存在时，任何 scope insert/update 都 fail closed。
+CREATE OR REPLACE FUNCTION reject_client_env_scope_during_revocation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM client_env_revocation_holds WHERE env_key = NEW.env_key) THEN
+    RAISE EXCEPTION 'environment cleanup is still unresolved'
+      USING ERRCODE = '23514', CONSTRAINT = 'client_env_scope_cleanup_hold';
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS client_env_scope_cleanup_hold_guard ON client_env_scope;
+CREATE TRIGGER client_env_scope_cleanup_hold_guard
+  BEFORE INSERT OR UPDATE OF env_key ON client_env_scope
+  FOR EACH ROW EXECUTE FUNCTION reject_client_env_scope_during_revocation();
 DO $$
 BEGIN
   LOCK TABLE client_env_scope IN SHARE ROW EXCLUSIVE MODE;
@@ -160,6 +187,7 @@ export interface ClientEnvironmentView {
   platform: string | null;
   assignees: ClientEnvAssignee[];
   assigneeCount: number;
+  cleanup: ClientCleanupReceipt | null;
 }
 
 export type CreateUserResult =
@@ -168,12 +196,14 @@ export type CreateUserResult =
 
 export type RotateKeyResult = { ok: true; plainKey: string } | { ok: false; reason: 'not_found' };
 
-export type MutateUserResult = { ok: true; user: ClientUserView; offboards: ClientOffboardView[] } |
-  { ok: false; reason: 'not_found' | 'invalid_name' | 'name_taken' | 'offboard_binding_missing' };
+export type MutateUserResult =
+  { ok: true; user: ClientUserView; offboards: ClientOffboardView[]; cleanup: ClientCleanupReceipt[] } |
+  { ok: false; reason: 'not_found' | 'invalid_name' | 'name_taken' };
 
 export type SetScopeResult =
-  | { ok: true; scope: ClientEnvScopeRow[]; offboards: ClientOffboardView[] }
-  | { ok: false; reason: 'not_found' | 'unknown_environment' | 'env_already_assigned' | 'offboard_binding_missing' | 'offboard_in_progress'; envKey?: string };
+  | { ok: true; scope: ClientEnvScopeRow[]; offboards: ClientOffboardView[]; cleanup: ClientCleanupReceipt[] }
+  | { ok: false; reason: 'not_found' | 'unknown_environment' | 'env_already_assigned' |
+      'cleanup_in_progress' | 'offboard_in_progress'; envKey?: string };
 
 export type CreateProvisioningIntentResult =
   | { ok: true; intentId: string; proof: string; expiresAt: number }
@@ -193,6 +223,19 @@ export interface ClientOffboardView {
   requestedAt: number;
   purgeDueAt: number;
 }
+
+export interface ClientCleanupHoldView {
+  kind: 'binding_missing';
+  revocationId: string;
+  envKey: string;
+  state: 'binding_missing';
+  reason: 'customer_terminated' | 'admin_revoked';
+  requestedAt: number;
+}
+
+export type ClientCleanupReceipt =
+  | ClientCleanupHoldView
+  | ({ kind: 'offboard_pending' } & ClientOffboardView);
 
 export type BeginOffboardResult =
   | { ok: true; offboard: ClientOffboardView }
@@ -231,6 +274,34 @@ export class ClientUserStore {
 
   constructor(options: ClientUserStoreOptions = {}) {
     this.pool = options.pool ?? new Pool(resolveEnvPgConfig());
+  }
+
+  private offboardReceipt(offboard: ClientOffboardView): ClientCleanupReceipt {
+    return { kind: 'offboard_pending', ...offboard };
+  }
+
+  private async enqueueCleanupHold(
+    client: pg.PoolClient,
+    input: { userId: string; envKey: string; reason: ClientCleanupHoldView['reason']; actor: string | null },
+  ): Promise<ClientCleanupHoldView> {
+    const revocationId = crypto.randomUUID();
+    const { rows } = await client.query<{
+      revocation_id: string; env_key: string; reason: ClientCleanupHoldView['reason']; requested_at: Date;
+    }>(
+      `INSERT INTO client_env_revocation_holds
+         (revocation_id,env_key,user_id,reason,revoked_by,requested_at,updated_at)
+       VALUES ($1,$2,$3,$4,$5,now(),now())
+       ON CONFLICT (env_key) DO UPDATE
+         SET updated_at=client_env_revocation_holds.updated_at
+       RETURNING revocation_id,env_key,reason,requested_at`,
+      [revocationId, input.envKey, input.userId, input.reason, input.actor],
+    );
+    const row = rows[0];
+    if (!row) throw new Error('revocation_hold_insert_failed');
+    return {
+      kind: 'binding_missing', revocationId: row.revocation_id, envKey: row.env_key,
+      state: 'binding_missing', reason: row.reason, requestedAt: row.requested_at.getTime(),
+    };
   }
 
   private async enqueueOffboard(
@@ -782,6 +853,7 @@ export class ClientUserStore {
     updatedBy: string | null,
   ): Promise<MutateUserResult> {
     const offboards: ClientOffboardView[] = [];
+    const cleanup: ClientCleanupReceipt[] = [];
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -811,21 +883,30 @@ export class ClientUserStore {
       if (current.status === 'enabled' && status === 'disabled') {
         const scopes = await client.query<{
           env_key: string; label: string | null; platform: string | null; source: string;
-          assigned_by: string | null; assigned_at: Date; registry_platform: string | null; account_id: string | null;
+          assigned_by: string | null; assigned_at: Date; registry_platform: string | null;
         }>(`SELECT s.env_key,s.label,s.platform,s.source,s.assigned_by,s.assigned_at,
-                   e.platform AS registry_platform,a.account_id
+                   e.platform AS registry_platform
               FROM client_env_scope s
               LEFT JOIN client_environments e ON e.env_key=s.env_key
-              LEFT JOIN interaction_auth_state a ON a.env_key=s.env_key AND a.platform='wechat_channels'
              WHERE s.user_id=$1 AND s.source='admin' FOR UPDATE OF s`, [userId]);
+        for (const envKey of scopes.rows.map((scope) => scope.env_key).sort()) {
+          await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, [`interaction-env:${envKey}`]);
+        }
         for (const scope of scopes.rows) {
           if (scope.platform !== 'wechat_channels' && scope.registry_platform !== 'wechat_channels') continue;
-          if (!scope.account_id) {
-            await client.query('ROLLBACK');
-            return { ok: false, reason: 'offboard_binding_missing' };
+          const binding = await client.query<{ account_id: string }>(
+            `SELECT account_id FROM interaction_auth_state
+              WHERE env_key=$1 AND platform='wechat_channels' FOR UPDATE`, [scope.env_key],
+          );
+          if (!binding.rows[0]) {
+            cleanup.push(await this.enqueueCleanupHold(client, { userId, envKey: scope.env_key,
+              reason: 'customer_terminated', actor: updatedBy }));
+            continue;
           }
-          offboards.push(await this.enqueueOffboard(client, { userId, envKey: scope.env_key, accountId: scope.account_id,
-            reason: 'customer_terminated', actor: updatedBy }));
+          const offboard = await this.enqueueOffboard(client, { userId, envKey: scope.env_key,
+            accountId: binding.rows[0].account_id, reason: 'customer_terminated', actor: updatedBy });
+          offboards.push(offboard);
+          cleanup.push(this.offboardReceipt(offboard));
         }
         await client.query(
           `INSERT INTO client_env_scope_audit
@@ -845,7 +926,7 @@ export class ClientUserStore {
       throw error;
     } finally { client.release(); }
     const user = await this.viewOf(userId);
-    return { ok: true, user: user!, offboards };
+    return { ok: true, user: user!, offboards, cleanup };
   }
 
   /** 轮换 key：换 hash+盐、bump rotated_at；旧 key 立即失效，回显一次新明文。 */
@@ -917,11 +998,24 @@ export class ClientUserStore {
         label: string | null;
         platform: string | null;
         assignees: { userId: string; name: string }[] | null;
+        hold_id: string | null;
+        hold_reason: ClientCleanupHoldView['reason'] | null;
+        hold_requested_at: Date | null;
+        offboard_id: string | null;
+        offboard_account_id: string | null;
+        offboard_state: ClientOffboardView['state'] | null;
+        offboard_reason: ClientOffboardView['reason'] | null;
+        offboard_requested_at: Date | null;
+        offboard_purge_due_at: Date | null;
       }>(
         `WITH keys AS (
            SELECT env_key FROM client_environments
            UNION
            SELECT env_key FROM client_env_scope
+           UNION
+           SELECT env_key FROM client_env_revocation_holds
+           UNION
+           SELECT env_key FROM interaction_offboards WHERE platform='wechat_channels' AND state <> 'purged'
          )
          SELECT k.env_key,
                 COALESCE(
@@ -933,23 +1027,45 @@ export class ClientUserStore {
                   max(e.platform)
                 ) AS platform,
                 json_agg(json_build_object('userId', u.user_id, 'name', u.name) ORDER BY u.name)
-                  FILTER (WHERE u.user_id IS NOT NULL) AS assignees
+                  FILTER (WHERE u.user_id IS NOT NULL) AS assignees,
+                h.revocation_id AS hold_id,h.reason AS hold_reason,h.requested_at AS hold_requested_at,
+                o.offboard_id,o.account_id AS offboard_account_id,o.state AS offboard_state,
+                o.reason AS offboard_reason,o.requested_at AS offboard_requested_at,
+                o.purge_due_at AS offboard_purge_due_at
          FROM keys k
          LEFT JOIN client_environments e ON e.env_key = k.env_key
          LEFT JOIN client_env_scope s
            ON s.env_key = k.env_key AND s.source = 'admin'
          LEFT JOIN client_users u ON u.user_id = s.user_id
-         GROUP BY k.env_key
+         LEFT JOIN client_env_revocation_holds h ON h.env_key = k.env_key
+         LEFT JOIN interaction_offboards o
+           ON o.env_key = k.env_key AND o.platform='wechat_channels' AND o.state <> 'purged'
+         GROUP BY k.env_key,h.revocation_id,h.reason,h.requested_at,
+                  o.offboard_id,o.account_id,o.state,o.reason,o.requested_at,o.purge_due_at
          ORDER BY k.env_key ASC`,
       );
       return rows.map((r) => {
         const assignees = (r.assignees ?? []).map((a) => ({ userId: a.userId, name: a.name }));
+        const cleanup: ClientCleanupReceipt | null = r.hold_id && r.hold_reason && r.hold_requested_at
+          ? {
+              kind: 'binding_missing', revocationId: r.hold_id, envKey: r.env_key,
+              state: 'binding_missing', reason: r.hold_reason, requestedAt: r.hold_requested_at.getTime(),
+            }
+          : r.offboard_id && r.offboard_account_id && r.offboard_state && r.offboard_reason &&
+              r.offboard_requested_at && r.offboard_purge_due_at
+            ? {
+                kind: 'offboard_pending', offboardId: r.offboard_id, envKey: r.env_key,
+                accountId: r.offboard_account_id, state: r.offboard_state, reason: r.offboard_reason,
+                requestedAt: r.offboard_requested_at.getTime(), purgeDueAt: r.offboard_purge_due_at.getTime(),
+              }
+            : null;
         return {
           envKey: r.env_key,
           label: r.label,
           platform: r.platform,
           assignees,
           assigneeCount: assignees.length,
+          cleanup,
         };
       });
     } catch (err) {
@@ -969,6 +1085,7 @@ export class ClientUserStore {
     assignedBy: string | null,
   ): Promise<SetScopeResult> {
     const offboards: ClientOffboardView[] = [];
+    const cleanup: ClientCleanupReceipt[] = [];
     const seen = new Set<string>();
     const clean = items
       .map((i) => (i.envKey ?? '').trim())
@@ -987,6 +1104,10 @@ export class ClientUserStore {
         assigned_by: string | null; assigned_at: Date;
       }>(`SELECT env_key,label,platform,source,assigned_by,assigned_at
             FROM client_env_scope WHERE user_id=$1 AND source='admin' FOR UPDATE`, [userId]);
+      const affectedEnvKeys = [...new Set([...current.rows.map((row) => row.env_key), ...clean])].sort();
+      for (const envKey of affectedEnvKeys) {
+        await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, [`interaction-env:${envKey}`]);
+      }
       const registered = clean.length
         ? await client.query<{ env_key: string; label: string | null; platform: string | null }>(
             `SELECT env_key, label, platform FROM client_environments
@@ -1001,6 +1122,14 @@ export class ClientUserStore {
         return { ok: false, reason: 'unknown_environment', envKey: unknown };
       }
       if (clean.length) {
+        const held = await client.query<{ env_key: string }>(
+          `SELECT env_key FROM client_env_revocation_holds
+            WHERE env_key=ANY($1::text[]) ORDER BY env_key LIMIT 1 FOR UPDATE`, [clean],
+        );
+        if (held.rows[0]) {
+          await client.query('ROLLBACK');
+          return { ok: false, reason: 'cleanup_in_progress', envKey: held.rows[0].env_key };
+        }
         const purging = await client.query<{ env_key: string }>(
           `SELECT env_key FROM interaction_offboards
             WHERE env_key=ANY($1::text[]) AND platform='wechat_channels' AND state <> 'purged'
@@ -1033,11 +1162,14 @@ export class ClientUserStore {
             WHERE platform='wechat_channels' AND env_key=$1 FOR UPDATE`, [row.env_key],
         );
         if (!binding.rows[0]) {
-          await client.query('ROLLBACK');
-          return { ok: false, reason: 'offboard_binding_missing', envKey: row.env_key };
+          cleanup.push(await this.enqueueCleanupHold(client, { userId, envKey: row.env_key,
+            reason: 'admin_revoked', actor: assignedBy }));
+          continue;
         }
-        offboards.push(await this.enqueueOffboard(client, { userId, envKey: row.env_key, accountId: binding.rows[0].account_id,
-          reason: 'admin_revoked', actor: assignedBy }));
+        const offboard = await this.enqueueOffboard(client, { userId, envKey: row.env_key,
+          accountId: binding.rows[0].account_id, reason: 'admin_revoked', actor: assignedBy });
+        offboards.push(offboard);
+        cleanup.push(this.offboardReceipt(offboard));
       }
       await client.query(
         `INSERT INTO client_env_scope_audit
@@ -1072,11 +1204,66 @@ export class ClientUserStore {
           (err as { constraint?: string })?.constraint === 'uq_client_env_scope_active_env') {
         return { ok: false, reason: 'env_already_assigned' };
       }
+      if ((err as { code?: string; constraint?: string })?.code === '23514' &&
+          (err as { constraint?: string })?.constraint === 'client_env_scope_cleanup_hold') {
+        return { ok: false, reason: 'cleanup_in_progress' };
+      }
       throw err;
     } finally {
       client.release();
     }
-    return { ok: true, scope: await this.listEnvScope(userId), offboards };
+    return { ok: true, scope: await this.listEnvScope(userId), offboards, cleanup };
+  }
+
+  /**
+   * A late auth status supplies the exact accountId that an access-first admin revocation lacked.
+   * Materialize those holds into the existing offboard lifecycle; callers dispatch returned rows
+   * through InteractionOffboardingService, keeping this store the only DB writer.
+   */
+  async reconcileRevocationHolds(limit = 50): Promise<ClientOffboardView[]> {
+    const boundedLimit = Math.max(1, Math.min(200, Math.trunc(limit) || 50));
+    const { rows: candidates } = await this.pool.query<{ env_key: string }>(
+      `SELECT h.env_key
+         FROM client_env_revocation_holds h
+         JOIN interaction_auth_state a ON a.env_key=h.env_key AND a.platform='wechat_channels'
+        ORDER BY h.requested_at,h.env_key LIMIT $1`, [boundedLimit],
+    );
+    const offboards: ClientOffboardView[] = [];
+    for (const candidate of candidates) {
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1,0))`,
+          [`interaction-env:${candidate.env_key}`]);
+        const { rows } = await client.query<{
+          revocation_id: string; env_key: string; user_id: string;
+          reason: ClientCleanupHoldView['reason']; revoked_by: string | null; account_id: string;
+        }>(
+          `SELECT h.revocation_id,h.env_key,h.user_id,h.reason,h.revoked_by,a.account_id
+             FROM client_env_revocation_holds h
+             JOIN interaction_auth_state a ON a.env_key=h.env_key AND a.platform='wechat_channels'
+            WHERE h.env_key=$1 FOR UPDATE OF h,a`, [candidate.env_key],
+        );
+        const row = rows[0];
+        if (!row) {
+          await client.query('COMMIT');
+          continue;
+        }
+        const offboard = await this.enqueueOffboard(client, {
+          userId: row.user_id, envKey: row.env_key, accountId: row.account_id,
+          reason: row.reason, actor: row.revoked_by,
+        });
+        await client.query(`DELETE FROM client_env_revocation_holds WHERE revocation_id=$1`, [row.revocation_id]);
+        await client.query('COMMIT');
+        offboards.push(offboard);
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    }
+    return offboards;
   }
 
   async close(): Promise<void> {

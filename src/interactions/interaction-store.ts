@@ -301,7 +301,7 @@ export class InteractionStore {
       // Same lock as ClientUserStore.beginEnvironmentOffboard: first-auth and
       // customer unbind must observe one serial order for an environment.
       await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, [`interaction-env:${payload.envKey}`]);
-      await this.assertAccountScope(client, payload.accountId, payload.envKey, false);
+      await this.assertAccountScope(client, payload.accountId, payload.envKey, false, true);
       const offboard = await client.query<{ offboard_id: string; state: string }>(
         `SELECT offboard_id,state FROM interaction_offboards
           WHERE platform=$1 AND account_id=$2 AND env_key=$3 AND state <> 'purged' FOR SHARE`,
@@ -513,7 +513,16 @@ export class InteractionStore {
     accountId: string,
     envKey: string,
     requireBinding = true,
+    allowRevocationHold = false,
   ): Promise<void> {
+    if (!allowRevocationHold) {
+      const hold = await queryable.query(
+        `SELECT 1 FROM client_env_revocation_holds WHERE env_key=$1 FOR SHARE`, [envKey],
+      );
+      if (hold.rows[0]) {
+        throw new InteractionError('INTERACTION_FEATURE_DISABLED', '环境归属已撤销，互动清理仍待定位。', 409);
+      }
+    }
     const account = await queryable.query<{ platform: string }>(
       `SELECT platform FROM accounts WHERE account_id=$1 FOR SHARE`, [accountId],
     );

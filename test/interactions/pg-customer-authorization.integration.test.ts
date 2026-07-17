@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import pg from 'pg';
 import { ClientUserStore } from '../../src/client-auth/client-user-store.js';
+import { parseSyncBatchPayload } from '../../src/interactions/contract.js';
 import { InteractionStore } from '../../src/interactions/interaction-store.js';
 
 const connectionString = process.env.AIDCP_INTERACTION_TEST_DATABASE_URL;
@@ -12,7 +14,7 @@ test('PostgreSQL: authoritative env ownership is unique and cross-customer inter
     const users = new ClientUserStore({ pool });
     try {
       await users.init();
-      await pool.query(`TRUNCATE interaction_offboard_audit,interaction_offboards,
+      await pool.query(`TRUNCATE client_env_revocation_holds,interaction_offboard_audit,interaction_offboards,
         client_env_provisioning_intents,client_env_scope_audit,client_env_scope,client_users,client_environments RESTART IDENTITY CASCADE`);
       await pool.query(`DELETE FROM interaction_auth_state WHERE account_id IN ('acct-auth-a','acct-auth-b')`);
       await pool.query(`INSERT INTO accounts(account_id,label,platform) VALUES
@@ -138,7 +140,7 @@ test('PostgreSQL: unbind/termination revoke first, retry offline cleanup, tombst
     try {
       await users.init();
       await interactions.init();
-      await pool.query(`TRUNCATE interaction_offboard_audit,interaction_offboards,
+      await pool.query(`TRUNCATE client_env_revocation_holds,interaction_offboard_audit,interaction_offboards,
         client_env_provisioning_intents,client_env_scope_audit,client_env_scope,client_users,client_environments RESTART IDENTITY CASCADE`);
       await pool.query(`DELETE FROM interaction_auth_state
         WHERE account_id IN ('acct-offboard-a','acct-offboard-b','acct-term-a','acct-term-b')`);
@@ -231,7 +233,7 @@ test('PostgreSQL: provisioned video environment without an auth binding gets ter
     try {
       await users.init();
       await interactions.init();
-      await pool.query(`TRUNCATE interaction_offboard_audit,interaction_offboards,
+      await pool.query(`TRUNCATE client_env_revocation_holds,interaction_offboard_audit,interaction_offboards,
         client_env_provisioning_intents,client_env_scope_audit,client_env_scope,client_users,client_environments RESTART IDENTITY CASCADE`);
       await pool.query(`INSERT INTO client_users(user_id,name,key_hash,key_salt,status) VALUES
         ('user-provisioned-unbound','provisioned-unbound','hash','salt','enabled'),
@@ -305,6 +307,107 @@ test('PostgreSQL: provisioned video environment without an auth binding gets ter
       );
       assert.deepEqual((await users.listEnvScope('user-legacy-unbound')).map((row) => row.envKey),
         ['env-legacy-unbound'], 'missing legacy binding must not silently revoke ownership');
+    } finally {
+      await pool.end();
+    }
+  });
+
+test('PostgreSQL: admin revocation removes ownership before cleanup and late binding materializes exact offboard',
+  { skip: !connectionString }, async () => {
+    const pool = new pg.Pool({ connectionString });
+    const users = new ClientUserStore({ pool });
+    const interactions = new InteractionStore({ pool });
+    try {
+      await users.init();
+      await interactions.init();
+      await pool.query(`TRUNCATE client_env_revocation_holds,interaction_offboard_audit,interaction_offboards,
+        client_env_provisioning_intents,client_env_scope_audit,client_env_scope,client_users,client_environments RESTART IDENTITY CASCADE`);
+      await pool.query(`DELETE FROM interaction_auth_state WHERE env_key LIKE 'env-revoke-%'`);
+      await pool.query(`INSERT INTO accounts(account_id,label,platform) VALUES
+        ('acct-revoke-bound','bound cleanup','wechat_channels'),
+        ('acct-revoke-late','late cleanup','wechat_channels'),
+        ('acct-revoke-disable','disable cleanup','wechat_channels')
+        ON CONFLICT (account_id) DO UPDATE SET platform=EXCLUDED.platform`);
+      await pool.query(`INSERT INTO client_users(user_id,name,key_hash,key_salt,status) VALUES
+        ('user-revoke-owner','revoke-owner','hash','salt','enabled'),
+        ('user-revoke-next','revoke-next','hash','salt','enabled'),
+        ('user-revoke-disable','revoke-disable','hash','salt','enabled')`);
+      await users.registerEnvironments([
+        { envKey: 'env-revoke-bound', platform: 'wechat_channels' },
+        { envKey: 'env-revoke-missing', platform: 'wechat_channels' },
+        { envKey: 'env-revoke-disable-bound', platform: 'wechat_channels' },
+        { envKey: 'env-revoke-disable-missing', platform: 'wechat_channels' },
+      ], 'admin');
+      await interactions.upsertAuthStatus({
+        envKey: 'env-revoke-bound', accountId: 'acct-revoke-bound', platform: 'wechat_channels', status: 'active',
+        browserState: 'closed', capabilities: { commentsRead: true, commentsReply: false, dmRead: false,
+          dmSendText: false, dmSendImage: false }, identity: null, runtimeControlsVersion: 0,
+        checkedAt: Date.now(), reasonCode: null,
+      });
+      await interactions.upsertAuthStatus({
+        envKey: 'env-revoke-disable-bound', accountId: 'acct-revoke-disable', platform: 'wechat_channels', status: 'active',
+        browserState: 'closed', capabilities: { commentsRead: true, commentsReply: false, dmRead: false,
+          dmSendText: false, dmSendImage: false }, identity: null, runtimeControlsVersion: 0,
+        checkedAt: Date.now(), reasonCode: null,
+      });
+      assert.equal((await users.setScope('user-revoke-owner', [
+        { envKey: 'env-revoke-bound' }, { envKey: 'env-revoke-missing' },
+      ], 'admin')).ok, true);
+
+      const removals = await Promise.all([
+        users.setScope('user-revoke-owner', [], 'admin-first'),
+        users.setScope('user-revoke-owner', [], 'admin-retry'),
+      ]);
+      assert.equal(removals.every((result) => result.ok), true);
+      const first = removals.find((result) => result.ok && result.cleanup.length === 2);
+      assert.ok(first?.ok);
+      assert.deepEqual(first.cleanup.map((item) => item.kind).sort(), ['binding_missing', 'offboard_pending']);
+      assert.equal((await users.listEnvScope('user-revoke-owner')).length, 0,
+        'ownership must be gone even when one binding is missing');
+      assert.deepEqual(
+        await users.withAuthorizedInteractionScope('user-revoke-owner', 'env-revoke-missing', async () => true),
+        { ok: false, reason: 'not_authorized' },
+      );
+      assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM client_env_revocation_holds
+        WHERE env_key='env-revoke-missing'`)).rows[0].n, 1, 'retry must not duplicate the hold');
+      const blocked = await users.setScope('user-revoke-next', [{ envKey: 'env-revoke-missing' }], 'admin');
+      assert.deepEqual(blocked, { ok: false, reason: 'cleanup_in_progress', envKey: 'env-revoke-missing' });
+      await assert.rejects(pool.query(`INSERT INTO client_env_scope(user_id,env_key,source)
+        VALUES ('user-revoke-next','env-revoke-missing','admin')`),
+      (error: unknown) => (error as { constraint?: string }).constraint === 'client_env_scope_cleanup_hold');
+      const registry = (await users.listAllEnvironments()).find((item) => item.envKey === 'env-revoke-missing');
+      assert.equal(registry?.assigneeCount, 0);
+      assert.equal(registry?.cleanup?.kind, 'binding_missing');
+
+      await interactions.upsertAuthStatus({
+        envKey: 'env-revoke-missing', accountId: 'acct-revoke-late', platform: 'wechat_channels', status: 'active',
+        browserState: 'open', capabilities: { commentsRead: true, commentsReply: false, dmRead: false,
+          dmSendText: false, dmSendImage: false }, identity: null, runtimeControlsVersion: 0,
+        checkedAt: Date.now(), reasonCode: null,
+      });
+      const fixture = JSON.parse(await readFile(new URL('../fixtures/wechat-channels-interaction/v1/ws/comment-sync-batch.json',
+        import.meta.url), 'utf8')) as { payload: unknown };
+      const parsed = parseSyncBatchPayload(fixture.payload);
+      assert.ok(parsed);
+      await assert.rejects(interactions.ingestBatch({
+        ...parsed, envKey: 'env-revoke-missing', accountId: 'acct-revoke-late', batchId: 'batch-revocation-hold',
+      }), (error: unknown) => (error as { code?: string }).code === 'INTERACTION_FEATURE_DISABLED');
+      const materialized = await users.reconcileRevocationHolds();
+      assert.deepEqual(materialized.map((item) => [item.envKey, item.accountId, item.reason]),
+        [['env-revoke-missing', 'acct-revoke-late', 'admin_revoked']]);
+      assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM client_env_revocation_holds
+        WHERE env_key='env-revoke-missing'`)).rows[0].n, 0);
+      assert.deepEqual(await users.setScope('user-revoke-next', [{ envKey: 'env-revoke-missing' }], 'admin'),
+        { ok: false, reason: 'offboard_in_progress', envKey: 'env-revoke-missing' });
+
+      assert.equal((await users.setScope('user-revoke-disable', [
+        { envKey: 'env-revoke-disable-bound' }, { envKey: 'env-revoke-disable-missing' },
+      ], 'admin')).ok, true);
+      const disabled = await users.updateUser('user-revoke-disable', { status: 'disabled' }, 'admin-disable');
+      assert.ok(disabled.ok);
+      assert.equal(disabled.user.status, 'disabled');
+      assert.equal((await users.listEnvScope('user-revoke-disable')).length, 0);
+      assert.deepEqual(disabled.cleanup.map((item) => item.kind).sort(), ['binding_missing', 'offboard_pending']);
     } finally {
       await pool.end();
     }

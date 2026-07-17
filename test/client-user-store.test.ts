@@ -41,6 +41,7 @@ test('listAllEnvironments: 行映射为视图，assigneeCount = assignees 长度
     platform: 'xiaohongshu',
     assignees: [{ userId: 'u1', name: 'A' }],
     assigneeCount: 1,
+    cleanup: null,
   });
   assert.equal(envs[1].assigneeCount, 1); // 全局唯一 active owner
   assert.deepEqual(
@@ -55,6 +56,22 @@ test('listAllEnvironments: json_agg 为 null 时回落空 assignees（count 0）
   const [env] = await store.listAllEnvironments();
   assert.deepEqual(env.assignees, []);
   assert.equal(env.assigneeCount, 0);
+});
+
+test('listAllEnvironments: binding-missing hold 映射为不含伪 accountId 的 cleanup 真态', async () => {
+  const requestedAt = new Date('2026-07-17T08:00:00Z');
+  const pool = fakePool(() => ({ rows: [{
+    env_key: 'wechat-env', label: '视频号', platform: 'wechat_channels', assignees: null,
+    hold_id: '6f421ba8-b921-4c5d-bff2-65f330e3c227', hold_reason: 'admin_revoked',
+    hold_requested_at: requestedAt,
+  }] }));
+  const store = new ClientUserStore({ pool });
+  const [env] = await store.listAllEnvironments();
+  assert.deepEqual(env.cleanup, {
+    kind: 'binding_missing', revocationId: '6f421ba8-b921-4c5d-bff2-65f330e3c227',
+    envKey: 'wechat-env', state: 'binding_missing', reason: 'admin_revoked', requestedAt: requestedAt.getTime(),
+  });
+  assert.equal('accountId' in (env.cleanup ?? {}), false);
 });
 
 test('listAllEnvironments: 缺表(42P01)fail-closed 回落空数组，不抛', async () => {
@@ -155,6 +172,10 @@ test('schema archives and removes legacy customer claims, then enforces one auth
   assert.match(CLIENT_USERS_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS client_env_provisioning_intents/);
   assert.match(CLIENT_USERS_SCHEMA_SQL, /proof_hash\s+CHAR\(64\)\s+NOT NULL/);
   assert.match(CLIENT_USERS_SCHEMA_SQL, /state IN \('pending','completed','expired'\)/);
+  assert.match(CLIENT_USERS_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS client_env_revocation_holds/);
+  assert.match(CLIENT_USERS_SCHEMA_SQL, /env_key\s+TEXT\s+NOT NULL UNIQUE/);
+  assert.match(CLIENT_USERS_SCHEMA_SQL, /client_env_scope_cleanup_hold_guard/);
+  assert.match(CLIENT_USERS_SCHEMA_SQL, /CONSTRAINT = 'client_env_scope_cleanup_hold'/);
 });
 
 test('completeProvisioningIntent rejects malformed intent/proof before touching PostgreSQL', async () => {

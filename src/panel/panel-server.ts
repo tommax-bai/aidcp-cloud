@@ -577,7 +577,7 @@ function createRequestHandler(
           return;
         }
         for (const offboard of r.offboards) await deps.onClientOffboardCreated?.(offboard);
-        sendJson(res, 200, { user: r.user });
+        sendJson(res, 200, { user: r.user, cleanup: r.cleanup });
         return;
       }
       if (method === 'POST' && sub === 'rotate-key') {
@@ -616,12 +616,13 @@ function createRequestHandler(
         const r = await store.setScope(userId, items, actor);
         if (!r.ok) {
           const status = r.reason === 'not_found' ? 404 :
-            r.reason === 'env_already_assigned' || r.reason === 'offboard_in_progress' ? 409 : 422;
+            r.reason === 'env_already_assigned' || r.reason === 'cleanup_in_progress' ||
+              r.reason === 'offboard_in_progress' ? 409 : 422;
           sendJson(res, status, { error: r.reason, ...(r.envKey ? { envKey: r.envKey } : {}) });
           return;
         }
         for (const offboard of r.offboards) await deps.onClientOffboardCreated?.(offboard);
-        sendJson(res, 200, { scope: r.scope });
+        sendJson(res, 200, { scope: r.scope, cleanup: r.cleanup });
         return;
       }
       sendJson(res, 404, { error: 'not_found' });

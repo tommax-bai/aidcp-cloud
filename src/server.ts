@@ -2058,7 +2058,20 @@ async function main(): Promise<void> {
     const retryOffboards = (): void => {
       if (offboardRetryRunning) return;
       offboardRetryRunning = true;
-      void interactionOffboarding?.retryPending()
+      void (async () => {
+        try {
+          const materialized = await clientUserStore.reconcileRevocationHolds();
+          for (const offboard of materialized) {
+            const edgeId = server.resolveEdgeIdForAccount(offboard.accountId);
+            if (edgeId) await interactionOffboarding?.dispatchPending(offboard.accountId, edgeId);
+          }
+        } catch (error) {
+          console.warn(
+            `[interaction] revocation hold reconcile 失败: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        await interactionOffboarding?.retryPending();
+      })()
         .catch((error) => console.warn(
           `[interaction] offboard retry 失败: ${error instanceof Error ? error.message : String(error)}`,
         ))
