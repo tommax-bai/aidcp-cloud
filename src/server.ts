@@ -195,7 +195,7 @@ import {
   type DelegatedTask,
 } from './delegated-task/index.js';
 import { DelegatedTaskNotificationGate, delegatedTaskFailureReceipt } from './delegated-task/notification.js';
-import { platformRegistryEntry } from './platform/index.js';
+import { omitUnsupportedUsageCaps, platformRegistryEntry } from './platform/index.js';
 import {
   buildDelegatedTaskConfirmationCard,
   buildDelegatedTaskProgressCard,
@@ -2107,6 +2107,10 @@ async function main(): Promise<void> {
     const minuteSince = asOf - 60_000;
     const hourSince = asOf - 60 * 60_000;
     const nextUsageRefreshAt = asOf + minuteWindowMs;
+    // 平台按**同步镜像**现读（change platform-honest-usage-caps）：init() 全表预热 + 新账号入库回填。
+    // undefined = 未知（缺键）⇒ 下游 omitUnsupportedUsageCaps 不摘任何上限 = 本规则之前的行为。
+    // 刻意不用 getPlatform()：那条缺值回落小红书（把「不知道」说成「是小红书」），且是 await PG。
+    const accountPlatform = accountStore?.platformFor?.(accountId);
     const sessionUsage = runtimes?.sessionUsageForAccount(accountId, edgeId) ?? null;
     const sessionStartedAt = sessionUsage?.active === true
       && typeof sessionUsage.startedAt === 'number'
@@ -2141,7 +2145,13 @@ async function main(): Promise<void> {
     dayTotals.publish = dayPublishCount;
 
     const sessionTotals = completeSessionUsageCounts(sessionUsage?.totals ?? {}, sessionRiskTotals, sessionPublishCount);
-    const sessionQuotas = pickSessionUsageCounts(sessionUsage?.quotas ?? sessionConfigStore.sessionBudget());
+    // 「本轮计划」窗口也是一个客户端上限面（change platform-honest-usage-caps）：session 预算是全局单例
+    // （session_config_global，零平台维度）⇒ 不摘的话 FB 会在 KPI 格显示诚实的「收藏 0」、而正下方的
+    // 窗口条同屏显示「收藏 0/5」带进度条。两处同源同谎，必须一起摘。
+    const sessionQuotas = omitUnsupportedUsageCaps(
+      accountPlatform,
+      pickSessionUsageCounts(sessionUsage?.quotas ?? sessionConfigStore.sessionBudget()),
+    );
     const windows: NonNullable<UiDailyUsagePayload['windows']> = {
       session: makeUsageWindow(sessionTotals, sessionQuotas, {
         active: sessionUsage?.active === true,
@@ -2191,9 +2201,12 @@ async function main(): Promise<void> {
     try {
       const controller = await riskRegistry.getController(accountId);
       const effective = controller.effectiveQuotas();
-      const minuteQuotas = pickDailyUsageCounts(effective.minute);
-      const hourQuotas = pickDailyUsageCounts(effective.hour);
-      const dayQuotas = pickDailyUsageCounts(effective.day);
+      // 平台过滤**永远是最后一步**（change platform-honest-usage-caps）：先让 effectiveQuotas 算完该发多少
+      // （含风控缩放与慢启动 min(曲线, 档位) 压低），最后再把这个平台结构上发不出的摘掉。顺序颠倒则
+      // 慢启动曲线会对一个不存在的动作做 clamp 运算。且必须在 pickDailyUsageCounts **之后**——见该函数注释。
+      const minuteQuotas = omitUnsupportedUsageCaps(accountPlatform, pickDailyUsageCounts(effective.minute));
+      const hourQuotas = omitUnsupportedUsageCaps(accountPlatform, pickDailyUsageCounts(effective.hour));
+      const dayQuotas = omitUnsupportedUsageCaps(accountPlatform, pickDailyUsageCounts(effective.day));
       payload.quotaLevel = controller.getState().quotaLevel;
       // 慢启动投影（change account-level-slow-start）：**必须从同一个 controller 实例取**，
       // 绝不从 store 另读一次——这是唯一能防「徽章说 D7、clamp 已按 D8 放行」的机制。
@@ -4153,7 +4166,13 @@ async function main(): Promise<void> {
               return {
                 ok: true as const,
                 slowStart: controller.slowStartView(),
-                dayQuotas: pickDailyUsageCounts(controller.effectiveQuotas().day) as Record<string, number>,
+                // 与 ui.snapshot 的上限投影同源同规则（change platform-honest-usage-caps）：这份回执也过客户
+                // 端信任边界。不一起摘 = 同名同源的两份上限一份诚实一份撒谎，而两边都是宽松 Record<string,number>、
+                // typecheck 抓不到这种漂移。
+                dayQuotas: omitUnsupportedUsageCaps(
+                  accountStore.platformFor?.(accountId),
+                  pickDailyUsageCounts(controller.effectiveQuotas().day),
+                ) as Record<string, number>,
               };
             },
           },
