@@ -1,0 +1,12 @@
+{
+  "data": {
+    "envKey": "env_wc_demo",
+    "accountId": "acct_wc_demo",
+    "channel": "comment",
+    "action": "test_reset",
+    "actionRequestId": "test-reset-sync-comment-001",
+    "status": "accepted",
+    "deleted": { "threads": 1, "syncBatches": 3, "syncCursors": 2 }
+  },
+  "meta": { "requestId": "customer-test-reset-001", "asOf": 1784044802500 }
+}

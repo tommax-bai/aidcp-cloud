@@ -17,6 +17,11 @@ import {
 
 const MAX_BODY = 64 * 1024;
 
+export function interactionTestDataResetEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.AIDCP_DEPLOY_ENV?.trim() === 'dev' &&
+    env.AIDCP_INTERACTION_TEST_DATA_RESET?.trim().toLowerCase() === 'true';
+}
+
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(body));
@@ -162,6 +167,7 @@ export class InteractionCustomerApi {
     workflow: ReplyWorkflow;
     sender: InteractionSendOrchestrator;
     onRuntimeControlsUpdated?: (controls: RuntimeControls) => Promise<{ delivered: number }>;
+    testDataResetEnabled?: boolean;
     cursorSecret: string;
     clock?: () => number;
   }) {
@@ -248,7 +254,9 @@ export class InteractionCustomerApi {
       const nextCursor = result.next ? this.cursors.encode({ kind: 'list', envKey, asOf,
         time: result.next.lastMessageAt, id: result.next.id }) : null;
       this.ok(res, requestId, asOf, { envKey, accountId, platform: INTERACTION_PLATFORM,
-        auth: authSummary(auth, controls), replyConfig, items: result.items, nextCursor });
+        auth: authSummary(auth, controls), replyConfig,
+        testTools: { dataResetEnabled: this.deps.testDataResetEnabled === true },
+        items: result.items, nextCursor });
       return true;
     }
     if (parts[2] === 'interactions' && parts.length === 4 && method === 'GET') {
@@ -399,6 +407,52 @@ export class InteractionCustomerApi {
       const ids = await Promise.all(channels.map((channel) => this.deps.sender.requestSync({ accountId, envKey, channel,
         scopeExternalId: typeof body.scopeExternalId === 'string' ? body.scopeExternalId : null, reason: 'user_requested' })));
       const response = this.envelope(requestId, this.clock(), { envKey, accountId, action: 'sync', actionRequestId: ids[0], status: 'accepted' });
+      await this.deps.store.completeApiRequest(claim.requestId, response);
+      sendJson(res, 200, response);
+      return true;
+    }
+    if (parts[2] === 'interactions' && parts.length === 4 && method === 'POST' && parts[3] === 'test-reset') {
+      onlyQuery(url, []);
+      if (this.deps.testDataResetEnabled !== true) {
+        throw new InteractionError('INTERACTION_FEATURE_DISABLED', '测试数据重置只在显式启用的开发环境开放。', 404);
+      }
+      const key = this.idempotencyKey(req);
+      const body = await readBody(req);
+      if (!onlyKeys(body, ['channel']) || (body.channel !== 'comment' && body.channel !== 'dm')) {
+        throw new InteractionError('INTERACTION_VALIDATION_FAILED', '重置请求必须且只能选择评论或私信。', 422);
+      }
+      const channel = body.channel as InteractionChannel;
+      const actor = `client:${userId}`;
+      const claim = await this.deps.store.claimApiRequest({ actor, action: 'test_reset', idempotencyKey: key,
+        accountId, envKey, resourceId: channel });
+      if (claim.response) { sendJson(res, 200, claim.response); return true; }
+      if (!claim.fresh) {
+        throw new InteractionError('INTERACTION_STATE_CONFLICT',
+          '同一幂等键的上次重置结果尚未确认；请刷新状态，确认后使用新的重置操作。', 409);
+      }
+      const resetState: { value: Awaited<ReturnType<InteractionStore['resetTestData']>> | null } = { value: null };
+      let actionRequestId: string;
+      try {
+        actionRequestId = await this.deps.sender.requestSync({ accountId, envKey, channel,
+          scopeExternalId: null, reason: 'test_reset' }, {
+          beforeDispatch: async () => {
+            resetState.value = await this.deps.store.resetTestData({ accountId, envKey, channel, actor });
+          },
+        });
+      } catch (error) {
+        if (resetState.value) {
+          await this.deps.store.recordAudit({ accountId, envKey, actor, action: 'test_data_reset_dispatch_failed',
+            entityType: 'interaction_channel', entityId: channel, summary: 'test data reset committed but sync dispatch failed',
+            labels: { channel, deleted: resetState.value.deleted } });
+          throw new InteractionError('INTERACTION_TEST_RESET_PARTIAL',
+            '云端测试数据已清空，但重新拉取请求未送达 Edge；请确认客户端在线后再次重置该渠道。', 503, true);
+        }
+        throw error;
+      }
+      const reset = resetState.value;
+      if (!reset) throw new InteractionError('INTERACTION_INTERNAL_ERROR', '重置事务未执行。', 500, true);
+      const response = this.envelope(requestId, this.clock(), { envKey, accountId, channel,
+        action: 'test_reset', actionRequestId, status: 'accepted', deleted: reset.deleted });
       await this.deps.store.completeApiRequest(claim.requestId, response);
       sendJson(res, 200, response);
       return true;

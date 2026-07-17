@@ -77,6 +77,7 @@ import {
   INTERACTION_PLATFORM,
   INTERACTION_REPLY_RECOVERY_CAPABILITY,
   INTERACTION_RUNTIME_CONTROLS_CAPABILITY,
+  INTERACTION_TEST_DATA_RESET_CAPABILITY,
   InteractionError,
   type InteractionAuthStatusPayload,
   type InteractionOffboardAckPayload,
@@ -634,6 +635,7 @@ export class DefaultMessageHandler implements MessageHandler {
           INTERACTION_REPLY_RECOVERY_CAPABILITY,
           INTERACTION_OFFBOARDING_CAPABILITY,
           INTERACTION_BROWSER_CONTROL_CAPABILITY,
+          INTERACTION_TEST_DATA_RESET_CAPABILITY,
           ...(this.deps.interactionRuntimeControls ? [INTERACTION_RUNTIME_CONTROLS_CAPABILITY] : []),
         ]
         .filter((capability) => (session.capabilities ?? []).includes(capability))

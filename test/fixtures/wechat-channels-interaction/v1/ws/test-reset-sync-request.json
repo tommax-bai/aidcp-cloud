@@ -1,0 +1,16 @@
+{
+  "v": 2,
+  "type": "interaction.sync.request",
+  "id": "test-reset-sync-envelope-001",
+  "ts": 1784044802500,
+  "payload": {
+    "requestId": "test-reset-sync-comment-001",
+    "envKey": "env_wc_demo",
+    "accountId": "acct_wc_demo",
+    "platform": "wechat_channels",
+    "channel": "comment",
+    "scopeExternalId": null,
+    "reason": "test_reset",
+    "requestedAt": 1784044802500
+  }
+}

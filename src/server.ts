@@ -248,6 +248,7 @@ import {
   InteractionSendOrchestrator,
   InteractionOffboardingService,
   InteractionCustomerApi,
+  interactionTestDataResetEnabled,
   InteractionInternalApi,
   InteractionMetrics,
   parseInteractionPanelGrants,
@@ -1996,6 +1997,7 @@ async function main(): Promise<void> {
     })
     : undefined;
   const clientCursorSecret = readEnvString('AIDCP_CLIENT_JWT_SECRET');
+  const testDataResetEnabled = interactionTestDataResetEnabled(process.env);
   const interactionCustomerApi = interactionStore && replyConfigStore && replyWorkflow && interactionSender && clientCursorSecret
     ? new InteractionCustomerApi({
       users: clientUserStore,
@@ -2004,6 +2006,7 @@ async function main(): Promise<void> {
       workflow: replyWorkflow,
       sender: interactionSender,
       onRuntimeControlsUpdated: deliverInteractionRuntimeControls,
+      testDataResetEnabled,
       cursorSecret: clientCursorSecret,
     })
     : undefined;

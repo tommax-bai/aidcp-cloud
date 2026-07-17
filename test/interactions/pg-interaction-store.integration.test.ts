@@ -66,6 +66,21 @@ test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recov
         '同一 inbound message 的后续 batch 不得再创建 active job');
       assert.equal((await pool.query(`SELECT count(*)::int AS n FROM interaction_reply_jobs`)).rows[0].n, 1);
 
+      const reset = await store.resetTestData({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo',
+        channel: 'comment', actor: 'client:test' });
+      assert.ok(reset.deleted.threads >= 1);
+      assert.ok(reset.deleted.syncBatches >= 1);
+      assert.ok(reset.deleted.syncCursors >= 1);
+      assert.equal((await pool.query(`SELECT count(*)::int AS n FROM interaction_threads WHERE account_id='acct_wc_demo' AND channel='comment'`)).rows[0].n, 0);
+      assert.equal((await pool.query(`SELECT count(*)::int AS n FROM interaction_auth_state WHERE account_id='acct_wc_demo'`)).rows[0].n, 1,
+        '测试重置必须保留授权');
+      assert.equal((await pool.query(`SELECT count(*)::int AS n FROM interaction_runtime_controls WHERE account_id='acct_wc_demo'`)).rows[0].n, 1,
+        '测试重置必须保留运行控制');
+      assert.equal((await pool.query(`SELECT count(*)::int AS n FROM interaction_audit_events WHERE action='test_data_reset'`)).rows[0].n, 1);
+      const replayed = await store.ingestBatch(payload);
+      assert.equal(replayed.ack.status, 'accepted', '删除 batch 去重状态后同一真实样本应可重新入箱');
+      assert.equal((await pool.query(`SELECT count(*)::int AS n FROM interaction_reply_jobs`)).rows[0].n, 1);
+
       const jobRow = (await pool.query<{ id: string }>(`SELECT id FROM interaction_reply_jobs LIMIT 1`)).rows[0];
       await pool.query(`UPDATE interaction_reply_jobs SET state='queued',version=4,config_version=2,
         final_text='谢谢你的喜欢，欢迎继续交流。',risk_level='low' WHERE id=$1`, [jobRow.id]);
@@ -111,6 +126,10 @@ test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recov
       }), (error: unknown) => (error as { code?: string }).code === 'INTERACTION_SCOPE_MISMATCH',
       'duplicate terminal result must still validate jobId');
       assert.deepEqual(await store.recoverableAttemptIds(), []);
+      await assert.rejects(store.resetTestData({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo',
+        channel: 'comment', actor: 'client:test' }),
+      (error: unknown) => (error as { code?: string }).code === 'INTERACTION_STATE_CONFLICT',
+      '出现过发送记录的渠道不得重置');
       assert.equal(await store.getJobContext('acct_wc_demo', 'another-env', jobRow.id), null,
         'accountId/envKey 必须同时命中');
 

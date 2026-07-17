@@ -9,6 +9,7 @@ import type { ReplyPreviewResult } from './reply-workflow.js';
 import {
   INTERACTION_PLATFORM,
   INTERACTION_BROWSER_CONTROL_CAPABILITY,
+  INTERACTION_TEST_DATA_RESET_CAPABILITY,
   InteractionError,
   type InteractionAuthReopenPayload,
   type InteractionBrowserControlPayload,
@@ -283,6 +284,7 @@ export class InteractionSendOrchestrator {
 
   async requestSync(
     input: Omit<InteractionSyncRequestPayload, 'requestId' | 'requestedAt' | 'platform'>,
+    options?: { beforeDispatch?: () => Promise<void> },
   ): Promise<string> {
     const [controls, auth] = await Promise.all([
       this.deps.store.getRuntimeControls(input.accountId),
@@ -299,9 +301,11 @@ export class InteractionSendOrchestrator {
     const capable = input.channel === 'comment' ? auth.capabilities.commentsRead : auth.capabilities.dmRead;
     if (!capable) throw new InteractionError('INTERACTION_PERMISSION_DENIED', '平台当前未确认渠道读取能力。', 403);
     const requestId = randomUUID();
-    const edgeId = this.deps.pusher.resolveEdgeIdForAccount?.(input.accountId) ?? null;
+    const requiredCapability = input.reason === 'test_reset' ? INTERACTION_TEST_DATA_RESET_CAPABILITY : undefined;
+    const edgeId = this.deps.pusher.resolveEdgeIdForAccount?.(input.accountId, requiredCapability) ?? null;
     if (!edgeId) throw new InteractionError('INTERACTION_UPSTREAM_UNAVAILABLE', '账号当前没有在线 Edge。', 503, true);
     const payload: InteractionSyncRequestPayload = { ...input, requestId, platform: INTERACTION_PLATFORM, requestedAt: this.clock() };
+    await options?.beforeDispatch?.();
     if (this.deps.pusher.pushToEdges(makeEnvelope('interaction.sync.request', requestId, this.clock(), payload), edgeId) !== 1) {
       throw new InteractionError('INTERACTION_UPSTREAM_UNAVAILABLE', '同步请求未送达唯一 Edge。', 503, true);
     }

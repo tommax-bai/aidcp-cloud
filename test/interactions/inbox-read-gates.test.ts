@@ -79,3 +79,29 @@ test('manual sync request checks read capability before emitting a WS command', 
   assert.ok(requestId);
   assert.equal(pushes, 1);
 });
+
+test('test reset sync requires the negotiated Edge before running the delete callback', async () => {
+  const events: string[] = [];
+  let capabilityAvailable = false;
+  const pusher = {
+    resolveEdgeIdForAccount: (_accountId: string, requiredCapability?: string) => {
+      events.push(`resolve:${requiredCapability ?? 'base'}`);
+      return capabilityAvailable ? 'edge-a' : null;
+    },
+    pushToEdges: () => { events.push('push'); return 1; },
+  } as unknown as EdgePusher;
+  const sender = new InteractionSendOrchestrator({
+    store: { getRuntimeControls: async () => controls, getAuth: async () => auth } as unknown as InteractionStore,
+    configs: {} as ReplyConfigStore, pusher, controllerFor: () => undefined,
+    metrics: new InteractionMetrics(), clock: () => 10,
+  });
+  await assert.rejects(sender.requestSync({ accountId: 'acct-a', envKey: 'env-a', channel: 'comment',
+    scopeExternalId: null, reason: 'test_reset' }, { beforeDispatch: async () => { events.push('delete'); } }),
+  (error: unknown) => (error as { code?: string }).code === 'INTERACTION_UPSTREAM_UNAVAILABLE');
+  assert.deepEqual(events, ['resolve:interaction_test_data_reset_v1'], '旧版或离线 Edge 时不得先删 Cloud');
+
+  capabilityAvailable = true;
+  await sender.requestSync({ accountId: 'acct-a', envKey: 'env-a', channel: 'comment',
+    scopeExternalId: null, reason: 'test_reset' }, { beforeDispatch: async () => { events.push('delete'); } });
+  assert.deepEqual(events.slice(1), ['resolve:interaction_test_data_reset_v1', 'delete', 'push']);
+});

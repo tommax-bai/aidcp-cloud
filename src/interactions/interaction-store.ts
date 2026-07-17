@@ -40,6 +40,11 @@ export interface IngestResult {
   newJobIds: string[];
 }
 
+export interface InteractionTestResetResult {
+  channel: InteractionChannel;
+  deleted: { threads: number; syncBatches: number; syncCursors: number };
+}
+
 export interface ListQuery {
   accountId: string;
   envKey: string;
@@ -1076,6 +1081,67 @@ export class InteractionStore {
     };
   }
 
+  async resetTestData(input: {
+    accountId: string;
+    envKey: string;
+    channel: InteractionChannel;
+    actor: string;
+  }): Promise<InteractionTestResetResult> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const controls = await client.query<{ env_key: string | null; write_paused: boolean }>(
+        `SELECT env_key,write_paused FROM interaction_runtime_controls
+          WHERE platform=$1 AND account_id=$2 FOR UPDATE`,
+        [INTERACTION_PLATFORM, input.accountId],
+      );
+      const row = controls.rows[0];
+      if (!row || row.env_key !== input.envKey) {
+        throw new InteractionError('INTERACTION_SCOPE_MISMATCH', '环境与账号运行控制不匹配。', 409);
+      }
+      if (!row.write_paused) {
+        throw new InteractionError('INTERACTION_STATE_CONFLICT', '请先暂停当前账号的所有回复写入，再重置测试数据。', 409);
+      }
+      const sendHistory = await client.query(
+        `SELECT 1 FROM interaction_send_attempts
+          WHERE account_id=$1 AND env_key=$2 AND channel=$3 LIMIT 1`,
+        [input.accountId, input.envKey, input.channel],
+      );
+      if (sendHistory.rowCount) {
+        throw new InteractionError('INTERACTION_STATE_CONFLICT', '该渠道已有回复发送记录，不能重置以免重复测试写入。', 409);
+      }
+      const threads = await client.query(
+        `DELETE FROM interaction_threads
+          WHERE account_id=$1 AND env_key=$2 AND channel=$3`,
+        [input.accountId, input.envKey, input.channel],
+      );
+      const syncBatches = await client.query(
+        `DELETE FROM interaction_sync_batches
+          WHERE account_id=$1 AND env_key=$2 AND channel=$3`,
+        [input.accountId, input.envKey, input.channel],
+      );
+      const syncCursors = await client.query(
+        `DELETE FROM interaction_sync_cursors
+          WHERE account_id=$1 AND env_key=$2 AND channel=$3`,
+        [input.accountId, input.envKey, input.channel],
+      );
+      const deleted = {
+        threads: threads.rowCount ?? 0,
+        syncBatches: syncBatches.rowCount ?? 0,
+        syncCursors: syncCursors.rowCount ?? 0,
+      };
+      await this.audit(client, input.accountId, input.envKey, input.actor, 'test_data_reset', null,
+        'interaction_channel', input.channel, 'interaction test data reset', { channel: input.channel, deleted });
+      await client.query('COMMIT');
+      return { channel: input.channel, deleted };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async updateRuntimeControls(input: {
     accountId: string; expectedVersion: number; actor: string;
     commentsReadEnabled: boolean; commentsReplyEnabled: boolean; dmReadEnabled: boolean;
@@ -1472,7 +1538,7 @@ export class InteractionStore {
   }
 
   async claimApiRequest(input: {
-    actor: string; action: 'send' | 'sync' | 'auth_reopen' | 'browser_control'; idempotencyKey: string;
+    actor: string; action: 'send' | 'sync' | 'auth_reopen' | 'browser_control' | 'test_reset'; idempotencyKey: string;
     accountId: string; envKey: string; resourceId?: string | null;
   }): Promise<{ requestId: string; fresh: boolean; response: unknown | null }> {
     const requestId = this.idGen('request');

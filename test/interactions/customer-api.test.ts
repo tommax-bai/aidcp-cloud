@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { test } from 'node:test';
 import type { ClientUserStore } from '../../src/client-auth/client-user-store.js';
-import { InteractionCustomerApi } from '../../src/interactions/interaction-customer-api.js';
+import { InteractionCustomerApi, interactionTestDataResetEnabled } from '../../src/interactions/interaction-customer-api.js';
 import type { InteractionStore, ListQuery } from '../../src/interactions/interaction-store.js';
 import type { InteractionSendOrchestrator } from '../../src/interactions/send-orchestrator.js';
 import type { ReplyConfigStore } from '../../src/interactions/reply-config-store.js';
@@ -15,6 +15,13 @@ const job: ReplyJobView = {
   polishedText: null, finalText: null, riskLevel: 'unknown', riskReasons: [], approvalActor: null,
   approvedAt: null, idempotencyKey: null, updatedAt: 1784044800000,
 };
+
+test('test data reset requires both explicit dev identity and opt-in flag', () => {
+  assert.equal(interactionTestDataResetEnabled({ AIDCP_DEPLOY_ENV: 'dev', AIDCP_INTERACTION_TEST_DATA_RESET: 'true' }), true);
+  assert.equal(interactionTestDataResetEnabled({ AIDCP_DEPLOY_ENV: 'ol', AIDCP_INTERACTION_TEST_DATA_RESET: 'true' }), false);
+  assert.equal(interactionTestDataResetEnabled({ AIDCP_DEPLOY_ENV: 'dev' }), false);
+  assert.equal(interactionTestDataResetEnabled({ AIDCP_INTERACTION_TEST_DATA_RESET: 'true' }), false);
+});
 
 test('customer API transactionally binds enabled user + owned env + account on every read/action', async () => {
   let mutationCalls = 0;
@@ -32,6 +39,11 @@ test('customer API transactionally binds enabled user + owned env + account on e
   };
   let readControlUpdates = 0;
   let runtimeDeliveries = 0;
+  let resetCalls = 0;
+  let resetDispatchCalls = 0;
+  let resetFailureAudits = 0;
+  let failResetDispatch = false;
+  const resetResponses = new Map<string, unknown>();
   const users = {
     withAuthorizedInteractionScope: async <T>(
       userId: string,
@@ -85,7 +97,22 @@ test('customer API transactionally binds enabled user + owned env + account on e
         updatedAt: 2, updatedBy: 'client:user-a',
       };
     },
+    resetTestData: async (input: { accountId: string; envKey: string; channel: string; actor: string }) => {
+      resetCalls += 1;
+      assert.deepEqual(input, { accountId: 'acct-a', envKey: 'env-a', channel: input.channel, actor: 'client:user-a' });
+      return { channel: input.channel, deleted: { threads: 1, syncBatches: 2, syncCursors: 1 } };
+    },
+    recordAudit: async (input: { action: string }) => {
+      if (input.action === 'test_data_reset_dispatch_failed') resetFailureAudits += 1;
+    },
     claimApiRequest: async (input: { action: string; idempotencyKey: string; accountId: string; envKey: string; resourceId?: string }) => {
+      if (input.action === 'test_reset') {
+        assert.equal(input.accountId, 'acct-a');
+        assert.equal(input.envKey, 'env-a');
+        assert.ok(input.resourceId === 'comment' || input.resourceId === 'dm');
+        const response = resetResponses.get(input.idempotencyKey) ?? null;
+        return { requestId: `reset:${input.idempotencyKey}`, fresh: response === null, response };
+      }
       browserClaimCalls += 1;
       assert.deepEqual(input, {
         actor: 'client:user-a', action: 'browser_control', idempotencyKey: 'browser-key',
@@ -93,9 +120,20 @@ test('customer API transactionally binds enabled user + owned env + account on e
       });
       return { requestId: 'browser-claim-1', fresh: completedBrowserResponse === null, response: completedBrowserResponse };
     },
-    completeApiRequest: async (_requestId: string, response: unknown) => { completedBrowserResponse = response; },
+    completeApiRequest: async (requestId: string, response: unknown) => {
+      if (requestId.startsWith('reset:')) resetResponses.set(requestId.slice('reset:'.length), response);
+      else completedBrowserResponse = response;
+    },
   } as unknown as InteractionStore;
   const sender = {
+    requestSync: async (input: { accountId: string; envKey: string; channel: string; reason: string },
+      options?: { beforeDispatch?: () => Promise<void> }) => {
+      resetDispatchCalls += 1;
+      assert.equal(input.reason, 'test_reset');
+      await options?.beforeDispatch?.();
+      if (failResetDispatch) throw new Error('socket_closed');
+      return `reset-request-${input.channel}`;
+    },
     requestBrowserControl: (input: { accountId: string; envKey: string; action: string }) => {
       browserDispatchCalls += 1;
       assert.deepEqual(input, { accountId: 'acct-a', envKey: 'env-a', action: 'open' });
@@ -120,7 +158,7 @@ test('customer API transactionally binds enabled user + owned env + account on e
       runtimeDeliveries += 1;
       assert.equal(controls.version, controlsVersion);
       return { delivered: 1 };
-    }, cursorSecret: 'test-cursor-secret', clock: () => 1784044800000 });
+    }, testDataResetEnabled: true, cursorSecret: 'test-cursor-secret', clock: () => 1784044800000 });
   const server = http.createServer((req, res) => {
     const actor = typeof req.headers['x-test-user'] === 'string' ? req.headers['x-test-user'] : 'user-b';
     void api.handle(req, res, actor).then((handled) => {
@@ -179,7 +217,7 @@ test('customer API transactionally binds enabled user + owned env + account on e
 
     const list = await fetch(`${base}/environments/env-a/interactions`, { headers: { 'x-test-user': 'user-a' } });
     assert.equal(list.status, 200);
-    const listBody = await list.json() as { data: { envKey: string; accountId: string; replyConfig: {
+    const listBody = await list.json() as { data: { envKey: string; accountId: string; testTools: { dataResetEnabled: boolean }; replyConfig: {
       status: string; currentVersion: number | null; draftVersion: number | null; publishedVersion: number | null;
     }; auth: {
       runtimeControls: { storedVersion: number; edgeAppliedVersion: number | null; applicationStatus: string };
@@ -187,6 +225,7 @@ test('customer API transactionally binds enabled user + owned env + account on e
     assert.deepEqual([listBody.data.envKey, listBody.data.accountId, listBody.meta.asOf],
       ['env-a', 'acct-a', 1784044800000]);
     assert.equal(listCalls, 1);
+    assert.equal(listBody.data.testTools.dataResetEnabled, true);
     const pendingList = await fetch(`${base}/environments/env-a/interactions?state=pending`, {
       headers: { 'x-test-user': 'user-a' },
     });
@@ -316,6 +355,44 @@ test('customer API transactionally binds enabled user + owned env + account on e
     assert.deepEqual(await duplicateBrowser.json(), acceptedBrowserBody);
     assert.equal(browserDispatchCalls, 1, '同一幂等键不得重复派发浏览器控制');
     assert.equal(browserClaimCalls, 2);
+
+    const invalidReset = await fetch(`${base}/environments/env-a/interactions/test-reset`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-test-user': 'user-a', 'idempotency-key': 'reset-invalid' },
+      body: JSON.stringify({ channel: 'comment', accountId: 'acct-a' }),
+    });
+    assert.equal(invalidReset.status, 422);
+    assert.equal(resetCalls, 0);
+
+    const acceptedReset = await fetch(`${base}/environments/env-a/interactions/test-reset`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-test-user': 'user-a', 'idempotency-key': 'reset-comment' },
+      body: JSON.stringify({ channel: 'comment' }),
+    });
+    assert.equal(acceptedReset.status, 200);
+    const acceptedResetBody = await acceptedReset.json() as { data: Record<string, unknown> };
+    assert.deepEqual(acceptedResetBody.data, {
+      envKey: 'env-a', accountId: 'acct-a', channel: 'comment', action: 'test_reset',
+      actionRequestId: 'reset-request-comment', status: 'accepted',
+      deleted: { threads: 1, syncBatches: 2, syncCursors: 1 },
+    });
+    const duplicateReset = await fetch(`${base}/environments/env-a/interactions/test-reset`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-test-user': 'user-a', 'idempotency-key': 'reset-comment' },
+      body: JSON.stringify({ channel: 'comment' }),
+    });
+    assert.equal(duplicateReset.status, 200);
+    assert.deepEqual(await duplicateReset.json(), acceptedResetBody);
+    assert.equal(resetCalls, 1, '已完成的幂等重放不得再次删除');
+    assert.equal(resetDispatchCalls, 1, '已完成的幂等重放不得再次下发');
+
+    failResetDispatch = true;
+    const partialReset = await fetch(`${base}/environments/env-a/interactions/test-reset`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-test-user': 'user-a', 'idempotency-key': 'reset-dm' },
+      body: JSON.stringify({ channel: 'dm' }),
+    });
+    assert.equal(partialReset.status, 503);
+    const partialBody = await partialReset.json() as { error: { code: string; retryable: boolean } };
+    assert.deepEqual([partialBody.error.code, partialBody.error.retryable], ['INTERACTION_TEST_RESET_PARTIAL', true]);
+    assert.equal(resetCalls, 2, '部分完成时 Cloud 删除已经发生');
+    assert.equal(resetFailureAudits, 1);
 
     const unknownInteractionRoute = await fetch(`${base}/environments/env-a/interactions/not-a-route`,
       { method: 'POST', headers: { 'x-test-user': 'user-a' } });
