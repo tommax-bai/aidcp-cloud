@@ -492,6 +492,12 @@ export class RoleDispatcher {
   /** 浏览额度休眠计时器句柄（minute/hour/day 窗口释放后重驱浏览；每连接私有、unref）。 */
   private viewQuotaSleepTimer: unknown;
   private viewQuotaSleeping = false;
+  /**
+   * 本轮浏览额度休眠已扣下的命令数（change session-start-quota-honest-sleep）。
+   * 每次进入休眠置 0；命令下发口按此节流打印（首条 + 每 N 条汇总），避免日窗数小时休眠 ×
+   * 存活探针 240s nudge × 车队规模刷屏。红线：节流 ≠ 不打——这道闸从边角升为主刹车，静默丢弃即撞红线。
+   */
+  private viewQuotaSuppressedCount = 0;
   /** 每账号当日自动续场计数（场数 + 累计浏览毫秒），按本地日界重置。 */
   private readonly dailyResume = new Map<string, { dayKey: string; sessions: number; browseMs: number }>();
   /** SessionMonitor 引用（供 excursion → pauseClock/resumeClock；setup 时捕获）。 */
@@ -763,7 +769,16 @@ export class RoleDispatcher {
     // 中途档位补推：先于软暂停/配额/去重闸——控制消息不应被抑制、不占配额（见 maybePushTempo）。
     this.maybePushTempo();
     if (this.viewQuotaSleeping && !this.isQuotaSleepBypass(command)) {
-      return false; // 浏览额度休眠：不打开/滚动/互动，等窗口释放后重驱
+      // 浏览额度休眠：不打开/滚动/互动，等窗口释放后重驱。
+      // 🔴 红线：MUST NOT 静默丢弃——节流打印首条 + 每 50 条汇总（key=account+reason，同一轮休眠）。
+      this.viewQuotaSuppressedCount += 1;
+      if (this.viewQuotaSuppressedCount === 1 || this.viewQuotaSuppressedCount % 50 === 0) {
+        const noteId = typeof command.params?.noteId === 'string' ? command.params.noteId : '-';
+        console.log(
+          `[RoleDispatcher] command.suppressed reason=view_quota_sleep action=${command.action} note=${noteId} account=${this.currentAccountId} suppressed=${this.viewQuotaSuppressedCount}`,
+        );
+      }
+      return false;
     }
     if (
       this.sessionContext.browseSuspended &&
@@ -1583,6 +1598,17 @@ export class RoleDispatcher {
     this.setupEdgeEventSubscriptions();
     this.sessionActive = true;
     this.sessionStartedAt = this.clock();
+    // 会话启动现问一次 view 配额（change session-start-quota-honest-sleep）：被拒即当场休眠。
+    // 🔴 为什么在 feed.entered 之前：EventBus 进程内同步派发，下游角色链可能在这次 emit 内同步走到
+    //    sendCommand ⇒ 刹车装在 emit 之后 = 首批命令从休眠闸底下漏出，且间歇、测试可全绿（同族判例：
+    //    点赞闸集合同步 emit 顺序竞态）。故刹车必须先于 emit 踩死。
+    // 🔴 为什么不区分窗口 / 不拒签会话：minute/hour 被拒睡 60s 后自动重驱（净行为同今日、只是提前），
+    //    day 被拒睡到明天；会话照开、只踩刹车，守既有反向不变量（配额满 MUST 休眠、MUST NOT session.end）。
+    // 上面 :1556 的 cancelViewQuotaSleep(false) 已先清掉同连接重启路径的陈旧标记；此处按最新事实重装。
+    const startupViewDecision = this.explainView();
+    if (!startupViewDecision.allowed) {
+      this.sleepForViewQuota(startupViewDecision);
+    }
     this.eventBus.emit('feed.entered', {
       pageType: 'feed',
       trigger: 'session_start',
@@ -1628,6 +1654,7 @@ export class RoleDispatcher {
     if (this.viewQuotaSleeping) return;
     const delay = this.viewQuotaSleepDelay(decision);
     this.viewQuotaSleeping = true;
+    this.viewQuotaSuppressedCount = 0; // 新一轮休眠：抑制计数归零，节流键随之重置
     this.sessionMonitor?.pauseClock('view_quota');
     console.log(
       `[RoleDispatcher] view 配额暂不可用 → 休眠浏览 ${Math.ceil(delay / 1000)}s（account=${this.currentAccountId}, reason=${decision.reason ?? 'unknown'}）`,
