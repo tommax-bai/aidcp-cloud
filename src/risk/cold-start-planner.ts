@@ -38,8 +38,15 @@ export const FB_COLD_START_PLANS: ColdStartDayPlan[] = [
  * 用区间**上界**作当日天花板——`effectiveQuotas()` 每次调用都要现算, 绝不能像
  * `quotaForAccountAge` 那样随机采样(会让配额逐调用抖动)。account 年龄超冷启动窗口(7天) → null(毕业)。
  * platform === 'facebook' → 更保守 FB 曲线, 否则小红书曲线。
+ *
+ * **平台未确认（platform == null）→ 返回 null（不 clamp），MUST NOT 回落小红书曲线**
+ * （change account-level-slow-start，design D5）。旧行为是「非 facebook 一律 XHS」，于是平台解析
+ * 失败的 FB 号会按 XHS 曲线跑：D1 上限取 view=50 而非 FB 的 20（差 2.5 倍），且无日志无告警。
+ * FB 那条更保守的曲线正是慢启动唯一的存在理由，静默按更松的曲线跑比不 clamp 更危险。
+ * 调用方据 null 判 eligible=false 并如实说明，绝不静默假装在压低。
  */
 export function coldStartDailyCap(accountAgeDays: number, platform?: string): ActionQuota | null {
+  if (platform == null) return null;
   const day = Math.floor(Math.max(0, accountAgeDays)) + 1;
   const plans = platform === 'facebook' ? FB_COLD_START_PLANS : COLD_START_PLANS;
   const plan = plans.find((candidate) => candidate.day === day);

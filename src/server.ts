@@ -1255,15 +1255,31 @@ async function main(): Promise<void> {
   // （change safety-quota-config）；init 失败时其镜像为空 → 退化派生写死默认，绝不 brick。
   // 养号冷启动配额爬坡（change disable-account-age-coldstart-ramp）：默认**关**——配额直接走安全限额
   // 配置（quota_config / quotas.ts 三档），不按账号年龄压低。仅当运维显式设 AIDCP_COLDSTART_RAMP=true 时
-  // opt-in 启用逐日爬坡（effectiveQuotas=min(冷启动天花板, 风控缩放)）。resolver 缺 / 失败 → 该账号不叠冷启动。
+  // opt-in 启用逐日爬坡（effectiveQuotas=min(冷启动天花板, 风控缩放)）。provider 缺 → 该账号不叠冷启动。
   const coldStartRampEnabled = process.env.AIDCP_COLDSTART_RAMP === 'true';
+  // 慢启动全局停用闸（change account-level-slow-start）：置真 → 无视所有账号级开关与 env 旁路、全体不 clamp。
+  // 存在理由：账号级开关的事实源是 accounts.slow_start_since，由 AccountStore 的进程内镜像同步现读；
+  // raw SQL 改库**不刷镜像**（全仓无 watch / setInterval）→ 没有此闸就没有秒级止血手段。重启即生效。
+  const slowStartDisabled = process.env.AIDCP_SLOW_START_DISABLED === 'true';
+  // 养号事实 provider（change account-level-slow-start）：同步现读 AccountStore 内存镜像，取代原先
+  // 构造期解析一次的 nurtureMetaResolver——那条配 controller Map 永不驱逐 = 勾选要重启才生效。
+  const nurtureProvider =
+    accountStore?.platformFor && accountStore.slowStartSinceFor && accountStore.createdAtFor
+      ? {
+          platformFor: (accountId: string) => accountStore.platformFor!(accountId),
+          slowStartSinceFor: (accountId: string) => accountStore.slowStartSinceFor!(accountId),
+          createdAtFor: (accountId: string) => accountStore.createdAtFor!(accountId),
+        }
+      : undefined;
   const riskRegistry = new RiskControllerRegistry(riskStore, undefined, quotaConfigStore, {
     coldStartRampEnabled,
-    nurtureMetaResolver: accountStore
-      ? (accountId) => accountStore!.getNurtureMeta?.(accountId) ?? Promise.resolve(null)
-      : undefined,
+    slowStartDisabled,
+    nurtureProvider,
   });
   console.log(`[aidcp-cloud] 冷启动配额爬坡 ${coldStartRampEnabled ? '已开启(AIDCP_COLDSTART_RAMP=true)' : '已禁用(默认·直接走安全限额配置)'}`);
+  if (slowStartDisabled) {
+    console.log('[aidcp-cloud] 账号级慢启动 已被全局停用(AIDCP_SLOW_START_DISABLED=true·无视所有账号级开关)');
+  }
   // retire-default-account：不再建单租户全局 'default' controller；风控一律经 registry 按真实账号懒解析。
   const resolveController = (accountId: string): Promise<RiskController> => riskRegistry.getController(accountId);
   // 「唯一真实账号」解析（飞书无参 / 自动发帖用）：恰好一个真实账号 → 它，0 或多个 → null（honest-fail，绝不回落 default）。

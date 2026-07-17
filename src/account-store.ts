@@ -12,6 +12,7 @@
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from './cache/pg-anchor-cache.js';
 import { normalizePlatformId, type PlatformId } from './platform/index.js';
+import { shanghaiDayStartMs } from './time/shanghai-day.js';
 
 const { Pool } = pg;
 
@@ -48,6 +49,11 @@ ALTER TABLE accounts ADD COLUMN IF NOT EXISTS platform TEXT NOT NULL DEFAULT 'xi
 -- 自愈式加列（change account-group-chat-injection → generalize-contact-info，物理改名迁移 0036）：每账号「联系方式」，
 -- 供 /comment --contact 注入。verbatim 存储——写入不 trim / 不截断（见 setContactInfo），与 nickname / group_label 刻意相反。
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS contact_info TEXT;
+-- 自愈式加列（change account-level-slow-start，迁移 0044 文档伴随）：账号级慢启动起点。
+-- NULL = 关（默认）；非 NULL = 开，且该时刻即爬坡第 1 天的起点（写入时已对齐上海日起点）。
+-- 一列同时表达开关 / 起点 / 三态 → 结构上不可能出现 enabled=true && since=NULL 这种非法组合。
+-- MUST NOT 用 created_at 当起点：那是「第一次连上本云端库」，cookie 导入的三年老号会被算「第 1 天」。
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS slow_start_since TIMESTAMPTZ;
 -- retire-default-account：不再 seed 'default' 占位行。账号父行由真实账号握手时 ensureAccount 幂等登记产生。
 `;
 
@@ -67,6 +73,15 @@ export interface PlatformAccountRecord extends AccountRecord {
  */
 export type SetGroupLabelResult =
   | { ok: true; groupLabel: string | null }
+  | { ok: false; reason: 'account_not_found' | 'retired_account' };
+
+/**
+ * setSlowStart 结果（change account-level-slow-start）：诚实可区分——成功回读写后真态（RETURNING）；
+ * 退役保留账号 / 无对应行以 ok:false + 具名 reason 返回，绝不静默成功、绝不 seed 造幽灵行。
+ * 照 SetGroupLabelResult 同款形状。
+ */
+export type SetSlowStartResult =
+  | { ok: true; slowStartSince: number | null }
   | { ok: false; reason: 'account_not_found' | 'retired_account' };
 
 /**
@@ -130,10 +145,32 @@ export interface AccountStore {
   /** 按平台枚举账号；返回状态字段，调用方可据 active/paused 做调度闸。 */
   listByPlatform?(platform: PlatformId): Promise<PlatformAccountRecord[]>;
   /**
-   * 读账号养号元数据（change account-nurture-discipline-spine）：created_at(epoch ms) + platform。
-   * 供风控冷启动配额爬坡按账号年龄现算天花板。缺行 / 无 created_at → null（调用方按「不叠冷启动」安全兜底）。
+   * 写账号级慢启动开关（change account-level-slow-start）：单写、UPDATE-only（**不 seed 造行**）。
+   * enabled=true → 写 shanghaiDayStartMs(now) 对齐后的时刻（勾选当天整天算第 1 天，与「今日进展」
+   * 的上海自然日计数窗口同相；见 design D2——这是只能在写入时刻做对的决定）；false → 写 NULL。
+   * **顺序：先库后镜像，库失败不刷镜像**。退役保留账号 / 无对应行以可区分结果返回。
    */
-  getNurtureMeta?(accountId: string): Promise<{ createdAt: number; platform: PlatformId } | null>;
+  setSlowStart?(accountId: string, enabled: boolean, now: number): Promise<SetSlowStartResult>;
+  /**
+   * 同步读账号级慢启动起点（change account-level-slow-start）：读 init() 预热 + setSlowStart 写后
+   * 更新的进程内镜像。返回 epoch ms（开）或 null（关 / 缺行）。
+   * **同步、零 IO、永不抛**——契约与 QuotaProvider 逐字同款：effectiveQuotas 是同步热路径，
+   * canDo 在浏览闭环每个动作都调，绝不能 await PG。
+   */
+  slowStartSinceFor?(accountId: string): number | null;
+  /**
+   * 同步读账号平台（change account-level-slow-start）：读 init() 预热 + getPlatform 回填的镜像。
+   * **缺键 → undefined（未知），MUST NOT 回落 xiaohongshu**——回落会让 FB 号按小红书曲线跑
+   * （D1 view=50 而非 20，差 2.5 倍）。调用方据 undefined 判 eligible=false、不 clamp（见 design D5）。
+   * 同步、零 IO、永不抛。
+   */
+  platformFor?(accountId: string): PlatformId | undefined;
+  /**
+   * 同步读账号入库时刻（change account-level-slow-start）：**仅供 env 全局旁路
+   * `AIDCP_COLDSTART_RAMP=true` 这条历史路径**现读，且仅在账号级未开启时才被查询。
+   * MUST NOT 用作慢启动起点（它是「第一次连上本云端库」，不是平台注册时间）。同步、零 IO、永不抛。
+   */
+  createdAtFor?(accountId: string): number | undefined;
   close?(): Promise<void>;
 }
 
@@ -164,6 +201,12 @@ export class PgAccountStore implements AccountStore {
   private readonly nicknameCache = new Map<string, string | null>();
   /** 账号平台缓存（init 预热 + getPlatform 回填）。accounts.platform 是事实源，缓存只做读路径加速。 */
   private readonly platformCache = new Map<string, PlatformId>();
+  /** 账号级慢启动起点镜像（change account-level-slow-start）：init() 预热全表 + setSlowStart 写后更新。
+   *  供风控 effectiveQuotas 同步热路径现读；缺键 / 值 null = 关。 */
+  private readonly slowStartCache = new Map<string, number | null>();
+  /** 账号入库时刻镜像（change account-level-slow-start）：init() 预热全表。
+   *  **仅供 env 全局旁路 AIDCP_COLDSTART_RAMP 这条历史路径现读**；不参与慢启动起点。 */
+  private readonly createdAtCache = new Map<string, number>();
 
   constructor(options: PgAccountStoreOptions = {}) {
     this.pool =
@@ -181,12 +224,19 @@ export class PgAccountStore implements AccountStore {
   async init(): Promise<void> {
     await this.pool.query(ACCOUNTS_SCHEMA_SQL);
     // 预热昵称缓存（change account-real-nickname）：供握手同步读，避免每次握手 await PG。
-    const { rows } = await this.pool.query<{ account_id: string; nickname: string | null; platform: string | null }>(
-      'SELECT account_id, nickname, platform FROM accounts',
-    );
+    // 同批预热慢启动起点镜像（change account-level-slow-start）：供 effectiveQuotas 同步热路径现读。
+    const { rows } = await this.pool.query<{
+      account_id: string;
+      nickname: string | null;
+      platform: string | null;
+      slow_start_since: Date | null;
+      created_at: Date | null;
+    }>('SELECT account_id, nickname, platform, slow_start_since, created_at FROM accounts');
     for (const r of rows) {
       this.nicknameCache.set(r.account_id, r.nickname ?? null);
       this.platformCache.set(r.account_id, normalizePlatformId(r.platform));
+      this.slowStartCache.set(r.account_id, r.slow_start_since ? r.slow_start_since.getTime() : null);
+      if (r.created_at) this.createdAtCache.set(r.account_id, r.created_at.getTime());
     }
   }
 
@@ -232,13 +282,21 @@ export class PgAccountStore implements AccountStore {
     // facebook-scheduled-comment 2.5：新账号登记时按 edge 声明的平台建行（缺省回落 xhs，行为不变）。
     // ON CONFLICT DO NOTHING → 既有行的 platform 绝不被覆盖（平台仍以现有行为事实源）。
     // RETURNING 判定是否真插入了新行：仅新行才回填 platformCache（既有行不触碰缓存，防污染）。
+    // account-level-slow-start：同批回填 createdAtCache。风控的 env 全局旁路（AIDCP_COLDSTART_RAMP）
+    // 已从「建 controller 时 await PG 读 created_at」改为经 provider 现读内存镜像；本进程 init() 之后
+    // 新登记的账号若不在此回填，该旁路会对它静默失效（默认关，但那是回滚拉杆，不能悄悄少一半）。
     const normalized = platform ? normalizePlatformId(platform) : 'xiaohongshu';
-    const { rows } = await this.pool.query<{ platform: string }>(
+    const { rows } = await this.pool.query<{ platform: string; created_at: Date | null }>(
       `INSERT INTO accounts (account_id, label, platform) VALUES ($1, $1, $2)
-       ON CONFLICT (account_id) DO NOTHING RETURNING platform`,
+       ON CONFLICT (account_id) DO NOTHING RETURNING platform, created_at`,
       [accountId, normalized],
     );
-    if (rows.length > 0) this.platformCache.set(accountId, normalizePlatformId(rows[0].platform));
+    if (rows.length > 0) {
+      this.platformCache.set(accountId, normalizePlatformId(rows[0].platform));
+      if (rows[0].created_at) this.createdAtCache.set(accountId, rows[0].created_at.getTime());
+      // 新行的 slow_start_since 恒为 NULL（列无默认值）→ 镜像显式记 null，与库一致。
+      this.slowStartCache.set(accountId, null);
+    }
   }
 
   /**
@@ -349,16 +407,51 @@ export class PgAccountStore implements AccountStore {
     return platform;
   }
 
-  async getNurtureMeta(accountId: string): Promise<{ createdAt: number; platform: PlatformId } | null> {
-    if (accountId === RETIRED_ACCOUNT_ID) return null;
-    const { rows } = await this.pool.query<{ created_at: Date | null; platform: string | null }>(
-      `SELECT created_at, platform FROM accounts WHERE account_id = $1`,
-      [accountId],
+  /**
+   * 写账号级慢启动开关（change account-level-slow-start）：单写、UPDATE-only + RETURNING。
+   * - 退役保留账号 `default` 直接拒（不落库、不静默成功）；
+   * - enabled=true → 起点对齐上海日起点（勾选当天整天算第 1 天）。**这是只能在写入时刻做对的决定**：
+   *   若按墙钟算，dayIndex 与「今日进展」的上海自然日计数窗口不同相 → 23:50 勾选的号次日 23:51
+   *   会「计数没清零、上限凭空长 5」，一个打满的号在午夜前十分钟又能动（design D2）；
+   * - enabled=false → 写 NULL（关）；
+   * - 无对应行（0 rows）→ account_not_found，**绝不 seed 造幽灵行**；
+   * - **先库后镜像**：RETURNING 回读成功才刷镜像，库失败即抛（镜像不动，绝不出现「库没写成、内存说开了」）。
+   */
+  async setSlowStart(accountId: string, enabled: boolean, now: number): Promise<SetSlowStartResult> {
+    if (accountId === RETIRED_ACCOUNT_ID) return { ok: false, reason: 'retired_account' };
+    const value = enabled ? new Date(shanghaiDayStartMs(now)) : null;
+    const { rows } = await this.pool.query<{ slow_start_since: Date | null }>(
+      `UPDATE accounts SET slow_start_since = $2 WHERE account_id = $1 RETURNING slow_start_since`,
+      [accountId, value],
     );
-    const row = rows[0];
-    if (!row?.created_at) return null;
-    return { createdAt: row.created_at.getTime(), platform: normalizePlatformId(row.platform) };
+    if (rows.length === 0) return { ok: false, reason: 'account_not_found' };
+    const written = rows[0].slow_start_since ? rows[0].slow_start_since.getTime() : null;
+    this.slowStartCache.set(accountId, written);
+    return { ok: true, slowStartSince: written };
   }
+
+  /** 同步读慢启动起点（见 AccountStore.slowStartSinceFor 契约）：缺键 / 库内 NULL → null（关）。 */
+  slowStartSinceFor(accountId: string): number | null {
+    return this.slowStartCache.get(accountId) ?? null;
+  }
+
+  /**
+   * 同步读账号平台（见 AccountStore.platformFor 契约）：**缺键 → undefined（未知），绝不回落 xiaohongshu**。
+   * 与 getPlatform 刻意不同：那条是异步读库 + normalizePlatformId 归一（缺值回落小红书），
+   * 这条服务于冷启动曲线选择——回落一次就是 FB 号按小红书曲线跑（D1 view=50 而非 20）。
+   */
+  platformFor(accountId: string): PlatformId | undefined {
+    return this.platformCache.get(accountId);
+  }
+
+  /** 同步读账号入库时刻（见 AccountNurtureProvider.createdAtFor 契约）：仅供 env 旁路，缺键 → undefined。 */
+  createdAtFor(accountId: string): number | undefined {
+    return this.createdAtCache.get(accountId);
+  }
+
+  // getNurtureMeta 已删（change account-level-slow-start，task 2.3）：它是构造期 async 解析一次的
+  // 养号元数据读，唯一消费者是 registry 的 nurtureMetaResolver；后者已被同步 provider 现读取代。
+  // 保留它 = 同一事实两个源（一个现读镜像、一个读库快照），迟早漂移，故删而不留。
 
   async listByPlatform(platform: PlatformId): Promise<PlatformAccountRecord[]> {
     const normalized = normalizePlatformId(platform);

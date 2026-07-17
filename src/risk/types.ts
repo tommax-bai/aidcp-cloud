@@ -27,6 +27,35 @@ export interface QuotaProvider {
   windowQuotasFor(level: RiskQuotaLevel): WindowQuotas;
 }
 
+/**
+ * 账号养号事实提供者（change account-level-slow-start）：冷启动 / 慢启动 clamp 的**现读**输入。
+ * 由 `AccountStore`（account 层）实现（同步读内存镜像、永不抛），注入 `RiskController` 供
+ * `effectiveQuotas()` 每次现算。风控层只持接口、不依赖 account 层实现。
+ *
+ * **契约与 QuotaProvider 逐字同款：同步、零 IO、永不抛**——`effectiveQuotas()` 是同步热路径
+ * （canDo / explain / dailyRemaining 全同步调用，canDo 在浏览闭环每个动作都调），绝不能 await PG。
+ *
+ * **为什么是现读而非构造期快照**：RiskControllerRegistry 的 controller Map 永不驱逐（全文无
+ * delete / invalidate / TTL），controller 活到进程结束；面板仪表盘还会为每个有计数的账号
+ * materialize controller。构造期读入 → 勾选会「写库成功、HTTP 回 200、行为纹丝不动到重启，且零日志」。
+ * 现读做对之后，「Map 永不驱逐」从一个需要被绕开的坑变成一个不再相关的事实。
+ */
+export interface AccountNurtureProvider {
+  /**
+   * 账号平台。**缺失 → undefined（未知），MUST NOT 回落 xiaohongshu**：回落一次就是 FB 号按
+   * 小红书曲线跑（D1 view=50 而非 20，差 2.5 倍）。调用方据此判 eligible=false、不 clamp。
+   */
+  platformFor(accountId: string): string | undefined;
+  /** 账号级慢启动起点（epoch ms，已对齐上海日起点）；null = 关。慢启动的**唯一**起点来源。 */
+  slowStartSinceFor(accountId: string): number | null;
+  /**
+   * 账号入库时刻（epoch ms）。**仅供 env 全局旁路 `AIDCP_COLDSTART_RAMP=true` 这条历史路径**，
+   * 且仅在账号级未开启时才被查询（见 RiskController 的 anchor 解析优先级）。
+   * MUST NOT 用作慢启动起点——它记的是「第一次连上本云端库」，不是平台注册时间。
+   */
+  createdAtFor(accountId: string): number | undefined;
+}
+
 export interface RiskState {
   accountId: string;
   status: RiskStatus;

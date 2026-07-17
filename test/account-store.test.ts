@@ -244,3 +244,67 @@ test('ensureAccount: 既有行冲突（RETURNING 空）→ 不回填缓存（不
   await store.getPlatform('existing');
   assert.equal(calls.length, 2, '既有行不应回填缓存，getPlatform 必须落库读真态');
 });
+
+// ── change account-level-slow-start：slow_start_since 列自愈 DDL + setSlowStart 单写 + 同步镜像 ──
+
+test('ACCOUNTS_SCHEMA_SQL 含 slow_start_since 幂等自愈 ALTER（本仓无迁移执行器，dev/OL 那张既有表靠它补列）', () => {
+  assert.match(ACCOUNTS_SCHEMA_SQL, /ALTER TABLE accounts ADD COLUMN IF NOT EXISTS slow_start_since TIMESTAMPTZ/);
+});
+
+test('setSlowStart(true)：UPDATE-only（绝不 seed 造行）+ 起点对齐上海日起点', async () => {
+  // 2026-07-17 23:50 Asia/Shanghai —— 墙钟起点会让 dayIndex 与上海自然日计数窗口不同相（design D2）。
+  const at2350 = Date.UTC(2026, 6, 17, 15, 50);
+  const aligned = new Date(Date.UTC(2026, 6, 16, 16, 0)); // 2026-07-17 00:00 +08
+  const { calls, pool } = fakePoolReturning([{ slow_start_since: aligned }]);
+  const store = new PgAccountStore({ pool });
+  const res = await store.setSlowStart('acc-1', true, at2350);
+  assert.match(calls[0].text, /UPDATE accounts SET slow_start_since = \$2 WHERE account_id = \$1 RETURNING slow_start_since/);
+  assert.doesNotMatch(calls[0].text, /INSERT/, 'UPDATE-only：绝不为不存在的账号造幽灵行');
+  assert.deepEqual(calls[0].params, ['acc-1', aligned], '写入值必须是对齐后的上海日起点，不是墙钟 now');
+  assert.deepEqual(res, { ok: true, slowStartSince: aligned.getTime() });
+});
+
+test('setSlowStart(false)：写 NULL（关）', async () => {
+  const { calls, pool } = fakePoolReturning([{ slow_start_since: null }]);
+  const store = new PgAccountStore({ pool });
+  const res = await store.setSlowStart('acc-1', false, Date.now());
+  assert.deepEqual(calls[0].params, ['acc-1', null]);
+  assert.deepEqual(res, { ok: true, slowStartSince: null });
+});
+
+test('setSlowStart：无对应行 → account_not_found（诚实可区分，绝不静默成功）', async () => {
+  const { pool } = fakePoolReturning([]);
+  const store = new PgAccountStore({ pool });
+  assert.deepEqual(await store.setSlowStart('ghost', true, Date.now()), { ok: false, reason: 'account_not_found' });
+});
+
+test('setSlowStart：退役保留账号直接拒（不落库）', async () => {
+  const { calls, pool } = fakePoolReturning([{ slow_start_since: null }]);
+  const store = new PgAccountStore({ pool });
+  assert.deepEqual(await store.setSlowStart('default', true, Date.now()), { ok: false, reason: 'retired_account' });
+  assert.equal(calls.length, 0, '绝不为退役保留标识写库');
+});
+
+test('setSlowStart：先库后镜像 —— 写成功才刷镜像，供 effectiveQuotas 同步现读', async () => {
+  const since = new Date(Date.UTC(2026, 6, 16, 16, 0));
+  const { pool } = fakePoolReturning([{ slow_start_since: since }]);
+  const store = new PgAccountStore({ pool });
+  assert.equal(store.slowStartSinceFor('acc-1'), null, '写之前：镜像缺键 = 关');
+  await store.setSlowStart('acc-1', true, Date.now());
+  assert.equal(store.slowStartSinceFor('acc-1'), since.getTime(), '写库成功后镜像立刻可被同步现读');
+});
+
+test('setSlowStart：库失败即抛，镜像纹丝不动（绝不出现「库没写成、内存说开了」）', async () => {
+  const pool = { query: async () => { throw new Error('PG down'); } } as unknown as pg.Pool;
+  const store = new PgAccountStore({ pool });
+  await assert.rejects(() => store.setSlowStart('acc-1', true, Date.now()), /PG down/);
+  assert.equal(store.slowStartSinceFor('acc-1'), null, '库失败后镜像必须仍是关');
+});
+
+test('platformFor：缺键 → undefined（未知），MUST NOT 回落 xiaohongshu', async () => {
+  const { pool } = fakePoolReturning([]);
+  const store = new PgAccountStore({ pool });
+  // 与 getPlatform 刻意不同：那条归一化缺值为 xiaohongshu，这条服务于冷启动曲线选择——
+  // 回落一次就是 FB 号按 XHS 曲线跑（D1 view=50 而非 20）。
+  assert.equal(store.platformFor('never-seen'), undefined);
+});
