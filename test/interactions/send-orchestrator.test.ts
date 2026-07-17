@@ -6,7 +6,7 @@ import type { ReplyConfigStore } from '../../src/interactions/reply-config-store
 import type { InteractionStore } from '../../src/interactions/interaction-store.js';
 import { InteractionMetrics } from '../../src/interactions/metrics.js';
 import { InteractionSendOrchestrator, replyIdempotencyKey } from '../../src/interactions/send-orchestrator.js';
-import type { ReplyConfigSnapshot, ScopedJobContext } from '../../src/interactions/types.js';
+import type { ReplyConfigSnapshot, RuntimeControls, ScopedJobContext } from '../../src/interactions/types.js';
 
 const now = 1784044810000;
 
@@ -82,14 +82,15 @@ test('approved command is persisted as one attempt and dispatched to one account
   let markedDispatched = false;
   let createCalls = 0;
   const base = context('queued');
+  let runtimeControls: RuntimeControls = {
+    accountId: 'acct_wc_demo', platform: 'wechat_channels' as const, envKey: 'env_wc_demo', version: 1,
+    commentsReadEnabled: true, commentsReplyEnabled: true, dmReadEnabled: true, dmSendTextEnabled: true,
+    dmSendImageEnabled: false as const, writePaused: true, consecutiveFailures: 3,
+    circuitOpenedAt: now - 1_000, lastConfirmedAt: null, updatedAt: now, updatedBy: 'circuit_breaker',
+  };
   const store = {
     getJobContext: async () => base,
-    getRuntimeControls: async () => ({
-      accountId: 'acct_wc_demo', platform: 'wechat_channels', envKey: 'env_wc_demo', version: 1,
-      commentsReadEnabled: true, commentsReplyEnabled: true, dmReadEnabled: true, dmSendTextEnabled: true,
-      dmSendImageEnabled: false, writePaused: false, consecutiveFailures: 0, circuitOpenedAt: null,
-      lastConfirmedAt: null, updatedAt: now, updatedBy: 'admin',
-    }),
+    getRuntimeControls: async () => runtimeControls,
     getSendAuthGate: async () => ({
       activeSince: now - 700_000,
       auth: {
@@ -124,6 +125,17 @@ test('approved command is persisted as one attempt and dispatched to one account
     controllerFor: () => ({ explain: () => ({ allowed: true }), record: async () => true }),
     metrics: new InteractionMetrics(), env: { AIDCP_INTERACTION_WRITE_ENABLED: 'true' }, clock: () => now,
   });
+  await assert.rejects(
+    sender.dispatchQueued({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo',
+      jobId: 'job_comment_100', expectedVersion: 4 }),
+    (error: unknown) => (error as { code?: string }).code === 'INTERACTION_FEATURE_DISABLED',
+    '熔断未清除前必须继续拒绝发送',
+  );
+  assert.equal(createCalls, 0);
+  runtimeControls = {
+    ...runtimeControls, version: 2, writePaused: false, consecutiveFailures: 0,
+    circuitOpenedAt: null, updatedBy: 'admin',
+  };
   const output = await sender.dispatchQueued({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo',
     jobId: 'job_comment_100', expectedVersion: 4 });
   assert.equal(output.job.state, 'sending');

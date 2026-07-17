@@ -251,6 +251,130 @@ test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recov
     }
   });
 
+test('PostgreSQL: circuit reset, replay-safe thread states and periodic classifying recovery',
+  { skip: !connectionString }, async () => {
+    const pool = new pg.Pool({ connectionString });
+    const now = 1_784_044_900_000;
+    const store = new InteractionStore({ pool, clock: () => now });
+    try {
+      await pool.query(`TRUNCATE
+        interaction_api_requests,interaction_audit_events,interaction_send_attempts,interaction_reply_jobs,
+        interaction_messages,interaction_threads,interaction_sync_batches,interaction_sync_cursors,
+        interaction_auth_state,interaction_runtime_controls RESTART IDENTITY CASCADE`);
+      await pool.query(`INSERT INTO accounts(account_id,label,platform) VALUES
+        ('acct_wc_store_circuit','store-circuit','wechat_channels')
+        ON CONFLICT (account_id) DO UPDATE SET platform=EXCLUDED.platform`);
+      await store.init();
+      await store.upsertAuthStatus({
+        envKey: 'env_wc_store_circuit', accountId: 'acct_wc_store_circuit', platform: 'wechat_channels',
+        status: 'active', browserState: 'closed', capabilities: { commentsRead: true, commentsReply: true,
+          dmRead: true, dmSendText: true, dmSendImage: false },
+        identity: { externalId: 'finder-store-circuit', displayName: '存储熔断测试号',
+          identityHash: `sha256:${'2'.repeat(64)}` },
+        runtimeControlsVersion: 0, checkedAt: now - 1_000, reasonCode: null,
+      });
+
+      await store.noteSendOutcome('acct_wc_store_circuit', false, 3);
+      await store.noteSendOutcome('acct_wc_store_circuit', false, 3);
+      await store.noteSendOutcome('acct_wc_store_circuit', false, 3);
+      const tripped = await store.getRuntimeControls('acct_wc_store_circuit');
+      assert.equal(tripped.writePaused, true);
+      assert.equal(tripped.consecutiveFailures, 3);
+      assert.ok(tripped.circuitOpenedAt !== null);
+      await assert.rejects(store.updateRuntimeControls({
+        accountId: 'acct_wc_store_circuit', expectedVersion: tripped.version - 1, actor: 'admin-conflict',
+        commentsReadEnabled: true, commentsReplyEnabled: true, dmReadEnabled: true,
+        dmSendTextEnabled: true, dmSendImageEnabled: false, writePaused: false,
+      }), (error: unknown) => (error as { code?: string }).code === 'INTERACTION_VERSION_CONFLICT');
+      const afterConflict = await store.getRuntimeControls('acct_wc_store_circuit');
+      assert.equal(afterConflict.consecutiveFailures, 3);
+      assert.equal(afterConflict.circuitOpenedAt, tripped.circuitOpenedAt);
+
+      const cleared = await store.updateRuntimeControls({
+        accountId: 'acct_wc_store_circuit', expectedVersion: tripped.version, actor: 'admin-recovery',
+        commentsReadEnabled: true, commentsReplyEnabled: true, dmReadEnabled: true,
+        dmSendTextEnabled: true, dmSendImageEnabled: false, writePaused: false,
+      });
+      assert.equal(cleared.writePaused, false);
+      assert.equal(cleared.consecutiveFailures, 0);
+      assert.equal(cleared.circuitOpenedAt, null);
+      const resetAudit = (await pool.query<{ labels: Record<string, unknown> }>(
+        `SELECT labels FROM interaction_audit_events
+          WHERE account_id='acct_wc_store_circuit' AND action='runtime_controls_updated'
+          ORDER BY created_at DESC LIMIT 1`,
+      )).rows[0];
+      assert.deepEqual(resetAudit.labels, {
+        version: cleared.version, circuitReset: true, circuitWasOpen: true, previousConsecutiveFailures: 3,
+      });
+
+      const raw = JSON.parse(await readFile(new URL('../fixtures/wechat-channels-interaction/v1/ws/comment-sync-batch.json', import.meta.url), 'utf8')) as { payload: unknown };
+      const fixture = parseSyncBatchPayload(raw.payload);
+      assert.ok(fixture);
+      const oldKinds = ['ignored', 'escalated', 'replied'] as const;
+      const oldThreads = oldKinds.map((kind, index) => ({
+        ...fixture.threads[0], externalThreadId: `thread-${kind}`,
+        participant: { ...fixture.threads[0].participant!, externalId: `viewer-${kind}` },
+        updatedAt: now - 5_000 + index,
+      }));
+      const oldMessages = oldKinds.map((kind, index) => ({
+        ...fixture.messages[0], externalThreadId: `thread-${kind}`, externalMessageId: `message-${kind}`,
+        externalRootId: `message-${kind}`, platformCreatedAt: now - 5_000 + index,
+      }));
+      const initial = await store.ingestBatch({
+        ...fixture, accountId: 'acct_wc_store_circuit', envKey: 'env_wc_store_circuit',
+        batchId: 'batch-state-initial', cursorAfter: 'cursor-state-initial',
+        threads: oldThreads, messages: oldMessages, observedAt: now - 4_000,
+      });
+      assert.equal(initial.newJobIds.length, 3);
+      await store.transitionMessageJob({ accountId: 'acct_wc_store_circuit', envKey: 'env_wc_store_circuit',
+        messageId: (await store.getJobContext('acct_wc_store_circuit', 'env_wc_store_circuit', initial.newJobIds[0]))!.message.id,
+        expectedVersion: 0, to: 'ignored', actor: 'admin' });
+      await store.transitionMessageJob({ accountId: 'acct_wc_store_circuit', envKey: 'env_wc_store_circuit',
+        messageId: (await store.getJobContext('acct_wc_store_circuit', 'env_wc_store_circuit', initial.newJobIds[1]))!.message.id,
+        expectedVersion: 0, to: 'escalated', actor: 'admin' });
+      await pool.query(`UPDATE interaction_reply_jobs SET state='sent',version=version+1 WHERE id=$1`,
+        [initial.newJobIds[2]]);
+      await pool.query(`UPDATE interaction_threads SET status='replied'
+        WHERE external_thread_id='thread-replied' AND account_id='acct_wc_store_circuit'`);
+
+      const newThread = { ...fixture.threads[0], externalThreadId: 'thread-new',
+        participant: { ...fixture.threads[0].participant!, externalId: 'viewer-new' }, updatedAt: now };
+      const newMessage = { ...fixture.messages[0], externalThreadId: 'thread-new', externalMessageId: 'message-new',
+        externalRootId: 'message-new', platformCreatedAt: now };
+      const replay = await store.ingestBatch({
+        ...fixture, accountId: 'acct_wc_store_circuit', envKey: 'env_wc_store_circuit',
+        batchId: 'batch-state-replay-with-new', cursorAfter: 'cursor-state-replay-with-new',
+        threads: [...oldThreads, newThread], messages: [...oldMessages, newMessage], observedAt: now,
+      });
+      assert.equal(replay.newJobIds.length, 1);
+      const statuses = (await pool.query<{ external_thread_id: string; status: string }>(
+        `SELECT external_thread_id,status FROM interaction_threads
+          WHERE account_id='acct_wc_store_circuit' ORDER BY external_thread_id`,
+      )).rows;
+      assert.deepEqual(Object.fromEntries(statuses.map((row) => [row.external_thread_id, row.status])), {
+        'thread-escalated': 'escalated', 'thread-ignored': 'closed',
+        'thread-new': 'waiting_review', 'thread-replied': 'replied',
+      });
+
+      await pool.query(`UPDATE interaction_reply_jobs SET state='classifying',version=10,
+        updated_at=to_timestamp($2/1000.0) WHERE id=$1`, [initial.newJobIds[0], now - 60_000]);
+      await pool.query(`UPDATE interaction_reply_jobs SET state='classifying',version=20,
+        updated_at=to_timestamp($2/1000.0) WHERE id=$1`, [initial.newJobIds[1], now - 10_000]);
+      assert.equal(await store.recoverStalledClassifyingJobs(now - 40_000), 1);
+      const recovered = (await pool.query<{ id: string; state: string; version: number }>(
+        `SELECT id,state,version FROM interaction_reply_jobs WHERE id=ANY($1::text[]) ORDER BY id`,
+        [[initial.newJobIds[0], initial.newJobIds[1]]],
+      )).rows;
+      const byId = new Map(recovered.map((row) => [row.id, row]));
+      assert.deepEqual({ state: byId.get(initial.newJobIds[0])?.state, version: byId.get(initial.newJobIds[0])?.version },
+        { state: 'new', version: 11 });
+      assert.deepEqual({ state: byId.get(initial.newJobIds[1])?.state, version: byId.get(initial.newJobIds[1])?.version },
+        { state: 'classifying', version: 20 });
+    } finally {
+      await pool.end();
+    }
+  });
+
 test('PostgreSQL: immutable template/config versions, publish CAS and fail-closed invalid variables',
   { skip: !connectionString }, async () => {
     const pool = new pg.Pool({ connectionString });

@@ -9,6 +9,9 @@
     "dmSendTextEnabled": false,
     "dmSendImageEnabled": false,
     "writePaused": true,
+    "circuitOpen": false,
+    "circuitOpenedAt": null,
+    "consecutiveFailures": 0,
     "updatedAt": 1784044700000,
     "updatedBy": "admin_demo"
   },

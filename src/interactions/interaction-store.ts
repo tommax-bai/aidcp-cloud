@@ -494,13 +494,16 @@ export class InteractionStore {
              ON CONFLICT (inbound_message_id) DO NOTHING RETURNING id`,
             [this.idGen('job'), payload.platform, payload.accountId, payload.envKey, payload.channel, dbMessage.id],
           );
-          if (job.rows[0]) newJobIds.push(job.rows[0].id);
+          const createdJob = job.rows[0];
+          if (createdJob) newJobIds.push(createdJob.id);
           await client.query(
-            `UPDATE interaction_threads SET status='waiting_review',
+            `UPDATE interaction_threads
+               SET status=CASE WHEN $6::boolean THEN 'waiting_review' ELSE status END,
                last_message_at=GREATEST(last_message_at,to_timestamp($2/1000.0)),
                last_synced_at=GREATEST(last_synced_at,to_timestamp($5/1000.0)),updated_at=now()
              WHERE id=$1 AND account_id=$3 AND env_key=$4`,
-            [threadId, message.platformCreatedAt, payload.accountId, payload.envKey, payload.observedAt],
+            [threadId, message.platformCreatedAt, payload.accountId, payload.envKey, payload.observedAt,
+              Boolean(createdJob)],
           );
         }
       }
@@ -1214,11 +1217,15 @@ export class InteractionStore {
     commentsReadEnabled: boolean; commentsReplyEnabled: boolean; dmReadEnabled: boolean;
     dmSendTextEnabled: boolean; dmSendImageEnabled: false; writePaused: boolean;
   }): Promise<RuntimeControls> {
-    await this.getRuntimeControls(input.accountId);
+    const current = await this.getRuntimeControls(input.accountId);
+    const resettingCircuit = current.writePaused && !input.writePaused;
     const { rows } = await this.pool.query<{ version: number }>(
       `UPDATE interaction_runtime_controls SET version=version+1,comments_read_enabled=$3,
           comments_reply_enabled=$4,dm_read_enabled=$5,dm_send_text_enabled=$6,
-          dm_send_image_enabled=false,write_paused=$7,updated_at=now(),updated_by=$8
+          dm_send_image_enabled=false,
+          consecutive_failures=CASE WHEN write_paused=true AND $7=false THEN 0 ELSE consecutive_failures END,
+          circuit_opened_at=CASE WHEN write_paused=true AND $7=false THEN NULL ELSE circuit_opened_at END,
+          write_paused=$7,updated_at=now(),updated_by=$8
         WHERE platform=$1 AND account_id=$2 AND version=$9 RETURNING version`,
       [INTERACTION_PLATFORM, input.accountId, input.commentsReadEnabled, input.commentsReplyEnabled,
         input.dmReadEnabled, input.dmSendTextEnabled, input.writePaused, input.actor, input.expectedVersion],
@@ -1230,7 +1237,13 @@ export class InteractionStore {
       });
     }
     await this.audit(this.pool, input.accountId, null, input.actor, 'runtime_controls_updated', null,
-      'runtime_controls', input.accountId, 'runtime controls updated', { version: Number(rows[0].version) });
+      'runtime_controls', input.accountId, 'runtime controls updated', {
+        version: Number(rows[0].version), circuitReset: resettingCircuit,
+        ...(resettingCircuit ? {
+          circuitWasOpen: current.circuitOpenedAt !== null,
+          previousConsecutiveFailures: current.consecutiveFailures,
+        } : {}),
+      });
     return this.getRuntimeControls(input.accountId);
   }
 
@@ -1399,6 +1412,27 @@ export class InteractionStore {
         await client.query('COMMIT');
         return { duplicate: true };
       }
+      if (offboard.state === 'purged') {
+        await client.query(
+          `UPDATE interaction_offboards SET edge_result_status=$2,last_error_code=$3,
+              edge_cleared_at=CASE WHEN $2 IN ('cleared','already_cleared')
+                THEN to_timestamp($4/1000.0) ELSE edge_cleared_at END,updated_at=now()
+            WHERE offboard_id=$1 AND state='purged'`,
+          [payload.offboardId, payload.status, payload.status === 'failed' ? payload.errorCode : null,
+            payload.finishedAt],
+        );
+        await client.query(
+          `INSERT INTO interaction_offboard_audit
+             (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+          [this.idGen('audit'), payload.offboardId, payload.platform, payload.accountId, payload.envKey,
+            offboard.user_id, payload.status === 'failed' ? 'edge_cleanup_failed_after_cloud_purge' :
+              'edge_cleanup_confirmed_after_cloud_purge',
+            payload.status === 'failed' ? 'purged_edge_failed' : 'purged_edge_confirmed'],
+        );
+        await client.query('COMMIT');
+        return { duplicate: false };
+      }
       if (!['pending_edge', 'dispatched'].includes(offboard.state)) {
         throw new InteractionError('INTERACTION_STATE_CONFLICT', '解绑结果不允许推进当前任务。', 409);
       }
@@ -1420,6 +1454,12 @@ export class InteractionStore {
         `UPDATE interaction_offboards SET state='tombstoned',edge_result_status=$2,last_error_code=NULL,
             edge_cleared_at=to_timestamp($3/1000.0),tombstoned_at=now(),updated_at=now()
           WHERE offboard_id=$1`, [payload.offboardId, payload.status, payload.finishedAt],
+      );
+      await client.query(
+        `INSERT INTO interaction_offboard_audit
+           (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
+         VALUES ($1,$2,$3,$4,$5,$6,'edge_cleanup_confirmed','tombstoned')`,
+        [this.idGen('audit'), payload.offboardId, payload.platform, payload.accountId, payload.envKey, offboard.user_id],
       );
       await client.query(
         `UPDATE interaction_auth_state SET status='disabled',capabilities=$3::jsonb,identity=NULL,
@@ -1465,8 +1505,10 @@ export class InteractionStore {
         await client.query('BEGIN');
         const due = await client.query<{
           offboard_id: string; account_id: string; env_key: string; user_id: string | null;
-        }>(`SELECT offboard_id,account_id,env_key,user_id FROM interaction_offboards
-              WHERE state='tombstoned' AND purge_due_at <= to_timestamp($1/1000.0)
+          edge_result_status: string | null;
+        }>(`SELECT offboard_id,account_id,env_key,user_id,edge_result_status FROM interaction_offboards
+              WHERE state IN ('pending_edge','dispatched','tombstoned')
+                AND purge_due_at <= to_timestamp($1/1000.0)
               ORDER BY purge_due_at ASC,offboard_id ASC LIMIT 1 FOR UPDATE SKIP LOCKED`, [now]);
         const row = due.rows[0];
         if (!row) {
@@ -1486,14 +1528,16 @@ export class InteractionStore {
         await client.query(`DELETE FROM interaction_runtime_controls WHERE account_id=$1`, [row.account_id]);
         const updated = await client.query(
           `UPDATE interaction_offboards SET state='purged',purged_at=now(),updated_at=now()
-            WHERE offboard_id=$1 AND state='tombstoned'`, [row.offboard_id],
+            WHERE offboard_id=$1 AND state IN ('pending_edge','dispatched','tombstoned')`, [row.offboard_id],
         );
         if (updated.rowCount) {
           await client.query(
             `INSERT INTO interaction_offboard_audit
                (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
-             VALUES ($1,$2,'wechat_channels',$3,$4,$5,'cloud_purged','purged')`,
-            [this.idGen('audit'), row.offboard_id, row.account_id, row.env_key, row.user_id],
+             VALUES ($1,$2,'wechat_channels',$3,$4,$5,'cloud_purged',$6)`,
+            [this.idGen('audit'), row.offboard_id, row.account_id, row.env_key, row.user_id,
+              row.edge_result_status === 'cleared' || row.edge_result_status === 'already_cleared'
+                ? 'purged_edge_confirmed' : 'purged_edge_unconfirmed'],
           );
           purged++;
         }

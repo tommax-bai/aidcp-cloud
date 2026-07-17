@@ -122,6 +122,9 @@ function publicControls(value: RuntimeControls) {
     dmSendTextEnabled: value.dmSendTextEnabled,
     dmSendImageEnabled: false as const,
     writePaused: value.writePaused,
+    circuitOpen: value.circuitOpenedAt !== null,
+    circuitOpenedAt: value.circuitOpenedAt,
+    consecutiveFailures: value.consecutiveFailures,
     updatedAt: value.updatedAt,
     updatedBy: value.updatedBy,
   };

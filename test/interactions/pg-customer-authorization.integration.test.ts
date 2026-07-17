@@ -170,6 +170,24 @@ test('PostgreSQL: unbind/termination revoke first, retry offline cleanup, tombst
       assert.equal((await users.setScope('user-offboard-b', [{ envKey: 'env-offboard-b' }], 'admin')).ok, true);
       assert.equal((await users.setScope('user-term', [{ envKey: 'env-term-a' }, { envKey: 'env-term-b' }], 'admin')).ok, true);
 
+      const rawFixture = JSON.parse(await readFile(
+        new URL('../fixtures/wechat-channels-interaction/v1/ws/comment-sync-batch.json', import.meta.url), 'utf8',
+      )) as { payload: unknown };
+      const fixture = parseSyncBatchPayload(rawFixture.payload);
+      assert.ok(fixture);
+      await interactions.ingestBatch({
+        ...fixture, accountId: 'acct-offboard-b', envKey: 'env-offboard-b',
+        batchId: 'batch-offboard-b-content', cursorAfter: 'cursor-offboard-b-content',
+        threads: [{ ...fixture.threads[0], externalThreadId: 'thread-offboard-b',
+          participant: { externalId: 'participant-offboard-b', displayName: '待清除昵称',
+            avatarUrl: 'https://example.invalid/avatar.jpg' }, sourceTitle: '待清除会话标题' }],
+        messages: [{ ...fixture.messages[0], externalThreadId: 'thread-offboard-b',
+          externalMessageId: 'message-offboard-b', externalRootId: 'message-offboard-b',
+          contentText: '待清除消息正文', attachmentMeta: {
+            mimeType: 'image/jpeg', width: 100, height: 100, url: 'https://example.invalid/content.jpg',
+          } }],
+      });
+
       const started = await users.beginEnvironmentOffboard('user-offboard-a', 'env-offboard-a');
       assert.equal(started.ok, true);
       if (!started.ok) return;
@@ -208,6 +226,38 @@ test('PostgreSQL: unbind/termination revoke first, retry offline cleanup, tombst
       assert.equal((await users.getOffboard('user-offboard-a', started.offboard.offboardId))?.state, 'purged');
       assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM interaction_auth_state
         WHERE account_id='acct-offboard-a'`)).rows[0].n, 0);
+
+      const noEdgeReceipt = await users.beginEnvironmentOffboard('user-offboard-b', 'env-offboard-b');
+      assert.equal(noEdgeReceipt.ok, true);
+      if (!noEdgeReceipt.ok) return;
+      await pool.query(`UPDATE interaction_offboards SET purge_due_at=to_timestamp(1)
+        WHERE offboard_id=$1`, [noEdgeReceipt.offboard.offboardId]);
+      assert.equal(await interactions.purgeDueOffboards(1_784_044_833_000), 1,
+        'Cloud 到期清除不得等待 Edge 回执');
+      assert.equal((await users.getOffboard('user-offboard-b', noEdgeReceipt.offboard.offboardId))?.state, 'purged');
+      assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM interaction_threads
+        WHERE account_id='acct-offboard-b'`)).rows[0].n, 0);
+      assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM interaction_auth_state
+        WHERE account_id='acct-offboard-b'`)).rows[0].n, 0);
+      const unconfirmedAudit = (await pool.query<{ status: string }>(
+        `SELECT status FROM interaction_offboard_audit
+          WHERE offboard_id=$1 AND event='cloud_purged' ORDER BY created_at DESC LIMIT 1`,
+        [noEdgeReceipt.offboard.offboardId],
+      )).rows[0];
+      assert.equal(unconfirmedAudit.status, 'purged_edge_unconfirmed');
+
+      assert.equal((await interactions.applyOffboardResult({
+        offboardId: noEdgeReceipt.offboard.offboardId, envKey: 'env-offboard-b', accountId: 'acct-offboard-b',
+        platform: 'wechat_channels', status: 'cleared', errorCode: null, finishedAt: 1_784_044_834_000,
+      })).duplicate, false, 'Cloud 已清除后到达的 Edge 回执仍须独立记账');
+      const lateEdge = (await pool.query<{ edge_result_status: string | null }>(
+        `SELECT edge_result_status FROM interaction_offboards WHERE offboard_id=$1`,
+        [noEdgeReceipt.offboard.offboardId],
+      )).rows[0];
+      assert.equal(lateEdge.edge_result_status, 'cleared');
+      assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM interaction_offboard_audit
+        WHERE offboard_id=$1 AND event='edge_cleanup_confirmed_after_cloud_purge'
+          AND status='purged_edge_confirmed'`, [noEdgeReceipt.offboard.offboardId])).rows[0].n, 1);
 
       const terminated = await users.updateUser('user-term', { status: 'disabled' }, 'admin-termination');
       assert.equal(terminated.ok, true);

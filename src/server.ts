@@ -1304,12 +1304,12 @@ async function main(): Promise<void> {
   let interactionInbox: InteractionInboxService | undefined;
   let interactionSender: InteractionSendOrchestrator | undefined;
   let interactionOffboarding: InteractionOffboardingService | undefined;
+  const interactionAiTimeoutMs = Math.max(1_000, readEnvNumber('AIDCP_INTERACTION_AI_TIMEOUT_MS', 20_000));
   try {
     interactionStore = new InteractionStore();
     replyConfigStore = new ReplyConfigStore();
     await interactionStore.init();
     await replyConfigStore.init();
-    const interactionAiTimeoutMs = Math.max(1_000, readEnvNumber('AIDCP_INTERACTION_AI_TIMEOUT_MS', 20_000));
     const resetClassifying = await interactionStore.recoverStalledClassifyingJobs(Date.now() - interactionAiTimeoutMs * 2);
     interactionMetrics.gauge('interaction_recovered_classifying_jobs', resetClassifying);
     const replyAi = new ReplyAiService(
@@ -2024,6 +2024,10 @@ async function main(): Promise<void> {
       if (recoveryRunning || !interactionStore || !replyWorkflow || !interactionSender) return;
       recoveryRunning = true;
       try {
+        const resetClassifying = await interactionStore.recoverStalledClassifyingJobs(
+          Date.now() - interactionAiTimeoutMs * 2,
+        );
+        interactionMetrics.gauge('interaction_recovered_classifying_jobs', resetClassifying);
         const drafts = await interactionStore.pendingGenerationJobs();
         for (const ref of drafts) {
           try {

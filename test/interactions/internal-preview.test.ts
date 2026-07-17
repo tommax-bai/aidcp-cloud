@@ -15,7 +15,7 @@ test('runtime-control CAS reports online delivery separately from persisted succ
     accountId: 'acct_wc_demo', platform: 'wechat_channels' as const, envKey: 'env_wc_demo', version: 8,
     commentsReadEnabled: true, commentsReplyEnabled: false, dmReadEnabled: true,
     dmSendTextEnabled: false, dmSendImageEnabled: false as const, writePaused: true,
-    consecutiveFailures: 0, circuitOpenedAt: null, lastConfirmedAt: null,
+    consecutiveFailures: 3, circuitOpenedAt: 1784044790000, lastConfirmedAt: null,
     updatedAt: 1784044800000, updatedBy: 'admin',
   };
   const api = new InteractionInternalApi({
@@ -45,8 +45,14 @@ test('runtime-control CAS reports online delivery separately from persisted succ
         dmReadEnabled: true, dmSendTextEnabled: false, dmSendImageEnabled: false, writePaused: true }),
     });
     assert.equal(response.status, 200);
-    const body = await response.json() as { data: { version: number; edgeDelivery: { status: string; delivered: number } } };
+    const body = await response.json() as { data: {
+      version: number; circuitOpen: boolean; circuitOpenedAt: number | null; consecutiveFailures: number;
+      edgeDelivery: { status: string; delivered: number };
+    } };
     assert.equal(body.data.version, 8);
+    assert.equal(body.data.circuitOpen, true);
+    assert.equal(body.data.circuitOpenedAt, 1784044790000);
+    assert.equal(body.data.consecutiveFailures, 3);
     assert.deepEqual(body.data.edgeDelivery, { status: 'enqueued', delivered: 1 });
     assert.equal(updates, 1);
     assert.equal(deliveries, 1);

@@ -7,6 +7,7 @@ const authorityMigrationUrl = new URL('../../migrations/0040_customer_env_author
 const recoveryMigrationUrl = new URL('../../migrations/0041_interaction_recovery_offboarding.sql', import.meta.url);
 const runtimeControlMigrationUrl = new URL('../../migrations/0042_interaction_runtime_control_application.sql', import.meta.url);
 const provisioningMigrationUrl = new URL('../../migrations/0043_client_env_provisioning_intents.sql', import.meta.url);
+const storeCircuitMigrationUrl = new URL('../../migrations/0045_wechat_store_and_circuit.sql', import.meta.url);
 
 test('0039 creates the dedicated inbound domain and never writes outbound interaction_feed', async () => {
   const sql = await readFile(migrationUrl, 'utf8');
@@ -91,4 +92,10 @@ test('0043 adds one-time provisioning intents without weakening authoritative un
   assert.match(sql, /uq_client_env_scope_active_env is required/);
   assert.doesNotMatch(sql, /ALTER TABLE client_env_scope[\s\S]*DROP CONSTRAINT|DROP INDEX[\s\S]*uq_client_env_scope_active_env/,
     'provisioning must not weaken admin-only source or global unique owner');
+});
+
+test('0045 indexes every non-terminal offboard state for time-bounded Cloud purge', async () => {
+  const sql = await readFile(storeCircuitMigrationUrl, 'utf8');
+  assert.match(sql, /DROP INDEX IF EXISTS idx_interaction_offboards_purge/);
+  assert.match(sql, /WHERE state IN \('pending_edge','dispatched','tombstoned'\)/);
 });
