@@ -157,7 +157,8 @@ export class QuotaConfigStore implements QuotaProvider {
    * 🔴 **红线二：只夹 COOLDOWN_ACTIONS，MUST NOT 夹 RISK_ACTIONS 全集。**
    *    夹的立论只覆盖受冷却约束的动作；对其余动作夹既无依据又有真实伤害——
    *    `MINUTE_BURST_CAP.dm_reply = 0` 是占位而非真上限，夹了会把运营显式配置的额度永久压成 0
-   *    （配额 0 ⇒ canDo 恒拒），并从上游架空 risk-controller 专为此开的 dm_reply 豁免。
+   *    （配额 0 ⇒ canDo 恒拒）；而本函数在取值链**最上游**、下游无人救得回来
+   *    ⇒ 视频号入站回复静默停摆（`quota_config` 覆盖是它唯一的启用路径）。
    *    两条红线是同一个陷阱的两个轴（窗口轴 / 动作轴）：**「对称地都夹一下」看着整齐，实为回归。**
    */
   windowQuotasFor(level: RiskQuotaLevel): WindowQuotas {

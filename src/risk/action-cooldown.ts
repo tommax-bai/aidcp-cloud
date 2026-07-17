@@ -75,9 +75,12 @@ export const COOLDOWN_MS: Readonly<Record<CooldownAction, number>> = {
  *    对它们夹 `MINUTE_BURST_CAP` 既无立论（不变量只谈冷却动作），又会造成真实伤害：
  *    `MINUTE_BURST_CAP.dm_reply = 0`（＝「旧浏览曲线没有 dm_reply 语义」的占位，不是真爆发上限）
  *    ⇒ 夹了它就把运营在面板上显式配置的额度**永久压成 0**、`canDo` 恒拒（配额 0 即硬拒），
- *    而 `risk-controller.ts` 的慢启动 clamp 早已专门为此开了 dm_reply 豁免
- *    （「不能把运营明确配置的非零额度再次夹成 0」）——在取值口夹会**从上游架空那条豁免**。
+ *    而 `quota_config` 覆盖是 dm_reply **唯一**的启用路径（三档 `DAILY_QUOTAS.dm_reply` 全为 0，
+ *    派生路径也是 0）⇒ 视频号入站回复静默停摆。
  *    那正是本 change 要根除的病（旋钮被焊死、无日志无告警），只是换了个动作。
+ *    **下游救不回来**：`windowQuotasFor` 在取值链最上游（`risk-controller.riskScaledQuotas` 从它取基准），
+ *    而慢启动 clamp 对视频号直接 early-return（`wechat_channels` 不在 `SLOW_START_PLATFORMS` 内）——
+ *    它压根不参与，无从纠正上游夹出来的 0。
  */
 export const COOLDOWN_ACTIONS: readonly CooldownAction[] = Object.keys(COOLDOWN_MS) as CooldownAction[];
 
