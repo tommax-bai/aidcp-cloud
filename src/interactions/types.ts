@@ -367,6 +367,16 @@ export interface ThreadView {
   lastSyncedAt: number;
 }
 
+export interface SyncFreshnessEvidence {
+  observedAt: number;
+  receivedAt: number;
+}
+
+export interface SyncFreshnessProjection {
+  comment: SyncFreshnessEvidence | null;
+  dm: SyncFreshnessEvidence | null;
+}
+
 export interface MessageView {
   id: string;
   threadId: string;

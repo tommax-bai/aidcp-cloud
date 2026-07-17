@@ -44,6 +44,11 @@ test('customer API transactionally binds enabled user + owned env + account on e
   let resetFailureAudits = 0;
   let failResetDispatch = false;
   const resetResponses = new Map<string, unknown>();
+  let freshnessReads = 0;
+  const syncFreshness = {
+    comment: { observedAt: 1784044799000, receivedAt: 1784044800100 },
+    dm: null,
+  };
   const users = {
     withAuthorizedInteractionScope: async <T>(
       userId: string,
@@ -68,6 +73,22 @@ test('customer API transactionally binds enabled user + owned env + account on e
       listCalls += 1;
       lastListState = query.state;
       return { items: [], next: null };
+    },
+    getDetail: async (accountId: string, envKey: string, threadId: string) => {
+      assert.deepEqual([accountId, envKey, threadId], ['acct-a', 'env-a', 'thread-a']);
+      return {
+        thread: {
+          id: 'thread-a', platform: 'wechat_channels', accountId, envKey, channel: 'comment',
+          externalThreadId: 'external-thread-a', sourceExternalId: null, sourceTitle: null, sourceCoverUrl: null,
+          participant: null, status: 'open', lastMessageAt: 1784044798000, lastSyncedAt: 1784044799000,
+        },
+        messages: [], replyJob: null, sendAttempt: null, next: null,
+      };
+    },
+    getSyncFreshness: async (accountId: string, envKey: string) => {
+      freshnessReads += 1;
+      assert.deepEqual([accountId, envKey], ['acct-a', 'env-a']);
+      return syncFreshness;
     },
     getAuth: async () => ({
       envKey: 'env-a', accountId: 'acct-a', platform: 'wechat_channels', status: authStatus, browserState: 'closed',
@@ -183,6 +204,7 @@ test('customer API transactionally binds enabled user + owned env + account on e
     });
     assert.equal(crossTenantRead.status, 404);
     assert.equal(listCalls, 0);
+    assert.equal(freshnessReads, 0);
     const crossTenantAct = await fetch(`${base}/environments/env-b/interactions/message-b/ignore`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-test-user': 'user-a' },
       body: JSON.stringify({ expectedVersion: 1 }),
@@ -217,7 +239,8 @@ test('customer API transactionally binds enabled user + owned env + account on e
 
     const list = await fetch(`${base}/environments/env-a/interactions`, { headers: { 'x-test-user': 'user-a' } });
     assert.equal(list.status, 200);
-    const listBody = await list.json() as { data: { envKey: string; accountId: string; testTools: { dataResetEnabled: boolean }; replyConfig: {
+    const listBody = await list.json() as { data: { envKey: string; accountId: string;
+      testTools: { dataResetEnabled: boolean }; syncFreshness: typeof syncFreshness; replyConfig: {
       status: string; currentVersion: number | null; draftVersion: number | null; publishedVersion: number | null;
     }; auth: {
       runtimeControls: { storedVersion: number; edgeAppliedVersion: number | null; applicationStatus: string };
@@ -226,6 +249,16 @@ test('customer API transactionally binds enabled user + owned env + account on e
       ['env-a', 'acct-a', 1784044800000]);
     assert.equal(listCalls, 1);
     assert.equal(listBody.data.testTools.dataResetEnabled, true);
+    assert.deepEqual(listBody.data.syncFreshness, syncFreshness);
+    assert.notEqual(listBody.meta.asOf, listBody.data.syncFreshness.comment?.observedAt,
+      'HTTP snapshot time must remain separate from platform observation time');
+    const detail = await fetch(`${base}/environments/env-a/interactions/thread-a`, {
+      headers: { 'x-test-user': 'user-a' },
+    });
+    assert.equal(detail.status, 200);
+    const detailBody = await detail.json() as { data: { syncFreshness: typeof syncFreshness }; meta: { asOf: number } };
+    assert.deepEqual(detailBody.data.syncFreshness, syncFreshness);
+    assert.equal(detailBody.meta.asOf, 1784044800000);
     const pendingList = await fetch(`${base}/environments/env-a/interactions?state=pending`, {
       headers: { 'x-test-user': 'user-a' },
     });

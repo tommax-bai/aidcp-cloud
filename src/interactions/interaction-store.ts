@@ -22,6 +22,7 @@ import {
   type RuntimeControls,
   type ScopedJobContext,
   type SendAttemptView,
+  type SyncFreshnessProjection,
   type ThreadView,
 } from './types.js';
 
@@ -367,9 +368,11 @@ export class InteractionStore {
       await this.assertAccountScope(client, payload.accountId, payload.envKey);
       const existing = await client.query<{
         env_key: string; channel: InteractionChannel; scope_external_id: string | null;
-        cursor_after: string | null; persisted_threads: number; persisted_messages: number; received_at: Date;
+        cursor_after: string | null; persisted_threads: number; persisted_messages: number;
+        observed_at: Date; received_at: Date;
       }>(
-        `SELECT env_key, channel, scope_external_id, cursor_after, persisted_threads, persisted_messages, received_at
+        `SELECT env_key, channel, scope_external_id, cursor_after, persisted_threads, persisted_messages,
+                observed_at, received_at
            FROM interaction_sync_batches
           WHERE platform=$1 AND account_id=$2 AND batch_id=$3`,
         [payload.platform, payload.accountId, payload.batchId],
@@ -382,6 +385,39 @@ export class InteractionStore {
         ) {
           throw new InteractionError('INTERACTION_SCOPE_MISMATCH', '重复批次的 scope 或游标不一致。', 409);
         }
+        let receivedAt = epoch(row.received_at);
+        if (payload.observedAt > epoch(row.observed_at)) {
+          receivedAt = Math.max(this.clock(), receivedAt + 1);
+          await client.query(
+            `UPDATE interaction_sync_batches
+                SET observed_at=to_timestamp($4/1000.0),received_at=to_timestamp($5/1000.0)
+              WHERE platform=$1 AND account_id=$2 AND batch_id=$3
+                AND observed_at < to_timestamp($4/1000.0)`,
+            [payload.platform, payload.accountId, payload.batchId, payload.observedAt, receivedAt],
+          );
+          await client.query(
+            `INSERT INTO interaction_sync_cursors
+              (id,platform,account_id,env_key,channel,scope_external_id,cursor,last_success_at,last_batch_id,schema_version,updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,to_timestamp($8/1000.0),$9,1,to_timestamp($10/1000.0))
+             ON CONFLICT (platform,account_id,channel,(COALESCE(scope_external_id,''))) DO UPDATE SET
+               env_key=EXCLUDED.env_key,cursor=EXCLUDED.cursor,
+               last_success_at=GREATEST(interaction_sync_cursors.last_success_at,EXCLUDED.last_success_at),
+               last_batch_id=EXCLUDED.last_batch_id,updated_at=EXCLUDED.updated_at`,
+            [this.idGen('cursor'), payload.platform, payload.accountId, payload.envKey, payload.channel,
+              payload.scopeExternalId, payload.cursorAfter, payload.observedAt, payload.batchId, receivedAt],
+          );
+          const externalThreadIds = payload.threads.map((thread) => thread.externalThreadId);
+          if (externalThreadIds.length > 0) {
+            await client.query(
+              `UPDATE interaction_threads
+                  SET last_synced_at=GREATEST(last_synced_at,to_timestamp($5/1000.0)),updated_at=now()
+                WHERE platform=$1 AND account_id=$2 AND env_key=$3 AND channel=$4
+                  AND external_thread_id=ANY($6::text[])`,
+              [payload.platform, payload.accountId, payload.envKey, payload.channel,
+                payload.observedAt, externalThreadIds],
+            );
+          }
+        }
         await client.query('COMMIT');
         return {
           newJobIds: [],
@@ -390,7 +426,7 @@ export class InteractionStore {
             platform: INTERACTION_PLATFORM, channel: payload.channel, scopeExternalId: payload.scopeExternalId,
             status: 'duplicate', cursorAfter: payload.cursorAfter,
             persisted: { threads: row.persisted_threads, messages: row.persisted_messages },
-            errorCode: null, receivedAt: epoch(row.received_at),
+            errorCode: null, receivedAt,
           },
         };
       }
@@ -402,7 +438,7 @@ export class InteractionStore {
             (id,platform,account_id,env_key,channel,external_thread_id,source_external_id,source_title,
              source_cover_url,participant_external_id,participant_name,participant_avatar_url,status,
              last_message_at,last_synced_at,created_at,updated_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'open',to_timestamp($13/1000.0),now(),now(),now())
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'open',to_timestamp($13/1000.0),to_timestamp($14/1000.0),now(),now())
            ON CONFLICT (platform,account_id,channel,external_thread_id) DO UPDATE SET
              env_key=EXCLUDED.env_key,
              source_external_id=COALESCE(EXCLUDED.source_external_id,interaction_threads.source_external_id),
@@ -412,12 +448,12 @@ export class InteractionStore {
              participant_name=COALESCE(EXCLUDED.participant_name,interaction_threads.participant_name),
              participant_avatar_url=COALESCE(EXCLUDED.participant_avatar_url,interaction_threads.participant_avatar_url),
              last_message_at=GREATEST(interaction_threads.last_message_at,EXCLUDED.last_message_at),
-             last_synced_at=now(), updated_at=now()
+             last_synced_at=GREATEST(interaction_threads.last_synced_at,EXCLUDED.last_synced_at), updated_at=now()
            RETURNING id`,
           [this.idGen('thread'), payload.platform, payload.accountId, payload.envKey, payload.channel,
             thread.externalThreadId, thread.sourceExternalId, thread.sourceTitle, thread.sourceCoverUrl,
             thread.participant?.externalId ?? null, thread.participant?.displayName ?? null,
-            thread.participant?.avatarUrl ?? null, thread.updatedAt],
+            thread.participant?.avatarUrl ?? null, thread.updatedAt, payload.observedAt],
         );
         threadIds.set(thread.externalThreadId, rows[0].id);
       }
@@ -461,23 +497,26 @@ export class InteractionStore {
           if (job.rows[0]) newJobIds.push(job.rows[0].id);
           await client.query(
             `UPDATE interaction_threads SET status='waiting_review',
-               last_message_at=GREATEST(last_message_at,to_timestamp($2/1000.0)),last_synced_at=now(),updated_at=now()
+               last_message_at=GREATEST(last_message_at,to_timestamp($2/1000.0)),
+               last_synced_at=GREATEST(last_synced_at,to_timestamp($5/1000.0)),updated_at=now()
              WHERE id=$1 AND account_id=$3 AND env_key=$4`,
-            [threadId, message.platformCreatedAt, payload.accountId, payload.envKey],
+            [threadId, message.platformCreatedAt, payload.accountId, payload.envKey, payload.observedAt],
           );
         }
       }
 
+      const receivedAt = this.clock();
       await client.query(
         `INSERT INTO interaction_sync_cursors
           (id,platform,account_id,env_key,channel,scope_external_id,cursor,last_success_at,last_batch_id,schema_version,updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,now(),$8,1,now())
+         VALUES ($1,$2,$3,$4,$5,$6,$7,to_timestamp($8/1000.0),$9,1,to_timestamp($10/1000.0))
          ON CONFLICT (platform,account_id,channel,(COALESCE(scope_external_id,''))) DO UPDATE SET
-           env_key=EXCLUDED.env_key,cursor=EXCLUDED.cursor,last_success_at=now(),last_batch_id=EXCLUDED.last_batch_id,updated_at=now()`,
+           env_key=EXCLUDED.env_key,cursor=EXCLUDED.cursor,
+           last_success_at=GREATEST(interaction_sync_cursors.last_success_at,EXCLUDED.last_success_at),
+           last_batch_id=EXCLUDED.last_batch_id,updated_at=EXCLUDED.updated_at`,
         [this.idGen('cursor'), payload.platform, payload.accountId, payload.envKey, payload.channel,
-          payload.scopeExternalId, payload.cursorAfter, payload.batchId],
+          payload.scopeExternalId, payload.cursorAfter, payload.observedAt, payload.batchId, receivedAt],
       );
-      const receivedAt = this.clock();
       await client.query(
         `INSERT INTO interaction_sync_batches
           (id,platform,account_id,env_key,batch_id,request_id,channel,scope_external_id,cursor_before,cursor_after,
@@ -583,6 +622,25 @@ export class InteractionStore {
     const auth = await this.getAuth(accountId, envKey);
     if (!auth || !rows[0]) return null;
     return { auth, activeSince: rows[0].active_since ? epoch(rows[0].active_since) : null };
+  }
+
+  async getSyncFreshness(accountId: string, envKey: string): Promise<SyncFreshnessProjection> {
+    const { rows } = await this.pool.query<{
+      channel: InteractionChannel;
+      observed_at: Date | string;
+      received_at: Date | string;
+    }>(
+      `SELECT DISTINCT ON (channel) channel,observed_at,received_at
+         FROM interaction_sync_batches
+        WHERE platform=$1 AND account_id=$2 AND env_key=$3 AND ack_status='accepted'
+        ORDER BY channel,observed_at DESC,received_at DESC,id DESC`,
+      [INTERACTION_PLATFORM, accountId, envKey],
+    );
+    const projection: SyncFreshnessProjection = { comment: null, dm: null };
+    for (const row of rows) {
+      projection[row.channel] = { observedAt: epoch(row.observed_at), receivedAt: epoch(row.received_at) };
+    }
+    return projection;
   }
 
   async listInteractions(query: ListQuery): Promise<ListResult> {

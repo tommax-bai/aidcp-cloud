@@ -243,12 +243,13 @@ export class InteractionCustomerApi {
       const token = url.searchParams.get('cursor');
       const cursor = token ? this.cursors.decode(token, { kind: 'list', envKey }) : null;
       const asOf = cursor?.asOf ?? this.clock();
-      const [result, auth, controls, replyConfig] = await Promise.all([
+      const [result, auth, controls, replyConfig, syncFreshness] = await Promise.all([
         this.deps.store.listInteractions({ accountId, envKey, asOf, limit, channel, state,
           before: cursor ? { lastMessageAt: cursor.time, id: cursor.id } : undefined }),
         this.deps.store.getAuth(accountId, envKey),
         this.deps.store.getRuntimeControls(accountId),
         replyConfigSummary(this.deps.configs, accountId),
+        this.deps.store.getSyncFreshness(accountId, envKey),
       ]);
       if (!auth) throw new InteractionError('INTERACTION_UPSTREAM_UNAVAILABLE', '平台登录状态尚不可用。', 503);
       const nextCursor = result.next ? this.cursors.encode({ kind: 'list', envKey, asOf,
@@ -256,7 +257,7 @@ export class InteractionCustomerApi {
       this.ok(res, requestId, asOf, { envKey, accountId, platform: INTERACTION_PLATFORM,
         auth: authSummary(auth, controls), replyConfig,
         testTools: { dataResetEnabled: this.deps.testDataResetEnabled === true },
-        items: result.items, nextCursor });
+        syncFreshness, items: result.items, nextCursor });
       return true;
     }
     if (parts[2] === 'interactions' && parts.length === 4 && method === 'GET') {
@@ -265,18 +266,19 @@ export class InteractionCustomerApi {
       const token = url.searchParams.get('cursor');
       const cursor = token ? this.cursors.decode(token, { kind: 'detail', envKey, resourceId: threadId }) : null;
       const asOf = cursor?.asOf ?? this.clock();
-      const [detail, auth, controls, replyConfig] = await Promise.all([
+      const [detail, auth, controls, replyConfig, syncFreshness] = await Promise.all([
         this.deps.store.getDetail(accountId, envKey, threadId, 100,
           cursor ? { platformCreatedAt: cursor.time, id: cursor.id } : undefined),
         this.deps.store.getAuth(accountId, envKey),
         this.deps.store.getRuntimeControls(accountId),
         replyConfigSummary(this.deps.configs, accountId),
+        this.deps.store.getSyncFreshness(accountId, envKey),
       ]);
       if (!detail) throw new InteractionError('INTERACTION_NOT_FOUND', '资源不存在。', 404);
       if (!auth) throw new InteractionError('INTERACTION_UPSTREAM_UNAVAILABLE', '平台登录状态尚不可用。', 503);
       const nextCursor = detail.next ? this.cursors.encode({ kind: 'detail', envKey, resourceId: threadId, asOf,
         time: detail.next.platformCreatedAt, id: detail.next.id }) : null;
-      this.ok(res, requestId, asOf, { envKey, accountId, platform: INTERACTION_PLATFORM, auth: authSummary(auth, controls), replyConfig,
+      this.ok(res, requestId, asOf, { envKey, accountId, platform: INTERACTION_PLATFORM, auth: authSummary(auth, controls), replyConfig, syncFreshness,
         thread: detail.thread, messages: detail.messages, replyJob: detail.replyJob,
         sendAttempt: detail.sendAttempt, nextCursor });
       return true;

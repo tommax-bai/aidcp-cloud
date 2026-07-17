@@ -49,6 +49,34 @@ test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recov
       assert.deepEqual(duplicates.map((result) => result.ack.status).sort(), ['accepted', 'duplicate']);
       assert.equal((await pool.query(`SELECT count(*)::int AS n FROM interaction_messages`)).rows[0].n, 1);
       assert.equal((await pool.query(`SELECT count(*)::int AS n FROM interaction_reply_jobs`)).rows[0].n, 1);
+      assert.deepEqual(await store.getSyncFreshness('acct_wc_demo', 'env_wc_demo'), {
+        comment: { observedAt: payload.observedAt, receivedAt: 1784044802100 },
+        dm: null,
+      });
+
+      const laterObservation = { ...payload, observedAt: payload.observedAt + 5_000 };
+      const laterDuplicate = await store.ingestBatch(laterObservation);
+      assert.equal(laterDuplicate.ack.status, 'duplicate');
+      assert.equal(laterDuplicate.ack.receivedAt, 1784044802101,
+        'a newer unchanged observation must get a monotonic Cloud receipt time');
+      assert.deepEqual(await store.getSyncFreshness('acct_wc_demo', 'env_wc_demo'), {
+        comment: { observedAt: laterObservation.observedAt, receivedAt: 1784044802101 },
+        dm: null,
+      });
+      assert.equal((await pool.query(`SELECT count(*)::int AS n FROM interaction_messages`)).rows[0].n, 1);
+      assert.equal((await pool.query(`SELECT count(*)::int AS n FROM interaction_reply_jobs`)).rows[0].n, 1);
+      const replay = await store.ingestBatch(payload);
+      assert.equal(replay.ack.receivedAt, 1784044802101,
+        'an equal/older replay must retain the latest successful receipt evidence');
+      assert.deepEqual(await store.getSyncFreshness('acct_wc_demo', 'env_wc_demo'), {
+        comment: { observedAt: laterObservation.observedAt, receivedAt: 1784044802101 },
+        dm: null,
+      });
+      const syncedThread = (await pool.query<{ last_synced_at: Date }>(
+        `SELECT last_synced_at FROM interaction_threads WHERE account_id=$1 AND env_key=$2 AND channel='comment' LIMIT 1`,
+        ['acct_wc_demo', 'env_wc_demo'],
+      )).rows[0];
+      assert.equal(syncedThread.last_synced_at.getTime(), laterObservation.observedAt);
 
       const broken: InteractionSyncBatchPayload = {
         ...payload, batchId: 'batch-rollback', cursorAfter: 'cursor-must-not-commit',

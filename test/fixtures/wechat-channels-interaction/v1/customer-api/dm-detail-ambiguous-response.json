@@ -33,6 +33,13 @@
         }
       }
     },
+    "syncFreshness": {
+      "comment": null,
+      "dm": {
+        "observedAt": 1784044803000,
+        "receivedAt": 1784044803100
+      }
+    },
     "thread": {
       "id": "thread_dm_200",
       "platform": "wechat_channels",
@@ -50,7 +57,7 @@
       },
       "status": "waiting_review",
       "lastMessageAt": 1784044802500,
-      "lastSyncedAt": 1784044803100
+      "lastSyncedAt": 1784044803000
     },
     "messages": [
       {
