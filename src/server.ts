@@ -2601,13 +2601,19 @@ async function main(): Promise<void> {
   const interactionGuardRegistry = new InteractionGuardRegistry();
 
   // 动作冷却闸（engagement-restraint）：单例共享（内部按 accountId 分桶）——同账号 N 连接共用同一冷却时间线，
-  // 不同账号互不影响。附加只读节奏闸，不写风控终态；判定全在云端、内存态、不经协议、无迁移。
-  // 重启冷启动静默期（change account-nurture-discipline-spine §4.1）：冷却为内存态、重启即清零，
-  // 不设静默期则重启瞬间每账号每类互动可 burst。默认 3min，AIDCP_RESTART_QUIET_MS 可调（0=关）。
-  const restartQuietMs = Number(process.env.AIDCP_RESTART_QUIET_MS ?? 180_000);
+  // 不同账号互不影响。**兜底闸、不是数量闸**（数量单归风控配额主闸；语义见 risk/action-cooldown.ts 文件头）：
+  // 只防意外爆发——同秒重入、同账号并行会话同刻双发、重启后首发。不写风控终态；判定全在云端、内存态、
+  // 不经协议、无迁移。
+  // 重启冷启动静默期（change account-nurture-discipline-spine §4.1，默认值于 cooldown-as-backstop-not-quota 改判）：
+  // 冷却为内存态、重启即清零 ⇒ 兜底对每账号每动作的首发是瞎的，静默期补上这一发的最小间距。
+  // 默认 15s ＝ 与冷却同值、同受「兜底必须比主闸松」不变量约束（旧默认 3min 把病灶从冷却搬到静默期：
+  // 严 12×，且严于 follow/comment 的 60s 主闸地板）。AIDCP_RESTART_QUIET_MS 可调（0=关）＝秒级回滚旋钮。
+  const RESTART_QUIET_DEFAULT_MS = 15_000;
+  const restartQuietMs = Number(process.env.AIDCP_RESTART_QUIET_MS ?? RESTART_QUIET_DEFAULT_MS);
   const actionCooldownGate = new ActionCooldownGate({
     startedAtMs: Date.now(),
-    restartQuietMs: Number.isFinite(restartQuietMs) && restartQuietMs >= 0 ? restartQuietMs : 180_000,
+    restartQuietMs:
+      Number.isFinite(restartQuietMs) && restartQuietMs >= 0 ? restartQuietMs : RESTART_QUIET_DEFAULT_MS,
   });
 
   // 每个连接握手时由 buildDispatcher 造一束 RoleDispatcher：私有总线 / 该连接真实账号 controller / 定向下发。
