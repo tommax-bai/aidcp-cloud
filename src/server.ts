@@ -3389,8 +3389,8 @@ async function main(): Promise<void> {
       // 并发准入（change parallel-rewrite-drafts）：账号在途帽（claim + DB 待审之和，覆盖全部触发入口）
       // + 全局并发生成帽（保护 LLM/生图供应商；上线先压 AIDCP_PUBLISH_IMAGE_CONCURRENCY 观察成功率）。
       countPendingForAccount: (accountId) => publishLogStore.countPendingForAccount(accountId),
-      pendingCapPerAccount: Number(process.env.AIDCP_PUBLISH_PENDING_CAP_PER_ACCOUNT ?? 3),
-      maxConcurrentRuns: Number(process.env.AIDCP_PUBLISH_MAX_CONCURRENT_RUNS ?? 2),
+      pendingCapPerAccount: Number(process.env.AIDCP_PUBLISH_PENDING_CAP_PER_ACCOUNT ?? 20),
+      maxConcurrentRuns: Number(process.env.AIDCP_PUBLISH_MAX_CONCURRENT_RUNS ?? 3),
       logger: console,
     });
     console.log('[aidcp-cloud] PublishScheduler 已就绪（手动 /publish 即用；洗稿并行=参照稿粒度）');

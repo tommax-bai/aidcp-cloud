@@ -205,8 +205,8 @@ describe('claim 键控单飞与容量帽', () => {
       resolveRisk: async () => ({ canDo: () => true, getState: () => ({ status: 'normal' }) }),
       resolveSingleAccountId: async () => 'acc-test',
       countPendingForAccount: async () => opts.dbPending ?? 0,
-      pendingCapPerAccount: opts.pendingCap ?? 3,
-      maxConcurrentRuns: opts.maxRuns ?? 2,
+      ...(opts.pendingCap === undefined ? {} : { pendingCapPerAccount: opts.pendingCap }),
+      ...(opts.maxRuns === undefined ? {} : { maxConcurrentRuns: opts.maxRuns }),
       orchestrator: {
         trigger: async (input) => {
           started.push(input.generateInput.referenceNote?.sourceId ?? `auto:${input.accountId}`);
@@ -236,7 +236,7 @@ describe('claim 键控单飞与容量帽', () => {
     if (a.started) await a.outcome;
   });
 
-  it('同账号跨参照稿并行放行；全局帽满第三发拒 publish_busy', async () => {
+  it('显式全局帽 2：同账号跨参照稿并行放行；帽满第三发拒 publish_busy', async () => {
     const { scheduler, started, note, releaseAll } = buildConcurrent({ maxRuns: 2, pendingCap: 10 });
     const a = scheduler.tryBeginRewrite('acc-test', note('src-1'));
     const b = scheduler.tryBeginRewrite('acc-test', note('src-2'));
@@ -249,6 +249,58 @@ describe('claim 键控单飞与容量帽', () => {
     releaseAll();
     if (a.started) await a.outcome;
     if (b.started) await b.outcome;
+  });
+
+  it('默认容量：三篇跨来源洗稿并行，第四篇拒 publish_busy；账号在途默认帽为 20', async () => {
+    const { scheduler, started, note, releaseAll } = buildConcurrent();
+    const a = scheduler.tryBeginRewrite('acc-test', note('src-1'));
+    const b = scheduler.tryBeginRewrite('acc-test', note('src-2'));
+    const c = scheduler.tryBeginRewrite('acc-test', note('src-3'));
+    const d = scheduler.tryBeginRewrite('acc-test', note('src-4'));
+    assert.equal(a.started && b.started && c.started, true, '默认三轮洗稿并行放行');
+    assert.equal(d.started, false);
+    if (!d.started) assert.equal(d.reason, 'publish_busy', '默认全局帽 3 已满');
+    await new Promise((r) => setTimeout(r, 5));
+    assert.deepEqual(started.sort(), ['src-1', 'src-2', 'src-3'], '三轮真的都在跑');
+    releaseAll();
+    if (a.started) await a.outcome;
+    if (b.started) await b.outcome;
+    if (c.started) await c.outcome;
+
+    const cap = buildConcurrent();
+    const nineteenthPlusOne = cap.scheduler.tryBeginRewrite('acc-test', cap.note('src-20'), { dbPendingCount: 19 });
+    const overCap = cap.scheduler.tryBeginRewrite('acc-test', cap.note('src-21'), { dbPendingCount: 19 });
+    assert.equal(nineteenthPlusOne.started, true, '19 篇待审时仍可生成第 20 篇');
+    assert.equal(overCap.started, false);
+    if (!overCap.started) assert.equal(overCap.reason, 'publish_capacity', '生成中 + 待审达到默认 20 后拒绝');
+    cap.releaseAll();
+    if (nineteenthPlusOne.started) await nineteenthPlusOne.outcome;
+  });
+
+  it('普通稿仍按账号单飞 1；普通稿与洗稿共享默认三个总槽', async () => {
+    const { scheduler, started, note, releaseAll } = buildConcurrent();
+    const autonomous = scheduler.triggerManual('acc-test');
+    await new Promise((r) => setTimeout(r, 5));
+    const secondAutonomous = await scheduler.triggerManual('acc-test');
+    assert.equal(secondAutonomous.result, 'triggered');
+    if (secondAutonomous.result === 'triggered') {
+      assert.equal(secondAutonomous.status, 'skipped');
+      assert.match(secondAutonomous.failureReason ?? '', /already_running/);
+    }
+
+    const rewriteA = scheduler.tryBeginRewrite('acc-test', note('src-a'));
+    const rewriteB = scheduler.tryBeginRewrite('acc-test', note('src-b'));
+    const rewriteC = scheduler.tryBeginRewrite('acc-test', note('src-c'));
+    assert.equal(rewriteA.started && rewriteB.started, true, '普通稿占一槽后仍可并行两篇洗稿');
+    assert.equal(rewriteC.started, false);
+    if (!rewriteC.started) assert.equal(rewriteC.reason, 'publish_busy', '普通稿与洗稿共享总帽 3');
+    await new Promise((r) => setTimeout(r, 5));
+    assert.deepEqual(started.sort(), ['auto:acc-test', 'src-a', 'src-b']);
+
+    releaseAll();
+    await autonomous;
+    if (rewriteA.started) await rewriteA.outcome;
+    if (rewriteB.started) await rewriteB.outcome;
   });
 
   it('账号在途帽 = claim + DB 待审之和：dbPending 达帽即拒 publish_capacity（排期等全部入口同受此帽）', async () => {

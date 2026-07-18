@@ -83,9 +83,9 @@ export interface PublishSchedulerDeps {
    * claim 数相加对帽（claim 数精确防并发穿透，DB 数允许轻微滞后）。缺省（测试桩）→ 只按 claim 数对帽。
    */
   countPendingForAccount?: (accountId: string) => Promise<number>;
-  /** 每账号在途帽：生成中 claim + 落库待审之和（默认 3；覆盖全部触发入口，防排期小时格结构性击穿堆稿）。 */
+  /** 每账号在途帽：生成中 claim + 落库待审之和（默认 20；覆盖全部触发入口，防排期小时格结构性击穿堆稿）。 */
   pendingCapPerAccount?: number;
-  /** 全局并发生成帽（默认 2；保护 LLM/生图供应商——文本重试盲退避不识 429、生图零重试）。 */
+  /** 全局并发生成帽（默认 3；保护 LLM/生图供应商——文本重试盲退避不识 429、生图零重试）。 */
   maxConcurrentRuns?: number;
   /** retire-default-account：按真实账号解析风控（替代单租户全局 risk controller）。 */
   resolveRisk: (accountId: string) => Promise<SchedulerRisk>;
@@ -159,8 +159,8 @@ export class PublishScheduler {
     this.logger = deps.logger ?? console;
     this.conceptThreshold = deps.conceptThreshold ?? 20;
     this.minHoursBetween = deps.minHoursBetween ?? 24;
-    this.pendingCapPerAccount = Math.max(1, deps.pendingCapPerAccount ?? 3);
-    this.maxConcurrentRuns = Math.max(1, deps.maxConcurrentRuns ?? 2);
+    this.pendingCapPerAccount = Math.max(1, deps.pendingCapPerAccount ?? 20);
+    this.maxConcurrentRuns = Math.max(1, deps.maxConcurrentRuns ?? 3);
     this.startedAt = this.clock();
   }
 
