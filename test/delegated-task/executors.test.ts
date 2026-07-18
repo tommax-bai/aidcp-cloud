@@ -139,6 +139,47 @@ test('candidate modification is CAS-bound and carries the requested retained-ima
   });
 });
 
+test('candidate schedule patch stays CAS-bound and scheduled approval is a verified platform result', async () => {
+  const before = candidate();
+  let writtenPatch: unknown;
+  const publishTime = Date.now() + 2 * 60 * 60 * 1000;
+  const router = createDelegatedExecutorRouter({
+    comments: {
+      triggerManual: async () => ({ ok: false, message: 'unused' }),
+      triggerTargeted: async () => ({ ok: false, message: 'unused' }),
+      isRunning: () => false,
+    },
+    publishes: { triggerDelegated: async () => ({ result: 'blocked', reason: 'unused' }), isBusy: () => false },
+    loadCandidate: async () => before,
+    approveCandidate: async () => candidate({ status: 'scheduled' }),
+    rejectCandidate: async () => null,
+    modifyCandidate: async (_draft, patch) => {
+      writtenPatch = patch;
+      return candidate({ contentVersion: 4 });
+    },
+  });
+  const modify = task({
+    action: 'modify_candidate', actionFamily: 'candidate_control', targetSuccessCount: 1, maxAttempts: 1,
+    targetConstraints: {
+      candidateId: '42', candidateVersion: 3, publishMode: 'scheduled', publishTime,
+    },
+  });
+  const modified = await router.executorFor(modify).execute(modify, attempt);
+  assert.equal(modified.kind, 'success');
+  assert.deepEqual(writtenPatch, { publishMode: 'scheduled', publishTime });
+
+  const approve = task({
+    action: 'approve_candidate', actionFamily: 'candidate_control', targetSuccessCount: 1, maxAttempts: 1,
+    targetConstraints: { candidateId: '42', candidateVersion: 3 },
+  });
+  const approved = await router.executorFor(approve).execute(approve, attempt);
+  assert.deepEqual(approved, {
+    kind: 'success',
+    verificationKind: 'platform_schedule_confirmed',
+    evidenceRef: 'publish:42:v3',
+  });
+});
+
 // change restore-delegated-command-card-origin-chat：命令来源会话 → 审批卡目标（manual_source）。
 test('delegated publish threads originChatId to the publish port as manualApprovalChatId, and omits it when absent', async () => {
   const calls: Array<{ manualApprovalChatId?: string }> = [];

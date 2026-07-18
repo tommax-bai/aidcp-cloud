@@ -124,6 +124,10 @@ export function buildPublishCommandPlan(input: BuildPublishCommandPlanInput): Pu
 
   if (!input.approvedByUser) return cmds;
   add('submit_publish');
-  add('capture_postId');
+  if (md?.mode === 'scheduled' && md.publishTime) {
+    add('capture_scheduled', { publishTime: md.publishTime, scheduledTitle: input.title });
+  } else {
+    add('capture_postId');
+  }
   return cmds;
 }

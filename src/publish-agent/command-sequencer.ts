@@ -21,6 +21,7 @@ import { CommandPreemptedError, isPreemptionReason, type PreemptionReason } from
 import type { PlatformId } from '../platform/index.js';
 import type { PublishMetadata } from './types.js';
 import { buildPublishCommandPlan } from './platform-profile.js';
+import { validatePublishSchedule } from './schedule-policy.js';
 import {
   DEFAULT_FILL_BUDGET,
   isContentTooLong,
@@ -72,18 +73,23 @@ export interface PublishSequenceInput {
 export interface PublishSequenceResult {
   ok: boolean;
   /**
-   * 终局四态（change lease-strict-preemption 批 C 新增 `preempted`）：
+   * 终局五态：
    * - `published_confirmed`：已提交且抓到 postId。
    * - `submitted_unconfirmed`：提交动作已派发但未拿到确认（含提交后被抢占）——页面态 submitted、绝不重投。
+   * - `scheduled_pending`：平台已接受 XHS 原生定时任务，等待目标时刻后对账；不计发布次数。
    * - `failed_before_submit`：提交前真失败——可安全烧待审重投。
    * - `preempted`：提交前被严格高档位抢占（零平台副作用）——**保持待审、不写 failed、不计熔断、事件驱动重投**，
    *   下发段（publish-dispatcher）MUST 单独分支处置，绝不并入 failed_before_submit（否则被抢占的稿被烧成不可逆 failed）。
    */
-  outcome: 'published_confirmed' | 'submitted_unconfirmed' | 'failed_before_submit' | 'preempted';
+  outcome: 'published_confirmed' | 'submitted_unconfirmed' | 'scheduled_pending' | 'failed_before_submit' | 'preempted';
   /** 成功时的真实平台 postId（来自 capture_postId 回报） */
   postId?: string;
   /** 成功时的小红书详情页分享 URL（带 xsec_token，来自 capture_postId 回报；边缘抓不到则 undefined） */
   postUrl?: string;
+  /** 定时提交后从管理列表取得的平台内部句柄；绝不是公开 postId。 */
+  scheduledPlatformId?: string;
+  /** 已获平台接受的目标发布时间（epoch ms）。 */
+  scheduledAt?: number;
   /**
    * 真实上传成功张数 K（多图部分成功记账，publish-multi-image）。
    * 请求 N 张实成 K 张：K≥1 即有效图文帖、照发；K===0（全失败）→ 无有效帖、诚实 failed。
@@ -115,6 +121,20 @@ export interface CommandSequencerDeps {
   fillBudget?: FillBudgetConfig;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
+
+export interface ScheduledReconciliationInput {
+  taskId: string;
+  recordId: number;
+  edgeId: string;
+  title: string;
+  publishTime: number;
+  scheduledPlatformId?: string | null;
+  attempt: number;
+}
+
+export type ScheduledReconciliationResult =
+  | { state: 'published'; postId: string; postUrl: string }
+  | { state: 'pending'; error: string };
 
 interface Pending {
   commandId: string;
@@ -179,9 +199,22 @@ export class CommandSequencer {
    * - 仅当未请求配图（无图流，前向兼容）才存在"纯文字继续"路径。
    */
   async executePublishSequence(input: PublishSequenceInput): Promise<PublishSequenceResult> {
+    const platform = input.platform ?? 'xiaohongshu';
+    const scheduled = input.metadata?.mode === 'scheduled';
+    if (scheduled) {
+      const scheduleError = validatePublishSchedule(platform, 'scheduled', input.metadata?.publishTime ?? null, this.clock());
+      if (scheduleError) {
+        return {
+          ok: false,
+          outcome: 'failed_before_submit',
+          attachedCount: 0,
+          failedAt: { seq: -1, kind: 'set_schedule', error: scheduleError },
+        };
+      }
+    }
     // FB 正文逐字输入：超出预算上限所能打完的长度 → 诚实失败，MUST NOT 截断正文发出去。
     // 触发即说明内容生成侧越界（管线设计区间 200–500 字），要修的是那头，不是在这里悄悄砍。
-    if ((input.platform ?? 'xiaohongshu') === 'facebook' && isContentTooLong(input.content, this.fillBudget)) {
+    if (platform === 'facebook' && isContentTooLong(input.content, this.fillBudget)) {
       const chars = contentCharCount(input.content);
       const limit = maxFillChars(this.fillBudget);
       // 上限低于管线设计区间（200–500 字）时，真凶是预算/租约配置而非内容生成——把话说清楚，
@@ -203,6 +236,7 @@ export class CommandSequencer {
     const targetEdgeId = input.edgeId;
     let postId: string | undefined;
     let postUrl: string | undefined;
+    let scheduledPlatformId: string | undefined;
     let submitted = false;
     let attachedCount = 0;
     // 已尝试上传张数（成功+失败）。upload 均在 fill 前且连续；据此判「全部上传已尝试完」，
@@ -213,7 +247,8 @@ export class CommandSequencer {
     let lastUploadSeq = -1;
     // 元数据是增强项，非有效帖必需：失败best-effort跳过、继续发（带标题/正文/图的帖子仍是有效帖）。
     // 绝不伪造该项成功——只是诚实地"少了这个标签/选项"继续。核心步（导航/选模式/标题/正文/提交）仍 fail-fast。
-    const bestEffort = new Set<PublishCommandKind>(['add_with_candidate', 'set_option', 'set_schedule']);
+    // `set_schedule` 是提交关键步：失败继续会把定时稿立即发出，故绝不在 bestEffort。
+    const bestEffort = new Set<PublishCommandKind>(['add_with_candidate', 'set_option']);
 
     for (const cmd of sequence) {
       // 图文帖编辑器被"先传图"门控（task-0 实测：无图则标题/正文不存在）。全部上传已尝试完但 K===0 → 无有效帖，
@@ -244,8 +279,8 @@ export class CommandSequencer {
           continue;
         }
         // 已提交后抓 postId 异常：帖子已发出，postId 抓取仅记录用 → 非致命（不可把已发布误判为 failed）。
-        if (cmd.kind === 'capture_postId' && submitted) {
-          this.logger.warn(`[CommandSequencer] capture_postId 异常但已提交发布、postId 未知 seq=${cmd.seq}: ${error}`);
+        if ((cmd.kind === 'capture_postId' || cmd.kind === 'capture_scheduled') && submitted) {
+          this.logger.warn(`[CommandSequencer] ${cmd.kind} 异常但提交已派发、确认句柄未知 seq=${cmd.seq}: ${error}`);
           continue;
         }
         // 元数据增强项异常 → best-effort 跳过，继续发（少这个标签/选项不影响有效帖）。
@@ -259,7 +294,7 @@ export class CommandSequencer {
         const preempted = err instanceof CommandPreemptedError ? err : null;
         return {
           ok: false,
-          outcome: this.classifyFailureOutcome(submitted, preempted?.submitDispatched ?? false, preempted?.reason),
+          outcome: this.classifyFailureOutcome(scheduled, submitted, preempted?.submitDispatched ?? false, preempted?.reason),
           attachedCount,
           failedAt: { seq: cmd.seq, kind: cmd.kind, error },
         };
@@ -272,8 +307,8 @@ export class CommandSequencer {
           continue;
         }
         // 已提交后抓 postId 失败：帖子已发出 → 非致命（postId 未知，绝不把已发布误判为 failed）。
-        if (cmd.kind === 'capture_postId' && submitted) {
-          this.logger.warn(`[CommandSequencer] capture_postId 失败但已提交发布、postId 未知 seq=${cmd.seq}: ${result.error ?? 'unknown'}`);
+        if ((cmd.kind === 'capture_postId' || cmd.kind === 'capture_scheduled') && submitted) {
+          this.logger.warn(`[CommandSequencer] ${cmd.kind} 失败但提交已派发、确认句柄未知 seq=${cmd.seq}: ${result.error ?? 'unknown'}`);
           continue;
         }
         // 元数据增强项失败 → best-effort 跳过，继续发（少这个标签/选项不影响有效帖）。
@@ -285,7 +320,7 @@ export class CommandSequencer {
         // （提交已派发→submitted_unconfirmed；抢占原因→preempted；余→failed_before_submit）。
         return {
           ok: false,
-          outcome: this.classifyFailureOutcome(submitted, result.submitDispatched === true, result.error),
+          outcome: this.classifyFailureOutcome(scheduled, submitted, result.submitDispatched === true, result.error),
           attachedCount,
           failedAt: { seq: cmd.seq, kind: cmd.kind, error: result.error ?? 'unknown' },
         };
@@ -301,11 +336,21 @@ export class CommandSequencer {
         // 详情页分享 URL（带 xsec_token）随 capture_postId 回报；边缘抓不到则 undefined（诚实置空，下游不写假链接）。
         postUrl = result.postUrl;
       }
+      if (cmd.kind === 'capture_scheduled') scheduledPlatformId = result.value;
     }
 
     // 未授权 → 序列不含 submit → 未真正发布（红线：不假成功）。
     if (!submitted) {
       return { ok: false, outcome: 'failed_before_submit', attachedCount, failedAt: { seq: -1, kind: 'submit_publish', error: 'not_approved' } };
+    }
+    if (scheduled) {
+      return {
+        ok: true,
+        outcome: 'scheduled_pending',
+        attachedCount,
+        scheduledPlatformId,
+        scheduledAt: input.metadata!.publishTime!,
+      };
     }
     return {
       ok: true,
@@ -324,17 +369,42 @@ export class CommandSequencer {
    * ③ 其余提交前失败 → `failed_before_submit`：可安全烧待审重投（content_too_long / all_images_failed / not_approved 等）。
    */
   private classifyFailureOutcome(
+    scheduled: boolean,
     submitted: boolean,
     submitDispatchedNow: boolean,
     reason: string | undefined,
   ): PublishSequenceResult['outcome'] {
-    if (submitted || submitDispatchedNow) return 'submitted_unconfirmed';
+    if (submitted || submitDispatchedNow) return scheduled ? 'scheduled_pending' : 'submitted_unconfirmed';
     // yield_timeout（写者收到取消仍不停手＝控制面故障）：页面状态**未知**——卡死的写者可能仍会走完提交按下。
     // MUST NOT 当作「提交前零副作用」的 preempted 去自动重投（否则卡死写者最终按下提交 → 双发）。按「已提交待确认」
     // 终态处置（不重投、不烧稿），控制面回收 / 请运营重启客户端由边缘掉线侧信号驱动（spec 10.4）。
-    if (reason === 'yield_timeout') return 'submitted_unconfirmed';
+    if (reason === 'yield_timeout') return scheduled ? 'scheduled_pending' : 'submitted_unconfirmed';
     if (isPreemptionReason(reason)) return 'preempted';
     return 'failed_before_submit';
+  }
+
+  /** 到期后单步只读核验；退避与持久化状态机由 ScheduledPublishReconciler 负责。 */
+  async executeScheduledReconciliation(input: ScheduledReconciliationInput): Promise<ScheduledReconciliationResult> {
+    const cmd: PublishCommandPayload = {
+      taskId: input.taskId,
+      recordId: input.recordId,
+      seq: 1_000_000 + Math.max(0, Math.floor(input.attempt)),
+      kind: 'reconcile_scheduled',
+      platform: 'xiaohongshu',
+      params: {
+        publishTime: input.publishTime,
+        scheduledTitle: input.title,
+        ...(input.scheduledPlatformId ? { scheduledPlatformId: input.scheduledPlatformId } : {}),
+      },
+    };
+    try {
+      const result = await this.sendAndWaitResult(cmd, input.edgeId);
+      if (!result.ok) return { state: 'pending', error: result.error ?? 'scheduled_reconcile_failed' };
+      if (!result.value || !result.postUrl) return { state: 'pending', error: 'scheduled_public_identity_incomplete' };
+      return { state: 'published', postId: result.value, postUrl: result.postUrl };
+    } catch (err) {
+      return { state: 'pending', error: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   /**

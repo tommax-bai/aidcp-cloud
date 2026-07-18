@@ -35,6 +35,7 @@ export type PublishJourneyStatus =
   | 'generating'
   | 'waiting_approval'
   | 'dispatching'
+  | 'scheduled'
   | 'published'
   | 'submitted'
   | 'failed'
@@ -343,6 +344,10 @@ function persistedStages(row: PanelPublish, inFlight: boolean, snapshot: Record<
   if (row.status === 'published') {
     return [...base, stage('approval', 'completed', '发布授权已确认'), stage('dispatch', 'completed', '平台发布已确认', dispatchFacts)];
   }
+  if (row.status === 'scheduled') {
+    const target = row.publishTime === null ? '平台定时任务已确认' : `计划 ${new Date(row.publishTime).toLocaleString('zh-CN')} 公开`;
+    return [...base, stage('approval', 'completed', '发布授权已确认'), stage('dispatch', 'partial', target, dispatchFacts)];
+  }
   if (row.status === 'submitted') {
     return [...base, stage('approval', 'completed', '发布授权已确认'), stage('dispatch', 'partial', '已提交，待链接确认', dispatchFacts)];
   }
@@ -354,6 +359,8 @@ function journeyFromPublish(row: PanelPublish, inFlight: boolean, snapshot: Reco
     ? inFlight ? 'dispatching' : 'waiting_approval'
     : row.status === 'published'
       ? 'published'
+      : row.status === 'scheduled'
+        ? 'scheduled'
       : row.status === 'submitted'
         ? 'submitted'
         : row.status === 'needs_review'
@@ -365,6 +372,7 @@ function journeyFromPublish(row: PanelPublish, inFlight: boolean, snapshot: Reco
     generating: '正在生成候审稿',
     waiting_approval: '候审稿已完成，等待人工审批',
     dispatching: '审批已通过，正在向平台下发',
+    scheduled: '平台定时任务已确认，等待公开后对账',
     published: '平台发布已确认',
     submitted: '已提交平台，帖子链接尚未确认',
     failed: '平台下发失败，未确认发布',

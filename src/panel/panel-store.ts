@@ -90,8 +90,13 @@ export interface PanelPublish {
   id: number;
   title: string | null;
   status: string;
+  platform: string;
   platformPostId: string | null;
   publishedAt: number;
+  publishMode: 'immediate' | 'draft' | 'scheduled';
+  publishTime: number | null;
+  scheduledAt: number | null;
+  scheduledPlatformId: string | null;
   /** 发布账号（change publish-history-account-and-detail）。 */
   accountId: string;
   /** 账号展示名（accounts.label ?? account_id；nickname 待 account-real-nickname 落地后并入）。 */
@@ -256,6 +261,21 @@ function parseJsonObject(raw: unknown): Record<string, unknown> | null {
     }
   }
   return obj && typeof obj === 'object' ? (obj as Record<string, unknown>) : null;
+}
+
+function parsePublishSchedule(raw: unknown): {
+  publishMode: 'immediate' | 'draft' | 'scheduled';
+  publishTime: number | null;
+} {
+  const meta = parseJsonObject(raw);
+  const publishMode = meta?.mode === 'immediate' || meta?.mode === 'scheduled' || meta?.mode === 'draft'
+    ? meta.mode
+    : 'draft';
+  const rawTime = typeof meta?.publishTime === 'number' ? meta.publishTime : NaN;
+  return {
+    publishMode,
+    publishTime: publishMode === 'scheduled' && Number.isFinite(rawTime) ? rawTime : null,
+  };
 }
 
 function parseImageReferenceAudit(raw: unknown): PanelImageReferenceAudit | null {
@@ -465,8 +485,11 @@ export class PgPanelStore implements PanelStoreReader {
       id: number;
       title: string | null;
       status: string;
+      platform: string;
       platform_post_id: string | null;
       published_at: Date;
+      scheduled_at: Date | null;
+      scheduled_platform_id: string | null;
       account_id: string;
       account_label: string | null;
       account_nickname: string | null;
@@ -479,7 +502,8 @@ export class PgPanelStore implements PanelStoreReader {
       publish_metadata: unknown;
       source_reference: unknown;
     }>(
-      `SELECT pl.id, pl.title, pl.status, pl.platform_post_id, pl.published_at,
+      `SELECT pl.id, pl.title, pl.status, pl.platform, pl.platform_post_id, pl.published_at,
+              pl.scheduled_at, pl.scheduled_platform_id,
               pl.account_id, a.label AS account_label, a.nickname AS account_nickname, pl.content, pl.post_url,
               pl.content_version, pl.images, pl.image_url, pl.images_attached_count, pl.publish_metadata, pl.source_reference
        FROM publish_log pl
@@ -487,26 +511,34 @@ export class PgPanelStore implements PanelStoreReader {
        ${where} ORDER BY pl.published_at DESC LIMIT $${params.length}`,
       params,
     );
-    return rows.map((r) => ({
-      id: r.id,
-      title: r.title,
-      status: r.status,
-      platformPostId: r.platform_post_id,
-      publishedAt: r.published_at.getTime(),
-      accountId: r.account_id,
-      // 真名优先（change account-real-nickname）：nickname → label → account_id，绝不显示假名。
-      accountLabel: r.account_nickname ?? r.account_label ?? r.account_id,
-      content: r.content,
-      postUrl: r.post_url,
-      contentVersion: Number(r.content_version ?? 0),
-      images: r.images ?? [],
-      imageUrl: r.image_url,
-      imagesAttachedCount: Number(r.images_attached_count ?? 0),
-      imageReferenceAudit: parseImageReferenceAudit(r.publish_metadata),
-      coverFormAudit: parseCoverFormAudit(r.publish_metadata),
-      visualReferenceAudit: parseVisualReferenceAudit(r.publish_metadata),
-      sourceReference: parseSourceReference(r.source_reference),
-    }));
+    return rows.map((r) => {
+      const schedule = parsePublishSchedule(r.publish_metadata);
+      return {
+        id: r.id,
+        title: r.title,
+        status: r.status,
+        platform: r.platform,
+        platformPostId: r.platform_post_id,
+        publishedAt: r.published_at.getTime(),
+        publishMode: schedule.publishMode,
+        publishTime: schedule.publishTime,
+        scheduledAt: r.scheduled_at ? r.scheduled_at.getTime() : null,
+        scheduledPlatformId: r.scheduled_platform_id,
+        accountId: r.account_id,
+        // 真名优先（change account-real-nickname）：nickname → label → account_id，绝不显示假名。
+        accountLabel: r.account_nickname ?? r.account_label ?? r.account_id,
+        content: r.content,
+        postUrl: r.post_url,
+        contentVersion: Number(r.content_version ?? 0),
+        images: r.images ?? [],
+        imageUrl: r.image_url,
+        imagesAttachedCount: Number(r.images_attached_count ?? 0),
+        imageReferenceAudit: parseImageReferenceAudit(r.publish_metadata),
+        coverFormAudit: parseCoverFormAudit(r.publish_metadata),
+        visualReferenceAudit: parseVisualReferenceAudit(r.publish_metadata),
+        sourceReference: parseSourceReference(r.source_reference),
+      };
+    });
   }
 
   async listAlerts(options: { limit?: number; includeResolved?: boolean } = {}): Promise<PanelAlert[]> {

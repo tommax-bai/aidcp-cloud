@@ -32,6 +32,7 @@ test('verification evidence is action-specific', () => {
   assert.equal(verificationCountsAsSuccess('generate_candidates', 'candidate_persisted'), true);
   assert.equal(verificationCountsAsSuccess('comment_batch', 'platform_comment_confirmed'), true);
   assert.equal(verificationCountsAsSuccess('approve_candidate', 'platform_publish_confirmed'), true);
+  assert.equal(verificationCountsAsSuccess('approve_candidate', 'platform_schedule_confirmed'), true);
   assert.equal(verificationCountsAsSuccess('comment_batch', 'submitted_unknown'), false);
   assert.equal(actionFamilyFor('facebook_group_comment'), 'comment');
 });

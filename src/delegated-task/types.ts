@@ -107,6 +107,7 @@ export interface DelegatedTaskIntent {
 export type DelegatedVerificationKind =
   | 'platform_comment_confirmed'
   | 'platform_publish_confirmed'
+  | 'platform_schedule_confirmed'
   | 'candidate_persisted'
   | 'candidate_version_updated'
   | 'submitted_unknown'
@@ -245,6 +246,7 @@ export function honestTerminalStatus(
 
 export function isVerifiedSuccessKind(kind: DelegatedVerificationKind): boolean {
   return kind === 'platform_comment_confirmed' || kind === 'platform_publish_confirmed' ||
+    kind === 'platform_schedule_confirmed' ||
     kind === 'candidate_persisted' || kind === 'candidate_version_updated';
 }
 
@@ -253,6 +255,8 @@ export function verificationCountsAsSuccess(action: DelegatedAction, kind: Deleg
     case 'platform_comment_confirmed':
       return action === 'comment_batch' || action === 'comment_curated' || action === 'facebook_group_comment';
     case 'platform_publish_confirmed':
+      return action === 'publish_post' || action === 'publish_from_inspiration' || action === 'approve_candidate';
+    case 'platform_schedule_confirmed':
       return action === 'publish_post' || action === 'publish_from_inspiration' || action === 'approve_candidate';
     case 'candidate_persisted':
       return action === 'generate_candidates';

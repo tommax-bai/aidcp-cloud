@@ -2,12 +2,10 @@ import { BasePublishRole } from './base-role.js';
 import type { RoleConfig } from './base-role.js';
 import type { PipelineFields, CreatedContent, PublishModeDecision } from '../types.js';
 import type { PipelineContext } from '../pipeline-context.js';
-
-/** 定时发布上限：未来 7 天（毫秒）。 */
-const MAX_SCHEDULE_AHEAD_MS = 7 * 24 * 60 * 60 * 1000;
+import { XHS_SCHEDULE_MAX_AHEAD_MS, XHS_SCHEDULE_MIN_AHEAD_MS } from '../schedule-policy.js';
 
 /**
- * 校验/夹取定时发布时间：必须「未来且 ≤7 天」，否则返回 null（不接受非法定时）。
+ * 校验定时发布时间：必须「未来至少 1h 且 ≤14 天」，否则返回 null（不接受非法定时）。
  * 纯函数，确定性，供将来 scheduled 模式接线复用；本阶段默认 immediate 不调用。
  * @param publishTime 期望的发布时间戳（毫秒）；null/非有限值即无效。
  * @param now 当前时间戳（毫秒）。
@@ -15,17 +13,15 @@ const MAX_SCHEDULE_AHEAD_MS = 7 * 24 * 60 * 60 * 1000;
  */
 export function clampScheduledTime(publishTime: number | null, now: number): number | null {
   if (publishTime === null || !Number.isFinite(publishTime)) return null;
-  // 必须严格未来
-  if (publishTime <= now) return null;
-  // 必须 ≤7 天
-  if (publishTime - now > MAX_SCHEDULE_AHEAD_MS) return null;
+  if (publishTime - now < XHS_SCHEDULE_MIN_AHEAD_MS) return null;
+  if (publishTime - now > XHS_SCHEDULE_MAX_AHEAD_MS) return null;
   return publishTime;
 }
 
 /**
  * PublishModeDecider — 发布方式决策（A 阶段3 元数据，纯规则、确定性、不调 LLM）。
  * 规则：本阶段默认 mode='immediate'、publishTime=null（不定时）。
- * 定时（scheduled）的「未来且 ≤7 天」校验由纯函数 clampScheduledTime 实现，留作将来接线。
+ * 定时（scheduled）的「未来 1 小时至 14 天」校验由纯函数 clampScheduledTime 实现，供审批编辑与下发共用。
  * 红线：不编造时间——非定时一律 publishTime=null。
  * 降级（getDefaultOutput）：保守取 'draft'（不自动发出去），publishTime=null。
  */

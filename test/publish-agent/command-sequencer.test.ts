@@ -7,7 +7,7 @@ import type { PublishCommandPayload, PublishCommandResultPayload } from '../../s
 type Responder = (cmd: PublishCommandPayload) => PublishCommandResultPayload | null;
 
 /** 构造 sequencer + 一个会按 responder 同步回报的 pusher（responder 返回 null = 不回报，模拟超时）。 */
-function makeSequencer(responder: Responder, timeoutMs = 50) {
+function makeSequencer(responder: Responder, timeoutMs = 50, now = 0) {
   let seq: CommandSequencer;
   const pushed: PublishCommandPayload[] = [];
   const pusher = {
@@ -21,7 +21,7 @@ function makeSequencer(responder: Responder, timeoutMs = 50) {
     },
   };
   // uploadTimeoutMs 与 timeoutMs 同小值，便于测 upload_image 超时降级（生产默认 60s）。
-  seq = new CommandSequencer({ pusher, clock: () => 0, timeoutMs, uploadTimeoutMs: timeoutMs });
+  seq = new CommandSequencer({ pusher, clock: () => now, timeoutMs, uploadTimeoutMs: timeoutMs });
   return { seq, pushed };
 }
 
@@ -152,7 +152,67 @@ describe('AC-CMD CommandSequencer（云端编排驱动）', () => {
     const opts = cmds.filter((c) => c.kind === 'set_option').map((c) => c.params.optionKind);
     assert.ok(opts.includes('visibility') && opts.includes('declaration_ai'));
     assert.ok(kinds.includes('set_schedule'), 'scheduled 模式应发 set_schedule');
-    assert.ok(kinds.includes('submit_publish') && kinds.includes('capture_postId'));
+    assert.ok(kinds.includes('submit_publish') && kinds.includes('capture_scheduled'));
+    assert.ok(!kinds.includes('capture_postId'), '定时提交不得强求当场公开 postId');
+  });
+
+  it('XHS-SCHEDULE set_schedule 是提交前关键步骤：失败即闭锁，绝不退化成立即发布', async () => {
+    const now = 1_800_000_000_000;
+    const metadata = {
+      topics: ['t1'], mentions: [], location: null, collection: null,
+      visibility: 'public' as const,
+      permissions: { comment: 'allow' as const, save: 'allow' as const },
+      mode: 'scheduled' as const, publishTime: now + 2 * 60 * 60 * 1000,
+      compliance: {}, metadataScore: 1, decidedAt: now,
+    };
+    const { seq, pushed } = makeSequencer((cmd) => cmd.kind === 'set_schedule'
+      ? { recordId: cmd.recordId, seq: cmd.seq, kind: cmd.kind, ok: false, error: 'schedule_not_confirmed' }
+      : okFor(cmd), 50, now);
+    const result = await seq.executePublishSequence(input({ metadata }));
+    assert.equal(result.ok, false);
+    assert.equal(result.outcome, 'failed_before_submit');
+    assert.equal(result.failedAt?.kind, 'set_schedule');
+    assert.equal(pushed.some((cmd) => cmd.kind === 'submit_publish'), false);
+  });
+
+  it('XHS-SCHEDULE 提交后不强求公开链接：capture_scheduled 失败仍进入 scheduled_pending，且不发 capture_postId', async () => {
+    const now = 1_800_000_000_000;
+    const publishTime = now + 2 * 60 * 60 * 1000;
+    const metadata = {
+      topics: [], mentions: [], location: null, collection: null,
+      visibility: 'public' as const,
+      permissions: { comment: 'allow' as const, save: 'allow' as const },
+      mode: 'scheduled' as const, publishTime,
+      compliance: {}, metadataScore: 1, decidedAt: now,
+    };
+    const { seq, pushed } = makeSequencer((cmd) => cmd.kind === 'capture_scheduled'
+      ? { recordId: cmd.recordId, seq: cmd.seq, kind: cmd.kind, ok: false, error: 'scheduled_record_not_found' }
+      : okFor(cmd), 50, now);
+    const result = await seq.executePublishSequence(input({ metadata }));
+    assert.equal(result.ok, true);
+    assert.equal(result.outcome, 'scheduled_pending');
+    assert.equal(result.scheduledAt, publishTime);
+    assert.equal(result.postId, undefined);
+    assert.equal(pushed.some((cmd) => cmd.kind === 'capture_scheduled'), true);
+    assert.equal(pushed.some((cmd) => cmd.kind === 'capture_postId'), false);
+  });
+
+  it('XHS-SCHEDULE 云端前置焊死 1 小时至 14 天窗口，非法时间不下发任何命令', async () => {
+    const now = 1_800_000_000_000;
+    for (const publishTime of [now + 60 * 60 * 1000 - 1, now + 14 * 24 * 60 * 60 * 1000 + 1]) {
+      const metadata = {
+        topics: [], mentions: [], location: null, collection: null,
+        visibility: 'public' as const,
+        permissions: { comment: 'allow' as const, save: 'allow' as const },
+        mode: 'scheduled' as const, publishTime,
+        compliance: {}, metadataScore: 1, decidedAt: now,
+      };
+      const { seq, pushed } = makeSequencer(okFor, 50, now);
+      const result = await seq.executePublishSequence(input({ metadata }));
+      assert.equal(result.outcome, 'failed_before_submit');
+      assert.equal(result.failedAt?.error, 'schedule_time_out_of_range');
+      assert.equal(pushed.length, 0);
+    }
   });
 
   it('AC-CMD-SEQ-09 未授权 + 有 metadata → 元数据指令在、但 submit/capture 截止（AC-PUB 第2闸）', () => {

@@ -8,8 +8,13 @@ function publish(overrides: Partial<PanelPublish> = {}): PanelPublish {
     id: 101,
     title: 'Agent 选型别盲信榜单高分',
     status: 'pending_approval',
+    platform: 'xiaohongshu',
     platformPostId: null,
     publishedAt: 1_700_000_000_000,
+    publishMode: 'immediate',
+    publishTime: null,
+    scheduledAt: null,
+    scheduledPlatformId: null,
     accountId: 'acc-1',
     accountLabel: 'Tmax',
     content: '正文',
@@ -115,6 +120,25 @@ test('failed 与 submitted 只进入最近结果，并诚实区分失败和部�
   assert.equal(stateOf(lifecycle, 'dispatch', 'recent'), 'failed');
   assert.equal(lifecycle.recent[1].status, 'submitted');
   assert.equal(lifecycle.recent[1].stages.find((item) => item.key === 'dispatch')?.state, 'partial');
+});
+
+test('scheduled 进入最近结果并显示等待公开对账，不冒充已发布', () => {
+  const scheduled = publish({
+    id: 104,
+    status: 'scheduled',
+    publishMode: 'scheduled',
+    publishTime: 1_800_007_200_000,
+    scheduledAt: 1_800_007_200_000,
+    scheduledPlatformId: 'scheduled-internal-104',
+  });
+  const lifecycle = buildPublishLifecycle({
+    queue: { status: 'idle', snapshot: null },
+    pending: [],
+    recent: [scheduled],
+  });
+  assert.equal(lifecycle.recent[0]?.status, 'scheduled');
+  assert.equal(stateOf(lifecycle, 'dispatch', 'recent'), 'partial');
+  assert.match(lifecycle.recent[0]?.statusSummary ?? '', /等待公开后对账/);
 });
 
 test('run 已写 publishResult 时与同 recordId 待审稿去重', () => {

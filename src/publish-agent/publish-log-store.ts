@@ -7,9 +7,10 @@
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
 import { SHANGHAI_DAY_START_SQL } from '../time/shanghai-day.js';
-import type { PublishRecord, PublishStatus, PublishMetadata, Visibility } from './types.js';
+import type { PublishRecord, PublishStatus, PublishMetadata, PublishMode, Visibility } from './types.js';
 import { clampTitle } from './title-clamp.js';
 import { normalizePlatformId, type PlatformId } from '../platform/index.js';
+import { validatePublishSchedule } from './schedule-policy.js';
 
 /** JSONB publish_metadata 解析：pg 驱动通常已解析为对象；兼容字符串形态；解析失败诚实置 null。 */
 function parsePublishMetadata(raw: unknown): PublishMetadata | null {
@@ -36,7 +37,7 @@ CREATE TABLE IF NOT EXISTS publish_log (
   source_concepts  TEXT[] NOT NULL DEFAULT '{}',
   source_liked_ids INT[] DEFAULT '{}',
   status           TEXT NOT NULL DEFAULT 'draft'
-                   CHECK (status IN ('draft','pending_approval','submitted','published','failed','needs_review')),
+                   CHECK (status IN ('draft','pending_approval','scheduled','submitted','published','failed','needs_review')),
   platform_post_id TEXT,
   publish_metadata JSONB,
   ai_enforced      BOOLEAN NOT NULL DEFAULT false,
@@ -66,7 +67,7 @@ CREATE INDEX IF NOT EXISTS idx_publish_log_platform ON publish_log (platform);
 -- 既有表的 CHECK 约束需放开新取值（幂等：先 DROP IF EXISTS 默认约束名再以新集合重建）。无新表/新列。
 ALTER TABLE publish_log DROP CONSTRAINT IF EXISTS publish_log_status_check;
 ALTER TABLE publish_log ADD CONSTRAINT publish_log_status_check
-  CHECK (status IN ('draft','pending_approval','submitted','published','failed','needs_review'));
+  CHECK (status IN ('draft','pending_approval','scheduled','submitted','published','failed','needs_review'));
 -- edit-note-draft-before-publish：待审草稿就地编辑的「审=发」凭证 + 谁/何时审计。
 --   content_version：每行内容版本号（真列、非塞 JSONB，令版本闸是原子 WHERE 谓词）；既有行回填 0；每次成功编辑 +1。
 --   edited_by / edited_at：最后一次编辑者（JWT 主体）与时间；仅「谁/何时」，非 diff 日志。
@@ -75,6 +76,14 @@ ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS edited_by TEXT;
 ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ;
 -- publish-reference-source-panel：参照洗稿来稿快照。普通发布为 NULL；内容页只读此快照，不 join 当前精选池。
 ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS source_reference JSONB;
+-- xhs-native-scheduled-publish：平台定时内部句柄与有界对账状态；内部 id 绝不复用 platform_post_id。
+ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS scheduled_platform_id TEXT;
+ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ;
+ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS schedule_reconcile_attempts INT NOT NULL DEFAULT 0;
+ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS schedule_next_reconcile_at TIMESTAMPTZ;
+ALTER TABLE publish_log ADD COLUMN IF NOT EXISTS schedule_last_error TEXT;
+CREATE INDEX IF NOT EXISTS idx_publish_log_scheduled_due
+  ON publish_log (schedule_next_reconcile_at, id) WHERE status = 'scheduled';
 `;
 
 export interface PublishLogStoreOptions {
@@ -84,6 +93,7 @@ export interface PublishLogStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  clock?: () => number;
 }
 
 interface PublishRow {
@@ -97,7 +107,21 @@ interface PublishRow {
 }
 
 function toStatus(s: string): PublishStatus {
-  return s === 'submitted' || s === 'published' || s === 'failed' || s === 'needs_review' || s === 'pending_approval' ? s : 'draft';
+  return s === 'scheduled' || s === 'submitted' || s === 'published' || s === 'failed' || s === 'needs_review' || s === 'pending_approval' ? s : 'draft';
+}
+
+export interface ScheduledPublishRecord {
+  recordId: number;
+  accountId: string;
+  title: string;
+  scheduledAt: number;
+  scheduledPlatformId: string | null;
+  reconcileAttempts: number;
+}
+
+export interface ScheduledReconcileUpdate {
+  status: 'scheduled' | 'needs_review';
+  attempts: number;
 }
 
 /**
@@ -194,6 +218,8 @@ export interface EditDraftPatch {
   visibility?: string;
   topics?: string[];
   images?: string[];
+  publishMode?: PublishMode;
+  publishTime?: number | null;
 }
 
 /** editDraft 可区分拒因（诚实非乐观；面板据此映射不同 HTTP/文案）。 */
@@ -220,8 +246,10 @@ export type EditDraftResult =
 /** publish_log 持久化（PostgreSQL，aidcp 库）。 */
 export class PublishLogStore {
   private readonly pool: pg.Pool;
+  private readonly clock: () => number;
 
   constructor(options: PublishLogStoreOptions = {}) {
+    this.clock = options.clock ?? Date.now;
     this.pool =
       options.pool ??
       new Pool({
@@ -300,6 +328,90 @@ export class PublishLogStore {
       `UPDATE publish_log SET platform_post_id = $2, post_url = COALESCE($3, post_url), status = 'published' WHERE id = $1`,
       [id, postId, postUrl ?? null],
     );
+  }
+
+  /** 平台已接受原生定时任务；内部句柄单独落列，公开身份保持空，首次对账在目标时刻后 10 分钟。 */
+  async markScheduled(id: number, scheduledAt: number, scheduledPlatformId?: string | null): Promise<void> {
+    const result = await this.pool.query(
+      `UPDATE publish_log
+          SET status = 'scheduled', scheduled_at = to_timestamp($2 / 1000.0),
+              scheduled_platform_id = $3, schedule_reconcile_attempts = 0,
+              schedule_next_reconcile_at = to_timestamp(($2 + $4) / 1000.0), schedule_last_error = NULL
+        WHERE id = $1 AND status = 'pending_approval'`,
+      [id, scheduledAt, scheduledPlatformId ?? null, 10 * 60_000],
+    );
+    if ((result.rowCount ?? 0) === 0) throw new Error('scheduled_state_conflict');
+  }
+
+  /** 到期扫描只命中 scheduled 的索引行；旧/其它状态绝不被对账任务误领。 */
+  async listDueScheduled(limit = 20, now = this.clock()): Promise<ScheduledPublishRecord[]> {
+    const { rows } = await this.pool.query<{
+      id: number;
+      account_id: string | null;
+      title: string | null;
+      scheduled_at_ms: string;
+      scheduled_platform_id: string | null;
+      schedule_reconcile_attempts: number | string | null;
+    }>(
+      `SELECT id, account_id, title, extract(epoch from scheduled_at) * 1000 AS scheduled_at_ms,
+              scheduled_platform_id, schedule_reconcile_attempts
+         FROM publish_log
+        WHERE status = 'scheduled'
+          AND schedule_next_reconcile_at IS NOT NULL
+          AND schedule_next_reconcile_at <= to_timestamp($1 / 1000.0)
+        ORDER BY schedule_next_reconcile_at ASC, id ASC
+        LIMIT $2`,
+      [now, Math.max(1, Math.floor(limit))],
+    );
+    return rows.map((row) => ({
+      recordId: row.id,
+      accountId: row.account_id ?? 'default',
+      title: row.title ?? '',
+      scheduledAt: Number(row.scheduled_at_ms),
+      scheduledPlatformId: row.scheduled_platform_id,
+      reconcileAttempts: Number(row.schedule_reconcile_attempts ?? 0),
+    }));
+  }
+
+  /** 未确认公开：原子递增尝试并安排下次；达到 maxAttempts 后转人工复核。 */
+  async deferScheduledReconcile(
+    id: number,
+    error: string,
+    nextAt: number,
+    maxAttempts = 8,
+  ): Promise<ScheduledReconcileUpdate | null> {
+    const { rows } = await this.pool.query<{ status: 'scheduled' | 'needs_review'; schedule_reconcile_attempts: number | string }>(
+      `UPDATE publish_log
+          SET schedule_reconcile_attempts = schedule_reconcile_attempts + 1,
+              schedule_last_error = $2,
+              schedule_next_reconcile_at = CASE
+                WHEN schedule_reconcile_attempts + 1 >= $4 THEN NULL
+                ELSE to_timestamp($3 / 1000.0)
+              END,
+              status = CASE
+                WHEN schedule_reconcile_attempts + 1 >= $4 THEN 'needs_review'
+                ELSE 'scheduled'
+              END
+        WHERE id = $1 AND status = 'scheduled'
+      RETURNING status, schedule_reconcile_attempts`,
+      [id, error.slice(0, 1000), nextAt, Math.max(1, Math.floor(maxAttempts))],
+    );
+    const row = rows[0];
+    return row ? { status: row.status, attempts: Number(row.schedule_reconcile_attempts) } : null;
+  }
+
+  /**
+   * 公开确认的唯一状态闸。只有首次 scheduled→published 返回 true；调用者据此恰记一次发布风险账。
+   */
+  async confirmScheduledPublished(id: number, postId: string, postUrl: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `UPDATE publish_log
+          SET platform_post_id = $2, post_url = $3, status = 'published', schedule_next_reconcile_at = NULL,
+              schedule_last_error = NULL
+        WHERE id = $1 AND status = 'scheduled'`,
+      [id, postId, postUrl],
+    );
+    return (result.rowCount ?? 0) > 0;
   }
 
   /** 落库发帖元数据（A 阶段4 血缘/可观测）+ 防篡改审计标记。 */
@@ -437,6 +549,17 @@ export class PublishLogStore {
         return { ok: false, reason: 'invalid_field' };
       }
     }
+    let newPublishMode: PublishMode | undefined;
+    if (patch.publishMode !== undefined) {
+      if (patch.publishMode !== 'immediate' && patch.publishMode !== 'scheduled') {
+        return { ok: false, reason: 'invalid_field' };
+      }
+      newPublishMode = patch.publishMode;
+    }
+    if (patch.publishTime !== undefined && patch.publishTime !== null
+      && (typeof patch.publishTime !== 'number' || !Number.isFinite(patch.publishTime))) {
+      return { ok: false, reason: 'invalid_field' };
+    }
 
     const client = await this.pool.connect();
     try {
@@ -449,8 +572,9 @@ export class PublishLogStore {
         publish_metadata: unknown;
         image_url: string | null;
         images: string[] | null;
+        platform: string | null;
       }>(
-        `SELECT status, content_version, title, content, publish_metadata, image_url, images
+        `SELECT status, content_version, title, content, publish_metadata, image_url, images, platform
          FROM publish_log WHERE id = $1 FOR UPDATE`,
         [recordId],
       );
@@ -471,7 +595,7 @@ export class PublishLogStore {
       // 深合并：只动 visibility/topics，其余键逐字保留。待审行本应有元数据（生成段 recordMetadata 落库）；
       // 万一为 null 又要改可见范围/话题，则无从保证非空可见范围 → 诚实拒 invalid_field（守硬必选致命闸）。
       let metadata = parsePublishMetadata(row.publish_metadata);
-      if (newVisibility !== undefined || newTopics !== undefined) {
+      if (newVisibility !== undefined || newTopics !== undefined || newPublishMode !== undefined || patch.publishTime !== undefined) {
         if (metadata == null) {
           await client.query('ROLLBACK');
           return { ok: false, reason: 'invalid_field' };
@@ -479,6 +603,18 @@ export class PublishLogStore {
         metadata = { ...metadata };
         if (newVisibility !== undefined) metadata.visibility = newVisibility;
         if (newTopics !== undefined) metadata.topics = newTopics;
+        if (newPublishMode !== undefined || patch.publishTime !== undefined) {
+          const mode = newPublishMode ?? metadata.mode;
+          const publishTime = mode === 'scheduled'
+            ? (patch.publishTime !== undefined ? patch.publishTime : metadata.publishTime)
+            : null;
+          if (validatePublishSchedule(normalizePlatformId(row.platform), mode, publishTime, this.clock())) {
+            await client.query('ROLLBACK');
+            return { ok: false, reason: 'invalid_field' };
+          }
+          metadata.mode = mode;
+          metadata.publishTime = publishTime;
+        }
       }
 
       // images 子集校验 + 保序过滤（pending-draft-image-delete）：只删不注入。

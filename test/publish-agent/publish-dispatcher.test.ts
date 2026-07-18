@@ -55,10 +55,15 @@ function harness(opts: {
   const voided: string[] = [];
   const leasePriorities: string[] = [];
   const uiStates: Array<{ accountId: string; recordId: number; state: string; title?: string | null }> = [];
+  const recordedPublishes: string[] = [];
   const store = {
     loadForDispatch: async (_id: number) => (opts.draft === undefined ? makeDraft() : opts.draft),
     updateStatus: async (id: number, status: string) => { statusUpdates.push({ id, status }); events.push(`status:${status}`); },
     updatePostId: async (id: number, postId: string, postUrl?: string | null) => { postWrite = { id, postId, postUrl }; events.push('postId'); },
+    markScheduled: async (id: number, scheduledAt: number, scheduledPlatformId?: string | null) => {
+      statusUpdates.push({ id, status: 'scheduled' });
+      events.push(`scheduled:${scheduledAt}:${scheduledPlatformId ?? ''}`);
+    },
     markImagesAttached: async (id: number, count: number) => { attached.push({ id, count }); },
     listPendingApprovalIds: async () => (opts.draft && opts.draft.status === 'pending_approval' ? [opts.draft.recordId] : []),
   };
@@ -100,9 +105,23 @@ function harness(opts: {
     onPublishEnd: () => events.push('end'),
     notifyUiPublishState: (accountId, recordId, state, title) => uiStates.push({ accountId, recordId, state, title }),
     notifyDispatchEvent: (n) => notices.push(n),
+    recordPublish: async (accountId) => { recordedPublishes.push(accountId); },
     logger: silentLogger,
   });
-  return { dispatcher, events, get seqInput() { return seqInput; }, statusUpdates, get postWrite() { return postWrite; }, attached, voided, notices, leasePriorities, uiStates, redispatched };
+  return {
+    dispatcher,
+    events,
+    get seqInput() { return seqInput; },
+    statusUpdates,
+    get postWrite() { return postWrite; },
+    attached,
+    voided,
+    notices,
+    leasePriorities,
+    uiStates,
+    redispatched,
+    recordedPublishes,
+  };
 }
 
 describe('PublishDispatcher', () => {
@@ -212,6 +231,28 @@ describe('PublishDispatcher', () => {
     assert.deepEqual(h.uiStates.at(-1), { accountId: 'acct-A', recordId: 7, state: 'submitted', title: 'vLLM 部署踩坑' });
   });
 
+  test('原生定时提交 → scheduled、内部句柄独立落库且不占发布次数', async () => {
+    const publishTime = 1_800_007_200_000;
+    const h = harness({
+      draft: makeDraft({ metadata: {
+        topics: [], mentions: [], location: null, collection: null,
+        visibility: 'public', permissions: { comment: 'allow', save: 'allow' },
+        mode: 'scheduled', publishTime, compliance: {}, metadataScore: 1, decidedAt: 1_800_000_000_000,
+      } as any }),
+      seqResult: {
+        ok: true,
+        outcome: 'scheduled_pending',
+        attachedCount: 2,
+        scheduledAt: publishTime,
+        scheduledPlatformId: 'scheduled-internal-1',
+      },
+    });
+    await h.dispatcher.dispatch(7);
+    assert.equal(h.events.some((event) => event === `scheduled:${publishTime}:scheduled-internal-1`), true);
+    assert.equal(h.postWrite, undefined, '内部定时句柄不得写入公开 platform_post_id');
+    assert.deepEqual(h.recordedPublishes, [], '平台尚未公开时不消耗发布次数');
+  });
+
   test('草稿不存在 → 安静跳过', async () => {
     const h = harness({ approved: true, draft: null });
     await h.dispatcher.dispatch(7);
@@ -268,6 +309,9 @@ describe('PublishDispatcher', () => {
         },
         updatePostId: async (id) => {
           if (opts.drafts[id]) opts.drafts[id].status = 'published';
+        },
+        markScheduled: async (id) => {
+          if (opts.drafts[id]) opts.drafts[id].status = 'scheduled';
         },
         markImagesAttached: async () => {},
         listPendingApprovalIds: async () =>

@@ -52,15 +52,20 @@ describe('clampScheduledTime', () => {
     assert.equal(clampScheduledTime(now, now), null);
   });
 
-  test('未来且 ≤7 天 → 原样返回', () => {
-    const oneHour = now + 60 * 60 * 1000;
-    assert.equal(clampScheduledTime(oneHour, now), oneHour);
-    const sevenDays = now + 7 * 24 * 60 * 60 * 1000;
-    assert.equal(clampScheduledTime(sevenDays, now), sevenDays);
+  test('不足 1 小时 → null', () => {
+    const underOneHour = now + 60 * 60 * 1000 - 1;
+    assert.equal(clampScheduledTime(underOneHour, now), null);
   });
 
-  test('超过 7 天 → null', () => {
-    const overSeven = now + 7 * 24 * 60 * 60 * 1000 + 1;
-    assert.equal(clampScheduledTime(overSeven, now), null);
+  test('未来 1 小时至 14 天（含边界）→ 原样返回', () => {
+    const oneHour = now + 60 * 60 * 1000;
+    assert.equal(clampScheduledTime(oneHour, now), oneHour);
+    const fourteenDays = now + 14 * 24 * 60 * 60 * 1000;
+    assert.equal(clampScheduledTime(fourteenDays, now), fourteenDays);
+  });
+
+  test('超过 14 天 → null', () => {
+    const overFourteen = now + 14 * 24 * 60 * 60 * 1000 + 1;
+    assert.equal(clampScheduledTime(overFourteen, now), null);
   });
 });

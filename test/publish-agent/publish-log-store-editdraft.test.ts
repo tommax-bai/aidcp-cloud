@@ -39,10 +39,10 @@ function fakeClient(row: Record<string, unknown> | null, opts: { updateRowCount?
   return { client, calls, get updateParams() { return updateParams; } };
 }
 
-function storeWith(fc: ReturnType<typeof fakeClient>) {
+function storeWith(fc: ReturnType<typeof fakeClient>, now?: number) {
   // 只需 connect()；构造器接受注入 pool。
   const pool = { connect: async () => fc.client } as any;
-  return new PublishLogStore({ pool });
+  return new PublishLogStore({ pool, ...(now === undefined ? {} : { clock: () => now }) });
 }
 
 describe('PublishLogStore.editDraft', () => {
@@ -95,6 +95,56 @@ describe('PublishLogStore.editDraft', () => {
   test('元数据为 null 又要改可见范围 → invalid_field（守硬必选可见范围致命闸）', async () => {
     const fc = fakeClient({ status: 'pending_approval', content_version: 0, title: 't', content: 'c', publish_metadata: null });
     assert.deepEqual(await storeWith(fc).editDraft(9, 0, { visibility: 'public' }, 'op'), { ok: false, reason: 'invalid_field' });
+  });
+
+  test('定时编辑经同一 CAS 落库：仅 XHS、1 小时至 14 天，且切回立即发布会清空时间', async () => {
+    const now = 1_800_000_000_000;
+    const publishTime = now + 2 * 60 * 60 * 1000;
+    const scheduled = fakeClient({
+      status: 'pending_approval', content_version: 0, title: 't', content: 'c', publish_metadata: META,
+      platform: 'xiaohongshu', image_url: null, images: [],
+    });
+    const result = await storeWith(scheduled, now).editDraft(
+      9,
+      0,
+      { publishMode: 'scheduled', publishTime },
+      'operator',
+    );
+    assert.equal(result.ok, true);
+    const scheduledMeta = JSON.parse(scheduled.updateParams?.[3] as string);
+    assert.equal(scheduledMeta.mode, 'scheduled');
+    assert.equal(scheduledMeta.publishTime, publishTime);
+
+    const immediate = fakeClient({
+      status: 'pending_approval', content_version: 1, title: 't', content: 'c',
+      publish_metadata: { ...META, mode: 'scheduled', publishTime },
+      platform: 'xiaohongshu', image_url: null, images: [],
+    });
+    const immediateResult = await storeWith(immediate, now).editDraft(9, 1, { publishMode: 'immediate' }, 'operator');
+    assert.equal(immediateResult.ok, true);
+    const immediateMeta = JSON.parse(immediate.updateParams?.[3] as string);
+    assert.equal(immediateMeta.mode, 'immediate');
+    assert.equal(immediateMeta.publishTime, null);
+  });
+
+  test('定时编辑越界或非 XHS 均 fail closed，不写 UPDATE', async () => {
+    const now = 1_800_000_000_000;
+    for (const row of [
+      { platform: 'xiaohongshu', publishTime: now + 60 * 60 * 1000 - 1 },
+      { platform: 'xiaohongshu', publishTime: now + 14 * 24 * 60 * 60 * 1000 + 1 },
+      { platform: 'facebook', publishTime: now + 2 * 60 * 60 * 1000 },
+    ]) {
+      const fc = fakeClient({
+        status: 'pending_approval', content_version: 0, title: 't', content: 'c', publish_metadata: META,
+        platform: row.platform, image_url: null, images: [],
+      });
+      const result = await storeWith(fc, now).editDraft(9, 0, {
+        publishMode: 'scheduled',
+        publishTime: row.publishTime,
+      }, 'operator');
+      assert.deepEqual(result, { ok: false, reason: 'invalid_field' });
+      assert.equal(fc.updateParams, undefined);
+    }
   });
 });
 

@@ -10,24 +10,6 @@
  * 该文件是边-云两侧的唯一契约来源（edge 侧可复制或引用同名定义）。
  */
 
-import type {
-  InteractionAuthReopenPayload,
-  InteractionAuthStatusPayload,
-  InteractionBrowserControlPayload,
-  InteractionOffboardAckPayload,
-  InteractionOffboardCommandPayload,
-  InteractionOffboardResultPayload,
-  InteractionReplyReconcilePayload,
-  InteractionReplyReconcileResultPayload,
-  InteractionReplyResultPayload,
-  InteractionReplyResultAckPayload,
-  InteractionReplySendPayload,
-  InteractionRuntimeControlsPayload,
-  InteractionSyncAckPayload,
-  InteractionSyncBatchPayload,
-  InteractionSyncRequestPayload,
-} from '../interactions/types.js';
-
 /** 协议版本号 */
 export const PROTOCOL_VERSION = 2;
 
@@ -120,17 +102,17 @@ export type MessageType =
   | 'persona.generate.result' // cloud → edge：返回 soul.yaml/身份摘要或失败原因
   | 'persona.persist'         // edge → cloud：请求持久化确认后的 soul.yaml
   | 'persona.persist.result'  // cloud → edge：持久化结果
-  // —— 通用入站互动域（Session 00 frozen v1；capability=interaction_inbox_v1）——
-  | 'interaction.auth.status' // edge → cloud：平台登录态与能力快照
-  | 'interaction.sync.batch' // edge → cloud：评论/私信增量批次
-  | 'interaction.sync.ack' // cloud → edge：事务持久化后的批次确认
-  | 'interaction.reply.result' // edge → cloud：回复发送/核验终态
+  // —— 入站互动管理（视频号 v1；双方确认 interaction_inbox_v1 后启用）——
+  | 'interaction.auth.status' // edge → cloud：auth/browser/capability/identity 真态
+  | 'interaction.sync.batch' // edge → cloud：可重放的增量同步批次
+  | 'interaction.sync.ack' // cloud → edge：整批 accepted/duplicate/rejected
+  | 'interaction.reply.result' // edge → cloud：confirmed/failed/ambiguous 发送真态
   | 'interaction.reply.result.ack' // cloud → edge：持久结果确认；ack 后才清 Edge outbox
-  | 'interaction.reply.reconcile' // cloud → edge：仅核验既有 attempt，绝不触发新平台写
+  | 'interaction.reply.reconcile' // cloud → edge：只核验既有 attempt，绝不发起新平台写
   | 'interaction.reply.reconcile.result' // edge → cloud：重放/缺失/绑定冲突观察
-  | 'interaction.sync.request' // cloud → edge：按渠道请求同步
-  | 'interaction.reply.send' // cloud → edge：下发唯一 attempt 的文本回复
-  | 'interaction.auth.reopen' // cloud → edge：请求重开登录/挑战处理入口
+  | 'interaction.sync.request' // cloud → edge：触发按 channel/scope 同步
+  | 'interaction.reply.send' // cloud → edge：带稳定幂等键的文本回复
+  | 'interaction.auth.reopen' // cloud → edge：请求原环境重开登录 sidecar
   | 'interaction.browser.control' // cloud → edge：授权有效时打开可见 sidecar / 转回 API-only
   | 'interaction.runtime.controls' // cloud → edge：按账号下发版本化有效能力
   | 'interaction.offboard.command' // cloud → edge：撤权后清理所属加密会话
@@ -219,17 +201,327 @@ export interface WelcomePayload {
   /** 云端分配的会话 id */
   sessionId: string;
   serverVersion: string;
-  /** 云端确认启用的握手能力；只回显双方都支持的 capability。 */
-  capabilities?: string[];
-  /** 账号级恢复屏障；协商 offboarding 时缺失/true 都要求 Edge 保持 connector 停止。 */
-  interactionRecovery?: { offboardPending: boolean };
-  /** Negotiated account-scoped effective controls; missing remains fail-closed on Edge. */
-  interactionRuntime?: InteractionRuntimeControlsPayload;
   /**
    * 节奏快照（change pacing-floor-config-min-interval）：tempo + 每类操作兜底 floor 区间。
    * 可选、向后兼容（旧端忽略）；边缘据此做操作间最小间隔 gating 与详情页停留兜底。
    */
   pacing?: PacingSnapshotPayload;
+  /** Optional negotiated capabilities; old Cloud peers omit this field. */
+  capabilities?: string[];
+  /** Account-bound recovery barrier; missing is fail-closed when offboarding was negotiated. */
+  interactionRecovery?: { offboardPending: boolean };
+  /** Negotiated account-scoped effective controls; missing remains fail-closed. */
+  interactionRuntime?: InteractionRuntimeControlsPayload;
+}
+
+// ————————————————— 视频号入站互动 v1（Session 00 frozen contract）—————————————————
+
+export const INTERACTION_INBOX_CAPABILITY = 'interaction_inbox_v1' as const;
+export const INTERACTION_REPLY_RECOVERY_CAPABILITY = 'interaction_reply_recovery_v1' as const;
+export const INTERACTION_OFFBOARDING_CAPABILITY = 'interaction_offboarding_v1' as const;
+export const INTERACTION_RUNTIME_CONTROLS_CAPABILITY = 'interaction_runtime_controls_v1' as const;
+export const INTERACTION_BROWSER_CONTROL_CAPABILITY = 'interaction_browser_control_v1' as const;
+export const INTERACTION_TEST_DATA_RESET_CAPABILITY = 'interaction_test_data_reset_v1' as const;
+export type InteractionPlatform = 'wechat_channels';
+export type InteractionChannel = 'comment' | 'dm';
+export type InteractionMessageType = 'text' | 'image' | 'unknown';
+export type InteractionMessageLifecycle = 'active' | 'deleted' | 'hidden';
+export interface InteractionRuntimeControlsPayload {
+  accountId: string;
+  envKey: string;
+  version: number;
+  commentsReadEnabled: boolean;
+  commentsReplyEnabled: boolean;
+  dmReadEnabled: boolean;
+  dmSendTextEnabled: boolean;
+  dmSendImageEnabled: false;
+}
+export type InteractionAuthStatus =
+  | 'login_required'
+  | 'authenticating'
+  | 'active'
+  | 'reauth_required'
+  | 'challenge_required'
+  | 'degraded'
+  | 'disabled';
+export type InteractionBrowserState = 'closed' | 'opening' | 'open' | 'closing' | 'unavailable';
+export type InteractionErrorCode =
+  | 'INTERACTION_AUTH_REQUIRED'
+  | 'INTERACTION_PERMISSION_DENIED'
+  | 'INTERACTION_NOT_FOUND'
+  | 'INTERACTION_SCOPE_MISMATCH'
+  | 'INTERACTION_VERSION_CONFLICT'
+  | 'INTERACTION_STATE_CONFLICT'
+  | 'INTERACTION_VALIDATION_FAILED'
+  | 'INTERACTION_CONFIG_MISSING'
+  | 'INTERACTION_APPROVAL_REQUIRED'
+  | 'INTERACTION_SEND_AMBIGUOUS'
+  | 'INTERACTION_UNSUPPORTED_MESSAGE_TYPE'
+  | 'INTERACTION_FEATURE_DISABLED'
+  | 'INTERACTION_RATE_LIMITED'
+  | 'INTERACTION_UPSTREAM_UNAVAILABLE'
+  | 'INTERACTION_TEST_RESET_PARTIAL'
+  | 'INTERACTION_INTERNAL_ERROR'
+  | 'WECHAT_AUTH_REQUIRED'
+  | 'WECHAT_CHALLENGE_REQUIRED'
+  | 'WECHAT_IDENTITY_MISMATCH'
+  | 'WECHAT_RATE_LIMITED'
+  | 'WECHAT_PERMISSION_DENIED'
+  | 'WECHAT_SCHEMA_CHANGED';
+export type InteractionAuthReasonCode =
+  | 'WECHAT_AUTH_REQUIRED'
+  | 'WECHAT_CHALLENGE_REQUIRED'
+  | 'WECHAT_IDENTITY_MISMATCH'
+  | 'WECHAT_RATE_LIMITED'
+  | 'WECHAT_PERMISSION_DENIED'
+  | 'WECHAT_SCHEMA_CHANGED'
+  | 'INTERACTION_FEATURE_DISABLED'
+  | 'INTERACTION_UPSTREAM_UNAVAILABLE';
+
+export interface InteractionEffectiveCapabilities {
+  commentsRead: boolean;
+  commentsReply: boolean;
+  dmRead: boolean;
+  dmSendText: boolean;
+  dmSendImage: false;
+}
+
+export interface InteractionIdentitySummary {
+  externalId: string;
+  displayName: string;
+  identityHash: string;
+}
+
+export interface InteractionAuthStatusPayload {
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  status: InteractionAuthStatus;
+  browserState: InteractionBrowserState;
+  capabilities: InteractionEffectiveCapabilities;
+  /** Latest account-control version accepted by this Edge, or null before negotiation/application. */
+  runtimeControlsVersion: number | null;
+  identity: InteractionIdentitySummary | null;
+  checkedAt: number;
+  reasonCode: InteractionAuthReasonCode | null;
+}
+
+export interface InteractionParticipantSnapshot {
+  externalId: string;
+  displayName: string | null;
+  avatarUrl: string | null;
+}
+
+export interface InteractionAttachmentMeta {
+  mimeType: string | null;
+  width: number | null;
+  height: number | null;
+  url: string | null;
+}
+
+export interface InteractionSyncThread {
+  externalThreadId: string;
+  sourceExternalId: string | null;
+  sourceTitle: string | null;
+  sourceCoverUrl: string | null;
+  participant: InteractionParticipantSnapshot | null;
+  updatedAt: number;
+}
+
+export interface InteractionSyncMessage {
+  externalThreadId: string;
+  externalMessageId: string;
+  direction: 'inbound' | 'outbound';
+  externalParentId: string | null;
+  externalRootId: string | null;
+  messageType: InteractionMessageType;
+  contentText: string | null;
+  attachmentMeta: InteractionAttachmentMeta | null;
+  lifecycle: InteractionMessageLifecycle;
+  platformCreatedAt: number;
+  rawMetaSanitized: Record<string, string | number | boolean | null>;
+}
+
+export interface InteractionSyncBatchPayload {
+  batchId: string;
+  requestId: string | null;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  channel: InteractionChannel;
+  scopeExternalId: string | null;
+  cursorBefore: string | null;
+  cursorAfter: string | null;
+  hasMore: boolean;
+  threads: InteractionSyncThread[];
+  messages: InteractionSyncMessage[];
+  observedAt: number;
+}
+
+export interface InteractionSyncAckPayload {
+  batchId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  channel: InteractionChannel;
+  scopeExternalId: string | null;
+  status: 'accepted' | 'duplicate' | 'rejected';
+  cursorAfter: string | null;
+  persisted: { threads: number; messages: number };
+  errorCode: InteractionErrorCode | null;
+  receivedAt: number;
+}
+
+export interface InteractionSyncRequestPayload {
+  requestId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  channel: InteractionChannel;
+  scopeExternalId: string | null;
+  reason: 'user_requested' | 'resume' | 'scheduled' | 'recovery' | 'test_reset';
+  requestedAt: number;
+}
+
+export interface InteractionReplyTarget {
+  threadExternalId: string;
+  inboundMessageExternalId: string;
+  parentExternalId: string | null;
+}
+
+export interface InteractionReplySendPayload {
+  jobId: string;
+  attemptId: string;
+  idempotencyKey: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  channel: InteractionChannel;
+  target: InteractionReplyTarget;
+  content: { type: 'text'; text: string };
+  expiresAt: number;
+}
+
+export type InteractionReplyErrorCategory =
+  | 'auth_expired'
+  | 'challenge_required'
+  | 'identity_mismatch'
+  | 'rate_limited'
+  | 'permission_denied'
+  | 'schema_changed'
+  | 'transient_network'
+  | 'unsupported_message_type'
+  | 'invalid_scope'
+  | 'invalid_command'
+  | 'expired_command'
+  | 'platform_rejected'
+  | 'verification_failed'
+  | 'internal_error';
+
+export interface InteractionReplyResultPayload {
+  jobId: string;
+  attemptId: string;
+  idempotencyKey: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  channel: InteractionChannel;
+  status: 'confirmed' | 'failed' | 'ambiguous';
+  externalMessageId: string | null;
+  errorCategory: InteractionReplyErrorCategory | null;
+  errorCode: InteractionErrorCode | null;
+  verification: 'platform_ack' | 'history_lookup' | 'comment_lookup' | 'not_verified';
+  retryAfterMs: number | null;
+  finishedAt: number;
+}
+
+export interface InteractionReplyResultAckPayload {
+  jobId: string;
+  attemptId: string;
+  idempotencyKey: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  status: 'accepted' | 'duplicate' | 'rejected';
+  errorCode: InteractionErrorCode | null;
+  receivedAt: number;
+}
+
+export interface InteractionReplyReconcilePayload {
+  reconcileId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  attempts: Array<{
+    cloudStatus: 'created' | 'dispatched' | 'ambiguous';
+    command: InteractionReplySendPayload;
+  }>;
+  requestedAt: number;
+}
+
+export interface InteractionReplyReconcileResultPayload {
+  reconcileId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  attempts: Array<{
+    jobId: string;
+    attemptId: string;
+    idempotencyKey: string;
+    state: 'result_replayed' | 'not_found' | 'binding_conflict';
+    observedAt: number;
+  }>;
+  finishedAt: number;
+}
+
+export type InteractionOffboardReason = 'environment_unbind' | 'customer_terminated' | 'admin_revoked';
+
+export interface InteractionOffboardCommandPayload {
+  offboardId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  reason: InteractionOffboardReason;
+  requestedAt: number;
+  expiresAt: number;
+}
+
+export interface InteractionOffboardResultPayload {
+  offboardId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  status: 'cleared' | 'already_cleared' | 'failed';
+  errorCode: InteractionErrorCode | null;
+  finishedAt: number;
+}
+
+export interface InteractionOffboardAckPayload {
+  offboardId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  status: 'accepted' | 'duplicate' | 'rejected';
+  errorCode: InteractionErrorCode | null;
+  receivedAt: number;
+}
+
+export interface InteractionAuthReopenPayload {
+  requestId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  reason: 'user_requested' | 'auth_expired' | 'identity_mismatch' | 'challenge_required';
+  requestedAt: number;
+}
+
+export interface InteractionBrowserControlPayload {
+  requestId: string;
+  envKey: string;
+  accountId: string;
+  platform: InteractionPlatform;
+  action: 'open' | 'close';
+  requestedAt: number;
 }
 
 /**
@@ -262,14 +554,19 @@ export type UiDailyUsageAction = (typeof UI_DAILY_USAGE_ACTIONS)[number];
 export type UiDailyUsageCounts = Partial<Record<UiDailyUsageAction, number>>;
 export type UiDailyUsageWindow = 'session' | 'minute' | 'hour' | 'day';
 
+export interface UiDailyUsageInspirationSummary {
+  /** Count of account-scoped notes saved into the curated inspiration pool. */
+  count: number;
+  /** Sum of source-note likes for the saved inspirations, when observed by cloud. */
+  sourceLikeCount?: number;
+}
+
 export interface UiDailyUsageWindowStatus {
   active?: boolean;
   startedAt?: number;
   windowMs?: number;
   expiresAt?: number;
-  /** Epoch ms when cloud plans/recommends refreshing this usage-window snapshot. */
   refreshAt?: number;
-  /** Epoch ms when a saturated quota in this window is expected to release. */
   releaseAt?: number;
   totals: UiDailyUsageCounts;
   quotas?: UiDailyUsageCounts;
@@ -286,6 +583,8 @@ export interface UiDailyUsagePayload {
   quotas?: UiDailyUsageCounts;
   /** Backward-compatible alias for the day window saturated actions. */
   saturated?: UiDailyUsageAction[];
+  /** Optional curated inspiration result summary for value-oriented completion UI. */
+  inspirationSummary?: UiDailyUsageInspirationSummary;
   /**
    * First-persona onboarding projection. Present only while the lifetime first-post
    * flow is searching/generating; `target=20` is UI expectation, never a quota.
@@ -305,14 +604,14 @@ export interface UiDailyUsagePayload {
    * 两者之间没有任何不变量保证曲线更紧 → 勾了却一格都没压是**真实可达**的状态。
    * binding=false MUST 如实标注「当前档位已更严，不额外限制」，MUST NOT 宣称「正在压低配额」。
    *
-   * `eligible=false` 通常禁用开关；`binding_unknown` / `binding_conflict` 例外：环境配置仍可写，
-   * 只是当前没有唯一执行账号，UI MUST 保持 state 真态并不声称配额已生效。
+   * `eligible=false` 通常禁用；binding_unknown/binding_conflict 时环境配置仍可操作，
+   * state 表达配置真态，客户端不得声称配额已经作用到账号。
    */
   slowStart?: UiSlowStartPayload;
   windows?: Partial<Record<UiDailyUsageWindow, UiDailyUsageWindowStatus>>;
 }
 
-/** 环境级慢启动状态：有当前账号时与云端 clamp 同源同格；未绑定时只表达环境配置。 */
+/** 环境级慢启动状态：有唯一当前账号时与 clamp 同源，未绑定时只表达环境配置。 */
 export interface UiSlowStartPayload {
   /** off = 未开启；active = 爬坡中；graduated = 已完成（上限已放开，但库里开关仍为真）。 */
   state: 'off' | 'active' | 'graduated';
@@ -324,7 +623,7 @@ export interface UiSlowStartPayload {
   since?: number;
   /** active 时：clamp 是否至少收紧一项。false = 勾了但当前档位已更严、不额外限制。 */
   binding?: boolean;
-  /** 当前环境配置此刻能否作用到唯一账号；绑定缺失/冲突时配置仍可操作。 */
+  /** 当前环境设置是否正作用到唯一账号；绑定缺失/冲突时设置仍可操作。 */
   eligible: boolean;
   ineligibleReason?:
     | 'platform_unsupported'
@@ -360,7 +659,7 @@ export interface UiSnapshotPayload {
   account?: { id: string; nickname?: string };
   /** 最近一次成功发布的摘要；at = epoch ms（来源 publish_log.published_at，为草稿入库时间近似） */
   lastPublish?: { title: string; at: number };
-  /** 当前待审稿件的只读预览；正文/配图来自 publish_log，原稿信息不随客户端契约下发。 */
+  /** 当前待审稿件的只读预览；正文/配图来自云端 publish_log，不含原稿来源字段。 */
   publishPreview?: UiPublishPreviewPayload;
   /**
    * 发布审批状态。云端只推边缘看不到的状态（pending/approved/submitted/rejected/failed）；
@@ -727,7 +1026,7 @@ export interface PersonaPersistPayload {
   soulYaml: string;
 }
 
-/** cloud → edge：持久化结果；失败带 reason（如 unknown_account / persona_invalid）。 */
+/** cloud → edge：持久化结果；失败带 reason（如 unknown_account / persona_required / persona_invalid）。 */
 export interface PersonaPersistResultPayload {
   ok: boolean;
   reason?: string;
@@ -993,7 +1292,7 @@ export interface PublishResultPayload {
   error?: string;
 }
 
-/** 发布原子指令的种类（A 设计 E1-E10）。 */
+/** 发布原子指令的种类（E1-E12；仍由一对通用 publish.command/result 消息承载）。 */
 export type PublishCommandKind =
   | 'navigate_entry'
   | 'select_mode'
@@ -1004,7 +1303,11 @@ export type PublishCommandKind =
   | 'set_option'
   | 'set_schedule'
   | 'submit_publish'
-  | 'capture_postId';
+  | 'capture_postId'
+  /** 小红书定时提交后：捕获定时列表内部句柄，绝不当公开 postId。 */
+  | 'capture_scheduled'
+  /** 小红书目标时刻后：只读核验真实公开 postId/postUrl。 */
+  | 'reconcile_scheduled';
 
 /**
  * 各 kind 的参数（按 kind 区分；元数据维度本阶段先占位预留）。
@@ -1027,6 +1330,10 @@ export interface PublishCommandParams {
   optionValue?: string;
   /** set_schedule：定时发布时刻（毫秒时间戳；缺省则云端不下发此指令） */
   publishTime?: number;
+  /** capture_scheduled / reconcile_scheduled：用于唯一匹配的冻结标题。 */
+  scheduledTitle?: string;
+  /** reconcile_scheduled：平台定时列表内部句柄；它不是公开 postId。 */
+  scheduledPlatformId?: string;
 }
 
 /**
@@ -1035,6 +1342,8 @@ export interface PublishCommandParams {
  * 注意：此 `recordId`（数字，PublishLogStore.insert 返回）与 AC-PUB 审批文件的 `requestId`（字符串）是两个不同的键。
  */
 export interface PublishCommandPayload {
+  /** 运行时平台；缺省按历史小红书处理。 */
+  platform?: 'xiaohongshu' | 'facebook';
   /** 当前 edge 页面写任务租约；发布完整序列逐条携同一值。 */
   taskId: string;
   /** 发布记录主键 */
@@ -1043,8 +1352,6 @@ export interface PublishCommandPayload {
   seq: number;
   /** 指令种类 */
   kind: PublishCommandKind;
-  /** 发布平台；缺省按历史小红书命令处理。 */
-  platform?: 'xiaohongshu' | 'facebook';
   /** 指令参数 */
   params: PublishCommandParams;
   /** 边缘执行超时（毫秒，缺省由边缘兜底） */
@@ -1072,10 +1379,13 @@ export interface PublishCommandResultPayload {
    * 反之 `ok===false && !submitDispatched` 才是「提交前失败」，可安全保持待审重投（change lease-strict-preemption）。
    */
   submitDispatched?: boolean;
-  /** 成功时的产出值（如 capture_postId 的真实 postId） */
+  /**
+   * 成功产出：capture_postId/reconcile_scheduled 为真实公开 postId；
+   * capture_scheduled 为平台定时列表内部句柄（不得写 platform_post_id）。
+   */
   value?: string;
   /**
-   * capture_postId 附带：带 xsec_token 的完整小红书详情页分享 URL（可点开真实笔记）。
+   * capture_postId / reconcile_scheduled 附带：平台给出的完整小红书详情页分享 URL（可点开真实笔记）。
    * 抓不到则不带（undefined）——诚实置空，绝不用裸 id 拼打不开的假链接（change publish-history-account-and-detail）。
    */
   postUrl?: string;
@@ -1246,7 +1556,7 @@ export interface PageCardsPayload {
   containerName?: string;
 }
 
-/** Note detail image reference observed by edge. */
+/** Note detail image reference observed by edge. Edge only reports URL/metadata; it does not download. */
 export interface NoteImagePayload {
   index: number;
   url: string;

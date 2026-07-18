@@ -61,7 +61,7 @@ export interface CandidateSnapshot {
   recordId: number;
   accountId: string;
   platform: 'xiaohongshu' | 'facebook';
-  status: 'draft' | 'pending_approval' | 'submitted' | 'published' | 'failed' | 'needs_review';
+  status: 'draft' | 'pending_approval' | 'scheduled' | 'submitted' | 'published' | 'failed' | 'needs_review';
   contentVersion: number;
   title: string | null;
   content: string;
@@ -76,7 +76,7 @@ export interface DelegatedExecutorDeps {
   rejectCandidate: (draft: CandidateSnapshot) => Promise<CandidateSnapshot | null>;
   modifyCandidate: (
     draft: CandidateSnapshot,
-    patch: { title?: string; content?: string; images?: string[] },
+    patch: { title?: string; content?: string; images?: string[]; publishMode?: 'immediate' | 'scheduled'; publishTime?: number | null },
   ) => Promise<CandidateSnapshot | null>;
   terminalWaitMs?: number;
   now?: () => number;
@@ -147,6 +147,9 @@ function publishResult(task: DelegatedTask, outcome: TriggerOutcome): DelegatedE
   if (outcome.status === 'published') {
     return { kind: 'success', verificationKind: 'platform_publish_confirmed', evidenceRef: evidence };
   }
+  if (outcome.status === 'scheduled') {
+    return { kind: 'success', verificationKind: 'platform_schedule_confirmed', evidenceRef: evidence };
+  }
   if (outcome.status === 'pending_approval' || outcome.status === 'draft') {
     if (outcome.recordId == null) return { kind: 'failed', reason: 'candidate_record_missing', retryable: false };
     if (task.action === 'generate_candidates') {
@@ -170,6 +173,9 @@ function candidateResult(task: DelegatedTask, draft: CandidateSnapshot | null): 
     if (draft.status === 'published') {
       return { kind: 'success', verificationKind: 'platform_publish_confirmed', evidenceRef };
     }
+    if (draft.status === 'scheduled') {
+      return { kind: 'success', verificationKind: 'platform_schedule_confirmed', evidenceRef };
+    }
     if (draft.status === 'submitted') {
       return { kind: 'submitted_unknown', reason: '候选稿已提交但平台结果未确认', evidenceRef };
     }
@@ -184,20 +190,55 @@ function candidateResult(task: DelegatedTask, draft: CandidateSnapshot | null): 
     : { kind: 'failed', reason: `candidate_write_${draft.status}`, retryable: false };
 }
 
-function parseCandidatePatch(task: DelegatedTask): { title?: string; content?: string; images?: string[] } | null {
+function parseCandidatePatch(
+  task: DelegatedTask,
+): { title?: string; content?: string; images?: string[]; publishMode?: 'immediate' | 'scheduled'; publishTime?: number | null } | null {
   const title = constraintString(task, 'title');
   const content = constraintString(task, 'content');
   const images = Array.isArray(task.targetConstraints.images) && task.targetConstraints.images.every((item) => typeof item === 'string')
     ? task.targetConstraints.images
     : undefined;
-  if (title || content || images) return { ...(title ? { title } : {}), ...(content ? { content } : {}), ...(images ? { images } : {}) };
+  const rawMode = task.targetConstraints.publishMode;
+  const publishMode = rawMode === 'immediate' || rawMode === 'scheduled' ? rawMode : undefined;
+  const rawPublishTime = task.targetConstraints.publishTime;
+  const parsedPublishTime = typeof rawPublishTime === 'number'
+    ? rawPublishTime
+    : typeof rawPublishTime === 'string' && rawPublishTime.trim()
+      ? Number(rawPublishTime)
+      : rawPublishTime === null
+        ? null
+        : undefined;
+  const publishTime = parsedPublishTime === null || Number.isFinite(parsedPublishTime) ? parsedPublishTime : undefined;
+  if (title || content || images || publishMode || publishTime !== undefined) {
+    return {
+      ...(title ? { title } : {}),
+      ...(content ? { content } : {}),
+      ...(images ? { images } : {}),
+      ...(publishMode ? { publishMode } : {}),
+      ...(publishTime !== undefined ? { publishTime } : {}),
+    };
+  }
   const raw = constraintString(task, 'patch');
   if (!raw) return null;
   try {
-    const parsed = JSON.parse(raw) as { title?: unknown; content?: unknown };
-    const out = {
+    const parsed = JSON.parse(raw) as {
+      title?: unknown;
+      content?: unknown;
+      publishMode?: unknown;
+      publishTime?: unknown;
+    };
+    const out: {
+      title?: string;
+      content?: string;
+      publishMode?: 'immediate' | 'scheduled';
+      publishTime?: number | null;
+    } = {
       ...(typeof parsed.title === 'string' && parsed.title.trim() ? { title: parsed.title.trim() } : {}),
       ...(typeof parsed.content === 'string' && parsed.content.trim() ? { content: parsed.content.trim() } : {}),
+      ...(parsed.publishMode === 'immediate' || parsed.publishMode === 'scheduled' ? { publishMode: parsed.publishMode } : {}),
+      ...(parsed.publishTime === null || (typeof parsed.publishTime === 'number' && Number.isFinite(parsed.publishTime))
+        ? { publishTime: parsed.publishTime }
+        : {}),
     };
     return Object.keys(out).length > 0 ? out : null;
   } catch {
@@ -381,6 +422,9 @@ export function createDelegatedExecutorRouter(deps: DelegatedExecutorDeps): {
       if (!draft) return { kind: 'failed', reason: 'candidate_missing_during_reconcile', retryable: false };
       if (draft.status === 'published') {
         return { kind: 'success', verificationKind: 'platform_publish_confirmed', evidenceRef: `publish:${draft.recordId}` };
+      }
+      if (draft.status === 'scheduled') {
+        return { kind: 'success', verificationKind: 'platform_schedule_confirmed', evidenceRef: `publish:${draft.recordId}` };
       }
       if (draft.status === 'submitted') {
         return { kind: 'submitted_unknown', reason: '候选已提交但平台结果未确认', evidenceRef: `publish:${draft.recordId}` };

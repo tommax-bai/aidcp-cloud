@@ -97,6 +97,7 @@ import {
   type PublishApprovalPreflightResult,
 } from './feishu/index.js';
 import { CommandSequencer } from './publish-agent/command-sequencer.js';
+import { ScheduledPublishReconciler } from './publish-agent/scheduled-publish-reconciler.js';
 import { createPublishDraftImageRemoveHandler } from './publish-agent/draft-image-remove.js';
 import {
   clampFillBudgetToLease,
@@ -712,8 +713,10 @@ async function main(): Promise<void> {
     credentials: credentialStore,
     env: process.env,
   });
+  let scheduledPublishReconciler: ScheduledPublishReconciler | null = null;
   const flushTokenUsageOnExit = (sig: string): void => {
     console.log(`[aidcp-cloud] 收到 ${sig}，flush token 用量后退出`);
+    scheduledPublishReconciler?.stop();
     void Promise.race([
       tokenUsageStore.close().catch(() => {}),
       new Promise((resolve) => setTimeout(resolve, 3000)),
@@ -2400,6 +2403,9 @@ async function main(): Promise<void> {
     };
   }
 
+  const recordPublish = async (accountId: string): Promise<void> => {
+    await (await resolveController(accountId)).record('publish');
+  };
   const publishDispatcher = new PublishDispatcher({
     store: publishLogStore,
     sequencer: commandSequencer,
@@ -2411,9 +2417,7 @@ async function main(): Promise<void> {
     voidApprovalSignal,
     // 发布记账（change risk-record-actuated-facts）：真发出去了才记，与 publish_log 权威口径同轴。
     // 此前 record('publish') 全仓零调用点 ⇒ 发布计数器恒 0 ⇒ 发布日配额从未开过火。
-    recordPublish: async (accountId) => {
-      await (await resolveController(accountId)).record('publish');
-    },
+    recordPublish,
     // 陪伴界面：授权核实→approved、云端终判失败→failed 推给在线边缘（published 由边缘自知）。
     notifyUiPublishState: (accountId, recordId, state, title) =>
       uiSnapshotService.pushPublishState(accountId, recordId, state, title),
@@ -2452,6 +2456,18 @@ async function main(): Promise<void> {
     breakerThreshold: Number(process.env.AIDCP_PUBLISH_BREAKER_THRESHOLD ?? 2),
     logger: console,
   });
+  scheduledPublishReconciler = new ScheduledPublishReconciler({
+    store: publishLogStore,
+    sequencer: commandSequencer,
+    edgeTaskLeases,
+    resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
+    isEdgePaused: (edgeId) => (edgeServer ? edgeServer.isEdgePaused(edgeId) : false),
+    recordPublish,
+    intervalMs: readEnvNumber('AIDCP_SCHEDULED_RECONCILE_SCAN_MS', 60_000),
+    maxAttempts: readEnvNumber('AIDCP_SCHEDULED_RECONCILE_MAX_ATTEMPTS', 8),
+    logger: console,
+  });
+  scheduledPublishReconciler.start();
   // 审批授权 → 触发下发（仅 publish-<n> 走此路；评论审批 comment-<…> 不触发发帖下发）。
   // humanApproval：人工批准入口（含 already-decided 重复批准）——熔断中即视为人工确认清除并恢复 drain。
   const triggerPublishDispatchOnApprove = (requestId: string): void => {
@@ -3138,7 +3154,7 @@ async function main(): Promise<void> {
           sourceConcepts: record.sourceConcepts ?? [],
           sourceLikedIds: record.sourceLikedIds ?? [],
           // decouple-publish-generation-from-dispatch：生成候审段落 'pending_approval'（待人审、未下发）。
-          status: record.status as 'draft' | 'pending_approval' | 'submitted' | 'published' | 'failed' | 'needs_review',
+          status: record.status as 'draft' | 'pending_approval' | 'scheduled' | 'submitted' | 'published' | 'failed' | 'needs_review',
           // 审计用 image_url（封面=首张）+ 多图全集 images（下发段读回逐张上传）；真实附着数插入时 0，上传成功后由 markImagesAttached 置真实 K。
           imageUrl: record.imageUrl,
           imageUrls: record.images,
@@ -3150,7 +3166,7 @@ async function main(): Promise<void> {
         });
       },
       async updateStatus(id, status) {
-        await publishLogStore.updateStatus(id, status as 'draft' | 'pending_approval' | 'submitted' | 'published' | 'failed' | 'needs_review');
+        await publishLogStore.updateStatus(id, status as 'draft' | 'pending_approval' | 'scheduled' | 'submitted' | 'published' | 'failed' | 'needs_review');
       },
       // stage-4 元数据落库 + 防篡改审计（供下发段重建发布输入 + 审计）。
       async recordMetadata(id, metadata, aiEnforced) {

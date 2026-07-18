@@ -25,6 +25,7 @@ export interface DispatchStore {
   loadForDispatch(recordId: number): Promise<DispatchDraft | null>;
   updateStatus(id: number, status: string): Promise<void>;
   updatePostId(id: number, postId: string, postUrl?: string | null): Promise<void>;
+  markScheduled(id: number, scheduledAt: number, scheduledPlatformId?: string | null): Promise<void>;
   /** 配图收口：标记真实附着张数 K（K>0 派生 images_attached=true）。 */
   markImagesAttached(id: number, count: number): Promise<void>;
   /** 兜底扫描用：列出所有待审草稿 id（供事件丢失时补触发）。 */
@@ -504,6 +505,29 @@ export class PublishDispatcher {
         // 权威口径同轴（published）。best-effort：记账失败绝不影响已成功的发布终态。
         await this.recordActuatedPublish(accountId, recordId);
         this.logger.log(`[PublishDispatcher] recordId=${recordId} published postId=${result.postId} edge=${edgeId}`);
+      } else if (result.outcome === 'scheduled_pending') {
+        // 原生定时任务已被平台接受（或提交按下已派发但回执不确定）：不重投、不当场抓公开 postId、也不记发布次数。
+        // 内部定时 id 只作后续对账句柄，绝不写 platform_post_id。
+        this.consecutivePreemptions.delete(recordId);
+        const scheduledAt = result.scheduledAt ?? draft.metadata?.publishTime;
+        if (scheduledAt == null) {
+          // 理论由 sequencer 前置校验焊死；兜底仍诚实 needs_review，绝不把未知时间当立即发布计数。
+          await this.store.updateStatus(recordId, 'needs_review').catch(() => {});
+          this.logger.warn(`[PublishDispatcher] recordId=${recordId} scheduled_pending 缺目标时间 → needs_review`);
+        } else {
+          try {
+            await this.store.markScheduled(recordId, scheduledAt, result.scheduledPlatformId);
+            this.logger.log(
+              `[PublishDispatcher] recordId=${recordId} scheduled at=${new Date(scheduledAt).toISOString()} internalId=${result.scheduledPlatformId ?? '-'}`,
+            );
+            // companion 旧枚举没有 scheduled；暂用 submitted 表达“平台已接受，待确认”，console 读取权威 scheduled 状态。
+            this.notifyUi(accountId, recordId, 'submitted', draft.title);
+          } catch (err) {
+            // 平台任务可能已存在，绝不能回 pending 触发重投；转人工复核且不计发布次数。
+            await this.store.updateStatus(recordId, 'needs_review').catch(() => {});
+            this.logger.error(`[PublishDispatcher] recordId=${recordId} scheduled 落库失败 → needs_review：${(err as Error).message}`);
+          }
+        }
       } else if (result.outcome === 'submitted_unconfirmed') {
         // 当前页面已确认提交，但未拿到同页 postId/permalink。
         // 对用户是“已提交，待链接确认”，不是失败；仍不重试，素材隔离。
