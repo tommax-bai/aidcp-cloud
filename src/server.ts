@@ -1954,7 +1954,8 @@ async function main(): Promise<void> {
     `schema=${interactionSchemaMode ?? 'unavailable'} ` +
     `environment=${readEnvString('AIDCP_DEPLOY_ENV') ?? 'unset'} ` +
     `configured=${interactionConfiguredGlobalWriteEnabled} ` +
-    `effective=${interactionGlobalWriteEnabled}`,
+    `effective=${interactionGlobalWriteEnabled} ` +
+    `dev_quota_bypass=${interactionGlobalWriteEnabled && readEnvString('AIDCP_DEPLOY_ENV') === 'dev'}`,
   );
   const interactionRuntimeControls = interactionStore && interactionInbox
     ? {

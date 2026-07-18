@@ -104,6 +104,57 @@ test('legacy schema mode blocks outbound work before any job data is touched', a
   assert.equal(read, false);
 });
 
+test('dev reviewed sends bypass login cooldown and quota-only denial but retain risk-state blocks', async () => {
+  const approved = context('approved');
+  let transitions = 0;
+  const store = sendableStore({
+    getJobContext: async () => approved,
+    getSendAuthGate: async () => ({
+      activeSince: now - 1_000,
+      auth: {
+        envKey: 'env_wc_demo', accountId: 'acct_wc_demo', platform: 'wechat_channels', status: 'active',
+        browserState: 'closed', capabilities: { commentsRead: true, commentsReply: true, dmRead: true,
+          dmSendText: true, dmSendImage: false },
+        identity: { externalId: 'finder', displayName: 'dev', identityHash: `sha256:${'1'.repeat(64)}` },
+        runtimeControlsVersion: 1, checkedAt: now, reasonCode: null,
+      },
+    }),
+    transitionJob: async () => {
+      transitions += 1;
+      return { ...approved.job, state: 'queued' as const, version: approved.job.version + 1 };
+    },
+    recordAudit: async () => undefined,
+  });
+  const devSender = new InteractionSendOrchestrator({
+    store,
+    configs: { getSnapshot: async () => config() } as unknown as ReplyConfigStore,
+    pusher: {} as EdgePusher,
+    controllerFor: () => ({ explain: () => ({ allowed: false, reason: 'quota:minute' }), record: async () => true }),
+    metrics: new InteractionMetrics(), globalWriteEnabled: true,
+    env: { AIDCP_DEPLOY_ENV: 'dev', AIDCP_INTERACTION_WRITE_ENABLED: 'true' }, clock: () => now,
+  });
+  const queued = await devSender.queueApproved({
+    accountId: 'acct_wc_demo', envKey: 'env_wc_demo', jobId: approved.job.id,
+    expectedVersion: approved.job.version, actor: 'client:test',
+  });
+  assert.equal(queued.state, 'queued');
+  assert.equal(transitions, 1);
+
+  const restricted = new InteractionSendOrchestrator({
+    store,
+    configs: { getSnapshot: async () => config() } as unknown as ReplyConfigStore,
+    pusher: {} as EdgePusher,
+    controllerFor: () => ({ explain: () => ({ allowed: false, reason: 'state:restricted' }), record: async () => true }),
+    metrics: new InteractionMetrics(), globalWriteEnabled: true,
+    env: { AIDCP_DEPLOY_ENV: 'dev', AIDCP_INTERACTION_WRITE_ENABLED: 'true' }, clock: () => now,
+  });
+  await assert.rejects(
+    restricted.queueApproved({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo', jobId: approved.job.id,
+      expectedVersion: approved.job.version, actor: 'client:test' }),
+    (error: unknown) => (error as { code?: string }).code === 'INTERACTION_RATE_LIMITED',
+  );
+});
+
 test('approved command is persisted as one attempt and dispatched to one account Edge without claiming sent', async () => {
   const pushed: Envelope[] = [];
   let markedDispatched = false;

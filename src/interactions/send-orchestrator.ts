@@ -49,6 +49,7 @@ interface GateResult {
 
 export class InteractionSendOrchestrator {
   private readonly globalWriteEnabled: boolean;
+  private readonly devQuotaBypassEnabled: boolean;
   private readonly autoAllowlist: Set<string>;
   private readonly clock: () => number;
 
@@ -65,6 +66,7 @@ export class InteractionSendOrchestrator {
   }) {
     const env = deps.env ?? process.env;
     this.globalWriteEnabled = deps.globalWriteEnabled ?? enabled(env.AIDCP_INTERACTION_WRITE_ENABLED);
+    this.devQuotaBypassEnabled = this.globalWriteEnabled && env.AIDCP_DEPLOY_ENV?.trim() === 'dev';
     this.autoAllowlist = new Set((env.AIDCP_INTERACTION_AUTO_ACCOUNT_ALLOWLIST ?? '')
       .split(',').map((item) => item.trim()).filter(Boolean));
     this.clock = deps.clock ?? Date.now;
@@ -161,7 +163,9 @@ export class InteractionSendOrchestrator {
       : authGate.auth.capabilities.dmSendText;
     if (!capability) this.blocked('INTERACTION_PERMISSION_DENIED', '平台当前未确认回复能力。', 403);
     const cooldownMs = snapshot.policy.rateLimits.newLoginCooldownSeconds * 1_000;
-    if (authGate.activeSince === null || this.clock() - authGate.activeSince < cooldownMs) {
+    if (!this.devQuotaBypassEnabled && (
+      authGate.activeSince === null || this.clock() - authGate.activeSince < cooldownMs
+    )) {
       this.blocked('INTERACTION_RATE_LIMITED', '登录冷却尚未结束。', 429);
     }
     const auto = context.job.approvalActor === null;
@@ -175,7 +179,10 @@ export class InteractionSendOrchestrator {
     const controller = await this.deps.controllerFor(accountId);
     if (!controller) this.blocked('INTERACTION_UPSTREAM_UNAVAILABLE', '风险控制器不可用。', 503);
     const risk = controller.explain(action);
-    if (!risk.allowed) this.blocked('INTERACTION_RATE_LIMITED', '风险配额不允许本次回复。', 429);
+    const devQuotaBypass = this.devQuotaBypassEnabled && risk.reason?.startsWith('quota:');
+    if (!risk.allowed && !devQuotaBypass) {
+      this.blocked('INTERACTION_RATE_LIMITED', '风险配额不允许本次回复。', 429);
+    }
     const limits = snapshot.policy.rateLimits;
     const counts = await this.deps.store.sendWindowCounts(accountId, context.thread.id, this.clock());
     if (limits.accountPerMinute <= 0 || counts.minute >= limits.accountPerMinute ||
