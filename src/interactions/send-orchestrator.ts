@@ -59,11 +59,12 @@ export class InteractionSendOrchestrator {
     isEdgePaused?: (edgeId: string) => boolean;
     controllerFor: (accountId: string) => InteractionRiskController | undefined | Promise<InteractionRiskController | undefined>;
     metrics: InteractionMetrics;
+    globalWriteEnabled?: boolean;
     env?: NodeJS.ProcessEnv;
     clock?: () => number;
   }) {
     const env = deps.env ?? process.env;
-    this.globalWriteEnabled = enabled(env.AIDCP_INTERACTION_WRITE_ENABLED);
+    this.globalWriteEnabled = deps.globalWriteEnabled ?? enabled(env.AIDCP_INTERACTION_WRITE_ENABLED);
     this.autoAllowlist = new Set((env.AIDCP_INTERACTION_AUTO_ACCOUNT_ALLOWLIST ?? '')
       .split(',').map((item) => item.trim()).filter(Boolean));
     this.clock = deps.clock ?? Date.now;

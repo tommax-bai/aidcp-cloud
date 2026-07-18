@@ -258,6 +258,8 @@ import {
   INTERACTION_OFFBOARDING_CAPABILITY,
   INTERACTION_REPLY_RECOVERY_CAPABILITY,
   INTERACTION_RUNTIME_CONTROLS_CAPABILITY,
+  interactionWritesAllowed,
+  type InteractionSchemaMode,
   type InteractionRuntimeControlsPayload,
 } from './interactions/index.js';
 import { projectRuntimeControls } from './interactions/runtime-controls-provider.js';
@@ -1338,6 +1340,7 @@ async function main(): Promise<void> {
   // Session 02：独立入站互动域。0039 未部署时只禁用本能力，不拖垮原有浏览/发布链。
   const interactionMetrics = new InteractionMetrics();
   let interactionStore: InteractionStore | undefined;
+  let interactionSchemaMode: InteractionSchemaMode | undefined;
   let replyConfigStore: ReplyConfigStore | undefined;
   let replyWorkflow: ReplyWorkflow | undefined;
   let interactionInbox: InteractionInboxService | undefined;
@@ -1347,7 +1350,7 @@ async function main(): Promise<void> {
   try {
     interactionStore = new InteractionStore();
     replyConfigStore = new ReplyConfigStore();
-    await interactionStore.init();
+    interactionSchemaMode = await interactionStore.init();
     await replyConfigStore.init();
     const resetClassifying = await interactionStore.recoverStalledClassifyingJobs(Date.now() - interactionAiTimeoutMs * 2);
     interactionMetrics.gauge('interaction_recovered_classifying_jobs', resetClassifying);
@@ -1387,10 +1390,15 @@ async function main(): Promise<void> {
         console.warn(`[interaction] retention 失败: ${error instanceof Error ? error.message : String(error)}`));
     }, 24 * 60 * 60 * 1_000);
     interactionRetentionTimer.unref?.();
-    console.log('[aidcp-cloud] 入站 interaction 域已就绪（0039 / frozen v1；写总开关默认关闭）');
+    if (interactionSchemaMode === 'legacy_read_only') {
+      console.warn('[aidcp-cloud] 入站 interaction 域以兼容只读模式就绪（migration 0046 未执行；读取已恢复；评论回复/私信发送强制关闭）');
+    } else {
+      console.log('[aidcp-cloud] 入站 interaction 域已就绪（migration 0046；完整读写能力受写总开关控制）');
+    }
   } catch (error) {
     await Promise.allSettled([interactionStore?.close(), replyConfigStore?.close()]);
     interactionStore = undefined;
+    interactionSchemaMode = undefined;
     replyConfigStore = undefined;
     replyWorkflow = undefined;
     interactionInbox = undefined;
@@ -1920,8 +1928,12 @@ async function main(): Promise<void> {
   // 建号自助人设生成器（change edge-persona-keyword-generation）：复用共享 llm（按角色 browse:persona_generator
   // 解析模型/温度、按 accountId 记账），生成 persona.generate 的草稿。
   const personaGenerator = new PersonaGenerator({ llm });
-  const interactionGlobalWriteEnabled = ['1', 'true', 'yes', 'on'].includes(
+  const interactionConfiguredGlobalWriteEnabled = ['1', 'true', 'yes', 'on'].includes(
     (readEnvString('AIDCP_INTERACTION_WRITE_ENABLED') ?? '').toLowerCase(),
+  );
+  const interactionGlobalWriteEnabled = interactionWritesAllowed(
+    interactionSchemaMode,
+    interactionConfiguredGlobalWriteEnabled,
   );
   const interactionRuntimeControls = interactionStore && interactionInbox
     ? {
@@ -2038,6 +2050,7 @@ async function main(): Promise<void> {
       isEdgePaused: (edgeId) => server.isEdgePaused(edgeId),
       controllerFor: (accountId) => riskRegistry.getController(accountId),
       metrics: interactionMetrics,
+      globalWriteEnabled: interactionGlobalWriteEnabled,
     })
     : undefined;
   interactionOffboarding = interactionStore

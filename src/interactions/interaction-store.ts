@@ -25,6 +25,7 @@ import {
   type SyncFreshnessProjection,
   type ThreadView,
 } from './types.js';
+import { classifyInteractionSchema, type InteractionSchemaMode } from './schema-capability.js';
 
 const { Pool } = pg;
 const SYNC_THREAD_FUTURE_SKEW_MS = 5 * 60 * 1_000;
@@ -277,8 +278,12 @@ export class InteractionStore {
   }
 
   /** Migrations own the schema. init fails locally and lets main disable only this feature. */
-  async init(): Promise<void> {
-    const { rows } = await this.pool.query<{ present: boolean }>(
+  async init(): Promise<InteractionSchemaMode> {
+    const { rows } = await this.pool.query<{
+      base_present: boolean;
+      active_attempt_index_present: boolean;
+      legacy_retryable_column_present: boolean;
+    }>(
       `SELECT to_regclass('public.interaction_threads') IS NOT NULL
           AND to_regclass('public.interaction_reply_configs') IS NOT NULL
           AND to_regclass('public.interaction_offboards') IS NOT NULL
@@ -292,18 +297,24 @@ export class InteractionStore {
             WHERE table_schema='public' AND table_name='interaction_auth_state'
               AND column_name='runtime_controls_version'
           )
-          AND EXISTS (
+          AS base_present,
+          EXISTS (
             SELECT 1 FROM pg_indexes
             WHERE schemaname='public' AND tablename='interaction_send_attempts'
               AND indexname='uq_interaction_send_attempts_active_idem'
-          )
-          AND NOT EXISTS (
+          ) AS active_attempt_index_present,
+          EXISTS (
             SELECT 1 FROM information_schema.columns
             WHERE table_schema='public' AND table_name='interaction_send_attempts'
               AND column_name='retryable'
-          ) AS present`,
+          ) AS legacy_retryable_column_present`,
     );
-    if (rows[0]?.present !== true) throw new Error('interaction_schema_missing_run_0046');
+    const shape = rows[0];
+    return classifyInteractionSchema({
+      basePresent: shape?.base_present === true,
+      activeAttemptIndexPresent: shape?.active_attempt_index_present === true,
+      legacyRetryableColumnPresent: shape?.legacy_retryable_column_present === true,
+    });
   }
 
   async upsertAuthStatus(payload: InteractionAuthStatusPayload): Promise<void> {

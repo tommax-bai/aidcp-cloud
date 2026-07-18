@@ -6,6 +6,7 @@ import type { ReplyConfigStore } from '../../src/interactions/reply-config-store
 import type { InteractionStore } from '../../src/interactions/interaction-store.js';
 import { InteractionMetrics } from '../../src/interactions/metrics.js';
 import { InteractionSendOrchestrator, replyIdempotencyKey } from '../../src/interactions/send-orchestrator.js';
+import { interactionWritesAllowed } from '../../src/interactions/schema-capability.js';
 import type { ReplyConfigSnapshot, RuntimeControls, ScopedJobContext } from '../../src/interactions/types.js';
 
 const now = 1784044810000;
@@ -87,7 +88,7 @@ test('reply idempotency key exactly matches the frozen UTF-8 formula fixture', (
   assert.equal(replyIdempotencyKey(context()), 'e0e055e5abfced94f0e808eb5745a36b5f9f7aecc75c2d0377f5b2f692ae2ae9');
 });
 
-test('global write kill switch defaults off before any job data is touched', async () => {
+test('legacy schema mode blocks outbound work before any job data is touched', async () => {
   let read = false;
   const sender = new InteractionSendOrchestrator({
     store: { getJobContext: async () => { read = true; return context(); } } as unknown as InteractionStore,
@@ -95,7 +96,8 @@ test('global write kill switch defaults off before any job data is touched', asy
     pusher: {} as EdgePusher,
     controllerFor: () => undefined,
     metrics: new InteractionMetrics(),
-    env: {},
+    globalWriteEnabled: interactionWritesAllowed('legacy_read_only', true),
+    env: { AIDCP_INTERACTION_WRITE_ENABLED: 'true' },
   });
   await assert.rejects(sender.dispatchQueued({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo', jobId: 'job_comment_100', expectedVersion: 4 }),
     (error: unknown) => (error as { code?: string }).code === 'INTERACTION_FEATURE_DISABLED');

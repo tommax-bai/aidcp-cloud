@@ -1,6 +1,7 @@
 export * from './types.js';
 export * from './contract.js';
 export * from './interaction-store.js';
+export * from './schema-capability.js';
 export * from './reply-config.js';
 export * from './reply-config-store.js';
 export * from './reply-ai.js';

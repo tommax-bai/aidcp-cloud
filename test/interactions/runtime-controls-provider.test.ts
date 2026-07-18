@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { projectRuntimeControls } from '../../src/interactions/runtime-controls-provider.js';
+import { interactionWritesAllowed } from '../../src/interactions/schema-capability.js';
 import type { RuntimeControls } from '../../src/interactions/types.js';
 
 function controls(overrides: Partial<RuntimeControls> = {}): RuntimeControls {
@@ -13,11 +14,11 @@ function controls(overrides: Partial<RuntimeControls> = {}): RuntimeControls {
   };
 }
 
-test('runtime controls projection keeps reads but closes writes when global write is off', async () => {
+test('legacy schema mode keeps reads but closes writes even when global write is configured on', async () => {
   const snapshot = await projectRuntimeControls({
     getRuntimeControls: async () => controls(), hasPendingOffboard: async () => false,
     hasPendingRevocationHold: async () => false,
-    globalWriteEnabled: false,
+    globalWriteEnabled: interactionWritesAllowed('legacy_read_only', true),
   }, 'env_wc_a');
   assert.deepEqual(snapshot, {
     accountId: 'env_wc_a', envKey: 'env_wc_a', version: 4,
