@@ -65,6 +65,7 @@ import type { NotificationContact, NotificationContactManual } from '../cache/no
 import type { ThinkingMode, ThinkingModeApi } from '../config/role-catalog.js';
 import type { AlertStore } from '../alerts/index.js';
 import type { DelegatedTaskService } from '../delegated-task/service.js';
+import type { InteractionPermissionOverview } from '../interactions/interaction-panel-permissions.js';
 
 /** 全局「内容可自动时段」视图（GET /api/content-schedule/global）。overridden = 库有行。 */
 export interface ContentScheduleGlobalView {
@@ -121,6 +122,10 @@ export interface PanelDeps {
   /** 视频号互动配置 internal API；仍复用 panel JWT，但在域内按显式 grants 再次 fail-closed。 */
   interactionInternalApi?: {
     handle(req: IncomingMessage, res: ServerResponse, actor: string): Promise<boolean>;
+  };
+  /** 视频号互动权限只读概览；只含固定权限元数据和有效 panel 用户名，不含密码或环境变量原文。 */
+  interactionPermissions?: {
+    getView(): InteractionPermissionOverview;
   };
   /** 令牌撤销黑名单（change console-cloud-panel-hardening #26）；未注入则登出/撤销不生效（向后兼容）。 */
   revocation?: TokenRevocationStore;

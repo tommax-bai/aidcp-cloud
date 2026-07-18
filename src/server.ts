@@ -256,6 +256,7 @@ import {
   interactionTestDataResetEnabled,
   InteractionInternalApi,
   InteractionMetrics,
+  buildInteractionPermissionOverview,
   parseInteractionPanelGrants,
   INTERACTION_OFFBOARDING_CAPABILITY,
   INTERACTION_REPLY_RECOVERY_CAPABILITY,
@@ -2061,6 +2062,8 @@ async function main(): Promise<void> {
     ? new InteractionOffboardingService({ store: interactionStore, pusher: server, metrics: interactionMetrics })
     : undefined;
   const interactionPanelGrants = parseInteractionPanelGrants(readEnvString('AIDCP_INTERACTION_PANEL_GRANTS'));
+  const panelUsers = parsePanelUsers(readEnvString('AIDCP_PANEL_USERS'));
+  const interactionPermissionOverview = buildInteractionPermissionOverview(panelUsers, interactionPanelGrants);
   const deliverInteractionRuntimeControls = async (controls: import('./interactions/types.js').RuntimeControls): Promise<{ delivered: number }> => {
     if (!interactionRuntimeControls) return { delivered: 0 };
     const edgeId = server.resolveEdgeIdForAccount(
@@ -3909,6 +3912,7 @@ async function main(): Promise<void> {
       const panel = await startPanelApi(
         {
           interactionInternalApi,
+          interactionPermissions: { getView: () => interactionPermissionOverview },
           revocation: new TokenRevocationStore(),
           riskRegistry,
           publishLogStore,
@@ -4200,7 +4204,7 @@ async function main(): Promise<void> {
         {
           port: panelPort,
           jwtSecret: readEnvString('AIDCP_PANEL_JWT_SECRET') ?? '',
-          users: parsePanelUsers(readEnvString('AIDCP_PANEL_USERS')),
+          users: panelUsers,
           jwtTtlSeconds: readEnvPort('AIDCP_PANEL_JWT_TTL_SECONDS') ?? 3600,
           // 自检拒绝绑定：边-云 8787 / PG 5432 / 调试 8788 / 客户鉴权端口 / 部署时经 env 补充的 isales 等端口。
           forbiddenPorts: [port, debugPort, 5432, ...(clientAuthPort ? [clientAuthPort] : []), ...parseForbiddenPorts(readEnvString('AIDCP_PANEL_FORBIDDEN_PORTS'))],

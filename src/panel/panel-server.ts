@@ -1507,6 +1507,16 @@ function createRequestHandler(
       return;
     }
 
+    // ── 视频号互动权限只读概览（change wechat-panel-permission-visibility）──
+    if (method === 'GET' && url === '/api/config/interaction-permissions') {
+      if (!deps.interactionPermissions) {
+        sendJson(res, 503, { error: 'interaction_permissions_unavailable' });
+        return;
+      }
+      sendJson(res, 200, deps.interactionPermissions.getView());
+      return;
+    }
+
     // ── 模型与凭据配置（change console-model-provider-config）──────────────
     // 明文密钥绝不回传；写非乐观；主密钥缺失诚实 503，绝不假成功。
     if (url === '/api/config/model') {

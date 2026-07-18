@@ -11,4 +11,5 @@ export * from './offboarding-service.js';
 export * from './interaction-inbox-service.js';
 export * from './interaction-customer-api.js';
 export * from './interaction-internal-api.js';
+export * from './interaction-panel-permissions.js';
 export * from './metrics.js';
