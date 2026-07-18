@@ -25,6 +25,7 @@ test('test data reset requires both explicit dev identity and opt-in flag', () =
 
 test('customer API transactionally binds enabled user + owned env + account on every read/action', async () => {
   let mutationCalls = 0;
+  let draftCalls = 0;
   let listCalls = 0;
   let lastListState: ListQuery['state'];
   let authorizedOperations = 0;
@@ -174,7 +175,17 @@ test('customer API transactionally binds enabled user + owned env + account on e
       return replyConfigHead;
     },
   } as unknown as ReplyConfigStore;
-  const api = new InteractionCustomerApi({ users, store, configs, workflow: {} as ReplyWorkflow,
+  const workflow = {
+    edit: async (input: { accountId: string; envKey: string; jobId: string; expectedVersion: number; actor: string; text: string }) => {
+      draftCalls += 1;
+      assert.deepEqual(input, {
+        accountId: 'acct-a', envKey: 'env-a', jobId: 'job-a', expectedVersion: 2,
+        actor: 'client:user-a', text: '保存到公开草稿路由',
+      });
+      return { ...job, finalText: input.text, version: input.expectedVersion + 1 };
+    },
+  } as unknown as ReplyWorkflow;
+  const api = new InteractionCustomerApi({ users, store, configs, workflow,
     sender, onRuntimeControlsUpdated: async (controls) => {
       runtimeDeliveries += 1;
       assert.equal(controls.version, controlsVersion);
@@ -236,6 +247,19 @@ test('customer API transactionally binds enabled user + owned env + account on e
     assert.equal(acceptedBody.data.job.state, 'ignored');
     assert.equal(acceptedBody.meta.asOf, 1784044800000);
     assert.equal(mutationCalls, 1);
+
+    const savedDraft = await fetch(`${base}/environments/env-a/replies/job-a/draft`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', 'x-test-user': 'user-a' },
+      body: JSON.stringify({ expectedVersion: 2, finalText: '保存到公开草稿路由' }),
+    });
+    assert.equal(savedDraft.status, 200);
+    assert.equal(draftCalls, 1);
+    const undocumentedShortDraft = await fetch(`${base}/environments/env-a/replies/job-a`, {
+      method: 'PUT', headers: { 'content-type': 'application/json', 'x-test-user': 'user-a' },
+      body: JSON.stringify({ expectedVersion: 2, finalText: '保存到公开草稿路由' }),
+    });
+    assert.equal(undocumentedShortDraft.status, 404);
+    assert.equal(draftCalls, 1, '未公开的短路由不得进入草稿工作流');
 
     const list = await fetch(`${base}/environments/env-a/interactions`, { headers: { 'x-test-user': 'user-a' } });
     assert.equal(list.status, 200);

@@ -236,7 +236,7 @@ test('explicit regenerate can recover a failed job, while inactive auth blocks b
     getJobContext: async () => context,
     getAuth: async () => ({ envKey: 'env-a', accountId: 'acct_wc_demo', platform: 'wechat_channels' as const,
       status: 'active' as const, browserState: 'closed' as const,
-      capabilities: { commentsRead: true, commentsReply: true, dmRead: true, dmSendText: true, dmSendImage: false as const },
+      capabilities: { commentsRead: true, commentsReply: false, dmRead: true, dmSendText: false, dmSendImage: false as const },
       identity: { externalId: 'finder', displayName: '账号', identityHash: `sha256:${'1'.repeat(64)}` },
       runtimeControlsVersion: 0, checkedAt: now, reasonCode: null }),
     transitionJob: async (input: { from: string[]; to: string }) => {
@@ -268,4 +268,48 @@ test('explicit regenerate can recover a failed job, while inactive auth blocks b
     expectedVersion: 4, actor: 'client:user-a' }),
   (error: unknown) => (error as { code?: string }).code === 'INTERACTION_AUTH_REQUIRED');
   assert.equal(mutated, false);
+});
+
+test('active identified auth permits edit and approve while platform send capability remains false', async () => {
+  const base: ScopedJobContext = {
+    thread: { id: 'thread-a', platform: 'wechat_channels', accountId: 'acct_wc_demo', envKey: 'env-a',
+      channel: 'comment', externalThreadId: 'thread-external', sourceExternalId: null, sourceTitle: null,
+      sourceCoverUrl: null, participant: null, status: 'waiting_review', lastMessageAt: now, lastSyncedAt: now },
+    message: { id: 'message-a', threadId: 'thread-a', direction: 'inbound', externalMessageId: 'message-external',
+      externalParentId: null, externalRootId: null, messageType: 'text', contentText: '谢谢分享',
+      attachmentMeta: null, lifecycle: 'active', platformCreatedAt: now },
+    job: { id: 'job-a', inboundMessageId: 'message-a', state: 'approval_required', version: 7,
+      matchedRuleId: 'first', configVersion: 2, template: { templateId: 'thanks-v1', templateVersion: 1 },
+      renderedText: '小王，谢谢关注 示例视频号。', polishedText: '小王，谢谢关注 示例视频号。',
+      finalText: '小王，谢谢关注 示例视频号。', riskLevel: 'low', riskReasons: [], approvalActor: null,
+      approvedAt: null, idempotencyKey: null, updatedAt: now, meaningChanged: false, introducedClaims: [],
+      lastErrorCode: null },
+  };
+  let current = base;
+  const transitions: string[] = [];
+  const store = {
+    getJobContext: async () => current,
+    getAuth: async () => ({ envKey: 'env-a', accountId: 'acct_wc_demo', platform: 'wechat_channels' as const,
+      status: 'active' as const, browserState: 'closed' as const,
+      capabilities: { commentsRead: true, commentsReply: false, dmRead: true, dmSendText: false, dmSendImage: false as const },
+      identity: { externalId: 'finder', displayName: '账号', identityHash: `sha256:${'1'.repeat(64)}` },
+      runtimeControlsVersion: 0, checkedAt: now, reasonCode: null }),
+    transitionJob: async (input: { to: ScopedJobContext['job']['state']; patch?: Partial<ScopedJobContext['job']> }) => {
+      transitions.push(input.to);
+      current = { ...current, job: { ...current.job, ...input.patch, state: input.to, version: current.job.version + 1 } };
+      return current.job;
+    },
+    recordAudit: async () => {},
+  } as unknown as InteractionStore;
+  const review = { role: 'reply_risk_reviewer', riskLevel: 'low', riskTags: [], reasons: [], allowAutoSend: false };
+  const workflow = new ReplyWorkflow(store, { getSnapshot: async () => snapshot() } as unknown as ReplyConfigStore,
+    new ReplyAiService({ complete: async () => JSON.stringify(review) }, 100));
+
+  const edited = await workflow.edit({ accountId: 'acct_wc_demo', envKey: 'env-a', jobId: 'job-a',
+    expectedVersion: 7, actor: 'client:user-a', text: '朋友，谢谢关注 示例视频号。' });
+  assert.equal(edited.finalText, '朋友，谢谢关注 示例视频号。');
+  const approved = await workflow.approve({ accountId: 'acct_wc_demo', envKey: 'env-a', jobId: 'job-a',
+    expectedVersion: edited.version, actor: 'client:user-a' });
+  assert.equal(approved.state, 'approved');
+  assert.deepEqual(transitions, ['approval_required', 'approved']);
 });

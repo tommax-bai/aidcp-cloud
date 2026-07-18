@@ -365,7 +365,7 @@ export class InteractionCustomerApi {
       }
       return false;
     }
-    if (parts[2] === 'replies' && parts.length === 4 && method === 'PUT') {
+    if (parts[2] === 'replies' && parts.length === 5 && parts[4] === 'draft' && method === 'PUT') {
       onlyQuery(url, []);
       const body = await readBody(req);
       if (!onlyKeys(body, ['expectedVersion','finalText']) || !Number.isInteger(body.expectedVersion) ||

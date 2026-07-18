@@ -205,6 +205,33 @@ test('paused Edge defers before creating an attempt and preserves the queued job
   assert.equal((await sendableStore().getJobContext('acct_wc_demo', 'env_wc_demo', 'job_comment_100'))?.job.state, 'queued');
 });
 
+test('real send remains blocked before attempt creation when platform reply capability is false', async () => {
+  let createCalls = 0;
+  let pushes = 0;
+  const blockedAuth = await sendableStore().getSendAuthGate('acct_wc_demo', 'env_wc_demo');
+  assert.ok(blockedAuth);
+  const sender = new InteractionSendOrchestrator({
+    store: sendableStore({
+      getSendAuthGate: async () => ({
+        ...blockedAuth,
+        auth: { ...blockedAuth.auth, capabilities: { ...blockedAuth.auth.capabilities, commentsReply: false } },
+      }),
+      createAttempt: async () => { createCalls += 1; throw new Error('must_not_create'); },
+    }),
+    configs: { getSnapshot: async () => config() } as unknown as ReplyConfigStore,
+    pusher: { resolveEdgeIdForAccount: () => 'edge-blocked', pushToEdges: () => { pushes += 1; return 1; } } as unknown as EdgePusher,
+    controllerFor: () => ({ explain: () => ({ allowed: true }), record: async () => true }),
+    metrics: new InteractionMetrics(), env: { AIDCP_INTERACTION_WRITE_ENABLED: 'true' }, clock: () => now,
+  });
+
+  await assert.rejects(
+    sender.dispatchQueued({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo', jobId: 'job_comment_100', expectedVersion: 4 }),
+    (error: unknown) => (error as { code?: string }).code === 'INTERACTION_PERMISSION_DENIED',
+  );
+  assert.equal(createCalls, 0);
+  assert.equal(pushes, 0);
+});
+
 test('zero delivery releases the attempt back to queued through the deferred path', async () => {
   const base = context('queued');
   let deferredAttemptId: string | null = null;
