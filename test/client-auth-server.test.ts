@@ -864,7 +864,7 @@ test('缺表(42P01)→ 503 curated_content_unavailable，读路径绝不空池',
   );
 });
 
-test('读离线可用，不可逆写离线诚实拒绝(binding_unverified)且零任务落库', async () => {
+test('浏览器离线时精选洗稿可按持久绑定创建，通用发布委托仍诚实拒绝', async () => {
   const fx = makeFakeStore();
   fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
   fx.scope.set('u1', [{ envKey: 'p1', label: 'a', platform: 'xiaohongshu', source: 'admin', assignedAt: 0 }]);
@@ -896,12 +896,21 @@ test('读离线可用，不可逆写离线诚实拒绝(binding_unverified)且零
       assert.equal((await fetch(`${base}/curated-contents?envKey=p1`, { headers })).status, 200);
       assert.equal((await fetch(`${base}/curated-contents/7?envKey=p1`, { headers })).status, 200);
       assert.equal((await fetch(`${base}/delegated-tasks?envKey=p1`, { headers })).status, 200);
-      // 不可逆写：离线拒绝、零任务落库。
+      // 精选洗稿只排队云端生成必审候选稿，不需要浏览器在线。
       const createPost = await fetch(`${base}/curated-contents/7/create-post`, {
         method: 'POST', headers, body: JSON.stringify({ envKey: 'p1', useReferenceImages: false }),
       });
-      assert.equal(createPost.status, 409);
-      assert.equal((await createPost.json() as { error: string }).error, 'binding_unverified');
+      assert.equal(createPost.status, 201);
+      const createBody = await createPost.json() as {
+        triggered: boolean; created: boolean; task: { id: string; status: string; version: number };
+      };
+      assert.deepEqual(createBody, { triggered: true, created: true, task: { id: createBody.task.id, status: 'queued', version: 2 } });
+      const [rewriteTask] = await taskStore.list({ accountId: ACCT_P1, limit: 20 });
+      assert.equal(rewriteTask.accountId, ACCT_P1);
+      assert.equal(rewriteTask.approvalMode, 'review');
+      assert.equal(rewriteTask.sourceConstraints.curatedId, 7);
+
+      // 通用发布委托不在本 change 的放宽范围内，离线仍拒绝且不新增第二条任务。
       const draft = await fetch(`${base}/delegated-tasks/draft`, {
         method: 'POST', headers, body: JSON.stringify({
           envKey: 'p1', action: 'publish_post', targetSuccessCount: 1, maxAttempts: 2,
@@ -910,7 +919,8 @@ test('读离线可用，不可逆写离线诚实拒绝(binding_unverified)且零
         }),
       });
       assert.equal(draft.status, 409);
-      assert.equal((await taskStore.list({ accountId: ACCT_P1, limit: 20 })).length, 0, '离线写绝不落库');
+      assert.equal((await draft.json() as { error: string }).error, 'binding_unverified');
+      assert.equal((await taskStore.list({ accountId: ACCT_P1, limit: 20 })).length, 1, '通用离线委托不得新增任务');
     },
   );
 });

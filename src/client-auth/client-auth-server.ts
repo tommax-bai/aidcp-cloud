@@ -42,7 +42,7 @@ export interface ClientAuthDeps {
   /**
    * 环境→edgeId 活会话反查（change curated-envkey-account-binding，D5 活体佐证）。返回 `ads-<envKey>` 或 null。
    * **刻意用 resolveEdgeIdForAccount（幸存者）；反方向的 resolveAccountIdForEdge 已被慢启动 change 删除**——
-   * 给后者新增调用方会把那次删除卡死。仅用于不可逆写（create-post / 建委托任务）的绑定活体佐证；读路由绝不用。
+   * 给后者新增调用方会把那次删除卡死。仅用于通用客户端发布类委托的创建时活体佐证；读路由与纯云端洗稿创建绝不用。
    */
   resolveEdgeIdForAccount?: (accountId: string) => string | null;
   interactionApi?: {
@@ -217,12 +217,13 @@ function sendBindingFailure(res: http.ServerResponse, reason: Exclude<ResolvedBi
 
 /**
  * D5 活体佐证（change curated-envkey-account-binding，ESSENTIAL）：解析出的绑定账号此刻**真的活在该环境上**吗。
- * 绑定是上一次握手的事实、可能陈旧——对**读**（幂等、可回头）无所谓，对**不可逆写**（发布出去收不回）MUST 佐证。
+ * 绑定是上一次握手的事实、可能陈旧——对**读 / 纯云端候审内容生成**（无平台副作用、可回头）无所谓，
+ * 对当前阶段就具备平台写能力的通用委托 MUST 佐证。
  *
  * 判据 = `resolveEdgeIdForAccount(boundAccountId) === 'ads-' + envKey`：语义正是「我解析出的账号此刻是否正跑在这个
  * 环境上」。**用幸存者 resolveEdgeIdForAccount；反方向的 resolveAccountIdForEdge 已被慢启动 change 删除**。多连接时前者取最早登记者
  * ⇒ 可能误拒；误拒可接受（fail-closed + 有日志），误放不可接受。dep 缺失 ⇒ 无法佐证 ⇒ fail-closed。
- * **MUST NOT 用于读路由**——在读上要求边缘在线正是本 change 修的那个缺陷本身。
+ * **MUST NOT 用于读路由或精选内容洗稿创建**——二者在当前阶段都不需要浏览器兑现。
  */
 function attestLiveBinding(deps: ClientAuthDeps, boundAccountId: string, envKey: string): boolean {
   const edgeId = deps.resolveEdgeIdForAccount?.(boundAccountId) ?? null;
@@ -504,7 +505,7 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         return;
       }
       const accountId = bound.accountId;
-      // 读（含内容适配性判定）离线可用；不可逆写（createDraft）才在下方要求 D5 活体佐证。
+      // 内容读取与洗稿任务创建都在云端完成；持久绑定已确定账号，不要求浏览器在线。
       const row = await deps.curatedContent.getOneForAccount(id, accountId);
       if (!row) {
         sendJson(res, 404, { error: 'not_found' });
@@ -522,11 +523,7 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         sendJson(res, 200, { triggered: false, reason: 'reference_images_unavailable' });
         return;
       }
-      // D5 活体佐证：不可逆发布 MUST 由活会话佐证绑定，否则诚实「尚未开始」——绝不创建任何任务、绝不记为失败尝试。
-      if (!attestLiveBinding(deps, accountId, envKey)) {
-        sendJson(res, 409, { error: 'binding_unverified', message: '暂时无法确认该环境当前登录的账号，请让该环境连上云端后重试。' });
-        return;
-      }
+      // client-rewrite-offline-start：这里只排队生成必审候选稿；真正的平台下发仍由后续活边缘定向闸控制。
       try {
         const result = await deps.delegatedTasks.createDraft({
           accountId,
