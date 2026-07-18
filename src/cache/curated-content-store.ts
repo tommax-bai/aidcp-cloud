@@ -194,6 +194,9 @@ export interface CuratedClientListResult {
   total: number;
 }
 
+/** 客户端灵感库筛选：created/uncreated 只切分原可创作集合；all 保留精选池全量。 */
+export type CuratedClientCreationStatus = 'uncreated' | 'created' | 'creatable' | 'all';
+
 /** 面板筛选面：驱动筛选下拉 + 清理前影响预览（按账号）。 */
 export interface CuratedFacets {
   /** 该账号实际出现的纳入原因去重 + 各自计数 + 携机器人点赞/收藏标记的高权重行数。 */
@@ -1008,7 +1011,7 @@ export class CuratedContentStore {
 
   /**
    * 客户端灵感库列表（严格按账号）。
-   * creatableOnly 条件下推 SQL 后再 COUNT/LIMIT/OFFSET，避免先分页后过滤造成空页和错误 total。
+   * creationStatus 条件下推 SQL 后再 COUNT/LIMIT/OFFSET，避免先分页后过滤造成空页和错误 total。
    * limit/offset 在 store 再收口，防调用方遗漏边界；缺表抛 CuratedContentUnavailableError（服务不可用），
    * **绝不回落空结果**（change curated-envkey-account-binding：缺表回空正是本 change 要杀的红线字符串）。
    *
@@ -1019,15 +1022,27 @@ export class CuratedContentStore {
    */
   async listForClient(
     accountId: string,
-    opts: { creatableOnly: boolean; limit: number; offset: number },
+    opts: { creationStatus: CuratedClientCreationStatus; limit: number; offset: number },
   ): Promise<CuratedClientListResult> {
     const limit = Number.isFinite(opts.limit) ? Math.max(1, Math.min(50, Math.floor(opts.limit))) : 20;
     const offset = Number.isFinite(opts.offset) ? Math.max(0, Math.floor(opts.offset)) : 0;
     const params: unknown[] = [accountId];
-    const conds = ['account_id = $1'];
-    if (opts.creatableOnly) {
-      conds.push(`content_type = 'image_text'`);
-      conds.push(`BTRIM(COALESCE(body, '')) <> ''`);
+    const conds = ['c.account_id = $1'];
+    if (opts.creationStatus !== 'all') {
+      conds.push(`c.content_type = 'image_text'`);
+      conds.push(`BTRIM(COALESCE(c.body, '')) <> ''`);
+      const triggered = `EXISTS (
+        SELECT 1
+        FROM delegated_tasks dt
+        WHERE dt.account_id = c.account_id
+          AND dt.action = 'publish_post'
+          AND (
+            dt.source_constraints->>'curatedId' = c.id::text
+            OR dt.source_constraints->>'sourceId' = c.source_id
+          )
+      )`;
+      if (opts.creationStatus === 'created') conds.push(triggered);
+      if (opts.creationStatus === 'uncreated') conds.push(`NOT ${triggered}`);
     }
     params.push(limit, offset);
     try {
@@ -1037,9 +1052,9 @@ export class CuratedContentStore {
                 visual_analysis,
                 bot_liked, bot_collected, admit_reason, first_seen_at, updated_at,
                 COUNT(*) OVER() AS total_count
-         FROM curated_content
+         FROM curated_content c
          WHERE ${conds.join(' AND ')}
-         ORDER BY updated_at DESC
+         ORDER BY c.updated_at DESC
          LIMIT $2 OFFSET $3`,
         params,
       );
@@ -1048,7 +1063,7 @@ export class CuratedContentStore {
       }
       if (offset === 0) return { items: [], total: 0 };
       const { rows: countRows } = await this.pool.query<{ total_count: string }>(
-        `SELECT COUNT(*)::text AS total_count FROM curated_content WHERE ${conds.join(' AND ')}`,
+        `SELECT COUNT(*)::text AS total_count FROM curated_content c WHERE ${conds.join(' AND ')}`,
         [accountId],
       );
       return { items: [], total: Number(countRows[0]?.total_count ?? '0') };

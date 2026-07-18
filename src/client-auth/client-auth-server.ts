@@ -514,8 +514,8 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       }
       const query = new URL(rawUrl, 'http://localhost').searchParams;
       const envKey = (query.get('envKey') ?? '').trim();
-      const mode = query.get('mode') ?? 'creatable';
-      if (mode !== 'creatable' && mode !== 'all') {
+      const mode = query.get('mode') ?? 'uncreated';
+      if (mode !== 'uncreated' && mode !== 'created' && mode !== 'creatable' && mode !== 'all') {
         sendJson(res, 400, { error: 'bad_request', reason: 'invalid_mode' });
         return;
       }
@@ -545,7 +545,7 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         : Promise.resolve(null);
       const [result, referenceDraftCount] = await Promise.all([
         deps.curatedContent.listForClient(accountId, {
-          creatableOnly: mode === 'creatable',
+          creationStatus: mode,
           limit,
           offset,
         }),

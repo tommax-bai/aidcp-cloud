@@ -594,7 +594,7 @@ test('客户灵感库按环境归属隔离、最小披露，并在归属撤销�
   const reads: Array<{ kind: string; accountId: string; id?: number; options?: unknown }> = [];
   const draftCountReads: string[] = [];
   const curatedContent = {
-    async listForClient(accountId: string, options: { creatableOnly: boolean; limit: number; offset: number }) {
+    async listForClient(accountId: string, options: { creationStatus: 'uncreated' | 'created' | 'creatable' | 'all'; limit: number; offset: number }) {
       reads.push({ kind: 'list', accountId, options });
       return { items: [row()], total: 1 };
     },
@@ -626,7 +626,18 @@ test('客户灵感库按环境归属隔离、最小披露，并在归属撤销�
       assert.equal((await fetch(`${base}/curated-contents?envKey=p2` , { headers })).status, 403);
       assert.equal(reads.length, 0, '未归属环境不得触达精选 store');
 
-      const listed = await fetch(`${base}/curated-contents?envKey=p1&mode=creatable&limit=12&offset=24`, { headers });
+      const legacy = await fetch(`${base}/curated-contents?envKey=p1&mode=creatable&limit=12&offset=24`, { headers });
+      assert.equal(legacy.status, 200);
+      assert.deepEqual(reads[0], {
+        kind: 'list',
+        accountId: ACCT_P1,
+        options: { creationStatus: 'creatable', limit: 12, offset: 24 },
+      }, '旧筛选值必须精确保留原可创作集合');
+      const invalid = await fetch(`${base}/curated-contents?envKey=p1&mode=unknown`, { headers });
+      assert.equal(invalid.status, 400);
+      assert.equal(reads.length, 1, '未知筛选值必须在触达 store 前明确拒绝');
+
+      const listed = await fetch(`${base}/curated-contents?envKey=p1&mode=uncreated&limit=12&offset=24`, { headers });
       assert.equal(listed.status, 200);
       const listBody = await listed.json() as { items: Array<Record<string, unknown>>; total: number; referenceDraftCount: number; limit: number; offset: number };
       assert.equal(listBody.total, 1);
@@ -642,13 +653,20 @@ test('客户灵感库按环境归属隔离、最小披露，并在归属撤销�
       const image = (listBody.items[0].referenceImages as Array<Record<string, unknown>>)[0];
       assert.equal(image.formGuess, undefined, '客户 DTO 不泄漏模型内部诊断');
       // 传给 store 的账号参数 MUST 是**绑定账号**、MUST NOT 是请求里的 envKey——这是本 bug 的直接反例。
-      assert.deepEqual(reads[0], {
+      assert.deepEqual(reads[1], {
         kind: 'list',
         accountId: ACCT_P1,
-        options: { creatableOnly: true, limit: 12, offset: 24 },
+        options: { creationStatus: 'uncreated', limit: 12, offset: 24 },
       });
-      assert.notEqual(reads[0].accountId, 'p1', 'store 收到的绝不能是 envKey');
-      assert.deepEqual(draftCountReads, [ACCT_P1], '成稿汇总只能读取已授权账号的绑定账号，绝不是 envKey');
+      assert.notEqual(reads[1].accountId, 'p1', 'store 收到的绝不能是 envKey');
+
+      assert.equal((await fetch(`${base}/curated-contents?envKey=p1&mode=created&limit=1&offset=0`, { headers })).status, 200);
+      assert.equal((await fetch(`${base}/curated-contents?envKey=p1&mode=all&limit=1&offset=0`, { headers })).status, 200);
+      assert.deepEqual(reads.slice(2, 4), [
+        { kind: 'list', accountId: ACCT_P1, options: { creationStatus: 'created', limit: 1, offset: 0 } },
+        { kind: 'list', accountId: ACCT_P1, options: { creationStatus: 'all', limit: 1, offset: 0 } },
+      ]);
+      assert.deepEqual(draftCountReads, [ACCT_P1, ACCT_P1, ACCT_P1, ACCT_P1], '兼容值与三种新筛选的汇总都只能读取已授权账号的绑定账号，绝不是 envKey');
 
       const detail = await fetch(`${base}/curated-contents/7?envKey=p1`, { headers });
       assert.equal(detail.status, 200);

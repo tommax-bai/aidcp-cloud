@@ -69,6 +69,14 @@ CREATE INDEX IF NOT EXISTS idx_delegated_tasks_claim
   ON delegated_tasks(status, next_eligible_at, not_before, deadline_at, priority, created_at);
 CREATE INDEX IF NOT EXISTS idx_delegated_tasks_ownership
   ON delegated_tasks(account_id, action_family, status);
+-- split-curated-creation-status-filters：灵感库按账号判断是否曾触发精选洗稿。
+-- 两个局部表达式索引允许 curatedId/sourceId 的 OR 谓词走 BitmapOr，任务终态不参与归类。
+CREATE INDEX IF NOT EXISTS idx_delegated_tasks_curated_publish_id
+  ON delegated_tasks(account_id, (source_constraints->>'curatedId'))
+  WHERE action = 'publish_post';
+CREATE INDEX IF NOT EXISTS idx_delegated_tasks_curated_publish_source
+  ON delegated_tasks(account_id, (source_constraints->>'sourceId'))
+  WHERE action = 'publish_post';
 
 CREATE TABLE IF NOT EXISTS delegated_task_events (
   id          BIGSERIAL PRIMARY KEY,
