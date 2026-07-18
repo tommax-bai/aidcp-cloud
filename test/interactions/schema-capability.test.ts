@@ -49,6 +49,14 @@ test('interaction store starts legacy read-only mode without executing DDL', asy
   assert.doesNotMatch(inspectedSql, /\b(?:ALTER|CREATE|DROP)\b/i);
 });
 
+test('legacy writes use the existing global switch only in dev', () => {
+  assert.equal(interactionWritesAllowed('legacy_read_only', true, 'dev'), true);
+  assert.equal(interactionWritesAllowed('legacy_read_only', false, 'dev'), false);
+  assert.equal(interactionWritesAllowed('legacy_read_only', true, 'ol'), false);
+  assert.equal(interactionWritesAllowed('legacy_read_only', true), false);
+  assert.equal(interactionWritesAllowed(undefined, true, 'dev'), false);
+});
+
 test('interaction store rejects a missing base schema', async () => {
   const store = storeFor({
     basePresent: false,

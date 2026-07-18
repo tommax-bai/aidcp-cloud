@@ -16,6 +16,10 @@ export function classifyInteractionSchema(shape: InteractionSchemaShape): Intera
 export function interactionWritesAllowed(
   schemaMode: InteractionSchemaMode | undefined,
   configuredGlobalWriteEnabled: boolean,
+  deploymentEnvironment?: string,
 ): boolean {
-  return schemaMode === 'full' && configuredGlobalWriteEnabled;
+  if (!configuredGlobalWriteEnabled) return false;
+  return schemaMode === 'full' || (
+    schemaMode === 'legacy_read_only' && deploymentEnvironment?.trim() === 'dev'
+  );
 }

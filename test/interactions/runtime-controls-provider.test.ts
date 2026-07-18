@@ -27,6 +27,24 @@ test('legacy schema mode keeps reads but closes writes even when global write is
   });
 });
 
+test('dev legacy mode projects stored text writes without weakening account controls', async () => {
+  const snapshot = await projectRuntimeControls({
+    getRuntimeControls: async () => controls(), hasPendingOffboard: async () => false,
+    hasPendingRevocationHold: async () => false,
+    globalWriteEnabled: interactionWritesAllowed('legacy_read_only', true, 'dev'),
+  }, 'env_wc_a');
+  assert.equal(snapshot.commentsReplyEnabled, true);
+  assert.equal(snapshot.dmSendTextEnabled, true);
+
+  const paused = await projectRuntimeControls({
+    getRuntimeControls: async () => controls({ writePaused: true }), hasPendingOffboard: async () => false,
+    hasPendingRevocationHold: async () => false,
+    globalWriteEnabled: interactionWritesAllowed('legacy_read_only', true, 'dev'),
+  }, 'env_wc_a');
+  assert.equal(paused.commentsReplyEnabled, false);
+  assert.equal(paused.dmSendTextEnabled, false);
+});
+
 test('runtime controls projection closes every capability during offboarding', async () => {
   const snapshot = await projectRuntimeControls({
     getRuntimeControls: async () => controls(), hasPendingOffboard: async () => true,

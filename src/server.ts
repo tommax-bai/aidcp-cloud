@@ -1395,7 +1395,15 @@ async function main(): Promise<void> {
         console.warn(`[interaction] retention 失败: ${error instanceof Error ? error.message : String(error)}`));
     }, 24 * 60 * 60 * 1_000);
     interactionRetentionTimer.unref?.();
-    if (interactionSchemaMode === 'legacy_read_only') {
+    if (
+      interactionSchemaMode === 'legacy_read_only' &&
+      readEnvString('AIDCP_DEPLOY_ENV') === 'dev'
+    ) {
+      console.warn(
+        '[aidcp-cloud] interaction legacy schema active in dev ' +
+        '(migration 0046 unchanged; writes follow the global write switch)',
+      );
+    } else if (interactionSchemaMode === 'legacy_read_only') {
       console.warn('[aidcp-cloud] 入站 interaction 域以兼容只读模式就绪（migration 0046 未执行；读取已恢复；评论回复/私信发送强制关闭）');
     } else {
       console.log('[aidcp-cloud] 入站 interaction 域已就绪（migration 0046；完整读写能力受写总开关控制）');
@@ -1939,6 +1947,14 @@ async function main(): Promise<void> {
   const interactionGlobalWriteEnabled = interactionWritesAllowed(
     interactionSchemaMode,
     interactionConfiguredGlobalWriteEnabled,
+    readEnvString('AIDCP_DEPLOY_ENV'),
+  );
+  console.log(
+    '[aidcp-cloud] interaction write capability ' +
+    `schema=${interactionSchemaMode ?? 'unavailable'} ` +
+    `environment=${readEnvString('AIDCP_DEPLOY_ENV') ?? 'unset'} ` +
+    `configured=${interactionConfiguredGlobalWriteEnabled} ` +
+    `effective=${interactionGlobalWriteEnabled}`,
   );
   const interactionRuntimeControls = interactionStore && interactionInbox
     ? {
