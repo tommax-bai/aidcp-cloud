@@ -48,23 +48,8 @@ export interface ClientAuthDeps {
   interactionApi?: {
     handle(req: http.IncomingMessage, res: http.ServerResponse, userId: string): Promise<boolean>;
   };
-  /**
-   * 账号级慢启动读写（change account-level-slow-start；离线可读写 change slow-start-offline-toggle）。
-   *
-   * **accountId 由路由经持久绑定解析、客户端永不提交**——红线已成文：accountId is never accepted as an
-   * unverified cross-customer selector。客户只能改「自己环境上已绑定的那个账号」：ownership + 绑定 + accounts
-   * 存在 + 跨客户争用由 store.resolveBoundAccountForEnv(userId, envKey) 一次现读完成（**不依赖边缘在线**，
-   * 绑定持久在库），本回调只拿着已解析出的 accountId 写入 / 读回同一个 controller 的真态。
-   *
-   * `setForEnv` 的执行体在云端配额计算内、经运行时现读生效 ⇒ 云端写入成功即为已生效，绝无「待下发边缘」态。
-   * `viewForAccount` 为不依赖边缘的读投影（GET /environments/:envKey/slow-start）：与写路由 / ui.snapshot 同一个
-   * controller 产出（同一 anchor、同一次 clock）；DB 不可达即 null → 路由 503（绝不降级成看似正常的空投影）。
-   */
+  /** 有当前唯一账号时，从同一个 RiskController 读取实际 clamp 投影。环境配置写入由 store 单写。 */
   slowStart?: {
-    setForEnv(accountId: string, enabled: boolean): Promise<
-      | { ok: true; slowStart: UiSlowStartPayload; dayQuotas: Record<string, number> }
-      | { ok: false; reason: 'account_not_found' | 'retired_account' | 'unavailable' }
-    >;
     viewForAccount(accountId: string): Promise<
       { slowStart: UiSlowStartPayload; dayQuotas: Record<string, number> } | null
     >;
@@ -97,6 +82,26 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
   const payload = JSON.stringify(body);
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
   res.end(payload);
+}
+
+function environmentOnlySlowStartView(
+  slowStartSince: number | null,
+  reason: 'binding_unknown' | 'binding_conflict',
+  now = Date.now(),
+): UiSlowStartPayload {
+  const totalDays = 7;
+  if (slowStartSince == null) {
+    return { state: 'off', totalDays, eligible: false, ineligibleReason: reason };
+  }
+  const day = Math.max(0, Math.floor((now - slowStartSince) / 86_400_000)) + 1;
+  if (day > totalDays) {
+    return {
+      state: 'graduated', totalDays, since: slowStartSince, eligible: false, ineligibleReason: reason,
+    };
+  }
+  return {
+    state: 'active', day, totalDays, since: slowStartSince, eligible: false, ineligibleReason: reason,
+  };
 }
 
 async function readJsonBody(req: http.IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<unknown> {
@@ -317,7 +322,7 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       return;
     }
 
-    // 账号级慢启动开关（change account-level-slow-start；**离线可读写** change slow-start-offline-toggle）：env-scoped。
+    // 环境级慢启动开关（change environment-level-slow-start）：env-scoped、离线且未绑定账号也可配置。
     //
     // **绝不走 WS 写**（仍成立）：ws-server 全文无鉴权，session.accountId 是边缘 hello 里自报的字符串
     // ——改一个字符串就能替别人关慢启动。**accountId 由云端解析、客户端永不提交**（仍成立）。
@@ -354,28 +359,29 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         sendJson(res, 422, { error: 'validation_failed', reason: 'only_enabled_boolean_accepted' });
         return;
       }
-      // accountId 经**持久绑定**解析（不依赖边缘在线）：ownership + 绑定 + accounts 存在 + 跨客户争用一次现读。
-      // 未解析 MUST 响亮回报——environment_not_owned(403，不泄露账号) / binding_unknown(409) /
-      // binding_conflict(409，安全事件，与 unknown 分码) / binding_unavailable(503)——绝不猜账号、绝不 200-空。
-      const bound = await deps.store.resolveBoundAccountForEnv(userId, envKey);
-      if (!bound.ok) {
-        sendBindingFailure(res, bound.reason);
+      // 单写目标就是环境：ownership 与 UPDATE 同一语句。账号绑定只决定能否追加 controller 生效投影，
+      // 不再是保存环境配置的前置；未绑定也不能把已写成误报为失败。
+      const stored = await deps.store.setEnvironmentSlowStart(userId, envKey, enabled, Date.now());
+      if (!stored.ok) {
+        sendBindingFailure(res, stored.reason);
         return;
       }
-      const result = await deps.slowStart.setForEnv(bound.accountId, enabled);
-      if (!result.ok) {
-        if (result.reason === 'unavailable') {
+      let view: { slowStart: UiSlowStartPayload; dayQuotas?: Record<string, number> };
+      if (stored.binding === 'bound') {
+        const controllerView = await deps.slowStart.viewForAccount(stored.accountId);
+        if (!controllerView) {
           sendJson(res, 503, { error: 'slow_start_unavailable' });
           return;
         }
-        sendJson(res, 404, { error: result.reason });
-        return;
+        view = controllerView;
+      } else {
+        view = { slowStart: environmentOnlySlowStartView(stored.slowStartSince, stored.binding) };
       }
       // 回执带写后真态 + 生效后的当日上限。**不做「已保存 vs 已下发本机」二态**：慢启动的执行体
       // 就在云端 effectiveQuotas 内，provider 现读做对了 → PUT 200 = 本云端已生效。
       // 照抄一个不存在的状态同样是撒谎。（两者绑定：若把 provider 偷懒做成构造期读入，这句立刻变谎言。）
       sendJson(res, 200, {
-        data: { envKey, slowStart: result.slowStart, dayQuotas: result.dayQuotas },
+        data: { envKey, slowStart: view.slowStart, ...(view.dayQuotas ? { dayQuotas: view.dayQuotas } : {}) },
         meta: { requestId: randomUUID(), asOf: Date.now() },
       });
       return;
@@ -390,30 +396,25 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         sendJson(res, 503, { error: 'slow_start_unavailable' });
         return;
       }
-      const bound = await deps.store.resolveBoundAccountForEnv(userId, envKey);
-      if (!bound.ok) {
-        // binding_unknown 在**读**路由上是一等**可见态**（不是错误）：没有账号即回一个诚实的不可用投影，
-        // 让客户端把这一行渲染出来并给出可行动的下一步。**MUST NOT 编造 state/day/since/totalDays**——
-        // 没账号即不知平台，任何默认值都是伪造。其余（not_owned 403 / conflict 409 / unavailable 503）仍是硬失败。
-        if (bound.reason === 'binding_unknown') {
-          sendJson(res, 200, {
-            data: { envKey, slowStart: { eligible: false, ineligibleReason: 'binding_unknown' } },
-            meta: { requestId: randomUUID(), asOf: Date.now() },
-          });
-          return;
-        }
-        sendBindingFailure(res, bound.reason);
+      const stored = await deps.store.getEnvironmentSlowStart(userId, envKey);
+      if (!stored.ok) {
+        sendBindingFailure(res, stored.reason);
         return;
       }
-      const view = await deps.slowStart.viewForAccount(bound.accountId);
-      if (!view) {
-        // controller 取用失败（DB 不可达等）→ 503，**绝不**降级成看似正常的空投影或 binding_unknown。
-        sendJson(res, 503, { error: 'slow_start_unavailable' });
-        return;
+      let view: { slowStart: UiSlowStartPayload; dayQuotas?: Record<string, number> };
+      if (stored.binding === 'bound') {
+        const controllerView = await deps.slowStart.viewForAccount(stored.accountId);
+        if (!controllerView) {
+          sendJson(res, 503, { error: 'slow_start_unavailable' });
+          return;
+        }
+        view = controllerView;
+      } else {
+        view = { slowStart: environmentOnlySlowStartView(stored.slowStartSince, stored.binding) };
       }
       // 回包 MUST NOT 含 accountId（读路由不得开侧门泄露账号身份，与「非所有者 fail-closed」同口径）。
       sendJson(res, 200, {
-        data: { envKey, slowStart: view.slowStart, dayQuotas: view.dayQuotas },
+        data: { envKey, slowStart: view.slowStart, ...(view.dayQuotas ? { dayQuotas: view.dayQuotas } : {}) },
         meta: { requestId: randomUUID(), asOf: Date.now() },
       });
       return;

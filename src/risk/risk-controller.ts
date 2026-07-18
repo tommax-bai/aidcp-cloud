@@ -48,22 +48,20 @@ export interface RiskControllerOptions {
    * 关（默认）→ 该路径不提供 anchor。true → 全体账号按 created_at 现算年龄爬坡（历史行为，
    * 因生产事故保留的回滚拉杆）。
    *
-   * **与账号级慢启动严格「谁开用谁的起点」，MUST NOT OR / AND / min 合成**（见 resolveNurtureAnchor）。
+   * **与环境级慢启动严格「显式环境设置优先」，MUST NOT OR / AND / min 合成**（见 resolveNurtureAnchor）。
    */
   coldStartRampEnabled?: boolean;
   /**
-   * 全局停用闸（change account-level-slow-start）：置真 → 无视所有账号级开关与 env 旁路、全体不 clamp。
-   * 理由：raw SQL 改库不刷 AccountStore 的内存镜像，没有此闸即无秒级止血手段。
+   * 全局停用闸：置真 → 无视所有环境级开关与历史 env 旁路、全体不 clamp。
    */
   slowStartDisabled?: boolean;
 }
 
-/** 慢启动的生效锚点（change account-level-slow-start）：起点 + 它来自哪条启用路径。 */
+/** 慢启动的生效锚点：环境级显式设置，或历史 AIDCP_COLDSTART_RAMP 旁路。 */
 interface NurtureAnchor {
   /** 爬坡第 1 天的起点（epoch ms）。 */
   since: number;
-  /** 'account' = 账号级 slow_start_since；'env' = AIDCP_COLDSTART_RAMP 旁路的 created_at。 */
-  source: 'account' | 'env';
+  source: 'environment' | 'legacy_env';
 }
 
 /** 慢启动对外投影（change account-level-slow-start）：供 ui.snapshot 组装，与 clamp 同源同格。 */
@@ -79,7 +77,12 @@ export interface SlowStartView {
   ineligibleReason?: SlowStartIneligibleReason;
 }
 
-export type SlowStartIneligibleReason = 'platform_unsupported' | 'platform_unknown' | 'globally_disabled';
+export type SlowStartIneligibleReason =
+  | 'platform_unsupported'
+  | 'platform_unknown'
+  | 'globally_disabled'
+  | 'binding_unknown'
+  | 'binding_conflict';
 
 /** 慢启动曲线总天数（COLD_START_PLANS / FB_COLD_START_PLANS 均为 7 天）。 */
 export const SLOW_START_TOTAL_DAYS = 7;
@@ -266,7 +269,7 @@ export class RiskController {
    * 解析慢启动锚点（change account-level-slow-start）：**clamp 与投影共用此函数 + 同一次 clock()**
    * ——这是「显示的 = 生效的」的唯一机制保障（否则会出现「徽章说 D7、clamp 已按 D8 放行」）。
    *
-   * 优先级严格是：① 账号级 slow_start_since 非 NULL → 用它；② 否则 env 旁路开且有 created_at
+   * 优先级严格是：① 当前唯一绑定环境 slow_start_since 非 NULL → 用它；② 否则历史 env 旁路开且有 created_at
    * → 用 created_at（历史路径原样保留）；③ 否则 null（逐位零回归）。
    *
    * **MUST NOT OR / AND / min 合成两条路径**：合成一次就会把 FB 全车队夹回 view=70
@@ -275,10 +278,10 @@ export class RiskController {
   private resolveNurtureAnchor(): NurtureAnchor | null {
     // 全局停用闸：无视所有账号级开关与 env 旁路（raw SQL 改库不刷镜像时的秒级止血手段）。
     if (this.slowStartDisabled) return null;
-    const accountSince = this.nurtureProvider?.slowStartSinceFor(this.accountId) ?? null;
-    if (accountSince != null) return { since: accountSince, source: 'account' };
+    const environmentSince = this.nurtureProvider?.slowStartSinceFor(this.accountId) ?? null;
+    if (environmentSince != null) return { since: environmentSince, source: 'environment' };
     const createdAt = this.coldStartRampEnabled ? this.nurtureProvider?.createdAtFor(this.accountId) : undefined;
-    if (createdAt != null) return { since: createdAt, source: 'env' };
+    if (createdAt != null) return { since: createdAt, source: 'legacy_env' };
     return null;
   }
 
@@ -339,8 +342,8 @@ export class RiskController {
         ineligibleReason: 'platform_unsupported',
       };
     }
-    // env 旁路不是「账号级慢启动」——它没有账号级开关，UI MUST NOT 把它显示成用户勾过的东西。
-    if (anchor.source !== 'account') return { state: 'off', totalDays, eligible: true };
+    // 历史 env 全局旁路没有用户可操作的环境开关，UI MUST NOT 把它显示成用户勾过的配置。
+    if (anchor.source !== 'environment') return { state: 'off', totalDays, eligible: true };
 
     const now = this.clock();
     const day = this.dayIndexFor(anchor, now);

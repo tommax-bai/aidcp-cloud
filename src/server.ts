@@ -1032,6 +1032,13 @@ async function main(): Promise<void> {
     await store.init();
     accountStore = store;
     console.log('[aidcp-cloud] AccountStore 已就绪（accounts 表，seed default）');
+    try {
+      const migrated = await clientUserStore.migrateEnvironmentSlowStartFromAccounts();
+      console.log(`[aidcp-cloud] 环境级慢启动镜像已就绪（一次性初始化 ${migrated} 个历史环境）`);
+    } catch (migrationError) {
+      // 加列/回填失败时环境镜像保持关闭态，绝不退回读取账号旧列重新制造“设置跟账号走”。
+      console.warn('[aidcp-cloud] 环境级慢启动迁移失败（不回退账号旧列）:', (migrationError as Error).message);
+    }
   } catch (err) {
     console.warn(
       '[aidcp-cloud] AccountStore 初始化失败，账号暂停态退化为纯内存（重启丢失）:',
@@ -1290,17 +1297,17 @@ async function main(): Promise<void> {
   // 配置（quota_config / quotas.ts 三档），不按账号年龄压低。仅当运维显式设 AIDCP_COLDSTART_RAMP=true 时
   // opt-in 启用逐日爬坡（effectiveQuotas=min(冷启动天花板, 风控缩放)）。provider 缺 → 该账号不叠冷启动。
   const coldStartRampEnabled = process.env.AIDCP_COLDSTART_RAMP === 'true';
-  // 慢启动全局停用闸（change account-level-slow-start）：置真 → 无视所有账号级开关与 env 旁路、全体不 clamp。
-  // 存在理由：账号级开关的事实源是 accounts.slow_start_since，由 AccountStore 的进程内镜像同步现读；
+  // 慢启动全局停用闸：置真 → 无视所有环境级开关与历史 env 旁路、全体不 clamp。
+  // 环境级事实源由 ClientUserStore 的进程内镜像同步现读；
   // raw SQL 改库**不刷镜像**（全仓无 watch / setInterval）→ 没有此闸就没有秒级止血手段。重启即生效。
   const slowStartDisabled = process.env.AIDCP_SLOW_START_DISABLED === 'true';
-  // 养号事实 provider（change account-level-slow-start）：同步现读 AccountStore 内存镜像，取代原先
-  // 构造期解析一次的 nurtureMetaResolver——那条配 controller Map 永不驱逐 = 勾选要重启才生效。
+  // 养号事实 provider：平台/历史 created_at 仍来自 AccountStore；显式慢启动起点只来自当前绑定环境。
+  // RiskController 仍按账号单写，但不再读取 accounts.slow_start_since。
   const nurtureProvider =
-    accountStore?.platformFor && accountStore.slowStartSinceFor && accountStore.createdAtFor
+    accountStore?.platformFor && accountStore.createdAtFor
       ? {
           platformFor: (accountId: string) => accountStore.platformFor!(accountId),
-          slowStartSinceFor: (accountId: string) => accountStore.slowStartSinceFor!(accountId),
+          slowStartSinceFor: (accountId: string) => clientUserStore.slowStartSinceFor(accountId),
           createdAtFor: (accountId: string) => accountStore.createdAtFor!(accountId),
         }
       : undefined;
@@ -1311,7 +1318,7 @@ async function main(): Promise<void> {
   });
   console.log(`[aidcp-cloud] 冷启动配额爬坡 ${coldStartRampEnabled ? '已开启(AIDCP_COLDSTART_RAMP=true)' : '已禁用(默认·直接走安全限额配置)'}`);
   if (slowStartDisabled) {
-    console.log('[aidcp-cloud] 账号级慢启动 已被全局停用(AIDCP_SLOW_START_DISABLED=true·无视所有账号级开关)');
+    console.log('[aidcp-cloud] 环境级慢启动 已被全局停用(AIDCP_SLOW_START_DISABLED=true·无视所有环境开关)');
   }
   // retire-default-account：不再建单租户全局 'default' controller；风控一律经 registry 按真实账号懒解析。
   const resolveController = (accountId: string): Promise<RiskController> => riskRegistry.getController(accountId);
@@ -2285,7 +2292,7 @@ async function main(): Promise<void> {
       const hourQuotas = projectTotals(pickDailyUsageCounts(effective.hour));
       const dayQuotas = projectTotals(pickDailyUsageCounts(effective.day));
       payload.quotaLevel = controller.getState().quotaLevel;
-      // 慢启动投影（change account-level-slow-start）：**必须从同一个 controller 实例取**，
+      // 环境级慢启动投影：**必须从同一个 controller 实例取**，
       // 绝不从 store 另读一次——这是唯一能防「徽章说 D7、clamp 已按 D8 放行」的机制。
       // controller 内部 slowStartView() 与 clamp 共用同一个 anchor 解析 + 同一次 clock()。
       payload.slowStart = controller.slowStartView();
@@ -4229,7 +4236,7 @@ async function main(): Promise<void> {
   // N1 头号风险：AIDCP_CLIENT_JWT_SECRET 与面板密钥相同则边界坍塌 → startClientAuthApi 内硬断言拒启。
   if (clientAuthPort) {
     try {
-      // 慢启动读写共用的投影产出（change account-level-slow-start / slow-start-offline-toggle）：与 ui.snapshot
+      // 环境级慢启动读写共用的投影产出：与 ui.snapshot
       // 的慢启动投影**同一个 controller**（同一 anchor 解析、同一次 clock）→ 徽章天数与生效上限同源同规则。
       // dayQuotas 亦过客户端信任边界，与 ui.snapshot 上限投影同规则剥去平台不支持项（change platform-honest-usage-caps）。
       const buildSlowStartView = async (accountId: string) => {
@@ -4254,19 +4261,8 @@ async function main(): Promise<void> {
           // 幸存者 resolveEdgeIdForAccount（account→edge）；反方向的 resolveAccountIdForEdge 已被慢启动 change 删除。
           resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
           interactionApi: interactionCustomerApi,
-          // 账号级慢启动读写（change account-level-slow-start；**离线可读写** change slow-start-offline-toggle）。
-          // accountId 由路由经**持久绑定**（resolveBoundAccountForEnv）解析后传入——不再靠活会话反查，故边缘离线
-          // （含从未启动）也能读写。本回调只拿着已解析出的 accountId 做写入 / 读回同一个 controller 的真态。
+          // 环境配置由 ClientUserStore 直接单写；仅当存在唯一当前账号时，回调读取同一个 controller 的生效投影。
           slowStart: {
-            setForEnv: async (accountId, enabled) => {
-              if (!accountStore?.setSlowStart) return { ok: false as const, reason: 'unavailable' as const };
-              const written = await accountStore.setSlowStart(accountId, enabled, Date.now());
-              if (!written.ok) return { ok: false as const, reason: written.reason };
-              // 写后真态从**同一个 controller** 取：provider 现读 → 这里读到的就是此刻真正生效的。
-              return { ok: true as const, ...(await buildSlowStartView(accountId)) };
-            },
-            // 不依赖边缘的读投影（GET /environments/:envKey/slow-start）：与写路由 / ui.snapshot 同一个 controller
-            // 产出。DB 不可达 / controller 取用失败即 null → 路由 503（绝不降级成看似正常的空投影）。
             viewForAccount: async (accountId) => {
               try {
                 return await buildSlowStartView(accountId);

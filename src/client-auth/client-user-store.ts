@@ -20,6 +20,7 @@ import pg from 'pg';
 import { resolveEnvPgConfig } from '../cache/pg-config.js';
 import { generateKey, hashKey, verifyKey, decoyVerify } from './key.js';
 import { RETIRED_ACCOUNT_ID } from '../account-store.js';
+import { shanghaiDayStartMs } from '../time/shanghai-day.js';
 
 const { Pool } = pg;
 
@@ -36,6 +37,22 @@ const { Pool } = pg;
 export type ResolvedBinding =
   | { ok: true; accountId: string }
   | { ok: false; reason: 'environment_not_owned' | 'binding_unknown' | 'binding_conflict' | 'binding_unavailable' };
+
+export type EnvironmentSlowStartRecord =
+  | {
+      ok: true;
+      envKey: string;
+      slowStartSince: number | null;
+      binding: 'bound';
+      accountId: string;
+    }
+  | {
+      ok: true;
+      envKey: string;
+      slowStartSince: number | null;
+      binding: 'binding_unknown' | 'binding_conflict';
+    }
+  | { ok: false; reason: 'environment_not_owned' | 'binding_unavailable' };
 
 /** D5 跨客户绑定冲突告警载荷（走既有告警通道，非仅 console.warn）。 */
 export interface EnvBindingConflictAlert {
@@ -100,6 +117,14 @@ CREATE TABLE IF NOT EXISTS client_environments (
 -- 全新库上 accounts 表尚不存在、加 FK 必抛——完整性改由**读侧每次 JOIN accounts**（悬空绑定读时 fail-closed）承担，
 -- 见 resolveBoundAccountForEnv。这是真实取舍（少了写时完整性），不是「初始化顺序禁止加列」。
 ALTER TABLE client_environments ADD COLUMN IF NOT EXISTS account_id TEXT;
+-- 环境级慢启动事实源（change environment-level-slow-start）：NULL=关，非 NULL=上海自然日起点。
+-- 旧 accounts.slow_start_since 暂留回滚，但运行时不再读取；迁移须等 accounts 表 init 后单独执行。
+ALTER TABLE client_environments ADD COLUMN IF NOT EXISTS slow_start_since TIMESTAMPTZ;
+-- 一次性迁移标记：NULL/false 只代表历史行尚未初始化；新环境默认 true，防止以后因复用旧账号而被回灌。
+ALTER TABLE client_environments ADD COLUMN IF NOT EXISTS slow_start_initialized BOOLEAN;
+UPDATE client_environments SET slow_start_initialized = false WHERE slow_start_initialized IS NULL;
+ALTER TABLE client_environments ALTER COLUMN slow_start_initialized SET DEFAULT true;
+ALTER TABLE client_environments ALTER COLUMN slow_start_initialized SET NOT NULL;
 -- D5 跨客户争用闸要按 account_id 反查「还有哪些 env 也绑了同一账号」，故加账号索引。
 CREATE INDEX IF NOT EXISTS client_environments_account_idx ON client_environments (account_id);
 -- 客户端程序化新建的短时一次性意图。proof 只以 SHA-256 落库；完成动作仍由 Cloud
@@ -317,6 +342,9 @@ export interface ClientUserStoreOptions {
 
 export class ClientUserStore {
   private readonly pool: pg.Pool;
+  /** RiskController 同步热路径镜像：只收录当前恰好绑定一个环境的账号。 */
+  private environmentSlowStartByAccount = new Map<string, number | null>();
+  private ambiguousEnvironmentAccounts = new Set<string>();
 
   constructor(options: ClientUserStoreOptions = {}) {
     this.pool = options.pool ?? new Pool(resolveEnvPgConfig());
@@ -555,6 +583,160 @@ export class ClientUserStore {
 
   async init(): Promise<void> {
     await this.pool.query(CLIENT_USERS_SCHEMA_SQL);
+    await this.refreshEnvironmentSlowStartMirror();
+  }
+
+  /**
+   * 从旧账号字段一次性初始化历史环境。initialized=false 可重跑；用户明确关闭后的 NULL 永不再次回灌。
+   * 必须在 accounts 表完成 init 后调用；旧列只用于迁移，不参与后续运行时读取或双写。
+   */
+  async migrateEnvironmentSlowStartFromAccounts(): Promise<number> {
+    const result = await this.pool.query(
+      `WITH pending AS (
+         SELECT e.env_key, a.slow_start_since AS legacy_since
+           FROM client_environments e
+           LEFT JOIN accounts a ON a.account_id=e.account_id
+          WHERE e.slow_start_initialized=false
+       )
+       UPDATE client_environments e
+          SET slow_start_since = COALESCE(e.slow_start_since, pending.legacy_since),
+              slow_start_initialized = true,
+              updated_at = now()
+         FROM pending
+        WHERE e.env_key=pending.env_key
+       RETURNING e.env_key`,
+    );
+    await this.refreshEnvironmentSlowStartMirror();
+    return result.rowCount ?? result.rows.length;
+  }
+
+  /**
+   * 重建环境配置→当前账号的同步镜像。一个账号异常出现在多个环境时不任取一行；该账号无显式环境 anchor。
+   */
+  async refreshEnvironmentSlowStartMirror(): Promise<void> {
+    const { rows } = await this.pool.query<{
+      env_key: string;
+      account_id: string;
+      slow_start_since: Date | null;
+    }>(`SELECT env_key, account_id, slow_start_since
+          FROM client_environments
+         WHERE account_id IS NOT NULL
+         ORDER BY account_id, env_key`);
+    const grouped = new Map<string, { envKey: string; since: number | null }[]>();
+    for (const row of rows) {
+      const accountId = String(row.account_id ?? '').trim();
+      if (!accountId || accountId === RETIRED_ACCOUNT_ID) continue;
+      const entries = grouped.get(accountId) ?? [];
+      entries.push({
+        envKey: row.env_key,
+        since: row.slow_start_since ? row.slow_start_since.getTime() : null,
+      });
+      grouped.set(accountId, entries);
+    }
+    const next = new Map<string, number | null>();
+    const ambiguous = new Set<string>();
+    for (const [accountId, entries] of grouped) {
+      if (entries.length === 1) {
+        next.set(accountId, entries[0].since);
+        continue;
+      }
+      ambiguous.add(accountId);
+      console.warn(
+        `[client-env] 环境级慢启动绑定歧义：账号 ${accountId} 同时出现在 ${entries.length} 个环境，拒绝任取配置`,
+      );
+    }
+    this.environmentSlowStartByAccount = next;
+    this.ambiguousEnvironmentAccounts = ambiguous;
+  }
+
+  /** RiskController 同步、零 IO 现读；无绑定/歧义/关闭均返回 null。 */
+  slowStartSinceFor(accountId: string): number | null {
+    if (this.ambiguousEnvironmentAccounts.has(accountId)) return null;
+    return this.environmentSlowStartByAccount.get(accountId) ?? null;
+  }
+
+  hasAmbiguousEnvironmentBinding(accountId: string): boolean {
+    return this.ambiguousEnvironmentAccounts.has(accountId);
+  }
+
+  /**
+   * 读取环境自己的慢启动配置，并只在绑定唯一、账号存在且无跨客户争用时向服务层提供 accountId。
+   */
+  async getEnvironmentSlowStart(userId: string, envKey: string): Promise<EnvironmentSlowStartRecord> {
+    const key = (envKey ?? '').trim();
+    if (!userId || !key) return { ok: false, reason: 'environment_not_owned' };
+    try {
+      const { rows } = await this.pool.query<{
+        owned: boolean;
+        slow_start_since: Date | null;
+        bound_account: string | null;
+        account_exists: boolean;
+        contended: boolean;
+        duplicate_count: number | string;
+      }>(
+        `SELECT
+           EXISTS(SELECT 1 FROM client_env_scope s
+                   WHERE s.user_id=$1 AND s.env_key=$2 AND s.source='admin') AS owned,
+           e.slow_start_since,
+           e.account_id AS bound_account,
+           CASE WHEN e.account_id IS NOT NULL
+                THEN EXISTS(SELECT 1 FROM accounts a WHERE a.account_id=e.account_id)
+                ELSE false END AS account_exists,
+           CASE WHEN e.account_id IS NOT NULL
+                THEN ${contendedAcrossCustomersSql('e.account_id', '$1')}
+                ELSE false END AS contended,
+           CASE WHEN e.account_id IS NOT NULL
+                THEN (SELECT count(*) FROM client_environments e3 WHERE e3.account_id=e.account_id)
+                ELSE 0 END AS duplicate_count
+         FROM (SELECT $2::text AS env_key) k
+         LEFT JOIN client_environments e ON e.env_key=k.env_key`,
+        [userId, key],
+      );
+      const row = rows[0];
+      if (!row?.owned) return { ok: false, reason: 'environment_not_owned' };
+      const slowStartSince = row.slow_start_since ? row.slow_start_since.getTime() : null;
+      if (row.contended || Number(row.duplicate_count) > 1) {
+        return { ok: true, envKey: key, slowStartSince, binding: 'binding_conflict' };
+      }
+      if (!row.bound_account || !row.account_exists) {
+        return { ok: true, envKey: key, slowStartSince, binding: 'binding_unknown' };
+      }
+      return { ok: true, envKey: key, slowStartSince, binding: 'bound', accountId: row.bound_account };
+    } catch (err) {
+      if (isMissingTable(err)) return { ok: false, reason: 'binding_unavailable' };
+      throw err;
+    }
+  }
+
+  /** 环境级单写：ownership 与 UPDATE 同一语句，先库后镜像；账号字段完全不参与写入。 */
+  async setEnvironmentSlowStart(
+    userId: string,
+    envKey: string,
+    enabled: boolean,
+    now: number,
+  ): Promise<EnvironmentSlowStartRecord> {
+    const key = (envKey ?? '').trim();
+    if (!userId || !key) return { ok: false, reason: 'environment_not_owned' };
+    const value = enabled ? new Date(shanghaiDayStartMs(now)) : null;
+    try {
+      const result = await this.pool.query(
+        `UPDATE client_environments e
+            SET slow_start_since=$3, slow_start_initialized=true, updated_at=now()
+          WHERE e.env_key=$2
+            AND EXISTS(SELECT 1 FROM client_env_scope s
+                        WHERE s.user_id=$1 AND s.env_key=e.env_key AND s.source='admin')
+        RETURNING e.env_key`,
+        [userId, key, value],
+      );
+      if ((result.rowCount ?? result.rows.length) === 0) {
+        return { ok: false, reason: 'environment_not_owned' };
+      }
+      await this.refreshEnvironmentSlowStartMirror();
+      return this.getEnvironmentSlowStart(userId, key);
+    } catch (err) {
+      if (isMissingTable(err)) return { ok: false, reason: 'binding_unavailable' };
+      throw err;
+    }
   }
 
   // ── 鉴权侧（供 client-auth-server；fail-closed）──────────────────────────
@@ -1085,6 +1267,10 @@ export class ClientUserStore {
       } else {
         await this.upsertEnvironment(this.pool, i.envKey, i.label, i.platform, source, null);
       }
+    }
+    // 只有真实 accountId 到来时绑定才可能变化；null 在 COALESCE 语义下不会擦除既有绑定。
+    if (clean.some((item) => item.accountId != null)) {
+      await this.refreshEnvironmentSlowStartMirror();
     }
     return clean.length;
   }

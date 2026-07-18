@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import { CLIENT_USERS_SCHEMA_SQL, ClientUserStore } from '../src/client-auth/client-user-store.js';
+import { shanghaiDayStartMs } from '../src/time/shanghai-day.js';
 
 /**
  * client-user-env-picker：`listAllEnvironments` 的**映射逻辑**单测（行 → ClientEnvironmentView）。
@@ -292,7 +293,9 @@ test('registerEnvironments: 带真实 accountId 走事务、无冲突则写绑�
   assert.doesNotMatch(upsert.sql, /account_id = COALESCE\(client_environments\.account_id, EXCLUDED\.account_id\)/);
   // 事务包裹（不牵连握手由调用侧 fire-and-forget 保证；此处锁 BEGIN/COMMIT 成对）。
   assert.equal(calls[0].sql, 'BEGIN');
-  assert.equal(calls.at(-1)!.sql, 'COMMIT');
+  assert.equal(calls.some((call) => call.sql === 'COMMIT'), true);
+  assert.match(calls.at(-1)!.sql, /SELECT env_key, account_id, slow_start_since/,
+    '绑定提交后必须刷新环境慢启动镜像');
 });
 
 test('registerEnvironments: D5 写闸——跨客户冲突则拒写绑定(account_id→null)+告警，label/platform 照登记', async () => {
@@ -344,4 +347,86 @@ test('isAccountReachableByUser: 反向判别（ok / 争用 fail-closed / 不可�
     { ok: false, reason: 'binding_conflict' });
   assert.deepEqual(await make({ owned_bound: false, contended: false }).isAccountReachableByUser('u1', 'acct-x'),
     { ok: false, reason: 'environment_not_owned' });
+});
+
+test('environment slow-start schema is additive and leaves the legacy account column untouched', () => {
+  assert.match(CLIENT_USERS_SCHEMA_SQL, /ALTER TABLE client_environments ADD COLUMN IF NOT EXISTS slow_start_since TIMESTAMPTZ/);
+  assert.match(CLIENT_USERS_SCHEMA_SQL, /slow_start_initialized BOOLEAN/);
+  assert.match(CLIENT_USERS_SCHEMA_SQL, /ALTER COLUMN slow_start_initialized SET DEFAULT true/,
+    '新环境默认已初始化，绝不能在未来重启时从复用账号回灌旧值');
+  assert.doesNotMatch(CLIENT_USERS_SCHEMA_SQL, /DROP COLUMN[\s\S]*slow_start_since/i);
+});
+
+test('migrateEnvironmentSlowStartFromAccounts: COPY-on-null 后刷新同步镜像，可重跑且不双写账号', async () => {
+  const calls: { sql: string; params?: unknown[] }[] = [];
+  const since = new Date('2026-07-18T00:00:00+08:00');
+  const pool = {
+    query: async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      if (/UPDATE client_environments e/.test(sql)) return { rows: [{ env_key: 'fb-env' }], rowCount: 1 };
+      if (/SELECT env_key, account_id, slow_start_since/.test(sql)) {
+        return { rows: [{ env_key: 'fb-env', account_id: 'acct-a', slow_start_since: since }] };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  } as unknown as pg.Pool;
+  const store = new ClientUserStore({ pool });
+  assert.equal(await store.migrateEnvironmentSlowStartFromAccounts(), 1);
+  assert.equal(store.slowStartSinceFor('acct-a'), since.getTime());
+  const migration = calls[0].sql;
+  assert.match(migration, /e\.slow_start_initialized=false/);
+  assert.match(migration, /slow_start_initialized = true/);
+  assert.match(migration, /COALESCE\(e\.slow_start_since, pending\.legacy_since\)/,
+    '历史值只初始化一次，已有环境真态优先');
+  assert.doesNotMatch(migration, /UPDATE accounts/);
+});
+
+test('setEnvironmentSlowStart: ownership-scoped 环境单写，上海日起点对齐且未绑定也返回配置态', async () => {
+  const calls: { sql: string; params?: unknown[] }[] = [];
+  const now = Date.parse('2026-07-18T23:50:00+08:00');
+  const aligned = shanghaiDayStartMs(now);
+  const pool = {
+    query: async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      if (/UPDATE client_environments e/.test(sql)) return { rows: [{ env_key: 'fb-env' }], rowCount: 1 };
+      if (/SELECT env_key, account_id, slow_start_since/.test(sql)) return { rows: [] };
+      if (/AS owned/.test(sql)) return { rows: [{
+        owned: true, slow_start_since: new Date(aligned), bound_account: null,
+        account_exists: false, contended: false, duplicate_count: 0,
+      }] };
+      return { rows: [], rowCount: 0 };
+    },
+  } as unknown as pg.Pool;
+  const store = new ClientUserStore({ pool });
+  const result = await store.setEnvironmentSlowStart('u1', 'fb-env', true, now);
+  assert.deepEqual(result, {
+    ok: true, envKey: 'fb-env', slowStartSince: aligned, binding: 'binding_unknown',
+  });
+  const write = calls.find((call) => /UPDATE client_environments e/.test(call.sql))!;
+  assert.equal((write.params?.[2] as Date).getTime(), aligned);
+  assert.match(write.sql, /slow_start_initialized=true/);
+  assert.doesNotMatch(write.sql, /UPDATE accounts/);
+});
+
+test('environment slow-start mirror: 换绑即时移除旧账号；重复绑定不任取并标记歧义', async () => {
+  let rows: { env_key: string; account_id: string; slow_start_since: Date | null }[] = [
+    { env_key: 'fb-env', account_id: 'acct-a', slow_start_since: new Date(1000) },
+  ];
+  const pool = fakePool(() => ({ rows }));
+  const store = new ClientUserStore({ pool });
+  await store.refreshEnvironmentSlowStartMirror();
+  assert.equal(store.slowStartSinceFor('acct-a'), 1000);
+
+  rows = [{ env_key: 'fb-env', account_id: 'acct-b', slow_start_since: new Date(1000) }];
+  await store.refreshEnvironmentSlowStartMirror();
+  assert.equal(store.slowStartSinceFor('acct-a'), null);
+  assert.equal(store.slowStartSinceFor('acct-b'), 1000);
+
+  rows = [
+    { env_key: 'fb-env', account_id: 'acct-b', slow_start_since: new Date(1000) },
+    { env_key: 'fb-env-2', account_id: 'acct-b', slow_start_since: null },
+  ];
+  await store.refreshEnvironmentSlowStartMirror();
+  assert.equal(store.slowStartSinceFor('acct-b'), null, '多环境歧义不得任取开启或关闭任一行');
+  assert.equal(store.hasAmbiguousEnvironmentBinding('acct-b'), true);
 });

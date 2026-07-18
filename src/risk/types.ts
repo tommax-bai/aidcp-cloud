@@ -46,7 +46,10 @@ export interface AccountNurtureProvider {
    * 小红书曲线跑（D1 view=50 而非 20，差 2.5 倍）。调用方据此判 eligible=false、不 clamp。
    */
   platformFor(accountId: string): string | undefined;
-  /** 账号级慢启动起点（epoch ms，已对齐上海日起点）；null = 关。慢启动的**唯一**起点来源。 */
+  /**
+   * 当前唯一绑定环境的慢启动起点（epoch ms，已对齐上海日起点）；null = 环境关/无绑定/绑定歧义。
+   * 签名仍以 accountId 查询是因为 RiskController 按账号单写；事实所有权属于环境，MUST NOT 回读账号旧列。
+   */
   slowStartSinceFor(accountId: string): number | null;
   /**
    * 账号入库时刻（epoch ms）。**仅供 env 全局旁路 `AIDCP_COLDSTART_RAMP=true` 这条历史路径**，
