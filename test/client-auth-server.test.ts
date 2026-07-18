@@ -11,6 +11,7 @@ import { DelegatedTaskService } from '../src/delegated-task/service.js';
 import type { CuratedPanelRow } from '../src/cache/curated-content-store.js';
 import { CuratedContentUnavailableError } from '../src/cache/curated-content-store.js';
 import type { UiSlowStartPayload } from '../src/comm/protocol.js';
+import type { PendingPublishPreview } from '../src/publish-agent/publish-log-store.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 const CLIENT_SECRET = 'client-secret-xyz';
@@ -1168,6 +1169,128 @@ test('慢启动读：controller 取用失败（viewForAccount 返回 null）→ 
       const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
       const res = await fetch(`${base}/environments/p1/slow-start`, { headers });
       assert.equal(res.status, 503);
+    },
+  );
+});
+
+test('待审批稿列表按环境持久绑定分页，并只返回客户最小投影', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const calls: unknown[] = [];
+  const item: PendingPublishPreview = {
+    id: 42,
+    accountId: ACCT_P1,
+    platform: 'xiaohongshu',
+    kind: 'rewrite',
+    title: '工程 Wiki 的下一步是 Agent Memory',
+    content: `完整正文${'很长'.repeat(100)}`,
+    topics: ['Agent Memory'],
+    images: ['https://img/cover.jpg'],
+    contentVersion: 3,
+    updatedAt: 1_721_277_200_000,
+    publishMode: 'immediate',
+    publishTime: null,
+    imageReferenceAudit: { requestedCount: 1, usableCount: 1, generatedCount: 1, status: 'used' },
+  };
+  const pendingDrafts = {
+    async listPendingPublishPreviewsForAccount(accountId: string, options: { limit: number; offset: number }) {
+      calls.push({ accountId, options });
+      return { items: [item], total: 25 };
+    },
+    async pendingPublishPreviewForAccountRecord() { return null; },
+  };
+
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), pendingDrafts },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const response = await fetch(`${base}/publish-drafts?envKey=p1&limit=12&offset=12`, { headers });
+      assert.equal(response.status, 200);
+      const body = await response.json() as { items: Record<string, unknown>[]; total: number; limit: number; offset: number };
+      assert.deepEqual(calls, [{ accountId: ACCT_P1, options: { limit: 12, offset: 12 } }]);
+      assert.equal(body.total, 25);
+      assert.equal(body.limit, 12);
+      assert.equal(body.offset, 12);
+      assert.deepEqual(Object.keys(body.items[0]).sort(), [
+        'contentPreview', 'contentVersion', 'id', 'images', 'kind', 'platform',
+        'publishMode', 'publishTime', 'title', 'topics', 'updatedAt',
+      ]);
+      assert.equal(String(body.items[0].contentPreview).endsWith('…'), true);
+      const wire = JSON.stringify(body);
+      assert.equal(wire.includes(ACCT_P1), false);
+      assert.equal(wire.includes('imageReferenceAudit'), false);
+      assert.equal(wire.includes('完整正文很长很长很长很长很长很长很长很长很长很长'), true);
+      assert.equal(wire.includes(item.content), false, '列表不得返回完整正文');
+    },
+  );
+});
+
+test('待审批稿详情按账号和记录联合取数，缺失诚实返回 404', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const calls: unknown[] = [];
+  const item: PendingPublishPreview = {
+    id: 42,
+    accountId: ACCT_P1,
+    platform: 'xiaohongshu',
+    kind: 'generated',
+    title: '待审批标题',
+    content: '完整正文',
+    topics: [],
+    images: [],
+    contentVersion: 1,
+    updatedAt: 1_721_277_200_000,
+    publishMode: 'scheduled',
+    publishTime: 1_721_284_400_000,
+  };
+  const pendingDrafts = {
+    async listPendingPublishPreviewsForAccount() { return { items: [], total: 0 }; },
+    async pendingPublishPreviewForAccountRecord(accountId: string, id: number) {
+      calls.push({ accountId, id });
+      return id === 42 ? item : null;
+    },
+  };
+
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), pendingDrafts },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const found = await fetch(`${base}/publish-drafts/42?envKey=p1`, { headers });
+      assert.equal(found.status, 200);
+      const foundBody = await found.json() as { item: Record<string, unknown> };
+      assert.equal(foundBody.item.content, '完整正文');
+      assert.equal('accountId' in foundBody.item, false);
+
+      const missing = await fetch(`${base}/publish-drafts/99?envKey=p1`, { headers });
+      assert.equal(missing.status, 404);
+      assert.deepEqual(calls, [
+        { accountId: ACCT_P1, id: 42 },
+        { accountId: ACCT_P1, id: 99 },
+      ]);
+    },
+  );
+});
+
+test('待审批稿读取遇到未知绑定时 fail-closed，绝不触达稿件 store 或返回空池', async () => {
+  const fx = ownerOfP1();
+  let calls = 0;
+  const pendingDrafts = {
+    async listPendingPublishPreviewsForAccount() { calls += 1; return { items: [], total: 0 }; },
+    async pendingPublishPreviewForAccountRecord() { calls += 1; return null; },
+  };
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), pendingDrafts },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const list = await fetch(`${base}/publish-drafts?envKey=p1`, { headers });
+      assert.equal(list.status, 409);
+      assert.equal((await list.json() as { error: string }).error, 'binding_unknown');
+      const detail = await fetch(`${base}/publish-drafts/42?envKey=p1`, { headers });
+      assert.equal(detail.status, 409);
+      assert.equal(calls, 0);
     },
   );
 });

@@ -918,6 +918,10 @@ export interface PublishApprovalActionPayload {
   approved: boolean;
   /** 客户端所见的稿件版本；云端写审批信号前再次比对，守住“审=发”。 */
   contentVersion?: number;
+  /** 批准时可选发布方式；缺省表示旧客户端沿用稿件当前计划。取消动作不得携带。 */
+  publishMode?: 'immediate' | 'scheduled';
+  /** scheduled=北京时间目标 epoch ms；immediate 必须为 null。 */
+  publishTime?: number | null;
 }
 
 /** 客户端审批动作结果（cloud → edge）。 */

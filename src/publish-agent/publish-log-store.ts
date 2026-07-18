@@ -150,6 +150,7 @@ export interface DispatchDraft {
 export interface PendingPublishPreview {
   id: number;
   accountId: string;
+  platform: PlatformId;
   kind: 'rewrite' | 'generated';
   title: string | null;
   content: string;
@@ -157,6 +158,8 @@ export interface PendingPublishPreview {
   images: string[];
   contentVersion: number;
   updatedAt: number;
+  publishMode: PublishMode;
+  publishTime: number | null;
   imageReferenceAudit?: {
     requestedCount: number;
     usableCount: number;
@@ -168,6 +171,7 @@ export interface PendingPublishPreview {
 interface PendingPublishPreviewRow {
   id: number;
   account_id: string;
+  platform: string | null;
   title: string | null;
   content: string;
   images: string[] | null;
@@ -181,6 +185,12 @@ interface PendingPublishPreviewRow {
 
 function toPendingPublishPreview(row: PendingPublishPreviewRow): PendingPublishPreview {
   const metadata = parsePublishMetadata(row.publish_metadata);
+  const publishMode = metadata?.mode === 'scheduled' || metadata?.mode === 'draft'
+    ? metadata.mode
+    : 'immediate';
+  const publishTime = publishMode === 'scheduled' && Number.isFinite(metadata?.publishTime)
+    ? metadata!.publishTime
+    : null;
   const audit = metadata?.referenceImageAudit ?? null;
   const auditStatus = audit?.status ?? 'none';
   const imageReferenceAudit: PendingPublishPreview['imageReferenceAudit'] = ['none', 'used', 'unsupported', 'unavailable', 'skipped'].includes(auditStatus)
@@ -195,6 +205,7 @@ function toPendingPublishPreview(row: PendingPublishPreviewRow): PendingPublishP
   return {
     id: row.id,
     accountId: row.account_id,
+    platform: normalizePlatformId(row.platform),
     kind: row.source_reference != null ? 'rewrite' : 'generated',
     title: row.title,
     content: row.content,
@@ -202,6 +213,8 @@ function toPendingPublishPreview(row: PendingPublishPreviewRow): PendingPublishP
     images,
     contentVersion: Number(row.content_version ?? 0),
     updatedAt: (row.edited_at ?? row.published_at).getTime(),
+    publishMode,
+    publishTime,
     ...(imageReferenceAudit ? { imageReferenceAudit } : {}),
   };
 }
@@ -804,8 +817,8 @@ export class PublishLogStore {
   /** 陪伴客户端稿件预览：读取当前账号最新待审行的最终标题/正文/话题/配图与版本。 */
   async pendingPublishPreviewForAccount(accountId: string): Promise<PendingPublishPreview | null> {
     const { rows } = await this.pool.query<PendingPublishPreviewRow>(
-      `SELECT id, account_id, title, content, images, image_url, publish_metadata, content_version,
-              edited_at, published_at, source_reference
+      `SELECT id, account_id, platform, title, content, images, image_url, publish_metadata, content_version,
+               edited_at, published_at, source_reference
        FROM publish_log
        WHERE account_id = $1 AND status = 'pending_approval'
        ORDER BY id DESC LIMIT 1`,
@@ -817,12 +830,54 @@ export class PublishLogStore {
   /** 按记录号读取待审预览，供后台编辑成功后即时刷新绑定客户端。 */
   async pendingPublishPreviewForRecord(recordId: number): Promise<PendingPublishPreview | null> {
     const { rows } = await this.pool.query<PendingPublishPreviewRow>(
-      `SELECT id, account_id, title, content, images, image_url, publish_metadata, content_version,
-              edited_at, published_at, source_reference
+      `SELECT id, account_id, platform, title, content, images, image_url, publish_metadata, content_version,
+               edited_at, published_at, source_reference
        FROM publish_log
        WHERE id = $1 AND status = 'pending_approval'
        LIMIT 1`,
       [recordId],
+    );
+    return rows[0] ? toPendingPublishPreview(rows[0]) : null;
+  }
+
+  /** 客户端多稿审核：账号 + pending 状态在 SQL 内共同收口，列表与 total 使用同一筛选口径。 */
+  async listPendingPublishPreviewsForAccount(
+    accountId: string,
+    options: { limit: number; offset: number },
+  ): Promise<{ items: PendingPublishPreview[]; total: number }> {
+    const [list, count] = await Promise.all([
+      this.pool.query<PendingPublishPreviewRow>(
+        `SELECT id, account_id, platform, title, content, images, image_url, publish_metadata, content_version,
+                edited_at, published_at, source_reference
+           FROM publish_log
+          WHERE account_id = $1 AND status = 'pending_approval'
+          ORDER BY id DESC LIMIT $2 OFFSET $3`,
+        [accountId, options.limit, options.offset],
+      ),
+      this.pool.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM publish_log
+          WHERE account_id = $1 AND status = 'pending_approval'`,
+        [accountId],
+      ),
+    ]);
+    return {
+      items: list.rows.map(toPendingPublishPreview),
+      total: Number(count.rows[0]?.n ?? '0'),
+    };
+  }
+
+  /** 客户端待审详情：跨账号、非 pending 与不存在共用 null，调用方不得泄漏其真实存在性。 */
+  async pendingPublishPreviewForAccountRecord(
+    accountId: string,
+    recordId: number,
+  ): Promise<PendingPublishPreview | null> {
+    const { rows } = await this.pool.query<PendingPublishPreviewRow>(
+      `SELECT id, account_id, platform, title, content, images, image_url, publish_metadata, content_version,
+              edited_at, published_at, source_reference
+         FROM publish_log
+        WHERE id = $1 AND account_id = $2 AND status = 'pending_approval'
+        LIMIT 1`,
+      [recordId, accountId],
     );
     return rows[0] ? toPendingPublishPreview(rows[0]) : null;
   }

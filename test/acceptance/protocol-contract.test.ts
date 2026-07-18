@@ -28,6 +28,7 @@ import {
   type UiSnapshotPayload,
   type EdgeTaskReleasedPayload,
   type PublishCommandResultPayload,
+  type PublishApprovalActionPayload,
   type CaptchaAssistClickPayload,
   type CaptchaAssistClickResultPayload,
   type CaptchaAssistTypeReportPayload,
@@ -385,5 +386,25 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     const noTargetBack = parseEnvelope(JSON.stringify(makeEnvelope('captcha.assist.click_result', 'r-2', 1700000000000, noTarget)));
     assert.equal((noTargetBack!.payload as CaptchaAssistClickResultPayload).status, 'no_target');
     assert.deepEqual((noTargetBack!.payload as CaptchaAssistClickResultPayload).typeReport, { focus: 'none', typed: 0, submitted: false });
+  });
+
+  it('AC-PROTO-19 客户端批准的立即/定时发布计划逐字段往返存活', () => {
+    const scheduled: PublishApprovalActionPayload = {
+      requestId: 'publish-89',
+      approved: true,
+      contentVersion: 3,
+      publishMode: 'scheduled',
+      publishTime: 1_784_383_200_000,
+    };
+    const back = parseEnvelope(JSON.stringify(makeEnvelope('publish.approval_action', 'pa-1', 1700000000000, scheduled)));
+    assert.deepEqual(back!.payload, scheduled);
+    const payload = back!.payload as PublishApprovalActionPayload;
+    assert.equal(payload.publishMode, 'scheduled');
+    assert.equal(payload.publishTime, 1_784_383_200_000);
+
+    const legacy: PublishApprovalActionPayload = { requestId: 'publish-89', approved: true, contentVersion: 3 };
+    const legacyBack = parseEnvelope(JSON.stringify(makeEnvelope('publish.approval_action', 'pa-2', 1700000000000, legacy)));
+    assert.equal((legacyBack!.payload as PublishApprovalActionPayload).publishMode, undefined);
+    assert.equal((legacyBack!.payload as PublishApprovalActionPayload).publishTime, undefined);
   });
 });

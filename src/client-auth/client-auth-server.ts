@@ -26,6 +26,7 @@ import type { CuratedContentStore, CuratedPanelRow, CuratedReferenceImage } from
 import { CuratedContentUnavailableError } from '../cache/curated-content-store.js';
 import type { ResolvedBinding } from './client-user-store.js';
 import type { UiSlowStartPayload } from '../comm/protocol.js';
+import type { PendingPublishPreview, PublishLogStore } from '../publish-agent/publish-log-store.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -39,6 +40,11 @@ export interface ClientAuthDeps {
   curatedContent?: Pick<CuratedContentStore, 'listForClient' | 'getOneForAccount'>;
   /** Account-scoped count of publish_log rows that have a persisted source_reference. */
   referenceDraftCountForAccount?: (accountId: string) => Promise<number>;
+  /** Account/status-scoped pending drafts. Customer responses always pass through explicit DTO allowlists below. */
+  pendingDrafts?: Pick<
+    PublishLogStore,
+    'listPendingPublishPreviewsForAccount' | 'pendingPublishPreviewForAccountRecord'
+  >;
   /**
    * 环境→edgeId 活会话反查（change curated-envkey-account-binding，D5 活体佐证）。返回 `ads-<envKey>` 或 null。
    * **刻意用 resolveEdgeIdForAccount（幸存者）；反方向的 resolveAccountIdForEdge 已被慢启动 change 删除**——
@@ -190,6 +196,28 @@ function toClientCuratedDetail(row: CuratedPanelRow): Record<string, unknown> {
     firstSeenAt: row.firstSeenAt,
     countsCapturedAt: row.countsCapturedAt,
   };
+}
+
+/** 待审稿客户投影：不回 accountId/sourceReference/provider 诊断/审批凭据。 */
+function toClientPendingDraftListItem(row: PendingPublishPreview): Record<string, unknown> {
+  const body = row.content.trim();
+  return {
+    id: row.id,
+    platform: row.platform,
+    kind: row.kind,
+    title: row.title,
+    contentPreview: body.length > 180 ? `${body.slice(0, 180)}…` : body,
+    topics: row.topics,
+    images: row.images,
+    contentVersion: row.contentVersion,
+    updatedAt: row.updatedAt,
+    publishMode: row.publishMode,
+    publishTime: row.publishTime,
+  };
+}
+
+function toClientPendingDraftDetail(row: PendingPublishPreview): Record<string, unknown> {
+  return { ...toClientPendingDraftListItem(row), content: row.content };
 }
 
 /**
@@ -418,6 +446,63 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         data: { envKey, slowStart: view.slowStart, ...(view.dayQuotas ? { dayQuotas: view.dayQuotas } : {}) },
         meta: { requestId: randomUUID(), asOf: Date.now() },
       });
+      return;
+    }
+
+    // 客户稿件审核：读可离线，envKey 每次从持久绑定解析账号；SQL 同时收口 account + pending 状态。
+    if (method === 'GET' && url === '/publish-drafts') {
+      if (!deps.pendingDrafts) {
+        sendJson(res, 503, { error: 'pending_drafts_unavailable' });
+        return;
+      }
+      const query = new URL(rawUrl, 'http://localhost').searchParams;
+      const envKey = (query.get('envKey') ?? '').trim();
+      const limit = parseIntegerQuery(query.get('limit'), 12, 1, 50);
+      const offset = parseIntegerQuery(query.get('offset'), 0, 0, 1_000_000);
+      if (limit === null || offset === null) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_pagination' });
+        return;
+      }
+      const bound = await deps.store.resolveBoundAccountForEnv(userId, envKey);
+      if (!bound.ok) {
+        sendBindingFailure(res, bound.reason);
+        return;
+      }
+      const result = await deps.pendingDrafts.listPendingPublishPreviewsForAccount(
+        bound.accountId,
+        { limit, offset },
+      );
+      sendJson(res, 200, {
+        items: result.items.map(toClientPendingDraftListItem),
+        total: result.total,
+        limit,
+        offset,
+      });
+      return;
+    }
+    const pendingDraftDetail = /^\/publish-drafts\/([^/]+)$/.exec(url);
+    if (method === 'GET' && pendingDraftDetail) {
+      if (!deps.pendingDrafts) {
+        sendJson(res, 503, { error: 'pending_drafts_unavailable' });
+        return;
+      }
+      const id = Number(decodeURIComponent(pendingDraftDetail[1]));
+      if (!Number.isInteger(id) || id <= 0) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_id' });
+        return;
+      }
+      const envKey = (new URL(rawUrl, 'http://localhost').searchParams.get('envKey') ?? '').trim();
+      const bound = await deps.store.resolveBoundAccountForEnv(userId, envKey);
+      if (!bound.ok) {
+        sendBindingFailure(res, bound.reason);
+        return;
+      }
+      const row = await deps.pendingDrafts.pendingPublishPreviewForAccountRecord(bound.accountId, id);
+      if (!row) {
+        sendJson(res, 404, { error: 'not_found' });
+        return;
+      }
+      sendJson(res, 200, { item: toClientPendingDraftDetail(row) });
       return;
     }
 

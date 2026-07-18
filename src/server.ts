@@ -99,6 +99,7 @@ import {
 import { CommandSequencer } from './publish-agent/command-sequencer.js';
 import { ScheduledPublishReconciler } from './publish-agent/scheduled-publish-reconciler.js';
 import { createPublishDraftImageRemoveHandler } from './publish-agent/draft-image-remove.js';
+import { createClientPublishApprovalHandler } from './publish-agent/client-publish-approval.js';
 import {
   clampFillBudgetToLease,
   DEFAULT_FILL_BUDGET,
@@ -2558,63 +2559,23 @@ async function main(): Promise<void> {
     refreshPreview: (recordId) => refreshPublishPreview(recordId),
   });
 
-  const handlePublishApprovalAction = async (
+  const approvePublishForClient = createClientPublishApprovalHandler({
+    loadDraft: (recordId) => publishLogStore.loadForDispatch(recordId),
+    readApproval: (requestId) => readPublishApproval(requestId),
+    editDraft: (recordId, expectedVersion, patch, editor) =>
+      publishLogStore.editDraft(recordId, expectedVersion, patch, editor),
+    preflight: (requestId) => preflightApprovePublish(requestId),
+    writeApproval: (requestId, approved, approvalPayload) =>
+      writeApprovalSignal({ writeFile, readFile }, requestId, approved, approvalPayload),
+    triggerApproved: triggerPublishDispatchOnApprove,
+    notifyRejected: notifyPublishRejected,
+  });
+
+  const handlePublishApprovalAction = (
     payload: import('./comm/protocol.js').PublishApprovalActionPayload,
     session: import('./comm/ws-server.js').EdgeSession,
-  ): Promise<import('./comm/protocol.js').PublishApprovalActionResultPayload> => {
-    const requestId = typeof payload?.requestId === 'string' ? payload.requestId : '';
-    const match = /^publish-(\d+)$/.exec(requestId);
-    if (!match || typeof payload?.approved !== 'boolean') {
-      return { requestId, ok: false, reason: 'invalid_request' };
-    }
-    if (!session.accountId) return { requestId, ok: false, reason: 'account_unavailable' };
-
-    const recordId = Number(match[1]);
-    const draft = await publishLogStore.loadForDispatch(recordId).catch(() => null);
-    if (!draft) return { requestId, ok: false, reason: 'not_found' };
-    if (draft.accountId !== session.accountId) return { requestId, ok: false, reason: 'account_mismatch' };
-
-    const existing = await readPublishApproval(requestId);
-    if (existing) {
-      if (existing.approved !== payload.approved) return { requestId, ok: false, reason: 'already_decided' };
-      if (existing.approved) triggerPublishDispatchOnApprove(requestId);
-      return {
-        requestId,
-        ok: true,
-        state: existing.approved ? 'approved' : 'rejected',
-        alreadyDecided: true,
-      };
-    }
-    if (draft.status !== 'pending_approval') return { requestId, ok: false, reason: 'not_pending' };
-
-    if (payload.approved) {
-      const requestedVersion = Number.isInteger(payload.contentVersion) ? Number(payload.contentVersion) : 0;
-      if (requestedVersion !== draft.contentVersion) {
-        return { requestId, ok: false, reason: 'version_stale', currentVersion: draft.contentVersion };
-      }
-      const preflight = await preflightApprovePublish(requestId);
-      if (!preflight.ok) return { requestId, ok: false, reason: preflight.reason };
-    }
-
-    const tags = Array.isArray(draft.metadata?.topics)
-      ? draft.metadata.topics.filter((topic): topic is string => typeof topic === 'string')
-      : [];
-    const approvalPayload = {
-      title: draft.title ?? '',
-      content: draft.content,
-      tags,
-      contentVersion: draft.contentVersion,
-    };
-    const result = await writeApprovalSignal({ writeFile, readFile }, requestId, payload.approved, approvalPayload);
-    if (!result.written) {
-      if (result.alreadyDecided !== payload.approved) return { requestId, ok: false, reason: 'already_decided' };
-      if (payload.approved) triggerPublishDispatchOnApprove(requestId);
-      return { requestId, ok: true, state: payload.approved ? 'approved' : 'rejected', alreadyDecided: true };
-    }
-    if (payload.approved) triggerPublishDispatchOnApprove(requestId);
-    else notifyPublishRejected(requestId);
-    return { requestId, ok: true, state: payload.approved ? 'approved' : 'rejected' };
-  };
+  ): Promise<import('./comm/protocol.js').PublishApprovalActionResultPayload> =>
+    approvePublishForClient(payload, session.accountId);
 
   // 兜底补偿（at-least-once）：低频扫描已授权但未下发的待审草稿补触发（覆盖事件丢失）；靠 dispatch 幂等去重。
   const dispatchScanMs = Number(process.env.AIDCP_PUBLISH_DISPATCH_SCAN_MS ?? 60_000);
@@ -4286,6 +4247,7 @@ async function main(): Promise<void> {
           delegatedTasks: delegatedTaskService,
           curatedContent: curatedContentStore,
           referenceDraftCountForAccount: (accountId) => publishLogStore.countReferenceDraftsForAccount(accountId),
+          pendingDrafts: publishLogStore,
           // D5 活体佐证（change curated-envkey-account-binding）：不可逆写要求绑定账号此刻活在该环境上。
           // 幸存者 resolveEdgeIdForAccount（account→edge）；反方向的 resolveAccountIdForEdge 已被慢启动 change 删除。
           resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
