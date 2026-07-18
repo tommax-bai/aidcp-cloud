@@ -169,10 +169,6 @@ test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recov
       }), (error: unknown) => (error as { code?: string }).code === 'INTERACTION_SCOPE_MISMATCH',
       'duplicate terminal result must still validate jobId');
       assert.deepEqual(await store.recoverableAttemptIds(), []);
-      await assert.rejects(store.resetTestData({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo',
-        channel: 'comment', actor: 'client:test' }),
-      (error: unknown) => (error as { code?: string }).code === 'INTERACTION_STATE_CONFLICT',
-      '出现过发送记录的渠道不得重置');
       assert.equal(await store.getJobContext('acct_wc_demo', 'another-env', jobRow.id), null,
         'accountId/envKey 必须同时命中');
 
@@ -272,6 +268,24 @@ test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recov
         `SELECT final_text,introduced_claims FROM interaction_reply_jobs WHERE id=$1`, [jobRow.id])).rows[0];
       assert.equal(retainedText.final_text, null);
       assert.deepEqual(retainedText.introduced_claims, []);
+
+      // 开发测试重置：无条件、彻底。此刻 comment 渠道里已有 已发送 / 转人工 / 排队中 等各种状态的
+      // 回复任务和发送台账；重置必须把它们连同线程/消息/批次/游标一次清光，且不要求先暂停写入。
+      await pool.query(`UPDATE interaction_runtime_controls SET write_paused=false WHERE account_id='acct_wc_demo'`);
+      const wipe = await store.resetTestData({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo',
+        channel: 'comment', actor: 'client:test' });
+      assert.ok(wipe.deleted.threads >= 1, '未暂停写入、且已有发送/转人工记录，也能重置');
+      for (const table of ['interaction_threads', 'interaction_messages', 'interaction_reply_jobs',
+        'interaction_send_attempts', 'interaction_sync_batches', 'interaction_sync_cursors']) {
+        const remaining = (await pool.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM ${table}
+             WHERE account_id='acct_wc_demo' AND env_key='env_wc_demo' AND channel='comment'`)).rows[0].n;
+        assert.equal(remaining, 0, `${table} 的 comment 记录必须被清空`);
+      }
+      assert.equal((await pool.query(`SELECT count(*)::int AS n FROM interaction_auth_state WHERE account_id='acct_wc_demo'`)).rows[0].n, 1,
+        '重置保留授权，不动登录态');
+      assert.equal((await pool.query(`SELECT count(*)::int AS n FROM interaction_runtime_controls WHERE account_id='acct_wc_demo'`)).rows[0].n, 1,
+        '重置保留运行控制');
     } finally {
       await pool.end();
     }

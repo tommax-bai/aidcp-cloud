@@ -1227,8 +1227,8 @@ export class InteractionStore {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      const controls = await client.query<{ env_key: string | null; write_paused: boolean }>(
-        `SELECT env_key,write_paused FROM interaction_runtime_controls
+      const controls = await client.query<{ env_key: string | null }>(
+        `SELECT env_key FROM interaction_runtime_controls
           WHERE platform=$1 AND account_id=$2 FOR UPDATE`,
         [INTERACTION_PLATFORM, input.accountId],
       );
@@ -1236,17 +1236,25 @@ export class InteractionStore {
       if (!row || row.env_key !== input.envKey) {
         throw new InteractionError('INTERACTION_SCOPE_MISMATCH', '环境与账号运行控制不匹配。', 409);
       }
-      if (!row.write_paused) {
-        throw new InteractionError('INTERACTION_STATE_CONFLICT', '请先暂停当前账号的所有回复写入，再重置测试数据。', 409);
-      }
-      const sendHistory = await client.query(
-        `SELECT 1 FROM interaction_send_attempts
-          WHERE account_id=$1 AND env_key=$2 AND channel=$3 LIMIT 1`,
+      // 开发测试专用：重置无条件清空该环境账号在此渠道下的全部互动记录——收件线程与消息、
+      // 回复任务（含 已发送 / 转人工 / 已忽略 等所有状态）、发送尝试台账、同步批次与游标，
+      // 全部删干净后再从平台重新拉取。不设「先暂停写入」「已发过回复」等任何前置条件。
+      // 按 子→父 顺序显式删除，不依赖 FK 级联，保证任何状态的记录都清得掉。
+      const sendAttempts = await client.query(
+        `DELETE FROM interaction_send_attempts
+          WHERE account_id=$1 AND env_key=$2 AND channel=$3`,
         [input.accountId, input.envKey, input.channel],
       );
-      if (sendHistory.rowCount) {
-        throw new InteractionError('INTERACTION_STATE_CONFLICT', '该渠道已有回复发送记录，不能重置以免重复测试写入。', 409);
-      }
+      const replyJobs = await client.query(
+        `DELETE FROM interaction_reply_jobs
+          WHERE account_id=$1 AND env_key=$2 AND channel=$3`,
+        [input.accountId, input.envKey, input.channel],
+      );
+      const messages = await client.query(
+        `DELETE FROM interaction_messages
+          WHERE account_id=$1 AND env_key=$2 AND channel=$3`,
+        [input.accountId, input.envKey, input.channel],
+      );
       const threads = await client.query(
         `DELETE FROM interaction_threads
           WHERE account_id=$1 AND env_key=$2 AND channel=$3`,
@@ -1268,7 +1276,11 @@ export class InteractionStore {
         syncCursors: syncCursors.rowCount ?? 0,
       };
       await this.audit(client, input.accountId, input.envKey, input.actor, 'test_data_reset', null,
-        'interaction_channel', input.channel, 'interaction test data reset', { channel: input.channel, deleted });
+        'interaction_channel', input.channel, 'interaction test data reset', {
+          channel: input.channel,
+          deleted: { ...deleted, messages: messages.rowCount ?? 0, replyJobs: replyJobs.rowCount ?? 0,
+            sendAttempts: sendAttempts.rowCount ?? 0 },
+        });
       await client.query('COMMIT');
       return { channel: input.channel, deleted };
     } catch (error) {
