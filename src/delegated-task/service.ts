@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { PlatformId, DelegatedActionSupport } from '../platform/index.js';
 import { delegatedActionSupportForPlatform } from '../platform/index.js';
 import { parseDelegatedText, type ParsedDelegatedRequest } from './parser.js';
-import type { DelegatedTaskCreate, DelegatedTaskStore } from './store.js';
+import type { DelegatedTaskCreate, DelegatedTaskListFilter, DelegatedTaskStore } from './store.js';
 import type { DelegatedTask, DelegatedTaskIntent, JsonValue, TaskConstraints } from './types.js';
 import { validateDelegatedTaskIntent } from './types.js';
 
@@ -266,7 +266,7 @@ export class DelegatedTaskService {
     return this.requireTask(taskId);
   }
 
-  list(filter?: { accountId?: string; limit?: number }): Promise<DelegatedTask[]> {
+  list(filter?: DelegatedTaskListFilter): Promise<DelegatedTask[]> {
     return this.deps.store.list(filter);
   }
 

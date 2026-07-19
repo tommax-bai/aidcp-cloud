@@ -44,8 +44,13 @@ import { isAllowedPlatformCredential } from '../config/platform-credentials.js';
 import type { FacebookGroupMembershipStatus, FacebookGroupTargetInput } from '../comment-agent/facebook-group-store.js';
 import { readDownloadsManifest } from './downloads-manifest.js';
 import { DelegatedTaskServiceError } from '../delegated-task/service.js';
-import type { DelegatedTaskIntent, JsonValue } from '../delegated-task/types.js';
-import { clampClientApprovalMode } from '../delegated-task/types.js';
+import type {
+  DelegatedActionFamily,
+  DelegatedTaskIntent,
+  DelegatedTaskStatus,
+  JsonValue,
+} from '../delegated-task/types.js';
+import { clampClientApprovalMode, DELEGATED_TASK_STATUSES } from '../delegated-task/types.js';
 import { buildPublishLifecycle } from './publish-stage-lifecycle.js';
 import { CuratedContentUnavailableError } from '../cache/curated-content-store.js';
 
@@ -457,7 +462,28 @@ function createRequestHandler(
           const accountId = query.get('accountId')?.trim() || undefined;
           const limitRaw = Number(query.get('limit') ?? 50);
           const limit = Number.isInteger(limitRaw) ? Math.min(200, Math.max(1, limitRaw)) : 50;
-          sendJson(res, 200, { tasks: await service.list({ accountId, limit }) });
+          const actionFamilyRaw = query.get('actionFamily')?.trim() || undefined;
+          const actionFamilies: DelegatedActionFamily[] = ['comment', 'publish', 'candidate_control'];
+          if (actionFamilyRaw && !actionFamilies.includes(actionFamilyRaw as DelegatedActionFamily)) {
+            sendJson(res, 400, { error: 'bad_request', reason: 'invalid_action_family' });
+            return;
+          }
+          const statusesRaw = query.get('statuses')?.trim();
+          const statuses = statusesRaw
+            ? statusesRaw.split(',').map((status) => status.trim()).filter(Boolean)
+            : undefined;
+          if (statuses && (statuses.length === 0 || statuses.some((status) => !DELEGATED_TASK_STATUSES.includes(status as DelegatedTaskStatus)))) {
+            sendJson(res, 400, { error: 'bad_request', reason: 'invalid_task_status' });
+            return;
+          }
+          sendJson(res, 200, {
+            tasks: await service.list({
+              accountId,
+              actionFamily: actionFamilyRaw as DelegatedActionFamily | undefined,
+              statuses: statuses as DelegatedTaskStatus[] | undefined,
+              limit,
+            }),
+          });
           return;
         }
         if (method === 'POST' && url === '/api/delegated-tasks/draft') {

@@ -115,6 +115,13 @@ export interface DelegatedTaskCreate extends DelegatedTaskIntent {
   dedupeKey: string;
 }
 
+export interface DelegatedTaskListFilter {
+  accountId?: string;
+  actionFamily?: DelegatedActionFamily;
+  statuses?: DelegatedTaskStatus[];
+  limit?: number;
+}
+
 export interface AttemptFinish {
   status: 'succeeded' | 'skipped' | 'failed' | 'submitted_unknown';
   verificationKind: DelegatedVerificationKind;
@@ -126,7 +133,7 @@ export interface DelegatedTaskStore {
   init(): Promise<void>;
   createDraft(input: DelegatedTaskCreate): Promise<{ task: DelegatedTask; created: boolean }>;
   get(id: string): Promise<DelegatedTask | null>;
-  list(filter?: { accountId?: string; limit?: number }): Promise<DelegatedTask[]>;
+  list(filter?: DelegatedTaskListFilter): Promise<DelegatedTask[]>;
   confirm(id: string, version: number): Promise<DelegatedTask | null>;
   claimNext(opts: { workerId: string; leaseMs: number; now?: number }): Promise<DelegatedTask | null>;
   markExecuting(id: string, claimToken: string, step: string): Promise<DelegatedTask | null>;
@@ -338,12 +345,26 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
     return rows[0] ? mapTask(rows[0]) : null;
   }
 
-  async list(filter: { accountId?: string; limit?: number } = {}): Promise<DelegatedTask[]> {
+  async list(filter: DelegatedTaskListFilter = {}): Promise<DelegatedTask[]> {
     const limit = Math.max(1, Math.min(200, filter.limit ?? 50));
-    const q = filter.accountId
-      ? { sql: 'SELECT * FROM delegated_tasks WHERE account_id=$1 ORDER BY created_at DESC LIMIT $2', args: [filter.accountId, limit] }
-      : { sql: 'SELECT * FROM delegated_tasks ORDER BY created_at DESC LIMIT $1', args: [limit] };
-    const { rows } = await this.pool.query<TaskRow>(q.sql, q.args);
+    const predicates: string[] = [];
+    const args: unknown[] = [];
+    if (filter.accountId) {
+      args.push(filter.accountId);
+      predicates.push(`account_id=$${args.length}`);
+    }
+    if (filter.actionFamily) {
+      args.push(filter.actionFamily);
+      predicates.push(`action_family=$${args.length}`);
+    }
+    if (filter.statuses?.length) {
+      args.push(filter.statuses);
+      predicates.push(`status = ANY($${args.length}::text[])`);
+    }
+    args.push(limit);
+    const where = predicates.length > 0 ? ` WHERE ${predicates.join(' AND ')}` : '';
+    const sql = `SELECT * FROM delegated_tasks${where} ORDER BY created_at DESC LIMIT $${args.length}`;
+    const { rows } = await this.pool.query<TaskRow>(sql, args);
     return rows.map(mapTask);
   }
 
@@ -646,9 +667,11 @@ export class MemoryDelegatedTaskStore implements DelegatedTaskStore {
     return t ? structuredClone(t) : null;
   }
 
-  async list(filter: { accountId?: string; limit?: number } = {}): Promise<DelegatedTask[]> {
+  async list(filter: DelegatedTaskListFilter = {}): Promise<DelegatedTask[]> {
     return [...this.tasks.values()]
       .filter((t) => !filter.accountId || t.accountId === filter.accountId)
+      .filter((t) => !filter.actionFamily || t.actionFamily === filter.actionFamily)
+      .filter((t) => !filter.statuses?.length || filter.statuses.includes(t.status))
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, filter.limit ?? 50)
       .map((t) => structuredClone(t));

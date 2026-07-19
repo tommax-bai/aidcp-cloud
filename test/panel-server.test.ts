@@ -1490,6 +1490,37 @@ test('HTTP DelegatedTask API: console draft auto-queues (no confirm card), contr
     const list = await fetch(`${base}/api/delegated-tasks?accountId=default`, { headers: auth });
     assert.equal(list.status, 200);
     assert.match(JSON.stringify(await list.json()), new RegExp(draft.task.id));
+
+    const createQueued = async (action: 'publish_post' | 'comment_batch', sourceRef: string) => {
+      const response = await fetch(`${base}/api/delegated-tasks/draft`, {
+        method: 'POST', headers: auth,
+        body: JSON.stringify({
+          accountId: 'default', action, targetSuccessCount: 1, maxAttempts: 2,
+          deadlineAt: Date.now() + 86_400_000, executionWindow: { mode: 'immediate' },
+          sourceConstraints: action === 'publish_post' ? { title: '排队发布稿' } : {},
+          targetConstraints: {}, approvalMode: 'review', priority: 'normal', sourceRef,
+        }),
+      });
+      assert.equal(response.status, 201);
+      return (await response.json()) as { task: { id: string; action: string; status: string } };
+    };
+    const queuedPublish = await createQueued('publish_post', 'panel-filter-publish');
+    await createQueued('comment_batch', 'panel-filter-newer-comment');
+
+    const filtered = await fetch(
+      `${base}/api/delegated-tasks?actionFamily=publish&statuses=queued,planning,deferred&limit=1`,
+      { headers: auth },
+    );
+    assert.equal(filtered.status, 200);
+    const filteredBody = (await filtered.json()) as { tasks: Array<{ id: string; action: string; status: string }> };
+    assert.deepEqual(filteredBody.tasks.map((task) => task.id), [queuedPublish.task.id]);
+    assert.equal(filteredBody.tasks[0].action, 'publish_post');
+    assert.equal(filteredBody.tasks[0].status, 'queued');
+
+    const invalidFilter = await fetch(`${base}/api/delegated-tasks?actionFamily=publish&statuses=bogus`, { headers: auth });
+    assert.equal(invalidFilter.status, 400);
+    assert.deepEqual(await invalidFilter.json(), { error: 'bad_request', reason: 'invalid_task_status' });
+
     const cancelled = await fetch(`${base}/api/delegated-tasks/${draft.task.id}/cancel`, {
       method: 'POST', headers: auth, body: JSON.stringify({ version: draft.task.version }),
     });
