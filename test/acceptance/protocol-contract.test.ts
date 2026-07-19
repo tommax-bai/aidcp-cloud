@@ -163,10 +163,11 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
   it('AC-PROTO-09 persona 生成载荷可选字段往返存活（防两端静默漂移）', () => {
     // change edge-persona-keyword-generation 新增 persona.generate/persist 请求响应对（edge 发起、pending-id 回包）。
     // typecheck 的 MessageType 穷举抓不到可选字段（soulYaml/identitySummary/reason）漂移，故此往返断言兜底。
-    const req: PersonaGeneratePayload = { accountId: 'acc-1', keywordSelections: ['美妆', '活泼'], idempotencyKey: 'idem-1' };
+    const req: PersonaGeneratePayload = { accountId: 'acc-1', keywordSelections: ['美妆', '活泼'], writingLanguage: 'vi', idempotencyKey: 'idem-1' };
     const reqBack = parseEnvelope(JSON.stringify(makeEnvelope('persona.generate', 'g-1', 1700000000000, req)));
     assert.deepEqual((reqBack!.payload as PersonaGeneratePayload).keywordSelections, ['美妆', '活泼']);
     assert.equal((reqBack!.payload as PersonaGeneratePayload).idempotencyKey, 'idem-1');
+    assert.equal((reqBack!.payload as PersonaGeneratePayload).writingLanguage, 'vi');
 
     const res: PersonaGenerateResultPayload = { ok: true, soulYaml: 'identity:\n  name: x', identitySummary: '美妆达人' };
     const resBack = parseEnvelope(JSON.stringify(makeEnvelope('persona.generate.result', 'g-1', 1700000000000, res)));
@@ -176,9 +177,10 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
 
   it('AC-PROTO-10 ui.snapshot personaBound 可选字段往返存活（change persona-wizard-onboarding-fixes）', () => {
     // 加可选 personaBound（无新增 MessageType、计数随审批动作协议为 67）；typecheck 抓不到可选字段漂移，往返断言兜底。
-    const snap: UiSnapshotPayload = { account: { id: 'acc-1' }, personaBound: true };
+    const snap: UiSnapshotPayload = { account: { id: 'acc-1' }, personaBound: true, personaWritingLanguage: 'vi' };
     const back = parseEnvelope(JSON.stringify(makeEnvelope('ui.snapshot', 's-1', 1700000000000, snap)));
     assert.equal((back!.payload as UiSnapshotPayload).personaBound, true);
+    assert.equal((back!.payload as UiSnapshotPayload).personaWritingLanguage, 'vi');
   });
 
   it('AC-PROTO-11 ui.snapshot 稿件预览字段往返存活', () => {

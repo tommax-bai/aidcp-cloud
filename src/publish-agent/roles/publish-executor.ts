@@ -17,6 +17,7 @@ import type { PublishApprovalPayload } from '../../feishu/types.js';
 import type { ApprovalWriteResult } from '../../feishu/ws-receiver.js';
 import { clampTitle, firstSentence } from '../title-clamp.js';
 import { publishProfileForPlatform } from '../platform-profile.js';
+import { checkWritingLanguage } from '../../soul/writing-language.js';
 
 /**
  * PublishExecutor —— 生成候审段的出口角色（change decouple-publish-generation-from-dispatch）。
@@ -184,9 +185,22 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     const { gateDecision, assembledContent, publishMetadata } = input;
     const title = this.resolveTitle(input.titleSelection, assembledContent);
     const accountId = this.accountIdFrom(context);
-    const platform = (context.get('trigger') as TriggerInput | undefined)?.platform ?? 'xiaohongshu';
+    const trigger = context.get('trigger') as TriggerInput | undefined;
+    const platform = trigger?.platform ?? 'xiaohongshu';
     // change split-topic-roles：话题唯一真源 = publishMetadata.topics（finalTags 已恒空）；卡/落库/下发一律读它。
     const topics = publishMetadata?.topics ?? [];
+
+    // Facebook 的最终候审正文必须仍符合账号语言。这里只做确定性拦截，不翻译、不改写，
+    // 因而审批者看到的正文与获批后实际下发的正文保持逐字一致。
+    if (platform === 'facebook') {
+      const writingLanguage = trigger?.generateInput.soul.writing_language;
+      if (!writingLanguage) {
+        return this.handleAbort(assembledContent, title, context, accountId, topics, 'writing_language_required');
+      }
+      if (checkWritingLanguage(assembledContent.finalContent, writingLanguage) !== 'match') {
+        return this.handleAbort(assembledContent, title, context, accountId, topics, 'writing_language_mismatch');
+      }
+    }
 
     switch (gateDecision.recommendedAction) {
       // auto_publish 与 manual_review 同路：AC-PUB 本就要求人审，两者都是「落库待审草稿 + 发审批卡」，

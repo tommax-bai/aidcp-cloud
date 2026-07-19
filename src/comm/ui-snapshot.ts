@@ -26,6 +26,7 @@ import {
   type UiDailyUsagePayload,
   type UiPublishPreviewPayload,
   type UiSnapshotPayload,
+  type PersonaWritingLanguage,
 } from './protocol.js';
 import { randomUUID } from 'node:crypto';
 
@@ -50,6 +51,8 @@ export interface UiSnapshotDeps {
   getNickname?: (accountId: string) => string | null;
   /** 该账号是否已绑人设（persona 存储权威判据）；用于 hello 快照下发 personaBound 信号（change persona-wizard-onboarding-fixes）。 */
   isPersonaBound?: (accountId: string) => boolean;
+  /** 已保存的 Facebook 写作语言；null=已绑定存量人设缺字段。 */
+  getPersonaWritingLanguage?: (accountId: string) => PersonaWritingLanguage | null;
   /** 最近一次成功发布摘要（PublishLogStore.lastPublishedForAccount）。 */
   lastPublishedForAccount?: (accountId: string) => Promise<{ title: string | null; at: number } | null>;
   /** 最新待审草稿（PublishLogStore.pendingApprovalForAccount）。 */
@@ -163,7 +166,13 @@ export class UiSnapshotService {
       if (!accountId || !this.deps.isPersonaBound) return;
       const target = edgeId ?? this.deps.resolveEdgeIdForAccount(accountId);
       if (!target) return; // 无在线边缘：如实放弃，下次握手补
-      this.push(accountId, target, { personaBound: this.deps.isPersonaBound(accountId) }, 'personaBound');
+      const personaBound = this.deps.isPersonaBound(accountId);
+      this.push(accountId, target, {
+        personaBound,
+        ...(personaBound && this.deps.getPersonaWritingLanguage
+          ? { personaWritingLanguage: this.deps.getPersonaWritingLanguage(accountId) }
+          : {}),
+      }, 'personaBound');
     } catch (err) {
       this.logger.warn(
         `[ui-snapshot] personaBound 推送异常 account=${accountId}: ${err instanceof Error ? err.message : String(err)}`,

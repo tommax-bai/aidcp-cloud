@@ -227,4 +227,22 @@ describe('comment_de_ai_flavor：评论体裁客套句召回（阈值 1）', () 
     await sleep(20);
     assert.equal(rewriteCalled, false);
   });
+
+  it('去 AI 味改写若切换语言则保留原评论，不把翻译腔送入后续发布', async () => {
+    const bus = new EventBus();
+    let prompt = '';
+    const zhSoul = { ...soul, writing_language: 'zh-CN' as const };
+    const role = new CommentDeAiFlavor({
+      eventBus: bus,
+      soul: zhSoul,
+      llm: { complete: async (value) => { prompt = value; return 'Thanks for the helpful post'; } },
+    });
+    role.subscribe();
+    let cleared: any = null;
+    bus.on('comment.cleared', (payload) => { cleared = payload; });
+    bus.emit('comment.composed', { noteId: 'n1', sourcePageType: 'feed', actions: ['like'], draft: '感谢分享，这个方法确实有用', ts: Date.now() });
+    await sleep(20);
+    assert.match(prompt, /不得翻译或切换语言/);
+    assert.equal(cleared?.text, '感谢分享，这个方法确实有用');
+  });
 });

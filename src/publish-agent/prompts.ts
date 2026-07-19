@@ -22,6 +22,7 @@ import type {
 import { IMAGE_CATEGORIES } from './types.js';
 import { categorySafetyInstruction, formatContentVisualCategoryBrief } from './content-visual-brief.js';
 import type { Soul } from '../soul/types.js';
+import { writingLanguageInstruction } from '../soul/writing-language.js';
 
 /**
  * 禁用词/句式列表（negative list）。
@@ -373,12 +374,68 @@ export function buildScoutPrompt(trigger: TriggerInput): string {
 
 // ─── ContentCreator ──────────────────────────────────────────────────────────
 
+function buildFacebookCreatorPrompt(scoutDecision: ScoutDecision, trigger: TriggerInput): string {
+  const { generateInput, recentPublished } = trigger;
+  const { identity, interests, writing_language: writingLanguage } = generateInput.soul;
+  if (!writingLanguage) throw new Error('writing_language_required');
+
+  const concepts = generateInput.concepts.length
+    ? generateInput.concepts.map((item) => `- ${item.keyword}${item.sourceNote ? `（来源：${item.sourceNote}）` : ''}`).join('\n')
+    : '（无）';
+  const materials = generateInput.materials?.length
+    ? generateInput.materials.slice(0, 8).map((item) => `- ${item.title}：${item.body.replace(/\s+/g, ' ').slice(0, 240)}`).join('\n')
+    : generateInput.likedContents.length
+      ? generateInput.likedContents.slice(0, 8).map((item) => `- ${item.title}：${item.summary}`).join('\n')
+      : '（无）';
+  const commentHints = (generateInput.commentHints ?? [])
+    .slice(0, 3)
+    .map((item) => `- ${item.text.replace(/\s+/g, ' ').slice(0, 120)}`)
+    .join('\n');
+  const recent = recentPublished.length ? recentPublished.map((item, index) => `${index + 1}. ${item}`).join('\n') : '（无）';
+  const interestsLine = [...interests.primary, ...interests.secondary].join('、') || '（未设置）';
+
+  return [
+    `你是「${identity.name}」，${identity.role}，${identity.background}。语气：${identity.tone}。兴趣：${interestsLine}。`,
+    '你在为自己的 Facebook 账号写一条帖子。内容要像真人自然分享，有明确但不过度包装的观点。',
+    '',
+    '【唯一发言语言】',
+    writingLanguageInstruction(writingLanguage),
+    '帖子正文和 JSON 中的 title 摘要都必须使用该语言。即使素材是其他语言，也只吸收事实与角度，不得复制素材句子，不得在最后做翻译腔转换。',
+    '',
+    '【本次方向】',
+    `方向：${scoutDecision.publishDirection}`,
+    `关键点：${scoutDecision.keyPoints.join('、')}`,
+    `理由：${scoutDecision.reason}`,
+    '',
+    '【可用概念】',
+    concepts,
+    '',
+    '【可用素材】',
+    materials,
+    ...(commentHints ? ['', '【读者角度线索】', commentHints] : []),
+    '',
+    '【最近发布内容（避免重复）】',
+    recent,
+    '',
+    '【写作要求】',
+    '- 正文约 80-600 个字符；长短服从内容，不凑字数。',
+    '- 开头直接进入观点、观察或具体场景；保留账号语气，不写营销话术、外链、@ 或话题标签。',
+    '- 只使用素材中确有依据的事实，不伪造亲历、数据、人物或结果。',
+    '- 避免模板化的总分总、编号排比、空泛总结和 AI 客套话。',
+    '',
+    '严格只输出一个 JSON 对象，不要代码块或解释：',
+    '{"title":"内部摘要","content":"Facebook 帖子正文","tone":"professional|casual|technical|narrative","style":{"type":"post"}}',
+    '不要输出 tags/话题字段。',
+  ].join('\n');
+}
+
 /**
  * ContentCreator prompt — 文案创作
  * 复用现有 prompts.ts 的人设和禁用词规则
  * 输出 JSON: { title, content, tags, tone, style }
  */
 export function buildCreatorPrompt(scoutDecision: ScoutDecision, trigger: TriggerInput): string {
+  if (trigger.platform === 'facebook') return buildFacebookCreatorPrompt(scoutDecision, trigger);
   const { generateInput, recentPublished } = trigger;
   const { identity } = generateInput.soul;
   const soulInterests = [...generateInput.soul.interests.primary, ...generateInput.soul.interests.secondary].join('、');
@@ -946,7 +1003,7 @@ export function buildGatekeeperPrompt(assembled: AssembledContent): string {
  * 故 MUST 显式要求只输出正文本身（模型带一句「好的，以下是重写后的内容：」就会原样发出去）。
  */
 export function buildDeAiRewritePrompt(content: string, flagged: string[]): string {
-  return `请重写以下内容，去除AI味过重的表达（${flagged.join('、')}），保持原意和自然口吻。\n只输出重写后的正文本身——不要任何前言、解释、标题或格式包裹，输出的第一个字就是正文的第一个字。\n\n${content}`;
+  return `请重写以下内容，去除AI味过重的表达（${flagged.join('、')}），保持原意和自然口吻。\n必须保持输入正文的原语言，不得翻译或切换语言。\n只输出重写后的正文本身——不要任何前言、解释、标题或格式包裹，输出的第一个字就是正文的第一个字。\n\n${content}`;
 }
 
 // ─── 封面文字卡文案（change textcard-cover-form）：CoverCardWriter 专用 ────────────

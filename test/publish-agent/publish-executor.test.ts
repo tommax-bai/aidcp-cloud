@@ -118,7 +118,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     const ctx = new PipelineContext<PipelineFields>();
     ctx.write('trigger', {
       metrics: { hoursSinceLastPublish: 1, newConceptCount: 1, likedSinceLastPublish: 0 },
-      generateInput: { concepts: [], likedContents: [], soul: {} as any, recentPosts: [] },
+      generateInput: { concepts: [], likedContents: [], soul: { writing_language: 'zh-CN' } as any, recentPosts: [] },
       recentPublished: [],
       accountId: 'acc-test',
       approvalMode: 'auto_approve',
@@ -209,7 +209,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     const ctx = new PipelineContext<PipelineFields>();
     ctx.write('trigger', {
       metrics: { hoursSinceLastPublish: 1, newConceptCount: 1, likedSinceLastPublish: 0 },
-      generateInput: { concepts: [], likedContents: [], soul: {} as any, recentPosts: [] },
+      generateInput: { concepts: [], likedContents: [], soul: { writing_language: 'zh-CN' } as any, recentPosts: [] },
       recentPublished: [],
       accountId: 'fb-1',
       platform: 'facebook',
@@ -237,6 +237,38 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     assert.deepEqual(imageElements.map((el: any) => el.img_key), ['img_key_a']);
     assert.match(warnings.join('\n'), /素材缩略图上传飞书失败/);
     assert.equal(ctx.get('publishResult')?.approvalCard?.sent, true);
+  });
+
+  test('Facebook 候审前语言漂移只拦截，不翻译、不发审批卡', async () => {
+    const insertedRecords: any[] = [];
+    const sentCards: any[] = [];
+    const role = new PublishExecutorRole({
+      store: { insert: async (record: any) => { insertedRecords.push(record); return 77; } },
+      messenger: { sendApprovalCard: async (_chatId: string, card: any) => { sentCards.push(card); } },
+      botChatStore: { getDefaultChat: async () => ({ chatId: 'chat-1' }) },
+      clock,
+      logger: silentLogger,
+    });
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('trigger', {
+      metrics: { hoursSinceLastPublish: 1, newConceptCount: 1, likedSinceLastPublish: 0 },
+      generateInput: { concepts: [], likedContents: [], soul: { writing_language: 'en' }, recentPosts: [] },
+      recentPublished: [],
+      accountId: 'fb-en',
+      platform: 'facebook',
+    } as any);
+    ctx.write('assembledContent', makeAssembledContent()); // 中文正文，故意制造后处理语言漂移
+    ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('publishMetadata', makePublishMetadata());
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.equal(ctx.get('publishResult')?.status, 'failed');
+    assert.match(ctx.get('publishResult')?.reason ?? '', /writing_language_mismatch/);
+    assert.equal(insertedRecords[0].content, makeAssembledContent().finalContent, '拦截时不得悄悄翻译或改写正文');
+    assert.equal(insertedRecords[0].status, 'failed');
+    assert.equal(sentCards.length, 0);
   });
 
   test('手动飞书 publish source chat 优先于默认群', async () => {

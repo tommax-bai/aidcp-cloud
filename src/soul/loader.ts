@@ -26,8 +26,10 @@ import type {
   SearchSource,
   BehaviorGuidelines,
   LikeAffinity,
+  WritingLanguage,
 } from './types.js';
 import { LIKE_AFFINITY_VALUES } from './like-affinity.js';
+import { isWritingLanguage } from './writing-language.js';
 
 const MANDATORY_INTERACTION_ACTIONS = new Set<MandatoryInteractionAction>(['like', 'comment']);
 const MANDATORY_COMMENT_APPROVALS = new Set<MandatoryCommentApproval>(['review', 'auto_approve']);
@@ -257,9 +259,14 @@ function parseBehaviorGuidelines(v: YamlValue): BehaviorGuidelines {
 /** 把已解析的 YAML 值校验并装载为强类型 Soul。 */
 export function loadSoulFromValue(value: YamlValue): Soul {
   if (!isRecord(value)) throw new Error('soul 配置根节点必须是对象');
+  const writingLanguage = value.writing_language;
+  if (writingLanguage !== undefined && !isWritingLanguage(writingLanguage)) {
+    throw new Error('soul.writing_language 只允许 zh-CN/en/vi');
+  }
   return {
     identity: parseIdentity(value.identity),
     interests: parseInterests(value.interests),
+    ...(writingLanguage ? { writing_language: writingLanguage as WritingLanguage } : {}),
     engagement_rules: value.engagement_rules ? parseEngagementRules(value.engagement_rules) : undefined,
     mandatory_interactions: value.mandatory_interactions ? parseMandatoryInteractions(value.mandatory_interactions) : undefined,
     browse_patterns: value.browse_patterns ? parseBrowsePatterns(value.browse_patterns) : undefined,

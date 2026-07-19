@@ -60,7 +60,9 @@ import type { FeishuMessenger } from '../feishu/messenger.js';
 import type { BotChatStore } from '../cache/bot-chat-store.js';
 import { RiskController, SessionBudget, buildPacingSnapshot } from '../risk/index.js';
 import type { RiskStatus, RiskQuotaLevel, PacingFloorProvider } from '../risk/index.js';
-import { resolveReadSurface } from '../platform/index.js';
+import { normalizePlatformId, resolveReadSurface } from '../platform/index.js';
+import { isWritingLanguage } from '../soul/writing-language.js';
+import type { WritingLanguage } from '../soul/types.js';
 import type { PacingSnapshotPayload } from './protocol.js';
 import type { AccountStateManager } from '../account-state.js';
 import {
@@ -889,6 +891,18 @@ export class DefaultMessageHandler implements MessageHandler {
       return makeEnvelope('persona.generate.result', env.id, this.clock(), { ok: false, reason: 'unknown_account' });
     }
     const accountId = session.accountId;
+    const platform = normalizePlatformId(session.platform);
+    const requestedWritingLanguage = p.writingLanguage;
+    if (platform === 'facebook') {
+      if (requestedWritingLanguage === undefined) {
+        return makeEnvelope('persona.generate.result', env.id, this.clock(), { ok: false, reason: 'writing_language_required' });
+      }
+      if (!isWritingLanguage(requestedWritingLanguage)) {
+        return makeEnvelope('persona.generate.result', env.id, this.clock(), { ok: false, reason: 'writing_language_invalid' });
+      }
+    } else if (requestedWritingLanguage !== undefined) {
+      return makeEnvelope('persona.generate.result', env.id, this.clock(), { ok: false, reason: 'writing_language_not_supported' });
+    }
     const idempotencyKey = (p.idempotencyKey ?? '').trim();
     if (!idempotencyKey) {
       return makeEnvelope('persona.generate.result', env.id, this.clock(), { ok: false, reason: 'missing_idempotency_key' });
@@ -904,7 +918,12 @@ export class DefaultMessageHandler implements MessageHandler {
     const cacheKey = `${accountId}:${idempotencyKey}`;
     let inflight = this.personaGenInflight.get(cacheKey);
     if (!inflight) {
-      inflight = this.runPersonaGenerate(accountId, idempotencyKey, kws)
+      inflight = this.runPersonaGenerate(
+        accountId,
+        idempotencyKey,
+        kws,
+        platform === 'facebook' ? requestedWritingLanguage as WritingLanguage : undefined,
+      )
         .then((res) => {
           // 成功结果保留缓存（重连/重试复用、防双计费）；失败逐出（允许客户重试）。
           if (!res.ok) this.personaGenInflight.delete(cacheKey);
@@ -925,10 +944,11 @@ export class DefaultMessageHandler implements MessageHandler {
     accountId: string,
     idempotencyKey: string,
     keywordSelections: string[],
+    writingLanguage?: WritingLanguage,
   ): Promise<PersonaGenerateResultPayload> {
     // 每账号差异化种子：拌 accountId + 幂等键（每次「生成/重新生成」都带新键 → 有区分度），抗跨账号同质化。
     const diversitySeed = `account:${accountId}|nonce:${idempotencyKey}`;
-    const outcome = await this.deps.personaGenerator!.generate({ accountId, keywordSelections, diversitySeed });
+    const outcome = await this.deps.personaGenerator!.generate({ accountId, keywordSelections, diversitySeed, writingLanguage });
     if (outcome.ok) {
       return { ok: true, soulYaml: outcome.soulYaml, identitySummary: outcome.identitySummary };
     }

@@ -3,3 +3,4 @@ export * from './types.js';
 export * from './yaml.js';
 export * from './loader.js';
 export * from './serialize.js';
+export * from './writing-language.js';

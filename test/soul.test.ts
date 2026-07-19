@@ -42,6 +42,19 @@ test('历史人设缺 like_affinity 按 normal，未知档位严格拒绝', () =
   assert.throws(() => loadSoulFromYaml(serializeSoul(invalid)), /like_affinity/);
 });
 
+test('writing_language 可选兼容历史人设，合法值 round-trip，未知值严格拒绝', () => {
+  const legacy = loadSoul();
+  assert.equal(legacy.writing_language, undefined);
+
+  const configured = { ...legacy, writing_language: 'vi' as const };
+  const back = loadSoulFromYaml(serializeSoul(configured));
+  assert.equal(back.writing_language, 'vi');
+  assert.match(serializeSoul(configured), /writing_language: "vi"/);
+
+  const invalidYaml = serializeSoul(configured).replace('writing_language: "vi"', 'writing_language: "fr"');
+  assert.throws(() => loadSoulFromYaml(invalidYaml), /writing_language/);
+});
+
 test('parseYaml 处理嵌套 map / 列表 / 行内数组 / 注释', () => {
   const v = parseYaml([
     '# top comment',

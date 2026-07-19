@@ -111,6 +111,16 @@ describe('PersonaGenerator', () => {
     assert.ok(out.identitySummary.includes('小柚'));
   });
 
+  it('Facebook 发言语言由结构化输入确定性写入 Soul，不交给模型猜', async () => {
+    const llm = stubLlm(VALID_SOUL_JSON);
+    const gen = new PersonaGenerator({ llm });
+    const out = await gen.generate({ ...baseInput, writingLanguage: 'vi' });
+    assert.equal(out.ok, true);
+    if (!out.ok) return;
+    assert.equal(loadSoulFromYaml(out.soulYaml).writing_language, 'vi');
+    assert.doesNotMatch(llm.calls[0].prompt, /writing_language|越南语/, '结构化账号配置不应被模型自由改写');
+  });
+
   it('更喜欢标记被剥离并确定性映射到 behavior_guidelines', async () => {
     const llm = stubLlm(VALID_SOUL_JSON);
     const gen = new PersonaGenerator({ llm });
@@ -224,6 +234,33 @@ describe('handler persona.generate 幂等去重', () => {
     assert.equal(r1?.type, 'persona.generate.result');
     assert.equal((r1?.payload as { ok: boolean }).ok, true);
     assert.equal((r2?.payload as { ok: boolean }).ok, true);
+  });
+
+  it('Facebook 生成人设必须携带合法发言语言；小红书禁止携带', async () => {
+    const inputs: PersonaGenerateInput[] = [];
+    const handler = makeHandler({
+      generate: async (input) => {
+        inputs.push(input);
+        return { ok: true, soulYaml: 'identity:\n  name: "x"', identitySummary: 'x' };
+      },
+    });
+    const fbSession = { accountId: 'fb-1', edgeId: 'edge-1', platform: 'facebook' } as never;
+    const missing = await handler.handle(makeEnvelope('persona.generate', 'fb-1', 1, {
+      accountId: 'fb-1', keywordSelections: ['咖啡'], idempotencyKey: 'fb-missing',
+    }), fbSession);
+    assert.equal((missing?.payload as { reason?: string }).reason, 'writing_language_required');
+
+    const ok = await handler.handle(makeEnvelope('persona.generate', 'fb-2', 2, {
+      accountId: 'fb-1', keywordSelections: ['咖啡'], writingLanguage: 'en', idempotencyKey: 'fb-ok',
+    }), fbSession);
+    assert.equal((ok?.payload as { ok?: boolean }).ok, true);
+    assert.equal(inputs[0].writingLanguage, 'en');
+
+    const xhsSession = { accountId: 'xhs-1', edgeId: 'edge-1', platform: 'xiaohongshu' } as never;
+    const unsupported = await handler.handle(makeEnvelope('persona.generate', 'xhs-1', 3, {
+      accountId: 'xhs-1', keywordSelections: ['咖啡'], writingLanguage: 'vi', idempotencyKey: 'xhs-lang',
+    }), xhsSession);
+    assert.equal((unsupported?.payload as { reason?: string }).reason, 'writing_language_not_supported');
   });
 
   it('缺 accountId → 诚实回 unknown_account，不调生成器', async () => {

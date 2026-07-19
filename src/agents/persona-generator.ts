@@ -18,7 +18,7 @@
  * LLM 只产 identity + interests（含 seed_keywords）；behavior_guidelines 由代码据生成结果与受控点赞倾向确定性补齐。
  */
 
-import type { BehaviorGuidelines, LikeAffinity, Soul } from '../soul/types.js';
+import type { BehaviorGuidelines, LikeAffinity, Soul, WritingLanguage } from '../soul/types.js';
 import type { YamlValue } from '../soul/yaml.js';
 import { loadSoulFromValue, loadSoulFromYaml, serializeSoul } from '../soul/index.js';
 import { DEFAULT_LIKE_AFFINITY, generatedLikePrinciple, LIKE_AFFINITY_VALUES } from '../soul/like-affinity.js';
@@ -64,6 +64,8 @@ export interface PersonaGenerateInput {
   accountId: string;
   /** 客户勾选的垂类/兴趣/语气关键词，以及可选受控 like_affinity 标记。 */
   keywordSelections: string[];
+  /** Facebook-only，由 Cloud 入口校验后确定性注入，模型不得决定。 */
+  writingLanguage?: WritingLanguage;
   /** 每账号差异化种子（调用方注入，如 accountId + nonce）：拌进 prompt 抗跨账号同质化。 */
   diversitySeed?: string;
 }
@@ -117,6 +119,7 @@ export class PersonaGenerator {
         soul = loadSoulFromValue(parsed as YamlValue);
         soul = {
           ...soul,
+          ...(input.writingLanguage ? { writing_language: input.writingLanguage } : {}),
           behavior_guidelines: this.buildBehaviorGuidelines(soul, likeAffinity),
         };
       } catch (err) {

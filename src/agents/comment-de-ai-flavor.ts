@@ -12,6 +12,7 @@ import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { RoleName, CommentComposedPayload } from '../event-bus/types.js';
 import { PostProcessor } from '../publish-agent/post-processor.js';
+import { checkWritingLanguage, writingLanguageInstruction } from '../soul/writing-language.js';
 
 /**
  * 评论体裁专用 AI 味信号集（change humanize-interaction-prompts）：发帖侧词表是长文议论文连接词，
@@ -112,6 +113,19 @@ export class CommentDeAiFlavor extends BaseRole {
       }
     }
 
+    const writingLanguage = this.soul.writing_language;
+    if (writingLanguage && checkWritingLanguage(text, writingLanguage) !== 'match') {
+      this.emit('comment.skipped', {
+        noteId: payload.noteId,
+        sourcePageType: payload.sourcePageType,
+        actions: payload.actions,
+        reason: 'writing_language_mismatch',
+        ...(payload.mandatoryInteraction ? { mandatoryInteraction: payload.mandatoryInteraction } : {}),
+        ts: Date.now(),
+      });
+      return;
+    }
+
     this.emit('comment.cleared', {
       noteId: payload.noteId,
       sourcePageType: payload.sourcePageType,
@@ -134,7 +148,9 @@ ${references.map((r, i) => `${i + 1}. ${r}`).join('\n')}
 待重写评论：
 ${content}`;
     const raw = await this.decide(prompt);
-    return raw.trim().replace(/^["'“”『「]+|["'“”』」]+$/g, '').trim() || content;
+    const candidate = raw.trim().replace(/^["'“”『「]+|["'“”』」]+$/g, '').trim() || content;
+    const writingLanguage = this.soul.writing_language;
+    return writingLanguage && checkWritingLanguage(candidate, writingLanguage) !== 'match' ? content : candidate;
   }
 
   /** 人设语气片段（change category-adaptive-images-and-judgment）：去 AI 味重写按该账号语气、不抹平成通用中庸腔。
@@ -142,7 +158,10 @@ ${content}`;
   private personaVoiceLine(): string {
     try {
       const { identity } = this.soul;
-      return `把它按你（「${identity.name}」，${identity.role}，语气「${identity.tone}」）的口吻重写、保留你自己的个人腔`;
+      const language = this.soul.writing_language
+        ? `；${writingLanguageInstruction(this.soul.writing_language)}，不得翻译或切换语言`
+        : '';
+      return `把它按你（「${identity.name}」，${identity.role}，语气「${identity.tone}」）的口吻重写、保留你自己的个人腔${language}`;
     } catch {
       return '把它改写成更像真人随手留言的口吻';
     }
@@ -161,7 +180,9 @@ ${content}`;
 
   private async rewrite(content: string, flagged: string[]): Promise<string> {
     const raw = await this.decide(this.buildRewritePrompt(content, flagged));
-    return raw.trim().replace(/^["'“”『「]+|["'“”』」]+$/g, '').trim() || content;
+    const candidate = raw.trim().replace(/^["'“”『「]+|["'“”』」]+$/g, '').trim() || content;
+    const writingLanguage = this.soul.writing_language;
+    return writingLanguage && checkWritingLanguage(candidate, writingLanguage) !== 'match' ? content : candidate;
   }
 }
 

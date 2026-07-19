@@ -57,6 +57,8 @@ export function serializeSoul(soul: Soul): string {
   lines.push(`  background: ${quoteScalar(soul.identity.background)}`);
   lines.push(`  tone: ${quoteScalar(soul.identity.tone)}`);
 
+  if (soul.writing_language) lines.push(`writing_language: ${quoteScalar(soul.writing_language)}`);
+
   lines.push('interests:');
   lines.push(...emitStringListField('primary', soul.interests.primary, '  ', '    '));
   lines.push(...emitStringListField('secondary', soul.interests.secondary, '  ', '    '));

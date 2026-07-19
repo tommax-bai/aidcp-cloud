@@ -98,11 +98,16 @@ export interface BehaviorGuidelines {
 
 export type LikeAffinity = 'normal' | 'like_more' | 'like_most';
 
+/** Facebook 账号对外公开文本的受控写作语言。 */
+export type WritingLanguage = 'zh-CN' | 'en' | 'vi';
+
 export interface Soul {
   /** 身份与语气 */
   identity: SoulIdentity;
   /** 兴趣领域 */
   interests: SoulInterests;
+  /** Facebook-only 公开帖子/评论写作语言；存量与非 Facebook soul 可缺省。 */
+  writing_language?: WritingLanguage;
   /** 传统互动规则（向后兼容，ManagerAgent 中已弱化） */
   engagement_rules?: EngagementRules;
   /** 运营员显式配置的确定性互动规则；缺省=完全沿用普通互动链。 */

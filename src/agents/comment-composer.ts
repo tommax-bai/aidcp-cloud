@@ -17,6 +17,8 @@ import { interactionLabel } from './interaction-label.js';
 import type { MandatoryInteractionContext, RoleName, CommentAppraisedPayload } from '../event-bus/types.js';
 import { topicKeysFromTitle, type ValuableCommentRef } from '../cache/valuable-comment-store.js';
 import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/index.js';
+import { checkWritingLanguage, writingLanguageInstruction } from '../soul/writing-language.js';
+import type { WritingLanguage } from '../soul/types.js';
 
 /** 撰写语境（change humanize-interaction-prompts）：把「为何值得评 / 刚做了什么互动」穿透进 prompt。 */
 interface ComposeContext {
@@ -83,6 +85,11 @@ export class CommentComposer extends BaseRole {
       this.skip(payload, 'note_data_unavailable');
       return;
     }
+    const writingLanguage = this.facebookWritingLanguage();
+    if (this.platformProfile.platform === 'facebook' && !writingLanguage) {
+      this.skip(payload, 'writing_language_required');
+      return;
+    }
 
     // 语料库参考（best-effort）：取不到 / 出错 / 为空 → references 为空，prompt 与今天一致。
     let references: string[] = [];
@@ -98,7 +105,7 @@ export class CommentComposer extends BaseRole {
     // 现场评论（change platform-vocabulary-and-thresholds 2.1）：Facebook 由 note.detail 直接带回、
     // 小红书由 dispatcher 从 scroll_comments 回执归集。采不到即空 ⇒ prompt 与今天一致。
     const onPageComments = (note.comments ?? []).filter(Boolean).slice(0, 6);
-    const attempts = payload.mandatoryInteraction ? 2 : 1;
+    const attempts = payload.mandatoryInteraction || writingLanguage ? 2 : 1;
     let draft: string | null = null;
     let failureReason = 'llm_error';
     for (let attempt = 0; attempt < attempts; attempt++) {
@@ -128,6 +135,10 @@ export class CommentComposer extends BaseRole {
       }
       if (candidate.length > this.platformProfile.maxCommentLength) {
         failureReason = 'compose_too_long';
+        continue;
+      }
+      if (writingLanguage && checkWritingLanguage(candidate, writingLanguage) !== 'match') {
+        failureReason = 'writing_language_mismatch';
         continue;
       }
       draft = candidate;
@@ -175,20 +186,30 @@ export class CommentComposer extends BaseRole {
     note: NoteData,
     opts: { references?: string[]; onPageComments?: string[] } = {},
   ): Promise<string | null> {
+    const writingLanguage = this.facebookWritingLanguage();
+    if (this.platformProfile.platform === 'facebook' && !writingLanguage) return null;
     const references = (opts.references ?? []).filter(Boolean).slice(0, 3);
     // 显式传入优先；未传则回落到笔记自带的现场评论（Facebook note.detail 直接带回）。
     const onPageComments = (opts.onPageComments ?? note.comments ?? []).filter(Boolean).slice(0, 6);
-    let raw: string;
-    try {
-      raw = await this.decide(this.buildPrompt(note, references, onPageComments));
-    } catch {
-      return null;
+    for (let attempt = 0; attempt < (writingLanguage ? 2 : 1); attempt++) {
+      let raw: string;
+      try {
+        raw = await this.decide(this.buildPrompt(note, references, onPageComments, { retry: attempt > 0 }));
+      } catch {
+        continue;
+      }
+      const parsed = this.parseOutput(raw);
+      if (parsed.decline) return null; // 诚实弃权 → 命令路径视为无草稿
+      const draft = this.sanitize(parsed.text);
+      if (!draft || draft.length > this.platformProfile.maxCommentLength) continue;
+      if (writingLanguage && checkWritingLanguage(draft, writingLanguage) !== 'match') continue;
+      return draft;
     }
-    const parsed = this.parseOutput(raw);
-    if (parsed.decline) return null; // 诚实弃权 → 命令路径视为无草稿
-    const draft = this.sanitize(parsed.text);
-    if (!draft || draft.length > this.platformProfile.maxCommentLength) return null;
-    return draft;
+    return null;
+  }
+
+  private facebookWritingLanguage(): WritingLanguage | undefined {
+    return this.platformProfile.platform === 'facebook' ? this.soul.writing_language : undefined;
   }
 
   private buildPrompt(note: NoteData, references: string[] = [], onPageComments: string[] = [], ctx: ComposeContext = {}): string {
@@ -211,7 +232,13 @@ export class CommentComposer extends BaseRole {
       ? `\n这篇已由详情全文确认命中账号强制规则「${mandatory.ruleId}」。本次必须写出一条贴合正文的评论，不得选择弃权。\n评论指引：${mandatory.commentGuidance ?? '紧扣正文，写一条自然、具体的真人评论。'}${ctx.retry ? '\n上一次输出无效；这是唯一一次补写，请只给合法、非空、不过长的具体评论。' : ''}\n`
       : '';
     // 语言约束（change platform-vocabulary-and-thresholds 2.2）：只有声明了该规则的平台才渲染这条 bullet。
-    const langLine = composeLanguageRule ? `\n- ${composeLanguageRule}；` : '';
+    const writingLanguage = this.facebookWritingLanguage();
+    const languageRule = writingLanguage
+      ? writingLanguageInstruction(writingLanguage)
+      : composeLanguageRule;
+    const langLine = languageRule
+      ? `\n- ${languageRule}${ctx.retry && writingLanguage ? '；上一次没有满足发言语言要求，这次必须纠正' : ''}；`
+      : '';
     // 空正文（Facebook 图片帖常无正文）：诚实说明「没有文字正文」，并禁止臆造画面内容——不写「标题：」空行。
     // 现场评论此时就是唯一文字依据；连评论也没有 ⇒ 模型应走 decline，绝不硬凑。
     const titleLine = note.title.trim() ? `\n标题：${note.title}` : '';

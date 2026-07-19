@@ -7,8 +7,11 @@ import type { PipelineFields, TriggerInput, ScoutDecision } from '../../src/publ
 const clock = () => 1700000000000;
 const silentLogger = { log() {}, warn() {}, error() {} };
 
-function makeTriggerInput(): TriggerInput {
-  return {
+function makeTriggerInput(
+  platform: TriggerInput['platform'] = 'xiaohongshu',
+  writingLanguage: 'zh-CN' | 'en' | 'vi' = 'en',
+): TriggerInput {
+  const trigger: TriggerInput = {
     metrics: { hoursSinceLastPublish: 30, newConceptCount: 3, likedSinceLastPublish: 20 },
     generateInput: {
       concepts: [{ keyword: 'RAG 重排' }, { keyword: 'vLLM 量化' }],
@@ -26,7 +29,10 @@ function makeTriggerInput(): TriggerInput {
       recentPosts: [],
     },
     recentPublished: [],
+    platform,
   };
+  if (platform === 'facebook') trigger.generateInput.soul.writing_language = writingLanguage;
+  return trigger;
 }
 
 function makeScoutDecision(shouldPublish: boolean): ScoutDecision {
@@ -109,6 +115,67 @@ describe('ContentCreatorRole', () => {
     assert.ok(content);
     assert.ok(content.title.length <= 20, `标题应≤20字，实际 ${content.title.length}`);
     assert.equal(content.title, longTitle.slice(0, 20));
+  });
+
+  test('Facebook 从初稿阶段按账号发言语言创作，不复用小红书模板', async () => {
+    let prompt = '';
+    const fakeLlm = {
+      chat: async (messages: Array<{ content: string }>) => {
+        prompt = messages.map((item) => item.content).join('\n');
+        return JSON.stringify({
+          title: 'RAG lessons',
+          content: 'I changed the chunking strategy and the retrieval results became much more reliable.',
+          tone: 'casual',
+          style: { type: 'post' },
+        });
+      },
+      complete: async () => '',
+    };
+    const role = new ContentCreatorRole({ llmClient: fakeLlm as any, clock, logger: silentLogger });
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('trigger', makeTriggerInput('facebook'));
+    role.register(ctx);
+    ctx.write('scoutDecision', makeScoutDecision(true));
+    await new Promise(r => setTimeout(r, 50));
+
+    assert.match(ctx.get('createdContent')?.content ?? '', /retrieval results/);
+    assert.match(prompt, /最终公开正文必须只使用英文自然表达/);
+    assert.match(prompt, /Facebook 帖子创作者/);
+    assert.doesNotMatch(prompt, /你在写一篇要发到小红书的笔记/);
+  });
+
+  test('Facebook 初稿语言与账号配置不符时 fail closed', async () => {
+    const fakeLlm = {
+      chat: async () => JSON.stringify({ title: '错误语言', content: '这是一段不该进入候审的中文正文。', tone: 'casual', style: {} }),
+      complete: async () => '',
+    };
+    const role = new ContentCreatorRole({ llmClient: fakeLlm as any, clock, logger: silentLogger });
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('trigger', makeTriggerInput('facebook'));
+    role.register(ctx);
+    ctx.write('scoutDecision', makeScoutDecision(true));
+    await new Promise(r => setTimeout(r, 50));
+    assert.equal(ctx.get('createdContent'), undefined);
+  });
+
+  test('Facebook 中文与越南语账号都从初稿直接使用配置语言', async () => {
+    const cases = [
+      { language: 'zh-CN' as const, content: '这是一段从初稿开始自然写成的中文内容。' },
+      { language: 'vi' as const, content: 'Cảm ơn bạn, đây là một bài viết rất hữu ích.' },
+    ];
+    for (const item of cases) {
+      const fakeLlm = {
+        chat: async () => JSON.stringify({ title: 'summary', content: item.content, tone: 'casual', style: {} }),
+        complete: async () => '',
+      };
+      const role = new ContentCreatorRole({ llmClient: fakeLlm as any, clock, logger: silentLogger });
+      const ctx = new PipelineContext<PipelineFields>();
+      ctx.write('trigger', makeTriggerInput('facebook', item.language));
+      role.register(ctx);
+      ctx.write('scoutDecision', makeScoutDecision(true));
+      await new Promise(r => setTimeout(r, 50));
+      assert.equal(ctx.get('createdContent')?.content, item.content);
+    }
   });
 
   test('LLM 失败（retry 2次后）→ abort（不写入 createdContent）', async () => {

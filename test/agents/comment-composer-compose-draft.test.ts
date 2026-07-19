@@ -20,11 +20,12 @@ const note: NoteData = { noteId: 'n1', title: 'RAG 工程实战', content: '正�
 function makeComposer(
   complete: (p: string) => string | Promise<string>,
   platformProfile?: CommentPlatformProfile,
+  soulOverride?: Soul,
 ) {
   let lastPrompt = '';
   const composer = new CommentComposer({
     eventBus: new EventBus(),
-    soul,
+    soul: soulOverride ?? (platformProfile?.platform === 'facebook' ? { ...soul, writing_language: 'en' } : soul),
     getNoteData: () => note,
     ...(platformProfile ? { platformProfile } : {}),
     llm: {
@@ -93,15 +94,15 @@ describe('CommentComposer 平台词汇与语言规则（change platform-vocabula
     assert.doesNotMatch(p, /当地语言/);
   });
 
-  it('Facebook profile：prompt 用「帖子」、带语言规则、上限 500 字', async () => {
+  it('Facebook profile：prompt 用「帖子」、带账号发言语言规则、上限 500 字', async () => {
     const { composer, getPrompt } = makeComposer(() => '{"text":"nice one"}', FB_COMMENT_PROFILE);
     await composer.composeDraft({ ...fbNote, content: 'a real english post body' });
     const p = getPrompt();
     assert.match(p, /为下面这篇你认可的帖子写/);
     assert.match(p, /当前帖子：/);
     assert.match(p, /最多 500 字/);
-    assert.match(p, /当地语言/);
-    assert.match(p, /除非原文本来就是中文，否则绝不要用中文/);
+    assert.match(p, /最终公开正文必须只使用英文自然表达/);
+    assert.match(p, /不得先用其它语言成稿后再翻译/);
   });
 
   it('Facebook 空正文帖：诚实说明无文字正文 + 禁臆造画面，不渲染空标题行', async () => {
@@ -122,7 +123,7 @@ describe('CommentComposer 平台词汇与语言规则（change platform-vocabula
   });
 
   it('显式 onPageComments 覆盖 note.comments（命令路径优先）', async () => {
-    const { composer, getPrompt } = makeComposer(() => '{"text":"ok"}', FB_COMMENT_PROFILE);
+    const { composer, getPrompt } = makeComposer(() => '{"text":"sounds good"}', FB_COMMENT_PROFILE);
     await composer.composeDraft(
       { ...fbNote, content: 'body', comments: ['from-note'] },
       { onPageComments: ['explicit-arg'] },
@@ -130,5 +131,36 @@ describe('CommentComposer 平台词汇与语言规则（change platform-vocabula
     const p = getPrompt();
     assert.match(p, /explicit-arg/);
     assert.doesNotMatch(p, /from-note/);
+  });
+
+  it('Facebook 缺少账号发言语言时 fail closed，不调用模型', async () => {
+    let calls = 0;
+    const { composer } = makeComposer(() => { calls++; return '{"text":"nice post"}'; }, FB_COMMENT_PROFILE, soul);
+    assert.equal(await composer.composeDraft({ ...fbNote, content: 'english body' }), null);
+    assert.equal(calls, 0);
+  });
+
+  it('越南语账号遇到英文首稿会补写一次，只接受越南语终稿', async () => {
+    let calls = 0;
+    const vietnameseSoul: Soul = { ...soul, writing_language: 'vi' };
+    const { composer, getPrompt } = makeComposer(
+      () => ++calls === 1 ? '{"text":"nice post"}' : '{"text":"Cảm ơn bạn, bài viết rất hữu ích"}',
+      FB_COMMENT_PROFILE,
+      vietnameseSoul,
+    );
+    assert.equal(await composer.composeDraft({ ...fbNote, content: 'english body' }), 'Cảm ơn bạn, bài viết rất hữu ích');
+    assert.equal(calls, 2);
+    assert.match(getPrompt(), /上一次没有满足发言语言要求/);
+  });
+
+  it('中文 Facebook 账号直接接受自然中文评论', async () => {
+    const chineseSoul: Soul = { ...soul, writing_language: 'zh-CN' };
+    const { composer, getPrompt } = makeComposer(
+      () => '{"text":"这个方法很实用，我也准备试试看"}',
+      FB_COMMENT_PROFILE,
+      chineseSoul,
+    );
+    assert.equal(await composer.composeDraft({ ...fbNote, content: 'English source context' }), '这个方法很实用，我也准备试试看');
+    assert.match(getPrompt(), /只使用简体中文自然表达/);
   });
 });

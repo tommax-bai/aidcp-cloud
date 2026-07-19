@@ -423,6 +423,16 @@ test('ui-snapshot: personaBound=true 先于重快照单独下发（不排在 DB 
   assert.equal(sent[1].env.payload.personaBound, undefined, '后面的重快照不再重复带');
 });
 
+test('ui-snapshot: 已绑人设同步结构化发言语言，存量缺字段显式为 null', async () => {
+  const configured = makeService({ isPersonaBound: () => true, getPersonaWritingLanguage: () => 'vi' });
+  await configured.service.pushHelloSnapshot('acc-1', 'edge-1');
+  assert.equal(configured.sent[0].env.payload.personaWritingLanguage, 'vi');
+
+  const legacy = makeService({ isPersonaBound: () => true, getPersonaWritingLanguage: () => null });
+  await legacy.service.pushHelloSnapshot('acc-1', 'edge-1');
+  assert.equal(legacy.sent[0].env.payload.personaWritingLanguage, null);
+});
+
 test('ui-snapshot: personaBound=false 同样下发（权威「未绑」绝不吞掉）', async () => {
   const { service, sent } = makeService({ isPersonaBound: () => false });
   await service.pushHelloSnapshot('acc-1', 'edge-1');

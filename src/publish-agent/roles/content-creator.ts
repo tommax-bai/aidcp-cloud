@@ -6,6 +6,7 @@ import { buildCreatorPrompt } from '../prompts.js';
 import { escapeControlCharsInJsonStrings } from '../json-repair.js';
 import { executeWithRetry } from '../retry-strategy.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
+import { checkWritingLanguage } from '../../soul/writing-language.js';
 
 // 内容生成超时（角色闸 + LLM 调用同值）：放宽到 120s，容纳较强/较慢模型（如 qwen-max 系）。env 可调。
 const CONTENT_TIMEOUT_MS = Number(process.env.AIDCP_PUBLISH_CONTENT_TIMEOUT_MS ?? 180_000);
@@ -49,11 +50,12 @@ export class ContentCreatorRole extends BasePublishRole<CreatorInput, CreatedCon
 
   protected async execute(input: CreatorInput, context: PipelineContext<PipelineFields>): Promise<CreatedContent> {
     const prompt = buildCreatorPrompt(input.scoutDecision, input.trigger);
+    const facebook = input.trigger.platform === 'facebook';
     const raw = await executeWithRetry(
       async () => {
         return this.llmClient.chat(
           [
-            { role: 'system', content: '你是小红书笔记创作者，正文创作：严格按要求生成JSON格式内容。' },
+            { role: 'system', content: facebook ? '你是 Facebook 帖子创作者，严格按账号人设和发言语言生成 JSON 格式内容。' : '你是小红书笔记创作者，正文创作：严格按要求生成JSON格式内容。' },
             { role: 'user', content: prompt },
           ],
           // LLM 调用超时须与角色闸同放宽，否则 QwenClient 默认 30s 会先 abort（角色闸放宽也没用）。
@@ -62,11 +64,18 @@ export class ContentCreatorRole extends BasePublishRole<CreatorInput, CreatedCon
       },
       { maxRetries: 2, initialDelayMs: 500, maxDelayMs: 5000, backoffMultiplier: 2 },
     );
-    const parsed = this.parseOutput(raw);
+    const parsed = this.parseOutput(raw, input.trigger.platform);
+    if (facebook) {
+      const writingLanguage = input.trigger.generateInput.soul.writing_language;
+      if (!writingLanguage) throw new Error('writing_language_required');
+      if (checkWritingLanguage(parsed.content, writingLanguage) !== 'match') {
+        throw new Error('writing_language_mismatch');
+      }
+    }
     return { ...parsed, createdAt: this.clock() };
   }
 
-  private parseOutput(raw: string): Omit<CreatedContent, 'createdAt'> {
+  private parseOutput(raw: string, platform: TriggerInput['platform']): Omit<CreatedContent, 'createdAt'> {
     const match = raw.match(/\{[\s\S]*\}/);
     if (!match) throw new Error('No JSON found in Creator output');
     // doubao 常把多行正文的换行不转义直接放进 JSON 字符串（Bad control character，正文角色切 doubao 后必炸）——
@@ -79,7 +88,7 @@ export class ContentCreatorRole extends BasePublishRole<CreatorInput, CreatedCon
       obj = JSON.parse(escapeControlCharsInJsonStrings(match[0]));
     }
     // 小红书标题硬上限 20 字（超限「发布」按钮静默失效）。云端先截断至 20 兜底，edge 再截一次双保险。
-    const title = String(obj.title || '').slice(0, 20);
+    const title = String(obj.title || '').slice(0, platform === 'facebook' ? 80 : 20);
     return {
       title,
       content: String(obj.content || ''),

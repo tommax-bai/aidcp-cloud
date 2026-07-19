@@ -76,7 +76,7 @@ import {
 } from './feishu/mandatory-comment-cards.js';
 import type { MandatoryCommentOutcomeNoticeInput } from './orchestrator/role-dispatcher.js';
 import { CommentScheduler } from './comment-agent/comment-scheduler.js';
-import { loadSoul, type Soul } from './soul/index.js';
+import { checkWritingLanguage, loadSoul, type Soul, writingLanguageInstruction } from './soul/index.js';
 
 
 import {
@@ -2400,6 +2400,7 @@ async function main(): Promise<void> {
     getNickname: (accountId) => accountStore?.getNickname?.(accountId) ?? null,
     // 已绑人设信号（change persona-wizard-onboarding-fixes）：persona 存储权威判据，随 hello 快照下发。
     isPersonaBound: (accountId) => personaStore.getForAccount(accountId) !== null,
+    getPersonaWritingLanguage: (accountId) => resolvePersona(accountId)?.writing_language ?? null,
     lastPublishedForAccount: (accountId) => publishLogStore.lastPublishedForAccount(accountId),
     pendingApprovalForAccount: (accountId) => publishLogStore.pendingApprovalForAccount(accountId),
     pendingPublishPreviewForAccount: async (accountId) => {
@@ -3250,6 +3251,11 @@ async function main(): Promise<void> {
       // 无人值守（不走人审），一次 LLM 调用产草稿，交给确定性校验器把关。
       try {
         const s = getSoul(accountId);
+        const writingLanguage = s.writing_language;
+        if (!writingLanguage) {
+          console.warn(`[facebook-comment] account=${accountId} 缺少 writing_language，拒绝生成评论`);
+          return null;
+        }
         const others = (comments ?? []).slice(0, 6).map((c, i) => `${i + 1}. ${c}`).join('\n');
         const hasBody = Boolean(postText && postText.trim());
         const contextLines = [
@@ -3260,14 +3266,19 @@ async function main(): Promise<void> {
           `你在 Facebook 上以「${s.identity.name}」（${s.identity.role}）的身份，在下面这条帖子下写一条自然、真诚的评论。\n\n` +
           `${contextLines}\n\n` +
           `要求：\n` +
-          `- **用与上面帖子正文/他人评论相同的语言写**（当地语言；除非原文本来就是中文，否则绝不要用中文）；\n` +
+          `- **${writingLanguageInstruction(writingLanguage)}**；即使帖子或他人评论使用其他语言，也不要跟随切换；\n` +
           `- 顺着帖子和评论区的话茬自然回应，像真人随手留言，一两句即可；\n` +
           `- 与话题「${keyword}」相关，但不要生硬堆砌关键词；\n` +
           `- 不要外链、不要 @、不要联系方式（微信/电话/邮箱）、不要营销话术、不要话题标签；\n` +
           `- 只输出评论正文。`;
-        const text = await llm.complete(prompt, { accountId, role: 'facebook_comment_composer' } as never);
-        const clean = String(text ?? '').trim();
-        return clean || null;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const retryPrompt = attempt === 0 ? prompt : `${prompt}\n\n上一次输出没有满足账号发言语言要求；这次必须纠正，只输出合法评论正文。`;
+          const text = await llm.complete(retryPrompt, { accountId, role: 'facebook_comment_composer' } as never);
+          const clean = String(text ?? '').trim();
+          if (clean && checkWritingLanguage(clean, writingLanguage) === 'match') return clean;
+        }
+        console.warn(`[facebook-comment] account=${accountId} 连续两次未满足 writing_language=${writingLanguage}，拒绝发布评论`);
+        return null;
       } catch {
         return null;
       }

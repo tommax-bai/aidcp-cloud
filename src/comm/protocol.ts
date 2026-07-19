@@ -682,8 +682,13 @@ export interface UiSnapshotPayload {
    * 云端是人设状态的唯一权威写方，故 true / false **都下发**；边缘 MUST NOT 把「未知」当「未绑」——
    * 弹人设向导只能由权威的 false 触发，绝不能由「等了一会儿还没收到」触发。
    * 旧契约（仅 true 时下发）把「云端说没有」与「云端还没说」压成同一个值，导致已设置人设的账号被反复误弹。
-   */
+  */
   personaBound?: boolean;
+  /**
+   * Facebook 人设公开写作语言：字符串=Cloud 已确认值；null=已绑定存量人设缺字段；
+   * 字段缺省=Cloud 尚未投影该事实。非 Facebook 环境不消费。
+   */
+  personaWritingLanguage?: PersonaWritingLanguage | null;
 }
 
 /** 陪伴客户端展示用的稿件快照；审批状态仍由同包内的 publish 字段单独表达。 */
@@ -1002,10 +1007,14 @@ export interface RiskRecordResultPayload {
  * edge → cloud：按客户勾选的关键词请求云端生成账号 persona（soul.yaml + 身份摘要）。
  * 安全：云端以握手绑定的 session.accountId 为准，不信任本载荷自报的 accountId。
  */
+export type PersonaWritingLanguage = 'zh-CN' | 'en' | 'vi';
+
 export interface PersonaGeneratePayload {
   accountId: string;
   /** 建号流程勾选的关键词集合（供 persona 生成种子化） */
   keywordSelections: string[];
+  /** Facebook-only 账号公开写作语言；Cloud 按握手确认的平台校验。 */
+  writingLanguage?: PersonaWritingLanguage;
   /** 幂等键：同 key 重复请求云端只生成一次、复用结果，防重连/重试重复扣费 */
   idempotencyKey: string;
 }
