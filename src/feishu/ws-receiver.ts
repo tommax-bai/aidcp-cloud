@@ -240,12 +240,15 @@ export class FeishuWsReceiver {
     // 「发帖未产出／已有一轮在运行中」卡）。终态结果卡照旧异步补发、honest-status 判级不变；
     // 不插入「任务启动中」中间卡。重复执行由发帖并发闸兜底（本层不自建去重）。
     void this.commandRouter
-      .handle(text, { chatId: message.chat_id, messageId: message.message_id })
-      .then((result) => {
-        // 静默受理（精确命令直接排队）：不发卡，只留已读表情；结果由任务自身的业务结果卡回报。
-        if (result.silent) return;
-        if (this.messenger) {
-          return this.messenger.sendCard(message.chat_id, result.card ?? buildCommandResultCard(result));
+      .handleBatch(text, { chatId: message.chat_id, messageId: message.message_id })
+      .then((results) => {
+        for (const result of results) {
+          // 静默受理（精确命令直接排队）：不发卡，只留已读表情；结果由任务自身的业务结果卡回报。
+          if (result.silent || !this.messenger) continue;
+          // 各子命令卡片独立发送；一张卡失败不吞掉其它兄弟结果。
+          void this.messenger.sendCard(message.chat_id, result.card ?? buildCommandResultCard(result)).catch((err) => {
+            this.logger.error('[feishu] 后台发送子命令结果失败:', (err as Error).message);
+          });
         }
       })
       .catch((err) => {

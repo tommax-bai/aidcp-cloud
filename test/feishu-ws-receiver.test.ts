@@ -11,20 +11,20 @@ import { FeishuMessenger } from '../src/feishu/messenger.js';
 import { FeishuTokenManager } from '../src/feishu/token.js';
 import type { CommandResult } from '../src/feishu/types.js';
 
-/** 可控命令桩：handle 返回一个可手动 resolve/reject 的 promise，用于验证 fast-ack（受理即返回）。 */
+/** 可控命令桩：handleBatch 返回一个可手动 resolve/reject 的 promise，用于验证 fast-ack（受理即返回）。 */
 function makeDeferredRouter(): {
   router: CommandRouter;
   resolve: (r: CommandResult) => void;
   reject: (e: unknown) => void;
 } {
-  let resolve!: (r: CommandResult) => void;
   let reject!: (e: unknown) => void;
-  const p = new Promise<CommandResult>((res, rej) => {
-    resolve = res;
+  let resolveBatch!: (results: CommandResult[]) => void;
+  const p = new Promise<CommandResult[]>((res, rej) => {
+    resolveBatch = res;
     reject = rej;
   });
-  const router = { handle: () => p } as unknown as CommandRouter;
-  return { router, resolve, reject };
+  const router = { handleBatch: () => p } as unknown as CommandRouter;
+  return { router, resolve: (result) => resolveBatch([result]), reject };
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 20));
@@ -140,6 +140,25 @@ test('ws-receiver: @ 提及占位被剥离后仍能解析指令', async () => {
   // fast-ack：回卡后台异步补发，等一拍。
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(sent.length, 1);
+});
+
+test('ws-receiver: 批命令逐个发送非静默结果，静默入队不冒充完成', async () => {
+  const { messenger, sent } = makeRecordingMessenger();
+  const router = {
+    handleBatch: async () => [
+      { command: '/publish Tianxing Bai', ok: true, level: 'warning', title: '已入队', message: '', silent: true },
+      { command: '/comment Missing', ok: false, level: 'warning', title: '未找到账号', message: 'Missing' },
+    ],
+  } as unknown as CommandRouter;
+  const receiver = new FeishuWsReceiver({ appId: 'a', appSecret: 's', commandRouter: router, messenger });
+  await receiver.handleMessage({
+    message_id: 'om_batch', chat_id: 'oc_chat', message_type: 'text',
+    content: JSON.stringify({ text: '/publish Tianxing Bai; /comment Missing' }),
+  });
+  await tick();
+  assert.equal(sent.length, 1);
+  assert.match(sent[0]!.body, /未找到账号/);
+  assert.doesNotMatch(sent[0]!.body, /已入队/);
 });
 
 test('ws-receiver: 非文本消息被忽略', async () => {

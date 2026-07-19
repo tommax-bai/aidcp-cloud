@@ -30,11 +30,25 @@ function candidate(overrides: Partial<CandidateSnapshot> = {}): CandidateSnapsho
 }
 
 test('batch comments always use automatic quota semantics while legacy single comment retains manual compatibility', async () => {
-  const calls: Array<{ priority: string; manualOverride: boolean; force: boolean }> = [];
+  const calls: Array<{
+    priority: string;
+    manualOverride: boolean;
+    force: boolean;
+    injectContact?: boolean;
+    joinFirst?: boolean;
+    joinGroupUrl?: string;
+  }> = [];
   const router = createDelegatedExecutorRouter({
     comments: {
       triggerManual: async (_accountId, options) => {
-        calls.push({ priority: options.priority, manualOverride: options.manualOverride, force: options.force });
+        calls.push({
+          priority: options.priority,
+          manualOverride: options.manualOverride,
+          force: options.force,
+          injectContact: options.injectContact,
+          joinFirst: options.joinFirst,
+          joinGroupUrl: options.joinGroupUrl,
+        });
         await options.onResult({ outcome: 'commented', noteId: 'note-1' });
         return { ok: true, message: 'started' };
       },
@@ -49,11 +63,23 @@ test('batch comments always use automatic quota semantics while legacy single co
   });
   const batch = await router.executorFor(task()).execute(task(), attempt);
   assert.equal(batch.kind, 'success');
-  assert.deepEqual(calls[0], { priority: 'automatic', manualOverride: false, force: false });
+  assert.deepEqual(calls[0], {
+    priority: 'automatic', manualOverride: false, force: false,
+    injectContact: false, joinFirst: undefined, joinGroupUrl: undefined,
+  });
 
-  const legacy = task({ source: 'legacy_command', targetSuccessCount: 1, targetConstraints: { manualSingle: true, force: true } });
+  const legacy = task({
+    platform: 'facebook', action: 'facebook_group_comment', source: 'legacy_command', targetSuccessCount: 1,
+    targetConstraints: {
+      manualSingle: true, force: true, injectContact: true,
+      joinGroup: true, groupUrl: 'https://www.facebook.com/groups/example',
+    },
+  });
   await router.executorFor(legacy).execute(legacy, attempt);
-  assert.deepEqual(calls[1], { priority: 'human', manualOverride: true, force: true });
+  assert.deepEqual(calls[1], {
+    priority: 'human', manualOverride: true, force: true, injectContact: true,
+    joinFirst: true, joinGroupUrl: 'https://www.facebook.com/groups/example',
+  });
 });
 
 test('Facebook shadow observation is skipped and never counted as a verified comment', async () => {
@@ -105,6 +131,26 @@ test('preempted 评论 → deferred（未发出、退避重试，绝不立刻对
   const router = routerWithCommentOutcome('preempted', 'preempted:preempted_by_task');
   const r = await router.executorFor(task()).execute(task(), attempt);
   assert.equal(r.kind, 'deferred', '被抢占＝未发出、可安全稍后重试');
+  assert.notEqual(r.kind === 'deferred' ? r.attemptStarted : undefined, false, '抢占可能发生在浏览器已动作后，必须保留账本');
+});
+
+test('普通评论租约未取得 → deferred 且明确不消耗尝试；加群后评论未起跑则保守保留', async () => {
+  const router = routerWithCommentOutcome('not_started', 'edge_task_lease_timeout');
+  const plain = task({ action: 'comment_batch' });
+  const plainResult = await router.executorFor(plain).execute(plain, attempt);
+  assert.deepEqual(
+    plainResult.kind === 'deferred' ? plainResult.attemptStarted : undefined,
+    false,
+    '普通评论租约失败能证明零浏览器命令',
+  );
+
+  const joined = task({ platform: 'facebook', action: 'facebook_group_comment' });
+  const joinedResult = await router.executorFor(joined).execute(joined, attempt);
+  assert.notEqual(
+    joinedResult.kind === 'deferred' ? joinedResult.attemptStarted : undefined,
+    false,
+    'facebook_group_comment 可能已先加入群，不能回滚整轮尝试',
+  );
 });
 
 test('candidate modification is CAS-bound and carries the requested retained-image subset', async () => {

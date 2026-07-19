@@ -335,7 +335,40 @@ test('预算耗尽终态带上最后一次失败原因（而非只有记账）',
   assert.match(done!.terminalOutcome!.message, /Pipeline aborted by content_writer: llm_error/);
 });
 
-// 红线：让开（deferred → settle 成 skipped）同样烧尝试预算，且从未接触平台。
+test('明确未起跑的资源等待可反复排队且零尝试，资源释放后仍能执行', async () => {
+  const store = new MemoryDelegatedTaskStore();
+  let now = 5_500_000;
+  const task = await confirmedTask(store, now, {
+    action: 'comment_batch', targetSuccessCount: 1, maxAttempts: 1, deadlineAt: now + 300_000,
+  });
+  let waits = 3;
+  const executor: DelegatedTaskExecutor = {
+    // provisional attempt 被原子移除，所以同一目标可以在资源释放后安全重试。
+    targetKey: () => 'browser-lease:xhs-1',
+    execute: async () => waits-- > 0
+      ? { kind: 'deferred', reason: 'edge_task_lease_timeout', retryAt: now + 1_000, attemptStarted: false }
+      : { kind: 'success', verificationKind: 'platform_comment_confirmed', evidenceRef: 'comment:note-1' },
+  };
+  const worker = new DelegatedTaskWorker({ store, executorFor: () => executor, now: () => now, claimLeaseMs: 10_000 });
+
+  for (let i = 0; i < 3; i++) {
+    await worker.tick();
+    const queued = await store.get(task.id);
+    assert.equal(queued?.status, 'deferred');
+    assert.deepEqual(queued?.progress, { successCount: 0, attemptCount: 0, skippedCount: 0, failureCount: 0 });
+    assert.deepEqual(await store.listAttempts(task.id), []);
+    now += 2_000;
+  }
+
+  await worker.tick();
+  const done = await store.get(task.id);
+  assert.equal(done?.status, 'completed');
+  assert.deepEqual(done?.progress, { successCount: 1, attemptCount: 1, skippedCount: 0, failureCount: 0 });
+  assert.equal((await store.listAttempts(task.id)).length, 1);
+});
+
+// 红线：未携带 attemptStarted:false 的一般让开（deferred → settle 成 skipped）仍烧尝试预算；
+// worker 不能自行猜测执行器是否真的完全没碰浏览器/平台。
 // 与真实失败同文表述会让运营误以为系统已在平台上动过手。
 test('全程被让开而耗尽预算 → 明说「均未真正开始」，绝不暗示已动过手', async () => {
   const store = new MemoryDelegatedTaskStore();

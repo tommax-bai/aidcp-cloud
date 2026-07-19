@@ -2,11 +2,25 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   CommandRouter,
+  MAX_COMMANDS_PER_MESSAGE,
   parseCommand,
+  splitCommandBatch,
   resolvePublishApprovalRequestId,
   matchAccountByNickname,
   type CommandActions,
 } from '../src/feishu/commands.js';
+
+test('splitCommandBatch: 只在已支持 slash 命令边界拆 ASCII/全角分号', () => {
+  assert.deepEqual(
+    splitCommandBatch('/publish Tianxing Bai; /comment Tianxing Bai --join --contact --force'),
+    ['/publish Tianxing Bai', '/comment Tianxing Bai --join --contact --force'],
+  );
+  assert.deepEqual(splitCommandBatch('/status a；/resume a'), ['/status a', '/resume a']);
+  assert.deepEqual(
+    splitCommandBatch('/comment Name; Part --join=https://example.com/a;b;/not-a-command'),
+    ['/comment Name; Part --join=https://example.com/a;b;/not-a-command'],
+  );
+});
 
 test('parseCommand: /status acc-01', () => {
   const cmd = parseCommand('/status acc-01');
@@ -76,6 +90,57 @@ function makeActions(): { actions: CommandActions; log: string[] } {
   };
   return { actions, log };
 }
+
+test('CommandRouter.handleBatch: 子命令并发受理，且 messageId+序号形成稳定独立来源', async () => {
+  const seen: Array<{ text: string; messageId?: string }> = [];
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const router = new CommandRouter({
+    ...makeActions().actions,
+    delegate: async (text, context) => {
+      seen.push({ text, messageId: context?.messageId });
+      await gate;
+      return { command: text, ok: true, level: 'warning', title: '已独立受理', message: text, silent: true };
+    },
+  });
+
+  const pending = router.handleBatch(
+    '/publish Tianxing Bai; /comment Tianxing Bai --join --contact --force',
+    { chatId: 'oc_admin', messageId: 'om_batch' },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(seen, [
+    { text: '/publish Tianxing Bai', messageId: 'om_batch:command:1' },
+    { text: '/comment Tianxing Bai --join --contact --force', messageId: 'om_batch:command:2' },
+  ], '第二条不应等待第一条完成才开始受理');
+  release();
+  assert.equal((await pending).length, 2);
+
+  seen.length = 0;
+  const replay = router.handleBatch('/publish Tianxing Bai; /publish Tianxing Bai', { messageId: 'om_batch' });
+  await new Promise((resolve) => setImmediate(resolve));
+  await replay;
+  assert.deepEqual(seen.map((item) => item.messageId), ['om_batch:command:1', 'om_batch:command:2']);
+});
+
+test('CommandRouter.handleBatch: 一个子命令拒绝不吞掉兄弟，超上限整批不受理', async () => {
+  const router = new CommandRouter({
+    ...makeActions().actions,
+    delegate: async (text) => {
+      if (text.startsWith('/comment')) throw new Error('昵称不存在');
+      return { command: text, ok: true, level: 'warning', title: '已入队', message: '', silent: true };
+    },
+  });
+  const results = await router.handleBatch('/publish Tianxing Bai; /comment Missing');
+  assert.equal(results[0]?.silent, true);
+  assert.equal(results[1]?.ok, false);
+  assert.match(results[1]?.message ?? '', /昵称不存在/);
+
+  const tooMany = Array.from({ length: MAX_COMMANDS_PER_MESSAGE + 1 }, () => '/status a').join(';');
+  const rejected = await router.handleBatch(tooMany);
+  assert.equal(rejected.length, 1);
+  assert.match(rejected[0]?.title ?? '', /过多/);
+});
 
 test('CommandRouter: status 调用 actions.status 并回成功回执', async () => {
   const { actions, log } = makeActions();

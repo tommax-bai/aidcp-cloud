@@ -142,6 +142,8 @@ export interface DelegatedTaskStore {
   releaseWaitingApprovalClaim(id: string, claimToken: string, nextEligibleAt: number): Promise<DelegatedTask | null>;
   startAttempt(taskId: string, claimToken: string, targetKey: string): Promise<DelegatedTaskAttempt>;
   markAttemptDispatched(attemptId: string): Promise<void>;
+  /** 仅用于已证明零动作的等待：原子移除临时账本，并在需要时撤回 attempt_count。 */
+  discardAttemptBeforeStart(attemptId: string, reason: string): Promise<DelegatedTask>;
   annotateAttempt(attemptId: string, verificationKind: DelegatedVerificationKind, evidenceRef: string, reason?: string): Promise<void>;
   finishAttempt(attemptId: string, result: AttemptFinish): Promise<DelegatedTask>;
   listUnsettledAttempts(taskId: string): Promise<DelegatedTaskAttempt[]>;
@@ -475,6 +477,37 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
     );
   }
 
+  async discardAttemptBeforeStart(attemptId: string, reason: string): Promise<DelegatedTask> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const attemptRows = await client.query<AttemptRow>(
+        `DELETE FROM delegated_task_attempts WHERE id=$1 AND status IN ('prepared','dispatched') RETURNING *`,
+        [attemptId],
+      );
+      const attempt = attemptRows.rows[0];
+      if (!attempt) throw new Error('attempt_already_finished_or_missing');
+      const dispatched = attempt.status === 'dispatched';
+      const taskRows = await client.query<TaskRow>(
+        `UPDATE delegated_tasks SET attempt_count=GREATEST(attempt_count-$2,0), updated_at=now(), version=version+1
+         WHERE id=$1 RETURNING *`,
+        [attempt.task_id, dispatched ? 1 : 0],
+      );
+      if (!taskRows.rows[0]) throw new Error('attempt_task_missing');
+      await client.query(
+        `INSERT INTO delegated_task_events(task_id,event_type,detail) VALUES($1,'attempt_discarded_before_start',$2)`,
+        [attempt.task_id, JSON.stringify({ attemptId, reason, dispatched })],
+      );
+      await client.query('COMMIT');
+      return mapTask(taskRows.rows[0]);
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
   async annotateAttempt(attemptId: string, verificationKind: DelegatedVerificationKind, evidenceRef: string, reason?: string): Promise<void> {
     await this.pool.query(
       `UPDATE delegated_task_attempts SET verification_kind=$2, evidence_ref=$3, reason=$4
@@ -767,6 +800,19 @@ export class MemoryDelegatedTaskStore implements DelegatedTaskStore {
         this.mutate(task, {});
       }
     }
+  }
+
+  async discardAttemptBeforeStart(id: string, _reason: string): Promise<DelegatedTask> {
+    const attempt = this.attempts.get(id);
+    if (!attempt || (attempt.status !== 'prepared' && attempt.status !== 'dispatched')) {
+      throw new Error('attempt_already_finished_or_missing');
+    }
+    const task = this.tasks.get(attempt.taskId);
+    if (!task) throw new Error('attempt_task_missing');
+    this.attempts.delete(id);
+    if (attempt.status === 'dispatched') task.progress.attemptCount = Math.max(0, task.progress.attemptCount - 1);
+    this.mutate(task, {});
+    return structuredClone(task);
   }
 
   async annotateAttempt(id: string, verificationKind: DelegatedVerificationKind, evidenceRef: string, reason?: string): Promise<void> {

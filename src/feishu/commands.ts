@@ -23,6 +23,23 @@ import type { BotChatRecord } from '../cache/bot-chat-store.js';
 /** 已识别的指令动作 */
 export type CommandAction = 'status' | 'pause' | 'resume' | 'publish-test' | 'publish' | 'comment' | 'bind' | 'help';
 
+/** 单条飞书消息允许携带的最大原子命令数，防止一次消息无界放大后台工作。 */
+export const MAX_COMMANDS_PER_MESSAGE = 8;
+
+const COMMAND_AFTER_SEPARATOR =
+  /[;；](?=\s*\/(?:aidcp\s+\/?(?:status|pause|resume|publish-test|publish|comment|bind|help)|(?:status|pause|resume|publish-test|publish|comment|bind|task|help))\b)/giu;
+
+/**
+ * 只在分号后紧跟已支持 slash 命令时拆分。URL、昵称和普通参数里的分号原样保留。
+ * 单命令返回原文本本身，使既有解析/路由路径保持不变。
+ */
+export function splitCommandBatch(text: string): string[] {
+  const source = text ?? '';
+  const parts = source.split(COMMAND_AFTER_SEPARATOR);
+  if (parts.length === 1) return [source];
+  return parts.map((part) => part.trim()).filter(Boolean);
+}
+
 /** 解析后的指令结构 */
 export interface ParsedCommand {
   action: CommandAction;
@@ -305,6 +322,38 @@ export class CommandRouter {
      */
     private readonly isChatAuthorized?: (chatId?: string) => boolean,
   ) {}
+
+  /** 并发受理一条消息里的原子命令；每个子命令独立失败、独立使用稳定幂等来源。 */
+  async handleBatch(text: string, context?: { chatId?: string; messageId?: string }): Promise<CommandResult[]> {
+    const commands = splitCommandBatch(text);
+    if (commands.length === 1) return [await this.handle(text, context)];
+    if (commands.length > MAX_COMMANDS_PER_MESSAGE) {
+      return [{
+        command: text,
+        ok: false,
+        level: 'warning',
+        title: '批命令过多',
+        message: `一条消息最多可提交 ${MAX_COMMANDS_PER_MESSAGE} 条命令；本批未受理，请拆成多条消息。`,
+      }];
+    }
+
+    return Promise.all(commands.map(async (command, index) => {
+      const childContext = context?.messageId
+        ? { ...context, messageId: `${context.messageId}:command:${index + 1}` }
+        : context;
+      try {
+        return await this.handle(command, childContext);
+      } catch (err) {
+        return {
+          command,
+          ok: false,
+          level: 'error' as const,
+          title: '子命令处理失败',
+          message: (err as Error).message ?? String(err),
+        };
+      }
+    }));
+  }
 
   /** 处理一条文本指令，返回回执（CommandResult，交给 cards 渲染卡片） */
   async handle(text: string, context?: { chatId?: string; messageId?: string }): Promise<CommandResult> {

@@ -10,7 +10,13 @@ export type DelegatedExecutionResult =
   | { kind: 'skipped'; reason: string }
   | { kind: 'failed'; reason: string; retryable?: boolean }
   | { kind: 'submitted_unknown'; reason: string; evidenceRef?: string }
-  | { kind: 'deferred'; reason: string; retryAt: number };
+  | {
+      kind: 'deferred';
+      reason: string;
+      retryAt: number;
+      /** 仅在执行器能证明没有浏览器或平台动作被派发时为 false。 */
+      attemptStarted?: boolean;
+    };
 
 export interface DelegatedTaskExecutor {
   targetKey(task: DelegatedTask): Promise<string> | string;
@@ -197,9 +203,11 @@ export class DelegatedTaskWorker {
     reconciling: boolean,
   ): Promise<DelegatedTask | null> {
     if (result.kind === 'deferred') {
-      if (!reconciling && attempt.status === 'prepared') {
-        // `not_started`（非 `not_dispatched`）：让开发生在动作真正开始前，执行器根本没跑、浏览器没碰过平台。
-        // 这是终态回执说「均未真正开始」的唯一凭据——两者从前都记 not_dispatched，与「跑了但没写」不可分。
+      if (!reconciling && result.attemptStarted === false) {
+        await this.deps.store.discardAttemptBeforeStart(attempt.id, result.reason);
+      } else if (!reconciling && attempt.status === 'prepared') {
+        // 未显式证明零动作的一般 defer 保持旧账本语义；worker 不猜测浏览器/平台是否已被触碰。
+        // `not_started` 仍区别于“跑过但未写”的 not_dispatched，供既有终态说明使用。
         await this.deps.store.finishAttempt(attempt.id, { status: 'skipped', verificationKind: 'not_started', reason: result.reason });
       }
       return this.update(await this.deps.store.releaseClaim(task.id, token, 'deferred', {

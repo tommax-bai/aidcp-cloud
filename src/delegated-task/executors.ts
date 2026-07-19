@@ -14,6 +14,7 @@ export interface DelegatedCommentPort {
       priority: 'automatic' | 'human';
       manualOverride: boolean;
       force: boolean;
+      injectContact?: boolean;
       approvalMode: 'review' | 'auto_approve';
       joinFirst?: boolean;
       joinGroupUrl?: string;
@@ -102,7 +103,7 @@ function commentApprovalMode(task: DelegatedTask): 'review' | 'auto_approve' {
   return task.approvalMode === 'auto_approve' ? 'auto_approve' : 'review';
 }
 
-function commentResult(result: CommentTerminalObservation | TargetedCommentResult): DelegatedExecutionResult {
+function commentResult(task: DelegatedTask, result: CommentTerminalObservation | TargetedCommentResult): DelegatedExecutionResult {
   if (result.outcome === 'commented') {
     const noteId = 'noteId' in result ? result.noteId : undefined;
     const container = 'container' in result ? result.container : undefined;
@@ -113,7 +114,13 @@ function commentResult(result: CommentTerminalObservation | TargetedCommentResul
     };
   }
   if (result.outcome === 'not_started') {
-    return { kind: 'deferred', reason: result.reason ?? 'edge_task_not_started', retryAt: Date.now() + 30_000 };
+    return {
+      kind: 'deferred',
+      reason: result.reason ?? 'edge_task_not_started',
+      retryAt: Date.now() + 30_000,
+      // 加群评论可能已经完成入组、随后评论租约才失败；这种复合动作不能声称整轮零副作用。
+      ...(task.action !== 'facebook_group_comment' ? { attemptStarted: false as const } : {}),
+    };
   }
   if (result.outcome === 'verification_ambiguous') {
     return { kind: 'submitted_unknown', reason: result.reason ?? 'comment_submission_unverified' };
@@ -288,6 +295,7 @@ export function createDelegatedExecutorRouter(deps: DelegatedExecutorDeps): {
   const terminalWaitMs = Math.max(10_000, deps.terminalWaitMs ?? 4 * 60_000);
 
   const awaitComment = async (
+    task: DelegatedTask,
     trigger: (onResult: (result: CommentTerminalObservation | TargetedCommentResult) => void) => Promise<{ ok: boolean; message: string; code?: string; reason?: string }>,
   ): Promise<DelegatedExecutionResult> => {
     let timer: NodeJS.Timeout | undefined;
@@ -296,7 +304,8 @@ export function createDelegatedExecutorRouter(deps: DelegatedExecutorDeps): {
       void trigger(resolve).then((receipt) => {
         if (receipt.ok) return;
         if (receipt.code === 'edge_offline' || receipt.reason === 'running') {
-          reject(new Error(`deferred:${receipt.code ?? receipt.reason}`));
+          // 触发器明确在任何后台任务/浏览器动作之前拒绝；可以安全归还尝试预算。
+          reject(new Error(`deferred_not_started:${receipt.code ?? receipt.reason}`));
         } else {
           // 起跑前触发闸失败（人设未绑 / 联系方式缺 / 非 FB 带 --join / FB 未接线 / 平台画像失败）：
           // 携带人类可读文案（message 优先），供委托层补一张诚实失败卡（红线：绝不静默失败）。
@@ -305,10 +314,12 @@ export function createDelegatedExecutorRouter(deps: DelegatedExecutorDeps): {
       }).catch(reject);
     });
     try {
-      return commentResult(await terminal);
+      return commentResult(task, await terminal);
     } catch (err) {
       const message = (err as Error).message;
-      if (message.startsWith('deferred:')) return { kind: 'deferred', reason: message, retryAt: now() + 30_000 };
+      if (message.startsWith('deferred_not_started:')) {
+        return { kind: 'deferred', reason: message.slice('deferred_not_started:'.length), retryAt: now() + 30_000, attemptStarted: false };
+      }
       if (message === 'comment_terminal_timeout') {
         return { kind: 'submitted_unknown', reason: '评论任务已触发但未在时限内收到终态；为防重复不自动重试。' };
       }
@@ -336,10 +347,11 @@ export function createDelegatedExecutorRouter(deps: DelegatedExecutorDeps): {
       if (task.action === 'comment_batch' || task.action === 'facebook_group_comment') {
         const legacySingle = task.source === 'legacy_command' && task.targetSuccessCount === 1 &&
           task.targetConstraints.manualSingle === true;
-        return awaitComment((onResult) => deps.comments.triggerManual(task.accountId, {
+        return awaitComment(task, (onResult) => deps.comments.triggerManual(task.accountId, {
           priority: legacySingle ? 'human' : 'automatic',
           manualOverride: legacySingle,
           force: legacySingle && task.targetConstraints.force === true,
+          injectContact: task.targetConstraints.injectContact === true,
           approvalMode: commentApprovalMode(task),
           // 命令来源会话 → 审批卡与终态卡都回来源会话（私聊 / 群）；无来源会话 → 回落账号团队群 → 默认群。
           ...(task.originChatId ? { originChatId: task.originChatId } : {}),
@@ -354,7 +366,7 @@ export function createDelegatedExecutorRouter(deps: DelegatedExecutorDeps): {
         const noteId = constraintString(task, 'noteId');
         const title = constraintString(task, 'title');
         if (!noteId || !title) return { kind: 'failed', reason: 'curated_target_snapshot_missing', retryable: false };
-        return awaitComment((onResult) => deps.comments.triggerTargeted(task.accountId, { noteId, title }, {
+        return awaitComment(task, (onResult) => deps.comments.triggerTargeted(task.accountId, { noteId, title }, {
           priority: 'automatic',
           approvalMode: commentApprovalMode(task),
           ...(task.originChatId ? { originChatId: task.originChatId } : {}),
