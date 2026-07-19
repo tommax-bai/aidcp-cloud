@@ -27,6 +27,8 @@ import { CuratedContentUnavailableError } from '../cache/curated-content-store.j
 import type { ResolvedBinding } from './client-user-store.js';
 import type { UiSlowStartPayload } from '../comm/protocol.js';
 import type { PendingPublishPreview, PublishLogStore } from '../publish-agent/publish-log-store.js';
+import type { PersonaAutoFillService } from '../agents/persona-auto-fill.js';
+import { isWritingLanguage } from '../soul/writing-language.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -61,6 +63,8 @@ export interface ClientAuthDeps {
     >;
   };
   onOffboardCreated?: (offboard: ClientOffboardView) => Promise<void>;
+  /** 客户只提交批次意图；环境/账号/人设状态均由 Cloud 自行解析。 */
+  personaAutoFill?: Pick<PersonaAutoFillService, 'createRun'>;
 }
 
 export interface ClientAuthConfig {
@@ -348,6 +352,48 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
     if (method === 'GET' && url === '/my-environments') {
       const scope = await deps.store.listEnvScope(userId);
       sendJson(res, 200, { environments: scope.map((s) => ({ envKey: s.envKey, label: s.label, platform: s.platform })) });
+      return;
+    }
+
+    if (method === 'POST' && url === '/persona-auto-fill/runs') {
+      if (!deps.personaAutoFill) {
+        sendJson(res, 503, { error: 'persona_auto_fill_unavailable' });
+        return;
+      }
+      const idempotencyHeader = req.headers['idempotency-key'];
+      const idempotencyKey = typeof idempotencyHeader === 'string' ? idempotencyHeader.trim() : '';
+      if (!idempotencyKey || idempotencyKey.length > 128 || !/^[A-Za-z0-9._:-]+$/.test(idempotencyKey)) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_idempotency_key' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const raw = body as Record<string, unknown>;
+      const allowed = new Set(['platform', 'strategy', 'writingLanguage']);
+      if (Object.keys(raw).some((key) => !allowed.has(key)) || raw.platform !== 'facebook' ||
+          raw.strategy !== 'facebook_auto_v1' || !isWritingLanguage(raw.writingLanguage)) {
+        // accountId/envKey 等客户端选择器明确不在契约内；Cloud 必须自行快照与解析。
+        sendJson(res, 422, { error: 'validation_failed', reason: 'invalid_persona_auto_fill_intent' });
+        return;
+      }
+      const result = await deps.personaAutoFill.createRun({
+        userId,
+        idempotencyKey,
+        writingLanguage: raw.writingLanguage,
+      });
+      sendJson(res, result.idempotent ? 200 : 201, {
+        data: { runId: result.run.runId, state: result.run.state, idempotent: result.idempotent },
+        meta: { requestId: randomUUID(), asOf: Date.now() },
+      });
       return;
     }
 

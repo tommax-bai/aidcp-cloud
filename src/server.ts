@@ -67,6 +67,7 @@ import type { CommentApprovalNoticeInput, CommentApprovalPort } from './agents/c
 import type { BaseRole } from './agents/base-role.js';
 import { CommentSearchTermGenerator, type RoleLlmLike } from './agents/comment-search-term-generator.js';
 import { PersonaGenerator } from './agents/persona-generator.js';
+import { PersonaAutoFillService } from './agents/persona-auto-fill.js';
 import { CommentTargetPicker } from './agents/comment-target-picker.js';
 import { buildCommentApprovalCard } from './feishu/comment-approval-card.js';
 import { buildCommandResultCard } from './feishu/cards.js';
@@ -218,6 +219,7 @@ import { categoryOf, type ThinkingMode } from './config/role-catalog.js';
 // 账号人设（change account-persona-config，stream F）：按账号可配 + 热加载，回落打包 soul.yaml 不 brick。
 import { PersonaStore, createPersonaResolver } from './config/persona-store.js';
 import { createPersonaPanel } from './config/persona-facade.js';
+import { PersonaAutoFillStore } from './config/persona-auto-fill-store.js';
 // 安全限额（change safety-quota-config，stream D）：三档×动作×三窗口限额数字后台可改+热加载，缺值回落写死默认。
 import { QuotaConfigStore } from './config/quota-config-store.js';
 import { createQuotaConfigPanel } from './config/quota-config-facade.js';
@@ -1234,6 +1236,15 @@ async function main(): Promise<void> {
       (err as Error).message,
     );
   }
+  let personaAutoFillStore: PersonaAutoFillStore | undefined;
+  try {
+    const store = new PersonaAutoFillStore();
+    await store.init();
+    personaAutoFillStore = store;
+    console.log('[aidcp-cloud] Facebook 人设自动补齐任务存储已就绪');
+  } catch (err) {
+    console.warn('[aidcp-cloud] Facebook 人设自动补齐任务存储初始化失败，该能力禁用:', (err as Error).message);
+  }
   // 首作新人状态（change persona-first-post-onboarding）：账号首次绑定时只建一次，后续解绑/更新不重置。
   // 存储不可用时不展示带自动生成承诺的引导；普通人设/浏览/发布链继续按既有逻辑工作。
   let firstPostOnboardingStore: FirstPostOnboardingStore | undefined;
@@ -1941,6 +1952,19 @@ async function main(): Promise<void> {
   // 建号自助人设生成器（change edge-persona-keyword-generation）：复用共享 llm（按角色 browse:persona_generator
   // 解析模型/温度、按 accountId 记账），生成 persona.generate 的草稿。
   const personaGenerator = new PersonaGenerator({ llm });
+  const personaAutoFill = personaAutoFillStore
+    ? new PersonaAutoFillService({
+        store: personaAutoFillStore,
+        clientUsers: clientUserStore,
+        personas: personaStore,
+        personaPanel,
+        generator: personaGenerator,
+        logger: console,
+      })
+    : undefined;
+  void personaAutoFill?.resume().catch((err) => {
+    console.warn('[persona-auto-fill] 启动恢复失败，现有 run 保持持久态、待下次启动继续:', (err as Error).message);
+  });
   const interactionConfiguredGlobalWriteEnabled = ['1', 'true', 'yes', 'on'].includes(
     (readEnvString('AIDCP_INTERACTION_WRITE_ENABLED') ?? '').toLowerCase(),
   );
@@ -2054,18 +2078,20 @@ async function main(): Promise<void> {
       // 环境登记；self-/host- 兜底 edge 不是可分配环境、跳过。env_key = 去掉 ads- 前缀（与 edge attach/过滤口径一致）。
       const eid = session.edgeId;
       if (eid && eid.startsWith('ads-')) {
+        const envKey = eid.slice('ads-'.length);
         void clientUserStore
           .registerEnvironments(
             // 环境→账号绑定（change curated-envkey-account-binding）：session.accountId 就在同一 session 对象里；
             // 该钩子按构造安全（welcome 已回发后触发、fire-and-forget + .catch），加此字段结构上不可能拒掉一次握手。
             [{
-              envKey: eid.slice('ads-'.length),
+              envKey,
               label: session.accountNickname ?? null,
               platform: session.platform ?? null,
               accountId: session.accountId ?? null,
             }],
             'auto',
           )
+          .then(() => personaAutoFill?.notifyEnvironmentBound(envKey))
           .catch((err) => console.warn(`[client-env] 自动登记环境失败 edge=${eid}: ${err instanceof Error ? err.message : String(err)}`));
       }
     },
@@ -4314,6 +4340,7 @@ async function main(): Promise<void> {
             const edgeId = server.resolveEdgeIdForAccount(offboard.accountId);
             if (edgeId) await interactionOffboarding?.dispatchPending(offboard.accountId, edgeId);
           },
+          personaAutoFill,
         },
         {
           port: clientAuthPort,

@@ -166,6 +166,30 @@ export class PersonaStore {
   }
 
   /**
+   * 自动补齐专用：只有账号当前没有 persona_config 行时才写入。
+   * PG 的唯一键是最终裁判，因此与人工设置并发时也不会覆盖对方；未插入时镜像保持不变。
+   */
+  async setIfMissing(accountId: string, personaText: string, updatedBy: string): Promise<PersonaRow | null> {
+    const { rows } = await this.pool.query<PersonaDbRow>(
+      `INSERT INTO persona_config (account_id, persona, updated_at, updated_by)
+       VALUES ($1, $2, now(), $3)
+       ON CONFLICT (account_id) DO NOTHING
+       RETURNING account_id, persona, updated_at, updated_by`,
+      [accountId, personaText, updatedBy],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    const result: PersonaRow = {
+      accountId: row.account_id,
+      persona: row.persona,
+      updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+      updatedBy: row.updated_by ?? updatedBy,
+    };
+    this.cache.set(accountId, result);
+    return result;
+  }
+
+  /**
    * 清除某账号的人设（删行 → 该账号变为「未绑人设」，浏览/发布/评论入口将诚实拒绝其运行）。
    * 写库成功才删镜像。面板 PUT 空文本会调用此方法完成显式解绑。
    */

@@ -18,7 +18,7 @@ interests:
     - "成分党"
 `;
 
-/** 内存假 store：实现 facade 用到的 getRow / listAccounts / accountExists / set / clear。 */
+/** 内存假 store：实现 facade 用到的 getRow / listAccounts / accountExists / set / setIfMissing / clear。 */
 function fakeStore(opts: { accounts?: PersonaAccount[]; override?: Record<string, string> } = {}) {
   const accounts = opts.accounts ?? [{ accountId: 'default', label: 'default' }];
   const rows = new Map<string, PersonaRow>();
@@ -30,6 +30,12 @@ function fakeStore(opts: { accounts?: PersonaAccount[]; override?: Record<string
     listAccounts: async () => accounts,
     accountExists: async (id: string) => accounts.some((a) => a.accountId === id),
     set: async (id: string, persona: string, by: string) => {
+      const row: PersonaRow = { accountId: id, persona, updatedAt: '2026-06-24T01:00:00.000Z', updatedBy: by };
+      rows.set(id, row);
+      return row;
+    },
+    setIfMissing: async (id: string, persona: string, by: string) => {
+      if (rows.has(id)) return null;
       const row: PersonaRow = { accountId: id, persona, updatedAt: '2026-06-24T01:00:00.000Z', updatedBy: by };
       rows.set(id, row);
       return row;
@@ -119,4 +125,20 @@ test('setPersona：仅真绑定成功触发 onBound（解绑 / 非法 / 未知�
   await panel.setPersona('acc1', '   ', 'a'); // 解绑 → 不触发
   await panel.setPersona('ghost', soulYaml('x'), 'a'); // 未知账号 → 不触发
   assert.deepEqual(bound, ['acc1'], '解绑/非法/未知账号均不触发 onBound（绝不误唤醒）');
+});
+
+test('setPersonaIfMissing：首次写入并触发绑定回调，已有人工人设时原子跳过', async () => {
+  const { store, rows } = fakeStore({
+    accounts: [{ accountId: 'empty', label: null }, { accountId: 'manual', label: null }],
+    override: { manual: soulYaml('人工人设') },
+  });
+  const bound: string[] = [];
+  const changed: string[] = [];
+  const panel = createPersonaPanel({ store, onBound: (id) => bound.push(id), onChanged: (id) => changed.push(id) });
+  assert.deepEqual(await panel.setPersonaIfMissing('empty', soulYaml('自动人设'), 'auto'), { ok: true, created: true });
+  assert.ok(rows.get('empty')?.persona.includes('自动人设'));
+  assert.deepEqual(await panel.setPersonaIfMissing('manual', soulYaml('不应覆盖'), 'auto'), { ok: true, created: false });
+  assert.ok(rows.get('manual')?.persona.includes('人工人设'));
+  assert.deepEqual(bound, ['empty']);
+  assert.deepEqual(changed, ['empty']);
 });

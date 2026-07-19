@@ -276,6 +276,58 @@ test('/my-environments 只返回本客户归属(N2 权威过滤)', async () => {
   );
 });
 
+test('POST /persona-auto-fill/runs 只收批次意图，拒绝账号选择器并按客户幂等', async () => {
+  const fx = makeFakeStore();
+  fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
+  const calls: Array<{ userId: string; idempotencyKey: string; writingLanguage: string }> = [];
+  const seen = new Set<string>();
+  const personaAutoFill = {
+    async createRun(input: { userId: string; idempotencyKey: string; writingLanguage: 'zh-CN' | 'en' | 'vi' }) {
+      calls.push(input);
+      const key = `${input.userId}:${input.idempotencyKey}`;
+      const idempotent = seen.has(key);
+      seen.add(key);
+      return {
+        run: { runId: 'run-public-1', userId: input.userId, idempotencyKey: input.idempotencyKey,
+          platform: 'facebook' as const, strategy: 'facebook_auto_v1' as const,
+          writingLanguage: input.writingLanguage, state: 'running' as const },
+        idempotent,
+      };
+    },
+  };
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), personaAutoFill },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const missingKey = await fetch(`${base}/persona-auto-fill/runs`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ platform: 'facebook', strategy: 'facebook_auto_v1', writingLanguage: 'zh-CN' }),
+      });
+      assert.equal(missingKey.status, 400);
+      const leakedSelector = await fetch(`${base}/persona-auto-fill/runs`, {
+        method: 'POST', headers: { ...headers, 'idempotency-key': 'batch-1' },
+        body: JSON.stringify({ platform: 'facebook', strategy: 'facebook_auto_v1', writingLanguage: 'zh-CN', accountId: 'secret-account' }),
+      });
+      assert.equal(leakedSelector.status, 422);
+
+      const issue = () => fetch(`${base}/persona-auto-fill/runs`, {
+        method: 'POST', headers: { ...headers, 'idempotency-key': 'batch-1' },
+        body: JSON.stringify({ platform: 'facebook', strategy: 'facebook_auto_v1', writingLanguage: 'zh-CN' }),
+      });
+      const first = await issue();
+      assert.equal(first.status, 201);
+      const firstBody = await first.json() as Record<string, unknown>;
+      const retry = await issue();
+      assert.equal(retry.status, 200);
+      const retryBody = await retry.json() as Record<string, unknown>;
+      assert.equal(JSON.stringify(firstBody).includes('secret-account'), false);
+      assert.equal(JSON.stringify(retryBody).includes('accountId'), false);
+      assert.deepEqual(calls.map((call) => call.userId), ['u1', 'u1']);
+    },
+  );
+});
+
 test('control-bootstrap 只为已归属且已绑定环境返回最小账号引导', async () => {
   const fx = makeFakeStore();
   fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });

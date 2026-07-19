@@ -36,6 +36,7 @@ function fakePool(opts: { accounts?: Array<{ account_id: string; label: string |
       if (sql.includes('INSERT INTO persona_config')) {
         if (failWrite) throw new Error('db down');
         const [accountId, persona, updatedBy] = params as [string, string, string];
+        if (sql.includes('DO NOTHING') && rows.has(accountId)) return { rows: [] };
         const row = { account_id: accountId, persona, updated_at: '2026-06-24T01:00:00.000Z', updated_by: updatedBy };
         rows.set(accountId, row);
         return { rows: [row] };
@@ -75,6 +76,18 @@ test('set 后 getForAccount 即时热加载（无需重启）+ 回真态含审�
   assert.equal(row.updatedBy, 'alice');
   assert.ok(row.updatedAt);
   assert.ok(store.getForAccount('default')?.includes('账号A'));
+});
+
+test('setIfMissing：首次原子写入；已有行时跳过且绝不覆盖', async () => {
+  const { pool } = fakePool();
+  const store = new PersonaStore({ pool });
+  await store.init();
+  const created = await store.setIfMissing('default', soulYaml('自动生成'), 'auto');
+  assert.equal(created?.updatedBy, 'auto');
+  const skipped = await store.setIfMissing('default', soulYaml('不应覆盖'), 'auto');
+  assert.equal(skipped, null);
+  assert.ok(store.getForAccount('default')?.includes('自动生成'));
+  assert.equal(store.getForAccount('default')?.includes('不应覆盖'), false);
 });
 
 test('结构化 mandatory_interactions 经 store 热加载后由 resolver 原样解析', async () => {

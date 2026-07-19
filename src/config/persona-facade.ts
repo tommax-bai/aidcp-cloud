@@ -17,6 +17,7 @@ import type {
   PanelPersonaConfig,
   PersonaConfigCatalogView,
   PersonaConfigRowView,
+  PersonaCreateIfMissingResult,
   PersonaDetailView,
   PersonaSetResult,
 } from '../panel/types.js';
@@ -123,6 +124,29 @@ export function createPersonaPanel(deps: PersonaFacadeDeps): PanelPersonaConfig 
         /* best-effort：不影响绑定回真态 */
       }
       return { ok: true, view: await buildCatalog() };
+    },
+    setPersonaIfMissing: async (accountId, persona, updatedBy): Promise<PersonaCreateIfMissingResult> => {
+      if (!(await deps.store.accountExists(accountId))) {
+        return { ok: false, reason: 'unknown_account' };
+      }
+      try {
+        loadSoulFromYaml(persona);
+      } catch {
+        return { ok: false, reason: 'persona_invalid' };
+      }
+      const row = await deps.store.setIfMissing(accountId, persona, updatedBy);
+      if (!row) return { ok: true, created: false };
+      try {
+        deps.onBound?.(accountId);
+      } catch {
+        /* best-effort：不影响自动补齐的持久化结果 */
+      }
+      try {
+        deps.onChanged?.(accountId);
+      } catch {
+        /* best-effort：不影响自动补齐的持久化结果 */
+      }
+      return { ok: true, created: true };
     },
   };
 }

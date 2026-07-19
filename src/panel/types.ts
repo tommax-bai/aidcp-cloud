@@ -746,6 +746,11 @@ export type PersonaSetResult =
   | { ok: true; view: PersonaConfigCatalogView }
   | { ok: false; reason: 'unknown_account' | 'persona_invalid' };
 
+/** 自动补齐专用结果：created=false 表示账号已经有人设，调用方必须按跳过处理。 */
+export type PersonaCreateIfMissingResult =
+  | { ok: true; created: boolean }
+  | { ok: false; reason: 'unknown_account' | 'persona_invalid' };
+
 export interface PanelPersonaConfig {
   /** 账号 + 各自人设生效值/来源/审计（列出所有账号，含未绑定者）。 */
   getCatalog(): Promise<PersonaConfigCatalogView>;
@@ -756,6 +761,14 @@ export interface PanelPersonaConfig {
    * 写后回真态目录。
    */
   setPersona(accountId: string, persona: string, updatedBy: string): Promise<PersonaSetResult>;
+  /**
+   * 仅当账号仍无人设时原子写入。用于云端自动补齐，永不覆盖人工设置或并发先写入的人设。
+   */
+  setPersonaIfMissing(
+    accountId: string,
+    persona: string,
+    updatedBy: string,
+  ): Promise<PersonaCreateIfMissingResult>;
 }
 
 // ── 安全限额配置（change safety-quota-config，stream D）──────────────────────────
