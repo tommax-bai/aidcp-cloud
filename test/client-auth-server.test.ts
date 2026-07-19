@@ -276,6 +276,74 @@ test('/my-environments 只返回本客户归属(N2 权威过滤)', async () => {
   );
 });
 
+test('control-bootstrap 只为已归属且已绑定环境返回最小账号引导', async () => {
+  const fx = makeFakeStore();
+  fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
+  fx.scope.set('u1', [{ envKey: 'p1', label: 'owned', platform: 'xiaohongshu', source: 'admin', assignedAt: 0 }]);
+  fx.bindings.set('p1', ACCT_P1);
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter() },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const response = await fetch(`${base}/environments/p1/control-bootstrap`, { headers });
+      assert.equal(response.status, 200);
+      const body = await response.json() as { data: Record<string, unknown> };
+      assert.deepEqual(body.data, { envKey: 'p1', accountId: ACCT_P1 });
+      assert.deepEqual(Object.keys(body.data).sort(), ['accountId', 'envKey']);
+    },
+  );
+});
+
+test('control-bootstrap 对越权、未绑定与跨客户冲突保持可区分 fail-closed', async () => {
+  const fx = makeFakeStore();
+  fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
+  fx.scope.set('u1', [
+    { envKey: 'unknown', label: null, platform: 'facebook', source: 'admin', assignedAt: 0 },
+    { envKey: 'contended', label: null, platform: 'facebook', source: 'admin', assignedAt: 0 },
+  ]);
+  fx.scope.set('u2', [{ envKey: 'other-owner', label: null, platform: 'facebook', source: 'admin', assignedAt: 0 }]);
+  fx.bindings.set('contended', ACCT_P1);
+  fx.bindings.set('other-owner', ACCT_P1);
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter() },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      for (const [envKey, status, error] of [
+        ['not-owned', 403, 'environment_not_owned'],
+        ['unknown', 409, 'binding_unknown'],
+        ['contended', 409, 'binding_conflict'],
+      ] as const) {
+        const response = await fetch(`${base}/environments/${envKey}/control-bootstrap`, { headers });
+        assert.equal(response.status, status, envKey);
+        assert.deepEqual(await response.json(), { error });
+      }
+    },
+  );
+});
+
+test('control-bootstrap 在绑定存储不可用和无客户 token 时拒绝', async () => {
+  const fx = makeFakeStore();
+  fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
+  const unavailableStore = {
+    ...(fx.store as unknown as Record<string, unknown>),
+    async resolveBoundAccountForEnv() { return { ok: false as const, reason: 'binding_unavailable' as const }; },
+  } as unknown as ClientUserStore;
+  await withServer(
+    { store: unavailableStore, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter() },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const unavailable = await fetch(`${base}/environments/p1/control-bootstrap`, { headers });
+      assert.equal(unavailable.status, 503);
+      assert.deepEqual(await unavailable.json(), { error: 'binding_unavailable' });
+      const anonymous = await fetch(`${base}/environments/p1/control-bootstrap`);
+      assert.equal(anonymous.status, 401);
+    },
+  );
+});
+
 test('官方新建 intent 可原子完成当前客户归属，重试幂等且旧 attach 仍拒绝', async () => {
   const fx = makeFakeStore();
   fx.users.set('alice', { userId: 'user-a', key: 'ck_alice', status: 'enabled' });

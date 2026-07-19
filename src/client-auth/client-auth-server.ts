@@ -351,6 +351,31 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       return;
     }
 
+    // 无浏览器控制面启动引导（change browser-slot-cloud-presence）。这是一个刻意收窄的 env-scoped 读：
+    // - 客户 token / ownership / binding conflict 均由既有权威链复核；
+    // - 只返回当前环境的 envKey + accountId，不把所有环境账号塞进 /my-environments；
+    // - 只用于建立随后仍会被真实浏览器身份复核的控制面，绝不创建/修改/推断绑定。
+    const controlBootstrapMatch = /^\/environments\/([^/]+)\/control-bootstrap$/.exec(url);
+    if (method === 'GET' && controlBootstrapMatch) {
+      let envKey: string;
+      try {
+        envKey = decodeURIComponent(controlBootstrapMatch[1]).trim();
+      } catch {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_env_key' });
+        return;
+      }
+      const bound = await deps.store.resolveBoundAccountForEnv(userId, envKey);
+      if (!bound.ok) {
+        sendBindingFailure(res, bound.reason);
+        return;
+      }
+      sendJson(res, 200, {
+        data: { envKey, accountId: bound.accountId },
+        meta: { requestId: randomUUID(), asOf: Date.now() },
+      });
+      return;
+    }
+
     // 环境级慢启动开关（change environment-level-slow-start）：env-scoped、离线且未绑定账号也可配置。
     //
     // **绝不走 WS 写**（仍成立）：ws-server 全文无鉴权，session.accountId 是边缘 hello 里自报的字符串
