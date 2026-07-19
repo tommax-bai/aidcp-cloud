@@ -1959,7 +1959,6 @@ async function main(): Promise<void> {
         clientUsers: clientUserStore,
         personas: personaStore,
         personaPanel,
-        generator: personaGenerator,
         logger: console,
       })
     : undefined;

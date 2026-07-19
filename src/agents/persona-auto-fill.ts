@@ -1,58 +1,42 @@
-/** Cloud-owned Facebook 人设自动补齐编排。 */
-import crypto from 'node:crypto';
-import type { PersonaGenerator } from './persona-generator.js';
+/** Cloud-owned Facebook 已选人设补齐编排。 */
 import type { ClientUserStore } from '../client-auth/client-user-store.js';
 import type { PersonaStore } from '../config/persona-store.js';
 import type { PanelPersonaConfig } from '../panel/types.js';
-import type { WritingLanguage } from '../soul/types.js';
+import { loadSoulFromYaml } from '../soul/index.js';
 import type {
   PersonaAutoFillRun,
   PersonaAutoFillStore,
   PersonaAutoFillTarget,
 } from '../config/persona-auto-fill-store.js';
 
-const FACEBOOK_DIRECTIONS = [
-  ['生活方式', '居家日常', '生活好物'],
-  ['美食探店', '家常料理', '咖啡甜品'],
-  ['旅行见闻', '周末出游', '城市散步'],
-  ['运动健身', '健康习惯', '户外活动'],
-  ['宠物日常', '养宠经验', '萌宠内容'],
-  ['亲子生活', '家庭陪伴', '育儿日常'],
-  ['数码科技', '实用工具', '产品体验'],
-  ['职场成长', '效率方法', '工作日常'],
-  ['穿搭审美', '日常搭配', '个人风格'],
-  ['影视娱乐', '音乐分享', '文化热点'],
-  ['摄影记录', '构图灵感', '影像器材'],
-  ['汽车生活', '用车体验', '自驾出行'],
-] as const;
-
 export interface PersonaAutoFillServiceDeps {
   store: PersonaAutoFillStore;
   clientUsers: Pick<ClientUserStore, 'resolveBoundAccountForEnv'>;
   personas: Pick<PersonaStore, 'getForAccount'>;
   personaPanel: Pick<PanelPersonaConfig, 'setPersonaIfMissing'>;
-  generator: Pick<PersonaGenerator, 'generate'>;
   logger?: Pick<Console, 'log' | 'warn'>;
-  maxTargetAttempts?: number;
 }
 
 export class PersonaAutoFillService {
   private readonly inflightTargets = new Map<string, Promise<void>>();
   private readonly inflightRuns = new Map<string, Promise<void>>();
   private readonly logger: Pick<Console, 'log' | 'warn'>;
-  private readonly maxTargetAttempts: number;
 
   constructor(private readonly deps: PersonaAutoFillServiceDeps) {
     this.logger = deps.logger ?? console;
-    this.maxTargetAttempts = Math.max(1, deps.maxTargetAttempts ?? 2);
   }
 
   async createRun(input: {
     userId: string;
     idempotencyKey: string;
-    writingLanguage: WritingLanguage;
+    soulYaml: string;
   }): Promise<{ run: PersonaAutoFillRun; idempotent: boolean }> {
-    const result = await this.deps.store.createRun(input);
+    const soul = loadSoulFromYaml(input.soulYaml);
+    if (!soul.writing_language) throw new Error('facebook_writing_language_required');
+    const result = await this.deps.store.createRun({
+      ...input,
+      writingLanguage: soul.writing_language,
+    });
     if (result.run.state === 'running') this.scheduleRun(result.run.runId);
     return { run: result.run, idempotent: !result.created };
   }
@@ -79,7 +63,6 @@ export class PersonaAutoFillService {
   }
 
   private async processRun(runId: string): Promise<void> {
-    // generator 自身有有界重试；target 层再至多重复一次，持久 attempts 防进程重启后无限调用。
     for (;;) {
       const pending = await this.deps.store.listPendingForRun(runId, 20);
       if (!pending.length) break;
@@ -125,27 +108,15 @@ export class PersonaAutoFillService {
     const claimed = await this.deps.store.claimTarget(target.runId, target.envKey, accountId);
     if (!claimed) return;
 
-    const direction = this.directionFor(accountId);
-    const generated = await this.deps.generator.generate({
-      accountId,
-      keywordSelections: [...direction, 'like_affinity:normal'],
-      diversitySeed: `facebook_auto_v1:${accountId}`,
-      writingLanguage: claimed.writingLanguage,
-    });
-    if (!generated.ok) {
-      const terminal = claimed.attempts >= this.maxTargetAttempts;
-      await this.deps.store.markTarget(
-        claimed.runId,
-        claimed.envKey,
-        terminal ? 'failed' : 'pending',
-        generated.reason,
-      );
+    // 旧 facebook_auto_v1 运行没有用户确认模板；部署后必须停止模型行为并具名失败。
+    if (claimed.strategy !== 'selected_persona_v1' || !claimed.soulYaml) {
+      await this.deps.store.markTarget(claimed.runId, claimed.envKey, 'failed', 'selected_persona_required');
       return;
     }
     const stored = await this.deps.personaPanel.setPersonaIfMissing(
       accountId,
-      generated.soulYaml,
-      `persona-auto-fill:${claimed.runId}`,
+      claimed.soulYaml,
+      `persona-selected-fill:${claimed.runId}`,
     );
     if (!stored.ok) {
       await this.deps.store.markTarget(claimed.runId, claimed.envKey, 'failed', stored.reason);
@@ -157,11 +128,6 @@ export class PersonaAutoFillService {
       stored.created ? 'succeeded' : 'skipped_existing',
       stored.created ? null : 'persona_won_concurrent_race',
     );
-  }
-
-  private directionFor(accountId: string): readonly string[] {
-    const digest = crypto.createHash('sha256').update(`facebook_auto_v1:${accountId}`, 'utf8').digest();
-    return FACEBOOK_DIRECTIONS[digest.readUInt32BE(0) % FACEBOOK_DIRECTIONS.length];
   }
 
   private message(err: unknown): string {

@@ -12,6 +12,7 @@ import type { WritingLanguage } from '../soul/types.js';
 const { Pool } = pg;
 
 export type PersonaAutoFillRunState = 'running' | 'completed' | 'completed_with_failures';
+export type PersonaAutoFillStrategy = 'facebook_auto_v1' | 'selected_persona_v1';
 export type PersonaAutoFillTargetState =
   | 'waiting_binding'
   | 'pending'
@@ -25,8 +26,9 @@ export interface PersonaAutoFillRun {
   userId: string;
   idempotencyKey: string;
   platform: 'facebook';
-  strategy: 'facebook_auto_v1';
+  strategy: PersonaAutoFillStrategy;
   writingLanguage: WritingLanguage;
+  soulYaml: string | null;
   state: PersonaAutoFillRunState;
 }
 
@@ -35,7 +37,9 @@ export interface PersonaAutoFillTarget {
   userId: string;
   envKey: string;
   accountId: string | null;
+  strategy: PersonaAutoFillStrategy;
   writingLanguage: WritingLanguage;
+  soulYaml: string | null;
   state: PersonaAutoFillTargetState;
   attempts: number;
   reason: string | null;
@@ -47,8 +51,9 @@ CREATE TABLE IF NOT EXISTS persona_auto_fill_runs (
   user_id           TEXT        NOT NULL REFERENCES client_users(user_id) ON DELETE CASCADE,
   idempotency_key   TEXT        NOT NULL,
   platform          TEXT        NOT NULL CHECK (platform = 'facebook'),
-  strategy          TEXT        NOT NULL CHECK (strategy = 'facebook_auto_v1'),
+  strategy          TEXT        NOT NULL CHECK (strategy IN ('facebook_auto_v1','selected_persona_v1')),
   writing_language  TEXT        NOT NULL CHECK (writing_language IN ('zh-CN','en','vi')),
+  persona_soul_yaml TEXT,
   state             TEXT        NOT NULL DEFAULT 'running'
     CHECK (state IN ('running','completed','completed_with_failures')),
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -71,6 +76,14 @@ CREATE INDEX IF NOT EXISTS persona_auto_fill_targets_env_idx
   ON persona_auto_fill_targets (env_key, state);
 CREATE INDEX IF NOT EXISTS persona_auto_fill_targets_run_state_idx
   ON persona_auto_fill_targets (run_id, state);
+
+ALTER TABLE persona_auto_fill_runs
+  ADD COLUMN IF NOT EXISTS persona_soul_yaml TEXT;
+ALTER TABLE persona_auto_fill_runs
+  DROP CONSTRAINT IF EXISTS persona_auto_fill_runs_strategy_check;
+ALTER TABLE persona_auto_fill_runs
+  ADD CONSTRAINT persona_auto_fill_runs_strategy_check
+  CHECK (strategy IN ('facebook_auto_v1','selected_persona_v1'));
 `;
 
 export interface PersonaAutoFillStoreOptions {
@@ -82,8 +95,9 @@ interface RunDbRow {
   user_id: string;
   idempotency_key: string;
   platform: 'facebook';
-  strategy: 'facebook_auto_v1';
+  strategy: PersonaAutoFillStrategy;
   writing_language: WritingLanguage;
+  persona_soul_yaml: string | null;
   state: PersonaAutoFillRunState;
 }
 
@@ -103,6 +117,7 @@ function mapRun(row: RunDbRow): PersonaAutoFillRun {
     platform: row.platform,
     strategy: row.strategy,
     writingLanguage: row.writing_language,
+    soulYaml: row.persona_soul_yaml,
     state: row.state,
   };
 }
@@ -113,7 +128,9 @@ function mapTarget(row: TargetDbRow): PersonaAutoFillTarget {
     userId: row.user_id,
     envKey: row.env_key,
     accountId: row.account_id,
+    strategy: row.strategy,
     writingLanguage: row.writing_language,
+    soulYaml: row.persona_soul_yaml,
     state: row.target_state,
     attempts: Number(row.attempts),
     reason: row.reason,
@@ -121,7 +138,7 @@ function mapTarget(row: TargetDbRow): PersonaAutoFillTarget {
 }
 
 const TARGET_SELECT = `
-  SELECT t.run_id, r.user_id, r.idempotency_key, r.platform, r.strategy, r.writing_language,
+  SELECT t.run_id, r.user_id, r.idempotency_key, r.platform, r.strategy, r.writing_language, r.persona_soul_yaml,
          r.state, t.env_key, t.account_id, t.state AS target_state, t.attempts, t.reason
     FROM persona_auto_fill_targets t
     JOIN persona_auto_fill_runs r ON r.run_id=t.run_id`;
@@ -142,6 +159,7 @@ export class PersonaAutoFillStore {
     userId: string;
     idempotencyKey: string;
     writingLanguage: WritingLanguage;
+    soulYaml: string;
   }): Promise<{ run: PersonaAutoFillRun; created: boolean }> {
     const client = await this.pool.connect();
     try {
@@ -149,18 +167,18 @@ export class PersonaAutoFillStore {
       const runId = crypto.randomUUID();
       const inserted = await client.query<RunDbRow>(
         `INSERT INTO persona_auto_fill_runs
-           (run_id,user_id,idempotency_key,platform,strategy,writing_language,state,created_at,updated_at)
-         SELECT $1,$2,$3,'facebook','facebook_auto_v1',$4,'running',now(),now()
+           (run_id,user_id,idempotency_key,platform,strategy,writing_language,persona_soul_yaml,state,created_at,updated_at)
+         SELECT $1,$2,$3,'facebook','selected_persona_v1',$4,$5,'running',now(),now()
            FROM client_users u WHERE u.user_id=$2 AND u.status='enabled'
          ON CONFLICT (user_id,idempotency_key) DO NOTHING
-         RETURNING run_id,user_id,idempotency_key,platform,strategy,writing_language,state`,
-        [runId, input.userId, input.idempotencyKey, input.writingLanguage],
+         RETURNING run_id,user_id,idempotency_key,platform,strategy,writing_language,persona_soul_yaml,state`,
+        [runId, input.userId, input.idempotencyKey, input.writingLanguage, input.soulYaml],
       );
       const created = Boolean(inserted.rows[0]);
       let row = inserted.rows[0];
       if (!row) {
         const existing = await client.query<RunDbRow>(
-          `SELECT run_id,user_id,idempotency_key,platform,strategy,writing_language,state
+          `SELECT run_id,user_id,idempotency_key,platform,strategy,writing_language,persona_soul_yaml,state
              FROM persona_auto_fill_runs WHERE user_id=$1 AND idempotency_key=$2`,
           [input.userId, input.idempotencyKey],
         );
@@ -181,7 +199,7 @@ export class PersonaAutoFillStore {
         );
         await this.refreshRunStateWith(client, row.run_id);
         const refreshed = await client.query<RunDbRow>(
-          `SELECT run_id,user_id,idempotency_key,platform,strategy,writing_language,state
+          `SELECT run_id,user_id,idempotency_key,platform,strategy,writing_language,persona_soul_yaml,state
              FROM persona_auto_fill_runs WHERE run_id=$1`,
           [row.run_id],
         );
@@ -226,7 +244,7 @@ export class PersonaAutoFillStore {
           WHERE run_id=$1 AND env_key=$2 AND state IN ('pending','waiting_binding')
          RETURNING *
        )
-       SELECT c.run_id,r.user_id,r.idempotency_key,r.platform,r.strategy,r.writing_language,r.state,
+       SELECT c.run_id,r.user_id,r.idempotency_key,r.platform,r.strategy,r.writing_language,r.persona_soul_yaml,r.state,
               c.env_key,c.account_id,c.state AS target_state,c.attempts,c.reason
          FROM claimed c JOIN persona_auto_fill_runs r ON r.run_id=c.run_id`,
       [runId, envKey, accountId],

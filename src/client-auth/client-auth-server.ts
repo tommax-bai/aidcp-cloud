@@ -29,9 +29,11 @@ import type { UiSlowStartPayload } from '../comm/protocol.js';
 import type { PendingPublishPreview, PublishLogStore } from '../publish-agent/publish-log-store.js';
 import type { PersonaAutoFillService } from '../agents/persona-auto-fill.js';
 import { isWritingLanguage } from '../soul/writing-language.js';
+import { loadSoulFromYaml } from '../soul/index.js';
 import type { RiskStatus } from '../risk/types.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
+const MAX_SELECTED_PERSONA_BYTES = 32 * 1024;
 
 export interface ClientAuthDeps {
   store: ClientUserStore;
@@ -71,7 +73,7 @@ export interface ClientAuthDeps {
     resumeEdgesForAccount(accountId: string): number;
   };
   onOffboardCreated?: (offboard: ClientOffboardView) => Promise<void>;
-  /** 客户只提交批次意图；环境/账号/人设状态均由 Cloud 自行解析。 */
+  /** 客户只提交已确认人设；环境/账号/人设缺失状态均由 Cloud 自行解析。 */
   personaAutoFill?: Pick<PersonaAutoFillService, 'createRun'>;
 }
 
@@ -489,17 +491,24 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         return;
       }
       const raw = body as Record<string, unknown>;
-      const allowed = new Set(['platform', 'strategy', 'writingLanguage']);
+      const allowed = new Set(['platform', 'soulYaml']);
       if (Object.keys(raw).some((key) => !allowed.has(key)) || raw.platform !== 'facebook' ||
-          raw.strategy !== 'facebook_auto_v1' || !isWritingLanguage(raw.writingLanguage)) {
-        // accountId/envKey 等客户端选择器明确不在契约内；Cloud 必须自行快照与解析。
+          typeof raw.soulYaml !== 'string' || !raw.soulYaml.trim() ||
+          Buffer.byteLength(raw.soulYaml, 'utf8') > MAX_SELECTED_PERSONA_BYTES) {
         sendJson(res, 422, { error: 'validation_failed', reason: 'invalid_persona_auto_fill_intent' });
+        return;
+      }
+      try {
+        const soul = loadSoulFromYaml(raw.soulYaml);
+        if (!isWritingLanguage(soul.writing_language)) throw new Error('writing_language_required');
+      } catch {
+        sendJson(res, 422, { error: 'validation_failed', reason: 'invalid_selected_persona' });
         return;
       }
       const result = await deps.personaAutoFill.createRun({
         userId,
         idempotencyKey,
-        writingLanguage: raw.writingLanguage,
+        soulYaml: raw.soulYaml,
       });
       sendJson(res, result.idempotent ? 200 : 201, {
         data: { runId: result.run.runId, state: result.run.state, idempotent: result.idempotent },

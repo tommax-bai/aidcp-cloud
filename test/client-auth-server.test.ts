@@ -276,21 +276,22 @@ test('/my-environments 只返回本客户归属(N2 权威过滤)', async () => {
   );
 });
 
-test('POST /persona-auto-fill/runs 只收批次意图，拒绝账号选择器并按客户幂等', async () => {
+test('POST /persona-auto-fill/runs 只收已确认人设，拒绝目标选择器/自动策略并按客户幂等', async () => {
   const fx = makeFakeStore();
   fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
-  const calls: Array<{ userId: string; idempotencyKey: string; writingLanguage: string }> = [];
+  const selectedSoul = `identity:\n  name: "旅行模板"\n  role: "旅行分享者"\n  background: "关注周末出游"\n  tone: "亲切"\nwriting_language: "zh-CN"\ninterests:\n  primary:\n    - "旅行"\n  secondary: []\n  seed_keywords:\n    - "周末出游"\n`;
+  const calls: Array<{ userId: string; idempotencyKey: string; soulYaml: string }> = [];
   const seen = new Set<string>();
   const personaAutoFill = {
-    async createRun(input: { userId: string; idempotencyKey: string; writingLanguage: 'zh-CN' | 'en' | 'vi' }) {
+    async createRun(input: { userId: string; idempotencyKey: string; soulYaml: string }) {
       calls.push(input);
       const key = `${input.userId}:${input.idempotencyKey}`;
       const idempotent = seen.has(key);
       seen.add(key);
       return {
         run: { runId: 'run-public-1', userId: input.userId, idempotencyKey: input.idempotencyKey,
-          platform: 'facebook' as const, strategy: 'facebook_auto_v1' as const,
-          writingLanguage: input.writingLanguage, state: 'running' as const },
+          platform: 'facebook' as const, strategy: 'selected_persona_v1' as const,
+          writingLanguage: 'zh-CN' as const, soulYaml: input.soulYaml, state: 'running' as const },
         idempotent,
       };
     },
@@ -302,18 +303,30 @@ test('POST /persona-auto-fill/runs 只收批次意图，拒绝账号选择器并
       const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
       const missingKey = await fetch(`${base}/persona-auto-fill/runs`, {
         method: 'POST', headers,
-        body: JSON.stringify({ platform: 'facebook', strategy: 'facebook_auto_v1', writingLanguage: 'zh-CN' }),
+        body: JSON.stringify({ platform: 'facebook', soulYaml: selectedSoul }),
       });
       assert.equal(missingKey.status, 400);
       const leakedSelector = await fetch(`${base}/persona-auto-fill/runs`, {
         method: 'POST', headers: { ...headers, 'idempotency-key': 'batch-1' },
-        body: JSON.stringify({ platform: 'facebook', strategy: 'facebook_auto_v1', writingLanguage: 'zh-CN', accountId: 'secret-account' }),
+        body: JSON.stringify({ platform: 'facebook', soulYaml: selectedSoul, accountId: 'secret-account' }),
       });
       assert.equal(leakedSelector.status, 422);
 
+      const oldAutoIntent = await fetch(`${base}/persona-auto-fill/runs`, {
+        method: 'POST', headers: { ...headers, 'idempotency-key': 'batch-old' },
+        body: JSON.stringify({ platform: 'facebook', strategy: 'facebook_auto_v1', writingLanguage: 'zh-CN' }),
+      });
+      assert.equal(oldAutoIntent.status, 422);
+
+      const invalidPersona = await fetch(`${base}/persona-auto-fill/runs`, {
+        method: 'POST', headers: { ...headers, 'idempotency-key': 'batch-invalid' },
+        body: JSON.stringify({ platform: 'facebook', soulYaml: 'identity: {}' }),
+      });
+      assert.equal(invalidPersona.status, 422);
+
       const issue = () => fetch(`${base}/persona-auto-fill/runs`, {
         method: 'POST', headers: { ...headers, 'idempotency-key': 'batch-1' },
-        body: JSON.stringify({ platform: 'facebook', strategy: 'facebook_auto_v1', writingLanguage: 'zh-CN' }),
+        body: JSON.stringify({ platform: 'facebook', soulYaml: selectedSoul }),
       });
       const first = await issue();
       assert.equal(first.status, 201);
@@ -324,6 +337,7 @@ test('POST /persona-auto-fill/runs 只收批次意图，拒绝账号选择器并
       assert.equal(JSON.stringify(firstBody).includes('secret-account'), false);
       assert.equal(JSON.stringify(retryBody).includes('accountId'), false);
       assert.deepEqual(calls.map((call) => call.userId), ['u1', 'u1']);
+      assert.deepEqual(new Set(calls.map((call) => call.soulYaml)), new Set([selectedSoul]));
     },
   );
 });
