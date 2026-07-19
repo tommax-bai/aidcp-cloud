@@ -2026,7 +2026,14 @@ async function main(): Promise<void> {
     },
     // 握手注册完成（连接已可被推送、welcome 已回）→ 回填该账号的陪伴界面快照（昵称/最近发布/在途候审）。
     onEdgeRegistered: (session) => {
-      void uiSnapshot?.pushHelloSnapshot(session.accountId, session.edgeId);
+      // welcome 是传输提交点：只有走到这里的新连接才可顶替同 edgeId 旧连接并激活浏览业务。
+      // 视频号由注册表保持 transport-only；无人设 XHS/FB 由启动闸保持在线但不启动会话。
+      runtimes?.onWelcomed(session);
+      void uiSnapshot?.pushHelloSnapshot(session.accountId, session.edgeId).catch((err) => {
+        console.warn(
+          `[ui-snapshot] hello 快照回填失败（连接保持在线） account=${session.accountId ?? '-'} edge=${session.edgeId ?? '-'}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
       if (session.accountId && session.edgeId) {
         void (async () => {
           const capabilities = new Set(session.capabilities ?? []);

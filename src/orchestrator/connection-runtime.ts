@@ -16,16 +16,24 @@ import type { RoleDispatcher, SessionBudgetAction, SessionUsageSnapshot } from '
 import type { EdgeSession } from '../comm/ws-server.js';
 import type { ResumeGateVerdict } from '../comm/browser-standby.js';
 import type { RiskController } from '../risk/index.js';
-import { normalizePlatformId, type PlatformId } from '../platform/index.js';
+import {
+  isOrchestrationCapabilitySupported,
+  normalizePlatformId,
+  type PlatformId,
+} from '../platform/index.js';
 
 /** 单连接运行时束。 */
 export interface ConnectionRuntime {
   sessionId: string;
   edgeId?: string;
   accountId: string;
+  platform: PlatformId;
+  capabilities?: string[];
   bus: EventBus;
   controller: RiskController;
-  dispatcher: RoleDispatcher;
+  /** 浏览业务运行时只在 welcome 已写出后激活；interaction-only / degraded 连接保持 undefined。 */
+  dispatcher?: RoleDispatcher;
+  welcomed: boolean;
   /** 拆除：结束会话 + 解除 tee + 清空私有总线监听。 */
   teardown(): void;
 }
@@ -86,9 +94,9 @@ export class ConnectionRuntimeRegistry {
   }
 
   /**
-   * 握手：校验账号身份 → 顶替同 edgeId 旧连接 → 登记新账号 → 解析账号 controller →
-   * 建私有总线(+tee) + RoleDispatcher 并 setup()。**不在此启动会话**——会话由 handler 在握手成功后
-   * 向私有通道 emit edge.hello（携 accountId）触发，启动闸（含诚实人设闸）在 dispatcher 内部执行（D3）。
+   * 握手准入：校验账号身份 → 登记新账号 → 解析账号 controller → 建私有总线(+tee)。
+   * 不在这里构造 RoleDispatcher、读取人设或顶替旧 edge：这些业务/提交动作只在 welcome 已写出后执行，
+   * 防止业务闸或候选连接失败被升级成传输握手失败。
    */
   async onHandshake(session: EdgeSession): Promise<HandshakeOutcome> {
     const accountId = session.accountId?.trim();
@@ -155,17 +163,6 @@ export class ConnectionRuntimeRegistry {
       }
     }
 
-    // 同 edgeId 重连顶替（同一节点回来，不计为并行第二节点）：收掉该 edgeId 的旧连接。
-    // 仅顶替「不同 sessionId 但同 edgeId」的旧运行时；不同 edgeId 则视为真并行第二节点，并存。
-    for (const rt of [...this.bySession.values()]) {
-      if (rt.edgeId === session.edgeId && rt.sessionId !== session.sessionId) {
-        this.deps.logger?.log?.(
-          `[runtime] edgeId=${session.edgeId} 重连，顶替旧连接 sessionId=${rt.sessionId}（account=${rt.accountId}）`,
-        );
-        this.deps.closeEdge(rt.sessionId);
-      }
-    }
-
     // 解析该连接账号的 RiskController（同账号 N 连接经注册表天然共用 → 额度合并不翻倍，D7①）。
     const controller = await this.deps.getController(accountId);
 
@@ -177,9 +174,12 @@ export class ConnectionRuntimeRegistry {
       sessionId: session.sessionId,
       edgeId: session.edgeId,
       accountId,
+      platform: accountPlatform,
+      capabilities: session.capabilities,
       bus,
       controller,
-      dispatcher: undefined as unknown as RoleDispatcher,
+      dispatcher: undefined,
+      welcomed: false,
       teardown: () => {
         try {
           runtime.dispatcher?.endSession('disconnect');
@@ -191,14 +191,71 @@ export class ConnectionRuntimeRegistry {
       },
     };
 
-    runtime.dispatcher = this.deps.buildDispatcher({ bus, controller, accountId, edgeId: session.edgeId, platform: accountPlatform, capabilities: session.capabilities });
-    runtime.dispatcher.setCurrentAccountId(accountId);
-    runtime.dispatcher.setup();
     this.bySession.set(session.sessionId, runtime);
     this.deps.logger?.log?.(
-      `[runtime] 连接运行时已建立 sessionId=${session.sessionId} edgeId=${session.edgeId ?? '-'} account=${accountId}（在线连接=${this.bySession.size}）`,
+      `[runtime] 传输运行时已建立 sessionId=${session.sessionId} edgeId=${session.edgeId ?? '-'} account=${accountId}（在线连接=${this.bySession.size}）`,
     );
     return { ok: true };
+  }
+
+  /**
+   * welcome 已写出且 socket 已进入在线路由后的提交点：顶替同 edgeId 旧连接，并按平台激活浏览业务运行时。
+   * 视频号是 interaction-only，保持 transport-only；业务初始化失败只降级本连接，绝不反向关闭已 welcome 的 socket。
+   */
+  onWelcomed(session: EdgeSession): void {
+    const runtime = this.bySession.get(session.sessionId);
+    if (!runtime || runtime.welcomed) return;
+    runtime.welcomed = true;
+
+    // 同 edgeId 重连顶替只在新候选已 welcome 后提交；失败候选不能提前驱逐旧健康连接。
+    for (const existing of [...this.bySession.values()]) {
+      if (existing.welcomed && existing.edgeId === runtime.edgeId && existing.sessionId !== runtime.sessionId) {
+        this.deps.logger?.log?.(
+          `[runtime] edgeId=${runtime.edgeId} 新连接已 welcome，顶替旧连接 sessionId=${existing.sessionId}（account=${existing.accountId}）`,
+        );
+        this.deps.closeEdge(existing.sessionId);
+      }
+    }
+
+    if (!isOrchestrationCapabilitySupported(runtime.platform, 'browse')) {
+      this.deps.logger?.log?.(
+        `[runtime] sessionId=${runtime.sessionId} platform=${runtime.platform} 无 browse 编排，保持 transport-only`,
+      );
+      return;
+    }
+
+    let dispatcher: RoleDispatcher | undefined;
+    try {
+      dispatcher = this.deps.buildDispatcher({
+        bus: runtime.bus,
+        controller: runtime.controller,
+        accountId: runtime.accountId,
+        edgeId: runtime.edgeId,
+        platform: runtime.platform,
+        capabilities: runtime.capabilities,
+      });
+      dispatcher.setCurrentAccountId(runtime.accountId);
+      dispatcher.setup();
+      runtime.dispatcher = dispatcher;
+      runtime.bus.emit('edge.hello', {
+        edgeId: runtime.edgeId!,
+        accountId: runtime.accountId,
+        ts: Date.now(),
+      });
+      this.deps.logger?.log?.(
+        `[runtime] welcome 后业务运行时已激活 sessionId=${runtime.sessionId} edgeId=${runtime.edgeId ?? '-'} account=${runtime.accountId}`,
+      );
+    } catch (err) {
+      try {
+        dispatcher?.endSession('activation_failed');
+      } catch {
+        // 激活失败的清理也只能降级本业务运行时，不能反向破坏已 welcome 的传输。
+      }
+      runtime.dispatcher = undefined;
+      this.deps.logger?.error?.(
+        `[runtime] welcome 后业务运行时激活失败，连接保持在线 sessionId=${runtime.sessionId} edgeId=${runtime.edgeId ?? '-'} account=${runtime.accountId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /** 断连：拆除该连接运行时（结束会话 + 解 tee + 清监听）。 */
@@ -214,12 +271,12 @@ export class ConnectionRuntimeRegistry {
 
   /** 面板 /dispatch 恢复：对所有连接经启动闸尝试启动（未绑人设的仍被诚实拒绝）。 */
   startAll(): void {
-    for (const rt of this.bySession.values()) rt.dispatcher.tryStartSession();
+    for (const rt of this.bySession.values()) rt.dispatcher?.tryStartSession();
   }
 
   /** 面板 /dispatch 暂停：结束所有连接会话。 */
   endAll(reason?: string): void {
-    for (const rt of this.bySession.values()) rt.dispatcher.endSession(reason);
+    for (const rt of this.bySession.values()) rt.dispatcher?.endSession(reason);
   }
 
   /**
@@ -229,7 +286,7 @@ export class ConnectionRuntimeRegistry {
   endSessionForAccount(accountId: string, reason?: string): number {
     let n = 0;
     for (const rt of this.bySession.values()) {
-      if (rt.accountId === accountId) {
+      if (rt.accountId === accountId && rt.dispatcher) {
         rt.dispatcher.endSession(reason);
         n++;
       }
@@ -244,7 +301,7 @@ export class ConnectionRuntimeRegistry {
   resumeSessionForAccount(accountId: string): number {
     let n = 0;
     for (const rt of this.bySession.values()) {
-      if (rt.accountId === accountId) {
+      if (rt.accountId === accountId && rt.dispatcher) {
         rt.dispatcher.tryAutoResume();
         n++;
       }
@@ -260,7 +317,7 @@ export class ConnectionRuntimeRegistry {
   startSessionForAccount(accountId: string): number {
     let n = 0;
     for (const rt of this.bySession.values()) {
-      if (rt.accountId === accountId) {
+      if (rt.accountId === accountId && rt.dispatcher) {
         rt.dispatcher.startOnPersonaBound();
         n++;
       }
@@ -275,6 +332,7 @@ export class ConnectionRuntimeRegistry {
   runtimeForAccount(accountId: string): { bus: EventBus; edgeId?: string } | null {
     let fallback: { bus: EventBus; edgeId?: string } | null = null;
     for (const rt of this.bySession.values()) {
+      if (!rt.welcomed) continue;
       if (rt.accountId !== accountId) continue;
       if (rt.edgeId) return { bus: rt.bus, edgeId: rt.edgeId };
       fallback ??= { bus: rt.bus, edgeId: rt.edgeId };
@@ -287,6 +345,7 @@ export class ConnectionRuntimeRegistry {
     let fallback: SessionUsageSnapshot | null = null;
     for (const rt of this.bySession.values()) {
       if (rt.accountId !== accountId) continue;
+      if (!rt.dispatcher) continue;
       const snapshot = rt.dispatcher.sessionUsageSnapshot();
       if (edgeId && rt.edgeId === edgeId) return snapshot;
       if (!fallback || snapshot.active) fallback = snapshot;
@@ -304,6 +363,7 @@ export class ConnectionRuntimeRegistry {
     let fallback: ResumeGateVerdict | null = null;
     for (const rt of this.bySession.values()) {
       if (rt.accountId !== accountId) continue;
+      if (!rt.dispatcher) continue;
       const verdict = rt.dispatcher.resumeGateSnapshot();
       if (edgeId && rt.edgeId === edgeId) return verdict;
       if (!fallback || rt.dispatcher.active) fallback = verdict;
@@ -316,10 +376,11 @@ export class ConnectionRuntimeRegistry {
     let fallback: ConnectionRuntime | null = null;
     for (const rt of this.bySession.values()) {
       if (rt.accountId !== accountId) continue;
-      if (edgeId && rt.edgeId === edgeId) return rt.dispatcher.remainingBudget(action);
+      if (edgeId && rt.edgeId === edgeId) return rt.dispatcher?.remainingBudget(action) ?? 0;
+      if (!rt.dispatcher) continue;
       if (!fallback || rt.dispatcher.active) fallback = rt;
     }
-    return fallback?.dispatcher.remainingBudget(action) ?? 0;
+    return fallback?.dispatcher?.remainingBudget(action) ?? 0;
   }
 
   /** Consume current single-session budget for an online account/edge. Returns false when missing or exhausted. */
@@ -327,10 +388,11 @@ export class ConnectionRuntimeRegistry {
     let fallback: ConnectionRuntime | null = null;
     for (const rt of this.bySession.values()) {
       if (rt.accountId !== accountId) continue;
-      if (edgeId && rt.edgeId === edgeId) return rt.dispatcher.consumeBudget(action);
+      if (edgeId && rt.edgeId === edgeId) return rt.dispatcher?.consumeBudget(action) ?? false;
+      if (!rt.dispatcher) continue;
       if (!fallback || rt.dispatcher.active) fallback = rt;
     }
-    return fallback?.dispatcher.consumeBudget(action) ?? false;
+    return fallback?.dispatcher?.consumeBudget(action) ?? false;
   }
 
   /**
@@ -340,7 +402,7 @@ export class ConnectionRuntimeRegistry {
   onlineAccountIds(): string[] {
     const ids = new Set<string>();
     for (const rt of this.bySession.values()) {
-      if (rt.edgeId) ids.add(rt.accountId);
+      if (rt.welcomed && rt.edgeId) ids.add(rt.accountId);
     }
     return [...ids];
   }
@@ -348,7 +410,7 @@ export class ConnectionRuntimeRegistry {
   /** 当前活跃（已 startSession）的连接数。 */
   activeCount(): number {
     let n = 0;
-    for (const rt of this.bySession.values()) if (rt.dispatcher.active) n++;
+    for (const rt of this.bySession.values()) if (rt.dispatcher?.active) n++;
     return n;
   }
 

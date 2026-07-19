@@ -17,10 +17,12 @@ class FakeDispatcher {
   setupCalled = false;
   starts = 0;
   ends = 0;
+  constructor(private readonly setupError?: string) {}
   setCurrentAccountId(a: string): void {
     this.accountId = a;
   }
   setup(): void {
+    if (this.setupError) throw new Error(this.setupError);
     this.setupCalled = true;
   }
   tryStartSession(): void {
@@ -49,6 +51,7 @@ interface Harness {
 function makeHarness(
   platformByAccount: Record<string, PlatformId> = {},
   nicknameByAccount: Record<string, string | null> = {},
+  setupError?: string,
 ): Harness {
   const observerBus = new EventBus();
   const built: DispatcherBuildContext[] = [];
@@ -62,7 +65,7 @@ function makeHarness(
     getController: async (accountId) => ({ accountId }) as unknown as RiskController,
     buildDispatcher: (ctx) => {
       built.push(ctx);
-      const d = new FakeDispatcher();
+      const d = new FakeDispatcher(setupError);
       dispatchers.push(d);
       return d as unknown as RoleDispatcher;
     },
@@ -125,17 +128,23 @@ test('edge-command-target-guard R1：空白 edgeId 同样被拒（trim 后为空
   assert.equal(h.registry.runtimeCount(), 0);
 });
 
-test('合法账号握手：登记账号 + 解析 controller + 建私有总线运行时（setup + setCurrentAccountId）', async () => {
+test('合法账号握手先建传输运行时，welcome 后才 setup dispatcher + setCurrentAccountId', async () => {
   const h = makeHarness();
   const session: EdgeSession = { sessionId: 's1', edgeId: 'eA', accountId: 'acctA' };
   const outcome = await h.registry.onHandshake(session);
   assert.equal(outcome.ok, true);
   assert.deepEqual(h.ensured, ['acctA']);
   assert.equal(h.registry.runtimeCount(), 1);
+  assert.equal(h.built.length, 0, 'welcome 前不得构造业务 dispatcher');
+  assert.equal(h.registry.runtimeForAccount('acctA'), null, 'welcome 前的候选 runtime 不得进入账号业务解析');
+  assert.deepEqual(h.registry.onlineAccountIds(), [], 'welcome 前不得冒充在线账号');
+  h.registry.onWelcomed(session);
   assert.equal(h.built[0]!.accountId, 'acctA');
   assert.equal(h.built[0]!.edgeId, 'eA');
   assert.equal(h.dispatchers[0]!.setupCalled, true);
   assert.equal(h.dispatchers[0]!.accountId, 'acctA');
+  assert.ok(h.registry.runtimeForAccount('acctA'));
+  assert.deepEqual(h.registry.onlineAccountIds(), ['acctA']);
   // 私有总线：busFor 返回该连接独立总线（非全局观测总线）。
   const bus = h.registry.busFor(session);
   assert.notEqual(bus, h.observerBus);
@@ -169,15 +178,42 @@ test('facebook-scheduled-comment 2.5：全新 Facebook 账号首连不再被 pla
   assert.equal(outcome.ok, true, '首连应成功：ensureAccount 已按 edge 平台建行，getAccountPlatform 读回 facebook，与 edge 一致');
   assert.deepEqual(h.ensured, ['fb-new']);
   assert.equal(h.registry.runtimeCount(), 1);
+  h.registry.onWelcomed({ sessionId: 's1', edgeId: 'eFB', accountId: 'fb-new', platform: 'facebook' });
   // dispatcher 收到该连接平台，供 session-start 平台闸使用。
   assert.equal(h.built[0].platform, 'facebook');
 });
 
 test('facebook-scheduled-comment 2.8：facebook 连接的 dispatcher 上下文带 platform=facebook', async () => {
   const h = makeHarness({ acctX: 'facebook' });
-  const outcome = await h.registry.onHandshake({ sessionId: 's1', edgeId: 'eA', accountId: 'acctX', platform: 'facebook' });
+  const session: EdgeSession = { sessionId: 's1', edgeId: 'eA', accountId: 'acctX', platform: 'facebook' };
+  const outcome = await h.registry.onHandshake(session);
   assert.equal(outcome.ok, true);
+  h.registry.onWelcomed(session);
   assert.equal(h.built[0].platform, 'facebook');
+});
+
+test('视频号无人设：welcome 后保持 transport-only，不构造浏览 dispatcher', async () => {
+  const h = makeHarness({ wechatA: 'wechat_channels' });
+  const session: EdgeSession = {
+    sessionId: 's-wechat', edgeId: 'ads-wechat', accountId: 'wechatA', platform: 'wechat_channels',
+  };
+  const outcome = await h.registry.onHandshake(session);
+  assert.equal(outcome.ok, true);
+  h.registry.onWelcomed(session);
+  assert.equal(h.registry.runtimeCount(), 1, '传输连接保持在线');
+  assert.equal(h.built.length, 0, 'interaction-only 平台绝不构造浏览 dispatcher/读取人设');
+  assert.equal(h.registry.activeCount(), 0);
+});
+
+test('welcome 后 dispatcher setup 异常只降级业务运行时，传输 runtime 保持在线', async () => {
+  const h = makeHarness({ acctA: 'xiaohongshu' }, {}, 'no_persona');
+  const session: EdgeSession = { sessionId: 's1', edgeId: 'eA', accountId: 'acctA', platform: 'xiaohongshu' };
+  const outcome = await h.registry.onHandshake(session);
+  assert.equal(outcome.ok, true);
+  assert.doesNotThrow(() => h.registry.onWelcomed(session));
+  assert.equal(h.registry.runtimeCount(), 1);
+  assert.equal(h.registry.activeCount(), 0);
+  assert.equal(h.registry.remainingSessionBudgetForAccount('acctA', 'like', 'eA'), 0, '缺 dispatcher 的预算操作 fail-closed');
 });
 
 test('facebook-scheduled-comment 2.9：hello 昵称在平台校验后写入空昵称账号', async () => {
@@ -273,17 +309,26 @@ test('两连接（不同账号）私有总线互相隔离 + 各自 tee 到全局
 
 test('同 edgeId 重连顶替旧连接（收掉旧 ws），不计为并行第二节点', async () => {
   const h = makeHarness();
-  await h.registry.onHandshake({ sessionId: 's1', edgeId: 'eX', accountId: 'A' });
-  await h.registry.onHandshake({ sessionId: 's2', edgeId: 'eX', accountId: 'A' }); // 同 edgeId 重连
+  const s1: EdgeSession = { sessionId: 's1', edgeId: 'eX', accountId: 'A' };
+  const s2: EdgeSession = { sessionId: 's2', edgeId: 'eX', accountId: 'A' };
+  await h.registry.onHandshake(s1);
+  h.registry.onWelcomed(s1);
+  await h.registry.onHandshake(s2); // 同 edgeId 候选到达
+  assert.deepEqual(h.closed, [], '候选未 welcome 前不得驱逐旧健康连接');
+  h.registry.onWelcomed(s2);
   assert.deepEqual(h.closed, ['s1']); // 顶替：收掉旧 sessionId 的连接
 });
 
 test('同 edgeId 换账号重连（profile 换号 A→B，account-identity-from-login 2.1）：顶替旧连接 + 新运行时按 B 建、按 B 重过就绪闸（拆旧起新不串味）', async () => {
   const h = makeHarness();
-  await h.registry.onHandshake({ sessionId: 's1', edgeId: 'eX', accountId: 'A' });
+  const s1: EdgeSession = { sessionId: 's1', edgeId: 'eX', accountId: 'A' };
+  await h.registry.onHandshake(s1);
+  h.registry.onWelcomed(s1);
   const s2: EdgeSession = { sessionId: 's2', edgeId: 'eX', accountId: 'B' };
   const outcome = await h.registry.onHandshake(s2);
   assert.equal(outcome.ok, true);
+  assert.deepEqual(h.closed, [], '换号候选未 welcome 前也不顶替');
+  h.registry.onWelcomed(s2);
   assert.deepEqual(h.closed, ['s1']); // 按 edgeId 顶替旧连接（与账号是否相同无关）→ 触发旧账号运行时拆除
   assert.deepEqual(h.ensured, ['A', 'B']); // 新账号 B 也登记进主表
   assert.equal(h.built[1]!.accountId, 'B'); // 新运行时绑 B（私有总线 + B 的 controller + 就绪闸）
@@ -302,6 +347,7 @@ test('断连拆除运行时：结束会话 + 移除登记', async () => {
   const h = makeHarness();
   const session: EdgeSession = { sessionId: 's1', edgeId: 'eA', accountId: 'A' };
   await h.registry.onHandshake(session);
+  h.registry.onWelcomed(session);
   assert.equal(h.registry.runtimeCount(), 1);
   h.registry.onDisconnect(session);
   assert.equal(h.registry.runtimeCount(), 0);

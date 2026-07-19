@@ -96,4 +96,23 @@ describe('EventBus', () => {
     bus.emit('blackboard.updated', { field: 'x' });
     assert.equal(called, true);
   });
+
+  it('异步错误隔离：fire-and-forget handler rejection 被记录，不形成未处理拒绝且不影响其他 handler', async () => {
+    const bus = new EventBus();
+    let called = false;
+    const errors: unknown[][] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => { errors.push(args); };
+    try {
+      bus.on('blackboard.updated', async () => { throw new Error('async boom'); });
+      bus.on('blackboard.updated', () => { called = true; });
+      bus.emit('blackboard.updated', { field: 'x' });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(called, true);
+      assert.equal(errors.length, 1);
+      assert.match(String(errors[0]?.[0]), /async handler error/);
+    } finally {
+      console.error = original;
+    }
+  });
 });

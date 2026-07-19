@@ -62,7 +62,8 @@ export class CommentLikeAppraiser extends BaseRole {
   private readonly getSessionLikeCounts: () => { noteLikes: number; commentLikes: number };
   private readonly getCommentLikeDailyRemaining?: () => number;
   private readonly ratio: number;
-  private readonly likeProbability: number;
+  /** 显式测试/配置覆盖；缺省概率按动作发生时的人设惰性计算，构造期绝不读取人设。 */
+  private readonly likeProbabilityOverride?: number;
   private readonly random: () => number;
   private unsubscribers: (() => void)[] = [];
   /** 当前正在深读评论的笔记（reading.scroll_comments 设，scroll_comments 回执用后即清）。 */
@@ -79,7 +80,7 @@ export class CommentLikeAppraiser extends BaseRole {
     this.getSessionLikeCounts = options.getSessionLikeCounts;
     this.getCommentLikeDailyRemaining = options.getCommentLikeDailyRemaining;
     this.ratio = options.ratio ?? 0.15;
-    this.likeProbability = options.likeProbability ?? commentLikeProbability(this.soul);
+    this.likeProbabilityOverride = options.likeProbability;
     this.random = options.random ?? Math.random;
   }
 
@@ -146,7 +147,8 @@ export class CommentLikeAppraiser extends BaseRole {
     const { noteLikes, commentLikes } = this.getSessionLikeCounts();
     if ((commentLikes + 1) / Math.max(1, noteLikes) > this.ratio) return this.skip(noteId, 'ratio_gate');
     // 4) Bernoulli「偶尔不点」
-    if (this.random() >= this.likeProbability) return this.skip(noteId, 'bernoulli_abstain');
+    const likeProbability = this.likeProbabilityOverride ?? commentLikeProbability(this.soul);
+    if (this.random() >= likeProbability) return this.skip(noteId, 'bernoulli_abstain');
 
     // ── 候选硬过滤：去已赞 / 无锚点 / 空文本（绝不回点已赞）──
     const usable = candidates.filter((c) => c && c.anchorId && c.text && !c.alreadyLiked);

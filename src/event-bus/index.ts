@@ -54,7 +54,8 @@ export class EventBus {
   }
 
   /**
-   * 同步触发事件（fire-and-forget）。handler 的 Promise 被忽略，抛错不影响其他 handler。
+   * 同步触发事件（fire-and-forget）。同步抛错和异步 rejection 都只记录当前 handler，
+   * 不影响其他订阅者，也不升级成进程级未处理拒绝。
    */
   emit<K extends keyof AllEventMap>(event: K, data: AllEventMap[K]): void {
     const key = event as string;
@@ -62,7 +63,12 @@ export class EventBus {
     if (set) {
       for (const h of set) {
         try {
-          h(data);
+          const result = h(data);
+          if (result && typeof (result as Promise<void>).then === 'function') {
+            void (result as Promise<void>).catch((err) => {
+              console.error(`[EventBus] async handler error on "${key}":`, err);
+            });
+          }
         } catch (err) {
           console.error(`[EventBus] handler error on "${key}":`, err);
         }

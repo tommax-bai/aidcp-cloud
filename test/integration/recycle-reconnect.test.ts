@@ -67,6 +67,7 @@ test('回收（断连）拆除运行时，随后同槽位重新握手干净起�
   const h = makeHarness();
   const s1: EdgeSession = { sessionId: 's1', edgeId: 'eX', accountId: 'A' };
   await h.registry.onHandshake(s1);
+  h.registry.onWelcomed(s1);
   assert.equal(h.registry.runtimeCount(), 1);
 
   // 节点回收退出 → 边-云连接干净关闭 → 云端断连拆除
@@ -78,6 +79,7 @@ test('回收（断连）拆除运行时，随后同槽位重新握手干净起�
   const s2: EdgeSession = { sessionId: 's2', edgeId: 'eX', accountId: 'A' };
   const outcome = await h.registry.onHandshake(s2);
   assert.equal(outcome.ok, true);
+  h.registry.onWelcomed(s2);
   assert.equal(h.registry.runtimeCount(), 1, '重起后恰好一个运行时');
   assert.equal(h.built.length, 2, '为重起的新连接建了一个全新的运行时');
 });
@@ -88,6 +90,8 @@ test('回收一个节点绝不广播结束给兄弟节点（隔离 + a38fb96 红
   const s2: EdgeSession = { sessionId: 's2', edgeId: 'eY', accountId: 'B' };
   await h.registry.onHandshake(s1);
   await h.registry.onHandshake(s2);
+  h.registry.onWelcomed(s1);
+  h.registry.onWelcomed(s2);
   assert.equal(h.registry.runtimeCount(), 2);
 
   // 仅回收 eX
@@ -102,9 +106,12 @@ test('高频回收：旧 ws 未拆时同 edgeId 新握手到 → 顶替驱逐旧
   const h = makeHarness();
   const s1: EdgeSession = { sessionId: 's1', edgeId: 'eX', accountId: 'A' };
   await h.registry.onHandshake(s1);
+  h.registry.onWelcomed(s1);
   // 硬退出无干净 FIN 的边角：新进程握手到时旧连接尚未被云端判掉
   const s2: EdgeSession = { sessionId: 's2', edgeId: 'eX', accountId: 'A' };
   await h.registry.onHandshake(s2);
+  assert.deepEqual(h.closed, [], '候选只完成握手准入时不得驱逐旧连接');
+  h.registry.onWelcomed(s2);
 
   // 顶替即时请求驱逐旧 ws；旧运行时与新短暂并存，待旧 ws 真关闭再拆（真实异步序列）。
   assert.deepEqual(h.closed, ['s1'], '同 edgeId 顶替：请求驱逐旧 sessionId 的连接');

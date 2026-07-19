@@ -638,8 +638,8 @@ export class DefaultMessageHandler implements MessageHandler {
       });
       return makeEnvelope('error', env.id, this.clock(), { code: outcome.code, message: outcome.message });
     }
-    // 通知该连接决策层：上线 → 携 accountId emit edge.hello（进私有通道）触发会话启动（经诚实人设/调度闸 D3）。
-    this.bus(session).emit('edge.hello', { edgeId: p.edgeId, accountId: session.accountId, ts: this.clock() });
+    // 这里只完成传输协商。浏览业务运行时与 edge.hello 在 ws-server 写出 welcome、登记在线路由后激活，
+    // 防止人设/调度/角色构造等业务异常反向把合法连接升级成握手失败。
     const negotiatedCapabilities = this.deps.interactionInbox
       ? [
           INTERACTION_CAPABILITY,
