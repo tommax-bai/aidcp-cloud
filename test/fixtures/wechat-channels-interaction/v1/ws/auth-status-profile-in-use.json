@@ -1,0 +1,24 @@
+{
+  "v": 2,
+  "type": "interaction.auth.status",
+  "id": "auth-status-profile-in-use-001",
+  "ts": 1784044802000,
+  "payload": {
+    "envKey": "env_wc_demo",
+    "accountId": "acct_wc_demo",
+    "platform": "wechat_channels",
+    "status": "reauth_required",
+    "browserState": "unavailable",
+    "capabilities": {
+      "commentsRead": false,
+      "commentsReply": false,
+      "dmRead": false,
+      "dmSendText": false,
+      "dmSendImage": false
+    },
+    "runtimeControlsVersion": 7,
+    "identity": null,
+    "checkedAt": 1784044802000,
+    "reasonCode": "INTERACTION_BROWSER_PROFILE_IN_USE"
+  }
+}

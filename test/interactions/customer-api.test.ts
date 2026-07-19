@@ -33,6 +33,8 @@ test('customer API transactionally binds enabled user + owned env + account on e
   let browserClaimCalls = 0;
   let completedBrowserResponse: unknown = null;
   let authStatus = 'active';
+  let authBrowserState = 'closed';
+  let authReasonCode: string | null = null;
   let controlsVersion = 1;
   let controlsState = {
     commentsReadEnabled: true, commentsReplyEnabled: true, dmReadEnabled: true,
@@ -92,9 +94,9 @@ test('customer API transactionally binds enabled user + owned env + account on e
       return syncFreshness;
     },
     getAuth: async () => ({
-      envKey: 'env-a', accountId: 'acct-a', platform: 'wechat_channels', status: authStatus, browserState: 'closed',
+      envKey: 'env-a', accountId: 'acct-a', platform: 'wechat_channels', status: authStatus, browserState: authBrowserState,
       capabilities: { commentsRead: true, commentsReply: true, dmRead: true, dmSendText: true, dmSendImage: false },
-      identity: null, runtimeControlsVersion: 0, checkedAt: 1, reasonCode: null,
+      identity: null, runtimeControlsVersion: 0, checkedAt: 1, reasonCode: authReasonCode,
     }),
     getRuntimeControls: async () => ({
       accountId: 'acct-a', platform: 'wechat_channels', envKey: 'env-a', version: controlsVersion, ...controlsState,
@@ -295,6 +297,22 @@ test('customer API transactionally binds enabled user + owned env + account on e
         commentsReadEnabled: true, commentsReplyEnabled: true, dmReadEnabled: true,
         dmSendTextEnabled: true, dmSendImageEnabled: false, writePaused: false,
       } });
+
+    authStatus = 'reauth_required';
+    authBrowserState = 'unavailable';
+    authReasonCode = 'INTERACTION_BROWSER_PROFILE_IN_USE';
+    const occupiedList = await fetch(`${base}/environments/env-a/interactions`, {
+      headers: { 'x-test-user': 'user-a' },
+    });
+    const occupiedListBody = await occupiedList.json() as { data: { auth: Record<string, unknown> } };
+    assert.deepEqual(
+      [occupiedListBody.data.auth.status, occupiedListBody.data.auth.browserState, occupiedListBody.data.auth.reasonCode],
+      ['reauth_required', 'unavailable', 'INTERACTION_BROWSER_PROFILE_IN_USE'],
+    );
+    assert.equal(JSON.stringify(occupiedListBody).includes('ownerHint'), false);
+    authStatus = 'active';
+    authBrowserState = 'closed';
+    authReasonCode = null;
 
     replyConfigHead = null;
     const missingConfigList = await fetch(`${base}/environments/env-a/interactions`, {

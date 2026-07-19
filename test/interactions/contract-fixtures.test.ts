@@ -43,6 +43,7 @@ function cache(): AnchorStore {
 
 test('frozen v1 WS fixtures are accepted by strict Cloud consumers', async () => {
   const auth = await fixture('auth-status-active.json');
+  const occupiedAuth = await fixture('auth-status-profile-in-use.json');
   const batch = await fixture('comment-sync-batch.json');
   const confirmed = await fixture('comment-reply-result-confirmed.json');
   const ambiguous = await fixture('dm-reply-result-ambiguous.json');
@@ -51,6 +52,12 @@ test('frozen v1 WS fixtures are accepted by strict Cloud consumers', async () =>
   const offboardResult = await fixture('offboard-result.json');
 
   assert.ok(parseAuthStatusPayload(auth.payload));
+  const parsedOccupiedAuth = parseAuthStatusPayload(occupiedAuth.payload);
+  assert.ok(parsedOccupiedAuth);
+  assert.equal(parsedOccupiedAuth.status, 'reauth_required');
+  assert.equal(parsedOccupiedAuth.browserState, 'unavailable');
+  assert.equal(parsedOccupiedAuth.reasonCode, 'INTERACTION_BROWSER_PROFILE_IN_USE');
+  assert.equal('ownerHint' in (occupiedAuth.payload as Record<string, unknown>), false);
   assert.ok(parseSyncBatchPayload(batch.payload));
   assert.ok(parseReplyResultPayload(confirmed.payload));
   assert.ok(parseReplyResultPayload(ambiguous.payload));
@@ -65,6 +72,7 @@ test('frozen v1 WS fixtures are accepted by strict Cloud consumers', async () =>
 
   const expectedTypes: Record<string, string> = {
     'hello.json': 'hello', 'welcome.json': 'welcome', 'auth-status-active.json': 'interaction.auth.status',
+    'auth-status-profile-in-use.json': 'interaction.auth.status',
     'auth-reopen.json': 'interaction.auth.reopen', 'sync-request.json': 'interaction.sync.request',
     'test-reset-sync-request.json': 'interaction.sync.request',
     'browser-control-open.json': 'interaction.browser.control',

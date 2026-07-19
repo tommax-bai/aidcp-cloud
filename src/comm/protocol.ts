@@ -247,6 +247,7 @@ export type InteractionAuthStatus =
 export type InteractionBrowserState = 'closed' | 'opening' | 'open' | 'closing' | 'unavailable';
 export type InteractionErrorCode =
   | 'INTERACTION_AUTH_REQUIRED'
+  | 'INTERACTION_BROWSER_PROFILE_IN_USE'
   | 'INTERACTION_PERMISSION_DENIED'
   | 'INTERACTION_NOT_FOUND'
   | 'INTERACTION_SCOPE_MISMATCH'
@@ -269,6 +270,7 @@ export type InteractionErrorCode =
   | 'WECHAT_PERMISSION_DENIED'
   | 'WECHAT_SCHEMA_CHANGED';
 export type InteractionAuthReasonCode =
+  | 'INTERACTION_BROWSER_PROFILE_IN_USE'
   | 'WECHAT_AUTH_REQUIRED'
   | 'WECHAT_CHALLENGE_REQUIRED'
   | 'WECHAT_IDENTITY_MISMATCH'

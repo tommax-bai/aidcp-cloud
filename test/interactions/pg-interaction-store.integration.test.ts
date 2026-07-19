@@ -41,6 +41,29 @@ test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recov
         identity: { externalId: 'finder_demo_public', displayName: '示例视频号', identityHash: `sha256:${'1'.repeat(64)}` },
         runtimeControlsVersion: 0, checkedAt: 1784044000000, reasonCode: null,
       });
+      await store.upsertAuthStatus({
+        envKey: 'env_wc_demo', accountId: 'acct_wc_demo', platform: 'wechat_channels',
+        status: 'reauth_required', browserState: 'unavailable',
+        capabilities: { commentsRead: false, commentsReply: false, dmRead: false,
+          dmSendText: false, dmSendImage: false },
+        identity: null, runtimeControlsVersion: 0, checkedAt: 1784044001000,
+        reasonCode: 'INTERACTION_BROWSER_PROFILE_IN_USE',
+      });
+      assert.deepEqual(await store.getAuth('acct_wc_demo', 'env_wc_demo'), {
+        envKey: 'env_wc_demo', accountId: 'acct_wc_demo', platform: 'wechat_channels',
+        status: 'reauth_required', browserState: 'unavailable',
+        capabilities: { commentsRead: false, commentsReply: false, dmRead: false,
+          dmSendText: false, dmSendImage: false },
+        identity: null, runtimeControlsVersion: 0, checkedAt: 1784044001000,
+        reasonCode: 'INTERACTION_BROWSER_PROFILE_IN_USE',
+      });
+      await store.upsertAuthStatus({
+        envKey: 'env_wc_demo', accountId: 'acct_wc_demo', platform: 'wechat_channels', status: 'active',
+        browserState: 'closed', capabilities: { commentsRead: true, commentsReply: true, dmRead: true,
+          dmSendText: true, dmSendImage: false },
+        identity: { externalId: 'finder_demo_public', displayName: '示例视频号', identityHash: `sha256:${'1'.repeat(64)}` },
+        runtimeControlsVersion: 0, checkedAt: 1784044002000, reasonCode: null,
+      });
       const fixture = JSON.parse(await readFile(new URL('../fixtures/wechat-channels-interaction/v1/ws/comment-sync-batch.json', import.meta.url), 'utf8')) as { payload: unknown };
       const payload = parseSyncBatchPayload(fixture.payload);
       assert.ok(payload);
