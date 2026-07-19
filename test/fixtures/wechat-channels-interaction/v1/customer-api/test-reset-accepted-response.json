@@ -5,6 +5,7 @@
     "channel": "comment",
     "action": "test_reset",
     "actionRequestId": "test-reset-sync-comment-001",
+    "resync": "accepted",
     "status": "accepted",
     "deleted": { "threads": 1, "syncBatches": 3, "syncCursors": 2 }
   },

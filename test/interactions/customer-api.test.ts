@@ -42,7 +42,7 @@ test('customer API transactionally binds enabled user + owned env + account on e
   let runtimeDeliveries = 0;
   let resetCalls = 0;
   let resetDispatchCalls = 0;
-  let resetFailureAudits = 0;
+  let resetResyncSkippedAudits = 0;
   let failResetDispatch = false;
   const resetResponses = new Map<string, unknown>();
   let freshnessReads = 0;
@@ -125,7 +125,7 @@ test('customer API transactionally binds enabled user + owned env + account on e
       return { channel: input.channel, deleted: { threads: 1, syncBatches: 2, syncCursors: 1 } };
     },
     recordAudit: async (input: { action: string }) => {
-      if (input.action === 'test_data_reset_dispatch_failed') resetFailureAudits += 1;
+      if (input.action === 'test_data_reset_resync_skipped') resetResyncSkippedAudits += 1;
     },
     claimApiRequest: async (input: { action: string; idempotencyKey: string; accountId: string; envKey: string; resourceId?: string }) => {
       if (input.action === 'test_reset') {
@@ -428,7 +428,7 @@ test('customer API transactionally binds enabled user + owned env + account on e
     const acceptedResetBody = await acceptedReset.json() as { data: Record<string, unknown> };
     assert.deepEqual(acceptedResetBody.data, {
       envKey: 'env-a', accountId: 'acct-a', channel: 'comment', action: 'test_reset',
-      actionRequestId: 'reset-request-comment', status: 'accepted',
+      actionRequestId: 'reset-request-comment', resync: 'accepted', status: 'accepted',
       deleted: { threads: 1, syncBatches: 2, syncCursors: 1 },
     });
     const duplicateReset = await fetch(`${base}/environments/env-a/interactions/test-reset`, {
@@ -440,16 +440,21 @@ test('customer API transactionally binds enabled user + owned env + account on e
     assert.equal(resetCalls, 1, '已完成的幂等重放不得再次删除');
     assert.equal(resetDispatchCalls, 1, '已完成的幂等重放不得再次下发');
 
+    // 引擎/浏览器离线 → 派发失败：清空仍然发生，整体不再失败——回 200 且 resync=skipped、actionRequestId=null。
     failResetDispatch = true;
-    const partialReset = await fetch(`${base}/environments/env-a/interactions/test-reset`, {
+    const offlineReset = await fetch(`${base}/environments/env-a/interactions/test-reset`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-test-user': 'user-a', 'idempotency-key': 'reset-dm' },
       body: JSON.stringify({ channel: 'dm' }),
     });
-    assert.equal(partialReset.status, 503);
-    const partialBody = await partialReset.json() as { error: { code: string; retryable: boolean } };
-    assert.deepEqual([partialBody.error.code, partialBody.error.retryable], ['INTERACTION_TEST_RESET_PARTIAL', true]);
-    assert.equal(resetCalls, 2, '部分完成时 Cloud 删除已经发生');
-    assert.equal(resetFailureAudits, 1);
+    assert.equal(offlineReset.status, 200, '离线时清空仍成功，不整体失败');
+    const offlineBody = await offlineReset.json() as { data: Record<string, unknown> };
+    assert.deepEqual(offlineBody.data, {
+      envKey: 'env-a', accountId: 'acct-a', channel: 'dm', action: 'test_reset',
+      actionRequestId: null, resync: 'skipped', status: 'accepted',
+      deleted: { threads: 1, syncBatches: 2, syncCursors: 1 },
+    });
+    assert.equal(resetCalls, 2, '离线时 Cloud 删除依然发生');
+    assert.equal(resetResyncSkippedAudits, 1, '离线时记一条 resync skipped 审计');
 
     const unknownInteractionRoute = await fetch(`${base}/environments/env-a/interactions/not-a-route`,
       { method: 'POST', headers: { 'x-test-user': 'user-a' } });

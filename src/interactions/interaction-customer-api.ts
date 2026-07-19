@@ -432,29 +432,25 @@ export class InteractionCustomerApi {
         throw new InteractionError('INTERACTION_STATE_CONFLICT',
           '同一幂等键的上次重置结果尚未确认；请刷新状态，确认后使用新的重置操作。', 409);
       }
-      const resetState: { value: Awaited<ReturnType<InteractionStore['resetTestData']>> | null } = { value: null };
-      let actionRequestId: string;
+      // 开发测试工具：清空是纯云端事务，必须与「引擎/浏览器是否在线」解耦——先无条件清空
+      //（scope 由 resetTestData 自身的 FOR UPDATE + env 校验兜底），再尽力触发重新拉取。没有在线
+      // Edge 或派发失败时不再整体失败，只把 resync 标记为 skipped、actionRequestId 记 null；清空已
+      // 落库，Edge 下次上线由既有同步补拉。见 [[wechat-test-reset-unconditional-wipe]] 的离线可重置诉求。
+      const reset = await this.deps.store.resetTestData({ accountId, envKey, channel, actor });
+      let actionRequestId: string | null = null;
+      let resync: 'accepted' | 'skipped' = 'skipped';
       try {
         actionRequestId = await this.deps.sender.requestSync({ accountId, envKey, channel,
-          scopeExternalId: null, reason: 'test_reset' }, {
-          beforeDispatch: async () => {
-            resetState.value = await this.deps.store.resetTestData({ accountId, envKey, channel, actor });
-          },
-        });
+          scopeExternalId: null, reason: 'test_reset' });
+        resync = 'accepted';
       } catch (error) {
-        if (resetState.value) {
-          await this.deps.store.recordAudit({ accountId, envKey, actor, action: 'test_data_reset_dispatch_failed',
-            entityType: 'interaction_channel', entityId: channel, summary: 'test data reset committed but sync dispatch failed',
-            labels: { channel, deleted: resetState.value.deleted } });
-          throw new InteractionError('INTERACTION_TEST_RESET_PARTIAL',
-            '云端测试数据已清空，但重新拉取请求未送达 Edge；请确认客户端在线后再次重置该渠道。', 503, true);
-        }
-        throw error;
+        const reason = error instanceof InteractionError ? error.code : 'INTERACTION_INTERNAL_ERROR';
+        await this.deps.store.recordAudit({ accountId, envKey, actor, action: 'test_data_reset_resync_skipped',
+          entityType: 'interaction_channel', entityId: channel,
+          summary: 'test data reset committed; automatic re-pull not dispatched', labels: { channel, deleted: reset.deleted, reason } });
       }
-      const reset = resetState.value;
-      if (!reset) throw new InteractionError('INTERACTION_INTERNAL_ERROR', '重置事务未执行。', 500, true);
       const response = this.envelope(requestId, this.clock(), { envKey, accountId, channel,
-        action: 'test_reset', actionRequestId, status: 'accepted', deleted: reset.deleted });
+        action: 'test_reset', actionRequestId, resync, status: 'accepted', deleted: reset.deleted });
       await this.deps.store.completeApiRequest(claim.requestId, response);
       sendJson(res, 200, response);
       return true;
