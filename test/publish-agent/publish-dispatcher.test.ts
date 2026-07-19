@@ -39,7 +39,7 @@ function harness(opts: {
   approvedVersion?: number;
   edgeId?: string | null;
   seqResult?: any;
-  leaseError?: Error;
+  leaseError?: Error | (() => Error | undefined);
   /** 7.3：注入验证码硬暂停闸。 */
   isEdgePaused?: (edgeId: string) => boolean;
   /** 7.2：同稿连续被抢占达此阈值停自动重投（缺省 3）。 */
@@ -83,7 +83,8 @@ function harness(opts: {
     edgeTaskLeases: {
       withLease: async (request, work) => {
         leasePriorities.push(request.priority);
-        if (opts.leaseError) throw opts.leaseError;
+        const leaseError = typeof opts.leaseError === 'function' ? opts.leaseError() : opts.leaseError;
+        if (leaseError) throw leaseError;
         events.push('lease:acquired');
         try {
           return await work({ taskId: 'task-publish-1', edgeId: request.edgeId, kind: request.kind, priority: request.priority });
@@ -203,6 +204,51 @@ describe('PublishDispatcher', () => {
       h.notices,
       [{ kind: 'cdp_unhealthy_requeued', accountId: 'acct-A', recordId: 7, title: 'vLLM 部署踩坑' }],
     );
+  });
+
+  test('浏览器等待本机槽位（零副作用）→ 保留授权、保持待审、通知自动重试且不计熔断', async () => {
+    const h = harness({
+      approved: true,
+      edgeId: 'edge-online',
+      leaseError: new EdgeTaskLeaseError('browser_wake_failed', 'parked browser is still waiting for a local slot'),
+    });
+    await h.dispatcher.dispatch(7);
+    assert.equal(h.events.includes('seq'), false, '未 acquired 前绝不驱动发布序列');
+    assert.equal(h.statusUpdates.length, 0, '草稿保持 pending_approval');
+    assert.deepEqual(h.voided, [], '槽位等待保留有效授权，后续无需重批');
+    assert.deepEqual(
+      h.notices,
+      [{ kind: 'browser_slot_waiting', accountId: 'acct-A', recordId: 7, title: 'vLLM 部署踩坑' }],
+    );
+    assert.equal(h.dispatcher.isBreakerOpen('acct-A'), false, '零发布命令不计序列失败/熔断');
+  });
+
+  test('槽位等待由既有扫描重试；同进程连续等待只通知一次，取得 lease 后清除并可重新武装', async () => {
+    const draft = makeDraft();
+    let attempt = 0;
+    const h = harness({
+      approved: true,
+      draft,
+      edgeId: 'edge-online',
+      leaseError: () => {
+        attempt += 1;
+        return attempt === 1 || attempt === 2 || attempt === 4
+          ? new EdgeTaskLeaseError('browser_wake_failed', 'waiting for browser slot')
+          : undefined;
+      },
+    });
+
+    await h.dispatcher.dispatch(7); // 首次等待，发一次通知
+    await h.dispatcher.scanAndDispatchApproved(); // 第二次仍等待，不重复通知
+    assert.equal(h.notices.filter((n) => n.kind === 'browser_slot_waiting').length, 1);
+    assert.deepEqual(h.voided, []);
+
+    await h.dispatcher.scanAndDispatchApproved(); // 第三次取得 lease，清除等待去重并执行
+    assert.equal(h.events.filter((event) => event === 'seq').length, 1, 'scanner 驱动的重试只执行一次序列');
+
+    await h.dispatcher.dispatch(7); // 桩保持 pending，模拟新的独立等待生命周期
+    assert.equal(h.notices.filter((n) => n.kind === 'browser_slot_waiting').length, 2, '取得 lease 后允许新等待重新通知');
+    assert.deepEqual(h.voided, []);
   });
 
   test('幂等：已 published 草稿 → 跳过，不二次发布', async () => {

@@ -44,6 +44,8 @@ export interface DispatchNotice {
     | 'offline_requeued'
     | 'acquire_timeout_requeued'
     | 'cdp_unhealthy_requeued'
+    /** 浏览器已进入本机唤醒/槽位队列：授权保留，由既有已批草稿扫描自动重试。 */
+    | 'browser_slot_waiting'
     | 'breaker_open'
     | 'breaker_cleared'
     /** 7.3：验证码硬暂停期该 edge 收不到发布命令 → 零副作用回待审（不烧稿、保留授权）。 */
@@ -149,6 +151,8 @@ export class PublishDispatcher {
   private readonly consecutivePreemptions = new Map<number, number>();
   /** 7.3：已就「验证码硬暂停」通知过运维的 recordId——防 60s 兜底扫描每轮对同一暂停重复 ping 运维（只在进入暂停态时发一次）。 */
   private readonly pausedNotified = new Set<number>();
+  /** 浏览器槽位等待通知去重：同一进程内只在首次进入等待时通知；取得租约/离开可下发态后清除。 */
+  private readonly browserSlotWaitingNotified = new Set<number>();
 
   /**
    * 发布真发出后记一笔风控计数（change risk-record-actuated-facts）。
@@ -206,6 +210,10 @@ export class PublishDispatcher {
     } catch {
       /* best-effort */
     }
+  }
+
+  private clearBrowserSlotWaiting(recordId: number): void {
+    this.browserSlotWaitingNotified.delete(recordId);
   }
 
   /** 序列失败记账：连续 N 次触发熔断（自愈不自残——停 drain 防连环烧掉整批获批草稿）。 */
@@ -289,6 +297,7 @@ export class PublishDispatcher {
     if (this.openBreakers.has(accountId)) {
       // 熔断中：新下发拒绝且不烧授权信号（信号原样保留，人工批准确认后由兜底扫描恢复 drain）。
       this.logger.warn(`[PublishDispatcher] 账号 ${accountId} 下发熔断中，recordId=${recordId} 暂不下发（授权保留不烧）`);
+      this.clearBrowserSlotWaiting(recordId);
       return;
     }
 
@@ -383,20 +392,24 @@ export class PublishDispatcher {
     // 入队后熔断才开启（同链前序项连败）的迟到项：同样跳过且不烧授权，防连环烧稿。
     if (this.openBreakers.has(accountId)) {
       this.logger.warn(`[PublishDispatcher] 账号 ${accountId} 下发熔断中，recordId=${recordId} 队内跳过（授权保留不烧）`);
+      this.clearBrowserSlotWaiting(recordId);
       return;
     }
     const draft = await this.store.loadForDispatch(recordId);
     if (!draft) {
       this.logger.warn(`[PublishDispatcher] recordId=${recordId} 下发时草稿已不存在，跳过`);
+      this.clearBrowserSlotWaiting(recordId);
       return;
     }
     // 幂等：已发布或非待审态不重发（兜底扫描/重复触发可能命中）。
     if (draft.status === 'published') {
       this.logger.log(`[PublishDispatcher] recordId=${recordId} 已发布，跳过（幂等）`);
+      this.clearBrowserSlotWaiting(recordId);
       return;
     }
     if (draft.status !== 'pending_approval') {
       this.logger.log(`[PublishDispatcher] recordId=${recordId} 非待审态(${draft.status})，跳过下发`);
+      this.clearBrowserSlotWaiting(recordId);
       return;
     }
 
@@ -405,6 +418,7 @@ export class PublishDispatcher {
     const decision = await this.readApproval(requestId).catch(() => null);
     if (!decision?.approved) {
       this.logger.warn(`[PublishDispatcher] recordId=${recordId} 授权信号未确认 approved，绝不下发（AC-PUB）`);
+      this.clearBrowserSlotWaiting(recordId);
       return;
     }
 
@@ -413,6 +427,7 @@ export class PublishDispatcher {
     // 这是「审=发」的结构性权威兜底：写时预检漏网（读版本与写签名之间又落编辑的 TOCTOU）在此收口。
     if (decision.contentVersion !== draft.contentVersion) {
       await this.voidApprovalSignal(requestId).catch(() => {});
+      this.clearBrowserSlotWaiting(recordId);
       this.logger.warn(
         `[PublishDispatcher] recordId=${recordId} 授权版本 v${decision.contentVersion} ≠ 草稿 v${draft.contentVersion} → 作废过期签名、留待审（不下发未审内容）`,
       );
@@ -422,6 +437,7 @@ export class PublishDispatcher {
     // 图文帖必须有图（executor 已拦，下发段再守一道；缺图诚实 failed）。
     if (draft.imageUrls.length === 0) {
       await this.store.updateStatus(recordId, 'failed').catch(() => {});
+      this.clearBrowserSlotWaiting(recordId);
       await this.settleFacebookMedia(draft, 'failed_before_submit', recordId, 'draft_missing_images');
       this.logger.warn(`[PublishDispatcher] recordId=${recordId} 无配图，诚实 failed（不下发）`);
       this.notifyUi(accountId, recordId, 'failed', draft.title);
@@ -434,6 +450,7 @@ export class PublishDispatcher {
     const edgeId = this.resolveEdgeIdForAccount(accountId);
     if (!edgeId) {
       await this.voidApprovalSignal(requestId).catch(() => {});
+      this.clearBrowserSlotWaiting(recordId);
       this.logger.warn(
         `[PublishDispatcher] 账号 ${accountId} 无在线边缘节点，recordId=${recordId} 回待审（作废本次授权、通知重批；不烧稿、不让位、不下发）`,
       );
@@ -445,6 +462,7 @@ export class PublishDispatcher {
     // 序列器立即 reject → 会被烧成不可逆 failed + 熔断 +1。下发前先闸：暂停即零副作用回待审、不烧稿、不计熔断。
     // 与离线分支不同：验证码暂停是**瞬态**（解完即恢复），故**不作废授权**——留待兜底扫描在恢复后重投。
     if (this.isEdgePaused?.(edgeId)) {
+      this.clearBrowserSlotWaiting(recordId);
       this.logger.warn(
         `[PublishDispatcher] 账号 ${accountId} edge ${edgeId} 处于验证码硬暂停 → recordId=${recordId} 保持待审、不下发（零副作用、保留授权）`,
       );
@@ -470,6 +488,7 @@ export class PublishDispatcher {
         },
         async (lease) => {
           // acquired 同时代表 edge 已 quiesced；此前不得推 approved/不得发送首条业务命令。
+          this.clearBrowserSlotWaiting(recordId);
           this.notifyUi(accountId, recordId, 'approved', draft.title);
           return this.sequencer.executePublishSequence({
             taskId: lease.taskId,
@@ -560,8 +579,21 @@ export class PublishDispatcher {
       }
     } catch (err) {
       if (!sequenceStarted) {
-        // acquire 未确认 = 零业务命令副作用；作废授权回待审，绝不把协议过旧/离线烧成 failed。
+        // 浏览器停泊且本次未在唤醒死线内取得槽位：本地环境仍留在 FIFO 队列，授权保留，
+        // 由既有 60s 已批草稿扫描重试。它与 edge 离线 / CDP 故障 / 无响应超时严格分开。
+        if (err instanceof EdgeTaskLeaseError && err.code === 'browser_wake_failed') {
+          if (!this.browserSlotWaitingNotified.has(recordId)) {
+            this.browserSlotWaitingNotified.add(recordId);
+            this.notifyOps({ kind: 'browser_slot_waiting', accountId, recordId, title: draft.title });
+          }
+          this.logger.warn(
+            `[PublishDispatcher] recordId=${recordId} 浏览器等待本机槽位，零命令下发、保留授权，交已批草稿扫描自动重试`,
+          );
+          return;
+        }
+        // 其他 acquire 未确认 = 零业务命令副作用；作废授权回待审，绝不把协议过旧/离线烧成 failed。
         await this.voidApprovalSignal(requestId).catch(() => {});
+        this.clearBrowserSlotWaiting(recordId);
         const noticeKind = err instanceof EdgeTaskLeaseError && err.code === 'acquire_timeout'
           ? 'acquire_timeout_requeued'
           : err instanceof EdgeTaskLeaseError && err.code === 'edge_unhealthy'

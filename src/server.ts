@@ -2458,6 +2458,8 @@ async function main(): Promise<void> {
         const text =
           notice.kind === 'offline_requeued'
             ? `⚠️ 发布未执行：账号「${name}」边缘离线，${ref} 已退回待审（本次授权作废）。边缘恢复后请重新批准。`
+            : notice.kind === 'browser_slot_waiting'
+              ? `⏳ 发布排队中：账号「${name}」客户端在线，目标浏览器正在等待本机可用槽位。${ref} 已批准且授权保留，槽位可用后会自动重试，无需重新批准。`
             : notice.kind === 'acquire_timeout_requeued'
               ? `⚠️ 发布未执行：账号「${name}」客户端仍在线，但浏览器未在接管时限内完成暂停当前浏览，${ref} 已退回待审（本次授权作废，未下发发布命令）。请检查浏览器/CDP后重新批准。`
               : notice.kind === 'cdp_unhealthy_requeued'
