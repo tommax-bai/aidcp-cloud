@@ -260,8 +260,8 @@ test('delegated publish threads originChatId to the publish port as manualApprov
 
 // 操作员全权白名单：精确 /publish 与专用服务端人工精选洗稿越风控/配额但保人审；
 // 自然语言、通用结构化请求或形状不完整的 operator_action 一律 governed。
-test('delegated publish sets operatorOverride only for trusted single operator actions', async () => {
-  const calls: Array<{ operatorOverride?: boolean; approvalMode?: string; hasReference: boolean }> = [];
+test('delegated publish sets operatorOverride only for trusted actions and human lease only for exact slash', async () => {
+  const calls: Array<{ operatorOverride?: boolean; edgeLeasePriority?: string; approvalMode?: string; hasReference: boolean }> = [];
   const router = createDelegatedExecutorRouter({
     comments: {
       triggerManual: async () => ({ ok: true, message: 'unused' }),
@@ -270,7 +270,12 @@ test('delegated publish sets operatorOverride only for trusted single operator a
     },
     publishes: {
       triggerDelegated: async (_accountId, opts) => {
-        calls.push({ operatorOverride: opts.operatorOverride, approvalMode: opts.approvalMode, hasReference: opts.referenceNote !== undefined });
+        calls.push({
+          operatorOverride: opts.operatorOverride,
+          edgeLeasePriority: opts.edgeLeasePriority,
+          approvalMode: opts.approvalMode,
+          hasReference: opts.referenceNote !== undefined,
+        });
         return { result: 'triggered', reason: 'delegated_publish_post', status: 'pending_approval', recordId: 9 };
       },
       isBusy: () => false,
@@ -284,15 +289,18 @@ test('delegated publish sets operatorOverride only for trusted single operator a
   const precise = task({ action: 'publish_post', actionFamily: 'publish', source: 'legacy_command', targetSuccessCount: 1, targetConstraints: { manualSingle: true } });
   await router.executorFor(precise).execute(precise, attempt);
   assert.equal(calls[0].operatorOverride, true);
+  assert.equal(calls[0].edgeLeasePriority, 'human');
   assert.equal(calls[0].approvalMode, 'review');
 
   const nl = task({ action: 'publish_post', actionFamily: 'publish', source: 'feishu' });
   await router.executorFor(nl).execute(nl, attempt);
   assert.equal(calls[1].operatorOverride, undefined);
+  assert.equal(calls[1].edgeLeasePriority, undefined);
 
   const structured = task({ action: 'publish_post', actionFamily: 'publish', source: 'edge' });
   await router.executorFor(structured).execute(structured, attempt);
   assert.equal(calls[2].operatorOverride, undefined);
+  assert.equal(calls[2].edgeLeasePriority, undefined);
 
   const curatedSnapshot = {
     curatedId: 7,
@@ -306,7 +314,12 @@ test('delegated publish sets operatorOverride only for trusted single operator a
     sourceConstraints: curatedSnapshot,
   });
   await router.executorFor(operatorRewrite).execute(operatorRewrite, attempt);
-  assert.deepEqual(calls[3], { operatorOverride: true, approvalMode: 'review', hasReference: true });
+  assert.deepEqual(calls[3], {
+    operatorOverride: true,
+    edgeLeasePriority: undefined,
+    approvalMode: 'review',
+    hasReference: true,
+  });
 
   const forgedStructured = task({
     action: 'publish_post', actionFamily: 'publish', source: 'edge', targetSuccessCount: 1,

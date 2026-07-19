@@ -389,6 +389,8 @@ export class PublishScheduler {
       manualApprovalChatId?: string;
       /** 操作员主动单次指令置 true：越风控/配额但保人审；普通结构化任务不得置位。 */
       operatorOverride?: boolean;
+      /** 精确手工 /publish 才可置 human；与配额 override 分离，避免可信自动洗稿被抬档。 */
+      edgeLeasePriority?: 'human';
     },
   ): Promise<TriggerOutcome> {
     if (this.d.isPersonaBound && !this.d.isPersonaBound(accountId)) {
@@ -422,6 +424,7 @@ export class PublishScheduler {
       opts.manualApprovalChatId,
       opts.approvalMode ?? 'review',
       inspirationSinceMs,
+      opts.edgeLeasePriority,
     );
     return {
       result: 'triggered',
@@ -511,6 +514,7 @@ export class PublishScheduler {
     manualApprovalChatId?: string,
     approvalMode?: NonNullable<TriggerInput['approvalMode']>,
     inspirationSinceMs?: number,
+    edgeLeasePriority?: 'human',
   ): Promise<{ status: string; recordId?: number | null; failureReason?: string; approvalCard?: SchedulerApprovalCardResult }> {
     const dbPending = await this.dbPendingCount(accountId);
     const kind = referenceNote ? ('rewrite' as const) : ('autonomous' as const);
@@ -528,7 +532,17 @@ export class PublishScheduler {
       this.logger.warn(`[PublishScheduler] 触发被 claim 拒绝 account=${accountId} key=${key} reason=${claim.reason}`);
       return { status: 'skipped', failureReason: `${text}（${claim.reason}）` };
     }
-    return this.runClaimed(key, reason, forced, accountId, referenceNote, manualApprovalChatId, approvalMode, inspirationSinceMs);
+    return this.runClaimed(
+      key,
+      reason,
+      forced,
+      accountId,
+      referenceNote,
+      manualApprovalChatId,
+      approvalMode,
+      inspirationSinceMs,
+      edgeLeasePriority,
+    );
   }
 
   /** claim 已持有的执行段：finally 覆盖含 buildTriggerInput 在内全程释放键（DB 瞬错不卡键）。 */
@@ -541,6 +555,7 @@ export class PublishScheduler {
     manualApprovalChatId?: string,
     approvalMode?: NonNullable<TriggerInput['approvalMode']>,
     inspirationSinceMs?: number,
+    edgeLeasePriority?: 'human',
   ): Promise<{ status: string; recordId?: number | null; failureReason?: string; approvalCard?: SchedulerApprovalCardResult }> {
     try {
     const base = await this.buildTriggerInput(accountId, { inspirationSinceMs });
@@ -583,6 +598,9 @@ export class PublishScheduler {
     }
     if (approvalMode) {
       input.approvalMode = approvalMode;
+    }
+    if (edgeLeasePriority === 'human') {
+      input.edgeLeasePriority = 'human';
     }
     this.logger.log(`[PublishScheduler] 触发发帖编排 reason=${reason} forced=${forced} account=${input.accountId} newConcepts=${input.metrics.newConceptCount} liked=${input.metrics.likedSinceLastPublish}`);
     const res = await this.d.orchestrator.trigger(input);

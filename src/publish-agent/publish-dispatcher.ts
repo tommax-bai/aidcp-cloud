@@ -281,6 +281,7 @@ export class PublishDispatcher {
     }
     // 先轻读取账号用于串行键（只读、不改态）。读不到则不入队。
     let accountId: string;
+    let persistedPriority: EdgeTaskPriority = 'automatic';
     try {
       const peek = await this.store.loadForDispatch(recordId);
       if (!peek) {
@@ -288,6 +289,7 @@ export class PublishDispatcher {
         return;
       }
       accountId = peek.accountId;
+      persistedPriority = peek.metadata?.edgeLeasePriority === 'human' ? 'human' : 'automatic';
     } catch (err) {
       this.logger.warn(`[PublishDispatcher] recordId=${recordId} 读草稿失败，跳过: ${err instanceof Error ? err.message : String(err)}`);
       return;
@@ -302,11 +304,10 @@ export class PublishDispatcher {
     }
 
     this.inFlight.add(recordId);
-    // 9.1（用户 2026-07-14 拍板）：一切发布一律自动档，不论触发路径（人审入口 / 兜底扫描 / 事件驱动重投）。
-    // 发布是异步队列作业，批准完人就走了、没人在线等回执 → 不给人工档。人工档只留「运营在线等回执」的动作
-    // （手动评论 / 手动加群 / 客户端内审批即时动作）。opts.humanApproval 仍保留——它另驱动熔断解除
-    // （confirmHumanApproval），只是不再据此定租约档位。同时消灭「同稿因触发路径不同而档位不同 + 重投降级」两个反 aging 缺陷。
-    const priority: EdgeTaskPriority = 'automatic';
+    // 默认发布仍走 automatic（2026-07-14 的队列约束）。唯一例外是精确手工 /publish：其来源在候审前
+    // 已冻结进 publish_metadata，审批等待与事件驱动重投都保持 human，才能与同批手工评论同级 FIFO、互不抢占。
+    // `opts.humanApproval` 只表示本次批准动作由人发起，不能把自动候选一概抬档。
+    const priority = persistedPriority;
     const prev = this.accountTail.get(accountId) ?? Promise.resolve();
     const run = prev
       .catch(() => {})

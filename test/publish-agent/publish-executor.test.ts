@@ -475,6 +475,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
         recentPosts: [],
       },
       recentPublished: [],
+      edgeLeasePriority: 'human',
     } as any);
     ctx.write('publishMetadata', {
       topics: ['RAG'], mentions: [], location: null, collection: null,
@@ -527,6 +528,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     assert.deepEqual(insertedRecords[0].tags, ['RAG'], '落库 tags == publishMetadata.topics');
     assert.equal(recordedMeta.length, 1);
     assert.equal(recordedMeta[0].aiEnforced, true, 'aiEnforced 审计如实落库');
+    assert.equal(recordedMeta[0].metadata.edgeLeasePriority, 'human', '手工租约档位在发审批卡前冻结进元数据');
     assert.deepEqual(recordedMeta[0].metadata.referenceImageAudit, {
       requestedCount: REFERENCE_IMAGE_MAX_COUNT,
       usableCount: REFERENCE_IMAGE_MAX_COUNT,
@@ -557,6 +559,41 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
         finalStatus: 'unverified',
       }],
     }, '逐槽视觉核验原样并列落库');
+  });
+
+  test('精确手工发布的 human 档位落库失败 → 回到 needs_review，不发审批卡', async () => {
+    const statusUpdates: Array<{ id: number; status: string }> = [];
+    const sentCards: any[] = [];
+    const role = new PublishExecutorRole({
+      store: {
+        insert: async () => 70,
+        recordMetadata: async () => { throw new Error('metadata unavailable'); },
+        updateStatus: async (id: number, status: any) => { statusUpdates.push({ id, status }); },
+      },
+      messenger: { sendApprovalCard: async (_c: string, card: any) => { sentCards.push(card); } },
+      botChatStore: { getDefaultChat: async () => ({ chatId: 'c' }) },
+      clock,
+      logger: silentLogger,
+    });
+
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('trigger', {
+      metrics: { hoursSinceLastPublish: 30, newConceptCount: 1, likedSinceLastPublish: 0 },
+      generateInput: { concepts: [], likedContents: [], soul: {} as any, recentPosts: [] },
+      recentPublished: [],
+      edgeLeasePriority: 'human',
+    } as any);
+    ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('publishMetadata', makePublishMetadata());
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.deepEqual(statusUpdates, [{ id: 70, status: 'needs_review' }]);
+    assert.equal(sentCards.length, 0, '队列优先级事实未落库时不得开放审批出口');
+    assert.equal(ctx.get('publishResult')?.status, 'skipped');
   });
 
   test('参考图 provider 返回 used → publishMetadata.referenceImageAudit 标记 providerClaimedUsed=true', async () => {

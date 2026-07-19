@@ -136,6 +136,20 @@ describe('AC-PUB-SCHED PublishScheduler 三扳机', () => {
     });
   });
 
+  it('精确手工委托把 human 租约意图带入发布管线，普通委托保持未标记', async () => {
+    const { scheduler, inputs } = build({ canDo: false, status: 'warned' });
+    await scheduler.triggerDelegated('acc-test', {
+      action: 'publish_post',
+      operatorOverride: true,
+      edgeLeasePriority: 'human',
+    });
+    assert.equal(inputs[0].edgeLeasePriority, 'human');
+
+    const governed = build();
+    await governed.scheduler.triggerDelegated('acc-test', { action: 'publish_post' });
+    assert.equal(governed.inputs[0].edgeLeasePriority, undefined);
+  });
+
   it('手动 /publish 编排失败 → 触发但 status=failed，并把编排失败原因沿链路 surface 为 failureReason', async () => {
     const { scheduler } = build({ orchestratorStatus: 'failed', orchestratorReason: 'Pipeline aborted by TitleCreator: 标题解析失败' });
     const o = await scheduler.triggerManual('acc-test');

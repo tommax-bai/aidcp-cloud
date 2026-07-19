@@ -54,6 +54,8 @@ export interface DelegatedPublishPort {
       manualApprovalChatId?: string;
       /** change delegated-executor-operator-authority-parity：仅精确 /publish 命令置 true，越风控保人审。 */
       operatorOverride?: boolean;
+      /** 精确手工 /publish 的 Edge 租约保持 human；审批等待后仍不得退化成 automatic。 */
+      edgeLeasePriority?: 'human';
     },
   ): Promise<TriggerOutcome>;
   isBusy(accountId?: string): boolean;
@@ -390,6 +392,7 @@ export function createDelegatedExecutorRouter(deps: DelegatedExecutorDeps): {
           action: task.action,
           approvalMode: approvalMode(task),
           ...(operatorOverride ? { operatorOverride: true } : {}),
+          ...(legacySingle ? { edgeLeasePriority: 'human' as const } : {}),
           ...(note ? { referenceNote: note } : {}),
           // 命令来源会话 → 审批卡回来源会话（私聊 / 群）；无来源会话 → 回落默认审批群。
           ...(task.originChatId ? { manualApprovalChatId: task.originChatId } : {}),

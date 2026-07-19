@@ -201,6 +201,12 @@ export interface TriggerInput {
    * When present, PublishExecutor sends the approval card here before considering the default approval group.
    */
   manualApprovalChatId?: string;
+  /**
+   * Edge lease priority requested by an exact operator command. It is frozen
+   * into publish metadata before the approval card is emitted, so approval
+   * latency or a process restart cannot downgrade a manual task to automatic.
+   */
+  edgeLeasePriority?: 'human';
 }
 
 /** ContentScout 输出 */
@@ -674,6 +680,8 @@ export interface PublishMetadata {
     reservationId: string;
     imageIds: number[];
   };
+  /** Exact manual publish only; absent means the established automatic lane. */
+  edgeLeasePriority?: 'human';
   decidedAt: number;
 }
 

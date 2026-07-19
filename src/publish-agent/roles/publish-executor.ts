@@ -329,8 +329,21 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
         ),
         context,
       );
+      const trigger = context.get('trigger') as TriggerInput | undefined;
+      if (trigger?.edgeLeasePriority === 'human') {
+        metadataWithAudit.edgeLeasePriority = 'human';
+      }
       const aiEnforced = metadataWithAudit.compliance.aiEnforced === true;
-      await this.store.recordMetadata(recordId, metadataWithAudit, aiEnforced).catch(() => {});
+      try {
+        await this.store.recordMetadata(recordId, metadataWithAudit, aiEnforced);
+      } catch (err) {
+        // 普通历史路径保留既有 metadata best-effort；精确手工发布的档位则是队列安全事实，不能丢标后
+        // 继续发审批卡、再以 automatic 被同批 human 评论抢占。标记失败时转人工复核并 fail-closed。
+        if (trigger?.edgeLeasePriority === 'human') {
+          await this.store.updateStatus?.(recordId, 'needs_review').catch(() => {});
+          throw new Error(`manual_publish_priority_persistence_failed: ${(err as Error).message}`);
+        }
+      }
     }
 
     // 发飞书审批卡（review）或免审写授权信号 + 发通知卡（auto_approve）。二者都只产出待审草稿，

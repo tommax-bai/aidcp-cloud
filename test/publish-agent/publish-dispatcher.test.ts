@@ -147,12 +147,23 @@ describe('PublishDispatcher', () => {
     assert.deepEqual(h.recordedPublishes, ['acct-A'], '发布前是否越权不影响事实记账：平台确认发布后必须占用 publish 配额');
   });
 
-  test('9.1：一切发布一律 automatic 档，人工批准入口也不再抬到 human', async () => {
-    // change lease-strict-preemption 9.1（用户 2026-07-14 拍板）：发布是异步队列作业、没人在线等回执，
-    // 一律自动档——消灭「同稿因触发路径不同而档位不同 + 重投降级」两个反 aging 缺陷。humanApproval 仍保留（另驱动熔断解除）。
+  test('普通候选仍一律 automatic，单凭人工批准动作不会把自动候选抬档', async () => {
     const h = harness({ approved: true, edgeId: 'edge-A' });
     await h.dispatcher.dispatch(7, { humanApproval: true });
     assert.deepEqual(h.leasePriorities, ['automatic']);
+  });
+
+  test('精确手工 /publish 冻结的 human 档位跨审批等待与下发保持不变', async () => {
+    const base = makeDraft();
+    const h = harness({
+      approved: true,
+      edgeId: 'edge-A',
+      draft: makeDraft({
+        metadata: { ...base.metadata!, edgeLeasePriority: 'human' },
+      }),
+    });
+    await h.dispatcher.dispatch(7, { humanApproval: true });
+    assert.deepEqual(h.leasePriorities, ['human']);
   });
 
   test('AC-PUB 红线：未授权 → 绝不让位、绝不驱动序列、不改态', async () => {
