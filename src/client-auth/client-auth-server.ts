@@ -29,6 +29,7 @@ import type { UiSlowStartPayload } from '../comm/protocol.js';
 import type { PendingPublishPreview, PublishLogStore } from '../publish-agent/publish-log-store.js';
 import type { PersonaAutoFillService } from '../agents/persona-auto-fill.js';
 import { isWritingLanguage } from '../soul/writing-language.js';
+import type { RiskStatus } from '../risk/types.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -62,9 +63,30 @@ export interface ClientAuthDeps {
       { slowStart: UiSlowStartPayload; dayQuotas: Record<string, number> } | null
     >;
   };
+  /** 客户环境风险读/恢复：accountId 只在 Cloud 内部流转，HTTP DTO 永不暴露。 */
+  environmentRisk?: {
+    platformForAccount(accountId: string): string | undefined;
+    viewForAccount(accountId: string): Promise<ClientEnvironmentRiskState | null>;
+    recoverRestrictedForAccount(accountId: string, reason: string): Promise<ClientEnvironmentRiskRecovery | null>;
+    resumeEdgesForAccount(accountId: string): number;
+  };
   onOffboardCreated?: (offboard: ClientOffboardView) => Promise<void>;
   /** 客户只提交批次意图；环境/账号/人设状态均由 Cloud 自行解析。 */
   personaAutoFill?: Pick<PersonaAutoFillService, 'createRun'>;
+}
+
+export interface ClientEnvironmentRiskState {
+  status: RiskStatus;
+  statusSince: number;
+  updatedAt: number;
+}
+
+export interface ClientEnvironmentRiskRecovery {
+  accepted: boolean;
+  refusal?: 'state_not_restricted';
+  statusBefore: RiskStatus;
+  state: ClientEnvironmentRiskState;
+  changed: boolean;
 }
 
 export interface ClientAuthConfig {
@@ -247,6 +269,25 @@ function sendBindingFailure(res: http.ServerResponse, reason: Exclude<ResolvedBi
   sendJson(res, status, { error: reason });
 }
 
+async function resolveOwnedFacebookRiskAccount(
+  deps: ClientAuthDeps,
+  res: http.ServerResponse,
+  userId: string,
+  envKey: string,
+): Promise<string | null> {
+  const bound = await deps.store.resolveBoundAccountForEnv(userId, envKey);
+  if (!bound.ok) {
+    sendBindingFailure(res, bound.reason);
+    return null;
+  }
+  const platform = deps.environmentRisk?.platformForAccount(bound.accountId)?.trim().toLowerCase();
+  if (platform !== 'facebook') {
+    sendJson(res, 409, { error: 'unsupported_platform' });
+    return null;
+  }
+  return bound.accountId;
+}
+
 /**
  * D5 活体佐证（change curated-envkey-account-binding，ESSENTIAL）：解析出的绑定账号此刻**真的活在该环境上**吗。
  * 绑定是上一次握手的事实、可能陈旧——对**读 / 纯云端候审内容生成**（无平台副作用、可回头）无所谓，
@@ -352,6 +393,76 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
     if (method === 'GET' && url === '/my-environments') {
       const scope = await deps.store.listEnvScope(userId);
       sendJson(res, 200, { environments: scope.map((s) => ({ envKey: s.envKey, label: s.label, platform: s.platform })) });
+      return;
+    }
+
+    // 当前客户拥有的 Facebook 环境风险真态读（离线可用）：envKey→accountId 只在 Cloud 内解析，回包绝不泄露账号键。
+    if (method === 'GET' && /^\/environments\/[^/]+\/risk-state$/.test(url)) {
+      const envKey = decodeURIComponent(url.split('/')[2] ?? '').trim();
+      if (!deps.environmentRisk) {
+        sendJson(res, 503, { error: 'environment_risk_unavailable' });
+        return;
+      }
+      const accountId = await resolveOwnedFacebookRiskAccount(deps, res, userId, envKey);
+      if (!accountId) return;
+      const state = await deps.environmentRisk.viewForAccount(accountId);
+      if (!state) {
+        sendJson(res, 503, { error: 'environment_risk_unavailable' });
+        return;
+      }
+      sendJson(res, 200, {
+        data: { envKey, ...state },
+        meta: { requestId: randomUUID(), asOf: Date.now() },
+      });
+      return;
+    }
+
+    // 客户自助「解除受限」：只接受空对象。kind/status/accountId/reason 全由 Cloud 固定或解析，客户端无选择权。
+    if (method === 'POST' && /^\/environments\/[^/]+\/risk-state\/recover$/.test(url)) {
+      const envKey = decodeURIComponent(url.split('/')[2] ?? '').trim();
+      if (!deps.environmentRisk) {
+        sendJson(res, 503, { error: 'environment_risk_unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body as object).length !== 0) {
+        sendJson(res, 422, { error: 'validation_failed', reason: 'empty_object_required' });
+        return;
+      }
+      const accountId = await resolveOwnedFacebookRiskAccount(deps, res, userId, envKey);
+      if (!accountId) return;
+      const auditReason = `client_environment_recovery:user=${userId}:env=${envKey}`;
+      const recovery = await deps.environmentRisk.recoverRestrictedForAccount(accountId, auditReason);
+      if (!recovery) {
+        sendJson(res, 503, { error: 'environment_risk_unavailable' });
+        return;
+      }
+      if (!recovery.accepted) {
+        sendJson(res, 409, {
+          error: 'risk_state_not_restricted',
+          data: { envKey, status: recovery.state.status },
+        });
+        return;
+      }
+      const resumedEdges = deps.environmentRisk.resumeEdgesForAccount(accountId);
+      logger.log('[client-auth] Facebook 环境解除受限', {
+        userId,
+        envKey,
+        statusBefore: recovery.statusBefore,
+        statusAfter: recovery.state.status,
+        changed: recovery.changed,
+        resumedEdges,
+      });
+      sendJson(res, 200, {
+        data: { envKey, ...recovery.state, changed: recovery.changed, resumedEdges },
+        meta: { requestId: randomUUID(), asOf: Date.now() },
+      });
       return;
     }
 

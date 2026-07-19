@@ -3,7 +3,7 @@ import { deriveWindowQuotas, deriveWindowQuotasFromDaily, minWindowQuotas, scale
 import { createRiskState, RiskStateMachine } from './risk-state-machine.js';
 import { SlidingWindowCounter, WINDOW_MS } from './sliding-window-counter.js';
 import { RISK_ACTIONS } from './types.js';
-import type { AccountNurtureProvider, QuotaProvider, RiskAction, RiskQuotaLevel, RiskSignal, RiskState, RiskStore, RiskWindow, WindowQuotas } from './types.js';
+import type { AccountNurtureProvider, QuotaProvider, RiskAction, RiskQuotaLevel, RiskSignal, RiskState, RiskStatus, RiskStore, RiskWindow, WindowQuotas } from './types.js';
 
 /**
  * 支持慢启动的平台白名单（change account-level-slow-start，design D12）：第一版只放 facebook /
@@ -55,6 +55,18 @@ export interface RiskControllerOptions {
    * 全局停用闸：置真 → 无视所有环境级开关与历史 env 旁路、全体不 clamp。
    */
   slowStartDisabled?: boolean;
+}
+
+/**
+ * 客户环境「解除受限」的原子结果（change facebook-environment-restriction-recovery）。
+ * accepted=false 只会发生在 warned/frozen；normal 视为幂等已完成，避免双端同时恢复时把真成功报成失败。
+ */
+export interface RestrictedRecoveryResult {
+  accepted: boolean;
+  refusal?: 'state_not_restricted';
+  statusBefore: RiskStatus;
+  state: RiskState;
+  changed: boolean;
 }
 
 /** 慢启动的生效锚点：环境级显式设置，或历史 AIDCP_COLDSTART_RAMP 旁路。 */
@@ -233,6 +245,37 @@ export class RiskController {
       this.state = this.stateMachine.transition(this.state, signal, signal.at ?? this.clock());
       await this.store?.saveState(this.state);
       return this.getState();
+    });
+  }
+
+  /**
+   * 只允许 restricted → normal 的人工恢复，并与其它账号风险写共享同一 mutation queue。
+   * MUST NOT 用 getState()+applySignal() 在路由层拼：两次调用中间可插入另一条信号，形成 TOCTOU。
+   */
+  async recoverRestricted(reason: string): Promise<RestrictedRecoveryResult> {
+    const auditReason = String(reason ?? '').trim();
+    if (!auditReason) throw new Error('restricted_recovery_requires_reason');
+    return this.enqueue(async () => {
+      const statusBefore = this.state.status;
+      if (statusBefore === 'normal') {
+        return { accepted: true, statusBefore, state: this.getState(), changed: false };
+      }
+      if (statusBefore !== 'restricted') {
+        return {
+          accepted: false,
+          refusal: 'state_not_restricted',
+          statusBefore,
+          state: this.getState(),
+          changed: false,
+        };
+      }
+      this.state = this.stateMachine.transition(
+        this.state,
+        { kind: 'operator_override_recover', reason: auditReason },
+        this.clock(),
+      );
+      await this.store?.saveState(this.state);
+      return { accepted: true, statusBefore, state: this.getState(), changed: true };
     });
   }
 

@@ -4329,6 +4329,36 @@ async function main(): Promise<void> {
               }
             },
           },
+          environmentRisk: {
+            platformForAccount: (accountId) => accountStore?.platformFor?.(accountId),
+            viewForAccount: async (accountId) => {
+              try {
+                const state = (await riskRegistry.getController(accountId)).getState();
+                return { status: state.status, statusSince: state.statusSince, updatedAt: state.updatedAt };
+              } catch {
+                return null;
+              }
+            },
+            recoverRestrictedForAccount: async (accountId, reason) => {
+              try {
+                const result = await (await riskRegistry.getController(accountId)).recoverRestricted(reason);
+                return {
+                  accepted: result.accepted,
+                  ...(result.refusal ? { refusal: result.refusal } : {}),
+                  statusBefore: result.statusBefore,
+                  state: {
+                    status: result.state.status,
+                    statusSince: result.state.statusSince,
+                    updatedAt: result.state.updatedAt,
+                  },
+                  changed: result.changed,
+                };
+              } catch {
+                return null;
+              }
+            },
+            resumeEdgesForAccount: (accountId) => server.resumeEdgesForAccount(accountId),
+          },
           onOffboardCreated: async (offboard) => {
             const edgeId = server.resolveEdgeIdForAccount(offboard.accountId);
             if (edgeId) await interactionOffboarding?.dispatchPending(offboard.accountId, edgeId);

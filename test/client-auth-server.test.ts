@@ -1125,6 +1125,159 @@ function ownerOfP1(): ReturnType<typeof makeFakeStore> {
   return fx;
 }
 
+function makeEnvironmentRiskDep(options: {
+  status?: 'normal' | 'warned' | 'restricted' | 'frozen';
+  platform?: string;
+  resumedEdges?: number;
+  accept?: boolean;
+} = {}) {
+  const status = options.status ?? 'restricted';
+  const calls: Array<Record<string, unknown>> = [];
+  let resumed = 0;
+  const dep: NonNullable<ClientAuthDeps['environmentRisk']> = {
+    platformForAccount(accountId) {
+      calls.push({ action: 'platform', accountId });
+      return options.platform ?? 'facebook';
+    },
+    async viewForAccount(accountId) {
+      calls.push({ action: 'view', accountId });
+      return { status, statusSince: 1000, updatedAt: 2000 };
+    },
+    async recoverRestrictedForAccount(accountId, reason) {
+      calls.push({ action: 'recover', accountId, reason });
+      const accepted = options.accept ?? (status === 'restricted' || status === 'normal');
+      return {
+        accepted,
+        ...(accepted ? {} : { refusal: 'state_not_restricted' as const }),
+        statusBefore: status,
+        state: {
+          status: status === 'restricted' && accepted ? 'normal' : status,
+          statusSince: status === 'restricted' && accepted ? 3000 : 1000,
+          updatedAt: 3000,
+        },
+        changed: status === 'restricted' && accepted,
+      };
+    },
+    resumeEdgesForAccount(accountId) {
+      calls.push({ action: 'resume', accountId });
+      resumed += 1;
+      return options.resumedEdges ?? 2;
+    },
+  };
+  return { dep, calls, resumedCount: () => resumed };
+}
+
+test('环境风险读：离线仍返回 Cloud restricted 真态且 DTO 不含 accountId', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const risk = makeEnvironmentRiskDep();
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), environmentRisk: risk.dep },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/risk-state`, { headers });
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.doesNotMatch(text, new RegExp(ACCT_P1));
+      const body = JSON.parse(text) as { data: Record<string, unknown> };
+      assert.deepEqual(Object.keys(body.data).sort(), ['envKey', 'status', 'statusSince', 'updatedAt']);
+      assert.equal(body.data.status, 'restricted');
+      assert.deepEqual(risk.calls.filter((c) => c.action === 'view'), [{ action: 'view', accountId: ACCT_P1 }]);
+    },
+  );
+});
+
+test('环境风险读：非所有者与非 Facebook 平台均 fail-closed', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const risk = makeEnvironmentRiskDep({ platform: 'wechat_channels' });
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), environmentRisk: risk.dep },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const notOwned = await fetch(`${base}/environments/p2/risk-state`, { headers });
+      assert.equal(notOwned.status, 403);
+      assert.doesNotMatch(await notOwned.text(), new RegExp(ACCT_P1));
+      const unsupported = await fetch(`${base}/environments/p1/risk-state`, { headers });
+      assert.equal(unsupported.status, 409);
+      assert.equal((await unsupported.json() as { error: string }).error, 'unsupported_platform');
+      assert.equal(risk.calls.some((c) => c.action === 'view'), false);
+    },
+  );
+});
+
+test('环境风险恢复：restricted 写后 normal、Cloud 生成理由并回真实 resumedEdges', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const risk = makeEnvironmentRiskDep({ resumedEdges: 3 });
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), environmentRisk: risk.dep },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/risk-state/recover`, {
+        method: 'POST', headers, body: JSON.stringify({}),
+      });
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.doesNotMatch(text, new RegExp(ACCT_P1));
+      const body = JSON.parse(text) as { data: Record<string, unknown> };
+      assert.deepEqual(Object.keys(body.data).sort(), ['changed', 'envKey', 'resumedEdges', 'status', 'statusSince', 'updatedAt']);
+      assert.equal(body.data.status, 'normal');
+      assert.equal(body.data.changed, true);
+      assert.equal(body.data.resumedEdges, 3);
+      const recover = risk.calls.find((c) => c.action === 'recover');
+      assert.equal(recover?.accountId, ACCT_P1);
+      assert.match(String(recover?.reason), /user=u1:env=p1/);
+      assert.equal(risk.resumedCount(), 1);
+    },
+  );
+});
+
+test('环境风险恢复：normal 幂等；warned/frozen 拒绝且不恢复 edge', async () => {
+  for (const status of ['normal', 'warned', 'frozen'] as const) {
+    const fx = ownerOfP1();
+    fx.bindings.set('p1', ACCT_P1);
+    const risk = makeEnvironmentRiskDep({ status });
+    await withServer(
+      { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), environmentRisk: risk.dep },
+      baseConfig(0),
+      async (base) => {
+        const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+        const res = await fetch(`${base}/environments/p1/risk-state/recover`, {
+          method: 'POST', headers, body: JSON.stringify({}),
+        });
+        assert.equal(res.status, status === 'normal' ? 200 : 409, status);
+        assert.equal(risk.resumedCount(), status === 'normal' ? 1 : 0, status);
+      },
+    );
+  }
+});
+
+test('环境风险恢复：任何客户端选择器都在绑定解析前整块拒绝', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const risk = makeEnvironmentRiskDep();
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), environmentRisk: risk.dep },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      for (const extra of [
+        { accountId: ACCT_P1 }, { kind: 'operator_override_recover' }, { status: 'normal' }, { reason: 'trust me' },
+      ]) {
+        const res = await fetch(`${base}/environments/p1/risk-state/recover`, {
+          method: 'POST', headers, body: JSON.stringify(extra),
+        });
+        assert.equal(res.status, 422, Object.keys(extra)[0]);
+      }
+      assert.equal(risk.calls.length, 0, '坏 body 不得触发平台检查、绑定账号取态或恢复');
+    },
+  );
+});
+
 test('慢启动写：边缘离线 + 有唯一绑定 → 写环境成功并用当前账号 controller 返回生效真态', async () => {
   const fx = ownerOfP1();
   fx.bindings.set('p1', ACCT_P1);

@@ -72,3 +72,51 @@ test('mutation queue: 并发 light + manual_freeze 串行组合、无丢更新�
   // 串行：light→warned 再 manual_freeze→frozen，或 manual_freeze→frozen 再 light(对 frozen no-op)；两序最终都 frozen
   assert.equal(c.getState().status, 'frozen');
 });
+
+test('recoverRestricted: restricted 原子恢复为 normal、清信号窗并持久', async () => {
+  const store = memStore();
+  const initial: RiskState = {
+    ...createRiskState('a', 1000),
+    status: 'restricted',
+    signalCount: 4,
+    lastSignalAt: 1500,
+  };
+  const c = await RiskController.create({ accountId: 'a', initialState: initial, store, clock: () => 2000 });
+  const result = await c.recoverRestricted('client environment recovery');
+  assert.equal(result.accepted, true);
+  assert.equal(result.statusBefore, 'restricted');
+  assert.equal(result.changed, true);
+  assert.equal(result.state.status, 'normal');
+  assert.equal(result.state.signalCount, 0);
+  assert.equal(result.state.lastSignalAt, null);
+  assert.equal(store.saves.length, 1);
+  assert.equal(store.saves[0].status, 'normal');
+});
+
+test('recoverRestricted: normal 幂等不写；warned/frozen 拒绝且不降级', async () => {
+  for (const status of ['normal', 'warned', 'frozen'] as const) {
+    const store = memStore();
+    const c = await RiskController.create({
+      accountId: status,
+      initialState: { ...createRiskState(status), status },
+      store,
+    });
+    const result = await c.recoverRestricted('manual confirmation');
+    assert.equal(result.accepted, status === 'normal', status);
+    assert.equal(result.changed, false, status);
+    assert.equal(result.state.status, status, status);
+    assert.equal(store.saves.length, 0, `${status} 不应写库`);
+  }
+});
+
+test('recoverRestricted: 空审计理由在入队前拒绝且不写', async () => {
+  const store = memStore();
+  const c = await RiskController.create({
+    accountId: 'a',
+    initialState: { ...createRiskState('a'), status: 'restricted' },
+    store,
+  });
+  await assert.rejects(() => c.recoverRestricted('   '), /restricted_recovery_requires_reason/);
+  assert.equal(c.getState().status, 'restricted');
+  assert.equal(store.saves.length, 0);
+});
