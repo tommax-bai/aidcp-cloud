@@ -197,6 +197,78 @@ test('Console preview is read-only: no reply job and no WS command are created',
   }
 });
 
+test('preview contexts expose only account-scoped inbound fields and return an empty list without a binding', async () => {
+  const calls: Array<{ accountId: string; channel: string; limit: number }> = [];
+  let empty = false;
+  const api = new InteractionInternalApi({
+    store: {
+      listReplyPreviewContexts: async (accountId: string, channel: string, limit: number) => {
+        calls.push({ accountId, channel, limit });
+        return empty ? [] : [{
+          threadId: 'thread-a', messageId: 'message-a', channel: 'comment' as const, messageType: 'text' as const,
+          userMessage: '这双靴子还有吗', userName: '清', videoTitle: '血小板的cos', receivedAt: 1_784_044_802_000,
+        }];
+      },
+    } as unknown as InteractionStore,
+    configs: {} as ReplyConfigStore,
+    workflow: {} as ReplyWorkflow,
+    grantsFor: () => new Set(['interaction.config.preview']),
+    cursorSecret: 'internal-test-cursor-secret',
+    clock: () => 1_784_044_803_000,
+  });
+  const server = http.createServer((req, res) => { void api.handle(req, res, 'admin'); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const base = `http://127.0.0.1:${address.port}/api/accounts/acct_wc_demo/reply-preview-contexts`;
+    const response = await fetch(`${base}?channel=comment&limit=10`);
+    assert.equal(response.status, 200);
+    const body = await response.json() as { data: { accountId: string; items: Array<Record<string, unknown>> } };
+    assert.equal(body.data.accountId, 'acct_wc_demo');
+    assert.deepEqual(body.data.items, [{
+      threadId: 'thread-a', messageId: 'message-a', channel: 'comment', messageType: 'text',
+      userMessage: '这双靴子还有吗', userName: '清', videoTitle: '血小板的cos', receivedAt: 1_784_044_802_000,
+    }]);
+    assert.equal('externalThreadId' in body.data.items[0], false);
+    assert.deepEqual(calls, [{ accountId: 'acct_wc_demo', channel: 'comment', limit: 10 }]);
+
+    empty = true;
+    const emptyResponse = await fetch(`${base}?channel=comment`);
+    assert.equal(emptyResponse.status, 200);
+    const emptyBody = await emptyResponse.json() as { data: { items: unknown[] } };
+    assert.deepEqual(emptyBody.data.items, []);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test('DM preview contexts require full-text permission before the store is read', async () => {
+  let storeReads = 0;
+  const api = new InteractionInternalApi({
+    store: {
+      listReplyPreviewContexts: async () => { storeReads += 1; return []; },
+    } as unknown as InteractionStore,
+    configs: {} as ReplyConfigStore,
+    workflow: {} as ReplyWorkflow,
+    grantsFor: () => new Set(['interaction.config.preview']),
+    cursorSecret: 'internal-test-cursor-secret',
+  });
+  const server = http.createServer((req, res) => { void api.handle(req, res, 'admin'); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/api/accounts/acct_wc_demo/reply-preview-contexts?channel=dm`,
+    );
+    assert.equal(response.status, 403);
+    assert.equal(storeReads, 0);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test('internal config reads fall back to the published snapshot after publish clears draftVersion', async () => {
   let selector: unknown;
   const published = {

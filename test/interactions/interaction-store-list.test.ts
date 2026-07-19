@@ -53,6 +53,35 @@ test('sync freshness is account/env scoped and preserves per-channel observed/re
   assert.match(capturedSql, /ORDER BY channel,observed_at DESC,received_at DESC,id DESC/);
 });
 
+test('reply preview contexts use the authoritative auth binding and latest active inbound message only', async () => {
+  let capturedSql = '';
+  let capturedParams: unknown[] = [];
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      capturedSql = sql;
+      capturedParams = params;
+      return { rows: [{
+        thread_id: 'thread-a', message_id: 'message-a', channel: 'comment', message_type: 'text',
+        content_text: '这双靴子还有吗', participant_name: '清', source_title: '血小板的cos',
+        platform_created_at: new Date(1_784_044_802_000),
+      }] };
+    },
+  } as unknown as Pool;
+  const store = new InteractionStore({ pool });
+
+  const result = await store.listReplyPreviewContexts('acct-a', 'comment', 20);
+
+  assert.deepEqual(result, [{
+    threadId: 'thread-a', messageId: 'message-a', channel: 'comment', messageType: 'text',
+    userMessage: '这双靴子还有吗', userName: '清', videoTitle: '血小板的cos', receivedAt: 1_784_044_802_000,
+  }]);
+  assert.deepEqual(capturedParams, ['wechat_channels', 'acct-a', 'comment', 20]);
+  assert.match(capturedSql, /t\.account_id=a\.account_id AND t\.env_key=a\.env_key/);
+  assert.match(capturedSql, /direction='inbound' AND lifecycle='active'/);
+  assert.match(capturedSql, /ORDER BY platform_created_at DESC,id DESC LIMIT 1/);
+  assert.doesNotMatch(capturedSql, /interaction_send_attempts/);
+});
+
 test('a newer observation of an unchanged empty batch advances evidence but an older replay does not', async () => {
   let observedAt = 1_784_044_800_000;
   let receivedAt = 1_784_044_800_100;

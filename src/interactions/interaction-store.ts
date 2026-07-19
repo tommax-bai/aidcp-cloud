@@ -63,6 +63,17 @@ export interface ListResult {
   next: { lastMessageAt: number; id: string } | null;
 }
 
+export interface ReplyPreviewContext {
+  threadId: string;
+  messageId: string;
+  channel: InteractionChannel;
+  messageType: MessageView['messageType'];
+  userMessage: string | null;
+  userName: string | null;
+  videoTitle: string | null;
+  receivedAt: number;
+}
+
 export interface RecoverableJobRef {
   accountId: string;
   envKey: string;
@@ -728,6 +739,49 @@ export class InteractionStore {
         ? { lastMessageAt: epoch(page[page.length - 1].last_message_at), id: page[page.length - 1].thread_id }
         : null,
     };
+  }
+
+  async listReplyPreviewContexts(
+    accountId: string,
+    channel: InteractionChannel,
+    limit: number,
+  ): Promise<ReplyPreviewContext[]> {
+    const { rows } = await this.pool.query<{
+      thread_id: string;
+      message_id: string;
+      channel: InteractionChannel;
+      message_type: MessageView['messageType'];
+      content_text: string | null;
+      participant_name: string | null;
+      source_title: string | null;
+      platform_created_at: Date | string;
+    }>(
+      `SELECT t.id AS thread_id,m.id AS message_id,t.channel,m.message_type,m.content_text,
+              t.participant_name,t.source_title,m.platform_created_at
+         FROM interaction_auth_state a
+         JOIN interaction_threads t
+           ON t.platform=a.platform AND t.account_id=a.account_id AND t.env_key=a.env_key
+         JOIN LATERAL (
+           SELECT id,message_type,content_text,platform_created_at
+             FROM interaction_messages
+            WHERE thread_id=t.id AND account_id=t.account_id AND env_key=t.env_key
+              AND direction='inbound' AND lifecycle='active'
+            ORDER BY platform_created_at DESC,id DESC LIMIT 1
+         ) m ON true
+        WHERE a.platform=$1 AND a.account_id=$2 AND t.channel=$3
+        ORDER BY m.platform_created_at DESC,t.id DESC LIMIT $4`,
+      [INTERACTION_PLATFORM, accountId, channel, limit],
+    );
+    return rows.map((row) => ({
+      threadId: row.thread_id,
+      messageId: row.message_id,
+      channel: row.channel,
+      messageType: row.message_type,
+      userMessage: row.content_text,
+      userName: row.participant_name,
+      videoTitle: row.source_title,
+      receivedAt: epoch(row.platform_created_at),
+    }));
   }
 
   async getDetail(

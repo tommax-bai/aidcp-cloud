@@ -41,7 +41,8 @@ export function parseInteractionPanelGrants(raw: string | undefined): Map<string
 
 const KNOWN_SUFFIXES = new Set([
   'interaction-runtime-controls', 'interaction-reply-policy', 'reply-templates', 'reply-rules',
-  'reply-profile', 'reply-preview', 'reply-config/initialize', 'reply-config/publish', 'reply-config/audit',
+  'reply-profile', 'reply-preview', 'reply-preview-contexts', 'reply-config/initialize',
+  'reply-config/publish', 'reply-config/audit',
 ]);
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
@@ -131,7 +132,7 @@ function publicControls(value: RuntimeControls) {
 }
 
 function routeGrant(suffix: string, method: string): InteractionGrant {
-  if (suffix === 'reply-preview') return 'interaction.config.preview';
+  if (suffix === 'reply-preview' || suffix === 'reply-preview-contexts') return 'interaction.config.preview';
   if (suffix === 'reply-config/publish') return 'interaction.config.publish';
   if (suffix === 'reply-config/audit') return 'interaction.audit.view';
   if (method === 'GET') return 'interaction.config.view';
@@ -204,7 +205,10 @@ export class InteractionInternalApi {
   ): Promise<void> {
     const method = req.method ?? 'GET';
     this.require(actor, routeGrant(suffix, method));
-    onlyQuery(url, suffix === 'reply-config/audit' && method === 'GET' ? ['limit','cursor'] : []);
+    const allowedQuery = suffix === 'reply-config/audit' && method === 'GET'
+      ? ['limit','cursor']
+      : suffix === 'reply-preview-contexts' && method === 'GET' ? ['channel','limit'] : [];
+    onlyQuery(url, allowedQuery);
     if (suffix === 'interaction-runtime-controls') {
       if (method === 'GET') {
         this.require(actor, 'interaction.config.view');
@@ -355,6 +359,17 @@ export class InteractionInternalApi {
         this.ok(res, requestId, { accountId, currentVersion: head!.currentVersion, profiles: snapshot.profiles });
         return;
       }
+    }
+    if (suffix === 'reply-preview-contexts' && method === 'GET') {
+      const channel = url.searchParams.get('channel');
+      const limit = Number(url.searchParams.get('limit') ?? 20);
+      if ((channel !== 'comment' && channel !== 'dm') || !Number.isInteger(limit) || limit < 1 || limit > 50) {
+        throw new InteractionError('INTERACTION_VALIDATION_FAILED', 'preview context 查询不合法。', 422);
+      }
+      if (channel === 'dm') this.require(actor, 'interaction.dm.view_full');
+      const items = await this.deps.store.listReplyPreviewContexts(accountId, channel, limit);
+      this.ok(res, requestId, { accountId, items });
+      return;
     }
     if (suffix === 'reply-preview' && method === 'POST') {
       this.require(actor, 'interaction.config.preview');
