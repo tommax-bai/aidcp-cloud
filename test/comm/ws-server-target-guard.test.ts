@@ -37,6 +37,44 @@ async function connectEdge(port: number, edgeId: string, accountId?: string, cap
   return ws;
 }
 
+test('失败 hello 即使已写入账号/能力也不登记在线路由，并在 error 后关闭', async () => {
+  const failedHello: MessageHandler = {
+    handle(env: Envelope, session: EdgeSession): Envelope {
+      if (env.type === 'hello') {
+        const p = env.payload as HelloPayload;
+        session.edgeId = p.edgeId;
+        session.accountId = p.accountId;
+        session.capabilities = p.capabilities;
+        throw new Error('runtime registry not ready');
+      }
+      return makeEnvelope('pong', env.id, 0, {});
+    },
+  };
+  const s = new EdgeCloudServer({ handler: failedHello, port: 0, clock: () => 0 });
+  await s.start();
+  const ws = new WebSocket(`ws://127.0.0.1:${s.address()!}`);
+  await once(ws, 'open');
+  ws.send(JSON.stringify(makeEnvelope('hello', 'failed-hello', 0, {
+    edgeId: 'edge-ghost', accountId: 'acc-ghost', capabilities: ['interaction_test_data_reset_v1'],
+  })));
+  const [data] = (await once(ws, 'message')) as [Buffer | string];
+  assert.equal(JSON.parse(data.toString()).type, 'error');
+  await once(ws, 'close');
+  assert.equal(s.edgeCount(), 0);
+  assert.equal(s.resolveEdgeIdForAccount('acc-ghost', 'interaction_test_data_reset_v1'), null);
+  assert.equal(s.pushToEdges(makeEnvelope('interaction.sync.request', 'reset-ghost', 0, {
+    requestId: 'reset-ghost',
+    envKey: 'env-ghost',
+    accountId: 'acc-ghost',
+    platform: 'wechat_channels',
+    channel: 'comment',
+    scopeExternalId: null,
+    reason: 'test_reset',
+    requestedAt: 0,
+  }), 'edge-ghost'), 0);
+  await s.close();
+});
+
 test('缺目标 edgeId 绝不广播：多个在线 edge 时命中 0（诚实失败）', async () => {
   const s = new EdgeCloudServer({ handler: helloHandler, port: 0, clock: () => 0 });
   await s.start();

@@ -2120,9 +2120,6 @@ async function main(): Promise<void> {
       cursorSecret: clientCursorSecret,
     })
     : undefined;
-  await server.start();
-  console.log(`[aidcp-cloud] 边-云 WebSocket 服务端已监听 :${port}`);
-
   if (interactionStore && replyWorkflow && interactionSender) {
     let recoveryRunning = false;
     const drainInteractionRecovery = async (): Promise<void> => {
@@ -2903,6 +2900,11 @@ async function main(): Promise<void> {
     logger: console,
   });
   console.log('[aidcp-cloud] 连接运行时注册表就绪（按连接多租户编排，握手建运行时、断连拆除）');
+
+  // hello 处理会同步进入 runtimes.onHandshake()/busFor()。必须先完成运行时注册表装配再开放端口，
+  // 否则 Cloud 重启窗口内的 Edge 会收到 handler_error，却可能留下只有自陈 identity/capability 的半握手连接。
+  await server.start();
+  console.log(`[aidcp-cloud] 边-云 WebSocket 服务端已监听 :${port}`);
 
   // 角色 prompt 只读预览（role-prompt-visibility）：用一个仅供预览的 RoleDispatcher 渲染真实 prompt
   // （独立私有总线、从不启动会话 / 从不下发指令；多租户下不再有单一全局 dispatcher 可借）。

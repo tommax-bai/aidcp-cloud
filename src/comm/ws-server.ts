@@ -325,9 +325,9 @@ export class EdgeCloudServer implements EdgePusher {
       // 在握手成功时登记边缘连接，使其可被主动推送
       const env = parseEnvelope(text);
       const reply = await this.routeMessage(text, session);
-      if (env?.type === 'hello') {
+      if (env?.type === 'hello' && reply?.type === 'welcome') {
         this.edges.set(session.sessionId, { ws, session, lastSeen: this.clock() });
-      } else {
+      } else if (env?.type !== 'hello') {
         // 任意入站帧刷新 lastSeen（连接活着的证据）
         const conn = this.edges.get(session.sessionId);
         if (conn) conn.lastSeen = this.clock();
@@ -341,6 +341,10 @@ export class EdgeCloudServer implements EdgePusher {
         } catch (err) {
           console.warn(`[ws-server] onEdgeRegistered 回调异常（已吞）: ${err instanceof Error ? err.message : String(err)}`);
         }
+      } else if (env?.type === 'hello') {
+        // error/bad hello 不能留下可被 account/capability resolver 命中的幽灵连接。
+        // 先写 error frame，再关闭；Edge 必须把它当握手失败并走既有重连。
+        ws.close(1008, 'handshake rejected');
       }
     });
     // ws 协议层 pong（响应主动 ping）也刷新 lastSeen

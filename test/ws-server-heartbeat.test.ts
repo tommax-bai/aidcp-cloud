@@ -4,7 +4,11 @@ import { WebSocket } from 'ws';
 import { EdgeCloudServer, makeEnvelope } from '../src/comm/index.js';
 import type { MessageHandler } from '../src/comm/ws-server.js';
 
-const echo: MessageHandler = { handle: (env) => makeEnvelope('pong', env.id, 0, {}) };
+const echo: MessageHandler = {
+  handle: (env, session) => env.type === 'hello'
+    ? makeEnvelope('welcome', env.id, 0, { sessionId: session.sessionId, serverVersion: 'test' })
+    : makeEnvelope('pong', env.id, 0, {}),
+};
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
