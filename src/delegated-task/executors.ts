@@ -5,6 +5,7 @@ import type { ReferenceNote } from '../publish-agent/publish-scheduler.js';
 import type { ReferenceImageSnapshot } from '../publish-agent/types.js';
 import type { DelegatedTaskExecutor, DelegatedExecutionResult } from './worker.js';
 import type { DelegatedTask } from './types.js';
+import { delegatedRewriteSourceId } from './ownership.js';
 
 export interface DelegatedCommentPort {
   triggerManual(
@@ -441,7 +442,7 @@ export function createDelegatedExecutorRouter(deps: DelegatedExecutorDeps): {
     externalBusy: (task) => task.actionFamily === 'comment'
       ? deps.comments.isRunning(task.accountId)
       : task.actionFamily === 'publish'
-        ? deps.publishes.isBusy(task.accountId)
+        ? delegatedRewriteSourceId(task) === null && deps.publishes.isBusy(task.accountId)
         : false,
   };
 }

@@ -4,6 +4,23 @@ import { MemoryDelegatedTaskStore } from '../../src/delegated-task/store.js';
 import { DelegatedTaskWorker, type DelegatedExecutionResult, type DelegatedTaskExecutor } from '../../src/delegated-task/worker.js';
 import type { DelegatedTask, DelegatedTaskAttempt } from '../../src/delegated-task/types.js';
 
+function deferredExecution(): {
+  promise: Promise<DelegatedExecutionResult>;
+  resolve: (result: DelegatedExecutionResult) => void;
+} {
+  let resolve!: (result: DelegatedExecutionResult) => void;
+  const promise = new Promise<DelegatedExecutionResult>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let i = 0; i < 100; i += 1) {
+    if (predicate()) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.fail('condition_not_reached');
+}
+
 async function confirmedTask(store: MemoryDelegatedTaskStore, now: number, overrides: Partial<Parameters<MemoryDelegatedTaskStore['createDraft']>[0]> = {}) {
   const created = await store.createDraft({
     accountId: 'xhs-1', accountName: '小萝北', platform: 'xiaohongshu', action: 'comment_batch',
@@ -12,6 +29,111 @@ async function confirmedTask(store: MemoryDelegatedTaskStore, now: number, overr
   });
   return (await store.confirm(created.task.id, created.task.version))!;
 }
+
+test('worker runs three different rewrite sources concurrently and keeps the fourth queued at the configured cap', async () => {
+  const store = new MemoryDelegatedTaskStore();
+  const now = 15_000_000;
+  const tasks = await Promise.all(['source-1', 'source-2', 'source-3', 'source-4'].map((sourceId) =>
+    confirmedTask(store, now, {
+      action: 'publish_post', targetSuccessCount: 1, maxAttempts: 1,
+      sourceConstraints: { sourceId }, dedupeKey: `rewrite-${sourceId}`,
+    })));
+  const gates = new Map(tasks.map((task) => [task.id, deferredExecution()]));
+  const started: string[] = [];
+  const executor: DelegatedTaskExecutor = {
+    targetKey: (task) => `draft:${task.id}`,
+    execute: async (task) => {
+      started.push(task.id);
+      return gates.get(task.id)!.promise;
+    },
+  };
+  const worker = new DelegatedTaskWorker({
+    store, executorFor: () => executor, now: () => now, claimLeaseMs: 10_000, maxConcurrent: 3,
+  });
+
+  const running = [worker.tick(), worker.tick(), worker.tick()];
+  await waitFor(() => started.length === 3);
+  assert.equal(await worker.tick(), null);
+  assert.equal((await store.get(tasks[3]!.id))?.status, 'queued');
+
+  for (const taskId of started) {
+    gates.get(taskId)!.resolve({ kind: 'waiting_approval', evidenceRef: `draft:${taskId}` });
+  }
+  await Promise.all(running);
+  assert.deepEqual((await Promise.all(tasks.slice(0, 3).map((task) => store.get(task.id)))).map((task) => task?.status), [
+    'waiting_approval', 'waiting_approval', 'waiting_approval',
+  ]);
+});
+
+test('worker defers a second rewrite for the same account and source while the first is executing', async () => {
+  const store = new MemoryDelegatedTaskStore();
+  const now = 16_000_000;
+  const first = await confirmedTask(store, now, {
+    action: 'publish_post', targetSuccessCount: 1, maxAttempts: 1,
+    sourceConstraints: { sourceId: 'same-source' }, dedupeKey: 'same-source-1',
+  });
+  const second = await confirmedTask(store, now, {
+    action: 'publish_post', targetSuccessCount: 1, maxAttempts: 1,
+    sourceConstraints: { sourceId: 'same-source' }, dedupeKey: 'same-source-2',
+  });
+  const gate = deferredExecution();
+  const started: string[] = [];
+  const executor: DelegatedTaskExecutor = {
+    targetKey: (task) => `draft:${task.id}`,
+    execute: async (task) => {
+      started.push(task.id);
+      return gate.promise;
+    },
+  };
+  const worker = new DelegatedTaskWorker({
+    store, executorFor: () => executor, now: () => now, retryDelayMs: 1_000,
+    claimLeaseMs: 10_000, maxConcurrent: 3,
+  });
+
+  const firstRun = worker.tick();
+  await waitFor(() => started.length === 1);
+  const deferred = await worker.tick();
+  assert.equal(deferred?.id, second.id);
+  assert.equal(deferred?.status, 'deferred');
+  assert.deepEqual(started, [first.id]);
+
+  gate.resolve({ kind: 'waiting_approval', evidenceRef: `draft:${first.id}` });
+  await firstRun;
+});
+
+test('waiting approval rewrite does not block another task for the same source', async () => {
+  const store = new MemoryDelegatedTaskStore();
+  let now = 17_000_000;
+  const first = await confirmedTask(store, now, {
+    action: 'publish_post', targetSuccessCount: 1, maxAttempts: 1,
+    sourceConstraints: { sourceId: 'reusable-source' }, dedupeKey: 'waiting-source-1',
+  });
+  const second = await confirmedTask(store, now, {
+    action: 'publish_post', targetSuccessCount: 1, maxAttempts: 1,
+    sourceConstraints: { sourceId: 'reusable-source' }, dedupeKey: 'waiting-source-2',
+  });
+  const executed: string[] = [];
+  const executor: DelegatedTaskExecutor = {
+    targetKey: (task) => `draft:${task.id}`,
+    execute: async (task) => {
+      executed.push(task.id);
+      return { kind: 'waiting_approval', evidenceRef: `draft:${task.id}` };
+    },
+    reconcileWaitingApproval: async (task) => ({ kind: 'waiting_approval', evidenceRef: `draft:${task.id}` }),
+  };
+  const worker = new DelegatedTaskWorker({
+    store, executorFor: () => executor, now: () => now, retryDelayMs: 1_000,
+    claimLeaseMs: 10_000, maxConcurrent: 3,
+  });
+
+  await worker.tick();
+  assert.equal((await store.get(first.id))?.status, 'waiting_approval');
+  now += 2_000;
+  await worker.tick();
+  await worker.tick();
+  assert.deepEqual(executed, [first.id, second.id]);
+  assert.equal((await store.get(second.id))?.status, 'waiting_approval');
+});
 
 test('worker reports honest 3/5 partial completion after five attempts', async () => {
   const store = new MemoryDelegatedTaskStore();

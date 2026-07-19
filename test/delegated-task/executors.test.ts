@@ -291,6 +291,24 @@ test('command-triggered comment tasks forward originChatId to every comment bran
   assert.deepEqual(seen, ['oc_private_p', 'oc_private_p', 'oc_private_p']);
 });
 
+test('rewrite generation does not inherit the autonomous publish busy gate', () => {
+  const router = createDelegatedExecutorRouter({
+    comments: {
+      triggerManual: async () => ({ ok: false, message: 'unused' }),
+      triggerTargeted: async () => ({ ok: false, message: 'unused' }),
+      isRunning: () => false,
+    },
+    publishes: { triggerDelegated: async () => ({ result: 'blocked', reason: 'unused' }), isBusy: () => true },
+    loadCandidate: async () => null,
+    approveCandidate: async () => null,
+    rejectCandidate: async () => null,
+    modifyCandidate: async () => null,
+  });
+
+  assert.equal(router.externalBusy(task({ action: 'publish_post', actionFamily: 'publish', sourceConstraints: { sourceId: 'source-1' } })), false);
+  assert.equal(router.externalBusy(task({ action: 'publish_post', actionFamily: 'publish', sourceConstraints: {} })), true);
+});
+
 test('automatic comment tasks carry no originChatId, so cards fall back to the account team route', async () => {
   const seen: Array<string | undefined> = [];
   const router = createDelegatedExecutorRouter({

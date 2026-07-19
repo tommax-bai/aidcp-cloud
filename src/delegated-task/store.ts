@@ -11,6 +11,7 @@ import type {
   DelegatedTerminalOutcome,
   DelegatedVerificationKind,
 } from './types.js';
+import { delegatedTasksConflict } from './ownership.js';
 import {
   actionFamilyFor,
   assertTaskTransition,
@@ -157,6 +158,7 @@ export interface DelegatedTaskStore {
   requestCancel(id: string, version?: number): Promise<DelegatedTask | null>;
   complete(id: string, claimToken: string | null, status: DelegatedTaskStatus, outcome: DelegatedTerminalOutcome): Promise<DelegatedTask | null>;
   hasActiveOwnership(accountId: string, family: DelegatedActionFamily, excludingTaskId?: string): Promise<boolean>;
+  hasTaskOwnershipConflict(task: DelegatedTask): Promise<boolean>;
   close?(): Promise<void>;
 }
 
@@ -615,6 +617,16 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
     return Boolean(rows[0]?.present);
   }
 
+  async hasTaskOwnershipConflict(task: DelegatedTask): Promise<boolean> {
+    const { rows } = await this.pool.query<TaskRow>(
+      `SELECT * FROM delegated_tasks WHERE account_id=$1 AND action_family=$2
+         AND status IN ('planning','waiting_approval','executing')
+         AND id <> $3::uuid`,
+      [task.accountId, task.actionFamily, task.id],
+    );
+    return rows.some((row) => delegatedTasksConflict(task, mapTask(row)));
+  }
+
   async close(): Promise<void> {
     await this.pool.end();
   }
@@ -825,6 +837,10 @@ export class MemoryDelegatedTaskStore implements DelegatedTaskStore {
   async hasActiveOwnership(accountId: string, family: DelegatedActionFamily, excludingTaskId?: string): Promise<boolean> {
     return [...this.tasks.values()].some((t) => t.accountId === accountId && t.actionFamily === family && t.id !== excludingTaskId &&
       ['planning', 'waiting_approval', 'executing'].includes(t.status));
+  }
+
+  async hasTaskOwnershipConflict(task: DelegatedTask): Promise<boolean> {
+    return [...this.tasks.values()].some((active) => delegatedTasksConflict(task, active));
   }
 
   private mutate(task: DelegatedTask, patch: Partial<DelegatedTask>): void {

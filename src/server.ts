@@ -3730,6 +3730,10 @@ async function main(): Promise<void> {
       terminalWaitMs: readEnvNumber('AIDCP_DELEGATED_TASK_TERMINAL_WAIT_MS', 4 * 60_000),
     });
     const delegatedTaskNotificationGate = new DelegatedTaskNotificationGate();
+    const delegatedTaskMaxConcurrent = Math.max(
+      1,
+      Math.trunc(readEnvNumber('AIDCP_DELEGATED_TASK_MAX_CONCURRENT', 3)),
+    );
     const worker = new DelegatedTaskWorker({
       store: delegatedTaskStore,
       executorFor: delegatedExecutors.executorFor,
@@ -3770,11 +3774,12 @@ async function main(): Promise<void> {
           console.warn(`[delegated-task] ${commandLabel}失败结果卡发送失败 task=${task.id}: ${(err as Error).message}`);
         }
       },
+      maxConcurrent: delegatedTaskMaxConcurrent,
       logger: console,
     });
     if (readEnvString('AIDCP_DELEGATED_TASK_WORKER') !== 'false') {
       worker.start(readEnvNumber('AIDCP_DELEGATED_TASK_POLL_MS', 5_000));
-      console.log('[aidcp-cloud] DelegatedTaskWorker 已启动（automatic priority；安全边界 pause/cancel）');
+      console.log(`[aidcp-cloud] DelegatedTaskWorker 已启动（automatic priority；安全边界 pause/cancel；并发=${delegatedTaskMaxConcurrent}）`);
     } else {
       console.warn('[aidcp-cloud] DelegatedTaskWorker 已禁用（任务可确认但不会执行）');
     }

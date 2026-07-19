@@ -29,6 +29,7 @@ export interface DelegatedTaskWorkerDeps {
   workerId?: string;
   claimLeaseMs?: number;
   retryDelayMs?: number;
+  maxConcurrent?: number;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
 
@@ -37,9 +38,11 @@ export class DelegatedTaskWorker {
   private readonly workerId: string;
   private readonly claimLeaseMs: number;
   private readonly retryDelayMs: number;
+  private readonly maxConcurrent: number;
   private readonly logger: Pick<Console, 'log' | 'warn' | 'error'>;
   private timer: NodeJS.Timeout | null = null;
-  private ticking = false;
+  private activeExecutions = 0;
+  private admissionTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly deps: DelegatedTaskWorkerDeps) {
     this.now = deps.now ?? Date.now;
@@ -49,14 +52,15 @@ export class DelegatedTaskWorker {
     // task while the first process is still awaiting an honest terminal result.
     this.claimLeaseMs = Math.max(10_000, deps.claimLeaseMs ?? 15 * 60_000);
     this.retryDelayMs = Math.max(1_000, deps.retryDelayMs ?? 30_000);
+    this.maxConcurrent = Math.max(1, Math.trunc(deps.maxConcurrent ?? 3));
     this.logger = deps.logger ?? console;
   }
 
   start(intervalMs = 5_000): void {
     if (this.timer) return;
-    this.timer = setInterval(() => void this.tick(), Math.max(500, intervalMs));
+    this.timer = setInterval(() => this.pump(), Math.max(500, intervalMs));
     this.timer.unref?.();
-    void this.tick();
+    this.pump();
   }
 
   stop(): void {
@@ -65,19 +69,28 @@ export class DelegatedTaskWorker {
   }
 
   async tick(): Promise<DelegatedTask | null> {
-    if (this.ticking) return null;
-    this.ticking = true;
+    const releaseAdmission = await this.acquireAdmission();
+    if (this.activeExecutions >= this.maxConcurrent) {
+      releaseAdmission();
+      return null;
+    }
+    this.activeExecutions += 1;
     try {
       await this.expireDueTasks();
       const task = await this.deps.store.claimNext({ workerId: this.workerId, leaseMs: this.claimLeaseMs, now: this.now() });
       if (!task || !task.claimToken) return null;
-      return await this.processClaimed(task);
+      return await this.processClaimed(task, releaseAdmission);
     } finally {
-      this.ticking = false;
+      releaseAdmission();
+      this.activeExecutions -= 1;
     }
   }
 
-  private async processClaimed(task: DelegatedTask): Promise<DelegatedTask | null> {
+  private pump(): void {
+    for (let slot = 0; slot < this.maxConcurrent; slot += 1) void this.tick();
+  }
+
+  private async processClaimed(task: DelegatedTask, releaseAdmission: () => void): Promise<DelegatedTask | null> {
     const token = task.claimToken!;
     const fresh = await this.deps.store.get(task.id);
     if (!fresh || fresh.claimToken !== token) return fresh;
@@ -88,16 +101,6 @@ export class DelegatedTaskWorker {
     if (this.deps.platformStillMatches && !(await this.deps.platformStillMatches(fresh))) {
       return this.update(await this.deps.store.complete(fresh.id, token, 'failed', {
         code: 'platform_changed', message: '账号平台事实已变化，任务未路由到其他平台。',
-      }));
-    }
-    if (await this.deps.store.hasActiveOwnership(fresh.accountId, fresh.actionFamily, fresh.id)) {
-      return this.update(await this.deps.store.releaseClaim(fresh.id, token, 'deferred', {
-        nextEligibleAt: this.now() + this.retryDelayMs, step: 'waiting_ownership', reason: 'delegated_ownership_busy',
-      }));
-    }
-    if (this.deps.externalBusy && await this.deps.externalBusy(fresh)) {
-      return this.update(await this.deps.store.releaseClaim(fresh.id, token, 'deferred', {
-        nextEligibleAt: this.now() + this.retryDelayMs, step: 'waiting_safe_slot', reason: 'scheduler_busy',
       }));
     }
     const executor = this.deps.executorFor(fresh);
@@ -111,9 +114,21 @@ export class DelegatedTaskWorker {
       if (!executor.reconcileWaitingApproval) {
         return this.deps.store.releaseWaitingApprovalClaim(fresh.id, token, this.now() + this.retryDelayMs);
       }
+      releaseAdmission();
       const result = await executor.reconcileWaitingApproval(fresh);
       const unsettled = await this.deps.store.listUnsettledAttempts(fresh.id);
       return this.handleWithoutNewAttempt(fresh, token, result, unsettled[0]);
+    }
+
+    if (await this.deps.store.hasTaskOwnershipConflict(fresh)) {
+      return this.update(await this.deps.store.releaseClaim(fresh.id, token, 'deferred', {
+        nextEligibleAt: this.now() + this.retryDelayMs, step: 'waiting_ownership', reason: 'delegated_ownership_busy',
+      }));
+    }
+    if (this.deps.externalBusy && await this.deps.externalBusy(fresh)) {
+      return this.update(await this.deps.store.releaseClaim(fresh.id, token, 'deferred', {
+        nextEligibleAt: this.now() + this.retryDelayMs, step: 'waiting_safe_slot', reason: 'scheduler_busy',
+      }));
     }
 
     const unsettled = await this.deps.store.listUnsettledAttempts(fresh.id);
@@ -126,6 +141,7 @@ export class DelegatedTaskWorker {
           submittedUnknown: attempt.status === 'dispatched',
         }));
       }
+      releaseAdmission();
       const reconciled = await executor.reconcileAttempt(fresh, attempt);
       return this.handleAttemptResult(fresh, token, attempt, reconciled, true);
     }
@@ -146,6 +162,7 @@ export class DelegatedTaskWorker {
     await this.deps.store.markAttemptDispatched(attempt.id);
     const executing = await this.deps.store.markExecuting(fresh.id, token, `executing:${fresh.action}`);
     if (!executing || executing.claimToken !== token) return executing;
+    releaseAdmission();
     let result: DelegatedExecutionResult;
     try {
       result = await executor.execute(executing, attempt);
@@ -154,6 +171,22 @@ export class DelegatedTaskWorker {
       result = { kind: 'failed', reason: `executor_exception:${(err as Error).message}`, retryable: true };
     }
     return this.handleAttemptResult(executing, token, attempt, result, false);
+  }
+
+  private async acquireAdmission(): Promise<() => void> {
+    let releaseTurn!: () => void;
+    const turn = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    const previous = this.admissionTail;
+    this.admissionTail = previous.then(() => turn);
+    await previous;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      releaseTurn();
+    };
   }
 
   private async handleAttemptResult(
