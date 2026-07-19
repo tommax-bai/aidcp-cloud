@@ -852,7 +852,14 @@ export class ClientUserStore {
    */
   async completeProvisioningIntent(
     userId: string,
-    input: { intentId: string; proof: string; envKey: string; label?: string | null; platform?: string | null },
+    input: {
+      intentId: string;
+      proof: string;
+      envKey: string;
+      label?: string | null;
+      platform?: string | null;
+      slowStartEnabled?: boolean;
+    },
   ): Promise<CompleteProvisioningIntentResult> {
     const intentId = String(input.intentId || '').trim();
     const proof = String(input.proof || '');
@@ -867,6 +874,12 @@ export class ClientUserStore {
     if (!ENV_KEY_PATTERN.test(envKey) || !platform) {
       return { ok: false, reason: 'invalid_environment' };
     }
+    if (input.slowStartEnabled === true && platform !== 'facebook') {
+      return { ok: false, reason: 'invalid_environment' };
+    }
+    const slowStartSince = input.slowStartEnabled === true
+      ? new Date(shanghaiDayStartMs(Date.now()))
+      : null;
 
     const client = await this.pool.connect();
     try {
@@ -922,11 +935,12 @@ export class ClientUserStore {
       }
 
       const registered = await client.query<{ env_key: string }>(
-        `INSERT INTO client_environments (env_key,label,platform,source,created_at,updated_at)
-         VALUES ($1,$2,$3,'auto',now(),now())
+        `INSERT INTO client_environments
+           (env_key,label,platform,source,slow_start_since,slow_start_initialized,created_at,updated_at)
+         VALUES ($1,$2,$3,'auto',$4,true,now(),now())
          ON CONFLICT (env_key) DO NOTHING
          RETURNING env_key`,
-        [envKey, label, platform],
+        [envKey, label, platform, slowStartSince],
       );
       if (!registered.rows[0]) {
         await client.query('ROLLBACK');

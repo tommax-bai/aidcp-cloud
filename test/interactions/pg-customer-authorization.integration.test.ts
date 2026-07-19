@@ -5,6 +5,7 @@ import pg from 'pg';
 import { ClientUserStore } from '../../src/client-auth/client-user-store.js';
 import { parseSyncBatchPayload } from '../../src/interactions/contract.js';
 import { InteractionStore } from '../../src/interactions/interaction-store.js';
+import { shanghaiDayStartMs } from '../../src/time/shanghai-day.js';
 
 const connectionString = process.env.AIDCP_INTERACTION_TEST_DATABASE_URL;
 
@@ -83,18 +84,29 @@ test('PostgreSQL: authoritative env ownership is unique and cross-customer inter
       const provision = await users.createProvisioningIntent('user-a');
       assert.equal(provision.ok, true);
       if (!provision.ok) return;
+      const provisionStartedAt = Date.now();
       const completed = await users.completeProvisioningIntent('user-a', {
         intentId: provision.intentId, proof: provision.proof, envKey: 'env-auth-provisioned',
-        label: '客户端新建', platform: 'facebook',
+        label: '客户端新建', platform: 'facebook', slowStartEnabled: true,
       });
       assert.equal(completed.ok, true);
       if (!completed.ok) return;
+      const provisionFinishedAt = Date.now();
       assert.equal(completed.idempotent, false);
+      const firstSlowStart = (await pool.query<{ slow_start_since: Date | null }>(
+        `SELECT slow_start_since FROM client_environments WHERE env_key='env-auth-provisioned'`,
+      )).rows[0].slow_start_since;
+      assert.ok((firstSlowStart?.getTime() ?? 0) >= shanghaiDayStartMs(provisionStartedAt));
+      assert.ok((firstSlowStart?.getTime() ?? 0) <= shanghaiDayStartMs(provisionFinishedAt));
+      assert.equal((await users.setEnvironmentSlowStart('user-a', 'env-auth-provisioned', false, Date.now())).ok, true);
       const retried = await users.completeProvisioningIntent('user-a', {
         intentId: provision.intentId, proof: provision.proof, envKey: 'env-auth-provisioned',
-        label: '客户端新建', platform: 'facebook',
+        label: '客户端新建', platform: 'facebook', slowStartEnabled: true,
       });
       assert.equal(retried.ok && retried.idempotent, true);
+      assert.equal((await pool.query<{ slow_start_since: Date | null }>(
+        `SELECT slow_start_since FROM client_environments WHERE env_key='env-auth-provisioned'`,
+      )).rows[0].slow_start_since, null, '完成重试不得复活已关闭的慢启动');
       assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM client_env_scope
         WHERE env_key='env-auth-provisioned' AND user_id='user-a' AND source='admin'`)).rows[0].n, 1);
       const storedProof = (await pool.query<{ proof_hash: string }>(

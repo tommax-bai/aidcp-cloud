@@ -717,11 +717,12 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         return;
       }
       const raw = body as Record<string, unknown>;
-      const allowed = new Set(['intentId', 'proof', 'envKey', 'label', 'platform']);
+      const allowed = new Set(['intentId', 'proof', 'envKey', 'label', 'platform', 'slowStartEnabled']);
       if (Object.keys(raw).some((key) => !allowed.has(key)) ||
           typeof raw.intentId !== 'string' || typeof raw.proof !== 'string' ||
           typeof raw.envKey !== 'string' || (raw.label != null && typeof raw.label !== 'string') ||
-          typeof raw.platform !== 'string') {
+          typeof raw.platform !== 'string' ||
+          (raw.slowStartEnabled !== undefined && typeof raw.slowStartEnabled !== 'boolean')) {
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
@@ -731,6 +732,7 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         envKey: raw.envKey,
         label: raw.label as string | null | undefined,
         platform: raw.platform,
+        slowStartEnabled: raw.slowStartEnabled as boolean | undefined,
       });
       if (!result.ok) {
         const status = result.reason === 'disabled' ? 401 :

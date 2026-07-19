@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import pg from 'pg';
 import { CLIENT_USERS_SCHEMA_SQL, ClientUserStore } from '../src/client-auth/client-user-store.js';
 import { shanghaiDayStartMs } from '../src/time/shanghai-day.js';
@@ -192,6 +193,60 @@ test('completeProvisioningIntent rejects malformed intent/proof before touching 
   assert.deepEqual(await store.completeProvisioningIntent('user-a', {
     intentId: 'not-a-uuid', proof: 'short', envKey: 'fresh-env', platform: 'facebook',
   }), { ok: false, reason: 'invalid_intent' });
+});
+
+test('completeProvisioningIntent atomically stores Facebook slow start at Shanghai day start', async () => {
+  const intentId = '11111111-1111-4111-8111-111111111111';
+  const proof = 'A'.repeat(43);
+  const proofHash = createHash('sha256').update(proof, 'utf8').digest('hex');
+  const calls: { sql: string; params?: unknown[] }[] = [];
+  const assignedAt = new Date();
+  const client = {
+    query: async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      if (/SELECT status FROM client_users/.test(sql)) return { rows: [{ status: 'enabled' }] };
+      if (/FROM client_env_provisioning_intents/.test(sql)) return { rows: [{
+        proof_hash: proofHash,
+        state: 'pending',
+        expires_at: new Date(Date.now() + 60_000),
+        completed_env_key: null,
+        completed_at: null,
+      }] };
+      if (/INSERT INTO client_environments/.test(sql)) return { rows: [{ env_key: 'fb-new' }] };
+      if (/INSERT INTO client_env_scope/.test(sql)) return { rows: [{
+        env_key: 'fb-new', label: 'FB new', platform: 'facebook', assigned_at: assignedAt,
+      }] };
+      return { rows: [] };
+    },
+    release() {},
+  };
+  const pool = { connect: async () => client } as unknown as pg.Pool;
+  const before = Date.now();
+  const result = await new ClientUserStore({ pool }).completeProvisioningIntent('user-a', {
+    intentId, proof, envKey: 'fb-new', label: 'FB new', platform: 'facebook', slowStartEnabled: true,
+  });
+  const after = Date.now();
+  assert.equal(result.ok, true);
+  const insert = calls.find((call) => /INSERT INTO client_environments/.test(call.sql))!;
+  assert.match(insert.sql, /slow_start_since,slow_start_initialized/);
+  assert.match(insert.sql, /VALUES \(\$1,\$2,\$3,'auto',\$4,true,now\(\),now\(\)\)/);
+  const stored = insert.params?.[3] as Date;
+  assert.ok(stored instanceof Date);
+  assert.ok(stored.getTime() >= shanghaiDayStartMs(before));
+  assert.ok(stored.getTime() <= shanghaiDayStartMs(after));
+  assert.ok(calls.some((call) => call.sql === 'COMMIT'));
+});
+
+test('completeProvisioningIntent rejects non-Facebook slow start before PostgreSQL', async () => {
+  const pool = { connect: async () => assert.fail('non-Facebook slow start must fail before PostgreSQL') } as unknown as pg.Pool;
+  const result = await new ClientUserStore({ pool }).completeProvisioningIntent('user-a', {
+    intentId: '11111111-1111-4111-8111-111111111111',
+    proof: 'A'.repeat(43),
+    envKey: 'xhs-new',
+    platform: 'xiaohongshu',
+    slowStartEnabled: true,
+  });
+  assert.deepEqual(result, { ok: false, reason: 'invalid_environment' });
 });
 
 test('listEnvScope ignores client self-claims and revoked assignments', async () => {

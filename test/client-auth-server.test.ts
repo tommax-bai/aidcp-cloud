@@ -121,6 +121,7 @@ function makeFakeStore(): {
     },
     async completeProvisioningIntent(userId: string, input: {
       intentId: string; proof: string; envKey: string; label?: string | null; platform?: string | null;
+      slowStartEnabled?: boolean;
     }) {
       const intent = intents.get(input.intentId);
       if (!intent || intent.userId !== userId || intent.proof !== input.proof) {
@@ -128,6 +129,9 @@ function makeFakeStore(): {
       }
       if (intent.envKey && intent.envKey !== input.envKey) {
         return { ok: false as const, reason: 'intent_target_mismatch' as const };
+      }
+      if (input.slowStartEnabled === true && input.platform !== 'facebook') {
+        return { ok: false as const, reason: 'invalid_environment' as const };
       }
       if (intent.envKey === input.envKey) {
         const environment = (scope.get(userId) ?? []).find((item) => item.envKey === input.envKey)!;
@@ -141,6 +145,7 @@ function makeFakeStore(): {
       const environment: ClientEnvScopeRow = { envKey: input.envKey, label: input.label ?? null,
         platform: input.platform ?? null, source: 'admin', assignedAt: Date.now() };
       scope.set(userId, [...(scope.get(userId) ?? []), environment]);
+      slowStarts.set(input.envKey, input.slowStartEnabled === true ? Date.now() : null);
       return { ok: true as const, environment, idempotent: false };
     },
     async beginEnvironmentOffboard(userId: string, envKey: string) {
@@ -287,20 +292,44 @@ test('官方新建 intent 可原子完成当前客户归属，重试幂等且旧
       assert.equal(issued.status, 201);
       const intent = (await issued.json()) as { data: { intentId: string; proof: string } };
       const completionBody = JSON.stringify({ intentId: intent.data.intentId, proof: intent.data.proof,
-        envKey: 'fresh-env-1', label: '新环境', platform: 'facebook' });
+        envKey: 'fresh-env-1', label: '新环境', platform: 'facebook', slowStartEnabled: true });
       const completed = await fetch(`${base}/environment-provisioning/complete`, {
         method: 'POST', headers, body: completionBody,
       });
       assert.equal(completed.status, 201);
       assert.equal(((await completed.json()) as { data: { idempotent: boolean } }).data.idempotent, false);
       assert.deepEqual((fx.scope.get('user-a') ?? []).map((item) => item.envKey), ['fresh-env-1']);
+      assert.equal(typeof fx.slowStarts.get('fresh-env-1'), 'number');
 
+      fx.slowStarts.set('fresh-env-1', null);
       const retried = await fetch(`${base}/environment-provisioning/complete`, {
         method: 'POST', headers, body: completionBody,
       });
       assert.equal(retried.status, 200);
       assert.equal(((await retried.json()) as { data: { idempotent: boolean } }).data.idempotent, true);
       assert.equal((fx.scope.get('user-a') ?? []).length, 1);
+      assert.equal(fx.slowStarts.get('fresh-env-1'), null, '幂等重试不得重新开启已被运营关闭的慢启动');
+
+      const legacyIntent = (await (await fetch(`${base}/environment-provisioning/intents`, {
+        method: 'POST', headers, body: '{}',
+      })).json()) as { data: { intentId: string; proof: string } };
+      const legacy = await fetch(`${base}/environment-provisioning/complete`, {
+        method: 'POST', headers, body: JSON.stringify({ intentId: legacyIntent.data.intentId,
+          proof: legacyIntent.data.proof, envKey: 'fresh-env-legacy', label: '', platform: 'facebook' }),
+      });
+      assert.equal(legacy.status, 201);
+      assert.equal(fx.slowStarts.get('fresh-env-legacy'), null, '旧客户端省略字段时保持关闭');
+
+      const xhsIntent = (await (await fetch(`${base}/environment-provisioning/intents`, {
+        method: 'POST', headers, body: '{}',
+      })).json()) as { data: { intentId: string; proof: string } };
+      const xhs = await fetch(`${base}/environment-provisioning/complete`, {
+        method: 'POST', headers, body: JSON.stringify({ intentId: xhsIntent.data.intentId,
+          proof: xhsIntent.data.proof, envKey: 'fresh-env-xhs', label: '', platform: 'xiaohongshu',
+          slowStartEnabled: true }),
+      });
+      assert.equal(xhs.status, 400);
+      assert.equal(fx.registered.has('fresh-env-xhs'), false);
 
       const attach = await fetch(`${base}/environments`, {
         method: 'POST', headers, body: JSON.stringify({ envKey: 'arbitrary-existing-env' }),
