@@ -22,6 +22,17 @@ test('humanizeAttemptReason: 前缀式码保留参数（风控状态值不得丢
   assert.match(e, /socket hang up/);
 });
 
+test('humanizeAttemptReason: 新风控原因分开展示状态、档位与真实配额窗口', () => {
+  assert.equal(
+    humanizeAttemptReason('risk_denied(status=normal,tier=conservative,cause=quota:minute,used=0,limit=0)'),
+    '风控状态：normal（正常）；配额档位：conservative（保守）；发布配额：分钟窗口 0/0，已达到上限',
+  );
+  assert.equal(
+    humanizeAttemptReason('risk_status(status=warned,tier=conservative)'),
+    '风控状态：warned（预警）；配额档位：conservative（保守）；当前风控状态暂停发帖',
+  );
+});
+
 test('humanizeAttemptReason: 中文人话句原样透传（不重复加工）', () => {
   const raw = '已有一轮发帖编排在运行中，本次未触发（already_running）';
   assert.equal(humanizeAttemptReason(raw), raw);

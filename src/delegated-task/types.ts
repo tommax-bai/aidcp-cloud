@@ -19,7 +19,7 @@ export const DELEGATED_TASK_STATUSES = [
 
 export type DelegatedTaskStatus = (typeof DELEGATED_TASK_STATUSES)[number];
 export type DelegatedTaskPriority = 'normal' | 'high';
-export type DelegatedTaskSource = 'feishu' | 'edge' | 'console' | 'api' | 'legacy_command';
+export type DelegatedTaskSource = 'feishu' | 'edge' | 'console' | 'api' | 'legacy_command' | 'operator_action';
 export type DelegatedApprovalMode = 'review' | 'auto_approve' | 'draft_only';
 export type DelegatedScheduleMode = 'immediate' | 'at_time' | 'next_safe_slot';
 export type DelegatedActionFamily = 'comment' | 'publish' | 'candidate_control';

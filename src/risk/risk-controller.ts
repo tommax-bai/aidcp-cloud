@@ -91,6 +91,8 @@ export interface CanDoResult {
   allowed: boolean;
   reason?: string;
   retryAfterMs?: number;
+  /** 同次配额判定快照，避免调用方二次读取热配置后展示出与判定不一致的窗口或上限。 */
+  quota?: { window: RiskWindow; used: number; limit: number };
 }
 
 export class RiskController {
@@ -146,11 +148,13 @@ export class RiskController {
     const quotas = this.effectiveQuotas();
     for (const window of ['minute', 'hour', 'day'] as const) {
       const quota = quotas[window][action];
-      if (this.counter.count(action, window) >= quota) {
+      const used = this.counter.count(action, window);
+      if (used >= quota) {
         return {
           allowed: false,
           reason: `quota:${window}`,
           retryAfterMs: this.counter.retryAfterMs(action, window, quota),
+          quota: { window, used, limit: quota },
         };
       }
     }

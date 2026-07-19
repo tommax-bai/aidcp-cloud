@@ -576,7 +576,7 @@ test('Edge delegated-task routes bind every read/write to the customer-owned env
         method: 'POST', headers, body: JSON.stringify({
           envKey: 'p1', action: 'comment_batch', targetSuccessCount: 2, maxAttempts: 4,
           deadlineAt: Date.now() + 60_000, executionWindow: { mode: 'immediate' },
-          sourceConstraints: {}, targetConstraints: {}, approvalMode: 'review', priority: 'normal',
+          source: 'operator_action', sourceConstraints: {}, targetConstraints: {}, approvalMode: 'review', priority: 'normal',
         }),
       });
       assert.equal(created.status, 201);
@@ -887,7 +887,7 @@ test('客户参考创作只用服务端精选快照，图文/文字模式排队�
 
       // 「只用服务端快照」仍须成立——但改由服务端任务行证明，不再靠回包自证。任务落在绑定账号（≠ envKey）上。
       const [textStored] = await taskStore.list({ accountId: ACCT_P1, limit: 20 });
-      assert.equal(textStored.source, 'edge');
+      assert.equal(textStored.source, 'operator_action');
       assert.equal(textStored.sourceConstraints.body, '服务端正文', '客户端伪造正文必须被忽略');
       assert.equal(textStored.sourceConstraints.useReferenceImages, false);
       assert.equal(textStored.sourceConstraints.referenceImages, undefined);

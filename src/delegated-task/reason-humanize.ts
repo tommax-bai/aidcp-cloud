@@ -39,8 +39,45 @@ const EXACT: Record<string, string> = {
   submitted_result_unknown: '已提交但平台结果未确认，为防重复未自动重试',
 };
 
+const RISK_STATUS_LABELS: Record<string, string> = {
+  normal: '正常',
+  warned: '预警',
+  restricted: '受限',
+  frozen: '冻结',
+};
+
+const QUOTA_TIER_LABELS: Record<string, string> = {
+  conservative: '保守',
+  normal: '标准',
+  aggressive: '积极',
+};
+
+const QUOTA_WINDOW_LABELS: Record<string, string> = {
+  minute: '分钟',
+  hour: '小时',
+  day: '当天',
+};
+
+function labeled(value: string, labels: Record<string, string>): string {
+  const label = labels[value];
+  return label ? `${value}（${label}）` : value;
+}
+
 /** 前缀式：保留原串里的参数（状态值 / 异常原文），只把码壳翻成人话。 */
 const PREFIXES: { match: RegExp; render: (m: RegExpMatchArray) => string }[] = [
+  {
+    match: /^risk_status\(status=([^,()]+),tier=([^,()]+)\)$/,
+    render: (m) => `风控状态：${labeled(m[1], RISK_STATUS_LABELS)}；配额档位：${labeled(m[2], QUOTA_TIER_LABELS)}；当前风控状态暂停发帖`,
+  },
+  {
+    match: /^risk_denied\(status=([^,()]+),tier=([^,()]+),cause=quota:(minute|hour|day),used=(\d+),limit=(\d+)\)$/,
+    render: (m) => `风控状态：${labeled(m[1], RISK_STATUS_LABELS)}；配额档位：${labeled(m[2], QUOTA_TIER_LABELS)}；发布配额：${QUOTA_WINDOW_LABELS[m[3]]}窗口 ${m[4]}/${m[5]}，已达到上限`,
+  },
+  {
+    match: /^risk_denied\(status=([^,()]+),tier=([^,()]+),cause=([^()]+)\)$/,
+    render: (m) => `风控状态：${labeled(m[1], RISK_STATUS_LABELS)}；配额档位：${labeled(m[2], QUOTA_TIER_LABELS)}；拒绝原因：${m[3]}`,
+  },
+  // 部署前历史 attempt 兼容：字段不足时只翻译已有事实，绝不补猜档位或配额窗口。
   { match: /^risk_status\((.+)\)$/, render: (m) => `账号风控状态为 ${m[1]}，暂不发帖` },
   { match: /^risk_denied\(status=(.+)\)$/, render: (m) => `风控拒绝本次发帖（状态 ${m[1]}）` },
   { match: /^executor_exception:(.*)$/s, render: (m) => `执行器异常：${m[1].trim() || '(无异常信息)'}` },

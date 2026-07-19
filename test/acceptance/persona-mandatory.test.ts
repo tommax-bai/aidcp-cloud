@@ -90,7 +90,7 @@ describe('AC-PERSONA 强制账号人设（系统不存在默认/兜底人设）'
       conceptStore: { countNewSince: async () => 99, getNewConceptsSince: async () => ['k'] },
       likedStore: { countSince: async () => 1, recentSince: async () => [] },
       publishLog: { getMostRecentPublishTime: async () => null, recentPublishedContents: async () => [] },
-      resolveRisk: async () => ({ canDo: () => true, getState: () => ({ status: 'normal' }) }),
+      resolveRisk: async () => ({ canDo: () => true, explain: () => ({ allowed: true }), getState: () => ({ status: 'normal', quotaLevel: 'normal' }) }),
       resolveSingleAccountId: async () => 'acc-none',
       isPersonaBound: () => false,
       orchestrator: { trigger: async (input) => { triggered.push(input); return { status: 'draft' }; } },

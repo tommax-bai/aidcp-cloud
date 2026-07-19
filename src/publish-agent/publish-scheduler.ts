@@ -52,7 +52,12 @@ export interface SchedulerPublishLog {
 }
 export interface SchedulerRisk {
   canDo(action: 'publish'): boolean;
-  getState(): { status: string };
+  explain(action: 'publish'): {
+    allowed: boolean;
+    reason?: string;
+    quota?: { window: 'minute' | 'hour' | 'day'; used: number; limit: number };
+  };
+  getState(): { status: string; quotaLevel: string };
 }
 export type SchedulerApprovalCardResult = NonNullable<PublishResult['approvalCard']>;
 export type SchedulerTriggerResult = {
@@ -366,9 +371,9 @@ export class PublishScheduler {
   /**
    * User-delegated publish. 默认 governed：受管路径，非 normal / canDo 拒发时诚实 blocked（自然语言目标、
    * 结构化 edge/console/api 草稿走这条，风控闸不放）。
-   * operatorOverride=true（仅精确 /publish 斜杠命令、操作员全权授权）：越过风控 status/canDo，等价老 triggerManual——
+   * operatorOverride=true（仅 executor 白名单认定的操作员主动单次指令）：越过风控 status/canDo，等价老 triggerManual——
    * 但**发布前飞书人审（AC-PUB）仍强制**，越权只越风控/配额、绝不越人审。scope 由调用方（executor）限定为
-   * `source==='legacy_command' && manualSingle`，绝不扩到自然语言 / 结构化发帖（否则 edge 结构化发帖会跳风控）。
+   * 精确 slash 或服务端可信人工精选洗稿，绝不扩到自然语言 / 通用结构化发帖。
    * Pending approval is a persisted candidate, not a verified platform publish.
    */
   async triggerDelegated(
@@ -382,7 +387,7 @@ export class PublishScheduler {
        * 缺省（自动 / 无来源会话）→ 审批卡回落默认审批群，既有行为逐字不变。
        */
       manualApprovalChatId?: string;
-      /** change delegated-executor-operator-authority-parity：仅精确 /publish 命令置 true，越风控保人审。 */
+      /** 操作员主动单次指令置 true：越风控/配额但保人审；普通结构化任务不得置位。 */
       operatorOverride?: boolean;
     },
   ): Promise<TriggerOutcome> {
@@ -390,12 +395,22 @@ export class PublishScheduler {
       return { result: 'blocked', reason: 'needs_persona_setup' };
     }
     const risk = await this.d.resolveRisk(accountId);
-    const status = risk.getState().status;
+    const state = risk.getState();
+    const status = state.status;
+    const tier = state.quotaLevel;
     if (opts.operatorOverride) {
-      this.logger.log(`[PublishScheduler] 委托手动发布 account=${accountId}：越过风控 canDo（精确 /publish 人工授权），发布前飞书人审仍生效`);
+      this.logger.log(`[PublishScheduler] 委托手动发布 account=${accountId}：越过风控 canDo（操作员主动授权），发布前飞书人审仍生效`);
     } else {
-      if (status !== 'normal') return { result: 'blocked', reason: `risk_status(${status})` };
-      if (!risk.canDo('publish')) return { result: 'blocked', reason: `risk_denied(status=${status})` };
+      if (status !== 'normal') {
+        return { result: 'blocked', reason: `risk_status(status=${status},tier=${tier})` };
+      }
+      const decision = risk.explain('publish');
+      if (!decision.allowed) {
+        const detail = decision.quota
+          ? `cause=quota:${decision.quota.window},used=${decision.quota.used},limit=${decision.quota.limit}`
+          : `cause=${decision.reason ?? 'unknown'}`;
+        return { result: 'blocked', reason: `risk_denied(status=${status},tier=${tier},${detail})` };
+      }
     }
     const reason = `delegated_${opts.action}`;
     const inspirationSinceMs = opts.action === 'publish_from_inspiration' ? shanghaiDayStartMs(this.clock()) : undefined;

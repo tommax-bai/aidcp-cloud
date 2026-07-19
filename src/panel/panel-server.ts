@@ -2398,7 +2398,8 @@ function createRequestHandler(
             maxAttempts: 2,
             deadlineAt: Date.now() + 24 * 60 * 60 * 1000,
             executionWindow: { mode: 'immediate' },
-            source: 'console',
+            // 专用服务端入口产生的人工单篇洗稿；通用建任务路由会把客户端自报来源收口回 console。
+            source: 'operator_action',
             sourceRef: `curated:${id}:create-post`,
             sourceConstraints: {
               curatedId: id,

@@ -12,6 +12,9 @@ interface Knobs {
   lastPublishMs?: number | null;
   canDo?: boolean;
   status?: string;
+  quotaLevel?: string;
+  riskReason?: string;
+  riskQuota?: { window: 'minute' | 'hour' | 'day'; used: number; limit: number };
   conceptThreshold?: number;
   minHoursBetween?: number;
   /** 编排器返回的终态（缺省 'draft' 正常）；用于模拟 failed/skipped 等非正常出口。 */
@@ -41,7 +44,17 @@ function build(k: Knobs = {}) {
       getMostRecentPublishTime: async () => (k.lastPublishMs === undefined ? null : k.lastPublishMs),
       recentPublishedContents: async () => ['上一篇'],
     },
-    resolveRisk: async () => ({ canDo: () => k.canDo ?? true, getState: () => ({ status: k.status ?? 'normal' }) }),
+    resolveRisk: async () => ({
+      canDo: () => k.canDo ?? true,
+      explain: () => k.canDo ?? true
+        ? { allowed: true }
+        : {
+            allowed: false,
+            reason: k.riskReason ?? 'quota:minute',
+            quota: k.riskQuota ?? { window: 'minute', used: 0, limit: 0 },
+          },
+      getState: () => ({ status: k.status ?? 'normal', quotaLevel: k.quotaLevel ?? 'normal' }),
+    }),
     resolveSingleAccountId: async () => 'acc-test',
     isPersonaBound: k.personaBound === undefined ? undefined : () => k.personaBound === true,
     orchestrator: { trigger: async (input) => { triggered.push(JSON.stringify(input.metrics)); inputs.push(input); return { status: k.orchestratorStatus ?? 'draft', reason: k.orchestratorReason }; } },
@@ -97,6 +110,30 @@ describe('AC-PUB-SCHED PublishScheduler 三扳机', () => {
     assert.equal(o.result, 'triggered');
     assert.equal(o.reason, 'manual_feishu');
     assert.equal(triggered.length, 1, '手动越过风控仍触发编排');
+  });
+
+  it('governed 委托配额拒绝同时携带状态、档位、窗口、用量和上限', async () => {
+    const { scheduler, triggered } = build({
+      canDo: false,
+      status: 'normal',
+      quotaLevel: 'conservative',
+      riskReason: 'quota:minute',
+      riskQuota: { window: 'minute', used: 0, limit: 0 },
+    });
+    const outcome = await scheduler.triggerDelegated('acc-test', { action: 'publish_post' });
+    assert.deepEqual(outcome, {
+      result: 'blocked',
+      reason: 'risk_denied(status=normal,tier=conservative,cause=quota:minute,used=0,limit=0)',
+    });
+    assert.equal(triggered.length, 0);
+  });
+
+  it('governed 委托状态拒绝同时携带威胁态与配额档位，不伪装成配额满', async () => {
+    const { scheduler } = build({ canDo: false, status: 'warned', quotaLevel: 'conservative' });
+    assert.deepEqual(await scheduler.triggerDelegated('acc-test', { action: 'publish_post' }), {
+      result: 'blocked',
+      reason: 'risk_status(status=warned,tier=conservative)',
+    });
   });
 
   it('手动 /publish 编排失败 → 触发但 status=failed，并把编排失败原因沿链路 surface 为 failureReason', async () => {
@@ -202,7 +239,7 @@ describe('claim 键控单飞与容量帽', () => {
       },
       likedStore: { countSince: async () => 0, recentSince: async () => [] },
       publishLog: { getMostRecentPublishTime: async () => null, recentPublishedContents: async () => [] },
-      resolveRisk: async () => ({ canDo: () => true, getState: () => ({ status: 'normal' }) }),
+      resolveRisk: async () => ({ canDo: () => true, explain: () => ({ allowed: true }), getState: () => ({ status: 'normal', quotaLevel: 'normal' }) }),
       resolveSingleAccountId: async () => 'acc-test',
       countPendingForAccount: async () => opts.dbPending ?? 0,
       ...(opts.pendingCap === undefined ? {} : { pendingCapPerAccount: opts.pendingCap }),

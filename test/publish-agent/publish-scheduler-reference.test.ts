@@ -21,7 +21,7 @@ function build() {
     },
     likedStore: { countSince: async () => 0, recentSince: async () => [] },
     publishLog: { getMostRecentPublishTime: async () => null, recentPublishedContents: async () => [] },
-    resolveRisk: async () => ({ canDo: () => true, getState: () => ({ status: 'normal' }) }),
+    resolveRisk: async () => ({ canDo: () => true, explain: () => ({ allowed: true }), getState: () => ({ status: 'normal', quotaLevel: 'normal' }) }),
     resolveSingleAccountId: async () => 'acc-test',
     orchestrator: {
       trigger: async (input) => {
@@ -141,7 +141,7 @@ describe('triggerManual referenceNote（洗稿参照）', () => {
       conceptStore: { countNewSince: async () => 0, getNewConceptsSince: async () => [] },
       likedStore: { countSince: async () => 0, recentSince: async () => [] },
       publishLog: { getMostRecentPublishTime: async () => null, recentPublishedContents: async () => [] },
-      resolveRisk: async () => ({ canDo: () => true, getState: () => ({ status: 'normal' }) }),
+      resolveRisk: async () => ({ canDo: () => true, explain: () => ({ allowed: true }), getState: () => ({ status: 'normal', quotaLevel: 'normal' }) }),
       resolveSingleAccountId: async () => 'acc-test',
       isPersonaBound: () => false,
       orchestrator: { trigger: async () => ({ status: 'draft' }) },

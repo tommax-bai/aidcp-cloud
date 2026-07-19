@@ -365,15 +365,20 @@ export function createDelegatedExecutorRouter(deps: DelegatedExecutorDeps): {
         task.action === 'publish_post' || task.action === 'publish_from_inspiration' ||
         task.action === 'generate_candidates'
       ) {
-        // change delegated-executor-operator-authority-parity：精确 /publish 斜杠命令（source legacy_command +
-        // manualSingle）＝操作员全权，越风控/配额但保人审——与评论分支 legacySingle→manualOverride 对称。
-        // 自然语言（feishu）/ 结构化（edge/console/api）发帖一律留 governed（不置 operatorOverride），风控闸不放。
-        const operatorOverride = task.source === 'legacy_command' && task.targetConstraints.manualSingle === true;
+        const note = referenceNote(task);
+        // 操作员全权白名单：①精确单次 slash；②仅由专用服务端入口创建、且形状完整的单篇精选洗稿。
+        // 通用 edge/console/api 请求即使仿造精选字段也没有 operator_action 来源，不能借字段越风控/配额。
+        const legacySingle = task.source === 'legacy_command' && task.targetSuccessCount === 1 &&
+          task.targetConstraints.manualSingle === true;
+        const operatorCuratedRewrite = task.source === 'operator_action' && task.action === 'publish_post' &&
+          task.targetSuccessCount === 1 && typeof task.sourceConstraints.curatedId === 'number' &&
+          Number.isInteger(task.sourceConstraints.curatedId) && task.sourceConstraints.curatedId > 0 && note !== undefined;
+        const operatorOverride = legacySingle || operatorCuratedRewrite;
         return publishResult(task, await deps.publishes.triggerDelegated(task.accountId, {
           action: task.action,
           approvalMode: approvalMode(task),
           ...(operatorOverride ? { operatorOverride: true } : {}),
-          ...(referenceNote(task) ? { referenceNote: referenceNote(task)! } : {}),
+          ...(note ? { referenceNote: note } : {}),
           // 命令来源会话 → 审批卡回来源会话（私聊 / 群）；无来源会话 → 回落默认审批群。
           ...(task.originChatId ? { manualApprovalChatId: task.originChatId } : {}),
         }));

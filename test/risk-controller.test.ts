@@ -78,6 +78,7 @@ test('explain: 配额超限时返回滑动窗口重试时间', async () => {
   assert.equal(decision.allowed, false);
   assert.equal(decision.reason, 'quota:minute');
   assert.equal(decision.retryAfterMs, 60_000 - now);
+  assert.deepEqual(decision.quota, { window: 'minute', used: quota, limit: quota });
 });
 
 test('quotaReleaseAfterMs: 按指定窗口只读返回释放时间', async () => {

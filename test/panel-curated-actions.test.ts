@@ -147,9 +147,10 @@ test('HTTP 精选行级动作：拒绝路径不变；合法写直接确认入队
     rows.set('7:acc-1', row());
     const created = await post('/api/curated/contents/7/create-post', { accountId: 'acc-1' });
     assert.equal(created.status, 201);
-    const createdTask = (await created.json()) as { task: { status: string; action: string; progress: { attemptCount: number }; sourceConstraints: Record<string, unknown> } };
+    const createdTask = (await created.json()) as { task: { status: string; action: string; source: string; progress: { attemptCount: number }; sourceConstraints: Record<string, unknown> } };
     assert.equal(createdTask.task.status, 'queued');
     assert.equal(createdTask.task.action, 'publish_post');
+    assert.equal(createdTask.task.source, 'operator_action');
     assert.equal(createdTask.task.progress.attemptCount, 0);
     assert.equal(createdTask.task.sourceConstraints.sourceId, 'note-42');
     rows.set('12:acc-1', row({

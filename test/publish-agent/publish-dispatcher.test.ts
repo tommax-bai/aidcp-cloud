@@ -143,6 +143,7 @@ describe('PublishDispatcher', () => {
     assert.deepEqual(h.leasePriorities, ['automatic'], '兜底/非人工触发按 automatic 排队');
     assert.deepEqual(h.attached, [{ id: 7, count: 2 }], '如实标记真实附着数 K=2');
     assert.deepEqual(h.postWrite, { id: 7, postId: 'post_real', postUrl: undefined });
+    assert.deepEqual(h.recordedPublishes, ['acct-A'], '发布前是否越权不影响事实记账：平台确认发布后必须占用 publish 配额');
   });
 
   test('9.1：一切发布一律 automatic 档，人工批准入口也不再抬到 human', async () => {

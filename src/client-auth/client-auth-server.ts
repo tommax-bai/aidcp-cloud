@@ -642,7 +642,8 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
           maxAttempts: 2,
           deadlineAt: Date.now() + 24 * 60 * 60 * 1000,
           executionWindow: { mode: 'immediate' },
-          source: 'edge',
+          // 专用服务端入口产生的人工单篇洗稿；通用客户端建任务路由仍强制 source=edge，不能伪造此权限。
+          source: 'operator_action',
           sourceRef: `edge:curated:${envKey}:${id}:create-post`,
           sourceConstraints: {
             curatedId: id,
