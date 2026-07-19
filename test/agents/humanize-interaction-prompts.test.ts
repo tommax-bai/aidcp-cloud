@@ -92,6 +92,47 @@ describe('interaction_appraiser：去评分器姿态 + 上下文注入', () => {
     await sleep(5);
     assert.doesNotMatch(prompt, /轻量高频/);
   });
+
+  it('三档点赞倾向逐档注入软偏好，且更喜欢仍保留 pass', () => {
+    const prompts = (['normal', 'like_more', 'like_most'] as const).map((like_affinity) => {
+      const role = new InteractionAppraiserRole({
+        eventBus: new EventBus(),
+        soul: { ...soul, behavior_guidelines: { ...soul.behavior_guidelines!, like_affinity } },
+        llm: { complete: async () => '{"action":"pass","reason":"x"}' },
+        sessionContext: new SessionContext(),
+        getNoteData: () => note(),
+        getRemainingBudget: () => ({ likes: 5, collects: 3 }),
+      });
+      return role.previewPrompt();
+    });
+    assert.match(prompts[0], /点赞倾向：正常/);
+    assert.match(prompts[0], /多数普通内容仍然跳过/);
+    assert.match(prompts[1], /点赞倾向：喜欢/);
+    assert.match(prompts[1], /适度偏向点赞/);
+    assert.match(prompts[2], /点赞倾向：更喜欢/);
+    assert.match(prompts[2], /明显偏向点赞/);
+    assert.match(prompts[2], /即使“更喜欢”也必须保留这个出口/);
+  });
+
+  it('更喜欢不绕过普通预算闸，也不形成 mandatory like', async () => {
+    const bus = new EventBus();
+    let llmCalls = 0;
+    const completed: unknown[] = [];
+    bus.on('interaction.completed', (event) => { completed.push(event); });
+    const role = new InteractionAppraiserRole({
+      eventBus: bus,
+      soul: { ...soul, behavior_guidelines: { ...soul.behavior_guidelines!, like_affinity: 'like_most' } },
+      llm: { complete: async () => { llmCalls++; return '{"action":"like","reason":"x"}'; } },
+      sessionContext: new SessionContext(),
+      getNoteData: () => note(),
+      getRemainingBudget: () => ({ likes: 0, collects: 0 }),
+    });
+    await (role as unknown as { onReadingDone: (p: unknown) => Promise<void> }).onReadingDone({
+      noteId: 'n1', sourcePageType: 'feed', imagesBrowsed: 0, commentsRead: 0, keyPoints: [], readDurationMs: 0, ts: 0,
+    });
+    assert.equal(llmCalls, 0, '软倾向不得绕过预算预闸');
+    assert.deepEqual(completed, []);
+  });
 });
 
 describe('content_evaluator：受控好奇豁免（random 可注入）', () => {

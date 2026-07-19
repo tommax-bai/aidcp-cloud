@@ -18,6 +18,7 @@ import type { NoteData } from './content-curator-role.js';
 import { tieredInterests } from './persona-format.js';
 import type { RoleName, ReadingDonePayload } from '../event-bus/types.js';
 import { mandatoryInteractionPrompt } from './mandatory-interaction.js';
+import { likeAffinityLabel, noteLikeAffinityGuidance, resolveLikeAffinity } from '../soul/like-affinity.js';
 
 /**
  * 收藏硬数值阈值（engagement-restraint）：仅当笔记「收藏数 / 点赞数 ≥ 此比例」（默认 1/3）才收藏。
@@ -188,15 +189,19 @@ export class InteractionAppraiserRole extends BaseRole {
     const { identity, interests, behavior_guidelines: bg } = this.soul;
     const collectionPrinciple = bg?.collection_principle ?? COLLECT_PRINCIPLE_FALLBACK;
     const likePrinciple = bg?.like_principle ?? LIKE_PRINCIPLE_FALLBACK;
+    const likeAffinity = resolveLikeAffinity(this.soul);
+    const likeAffinityLine = `点赞倾向：${likeAffinityLabel(likeAffinity)}（${noteLikeAffinityGuidance(likeAffinity)}）`;
     const interestsStr = tieredInterests(interests);
     const mandatory = mandatoryInteractionPrompt(this.soul);
-    return [`你是「${identity.name}」，${identity.role}。${identity.background}\n语气：${identity.tone}\n\n你的兴趣：${interestsStr}\n收藏标准：${collectionPrinciple}\n点赞标准：${likePrinciple}${mandatory ? `\n账号强制规则（仅上游已确认命中时走确定性旁路；到达本普通 prompt 代表未命中）：\n${mandatory}` : ''}`];
+    return [`你是「${identity.name}」，${identity.role}。${identity.background}\n语气：${identity.tone}\n\n你的兴趣：${interestsStr}\n收藏标准：${collectionPrinciple}\n点赞标准：${likePrinciple}\n${likeAffinityLine}${mandatory ? `\n账号强制规则（仅上游已确认命中时走确定性旁路；到达本普通 prompt 代表未命中）：\n${mandatory}` : ''}`];
   }
 
   private buildPrompt(note: NoteData, ctx: ReadingContext): string {
     const { identity, interests, behavior_guidelines: bg } = this.soul;
     const collectionPrinciple = bg?.collection_principle ?? COLLECT_PRINCIPLE_FALLBACK;
     const likePrinciple = bg?.like_principle ?? LIKE_PRINCIPLE_FALLBACK;
+    const likeAffinity = resolveLikeAffinity(this.soul);
+    const likeAffinityLine = `点赞倾向：${likeAffinityLabel(likeAffinity)}（${noteLikeAffinityGuidance(likeAffinity)}）`;
     const interestsStr = tieredInterests(interests);
     const mandatory = mandatoryInteractionPrompt(this.soul);
     const experienceBlock = buildExperienceBlock(ctx);
@@ -211,6 +216,7 @@ export class InteractionAppraiserRole extends BaseRole {
 你的兴趣：${interestsStr}
 收藏标准：${collectionPrinciple}
 点赞标准：${likePrinciple}
+${likeAffinityLine}
 ${mandatory ? `账号强制规则（仅上游详情已确认命中时由代码直接执行；本次既然进入普通判定，就不得自行把它当成已命中）：\n${mandatory}\n` : ''}
 
 当前笔记：
@@ -218,11 +224,11 @@ ${mandatory ? `账号强制规则（仅上游详情已确认命中时由代码�
 内容：${note.content}
 点赞数：${note.likeCount}，收藏数：${note.collectCount}
 ${experienceBlock}${stateBlock}
-你在刷手机，决定对这篇笔记做什么（点赞是选择性互动，收藏是更稀有的选择性互动）：
-- like：按你上面的**点赞标准**判断这篇够不够格点；只是泛泛认同、刷过即忘的不点（多数笔记如此）
+你在刷手机，决定对这篇笔记做什么（点赞是选择性互动，并按账号倾向分档保持可跳过；收藏是更稀有的选择性互动）：
+- like：同时按上面的**点赞标准**和**点赞倾向**判断；档位越高越愿意表达真实好感，但任何档位都不为低质、无关内容凑点赞
 - collect：按你上面的**收藏标准**判断——更稀有、更谨慎，只有真会反复回看 / 照着做的才收藏
 - both：值得收藏的内容几乎也值得点赞，收藏时优先选 both
-- pass：不够格互动（多数普通笔记落这里）
+- pass：按当前档位仍不够格互动；即使“更喜欢”也必须保留这个出口
 
 只输出JSON：{"action":"like","reason":"简短原因"}
 或：{"action":"collect","reason":"简短原因"}

@@ -84,6 +84,7 @@ export function serializeSoul(soul: Soul): string {
     lines.push(`  privacy: ${quoteScalar(bg.privacy)}`);
     lines.push(`  collection_principle: ${quoteScalar(bg.collection_principle)}`);
     lines.push(`  like_principle: ${quoteScalar(bg.like_principle)}`);
+    if (bg.like_affinity) lines.push(`  like_affinity: ${quoteScalar(bg.like_affinity)}`);
   }
 
   return lines.join('\n') + '\n';

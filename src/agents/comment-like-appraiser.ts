@@ -22,6 +22,7 @@ import { tieredInterests } from './persona-format.js';
 import type { CommentCandidate } from '../comm/protocol.js';
 import type { RoleName, ReadingScrollCommentsPayload } from '../event-bus/types.js';
 import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/index.js';
+import { commentLikeProbability, likeAffinityLabel, resolveLikeAffinity } from '../soul/like-affinity.js';
 
 /** 点赞哲学兜底（soul 缺 behavior_guidelines 时）：选择性、只在真戳到时点。 */
 const LIKE_PRINCIPLE_FALLBACK = '只在真有共鸣 / 觉得有意思 / 学到东西时才点；平淡的、随手认同的不点';
@@ -38,7 +39,7 @@ export interface CommentLikeAppraiserOptions extends RoleOptions {
   getCommentLikeDailyRemaining?: () => number;
   /** 评论赞数 ≈ 笔记赞数的该比率（默认 0.15） */
   ratio?: number;
-  /** 即便比率允许，也以 (1 - likeProbability) 概率「偶尔不点」，增加不规律感（默认 0.6） */
+  /** 显式覆盖 Bernoulli 允许概率；未提供时按 soul 点赞倾向取 0.60/0.75/0.90。 */
   likeProbability?: number;
   random?: () => number;
 }
@@ -78,7 +79,7 @@ export class CommentLikeAppraiser extends BaseRole {
     this.getSessionLikeCounts = options.getSessionLikeCounts;
     this.getCommentLikeDailyRemaining = options.getCommentLikeDailyRemaining;
     this.ratio = options.ratio ?? 0.15;
-    this.likeProbability = options.likeProbability ?? 0.6;
+    this.likeProbability = options.likeProbability ?? commentLikeProbability(this.soul);
     this.random = options.random ?? Math.random;
   }
 
@@ -194,7 +195,8 @@ export class CommentLikeAppraiser extends BaseRole {
   private personaHeader(): string {
     const { identity, interests, behavior_guidelines: bg } = this.soul;
     const likePrinciple = bg?.like_principle ?? LIKE_PRINCIPLE_FALLBACK;
-    return `你是「${identity.name}」，${identity.role}。语气：${identity.tone}。兴趣：${tieredInterests(interests)}。\n你点赞的一贯标准：${likePrinciple}`;
+    const likeAffinity = resolveLikeAffinity(this.soul);
+    return `你是「${identity.name}」，${identity.role}。语气：${identity.tone}。兴趣：${tieredInterests(interests)}。\n你点赞的一贯标准：${likePrinciple}\n点赞倾向：${likeAffinityLabel(likeAffinity)}（只提高普通点赞意愿，不代表每条必点）`;
   }
 
   private buildPrompt(note: NoteData | null, usable: CommentCandidate[]): string {

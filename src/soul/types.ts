@@ -92,7 +92,11 @@ export interface BehaviorGuidelines {
   privacy: string;
   collection_principle: string;
   like_principle: string;
+  /** 普通点赞软倾向；缺省等价 normal，绝不代表 mandatory like 授权。 */
+  like_affinity?: LikeAffinity;
 }
+
+export type LikeAffinity = 'normal' | 'like_more' | 'like_most';
 
 export interface Soul {
   /** 身份与语气 */

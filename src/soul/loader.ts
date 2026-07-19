@@ -25,12 +25,15 @@ import type {
   SessionLimits,
   SearchSource,
   BehaviorGuidelines,
+  LikeAffinity,
 } from './types.js';
+import { LIKE_AFFINITY_VALUES } from './like-affinity.js';
 
 const MANDATORY_INTERACTION_ACTIONS = new Set<MandatoryInteractionAction>(['like', 'comment']);
 const MANDATORY_COMMENT_APPROVALS = new Set<MandatoryCommentApproval>(['review', 'auto_approve']);
 const MAX_MANDATORY_INTERACTION_RULES = 8;
 const MAX_MANDATORY_RULE_TEXT_LENGTH = 500;
+const LIKE_AFFINITIES = new Set<LikeAffinity>(LIKE_AFFINITY_VALUES);
 
 const SEARCH_SOURCES: SearchSource[] = [
   'extract_from_liked',
@@ -234,11 +237,20 @@ function parseBrowsePatterns(v: YamlValue): BrowsePatterns {
 
 function parseBehaviorGuidelines(v: YamlValue): BehaviorGuidelines {
   if (!isRecord(v)) throw new Error('soul.behavior_guidelines 必须是对象');
+  const rawAffinity = v.like_affinity;
+  let likeAffinity: LikeAffinity | undefined;
+  if (rawAffinity !== undefined) {
+    if (typeof rawAffinity !== 'string' || !LIKE_AFFINITIES.has(rawAffinity as LikeAffinity)) {
+      throw new Error(`soul.behavior_guidelines.like_affinity 非法: ${String(rawAffinity)}`);
+    }
+    likeAffinity = rawAffinity as LikeAffinity;
+  }
   return {
     style: reqString(v, 'style', 'behavior_guidelines'),
     privacy: reqString(v, 'privacy', 'behavior_guidelines'),
     collection_principle: reqString(v, 'collection_principle', 'behavior_guidelines'),
     like_principle: reqString(v, 'like_principle', 'behavior_guidelines'),
+    ...(likeAffinity ? { like_affinity: likeAffinity } : {}),
   };
 }
 

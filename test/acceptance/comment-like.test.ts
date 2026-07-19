@@ -32,10 +32,13 @@ const candidates: CommentCandidate[] = [
 /** 构造一个 appraiser，driveScroll 后回收 intended/skipped 事件与 LLM 调用次数。 */
 function makeAppraiser(opts: {
   llmOut: string;
+  soul?: Soul;
   sessionLikeCounts?: { noteLikes: number; commentLikes: number };
   remainingCommentLikes?: number;
   ratio?: number;
   likeProbability?: number;
+  useAffinityProbability?: boolean;
+  random?: number;
   dailyRemaining?: number;
 }) {
   const bus = new EventBus();
@@ -43,15 +46,15 @@ function makeAppraiser(opts: {
   const llm = { complete: async () => { llmCalls += 1; return opts.llmOut; } };
   const role = new CommentLikeAppraiser({
     eventBus: bus,
-    soul: mockSoul,
+    soul: opts.soul ?? mockSoul,
     llm,
     getNoteData: () => sampleNote,
     getRemainingCommentLikes: () => opts.remainingCommentLikes ?? 3,
     getSessionLikeCounts: () => opts.sessionLikeCounts ?? { noteLikes: 10, commentLikes: 0 },
     getCommentLikeDailyRemaining: () => opts.dailyRemaining ?? 6,
     ratio: opts.ratio ?? 0.15,
-    likeProbability: opts.likeProbability ?? 1, // 默认不被 Bernoulli 拦（测其他闸）
-    random: () => 0, // 确定性：random()<likeProbability 恒真
+    ...(opts.useAffinityProbability ? {} : { likeProbability: opts.likeProbability ?? 1 }), // 既有用例默认不被 Bernoulli 拦
+    random: () => opts.random ?? 0,
   });
   const intended: unknown[] = [];
   const skipped: { reason: string }[] = [];
@@ -111,6 +114,55 @@ describe('AC-CLIKE 评论点赞红线', () => {
     assert.equal(a.intended.length, 0, '比率不满足应弃权');
     assert.equal(a.skipped.at(-1)?.reason, 'ratio_gate');
     assert.equal(a.llmCalls(), 0, '预闸不过绝不调 LLM');
+  });
+
+  it('AC-CLIKE-AFFINITY 三档只单调提高 Bernoulli 放行概率', async () => {
+    const withAffinity = (like_affinity: 'normal' | 'like_more' | 'like_most'): Soul => ({
+      ...mockSoul,
+      behavior_guidelines: {
+        style: '自然互动',
+        privacy: '不越权',
+        collection_principle: '谨慎收藏',
+        like_principle: '按真实好感点赞',
+        like_affinity,
+      },
+    });
+    const normal = makeAppraiser({
+      llmOut: '{"pick":0}', soul: withAffinity('normal'), useAffinityProbability: true, random: 0.7,
+    });
+    await normal.driveScroll();
+    assert.equal(normal.llmCalls(), 0, 'normal=0.60，random 0.70 应弃权');
+    assert.equal(normal.skipped.at(-1)?.reason, 'bernoulli_abstain');
+
+    const liked = makeAppraiser({
+      llmOut: '{"pick":0}', soul: withAffinity('like_more'), useAffinityProbability: true, random: 0.7,
+    });
+    await liked.driveScroll();
+    assert.equal(liked.llmCalls(), 1, '喜欢=0.75，random 0.70 应进入价值判断');
+
+    const preferred = makeAppraiser({
+      llmOut: '{"pick":0}', soul: withAffinity('like_most'), useAffinityProbability: true, random: 0.85,
+    });
+    await preferred.driveScroll();
+    assert.equal(preferred.llmCalls(), 1, '更喜欢=0.90，random 0.85 应进入价值判断');
+  });
+
+  it('AC-CLIKE-AFFINITY 更喜欢仍不能绕过比例硬闸', async () => {
+    const highAffinity: Soul = {
+      ...mockSoul,
+      behavior_guidelines: {
+        style: '自然互动', privacy: '不越权', collection_principle: '谨慎收藏',
+        like_principle: '更愿意表达真实好感', like_affinity: 'like_most',
+      },
+    };
+    const appraiser = makeAppraiser({
+      llmOut: '{"pick":1}', soul: highAffinity, useAffinityProbability: true, random: 0,
+      sessionLikeCounts: { noteLikes: 1, commentLikes: 0 },
+    });
+    await appraiser.driveScroll();
+    assert.equal(appraiser.llmCalls(), 0);
+    assert.equal(appraiser.skipped.at(-1)?.reason, 'ratio_gate');
+    assert.deepEqual(appraiser.intended, []);
   });
 
   it('AC-CLIKE-ABSTAIN 候选全已赞 → 弃权（绝不回点已赞）', async () => {

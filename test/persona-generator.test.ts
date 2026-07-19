@@ -13,7 +13,11 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { serializeSoul, loadSoulFromYaml } from '../src/soul/index.js';
 import type { Soul } from '../src/soul/types.js';
-import { PersonaGenerator, type PersonaGenerateInput } from '../src/agents/persona-generator.js';
+import {
+  extractLikeAffinitySelection,
+  PersonaGenerator,
+  type PersonaGenerateInput,
+} from '../src/agents/persona-generator.js';
 import { makeEnvelope } from '../src/comm/protocol.js';
 import { DefaultMessageHandler } from '../src/comm/handler.js';
 
@@ -75,11 +79,13 @@ describe('serializeSoul round-trip（YAML 子集不漂移）', () => {
         privacy: '不盲目回关',
         collection_principle: '只收藏硬核',
         like_principle: '有共鸣才点',
+        like_affinity: 'like_more',
       },
     };
     const back = loadSoulFromYaml(serializeSoul(soul));
     assert.equal(back.behavior_guidelines?.style, '精准浏览');
     assert.equal(back.behavior_guidelines?.like_principle, '有共鸣才点');
+    assert.equal(back.behavior_guidelines?.like_affinity, 'like_more');
   });
 });
 
@@ -99,7 +105,37 @@ describe('PersonaGenerator', () => {
     const soul = loadSoulFromYaml(out.soulYaml);
     assert.equal(soul.identity.name, '小柚');
     assert.deepEqual(soul.interests.seed_keywords, ['烟酰胺 测评', '敏感肌 面霜', '成分党 护肤']);
+    assert.equal(soul.behavior_guidelines?.like_affinity, 'normal', '旧客户端无标记应按正常档');
+    assert.match(soul.behavior_guidelines?.like_principle ?? '', /护肤成分/);
+    assert.equal(soul.mandatory_interactions, undefined, '点赞倾向绝不生成强制互动规则');
     assert.ok(out.identitySummary.includes('小柚'));
+  });
+
+  it('更喜欢标记被剥离并确定性映射到 behavior_guidelines', async () => {
+    const llm = stubLlm(VALID_SOUL_JSON);
+    const gen = new PersonaGenerator({ llm });
+    const out = await gen.generate({
+      ...baseInput,
+      keywordSelections: [...baseInput.keywordSelections, 'like_affinity:like_most'],
+    });
+    assert.equal(out.ok, true);
+    if (!out.ok) return;
+    const soul = loadSoulFromYaml(out.soulYaml);
+    assert.equal(soul.behavior_guidelines?.like_affinity, 'like_most');
+    assert.match(soul.behavior_guidelines?.like_principle ?? '', /明显偏向点赞/);
+    assert.doesNotMatch(llm.calls[0].prompt, /like_affinity:/, '内部 token 不得污染生成 prompt');
+    assert.equal(soul.mandatory_interactions, undefined);
+  });
+
+  it('未知或重复档位标记按 normal，且全部从兴趣关键词剥离', () => {
+    assert.deepEqual(
+      extractLikeAffinitySelection(['美妆', 'like_affinity:bogus']),
+      { keywords: ['美妆'], likeAffinity: 'normal' },
+    );
+    assert.deepEqual(
+      extractLikeAffinitySelection(['美妆', 'like_affinity:like_more', 'like_affinity:like_most']),
+      { keywords: ['美妆'], likeAffinity: 'normal' },
+    );
   });
 
   it('垃圾输出（非 JSON）→ 硬 fail-closed，绝不返回模板/半成品', async () => {

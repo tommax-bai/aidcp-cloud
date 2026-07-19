@@ -15,18 +15,43 @@
  *  - 抗跨账号同质化：每账号差异化种子拌进 prompt，差异化重点落在 seed_keywords（真封号链路）。
  *  - 保真：背景不得编造具体可核验经历/头衔（否则诱发发布链第一人称虚构亲历）。
  *
- * v1 范围：只产 identity + interests（含 seed_keywords）；behavior_guidelines 留快速跟进（缺省合法）。
+ * LLM 只产 identity + interests（含 seed_keywords）；behavior_guidelines 由代码据生成结果与受控点赞倾向确定性补齐。
  */
 
-import type { Soul } from '../soul/types.js';
+import type { BehaviorGuidelines, LikeAffinity, Soul } from '../soul/types.js';
 import type { YamlValue } from '../soul/yaml.js';
 import { loadSoulFromValue, loadSoulFromYaml, serializeSoul } from '../soul/index.js';
+import { DEFAULT_LIKE_AFFINITY, generatedLikePrinciple, LIKE_AFFINITY_VALUES } from '../soul/like-affinity.js';
 import type { RoleName } from '../event-bus/types.js';
 import { type RoleLlmLike } from './comment-search-term-generator.js';
 
 const ROLE_NAME: RoleName = 'persona_generator';
 const ROLE_KEY = `browse:${ROLE_NAME}`;
 const DEFAULT_MAX_RETRIES = 2;
+export const LIKE_AFFINITY_KEYWORD_PREFIX = 'like_affinity:';
+const LIKE_AFFINITY_SET = new Set<LikeAffinity>(LIKE_AFFINITY_VALUES);
+
+export function extractLikeAffinitySelection(keywordSelections: string[]): {
+  keywords: string[];
+  likeAffinity: LikeAffinity;
+} {
+  const keywords: string[] = [];
+  const affinityMarkers: LikeAffinity[] = [];
+  for (const raw of keywordSelections ?? []) {
+    const value = raw.trim();
+    if (!value) continue;
+    if (value.startsWith(LIKE_AFFINITY_KEYWORD_PREFIX)) {
+      const affinity = value.slice(LIKE_AFFINITY_KEYWORD_PREFIX.length) as LikeAffinity;
+      if (LIKE_AFFINITY_SET.has(affinity)) affinityMarkers.push(affinity);
+      continue;
+    }
+    keywords.push(value);
+  }
+  return {
+    keywords,
+    likeAffinity: affinityMarkers.length === 1 ? affinityMarkers[0] : DEFAULT_LIKE_AFFINITY,
+  };
+}
 
 export interface PersonaGeneratorOptions {
   llm: RoleLlmLike;
@@ -37,7 +62,7 @@ export interface PersonaGeneratorOptions {
 export interface PersonaGenerateInput {
   /** 账号标识（token 按账号记账；云端已以握手绑定 accountId 为准，本值仅用于记账归属）。 */
   accountId: string;
-  /** 客户勾选的关键词集合（垂类/兴趣/语气/互动偏好等，供人设种子化）。 */
+  /** 客户勾选的垂类/兴趣/语气关键词，以及可选受控 like_affinity 标记。 */
   keywordSelections: string[];
   /** 每账号差异化种子（调用方注入，如 accountId + nonce）：拌进 prompt 抗跨账号同质化。 */
   diversitySeed?: string;
@@ -62,7 +87,7 @@ export class PersonaGenerator {
    * 生成人设草稿。fail-closed：任何环节失败重试有限次，仍失败返回 { ok:false, reason }（绝不兜底/半成品）。
    */
   async generate(input: PersonaGenerateInput): Promise<PersonaGenerateOutcome> {
-    const kws = (input.keywordSelections ?? []).map((s) => s.trim()).filter(Boolean);
+    const { keywords: kws, likeAffinity } = extractLikeAffinitySelection(input.keywordSelections ?? []);
     if (!kws.length) return { ok: false, reason: 'no_keywords' };
 
     let lastReason: 'generation_failed' | 'persona_invalid' = 'generation_failed';
@@ -90,6 +115,10 @@ export class PersonaGenerator {
       let soul: Soul;
       try {
         soul = loadSoulFromValue(parsed as YamlValue);
+        soul = {
+          ...soul,
+          behavior_guidelines: this.buildBehaviorGuidelines(soul, likeAffinity),
+        };
       } catch (err) {
         console.log(`[${ROLE_NAME}] 结构校验不过(attempt ${attempt}): ${(err as Error).message}`);
         lastReason = 'persona_invalid';
@@ -119,6 +148,16 @@ export class PersonaGenerator {
   private summarize(soul: Soul): string {
     const seeds = soul.interests.seed_keywords.slice(0, 3).join('、');
     return `${soul.identity.name}·${soul.identity.role}${seeds ? `（搜索方向：${seeds}）` : ''}`;
+  }
+
+  private buildBehaviorGuidelines(soul: Soul, likeAffinity: LikeAffinity): BehaviorGuidelines {
+    return {
+      style: `${soul.identity.tone}；浏览、点赞与收藏保持自然、有分寸`,
+      privacy: '不编造私人经历或关系，不因互动倾向泄露隐私、盲目回关或做越权承诺',
+      collection_principle: '只收藏会反复参考、能直接复用或确有长期价值的内容；收藏比点赞更稀有',
+      like_principle: generatedLikePrinciple(likeAffinity, soul.interests.primary),
+      like_affinity: likeAffinity,
+    };
   }
 
   private buildPrompt(keywords: string[], diversitySeed: string | undefined, attempt: number): string {
