@@ -124,6 +124,55 @@ function parseConfidence(raw: unknown, fallback: number): number {
   return Math.max(0, Math.min(1, n));
 }
 
+export type FacebookGroupJoinPhase = 'pre_click' | 'post_click';
+
+/** Runtime and admin preview share this exact prompt builder to prevent drift. */
+export function buildFacebookGroupJoinJudgePrompt(
+  phase: FacebookGroupJoinPhase,
+  obs: FacebookGroupJoinObservation,
+): string {
+  const allowed =
+    phase === 'pre_click'
+      ? 'instant_join | gated_skip | already_member | ambiguous_skip'
+      : 'joined | pending_gated | failed';
+  // 只喂「加群语义信号」给 LLM，剔除页面加载诊断字段（documentReady / actionNodeCount 等）——
+  // 真机事故:LLM 见 documentReady='loading' 就对明明有「加入小组」的页面保守判 ambiguous。加载态与加群判定无关。
+  const signals = {
+    title: obs.title,
+    pageUrl: obs.pageUrl,
+    mainCtaText: obs.mainCtaText,
+    mainCtaAria: obs.mainCtaAria,
+    headerText: obs.headerText,
+    modalText: obs.modalText,
+    membershipSignals: obs.membershipSignals,
+    loginRequired: obs.loginRequired,
+    captchaDetected: obs.captchaDetected,
+    questionnaireRequired: obs.questionnaireRequired,
+    pendingRequest: obs.pendingRequest,
+    navError: obs.navError,
+    // L3 语言无关结构信号：群主体内有可聚焦发帖/评论框 + 是否仍有可见「加入」CTA（承重成员态判据）。
+    composerPresent: obs.composerPresent,
+    joinCtaPresent: obs.joinCtaPresent,
+  };
+  return `You classify a Facebook public group join observation.
+
+Rules:
+- Fail closed. If uncertain, choose ${phase === 'pre_click' ? 'ambiguous_skip' : 'failed'}.
+- Pre-click instant_join means clicking the visible Join control is likely to make this account a member immediately, without approval questions.
+- Approval gates, pending requests, membership questions, login, captcha, or unclear UI must not be treated as instant join.
+- A clear Join control (e.g. "加入小组" / "Join group" / "Tham gia") with no approval/pending/login/captcha signal is an instant_join; page load state is irrelevant.
+- Post-click joined means the account is now visibly a member.
+- Language-independent membership signal: composerPresent=true with joinCtaPresent=false (a focusable post/comment box in the group body and NO visible Join control) indicates membership even if the button text is in an unrecognized language. joinCtaPresent=true means the account is NOT yet a member (still shows a Join control), regardless of any composer.
+
+Phase: ${phase}
+Allowed verdicts: ${allowed}
+Observation JSON:
+${JSON.stringify(signals, null, 2)}
+
+Return JSON only:
+{"verdict":"...","confidence":0.0,"reason":"short evidence"}`;
+}
+
 export class FacebookGroupJoinJudge {
   readonly roleName: RoleName = ROLE_NAME;
   private readonly llm?: FacebookGroupJoinJudgeOptions['llm'];
@@ -223,7 +272,7 @@ export class FacebookGroupJoinJudge {
     }
     let raw: string;
     try {
-      raw = await this.llm.complete(this.buildPrompt(phase, obs), { role: `browse:${ROLE_NAME}` });
+      raw = await this.llm.complete(buildFacebookGroupJoinJudgePrompt(phase, obs), { role: `browse:${ROLE_NAME}` });
     } catch (err) {
       return phase === 'pre_click'
         ? { phase, verdict: 'ambiguous_skip', confidence: 0, reason: `llm_error:${(err as Error).message}` }
@@ -259,49 +308,6 @@ export class FacebookGroupJoinJudge {
         ? { phase, verdict: 'ambiguous_skip', confidence: 0, reason: 'invalid_json' }
         : { phase, verdict: 'failed', confidence: 0, reason: 'invalid_json' };
     }
-  }
-
-  private buildPrompt(phase: 'pre_click' | 'post_click', obs: FacebookGroupJoinObservation): string {
-    const allowed =
-      phase === 'pre_click'
-        ? 'instant_join | gated_skip | already_member | ambiguous_skip'
-        : 'joined | pending_gated | failed';
-    // 只喂「加群语义信号」给 LLM，剔除页面加载诊断字段（documentReady / actionNodeCount 等）——
-    // 真机事故:LLM 见 documentReady='loading' 就对明明有「加入小组」的页面保守判 ambiguous。加载态与加群判定无关。
-    const signals = {
-      title: obs.title,
-      pageUrl: obs.pageUrl,
-      mainCtaText: obs.mainCtaText,
-      mainCtaAria: obs.mainCtaAria,
-      headerText: obs.headerText,
-      modalText: obs.modalText,
-      membershipSignals: obs.membershipSignals,
-      loginRequired: obs.loginRequired,
-      captchaDetected: obs.captchaDetected,
-      questionnaireRequired: obs.questionnaireRequired,
-      pendingRequest: obs.pendingRequest,
-      navError: obs.navError,
-      // L3 语言无关结构信号：群主体内有可聚焦发帖/评论框 + 是否仍有可见「加入」CTA（承重成员态判据）。
-      composerPresent: obs.composerPresent,
-      joinCtaPresent: obs.joinCtaPresent,
-    };
-    return `You classify a Facebook public group join observation.
-
-Rules:
-- Fail closed. If uncertain, choose ${phase === 'pre_click' ? 'ambiguous_skip' : 'failed'}.
-- Pre-click instant_join means clicking the visible Join control is likely to make this account a member immediately, without approval questions.
-- Approval gates, pending requests, membership questions, login, captcha, or unclear UI must not be treated as instant join.
-- A clear Join control (e.g. "加入小组" / "Join group" / "Tham gia") with no approval/pending/login/captcha signal is an instant_join; page load state is irrelevant.
-- Post-click joined means the account is now visibly a member.
-- Language-independent membership signal: composerPresent=true with joinCtaPresent=false (a focusable post/comment box in the group body and NO visible Join control) indicates membership even if the button text is in an unrecognized language. joinCtaPresent=true means the account is NOT yet a member (still shows a Join control), regardless of any composer.
-
-Phase: ${phase}
-Allowed verdicts: ${allowed}
-Observation JSON:
-${JSON.stringify(signals, null, 2)}
-
-Return JSON only:
-{"verdict":"...","confidence":0.0,"reason":"short evidence"}`;
   }
 
   private record(obs: FacebookGroupJoinObservation, result: FacebookGroupJoinJudgeResult): void {

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createCoverFormSensor,
+  buildCoverFormSensePrompt,
   COVER_FORM_SENSOR_ROLE,
   type CoverFormSensorDeps,
   type CoverFormSenseRef,
@@ -158,6 +159,8 @@ test('视觉成功：单次调用（ossUrl 优先入图、role 记账、超时�
   assert.equal(vision.calls.length, 1);
   const content = vision.calls[0].messages[0].content;
   assert.ok(Array.isArray(content));
+  assert.equal(content[0]?.type, 'text');
+  assert.equal(content[0]?.type === 'text' ? content[0].text : '', buildCoverFormSensePrompt(), '运行时与后台预览必须共用同一 builder');
   const imagePart = content.find((p) => p.type === 'image_url');
   assert.deepEqual(imagePart, { type: 'image_url', image_url: { url: 'https://oss.test/cover.jpg' } });
   assert.equal(vision.calls[0].opts?.role, COVER_FORM_SENSOR_ROLE);

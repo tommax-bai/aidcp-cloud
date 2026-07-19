@@ -300,7 +300,7 @@ function parseDetails(value: unknown, expectedFamily: VisualFrameDetails['family
   return { family: expectedFamily, ...cleaned } as unknown as VisualFrameDetails;
 }
 
-function setPrompt(): string {
+export function buildVisualReferenceSetPrompt(): string {
   return `你是整组视觉参考分析师。分析按顺序给出的图片，严格只输出一个 JSON 对象。
 目标：轻量判断整组视觉语言、风格簇、顺序角色和每张视觉类型。逐图构图细节由下一阶段专家补齐，本轮禁止输出 common/details，以降低大图集延迟。禁止 OCR，禁止抄写或概括图片中的具体文字/数值/账号/水印；禁止猜摄影师、相机型号或精确 EXIF。
 
@@ -310,7 +310,7 @@ function setPrompt(): string {
 frames 必须与输入图片等量且 sourceArrayIndex 覆盖 0..N-1。`;
 }
 
-function specialistPrompt(family: VisualFrameDetails['family'], indexes: number[]): string {
+export function buildVisualReferenceSpecialistPrompt(family: VisualFrameDetails['family'], indexes: number[]): string {
   const schemas: Record<VisualFrameDetails['family'], string> = {
     photo: '{"family":"photo","cameraAngle":"","focalLengthFeel":"只给观感/区间，不猜型号","depthOfField":"","focus":"","light":"自然光/硬光/柔光/逆光等","colorGrade":"","grainSharpness":"","facialExpression":"人物可观察眉眼与嘴角；无人则写无人物","gazeDirection":"视线方向；无人则写不适用","headAngle":"头部角度；无人则写不适用","bodyPose":"身体姿态；无人则写不适用","gesture":"手势/动作；无人则写不适用","poseEnergy":"静态/松弛/紧绷/动态等可观察能量","emotionalValence":"正向/中性/负向的可观察效价，不猜内心","emotionalArousal":"低/中/高唤醒度的可观察表现"}',
     illustration: '{"family":"illustration","medium":"","strokeOrRender":"","shapeLanguage":"","outline":"","materials":"","lightingModel":"","perspective":"","detailLevel":""}',
@@ -432,7 +432,7 @@ export function createVisualReferenceAnalyzer(deps: VisualReferenceAnalyzerDeps)
 
       let setRaw: string;
       try {
-        setRaw = await deps.vision.chatVision(messagesForImages(setPrompt(), anchors), {
+        setRaw = await deps.vision.chatVision(messagesForImages(buildVisualReferenceSetPrompt(), anchors), {
           role: VISUAL_REFERENCE_ANALYZER_ROLE,
           accountId: input.accountId,
           timeoutMs,
@@ -464,7 +464,7 @@ export function createVisualReferenceAnalyzer(deps: VisualReferenceAnalyzerDeps)
       const detailResults = await Promise.all(specialistJobs.map(async ({ family, frames }) => {
         const groupAnchors = frames.map((frame) => anchors[frame.sourceArrayIndex]);
         try {
-          const raw = await deps.vision.chatVision(messagesForImages(specialistPrompt(family, frames.map((f) => f.sourceArrayIndex)), groupAnchors), {
+          const raw = await deps.vision.chatVision(messagesForImages(buildVisualReferenceSpecialistPrompt(family, frames.map((f) => f.sourceArrayIndex)), groupAnchors), {
             role: VISUAL_REFERENCE_ANALYZER_ROLE,
             accountId: input.accountId,
             timeoutMs,

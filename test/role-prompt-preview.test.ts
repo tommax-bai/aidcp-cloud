@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRolePromptProvider } from '../src/config/role-prompt-preview.js';
+import { ROLE_CATALOG } from '../src/config/role-catalog.js';
+import { STATIC_ROLE_PROMPT_PREVIEWS } from '../src/config/static-role-prompt-previews.js';
 import { PUBLISH_PREVIEW_BUILDERS } from '../src/publish-agent/prompts-preview.js';
 import type { BaseRole } from '../src/agents/base-role.js';
 import { CommentSearchTermGenerator, type RoleLlmLike } from '../src/agents/comment-search-term-generator.js';
@@ -57,6 +59,8 @@ test('图像角色 → available:true（发给文生图模型的图片指令，�
   assert.ok(v.prompt && v.prompt.trim().length > 0);
   assert.match(v.prompt!, /no text|no watermark|no human faces/); // 固定风格基底可见
   assert.equal(v.segments, undefined); // 图片指令无人设来源段
+  assert.equal(v.personaSource, 'none');
+  assert.equal(v.personaSourceLabel, '不使用人设');
   assert.match(v.note, /文生图|图片指令/);
 });
 
@@ -71,7 +75,7 @@ test('发布文本角色 → available:true + 真实 prompt 文本，不附来�
   assert.ok(v.note.length > 0);
 });
 
-test('15 个发布文本角色全部 available:true 且 prompt 非空', () => {
+test('16 个发布文本角色全部 available:true 且 prompt 非空', () => {
   const p = createRolePromptProvider(() => []);
   const ids = [
     'publish:ContentScout',
@@ -84,6 +88,7 @@ test('15 个发布文本角色全部 available:true 且 prompt 非空', () => {
     'publish:TopicGenerator',
     'publish:TopicEvaluator',
     'publish:CategoryClassifier',
+    'publish:CoverCardWriter',
     'publish:ImageSetPlanner',
     'publish:ImagePromptComposer',
     'publish:ContentCleaner',
@@ -95,6 +100,136 @@ test('15 个发布文本角色全部 available:true 且 prompt 非空', () => {
     assert.equal(v.available, true, `${id} 应可预览`);
     assert.ok(v.prompt && v.prompt.trim().length > 0, `${id} prompt 应非空`);
     assert.equal(v.segments, undefined, `${id} 不应附来源段`);
+  }
+});
+
+test('视频号收件箱三个 interaction 角色全部使用真实同源 prompt 预览', () => {
+  const p = createRolePromptProvider(() => []);
+  const expected: Array<[string, RegExp]> = [
+    ['reply_intent_classifier', /reply_intent_classifier.*intent/s],
+    ['reply_polisher', /reply_polisher.*polishedText/s],
+    ['reply_risk_reviewer', /reply_risk_reviewer.*allowAutoSend/s],
+  ];
+  for (const [roleId, marker] of expected) {
+    const view = p.get(roleId);
+    assert.equal(view.available, true, `${roleId} 应可预览`);
+    assert.match(view.prompt ?? '', marker);
+    assert.match(view.note, /视频号收件箱|示例占位/);
+    assert.equal(view.personaSource, 'none');
+    assert.equal(view.personaFallback, undefined);
+  }
+});
+
+test('独立 Facebook 角色和封面文字卡角色不依赖 dispatcher 也可预览', () => {
+  const p = createRolePromptProvider(() => []);
+  const join = p.get('browse:facebook_group_join_judge');
+  assert.equal(join.available, true);
+  assert.match(join.prompt ?? '', /Facebook public group join observation/);
+
+  const comment = p.get('facebook_comment_composer');
+  assert.equal(comment.available, true);
+  assert.match(comment.prompt ?? '', /Facebook.*自然、真诚的评论/s);
+  assert.match(comment.prompt ?? '', /最终公开正文必须只使用简体中文/);
+  assert.equal(comment.personaSource, 'sample');
+  assert.match(comment.prompt ?? '', /<示例 Facebook 账号>|<示例账号定位>/);
+
+  const cover = p.get('publish:CoverCardWriter');
+  assert.equal(cover.available, true);
+  assert.match(cover.prompt ?? '', /封面文字卡的文案编辑/);
+  assert.match(cover.prompt ?? '', /<示例笔记标题>/);
+});
+
+test('三个 vision 角色展示真实模型文本指令而非误报不调用大模型', () => {
+  const p = createRolePromptProvider(() => []);
+  const expected: Array<[string, RegExp]> = [
+    ['publish:CoverFormSensor', /text_card\|photo\|illustration\|other/],
+    ['publish:VisualReferenceAnalyzer', /整组视觉参考分析师.*视觉结构专家/s],
+    ['publish:VisualFidelityAuditor', /视觉质量与内容一致性审核员.*copyCheck/s],
+  ];
+  for (const [roleId, marker] of expected) {
+    const view = p.get(roleId);
+    assert.equal(view.available, true, `${roleId} 应可预览`);
+    assert.match(view.prompt ?? '', marker);
+    assert.match(view.note, /视觉模型|视觉/);
+    assert.equal(view.segments, undefined);
+    assert.equal(view.personaSource, 'none');
+  }
+});
+
+test('角色目录中所有非 browse 及独立静态业务角色都有非空预览来源', () => {
+  const p = createRolePromptProvider(() => []);
+  const roles = ROLE_CATALOG.filter((role) => role.group !== 'browse' || STATIC_ROLE_PROMPT_PREVIEWS[role.roleId]);
+  assert.ok(roles.length > 0);
+  for (const role of roles) {
+    const view = p.get(role.roleId);
+    assert.equal(view.available, true, `${role.roleId} 只进目录但未补预览`);
+    assert.ok(view.prompt?.trim(), `${role.roleId} prompt 应非空`);
+  }
+});
+
+test('选择账号不会给 interaction、独立 browse、无 persona 发布角色或 vision 角色伪造人设来源', () => {
+  let switched = false;
+  const p = createRolePromptProvider(() => [], {
+    withAccount: (_accountId, fn) => {
+      switched = true;
+      return fn();
+    },
+    hasPersona: () => false,
+    getPersona: () => null,
+  });
+  for (const roleId of [
+    'reply_intent_classifier',
+    'browse:facebook_group_join_judge',
+    'publish:CoverCardWriter',
+    'publish:CoverFormSensor',
+    'publish:VisualReferenceAnalyzer',
+    'publish:VisualFidelityAuditor',
+  ]) {
+    const view = p.get(roleId, 'acc-no-persona');
+    assert.equal(view.available, true, `${roleId} 应可预览`);
+    assert.equal(view.accountId, undefined);
+    assert.equal(view.personaSource, 'none');
+    assert.equal(view.personaFallback, undefined);
+  }
+  assert.equal(switched, false, '不消费 persona 的静态预览不应切换账号口径');
+});
+
+test('Facebook 定向评论按所选账号真实人设渲染，无人设时诚实回落示例', () => {
+  const accountProvider = createRolePromptProvider(() => [], {
+    withAccount: (_accountId, fn) => fn(),
+    getPersona: () => sampleSoul,
+  });
+  const accountView = accountProvider.get('facebook_comment_composer', 'fb-account');
+  assert.equal(accountView.available, true);
+  assert.equal(accountView.accountId, 'fb-account');
+  assert.equal(accountView.personaSource, 'account');
+  assert.match(accountView.prompt ?? '', /测试账号.*AI工程师/s);
+
+  const fallbackProvider = createRolePromptProvider(() => [], {
+    withAccount: (_accountId, fn) => fn(),
+    getPersona: () => null,
+  });
+  const fallbackView = fallbackProvider.get('facebook_comment_composer', 'fb-no-persona');
+  assert.equal(fallbackView.available, true);
+  assert.equal(fallbackView.accountId, 'fb-no-persona');
+  assert.equal(fallbackView.personaSource, 'fallback_sample');
+  assert.equal(fallbackView.personaFallback, true);
+  assert.match(fallbackView.prompt ?? '', /<示例 Facebook 账号>|<示例账号定位>/);
+});
+
+test('静态同源预览构建失败时诚实降级且不抛', () => {
+  const original = STATIC_ROLE_PROMPT_PREVIEWS.reply_intent_classifier;
+  STATIC_ROLE_PROMPT_PREVIEWS.reply_intent_classifier = {
+    ...original,
+    build: () => { throw new Error('boom'); },
+  };
+  try {
+    const view = createRolePromptProvider(() => []).get('reply_intent_classifier');
+    assert.equal(view.available, false);
+    assert.equal(view.prompt, null);
+    assert.match(view.note, /预览不可用：boom/);
+  } finally {
+    STATIC_ROLE_PROMPT_PREVIEWS.reply_intent_classifier = original;
   }
 });
 
@@ -208,6 +343,7 @@ test('配图生成执行带 accountId → available:true 图片指令，不加�
   assert.equal(v.personaFallback, undefined);
   assert.equal(v.accountId, undefined);
   assert.equal(v.segments, undefined);
+  assert.equal(v.personaSource, 'none');
 });
 
 test('previewPrompt 抛错 → 优雅降级 available:false，绝不抛', () => {

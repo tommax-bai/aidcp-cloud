@@ -113,7 +113,8 @@ function parse(
   };
 }
 
-function buildMessages(input: VisualAuditInput): VisionChatMessage[] {
+/** Runtime and admin preview share this exact visual-model text instruction builder. */
+export function buildVisualFidelityAuditPrompt(input: VisualAuditInput): string {
   const mode: Exclude<VisualAuditMode, 'skipped'> = input.referenceUrl ? 'reference_fidelity' : 'content_alignment';
   const expectation = input.expectedFrame
     ? `期望类型=${input.expectedFrame.kind}；主体=${input.expectedFrame.common.subject}；构图=${input.expectedFrame.common.composition}；色彩=${input.expectedFrame.common.palette.join('、')}；氛围=${input.expectedFrame.common.mood}`
@@ -140,18 +141,19 @@ function buildMessages(input: VisualAuditInput): VisionChatMessage[] {
   const riskInstruction = mode === 'reference_fidelity'
     ? '风险：recognizableRealPerson 只在生成脸能对应来源真人、名人或其他可识别真实身份时为 true；普通虚构人像即使清晰露脸也不是该风险。另核验乱码/无意义文字、画内水印/平台标识、明显逐字复制原图文字、原创风险 low|medium|high。copyCheck 必须为 evaluated。'
     : '风险：核验可识别名人/真实身份、乱码/无意义文字、画内水印/平台标识、明显受保护标识或高风险模仿。由于没有来源图片，copyCheck 必须为 not_applicable 且 copiedText 必须为 false，不能把它解释成“确认未复制来源”。';
-  const imageContent: VisionContentPart[] = [
-    {
-      type: 'text',
-      text: `你是生成配图的视觉质量与内容一致性审核员。${comparisonInstruction}
+  return `你是生成配图的视觉质量与内容一致性审核员。${comparisonInstruction}
 ${expectation}
 ${contentExpectation}
 ${responsibility}
 ${scoreInstruction}
 ${riskInstruction}
 禁止在输出中复述图中文字、账号、数值或水印内容。严格只输出：
-{${scoreShape},"risks":{"recognizableRealPerson":false,"garbledText":false,"watermark":false,"copiedText":false,"copyCheck":"${mode === 'reference_fidelity' ? 'evaluated' : 'not_applicable'}","originalityRisk":"low|medium|high"},"reason":"简短理由，不引用图中文字","retryGuidance":"若失败，给可执行的视觉修正，不引用图中文字"}`,
-    },
+{${scoreShape},"risks":{"recognizableRealPerson":false,"garbledText":false,"watermark":false,"copiedText":false,"copyCheck":"${mode === 'reference_fidelity' ? 'evaluated' : 'not_applicable'}","originalityRisk":"low|medium|high"},"reason":"简短理由，不引用图中文字","retryGuidance":"若失败，给可执行的视觉修正，不引用图中文字"}`;
+}
+
+function buildMessages(input: VisualAuditInput): VisionChatMessage[] {
+  const imageContent: VisionContentPart[] = [
+    { type: 'text', text: buildVisualFidelityAuditPrompt(input) },
   ];
   if (input.referenceUrl) {
     imageContent.push(

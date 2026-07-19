@@ -2,6 +2,8 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { VisionChatMessage, VisionLlmClient } from '../../src/llm/vision.js';
 import {
+  buildVisualReferenceSetPrompt,
+  buildVisualReferenceSpecialistPrompt,
   createVisualReferenceAnalyzer,
   normalizeReferenceVisualAnalysis,
   visualAnalysisCacheKey,
@@ -79,6 +81,13 @@ describe('VisualReferenceAnalyzer', () => {
     assert.equal(out.frameSpecs?.[1].details.family, 'ui_document');
     assert.equal('focalLengthFeel' in out.frameSpecs![1].details, false, 'UI 不应硬套摄影参数');
     assert.equal(vision.calls.length, 3, '整组一次 + 两个 specialist family');
+    const firstText = (call: VisionChatMessage[]): string => {
+      const content = call[0]?.content;
+      return Array.isArray(content) && content[0]?.type === 'text' ? content[0].text : '';
+    };
+    assert.equal(firstText(vision.calls[0]), buildVisualReferenceSetPrompt());
+    assert.equal(firstText(vision.calls[1]), buildVisualReferenceSpecialistPrompt('photo', [0]));
+    assert.equal(firstText(vision.calls[2]), buildVisualReferenceSpecialistPrompt('ui_document', [1]));
     const allPrompts = vision.calls.flatMap((call) => call).flatMap((message) =>
       Array.isArray(message.content) ? message.content.filter((part) => part.type === 'text').map((part) => part.text) : [message.content],
     ).join('\n');

@@ -54,7 +54,22 @@ function reviewFallback(): RiskReviewerOutput {
   return { role: 'reply_risk_reviewer', riskLevel: 'unknown', riskTags: ['unknown'], reasons: ['ai_unavailable'], allowAutoSend: false };
 }
 
-function prompt(role: string, input: unknown, outputSchema: string): string {
+export type InteractionReplyInput = IntentClassifierInput | PolisherInput | RiskReviewerInput;
+export type InteractionReplyRole = InteractionReplyInput['role'];
+
+const OUTPUT_SCHEMAS: Record<InteractionReplyRole, string> = {
+  reply_intent_classifier:
+    '{"role":"reply_intent_classifier","intent":"<enum>","confidence":0..1,"riskTags":["<enum>"],"reasons":["<short_code>"]}',
+  reply_polisher:
+    '{"role":"reply_polisher","polishedText":"<text>","meaningChanged":false,"introducedClaims":[],"riskTags":[]}',
+  reply_risk_reviewer:
+    '{"role":"reply_risk_reviewer","riskLevel":"low|medium|high|unknown","riskTags":[],"reasons":[],"allowAutoSend":false}',
+};
+
+/** Runtime and admin preview share this exact prompt builder to prevent drift. */
+export function buildInteractionReplyPrompt(input: InteractionReplyInput): string {
+  const role = input.role;
+  const outputSchema = OUTPUT_SCHEMAS[role];
   return `你是 AIDCP 入站客服工作流的专用角色 ${role}。\n` +
     `严格遵守：只输出一个 JSON 对象，不要 Markdown、解释或代码围栏；不得补充输入中不存在的订单、价格、优惠、库存、时效、身份或承诺。\n` +
     `输出 schema：${outputSchema}\n输入：${JSON.stringify(input)}`;
@@ -66,7 +81,7 @@ export class ReplyAiService {
     private readonly timeoutMs = 20_000,
   ) {}
 
-  private async call(role: string, accountId: string, body: string): Promise<{ raw: string | null; fallback: AiFallback }> {
+  private async call(role: InteractionReplyRole, accountId: string, body: string): Promise<{ raw: string | null; fallback: AiFallback }> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const raw = await Promise.race([
@@ -92,8 +107,7 @@ export class ReplyAiService {
   }
 
   async classify(input: IntentClassifierInput): Promise<AiStepResult<IntentClassifierOutput>> {
-    const result = await this.call(input.role, input.accountId, prompt(input.role, input,
-      '{"role":"reply_intent_classifier","intent":"<enum>","confidence":0..1,"riskTags":["<enum>"],"reasons":["<short_code>"]}'));
+    const result = await this.call(input.role, input.accountId, buildInteractionReplyPrompt(input));
     if (!result.raw) return { value: classifyFallback(), fallback: result.fallback };
     const value = parseObject(result.raw);
     if (!value) return { value: classifyFallback(), fallback: 'invalid_json' };
@@ -113,8 +127,7 @@ export class ReplyAiService {
       role: 'reply_polisher', polishedText: input.renderedText, meaningChanged: false,
       introducedClaims: [], riskTags: [],
     };
-    const result = await this.call(input.role, input.accountId, prompt(input.role, input,
-      '{"role":"reply_polisher","polishedText":"<text>","meaningChanged":false,"introducedClaims":[],"riskTags":[]}'));
+    const result = await this.call(input.role, input.accountId, buildInteractionReplyPrompt(input));
     if (!result.raw) return { value: fallback, fallback: result.fallback };
     const value = parseObject(result.raw);
     if (!value) return { value: fallback, fallback: 'invalid_json' };
@@ -134,8 +147,7 @@ export class ReplyAiService {
   }
 
   async review(input: RiskReviewerInput): Promise<AiStepResult<RiskReviewerOutput>> {
-    const result = await this.call(input.role, input.accountId, prompt(input.role, input,
-      '{"role":"reply_risk_reviewer","riskLevel":"low|medium|high|unknown","riskTags":[],"reasons":[],"allowAutoSend":false}'));
+    const result = await this.call(input.role, input.accountId, buildInteractionReplyPrompt(input));
     if (!result.raw) return { value: reviewFallback(), fallback: result.fallback };
     const value = parseObject(result.raw);
     if (!value) return { value: reviewFallback(), fallback: 'invalid_json' };

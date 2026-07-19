@@ -19,6 +19,7 @@ import type { BaseRole } from '../agents/base-role.js';
 import type { Soul } from '../soul/types.js';
 import { getCatalogItem } from './role-catalog.js';
 import { PUBLISH_PREVIEW_BUILDERS, IMAGE_PROMPT_PREVIEW_BUILDERS } from '../publish-agent/prompts-preview.js';
+import { STATIC_ROLE_PROMPT_PREVIEWS } from './static-role-prompt-previews.js';
 import type { RolePromptView, RolePromptSegment } from '../panel/types.js';
 
 const SAMPLE_PERSONA_NOTE = '实时数据为示例占位（线上调用时由系统填入真实值）；人设为示例人设。';
@@ -146,6 +147,26 @@ export function createRolePromptProvider(
   const render = (roleId: string, publishSoul?: Soul): RolePromptView => {
     const item = getCatalogItem(roleId);
     if (!item) return { roleId, prompt: null, available: false, note: '未知角色' };
+    // 不依赖 RoleDispatcher 的 interaction、独立 browse、发布文本与 vision 角色。
+    // 每个闭包都调用运行时共享 prompt builder；预览只注入明示示例数据，绝不触发模型或读取业务图片。
+    const staticPreview = STATIC_ROLE_PROMPT_PREVIEWS[roleId];
+    if (staticPreview) {
+      try {
+        const prompt = staticPreview.build(publishSoul);
+        if (!prompt.trim()) throw new Error('empty prompt');
+        return {
+          roleId,
+          prompt,
+          available: true,
+          note: staticPreview.note,
+          ...(staticPreview.usesPersona
+            ? {}
+            : { personaSource: 'none' as const, personaSourceLabel: '不使用人设' }),
+        };
+      } catch (e) {
+        return { roleId, prompt: null, available: false, note: `预览不可用：${(e as Error).message}` };
+      }
+    }
     if (item.llmKind !== 'text') {
       // 图像角色（change publish-prompt-preview 补图片类）：展示发给文生图模型的「有效图片指令」
       // （示例主体 + 固定风格基底）；无预览闭包时回落旧「无文本 prompt」说明。
@@ -155,10 +176,20 @@ export function createRolePromptProvider(
           return { roleId, prompt: null, available: false, note: '图像角色无文本 prompt（用全局图片模型）' };
         }
         try {
-          return { roleId, prompt: buildImg(), available: true, note: IMAGE_PREVIEW_NOTE };
+          return {
+            roleId,
+            prompt: buildImg(),
+            available: true,
+            note: IMAGE_PREVIEW_NOTE,
+            personaSource: 'none',
+            personaSourceLabel: '不使用人设',
+          };
         } catch (e) {
           return { roleId, prompt: null, available: false, note: `预览不可用：${(e as Error).message}` };
         }
+      }
+      if (item.llmKind === 'vision') {
+        return { roleId, prompt: null, available: false, note: '该视觉模型角色暂不支持预览' };
       }
       return { roleId, prompt: null, available: false, note: '该角色不调用大模型' };
     }
@@ -189,8 +220,29 @@ export function createRolePromptProvider(
       if (!accountId || !opts.withAccount) {
         const view = render(roleId);
         const item = getCatalogItem(roleId);
-        if (item?.llmKind !== 'text') return view;
+        const staticPreview = STATIC_ROLE_PROMPT_PREVIEWS[roleId];
+        if (staticPreview?.usesPersona) return withPersonaSource(view, 'sample', '示例人设');
+        if (item?.llmKind !== 'text' || staticPreview) return view;
         return withPersonaSource(view, 'sample', item.group === 'publish' ? '发布侧示例人设' : '示例人设');
+      }
+      const staticPreview = STATIC_ROLE_PROMPT_PREVIEWS[roleId];
+      // 不消费 persona 的静态预览不得因账号选择伪造来源或 fallback。
+      if (staticPreview && !staticPreview.usesPersona) return render(roleId);
+      // Facebook 定向评论等独立角色虽不进 dispatcher，但运行时确实读取 Soul；按真实/示例 persona 口径渲染。
+      if (staticPreview?.usesPersona) {
+        const persona = opts.getPersona?.(accountId) ?? null;
+        const fallback = !!opts.getPersona && persona == null;
+        const view = render(roleId, persona ?? undefined);
+        return {
+          ...withPersonaSource(
+            view,
+            fallback ? 'fallback_sample' : 'account',
+            fallback ? '示例人设' : '所选账号人设',
+            fallback ? FALLBACK_NOTE : ACCOUNT_PERSONA_NOTE,
+          ),
+          accountId,
+          ...(fallback ? { personaFallback: true } : {}),
+        };
       }
       const pubItem = getCatalogItem(roleId);
       if (pubItem?.group === 'publish') {

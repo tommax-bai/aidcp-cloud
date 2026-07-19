@@ -96,7 +96,7 @@ export function usableImageUrl(img: ReferenceImageSnapshot): string | undefined 
 }
 
 /** 视觉判定提示词（中文；输出收窄为 form+confidence+reason，刻意不要求颜色/坐标/OCR 全文——防搬运结构隔离）。 */
-function buildSensePrompt(): string {
+export function buildCoverFormSensePrompt(): string {
   return `请判断这张小红书笔记封面图的形态，四选一：
 - text_card：排版文字知识卡/海报——画面主体是排版好的文字内容（大标题、要点列表、金句等），文字本身是信息主体
 - photo：真实拍摄的照片（人物、风景、食物、产品、生活场景等实拍）
@@ -113,7 +113,7 @@ function buildSenseMessages(imageUrl: string): VisionChatMessage[] {
     {
       role: 'user',
       content: [
-        { type: 'text', text: buildSensePrompt() },
+        { type: 'text', text: buildCoverFormSensePrompt() },
         { type: 'image_url', image_url: { url: imageUrl } },
       ],
     },

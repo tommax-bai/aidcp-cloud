@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import type { LlmClient } from '../../src/llm/index.js';
-import { ReplyAiService } from '../../src/interactions/reply-ai.js';
+import { buildInteractionReplyPrompt, ReplyAiService } from '../../src/interactions/reply-ai.js';
 import type { InteractionStore } from '../../src/interactions/interaction-store.js';
 import type { ReplyConfigStore } from '../../src/interactions/reply-config-store.js';
 import { ReplyWorkflow } from '../../src/interactions/reply-workflow.js';
@@ -16,7 +16,7 @@ import {
   validateFinalReplyText,
   validateReplyConfig,
 } from '../../src/interactions/reply-config.js';
-import type { MinimalInbound, ReplyConfigSnapshot, ReplyProfile, ReplyRule, ReplyTemplate, ScopedJobContext } from '../../src/interactions/types.js';
+import type { MinimalInbound, PolisherInput, ReplyConfigSnapshot, ReplyProfile, ReplyRule, ReplyTemplate, RiskReviewerInput, ScopedJobContext } from '../../src/interactions/types.js';
 
 const now = 1784044800000;
 const inbound: MinimalInbound = {
@@ -96,22 +96,32 @@ test('dedicated AI roles consume frozen fixtures and reject malformed structured
   const outputs = await Promise.all(names.map(async (name) => JSON.parse(await readFile(
     new URL(`../fixtures/wechat-channels-interaction/v1/ai/${name}`, import.meta.url), 'utf8')) as unknown));
   const accountIds: Array<string | undefined> = [];
-  const llm: LlmClient = { complete: async (_prompt, options) => {
+  const prompts: string[] = [];
+  const llm: LlmClient = { complete: async (prompt, options) => {
+    prompts.push(prompt);
     accountIds.push(options?.accountId);
     return JSON.stringify(outputs.shift());
   } };
   const ai = new ReplyAiService(llm, 100);
-  const classifier = await ai.classify({ role: 'reply_intent_classifier', requestId: 'r1', accountId: 'acct_wc_demo', inbound });
-  const polisher = await ai.polish({ role: 'reply_polisher', requestId: 'r2', accountId: 'acct_wc_demo', inbound,
+  const classifierInput = { role: 'reply_intent_classifier' as const, requestId: 'r1', accountId: 'acct_wc_demo', inbound };
+  const polisherInput: PolisherInput = { role: 'reply_polisher', requestId: 'r2', accountId: 'acct_wc_demo', inbound,
     renderedText: '谢谢。', profile: { tone: ['friendly'], maxLength: 500, allowEmoji: false, allowLinks: false,
-      blockedPhrases: [], requiredDisclaimer: null } });
-  const reviewer = await ai.review({ role: 'reply_risk_reviewer', requestId: 'r3', accountId: 'acct_wc_demo', inbound,
+      blockedPhrases: [], requiredDisclaimer: null } };
+  const classifier = await ai.classify(classifierInput);
+  const polisher = await ai.polish(polisherInput);
+  const reviewerInput: RiskReviewerInput = { role: 'reply_risk_reviewer', requestId: 'r3', accountId: 'acct_wc_demo', inbound,
     renderedText: '谢谢。', candidateText: polisher.value.polishedText, meaningChanged: false, introducedClaims: [],
-    policy: { mode: 'review_before_send', hardRiskTags: ['unknown'] } });
+    policy: { mode: 'review_before_send' as const, hardRiskTags: ['unknown' as const] } };
+  const reviewer = await ai.review(reviewerInput);
   assert.deepEqual([classifier.fallback, polisher.fallback, reviewer.fallback], ['none', 'none', 'none']);
   assert.equal(classifier.value.role, 'reply_intent_classifier');
   assert.equal(reviewer.value.allowAutoSend, false);
   assert.deepEqual(accountIds, ['acct_wc_demo','acct_wc_demo','acct_wc_demo']);
+  assert.deepEqual(prompts, [
+    buildInteractionReplyPrompt(classifierInput),
+    buildInteractionReplyPrompt(polisherInput),
+    buildInteractionReplyPrompt(reviewerInput),
+  ], '运行时三次调用必须与后台预览复用同一 prompt builder');
 
   const malformed = new ReplyAiService({ complete: async () => '{"role":"reply_intent_classifier","intent":"gratitude","extra":true}' }, 100);
   const result = await malformed.classify({ role: 'reply_intent_classifier', requestId: 'bad', accountId: 'acct_wc_demo', inbound });

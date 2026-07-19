@@ -1,7 +1,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { VisionLlmClient } from '../../src/llm/vision.js';
-import { createVisualFidelityAuditor } from '../../src/publish-agent/visual-fidelity-auditor.js';
+import { buildVisualFidelityAuditPrompt, createVisualFidelityAuditor } from '../../src/publish-agent/visual-fidelity-auditor.js';
 
 function payload(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -13,12 +13,19 @@ function payload(overrides: Record<string, unknown> = {}): string {
 
 describe('VisualFidelityAuditor', () => {
   test('五项过阈且无硬风险才通过', async () => {
-    const vision: VisionLlmClient = { chatVision: async () => payload() };
+    let prompt = '';
+    const vision: VisionLlmClient = { chatVision: async (messages) => {
+      const content = messages[0]?.content;
+      prompt = Array.isArray(content) && content[0]?.type === 'text' ? content[0].text : '';
+      return payload();
+    } };
     const auditor = createVisualFidelityAuditor({ vision, minScore: 0.7, clock: () => 7 });
-    const out = await auditor.audit({ accountId: 'a', referenceUrl: 'https://r', generatedUrl: 'https://g' });
+    const input = { accountId: 'a', referenceUrl: 'https://r', generatedUrl: 'https://g' };
+    const out = await auditor.audit(input);
     assert.equal(out.status, 'passed');
     assert.equal(out.scores?.composition, 0.8);
     assert.equal(out.auditedAt, 7);
+    assert.equal(prompt, buildVisualFidelityAuditPrompt(input), '运行时与后台预览必须共用同一 builder');
   });
 
   test('乱码/水印/逐字复制等硬风险直接失败', async () => {

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FacebookGroupJoinJudge } from '../../src/agents/facebook-group-join-judge.js';
+import { buildFacebookGroupJoinJudgePrompt, FacebookGroupJoinJudge } from '../../src/agents/facebook-group-join-judge.js';
 import type { FacebookGroupJoinAuditRow } from '../../src/comment-agent/facebook-group-store.js';
 
 test('FacebookGroupJoinJudge pre-click skips already-member and gated observations without LLM', async () => {
@@ -54,14 +54,20 @@ test('pending-label-audit: 裸「取消」不触发 pending/gated 确定性判�
 });
 
 test('FacebookGroupJoinJudge fails closed on low-confidence model instant_join (no clear join CTA → LLM)', async () => {
+  let prompt = '';
   const judge = new FacebookGroupJoinJudge({
-    llm: { complete: async () => '{"verdict":"instant_join","confidence":0.4,"reason":"unclear"}' },
+    llm: { complete: async (value) => {
+      prompt = value;
+      return '{"verdict":"instant_join","confidence":0.4,"reason":"unclear"}';
+    } },
   });
 
   // 无清晰加入 CTA（"View" 非加入词）→ 不走确定性 instant_join → 交 LLM → 低置信 → fail-closed。
-  const result = await judge.evaluatePreClick({ mainCtaText: 'View', headerText: 'Public group' });
+  const observation = { mainCtaText: 'View', headerText: 'Public group' };
+  const result = await judge.evaluatePreClick(observation);
   assert.equal(result.verdict, 'ambiguous_skip');
   assert.match(result.reason, /fail_closed/);
+  assert.equal(prompt, buildFacebookGroupJoinJudgePrompt('pre_click', observation), '运行时与后台预览必须共用同一 builder');
 });
 
 test('FacebookGroupJoinJudge: clear Join CTA → deterministic instant_join, ignores documentReady=loading, no LLM', async () => {

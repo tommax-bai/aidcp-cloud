@@ -123,6 +123,8 @@ export const ROLE_CATALOG: RoleCatalogItem[] = [
   { roleId: 'browse:comment_appraiser', displayName: '是否值得评论判定', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
   { roleId: 'browse:comment_composer', displayName: '评论文案撰写', group: 'browse', category: 'browse_compose', llmKind: 'text', tunableTemperature: true },
   { roleId: 'browse:comment_de_ai_flavor', displayName: '评论去 AI 味改写', group: 'browse', category: 'browse_compose', llmKind: 'text', tunableTemperature: true },
+  // Facebook 定向评论的既有运行时 roleId 没有 browse: 前缀；保持稳定键，避免用量归账与模型覆盖静默换键。
+  { roleId: 'facebook_comment_composer', displayName: 'Facebook 定向评论撰写', group: 'browse', category: 'browse_compose', llmKind: 'text', tunableTemperature: true },
   // F. 逛作者主页
   { roleId: 'browse:author_evaluator', displayName: '是否进主页评估', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
   { roleId: 'browse:follow_agent', displayName: '关注博主判定', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
