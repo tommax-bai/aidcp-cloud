@@ -64,6 +64,7 @@ describe('WanxiangClient', () => {
     const submitBody = JSON.parse(capture.bodies[0]);
     assert.equal(submitBody.model, 'wan2.7-image-pro');
     assert.equal(submitBody.input.messages[0].content[0].text, 'cute cat illustration');
+    assert.equal(submitBody.parameters.size, '1024*1024');
     assert.equal(submitBody.parameters.watermark, false);
     assert.equal(result.referenceStatus, undefined);
     assert.equal(result.referenceUsed, undefined);
@@ -88,6 +89,8 @@ describe('WanxiangClient', () => {
       },
     ], capture);
 
+    const previousReferenceSize = process.env.AIDCP_WANXIANG_REFERENCE_IMAGE_SIZE;
+    delete process.env.AIDCP_WANXIANG_REFERENCE_IMAGE_SIZE;
     const client = new WanxiangClient({
       apiKey: 'test-key',
       pollIntervalMs: 10,
@@ -95,6 +98,8 @@ describe('WanxiangClient', () => {
       logger: silentLogger,
       fetchImpl: fetchImpl as any,
     });
+    if (previousReferenceSize === undefined) delete process.env.AIDCP_WANXIANG_REFERENCE_IMAGE_SIZE;
+    else process.env.AIDCP_WANXIANG_REFERENCE_IMAGE_SIZE = previousReferenceSize;
 
     const result = await client.generate('保持原图黑白文字卡片版式，改写成新的标题和要点', undefined, {
       referenceImages: [' https://oss.example.com/original-1.webp ', '', 'https://oss.example.com/original-2.webp'],
@@ -109,8 +114,44 @@ describe('WanxiangClient', () => {
       { image: 'https://oss.example.com/original-2.webp' },
       { text: '保持原图黑白文字卡片版式，改写成新的标题和要点' },
     ]);
-    assert.equal(submitBody.parameters.size, '2K');
+    assert.equal(submitBody.parameters.size, '1K');
     assert.equal(submitBody.parameters.watermark, false);
+  });
+
+  test('AIDCP_WANXIANG_REFERENCE_IMAGE_SIZE 显式覆盖参考图 1K 默认值', async () => {
+    const capture = { bodies: [] as string[] };
+    const fetchImpl = mockFetch([
+      { ok: true, json: async () => ({ output: { task_id: 'task-ref-override', task_status: 'PENDING' } }) },
+      {
+        ok: true,
+        json: async () => ({
+          output: {
+            task_id: 'task-ref-override',
+            task_status: 'SUCCEEDED',
+            choices: [{ message: { content: [{ image: 'https://cdn.example.com/ref-override.png' }] } }],
+          },
+        }),
+      },
+    ], capture);
+
+    const previousReferenceSize = process.env.AIDCP_WANXIANG_REFERENCE_IMAGE_SIZE;
+    process.env.AIDCP_WANXIANG_REFERENCE_IMAGE_SIZE = '2K';
+    const client = new WanxiangClient({
+      apiKey: 'test-key',
+      pollIntervalMs: 1,
+      maxPollAttempts: 2,
+      logger: silentLogger,
+      fetchImpl: fetchImpl as any,
+    });
+    if (previousReferenceSize === undefined) delete process.env.AIDCP_WANXIANG_REFERENCE_IMAGE_SIZE;
+    else process.env.AIDCP_WANXIANG_REFERENCE_IMAGE_SIZE = previousReferenceSize;
+
+    const result = await client.generate('按参考图重构', undefined, {
+      referenceImages: ['https://oss.example.com/original.webp'],
+    });
+
+    assert.equal(result.url, 'https://cdn.example.com/ref-override.png');
+    assert.equal(JSON.parse(capture.bodies[0]).parameters.size, '2K');
   });
 
   test('显式 referenceRoles 时辅助锚在前、primary 最后，并在文本中说明图序角色', async () => {
