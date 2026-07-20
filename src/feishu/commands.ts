@@ -103,7 +103,12 @@ const HELP_TEXT = [
 /** 账号昵称匹配的候选项（执行层从账号存储拼出）。 */
 export interface AccountNickCandidate {
   accountId: string;
-  nickname: string | null;
+  /** 统一解析后的首选可读名，仅用于清单和回执。 */
+  displayName?: string | null;
+  /** 允许人工输入匹配的全部历史/当前可读名，不含机器 accountId。 */
+  names?: string[];
+  /** @deprecated 兼容旧调用/测试；新调用使用 displayName + names。 */
+  nickname?: string | null;
 }
 
 /** 按昵称解析账号的结果。 */
@@ -120,12 +125,19 @@ export function matchAccountByNickname(
   candidates: AccountNickCandidate[],
 ): NicknameResolution {
   const norm = (nickname ?? '').trim().toLowerCase();
-  const available = candidates.map((c) => c.nickname ?? `(无昵称:${c.accountId})`);
+  const available = candidates.map((c) => c.displayName?.trim() || c.nickname?.trim() || '（未获取昵称）');
   if (!norm) return { ok: false, reason: 'not_found', available };
-  const hits = candidates.filter((c) => (c.nickname ?? '').trim().toLowerCase() === norm);
+  const hits = candidates.filter((c) => {
+    const names = c.names?.length ? c.names : [c.nickname ?? c.displayName ?? ''];
+    return names.some((name) => name.trim().toLowerCase() === norm);
+  });
   if (hits.length === 1) return { ok: true, accountId: hits[0].accountId };
   if (hits.length === 0) return { ok: false, reason: 'not_found', available };
-  return { ok: false, reason: 'ambiguous', available: hits.map((c) => c.accountId) };
+  return {
+    ok: false,
+    reason: 'ambiguous',
+    available: hits.map((c) => c.displayName?.trim() || c.nickname?.trim() || '（未获取昵称）'),
+  };
 }
 
 /**

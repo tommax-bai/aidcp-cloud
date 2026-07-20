@@ -134,6 +134,7 @@ import {
 } from './publish-agent/image-providers.js';
 import { AccountStateManager } from './account-state.js';
 import { PgAccountStore, type AccountStore } from './account-store.js';
+import { resolveNotificationAccountName } from './account-display-name.js';
 // change textcard-cover-form：封面形态感知（vision 客户端 + 感知服务）与文字卡渲染出口。
 import { OpenAiCompatVisionClient } from './llm/vision.js';
 import {
@@ -1064,9 +1065,11 @@ async function main(): Promise<void> {
   const accountState = new AccountStateManager(accountStore);
   await accountState.init();
   const accountDisplayName = (accountId: string): string | undefined => {
-    const nickname = accountStore?.getNickname?.(accountId)?.trim();
-    return nickname || undefined;
+    const display = accountStore?.getDisplayName?.(accountId);
+    return display && display.source !== 'account_id' ? display.name : undefined;
   };
+  const accountDisplayNameCandidates = (accountId: string): string[] =>
+    accountStore?.getDisplayNameCandidates?.(accountId) ?? [];
 
   // Unified user-delegated task control plane. If PG/account facts are unavailable, all public write entries fail closed.
   let delegatedTaskStore: PgDelegatedTaskStore | undefined;
@@ -1086,7 +1089,8 @@ async function main(): Promise<void> {
         store,
         listAccounts: async () => Promise.all((await accountStore!.listAll()).map(async (row) => ({
           accountId: row.accountId,
-          nickname: accountStore!.getNickname?.(row.accountId) ?? null,
+          displayName: accountDisplayName(row.accountId) ?? null,
+          names: accountDisplayNameCandidates(row.accountId),
           platform: await accountStore!.getPlatform?.(row.accountId) ?? 'xiaohongshu',
           status: row.status,
         }))),
@@ -1391,7 +1395,7 @@ async function main(): Promise<void> {
     );
     replyWorkflow = new ReplyWorkflow(interactionStore, replyConfigResolver, replyAi, {
       dmAiEnabled: readEnvString('AIDCP_INTERACTION_DM_AI_ENABLED')?.toLocaleLowerCase() === 'true',
-      accountNameFor: (accountId) => accountStore?.getNickname?.(accountId),
+      accountNameFor: accountDisplayName,
       canAutoQueue: async (context, snapshot, preview) =>
         interactionSender?.canAutoQueueDraft(context, snapshot, preview) ?? false,
     });
@@ -1671,7 +1675,8 @@ async function main(): Promise<void> {
     const all = await accountStore.listAll();
     const candidates = all.map((a) => ({
       accountId: a.accountId,
-      nickname: accountStore!.getNickname?.(a.accountId) ?? null,
+      displayName: accountDisplayName(a.accountId) ?? null,
+      names: accountDisplayNameCandidates(a.accountId),
     }));
     const r = matchAccountByNickname(nickname, candidates);
     if (r.ok) return r.accountId;
@@ -2519,7 +2524,7 @@ async function main(): Promise<void> {
       void (async () => {
         const chatId = await resolveCardChatId(undefined, notice.accountId);
         if (!chatId) return;
-        const name = accountDisplayName(notice.accountId) ?? notice.accountId;
+        const name = accountDisplayName(notice.accountId) ?? '（未获取昵称）';
         const ref = notice.recordId !== undefined ? `草稿 #${notice.recordId}${notice.title ? `「${notice.title}」` : ''}` : '';
         const text =
           notice.kind === 'offline_requeued'
@@ -2693,7 +2698,7 @@ async function main(): Promise<void> {
         console.error('[comment] 无可用飞书群，评论审批卡未发出（将超时跳过、不发）');
         return;
       }
-      const displayName = accountName?.trim() || (accountId ? accountDisplayName(accountId) : undefined);
+      const displayName = resolveNotificationAccountName(accountId, accountName, accountDisplayName);
       await messenger.sendApprovalCard(chatId, buildCommentApprovalCard({ requestId, noteId, text, title, authorName, accountId, accountName: displayName }));
     },
     isApproved: isPublishApproved,
@@ -2708,7 +2713,7 @@ async function main(): Promise<void> {
   ): Promise<void> => {
     const chatId = await resolveCardChatId(input.originChatId, input.accountId);
     if (!chatId) throw new Error('auto_approve_chat_not_configured');
-    const displayName = input.accountName?.trim() || (input.accountId ? accountDisplayName(input.accountId) : undefined);
+    const displayName = resolveNotificationAccountName(input.accountId, input.accountName, accountDisplayName);
     const mandatory = source === 'mandatory_persona';
     await messenger.sendCard(
       chatId,
@@ -2733,7 +2738,7 @@ async function main(): Promise<void> {
   const notifyMandatoryCommentOutcome = async (input: MandatoryCommentOutcomeNoticeInput): Promise<void> => {
     const chatId = await resolveAccountChatId(input.accountId);
     if (!chatId) throw new Error('mandatory_comment_outcome_chat_not_configured');
-    const displayName = input.accountName?.trim() || (input.accountId ? accountDisplayName(input.accountId) : undefined);
+    const displayName = resolveNotificationAccountName(input.accountId, input.accountName, accountDisplayName);
     await messenger.sendCard(chatId, buildMandatoryCommentOutcomeCard({ ...input, accountName: displayName }));
     console.log(
       `[comment] mandatory 终态通知已发 outcome=${input.outcome} account=${input.accountId ?? '-'} requestId=${input.requestId} note=${input.noteId}`,
@@ -4253,7 +4258,7 @@ async function main(): Promise<void> {
                   // 只在「没走到人审卡」时补卡（未触发黄 / 失败红 / 跳过黄）；进人审（pending_approval 等）由人审卡自证，不双卡。
                   let receipt: { ok: boolean; level: 'success' | 'warning' | 'error'; title: string; message: string } | null = null;
                   const accountName = accountDisplayName(accountId);
-                  const accountLabel = accountName ?? accountId;
+                  const accountLabel = accountName ?? '（未获取昵称）';
                   if (o.result !== 'triggered') {
                     receipt = { ok: false, level: 'warning', title: '参照创作未触发', message: `账号 \`${accountLabel}\`「${sourceLabel}」未触发：${o.reason}` };
                   } else if (o.status === 'failed' || o.status === 'timeout') {
@@ -4350,6 +4355,12 @@ async function main(): Promise<void> {
           store: clientUserStore,
           revocation: new TokenRevocationStore(), // 独立撤销黑名单，绝不共用面板的
           rateLimiter: new LoginRateLimiter(),
+          ...(accountStore?.setOperatorAlias ? {
+            operatorAlias: {
+              setForAccount: (accountId: string, alias: string | null) =>
+                accountStore!.setOperatorAlias!(accountId, alias),
+            },
+          } : {}),
           delegatedTasks: delegatedTaskService,
           curatedContent: curatedContentStore,
           referenceDraftCountForAccount: (accountId) => publishLogStore.countReferenceDraftsForAccount(accountId),

@@ -83,14 +83,15 @@ test('buildAlertCard: P0/P1 红色头部 + 去处理按钮', () => {
   assert.equal(buttons[0].url, 'https://console.aidcp.local/accounts/acc-02');
 });
 
-test('buildAlertCard: 缺昵称时账号标题后缀回落 ID', () => {
+test('buildAlertCard: 缺昵称时账号标题不泄漏机器 ID', () => {
   const card = buildAlertCard({
     severity: 'P1',
     title: '未知阻断弹窗',
     accountId: 'acc-02',
     detail: 'x',
   });
-  assert.match(card.header?.title.content ?? '', /acc-02/);
+  assert.match(card.header?.title.content ?? '', /（未获取昵称）/);
+  assert.doesNotMatch(card.header?.title.content ?? '', /acc-02/);
 });
 
 test('buildAlertCard: P2 用橙色头部', () => {
@@ -127,7 +128,8 @@ test('buildCommandResultCard: 缺昵称时账号行回落 ID', () => {
   });
   const div = card.elements[0];
   assert.ok(div.tag === 'div' && div.text);
-  assert.match(div.text!.content, /\*\*账号\*\*：acc-01/);
+  assert.match(div.text!.content, /\*\*账号\*\*：（未获取昵称）/);
+  assert.doesNotMatch(div.text!.content, /acc-01/);
 });
 
 test('buildCommandResultCard: 失败用红色', () => {
@@ -213,7 +215,8 @@ test('buildPublishApprovalCard: 审批卡显示账号昵称，缺昵称时回落
   });
   const flat = JSON.stringify(fallback);
   assert.match(flat, /账号/);
-  assert.match(flat, /acc-02/);
+  assert.match(flat, /（未获取昵称）/);
+  assert.doesNotMatch(flat, /acc-02/);
 });
 
 test('buildPublishApprovalCard: publish-<n> 卡片带「编号」字段（与客户端发布卡对暗号）', () => {

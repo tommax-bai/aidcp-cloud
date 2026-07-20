@@ -149,3 +149,19 @@ test('nickname ambiguity fails closed', async () => {
     (err: unknown) => err instanceof DelegatedTaskServiceError && err.code === 'account_ambiguous',
   );
 });
+
+test('unified account directory accepts legacy platform name but stores and displays the preferred operator alias', async () => {
+  const { service: svc } = service([{
+    accountId: 'fb-machine-id',
+    displayName: 'Tianxing Bai1',
+    names: ['Tianxing Bai1', 'Tianxing Bai', 'Facebook 运营号'],
+    platform: 'facebook',
+    status: 'active',
+  }]);
+  const result = await svc.createDraft({
+    accountName: 'Tianxing Bai', action: 'publish_post', targetSuccessCount: 1, maxAttempts: 1,
+    deadlineAt: NOW + 10_000, source: 'feishu',
+  });
+  assert.equal(result.task.accountId, 'fb-machine-id', '机器载荷仍使用 accountId');
+  assert.equal(result.task.accountName, 'Tianxing Bai1', '人类可见回执使用统一首选名');
+});

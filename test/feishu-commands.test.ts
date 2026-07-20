@@ -602,6 +602,19 @@ test('matchAccountByNickname: 精确命中（trim + 大小写不敏感）', () =
   assert.deepEqual(matchAccountByNickname('  tmax ', cands), { ok: true, accountId: 'id-b' });
 });
 
+test('matchAccountByNickname: 统一候选同时接受人工别名、平台昵称和运营标签，清单显示首选名', () => {
+  const candidates = [{
+    accountId: 'machine-id',
+    displayName: 'Tianxing Bai1',
+    names: ['Tianxing Bai1', 'Tianxing Bai', 'Facebook 运营号'],
+  }];
+  assert.deepEqual(matchAccountByNickname('Tianxing Bai1', candidates), { ok: true, accountId: 'machine-id' });
+  assert.deepEqual(matchAccountByNickname('Tianxing Bai', candidates), { ok: true, accountId: 'machine-id' });
+  assert.deepEqual(matchAccountByNickname('Facebook 运营号', candidates), { ok: true, accountId: 'machine-id' });
+  const missing = matchAccountByNickname('不存在', candidates);
+  assert.deepEqual(missing.ok === false && missing.available, ['Tianxing Bai1']);
+});
+
 test('matchAccountByNickname: 找不到 → not_found（带可用昵称清单）', () => {
   const cands = [{ accountId: 'id-a', nickname: '工程师大白' }];
   const r = matchAccountByNickname('不存在的名', cands);

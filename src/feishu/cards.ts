@@ -115,7 +115,7 @@ export function buildDailySummaryCard(data: DailySummaryData): FeishuCard {
 function formatAccountDisplay(accountName?: string, accountId?: string): string {
   const name = accountName?.trim();
   if (name) return name;
-  return accountId ?? '';
+  return accountId?.trim() ? '（未获取昵称）' : '';
 }
 
 /** P0/P1 告警卡片 */

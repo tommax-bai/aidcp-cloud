@@ -76,6 +76,26 @@ test('store: 未配 = 完全不自动（零回归默认）', async () => {
   assert.equal(store.getAccount('acc-1'), null);
 });
 
+test('listCatalog: 排期账号展示复用统一解析器，运营别名优先', async () => {
+  const pool = {
+    query: async (sql: string) => {
+      assert.match(sql, /a\.operator_alias/);
+      return { rows: [{
+        account_id: 'acc-1', label: '运营标签', nickname: '平台昵称', operator_alias: '人工昵称',
+        has_contact_info: false, auto_enabled: null, post_enabled: null, post_mode: null,
+        post_daily_cap: null, comment_enabled: null, comment_mode: null, comment_daily_cap: null,
+        contact_comment_enabled: null, contact_comment_mode: null, contact_comment_daily_cap: null,
+        content_active_mask: null, updated_at: null, updated_by: null,
+      }] };
+    },
+    end: async () => {},
+  } as unknown as pg.Pool;
+  const [row] = await new ContentScheduleStore({ pool }).listCatalog();
+  assert.equal(row.operatorAlias, '人工昵称');
+  assert.equal(row.displayName, '人工昵称');
+  assert.equal(row.displayNameSource, 'operator_alias');
+});
+
 test('store: setGlobal 非法掩码整块拒（长度不对 / 非01 / 非串）', async () => {
   const { store } = await makeStore();
   for (const bad of ['1'.repeat(167), 'x'.repeat(168), 42 as unknown as string]) {

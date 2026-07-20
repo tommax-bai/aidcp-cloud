@@ -17,9 +17,10 @@ import type { LlmKind, ThinkingModeApi } from '../config/role-catalog.js';
 import type { ModelEffectiveSource, PersonaSource } from './types.js';
 
 /** 面板 API 契约版本号。接口形状变更时递增。 */
+// v6（change unified-account-display-name）：PanelAccount 增加运营别名和统一展示名投影。
 // v5（change wechat-panel-permission-visibility）：新增只读视频号互动权限概览端点。
 // v4（change generalize-contact-info）：PanelAccount.groupChatInfo → contactInfo（DTO 字段改名）。
-export const PANEL_API_VERSION = 5;
+export const PANEL_API_VERSION = 6;
 
 /**
  * PanelAccount 字段权威清单（console 镜像对拍此清单防漂移，#5/#6）。
@@ -29,6 +30,9 @@ export const PANEL_ACCOUNT_FIELDS = [
   'accountId',
   'label',
   'nickname',
+  'operatorAlias',
+  'displayName',
+  'displayNameSource',
   'platform',
   'groupLabel',
   'machineLabel',

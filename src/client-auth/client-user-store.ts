@@ -38,6 +38,12 @@ export type ResolvedBinding =
   | { ok: true; accountId: string }
   | { ok: false; reason: 'environment_not_owned' | 'binding_unknown' | 'binding_conflict' | 'binding_unavailable' };
 
+/** 客户修改运营别名时使用的更窄绑定解析：悬空账号与尚未绑定必须可区分，便于诚实回滚。 */
+export type ResolvedOperatorAliasBinding =
+  | { ok: true; accountId: string }
+  | { ok: false; reason:
+      'environment_not_owned' | 'binding_unknown' | 'account_not_found' | 'binding_conflict' | 'binding_unavailable' };
+
 export type EnvironmentSlowStartRecord =
   | {
       ok: true;
@@ -1402,6 +1408,43 @@ export class ClientUserStore {
       if (r.contended) return { ok: false, reason: 'binding_conflict' };
       // 悬空绑定（accounts 无此行）：读时 fail-closed，归入日常态 binding_unknown（下次握手 ensureAccount 重建即自愈）。
       if (!r.account_exists) return { ok: false, reason: 'binding_unknown' };
+      return { ok: true, accountId: r.bound_account };
+    } catch (err) {
+      if (isMissingTable(err)) return { ok: false, reason: 'binding_unavailable' };
+      throw err;
+    }
+  }
+
+  /**
+   * 客户环境运营别名写入口的专用解析。它比通用读取更严格地保留 `account_not_found`，从而让客户端知道
+   * 本地乐观值并未保存到 Cloud；归属与跨客户争用仍在同一条现读 SQL 内 fail-closed。
+   */
+  async resolveOperatorAliasAccountForEnv(userId: string, envKey: string): Promise<ResolvedOperatorAliasBinding> {
+    const key = (envKey ?? '').trim();
+    if (!userId || !key) return { ok: false, reason: 'environment_not_owned' };
+    try {
+      const { rows } = await this.pool.query<{
+        owned: boolean; bound_account: string | null; account_exists: boolean; contended: boolean;
+      }>(
+        `SELECT
+           EXISTS(SELECT 1 FROM client_env_scope s
+                  WHERE s.user_id = $1 AND s.env_key = $2 AND s.source = 'admin') AS owned,
+           e.account_id AS bound_account,
+           CASE WHEN e.account_id IS NOT NULL
+                THEN EXISTS(SELECT 1 FROM accounts acc WHERE acc.account_id = e.account_id)
+                ELSE false END AS account_exists,
+           CASE WHEN e.account_id IS NOT NULL
+                THEN ${contendedAcrossCustomersSql('e.account_id', '$1')}
+                ELSE false END AS contended
+         FROM (SELECT $2::text AS env_key) k
+         LEFT JOIN client_environments e ON e.env_key = k.env_key`,
+        [userId, key],
+      );
+      const r = rows[0];
+      if (!r || !r.owned) return { ok: false, reason: 'environment_not_owned' };
+      if (r.bound_account == null) return { ok: false, reason: 'binding_unknown' };
+      if (r.contended) return { ok: false, reason: 'binding_conflict' };
+      if (!r.account_exists) return { ok: false, reason: 'account_not_found' };
       return { ok: true, accountId: r.bound_account };
     } catch (err) {
       if (isMissingTable(err)) return { ok: false, reason: 'binding_unavailable' };

@@ -12,6 +12,12 @@
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from './cache/pg-anchor-cache.js';
 import { normalizePlatformId, type PlatformId } from './platform/index.js';
+import {
+  accountDisplayNameCandidates,
+  resolveAccountDisplayName,
+  type AccountDisplayName,
+  type AccountDisplayNameInput,
+} from './account-display-name.js';
 
 const { Pool } = pg;
 
@@ -38,11 +44,14 @@ CREATE TABLE IF NOT EXISTS accounts (
   machine_label TEXT,
   group_label   TEXT,
   nickname      TEXT,
+  operator_alias TEXT,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- 自愈式加列（change account-real-nickname，迁移 0020 文档伴随）：本仓无迁移执行器，
 -- 已存在的 accounts 表靠这条幂等 ALTER 在 init() 时补上 nickname 列（CREATE TABLE IF NOT EXISTS 不改既有表）。
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS nickname TEXT;
+-- 账号级运营别名（change unified-account-display-name）：与平台 nickname 物理分离，空值为 NULL。
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS operator_alias TEXT;
 -- 自愈式加列（change platform-abstraction-layer）：accounts.platform 是运行时平台事实源。
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS platform TEXT NOT NULL DEFAULT 'xiaohongshu';
 -- 自愈式加列（change account-group-chat-injection → generalize-contact-info，物理改名迁移 0036）：每账号「联系方式」，
@@ -82,6 +91,10 @@ export type SetContactInfoResult =
   | { ok: true; contactInfo: string | null }
   | { ok: false; reason: 'account_not_found' | 'retired_account' };
 
+export type SetOperatorAliasResult =
+  | { ok: true; operatorAlias: string | null; display: AccountDisplayName }
+  | { ok: false; reason: 'account_not_found' | 'retired_account' };
+
 /** AccountStateManager 依赖的最小存储接口（便于内存打桩、不依赖真 PG）。 */
 export interface AccountStore {
   init?(): Promise<void>;
@@ -107,6 +120,12 @@ export interface AccountStore {
    * 不让 PG await 阻塞回 feed。缺省 → 调用方按 null 处理。
    */
   getNickname?(accountId: string): string | null;
+  /** 设置/清除账号级运营别名；UPDATE-only，成功后同步刷新显示名目录。 */
+  setOperatorAlias?(accountId: string, alias: string | null): Promise<SetOperatorAliasResult>;
+  /** 同步读取统一显示名与来源。 */
+  getDisplayName?(accountId: string): AccountDisplayName;
+  /** 同步读取人工选号可接受的别名/平台昵称/运营标签候选，不含 accountId。 */
+  getDisplayNameCandidates?(accountId: string): string[];
   /**
    * 写账号分组标签（change editable-account-group-label）：单写、UPDATE-only（**不 seed 造行**）。
    * trim 后空（空串 / 纯空白 / null）→ 写 NULL（清空分组）；退役保留账号与无对应行以可区分结果返回；
@@ -172,9 +191,8 @@ interface AccountPlatformRow extends AccountRow {
 /** accounts 主表持久化（PostgreSQL）。 */
 export class PgAccountStore implements AccountStore {
   private readonly pool: pg.Pool;
-  /** 账号昵称的进程内同步缓存（change account-real-nickname）：init() 预热全表 + setNickname 写后更新。
-   *  供采集收尾做差异写库判定；缺键=未知 → getNickname 返回 null。 */
-  private readonly nicknameCache = new Map<string, string | null>();
+  /** 统一账号显示名目录：init 预热，昵称/运营别名写后同步更新。 */
+  private readonly displayNameCache = new Map<string, AccountDisplayNameInput>();
   /** 账号平台缓存（init 预热 + getPlatform 回填）。accounts.platform 是事实源，缓存只做读路径加速。 */
   private readonly platformCache = new Map<string, PlatformId>();
   /** 账号入库时刻镜像（change account-level-slow-start）：init() 预热全表。
@@ -200,11 +218,18 @@ export class PgAccountStore implements AccountStore {
     const { rows } = await this.pool.query<{
       account_id: string;
       nickname: string | null;
+      operator_alias: string | null;
+      label: string | null;
       platform: string | null;
       created_at: Date | null;
-    }>('SELECT account_id, nickname, platform, created_at FROM accounts');
+    }>('SELECT account_id, nickname, operator_alias, label, platform, created_at FROM accounts');
     for (const r of rows) {
-      this.nicknameCache.set(r.account_id, r.nickname ?? null);
+      this.displayNameCache.set(r.account_id, {
+        accountId: r.account_id,
+        operatorAlias: r.operator_alias ?? null,
+        nickname: r.nickname ?? null,
+        label: r.label ?? null,
+      });
       this.platformCache.set(r.account_id, normalizePlatformId(r.platform));
       if (r.created_at) this.createdAtCache.set(r.account_id, r.created_at.getTime());
     }
@@ -256,12 +281,24 @@ export class PgAccountStore implements AccountStore {
     // 已从「建 controller 时 await PG 读 created_at」改为经 provider 现读内存镜像；本进程 init() 之后
     // 新登记的账号若不在此回填，该旁路会对它静默失效（默认关，但那是回滚拉杆，不能悄悄少一半）。
     const normalized = platform ? normalizePlatformId(platform) : 'xiaohongshu';
-    const { rows } = await this.pool.query<{ platform: string; created_at: Date | null }>(
+    const { rows } = await this.pool.query<{
+      platform: string;
+      created_at: Date | null;
+      label: string | null;
+      nickname: string | null;
+      operator_alias: string | null;
+    }>(
       `INSERT INTO accounts (account_id, label, platform) VALUES ($1, $1, $2)
-       ON CONFLICT (account_id) DO NOTHING RETURNING platform, created_at`,
+       ON CONFLICT (account_id) DO NOTHING RETURNING platform, created_at, label, nickname, operator_alias`,
       [accountId, normalized],
     );
     if (rows.length > 0) {
+      this.displayNameCache.set(accountId, {
+        accountId,
+        operatorAlias: rows[0].operator_alias ?? null,
+        nickname: rows[0].nickname ?? null,
+        label: rows[0].label ?? accountId,
+      });
       this.platformCache.set(accountId, normalizePlatformId(rows[0].platform));
       if (rows[0].created_at) this.createdAtCache.set(accountId, rows[0].created_at.getTime());
     }
@@ -284,7 +321,13 @@ export class PgAccountStore implements AccountStore {
       [accountId, value],
     );
     // 更新同步缓存：后续握手 / UI 立即读到最新展示名；XHS 启动仍会继续检测平台昵称变化。
-    this.nicknameCache.set(accountId, value);
+    const previous = this.displayNameCache.get(accountId);
+    this.displayNameCache.set(accountId, {
+      accountId,
+      operatorAlias: previous?.operatorAlias ?? null,
+      nickname: value,
+      label: previous?.label ?? accountId,
+    });
   }
 
   /**
@@ -292,7 +335,39 @@ export class PgAccountStore implements AccountStore {
    * 缺键（未预热到 / 新账号）或库内 NULL → 返回 null（= 「需采集」）。绝不 await PG（握手同步算门用）。
    */
   getNickname(accountId: string): string | null {
-    return this.nicknameCache.get(accountId) ?? null;
+    return this.displayNameCache.get(accountId)?.nickname?.trim() || null;
+  }
+
+  async setOperatorAlias(accountId: string, alias: string | null): Promise<SetOperatorAliasResult> {
+    if (accountId === RETIRED_ACCOUNT_ID) return { ok: false, reason: 'retired_account' };
+    const clean = (alias ?? '').trim();
+    const value = clean ? clean.slice(0, 80) : null;
+    const { rows } = await this.pool.query<{
+      operator_alias: string | null;
+      nickname: string | null;
+      label: string | null;
+    }>(
+      `UPDATE accounts SET operator_alias = $2 WHERE account_id = $1
+       RETURNING operator_alias, nickname, label`,
+      [accountId, value],
+    );
+    if (rows.length === 0) return { ok: false, reason: 'account_not_found' };
+    const record: AccountDisplayNameInput = {
+      accountId,
+      operatorAlias: rows[0].operator_alias ?? null,
+      nickname: rows[0].nickname ?? null,
+      label: rows[0].label ?? null,
+    };
+    this.displayNameCache.set(accountId, record);
+    return { ok: true, operatorAlias: record.operatorAlias ?? null, display: resolveAccountDisplayName(record) };
+  }
+
+  getDisplayName(accountId: string): AccountDisplayName {
+    return resolveAccountDisplayName(this.displayNameCache.get(accountId) ?? { accountId });
+  }
+
+  getDisplayNameCandidates(accountId: string): string[] {
+    return accountDisplayNameCandidates(this.displayNameCache.get(accountId) ?? { accountId });
   }
 
   /**

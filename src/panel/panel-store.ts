@@ -21,6 +21,10 @@ import {
 import type { FeedAction } from '../cache/interaction-feed-store.js';
 import type { AlertSeverity } from '../feishu/types.js';
 import type { VisualReferenceAudit } from '../publish-agent/visual-reference-types.js';
+import {
+  resolveAccountDisplayName,
+  type AccountDisplayNameSource,
+} from '../account-display-name.js';
 
 const { Pool } = pg;
 
@@ -32,6 +36,11 @@ export interface PanelAccount {
   label: string | null;
   /** 登录账号平台真实昵称（change account-real-nickname；未采到为 null，console 回落 label/accountId）。 */
   nickname: string | null;
+  /** 运营人工别名；与平台昵称分列，人工清除时为 null。 */
+  operatorAlias: string | null;
+  /** Cloud 唯一解析器产出的首选展示名。 */
+  displayName: string;
+  displayNameSource: AccountDisplayNameSource;
   platform: string;
   groupLabel: string | null;
   machineLabel: string | null;
@@ -99,7 +108,7 @@ export interface PanelPublish {
   scheduledPlatformId: string | null;
   /** 发布账号（change publish-history-account-and-detail）。 */
   accountId: string;
-  /** 账号展示名（accounts.label ?? account_id；nickname 待 account-real-nickname 落地后并入）。 */
+  /** 统一解析后的账号展示名。 */
   accountLabel: string;
   /** 已发布正文全文（后台「查看」用）。 */
   content: string | null;
@@ -212,6 +221,7 @@ interface AccountJoinRow {
   account_id: string;
   label: string | null;
   nickname: string | null;
+  operator_alias: string | null;
   platform: string;
   group_label: string | null;
   machine_label: string | null;
@@ -227,10 +237,16 @@ interface AccountJoinRow {
 function toAccount(r: AccountJoinRow): PanelAccount {
   const accountId = r.account_id;
   const personaBound = r.persona_bound === true;
+  const display = resolveAccountDisplayName({
+    accountId, operatorAlias: r.operator_alias, nickname: r.nickname, label: r.label,
+  });
   return {
     accountId,
     label: r.label,
     nickname: r.nickname,
+    operatorAlias: r.operator_alias,
+    displayName: display.name,
+    displayNameSource: display.source,
     platform: r.platform,
     groupLabel: r.group_label,
     machineLabel: r.machine_label,
@@ -364,7 +380,7 @@ function parseSourceReference(raw: unknown): PanelPublishSourceReference | null 
 }
 
 const ACCOUNT_SELECT = `
-  SELECT a.account_id, a.label, a.nickname, a.platform, a.group_label, a.machine_label,
+  SELECT a.account_id, a.label, a.nickname, a.operator_alias, a.platform, a.group_label, a.machine_label,
          a.contact_info,
          a.status AS operator_status, a.paused_at,
          r.status AS risk_status, r.quota_level AS risk_quota_level, r.signal_count,
@@ -464,7 +480,7 @@ export class PgPanelStore implements PanelStoreReader {
 
   /**
    * 已发布历史（change publish-history-account-and-detail）：带账号 + 正文 + 详情页链接；可选按账号过滤。
-   * LEFT JOIN accounts 取展示名（label ?? account_id）；按账号过滤走 publish_log.account_id 索引（迁移 0005）。
+   * LEFT JOIN accounts 后复用统一解析器生成展示名；按账号过滤走 publish_log.account_id 索引（迁移 0005）。
    * status 服务端过滤（change parallel-rewrite-drafts）：多候选草稿世界待审集合必须完整可见——
    * 「全局最近 N 条再客户端过滤」的窗口会把老 pending 挤出视野，挑选入口面残缺。
    */
@@ -493,6 +509,7 @@ export class PgPanelStore implements PanelStoreReader {
       account_id: string;
       account_label: string | null;
       account_nickname: string | null;
+      account_operator_alias: string | null;
       content: string | null;
       post_url: string | null;
       content_version: number | string | null;
@@ -504,7 +521,8 @@ export class PgPanelStore implements PanelStoreReader {
     }>(
       `SELECT pl.id, pl.title, pl.status, pl.platform, pl.platform_post_id, pl.published_at,
               pl.scheduled_at, pl.scheduled_platform_id,
-              pl.account_id, a.label AS account_label, a.nickname AS account_nickname, pl.content, pl.post_url,
+              pl.account_id, a.label AS account_label, a.nickname AS account_nickname,
+              a.operator_alias AS account_operator_alias, pl.content, pl.post_url,
               pl.content_version, pl.images, pl.image_url, pl.images_attached_count, pl.publish_metadata, pl.source_reference
        FROM publish_log pl
        LEFT JOIN accounts a ON a.account_id = pl.account_id
@@ -525,8 +543,12 @@ export class PgPanelStore implements PanelStoreReader {
         scheduledAt: r.scheduled_at ? r.scheduled_at.getTime() : null,
         scheduledPlatformId: r.scheduled_platform_id,
         accountId: r.account_id,
-        // 真名优先（change account-real-nickname）：nickname → label → account_id，绝不显示假名。
-        accountLabel: r.account_nickname ?? r.account_label ?? r.account_id,
+        accountLabel: resolveAccountDisplayName({
+          accountId: r.account_id,
+          operatorAlias: r.account_operator_alias,
+          nickname: r.account_nickname,
+          label: r.account_label,
+        }).name,
         content: r.content,
         postUrl: r.post_url,
         contentVersion: Number(r.content_version ?? 0),

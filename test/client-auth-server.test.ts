@@ -81,6 +81,15 @@ function makeFakeStore(): {
       if (contendedAcrossCustomers(bound, userId)) return { ok: false as const, reason: 'binding_conflict' as const };
       return { ok: true as const, accountId: bound };
     },
+    async resolveOperatorAliasAccountForEnv(userId: string, envKey: string) {
+      const key = (envKey ?? '').trim();
+      const owned = (scope.get(userId) ?? []).some((item) => item.envKey === key);
+      if (!key || !owned) return { ok: false as const, reason: 'environment_not_owned' as const };
+      const bound = bindings.get(key);
+      if (!bound) return { ok: false as const, reason: 'binding_unknown' as const };
+      if (contendedAcrossCustomers(bound, userId)) return { ok: false as const, reason: 'binding_conflict' as const };
+      return { ok: true as const, accountId: bound };
+    },
     async getEnvironmentSlowStart(userId: string, envKey: string) {
       const key = (envKey ?? '').trim();
       const owned = (scope.get(userId) ?? []).some((item) => item.envKey === key);
@@ -399,6 +408,93 @@ test('control-bootstrap 只为已归属且已绑定环境返回最小账号引�
       const body = await response.json() as { data: Record<string, unknown> };
       assert.deepEqual(body.data, { envKey: 'p1', accountId: ACCT_P1 });
       assert.deepEqual(Object.keys(body.data).sort(), ['accountId', 'envKey']);
+    },
+  );
+});
+
+test('operator-alias: 已归属绑定环境可设置别名，空内容清除并返回系统回落名', async () => {
+  const fx = makeFakeStore();
+  fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
+  fx.scope.set('u1', [{ envKey: 'p1', label: 'owned', platform: 'facebook', source: 'admin', assignedAt: 0 }]);
+  fx.bindings.set('p1', ACCT_P1);
+  const writes: Array<string | null> = [];
+  const operatorAlias = {
+    async setForAccount(accountId: string, alias: string | null) {
+      assert.equal(accountId, ACCT_P1, '客户端不得提交或替换账号键');
+      writes.push(alias);
+      return alias
+        ? { ok: true as const, operatorAlias: alias, display: { name: alias, source: 'operator_alias' as const } }
+        : { ok: true as const, operatorAlias: null, display: { name: 'Tianxing Bai', source: 'platform_nickname' as const } };
+    },
+  };
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), operatorAlias },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const set = await fetch(`${base}/environments/p1/operator-alias`, {
+        method: 'PUT', headers, body: JSON.stringify({ alias: '  Tianxing Bai1  ' }),
+      });
+      assert.equal(set.status, 200);
+      assert.deepEqual((await set.json() as { data: unknown }).data, {
+        envKey: 'p1', operatorAlias: 'Tianxing Bai1',
+        displayName: 'Tianxing Bai1', displayNameSource: 'operator_alias',
+      });
+      const clear = await fetch(`${base}/environments/p1/operator-alias`, {
+        method: 'PUT', headers, body: JSON.stringify({ alias: '   ' }),
+      });
+      assert.equal(clear.status, 200);
+      assert.deepEqual((await clear.json() as { data: unknown }).data, {
+        envKey: 'p1', operatorAlias: null,
+        displayName: 'Tianxing Bai', displayNameSource: 'platform_nickname',
+      });
+      assert.deepEqual(writes, ['Tianxing Bai1', null]);
+    },
+  );
+});
+
+test('operator-alias: 越权、未绑定、账号缺失、无效输入与写失败均诚实拒绝', async () => {
+  const fx = makeFakeStore();
+  fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
+  fx.scope.set('u1', [
+    { envKey: 'unbound', label: null, platform: 'facebook', source: 'admin', assignedAt: 0 },
+    { envKey: 'missing', label: null, platform: 'facebook', source: 'admin', assignedAt: 0 },
+    { envKey: 'write-fails', label: null, platform: 'facebook', source: 'admin', assignedAt: 0 },
+  ]);
+  fx.bindings.set('missing', 'missing-account');
+  fx.bindings.set('write-fails', ACCT_P1);
+  const originalResolve = fx.store.resolveOperatorAliasAccountForEnv.bind(fx.store);
+  fx.store.resolveOperatorAliasAccountForEnv = async (userId, envKey) => envKey === 'missing'
+    ? { ok: false as const, reason: 'account_not_found' as const }
+    : originalResolve(userId, envKey);
+  await withServer(
+    {
+      store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(),
+      operatorAlias: { async setForAccount() { throw new Error('database_down'); } },
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      for (const [envKey, status, error] of [
+        ['not-owned', 403, 'environment_not_owned'],
+        ['unbound', 409, 'binding_unknown'],
+        ['missing', 409, 'account_not_found'],
+      ] as const) {
+        const response = await fetch(`${base}/environments/${envKey}/operator-alias`, {
+          method: 'PUT', headers, body: JSON.stringify({ alias: 'name' }),
+        });
+        assert.equal(response.status, status, envKey);
+        assert.deepEqual(await response.json(), { error });
+      }
+      const invalid = await fetch(`${base}/environments/write-fails/operator-alias`, {
+        method: 'PUT', headers, body: JSON.stringify({ alias: 123 }),
+      });
+      assert.equal(invalid.status, 422);
+      const failed = await fetch(`${base}/environments/write-fails/operator-alias`, {
+        method: 'PUT', headers, body: JSON.stringify({ alias: 'name' }),
+      });
+      assert.equal(failed.status, 503);
+      assert.deepEqual(await failed.json(), { error: 'operator_alias_write_failed' });
     },
   );
 });

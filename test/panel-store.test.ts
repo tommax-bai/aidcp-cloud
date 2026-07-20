@@ -73,13 +73,16 @@ test('likeRate views=0 时 rate/healthy 为 null（不除零、不假成功）',
 test('listAccounts 映射 accounts⨝risk_state（operator vs risk 状态分开）', async () => {
   const store = new PgPanelStore({ pool: poolReturning([
     {
-      account_id: 'default', label: 'default', platform: 'xiaohongshu',
+      account_id: 'acc-1', label: '运营标签', nickname: '平台昵称', operator_alias: '人工昵称', platform: 'xiaohongshu',
       group_label: null, machine_label: null, operator_status: 'paused',
       paused_at: new Date(1000), risk_status: 'warned', risk_quota_level: 'conservative', signal_count: 3,
     },
   ]) });
   const [a] = await store.listAccounts();
-  assert.equal(a.accountId, 'default');
+  assert.equal(a.accountId, 'acc-1');
+  assert.equal(a.operatorAlias, '人工昵称');
+  assert.equal(a.displayName, '人工昵称');
+  assert.equal(a.displayNameSource, 'operator_alias');
   assert.equal(a.operatorStatus, 'paused');
   assert.equal(a.pausedAt, 1000);
   assert.equal(a.riskStatus, 'warned');
@@ -96,6 +99,7 @@ test('listAccounts 无 risk_state 行时风控字段为 null（账号无风控�
   const store = new PgPanelStore({ pool: poolReturning([
     {
       account_id: 'x', label: null, platform: 'xiaohongshu', group_label: null, machine_label: null,
+      nickname: null, operator_alias: null,
       operator_status: 'active', paused_at: null, risk_status: null, risk_quota_level: null, signal_count: null,
     },
   ]) });
@@ -201,6 +205,7 @@ test('publishedHistory 映射参照洗稿来稿快照；普通发布来源为 nu
         account_id: 'acc-1',
         account_label: '账号标签',
         account_nickname: null,
+        account_operator_alias: '人工昵称',
         content: '发布正文',
         post_url: null,
         content_version: 0,
@@ -234,6 +239,7 @@ test('publishedHistory 映射参照洗稿来稿快照；普通发布来源为 nu
         account_id: 'acc-1',
         account_label: '账号标签',
         account_nickname: null,
+        account_operator_alias: null,
         content: '普通正文',
         post_url: null,
         content_version: 0,
@@ -248,6 +254,7 @@ test('publishedHistory 映射参照洗稿来稿快照；普通发布来源为 nu
 
   const rows = await store.publishedHistory(50, 'acc-1');
   assert.equal(rows[0].sourceReference?.curatedContentId, 7);
+  assert.equal(rows[0].accountLabel, '人工昵称');
   assert.equal(rows[0].sourceReference?.body, '来稿正文');
   assert.equal(rows[0].sourceReference?.sourceUrl, null, '缺来源链接保持 null，不伪造');
   assert.deepEqual(rows[0].imageReferenceAudit, {

@@ -29,6 +29,11 @@ test('ACCOUNTS_SCHEMA_SQL 含 nickname 列 + 幂等自愈 ALTER（本仓无迁�
   assert.match(ACCOUNTS_SCHEMA_SQL, /ALTER TABLE accounts ADD COLUMN IF NOT EXISTS nickname TEXT/);
 });
 
+test('ACCOUNTS_SCHEMA_SQL 含独立 operator_alias 列 + 幂等自愈 ALTER', () => {
+  assert.match(ACCOUNTS_SCHEMA_SQL, /operator_alias\s+TEXT/);
+  assert.match(ACCOUNTS_SCHEMA_SQL, /ALTER TABLE accounts ADD COLUMN IF NOT EXISTS operator_alias TEXT/);
+});
+
 test('ACCOUNTS_SCHEMA_SQL 含 platform 列 + 幂等自愈 ALTER（accounts.platform 是平台事实源）', () => {
   assert.match(ACCOUNTS_SCHEMA_SQL, /platform\s+TEXT NOT NULL DEFAULT 'xiaohongshu'/);
   assert.match(ACCOUNTS_SCHEMA_SQL, /ALTER TABLE accounts ADD COLUMN IF NOT EXISTS platform TEXT NOT NULL DEFAULT 'xiaohongshu'/);
@@ -60,6 +65,83 @@ test('setNickname: 拒空白 → no-op（绝不用空覆盖已有真名）', asy
   await store.setNickname('acc-1', '   ');
   await store.setNickname('acc-1', '');
   assert.equal(calls.length, 0);
+});
+
+test('setOperatorAlias: 非空 trim 后 UPDATE-only，写后统一目录立即返回人工来源', async () => {
+  const { calls, pool } = fakePoolReturning([{
+    operator_alias: '运营重点号', nickname: '平台真名', label: 'acc-1',
+  }]);
+  const store = new PgAccountStore({ pool });
+  const result = await store.setOperatorAlias('acc-1', '  运营重点号  ');
+  assert.deepEqual(result, {
+    ok: true,
+    operatorAlias: '运营重点号',
+    display: { name: '运营重点号', source: 'operator_alias' },
+  });
+  assert.deepEqual(store.getDisplayName('acc-1'), { name: '运营重点号', source: 'operator_alias' });
+  assert.deepEqual(store.getDisplayNameCandidates('acc-1'), ['运营重点号', '平台真名']);
+  assert.match(calls[0].text, /UPDATE accounts SET operator_alias = \$2 WHERE account_id = \$1/);
+  assert.doesNotMatch(calls[0].text, /INSERT INTO accounts/);
+  assert.deepEqual(calls[0].params, ['acc-1', '运营重点号']);
+});
+
+test('setOperatorAlias: 空白清为 NULL，并立即回落平台昵称', async () => {
+  const { calls, pool } = fakePoolReturning([{
+    operator_alias: null, nickname: '平台真名', label: '运营标签',
+  }]);
+  const store = new PgAccountStore({ pool });
+  const result = await store.setOperatorAlias('acc-1', '   ');
+  assert.deepEqual(result, {
+    ok: true,
+    operatorAlias: null,
+    display: { name: '平台真名', source: 'platform_nickname' },
+  });
+  assert.equal(calls[0].params[1], null);
+});
+
+test('setOperatorAlias: 无账号与退役账号诚实拒绝', async () => {
+  const { calls, pool } = fakePoolReturning([]);
+  const store = new PgAccountStore({ pool });
+  assert.deepEqual(await store.setOperatorAlias('ghost', '别名'), { ok: false, reason: 'account_not_found' });
+  assert.deepEqual(await store.setOperatorAlias('default', '别名'), { ok: false, reason: 'retired_account' });
+  assert.equal(calls.length, 1, '退役账号不得发 SQL');
+});
+
+test('平台昵称刷新只更新 nickname，绝不覆盖目录中的运营别名', async () => {
+  const calls: { text: string; params: unknown[] }[] = [];
+  const pool = {
+    query: async (text: string, params: unknown[]) => {
+      calls.push({ text, params });
+      if (text.includes('SET operator_alias')) {
+        return { rows: [{ operator_alias: '运营重点号', nickname: '旧平台名', label: 'acc-1' }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  } as unknown as pg.Pool;
+  const store = new PgAccountStore({ pool });
+  await store.setOperatorAlias('acc-1', '运营重点号');
+  await store.setNickname('acc-1', '新平台名');
+  assert.deepEqual(store.getDisplayName('acc-1'), { name: '运营重点号', source: 'operator_alias' });
+  assert.equal(store.getNickname('acc-1'), '新平台名');
+  assert.deepEqual(store.getDisplayNameCandidates('acc-1'), ['运营重点号', '新平台名']);
+});
+
+test('init 预热运营别名、平台昵称和标签到统一同步目录', async () => {
+  let call = 0;
+  const pool = {
+    query: async () => {
+      call += 1;
+      if (call === 1) return { rows: [], rowCount: 0 };
+      return { rows: [{
+        account_id: 'acc-1', operator_alias: '运营重点号', nickname: '平台真名', label: '标签',
+        platform: 'facebook', created_at: null,
+      }], rowCount: 1 };
+    },
+  } as unknown as pg.Pool;
+  const store = new PgAccountStore({ pool });
+  await store.init();
+  assert.deepEqual(store.getDisplayName('acc-1'), { name: '运营重点号', source: 'operator_alias' });
+  assert.deepEqual(store.getDisplayNameCandidates('acc-1'), ['运营重点号', '平台真名', '标签']);
 });
 
 // ── change editable-account-group-label：setGroupLabel 单写、UPDATE-only、诚实可区分 ──

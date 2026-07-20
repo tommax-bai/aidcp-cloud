@@ -8,7 +8,12 @@ import { validateDelegatedTaskIntent } from './types.js';
 
 export interface DelegatedAccountCandidate {
   accountId: string;
-  nickname: string | null;
+  /** Cloud 统一解析器产出的首选可读名。 */
+  displayName?: string | null;
+  /** 运营别名、平台昵称、运营标签候选；不含机器 ID。 */
+  names?: string[];
+  /** @deprecated 兼容既有注入夹具；新调用使用 displayName + names。 */
+  nickname?: string | null;
   platform: PlatformId;
   status?: 'active' | 'paused';
 }
@@ -166,7 +171,7 @@ export class DelegatedTaskService {
       throw new DelegatedTaskServiceError('platform_mismatch', `账号平台事实为 ${platformLabel(account.platform)}，与请求不一致。`, 409);
     }
     if (account.status === 'paused') {
-      throw new DelegatedTaskServiceError('account_paused', `账号「${account.nickname ?? account.accountId}」当前已暂停。`, 409);
+      throw new DelegatedTaskServiceError('account_paused', `账号「${account.displayName ?? account.nickname ?? '（未获取昵称）'}」当前已暂停。`, 409);
     }
     let preparedIntent = intent;
     if (this.deps.prepareTarget) {
@@ -190,7 +195,7 @@ export class DelegatedTaskService {
     ) {
       throw new DelegatedTaskServiceError('unsupported_target_scope', 'Facebook Beta 不支持任意帖子 URL 评论，只能使用已有配置目标范围。', 422);
     }
-    const accountName = account.nickname?.trim() || intent.accountName?.trim();
+    const accountName = account.displayName?.trim() || account.nickname?.trim() || intent.accountName?.trim();
     if (!accountName) throw new DelegatedTaskServiceError('account_name_required', '账号缺少可读昵称，请先完成昵称采集。', 409);
     const create: DelegatedTaskCreate = {
       ...preparedIntent,
@@ -283,9 +288,12 @@ export class DelegatedTaskService {
     }
     const nickname = intent.accountName?.trim().toLocaleLowerCase();
     if (!nickname) throw new DelegatedTaskServiceError('account_name_required', '请提供账号昵称。');
-    const hits = accounts.filter((a) => a.nickname?.trim().toLocaleLowerCase() === nickname);
+    const hits = accounts.filter((a) => {
+      const names = a.names?.length ? a.names : [a.nickname ?? a.displayName ?? ''];
+      return names.some((name) => name.trim().toLocaleLowerCase() === nickname);
+    });
     if (hits.length === 0) {
-      const available = accounts.map((a) => a.nickname).filter(Boolean).join('、') || '无可用昵称';
+      const available = accounts.map((a) => a.displayName ?? a.nickname).filter(Boolean).join('、') || '无可用昵称';
       throw new DelegatedTaskServiceError('account_not_found', `找不到昵称「${intent.accountName}」；可用昵称：${available}`, 404);
     }
     if (hits.length > 1) throw new DelegatedTaskServiceError('account_ambiguous', `昵称「${intent.accountName}」不唯一，请先消除重名。`, 409);

@@ -33,6 +33,7 @@ import type { AccountPersonaService } from '../config/account-persona-service.js
 import { isWritingLanguage } from '../soul/writing-language.js';
 import { loadSoulFromYaml } from '../soul/index.js';
 import type { RiskStatus } from '../risk/types.js';
+import type { SetOperatorAliasResult } from '../account-store.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_SELECTED_PERSONA_BYTES = 32 * 1024;
@@ -41,6 +42,10 @@ export interface ClientAuthDeps {
   store: ClientUserStore;
   revocation: TokenRevocationStore;
   rateLimiter: LoginRateLimiter;
+  /** 当前客户自有环境的运营别名写入；账号键只由 Cloud 绑定解析得到。 */
+  operatorAlias?: {
+    setForAccount(accountId: string, alias: string | null): Promise<SetOperatorAliasResult>;
+  };
   /** Customer-scoped delegated tasks. Every route re-checks env ownership from the DB. */
   delegatedTasks?: DelegatedTaskService;
   /** Account-scoped curated reads. HTTP responses are projected through an explicit customer DTO below. */
@@ -462,6 +467,77 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
     if (method === 'GET' && url === '/my-environments') {
       const scope = await deps.store.listEnvScope(userId);
       sendJson(res, 200, { environments: scope.map((s) => ({ envKey: s.envKey, label: s.label, platform: s.platform })) });
+      return;
+    }
+
+    const operatorAliasMatch = /^\/environments\/([^/]+)\/operator-alias$/.exec(url);
+    if (operatorAliasMatch) {
+      if (method !== 'PUT') {
+        sendJson(res, 405, { error: 'method_not_allowed' });
+        return;
+      }
+      if (!deps.operatorAlias) {
+        sendJson(res, 503, { error: 'operator_alias_unavailable' });
+        return;
+      }
+      let envKey: string;
+      try {
+        envKey = decodeURIComponent(operatorAliasMatch[1] ?? '').trim();
+      } catch {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_env_key' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const raw = body as Record<string, unknown>;
+      if (Object.keys(raw).length !== 1 || !Object.hasOwn(raw, 'alias')
+          || (typeof raw.alias !== 'string' && raw.alias !== null)) {
+        sendJson(res, 422, { error: 'validation_failed', reason: 'alias_string_or_null_required' });
+        return;
+      }
+      const clean = typeof raw.alias === 'string' ? raw.alias.trim() : '';
+      if (clean.length > 80) {
+        sendJson(res, 422, { error: 'validation_failed', reason: 'alias_too_long' });
+        return;
+      }
+      const bound = await deps.store.resolveOperatorAliasAccountForEnv(userId, envKey);
+      if (!bound.ok) {
+        const status = bound.reason === 'environment_not_owned' ? 403
+          : bound.reason === 'binding_unavailable' ? 503
+            : 409;
+        sendJson(res, status, { error: bound.reason });
+        return;
+      }
+      try {
+        const result = await deps.operatorAlias.setForAccount(bound.accountId, clean || null);
+        if (!result.ok) {
+          sendJson(res, 409, { error: result.reason });
+          return;
+        }
+        sendJson(res, 200, {
+          data: {
+            envKey,
+            operatorAlias: result.operatorAlias,
+            displayName: result.display.name,
+            displayNameSource: result.display.source,
+          },
+          meta: { requestId: randomUUID(), asOf: Date.now() },
+        });
+      } catch (err) {
+        logger.warn('[client-auth] 运营别名写入失败', {
+          userId, envKey, reason: err instanceof Error ? err.message : String(err),
+        });
+        sendJson(res, 503, { error: 'operator_alias_write_failed' });
+      }
       return;
     }
 

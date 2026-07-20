@@ -18,6 +18,7 @@
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
 import { RETIRED_ACCOUNT_ID } from '../account-store.js';
+import { resolveAccountDisplayName, type AccountDisplayNameSource } from '../account-display-name.js';
 import { SHANGHAI_DAY_START_SQL } from '../time/shanghai-day.js';
 import { isValidWeekActiveMask } from '../risk/session-limits.js';
 
@@ -66,6 +67,9 @@ export interface ContentScheduleCatalogRow {
   accountId: string;
   label: string | null;
   nickname: string | null;
+  operatorAlias: string | null;
+  displayName: string;
+  displayNameSource: AccountDisplayNameSource;
   autoEnabled: boolean;
   postEnabled: boolean;
   postMode: ContentScheduleActionMode;
@@ -600,6 +604,7 @@ export class ContentScheduleStore {
       account_id: string;
       label: string | null;
       nickname: string | null;
+      operator_alias: string | null;
       auto_enabled: boolean | null;
       post_enabled: boolean | null;
       post_mode: string | null;
@@ -615,7 +620,7 @@ export class ContentScheduleStore {
       updated_at: Date | string | null;
       updated_by: string | null;
     }>(
-      `SELECT a.account_id, a.label, a.nickname, (a.contact_info IS NOT NULL) AS has_contact_info,
+      `SELECT a.account_id, a.label, a.nickname, a.operator_alias, (a.contact_info IS NOT NULL) AS has_contact_info,
               s.auto_enabled, s.post_enabled, s.post_daily_cap, s.comment_enabled, s.comment_daily_cap,
               s.contact_comment_enabled, s.contact_comment_daily_cap,
               s.post_mode, s.comment_mode, s.contact_comment_mode,
@@ -632,10 +637,16 @@ export class ContentScheduleStore {
       const postMode = actionModeFromDb(r.post_mode, r.post_enabled);
       const commentMode = actionModeFromDb(r.comment_mode, r.comment_enabled);
       const contactCommentMode = actionModeFromDb(r.contact_comment_mode, r.contact_comment_enabled);
+      const display = resolveAccountDisplayName({
+        accountId: r.account_id, operatorAlias: r.operator_alias, nickname: r.nickname, label: r.label,
+      });
       return {
         accountId: r.account_id,
         label: r.label ?? null,
         nickname: r.nickname ?? null,
+        operatorAlias: r.operator_alias ?? null,
+        displayName: display.name,
+        displayNameSource: display.source,
         autoEnabled: r.auto_enabled === true,
         postEnabled: actionModeEnabled(postMode),
         postMode,

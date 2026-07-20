@@ -394,6 +394,30 @@ test('resolveBoundAccountForEnv: 判别式映射（owned/bound/dangling/contende
   assert.deepEqual(await missingTable.resolveBoundAccountForEnv('u1', 'p1'), { ok: false, reason: 'binding_unavailable' });
 });
 
+test('resolveOperatorAliasAccountForEnv: 专用写解析保留悬空账号原因并复用归属/争用闸', async () => {
+  const make = (row: unknown) => new ClientUserStore({ pool: fakePool(() => ({ rows: [row] })) });
+  assert.deepEqual(
+    await make({ owned: true, bound_account: 'acct-x', account_exists: true, contended: false })
+      .resolveOperatorAliasAccountForEnv('u1', 'p1'),
+    { ok: true, accountId: 'acct-x' });
+  assert.deepEqual(
+    await make({ owned: false, bound_account: null, account_exists: false, contended: false })
+      .resolveOperatorAliasAccountForEnv('u1', 'p1'),
+    { ok: false, reason: 'environment_not_owned' });
+  assert.deepEqual(
+    await make({ owned: true, bound_account: null, account_exists: false, contended: false })
+      .resolveOperatorAliasAccountForEnv('u1', 'p1'),
+    { ok: false, reason: 'binding_unknown' });
+  assert.deepEqual(
+    await make({ owned: true, bound_account: 'acct-x', account_exists: false, contended: false })
+      .resolveOperatorAliasAccountForEnv('u1', 'p1'),
+    { ok: false, reason: 'account_not_found' });
+  assert.deepEqual(
+    await make({ owned: true, bound_account: 'acct-x', account_exists: true, contended: true })
+      .resolveOperatorAliasAccountForEnv('u1', 'p1'),
+    { ok: false, reason: 'binding_conflict' });
+});
+
 test('isAccountReachableByUser: 反向判别（ok / 争用 fail-closed / 不可达）', async () => {
   const make = (row: unknown) => new ClientUserStore({ pool: fakePool(() => ({ rows: [row] })) });
   assert.deepEqual(await make({ owned_bound: true, contended: false }).isAccountReachableByUser('u1', 'acct-x'),
