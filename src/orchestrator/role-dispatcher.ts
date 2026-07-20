@@ -1161,6 +1161,28 @@ export class RoleDispatcher {
     return this.sendCommand(params ? { action: 'scroll', reason, params } : { action: 'scroll', reason });
   }
 
+  /**
+   * Facebook Feed 已无可继续浏览内容时，由 Cloud 单点授权切到 Reels。
+   *
+   * `empty_feed_reels_fallback` 是已部署 Edge 认识的兼容握手名：既承载首页明确空态，也承载非空 Feed
+   * 确认到底。只有命令真正下发后才置幂等闸；若被软暂停/评论支线等抑制，后续诚实重报仍可重试。
+   */
+  private authorizeFacebookReelsFallback(source: 'empty_feed' | 'feed_exhausted'): boolean {
+    if (this.accountPlatform !== 'facebook' || !this.sessionActive || this.reelsFallbackAuthorized) return false;
+    const sent = this.sendCommand({ action: 'scroll', reason: 'empty_feed_reels_fallback' });
+    if (!sent) {
+      console.log(`[RoleDispatcher] Facebook ${source} → Reels fallback 命令被当前调度闸抑制，保留后续重试资格`);
+      return false;
+    }
+    this.reelsFallbackAuthorized = true;
+    console.log(
+      source === 'empty_feed'
+        ? '[RoleDispatcher] Facebook 首页明确空 Feed → 授权切换 Reels 列表'
+        : '[RoleDispatcher] Facebook 普通 Feed 已确认到底 → 授权切换 Reels 列表',
+    );
+    return true;
+  }
+
   private emitSearchSkippedAfterIntercept(currentPageType: 'feed' | 'search', reason: string): void {
     this.eventBus.emit('search.skipped', { currentPageType, reason, ts: this.clock() });
   }
@@ -2499,10 +2521,7 @@ export class RoleDispatcher {
 
       // Facebook 首页显式空态：Edge 只观察，Cloud 才选择列表。每场只授权一次，复用现有 scroll 命令。
       this.eventBus.on('feed.empty.confirmed', () => {
-        if (this.accountPlatform !== 'facebook' || !this.sessionActive || this.reelsFallbackAuthorized) return;
-        this.reelsFallbackAuthorized = true;
-        console.log('[RoleDispatcher] Facebook 首页明确空 Feed → 授权切换 Reels 列表');
-        this.sendCommand({ action: 'scroll', reason: 'empty_feed_reels_fallback' });
+        this.authorizeFacebookReelsFallback('empty_feed');
       }),
 
       // Edge 上报可见卡片 → 更新数据并触发评估
@@ -2663,7 +2682,17 @@ export class RoleDispatcher {
           }
           return;
         }
-        // feed 到底自愈（change platform-browse-protocol）：feed_exhausted 回执立即映射 refresh，避免转 idle → 240s nudge 循环。
+        // Facebook 普通 Feed 确认到底：复用已部署 Reels fallback 握手，每场只授权一次；重复到底回执直接吞掉，
+        // 不再刷新同一普通 Feed。其他平台保持既有 refresh 自愈，避免转 idle → 240s nudge 循环。
+        if (
+          payload.action === 'scroll' &&
+          payload.reason === 'feed_exhausted' &&
+          this.accountPlatform === 'facebook' &&
+          this.sessionActive
+        ) {
+          this.authorizeFacebookReelsFallback('feed_exhausted');
+          return;
+        }
         // 阶段 0 边缘不上报 feed_exhausted ⇒ 惰性；feed_refresh 能力关时 canRefresh()===false ⇒ 不误发。
         if (payload.reason === 'feed_exhausted' && this.canRefresh() && this.sessionActive) {
           console.log('[RoleDispatcher] feed_exhausted → 立即刷新换新批（避免 idle 空转）');
