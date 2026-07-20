@@ -58,6 +58,12 @@ export interface EdgeSession {
    * 云端据此逐字段比对选中卡是否即实际被点 article（信息流就地点赞防点错卡）。详情页/无 observation 时不消费。
    */
   lastCards?: PageCardsPayload['cards'];
+  /**
+   * 当前已经按 `page.cards{listKind:'reels'}` 记过 view 的活动 Reel。
+   * 若随后同一条 Reel 为互动评估上报 note.detail，handler 仍转发详情，但不再重复记 view。
+   * 下一批 page.cards 会覆盖/清除此值；普通 feed 详情继续走既有 detail 记账。
+   */
+  countedReelViewNoteId?: string;
 }
 
 /**

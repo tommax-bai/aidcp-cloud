@@ -108,6 +108,24 @@ describe('RoleDispatcher 互动风控闸', () => {
     assert.ok(delays[0] >= 10_000, '唤醒时间应尊重 retryAfterMs');
   });
 
+  it('view quota=false：content.no_valuable 的统一 scroll 出口也进入休眠，不得无限翻页', () => {
+    const delays: number[] = [];
+    const { bus, commands } = setup(() => true, {
+      explainView: () => ({ allowed: false, reason: 'quota:day', retryAfterMs: 20_000 }),
+      setTimeoutFn: (_fn, ms) => {
+        delays.push(ms);
+        return { id: 'timer' };
+      },
+      clearTimeoutFn: () => {},
+    });
+
+    bus.emit('feed.scrolled', { pageType: 'feed', scrollCount: 1, ts: 0 });
+
+    assert.ok(!actionsOf(commands).includes('scroll'), '浏览额度耗尽后无价值内容也不得继续翻页');
+    assert.equal(delays.length, 1, '统一 scroll 出口应安装一次额度窗口唤醒');
+    assert.ok(delays[0] >= 20_000);
+  });
+
   it('canView=true：content.valuable 正常下发 open_note', () => {
     const { bus, commands } = setup(() => true, { canView: () => true });
 

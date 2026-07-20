@@ -1136,6 +1136,16 @@ export class RoleDispatcher {
   }
 
   private sendScrollCommand(reason: string, floorMs = 0): boolean {
+    // 翻页也是一次「准备消费下一条内容」：统一在 scroll 出口现问 view 配额。旧路径只在
+    // content.valuable/open_note 前检查，导致连续 content.no_valuable（Reels 外语/不匹配最常见）可以绕过
+    // view 上限无限滚。已经处于休眠时仍让命令进入 sendCommand，由既有节流日志记录 suppressed 事实。
+    if (!this.viewQuotaSleeping) {
+      const decision = this.explainView();
+      if (!decision.allowed) {
+        this.sleepForViewQuota(decision);
+        return false;
+      }
+    }
     const params = this.scrollDwellParams(floorMs);
     return this.sendCommand(params ? { action: 'scroll', reason, params } : { action: 'scroll', reason });
   }

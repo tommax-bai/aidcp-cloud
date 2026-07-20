@@ -490,6 +490,24 @@ export class DefaultMessageHandler implements MessageHandler {
         // 留存最近一批卡快照（change platform-browse-protocol）：note-scoped 互动回执带独立见证 observation 时，
         // 归账仲裁据此逐字段比对选中卡（信息流就地点赞防点错卡）。详情页/无 observation 时不消费——阶段 0 惰性。
         session.lastCards = cards;
+        // Reels 与普通 feed 的语义不同：单卡就是当前已经呈现、正在播放的内容，不需要等 content_evaluator
+        // 再决定「打开」才算浏览。每次 Edge 上报的新活动 Reel 当场记一次 view，避免不感兴趣/外语内容全部
+        // skip 后 view 永远为 0、会话只剩无限 scroll。Edge 的 Reels session 已保证每次 cards 是一个新活动
+        // 视频；Cloud 只接受单卡形态，畸形多卡/空卡 fail-closed 不记。
+        //
+        // 仍保留 page.cards.arrived：内容选择、点赞与目标见证继续走现有链路，浏览事实绝不强迫点赞。
+        if (normalizePlatformId(session.platform) === 'facebook' && listKind === 'reels' && cards.length === 1) {
+          const noteId = cards[0]?.noteId;
+          session.countedReelViewNoteId = noteId;
+          this.bus(session).emit('interaction.occurred', {
+            action: 'view',
+            accountId: session.accountId,
+            ...(noteId ? { noteId } : {}),
+          });
+        } else {
+          // 任一后续普通/空/畸形列表都结束「当前 Reel 已记 view」关联，不能抑制未来普通详情记账。
+          session.countedReelViewNoteId = undefined;
+        }
         // 只有 Facebook + 现有 feed 列表 + 0 卡 + Edge 明确 empty 四条件同时满足才产生 fallback 候选。
         // 未确认 0 卡、Reels 空批、其它平台或畸形 empty+cards 均走普通 page.cards，绝不扩大为空态。
         if (normalizePlatformId(session.platform) === 'facebook' && listKind === 'feed' && listState === 'empty' && cards.length === 0) {
@@ -513,11 +531,15 @@ export class DefaultMessageHandler implements MessageHandler {
         // 故在此唯一必经入口按账号驱动计数——与 like/collect 同走 interaction.occurred → record('view')，
         // 既补齐面板浏览数（risk_counters），又激活浏览配额与点赞/浏览比例闸门（内存窗口）。
         // view 不入 interaction_feed：其订阅方按动作白名单过滤，浏览不污染「已互动笔记」展示账本。
-        this.bus(session).emit('interaction.occurred', {
-          action: 'view',
-          accountId: session.accountId,
-          ...(detail.noteId ? { noteId: detail.noteId } : {}),
-        });
+        const reelViewAlreadyCounted =
+          !!detail.noteId && detail.noteId === session.countedReelViewNoteId;
+        if (!reelViewAlreadyCounted) {
+          this.bus(session).emit('interaction.occurred', {
+            action: 'view',
+            accountId: session.accountId,
+            ...(detail.noteId ? { noteId: detail.noteId } : {}),
+          });
+        }
         return null;
       }
       case 'profile.detail': {
