@@ -60,6 +60,8 @@ export interface PanelAccount {
   personaBound: boolean;
   /** 需设置人设（派生）：未绑人设且非 default（default 硬豁免）。后台据此标「需设置人设」+ 跳转人设页。 */
   needsPersonaSetup: boolean;
+  /** 环境资产独立生命周期的只读摘要；删除环境不改变账号本身。 */
+  environmentSummary?: { activeCount: number; deletingCount: number; onlineCount: number };
 }
 
 export interface PanelPublishSourceReference {
@@ -259,6 +261,7 @@ function toAccount(r: AccountJoinRow): PanelAccount {
     personaBound,
     // retire-default-account / persona-driven-content-pipeline：default 账号已删，不再特判——是否需补人设仅看 personaBound。
     needsPersonaSetup: !personaBound,
+    environmentSummary: { activeCount: 0, deletingCount: 0, onlineCount: 0 },
   };
 }
 

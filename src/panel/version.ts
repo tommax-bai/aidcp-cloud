@@ -44,6 +44,7 @@ export const PANEL_ACCOUNT_FIELDS = [
   'signalCount',
   'personaBound',
   'needsPersonaSetup',
+  'environmentSummary',
 ] as const;
 
 // typecheck 强制：清单必须恰好覆盖 PanelAccount 的键。若接口加字段没同步进清单，_Missing 非 never → 编译失败；

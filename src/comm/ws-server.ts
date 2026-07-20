@@ -124,6 +124,8 @@ export interface WsServerOptions {
    * 仅握手成功（回 welcome）才触发；被拒握手（回 error）不触发。回调异常自吞，不影响主链路。
    */
   onEdgeRegistered?: (session: EdgeSession) => void;
+  /** Cloud 内部同步出站闸；返回 false 时命中 0，绝不把删除环境的自动化命令推到 Edge。 */
+  canPushToEdge?: (env: Envelope, edgeId: string) => boolean;
 }
 
 let sessionSeq = 0;
@@ -155,6 +157,7 @@ export class EdgeCloudServer implements EdgePusher {
   private readonly staleAfterMs: number;
   private readonly onCloseCb?: (session: EdgeSession) => void;
   private readonly onEdgeRegisteredCb?: (session: EdgeSession) => void;
+  private readonly canPushToEdge?: (env: Envelope, edgeId: string) => boolean;
   private heartbeatTimer?: ReturnType<typeof setInterval>;
 
   constructor(options: WsServerOptions) {
@@ -167,6 +170,7 @@ export class EdgeCloudServer implements EdgePusher {
     this.staleAfterMs = options.staleAfterMs ?? 75000;
     this.onCloseCb = options.onClose;
     this.onEdgeRegisteredCb = options.onEdgeRegistered;
+    this.canPushToEdge = options.canPushToEdge;
   }
 
   /** 启动监听 */
@@ -214,6 +218,10 @@ export class EdgeCloudServer implements EdgePusher {
     // 禁止靠省略 edgeId 隐式退化为广播（否则某连接漏带 edgeId 会把命令误投给所有 edge）。
     if (!edgeId || !edgeId.trim()) {
       console.warn(`[ws-server] pushToEdges 缺目标 edgeId（type=${env.type}）：拒绝广播、诚实失败（命中 0）`);
+      return 0;
+    }
+    if (this.canPushToEdge && !this.canPushToEdge(env, edgeId)) {
+      console.warn(`[ws-server] edgeId=${edgeId} 环境处于删除生命周期，抑制 type=${env.type}（命中 0）`);
       return 0;
     }
     let outbound = env;

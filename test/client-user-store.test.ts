@@ -39,11 +39,17 @@ test('listAllEnvironments: 行映射为视图，assigneeCount = assignees 长度
   assert.equal(envs.length, 2);
   assert.deepEqual(envs[0], {
     envKey: 'p1',
+    environmentName: 'p1',
     label: '大白',
     platform: 'xiaohongshu',
     assignees: [{ userId: 'u1', name: 'A' }],
     assigneeCount: 1,
     cleanup: null,
+    account: null,
+    bindingObservedAt: null,
+    installation: null,
+    lifecycle: { state: 'active', requestId: null, requestedBy: null, requestedAt: null,
+      resultKind: null, resultError: null, resultAt: null, deletedAt: null },
   });
   assert.equal(envs[1].assigneeCount, 1); // 全局唯一 active owner
   assert.deepEqual(
@@ -146,8 +152,9 @@ test('registerEnvironments: source 显式传 auto 透传到参数（自动登记
 
 test('ownsEnv: user A only owns rows explicitly scoped to user A', async () => {
   const pool = fakePool((sql, params) => {
-    assert.match(sql, /WHERE user_id = \$1 AND env_key = \$2/);
+    assert.match(sql, /WHERE s\.user_id = \$1 AND s\.env_key = \$2/);
     assert.match(sql, /source = 'admin'/);
+    assert.match(sql, /e\.lifecycle_state = 'active'/);
     return { rows: [{ owned: params?.[0] === 'user-a' && params?.[1] === 'env-a' }] };
   });
   const store = new ClientUserStore({ pool });
@@ -175,6 +182,10 @@ test('schema archives and removes legacy customer claims, then enforces one auth
   assert.match(CLIENT_USERS_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS client_env_provisioning_intents/);
   assert.match(CLIENT_USERS_SCHEMA_SQL, /proof_hash\s+CHAR\(64\)\s+NOT NULL/);
   assert.match(CLIENT_USERS_SCHEMA_SQL, /state IN \('pending','completed','expired'\)/);
+  assert.match(CLIENT_USERS_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS client_environment_installations/);
+  assert.match(CLIENT_USERS_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS client_environment_deletion_requests/);
+  assert.match(CLIENT_USERS_SCHEMA_SQL, /state IN \('waiting_edge','deleting','delete_failed','deleted'\)/);
+  assert.match(CLIENT_USERS_SCHEMA_SQL, /client_environment_deletion_active_idx/);
   // PK 单值（change slow-start-offline-toggle，迁移自已删除的 ws-server-resolve-account「多账号即拒绝猜测」）：
   // client_environments.env_key 是主键 ⇒ 一个环境至多一行 ⇒ 至多一个绑定账号 ⇒「同一环境解析出多个账号、
   // 须拒绝猜测」的路径**结构上不存在**。这正是慢启动写路由从活会话反查改到持久绑定后歧义消失的根据。
@@ -229,7 +240,7 @@ test('completeProvisioningIntent atomically stores Facebook slow start at Shangh
   assert.equal(result.ok, true);
   const insert = calls.find((call) => /INSERT INTO client_environments/.test(call.sql))!;
   assert.match(insert.sql, /slow_start_since,slow_start_initialized/);
-  assert.match(insert.sql, /VALUES \(\$1,\$2,\$3,'auto',\$4,true,now\(\),now\(\)\)/);
+  assert.match(insert.sql, /VALUES \(\$1,\$2,\$2,\$3,'auto',\$4,true,now\(\),now\(\)\)/);
   const stored = insert.params?.[3] as Date;
   assert.ok(stored instanceof Date);
   assert.ok(stored.getTime() >= shanghaiDayStartMs(before));
@@ -251,7 +262,8 @@ test('completeProvisioningIntent rejects non-Facebook slow start before PostgreS
 
 test('listEnvScope ignores client self-claims and revoked assignments', async () => {
   const pool = fakePool((sql) => {
-    assert.match(sql, /user_id = \$1 AND source = 'admin'/);
+    assert.match(sql, /s\.user_id = \$1 AND s\.source = 'admin'/);
+    assert.match(sql, /e\.lifecycle_state = 'active'/);
     return { rows: [] };
   });
   const store = new ClientUserStore({ pool });
@@ -508,4 +520,97 @@ test('environment slow-start mirror: 换绑即时移除旧账号；重复绑定�
   await store.refreshEnvironmentSlowStartMirror();
   assert.equal(store.slowStartSinceFor('acct-b'), null, '多环境歧义不得任取开启或关闭任一行');
   assert.equal(store.hasAmbiguousEnvironmentBinding('acct-b'), true);
+});
+
+test('environment deletion request is idempotent and keeps the first target owner/version', async () => {
+  const { pool, calls } = txPool((sql) => {
+    if (/SELECT e\.env_key,e\.platform,e\.lifecycle_state/.test(sql)) {
+      return { rows: [{ env_key: 'env-1', platform: 'facebook', lifecycle_state: 'waiting_edge', target_user_id: 'u1' }] };
+    }
+    if (/SELECT request_id,version,state,target_user_id,idempotency_key/.test(sql)) {
+      return { rows: [{ request_id: 'request-1', version: 3, state: 'waiting_edge', target_user_id: 'u1',
+        idempotency_key: 'first-key' }] };
+    }
+    return { rows: [] };
+  });
+  const store = new ClientUserStore({ pool });
+  assert.deepEqual(await store.requestEnvironmentDeletion('env-1', 'admin', 'retry-key'), {
+    ok: true, requestId: 'request-1', version: 3, envKey: 'env-1', platform: 'facebook',
+    targetUserId: 'u1', state: 'waiting_edge', idempotent: true,
+  });
+  assert.equal(calls.some((call) => /INSERT INTO client_environment_deletion_requests/.test(call.sql)), false);
+  assert.equal(calls.some((call) => call.sql === 'COMMIT'), true);
+});
+
+test('environment deletion claim rejects stale request version before inspecting holders', async () => {
+  const { pool, calls } = txPool((sql) => {
+    if (/WHERE d\.request_id=\$1 FOR UPDATE OF d,e/.test(sql)) {
+      return { rows: [{
+        request_id: 'request-1', version: 2, env_key: 'env-1', environment_name: '环境一', platform: 'facebook',
+        state: 'waiting_edge', target_user_id: 'u1', claimed_installation_id: null, cleanup_ready: true,
+      }] };
+    }
+    return { rows: [] };
+  });
+  const store = new ClientUserStore({ pool });
+  assert.deepEqual(await store.claimEnvironmentDeletion('u1', 'request-1', 1, 'install-a'), {
+    ok: false, reason: 'request_version_mismatch',
+  });
+  assert.equal(calls.some((call) => /FROM client_environment_installations/.test(call.sql)), false);
+  assert.equal(calls.at(-1)?.sql, 'ROLLBACK');
+});
+
+test('environment deletion claim fails closed when multiple fresh Edge installations report the same env', async () => {
+  const { pool, calls } = txPool((sql) => {
+    if (/WHERE d\.request_id=\$1 FOR UPDATE OF d,e/.test(sql)) {
+      return { rows: [{
+        request_id: 'request-1', version: 1, env_key: 'env-1', environment_name: '环境一', platform: 'facebook',
+        state: 'waiting_edge', target_user_id: 'u1', claimed_installation_id: null, cleanup_ready: true,
+      }] };
+    }
+    if (/FROM client_environment_installations/.test(sql)) {
+      return { rows: [{ installation_id: 'install-a' }, { installation_id: 'install-b' }] };
+    }
+    return { rows: [] };
+  });
+  const store = new ClientUserStore({ pool });
+  assert.deepEqual(await store.claimEnvironmentDeletion('u1', 'request-1', 1, 'install-a'), {
+    ok: false, reason: 'ambiguous_holder',
+  });
+  assert.equal(calls.at(-1)?.sql, 'ROLLBACK');
+});
+
+test('failed environment deletion receipt is idempotent after a lost HTTP response', async () => {
+  const { pool, calls } = txPool((sql) => {
+    if (/SELECT env_key,version,state,target_user_id/.test(sql)) {
+      return { rows: [{ env_key: 'env-1', version: 1, state: 'delete_failed', target_user_id: 'u1',
+        claimed_installation_id: null, result_key: 'result-1' }] };
+    }
+    return { rows: [] };
+  });
+  const store = new ClientUserStore({ pool });
+  assert.deepEqual(await store.completeEnvironmentDeletion('u1', 'request-1', 1, 'install-a', {
+    resultKey: 'result-1', status: 'failed', error: 'AdsPower failed',
+  }), { ok: true, requestId: 'request-1', envKey: 'env-1', state: 'delete_failed', idempotent: true });
+  assert.equal(calls.some((call) => /UPDATE client_environments/.test(call.sql)), false);
+  assert.equal(calls.at(-1)?.sql, 'COMMIT');
+});
+
+test('successful AdsPower receipt removes only active scope and marks environment deleted', async () => {
+  const { pool, calls } = txPool((sql) => {
+    if (/SELECT env_key,version,state,target_user_id/.test(sql)) {
+      return { rows: [{ env_key: 'env-1', version: 1, state: 'deleting', target_user_id: 'u1',
+        claimed_installation_id: 'install-a', result_key: null }] };
+    }
+    return { rows: [] };
+  });
+  const store = new ClientUserStore({ pool });
+  assert.deepEqual(await store.completeEnvironmentDeletion('u1', 'request-1', 1, 'install-a', {
+    resultKey: 'result-1', status: 'succeeded', resultKind: 'already_missing',
+  }), { ok: true, requestId: 'request-1', envKey: 'env-1', state: 'deleted', idempotent: false });
+  assert.equal(calls.some((call) => /DELETE FROM client_env_scope WHERE env_key=\$1 AND source='admin'/.test(call.sql)), true);
+  assert.equal(calls.some((call) => /SET state='deleted',result_key=\$2,result_kind=\$3/.test(call.sql)
+    && call.params?.[2] === 'already_missing'), true);
+  assert.equal(calls.some((call) => /lifecycle_state='deleted',deleted_at=now\(\)/.test(call.sql)), true);
+  assert.equal(calls.at(-1)?.sql, 'COMMIT');
 });

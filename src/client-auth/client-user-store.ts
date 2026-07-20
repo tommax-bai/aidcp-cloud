@@ -21,6 +21,7 @@ import { resolveEnvPgConfig } from '../cache/pg-config.js';
 import { generateKey, hashKey, verifyKey, decoyVerify } from './key.js';
 import { RETIRED_ACCOUNT_ID } from '../account-store.js';
 import { shanghaiDayStartMs } from '../time/shanghai-day.js';
+import { resolveAccountDisplayName } from '../account-display-name.js';
 
 const { Pool } = pg;
 
@@ -123,6 +124,14 @@ CREATE TABLE IF NOT EXISTS client_environments (
 -- 全新库上 accounts 表尚不存在、加 FK 必抛——完整性改由**读侧每次 JOIN accounts**（悬空绑定读时 fail-closed）承担，
 -- 见 resolveBoundAccountForEnv。这是真实取舍（少了写时完整性），不是「初始化顺序禁止加列」。
 ALTER TABLE client_environments ADD COLUMN IF NOT EXISTS account_id TEXT;
+-- 管理后台环境资产页的事实字段。环境名与账号展示名分离；删除只改变环境生命周期，绝不擦账号绑定审计。
+ALTER TABLE client_environments ADD COLUMN IF NOT EXISTS environment_name TEXT;
+ALTER TABLE client_environments ADD COLUMN IF NOT EXISTS binding_observed_at TIMESTAMPTZ;
+ALTER TABLE client_environments ADD COLUMN IF NOT EXISTS lifecycle_state TEXT;
+UPDATE client_environments SET lifecycle_state = 'active' WHERE lifecycle_state IS NULL;
+ALTER TABLE client_environments ALTER COLUMN lifecycle_state SET DEFAULT 'active';
+ALTER TABLE client_environments ALTER COLUMN lifecycle_state SET NOT NULL;
+ALTER TABLE client_environments ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 -- 环境级慢启动事实源（change environment-level-slow-start）：NULL=关，非 NULL=上海自然日起点。
 -- 旧 accounts.slow_start_since 暂留回滚，但运行时不再读取；迁移须等 accounts 表 init 后单独执行。
 ALTER TABLE client_environments ADD COLUMN IF NOT EXISTS slow_start_since TIMESTAMPTZ;
@@ -133,6 +142,46 @@ ALTER TABLE client_environments ALTER COLUMN slow_start_initialized SET DEFAULT 
 ALTER TABLE client_environments ALTER COLUMN slow_start_initialized SET NOT NULL;
 -- D5 跨客户争用闸要按 account_id 反查「还有哪些 env 也绑了同一账号」，故加账号索引。
 CREATE INDEX IF NOT EXISTS client_environments_account_idx ON client_environments (account_id);
+CREATE INDEX IF NOT EXISTS client_environments_lifecycle_idx ON client_environments (lifecycle_state, updated_at DESC);
+-- Edge 常规 HTTP 拉取时上报“哪个稳定安装持有哪个环境”；只作责任归属观测，不进入 WebSocket 协议。
+CREATE TABLE IF NOT EXISTS client_environment_installations (
+  env_key         TEXT        NOT NULL,
+  installation_id TEXT        NOT NULL,
+  user_id         TEXT        NOT NULL,
+  environment_name TEXT,
+  last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (env_key, installation_id)
+);
+CREATE INDEX IF NOT EXISTS client_environment_installations_user_seen_idx
+  ON client_environment_installations (user_id, last_seen_at DESC);
+-- 管理员删除意图与 Edge 终态回执。request_id/idempotency_key 令轮询、认领与结果都可安全重试。
+CREATE TABLE IF NOT EXISTS client_environment_deletion_requests (
+  request_id              UUID        PRIMARY KEY,
+  env_key                 TEXT        NOT NULL REFERENCES client_environments(env_key),
+  idempotency_key         TEXT        NOT NULL,
+  requested_by            TEXT        NOT NULL,
+  requested_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  target_user_id          TEXT,
+  version                 INTEGER     NOT NULL DEFAULT 1,
+  state                   TEXT        NOT NULL DEFAULT 'waiting_edge'
+    CHECK (state IN ('waiting_edge','deleting','delete_failed','deleted')),
+  claimed_installation_id TEXT,
+  claimed_at              TIMESTAMPTZ,
+  result_key              TEXT,
+  result_kind             TEXT        CHECK (result_kind IS NULL OR result_kind IN ('deleted','already_missing')),
+  result_error            TEXT,
+  result_at               TIMESTAMPTZ,
+  updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (env_key, idempotency_key)
+);
+ALTER TABLE client_environment_deletion_requests ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE client_environment_deletion_requests ADD COLUMN IF NOT EXISTS result_kind TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS client_environment_deletion_active_idx
+  ON client_environment_deletion_requests (env_key)
+  WHERE state IN ('waiting_edge','deleting','delete_failed');
+CREATE INDEX IF NOT EXISTS client_environment_deletion_target_idx
+  ON client_environment_deletion_requests (target_user_id, state, requested_at);
 -- 客户端程序化新建的短时一次性意图。proof 只以 SHA-256 落库；完成动作仍由 Cloud
 -- 在事务内写权威注册表 + active owner，旧 customer attach 路径不复活。
 CREATE TABLE IF NOT EXISTS client_env_provisioning_intents (
@@ -260,12 +309,69 @@ export interface ClientEnvAssignee {
  */
 export interface ClientEnvironmentView {
   envKey: string;
+  environmentName: string;
   label: string | null;
   platform: string | null;
   assignees: ClientEnvAssignee[];
   assigneeCount: number;
   cleanup: ClientCleanupReceipt | null;
+  account: {
+    accountId: string;
+    label: string | null;
+    nickname: string | null;
+    operatorAlias: string | null;
+    displayName: string;
+    platform: string;
+    groupLabel: string | null;
+    riskStatus: string | null;
+    riskQuotaLevel: string | null;
+  } | null;
+  bindingObservedAt: number | null;
+  installation: { installationId: string; lastSeenAt: number; online: boolean } | null;
+  lifecycle: {
+    state: 'active' | 'waiting_edge' | 'deleting' | 'delete_failed' | 'deleted';
+    requestId: string | null;
+    requestedBy: string | null;
+    requestedAt: number | null;
+    resultKind: 'deleted' | 'already_missing' | null;
+    resultError: string | null;
+    resultAt: number | null;
+    deletedAt: number | null;
+  };
 }
+
+export interface ClientEnvironmentSummary {
+  activeCount: number;
+  deletingCount: number;
+  onlineCount: number;
+}
+
+export interface ClientEnvironmentMaintenanceItem {
+  requestId: string;
+  version: number;
+  envKey: string;
+  environmentName: string;
+  platform: string | null;
+  state: 'waiting_edge' | 'deleting' | 'delete_failed';
+  cleanupReady: boolean;
+  cleanupReason: 'ready' | 'wechat_offboard_pending';
+}
+
+export type RequestEnvironmentDeletionResult =
+  | { ok: true; requestId: string; version: number; envKey: string; platform: string | null; targetUserId: string | null;
+      state: 'waiting_edge' | 'deleting' | 'delete_failed' | 'deleted'; idempotent: boolean }
+  | { ok: false; reason: 'not_found' | 'already_deleted' | 'idempotency_conflict' };
+
+export type ClaimEnvironmentDeletionResult =
+  | { ok: true; requestId: string; version: number; envKey: string; environmentName: string; platform: string | null;
+      state: 'deleting'; idempotent: boolean }
+  | { ok: false; reason: 'not_found' | 'not_target' | 'request_version_mismatch' |
+      'ambiguous_holder' | 'cleanup_pending' | 'already_completed' };
+
+export type CompleteEnvironmentDeletionResult =
+  | { ok: true; requestId: string; envKey: string; state: 'deleted' | 'delete_failed'; idempotent: boolean }
+  | { ok: false; reason: 'not_found' | 'not_target' | 'request_version_mismatch' |
+      'not_claimed' | 'result_conflict' };
 
 export type CreateUserResult =
   | { ok: true; user: ClientUserView; plainKey: string }
@@ -352,6 +458,8 @@ export interface ClientUserStoreOptions {
 
 export class ClientUserStore {
   private readonly pool: pg.Pool;
+  /** 同步 WS 出口闸镜像：删除生命周期中的 AdsPower env 不再接收普通自动化命令。 */
+  private blockedAutomationEnvKeys = new Set<string>();
   /** RiskController 同步热路径镜像：只收录当前恰好绑定一个环境的账号。 */
   private environmentSlowStartByAccount = new Map<string, number | null>();
   private ambiguousEnvironmentAccounts = new Set<string>();
@@ -712,7 +820,18 @@ export class ClientUserStore {
 
   async init(): Promise<void> {
     await this.pool.query(CLIENT_USERS_SCHEMA_SQL);
+    const blocked = await this.pool.query<{ env_key: string }>(
+      `SELECT env_key FROM client_environments WHERE lifecycle_state <> 'active'`,
+    );
+    this.blockedAutomationEnvKeys = new Set(blocked.rows.map((row) => row.env_key));
     await this.refreshEnvironmentSlowStartMirror();
+  }
+
+  /** WebSocket 传输层同步闸；不产生删除命令，只在 Cloud 内部抑制删除环境的普通自动化下发。 */
+  isAutomationAllowedForEdgeId(edgeId: string): boolean {
+    const normalized = edgeId.trim();
+    if (!normalized.startsWith('ads-')) return true;
+    return !this.blockedAutomationEnvKeys.has(normalized.slice('ads-'.length));
   }
 
   /**
@@ -924,9 +1043,10 @@ export class ClientUserStore {
         source: string;
         assigned_at: Date;
       }>(
-        `SELECT env_key, label, platform, source, assigned_at
-         FROM client_env_scope
-         WHERE user_id = $1 AND source = 'admin'
+        `SELECT s.env_key, s.label, s.platform, s.source, s.assigned_at
+         FROM client_env_scope s
+         JOIN client_environments e ON e.env_key = s.env_key
+         WHERE s.user_id = $1 AND s.source = 'admin' AND e.lifecycle_state = 'active'
          ORDER BY assigned_at ASC`,
         [userId],
       );
@@ -1065,8 +1185,8 @@ export class ClientUserStore {
 
       const registered = await client.query<{ env_key: string }>(
         `INSERT INTO client_environments
-           (env_key,label,platform,source,slow_start_since,slow_start_initialized,created_at,updated_at)
-         VALUES ($1,$2,$3,'auto',$4,true,now(),now())
+           (env_key,label,environment_name,platform,source,slow_start_since,slow_start_initialized,created_at,updated_at)
+         VALUES ($1,$2,$2,$3,'auto',$4,true,now(),now())
          ON CONFLICT (env_key) DO NOTHING
          RETURNING env_key`,
         [envKey, label, platform, slowStartSince],
@@ -1115,9 +1235,10 @@ export class ClientUserStore {
     try {
       const { rows } = await this.pool.query<{ owned: boolean }>(
         `SELECT EXISTS (
-           SELECT 1 FROM client_env_scope
-           WHERE user_id = $1 AND env_key = $2
-             AND source = 'admin'
+           SELECT 1 FROM client_env_scope s
+           JOIN client_environments e ON e.env_key = s.env_key
+           WHERE s.user_id = $1 AND s.env_key = $2
+             AND s.source = 'admin' AND e.lifecycle_state = 'active'
          ) AS owned`,
         [userId, key],
       );
@@ -1160,7 +1281,7 @@ export class ClientUserStore {
          JOIN accounts acc
            ON acc.account_id = a.account_id AND acc.platform = a.platform
          WHERE s.user_id = $1 AND s.env_key = $2
-           AND s.source = 'admin'
+           AND s.source = 'admin' AND e.lifecycle_state = 'active'
          FOR SHARE OF s, e, a, acc`,
         [userId, key],
       );
@@ -1463,12 +1584,16 @@ export class ClientUserStore {
     source: 'import' | 'auto' | 'admin', accountId: string | null,
   ): Promise<void> {
     await exec.query(
-      `INSERT INTO client_environments (env_key, label, platform, source, account_id, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, now(), now())
+      `INSERT INTO client_environments
+         (env_key, label, environment_name, platform, source, account_id, binding_observed_at, created_at, updated_at)
+       VALUES ($1, $2, $2, $3, $4, $5, CASE WHEN $5::text IS NULL THEN NULL ELSE now() END, now(), now())
        ON CONFLICT (env_key) DO UPDATE
          SET label = COALESCE(EXCLUDED.label, client_environments.label),
+             environment_name = COALESCE(EXCLUDED.environment_name, client_environments.environment_name),
              platform = COALESCE(EXCLUDED.platform, client_environments.platform),
              account_id = COALESCE(EXCLUDED.account_id, client_environments.account_id),
+             binding_observed_at = CASE WHEN EXCLUDED.account_id IS NULL
+               THEN client_environments.binding_observed_at ELSE now() END,
              updated_at = now()`,
       [envKey, label, platform, source, accountId],
     );
@@ -1512,7 +1637,8 @@ export class ClientUserStore {
       }>(
         `SELECT
            EXISTS(SELECT 1 FROM client_env_scope s
-                  WHERE s.user_id = $1 AND s.env_key = $2 AND s.source = 'admin') AS owned,
+                  WHERE s.user_id = $1 AND s.env_key = $2 AND s.source = 'admin'
+                    AND e.lifecycle_state = 'active') AS owned,
            e.account_id AS bound_account,
            CASE WHEN e.account_id IS NOT NULL
                 THEN EXISTS(SELECT 1 FROM accounts acc WHERE acc.account_id = e.account_id)
@@ -1615,9 +1741,29 @@ export class ClientUserStore {
     try {
       const { rows } = await this.pool.query<{
         env_key: string;
+        environment_name: string | null;
         label: string | null;
         platform: string | null;
         assignees: { userId: string; name: string }[] | null;
+        account_id: string | null;
+        account_label: string | null;
+        account_nickname: string | null;
+        account_operator_alias: string | null;
+        account_platform: string | null;
+        group_label: string | null;
+        risk_status: string | null;
+        risk_quota_level: string | null;
+        binding_observed_at: Date | null;
+        lifecycle_state: ClientEnvironmentView['lifecycle']['state'] | null;
+        deleted_at: Date | null;
+        request_id: string | null;
+        deletion_requested_by: string | null;
+        deletion_requested_at: Date | null;
+        result_kind: 'deleted' | 'already_missing' | null;
+        result_error: string | null;
+        result_at: Date | null;
+        installation_id: string | null;
+        installation_seen_at: Date | null;
         hold_id: string | null;
         hold_reason: ClientCleanupHoldView['reason'] | null;
         hold_requested_at: Date | null;
@@ -1642,12 +1788,23 @@ export class ClientUserStore {
                   (array_agg(s.label ORDER BY s.assigned_at DESC) FILTER (WHERE s.label IS NOT NULL))[1],
                   max(e.label)
                 ) AS label,
+                COALESCE(max(e.environment_name),
+                  (array_agg(s.label ORDER BY s.assigned_at DESC) FILTER (WHERE s.label IS NOT NULL))[1],
+                  k.env_key) AS environment_name,
                 COALESCE(
                   (array_agg(s.platform ORDER BY s.assigned_at DESC) FILTER (WHERE s.platform IS NOT NULL))[1],
                   max(e.platform)
                 ) AS platform,
                 json_agg(json_build_object('userId', u.user_id, 'name', u.name) ORDER BY u.name)
                   FILTER (WHERE u.user_id IS NOT NULL) AS assignees,
+                max(e.account_id) AS account_id,max(a.label) AS account_label,max(a.nickname) AS account_nickname,
+                max(a.operator_alias) AS account_operator_alias,max(a.platform) AS account_platform,
+                max(a.group_label) AS group_label,max(r.status) AS risk_status,max(r.quota_level) AS risk_quota_level,
+                max(e.binding_observed_at) AS binding_observed_at,
+                COALESCE(max(e.lifecycle_state), 'active') AS lifecycle_state,max(e.deleted_at) AS deleted_at,
+                d.request_id,d.requested_by AS deletion_requested_by,d.requested_at AS deletion_requested_at,
+                d.result_kind,d.result_error,d.result_at,
+                i.installation_id,i.last_seen_at AS installation_seen_at,
                 h.revocation_id AS hold_id,h.reason AS hold_reason,h.requested_at AS hold_requested_at,
                 o.offboard_id,o.account_id AS offboard_account_id,o.state AS offboard_state,
                 o.reason AS offboard_reason,o.requested_at AS offboard_requested_at,
@@ -1657,11 +1814,25 @@ export class ClientUserStore {
          LEFT JOIN client_env_scope s
            ON s.env_key = k.env_key AND s.source = 'admin'
          LEFT JOIN client_users u ON u.user_id = s.user_id
+         LEFT JOIN accounts a ON a.account_id = e.account_id
+         LEFT JOIN risk_state r ON r.account_id = a.account_id
+         LEFT JOIN LATERAL (
+           SELECT request_id,requested_by,requested_at,result_kind,result_error,result_at
+           FROM client_environment_deletion_requests d0 WHERE d0.env_key=k.env_key
+           ORDER BY requested_at DESC LIMIT 1
+         ) d ON true
+         LEFT JOIN LATERAL (
+           SELECT installation_id,last_seen_at
+           FROM client_environment_installations i0 WHERE i0.env_key=k.env_key
+           ORDER BY last_seen_at DESC LIMIT 1
+         ) i ON true
          LEFT JOIN client_env_revocation_holds h ON h.env_key = k.env_key
          LEFT JOIN interaction_offboards o
            ON o.env_key = k.env_key AND o.platform='wechat_channels' AND o.state <> 'purged'
          GROUP BY k.env_key,h.revocation_id,h.reason,h.requested_at,
-                  o.offboard_id,o.account_id,o.state,o.reason,o.requested_at,o.purge_due_at
+                  o.offboard_id,o.account_id,o.state,o.reason,o.requested_at,o.purge_due_at,
+                  d.request_id,d.requested_by,d.requested_at,d.result_kind,d.result_error,d.result_at,
+                  i.installation_id,i.last_seen_at
          ORDER BY k.env_key ASC`,
       );
       return rows.map((r) => {
@@ -1681,16 +1852,355 @@ export class ClientUserStore {
             : null;
         return {
           envKey: r.env_key,
+          environmentName: r.environment_name ?? r.env_key,
           label: r.label,
           platform: r.platform,
           assignees,
           assigneeCount: assignees.length,
           cleanup,
+          account: r.account_id && r.account_platform
+            ? (() => {
+                const display = resolveAccountDisplayName({
+                  accountId: r.account_id!, label: r.account_label,
+                  nickname: r.account_nickname, operatorAlias: r.account_operator_alias,
+                });
+                return {
+                  accountId: r.account_id!, label: r.account_label, nickname: r.account_nickname,
+                  operatorAlias: r.account_operator_alias, displayName: display.name,
+                  platform: r.account_platform!, groupLabel: r.group_label,
+                  riskStatus: r.risk_status, riskQuotaLevel: r.risk_quota_level,
+                };
+              })()
+            : null,
+          bindingObservedAt: r.binding_observed_at?.getTime() ?? null,
+          installation: r.installation_id && r.installation_seen_at
+            ? {
+                installationId: r.installation_id,
+                lastSeenAt: r.installation_seen_at.getTime(),
+                online: r.installation_seen_at.getTime() >= Date.now() - 120_000,
+              }
+            : null,
+          lifecycle: {
+            state: r.lifecycle_state ?? 'active', requestId: r.request_id ?? null,
+            requestedBy: r.deletion_requested_by ?? null,
+            requestedAt: r.deletion_requested_at?.getTime() ?? null,
+            resultKind: r.result_kind ?? null, resultError: r.result_error ?? null,
+            resultAt: r.result_at?.getTime() ?? null, deletedAt: r.deleted_at?.getTime() ?? null,
+          },
         };
       });
     } catch (err) {
       if (isMissingTable(err)) return [];
       throw err;
+    }
+  }
+
+  /** 账号页的加法投影：环境生命周期独立，账号本身不因环境删除而删除或重置。 */
+  async environmentSummariesByAccount(): Promise<Record<string, ClientEnvironmentSummary>> {
+    try {
+      const { rows } = await this.pool.query<{
+        account_id: string; active_count: number | string; deleting_count: number | string; online_count: number | string;
+      }>(
+        `SELECT e.account_id,
+                count(*) FILTER (WHERE e.lifecycle_state='active')::int AS active_count,
+                count(*) FILTER (WHERE e.lifecycle_state IN ('waiting_edge','deleting','delete_failed'))::int AS deleting_count,
+                count(*) FILTER (WHERE e.lifecycle_state='active' AND EXISTS (
+                  SELECT 1 FROM client_environment_installations i
+                  WHERE i.env_key=e.env_key AND i.last_seen_at >= now()-interval '2 minutes'
+                ))::int AS online_count
+         FROM client_environments e
+         WHERE e.account_id IS NOT NULL AND e.lifecycle_state <> 'deleted'
+         GROUP BY e.account_id`,
+      );
+      return Object.fromEntries(rows.map((r) => [r.account_id, {
+        activeCount: Number(r.active_count), deletingCount: Number(r.deleting_count), onlineCount: Number(r.online_count),
+      }]));
+    } catch (err) {
+      if (isMissingTable(err)) return {};
+      throw err;
+    }
+  }
+
+  /** 内部管理员只写删除意图；实际 AdsPower 删除必须由唯一持有该环境的 Edge 经 HTTP 拉取执行。 */
+  async requestEnvironmentDeletion(
+    envKey: string, requestedBy: string, idempotencyKey: string,
+  ): Promise<RequestEnvironmentDeletionResult> {
+    const key = envKey.trim();
+    const idem = idempotencyKey.trim();
+    if (!key) return { ok: false, reason: 'not_found' };
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const env = await client.query<{
+        env_key: string; platform: string | null; lifecycle_state: string; target_user_id: string | null;
+      }>(
+        `SELECT e.env_key,e.platform,e.lifecycle_state,
+                COALESCE(s.user_id, i.user_id) AS target_user_id
+         FROM client_environments e
+         LEFT JOIN client_env_scope s ON s.env_key=e.env_key AND s.source='admin'
+         LEFT JOIN LATERAL (
+           SELECT user_id FROM client_environment_installations i0
+           WHERE i0.env_key=e.env_key ORDER BY last_seen_at DESC LIMIT 1
+         ) i ON true
+         WHERE e.env_key=$1 FOR UPDATE OF e`,
+        [key],
+      );
+      const row = env.rows[0];
+      if (!row) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'not_found' };
+      }
+      const existing = await client.query<{
+        request_id: string; version: number;
+        state: RequestEnvironmentDeletionResult extends { ok: true; state: infer S } ? S : never;
+        target_user_id: string | null; idempotency_key: string;
+      }>(
+        `SELECT request_id,version,state,target_user_id,idempotency_key
+         FROM client_environment_deletion_requests
+         WHERE env_key=$1 AND (idempotency_key=$2 OR state IN ('waiting_edge','deleting','delete_failed'))
+         ORDER BY requested_at DESC LIMIT 1`,
+        [key, idem],
+      );
+      if (existing.rows[0]) {
+        const prior = existing.rows[0];
+        await client.query('COMMIT');
+        this.blockedAutomationEnvKeys.add(key);
+        return { ok: true, requestId: prior.request_id, version: prior.version, envKey: key, platform: row.platform,
+          targetUserId: prior.target_user_id, state: prior.state, idempotent: true };
+      }
+      if (row.lifecycle_state === 'deleted') {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'already_deleted' };
+      }
+      const requestId = crypto.randomUUID();
+      await client.query(
+        `INSERT INTO client_environment_deletion_requests
+           (request_id,env_key,idempotency_key,requested_by,target_user_id,state)
+         VALUES ($1,$2,$3,$4,$5,'waiting_edge')`,
+        [requestId, key, idem || requestId, requestedBy, row.target_user_id],
+      );
+      await client.query(
+        `UPDATE client_environments SET lifecycle_state='waiting_edge',updated_at=now() WHERE env_key=$1`, [key],
+      );
+      await client.query('COMMIT');
+      this.blockedAutomationEnvKeys.add(key);
+      return { ok: true, requestId, version: 1, envKey: key, platform: row.platform,
+        targetUserId: row.target_user_id, state: 'waiting_edge', idempotent: false };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Edge 的常规 HTTP 心跳：上报本安装持有的环境，并只读取属于该客户的删除候选。 */
+  async observeAndListEnvironmentMaintenance(
+    userId: string,
+    installationId: string,
+    environments: { envKey: string; environmentName?: string | null }[],
+  ): Promise<ClientEnvironmentMaintenanceItem[]> {
+    const install = installationId.trim();
+    if (!userId || !install) return [];
+    const seen = new Set<string>();
+    for (const item of environments.slice(0, 500)) {
+      const envKey = item.envKey.trim();
+      if (!envKey || seen.has(envKey)) continue;
+      seen.add(envKey);
+      const environmentName = item.environmentName?.trim() || null;
+      await this.pool.query(
+        `INSERT INTO client_environment_installations
+           (env_key,installation_id,user_id,environment_name,last_seen_at)
+         SELECT e.env_key,$2,$3,$4,now() FROM client_environments e
+         WHERE e.env_key=$1 AND (
+           EXISTS (SELECT 1 FROM client_env_scope s WHERE s.env_key=e.env_key AND s.user_id=$3 AND s.source='admin')
+           OR EXISTS (SELECT 1 FROM client_environment_deletion_requests d
+                      WHERE d.env_key=e.env_key AND d.target_user_id=$3 AND d.state<>'deleted')
+         )
+         ON CONFLICT (env_key,installation_id) DO UPDATE
+           SET user_id=EXCLUDED.user_id,environment_name=COALESCE(EXCLUDED.environment_name,
+             client_environment_installations.environment_name),last_seen_at=now()`,
+        [envKey, install, userId, environmentName],
+      );
+      if (environmentName) {
+        await this.pool.query(
+          `UPDATE client_environments SET environment_name=$2,updated_at=now()
+           WHERE env_key=$1 AND lifecycle_state<>'deleted'`, [envKey, environmentName],
+        );
+      }
+    }
+    const { rows } = await this.pool.query<{
+      request_id: string; version: number; env_key: string; environment_name: string; platform: string | null;
+      state: 'waiting_edge' | 'deleting' | 'delete_failed'; cleanup_ready: boolean;
+    }>(
+      `SELECT d.request_id,d.version,d.env_key,COALESCE(e.environment_name,e.label,e.env_key) AS environment_name,
+              e.platform,d.state,
+              CASE WHEN e.platform='wechat_channels' THEN EXISTS (
+                SELECT 1 FROM interaction_offboards o
+                WHERE o.env_key=e.env_key AND o.platform='wechat_channels' AND o.state IN ('tombstoned','purged')
+              ) ELSE true END AS cleanup_ready
+       FROM client_environment_deletion_requests d
+       JOIN client_environments e ON e.env_key=d.env_key
+       WHERE d.target_user_id=$1 AND d.state IN ('waiting_edge','deleting','delete_failed')
+         AND EXISTS (
+           SELECT 1 FROM client_environment_installations mine
+           WHERE mine.env_key=d.env_key AND mine.user_id=$1 AND mine.installation_id=$2
+             AND mine.last_seen_at >= now()-interval '2 minutes'
+         )
+       ORDER BY d.requested_at ASC`,
+      [userId, install],
+    );
+    return rows.map((r) => ({
+      requestId: r.request_id, version: r.version, envKey: r.env_key, environmentName: r.environment_name,
+      platform: r.platform, state: r.state, cleanupReady: r.cleanup_ready,
+      cleanupReason: r.cleanup_ready ? 'ready' : 'wechat_offboard_pending',
+    }));
+  }
+
+  /** 唯一、新鲜持有者认领；多安装或无新鲜观测都 fail-closed，Cloud 不猜目标。 */
+  async claimEnvironmentDeletion(
+    userId: string, requestId: string, version: number, installationId: string,
+  ): Promise<ClaimEnvironmentDeletionResult> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const request = await client.query<{
+        request_id: string; version: number; env_key: string; environment_name: string; platform: string | null; state: string;
+        target_user_id: string | null; claimed_installation_id: string | null; cleanup_ready: boolean;
+      }>(
+        `SELECT d.request_id,d.version,d.env_key,COALESCE(e.environment_name,e.label,e.env_key) AS environment_name,
+                e.platform,d.state,d.target_user_id,d.claimed_installation_id,
+                CASE WHEN e.platform='wechat_channels' THEN EXISTS (
+                  SELECT 1 FROM interaction_offboards o
+                  WHERE o.env_key=e.env_key AND o.platform='wechat_channels' AND o.state IN ('tombstoned','purged')
+                ) ELSE true END AS cleanup_ready
+         FROM client_environment_deletion_requests d
+         JOIN client_environments e ON e.env_key=d.env_key
+         WHERE d.request_id=$1 FOR UPDATE OF d,e`,
+        [requestId],
+      );
+      const row = request.rows[0];
+      if (!row) { await client.query('ROLLBACK'); return { ok: false, reason: 'not_found' }; }
+      if (row.target_user_id !== userId) { await client.query('ROLLBACK'); return { ok: false, reason: 'not_target' }; }
+      if (row.version !== version) {
+        await client.query('ROLLBACK'); return { ok: false, reason: 'request_version_mismatch' };
+      }
+      if (row.state === 'deleted') { await client.query('ROLLBACK'); return { ok: false, reason: 'already_completed' }; }
+      if (row.state === 'deleting' && row.claimed_installation_id === installationId) {
+        await client.query('COMMIT');
+        return { ok: true, requestId: row.request_id, version: row.version, envKey: row.env_key,
+          environmentName: row.environment_name, platform: row.platform, state: 'deleting', idempotent: true };
+      }
+      if (!row.cleanup_ready) { await client.query('ROLLBACK'); return { ok: false, reason: 'cleanup_pending' }; }
+      const holders = await client.query<{ installation_id: string }>(
+        `SELECT installation_id FROM client_environment_installations
+         WHERE env_key=$1 AND user_id=$2 AND last_seen_at >= now()-interval '2 minutes'
+         ORDER BY installation_id`, [row.env_key, userId],
+      );
+      if (holders.rows.length !== 1 || holders.rows[0]?.installation_id !== installationId) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'ambiguous_holder' };
+      }
+      await client.query(
+        `UPDATE client_environment_deletion_requests
+         SET state='deleting',claimed_installation_id=$2,claimed_at=now(),updated_at=now()
+         WHERE request_id=$1`, [requestId, installationId],
+      );
+      await client.query(
+        `UPDATE client_environments SET lifecycle_state='deleting',updated_at=now() WHERE env_key=$1`, [row.env_key],
+      );
+      await client.query('COMMIT');
+      return { ok: true, requestId: row.request_id, version: row.version, envKey: row.env_key,
+        environmentName: row.environment_name, platform: row.platform, state: 'deleting', idempotent: false };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Edge 终态回执：只有同一认领安装可写；成功后软删除环境并撤销 scope，账号/风控/分组保持原样。 */
+  async completeEnvironmentDeletion(
+    userId: string,
+    requestId: string,
+    version: number,
+    installationId: string,
+    input: { resultKey: string; status: 'succeeded' | 'failed'; resultKind?: 'deleted' | 'already_missing'; error?: string | null },
+  ): Promise<CompleteEnvironmentDeletionResult> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const request = await client.query<{
+        env_key: string; version: number; state: string; target_user_id: string | null; claimed_installation_id: string | null;
+        result_key: string | null;
+      }>(
+        `SELECT env_key,version,state,target_user_id,claimed_installation_id,result_key
+         FROM client_environment_deletion_requests WHERE request_id=$1 FOR UPDATE`, [requestId],
+      );
+      const row = request.rows[0];
+      if (!row) { await client.query('ROLLBACK'); return { ok: false, reason: 'not_found' }; }
+      if (row.target_user_id !== userId) { await client.query('ROLLBACK'); return { ok: false, reason: 'not_target' }; }
+      if (row.version !== version) {
+        await client.query('ROLLBACK'); return { ok: false, reason: 'request_version_mismatch' };
+      }
+      if (row.state === 'deleted') {
+        await client.query('COMMIT');
+        return row.result_key === input.resultKey
+          ? { ok: true, requestId, envKey: row.env_key, state: 'deleted', idempotent: true }
+          : { ok: false, reason: 'result_conflict' };
+      }
+      if (row.state === 'delete_failed' && row.result_key === input.resultKey) {
+        await client.query('COMMIT');
+        return { ok: true, requestId, envKey: row.env_key, state: 'delete_failed', idempotent: true };
+      }
+      if (row.claimed_installation_id !== installationId || row.state !== 'deleting') {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'not_claimed' };
+      }
+      if (input.status === 'failed') {
+        await client.query(
+          `UPDATE client_environment_deletion_requests
+           SET state='delete_failed',result_key=$2,result_error=$3,result_at=now(),
+               claimed_installation_id=NULL,claimed_at=NULL,updated_at=now() WHERE request_id=$1`,
+          [requestId, input.resultKey, (input.error ?? 'adspower_delete_failed').slice(0, 1000)],
+        );
+        await client.query(
+          `UPDATE client_environments SET lifecycle_state='delete_failed',updated_at=now() WHERE env_key=$1`, [row.env_key],
+        );
+        await client.query('COMMIT');
+        return { ok: true, requestId, envKey: row.env_key, state: 'delete_failed', idempotent: false };
+      }
+      if (input.resultKind !== 'deleted' && input.resultKind !== 'already_missing') {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'result_conflict' };
+      }
+      await client.query(
+        `INSERT INTO client_env_scope_audit
+           (user_id,env_key,label,platform,source,assigned_by,assigned_at,revoked_by,reason)
+         SELECT user_id,env_key,label,platform,source,assigned_by,assigned_at,$2,'admin_revoked'
+         FROM client_env_scope WHERE env_key=$1 AND source='admin'
+         ON CONFLICT (user_id,env_key,assigned_at,reason) DO NOTHING`,
+        [row.env_key, `environment-delete:${requestId}`],
+      );
+      await client.query(`DELETE FROM client_env_scope WHERE env_key=$1 AND source='admin'`, [row.env_key]);
+      await client.query(
+        `UPDATE client_environment_deletion_requests
+         SET state='deleted',result_key=$2,result_kind=$3,result_error=NULL,result_at=now(),updated_at=now()
+         WHERE request_id=$1`,
+        [requestId, input.resultKey, input.resultKind],
+      );
+      await client.query(
+        `UPDATE client_environments SET lifecycle_state='deleted',deleted_at=now(),updated_at=now() WHERE env_key=$1`,
+        [row.env_key],
+      );
+      await client.query('COMMIT');
+      return { ok: true, requestId, envKey: row.env_key, state: 'deleted', idempotent: false };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
     }
   }
 

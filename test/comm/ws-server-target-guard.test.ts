@@ -99,6 +99,24 @@ test('缺目标 edgeId 绝不广播：多个在线 edge 时命中 0（诚实失�
   await s.close();
 });
 
+test('删除生命周期同步闸抑制普通 WS 自动化，但不新增任何删除 message type', async () => {
+  const seen: string[] = [];
+  const s = new EdgeCloudServer({
+    handler: helloHandler, port: 0, clock: () => 0,
+    canPushToEdge: (env, edgeId) => { seen.push(`${edgeId}:${env.type}`); return env.type === 'session.end'; },
+  });
+  await s.start();
+  const edge = await connectEdge(s.address()!, 'ads-profile-delete', 'acc-1');
+  assert.equal(s.pushToEdges(makeEnvelope('page.scroll', 'blocked-1', 0, {}), 'ads-profile-delete'), 0);
+  assert.equal(s.pushToEdges(makeEnvelope('session.end', 'allowed-1', 0, { reason: 'environment_delete' }),
+    'ads-profile-delete'), 1);
+  const [data] = (await once(edge, 'message')) as [Buffer | string];
+  assert.equal(JSON.parse(data.toString()).type, 'session.end');
+  assert.deepEqual(seen, ['ads-profile-delete:page.scroll', 'ads-profile-delete:session.end']);
+  edge.close();
+  await s.close();
+});
+
 test('账号控制只解析到同账号且协商 controls capability 的在线 Edge', async () => {
   const s = new EdgeCloudServer({ handler: helloHandler, port: 0, clock: () => 0 });
   await s.start();

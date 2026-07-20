@@ -557,6 +557,54 @@ function createRequestHandler(
       return;
     }
 
+    // 环境资产生命周期（change admin-environment-lifecycle-management）：内部 JWT 管理面。
+    // 这里只写 Cloud 删除意图；AdsPower 物理删除由 Edge 经客户鉴权 HTTP 拉取、认领并回执。
+    if (method === 'GET' && url === '/api/environments') {
+      if (!deps.clientUsers) {
+        sendJson(res, 503, { error: 'client_users_unavailable' });
+        return;
+      }
+      sendJson(res, 200, { environments: await deps.clientUsers.listAllEnvironments(), asOf: Date.now() });
+      return;
+    }
+    const environmentDeletion = /^\/api\/environments\/([^/]+)\/deletion$/.exec(url);
+    if (method === 'POST' && environmentDeletion) {
+      if (!deps.clientUsers) {
+        sendJson(res, 503, { error: 'client_users_unavailable' });
+        return;
+      }
+      let envKey: string;
+      let body: unknown;
+      try {
+        envKey = decodeURIComponent(environmentDeletion[1] ?? '').trim();
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const raw = (body ?? {}) as Record<string, unknown>;
+      const confirmEnvKey = typeof raw.confirmEnvKey === 'string' ? raw.confirmEnvKey.trim() : '';
+      const idempotencyKey = typeof raw.idempotencyKey === 'string' ? raw.idempotencyKey.trim() : '';
+      if (!envKey || confirmEnvKey !== envKey || !idempotencyKey || idempotencyKey.length > 200) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'exact_environment_confirmation_required' });
+        return;
+      }
+      const result = await deps.clientUsers.requestEnvironmentDeletion(
+        envKey, verified.payload.sub, idempotencyKey,
+      );
+      if (!result.ok) {
+        sendJson(res, result.reason === 'not_found' ? 404 : 409, { error: result.reason });
+        return;
+      }
+      // 视频号沿用既有 offboard/tombstone 安全闭环；未到 tombstoned/purged 时 Edge 认领会 fail-closed。
+      if (result.platform === 'wechat_channels' && result.targetUserId) {
+        const offboard = await deps.clientUsers.beginEnvironmentOffboard(result.targetUserId, envKey);
+        if (offboard.ok) await deps.onClientOffboardCreated?.(offboard.offboard);
+      }
+      sendJson(res, result.idempotent ? 200 : 202, { deletion: result });
+      return;
+    }
+
     // ── 对外客户管理（change edge-client-customer-auth）：受**内部** JWT 保护 ──────────
     // 客户令牌用另一密钥,到不了这里（上方验签即 bad_signature）。列表/读取绝不含 key/hash；
     // 明文 key 仅 create/rotate 一次性回显。未注入 clientUsers 则 503。
@@ -711,6 +759,14 @@ function createRequestHandler(
       // console 渲染「数据截至 …」区分「无新活动」与「界面冻结」）。今日聚合（todayTotals /
       // todayTotalsByAccount / likeRate）走 risk_counters 的 occurred_at 打头索引
       // （change console-cloud-panel-hardening #21 新补），不带账号前缀也不再退化为全表扫描。
+      const environmentSummaries = deps.clientUsers
+        ? await deps.clientUsers.environmentSummariesByAccount()
+        : {};
+      const accountsWithEnvironments = accounts.map((account) => ({
+        ...account,
+        environmentSummary: environmentSummaries[account.accountId]
+          ?? { activeCount: 0, deletingCount: 0, onlineCount: 0 },
+      }));
       const summary: DashboardSummary = {
         asOf: Date.now(),
         edgesOnline: deps.edgeServer.onlineEdgeCount(), // staleness-aware（死连接不算在线，D9）
@@ -719,7 +775,7 @@ function createRequestHandler(
         // decouple-quota-hit-from-risk：每账号带 day 上限 + 饱和标记（用量可见）。
         totalsByAccount: totalsByAccountWithQuotas,
         likeRate,
-        accounts,
+        accounts: accountsWithEnvironments,
         alerts, // V1 task 9.5：真告警（未解决），来自 alerts 表
         // 归因已落地：按账号切片为真数字（保留键 default 即单账号现实下的真实账号）。
         attributionPending: false,
@@ -730,7 +786,13 @@ function createRequestHandler(
       return;
     }
     if (method === 'GET' && url === '/api/accounts') {
-      sendJson(res, 200, { accounts: await deps.panelStore.listAccounts() });
+      const accounts = await deps.panelStore.listAccounts();
+      const summaries = deps.clientUsers ? await deps.clientUsers.environmentSummariesByAccount() : {};
+      sendJson(res, 200, { accounts: accounts.map((account) => ({
+        ...account,
+        environmentSummary: summaries[account.accountId]
+          ?? { activeCount: 0, deletingCount: 0, onlineCount: 0 },
+      })) });
       return;
     }
     if (method === 'GET' && url === '/api/facebook/groups') {

@@ -2063,6 +2063,12 @@ async function main(): Promise<void> {
   const server = new EdgeCloudServer({
     port,
     handler,
+    // 删除本身不经 WS；这里只同步抑制普通自动化下发。视频号既有 offboard 清理命令与 session.end
+    // 必须穿透，避免 tombstone 前被环境删除闸自锁。
+    canPushToEdge: (env, edgeId) =>
+      env.type === 'session.end'
+      || env.type.startsWith('interaction.offboard.')
+      || clientUserStore.isAutomationAllowedForEdgeId(edgeId),
     onClose: (session) => {
       if (session.edgeId) {
         edgeTaskLeases.invalidateEdge(session.edgeId);

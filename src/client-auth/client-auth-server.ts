@@ -479,6 +479,97 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       sendJson(res, 401, { error: 'unauthorized', reason: verified.reason });
       return;
     }
+    // 环境维护面刻意位于 revocation/enabled 闸之前：管理员冻结客户后，已有且仍在签名有效期内的 Edge
+    // 仍须能拉取删除意图、提交 AdsPower 终态。它只能访问 Cloud 预先定向到该 sub 的 request，不能扩大环境 scope。
+    const maintenanceUserId = verified.payload.sub;
+    if (method === 'POST' && url === '/environment-maintenance/poll') {
+      let raw: Record<string, unknown>;
+      try {
+        const body = await readJsonBody(req);
+        raw = body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : {};
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const installationId = typeof raw.installationId === 'string' ? raw.installationId.trim() : '';
+      if (!installationId || installationId.length > 200 || !Array.isArray(raw.environments)) {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const environments = raw.environments
+        .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
+        .map((item) => ({
+          envKey: typeof item.envKey === 'string' ? item.envKey : '',
+          environmentName: typeof item.environmentName === 'string' ? item.environmentName : null,
+        }));
+      const deletions = await deps.store.observeAndListEnvironmentMaintenance(
+        maintenanceUserId, installationId, environments,
+      );
+      sendJson(res, 200, { deletions, asOf: Date.now() });
+      return;
+    }
+    const maintenanceClaim = /^\/environment-maintenance\/deletions\/([^/]+)\/claim$/.exec(url);
+    if (method === 'POST' && maintenanceClaim) {
+      let installationId = '';
+      let version = 0;
+      try {
+        const body = await readJsonBody(req) as Record<string, unknown> | undefined;
+        installationId = typeof body?.installationId === 'string' ? body.installationId.trim() : '';
+        version = typeof body?.version === 'number' && Number.isInteger(body.version) ? body.version : 0;
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      if (!installationId || installationId.length > 200 || version < 1) {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const result = await deps.store.claimEnvironmentDeletion(
+        maintenanceUserId, decodeURIComponent(maintenanceClaim[1] ?? ''), version, installationId,
+      );
+      if (!result.ok) {
+        const status = result.reason === 'not_found' ? 404 : result.reason === 'not_target' ? 403 : 409;
+        sendJson(res, status, { error: result.reason });
+        return;
+      }
+      sendJson(res, 200, { deletion: result });
+      return;
+    }
+    const maintenanceResult = /^\/environment-maintenance\/deletions\/([^/]+)\/result$/.exec(url);
+    if (method === 'PUT' && maintenanceResult) {
+      let raw: Record<string, unknown>;
+      try {
+        const body = await readJsonBody(req);
+        raw = body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : {};
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const installationId = typeof raw.installationId === 'string' ? raw.installationId.trim() : '';
+      const resultKeyHeader = req.headers['idempotency-key'];
+      const resultKey = (Array.isArray(resultKeyHeader) ? resultKeyHeader[0] : resultKeyHeader)?.trim() ?? '';
+      const version = typeof raw.version === 'number' && Number.isInteger(raw.version) ? raw.version : 0;
+      const status = raw.status === 'succeeded' || raw.status === 'failed' ? raw.status : null;
+      const resultKind = raw.resultKind === 'deleted' || raw.resultKind === 'already_missing' ? raw.resultKind : undefined;
+      const error = typeof raw.error === 'string' ? raw.error : null;
+      if (!installationId || !resultKey || !status || version < 1
+        || (status === 'succeeded' && !resultKind)
+        || installationId.length > 200 || resultKey.length > 200) {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const result = await deps.store.completeEnvironmentDeletion(
+        maintenanceUserId, decodeURIComponent(maintenanceResult[1] ?? ''), version, installationId,
+        { resultKey, status, resultKind, error },
+      );
+      if (!result.ok) {
+        const responseStatus = result.reason === 'not_found' ? 404 : result.reason === 'not_target' ? 403 : 409;
+        sendJson(res, responseStatus, { error: result.reason });
+        return;
+      }
+      sendJson(res, 200, { deletion: result });
+      return;
+    }
     if (deps.revocation.isRevoked(verified.payload.jti)) {
       sendJson(res, 401, { error: 'unauthorized', reason: 'revoked' });
       return;

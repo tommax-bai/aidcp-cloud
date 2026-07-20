@@ -115,6 +115,66 @@ test('自检拒绝保留端口（forbidden_port）', async () => {
   await h.close();
 });
 
+test('环境管理 API 展示资产/账号摘要，并以精确 envKey 确认创建 HTTP 删除意图', async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const clientUsers = {
+    async listAllEnvironments() {
+      return [{
+        envKey: 'profile-1', environmentName: '环境一', label: '环境一', platform: 'xiaohongshu',
+        assignees: [{ userId: 'u1', name: '客户甲' }], assigneeCount: 1, cleanup: null,
+        account: { accountId: 'default', label: 'default', nickname: null, operatorAlias: null,
+          displayName: 'default', platform: 'xiaohongshu', groupLabel: '一组', riskStatus: 'normal',
+          riskQuotaLevel: 'normal' },
+        bindingObservedAt: 10, installation: null,
+        lifecycle: { state: 'active', requestId: null, requestedBy: null, requestedAt: null,
+          resultKind: null, resultError: null, resultAt: null, deletedAt: null },
+      }];
+    },
+    async environmentSummariesByAccount() {
+      return { default: { activeCount: 1, deletingCount: 0, onlineCount: 0 } };
+    },
+    async requestEnvironmentDeletion(envKey: string, requestedBy: string, idempotencyKey: string) {
+      requests.push({ envKey, requestedBy, idempotencyKey });
+      return { ok: true as const, requestId: 'request-1', version: 1, envKey, platform: 'xiaohongshu', targetUserId: 'u1',
+        state: 'waiting_edge' as const, idempotent: false };
+    },
+  };
+  const environmentDeps = { ...deps, clientUsers } as unknown as PanelDeps;
+  const h = await startPanelApi(environmentDeps, makeConfig());
+  assert.equal(h.started, true);
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = await login.json() as { token: string };
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+    const environments = await fetch(`${base}/api/environments`, { headers: auth });
+    assert.equal(environments.status, 200);
+    assert.equal(((await environments.json()) as { environments: Array<{ environmentName: string }> })
+      .environments[0]?.environmentName, '环境一');
+    const accounts = await fetch(`${base}/api/accounts`, { headers: auth });
+    assert.deepEqual(((await accounts.json()) as { accounts: Array<{ environmentSummary: unknown }> })
+      .accounts[0]?.environmentSummary, { activeCount: 1, deletingCount: 0, onlineCount: 0 });
+
+    const wrong = await fetch(`${base}/api/environments/profile-1/deletion`, {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({ confirmEnvKey: 'profile-other', idempotencyKey: 'idem-1' }),
+    });
+    assert.equal(wrong.status, 400);
+    const accepted = await fetch(`${base}/api/environments/profile-1/deletion`, {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({ confirmEnvKey: 'profile-1', idempotencyKey: 'idem-1' }),
+    });
+    assert.equal(accepted.status, 202);
+    assert.equal(((await accepted.json()) as { deletion: { state: string } }).deletion.state, 'waiting_edge');
+    assert.deepEqual(requests, [{ envKey: 'profile-1', requestedBy: 'alice', idempotencyKey: 'idem-1' }]);
+  } finally {
+    await h.close();
+  }
+});
+
 test('缺 JWT 密钥不启动（missing_secret）', async () => {
   const h = await startPanelApi(deps, makeConfig({ jwtSecret: '' }));
   assert.equal(h.started, false);
