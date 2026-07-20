@@ -1997,7 +1997,7 @@ async function main(): Promise<void> {
     `environment=${readEnvString('AIDCP_DEPLOY_ENV') ?? 'unset'} ` +
     `configured=${interactionConfiguredGlobalWriteEnabled} ` +
     `effective=${interactionGlobalWriteEnabled} ` +
-    `dev_quota_bypass=${interactionGlobalWriteEnabled && readEnvString('AIDCP_DEPLOY_ENV') === 'dev'}`,
+    'reply_quantity_gate=interaction_windows',
   );
   const interactionRuntimeControls = interactionStore && interactionInbox
     ? {
