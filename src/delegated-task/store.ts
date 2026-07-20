@@ -130,11 +130,19 @@ export interface AttemptFinish {
   reason?: string;
 }
 
+export interface InterruptedClaimRecovery {
+  task: DelegatedTask;
+  fromStatus: 'planning' | 'executing';
+  previousClaimExpiresAt: number | null;
+}
+
 export interface DelegatedTaskStore {
   init(): Promise<void>;
   createDraft(input: DelegatedTaskCreate): Promise<{ task: DelegatedTask; created: boolean }>;
   get(id: string): Promise<DelegatedTask | null>;
   list(filter?: DelegatedTaskListFilter): Promise<DelegatedTask[]>;
+  /** One-shot process-start recovery. Never call while this process is executing delegated work. */
+  recoverInterruptedClaims(now?: number): Promise<InterruptedClaimRecovery[]>;
   confirm(id: string, version: number): Promise<DelegatedTask | null>;
   claimNext(opts: { workerId: string; leaseMs: number; now?: number }): Promise<DelegatedTask | null>;
   markExecuting(id: string, claimToken: string, step: string): Promise<DelegatedTask | null>;
@@ -215,6 +223,11 @@ interface AttemptRow {
   prepared_at: Date | string;
   dispatched_at: Date | string | null;
   finished_at: Date | string | null;
+}
+
+interface InterruptedTaskRow extends TaskRow {
+  recovered_from: 'planning' | 'executing';
+  previous_claim_expires_at: Date | string | null;
 }
 
 const epoch = (v: Date | string | null): number | null => (v ? new Date(v).getTime() : null);
@@ -370,6 +383,62 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
     const sql = `SELECT * FROM delegated_tasks${where} ORDER BY created_at DESC LIMIT $${args.length}`;
     const { rows } = await this.pool.query<TaskRow>(sql, args);
     return rows.map(mapTask);
+  }
+
+  async recoverInterruptedClaims(now = Date.now()): Promise<InterruptedClaimRecovery[]> {
+    const recoveredAt = new Date(now);
+    const { rows } = await this.pool.query<InterruptedTaskRow>(
+      `WITH interrupted AS (
+         SELECT id, status AS recovered_from, claim_expires_at AS previous_claim_expires_at
+         FROM delegated_tasks
+         WHERE status IN ('planning','executing')
+         FOR UPDATE
+       ), recovered AS (
+         UPDATE delegated_tasks t SET
+           status=CASE
+             WHEN t.cancel_requested AND t.success_count > 0 THEN 'partially_completed'
+             WHEN t.cancel_requested THEN 'cancelled'
+             WHEN t.pause_requested THEN 'deferred'
+             ELSE 'queued'
+           END,
+           terminal_outcome=CASE WHEN t.cancel_requested THEN jsonb_build_object(
+             'code','remaining_cancelled_by_user',
+             'message','Cloud 重启时任务已请求取消；已取消剩余部分。',
+             'remainingCount',GREATEST(t.target_success_count-t.success_count,0)
+           ) ELSE t.terminal_outcome END,
+           claim_token=NULL,
+           claim_expires_at=NULL,
+           next_eligible_at=CASE WHEN t.pause_requested OR t.cancel_requested THEN NULL ELSE $1 END,
+           current_step=CASE
+             WHEN t.cancel_requested THEN NULL
+             WHEN t.pause_requested THEN 'paused_by_user'
+             ELSE 'reconcile_interrupted_attempt'
+           END,
+           completed_at=CASE WHEN t.cancel_requested THEN $1 ELSE t.completed_at END,
+           updated_at=$1,
+           version=t.version+1
+         FROM interrupted i
+         WHERE t.id=i.id
+         RETURNING t.*, i.recovered_from, i.previous_claim_expires_at
+       ), logged AS (
+         INSERT INTO delegated_task_events(task_id,event_type,from_status,to_status,detail)
+         SELECT id,'interrupted_claim_recovered',recovered_from,status,
+                jsonb_build_object(
+                  'reason','worker_restart',
+                  'previousClaimExpiresAt',previous_claim_expires_at,
+                  'recoveredAt',$1
+                )
+         FROM recovered
+         RETURNING task_id
+       )
+       SELECT recovered.* FROM recovered`,
+      [recoveredAt],
+    );
+    return rows.map((row) => ({
+      task: mapTask(row),
+      fromStatus: row.recovered_from,
+      previousClaimExpiresAt: epoch(row.previous_claim_expires_at),
+    }));
   }
 
   async confirm(id: string, version: number): Promise<DelegatedTask | null> {
@@ -682,6 +751,13 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
 export class MemoryDelegatedTaskStore implements DelegatedTaskStore {
   private readonly tasks = new Map<string, DelegatedTask>();
   private readonly attempts = new Map<string, DelegatedTaskAttempt>();
+  readonly interruptedClaimEvents: Array<{
+    taskId: string;
+    fromStatus: 'planning' | 'executing';
+    toStatus: DelegatedTaskStatus;
+    previousClaimExpiresAt: number | null;
+    recoveredAt: number;
+  }> = [];
 
   async init(): Promise<void> {}
 
@@ -720,6 +796,38 @@ export class MemoryDelegatedTaskStore implements DelegatedTaskStore {
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, filter.limit ?? 50)
       .map((t) => structuredClone(t));
+  }
+
+  async recoverInterruptedClaims(now = Date.now()): Promise<InterruptedClaimRecovery[]> {
+    const recovered: InterruptedClaimRecovery[] = [];
+    for (const task of this.tasks.values()) {
+      if (task.status !== 'planning' && task.status !== 'executing') continue;
+      const fromStatus = task.status;
+      const previousClaimExpiresAt = task.claimExpiresAt;
+      const nextStatus: DelegatedTaskStatus = task.cancelRequested
+        ? honestTerminalStatus(task.progress, 'cancelled')
+        : task.pauseRequested
+          ? 'deferred'
+          : 'queued';
+      Object.assign(task, {
+        status: nextStatus,
+        terminalOutcome: task.cancelRequested ? {
+          code: 'remaining_cancelled_by_user',
+          message: 'Cloud 重启时任务已请求取消；已取消剩余部分。',
+          remainingCount: Math.max(0, task.targetSuccessCount - task.progress.successCount),
+        } : task.terminalOutcome,
+        claimToken: null,
+        claimExpiresAt: null,
+        nextEligibleAt: task.pauseRequested || task.cancelRequested ? null : now,
+        currentStep: task.cancelRequested ? null : task.pauseRequested ? 'paused_by_user' : 'reconcile_interrupted_attempt',
+        completedAt: task.cancelRequested ? now : task.completedAt,
+        version: task.version + 1,
+        updatedAt: now,
+      });
+      this.interruptedClaimEvents.push({ taskId: task.id, fromStatus, toStatus: nextStatus, previousClaimExpiresAt, recoveredAt: now });
+      recovered.push({ task: structuredClone(task), fromStatus, previousClaimExpiresAt });
+    }
+    return recovered;
   }
 
   async confirm(id: string, version: number): Promise<DelegatedTask | null> {

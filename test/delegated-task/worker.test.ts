@@ -101,6 +101,171 @@ test('worker defers a second rewrite for the same account and source while the f
   await firstRun;
 });
 
+test('startup recovery clears interrupted claims and preserves pause/cancel intent', async () => {
+  const store = new MemoryDelegatedTaskStore();
+  const now = 16_500_000;
+
+  const ordinary = await confirmedTask(store, now, { dedupeKey: 'recover-ordinary' });
+  const ordinaryClaim = (await store.claimNext({ workerId: 'old-worker', leaseMs: 10_000, now }))!;
+  assert.equal(ordinaryClaim.id, ordinary.id);
+
+  const paused = await confirmedTask(store, now, { dedupeKey: 'recover-paused' });
+  const pausedClaim = (await store.claimNext({ workerId: 'old-worker', leaseMs: 10_000, now }))!;
+  await store.markExecuting(paused.id, pausedClaim.claimToken!, 'executing:comment_batch');
+  await store.requestPause(paused.id);
+
+  const cancelled = await confirmedTask(store, now, { dedupeKey: 'recover-cancelled' });
+  const cancelledClaim = (await store.claimNext({ workerId: 'old-worker', leaseMs: 10_000, now }))!;
+  await store.markExecuting(cancelled.id, cancelledClaim.claimToken!, 'executing:comment_batch');
+  await store.requestCancel(cancelled.id);
+
+  const untouched = await confirmedTask(store, now, { dedupeKey: 'recover-untouched' });
+  const untouchedBefore = await store.get(untouched.id);
+  const recovered = await store.recoverInterruptedClaims(now + 1_000);
+
+  assert.deepEqual(recovered.map((item) => item.task.id), [ordinary.id, paused.id, cancelled.id]);
+  assert.equal((await store.get(ordinary.id))?.status, 'queued');
+  assert.equal((await store.get(ordinary.id))?.claimToken, null);
+  assert.equal((await store.get(paused.id))?.status, 'deferred');
+  assert.equal((await store.get(paused.id))?.currentStep, 'paused_by_user');
+  assert.equal((await store.get(cancelled.id))?.status, 'cancelled');
+  assert.equal((await store.get(cancelled.id))?.terminalOutcome?.code, 'remaining_cancelled_by_user');
+  assert.equal((await store.get(untouched.id))?.version, untouchedBefore?.version, 'queued task must not be rewritten');
+  assert.equal(store.interruptedClaimEvents.length, 3);
+  assert.deepEqual(store.interruptedClaimEvents.map((event) => event.fromStatus), ['planning', 'executing', 'executing']);
+});
+
+test('startup recovery discards a prepared attempt as proven not dispatched and returns its budget', async () => {
+  const store = new MemoryDelegatedTaskStore();
+  const now = 16_600_000;
+  const task = await confirmedTask(store, now, {
+    action: 'publish_post', targetSuccessCount: 1, maxAttempts: 1,
+    sourceConstraints: { sourceId: 'prepared-source' }, dedupeKey: 'recover-prepared',
+  });
+  const claimed = (await store.claimNext({ workerId: 'old-worker', leaseMs: 10_000, now }))!;
+  await store.startAttempt(task.id, claimed.claimToken!, 'draft:prepared');
+
+  let executions = 0;
+  const worker = new DelegatedTaskWorker({
+    store,
+    executorFor: () => ({
+      targetKey: () => 'draft:fresh',
+      execute: async () => {
+        executions += 1;
+        return { kind: 'waiting_approval', evidenceRef: 'publish:101' };
+      },
+      reconcileAttempt: async () => ({ kind: 'failed', reason: 'must_not_reconcile_prepared' }),
+    }),
+    now: () => now + 1_000,
+    claimLeaseMs: 10_000,
+  });
+
+  await worker.recoverInterruptedClaims();
+  const requeued = await worker.tick();
+  assert.equal(requeued?.status, 'queued');
+  assert.equal(requeued?.currentStep, 'recovered_before_dispatch');
+  assert.equal(requeued?.progress.attemptCount, 0);
+  assert.equal((await store.listAttempts(task.id)).length, 0);
+  assert.equal(executions, 0);
+
+  const completed = await worker.tick();
+  assert.equal(completed?.status, 'waiting_approval');
+  assert.equal(executions, 1);
+});
+
+test('startup recovery reconciles dispatched work as unknown, then releases a same-source rewrite', async () => {
+  const store = new MemoryDelegatedTaskStore();
+  const now = 16_700_000;
+  const oldTask = await confirmedTask(store, now, {
+    action: 'publish_post', targetSuccessCount: 1, maxAttempts: 1,
+    sourceConstraints: { sourceId: 'restart-source' }, dedupeKey: 'recover-dispatched-old',
+  });
+  const oldClaim = (await store.claimNext({ workerId: 'old-worker', leaseMs: 10_000, now }))!;
+  const oldAttempt = await store.startAttempt(oldTask.id, oldClaim.claimToken!, 'draft:old');
+  await store.markAttemptDispatched(oldAttempt.id);
+  await store.markExecuting(oldTask.id, oldClaim.claimToken!, 'executing:publish_post');
+
+  const newTask = await confirmedTask(store, now + 1, {
+    action: 'publish_post', targetSuccessCount: 1, maxAttempts: 1,
+    sourceConstraints: { sourceId: 'restart-source' }, dedupeKey: 'recover-dispatched-new',
+  });
+  const executed: string[] = [];
+  const worker = new DelegatedTaskWorker({
+    store,
+    executorFor: () => ({
+      targetKey: (task) => `draft:${task.id}`,
+      execute: async (task) => {
+        executed.push(task.id);
+        return { kind: 'waiting_approval', evidenceRef: `draft:${task.id}` };
+      },
+      reconcileAttempt: async (_task, attempt) => ({
+        kind: 'submitted_unknown',
+        reason: `派发账本 ${attempt.id} 在进程重启前未收敛；停止盲重试。`,
+      }),
+    }),
+    now: () => now + 1_000,
+    claimLeaseMs: 10_000,
+  });
+
+  await worker.recoverInterruptedClaims();
+  const oldDone = await worker.tick();
+  assert.equal(oldDone?.status, 'failed');
+  assert.equal(oldDone?.terminalOutcome?.code, 'submitted_result_unknown');
+  assert.equal((await store.listAttempts(oldTask.id))[0]?.status, 'submitted_unknown');
+  assert.deepEqual(executed, []);
+
+  const newDone = await worker.tick();
+  assert.equal(newDone?.id, newTask.id);
+  assert.equal(newDone?.status, 'waiting_approval');
+  assert.deepEqual(executed, [newTask.id]);
+});
+
+test('startup recovery releases an interrupted task that expired while the process was down', async () => {
+  const store = new MemoryDelegatedTaskStore();
+  const now = 16_800_000;
+  const task = await confirmedTask(store, now, {
+    targetSuccessCount: 1,
+    maxAttempts: 1,
+    deadlineAt: now + 500,
+    dedupeKey: 'recover-expired',
+  });
+  await store.claimNext({ workerId: 'old-worker', leaseMs: 10_000, now });
+  let executions = 0;
+  const worker = new DelegatedTaskWorker({
+    store,
+    executorFor: () => ({
+      targetKey: () => 'must-not-run',
+      execute: async () => {
+        executions += 1;
+        return { kind: 'failed', reason: 'must_not_run' };
+      },
+    }),
+    now: () => now + 1_000,
+    claimLeaseMs: 10_000,
+  });
+
+  await worker.recoverInterruptedClaims();
+  await worker.tick();
+  const done = await store.get(task.id);
+  assert.equal(done?.status, 'failed');
+  assert.equal(done?.terminalOutcome?.code, 'deadline');
+  assert.equal(done?.claimToken, null);
+  assert.equal(executions, 0);
+});
+
+test('interrupted-claim recovery is one-shot and cannot be invoked after the worker starts', async () => {
+  const store = new MemoryDelegatedTaskStore();
+  const worker = new DelegatedTaskWorker({
+    store,
+    executorFor: () => null,
+    now: () => 16_900_000,
+  });
+  assert.deepEqual(await worker.recoverInterruptedClaims(), []);
+  await worker.start(60_000);
+  await assert.rejects(worker.recoverInterruptedClaims(), /interrupted_claim_recovery_after_worker_start/);
+  worker.stop();
+});
+
 test('waiting approval rewrite does not block another task for the same source', async () => {
   const store = new MemoryDelegatedTaskStore();
   let now = 17_000_000;

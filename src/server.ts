@@ -3863,7 +3863,9 @@ async function main(): Promise<void> {
       logger: console,
     });
     if (readEnvString('AIDCP_DELEGATED_TASK_WORKER') !== 'false') {
-      worker.start(readEnvNumber('AIDCP_DELEGATED_TASK_POLL_MS', 5_000));
+      // recover-stale-delegated-executions：新进程没有任何存活的本地执行；先收敛旧进程遗留的
+      // planning/executing claim，再开放 pump，避免旧 ownership 把同源重洗卡到 24h deadline。
+      await worker.start(readEnvNumber('AIDCP_DELEGATED_TASK_POLL_MS', 5_000));
       console.log(`[aidcp-cloud] DelegatedTaskWorker 已启动（automatic priority；安全边界 pause/cancel；并发=${delegatedTaskMaxConcurrent}）`);
     } else {
       console.warn('[aidcp-cloud] DelegatedTaskWorker 已禁用（任务可确认但不会执行）');

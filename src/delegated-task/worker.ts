@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { DelegatedTaskStore } from './store.js';
+import type { DelegatedTaskStore, InterruptedClaimRecovery } from './store.js';
 import type { DelegatedTask, DelegatedTaskAttempt, DelegatedVerificationKind } from './types.js';
 import { honestTerminalStatus, isTerminalTaskStatus } from './types.js';
 import { humanizeAttemptReason } from './reason-humanize.js';
@@ -49,6 +49,7 @@ export class DelegatedTaskWorker {
   private timer: NodeJS.Timeout | null = null;
   private activeExecutions = 0;
   private admissionTail: Promise<void> = Promise.resolve();
+  private interruptedRecovery: Promise<InterruptedClaimRecovery[]> | null = null;
 
   constructor(private readonly deps: DelegatedTaskWorkerDeps) {
     this.now = deps.now ?? Date.now;
@@ -62,11 +63,36 @@ export class DelegatedTaskWorker {
     this.logger = deps.logger ?? console;
   }
 
-  start(intervalMs = 5_000): void {
+  async start(intervalMs = 5_000): Promise<void> {
+    if (this.timer) return;
+    await this.recoverInterruptedClaims();
     if (this.timer) return;
     this.timer = setInterval(() => this.pump(), Math.max(500, intervalMs));
     this.timer.unref?.();
     this.pump();
+  }
+
+  /**
+   * Process-start boundary only: a new worker has no surviving in-memory executions, so any
+   * persisted planning/executing claim belongs to the exited process. Runtime lease expiry alone
+   * is not enough evidence because publish generation can legitimately outlive the claim lease.
+   */
+  async recoverInterruptedClaims(): Promise<InterruptedClaimRecovery[]> {
+    if (this.timer || this.activeExecutions > 0) throw new Error('interrupted_claim_recovery_after_worker_start');
+    if (!this.interruptedRecovery) {
+      this.interruptedRecovery = this.deps.store.recoverInterruptedClaims(this.now()).then((recovered) => {
+        if (recovered.length > 0) {
+          this.logger.warn(`[delegated-task] recovered ${recovered.length} interrupted claim(s) before worker start`);
+          for (const item of recovered) {
+            this.logger.warn(
+              `[delegated-task] interrupted claim task=${item.task.id} from=${item.fromStatus} to=${item.task.status}`,
+            );
+          }
+        }
+        return recovered;
+      });
+    }
+    return this.interruptedRecovery;
   }
 
   stop(): void {
@@ -126,20 +152,15 @@ export class DelegatedTaskWorker {
       return this.handleWithoutNewAttempt(fresh, token, result, unsettled[0]);
     }
 
-    if (await this.deps.store.hasTaskOwnershipConflict(fresh)) {
-      return this.update(await this.deps.store.releaseClaim(fresh.id, token, 'deferred', {
-        nextEligibleAt: this.now() + this.retryDelayMs, step: 'waiting_ownership', reason: 'delegated_ownership_busy',
-      }));
-    }
-    if (this.deps.externalBusy && await this.deps.externalBusy(fresh)) {
-      return this.update(await this.deps.store.releaseClaim(fresh.id, token, 'deferred', {
-        nextEligibleAt: this.now() + this.retryDelayMs, step: 'waiting_safe_slot', reason: 'scheduler_busy',
-      }));
-    }
-
     const unsettled = await this.deps.store.listUnsettledAttempts(fresh.id);
     if (unsettled.length > 0) {
       const attempt = unsettled[0];
+      if (attempt.status === 'prepared') {
+        await this.deps.store.discardAttemptBeforeStart(attempt.id, 'worker_restart_before_dispatch');
+        return this.update(await this.deps.store.releaseClaim(fresh.id, token, 'queued', {
+          nextEligibleAt: this.now(), step: 'recovered_before_dispatch', reason: 'worker_restart_before_dispatch',
+        }));
+      }
       if (!executor.reconcileAttempt) {
         return this.update(await this.deps.store.complete(fresh.id, token, 'failed', {
           code: 'submitted_result_unknown',
@@ -150,6 +171,17 @@ export class DelegatedTaskWorker {
       releaseAdmission();
       const reconciled = await executor.reconcileAttempt(fresh, attempt);
       return this.handleAttemptResult(fresh, token, attempt, reconciled, true);
+    }
+
+    if (await this.deps.store.hasTaskOwnershipConflict(fresh)) {
+      return this.update(await this.deps.store.releaseClaim(fresh.id, token, 'deferred', {
+        nextEligibleAt: this.now() + this.retryDelayMs, step: 'waiting_ownership', reason: 'delegated_ownership_busy',
+      }));
+    }
+    if (this.deps.externalBusy && await this.deps.externalBusy(fresh)) {
+      return this.update(await this.deps.store.releaseClaim(fresh.id, token, 'deferred', {
+        nextEligibleAt: this.now() + this.retryDelayMs, step: 'waiting_safe_slot', reason: 'scheduler_busy',
+      }));
     }
 
     if (fresh.progress.attemptCount >= fresh.maxAttempts) return this.finishBudget(fresh, token, 'max_attempts');

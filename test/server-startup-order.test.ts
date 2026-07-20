@@ -25,3 +25,11 @@ test('hello handler does not activate business runtime until onEdgeRegistered po
   assert.equal(admission.includes('buildDispatcher('), false, 'pre-welcome admission must not construct dispatcher');
   assert.match(server, /onEdgeRegistered:[\s\S]*runtimes\?\.onWelcomed\(session\)/);
 });
+
+test('delegated worker startup recovery finishes before its execution pump is announced ready', async () => {
+  const source = await readFile(new URL('../src/server.ts', import.meta.url), 'utf8');
+  const workerStart = source.indexOf("await worker.start(readEnvNumber('AIDCP_DELEGATED_TASK_POLL_MS'");
+  const readyLog = source.indexOf('DelegatedTaskWorker 已启动');
+  assert.ok(workerStart >= 0 && readyLog >= 0, 'delegated worker startup landmarks must exist');
+  assert.ok(workerStart < readyLog, 'interrupted claims must recover before worker readiness is announced');
+});
