@@ -32,6 +32,7 @@ import {
   type CaptchaAssistClickPayload,
   type CaptchaAssistClickResultPayload,
   type CaptchaAssistTypeReportPayload,
+  type PageCardsPayload,
 } from '../../src/comm/protocol.js';
 
 /**
@@ -408,5 +409,11 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     const legacyBack = parseEnvelope(JSON.stringify(makeEnvelope('publish.approval_action', 'pa-2', 1700000000000, legacy)));
     assert.equal((legacyBack!.payload as PublishApprovalActionPayload).publishMode, undefined);
     assert.equal((legacyBack!.payload as PublishApprovalActionPayload).publishTime, undefined);
+  });
+
+  it('AC-PROTO-20 page.cards 列表形态/空态可选字段往返存活，消息类型与 Surface 不扩展', () => {
+    const payload: PageCardsPayload = { cards: [], listKind: 'feed', listState: 'empty', startupId: 'start-1' };
+    const env = makeEnvelope('page.cards', 'pc-empty', 1700000000000, payload);
+    assert.deepEqual(parseEnvelope(JSON.stringify(env))?.payload, payload);
   });
 });

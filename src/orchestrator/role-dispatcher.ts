@@ -454,6 +454,8 @@ export class RoleDispatcher {
   private commentInflight = false;
   /** feed 翻页按新卡数算的待发停留兜底（feed-scroll-card-floor）：page.cards.arrived 覆盖写、feed.scrolled 消费后归零。 */
   private pendingFeedFloorMs = 0;
+  /** 当前会话已授权过首页空态→Reels；重复 empty 报告不得多次导航。 */
+  private reelsFallbackAuthorized = false;
   private readonly isHardPaused: (edgeId?: string) => boolean;
   private readonly edgeTaskLeases?: Pick<EdgeTaskLeaseClient, 'acquire' | 'release'>;
   private currentEdgeId?: string;
@@ -1515,6 +1517,7 @@ export class RoleDispatcher {
     this.budgetInit = { ...this.budget };
     this.searchLimiter.resetSession();
     this.clearFacebookNaturalInteractionEvidence();
+    this.reelsFallbackAuthorized = false;
     // 跨会话残留清理（change platform-browse-protocol）：迁移在途 / 审批在途标志不得跨会话粘连。
     this.commentInflight = false;
     // 跨会话概念记忆：异步刷新，不阻塞 feed.entered（首次搜索发生在连刷阈值之后，届时池已就绪）。
@@ -1592,6 +1595,7 @@ export class RoleDispatcher {
     // 故此处的清理才是生产实际生效的那一份（红线修复：防审批标志卡死跨会话粘连、迁移在途被后续 open_note 误消费）。
     this.commentInflight = false;
     this.clearFacebookNaturalInteractionEvidence();
+    this.reelsFallbackAuthorized = false;
     // 重新订阅角色与接线（SessionMonitor.subscribe 重置 startedAt/actionCount）
     this.roles.forEach((r) => r.subscribe());
     this.setupCommandTranslation();
@@ -1644,6 +1648,7 @@ export class RoleDispatcher {
     this.interactionRetry.clear();
     this.pendingInteractionKeys.clear();
     this.clearFacebookNaturalInteractionEvidence();
+    this.reelsFallbackAuthorized = false;
     console.log(`[RoleDispatcher] 会话结束: ${reason ?? 'manual'}`);
     // 仅「正常结束」且续场特性已开（注入提供者）才安排休息+续场。
     if (opts?.autoResumeEligible) this.armRestTimer(account, this.takePendingAutoResumeInMs());
@@ -2386,6 +2391,14 @@ export class RoleDispatcher {
       this.eventBus.on('excursion.ended', () => {
         this.sessionMonitor?.resumeClock('patrol');
         void this.endNotificationTask();
+      }),
+
+      // Facebook 首页显式空态：Edge 只观察，Cloud 才选择列表。每场只授权一次，复用现有 scroll 命令。
+      this.eventBus.on('feed.empty.confirmed', () => {
+        if (this.accountPlatform !== 'facebook' || !this.sessionActive || this.reelsFallbackAuthorized) return;
+        this.reelsFallbackAuthorized = true;
+        console.log('[RoleDispatcher] Facebook 首页明确空 Feed → 授权切换 Reels 列表');
+        this.sendCommand({ action: 'scroll', reason: 'empty_feed_reels_fallback' });
       }),
 
       // Edge 上报可见卡片 → 更新数据并触发评估

@@ -1572,6 +1572,10 @@ export interface PageCardsPayload {
    * 自动回填/刷新——让后台/审计/飞书一律展示群名而非群 id（id 对人无辨识度）。缺省=非容器搜索或未解析出名称。
    */
   containerName?: string;
+  /** 当前列表的页面形态观察；缺省='feed'。不是 feed/detail 控制流 surface。 */
+  listKind?: 'feed' | 'reels';
+  /** 当前列表内容状态；缺省='ready'。empty 仅允许在 cards=[] 时作为显式观察。 */
+  listState?: 'ready' | 'empty';
 }
 
 /** Note detail image reference observed by edge. Edge only reports URL/metadata; it does not download. */
