@@ -4,6 +4,8 @@ import {
   AccountPersonaService,
   summarizePersona,
 } from '../src/config/account-persona-service.js';
+import { createPersonaPanel } from '../src/config/persona-facade.js';
+import type { PersonaStore } from '../src/config/persona-store.js';
 import type { PersonaDetailView } from '../src/panel/types.js';
 
 const SOUL = `identity:
@@ -152,6 +154,54 @@ describe('AccountPersonaService', () => {
     assert.equal(result.firstPostOnboarding, true);
     assert.equal(result.view.persona.updatedAt, '2026-07-20T01:00:00.000Z');
     assert.equal(result.view.persona.summary.name, '阿柚');
+  });
+
+  it('admin clear resets onboarding eligibility; next real bind returns true once and ordinary update stays idempotent', async () => {
+    type TestPersonaRow = {
+      accountId: string; persona: string; updatedAt: string | null; updatedBy: string | null;
+    };
+    let personaRow: TestPersonaRow | undefined = {
+      accountId: 'acc-1', persona: SOUL, updatedAt: '2026-07-20T00:00:00.000Z', updatedBy: 'seed',
+    };
+    let firstPostExists = true;
+    let boundCalls = 0;
+    const store = {
+      getRow: () => personaRow,
+      listAccounts: async () => [{ accountId: 'acc-1', label: '阿柚' }],
+      accountExists: async (accountId: string) => accountId === 'acc-1',
+      set: async (accountId: string, persona: string, updatedBy: string) => {
+        const next = { accountId, persona, updatedAt: '2026-07-20T02:00:00.000Z', updatedBy };
+        personaRow = next;
+        return next;
+      },
+      clear: async () => {
+        personaRow = undefined;
+        firstPostExists = false;
+      },
+    } as unknown as PersonaStore;
+    const facade = createPersonaPanel({ store, onBound: () => { boundCalls += 1; } });
+    const service = new AccountPersonaService({
+      generator: {} as never,
+      facade,
+      firstPostOnboarding: {
+        armFirstBind: async () => {
+          if (firstPostExists) return false;
+          firstPostExists = true;
+          return true;
+        },
+      },
+      logger: { warn() {} },
+    });
+
+    const cleared = await facade.setPersona('acc-1', '   ', 'admin');
+    assert.equal(cleared.ok, true);
+    assert.equal(firstPostExists, false, '后台清空把首作资格恢复为未建立');
+    assert.equal(boundCalls, 0, '清空不误触发绑定唤醒');
+
+    const rebound = await service.persist('acc-1', SOUL, 'client');
+    assert.equal(rebound.ok && rebound.firstPostOnboarding, true, '重新建立人设只在首次重建时返回引导');
+    const updated = await service.persist('acc-1', SOUL, 'client');
+    assert.equal(updated.ok && updated.firstPostOnboarding, false, '普通更新不重复建立首作状态');
   });
 
   it('rejects invalid or failed persistence without returning success', async () => {

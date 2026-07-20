@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import { PersonaStore, createPersonaResolver } from '../src/config/persona-store.js';
+import { FirstPostOnboardingStore } from '../src/onboarding/first-post-onboarding-store.js';
 
 const soulYaml = (name: string) => `
 identity:
@@ -22,17 +23,30 @@ interests:
  * 内存假 pool：路由 persona_config 的建表 / SELECT / upsert(RETURNING) / DELETE，
  * 以及 accounts 的 list / exists。可注入写失败。
  */
-function fakePool(opts: { accounts?: Array<{ account_id: string; label: string | null }>; persona?: Record<string, string> } = {}) {
+function fakePool(opts: {
+  accounts?: Array<{ account_id: string; label: string | null }>;
+  persona?: Record<string, string>;
+  firstPostAccounts?: string[];
+} = {}) {
   const accounts = new Map<string, string | null>();
   for (const a of opts.accounts ?? [{ account_id: 'default', label: 'default' }]) accounts.set(a.account_id, a.label);
   const rows = new Map<string, { account_id: string; persona: string; updated_at: string; updated_by: string }>();
   for (const [id, persona] of Object.entries(opts.persona ?? {})) {
     rows.set(id, { account_id: id, persona, updated_at: '2026-06-24T00:00:00.000Z', updated_by: 'seed' });
   }
+  const firstPostAccounts = new Set(opts.firstPostAccounts ?? []);
   let failWrite = false;
+  let failReset = false;
   const pool = {
     query: async (sql: string, params?: unknown[]) => {
       if (sql.includes('CREATE TABLE')) return { rows: [] };
+      if (sql.includes('WITH cleared_persona AS')) {
+        if (failWrite || failReset) throw new Error('first-post reset failed');
+        const [accountId] = params as [string];
+        const personaCleared = rows.delete(accountId) ? 1 : 0;
+        const firstPostCleared = firstPostAccounts.delete(accountId) ? 1 : 0;
+        return { rows: [{ persona_cleared: personaCleared, first_post_cleared: firstPostCleared }] };
+      }
       if (sql.includes('INSERT INTO persona_config')) {
         if (failWrite) throw new Error('db down');
         const [accountId, persona, updatedBy] = params as [string, string, string];
@@ -47,6 +61,12 @@ function fakePool(opts: { accounts?: Array<{ account_id: string; label: string |
         rows.delete(accountId);
         return { rows: [] };
       }
+      if (sql.includes('INSERT INTO first_post_onboarding')) {
+        const [accountId] = params as [string];
+        if (firstPostAccounts.has(accountId)) return { rows: [], rowCount: 0 };
+        firstPostAccounts.add(accountId);
+        return { rows: [], rowCount: 1 };
+      }
       if (sql.includes('FROM persona_config')) return { rows: [...rows.values()] };
       if (sql.includes('SELECT 1 AS one FROM accounts')) {
         const [accountId] = params as [string];
@@ -58,7 +78,13 @@ function fakePool(opts: { accounts?: Array<{ account_id: string; label: string |
       return { rows: [] };
     },
   };
-  return { pool: pool as unknown as pg.Pool, setFailWrite: (v: boolean) => { failWrite = v; } };
+  return {
+    pool: pool as unknown as pg.Pool,
+    setFailWrite: (v: boolean) => { failWrite = v; },
+    setFailReset: (v: boolean) => { failReset = v; },
+    hasPersona: (accountId: string) => rows.has(accountId),
+    hasFirstPost: (accountId: string) => firstPostAccounts.has(accountId),
+  };
 }
 
 test('缺行 → getForAccount 返回 null（回落语义）', async () => {
@@ -125,6 +151,41 @@ test('clear 删行 → getForAccount 回 null', async () => {
   assert.ok(store.getForAccount('default'));
   await store.clear('default');
   assert.equal(store.getForAccount('default'), null);
+});
+
+test('后台 clear 原子清除人设与首作状态，下一次绑定可重新建立且普通更新不重复', async () => {
+  const { pool, hasPersona, hasFirstPost } = fakePool({
+    persona: { default: soulYaml('旧人设') },
+    firstPostAccounts: ['default'],
+  });
+  const personaStore = new PersonaStore({ pool });
+  const firstPostStore = new FirstPostOnboardingStore({ pool });
+  await personaStore.init();
+
+  await personaStore.clear('default');
+  assert.equal(hasPersona('default'), false, '后台清空删除 persona_config');
+  assert.equal(hasFirstPost('default'), false, '后台清空同步删除 first_post_onboarding');
+  assert.equal(personaStore.getForAccount('default'), null, '数据库成功后才清内存镜像');
+
+  await personaStore.set('default', soulYaml('重新初始化'), 'admin');
+  assert.equal(await firstPostStore.armFirstBind('default'), true, '清空后的下一次真实绑定重新获得首作资格');
+  await personaStore.set('default', soulYaml('普通更新'), 'admin');
+  assert.equal(await firstPostStore.armFirstBind('default'), false, '普通人设更新不重置首作状态');
+});
+
+test('后台 clear 的首作复位失败 → 人设持久态与内存镜像都保持原值', async () => {
+  const { pool, setFailReset, hasPersona, hasFirstPost } = fakePool({
+    persona: { default: soulYaml('原始') },
+    firstPostAccounts: ['default'],
+  });
+  const store = new PersonaStore({ pool });
+  await store.init();
+  setFailReset(true);
+
+  await assert.rejects(store.clear('default'), /first-post reset failed/);
+  assert.equal(hasPersona('default'), true, '原子语句失败时 persona_config 不变');
+  assert.equal(hasFirstPost('default'), true, '原子语句失败时 first_post_onboarding 不变');
+  assert.ok(store.getForAccount('default')?.includes('原始'), '失败时内存镜像不清除');
 });
 
 test('写库失败 → 内存镜像不变（绝不镜像/库不一致）', async () => {

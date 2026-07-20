@@ -190,11 +190,26 @@ export class PersonaStore {
   }
 
   /**
-   * 清除某账号的人设（删行 → 该账号变为「未绑人设」，浏览/发布/评论入口将诚实拒绝其运行）。
-   * 写库成功才删镜像。面板 PUT 空文本会调用此方法完成显式解绑。
+   * 后台显式清空某账号的人设，并同时复位该账号的首作新人状态。
+   * 两张表由同一条 PostgreSQL 语句原子删除；任一删除失败时整条语句回滚，内存镜像保持不变。
+   * 成功后账号变为「未绑人设」，浏览/发布/评论入口诚实拒绝；下一次真实绑定可重新建立首作状态。
    */
   async clear(accountId: string): Promise<void> {
-    await this.pool.query(`DELETE FROM persona_config WHERE account_id = $1`, [accountId]);
+    await this.pool.query(
+      `WITH cleared_persona AS (
+         DELETE FROM persona_config
+          WHERE account_id = $1
+         RETURNING account_id
+       ), cleared_first_post AS (
+         DELETE FROM first_post_onboarding
+          WHERE account_id = $1
+         RETURNING account_id
+       )
+       SELECT
+         (SELECT count(*) FROM cleared_persona) AS persona_cleared,
+         (SELECT count(*) FROM cleared_first_post) AS first_post_cleared`,
+      [accountId],
+    );
     this.cache.delete(accountId);
   }
 
