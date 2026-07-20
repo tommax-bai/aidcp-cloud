@@ -24,6 +24,8 @@ export interface RoleOptions {
   soul?: Soul;
   getSoul?: () => Soul;
   llm?: RoleLlm;
+  /** 可选 per-role 模型硬 deadline；缺省继续使用共享客户端构造默认。 */
+  llmTimeoutMs?: number;
 }
 
 export abstract class BaseRole {
@@ -32,12 +34,14 @@ export abstract class BaseRole {
   private readonly soulSnapshot?: Soul;
   private readonly getSoulFn?: () => Soul;
   protected readonly llm?: RoleLlm;
+  private readonly llmTimeoutMs?: number;
 
   constructor(options: RoleOptions) {
     this.eventBus = options.eventBus;
     this.soulSnapshot = options.soul;
     this.getSoulFn = options.getSoul;
     this.llm = options.llm;
+    this.llmTimeoutMs = positiveTimeoutMs(options.llmTimeoutMs);
   }
 
   /**
@@ -79,7 +83,10 @@ export abstract class BaseRole {
     let raw: string;
     try {
       // 带上角色键（browse: 前缀）→ 客户端按角色解析模型/温度（change console-role-model-config）。
-      raw = await this.llm.complete(prompt, { role: `browse:${this.roleName}` });
+      raw = await this.llm.complete(prompt, {
+        role: `browse:${this.roleName}`,
+        ...(this.llmTimeoutMs !== undefined ? { timeoutMs: this.llmTimeoutMs } : {}),
+      });
     } catch (err) {
       this.log(`LLM 调用失败：${(err as Error).message}`);
       throw err;
@@ -87,6 +94,10 @@ export abstract class BaseRole {
     this.log(`LLM 判定 → ${oneLinePreview(raw, 240)}`);
     return raw;
   }
+}
+
+function positiveTimeoutMs(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
 }
 
 /** 把多行文本压成单行并截断，用于日志预览。 */

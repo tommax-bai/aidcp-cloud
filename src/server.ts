@@ -752,10 +752,16 @@ async function main(): Promise<void> {
     // change role-thinking-mode-config：按角色解析思考三态（role→分类→default）；default 出口不发 thinking 字段（零回归）。
     getThinking: resolveThinkingForRole,
     providerRuntime,
+    // 开始行证明已越过本地同步准备；只含路由/时限元数据，绝不含 prompt、响应正文或密钥。
+    onStart: (info) => {
+      console.log(
+        `[llm.start] account=${info.accountId ?? '-'} role=${info.role ?? '-'} provider=${info.provider ?? '-'} model=${info.model} timeoutMs=${info.timeoutMs}`,
+      );
+    },
     // 保留原 console.log（加 provider + tokens 维度）；记账 add() 受 try/catch 双保险，绝不抛进/拖垮 LLM 调用路径。
     onCall: (info) => {
       console.log(
-        `[llm] account=${info.accountId ?? '-'} role=${info.role ?? '-'} provider=${info.provider ?? '-'} model=${info.model} ms=${info.ms} ok=${info.ok} tokens=${info.totalTokens ?? 0}`,
+        `[llm] account=${info.accountId ?? '-'} role=${info.role ?? '-'} provider=${info.provider ?? '-'} model=${info.model} ms=${info.ms} ok=${info.ok} tokens=${info.totalTokens ?? 0} stage=${info.stage} timedOut=${info.timedOut} requestId=${info.requestId ?? '-'}`,
       );
       try {
         tokenUsageStore.add(info);
@@ -2862,6 +2868,7 @@ async function main(): Promise<void> {
       });
     }
     const commentCorpusLookupTimeoutMs = readEnvNumberOrUndefined('AIDCP_COMMENT_CORPUS_LOOKUP_TIMEOUT_MS');
+    const commentLlmTimeoutMs = readEnvNumberOrUndefined('AIDCP_COMMENT_LLM_TIMEOUT_MS');
     const commentSublineTimeoutMs = readEnvNumberOrUndefined('AIDCP_COMMENT_SUBLINE_TIMEOUT_MS');
     return new RoleDispatcher({
       getSoul: opts?.getSoul ?? getSoul,
@@ -2894,8 +2901,9 @@ async function main(): Promise<void> {
       // 人设 mandatory auto_approve 独立于逐条人审 env，但仍必须先通知成功；通知失败由 gate fail-closed。
       commentAutoApproveNotify: (input) => notifyAutoApprovedComment(input, 'mandatory_persona'),
       notifyMandatoryCommentOutcome,
-      // 评论增强查询和整条子链都有界；未配 env 时由各自唯一默认事实源兜底（3s / 15min）。
+      // 评论增强查询、模型调用和整条子链都有界；未配 env 时由唯一默认事实源兜底（3s / 30s / 5min）。
       ...(commentCorpusLookupTimeoutMs !== undefined ? { commentCorpusLookupTimeoutMs } : {}),
+      ...(commentLlmTimeoutMs !== undefined ? { commentLlmTimeoutMs } : {}),
       ...(commentSublineTimeoutMs !== undefined ? { commentSublineTimeoutMs } : {}),
       // 评论 / 评论赞当日配额预闸：按该账号 controller 当日剩余。
       getCommentDailyRemaining: () => ctx.controller.dailyRemaining('comment'),

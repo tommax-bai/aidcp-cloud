@@ -111,8 +111,10 @@ export interface ConceptStorePort extends ConceptSink {
 const EMPTY_CONCEPT_POOL: ConceptPool = { known: [], candidates: [], source: new Map() };
 const VIEW_QUOTA_RECHECK_FALLBACK_MS = 60_000;
 const VIEW_QUOTA_WAKE_GRACE_MS = 250;
-/** 整条评论子链的安全兜底；正常的人审短超时远早于它结束。 */
-export const DEFAULT_COMMENT_SUBLINE_TIMEOUT_MS = 15 * 60_000;
+/** 评论角色单次 LLM 硬 deadline；不沿用面向慢 thinking 角色的全局 180s。 */
+export const DEFAULT_COMMENT_LLM_TIMEOUT_MS = 30_000;
+/** 整条评论子链的安全兜底；局部 LLM / 人审超时应更早结束。 */
+export const DEFAULT_COMMENT_SUBLINE_TIMEOUT_MS = 5 * 60_000;
 
 function positiveTimeoutMs(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
@@ -271,6 +273,8 @@ export interface RoleDispatcherOptions {
   getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
   /** 可选语料召回等待上限；超时按空参考继续。 */
   commentCorpusLookupTimeoutMs?: number;
+  /** 评论评估 / 撰写 / 去 AI 味的单次 LLM 硬 deadline。 */
+  commentLlmTimeoutMs?: number;
   /** 整条评论支线等待上限；超时释放钉页与会话时钟。 */
   commentSublineTimeoutMs?: number;
   /**
@@ -450,6 +454,7 @@ export class RoleDispatcher {
   }) => Promise<{ fired: boolean; reason?: string }>;
   private readonly getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
   private readonly commentCorpusLookupTimeoutMs?: number;
+  private readonly commentLlmTimeoutMs: number;
   private readonly commentSublineTimeoutMs: number;
   /** 已下发待回执的评论上下文：action.completed{comment} 据此扣额 + emit comment.done（→ 是否进主页评估）。 */
   private pendingComment: PendingCommentDelivery | null = null;
@@ -608,6 +613,7 @@ export class RoleDispatcher {
     this.archiveValuableComment = options.archiveValuableComment;
     this.getCorpusReferences = options.getCorpusReferences;
     this.commentCorpusLookupTimeoutMs = options.commentCorpusLookupTimeoutMs;
+    this.commentLlmTimeoutMs = positiveTimeoutMs(options.commentLlmTimeoutMs, DEFAULT_COMMENT_LLM_TIMEOUT_MS);
     this.commentSublineTimeoutMs = positiveTimeoutMs(options.commentSublineTimeoutMs, DEFAULT_COMMENT_SUBLINE_TIMEOUT_MS);
     this.curatedStore = options.curatedStore;
     this.textCardTranscriber = options.textCardTranscriber;
@@ -1279,6 +1285,7 @@ export class RoleDispatcher {
       // —— 发评论支线（接在互动完成与「是否进主页评估」之间）：评估→撰写→去AI味→循环内人审 ——
       new CommentAppraiser({
         ...commonOptions,
+        llmTimeoutMs: this.commentLlmTimeoutMs,
         getNoteData,
         getRemainingComments: () => this.budget.comments,
         ...(this.getCommentDailyRemaining ? { getDailyRemaining: this.getCommentDailyRemaining } : {}),
@@ -1290,6 +1297,7 @@ export class RoleDispatcher {
       }),
       new CommentComposer({
         ...commonOptions,
+        llmTimeoutMs: this.commentLlmTimeoutMs,
         getNoteData,
         ...(this.getCorpusReferences ? { getCorpusReferences: this.getCorpusReferences } : {}),
         ...(this.commentCorpusLookupTimeoutMs !== undefined
@@ -1301,6 +1309,7 @@ export class RoleDispatcher {
       }),
       new CommentDeAiFlavor({
         ...commonOptions,
+        llmTimeoutMs: this.commentLlmTimeoutMs,
         isCommentSublineExpired: (noteId) => this.isCommentSublineExpired(noteId),
       }),
       new CommentApprovalGate({

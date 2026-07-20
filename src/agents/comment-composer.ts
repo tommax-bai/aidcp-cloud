@@ -158,7 +158,8 @@ export class CommentComposer extends BaseRole {
       } catch {
         if (this.isCommentSublineExpired(payload.noteId)) return;
         failureReason = 'llm_error';
-        continue;
+        // transport / hard-deadline 失败不自动重发同一请求；有限补写只留给已返回但内容无效的路径。
+        break;
       }
       if (this.isCommentSublineExpired(payload.noteId)) return;
 

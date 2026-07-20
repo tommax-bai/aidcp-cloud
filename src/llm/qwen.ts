@@ -75,6 +75,36 @@ export interface QwenChatMessage {
   content: string;
 }
 
+/** 文本调用在统一出口内最后抵达的安全阶段；不含 prompt / 响应正文。 */
+export type LlmCallStage = 'request_started' | 'headers_received' | 'body_parsed';
+
+export interface LlmCallStartedInfo {
+  role?: string;
+  provider?: string;
+  model: string;
+  accountId?: string;
+  timeoutMs: number;
+}
+
+export interface LlmCallCompletedInfo {
+  role?: string;
+  /** 生效厂商（change model-config-volcengine-provider）：供日志/记账区分同名模型来自哪个厂商。 */
+  provider?: string;
+  model: string;
+  ms: number;
+  ok: boolean;
+  accountId?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  /** 终局时最后抵达阶段；超时可据此区分连接/响应头/响应体。 */
+  stage: LlmCallStage;
+  /** 厂商响应头中的请求 ID（若已取得）；不含正文。 */
+  requestId?: string;
+  /** 是否由应用层硬 deadline 结算。 */
+  timedOut: boolean;
+}
+
 export interface QwenClientOptions {
   /** API Key（默认读 env DASHSCOPE_API_KEY） */
   apiKey?: string;
@@ -114,10 +144,12 @@ export interface QwenClientOptions {
   baseUrl?: string;
   /** 采样温度，默认 0（定位/规划要稳定） */
   temperature?: number;
-  /** 请求超时（毫秒），默认 30s */
+  /** 请求超时（毫秒），默认 180s；per-call 可显式覆盖。 */
   timeoutMs?: number;
   /** 注入 fetch（测试用），默认全局 fetch */
   fetchImpl?: typeof fetch;
+  /** 发请求前的安全元数据钩子；不得包含 prompt、响应正文或密钥。 */
+  onStart?: (info: LlmCallStartedInfo) => void;
   /**
    * 调用可观测钩子（change console-role-model-config；token 字段 change llm-token-usage-stats）：
    * 每次调用后回报 role / 生效 model / 耗时 / 成功与否 / 账号 / token 用量。
@@ -125,18 +157,7 @@ export interface QwenClientOptions {
    * **token 与 ok 解耦（红线）**：`promptTokens/completionTokens/totalTokens` 取自响应体 `usage`，
    * 即使 `ok=false`（如已返回 usage 但缺 content 判失败）也带真实已计费 token；真没拿到 usage 才为 undefined。
    */
-  onCall?: (info: {
-    role?: string;
-    /** 生效厂商（change model-config-volcengine-provider）：供日志/记账区分同名模型来自哪个厂商。 */
-    provider?: string;
-    model: string;
-    ms: number;
-    ok: boolean;
-    accountId?: string;
-    promptTokens?: number;
-    completionTokens?: number;
-    totalTokens?: number;
-  }) => void;
+  onCall?: (info: LlmCallCompletedInfo) => void;
 }
 
 interface ChatCompletionResponse {
@@ -155,6 +176,31 @@ export interface LlmErrorMeta {
   role?: string;
   accountId?: string;
   baseUrl?: string;
+}
+
+/**
+ * 应用层硬 deadline：与底层 Abort 是否真正让 fetch settle 解耦。
+ * stage/requestId 只含排障元数据，绝不包含 prompt、响应正文或密钥。
+ */
+export class LlmTimeoutError extends Error {
+  constructor(
+    public readonly timeoutMs: number,
+    public readonly stage: LlmCallStage,
+    public readonly requestId: string | undefined,
+    meta: LlmErrorMeta,
+  ) {
+    super(
+      [
+        `LLM timeout after ${timeoutMs}ms`,
+        formatLlmMeta(meta),
+        `stage=${stage}`,
+        requestId ? `requestId=${requestId}` : undefined,
+      ]
+        .filter(Boolean)
+        .join(' | '),
+    );
+    this.name = 'LlmTimeoutError';
+  }
 }
 
 interface ProviderErrorPayload {
@@ -191,6 +237,17 @@ function formatLlmMeta(meta: LlmErrorMeta): string {
     `account=${valueOrDash(meta.accountId)}`,
     `endpoint=${valueOrDash(endpointHost(meta.baseUrl))}`,
   ].join(' ');
+}
+
+/** 常见 OpenAI 兼容厂商请求 ID 响应头；缺 headers 的测试桩诚实返回 undefined。 */
+function responseRequestId(response: Response): string | undefined {
+  const headers = (response as Response & { headers?: Headers }).headers;
+  if (!headers || typeof headers.get !== 'function') return undefined;
+  for (const name of ['x-tt-logid', 'x-request-id', 'x-dashscope-request-id', 'request-id']) {
+    const value = headers.get(name)?.trim();
+    if (value) return value.slice(0, 200);
+  }
+  return undefined;
 }
 
 function extractRequestId(message: string | undefined): string | undefined {
@@ -336,17 +393,8 @@ export class QwenClient implements ChatLlmClient {
   private readonly temperature: number;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
-  private readonly onCall?: (info: {
-    role?: string;
-    provider?: string;
-    model: string;
-    ms: number;
-    ok: boolean;
-    accountId?: string;
-    promptTokens?: number;
-    completionTokens?: number;
-    totalTokens?: number;
-  }) => void;
+  private readonly onStart?: (info: LlmCallStartedInfo) => void;
+  private readonly onCall?: (info: LlmCallCompletedInfo) => void;
 
   constructor(options: QwenClientOptions = {}) {
     this.apiKey = options.apiKey ?? process.env.DASHSCOPE_API_KEY ?? '';
@@ -363,6 +411,7 @@ export class QwenClient implements ChatLlmClient {
     // 天花板经 env AIDCP_LLM_TIMEOUT_MS 可调（在 server.ts 构造处读取）；探活/发布等显式传 timeoutMs 的路径不受影响。
     // 关键联动不变量：浏览闭环空转看门狗轻推阈值 MUST 严格大于此天花板（见 resume-limits.ts）。
     this.timeoutMs = options.timeoutMs ?? 180_000;
+    this.onStart = options.onStart;
     this.onCall = options.onCall;
     const f = options.fetchImpl ?? globalThis.fetch;
     if (!f) throw new Error('global fetch 不可用（需 Node>=18）；请注入 fetchImpl');
@@ -414,14 +463,26 @@ export class QwenClient implements ChatLlmClient {
         throw new Error('Qwen apiKey 缺失（设置 DASHSCOPE_API_KEY 或传入 apiKey）');
       }
     }
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
     const startedAt = Date.now();
+    const controller = new AbortController();
     let ok = false;
+    let timedOut = false;
+    let stage: LlmCallStage = 'request_started';
+    let requestId: string | undefined;
     // token 用量（change llm-token-usage-stats）：声明于 try 外，使 finally 在失败路径也能看到。
     // 红线：响应体一旦带 usage（prompt token 已计费）就如实带出，绝不因后续判失败而清零。
     let usage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined;
-    try {
+    this.onStart?.({
+      role: opts?.role,
+      provider,
+      model,
+      accountId: opts?.accountId,
+      timeoutMs,
+    });
+
+    // 硬 deadline 与 Abort 双轨：deadline Promise 自己结算调用方；abort 只负责 best-effort 释放底层连接。
+    // Promise.race 会给 requestPromise 挂上 reject 消费器，迟到 rejection 不会成为 unhandled rejection。
+    const requestPromise = (async (): Promise<string> => {
       const res = await this.fetchImpl(`${baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -437,11 +498,16 @@ export class QwenClient implements ChatLlmClient {
         }),
         signal: controller.signal,
       });
+      stage = 'headers_received';
+      requestId = responseRequestId(res);
       if (!res.ok) {
         const text = await res.text().catch(() => '');
+        stage = 'body_parsed';
         throw buildLlmHttpError(res.status, text, { provider, model, role: opts?.role, accountId: opts?.accountId, baseUrl });
       }
       const data = (await res.json()) as ChatCompletionResponse;
+      stage = 'body_parsed';
+      requestId = requestId ?? data.error?.request_id ?? data.error?.requestId;
       // 早于「缺 content 抛错」捕获 usage：DashScope 兼容模式即使生成失败也常已计 prompt token。
       usage = data.usage;
       if (data.error?.message) {
@@ -457,10 +523,31 @@ export class QwenClient implements ChatLlmClient {
           baseUrl,
         });
       }
+      return content;
+    })();
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadlinePromise = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        const error = new LlmTimeoutError(timeoutMs, stage, requestId, {
+          provider,
+          model,
+          role: opts?.role,
+          accountId: opts?.accountId,
+          baseUrl,
+        });
+        // 先结算外层，再 best-effort 取消底层；即使 abort 在罕见网络状态不生效，调用方也已恢复。
+        reject(error);
+        controller.abort(error);
+      }, timeoutMs);
+    });
+    try {
+      const content = await Promise.race([requestPromise, deadlinePromise]);
       ok = true;
       return content;
     } finally {
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
       this.onCall?.({
         role: opts?.role,
         provider,
@@ -471,6 +558,9 @@ export class QwenClient implements ChatLlmClient {
         promptTokens: usage?.prompt_tokens,
         completionTokens: usage?.completion_tokens,
         totalTokens: usage?.total_tokens,
+        stage,
+        requestId,
+        timedOut,
       });
     }
   }

@@ -92,6 +92,9 @@ ECS 上 `aidcp-cloud` 的权威环境文件为：
 > change `raise-model-call-timeouts-for-thinking-models`（2026-07-01）：为 thinking 类模型整体抬高单次调用天花板并联动放大外层时限。以下键**不设即用默认值**，只在需要按部署调优时写入 ECS `.env`。毫秒。
 
 - `AIDCP_LLM_TIMEOUT_MS`（默认 `180000`）：云端单次文本模型调用天花板（QwenClient 构造默认）。thinking 模型复杂提示常需 60–150s+，故 ≥180s。**联动不变量**：看门狗恢复轻推阈值必须严格大于此值（见下）。
+- `AIDCP_COMMENT_LLM_TIMEOUT_MS`（默认 `30000`）：浏览评论评估、撰写与去 AI 味改写的单次模型硬 deadline；只覆盖评论三角色，不下调其它 thinking 角色的全局天花板。
+- `AIDCP_COMMENT_CORPUS_LOOKUP_TIMEOUT_MS`（默认 `3000`）：评论撰写前可选参考语料查询上限；超时按空参考继续。
+- `AIDCP_COMMENT_SUBLINE_TIMEOUT_MS`（默认 `300000`）：整条 `commentInflight` 暂停窗最后保险；到期诚实 skip 并释放浏览，迟到授权失效。
 - `AIDCP_PUBLISH_PIPELINE_TIMEOUT_MS`（默认 `600000`）：发布流水线总闸，须 ≥ 关键路径各模型角色预算之和（容器不得小于内容物）。
 - 发布角色执行超时（各角色闸；均须 ≥ 单次模型天花板且会同传进该角色的模型调用）：
   - `AIDCP_PUBLISH_GATE_TIMEOUT_MS`（默认 `180000`，ApprovalGatekeeper）

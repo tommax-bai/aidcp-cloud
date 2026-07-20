@@ -9,7 +9,13 @@ import { CommentAppraiser } from '../../src/agents/comment-appraiser.js';
 import { CommentComposer } from '../../src/agents/comment-composer.js';
 import { CommentDeAiFlavor } from '../../src/agents/comment-de-ai-flavor.js';
 import { CommentApprovalGate, type CommentApprovalPort } from '../../src/agents/comment-approval-gate.js';
+import {
+  DEFAULT_COMMENT_LLM_TIMEOUT_MS,
+  DEFAULT_COMMENT_SUBLINE_TIMEOUT_MS,
+  RoleDispatcher,
+} from '../../src/orchestrator/role-dispatcher.js';
 import type { NoteData } from '../../src/agents/content-curator-role.js';
+import type { LlmCallOpts } from '../../src/llm/qwen.js';
 import type { Soul } from '../../src/soul/types.js';
 
 const soul: Soul = {
@@ -199,6 +205,65 @@ describe('CommentComposer', () => {
     assert.equal(calls, 2);
     assert.equal(skipped?.reason, 'nothing_genuine');
     assert.equal(skipped?.mandatoryInteraction?.ruleId, 'vietnam-recruitment');
+  });
+
+  it('mandatory 撰写遇 transport/deadline 失败 → 不自动重试同一模型调用', async () => {
+    const bus = new EventBus();
+    let calls = 0;
+    const role = new CommentComposer({
+      eventBus: bus,
+      soul,
+      llm: { complete: async () => { calls++; throw new Error('LLM timeout'); } },
+      getNoteData: () => note,
+    });
+    role.subscribe();
+    let skipped: any = null;
+    bus.on('comment.skipped', (p) => { skipped = p; });
+    bus.emit('comment.appraised', { ...trigger, mandatoryInteraction, ts: Date.now() });
+    await sleep(30);
+    assert.equal(calls, 1, 'transport/deadline 失败不得走内容补写重试');
+    assert.equal(skipped?.reason, 'llm_error');
+  });
+});
+
+describe('评论角色独立 LLM deadline', () => {
+  it('生产默认：单次模型 30s、整条评论支线 5min', () => {
+    assert.equal(DEFAULT_COMMENT_LLM_TIMEOUT_MS, 30_000);
+    assert.equal(DEFAULT_COMMENT_SUBLINE_TIMEOUT_MS, 5 * 60_000);
+  });
+
+  it('RoleDispatcher 只给 appraiser/composer/de-ai 三个评论模型调用注入同一短 deadline', async () => {
+    const calls: Array<{ role?: string; timeoutMs?: number }> = [];
+    const llm = {
+      complete: async (_prompt: string, opts?: LlmCallOpts): Promise<string> => {
+        calls.push({ role: opts?.role, timeoutMs: opts?.timeoutMs });
+        if (opts?.role === 'browse:comment_appraiser') return '{"comment":true,"reason":"值得说"}';
+        if (opts?.role === 'browse:comment_composer') return '{"text":"感谢分享"}';
+        if (opts?.role === 'browse:comment_de_ai_flavor') return '这个角度挺有意思';
+        return '{}';
+      },
+    };
+    const dispatcher = new RoleDispatcher({
+      soul,
+      llm,
+      commentLlmTimeoutMs: 37,
+      sendCommand: () => {},
+    });
+    dispatcher.setup();
+    dispatcher.startSession();
+    dispatcher.updateNoteData(note);
+    dispatcher.bus.emit('interaction.completed', { ...trigger, ts: Date.now() });
+    await sleep(60);
+
+    for (const role of ['browse:comment_appraiser', 'browse:comment_composer', 'browse:comment_de_ai_flavor']) {
+      const call = calls.find((item) => item.role === role);
+      assert.ok(call, `${role} 应实际调用模型`);
+      assert.equal(call.timeoutMs, 37, `${role} 应使用评论专用 per-call deadline`);
+    }
+    for (const call of calls.filter((item) => !item.role?.startsWith('browse:comment_'))) {
+      assert.equal(call.timeoutMs, undefined, `${call.role} 不应继承评论专用 deadline`);
+    }
+    dispatcher.endSession();
   });
 });
 
