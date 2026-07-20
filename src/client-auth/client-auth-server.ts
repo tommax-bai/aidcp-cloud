@@ -29,6 +29,7 @@ import type { ResolvedBinding } from './client-user-store.js';
 import type { UiSlowStartPayload } from '../comm/protocol.js';
 import type { PendingPublishPreview, PublishLogStore } from '../publish-agent/publish-log-store.js';
 import type { PersonaAutoFillService } from '../agents/persona-auto-fill.js';
+import type { AccountPersonaService } from '../config/account-persona-service.js';
 import { isWritingLanguage } from '../soul/writing-language.js';
 import { loadSoulFromYaml } from '../soul/index.js';
 import type { RiskStatus } from '../risk/types.js';
@@ -76,6 +77,10 @@ export interface ClientAuthDeps {
   onOffboardCreated?: (offboard: ClientOffboardView) => Promise<void>;
   /** 客户只提交已确认人设；环境/账号/人设缺失状态均由 Cloud 自行解析。 */
   personaAutoFill?: Pick<PersonaAutoFillService, 'createRun'>;
+  /** 客户按授权环境离线读取/生成/保存单账号人设；账号键与平台均只在 Cloud 内解析。 */
+  persona?: Pick<AccountPersonaService, 'get' | 'generate' | 'persist'> & {
+    platformForAccount(accountId: string): string | undefined;
+  };
 }
 
 export interface ClientEnvironmentRiskState {
@@ -457,6 +462,136 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
     if (method === 'GET' && url === '/my-environments') {
       const scope = await deps.store.listEnvScope(userId);
       sendJson(res, 200, { environments: scope.map((s) => ({ envKey: s.envKey, label: s.label, platform: s.platform })) });
+      return;
+    }
+
+    const personaMatch = /^\/environments\/([^/]+)\/persona(?:\/(draft))?$/.exec(url);
+    if (personaMatch) {
+      if (method !== 'GET' && method !== 'POST' && method !== 'PUT') {
+        sendJson(res, 405, { error: 'method_not_allowed' });
+        return;
+      }
+      if (!deps.persona) {
+        sendJson(res, 503, { error: 'persona_unavailable' });
+        return;
+      }
+      let envKey: string;
+      try {
+        envKey = decodeURIComponent(personaMatch[1] ?? '').trim();
+      } catch {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_env_key' });
+        return;
+      }
+      const isDraft = personaMatch[2] === 'draft';
+      if ((method === 'POST') !== isDraft || (method === 'GET' && isDraft) || (method === 'PUT' && isDraft)) {
+        sendJson(res, 405, { error: 'method_not_allowed' });
+        return;
+      }
+      const bound = await deps.store.resolveBoundAccountForEnv(userId, envKey);
+      if (!bound.ok) {
+        sendBindingFailure(res, bound.reason);
+        return;
+      }
+
+      if (method === 'GET') {
+        const result = await deps.persona.get(bound.accountId);
+        if (!result.ok) {
+          const status = result.reason === 'unknown_account' ? 409 : 503;
+          sendJson(res, status, { error: result.reason });
+          return;
+        }
+        sendJson(res, 200, {
+          data: { envKey, ...result.view },
+          meta: { requestId: randomUUID(), asOf: Date.now() },
+        });
+        return;
+      }
+
+      if (method === 'POST') {
+        const idempotencyHeader = req.headers['idempotency-key'];
+        const idempotencyKey = typeof idempotencyHeader === 'string' ? idempotencyHeader.trim() : '';
+        if (!idempotencyKey || idempotencyKey.length > 128 || !/^[A-Za-z0-9._:-]+$/.test(idempotencyKey)) {
+          sendJson(res, 400, { error: 'bad_request', reason: 'invalid_idempotency_key' });
+          return;
+        }
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          sendJson(res, 400, { error: 'bad_request' });
+          return;
+        }
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          sendJson(res, 400, { error: 'bad_request' });
+          return;
+        }
+        const raw = body as Record<string, unknown>;
+        const allowed = new Set(['keywordSelections', 'writingLanguage']);
+        if (Object.keys(raw).some((key) => !allowed.has(key)) || !Array.isArray(raw.keywordSelections)) {
+          sendJson(res, 422, { error: 'validation_failed', reason: 'invalid_persona_draft_intent' });
+          return;
+        }
+        const result = await deps.persona.generate({
+          accountId: bound.accountId,
+          platform: deps.persona.platformForAccount(bound.accountId),
+          keywordSelections: raw.keywordSelections,
+          ...(raw.writingLanguage === undefined ? {} : { writingLanguage: raw.writingLanguage }),
+          idempotencyKey,
+        });
+        if (!result.ok) {
+          const status = result.reason === 'unknown_account' ? 409
+            : result.reason === 'unavailable' || result.reason === 'generation_failed' ? 503
+              : 422;
+          sendJson(res, status, { error: 'persona_draft_rejected', reason: result.reason });
+          return;
+        }
+        sendJson(res, 200, {
+          data: {
+            envKey,
+            draft: {
+              soulYaml: result.soulYaml,
+              identitySummary: result.identitySummary,
+              summary: result.summary,
+            },
+          },
+          meta: { requestId: randomUUID(), asOf: Date.now() },
+        });
+        return;
+      }
+
+      let body: unknown;
+      try {
+        body = await readJsonBody(req, MAX_SELECTED_PERSONA_BYTES + 1024);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const raw = body as Record<string, unknown>;
+      if (Object.keys(raw).length !== 1 || typeof raw.soulYaml !== 'string'
+          || Buffer.byteLength(raw.soulYaml, 'utf8') > MAX_SELECTED_PERSONA_BYTES) {
+        sendJson(res, 422, { error: 'validation_failed', reason: 'invalid_persona_persist_intent' });
+        return;
+      }
+      const result = await deps.persona.persist(
+        bound.accountId,
+        raw.soulYaml,
+        `client-auth:${userId}:${envKey}`,
+      );
+      if (!result.ok) {
+        const status = result.reason === 'unknown_account' ? 409
+          : result.reason === 'persist_failed' ? 503
+            : 422;
+        sendJson(res, status, { error: 'persona_persist_rejected', reason: result.reason });
+        return;
+      }
+      sendJson(res, 200, {
+        data: { envKey, ...result.view, firstPostOnboarding: result.firstPostOnboarding },
+        meta: { requestId: randomUUID(), asOf: Date.now() },
+      });
       return;
     }
 

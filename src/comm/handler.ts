@@ -47,6 +47,7 @@ import {
 } from './protocol.js';
 import type { PersonaGenerator } from '../agents/persona-generator.js';
 import type { PanelPersonaConfig } from '../panel/types.js';
+import type { AccountPersonaService } from '../config/account-persona-service.js';
 import type { CommandSequencer } from '../publish-agent/command-sequencer.js';
 import type { EdgeTaskLeaseClient } from './edge-task-lease-client.js';
 import type { MessageHandler, EdgeSession, EdgePusher } from './ws-server.js';
@@ -199,6 +200,8 @@ export interface HandlerDeps {
    * promise instead of showing a UI whose automatic follow-up cannot run.
    */
   firstPostOnboarding?: { armFirstBind(accountId: string): Promise<boolean> };
+  /** Production single-account persona path shared by WebSocket and customer-auth HTTP. */
+  personaService?: Pick<AccountPersonaService, 'generate' | 'persist'>;
   /** 客户端稿件预览内的发布/取消审批动作。未注入则诚实返回 unavailable。 */
   publishApprovalAction?: (
     payload: PublishApprovalActionPayload,
@@ -883,6 +886,29 @@ export class DefaultMessageHandler implements MessageHandler {
    */
   private async onPersonaGenerate(env: Envelope, session: EdgeSession): Promise<Envelope> {
     const p = env.payload as PersonaGeneratePayload;
+    if (this.deps.personaService) {
+      if (!session.accountId) {
+        this.logger.warn('[persona] persona.generate 会话缺 accountId（握手应已保证）— 诚实回 unknown_account');
+        return makeEnvelope('persona.generate.result', env.id, this.clock(), { ok: false, reason: 'unknown_account' });
+      }
+      const result = await this.deps.personaService.generate({
+        accountId: session.accountId,
+        // 旧 WS 客户端的历史 session 可能没有平台字段；该兼容入口维持旧默认。新的 customer-auth
+        // 环境接口必须由账号仓给出权威平台，缺失时 AccountPersonaService 会 fail-closed。
+        platform: session.platform ?? 'xiaohongshu',
+        keywordSelections: p.keywordSelections,
+        writingLanguage: p.writingLanguage,
+        idempotencyKey: p.idempotencyKey ?? '',
+      });
+      return makeEnvelope(
+        'persona.generate.result',
+        env.id,
+        this.clock(),
+        result.ok
+          ? { ok: true, soulYaml: result.soulYaml, identitySummary: result.identitySummary }
+          : { ok: false, reason: result.reason },
+      );
+    }
     if (!this.deps.personaGenerator) {
       return makeEnvelope('persona.generate.result', env.id, this.clock(), { ok: false, reason: 'unavailable' });
     }
@@ -961,6 +987,25 @@ export class DefaultMessageHandler implements MessageHandler {
    */
   private async onPersonaPersist(env: Envelope, session: EdgeSession): Promise<Envelope> {
     const p = env.payload as PersonaPersistPayload;
+    if (this.deps.personaService) {
+      if (!session.accountId) {
+        this.logger.warn('[persona] persona.persist 会话缺 accountId（握手应已保证）— 诚实回 unknown_account');
+        return makeEnvelope('persona.persist.result', env.id, this.clock(), { ok: false, reason: 'unknown_account' });
+      }
+      const result = await this.deps.personaService.persist(
+        session.accountId,
+        p.soulYaml ?? '',
+        `edge-onboarding:${session.accountId}`,
+      );
+      return makeEnvelope(
+        'persona.persist.result',
+        env.id,
+        this.clock(),
+        result.ok
+          ? { ok: true, firstPostOnboarding: result.firstPostOnboarding }
+          : { ok: false, reason: result.reason },
+      );
+    }
     if (!this.deps.personaFacade) {
       return makeEnvelope('persona.persist.result', env.id, this.clock(), { ok: false, reason: 'unavailable' });
     }

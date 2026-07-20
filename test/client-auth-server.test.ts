@@ -1670,3 +1670,144 @@ test('待审批稿读取遇到未知绑定时 fail-closed，绝不触达稿件 s
     },
   );
 });
+
+test('环境级人设 API 在 core 离线时按绑定账号读、生成、保存且不泄露 accountId', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const calls: Array<Record<string, unknown>> = [];
+  const summary = {
+    name: '阿柚', role: '数据标注内容分享者', background: '数据标注从业者', tone: '亲切接地气',
+    writingLanguage: 'zh-CN' as const, primaryInterests: ['数据标注'], secondaryInterests: ['AI 工具'],
+    seedKeywords: ['数据标注兼职'], likeAffinity: 'normal' as const,
+  };
+  const persona: NonNullable<ClientAuthDeps['persona']> = {
+    platformForAccount(accountId) {
+      calls.push({ kind: 'platform', accountId });
+      return 'facebook';
+    },
+    async get(accountId) {
+      calls.push({ kind: 'get', accountId });
+      return {
+        ok: true,
+        view: {
+          state: 'configured',
+          persona: { soulYaml: 'soul-current', summary, updatedAt: '2026-07-20T00:00:00.000Z' },
+        },
+      };
+    },
+    async generate(input) {
+      calls.push({ kind: 'generate', ...input });
+      return { ok: true, soulYaml: 'soul-draft', identitySummary: '阿柚·数据标注内容分享者', summary };
+    },
+    async persist(accountId, soulYaml, updatedBy) {
+      calls.push({ kind: 'persist', accountId, soulYaml, updatedBy });
+      return {
+        ok: true,
+        view: {
+          state: 'configured',
+          persona: { soulYaml, summary, updatedAt: '2026-07-20T01:00:00.000Z' },
+        },
+        firstPostOnboarding: false,
+      };
+    },
+  };
+
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), persona },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const read = await fetch(`${base}/environments/p1/persona`, { headers });
+      assert.equal(read.status, 200);
+      const readBody = await read.json() as { data: Record<string, unknown> };
+      assert.equal(readBody.data.envKey, 'p1');
+      assert.equal(readBody.data.state, 'configured');
+      assert.equal(JSON.stringify(readBody).includes(ACCT_P1), false);
+
+      const draft = await fetch(`${base}/environments/p1/persona/draft`, {
+        method: 'POST',
+        headers: { ...headers, 'idempotency-key': 'offline-persona-1' },
+        body: JSON.stringify({ keywordSelections: ['数据标注', 'like_affinity:normal'], writingLanguage: 'zh-CN' }),
+      });
+      assert.equal(draft.status, 200);
+      const draftBody = await draft.json() as { data: { envKey: string; draft: { soulYaml: string } } };
+      assert.equal(draftBody.data.envKey, 'p1');
+      assert.equal(draftBody.data.draft.soulYaml, 'soul-draft');
+      assert.equal(JSON.stringify(draftBody).includes(ACCT_P1), false);
+
+      const save = await fetch(`${base}/environments/p1/persona`, {
+        method: 'PUT', headers, body: JSON.stringify({ soulYaml: 'soul-draft' }),
+      });
+      assert.equal(save.status, 200);
+      const saveBody = await save.json() as { data: Record<string, unknown> };
+      assert.equal(saveBody.data.envKey, 'p1');
+      assert.equal(saveBody.data.state, 'configured');
+      assert.equal(JSON.stringify(saveBody).includes(ACCT_P1), false);
+    },
+  );
+
+  assert.deepEqual(calls.map((call) => call.kind), ['get', 'platform', 'generate', 'persist']);
+  assert.equal(calls.every((call) => call.accountId === ACCT_P1), true);
+});
+
+test('环境级人设 API 严格拒绝账号选择器并区分未绑定、非所有者与真实 missing', async () => {
+  const fx = ownerOfP1();
+  fx.scope.set('u1', [
+    ...(fx.scope.get('u1') ?? []),
+    { envKey: 'p2', label: '未识别', platform: 'facebook', source: 'admin', assignedAt: 1 },
+  ]);
+  fx.bindings.set('p1', ACCT_P1);
+  let serviceCalls = 0;
+  const persona: NonNullable<ClientAuthDeps['persona']> = {
+    platformForAccount: () => 'facebook',
+    async get() {
+      serviceCalls += 1;
+      return { ok: true, view: { state: 'missing', persona: null } };
+    },
+    async generate() {
+      serviceCalls += 1;
+      return { ok: false, reason: 'generation_failed' };
+    },
+    async persist() {
+      serviceCalls += 1;
+      return { ok: false, reason: 'persona_invalid' };
+    },
+  };
+
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), persona },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const missing = await fetch(`${base}/environments/p1/persona`, { headers });
+      assert.equal(missing.status, 200);
+      assert.deepEqual((await missing.json() as { data: unknown }).data, {
+        envKey: 'p1', state: 'missing', persona: null,
+      });
+
+      const unknown = await fetch(`${base}/environments/p2/persona`, { headers });
+      assert.equal(unknown.status, 409);
+      assert.equal((await unknown.json() as { error: string }).error, 'binding_unknown');
+
+      const foreign = await fetch(`${base}/environments/not-owned/persona`, { headers });
+      assert.equal(foreign.status, 403);
+      assert.equal((await foreign.json() as { error: string }).error, 'environment_not_owned');
+
+      const injectedDraft = await fetch(`${base}/environments/p1/persona/draft`, {
+        method: 'POST',
+        headers: { ...headers, 'idempotency-key': 'offline-persona-2' },
+        body: JSON.stringify({ keywordSelections: ['数据标注'], writingLanguage: 'zh-CN', accountId: 'victim' }),
+      });
+      assert.equal(injectedDraft.status, 422);
+
+      const injectedSave = await fetch(`${base}/environments/p1/persona`, {
+        method: 'PUT', headers, body: JSON.stringify({ soulYaml: 'x', accountId: 'victim' }),
+      });
+      assert.equal(injectedSave.status, 422);
+
+      const unsupportedMethod = await fetch(`${base}/environments/p1/persona`, { method: 'DELETE', headers });
+      assert.equal(unsupportedMethod.status, 405);
+    },
+  );
+  assert.equal(serviceCalls, 1, 'only the authoritative missing read reaches the persona service');
+});

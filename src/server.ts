@@ -220,6 +220,7 @@ import { categoryOf, type ThinkingMode } from './config/role-catalog.js';
 // 账号人设（change account-persona-config，stream F）：按账号可配 + 热加载，回落打包 soul.yaml 不 brick。
 import { PersonaStore, createPersonaResolver } from './config/persona-store.js';
 import { createPersonaPanel } from './config/persona-facade.js';
+import { AccountPersonaService } from './config/account-persona-service.js';
 import { PersonaAutoFillStore } from './config/persona-auto-fill-store.js';
 // 安全限额（change safety-quota-config，stream D）：三档×动作×三窗口限额数字后台可改+热加载，缺值回落写死默认。
 import { QuotaConfigStore } from './config/quota-config-store.js';
@@ -1971,6 +1972,23 @@ async function main(): Promise<void> {
   // 建号自助人设生成器（change edge-persona-keyword-generation）：复用共享 llm（按角色 browse:persona_generator
   // 解析模型/温度、按 accountId 记账），生成 persona.generate 的草稿。
   const personaGenerator = new PersonaGenerator({ llm });
+  const personaFirstPostOnboarding = firstPostOnboardingStore
+    ? {
+        armFirstBind: async (accountId: string) => {
+          // 只有精选入口与既有参照创作调度器都就绪，才向客户端承诺这条自动首作链。
+          if (!curatedContentStore || !publishScheduler) return false;
+          const created = await firstPostOnboardingStore!.armFirstBind(accountId);
+          if (created) void uiSnapshot?.pushDailyUsage(accountId);
+          return created;
+        },
+      }
+    : undefined;
+  const accountPersonaService = new AccountPersonaService({
+    generator: personaGenerator,
+    facade: personaPanel,
+    firstPostOnboarding: personaFirstPostOnboarding,
+    logger: console,
+  });
   const personaAutoFill = personaAutoFillStore
     ? new PersonaAutoFillService({
         store: personaAutoFillStore,
@@ -2026,20 +2044,8 @@ async function main(): Promise<void> {
     captchaAssist,
     commandSequencer,
     edgeTaskLeases,
-    // 建号自助人设（change edge-persona-keyword-generation）：persona.generate 生成器 + persona.persist 复用写入外观。
-    personaGenerator,
-    personaFacade: personaPanel,
-    firstPostOnboarding: firstPostOnboardingStore
-      ? {
-          armFirstBind: async (accountId) => {
-            // 只有精选入口与既有参照创作调度器都就绪，才向客户端承诺这条自动首作链。
-            if (!curatedContentStore || !publishScheduler) return false;
-            const created = await firstPostOnboardingStore!.armFirstBind(accountId);
-            if (created) void uiSnapshot?.pushDailyUsage(accountId);
-            return created;
-          },
-        }
-      : undefined,
+    // 单账号人设应用服务由旧 WS 与 customer-auth HTTP 共用，生成幂等与写入语义只有一份。
+    personaService: accountPersonaService,
     // 该函数声明在下方审批装配段；用闭包延迟取值，避免 handler 初始化时触发 TDZ。
     publishApprovalAction: (payload, session) => handlePublishApprovalAction(payload, session),
     publishDraftImageRemove: (payload, session) => handlePublishDraftImageRemove(payload, session),
@@ -4391,6 +4397,12 @@ async function main(): Promise<void> {
               }
             },
             resumeEdgesForAccount: (accountId) => server.resumeEdgesForAccount(accountId),
+          },
+          persona: {
+            get: (accountId) => accountPersonaService.get(accountId),
+            generate: (input) => accountPersonaService.generate(input),
+            persist: (accountId, soulYaml, updatedBy) => accountPersonaService.persist(accountId, soulYaml, updatedBy),
+            platformForAccount: (accountId) => accountStore?.platformFor?.(accountId),
           },
           onOffboardCreated: async (offboard) => {
             const edgeId = server.resolveEdgeIdForAccount(offboard.accountId);
