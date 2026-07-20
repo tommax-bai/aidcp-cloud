@@ -42,13 +42,20 @@ const COMMENT_REWRITE_THRESHOLD = 1;
 /** 评论体裁语气偏活泼，感叹号上限放宽到 3（避免单个「！」把真诚口语误判为过量）。 */
 const COMMENT_EXCLAMATION_MAX = 3;
 
+export interface CommentDeAiFlavorOptions extends RoleOptions {
+  /** 总评论子链超时后拦截迟到异步结果。 */
+  isCommentSublineExpired?: (noteId: string) => boolean;
+}
+
 export class CommentDeAiFlavor extends BaseRole {
   readonly roleName: RoleName = 'comment_de_ai_flavor';
   private readonly post: PostProcessor;
+  private readonly isCommentSublineExpired: (noteId: string) => boolean;
   private unsubscribers: (() => void)[] = [];
 
-  constructor(options: RoleOptions) {
+  constructor(options: CommentDeAiFlavorOptions) {
     super(options);
+    this.isCommentSublineExpired = options.isCommentSublineExpired ?? (() => false);
     this.post = new PostProcessor(
       this.llm
         ? { rewrite: (content, flagged) => this.rewrite(content, flagged), rewriteThreshold: COMMENT_REWRITE_THRESHOLD, extraPhrases: COMMENT_AI_PHRASES }
@@ -68,6 +75,7 @@ export class CommentDeAiFlavor extends BaseRole {
   }
 
   private async onComposed(payload: CommentComposedPayload): Promise<void> {
+    if (this.isCommentSublineExpired(payload.noteId)) return;
     let text = payload.draft;
     try {
       const result = await this.post.process(payload.draft, COMMENT_EXCLAMATION_MAX);
@@ -76,6 +84,7 @@ export class CommentDeAiFlavor extends BaseRole {
       // 去 AI 味失败不应阻断：退回原草稿（确定性、不抛）。
       text = payload.draft;
     }
+    if (this.isCommentSublineExpired(payload.noteId)) return;
     text = text.trim();
     if (!text) {
       this.emit('comment.skipped', {
@@ -99,6 +108,7 @@ export class CommentDeAiFlavor extends BaseRole {
         } catch {
           /* 改写失败 → 保留原 text，下面统一再判一次 */
         }
+        if (this.isCommentSublineExpired(payload.noteId)) return;
       }
       if (!text || overlapsAny(text, references)) {
         this.emit('comment.skipped', {
@@ -126,6 +136,7 @@ export class CommentDeAiFlavor extends BaseRole {
       return;
     }
 
+    if (this.isCommentSublineExpired(payload.noteId)) return;
     this.emit('comment.cleared', {
       noteId: payload.noteId,
       sourcePageType: payload.sourcePageType,

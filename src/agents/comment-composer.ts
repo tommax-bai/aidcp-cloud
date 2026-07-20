@@ -33,6 +33,8 @@ interface ComposeContext {
 }
 
 export const DEFAULT_MAX_COMMENT_LEN = XHS_COMMENT_PROFILE.maxCommentLength;
+/** 可选语料召回是写作增强，不得无限阻塞主浏览闭环。 */
+export const DEFAULT_COMMENT_CORPUS_LOOKUP_TIMEOUT_MS = 3_000;
 
 export interface CommentComposerOptions extends RoleOptions {
   getNoteData: (noteId: string) => NoteData | null;
@@ -40,6 +42,13 @@ export interface CommentComposerOptions extends RoleOptions {
   /** 可选：按主题键召回语料库优质评论作参考（仅作灵感、不可照抄）。缺省/空/出错 → 行为同今天。
    *  主题键由本角色用 topicKeysFromTitle 从当前笔记标题派生（与归档侧同一套键）。 */
   getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
+  /** 可选语料召回等待上限；超时按空参考继续。 */
+  corpusLookupTimeoutMs?: number;
+  /** 总评论子链超时后拦截迟到异步结果。 */
+  isCommentSublineExpired?: (noteId: string) => boolean;
+  /** 计时器注入（测试桩）；生产由 dispatcher 注入真计时器。 */
+  setTimeoutFn?: (fn: () => void, ms: number) => unknown;
+  clearTimeoutFn?: (handle: unknown) => void;
 }
 
 export class CommentComposer extends BaseRole {
@@ -47,6 +56,10 @@ export class CommentComposer extends BaseRole {
   private readonly getNoteData: (noteId: string) => NoteData | null;
   private readonly platformProfile: CommentPlatformProfile;
   private readonly getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
+  private readonly corpusLookupTimeoutMs: number;
+  private readonly isCommentSublineExpired: (noteId: string) => boolean;
+  private readonly setTimeoutFn: (fn: () => void, ms: number) => unknown;
+  private readonly clearTimeoutFn: (handle: unknown) => void;
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: CommentComposerOptions) {
@@ -55,6 +68,10 @@ export class CommentComposer extends BaseRole {
     this.getNoteData = options.getNoteData;
     this.platformProfile = options.platformProfile ?? XHS_COMMENT_PROFILE;
     this.getCorpusReferences = options.getCorpusReferences;
+    this.corpusLookupTimeoutMs = positiveMs(options.corpusLookupTimeoutMs, DEFAULT_COMMENT_CORPUS_LOOKUP_TIMEOUT_MS);
+    this.isCommentSublineExpired = options.isCommentSublineExpired ?? (() => false);
+    this.setTimeoutFn = options.setTimeoutFn ?? ((fn, ms) => setTimeout(fn, ms));
+    this.clearTimeoutFn = options.clearTimeoutFn ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
   }
 
   subscribe(): void {
@@ -69,6 +86,7 @@ export class CommentComposer extends BaseRole {
   }
 
   private skip(payload: CommentAppraisedPayload, reason: string): void {
+    if (this.isCommentSublineExpired(payload.noteId)) return;
     this.emit('comment.skipped', {
       noteId: payload.noteId,
       sourcePageType: payload.sourcePageType,
@@ -80,6 +98,7 @@ export class CommentComposer extends BaseRole {
   }
 
   private async onAppraised(payload: CommentAppraisedPayload): Promise<void> {
+    if (this.isCommentSublineExpired(payload.noteId)) return;
     const note = this.getNoteData(payload.noteId);
     if (!note) {
       this.skip(payload, 'note_data_unavailable');
@@ -95,12 +114,30 @@ export class CommentComposer extends BaseRole {
     let references: string[] = [];
     if (this.getCorpusReferences) {
       try {
-        const refs = await this.getCorpusReferences(topicKeysFromTitle(note.title));
-        references = refs.map((r) => r.text).filter(Boolean).slice(0, 3);
+        const timedOut = Symbol('corpus_lookup_timeout');
+        let timer: unknown;
+        const timeout = new Promise<typeof timedOut>((resolve) => {
+          timer = this.setTimeoutFn(() => resolve(timedOut), this.corpusLookupTimeoutMs);
+          unrefTimer(timer);
+        });
+        try {
+          const result = await Promise.race([
+            Promise.resolve().then(() => this.getCorpusReferences!(topicKeysFromTitle(note.title))),
+            timeout,
+          ]);
+          if (result === timedOut) {
+            this.log(`corpus_lookup_timeout note=${payload.noteId} timeoutMs=${this.corpusLookupTimeoutMs}`);
+          } else {
+            references = result.map((r) => r.text).filter(Boolean).slice(0, 3);
+          }
+        } finally {
+          if (timer !== undefined) this.clearTimeoutFn(timer);
+        }
       } catch {
         references = [];
       }
     }
+    if (this.isCommentSublineExpired(payload.noteId)) return;
 
     // 现场评论（change platform-vocabulary-and-thresholds 2.1）：Facebook 由 note.detail 直接带回、
     // 小红书由 dispatcher 从 scroll_comments 回执归集。采不到即空 ⇒ prompt 与今天一致。
@@ -109,6 +146,7 @@ export class CommentComposer extends BaseRole {
     let draft: string | null = null;
     let failureReason = 'llm_error';
     for (let attempt = 0; attempt < attempts; attempt++) {
+      if (this.isCommentSublineExpired(payload.noteId)) return;
       let raw: string;
       try {
         raw = await this.decide(this.buildPrompt(note, references, onPageComments, {
@@ -118,9 +156,11 @@ export class CommentComposer extends BaseRole {
           retry: attempt > 0,
         }));
       } catch {
+        if (this.isCommentSublineExpired(payload.noteId)) return;
         failureReason = 'llm_error';
         continue;
       }
+      if (this.isCommentSublineExpired(payload.noteId)) return;
 
       const parsed = this.parseOutput(raw);
       // 普通路径维持“写不出则弃权”；mandatory 最多补写一次，仍失败就诚实 skip，不塞模板。
@@ -149,6 +189,7 @@ export class CommentComposer extends BaseRole {
       return;
     }
 
+    if (this.isCommentSublineExpired(payload.noteId)) return;
     this.emit('comment.composed', {
       noteId: payload.noteId,
       sourcePageType: payload.sourcePageType,
@@ -284,4 +325,14 @@ ${refBlock}${liveBlock}
     t = t.replace(/@\S+/g, '').replace(/\s{2,}/g, ' ').trim();
     return t;
   }
+}
+
+function positiveMs(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+function unrefTimer(handle: unknown): void {
+  if (typeof handle !== 'object' || handle === null || !('unref' in handle)) return;
+  const unref = (handle as { unref?: unknown }).unref;
+  if (typeof unref === 'function') unref.call(handle);
 }

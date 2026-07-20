@@ -48,6 +48,8 @@ export interface CommentAppraiserOptions extends RoleOptions {
   /** 平台词汇 profile（change platform-vocabulary-and-thresholds）；缺省小红书 = 今天。用于站点名/内容名词/
    *  指标名词去硬编码 + 门槛平台化（无收藏概念平台放宽收藏合取支）。 */
   platformProfile?: CommentPlatformProfile;
+  /** 总评论子链超时后拦截迟到异步结果。 */
+  isCommentSublineExpired?: (noteId: string) => boolean;
 }
 
 export class CommentAppraiser extends BaseRole {
@@ -58,6 +60,7 @@ export class CommentAppraiser extends BaseRole {
   private readonly getCommentCooldownOk?: () => boolean;
   private readonly getMandatoryRiskDecision?: () => { allowed: boolean; reason?: string; retryAfterMs?: number };
   private readonly platformProfile: CommentPlatformProfile;
+  private readonly isCommentSublineExpired: (noteId: string) => boolean;
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: CommentAppraiserOptions) {
@@ -69,6 +72,7 @@ export class CommentAppraiser extends BaseRole {
     this.getCommentCooldownOk = options.getCommentCooldownOk;
     this.getMandatoryRiskDecision = options.getMandatoryRiskDecision;
     this.platformProfile = options.platformProfile ?? XHS_COMMENT_PROFILE;
+    this.isCommentSublineExpired = options.isCommentSublineExpired ?? (() => false);
   }
 
   subscribe(): void {
@@ -83,6 +87,7 @@ export class CommentAppraiser extends BaseRole {
   }
 
   private skip(payload: InteractionCompletedPayload, reason: string): void {
+    if (this.isCommentSublineExpired(payload.noteId)) return;
     this.emit('comment.skipped', {
       noteId: payload.noteId,
       sourcePageType: payload.sourcePageType,
@@ -94,6 +99,7 @@ export class CommentAppraiser extends BaseRole {
   }
 
   private async onInteractionCompleted(payload: InteractionCompletedPayload): Promise<void> {
+    if (this.isCommentSublineExpired(payload.noteId)) return;
     const mandatory = payload.mandatoryInteraction;
     if (mandatory?.actions.includes('comment')) {
       const note = this.getNoteData(payload.noteId);
@@ -120,14 +126,17 @@ export class CommentAppraiser extends BaseRole {
       // 与下方普通评论的 comment.appraising 一样排到微任务：本角色比 dispatcher 的
       // interaction.completed 指令翻译更早订阅；若同步 emit，comment.appraised 会先把
       // commentInflight 置真，导致同一 mandatory 规则的 like 尚未下发就被钉页闸吞掉。
-      queueMicrotask(() => this.emit('comment.appraised', {
-        noteId: payload.noteId,
-        sourcePageType: payload.sourcePageType,
-        actions: payload.actions,
-        reason: `mandatory_rule:${mandatory.ruleId}`,
-        mandatoryInteraction: mandatory,
-        ts: Date.now(),
-      }));
+      queueMicrotask(() => {
+        if (this.isCommentSublineExpired(payload.noteId)) return;
+        this.emit('comment.appraised', {
+          noteId: payload.noteId,
+          sourcePageType: payload.sourcePageType,
+          actions: payload.actions,
+          reason: `mandatory_rule:${mandatory.ruleId}`,
+          mandatoryInteraction: mandatory,
+          ts: Date.now(),
+        });
+      });
       return;
     }
     // 数量闸（最便宜阶段）：会话预算 + 每日上限取小，任一耗尽即不评。
@@ -167,20 +176,25 @@ export class CommentAppraiser extends BaseRole {
     // **必须排到微任务**：本角色订阅早于 dispatcher，若同步 emit，dispatcher 的 comment.appraising 处理器会先于它自己的
     // interaction.completed 处理器把 commentInflight 置真 → 把**本次**待发的 like/collect 命令一并扣住（回归：路径F collect 丢失）。
     // 微任务把置位排到本次同步 emit 之后（届时 like/collect 已下发），仍远早于点赞回执的边缘往返 ⇒ 覆盖 appraiser 窗、不误伤互动下发。
-    queueMicrotask(() => this.emit('comment.appraising', {
-      noteId: payload.noteId,
-      sourcePageType: payload.sourcePageType,
-      actions: payload.actions,
-      ts: Date.now(),
-    }));
+    queueMicrotask(() => {
+      if (this.isCommentSublineExpired(payload.noteId)) return;
+      this.emit('comment.appraising', {
+        noteId: payload.noteId,
+        sourcePageType: payload.sourcePageType,
+        actions: payload.actions,
+        ts: Date.now(),
+      });
+    });
 
     let raw: string;
     try {
       raw = await this.decide(this.buildPrompt(note, payload.actions));
     } catch {
+      if (this.isCommentSublineExpired(payload.noteId)) return;
       this.skip(payload, 'llm_error');
       return;
     }
+    if (this.isCommentSublineExpired(payload.noteId)) return;
 
     const verdict = this.parseOutput(raw);
     if (!verdict) {
@@ -192,6 +206,7 @@ export class CommentAppraiser extends BaseRole {
       return;
     }
 
+    if (this.isCommentSublineExpired(payload.noteId)) return;
     this.emit('comment.appraised', {
       noteId: payload.noteId,
       sourcePageType: payload.sourcePageType,

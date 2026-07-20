@@ -2811,6 +2811,8 @@ async function main(): Promise<void> {
         );
       });
     }
+    const commentCorpusLookupTimeoutMs = readEnvNumberOrUndefined('AIDCP_COMMENT_CORPUS_LOOKUP_TIMEOUT_MS');
+    const commentSublineTimeoutMs = readEnvNumberOrUndefined('AIDCP_COMMENT_SUBLINE_TIMEOUT_MS');
     return new RoleDispatcher({
       getSoul: opts?.getSoul ?? getSoul,
       llm,
@@ -2842,6 +2844,9 @@ async function main(): Promise<void> {
       // 人设 mandatory auto_approve 独立于逐条人审 env，但仍必须先通知成功；通知失败由 gate fail-closed。
       commentAutoApproveNotify: (input) => notifyAutoApprovedComment(input, 'mandatory_persona'),
       notifyMandatoryCommentOutcome,
+      // 评论增强查询和整条子链都有界；未配 env 时由各自唯一默认事实源兜底（3s / 15min）。
+      ...(commentCorpusLookupTimeoutMs !== undefined ? { commentCorpusLookupTimeoutMs } : {}),
+      ...(commentSublineTimeoutMs !== undefined ? { commentSublineTimeoutMs } : {}),
       // 评论 / 评论赞当日配额预闸：按该账号 controller 当日剩余。
       getCommentDailyRemaining: () => ctx.controller.dailyRemaining('comment'),
       getCommentLikeDailyRemaining: () => ctx.controller.dailyRemaining('comment_like'),

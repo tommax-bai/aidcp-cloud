@@ -112,6 +112,30 @@ describe('CommentComposer', () => {
     assert.equal(composed?.draft, '学到了，感谢分享');
   });
 
+  it('可选语料查询永不 settle → 到短超时后按空参考继续撰写', async () => {
+    const bus = new EventBus();
+    let llmCalled = false;
+    const role = new CommentComposer({
+      eventBus: bus,
+      soul,
+      llm: { complete: async () => {
+        llmCalled = true;
+        return '{"text":"这个方法我也想试试"}';
+      } },
+      getNoteData: () => note,
+      getCorpusReferences: async () => new Promise<never>(() => {}),
+      corpusLookupTimeoutMs: 5,
+    });
+    role.subscribe();
+    let composed: any = null;
+    bus.on('comment.composed', (p) => { composed = p; });
+    bus.emit('comment.appraised', { ...trigger, ts: Date.now() });
+    await sleep(30);
+    assert.equal(llmCalled, true, '语料查询只是增强项，超时后仍应调用撰写模型');
+    assert.equal(composed?.draft, '这个方法我也想试试');
+    assert.equal(composed?.references, undefined, '超时按空参考继续，不伪造引用');
+  });
+
   it('裸 @ 被剥除', async () => {
     const bus = new EventBus();
     const role = new CommentComposer({ eventBus: bus, soul, llm: { complete: async () => '{"text":"@某人 学到了"}' }, getNoteData: () => note });

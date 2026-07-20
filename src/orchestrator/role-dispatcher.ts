@@ -12,7 +12,7 @@
  */
 
 import { EventBus } from '../event-bus/index.js';
-import type { CommentApprovalTrace, MandatoryInteractionContext, NoteDetailData } from '../event-bus/types.js';
+import type { CommentApprovalTrace, CommentAppraisingPayload, MandatoryInteractionContext, NoteDetailData } from '../event-bus/types.js';
 import {
   isNoteActionSupported,
   noteActionRefusalReason,
@@ -110,6 +110,12 @@ export interface ConceptStorePort extends ConceptSink {
 const EMPTY_CONCEPT_POOL: ConceptPool = { known: [], candidates: [], source: new Map() };
 const VIEW_QUOTA_RECHECK_FALLBACK_MS = 60_000;
 const VIEW_QUOTA_WAKE_GRACE_MS = 250;
+/** 整条评论子链的安全兜底；正常的人审短超时远早于它结束。 */
+export const DEFAULT_COMMENT_SUBLINE_TIMEOUT_MS = 15 * 60_000;
+
+function positiveTimeoutMs(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
 
 /**
  * 提取 Facebook 帖子的**规范身份键**（数字帖 id），用于「自然互动见证」两个集合（已选中 / 已放行）的**去形态匹配**。
@@ -163,6 +169,8 @@ interface PendingCommentDelivery {
   mandatoryInteraction?: MandatoryInteractionContext;
   approvalTrace?: CommentApprovalTrace;
 }
+
+type CommentSublineSnapshot = Pick<CommentAppraisingPayload, 'noteId' | 'sourcePageType' | 'actions'>;
 
 export type SessionBudgetAction = 'like' | 'collect' | 'follow' | 'search' | 'comment' | 'comment_like' | 'join_group';
 
@@ -260,6 +268,10 @@ export interface RoleDispatcherOptions {
   archiveValuableComment?: (input: ValuableCommentInput) => Promise<void>;
   /** 按主题键召回语料库参考评论（接 ValuableCommentStore.retrieveByTopics）；缺省 → 撰写不注入参考。 */
   getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
+  /** 可选语料召回等待上限；超时按空参考继续。 */
+  commentCorpusLookupTimeoutMs?: number;
+  /** 整条评论支线等待上限；超时释放钉页与会话时钟。 */
+  commentSublineTimeoutMs?: number;
   /**
    * 精选语料库（change curated-admission-eval-roles，Phase 3）：注入则注册两段式准入的模型评估角色
    * —— 正文角色（curated_note_evaluator，恒注册）+ 评论角色（curated_comment_evaluator，仅评论赞链路开启时）。
@@ -433,6 +445,8 @@ export class RoleDispatcher {
     ageHours: number;
   }) => Promise<{ fired: boolean; reason?: string }>;
   private readonly getCorpusReferences?: (topics: string[]) => Promise<ValuableCommentRef[]>;
+  private readonly commentCorpusLookupTimeoutMs?: number;
+  private readonly commentSublineTimeoutMs: number;
   /** 已下发待回执的评论上下文：action.completed{comment} 据此扣额 + emit comment.done（→ 是否进主页评估）。 */
   private pendingComment: PendingCommentDelivery | null = null;
   /**
@@ -452,6 +466,11 @@ export class RoleDispatcher {
    * 推迟窗内 should_end（动作数/时长/配额触发的结束延后到评论支线终局，避免废掉在审/已授权评论）。
    */
   private commentInflight = false;
+  /** 当前评论支线的总超时句柄与事件快照。 */
+  private commentSublineTimer: unknown;
+  private commentSublineSnapshot?: CommentSublineSnapshot;
+  /** dispatcher 生命周期内保留墓碑，迟到异步结果不得重新授权或下发。 */
+  private readonly expiredCommentSublineNoteIds = new Set<string>();
   /** feed 翻页按新卡数算的待发停留兜底（feed-scroll-card-floor）：page.cards.arrived 覆盖写、feed.scrolled 消费后归零。 */
   private pendingFeedFloorMs = 0;
   /** 当前会话已授权过首页空态→Reels；重复 empty 报告不得多次导航。 */
@@ -584,6 +603,8 @@ export class RoleDispatcher {
     this.getCommentLikeDailyRemaining = options.getCommentLikeDailyRemaining;
     this.archiveValuableComment = options.archiveValuableComment;
     this.getCorpusReferences = options.getCorpusReferences;
+    this.commentCorpusLookupTimeoutMs = options.commentCorpusLookupTimeoutMs;
+    this.commentSublineTimeoutMs = positiveTimeoutMs(options.commentSublineTimeoutMs, DEFAULT_COMMENT_SUBLINE_TIMEOUT_MS);
     this.curatedStore = options.curatedStore;
     this.hotLeadGateConfig = options.hotLeadGateConfig;
     this.isAutoContactEnabled = options.isAutoContactEnabled;
@@ -723,10 +744,54 @@ export class RoleDispatcher {
    * + pauseClock（推迟窗内 should_end）。只在 currentNote 命中该 noteId 时置位（守卫下游同 tick 同步 skip 卡死，见调用处注释）。
    * comment.appraising / comment.appraised 两入口共用；幂等（布尔 + pauseReasons Set），终局单次 resumeClock 解除。
    */
-  private enterCommentSubline(noteId: string): void {
-    if (this.currentNote?.noteId !== noteId) return;
+  private enterCommentSubline(payload: CommentSublineSnapshot): void {
+    if (this.currentNote?.noteId !== payload.noteId) return;
+    if (this.expiredCommentSublineNoteIds.has(payload.noteId)) return;
+    // appraising + appraised 会先后抵达；总期限只从第一个有效入口起算，不允许后续阶段续期。
+    if (this.commentInflight) return;
     this.commentInflight = true;
+    this.commentSublineSnapshot = {
+      noteId: payload.noteId,
+      sourcePageType: payload.sourcePageType,
+      actions: [...payload.actions],
+    };
     this.sessionMonitor?.pauseClock('comment_subline');
+    this.commentSublineTimer = this.setTimeoutFn(
+      () => this.expireCommentSubline(payload.noteId),
+      this.commentSublineTimeoutMs,
+    );
+    (this.commentSublineTimer as { unref?: () => void } | undefined)?.unref?.();
+  }
+
+  private isCommentSublineExpired(noteId: string): boolean {
+    return this.expiredCommentSublineNoteIds.has(noteId);
+  }
+
+  private clearCommentSublineHold(resumeClock: boolean): void {
+    if (this.commentSublineTimer !== undefined) {
+      this.clearTimeoutFn(this.commentSublineTimer);
+      this.commentSublineTimer = undefined;
+    }
+    this.commentSublineSnapshot = undefined;
+    this.commentInflight = false;
+    if (resumeClock) this.sessionMonitor?.resumeClock('comment_subline');
+  }
+
+  private expireCommentSubline(noteId: string): void {
+    const snapshot = this.commentSublineSnapshot;
+    if (!this.commentInflight || !snapshot || snapshot.noteId !== noteId) return;
+    this.expiredCommentSublineNoteIds.add(noteId);
+    // 当前回调已经触发；先清态再发唯一终局事件，避免同步监听器看到仍在途或重复清理。
+    this.commentSublineTimer = undefined;
+    this.commentSublineSnapshot = undefined;
+    this.commentInflight = false;
+    this.sessionMonitor?.resumeClock('comment_subline');
+    console.warn(`[RoleDispatcher] comment_subline_timeout note=${noteId} timeoutMs=${this.commentSublineTimeoutMs}`);
+    this.eventBus.emit('comment.skipped', {
+      ...snapshot,
+      reason: 'comment_subline_timeout',
+      ts: this.clock(),
+    });
   }
 
   private isQuotaSleepBypass(command: EdgeCommand): boolean {
@@ -1206,13 +1271,23 @@ export class RoleDispatcher {
         getCommentCooldownOk: () => this.cooldownPasses('comment'),
         // mandatory 评论仍跳过普通策略门，但在生成正文/发预授权卡之前先读最终风控同源解释。
         getMandatoryRiskDecision: () => this.explainInteract('comment'),
+        isCommentSublineExpired: (noteId) => this.isCommentSublineExpired(noteId),
       }),
       new CommentComposer({
         ...commonOptions,
         getNoteData,
         ...(this.getCorpusReferences ? { getCorpusReferences: this.getCorpusReferences } : {}),
+        ...(this.commentCorpusLookupTimeoutMs !== undefined
+          ? { corpusLookupTimeoutMs: this.commentCorpusLookupTimeoutMs }
+          : {}),
+        isCommentSublineExpired: (noteId) => this.isCommentSublineExpired(noteId),
+        setTimeoutFn: this.setTimeoutFn,
+        clearTimeoutFn: this.clearTimeoutFn,
       }),
-      new CommentDeAiFlavor(commonOptions),
+      new CommentDeAiFlavor({
+        ...commonOptions,
+        isCommentSublineExpired: (noteId) => this.isCommentSublineExpired(noteId),
+      }),
       new CommentApprovalGate({
         ...commonOptions,
         ...(this.commentApproval ? { approval: this.commentApproval } : {}),
@@ -1222,6 +1297,7 @@ export class RoleDispatcher {
         getNoteTitle: (id) => getNoteData(id)?.title ?? null,
         getNoteAuthor: (id) => getNoteData(id)?.author ?? null,
         now: this.clock,
+        isCommentSublineExpired: (noteId) => this.isCommentSublineExpired(noteId),
       }),
       // —— 评论点赞（comment-like-on-detail，默认关）：自有单航班，结合正文偶尔给一条评论点赞 ——
       ...(commentLikeEnabled
@@ -1519,7 +1595,7 @@ export class RoleDispatcher {
     this.clearFacebookNaturalInteractionEvidence();
     this.reelsFallbackAuthorized = false;
     // 跨会话残留清理（change platform-browse-protocol）：迁移在途 / 审批在途标志不得跨会话粘连。
-    this.commentInflight = false;
+    this.clearCommentSublineHold(false);
     // 跨会话概念记忆：异步刷新，不阻塞 feed.entered（首次搜索发生在连刷阈值之后，届时池已就绪）。
     void this.refreshConceptPool();
     this.eventBus.emit('feed.entered', {
@@ -1593,7 +1669,7 @@ export class RoleDispatcher {
     // 跨会话残留清理（change platform-browse-protocol）：迁移在途 / 审批在途标志不得跨会话粘连。
     // **生产的会话(重)启动统一走 restartSession**（edge hello / 绑人设自启 / 续场 / 面板），startSession 仅测试用——
     // 故此处的清理才是生产实际生效的那一份（红线修复：防审批标志卡死跨会话粘连、迁移在途被后续 open_note 误消费）。
-    this.commentInflight = false;
+    this.clearCommentSublineHold(false);
     this.clearFacebookNaturalInteractionEvidence();
     this.reelsFallbackAuthorized = false;
     // 重新订阅角色与接线（SessionMonitor.subscribe 重置 startedAt/actionCount）
@@ -1633,7 +1709,7 @@ export class RoleDispatcher {
     this.cancelWakeTimer();
     this.cancelViewQuotaSleep(false);
     this.settlePendingMandatoryCommentAsUnknown(`session_ended:${reason ?? 'manual'}`);
-    this.commentInflight = false;
+    this.clearCommentSublineHold(false);
     void this.endNotificationTask();
     if (!this.sessionActive) return;
     const account = this.currentAccountId;
@@ -2038,13 +2114,12 @@ export class RoleDispatcher {
       // 当前 noteId 为守卫——命中 ⇒ appraiser/composer 均走 await（唯一同步 skip 是 note 数据缺失），本处理器后置为真、终局再清；
       // 未命中 ⇒ 下游同步 emit comment.skipped 先清标志，此时不置真、避免置真后无人清（浏览被扣住无法前进 → 无终局 → 永久卡死）。
       // pauseClock('comment_subline') refcount by reason、幂等；两个入口重复置真/暂停均无副作用，终局单次 resumeClock 解除。
-      this.eventBus.on('comment.appraising', (payload) => this.enterCommentSubline(payload.noteId)),
-      this.eventBus.on('comment.appraised', (payload) => this.enterCommentSubline(payload.noteId)),
+      this.eventBus.on('comment.appraising', (payload) => this.enterCommentSubline(payload)),
+      this.eventBus.on('comment.appraised', (payload) => this.enterCommentSubline(payload)),
 
       // 评论支线终局之一（跳过/拒绝/超时/撰写弃权）→ 清在途标志 + 恢复时钟（末次解除会补发延期的 should_end）。
       this.eventBus.on('comment.skipped', () => {
-        this.commentInflight = false;
-        this.sessionMonitor?.resumeClock('comment_subline');
+        this.clearCommentSublineHold(true);
       }),
 
       // 评论支线终局之一（评论已投，成功/失败均计一次）→ 恢复时钟。此时评论已真正下发（含 FB 两步迁移后的直发），
@@ -2085,11 +2160,15 @@ export class RoleDispatcher {
       // 人审通过的评论 → 下发 comment 指令。风控闸：被拒则诚实跳过（不下发、不扣额），仍 emit comment.skipped 走「是否进主页评估」。
       // 配额改由 action.completed 真实回执扣减（对齐 follow）。
       this.eventBus.on('comment.approved', (payload) => {
+        if (this.isCommentSublineExpired(payload.noteId)) {
+          console.warn(`[RoleDispatcher] comment.approved ignored reason=late_after_comment_subline_timeout note=${payload.noteId}`);
+          return;
+        }
         // 评论支线在途终局之一（人审通过）：**先清在途标志再下发**——评论/迁移命令也经 sendCommand，
         // 不先清会被自己的 commentInflight 闸扣住而静默丢弃（镜像 nickname-enricher 先解除暂停再 emit 的顺序）。
         // 时钟不在此恢复：resumeClock 会补发延期的 should_end；须晚于评论真正下发（见 comment.done），
         // 否则补发的 session.end 会抢在（FB 两步迁移的）评论之前结束会话、废掉已授权评论。
-        this.commentInflight = false;
+        this.clearCommentSublineHold(false);
         const approvedDelivery: PendingCommentDelivery = {
           noteId: payload.noteId,
           sourcePageType: payload.sourcePageType,
@@ -2478,8 +2557,7 @@ export class RoleDispatcher {
             this.clearMandatoryCommentOutcomeTimer();
             if (payload.action === 'comment') this.pendingComment = null;
             if (payload.action === 'open_note') this.pendingMigration = null;
-            this.commentInflight = false;
-            this.sessionMonitor?.resumeClock('comment_subline');
+            this.clearCommentSublineHold(true);
           }
           return;
         }

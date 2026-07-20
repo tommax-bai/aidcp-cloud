@@ -975,5 +975,38 @@ describe('RoleDispatcher Integration', () => {
       assert.equal(rescan.length, 0, 'comment.appraising 后 appraiser 窗内并行点赞 no_target 不重扫（覆盖残留窗）');
       dispatcher.endSession();
     });
+
+    it('(i) 评论子链总超时 → 单次诚实 skip、恢复浏览，迟到 appraised/approved 不再续期或下发', async () => {
+      const commands: EdgeCommand[] = [];
+      const dispatcher = seed(commands, {
+        commentSublineTimeoutMs: 10,
+        llm: { complete: async () => new Promise<string>(() => {}) },
+      });
+      const timeoutSkips: unknown[] = [];
+      dispatcher.bus.on('comment.skipped', (payload) => {
+        if (payload.reason === 'comment_subline_timeout') timeoutSkips.push(payload);
+      });
+
+      dispatcher.bus.emit('comment.appraising', { noteId: 'n1', sourcePageType: 'feed', actions: ['like'], ts: Date.now() });
+      await new Promise((r) => setTimeout(r, 30));
+      assert.equal(timeoutSkips.length, 1, '总超时只应发出一次 comment_subline_timeout');
+      assert.equal((dispatcher as unknown as { commentInflight: boolean }).commentInflight, false, '总超时应释放钉页状态');
+
+      commands.length = 0;
+      dispatcher.bus.emit('session.idle_nudge', { reason: 'idle_recover_nudge', ts: Date.now() });
+      assert.equal(
+        commands.filter((c) => c.action === 'scroll' && c.reason === 'idle_recover_nudge').length,
+        1,
+        '总超时后浏览应恢复，不再被 comment_inflight 扣住',
+      );
+
+      commands.length = 0;
+      dispatcher.bus.emit('comment.appraised', { noteId: 'n1', sourcePageType: 'feed', actions: ['like'], ts: Date.now() });
+      dispatcher.bus.emit('comment.approved', { noteId: 'n1', sourcePageType: 'feed', actions: ['like'], text: '迟到授权', ts: Date.now() });
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(timeoutSkips.length, 1, '迟到 appraised 不得重新启动总超时或发第二个 skip');
+      assert.equal(commands.filter((c) => c.action === 'comment' || c.action === 'open_note').length, 0, '迟到 approved 绝不下发评论或迁移命令');
+      dispatcher.endSession();
+    });
   });
 });

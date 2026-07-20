@@ -65,6 +65,8 @@ export interface CommentApprovalGateOptions extends RoleOptions {
   getNoteAuthor?: (noteId: string) => string | null;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  /** 总评论子链超时后拦截迟到审批结果，绝不再下发评论。 */
+  isCommentSublineExpired?: (noteId: string) => boolean;
 }
 
 export class CommentApprovalGate extends BaseRole {
@@ -77,6 +79,7 @@ export class CommentApprovalGate extends BaseRole {
   private readonly getNoteAuthor?: (noteId: string) => string | null;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly isCommentSublineExpired: (noteId: string) => boolean;
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: CommentApprovalGateOptions) {
@@ -89,6 +92,7 @@ export class CommentApprovalGate extends BaseRole {
     this.getNoteAuthor = options.getNoteAuthor;
     this.now = options.now ?? (() => Date.now());
     this.sleep = options.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    this.isCommentSublineExpired = options.isCommentSublineExpired ?? (() => false);
   }
 
   subscribe(): void {
@@ -103,6 +107,7 @@ export class CommentApprovalGate extends BaseRole {
   }
 
   private skip(payload: CommentClearedPayload, reason: string): void {
+    if (this.isCommentSublineExpired(payload.noteId)) return;
     this.emit('comment.skipped', {
       noteId: payload.noteId,
       sourcePageType: payload.sourcePageType,
@@ -114,6 +119,7 @@ export class CommentApprovalGate extends BaseRole {
   }
 
   private async onCleared(payload: CommentClearedPayload): Promise<void> {
+    if (this.isCommentSublineExpired(payload.noteId)) return;
     const mandatoryAutoApprove = payload.mandatoryInteraction?.actions.includes('comment') === true &&
       payload.mandatoryInteraction.commentApproval === 'auto_approve';
     const title = this.getNoteTitle?.(payload.noteId) ?? undefined;
@@ -131,10 +137,12 @@ export class CommentApprovalGate extends BaseRole {
       try {
         await this.autoApproveNotify({ requestId, noteId: payload.noteId, text: payload.text, title, authorName, accountId, accountName });
       } catch (err) {
+        if (this.isCommentSublineExpired(payload.noteId)) return;
         this.log(`mandatory auto_approve 通知失败：${(err as Error).message}`);
         this.skip(payload, 'auto_approve_notice_failed');
         return;
       }
+      if (this.isCommentSublineExpired(payload.noteId)) return;
       this.log(`mandatory auto_approve 已通知并授权 rule=${payload.mandatoryInteraction!.ruleId} note=${payload.noteId}`);
       const approvalTrace: CommentApprovalTrace = {
         requestId,
@@ -169,19 +177,23 @@ export class CommentApprovalGate extends BaseRole {
     try {
       await this.approval.request({ requestId, noteId: payload.noteId, text: payload.text, title, authorName, accountId, accountName });
     } catch (err) {
+      if (this.isCommentSublineExpired(payload.noteId)) return;
       this.log(`审批卡发送失败：${(err as Error).message}`);
       this.skip(payload, 'approval_request_failed');
       return;
     }
+    if (this.isCommentSublineExpired(payload.noteId)) return;
 
     const deadline = this.now() + timeoutMs;
     while (this.now() <= deadline) {
+      if (this.isCommentSublineExpired(payload.noteId)) return;
       let approved = false;
       try {
         approved = await this.approval.isApproved(requestId);
       } catch {
         approved = false;
       }
+      if (this.isCommentSublineExpired(payload.noteId)) return;
       if (approved) {
         this.emit('comment.approved', {
           noteId: payload.noteId,
@@ -195,6 +207,7 @@ export class CommentApprovalGate extends BaseRole {
       }
       await this.sleep(pollMs);
     }
+    if (this.isCommentSublineExpired(payload.noteId)) return;
     // 超时：本篇不评、记审计，走「是否进主页评估」。
     this.log(`评论人审超时（${timeoutMs}ms），本篇不发 requestId=${requestId}`);
     this.skip(payload, 'approval_timeout');
