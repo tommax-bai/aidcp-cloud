@@ -1931,6 +1931,64 @@ test('待审批稿读取遇到未知绑定时 fail-closed，绝不触达稿件 s
   );
 });
 
+test('排期占用按环境绑定账号读取且只返回时间戳投影', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const calls: string[] = [];
+  const first = Date.parse('2026-07-21T08:15:00+08:00');
+  const second = Date.parse('2026-07-21T12:00:00+08:00');
+  const publishSchedule = {
+    async listOccupiedScheduledTimesForAccount(accountId: string) {
+      calls.push(accountId);
+      return [first, Number.NaN, second];
+    },
+  };
+
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), publishSchedule },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const response = await fetch(`${base}/publish-schedule/occupied-hours?envKey=p1`, { headers });
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { occupiedTimes: [first, second] });
+      assert.deepEqual(calls, [ACCT_P1]);
+    },
+  );
+});
+
+test('排期占用未知绑定 fail-closed，缺能力时独立返回不可用', async () => {
+  const fx = ownerOfP1();
+  let calls = 0;
+  const publishSchedule = {
+    async listOccupiedScheduledTimesForAccount() { calls += 1; return []; },
+  };
+
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), publishSchedule },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const unknown = await fetch(`${base}/publish-schedule/occupied-hours?envKey=p1`, { headers });
+      assert.equal(unknown.status, 409);
+      assert.equal((await unknown.json() as { error: string }).error, 'binding_unknown');
+      assert.equal(calls, 0);
+    },
+  );
+
+  fx.bindings.set('p1', ACCT_P1);
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter() },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const unavailable = await fetch(`${base}/publish-schedule/occupied-hours?envKey=p1`, { headers });
+      assert.equal(unavailable.status, 503);
+      assert.equal((await unavailable.json() as { error: string }).error, 'publish_schedule_unavailable');
+    },
+  );
+});
+
 test('环境级人设 API 在 core 离线时按绑定账号读、生成、保存且不泄露 accountId', async () => {
   const fx = ownerOfP1();
   fx.bindings.set('p1', ACCT_P1);

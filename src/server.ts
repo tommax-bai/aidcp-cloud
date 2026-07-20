@@ -4376,6 +4376,7 @@ async function main(): Promise<void> {
           curatedContent: curatedContentStore,
           referenceDraftCountForAccount: (accountId) => publishLogStore.countReferenceDraftsForAccount(accountId),
           pendingDrafts: publishLogStore,
+          publishSchedule: publishLogStore,
           publishDraftActions: {
             approve: (payload, accountId, actor) => approvePublishForClient(payload, accountId, actor),
             removeImage: (payload, accountId, actor) =>

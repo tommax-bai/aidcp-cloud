@@ -68,6 +68,8 @@ export interface ClientAuthDeps {
     PublishLogStore,
     'listPendingPublishPreviewsForAccount' | 'pendingPublishPreviewForAccountRecord'
   >;
+  /** Account-scoped Xiaohongshu scheduled truth for approval-page free-slot selection. */
+  publishSchedule?: Pick<PublishLogStore, 'listOccupiedScheduledTimesForAccount'>;
   /** 客户待审稿写：传输层只解析客户环境，实际闸序与落库复用既有领域方法。 */
   publishDraftActions?: {
     approve(
@@ -1205,6 +1207,24 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       });
       return;
     }
+
+    // 客户端快捷排期占用：账号只由客户环境绑定解析；不接受 renderer 自报账号或时间窗口。
+    if (method === 'GET' && url === '/publish-schedule/occupied-hours') {
+      if (!deps.publishSchedule) {
+        sendJson(res, 503, { error: 'publish_schedule_unavailable' });
+        return;
+      }
+      const envKey = (new URL(rawUrl, 'http://localhost').searchParams.get('envKey') ?? '').trim();
+      const bound = await deps.store.resolveBoundAccountForEnv(userId, envKey);
+      if (!bound.ok) {
+        sendBindingFailure(res, bound.reason);
+        return;
+      }
+      const occupiedTimes = await deps.publishSchedule.listOccupiedScheduledTimesForAccount(bound.accountId);
+      sendJson(res, 200, { occupiedTimes: occupiedTimes.filter(Number.isFinite) });
+      return;
+    }
+
     const pendingDraftDetail = /^\/publish-drafts\/([^/]+)$/.exec(url);
     if (method === 'GET' && pendingDraftDetail) {
       if (!deps.pendingDrafts) {

@@ -61,3 +61,31 @@ test('待审批详情用记录号和账号联合查询，非命中不暴露记�
   assert.match(calls[0].sql, /id = \$1 AND account_id = \$2 AND status = 'pending_approval'/);
   assert.deepEqual(calls[0].params, [42, 'account-1']);
 });
+
+test('客户端排期占用只查询账号的小红书 scheduled 与 Cloud 固定未来 14 天', async () => {
+  const now = Date.parse('2026-07-20T09:30:00+08:00');
+  const calls: { sql: string; params: unknown[] }[] = [];
+  const pool = {
+    async query(sql: string, params: unknown[]) {
+      calls.push({ sql, params });
+      return {
+        rows: [
+          { scheduled_at_ms: String(Date.parse('2026-07-21T08:15:00+08:00')) },
+          { scheduled_at_ms: 'not-a-number' },
+        ],
+      };
+    },
+  };
+  const store = new PublishLogStore({ pool: pool as never, clock: () => now });
+
+  assert.deepEqual(await store.listOccupiedScheduledTimesForAccount('account-1'), [
+    Date.parse('2026-07-21T08:15:00+08:00'),
+  ]);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].sql, /account_id = \$1/);
+  assert.match(calls[0].sql, /platform = 'xiaohongshu'/);
+  assert.match(calls[0].sql, /status = 'scheduled'/);
+  assert.match(calls[0].sql, /scheduled_at >= to_timestamp\(\$2/);
+  assert.match(calls[0].sql, /scheduled_at <= to_timestamp\(\$3/);
+  assert.deepEqual(calls[0].params, ['account-1', now, now + 14 * 24 * 60 * 60 * 1000]);
+});

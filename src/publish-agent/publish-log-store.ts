@@ -24,6 +24,7 @@ function parsePublishMetadata(raw: unknown): PublishMetadata | null {
 
 /** 合法可见范围枚举（与 types.ts 的 Visibility 同步；编辑侧校验用）。 */
 const VISIBILITY_VALUES: readonly Visibility[] = ['public', 'friends_only', 'self_only'];
+const CLIENT_SCHEDULE_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 
 const { Pool } = pg;
 
@@ -384,6 +385,26 @@ export class PublishLogStore {
       scheduledPlatformId: row.scheduled_platform_id,
       reconcileAttempts: Number(row.schedule_reconcile_attempts ?? 0),
     }));
+  }
+
+  /**
+   * 客户端审批快捷排期的账号级占用真态。
+   * 只认平台已接受后落成的 scheduled 行；查询窗口由 Cloud 时钟固定，调用方不能扩窗探测历史。
+   */
+  async listOccupiedScheduledTimesForAccount(accountId: string): Promise<number[]> {
+    const now = this.clock();
+    const { rows } = await this.pool.query<{ scheduled_at_ms: string }>(
+      `SELECT extract(epoch from scheduled_at) * 1000 AS scheduled_at_ms
+         FROM publish_log
+        WHERE account_id = $1
+          AND platform = 'xiaohongshu'
+          AND status = 'scheduled'
+          AND scheduled_at >= to_timestamp($2 / 1000.0)
+          AND scheduled_at <= to_timestamp($3 / 1000.0)
+        ORDER BY scheduled_at ASC, id ASC`,
+      [accountId, now, now + CLIENT_SCHEDULE_WINDOW_MS],
+    );
+    return rows.map((row) => Number(row.scheduled_at_ms)).filter(Number.isFinite);
   }
 
   /** 未确认公开：原子递增尝试并安排下次；达到 maxAttempts 后转人工复核。 */
