@@ -2527,7 +2527,9 @@ async function main(): Promise<void> {
         const name = accountDisplayName(notice.accountId) ?? '（未获取昵称）';
         const ref = notice.recordId !== undefined ? `草稿 #${notice.recordId}${notice.title ? `「${notice.title}」` : ''}` : '';
         const text =
-          notice.kind === 'offline_requeued'
+          notice.kind === 'edge_offline_waiting'
+            ? `⏳ 发布待执行：账号「${name}」的批准已受理，但客户端核心暂离线。${ref} 保持授权，核心恢复后会自动尝试执行；当前尚未发布。`
+            : notice.kind === 'offline_requeued'
             ? `⚠️ 发布未执行：账号「${name}」边缘离线，${ref} 已退回待审（本次授权作废）。边缘恢复后请重新批准。`
             : notice.kind === 'browser_slot_waiting'
               ? `⏳ 发布排队中：账号「${name}」客户端在线，目标浏览器正在等待本机可用槽位。${ref} 已批准且授权保留，槽位可用后会自动重试，无需重新批准。`
@@ -2618,8 +2620,8 @@ async function main(): Promise<void> {
     if (!draft) return { ok: false, reason: 'publish_target_unavailable' };
     const edgeId = server.resolveEdgeIdForAccount(draft.accountId);
     if (!edgeId) {
-      console.warn(`[aidcp-cloud] 授权发布被拦截：账号 ${draft.accountId} 无在线节点，requestId=${requestId}`);
-      return { ok: false, reason: 'account_offline', accountId: draft.accountId };
+      console.log(`[aidcp-cloud] 授权发布已受理：账号 ${draft.accountId} 核心暂离线，等待恢复后执行 requestId=${requestId}`);
+      return { ok: true, accountId: draft.accountId };
     }
     return { ok: true, accountId: draft.accountId, edgeId };
   };
@@ -4367,6 +4369,11 @@ async function main(): Promise<void> {
           curatedContent: curatedContentStore,
           referenceDraftCountForAccount: (accountId) => publishLogStore.countReferenceDraftsForAccount(accountId),
           pendingDrafts: publishLogStore,
+          publishDraftActions: {
+            approve: (payload, accountId, actor) => approvePublishForClient(payload, accountId, actor),
+            removeImage: (payload, accountId, actor) =>
+              handlePublishDraftImageRemove(payload, { accountId, actor }),
+          },
           // D5 活体佐证（change curated-envkey-account-binding）：不可逆写要求绑定账号此刻活在该环境上。
           // 幸存者 resolveEdgeIdForAccount（account→edge）；反方向的 resolveAccountIdForEdge 已被慢启动 change 删除。
           resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),

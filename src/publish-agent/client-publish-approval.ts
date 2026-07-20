@@ -72,6 +72,7 @@ export function createClientPublishApprovalHandler(deps: ClientPublishApprovalDe
   return async (
     payload: PublishApprovalActionPayload,
     accountId: string | null | undefined,
+    actor = 'client',
   ): Promise<PublishApprovalActionResultPayload> => {
     const requestId = typeof payload?.requestId === 'string' ? payload.requestId : '';
     const match = /^publish-(\d+)$/.exec(requestId);
@@ -129,7 +130,7 @@ export function createClientPublishApprovalHandler(deps: ClientPublishApprovalDe
             recordId,
             requestedVersion,
             { publishMode: requestedPlan.mode, publishTime: requestedPlan.publishTime },
-            'client',
+            actor,
           );
           if (!edit.ok) {
             if (edit.reason === 'version_conflict') {

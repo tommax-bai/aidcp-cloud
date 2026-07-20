@@ -33,6 +33,7 @@ function makeFakeStore(): {
   /** envKey → 环境级慢启动起点。 */
   slowStarts: Map<string, number | null>;
   slowStartWrites: { envKey: string; enabled: boolean }[];
+  cleanupGrants: Map<string, { edgeId: string; jtiHash: string; expiresAt: number; used: boolean }>;
 } {
   const users = new Map<string, { userId: string; key: string; status: 'enabled' | 'disabled' }>();
   const scope = new Map<string, ClientEnvScopeRow[]>();
@@ -41,6 +42,7 @@ function makeFakeStore(): {
   const bindings = new Map<string, string>();
   const slowStarts = new Map<string, number | null>();
   const slowStartWrites: { envKey: string; enabled: boolean }[] = [];
+  const cleanupGrants = new Map<string, { edgeId: string; jtiHash: string; expiresAt: number; used: boolean }>();
   const intents = new Map<string, { userId: string; proof: string; expiresAt: number; envKey?: string }>();
   let nextIntent = 1;
 
@@ -170,8 +172,42 @@ function makeFakeStore(): {
     async getOffboard(userId: string, offboardId: string) {
       return offboards.get(`${userId}:${offboardId}`) ?? null;
     },
+    async registerOffboardCleanupGrant(input: {
+      userId: string; offboardId: string; edgeId: string; jtiHash: string; expiresAt: number;
+    }) {
+      if (!offboards.has(`${input.userId}:${input.offboardId}`)) return false;
+      cleanupGrants.set(`${input.userId}:${input.offboardId}`, {
+        edgeId: input.edgeId, jtiHash: input.jtiHash, expiresAt: input.expiresAt, used: false,
+      });
+      return true;
+    },
+    async consumeOffboardCleanupGrant(input: {
+      userId: string; offboardId: string; envKey: string; accountId: string; edgeId: string; jtiHash: string;
+    }) {
+      const offboard = offboards.get(`${input.userId}:${input.offboardId}`);
+      const grant = cleanupGrants.get(`${input.userId}:${input.offboardId}`);
+      if (!offboard || !grant) return { ok: false as const, reason: 'not_found' as const };
+      if (grant.used) return { ok: false as const, reason: 'already_used' as const };
+      if (grant.expiresAt <= Date.now()) return { ok: false as const, reason: 'expired' as const };
+      if (grant.edgeId !== input.edgeId || grant.jtiHash !== input.jtiHash
+        || offboard.envKey !== input.envKey || offboard.accountId !== input.accountId) {
+        return { ok: false as const, reason: 'scope_mismatch' as const };
+      }
+      grant.used = true;
+      return { ok: true as const, offboard, edgeId: input.edgeId };
+    },
   };
-  return { store: fake as unknown as ClientUserStore, users, scope, offboards, registered, bindings, slowStarts, slowStartWrites };
+  return {
+    store: fake as unknown as ClientUserStore,
+    users,
+    scope,
+    offboards,
+    registered,
+    bindings,
+    slowStarts,
+    slowStartWrites,
+    cleanupGrants,
+  };
 }
 
 function baseConfig(port: number, overrides: Partial<ClientAuthConfig> = {}): ClientAuthConfig {
@@ -740,6 +776,63 @@ test('客户只能解绑自己的环境，且响应可轮询 pending/offline 清
     assert.equal(status.status, 200);
     assert.equal(((await status.json()) as { data: ClientOffboardView }).data.state, 'pending_edge');
   });
+});
+
+test('offboard cleanup grant is edge-bound, use-once and never authorizes another environment', async () => {
+  const fx = makeFakeStore();
+  fx.users.set('bob', { userId: 'user-b', key: 'ck_bob', status: 'enabled' });
+  fx.scope.set('user-b', [
+    { envKey: 'env-b', label: 'Bob 环境', platform: 'wechat_channels', source: 'admin', assignedAt: 0 },
+  ]);
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter() },
+    baseConfig(0),
+    async (base) => {
+      const login = await fetch(`${base}/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'bob', key: 'ck_bob' }),
+      });
+      const token = ((await login.json()) as { token: string }).token;
+      const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+      const removed = await fetch(`${base}/environments/env-b`, {
+        method: 'DELETE', headers, body: JSON.stringify({ edgeId: 'ads-env-b' }),
+      });
+      assert.equal(removed.status, 202);
+      const receipt = (await removed.json()) as { data: ClientOffboardView & {
+        cleanupGrant: string; cleanupGrantExpiresAt: number; cleanupEdgeId: string;
+      } };
+      assert.equal(receipt.data.cleanupEdgeId, 'ads-env-b');
+      assert.ok(receipt.data.cleanupGrantExpiresAt > Date.now());
+      assert.equal(typeof receipt.data.cleanupGrant, 'string');
+
+      const mismatched = await fetch(`${base}/offboarding/${receipt.data.offboardId}/cleanup-bootstrap`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ cleanupGrant: receipt.data.cleanupGrant, edgeId: 'ads-other' }),
+      });
+      assert.equal(mismatched.status, 403);
+
+      const bootstrap = await fetch(`${base}/offboarding/${receipt.data.offboardId}/cleanup-bootstrap`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ cleanupGrant: receipt.data.cleanupGrant, edgeId: 'ads-env-b' }),
+      });
+      assert.equal(bootstrap.status, 200);
+      assert.deepEqual((await bootstrap.json() as { data: Record<string, unknown> }).data, {
+        mode: 'restricted_cleanup',
+        offboardId: receipt.data.offboardId,
+        envKey: 'env-b',
+        accountId: 'account-env-b',
+        edgeId: 'ads-env-b',
+      });
+
+      const replay = await fetch(`${base}/offboarding/${receipt.data.offboardId}/cleanup-bootstrap`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ cleanupGrant: receipt.data.cleanupGrant, edgeId: 'ads-env-b' }),
+      });
+      assert.equal(replay.status, 409);
+      assert.deepEqual(await replay.json(), { error: 'cleanup_grant_already_used' });
+    },
+  );
 });
 
 test('Edge delegated-task routes bind every read/write to the customer-owned environment', async () => {
@@ -1906,4 +1999,107 @@ test('环境级人设 API 严格拒绝账号选择器并区分未绑定、非所
     },
   );
   assert.equal(serviceCalls, 1, 'only the authoritative missing read reaches the persona service');
+});
+
+test('/my-environments 返回绑定与人设权威投影但不泄露 accountId', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const persona: NonNullable<ClientAuthDeps['persona']> = {
+    platformForAccount: () => 'facebook',
+    async get(accountId) {
+      assert.equal(accountId, ACCT_P1);
+      return {
+        ok: true,
+        view: {
+          state: 'configured',
+          persona: {
+            soulYaml: 'soul-current',
+            summary: {
+              name: '阿柚', role: '内容分享者', background: '从业者', tone: '亲切', writingLanguage: 'zh-CN',
+              primaryInterests: [], secondaryInterests: [], seedKeywords: [], likeAffinity: 'normal',
+            },
+            updatedAt: '2026-07-20T00:00:00.000Z',
+          },
+        },
+      };
+    },
+    async generate() { return { ok: false, reason: 'unavailable' }; },
+    async persist() { return { ok: false, reason: 'persist_failed' }; },
+  };
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), persona },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const response = await fetch(`${base}/my-environments`, { headers });
+      assert.equal(response.status, 200);
+      const body = await response.json() as { environments: Array<Record<string, unknown>> };
+      assert.deepEqual(body.environments, [{
+        envKey: 'p1', label: 'a', platform: 'facebook',
+        bindingState: 'bound', personaState: 'configured', personaBound: true,
+      }]);
+      assert.equal(JSON.stringify(body).includes(ACCT_P1), false);
+      assert.equal(JSON.stringify(body).includes('accountId'), false);
+    },
+  );
+});
+
+test('客户待审写在浏览器/core 缺席时按 env 绑定复用领域方法并返回受理真态', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const calls: Array<Record<string, unknown>> = [];
+  const publishDraftActions: NonNullable<ClientAuthDeps['publishDraftActions']> = {
+    async approve(payload, accountId, actor) {
+      calls.push({ kind: 'approve', payload, accountId, actor });
+      return {
+        requestId: payload.requestId,
+        ok: true,
+        state: payload.approved ? 'approved' : 'rejected',
+        currentVersion: payload.contentVersion,
+      };
+    },
+    async removeImage(payload, accountId, actor) {
+      calls.push({ kind: 'remove', payload, accountId, actor });
+      return { requestId: payload.requestId, ok: true, images: ['https://img/2.jpg'], contentVersion: 4 };
+    },
+  };
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), publishDraftActions },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const approval = await fetch(`${base}/environments/p1/publish/approval`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ requestId: 'publish-42', approved: true, contentVersion: 3 }),
+      });
+      assert.equal(approval.status, 200);
+      const approvalBody = await approval.json() as { data: Record<string, unknown> };
+      assert.equal(approvalBody.data.receipt, 'accepted_pending_execution');
+      assert.equal(approvalBody.data.state, 'approved');
+      assert.equal(JSON.stringify(approvalBody).includes(ACCT_P1), false);
+
+      const remove = await fetch(`${base}/environments/p1/publish/draft-image-remove`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ requestId: 'publish-42', contentVersion: 3, imageUrl: 'https://img/1.jpg' }),
+      });
+      assert.equal(remove.status, 200);
+      const removeBody = await remove.json() as { data: Record<string, unknown> };
+      assert.deepEqual(removeBody.data.images, ['https://img/2.jpg']);
+      assert.equal(removeBody.data.contentVersion, 4);
+
+      const injected = await fetch(`${base}/environments/p1/publish/approval`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ requestId: 'publish-42', approved: true, contentVersion: 3, accountId: 'victim' }),
+      });
+      assert.equal(injected.status, 422);
+      const foreign = await fetch(`${base}/environments/not-owned/publish/draft-image-remove`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ requestId: 'publish-42', contentVersion: 3, imageUrl: 'https://img/1.jpg' }),
+      });
+      assert.equal(foreign.status, 403);
+    },
+  );
+  assert.deepEqual(calls.map((call) => call.kind), ['approve', 'remove']);
+  assert.equal(calls.every((call) => call.accountId === ACCT_P1), true);
+  assert.equal(calls.every((call) => call.actor === 'client-auth:u1:p1'), true);
 });

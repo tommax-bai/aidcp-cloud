@@ -36,6 +36,8 @@ export interface DraftImageRemoveDeps {
 /** 会话身份：只取握手确立的 accountId（自报 edgeId 之外的一切都不采信）。 */
 export interface DraftImageRemoveSession {
   accountId?: string;
+  /** 审计写入者；旧 Edge WS 缺省保持既有 edge-client 口径。 */
+  actor?: string;
 }
 
 export function createPublishDraftImageRemoveHandler(deps: DraftImageRemoveDeps) {
@@ -77,7 +79,12 @@ export function createPublishDraftImageRemoveHandler(deps: DraftImageRemoveDeps)
     if (kept.length === 0) return { requestId, ok: false, reason: 'last_image' };
 
     const edited = await deps
-      .editDraft(recordId, Number(requestedVersion), { images: kept }, `edge-client:${session.accountId}`)
+      .editDraft(
+        recordId,
+        Number(requestedVersion),
+        { images: kept },
+        session.actor ?? `edge-client:${session.accountId}`,
+      )
       .catch((err: unknown) => {
         logger.warn(
           `[publish-draft] 客户端删配图落库失败 recordId=${recordId}: ${err instanceof Error ? err.message : String(err)}`,

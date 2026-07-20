@@ -318,6 +318,10 @@ export type BeginOffboardResult =
   | { ok: true; offboard: ClientOffboardView }
   | { ok: false; reason: 'disabled' | 'not_authorized' | 'offboard_binding_missing' };
 
+export type ConsumeOffboardCleanupGrantResult =
+  | { ok: true; offboard: ClientOffboardView; edgeId: string }
+  | { ok: false; reason: 'not_found' | 'scope_mismatch' | 'expired' | 'already_used' | 'not_pending' };
+
 export type InteractionScopeAuthorization<T> =
   | { ok: true; accountId: string; value: T }
   | { ok: false; reason: 'disabled' | 'not_authorized' };
@@ -585,6 +589,125 @@ export class ClientUserStore {
     const row = rows[0];
     return row ? { offboardId: row.offboard_id, envKey: row.env_key, accountId: row.account_id,
       state: row.state, reason: row.reason, requestedAt: row.requested_at.getTime(), purgeDueAt: row.purge_due_at.getTime() } : null;
+  }
+
+  /** Persist only a hash of the signed grant identity; the bearer token never enters PostgreSQL or audit rows. */
+  async registerOffboardCleanupGrant(input: {
+    userId: string;
+    offboardId: string;
+    edgeId: string;
+    jtiHash: string;
+    expiresAt: number;
+  }): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const updated = await client.query<{ account_id: string; env_key: string }>(
+        `UPDATE interaction_offboards
+            SET cleanup_grant_jti_hash=$4,cleanup_grant_edge_id=$3,
+                cleanup_grant_expires_at=to_timestamp($5 / 1000.0),cleanup_grant_used_at=NULL,updated_at=now()
+          WHERE offboard_id=$1 AND user_id=$2 AND state IN ('pending_edge','dispatched')
+          RETURNING account_id,env_key`,
+        [input.offboardId, input.userId, input.edgeId, input.jtiHash, input.expiresAt],
+      );
+      const row = updated.rows[0];
+      if (!row) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      await client.query(
+        `INSERT INTO interaction_offboard_audit
+           (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
+         VALUES ($1,$2,'wechat_channels',$3,$4,$5,'cleanup_grant_issued','issued')`,
+        [crypto.randomUUID(), input.offboardId, row.account_id, row.env_key, input.userId],
+      );
+      await client.query('COMMIT');
+      return true;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Atomically validates every binding and burns the grant before returning the account bootstrap. */
+  async consumeOffboardCleanupGrant(input: {
+    userId: string;
+    offboardId: string;
+    envKey: string;
+    accountId: string;
+    edgeId: string;
+    jtiHash: string;
+    now?: number;
+  }): Promise<ConsumeOffboardCleanupGrantResult> {
+    const now = input.now ?? Date.now();
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const selected = await client.query<{
+        offboard_id: string; env_key: string; account_id: string; state: ClientOffboardView['state'];
+        reason: ClientOffboardView['reason']; requested_at: Date; purge_due_at: Date;
+        user_id: string | null; cleanup_grant_jti_hash: string | null; cleanup_grant_edge_id: string | null;
+        cleanup_grant_expires_at: Date | null; cleanup_grant_used_at: Date | null;
+      }>(
+        `SELECT offboard_id,env_key,account_id,state,reason,requested_at,purge_due_at,user_id,
+                cleanup_grant_jti_hash,cleanup_grant_edge_id,cleanup_grant_expires_at,cleanup_grant_used_at
+           FROM interaction_offboards WHERE offboard_id=$1 FOR UPDATE`,
+        [input.offboardId],
+      );
+      const row = selected.rows[0];
+      let failure: Exclude<ConsumeOffboardCleanupGrantResult, { ok: true }>['reason'] | null = null;
+      if (!row) failure = 'not_found';
+      else if (row.user_id !== input.userId || row.env_key !== input.envKey || row.account_id !== input.accountId
+        || row.cleanup_grant_edge_id !== input.edgeId || row.cleanup_grant_jti_hash !== input.jtiHash) failure = 'scope_mismatch';
+      else if (row.cleanup_grant_used_at) failure = 'already_used';
+      else if (!row.cleanup_grant_expires_at || row.cleanup_grant_expires_at.getTime() <= now) failure = 'expired';
+      else if (row.state !== 'pending_edge' && row.state !== 'dispatched') failure = 'not_pending';
+
+      if (failure) {
+        if (row) {
+          await client.query(
+            `INSERT INTO interaction_offboard_audit
+               (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
+             VALUES ($1,$2,'wechat_channels',$3,$4,$5,'cleanup_grant_rejected',$6)`,
+            [crypto.randomUUID(), row.offboard_id, row.account_id, row.env_key, input.userId, failure],
+          );
+        }
+        await client.query('COMMIT');
+        return { ok: false, reason: failure };
+      }
+
+      await client.query(
+        `UPDATE interaction_offboards SET cleanup_grant_used_at=now(),updated_at=now() WHERE offboard_id=$1`,
+        [row!.offboard_id],
+      );
+      await client.query(
+        `INSERT INTO interaction_offboard_audit
+           (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
+         VALUES ($1,$2,'wechat_channels',$3,$4,$5,'cleanup_grant_consumed','consumed')`,
+        [crypto.randomUUID(), row!.offboard_id, row!.account_id, row!.env_key, input.userId],
+      );
+      await client.query('COMMIT');
+      return {
+        ok: true,
+        edgeId: input.edgeId,
+        offboard: {
+          offboardId: row!.offboard_id,
+          envKey: row!.env_key,
+          accountId: row!.account_id,
+          state: row!.state,
+          reason: row!.reason,
+          requestedAt: row!.requested_at.getTime(),
+          purgeDueAt: row!.purge_due_at.getTime(),
+        },
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async init(): Promise<void> {

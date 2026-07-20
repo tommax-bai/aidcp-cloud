@@ -10,8 +10,8 @@
  * - 通过即切：授权到达即下发该草稿、不等自然空档。唯一例外=该账号处于下发熔断（连续序列失败触发）——
  *   熔断只延后不放行不烧授权，人工再次批准（含 already-decided 重复批准）即确认清除、恢复 drain。
  * - 忠于冻结草稿：从 publish_log 读回标题/正文/图/元数据原样发，MUST NOT 重生成（陈旧亦照发）。
- * - 边缘离线（零副作用失败）：草稿回待审 + 作废本次授权信号 + 通知重批（不烧稿、不伪造、不静默吞授权、
- *   不让位空转）；序列中途失败（页面状态未知）仍诚实 failed 终态、绝不自动重跑。
+ * - 批准受理与平台执行分离：初始边缘离线时保留授权并等待控制核心恢复；序列中途断线（页面状态未知）
+ *   仍按既有诚实失败/重审合同处理，绝不自动重跑可能已提交的页面写。
  * - 幂等 + 按账号单飞：同 recordId 重复触发不二次发布；同账号下发串行，绝不并发抢同一边缘。
  */
 
@@ -41,6 +41,7 @@ export interface ApprovalDecision {
 /** 下发段运维通知（best-effort，绝不影响下发主链路）：离线/接管超时回待审 / 熔断开启 / 熔断解除。 */
 export interface DispatchNotice {
   kind:
+    | 'edge_offline_waiting'
     | 'offline_requeued'
     | 'acquire_timeout_requeued'
     | 'cdp_unhealthy_requeued'
@@ -153,6 +154,8 @@ export class PublishDispatcher {
   private readonly pausedNotified = new Set<number>();
   /** 浏览器槽位等待通知去重：同一进程内只在首次进入等待时通知；取得租约/离开可下发态后清除。 */
   private readonly browserSlotWaitingNotified = new Set<number>();
+  /** 初始 core 离线等待通知去重：授权保留，兜底扫描重试期间不重复通知。 */
+  private readonly edgeOfflineWaitingNotified = new Set<number>();
 
   /**
    * 发布真发出后记一笔风控计数（change risk-record-actuated-facts）。
@@ -445,19 +448,21 @@ export class PublishDispatcher {
       return;
     }
 
-    // 边缘离线（零副作用失败，change parallel-rewrite-drafts）→ 草稿回待审 + 作废本次授权信号 + 通知重批。
-    // 不烧稿（保住生成+生图成本）、不让位空转、不伪造、不静默吞授权；边缘恢复后人工重批即可下发。
-    // 作废信号防两害：60s 兜底扫描对着离线边缘反复空转、以及边缘恢复后旧授权在无人知情时自动发出。
+    // 初始 core 离线发生在任何页面命令下发之前：批准已被 Cloud 权威受理，保留授权并由兜底扫描等待 core
+    // 恢复。此处 MUST NOT 作废授权或要求客户重复批准；受理成功仍不等于平台已发布。
     const edgeId = this.resolveEdgeIdForAccount(accountId);
     if (!edgeId) {
-      await this.voidApprovalSignal(requestId).catch(() => {});
       this.clearBrowserSlotWaiting(recordId);
       this.logger.warn(
-        `[PublishDispatcher] 账号 ${accountId} 无在线边缘节点，recordId=${recordId} 回待审（作废本次授权、通知重批；不烧稿、不让位、不下发）`,
+        `[PublishDispatcher] 账号 ${accountId} 控制核心暂离线，recordId=${recordId} 保留授权等待恢复（未启动浏览器、未下发）`,
       );
-      this.notifyOps({ kind: 'offline_requeued', accountId, recordId, title: draft.title });
+      if (!this.edgeOfflineWaitingNotified.has(recordId)) {
+        this.edgeOfflineWaitingNotified.add(recordId);
+        this.notifyOps({ kind: 'edge_offline_waiting', accountId, recordId, title: draft.title });
+      }
       return;
     }
+    this.edgeOfflineWaitingNotified.delete(recordId);
 
     // 7.3 验证码硬暂停闸：暂停期该 edge 收不到发布命令（不在 ws-server 下发豁免名单）→ 投递必为 0 →
     // 序列器立即 reject → 会被烧成不可逆 failed + 熔断 +1。下发前先闸：暂停即零副作用回待审、不烧稿、不计熔断。

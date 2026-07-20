@@ -12,6 +12,7 @@
  */
 
 import {
+  CLIENT_CORE_BROWSER_EXECUTOR_CAPABILITY,
   makeEnvelope,
   type Envelope,
   type SelectRequestPayload,
@@ -645,17 +646,22 @@ export class DefaultMessageHandler implements MessageHandler {
     }
     // 这里只完成传输协商。浏览业务运行时与 edge.hello 在 ws-server 写出 welcome、登记在线路由后激活，
     // 防止人设/调度/角色构造等业务异常反向把合法连接升级成握手失败。
-    const negotiatedCapabilities = this.deps.interactionInbox
-      ? [
+    const negotiated = [
+      ...((session.capabilities ?? []).includes(CLIENT_CORE_BROWSER_EXECUTOR_CAPABILITY)
+        ? [CLIENT_CORE_BROWSER_EXECUTOR_CAPABILITY]
+        : []),
+      ...(this.deps.interactionInbox
+        ? [
           INTERACTION_CAPABILITY,
           INTERACTION_REPLY_RECOVERY_CAPABILITY,
           INTERACTION_OFFBOARDING_CAPABILITY,
           INTERACTION_BROWSER_CONTROL_CAPABILITY,
           INTERACTION_TEST_DATA_RESET_CAPABILITY,
           ...(this.deps.interactionRuntimeControls ? [INTERACTION_RUNTIME_CONTROLS_CAPABILITY] : []),
-        ]
-        .filter((capability) => (session.capabilities ?? []).includes(capability))
-      : undefined;
+        ].filter((capability) => (session.capabilities ?? []).includes(capability))
+        : []),
+    ];
+    const negotiatedCapabilities = negotiated.length > 0 ? negotiated : undefined;
     let offboardPending: boolean | undefined;
     if (negotiatedCapabilities?.includes(INTERACTION_OFFBOARDING_CAPABILITY)) {
       try {

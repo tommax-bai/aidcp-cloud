@@ -10,6 +10,7 @@ const provisioningMigrationUrl = new URL('../../migrations/0043_client_env_provi
 const storeCircuitMigrationUrl = new URL('../../migrations/0045_wechat_store_and_circuit.sql', import.meta.url);
 const activeIdempotencyMigrationUrl = new URL('../../migrations/0046_interaction_idempotency_active_unique.sql', import.meta.url);
 const groupReplyConfigMigrationUrl = new URL('../../migrations/0048_wechat_group_reply_config.sql', import.meta.url);
+const cleanupGrantMigrationUrl = new URL('../../migrations/0049_offboard_cleanup_grants.sql', import.meta.url);
 
 test('0039 creates the dedicated inbound domain and never writes outbound interaction_feed', async () => {
   const sql = await readFile(migrationUrl, 'utf8');
@@ -124,4 +125,14 @@ test('0048 adds stable group/default config scopes without deleting legacy accou
   assert.match(sql, /ADD COLUMN IF NOT EXISTS config_scope_id TEXT REFERENCES interaction_reply_config_scopes/);
   assert.doesNotMatch(sql, /DROP TABLE|DELETE FROM interaction_reply_configs|ALTER TABLE interaction_reply_configs/,
     'group-scope migration must remain additive and leave legacy account configs intact');
+});
+
+test('0049 adds hashed use-once offboard cleanup grants without storing bearer tokens', async () => {
+  const sql = await readFile(cleanupGrantMigrationUrl, 'utf8');
+  assert.match(sql, /cleanup_grant_jti_hash CHAR\(64\)/);
+  assert.match(sql, /cleanup_grant_edge_id TEXT/);
+  assert.match(sql, /cleanup_grant_expires_at TIMESTAMPTZ/);
+  assert.match(sql, /cleanup_grant_used_at TIMESTAMPTZ/);
+  assert.match(sql, /state IN \('pending_edge','dispatched'\)/);
+  assert.doesNotMatch(sql, /cleanup_grant_token|bearer_token/i);
 });

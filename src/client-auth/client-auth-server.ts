@@ -26,7 +26,13 @@ import { clampClientApprovalMode } from '../delegated-task/types.js';
 import type { CuratedContentStore, CuratedPanelRow, CuratedReferenceImage } from '../cache/curated-content-store.js';
 import { CuratedContentUnavailableError } from '../cache/curated-content-store.js';
 import type { ResolvedBinding } from './client-user-store.js';
-import type { UiSlowStartPayload } from '../comm/protocol.js';
+import type {
+  PublishApprovalActionPayload,
+  PublishApprovalActionResultPayload,
+  PublishDraftImageRemovePayload,
+  PublishDraftImageRemoveResultPayload,
+  UiSlowStartPayload,
+} from '../comm/protocol.js';
 import type { PendingPublishPreview, PublishLogStore } from '../publish-agent/publish-log-store.js';
 import type { PersonaAutoFillService } from '../agents/persona-auto-fill.js';
 import type { AccountPersonaService } from '../config/account-persona-service.js';
@@ -34,6 +40,11 @@ import { isWritingLanguage } from '../soul/writing-language.js';
 import { loadSoulFromYaml } from '../soul/index.js';
 import type { RiskStatus } from '../risk/types.js';
 import type { SetOperatorAliasResult } from '../account-store.js';
+import {
+  hashOffboardCleanupGrantJti,
+  issueOffboardCleanupGrant,
+  verifyOffboardCleanupGrant,
+} from './offboard-cleanup-grant.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_SELECTED_PERSONA_BYTES = 32 * 1024;
@@ -57,6 +68,19 @@ export interface ClientAuthDeps {
     PublishLogStore,
     'listPendingPublishPreviewsForAccount' | 'pendingPublishPreviewForAccountRecord'
   >;
+  /** 客户待审稿写：传输层只解析客户环境，实际闸序与落库复用既有领域方法。 */
+  publishDraftActions?: {
+    approve(
+      payload: PublishApprovalActionPayload,
+      accountId: string,
+      actor: string,
+    ): Promise<PublishApprovalActionResultPayload>;
+    removeImage(
+      payload: PublishDraftImageRemovePayload,
+      accountId: string,
+      actor: string,
+    ): Promise<PublishDraftImageRemoveResultPayload>;
+  };
   /**
    * 环境→edgeId 活会话反查（change curated-envkey-account-binding，D5 活体佐证）。返回 `ads-<envKey>` 或 null。
    * **刻意用 resolveEdgeIdForAccount（幸存者）；反方向的 resolveAccountIdForEdge 已被慢启动 change 删除**——
@@ -326,17 +350,34 @@ function sendBindingFailure(res: http.ServerResponse, reason: Exclude<ResolvedBi
   sendJson(res, status, { error: reason });
 }
 
+/** 单一客户环境绑定解析边界：所有 env-scoped Cloud 操作复用，绝不采信客户端 accountId。 */
+async function resolveOwnedBoundAccount(
+  deps: ClientAuthDeps,
+  res: http.ServerResponse,
+  userId: string,
+  envKey: string,
+): Promise<{ envKey: string; accountId: string } | null> {
+  const normalizedEnvKey = envKey.trim();
+  if (!normalizedEnvKey || normalizedEnvKey.length > 256 || /[\u0000-\u001f\u007f]/.test(normalizedEnvKey)) {
+    sendJson(res, 400, { error: 'bad_request', reason: 'invalid_env_key' });
+    return null;
+  }
+  const bound = await deps.store.resolveBoundAccountForEnv(userId, normalizedEnvKey);
+  if (!bound.ok) {
+    sendBindingFailure(res, bound.reason);
+    return null;
+  }
+  return { envKey: normalizedEnvKey, accountId: bound.accountId };
+}
+
 async function resolveOwnedFacebookRiskAccount(
   deps: ClientAuthDeps,
   res: http.ServerResponse,
   userId: string,
   envKey: string,
 ): Promise<string | null> {
-  const bound = await deps.store.resolveBoundAccountForEnv(userId, envKey);
-  if (!bound.ok) {
-    sendBindingFailure(res, bound.reason);
-    return null;
-  }
+  const bound = await resolveOwnedBoundAccount(deps, res, userId, envKey);
+  if (!bound) return null;
   const platform = deps.environmentRisk?.platformForAccount(bound.accountId)?.trim().toLowerCase();
   if (platform !== 'facebook') {
     sendJson(res, 409, { error: 'unsupported_platform' });
@@ -466,7 +507,21 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
     // 权威过滤点：只返回该客户归属的环境（N2 scoped 读）。
     if (method === 'GET' && url === '/my-environments') {
       const scope = await deps.store.listEnvScope(userId);
-      sendJson(res, 200, { environments: scope.map((s) => ({ envKey: s.envKey, label: s.label, platform: s.platform })) });
+      const environments = await Promise.all(scope.map(async (s) => {
+        const base = { envKey: s.envKey, label: s.label, platform: s.platform };
+        const bound = await deps.store.resolveBoundAccountForEnv(userId, s.envKey);
+        if (!bound.ok) return { ...base, bindingState: bound.reason };
+        if (!deps.persona) return { ...base, bindingState: 'bound', personaState: 'unavailable' };
+        const persona = await deps.persona.get(bound.accountId).catch(() => null);
+        if (!persona?.ok) return { ...base, bindingState: 'bound', personaState: 'unavailable' };
+        return {
+          ...base,
+          bindingState: 'bound',
+          personaState: persona.view.state,
+          personaBound: persona.view.state === 'configured',
+        };
+      }));
+      sendJson(res, 200, { environments });
       return;
     }
 
@@ -563,11 +618,8 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         sendJson(res, 405, { error: 'method_not_allowed' });
         return;
       }
-      const bound = await deps.store.resolveBoundAccountForEnv(userId, envKey);
-      if (!bound.ok) {
-        sendBindingFailure(res, bound.reason);
-        return;
-      }
+      const bound = await resolveOwnedBoundAccount(deps, res, userId, envKey);
+      if (!bound) return;
 
       if (method === 'GET') {
         const result = await deps.persona.get(bound.accountId);
@@ -666,6 +718,124 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       }
       sendJson(res, 200, {
         data: { envKey, ...result.view, firstPostOnboarding: result.firstPostOnboarding },
+        meta: { requestId: randomUUID(), asOf: Date.now() },
+      });
+      return;
+    }
+
+    const publishApprovalMatch = /^\/environments\/([^/]+)\/publish\/approval$/.exec(url);
+    if (method === 'POST' && publishApprovalMatch) {
+      if (!deps.publishDraftActions) {
+        sendJson(res, 503, { error: 'publish_draft_actions_unavailable' });
+        return;
+      }
+      let envKey: string;
+      try {
+        envKey = decodeURIComponent(publishApprovalMatch[1] ?? '').trim();
+      } catch {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_env_key' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const raw = body as Record<string, unknown>;
+      const allowed = new Set(['requestId', 'approved', 'contentVersion', 'publishMode', 'publishTime']);
+      if (Object.keys(raw).some((key) => !allowed.has(key))) {
+        sendJson(res, 422, { error: 'validation_failed', reason: 'invalid_publish_approval_intent' });
+        return;
+      }
+      const bound = await resolveOwnedBoundAccount(deps, res, userId, envKey);
+      if (!bound) return;
+      const payload = {
+        requestId: raw.requestId,
+        approved: raw.approved,
+        contentVersion: raw.contentVersion,
+        ...(Object.prototype.hasOwnProperty.call(raw, 'publishMode') ? { publishMode: raw.publishMode } : {}),
+        ...(Object.prototype.hasOwnProperty.call(raw, 'publishTime') ? { publishTime: raw.publishTime } : {}),
+      } as PublishApprovalActionPayload;
+      const result = await deps.publishDraftActions.approve(
+        payload,
+        bound.accountId,
+        `client-auth:${userId}:${bound.envKey}`,
+      );
+      if (!result.ok) {
+        const status = result.reason === 'invalid_request' || result.reason === 'invalid_publish_plan' ? 422
+          : result.reason === 'store_unavailable' || result.reason === 'publish_target_unavailable' ? 503
+            : 409;
+        sendJson(res, status, { error: 'publish_approval_rejected', ...result });
+        return;
+      }
+      sendJson(res, 200, {
+        data: {
+          envKey: bound.envKey,
+          ...result,
+          receipt: result.state === 'approved' ? 'accepted_pending_execution' : 'rejected',
+        },
+        meta: { requestId: randomUUID(), asOf: Date.now() },
+      });
+      return;
+    }
+
+    const publishImageRemoveMatch = /^\/environments\/([^/]+)\/publish\/draft-image-remove$/.exec(url);
+    if (method === 'POST' && publishImageRemoveMatch) {
+      if (!deps.publishDraftActions) {
+        sendJson(res, 503, { error: 'publish_draft_actions_unavailable' });
+        return;
+      }
+      let envKey: string;
+      try {
+        envKey = decodeURIComponent(publishImageRemoveMatch[1] ?? '').trim();
+      } catch {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_env_key' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const raw = body as Record<string, unknown>;
+      const allowed = new Set(['requestId', 'contentVersion', 'imageUrl']);
+      if (Object.keys(raw).some((key) => !allowed.has(key))) {
+        sendJson(res, 422, { error: 'validation_failed', reason: 'invalid_publish_image_remove_intent' });
+        return;
+      }
+      const bound = await resolveOwnedBoundAccount(deps, res, userId, envKey);
+      if (!bound) return;
+      const result = await deps.publishDraftActions.removeImage(
+        {
+          requestId: raw.requestId,
+          contentVersion: raw.contentVersion,
+          imageUrl: raw.imageUrl,
+        } as PublishDraftImageRemovePayload,
+        bound.accountId,
+        `client-auth:${userId}:${bound.envKey}`,
+      );
+      if (!result.ok) {
+        const status = result.reason === 'invalid_request' ? 422
+          : result.reason === 'store_unavailable' ? 503
+            : result.reason === 'not_found' ? 404
+              : 409;
+        sendJson(res, status, { error: 'publish_image_remove_rejected', ...result });
+        return;
+      }
+      sendJson(res, 200, {
+        data: { envKey: bound.envKey, ...result },
         meta: { requestId: randomUUID(), asOf: Date.now() },
       });
       return;
@@ -1228,14 +1398,125 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
     const environmentOffboard = /^\/environments\/([^/]+)$/.exec(url);
     if (method === 'DELETE' && environmentOffboard) {
       const envKey = decodeURIComponent(environmentOffboard[1]).trim();
+      let edgeId = '';
+      try {
+        const raw = await readJsonBody(req);
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)
+          || Object.keys(raw).some((key) => key !== 'edgeId')
+          || ('edgeId' in raw && typeof (raw as { edgeId?: unknown }).edgeId !== 'string')) {
+          sendJson(res, 400, { error: 'bad_request' });
+          return;
+        }
+        edgeId = String((raw as { edgeId?: string }).edgeId || '').trim();
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      // Backward compatibility: old clients send no body and continue on the durable legacy
+      // offboard path. New clients must bind the cleanup grant to this environment's stable edgeId.
+      if (edgeId && (edgeId.length > 256 || edgeId !== `ads-${envKey}`)) {
+        sendJson(res, 409, { error: 'cleanup_edge_mismatch' });
+        return;
+      }
       const result = await deps.store.beginEnvironmentOffboard(userId, envKey);
       if (!result.ok) {
         sendJson(res, result.reason === 'disabled' ? 401 : result.reason === 'not_authorized' ? 404 : 409,
           { error: result.reason });
         return;
       }
+      let cleanupGrant: { token: string; expiresAt: number; edgeId: string } | null = null;
+      if (edgeId && result.offboard.state !== 'tombstoned' && result.offboard.state !== 'purged') {
+        const issued = issueOffboardCleanupGrant({
+          offboardId: result.offboard.offboardId,
+          envKey: result.offboard.envKey,
+          accountId: result.offboard.accountId,
+          edgeId,
+          userId,
+        }, config.jwtSecret);
+        const expiresAt = issued.claims.exp * 1000;
+        const registered = await deps.store.registerOffboardCleanupGrant({
+          userId,
+          offboardId: result.offboard.offboardId,
+          edgeId,
+          jtiHash: hashOffboardCleanupGrantJti(issued.claims.jti),
+          expiresAt,
+        });
+        if (!registered) {
+          sendJson(res, 409, { error: 'cleanup_grant_unavailable' });
+          return;
+        }
+        cleanupGrant = { token: issued.token, expiresAt, edgeId };
+      }
       await deps.onOffboardCreated?.(result.offboard);
-      sendJson(res, 202, { data: result.offboard, meta: { requestId: randomUUID(), asOf: Date.now() } });
+      sendJson(res, 202, {
+        data: {
+          ...result.offboard,
+          ...(cleanupGrant ? {
+            cleanupGrant: cleanupGrant.token,
+            cleanupGrantExpiresAt: cleanupGrant.expiresAt,
+            cleanupEdgeId: cleanupGrant.edgeId,
+          } : {}),
+        },
+        meta: { requestId: randomUUID(), asOf: Date.now() },
+      });
+      return;
+    }
+    const offboardCleanupBootstrap = /^\/offboarding\/([^/]+)\/cleanup-bootstrap$/.exec(url);
+    if (method === 'POST' && offboardCleanupBootstrap) {
+      let raw: unknown;
+      try {
+        raw = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)
+        || Object.keys(raw).some((key) => key !== 'cleanupGrant' && key !== 'edgeId')) {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { cleanupGrant, edgeId } = raw as { cleanupGrant?: unknown; edgeId?: unknown };
+      if (typeof cleanupGrant !== 'string' || !cleanupGrant || cleanupGrant.length > 4096
+        || typeof edgeId !== 'string' || !edgeId || edgeId.length > 256) {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const verifiedGrant = verifyOffboardCleanupGrant(cleanupGrant, config.jwtSecret);
+      if (!verifiedGrant.ok) {
+        sendJson(res, verifiedGrant.reason === 'expired' ? 410 : 403, { error: `cleanup_grant_${verifiedGrant.reason}` });
+        return;
+      }
+      const claims = verifiedGrant.claims;
+      const offboardId = decodeURIComponent(offboardCleanupBootstrap[1]);
+      if (claims.offboardId !== offboardId || claims.userId !== userId || claims.edgeId !== edgeId) {
+        sendJson(res, 403, { error: 'cleanup_grant_scope_mismatch' });
+        return;
+      }
+      const consumed = await deps.store.consumeOffboardCleanupGrant({
+        userId,
+        offboardId: claims.offboardId,
+        envKey: claims.envKey,
+        accountId: claims.accountId,
+        edgeId: claims.edgeId,
+        jtiHash: hashOffboardCleanupGrantJti(claims.jti),
+      });
+      if (!consumed.ok) {
+        const status = consumed.reason === 'not_found' ? 404
+          : consumed.reason === 'expired' ? 410
+            : consumed.reason === 'already_used' ? 409 : 403;
+        sendJson(res, status, { error: `cleanup_grant_${consumed.reason}` });
+        return;
+      }
+      sendJson(res, 200, {
+        data: {
+          mode: 'restricted_cleanup',
+          offboardId: consumed.offboard.offboardId,
+          envKey: consumed.offboard.envKey,
+          accountId: consumed.offboard.accountId,
+          edgeId: consumed.edgeId,
+        },
+        meta: { requestId: randomUUID(), asOf: Date.now() },
+      });
       return;
     }
     const offboardStatus = /^\/offboarding\/([^/]+)$/.exec(url);

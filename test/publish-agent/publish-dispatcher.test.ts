@@ -174,14 +174,18 @@ describe('PublishDispatcher', () => {
     assert.equal(h.statusUpdates.length, 0, '未授权不改态（仍待审）');
   });
 
-  test('边缘离线（零副作用）→ 回待审：作废授权、通知重批、不烧稿、不让位、不驱动序列', async () => {
+  test('初始 core 离线（零页面副作用）→ 保留授权等待恢复、不烧稿、不让位、不驱动序列', async () => {
     const h = harness({ approved: true, edgeId: null });
     await h.dispatcher.dispatch(7);
     assert.equal(h.events.includes('seq'), false, '离线不驱动序列');
     assert.equal(h.events.includes('start'), false, '离线不让位空转');
-    assert.equal(h.statusUpdates.length, 0, '不改态：草稿留待审可重批（不烧成 failed 终态）');
-    assert.deepEqual(h.voided, ['publish-7'], '作废本次授权信号（防兜底扫描对离线空转/旧授权无人知情自动发出）');
-    assert.deepEqual(h.notices, [{ kind: 'offline_requeued', accountId: 'acct-A', recordId: 7, title: 'vLLM 部署踩坑' }], '如实通知重批');
+    assert.equal(h.statusUpdates.length, 0, '不改态：草稿留待审且不烧成 failed 终态');
+    assert.deepEqual(h.voided, [], '批准已受理，初始 core 离线不得作废授权或要求重复批准');
+    assert.deepEqual(
+      h.notices,
+      [{ kind: 'edge_offline_waiting', accountId: 'acct-A', recordId: 7, title: 'vLLM 部署踩坑' }],
+      '如实通知已受理但待 core 恢复，绝不冒充已发布',
+    );
   });
 
   test('在线 edge 的 acquire 超时（零副作用）→ 回待审但不得误报离线', async () => {

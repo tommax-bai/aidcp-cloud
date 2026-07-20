@@ -13,6 +13,9 @@
 /** 协议版本号 */
 export const PROTOCOL_VERSION = 2;
 
+/** Edge build supports a persistent client core whose browser executor is acquired on demand. */
+export const CLIENT_CORE_BROWSER_EXECUTOR_CAPABILITY = 'client_core_browser_executor_v1';
+
 /** 所有消息的类型枚举 */
 export type MessageType =
   // —— 连接握手 ——
