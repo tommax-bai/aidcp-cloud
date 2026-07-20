@@ -1463,6 +1463,8 @@ export interface InteractionCollectPayload {
 
 export interface InteractionFollowPayload {
   authorId?: string;
+  /** Facebook Reels 专用：把关注绑定到当前规范 Reel；其它平台/主页关注可省略。 */
+  noteId?: string;
   reason?: string;
   /** 关注前犹豫时间中心值（毫秒，可选） */
   thinkMs?: number;

@@ -23,6 +23,7 @@ import {
   type SearchExecutePayload,
   type NoteOpenPayload,
   type InteractionCommentPayload,
+  type InteractionFollowPayload,
   type PersonaGeneratePayload,
   type PersonaGenerateResultPayload,
   type PersonaPersistResultPayload,
@@ -105,6 +106,19 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     const env = makeEnvelope('interaction.like', 'rt-1', 1700000000000, { noteId: 'n1', reason: 'r' });
     const back = parseEnvelope(JSON.stringify(env));
     assert.deepEqual(back, env);
+  });
+
+  it('AC-PROTO-04B interaction.follow 兼容旧载荷，并保留 Reel noteId', () => {
+    const legacy: InteractionFollowPayload = { authorId: 'author-1' };
+    const reel: InteractionFollowPayload = {
+      authorId: 'author-1',
+      noteId: 'https://www.facebook.com/reel/111',
+      thinkMs: 1200,
+    };
+    assert.equal(legacy.noteId, undefined);
+    const env = makeEnvelope('interaction.follow', 'follow-1', 1700000000000, reel);
+    assert.deepEqual(parseEnvelope(JSON.stringify(env)), env);
+    assert.equal((env.payload as InteractionFollowPayload).noteId, reel.noteId);
   });
 
   it('AC-PROTO-05 坏帧解析返回 null（坏 JSON / 缺字段）', () => {
