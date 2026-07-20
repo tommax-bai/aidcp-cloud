@@ -155,11 +155,6 @@ export class InteractionScopeInternalApi {
         return;
       }
     }
-    if (rest === 'migration-inventory' && method === 'GET') {
-      this.require(actor, 'interaction.audit.view');
-      this.ok(res, requestId, { mode: this.deps.resolver.mode, items: await this.deps.resolver.inventory() });
-      return;
-    }
     const slash = rest.indexOf('/');
     const scopeId = decodeURIComponent(slash < 0 ? rest : rest.slice(0, slash));
     const suffix = slash < 0 ? '' : rest.slice(slash + 1);

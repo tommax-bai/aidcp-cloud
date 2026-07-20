@@ -147,7 +147,7 @@ export class InteractionInternalApi {
     workflow: ReplyWorkflow;
     grantsFor: (actor: string) => ReadonlySet<InteractionGrant>;
     cursorSecret: string;
-    resolutionMode?: 'legacy' | 'shadow' | 'scoped';
+    resolutionMode?: 'scoped';
     onRuntimeControlsUpdated?: (controls: RuntimeControls) => Promise<{ delivered: number }>;
     clock?: () => number;
   }) {
@@ -205,6 +205,16 @@ export class InteractionInternalApi {
     requestId: string,
   ): Promise<void> {
     const method = req.method ?? 'GET';
+    if (this.deps.resolutionMode === 'scoped' &&
+        suffix !== 'interaction-runtime-controls' && suffix !== 'reply-preview-contexts') {
+      throw new InteractionError(
+        'INTERACTION_STATE_CONFLICT',
+        '账号级回复策略已退役，请在视频号分组/默认策略中管理。',
+        410,
+        false,
+        { reason: 'account_reply_config_retired' },
+      );
+    }
     this.require(actor, routeGrant(suffix, method));
     const allowedQuery = suffix === 'reply-config/audit' && method === 'GET'
       ? ['limit','cursor']
@@ -243,15 +253,6 @@ export class InteractionInternalApi {
         });
         return;
       }
-    }
-    if (this.deps.resolutionMode === 'scoped' && method !== 'GET') {
-      throw new InteractionError(
-        'INTERACTION_STATE_CONFLICT',
-        '账号级回复配置写入口已停用，请在视频号分组/默认策略中修改。',
-        409,
-        false,
-        { reason: 'account_reply_config_deprecated' },
-      );
     }
     if (suffix === 'reply-config/initialize' && method === 'POST') {
       this.require(actor, 'interaction.config.edit');

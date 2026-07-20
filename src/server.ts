@@ -254,7 +254,6 @@ import {
   ReplyConfigStore,
   ReplyConfigScopeStore,
   ReplyConfigResolver,
-  parseReplyConfigResolutionMode,
   ReplyAiService,
   ReplyWorkflow,
   InteractionInboxService,
@@ -1382,11 +1381,7 @@ async function main(): Promise<void> {
     interactionSchemaMode = await interactionStore.init();
     await replyConfigStore.init();
     await replyConfigScopeStore.init();
-    replyConfigResolver = new ReplyConfigResolver(
-      replyConfigStore,
-      replyConfigScopeStore,
-      parseReplyConfigResolutionMode(readEnvString('AIDCP_WECHAT_REPLY_CONFIG_SCOPE_MODE')),
-    );
+    replyConfigResolver = new ReplyConfigResolver(replyConfigScopeStore);
     const resetClassifying = await interactionStore.recoverStalledClassifyingJobs(Date.now() - interactionAiTimeoutMs * 2);
     interactionMetrics.gauge('interaction_recovered_classifying_jobs', resetClassifying);
     const replyAi = new ReplyAiService(

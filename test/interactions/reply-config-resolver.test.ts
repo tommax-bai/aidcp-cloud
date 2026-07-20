@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { ReplyConfigStore } from '../../src/interactions/reply-config-store.js';
 import type { ReplyConfigScopeStore } from '../../src/interactions/reply-config-scope-store.js';
-import { ReplyConfigResolver, replyConfigFingerprint } from '../../src/interactions/reply-config-resolver.js';
+import { ReplyConfigResolver } from '../../src/interactions/reply-config-resolver.js';
 import type { ReplyConfigScopeHead, ReplyConfigSnapshot, ReplyConfigSource } from '../../src/interactions/types.js';
 
 function snapshot(accountId: string, version: number, scopeId?: string, source?: ReplyConfigSource): ReplyConfigSnapshot {
@@ -42,8 +41,7 @@ test('scoped resolver uses group exactly and never falls back to default', async
       ? head('scope-default', defaultSource, 9) : null,
     getSnapshot: async () => snapshot('account-a', 9, 'scope-default', defaultSource),
   } as unknown as ReplyConfigScopeStore;
-  const legacy = { getSnapshot: async () => snapshot('account-a', 3), getHead: async () => null } as unknown as ReplyConfigStore;
-  const resolver = new ReplyConfigResolver(legacy, scopes, 'scoped');
+  const resolver = new ReplyConfigResolver(scopes);
   const resolved = await resolver.resolve('account-a');
   assert.equal(resolved.status, 'missing');
   assert.equal(resolved.reason, 'group_config_missing');
@@ -59,36 +57,11 @@ test('ungrouped account resolves the singleton default published snapshot', asyn
     getScopeBySource: async () => head('scope-default', source, 4),
     getSnapshot: async () => published,
   } as unknown as ReplyConfigScopeStore;
-  const resolver = new ReplyConfigResolver({} as ReplyConfigStore, scopes, 'scoped');
+  const resolver = new ReplyConfigResolver(scopes);
   const resolved = await resolver.resolve('account-u');
   assert.equal(resolved.status, 'published');
   assert.equal(resolved.snapshot, published);
   assert.equal(resolved.source.type, 'default');
-});
-
-test('shadow executes legacy while reporting body-free fingerprint parity', async () => {
-  const source: ReplyConfigSource = { type: 'group', groupLabel: 'A' };
-  const legacySnapshot = snapshot('account-a', 2);
-  const scopedSnapshot = { ...snapshot('account-a', 7, 'scope-a', source), createdAt: 999, createdBy: 'other' };
-  const observations: unknown[] = [];
-  const scopes = {
-    sourceForAccount: async () => source,
-    getScopeBySource: async () => head('scope-a', source, 7),
-    getSnapshot: async () => scopedSnapshot,
-  } as unknown as ReplyConfigScopeStore;
-  const legacy = {
-    getSnapshot: async () => legacySnapshot,
-    getHead: async () => ({ currentVersion: 2, draftVersion: null, publishedVersion: 2 }),
-  } as unknown as ReplyConfigStore;
-  const resolver = new ReplyConfigResolver(legacy, scopes, 'shadow', {
-    onShadowObservation: (value) => observations.push(value),
-  });
-  const resolved = await resolver.resolve('account-a');
-  assert.equal(resolved.snapshot, legacySnapshot);
-  assert.equal(replyConfigFingerprint(legacySnapshot), replyConfigFingerprint(scopedSnapshot));
-  assert.deepEqual(observations, [{
-    accountId: 'account-a', source, legacyVersion: 2, scopedVersion: 7, sameFingerprint: true,
-  }]);
 });
 
 test('historical job lookup uses frozen scope id instead of current account grouping', async () => {
@@ -97,7 +70,15 @@ test('historical job lookup uses frozen scope id instead of current account grou
   const scopes = {
     getSnapshot: async (...args: unknown[]) => { loaded = args; return frozen; },
   } as unknown as ReplyConfigScopeStore;
-  const resolver = new ReplyConfigResolver({} as ReplyConfigStore, scopes, 'scoped');
+  const resolver = new ReplyConfigResolver(scopes);
   assert.equal(await resolver.getSnapshotForJob('account-a', 'scope-old', 5), frozen);
   assert.deepEqual(loaded, ['scope-old', 5, 'account-a']);
+});
+
+test('historical account-scoped jobs fail closed after legacy strategy retirement', async () => {
+  const scopes = new Proxy({}, {
+    get() { throw new Error('legacy_job_must_not_read_scoped_or_account_config'); },
+  }) as ReplyConfigScopeStore;
+  const resolver = new ReplyConfigResolver(scopes);
+  assert.equal(await resolver.getSnapshotForJob('account-a', null, 9), null);
 });

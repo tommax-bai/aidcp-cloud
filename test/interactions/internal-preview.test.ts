@@ -72,6 +72,36 @@ test('runtime-control CAS reports online delivery separately from persisted succ
   }
 });
 
+test('scoped mode retires every account strategy route without reading legacy data', async () => {
+  const api = new InteractionInternalApi({
+    store: {} as InteractionStore,
+    configs: new Proxy({}, {
+      get() { throw new Error('retired_account_strategy_must_not_read_legacy_store'); },
+    }) as ReplyConfigStore,
+    workflow: new Proxy({}, {
+      get() { throw new Error('retired_account_strategy_must_not_run_preview'); },
+    }) as ReplyWorkflow,
+    grantsFor: () => new Set(['interaction.config.view', 'interaction.config.edit']),
+    cursorSecret: 'internal-test-cursor-secret',
+    resolutionMode: 'scoped',
+  });
+  const server = http.createServer((req, res) => { void api.handle(req, res, 'admin'); });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    for (const path of ['interaction-reply-policy', 'reply-templates', 'reply-rules', 'reply-profile',
+      'reply-preview', 'reply-config/initialize', 'reply-config/publish', 'reply-config/audit']) {
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/accounts/acct_wc_demo/${path}`);
+      assert.equal(response.status, 410, path);
+      const body = await response.json() as { error: { details?: { reason?: string } } };
+      assert.equal(body.error.details?.reason, 'account_reply_config_retired');
+    }
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test('missing reply config is initialized only by an explicit safe-draft action', async () => {
   let initializeCalls = 0;
   const snapshot = {

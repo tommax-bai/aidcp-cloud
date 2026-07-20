@@ -12,6 +12,7 @@ const activeIdempotencyMigrationUrl = new URL('../../migrations/0046_interaction
 const groupReplyConfigMigrationUrl = new URL('../../migrations/0048_wechat_group_reply_config.sql', import.meta.url);
 const cleanupGrantMigrationUrl = new URL('../../migrations/0049_offboard_cleanup_grants.sql', import.meta.url);
 const groupReplyConfigPrivilegesMigrationUrl = new URL('../../migrations/0050_wechat_group_reply_config_privileges.sql', import.meta.url);
+const retireAccountReplyConfigsMigrationUrl = new URL('../../migrations/0051_retire_account_reply_configs.sql', import.meta.url);
 
 test('0039 creates the dedicated inbound domain and never writes outbound interaction_feed', async () => {
   const sql = await readFile(migrationUrl, 'utf8');
@@ -146,4 +147,15 @@ test('0050 grants group-scoped reply config access to the existing runtime role'
   assert.match(sql, /interaction_reply_config_scopes, interaction_reply_scope_versions, interaction_reply_scope_audit/);
   assert.doesNotMatch(sql, /TO\s+aidcp\b/i, 'the migration must not hard-code an environment role name');
   assert.doesNotMatch(sql, /DROP|REVOKE|ALTER TABLE/i, 'the privilege repair must remain additive');
+});
+
+test('0051 clears only retired account strategy data and keeps runtime/scoped/interaction domains', async () => {
+  const sql = await readFile(retireAccountReplyConfigsMigrationUrl, 'utf8');
+  for (const table of ['reply_templates', 'reply_rules', 'account_reply_profiles',
+    'interaction_reply_config_versions', 'interaction_reply_configs']) {
+    assert.match(sql, new RegExp(`DELETE FROM ${table} WHERE platform = 'wechat_channels'`));
+  }
+  assert.match(sql, /DELETE FROM interaction_audit_events[\s\S]*entity_type IN \('config', 'policy', 'template', 'rule', 'profile'\)/);
+  assert.doesNotMatch(sql, /DELETE FROM (interaction_runtime_controls|interaction_reply_config_scopes|interaction_reply_scope_versions|interaction_threads|interaction_messages|interaction_reply_jobs|interaction_send_attempts|risk_)/);
+  assert.doesNotMatch(sql, /DROP|TRUNCATE|ALTER TABLE/i);
 });

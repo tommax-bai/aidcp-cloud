@@ -101,7 +101,7 @@ type ReplyConfigProjection = {
   currentVersion: number | null;
   draftVersion: number | null;
   publishedVersion: number | null;
-  mode?: 'legacy' | 'shadow' | 'scoped';
+  mode?: 'scoped';
   source?: { type: 'group' | 'default'; groupLabel: string | null };
 };
 

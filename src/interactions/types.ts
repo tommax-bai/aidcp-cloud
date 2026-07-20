@@ -434,7 +434,7 @@ export interface ScopedJobContext {
 
 export type ReplyMode = 'draft_only' | 'review_before_send' | 'auto_safe';
 export type ReplyConfigScopeType = 'group' | 'default';
-export type ReplyConfigResolutionMode = 'legacy' | 'shadow' | 'scoped';
+export type ReplyConfigResolutionMode = 'scoped';
 
 export interface ReplyConfigSource {
   type: ReplyConfigScopeType;
