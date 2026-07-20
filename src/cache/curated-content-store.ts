@@ -20,6 +20,7 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from './pg-anchor-cache.js';
+import type { DelegatedExecutionTarget } from '../delegated-task/types.js';
 import type { ReferenceVisualAnalysis } from '../publish-agent/visual-reference-types.js';
 import type { VisualAnalysisAnchor } from '../publish-agent/visual-reference-analyzer.js';
 import { normalizeReferenceVisualAnalysis } from '../publish-agent/visual-reference-analyzer.js';
@@ -261,6 +262,8 @@ export interface CuratedContentStoreOptions {
   /** Best-effort callback after a non-empty image/video source is durably admitted. */
   onSourceAdmitted?: (source: CuratedSourceAdmission) => void | Promise<void>;
   logger?: Pick<Console, 'warn'>;
+  /** Trusted Cloud target used only when projecting delegated-task creation state. */
+  executionTarget?: DelegatedExecutionTarget;
 }
 
 /** 建表 DDL（幂等，columns-right-on-first-ship；本仓无迁移框架）。 */
@@ -668,6 +671,7 @@ export class CuratedContentStore {
   private readonly referenceImageRelocator?: CuratedReferenceImageRelocator;
   private readonly onSourceAdmitted?: (source: CuratedSourceAdmission) => void | Promise<void>;
   private readonly logger?: Pick<Console, 'warn'>;
+  private readonly executionTarget?: DelegatedExecutionTarget;
 
   constructor(options: CuratedContentStoreOptions = {}) {
     this.retentionMax = options.retentionMax ?? 1000;
@@ -675,6 +679,7 @@ export class CuratedContentStore {
     this.referenceImageRelocator = options.referenceImageRelocator;
     this.onSourceAdmitted = options.onSourceAdmitted;
     this.logger = options.logger;
+    this.executionTarget = options.executionTarget;
     this.pool =
       options.pool ??
       new Pool({
@@ -1183,20 +1188,31 @@ export class CuratedContentStore {
     if (opts.creationStatus !== 'all') {
       conds.push(`c.content_type = 'image_text'`);
       conds.push(`BTRIM(COALESCE(c.body, '')) <> ''`);
-      const triggered = `EXISTS (
-        SELECT 1
-        FROM delegated_tasks dt
-        WHERE dt.account_id = c.account_id
-          AND dt.action = 'publish_post'
-          AND (
-            dt.source_constraints->>'curatedId' = c.id::text
-            OR dt.source_constraints->>'sourceId' = c.source_id
-          )
-      )`;
-      if (opts.creationStatus === 'created') conds.push(triggered);
-      if (opts.creationStatus === 'uncreated') conds.push(`NOT ${triggered}`);
+      if (opts.creationStatus === 'created' || opts.creationStatus === 'uncreated') {
+        if (!this.executionTarget) {
+          throw new CuratedContentUnavailableError('listForClient:delegatedExecutionTarget');
+        }
+        params.push(this.executionTarget);
+        const targetIdx = params.length;
+        const triggered = `EXISTS (
+          SELECT 1
+          FROM delegated_tasks dt
+          WHERE dt.execution_target = $${targetIdx}
+            AND dt.account_id = c.account_id
+            AND dt.action = 'publish_post'
+            AND (
+              dt.source_constraints->>'curatedId' = c.id::text
+              OR dt.source_constraints->>'sourceId' = c.source_id
+            )
+        )`;
+        if (opts.creationStatus === 'created') conds.push(triggered);
+        if (opts.creationStatus === 'uncreated') conds.push(`NOT ${triggered}`);
+      }
     }
-    params.push(limit, offset);
+    params.push(limit);
+    const limitIdx = params.length;
+    params.push(offset);
+    const offsetIdx = params.length;
     try {
       const { rows } = await this.pool.query<CuratedPanelDbRow>(
         `SELECT id, account_id, content_type, source_id, title, body, author, source_url, topics,
@@ -1207,7 +1223,7 @@ export class CuratedContentStore {
          FROM curated_content c
          WHERE ${conds.join(' AND ')}
          ORDER BY c.updated_at DESC
-         LIMIT $2 OFFSET $3`,
+         LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
         params,
       );
       if (rows.length > 0) {
@@ -1216,7 +1232,7 @@ export class CuratedContentStore {
       if (offset === 0) return { items: [], total: 0 };
       const { rows: countRows } = await this.pool.query<{ total_count: string }>(
         `SELECT COUNT(*)::text AS total_count FROM curated_content c WHERE ${conds.join(' AND ')}`,
-        [accountId],
+        params.slice(0, -2),
       );
       return { items: [], total: Number(countRows[0]?.total_count ?? '0') };
     } catch (err) {

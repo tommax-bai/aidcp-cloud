@@ -5,7 +5,7 @@ import type { DelegatedTask, DelegatedTaskAttempt } from '../../src/delegated-ta
 
 function task(overrides: Partial<DelegatedTask> = {}): DelegatedTask {
   return {
-    id: 'task-1', accountId: 'xhs-1', accountName: '小萝北', platform: 'xiaohongshu',
+    id: 'task-1', executionTarget: 'dev', accountId: 'xhs-1', accountName: '小萝北', platform: 'xiaohongshu',
     action: 'comment_batch', actionFamily: 'comment', targetSuccessCount: 3, maxAttempts: 6,
     deadlineAt: Date.now() + 60_000, notBefore: Date.now(), executionWindow: { mode: 'immediate' },
     sourceConstraints: {}, targetConstraints: {}, approvalMode: 'review', priority: 'normal', source: 'api', sourceRef: null, originChatId: null,

@@ -205,6 +205,7 @@ import {
   DelegatedTaskService,
   DelegatedTaskWorker,
   createDelegatedExecutorRouter,
+  parseDelegatedExecutionTarget,
   type DelegatedTask,
 } from './delegated-task/index.js';
 import { DelegatedTaskNotificationGate, delegatedTaskFailureReceipt } from './delegated-task/notification.js';
@@ -478,6 +479,7 @@ function parseForbiddenPorts(raw: string | undefined): number[] {
 async function main(): Promise<void> {
   const port = Number(process.env.AIDCP_PORT ?? 8787);
   const debugPort = Number(process.env.AIDCP_DEBUG_PORT ?? 8788);
+  const delegatedExecutionTarget = parseDelegatedExecutionTarget(readEnvString('AIDCP_DEPLOY_ENV'));
 
   // 模型配置 + 加密凭据（change console-model-provider-config）。
   // 先于 LLM 客户端构造：模型名经 getCached() 运行时解析（热加载）；DashScope 密钥库内优先、回退 env。
@@ -924,6 +926,7 @@ async function main(): Promise<void> {
       ...(ossUploader ? { referenceImageRelocator: createCuratedReferenceImageRelocator(ossUploader) } : {}),
       onSourceAdmitted: (source: CuratedSourceAdmission) => firstPostCoordinator?.onSourceAdmitted(source),
       logger: console,
+      ...(delegatedExecutionTarget ? { executionTarget: delegatedExecutionTarget } : {}),
     });
     await ccs.init();
     curatedContentStore = ccs;
@@ -1084,9 +1087,10 @@ async function main(): Promise<void> {
   // Unified user-delegated task control plane. If PG/account facts are unavailable, all public write entries fail closed.
   let delegatedTaskStore: PgDelegatedTaskStore | undefined;
   let delegatedTaskService: DelegatedTaskService | undefined;
-  if (accountStore) {
+  if (accountStore && delegatedExecutionTarget) {
     try {
       const store = new PgDelegatedTaskStore({
+        executionTarget: delegatedExecutionTarget,
         host: readEnvString('PGHOST'),
         port: readEnvPort('PGPORT'),
         database: readEnvString('PGDATABASE'),
@@ -1184,10 +1188,15 @@ async function main(): Promise<void> {
           return { ok: true };
         },
       });
-      console.log('[aidcp-cloud] DelegatedTaskStore 已就绪（统一用户委托任务控制面）');
+      console.log(`[aidcp-cloud] DelegatedTaskStore 已就绪（统一用户委托任务控制面；executionTarget=${delegatedExecutionTarget}）`);
     } catch (err) {
       console.warn('[aidcp-cloud] DelegatedTaskStore 初始化失败，公共写入口 fail-closed:', (err as Error).message);
     }
+  } else if (accountStore) {
+    console.warn(
+      `[aidcp-cloud] DelegatedTaskStore 未启用：AIDCP_DEPLOY_ENV=${JSON.stringify(readEnvString('AIDCP_DEPLOY_ENV') ?? null)} ` +
+      '不是 dev/ol；任务创建与 worker fail-closed，绝不猜测执行环境',
+    );
   }
 
   // 账号作用域出站的**唯一**群解析入口（change feishu-route-account-cards-by-team）：账号 → group_label → 团队群，

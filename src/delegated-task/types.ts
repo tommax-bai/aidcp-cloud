@@ -18,6 +18,8 @@ export const DELEGATED_TASK_STATUSES = [
 ] as const;
 
 export type DelegatedTaskStatus = (typeof DELEGATED_TASK_STATUSES)[number];
+export const DELEGATED_EXECUTION_TARGETS = ['dev', 'ol'] as const;
+export type DelegatedExecutionTarget = (typeof DELEGATED_EXECUTION_TARGETS)[number];
 export type DelegatedTaskPriority = 'normal' | 'high';
 export type DelegatedTaskSource = 'feishu' | 'edge' | 'console' | 'api' | 'legacy_command' | 'operator_action';
 export type DelegatedApprovalMode = 'review' | 'auto_approve' | 'draft_only';
@@ -45,6 +47,11 @@ export interface DelegatedTerminalOutcome {
 
 export interface DelegatedTask {
   id: string;
+  /**
+   * Trusted Cloud deployment that created and may execute this task.
+   * This is injected by the server-side store, never by client/task intent input.
+   */
+  executionTarget: DelegatedExecutionTarget;
   accountId: string;
   accountName: string;
   platform: DelegatedPlatformId;
@@ -82,6 +89,13 @@ export interface DelegatedTask {
   updatedAt: number;
   confirmedAt: number | null;
   completedAt: number | null;
+}
+
+/** Strict fail-closed parser for the existing Cloud deployment fact source. */
+export function parseDelegatedExecutionTarget(value: unknown): DelegatedExecutionTarget | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized === 'dev' || normalized === 'ol' ? normalized : null;
 }
 
 export interface DelegatedTaskIntent {

@@ -3,6 +3,7 @@ import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
 import type {
   DelegatedActionFamily,
+  DelegatedExecutionTarget,
   DelegatedPlatformId,
   DelegatedTask,
   DelegatedTaskAttempt,
@@ -25,6 +26,7 @@ const { Pool } = pg;
 export const DELEGATED_TASK_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS delegated_tasks (
   id                    UUID PRIMARY KEY,
+  execution_target      TEXT NOT NULL CHECK (execution_target IN ('dev','ol')),
   account_id            TEXT NOT NULL REFERENCES accounts(account_id),
   account_name          TEXT NOT NULL,
   platform              TEXT NOT NULL CHECK (platform IN ('xiaohongshu','facebook')),
@@ -63,13 +65,33 @@ CREATE TABLE IF NOT EXISTS delegated_tasks (
 -- change restore-delegated-command-card-origin-chat：命令来源会话（操作员向卡片投递目标）。
 -- 无迁移器、schema 启动自建；幂等 ADD COLUMN，旧行为 NULL = 回落既有默认 / 团队路由，零回归。
 ALTER TABLE delegated_tasks ADD COLUMN IF NOT EXISTS origin_chat_id TEXT;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_delegated_tasks_active_dedupe
-  ON delegated_tasks(dedupe_key)
+-- scope-delegated-tasks-by-cloud-target：历史任务由用户确认全部属于 dev。
+-- 先回填再收紧；不保留列默认值，未来每条新任务都必须由可信 Cloud target 显式写入。
+ALTER TABLE delegated_tasks ADD COLUMN IF NOT EXISTS execution_target TEXT;
+UPDATE delegated_tasks SET execution_target='dev' WHERE execution_target IS NULL;
+ALTER TABLE delegated_tasks ALTER COLUMN execution_target SET NOT NULL;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid='delegated_tasks'::regclass
+       AND conname='delegated_tasks_execution_target_check'
+  ) THEN
+    ALTER TABLE delegated_tasks
+      ADD CONSTRAINT delegated_tasks_execution_target_check
+      CHECK (execution_target IN ('dev','ol'));
+  END IF;
+END $$;
+DROP INDEX IF EXISTS idx_delegated_tasks_active_dedupe;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_delegated_tasks_target_active_dedupe
+  ON delegated_tasks(execution_target, dedupe_key)
   WHERE status IN ('draft','awaiting_confirmation','queued','planning','waiting_approval','executing','deferred');
-CREATE INDEX IF NOT EXISTS idx_delegated_tasks_claim
-  ON delegated_tasks(status, next_eligible_at, not_before, deadline_at, priority, created_at);
-CREATE INDEX IF NOT EXISTS idx_delegated_tasks_ownership
-  ON delegated_tasks(account_id, action_family, status);
+DROP INDEX IF EXISTS idx_delegated_tasks_claim;
+CREATE INDEX IF NOT EXISTS idx_delegated_tasks_target_claim
+  ON delegated_tasks(execution_target, status, next_eligible_at, not_before, deadline_at, priority, created_at);
+DROP INDEX IF EXISTS idx_delegated_tasks_ownership;
+CREATE INDEX IF NOT EXISTS idx_delegated_tasks_target_ownership
+  ON delegated_tasks(execution_target, account_id, action_family, status);
 -- split-curated-creation-status-filters：灵感库按账号判断是否曾触发精选洗稿。
 -- 两个局部表达式索引允许 curatedId/sourceId 的 OR 谓词走 BitmapOr，任务终态不参与归类。
 CREATE INDEX IF NOT EXISTS idx_delegated_tasks_curated_publish_id
@@ -174,6 +196,7 @@ export interface DelegatedTaskStore {
 
 interface TaskRow {
   id: string;
+  execution_target: DelegatedExecutionTarget;
   account_id: string;
   account_name: string;
   platform: DelegatedPlatformId;
@@ -235,6 +258,7 @@ const epoch = (v: Date | string | null): number | null => (v ? new Date(v).getTi
 function mapTask(r: TaskRow): DelegatedTask {
   return {
     id: r.id,
+    executionTarget: r.execution_target,
     accountId: r.account_id,
     accountName: r.account_name,
     platform: r.platform,
@@ -298,12 +322,15 @@ export interface PgDelegatedTaskStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  executionTarget: DelegatedExecutionTarget;
 }
 
 export class PgDelegatedTaskStore implements DelegatedTaskStore {
   private readonly pool: pg.Pool;
+  private readonly executionTarget: DelegatedExecutionTarget;
 
-  constructor(options: PgDelegatedTaskStoreOptions = {}) {
+  constructor(options: PgDelegatedTaskStoreOptions) {
+    this.executionTarget = options.executionTarget;
     this.pool = options.pool ?? new Pool({
       host: options.host ?? DEFAULT_PG_CONFIG.host,
       port: options.port ?? DEFAULT_PG_CONFIG.port,
@@ -326,7 +353,7 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
       input.executionWindow ?? { mode: 'immediate' }, input.sourceConstraints ?? {}, input.targetConstraints ?? {},
       input.approvalMode ?? (input.action === 'generate_candidates' ? 'draft_only' : 'review'),
       input.priority ?? 'normal', input.source, input.sourceRef ?? null, input.dedupeKey,
-      input.originChatId ?? null,
+      input.originChatId ?? null, this.executionTarget,
     ];
     try {
       const { rows } = await this.pool.query<TaskRow>(
@@ -334,23 +361,23 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
            id, account_id, account_name, platform, action, action_family,
            target_success_count, max_attempts, deadline_at, not_before, execution_window,
            source_constraints, target_constraints, approval_mode, priority, source, source_ref,
-           status, dedupe_key, origin_chat_id
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'awaiting_confirmation',$18,$19)
+           status, dedupe_key, origin_chat_id, execution_target
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'awaiting_confirmation',$18,$19,$20)
          RETURNING *`,
         values,
       );
       await this.pool.query(
         `INSERT INTO delegated_task_events(task_id,event_type,to_status,detail) VALUES($1,'draft_created','awaiting_confirmation',$2)`,
-        [id, JSON.stringify({ source: input.source })],
+        [id, JSON.stringify({ source: input.source, executionTarget: this.executionTarget })],
       );
       return { task: mapTask(rows[0]), created: true };
     } catch (err) {
       if ((err as { code?: string }).code !== '23505') throw err;
       const { rows } = await this.pool.query<TaskRow>(
-        `SELECT * FROM delegated_tasks WHERE dedupe_key=$1 AND status IN
+        `SELECT * FROM delegated_tasks WHERE dedupe_key=$1 AND execution_target=$2 AND status IN
          ('draft','awaiting_confirmation','queued','planning','waiting_approval','executing','deferred')
          ORDER BY created_at DESC LIMIT 1`,
-        [input.dedupeKey],
+        [input.dedupeKey, this.executionTarget],
       );
       if (!rows[0]) throw err;
       return { task: mapTask(rows[0]), created: false };
@@ -358,14 +385,17 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
   }
 
   async get(id: string): Promise<DelegatedTask | null> {
-    const { rows } = await this.pool.query<TaskRow>('SELECT * FROM delegated_tasks WHERE id=$1', [id]);
+    const { rows } = await this.pool.query<TaskRow>(
+      'SELECT * FROM delegated_tasks WHERE id=$1 AND execution_target=$2',
+      [id, this.executionTarget],
+    );
     return rows[0] ? mapTask(rows[0]) : null;
   }
 
   async list(filter: DelegatedTaskListFilter = {}): Promise<DelegatedTask[]> {
     const limit = Math.max(1, Math.min(200, filter.limit ?? 50));
-    const predicates: string[] = [];
-    const args: unknown[] = [];
+    const predicates: string[] = ['execution_target=$1'];
+    const args: unknown[] = [this.executionTarget];
     if (filter.accountId) {
       args.push(filter.accountId);
       predicates.push(`account_id=$${args.length}`);
@@ -379,7 +409,7 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
       predicates.push(`status = ANY($${args.length}::text[])`);
     }
     args.push(limit);
-    const where = predicates.length > 0 ? ` WHERE ${predicates.join(' AND ')}` : '';
+    const where = ` WHERE ${predicates.join(' AND ')}`;
     const sql = `SELECT * FROM delegated_tasks${where} ORDER BY created_at DESC LIMIT $${args.length}`;
     const { rows } = await this.pool.query<TaskRow>(sql, args);
     return rows.map(mapTask);
@@ -391,7 +421,7 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
       `WITH interrupted AS (
          SELECT id, status AS recovered_from, claim_expires_at AS previous_claim_expires_at
          FROM delegated_tasks
-         WHERE status IN ('planning','executing')
+         WHERE execution_target=$2 AND status IN ('planning','executing')
          FOR UPDATE
        ), recovered AS (
          UPDATE delegated_tasks t SET
@@ -435,7 +465,7 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
          RETURNING task_id
        )
        SELECT recovered.* FROM recovered`,
-      [recoveredAt],
+      [recoveredAt, this.executionTarget],
     );
     return rows.map((row) => ({
       task: mapTask(row),
@@ -447,8 +477,8 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
   async confirm(id: string, version: number): Promise<DelegatedTask | null> {
     const { rows } = await this.pool.query<TaskRow>(
       `UPDATE delegated_tasks SET status='queued', confirmed_at=now(), updated_at=now(), version=version+1
-       WHERE id=$1 AND status='awaiting_confirmation' AND version=$2 RETURNING *`,
-      [id, version],
+       WHERE id=$1 AND status='awaiting_confirmation' AND version=$2 AND execution_target=$3 RETURNING *`,
+      [id, version, this.executionTarget],
     );
     if (rows[0]) {
       await this.pool.query(
@@ -467,7 +497,7 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
     const { rows } = await this.pool.query<TaskRow>(
       `WITH candidate AS (
          SELECT id FROM delegated_tasks
-         WHERE status IN ('queued','deferred','waiting_approval')
+         WHERE execution_target=$4 AND status IN ('queued','deferred','waiting_approval')
            AND pause_requested=false AND cancel_requested=false
            AND not_before <= $1 AND (next_eligible_at IS NULL OR next_eligible_at <= $1)
            AND deadline_at > $1 AND (claim_expires_at IS NULL OR claim_expires_at <= $1)
@@ -481,7 +511,7 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
          updated_at=$1,
          version=CASE WHEN t.status='waiting_approval' THEN t.version ELSE t.version+1 END
        FROM candidate WHERE t.id=candidate.id RETURNING t.*`,
-      [now, token, expires],
+      [now, token, expires, this.executionTarget],
     );
     return rows[0] ? mapTask(rows[0]) : null;
   }
@@ -489,8 +519,8 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
   async markExecuting(id: string, claimToken: string, step: string): Promise<DelegatedTask | null> {
     const { rows } = await this.pool.query<TaskRow>(
       `UPDATE delegated_tasks SET status='executing', current_step=$3, updated_at=now(), version=version+1
-       WHERE id=$1 AND claim_token=$2 AND status='planning' RETURNING *`,
-      [id, claimToken, step],
+       WHERE id=$1 AND claim_token=$2 AND status='planning' AND execution_target=$4 RETURNING *`,
+      [id, claimToken, step, this.executionTarget],
     );
     return rows[0] ? mapTask(rows[0]) : this.get(id);
   }
@@ -507,8 +537,8 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
     const { rows } = await this.pool.query<TaskRow>(
       `UPDATE delegated_tasks SET status=$3, claim_token=NULL, claim_expires_at=NULL,
          next_eligible_at=$4, current_step=$5, updated_at=now(), version=version+1
-       WHERE id=$1 AND claim_token=$2 RETURNING *`,
-      [id, claimToken, nextStatus, opts.nextEligibleAt ? new Date(opts.nextEligibleAt) : null, opts.step ?? null],
+       WHERE id=$1 AND claim_token=$2 AND execution_target=$6 RETURNING *`,
+      [id, claimToken, nextStatus, opts.nextEligibleAt ? new Date(opts.nextEligibleAt) : null, opts.step ?? null, this.executionTarget],
     );
     if (rows[0]) await this.event(id, 'claim_released', before.status, nextStatus, { reason: opts.reason ?? null });
     return rows[0] ? mapTask(rows[0]) : null;
@@ -518,8 +548,8 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
     const { rows } = await this.pool.query<TaskRow>(
       `UPDATE delegated_tasks SET claim_token=NULL, claim_expires_at=NULL,
          next_eligible_at=$3, current_step='waiting_approval', updated_at=now()
-       WHERE id=$1 AND claim_token=$2 AND status='waiting_approval' RETURNING *`,
-      [id, claimToken, new Date(nextEligibleAt)],
+       WHERE id=$1 AND claim_token=$2 AND status='waiting_approval' AND execution_target=$4 RETURNING *`,
+      [id, claimToken, new Date(nextEligibleAt), this.executionTarget],
     );
     return rows[0] ? mapTask(rows[0]) : this.get(id);
   }
@@ -540,12 +570,15 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
   async markAttemptDispatched(attemptId: string): Promise<void> {
     await this.pool.query(
       `WITH marked AS (
-         UPDATE delegated_task_attempts SET status='dispatched', dispatched_at=now()
-         WHERE id=$1 AND status='prepared' RETURNING task_id
+         UPDATE delegated_task_attempts a SET status='dispatched', dispatched_at=now()
+         FROM delegated_tasks scoped
+         WHERE a.id=$1 AND a.status='prepared' AND scoped.id=a.task_id
+           AND scoped.execution_target=$2
+         RETURNING a.task_id
        )
        UPDATE delegated_tasks t SET attempt_count=attempt_count+1, updated_at=now(), version=version+1
-       FROM marked WHERE t.id=marked.task_id`,
-      [attemptId],
+       FROM marked WHERE t.id=marked.task_id AND t.execution_target=$2`,
+      [attemptId, this.executionTarget],
     );
   }
 
@@ -554,16 +587,19 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
     try {
       await client.query('BEGIN');
       const attemptRows = await client.query<AttemptRow>(
-        `DELETE FROM delegated_task_attempts WHERE id=$1 AND status IN ('prepared','dispatched') RETURNING *`,
-        [attemptId],
+        `DELETE FROM delegated_task_attempts a USING delegated_tasks scoped
+         WHERE a.id=$1 AND a.status IN ('prepared','dispatched') AND scoped.id=a.task_id
+           AND scoped.execution_target=$2
+         RETURNING a.*`,
+        [attemptId, this.executionTarget],
       );
       const attempt = attemptRows.rows[0];
       if (!attempt) throw new Error('attempt_already_finished_or_missing');
       const dispatched = attempt.status === 'dispatched';
       const taskRows = await client.query<TaskRow>(
         `UPDATE delegated_tasks SET attempt_count=GREATEST(attempt_count-$2,0), updated_at=now(), version=version+1
-         WHERE id=$1 RETURNING *`,
-        [attempt.task_id, dispatched ? 1 : 0],
+         WHERE id=$1 AND execution_target=$3 RETURNING *`,
+        [attempt.task_id, dispatched ? 1 : 0, this.executionTarget],
       );
       if (!taskRows.rows[0]) throw new Error('attempt_task_missing');
       await client.query(
@@ -582,9 +618,11 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
 
   async annotateAttempt(attemptId: string, verificationKind: DelegatedVerificationKind, evidenceRef: string, reason?: string): Promise<void> {
     await this.pool.query(
-      `UPDATE delegated_task_attempts SET verification_kind=$2, evidence_ref=$3, reason=$4
-       WHERE id=$1 AND status IN ('prepared','dispatched')`,
-      [attemptId, verificationKind, evidenceRef, reason ?? null],
+      `UPDATE delegated_task_attempts a SET verification_kind=$2, evidence_ref=$3, reason=$4
+       FROM delegated_tasks scoped
+       WHERE a.id=$1 AND a.status IN ('prepared','dispatched') AND scoped.id=a.task_id
+         AND scoped.execution_target=$5`,
+      [attemptId, verificationKind, evidenceRef, reason ?? null, this.executionTarget],
     );
   }
 
@@ -593,21 +631,27 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
     try {
       await client.query('BEGIN');
       const attemptRows = await client.query<AttemptRow>(
-        `UPDATE delegated_task_attempts SET status=$2, verification_kind=$3, evidence_ref=$4,
-           reason=$5, finished_at=now() WHERE id=$1 AND status IN ('prepared','dispatched') RETURNING *`,
-        [attemptId, result.status, result.verificationKind, result.evidenceRef ?? null, result.reason ?? null],
+        `UPDATE delegated_task_attempts a SET status=$2, verification_kind=$3, evidence_ref=$4,
+           reason=$5, finished_at=now() FROM delegated_tasks scoped
+         WHERE a.id=$1 AND a.status IN ('prepared','dispatched') AND scoped.id=a.task_id
+           AND scoped.execution_target=$6 RETURNING a.*`,
+        [attemptId, result.status, result.verificationKind, result.evidenceRef ?? null, result.reason ?? null, this.executionTarget],
       );
       const attempt = attemptRows.rows[0];
       if (!attempt) throw new Error('attempt_already_finished_or_missing');
-      const currentTask = await client.query<Pick<TaskRow, 'action'>>('SELECT action FROM delegated_tasks WHERE id=$1 FOR UPDATE', [attempt.task_id]);
+      const currentTask = await client.query<Pick<TaskRow, 'action'>>(
+        'SELECT action FROM delegated_tasks WHERE id=$1 AND execution_target=$2 FOR UPDATE',
+        [attempt.task_id, this.executionTarget],
+      );
+      if (!currentTask.rows[0]) throw new Error('attempt_task_missing');
       const success = result.status === 'succeeded' && verificationCountsAsSuccess(currentTask.rows[0].action, result.verificationKind) ? 1 : 0;
       const skipped = result.status === 'skipped' ? 1 : 0;
       const failure = result.status === 'failed' || result.status === 'submitted_unknown' ? 1 : 0;
       const taskRows = await client.query<TaskRow>(
         `UPDATE delegated_tasks SET success_count=success_count+$2,
            skipped_count=skipped_count+$3, failure_count=failure_count+$4, updated_at=now(), version=version+1
-         WHERE id=$1 RETURNING *`,
-        [attempt.task_id, success, skipped, failure],
+         WHERE id=$1 AND execution_target=$5 RETURNING *`,
+        [attempt.task_id, success, skipped, failure, this.executionTarget],
       );
       await client.query(
         `INSERT INTO delegated_task_events(task_id,event_type,detail) VALUES($1,'attempt_finished',$2)`,
@@ -625,16 +669,20 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
 
   async listUnsettledAttempts(taskId: string): Promise<DelegatedTaskAttempt[]> {
     const { rows } = await this.pool.query<AttemptRow>(
-      `SELECT * FROM delegated_task_attempts WHERE task_id=$1 AND status IN ('prepared','dispatched') ORDER BY ordinal`,
-      [taskId],
+      `SELECT a.* FROM delegated_task_attempts a
+       JOIN delegated_tasks scoped ON scoped.id=a.task_id AND scoped.execution_target=$2
+       WHERE a.task_id=$1 AND a.status IN ('prepared','dispatched') ORDER BY a.ordinal`,
+      [taskId, this.executionTarget],
     );
     return rows.map(mapAttempt);
   }
 
   async listAttempts(taskId: string): Promise<DelegatedTaskAttempt[]> {
     const { rows } = await this.pool.query<AttemptRow>(
-      `SELECT * FROM delegated_task_attempts WHERE task_id=$1 ORDER BY ordinal`,
-      [taskId],
+      `SELECT a.* FROM delegated_task_attempts a
+       JOIN delegated_tasks scoped ON scoped.id=a.task_id AND scoped.execution_target=$2
+       WHERE a.task_id=$1 ORDER BY a.ordinal`,
+      [taskId, this.executionTarget],
     );
     return rows.map(mapAttempt);
   }
@@ -648,8 +696,8 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
       `UPDATE delegated_tasks SET pause_requested=true, status=$2, current_step=$3,
          claim_token=CASE WHEN $4 THEN NULL ELSE claim_token END,
          claim_expires_at=CASE WHEN $4 THEN NULL ELSE claim_expires_at END,
-         updated_at=now(), version=version+1 WHERE id=$1 RETURNING *`,
-      [id, nextStatus, immediate ? 'paused_by_user' : task.currentStep, immediate],
+         updated_at=now(), version=version+1 WHERE id=$1 AND execution_target=$5 RETURNING *`,
+      [id, nextStatus, immediate ? 'paused_by_user' : task.currentStep, immediate, this.executionTarget],
     );
     return rows[0] ? mapTask(rows[0]) : null;
   }
@@ -660,8 +708,9 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
     if (task.status !== 'deferred' || !task.pauseRequested) return task;
     const { rows } = await this.pool.query<TaskRow>(
       `UPDATE delegated_tasks SET pause_requested=false, status='queued', current_step=NULL,
-         next_eligible_at=NULL, updated_at=now(), version=version+1 WHERE id=$1 RETURNING *`,
-      [id],
+         next_eligible_at=NULL, updated_at=now(), version=version+1
+       WHERE id=$1 AND execution_target=$2 RETURNING *`,
+      [id, this.executionTarget],
     );
     return rows[0] ? mapTask(rows[0]) : null;
   }
@@ -672,8 +721,9 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
     const inFlight = task.status === 'planning' || task.status === 'executing';
     if (inFlight) {
       const { rows } = await this.pool.query<TaskRow>(
-        `UPDATE delegated_tasks SET cancel_requested=true, updated_at=now(), version=version+1 WHERE id=$1 RETURNING *`,
-        [id],
+        `UPDATE delegated_tasks SET cancel_requested=true, updated_at=now(), version=version+1
+         WHERE id=$1 AND execution_target=$2 RETURNING *`,
+        [id, this.executionTarget],
       );
       return rows[0] ? mapTask(rows[0]) : null;
     }
@@ -703,8 +753,9 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
     const { rows } = await this.pool.query<TaskRow>(
       `UPDATE delegated_tasks SET status=$2, terminal_outcome=$3, claim_token=NULL, claim_expires_at=NULL,
          current_step=NULL, completed_at=CASE WHEN $4 THEN now() ELSE completed_at END,
-         updated_at=now(), version=version+1 WHERE id=$1 RETURNING *`,
-      [id, status, JSON.stringify(outcome), terminal],
+         updated_at=now(), version=version+1
+       WHERE id=$1 AND execution_target=$5 RETURNING *`,
+      [id, status, JSON.stringify(outcome), terminal, this.executionTarget],
     );
     if (rows[0]) await this.event(id, 'task_status', task.status, status, outcome as unknown as Record<string, unknown>);
     return rows[0] ? mapTask(rows[0]) : null;
@@ -713,21 +764,21 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
   async hasActiveOwnership(accountId: string, family: DelegatedActionFamily, excludingTaskId?: string): Promise<boolean> {
     const { rows } = await this.pool.query<{ present: boolean }>(
       `SELECT EXISTS(
-         SELECT 1 FROM delegated_tasks WHERE account_id=$1 AND action_family=$2
+         SELECT 1 FROM delegated_tasks WHERE execution_target=$1 AND account_id=$2 AND action_family=$3
            AND status IN ('planning','waiting_approval','executing')
-           AND ($3::uuid IS NULL OR id <> $3::uuid)
+           AND ($4::uuid IS NULL OR id <> $4::uuid)
        ) AS present`,
-      [accountId, family, excludingTaskId ?? null],
+      [this.executionTarget, accountId, family, excludingTaskId ?? null],
     );
     return Boolean(rows[0]?.present);
   }
 
   async hasTaskOwnershipConflict(task: DelegatedTask): Promise<boolean> {
     const { rows } = await this.pool.query<TaskRow>(
-      `SELECT * FROM delegated_tasks WHERE account_id=$1 AND action_family=$2
+      `SELECT * FROM delegated_tasks WHERE execution_target=$1 AND account_id=$2 AND action_family=$3
          AND status IN ('planning','waiting_approval','executing')
-         AND id <> $3::uuid`,
-      [task.accountId, task.actionFamily, task.id],
+         AND id <> $4::uuid`,
+      [this.executionTarget, task.accountId, task.actionFamily, task.id],
     );
     return rows.some((row) => delegatedTasksConflict(task, mapTask(row)));
   }
@@ -762,6 +813,8 @@ export class MemoryDelegatedTaskStore implements DelegatedTaskStore {
     recoveredAt: number;
   }> = [];
 
+  constructor(private readonly executionTarget: DelegatedExecutionTarget = 'dev') {}
+
   async init(): Promise<void> {}
 
   async createDraft(input: DelegatedTaskCreate): Promise<{ task: DelegatedTask; created: boolean }> {
@@ -769,7 +822,8 @@ export class MemoryDelegatedTaskStore implements DelegatedTaskStore {
     if (existing) return { task: structuredClone(existing), created: false };
     const now = Date.now();
     const task: DelegatedTask = {
-      id: randomUUID(), accountId: input.accountId, accountName: input.accountName, platform: input.platform,
+      id: randomUUID(), executionTarget: this.executionTarget,
+      accountId: input.accountId, accountName: input.accountName, platform: input.platform,
       action: input.action, actionFamily: actionFamilyFor(input.action), targetSuccessCount: input.targetSuccessCount,
       maxAttempts: input.maxAttempts, deadlineAt: input.deadlineAt, notBefore: input.notBefore ?? now,
       executionWindow: input.executionWindow ?? { mode: 'immediate' },
