@@ -1594,6 +1594,97 @@ test('环境风险恢复：任何客户端选择器都在绑定解析前整块�
   );
 });
 
+test('环境首页概览：引擎和浏览器均离线仍按持久绑定读取，且响应不泄露 accountId', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const reads: string[] = [];
+  const dailyUsage = { asOf: 1_721_277_200_000, totals: { view: 17, publish: 1 } };
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      resolveEdgeIdForAccount: () => null,
+      environmentOverview: {
+        async viewForAccount(accountId) {
+          reads.push(accountId);
+          return {
+            dailyUsage,
+            currentPublishState: { state: 'submitted', code: '#42', title: '在途笔记', at: 1_721_277_100_000 },
+            lastPublished: { title: '上一篇笔记', at: 1_721_200_000_000 },
+          };
+        },
+      },
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const response = await fetch(`${base}/environments/p1/overview`, { headers });
+      assert.equal(response.status, 200);
+      const text = await response.text();
+      assert.doesNotMatch(text, new RegExp(ACCT_P1), '客户 DTO 不得泄露绑定账号标识');
+      const body = JSON.parse(text) as { data: Record<string, unknown>; meta: { asOf: number } };
+      assert.equal(body.data.envKey, 'p1');
+      assert.deepEqual(body.data.dailyUsage, dailyUsage);
+      assert.deepEqual(body.data.currentPublishState, {
+        state: 'submitted', code: '#42', title: '在途笔记', at: 1_721_277_100_000,
+      });
+      assert.deepEqual(body.data.lastPublished, { title: '上一篇笔记', at: 1_721_200_000_000 });
+      assert.equal(typeof body.meta.asOf, 'number');
+      assert.deepEqual(reads, [ACCT_P1], '概览读取只使用 Cloud 解析出的绑定账号');
+    },
+  );
+});
+
+test('环境首页概览：非所有者 fail-closed，且 overview provider 不被触达', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p2', ACCT_P1);
+  let reads = 0;
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      environmentOverview: {
+        async viewForAccount() {
+          reads += 1;
+          return null;
+        },
+      },
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const response = await fetch(`${base}/environments/p2/overview`, { headers });
+      assert.equal(response.status, 403);
+      assert.doesNotMatch(await response.text(), new RegExp(ACCT_P1));
+      assert.equal(reads, 0);
+    },
+  );
+});
+
+test('环境首页概览：Cloud 聚合失败返回 503，不降级成空计数或从未发布', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      environmentOverview: { viewForAccount: async () => null },
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const response = await fetch(`${base}/environments/p1/overview`, { headers });
+      assert.equal(response.status, 503);
+      const body = await response.json() as Record<string, unknown>;
+      assert.equal(body.error, 'environment_overview_unavailable');
+      assert.equal('data' in body, false);
+    },
+  );
+});
+
 test('慢启动写：边缘离线 + 有唯一绑定 → 写环境成功并用当前账号 controller 返回生效真态', async () => {
   const fx = ownerOfP1();
   fx.bindings.set('p1', ACCT_P1);

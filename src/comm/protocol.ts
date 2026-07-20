@@ -25,7 +25,7 @@ export type MessageType =
   | 'hello' // edge → cloud：边缘上线，声明能力/会话
   | 'welcome' // cloud → edge：握手确认
   // —— 自动化运行投影（cloud → edge）；客户数据字段仅供旧客户端兼容 ——
-  | 'ui.snapshot' // 新客户端仅接收用量/浏览器待机等自动化投影；人物、草稿、审批、发布等 AIDCP 数据经 customer-auth HTTP 拉取
+  | 'ui.snapshot' // 新客户端仅接收浏览器待机等自动化控制投影；今日用量、人物、草稿、审批、发布等客户数据经 customer-auth HTTP 拉取
   // —— 任务规划 ——
   | 'plan.request' // edge → cloud：给定高层目标，请求拆解为步骤
   | 'plan.response' // cloud → edge：返回有序步骤清单

@@ -49,6 +49,8 @@ test('ui-snapshot: hello 快照带昵称 + 最近发布，定向到该 edge', as
 
 test('ui-snapshot: new pull-data-plane client receives automation projection but no persona/publish cloud_data push', async () => {
   const dailyUsage = { asOf: 1, totals: {}, quotas: {}, saturated: [], windows: {} } as NonNullable<UiSnapshotPayload['dailyUsage']>;
+  const browserStandby = { enabled: true, eligible: false, reason: 'short_wait', generatedAt: 1, source: 'risk' } as NonNullable<UiSnapshotPayload['browserStandby']>;
+  let usageReads = 0;
   const { service, sent } = makeService({
     isPersonaBound: () => true,
     getPersonaWritingLanguage: () => 'vi',
@@ -57,17 +59,33 @@ test('ui-snapshot: new pull-data-plane client receives automation projection but
       recordId: 42, code: '#42', kind: 'generated', title: '候审稿', content: '正文', topics: [],
       images: [], contentVersion: 1, updatedAt: 1,
     }),
-    todayUsageForAccount: async () => dailyUsage,
+    todayUsageForAccount: async () => { usageReads += 1; return dailyUsage; },
+    browserStandbyForAccount: async () => browserStandby,
   });
   await service.pushHelloSnapshot('acc-1', 'edge-1', [CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY]);
   assert.equal(sent.length, 1);
   assert.equal(sent[0].env.payload.account, undefined);
-  assert.deepEqual(sent[0].env.payload.dailyUsage, dailyUsage);
+  assert.equal(sent[0].env.payload.dailyUsage, undefined);
+  assert.deepEqual(sent[0].env.payload.browserStandby, browserStandby);
+  assert.equal(usageReads, 0, '新客户端今日进展只经 HTTP 拉取，自动化 WS 不应读取或推送');
   assert.equal(sent[0].env.payload.personaBound, undefined);
   assert.equal(sent[0].env.payload.personaWritingLanguage, undefined);
   assert.equal(sent[0].env.payload.lastPublish, undefined);
   assert.equal(sent[0].env.payload.publish, undefined);
   assert.equal(sent[0].env.payload.publishPreview, undefined);
+});
+
+test('ui-snapshot: new pull-data-plane client dailyUsage refresh only preserves browser standby chain', async () => {
+  const browserStandby = { enabled: true, eligible: true, reason: 'frozen', generatedAt: 1, source: 'risk' } as NonNullable<UiSnapshotPayload['browserStandby']>;
+  let usageReads = 0;
+  const { service, sent } = makeService({
+    edgeCapabilities: () => [CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY],
+    todayUsageForAccount: async () => { usageReads += 1; return { asOf: 1, totals: {} }; },
+    browserStandbyForAccount: async () => browserStandby,
+  });
+  await service.pushDailyUsageSnapshot('acc-1', 'edge-1');
+  assert.equal(usageReads, 0);
+  assert.deepEqual(sent[0].env.payload, { browserStandby });
 });
 
 test('ui-snapshot: new pull-data-plane client never receives realtime persona or publish data pushes', () => {

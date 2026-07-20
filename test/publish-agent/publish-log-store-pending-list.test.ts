@@ -89,3 +89,21 @@ test('客户端排期占用只查询账号的小红书 scheduled 与 Cloud 固�
   assert.match(calls[0].sql, /scheduled_at <= to_timestamp\(\$3/);
   assert.deepEqual(calls[0].params, ['account-1', now, now + 14 * 24 * 60 * 60 * 1000]);
 });
+
+test('客户首页当前发布只读取仍在途状态，submitted 不与 confirmed published 混同', async () => {
+  const calls: { sql: string; params: unknown[] }[] = [];
+  const pool = {
+    async query(sql: string, params: unknown[]) {
+      calls.push({ sql, params });
+      return { rows: [{ id: 88, title: '待平台确认', status: 'submitted', ts: '1721277200000' }] };
+    },
+  };
+  const store = new PublishLogStore({ pool: pool as never });
+  const result = await store.currentPublishForAccount('account-1');
+
+  assert.deepEqual(result, { id: 88, title: '待平台确认', status: 'submitted', at: 1_721_277_200_000 });
+  assert.match(calls[0].sql, /account_id = \$1/);
+  assert.match(calls[0].sql, /status IN \('pending_approval', 'scheduled', 'submitted'\)/);
+  assert.doesNotMatch(calls[0].sql, /status IN \([^)]*published/);
+  assert.deepEqual(calls[0].params, ['account-1']);
+});

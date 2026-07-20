@@ -183,11 +183,18 @@ test('新客户端的自动化通道过滤 ui.snapshot 数据面字段，纯数�
     personaBound: true,
     publish: { state: 'pending' },
     dailyUsage: { asOf: 0, totals: {}, quotas: {}, saturated: [], windows: {} },
+    browserStandby: {
+      enabled: true, eligible: false, reason: 'short_wait', waitMs: 30_000, wakeAt: 30_000,
+      generatedAt: 0, source: 'risk', minWaitMs: 1_200_000, warmupMs: 90_000,
+    },
   }), 'edge-pull-data'), 1);
   const [data] = (await message) as [Buffer | string];
   const received = JSON.parse(data.toString()) as Envelope;
   assert.deepEqual(received.payload, {
-    dailyUsage: { asOf: 0, totals: {}, quotas: {}, saturated: [], windows: {} },
+    browserStandby: {
+      enabled: true, eligible: false, reason: 'short_wait', waitMs: 30_000, wakeAt: 30_000,
+      generatedAt: 0, source: 'risk', minWaitMs: 1_200_000, warmupMs: 90_000,
+    },
   });
 
   assert.equal(s.pushToEdges(makeEnvelope('ui.snapshot', 'data-only-snapshot', 0, {

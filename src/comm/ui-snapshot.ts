@@ -136,7 +136,8 @@ export class UiSnapshotService {
         }
       }
 
-      const dailyUsage = this.deps.todayUsageForAccount
+      // 新客户端的今日进展属于客户 HTTP 数据面；WS 只保留浏览器待机这一自动化控制信号。
+      const dailyUsage = !pullDataPlane && this.deps.todayUsageForAccount
         ? await this.deps.todayUsageForAccount(accountId, edgeId).catch(() => null)
         : null;
       if (dailyUsage) payload.dailyUsage = dailyUsage;
@@ -197,6 +198,7 @@ export class UiSnapshotService {
       if (!accountId || !this.deps.todayUsageForAccount) return;
       const target = edgeId ?? this.deps.resolveEdgeIdForAccount(accountId);
       if (!target) return;
+      if (this.usesPullDataPlane(target)) return;
       const dailyUsage = await this.deps.todayUsageForAccount(accountId, target).catch(() => null);
       if (!dailyUsage) return;
       this.push(accountId, target, { dailyUsage }, 'dailyUsage');
@@ -246,8 +248,11 @@ export class UiSnapshotService {
 
   async pushDailyUsageSnapshot(accountId: string, edgeId: string): Promise<void> {
     try {
+      const pullDataPlane = this.usesPullDataPlane(edgeId);
       const [dailyUsage, browserStandby] = await Promise.all([
-        this.deps.todayUsageForAccount ? this.deps.todayUsageForAccount(accountId, edgeId).catch(() => null) : Promise.resolve(null),
+        !pullDataPlane && this.deps.todayUsageForAccount
+          ? this.deps.todayUsageForAccount(accountId, edgeId).catch(() => null)
+          : Promise.resolve(null),
         this.deps.browserStandbyForAccount ? this.deps.browserStandbyForAccount(accountId, edgeId).catch(() => null) : Promise.resolve(null),
       ]);
       if (!dailyUsage && !browserStandby) {

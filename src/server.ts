@@ -4377,6 +4377,50 @@ async function main(): Promise<void> {
           referenceDraftCountForAccount: (accountId) => publishLogStore.countReferenceDraftsForAccount(accountId),
           pendingDrafts: publishLogStore,
           publishSchedule: publishLogStore,
+          environmentOverview: {
+            viewForAccount: async (accountId) => {
+              try {
+                const [dailyUsage, current, last] = await Promise.all([
+                  buildTodayUsageForAccount(accountId),
+                  publishLogStore.currentPublishForAccount(accountId),
+                  publishLogStore.lastPublishedForAccount(accountId),
+                ]);
+                let currentPublishState: {
+                  state: 'pending' | 'approved' | 'submitted';
+                  code: string;
+                  title?: string;
+                  at: number;
+                } | null = null;
+                if (current) {
+                  let state: 'pending' | 'approved' | 'submitted' | null;
+                  if (current.status === 'submitted') state = 'submitted';
+                  else if (current.status === 'scheduled') state = 'approved';
+                  else {
+                    const decision = await readPublishApproval(`publish-${current.id}`).catch(() => null);
+                    state = decision == null ? 'pending' : decision.approved ? 'approved' : null;
+                  }
+                  if (state) {
+                    currentPublishState = {
+                      state,
+                      code: `#${current.id}`,
+                      ...(current.title ? { title: current.title } : {}),
+                      at: current.at,
+                    };
+                  }
+                }
+                return {
+                  dailyUsage,
+                  currentPublishState,
+                  lastPublished: last?.title ? { title: last.title, at: last.at } : null,
+                };
+              } catch (err) {
+                console.warn(
+                  `[aidcp-cloud] client environment overview failed account=${accountId}: ${err instanceof Error ? err.message : String(err)}`,
+                );
+                return null;
+              }
+            },
+          },
           publishDraftActions: {
             approve: (payload, accountId, actor) => approvePublishForClient(payload, accountId, actor),
             removeImage: (payload, accountId, actor) =>

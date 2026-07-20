@@ -31,6 +31,7 @@ import type {
   PublishApprovalActionResultPayload,
   PublishDraftImageRemovePayload,
   PublishDraftImageRemoveResultPayload,
+  UiDailyUsagePayload,
   UiSlowStartPayload,
 } from '../comm/protocol.js';
 import type { PendingPublishPreview, PublishLogStore } from '../publish-agent/publish-log-store.js';
@@ -70,6 +71,10 @@ export interface ClientAuthDeps {
   >;
   /** Account-scoped Xiaohongshu scheduled truth for approval-page free-slot selection. */
   publishSchedule?: Pick<PublishLogStore, 'listOccupiedScheduledTimesForAccount'>;
+  /** 客户首页只读概览；账号键由持久绑定解析，DTO 不得回传 accountId。 */
+  environmentOverview?: {
+    viewForAccount(accountId: string): Promise<ClientEnvironmentOverview | null>;
+  };
   /** 客户待审稿写：传输层只解析客户环境，实际闸序与落库复用既有领域方法。 */
   publishDraftActions?: {
     approve(
@@ -112,6 +117,17 @@ export interface ClientAuthDeps {
   persona?: Pick<AccountPersonaService, 'get' | 'generate' | 'persist'> & {
     platformForAccount(accountId: string): string | undefined;
   };
+}
+
+export interface ClientEnvironmentOverview {
+  dailyUsage: UiDailyUsagePayload;
+  currentPublishState: {
+    state: 'pending' | 'approved' | 'submitted';
+    code: string;
+    title?: string;
+    at: number;
+  } | null;
+  lastPublished: { title: string; at: number } | null;
 }
 
 export interface ClientEnvironmentRiskState {
@@ -1074,6 +1090,44 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       sendJson(res, 200, {
         data: { envKey, accountId: bound.accountId },
         meta: { requestId: randomUUID(), asOf: Date.now() },
+      });
+      return;
+    }
+
+    // 客户首页概览：常规业务数据始终经 request-scoped HTTP 拉取，与自动化连接、引擎和浏览器解耦。
+    // envKey 只用于客户 ownership + 持久绑定解析；accountId 只在 Cloud 内部流转，响应 DTO 明确不含该字段。
+    const overviewMatch = /^\/environments\/([^/]+)\/overview$/.exec(url);
+    if (method === 'GET' && overviewMatch) {
+      if (!deps.environmentOverview) {
+        sendJson(res, 503, { error: 'environment_overview_unavailable' });
+        return;
+      }
+      let envKey: string;
+      try {
+        envKey = decodeURIComponent(overviewMatch[1]).trim();
+      } catch {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_env_key' });
+        return;
+      }
+      const bound = await deps.store.resolveBoundAccountForEnv(userId, envKey);
+      if (!bound.ok) {
+        sendBindingFailure(res, bound.reason);
+        return;
+      }
+      const view = await deps.environmentOverview.viewForAccount(bound.accountId);
+      if (!view) {
+        sendJson(res, 503, { error: 'environment_overview_unavailable' });
+        return;
+      }
+      const asOf = Date.now();
+      sendJson(res, 200, {
+        data: {
+          envKey,
+          dailyUsage: view.dailyUsage,
+          currentPublishState: view.currentPublishState,
+          lastPublished: view.lastPublished,
+        },
+        meta: { requestId: randomUUID(), asOf },
       });
       return;
     }

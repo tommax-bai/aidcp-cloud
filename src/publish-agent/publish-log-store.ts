@@ -169,6 +169,14 @@ export interface PendingPublishPreview {
   };
 }
 
+/** 客户首页当前仍在途的发布摘要；终态 published/failed/needs_review 由其它投影承载。 */
+export interface CurrentPublishRecord {
+  id: number;
+  title: string | null;
+  status: 'pending_approval' | 'scheduled' | 'submitted';
+  at: number;
+}
+
 interface PendingPublishPreviewRow {
   id: number;
   account_id: string;
@@ -818,6 +826,27 @@ export class PublishLogStore {
     const r = rows[0];
     if (!r || r.ts == null) return null;
     return { title: r.title ?? null, at: Number(r.ts) };
+  }
+
+  /**
+   * 客户首页当前发布态：只取仍在途的最新记录，避免历史失败或已发布记录长期冒充“处理中”。
+   * `published_at` 是既有记录创建时间，沿用 lastPublishedForAccount 的摘要时间口径。
+   */
+  async currentPublishForAccount(accountId: string): Promise<CurrentPublishRecord | null> {
+    const { rows } = await this.pool.query<{
+      id: number;
+      title: string | null;
+      status: CurrentPublishRecord['status'];
+      ts: string | null;
+    }>(
+      `SELECT id, title, status, extract(epoch from published_at) * 1000 AS ts FROM publish_log
+        WHERE account_id = $1 AND status IN ('pending_approval', 'scheduled', 'submitted')
+        ORDER BY id DESC LIMIT 1`,
+      [accountId],
+    );
+    const row = rows[0];
+    if (!row || row.ts == null) return null;
+    return { id: row.id, title: row.title ?? null, status: row.status, at: Number(row.ts) };
   }
 
   /**

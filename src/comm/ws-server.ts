@@ -234,7 +234,6 @@ export class EdgeCloudServer implements EdgePusher {
     if (env.type === 'ui.snapshot' && this.edgeCapabilities(edgeId)?.includes(CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY)) {
       const payload = env.payload as Record<string, unknown>;
       const automationPayload: Record<string, unknown> = {};
-      if (payload.dailyUsage !== undefined) automationPayload.dailyUsage = payload.dailyUsage;
       if (payload.browserStandby !== undefined) automationPayload.browserStandby = payload.browserStandby;
       if (Object.keys(automationPayload).length === 0) {
         console.warn(`[ws-server] ui.snapshot 仅含 cloud_data（edge=${edgeId}）：新客户端应经 HTTP 拉取，拒绝下发`);
