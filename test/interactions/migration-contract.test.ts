@@ -9,6 +9,7 @@ const runtimeControlMigrationUrl = new URL('../../migrations/0042_interaction_ru
 const provisioningMigrationUrl = new URL('../../migrations/0043_client_env_provisioning_intents.sql', import.meta.url);
 const storeCircuitMigrationUrl = new URL('../../migrations/0045_wechat_store_and_circuit.sql', import.meta.url);
 const activeIdempotencyMigrationUrl = new URL('../../migrations/0046_interaction_idempotency_active_unique.sql', import.meta.url);
+const groupReplyConfigMigrationUrl = new URL('../../migrations/0048_wechat_group_reply_config.sql', import.meta.url);
 
 test('0039 creates the dedicated inbound domain and never writes outbound interaction_feed', async () => {
   const sql = await readFile(migrationUrl, 'utf8');
@@ -108,4 +109,19 @@ test('0046 limits idempotency uniqueness to active attempts and removes the unus
   assert.match(sql, /DROP COLUMN IF EXISTS retryable/);
   assert.doesNotMatch(sql, /DROP[^\n]*idempotency_key[^\n]*CHECK/i,
     'the deterministic idempotency key format check must remain in place');
+});
+
+test('0048 adds stable group/default config scopes without deleting legacy account config', async () => {
+  const sql = await readFile(groupReplyConfigMigrationUrl, 'utf8');
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS interaction_reply_config_scopes/);
+  assert.match(sql, /scope_type\s+TEXT NOT NULL CHECK \(scope_type IN \('group','default'\)\)/);
+  assert.match(sql, /uq_reply_config_scope_default[\s\S]*WHERE scope_type = 'default'/);
+  assert.match(sql, /uq_reply_config_scope_group[\s\S]*WHERE scope_type = 'group'/);
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS interaction_reply_scope_versions/);
+  assert.match(sql, /templates\s+JSONB NOT NULL/);
+  assert.match(sql, /rules\s+JSONB NOT NULL/);
+  assert.match(sql, /profiles\s+JSONB NOT NULL/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS config_scope_id TEXT REFERENCES interaction_reply_config_scopes/);
+  assert.doesNotMatch(sql, /DROP TABLE|DELETE FROM interaction_reply_configs|ALTER TABLE interaction_reply_configs/,
+    'group-scope migration must remain additive and leave legacy account configs intact');
 });

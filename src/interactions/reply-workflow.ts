@@ -7,7 +7,7 @@ import {
   validateFinalReplyText,
   validateReplyConfig,
 } from './reply-config.js';
-import type { ReplyConfigStore } from './reply-config-store.js';
+import { readJobConfig, readPublishedConfig, type ReplyConfigReader } from './reply-config-resolver.js';
 import { ReplyAiService, type AiFallback } from './reply-ai.js';
 import type { InteractionStore } from './interaction-store.js';
 import {
@@ -76,6 +76,7 @@ function profileFor(snapshot: ReplyConfigSnapshot, channel: 'comment' | 'dm'): R
 export class ReplyWorkflow {
   private readonly requestId: () => string;
   private readonly dmAiEnabled: boolean;
+  private readonly accountNameFor: (accountId: string) => string | null | undefined | Promise<string | null | undefined>;
   private readonly canAutoQueue: (
     context: ScopedJobContext,
     snapshot: ReplyConfigSnapshot,
@@ -84,7 +85,7 @@ export class ReplyWorkflow {
 
   constructor(
     private readonly store: InteractionStore,
-    private readonly configs: ReplyConfigStore,
+    private readonly configs: ReplyConfigReader,
     private readonly ai: ReplyAiService,
     options: {
       requestId?: () => string;
@@ -95,10 +96,12 @@ export class ReplyWorkflow {
         snapshot: ReplyConfigSnapshot,
         preview: ReplyPreviewResult,
       ) => Promise<boolean>;
+      accountNameFor?: (accountId: string) => string | null | undefined | Promise<string | null | undefined>;
     } = {},
   ) {
     this.requestId = options.requestId ?? randomUUID;
     this.dmAiEnabled = options.dmAiEnabled ?? false;
+    this.accountNameFor = options.accountNameFor ?? (() => null);
     this.canAutoQueue = options.canAutoQueue ?? (async () => false);
   }
 
@@ -122,7 +125,7 @@ export class ReplyWorkflow {
     });
     const context = await this.store.getJobContext(input.accountId, input.envKey, input.jobId);
     if (!context) throw new InteractionError('INTERACTION_NOT_FOUND', '回复任务不存在。', 404);
-    const snapshot = await this.configs.getSnapshot(input.accountId, 'published');
+    const snapshot = await readPublishedConfig(this.configs, input.accountId);
     if (!snapshot || !snapshot.policy.generateDrafts || !snapshot.policy.channels[context.thread.channel].enabled) {
       return this.failGeneration(input, classifying.version, 'INTERACTION_CONFIG_MISSING', 'published_config_unavailable');
     }
@@ -158,6 +161,7 @@ export class ReplyWorkflow {
       patch: {
         matchedRuleId: preview.matchedRuleId,
         configVersion: snapshot.configVersion,
+        configScopeId: snapshot.configScopeId ?? null,
         templateId: preview.templateId,
         templateVersion: preview.templateVersion,
         renderedText: preview.renderedText,
@@ -230,10 +234,11 @@ export class ReplyWorkflow {
     }
     let rendered: string;
     try {
+      const accountName = await this.accountNameFor(snapshot.accountId);
       rendered = renderReplyTemplate(template, profile, {
         user_name: inbound.userName,
         video_title: inbound.videoTitle,
-        account_name: profile.selfName,
+        account_name: accountName?.trim() || profile.selfName,
         support_channel: null,
       });
     } catch (error) {
@@ -312,7 +317,9 @@ export class ReplyWorkflow {
     if (!context.job.finalText?.trim() || context.message.messageType !== 'text' || context.message.lifecycle !== 'active') {
       throw new InteractionError('INTERACTION_VALIDATION_FAILED', '回复内容或原消息状态不允许审批。', 422);
     }
-    const snapshot = context.job.configVersion === null ? null : await this.configs.getSnapshot(input.accountId, context.job.configVersion);
+    const snapshot = context.job.configVersion === null ? null : await readJobConfig(this.configs,
+      input.accountId, context.job.configScopeId, context.job.configVersion,
+    );
     const profile = snapshot ? profileFor(snapshot, context.thread.channel) : null;
     if (!profile || validateFinalReplyText(profile, context.job.finalText).length) {
       throw new InteractionError('INTERACTION_VALIDATION_FAILED', '回复内容未通过账号 profile 确定性门禁。', 422);
@@ -332,7 +339,9 @@ export class ReplyWorkflow {
     const context = await this.store.getJobContext(input.accountId, input.envKey, input.jobId);
     if (!context) throw new InteractionError('INTERACTION_NOT_FOUND', '回复任务不存在。', 404);
     await this.ensureDraftAuth(context);
-    const snapshot = context.job.configVersion === null ? null : await this.configs.getSnapshot(input.accountId, context.job.configVersion);
+    const snapshot = context.job.configVersion === null ? null : await readJobConfig(this.configs,
+      input.accountId, context.job.configScopeId, context.job.configVersion,
+    );
     const profile = snapshot ? profileFor(snapshot, context.thread.channel) : null;
     if (!snapshot || !profile || text.length > profile.maxLength) {
       throw new InteractionError('INTERACTION_VALIDATION_FAILED', '编辑内容超长或引用配置已失效。', 422);

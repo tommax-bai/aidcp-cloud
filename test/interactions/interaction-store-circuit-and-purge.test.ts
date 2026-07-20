@@ -197,6 +197,9 @@ test('deadline purges Cloud data without Edge receipt and a late receipt is reco
   assert.equal(await store.purgeDueOffboards(1_784_044_900_000), 1);
   assert.ok(deletedSql.some((sql) => sql.includes('DELETE FROM interaction_threads')));
   assert.ok(deletedSql.some((sql) => sql.includes('DELETE FROM interaction_auth_state')));
+  assert.equal(deletedSql.some((sql) => sql.includes('interaction_reply_config_scopes') ||
+    sql.includes('interaction_reply_scope_versions') || sql.includes('interaction_reply_scope_audit')), false,
+  'offboarding an account must preserve group/default strategy aggregates and their immutable versions');
   assert.deepEqual(offboardAudits, [{ event: 'cloud_purged', status: 'purged_edge_unconfirmed' }]);
 
   const lateAudits: Array<{ event: string; status: string }> = [];

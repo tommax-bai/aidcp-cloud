@@ -169,6 +169,18 @@ export class ReplyConfigStore {
     };
   }
 
+  async getPublished(accountId: string): Promise<ReplyConfigSnapshot | null> {
+    return this.getSnapshot(accountId, 'published');
+  }
+
+  async getSnapshotForJob(
+    accountId: string,
+    scopeId: string | null | undefined,
+    version: number,
+  ): Promise<ReplyConfigSnapshot | null> {
+    return scopeId ? null : this.getSnapshot(accountId, version);
+  }
+
   private async createDraft(
     accountId: string,
     expectedVersion: number,

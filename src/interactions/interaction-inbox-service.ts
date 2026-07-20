@@ -2,7 +2,7 @@ import type { InteractionStore } from './interaction-store.js';
 import type { InteractionMetrics } from './metrics.js';
 import { riskActionForChannel, type InteractionRiskController } from './send-orchestrator.js';
 import type { ReplyWorkflow } from './reply-workflow.js';
-import type { ReplyConfigStore } from './reply-config-store.js';
+import { readJobConfig, type ReplyConfigReader } from './reply-config-resolver.js';
 import type {
   InteractionChannel,
   InteractionAuthStatusPayload,
@@ -18,7 +18,7 @@ export class InteractionInboxService {
   constructor(private readonly deps: {
     store: InteractionStore;
     workflow: ReplyWorkflow;
-    configs: ReplyConfigStore;
+    configs: ReplyConfigReader;
     controllerFor: (accountId: string) => InteractionRiskController | undefined | Promise<InteractionRiskController | undefined>;
     metrics: InteractionMetrics;
     dispatchAuto?: (input: { accountId: string; envKey: string; jobId: string; expectedVersion: number }) => Promise<unknown>;
@@ -88,7 +88,9 @@ export class InteractionInboxService {
     this.deps.metrics.increment('interaction_reply_result_total', { channel: payload.channel, status: payload.status });
     const context = await this.deps.store.getJobContext(payload.accountId, payload.envKey, payload.jobId);
     const config = context?.job.configVersion == null ? null :
-      await this.deps.configs.getSnapshot(payload.accountId, context.job.configVersion);
+      await readJobConfig(this.deps.configs,
+        payload.accountId, context.job.configScopeId, context.job.configVersion,
+      );
     const failureLimit = Math.max(1, config?.policy.rateLimits.consecutiveFailureLimit ?? 3);
     if (payload.status === 'confirmed') {
       await this.deps.store.noteSendOutcome(payload.accountId, true, failureLimit);

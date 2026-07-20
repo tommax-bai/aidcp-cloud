@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { makeEnvelope } from '../comm/protocol.js';
 import type { EdgePusher } from '../comm/ws-server.js';
-import type { ReplyConfigStore } from './reply-config-store.js';
+import { readJobConfig, type ReplyConfigReader } from './reply-config-resolver.js';
 import { deterministicClaimTags, validateFinalReplyText } from './reply-config.js';
 import type { InteractionStore } from './interaction-store.js';
 import type { InteractionMetrics } from './metrics.js';
@@ -55,7 +55,7 @@ export class InteractionSendOrchestrator {
 
   constructor(private readonly deps: {
     store: InteractionStore;
-    configs: ReplyConfigStore;
+    configs: ReplyConfigReader;
     pusher: EdgePusher;
     isEdgePaused?: (edgeId: string) => boolean;
     controllerFor: (accountId: string) => InteractionRiskController | undefined | Promise<InteractionRiskController | undefined>;
@@ -137,7 +137,9 @@ export class InteractionSendOrchestrator {
     if (!context.job.finalText?.trim() || context.message.messageType !== 'text' || context.message.lifecycle !== 'active') {
       this.blocked('INTERACTION_VALIDATION_FAILED', '回复文本或原消息状态不允许发送。', 422);
     }
-    const snapshot = context.job.configVersion === null ? null : await this.deps.configs.getSnapshot(accountId, context.job.configVersion);
+    const snapshot = context.job.configVersion === null ? null : await readJobConfig(this.deps.configs,
+      accountId, context.job.configScopeId, context.job.configVersion,
+    );
     if (!snapshot || snapshot.state !== 'published' || !snapshot.policy.sendReplies ||
         !snapshot.policy.channels[context.thread.channel].enabled) {
       this.blocked('INTERACTION_CONFIG_MISSING', '已发布回复配置缺失或发送未开启。', 422);
