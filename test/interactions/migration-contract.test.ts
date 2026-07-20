@@ -11,6 +11,7 @@ const storeCircuitMigrationUrl = new URL('../../migrations/0045_wechat_store_and
 const activeIdempotencyMigrationUrl = new URL('../../migrations/0046_interaction_idempotency_active_unique.sql', import.meta.url);
 const groupReplyConfigMigrationUrl = new URL('../../migrations/0048_wechat_group_reply_config.sql', import.meta.url);
 const cleanupGrantMigrationUrl = new URL('../../migrations/0049_offboard_cleanup_grants.sql', import.meta.url);
+const groupReplyConfigPrivilegesMigrationUrl = new URL('../../migrations/0050_wechat_group_reply_config_privileges.sql', import.meta.url);
 
 test('0039 creates the dedicated inbound domain and never writes outbound interaction_feed', async () => {
   const sql = await readFile(migrationUrl, 'utf8');
@@ -135,4 +136,14 @@ test('0049 adds hashed use-once offboard cleanup grants without storing bearer t
   assert.match(sql, /cleanup_grant_used_at TIMESTAMPTZ/);
   assert.match(sql, /state IN \('pending_edge','dispatched'\)/);
   assert.doesNotMatch(sql, /cleanup_grant_token|bearer_token/i);
+});
+
+test('0050 grants group-scoped reply config access to the existing runtime role', async () => {
+  const sql = await readFile(groupReplyConfigPrivilegesMigrationUrl, 'utf8');
+  assert.match(sql, /pg_get_userbyid\(c\.relowner\)/);
+  assert.match(sql, /c\.relname = 'interaction_reply_configs'/);
+  assert.match(sql, /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE/);
+  assert.match(sql, /interaction_reply_config_scopes, interaction_reply_scope_versions, interaction_reply_scope_audit/);
+  assert.doesNotMatch(sql, /TO\s+aidcp\b/i, 'the migration must not hard-code an environment role name');
+  assert.doesNotMatch(sql, /DROP|REVOKE|ALTER TABLE/i, 'the privilege repair must remain additive');
 });
