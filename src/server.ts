@@ -250,6 +250,9 @@ import type { ModelConfigView } from './panel/types.js';
 import {
   InteractionStore,
   ReplyConfigStore,
+  ReplyConfigScopeStore,
+  ReplyConfigResolver,
+  parseReplyConfigResolutionMode,
   ReplyAiService,
   ReplyWorkflow,
   InteractionInboxService,
@@ -258,6 +261,7 @@ import {
   InteractionCustomerApi,
   interactionTestDataResetEnabled,
   InteractionInternalApi,
+  InteractionScopeInternalApi,
   InteractionMetrics,
   buildInteractionPermissionOverview,
   parseInteractionPanelGrants,
@@ -1359,6 +1363,8 @@ async function main(): Promise<void> {
   let interactionStore: InteractionStore | undefined;
   let interactionSchemaMode: InteractionSchemaMode | undefined;
   let replyConfigStore: ReplyConfigStore | undefined;
+  let replyConfigScopeStore: ReplyConfigScopeStore | undefined;
+  let replyConfigResolver: ReplyConfigResolver | undefined;
   let replyWorkflow: ReplyWorkflow | undefined;
   let interactionInbox: InteractionInboxService | undefined;
   let interactionSender: InteractionSendOrchestrator | undefined;
@@ -1367,22 +1373,30 @@ async function main(): Promise<void> {
   try {
     interactionStore = new InteractionStore();
     replyConfigStore = new ReplyConfigStore();
+    replyConfigScopeStore = new ReplyConfigScopeStore();
     interactionSchemaMode = await interactionStore.init();
     await replyConfigStore.init();
+    await replyConfigScopeStore.init();
+    replyConfigResolver = new ReplyConfigResolver(
+      replyConfigStore,
+      replyConfigScopeStore,
+      parseReplyConfigResolutionMode(readEnvString('AIDCP_WECHAT_REPLY_CONFIG_SCOPE_MODE')),
+    );
     const resetClassifying = await interactionStore.recoverStalledClassifyingJobs(Date.now() - interactionAiTimeoutMs * 2);
     interactionMetrics.gauge('interaction_recovered_classifying_jobs', resetClassifying);
     const replyAi = new ReplyAiService(
       llm,
       interactionAiTimeoutMs,
     );
-    replyWorkflow = new ReplyWorkflow(interactionStore, replyConfigStore, replyAi, {
+    replyWorkflow = new ReplyWorkflow(interactionStore, replyConfigResolver, replyAi, {
       dmAiEnabled: readEnvString('AIDCP_INTERACTION_DM_AI_ENABLED')?.toLocaleLowerCase() === 'true',
+      accountNameFor: (accountId) => accountStore?.getNickname?.(accountId),
       canAutoQueue: async (context, snapshot, preview) =>
         interactionSender?.canAutoQueueDraft(context, snapshot, preview) ?? false,
     });
     interactionInbox = new InteractionInboxService({
       store: interactionStore,
-      configs: replyConfigStore,
+      configs: replyConfigResolver,
       workflow: replyWorkflow,
       controllerFor: (accountId) => riskRegistry.getController(accountId),
       metrics: interactionMetrics,
@@ -1418,13 +1432,17 @@ async function main(): Promise<void> {
     } else if (interactionSchemaMode === 'legacy_read_only') {
       console.warn('[aidcp-cloud] 入站 interaction 域以兼容只读模式就绪（migration 0046 未执行；读取已恢复；评论回复/私信发送强制关闭）');
     } else {
-      console.log('[aidcp-cloud] 入站 interaction 域已就绪（migration 0046；完整读写能力受写总开关控制）');
+      console.log(`[aidcp-cloud] 入站 interaction 域已就绪（migration 0048；回复策略解析模式 ${replyConfigResolver.mode}；完整读写能力受写总开关控制）`);
     }
   } catch (error) {
-    await Promise.allSettled([interactionStore?.close(), replyConfigStore?.close()]);
+    await Promise.allSettled([
+      interactionStore?.close(), replyConfigStore?.close(), replyConfigScopeStore?.close(), replyConfigResolver?.close(),
+    ]);
     interactionStore = undefined;
     interactionSchemaMode = undefined;
     replyConfigStore = undefined;
+    replyConfigScopeStore = undefined;
+    replyConfigResolver = undefined;
     replyWorkflow = undefined;
     interactionInbox = undefined;
     console.warn(`[aidcp-cloud] 入站 interaction 域未启用: ${error instanceof Error ? error.message : String(error)}`);
@@ -2097,10 +2115,10 @@ async function main(): Promise<void> {
     },
   });
   edgeServer = server;
-  interactionSender = interactionStore && replyConfigStore
+  interactionSender = interactionStore && replyConfigResolver
     ? new InteractionSendOrchestrator({
       store: interactionStore,
-      configs: replyConfigStore,
+      configs: replyConfigResolver,
       pusher: server,
       isEdgePaused: (edgeId) => server.isEdgePaused(edgeId),
       controllerFor: (accountId) => riskRegistry.getController(accountId),
@@ -2129,23 +2147,39 @@ async function main(): Promise<void> {
       ),
     };
   };
-  const interactionInternalApi = interactionStore && replyConfigStore && replyWorkflow
+  const legacyInteractionInternalApi = interactionStore && replyConfigStore && replyWorkflow
     ? new InteractionInternalApi({
       store: interactionStore,
       configs: replyConfigStore,
       workflow: replyWorkflow,
       grantsFor: (actor) => interactionPanelGrants.get(actor) ?? new Set(),
       cursorSecret: readEnvString('AIDCP_PANEL_JWT_SECRET') ?? '',
+      resolutionMode: replyConfigResolver?.mode,
       onRuntimeControlsUpdated: deliverInteractionRuntimeControls,
     })
     : undefined;
+  const scopeInteractionInternalApi = replyConfigScopeStore && replyConfigResolver && replyWorkflow
+    ? new InteractionScopeInternalApi({
+      scopes: replyConfigScopeStore,
+      resolver: replyConfigResolver,
+      workflow: replyWorkflow,
+      grantsFor: (actor) => interactionPanelGrants.get(actor) ?? new Set(),
+      cursorSecret: readEnvString('AIDCP_PANEL_JWT_SECRET') ?? '',
+    })
+    : undefined;
+  const interactionInternalApi = legacyInteractionInternalApi || scopeInteractionInternalApi
+    ? {
+        handle: async (...args: Parameters<InteractionInternalApi['handle']>) =>
+          await scopeInteractionInternalApi?.handle(...args) || await legacyInteractionInternalApi?.handle(...args) || false,
+      }
+    : undefined;
   const clientCursorSecret = readEnvString('AIDCP_CLIENT_JWT_SECRET');
   const testDataResetEnabled = interactionTestDataResetEnabled(process.env);
-  const interactionCustomerApi = interactionStore && replyConfigStore && replyWorkflow && interactionSender && clientCursorSecret
+  const interactionCustomerApi = interactionStore && replyConfigResolver && replyWorkflow && interactionSender && clientCursorSecret
     ? new InteractionCustomerApi({
       users: clientUserStore,
       store: interactionStore,
-      configs: replyConfigStore,
+      configs: replyConfigResolver,
       workflow: replyWorkflow,
       sender: interactionSender,
       onRuntimeControlsUpdated: deliverInteractionRuntimeControls,

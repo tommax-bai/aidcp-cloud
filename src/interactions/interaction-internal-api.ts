@@ -147,6 +147,7 @@ export class InteractionInternalApi {
     workflow: ReplyWorkflow;
     grantsFor: (actor: string) => ReadonlySet<InteractionGrant>;
     cursorSecret: string;
+    resolutionMode?: 'legacy' | 'shadow' | 'scoped';
     onRuntimeControlsUpdated?: (controls: RuntimeControls) => Promise<{ delivered: number }>;
     clock?: () => number;
   }) {
@@ -242,6 +243,15 @@ export class InteractionInternalApi {
         });
         return;
       }
+    }
+    if (this.deps.resolutionMode === 'scoped' && method !== 'GET') {
+      throw new InteractionError(
+        'INTERACTION_STATE_CONFLICT',
+        '账号级回复配置写入口已停用，请在视频号分组/默认策略中修改。',
+        409,
+        false,
+        { reason: 'account_reply_config_deprecated' },
+      );
     }
     if (suffix === 'reply-config/initialize' && method === 'POST') {
       this.require(actor, 'interaction.config.edit');

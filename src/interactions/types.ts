@@ -92,6 +92,7 @@ export class InteractionError extends Error {
       currentState?: ReplyJobState;
       retryAfterMs?: number;
       issues?: ValidationIssue[];
+      reason?: string;
     },
   ) {
     super(message);
@@ -399,6 +400,7 @@ export interface ReplyJobView {
   version: number;
   matchedRuleId: string | null;
   configVersion: number | null;
+  configScopeId?: string | null;
   template: { templateId: string | null; templateVersion: number | null };
   renderedText: string | null;
   polishedText: string | null;
@@ -431,6 +433,47 @@ export interface ScopedJobContext {
 }
 
 export type ReplyMode = 'draft_only' | 'review_before_send' | 'auto_safe';
+export type ReplyConfigScopeType = 'group' | 'default';
+export type ReplyConfigResolutionMode = 'legacy' | 'shadow' | 'scoped';
+
+export interface ReplyConfigSource {
+  type: ReplyConfigScopeType;
+  groupLabel: string | null;
+}
+
+export interface ReplyConfigScopeHead {
+  scopeId: string;
+  platform: InteractionPlatform;
+  source: ReplyConfigSource;
+  memberCount: number;
+  currentVersion: number;
+  draftVersion: number | null;
+  publishedVersion: number | null;
+  updatedAt: number;
+  updatedBy: string;
+}
+
+export interface ReplyConfigScopeSummary {
+  scopeId: string | null;
+  platform: InteractionPlatform;
+  source: ReplyConfigSource;
+  memberCount: number;
+  currentVersion: number;
+  draftVersion: number | null;
+  publishedVersion: number | null;
+  updatedAt: number | null;
+  updatedBy: string | null;
+}
+
+export interface EffectiveReplyConfig {
+  accountId: string;
+  mode: ReplyConfigResolutionMode;
+  status: 'missing' | 'draft_only' | 'published' | 'unknown';
+  reason: 'group_config_missing' | 'default_config_missing' | 'account_not_found' | null;
+  source: ReplyConfigSource;
+  head: ReplyConfigScopeHead | null;
+  snapshot: ReplyConfigSnapshot | null;
+}
 export interface PolicyChannel {
   enabled: boolean;
   aiPolishEnabled: boolean;
@@ -514,6 +557,9 @@ export interface ReplyProfile {
 
 export interface ReplyConfigSnapshot {
   accountId: string;
+  /** Present for group/default snapshots; legacy account snapshots leave it null/undefined. */
+  configScopeId?: string | null;
+  configSource?: ReplyConfigSource | null;
   platform: InteractionPlatform;
   configVersion: number;
   state: 'draft' | 'published';

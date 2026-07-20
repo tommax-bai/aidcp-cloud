@@ -145,6 +145,7 @@ interface JobRow {
   version: number | string;
   matched_rule_id: string | null;
   config_version: number | string | null;
+  config_scope_id: string | null;
   template_id: string | null;
   template_version: number | string | null;
   rendered_text: string | null;
@@ -233,6 +234,7 @@ function toJob(row: JobRow): ScopedJobContext['job'] {
     version: Number(row.version),
     matchedRuleId: row.matched_rule_id,
     configVersion: row.config_version === null ? null : Number(row.config_version),
+    configScopeId: row.config_scope_id,
     template: {
       templateId: row.template_id,
       templateVersion: row.template_version === null ? null : Number(row.template_version),
@@ -272,7 +274,7 @@ function toAttempt(row: AttemptRow): SendAttemptView {
   };
 }
 
-const JOB_COLUMNS = `id, inbound_message_id, state, version, matched_rule_id, config_version,
+const JOB_COLUMNS = `id, inbound_message_id, state, version, matched_rule_id, config_version, config_scope_id,
   template_id, template_version, rendered_text, polished_text, final_text, meaning_changed,
   introduced_claims, risk_level, risk_reasons, approval_actor, approved_at, idempotency_key,
   last_error_code, updated_at`;
@@ -846,7 +848,7 @@ export class InteractionStore {
 
   async getJobContext(accountId: string, envKey: string, jobId: string): Promise<ScopedJobContext | null> {
     const { rows } = await this.pool.query<JobRow & MessageRow & ThreadRow>(
-      `SELECT j.id,j.inbound_message_id,j.state,j.version,j.matched_rule_id,j.config_version,j.template_id,
+      `SELECT j.id,j.inbound_message_id,j.state,j.version,j.matched_rule_id,j.config_version,j.config_scope_id,j.template_id,
               j.template_version,j.rendered_text,j.polished_text,j.final_text,j.meaning_changed,j.introduced_claims,
               j.risk_level,j.risk_reasons,j.approval_actor,j.approved_at,j.idempotency_key,j.last_error_code,j.updated_at,
               m.id AS m_id,m.thread_id,m.direction,m.external_message_id,m.external_parent_id,m.external_root_id,
@@ -887,7 +889,7 @@ export class InteractionStore {
     accountId: string; envKey: string; jobId: string; expectedVersion: number;
     from: ReplyJobState[]; to: ReplyJobState; actor: string;
     patch?: Partial<{
-      matchedRuleId: string | null; configVersion: number | null; templateId: string | null;
+      matchedRuleId: string | null; configVersion: number | null; configScopeId: string | null; templateId: string | null;
       templateVersion: number | null; renderedText: string | null; polishedText: string | null;
       finalText: string | null; meaningChanged: boolean; introducedClaims: string[];
       riskLevel: ReplyJobView['riskLevel']; riskReasons: RiskTag[]; idempotencyKey: string | null;
@@ -897,7 +899,7 @@ export class InteractionStore {
     const set: string[] = [`state=$6`, `version=version+1`, `updated_at=now()`];
     const values: unknown[] = [input.jobId, input.accountId, input.envKey, input.expectedVersion, input.from, input.to];
     const map: Record<string, string> = {
-      matchedRuleId: 'matched_rule_id', configVersion: 'config_version', templateId: 'template_id',
+      matchedRuleId: 'matched_rule_id', configVersion: 'config_version', configScopeId: 'config_scope_id', templateId: 'template_id',
       templateVersion: 'template_version', renderedText: 'rendered_text', polishedText: 'polished_text',
       finalText: 'final_text', meaningChanged: 'meaning_changed', introducedClaims: 'introduced_claims',
       riskLevel: 'risk_level', riskReasons: 'risk_reasons', idempotencyKey: 'idempotency_key', lastErrorCode: 'last_error_code',

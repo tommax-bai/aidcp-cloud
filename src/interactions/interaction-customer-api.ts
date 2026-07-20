@@ -4,6 +4,7 @@ import type { ClientUserStore } from '../client-auth/client-user-store.js';
 import type { InteractionStore } from './interaction-store.js';
 import type { InteractionSendOrchestrator } from './send-orchestrator.js';
 import type { ReplyConfigStore } from './reply-config-store.js';
+import type { ReplyConfigResolver } from './reply-config-resolver.js';
 import type { ReplyWorkflow } from './reply-workflow.js';
 import {
   INTERACTION_PLATFORM,
@@ -100,10 +101,26 @@ type ReplyConfigProjection = {
   currentVersion: number | null;
   draftVersion: number | null;
   publishedVersion: number | null;
+  mode?: 'legacy' | 'shadow' | 'scoped';
+  source?: { type: 'group' | 'default'; groupLabel: string | null };
 };
 
-async function replyConfigSummary(configs: ReplyConfigStore, accountId: string): Promise<ReplyConfigProjection> {
+type CustomerConfigReader = ReplyConfigStore | ReplyConfigResolver;
+
+async function replyConfigSummary(configs: CustomerConfigReader, accountId: string): Promise<ReplyConfigProjection> {
   try {
+    if ('resolve' in configs) {
+      const effective = await configs.resolve(accountId);
+      const version = effective.snapshot?.configVersion ?? null;
+      return {
+        status: effective.status,
+        currentVersion: effective.head?.currentVersion ?? version,
+        draftVersion: effective.head?.draftVersion ?? null,
+        publishedVersion: effective.head?.publishedVersion ?? version,
+        mode: effective.mode,
+        source: effective.source,
+      };
+    }
     const head = await configs.getHead(accountId);
     if (!head) {
       return { status: 'missing', currentVersion: null, draftVersion: null, publishedVersion: null };
@@ -163,7 +180,7 @@ export class InteractionCustomerApi {
   constructor(private readonly deps: {
     users: ClientUserStore;
     store: InteractionStore;
-    configs: ReplyConfigStore;
+    configs: CustomerConfigReader;
     workflow: ReplyWorkflow;
     sender: InteractionSendOrchestrator;
     onRuntimeControlsUpdated?: (controls: RuntimeControls) => Promise<{ delivered: number }>;
