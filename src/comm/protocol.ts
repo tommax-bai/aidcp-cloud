@@ -1480,6 +1480,11 @@ export interface InteractionCommentPayload {
    * 人审卡展示的是「text + 换行 + 此码」的完整终稿（AC-PUB 审=发）。缺省 = 不注入（普通评论）。
    */
   groupChatCode?: string;
+  /**
+   * 手工 `/comment --feed`：提交动作派发后跳过平台确认，500ms 后直回平台首页。
+   * 缺省 false；该模式只能诚实回 submitted-unconfirmed / verification_ambiguous，绝不表示平台确认成功。
+   */
+  fastReturnToFeed?: boolean;
   reason?: string;
   /** 发评论前犹豫时间中心值（毫秒，可选） */
   thinkMs?: number;

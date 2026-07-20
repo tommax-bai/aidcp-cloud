@@ -22,6 +22,7 @@ import {
   type SessionEndPayload,
   type SearchExecutePayload,
   type NoteOpenPayload,
+  type InteractionCommentPayload,
   type PersonaGeneratePayload,
   type PersonaGenerateResultPayload,
   type PersonaPersistResultPayload,
@@ -159,6 +160,12 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     const open: NoteOpenPayload = { url: 'https://www.facebook.com/groups/123456/posts/999' };
     const openBack = parseEnvelope(JSON.stringify(makeEnvelope('note.open', 'o-1', 1700000000000, open)));
     assert.equal((openBack!.payload as NoteOpenPayload).url, 'https://www.facebook.com/groups/123456/posts/999');
+  });
+
+  it('AC-PROTO-08B comment --feed 快返字段往返存活（防两端静默漂移）', () => {
+    const payload: InteractionCommentPayload = { noteId: 'n1', text: '评论正文', fastReturnToFeed: true };
+    const back = parseEnvelope(JSON.stringify(makeEnvelope('interaction.comment', 'c-feed', 1700000000000, payload)));
+    assert.equal((back!.payload as InteractionCommentPayload).fastReturnToFeed, true);
   });
 
   it('AC-PROTO-09 persona 生成载荷可选字段往返存活（防两端静默漂移）', () => {

@@ -439,36 +439,54 @@ test('parseCommand: --force 也 trailing-only——非末尾 token 并入昵称�
   assert.equal(cmd.nickname, '--force 工程师');
 });
 
-test('CommandRouter: /comment --contact/--join/--force 把开关透传给 comment 动作', async () => {
-  let seen: { nickname?: string; options?: { injectContact?: boolean; joinGroup?: boolean; joinGroupUrl?: string; force?: boolean } } | null = null;
+test('parseCommand: --feed 与其它尾部开关任意顺序组合，且中间 token 不误切昵称', () => {
+  const a = parseCommand('/comment 工程师大白 --contact --feed --force');
+  assert.equal(a.nickname, '工程师大白');
+  assert.equal(a.injectContact, true);
+  assert.equal(a.fastReturnToFeed, true);
+  assert.equal(a.force, true);
+  const b = parseCommand('/comment 工程师大白 --FEED --join');
+  assert.equal(b.nickname, '工程师大白');
+  assert.equal(b.fastReturnToFeed, true);
+  assert.equal(b.joinGroup, true);
+  const middle = parseCommand('/comment --feed 工程师大白');
+  assert.equal(middle.fastReturnToFeed, undefined);
+  assert.equal(middle.nickname, '--feed 工程师大白');
+});
+
+test('CommandRouter: /comment --contact/--join/--force/--feed 把开关透传给 comment 动作', async () => {
+  let seen: { nickname?: string; options?: { injectContact?: boolean; joinGroup?: boolean; joinGroupUrl?: string; force?: boolean; fastReturnToFeed?: boolean } } | null = null;
   const router = new CommandRouter({
     ...makeActions().actions,
-    comment: async (nickname?: string, options?: { injectContact?: boolean; joinGroup?: boolean; joinGroupUrl?: string; force?: boolean }) => {
+    comment: async (nickname?: string, options?: { injectContact?: boolean; joinGroup?: boolean; joinGroupUrl?: string; force?: boolean; fastReturnToFeed?: boolean }) => {
       seen = { nickname, options };
       return { ok: true as const, level: 'success' as const, title: '已触发', message: 'ok' };
     },
   });
   await router.handle('/comment 工程师大白 --contact');
-  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: true, joinGroup: undefined, joinGroupUrl: undefined, force: undefined } });
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: true, joinGroup: undefined, joinGroupUrl: undefined, force: undefined, fastReturnToFeed: undefined } });
 
   await router.handle('/comment 工程师大白');
-  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: undefined, joinGroup: undefined, joinGroupUrl: undefined, force: undefined } });
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: undefined, joinGroup: undefined, joinGroupUrl: undefined, force: undefined, fastReturnToFeed: undefined } });
 
   await router.handle('/comment 工程师大白 --join --contact');
-  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: true, joinGroup: true, joinGroupUrl: undefined, force: undefined } });
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: true, joinGroup: true, joinGroupUrl: undefined, force: undefined, fastReturnToFeed: undefined } });
 
   await router.handle('/comment 工程师大白 --join=https://www.facebook.com/groups/901700573618044');
   assert.deepEqual(seen, {
     nickname: '工程师大白',
-    options: { injectContact: undefined, joinGroup: true, joinGroupUrl: 'https://www.facebook.com/groups/901700573618044', force: undefined },
+    options: { injectContact: undefined, joinGroup: true, joinGroupUrl: 'https://www.facebook.com/groups/901700573618044', force: undefined, fastReturnToFeed: undefined },
   });
 
   // --force 透传（change manual-comment-force-flag），可与 --contact 组合
   await router.handle('/comment 工程师大白 --force');
-  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: undefined, joinGroup: undefined, joinGroupUrl: undefined, force: true } });
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: undefined, joinGroup: undefined, joinGroupUrl: undefined, force: true, fastReturnToFeed: undefined } });
 
   await router.handle('/comment 工程师大白 --contact --force');
-  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: true, joinGroup: undefined, joinGroupUrl: undefined, force: true } });
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: true, joinGroup: undefined, joinGroupUrl: undefined, force: true, fastReturnToFeed: undefined } });
+
+  await router.handle('/comment 工程师大白 --feed');
+  assert.deepEqual(seen, { nickname: '工程师大白', options: { injectContact: undefined, joinGroup: undefined, joinGroupUrl: undefined, force: undefined, fastReturnToFeed: true } });
 });
 
 test('CommandRouter: publish 编排失败 → 回执 ok:false / level:error（红 ❌，绝不再绿色）+ 透传失败原因', async () => {

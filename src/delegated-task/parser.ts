@@ -134,6 +134,7 @@ export function parseDelegatedText(text: string, opts: ParseDelegatedTextOptions
     }
     if (flags.some((v) => /^--contact$/i.test(v))) targetConstraints.injectContact = true;
     if (flags.some((v) => /^--force$/i.test(v))) targetConstraints.force = true;
+    if (flags.some((v) => /^--feed$/i.test(v))) targetConstraints.fastReturnToFeed = true;
     return withIntent(nickname, baseIntent(raw, join ? 'facebook_group_comment' : 'comment_batch', 1, { ...opts, source: 'legacy_command' }, { target: targetConstraints }));
   }
 

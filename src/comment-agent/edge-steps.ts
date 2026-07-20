@@ -148,7 +148,7 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
   filterUncommented(cards: CommentCandidateCard[]): Promise<CommentCandidateCard[]>;
   readNote(card: CommentCandidateCard): Promise<{ note: NoteForComment; comments: OnPageComment[] } | null>;
   readCurrentNote(note: NoteForComment): Promise<{ note: NoteForComment; comments: OnPageComment[] } | null>;
-  post(noteId: string, text: string, contactInfo?: string | null): Promise<CommentPostResult>;
+  post(noteId: string, text: string, contactInfo?: string | null, fastReturnToFeed?: boolean): Promise<CommentPostResult>;
   recordCommented(noteId: string): Promise<void>;
 } {
   const { bus, pusher, edgeId, taskId, dedup } = deps;
@@ -323,7 +323,7 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
 
     readCurrentNote,
 
-    async post(noteId: string, text: string, contactInfo?: string | null): Promise<CommentPostResult> {
+    async post(noteId: string, text: string, contactInfo?: string | null, fastReturnToFeed = false): Promise<CommentPostResult> {
       const completed = await sendAndAwait<ActionCompleted>(
         bus,
         'action.completed',
@@ -338,6 +338,7 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
               // 联系方式（account-group-chat-injection）：非空时边缘逐字敲 text 后整段插入此码（绕过 @/# 补全）。
               // 线协议字段名仍为 groupChatCode（protocol.ts 热点字段，重命名属另行协调步骤）。
               ...(contactInfo ? { groupChatCode: contactInfo } : {}),
+              ...(fastReturnToFeed ? { fastReturnToFeed: true } : {}),
               ...(deps.thinkMs ? { thinkMs: deps.thinkMs() } : {}),
             }),
           ),

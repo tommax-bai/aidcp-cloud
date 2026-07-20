@@ -37,6 +37,7 @@ test('batch comments always use automatic quota semantics while legacy single co
     injectContact?: boolean;
     joinFirst?: boolean;
     joinGroupUrl?: string;
+    fastReturnToFeed?: boolean;
   }> = [];
   const router = createDelegatedExecutorRouter({
     comments: {
@@ -48,6 +49,7 @@ test('batch comments always use automatic quota semantics while legacy single co
           injectContact: options.injectContact,
           joinFirst: options.joinFirst,
           joinGroupUrl: options.joinGroupUrl,
+          fastReturnToFeed: options.fastReturnToFeed,
         });
         await options.onResult({ outcome: 'commented', noteId: 'note-1' });
         return { ok: true, message: 'started' };
@@ -66,6 +68,7 @@ test('batch comments always use automatic quota semantics while legacy single co
   assert.deepEqual(calls[0], {
     priority: 'automatic', manualOverride: false, force: false,
     injectContact: false, joinFirst: undefined, joinGroupUrl: undefined,
+    fastReturnToFeed: false,
   });
 
   const legacy = task({
@@ -73,12 +76,14 @@ test('batch comments always use automatic quota semantics while legacy single co
     targetConstraints: {
       manualSingle: true, force: true, injectContact: true,
       joinGroup: true, groupUrl: 'https://www.facebook.com/groups/example',
+      fastReturnToFeed: true,
     },
   });
   await router.executorFor(legacy).execute(legacy, attempt);
   assert.deepEqual(calls[1], {
     priority: 'human', manualOverride: true, force: true, injectContact: true,
     joinFirst: true, joinGroupUrl: 'https://www.facebook.com/groups/example',
+    fastReturnToFeed: true,
   });
 });
 

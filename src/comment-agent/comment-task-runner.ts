@@ -72,7 +72,7 @@ export interface CommentTaskSteps {
     comments: OnPageComment[],
   ): Promise<{ text: string; contactInfo: string | null } | null>;
   /** 发布评论（interaction.comment + 真回执校验）；正文逐字、联系方式整段插入；返回三态（7.6/HOLE-8）。 */
-  post(noteId: string, text: string, contactInfo?: string | null): Promise<CommentPostResult>;
+  post(noteId: string, text: string, contactInfo?: string | null, fastReturnToFeed?: boolean): Promise<CommentPostResult>;
   /** 发布成功后记一笔「已评论」（供下次去重）。 */
   recordCommented(noteId: string): Promise<void>;
 }

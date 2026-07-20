@@ -17,7 +17,7 @@ test('parses batch comment goal with nickname, success count, attempts and prior
 });
 
 test('legacy write slash command remains syntax-compatible but becomes a single task intent', () => {
-  const parsed = parseDelegatedText('/comment 工程师大白 --contact --force', { now: NOW });
+  const parsed = parseDelegatedText('/comment 工程师大白 --contact --force --feed', { now: NOW });
   assert.equal(parsed.ok, true);
   if (!parsed.ok || parsed.kind !== 'intent') return;
   assert.equal(parsed.nickname, '工程师大白');
@@ -25,6 +25,7 @@ test('legacy write slash command remains syntax-compatible but becomes a single 
   assert.equal(parsed.intent.targetSuccessCount, 1);
   assert.equal(parsed.intent.targetConstraints?.manualSingle, true);
   assert.equal(parsed.intent.targetConstraints?.injectContact, true);
+  assert.equal(parsed.intent.targetConstraints?.fastReturnToFeed, true);
 });
 
 test('parses candidates, curated comment and task controls', () => {

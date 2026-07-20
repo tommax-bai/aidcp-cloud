@@ -390,6 +390,7 @@ export class CommentScheduler {
       joinGroupUrl?: string;
       manualOverride?: boolean;
       force?: boolean;
+      fastReturnToFeed?: boolean;
       approvalMode?: ContentScheduleApprovalMode;
       /** 命令来源会话（change unify-card-routing-origin-then-team）：审批卡 / 终态卡回下命令的会话；缺省 → 账号团队群 → 默认群。 */
       originChatId?: string;
@@ -486,6 +487,7 @@ export class CommentScheduler {
           ...(targetedUrl ? { joinGroupUrl: targetedUrl } : {}),
           manualOverride: options?.manualOverride === true,
           force: options?.force === true,
+          fastReturnToFeed: options?.fastReturnToFeed === true,
           approvalMode: options?.approvalMode,
         ...(options?.originChatId ? { originChatId: options.originChatId } : {}),
           ...(options?.originChatId ? { originChatId: options.originChatId } : {}),
@@ -516,6 +518,7 @@ export class CommentScheduler {
         contactInfo,
         manualOverride: options?.manualOverride === true,
         force: options?.force === true,
+        fastReturnToFeed: options?.fastReturnToFeed === true,
         approvalMode: options?.approvalMode,
         ...(options?.originChatId ? { originChatId: options.originChatId } : {}),
       })
@@ -544,6 +547,7 @@ export class CommentScheduler {
       platformProfile,
       options?.priority ?? 'human',
       options?.force === true,
+      options?.fastReturnToFeed === true,
       options?.approvalMode,
       options?.onResult,
       options?.originChatId,
@@ -721,6 +725,7 @@ export class CommentScheduler {
       overrideContainerUrl?: string;
       manualOverride?: boolean;
       force?: boolean;
+      fastReturnToFeed?: boolean;
       approvalMode?: ContentScheduleApprovalMode;
       /** 命令来源会话（change unify-card-routing-origin-then-team）：审批卡 / 终态卡回下命令的会话；缺省 → 账号团队群 → 默认群。 */
       originChatId?: string;
@@ -762,6 +767,7 @@ export class CommentScheduler {
       overrideContainerUrl?: string;
       manualOverride?: boolean;
       force?: boolean;
+      fastReturnToFeed?: boolean;
       approvalMode?: ContentScheduleApprovalMode;
       /** 命令来源会话（change unify-card-routing-origin-then-team）：审批卡 / 终态卡回下命令的会话；缺省 → 账号团队群 → 默认群。 */
       originChatId?: string;
@@ -977,7 +983,7 @@ export class CommentScheduler {
 
           // 6) 提交评论 + 服务器确认（边端 own-identity 收窄）。成功记风控走 interaction.occurred 自动路径，绝不在此重复 record。
           // 提交被更高优先级任务抢占 / 边端失配 taskId 静默丢弃 → submitComment 超时回 ok:false → 走 else 诚实非提交（不打去重、可重试）。
-          const submit = await steps.submitComment(target, v.text, groupChatCode);
+          const submit = await steps.submitComment(target, v.text, groupChatCode, options.fastReturnToFeed === true);
           // 防重复真发（BLOCKING §5.4）：仅在**真提交了**（成功 或 提交后确认不了 verification_ambiguous）时打去重标记——
           // 硬失败（权限门/找不到评论框/被拦/身份未知）没真点提交、无重复真发风险，不打标记（可重试、不白占当日上限）。
           // 该标记同时使 facebookCommentedToday 计入当日配额；仅计「真发过一次」的目标，不误伤硬失败重试。
@@ -1027,6 +1033,7 @@ export class CommentScheduler {
       joinGroupUrl?: string;
       manualOverride?: boolean;
       force?: boolean;
+      fastReturnToFeed?: boolean;
       approvalMode?: ContentScheduleApprovalMode;
       /** 命令来源会话（change unify-card-routing-origin-then-team）：审批卡 / 终态卡回下命令的会话；缺省 → 账号团队群 → 默认群。 */
       originChatId?: string;
@@ -1063,6 +1070,7 @@ export class CommentScheduler {
       overrideContainerUrl: join.groupUrl,
       manualOverride: options.manualOverride === true,
       force: options.force === true,
+      fastReturnToFeed: options.fastReturnToFeed === true,
       approvalMode: options.approvalMode,
       ...(options.originChatId ? { originChatId: options.originChatId } : {}),
     });
@@ -1305,6 +1313,7 @@ export class CommentScheduler {
     // change manual-comment-force-flag：--force 时放开「强相关甄选」与「每笔记去重」两道软筛选（仅手动路径）。
     // 缺省 false → 默认/自动路径行为逐字不变（零回归）。仍守人审、边端诚实闸（发布前就地核对 noteId）、账号隔离。
     force = false,
+    fastReturnToFeed = false,
     approvalMode: ContentScheduleApprovalMode = 'review',
     onResult?: (result: CommentTerminalObservation) => Promise<void> | void,
     originChatId?: string,
@@ -1431,7 +1440,7 @@ export class CommentScheduler {
                 }
                 // 发布：边端在提交前【就地核对当前详情页 noteId】（interaction.comment 带 noteId），
                 // 页面被弹层顶掉/被导航离开/笔记已删 → 边端诚实回 ok:false → 不发（绝不在错笔记上发）。
-                const posted = await edge.post(selected.noteId, composed.text, composed.contactInfo);
+                const posted = await edge.post(selected.noteId, composed.text, composed.contactInfo, fastReturnToFeed);
                 const pbase = { term, noteId: selected.noteId, noteTitle: prepared.note.title, text: displayText, termsTried: tried } as const;
                 if (posted.status === 'preempted') {
                   // 7.6：提交前被抢占 → 放弃本轮（不写去重、不换词重试）。

@@ -1807,7 +1807,7 @@ async function main(): Promise<void> {
     },
     // 手动 /comment <昵称>（change comment-search-command）：按昵称解析账号 → 触发按需评论任务。
     // 回执据**触发结果**判 ok/level（开跑绿 / 未触发黄 / 失败红）；最终评/未评结果由 scheduler 异步补结果卡片。
-    comment: async (nickname?: string, options?: { injectContact?: boolean; joinGroup?: boolean; joinGroupUrl?: string; force?: boolean }) => {
+    comment: async (nickname?: string, options?: { injectContact?: boolean; joinGroup?: boolean; joinGroupUrl?: string; force?: boolean; fastReturnToFeed?: boolean }) => {
       if (!commentScheduler) {
         return { ok: false, level: 'error', title: '按需评论未就绪', message: '评论触发器未就绪（启动中或依赖不可用），未发起任务。' };
       }
@@ -1825,6 +1825,7 @@ async function main(): Promise<void> {
         joinGroupUrl: options?.joinGroupUrl,
         manualOverride: true,
         force: options?.force === true,
+        fastReturnToFeed: options?.fastReturnToFeed === true,
       });
     },
   };

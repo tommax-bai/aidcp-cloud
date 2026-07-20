@@ -122,6 +122,17 @@ describe('buildFacebookEdgeSteps', () => {
     assert.equal(sent[0].payload.text, '很喜欢');
   });
 
+  it('comment：显式 fast return 透传 fastReturnToFeed=true，未确认结果原样返回', async () => {
+    const bus = new EventBus();
+    const { pusher, sent } = makePusher((env) => {
+      if (env.type === 'interaction.comment') bus.emit('action.completed', { action: 'comment', ok: false, reason: 'verification_ambiguous', ts: 0 } as never);
+    });
+    const r = await steps(bus, pusher).submitComment('https://fb.com/g/1/posts/2', '很喜欢', undefined, true);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'verification_ambiguous');
+    assert.equal(sent[0].payload.fastReturnToFeed, true);
+  });
+
   it('comment：action.completed{comment,ok:false,reason} → ok:false + reason', async () => {
     const bus = new EventBus();
     const { pusher } = makePusher((env) => {

@@ -19,6 +19,7 @@ export interface DelegatedCommentPort {
       approvalMode: 'review' | 'auto_approve';
       joinFirst?: boolean;
       joinGroupUrl?: string;
+      fastReturnToFeed?: boolean;
       /**
        * change unify-card-routing-origin-then-team：命令来源会话，透传成评论审批卡 + 终态结果卡的目标。
        * 与 DelegatedPublishPort.manualApprovalChatId 对称。缺省 → 补集回落账号团队群 → 默认群。
@@ -358,6 +359,7 @@ export function createDelegatedExecutorRouter(deps: DelegatedExecutorDeps): {
           priority: legacySingle ? 'human' : 'automatic',
           manualOverride: legacySingle,
           force: legacySingle && task.targetConstraints.force === true,
+          fastReturnToFeed: legacySingle && task.targetConstraints.fastReturnToFeed === true,
           injectContact: task.targetConstraints.injectContact === true,
           approvalMode: commentApprovalMode(task),
           // 命令来源会话 → 审批卡与终态卡都回来源会话（私聊 / 群）；无来源会话 → 回落账号团队群 → 默认群。

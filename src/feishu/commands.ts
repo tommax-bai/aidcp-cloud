@@ -80,6 +80,11 @@ export interface ParsedCommand {
    * 可与 `--contact` / `--join` 任意顺序组合。自动 / 排期路径绝不带此旗标。
    */
   force?: boolean;
+  /**
+   * `/comment` 的快速回首页开关（change comment-feed-fast-return）：尾部 `--feed` present → true。
+   * 仅手工单次评论生效；提交派发后不等平台确认，500ms 后回平台首页，并诚实落 submitted-unconfirmed。
+   */
+  fastReturnToFeed?: boolean;
 }
 
 const HELP_TEXT = [
@@ -94,6 +99,7 @@ const HELP_TEXT = [
   '• `/comment <昵称> --join=<群链接>` — 仅 Facebook：加入指定的这个群（若已是成员则直接在群内评论），再发一条评论',
   '• `/comment <昵称> --join --contact` — 加群 + 在新群里发一条带「联系方式」的评论（走人审；任意顺序）',
   '• `/comment <昵称> --force` — 跳过「强相关 + 已评过去重」两道软筛选（没强相关目标也评、已评过的也能再评）；仍走人审、仍拦链接/联系方式/刷屏；可与 --contact / --join 组合',
+  '• `/comment <昵称> --feed` — 评论提交后不等待平台结果，500ms 后直接回首页；结果记为「已提交、未确认」，不会冒充成功或自动重试',
   '• `/publish-test [requestId]` — 发送测试审批卡片',
   '• `/bind` — 绑定当前群为默认审批群（开发中）',
   '',
@@ -183,6 +189,7 @@ export function parseCommand(text: string): ParsedCommand {
       let joinGroup: boolean | undefined;
       let joinGroupUrl: string | undefined;
       let force: boolean | undefined;
+      let fastReturnToFeed: boolean | undefined;
       while (commentArgs.length > 0) {
         const lastToken = commentArgs[commentArgs.length - 1] ?? '';
         if (/^--contact$/i.test(lastToken)) {
@@ -193,6 +200,11 @@ export function parseCommand(text: string): ParsedCommand {
         // `--force`（change manual-comment-force-flag）：放开相关性 + 每笔记去重两道软筛选（仅手动路径），任意顺序可组合。
         if (/^--force$/i.test(lastToken)) {
           force = true;
+          commentArgs = commentArgs.slice(0, -1);
+          continue;
+        }
+        if (/^--feed$/i.test(lastToken)) {
+          fastReturnToFeed = true;
           commentArgs = commentArgs.slice(0, -1);
           continue;
         }
@@ -207,7 +219,7 @@ export function parseCommand(text: string): ParsedCommand {
         }
         break;
       }
-      return { action: 'comment', nickname: commentArgs.join(' ').trim() || undefined, injectContact, joinGroup, joinGroupUrl, force, raw, args };
+      return { action: 'comment', nickname: commentArgs.join(' ').trim() || undefined, injectContact, joinGroup, joinGroupUrl, force, fastReturnToFeed, raw, args };
     }
     case '/bind':
       return { action: 'bind', raw, args };
@@ -295,7 +307,7 @@ export interface CommandActions {
    */
   comment?(
     nickname?: string,
-    options?: { injectContact?: boolean; joinGroup?: boolean; joinGroupUrl?: string; force?: boolean },
+    options?: { injectContact?: boolean; joinGroup?: boolean; joinGroupUrl?: string; force?: boolean; fastReturnToFeed?: boolean },
   ): Promise<CommentCommandReceipt> | CommentCommandReceipt;
   /** 绑定当前群为默认审批群 */
   bindChat?(record: BotChatRecord): Promise<void> | void;
@@ -471,7 +483,13 @@ export class CommandRouter {
       // nickname → 执行层按昵称解析真实账号（严格只认昵称）；解析失败 / 边端离线由执行层抛错、走 fail 分支。
       // 回执 ok/level/title/message 由执行层据**真实触发结果**给出（开跑绿、未触发黄、触发失败红），
       // 路由层不再一律当成功——杜绝「触发」被无脑染绿 ✅（评论任务最终结果另由结果卡片补达）。
-      const r = await this.actions.comment(cmd.nickname, { injectContact: cmd.injectContact, joinGroup: cmd.joinGroup, joinGroupUrl: cmd.joinGroupUrl, force: cmd.force });
+      const r = await this.actions.comment(cmd.nickname, {
+        injectContact: cmd.injectContact,
+        joinGroup: cmd.joinGroup,
+        joinGroupUrl: cmd.joinGroupUrl,
+        force: cmd.force,
+        fastReturnToFeed: cmd.fastReturnToFeed,
+      });
       return {
         command: cmd.raw,
         ok: r.ok,

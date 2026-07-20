@@ -32,11 +32,13 @@ function makeEnv(
   },
 ) {
   const sentTypes: string[] = [];
+  const sent: Envelope[] = [];
   const pusher = {
     pushToEdges: (envelope: unknown, _edgeId?: string): number => {
       if (opts.offline) return 0;
       const env = envelope as Envelope;
       sentTypes.push(env.type);
+      sent.push(env);
       if (opts.silent) return 1;
       // 同步模拟边端上报（订阅已先建立）。
       if (env.type === 'search.execute') {
@@ -71,7 +73,7 @@ function makeEnv(
       return 1;
     },
   };
-  return { pusher, sentTypes };
+  return { pusher, sentTypes, sent };
 }
 
 function makeDedup(commented: Set<string> = new Set()): CommentDedup & { recorded: string[] } {
@@ -212,6 +214,14 @@ describe('buildEdgeCommentSteps', () => {
     const { pusher } = makeEnv(bus, { postOk: true });
     const steps = buildEdgeCommentSteps({ bus, pusher, edgeId: 'e1', dedup: makeDedup() });
     assert.deepEqual(await steps.post('a', '一条评论'), { status: 'confirmed' });
+  });
+
+  it('post：fastReturnToFeed 只在显式 true 时进入 interaction.comment payload', async () => {
+    const bus = new EventBus();
+    const { pusher, sent } = makeEnv(bus, { postOk: false, postReason: 'submitted_unconfirmed' });
+    const steps = buildEdgeCommentSteps({ bus, pusher, edgeId: 'e1', dedup: makeDedup() });
+    assert.deepEqual(await steps.post('a', '一条评论', null, true), { status: 'submitted_unconfirmed' });
+    assert.equal(sent.find((env) => env.type === 'interaction.comment')?.payload.fastReturnToFeed, true);
   });
 
   it('post：回执 ok:false 无 reason → not_dispatched（提交前失败，可重排）', async () => {

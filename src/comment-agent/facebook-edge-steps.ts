@@ -151,7 +151,7 @@ function sendAndRace<T>(
 export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
   searchInContainer(keyword: string, container: string): Promise<FacebookSearchStepResult>;
   openPost(url: string): Promise<FacebookOpenStepResult>;
-  submitComment(permalink: string, text: string, groupChatCode?: string): Promise<FacebookCommentStepResult>;
+  submitComment(permalink: string, text: string, groupChatCode?: string, fastReturnToFeed?: boolean): Promise<FacebookCommentStepResult>;
 } {
   const timeout = deps.stepTimeoutMs ?? FACEBOOK_STEP_TIMEOUT_MS;
   // 开帖步专用上界（边端先答，见 FACEBOOK_OPEN_STEP_TIMEOUT_MS）。与上一行同形：显式注入优先（测试用小值快速验超时），
@@ -240,7 +240,7 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
       return { ok: true, ...(outcome.postText ? { postText: outcome.postText } : {}), ...(outcome.comments ? { comments: outcome.comments } : {}) };
     },
 
-    async submitComment(permalink, text, groupChatCode) {
+    async submitComment(permalink, text, groupChatCode, fastReturnToFeed = false) {
       // 长度感知超时（P0-1）：长评论逐字输入+提交后 reload/校验整段耗时可超固定 28s；用文案长度放大提交步超时，
       // 让慢但成功的提交等到真实回执（ok / verification_ambiguous，两者都会打去重标记），杜绝「误判 timeout → 再发一条」。
       const submitTimeout = facebookCommentSubmitTimeoutMs(text, timeout);
@@ -263,6 +263,7 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
               noteId: permalink,
               text,
               ...(groupChatCode && groupChatCode.length > 0 ? { groupChatCode } : {}),
+              ...(fastReturnToFeed ? { fastReturnToFeed: true } : {}),
               ...(deps.taskId ? { taskId: deps.taskId } : {}),
             } as never),
           ),
