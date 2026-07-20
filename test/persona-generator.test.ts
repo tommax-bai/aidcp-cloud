@@ -236,6 +236,38 @@ describe('handler persona.generate 幂等去重', () => {
     assert.equal((r2?.payload as { ok: boolean }).ok, true);
   });
 
+  it('兼容入口允许 64 项展开载荷，并在模型调用前拒绝第 65 项或 41 字单项', async () => {
+    const inputs: PersonaGenerateInput[] = [];
+    const handler = makeHandler({
+      generate: async (input) => {
+        inputs.push(input);
+        return { ok: true, soulYaml: 'identity:\n  name: "x"', identitySummary: 'x' };
+      },
+    });
+    const session = { accountId: 'acc-1', edgeId: 'edge-1', platform: 'xiaohongshu' } as never;
+    const accepted = await handler.handle(makeEnvelope('persona.generate', 'bounds-64', 1, {
+      accountId: 'ignored',
+      keywordSelections: Array.from({ length: 64 }, (_, index) => `关键词-${index}`),
+      idempotencyKey: 'bounds-64',
+    }), session);
+    assert.equal((accepted?.payload as { ok?: boolean }).ok, true);
+    assert.equal(inputs.length, 1);
+    assert.equal(inputs[0].keywordSelections.length, 64);
+
+    const tooMany = await handler.handle(makeEnvelope('persona.generate', 'bounds-65', 2, {
+      accountId: 'ignored',
+      keywordSelections: Array.from({ length: 65 }, (_, index) => `关键词-${index}`),
+      idempotencyKey: 'bounds-65',
+    }), session);
+    assert.equal((tooMany?.payload as { reason?: string }).reason, 'input_too_large');
+
+    const tooLong = await handler.handle(makeEnvelope('persona.generate', 'bounds-long', 3, {
+      accountId: 'ignored', keywordSelections: ['x'.repeat(41)], idempotencyKey: 'bounds-long',
+    }), session);
+    assert.equal((tooLong?.payload as { reason?: string }).reason, 'input_too_large');
+    assert.equal(inputs.length, 1, '超限请求不得进入模型');
+  });
+
   it('Facebook 生成人设必须携带合法发言语言；小红书禁止携带', async () => {
     const inputs: PersonaGenerateInput[] = [];
     const handler = makeHandler({

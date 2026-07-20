@@ -139,10 +139,19 @@ describe('AccountPersonaService', () => {
     assert.deepEqual(await service.generate({
       accountId: 'acc-1', platform: undefined, keywordSelections: ['数据标注'], idempotencyKey: 'missing-platform',
     }), { ok: false, reason: 'unsupported_platform' });
+    const expanded = await service.generate({
+      accountId: 'acc-1', platform: 'xiaohongshu',
+      keywordSelections: Array.from({ length: 64 }, (_, index) => `关键词-${index}`), idempotencyKey: 'expanded',
+    });
+    assert.equal(expanded.ok, true, '24 个可见偏好展开出的正常载荷应被允许');
+    assert.deepEqual(await service.generate({
+      accountId: 'acc-1', platform: 'xiaohongshu',
+      keywordSelections: Array.from({ length: 65 }, (_, index) => `关键词-${index}`), idempotencyKey: 'too-many',
+    }), { ok: false, reason: 'input_too_large' });
     assert.deepEqual(await service.generate({
       accountId: 'acc-1', platform: 'xiaohongshu', keywordSelections: ['x'.repeat(41)], idempotencyKey: 'c',
     }), { ok: false, reason: 'input_too_large' });
-    assert.equal(calls, 0);
+    assert.equal(calls, 1, '只有 64 项合法载荷可进入模型');
   });
 
   it('persists through the facade and returns the first-bind receipt', async () => {

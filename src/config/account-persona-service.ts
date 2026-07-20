@@ -7,7 +7,9 @@ import { isWritingLanguage } from '../soul/writing-language.js';
 import type { WritingLanguage } from '../soul/types.js';
 
 export const MAX_PERSONA_BYTES = 32 * 1024;
-export const MAX_PERSONA_KEYWORDS = 24;
+// Renderer caps visible content preferences at 24, but the request also carries derived
+// category/affinity markers. Keep transport validation bounded without rejecting that expansion.
+export const MAX_PERSONA_KEYWORDS = 64;
 export const MAX_PERSONA_KEYWORD_LENGTH = 40;
 const MAX_GENERATION_IDEMPOTENCY_ENTRIES = 1024;
 

@@ -49,7 +49,11 @@ import {
 } from './protocol.js';
 import type { PersonaGenerator } from '../agents/persona-generator.js';
 import type { PanelPersonaConfig } from '../panel/types.js';
-import type { AccountPersonaService } from '../config/account-persona-service.js';
+import {
+  MAX_PERSONA_KEYWORDS,
+  MAX_PERSONA_KEYWORD_LENGTH,
+  type AccountPersonaService,
+} from '../config/account-persona-service.js';
 import type { CommandSequencer } from '../publish-agent/command-sequencer.js';
 import type { EdgeTaskLeaseClient } from './edge-task-lease-client.js';
 import type { MessageHandler, EdgeSession, EdgePusher } from './ws-server.js';
@@ -979,9 +983,10 @@ export class DefaultMessageHandler implements MessageHandler {
     // 轻量输入校验（change persona-wizard-onboarding-fixes）：垂类/兴趣自由文本引入弱注入面 → 有界爆炸面。
     // 单项长度上限 + 条数上限，超限诚实拒绝、绝不把超长/超量文本原样喂进生成 prompt（accountId 已取握手绑定值、产物另经结构复验）。
     const kws = (p.keywordSelections ?? []).filter((k) => typeof k === 'string');
-    const MAX_KEYWORDS = 24;
-    const MAX_KEYWORD_LEN = 40;
-    if (kws.length > MAX_KEYWORDS || kws.some((k) => k.length > MAX_KEYWORD_LEN)) {
+    if (
+      kws.length > MAX_PERSONA_KEYWORDS
+      || kws.some((k) => k.length > MAX_PERSONA_KEYWORD_LENGTH)
+    ) {
       return makeEnvelope('persona.generate.result', env.id, this.clock(), { ok: false, reason: 'input_too_large' });
     }
     const cacheKey = `${accountId}:${idempotencyKey}`;
