@@ -201,23 +201,24 @@ test('N1: 客户密钥与面板相同则拒启(secret_collision)', async () => {
   assert.equal(h.reason, 'secret_collision');
 });
 
-test('egress: 无令牌返回首个可信转发 IP、证据响应头、CORS 与 no-store', async () => {
+test('egress: 无令牌返回 nginx 最近连接 IP、证据响应头、CORS 与 no-store', async () => {
   const fx = makeFakeStore();
   await withServer(
     { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter() },
     baseConfig(0),
     async (base) => {
       const r = await fetch(`${base}/egress`, {
-        headers: { 'x-forwarded-for': '198.51.100.23, 10.0.0.4' },
+        // 首段模拟上游代理/客户端自带前缀；最右段模拟 nginx $proxy_add_x_forwarded_for 追加的真实连接端。
+        headers: { 'x-forwarded-for': '198.51.100.23, 203.0.113.45' },
       });
       assert.equal(r.status, 200);
       assert.equal(r.headers.get('cache-control'), 'no-store');
       assert.equal(r.headers.get('access-control-allow-origin'), '*');
       assert.match(r.headers.get('access-control-expose-headers') ?? '', /x-aidcp-egress-ip/);
-      assert.equal(r.headers.get('x-aidcp-egress-ip'), '198.51.100.23');
+      assert.equal(r.headers.get('x-aidcp-egress-ip'), '203.0.113.45');
       assert.ok(r.headers.get('x-aidcp-request-id'));
       const body = (await r.json()) as { ip: string; checkedAt: string; requestId: string };
-      assert.equal(body.ip, '198.51.100.23');
+      assert.equal(body.ip, '203.0.113.45');
       assert.equal(body.requestId, r.headers.get('x-aidcp-request-id'));
       assert.ok(Number.isFinite(Date.parse(body.checkedAt)));
     },

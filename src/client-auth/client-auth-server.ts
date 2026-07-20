@@ -194,6 +194,20 @@ function clientIp(req: http.IncomingMessage): string {
   return forwarded ?? normalizeIp(req.socket.remoteAddress) ?? 'unknown';
 }
 
+/**
+ * 出口证明取受控 nginx 追加的最右段：`$proxy_add_x_forwarded_for` 会把真实连接端追加在任意客户端前缀之后。
+ * 取首段会被上游代理自带/客户端伪造的 XFF 欺骗，甚至把已代理请求误报成本机原始 IP。
+ */
+function egressClientIp(req: http.IncomingMessage): string {
+  const xff = req.headers['x-forwarded-for'];
+  const values = typeof xff === 'string' ? xff.split(',') : [];
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    const candidate = normalizeIp(values[index]);
+    if (candidate) return candidate;
+  }
+  return normalizeIp(req.socket.remoteAddress) ?? 'unknown';
+}
+
 const EGRESS_CORS_HEADERS: http.OutgoingHttpHeaders = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET, OPTIONS',
@@ -387,7 +401,7 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       return;
     }
     if (method === 'GET' && url === '/egress') {
-      const ip = clientIp(req);
+      const ip = egressClientIp(req);
       const checkedAt = new Date().toISOString();
       const requestId = randomUUID();
       sendJson(res, 200, { ip, checkedAt, requestId }, {
