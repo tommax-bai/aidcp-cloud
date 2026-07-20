@@ -6,6 +6,7 @@ import type { ReferenceImageSnapshot } from '../publish-agent/types.js';
 import type { DelegatedTaskExecutor, DelegatedExecutionResult } from './worker.js';
 import type { DelegatedTask } from './types.js';
 import { delegatedRewriteSourceId } from './ownership.js';
+import { normalizeTextCardTranscription } from '../cache/curated-content-store.js';
 
 export interface DelegatedCommentPort {
   triggerManual(
@@ -275,6 +276,9 @@ function referenceNote(task: DelegatedTask): ReferenceNote | undefined {
         return Number.isInteger(image.index) && typeof image.sourceUrl === 'string' && image.sourceUrl.length > 0;
       }) as unknown as ReferenceImageSnapshot[]
     : [];
+  const textCardTranscription = useReferenceImages
+    ? normalizeTextCardTranscription(task.sourceConstraints.textCardTranscription)
+    : undefined;
   return {
     sourceId,
     title,
@@ -285,6 +289,7 @@ function referenceNote(task: DelegatedTask): ReferenceNote | undefined {
     ...(typeof author === 'string' && author ? { author } : {}),
     ...(typeof sourceUrl === 'string' ? { sourceUrl: sourceUrl || null } : {}),
     ...(images.length > 0 ? { images } : {}),
+    ...(textCardTranscription ? { textCardTranscription } : {}),
     capturedAt: task.createdAt,
   };
 }

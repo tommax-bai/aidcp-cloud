@@ -51,6 +51,8 @@ export interface VisionCallOpts {
   accountId?: string;
   /** 显式超时覆盖（毫秒）。 */
   timeoutMs?: number;
+  /** Optional completion ceiling for dense OCR-like calls; omitted for existing visual classifiers. */
+  maxTokens?: number;
 }
 
 /** 多模态 LLM 客户端接口（感知服务经此解耦，便于打桩单测）。 */
@@ -137,6 +139,10 @@ export class OpenAiCompatVisionClient implements VisionLlmClient {
     const model = this.getModel();
     const provider = this.getProvider();
     const timeoutMs = opts?.timeoutMs ?? this.timeoutMs;
+    const maxTokens =
+      typeof opts?.maxTokens === 'number' && Number.isFinite(opts.maxTokens) && opts.maxTokens > 0
+        ? Math.floor(opts.maxTokens)
+        : undefined;
     const rt = this.providerRuntime[provider];
     if (!rt || !rt.apiKey) {
       // 发请求前诚实抛错：绝不退回别厂商的 key/baseUrl（避免把模型名发到错误厂商的"静默走错"）。
@@ -157,7 +163,7 @@ export class OpenAiCompatVisionClient implements VisionLlmClient {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${rt.apiKey}`,
         },
-        body: JSON.stringify({ model, messages, temperature: 0 }),
+        body: JSON.stringify({ model, messages, temperature: 0, ...(maxTokens ? { max_tokens: maxTokens } : {}) }),
         signal: controller.signal,
       });
       if (!res.ok) {

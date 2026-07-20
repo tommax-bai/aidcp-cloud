@@ -136,7 +136,7 @@ import { AccountStateManager } from './account-state.js';
 import { PgAccountStore, type AccountStore } from './account-store.js';
 import { resolveNotificationAccountName } from './account-display-name.js';
 // change textcard-cover-form：封面形态感知（vision 客户端 + 感知服务）与文字卡渲染出口。
-import { OpenAiCompatVisionClient } from './llm/vision.js';
+import { OpenAiCompatVisionClient, type VisionCallInfo } from './llm/vision.js';
 import {
   createCoverFormSensor,
   resolveCoverFormModel,
@@ -154,6 +154,11 @@ import {
 } from './publish-agent/visual-fidelity-auditor.js';
 // change textcard-carousel-form-parity（阶段0 影子）：帖级形态档服务（封面先行 + 内页有界并发判形）。
 import { createPostImageFormProfileService } from './publish-agent/post-image-form-profile.js';
+import {
+  createTextCardTranscriber,
+  resolveTextCardTranscriptionModel,
+  resolveTextCardTranscriptionProvider,
+} from './publish-agent/text-card-transcriber.js';
 import { createTextCardRenderer, type TextCardRenderer } from './render/text-card.js';
 import {
   ContentScoutRole,
@@ -2794,6 +2799,51 @@ async function main(): Promise<void> {
   // 每个连接握手时由 buildDispatcher 造一束 RoleDispatcher：私有总线 / 该连接真实账号 controller / 定向下发。
   // 人设以取值口注入（account-persona-config）：派发时按当前账号热加载，PUT 后无需重启。
   // opts.getSoul 仅供预览实例注入示例人设（见 previewDispatcher）；运行时连接一律用严格 getSoul。
+  // ── 精选准入文字卡识别/转写（change transcribe-textcard-image-text）────────────
+  // 独立于发布时封面感知：OCR 旗标开启才调用；形态识别与转写仍是两个隔离的视觉请求。
+  // 此处必须在 server.start 之前装配，避免重启后抢先握手的 Edge 得到缺少转写依赖的 dispatcher。
+  const textCardOcrEnabled = (): boolean => process.env.AIDCP_TEXTCARD_OCR === 'true';
+  const textCardOcrProvider = (): string => resolveTextCardTranscriptionProvider(resolveCoverFormProvider);
+  const textCardOcrModel = (): string => resolveTextCardTranscriptionModel(resolveCoverFormModel);
+  const recordVisionCall = (info: VisionCallInfo): void => {
+    console.log(
+      `[llm] account=${info.accountId ?? '-'} role=${info.role ?? '-'} provider=${info.provider ?? '-'} model=${info.model} ms=${info.ms} ok=${info.ok} tokens=${info.totalTokens ?? 0}`,
+    );
+    try {
+      tokenUsageStore.add(info);
+    } catch {
+      /* metrics never breaks llm */
+    }
+  };
+  const admissionFormVision = new OpenAiCompatVisionClient({
+    getModel: resolveCoverFormModel,
+    getProvider: resolveCoverFormProvider,
+    providerRuntime,
+    onCall: recordVisionCall,
+  });
+  const admissionFormSensor = createCoverFormSensor({
+    vision: admissionFormVision,
+    enabled: textCardOcrEnabled,
+    getModel: resolveCoverFormModel,
+    getProvider: resolveCoverFormProvider,
+    logger: console,
+  });
+  const textCardOcrVision = new OpenAiCompatVisionClient({
+    getModel: textCardOcrModel,
+    getProvider: textCardOcrProvider,
+    providerRuntime,
+    onCall: recordVisionCall,
+    timeoutMs: Number(process.env.AIDCP_TEXTCARD_OCR_TIMEOUT_MS ?? 120_000),
+  });
+  const textCardTranscriber = createTextCardTranscriber({
+    vision: textCardOcrVision,
+    formSensor: admissionFormSensor,
+    enabled: textCardOcrEnabled,
+    getModel: textCardOcrModel,
+    getProvider: textCardOcrProvider,
+    logger: console,
+  });
+
   const buildDispatcher = (ctx: DispatcherBuildContext, opts?: { getSoul?: (accountId?: string) => Soul }): RoleDispatcher => {
     // 通知联系人名册（notification-contact-registry）：订阅该连接私有总线的 notification.items.arrived
     // （评论/@/点赞/收藏/关注发送者），按该连接真实账号追加进事件流水。每连接握手 buildDispatcher 调一次 →
@@ -2867,6 +2917,7 @@ async function main(): Promise<void> {
       // 精选语料库（change curated-admission-eval-roles，Phase 3）：注入则注册两段式准入的模型评估角色
       // （正文 curated_note_evaluator + 评论 curated_comment_evaluator）。缺省（PG 不可用）→ 不注册。
       curatedStore: curatedContentStore,
+      textCardTranscriber,
       // 热度过滤阈值取值口：判定角色每次现读全局配置（后台改完热加载即时生效）。
       hotLeadGateConfig: () => hotLeadConfigStore.getGateConfig(),
       // 账号是否开启自动联系评论（off/review/auto_approve；默认关＝零回归）。
@@ -3038,16 +3089,7 @@ async function main(): Promise<void> {
     getModel: resolveCoverFormModel,
     getProvider: resolveCoverFormProvider,
     providerRuntime,
-    onCall: (info) => {
-      console.log(
-        `[llm] account=${info.accountId ?? '-'} role=${info.role ?? '-'} provider=${info.provider ?? '-'} model=${info.model} ms=${info.ms} ok=${info.ok} tokens=${info.totalTokens ?? 0}`,
-      );
-      try {
-        tokenUsageStore.add(info);
-      } catch {
-        /* metrics never breaks llm */
-      }
-    },
+    onCall: recordVisionCall,
   });
   const coverFormSensor = createCoverFormSensor({
     vision: coverFormVision,
@@ -3064,16 +3106,7 @@ async function main(): Promise<void> {
     getModel: resolveReferenceVisualModel,
     getProvider: resolveReferenceVisualProvider,
     providerRuntime,
-    onCall: (info) => {
-      console.log(
-        `[llm] account=${info.accountId ?? '-'} role=${info.role ?? '-'} provider=${info.provider ?? '-'} model=${info.model} ms=${info.ms} ok=${info.ok} tokens=${info.totalTokens ?? 0}`,
-      );
-      try {
-        tokenUsageStore.add(info);
-      } catch {
-        /* metrics never breaks llm */
-      }
-    },
+    onCall: recordVisionCall,
     timeoutMs: Number(process.env.AIDCP_REFERENCE_VISUAL_TIMEOUT_MS ?? 120_000),
   });
   const visualReferenceAnalyzer = createVisualReferenceAnalyzer({
@@ -3090,16 +3123,7 @@ async function main(): Promise<void> {
     getModel: resolveVisualAuditModel,
     getProvider: resolveVisualAuditProvider,
     providerRuntime,
-    onCall: (info) => {
-      console.log(
-        `[llm] account=${info.accountId ?? '-'} role=${info.role ?? '-'} provider=${info.provider ?? '-'} model=${info.model} ms=${info.ms} ok=${info.ok} tokens=${info.totalTokens ?? 0}`,
-      );
-      try {
-        tokenUsageStore.add(info);
-      } catch {
-        /* metrics never breaks llm */
-      }
-    },
+    onCall: recordVisionCall,
     timeoutMs: Number(process.env.AIDCP_VISUAL_AUDIT_TIMEOUT_MS ?? 60_000),
   });
   const visualFidelityAuditor = createVisualFidelityAuditor({ vision: visualAuditVision });
@@ -4257,6 +4281,9 @@ async function main(): Promise<void> {
                   ...(row.author ? { author: row.author } : {}),
                   ...(useReferenceImages && row.referenceImages.length > 0 ? { images: row.referenceImages } : {}),
                   ...(useReferenceImages && row.visualAnalysis ? { visualAnalysis: row.visualAnalysis } : {}),
+                  ...(useReferenceImages && row.textCardTranscription
+                    ? { textCardTranscription: row.textCardTranscription }
+                    : {}),
                 },
                 { dbPendingCount },
               );

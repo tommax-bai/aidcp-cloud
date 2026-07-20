@@ -58,6 +58,40 @@ export interface CuratedReferenceImageFormGuess {
   provider?: string;
 }
 
+export type TextCardTranscriptionStatus = 'complete' | 'partial' | 'failed';
+export type TextCardTranscriptionCardStatus = 'transcribed' | 'empty' | 'failed';
+
+/**
+ * 一张来源文字卡的有序转写。sourceArrayIndex 是与 reference_images JSONB 数组绑定的权威槽位；
+ * sourceIndex 只记录边缘看到的平台 index，不能用它代替数组槽位。
+ */
+export interface TextCardTranscriptionCard {
+  sourceArrayIndex: number;
+  sourceIndex: number;
+  /** 云端收到本次图片快照的时刻；不是伪造的边缘抓取时间。 */
+  capturedAt: number;
+  status: TextCardTranscriptionCardStatus;
+  text?: string;
+  reason?: string;
+}
+
+/** curated_content.text_card_transcription 的唯一结构化事实源。 */
+export interface TextCardTranscription {
+  version: 1;
+  status: TextCardTranscriptionStatus;
+  /** sha256 over ordered sourceArrayIndex/sourceIndex/usableUrl identities. */
+  anchor: string;
+  provider: string;
+  model: string;
+  transcribedAt: number;
+  cards: TextCardTranscriptionCard[];
+}
+
+export interface CuratedTextCardContext {
+  referenceImages: CuratedReferenceImage[];
+  transcription?: TextCardTranscription;
+}
+
 export interface CuratedReferenceImage {
   index: number;
   sourceUrl: string;
@@ -112,6 +146,7 @@ export interface CuratedObservation {
   commentCount?: number | null;
   admitReason: string;
   referenceImages?: CuratedReferenceImageInput[];
+  textCardTranscription?: TextCardTranscription;
 }
 
 /** 自有动作（collect 自动建行）时可附带的内容；缺少非空正文时不补建精选壳行。 */
@@ -136,6 +171,7 @@ export interface CuratedSourceAdmission {
   sourceUrl?: string;
   topics: string[];
   referenceImages: CuratedReferenceImage[];
+  textCardTranscription?: TextCardTranscription;
 }
 
 /** 召回给创作侧的一条灵感。 */
@@ -152,6 +188,7 @@ export interface CuratedSelectItem {
   botCollected: boolean;
   referenceImages: CuratedReferenceImage[];
   visualAnalysis?: ReferenceVisualAnalysis;
+  textCardTranscription?: TextCardTranscription;
 }
 
 /**
@@ -180,6 +217,8 @@ export interface CuratedPanelRow {
   updatedAt: number;
   referenceImages: CuratedReferenceImage[];
   visualAnalysis?: ReferenceVisualAnalysis;
+  /** Internal/operator view; client-auth mapping intentionally does not expose source OCR text. */
+  textCardTranscription?: TextCardTranscription;
 }
 
 /** 面板列表结果：当前筛选下的一页行 + 一致的总条数（供分页器）。 */
@@ -243,6 +282,7 @@ CREATE TABLE IF NOT EXISTS curated_content (
   counts_captured_at TIMESTAMPTZ,
   reference_images   JSONB NOT NULL DEFAULT '[]'::jsonb,
   visual_analysis    JSONB,
+  text_card_transcription JSONB,
   bot_liked          BOOLEAN NOT NULL DEFAULT false,
   bot_collected      BOOLEAN NOT NULL DEFAULT false,
   admit_reason       TEXT,
@@ -251,6 +291,7 @@ CREATE TABLE IF NOT EXISTS curated_content (
 );
 ALTER TABLE curated_content ADD COLUMN IF NOT EXISTS reference_images JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE curated_content ADD COLUMN IF NOT EXISTS visual_analysis JSONB;
+ALTER TABLE curated_content ADD COLUMN IF NOT EXISTS text_card_transcription JSONB;
 CREATE INDEX IF NOT EXISTS idx_curated_content_topics ON curated_content USING GIN(topics);
 CREATE INDEX IF NOT EXISTS idx_curated_content_account_updated ON curated_content (account_id, updated_at DESC);
 
@@ -272,6 +313,7 @@ BEGIN
                                 WHEN target.reference_images = '[]'::jsonb THEN legacy.reference_images
                                 ELSE target.reference_images
                               END,
+           text_card_transcription = COALESCE(target.text_card_transcription, legacy.text_card_transcription),
            like_count = COALESCE(target.like_count, legacy.like_count),
            collect_count = COALESCE(target.collect_count, legacy.collect_count),
            comment_count = COALESCE(target.comment_count, legacy.comment_count),
@@ -461,6 +503,78 @@ function parseReferenceImages(v: unknown): CuratedReferenceImage[] {
   return [];
 }
 
+function isTextCardTranscriptionStatus(v: unknown): v is TextCardTranscriptionStatus {
+  return v === 'complete' || v === 'partial' || v === 'failed';
+}
+
+function isTextCardTranscriptionCardStatus(v: unknown): v is TextCardTranscriptionCardStatus {
+  return v === 'transcribed' || v === 'empty' || v === 'failed';
+}
+
+/**
+ * JSONB / task payload boundary normalizer. Invalid envelopes are discarded as a whole; invalid card rows are not
+ * silently guessed because a shifted sourceArrayIndex would bind text to the wrong source image.
+ */
+export function normalizeTextCardTranscription(v: unknown): TextCardTranscription | undefined {
+  if (typeof v === 'string' && v.trim()) {
+    try {
+      return normalizeTextCardTranscription(JSON.parse(v));
+    } catch {
+      return undefined;
+    }
+  }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+  const o = v as Record<string, unknown>;
+  if (o.version !== 1 || !isTextCardTranscriptionStatus(o.status)) return undefined;
+  const anchor = cleanOptionalString(o.anchor);
+  const provider = cleanOptionalString(o.provider);
+  const model = cleanOptionalString(o.model);
+  const transcribedAt = strictPositiveInt(o.transcribedAt);
+  if (!anchor || !/^sha256:[a-f0-9]{64}$/.test(anchor) || !provider || !model || !transcribedAt) return undefined;
+  if (!Array.isArray(o.cards) || o.cards.length === 0 || o.cards.length > CURATED_REFERENCE_IMAGE_HARD_MAX) {
+    return undefined;
+  }
+  const seen = new Set<number>();
+  const cards: TextCardTranscriptionCard[] = [];
+  for (const raw of o.cards) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+    const card = raw as Record<string, unknown>;
+    const sourceArrayIndex = positiveInt(card.sourceArrayIndex);
+    const sourceIndex = positiveInt(card.sourceIndex);
+    const capturedAt = strictPositiveInt(card.capturedAt);
+    if (
+      sourceArrayIndex === undefined ||
+      sourceIndex === undefined ||
+      capturedAt === undefined ||
+      !isTextCardTranscriptionCardStatus(card.status) ||
+      seen.has(sourceArrayIndex)
+    ) return undefined;
+    seen.add(sourceArrayIndex);
+    const text = cleanOptionalString(card.text);
+    if (card.status === 'transcribed' && (!text || text.length > 8_000)) return undefined;
+    const reason = cleanOptionalString(card.reason);
+    cards.push({
+      sourceArrayIndex,
+      sourceIndex,
+      capturedAt,
+      status: card.status,
+      ...(card.status === 'transcribed' && text ? { text } : {}),
+      ...(reason ? { reason: reason.slice(0, 300) } : {}),
+    });
+  }
+  cards.sort((a, b) => a.sourceArrayIndex - b.sourceArrayIndex);
+  const succeeded = cards.filter((card) => card.status === 'transcribed').length;
+  const derivedStatus: TextCardTranscriptionStatus =
+    succeeded === cards.length ? 'complete' : succeeded > 0 ? 'partial' : 'failed';
+  if (o.status !== derivedStatus) return undefined;
+  return { version: 1, status: o.status, anchor, provider, model, transcribedAt, cards };
+}
+
+/** Successful per-card text in authoritative source-image order. */
+export function orderedTextCardTexts(transcription: TextCardTranscription | undefined): TextCardTranscriptionCard[] {
+  return transcription?.cards.filter((card) => card.status === 'transcribed' && !!card.text) ?? [];
+}
+
 interface CuratedRow {
   source_id: string;
   content_type: string;
@@ -474,6 +588,7 @@ interface CuratedRow {
   bot_collected: boolean;
   reference_images: unknown;
   visual_analysis: unknown;
+  text_card_transcription: unknown;
 }
 
 /** 面板列表用的完整 snake-case 行（含 id 与全字段；total_count 来自 COUNT(*) OVER()）。 */
@@ -499,11 +614,13 @@ interface CuratedPanelDbRow {
   total_count?: number | string;
   reference_images: unknown;
   visual_analysis: unknown;
+  text_card_transcription: unknown;
 }
 
 /** snake-case 行 → 面板 camelCase 视图（时间戳转 epoch ms、INT 诚实置空）。 */
 function rowToPanelView(r: CuratedPanelDbRow): CuratedPanelRow {
   const visualAnalysis = normalizeReferenceVisualAnalysis(r.visual_analysis);
+  const textCardTranscription = normalizeTextCardTranscription(r.text_card_transcription);
   return {
     id: r.id,
     accountId: r.account_id,
@@ -525,6 +642,7 @@ function rowToPanelView(r: CuratedPanelDbRow): CuratedPanelRow {
     updatedAt: r.updated_at.getTime(),
     referenceImages: parseReferenceImages(r.reference_images),
     ...(visualAnalysis ? { visualAnalysis } : {}),
+    ...(textCardTranscription ? { textCardTranscription } : {}),
   };
 }
 
@@ -612,11 +730,13 @@ export class CuratedContentStore {
     if (!body) return;
     const dedupKey = dedupKeyOf(obs.accountId, obs.contentType, obs.sourceId);
     const referenceImages = await this.prepareReferenceImages(obs.accountId, obs.sourceId, obs.referenceImages);
+    const textCardTranscription = normalizeTextCardTranscription(obs.textCardTranscription);
     await this.pool.query(
       `INSERT INTO curated_content
          (account_id, content_type, source_id, dedup_key, title, body, author, source_url,
-          topics, reference_images, like_count, collect_count, comment_count, counts_captured_at, admit_reason, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, now(), $14, now())
+          topics, reference_images, like_count, collect_count, comment_count, counts_captured_at, admit_reason,
+          text_card_transcription, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, now(), $14, $15::jsonb, now())
        ON CONFLICT (dedup_key) DO UPDATE SET
          title              = EXCLUDED.title,
          body               = EXCLUDED.body,
@@ -630,6 +750,12 @@ export class CuratedContentStore {
          visual_analysis    = CASE
                                 WHEN EXCLUDED.reference_images = '[]'::jsonb THEN curated_content.visual_analysis
                                 WHEN EXCLUDED.reference_images = curated_content.reference_images THEN curated_content.visual_analysis
+                                ELSE NULL
+                              END,
+         text_card_transcription = CASE
+                                WHEN EXCLUDED.text_card_transcription IS NOT NULL THEN EXCLUDED.text_card_transcription
+                                WHEN EXCLUDED.reference_images = '[]'::jsonb THEN curated_content.text_card_transcription
+                                WHEN EXCLUDED.reference_images = curated_content.reference_images THEN curated_content.text_card_transcription
                                 ELSE NULL
                               END,
          like_count         = EXCLUDED.like_count,
@@ -653,6 +779,7 @@ export class CuratedContentStore {
         obs.collectCount ?? null,
         obs.commentCount ?? null,
         obs.admitReason,
+        textCardTranscription ? JSON.stringify(textCardTranscription) : null,
       ],
     );
     await this.trimToRetention(obs.accountId);
@@ -667,6 +794,7 @@ export class CuratedContentStore {
         ...(obs.sourceUrl ? { sourceUrl: obs.sourceUrl } : {}),
         topics: obs.topics,
         referenceImages,
+        ...(textCardTranscription ? { textCardTranscription } : {}),
       });
     }
   }
@@ -683,6 +811,7 @@ export class CuratedContentStore {
       `UPDATE curated_content
           SET reference_images = $4::jsonb,
               visual_analysis = NULL,
+              text_card_transcription = NULL,
               updated_at = now()
         WHERE account_id = $1
           AND source_id = $2
@@ -690,6 +819,26 @@ export class CuratedContentStore {
       [accountId, sourceId, contentType, JSON.stringify(referenceImages)],
     );
     return rowCount ?? 0;
+  }
+
+  /** Read-through cache input for admission-time transcription; account/type scope prevents cross-tenant reuse. */
+  async getTextCardContext(
+    accountId: string,
+    sourceId: string,
+    contentType: CuratedSourceContentType,
+  ): Promise<CuratedTextCardContext | null> {
+    const { rows } = await this.pool.query<{ reference_images: unknown; text_card_transcription: unknown }>(
+      `SELECT reference_images, text_card_transcription
+         FROM curated_content
+        WHERE account_id = $1 AND source_id = $2 AND content_type = $3`,
+      [accountId, sourceId, contentType],
+    );
+    if (rows.length === 0) return null;
+    const transcription = normalizeTextCardTranscription(rows[0].text_card_transcription);
+    return {
+      referenceImages: parseReferenceImages(rows[0].reference_images),
+      ...(transcription ? { transcription } : {}),
+    };
   }
 
   /**
@@ -924,7 +1073,8 @@ export class CuratedContentStore {
     const limitIdx = params.length;
     const { rows } = await this.pool.query<CuratedRow>(
       `SELECT source_id, content_type, title, body, author, topics,
-              like_count, collect_count, bot_liked, bot_collected, reference_images, visual_analysis
+              like_count, collect_count, bot_liked, bot_collected, reference_images, visual_analysis,
+              text_card_transcription
        FROM curated_content
        WHERE ${conds.join(' AND ')}
        ORDER BY (CASE WHEN bot_collected THEN 2 ELSE 0 END + CASE WHEN bot_liked THEN 1 ELSE 0 END) DESC,
@@ -936,6 +1086,7 @@ export class CuratedContentStore {
     );
     return rows.map((r) => {
       const visualAnalysis = normalizeReferenceVisualAnalysis(r.visual_analysis);
+      const textCardTranscription = normalizeTextCardTranscription(r.text_card_transcription);
       return {
         sourceId: r.source_id,
         contentType: normalizeContentType(r.content_type),
@@ -949,6 +1100,7 @@ export class CuratedContentStore {
         botCollected: r.bot_collected,
         referenceImages: parseReferenceImages(r.reference_images),
         ...(visualAnalysis ? { visualAnalysis } : {}),
+        ...(textCardTranscription ? { textCardTranscription } : {}),
       };
     });
   }
@@ -992,7 +1144,7 @@ export class CuratedContentStore {
       const { rows } = await this.pool.query<CuratedPanelDbRow>(
         `SELECT id, account_id, content_type, source_id, title, body, author, source_url, topics,
                 like_count, collect_count, comment_count, counts_captured_at, reference_images,
-                visual_analysis,
+                visual_analysis, text_card_transcription,
                 bot_liked, bot_collected, admit_reason, first_seen_at, updated_at,
                 COUNT(*) OVER() AS total_count
          FROM curated_content
@@ -1049,7 +1201,7 @@ export class CuratedContentStore {
       const { rows } = await this.pool.query<CuratedPanelDbRow>(
         `SELECT id, account_id, content_type, source_id, title, body, author, source_url, topics,
                 like_count, collect_count, comment_count, counts_captured_at, reference_images,
-                visual_analysis,
+                visual_analysis, text_card_transcription,
                 bot_liked, bot_collected, admit_reason, first_seen_at, updated_at,
                 COUNT(*) OVER() AS total_count
          FROM curated_content c
@@ -1138,7 +1290,7 @@ export class CuratedContentStore {
       const { rows } = await this.pool.query<CuratedPanelDbRow>(
         `SELECT id, account_id, content_type, source_id, title, body, author, source_url, topics,
                 like_count, collect_count, comment_count, counts_captured_at, reference_images,
-                visual_analysis,
+                visual_analysis, text_card_transcription,
                 bot_liked, bot_collected, admit_reason, first_seen_at, updated_at
          FROM curated_content
          WHERE id = $1 AND account_id = $2`,

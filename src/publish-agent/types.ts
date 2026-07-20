@@ -1,5 +1,5 @@
 import type { Soul } from '../soul/types.js';
-import type { CuratedReferenceImageFormGuess } from '../cache/curated-content-store.js';
+import type { CuratedReferenceImageFormGuess, TextCardTranscription } from '../cache/curated-content-store.js';
 import type { ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
 import type { PlatformId } from '../platform/index.js';
 import type { TextCardSourceStyle } from '../render/text-card.js';
@@ -181,6 +181,8 @@ export interface TriggerInput {
       images?: ReferenceImageSnapshot[];
       /** Cached whole-set visual analysis. Contains visual structure only; never OCR/source copy. */
       visualAnalysis?: ReferenceVisualAnalysis;
+      /** Ordered source-card OCR; semantic slots only, never permission to reuse originals verbatim. */
+      textCardTranscription?: TextCardTranscription;
     };
     soul: Soul;
     recentPosts: string[];
@@ -375,6 +377,10 @@ export interface CoverCardPlan {
   perImageForms?: PerImageFormGuess[];
   /** 阶段1 预留：整帖多卡文案（阶段0 恒不写）。 */
   cardSet?: (CoverCardCopy | null)[];
+  /** How carousel semantic slots were populated; absent for non-carousel plans. */
+  cardContentMapping?: 'ordered_transcription' | 'body_fallback';
+  /** Source reference_images array indices aligned 1:1 with cardSet when ordered_transcription is used. */
+  cardSourceArrayIndices?: number[];
 }
 
 /** 封面渲染执行结局（诚实审计：降级用了生成图绝不标 text_card）。 */
@@ -397,6 +403,8 @@ export interface CoverFormAudit {
   perImageForms?: PerImageFormGuess[];
   /** 轮播每槽渲染结局（change textcard-carousel-form-parity 阶段1）：仅整帖渲卡时非空；[0] 与 renderStatus 一致。 */
   cardRenderStatuses?: CoverRenderStatus[];
+  cardContentMapping?: 'ordered_transcription' | 'body_fallback';
+  cardSourceArrayIndices?: number[];
 }
 
 export interface ImageReferenceAudit {
@@ -525,6 +533,8 @@ export interface ImagePlan {
    * cardSet[i] 非空 = 第 i 槽由文字卡渲染（cardSet[0] 兼作封面）；缺/undefined = 该槽走生成式（旗标关时恒 undefined，零回归）。
    */
   cardSet?: (CoverCardCopy | null)[];
+  cardContentMapping?: 'ordered_transcription' | 'body_fallback';
+  cardSourceArrayIndices?: number[];
   plannedAt: number;
 }
 

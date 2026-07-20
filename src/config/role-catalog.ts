@@ -111,6 +111,7 @@ export const ROLE_CATALOG: RoleCatalogItem[] = [
   { roleId: 'browse:content_curator', displayName: '详情页内容粗筛', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
   { roleId: 'browse:concept_extractor', displayName: '笔记关键词抽取', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false }, // 仅概念池可用时注册
   { roleId: 'browse:curated_note_evaluator', displayName: '精选准入·正文评估', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false }, // 仅精选库可用时注册
+  { roleId: 'browse:text_card_transcriber', displayName: '精选准入·文字卡转写（模型经 env 配置）', group: 'browse', category: 'browse_judge', llmKind: 'vision', tunableTemperature: false },
   // C. 翻评论区（看别人评论）
   { roleId: 'browse:comment_reviewer', displayName: '是否翻评论区判定', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false },
   { roleId: 'browse:curated_comment_evaluator', displayName: '精选准入·评论评估', group: 'browse', category: 'browse_judge', llmKind: 'text', tunableTemperature: false }, // 仅评论点赞+精选库时注册

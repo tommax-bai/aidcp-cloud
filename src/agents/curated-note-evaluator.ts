@@ -24,7 +24,16 @@ import type { RoleOptions } from './base-role.js';
 import type { NoteDetailData, RoleName } from '../event-bus/types.js';
 import { topicKeysFromTitle } from '../cache/valuable-comment-store.js';
 import { passesResonance, resolveCuratedGateConfig } from '../publish-agent/curated-gate.js';
-import type { CuratedObservation } from '../cache/curated-content-store.js';
+import type {
+  CuratedObservation,
+  CuratedReferenceImageInput,
+  CuratedTextCardContext,
+  TextCardTranscription,
+} from '../cache/curated-content-store.js';
+import {
+  mergeBodyWithTextCardTranscription,
+  type TextCardTranscriber,
+} from '../publish-agent/text-card-transcriber.js';
 
 /** 评估角色只需精选库的「观测落库」口（窄接口，便于测试桩）。 */
 export interface CuratedNoteSink {
@@ -35,6 +44,11 @@ export interface CuratedNoteSink {
     contentType: 'image_text' | 'video',
     images: NonNullable<NoteDetailData['images']>,
   ): Promise<number>;
+  getTextCardContext?(
+    accountId: string,
+    sourceId: string,
+    contentType: 'image_text' | 'video',
+  ): Promise<CuratedTextCardContext | null>;
 }
 
 export interface CuratedNoteEvaluatorOptions extends RoleOptions {
@@ -46,6 +60,7 @@ export interface CuratedNoteEvaluatorOptions extends RoleOptions {
    * （等价 Phase 2b 行为，相关性/丰富度不评）。
    */
   llmEvalEnabled?: boolean;
+  textCardTranscriber?: TextCardTranscriber;
 }
 
 /** LLM 正文评估的严格 JSON 输出契约。 */
@@ -62,6 +77,7 @@ export class CuratedNoteEvaluator extends BaseRole {
   private readonly curatedStore: CuratedNoteSink;
   private readonly getAccountId: () => string;
   private readonly llmEvalEnabled: boolean;
+  private readonly textCardTranscriber?: TextCardTranscriber;
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: CuratedNoteEvaluatorOptions) {
@@ -70,6 +86,7 @@ export class CuratedNoteEvaluator extends BaseRole {
     this.curatedStore = options.curatedStore;
     this.getAccountId = options.getAccountId;
     this.llmEvalEnabled = options.llmEvalEnabled ?? true;
+    this.textCardTranscriber = options.textCardTranscriber;
   }
 
   subscribe(): void {
@@ -88,15 +105,20 @@ export class CuratedNoteEvaluator extends BaseRole {
 
   private onNoteDetailArrived(payload: { detail: NoteDetailData; accountId?: string; ts: number }): void {
     // 异步评估，绝不阻塞浏览主路径（fire-and-forget）。
-    void this.evaluate(payload.detail, payload.accountId);
+    void this.evaluate(payload.detail, payload.accountId, payload.ts);
   }
 
   private onImageSnapshotArrived(payload: { detail: NoteDetailData; accountId?: string; ts: number }): void {
-    void this.refreshImages(payload.detail, payload.accountId);
+    void this.refreshImages(payload.detail, payload.accountId, payload.ts);
   }
 
-  private async refreshImages(d: NoteDetailData, eventAccountId?: string): Promise<void> {
+  private async refreshImages(d: NoteDetailData, eventAccountId: string | undefined, snapshotAt: number): Promise<void> {
     if (!d || !d.noteId || !d.images?.length) return;
+    // OCR 开启时必须让新图片快照重新走锚判断与正文重建，不能只替换图片后留下旧转写。
+    if (this.textCardTranscriber?.enabled()) {
+      await this.evaluate(d, eventAccountId, snapshotAt);
+      return;
+    }
     const accountId = eventAccountId ?? this.getAccountId();
     if (!accountId || accountId === '__unbound__') return;
     const contentType = d.mediaType === 'video' ? 'video' : 'image_text';
@@ -109,28 +131,55 @@ export class CuratedNoteEvaluator extends BaseRole {
     } catch (err) {
       this.log(`刷新精选参考图失败（回落准入评估）：${(err as Error).message}`);
     }
-    await this.evaluate(d, eventAccountId);
+    await this.evaluate(d, eventAccountId, snapshotAt);
   }
 
-  private async evaluate(d: NoteDetailData, eventAccountId?: string): Promise<void> {
+  private async evaluate(d: NoteDetailData, eventAccountId: string | undefined, snapshotAt: number): Promise<void> {
     if (!d || !d.noteId) return;
-    const body = d.content.trim();
-    if (!body) return;
-    const note = { ...d, content: body };
     const accountId = eventAccountId ?? this.getAccountId();
     // honest-fail：缺账号 / 未绑定占位 → 不落（杜绝脏流量记到退役账号名下）。
     if (!accountId || accountId === '__unbound__') return;
 
     const config = resolveCuratedGateConfig(accountId);
     // ── 第一段：共鸣预筛（零 LLM）。不过即弃，绝不进第二段（成本红线）。 ──
-    const res = passesResonance({ likeCount: note.likeCount, collectCount: note.collectCount }, config);
+    const res = passesResonance({ likeCount: d.likeCount, collectCount: d.collectCount }, config);
     if (!res.ok) return;
+
+    const contentType = d.mediaType === 'video' ? 'video' : 'image_text';
+    let referenceImages: CuratedReferenceImageInput[] = d.images ?? [];
+    let textCardTranscription: TextCardTranscription | undefined;
+    let body = d.content.trim();
+    if (contentType === 'image_text' && referenceImages.length > 0 && this.textCardTranscriber?.enabled()) {
+      let cached: CuratedTextCardContext | null = null;
+      try {
+        cached = (await this.curatedStore.getTextCardContext?.(accountId, d.noteId, contentType)) ?? null;
+      } catch (err) {
+        this.log(`读取文字卡转写缓存失败（继续现转）：${(err as Error).message}`);
+      }
+      try {
+        const outcome = await this.textCardTranscriber.transcribe({
+          accountId,
+          sourceId: d.noteId,
+          images: referenceImages,
+          snapshotAt,
+          cached,
+        });
+        referenceImages = outcome.images;
+        textCardTranscription = outcome.transcription;
+        body = mergeBodyWithTextCardTranscription(body, textCardTranscription);
+      } catch (err) {
+        // 服务承诺吞视觉失败；此处再防御，正文保持 DOM 原值，绝不阻断浏览。
+        this.log(`文字卡转写异常（保持 DOM 正文）：${(err as Error).message}`);
+      }
+    }
+    if (!body) return;
+    const note = { ...d, content: body };
 
     const topics = topicKeysFromTitle(note.title);
 
     // 开关关 → 回退「仅共鸣」：预筛过即纳入（不调 LLM、不评相关性/丰富度）。
     if (!this.llmEvalEnabled) {
-      await this.admit(accountId, note, topics, res.reason);
+      await this.admit(accountId, note, topics, res.reason, referenceImages, textCardTranscription);
       return;
     }
 
@@ -152,11 +201,18 @@ export class CuratedNoteEvaluator extends BaseRole {
       this.log(`评估不准入 note=${d.noteId}：${parsed.reason}`);
       return;
     }
-    await this.admit(accountId, note, topics, 'llm_eval');
+    await this.admit(accountId, note, topics, 'llm_eval', referenceImages, textCardTranscription);
   }
 
   /** 落精选语料（fire-and-forget：失败只 log，不抛、不阻塞浏览主路径）。 */
-  private async admit(accountId: string, d: NoteDetailData, topics: string[], admitReason: string): Promise<void> {
+  private async admit(
+    accountId: string,
+    d: NoteDetailData,
+    topics: string[],
+    admitReason: string,
+    referenceImages: CuratedReferenceImageInput[],
+    textCardTranscription?: TextCardTranscription,
+  ): Promise<void> {
     try {
       await this.curatedStore.upsertObservation({
         accountId,
@@ -170,7 +226,8 @@ export class CuratedNoteEvaluator extends BaseRole {
         likeCount: d.likeCount,
         collectCount: d.collectCount,
         admitReason,
-        referenceImages: d.images ?? [],
+        referenceImages,
+        ...(textCardTranscription ? { textCardTranscription } : {}),
       });
       this.log(`纳入精选 note=${d.noteId}（${admitReason}）`);
     } catch (err) {

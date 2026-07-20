@@ -59,6 +59,20 @@ test('不变量锁死：含 image_url 的消息只发到注入 provider 的 base
   assert.deepEqual(sent[0].content, imageMessages[0].content);
 });
 
+test('密集视觉调用可显式下发 max_tokens；未传时既有请求体不新增该键', async () => {
+  const rec: Rec = { calls: 0 };
+  const c = new OpenAiCompatVisionClient({
+    getModel: () => 'qwen-vl-test',
+    getProvider: () => 'visionprov',
+    providerRuntime: VISION_RT,
+    fetchImpl: fakeFetch(rec),
+  });
+  await c.chatVision(imageMessages, { maxTokens: 8192 });
+  assert.equal(rec.body?.max_tokens, 8192);
+  await c.chatVision(imageMessages);
+  assert.equal('max_tokens' in rec.body!, false);
+});
+
 test('构造必须显式注入 getModel/getProvider/providerRuntime（无隐式默认）', () => {
   assert.throws(
     () => new OpenAiCompatVisionClient({} as unknown as OpenAiCompatVisionClientOptions),

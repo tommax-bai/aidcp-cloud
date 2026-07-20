@@ -42,6 +42,7 @@ import { CommentLikeAppraiser } from '../agents/comment-like-appraiser.js';
 import { ValuableCommentArchivist } from '../agents/valuable-comment-archivist.js';
 import { CuratedNoteEvaluator, type CuratedNoteSink } from '../agents/curated-note-evaluator.js';
 import { CuratedCommentEvaluator, type CuratedCommentSink } from '../agents/curated-comment-evaluator.js';
+import type { TextCardTranscriber } from '../publish-agent/text-card-transcriber.js';
 import { HotLeadDetector } from '../hot-lead/hot-lead-detector.js';
 import type { HotLeadGateConfig } from '../hot-lead/heat-velocity.js';
 import type { ValuableCommentInput, ValuableCommentRef } from '../cache/valuable-comment-store.js';
@@ -278,6 +279,8 @@ export interface RoleDispatcherOptions {
    * 缺省（如 PG 不可用）→ 两角色都不注册，准入退回全局处理器的自有收藏直纳路径（仿 concept_extractor 仅概念池可用时注册）。
    */
   curatedStore?: CuratedNoteSink & CuratedCommentSink;
+  /** Optional admission-time text-card recognition/transcription service; its own flag remains authoritative. */
+  textCardTranscriber?: TextCardTranscriber;
   /**
    * 引流线索自动触发（change feed-hot-lead-auto-group-comment）：注入 `fireAutoContactComment` 则注册 hot_lead_detector
    * （接稿件价值判定之后，quality.pass 命中热度闸 + 账号开自动联系评论 + 过统一安全闸 → 自动触发带联系方式评论 → 飞书人审）。
@@ -433,6 +436,7 @@ export class RoleDispatcher {
   private readonly getCommentLikeDailyRemaining?: () => number;
   private readonly archiveValuableComment?: (input: ValuableCommentInput) => Promise<void>;
   private readonly curatedStore?: CuratedNoteSink & CuratedCommentSink;
+  private readonly textCardTranscriber?: TextCardTranscriber;
   private readonly hotLeadGateConfig?: () => HotLeadGateConfig;
   private readonly isAutoContactEnabled?: (accountId: string) => Promise<boolean>;
   private readonly hasCommentedForLead?: (accountId: string, noteId: string) => Promise<boolean>;
@@ -606,6 +610,7 @@ export class RoleDispatcher {
     this.commentCorpusLookupTimeoutMs = options.commentCorpusLookupTimeoutMs;
     this.commentSublineTimeoutMs = positiveTimeoutMs(options.commentSublineTimeoutMs, DEFAULT_COMMENT_SUBLINE_TIMEOUT_MS);
     this.curatedStore = options.curatedStore;
+    this.textCardTranscriber = options.textCardTranscriber;
     this.hotLeadGateConfig = options.hotLeadGateConfig;
     this.isAutoContactEnabled = options.isAutoContactEnabled;
     this.hasCommentedForLead = options.hasCommentedForLead;
@@ -1397,6 +1402,7 @@ export class RoleDispatcher {
           curatedStore: store,
           getAccountId: () => this.currentAccountId,
           llmEvalEnabled,
+          ...(this.textCardTranscriber ? { textCardTranscriber: this.textCardTranscriber } : {}),
         }),
       );
       // 评论评估角色仅在评论赞链路开启时注册——其源事件 comment_like.confirmed 仅该链路产出。

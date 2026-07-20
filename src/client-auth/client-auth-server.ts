@@ -1434,6 +1434,9 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
             ...(raw.useReferenceImages && row.visualAnalysis
               ? { visualAnalysis: JSON.parse(JSON.stringify(row.visualAnalysis)) as JsonValue }
               : {}),
+            ...(raw.useReferenceImages && row.textCardTranscription
+              ? { textCardTranscription: JSON.parse(JSON.stringify(row.textCardTranscription)) as JsonValue }
+              : {}),
           },
           targetConstraints: {},
           approvalMode: 'review',

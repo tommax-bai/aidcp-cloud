@@ -347,6 +347,23 @@ describe('CoverCardWriterRole × 轮播整帖多卡（change textcard-carousel-f
     }));
     return t;
   }
+  function trigger3WithTranscription(): TriggerInput {
+    const t = trigger3();
+    t.generateInput.referenceNote!.textCardTranscription = {
+      version: 1,
+      status: 'complete',
+      anchor: `sha256:${'a'.repeat(64)}`,
+      provider: 'dashscope',
+      model: 'ocr-model',
+      transcribedAt: 2,
+      cards: [
+        { sourceArrayIndex: 0, sourceIndex: 0, capturedAt: 1, status: 'transcribed', text: '封面讲本地迁移的价值' },
+        { sourceArrayIndex: 1, sourceIndex: 1, capturedAt: 1, status: 'transcribed', text: '先安装环境并检查路径' },
+        { sourceArrayIndex: 2, sourceIndex: 2, capturedAt: 1, status: 'transcribed', text: '备份数据再逐条导入' },
+      ],
+    };
+    return t;
+  }
   const SET3 = JSON.stringify({
     cards: [
       { cardTitle: '三分钟搬走AI记忆', bullets: ['告别云端依赖'], tags: ['干货'] },
@@ -370,6 +387,45 @@ describe('CoverCardWriterRole × 轮播整帖多卡（change textcard-carousel-f
     assert.equal(plan.cardSet?.[0]?.title, plan.card?.title, 'card 兼作 cardSet[0]');
     assert.equal(plan.cardSet?.[2]?.title, '第二步导入数据');
     assert.equal(plan.formProfile, 'all_text_card');
+    assert.equal(plan.cardContentMapping, 'body_fallback');
+  });
+
+  test('完整逐卡转写 → 按参考图顺序交给文案服务并记录 ordered_transcription 映射', async () => {
+    const { plan, llmCalls } = await run({
+      sensor: stubSensor({ status: 'detected', guess: guess('text_card', 0.9), cached: false }),
+      profileService: stubProfileService(ALL_CARD, true),
+      carouselEnabled: true,
+      trigger: trigger3WithTranscription(),
+      llmOutputs: [SET3],
+    });
+    assert.equal(plan.cardContentMapping, 'ordered_transcription');
+    assert.deepEqual(plan.cardSourceArrayIndices, [0, 1, 2]);
+    assert.match(llmCalls[0], /生成第 1 张 ↔ 来源数组下标 0[\s\S]*封面讲本地迁移的价值/);
+    assert.match(llmCalls[0], /生成第 2 张 ↔ 来源数组下标 1[\s\S]*先安装环境并检查路径/);
+    assert.match(llmCalls[0], /生成第 3 张 ↔ 来源数组下标 2[\s\S]*备份数据再逐条导入/);
+    assert.match(llmCalls[0], /若来源槽与终稿冲突，以终稿为准/);
+  });
+
+  test('任一实际生成槽缺转写 → 整套回落 body_fallback，不做部分映射', async () => {
+    const trigger = trigger3WithTranscription();
+    trigger.generateInput.referenceNote!.textCardTranscription!.cards[1] = {
+      sourceArrayIndex: 1,
+      sourceIndex: 1,
+      capturedAt: 1,
+      status: 'failed',
+      reason: 'missing_card_result',
+    };
+    trigger.generateInput.referenceNote!.textCardTranscription!.status = 'partial';
+    const { plan, llmCalls } = await run({
+      sensor: stubSensor({ status: 'detected', guess: guess('text_card', 0.9), cached: false }),
+      profileService: stubProfileService(ALL_CARD, true),
+      carouselEnabled: true,
+      trigger,
+      llmOutputs: [SET3],
+    });
+    assert.equal(plan.cardContentMapping, 'body_fallback');
+    assert.equal(plan.cardSourceArrayIndices, undefined);
+    assert.doesNotMatch(llmCalls[0], /来源文字卡的有序信息槽/);
   });
 
   test('轮播旗标关（默认）→ 即使 all_text_card 也只走单封面卡（无 cardSet）', async () => {

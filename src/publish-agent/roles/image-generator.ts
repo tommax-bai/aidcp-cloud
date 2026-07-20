@@ -330,6 +330,8 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
               ...(input.perImageForms ? { perImageForms: input.perImageForms } : {}),
               // 轮播每槽渲染结局（阶段1）：仅整帖渲卡（cardSet 非空）时并列落，供回放每张卡渲成没。
               ...(input.cardSet ? { cardRenderStatuses } : {}),
+              ...(input.cardContentMapping ? { cardContentMapping: input.cardContentMapping } : {}),
+              ...(input.cardSourceArrayIndices ? { cardSourceArrayIndices: input.cardSourceArrayIndices } : {}),
             } satisfies CoverFormAudit,
           }
         : {}),

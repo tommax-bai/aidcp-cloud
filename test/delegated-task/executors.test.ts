@@ -261,7 +261,7 @@ test('delegated publish threads originChatId to the publish port as manualApprov
 // 操作员全权白名单：精确 /publish 与专用服务端人工精选洗稿越风控/配额但保人审；
 // 自然语言、通用结构化请求或形状不完整的 operator_action 一律 governed。
 test('delegated publish sets operatorOverride only for trusted actions and human lease only for exact slash', async () => {
-  const calls: Array<{ operatorOverride?: boolean; edgeLeasePriority?: string; approvalMode?: string; hasReference: boolean }> = [];
+  const calls: Array<{ operatorOverride?: boolean; edgeLeasePriority?: string; approvalMode?: string; hasReference: boolean; textCardText?: string }> = [];
   const router = createDelegatedExecutorRouter({
     comments: {
       triggerManual: async () => ({ ok: true, message: 'unused' }),
@@ -270,11 +270,13 @@ test('delegated publish sets operatorOverride only for trusted actions and human
     },
     publishes: {
       triggerDelegated: async (_accountId, opts) => {
+        const textCardText = opts.referenceNote?.textCardTranscription?.cards[0]?.text;
         calls.push({
           operatorOverride: opts.operatorOverride,
           edgeLeasePriority: opts.edgeLeasePriority,
           approvalMode: opts.approvalMode,
           hasReference: opts.referenceNote !== undefined,
+          ...(textCardText ? { textCardText } : {}),
         });
         return { result: 'triggered', reason: 'delegated_publish_post', status: 'pending_approval', recordId: 9 };
       },
@@ -308,6 +310,17 @@ test('delegated publish sets operatorOverride only for trusted actions and human
     title: '参照标题',
     body: '参照正文',
     topics: ['话题'],
+    useReferenceImages: true,
+    referenceImages: [{ index: 0, sourceUrl: 'https://img.test/0.jpg' }],
+    textCardTranscription: {
+      version: 1,
+      status: 'complete',
+      anchor: `sha256:${'d'.repeat(64)}`,
+      provider: 'dashscope',
+      model: 'ocr-model',
+      transcribedAt: 10,
+      cards: [{ sourceArrayIndex: 0, sourceIndex: 0, capturedAt: 10, status: 'transcribed', text: '来源第一卡' }],
+    },
   };
   const operatorRewrite = task({
     action: 'publish_post', actionFamily: 'publish', source: 'operator_action', targetSuccessCount: 1,
@@ -319,6 +332,7 @@ test('delegated publish sets operatorOverride only for trusted actions and human
     edgeLeasePriority: undefined,
     approvalMode: 'review',
     hasReference: true,
+    textCardText: '来源第一卡',
   });
 
   const forgedStructured = task({

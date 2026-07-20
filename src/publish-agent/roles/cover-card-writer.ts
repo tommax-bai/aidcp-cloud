@@ -9,12 +9,18 @@ import type {
   SensedCoverForm,
   ReferenceImageSnapshot,
 } from '../types.js';
-import { buildCoverCardCopyPrompt, buildCardSetPrompt, IMAGE_COUNT_HARD_MAX } from '../prompts.js';
+import {
+  buildCoverCardCopyPrompt,
+  buildCardSetPrompt,
+  IMAGE_COUNT_HARD_MAX,
+  type CardSetSourceSlot,
+} from '../prompts.js';
 import { detectBannedPhrases } from '../post-processor.js';
-import { referenceImagesForGeneration } from '../reference-image-guidance.js';
+import { referenceImageUrl, referenceImagesForGeneration } from '../reference-image-guidance.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
 import type { CoverFormSensor, CoverFormSenseResult } from '../cover-form-sensor.js';
 import type { PostImageFormProfileService } from '../post-image-form-profile.js';
+import { orderedTextCardTexts, type TextCardTranscription } from '../../cache/curated-content-store.js';
 
 /**
  * CoverCardWriter — 封面形态决策 + 卡面文案（change textcard-cover-form）。
@@ -199,16 +205,37 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
 
     // 产后校验的原文（可读、不入生成上下文——防搬运 R2）；封面卡与轮播多卡共用。
     const originalTitle = referenceNote.title ?? '';
-    const originalBody = referenceNote.body ?? '';
+    // scheduler 会为改写 prompt 截断 body；逐卡转写另带全量结构，故重叠闸必须把它也纳入，避免尾部卡漏检。
+    const originalBody = [
+      referenceNote.body ?? '',
+      ...orderedTextCardTexts(referenceNote.textCardTranscription).map((card) => card.text!),
+    ].filter(Boolean).join('\n\n');
 
     // 轮播分支（阶段1）：形态档 all_text_card + 轮播旗标开 → 一次多卡文案 → cardSet 整帖渲卡；
     // 任一张违规/失败 → 整帖回落生成式（诚实记 carousel_copy_failed）。张数对齐源稿有效图数（同 ImageSetPlanner）。
     if (profileFields.formProfile === 'all_text_card' && this.carouselEnabled()) {
       const n = Math.min(referenceImagesForGeneration(images).length, this.maxImages);
       if (n >= 2) {
-        const cards = await this.composeCardSetWithGuard(input, originalTitle, originalBody, referenceNote.author, n, startedAt);
+        const sourceSlots = this.orderedSourceCardSlots(images, referenceNote.textCardTranscription, n);
+        const cards = await this.composeCardSetWithGuard(
+          input,
+          originalTitle,
+          originalBody,
+          referenceNote.author,
+          n,
+          startedAt,
+          sourceSlots?.slots,
+        );
         if (cards) {
-          return attach(this.carouselPlan(cards, sensedForm, sensedSource));
+          return attach(
+            this.carouselPlan(
+              cards,
+              sensedForm,
+              sensedSource,
+              sourceSlots ? 'ordered_transcription' : 'body_fallback',
+              sourceSlots?.sourceArrayIndices,
+            ),
+          );
         }
         this.logger.warn('[CoverCardWriter] 轮播多卡文案违规/失败，整帖回落生成式（carousel_copy_failed）');
         return {
@@ -302,6 +329,8 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
     cards: CoverCardCopy[],
     sensedForm: SensedCoverForm,
     sensedSource: CoverCardPlan['sensedSource'],
+    mapping: NonNullable<CoverCardPlan['cardContentMapping']>,
+    sourceArrayIndices?: number[],
   ): CoverCardPlan {
     return {
       coverForm: 'text_card',
@@ -311,7 +340,40 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
       sensedSource,
       gateReason: 'ok',
       decidedAt: this.clock(),
+      cardContentMapping: mapping,
+      ...(sourceArrayIndices ? { cardSourceArrayIndices: sourceArrayIndices } : {}),
     };
+  }
+
+  /**
+   * Select exactly the reference-image slots that will become rendered cards. Complete mapping is all-or-nothing:
+   * one missing/failed OCR slot returns null so the whole carousel uses the existing body split instead of guessing.
+   */
+  private orderedSourceCardSlots(
+    images: ReferenceImageSnapshot[],
+    transcription: TextCardTranscription | undefined,
+    n: number,
+  ): { slots: CardSetSourceSlot[]; sourceArrayIndices: number[] } | null {
+    if (!transcription || (transcription.status !== 'complete' && transcription.status !== 'partial')) return null;
+    const selected = images
+      .map((image, sourceArrayIndex) => ({ image, sourceArrayIndex }))
+      .filter(({ image }) => !!referenceImageUrl(image))
+      .slice(0, n);
+    if (selected.length !== n) return null;
+    const byIndex = new Map(
+      transcription.cards
+        .filter((card) => card.status === 'transcribed' && !!card.text)
+        .map((card) => [card.sourceArrayIndex, card.text!] as const),
+    );
+    const slots: CardSetSourceSlot[] = [];
+    const sourceArrayIndices: number[] = [];
+    for (const { sourceArrayIndex } of selected) {
+      const text = byIndex.get(sourceArrayIndex)?.trim();
+      if (!text) return null;
+      sourceArrayIndices.push(sourceArrayIndex);
+      slots.push({ sourceArrayIndex, text });
+    }
+    return { slots, sourceArrayIndices };
   }
 
   /**
@@ -325,15 +387,16 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
     author: string | undefined,
     n: number,
     startedAt: number,
+    sourceCards?: CardSetSourceSlot[],
   ): Promise<CoverCardCopy[] | null> {
     try {
-      const first = await this.composeCardSet(input, n, false, COPY_CALL_TIMEOUT_MS);
+      const first = await this.composeCardSet(input, n, false, COPY_CALL_TIMEOUT_MS, sourceCards);
       let violation = first ? this.findSetViolation(first, originalTitle, originalBody, author) : 'llm 输出不可解析或卡数不足';
       if (first && !violation) return first;
       const remaining = COVERCARD_TIMEOUT_MS - (this.clock() - startedAt) - 10_000;
       if (remaining >= RETRY_MIN_BUDGET_MS) {
         this.logger.warn(`[CoverCardWriter] 轮播多卡违规（${violation}），带紧约束重试一次（剩余预算 ${Math.round(remaining / 1000)}s）`);
-        const second = await this.composeCardSet(input, n, true, Math.min(COPY_CALL_TIMEOUT_MS, remaining));
+        const second = await this.composeCardSet(input, n, true, Math.min(COPY_CALL_TIMEOUT_MS, remaining), sourceCards);
         violation = second ? this.findSetViolation(second, originalTitle, originalBody, author) : 'llm 输出不可解析或卡数不足';
         if (second && !violation) return second;
       } else {
@@ -353,11 +416,12 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
     n: number,
     tighten: boolean,
     timeoutMs: number,
+    sourceCards?: CardSetSourceSlot[],
   ): Promise<CoverCardCopy[] | null> {
     const raw = await this.llmClient.chat(
       [
         { role: 'system', content: '你是小红书图文轮播文案编辑。严格返回JSON。' },
-        { role: 'user', content: buildCardSetPrompt(input.title, input.content, input.tags, n, tighten) },
+        { role: 'user', content: buildCardSetPrompt(input.title, input.content, input.tags, n, tighten, sourceCards) },
       ],
       { timeoutMs },
     );

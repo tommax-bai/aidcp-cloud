@@ -1059,16 +1059,22 @@ export function buildCoverCardCopyPrompt(
 
 /**
  * 轮播文字卡文案 prompt。一次产 N 张卡：card[0]=封面钩子卡、card[1..N-1]=正文段落卡（各承一段/一个要点簇）。
- * 防搬运红线同封面卡：**只喂洗稿后的标题/正文/标签**，MUST NOT 注入原笔记任何文本
- * （原文只在产后校验做重叠比对、不进生成上下文）。每张会被确定性排版渲染成一图，故约束长度条数。
- * count = 目标卡数（对齐源稿有效图数）；LLM 自行把正文切成 N 张连贯的卡、顺序输出。
+ * 缺有序转写时只喂洗稿后的标题/正文/标签，沿用按终稿拆卡；有完整有序转写时额外提供每个来源卡的
+ * 信息槽，使输出 card[i] 对应 sourceCards[i]。来源文字只用于语义对应，终稿事实优先且必须换表达；
+ * 产后校验继续对原文做逐字重叠检查。每张会被确定性排版渲染成一图，故约束长度条数。
  */
+export interface CardSetSourceSlot {
+  sourceArrayIndex: number;
+  text: string;
+}
+
 export function buildCardSetPrompt(
   title: string,
   body: string,
   tags: string[],
   count: number,
   tighten = false,
+  sourceCards?: CardSetSourceSlot[],
 ): string {
   const n = Math.max(2, Math.floor(count));
   const preview = buildContentVisualExcerpt(body, 2000);
@@ -1085,9 +1091,23 @@ export function buildCardSetPrompt(
   if (tags.length > 0) {
     lines.push(`【候选标签】${tags.join('、')}`, '');
   }
+  if (sourceCards?.length === n) {
+    lines.push(
+      '【来源文字卡的有序信息槽（只用于对应信息职责，禁止照抄）】',
+      ...sourceCards.map(
+        (card, index) =>
+          `生成第 ${index + 1} 张 ↔ 来源数组下标 ${card.sourceArrayIndex}\n${buildContentVisualExcerpt(card.text, 1200)}`,
+      ),
+      '',
+      '映射红线：第 i 张生成卡必须承接上面第 i 个来源槽的信息角色和叙事位置；只可使用改写终稿支持的事实，若来源槽与终稿冲突，以终稿为准；必须彻底换表达，绝不逐字搬运来源文字。',
+      '',
+    );
+  }
   lines.push(
     '【要求】',
-    `- 严格产出 ${n} 张卡，按封面→正文顺序输出，把正文主线切成连贯的 ${n - 1} 段承到第 2~${n} 张。`,
+    sourceCards?.length === n
+      ? `- 严格产出 ${n} 张卡，输出顺序必须与上面的 ${n} 个来源信息槽一一对应。`
+      : `- 严格产出 ${n} 张卡，按封面→正文顺序输出，把正文主线切成连贯的 ${n - 1} 段承到第 2~${n} 张。`,
     '- 第 1 张=封面钩子卡：cardTitle 8~16 字、钩子感强、口语化、不照抄笔记标题；bullets 可 0~3 条点题。',
     '- 第 2 张起=正文段落卡：cardTitle 是这段的小标题（6~14 字）；bullets 1~5 条、每条 6~18 字，承载这一段的干货/步骤/要点，短句并列。',
     '- 整套卡要覆盖正文主线、各卡内容不重复、连起来读得通；只用这篇笔记本身的内容，绝不新增笔记里没有的事实。',

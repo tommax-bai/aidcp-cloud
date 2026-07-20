@@ -47,6 +47,7 @@ test('init 建表幂等（DDL 含 IF NOT EXISTS 与索引）', async () => {
   assert.match(calls[0].sql, /content_type IN \('image_text','video','comment'\)/);
   assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS reference_images JSONB/);
   assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS visual_analysis JSONB/);
+  assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS text_card_transcription JSONB/);
   assert.match(calls[0].sql, /content_type = 'image_text'/);
   assert.match(calls[0].sql, /dedup_key\s+TEXT NOT NULL UNIQUE/);
   assert.match(calls[0].sql, /CREATE INDEX IF NOT EXISTS .* USING GIN\(topics\)/);
@@ -181,7 +182,42 @@ test('refreshReferenceImages：只更新已有源帖图片，空输入不写库'
   assert.equal(calls.length, 1);
   assert.match(calls[0].sql, /UPDATE curated_content/);
   assert.match(calls[0].sql, /reference_images = \$4::jsonb/);
+  assert.match(calls[0].sql, /text_card_transcription = NULL/, '图片快照变更必须清掉旧转写锚');
   assert.deepEqual(calls[0].params.slice(0, 3), ['acc-1', 'note-9', 'image_text']);
+});
+
+test('有序文字卡转写以单一 JSONB 随精选行写入，并由缓存读取口严格读回', async () => {
+  const transcription = {
+    version: 1 as const,
+    status: 'complete' as const,
+    anchor: `sha256:${'c'.repeat(64)}`,
+    provider: 'dashscope',
+    model: 'ocr-model',
+    transcribedAt: 123,
+    cards: [
+      { sourceArrayIndex: 1, sourceIndex: 8, capturedAt: 123, status: 'transcribed' as const, text: '第二卡' },
+      { sourceArrayIndex: 0, sourceIndex: 7, capturedAt: 123, status: 'transcribed' as const, text: '第一卡' },
+    ],
+  };
+  const storedImages = [{ index: 7, sourceUrl: 'https://img.test/a.jpg', captureStatus: 'url_only', capturedAt: 123 }];
+  const { pool, calls } = capturingPool((sql) =>
+    sql.includes('SELECT reference_images, text_card_transcription')
+      ? [{ reference_images: storedImages, text_card_transcription: transcription }]
+      : [],
+  );
+  const store = new CuratedContentStore({ pool });
+  await store.upsertObservation({
+    ...baseObs,
+    referenceImages: [{ index: 7, sourceUrl: 'https://img.test/a.jpg', capturedAt: 123 }],
+    textCardTranscription: transcription,
+  });
+  const written = JSON.parse(calls[0].params[14] as string) as typeof transcription;
+  assert.deepEqual(written.cards.map((card) => card.sourceArrayIndex), [0, 1], '写入边界先按权威槽排序');
+  assert.match(calls[0].sql, /text_card_transcription = CASE/);
+
+  const cached = await store.getTextCardContext('acc-1', 'note-9', 'image_text');
+  assert.deepEqual(cached?.transcription?.cards.map((card) => card.text), ['第一卡', '第二卡']);
+  assert.deepEqual(cached?.referenceImages.map((image) => image.index), [7]);
 });
 
 test('normalizeCuratedReferenceImages drops invalid URLs and caps at the configured limit', () => {

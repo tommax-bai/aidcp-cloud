@@ -73,6 +73,7 @@ export class FirstPostOnboardingCoordinator {
         ...(source.author ? { author: source.author } : {}),
         ...(source.sourceUrl ? { sourceUrl: source.sourceUrl } : {}),
         ...(source.referenceImages.length > 0 ? { images: source.referenceImages } : {}),
+        ...(source.textCardTranscription ? { textCardTranscription: source.textCardTranscription } : {}),
       };
       begin = this.deps.beginRewrite(accountId, referenceNote, { dbPendingCount });
     } catch (err) {

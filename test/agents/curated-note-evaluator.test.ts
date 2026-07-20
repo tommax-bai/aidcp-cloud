@@ -9,12 +9,19 @@ import { CuratedNoteEvaluator } from '../../src/agents/curated-note-evaluator.js
 import type { CuratedObservation } from '../../src/cache/curated-content-store.js';
 import type { NoteDetailData } from '../../src/event-bus/types.js';
 import type { Soul } from '../../src/soul/types.js';
+import type { TextCardTranscriber } from '../../src/publish-agent/text-card-transcriber.js';
 
 const soul: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },
   interests: { primary: ['AI', 'LLM'], secondary: ['编程'], seed_keywords: ['GPT'] },
 };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const normalizeImagesForTest = () => [0, 1].map((index) => ({
+  index,
+  sourceUrl: `https://img.test/${index}.jpg`,
+  captureStatus: 'url_only' as const,
+  capturedAt: 10,
+}));
 
 const mkDetail = (over: Partial<NoteDetailData> = {}): NoteDetailData => ({
   noteId: 'n1',
@@ -33,6 +40,7 @@ interface RunOpts {
   llmEvalEnabled?: boolean;
   accountId?: string;
   eventAccountId?: string;
+  textCardTranscriber?: TextCardTranscriber;
 }
 
 async function run(detail: NoteDetailData, opts: RunOpts = {}) {
@@ -52,6 +60,7 @@ async function run(detail: NoteDetailData, opts: RunOpts = {}) {
     curatedStore: { upsertObservation: async (obs) => { upserts.push(obs); } },
     getAccountId: () => opts.accountId ?? 'acc-1',
     ...(opts.llmEvalEnabled === undefined ? {} : { llmEvalEnabled: opts.llmEvalEnabled }),
+    ...(opts.textCardTranscriber ? { textCardTranscriber: opts.textCardTranscriber } : {}),
   });
   role.subscribe();
   bus.emit('note.detail.arrived', { detail, accountId: opts.eventAccountId, ts: Date.now() });
@@ -70,6 +79,44 @@ describe('CuratedNoteEvaluator 两段式准入', () => {
     const r = await run(mkDetail({ collectCount: 100, content: '   ' }));
     assert.equal(r.llmCalled, false, '空正文不是可用精选素材，绝不调 LLM');
     assert.equal(r.upserts.length, 0);
+  });
+
+  it('空 DOM 文字卡先按顺序增补真实转写，再参与丰富度评估并落逐卡记录', async () => {
+    const transcription = {
+      version: 1 as const,
+      status: 'complete' as const,
+      anchor: `sha256:${'b'.repeat(64)}`,
+      provider: 'dashscope',
+      model: 'ocr-model',
+      transcribedAt: 10,
+      cards: [
+        { sourceArrayIndex: 0, sourceIndex: 0, capturedAt: 10, status: 'transcribed' as const, text: '第一张：核心结论' },
+        { sourceArrayIndex: 1, sourceIndex: 1, capturedAt: 10, status: 'transcribed' as const, text: '第二张：操作步骤' },
+      ],
+    };
+    const textCardTranscriber: TextCardTranscriber = {
+      enabled: () => true,
+      transcribe: async () => ({
+        images: normalizeImagesForTest(),
+        transcription,
+        cacheHit: false,
+      }),
+    };
+    const r = await run(
+      mkDetail({
+        collectCount: 100,
+        content: '  ',
+        images: [
+          { index: 0, url: 'https://img.test/0.jpg' },
+          { index: 1, url: 'https://img.test/1.jpg' },
+        ],
+      }),
+      { textCardTranscriber },
+    );
+    assert.equal(r.llmCalled, true, '空 DOM 不能在转写前短路');
+    assert.equal(r.upserts.length, 1);
+    assert.equal(r.upserts[0].body, '第一张：核心结论\n\n第二张：操作步骤');
+    assert.deepEqual(r.upserts[0].textCardTranscription, transcription);
   });
 
   it('预筛过(收藏达地板) + 评估准入 → upsert(admitReason=llm_eval)', async () => {

@@ -2478,6 +2478,9 @@ function createRequestHandler(
               ...(useReferenceImages && row.visualAnalysis
                 ? { visualAnalysis: JSON.parse(JSON.stringify(row.visualAnalysis)) as JsonValue }
                 : {}),
+              ...(useReferenceImages && row.textCardTranscription
+                ? { textCardTranscription: JSON.parse(JSON.stringify(row.textCardTranscription)) as JsonValue }
+                : {}),
             },
             targetConstraints: {},
             approvalMode: 'review',

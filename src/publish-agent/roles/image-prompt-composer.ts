@@ -238,6 +238,8 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
       ...(coverPlan?.perImageForms ? { perImageForms: coverPlan.perImageForms } : {}),
       // 轮播多卡透传（阶段1）：cardSet 非空 = 整帖每槽渲文字卡；旗标关时 undefined，不新增键（零回归）。
       ...(coverPlan?.cardSet ? { cardSet: coverPlan.cardSet } : {}),
+      ...(coverPlan?.cardContentMapping ? { cardContentMapping: coverPlan.cardContentMapping } : {}),
+      ...(coverPlan?.cardSourceArrayIndices ? { cardSourceArrayIndices: coverPlan.cardSourceArrayIndices } : {}),
     };
   }
 
