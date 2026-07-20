@@ -16,13 +16,16 @@ export const PROTOCOL_VERSION = 2;
 /** Edge build supports a persistent client core whose browser executor is acquired on demand. */
 export const CLIENT_CORE_BROWSER_EXECUTOR_CAPABILITY = 'client_core_browser_executor_v1';
 
+/** Edge build separates customer HTTP data management from an on-demand automation engine. */
+export const CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY = 'client_data_plane_automation_engine_v1';
+
 /** 所有消息的类型枚举 */
 export type MessageType =
   // —— 连接握手 ——
   | 'hello' // edge → cloud：边缘上线，声明能力/会话
   | 'welcome' // cloud → edge：握手确认
-  // —— 陪伴界面数据回填（cloud → edge，主动推送）——
-  | 'ui.snapshot' // cloud → edge：账号资料快照 + 发布审批状态回填（昵称/最近发布/pending·approved·rejected·failed），边缘核心转 [ui-event] 行给桌面壳
+  // —— 自动化运行投影（cloud → edge）；客户数据字段仅供旧客户端兼容 ——
+  | 'ui.snapshot' // 新客户端仅接收用量/浏览器待机等自动化投影；人物、草稿、审批、发布等 AIDCP 数据经 customer-auth HTTP 拉取
   // —— 任务规划 ——
   | 'plan.request' // edge → cloud：给定高层目标，请求拆解为步骤
   | 'plan.response' // cloud → edge：返回有序步骤清单

@@ -20,6 +20,7 @@
  */
 
 import {
+  CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY,
   makeEnvelope,
   type Envelope,
   type UiBrowserStandbyPayload,
@@ -47,6 +48,8 @@ export interface UiSnapshotDeps {
   pusher: { pushToEdges(env: Envelope, edgeId?: string): number };
   /** 解析绑定该账号的在线边缘 edgeId；无在线节点返回 null（推送如实放弃）。 */
   resolveEdgeIdForAccount: (accountId: string) => string | null;
+  /** 当前自动化连接的能力；新 data-plane 客户端不接收 persona/publish 等 cloud_data 推送。 */
+  edgeCapabilities?: (edgeId: string) => string[] | undefined;
   /** 账号主数据昵称（AccountStore 同步缓存读）；无昵称返回 null（不发 identity）。 */
   getNickname?: (accountId: string) => string | null;
   /** 该账号是否已绑人设（persona 存储权威判据）；用于 hello 快照下发 personaBound 信号（change persona-wizard-onboarding-fixes）。 */
@@ -97,36 +100,39 @@ export class UiSnapshotService {
    * hello 注册完成后的全量快照（须在 ws-server 把连接放进推送表**之后**调用，
    * 否则 pushToEdges 命中 0 接收者——见 nickname-enricher 同款前科）。
    */
-  async pushHelloSnapshot(accountId: string | undefined, edgeId: string | undefined): Promise<void> {
+  async pushHelloSnapshot(accountId: string | undefined, edgeId: string | undefined, capabilities?: string[]): Promise<void> {
     if (!accountId || !edgeId) return;
+    const pullDataPlane = this.usesPullDataPlane(edgeId, capabilities);
     // 人设绑定态先单独发一包（红线：这个 bit 是零 I/O 的内存判据，绝不能排在下面五个 PG/fs 往返之后）。
     // 边缘客户端拿它决定「要不要弹人设向导」；它每晚到一毫秒，客户端就多一毫秒分不清「云端说没有」和
     // 「云端还没说」。真机上快照迟到 → 已设置人设的账号被误弹向导（工程师大白）。
-    this.pushPersonaBound(accountId, edgeId);
+    if (!pullDataPlane) this.pushPersonaBound(accountId, edgeId);
     try {
       const payload: UiSnapshotPayload = {};
 
-      const nickname = this.deps.getNickname?.(accountId) ?? null;
-      if (nickname && nickname.trim()) payload.account = { id: accountId, nickname: nickname.trim() };
+      if (!pullDataPlane) {
+        const nickname = this.deps.getNickname?.(accountId) ?? null;
+        if (nickname && nickname.trim()) payload.account = { id: accountId, nickname: nickname.trim() };
 
-      const last = await this.deps.lastPublishedForAccount?.(accountId)?.catch(() => null);
-      if (last?.title && Number.isFinite(last.at)) payload.lastPublish = { title: last.title, at: last.at };
+        const last = await this.deps.lastPublishedForAccount?.(accountId)?.catch(() => null);
+        if (last?.title && Number.isFinite(last.at)) payload.lastPublish = { title: last.title, at: last.at };
 
-      const preview = await this.deps.pendingPublishPreviewForAccount?.(accountId)?.catch(() => null);
-      const pending = preview
-        ? { id: preview.recordId, title: preview.title || null }
-        : await this.deps.pendingApprovalForAccount?.(accountId)?.catch(() => null);
-      if (pending) {
-        const decision = (await this.deps.readApproval?.(`publish-${pending.id}`)?.catch(() => null)) ?? null;
-        // 无信号=真候审；已批=下发在途；已拒=不回放（拒绝时刻已实时推过）。
-        const state: PublishUiState | null = decision == null ? 'pending' : decision.approved ? 'approved' : null;
-        if (state) {
-          if (preview) payload.publishPreview = preview;
-          payload.publish = {
-            state,
-            code: publishUiCode(pending.id),
-            ...(pending.title ? { title: pending.title } : {}),
-          };
+        const preview = await this.deps.pendingPublishPreviewForAccount?.(accountId)?.catch(() => null);
+        const pending = preview
+          ? { id: preview.recordId, title: preview.title || null }
+          : await this.deps.pendingApprovalForAccount?.(accountId)?.catch(() => null);
+        if (pending) {
+          const decision = (await this.deps.readApproval?.(`publish-${pending.id}`)?.catch(() => null)) ?? null;
+          // Legacy clients receive the historical push projection. Pull-data-plane clients refetch over HTTP.
+          const state: PublishUiState | null = decision == null ? 'pending' : decision.approved ? 'approved' : null;
+          if (state) {
+            if (preview) payload.publishPreview = preview;
+            payload.publish = {
+              state,
+              code: publishUiCode(pending.id),
+              ...(pending.title ? { title: pending.title } : {}),
+            };
+          }
         }
       }
 
@@ -166,6 +172,7 @@ export class UiSnapshotService {
       if (!accountId || !this.deps.isPersonaBound) return;
       const target = edgeId ?? this.deps.resolveEdgeIdForAccount(accountId);
       if (!target) return; // 无在线边缘：如实放弃，下次握手补
+      if (this.usesPullDataPlane(target)) return;
       const personaBound = this.deps.isPersonaBound(accountId);
       this.push(accountId, target, {
         personaBound,
@@ -208,6 +215,7 @@ export class UiSnapshotService {
         this.logger.log(`[ui-snapshot] ${state} 推送放弃：账号 ${accountId} 无在线边缘（recordId=${recordId}）`);
         return;
       }
+      if (this.usesPullDataPlane(edgeId)) return;
       const payload: UiSnapshotPayload = {
         publish: { state, code: publishUiCode(recordId), ...(title ? { title } : {}) },
       };
@@ -227,6 +235,7 @@ export class UiSnapshotService {
         this.logger.log(`[ui-snapshot] 预览推送放弃：账号 ${accountId} 无在线边缘（recordId=${preview.recordId}）`);
         return;
       }
+      if (this.usesPullDataPlane(edgeId)) return;
       this.push(accountId, edgeId, { publishPreview: preview }, 'publishPreview');
     } catch (err) {
       this.logger.warn(
@@ -268,6 +277,11 @@ export class UiSnapshotService {
       this.logger.warn(`[ui-snapshot] ${tag} 推送未送达 account=${accountId} edge=${edgeId}（连接可能刚断，不重试）`);
     }
     return sent;
+  }
+
+  private usesPullDataPlane(edgeId: string, capabilities?: string[]): boolean {
+    const offered = capabilities ?? this.deps.edgeCapabilities?.(edgeId) ?? [];
+    return offered.includes(CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY);
   }
 
   /**

@@ -13,7 +13,11 @@ import { once } from 'node:events';
 import { WebSocket } from 'ws';
 import { EdgeCloudServer, makeEnvelope } from '../../src/comm/index.js';
 import type { MessageHandler, EdgeSession } from '../../src/comm/ws-server.js';
-import type { Envelope, HelloPayload } from '../../src/comm/protocol.js';
+import {
+  CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY,
+  type Envelope,
+  type HelloPayload,
+} from '../../src/comm/protocol.js';
 
 /** 最小 handler：hello 落 edgeId/accountId 到 session 并回 welcome。 */
 const helloHandler: MessageHandler = {
@@ -142,6 +146,37 @@ test('浏览器前后台控制在验证码暂停期间仍须定向下发', async
   assert.equal(s.pushToEdges(control, 'edge-browser'), 1);
   const [data] = (await once(edge, 'message')) as [Buffer | string];
   assert.equal(JSON.parse(data.toString()).type, 'interaction.browser.control');
+  edge.close();
+  await s.close();
+});
+
+test('新客户端的自动化通道过滤 ui.snapshot 数据面字段，纯数据快照拒绝下发', async () => {
+  const s = new EdgeCloudServer({ handler: helloHandler, port: 0, clock: () => 0 });
+  await s.start();
+  const edge = await connectEdge(
+    s.address()!,
+    'edge-pull-data',
+    'acc-1',
+    [CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY],
+  );
+
+  const message = once(edge, 'message');
+  assert.equal(s.pushToEdges(makeEnvelope('ui.snapshot', 'mixed-snapshot', 0, {
+    personaBound: true,
+    publish: { state: 'pending' },
+    dailyUsage: { asOf: 0, totals: {}, quotas: {}, saturated: [], windows: {} },
+  }), 'edge-pull-data'), 1);
+  const [data] = (await message) as [Buffer | string];
+  const received = JSON.parse(data.toString()) as Envelope;
+  assert.deepEqual(received.payload, {
+    dailyUsage: { asOf: 0, totals: {}, quotas: {}, saturated: [], windows: {} },
+  });
+
+  assert.equal(s.pushToEdges(makeEnvelope('ui.snapshot', 'data-only-snapshot', 0, {
+    personaBound: false,
+    publish: { state: 'approved' },
+  }), 'edge-pull-data'), 0);
+
   edge.close();
   await s.close();
 });

@@ -14,12 +14,14 @@
 
 import { WebSocketServer, WebSocket } from 'ws';
 import {
+  CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY,
   makeEnvelope,
   parseEnvelope,
   type Envelope,
   type MessageType,
   type PageCardsPayload,
 } from './protocol.js';
+import { automationOperationDescriptorFor } from './operation-registry.js';
 
 /** 单条边缘连接的会话上下文 */
 export interface EdgeSession {
@@ -201,6 +203,11 @@ export class EdgeCloudServer implements EdgePusher {
 
   /** EdgePusher：把命令推给已上线边缘 */
   pushToEdges(env: Envelope, edgeId?: string): number {
+    const operation = automationOperationDescriptorFor(env.type);
+    if (!operation) {
+      console.warn(`[ws-server] operation_unclassified（type=${env.type}）：拒绝下发到自动化通道`);
+      return 0;
+    }
     // edge-command-target-guard R2/R3：缺目标 edgeId 时绝不广播——诚实失败（命中 0、返回 0、记警告）。
     // 沿用 resolveEdgeIdForAccount 的「0 = 诚实失败信号」语义；调用方据投递数做诚实失败处理。
     // 如将来确需「全网广播」，须新增语义明确的独立方法（如 broadcastToAllEdges），
@@ -209,10 +216,22 @@ export class EdgeCloudServer implements EdgePusher {
       console.warn(`[ws-server] pushToEdges 缺目标 edgeId（type=${env.type}）：拒绝广播、诚实失败（命中 0）`);
       return 0;
     }
-    const frame = JSON.stringify(env);
+    let outbound = env;
+    if (env.type === 'ui.snapshot' && this.edgeCapabilities(edgeId)?.includes(CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY)) {
+      const payload = env.payload as Record<string, unknown>;
+      const automationPayload: Record<string, unknown> = {};
+      if (payload.dailyUsage !== undefined) automationPayload.dailyUsage = payload.dailyUsage;
+      if (payload.browserStandby !== undefined) automationPayload.browserStandby = payload.browserStandby;
+      if (Object.keys(automationPayload).length === 0) {
+        console.warn(`[ws-server] ui.snapshot 仅含 cloud_data（edge=${edgeId}）：新客户端应经 HTTP 拉取，拒绝下发`);
+        return 0;
+      }
+      outbound = { ...env, payload: automationPayload } as Envelope;
+    }
+    const frame = JSON.stringify(outbound);
     // session.end 必达：绝不被验证码暂停闸吞掉，否则持久弹窗会导致会话无法终止（死锁）。
-    // ui.snapshot 同样豁免（edge-companion-ui 8.1 评审修正）：它是纯界面数据、不是页面命令，
-    // 验证码暂停期吞掉它会让发布终态（rejected/failed）推送永久丢失（终态不经 hello 快照回放）。
+    // ui.snapshot 的自动化投影同样豁免；新客户端的数据面字段已在上方过滤，
+    // 人物、草稿、审批、发布等状态由 customer-auth HTTP 拉取，不经该暂停闸。
     // captcha.assist.* 下行恢复命令可穿透暂停闸；普通浏览/互动/发布页面动作仍被拦截。
     const bypassPause =
       env.type === 'session.end' ||

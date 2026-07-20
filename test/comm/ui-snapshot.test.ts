@@ -6,6 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { UiSnapshotService, publishUiCode } from '../../src/comm/ui-snapshot.js';
+import { CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY } from '../../src/comm/protocol.js';
 import type { Envelope, UiBrowserStandbyPayload, UiSnapshotPayload } from '../../src/comm/protocol.js';
 
 interface Sent {
@@ -44,6 +45,43 @@ test('ui-snapshot: hello 快照带昵称 + 最近发布，定向到该 edge', as
   assert.deepEqual(sent[0].env.payload.account, { id: 'acc-1', nickname: '晚风手作' });
   assert.deepEqual(sent[0].env.payload.lastPublish, { title: '上一篇笔记', at: 1730000000000 });
   assert.equal(sent[0].env.payload.publish, undefined);
+});
+
+test('ui-snapshot: new pull-data-plane client receives automation projection but no persona/publish cloud_data push', async () => {
+  const dailyUsage = { asOf: 1, totals: {}, quotas: {}, saturated: [], windows: {} } as NonNullable<UiSnapshotPayload['dailyUsage']>;
+  const { service, sent } = makeService({
+    isPersonaBound: () => true,
+    getPersonaWritingLanguage: () => 'vi',
+    pendingApprovalForAccount: async () => ({ id: 42, title: '候审稿' }),
+    pendingPublishPreviewForAccount: async () => ({
+      recordId: 42, code: '#42', kind: 'generated', title: '候审稿', content: '正文', topics: [],
+      images: [], contentVersion: 1, updatedAt: 1,
+    }),
+    todayUsageForAccount: async () => dailyUsage,
+  });
+  await service.pushHelloSnapshot('acc-1', 'edge-1', [CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY]);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].env.payload.account, undefined);
+  assert.deepEqual(sent[0].env.payload.dailyUsage, dailyUsage);
+  assert.equal(sent[0].env.payload.personaBound, undefined);
+  assert.equal(sent[0].env.payload.personaWritingLanguage, undefined);
+  assert.equal(sent[0].env.payload.lastPublish, undefined);
+  assert.equal(sent[0].env.payload.publish, undefined);
+  assert.equal(sent[0].env.payload.publishPreview, undefined);
+});
+
+test('ui-snapshot: new pull-data-plane client never receives realtime persona or publish data pushes', () => {
+  const { service, sent } = makeService({
+    edgeCapabilities: () => [CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY],
+    isPersonaBound: () => true,
+  });
+  service.pushPersonaBound('acc-1');
+  service.pushPublishState('acc-1', 42, 'pending', '候审稿');
+  service.pushPublishPreview('acc-1', {
+    recordId: 42, code: '#42', kind: 'generated', title: '候审稿', content: '正文', topics: [],
+    images: [], contentVersion: 1, updatedAt: 1,
+  });
+  assert.equal(sent.length, 0);
 });
 
 test('ui-snapshot: hello snapshot includes account daily usage and quota saturation', async () => {

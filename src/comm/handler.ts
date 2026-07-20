@@ -13,6 +13,7 @@
 
 import {
   CLIENT_CORE_BROWSER_EXECUTOR_CAPABILITY,
+  CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY,
   makeEnvelope,
   type Envelope,
   type SelectRequestPayload,
@@ -655,6 +656,9 @@ export class DefaultMessageHandler implements MessageHandler {
     const negotiated = [
       ...((session.capabilities ?? []).includes(CLIENT_CORE_BROWSER_EXECUTOR_CAPABILITY)
         ? [CLIENT_CORE_BROWSER_EXECUTOR_CAPABILITY]
+        : []),
+      ...((session.capabilities ?? []).includes(CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY)
+        ? [CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY]
         : []),
       ...(this.deps.interactionInbox
         ? [

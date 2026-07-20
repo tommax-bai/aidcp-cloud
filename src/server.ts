@@ -2077,7 +2077,7 @@ async function main(): Promise<void> {
       // welcome 是传输提交点：只有走到这里的新连接才可顶替同 edgeId 旧连接并激活浏览业务。
       // 视频号由注册表保持 transport-only；无人设 XHS/FB 由启动闸保持在线但不启动会话。
       runtimes?.onWelcomed(session);
-      void uiSnapshot?.pushHelloSnapshot(session.accountId, session.edgeId).catch((err) => {
+      void uiSnapshot?.pushHelloSnapshot(session.accountId, session.edgeId, session.capabilities).catch((err) => {
         console.warn(
           `[ui-snapshot] hello 快照回填失败（连接保持在线） account=${session.accountId ?? '-'} edge=${session.edgeId ?? '-'}: ${err instanceof Error ? err.message : String(err)}`,
         );
@@ -2463,6 +2463,7 @@ async function main(): Promise<void> {
   uiSnapshot = new UiSnapshotService({
     pusher: { pushToEdges: (env, edgeId) => server.pushToEdges(env, edgeId) },
     resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
+    edgeCapabilities: (edgeId) => server.edgeCapabilities(edgeId),
     getNickname: (accountId) => accountStore?.getNickname?.(accountId) ?? null,
     // 已绑人设信号（change persona-wizard-onboarding-fixes）：persona 存储权威判据，随 hello 快照下发。
     isPersonaBound: (accountId) => personaStore.getForAccount(accountId) !== null,
