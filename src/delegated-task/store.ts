@@ -408,14 +408,17 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
            ) ELSE t.terminal_outcome END,
            claim_token=NULL,
            claim_expires_at=NULL,
-           next_eligible_at=CASE WHEN t.pause_requested OR t.cancel_requested THEN NULL ELSE $1 END,
+           next_eligible_at=CASE
+             WHEN t.pause_requested OR t.cancel_requested THEN NULL
+             ELSE $1::timestamptz
+           END,
            current_step=CASE
              WHEN t.cancel_requested THEN NULL
              WHEN t.pause_requested THEN 'paused_by_user'
              ELSE 'reconcile_interrupted_attempt'
            END,
-           completed_at=CASE WHEN t.cancel_requested THEN $1 ELSE t.completed_at END,
-           updated_at=$1,
+           completed_at=CASE WHEN t.cancel_requested THEN $1::timestamptz ELSE t.completed_at END,
+           updated_at=$1::timestamptz,
            version=t.version+1
          FROM interrupted i
          WHERE t.id=i.id
@@ -426,7 +429,7 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
                 jsonb_build_object(
                   'reason','worker_restart',
                   'previousClaimExpiresAt',previous_claim_expires_at,
-                  'recoveredAt',$1
+                  'recoveredAt',$1::timestamptz
                 )
          FROM recovered
          RETURNING task_id
