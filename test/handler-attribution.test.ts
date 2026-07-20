@@ -124,7 +124,9 @@ test('Reels 单卡一经呈现即记一次 view；匹配 note.detail 仍驱动�
   const eventBus = new EventBus();
   const got = capture(eventBus);
   const details: unknown[] = [];
+  const cardEvents: Array<{ listKind?: 'feed' | 'reels' }> = [];
   eventBus.on('note.detail.arrived', (e) => { details.push(e); });
+  eventBus.on('page.cards.arrived', (e) => { cardEvents.push(e); });
   const handler = makeHandler(eventBus);
   const session: EdgeSession = { sessionId: 's-reel-view', accountId: 'acc-fb', platform: 'facebook' };
 
@@ -139,6 +141,7 @@ test('Reels 单卡一经呈现即记一次 view；匹配 note.detail 仍驱动�
   assert.deepEqual(got.filter((e) => e.action === 'view'), [{
     action: 'view', accountId: 'acc-fb', noteId: 'https://www.facebook.com/reel/42',
   }]);
+  assert.equal(cardEvents[0]?.listKind, 'reels', '内部卡片事件须保留 Reels 形态供 Cloud 策略决策');
 
   await handler.handle(
     makeEnvelope('note.detail', 'reel-detail', 2, {

@@ -514,7 +514,12 @@ export class DefaultMessageHandler implements MessageHandler {
           this.bus(session).emit('feed.empty.confirmed', { ...(startupId ? { startupId } : {}), ts: this.clock() });
           return null;
         }
-        this.bus(session).emit('page.cards.arrived', { cards, ...(startupId ? { startupId } : {}), ts: this.clock() });
+        this.bus(session).emit('page.cards.arrived', {
+          cards,
+          ...(startupId ? { startupId } : {}),
+          ...(listKind ? { listKind } : {}),
+          ts: this.clock(),
+        });
         return null;
       }
       case 'note.detail': {

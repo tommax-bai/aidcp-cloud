@@ -536,6 +536,70 @@ describe('InteractionAppraiserRole', () => {
     role.unsubscribe();
   });
 
+  it('上游已处理普通 Reel → 不调用 LLM，显式 skip 防二次点赞', async () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    let llmCalls = 0;
+    const role = new InteractionAppraiserRole({
+      eventBus: bus,
+      soul: mockSoul,
+      llm: { complete: async () => { llmCalls++; return '{"action":"like"}'; } },
+      sessionContext: ctx,
+      getNoteData: () => ({ ...sampleNote, noteId: 'https://www.facebook.com/reel/42' }),
+      getRemainingBudget: defaultBudget,
+      isInteractionHandledExternally: () => true,
+    });
+    role.subscribe();
+    let skipped: InteractionSkippedPayload | null = null;
+    let completed = false;
+    bus.on('interaction.skipped', (p) => { skipped = p; });
+    bus.on('interaction.completed', () => { completed = true; });
+
+    bus.emit('reading.done', {
+      noteId: 'https://www.facebook.com/reel/42', sourcePageType: 'feed', imagesBrowsed: 0,
+      commentsRead: 0, keyPoints: [], readDurationMs: 100, ts: Date.now(),
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const finalSkipped = skipped as InteractionSkippedPayload | null;
+    assert.equal(llmCalls, 0);
+    assert.equal(completed, false);
+    assert.equal(finalSkipped?.reason, 'facebook_reel_probability_handled');
+    role.unsubscribe();
+  });
+
+  it('mandatory Reel like 优先于上游普通决策 skip', async () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    let llmCalls = 0;
+    const reel = { ...sampleNote, noteId: 'https://www.facebook.com/reel/42' };
+    const role = new InteractionAppraiserRole({
+      eventBus: bus,
+      soul: mockSoul,
+      llm: { complete: async () => { llmCalls++; return '{"action":"pass"}'; } },
+      sessionContext: ctx,
+      getNoteData: () => reel,
+      getRemainingBudget: () => ({ likes: 0, collects: 0 }),
+      isInteractionHandledExternally: () => true,
+    });
+    role.subscribe();
+    let captured: InteractionCompletedPayload | null = null;
+    bus.on('interaction.completed', (p) => { captured = p; });
+
+    bus.emit('reading.done', {
+      noteId: reel.noteId, sourcePageType: 'feed', imagesBrowsed: 0, commentsRead: 0,
+      keyPoints: [], readDurationMs: 100,
+      mandatoryInteraction: { ruleId: 'must-like-reel', actions: ['like'] }, ts: Date.now(),
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const finalCaptured = captured as InteractionCompletedPayload | null;
+    assert.equal(llmCalls, 0);
+    assert.deepEqual(finalCaptured?.actions, ['like']);
+    assert.equal(finalCaptured?.mandatoryInteraction?.ruleId, 'must-like-reel');
+    role.unsubscribe();
+  });
+
   it('unsubscribe 后不再响应事件', async () => {
     const bus = new EventBus();
     const ctx = new SessionContext();

@@ -12,7 +12,7 @@
  */
 
 import { EventBus } from '../event-bus/index.js';
-import type { CommentApprovalTrace, CommentAppraisingPayload, MandatoryInteractionContext, NoteDetailData } from '../event-bus/types.js';
+import type { CommentApprovalTrace, CommentAppraisingPayload, MandatoryInteractionContext, NoteDetailData, PageCardsData } from '../event-bus/types.js';
 import {
   isNoteActionSupported,
   noteActionRefusalReason,
@@ -115,6 +115,8 @@ const VIEW_QUOTA_WAKE_GRACE_MS = 250;
 export const DEFAULT_COMMENT_LLM_TIMEOUT_MS = 30_000;
 /** 整条评论子链的安全兜底；局部 LLM / 人审超时应更早结束。 */
 export const DEFAULT_COMMENT_SUBLINE_TIMEOUT_MS = 5 * 60_000;
+/** 普通 Facebook Reel 每次唯一呈现的点赞意图选择概率；实际成功仍受既有安全闸和 Edge 后验确认约束。 */
+export const FACEBOOK_REELS_LIKE_PROBABILITY = 0.25;
 
 function positiveTimeoutMs(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
@@ -140,6 +142,23 @@ export function facebookPostKey(noteId: string | undefined | null): string {
     return noteId;
   } catch {
     return noteId;
+  }
+}
+
+/** 只接受 Edge Reels reader 产出的规范身份，避免把普通链接或伪造 URL 当成 Reel 决策目标。 */
+export function isCanonicalFacebookReelNoteId(noteId: string | undefined | null): noteId is string {
+  if (!noteId) return false;
+  try {
+    const url = new URL(noteId);
+    return (
+      url.protocol === 'https:' &&
+      url.hostname.toLowerCase() === 'www.facebook.com' &&
+      /^\/reel\/[^/?#]+\/?$/i.test(url.pathname) &&
+      !url.search &&
+      !url.hash
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -570,6 +589,8 @@ export class RoleDispatcher {
   /** Facebook 自然互动证据：必须先由 content_evaluator 选中，再由 content_curator 放行，interaction_appraiser 才能发 like。 */
   private readonly facebookContentSelectedNoteIds = new Set<string>();
   private readonly facebookQualityPassedNoteIds = new Set<string>();
+  /** Reels 普通点赞的会话级一次性决策集合；命中/未命中/被安全闸挡住都不得因重报重抽。 */
+  private readonly facebookReelLikeDecisionNoteIds = new Set<string>();
   /** 当前会话剩余互动预算（从全局单场上限提供者派生，会话开始/重置时刷新）。 */
   private budget!: SessionInteractionBudget;
   /** 会话开始/重置时的预算快照（供比率闸：init−剩余；会话中途改预算不漂移）。 */
@@ -1299,6 +1320,7 @@ export class RoleDispatcher {
         getRemainingBudget,
         getMinSaveLikeRatio: () => this.collectMinSaveLikeRatio(),
         isInteractionEligible: (noteId) => this.facebookNaturalInteractionEligibility(noteId),
+        isInteractionHandledExternally: (noteId) => this.facebookReelLikeDecisionNoteIds.has(facebookPostKey(noteId)),
       }),
       // AuthorEvaluator 恒注册（它是「评论结算 → 返回 feed」的桥，emit profile.skipped 触发 BackToFeed，非纯主页角色）。
       // 注入 canVisitProfile：平台不访主页时它只产 profile.skipped、绝不产 profile.worth_visiting ⇒ 主页子链结构不触发，
@@ -2059,6 +2081,66 @@ export class RoleDispatcher {
   private clearFacebookNaturalInteractionEvidence(): void {
     this.facebookContentSelectedNoteIds.clear();
     this.facebookQualityPassedNoteIds.clear();
+    this.facebookReelLikeDecisionNoteIds.clear();
+  }
+
+  /**
+   * 活动 Reel 呈现即做一次普通点赞决策；放在异步内容评估之前，保证分母是实际浏览的 Reel，且目标尚未滚走。
+   * 25% 只选择意图：所有既有预算/风控/冷却/去重/回执闸保持原样，绝不把命中写成成功。
+   */
+  private maybeDispatchFacebookReelLike(
+    cards: PageCardsData[],
+    listKind: 'feed' | 'reels' | undefined,
+  ): void {
+    if (this.accountPlatform !== 'facebook' || listKind !== 'reels' || cards.length !== 1) return;
+    const noteId = cards[0]?.noteId;
+    if (!isCanonicalFacebookReelNoteId(noteId)) {
+      console.log(`[interaction_appraiser] skip reason=facebook_reel_invalid_target action=like note=${noteId ?? ''}`);
+      return;
+    }
+    const key = facebookPostKey(noteId);
+    if (this.facebookReelLikeDecisionNoteIds.has(key)) {
+      console.log(`[interaction_appraiser] skip reason=facebook_reel_duplicate_decision action=like note=${noteId}`);
+      return;
+    }
+    // 必须先占决策坑：任何后续预算/风控/冷却/下发失败都不能靠重报重新掷骰。
+    this.facebookReelLikeDecisionNoteIds.add(key);
+    if (this.remainingBudget('like') <= 0) {
+      console.log(`[interaction_appraiser] skip reason=no_budget action=like source=reels note=${noteId}`);
+      return;
+    }
+    const roll = this.randomFn();
+    if (!Number.isFinite(roll) || roll < 0 || roll >= 1) {
+      console.log(`[interaction_appraiser] skip reason=facebook_reel_invalid_random action=like note=${noteId}`);
+      return;
+    }
+    if (roll >= FACEBOOK_REELS_LIKE_PROBABILITY) {
+      console.log(
+        `[interaction_appraiser] skip reason=facebook_reel_probability_abstain action=like probability=${FACEBOOK_REELS_LIKE_PROBABILITY} roll=${roll} note=${noteId}`,
+      );
+      return;
+    }
+    if (!this.canInteract('like')) {
+      console.log(`[interaction_appraiser] skip reason=risk_blocked action=like source=reels note=${noteId}`);
+      return;
+    }
+    if (!this.cooldownPasses('like')) {
+      console.log(`[interaction_appraiser] skip reason=cooldown action=like source=reels note=${noteId}`);
+      return;
+    }
+    const sent = this.sendNoteScopedCommand('like', {
+      action: 'like',
+      reason: 'facebook_reel_probability_hit',
+      params: { noteId, thinkMs: this.thinkNow() },
+    });
+    if (sent) {
+      this.interactionRetry.set('like', { noteId, attempts: 0 });
+      console.log(
+        `[interaction_appraiser] facebook_reel_probability_hit action=like probability=${FACEBOOK_REELS_LIKE_PROBABILITY} roll=${roll} note=${noteId}`,
+      );
+    } else {
+      console.log(`[interaction_appraiser] skip reason=facebook_reel_dispatch_suppressed action=like note=${noteId}`);
+    }
   }
 
   private facebookNaturalInteractionEligibility(noteId: string): { ok: true } | { ok: false; reason: string } {
@@ -2527,6 +2609,7 @@ export class RoleDispatcher {
       // Edge 上报可见卡片 → 更新数据并触发评估
       this.eventBus.on('page.cards.arrived', (payload) => {
         this.updateVisibleCards(payload.cards);
+        this.maybeDispatchFacebookReelLike(payload.cards, payload.listKind);
         // feed-scroll-card-floor：仅 feed 来源——按本批 noteId 差分"上一批"算新卡数（缺 noteId 计为非新卡），
         // 覆盖写 pendingFeedFloorMs（含写 0），避免 open→return 残留旧值；search 上报不写不消费 feed 集合。
         if (this.sessionContext.sourcePageType === 'feed') {

@@ -148,7 +148,7 @@ export interface EventMap {
   // Edge 上报事件（handler → RoleDispatcher）
   // accountId 穿透握手事件（multi-account-node-support D4）：决策层据此设该连接当前账号，不再钉死 default。
   'edge.hello': { edgeId: string; accountId?: string; ts: number };
-  'page.cards.arrived': { cards: PageCardsData[]; startupId?: string; ts: number };
+  'page.cards.arrived': { cards: PageCardsData[]; startupId?: string; listKind?: 'feed' | 'reels'; ts: number };
   /** Edge 对 Facebook 首页显式空态完成加载感知确认；Cloud 才能据此授权切 Reels。 */
   'feed.empty.confirmed': { startupId?: string; ts: number };
   // accountId（change interaction-feed-enrichment）：tee 到全局观测总线后，元数据 upsert 需按真实账号归属（缺则保留键）。

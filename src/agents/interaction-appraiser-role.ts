@@ -39,6 +39,8 @@ export interface InteractionAppraiserRoleOptions extends RoleOptions {
    * 用于 Facebook 这类 shadow-first 平台，确保自然点赞只来自内容评估后的深读链。
    */
   isInteractionEligible?: (noteId: string, sourcePageType: 'feed' | 'search') => { ok: true } | { ok: false; reason: string };
+  /** 上游已对该笔记完成独立互动决策时，普通 LLM 不得再做第二次决定；mandatory 分支仍优先。 */
+  isInteractionHandledExternally?: (noteId: string, sourcePageType: 'feed' | 'search') => boolean;
 }
 
 export class InteractionAppraiserRole extends BaseRole {
@@ -48,6 +50,7 @@ export class InteractionAppraiserRole extends BaseRole {
   private readonly getRemainingBudget: () => { likes: number; collects: number };
   private readonly getMinSaveLikeRatio?: () => number;
   private readonly isInteractionEligible?: (noteId: string, sourcePageType: 'feed' | 'search') => { ok: true } | { ok: false; reason: string };
+  private readonly isInteractionHandledExternally?: (noteId: string, sourcePageType: 'feed' | 'search') => boolean;
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: InteractionAppraiserRoleOptions) {
@@ -58,6 +61,7 @@ export class InteractionAppraiserRole extends BaseRole {
     this.getRemainingBudget = options.getRemainingBudget;
     this.getMinSaveLikeRatio = options.getMinSaveLikeRatio;
     this.isInteractionEligible = options.isInteractionEligible;
+    this.isInteractionHandledExternally = options.isInteractionHandledExternally;
   }
 
   subscribe(): void {
@@ -107,6 +111,10 @@ export class InteractionAppraiserRole extends BaseRole {
         ts: Date.now(),
       });
       this.sessionContext.recordInteraction('mandatory:like');
+      return;
+    }
+    if (this.isInteractionHandledExternally?.(payload.noteId, payload.sourcePageType)) {
+      this.emitSkip(payload.noteId, payload.sourcePageType, 'facebook_reel_probability_handled');
       return;
     }
     const budget = this.getRemainingBudget();
