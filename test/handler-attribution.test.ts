@@ -120,6 +120,74 @@ test('refreshOnly note.detail 只刷新图片快照，不计 view', async () => 
   assert.equal(snapshots.length, 1);
 });
 
+test('Reels 单卡一经呈现即记一次 view；匹配 note.detail 仍驱动详情链但不重复计数', async () => {
+  const eventBus = new EventBus();
+  const got = capture(eventBus);
+  const details: unknown[] = [];
+  eventBus.on('note.detail.arrived', (e) => { details.push(e); });
+  const handler = makeHandler(eventBus);
+  const session: EdgeSession = { sessionId: 's-reel-view', accountId: 'acc-fb', platform: 'facebook' };
+
+  await handler.handle(
+    makeEnvelope('page.cards', 'reel-card', 1, {
+      cards: [{ index: 0, noteId: 'https://www.facebook.com/reel/42', title: 'visible reel', likeCount: 0, collectCount: 0, isVideo: true }],
+      listKind: 'reels',
+      listState: 'ready',
+    }),
+    session,
+  );
+  assert.deepEqual(got.filter((e) => e.action === 'view'), [{
+    action: 'view', accountId: 'acc-fb', noteId: 'https://www.facebook.com/reel/42',
+  }]);
+
+  await handler.handle(
+    makeEnvelope('note.detail', 'reel-detail', 2, {
+      noteId: 'https://www.facebook.com/reel/42', title: 'visible reel', content: 'full summary', mediaType: 'video', likeCount: 0, collectCount: 0,
+    }),
+    session,
+  );
+  assert.equal(details.length, 1, '详情仍须进入质量/互动链，不能为去重而吞事件');
+  assert.equal(got.filter((e) => e.action === 'view').length, 1, '同一 Reel 的 detail 不得重复记 view');
+});
+
+test('Reels 空/畸形多卡不记 view；后续普通 feed detail 保持既有一次 view', async () => {
+  const eventBus = new EventBus();
+  const got = capture(eventBus);
+  const handler = makeHandler(eventBus);
+  const session: EdgeSession = { sessionId: 's-reel-boundary', accountId: 'acc-fb', platform: 'facebook' };
+
+  await handler.handle(
+    makeEnvelope('page.cards', 'reel-empty', 1, { cards: [], listKind: 'reels', listState: 'empty' }),
+    session,
+  );
+  await handler.handle(
+    makeEnvelope('page.cards', 'reel-ambiguous', 2, {
+      cards: [
+        { index: 0, noteId: 'reel-a', title: 'a', likeCount: 0, collectCount: 0 },
+        { index: 1, noteId: 'reel-b', title: 'b', likeCount: 0, collectCount: 0 },
+      ],
+      listKind: 'reels', listState: 'ready',
+    }),
+    session,
+  );
+  assert.equal(got.filter((e) => e.action === 'view').length, 0);
+
+  await handler.handle(
+    makeEnvelope('page.cards', 'feed-card', 3, {
+      cards: [{ index: 0, noteId: 'feed-1', title: 'feed', likeCount: 0, collectCount: 0 }],
+      listKind: 'feed', listState: 'ready',
+    }),
+    session,
+  );
+  await handler.handle(
+    makeEnvelope('note.detail', 'feed-detail', 4, {
+      noteId: 'feed-1', title: 'feed', content: 'content', likeCount: 0, collectCount: 0,
+    }),
+    session,
+  );
+  assert.deepEqual(got.filter((e) => e.action === 'view'), [{ action: 'view', accountId: 'acc-fb', noteId: 'feed-1' }]);
+});
+
 test('未见 note.detail 时 noteId 不带（不编造）（V1 9.2）', async () => {
   const eventBus = new EventBus();
   const got = capture(eventBus);
