@@ -47,9 +47,12 @@ interface GateResult {
   action: 'comment' | 'dm_reply';
 }
 
+function interactionRiskBlocked(result: { allowed: boolean; reason?: string }): boolean {
+  return !result.allowed && !result.reason?.startsWith('quota:');
+}
+
 export class InteractionSendOrchestrator {
   private readonly globalWriteEnabled: boolean;
-  private readonly devQuotaBypassEnabled: boolean;
   private readonly autoAllowlist: Set<string>;
   private readonly clock: () => number;
 
@@ -66,7 +69,6 @@ export class InteractionSendOrchestrator {
   }) {
     const env = deps.env ?? process.env;
     this.globalWriteEnabled = deps.globalWriteEnabled ?? enabled(env.AIDCP_INTERACTION_WRITE_ENABLED);
-    this.devQuotaBypassEnabled = this.globalWriteEnabled && env.AIDCP_DEPLOY_ENV?.trim() === 'dev';
     this.autoAllowlist = new Set((env.AIDCP_INTERACTION_AUTO_ACCOUNT_ALLOWLIST ?? '')
       .split(',').map((item) => item.trim()).filter(Boolean));
     this.clock = deps.clock ?? Date.now;
@@ -116,7 +118,7 @@ export class InteractionSendOrchestrator {
       }
       const action = context.thread.channel === 'comment' ? 'comment' : 'dm_reply';
       const controller = await this.deps.controllerFor(context.thread.accountId);
-      if (!controller?.explain(action).allowed) return downgrade('risk_controller');
+      if (!controller || interactionRiskBlocked(controller.explain(action))) return downgrade('risk_controller');
       const limits = snapshot.policy.rateLimits;
       const counts = await this.deps.store.sendWindowCounts(context.thread.accountId, context.thread.id, this.clock());
       if (limits.accountPerMinute <= 0 || counts.minute >= limits.accountPerMinute ||
@@ -164,13 +166,13 @@ export class InteractionSendOrchestrator {
       ? authGate.auth.capabilities.commentsReply
       : authGate.auth.capabilities.dmSendText;
     if (!capability) this.blocked('INTERACTION_PERMISSION_DENIED', '平台当前未确认回复能力。', 403);
+    const auto = context.job.approvalActor === null;
     const cooldownMs = snapshot.policy.rateLimits.newLoginCooldownSeconds * 1_000;
-    if (!this.devQuotaBypassEnabled && (
+    if (auto && (
       authGate.activeSince === null || this.clock() - authGate.activeSince < cooldownMs
     )) {
       this.blocked('INTERACTION_RATE_LIMITED', '登录冷却尚未结束。', 429);
     }
-    const auto = context.job.approvalActor === null;
     if (auto && (!this.autoAllowlist.has(accountId) || snapshot.policy.mode !== 'auto_safe' ||
         !snapshot.policy.channels[context.thread.channel].allowAutoSend || context.job.riskLevel !== 'low' ||
         context.job.meaningChanged || context.job.introducedClaims.length || context.job.riskReasons.length ||
@@ -181,9 +183,8 @@ export class InteractionSendOrchestrator {
     const controller = await this.deps.controllerFor(accountId);
     if (!controller) this.blocked('INTERACTION_UPSTREAM_UNAVAILABLE', '风险控制器不可用。', 503);
     const risk = controller.explain(action);
-    const devQuotaBypass = this.devQuotaBypassEnabled && risk.reason?.startsWith('quota:');
-    if (!risk.allowed && !devQuotaBypass) {
-      this.blocked('INTERACTION_RATE_LIMITED', '风险配额不允许本次回复。', 429);
+    if (interactionRiskBlocked(risk)) {
+      this.blocked('INTERACTION_RATE_LIMITED', '风险状态不允许本次回复。', 429);
     }
     const limits = snapshot.policy.rateLimits;
     const counts = await this.deps.store.sendWindowCounts(accountId, context.thread.id, this.clock());

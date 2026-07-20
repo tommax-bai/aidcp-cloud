@@ -693,9 +693,9 @@ export const DEFAULT_REPLY_POLICY: ReplyPolicy = {
     dm: { enabled: false, aiPolishEnabled: false, allowAutoSend: false },
   },
   rateLimits: {
-    accountPerMinute: 0,
-    accountPerHour: 0,
-    accountPerDay: 0,
+    accountPerMinute: 2,
+    accountPerHour: 20,
+    accountPerDay: 100,
     threadCooldownSeconds: 60,
     newLoginCooldownSeconds: 600,
     consecutiveFailureLimit: 3,

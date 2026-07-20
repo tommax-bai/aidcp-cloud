@@ -105,19 +105,11 @@ export class ReplyWorkflow {
     this.canAutoQueue = options.canAutoQueue ?? (async () => false);
   }
 
-  private async ensureDraftAuth(context: ScopedJobContext): Promise<void> {
-    const auth = await this.store.getAuth(context.thread.accountId, context.thread.envKey);
-    if (!auth || auth.status !== 'active' || !auth.identity) {
-      throw new InteractionError('INTERACTION_AUTH_REQUIRED', '平台登录态不可用于回复操作。', 409);
-    }
-  }
-
   async generate(input: {
     accountId: string; envKey: string; jobId: string; expectedVersion: number; actor: string;
   }): Promise<ScopedJobContext['job']> {
     const initial = await this.store.getJobContext(input.accountId, input.envKey, input.jobId);
     if (!initial) throw new InteractionError('INTERACTION_NOT_FOUND', '回复任务不存在。', 404);
-    await this.ensureDraftAuth(initial);
     const classifying = await this.store.transitionJob({
       ...input,
       from: ['new', 'approval_required', 'failed'],
@@ -313,7 +305,6 @@ export class ReplyWorkflow {
   }): Promise<ScopedJobContext['job']> {
     const context = await this.store.getJobContext(input.accountId, input.envKey, input.jobId);
     if (!context) throw new InteractionError('INTERACTION_NOT_FOUND', '回复任务不存在。', 404);
-    await this.ensureDraftAuth(context);
     if (!context.job.finalText?.trim() || context.message.messageType !== 'text' || context.message.lifecycle !== 'active') {
       throw new InteractionError('INTERACTION_VALIDATION_FAILED', '回复内容或原消息状态不允许审批。', 422);
     }
@@ -338,7 +329,6 @@ export class ReplyWorkflow {
     if (!text) throw new InteractionError('INTERACTION_VALIDATION_FAILED', '回复内容不能为空。', 422);
     const context = await this.store.getJobContext(input.accountId, input.envKey, input.jobId);
     if (!context) throw new InteractionError('INTERACTION_NOT_FOUND', '回复任务不存在。', 404);
-    await this.ensureDraftAuth(context);
     const snapshot = context.job.configVersion === null ? null : await readJobConfig(this.configs,
       input.accountId, context.job.configScopeId, context.job.configVersion,
     );

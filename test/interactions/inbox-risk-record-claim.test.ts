@@ -66,7 +66,7 @@ test('策略拒绝（超配额）：写已经发生 ⇒ 占位绝不释放（否
   const { svc, released, statuses } = makeService(async () => false);
   await svc.onReplyResult(payload);
   assert.deepEqual(released, [], '返 false 只表示「超策略」，不表示「没记下」——释放占位会让重放再记一次');
-  assert.deepEqual(statuses, ['recorded_over_policy'], '如实标注：记下了、但超策略');
+  assert.deepEqual(statuses, ['recorded'], '视频号专用限速已在发送前判定；通用 quota 返回值不冒充该策略');
 });
 
 test('策略允许：占位保留，记为 recorded', async () => {

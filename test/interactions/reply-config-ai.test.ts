@@ -227,7 +227,7 @@ test('auto candidate is limited to unchanged deterministic template output', asy
   assert.equal(preview.riskLevel, 'low');
 });
 
-test('explicit regenerate can recover a failed job, while inactive auth blocks before CAS mutation', async () => {
+test('explicit regenerate can recover a failed job without consulting current platform auth', async () => {
   const context: ScopedJobContext = {
     thread: { id: 'thread-a', platform: 'wechat_channels', accountId: 'acct_wc_demo', envKey: 'env-a',
       channel: 'comment', externalThreadId: 'thread-external', sourceExternalId: null, sourceTitle: null,
@@ -244,11 +244,7 @@ test('explicit regenerate can recover a failed job, while inactive auth blocks b
   const transitions: Array<{ from: string[]; to: string }> = [];
   const store = {
     getJobContext: async () => context,
-    getAuth: async () => ({ envKey: 'env-a', accountId: 'acct_wc_demo', platform: 'wechat_channels' as const,
-      status: 'active' as const, browserState: 'closed' as const,
-      capabilities: { commentsRead: true, commentsReply: false, dmRead: true, dmSendText: false, dmSendImage: false as const },
-      identity: { externalId: 'finder', displayName: '账号', identityHash: `sha256:${'1'.repeat(64)}` },
-      runtimeControlsVersion: 0, checkedAt: now, reasonCode: null }),
+    getAuth: async () => { throw new Error('draft workflow must not read platform auth'); },
     transitionJob: async (input: { from: string[]; to: string }) => {
       transitions.push({ from: input.from, to: input.to });
       return { ...context.job, state: input.to, version: input.to === 'classifying' ? 5 : 6 };
@@ -267,20 +263,9 @@ test('explicit regenerate can recover a failed job, while inactive auth blocks b
   assert.equal(regenerated.state, 'approval_required');
   assert.ok(transitions[0].from.includes('failed'));
 
-  let mutated = false;
-  const blocked = new ReplyWorkflow({ ...store,
-    getAuth: async () => ({ ...(await (store as unknown as { getAuth(): Promise<Record<string, unknown>> }).getAuth()),
-      status: 'reauth_required' }),
-    transitionJob: async () => { mutated = true; throw new Error('must_not_mutate'); },
-  } as unknown as InteractionStore, {} as ReplyConfigStore,
-  new ReplyAiService({ complete: async () => '{}' }, 100));
-  await assert.rejects(blocked.generate({ accountId: 'acct_wc_demo', envKey: 'env-a', jobId: 'job-a',
-    expectedVersion: 4, actor: 'client:user-a' }),
-  (error: unknown) => (error as { code?: string }).code === 'INTERACTION_AUTH_REQUIRED');
-  assert.equal(mutated, false);
 });
 
-test('active identified auth permits edit and approve while platform send capability remains false', async () => {
+test('edit and approve remain available while platform auth is offline', async () => {
   const base: ScopedJobContext = {
     thread: { id: 'thread-a', platform: 'wechat_channels', accountId: 'acct_wc_demo', envKey: 'env-a',
       channel: 'comment', externalThreadId: 'thread-external', sourceExternalId: null, sourceTitle: null,
@@ -299,11 +284,7 @@ test('active identified auth permits edit and approve while platform send capabi
   const transitions: string[] = [];
   const store = {
     getJobContext: async () => current,
-    getAuth: async () => ({ envKey: 'env-a', accountId: 'acct_wc_demo', platform: 'wechat_channels' as const,
-      status: 'active' as const, browserState: 'closed' as const,
-      capabilities: { commentsRead: true, commentsReply: false, dmRead: true, dmSendText: false, dmSendImage: false as const },
-      identity: { externalId: 'finder', displayName: '账号', identityHash: `sha256:${'1'.repeat(64)}` },
-      runtimeControlsVersion: 0, checkedAt: now, reasonCode: null }),
+    getAuth: async () => { throw new Error('draft workflow must not read platform auth'); },
     transitionJob: async (input: { to: ScopedJobContext['job']['state']; patch?: Partial<ScopedJobContext['job']> }) => {
       transitions.push(input.to);
       current = { ...current, job: { ...current.job, ...input.patch, state: input.to, version: current.job.version + 1 } };

@@ -106,12 +106,11 @@ export class InteractionInboxService {
             await this.deps.store.releaseRiskRecordClaim(payload.attemptId);
             this.deps.metrics.increment('interaction_risk_record_total', { status: 'failed', channel: payload.channel });
           } else {
-            const withinPolicy = await controller.record(riskActionForChannel(payload.channel));
-            // 写已经发生 ⇒ 占位保留（绝不释放）。返回值只用来分辨这条回复是否超了策略——
-            // 那是**观测**，不是「没记下」。注：`dm_reply` 三档配额默认 0（占位而非真上限，
-            // quota_config 覆盖是其唯一启用路径）⇒ 该标签今天预期恒为 over_policy。
+            await controller.record(riskActionForChannel(payload.channel));
+            // 写已经发生 ⇒ 占位保留（绝不释放）。视频号数量策略由 interaction attempt
+            // 窗口单独负责；RiskController 的通用 quota 返回值不再被标成视频号策略结论。
             this.deps.metrics.increment('interaction_risk_record_total', {
-              status: withinPolicy ? 'recorded' : 'recorded_over_policy',
+              status: 'recorded',
               channel: payload.channel,
             });
           }

@@ -7,7 +7,7 @@ import type { InteractionStore } from '../../src/interactions/interaction-store.
 import { InteractionMetrics } from '../../src/interactions/metrics.js';
 import { InteractionSendOrchestrator, replyIdempotencyKey } from '../../src/interactions/send-orchestrator.js';
 import { interactionWritesAllowed } from '../../src/interactions/schema-capability.js';
-import type { ReplyConfigSnapshot, RuntimeControls, ScopedJobContext } from '../../src/interactions/types.js';
+import { DEFAULT_REPLY_POLICY, type ReplyConfigSnapshot, type RuntimeControls, type ScopedJobContext } from '../../src/interactions/types.js';
 
 const now = 1784044810000;
 
@@ -88,6 +88,20 @@ test('reply idempotency key exactly matches the frozen UTF-8 formula fixture', (
   assert.equal(replyIdempotencyKey(context()), 'e0e055e5abfced94f0e808eb5745a36b5f9f7aecc75c2d0377f5b2f692ae2ae9');
 });
 
+test('new reply configs keep writes off but start with a usable conservative interaction limit', () => {
+  assert.equal(DEFAULT_REPLY_POLICY.sendReplies, false);
+  assert.equal(DEFAULT_REPLY_POLICY.channels.comment.enabled, false);
+  assert.equal(DEFAULT_REPLY_POLICY.channels.dm.enabled, false);
+  assert.deepEqual(DEFAULT_REPLY_POLICY.rateLimits, {
+    accountPerMinute: 2,
+    accountPerHour: 20,
+    accountPerDay: 100,
+    threadCooldownSeconds: 60,
+    newLoginCooldownSeconds: 600,
+    consecutiveFailureLimit: 3,
+  });
+});
+
 test('legacy schema mode blocks outbound work before any job data is touched', async () => {
   let read = false;
   const sender = new InteractionSendOrchestrator({
@@ -104,7 +118,7 @@ test('legacy schema mode blocks outbound work before any job data is touched', a
   assert.equal(read, false);
 });
 
-test('dev reviewed sends bypass login cooldown and quota-only denial but retain risk-state blocks', async () => {
+test('reviewed sends bypass login cooldown and generic quota-only denial but retain risk-state blocks', async () => {
   const approved = context('approved');
   let transitions = 0;
   const store = sendableStore({
@@ -125,15 +139,15 @@ test('dev reviewed sends bypass login cooldown and quota-only denial but retain 
     },
     recordAudit: async () => undefined,
   });
-  const devSender = new InteractionSendOrchestrator({
+  const reviewedSender = new InteractionSendOrchestrator({
     store,
     configs: { getSnapshot: async () => config() } as unknown as ReplyConfigStore,
     pusher: {} as EdgePusher,
     controllerFor: () => ({ explain: () => ({ allowed: false, reason: 'quota:minute' }), record: async () => true }),
     metrics: new InteractionMetrics(), globalWriteEnabled: true,
-    env: { AIDCP_DEPLOY_ENV: 'dev', AIDCP_INTERACTION_WRITE_ENABLED: 'true' }, clock: () => now,
+    env: { AIDCP_DEPLOY_ENV: 'ol', AIDCP_INTERACTION_WRITE_ENABLED: 'true' }, clock: () => now,
   });
-  const queued = await devSender.queueApproved({
+  const queued = await reviewedSender.queueApproved({
     accountId: 'acct_wc_demo', envKey: 'env_wc_demo', jobId: approved.job.id,
     expectedVersion: approved.job.version, actor: 'client:test',
   });
@@ -146,13 +160,53 @@ test('dev reviewed sends bypass login cooldown and quota-only denial but retain 
     pusher: {} as EdgePusher,
     controllerFor: () => ({ explain: () => ({ allowed: false, reason: 'state:restricted' }), record: async () => true }),
     metrics: new InteractionMetrics(), globalWriteEnabled: true,
-    env: { AIDCP_DEPLOY_ENV: 'dev', AIDCP_INTERACTION_WRITE_ENABLED: 'true' }, clock: () => now,
+    env: { AIDCP_DEPLOY_ENV: 'ol', AIDCP_INTERACTION_WRITE_ENABLED: 'true' }, clock: () => now,
   });
   await assert.rejects(
     restricted.queueApproved({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo', jobId: approved.job.id,
       expectedVersion: approved.job.version, actor: 'client:test' }),
     (error: unknown) => (error as { code?: string }).code === 'INTERACTION_RATE_LIMITED',
   );
+});
+
+test('auto admission ignores generic quota but still requires the configured login cooldown', async () => {
+  const automatic = context('approval_required');
+  automatic.job.approvalActor = null;
+  const autoConfig = config();
+  autoConfig.policy.mode = 'auto_safe';
+  autoConfig.policy.channels.comment.allowAutoSend = true;
+  const preview = {
+    matchedRuleId: 'rule_thanks', templateId: 'tpl_thanks', templateVersion: 1,
+    renderedText: automatic.job.renderedText, polishedText: automatic.job.renderedText,
+    finalText: automatic.job.renderedText, riskLevel: 'low' as const, riskReasons: [], requiresApproval: false,
+    meaningChanged: false, introducedClaims: [], reviewReasons: [],
+    fallbacks: { classifier: 'none' as const, polisher: 'none' as const, reviewer: 'none' as const },
+  };
+  let activeSince = now - 1_000;
+  const store = sendableStore({
+    getJobContext: async () => automatic,
+    getSendAuthGate: async () => ({
+      activeSince,
+      auth: {
+        envKey: 'env_wc_demo', accountId: 'acct_wc_demo', platform: 'wechat_channels', status: 'active',
+        browserState: 'closed', capabilities: { commentsRead: true, commentsReply: true, dmRead: true,
+          dmSendText: true, dmSendImage: false },
+        identity: { externalId: 'finder', displayName: 'auto', identityHash: `sha256:${'1'.repeat(64)}` },
+        runtimeControlsVersion: 1, checkedAt: now, reasonCode: null,
+      },
+    }),
+  });
+  const sender = new InteractionSendOrchestrator({
+    store,
+    configs: { getSnapshot: async () => autoConfig } as unknown as ReplyConfigStore,
+    pusher: {} as EdgePusher,
+    controllerFor: () => ({ explain: () => ({ allowed: false, reason: 'quota:day' }), record: async () => true }),
+    metrics: new InteractionMetrics(), globalWriteEnabled: true,
+    env: { AIDCP_INTERACTION_AUTO_ACCOUNT_ALLOWLIST: 'acct_wc_demo' }, clock: () => now,
+  });
+  assert.equal(await sender.canAutoQueueDraft(automatic, autoConfig, preview), false);
+  activeSince = now - 700_000;
+  assert.equal(await sender.canAutoQueueDraft(automatic, autoConfig, preview), true);
 });
 
 test('approved command is persisted as one attempt and dispatched to one account Edge without claiming sent', async () => {
