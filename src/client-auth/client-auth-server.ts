@@ -13,6 +13,7 @@
 
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { isIP } from 'node:net';
 import { signJwt, verifyJwt } from '../panel/jwt.js';
 import { parseBearer } from '../panel/auth.js';
 import type { TokenRevocationStore } from '../panel/revocation.js';
@@ -112,9 +113,14 @@ export interface ClientAuthHandle {
   close(): Promise<void>;
 }
 
-function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
+function sendJson(
+  res: http.ServerResponse,
+  status: number,
+  body: unknown,
+  headers: http.OutgoingHttpHeaders = {},
+): void {
   const payload = JSON.stringify(body);
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...headers });
   res.end(payload);
 }
 
@@ -164,12 +170,37 @@ async function readJsonBody(req: http.IncomingMessage, maxBytes = MAX_BODY_BYTES
   });
 }
 
-/** 取客户端源 IP（Nginx 注入 x-forwarded-for 首段；回落 socket 地址）。 */
+/** 规范化单个 IP；拒绝把任意转发头文本反射进响应头。 */
+function normalizeIp(value: string | undefined): string | null {
+  let candidate = String(value ?? '').trim();
+  if (!candidate) return null;
+  if (candidate.startsWith('[')) {
+    const closing = candidate.indexOf(']');
+    if (closing > 0) candidate = candidate.slice(1, closing);
+  } else if (/^\d{1,3}(?:\.\d{1,3}){3}:\d+$/.test(candidate)) {
+    candidate = candidate.slice(0, candidate.lastIndexOf(':'));
+  }
+  if (candidate.toLowerCase().startsWith('::ffff:')) {
+    const mapped = candidate.slice(7);
+    if (isIP(mapped) === 4) candidate = mapped;
+  }
+  return isIP(candidate) ? candidate.toLowerCase() : null;
+}
+
+/** 取客户端源 IP（受控 Nginx 注入 x-forwarded-for 首段；非法时回落 socket 地址）。 */
 function clientIp(req: http.IncomingMessage): string {
   const xff = req.headers['x-forwarded-for'];
-  if (typeof xff === 'string' && xff.length > 0) return xff.split(',')[0].trim();
-  return req.socket.remoteAddress ?? 'unknown';
+  const forwarded = typeof xff === 'string' ? normalizeIp(xff.split(',')[0]) : null;
+  return forwarded ?? normalizeIp(req.socket.remoteAddress) ?? 'unknown';
 }
+
+const EGRESS_CORS_HEADERS: http.OutgoingHttpHeaders = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-methods': 'GET, OPTIONS',
+  'access-control-allow-headers': 'cache-control',
+  'access-control-expose-headers': 'x-aidcp-egress-ip, x-aidcp-egress-checked-at, x-aidcp-request-id',
+  'cache-control': 'no-store',
+};
 
 function parseIntegerQuery(value: string | null, fallback: number, min: number, max: number): number | null {
   if (value === null || value === '') return fallback;
@@ -348,6 +379,23 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
     // ── 公开端点 ──────────────────────────────────────────────
     if (method === 'GET' && url === '/health') {
       sendJson(res, 200, { ok: true });
+      return;
+    }
+    if (method === 'OPTIONS' && url === '/egress') {
+      res.writeHead(204, EGRESS_CORS_HEADERS);
+      res.end();
+      return;
+    }
+    if (method === 'GET' && url === '/egress') {
+      const ip = clientIp(req);
+      const checkedAt = new Date().toISOString();
+      const requestId = randomUUID();
+      sendJson(res, 200, { ip, checkedAt, requestId }, {
+        ...EGRESS_CORS_HEADERS,
+        'x-aidcp-egress-ip': ip,
+        'x-aidcp-egress-checked-at': checkedAt,
+        'x-aidcp-request-id': requestId,
+      });
       return;
     }
     if (method === 'POST' && url === '/login') {

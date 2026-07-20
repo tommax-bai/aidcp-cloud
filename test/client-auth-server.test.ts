@@ -201,6 +201,47 @@ test('N1: 客户密钥与面板相同则拒启(secret_collision)', async () => {
   assert.equal(h.reason, 'secret_collision');
 });
 
+test('egress: 无令牌返回首个可信转发 IP、证据响应头、CORS 与 no-store', async () => {
+  const fx = makeFakeStore();
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter() },
+    baseConfig(0),
+    async (base) => {
+      const r = await fetch(`${base}/egress`, {
+        headers: { 'x-forwarded-for': '198.51.100.23, 10.0.0.4' },
+      });
+      assert.equal(r.status, 200);
+      assert.equal(r.headers.get('cache-control'), 'no-store');
+      assert.equal(r.headers.get('access-control-allow-origin'), '*');
+      assert.match(r.headers.get('access-control-expose-headers') ?? '', /x-aidcp-egress-ip/);
+      assert.equal(r.headers.get('x-aidcp-egress-ip'), '198.51.100.23');
+      assert.ok(r.headers.get('x-aidcp-request-id'));
+      const body = (await r.json()) as { ip: string; checkedAt: string; requestId: string };
+      assert.equal(body.ip, '198.51.100.23');
+      assert.equal(body.requestId, r.headers.get('x-aidcp-request-id'));
+      assert.ok(Number.isFinite(Date.parse(body.checkedAt)));
+    },
+  );
+});
+
+test('egress: 非法转发头回退 socket 地址且 OPTIONS 可无凭据预检', async () => {
+  const fx = makeFakeStore();
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter() },
+    baseConfig(0),
+    async (base) => {
+      const r = await fetch(`${base}/egress`, { headers: { 'x-forwarded-for': 'not-an-ip' } });
+      assert.equal(r.status, 200);
+      assert.equal(((await r.json()) as { ip: string }).ip, '127.0.0.1');
+
+      const preflight = await fetch(`${base}/egress`, { method: 'OPTIONS' });
+      assert.equal(preflight.status, 204);
+      assert.equal(preflight.headers.get('access-control-allow-origin'), '*');
+      assert.equal(preflight.headers.get('cache-control'), 'no-store');
+    },
+  );
+});
+
 test('登录成功签发客户令牌;该令牌无法用面板密钥验签(N1 隔离)', async () => {
   const fx = makeFakeStore();
   fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
