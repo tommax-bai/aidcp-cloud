@@ -4,7 +4,10 @@ import {
   BULLET_MAX_COUNT,
   CONTENT_WIDTH,
   TAG_MAX_COUNT,
+  ARTICLE_PAGE_MIN_OCCUPANCY,
+  ARTICLE_PAGE_MAX_OCCUPANCY,
   createTextMetrics,
+  layoutArticleTextCard,
   layoutTextCard,
 } from '../../src/render/index.js';
 import type { TextCardLayoutModel } from '../../src/render/index.js';
@@ -272,4 +275,69 @@ test('字体覆盖抽查：ASCII/全角标点/CJK 标点/破折省略号/〇 全
     assert.ok(metrics.isCovered(ch.codePointAt(0)!, 'bold'), `expected covered (bold): ${ch}`);
   }
   assert.ok(!metrics.isCovered('🔥'.codePointAt(0)!, 'regular'));
+});
+
+// —— 连续文章卡：固定字号、短句分段与密度门禁 ——
+
+const ARTICLE_PARAGRAPHS = Array.from(
+  { length: 12 },
+  (_, index) => `这是重新理解自己的第${index + 1}个完整句子。`,
+);
+
+test('文章内页使用固定正文参数且占用率落在 0.80~0.96', () => {
+  const res = layoutArticleTextCard({
+    layoutKind: 'article_page',
+    title: '外界为何会替代内在',
+    paragraphs: ARTICLE_PARAGRAPHS,
+  }, metrics);
+  assert.ok(res.ok, JSON.stringify(res));
+  assert.equal(res.paragraphs.fontSize, 36);
+  assert.equal(res.paragraphs.lineHeightPx, 58);
+  assert.equal(res.paragraphs.items.length, 12);
+  assert.ok(res.occupancyRatio >= ARTICLE_PAGE_MIN_OCCUPANCY);
+  assert.ok(res.occupancyRatio <= ARTICLE_PAGE_MAX_OCCUPANCY);
+});
+
+test('文章内页内容过疏显式失败，不靠放大行高填空', () => {
+  const res = layoutArticleTextCard({
+    layoutKind: 'article_page',
+    title: '外界为何会替代内在',
+    paragraphs: ARTICLE_PARAGRAPHS.slice(0, 2),
+  }, metrics);
+  assert.ok(!res.ok);
+  assert.equal(res.reason, 'invalid_copy');
+  assert.match(res.detail ?? '', /too sparse/);
+});
+
+test('文章内页内容过多显式失败，不截断末尾段落', () => {
+  const res = layoutArticleTextCard({
+    layoutKind: 'article_page',
+    title: '外界为何会替代内在',
+    paragraphs: Array.from({ length: 20 }, (_, index) => `这是不能被删掉的第${index + 1}个完整句子。`),
+  }, metrics);
+  assert.ok(!res.ok);
+  assert.equal(res.reason, 'invalid_copy');
+  assert.match(res.detail ?? '', /too dense/);
+});
+
+test('文章卡出现未覆盖字形时显式失败，不静默删字符', () => {
+  const res = layoutArticleTextCard({
+    layoutKind: 'article_page',
+    title: '外界为何会替代内在',
+    paragraphs: [...ARTICLE_PARAGRAPHS.slice(0, 11), '这一句带有未覆盖表情🔥。'],
+  }, metrics);
+  assert.ok(!res.ok);
+  assert.equal(res.reason, 'glyph_uncovered');
+});
+
+test('文章正文换行不让中文闭合标点孤立到下一行', () => {
+  const res = layoutArticleTextCard({
+    layoutKind: 'article_page',
+    title: '稳定的自我感如何形成',
+    paragraphs: Array.from({ length: 7 }, () => '当一句很长的话接近边界的时候，标点仍然跟随前面的语义词组。'),
+  }, metrics);
+  assert.ok(res.ok, JSON.stringify(res));
+  for (const item of res.paragraphs.items) {
+    for (const line of item.lines) assert.doesNotMatch(line, /^[，。！？；：、）】》」』’”]/u);
+  }
 });

@@ -21,7 +21,12 @@ import {
   CANVAS_PADDING,
   CANVAS_WIDTH,
   CONTENT_HEIGHT,
+  ARTICLE_COVER_BAND_HEIGHT,
+  layoutArticleTextCard,
   layoutTextCard,
+  type ArticleTextCardLayoutModel,
+  type ArticleTextCardLayoutResult,
+  type ArticleTextCardLayoutKind,
   type TextCardLayoutModel,
 } from './text-card-layout.js';
 import {
@@ -52,6 +57,8 @@ export interface TextCardCopy {
   title: string;
   bullets: string[];
   tags: string[];
+  layoutKind?: ArticleTextCardLayoutKind;
+  paragraphs?: string[];
 }
 
 /** 渲染审计元数据（随 CoverFormAudit 上审计，回放「这张卡怎么排出来的」）。 */
@@ -69,6 +76,11 @@ export interface TextCardRenderMeta {
   backgroundPattern?: TextCardBackgroundPattern;
   bulletPresentation?: TextCardBulletPresentation;
   pageMarker?: string;
+  contentLayoutKind?: ArticleTextCardLayoutKind;
+  paragraphCount?: number;
+  bodyLineCount?: number;
+  contentBottom?: number;
+  occupancyRatio?: number;
 }
 
 /** 渲染显式结果：成功带 PNG 字节 + meta；失败带原因枚举（绝不静默假成功）。 */
@@ -108,6 +120,8 @@ export interface TextCardSeed {
 /** 渲染器公开契约（独立注入依赖；勿实现生图提供方接口、勿进路由表——design D11）。 */
 export interface TextCardRenderer {
   render(copy: TextCardCopy, seed: TextCardSeed): Promise<TextCardRenderResult>;
+  /** 与最终 renderer 共用的文章卡纯布局预检；旧测试替身可不实现。 */
+  preflightArticle?(copy: TextCardCopy): ArticleTextCardLayoutResult;
 }
 
 /** 中间产物（测试用：SVG 与 RGBA 像素来自同一次 resvg render()，用于越界像素断言）。 */
@@ -443,6 +457,82 @@ function buildCardTree(
   };
 }
 
+const ARTICLE_PAGE_BG = '#F3F2F0';
+const ARTICLE_TITLE = '#30302E';
+const ARTICLE_BODY = '#575755';
+const ARTICLE_DIVIDER = '#75736F';
+const ARTICLE_COVER_BG = '#171717';
+const ARTICLE_COVER_TITLE = '#F2D34B';
+
+/** 固定文章模板：只有阅读层级，不消费来源装饰令牌。 */
+function buildArticleCardTree(model: ArticleTextCardLayoutModel): SatoriNode {
+  const children: SatoriNode[] = [];
+  if (model.layoutKind === 'article_cover') {
+    children.push({
+      type: 'div',
+      props: {
+        style: {
+          position: 'absolute', left: 0, top: 0, width: CANVAS_WIDTH, height: ARTICLE_COVER_BAND_HEIGHT,
+          backgroundColor: ARTICLE_COVER_BG,
+        },
+      },
+    });
+  }
+
+  const titleColor = model.layoutKind === 'article_cover' ? ARTICLE_COVER_TITLE : ARTICLE_TITLE;
+  for (let index = 0; index < model.title.lines.length; index++) {
+    children.push(textLineNode(
+      model.title.lines[index],
+      CANVAS_PADDING,
+      model.title.offsetY + index * model.title.lineHeightPx,
+      model.title.lineHeightPx,
+      model.title.fontSize,
+      700,
+      titleColor,
+    ));
+  }
+  if (model.dividerY !== null) {
+    children.push({
+      type: 'div',
+      props: {
+        style: {
+          position: 'absolute', left: CANVAS_PADDING, top: model.dividerY,
+          width: CANVAS_WIDTH - CANVAS_PADDING * 2, height: 2,
+          backgroundColor: ARTICLE_DIVIDER,
+        },
+      },
+    });
+  }
+
+  let y = model.paragraphs.offsetY;
+  for (const item of model.paragraphs.items) {
+    for (const line of item.lines) {
+      children.push(textLineNode(
+        line,
+        CANVAS_PADDING,
+        y,
+        model.paragraphs.lineHeightPx,
+        model.paragraphs.fontSize,
+        400,
+        ARTICLE_BODY,
+      ));
+      y += model.paragraphs.lineHeightPx;
+    }
+    y += model.paragraphs.gap;
+  }
+
+  return {
+    type: 'div',
+    props: {
+      style: {
+        display: 'flex', position: 'relative', width: CANVAS_WIDTH, height: CANVAS_HEIGHT,
+        backgroundColor: ARTICLE_PAGE_BG, fontFamily: FONT_FAMILY,
+      },
+      children,
+    },
+  };
+}
+
 class SatoriTextCardRenderer implements TextCardRendererInternal {
   constructor(
     private readonly satori: SatoriFn,
@@ -458,8 +548,38 @@ class SatoriTextCardRenderer implements TextCardRendererInternal {
     return { ok: true, png: raw.png, meta: raw.meta };
   }
 
+  preflightArticle(copy: TextCardCopy): ArticleTextCardLayoutResult {
+    if (!copy.layoutKind) {
+      return { ok: false, reason: 'invalid_copy', detail: 'article layoutKind is missing' };
+    }
+    return layoutArticleTextCard(
+      { layoutKind: copy.layoutKind, title: copy.title, paragraphs: copy.paragraphs ?? [] },
+      this.metrics,
+    );
+  }
+
   async renderRaw(copy: TextCardCopy, seed: TextCardSeed): Promise<TextCardRenderRaw> {
     const theme = sourceTheme(seed);
+    if (copy.layoutKind) {
+      const articleModel = this.preflightArticle(copy);
+      if (!articleModel.ok) return articleModel;
+      const meta: TextCardRenderMeta = {
+        themeKey: 'article-simple-v1',
+        paletteKey: 'article-neutral',
+        layoutKey: articleModel.layoutKind,
+        titleFontSize: articleModel.title.fontSize,
+        titleLineCount: articleModel.title.lines.length,
+        truncated: false,
+        sanitized: articleModel.sanitized,
+        reductions: [],
+        contentLayoutKind: articleModel.layoutKind,
+        paragraphCount: articleModel.paragraphs.items.length,
+        bodyLineCount: articleModel.paragraphs.items.reduce((sum, item) => sum + item.lines.length, 0),
+        contentBottom: articleModel.contentBottom,
+        occupancyRatio: articleModel.occupancyRatio,
+      };
+      return this.rasterize(buildArticleCardTree(articleModel), meta, theme);
+    }
     const sourceStyle = seed.sourceStyle;
     const headerReserve = sourceStyle?.showPageMarker ? 64 : 0;
     const model = layoutTextCard(
@@ -499,8 +619,15 @@ class SatoriTextCardRenderer implements TextCardRendererInternal {
         : {}),
     };
 
+    return this.rasterize(buildCardTree(model, theme, copy, sourceStyle), meta, theme);
+  }
+
+  private async rasterize(
+    tree: SatoriNode,
+    meta: TextCardRenderMeta,
+    theme: ThemeSelection,
+  ): Promise<TextCardRenderRaw> {
     try {
-      const tree = buildCardTree(model, theme, copy, sourceStyle);
       const svg = await this.satori(tree, {
         width: CANVAS_WIDTH,
         height: CANVAS_HEIGHT,

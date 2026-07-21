@@ -958,6 +958,8 @@ async function main(): Promise<void> {
       likeCount: number;
       collectCount: number;
       referenceImages: CuratedReferenceImageInput[];
+      publishedAtText?: string;
+      publishedObservedAt?: number;
     }
   >();
 
@@ -1543,6 +1545,12 @@ async function main(): Promise<void> {
               sourceUrl: observed.sourceUrl,
               topics: observed.topics,
               referenceImages: observed.referenceImages,
+              ...(observed.publishedAtText
+                ? {
+                    publishedAtText: observed.publishedAtText,
+                    publishedObservedAt: observed.publishedObservedAt,
+                  }
+                : {}),
             }
           : undefined;
       curatedContentStore.markBotAction(accountId, evt.noteId, evt.action, content).catch((err) => {
@@ -1611,6 +1619,7 @@ async function main(): Promise<void> {
         likeCount: d.likeCount,
         collectCount: d.collectCount,
         referenceImages: d.images ?? [],
+        ...(d.publishedAtText ? { publishedAtText: d.publishedAtText, publishedObservedAt: evt.ts } : {}),
       });
     }
   };
@@ -3198,6 +3207,7 @@ async function main(): Promise<void> {
     renderEnabled: () => process.env.AIDCP_PUBLISH_TEXTCARD_COVER === 'true' || process.env.AIDCP_PUBLISH_TEXTCARD_CAROUSEL === 'true',
     carouselEnabled: () => process.env.AIDCP_PUBLISH_TEXTCARD_CAROUSEL === 'true',
     rendererAvailable: () => textCardRenderer !== null,
+    getTextCardRenderer: () => textCardRenderer,
     ossAvailable: () => !!ossUploader,
   }));
   publishOrchestrator.registerRole(new ImageSetPlannerRole({ llmClient: roleLlm('publish:ImageSetPlanner') }));

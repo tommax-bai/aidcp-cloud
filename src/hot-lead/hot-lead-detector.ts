@@ -66,7 +66,7 @@ export class HotLeadDetector extends BaseRole {
   private readonly triggeredTtlMs: number;
   private readonly now: () => number;
 
-  private lastDetail: { detail: NoteDetailData; accountId?: string } | null = null;
+  private lastDetail: { detail: NoteDetailData; accountId?: string; observedAt: number } | null = null;
   /** 短时「本 note 已尝试过（任意终态）」标记：account:noteId → 过期时刻。 */
   private readonly triggeredMarks = new Map<string, number>();
   private unsubscribers: Array<() => void> = [];
@@ -88,7 +88,7 @@ export class HotLeadDetector extends BaseRole {
     this.unsubscribers.push(
       this.eventBus.on('note.detail.arrived', (p) => {
         if (p.detail?.refreshOnly) return;
-        this.lastDetail = { detail: p.detail, accountId: p.accountId };
+        this.lastDetail = { detail: p.detail, accountId: p.accountId, observedAt: p.ts };
       }),
       this.eventBus.on('quality.pass', (p) => {
         void this.onQualityPass(p);
@@ -125,7 +125,7 @@ export class HotLeadDetector extends BaseRole {
     const accountId = cached.accountId ?? this.getAccountId();
 
     const evAl = evaluateHotLead(
-      { likeCount: detail.likeCount, publishedAtText: detail.publishedAtText },
+      { likeCount: detail.likeCount, publishedAtText: detail.publishedAtText, observedAt: cached.observedAt },
       this.getGateConfig(),
     );
     if (!evAl.isLead) return; // 非热帖线索：静默略过

@@ -743,7 +743,7 @@ test('HTTP 精选内容后台管理：未注入 503 / 缺账号=全账号视图 
   const curatedMock = {
     listForPanel: async (accountId: string | undefined, opts: unknown) => {
       calls.push({ fn: 'list', args: [accountId, opts] });
-      return { items: [{ id: 7, accountId: accountId ?? 'acc-1', contentType: 'image_text', sourceId: 'n-1', title: 'T', body: 'B', author: '甲', sourceUrl: null, topics: [], likeCount: null, collectCount: 5, commentCount: null, countsCapturedAt: null, botLiked: false, botCollected: true, admitReason: 'collect_floor', firstSeenAt: 1, updatedAt: 2 }], total: 1 };
+      return { items: [{ id: 7, accountId: accountId ?? 'acc-1', contentType: 'image_text', sourceId: 'n-1', title: 'T', body: 'B', author: '甲', sourceUrl: null, topics: [], likeCount: null, collectCount: 5, commentCount: null, countsCapturedAt: null, sourcePublishedAtText: '07-20', sourcePublishedAt: 1_774_118_400_000, sourcePublishedAtPrecision: 'day', sourcePublishedAtStatus: 'parsed', sourcePublishedAtObservedAt: 1_774_174_600_000, botLiked: false, botCollected: true, admitReason: 'collect_floor', firstSeenAt: 1, updatedAt: 2 }], total: 1 };
     },
     facetsForPanel: async (accountId: string | undefined) => {
       calls.push({ fn: 'facets', args: [accountId] });
@@ -782,9 +782,11 @@ test('HTTP 精选内容后台管理：未注入 503 / 缺账号=全账号视图 
     // 读列表：带类型/原因/分页过滤，回 {items,total}
     const list = (await (
       await fetch(`${base}/api/curated/contents?accountId=acc-1&contentType=image_text&admitReason=collect_floor&limit=20&offset=0`, { headers: auth })
-    ).json()) as { items: { id: number }[]; total: number };
+    ).json()) as { items: { id: number; sourcePublishedAtText: string; sourcePublishedAtPrecision: string }[]; total: number };
     assert.equal(list.total, 1);
     assert.equal(list.items[0].id, 7);
+    assert.equal(list.items[0].sourcePublishedAtText, '07-20');
+    assert.equal(list.items[0].sourcePublishedAtPrecision, 'day');
     const listCall = calls.find((c) => c.fn === 'list');
     assert.deepEqual(listCall?.args[0], 'acc-1');
     assert.deepEqual(listCall?.args[1], { contentType: 'image_text', admitReason: 'collect_floor', limit: 20, offset: 0 });

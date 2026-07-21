@@ -161,8 +161,20 @@ function wrapText(
   maxLines: number,
   metrics: TextMetrics,
   wordAwareCjk = false,
+  avoidLeadingPunctuation = false,
 ): WrapOutcome {
-  const units = splitUnits(text, wordAwareCjk);
+  let units = splitUnits(text, wordAwareCjk);
+  if (avoidLeadingPunctuation) {
+    const grouped: string[] = [];
+    for (const unit of units) {
+      if (/^[，。！？；：、）】》」』’”!?;,.:]+$/u.test(unit) && grouped.length > 0) {
+        grouped[grouped.length - 1] += unit;
+      } else {
+        grouped.push(unit);
+      }
+    }
+    units = grouped;
+  }
   const lines: string[] = [];
   let current = '';
   const fits = (s: string): boolean =>
@@ -470,5 +482,180 @@ export function layoutTextCard(
     truncated,
     sanitized,
     reductions,
+  };
+}
+
+// ─── 连续文章卡：固定阅读版式，不复用旧要点卡的主题与缩减阶梯 ──────────────
+
+export const ARTICLE_PAGE_MIN_OCCUPANCY = 0.80;
+export const ARTICLE_PAGE_MAX_OCCUPANCY = 0.96;
+export const ARTICLE_PAGE_TITLE_FONT_SIZE = 50;
+export const ARTICLE_PAGE_TITLE_LINE_HEIGHT = 64;
+export const ARTICLE_BODY_FONT_SIZE = 36;
+export const ARTICLE_BODY_LINE_HEIGHT = 58;
+export const ARTICLE_PARAGRAPH_GAP = 25;
+export const ARTICLE_COVER_BAND_HEIGHT = 650;
+
+export type ArticleTextCardLayoutKind = 'article_cover' | 'article_page';
+
+export interface ArticleTextCardLayoutInput {
+  layoutKind: ArticleTextCardLayoutKind;
+  title: string;
+  paragraphs: string[];
+}
+
+export interface ArticleParagraphLayout {
+  fontSize: number;
+  lineHeightPx: number;
+  offsetY: number;
+  gap: number;
+  items: Array<{ lines: string[] }>;
+}
+
+export interface ArticleTextCardLayoutModel {
+  ok: true;
+  layoutKind: ArticleTextCardLayoutKind;
+  canvas: { width: number; height: number; padding: number };
+  title: TitleBlockLayout;
+  dividerY: number | null;
+  paragraphs: ArticleParagraphLayout;
+  contentBottom: number;
+  occupancyRatio: number;
+  sanitized: boolean;
+}
+
+export type ArticleTextCardLayoutResult = ArticleTextCardLayoutModel | TextCardLayoutFailure;
+
+function articleSentences(paragraphs: string[], metrics: TextMetrics): { sentences: string[]; uncovered: boolean } {
+  const sentences: string[] = [];
+  let uncovered = false;
+  for (const raw of paragraphs) {
+    const stripped = metrics.stripUncovered(raw, 'regular');
+    if (stripped.stripped !== '') uncovered = true;
+    const normalized = normalizeWhitespace(stripped.kept);
+    if (!normalized) continue;
+    const parts = normalized.match(/[^。！？!?；;]+[。！？!?；;]?/gu) ?? [];
+    for (const part of parts) {
+      const sentence = part.trim();
+      if (sentence) sentences.push(sentence);
+    }
+  }
+  return { sentences, uncovered };
+}
+
+/**
+ * 文章卡纯布局。内容不足和溢出都显式失败，不拉伸行高、不截断、不删除段落。
+ * CoverCardWriter 与 renderer 共同调用本函数，因此密度门禁和最终像素使用同一套字宽。
+ */
+export function layoutArticleTextCard(
+  input: ArticleTextCardLayoutInput,
+  metrics: TextMetrics,
+): ArticleTextCardLayoutResult {
+  const titleStrip = metrics.stripUncovered(input.title, TITLE_WEIGHT);
+  if (titleStrip.stripped !== '') {
+    return { ok: false, reason: 'glyph_uncovered', detail: 'article title contains uncovered glyphs' };
+  }
+  const title = normalizeWhitespace(titleStrip.kept);
+  if (countGlyphs(title) < TITLE_MIN_GLYPHS) {
+    return {
+      ok: false,
+      reason: 'invalid_copy',
+      detail: `article title has ${countGlyphs(title)} glyphs after strip (<${TITLE_MIN_GLYPHS})`,
+    };
+  }
+
+  const normalized = articleSentences(input.paragraphs, metrics);
+  if (normalized.uncovered) {
+    return { ok: false, reason: 'glyph_uncovered', detail: 'article paragraphs contain uncovered glyphs' };
+  }
+  if (normalized.sentences.length < 2) {
+    return { ok: false, reason: 'invalid_copy', detail: 'article card needs at least 2 sentence paragraphs' };
+  }
+
+  const isCover = input.layoutKind === 'article_cover';
+  const titleFontSize = isCover ? 78 : ARTICLE_PAGE_TITLE_FONT_SIZE;
+  const titleLineHeightPx = isCover ? 96 : ARTICLE_PAGE_TITLE_LINE_HEIGHT;
+  const titleMaxLines = isCover ? 4 : 3;
+  const titleWrap = wrapText(
+    title,
+    titleFontSize,
+    TITLE_WEIGHT,
+    CONTENT_WIDTH,
+    titleMaxLines,
+    metrics,
+    true,
+    true,
+  );
+  if (titleWrap.overflowText !== null || titleWrap.lines.length === 0) {
+    return { ok: false, reason: 'invalid_copy', detail: `article title exceeds ${titleMaxLines} lines` };
+  }
+
+  const titleOffsetY = isCover ? 118 : 76;
+  const titleBottom = titleOffsetY + titleWrap.lines.length * titleLineHeightPx;
+  const dividerY = isCover ? null : titleBottom + 28;
+  const paragraphOffsetY = isCover ? 748 : titleBottom + 78;
+  const bodyFontSize = isCover ? 34 : ARTICLE_BODY_FONT_SIZE;
+  const bodyLineHeight = isCover ? 55 : ARTICLE_BODY_LINE_HEIGHT;
+  const paragraphGap = isCover ? 24 : ARTICLE_PARAGRAPH_GAP;
+  const bodyItems: Array<{ lines: string[] }> = [];
+  for (const sentence of normalized.sentences) {
+    const wrapped = wrapText(
+      sentence,
+      bodyFontSize,
+      'regular',
+      CONTENT_WIDTH,
+      3,
+      metrics,
+      true,
+      true,
+    );
+    if (wrapped.overflowText !== null || wrapped.lines.length === 0) {
+      return { ok: false, reason: 'invalid_copy', detail: 'article sentence exceeds 3 lines' };
+    }
+    bodyItems.push({ lines: wrapped.lines });
+  }
+
+  const bodyHeight = bodyItems.reduce(
+    (sum, item, index) => sum + item.lines.length * bodyLineHeight + (index > 0 ? paragraphGap : 0),
+    0,
+  );
+  const contentBottom = paragraphOffsetY + bodyHeight;
+  const occupancyRatio = contentBottom / CANVAS_HEIGHT;
+  if (contentBottom > Math.round(ARTICLE_PAGE_MAX_OCCUPANCY * CANVAS_HEIGHT)) {
+    return {
+      ok: false,
+      reason: 'invalid_copy',
+      detail: `article content too dense: occupancy ${occupancyRatio.toFixed(3)} > ${ARTICLE_PAGE_MAX_OCCUPANCY}`,
+    };
+  }
+  if (!isCover && occupancyRatio < ARTICLE_PAGE_MIN_OCCUPANCY) {
+    return {
+      ok: false,
+      reason: 'invalid_copy',
+      detail: `article content too sparse: occupancy ${occupancyRatio.toFixed(3)} < ${ARTICLE_PAGE_MIN_OCCUPANCY}`,
+    };
+  }
+
+  return {
+    ok: true,
+    layoutKind: input.layoutKind,
+    canvas: { width: CANVAS_WIDTH, height: CANVAS_HEIGHT, padding: CANVAS_PADDING },
+    title: {
+      fontSize: titleFontSize,
+      lineHeightPx: titleLineHeightPx,
+      offsetY: titleOffsetY,
+      lines: titleWrap.lines,
+    },
+    dividerY,
+    paragraphs: {
+      fontSize: bodyFontSize,
+      lineHeightPx: bodyLineHeight,
+      offsetY: paragraphOffsetY,
+      gap: paragraphGap,
+      items: bodyItems,
+    },
+    contentBottom,
+    occupancyRatio,
+    sanitized: false,
   };
 }

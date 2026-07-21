@@ -1,11 +1,17 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { CoverCardWriterRole } from '../../src/publish-agent/roles/cover-card-writer.js';
+import {
+  CoverCardWriterRole,
+  groupArticleSourceSlots,
+  isArticleFlowSource,
+  shouldUseArticleFlowSource,
+} from '../../src/publish-agent/roles/cover-card-writer.js';
 import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
 import type { PipelineFields, TriggerInput, CoverCardPlan, PostFormProfileResult } from '../../src/publish-agent/types.js';
 import type { CoverFormSensor, CoverFormSenseResult } from '../../src/publish-agent/cover-form-sensor.js';
 import type { PostImageFormProfileService } from '../../src/publish-agent/post-image-form-profile.js';
 import type { CuratedReferenceImageFormGuess } from '../../src/cache/curated-content-store.js';
+import type { TextCardRenderer } from '../../src/render/index.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 
@@ -71,6 +77,7 @@ interface RunOpts {
   trigger?: TriggerInput;
   clockImpl?: () => number;
   llmAdvance?: () => void;
+  getTextCardRenderer?: () => TextCardRenderer | null;
 }
 
 function run(opts: RunOpts): Promise<{ plan: CoverCardPlan; llmCalls: string[] }> {
@@ -93,6 +100,7 @@ function run(opts: RunOpts): Promise<{ plan: CoverCardPlan; llmCalls: string[] }
     renderEnabled: () => opts.renderEnabled ?? true,
     carouselEnabled: () => opts.carouselEnabled ?? false,
     rendererAvailable: () => opts.rendererAvailable ?? true,
+    getTextCardRenderer: opts.getTextCardRenderer,
     ossAvailable: () => opts.ossAvailable ?? true,
     clock: opts.clockImpl ?? (() => 1700000000000),
     logger: silentLogger,
@@ -258,6 +266,92 @@ describe('CoverCardWriterRole（封面形态决策 + 卡面文案；恒写键、
     });
     assert.equal(plan.coverForm, 'generative');
     assert.equal(plan.gateReason, 'copy_llm_failed');
+  });
+});
+
+describe('CoverCardWriterRole × 连续长文文章卡', () => {
+  test('文章判定与 13→9 连续分桶稳定覆盖结尾', () => {
+    const source = Array.from({ length: 13 }, (_, sourceArrayIndex) => ({
+      sourceArrayIndex,
+      text: `来源第${sourceArrayIndex + 1}页先解释一个完整观点。随后补充它的形成原因。再说明外界反馈如何影响自己。关系与物品也会承担原本属于内在的功能。这个过程会不断改变一个人看待自己的方式。最后承接到下一页的叙事位置。`,
+    }));
+    assert.equal(isArticleFlowSource(source), true);
+    assert.equal(shouldUseArticleFlowSource(source, 14), true);
+    assert.equal(shouldUseArticleFlowSource(source.slice(0, 3), 14), false, '少量 OCR 不足以代表整套来源');
+    const groups = groupArticleSourceSlots(source, 9);
+    assert.deepEqual(groups.map((group) => group.sourceArrayIndices), [
+      [0, 1], [2, 3], [4, 5], [6, 7], [8], [9], [10], [11], [12],
+    ]);
+    assert.match(groups[8].text, /来源第13页/);
+    assert.deepEqual(groupArticleSourceSlots(source, 9), groups, '相同输入分桶确定性一致');
+  });
+
+  test('14 张来源中 13 张成功转写时，生成 9 张文章卡并记录全部来源组', async () => {
+    const trigger = makeTrigger(true, { title: '旧标题', body: '旧正文只用于防搬运。' });
+    trigger.generateInput.referenceNote!.images = Array.from({ length: 14 }, (_, index) => ({
+      index,
+      sourceUrl: `https://cdn.example/article-${index}.webp`,
+      ossUrl: `https://oss.example/article-${index}.webp`,
+      capturedAt: 1,
+    }));
+    trigger.generateInput.referenceNote!.textCardTranscription = {
+      version: 1,
+      status: 'partial',
+      anchor: `sha256:${'b'.repeat(64)}`,
+      provider: 'dashscope',
+      model: 'ocr-model',
+      transcribedAt: 2,
+      cards: [
+        ...Array.from({ length: 13 }, (_, sourceArrayIndex) => ({
+          sourceArrayIndex,
+          sourceIndex: sourceArrayIndex,
+          capturedAt: 1,
+          status: 'transcribed' as const,
+          text: `原始第${sourceArrayIndex + 1}页先讨论稳定感从哪里来。它解释外部评价带来的摇摆。然后补充关系和物品承担的作用。外在评价一旦变化，旧有确定感也会跟着松动。重新理解这些反应，才能把注意力收回自身。最后把叙事继续推向文章结论。`,
+        })),
+        { sourceArrayIndex: 13, sourceIndex: 13, capturedAt: 1, status: 'failed' as const, reason: 'missing_card_result' as const },
+      ],
+    };
+    const articleOutput = JSON.stringify({
+      cards: Array.from({ length: 9 }, (_, cardIndex) => ({
+        cardTitle: `重新理解自己的第${cardIndex + 1}层`,
+        paragraphs: Array.from(
+          { length: cardIndex === 0 ? 5 : 12 },
+          (_, sentenceIndex) => `改写后的第${cardIndex + 1}页第${sentenceIndex + 1}个完整观点。`,
+        ),
+      })),
+    });
+    const preflightRenderer: TextCardRenderer = {
+      render: async () => ({ ok: false, reason: 'render_failed' }),
+      preflightArticle: () => ({ ok: true } as never),
+    };
+    const profile: PostFormProfileResult = {
+      profile: 'all_text_card',
+      gateReason: 'all_text_card',
+      perImageForms: [],
+      innerSensed: 13,
+    };
+    const { plan, llmCalls } = await run({
+      sensor: stubSensor({ status: 'detected', guess: guess('text_card', 0.99), cached: false }),
+      profileService: stubProfileService(profile, true),
+      carouselEnabled: true,
+      trigger,
+      llmOutputs: [articleOutput],
+      getTextCardRenderer: () => preflightRenderer,
+    });
+    assert.equal(plan.coverForm, 'text_card');
+    assert.equal(plan.cardSet?.length, 9);
+    assert.equal(plan.cardSet?.[0]?.layoutKind, 'article_cover');
+    assert.equal(plan.cardSet?.[8]?.layoutKind, 'article_page');
+    assert.deepEqual(plan.cardSet?.[1]?.bullets, []);
+    assert.equal(plan.cardSet?.[1]?.paragraphs?.length, 12);
+    assert.deepEqual(plan.cardSourceArrayIndexGroups, [
+      [0, 1], [2, 3], [4, 5], [6, 7], [8], [9], [10], [11], [12],
+    ]);
+    assert.match(llmCalls[0], /生成第 9 张 ↔ 来源数组下标 12/);
+    assert.match(llmCalls[0], /原始第13页/);
+    assert.match(llmCalls[0], /"paragraphs"/);
+    assert.doesNotMatch(llmCalls[0], /"bullets"/);
   });
 });
 

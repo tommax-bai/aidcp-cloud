@@ -2,60 +2,24 @@
  * 引流线索的「热度速率」度量与过滤闸（change feed-hot-lead-group-comment，段一）。
  *
  * 纯函数、无 PG、自包含、不调 LLM。三件事：
- * ① 把小红书发布相对时刻文本解析成「距今小时数」（不臆造：无法识别→null；裸日期→超窗哨兵）；
+ * ① 复用统一来源发布时间标准化结果派生「距今小时数」（不臆造：无法识别→null）；
  * ② 由点赞数 + 小时数算「每小时点赞」速率；
  * ③ 布尔过滤闸：帖龄≤上限 且 速率≥阈值 且 赞≥最小绝对值 → 判为「热帖线索」。
  *
  * 红线：MUST NOT 静默假成功。发布时刻不可得（null）或超帖龄上限一律判「非线索」，绝不臆造速率、
  * 绝不按绝对量硬塞。这是布尔过滤、不是排序，故不引入任何跨候选比较（前一版方案的非传递比较问题不存在）。
  *
- * 帖龄上限与解析的咬合（见 change design D3/D4）：小红书按「刚刚/分钟/小时/昨天」展示新鲜帖，
- * 再老才跳成裸日期（基本 ≥2 天前）。故上限取小（默认 48h）时，窗内只需处理小时级形态，
- * 裸日期即超窗、直接丢弃——无需按当前时钟换算，解析器保持纯函数、无时钟依赖、可确定性单测。
+ * 解析以 note.detail 事件 ts 为显式观测锚；日精度值按当日最年轻可能时刻保守计算帖龄。
  */
-
-/** 裸日期（≥天级粒度）的哨兵小时数：必然大于任何合理帖龄上限，交给过滤闸判超窗丢弃。 */
-export const STALE_SENTINEL_HOURS = 24 * 3650;
-
-/** 「昨天」统一按此常数（24–48 中点）。2 天窗内精度无意义，保持解析器纯函数、不依赖当前时钟。 */
-export const YESTERDAY_HOURS = 36;
-
-/** 「前天」常数（默认 48h 上限下已超窗，仅为可读性显式列出）。 */
-export const DAY_BEFORE_YESTERDAY_HOURS = 60;
+import { normalizeSourcePublishedTime, sourcePublishedAgeHours } from '../time/source-published-time.js';
 
 /**
- * 把发布相对时刻文本解析为「距今小时数」。
- * - 「刚刚 / X分钟前」→ 0（不足 1 小时，速率用 FLOOR 兜底）
- * - 「X小时前」→ X
- * - 「昨天…」→ 36（常数，见 YESTERDAY_HOURS）
- * - 「前天…」→ 60
- * - 「X天前」→ X*24
- * - 裸日期（MM-DD / YYYY-MM-DD / YYYY年MM月DD日）→ STALE_SENTINEL_HOURS（超窗）
- * - 剥离「编辑于」前缀；按 token 匹配（尾随地区名不影响）；无法识别 → null（不臆造）
+ * 把发布时刻文本解析为距事件观测锚的小时数。日精度按该日最年轻可能时刻计算，
+ * 避免把代表用的本地零点伪装成平台提供的精确时刻。
  */
-export function parsePublishedHoursAgo(text?: string | null): number | null {
-  if (!text) return null;
-  let s = text.trim();
-  if (!s) return null;
-  // 剥离「编辑于」前缀（尾随地区名无需剥离——下面按 token 匹配而非整串相等）
-  s = s.replace(/^编辑于\s*/, '');
-
-  if (/刚刚/.test(s)) return 0;
-  if (/\d+\s*分钟前/.test(s)) return 0;
-
-  const hour = s.match(/(\d+)\s*小时前/);
-  if (hour) return parseInt(hour[1], 10);
-
-  if (/昨天/.test(s)) return YESTERDAY_HOURS;
-  if (/前天/.test(s)) return DAY_BEFORE_YESTERDAY_HOURS;
-
-  const day = s.match(/(\d+)\s*天前/);
-  if (day) return parseInt(day[1], 10) * 24;
-
-  // 裸日期：MM-DD / M-D / YYYY-MM-DD（含 / 与 年月日 变体）
-  if (/(?:\d{4}[-/年])?\d{1,2}[-/月]\d{1,2}日?/.test(s)) return STALE_SENTINEL_HOURS;
-
-  return null;
+export function parsePublishedHoursAgo(text: string | null | undefined, observedAt: number): number | null {
+  const normalized = normalizeSourcePublishedTime(text, { observedAt });
+  return normalized ? sourcePublishedAgeHours(normalized) : null;
 }
 
 /** 每小时点赞速率 = 点赞数 / max(小时数, 分母下限)。分母下限挡刚发布（小时数=0）除零/爆表。 */
@@ -106,10 +70,10 @@ export interface HotLeadEval {
  * 顺序即闸序：小时不可得 → 帖龄超上限 → 赞不足 → 速率不足 → 命中。
  */
 export function evaluateHotLead(
-  input: { likeCount: number; publishedAtText?: string | null },
+  input: { likeCount: number; publishedAtText?: string | null; observedAt: number },
   config: HotLeadGateConfig = DEFAULT_HOT_LEAD_GATE_CONFIG,
 ): HotLeadEval {
-  const hoursAgo = parsePublishedHoursAgo(input.publishedAtText);
+  const hoursAgo = parsePublishedHoursAgo(input.publishedAtText, input.observedAt);
   if (hoursAgo === null) {
     return { isLead: false, hoursAgo: null, velocity: null, reason: 'unparseable_time' };
   }

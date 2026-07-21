@@ -1065,7 +1065,53 @@ export function buildCoverCardCopyPrompt(
  */
 export interface CardSetSourceSlot {
   sourceArrayIndex: number;
+  /** 文章流合并槽的全部连续来源下标；旧要点卡缺省。 */
+  sourceArrayIndices?: number[];
   text: string;
+}
+
+/** 连续长文来源的固定内容契约：模型只写标题和短句，不参与视觉设计。 */
+export function buildArticleCardSetPrompt(
+  title: string,
+  body: string,
+  count: number,
+  sourceCards: CardSetSourceSlot[],
+  tighten = false,
+): string {
+  const n = Math.max(2, Math.floor(count));
+  const lines = [
+    `你是小红书连续文章轮播的文案编辑。基于改写终稿，产出一套 ${n} 张可直接排版的文章卡内容。`,
+    '',
+    '【改写终稿标题】',
+    title,
+    '',
+    '【改写终稿正文】',
+    buildContentVisualExcerpt(body, 2000),
+    '',
+    '【按顺序合并后的来源信息槽（只用于叙事位置，禁止照抄）】',
+    ...sourceCards.map((card, index) => {
+      const indices = card.sourceArrayIndices ?? [card.sourceArrayIndex];
+      return `生成第 ${index + 1} 张 ↔ 来源数组下标 ${indices.join(',')}\n${buildContentVisualExcerpt(card.text, 1800)}`;
+    }),
+    '',
+    '【内容要求】',
+    `- cards 数组必须正好 ${n} 张，并逐槽承接上面的来源顺序；必须覆盖终稿开头、中段和结尾。`,
+    '- 第 1 张是封面：cardTitle 12~28 字，paragraphs 写 5~7 个完整短句，每句约 12~24 个中文字符，负责提出主题和核心问题。',
+    '- 第 2 张起是正文页：cardTitle 8~30 字；paragraphs 写 12~14 个完整短句，每句约 12~22 个中文字符。',
+    '- 每个 paragraph 只写一个完整意思，使用自然句号、问号或感叹号收束；不要用项目符号、编号、标签或小标题套小标题。',
+    '- 句子要像文章，不写口号式碎片；相邻卡不重复，最后一张必须落到终稿结论。',
+    '- 只可使用改写终稿支持的事实；来源槽与终稿冲突时以终稿为准，并彻底换表达。',
+    '- 不输出字号、颜色、坐标、模板、装饰等设计说明；不出现联系方式、价格、促销、平台名、作者名或 emoji。',
+  ];
+  if (tighten) {
+    lines.push('- 【加严】上一版有搬运、违禁或排版密度问题；保持上述句数和句长，重写表达，不删减成稀疏页面。');
+  }
+  lines.push(
+    '',
+    `【输出要求】严格只输出 JSON；cards 长度必须正好 ${n}：`,
+    '{"cards":[{"cardTitle":"…","paragraphs":["…","…"]},…]}',
+  );
+  return lines.join('\n');
 }
 
 export function buildCardSetPrompt(

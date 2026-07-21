@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { BasePublishRole } from './base-role.js';
 import type { RoleConfig } from './base-role.js';
 import type { PipelineContext } from '../pipeline-context.js';
-import type { PipelineFields, ImagePlan, ImageDirective, CoverFormAudit, CoverRenderStatus, CoverCardCopy } from '../types.js';
+import type { PipelineFields, ImagePlan, ImageDirective, CoverFormAudit, CoverRenderStatus, CoverCardCopy, TextCardRenderAuditMeta } from '../types.js';
 import type { ImageProvider, ImageResult } from '../image-provider.js';
 import { normImageProvider } from '../image-providers.js';
 import type { ObjectStore } from '../../storage/object-store.js';
@@ -35,6 +35,20 @@ import type {
 function envInt(name: string, def: number): number {
   const raw = Number(process.env[name]);
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : def;
+}
+
+function renderAuditMeta(meta: TextCardRenderMeta): TextCardRenderAuditMeta {
+  return {
+    themeKey: meta.themeKey,
+    truncated: meta.truncated,
+    sanitized: meta.sanitized,
+    reductions: meta.reductions,
+    ...(meta.contentLayoutKind ? { contentLayoutKind: meta.contentLayoutKind } : {}),
+    ...(meta.paragraphCount !== undefined ? { paragraphCount: meta.paragraphCount } : {}),
+    ...(meta.bodyLineCount !== undefined ? { bodyLineCount: meta.bodyLineCount } : {}),
+    ...(meta.contentBottom !== undefined ? { contentBottom: meta.contentBottom } : {}),
+    ...(meta.occupancyRatio !== undefined ? { occupancyRatio: meta.occupancyRatio } : {}),
+  };
 }
 
 // 文字卡渲染内层闸（change textcard-cover-form）：渲染+字节直传在进入每图槽机制**之前**独立结算——
@@ -289,6 +303,7 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     });
     const renderStatus: CoverRenderStatus = cardRenderStatuses[0] ?? 'not_attempted';
     const renderedCover = renderedCards[0]; // renderMeta 回放（0 号）。
+    const cardRenderMetas = renderedCards.map((rendered) => rendered ? renderAuditMeta(rendered.meta) : null);
 
     const auditing = referenceAuditing || autonomousAuditing;
     const shouldWriteVisualAudit = !!input.referenceBindings || !!input.referenceVisualAnalysis || auditing || !!input.visualSetBrief || !!input.slotRoles;
@@ -315,12 +330,7 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
               renderStatus,
               ...(renderedCover
                 ? {
-                    renderMeta: {
-                      themeKey: renderedCover.meta.themeKey,
-                      truncated: renderedCover.meta.truncated,
-                      sanitized: renderedCover.meta.sanitized,
-                      reductions: renderedCover.meta.reductions,
-                    },
+                    renderMeta: renderAuditMeta(renderedCover.meta),
                   }
                 : {}),
               // 帖级形态档影子审计（change textcard-carousel-form-parity，阶段0）：仅旗标开时非空，
@@ -329,9 +339,10 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
               ...(input.formProfileGate ? { formProfileGate: input.formProfileGate } : {}),
               ...(input.perImageForms ? { perImageForms: input.perImageForms } : {}),
               // 轮播每槽渲染结局（阶段1）：仅整帖渲卡（cardSet 非空）时并列落，供回放每张卡渲成没。
-              ...(input.cardSet ? { cardRenderStatuses } : {}),
+              ...(input.cardSet ? { cardRenderStatuses, cardRenderMetas } : {}),
               ...(input.cardContentMapping ? { cardContentMapping: input.cardContentMapping } : {}),
               ...(input.cardSourceArrayIndices ? { cardSourceArrayIndices: input.cardSourceArrayIndices } : {}),
+              ...(input.cardSourceArrayIndexGroups ? { cardSourceArrayIndexGroups: input.cardSourceArrayIndexGroups } : {}),
             } satisfies CoverFormAudit,
           }
         : {}),
@@ -356,7 +367,12 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
       return await Promise.race([
         (async (): Promise<{ url: string; meta: TextCardRenderMeta } | null> => {
           const res = await renderer.render(
-            { title: card.title, bullets: card.bullets, tags: card.tags },
+            {
+              title: card.title,
+              bullets: card.bullets,
+              tags: card.tags,
+              ...(card.layoutKind ? { layoutKind: card.layoutKind, paragraphs: card.paragraphs ?? [] } : {}),
+            },
             { accountId: keyCtx.accountId, postKey, ...(sourceStyle ? { sourceStyle } : {}) },
           );
           if (!res.ok) {
@@ -434,6 +450,10 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
           : { url: current.url, referenceStatus: 'skipped', auditMode, auditAttempts: attempts };
       }
       if (attempt === 0) {
+        // 文章模板不消费来源装饰令牌；相同文案重渲只会得到等价 PNG，失败即如实结算。
+        if (card.layoutKind) {
+          return { url: null, referenceStatus: 'skipped', auditMode, auditAttempts: attempts };
+        }
         if (!sourceStyle && auditMode === 'reference_fidelity') {
           return { url: null, referenceStatus: 'skipped', auditMode, auditAttempts: attempts };
         }

@@ -1041,6 +1041,11 @@ test('客户灵感库按环境归属隔离、最小披露，并在归属撤销�
     collectCount: 0,
     commentCount: 3,
     countsCapturedAt: null,
+    sourcePublishedAtText: '07-20',
+    sourcePublishedAt: Date.parse('2026-07-19T16:00:00.000Z'),
+    sourcePublishedAtPrecision: 'day',
+    sourcePublishedAtStatus: 'parsed',
+    sourcePublishedAtObservedAt: Date.parse('2026-07-21T07:30:00.000Z'),
     botLiked: false,
     botCollected: true,
     admitReason: 'internal-only-reason',
@@ -1121,6 +1126,11 @@ test('客户灵感库按环境归属隔离、最小披露，并在归属撤销�
       assert.equal(listBody.offset, 24);
       assert.equal(listBody.items[0].likeCount, null);
       assert.equal(listBody.items[0].collectCount, 0);
+      assert.equal(listBody.items[0].sourcePublishedAtText, '07-20');
+      assert.equal(listBody.items[0].sourcePublishedAt, Date.parse('2026-07-19T16:00:00.000Z'));
+      assert.equal(listBody.items[0].sourcePublishedAtPrecision, 'day');
+      assert.equal(listBody.items[0].sourcePublishedAtStatus, 'parsed');
+      assert.equal(listBody.items[0].sourcePublishedAtObservedAt, Date.parse('2026-07-21T07:30:00.000Z'));
       assert.equal(listBody.items[0].body, undefined, '列表只回正文摘要');
       assert.equal(typeof listBody.items[0].bodyPreview, 'string');
       assert.equal(listBody.items[0].accountId, undefined);
@@ -1145,7 +1155,9 @@ test('客户灵感库按环境归属隔离、最小披露，并在归属撤销�
 
       const detail = await fetch(`${base}/curated-contents/7?envKey=p1`, { headers });
       assert.equal(detail.status, 200);
-      assert.equal(((await detail.json()) as { item: { body: string } }).item.body, '这是一段值得参考的正文');
+      const detailBody = (await detail.json()) as { item: Record<string, unknown> };
+      assert.equal(detailBody.item.body, '这是一段值得参考的正文');
+      assert.equal(detailBody.item.sourcePublishedAtText, '07-20');
       assert.equal((await fetch(`${base}/curated-contents/99?envKey=p1`, { headers })).status, 404);
 
       fx.scope.set('u1', []);

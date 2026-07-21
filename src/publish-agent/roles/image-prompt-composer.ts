@@ -240,6 +240,7 @@ export class ImagePromptComposerRole extends BasePublishRole<ComposerInput, Imag
       ...(coverPlan?.cardSet ? { cardSet: coverPlan.cardSet } : {}),
       ...(coverPlan?.cardContentMapping ? { cardContentMapping: coverPlan.cardContentMapping } : {}),
       ...(coverPlan?.cardSourceArrayIndices ? { cardSourceArrayIndices: coverPlan.cardSourceArrayIndices } : {}),
+      ...(coverPlan?.cardSourceArrayIndexGroups ? { cardSourceArrayIndexGroups: coverPlan.cardSourceArrayIndexGroups } : {}),
     };
   }
 

@@ -11,7 +11,7 @@ export type ClientPublishQueueTaskStatus = (typeof CLIENT_PUBLISH_QUEUE_TASK_STA
 
 export interface ClientPublishQueueStage {
   key: 'source' | 'content' | 'approval' | 'dispatch';
-  label: '开始创作' | '正文与配图' | '你来确认' | '发布结果';
+  label: '开始创作' | '正文与配图' | '发布确认' | '发布结果';
   state: PublishStageState;
   summary: string;
   progress?: { current: number; total: number };
@@ -80,7 +80,7 @@ const STAGE_GROUPS: ReadonlyArray<{
     label: '正文与配图',
     sourceKeys: ['content', 'text_quality', 'visual_plan', 'image_review', 'package'],
   },
-  { key: 'approval', label: '你来确认', sourceKeys: ['approval'] },
+  { key: 'approval', label: '发布确认', sourceKeys: ['approval'] },
   { key: 'dispatch', label: '发布结果', sourceKeys: ['dispatch'] },
 ];
 
@@ -148,7 +148,20 @@ function aggregateState(stages: PublishStageView[]): PublishStageState {
   return 'pending';
 }
 
-function stageSummary(label: ClientPublishQueueStage['label'], state: PublishStageState): string {
+function stageSummary(
+  key: ClientPublishQueueStage['key'],
+  label: ClientPublishQueueStage['label'],
+  state: PublishStageState,
+): string {
+  if (key === 'approval') {
+    const approvalSuffix: Partial<Record<PublishStageState, string>> = {
+      pending: '尚未开始',
+      waiting_human: '待你确认',
+      completed: '已确认',
+    };
+    if (approvalSuffix[state]) return `${label}：${approvalSuffix[state]}`;
+  }
+  if (key === 'dispatch' && state === 'pending') return `${label}：等待发布`;
   const suffix: Record<PublishStageState, string> = {
     pending: '未开始',
     running: '进行中',
@@ -175,7 +188,7 @@ function projectStageGroup(
     key: group.key,
     label: group.label,
     state,
-    summary: stageSummary(group.label, state),
+    summary: stageSummary(group.key, group.label, state),
     ...(withProgress?.progress ? { progress: { ...withProgress.progress } } : {}),
   };
 }

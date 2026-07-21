@@ -48,6 +48,11 @@ test('init 建表幂等（DDL 含 IF NOT EXISTS 与索引）', async () => {
   assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS reference_images JSONB/);
   assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS visual_analysis JSONB/);
   assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS text_card_transcription JSONB/);
+  assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS source_published_at_text TEXT/);
+  assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS source_published_at TIMESTAMPTZ/);
+  assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS source_published_at_precision TEXT/);
+  assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS source_published_at_status TEXT/);
+  assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS source_published_at_observed_at TIMESTAMPTZ/);
   assert.match(calls[0].sql, /content_type = 'image_text'/);
   assert.match(calls[0].sql, /dedup_key\s+TEXT NOT NULL UNIQUE/);
   assert.match(calls[0].sql, /CREATE INDEX IF NOT EXISTS .* USING GIN\(topics\)/);
@@ -83,7 +88,54 @@ test('upsertObservation：INSERT...ON CONFLICT DO UPDATE，含 dedup_key、不�
   assert.equal(params[3], 'acc-1::image_text::note-9');
   // 计数原样落库。
   assert.deepEqual(params.slice(10, 13), [12, 3, 5]);
-  assert.equal(params[13], 'high_quality');
+  assert.equal(params[18], 'high_quality');
+});
+
+test('upsertObservation normalizes and atomically persists source published-time evidence', async () => {
+  const { pool, calls } = capturingPool();
+  const store = new CuratedContentStore({ pool });
+  const publishedObservedAt = Date.parse('2026-07-21T07:30:00.000Z');
+  await store.upsertObservation({
+    ...baseObs,
+    publishedAtText: '编辑于 3小时前 上海',
+    publishedObservedAt,
+  });
+
+  const sql = calls[0].sql;
+  assert.match(sql, /source_published_at_text/);
+  assert.match(sql, /WHEN EXCLUDED\.source_published_at_text IS NULL THEN curated_content\.source_published_at/);
+  assert.equal(calls[0].params[13], '编辑于 3小时前 上海');
+  assert.deepEqual(calls[0].params[14], new Date(publishedObservedAt - 3 * 3_600_000));
+  assert.equal(calls[0].params[15], 'hour');
+  assert.equal(calls[0].params[16], 'parsed');
+  assert.deepEqual(calls[0].params[17], new Date(publishedObservedAt));
+});
+
+test('upsertObservation retains unparseable raw evidence without inventing a time', async () => {
+  const { pool, calls } = capturingPool();
+  const store = new CuratedContentStore({ pool });
+  const publishedObservedAt = Date.parse('2026-07-21T07:30:00.000Z');
+  await store.upsertObservation({
+    ...baseObs,
+    publishedAtText: '未知平台日期格式',
+    publishedObservedAt,
+  });
+  assert.deepEqual(calls[0].params.slice(13, 18), [
+    '未知平台日期格式',
+    null,
+    null,
+    'unparseable',
+    new Date(publishedObservedAt),
+  ]);
+});
+
+test('upsertObservation rejects raw published text without an observation anchor', async () => {
+  const { pool } = capturingPool();
+  const store = new CuratedContentStore({ pool });
+  await assert.rejects(
+    store.upsertObservation({ ...baseObs, publishedAtText: '3小时前' }),
+    /publishedObservedAt is required/,
+  );
 });
 
 test('非空源帖进入精选后回调首作链路；评论与空正文不触发', async () => {
@@ -211,7 +263,7 @@ test('有序文字卡转写以单一 JSONB 随精选行写入，并由缓存读�
     referenceImages: [{ index: 7, sourceUrl: 'https://img.test/a.jpg', capturedAt: 123 }],
     textCardTranscription: transcription,
   });
-  const written = JSON.parse(calls[0].params[14] as string) as typeof transcription;
+  const written = JSON.parse(calls[0].params[19] as string) as typeof transcription;
   assert.deepEqual(written.cards.map((card) => card.sourceArrayIndex), [0, 1], '写入边界先按权威槽排序');
   assert.match(calls[0].sql, /text_card_transcription = CASE/);
 
@@ -316,7 +368,24 @@ test('markBotAction collect 走 INSERT...ON CONFLICT（自有收藏自动建/纳
   assert.equal(params[7], 'u'); // source_url
   assert.deepEqual(params[8], ['x']); // topics
   assert.equal(params[9], '[]'); // reference_images
-  assert.equal(params[10], 'bot_collect'); // admit_reason（有正文）
+  assert.equal(params[15], 'bot_collect'); // admit_reason（有正文）
+});
+
+test('markBotAction collect carries same-visit source published-time evidence', async () => {
+  const { pool, calls } = capturingPool();
+  const store = new CuratedContentStore({ pool });
+  const publishedObservedAt = Date.parse('2026-07-21T07:30:00.000Z');
+  await store.markBotAction('acc-1', 'note-9', 'collect', {
+    body: '收藏的正文',
+    publishedAtText: '昨天 14:30',
+    publishedObservedAt,
+  });
+  assert.equal(calls[0].params[10], '昨天 14:30');
+  assert.deepEqual(calls[0].params[11], new Date('2026-07-20T06:30:00.000Z'));
+  assert.equal(calls[0].params[12], 'minute');
+  assert.equal(calls[0].params[13], 'parsed');
+  assert.deepEqual(calls[0].params[14], new Date(publishedObservedAt));
+  assert.match(calls[0].sql, /WHEN EXCLUDED\.source_published_at_text IS NULL THEN curated_content\.source_published_at_text/);
 });
 
 test('markBotAction collect 视频内容：content_type/dedup_key 用 video', async () => {
@@ -490,6 +559,11 @@ const panelDbRow = {
   collect_count: 4,
   comment_count: 2,
   counts_captured_at: new Date(1000),
+  source_published_at_text: '07-20',
+  source_published_at: new Date(1500),
+  source_published_at_precision: 'day',
+  source_published_at_status: 'parsed',
+  source_published_at_observed_at: new Date(1600),
   bot_liked: true,
   bot_collected: false,
   admit_reason: 'collect_floor',
@@ -516,6 +590,11 @@ test('listForPanel：按账号 + 类型 + 原因过滤，COUNT(*) OVER() 取 tot
   assert.equal(out.total, 1);
   assert.equal(out.items[0].id, 7);
   assert.equal(out.items[0].countsCapturedAt, 1000); // Date → epoch ms
+  assert.equal(out.items[0].sourcePublishedAtText, '07-20');
+  assert.equal(out.items[0].sourcePublishedAt, 1500);
+  assert.equal(out.items[0].sourcePublishedAtPrecision, 'day');
+  assert.equal(out.items[0].sourcePublishedAtStatus, 'parsed');
+  assert.equal(out.items[0].sourcePublishedAtObservedAt, 1600);
   assert.equal(out.items[0].firstSeenAt, 2000);
   assert.equal(out.items[0].updatedAt, 3000);
   assert.equal(out.items[0].likeCount, 10);

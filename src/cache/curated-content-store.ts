@@ -24,6 +24,12 @@ import type { DelegatedExecutionTarget } from '../delegated-task/types.js';
 import type { ReferenceVisualAnalysis } from '../publish-agent/visual-reference-types.js';
 import type { VisualAnalysisAnchor } from '../publish-agent/visual-reference-analyzer.js';
 import { normalizeReferenceVisualAnalysis } from '../publish-agent/visual-reference-analyzer.js';
+import {
+  normalizeSourcePublishedTime,
+  type SourcePublishedAtPrecision,
+  type SourcePublishedAtStatus,
+  type SourcePublishedTime,
+} from '../time/source-published-time.js';
 
 const { Pool } = pg;
 
@@ -145,6 +151,9 @@ export interface CuratedObservation {
   likeCount?: number | null;
   collectCount?: number | null;
   commentCount?: number | null;
+  /** Raw platform evidence. When present, publishedObservedAt is required as the conversion anchor. */
+  publishedAtText?: string;
+  publishedObservedAt?: number;
   admitReason: string;
   referenceImages?: CuratedReferenceImageInput[];
   textCardTranscription?: TextCardTranscription;
@@ -159,6 +168,8 @@ export interface CuratedActionContent {
   topics?: string[];
   mediaType?: CuratedSourceContentType;
   referenceImages?: CuratedReferenceImageInput[];
+  publishedAtText?: string;
+  publishedObservedAt?: number;
 }
 
 /** Successful non-empty source admission, used by the first-post onboarding trigger. */
@@ -211,6 +222,11 @@ export interface CuratedPanelRow {
   collectCount: number | null;
   commentCount: number | null;
   countsCapturedAt: number | null;
+  sourcePublishedAtText: string | null;
+  sourcePublishedAt: number | null;
+  sourcePublishedAtPrecision: SourcePublishedAtPrecision | null;
+  sourcePublishedAtStatus: SourcePublishedAtStatus | null;
+  sourcePublishedAtObservedAt: number | null;
   botLiked: boolean;
   botCollected: boolean;
   admitReason: string | null;
@@ -311,6 +327,11 @@ CREATE TABLE IF NOT EXISTS curated_content (
   collect_count      INT,
   comment_count      INT,
   counts_captured_at TIMESTAMPTZ,
+  source_published_at_text TEXT,
+  source_published_at TIMESTAMPTZ,
+  source_published_at_precision TEXT,
+  source_published_at_status TEXT,
+  source_published_at_observed_at TIMESTAMPTZ,
   reference_images   JSONB NOT NULL DEFAULT '[]'::jsonb,
   visual_analysis    JSONB,
   text_card_transcription JSONB,
@@ -323,6 +344,11 @@ CREATE TABLE IF NOT EXISTS curated_content (
 ALTER TABLE curated_content ADD COLUMN IF NOT EXISTS reference_images JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE curated_content ADD COLUMN IF NOT EXISTS visual_analysis JSONB;
 ALTER TABLE curated_content ADD COLUMN IF NOT EXISTS text_card_transcription JSONB;
+ALTER TABLE curated_content ADD COLUMN IF NOT EXISTS source_published_at_text TEXT;
+ALTER TABLE curated_content ADD COLUMN IF NOT EXISTS source_published_at TIMESTAMPTZ;
+ALTER TABLE curated_content ADD COLUMN IF NOT EXISTS source_published_at_precision TEXT;
+ALTER TABLE curated_content ADD COLUMN IF NOT EXISTS source_published_at_status TEXT;
+ALTER TABLE curated_content ADD COLUMN IF NOT EXISTS source_published_at_observed_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_curated_content_topics ON curated_content USING GIN(topics);
 CREATE INDEX IF NOT EXISTS idx_curated_content_account_updated ON curated_content (account_id, updated_at DESC);
 
@@ -386,6 +412,25 @@ function normalizeContentType(value: string): CuratedContentType {
   if (value === 'comment') return 'comment';
   if (value === 'video') return 'video';
   return 'image_text';
+}
+
+function normalizeStoredPublishedPrecision(value: string | null): SourcePublishedAtPrecision | null {
+  return value === 'minute' || value === 'hour' || value === 'day' ? value : null;
+}
+
+function normalizeStoredPublishedStatus(value: string | null): SourcePublishedAtStatus | null {
+  return value === 'parsed' || value === 'unparseable' ? value : null;
+}
+
+function normalizePublishedEvidence(
+  publishedAtText: string | undefined,
+  publishedObservedAt: number | undefined,
+): SourcePublishedTime | null {
+  if (!publishedAtText?.trim()) return null;
+  if (!Number.isFinite(publishedObservedAt) || (publishedObservedAt ?? 0) <= 0) {
+    throw new Error('publishedObservedAt is required when publishedAtText is present');
+  }
+  return normalizeSourcePublishedTime(publishedAtText, { observedAt: publishedObservedAt! });
 }
 
 function normalizeSourceMediaType(value: unknown): CuratedSourceContentType {
@@ -637,6 +682,11 @@ interface CuratedPanelDbRow {
   collect_count: number | string | null;
   comment_count: number | string | null;
   counts_captured_at: Date | null;
+  source_published_at_text: string | null;
+  source_published_at: Date | null;
+  source_published_at_precision: string | null;
+  source_published_at_status: string | null;
+  source_published_at_observed_at: Date | null;
   bot_liked: boolean;
   bot_collected: boolean;
   admit_reason: string | null;
@@ -666,6 +716,13 @@ function rowToPanelView(r: CuratedPanelDbRow): CuratedPanelRow {
     collectCount: toNumOrNull(r.collect_count),
     commentCount: toNumOrNull(r.comment_count),
     countsCapturedAt: r.counts_captured_at ? r.counts_captured_at.getTime() : null,
+    sourcePublishedAtText: r.source_published_at_text,
+    sourcePublishedAt: r.source_published_at ? r.source_published_at.getTime() : null,
+    sourcePublishedAtPrecision: normalizeStoredPublishedPrecision(r.source_published_at_precision),
+    sourcePublishedAtStatus: normalizeStoredPublishedStatus(r.source_published_at_status),
+    sourcePublishedAtObservedAt: r.source_published_at_observed_at
+      ? r.source_published_at_observed_at.getTime()
+      : null,
     botLiked: r.bot_liked,
     botCollected: r.bot_collected,
     admitReason: r.admit_reason,
@@ -764,12 +821,15 @@ export class CuratedContentStore {
     const dedupKey = dedupKeyOf(obs.accountId, obs.contentType, obs.sourceId);
     const referenceImages = await this.prepareReferenceImages(obs.accountId, obs.sourceId, obs.referenceImages);
     const textCardTranscription = normalizeTextCardTranscription(obs.textCardTranscription);
+    const sourcePublished = normalizePublishedEvidence(obs.publishedAtText, obs.publishedObservedAt);
     await this.pool.query(
       `INSERT INTO curated_content
          (account_id, content_type, source_id, dedup_key, title, body, author, source_url,
           topics, reference_images, like_count, collect_count, comment_count, counts_captured_at, admit_reason,
-          text_card_transcription, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, now(), $14, $15::jsonb, now())
+          source_published_at_text, source_published_at, source_published_at_precision,
+          source_published_at_status, source_published_at_observed_at, text_card_transcription, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, now(), $19,
+               $14, $15, $16, $17, $18, $20::jsonb, now())
        ON CONFLICT (dedup_key) DO UPDATE SET
          title              = EXCLUDED.title,
          body               = EXCLUDED.body,
@@ -795,6 +855,26 @@ export class CuratedContentStore {
          collect_count      = EXCLUDED.collect_count,
          comment_count      = EXCLUDED.comment_count,
          counts_captured_at = now(),
+         source_published_at_text = CASE
+                                WHEN EXCLUDED.source_published_at_text IS NULL THEN curated_content.source_published_at_text
+                                ELSE EXCLUDED.source_published_at_text
+                              END,
+         source_published_at = CASE
+                                WHEN EXCLUDED.source_published_at_text IS NULL THEN curated_content.source_published_at
+                                ELSE EXCLUDED.source_published_at
+                              END,
+         source_published_at_precision = CASE
+                                WHEN EXCLUDED.source_published_at_text IS NULL THEN curated_content.source_published_at_precision
+                                ELSE EXCLUDED.source_published_at_precision
+                              END,
+         source_published_at_status = CASE
+                                WHEN EXCLUDED.source_published_at_text IS NULL THEN curated_content.source_published_at_status
+                                ELSE EXCLUDED.source_published_at_status
+                              END,
+         source_published_at_observed_at = CASE
+                                WHEN EXCLUDED.source_published_at_text IS NULL THEN curated_content.source_published_at_observed_at
+                                ELSE EXCLUDED.source_published_at_observed_at
+                              END,
          admit_reason       = EXCLUDED.admit_reason,
          updated_at         = now()`,
       [
@@ -811,6 +891,13 @@ export class CuratedContentStore {
         obs.likeCount ?? null,
         obs.collectCount ?? null,
         obs.commentCount ?? null,
+        sourcePublished?.rawText ?? null,
+        sourcePublished?.publishedAt !== null && sourcePublished?.publishedAt !== undefined
+          ? new Date(sourcePublished.publishedAt)
+          : null,
+        sourcePublished?.precision ?? null,
+        sourcePublished?.status ?? null,
+        sourcePublished ? new Date(sourcePublished.observedAt) : null,
         obs.admitReason,
         textCardTranscription ? JSON.stringify(textCardTranscription) : null,
       ],
@@ -1014,16 +1101,40 @@ export class CuratedContentStore {
     const mediaType = normalizeSourceMediaType(content?.mediaType);
     const dedupKey = dedupKeyOf(accountId, mediaType, sourceId);
     const referenceImages = await this.prepareReferenceImages(accountId, sourceId, content?.referenceImages);
+    const sourcePublished = normalizePublishedEvidence(content?.publishedAtText, content?.publishedObservedAt);
     await this.pool.query(
       `INSERT INTO curated_content
          (account_id, content_type, source_id, dedup_key, title, body, author, source_url,
-          topics, reference_images, like_count, collect_count, admit_reason, bot_collected, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, NULL, NULL, $11, true, now())
+          topics, reference_images, source_published_at_text, source_published_at,
+          source_published_at_precision, source_published_at_status, source_published_at_observed_at,
+          like_count, collect_count, admit_reason, bot_collected, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15,
+               NULL, NULL, $16, true, now())
        ON CONFLICT (dedup_key) DO UPDATE SET
          bot_collected = true,
          reference_images = CASE
                               WHEN curated_content.reference_images = '[]'::jsonb THEN EXCLUDED.reference_images
                               ELSE curated_content.reference_images
+                            END,
+         source_published_at_text = CASE
+                              WHEN EXCLUDED.source_published_at_text IS NULL THEN curated_content.source_published_at_text
+                              ELSE EXCLUDED.source_published_at_text
+                            END,
+         source_published_at = CASE
+                              WHEN EXCLUDED.source_published_at_text IS NULL THEN curated_content.source_published_at
+                              ELSE EXCLUDED.source_published_at
+                            END,
+         source_published_at_precision = CASE
+                              WHEN EXCLUDED.source_published_at_text IS NULL THEN curated_content.source_published_at_precision
+                              ELSE EXCLUDED.source_published_at_precision
+                            END,
+         source_published_at_status = CASE
+                              WHEN EXCLUDED.source_published_at_text IS NULL THEN curated_content.source_published_at_status
+                              ELSE EXCLUDED.source_published_at_status
+                            END,
+         source_published_at_observed_at = CASE
+                              WHEN EXCLUDED.source_published_at_text IS NULL THEN curated_content.source_published_at_observed_at
+                              ELSE EXCLUDED.source_published_at_observed_at
                             END,
          updated_at = now()`,
       [
@@ -1037,6 +1148,13 @@ export class CuratedContentStore {
         content?.sourceUrl ?? null,
         content?.topics ?? [],
         JSON.stringify(referenceImages),
+        sourcePublished?.rawText ?? null,
+        sourcePublished?.publishedAt !== null && sourcePublished?.publishedAt !== undefined
+          ? new Date(sourcePublished.publishedAt)
+          : null,
+        sourcePublished?.precision ?? null,
+        sourcePublished?.status ?? null,
+        sourcePublished ? new Date(sourcePublished.observedAt) : null,
         'bot_collect',
       ],
     );
@@ -1176,7 +1294,9 @@ export class CuratedContentStore {
     try {
       const { rows } = await this.pool.query<CuratedPanelDbRow>(
         `SELECT id, account_id, content_type, source_id, title, body, author, source_url, topics,
-                like_count, collect_count, comment_count, counts_captured_at, reference_images,
+                like_count, collect_count, comment_count, counts_captured_at,
+                source_published_at_text, source_published_at, source_published_at_precision,
+                source_published_at_status, source_published_at_observed_at, reference_images,
                 visual_analysis, text_card_transcription,
                 bot_liked, bot_collected, admit_reason, first_seen_at, updated_at,
                 COUNT(*) OVER() AS total_count
@@ -1247,7 +1367,9 @@ export class CuratedContentStore {
     try {
       const { rows } = await this.pool.query<CuratedPanelDbRow>(
         `SELECT id, account_id, content_type, source_id, title, body, author, source_url, topics,
-                like_count, collect_count, comment_count, counts_captured_at, reference_images,
+                like_count, collect_count, comment_count, counts_captured_at,
+                source_published_at_text, source_published_at, source_published_at_precision,
+                source_published_at_status, source_published_at_observed_at, reference_images,
                 visual_analysis, text_card_transcription,
                 bot_liked, bot_collected, admit_reason, first_seen_at, updated_at,
                 COUNT(*) OVER() AS total_count
@@ -1336,7 +1458,9 @@ export class CuratedContentStore {
     try {
       const { rows } = await this.pool.query<CuratedPanelDbRow>(
         `SELECT id, account_id, content_type, source_id, title, body, author, source_url, topics,
-                like_count, collect_count, comment_count, counts_captured_at, reference_images,
+                like_count, collect_count, comment_count, counts_captured_at,
+                source_published_at_text, source_published_at, source_published_at_precision,
+                source_published_at_status, source_published_at_observed_at, reference_images,
                 visual_analysis, text_card_transcription,
                 bot_liked, bot_collected, admit_reason, first_seen_at, updated_at
          FROM curated_content

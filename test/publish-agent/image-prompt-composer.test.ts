@@ -352,11 +352,21 @@ describe('ImagePromptComposerRole（配图指令，仅桩 LLM、不依赖图源�
       sensedSource: 'vision',
       gateReason: 'ok',
       decidedAt: clock(),
+      cardSet: [
+        { title: '文章封面标题', bullets: [], tags: [], layoutKind: 'article_cover', paragraphs: ['第一句。', '第二句。'] },
+      ],
+      cardContentMapping: 'ordered_transcription',
+      cardSourceArrayIndices: [0],
+      cardSourceArrayIndexGroups: [[0, 1]],
     };
     const plan = await run(llm, setPlan([{ subject: 'a' }]), 60, 'food', undefined, coverPlan);
     assert.equal(plan.coverForm, 'text_card');
     assert.deepEqual(plan.coverCard, coverPlan.card);
     assert.deepEqual(plan.coverGate, { sensedForm: 'text_card', sensedSource: 'vision', gateReason: 'ok' });
+    assert.deepEqual(plan.cardSet, coverPlan.cardSet);
+    assert.equal(plan.cardContentMapping, 'ordered_transcription');
+    assert.deepEqual(plan.cardSourceArrayIndices, [0]);
+    assert.deepEqual(plan.cardSourceArrayIndexGroups, [[0, 1]]);
     assert.equal(plan.imagePrompts.length, 1, 'text_card 决策下 0 号生成式提示词照常产出');
     assert.match(plan.imagePrompts[0], /negative space at the top/, '0 号仍为封面档生成式提示词');
   });

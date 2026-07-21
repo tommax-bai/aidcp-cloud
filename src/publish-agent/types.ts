@@ -346,6 +346,10 @@ export interface CoverCardCopy {
   bullets: string[];
   /** 标签 ≤3（不含 # 前缀）。 */
   tags: string[];
+  /** 连续长文来源使用固定文章模板；缺省时逐字保持历史要点卡路径。 */
+  layoutKind?: 'article_cover' | 'article_page';
+  /** 文章模板的有序短句段落；要点卡缺省。 */
+  paragraphs?: string[];
 }
 
 /** 封面形态门禁原因（每跳可回放「为什么这帖没出文字卡」）。 */
@@ -381,10 +385,24 @@ export interface CoverCardPlan {
   cardContentMapping?: 'ordered_transcription' | 'body_fallback';
   /** Source reference_images array indices aligned 1:1 with cardSet when ordered_transcription is used. */
   cardSourceArrayIndices?: number[];
+  /** Article flow source groups aligned 1:1 with cardSet; each group is ordered and non-empty. */
+  cardSourceArrayIndexGroups?: number[][];
 }
 
 /** 封面渲染执行结局（诚实审计：降级用了生成图绝不标 text_card）。 */
 export type CoverRenderStatus = 'not_attempted' | 'rendered' | 'render_failed_generative' | 'render_failed_none';
+
+export interface TextCardRenderAuditMeta {
+  themeKey: string;
+  truncated: boolean;
+  sanitized: boolean;
+  reductions: string[];
+  contentLayoutKind?: 'article_cover' | 'article_page';
+  paragraphCount?: number;
+  bodyLineCount?: number;
+  contentBottom?: number;
+  occupancyRatio?: number;
+}
 
 /** 封面形态审计（沿 referenceImageAudit 先例并列落 ImageDirective 与 publishMetadata，面板 null-safe）。 */
 export interface CoverFormAudit {
@@ -393,7 +411,7 @@ export interface CoverFormAudit {
   sensedSource: 'cached' | 'vision' | 'none';
   gateReason: CoverCardGateReason;
   renderStatus: CoverRenderStatus;
-  renderMeta?: { themeKey: string; truncated: boolean; sanitized: boolean; reductions: string[] };
+  renderMeta?: TextCardRenderAuditMeta;
   /**
    * 帖级形态档影子审计（change textcard-carousel-form-parity，阶段0）：仅 AIDCP_POST_FORM_PROFILE 开时非空。
    * 面板 null-safe 解析（旧行/旗标关为 undefined）；运营据此核纯卡源稿频率与内页判定准确率。
@@ -403,8 +421,11 @@ export interface CoverFormAudit {
   perImageForms?: PerImageFormGuess[];
   /** 轮播每槽渲染结局（change textcard-carousel-form-parity 阶段1）：仅整帖渲卡时非空；[0] 与 renderStatus 一致。 */
   cardRenderStatuses?: CoverRenderStatus[];
+  /** 与 cardSet 对齐的逐卡布局审计；未渲成的槽为 null。 */
+  cardRenderMetas?: Array<TextCardRenderAuditMeta | null>;
   cardContentMapping?: 'ordered_transcription' | 'body_fallback';
   cardSourceArrayIndices?: number[];
+  cardSourceArrayIndexGroups?: number[][];
 }
 
 export interface ImageReferenceAudit {
@@ -535,6 +556,7 @@ export interface ImagePlan {
   cardSet?: (CoverCardCopy | null)[];
   cardContentMapping?: 'ordered_transcription' | 'body_fallback';
   cardSourceArrayIndices?: number[];
+  cardSourceArrayIndexGroups?: number[][];
   plannedAt: number;
 }
 
