@@ -363,35 +363,9 @@ test('/my-environments 只返回本客户归属(N2 权威过滤)', async () => {
   );
 });
 
-test('环境删除维护只走 customer-auth HTTP，停用/撤销普通会话后仍按目标客户轮询、认领和回执', async () => {
+test('旧 environment-maintenance poll/claim/result 已退役且不再调用客户存储', async () => {
   const fx = makeFakeStore();
   fx.users.set('acme', { userId: 'u1', key: 'ck_secret', status: 'enabled' });
-  const calls: Array<Record<string, unknown>> = [];
-  const maintenanceStore = fx.store as unknown as {
-    observeAndListEnvironmentMaintenance(
-      userId: string, installationId: string, environments: Array<Record<string, unknown>>,
-    ): Promise<Array<Record<string, unknown>>>;
-    claimEnvironmentDeletion(
-      userId: string, requestId: string, version: number, installationId: string,
-    ): Promise<Record<string, unknown>>;
-    completeEnvironmentDeletion(
-      userId: string, requestId: string, version: number, installationId: string, input: Record<string, unknown>,
-    ): Promise<Record<string, unknown>>;
-  };
-  maintenanceStore.observeAndListEnvironmentMaintenance = async (userId, installationId, environments) => {
-    calls.push({ kind: 'poll', userId, installationId, environments });
-    return [{ requestId: 'request-1', version: 1, envKey: 'p1', environmentName: '环境一', platform: 'xiaohongshu',
-      state: 'waiting_edge', cleanupReady: true, cleanupReason: 'ready' }];
-  };
-  maintenanceStore.claimEnvironmentDeletion = async (userId, requestId, version, installationId) => {
-    calls.push({ kind: 'claim', userId, requestId, version, installationId });
-    return { ok: true, requestId, version, envKey: 'p1', environmentName: '环境一', platform: 'xiaohongshu',
-      state: 'deleting', idempotent: false };
-  };
-  maintenanceStore.completeEnvironmentDeletion = async (userId, requestId, version, installationId, input) => {
-    calls.push({ kind: 'result', userId, requestId, version, installationId, input });
-    return { ok: true, requestId, envKey: 'p1', state: 'deleted', idempotent: false };
-  };
   const revocation = new TokenRevocationStore();
   await withServer(
     { store: fx.store, revocation, rateLimiter: new LoginRateLimiter() },
@@ -401,10 +375,6 @@ test('环境删除维护只走 customer-auth HTTP，停用/撤销普通会话后
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ name: 'acme', key: 'ck_secret' }),
       })).json() as { token: string };
-      const verified = verifyJwt(login.token, CLIENT_SECRET);
-      assert.equal(verified.valid, true);
-      if (verified.valid) revocation.revoke(verified.payload.jti, verified.payload.exp);
-      fx.users.get('acme')!.status = 'disabled';
       const headers = { authorization: `Bearer ${login.token}`, 'content-type': 'application/json' };
 
       const poll = await fetch(`${base}/environment-maintenance/poll`, {
@@ -413,25 +383,20 @@ test('环境删除维护只走 customer-auth HTTP，停用/撤销普通会话后
           envKey: 'p1', environmentName: '环境一', accountId: 'must-not-pass',
         }] }),
       });
-      assert.equal(poll.status, 200);
-      const pollBody = await poll.json() as { deletions: Array<{ envKey: string }> };
-      assert.deepEqual(pollBody.deletions.map((item) => item.envKey), ['p1']);
+      assert.equal(poll.status, 404);
 
       const claim = await fetch(`${base}/environment-maintenance/deletions/request-1/claim`, {
         method: 'POST', headers, body: JSON.stringify({ installationId: 'installation-1', version: 1 }),
       });
-      assert.equal(claim.status, 200);
+      assert.equal(claim.status, 404);
       const result = await fetch(`${base}/environment-maintenance/deletions/request-1/result`, {
         method: 'PUT', headers: { ...headers, 'idempotency-key': 'result-1' },
         body: JSON.stringify({ installationId: 'installation-1', version: 1,
           status: 'succeeded', resultKind: 'deleted' }),
       });
-      assert.equal(result.status, 200);
+      assert.equal(result.status, 404);
     },
   );
-  assert.deepEqual(calls.map((call) => call.kind), ['poll', 'claim', 'result']);
-  assert.equal(calls.every((call) => call.userId === 'u1'), true);
-  assert.deepEqual(calls[0]?.environments, [{ envKey: 'p1', environmentName: '环境一' }]);
 });
 
 test('POST /persona-auto-fill/runs 只收已确认人设，拒绝目标选择器/自动策略并按客户幂等', async () => {

@@ -362,6 +362,19 @@ export type RequestEnvironmentDeletionResult =
       state: 'waiting_edge' | 'deleting' | 'delete_failed' | 'deleted'; idempotent: boolean }
   | { ok: false; reason: 'not_found' | 'already_deleted' | 'idempotency_conflict' };
 
+export type BeginDirectEnvironmentDeletionResult =
+  | { ok: true; action: 'execute'; requestId: string; version: number; envKey: string; platform: string | null;
+      targetUserId: string | null; state: 'deleting'; idempotent: boolean }
+  | { ok: true; action: 'in_progress'; requestId: string; version: number; envKey: string; platform: string | null;
+      targetUserId: string | null; state: 'deleting'; idempotent: true }
+  | { ok: true; action: 'complete'; requestId: string; version: number; envKey: string; platform: string | null;
+      targetUserId: string | null; state: 'deleted'; idempotent: true }
+  | { ok: false; reason: 'not_found' | 'already_deleted' };
+
+export type FinishDirectEnvironmentDeletionResult =
+  | { ok: true; requestId: string; envKey: string; state: 'deleted' | 'delete_failed'; idempotent: boolean }
+  | { ok: false; reason: 'not_found' | 'request_version_mismatch' | 'not_deleting' };
+
 export type ClaimEnvironmentDeletionResult =
   | { ok: true; requestId: string; version: number; envKey: string; environmentName: string; platform: string | null;
       state: 'deleting'; idempotent: boolean }
@@ -1921,7 +1934,184 @@ export class ClientUserStore {
     }
   }
 
-  /** 内部管理员只写删除意图；实际 AdsPower 删除必须由唯一持有该环境的 Edge 经 HTTP 拉取执行。 */
+  /**
+   * Cloud direct-delete admission. A short transaction serializes one envKey and freezes scheduling before
+   * the external AdsPower call. A fresh in-flight row is never executed twice; stale/failed/legacy waiting rows
+   * are taken over with an incremented version so a late completion cannot win.
+   */
+  async beginDirectEnvironmentDeletion(
+    envKey: string, requestedBy: string, idempotencyKey: string,
+  ): Promise<BeginDirectEnvironmentDeletionResult> {
+    const key = envKey.trim();
+    const idem = idempotencyKey.trim();
+    if (!key) return { ok: false, reason: 'not_found' };
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const env = await client.query<{
+        env_key: string; platform: string | null; lifecycle_state: string; target_user_id: string | null;
+      }>(
+        `SELECT e.env_key,e.platform,e.lifecycle_state,
+                COALESCE(s.user_id, i.user_id) AS target_user_id
+         FROM client_environments e
+         LEFT JOIN client_env_scope s ON s.env_key=e.env_key AND s.source='admin'
+         LEFT JOIN LATERAL (
+           SELECT user_id FROM client_environment_installations i0
+           WHERE i0.env_key=e.env_key ORDER BY last_seen_at DESC LIMIT 1
+         ) i ON true
+         WHERE e.env_key=$1 FOR UPDATE OF e`,
+        [key],
+      );
+      const row = env.rows[0];
+      if (!row) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'not_found' };
+      }
+      const existing = await client.query<{
+        request_id: string; version: number; state: string; target_user_id: string | null;
+        idempotency_key: string; fresh: boolean;
+      }>(
+        `SELECT request_id,version,state,target_user_id,idempotency_key,
+                updated_at >= now()-interval '30 seconds' AS fresh
+         FROM client_environment_deletion_requests
+         WHERE env_key=$1 AND (idempotency_key=$2 OR state IN ('waiting_edge','deleting','delete_failed'))
+         ORDER BY requested_at DESC LIMIT 1 FOR UPDATE`,
+        [key, idem],
+      );
+      const prior = existing.rows[0];
+      if (prior?.state === 'deleted') {
+        await client.query('COMMIT');
+        this.blockedAutomationEnvKeys.add(key);
+        return { ok: true, action: 'complete', requestId: prior.request_id, version: prior.version, envKey: key,
+          platform: row.platform, targetUserId: prior.target_user_id, state: 'deleted', idempotent: true };
+      }
+      if (row.lifecycle_state === 'deleted') {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'already_deleted' };
+      }
+      if (prior?.state === 'deleting' && prior.fresh) {
+        await client.query('COMMIT');
+        this.blockedAutomationEnvKeys.add(key);
+        return { ok: true, action: 'in_progress', requestId: prior.request_id, version: prior.version, envKey: key,
+          platform: row.platform, targetUserId: prior.target_user_id, state: 'deleting', idempotent: true };
+      }
+      if (prior) {
+        const nextVersion = prior.version + 1;
+        await client.query(
+          `UPDATE client_environment_deletion_requests
+           SET state='deleting',version=$2,claimed_installation_id=NULL,claimed_at=NULL,
+               result_key=NULL,result_kind=NULL,result_error=NULL,result_at=NULL,updated_at=now()
+           WHERE request_id=$1`,
+          [prior.request_id, nextVersion],
+        );
+        await client.query(
+          `UPDATE client_environments SET lifecycle_state='deleting',deleted_at=NULL,updated_at=now() WHERE env_key=$1`,
+          [key],
+        );
+        await client.query('COMMIT');
+        this.blockedAutomationEnvKeys.add(key);
+        return { ok: true, action: 'execute', requestId: prior.request_id, version: nextVersion, envKey: key,
+          platform: row.platform, targetUserId: prior.target_user_id ?? row.target_user_id,
+          state: 'deleting', idempotent: true };
+      }
+      const requestId = crypto.randomUUID();
+      await client.query(
+        `INSERT INTO client_environment_deletion_requests
+           (request_id,env_key,idempotency_key,requested_by,target_user_id,state)
+         VALUES ($1,$2,$3,$4,$5,'deleting')`,
+        [requestId, key, idem || requestId, requestedBy, row.target_user_id],
+      );
+      await client.query(
+        `UPDATE client_environments SET lifecycle_state='deleting',deleted_at=NULL,updated_at=now() WHERE env_key=$1`,
+        [key],
+      );
+      await client.query('COMMIT');
+      this.blockedAutomationEnvKeys.add(key);
+      return { ok: true, action: 'execute', requestId, version: 1, envKey: key, platform: row.platform,
+        targetUserId: row.target_user_id, state: 'deleting', idempotent: false };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Persist the Cloud direct AdsPower result. Only the matching request version can reach a terminal state. */
+  async finishDirectEnvironmentDeletion(
+    requestId: string,
+    version: number,
+    input: { status: 'succeeded' | 'failed'; resultKind?: 'deleted' | 'already_missing'; error?: string | null },
+  ): Promise<FinishDirectEnvironmentDeletionResult> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const request = await client.query<{ env_key: string; version: number; state: string; result_kind: string | null }>(
+        `SELECT env_key,version,state,result_kind
+         FROM client_environment_deletion_requests WHERE request_id=$1 FOR UPDATE`,
+        [requestId],
+      );
+      const row = request.rows[0];
+      if (!row) { await client.query('ROLLBACK'); return { ok: false, reason: 'not_found' }; }
+      if (row.version !== version) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'request_version_mismatch' };
+      }
+      if (row.state === 'deleted') {
+        await client.query('COMMIT');
+        return { ok: true, requestId, envKey: row.env_key, state: 'deleted', idempotent: true };
+      }
+      if (row.state !== 'deleting') {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'not_deleting' };
+      }
+      if (input.status === 'failed') {
+        await client.query(
+          `UPDATE client_environment_deletion_requests
+           SET state='delete_failed',result_error=$2,result_at=now(),updated_at=now() WHERE request_id=$1`,
+          [requestId, (input.error ?? 'adspower_delete_failed').slice(0, 1000)],
+        );
+        await client.query(
+          `UPDATE client_environments SET lifecycle_state='delete_failed',updated_at=now() WHERE env_key=$1`,
+          [row.env_key],
+        );
+        await client.query('COMMIT');
+        return { ok: true, requestId, envKey: row.env_key, state: 'delete_failed', idempotent: false };
+      }
+      if (input.resultKind !== 'deleted' && input.resultKind !== 'already_missing') {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'not_deleting' };
+      }
+      await client.query(
+        `INSERT INTO client_env_scope_audit
+           (user_id,env_key,label,platform,source,assigned_by,assigned_at,revoked_by,reason)
+         SELECT user_id,env_key,label,platform,source,assigned_by,assigned_at,$2,'admin_revoked'
+         FROM client_env_scope WHERE env_key=$1 AND source='admin'
+         ON CONFLICT (user_id,env_key,assigned_at,reason) DO NOTHING`,
+        [row.env_key, `environment-delete:${requestId}`],
+      );
+      await client.query(`DELETE FROM client_env_scope WHERE env_key=$1 AND source='admin'`, [row.env_key]);
+      await client.query(
+        `UPDATE client_environment_deletion_requests
+         SET state='deleted',result_kind=$2,result_error=NULL,result_at=now(),updated_at=now()
+         WHERE request_id=$1`,
+        [requestId, input.resultKind],
+      );
+      await client.query(
+        `UPDATE client_environments SET lifecycle_state='deleted',deleted_at=now(),updated_at=now() WHERE env_key=$1`,
+        [row.env_key],
+      );
+      await client.query('COMMIT');
+      return { ok: true, requestId, envKey: row.env_key, state: 'deleted', idempotent: false };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Legacy Edge-maintenance deletion intent retained only for historical compatibility. */
   async requestEnvironmentDeletion(
     envKey: string, requestedBy: string, idempotencyKey: string,
   ): Promise<RequestEnvironmentDeletionResult> {

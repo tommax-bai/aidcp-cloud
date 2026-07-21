@@ -542,6 +542,66 @@ test('environment deletion request is idempotent and keeps the first target owne
   assert.equal(calls.some((call) => call.sql === 'COMMIT'), true);
 });
 
+test('direct environment deletion starts in deleting and freezes the environment before AdsPower', async () => {
+  const { pool, calls } = txPool((sql) => {
+    if (/SELECT e\.env_key,e\.platform,e\.lifecycle_state/.test(sql)) {
+      return { rows: [{ env_key: 'env-1', platform: 'facebook', lifecycle_state: 'active', target_user_id: 'u1' }] };
+    }
+    if (/updated_at >= now\(\)-interval '30 seconds' AS fresh/.test(sql)) return { rows: [] };
+    return { rows: [] };
+  });
+  const store = new ClientUserStore({ pool });
+  const result = await store.beginDirectEnvironmentDeletion('env-1', 'admin', 'idem-1');
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.action, 'execute');
+    assert.equal(result.state, 'deleting');
+    assert.equal(result.version, 1);
+  }
+  assert.equal(calls.some((call) => /VALUES \(\$1,\$2,\$3,\$4,\$5,'deleting'\)/.test(call.sql)), true);
+  assert.equal(calls.some((call) => /lifecycle_state='deleting'/.test(call.sql)), true);
+  assert.equal(calls.at(-1)?.sql, 'COMMIT');
+  assert.equal(store.isAutomationAllowedForEdgeId('ads-env-1'), false);
+});
+
+test('fresh direct deletion is idempotent and does not admit a second external execution', async () => {
+  const { pool, calls } = txPool((sql) => {
+    if (/SELECT e\.env_key,e\.platform,e\.lifecycle_state/.test(sql)) {
+      return { rows: [{ env_key: 'env-1', platform: 'facebook', lifecycle_state: 'deleting', target_user_id: 'u1' }] };
+    }
+    if (/updated_at >= now\(\)-interval '30 seconds' AS fresh/.test(sql)) {
+      return { rows: [{ request_id: 'request-1', version: 2, state: 'deleting', target_user_id: 'u1',
+        idempotency_key: 'idem-1', fresh: true }] };
+    }
+    return { rows: [] };
+  });
+  const store = new ClientUserStore({ pool });
+  assert.deepEqual(await store.beginDirectEnvironmentDeletion('env-1', 'admin', 'idem-2'), {
+    ok: true, action: 'in_progress', requestId: 'request-1', version: 2, envKey: 'env-1', platform: 'facebook',
+    targetUserId: 'u1', state: 'deleting', idempotent: true,
+  });
+  assert.equal(calls.some((call) => /^UPDATE client_environment_deletion_requests/.test(call.sql)), false);
+  assert.equal(calls.at(-1)?.sql, 'COMMIT');
+});
+
+test('direct AdsPower success soft-deletes environment and active scope with version fencing', async () => {
+  const { pool, calls } = txPool((sql) => {
+    if (/SELECT env_key,version,state,result_kind/.test(sql)) {
+      return { rows: [{ env_key: 'env-1', version: 3, state: 'deleting', result_kind: null }] };
+    }
+    return { rows: [] };
+  });
+  const store = new ClientUserStore({ pool });
+  assert.deepEqual(await store.finishDirectEnvironmentDeletion('request-1', 3, {
+    status: 'succeeded', resultKind: 'already_missing',
+  }), { ok: true, requestId: 'request-1', envKey: 'env-1', state: 'deleted', idempotent: false });
+  assert.equal(calls.some((call) => /DELETE FROM client_env_scope WHERE env_key=\$1 AND source='admin'/.test(call.sql)), true);
+  assert.equal(calls.some((call) => /SET state='deleted',result_kind=\$2/.test(call.sql)
+    && call.params?.[1] === 'already_missing'), true);
+  assert.equal(calls.some((call) => /lifecycle_state='deleted',deleted_at=now\(\)/.test(call.sql)), true);
+  assert.equal(calls.at(-1)?.sql, 'COMMIT');
+});
+
 test('environment deletion claim rejects stale request version before inspecting holders', async () => {
   const { pool, calls } = txPool((sql) => {
     if (/WHERE d\.request_id=\$1 FOR UPDATE OF d,e/.test(sql)) {

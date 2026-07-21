@@ -557,8 +557,8 @@ function createRequestHandler(
       return;
     }
 
-    // 环境资产生命周期（change admin-environment-lifecycle-management）：内部 JWT 管理面。
-    // 这里只写 Cloud 删除意图；AdsPower 物理删除由 Edge 经客户鉴权 HTTP 拉取、认领并回执。
+    // 环境资产生命周期：内部 JWT 管理面。删除由 Cloud 直接调用服务端 AdsPower API；
+    // 只有 AdsPower 成功且 AIDCP 终态落库后才返回 deleted，不再创建 Edge maintenance 责任。
     if (method === 'GET' && url === '/api/environments') {
       if (!deps.clientUsers) {
         sendJson(res, 503, { error: 'client_users_unavailable' });
@@ -569,8 +569,8 @@ function createRequestHandler(
     }
     const environmentDeletion = /^\/api\/environments\/([^/]+)\/deletion$/.exec(url);
     if (method === 'POST' && environmentDeletion) {
-      if (!deps.clientUsers) {
-        sendJson(res, 503, { error: 'client_users_unavailable' });
+      if (!deps.clientUsers || !deps.environmentDeletion) {
+        sendJson(res, 503, { error: 'environment_deletion_unavailable' });
         return;
       }
       let envKey: string;
@@ -589,19 +589,21 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request', reason: 'exact_environment_confirmation_required' });
         return;
       }
-      const result = await deps.clientUsers.requestEnvironmentDeletion(
-        envKey, verified.payload.sub, idempotencyKey,
-      );
+      const result = await deps.environmentDeletion.delete(envKey, verified.payload.sub, idempotencyKey);
       if (!result.ok) {
-        sendJson(res, result.reason === 'not_found' ? 404 : 409, { error: result.reason });
+        const status = result.reason === 'not_found'
+          ? 404
+          : result.reason === 'already_deleted' || result.reason === 'deletion_in_progress'
+            ? 409
+            : result.reason === 'adspower_key_missing'
+              ? 503
+              : result.reason === 'persistence_failed'
+                ? 500
+                : 502;
+        sendJson(res, status, { error: result.reason, ...(result.deletion ? { deletion: result.deletion } : {}) });
         return;
       }
-      // 视频号沿用既有 offboard/tombstone 安全闭环；未到 tombstoned/purged 时 Edge 认领会 fail-closed。
-      if (result.platform === 'wechat_channels' && result.targetUserId) {
-        const offboard = await deps.clientUsers.beginEnvironmentOffboard(result.targetUserId, envKey);
-        if (offboard.ok) await deps.onClientOffboardCreated?.(offboard.offboard);
-      }
-      sendJson(res, result.idempotent ? 200 : 202, { deletion: result });
+      sendJson(res, 200, { deletion: result.deletion });
       return;
     }
 

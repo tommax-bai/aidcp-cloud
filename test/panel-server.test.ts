@@ -115,7 +115,7 @@ test('自检拒绝保留端口（forbidden_port）', async () => {
   await h.close();
 });
 
-test('环境管理 API 展示资产/账号摘要，并以精确 envKey 确认创建 HTTP 删除意图', async () => {
+test('环境管理 API 展示资产/账号摘要，并以精确 envKey 确认执行 Cloud 直删终态', async () => {
   const requests: Array<Record<string, unknown>> = [];
   const clientUsers = {
     async listAllEnvironments() {
@@ -133,13 +133,16 @@ test('环境管理 API 展示资产/账号摘要，并以精确 envKey 确认创
     async environmentSummariesByAccount() {
       return { default: { activeCount: 1, deletingCount: 0, onlineCount: 0 } };
     },
-    async requestEnvironmentDeletion(envKey: string, requestedBy: string, idempotencyKey: string) {
+  };
+  const environmentDeletion = {
+    async delete(envKey: string, requestedBy: string, idempotencyKey: string) {
       requests.push({ envKey, requestedBy, idempotencyKey });
-      return { ok: true as const, requestId: 'request-1', version: 1, envKey, platform: 'xiaohongshu', targetUserId: 'u1',
-        state: 'waiting_edge' as const, idempotent: false };
+      return { ok: true as const, deletion: { requestId: 'request-1', version: 1, envKey,
+        platform: 'xiaohongshu', targetUserId: 'u1', state: 'deleted' as const,
+        resultKind: 'deleted' as const, idempotent: false } };
     },
   };
-  const environmentDeps = { ...deps, clientUsers } as unknown as PanelDeps;
+  const environmentDeps = { ...deps, clientUsers, environmentDeletion } as unknown as PanelDeps;
   const h = await startPanelApi(environmentDeps, makeConfig());
   assert.equal(h.started, true);
   const base = `http://127.0.0.1:${h.port}`;
@@ -167,9 +170,43 @@ test('环境管理 API 展示资产/账号摘要，并以精确 envKey 确认创
       method: 'POST', headers: auth,
       body: JSON.stringify({ confirmEnvKey: 'profile-1', idempotencyKey: 'idem-1' }),
     });
-    assert.equal(accepted.status, 202);
-    assert.equal(((await accepted.json()) as { deletion: { state: string } }).deletion.state, 'waiting_edge');
+    assert.equal(accepted.status, 200);
+    assert.equal(((await accepted.json()) as { deletion: { state: string } }).deletion.state, 'deleted');
     assert.deepEqual(requests, [{ envKey: 'profile-1', requestedBy: 'alice', idempotencyKey: 'idem-1' }]);
+  } finally {
+    await h.close();
+  }
+});
+
+test('环境直删失败返回真实非成功状态，不把 AdsPower 失败写成已删除', async () => {
+  const clientUsers = { async listAllEnvironments() { return []; } };
+  const environmentDeletion = {
+    async delete() {
+      return { ok: false as const, reason: 'adspower_unreachable' as const,
+        deletion: { requestId: 'request-1', version: 1, envKey: 'profile-1', platform: 'facebook',
+          targetUserId: 'u1', state: 'delete_failed' as const, resultKind: null, idempotent: false } };
+    },
+  };
+  const h = await startPanelApi({ ...deps, clientUsers, environmentDeletion } as unknown as PanelDeps, makeConfig());
+  assert.equal(h.started, true);
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = await login.json() as { token: string };
+    const response = await fetch(`${base}/api/environments/profile-1/deletion`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ confirmEnvKey: 'profile-1', idempotencyKey: 'idem-1' }),
+    });
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), {
+      error: 'adspower_unreachable',
+      deletion: { requestId: 'request-1', version: 1, envKey: 'profile-1', platform: 'facebook',
+        targetUserId: 'u1', state: 'delete_failed', resultKind: null, idempotent: false },
+    });
   } finally {
     await h.close();
   }

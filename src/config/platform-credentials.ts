@@ -7,7 +7,7 @@
 
 import { TEXT_PROVIDERS, type TextProviderId } from '../llm/providers.js';
 
-export type PlatformCredentialGroup = 'model_api' | 'billing_access';
+export type PlatformCredentialGroup = 'model_api' | 'billing_access' | 'browser_service';
 
 export interface PlatformCredentialDefinition {
   provider: string;
@@ -23,6 +23,7 @@ export interface PlatformCredentialDefinition {
 
 const MODEL_API_GROUP = '模型 API Key';
 const BILLING_ACCESS_GROUP = '账单查询 AccessKey';
+const BROWSER_SERVICE_GROUP = '浏览器服务 API Key';
 
 const modelCredentials: PlatformCredentialDefinition[] = (Object.keys(TEXT_PROVIDERS) as TextProviderId[]).map((id) => ({
   provider: id,
@@ -38,6 +39,17 @@ const modelCredentials: PlatformCredentialDefinition[] = (Object.keys(TEXT_PROVI
 
 export const PLATFORM_CREDENTIALS: readonly PlatformCredentialDefinition[] = [
   ...modelCredentials,
+  {
+    provider: 'adspower',
+    field: 'api_key',
+    label: 'AdsPower API Key',
+    providerLabel: 'AdsPower',
+    group: 'browser_service',
+    groupLabel: BROWSER_SERVICE_GROUP,
+    envKeys: ['ADS_API_KEY', 'ADSPOWER_API_KEY'],
+    secretKind: 'api_key',
+    restartRequired: false,
+  },
   {
     provider: 'aliyun',
     field: 'access_key_id',
