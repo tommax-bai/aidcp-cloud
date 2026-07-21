@@ -179,7 +179,7 @@ export class CuratedNoteEvaluator extends BaseRole {
 
     // 开关关 → 回退「仅共鸣」：预筛过即纳入（不调 LLM、不评相关性/丰富度）。
     if (!this.llmEvalEnabled) {
-      await this.admit(accountId, note, topics, res.reason, referenceImages, textCardTranscription);
+      await this.admit(accountId, note, topics, res.reason, referenceImages, snapshotAt, textCardTranscription);
       return;
     }
 
@@ -201,7 +201,7 @@ export class CuratedNoteEvaluator extends BaseRole {
       this.log(`评估不准入 note=${d.noteId}：${parsed.reason}`);
       return;
     }
-    await this.admit(accountId, note, topics, 'llm_eval', referenceImages, textCardTranscription);
+    await this.admit(accountId, note, topics, 'llm_eval', referenceImages, snapshotAt, textCardTranscription);
   }
 
   /** 落精选语料（fire-and-forget：失败只 log，不抛、不阻塞浏览主路径）。 */
@@ -211,6 +211,7 @@ export class CuratedNoteEvaluator extends BaseRole {
     topics: string[],
     admitReason: string,
     referenceImages: CuratedReferenceImageInput[],
+    publishedObservedAt: number,
     textCardTranscription?: TextCardTranscription,
   ): Promise<void> {
     try {
@@ -225,6 +226,7 @@ export class CuratedNoteEvaluator extends BaseRole {
         topics,
         likeCount: d.likeCount,
         collectCount: d.collectCount,
+        ...(d.publishedAtText ? { publishedAtText: d.publishedAtText, publishedObservedAt } : {}),
         admitReason,
         referenceImages,
         ...(textCardTranscription ? { textCardTranscription } : {}),

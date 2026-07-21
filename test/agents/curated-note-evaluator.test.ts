@@ -40,6 +40,7 @@ interface RunOpts {
   llmEvalEnabled?: boolean;
   accountId?: string;
   eventAccountId?: string;
+  eventTs?: number;
   textCardTranscriber?: TextCardTranscriber;
 }
 
@@ -63,7 +64,7 @@ async function run(detail: NoteDetailData, opts: RunOpts = {}) {
     ...(opts.textCardTranscriber ? { textCardTranscriber: opts.textCardTranscriber } : {}),
   });
   role.subscribe();
-  bus.emit('note.detail.arrived', { detail, accountId: opts.eventAccountId, ts: Date.now() });
+  bus.emit('note.detail.arrived', { detail, accountId: opts.eventAccountId, ts: opts.eventTs ?? Date.now() });
   await sleep(30);
   return { llmCalled, upserts };
 }
@@ -120,13 +121,16 @@ describe('CuratedNoteEvaluator 两段式准入', () => {
   });
 
   it('预筛过(收藏达地板) + 评估准入 → upsert(admitReason=llm_eval)', async () => {
-    const r = await run(mkDetail({ collectCount: 100 }));
+    const eventTs = Date.parse('2026-07-21T07:30:00.000Z');
+    const r = await run(mkDetail({ collectCount: 100, publishedAtText: '3小时前' }), { eventTs });
     assert.equal(r.llmCalled, true);
     assert.equal(r.upserts.length, 1);
     assert.equal(r.upserts[0].admitReason, 'llm_eval');
     assert.equal(r.upserts[0].contentType, 'image_text');
     assert.equal(r.upserts[0].sourceId, 'n1');
     assert.equal(r.upserts[0].accountId, 'acc-1');
+    assert.equal(r.upserts[0].publishedAtText, '3小时前');
+    assert.equal(r.upserts[0].publishedObservedAt, eventTs);
   });
 
   it('预筛过 + 评估判不相关 → 不纳入', async () => {
