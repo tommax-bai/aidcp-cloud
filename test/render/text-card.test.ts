@@ -78,6 +78,31 @@ test('重试恒定跨实例：新工厂实例渲同 (账号, 帖子) 与首次�
   assert.ok(a.png.equals(b.png), 'retry with a fresh renderer must be byte-identical');
 });
 
+test('文章内页固定为简洁阅读模板，同输入字节一致并记录密度', async () => {
+  const renderer = await mustCreateRenderer();
+  const copy: TextCardCopy = {
+    title: '外界为何会替代内在',
+    bullets: [],
+    tags: [],
+    layoutKind: 'article_page',
+    paragraphs: Array.from({ length: 12 }, (_, index) => `这是重新理解自己的第${index + 1}个完整句子。`),
+  };
+  const first = await renderer.render(copy, GOLDEN_SEED);
+  const second = await renderer.render(copy, GOLDEN_SEED);
+  assert.ok(first.ok, JSON.stringify(first));
+  assert.ok(second.ok);
+  assert.ok(first.png.equals(second.png));
+  assert.deepEqual(pngDims(first.png), { width: OUTPUT_WIDTH, height: OUTPUT_HEIGHT });
+  assert.equal(first.meta.themeKey, 'article-simple-v1');
+  assert.equal(first.meta.contentLayoutKind, 'article_page');
+  assert.equal(first.meta.paragraphCount, 12);
+  assert.ok((first.meta.occupancyRatio ?? 0) >= 0.80);
+
+  const raw = await (renderer as TextCardRendererInternal).renderRaw(copy, GOLDEN_SEED);
+  assert.ok(raw.ok);
+  assert.doesNotMatch(raw.svg, /MIND NOTES|\d{2}\s*\/\s*\d{2}|border-radius/i);
+});
+
 test('不同账号 → 不同色板 → 产物字节互异', async () => {
   // 先用主题选取器找两个色板互异的账号（确定性，不靠碰运气）。
   const candidates = Array.from({ length: 32 }, (_, i) => `acct-${i}`);

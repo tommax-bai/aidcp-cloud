@@ -383,6 +383,51 @@ describe('ImageGeneratorRole — 确定性文字卡视觉保真审计', () => {
     assert.equal(d.imageUrls.length, 1);
   });
 
+  test('文章卡视觉审核失败后不做等价重渲染，并记录逐卡密度元数据', async () => {
+    const audit = auditorSequence([{ status: 'failed', reason: '视觉层级不合格', auditedAt: clock() }]);
+    const plan = auditedPlan();
+    plan.cardSet = [{
+      title: '外界为何会替代内在',
+      bullets: [],
+      tags: [],
+      layoutKind: 'article_page',
+      paragraphs: Array.from({ length: 12 }, (_, index) => `这是第${index + 1}个完整的文章短句。`),
+    }];
+    let renderCalls = 0;
+    let receivedParagraphs = 0;
+    const renderer: TextCardRenderer = {
+      render: async (copy) => {
+        renderCalls++;
+        receivedParagraphs = copy.paragraphs?.length ?? 0;
+        return {
+          ok: true,
+          png: Buffer.from('article-png'),
+          meta: {
+            ...RENDER_META,
+            themeKey: 'article-simple-v1',
+            contentLayoutKind: 'article_page',
+            paragraphCount: 12,
+            bodyLineCount: 12,
+            contentBottom: 1190,
+            occupancyRatio: 1190 / 1440,
+          },
+        };
+      },
+    };
+    const { d, store } = await run(
+      { generate: async () => ({ url: null }) },
+      plan,
+      { getTextCardRenderer: () => renderer, visualAuditor: audit.auditor, auditEnabled: () => true },
+    );
+    assert.equal(renderCalls, 1);
+    assert.equal(receivedParagraphs, 12);
+    assert.equal(audit.calls.length, 1);
+    assert.equal(store.puts.filter((key) => key.endsWith('/0.png')).length, 1);
+    assert.equal(d.imageUrls.length, 0);
+    assert.equal(d.coverFormAudit?.cardRenderMetas?.[0]?.paragraphCount, 12);
+    assert.equal(d.coverFormAudit?.cardRenderMetas?.[0]?.occupancyRatio, 1190 / 1440);
+  });
+
   test('两次审计仍失败则丢槽，保留两次失败记录', async () => {
     const audit = auditorSequence([
       { status: 'failed', reason: '色彩偏差', auditedAt: clock() },

@@ -11,6 +11,7 @@ import type {
 } from '../types.js';
 import {
   buildCoverCardCopyPrompt,
+  buildArticleCardSetPrompt,
   buildCardSetPrompt,
   IMAGE_COUNT_HARD_MAX,
   type CardSetSourceSlot,
@@ -21,6 +22,7 @@ import type { ChatLlmClient } from '../../llm/qwen.js';
 import type { CoverFormSensor, CoverFormSenseResult } from '../cover-form-sensor.js';
 import type { PostImageFormProfileService } from '../post-image-form-profile.js';
 import { orderedTextCardTexts, type TextCardTranscription } from '../../cache/curated-content-store.js';
+import type { TextCardRenderer } from '../../render/index.js';
 
 /**
  * CoverCardWriter — 封面形态决策 + 卡面文案（change textcard-cover-form）。
@@ -90,6 +92,8 @@ export interface CoverCardWriterDeps {
   renderEnabled?: () => boolean;
   /** 渲染出口就绪探针（工厂加载成功且字体校验过）。 */
   rendererAvailable?: () => boolean;
+  /** 文章卡文案阶段复用最终 renderer 的同一字体度量。 */
+  getTextCardRenderer?: () => TextCardRenderer | null;
   /** OSS 上传器就绪（渲染字节无 provider 临时 URL 可用，缺 OSS 在门禁即关）。 */
   ossAvailable?: () => boolean;
   /** text_card 置信阈值（消费端施加；判定原样持久化在感知层）。 */
@@ -103,6 +107,45 @@ interface WriterInput {
   content: string;
   /** 洗稿产物标签（防搬运：候选标签只来自洗稿产物，绝不喂原笔记话题）。 */
   tags: string[];
+}
+
+/** 只用转写结构判定文章流，避免解析视觉模型自由文本中的否定词。 */
+export function isArticleFlowSource(slots: CardSetSourceSlot[]): boolean {
+  if (slots.length < 2) return false;
+  const articleLike = slots.filter(({ text }) => {
+    const compactLength = text.replace(/\s+/g, '').length;
+    const sentenceCount = (text.match(/[。！？!?；;]/g) ?? []).length;
+    return compactLength >= 80 && sentenceCount >= 3;
+  }).length;
+  return articleLike * 2 >= slots.length;
+}
+
+export function shouldUseArticleFlowSource(slots: CardSetSourceSlot[], usableImageCount: number): boolean {
+  if (usableImageCount < 2 || slots.length / usableImageCount < 0.75) return false;
+  return isArticleFlowSource(slots);
+}
+
+/** 将 M 个来源按序稳定分成 N 个连续非空桶，整篇开头到结尾都被覆盖。 */
+export function groupArticleSourceSlots(slots: CardSetSourceSlot[], count: number): CardSetSourceSlot[] {
+  const n = Math.max(1, Math.min(Math.floor(count), slots.length));
+  const base = Math.floor(slots.length / n);
+  let remainder = slots.length % n;
+  let cursor = 0;
+  const groups: CardSetSourceSlot[] = [];
+  for (let index = 0; index < n; index++) {
+    const hasExtra = remainder > 0;
+    const size = base + (hasExtra ? 1 : 0);
+    if (hasExtra) remainder--;
+    const members = slots.slice(cursor, cursor + size);
+    cursor += size;
+    const sourceArrayIndices = members.map((member) => member.sourceArrayIndex);
+    groups.push({
+      sourceArrayIndex: sourceArrayIndices[0],
+      sourceArrayIndices,
+      text: members.map((member) => member.text).join('\n\n'),
+    });
+  }
+  return groups;
 }
 
 export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardPlan> {
@@ -120,6 +163,7 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
   private renderEnabled: () => boolean;
   private carouselEnabled: () => boolean;
   private rendererAvailable: () => boolean;
+  private getTextCardRenderer: () => TextCardRenderer | null;
   private ossAvailable: () => boolean;
   private minConfidence: number;
   private maxImages: number;
@@ -132,6 +176,7 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
     this.renderEnabled = deps.renderEnabled ?? (() => process.env.AIDCP_PUBLISH_TEXTCARD_COVER === 'true');
     this.carouselEnabled = deps.carouselEnabled ?? (() => process.env.AIDCP_PUBLISH_TEXTCARD_CAROUSEL === 'true');
     this.rendererAvailable = deps.rendererAvailable ?? (() => false);
+    this.getTextCardRenderer = deps.getTextCardRenderer ?? (() => null);
     this.ossAvailable = deps.ossAvailable ?? (() => false);
     this.minConfidence = deps.minConfidence ?? Number(process.env.AIDCP_COVER_FORM_MIN_CONFIDENCE ?? DEFAULT_MIN_CONFIDENCE);
     // 轮播卡数上限（与 ImageSetPlanner 同源：env AIDCP_PUBLISH_MAX_IMAGES 默认 9，硬夹 ≤9），对齐源稿有效图数。
@@ -214,9 +259,22 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
     // 轮播分支（阶段1）：形态档 all_text_card + 轮播旗标开 → 一次多卡文案 → cardSet 整帖渲卡；
     // 任一张违规/失败 → 整帖回落生成式（诚实记 carousel_copy_failed）。张数对齐源稿有效图数（同 ImageSetPlanner）。
     if (profileFields.formProfile === 'all_text_card' && this.carouselEnabled()) {
-      const n = Math.min(referenceImagesForGeneration(images).length, this.maxImages);
+      const usableImageCount = referenceImagesForGeneration(images).length;
+      const legacyCount = Math.min(usableImageCount, this.maxImages);
+      const transcribed = this.orderedTranscribedSourceSlots(images, referenceNote.textCardTranscription);
+      const articleFlow = shouldUseArticleFlowSource(transcribed, usableImageCount);
+      const articleSlots = articleFlow
+        ? groupArticleSourceSlots(transcribed, Math.min(transcribed.length, this.maxImages))
+        : null;
+      const n = articleSlots?.length ?? legacyCount;
       if (n >= 2) {
-        const sourceSlots = this.orderedSourceCardSlots(images, referenceNote.textCardTranscription, n);
+        const sourceSlots = articleSlots
+          ? {
+              slots: articleSlots,
+              sourceArrayIndices: articleSlots.map((slot) => slot.sourceArrayIndex),
+              sourceArrayIndexGroups: articleSlots.map((slot) => slot.sourceArrayIndices ?? [slot.sourceArrayIndex]),
+            }
+          : this.orderedSourceCardSlots(images, referenceNote.textCardTranscription, n);
         const cards = await this.composeCardSetWithGuard(
           input,
           originalTitle,
@@ -225,6 +283,7 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
           n,
           startedAt,
           sourceSlots?.slots,
+          articleFlow,
         );
         if (cards) {
           return attach(
@@ -234,6 +293,7 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
               sensedSource,
               sourceSlots ? 'ordered_transcription' : 'body_fallback',
               sourceSlots?.sourceArrayIndices,
+              sourceSlots?.sourceArrayIndexGroups,
             ),
           );
         }
@@ -331,6 +391,7 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
     sensedSource: CoverCardPlan['sensedSource'],
     mapping: NonNullable<CoverCardPlan['cardContentMapping']>,
     sourceArrayIndices?: number[],
+    sourceArrayIndexGroups?: number[][],
   ): CoverCardPlan {
     return {
       coverForm: 'text_card',
@@ -342,7 +403,25 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
       decidedAt: this.clock(),
       cardContentMapping: mapping,
       ...(sourceArrayIndices ? { cardSourceArrayIndices: sourceArrayIndices } : {}),
+      ...(sourceArrayIndexGroups ? { cardSourceArrayIndexGroups: sourceArrayIndexGroups } : {}),
     };
+  }
+
+  /** 读取全部“有来源图片且成功转写”的槽；partial 允许跳过失败槽，但绝不伪造文字。 */
+  private orderedTranscribedSourceSlots(
+    images: ReferenceImageSnapshot[],
+    transcription: TextCardTranscription | undefined,
+  ): CardSetSourceSlot[] {
+    if (!transcription || (transcription.status !== 'complete' && transcription.status !== 'partial')) return [];
+    const byIndex = new Map(
+      transcription.cards
+        .filter((card) => card.status === 'transcribed' && !!card.text?.trim())
+        .map((card) => [card.sourceArrayIndex, card.text!.trim()] as const),
+    );
+    return images
+      .map((image, sourceArrayIndex) => ({ image, sourceArrayIndex }))
+      .filter(({ image, sourceArrayIndex }) => !!referenceImageUrl(image) && byIndex.has(sourceArrayIndex))
+      .map(({ sourceArrayIndex }) => ({ sourceArrayIndex, text: byIndex.get(sourceArrayIndex)! }));
   }
 
   /**
@@ -353,7 +432,7 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
     images: ReferenceImageSnapshot[],
     transcription: TextCardTranscription | undefined,
     n: number,
-  ): { slots: CardSetSourceSlot[]; sourceArrayIndices: number[] } | null {
+  ): { slots: CardSetSourceSlot[]; sourceArrayIndices: number[]; sourceArrayIndexGroups?: number[][] } | null {
     if (!transcription || (transcription.status !== 'complete' && transcription.status !== 'partial')) return null;
     const selected = images
       .map((image, sourceArrayIndex) => ({ image, sourceArrayIndex }))
@@ -388,15 +467,16 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
     n: number,
     startedAt: number,
     sourceCards?: CardSetSourceSlot[],
+    articleFlow = false,
   ): Promise<CoverCardCopy[] | null> {
     try {
-      const first = await this.composeCardSet(input, n, false, COPY_CALL_TIMEOUT_MS, sourceCards);
+      const first = await this.composeCardSet(input, n, false, COPY_CALL_TIMEOUT_MS, sourceCards, articleFlow);
       let violation = first ? this.findSetViolation(first, originalTitle, originalBody, author) : 'llm 输出不可解析或卡数不足';
       if (first && !violation) return first;
       const remaining = COVERCARD_TIMEOUT_MS - (this.clock() - startedAt) - 10_000;
       if (remaining >= RETRY_MIN_BUDGET_MS) {
         this.logger.warn(`[CoverCardWriter] 轮播多卡违规（${violation}），带紧约束重试一次（剩余预算 ${Math.round(remaining / 1000)}s）`);
-        const second = await this.composeCardSet(input, n, true, Math.min(COPY_CALL_TIMEOUT_MS, remaining), sourceCards);
+        const second = await this.composeCardSet(input, n, true, Math.min(COPY_CALL_TIMEOUT_MS, remaining), sourceCards, articleFlow);
         violation = second ? this.findSetViolation(second, originalTitle, originalBody, author) : 'llm 输出不可解析或卡数不足';
         if (second && !violation) return second;
       } else {
@@ -417,11 +497,18 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
     tighten: boolean,
     timeoutMs: number,
     sourceCards?: CardSetSourceSlot[],
+    articleFlow = false,
   ): Promise<CoverCardCopy[] | null> {
+    if (articleFlow && sourceCards?.length !== n) return null;
     const raw = await this.llmClient.chat(
       [
         { role: 'system', content: '你是小红书图文轮播文案编辑。严格返回JSON。' },
-        { role: 'user', content: buildCardSetPrompt(input.title, input.content, input.tags, n, tighten, sourceCards) },
+        {
+          role: 'user',
+          content: articleFlow
+            ? buildArticleCardSetPrompt(input.title, input.content, n, sourceCards!, tighten)
+            : buildCardSetPrompt(input.title, input.content, input.tags, n, tighten, sourceCards),
+        },
       ],
       { timeoutMs },
     );
@@ -435,15 +522,30 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
     }
     const rawCards = Array.isArray(obj.cards) ? obj.cards : [];
     const cards: CoverCardCopy[] = [];
-    for (const c of rawCards.slice(0, n)) {
-      const o = (c ?? {}) as { cardTitle?: unknown; bullets?: unknown; tags?: unknown };
+    if (articleFlow && rawCards.length !== n) return null;
+    const selectedCards = articleFlow ? rawCards : rawCards.slice(0, n);
+    for (let index = 0; index < selectedCards.length; index++) {
+      const o = (selectedCards[index] ?? {}) as { cardTitle?: unknown; bullets?: unknown; tags?: unknown; paragraphs?: unknown };
       const title = String(o.cardTitle ?? '').trim();
       if (!title) return null; // 任一张标题缺失 = 整套不合格（绝不半套）
+      if (articleFlow) {
+        if (!Array.isArray(o.paragraphs)) return null;
+        const paragraphs = o.paragraphs.map((paragraph) => String(paragraph).trim()).filter(Boolean);
+        if (paragraphs.length < 2) return null;
+        cards.push({
+          title,
+          bullets: [],
+          tags: [],
+          layoutKind: index === 0 ? 'article_cover' : 'article_page',
+          paragraphs,
+        });
+        continue;
+      }
       const bullets = (Array.isArray(o.bullets) ? o.bullets : []).map((b) => String(b).trim()).filter(Boolean).slice(0, 5);
       const tags = (Array.isArray(o.tags) ? o.tags : []).map((t) => String(t).trim().replace(/^#/, '')).filter(Boolean).slice(0, 3);
       cards.push({ title, bullets, tags });
     }
-    return cards.length >= 2 ? cards : null;
+    return articleFlow ? (cards.length === n ? cards : null) : (cards.length >= 2 ? cards : null);
   }
 
   /** 逐张产后校验：任一张违规即返回该违规（整套回落）；全过返回 null。 */
@@ -456,6 +558,11 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
     for (let i = 0; i < cards.length; i++) {
       const v = this.findViolation(cards[i], originalTitle, originalBody, author);
       if (v) return `第 ${i + 1} 张：${v}`;
+      if (cards[i].layoutKind) {
+        const preflight = this.getTextCardRenderer()?.preflightArticle?.(cards[i]);
+        if (!preflight) return `第 ${i + 1} 张：文章布局预检不可用`;
+        if (!preflight.ok) return `第 ${i + 1} 张：${preflight.detail ?? preflight.reason}`;
+      }
     }
     return null;
   }
@@ -507,13 +614,13 @@ export class CoverCardWriterRole extends BasePublishRole<WriterInput, CoverCardP
     }
     // ② 任一文本行与原标题/正文无 ≥12 连续字符逐字重叠。
     const originalText = `${originalTitle}\n${originalBody}`;
-    for (const line of [card.title, ...card.bullets]) {
+    for (const line of [card.title, ...card.bullets, ...(card.paragraphs ?? [])]) {
       if (hasVerbatimOverlap(line, originalText, OVERLAP_WINDOW)) {
         return `与原文存在 ≥${OVERLAP_WINDOW} 连续字符逐字重叠：「${line}」`;
       }
     }
     // ③ 原作者名不得出现。
-    const allText = [card.title, ...card.bullets, ...card.tags].join('\n');
+    const allText = [card.title, ...card.bullets, ...(card.paragraphs ?? []), ...card.tags].join('\n');
     if (author && author.trim().length >= 2 && allText.includes(author.trim())) {
       return `卡面含原作者名「${author.trim()}」`;
     }

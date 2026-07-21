@@ -3198,6 +3198,7 @@ async function main(): Promise<void> {
     renderEnabled: () => process.env.AIDCP_PUBLISH_TEXTCARD_COVER === 'true' || process.env.AIDCP_PUBLISH_TEXTCARD_CAROUSEL === 'true',
     carouselEnabled: () => process.env.AIDCP_PUBLISH_TEXTCARD_CAROUSEL === 'true',
     rendererAvailable: () => textCardRenderer !== null,
+    getTextCardRenderer: () => textCardRenderer,
     ossAvailable: () => !!ossUploader,
   }));
   publishOrchestrator.registerRole(new ImageSetPlannerRole({ llmClient: roleLlm('publish:ImageSetPlanner') }));
