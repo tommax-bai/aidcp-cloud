@@ -46,6 +46,11 @@ import {
   issueOffboardCleanupGrant,
   verifyOffboardCleanupGrant,
 } from './offboard-cleanup-grant.js';
+import {
+  CLIENT_PUBLISH_QUEUE_TASK_STATUSES,
+  projectClientPublishQueueCancelReceipt,
+  type ClientPublishQueueView,
+} from './client-publish-queue.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_SELECTED_PERSONA_BYTES = 32 * 1024;
@@ -74,6 +79,11 @@ export interface ClientAuthDeps {
   /** 客户首页只读概览；账号键由持久绑定解析，DTO 不得回传 accountId。 */
   environmentOverview?: {
     viewForAccount(accountId: string): Promise<ClientEnvironmentOverview | null>;
+  };
+  /** 小红书客户发布队列；账号键只在 Cloud 内部流转，响应经最小披露 DTO 投影。 */
+  publishQueue?: {
+    platformForAccount(accountId: string): string | undefined;
+    viewForAccount(accountId: string): Promise<ClientPublishQueueView | null>;
   };
   /** 客户待审稿写：传输层只解析客户环境，实际闸序与落库复用既有领域方法。 */
   publishDraftActions?: {
@@ -1695,6 +1705,103 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         return;
       }
       sendJson(res, 200, { data: offboard, meta: { requestId: randomUUID(), asOf: Date.now() } });
+      return;
+    }
+
+    const publishQueueRead = /^\/environments\/([^/]+)\/publish-queue$/.exec(url);
+    if (method === 'GET' && publishQueueRead) {
+      if (!deps.publishQueue) {
+        sendJson(res, 503, { error: 'publish_queue_unavailable' });
+        return;
+      }
+      let envKey: string;
+      try {
+        envKey = decodeURIComponent(publishQueueRead[1]);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_env_key' });
+        return;
+      }
+      const bound = await resolveOwnedBoundAccount(deps, res, userId, envKey);
+      if (!bound) return;
+      if (deps.publishQueue.platformForAccount(bound.accountId)?.trim().toLowerCase() !== 'xiaohongshu') {
+        sendJson(res, 409, { error: 'unsupported_platform' });
+        return;
+      }
+      const view = await deps.publishQueue.viewForAccount(bound.accountId);
+      if (!view) {
+        sendJson(res, 503, { error: 'publish_queue_unavailable' });
+        return;
+      }
+      sendJson(res, 200, {
+        data: { envKey: bound.envKey, ...view },
+        meta: { requestId: randomUUID(), asOf: Date.now() },
+      });
+      return;
+    }
+
+    const publishQueueCancel = /^\/environments\/([^/]+)\/publish-queue\/tasks\/([^/]+)\/cancel$/.exec(url);
+    if (method === 'POST' && publishQueueCancel) {
+      if (!deps.publishQueue || !deps.delegatedTasks) {
+        sendJson(res, 503, { error: 'publish_queue_unavailable' });
+        return;
+      }
+      let envKey: string;
+      let taskId: string;
+      try {
+        envKey = decodeURIComponent(publishQueueCancel[1]);
+        taskId = decodeURIComponent(publishQueueCancel[2]).trim();
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      if (!taskId || taskId.length > 256 || /[\u0000-\u001f\u007f]/.test(taskId)) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_task_id' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const version = (body as { version?: unknown } | null)?.version;
+      if (typeof version !== 'number' || !Number.isInteger(version) || version < 0) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'version_required' });
+        return;
+      }
+      const bound = await resolveOwnedBoundAccount(deps, res, userId, envKey);
+      if (!bound) return;
+      if (deps.publishQueue.platformForAccount(bound.accountId)?.trim().toLowerCase() !== 'xiaohongshu') {
+        sendJson(res, 409, { error: 'unsupported_platform' });
+        return;
+      }
+      try {
+        const task = await deps.delegatedTasks.get(taskId);
+        if (task.accountId !== bound.accountId || task.actionFamily !== 'publish') {
+          sendJson(res, 404, { error: 'task_not_found' });
+          return;
+        }
+        if (!(CLIENT_PUBLISH_QUEUE_TASK_STATUSES as readonly string[]).includes(task.status)) {
+          sendJson(res, 409, { error: 'task_not_cancellable' });
+          return;
+        }
+        if (task.cancelRequested) {
+          sendJson(res, 409, { error: 'task_cancel_pending' });
+          return;
+        }
+        const updated = await deps.delegatedTasks.cancel(taskId, version);
+        sendJson(res, 200, {
+          data: projectClientPublishQueueCancelReceipt(updated),
+          meta: { requestId: randomUUID(), asOf: Date.now() },
+        });
+      } catch (err) {
+        if (err instanceof DelegatedTaskServiceError) {
+          sendJson(res, err.status, { error: err.code, message: err.message });
+        } else {
+          throw err;
+        }
+      }
       return;
     }
 

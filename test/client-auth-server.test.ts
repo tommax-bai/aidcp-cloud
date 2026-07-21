@@ -1552,6 +1552,166 @@ test('环境风险恢复：restricted 写后 normal、Cloud 生成理由并回�
   );
 });
 
+// ── 小红书客户发布队列：环境精确隔离、最小披露与版本化取消 ────────────────
+
+async function createQueuedPublishTask(
+  delegatedTasks: DelegatedTaskService,
+  sourceRef: string,
+): Promise<{ id: string; version: number }> {
+  const result = await delegatedTasks.createDraft({
+    accountId: ACCT_P1,
+    action: 'publish_post',
+    targetSuccessCount: 1,
+    maxAttempts: 2,
+    deadlineAt: Date.now() + 60_000,
+    executionWindow: { mode: 'immediate' },
+    sourceConstraints: { title: `queue-${sourceRef}` },
+    targetConstraints: {},
+    approvalMode: 'review',
+    priority: 'normal',
+    source: 'api',
+    sourceRef,
+  });
+  assert.equal(result.task.status, 'queued');
+  return { id: result.task.id, version: result.task.version };
+}
+
+test('客户发布队列读只服务精确归属的小红书环境且不回 accountId', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  let platform = 'xiaohongshu';
+  const viewed: string[] = [];
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      publishQueue: {
+        platformForAccount: () => platform,
+        async viewForAccount(accountId) {
+          viewed.push(accountId);
+          return {
+            summary: { inProgress: 2, waitingForYou: 1, cancellable: 1 },
+            tasks: [],
+            active: [],
+            recent: [],
+          };
+        },
+      },
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const ok = await fetch(`${base}/environments/p1/publish-queue`, { headers });
+      assert.equal(ok.status, 200);
+      const text = await ok.text();
+      assert.doesNotMatch(text, new RegExp(ACCT_P1));
+      assert.deepEqual((JSON.parse(text) as { data: Record<string, unknown> }).data, {
+        envKey: 'p1',
+        summary: { inProgress: 2, waitingForYou: 1, cancellable: 1 },
+        tasks: [],
+        active: [],
+        recent: [],
+      });
+      assert.deepEqual(viewed, [ACCT_P1]);
+
+      assert.equal((await fetch(`${base}/environments/p2/publish-queue`, { headers })).status, 403);
+      platform = 'facebook';
+      const unsupported = await fetch(`${base}/environments/p1/publish-queue`, { headers });
+      assert.equal(unsupported.status, 409);
+      assert.equal((await unsupported.json() as { error: string }).error, 'unsupported_platform');
+      assert.deepEqual(viewed, [ACCT_P1], '非小红书不得触发队列读取');
+    },
+  );
+});
+
+test('客户发布队列取消要求精确环境和版本，并区分立即取消与安全收口', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const taskStore = new MemoryDelegatedTaskStore();
+  const delegatedTasks = new DelegatedTaskService({
+    store: taskStore,
+    listAccounts: async () => [{
+      accountId: ACCT_P1,
+      displayName: '小萝北',
+      platform: 'xiaohongshu',
+      status: 'active',
+    }],
+  });
+  const publishQueue: NonNullable<ClientAuthDeps['publishQueue']> = {
+    platformForAccount: () => 'xiaohongshu',
+    async viewForAccount() {
+      return { summary: { inProgress: 0, waitingForYou: 0, cancellable: 0 }, tasks: [], active: [], recent: [] };
+    },
+  };
+  const immediate = await createQueuedPublishTask(delegatedTasks, 'immediate');
+  const planning = await createQueuedPublishTask(delegatedTasks, 'planning');
+  const claimed = await taskStore.claimNext({ workerId: 'test-worker', leaseMs: 60_000 });
+  assert.equal(claimed?.id, immediate.id);
+  // claimNext 按创建时间稳定排序；把真正 planning 的 id 交给路由，另一条保持 queued。
+  const planningId = claimed!.id;
+  const queuedId = planning.id;
+  const queuedVersion = (await delegatedTasks.get(queuedId)).version;
+  const planningVersion = (await delegatedTasks.get(planningId)).version;
+
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      delegatedTasks,
+      publishQueue,
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const wrongVersion = await fetch(
+        `${base}/environments/p1/publish-queue/tasks/${encodeURIComponent(queuedId)}/cancel`,
+        { method: 'POST', headers, body: JSON.stringify({ version: queuedVersion - 1 }) },
+      );
+      assert.equal(wrongVersion.status, 409);
+      assert.equal((await wrongVersion.json() as { error: string }).error, 'version_conflict');
+      assert.equal((await delegatedTasks.get(queuedId)).status, 'queued', '版本冲突不得自动重试写入');
+
+      const cancelled = await fetch(
+        `${base}/environments/p1/publish-queue/tasks/${encodeURIComponent(queuedId)}/cancel`,
+        { method: 'POST', headers, body: JSON.stringify({ version: queuedVersion }) },
+      );
+      assert.equal(cancelled.status, 200);
+      const cancelledText = await cancelled.text();
+      assert.doesNotMatch(cancelledText, new RegExp(ACCT_P1));
+      assert.deepEqual((JSON.parse(cancelledText) as { data: Record<string, unknown> }).data, {
+        id: queuedId,
+        status: 'cancelled',
+        cancelRequested: false,
+        version: queuedVersion + 1,
+        terminal: true,
+      });
+
+      const stopping = await fetch(
+        `${base}/environments/p1/publish-queue/tasks/${encodeURIComponent(planningId)}/cancel`,
+        { method: 'POST', headers, body: JSON.stringify({ version: planningVersion }) },
+      );
+      assert.equal(stopping.status, 200);
+      const stoppingBody = (await stopping.json()) as { data: Record<string, unknown> };
+      assert.deepEqual(stoppingBody.data, {
+        id: planningId,
+        status: 'planning',
+        cancelRequested: true,
+        version: planningVersion + 1,
+        terminal: false,
+      });
+
+      const missingVersion = await fetch(
+        `${base}/environments/p1/publish-queue/tasks/${encodeURIComponent(planningId)}/cancel`,
+        { method: 'POST', headers, body: JSON.stringify({}) },
+      );
+      assert.equal(missingVersion.status, 400);
+      assert.equal((await missingVersion.json() as { error: string }).error, 'bad_request');
+    },
+  );
+});
+
 test('环境风险恢复：normal 幂等；warned/frozen 拒绝且不恢复 edge', async () => {
   for (const status of ['normal', 'warned', 'frozen'] as const) {
     const fx = ownerOfP1();

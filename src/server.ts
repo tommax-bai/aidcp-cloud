@@ -201,6 +201,7 @@ import { PublishLogStore } from './publish-agent/publish-log-store.js';
 import { hasUserRejectionEvidence } from './publish-agent/types.js';
 import { PublishPipelineLogStore } from './publish-agent/publish-pipeline-log-store.js';
 import { startPanelApi, parsePanelUsers, PgPanelStore } from './panel/index.js';
+import { buildPublishLifecycle } from './panel/publish-stage-lifecycle.js';
 import {
   PgDelegatedTaskStore,
   DelegatedTaskService,
@@ -217,7 +218,12 @@ import {
   handleDelegatedTaskCardAction,
 } from './feishu/delegated-task-card.js';
 import { TokenRevocationStore } from './panel/revocation.js';
-import { ClientUserStore, startClientAuthApi, LoginRateLimiter } from './client-auth/index.js';
+import {
+  ClientUserStore,
+  startClientAuthApi,
+  LoginRateLimiter,
+  projectClientPublishQueue,
+} from './client-auth/index.js';
 import { PgAlertStore } from './alerts/index.js';
 import { ModelConfigStore } from './config/model-config-store.js';
 import { RoleConfigStore } from './config/role-config-store.js';
@@ -4395,6 +4401,15 @@ async function main(): Promise<void> {
   // N1 头号风险：AIDCP_CLIENT_JWT_SECRET 与面板密钥相同则边界坍塌 → startClientAuthApi 内硬断言拒启。
   if (clientAuthPort) {
     try {
+      // 客户发布队列复用面板已有的 publish_log 生命周期读取，但经过独立最小披露投影后才跨客户边界。
+      // 该 reader 只在客户 API 启用时创建；不初始化/修改表，也不复用面板鉴权域或路由。
+      const clientPublishQueueStore = new PgPanelStore({
+        host: readEnvString('PGHOST'),
+        port: readEnvPort('PGPORT'),
+        database: readEnvString('PGDATABASE'),
+        user: readEnvString('PGUSER'),
+        password: readEnvString('PGPASSWORD'),
+      });
       // 环境级慢启动读写共用的投影产出：与 ui.snapshot
       // 的慢启动投影**同一个 controller**（同一 anchor 解析、同一次 clock）→ 徽章天数与生效上限同源同规则。
       // dayQuotas 亦过客户端信任边界，与 ui.snapshot 上限投影同规则剥去平台不支持项（change platform-honest-usage-caps）。
@@ -4463,6 +4478,45 @@ async function main(): Promise<void> {
               } catch (err) {
                 console.warn(
                   `[aidcp-cloud] client environment overview failed account=${accountId}: ${err instanceof Error ? err.message : String(err)}`,
+                );
+                return null;
+              }
+            },
+          },
+          publishQueue: {
+            platformForAccount: (accountId) => accountStore?.platformFor?.(accountId),
+            viewForAccount: async (accountId) => {
+              if (!delegatedTaskService) return null;
+              try {
+                const queue = publishOrchestrator.getStatus();
+                // 先按账号过滤 runs，并刻意丢弃全局 aggregate snapshot：终态 snapshot 没有稳定账号键，
+                // 不能让另一账号的最近一轮穿过客户边界；该账号 recent 只以 publish_log 为权威来源。
+                const accountRuns = queue.runs.filter((run) => run.accountId === accountId);
+                const [pending, recent, tasks] = await Promise.all([
+                  clientPublishQueueStore.publishedHistory(50, accountId, 'pending_approval'),
+                  clientPublishQueueStore.publishedHistory(10, accountId),
+                  delegatedTaskService.list({
+                    accountId,
+                    actionFamily: 'publish',
+                    statuses: ['queued', 'planning', 'deferred'],
+                    limit: 50,
+                  }),
+                ]);
+                const lifecycle = buildPublishLifecycle({
+                  queue: {
+                    status: accountRuns.length > 0 ? 'running' : 'idle',
+                    snapshot: null,
+                    runs: accountRuns,
+                  },
+                  pending,
+                  recent,
+                  inFlightRecordIds: publishDispatcher.getInFlightRecordIds(),
+                  recentLimit: 5,
+                });
+                return projectClientPublishQueue({ accountId, lifecycle, tasks });
+              } catch (err) {
+                console.warn(
+                  `[aidcp-cloud] client publish queue failed account=${accountId}: ${err instanceof Error ? err.message : String(err)}`,
                 );
                 return null;
               }
