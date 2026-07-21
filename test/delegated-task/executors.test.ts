@@ -25,9 +25,41 @@ const attempt: DelegatedTaskAttempt = {
 function candidate(overrides: Partial<CandidateSnapshot> = {}): CandidateSnapshot {
   return {
     recordId: 42, accountId: 'xhs-1', platform: 'xiaohongshu', status: 'pending_approval',
-    contentVersion: 3, title: '原题', content: '原文', images: ['one.jpg', 'two.jpg'], ...overrides,
+    contentVersion: 3, title: '原题', content: '原文', images: ['one.jpg', 'two.jpg'], userRejected: false, ...overrides,
   };
 }
+
+test('waiting publish reconciliation treats only evidenced user rejection as cancellation', async () => {
+  let snapshot = candidate({ status: 'needs_review', userRejected: true });
+  const router = createDelegatedExecutorRouter({
+    comments: {
+      triggerManual: async () => ({ ok: false, message: 'unused' }),
+      triggerTargeted: async () => ({ ok: false, message: 'unused' }),
+      isRunning: () => false,
+    },
+    publishes: { triggerDelegated: async () => ({ result: 'blocked', reason: 'unused' }), isBusy: () => false },
+    loadCandidate: async () => snapshot,
+    approveCandidate: async () => null,
+    rejectCandidate: async () => null,
+    modifyCandidate: async () => null,
+  });
+  const waiting = task({
+    action: 'publish_post', actionFamily: 'publish', status: 'waiting_approval',
+    terminalOutcome: { code: 'waiting_approval', message: '等待审批', evidenceRef: 'publish:42' },
+  });
+  const executor = router.executorFor(waiting);
+
+  assert.deepEqual(await executor.reconcileWaitingApproval?.(waiting), {
+    kind: 'cancelled',
+    reason: '用户已取消发布，候选稿已留档，未向平台下发。',
+    evidenceRef: 'publish:42',
+  });
+
+  snapshot = candidate({ status: 'needs_review', userRejected: false });
+  assert.deepEqual(await executor.reconcileWaitingApproval?.(waiting), {
+    kind: 'failed', reason: 'candidate_terminal_needs_review', retryable: false,
+  });
+});
 
 test('batch comments always use automatic quota semantics while legacy single comment retains manual compatibility', async () => {
   const calls: Array<{

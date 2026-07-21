@@ -32,6 +32,7 @@ export function delegatedTaskNotificationFingerprint(task: DelegatedTask): strin
 export function delegatedTaskFailureReceipt(
   task: DelegatedTask,
 ): { level: 'warning' | 'error'; title: string; message: string } | null {
+  if (task.terminalOutcome?.code === 'candidate_cancelled_by_user') return null;
   const successCount = task.progress.successCount;
   if (task.actionFamily === 'publish') {
     const failedTerminal =

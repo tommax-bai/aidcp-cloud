@@ -72,6 +72,8 @@ export interface CandidateSnapshot {
   title: string | null;
   content: string;
   images: string[];
+  /** Normalized durable proof; never infer this from needs_review alone. */
+  userRejected: boolean;
 }
 
 export interface DelegatedExecutorDeps {
@@ -459,6 +461,13 @@ export function createDelegatedExecutorRouter(deps: DelegatedExecutorDeps): {
       }
       if (draft.status === 'pending_approval') {
         return { kind: 'waiting_approval', evidenceRef: `publish:${draft.recordId}`, reason: '仍在等待人工审批。' };
+      }
+      if (draft.status === 'needs_review' && draft.userRejected) {
+        return {
+          kind: 'cancelled',
+          reason: '用户已取消发布，候选稿已留档，未向平台下发。',
+          evidenceRef: `publish:${draft.recordId}`,
+        };
       }
       return { kind: 'failed', reason: `candidate_terminal_${draft.status}`, retryable: false };
     },

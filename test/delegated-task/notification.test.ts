@@ -85,6 +85,25 @@ test('delegatedTaskFailureReceipt: 发帖等待人审 → null(人审卡本身�
   assert.equal(delegatedTaskFailureReceipt(task), null);
 });
 
+test('delegatedTaskFailureReceipt: 用户取消发帖 → null(预期操作不报警)', async () => {
+  const task = await makeTask('publish_post', {
+    status: 'cancelled',
+    progress: { successCount: 0, attemptCount: 1, skippedCount: 1, failureCount: 0 },
+    terminalOutcome: { code: 'candidate_cancelled_by_user', message: '用户已取消发布，候选稿已留档，未向平台下发。' },
+  });
+  assert.equal(delegatedTaskFailureReceipt(task), null);
+});
+
+test('delegatedTaskFailureReceipt: 已有成功后用户取消剩余发帖 → null(不误报部分完成)', async () => {
+  const task = await makeTask('publish_post', {
+    targetSuccessCount: 2,
+    status: 'partially_completed',
+    progress: { successCount: 1, attemptCount: 2, skippedCount: 1, failureCount: 0 },
+    terminalOutcome: { code: 'candidate_cancelled_by_user', message: '用户已取消发布，保留真实完成 1/2。' },
+  });
+  assert.equal(delegatedTaskFailureReceipt(task), null);
+});
+
 test('delegatedTaskFailureReceipt: 评论起跑后失败(max_attempts) → null(评论链自己已发 postResultCard，不双发)', async () => {
   const task = await makeTask('comment_batch', {
     status: 'failed',

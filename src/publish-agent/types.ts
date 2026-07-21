@@ -692,7 +692,17 @@ export interface PublishMetadata {
   };
   /** Exact manual publish only; absent means the established automatic lane. */
   edgeLeasePriority?: 'human';
+  /** Durable evidence that a supported approval surface explicitly rejected this pending draft. */
+  approvalDecision?: {
+    kind: 'user_rejected';
+    decidedAt: number;
+  };
   decidedAt: number;
+}
+
+/** Fail closed: a terminal status alone is never proof of an explicit user rejection. */
+export function hasUserRejectionEvidence(metadata: PublishMetadata | null | undefined): boolean {
+  return metadata?.approvalDecision?.kind === 'user_rejected';
 }
 
 /** 元数据保守默认（不凑数/不伪造/最保守，单一来源；各角色降级与聚合兜底共用）。 */

@@ -335,8 +335,16 @@ export class PublishLogStore {
   /** 人工驳回：只允许 pending_approval 翻到 needs_review，避免旧卡误伤已发布记录。 */
   async rejectPendingApproval(id: number): Promise<boolean> {
     const result = await this.pool.query(
-      `UPDATE publish_log SET status = 'needs_review' WHERE id = $1 AND status = 'pending_approval'`,
-      [id],
+      `UPDATE publish_log
+          SET status = 'needs_review',
+              publish_metadata = jsonb_set(
+                COALESCE(publish_metadata, '{}'::jsonb),
+                '{approvalDecision}',
+                jsonb_build_object('kind', 'user_rejected', 'decidedAt', $2::bigint),
+                true
+              )
+        WHERE id = $1 AND status = 'pending_approval'`,
+      [id, this.clock()],
     );
     return (result.rowCount ?? 0) > 0;
   }

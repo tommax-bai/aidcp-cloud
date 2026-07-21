@@ -198,6 +198,7 @@ import {
 import { buildDeAiRewritePrompt } from './publish-agent/prompts.js';
 import { PostProcessor } from './publish-agent/post-processor.js';
 import { PublishLogStore } from './publish-agent/publish-log-store.js';
+import { hasUserRejectionEvidence } from './publish-agent/types.js';
 import { PublishPipelineLogStore } from './publish-agent/publish-pipeline-log-store.js';
 import { startPanelApi, parsePanelUsers, PgPanelStore } from './panel/index.js';
 import {
@@ -3820,6 +3821,7 @@ async function main(): Promise<void> {
         title: draft.title,
         content: draft.content,
         images: draft.imageUrls,
+        userRejected: hasUserRejectionEvidence(draft.metadata),
       };
     };
     const delegatedExecutors = createDelegatedExecutorRouter({

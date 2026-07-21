@@ -7,6 +7,7 @@ import { humanizeAttemptReason } from './reason-humanize.js';
 export type DelegatedExecutionResult =
   | { kind: 'success'; verificationKind: DelegatedVerificationKind; evidenceRef: string }
   | { kind: 'waiting_approval'; evidenceRef: string; reason?: string }
+  | { kind: 'cancelled'; reason: string; evidenceRef?: string }
   | { kind: 'skipped'; reason: string }
   | { kind: 'failed'; reason: string; retryable?: boolean }
   | { kind: 'submitted_unknown'; reason: string; evidenceRef?: string }
@@ -234,6 +235,9 @@ export class DelegatedTaskWorker {
     result: DelegatedExecutionResult,
     reconciling: boolean,
   ): Promise<DelegatedTask | null> {
+    if (result.kind === 'cancelled') {
+      return this.finishExecutionCancelled(task, token, result, attempt);
+    }
     if (result.kind === 'deferred') {
       if (!reconciling && result.attemptStarted === false) {
         await this.deps.store.discardAttemptBeforeStart(attempt.id, result.reason);
@@ -276,6 +280,9 @@ export class DelegatedTaskWorker {
     result: DelegatedExecutionResult,
     attempt?: DelegatedTaskAttempt,
   ): Promise<DelegatedTask | null> {
+    if (result.kind === 'cancelled') {
+      return this.finishExecutionCancelled(task, token, result, attempt);
+    }
     if (result.kind === 'waiting_approval') {
       return this.deps.store.releaseWaitingApprovalClaim(task.id, token, this.now() + this.retryDelayMs);
     }
@@ -311,6 +318,33 @@ export class DelegatedTaskWorker {
     return this.update(await this.deps.store.complete(latest.id, token, honestTerminalStatus(latest.progress, 'failure'), {
       code, message: result.reason,
     }));
+  }
+
+  private async finishExecutionCancelled(
+    task: DelegatedTask,
+    token: string,
+    result: Extract<DelegatedExecutionResult, { kind: 'cancelled' }>,
+    attempt?: DelegatedTaskAttempt,
+  ): Promise<DelegatedTask | null> {
+    const latest = attempt
+      ? await this.deps.store.finishAttempt(attempt.id, {
+          status: 'skipped',
+          verificationKind: 'not_dispatched',
+          evidenceRef: result.evidenceRef,
+          reason: result.reason,
+        })
+      : task;
+    return this.update(await this.deps.store.complete(
+      latest.id,
+      token,
+      honestTerminalStatus(latest.progress, 'cancelled'),
+      {
+        code: 'candidate_cancelled_by_user',
+        message: result.reason,
+        evidenceRef: result.evidenceRef,
+        remainingCount: Math.max(0, latest.targetSuccessCount - latest.progress.successCount),
+      },
+    ));
   }
 
   private async afterSettledAttempt(task: DelegatedTask, token: string, fatalReason?: string): Promise<DelegatedTask | null> {

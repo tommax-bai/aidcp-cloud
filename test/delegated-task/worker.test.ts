@@ -453,6 +453,69 @@ test('silent waiting release cannot overwrite a concurrent cancellation', async 
   assert.equal(cancelled?.progress.attemptCount, 1);
 });
 
+test('explicit candidate rejection settles a zero-success publish task as cancelled without failure count', async () => {
+  const store = new MemoryDelegatedTaskStore();
+  let now = 3_400_000;
+  const task = await confirmedTask(store, now, {
+    action: 'publish_post', targetSuccessCount: 1, maxAttempts: 1, dedupeKey: 'candidate-user-rejected',
+  });
+  const executor: DelegatedTaskExecutor = {
+    targetKey: () => 'publish:42',
+    execute: async () => ({ kind: 'waiting_approval', evidenceRef: 'publish:42' }),
+    reconcileWaitingApproval: async () => ({
+      kind: 'cancelled', reason: '用户已取消发布，候选稿已留档，未向平台下发。', evidenceRef: 'publish:42',
+    }),
+  };
+  const worker = new DelegatedTaskWorker({ store, executorFor: () => executor, now: () => now, retryDelayMs: 1_000, claimLeaseMs: 10_000 });
+
+  await worker.tick();
+  now += 2_000;
+  await worker.tick();
+
+  const cancelled = await store.get(task.id);
+  assert.equal(cancelled?.status, 'cancelled');
+  assert.deepEqual(cancelled?.progress, { successCount: 0, attemptCount: 1, skippedCount: 1, failureCount: 0 });
+  assert.equal(cancelled?.terminalOutcome?.code, 'candidate_cancelled_by_user');
+  assert.equal(cancelled?.terminalOutcome?.evidenceRef, 'publish:42');
+  const [attempt] = await store.listAttempts(task.id);
+  assert.equal(attempt.status, 'skipped');
+  assert.equal(attempt.verificationKind, 'not_dispatched');
+});
+
+test('explicit candidate rejection preserves earlier success and settles the remaining target without an artificial failure', async () => {
+  const store = new MemoryDelegatedTaskStore();
+  let now = 3_500_000;
+  const task = await confirmedTask(store, now, {
+    action: 'publish_post', targetSuccessCount: 2, maxAttempts: 2, dedupeKey: 'candidate-user-rejected-after-success',
+  });
+  let executions = 0;
+  const executor: DelegatedTaskExecutor = {
+    targetKey: () => `publish:${executions + 1}`,
+    execute: async () => {
+      executions += 1;
+      return executions === 1
+        ? { kind: 'success', verificationKind: 'platform_publish_confirmed', evidenceRef: 'publish:41' }
+        : { kind: 'waiting_approval', evidenceRef: 'publish:42' };
+    },
+    reconcileWaitingApproval: async () => ({
+      kind: 'cancelled', reason: '用户已取消发布，候选稿已留档，未向平台下发。', evidenceRef: 'publish:42',
+    }),
+  };
+  const worker = new DelegatedTaskWorker({ store, executorFor: () => executor, now: () => now, retryDelayMs: 1_000, claimLeaseMs: 10_000 });
+
+  await worker.tick();
+  now += 2_000;
+  await worker.tick();
+  now += 2_000;
+  await worker.tick();
+
+  const partial = await store.get(task.id);
+  assert.equal(partial?.status, 'partially_completed');
+  assert.deepEqual(partial?.progress, { successCount: 1, attemptCount: 2, skippedCount: 1, failureCount: 0 });
+  assert.equal(partial?.terminalOutcome?.code, 'candidate_cancelled_by_user');
+  assert.equal(partial?.terminalOutcome?.remainingCount, 1);
+});
+
 test('reconciles dispatched attempt before any retry', async () => {
   const store = new MemoryDelegatedTaskStore();
   let now = 4_000_000;
