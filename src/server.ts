@@ -27,8 +27,6 @@ import {
   resolveProviderEnvKey,
 } from './llm/index.js';
 import { PLATFORM_CREDENTIALS, resolvePlatformCredentialEnvValue } from './config/platform-credentials.js';
-import { AdsPowerAdminApi } from './adspower/admin-api.js';
-import { EnvironmentDeletionService } from './adspower/environment-deletion-service.js';
 import { TokenUsageStore } from './metrics/token-usage-store.js';
 import { createBillingPriceRefresh } from './metrics/billing-price-refresh.js';
 import { startRetentionSweeper } from './panel/retention-sweeper.js';
@@ -4029,19 +4027,6 @@ async function main(): Promise<void> {
     };
   };
 
-  // 管理后台环境删除：Cloud 直接调用服务端可达的 AdsPower Local API。Key 每次按需解密读取，
-  // 因此后台覆盖保存后下一次删除立即生效；base 只来自服务端 env，绝不接受浏览器覆盖。
-  const environmentDeletion = new EnvironmentDeletionService({
-    store: clientUserStore,
-    adsPower: new AdsPowerAdminApi({ apiBase: readEnvString('ADS_API_BASE') }),
-    getApiKey: async () => (
-      (await credentialStore.getSecretForRuntime('adspower', 'api_key').catch(() => null))
-      ?? readEnvString('ADS_API_KEY')
-      ?? readEnvString('ADSPOWER_API_KEY')
-      ?? null
-    ),
-  });
-
   // 显式 provider + model 覆盖 + 短超时；探活按 provider 路由到正确端点+密钥。
   // 失败抛错 → facade 区分 provider_key_missing（密钥缺失）与 model_invalid，绝不落库。
   // role 'system:model_probe'：探活真实消耗 token，如实记、可区分、不静默丢（change llm-token-usage-stats）。
@@ -4392,7 +4377,6 @@ async function main(): Promise<void> {
           // 对外客户管理（change edge-client-customer-auth）：内部 JWT 保护的 /api/client-users*。同一 store 实例
           // 亦供客户鉴权服务做 auth/scope 读（单实例共享池）。绝不回传 key/hash。
           clientUsers: clientUserStore,
-          environmentDeletion,
           onClientOffboardCreated: async (offboard) => {
             const edgeId = server.resolveEdgeIdForAccount(offboard.accountId);
             if (edgeId) await interactionOffboarding?.dispatchPending(offboard.accountId, edgeId);

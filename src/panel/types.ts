@@ -50,7 +50,6 @@ import type {
 import type { TokenRevocationStore } from './revocation.js';
 import type { PanelUser } from './auth.js';
 import type { ClientUserStore } from '../client-auth/client-user-store.js';
-import type { EnvironmentDeletionService } from '../adspower/environment-deletion-service.js';
 import type {
   PanelStoreReader,
   TodayTotals,
@@ -375,10 +374,8 @@ export interface PanelDeps {
    * 内部 JWT 保护:客户 CRUD / 生成·轮换 key（一次性回明文）/ 环境归属整批替换。
    * 红线:列表/读取绝不含 key/hash；客户令牌无法访问这些端点（物理隔离于客户鉴权服务）；写非乐观回真态。
    * 同一 store 实例亦供客户鉴权服务做 auth/scope 读（单实例共享 PG 池）。
-   */
+  */
   clientUsers?: ClientUserStore;
-  /** Cloud-side direct AdsPower deletion. Never accepts API base/key from the browser. */
-  environmentDeletion?: Pick<EnvironmentDeletionService, 'delete'>;
   onClientOffboardCreated?: (offboard: import('../client-auth/client-user-store.js').ClientOffboardView) => Promise<void>;
 }
 
@@ -456,7 +453,7 @@ export interface ModelConfigCredentialView {
   field: string;
   label: string;
   providerLabel: string;
-  group: 'model_api' | 'billing_access' | 'browser_service';
+  group: 'model_api' | 'billing_access';
   groupLabel: string;
   secretKind: 'api_key' | 'access_key_id' | 'access_key_secret';
   restartRequired: boolean;

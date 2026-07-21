@@ -5,12 +5,14 @@ import {
   resolvePlatformCredentialEnvValue,
 } from '../src/config/platform-credentials.js';
 
-test('AdsPower API key is an encrypted platform credential with hot runtime semantics', () => {
-  const credential = findPlatformCredential('adspower', 'api_key');
+test('AdsPower API key is not an allowed platform credential', () => {
+  assert.equal(findPlatformCredential('adspower', 'api_key'), undefined);
+});
+
+test('unrelated platform credentials keep their environment fallback behavior', () => {
+  const credential = findPlatformCredential('aliyun', 'access_key_id');
   assert.ok(credential);
-  assert.equal(credential.group, 'browser_service');
-  assert.equal(credential.groupLabel, '浏览器服务 API Key');
-  assert.equal(credential.restartRequired, false);
-  assert.deepEqual(credential.envKeys, ['ADS_API_KEY', 'ADSPOWER_API_KEY']);
-  assert.equal(resolvePlatformCredentialEnvValue(credential, { ADS_API_KEY: ' current-key ' }), 'current-key');
+  assert.equal(resolvePlatformCredentialEnvValue(credential, {
+    ALIYUN_BILLING_ACCESS_KEY_ID: ' current-key ',
+  }), 'current-key');
 });

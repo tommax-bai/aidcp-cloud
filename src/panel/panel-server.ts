@@ -557,53 +557,13 @@ function createRequestHandler(
       return;
     }
 
-    // 环境资产生命周期：内部 JWT 管理面。删除由 Cloud 直接调用服务端 AdsPower API；
-    // 只有 AdsPower 成功且 AIDCP 终态落库后才返回 deleted，不再创建 Edge maintenance 责任。
+    // 环境资产只读管理：历史 lifecycle 如实返回，但 Cloud 不提供环境删除写面。
     if (method === 'GET' && url === '/api/environments') {
       if (!deps.clientUsers) {
         sendJson(res, 503, { error: 'client_users_unavailable' });
         return;
       }
       sendJson(res, 200, { environments: await deps.clientUsers.listAllEnvironments(), asOf: Date.now() });
-      return;
-    }
-    const environmentDeletion = /^\/api\/environments\/([^/]+)\/deletion$/.exec(url);
-    if (method === 'POST' && environmentDeletion) {
-      if (!deps.clientUsers || !deps.environmentDeletion) {
-        sendJson(res, 503, { error: 'environment_deletion_unavailable' });
-        return;
-      }
-      let envKey: string;
-      let body: unknown;
-      try {
-        envKey = decodeURIComponent(environmentDeletion[1] ?? '').trim();
-        body = await readJsonBody(req);
-      } catch {
-        sendJson(res, 400, { error: 'bad_request' });
-        return;
-      }
-      const raw = (body ?? {}) as Record<string, unknown>;
-      const confirmEnvKey = typeof raw.confirmEnvKey === 'string' ? raw.confirmEnvKey.trim() : '';
-      const idempotencyKey = typeof raw.idempotencyKey === 'string' ? raw.idempotencyKey.trim() : '';
-      if (!envKey || confirmEnvKey !== envKey || !idempotencyKey || idempotencyKey.length > 200) {
-        sendJson(res, 400, { error: 'bad_request', reason: 'exact_environment_confirmation_required' });
-        return;
-      }
-      const result = await deps.environmentDeletion.delete(envKey, verified.payload.sub, idempotencyKey);
-      if (!result.ok) {
-        const status = result.reason === 'not_found'
-          ? 404
-          : result.reason === 'already_deleted' || result.reason === 'deletion_in_progress'
-            ? 409
-            : result.reason === 'adspower_key_missing'
-              ? 503
-              : result.reason === 'persistence_failed'
-                ? 500
-                : 502;
-        sendJson(res, status, { error: result.reason, ...(result.deletion ? { deletion: result.deletion } : {}) });
-        return;
-      }
-      sendJson(res, 200, { deletion: result.deletion });
       return;
     }
 
