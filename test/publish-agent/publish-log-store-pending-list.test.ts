@@ -19,6 +19,26 @@ function row(id = 42) {
   };
 }
 
+test('兜底下发列表按本地 target 过滤自动排期稿，同时保留历史/人工稿', async () => {
+  const calls: { sql: string; params: unknown[] }[] = [];
+  const pool = {
+    async query(sql: string, params: unknown[]) {
+      calls.push({ sql, params });
+      return { rows: [{ id: 1 }, { id: 2 }] };
+    },
+  };
+  const store = new PublishLogStore({ pool: pool as never });
+  assert.deepEqual(await store.listPendingApprovalIds('dev'), [1, 2]);
+  assert.match(calls[0].sql, /publish_metadata->'scheduleExecution' IS NULL/);
+  assert.match(calls[0].sql, /executionTarget' = \$1/);
+  assert.deepEqual(calls[0].params, ['dev']);
+
+  await store.listPendingApprovalIds(null);
+  assert.match(calls[1].sql, /publish_metadata->'scheduleExecution' IS NULL/);
+  assert.doesNotMatch(calls[1].sql, /executionTarget' = \$1/);
+  assert.deepEqual(calls[1].params, []);
+});
+
 test('待审批列表的 items 与 total 均在 SQL 内绑定账号和 pending 状态', async () => {
   const calls: { sql: string; params: unknown[] }[] = [];
   const pool = {

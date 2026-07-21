@@ -342,7 +342,11 @@ export class PublishScheduler {
    * persona 绑定 + 风控 status===normal + canDo('publish') + 发布前人审（AC-PUB）。forced=false → ContentScout
    * 可诚实判「无新素材」而跳过（诚实空槽，非硬凑）。触发条件是「时段格 + 错峰命中」（由调度器判），不看概念阈值。
    */
-  async triggerScheduled(accountId: string, approvalMode: ContentScheduleApprovalMode = 'review'): Promise<TriggerOutcome> {
+  async triggerScheduled(
+    accountId: string,
+    approvalMode: ContentScheduleApprovalMode,
+    scheduleExecution: NonNullable<TriggerInput['scheduleExecution']>,
+  ): Promise<TriggerOutcome> {
     if (this.d.isPersonaBound && !this.d.isPersonaBound(accountId)) {
       this.logger.warn(`[PublishScheduler] 排期扳机：账号 ${accountId} 未绑定人设 — 跳过，绝不以默认人设发布`);
       return { result: 'blocked', reason: 'needs_persona_setup' };
@@ -364,6 +368,9 @@ export class PublishScheduler {
       undefined,
       undefined,
       approvalMode,
+      undefined,
+      undefined,
+      scheduleExecution,
     );
     return { result: 'triggered', reason: 'scheduled_window', status: triggeredStatus, recordId, failureReason, approvalCard };
   }
@@ -515,6 +522,7 @@ export class PublishScheduler {
     approvalMode?: NonNullable<TriggerInput['approvalMode']>,
     inspirationSinceMs?: number,
     edgeLeasePriority?: 'human',
+    scheduleExecution?: NonNullable<TriggerInput['scheduleExecution']>,
   ): Promise<{ status: string; recordId?: number | null; failureReason?: string; approvalCard?: SchedulerApprovalCardResult }> {
     const dbPending = await this.dbPendingCount(accountId);
     const kind = referenceNote ? ('rewrite' as const) : ('autonomous' as const);
@@ -542,6 +550,7 @@ export class PublishScheduler {
       approvalMode,
       inspirationSinceMs,
       edgeLeasePriority,
+      scheduleExecution,
     );
   }
 
@@ -556,6 +565,7 @@ export class PublishScheduler {
     approvalMode?: NonNullable<TriggerInput['approvalMode']>,
     inspirationSinceMs?: number,
     edgeLeasePriority?: 'human',
+    scheduleExecution?: NonNullable<TriggerInput['scheduleExecution']>,
   ): Promise<{ status: string; recordId?: number | null; failureReason?: string; approvalCard?: SchedulerApprovalCardResult }> {
     try {
     const base = await this.buildTriggerInput(accountId, { inspirationSinceMs });
@@ -601,6 +611,9 @@ export class PublishScheduler {
     }
     if (edgeLeasePriority === 'human') {
       input.edgeLeasePriority = 'human';
+    }
+    if (scheduleExecution) {
+      input.scheduleExecution = { ...scheduleExecution };
     }
     this.logger.log(`[PublishScheduler] 触发发帖编排 reason=${reason} forced=${forced} account=${input.accountId} newConcepts=${input.metrics.newConceptCount} liked=${input.metrics.likedSinceLastPublish}`);
     const res = await this.d.orchestrator.trigger(input);

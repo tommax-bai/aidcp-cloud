@@ -19,6 +19,7 @@ import type { DispatchDraft } from './publish-log-store.js';
 import type { CommandSequencer } from './command-sequencer.js';
 import { EdgeTaskLeaseError, type EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
 import type { EdgeTaskPriority } from '../comm/protocol.js';
+import type { DeploymentTarget } from '../deployment-target.js';
 
 /** 下发段所需的落库读写子集。 */
 export interface DispatchStore {
@@ -29,7 +30,7 @@ export interface DispatchStore {
   /** 配图收口：标记真实附着张数 K（K>0 派生 images_attached=true）。 */
   markImagesAttached(id: number, count: number): Promise<void>;
   /** 兜底扫描用：列出所有待审草稿 id（供事件丢失时补触发）。 */
-  listPendingApprovalIds(): Promise<number[]>;
+  listPendingApprovalIds(executionTarget?: DeploymentTarget | null): Promise<number[]>;
 }
 
 /** 授权信号读回（edit-note-draft-before-publish）：approved + 授权所载内容版本号（缺→0，向后兼容）。无信号→null。 */
@@ -65,6 +66,8 @@ export interface PublishDispatcherDeps {
   edgeTaskLeases: Pick<EdgeTaskLeaseClient, 'withLease'>;
   /** 解析绑定该账号的在线边缘节点 edgeId；无在线节点返回 null（→ 诚实 failed）。 */
   resolveEdgeIdForAccount: (accountId: string) => string | null;
+  /** Cloud-local deployment target. null/absent fails closed for target-bound automatic drafts. */
+  executionTarget?: DeploymentTarget | null;
   /**
    * 7.3：该 edge 是否处于验证码硬暂停态（ws-server pausedEdges）。暂停期发布命令不在下发豁免名单、
    * 投递必为 0 → 会被序列器 reject 烧成不可逆 failed。下发前先闸：暂停即零副作用回待审、保留授权、不烧稿。
@@ -125,6 +128,7 @@ export class PublishDispatcher {
   private readonly sequencer: Pick<CommandSequencer, 'executePublishSequence'>;
   private readonly edgeTaskLeases: Pick<EdgeTaskLeaseClient, 'withLease'>;
   private readonly resolveEdgeIdForAccount: (accountId: string) => string | null;
+  private readonly executionTarget: DeploymentTarget | null;
   private readonly isEdgePaused?: (edgeId: string) => boolean;
   private readonly readApproval: (requestId: string) => Promise<ApprovalDecision | null>;
   private readonly voidApprovalSignal: (requestId: string) => Promise<void>;
@@ -179,6 +183,7 @@ export class PublishDispatcher {
     this.sequencer = deps.sequencer;
     this.edgeTaskLeases = deps.edgeTaskLeases;
     this.resolveEdgeIdForAccount = deps.resolveEdgeIdForAccount;
+    this.executionTarget = deps.executionTarget ?? null;
     this.isEdgePaused = deps.isEdgePaused;
     this.readApproval = deps.readApproval;
     this.voidApprovalSignal = deps.voidApprovalSignal;
@@ -217,6 +222,27 @@ export class PublishDispatcher {
 
   private clearBrowserSlotWaiting(recordId: number): void {
     this.browserSlotWaitingNotified.delete(recordId);
+  }
+
+  /** Legacy/manual drafts have no binding. Target-bound automatic drafts fail closed on malformed or mismatched metadata. */
+  private scheduleTargetAllows(draft: DispatchDraft): boolean {
+    const scheduleExecution = draft.metadata?.scheduleExecution;
+    if (scheduleExecution === undefined) return true;
+    const valid =
+      scheduleExecution !== null &&
+      typeof scheduleExecution === 'object' &&
+      (scheduleExecution.executionTarget === 'dev' || scheduleExecution.executionTarget === 'ol') &&
+      typeof scheduleExecution.envKey === 'string' &&
+      scheduleExecution.envKey.trim().length > 0 &&
+      typeof scheduleExecution.hourCell === 'string' &&
+      scheduleExecution.hourCell.trim().length > 0;
+    if (valid && scheduleExecution.executionTarget === this.executionTarget) return true;
+    this.logger.warn(
+      `[PublishDispatcher] recordId=${draft.recordId} 自动排期归属不匹配或非法 draftTarget=${
+        valid ? scheduleExecution.executionTarget : 'invalid'
+      } localTarget=${this.executionTarget ?? 'unset'}，下发前跳过且保留原状态`,
+    );
+    return false;
   }
 
   /** 序列失败记账：连续 N 次触发熔断（自愈不自残——停 drain 防连环烧掉整批获批草稿）。 */
@@ -291,6 +317,7 @@ export class PublishDispatcher {
         this.logger.warn(`[PublishDispatcher] recordId=${recordId} 草稿不存在，跳过`);
         return;
       }
+      if (!this.scheduleTargetAllows(peek)) return;
       accountId = peek.accountId;
       persistedPriority = peek.metadata?.edgeLeasePriority === 'human' ? 'human' : 'automatic';
     } catch (err) {
@@ -334,7 +361,7 @@ export class PublishDispatcher {
   async scanAndDispatchApproved(): Promise<void> {
     let ids: number[];
     try {
-      ids = await this.store.listPendingApprovalIds();
+      ids = await this.store.listPendingApprovalIds(this.executionTarget);
     } catch (err) {
       this.logger.warn(`[PublishDispatcher] 兜底扫描列待审失败: ${err instanceof Error ? err.message : String(err)}`);
       return;
@@ -405,6 +432,10 @@ export class PublishDispatcher {
       this.clearBrowserSlotWaiting(recordId);
       return;
     }
+    if (!this.scheduleTargetAllows(draft)) {
+      this.clearBrowserSlotWaiting(recordId);
+      return;
+    }
     // 幂等：已发布或非待审态不重发（兜底扫描/重复触发可能命中）。
     if (draft.status === 'published') {
       this.logger.log(`[PublishDispatcher] recordId=${recordId} 已发布，跳过（幂等）`);
@@ -460,6 +491,15 @@ export class PublishDispatcher {
         this.edgeOfflineWaitingNotified.add(recordId);
         this.notifyOps({ kind: 'edge_offline_waiting', accountId, recordId, title: draft.title });
       }
+      return;
+    }
+    const scheduledEnvKey = draft.metadata?.scheduleExecution?.envKey.trim();
+    if (scheduledEnvKey && edgeId !== `ads-${scheduledEnvKey}`) {
+      this.clearBrowserSlotWaiting(recordId);
+      this.logger.warn(
+        `[PublishDispatcher] recordId=${recordId} 自动排期浏览器环境已变化 expected=ads-${scheduledEnvKey} actual=${edgeId}，` +
+          '保留授权和稿件状态，绝不改投其它环境',
+      );
       return;
     }
     this.edgeOfflineWaitingNotified.delete(recordId);

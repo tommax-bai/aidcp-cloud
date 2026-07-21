@@ -1,10 +1,36 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { ContentScheduleStore } from '../src/config/content-schedule-store.js';
+import { CONTENT_SCHEDULE_SCHEMA_SQL, ContentScheduleStore } from '../src/config/content-schedule-store.js';
 
 const FULL = '1'.repeat(168);
 const HALF = '1'.repeat(84) + '0'.repeat(84);
+
+test('schema: 自动发帖小时格台账只保留 account/action 最新占位', () => {
+  assert.match(CONTENT_SCHEDULE_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS content_schedule_hour_claims/);
+  assert.match(CONTENT_SCHEDULE_SCHEMA_SQL, /PRIMARY KEY \(account_id, action\)/);
+  assert.match(CONTENT_SCHEDULE_SCHEMA_SQL, /execution_target IN \('dev', 'ol'\)/);
+});
+
+test('claimAutoPostHourCell: 原子 upsert 仅首个进程拿到相同小时格', async () => {
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  let first = true;
+  const pool = {
+    query: async (sql: string, params: unknown[] = []) => {
+      calls.push({ sql, params });
+      const rows = first ? [{ account_id: 'acc-1' }] : [];
+      first = false;
+      return { rows };
+    },
+  } as unknown as pg.Pool;
+  const store = new ContentScheduleStore({ pool });
+  const input = { accountId: 'acc-1', hourCell: '2026-01-05-10', executionTarget: 'dev' as const, envKey: 'env-1' };
+  assert.equal(await store.claimAutoPostHourCell(input), true);
+  assert.equal(await store.claimAutoPostHourCell(input), false);
+  assert.match(calls[0].sql, /ON CONFLICT \(account_id, action\) DO UPDATE/);
+  assert.match(calls[0].sql, /WHERE content_schedule_hour_claims\.hour_cell <> EXCLUDED\.hour_cell/);
+  assert.deepEqual(calls[0].params, ['acc-1', '2026-01-05-10', 'dev', 'env-1']);
+});
 
 /**
  * pg.Pool 桩：按 SQL 前缀路由固定应答，记录全部 query 调用。

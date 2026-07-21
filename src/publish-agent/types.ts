@@ -2,6 +2,7 @@ import type { Soul } from '../soul/types.js';
 import type { CuratedReferenceImageFormGuess, TextCardTranscription } from '../cache/curated-content-store.js';
 import type { ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
 import type { PlatformId } from '../platform/index.js';
+import type { DeploymentTarget } from '../deployment-target.js';
 import type { TextCardSourceStyle } from '../render/text-card.js';
 import type {
   ContentVisualBrief,
@@ -125,6 +126,12 @@ export interface PublishRecord {
 // ─── 管道角色类型 ──────────────────────────────────────────────────────────────
 
 /** 触发器输入度量 */
+export interface ScheduledExecutionAttribution {
+  executionTarget: DeploymentTarget;
+  envKey: string;
+  hourCell: string;
+}
+
 export interface TriggerInput {
   /** 排期审批模式；缺省 review，手动触发保持原有人审语义。 */
   approvalMode?: ContentScheduleApprovalMode | 'draft_only';
@@ -209,6 +216,8 @@ export interface TriggerInput {
    * latency or a process restart cannot downgrade a manual task to automatic.
    */
   edgeLeasePriority?: 'human';
+  /** Server-stamped automatic schedule ownership. Edge/client input must never populate this field. */
+  scheduleExecution?: ScheduledExecutionAttribution;
 }
 
 /** ContentScout 输出 */
@@ -714,6 +723,8 @@ export interface PublishMetadata {
   };
   /** Exact manual publish only; absent means the established automatic lane. */
   edgeLeasePriority?: 'human';
+  /** Frozen automatic schedule ownership; absent for manual and legacy drafts. */
+  scheduleExecution?: ScheduledExecutionAttribution;
   /** Durable evidence that a supported approval surface explicitly rejected this pending draft. */
   approvalDecision?: {
     kind: 'user_rejected';

@@ -1,4 +1,9 @@
 import type { PlatformId, DelegatedAction } from '../platform/index.js';
+import {
+  DEPLOYMENT_TARGETS,
+  parseDeploymentTarget,
+  type DeploymentTarget,
+} from '../deployment-target.js';
 
 export type { DelegatedAction };
 export type DelegatedPlatformId = Exclude<PlatformId, 'wechat_channels'>;
@@ -18,8 +23,8 @@ export const DELEGATED_TASK_STATUSES = [
 ] as const;
 
 export type DelegatedTaskStatus = (typeof DELEGATED_TASK_STATUSES)[number];
-export const DELEGATED_EXECUTION_TARGETS = ['dev', 'ol'] as const;
-export type DelegatedExecutionTarget = (typeof DELEGATED_EXECUTION_TARGETS)[number];
+export const DELEGATED_EXECUTION_TARGETS = DEPLOYMENT_TARGETS;
+export type DelegatedExecutionTarget = DeploymentTarget;
 export type DelegatedTaskPriority = 'normal' | 'high';
 export type DelegatedTaskSource = 'feishu' | 'edge' | 'console' | 'api' | 'legacy_command' | 'operator_action';
 export type DelegatedApprovalMode = 'review' | 'auto_approve' | 'draft_only';
@@ -93,9 +98,7 @@ export interface DelegatedTask {
 
 /** Strict fail-closed parser for the existing Cloud deployment fact source. */
 export function parseDelegatedExecutionTarget(value: unknown): DelegatedExecutionTarget | null {
-  if (typeof value !== 'string') return null;
-  const normalized = value.trim();
-  return normalized === 'dev' || normalized === 'ol' ? normalized : null;
+  return parseDeploymentTarget(value);
 }
 
 export interface DelegatedTaskIntent {

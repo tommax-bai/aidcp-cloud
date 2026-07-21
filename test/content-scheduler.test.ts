@@ -17,6 +17,13 @@ const OFFSET = offsetMinute(ACC, BASE_DAY, 'post');
 const NOW_HIT = new Date(2026, 0, 5, 10, OFFSET, 0);
 const NOW_MISS = new Date(2026, 0, 5, 10, (OFFSET + 1) % 60, 0);
 
+const onlineIdentities = (accountIds: string[]) =>
+  accountIds.map((accountId) => ({ accountId, envKey: `env-${accountId}` }));
+const autoPostEnvironmentDeps = {
+  executionTarget: 'dev' as const,
+  claimPostHourCell: async () => true,
+};
+
 function scheduleView(overrides: Partial<ContentScheduleView> = {}): ContentScheduleView {
   const next: ContentScheduleView = {
     autoEnabled: true,
@@ -48,6 +55,7 @@ interface State {
   busy: boolean;
   nowMs: number;
   triggerImpl: (id: string) => Promise<unknown>;
+  claimAllowed: boolean;
   /** 「自动 ⊆ 活跃」闸：undefined=不注入（不限）。 */
   browseActive?: boolean;
 }
@@ -63,10 +71,13 @@ function mk(overrides: Partial<State> = {}) {
     busy: false,
     nowMs: NOW_HIT.getTime(),
     triggerImpl: () => Promise.resolve(),
+    claimAllowed: true,
     ...overrides,
   };
   const deps: ContentSchedulerDeps = {
-    onlineAccounts: () => state.online,
+    onlineAccounts: () => onlineIdentities(state.online),
+    ...autoPostEnvironmentDeps,
+    claimPostHourCell: async () => state.claimAllowed,
     scheduleFor: () => state.view,
     riskStatus: () => state.risk,
     postedTodayCount: () => Promise.resolve(state.posted),
@@ -104,10 +115,44 @@ test('content-scheduler: happy path — 命中偏移分钟 + 各闸通过 → �
   assert.deepEqual(calls, [ACC]);
 });
 
+test('content-scheduler: 自动发帖先持久占位，并把 envKey/target/hourCell 冻结给触发器', async () => {
+  const claimed: Array<{ accountId: string; envKey: string; cell: string }> = [];
+  let execution: unknown;
+  const deps: ContentSchedulerDeps = {
+    ...autoPostEnvironmentDeps,
+    onlineAccounts: () => [{ accountId: ACC, envKey: 'env-real' }],
+    claimPostHourCell: async (identity, cell) => {
+      claimed.push({ ...identity, cell });
+      return true;
+    },
+    scheduleFor: () => scheduleView(),
+    riskStatus: () => 'normal',
+    postedTodayCount: () => Promise.resolve(0),
+    pendingAutonomousCount: () => Promise.resolve(0),
+    isPublishBusy: () => false,
+    triggerPost: (_id, _mode, frozen) => {
+      execution = frozen;
+      return Promise.resolve();
+    },
+    now: () => NOW_HIT.getTime(),
+    logger: { warn: () => {} },
+  };
+  await new ContentScheduler(deps).onTick();
+  assert.deepEqual(claimed, [{ accountId: ACC, envKey: 'env-real', cell: '2026-01-05-10' }]);
+  assert.deepEqual(execution, { executionTarget: 'dev', envKey: 'env-real', hourCell: '2026-01-05-10' });
+});
+
+test('content-scheduler: 小时格已被其它进程占位时不启动生成', async () => {
+  const h = mk({ claimAllowed: false });
+  await h.scheduler.onTick();
+  assert.deepEqual(h.calls, []);
+});
+
 test('content-scheduler: 三档模式透传 — postMode=auto_approve 下发给 triggerPost', async () => {
   let seenMode: string | undefined;
   const deps: ContentSchedulerDeps = {
-    onlineAccounts: () => [ACC],
+    onlineAccounts: () => onlineIdentities([ACC]),
+    ...autoPostEnvironmentDeps,
     scheduleFor: () => scheduleView({ postMode: 'auto_approve', postEnabled: true }),
     riskStatus: () => 'normal',
     postedTodayCount: () => Promise.resolve(0),
@@ -223,10 +268,12 @@ test('content-scheduler: 发帖全局串行 — 同 tick 内两账号撞同偏�
     pending: false,
     busy: false,
     nowMs,
-    triggerImpl: () => new Promise(() => {}), // 第一个 fire 后永不 settle → postFiring 保持 true
+	    triggerImpl: () => new Promise(() => {}), // 第一个 fire 后永不 settle → postFiring 保持 true
+    claimAllowed: true,
   };
   const deps: ContentSchedulerDeps = {
-    onlineAccounts: () => state.online,
+    onlineAccounts: () => onlineIdentities(state.online),
+    ...autoPostEnvironmentDeps,
     scheduleFor: () => state.view,
     riskStatus: () => state.risk,
     postedTodayCount: () => Promise.resolve(state.posted),
@@ -256,10 +303,12 @@ test('content-scheduler: 重入护栏 — 上轮未完时并发 tick 被跳过�
     pending: false,
     busy: false,
     nowMs: NOW_HIT.getTime(),
-    triggerImpl: () => Promise.resolve(),
+	    triggerImpl: () => Promise.resolve(),
+    claimAllowed: true,
   };
   const deps: ContentSchedulerDeps = {
-    onlineAccounts: () => state.online,
+    onlineAccounts: () => onlineIdentities(state.online),
+    ...autoPostEnvironmentDeps,
     scheduleFor: () => state.view,
     riskStatus: () => state.risk,
     postedTodayCount: async () => {
@@ -311,7 +360,8 @@ function mkC(overrides: Partial<CState> = {}) {
     ...overrides,
   };
   const deps: ContentSchedulerDeps = {
-    onlineAccounts: () => [ACC],
+    onlineAccounts: () => onlineIdentities([ACC]),
+    ...autoPostEnvironmentDeps,
     scheduleFor: () => st.view,
     riskStatus: () => 'normal',
     postedTodayCount: () => Promise.resolve(0),
@@ -341,6 +391,27 @@ test('content-scheduler/comment: happy path — 命中评论偏移分钟 → tri
   const { scheduler, fired } = mkC();
   await scheduler.onTick();
   assert.deepEqual(fired, [`comment:${ACC}`]);
+});
+
+test('content-scheduler/comment: 旧式连接 envKey=null 只阻断自动发帖，不误伤既有评论排期', async () => {
+  const fired: string[] = [];
+  const deps: ContentSchedulerDeps = {
+    ...autoPostEnvironmentDeps,
+    onlineAccounts: () => [{ accountId: ACC, envKey: null }],
+    scheduleFor: () => scheduleView({ postEnabled: false, postDailyCap: 0, commentEnabled: true, commentDailyCap: 2 }),
+    riskStatus: () => 'normal',
+    postedTodayCount: () => Promise.resolve(0),
+    pendingAutonomousCount: () => Promise.resolve(0),
+    isPublishBusy: () => false,
+    triggerPost: () => Promise.resolve(),
+    triggerComment: async (id) => { fired.push(id); },
+    isCommentBusy: () => false,
+    commentedTodayCount: () => Promise.resolve(0),
+    now: () => C_NOW_HIT.getTime(),
+    logger: { warn: () => {} },
+  };
+  await new ContentScheduler(deps).onTick();
+  assert.deepEqual(fired, [ACC]);
 });
 
 test('content-scheduler/comment: 动作幂等互不吞 — 发帖触发后同小时评论槽照常', async () => {
@@ -385,7 +456,8 @@ test('content-scheduler/join: join 与 comment 共用账号级单飞，join 在�
     commentedToday: 0,
   };
 	const deps: ContentSchedulerDeps = {
-	  onlineAccounts: () => [ACC],
+	  onlineAccounts: () => onlineIdentities([ACC]),
+    ...autoPostEnvironmentDeps,
 	  scheduleFor: () => scheduleView({ postEnabled: false, postDailyCap: 0, commentEnabled: true, commentDailyCap: 2 }),
     riskStatus: () => 'normal',
     postedTodayCount: () => Promise.resolve(0),
@@ -422,7 +494,8 @@ test('content-scheduler/cross-guard: 正在评论（isCommentBusy）→ 后台�
   const joinNow = new Date(2026, 0, 5, 10, joinOffset, 0);
   const fired: string[] = [];
 	const deps: ContentSchedulerDeps = {
-	  onlineAccounts: () => [ACC],
+	  onlineAccounts: () => onlineIdentities([ACC]),
+    ...autoPostEnvironmentDeps,
 	  scheduleFor: () => scheduleView({ postEnabled: false, postDailyCap: 0 }),
     riskStatus: () => 'normal',
     postedTodayCount: () => Promise.resolve(0),
@@ -446,7 +519,8 @@ test('content-scheduler/cross-guard: 正在加群（isJoinBusy）→ 后台自�
   const commentNow = new Date(2026, 0, 5, 10, commentOffset, 0);
   const fired: string[] = [];
 	const deps: ContentSchedulerDeps = {
-	  onlineAccounts: () => [ACC],
+	  onlineAccounts: () => onlineIdentities([ACC]),
+    ...autoPostEnvironmentDeps,
 	  scheduleFor: () => scheduleView({ postEnabled: false, postDailyCap: 0, commentEnabled: true, commentDailyCap: 2 }),
     riskStatus: () => 'normal',
     postedTodayCount: () => Promise.resolve(0),
@@ -510,7 +584,8 @@ function mkG(overrides: Partial<GState> = {}) {
     ...overrides,
   };
   const deps: ContentSchedulerDeps = {
-    onlineAccounts: () => [ACC],
+    onlineAccounts: () => onlineIdentities([ACC]),
+    ...autoPostEnvironmentDeps,
     scheduleFor: () => st.view,
     riskStatus: () => 'normal',
     postedTodayCount: () => Promise.resolve(0),
@@ -608,7 +683,8 @@ function mkRetry(triggerImpl: (id: string) => Promise<unknown>) {
   const abandoned: Array<{ action: string; reason: string }> = [];
   const state = { nowMs: NOW_HIT.getTime() };
   const deps: ContentSchedulerDeps = {
-    onlineAccounts: () => [ACC],
+    onlineAccounts: () => onlineIdentities([ACC]),
+    ...autoPostEnvironmentDeps,
     scheduleFor: () => scheduleView(),
     riskStatus: () => 'normal',
     postedTodayCount: () => Promise.resolve(0),

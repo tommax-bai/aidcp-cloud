@@ -274,6 +274,8 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
   ): Promise<PublishResult> {
     const lineage = this.lineageFrom(context);
     const sourceReference = this.sourceReferenceFrom(context, accountId);
+    const trigger = context.get('trigger') as TriggerInput | undefined;
+    const scheduleExecution = trigger?.scheduleExecution;
 
     // 配图收口红线（change publish-image-required-or-fail + publish-multi-image）：图文帖必须有图。
     // 全部生图失败（imageUrls 空）→ 提前诚实 failed，不落待审、不发审批卡、附着数=0（绝不静默走必然失败的纯文字路径）。
@@ -306,7 +308,9 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       tags: topics,
       imageUrl: assembled.imageUrl,
       images: assembled.imageUrls,
-      status: 'pending_approval',
+      // Target-bound automatic drafts begin fail-closed. Only after their attribution is durably recorded below
+      // may they enter pending_approval and become visible to approval/dispatch recovery.
+      status: scheduleExecution ? 'needs_review' : 'pending_approval',
       qualityScore: assembled.qualityScore,
       aiScore: assembled.aiScore,
       sourceConcepts: lineage.sourceConcepts,
@@ -329,9 +333,11 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
         ),
         context,
       );
-      const trigger = context.get('trigger') as TriggerInput | undefined;
       if (trigger?.edgeLeasePriority === 'human') {
         metadataWithAudit.edgeLeasePriority = 'human';
+      }
+      if (scheduleExecution) {
+        metadataWithAudit.scheduleExecution = { ...scheduleExecution };
       }
       const aiEnforced = metadataWithAudit.compliance.aiEnforced === true;
       try {
@@ -339,10 +345,24 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       } catch (err) {
         // 普通历史路径保留既有 metadata best-effort；精确手工发布的档位则是队列安全事实，不能丢标后
         // 继续发审批卡、再以 automatic 被同批 human 评论抢占。标记失败时转人工复核并 fail-closed。
-        if (trigger?.edgeLeasePriority === 'human') {
-          await this.store.updateStatus?.(recordId, 'needs_review').catch(() => {});
-          throw new Error(`manual_publish_priority_persistence_failed: ${(err as Error).message}`);
+        if (trigger?.edgeLeasePriority === 'human' || scheduleExecution) {
+          if (!scheduleExecution) await this.store.updateStatus?.(recordId, 'needs_review').catch(() => {});
+          const code = scheduleExecution ? 'scheduled_execution_persistence_failed' : 'manual_publish_priority_persistence_failed';
+          throw new Error(`${code}: ${(err as Error).message}`);
         }
+      }
+    } else if (scheduleExecution) {
+      throw new Error('scheduled_execution_persistence_failed: recordMetadata_unavailable');
+    }
+
+    if (scheduleExecution) {
+      if (!this.store.updateStatus) {
+        throw new Error('scheduled_execution_persistence_failed: updateStatus_unavailable');
+      }
+      try {
+        await this.store.updateStatus(recordId, 'pending_approval');
+      } catch (err) {
+        throw new Error(`scheduled_execution_persistence_failed: pending_transition_failed: ${(err as Error).message}`);
       }
     }
 

@@ -152,6 +152,23 @@ test('合法账号握手先建传输运行时，welcome 后才 setup dispatcher 
   assert.equal((h.registry.controllerForSession(session) as unknown as { accountId: string }).accountId, 'acctA');
 });
 
+test('自动排期在线身份只从 welcomed 的 ads-<envKey> 解析环境，旧式连接保留账号但 envKey=null', async () => {
+  const h = makeHarness();
+  const managed: EdgeSession = { sessionId: 's-managed', edgeId: 'ads-env-42', accountId: 'acctA' };
+  const legacy: EdgeSession = { sessionId: 's-legacy', edgeId: 'legacy-edge', accountId: 'acctB' };
+  await h.registry.onHandshake(managed);
+  await h.registry.onHandshake(legacy);
+  assert.deepEqual(h.registry.onlineAccountIdentities(), [], 'welcome 前不得进入自动排期身份');
+
+  h.registry.onWelcomed(managed);
+  h.registry.onWelcomed(legacy);
+  assert.deepEqual(h.registry.onlineAccountIdentities(), [
+    { accountId: 'acctA', envKey: 'env-42' },
+    { accountId: 'acctB', envKey: null },
+  ]);
+  assert.deepEqual(h.registry.onlineAccountIds().sort(), ['acctA', 'acctB'], '旧式连接的其它既有能力保持在线');
+});
+
 test('平台匹配：edge platform 与 accounts.platform 同为 xiaohongshu 时允许握手', async () => {
   const h = makeHarness({ acctA: 'xiaohongshu' });
   const session: EdgeSession = { sessionId: 's1', edgeId: 'eA', accountId: 'acctA', platform: 'xhs' };

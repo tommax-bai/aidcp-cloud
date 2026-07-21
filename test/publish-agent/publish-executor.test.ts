@@ -596,6 +596,78 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     assert.equal(ctx.get('publishResult')?.status, 'skipped');
   });
 
+  test('自动排期归属在审批出口前冻结进 publish metadata', async () => {
+    const recordedMeta: any[] = [];
+    const inserted: any[] = [];
+    const statusUpdates: Array<{ id: number; status: string }> = [];
+    const role = new PublishExecutorRole({
+      store: {
+        insert: async (record) => { inserted.push(record); return 71; },
+        recordMetadata: async (_id, metadata) => { recordedMeta.push(metadata); },
+        updateStatus: async (id, status) => { statusUpdates.push({ id, status }); },
+      },
+      messenger: { sendApprovalCard: async () => {} },
+      botChatStore: { getDefaultChat: async () => ({ chatId: 'c' }) },
+      clock,
+      logger: silentLogger,
+    });
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('trigger', {
+      metrics: { hoursSinceLastPublish: 30, newConceptCount: 1, likedSinceLastPublish: 0 },
+      generateInput: { concepts: [], likedContents: [], soul: {} as any, recentPosts: [] },
+      recentPublished: [],
+      scheduleExecution: { executionTarget: 'dev', envKey: 'env-71', hourCell: '2026-01-05-10' },
+    } as any);
+    ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('publishMetadata', makePublishMetadata());
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.equal(ctx.get('publishResult')?.status, 'pending_approval');
+    assert.equal(inserted[0].status, 'needs_review', '归属落库前先处于不可审批安全态');
+    assert.deepEqual(recordedMeta[0].scheduleExecution, {
+      executionTarget: 'dev', envKey: 'env-71', hourCell: '2026-01-05-10',
+    });
+    assert.deepEqual(statusUpdates, [{ id: 71, status: 'pending_approval' }], '归属落库后才开放审批');
+  });
+
+  test('自动排期归属落库失败 → needs_review 且不发审批卡', async () => {
+    const statusUpdates: Array<{ id: number; status: string }> = [];
+    const inserted: any[] = [];
+    const sentCards: any[] = [];
+    const role = new PublishExecutorRole({
+      store: {
+        insert: async (record) => { inserted.push(record); return 72; },
+        recordMetadata: async () => { throw new Error('metadata unavailable'); },
+        updateStatus: async (id, status) => { statusUpdates.push({ id, status }); },
+      },
+      messenger: { sendApprovalCard: async (_chatId, card) => { sentCards.push(card); } },
+      botChatStore: { getDefaultChat: async () => ({ chatId: 'c' }) },
+      clock,
+      logger: silentLogger,
+    });
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('trigger', {
+      metrics: { hoursSinceLastPublish: 30, newConceptCount: 1, likedSinceLastPublish: 0 },
+      generateInput: { concepts: [], likedContents: [], soul: {} as any, recentPosts: [] },
+      recentPublished: [],
+      scheduleExecution: { executionTarget: 'dev', envKey: 'env-72', hourCell: '2026-01-05-10' },
+    } as any);
+    ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('publishMetadata', makePublishMetadata());
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('auto_publish'));
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.equal(inserted[0].status, 'needs_review');
+    assert.deepEqual(statusUpdates, [], '归属失败时保持初始安全态，无需依赖第二次补救写');
+    assert.equal(sentCards.length, 0);
+    assert.equal(ctx.get('publishResult')?.status, 'skipped');
+  });
+
   test('参考图 provider 返回 used → publishMetadata.referenceImageAudit 标记 providerClaimedUsed=true', async () => {
     const recordedMeta: any[] = [];
     const role = new PublishExecutorRole({

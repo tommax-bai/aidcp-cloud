@@ -22,6 +22,21 @@
 import { isValidWeekActiveMask, isWeekActiveAt } from '../risk/session-limits.js';
 import { actionModeEnabled, type ContentScheduleActionMode, type ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
 import type { PlatformId } from '../platform/index.js';
+import type { DeploymentTarget } from '../deployment-target.js';
+
+export interface OnlineAccountIdentity {
+  accountId: string;
+  /** null keeps legacy scheduled comment/join behavior; automatic posting requires a non-null verified envKey. */
+  envKey: string | null;
+}
+
+export type VerifiedOnlineAccountIdentity = OnlineAccountIdentity & { envKey: string };
+
+export interface ScheduledPostExecution {
+  executionTarget: DeploymentTarget;
+  envKey: string;
+  hourCell: string;
+}
 
 /** 调度器每 tick 现读的生效排期（effectiveMask 已由 store 解析：override ?? global）。 */
 export interface ContentScheduleView {
@@ -41,8 +56,12 @@ export interface ContentScheduleView {
 }
 
 export interface ContentSchedulerDeps {
-  /** 当前在线账号（连接注册表访问器）。 */
-  onlineAccounts(): string[];
+  /** 当前完成欢迎握手的在线账号；envKey 可空以保持非发帖动作兼容，自动发帖单独 fail closed。 */
+  onlineAccounts(): OnlineAccountIdentity[];
+  /** Cloud 本地严格解析的部署目标；绝不接受 Edge 自报。 */
+  executionTarget: DeploymentTarget;
+  /** 自动发帖小时格的数据库原子占位；false 表示其它进程或重启前已触发该格。 */
+  claimPostHourCell(identity: VerifiedOnlineAccountIdentity, hourCell: string): Promise<boolean>;
   /** 单账号生效排期（store.effectiveScheduleFor，内存现读）。 */
   scheduleFor(accountId: string): ContentScheduleView;
   /** 风控状态（只 'normal' 才自动）。可同步或异步（server 侧按账号 registry 解析是 async）。 */
@@ -71,7 +90,11 @@ export interface ContentSchedulerDeps {
   browseActiveAt?(now: Date): boolean;
   /** 触发排期发帖：**fire-and-forget**——返回一个在生成完成/失败时 settle 的 promise，调度器只挂 finally、绝不 await。
    *  该实现负责走既有提议→人审→派发、并异步补飞书结果卡（成功/空槽/失败）。 */
-  triggerPost(accountId: string, approvalMode: ContentScheduleApprovalMode): Promise<unknown>;
+  triggerPost(
+    accountId: string,
+    approvalMode: ContentScheduleApprovalMode,
+    execution: ScheduledPostExecution,
+  ): Promise<unknown>;
   /**
    * 评论动作三件套（change content-schedule-comments）。可选：任一未注入 → 评论动作整体跳过（零回归）。
    * triggerComment 的实现负责 canDo('comment') 配额闸 + 调命令式评论入口 + 触发失败回黄卡（终态结果卡由评论链自补）。
@@ -291,7 +314,8 @@ export class ContentScheduler {
       const minute = now.getMinutes();
       const cell = hourCellKey(now);
 
-      for (const accountId of this.deps.onlineAccounts()) {
+      for (const identity of this.deps.onlineAccounts()) {
+        const { accountId } = identity;
         try {
           const s = this.deps.scheduleFor(accountId);
           // 账号级闸（对所有动作统一）：总开关 / fail-closed 内容格 / 自动 ⊆ 活跃 / 单飞。
@@ -336,6 +360,10 @@ export class ContentScheduler {
             if ((await this.deps.riskStatus(accountId)) !== 'normal') break;
 
             if (action === 'post') {
+              // Only automatic posting needs a frozen browser environment. Other scheduled actions retain the
+              // established online-account behavior and are not silently disabled for legacy edge identities.
+              if (!identity.envKey) continue;
+              const postIdentity: VerifiedOnlineAccountIdentity = { accountId, envKey: identity.envKey };
               // 账号粒度自主单飞（change parallel-rewrite-drafts）：该账号已有自主轮在跑 → 本槽顺延；
               // 洗稿在途不让槽（全局并发帽由 claim 层兜底，帽满触发同样诚实 skipped）。postFiring 保留：
               // 防同一 tick 内多账号齐发的错峰意义独立于旧槽污染理由。
@@ -363,13 +391,25 @@ export class ContentScheduler {
                   continue;
                 }
               }
+              const claimed = await this.deps.claimPostHourCell(postIdentity, cell);
+              if (!claimed) {
+                this.deps.logger?.info?.(
+                  `[content-scheduler] 自动发帖小时格已被占用 account=${accountId} env=${postIdentity.envKey} target=${this.deps.executionTarget} cell=${cell}`,
+                );
+                continue;
+              }
+              const execution: ScheduledPostExecution = {
+                executionTarget: this.deps.executionTarget,
+                envKey: postIdentity.envKey,
+                hourCell: cell,
+              };
               this.postFiring = true;
               this.fire(
                 accountId,
                 action,
                 fireKey,
                 cell,
-                () => this.deps.triggerPost(accountId, postMode),
+                () => this.deps.triggerPost(accountId, postMode, execution),
                 () => {
                   this.postFiring = false;
                 },

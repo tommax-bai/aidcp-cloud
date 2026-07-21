@@ -11,6 +11,7 @@ import type { PublishRecord, PublishStatus, PublishMetadata, PublishMode, Visibi
 import { clampTitle } from './title-clamp.js';
 import { normalizePlatformId, type PlatformId } from '../platform/index.js';
 import { validatePublishSchedule } from './schedule-policy.js';
+import type { DeploymentTarget } from '../deployment-target.js';
 
 /** JSONB publish_metadata 解析：pg 驱动通常已解析为对象；兼容字符串形态；解析失败诚实置 null。 */
 function parsePublishMetadata(raw: unknown): PublishMetadata | null {
@@ -483,9 +484,23 @@ export class PublishLogStore {
   }
 
   /** 列出所有待审草稿 id（change decouple-publish-generation-from-dispatch）：供下发段兜底扫描补触发。 */
-  async listPendingApprovalIds(): Promise<number[]> {
+  async listPendingApprovalIds(executionTarget?: DeploymentTarget | null): Promise<number[]> {
+    const targetClause =
+      executionTarget === undefined
+        ? ''
+        : executionTarget === null
+          ? `AND publish_metadata->'scheduleExecution' IS NULL`
+          : `AND (
+               publish_metadata->'scheduleExecution' IS NULL
+               OR publish_metadata->'scheduleExecution'->>'executionTarget' = $1
+             )`;
     const { rows } = await this.pool.query<{ id: number }>(
-      `SELECT id FROM publish_log WHERE status = 'pending_approval' ORDER BY id ASC`,
+      `SELECT id
+         FROM publish_log
+        WHERE status = 'pending_approval'
+          ${targetClause}
+        ORDER BY id ASC`,
+      executionTarget ? [executionTarget] : [],
     );
     return rows.map((r) => r.id);
   }

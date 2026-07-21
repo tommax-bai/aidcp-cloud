@@ -6,6 +6,7 @@ import type { PublishSchedulerDeps } from '../../src/publish-agent/publish-sched
 const T = 1700000000000;
 const HOUR = 3_600_000;
 const silent = { log() {}, warn() {}, error() {} };
+const scheduledExecution = { executionTarget: 'dev' as const, envKey: 'env-test', hourCell: '2026-01-05-10' };
 
 interface Knobs {
   newConcepts?: number;
@@ -204,8 +205,9 @@ describe('AC-PUB-SCHED PublishScheduler 三扳机', () => {
     assert.equal(auto.inputs[0].manualApprovalChatId, undefined);
 
     const scheduled = build({ newConcepts: 0, canDo: true });
-    await scheduled.scheduler.triggerScheduled('acc-test');
+    await scheduled.scheduler.triggerScheduled('acc-test', 'review', scheduledExecution);
     assert.equal(scheduled.inputs[0].manualApprovalChatId, undefined);
+    assert.deepEqual(scheduled.inputs[0].scheduleExecution, scheduledExecution);
   });
 
   it('参考今日灵感只召回上海自然日内素材，今日无任何灵感时诚实跳过', async () => {
@@ -360,7 +362,7 @@ describe('claim 键控单飞与容量帽', () => {
     assert.equal(a.started, false);
     if (!a.started) assert.equal(a.reason, 'publish_capacity');
     // 自主入口（排期/飞书）同受帽约束：doTrigger 预取 dbPending=3 → capacity 拒绝、诚实 skipped。
-    const o = await scheduler.triggerScheduled('acc-test');
+    const o = await scheduler.triggerScheduled('acc-test', 'review', scheduledExecution);
     assert.equal(o.result, 'triggered');
     if (o.result === 'triggered') {
       assert.equal(o.status, 'skipped');

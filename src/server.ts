@@ -207,9 +207,9 @@ import {
   DelegatedTaskService,
   DelegatedTaskWorker,
   createDelegatedExecutorRouter,
-  parseDelegatedExecutionTarget,
   type DelegatedTask,
 } from './delegated-task/index.js';
+import { parseDeploymentTarget } from './deployment-target.js';
 import { DelegatedTaskNotificationGate, delegatedTaskFailureReceipt } from './delegated-task/notification.js';
 import { omitUnsupportedUsageMetrics, platformRegistryEntry } from './platform/index.js';
 import {
@@ -486,7 +486,7 @@ function parseForbiddenPorts(raw: string | undefined): number[] {
 async function main(): Promise<void> {
   const port = Number(process.env.AIDCP_PORT ?? 8787);
   const debugPort = Number(process.env.AIDCP_DEBUG_PORT ?? 8788);
-  const delegatedExecutionTarget = parseDelegatedExecutionTarget(readEnvString('AIDCP_DEPLOY_ENV'));
+  const deploymentTarget = parseDeploymentTarget(readEnvString('AIDCP_DEPLOY_ENV'));
 
   // 模型配置 + 加密凭据（change console-model-provider-config）。
   // 先于 LLM 客户端构造：模型名经 getCached() 运行时解析（热加载）；DashScope 密钥库内优先、回退 env。
@@ -933,7 +933,7 @@ async function main(): Promise<void> {
       ...(ossUploader ? { referenceImageRelocator: createCuratedReferenceImageRelocator(ossUploader) } : {}),
       onSourceAdmitted: (source: CuratedSourceAdmission) => firstPostCoordinator?.onSourceAdmitted(source),
       logger: console,
-      ...(delegatedExecutionTarget ? { executionTarget: delegatedExecutionTarget } : {}),
+      ...(deploymentTarget ? { executionTarget: deploymentTarget } : {}),
     });
     await ccs.init();
     curatedContentStore = ccs;
@@ -1096,10 +1096,10 @@ async function main(): Promise<void> {
   // Unified user-delegated task control plane. If PG/account facts are unavailable, all public write entries fail closed.
   let delegatedTaskStore: PgDelegatedTaskStore | undefined;
   let delegatedTaskService: DelegatedTaskService | undefined;
-  if (accountStore && delegatedExecutionTarget) {
+  if (accountStore && deploymentTarget) {
     try {
       const store = new PgDelegatedTaskStore({
-        executionTarget: delegatedExecutionTarget,
+        executionTarget: deploymentTarget,
         host: readEnvString('PGHOST'),
         port: readEnvPort('PGPORT'),
         database: readEnvString('PGDATABASE'),
@@ -1197,7 +1197,7 @@ async function main(): Promise<void> {
           return { ok: true };
         },
       });
-      console.log(`[aidcp-cloud] DelegatedTaskStore 已就绪（统一用户委托任务控制面；executionTarget=${delegatedExecutionTarget}）`);
+      console.log(`[aidcp-cloud] DelegatedTaskStore 已就绪（统一用户委托任务控制面；executionTarget=${deploymentTarget}）`);
     } catch (err) {
       console.warn('[aidcp-cloud] DelegatedTaskStore 初始化失败，公共写入口 fail-closed:', (err as Error).message);
     }
@@ -2547,6 +2547,7 @@ async function main(): Promise<void> {
     sequencer: commandSequencer,
     edgeTaskLeases,
     resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
+    executionTarget: deploymentTarget,
     // 7.3：该 edge 是否处于验证码硬暂停（发布命令不在下发豁免名单 → 暂停期投递必为 0）。暂停即零副作用回待审、不烧稿。
     isEdgePaused: (edgeId) => (edgeServer ? edgeServer.isEdgePaused(edgeId) : false),
     readApproval: readPublishApproval,
@@ -3562,9 +3563,17 @@ async function main(): Promise<void> {
     // 每分钟心跳、按账号扇出、分钟错峰；到点只产草稿→飞书人审→approved 才发（AC-PUB 不动）。
     // 与旧 AIDCP_PUBLISH_AUTO 单账号扳机**无条件互斥**：内容排期开则旧扳机确定性不启（防错时双触发→同日双草稿超发），不留 fallback。
     const contentScheduleAutoOn = readEnvString('AIDCP_CONTENT_SCHEDULE_AUTO') === 'true';
-    if (contentScheduleAutoOn) {
+    if (contentScheduleAutoOn && deploymentTarget) {
       const contentScheduler: ContentScheduler = new ContentScheduler({
-        onlineAccounts: () => runtimes?.onlineAccountIds() ?? [],
+        onlineAccounts: () => runtimes?.onlineAccountIdentities() ?? [],
+        executionTarget: deploymentTarget,
+        claimPostHourCell: (identity, hourCell) =>
+          contentScheduleStore.claimAutoPostHourCell({
+            accountId: identity.accountId,
+            envKey: identity.envKey,
+            executionTarget: deploymentTarget,
+            hourCell,
+          }),
         scheduleFor: (accountId) => contentScheduleStore.effectiveScheduleFor(accountId),
         riskStatus: async (accountId) => (await resolveController(accountId)).getState().status,
         postedTodayCount: (accountId) => publishLogStore.countPublishedTodayForAccount(accountId),
@@ -3581,13 +3590,13 @@ async function main(): Promise<void> {
         // 自动 ⊆ 活跃（用户拍板：浏览休眠格绝不自动发内容）：读浏览周历掩码，沿其 fail-open（未配=全天活跃=不限）。
         browseActiveAt: (now) => isWeekActiveAt(sessionConfigStore.weekActiveMask(), now),
         // fire-and-forget：调度器只发起；结果（成功/诚实空槽/失败）在此异步补一张飞书卡，绝不静默假成功。
-        triggerPost: async (accountId, approvalMode) => {
+        triggerPost: async (accountId, approvalMode, scheduleExecution) => {
           let ok = false;
           let level: 'success' | 'warning' | 'error' = 'error';
           let title = '排期发帖失败';
           let message = 'unknown';
           try {
-            const o = await publishScheduler!.triggerScheduled(accountId, approvalMode);
+            const o = await publishScheduler!.triggerScheduled(accountId, approvalMode, scheduleExecution);
             if (o.result === 'triggered') {
               const st = o.status;
               if (st === 'pending_approval' || st === 'published' || st === 'draft') {
@@ -3783,6 +3792,11 @@ async function main(): Promise<void> {
       if (readEnvString('AIDCP_PUBLISH_AUTO') === 'true') {
         console.warn('[aidcp-cloud] ⚠️ AIDCP_PUBLISH_AUTO=true 被忽略：内容排期调度器已接管自动发帖（互斥，防错时双触发）');
       }
+    } else if (contentScheduleAutoOn) {
+      console.warn(
+        `[aidcp-cloud] ContentScheduler 未启动：AIDCP_DEPLOY_ENV=${JSON.stringify(readEnvString('AIDCP_DEPLOY_ENV') ?? null)} ` +
+          '不是 dev/ol，自动发帖执行环境无法安全盖章；旧自动扳机仍保持互斥关闭',
+      );
     } else if (readEnvString('AIDCP_PUBLISH_AUTO') === 'true') {
       // 旧单账号自动扳机（内容排期未开时保持原行为，零回归）。
       const everyMin = Number(process.env.AIDCP_PUBLISH_AUTO_INTERVAL_MIN ?? 30);

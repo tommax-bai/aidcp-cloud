@@ -407,6 +407,25 @@ export class ConnectionRuntimeRegistry {
     return [...ids];
   }
 
+  /**
+   * 自动排期使用的在线身份。envKey 只从完成 welcome 的既有 `ads-<profileId>` edgeId 派生；
+   * 非受管/旧式 edgeId 缺少可证明环境，fail closed，不进入自动发帖扫描。
+   */
+  onlineAccountIdentities(): Array<{ accountId: string; envKey: string | null }> {
+    const identities = new Map<string, { accountId: string; envKey: string | null }>();
+    for (const rt of this.bySession.values()) {
+      if (!rt.welcomed || !rt.edgeId) continue;
+      const parsedEnvKey = rt.edgeId.startsWith('ads-') ? rt.edgeId.slice('ads-'.length).trim() : '';
+      const envKey = parsedEnvKey || null;
+      const identity = { accountId: rt.accountId, envKey };
+      const previous = identities.get(identity.accountId);
+      if (!previous || (previous.envKey === null && identity.envKey !== null)) {
+        identities.set(identity.accountId, identity);
+      }
+    }
+    return [...identities.values()];
+  }
+
   /** 当前活跃（已 startSession）的连接数。 */
   activeCount(): number {
     let n = 0;

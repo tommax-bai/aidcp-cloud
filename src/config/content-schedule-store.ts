@@ -21,6 +21,7 @@ import { RETIRED_ACCOUNT_ID } from '../account-store.js';
 import { resolveAccountDisplayName, type AccountDisplayNameSource } from '../account-display-name.js';
 import { SHANGHAI_DAY_START_SQL } from '../time/shanghai-day.js';
 import { isValidWeekActiveMask } from '../risk/session-limits.js';
+import type { DeploymentTarget } from '../deployment-target.js';
 
 const { Pool } = pg;
 
@@ -203,6 +204,16 @@ ALTER TABLE contact_comment_attempts ADD COLUMN IF NOT EXISTS note_id TEXT;
 ALTER TABLE contact_comment_attempts ADD COLUMN IF NOT EXISTS source TEXT;
 ALTER TABLE contact_comment_attempts ADD COLUMN IF NOT EXISTS velocity DOUBLE PRECISION;
 ALTER TABLE contact_comment_attempts ADD COLUMN IF NOT EXISTS age_hours DOUBLE PRECISION;
+-- 自动发帖小时格幂等台账：每账号只保留最新格；不是待消费队列，也不积累历史。
+CREATE TABLE IF NOT EXISTS content_schedule_hour_claims (
+  account_id       TEXT NOT NULL,
+  action           TEXT NOT NULL CHECK (action = 'post'),
+  hour_cell        TEXT NOT NULL,
+  execution_target TEXT NOT NULL CHECK (execution_target IN ('dev', 'ol')),
+  env_key          TEXT NOT NULL,
+  claimed_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (account_id, action)
+);
 `;
 
 export interface ContentScheduleStoreOptions {
@@ -288,6 +299,37 @@ export class ContentScheduleStore {
   async init(): Promise<void> {
     await this.pool.query(CONTENT_SCHEDULE_SCHEMA_SQL);
     await this.reload();
+  }
+
+  /**
+   * 自动发帖命中格的跨进程原子占位。只允许同账号的 hourCell 向新值推进；相同格返回 false。
+   * 占位成功即视为本格已触发，后续生成失败也不释放，避免高成本自动重做。
+   */
+  async claimAutoPostHourCell(input: {
+    accountId: string;
+    hourCell: string;
+    executionTarget: DeploymentTarget;
+    envKey: string;
+  }): Promise<boolean> {
+    const accountId = input.accountId.trim();
+    const hourCell = input.hourCell.trim();
+    const envKey = input.envKey.trim();
+    if (!accountId || !hourCell || !envKey) throw new Error('invalid_content_schedule_hour_claim');
+
+    const { rows } = await this.pool.query<{ account_id: string }>(
+      `INSERT INTO content_schedule_hour_claims
+         (account_id, action, hour_cell, execution_target, env_key)
+       VALUES ($1, 'post', $2, $3, $4)
+       ON CONFLICT (account_id, action) DO UPDATE
+         SET hour_cell = EXCLUDED.hour_cell,
+             execution_target = EXCLUDED.execution_target,
+             env_key = EXCLUDED.env_key,
+             claimed_at = now()
+       WHERE content_schedule_hour_claims.hour_cell <> EXCLUDED.hour_cell
+       RETURNING account_id`,
+      [accountId, hourCell, input.executionTarget, envKey],
+    );
+    return rows.length === 1;
   }
 
   private async reload(): Promise<void> {

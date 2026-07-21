@@ -44,6 +44,7 @@ function harness(opts: {
   isEdgePaused?: (edgeId: string) => boolean;
   /** 7.2：同稿连续被抢占达此阈值停自动重投（缺省 3）。 */
   preemptRedispatchMax?: number;
+  executionTarget?: 'dev' | 'ol' | null;
 }) {
   const events: string[] = [];
   /** 7.1：被抢占事件驱动重投的调度器捕获（不自动跑，测试手动泵/断言次数）。 */
@@ -56,6 +57,7 @@ function harness(opts: {
   const leasePriorities: string[] = [];
   const uiStates: Array<{ accountId: string; recordId: number; state: string; title?: string | null }> = [];
   const recordedPublishes: string[] = [];
+  let scannedTarget: 'dev' | 'ol' | null | undefined;
   const store = {
     loadForDispatch: async (_id: number) => (opts.draft === undefined ? makeDraft() : opts.draft),
     updateStatus: async (id: number, status: string) => { statusUpdates.push({ id, status }); events.push(`status:${status}`); },
@@ -65,7 +67,10 @@ function harness(opts: {
       events.push(`scheduled:${scheduledAt}:${scheduledPlatformId ?? ''}`);
     },
     markImagesAttached: async (id: number, count: number) => { attached.push({ id, count }); },
-    listPendingApprovalIds: async () => (opts.draft && opts.draft.status === 'pending_approval' ? [opts.draft.recordId] : []),
+    listPendingApprovalIds: async (target?: 'dev' | 'ol' | null) => {
+      scannedTarget = target;
+      return opts.draft && opts.draft.status === 'pending_approval' ? [opts.draft.recordId] : [];
+    },
   };
   const sequencer = {
     executePublishSequence: async (input: any) => {
@@ -94,6 +99,7 @@ function harness(opts: {
       },
     },
     resolveEdgeIdForAccount: () => (opts.edgeId === undefined ? 'edge-A' : opts.edgeId),
+    executionTarget: opts.executionTarget,
     isEdgePaused: opts.isEdgePaused,
     preemptRedispatchMax: opts.preemptRedispatchMax,
     scheduleRedispatch: (fn) => { redispatched.push(fn); },
@@ -122,6 +128,7 @@ function harness(opts: {
     uiStates,
     redispatched,
     recordedPublishes,
+    get scannedTarget() { return scannedTarget; },
   };
 }
 
@@ -151,6 +158,49 @@ describe('PublishDispatcher', () => {
     const h = harness({ approved: true, edgeId: 'edge-A' });
     await h.dispatcher.dispatch(7, { humanApproval: true });
     assert.deepEqual(h.leasePriorities, ['automatic']);
+  });
+
+  test('其它 target 的自动排期稿在授权读取和 Edge 写入前被跳过，状态保持不变', async () => {
+    const draft = makeDraft({
+      metadata: {
+        ...makeDraft().metadata!,
+        scheduleExecution: { executionTarget: 'dev', envKey: 'env-a', hourCell: '2026-01-05-10' },
+      },
+    });
+    const h = harness({ draft, executionTarget: 'ol' });
+    await h.dispatcher.dispatch(draft.recordId, { humanApproval: true });
+    assert.equal(h.events.includes('seq'), false);
+    assert.equal(h.events.includes('lease:acquired'), false);
+    assert.deepEqual(h.statusUpdates, []);
+    assert.deepEqual(h.voided, []);
+  });
+
+  test('相同 target 的自动排期稿正常下发，兜底扫描把本地 target 传给存储过滤', async () => {
+    const draft = makeDraft({
+      metadata: {
+        ...makeDraft().metadata!,
+        scheduleExecution: { executionTarget: 'dev', envKey: 'env-a', hourCell: '2026-01-05-10' },
+      },
+    });
+    const h = harness({ draft, executionTarget: 'dev', edgeId: 'ads-env-a' });
+    await h.dispatcher.scanAndDispatchApproved();
+    assert.equal(h.scannedTarget, 'dev');
+    assert.equal(h.events.includes('seq'), true);
+  });
+
+  test('相同 target 但在线浏览器 envKey 已变化时不改投其它环境', async () => {
+    const draft = makeDraft({
+      metadata: {
+        ...makeDraft().metadata!,
+        scheduleExecution: { executionTarget: 'dev', envKey: 'env-a', hourCell: '2026-01-05-10' },
+      },
+    });
+    const h = harness({ draft, executionTarget: 'dev', edgeId: 'ads-env-b' });
+    await h.dispatcher.dispatch(draft.recordId);
+    assert.equal(h.events.includes('seq'), false);
+    assert.equal(h.events.includes('lease:acquired'), false);
+    assert.deepEqual(h.statusUpdates, []);
+    assert.deepEqual(h.voided, []);
   });
 
   test('精确手工 /publish 冻结的 human 档位跨审批等待与下发保持不变', async () => {
