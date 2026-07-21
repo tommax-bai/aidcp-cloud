@@ -114,7 +114,7 @@ export class InteractionAppraiserRole extends BaseRole {
       return;
     }
     if (this.isInteractionHandledExternally?.(payload.noteId, payload.sourcePageType)) {
-      this.emitSkip(payload.noteId, payload.sourcePageType, 'facebook_reel_probability_handled');
+      this.emitSkip(payload.noteId, payload.sourcePageType, 'facebook_presented_video_probability_handled');
       return;
     }
     const budget = this.getRemainingBudget();

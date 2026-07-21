@@ -64,6 +64,8 @@ export interface EdgeSession {
    * 下一批 page.cards 会覆盖/清除此值；普通 feed 详情继续走既有 detail 记账。
    */
   countedReelViewNoteId?: string;
+  /** Ordinary Feed videos already counted as presented views in this connection session. */
+  countedFacebookFeedVideoViewKeys?: Set<string>;
 }
 
 /**

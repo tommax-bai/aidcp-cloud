@@ -17,6 +17,8 @@ export interface PageCardsData {
   collectCount: number;
   coverDesc?: string;
   noteId?: string;
+  /** Existing protocol witness: this presented card contains a video. */
+  isVideo?: boolean;
 }
 
 export interface NoteDetailData {

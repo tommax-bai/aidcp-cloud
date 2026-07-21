@@ -536,7 +536,7 @@ describe('InteractionAppraiserRole', () => {
     role.unsubscribe();
   });
 
-  it('上游已处理普通 Reel → 不调用 LLM，显式 skip 防二次点赞', async () => {
+  it('上游已处理普通呈现视频 → 不调用 LLM，显式 skip 防二次点赞', async () => {
     const bus = new EventBus();
     const ctx = new SessionContext();
     let llmCalls = 0;
@@ -564,11 +564,11 @@ describe('InteractionAppraiserRole', () => {
     const finalSkipped = skipped as InteractionSkippedPayload | null;
     assert.equal(llmCalls, 0);
     assert.equal(completed, false);
-    assert.equal(finalSkipped?.reason, 'facebook_reel_probability_handled');
+    assert.equal(finalSkipped?.reason, 'facebook_presented_video_probability_handled');
     role.unsubscribe();
   });
 
-  it('mandatory Reel like 优先于上游普通决策 skip', async () => {
+  it('mandatory like 优先于上游普通呈现视频决策 skip', async () => {
     const bus = new EventBus();
     const ctx = new SessionContext();
     let llmCalls = 0;

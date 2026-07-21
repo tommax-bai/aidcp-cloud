@@ -68,6 +68,10 @@ import type { BotChatStore } from '../cache/bot-chat-store.js';
 import { RiskController, SessionBudget, buildPacingSnapshot } from '../risk/index.js';
 import type { RiskStatus, RiskQuotaLevel, PacingFloorProvider } from '../risk/index.js';
 import { normalizePlatformId, resolveReadSurface } from '../platform/index.js';
+import {
+  facebookPostKey,
+  isCanonicalFacebookFeedVideoNoteId,
+} from '../platform/facebook-presented-video.js';
 import { isWritingLanguage } from '../soul/writing-language.js';
 import type { WritingLanguage } from '../soul/types.js';
 import type { PacingSnapshotPayload } from './protocol.js';
@@ -500,7 +504,8 @@ export class DefaultMessageHandler implements MessageHandler {
         // 视频；Cloud 只接受单卡形态，畸形多卡/空卡 fail-closed 不记。
         //
         // 仍保留 page.cards.arrived：内容选择、点赞与目标见证继续走现有链路，浏览事实绝不强迫点赞。
-        if (normalizePlatformId(session.platform) === 'facebook' && listKind === 'reels' && cards.length === 1) {
+        const facebook = normalizePlatformId(session.platform) === 'facebook';
+        if (facebook && listKind === 'reels' && cards.length === 1) {
           const noteId = cards[0]?.noteId;
           session.countedReelViewNoteId = noteId;
           this.bus(session).emit('interaction.occurred', {
@@ -511,6 +516,25 @@ export class DefaultMessageHandler implements MessageHandler {
         } else {
           // 任一后续普通/空/畸形列表都结束「当前 Reel 已记 view」关联，不能抑制未来普通详情记账。
           session.countedReelViewNoteId = undefined;
+        }
+        // 普通 Feed 的严格主视频也已真实呈现：同一连接按规范视频身份只记一次，后续 detail 不重复。
+        // 畸形多视频批次、非规范目标或其它平台不记，避免把 mounted rail / 错误标记扩成浏览事实。
+        if (facebook && listKind === 'feed') {
+          const videos = cards.filter((card) => card.isVideo === true);
+          const noteId = videos.length === 1 ? videos[0]?.noteId : undefined;
+          if (isCanonicalFacebookFeedVideoNoteId(noteId)) {
+            const key = facebookPostKey(noteId);
+            const counted = session.countedFacebookFeedVideoViewKeys ?? new Set<string>();
+            session.countedFacebookFeedVideoViewKeys = counted;
+            if (!counted.has(key)) {
+              counted.add(key);
+              this.bus(session).emit('interaction.occurred', {
+                action: 'view',
+                accountId: session.accountId,
+                noteId,
+              });
+            }
+          }
         }
         // 只有 Facebook + 现有 feed 列表 + 0 卡 + Edge 明确 empty 四条件同时满足才产生 fallback 候选。
         // 未确认 0 卡、Reels 空批、其它平台或畸形 empty+cards 均走普通 page.cards，绝不扩大为空态。
@@ -542,7 +566,9 @@ export class DefaultMessageHandler implements MessageHandler {
         // view 不入 interaction_feed：其订阅方按动作白名单过滤，浏览不污染「已互动笔记」展示账本。
         const reelViewAlreadyCounted =
           !!detail.noteId && detail.noteId === session.countedReelViewNoteId;
-        if (!reelViewAlreadyCounted) {
+        const feedVideoViewAlreadyCounted =
+          !!detail.noteId && !!session.countedFacebookFeedVideoViewKeys?.has(facebookPostKey(detail.noteId));
+        if (!reelViewAlreadyCounted && !feedVideoViewAlreadyCounted) {
           this.bus(session).emit('interaction.occurred', {
             action: 'view',
             accountId: session.accountId,

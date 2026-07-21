@@ -191,6 +191,62 @@ test('Reels 空/畸形多卡不记 view；后续普通 feed detail 保持既有�
   assert.deepEqual(got.filter((e) => e.action === 'view'), [{ action: 'view', accountId: 'acc-fb', noteId: 'feed-1' }]);
 });
 
+test('Facebook Feed 主视频呈现即按规范身份记一次 view；重报和随后 detail 不重复', async () => {
+  const eventBus = new EventBus();
+  const got = capture(eventBus);
+  const handler = makeHandler(eventBus);
+  const session: EdgeSession = { sessionId: 's-feed-video-view', accountId: 'acc-fb', platform: 'facebook' };
+  const card = {
+    index: 0,
+    noteId: 'https://www.facebook.com/watch?v=1632570071375207',
+    title: 'safe cooking video',
+    likeCount: 27_000,
+    collectCount: 0,
+    isVideo: true,
+  };
+
+  await handler.handle(makeEnvelope('page.cards', 'feed-video-1', 1, { cards: [card], listKind: 'feed', listState: 'ready' }), session);
+  await handler.handle(makeEnvelope('page.cards', 'feed-video-2', 2, { cards: [card], listKind: 'feed', listState: 'ready' }), session);
+  await handler.handle(
+    makeEnvelope('note.detail', 'feed-video-detail', 3, {
+      noteId: card.noteId, title: card.title, content: card.title, mediaType: 'video', likeCount: 27_000, collectCount: 0,
+    }),
+    session,
+  );
+
+  assert.deepEqual(got.filter((event) => event.action === 'view'), [{
+    action: 'view', accountId: 'acc-fb', noteId: card.noteId,
+  }]);
+});
+
+test('Facebook Feed 0/多视频和非规范视频目标不提前记 view；普通详情计数保持不变', async () => {
+  const eventBus = new EventBus();
+  const got = capture(eventBus);
+  const handler = makeHandler(eventBus);
+  const session: EdgeSession = { sessionId: 's-feed-video-invalid', accountId: 'acc-fb', platform: 'facebook' };
+  const video = (id: string, noteId = `https://www.facebook.com/watch?v=${id}`) => ({
+    index: Number(id), noteId, title: `video ${id}`, likeCount: 0, collectCount: 0, isVideo: true,
+  });
+
+  await handler.handle(makeEnvelope('page.cards', 'feed-none', 1, {
+    cards: [{ ...video('1'), isVideo: false }], listKind: 'feed', listState: 'ready',
+  }), session);
+  await handler.handle(makeEnvelope('page.cards', 'feed-many', 2, {
+    cards: [video('2'), video('3')], listKind: 'feed', listState: 'ready',
+  }), session);
+  await handler.handle(makeEnvelope('page.cards', 'feed-bad', 3, {
+    cards: [video('4', 'https://evil.example/watch?v=4')], listKind: 'feed', listState: 'ready',
+  }), session);
+  assert.equal(got.filter((event) => event.action === 'view').length, 0);
+
+  await handler.handle(makeEnvelope('note.detail', 'ordinary-detail', 4, {
+    noteId: 'ordinary-1', title: 'ordinary', content: 'ordinary', likeCount: 0, collectCount: 0,
+  }), session);
+  assert.deepEqual(got.filter((event) => event.action === 'view'), [{
+    action: 'view', accountId: 'acc-fb', noteId: 'ordinary-1',
+  }]);
+});
+
 test('未见 note.detail 时 noteId 不带（不编造）（V1 9.2）', async () => {
   const eventBus = new EventBus();
   const got = capture(eventBus);
