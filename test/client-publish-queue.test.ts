@@ -103,7 +103,7 @@ test('客户发布队列只输出白名单字段、按账号隔离并压缩为�
       recordId: 20,
       active: false,
       status: 'submitted',
-      stages: [stage('dispatch', 'completed')],
+      stages: [stage('approval', 'completed'), stage('dispatch', 'completed')],
     })],
   };
   const view = projectClientPublishQueue({
@@ -132,10 +132,13 @@ test('客户发布队列只输出白名单字段、按账号隔离并压缩为�
   assert.deepEqual(view.active[0].stages.map(({ key, label, state }) => ({ key, label, state })), [
     { key: 'source', label: '开始创作', state: 'completed' },
     { key: 'content', label: '正文与配图', state: 'completed' },
-    { key: 'approval', label: '你来确认', state: 'waiting_human' },
+    { key: 'approval', label: '发布确认', state: 'waiting_human' },
     { key: 'dispatch', label: '发布结果', state: 'pending' },
   ]);
   assert.deepEqual(view.active[0].stages[1].progress, { current: 2, total: 4 });
+  assert.equal(view.active[0].stages[2].summary, '发布确认：待你确认');
+  assert.equal(view.active[0].stages[3].summary, '发布结果：等待发布');
+  assert.equal(view.recent[0].stages[2].summary, '发布确认：已确认');
   assert.equal(view.recent[0].statusLabel, '平台确认中，请勿重复操作');
   const serialized = JSON.stringify(view);
   for (const secret of [
