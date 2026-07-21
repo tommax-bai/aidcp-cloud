@@ -494,7 +494,7 @@ export class DefaultMessageHandler implements MessageHandler {
         this.deps.edgeTaskLeases?.onReleased(env.payload as EdgeTaskReleasedPayload, session.edgeId);
         return null;
       case 'page.cards': {
-        const { cards, startupId, listKind, listState } = env.payload as PageCardsPayload;
+        const { cards, startupId, documentGeneration, listKind, listState } = env.payload as PageCardsPayload;
         // 留存最近一批卡快照（change platform-browse-protocol）：note-scoped 互动回执带独立见证 observation 时，
         // 归账仲裁据此逐字段比对选中卡（信息流就地点赞防点错卡）。详情页/无 observation 时不消费——阶段 0 惰性。
         session.lastCards = cards;
@@ -539,7 +539,26 @@ export class DefaultMessageHandler implements MessageHandler {
         // 只有 Facebook + 现有 feed 列表 + 0 卡 + Edge 明确 empty 四条件同时满足才产生 fallback 候选。
         // 未确认 0 卡、Reels 空批、其它平台或畸形 empty+cards 均走普通 page.cards，绝不扩大为空态。
         if (normalizePlatformId(session.platform) === 'facebook' && listKind === 'feed' && listState === 'empty' && cards.length === 0) {
-          this.bus(session).emit('feed.empty.confirmed', { ...(startupId ? { startupId } : {}), ts: this.clock() });
+          this.bus(session).emit('feed.empty.confirmed', {
+            ...(startupId ? { startupId } : {}),
+            ...(documentGeneration ? { documentGeneration } : {}),
+            ts: this.clock(),
+          });
+          return null;
+        }
+        // 只有 Facebook 首页 Feed 的 0 卡结构观察可触发该事件。它不进入内容评估，也不冒充 empty；
+        // Cloud 仅把它视为一次列表选择候选，最终 Reels 导航仍由 dispatcher 单点授权。
+        if (
+          normalizePlatformId(session.platform) === 'facebook' &&
+          listKind === 'feed' &&
+          listState === 'present_unreportable' &&
+          cards.length === 0
+        ) {
+          this.bus(session).emit('feed.present_unreportable.confirmed', {
+            ...(startupId ? { startupId } : {}),
+            ...(documentGeneration ? { documentGeneration } : {}),
+            ts: this.clock(),
+          });
           return null;
         }
         this.bus(session).emit('page.cards.arrived', {

@@ -471,7 +471,7 @@ export class RoleDispatcher {
   private readonly expiredCommentSublineNoteIds = new Set<string>();
   /** feed 翻页按新卡数算的待发停留兜底（feed-scroll-card-floor）：page.cards.arrived 覆盖写、feed.scrolled 消费后归零。 */
   private pendingFeedFloorMs = 0;
-  /** 当前会话已授权过首页空态→Reels；重复 empty 报告不得多次导航。 */
+  /** 当前会话已授权过 Facebook Feed→Reels；重复 empty/unreportable 报告不得多次导航。 */
   private reelsFallbackAuthorized = false;
   private readonly isHardPaused: (edgeId?: string) => boolean;
   private readonly edgeTaskLeases?: Pick<EdgeTaskLeaseClient, 'acquire' | 'release'>;
@@ -1158,7 +1158,7 @@ export class RoleDispatcher {
    * `empty_feed_reels_fallback` 是已部署 Edge 认识的兼容握手名：既承载首页明确空态，也承载非空 Feed
    * 确认到底。只有命令真正下发后才置幂等闸；若被软暂停/评论支线等抑制，后续诚实重报仍可重试。
    */
-  private authorizeFacebookReelsFallback(source: 'empty_feed' | 'feed_exhausted'): boolean {
+  private authorizeFacebookReelsFallback(source: 'empty_feed' | 'feed_exhausted' | 'present_unreportable'): boolean {
     if (this.accountPlatform !== 'facebook' || !this.sessionActive || this.reelsFallbackAuthorized) return false;
     const sent = this.sendCommand({ action: 'scroll', reason: 'empty_feed_reels_fallback' });
     if (!sent) {
@@ -1166,11 +1166,12 @@ export class RoleDispatcher {
       return false;
     }
     this.reelsFallbackAuthorized = true;
-    console.log(
-      source === 'empty_feed'
-        ? '[RoleDispatcher] Facebook 首页明确空 Feed → 授权切换 Reels 列表'
-        : '[RoleDispatcher] Facebook 普通 Feed 已确认到底 → 授权切换 Reels 列表',
-    );
+    const message = source === 'empty_feed'
+      ? '[RoleDispatcher] Facebook 首页明确空 Feed → 授权切换 Reels 列表'
+      : source === 'present_unreportable'
+        ? '[RoleDispatcher] Facebook 首页物理卡连续不可上报 → 授权切换 Reels 列表'
+        : '[RoleDispatcher] Facebook 普通 Feed 已确认到底 → 授权切换 Reels 列表';
+    console.log(message);
     return true;
   }
 
@@ -2604,6 +2605,11 @@ export class RoleDispatcher {
       // Facebook 首页显式空态：Edge 只观察，Cloud 才选择列表。每场只授权一次，复用现有 scroll 命令。
       this.eventBus.on('feed.empty.confirmed', () => {
         this.authorizeFacebookReelsFallback('empty_feed');
+      }),
+
+      // Facebook 首页物理卡连续 8 轮仍无法形成可信身份：与明确空态同样只由 Cloud 单点选择列表。
+      this.eventBus.on('feed.present_unreportable.confirmed', () => {
+        this.authorizeFacebookReelsFallback('present_unreportable');
       }),
 
       // Edge 上报可见卡片 → 更新数据并触发评估

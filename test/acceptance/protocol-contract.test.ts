@@ -437,4 +437,16 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     const env = makeEnvelope('page.cards', 'pc-empty', 1700000000000, payload);
     assert.deepEqual(parseEnvelope(JSON.stringify(env))?.payload, payload);
   });
+
+  it('AC-PROTO-20b page.cards 首页物理卡不可上报状态与文档 generation 往返存活', () => {
+    const payload: PageCardsPayload = {
+      cards: [],
+      listKind: 'feed',
+      listState: 'present_unreportable',
+      startupId: 'start-1',
+      documentGeneration: 'doc-1',
+    };
+    const env = makeEnvelope('page.cards', 'pc-unreportable', 1700000000000, payload);
+    assert.deepEqual(parseEnvelope(JSON.stringify(env))?.payload, payload);
+  });
 });

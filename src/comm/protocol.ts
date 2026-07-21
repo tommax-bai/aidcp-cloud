@@ -1576,6 +1576,8 @@ export interface PageCardsPayload {
    * Cloud uses this only to scope first-feed nickname capture; old edges may omit it.
    */
   startupId?: string;
+  /** 当前 Facebook 文档 generation；只作同一启动内空态/不可上报态去重，不代替帖子身份。 */
+  documentGeneration?: string;
   /**
    * 本次容器内搜索所在容器的**真实人类可读名称**（change facebook-container-display-name，可选）。
    * Facebook 定向评论：边缘在配置容器（群/主页）内搜索时，从群页读出真实群名回传，云端据此把配置里的容器名
@@ -1584,8 +1586,8 @@ export interface PageCardsPayload {
   containerName?: string;
   /** 当前列表的页面形态观察；缺省='feed'。不是 feed/detail 控制流 surface。 */
   listKind?: 'feed' | 'reels';
-  /** 当前列表内容状态；缺省='ready'。empty 仅允许在 cards=[] 时作为显式观察。 */
-  listState?: 'ready' | 'empty';
+  /** 当前列表内容状态；缺省='ready'。empty/present_unreportable 仅允许在 cards=[] 时作为显式观察。 */
+  listState?: 'ready' | 'empty' | 'present_unreportable';
 }
 
 /** Note detail image reference observed by edge. Edge only reports URL/metadata; it does not download. */

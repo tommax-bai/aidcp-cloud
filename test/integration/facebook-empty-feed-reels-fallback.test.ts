@@ -39,6 +39,21 @@ test('Facebook 非空 Feed 确认到底：切 Reels、不 refresh，重复回执
   dispatcher.endSession('test');
 });
 
+test('Facebook 首页物理卡连续不可上报：Cloud 每场只授权一次 Reels fallback', () => {
+  const commands: EdgeCommand[] = [];
+  const dispatcher = new RoleDispatcher({ soul, llm, accountPlatform: 'facebook', sendCommand: (command) => commands.push(command) });
+  dispatcher.setup();
+  dispatcher.startSession();
+
+  dispatcher.bus.emit('feed.present_unreportable.confirmed', { startupId: 'start-1', documentGeneration: 'doc-1', ts: 1 });
+  dispatcher.bus.emit('feed.present_unreportable.confirmed', { startupId: 'start-1', documentGeneration: 'doc-1', ts: 2 });
+  dispatcher.bus.emit('feed.empty.confirmed', { startupId: 'start-1', documentGeneration: 'doc-1', ts: 3 });
+
+  const fallback = commands.filter((command) => command.action === 'scroll' && command.reason === 'empty_feed_reels_fallback');
+  assert.equal(fallback.length, 1, '同场重复结构态及其后空态都不得再次导航 Reels');
+  dispatcher.endSession('test');
+});
+
 test('非 Facebook 或非活跃会话不授权 Reels fallback', () => {
   const commands: EdgeCommand[] = [];
   const xhs = new RoleDispatcher({ soul, llm, accountPlatform: 'xiaohongshu', sendCommand: (command) => commands.push(command) });
@@ -53,6 +68,7 @@ test('非 Facebook 或非活跃会话不授权 Reels fallback', () => {
   const inactive = new RoleDispatcher({ soul, llm, accountPlatform: 'facebook', sendCommand: (command) => commands.push(command) });
   inactive.setup();
   inactive.bus.emit('feed.empty.confirmed', { ts: 3 });
+  inactive.bus.emit('feed.present_unreportable.confirmed', { ts: 3 });
   inactive.bus.emit('action.completed', { action: 'scroll', ok: false, reason: 'feed_exhausted', ts: 4 });
   assert.equal(commands.some((command) => command.reason === 'empty_feed_reels_fallback'), false);
 });
