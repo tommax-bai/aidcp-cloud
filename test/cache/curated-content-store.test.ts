@@ -552,11 +552,36 @@ test('listForClient：未创作在 SQL 层按持久化洗稿触发记录过滤�
   assert.match(calls[0].sql, /source_constraints->>'sourceId' = c\.source_id/);
   assert.doesNotMatch(calls[0].sql, /dt\.status/, '触发即已创作，任务后续状态不得改变归类');
   assert.match(calls[0].sql, /COUNT\(\*\) OVER\(\) AS total_count/);
+  assert.match(calls[0].sql, /c\.like_count::bigint \* 100 \+ c\.collect_count::bigint \* 143/);
+  assert.match(calls[0].sql, /END DESC NULLS LAST/);
+  assert.ok(calls[0].sql.indexOf('ORDER BY') < calls[0].sql.indexOf('LIMIT'), '排序必须发生在分页前');
   assert.match(calls[0].sql, /LIMIT \$3 OFFSET \$4/);
   assert.deepEqual(calls[0].params, ['acc-1', 'dev', 50, 0]);
   assert.equal(out.total, 23);
   assert.equal(out.items[0].likeCount, null, '缺失计数必须保持 null');
   assert.equal(out.items[0].collectCount, 0, '真实 0 必须保持 0');
+});
+
+test('listForClient：四种排序映射为固定 SQL，缺失值置后且使用稳定次级顺序', async () => {
+  const cases = [
+    {
+      sort: 'weighted' as const,
+      primary: /CASE[\s\S]*c\.like_count IS NULL OR c\.collect_count IS NULL[\s\S]*c\.like_count::bigint \* 100 \+ c\.collect_count::bigint \* 143[\s\S]*END DESC NULLS LAST/,
+    },
+    { sort: 'collects' as const, primary: /ORDER BY c\.collect_count DESC NULLS LAST,[\s\S]*c\.like_count DESC NULLS LAST/ },
+    { sort: 'likes' as const, primary: /ORDER BY c\.like_count DESC NULLS LAST,[\s\S]*c\.collect_count DESC NULLS LAST/ },
+    { sort: 'recent' as const, primary: /ORDER BY c\.updated_at DESC,[\s\S]*c\.id DESC/ },
+  ];
+  for (const entry of cases) {
+    const { pool, calls } = controllablePool(() => ({ rows: [] }));
+    const store = new CuratedContentStore({ pool });
+    await store.listForClient('acc-1', { creationStatus: 'all', sort: entry.sort, limit: 12, offset: 24 });
+    const sql = calls[0].sql;
+    assert.match(sql, entry.primary, `${entry.sort} 必须使用固定排序片段`);
+    assert.ok(sql.indexOf('ORDER BY') < sql.indexOf('LIMIT'), `${entry.sort} 必须先排序再分页`);
+    assert.match(sql, /c\.id DESC/, `${entry.sort} 必须用 id 稳定破同分`);
+    assert.deepEqual(calls[0].params, ['acc-1', 12, 24], '排序值不得作为 SQL 参数或标识符进入查询');
+  }
 });
 
 test('listForClient：已创作使用同一账号范围的 EXISTS，全部模式不加创作条件', async () => {

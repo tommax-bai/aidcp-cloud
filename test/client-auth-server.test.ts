@@ -1059,7 +1059,12 @@ test('客户灵感库按环境归属隔离、最小披露，并在归属撤销�
   const reads: Array<{ kind: string; accountId: string; id?: number; options?: unknown }> = [];
   const draftCountReads: string[] = [];
   const curatedContent = {
-    async listForClient(accountId: string, options: { creationStatus: 'uncreated' | 'created' | 'creatable' | 'all'; limit: number; offset: number }) {
+    async listForClient(accountId: string, options: {
+      creationStatus: 'uncreated' | 'created' | 'creatable' | 'all';
+      sort?: 'weighted' | 'collects' | 'likes' | 'recent';
+      limit: number;
+      offset: number;
+    }) {
       reads.push({ kind: 'list', accountId, options });
       return { items: [row()], total: 1 };
     },
@@ -1096,13 +1101,18 @@ test('客户灵感库按环境归属隔离、最小披露，并在归属撤销�
       assert.deepEqual(reads[0], {
         kind: 'list',
         accountId: ACCT_P1,
-        options: { creationStatus: 'creatable', limit: 12, offset: 24 },
+        options: { creationStatus: 'creatable', sort: 'weighted', limit: 12, offset: 24 },
       }, '旧筛选值必须精确保留原可创作集合');
       const invalid = await fetch(`${base}/curated-contents?envKey=p1&mode=unknown`, { headers });
       assert.equal(invalid.status, 400);
       assert.equal(reads.length, 1, '未知筛选值必须在触达 store 前明确拒绝');
 
-      const listed = await fetch(`${base}/curated-contents?envKey=p1&mode=uncreated&limit=12&offset=24`, { headers });
+      const invalidSort = await fetch(`${base}/curated-contents?envKey=p1&sort=like_count%20DESC`, { headers });
+      assert.equal(invalidSort.status, 400);
+      assert.deepEqual(await invalidSort.json(), { error: 'bad_request', reason: 'invalid_sort' });
+      assert.equal(reads.length, 1, '未知排序必须在环境解析和精选查询前明确拒绝');
+
+      const listed = await fetch(`${base}/curated-contents?envKey=p1&mode=uncreated&sort=collects&limit=12&offset=24`, { headers });
       assert.equal(listed.status, 200);
       const listBody = await listed.json() as { items: Array<Record<string, unknown>>; total: number; referenceDraftCount: number; limit: number; offset: number };
       assert.equal(listBody.total, 1);
@@ -1121,15 +1131,15 @@ test('客户灵感库按环境归属隔离、最小披露，并在归属撤销�
       assert.deepEqual(reads[1], {
         kind: 'list',
         accountId: ACCT_P1,
-        options: { creationStatus: 'uncreated', limit: 12, offset: 24 },
+        options: { creationStatus: 'uncreated', sort: 'collects', limit: 12, offset: 24 },
       });
       assert.notEqual(reads[1].accountId, 'p1', 'store 收到的绝不能是 envKey');
 
-      assert.equal((await fetch(`${base}/curated-contents?envKey=p1&mode=created&limit=1&offset=0`, { headers })).status, 200);
-      assert.equal((await fetch(`${base}/curated-contents?envKey=p1&mode=all&limit=1&offset=0`, { headers })).status, 200);
+      assert.equal((await fetch(`${base}/curated-contents?envKey=p1&mode=created&sort=likes&limit=1&offset=0`, { headers })).status, 200);
+      assert.equal((await fetch(`${base}/curated-contents?envKey=p1&mode=all&sort=recent&limit=1&offset=0`, { headers })).status, 200);
       assert.deepEqual(reads.slice(2, 4), [
-        { kind: 'list', accountId: ACCT_P1, options: { creationStatus: 'created', limit: 1, offset: 0 } },
-        { kind: 'list', accountId: ACCT_P1, options: { creationStatus: 'all', limit: 1, offset: 0 } },
+        { kind: 'list', accountId: ACCT_P1, options: { creationStatus: 'created', sort: 'likes', limit: 1, offset: 0 } },
+        { kind: 'list', accountId: ACCT_P1, options: { creationStatus: 'all', sort: 'recent', limit: 1, offset: 0 } },
       ]);
       assert.deepEqual(draftCountReads, [ACCT_P1, ACCT_P1, ACCT_P1, ACCT_P1], '兼容值与三种新筛选的汇总都只能读取已授权账号的绑定账号，绝不是 envKey');
 

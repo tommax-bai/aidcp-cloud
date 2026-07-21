@@ -1328,6 +1328,11 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         sendJson(res, 400, { error: 'bad_request', reason: 'invalid_mode' });
         return;
       }
+      const sort = query.get('sort') ?? 'weighted';
+      if (sort !== 'weighted' && sort !== 'collects' && sort !== 'likes' && sort !== 'recent') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_sort' });
+        return;
+      }
       const limit = parseIntegerQuery(query.get('limit'), 20, 1, 50);
       const offset = parseIntegerQuery(query.get('offset'), 0, 0, 1_000_000);
       if (limit === null || offset === null) {
@@ -1355,6 +1360,7 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       const [result, referenceDraftCount] = await Promise.all([
         deps.curatedContent.listForClient(accountId, {
           creationStatus: mode,
+          sort,
           limit,
           offset,
         }),

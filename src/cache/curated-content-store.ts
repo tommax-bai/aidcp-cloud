@@ -237,6 +237,34 @@ export interface CuratedClientListResult {
 /** 客户端灵感库筛选：created/uncreated 只切分原可创作集合；all 保留精选池全量。 */
 export type CuratedClientCreationStatus = 'uncreated' | 'created' | 'creatable' | 'all';
 
+/** 客户端灵感库排序：只允许固定产品语义，调用方不得提交 SQL 字段或方向。 */
+export type CuratedClientSort = 'weighted' | 'collects' | 'likes' | 'recent';
+
+const CURATED_CLIENT_SORT_SQL: Readonly<Record<CuratedClientSort, string>> = {
+  // 点赞 1 分、收藏 1.43 分；完整证据优先，绝不把缺失计数 COALESCE 成真实 0。
+  weighted: `CASE
+               WHEN c.like_count IS NULL OR c.collect_count IS NULL THEN NULL
+               ELSE c.like_count::bigint * 100 + c.collect_count::bigint * 143
+             END DESC NULLS LAST,
+             c.like_count DESC NULLS LAST,
+             c.collect_count DESC NULLS LAST,
+             c.counts_captured_at DESC NULLS LAST,
+             c.updated_at DESC,
+             c.id DESC`,
+  collects: `c.collect_count DESC NULLS LAST,
+             c.like_count DESC NULLS LAST,
+             c.counts_captured_at DESC NULLS LAST,
+             c.updated_at DESC,
+             c.id DESC`,
+  likes: `c.like_count DESC NULLS LAST,
+          c.collect_count DESC NULLS LAST,
+          c.counts_captured_at DESC NULLS LAST,
+          c.updated_at DESC,
+          c.id DESC`,
+  recent: `c.updated_at DESC,
+           c.id DESC`,
+};
+
 /** 面板筛选面：驱动筛选下拉 + 清理前影响预览（按账号）。 */
 export interface CuratedFacets {
   /** 该账号实际出现的纳入原因去重 + 各自计数 + 携机器人点赞/收藏标记的高权重行数。 */
@@ -1179,10 +1207,13 @@ export class CuratedContentStore {
    */
   async listForClient(
     accountId: string,
-    opts: { creationStatus: CuratedClientCreationStatus; limit: number; offset: number },
+    opts: { creationStatus: CuratedClientCreationStatus; sort?: CuratedClientSort; limit: number; offset: number },
   ): Promise<CuratedClientListResult> {
     const limit = Number.isFinite(opts.limit) ? Math.max(1, Math.min(50, Math.floor(opts.limit))) : 20;
     const offset = Number.isFinite(opts.offset) ? Math.max(0, Math.floor(opts.offset)) : 0;
+    const sort = opts.sort ?? 'weighted';
+    const orderBy = CURATED_CLIENT_SORT_SQL[sort];
+    if (!orderBy) throw new Error('invalid_curated_client_sort');
     const params: unknown[] = [accountId];
     const conds = ['c.account_id = $1'];
     if (opts.creationStatus !== 'all') {
@@ -1222,7 +1253,7 @@ export class CuratedContentStore {
                 COUNT(*) OVER() AS total_count
          FROM curated_content c
          WHERE ${conds.join(' AND ')}
-         ORDER BY c.updated_at DESC
+         ORDER BY ${orderBy}
          LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
         params,
       );
