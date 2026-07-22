@@ -16,6 +16,7 @@ import {
   type ExemptionList,
   type ImportExemption,
   type OwnershipRules,
+  UPDATE_TABLE_PATTERN_SOURCE,
   boundarySnapshot,
   classifyEdge,
   expandOwnership,
@@ -29,11 +30,20 @@ const snapshot = boundarySnapshot();
 const rules = readJson<OwnershipRules>('boundaries/ownership-rules.json');
 const exemptions = readJson<ExemptionList<ImportExemption>>('boundaries/import-exemptions.json');
 
+/**
+ * 归属查不到的边 —— MUST 报出来判失败，MUST NOT 静默丢弃。
+ * 典型形态：`../../scripts/foo.js` 这类解析到 `src/` 之外但确实存在的 `.ts`（正是最该报警的越界形态）。
+ */
+const unownedEdges: string[] = [];
+
 /** 跨层边（需豁免或被禁止的方向）。允许方向直接不进这个集合。 */
 const crossEdges = snapshot.imports.edges.flatMap((edge) => {
   const from = snapshot.ownership.get(edge.from);
   const to = snapshot.ownership.get(edge.to);
-  if (!from || !to) return [];
+  if (!from || !to) {
+    unownedEdges.push(`${edge.from}${from ? '' : '（无归属）'} -> ${edge.to}${to ? '' : '（无归属）'}`);
+    return [];
+  }
   const verdict = classifyEdge(from, to);
   if (verdict === 'allowed') return [];
   return [{ ...edge, fromLayer: from, toLayer: to, verdict }];
@@ -60,6 +70,27 @@ console.log(
   })}`,
 );
 
+/**
+ * kernel 准入判据（定稿 §4.7 kernel 段）。**写在这里、不进 JSON**，改它必须走代码评审。
+ *
+ * 「模块级可变单例」一条 MUST 同时覆盖 `export let` / `export var`：导出型可变单例正是最容易被
+ * 其它层写坏的那一种，早期版本只锚行首裸 `let` / `var`，`export let …` 直接漏过。
+ * 模块级 `const x = new Map()` / `new Set()` 同属可变容器单例，一并锚定（`[^=\n]*` 不跨越 `=` 与换行，
+ * 因此 `Map<string, string>` 这类类型标注不会误伤，函数体内的局部量因不在行首也不命中）。
+ */
+const KERNEL_ADMISSION_CHECKS: { name: string; re: RegExp }[] = [
+  {
+    name: 'SQL 字面量',
+    re: new RegExp(`\\b(INSERT\\s+INTO|DELETE\\s+FROM|CREATE\\s+TABLE|SELECT\\s)|${UPDATE_TABLE_PATTERN_SOURCE}`, 'i'),
+  },
+  { name: 'HTTP 路由注册', re: /createServer\s*\(|\bres\.writeHead\s*\(|\breq\.url\b|\brouter\./ },
+  { name: 'LLM 或供应商 HTTP 调用', re: /\bfetch\s*\(|\bLlmClient\b|\bChatLlmClient\b|['"`]https?:\/\// },
+  {
+    name: '进程内活状态（模块级可变单例 / 定时器 / 连接池）',
+    re: /^(?:export\s+)?(?:let|var)\s|^(?:export\s+)?const\s[^=\n]*=\s*new\s+(?:Map|Set)\b|\bsetInterval\s*\(|\bsetTimeout\s*\(|new\s+Pool\s*\(/m,
+  },
+];
+
 describe('AC-BOUND-* 导入方向门禁', () => {
   it('AC-BOUND-01 归属表全覆盖且无孤儿条目', () => {
     // 归属表条目数 MUST 等于扫描到的源文件数；两侧任一多出即失败（定稿 §4.0 第 1 条：未归属 MUST 恒为 0）。
@@ -70,6 +101,18 @@ describe('AC-BOUND-* 导入方向门禁', () => {
     assert.deepEqual(missing, [], `新增源文件未登记归属，先跑 boundary-record ownership 再提交：\n${missing.join('\n')}`);
     assert.deepEqual(orphans, [], `归属表残留源码中已不存在的路径：\n${orphans.join('\n')}`);
     assert.equal(snapshot.ownershipEntries.length, snapshot.files.length);
+
+    // 诚实闸：任何一端查不到归属的 import 边 MUST 报出来，MUST NOT 静默丢弃。
+    // 典型形态是 `../../scripts/foo.js` —— 解析得到 src/ 之外的真实 .ts，恰恰是最该报警的越界。
+    assert.deepEqual(
+      [...new Set(unownedEdges)].sort(),
+      [],
+      `存在归属查不到的 import 边（多半是导入了 src/ 之外的源文件）；MUST 先归属或消除，MUST NOT 当作这条边不存在：\n${[
+        ...new Set(unownedEdges),
+      ]
+        .sort()
+        .join('\n')}`,
+    );
 
     // 归属表 MUST 是规则表的机械展开：两者漂移即失败，防止有人绕过 §4.7 直接改文件级清单。
     const expanded = expandOwnership(rules, snapshot.files);
@@ -105,12 +148,7 @@ describe('AC-BOUND-* 导入方向门禁', () => {
     );
 
     // 逐条准入：无 SQL / 无 HTTP 路由 / 无 LLM 与供应商调用 / 无进程内活状态 / 不反向依赖业务层。
-    const checks: { name: string; re: RegExp }[] = [
-      { name: 'SQL 字面量', re: /\b(INSERT\s+INTO|UPDATE\s+[a-zA-Z_][a-zA-Z0-9_]*\s+SET|DELETE\s+FROM|CREATE\s+TABLE|SELECT\s)/i },
-      { name: 'HTTP 路由注册', re: /createServer\s*\(|\bres\.writeHead\s*\(|\breq\.url\b|\brouter\./ },
-      { name: 'LLM 或供应商 HTTP 调用', re: /\bfetch\s*\(|\bLlmClient\b|\bChatLlmClient\b|['"`]https?:\/\// },
-      { name: '进程内活状态（模块级可变单例 / 定时器 / 连接池）', re: /^(let|var)\s|\bsetInterval\s*\(|\bsetTimeout\s*\(|new\s+Pool\s*\(/m },
-    ];
+    const checks: { name: string; re: RegExp }[] = KERNEL_ADMISSION_CHECKS;
     const violations: string[] = [];
     for (const file of kernelFiles) {
       const source = stripTsComments(readFileSync(repoPath(file), 'utf8'));
@@ -194,5 +232,42 @@ describe('AC-BOUND-* 导入方向门禁', () => {
       unplanned <= exemptions.seedUnplanned,
       `未挂消除 change 的条目数 ${unplanned} 高于 seed 值 ${exemptions.seedUnplanned}；该数 MUST 单调不增（定稿 §12 棘轮规则第 1 条）`,
     );
+  });
+});
+
+/**
+ * 判据保真自检 —— **不属 `AC-BOUND-*` 族编号**（族内编号由定稿 §12 定死为 01..06）。
+ * 存在理由：门禁自身漏检时会静默报「无违规」，属红线「MUST NOT 静默假成功」；
+ * 这里对已经踩过的漏检形态各留一条机械断言，防止判据被改回去。
+ */
+describe('kernel 准入判据保真自检（非 AC 编号）', () => {
+  const mutableSingleton = KERNEL_ADMISSION_CHECKS.find((c) => c.name.startsWith('进程内活状态'))!;
+  const sqlLiteral = KERNEL_ADMISSION_CHECKS.find((c) => c.name === 'SQL 字面量')!;
+
+  it('模块级可变单例：export 形态与裸形态都 MUST 命中', () => {
+    for (const source of [
+      'export let cachedPool: Pool | null = null;\n',
+      'export var counter = 0;\n',
+      'let cachedPool = null;\n',
+      'var counter = 0;\n',
+      'export const registry = new Map<string, string>();\n',
+      'const seen = new Set<string>();\n',
+    ]) {
+      assert.ok(mutableSingleton.re.test(source), `模块级可变单例 MUST 被判违规，实际漏过：${source.trim()}`);
+    }
+  });
+
+  it('模块级可变单例：不可变导出与函数内局部量 MUST NOT 误判', () => {
+    for (const source of [
+      'export const DEFAULT_PG_CONFIG = { host: "127.0.0.1" } as const;\n',
+      'export function build(): void {\n  const seen = new Map<string, string>();\n  void seen;\n}\n',
+    ]) {
+      assert.equal(mutableSingleton.re.test(source), false, `不构成模块级可变单例，MUST NOT 判违规：${source.trim()}`);
+    }
+  });
+
+  it('SQL 字面量：带别名的 UPDATE MUST 命中', () => {
+    assert.ok(sqlLiteral.re.test('const q = `UPDATE risk_state r SET status=$1`;'));
+    assert.ok(sqlLiteral.re.test('const q = `UPDATE risk_state AS r SET status=$1`;'));
   });
 });

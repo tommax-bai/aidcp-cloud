@@ -19,6 +19,7 @@ import {
   boundarySnapshot,
   isLayer,
   readJson,
+  scanSqlSource,
 } from './helpers/boundary-scan.js';
 
 const snapshot = boundarySnapshot();
@@ -38,11 +39,21 @@ interface Violation {
 }
 
 const violations: Violation[] = [];
+/**
+ * 属主或写入方归属查不到的写入点 —— MUST 报出来判失败，MUST NOT 静默丢弃。
+ * 本族自持这条断言，不依赖另一个测试文件里的 `AC-BOUND-01`（那是隐式耦合，单独跑本文件时不成立）。
+ */
+const unresolvedWrites: string[] = [];
 for (const write of snapshot.writes) {
   if (snapshot.exceptionTables.has(write.table)) continue;
   const owner = snapshot.tableOwners.get(write.table);
   const writerLayer = snapshot.ownership.get(write.file);
-  if (!owner || !writerLayer) continue;
+  if (!owner || !writerLayer) {
+    unresolvedWrites.push(
+      `${write.table}${owner ? '' : '（表无属主）'} <- ${write.file}${writerLayer ? '' : '（写入方无归属）'} [${write.op}]`,
+    );
+    continue;
+  }
   if (owner === writerLayer) continue;
   violations.push({ table: write.table, file: write.file, op: write.op, owner, writerLayer });
 }
@@ -100,6 +111,14 @@ describe('AC-OWN-* 表写入与建表归属门禁', () => {
       ),
     ].sort();
     assert.deepEqual(unknown, [], `SQL 扫描命中未登记的表标识符：\n${unknown.join('\n')}`);
+
+    // 诚实闸一之二：属主或写入方归属查不到的写入点 MUST 失败，MUST NOT 当作这个写入不存在。
+    const unresolved = [...new Set(unresolvedWrites)].sort();
+    assert.deepEqual(
+      unresolved,
+      [],
+      `存在归属查不到的写入点（表无属主 / 写入方文件不在归属表内）；MUST 先补登记，MUST NOT 静默跳过：\n${unresolved.join('\n')}`,
+    );
 
     // 诚实闸二：动态拼接 SQL MUST 在解析登记表里具名，未登记与失效条目都判失败。
     assert.deepEqual(
@@ -178,5 +197,42 @@ describe('AC-OWN-* 表写入与建表归属门禁', () => {
       unplanned <= exemptions.seedUnplanned,
       `未挂消除 change 的条目数 ${unplanned} 高于 seed 值 ${exemptions.seedUnplanned}；该数 MUST 单调不增`,
     );
+  });
+});
+
+/**
+ * 扫描器保真自检 —— **不属 `AC-OWN-*` 族编号**（族内编号由定稿 §12 定死为 01..05）。
+ *
+ * 存在理由：扫描器漏检时门禁会报「无违规」而实为「没看见」，属红线「MUST NOT 静默假成功」，
+ * 而这种漏检既不会让任何用例变红、也不会被 typecheck 抓到。已经踩过的形态在这里各留一条机械断言。
+ * 实测教训：`UPDATE <表> <别名> SET` 是本仓 UPDATE 的主流写法（2026-07-23 实测 14 处 / 6 文件），
+ * 早期版本的 UPDATE 分支要求表名后紧跟 `SET`，对这一整类写入完全失明；修复后写入点 229 → 231。
+ */
+describe('SQL 扫描器保真自检（非 AC 编号）', () => {
+  const tablesOf = (sql: string, op: SqlOp): string[] =>
+    scanSqlSource('probe.ts', `const q = \`${sql}\`;`)
+      .writes.filter((w) => w.op === op)
+      .map((w) => w.table);
+
+  it('UPDATE：裸形态、别名形态、AS 别名、ONLY / public. 前缀都 MUST 命中', () => {
+    assert.deepEqual(tablesOf('UPDATE risk_state SET status=$1', 'update'), ['risk_state']);
+    assert.deepEqual(tablesOf('UPDATE risk_state r SET status=$1 WHERE r.id=$2', 'update'), ['risk_state']);
+    assert.deepEqual(tablesOf('UPDATE risk_state AS r SET status=$1', 'update'), ['risk_state']);
+    assert.deepEqual(tablesOf('UPDATE ONLY public.risk_state r SET status=$1', 'update'), ['risk_state']);
+    assert.deepEqual(tablesOf('UPDATE\n  delegated_tasks t\n  SET version=version+1', 'update'), ['delegated_tasks']);
+  });
+
+  it('UPDATE：三类实测假阳性形态 MUST NOT 命中', () => {
+    assert.deepEqual(tablesOf('INSERT INTO risk_state (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET status=$2', 'update'), []);
+    assert.deepEqual(tablesOf('SELECT id FROM delegated_tasks WHERE status=$1 FOR UPDATE SKIP LOCKED', 'update'), []);
+    assert.deepEqual(tablesOf('SELECT id FROM delegated_tasks t FOR UPDATE OF t', 'update'), []);
+  });
+
+  it('UPDATE：假阳性形态与真写入同处一段 SQL 时，只取真写入', () => {
+    const sql = [
+      'WITH locked AS (SELECT id FROM delegated_tasks WHERE status=$1 FOR UPDATE SKIP LOCKED)',
+      'UPDATE delegated_tasks t SET status=$2 FROM locked WHERE t.id=locked.id',
+    ].join('\n');
+    assert.deepEqual(tablesOf(sql, 'update'), ['delegated_tasks']);
   });
 });

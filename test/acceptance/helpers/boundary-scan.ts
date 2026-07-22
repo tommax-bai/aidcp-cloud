@@ -165,16 +165,30 @@ export interface SqlScanResult {
 }
 
 /**
+ * `UPDATE <表> [[AS] <别名>] SET` 的语法源串（唯一定义处）。
+ *
+ * **别名段 MUST 是可选的**：`UPDATE delegated_tasks t SET …` 这类带别名形态是本仓 UPDATE 的主流写法
+ * （2026-07-23 实测 14 处 / 6 文件）。早期版本要求表名后紧跟 `SET`，对这一整类写入完全不可见——
+ * 门禁报「无违规」实为「没看见」，违反红线「MUST NOT 静默假成功」。
+ * 回归防线：`table-ownership.test.ts` 的「SQL 扫描器保真自检」。
+ *
+ * 假阳性仍靠**语法锚定**排除，不靠标识符跳过名单：
+ *   - `ON CONFLICT … DO UPDATE SET`：`UPDATE` 后没有表标识符，且额外由 `(?<!\bDO\s{1,4})` 双保险；
+ *   - `FOR UPDATE SKIP LOCKED` / `FOR UPDATE OF …`：后面没有 `SET`，且由 `(?<!\bFOR\s{1,4})` 双保险。
+ */
+export const UPDATE_TABLE_PATTERN_SOURCE =
+  String.raw`(?<!\bDO\s{1,4})(?<!\bFOR\s{1,4})\bUPDATE\s+(?:ONLY\s+)?(?:public\.)?([a-zA-Z_][a-zA-Z0-9_]*)(?:\s+(?:AS\s+)?[a-zA-Z_][a-zA-Z0-9_]*)?\s+SET\b`;
+
+/**
  * 写操作模式。每条都**锚定到完整语法形态**（而不是「命中关键字后再靠白名单过滤」）：
- *   - `UPDATE <t> SET` 必须带 `SET`，因此 `ON CONFLICT … DO UPDATE SET`、`FOR UPDATE SKIP LOCKED`、
- *     `FOR UPDATE OF …` 这三类实测假阳性形态天然不命中，不需要标识符跳过名单；
+ *   - `UPDATE <t> [别名] SET` 必须带 `SET`（源串见上）；
  *   - `INSERT INTO` / `DELETE FROM` / `CREATE TABLE` / `ALTER TABLE` 各自带自己的固定引导词。
  * 这就是定稿 §12 要求的「显式排除规则」，与「不在白名单就跳过」相反：
  * 凡命中而表名未登记的，一律报错（见 AC-OWN-01）。
  */
 const WRITE_PATTERNS: { op: SqlOp; re: RegExp }[] = [
   { op: 'insert', re: /\bINSERT\s+INTO\s+(?:ONLY\s+)?(?:public\.)?([a-zA-Z_][a-zA-Z0-9_]*)/gi },
-  { op: 'update', re: /\bUPDATE\s+(?:ONLY\s+)?(?:public\.)?([a-zA-Z_][a-zA-Z0-9_]*)\s+SET\b/gi },
+  { op: 'update', re: new RegExp(UPDATE_TABLE_PATTERN_SOURCE, 'gi') },
   { op: 'delete', re: /\bDELETE\s+FROM\s+(?:ONLY\s+)?(?:public\.)?([a-zA-Z_][a-zA-Z0-9_]*)/gi },
   { op: 'create_table', re: /\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:public\.)?([a-zA-Z_][a-zA-Z0-9_]*)/gi },
   { op: 'alter_table', re: /\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?:public\.)?([a-zA-Z_][a-zA-Z0-9_]*)/gi },
