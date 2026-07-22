@@ -10,7 +10,7 @@ import { MemoryDelegatedTaskStore } from '../src/delegated-task/store.js';
 import { DelegatedTaskService } from '../src/delegated-task/service.js';
 import type { CuratedPanelRow } from '../src/cache/curated-content-store.js';
 import { CuratedContentUnavailableError } from '../src/cache/curated-content-store.js';
-import type { UiSlowStartPayload } from '../src/comm/protocol.js';
+import type { UiDailyUsagePayload, UiSlowStartPayload } from '../src/comm/protocol.js';
 import type { PendingPublishPreview } from '../src/publish-agent/publish-log-store.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
@@ -1745,7 +1745,16 @@ test('环境首页概览：引擎和浏览器均离线仍按持久绑定读取�
   const fx = ownerOfP1();
   fx.bindings.set('p1', ACCT_P1);
   const reads: string[] = [];
-  const dailyUsage = { asOf: 1_721_277_200_000, totals: { view: 17, publish: 1 } };
+  const dailyUsage: UiDailyUsagePayload = {
+    asOf: 1_721_277_200_000,
+    totals: { view: 17, search: 2, publish: 1 },
+    quotas: { view: 35, search: 10, publish: 1 },
+    saturated: ['publish'],
+    windows: {
+      session: { active: false, totals: { search: 1 }, quotas: { search: 3 }, saturated: [] },
+      day: { totals: { search: 2 }, quotas: { search: 10 }, saturated: [] },
+    },
+  };
   await withServer(
     {
       store: fx.store,

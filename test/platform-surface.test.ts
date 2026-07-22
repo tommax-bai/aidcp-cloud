@@ -12,14 +12,14 @@ import {
 } from '../src/platform/index.js';
 import type { UiDailyUsageCounts } from '../src/comm/protocol.js';
 
-/** 六键形状（无 join_group）：本 change 之前的载荷形状，用于证明既有行为逐位不变。 */
+/** 六键形状（无 search/join_group）：两项新增指标之前的载荷形状，用于证明旧端逐位兼容。 */
 const SIX_KEY_CAPS: UiDailyUsageCounts = { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 };
 
 /**
- * 七键形状 = 今天 pickDailyUsageCounts 的**真实出参**（它把全部键无条件物化）。
- * 投影拿到的永远是这个形状，所以 join_group 的相关断言必须压在它上面——压在六键形状上等于没测。
+ * 八键形状 = 今天 pickDailyUsageCounts 的**真实出参**（它把全部键无条件物化）。
+ * 投影拿到的永远是这个形状，所以 search/join_group 的相关断言必须压在它上面。
  */
-const SEVEN_KEY_COUNTS: UiDailyUsageCounts = { ...SIX_KEY_CAPS, join_group: 3 };
+const EIGHT_KEY_COUNTS: UiDailyUsageCounts = { view: 150, search: 2, like: 50, collect: 25, comment: 8, follow: 15, publish: 1, join_group: 3 };
 
 test('surface resolvers: xhs read/comment on detail; fb read=feed (就地读已开) / comment=detail', () => {
   assert.equal(resolveReadSurface('xiaohongshu'), 'detail');
@@ -74,26 +74,27 @@ test('usage metrics: 小红书逐位不变（回归判据，不是善意期待�
 });
 
 test('usage metrics: fb 拿到 join_group（显式 supported:true 才发）', () => {
-  const out = omitUnsupportedUsageMetrics('facebook', SEVEN_KEY_COUNTS);
-  assert.deepEqual(out, { view: 150, like: 50, comment: 8, follow: 15, publish: 1, join_group: 3 });
+  const out = omitUnsupportedUsageMetrics('facebook', EIGHT_KEY_COUNTS);
+  assert.deepEqual(out, { view: 150, search: 2, like: 50, comment: 8, follow: 15, publish: 1, join_group: 3 });
 });
 
-test('usage metrics: 小红书 MUST NOT 拿到 join_group（no_group_concept），其余六键逐位不变', () => {
-  const out = omitUnsupportedUsageMetrics('xiaohongshu', SEVEN_KEY_COUNTS);
+test('usage metrics: 小红书拿到 search，但 MUST NOT 拿到 join_group（no_group_concept）', () => {
+  const out = omitUnsupportedUsageMetrics('xiaohongshu', EIGHT_KEY_COUNTS);
   assert.ok(!('join_group' in out), '小红书没有群 ⇒ 加群键必须缺席');
-  assert.deepEqual(out, SIX_KEY_CAPS, '六键逐位不变');
+  assert.deepEqual(out, { view: 150, search: 2, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 });
 });
 
 test('usage metrics: 视频号只剩 publish（其余动作全声明 interaction_inbox_only）', () => {
-  assert.deepEqual(omitUnsupportedUsageMetrics('wechat_channels', SEVEN_KEY_COUNTS), { publish: 1 });
+  assert.deepEqual(omitUnsupportedUsageMetrics('wechat_channels', EIGHT_KEY_COUNTS), { publish: 1 });
 });
 
-test('usage metrics fail-safe: 平台未知 / 缺失 / 查表抛异常 ⇒ **保持现状**（既有键一个不摘、join_group 一个不加）', () => {
-  // 现状 = 本规则之前客户端有的那六格。**不是**「原样返回入参」——入参含 join_group（pick 无条件物化），
-  // 原样透传会把加群格泄给一个我们根本不知道是什么平台的账号。用一个新谎去治一个旧谎。
+test('usage metrics fail-safe: 平台未知 / 缺失 / 查表抛异常 ⇒ 既有六键照发，search/join_group 均不猜', () => {
+  // 现状 = 本规则之前客户端有的六格。**不是**「原样返回入参」——入参含两个 absent 新键，
+  // 原样透传会把搜索/加群泄给一个我们根本不知道是什么平台的账号。
   for (const unknown of [undefined, null, '', 'tiktok'] as const) {
-    const out = omitUnsupportedUsageMetrics(unknown, SEVEN_KEY_COUNTS);
+    const out = omitUnsupportedUsageMetrics(unknown, EIGHT_KEY_COUNTS);
     assert.deepEqual(out, SIX_KEY_CAPS, `platform=${String(unknown)}：六键照发`);
+    assert.ok(!('search' in out), `platform=${String(unknown)}：绝不猜测搜索能力`);
     assert.ok(!('join_group' in out), `platform=${String(unknown)}：绝不因「没查到」而凭空长出加群格`);
   }
 });
@@ -103,7 +104,7 @@ test('usage metrics: join_group 的读法不是 fail-open-to-supported（这是�
   // 若投影复用了它，未知平台就会拿到加群格。这条断言就是钉死「绝不能复用它」。
   assert.equal(isOrchestrationCapabilitySupported('tiktok', 'group_join'), true, '前提：那条 helper 确实 fail-open 到 true');
   assert.ok(
-    !('join_group' in omitUnsupportedUsageMetrics('tiktok', SEVEN_KEY_COUNTS)),
+    !('join_group' in omitUnsupportedUsageMetrics('tiktok', EIGHT_KEY_COUNTS)),
     '投影必须用「显式 supported===true」的读法，不得复用上面那条 helper',
   );
 });
@@ -113,17 +114,20 @@ test('usage metrics: publish 两张矩阵都没有声明 ⇒ 永不摘（缺声�
   assert.equal(omitUnsupportedUsageMetrics('facebook', { publish: 1 }).publish, 1);
 });
 
-test('usage metrics: session 窗口的四键子集同规则（本轮计划也是客户端指标面）', () => {
-  // pickSessionUsageCounts 只产 like/collect/comment/follow（无 view/publish），默认预算 collects:5 / follows:3。
-  const sessionCaps: UiDailyUsageCounts = { like: 10, collect: 5, comment: 2, follow: 3 };
-  assert.deepEqual(omitUnsupportedUsageMetrics('facebook', sessionCaps), { like: 10, comment: 2, follow: 3 });
+test('usage metrics: session 窗口包含 search 子集并按平台塑形（本轮计划也是客户端指标面）', () => {
+  const sessionCaps: UiDailyUsageCounts = { search: 3, like: 10, collect: 5, comment: 2, follow: 3 };
+  assert.deepEqual(omitUnsupportedUsageMetrics('facebook', sessionCaps), { search: 3, like: 10, comment: 2, follow: 3 });
   assert.deepEqual(omitUnsupportedUsageMetrics('xiaohongshu', sessionCaps), sessionCaps);
+  assert.deepEqual(omitUnsupportedUsageMetrics('wechat_channels', sessionCaps), {});
 });
 
 test('usage metrics: 入参缺席的键不会被凭空物化（绝不把「没有」变成 0）', () => {
   // 0 是个真数字、必须原样保留；undefined 是「没有」、必须保持缺席。
   assert.deepEqual(omitUnsupportedUsageMetrics('xiaohongshu', { like: 0 }), { like: 0 });
   assert.deepEqual(omitUnsupportedUsageMetrics('facebook', {}), {});
+  assert.deepEqual(omitUnsupportedUsageMetrics('facebook', { search: 0 }), { search: 0 });
+  assert.deepEqual(omitUnsupportedUsageMetrics('xiaohongshu', { search: 0 }), { search: 0 });
+  assert.deepEqual(omitUnsupportedUsageMetrics('wechat_channels', { search: 0 }), {});
   // 计数 0 与「没有这个指标」是两件事：FB 真发了 0 次加群申请 ⇒ 必须照显 0，不得当作缺席摘掉。
   assert.deepEqual(omitUnsupportedUsageMetrics('facebook', { join_group: 0 }), { join_group: 0 });
 });
@@ -133,6 +137,9 @@ test('capability + pacing resolvers (with fail-open)', () => {
   assert.equal(isOrchestrationCapabilitySupported('facebook', 'browse'), true);
   assert.equal(isOrchestrationCapabilitySupported('facebook', 'follow'), false, '普通主页关注能力仍不开放');
   assert.equal(isOrchestrationCapabilitySupported('facebook', 'reel_follow'), true, '仅 Reel 面具备关注执行器');
+  assert.equal(isOrchestrationCapabilitySupported('facebook', 'search'), true, '客户端搜索指标有显式平台声明');
+  assert.equal(isOrchestrationCapabilitySupported('xiaohongshu', 'search'), true);
+  assert.equal(isOrchestrationCapabilitySupported('wechat_channels', 'search'), false);
   assert.equal(isOrchestrationCapabilitySupported('xiaohongshu', 'browse'), true);
   assert.equal(isOrchestrationCapabilitySupported('tiktok', 'browse'), true); // fail-open
   assert.equal(platformFeedScrollFloorMs('facebook'), 7000);

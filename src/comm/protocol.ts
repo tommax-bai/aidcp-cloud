@@ -558,6 +558,7 @@ export interface InteractionBrowserControlPayload {
  */
 export const UI_DAILY_USAGE_ACTIONS = [
   'view',
+  'search',
   'like',
   'collect',
   'comment',

@@ -56,6 +56,8 @@ export type NoteScopedAction =
  *                 ⚠️ 读它**绝不能**用 isOrchestrationCapabilitySupported（那条 fail-open 到 true）——
  *                 该词的现状是「客户端根本没有这一格」，fail-open 到 true 会让平台未知的账号凭空长出
  *                 一个加群格，而小红书没有群。详见 declaresCapabilitySupported。
+ * - search        消费者 = 客户端指标投影（omitUnsupportedUsageMetrics）：只决定 FB/XHS 的今日进展是否
+ *                 出现搜索格，不参与搜索执行预闸；搜索事实仍由 search_activity_receipt_v1 终态记账。
  * **不变量**：普通主页 follow ⇒ profile_visit ⇒ browse。Reel 内联关注走 reel_follow，绝不能为了它翻转普通 follow。
  */
 export type OrchestrationCapability =
@@ -66,6 +68,7 @@ export type OrchestrationCapability =
   | 'profile_visit'
   | 'patrol'
   | 'notification'
+  | 'search'
   | 'group_join';
 
 /** Phase-1 user delegated business actions. This is control-plane metadata, not a protocol enum. */
@@ -300,6 +303,7 @@ export const PLATFORM_REGISTRY: Record<PlatformId, PlatformRegistryEntry> = {
       profile_visit: { supported: true },
       patrol: { supported: true },
       notification: { supported: true },
+      search: { supported: true },
       // 小红书没有「群」这个东西——不是没实装，是平台上不存在。
       group_join: { supported: false, reason: 'no_group_concept' },
     },
@@ -336,12 +340,11 @@ export const PLATFORM_REGISTRY: Record<PlatformId, PlatformRegistryEntry> = {
     platform: 'facebook',
     app: 'fb',
     displayName: 'Facebook',
-    // edge Facebook driver 的【编排能力子集】= {browse, comment, publish, interact, join}；本 registry 的
-    // capabilities 只登记**有云端消费者**的编排词（browse / feed_refresh / group_join），comment/publish/interact
+    // edge Facebook driver 的【编排能力子集】= {browse, search, comment, publish, interact, join}；本 registry 的
+    // capabilities 只登记**有云端消费者**的编排词（browse / feed_refresh / search / group_join），comment/publish/interact
     // 的编排接线各在其专属路径（定向评论调度器 / FacebookPublishExecutor / 互动闸），不作零消费者声明。
-    // group_join 于 change platform-honest-usage-metrics 登记：它的消费者是**非闸**的客户端指标投影
-    // （决定界面上有没有加群格），加群的闸与执行仍在 FacebookGroupJoinScheduler 自己的路径上——
-    // 别照本注释的旧版把它当零消费者声明删掉。
+    // search / group_join 的消费者是**非闸**的客户端指标投影（决定界面上有没有对应进度格）；动作闸与执行仍在
+    // 各自专属路径。别把它们当零消费者声明删掉，也别把这张表误接成动作放行闸。
     noteActions: FB_NOTE_ACTIONS,
     // 就地读/赞已开（change facebook-feed-inline-browse 灰度「开关打开」）：read/like='feed'（首页就地展开读全文 +
     // 逐帖 react），comment 留 'detail'（评论必进详情页，P5 已证 ⇒ 读=feed 与评=detail 不等 ⇒ 回执驱动两步迁移）。
@@ -365,6 +368,8 @@ export const PLATFORM_REGISTRY: Record<PlatformId, PlatformRegistryEntry> = {
       profile_visit: { supported: false, reason: 'no_profile_actuator' },
       patrol: { supported: false, reason: 'no_notification_patrol' },
       notification: { supported: false, reason: 'no_notification_surface' },
+      // FB 全站/容器搜索均有真实执行器；此声明只供客户端今日进展塑形。
+      search: { supported: true },
       // FB 群是真做的：调度器每天真点加入、风控计数器 join_group 真记账（含待审批）、
       // 后台用量表真在按「加群 用了/上限」显示。这条声明只让客户端也看得见同一个数。
       group_join: { supported: true },
@@ -418,6 +423,7 @@ export const PLATFORM_REGISTRY: Record<PlatformId, PlatformRegistryEntry> = {
       profile_visit: { supported: false, reason: 'interaction_inbox_only' },
       patrol: { supported: false, reason: 'interaction_inbox_only' },
       notification: { supported: false, reason: 'interaction_inbox_only' },
+      search: { supported: false, reason: 'interaction_inbox_only' },
       group_join: { supported: false, reason: 'interaction_inbox_only' },
     },
     pacing: {},

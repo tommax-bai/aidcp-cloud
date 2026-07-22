@@ -5,8 +5,8 @@
  * 动作放行、能力可用），绝不因查表失败静默砍掉一个支持平台。控制流一律读这里的静态表，**不读**运行时
  * observedSurface。
  *
- * 注意「今天行为」不等于「一律放行」：对 change platform-honest-usage-metrics 引入的、今天客户端根本没有的
- * 指标（join_group），「今天行为」是**不发**——查表失败时照样不发。fail-safe 的方向永远由「现状是什么」
+ * 注意「今天行为」不等于「一律放行」：对规则引入前客户端根本没有的指标
+ * （search / join_group），「今天行为」是**不发**——查表失败时照样不发。fail-safe 的方向永远由「现状是什么」
  * 决定，不由某个全局默认决定。详见 omitUnsupportedUsageMetrics。
  */
 import { platformRegistryEntry } from './registry.js';
@@ -87,8 +87,8 @@ export function isOrchestrationCapabilitySupported(
  *
  * `statusQuo` 是本表第二个字段，也是最容易被下一个人漏掉的那个：**它记的是「本规则不存在时，客户端有没有
  * 这一格」**。fail-safe 的方向由它决定，而不是由某个全局的 fail-open 常量决定：
- *   - `'supplied'`（既有六键，今天就在屏幕上）⇒ 只有**显式 supported:false** 才摘。
- *   - `'absent'`（如 join_group，今天屏幕上根本没有）⇒ 只有**显式 supported:true** 才加。
+ *   - `'supplied'`（规则引入前已有的六键）⇒ 只有**显式 supported:false** 才摘。
+ *   - `'absent'`（如 search / join_group）⇒ 只有**显式 supported:true** 才加。
  * 这两条看起来相反，其实是同一条：**只有显式声明才能改变现状**。若给 'absent' 的键沿用 'supplied' 的
  * fail-open，平台未知的账号会凭空长出一个「加群」格——用一个新谎去治一个旧谎。
  *
@@ -109,6 +109,7 @@ interface UsageMetricSupportSource {
 
 const USAGE_METRIC_SUPPORT_SOURCE: Record<UiDailyUsageAction, UsageMetricSupportSource> = {
   view: { statusQuo: 'supplied', declaration: { matrix: 'note', action: 'read_content' } },
+  search: { statusQuo: 'absent', declaration: { matrix: 'capability', capability: 'search' } },
   like: { statusQuo: 'supplied', declaration: { matrix: 'note', action: 'like' } },
   collect: { statusQuo: 'supplied', declaration: { matrix: 'note', action: 'collect' } },
   comment: { statusQuo: 'supplied', declaration: { matrix: 'note', action: 'comment' } },
@@ -120,8 +121,8 @@ const USAGE_METRIC_SUPPORT_SOURCE: Record<UiDailyUsageAction, UsageMetricSupport
 /**
  * 「本规则不存在时该发什么」——每一条 fail-safe 路径的落点。
  *
- * ⚠️ 这里**不能**图省事 `return counts`。入参是 pickDailyUsageCounts 的产物、七键全物化，其中
- * join_group 的现状是「客户端根本没有这一格」⇒ 原样返回会把加群指标泄给平台未知的账号（小红书没有群）。
+ * ⚠️ 这里**不能**图省事 `return counts`。入参是 pickDailyUsageCounts 的产物、八键全物化，其中
+ * search / join_group 的规则前现状都是「客户端没有这一格」⇒ 原样返回会把指标泄给未声明支持的平台。
  * 「保持现状」= 留下现状本就在发的键、丢掉现状本就没有的键，而不是「原样透传」。
  *
  * 本函数不查 registry、不抛。

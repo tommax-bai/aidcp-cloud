@@ -158,13 +158,14 @@ test('ui-snapshot: daily usage alone is enough to send hello snapshot', async ()
     pendingApprovalForAccount: async () => null,
     todayUsageForAccount: async () => ({
       asOf: 1730000001000,
-      totals: { view: 0, like: 0, collect: 0, comment: 0, follow: 0, publish: 0 },
+      totals: { view: 0, search: 0, like: 0, collect: 0, comment: 0, follow: 0, publish: 0 },
     }),
   });
   await service.pushHelloSnapshot('acc-1', 'edge-1');
   assert.equal(sent.length, 1);
   assert.deepEqual(sent[0].env.payload.dailyUsage?.totals, {
     view: 0,
+    search: 0,
     like: 0,
     collect: 0,
     comment: 0,

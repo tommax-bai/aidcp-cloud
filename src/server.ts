@@ -112,6 +112,7 @@ import {
 } from './publish-agent/fill-budget.js';
 import { EdgeTaskLeaseClient } from './comm/edge-task-lease-client.js';
 import { UiSnapshotService } from './comm/ui-snapshot.js';
+import { completeSessionUsageCounts, pickDailyUsageCounts, pickSessionUsageCounts } from './comm/daily-usage.js';
 import { buildBrowserStandbyHint, resolveBrowserStandbyConfig } from './comm/browser-standby.js';
 // 客户端指标键清单的**单一来源**（change platform-honest-usage-metrics）：联集由它派生。
 // 别在本文件另写一份数组——那正是本 change 删掉的东西（加键时 typecheck 一声不吭）。
@@ -383,31 +384,6 @@ function createCuratedReferenceImageRelocator(store: ObjectStore) {
  * 键名与风控动作名逐字同名（含 join_group）⇒ 本函数可直读风控 totals，无 UI↔风控映射表。
  * 清单来自 protocol.ts 的单一来源，勿在此另写一份。
  */
-function pickDailyUsageCounts(source: Partial<Record<string, number>>): UiDailyUsageCounts {
-  const counts: UiDailyUsageCounts = {};
-  for (const action of UI_DAILY_USAGE_ACTIONS) {
-    const value = source[action];
-    counts[action] = Number.isFinite(value) ? Math.max(0, Math.floor(Number(value))) : 0;
-  }
-  return counts;
-}
-
-function pickSessionUsageCounts(source: object | null | undefined): UiDailyUsageCounts {
-  const values = (source ?? {}) as Partial<Record<string, number>>;
-  const mappings: Array<[UiDailyUsageAction, string]> = [
-    ['like', 'likes'],
-    ['collect', 'collects'],
-    ['comment', 'comments'],
-    ['follow', 'follows'],
-  ];
-  const counts: UiDailyUsageCounts = {};
-  for (const [action, key] of mappings) {
-    const value = values[key];
-    if (Number.isFinite(value)) counts[action] = Math.max(0, Math.floor(Number(value)));
-  }
-  return counts;
-}
-
 function quotaSaturation(totals: UiDailyUsageCounts, quotas: UiDailyUsageCounts): UiDailyUsageAction[] {
   return UI_DAILY_USAGE_ACTIONS.filter((action) => {
     const cap = quotas[action];
@@ -462,22 +438,6 @@ function usageWindowReleaseAt(
 
 function dayWindowStart(at: number): number {
   return shanghaiDayStartMs(at);
-}
-
-function completeSessionUsageCounts(
-  budgetTotals: object | null | undefined,
-  riskTotals: Partial<Record<string, number>> | null,
-  publishCount: number | null,
-): UiDailyUsageCounts {
-  const totals = pickDailyUsageCounts(riskTotals ?? {});
-  const interactions = pickSessionUsageCounts(budgetTotals);
-  for (const action of ['like', 'collect', 'comment', 'follow'] as const) {
-    totals[action] = interactions[action] ?? totals[action] ?? 0;
-  }
-  totals.publish = typeof publishCount === 'number' && Number.isFinite(publishCount)
-    ? Math.max(0, Math.floor(publishCount))
-    : (totals.publish ?? 0);
-  return totals;
 }
 
 /**
