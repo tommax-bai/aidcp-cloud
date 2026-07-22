@@ -1148,7 +1148,27 @@ function createRequestHandler(
       const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
       const accountId = query.get('accountId') ?? undefined;
       const status = query.get('status') ?? undefined;
-      sendJson(res, 200, { items: await deps.panelStore.publishedHistory(50, accountId, status) });
+      const items = await deps.panelStore.publishedHistory(50, accountId, status);
+      // 待审详情投影同样带上下发进度（change publish-approval-signal-to-database，task 4.6）：
+      // 「已批准·待下发」在稿件列表 / 抽屉里也必须与「待审批」可区分。
+      // 读不到 → 不带这些字段，前端回落既有呈现（MUST NOT 白屏）。
+      const dispatch = await readApprovalDispatchFor(deps, items);
+      sendJson(res, 200, {
+        items: dispatch
+          ? items.map((row) => {
+              const view = dispatch.get(row.id);
+              return view
+                ? {
+                    ...row,
+                    dispatchState: view.dispatchState,
+                    dispatchBlockedReason: view.dispatchBlockedReason,
+                    decidedAt: view.decidedAt,
+                    waitingMs: Math.max(0, Date.now() - view.decidedAt),
+                  }
+                : row;
+            })
+          : items,
+      });
       return;
     }
     if (method === 'GET' && url === '/api/content/queue') {
