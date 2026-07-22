@@ -29,7 +29,7 @@ export const RISK_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS risk_counters (
   id          BIGSERIAL PRIMARY KEY,
   account_id  TEXT NOT NULL,
-  action      TEXT NOT NULL CHECK (action IN ('like','collect','comment','follow','publish','view','comment_like','join_group','dm_reply')),
+  action      TEXT NOT NULL CHECK (action IN ('like','collect','comment','follow','publish','view','search','comment_like','join_group','dm_reply')),
   count       INTEGER NOT NULL DEFAULT 1,
   occurred_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -72,10 +72,11 @@ BEGIN
       AND pg_get_constraintdef(oid) LIKE '%comment_like%'
       AND pg_get_constraintdef(oid) LIKE '%join_group%'
       AND pg_get_constraintdef(oid) LIKE '%dm_reply%'
+      AND pg_get_constraintdef(oid) LIKE '%search%'
   ) THEN
     ALTER TABLE risk_counters DROP CONSTRAINT IF EXISTS risk_counters_action_check;
     ALTER TABLE risk_counters ADD CONSTRAINT risk_counters_action_check
-      CHECK (action IN ('like','collect','comment','follow','publish','view','comment_like','join_group','dm_reply'));
+      CHECK (action IN ('like','collect','comment','follow','publish','view','search','comment_like','join_group','dm_reply'));
   END IF;
 END $$;
 `;

@@ -11,6 +11,7 @@
  * 5. SessionMonitor 集成（会话守护）
  */
 
+import { randomUUID } from 'node:crypto';
 import { EventBus } from '../event-bus/index.js';
 import type { CommentApprovalTrace, CommentAppraisingPayload, MandatoryInteractionContext, NoteDetailData, PageCardsData } from '../event-bus/types.js';
 import {
@@ -211,6 +212,8 @@ export interface RoleDispatcherOptions {
   canInteract?: (action: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like') => boolean;
   /** 互动风控解释口；mandatory 评论预检和最终闸共用同一 RiskController 判定来源。 */
   explainInteract?: (action: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like') => ViewQuotaDecision;
+  /** 自治搜索前的账号级风险解释口；不把 search 混入 note-scoped interaction。 */
+  explainSearch?: () => ViewQuotaDecision;
   /** 浏览前风控闸：兼容旧测试/旧装配；优先使用 explainView。 */
   canView?: () => boolean;
   /**
@@ -323,6 +326,8 @@ export interface RoleDispatcherOptions {
   hasInlineTargeting?: () => boolean;
   /** 本连接边缘是否声明 `facebook_reel_follow_v1`；缺省 false，旧 Edge 不接收自动 Reel 关注。 */
   hasReelFollow?: () => boolean;
+  /** 本连接边缘是否声明 `search_activity_receipt_v1`。 */
+  hasSearchActivityReceipt?: () => boolean;
   /**
    * Facebook 每日累计在线分钟默认（change account-nurture-discipline-spine §4.2）：全局每日时长阈值
    * （dailyCaps().maxMinutes）未显式设值（0=不限）时，Facebook 账号回落这个非零安全日窗（养号「每天在线
@@ -432,6 +437,7 @@ export class RoleDispatcher {
   private readonly pacingFloors?: PacingFloorProvider;
   private readonly canInteract: (action: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like') => boolean;
   private readonly explainInteract: (action: 'like' | 'collect' | 'follow' | 'comment' | 'comment_like') => ViewQuotaDecision;
+  private readonly explainSearch: () => ViewQuotaDecision;
   private readonly canView: () => boolean;
   private readonly explainView: () => ViewQuotaDecision;
   private readonly commentApproval?: CommentApprovalPort;
@@ -504,6 +510,8 @@ export class RoleDispatcher {
   private readonly hasInlineTargeting: () => boolean;
   /** 本连接边缘是否包含 Reel note-scoped 关注执行器；缺省 false = 不下发自动关注。 */
   private readonly hasReelFollow: () => boolean;
+  /** 本连接边缘是否回传关联后的搜索终态。 */
+  private readonly hasSearchActivityReceipt: () => boolean;
   /** Facebook 每日在线分钟默认（§4.2）；全局未设时 FB 账号回落此非零日窗。 */
   private readonly facebookDailyOnlineMinutes: number;
   /** 同账号并行互动去重 guard（按账号单例）；缺省不去重。 */
@@ -558,6 +566,8 @@ export class RoleDispatcher {
   private readonly conceptStore?: ConceptStorePort;
   /** 搜索前限频闸（每关键词每会话/每天上限），dispatcher 持有单例，会话重启时清会话计数。 */
   private readonly searchLimiter: SearchFrequencyLimiter;
+  /** 支持新回执的自治搜索待决关联；任务/运营搜索不进入概念词状态。 */
+  private readonly pendingSearchKeywords = new Map<string, string>();
   /** 概念池快照：startSession 时 loadPool 刷新，供 SearchEvaluator 读取。 */
   private conceptPool: ConceptPool = EMPTY_CONCEPT_POOL;
   /** 会话开始时刻，用于估算会话进度（疲劳乘子）。时长上限改为从全局单场上限提供者惰性解析（见 maxDurationMs()）。 */
@@ -610,6 +620,7 @@ export class RoleDispatcher {
       const allowed = this.canInteract(action);
       return allowed ? { allowed } : { allowed, reason: 'risk_blocked' };
     });
+    this.explainSearch = options.explainSearch ?? (() => ({ allowed: true }));
     this.canView = options.canView ?? (() => true);
     this.explainView = options.explainView ?? (() => {
       const allowed = this.canView();
@@ -641,6 +652,7 @@ export class RoleDispatcher {
     this.accountPlatform = options.accountPlatform;
     this.hasInlineTargeting = options.hasInlineTargeting ?? (() => false);
     this.hasReelFollow = options.hasReelFollow ?? (() => false);
+    this.hasSearchActivityReceipt = options.hasSearchActivityReceipt ?? (() => false);
     this.facebookDailyOnlineMinutes = options.facebookDailyOnlineMinutes ?? DEFAULT_FB_DAILY_ONLINE_MINUTES;
     this.interactionGuard = options.interactionGuard;
     this.cooldownGate = options.cooldownGate;
@@ -1657,6 +1669,7 @@ export class RoleDispatcher {
     this.budget = this.freshBudget();
     this.budgetInit = { ...this.budget };
     this.searchLimiter.resetSession();
+    this.pendingSearchKeywords.clear();
     this.clearFacebookNaturalInteractionEvidence();
     this.reelsFallbackAuthorized = false;
     // 跨会话残留清理（change platform-browse-protocol）：迁移在途 / 审批在途标志不得跨会话粘连。
@@ -1726,6 +1739,7 @@ export class RoleDispatcher {
     this.budgetInit = { ...this.budget };
     this.searchedKeywords = [];
     this.searchLimiter.resetSession();
+    this.pendingSearchKeywords.clear();
     void this.refreshConceptPool();
     this.sessionContext.reset();
     // 清在途互动状态（change fix-interaction-and-comment-capture）：新场从干净的重试/去重态开始。
@@ -1776,6 +1790,7 @@ export class RoleDispatcher {
     this.settlePendingMandatoryCommentAsUnknown(`session_ended:${reason ?? 'manual'}`);
     this.clearCommentSublineHold(false);
     void this.endNotificationTask();
+    this.pendingSearchKeywords.clear();
     if (!this.sessionActive) return;
     const account = this.currentAccountId;
     // 记当日累计浏览时长（含 excursion，仅供每日上限近似）。
@@ -2563,11 +2578,12 @@ export class RoleDispatcher {
 
       this.eventBus.on('search.approved', (payload) => {
         const keyword = payload.keyword;
-        // 搜索前两道闸（红线：被拦则诚实跳过——不下发、不扣 budget、不 markSearched，绝不假成功）。
-        // 闸一：会话搜索预算。
-        if (this.budget.searches <= 0) {
-          console.log(`[RoleDispatcher] 搜索被拦截，跳过 keyword=${keyword} reason=budget_exhausted`);
-          this.emitSearchSkippedAfterIntercept(payload.currentPageType, 'budget_exhausted');
+        // 搜索前三道闸（账号风险、关键词限频、会话预算）。被拦不下发、不扣尝试预算、不 markSearched。
+        const riskDecision = this.explainSearch();
+        if (!riskDecision.allowed) {
+          const reason = riskDecision.reason ?? 'risk_blocked';
+          console.log(`[RoleDispatcher] 搜索被拦截，跳过 keyword=${keyword} reason=${reason}`);
+          this.emitSearchSkippedAfterIntercept(payload.currentPageType, reason);
           return;
         }
         // 闸二：限频（每关键词每会话/每天上限）。
@@ -2578,21 +2594,47 @@ export class RoleDispatcher {
           this.emitSearchSkippedAfterIntercept(payload.currentPageType, reason);
           return;
         }
-        // 两道闸通过 → 记账 + 下发（如实带上 source）。
+        // 闸三：会话搜索预算。
+        if (this.budget.searches <= 0) {
+          console.log(`[RoleDispatcher] 搜索被拦截，跳过 keyword=${keyword} reason=budget_exhausted`);
+          this.emitSearchSkippedAfterIntercept(payload.currentPageType, 'budget_exhausted');
+          return;
+        }
+        // 三道闸通过 → 先确认命令真的进入下行通道，再记录尝试账。
+        const params: Record<string, unknown> = { keyword };
+        if (payload.source) params.source = payload.source;
+        const activityId = this.hasSearchActivityReceipt() ? randomUUID() : undefined;
+        if (activityId) {
+          params.activityId = activityId;
+          params.purpose = 'discovery';
+          params.scope = 'global';
+        }
+        const sent = this.sendCommand({ action: 'search', params });
+        if (!sent) {
+          console.log(`[RoleDispatcher] 搜索下发被抑制，跳过 keyword=${keyword} reason=dispatch_suppressed`);
+          this.emitSearchSkippedAfterIntercept(payload.currentPageType, 'dispatch_suppressed');
+          return;
+        }
         this.searchLimiter.recordSearch(keyword);
         this.searchedKeywords.push(keyword);
         this.consumeBudget('search');
-        const params: Record<string, unknown> = { keyword };
-        if (payload.source) params.source = payload.source;
-        this.sendCommand({ action: 'search', params });
         // change bounded-search-excursion（#2 修页型自指 bug）：唯一权威写入点——**真正下发了搜索指令**
         // 才把当前列表页型标为 search（被上面两道闸拦下、未下发的搜索绝不到这里，故不会误翻转）。
         // 由此搜索结果页被 SearchScroller 正确驱动、搜索卡不再计入 feed 深度；回首页时在 page.cards 处标回 feed。
         this.sessionContext.setSourcePageType('search');
-        // 跨会话标记已搜（fire-and-forget，失败不影响本次下发）。
-        this.conceptStore?.markSearched(keyword).catch((err) =>
-          console.warn(`[RoleDispatcher] markSearched 失败 keyword=${keyword}: ${err instanceof Error ? err.message : String(err)}`),
-        );
+        if (activityId) {
+          if (this.pendingSearchKeywords.size >= 128) {
+            const oldest = this.pendingSearchKeywords.keys().next().value as string | undefined;
+            if (oldest) this.pendingSearchKeywords.delete(oldest);
+            console.warn('[RoleDispatcher] pending search map 已达 128，淘汰最旧关联（不伪造概念词已搜）');
+          }
+          this.pendingSearchKeywords.set(activityId, keyword);
+        } else {
+          // 旧 Edge 无统一终态，保持历史兼容；handler 不会把该兼容标记冒充账号搜索事实。
+          this.conceptStore?.markSearched(keyword).catch((err) =>
+            console.warn(`[RoleDispatcher] legacy markSearched 失败 keyword=${keyword}: ${err instanceof Error ? err.message : String(err)}`),
+          );
+        }
       }),
 
       this.eventBus.on('quality.pass', (payload) => {
@@ -2789,6 +2831,18 @@ export class RoleDispatcher {
             this.clearCommentSublineHold(true);
           }
           return;
+        }
+        if (payload.action === 'search' && this.hasSearchActivityReceipt()) {
+          const activityId = typeof payload.activityId === 'string' ? payload.activityId.trim() : '';
+          const keyword = activityId ? this.pendingSearchKeywords.get(activityId) : undefined;
+          if (activityId && keyword) {
+            this.pendingSearchKeywords.delete(activityId);
+            if (payload.actuated === true) {
+              this.conceptStore?.markSearched(keyword).catch((err) =>
+                console.warn(`[RoleDispatcher] receipt markSearched 失败 keyword=${keyword}: ${err instanceof Error ? err.message : String(err)}`),
+              );
+            }
+          }
         }
         // observedSurface 仅审计（change platform-browse-protocol）：回执回声 surface 与期望不符 → warn（检测漂移）；
         // 绝不参与控制流（控制流一律读 effectiveReadSurface，见 shouldCloseWithScroll）。期望取版本偏斜后的有效值：

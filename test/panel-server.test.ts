@@ -34,9 +34,9 @@ const acct: PanelAccount = {
 };
 
 const mockPanelStore: PanelStoreReader = {
-  todayTotals: async () => ({ like: 10, collect: 2, comment: 1, follow: 0, publish: 1, view: 40, comment_like: 0, join_group: 0, dm_reply: 0 }),
+  todayTotals: async () => ({ like: 10, collect: 2, comment: 1, follow: 0, publish: 1, view: 40, search: 2, comment_like: 0, join_group: 0, dm_reply: 0 }),
   todayTotalsByAccount: async () => [
-    { accountId: 'default', totals: { like: 10, collect: 2, comment: 1, follow: 0, publish: 1, view: 40, comment_like: 0, join_group: 0, dm_reply: 0 } },
+    { accountId: 'default', totals: { like: 10, collect: 2, comment: 1, follow: 0, publish: 1, view: 40, search: 2, comment_like: 0, join_group: 0, dm_reply: 0 } },
   ],
   todayPublishCount: async () => 1,
   likeRate: async () => ({ likes: 10, views: 40, rate: 0.25, healthy: true }),
@@ -225,8 +225,9 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
     // /api/version 公开 + 枚举
     const ver = await fetch(`${base}/api/version`);
     assert.equal(ver.status, 200);
-    const verBody = (await ver.json()) as { panelApiVersion: number; enums: { riskStatus: string[] } };
+    const verBody = (await ver.json()) as { panelApiVersion: number; enums: { riskStatus: string[]; riskAction: string[] } };
     assert.deepEqual(verBody.enums.riskStatus, ['normal', 'warned', 'restricted', 'frozen']);
+    assert.ok(verBody.enums.riskAction.includes('search'));
 
     // 受保护无 token → 401
     assert.equal((await fetch(`${base}/api/me`)).status, 401);
@@ -248,8 +249,8 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
     const sumBody = (await sum.json()) as {
       asOf: number;
       edgesOnline: number;
-      totals: { like: number; publish: number };
-      totalsByAccount: { accountId: string; totals: { like: number } }[];
+      totals: { like: number; search: number; publish: number };
+      totalsByAccount: { accountId: string; totals: { like: number; search: number } }[];
       likeRate: { rate: number };
       accounts: unknown[];
       alerts: { severity: string }[];
@@ -264,6 +265,7 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
     );
     assert.equal(sumBody.edgesOnline, 3);
     assert.equal(sumBody.totals.like, 10);
+    assert.equal(sumBody.totals.search, 2);
     assert.equal(sumBody.totals.publish, 1);
     assert.equal(sumBody.likeRate.rate, 0.25);
     assert.equal(sumBody.accounts.length, 1);
@@ -271,6 +273,7 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
     assert.equal(sumBody.attributionPending, false);
     assert.equal(sumBody.totalsByAccount[0].accountId, 'default');
     assert.equal(sumBody.totalsByAccount[0].totals.like, 10);
+    assert.equal(sumBody.totalsByAccount[0].totals.search, 2);
     // V1 task 9.5：真告警
     assert.equal(sumBody.alerts[0].severity, 'P0');
     // V1 task 9.4：调度引擎态
@@ -1206,11 +1209,13 @@ test('summary 按账号带 day 上限 + 饱和标记（change decouple-quota-hit
     const entry = sum.totalsByAccount[0];
     // 默认 controller = normal 档 → effectiveQuotas().day 为 normal 每日配额
     assert.equal(entry.quotas?.like, 50);
+    assert.equal(entry.quotas?.search, 10);
     assert.equal(entry.quotas?.view, 150);
     assert.equal(entry.quotas?.publish, 1);
     // 用量 publish=1 >= cap 1 → 饱和标红；like=10 < 50 → 不饱和
     assert.ok(entry.saturated?.includes('publish'), 'publish 撞当日上限应标饱和');
     assert.ok(!entry.saturated?.includes('like'), 'like 未到上限不应标饱和');
+    assert.ok(!entry.saturated?.includes('search'), 'search 用量 2 未到上限 10 不应标饱和');
   } finally {
     await h.close();
   }

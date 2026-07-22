@@ -9,6 +9,7 @@ import { buildEdgeCommentSteps } from '../../src/comment-agent/edge-steps.js';
 import type { CommentDedup } from '../../src/comment-agent/edge-steps.js';
 
 interface Envelope {
+  id: string;
   type: string;
   payload: Record<string, unknown>;
 }
@@ -91,7 +92,7 @@ function makeDedup(commented: Set<string> = new Set()): CommentDedup & { recorde
 describe('buildEdgeCommentSteps', () => {
   it('searchAndHarvest：搜到卡片 → 仅取带 noteId 的、保序、index 重排', async () => {
     const bus = new EventBus();
-    const { pusher, sentTypes } = makeEnv(bus, {
+    const { pusher, sentTypes, sent } = makeEnv(bus, {
       cards: [
         { title: 'A', noteId: 'a', collectCount: 900 },
         { title: '无id', collectCount: 999 }, // 无 noteId → 丢
@@ -101,6 +102,9 @@ describe('buildEdgeCommentSteps', () => {
     const steps = buildEdgeCommentSteps({ bus, pusher, edgeId: 'e1', dedup: makeDedup(), sort: 'most_collected', timeWindow: 'one_day' });
     const cards = await steps.searchAndHarvest('Agent');
     assert.equal(sentTypes[0], 'search.execute');
+    assert.equal(sent[0].payload.purpose, 'task_targeting');
+    assert.equal(sent[0].payload.scope, 'global');
+    assert.equal(sent[0].payload.activityId, sent[0].id);
     assert.deepEqual(cards.map((c) => c.noteId), ['a', 'b']);
     assert.deepEqual(cards.map((c) => c.index), [0, 1]);
   });
@@ -130,6 +134,29 @@ describe('buildEdgeCommentSteps', () => {
     const elapsed = Date.now() - t0;
     assert.deepEqual(cards, [], '诚实失败回执 → 空候选');
     assert.ok(elapsed < 1000, `应消费诚实回执快速失败、不干等 5s 超时（实际 ${elapsed}ms）`);
+  });
+
+  it('searchAndHarvest：边端明确 no_results → 快速返回空候选', async () => {
+    const bus = new EventBus();
+    const { pusher } = makeEnv(bus, { silent: true });
+    const wrapped = {
+      pushToEdges(envelope: unknown, edgeId?: string) {
+        const env = envelope as Envelope & { id: string };
+        const sent = pusher.pushToEdges(envelope, edgeId);
+        bus.emit('action.completed', {
+          action: 'search',
+          ok: true,
+          activityId: env.id,
+          searchOutcome: 'no_results',
+          ts: Date.now(),
+        } as never);
+        return sent;
+      },
+    };
+    const steps = buildEdgeCommentSteps({ bus, pusher: wrapped, edgeId: 'e1', dedup: makeDedup(), stepTimeoutMs: 5000 });
+    const t0 = Date.now();
+    assert.deepEqual(await steps.searchAndHarvest('x'), []);
+    assert.ok(Date.now() - t0 < 1000);
   });
 
   it('filterUncommented：滤掉已评过的、index 重排', async () => {

@@ -131,9 +131,9 @@ test('binding=true：XHS conservative + D5-7 —— 四个头部动作纹丝不�
 test('binding=false：档位被面板编辑得比曲线更严 → 一格都压不动，如实标注「不额外限制」', () => {
   // D6 的真实场景：quota_config 面板可热编辑，与写死的曲线之间没有任何不变量保证曲线更紧。
   const tight: WindowQuotas = {
-    minute: { view: 1, like: 0, collect: 0, comment: 0, follow: 0, publish: 0, comment_like: 0, join_group: 0, dm_reply: 0 },
-    hour: { view: 1, like: 0, collect: 0, comment: 0, follow: 0, publish: 0, comment_like: 0, join_group: 0, dm_reply: 0 },
-    day: { view: 1, like: 0, collect: 0, comment: 0, follow: 0, publish: 0, comment_like: 0, join_group: 0, dm_reply: 0 },
+    minute: { view: 1, like: 0, collect: 0, comment: 0, follow: 0, publish: 0, search: 0, comment_like: 0, join_group: 0, dm_reply: 0 },
+    hour: { view: 1, like: 0, collect: 0, comment: 0, follow: 0, publish: 0, search: 0, comment_like: 0, join_group: 0, dm_reply: 0 },
+    day: { view: 1, like: 0, collect: 0, comment: 0, follow: 0, publish: 0, search: 0, comment_like: 0, join_group: 0, dm_reply: 0 },
   };
   const c = controllerAt(new NurtureStub('facebook', NOW), NOW, { quotaProvider: { windowQuotasFor: () => tight } });
   const view = c.slowStartView();

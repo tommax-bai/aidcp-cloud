@@ -8,13 +8,13 @@ export interface ColdStartDayPlan {
 }
 
 export const COLD_START_PLANS: ColdStartDayPlan[] = [
-  { day: 1, quotas: { view: [30, 50], like: [0, 3], collect: [0, 1], comment: [0, 0], follow: [0, 1], publish: [0, 0], comment_like: [0, 0], join_group: [0, 0], dm_reply: [0, 0] } },
-  { day: 2, quotas: { view: [30, 50], like: [0, 3], collect: [0, 1], comment: [0, 0], follow: [0, 1], publish: [0, 0], comment_like: [0, 0], join_group: [0, 0], dm_reply: [0, 0] } },
-  { day: 3, quotas: { view: [50, 80], like: [5, 10], collect: [1, 3], comment: [0, 1], follow: [1, 2], publish: [0, 0], comment_like: [0, 1], join_group: [0, 0], dm_reply: [0, 0] } },
-  { day: 4, quotas: { view: [50, 80], like: [5, 10], collect: [1, 3], comment: [0, 1], follow: [1, 2], publish: [0, 0], comment_like: [0, 1], join_group: [0, 0], dm_reply: [0, 0] } },
-  { day: 5, quotas: { view: [80, 120], like: [10, 20], collect: [3, 5], comment: [1, 3], follow: [2, 3], publish: [0, 1], comment_like: [0, 2], join_group: [0, 1], dm_reply: [0, 0] } },
-  { day: 6, quotas: { view: [80, 120], like: [10, 20], collect: [3, 5], comment: [1, 3], follow: [2, 3], publish: [0, 1], comment_like: [0, 2], join_group: [0, 1], dm_reply: [0, 0] } },
-  { day: 7, quotas: { view: [80, 120], like: [10, 20], collect: [3, 5], comment: [1, 3], follow: [2, 3], publish: [0, 1], comment_like: [0, 2], join_group: [0, 1], dm_reply: [0, 0] } },
+  { day: 1, quotas: { view: [30, 50], like: [0, 3], collect: [0, 1], comment: [0, 0], follow: [0, 1], publish: [0, 0], search: [0, 2], comment_like: [0, 0], join_group: [0, 0], dm_reply: [0, 0] } },
+  { day: 2, quotas: { view: [30, 50], like: [0, 3], collect: [0, 1], comment: [0, 0], follow: [0, 1], publish: [0, 0], search: [0, 2], comment_like: [0, 0], join_group: [0, 0], dm_reply: [0, 0] } },
+  { day: 3, quotas: { view: [50, 80], like: [5, 10], collect: [1, 3], comment: [0, 1], follow: [1, 2], publish: [0, 0], search: [1, 3], comment_like: [0, 1], join_group: [0, 0], dm_reply: [0, 0] } },
+  { day: 4, quotas: { view: [50, 80], like: [5, 10], collect: [1, 3], comment: [0, 1], follow: [1, 2], publish: [0, 0], search: [1, 3], comment_like: [0, 1], join_group: [0, 0], dm_reply: [0, 0] } },
+  { day: 5, quotas: { view: [80, 120], like: [10, 20], collect: [3, 5], comment: [1, 3], follow: [2, 3], publish: [0, 1], search: [2, 5], comment_like: [0, 2], join_group: [0, 1], dm_reply: [0, 0] } },
+  { day: 6, quotas: { view: [80, 120], like: [10, 20], collect: [3, 5], comment: [1, 3], follow: [2, 3], publish: [0, 1], search: [2, 5], comment_like: [0, 2], join_group: [0, 1], dm_reply: [0, 0] } },
+  { day: 7, quotas: { view: [80, 120], like: [10, 20], collect: [3, 5], comment: [1, 3], follow: [2, 3], publish: [0, 1], search: [2, 5], comment_like: [0, 2], join_group: [0, 1], dm_reply: [0, 0] } },
 ];
 
 /**
@@ -24,13 +24,13 @@ export const COLD_START_PLANS: ColdStartDayPlan[] = [
  * collect / comment_like 是小红书特有语义，FB 无对应概念 → 恒 0。区间上界即当日天花板。
  */
 export const FB_COLD_START_PLANS: ColdStartDayPlan[] = [
-  { day: 1, quotas: { view: [10, 20], like: [0, 2], collect: [0, 0], comment: [0, 0], follow: [0, 1], publish: [0, 0], comment_like: [0, 0], join_group: [0, 0], dm_reply: [0, 0] } },
-  { day: 2, quotas: { view: [15, 25], like: [0, 3], collect: [0, 0], comment: [0, 0], follow: [0, 1], publish: [0, 0], comment_like: [0, 0], join_group: [0, 0], dm_reply: [0, 0] } },
-  { day: 3, quotas: { view: [20, 35], like: [3, 6], collect: [0, 0], comment: [0, 1], follow: [1, 2], publish: [0, 0], comment_like: [0, 0], join_group: [0, 1], dm_reply: [0, 0] } },
-  { day: 4, quotas: { view: [25, 40], like: [5, 8], collect: [0, 0], comment: [1, 2], follow: [1, 2], publish: [0, 0], comment_like: [0, 0], join_group: [0, 1], dm_reply: [0, 0] } },
-  { day: 5, quotas: { view: [30, 50], like: [6, 12], collect: [0, 0], comment: [1, 3], follow: [2, 3], publish: [0, 1], comment_like: [0, 0], join_group: [1, 2], dm_reply: [0, 0] } },
-  { day: 6, quotas: { view: [40, 60], like: [8, 15], collect: [0, 0], comment: [2, 4], follow: [2, 4], publish: [0, 1], comment_like: [0, 0], join_group: [1, 2], dm_reply: [0, 0] } },
-  { day: 7, quotas: { view: [50, 70], like: [10, 18], collect: [0, 0], comment: [2, 5], follow: [3, 5], publish: [1, 1], comment_like: [0, 0], join_group: [1, 3], dm_reply: [0, 0] } },
+  { day: 1, quotas: { view: [10, 20], like: [0, 2], collect: [0, 0], comment: [0, 0], follow: [0, 1], publish: [0, 0], search: [0, 1], comment_like: [0, 0], join_group: [0, 0], dm_reply: [0, 0] } },
+  { day: 2, quotas: { view: [15, 25], like: [0, 3], collect: [0, 0], comment: [0, 0], follow: [0, 1], publish: [0, 0], search: [0, 1], comment_like: [0, 0], join_group: [0, 0], dm_reply: [0, 0] } },
+  { day: 3, quotas: { view: [20, 35], like: [3, 6], collect: [0, 0], comment: [0, 1], follow: [1, 2], publish: [0, 0], search: [1, 2], comment_like: [0, 0], join_group: [0, 1], dm_reply: [0, 0] } },
+  { day: 4, quotas: { view: [25, 40], like: [5, 8], collect: [0, 0], comment: [1, 2], follow: [1, 2], publish: [0, 0], search: [1, 2], comment_like: [0, 0], join_group: [0, 1], dm_reply: [0, 0] } },
+  { day: 5, quotas: { view: [30, 50], like: [6, 12], collect: [0, 0], comment: [1, 3], follow: [2, 3], publish: [0, 1], search: [1, 3], comment_like: [0, 0], join_group: [1, 2], dm_reply: [0, 0] } },
+  { day: 6, quotas: { view: [40, 60], like: [8, 15], collect: [0, 0], comment: [2, 4], follow: [2, 4], publish: [0, 1], search: [2, 4], comment_like: [0, 0], join_group: [1, 2], dm_reply: [0, 0] } },
+  { day: 7, quotas: { view: [50, 70], like: [10, 18], collect: [0, 0], comment: [2, 5], follow: [3, 5], publish: [1, 1], search: [2, 5], comment_like: [0, 0], join_group: [1, 3], dm_reply: [0, 0] } },
 ];
 
 /**

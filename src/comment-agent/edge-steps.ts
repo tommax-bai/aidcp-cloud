@@ -136,6 +136,8 @@ interface ActionCompleted {
   action: string;
   ok: boolean;
   reason?: string;
+  activityId?: string;
+  searchOutcome?: 'results_ready' | 'no_results' | 'failed_after_submit' | 'not_submitted';
   candidates?: Array<{ author?: string; text: string; likeCount?: number }>;
 }
 
@@ -185,8 +187,9 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
 
   return {
     async searchAndHarvest(term: string): Promise<CommentCandidateCard[]> {
+      const activityId = randomUUID();
       // 竞速（change comment-search-nav-confirm）：page.cards.arrived（候选）vs
-      // action.completed{action:'search', ok:false}（边端诚实回失败，如未导航到结果页 not_on_search_page）。
+      // action.completed{action:'search'}（边端诚实回失败，或明确 no_results 空结果终态）。
       // 谁先到用谁——边端诚实回执立即快速失败，不再干等满超时（消除多搜索词各等一遍的空转）。
       const outcome = await sendAndRace<
         { kind: 'cards'; cards: PageCardsArrived['cards'] } | { kind: 'fail'; reason: string }
@@ -201,7 +204,9 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
             event: 'action.completed',
             match: (data) => {
               const d = data as ActionCompleted;
-              if (d.action !== 'search' || d.ok) return undefined;
+              if (d.action !== 'search' || (d.activityId && d.activityId !== activityId)) return undefined;
+              if (d.ok && d.searchOutcome === 'no_results') return { kind: 'cards', cards: [] };
+              if (d.ok) return undefined;
               return { kind: 'fail', reason: d.reason ?? 'search_failed' };
             },
           },
@@ -209,8 +214,11 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
         timeout,
         () =>
           push(
-            makeEnvelope('search.execute', randomUUID(), Date.now(), {
+            makeEnvelope('search.execute', activityId, Date.now(), {
               taskId,
+              activityId,
+              purpose: 'task_targeting',
+              scope: 'global',
               keyword: term,
               source: 'manager',
               ...(deps.sort ? { sort: deps.sort as never } : {}),

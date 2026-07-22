@@ -146,6 +146,15 @@ export interface EventMap {
   'session.ended': { stats: SessionStats };
   // targetId（change interaction-feed-enrichment）：展示账本去重键——笔记动作=noteId，关注=authorId。noteId 保留（喂 likedNoteStore）。
   'interaction.occurred': { action: 'view' | 'like' | 'collect' | 'follow' | 'comment' | 'comment_like' | 'join_group'; accountId?: string; noteId?: string; targetId?: string };
+  /** Platform-observed search fact; deliberately separate from note-scoped interaction accounting. */
+  'search.occurred': {
+    accountId?: string;
+    activityId: string;
+    purpose: 'discovery' | 'task_targeting' | 'operator';
+    scope: 'global' | 'container';
+    outcome: 'results_ready' | 'no_results' | 'failed_after_submit';
+    resultCount?: number;
+  };
   'concept.discovered': { concepts: string[]; source: string };
   // Edge 上报事件（handler → RoleDispatcher）
   // accountId 穿透握手事件（multi-account-node-support D4）：决策层据此设该连接当前账号，不再钉死 default。
@@ -162,7 +171,21 @@ export interface EventMap {
   'profile.detail.arrived': { detail: ProfileDetailData; accountId?: string; ts: number };
   // noteId/observation（change platform-browse-protocol）：边缘从被点 article 派生的规范 id + 独立见证包（现读被点卡）。
   // 归账仲裁（handler.ts）与迁移落地确认 / observedSurface 审计（dispatcher）消费；缺省=今天行为（回落 currentNoteId）。
-  'action.completed': { action: string; ok: boolean; reason?: string; ts: number; candidates?: CommentCandidate[]; noteId?: string; observation?: unknown };
+  'action.completed': {
+    action: string;
+    ok: boolean;
+    reason?: string;
+    ts: number;
+    candidates?: CommentCandidate[];
+    noteId?: string;
+    observation?: unknown;
+    activityId?: string;
+    purpose?: 'discovery' | 'task_targeting' | 'operator';
+    scope?: 'global' | 'container';
+    actuated?: boolean;
+    searchOutcome?: 'results_ready' | 'no_results' | 'failed_after_submit' | 'not_submitted';
+    resultCount?: number;
+  };
   // 会话控制事件
   'session.should_end': { reason: string; ts: number };
 }

@@ -13,6 +13,7 @@ import {
 } from '../../src/comment-agent/facebook-edge-steps.js';
 
 interface Env {
+  id: string;
   type: string;
   payload: Record<string, unknown>;
 }
@@ -52,6 +53,9 @@ describe('buildFacebookEdgeSteps', () => {
     assert.deepEqual(r.candidates.map((c) => c.permalink), ['https://fb.com/g/1/posts/2', 'https://fb.com/g/1/posts/3']);
     assert.equal(sent[0].payload.container, 'https://www.facebook.com/groups/1');
     assert.equal(sent[0].payload.keyword, '咖啡');
+    assert.equal(sent[0].payload.purpose, 'task_targeting');
+    assert.equal(sent[0].payload.scope, 'container');
+    assert.equal(sent[0].payload.activityId, sent[0].id);
   });
 
   it('search：诚实失败回执 action.completed{search} → ok:false + reason', async () => {
@@ -62,6 +66,24 @@ describe('buildFacebookEdgeSteps', () => {
     const r = await steps(bus, pusher).searchInContainer('咖啡', 'https://www.facebook.com/groups/1');
     assert.equal(r.ok, false);
     assert.equal(r.reason, 'login_required');
+  });
+
+  it('search：明确 no_results 回执 → ok:true + 空候选，不等待超时', async () => {
+    const bus = new EventBus();
+    const { pusher } = makePusher((env) => {
+      if (env.type === 'search.execute') {
+        bus.emit('action.completed', {
+          action: 'search',
+          ok: true,
+          activityId: env.payload.activityId,
+          searchOutcome: 'no_results',
+          ts: 0,
+        } as never);
+      }
+    });
+    const r = await steps(bus, pusher, 5000).searchInContainer('咖啡', 'https://www.facebook.com/groups/1');
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.candidates, []);
   });
 
   it('search：无在线边端（命中0）→ ok:false timeout', async () => {

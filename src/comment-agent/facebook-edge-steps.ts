@@ -110,6 +110,8 @@ interface ActionCompleted {
   action: string;
   ok: boolean;
   reason?: string;
+  activityId?: string;
+  searchOutcome?: 'results_ready' | 'no_results' | 'failed_after_submit' | 'not_submitted';
 }
 
 type AwaitEvent = 'page.cards.arrived' | 'note.detail.arrived' | 'action.completed';
@@ -163,6 +165,7 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
 
   return {
     async searchInContainer(keyword, container) {
+      const activityId = randomUUID();
       // 命中：page.cards.arrived（候选）或 action.completed{action:'search'}（诚实阻断/权限失败）。
       const outcome = await sendAndRace<
         { kind: 'cards'; cards: FacebookCandidate[]; containerName?: string } | { kind: 'fail'; reason: string }
@@ -186,13 +189,23 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
             event: 'action.completed',
             match: (data) => {
               const d = data as ActionCompleted;
-              if (d.action !== 'search') return undefined;
+              if (d.action !== 'search' || (d.activityId && d.activityId !== activityId)) return undefined;
+              if (d.ok && d.searchOutcome === 'no_results') return { kind: 'cards', cards: [] };
+              if (d.ok) return undefined;
               return { kind: 'fail', reason: d.reason ?? 'search_failed' };
             },
           },
         ],
         timeout,
-        () => push(makeEnvelope('search.execute', randomUUID(), Date.now(), { keyword, source: 'manager', container, ...(deps.taskId ? { taskId: deps.taskId } : {}) } as never)),
+        () => push(makeEnvelope('search.execute', activityId, Date.now(), {
+          activityId,
+          purpose: 'task_targeting',
+          scope: 'container',
+          keyword,
+          source: 'manager',
+          container,
+          ...(deps.taskId ? { taskId: deps.taskId } : {}),
+        } as never)),
       );
       if (outcome === null) {
         log.warn?.('[fb-edge-steps] search 超时/离线');

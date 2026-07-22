@@ -115,7 +115,7 @@ import { UiSnapshotService } from './comm/ui-snapshot.js';
 import { buildBrowserStandbyHint, resolveBrowserStandbyConfig } from './comm/browser-standby.js';
 // 客户端指标键清单的**单一来源**（change platform-honest-usage-metrics）：联集由它派生。
 // 别在本文件另写一份数组——那正是本 change 删掉的东西（加键时 typecheck 一声不吭）。
-import { UI_DAILY_USAGE_ACTIONS } from './comm/protocol.js';
+import { SEARCH_ACTIVITY_RECEIPT_CAPABILITY, UI_DAILY_USAGE_ACTIONS } from './comm/protocol.js';
 import type {
   UiDailyUsageAction,
   UiDailyUsageCounts,
@@ -1683,6 +1683,27 @@ async function main(): Promise<void> {
         });
     }
   });
+
+  // 搜索是账号级平台活动，但不是 note-scoped interaction；独立事实通道避免污染互动 feed/liked_notes。
+  eventBus.on('search.occurred', (evt) => {
+    if (!evt.accountId) {
+      console.warn('[aidcp-cloud] search.occurred 缺 accountId — 丢弃（honest-fail），绝不回落 default');
+      return;
+    }
+    const accountId = evt.accountId;
+    riskRegistry
+      .getController(accountId)
+      .then(async (controller) => {
+        const verdict = pacingAlerter && evt.purpose !== 'operator' ? controller.explain('search') : undefined;
+        await controller.record('search');
+        if (verdict && !verdict.allowed && pacingAlerter) {
+          if (verdict.reason === 'quota:hour' || verdict.reason === 'quota:minute') {
+            pacingAlerter.maybe(accountId, 'search', verdict.reason === 'quota:hour' ? 'hour' : 'minute');
+          }
+        }
+      })
+      .catch((err) => console.warn('[aidcp-cloud] search RiskController record error:', err));
+  });
   console.log('[aidcp-cloud] 事件订阅已建立（RiskController）');
 
   // 展示账本元数据（change interaction-feed-enrichment）：看到笔记/作者时独立 upsert 标题+链接，面板读时 LEFT JOIN。
@@ -3012,6 +3033,8 @@ async function main(): Promise<void> {
       hasInlineTargeting: () => (ctx.capabilities ?? []).includes('inline_targeting'),
       // Reel 关注版本偏斜闸：旧 Edge 没有 note-scoped follow 执行器时不掷骰、不下发。
       hasReelFollow: () => (ctx.capabilities ?? []).includes(FACEBOOK_REEL_FOLLOW_EDGE_CAPABILITY),
+      // 搜索事实版本偏斜闸：只有声明能力的新 Edge 才等待终态并延后概念词落态。
+      hasSearchActivityReceipt: () => (ctx.capabilities ?? []).includes(SEARCH_ACTIVITY_RECEIPT_CAPABILITY),
       // FB 每日在线时长预算（change account-nurture-discipline-spine §4.2）：全局每日时长未设(0)时 FB 账号
       // 回落非零安全日窗（养号「每天在线 0.5-6h」防长挂）。AIDCP_FB_DAILY_ONLINE_MIN 覆盖；缺/非法 → dispatcher 默认 360。
       facebookDailyOnlineMinutes:
@@ -3025,6 +3048,7 @@ async function main(): Promise<void> {
       // 互动前风控闸：按该连接真实账号的 controller 判定（不再钉死 default）。被拒诚实跳过。
       canInteract: (action) => ctx.controller.canDo(action),
       explainInteract: (action) => ctx.controller.explain(action),
+      explainSearch: () => ctx.controller.explain('search'),
       // 浏览前风控闸：view 配额耗尽时不再打开下一篇笔记，按窗口释放时间休眠后重驱。
       explainView: () => ctx.controller.explain('view'),
       // 评论人审端口（env 闸开启时注入；未开启 → 评论一律诚实跳过、不发）。

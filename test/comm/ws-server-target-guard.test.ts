@@ -15,6 +15,7 @@ import { EdgeCloudServer, makeEnvelope } from '../../src/comm/index.js';
 import type { MessageHandler, EdgeSession } from '../../src/comm/ws-server.js';
 import {
   CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY,
+  SEARCH_ACTIVITY_RECEIPT_CAPABILITY,
   type Envelope,
   type HelloPayload,
 } from '../../src/comm/protocol.js';
@@ -40,6 +41,50 @@ async function connectEdge(port: number, edgeId: string, accountId?: string, cap
   await once(ws, 'message'); // welcome：此时 edges 已登记
   return ws;
 }
+
+test('search.execute 真送达后按连接登记待决 activity，供终态关联校验', async () => {
+  let observed: { purpose: string; scope: string } | undefined;
+  let resolveObserved!: () => void;
+  const observedPromise = new Promise<void>((resolve) => {
+    resolveObserved = resolve;
+  });
+  const handler: MessageHandler = {
+    handle(env: Envelope, session: EdgeSession): Envelope | null {
+      if (env.type === 'hello') {
+        const p = env.payload as HelloPayload;
+        session.edgeId = p.edgeId;
+        session.accountId = p.accountId;
+        session.capabilities = p.capabilities;
+        return makeEnvelope('welcome', env.id, 0, { sessionId: session.sessionId, serverVersion: 't' });
+      }
+      if (env.type === 'action.completed') {
+        observed = session.pendingSearchActivities?.get('activity-search');
+        resolveObserved();
+      }
+      return null;
+    },
+  };
+  const s = new EdgeCloudServer({ handler, port: 0, clock: () => 0 });
+  await s.start();
+  const ws = await connectEdge(s.address()!, 'edge-search', 'acc-search', [SEARCH_ACTIVITY_RECEIPT_CAPABILITY]);
+  const command = makeEnvelope('search.execute', 'search-env', 0, {
+    activityId: 'activity-search',
+    purpose: 'task_targeting',
+    scope: 'container',
+    keyword: '咖啡',
+    container: 'https://www.facebook.com/groups/1',
+  });
+  assert.equal(s.pushToEdges(command, 'edge-search'), 1);
+  await once(ws, 'message');
+  ws.send(JSON.stringify(makeEnvelope('action.completed', 'search-receipt', 1, {
+    action: 'search', ok: true, activityId: 'activity-search', purpose: 'task_targeting', scope: 'container',
+    actuated: true, searchOutcome: 'results_ready', resultCount: 1,
+  })));
+  await observedPromise;
+  assert.deepEqual(observed, { purpose: 'task_targeting', scope: 'container' });
+  ws.close();
+  await s.close();
+});
 
 test('失败 hello 即使已写入账号/能力也不登记在线路由，并在 error 后关闭', async () => {
   const failedHello: MessageHandler = {

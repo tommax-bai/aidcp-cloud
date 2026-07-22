@@ -15,6 +15,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import {
   CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY,
+  SEARCH_ACTIVITY_RECEIPT_CAPABILITY,
   makeEnvelope,
   parseEnvelope,
   type Envelope,
@@ -53,6 +54,13 @@ export interface EdgeSession {
    * 不回落 currentNoteId）。缺省=不声明（老边端），feed-surface 拒记账闸对其不启用。
    */
   capabilities?: string[];
+  /** Search activities actually sent on this connection and awaiting one terminal receipt. */
+  pendingSearchActivities?: Map<string, {
+    purpose: 'discovery' | 'task_targeting' | 'operator';
+    scope: 'global' | 'container';
+  }>;
+  /** Search terminal IDs consumed on this connection; bounded by the handler. */
+  completedSearchActivityIds?: Set<string>;
   /**
    * 最近一批 page.cards 快照（change platform-browse-protocol）：note-scoped 互动回执带独立见证 observation 时，
    * 云端据此逐字段比对选中卡是否即实际被点 article（信息流就地点赞防点错卡）。详情页/无 observation 时不消费。
@@ -263,6 +271,26 @@ export class EdgeCloudServer implements EdgePusher {
       if (!bypassPause && conn.session.edgeId && this.pausedEdges.has(conn.session.edgeId)) continue;
       if (conn.ws.readyState === WebSocket.OPEN) {
         conn.ws.send(frame);
+        if (outbound.type === 'search.execute' && (conn.session.capabilities ?? []).includes(SEARCH_ACTIVITY_RECEIPT_CAPABILITY)) {
+          const payload = outbound.payload as Record<string, unknown>;
+          const activityId = typeof payload.activityId === 'string' && payload.activityId.trim()
+            ? payload.activityId.trim()
+            : outbound.id;
+          const hasContainer = typeof payload.container === 'string' && payload.container.trim().length > 0;
+          const purpose = payload.purpose === 'operator' || payload.purpose === 'task_targeting'
+            ? payload.purpose
+            : hasContainer ? 'task_targeting' : 'discovery';
+          const scope = payload.scope === 'container' || (payload.scope !== 'global' && hasContainer)
+            ? 'container'
+            : 'global';
+          const pending = conn.session.pendingSearchActivities ??= new Map();
+          if (pending.size >= 256 && !pending.has(activityId)) {
+            const oldest = pending.keys().next().value as string | undefined;
+            if (oldest) pending.delete(oldest);
+            console.warn(`[ws-server] pending search 已达 256，淘汰最旧关联 activityId=${oldest ?? '-'}`);
+          }
+          pending.set(activityId, { purpose, scope });
+        }
         sent++;
       }
     }

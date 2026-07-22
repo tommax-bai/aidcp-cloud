@@ -4,8 +4,8 @@
  * 守护点（change: wire-concept-pool-search-intelligence）：
  *   1. 关键词来自「seed_keywords ∪ 概念池 candidates」，不再仅 6 个写死种子词；
  *   2. search.execute 的 source 如实标注来源（new_concept / random_from_interests）；
- *   3. 搜索前两道闸（预算 + 限频）生效，被拦时诚实跳过——不下发、不扣 budget、不 markSearched（红线：不假成功）；
- *   4. 已搜关键词跨会话不重复（markSearched → known → 候选集排除）。
+ *   3. 搜索前三道闸（账号风险 + 预算 + 限频）生效，被拦时诚实跳过；
+ *   4. 新 Edge 只在 actuated 回执后 markSearched，旧 Edge 保持下发后标记的兼容行为。
  *
  * 环境层级：离线 / 逻辑级（无外部依赖；桩 LLM + 桩 ConceptStore，不接 PG）。
  */
@@ -111,9 +111,9 @@ describe('AC-SEARCH 概念池驱动的搜索智能', () => {
     assert.equal(skipped!.reason, 'no_available_keywords');
   });
 
-  // ─── RoleDispatcher：搜索前两道闸 ─────────────────────────────────
+  // ─── RoleDispatcher：搜索前三道闸 + 执行事实 ───────────────────────
 
-  function setupDispatcher() {
+  function setupDispatcher(options: { capable?: boolean; searchAllowed?: boolean } = {}) {
     const commands: EdgeCommand[] = [];
     const marked: string[] = [];
     const bus = new EventBus();
@@ -129,6 +129,10 @@ describe('AC-SEARCH 概念池驱动的搜索智能', () => {
       sendCommand: (c) => commands.push(c),
       conceptStore,
       clock: () => 0,
+      hasSearchActivityReceipt: () => options.capable ?? false,
+      explainSearch: () => options.searchAllowed === false
+        ? { allowed: false, reason: 'quota:day' }
+        : { allowed: true },
     });
     d.setup();
     d.startSession(); // 指令翻译接线随会话激活进行（multi-account：setup 不再接线）
@@ -172,5 +176,52 @@ describe('AC-SEARCH 概念池驱动的搜索智能', () => {
 
     assert.equal(searchCmds(commands).length, 1, '同词第二次应被限频闸拦下，仅下发一次');
     assert.deepEqual(marked, ['RAG 实战'], '仅第一次通过时 markSearched');
+  });
+
+  it('AC-SEARCH-08 新 Edge 下发只记尝试，actuated=true 终态后才 markSearched', async () => {
+    const { bus, commands, marked } = setupDispatcher({ capable: true });
+
+    bus.emit('search.approved', { keyword: '向量数据库', reason: 'r', currentPageType: 'feed', source: 'new_concept', ts: 0 });
+
+    const command = searchCmds(commands)[0];
+    assert.equal(command.params?.purpose, 'discovery');
+    assert.equal(command.params?.scope, 'global');
+    assert.equal(typeof command.params?.activityId, 'string');
+    assert.deepEqual(marked, [], '仅下发不得把概念词标成已搜');
+
+    bus.emit('action.completed', {
+      action: 'search', ok: true, actuated: true, searchOutcome: 'results_ready',
+      activityId: command.params!.activityId as string, purpose: 'discovery', scope: 'global', resultCount: 2, ts: 1,
+    });
+    await Promise.resolve();
+    assert.deepEqual(marked, ['向量数据库']);
+
+    bus.emit('action.completed', {
+      action: 'search', ok: true, actuated: true, searchOutcome: 'results_ready',
+      activityId: command.params!.activityId as string, purpose: 'discovery', scope: 'global', resultCount: 2, ts: 2,
+    });
+    await Promise.resolve();
+    assert.deepEqual(marked, ['向量数据库'], '重复终态不得重复标记');
+  });
+
+  it('AC-SEARCH-09 新 Edge 未提交终态不 markSearched', async () => {
+    const { bus, commands, marked } = setupDispatcher({ capable: true });
+    bus.emit('search.approved', { keyword: 'LLM Agent', reason: 'r', currentPageType: 'feed', ts: 0 });
+    const activityId = searchCmds(commands)[0].params!.activityId as string;
+
+    bus.emit('action.completed', {
+      action: 'search', ok: false, actuated: false, searchOutcome: 'not_submitted',
+      activityId, purpose: 'discovery', scope: 'global', ts: 1,
+    });
+    await Promise.resolve();
+    assert.deepEqual(marked, []);
+  });
+
+  it('AC-SEARCH-10 账号风险闸拒绝时不下发、不扣尝试、不 markSearched', () => {
+    const { bus, commands, marked } = setupDispatcher({ capable: true, searchAllowed: false });
+    bus.emit('search.approved', { keyword: 'LLM Agent', reason: 'r', currentPageType: 'feed', ts: 0 });
+    assert.equal(searchCmds(commands).length, 0);
+    assert.deepEqual(marked, []);
+    assert.ok(commands.some((c) => c.action === 'scroll' && c.reason === 'feed_scroll'));
   });
 });

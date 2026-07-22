@@ -14,6 +14,7 @@
 import {
   CLIENT_CORE_BROWSER_EXECUTOR_CAPABILITY,
   CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY,
+  SEARCH_ACTIVITY_RECEIPT_CAPABILITY,
   makeEnvelope,
   type Envelope,
   type SelectRequestPayload,
@@ -640,7 +641,62 @@ export class DefaultMessageHandler implements MessageHandler {
           ...rawResult,
           action: normalizeActionCompletedAction(rawResult.action),
         };
-        this.bus(session).emit('action.completed', { ...result, ts: this.clock() });
+        let emitActionCompleted = true;
+        if (result.action === 'search' && (session.capabilities ?? []).includes(SEARCH_ACTIVITY_RECEIPT_CAPABILITY)) {
+          const activityId = typeof result.activityId === 'string' ? result.activityId.trim() : '';
+          const outcome = result.searchOutcome;
+          if (!activityId) {
+            this.logger.warn('[comm] search action.completed 缺 activityId — 不记平台事实（honest-fail）');
+            emitActionCompleted = false;
+          } else if (outcome === 'results_ready' || outcome === 'no_results' || outcome === 'failed_after_submit' || outcome === 'not_submitted') {
+            const completed = session.completedSearchActivityIds ??= new Set<string>();
+            if (completed.has(activityId)) {
+              this.logger.warn(`[comm] search action.completed 重复 activityId=${activityId} — 不重复记账`);
+              emitActionCompleted = false;
+            } else {
+              const pending = session.pendingSearchActivities;
+              const expected = pending?.get(activityId);
+              if (!expected) {
+                this.logger.warn(`[comm] search action.completed 未知 activityId=${activityId} — 不记平台事实`);
+                emitActionCompleted = false;
+              } else {
+                pending!.delete(activityId);
+                if (completed.size >= 256) {
+                  const oldest = completed.values().next().value as string | undefined;
+                  if (oldest) completed.delete(oldest);
+                }
+                completed.add(activityId);
+                const purposeMatches = result.purpose === undefined || result.purpose === expected.purpose;
+                const scopeMatches = result.scope === undefined || result.scope === expected.scope;
+                const resultCountValid = result.resultCount === undefined
+                  || (Number.isInteger(result.resultCount) && result.resultCount >= 0);
+                const terminalValid =
+                  ((outcome === 'results_ready' || outcome === 'no_results') && result.ok === true && result.actuated === true)
+                  || (outcome === 'failed_after_submit' && result.ok === false && result.actuated === true)
+                  || (outcome === 'not_submitted' && result.ok === false && result.actuated === false);
+                if (!purposeMatches || !scopeMatches || !resultCountValid || !terminalValid) {
+                  this.logger.warn(`[comm] search action.completed 矛盾终态 activityId=${activityId} — 已消费但不记平台事实`);
+                  emitActionCompleted = false;
+                } else if (result.actuated === true && outcome !== 'not_submitted') {
+                  this.bus(session).emit('search.occurred', {
+                    accountId: session.accountId,
+                    activityId,
+                    purpose: expected.purpose,
+                    scope: expected.scope,
+                    outcome,
+                    ...(result.resultCount !== undefined
+                      ? { resultCount: result.resultCount }
+                      : {}),
+                  });
+                }
+              }
+            }
+          } else {
+            this.logger.warn(`[comm] search action.completed 非法/缺失 searchOutcome activityId=${activityId || '-'} — 不记平台事实`);
+            emitActionCompleted = false;
+          }
+        }
+        if (emitActionCompleted) this.bus(session).emit('action.completed', { ...result, ts: this.clock() });
         // 真实发生的动作 → 驱动 RiskController 按账号计数（record 订在 interaction.occurred）。
         // 判据分两轴（change fb-join-quota-counts-attempts）：
         //   · like/collect/follow/comment/comment_like —— ok=true 才算真实互动（already_followed 是良性 no-op，不计）。
@@ -735,6 +791,9 @@ export class DefaultMessageHandler implements MessageHandler {
         : []),
       ...((session.capabilities ?? []).includes(CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY)
         ? [CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY]
+        : []),
+      ...((session.capabilities ?? []).includes(SEARCH_ACTIVITY_RECEIPT_CAPABILITY)
+        ? [SEARCH_ACTIVITY_RECEIPT_CAPABILITY]
         : []),
       ...(this.deps.interactionInbox
         ? [
