@@ -263,8 +263,8 @@ test('评论点赞择选（comment_like_appraiser）→ 已注册即 available:t
   assert.equal(v.prompt, 'RENDERED-COMMENT-LIKE');
 });
 
-test('评论点赞择选未注册（开关关）→ available:false 诚实标注，不崩', () => {
-  const p = createRolePromptProvider(() => []); // 未注册（AIDCP_COMMENT_LIKE 关）
+test('评论点赞择选未注册 → available:false 诚实标注，不崩', () => {
+  const p = createRolePromptProvider(() => []);
   const v = p.get('browse:comment_like_appraiser');
   assert.equal(v.available, false);
   assert.match(v.note, /暂不支持预览/);

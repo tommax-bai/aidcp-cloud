@@ -492,9 +492,14 @@ test('AI timeout returns explainable fail-closed fallbacks and never emits an em
   assert.equal(reviewer.value.riskLevel, 'unknown');
 });
 
-test('DM AI defaults off and no private-message body reaches classifier, polisher or reviewer', async () => {
+test('DM AI follows the published channel policy without a hidden global gate', async () => {
   let calls = 0;
-  const ai = new ReplyAiService({ complete: async () => { calls += 1; throw new Error('must_not_call'); } }, 100);
+  const outputs = [
+    { role: 'reply_intent_classifier', intent: 'unknown', confidence: 1, riskTags: [], reasons: [] },
+    { role: 'reply_polisher', polishedText: '你好 小王，我们已收到。', meaningChanged: false, introducedClaims: [], riskTags: [] },
+    { role: 'reply_risk_reviewer', riskLevel: 'low', riskTags: [], reasons: [], allowAutoSend: true },
+  ];
+  const ai = new ReplyAiService({ complete: async () => { calls += 1; return JSON.stringify(outputs.shift()); } }, 100);
   const config = snapshot();
   config.templates = [{ ...template, templateId: 'dm-safe', channel: 'dm', content: '你好 {{ user_name }}，我们已收到。',
     variables: ['user_name'] }];
@@ -503,11 +508,10 @@ test('DM AI defaults off and no private-message body reaches classifier, polishe
     actions: { templateId: 'dm-safe', polish: true, allowAutoSend: true, forceHumanTags: [] } }];
   const workflow = new ReplyWorkflow({} as InteractionStore, {} as ReplyConfigStore, ai);
   const preview = await workflow.buildPreview(config, { ...inbound, channel: 'dm', text: '我的订单和手机号是……' }, null);
-  assert.equal(calls, 0);
+  assert.equal(calls, 3);
   assert.equal(preview.finalText, '你好 小王，我们已收到。');
-  assert.equal(preview.riskLevel, 'unknown');
-  assert.equal(preview.requiresApproval, true);
-  assert.deepEqual(preview.reviewReasons, ['dm_ai_disabled']);
+  assert.equal(preview.riskLevel, 'low');
+  assert.deepEqual(preview.reviewReasons, []);
 });
 
 test('explicit support-channel template prefers account contact and preserves its guidance line', async () => {

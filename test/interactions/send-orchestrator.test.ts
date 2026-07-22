@@ -174,7 +174,7 @@ test('reviewed sends bypass login cooldown and generic quota-only denial but ret
   );
 });
 
-test('auto admission needs no hidden account allowlist but still requires the configured login cooldown', async () => {
+test('auto admission ignores stale account allowlists and generic quota but still requires login cooldown', async () => {
   const automatic = context('approval_required');
   automatic.job.approvalActor = null;
   const autoConfig = config();
@@ -208,7 +208,7 @@ test('auto admission needs no hidden account allowlist but still requires the co
     pusher: {} as EdgePusher,
     controllerFor: () => ({ explain: () => ({ allowed: false, reason: 'quota:day' }), record: async () => true }),
     metrics: new InteractionMetrics(), globalWriteEnabled: true,
-    clock: () => now,
+    env: { AIDCP_INTERACTION_AUTO_ACCOUNT_ALLOWLIST: 'some-other-account' }, clock: () => now,
   });
   assert.equal(await sender.canAutoQueueDraft(automatic, autoConfig, preview), false);
   activeSince = now - 700_000;
@@ -279,7 +279,7 @@ test('pre-dispatch auto recheck blocks ungrounded AI claims before creating an a
     pusher: {} as EdgePusher,
     controllerFor: () => ({ explain: () => ({ allowed: true }), record: async () => true }),
     metrics: new InteractionMetrics(), globalWriteEnabled: true,
-    clock: () => now,
+    env: { AIDCP_INTERACTION_AUTO_ACCOUNT_ALLOWLIST: '' }, clock: () => now,
   });
 
   await assert.rejects(

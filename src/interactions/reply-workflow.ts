@@ -99,7 +99,6 @@ function preservesProtectedLines(candidateText: string, protectedLines: string[]
 
 export class ReplyWorkflow {
   private readonly requestId: () => string;
-  private readonly dmAiEnabled: boolean;
   private readonly accountNameFor: (accountId: string) => string | null | undefined | Promise<string | null | undefined>;
   private readonly contactInfoFor: (accountId: string) => string | null | undefined | Promise<string | null | undefined>;
   private readonly canAutoQueue: (
@@ -114,8 +113,6 @@ export class ReplyWorkflow {
     private readonly ai: ReplyAiService,
     options: {
       requestId?: () => string;
-      /** Global privacy gate; false means no DM body is sent to any AI role. */
-      dmAiEnabled?: boolean;
       canAutoQueue?: (
         context: ScopedJobContext,
         snapshot: ReplyConfigSnapshot,
@@ -126,7 +123,6 @@ export class ReplyWorkflow {
     } = {},
   ) {
     this.requestId = options.requestId ?? randomUUID;
-    this.dmAiEnabled = options.dmAiEnabled ?? false;
     this.accountNameFor = options.accountNameFor ?? (() => null);
     this.contactInfoFor = options.contactInfoFor ?? (() => null);
     this.canAutoQueue = options.canAutoQueue ?? (async () => false);
@@ -233,14 +229,9 @@ export class ReplyWorkflow {
   ): Promise<ReplyPreviewResult> {
     const profile = profileFor(snapshot, inbound.channel);
     if (!profile) throw new InteractionError('INTERACTION_CONFIG_MISSING', '缺少渠道 profile。', 422);
-    // 冻结约束：私信 AI 默认为关闭；关闭时不得把私信正文发给任何模型角色。
-    const aiAllowed = inbound.channel !== 'dm' || this.dmAiEnabled;
-    const classifier = aiAllowed
-      ? await this.ai.classify({
-        role: 'reply_intent_classifier', requestId: this.requestId(), accountId: snapshot.accountId, inbound,
-      })
-      : { value: { role: 'reply_intent_classifier' as const, intent: 'unknown' as const, confidence: 0,
-        riskTags: ['unknown'] as RiskTag[], reasons: ['dm_ai_disabled'] }, fallback: 'none' as const };
+    const classifier = await this.ai.classify({
+      role: 'reply_intent_classifier', requestId: this.requestId(), accountId: snapshot.accountId, inbound,
+    });
     const rule = matchReplyRule(snapshot, { inbound, intent: classifier.value.intent, sourceExternalId });
     const template = rule ? templateFor(snapshot, rule) : null;
     if (!rule || !template) {
@@ -268,7 +259,7 @@ export class ReplyWorkflow {
       throw new InteractionError('INTERACTION_VALIDATION_FAILED',
         `模板渲染失败：${error instanceof Error ? error.message : 'unknown'}`, 422);
     }
-    const polish = aiAllowed && rule.actions.polish && snapshot.policy.channels[inbound.channel].aiPolishEnabled
+    const polish = rule.actions.polish && snapshot.policy.channels[inbound.channel].aiPolishEnabled
       ? await this.ai.polish({
         role: 'reply_polisher', requestId: this.requestId(), accountId: snapshot.accountId, inbound,
         intent: classifier.value.intent,
@@ -282,7 +273,7 @@ export class ReplyWorkflow {
       })
       : { value: { role: 'reply_polisher' as const, polishedText: rendered, meaningChanged: false,
         introducedClaims: [], riskTags: [] as RiskTag[] }, fallback: 'none' as const };
-    const aiPolishInvoked = aiAllowed && rule.actions.polish && snapshot.policy.channels[inbound.channel].aiPolishEnabled;
+    const aiPolishInvoked = rule.actions.polish && snapshot.policy.channels[inbound.channel].aiPolishEnabled;
     const polishedCandidate = polish.value.polishedText;
     const candidateIssues = validateFinalReplyText(profile, polishedCandidate);
     const protectedLines = renderedSupportChannelLines(template, rendered);
@@ -306,15 +297,12 @@ export class ReplyWorkflow {
       deterministicTags.push('unknown');
     }
     deterministicTags.push(...deterministicClaimTags(candidate));
-    const reviewer = aiAllowed
-      ? await this.ai.review({
-        role: 'reply_risk_reviewer', requestId: this.requestId(), accountId: snapshot.accountId, inbound,
-        renderedText: rendered, candidateText: candidate, meaningChanged: polish.value.meaningChanged,
-        introducedClaims: polish.value.introducedClaims,
-        policy: { mode: snapshot.policy.mode, hardRiskTags: [...HARD_RISK_TAGS] },
-      })
-      : { value: { role: 'reply_risk_reviewer' as const, riskLevel: 'unknown' as const,
-        riskTags: ['unknown'] as RiskTag[], reasons: ['dm_ai_disabled'], allowAutoSend: false }, fallback: 'none' as const };
+    const reviewer = await this.ai.review({
+      role: 'reply_risk_reviewer', requestId: this.requestId(), accountId: snapshot.accountId, inbound,
+      renderedText: rendered, candidateText: candidate, meaningChanged: polish.value.meaningChanged,
+      introducedClaims: polish.value.introducedClaims,
+      policy: { mode: snapshot.policy.mode, hardRiskTags: [...HARD_RISK_TAGS] },
+    });
     const fallbackRisk = classifier.fallback !== 'none' || polisherFallback !== 'none' || reviewer.fallback !== 'none'
       ? ['unknown'] as RiskTag[] : [];
     const collectedTags = uniqueTags(classifier.value.riskTags, polish.value.riskTags, reviewer.value.riskTags,
@@ -412,15 +400,12 @@ export class ReplyWorkflow {
         issues: deterministicIssues,
       });
     }
-    const reviewer = context.thread.channel !== 'dm' || this.dmAiEnabled
-      ? await this.ai.review({
-        role: 'reply_risk_reviewer', requestId: this.requestId(), accountId: input.accountId,
-        inbound: inboundOf(context), renderedText: context.job.renderedText ?? '', candidateText: text,
-        meaningChanged: text !== context.job.renderedText, introducedClaims: [],
-        policy: { mode: snapshot.policy.mode, hardRiskTags: [...HARD_RISK_TAGS] },
-      })
-      : { value: { role: 'reply_risk_reviewer' as const, riskLevel: 'unknown' as const,
-        riskTags: ['unknown'] as RiskTag[], reasons: ['dm_ai_disabled'], allowAutoSend: false }, fallback: 'none' as const };
+    const reviewer = await this.ai.review({
+      role: 'reply_risk_reviewer', requestId: this.requestId(), accountId: input.accountId,
+      inbound: inboundOf(context), renderedText: context.job.renderedText ?? '', candidateText: text,
+      meaningChanged: text !== context.job.renderedText, introducedClaims: [],
+      policy: { mode: snapshot.policy.mode, hardRiskTags: [...HARD_RISK_TAGS] },
+    });
     const tags = uniqueTags(reviewer.value.riskTags, reviewer.fallback === 'none' ? [] : ['unknown']);
     const job = await this.store.transitionJob({
       ...input, from: ['approval_required'], to: 'approval_required',

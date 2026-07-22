@@ -162,8 +162,6 @@ function makeHarness(opts: {
     pauseAccount: async (accountId, reason) => {
       paused.push(`${accountId}:${reason}`);
     },
-    autoEnabled: () => opts.auto ?? false,
-    shadow: () => opts.shadow ?? false,
     stepTimeoutMs: 20,
     logger: { warn: () => {}, log: () => {} },
   });
@@ -171,19 +169,13 @@ function makeHarness(opts: {
 }
 
 describe('FacebookGroupJoinScheduler', () => {
-  it('default-off: auto/shadow 都未开时不 claim、不下发', async () => {
-    const h = makeHarness();
-    const r = await h.scheduler.triggerScheduled('acc-fb');
-    assert.equal(r.triggered, false);
-    assert.equal(r.reason, 'disabled');
-    assert.deepEqual(h.sent, []);
-    assert.deepEqual(h.membershipCalls, []);
-  });
-
-  it('shadow: 只 observe + judge + audit，不 claim membership', async () => {
+  it('旧 auto/shadow 环境值不再阻断账号级加群调度', async () => {
+    const previousAuto = process.env.AIDCP_FB_GROUP_JOIN_AUTO;
+    const previousShadow = process.env.AIDCP_FB_GROUP_JOIN_SHADOW;
+    process.env.AIDCP_FB_GROUP_JOIN_AUTO = 'false';
+    process.env.AIDCP_FB_GROUP_JOIN_SHADOW = 'false';
     const h = makeHarness({
-      shadow: true,
-      llmVerdicts: ['{"verdict":"instant_join","confidence":0.9,"reason":"visible join"}'],
+      llmVerdicts: ['{"verdict":"gated_skip","confidence":0.9,"reason":"approval required"}'],
       edge: (env, bus) => {
         bus.emit('action.completed', {
           action: 'join_group',
@@ -191,18 +183,22 @@ describe('FacebookGroupJoinScheduler', () => {
           reason: 'observation_only',
           groupUrl: env.payload.groupUrl,
           clicked: false,
-          observation: { groupUrl: env.payload.groupUrl, mainCtaText: 'Join group' },
+          observation: { groupUrl: env.payload.groupUrl, mainCtaText: 'Request to join' },
           ts: 0,
         } as never);
       },
     });
-    const r = await h.scheduler.triggerScheduled('acc-fb');
-    assert.equal(r.triggered, true);
-    assert.equal(r.outcome, 'instant_join');
-    assert.equal(h.sent[0].type, 'group.join');
-    assert.equal(h.sent[0].payload.click, false);
-    assert.deepEqual(h.membershipCalls, []);
-    assert.ok(h.auditRows.some((row) => row.shadow === true && row.verdict === 'instant_join'));
+    try {
+      const r = await h.scheduler.triggerScheduled('acc-fb');
+      assert.equal(r.triggered, true);
+      assert.equal(r.outcome, 'gated_skip');
+      assert.equal(h.sent[0].type, 'group.join');
+    } finally {
+      if (previousAuto === undefined) delete process.env.AIDCP_FB_GROUP_JOIN_AUTO;
+      else process.env.AIDCP_FB_GROUP_JOIN_AUTO = previousAuto;
+      if (previousShadow === undefined) delete process.env.AIDCP_FB_GROUP_JOIN_SHADOW;
+      else process.env.AIDCP_FB_GROUP_JOIN_SHADOW = previousShadow;
+    }
   });
 
   it('real: pre-click gated verdict 写 membership gated + target gated，不点击', async () => {
@@ -541,14 +537,6 @@ describe('FacebookGroupJoinScheduler', () => {
     assert.deepEqual(h.sent, []);
     assert.deepEqual(h.membershipCalls, []);
     assert.deepEqual(h.targetCalls, []);
-  });
-
-  it('joinSpecificGroup kill switch 关（auto/shadow 皆 off）→ disabled，绝不越闸', async () => {
-    const h = makeHarness({ auto: false });
-    const r = await h.scheduler.joinSpecificGroup('acc-fb', SPEC_URL, { manual: true });
-    assert.equal(r.triggered, false);
-    assert.equal(r.reason, 'disabled');
-    assert.deepEqual(h.sent, []);
   });
 
   it('joinSpecificGroup 非 Facebook 账号 → not_facebook_account', async () => {

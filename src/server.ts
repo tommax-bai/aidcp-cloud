@@ -837,24 +837,22 @@ async function main(): Promise<void> {
     console.warn('[aidcp-cloud] LikedNoteStore 初始化失败，来源血缘退化:', (err as Error).message);
   }
 
-  // 优质评论语料库（valuable_comments 表，comment-like-on-detail B）。仅特性开启时建表/接线；
+  // 优质评论语料库（valuable_comments 表，comment-like-on-detail B）。
   // init 失败留 undefined（语料库退化：不归档、撰写不注入参考，不崩闭环）。
   let valuableCommentStore: ValuableCommentStore | undefined;
-  if (process.env.AIDCP_COMMENT_LIKE === 'true') {
-    try {
-      const vs = new ValuableCommentStore({
-        host: readEnvString('PGHOST'),
-        port: readEnvPort('PGPORT'),
-        database: readEnvString('PGDATABASE'),
-        user: readEnvString('PGUSER'),
-        password: readEnvString('PGPASSWORD'),
-      });
-      await vs.init();
-      valuableCommentStore = vs;
-      console.log('[aidcp-cloud] ValuableCommentStore 已就绪（valuable_comments 表）');
-    } catch (err) {
-      console.warn('[aidcp-cloud] ValuableCommentStore 初始化失败，评论语料库退化:', (err as Error).message);
-    }
+  try {
+    const vs = new ValuableCommentStore({
+      host: readEnvString('PGHOST'),
+      port: readEnvPort('PGPORT'),
+      database: readEnvString('PGDATABASE'),
+      user: readEnvString('PGUSER'),
+      password: readEnvString('PGPASSWORD'),
+    });
+    await vs.init();
+    valuableCommentStore = vs;
+    console.log('[aidcp-cloud] ValuableCommentStore 已就绪（valuable_comments 表）');
+  } catch (err) {
+    console.warn('[aidcp-cloud] ValuableCommentStore 初始化失败，评论语料库退化:', (err as Error).message);
   }
 
   // 通知联系人名册（notification-contact-registry，迁移 0016）：记录给本账号发过通知的人（评论/@/点赞/收藏/关注）。
@@ -1460,7 +1458,6 @@ async function main(): Promise<void> {
       interactionAiTimeoutMs,
     );
     replyWorkflow = new ReplyWorkflow(interactionStore, replyConfigResolver, replyAi, {
-      dmAiEnabled: readEnvString('AIDCP_INTERACTION_DM_AI_ENABLED')?.toLocaleLowerCase() === 'true',
       accountNameFor: accountDisplayName,
       ...(accountStore?.getContactInfo ? {
         contactInfoFor: (accountId: string) => accountStore!.getContactInfo!(accountId),
@@ -3459,13 +3456,8 @@ async function main(): Promise<void> {
     resolveApprovalMode: resolveEffectiveCommentApprovalMode,
     onTakeoverStart: onCommentTakeoverStart,
     onTakeoverEnd: onCommentTakeoverEnd,
-    // ── facebook-scheduled-comment 2.2/2.3：FB 定向评论执行（影子先行；kill switch 默认关；真发边端能力待接入） ──
+    // ── Facebook 定向评论：账号配置与结构化审批策略授权，风险/限速/验证继续 fail-closed。 ──
     facebookConfigFor: (accountId) => facebookCommentConfigStore.effectiveConfigFor(accountId),
-    facebookAutoEnabled: () => readEnvString('AIDCP_FB_COMMENT_AUTO') === 'true',
-    facebookShadow: () => readEnvString('AIDCP_FB_COMMENT_SHADOW') === 'true',
-    // 人审全量闸（change facebook-comment-review-and-targeted-join）：默认开（!== 'false'）→ 不带联系方式的 FB 评论也走飞书人审；
-    // 只有显式 AIDCP_FB_COMMENT_REVIEW_ALL=false 才恢复「校验后直发」旧行为。注意与 auto 的 ==='true' 语义相反（这项默认开）。
-    facebookCommentReviewAll: () => readEnvString('AIDCP_FB_COMMENT_REVIEW_ALL') !== 'false',
     facebookCompose: async (accountId, { keyword, postText, comments }) => {
       // 读了再写（change facebook-comment-read-before-write）：撰写器吃到帖子正文（图片帖常空）+ 顶部他人评论，
       // 顺着讨论、用**内容语言**写（图片群里内容多是当地语言，而本号 FB 界面可能是中文——绝不跟界面语言）。
@@ -3577,8 +3569,6 @@ async function main(): Promise<void> {
     logger: console,
   });
 
-  const facebookGroupJoinAutoEnabled = (): boolean => readEnvString('AIDCP_FB_GROUP_JOIN_AUTO') === 'true';
-  const facebookGroupJoinShadow = (): boolean => readEnvString('AIDCP_FB_GROUP_JOIN_SHADOW') === 'true';
   const facebookGroupJoinScheduler = new FacebookGroupJoinScheduler({
     resolveConnection: (accountId) => runtimes?.runtimeForAccount(accountId) ?? null,
     pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
@@ -3597,8 +3587,6 @@ async function main(): Promise<void> {
       await accountState.pause(accountId);
       console.warn(`[fb-group-join] account paused account=${accountId} reason=${reason}`);
     },
-    autoEnabled: facebookGroupJoinAutoEnabled,
-    shadow: facebookGroupJoinShadow,
     retryBackoffMs: readEnvNumber('AIDCP_FB_GROUP_JOIN_RETRY_BACKOFF_HOURS', 6) * 60 * 60 * 1000,
     maxAttempts: Math.max(1, Math.trunc(readEnvNumber('AIDCP_FB_GROUP_JOIN_MAX_ATTEMPTS', 3))),
     logger: console,
@@ -3640,9 +3628,8 @@ async function main(): Promise<void> {
 
     // ── 内容排期调度器（change content-schedule-auto-publish，Phase 1 只发帖）────────────────
     // 每分钟心跳、按账号扇出、分钟错峰；到点只产草稿→飞书人审→approved 才发（AC-PUB 不动）。
-    // 与旧 AIDCP_PUBLISH_AUTO 单账号扳机**无条件互斥**：内容排期开则旧扳机确定性不启（防错时双触发→同日双草稿超发），不留 fallback。
-    const contentScheduleAutoOn = readEnvString('AIDCP_CONTENT_SCHEDULE_AUTO') === 'true';
-    if (contentScheduleAutoOn && deploymentTarget) {
+    // 调度器在合法执行目标上常驻；账号周历/动作开关默认关闭并承担产品授权。
+    if (deploymentTarget) {
       const contentScheduler: ContentScheduler = new ContentScheduler({
         onlineAccounts: () => runtimes?.onlineAccountIdentities() ?? [],
         executionTarget: deploymentTarget,
@@ -3833,10 +3820,7 @@ async function main(): Promise<void> {
         triggerJoin: (accountId: string) => facebookGroupJoinScheduler.triggerScheduled(accountId),
         isJoinBusy: (accountId: string) => facebookGroupJoinScheduler.isRunning(accountId),
         joinedTodayCount: (accountId: string) => facebookGroupMembershipStore.countJoinedToday(accountId),
-        joinDailyCap: async (accountId: string) => {
-          if (!facebookGroupJoinAutoEnabled() && !facebookGroupJoinShadow()) return 0;
-          return (await resolveController(accountId)).effectiveQuotas().day.join_group;
-        },
+        joinDailyCap: async (accountId: string) => (await resolveController(accountId)).effectiveQuotas().day.join_group,
         joinAutomationFor: (accountId: string) => facebookGroupJoinAutomationStore.getForAccount(accountId),
         /**
          * 本小时格的有界重试用尽 → 发**一张**放弃卡（change browser-slot-scheduling）。
@@ -3869,25 +3853,12 @@ async function main(): Promise<void> {
       });
       contentSchedulerRef = contentScheduler; // 供评论管线回流「没开始」，见 onScheduledTaskNotStarted
       contentScheduler.start(60_000);
-      console.log('[aidcp-cloud] ContentScheduler 已启动（每分钟心跳、按账号错峰；旧 AIDCP_PUBLISH_AUTO 扳机已被互斥关闭）');
-      if (readEnvString('AIDCP_PUBLISH_AUTO') === 'true') {
-        console.warn('[aidcp-cloud] ⚠️ AIDCP_PUBLISH_AUTO=true 被忽略：内容排期调度器已接管自动发帖（互斥，防错时双触发）');
-      }
-    } else if (contentScheduleAutoOn) {
+      console.log('[aidcp-cloud] ContentScheduler 已启动（每分钟心跳、按账号错峰；账号配置为唯一产品授权）');
+    } else {
       console.warn(
         `[aidcp-cloud] ContentScheduler 未启动：AIDCP_DEPLOY_ENV=${JSON.stringify(readEnvString('AIDCP_DEPLOY_ENV') ?? null)} ` +
-          '不是 dev/ol，自动发帖执行环境无法安全盖章；旧自动扳机仍保持互斥关闭',
+          '不是 dev/ol，自动执行环境无法安全盖章',
       );
-    } else if (readEnvString('AIDCP_PUBLISH_AUTO') === 'true') {
-      // 旧单账号自动扳机（内容排期未开时保持原行为，零回归）。
-      const everyMin = Number(process.env.AIDCP_PUBLISH_AUTO_INTERVAL_MIN ?? 30);
-      setInterval(() => {
-        publishScheduler!.checkAndMaybeTrigger().then(
-          (o) => o.result !== 'skipped' && console.log(`[aidcp-cloud] PublishScheduler auto: ${o.result} (${o.reason})`),
-          (err) => console.warn('[aidcp-cloud] PublishScheduler auto error:', err),
-        );
-      }, everyMin * 60_000);
-      console.log(`[aidcp-cloud] PublishScheduler 自动扳机已开启（每 ${everyMin} 分钟）`);
     }
     // Mock 触发（仅 AIDCP_MOCK_PUBLISH=true；无飞书时驱动一次发帖，诊断/联调用）：
     // 监视信号文件 → 等价飞书 /publish 的 triggerManual(forced)；文件触发后即删避免重复。

@@ -657,8 +657,6 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
         commentMode: over.commentMode ?? 'generated',
         commentTemplates: over.commentTemplates ?? [],
       }),
-      facebookAutoEnabled: () => over.auto ?? false,
-      facebookShadow: () => over.shadow ?? false,
       facebookCompose: async () => (over.compose === undefined ? '这家手冲咖啡很不错' : over.compose),
       facebookCanComment: async () => over.canComment ?? true,
       facebookDailyCap: () => over.cap ?? 5,
@@ -670,20 +668,28 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
   }
   const tick = () => new Promise((r) => setTimeout(r, 15));
 
-  it('影子模式：只读浏览（搜+开帖）+撰写+校验通过 → 审计 shadow_ok，但绝不下发提交命令', async () => {
-    const { deps, audits, posted } = fbDeps({ shadow: true });
-    const r = await new CommentScheduler(deps).triggerManual('fb-1');
-    assert.equal(r.ok, true);
-    await tick();
-    assert.equal(audits.at(-1)?.outcome, 'shadow_ok');
-    assert.equal(audits.at(-1)?.shadow, true);
-    // 读了再写：影子会搜+开帖（只读），但绝不下发 interaction.comment（不提交）。
-    assert.deepEqual(posted, ['search.execute', 'note.open']);
-    assert.ok(!posted.includes('interaction.comment'), '影子绝不下发提交命令');
+  it('旧 FB 自动/影子环境值不再静默关闭账号评论链', async () => {
+    const previousAuto = process.env.AIDCP_FB_COMMENT_AUTO;
+    const previousShadow = process.env.AIDCP_FB_COMMENT_SHADOW;
+    process.env.AIDCP_FB_COMMENT_AUTO = 'false';
+    process.env.AIDCP_FB_COMMENT_SHADOW = 'false';
+    try {
+      const { deps, audits, posted } = fbDeps();
+      const r = await new CommentScheduler(deps).triggerManual('fb-1');
+      assert.equal(r.ok, true);
+      await tick();
+      assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
+      assert.equal(audits.at(-1)?.outcome, 'commented');
+    } finally {
+      if (previousAuto === undefined) delete process.env.AIDCP_FB_COMMENT_AUTO;
+      else process.env.AIDCP_FB_COMMENT_AUTO = previousAuto;
+      if (previousShadow === undefined) delete process.env.AIDCP_FB_COMMENT_SHADOW;
+      else process.env.AIDCP_FB_COMMENT_SHADOW = previousShadow;
+    }
   });
 
   it('无 eligible joined group → fail-closed 审计 no_targets，浏览前即停、不发', async () => {
-    const { deps, audits, posted } = fbDeps({ shadow: true, containers: [] });
+    const { deps, audits, posted } = fbDeps({ containers: [] });
     await new CommentScheduler(deps).triggerManual('fb-1');
     await tick();
     assert.equal(audits[0].outcome, 'no_targets');
@@ -691,7 +697,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
   });
 
   it('校验器拒（含链接）→ 审计 compose_skipped（只拒不修），绝不提交', async () => {
-    const { deps, audits, posted } = fbDeps({ shadow: true, compose: '好文 https://spam.example 推荐' });
+    const { deps, audits, posted } = fbDeps({ compose: '好文 https://spam.example 推荐' });
     await new CommentScheduler(deps).triggerManual('fb-1');
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
@@ -700,7 +706,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
   });
 
   it('撰写为空 → compose_skipped(empty_compose)，绝不提交', async () => {
-    const { deps, audits, posted } = fbDeps({ shadow: true, compose: null });
+    const { deps, audits, posted } = fbDeps({ compose: null });
     await new CommentScheduler(deps).triggerManual('fb-1');
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
@@ -708,18 +714,10 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
     assert.ok(!posted.includes('interaction.comment'));
   });
 
-  it('kill switch 全关（auto=false, shadow=false）→ 静默不跑、无审计、不发', async () => {
-    const { deps, audits, posted } = fbDeps({ auto: false, shadow: false });
-    await new CommentScheduler(deps).triggerManual('fb-1');
-    await tick();
-    assert.deepEqual(audits, []);
-    assert.deepEqual(posted, []);
-  });
-
   // 注：以下两个 quota_denied 测试**不带** manualOverride → 模型的是「自动排期评论」路径（ContentScheduler 的 priority:automatic 调用），
   // 此路径配额闸照旧。飞书手动 /comment 由 server.ts 显式带 manualOverride:true（见下方 change manual-comment-bypass-quota 用例）。
   it('真发路径 canDo 拒 → quota_denied，不发（自动路径：无 manualOverride）', async () => {
-    const { deps, audits, posted } = fbDeps({ auto: true, shadow: false, canComment: false });
+    const { deps, audits, posted } = fbDeps({ canComment: false });
     await new CommentScheduler(deps).triggerManual('fb-1');
     await tick();
     assert.equal(audits[0].outcome, 'quota_denied');
@@ -728,7 +726,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
   });
 
   it('真发路径日上限满 → quota_denied(daily_cap)（自动路径：无 manualOverride）', async () => {
-    const { deps, audits } = fbDeps({ auto: true, shadow: false, cap: 2, done: 2 });
+    const { deps, audits } = fbDeps({ cap: 2, done: 2 });
     await new CommentScheduler(deps).triggerManual('fb-1');
     await tick();
     assert.equal(audits[0].outcome, 'quota_denied');
@@ -738,7 +736,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
   // 回归：自动排期评论调用形态（ContentScheduler 传 priority:'automatic'、绝不带 manualOverride，见 server.ts）→ 配额闸照旧生效。
   // 钉死不变量「只有飞书手动出口带 override」：若哪天 auto caller 误带了旗标，此断言会红。
   it('自动调用形态（priority:automatic 无 manualOverride）→ canDo 拒仍 quota_denied，不发', async () => {
-    const { deps, audits, posted } = fbDeps({ auto: true, shadow: false, canComment: false });
+    const { deps, audits, posted } = fbDeps({ canComment: false });
     await new CommentScheduler(deps).triggerManual('fb-1', { priority: 'automatic' });
     await tick();
     assert.equal(audits[0].outcome, 'quota_denied');
@@ -870,8 +868,6 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
         commentTemplates: cfg.commentTemplates ?? [],
         ...(cfg.coverageRelaxed ? { relaxed: true } : {}),
       }),
-      facebookAutoEnabled: () => true,
-      facebookShadow: () => false,
       facebookResolveContainerName: async (_acct: string, url: string, name: string) => {
         resolvedNames.push({ url, name });
       },
@@ -966,7 +962,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.equal(base.dedupRecorded.length, 0, '未提交 → 不打去重（可重试）');
   });
 
-  // ── Feature A（change facebook-comment-review-and-targeted-join）：所有 FB 评论走飞书人审（默认开、可 env 关） ──
+  // ── Feature A：所有 FB 评论按结构化账号/来源策略审批，环境变量不能放宽 ──
   it('Feature A 默认开：非联系评论也需人审——审批口未接线 → 不提交（compose_skipped/approval_rejected_or_timeout），绝不裸发', async () => {
     const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true } });
     await new CommentScheduler({ ...deps, approval: undefined }).triggerManual('fb-1');
@@ -976,12 +972,19 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.ok(!posted.includes('interaction.comment'), '未接线人审 → 绝不提交评论');
   });
 
-  it('Feature A 逃生门：AIDCP_FB_COMMENT_REVIEW_ALL=false → 非联系评论校验后直发、无人审、commented', async () => {
+  it('旧 AIDCP_FB_COMMENT_REVIEW_ALL=false 不能关闭人审', async () => {
+    const previous = process.env.AIDCP_FB_COMMENT_REVIEW_ALL;
+    process.env.AIDCP_FB_COMMENT_REVIEW_ALL = 'false';
     const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true } });
-    await new CommentScheduler({ ...deps, approval: undefined, facebookCommentReviewAll: () => false }).triggerManual('fb-1');
-    await tick();
-    assert.equal(audits.at(-1)?.outcome, 'commented');
-    assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
+    try {
+      await new CommentScheduler({ ...deps, approval: undefined }).triggerManual('fb-1');
+      await tick();
+      assert.equal(audits.at(-1)?.reason, 'approval_rejected_or_timeout');
+      assert.deepEqual(posted, ['search.execute', 'note.open']);
+    } finally {
+      if (previous === undefined) delete process.env.AIDCP_FB_COMMENT_REVIEW_ALL;
+      else process.env.AIDCP_FB_COMMENT_REVIEW_ALL = previous;
+    }
   });
 
   it('Feature A 红线：manualOverride 只绕配额、绝不绕人审——无 approval 仍不提交', async () => {
@@ -1481,13 +1484,18 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
   });
 
-  it('手动 override 不越权 kill switch：普通 /comment + manualOverride 但 AIDCP_FB_COMMENT_AUTO 关 → 仍静默 no-op（红线：override 只绕配额、不绕 kill switch）', async () => {
+  it('普通 /comment 不再被旧 AIDCP_FB_COMMENT_AUTO=false 静默 no-op', async () => {
+    const previous = process.env.AIDCP_FB_COMMENT_AUTO;
+    process.env.AIDCP_FB_COMMENT_AUTO = 'false';
     const { deps, posted } = fbFlowDeps({ submit: { ok: true } });
-    await new CommentScheduler({ ...deps, facebookAutoEnabled: () => false, facebookShadow: () => false }).triggerManual('fb-1', {
-      manualOverride: true,
-    });
-    await tick();
-    assert.deepEqual(posted, [], 'manualOverride 绕的是配额闸；kill switch 关时普通 FB 评论仍不跑（红线保留）');
+    try {
+      await new CommentScheduler(deps).triggerManual('fb-1', { manualOverride: true });
+      await tick();
+      assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
+    } finally {
+      if (previous === undefined) delete process.env.AIDCP_FB_COMMENT_AUTO;
+      else process.env.AIDCP_FB_COMMENT_AUTO = previous;
+    }
   });
 
   it('手动 --join：manual 旗标透传加群调度器 + 群内评论侧亦跳过配额（整条链一致，change manual-comment-bypass-quota）', async () => {
@@ -1508,28 +1516,26 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
   });
 
-  it('加群评论 override 强制真发：kill switch AIDCP_FB_COMMENT_AUTO 关也评论（人工授权），仍过校验/确认', async () => {
+  it('加群评论按人工授权真发并仍过校验/确认', async () => {
     const JOINED = 'https://www.facebook.com/groups/joined-y';
     const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true } });
     const cards: Array<{ level: string }> = [];
     await new CommentScheduler({
       ...deps,
-      facebookAutoEnabled: () => false, // 无人值守 kill switch 关
-      facebookShadow: () => false,
       facebookJoinNewGroup: async () => ({ triggered: true, outcome: 'joined', groupUrl: JOINED }),
       postResultCard: (_a, r) => { cards.push({ level: r.level }); },
     }).triggerManual('fb-1', { joinFirst: true });
     await tick();
-    assert.equal(audits.at(-1)?.outcome, 'commented', 'override 人工授权路径不受无人值守 kill switch 影响');
+    assert.equal(audits.at(-1)?.outcome, 'commented');
     assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
     assert.equal(cards.at(-1)?.level, 'success');
   });
 
-  it('bypass 是范围内的：普通 /comment（无 --join）在 kill switch 关时仍静默 no-op', async () => {
+  it('普通 /comment（无 --join）按结构化审批策略运行', async () => {
     const { deps, posted } = fbFlowDeps({ submit: { ok: true } });
-    await new CommentScheduler({ ...deps, facebookAutoEnabled: () => false, facebookShadow: () => false }).triggerManual('fb-1');
+    await new CommentScheduler(deps).triggerManual('fb-1');
     await tick();
-    assert.deepEqual(posted, [], 'kill switch 关 → 普通 FB 评论不跑（只有 --join 的 pin 容器路径放宽）');
+    assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
   });
 
   it('加群评论：非会员结局（gated_skip）→ 不评论、诚实黄卡、不下发任何评论命令', async () => {
@@ -1566,7 +1572,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.doesNotMatch(cards.at(-1)!.message, /没有可加入的新群目标/);
   });
 
-  it('加群评论：加群未开启（disabled）→ 不评论、诚实卡指向 AIDCP_FB_GROUP_JOIN_AUTO', async () => {
+  it('加群评论：账号配置未开启（disabled）→ 不评论、诚实卡指向账号配置', async () => {
     const { deps, posted } = fbFlowDeps({ submit: { ok: true } });
     const cards: Array<{ message: string }> = [];
     await new CommentScheduler({
@@ -1576,7 +1582,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     }).triggerManual('fb-1', { joinFirst: true });
     await tick();
     assert.deepEqual(posted, []);
-    assert.match(cards.at(-1)!.message, /AIDCP_FB_GROUP_JOIN_AUTO/);
+    assert.match(cards.at(-1)!.message, /账号自动加群配置未开启/);
   });
 
   it('加群评论 --contact：正文过无人值守校验、联系方式经人审以 groupChatCode 下发、合并卡标「带联系方式」', async () => {

@@ -33,8 +33,6 @@ export interface FacebookGroupJoinSchedulerDeps {
   recordSessionJoin?: (accountId: string, edgeId?: string) => boolean | Promise<boolean>;
   isFacebookAccount?: (accountId: string) => boolean | Promise<boolean>;
   pauseAccount?: (accountId: string, reason: string) => Promise<void> | void;
-  autoEnabled?: () => boolean;
-  shadow?: () => boolean;
   retryBackoffMs?: number;
   maxAttempts?: number;
   stepTimeoutMs?: number;
@@ -119,8 +117,8 @@ export class FacebookGroupJoinScheduler {
    * @param opts.manual 手动操作员命令（飞书 `/comment --join`）：**跳过节奏 / 风控配额闸**——
    *   canJoin（风控状态 restricted/frozen + 日/时/分速率配额）与 canUseSessionJoin（本场会话加群额度）均不拦。
    *   人工授权即全权（用户定案 2026-07-10：手动命令不受配额限制、硬风控状态也强行执行），与已无配额闸的手动
-   *   XHS `/comment` 对齐。仍守物理 / 正确性闸：非 FB 账号 / 边端离线 / 单飞 running / 无目标 no_targets /
-   *   kill switch disabled / 影子 shadow。自动巡回（triggerJoin）不传 opts → manual=false → 配额闸照旧。
+   *   XHS `/comment` 对齐。仍守物理 / 正确性闸：非 FB 账号 / 边端离线 / 单飞 running / 无目标 no_targets。
+   *   自动巡回（triggerJoin）不传 opts → manual=false → 配额闸照旧。
    *   成功后仍照常 recordSessionJoin（账本诚实、绝不因绕闸而漏计，供自动巡回后续 pacing 取真实数）。
    */
   async triggerScheduled(accountId: string, opts?: { manual?: boolean }): Promise<FacebookGroupJoinTriggerResult> {
@@ -134,18 +132,13 @@ export class FacebookGroupJoinScheduler {
       if (this.deps.isFacebookAccount && !(await this.deps.isFacebookAccount(accountId))) {
         return { triggered: false, reason: 'not_facebook_account' };
       }
-      const shadow = this.deps.shadow?.() ?? false;
-      const autoEnabled = this.deps.autoEnabled?.() ?? false;
-      if (!shadow && !autoEnabled) return { triggered: false, reason: 'disabled' };
-      this.triggerSources.set(accountId, shadow ? 'shadow' : manual ? 'manual_pool' : 'scheduled');
+      this.triggerSources.set(accountId, manual ? 'manual_pool' : 'scheduled');
 
       const conn = this.deps.resolveConnection(accountId);
       if (!conn || !conn.edgeId) {
-        await this.audit({ accountId, outcome: 'join_failed', phase: 'scheduler', reason: 'edge_offline', shadow });
+        await this.audit({ accountId, outcome: 'join_failed', phase: 'scheduler', reason: 'edge_offline', shadow: false });
         return { triggered: false, reason: 'edge_offline' };
       }
-
-      if (shadow) return await this.runShadow(accountId, conn.bus, conn.edgeId, gear);
 
       // 手动命令跳过配额闸（含风控状态 + 速率 + 会话额度）；自动巡回照旧受闸。
       if (!manual) {
@@ -167,7 +160,7 @@ export class FacebookGroupJoinScheduler {
 
   /**
    * 加入**指定 url** 的群，只归该账号（change facebook-comment-review-and-targeted-join，`/comment --join=<url>`）。
-   * 守 triggerScheduled 同序物理闸：account_required / url 合法 / 单飞 running / 非 FB / kill switch(disabled) / edge_offline；
+   * 守 triggerScheduled 同序物理闸：account_required / url 合法 / 单飞 running / 非 FB / edge_offline；
    * **绕**配额闸（canJoin 风控速率状态 + 会话额度，人工授权，与 --join manual 契约一致，成功仍照记 recordSessionJoin，账本不漏）。
    * 已是成员（账本 status='joined'）→ already_member 快路，不走边端回合。
    * url 非法 → invalid_group_url；群已归属别的账号 → owned_by_other_account（诚实，绝不冒充成员评论）。
@@ -188,31 +181,15 @@ export class FacebookGroupJoinScheduler {
       if (this.deps.isFacebookAccount && !(await this.deps.isFacebookAccount(accountId))) {
         return { triggered: false, reason: 'not_facebook_account' };
       }
-      const shadow = this.deps.shadow?.() ?? false;
-      const autoEnabled = this.deps.autoEnabled?.() ?? false;
-      if (!shadow && !autoEnabled) return { triggered: false, reason: 'disabled' };
-      this.triggerSources.set(accountId, shadow ? 'shadow' : 'manual_specific');
+      this.triggerSources.set(accountId, 'manual_specific');
 
       const conn = this.deps.resolveConnection(accountId);
       if (!conn || !conn.edgeId) {
-        await this.audit({ accountId, groupUrl, outcome: 'join_failed', phase: 'scheduler', reason: 'edge_offline', shadow });
+        await this.audit({ accountId, groupUrl, outcome: 'join_failed', phase: 'scheduler', reason: 'edge_offline', shadow: false });
         return { triggered: false, reason: 'edge_offline' };
       }
       const bus = conn.bus;
       const edgeId = conn.edgeId;
-
-      if (shadow) {
-        const observed = await this.deps.edgeTaskLeases.withLease(
-          { edgeId, kind: 'group_join', priority: gear, leaseMs: 3 * 60_000 },
-          (lease) => this.steps(bus, edgeId, lease.taskId).observeGroup(groupUrl),
-        );
-        if (!observed.observation) {
-          await this.audit({ accountId, groupUrl, outcome: outcomeForReason(observed.reason), phase: 'shadow', shadow: true, reason: observed.reason ?? 'no_observation' });
-          return { triggered: true, groupUrl, outcome: observed.reason ?? 'no_observation' };
-        }
-        const verdict = await this.judge(accountId).evaluatePreClick(observed.observation);
-        return { triggered: true, groupUrl, outcome: verdict.verdict };
-      }
 
       // 手动指定群：绕配额闸（canJoin + 会话额度），只守物理闸。先 ensureTarget（enabled=false 兜 FK、绝不外泄），再认领本账号成员行。
       await this.deps.targets.ensureTarget(groupUrl);
@@ -234,32 +211,6 @@ export class FacebookGroupJoinScheduler {
       this.triggerSources.delete(accountId);
       this.running.delete(accountId);
     }
-  }
-
-  private async runShadow(accountId: string, bus: EventBus, edgeId: string, gear: EdgeTaskPriority): Promise<FacebookGroupJoinTriggerResult> {
-    const target = await this.deps.targets.nextJoinCandidate(accountId);
-    if (!target) {
-      await this.audit({ accountId, outcome: 'no_targets', phase: 'shadow', shadow: true, reason: 'no_candidate' });
-      return { triggered: false, reason: 'no_targets' };
-    }
-    const observed = await this.deps.edgeTaskLeases.withLease(
-      { edgeId, kind: 'group_join', priority: gear, leaseMs: 3 * 60_000 },
-      (lease) => this.steps(bus, edgeId, lease.taskId).observeGroup(target.groupUrl),
-    );
-    const observation = observed.observation;
-    if (!observation) {
-      await this.audit({
-        accountId,
-        groupUrl: target.groupUrl,
-        outcome: outcomeForReason(observed.reason),
-        phase: 'shadow',
-        shadow: true,
-        reason: observed.reason ?? 'no_observation',
-      });
-      return { triggered: true, groupUrl: target.groupUrl, outcome: observed.reason ?? 'no_observation' };
-    }
-    const verdict = await this.judge(accountId).evaluatePreClick(observation);
-    return { triggered: true, groupUrl: target.groupUrl, outcome: verdict.verdict };
   }
 
   private async runReal(accountId: string, bus: EventBus, edgeId: string, gear: EdgeTaskPriority): Promise<FacebookGroupJoinTriggerResult> {

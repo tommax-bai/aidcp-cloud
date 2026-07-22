@@ -96,7 +96,7 @@ export function joinOnlyReceipt(join: {
   if (!join.triggered) {
     switch (join.reason) {
       case 'disabled':
-        return { ok: false, level: 'warning', title: '未加群', message: '自动加群功能未开启（AIDCP_FB_GROUP_JOIN_AUTO=false）；未加群也未评论。' };
+        return { ok: false, level: 'warning', title: '未加群', message: '账号自动加群配置未开启；未加群也未评论。' };
       case 'edge_offline':
         return { ok: false, level: 'error', title: '未加群', message: '该账号暂无在线边端；未加群也未评论。' };
       case 'running':
@@ -261,16 +261,6 @@ export interface CommentSchedulerDeps {
   // ── facebook-scheduled-comment 2.2/2.3：Facebook 定向评论执行（缺省全不注入 → FB 分支继续诚实拒绝，零回归） ──
   /** 读该账号 FB 定向评论配置（关键词 + 正文模式 / 模板；目标群由 joined ledger 另选）。 */
   facebookConfigFor?: (accountId: string) => EffectiveFacebookCommentConfig;
-  /** kill switch（AIDCP_FB_COMMENT_AUTO）：默认关；关且非影子 → 整条 FB 评论不跑。 */
-  facebookAutoEnabled?: () => boolean;
-  /** 影子模式（AIDCP_FB_COMMENT_SHADOW）：跑选词+撰写+校验+审计，但绝不提交、不记风控/冷却。 */
-  facebookShadow?: () => boolean;
-  /**
-   * 人审全量闸（AIDCP_FB_COMMENT_REVIEW_ALL !== 'false'，change facebook-comment-review-and-targeted-join）：
-   * 默认 true → 不带联系方式的 FB 评论也走飞书人审；显式 'false' 恢复旧行为（校验后直发）。缺省未注入 → 视为 true（默认开）。
-   * 影子仍在人审前 short-circuit；manualOverride 只绕配额、绝不绕人审（人是刹车）。
-   */
-  facebookCommentReviewAll?: () => boolean;
   /**
    * FB 评论撰写（无人值守，不走人审）：**读了再写**（change facebook-comment-read-before-write）——
    * 按关键词/容器 + **帖子正文（图片帖常空）+ 顶部他人评论** 产草稿，顺着讨论、用**内容语言**写；返回 null=撰写失败。
@@ -553,8 +543,7 @@ export class CommentScheduler {
           ),
         )
         .finally(() => this.running.delete(accountId));
-      const mode = this.deps.facebookShadow?.() ? '影子模式（不真发）' : '真发（按风控/冷却/上限闸）';
-      return { ok: true, level: 'success', title: '已触发 Facebook 定向评论', message: `已触发 Facebook 定向评论 · ${mode}${options?.force ? ' · --force（跳过相关性/去重）' : ''}；结果稍后回报` };
+      return { ok: true, level: 'success', title: '已触发 Facebook 定向评论', message: `已触发 Facebook 定向评论 · 按账号审批/风控/冷却/上限执行${options?.force ? ' · --force（跳过相关性/去重）' : ''}；结果稍后回报` };
     }
 
     this.running.add(accountId);
@@ -693,8 +682,7 @@ export class CommentScheduler {
           ),
         )
         .finally(() => this.running.delete(accountId));
-      const mode = this.deps.facebookShadow?.() ? '影子模式（不真发）' : '真发（按风控/冷却/上限闸）';
-      return { ok: true, level: 'success', title: '已触发 Facebook 定向评论', message: `已触发 Facebook 定向评论 · ${mode}；结果稍后回报` };
+      return { ok: true, level: 'success', title: '已触发 Facebook 定向评论', message: '已触发 Facebook 定向评论 · 按账号审批/风控/冷却/上限执行；结果稍后回报' };
     }
 
     this.running.add(accountId);
@@ -730,8 +718,7 @@ export class CommentScheduler {
   /**
    * Facebook 定向评论执行（facebook-scheduled-comment 2.2/2.3 + 真发接线 task 4.x）。
    * 闸链 → 随机选关键词/容器 → 撰写 → 只拒不修校验：
-   * - 影子模式（AIDCP_FB_COMMENT_SHADOW）到「校验通过」即止步，**绝不提交、不记风控/冷却/去重**（物理发不出评论）。
-   * - 真发路径（kill switch AIDCP_FB_COMMENT_AUTO 开且非影子）：过 canDo + 日上限闸后，经边端评论能力真发——
+   * - 真发路径：过账号审批策略、canDo + 日上限闸后，经边端评论能力真发——
    *   容器内搜索 → 选未评候选 → 开帖 → 提交并「服务器确认」。每步有界超时（此路径无巡视看门狗）。
    *
    * 红线：
@@ -801,15 +788,8 @@ export class CommentScheduler {
   ): Promise<void> {
     const d = this.deps;
     const rand = d.random ?? Math.random;
-    // 加群评论 override（change facebook-manual-join-comment）：容器 = 人工授权「刚加入的群」→ **强制真发**，
-    // 绕过无人值守 kill switch / 影子（AIDCP_FB_COMMENT_AUTO / SHADOW）；否则「加了群却静默不评论」= 静默假成功红线。
-    // 仍守：硬校验 / 服务器确认 / canDo+日上限 / --contact 人审 / 单飞。普通 /comment 路径 manualTarget=undefined、行为不变。
     const manualTarget = options.overrideContainerUrl?.trim() || undefined;
-    const shadow = manualTarget ? false : (d.facebookShadow?.() ?? false);
-    const autoEnabled = manualTarget ? true : (d.facebookAutoEnabled?.() ?? false);
-
-    // kill switch：既未开真发、也未开影子 → 整条功能关闭，静默不跑（不产审计噪音）。override 强制真发，此闸恒不触发。
-    if (!autoEnabled && !shadow) return;
+    const shadow = false;
 
     const cfg = d.facebookConfigFor!(accountId);
     if (cfg.keywords.length === 0) {
@@ -969,7 +949,7 @@ export class CommentScheduler {
             return;
           }
 
-          // 4a) 联系方式 fail-closed（在影子闸前）：--contact 但账号没配联系方式 → 诚实退，绝不发无码评论。
+          // 4a) 联系方式 fail-closed：--contact 但账号没配联系方式 → 诚实退，绝不发无码评论。
           let groupChatCode: string | undefined;
           let contactInfo: string | null = null;
           if (options.injectContact) {
@@ -980,31 +960,19 @@ export class CommentScheduler {
             }
           }
 
-          // 5) 影子：只读浏览 + 撰写 + 校验到此为止——绝不提交、不记风控/冷却、不按已发去重，也**绝不打扰人审**（永不发的干跑不发卡）。
-          if (shadow) {
-            audit({ accountId, outcome: 'shadow_ok', shadow: true, keyword, container, textLength: v.text.length });
+          // 5) 结构化账号/来源审批策略是唯一审批授权；未接线/超时/拒绝均不提交。
+          const approved = await this.approveFacebookComment(accountId, {
+            permalink: target,
+            text: v.text,
+            ...(contactInfo ? { contactInfo } : {}),
+            container,
+            ...(usingCoverage && coverageCfg?.relaxed ? { coverageRelaxed: true } : {}),
+          }, options.approvalMode, options.originChatId);
+          if (!approved) {
+            audit({ accountId, outcome: 'compose_skipped', reason: 'approval_rejected_or_timeout', shadow: false, keyword, container, textLength: v.text.length });
             return;
           }
-
-          // 5a) 人审闸（change facebook-comment-review-and-targeted-join）：带联系方式一律必审；不带联系方式在
-          // 人审全量闸（AIDCP_FB_COMMENT_REVIEW_ALL，默认开）下也必审。未接线/超时/拒 → 诚实退、绝不裸发、不打去重。
-          // manualOverride 只绕配额（见上），**绝不**在此绕人审——人是刹车。持锁不释放，浏览器停在目标帖等待人审。
-          const reviewAll = d.facebookCommentReviewAll?.() ?? true;
-          if (options.injectContact || reviewAll) {
-            const approved = await this.approveFacebookComment(accountId, {
-              permalink: target,
-              text: v.text,
-              ...(contactInfo ? { contactInfo } : {}),
-              container,
-              // 放开时限兜底选出的覆盖群 → 审核卡标注「未满足冷却/预热」交人把关。手动 pin 群路径 coverageCfg 为空、绝不标注。
-              ...(usingCoverage && coverageCfg?.relaxed ? { coverageRelaxed: true } : {}),
-            }, options.approvalMode, options.originChatId);
-            if (!approved) {
-              audit({ accountId, outcome: 'compose_skipped', reason: 'approval_rejected_or_timeout', shadow: false, keyword, container, textLength: v.text.length });
-              return;
-            }
-            if (contactInfo) groupChatCode = approved.contactInfo;
-          }
+          if (contactInfo) groupChatCode = approved.contactInfo;
 
           // 6) 提交评论 + 服务器确认（边端 own-identity 收窄）。成功记风控走 interaction.occurred 自动路径，绝不在此重复 record。
           // 提交被更高优先级任务抢占 / 边端失配 taskId 静默丢弃 → submitComment 超时回 ok:false → 走 else 诚实非提交（不打去重、可重试）。

@@ -1338,10 +1338,6 @@ export class RoleDispatcher {
       llm: accountBoundLlm,
       platformProfile: commentProfileForPlatform(this.accountPlatform),
     };
-    // 详情页「评论点赞」特性总开关（默认关；线上灰度时置 AIDCP_COMMENT_LIKE=true）。
-    // 关闭时：既不注册 CommentLikeAppraiser、也不接线 comment_like.intended 下发——彻底惰性。
-    const commentLikeEnabled = process.env.AIDCP_COMMENT_LIKE === 'true';
-
     // 数据访问闭包
     const getNoteData = (noteId: string) =>
       this.currentNote?.noteId === noteId ? this.currentNote : null;
@@ -1423,20 +1419,16 @@ export class RoleDispatcher {
         now: this.clock,
         isCommentSublineExpired: (noteId) => this.isCommentSublineExpired(noteId),
       }),
-      // —— 评论点赞（comment-like-on-detail，默认关）：自有单航班，结合正文偶尔给一条评论点赞 ——
-      ...(commentLikeEnabled
-        ? [
-            new CommentLikeAppraiser({
-              ...commonOptions,
-              getNoteData,
-              getRemainingCommentLikes: () => this.budget.comment_likes,
-              getSessionLikeCounts: () => this.sessionLikeCounts(),
-              ...(this.getCommentLikeDailyRemaining ? { getCommentLikeDailyRemaining: this.getCommentLikeDailyRemaining } : {}),
-            }),
-          ]
-        : []),
-      // 优质评论归档（语料库 B）：仅在特性开 + 归档闭包就绪时注册；只在 comment_like.confirmed 上落库。
-      ...(commentLikeEnabled && this.archiveValuableComment
+      // —— 评论点赞（comment-like-on-detail）：自有单航班，结合正文偶尔给一条评论点赞 ——
+      new CommentLikeAppraiser({
+        ...commonOptions,
+        getNoteData,
+        getRemainingCommentLikes: () => this.budget.comment_likes,
+        getSessionLikeCounts: () => this.sessionLikeCounts(),
+        ...(this.getCommentLikeDailyRemaining ? { getCommentLikeDailyRemaining: this.getCommentLikeDailyRemaining } : {}),
+      }),
+      // 优质评论归档（语料库 B）：归档闭包就绪时注册；只在 comment_like.confirmed 上落库。
+      ...(this.archiveValuableComment
         ? [new ValuableCommentArchivist({ ...commonOptions, getNoteData, archive: this.archiveValuableComment })]
         : []),
       // ProfileOpener 只订 profile.worth_visiting（本人昵称采集走独立的 profile_open{direct}、不经此角色）⇒ 平台不访主页时
@@ -1514,18 +1506,15 @@ export class RoleDispatcher {
           ...(this.textCardTranscriber ? { textCardTranscriber: this.textCardTranscriber } : {}),
         }),
       );
-      // 评论评估角色仅在评论赞链路开启时注册——其源事件 comment_like.confirmed 仅该链路产出。
-      if (commentLikeEnabled) {
-        this.roles.push(
-          new CuratedCommentEvaluator({
-            ...commonOptions,
-            curatedStore: store,
-            getNoteData,
-            getAccountId: () => this.currentAccountId,
-            llmEvalEnabled,
-          }),
-        );
-      }
+      this.roles.push(
+        new CuratedCommentEvaluator({
+          ...commonOptions,
+          curatedStore: store,
+          getNoteData,
+          getAccountId: () => this.currentAccountId,
+          llmEvalEnabled,
+        }),
+      );
     }
 
     // 引流线索自动触发（change feed-hot-lead-auto-group-comment）：接稿件价值判定之后（订阅 quality.pass + note.detail.arrived）。

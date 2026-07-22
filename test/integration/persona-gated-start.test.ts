@@ -41,25 +41,18 @@ test('未绑人设的真实账号握手 → 诚实拒绝：不启动会话、置
   d.endSession();
 });
 
-test('评论点赞开启时无人设 XHS/FB 的 dispatcher setup 不提前读取人设，连接可先 welcome 再弹引导', () => {
-  const previous = process.env.AIDCP_COMMENT_LIKE;
-  process.env.AIDCP_COMMENT_LIKE = 'true';
-  try {
-    const d = new RoleDispatcher({
-      getSoul: () => { throw new Error('no_persona'); },
-      llm: { complete: async () => '-1' },
-      sendCommand: () => {},
-      accountPlatform: 'xiaohongshu',
-      isPersonaBound: () => false,
-    });
-    assert.doesNotThrow(() => d.setup(), '构造/订阅阶段不得读取人设');
-    d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'acct-no-persona', ts: 1 });
-    assert.equal(d.active, false, '无人设只阻止业务会话，不破坏 transport');
-    d.endSession();
-  } finally {
-    if (previous === undefined) delete process.env.AIDCP_COMMENT_LIKE;
-    else process.env.AIDCP_COMMENT_LIKE = previous;
-  }
+test('评论点赞角色常驻时无人设 XHS/FB 的 dispatcher setup 不提前读取人设，连接可先 welcome 再弹引导', () => {
+  const d = new RoleDispatcher({
+    getSoul: () => { throw new Error('no_persona'); },
+    llm: { complete: async () => '-1' },
+    sendCommand: () => {},
+    accountPlatform: 'xiaohongshu',
+    isPersonaBound: () => false,
+  });
+  assert.doesNotThrow(() => d.setup(), '构造/订阅阶段不得读取人设');
+  d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'acct-no-persona', ts: 1 });
+  assert.equal(d.active, false, '无人设只阻止业务会话，不破坏 transport');
+  d.endSession();
 });
 
 test('未绑人设账号：边缘自发上报 page.cards 也不产生任何下发指令（反应链未接线，绝不在默认人设上空跑）', () => {
