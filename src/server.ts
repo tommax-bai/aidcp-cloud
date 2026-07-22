@@ -62,6 +62,7 @@ import {
 import { EventBus } from './event-bus/index.js';
 import type { NoteDetailData } from './event-bus/index.js';
 import { RoleDispatcher } from './orchestrator/index.js';
+import { FACEBOOK_REEL_FOLLOW_EDGE_CAPABILITY } from './platform/facebook-presented-video.js';
 import { ConnectionRuntimeRegistry, type DispatcherBuildContext } from './orchestrator/connection-runtime.js';
 import type { CommentApprovalNoticeInput, CommentApprovalPort } from './agents/comment-approval-gate.js';
 import type { BaseRole } from './agents/base-role.js';
@@ -2911,6 +2912,8 @@ async function main(): Promise<void> {
       // effectiveReadSurface='feed'（就地读命令 + feed 循环闭合 + 评论迁移 + no_target 重扫）。老边端 / 未重打包
       // 回落 detail ⇒ 逐位等今天。快照本连接握手能力（重连按新连接重建、天然刷新）。
       hasInlineTargeting: () => (ctx.capabilities ?? []).includes('inline_targeting'),
+      // Reel 关注版本偏斜闸：旧 Edge 没有 note-scoped follow 执行器时不掷骰、不下发。
+      hasReelFollow: () => (ctx.capabilities ?? []).includes(FACEBOOK_REEL_FOLLOW_EDGE_CAPABILITY),
       // FB 每日在线时长预算（change account-nurture-discipline-spine §4.2）：全局每日时长未设(0)时 FB 账号
       // 回落非零安全日窗（养号「每天在线 0.5-6h」防长挂）。AIDCP_FB_DAILY_ONLINE_MIN 覆盖；缺/非法 → dispatcher 默认 360。
       facebookDailyOnlineMinutes:

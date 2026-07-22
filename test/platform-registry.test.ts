@@ -77,6 +77,11 @@ test('platform registry: browse capability is a Record and xhs browse stays supp
   assert.equal(PLATFORM_REGISTRY.xiaohongshu.noteSurfaces.read_content, 'detail');
   const fbCollect = PLATFORM_REGISTRY.facebook!.noteActions.collect;
   assert.equal(fbCollect.supported, false);
+  assert.equal(PLATFORM_REGISTRY.facebook!.capabilities.follow.supported, false, '普通主页关注保持关闭');
+  assert.equal(PLATFORM_REGISTRY.facebook!.capabilities.profile_visit.supported, false, '不借 Reel 能力绕开主页访问边界');
+  assert.equal(PLATFORM_REGISTRY.facebook!.capabilities.reel_follow.supported, true, 'Reel 卡内关注单独声明');
+  assert.equal(PLATFORM_REGISTRY.xiaohongshu.capabilities.follow.supported, true);
+  assert.equal(PLATFORM_REGISTRY.xiaohongshu.capabilities.reel_follow.supported, false);
 });
 
 test('platform registry: delegated actions declare XHS stable and Facebook beta/unsupported boundaries', () => {

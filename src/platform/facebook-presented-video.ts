@@ -2,6 +2,10 @@
 export const FACEBOOK_PRESENTED_VIDEO_LIKE_PROBABILITY = 0.25;
 /** Backward-compatible public name used by existing Reels tests/callers. */
 export const FACEBOOK_REELS_LIKE_PROBABILITY = FACEBOOK_PRESENTED_VIDEO_LIKE_PROBABILITY;
+/** Independent intent-selection probability for following the author of a presented Reel. */
+export const FACEBOOK_REELS_FOLLOW_PROBABILITY = 0.10;
+/** Edge hello capability proving this build contains the note-scoped Reel follow actuator. */
+export const FACEBOOK_REEL_FOLLOW_EDGE_CAPABILITY = 'facebook_reel_follow_v1';
 
 /**
  * Normalize supported Facebook post/video URLs to their globally unique post id.

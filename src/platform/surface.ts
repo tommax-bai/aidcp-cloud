@@ -98,6 +98,7 @@ export function isOrchestrationCapabilitySupported(
 type UsageMetricDeclaration =
   | { matrix: 'note'; action: NoteScopedAction }
   | { matrix: 'capability'; capability: OrchestrationCapability }
+  | { matrix: 'capability_any'; capabilities: readonly OrchestrationCapability[] }
   | { matrix: 'none' };
 
 interface UsageMetricSupportSource {
@@ -111,7 +112,7 @@ const USAGE_METRIC_SUPPORT_SOURCE: Record<UiDailyUsageAction, UsageMetricSupport
   like: { statusQuo: 'supplied', declaration: { matrix: 'note', action: 'like' } },
   collect: { statusQuo: 'supplied', declaration: { matrix: 'note', action: 'collect' } },
   comment: { statusQuo: 'supplied', declaration: { matrix: 'note', action: 'comment' } },
-  follow: { statusQuo: 'supplied', declaration: { matrix: 'capability', capability: 'follow' } },
+  follow: { statusQuo: 'supplied', declaration: { matrix: 'capability_any', capabilities: ['follow', 'reel_follow'] } },
   publish: { statusQuo: 'supplied', declaration: { matrix: 'none' } },
   join_group: { statusQuo: 'absent', declaration: { matrix: 'capability', capability: 'group_join' } },
 };
@@ -175,6 +176,14 @@ export function omitUnsupportedUsageMetrics(
       let support: NoteSupport | undefined;
       if (declaration.matrix === 'note') support = entry.noteActions[declaration.action];
       else if (declaration.matrix === 'capability') support = entry.capabilities[declaration.capability];
+      else if (declaration.matrix === 'capability_any') {
+        const candidates = declaration.capabilities.map((capability) => entry.capabilities[capability]);
+        support = candidates.some((candidate) => candidate?.supported === true)
+          ? { supported: true }
+          : candidates.every((candidate) => candidate?.supported === false)
+            ? { supported: false, reason: 'all_capabilities_unsupported' }
+            : undefined;
+      }
       const keep = statusQuo === 'supplied'
         ? support?.supported !== false // 现状=有：只有显式不支持才摘；缺声明（'none' / 表里没这格）⇒ 照发。
         : support?.supported === true; // 现状=无：只有显式支持才加；缺声明 ⇒ 不加。

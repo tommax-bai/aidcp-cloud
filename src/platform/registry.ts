@@ -23,20 +23,21 @@ export type NoteScopedAction =
  * - patrol/notification 消费者 = role-dispatcher setup() 的 canPatrol()（两者皆支持才注册 12 通知巡视角色）。
  * - profile_visit 消费者 = role-dispatcher setup() 的 canVisitProfile()（gate ProfileOpener 注册 + 注入 AuthorEvaluator：
  *                 不支持则永不产 profile.worth_visiting，只产 profile.skipped，主页子链结构性不触发）。
- * - follow        消费者 = FollowAgent（注入 canFollow：不支持则跳过关注、仍产 profile.done 保返回链）。
+ * - follow        消费者 = FollowAgent（主页关注；注入 canFollow：不支持则跳过、仍产 profile.done 保返回链）。
+ * - reel_follow   消费者 = Reel 呈现概率策略 + 客户端关注指标投影；不依赖 profile_visit。
  * - group_join    消费者 = 客户端指标投影（omitUnsupportedUsageMetrics）——**唯一的非闸消费者**：只决定
  *                 「这个账号的界面上有没有加群这一格」，MUST NOT 下发 / 拒绝 / 取消任何命令。加群本身的
  *                 闸与执行仍全在其专属路径（FacebookGroupJoinScheduler），本词不是第二道闸。
  *                 ⚠️ 读它**绝不能**用 isOrchestrationCapabilitySupported（那条 fail-open 到 true）——
  *                 该词的现状是「客户端根本没有这一格」，fail-open 到 true 会让平台未知的账号凭空长出
  *                 一个加群格，而小红书没有群。详见 declaresCapabilitySupported。
- * **不变量**：follow ⇒ profile_visit ⇒ browse（关注前必先访主页；主页访问是浏览的子能力）。v1 两平台皆满足
- * （小红书四词全支持 / Facebook 四词全不支持）；新增「访主页但不关注」类平台时须保 follow⇒profile_visit。
+ * **不变量**：普通主页 follow ⇒ profile_visit ⇒ browse。Reel 内联关注走 reel_follow，绝不能为了它翻转普通 follow。
  */
 export type OrchestrationCapability =
   | 'browse'
   | 'feed_refresh'
   | 'follow'
+  | 'reel_follow'
   | 'profile_visit'
   | 'patrol'
   | 'notification'
@@ -269,6 +270,7 @@ export const PLATFORM_REGISTRY: Record<'xiaohongshu', PlatformRegistryEntry> &
       browse: { supported: true },
       feed_refresh: { supported: true },
       follow: { supported: true },
+      reel_follow: { supported: false, reason: 'no_reels_surface' },
       profile_visit: { supported: true },
       patrol: { supported: true },
       notification: { supported: true },
@@ -305,8 +307,8 @@ export const PLATFORM_REGISTRY: Record<'xiaohongshu', PlatformRegistryEntry> &
     // 回滚（不需重发桌面客户端）：把值改回 'detail' 重部署 cloud，或边缘启动器 AIDCP_FB_BROWSE_AUTO≠on 停真互动。
     noteSurfaces: { read_content: 'feed', like: 'feed', comment: 'detail' },
     // feed_refresh 声明 supported（=今天 FeedScroller 对 FB 照常发 refresh）；FB 的「受控重新导航」实现在 C2。
-    // C4：FB 不做通知巡视（不上报 notification.detected）/ 不访作者主页 / 不关注（edge FB driver 无 profile/follow 执行器）
-    // ⇒ patrol/notification/profile_visit/follow 显式不支持 + reason；据此不注册 12 巡视角色 + ProfileOpener，
+    // C4：FB 不做通知巡视（不上报 notification.detected）/ 不访作者主页 / 不做主页关注；Reels 内联关注由
+    // 独立 reel_follow 声明与版本能力闸接线，绝不能翻转普通 follow/profile_visit。
     // 且 AuthorEvaluator 短路只产 profile.skipped（主页子链结构不触发）。ProfileBrowser/AuthorEvaluator/FollowAgent
     // 仍注册：AuthorEvaluator 是评论后返回 feed 的桥、FollowAgent 的 profile.done 是主页子链返回信号（皆须常在）；
     // ProfileBrowser 恒注册纯为无害（FB 经 canVisitProfile 结构不访作者主页；本人昵称采集另由永久接线的
@@ -315,6 +317,7 @@ export const PLATFORM_REGISTRY: Record<'xiaohongshu', PlatformRegistryEntry> &
       browse: { supported: true },
       feed_refresh: { supported: true },
       follow: { supported: false, reason: 'no_follow_actuator' },
+      reel_follow: { supported: true },
       profile_visit: { supported: false, reason: 'no_profile_actuator' },
       patrol: { supported: false, reason: 'no_notification_patrol' },
       notification: { supported: false, reason: 'no_notification_surface' },
@@ -344,6 +347,7 @@ export const PLATFORM_REGISTRY: Record<'xiaohongshu', PlatformRegistryEntry> &
       browse: { supported: false, reason: 'interaction_inbox_only' },
       feed_refresh: { supported: false, reason: 'interaction_inbox_only' },
       follow: { supported: false, reason: 'interaction_inbox_only' },
+      reel_follow: { supported: false, reason: 'interaction_inbox_only' },
       profile_visit: { supported: false, reason: 'interaction_inbox_only' },
       patrol: { supported: false, reason: 'interaction_inbox_only' },
       notification: { supported: false, reason: 'interaction_inbox_only' },

@@ -60,12 +60,11 @@ test('note action support fails open to true on unknown platform', () => {
   assert.equal(noteActionRefusalReason('tiktok', 'collect'), null);
 });
 
-test('usage metrics: fb 恰好少 collect(noteActions) 与 follow(capabilities)，其余逐位不变', () => {
+test('usage metrics: fb 少 collect，但 Reel 关注执行器使 follow 如实保留', () => {
   const out = omitUnsupportedUsageMetrics('facebook', SIX_KEY_CAPS);
-  assert.deepEqual(out, { view: 150, like: 50, comment: 8, publish: 1 });
-  // 两张矩阵都查到了：只查 noteActions 会漏掉 follow（它声明在 capabilities）。
+  assert.deepEqual(out, { view: 150, like: 50, comment: 8, follow: 15, publish: 1 });
   assert.ok(!('collect' in out), 'collect 必须缺席（no_collect_concept）');
-  assert.ok(!('follow' in out), 'follow 必须缺席（no_follow_actuator）');
+  assert.equal(out.follow, 15, '普通主页关注仍关闭，但 Reel 关注真实烧同一 follow 配额');
   // 入参不被就地改写（纯函数）。
   assert.deepEqual(SIX_KEY_CAPS, { view: 150, like: 50, collect: 25, comment: 8, follow: 15, publish: 1 });
 });
@@ -76,7 +75,7 @@ test('usage metrics: 小红书逐位不变（回归判据，不是善意期待�
 
 test('usage metrics: fb 拿到 join_group（显式 supported:true 才发）', () => {
   const out = omitUnsupportedUsageMetrics('facebook', SEVEN_KEY_COUNTS);
-  assert.deepEqual(out, { view: 150, like: 50, comment: 8, publish: 1, join_group: 3 });
+  assert.deepEqual(out, { view: 150, like: 50, comment: 8, follow: 15, publish: 1, join_group: 3 });
 });
 
 test('usage metrics: 小红书 MUST NOT 拿到 join_group（no_group_concept），其余六键逐位不变', () => {
@@ -117,7 +116,7 @@ test('usage metrics: publish 两张矩阵都没有声明 ⇒ 永不摘（缺声�
 test('usage metrics: session 窗口的四键子集同规则（本轮计划也是客户端指标面）', () => {
   // pickSessionUsageCounts 只产 like/collect/comment/follow（无 view/publish），默认预算 collects:5 / follows:3。
   const sessionCaps: UiDailyUsageCounts = { like: 10, collect: 5, comment: 2, follow: 3 };
-  assert.deepEqual(omitUnsupportedUsageMetrics('facebook', sessionCaps), { like: 10, comment: 2 });
+  assert.deepEqual(omitUnsupportedUsageMetrics('facebook', sessionCaps), { like: 10, comment: 2, follow: 3 });
   assert.deepEqual(omitUnsupportedUsageMetrics('xiaohongshu', sessionCaps), sessionCaps);
 });
 
@@ -132,6 +131,8 @@ test('usage metrics: 入参缺席的键不会被凭空物化（绝不把「没�
 test('capability + pacing resolvers (with fail-open)', () => {
   assert.equal(isOrchestrationCapabilitySupported('facebook', 'feed_refresh'), true);
   assert.equal(isOrchestrationCapabilitySupported('facebook', 'browse'), true);
+  assert.equal(isOrchestrationCapabilitySupported('facebook', 'follow'), false, '普通主页关注能力仍不开放');
+  assert.equal(isOrchestrationCapabilitySupported('facebook', 'reel_follow'), true, '仅 Reel 面具备关注执行器');
   assert.equal(isOrchestrationCapabilitySupported('xiaohongshu', 'browse'), true);
   assert.equal(isOrchestrationCapabilitySupported('tiktok', 'browse'), true); // fail-open
   assert.equal(platformFeedScrollFloorMs('facebook'), 7000);

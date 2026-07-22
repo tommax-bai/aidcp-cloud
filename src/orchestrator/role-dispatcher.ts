@@ -102,6 +102,7 @@ import type { RiskStatus, RiskQuotaLevel } from '../risk/types.js';
 import type { ConceptPool } from '../event-bus/types.js';
 import type { NotificationItem } from '../comm/protocol.js';
 import {
+  FACEBOOK_REELS_FOLLOW_PROBABILITY,
   FACEBOOK_PRESENTED_VIDEO_LIKE_PROBABILITY,
   facebookPostKey,
   hasObviousHighRiskFacebookCaption,
@@ -110,6 +111,7 @@ import {
 } from '../platform/facebook-presented-video.js';
 
 export {
+  FACEBOOK_REELS_FOLLOW_PROBABILITY,
   FACEBOOK_REELS_LIKE_PROBABILITY,
   facebookPostKey,
   isCanonicalFacebookReelNoteId,
@@ -314,6 +316,8 @@ export interface RoleDispatcherOptions {
    * 注入（重连按新连接重建、天然刷新）。缺省 → 恒 false（无就地读，=今天，保护测试与旧装配）。
    */
   hasInlineTargeting?: () => boolean;
+  /** 本连接边缘是否声明 `facebook_reel_follow_v1`；缺省 false，旧 Edge 不接收自动 Reel 关注。 */
+  hasReelFollow?: () => boolean;
   /**
    * Facebook 每日累计在线分钟默认（change account-nurture-discipline-spine §4.2）：全局每日时长阈值
    * （dailyCaps().maxMinutes）未显式设值（0=不限）时，Facebook 账号回落这个非零安全日窗（养号「每天在线
@@ -487,6 +491,8 @@ export class RoleDispatcher {
   private readonly accountPlatform?: PlatformId;
   /** 本连接边缘是否声明 inline_targeting（就地读/赞版本偏斜闸）；缺省 false = 老边端逐位等今天。 */
   private readonly hasInlineTargeting: () => boolean;
+  /** 本连接边缘是否包含 Reel note-scoped 关注执行器；缺省 false = 不下发自动关注。 */
+  private readonly hasReelFollow: () => boolean;
   /** Facebook 每日在线分钟默认（§4.2）；全局未设时 FB 账号回落此非零日窗。 */
   private readonly facebookDailyOnlineMinutes: number;
   /** 同账号并行互动去重 guard（按账号单例）；缺省不去重。 */
@@ -561,6 +567,8 @@ export class RoleDispatcher {
   private readonly facebookQualityPassedNoteIds = new Set<string>();
   /** 已呈现 Facebook 视频的会话级一次性决策集合；命中/未命中/被安全闸挡住都不得因重报重抽。 */
   private readonly facebookPresentedVideoLikeDecisionNoteIds = new Set<string>();
+  /** 已呈现 Facebook Reel 的会话级关注决策集合；与点赞独立，任何终态都不得因重报重抽。 */
+  private readonly facebookPresentedReelFollowDecisionNoteIds = new Set<string>();
   /** 当前会话剩余互动预算（从全局单场上限提供者派生，会话开始/重置时刷新）。 */
   private budget!: SessionInteractionBudget;
   /** 会话开始/重置时的预算快照（供比率闸：init−剩余；会话中途改预算不漂移）。 */
@@ -618,6 +626,7 @@ export class RoleDispatcher {
     this.isDispatchActive = options.isDispatchActive ?? (() => true);
     this.accountPlatform = options.accountPlatform;
     this.hasInlineTargeting = options.hasInlineTargeting ?? (() => false);
+    this.hasReelFollow = options.hasReelFollow ?? (() => false);
     this.facebookDailyOnlineMinutes = options.facebookDailyOnlineMinutes ?? DEFAULT_FB_DAILY_ONLINE_MINUTES;
     this.interactionGuard = options.interactionGuard;
     this.cooldownGate = options.cooldownGate;
@@ -2053,6 +2062,7 @@ export class RoleDispatcher {
     this.facebookContentSelectedNoteIds.clear();
     this.facebookQualityPassedNoteIds.clear();
     this.facebookPresentedVideoLikeDecisionNoteIds.clear();
+    this.facebookPresentedReelFollowDecisionNoteIds.clear();
   }
 
   /**
@@ -2142,6 +2152,70 @@ export class RoleDispatcher {
     } else {
       console.log(`[interaction_appraiser] skip reason=facebook_presented_video_dispatch_suppressed action=like source=${source} note=${noteId}`);
     }
+  }
+
+  /**
+   * Facebook 当前 Reel 的独立普通关注决策。概率只选择意图；Edge 版本能力、本轮预算、RiskController、
+   * 冷却、同账号去重与同 Reel 后置验证仍是权威，命中绝不等于关注成功。
+   */
+  private maybeDispatchFacebookPresentedReelFollow(
+    cards: PageCardsData[],
+    listKind: 'feed' | 'reels' | undefined,
+  ): void {
+    if (this.accountPlatform !== 'facebook' || listKind !== 'reels' || cards.length !== 1) return;
+    if (!this.hasReelFollow()) {
+      console.log('[interaction_appraiser] skip reason=facebook_reel_follow_edge_capability_missing action=follow');
+      return;
+    }
+    if (!isOrchestrationCapabilitySupported('facebook', 'reel_follow')) return;
+    const card = cards[0];
+    const noteId = card?.noteId;
+    if (!isCanonicalFacebookReelNoteId(noteId)) {
+      console.log(`[interaction_appraiser] skip reason=facebook_reel_follow_invalid_target action=follow note=${noteId ?? ''}`);
+      return;
+    }
+    const authorId = String(card.author ?? '').replace(/\s+/g, ' ').trim();
+    if (!authorId) {
+      console.log(`[interaction_appraiser] skip reason=facebook_reel_follow_missing_author action=follow note=${noteId}`);
+      return;
+    }
+    const key = facebookPostKey(noteId);
+    if (this.facebookPresentedReelFollowDecisionNoteIds.has(key)) {
+      console.log(`[interaction_appraiser] skip reason=facebook_reel_follow_duplicate_decision action=follow note=${noteId}`);
+      return;
+    }
+    // 先占决策坑：配额恢复、冷却结束或重复 page.cards 均不得让同一 Reel 重新掷骰。
+    this.facebookPresentedReelFollowDecisionNoteIds.add(key);
+    if (this.remainingBudget('follow') <= 0) {
+      console.log(`[interaction_appraiser] skip reason=no_budget action=follow source=reels note=${noteId}`);
+      return;
+    }
+    if (!this.canInteract('follow')) {
+      console.log(`[interaction_appraiser] skip reason=risk_blocked action=follow source=reels note=${noteId}`);
+      return;
+    }
+    if (!this.cooldownPasses('follow')) return;
+    const roll = this.randomFn();
+    if (!Number.isFinite(roll) || roll < 0 || roll >= 1) {
+      console.log(`[interaction_appraiser] skip reason=facebook_reel_follow_invalid_random action=follow note=${noteId}`);
+      return;
+    }
+    if (roll >= FACEBOOK_REELS_FOLLOW_PROBABILITY) {
+      console.log(
+        `[interaction_appraiser] skip reason=facebook_reel_follow_probability_abstain action=follow probability=${FACEBOOK_REELS_FOLLOW_PROBABILITY} roll=${roll} note=${noteId}`,
+      );
+      return;
+    }
+    const sent = this.sendCommand({
+      action: 'follow',
+      reason: 'facebook_reel_follow_probability_hit',
+      params: { authorId, noteId, thinkMs: this.thinkNow() },
+    });
+    console.log(
+      sent
+        ? `[interaction_appraiser] facebook_reel_follow_probability_hit action=follow probability=${FACEBOOK_REELS_FOLLOW_PROBABILITY} roll=${roll} note=${noteId}`
+        : `[interaction_appraiser] skip reason=facebook_reel_follow_dispatch_suppressed action=follow note=${noteId}`,
+    );
   }
 
   private facebookNaturalInteractionEligibility(noteId: string): { ok: true } | { ok: false; reason: string } {
@@ -2616,6 +2690,7 @@ export class RoleDispatcher {
       this.eventBus.on('page.cards.arrived', (payload) => {
         this.updateVisibleCards(payload.cards);
         this.maybeDispatchFacebookPresentedVideoLike(payload.cards, payload.listKind);
+        this.maybeDispatchFacebookPresentedReelFollow(payload.cards, payload.listKind);
         // feed-scroll-card-floor：仅 feed 来源——按本批 noteId 差分"上一批"算新卡数（缺 noteId 计为非新卡），
         // 覆盖写 pendingFeedFloorMs（含写 0），避免 open→return 残留旧值；search 上报不写不消费 feed 集合。
         if (this.sessionContext.sourcePageType === 'feed') {
