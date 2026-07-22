@@ -1,8 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { SessionConfigStore } from '../src/config/session-config-store.js';
+import { SessionConfigStore, SESSION_CONFIG_SCHEMA_SQL, SESSION_CONFIG_ALTER_SQL } from '../src/config/session-config-store.js';
 import { DEFAULT_SESSION_BUDGET, DEFAULT_SESSION_DURATION_MS } from '../src/risk/session-limits.js';
+import { fakeSchemaProbe } from './fixtures/schema-probe.js';
+
+/** 假 pool 的 schema 探测应答：存储 init() 现在只探测、不建表（change cloud-schema-migration-executor 第 5 节）。 */
+const schemaProbe = fakeSchemaProbe(SESSION_CONFIG_SCHEMA_SQL, SESSION_CONFIG_ALTER_SQL);
 
 interface SeedRow {
   max_duration_min: number;
@@ -26,6 +30,8 @@ function fakePool(seed?: SeedRow) {
   let failWrite = false;
   const pool = {
     query: async (sql: string, params?: unknown[]) => {
+      const __probe = schemaProbe(sql);
+      if (__probe) return __probe;
       if (sql.includes('CREATE TABLE') || sql.includes('ALTER TABLE')) return { rows: [] };
       if (sql.includes('INSERT INTO session_config_global')) {
         if (failWrite) throw new Error('db down');

@@ -30,6 +30,10 @@ import {
   type SourcePublishedAtStatus,
   type SourcePublishedTime,
 } from '../time/source-published-time.js';
+import { ensureCapabilitySchema } from '../schema/schema-capability.js';
+// 硬编码 `'public.'` 收口到唯一解析点（change cloud-schema-migration-executor 任务 5.5 / D8 第 4 条）：
+// 改 search_path 救不了写死在字面量里的 schema 名，搬 schema 时它会静默指错地方。
+import { qualifiedObjectName } from '../schema/schema-name.js';
 
 const { Pool } = pg;
 
@@ -310,7 +314,14 @@ export interface CuratedContentStoreOptions {
   executionTarget?: DelegatedExecutionTarget;
 }
 
-/** 建表 DDL（幂等，columns-right-on-first-ship；本仓无迁移框架）。 */
+/**
+ * schema 要求声明（change cloud-schema-migration-executor 第 5 节）。
+ *
+ * 这段常量原本是 `init()` 里真跑的建表 DDL；现在 DDL 的唯一所有者是
+ * `migrations/0066_baseline_cache_corpus_tables.sql`（其内容原样抽自本常量），本常量退化为两件事：
+ *   ① 存储启动时**探测**要求的来源；② 那条补齐迁移的抽取来源。
+ * 只有过渡期旋钮 `AIDCP_SCHEMA_SELF_CREATE=true` 时它才会被真的执行。
+ */
 export const CURATED_CONTENT_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS curated_content (
   id                 SERIAL PRIMARY KEY,
@@ -354,7 +365,7 @@ CREATE INDEX IF NOT EXISTS idx_curated_content_account_updated ON curated_conten
 
 DO $$
 BEGIN
-  IF to_regclass('public.curated_content') IS NOT NULL THEN
+  IF to_regclass('${qualifiedObjectName('curated_content')}') IS NOT NULL THEN
     ALTER TABLE curated_content DROP CONSTRAINT IF EXISTS curated_content_content_type_check;
 
     -- split-curated-source-media-types：存量 note 无法可靠反推是否视频，统一迁为 image_text。
@@ -776,9 +787,15 @@ export class CuratedContentStore {
       });
   }
 
-  /** 建表（幂等）。 */
+  /** schema 探测（不建表）。 */
   async init(): Promise<void> {
-    await this.pool.query(CURATED_CONTENT_SCHEMA_SQL);
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
+    // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
+    await ensureCapabilitySchema(this.pool, {
+      capability: 'curated_content',
+      sinceVersion: '0066_baseline_cache_corpus_tables',
+      ddl: [CURATED_CONTENT_SCHEMA_SQL],
+    });
   }
 
   private async prepareReferenceImages(

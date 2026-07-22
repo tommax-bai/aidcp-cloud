@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { RoleConfigStore } from '../src/config/role-config-store.js';
+import { RoleConfigStore, ROLE_CONFIG_SCHEMA_SQL, ROLE_CONFIG_ALTER_SQL } from '../src/config/role-config-store.js';
+import { fakeSchemaProbe } from './fixtures/schema-probe.js';
+
+/** 假 pool 的 schema 探测应答：存储 init() 现在只探测、不建表（change cloud-schema-migration-executor 第 5 节）。 */
+const schemaProbe = fakeSchemaProbe(ROLE_CONFIG_SCHEMA_SQL, ROLE_CONFIG_ALTER_SQL);
 
 /** 内存假 pool：路由 role_config 的建表 / SELECT / upsert(RETURNING)；可注入写失败。provider 随 0018 加列。 */
 function fakePool(seed: Record<string, { model: string | null; provider?: string | null; temperature: number | null; thinkingMode?: string | null }> = {}) {
@@ -15,6 +19,8 @@ function fakePool(seed: Record<string, { model: string | null; provider?: string
   let failWrite = false;
   const pool = {
     query: async (sql: string, params?: unknown[]) => {
+      const __probe = schemaProbe(sql);
+      if (__probe) return __probe;
       if (sql.includes('CREATE TABLE') || sql.trimStart().startsWith('ALTER')) return { rows: [] };
       if (sql.trimStart().startsWith('SELECT')) return { rows: [...rows.values()] };
       if (sql.includes('INSERT INTO role_config')) {

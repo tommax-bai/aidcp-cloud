@@ -1,3 +1,12 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:publish_approval_decision.approved,column:publish_approval_decision.candidate_ref,column:publish_approval_decision.content_version,column:publish_approval_decision.decided_at
+-- aidcp:objects=column:publish_approval_decision.decided_by,column:publish_approval_decision.decided_via,column:publish_approval_decision.dispatch_blocked_reason,column:publish_approval_decision.dispatch_state
+-- aidcp:objects=column:publish_approval_decision.dispatch_state_at,column:publish_approval_decision.env_key,column:publish_approval_decision.execution_target,column:publish_approval_decision.frozen_payload
+-- aidcp:objects=column:publish_approval_decision.request_id,column:publish_approval_decision.revision,column:publish_approval_decision.subject_kind,column:publish_approval_decision.void_reason
+-- aidcp:objects=column:publish_approval_outbox.command,column:publish_approval_outbox.consumed_at,column:publish_approval_outbox.created_at,column:publish_approval_outbox.execution_target
+-- aidcp:objects=column:publish_approval_outbox.id,column:publish_approval_outbox.payload,column:publish_approval_outbox.request_id,column:publish_approval_outbox.revision
+-- aidcp:objects=index:idx_publish_approval_decision_active,index:idx_publish_approval_decision_pending,index:idx_publish_approval_outbox_unconsumed,table:publish_approval_decision
+-- aidcp:objects=table:publish_approval_outbox
 -- change publish-approval-signal-to-database
 -- 人审授权的唯一权威载体：从本机文件 /tmp/aidcp-publish-approve-<requestId>.json 迁到持久记录。
 -- first-writer-wins 由「活跃行唯一」的部分唯一索引承担（替代文件系统 O_EXCL）。

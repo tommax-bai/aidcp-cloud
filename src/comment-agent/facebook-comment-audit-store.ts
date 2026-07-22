@@ -9,6 +9,7 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;
 
@@ -78,7 +79,13 @@ export class FacebookCommentAuditStore {
   }
 
   async init(): Promise<void> {
-    await this.pool.query(FACEBOOK_COMMENT_AUDIT_SCHEMA_SQL);
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
+    // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
+    await ensureCapabilitySchema(this.pool, {
+      capability: 'facebook_comment_audit',
+      sinceVersion: '0035_facebook_comment_audit',
+      ddl: [FACEBOOK_COMMENT_AUDIT_SCHEMA_SQL],
+    });
   }
 
   /**

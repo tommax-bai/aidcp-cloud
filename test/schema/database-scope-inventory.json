@@ -1,0 +1,85 @@
+{
+  "_comment": [
+    "库级作用域机制清单的机器可读副本（change cloud-schema-migration-executor 任务 10.1）。",
+    "人读版本在控制仓 aidcp/docs/database-scope-inventory.md，两者 MUST 同步。",
+    "advisory lock 与外键都是【数据库级】作用域：搬进不同 schema 后依然有效，只有拆成不同数据库才失效，",
+    "而且失效方式是静默的——锁不再互斥、外键不再存在，业务照跑、数据慢慢分叉。",
+    "键刻意不含行号：行号随无关编辑漂移，带行号的清单每次改代码都要重刷，很快就没人认真看了。"
+  ],
+  "advisoryLocks": {
+    "scripts/migrate.ts": {
+      "pg_advisory_unlock": 1,
+      "pg_try_advisory_lock": 1
+    },
+    "src/interactions/interaction-store.ts": {
+      "pg_advisory_xact_lock": 2
+    },
+    "src/risk/writer-lock.ts": {
+      "pg_advisory_unlock": 1,
+      "pg_try_advisory_lock": 1
+    }
+  },
+  "foreignKeys": {
+    "src/client-auth/client-user-store.ts": {
+      "client_environments(env_key)": 1,
+      "client_users(user_id)": 2
+    },
+    "src/comment-agent/facebook-group-store.ts": {
+      "accounts(account_id)": 1,
+      "facebook_group_target(group_url)": 2
+    },
+    "src/config/approval-policy-store.ts": {
+      "accounts(account_id)": 1
+    },
+    "src/config/persona-auto-fill-store.ts": {
+      "client_users(user_id)": 1,
+      "persona_auto_fill_runs(run_id)": 1
+    },
+    "src/config/persona-store.ts": {
+      "accounts(account_id)": 1
+    },
+    "src/delegated-task/store.ts": {
+      "accounts(account_id)": 1,
+      "delegated_tasks(id)": 2
+    },
+    "src/onboarding/first-post-onboarding-store.ts": {
+      "accounts(account_id)": 1
+    },
+    "src/publish-agent/draft-refinement.ts": {
+      "publish_log(id)": 1
+    },
+    "src/publish-agent/facebook-publish-media-store.ts": {
+      "account_facebook_publish_image(id)": 2,
+      "account_facebook_publish_image_set(id)": 1,
+      "accounts(account_id)": 1,
+      "publish_log(id)": 2
+    }
+  },
+  "schemaLiterals": {
+    "src/interactions/interaction-store.ts": {
+      "public.interaction_offboards": 1,
+      "public.interaction_reply_configs": 1,
+      "public.interaction_threads": 1
+    },
+    "src/interactions/reply-config-scope-store.ts": {
+      "public.interaction_reply_config_scopes": 1,
+      "public.interaction_reply_scope_versions": 1
+    },
+    "src/interactions/reply-config-store.ts": {
+      "public.interaction_reply_configs": 1,
+      "public.reply_templates": 1
+    }
+  },
+  "migrationForeignKeyTargets": {
+    "account_facebook_publish_image": 2,
+    "account_facebook_publish_image_set": 1,
+    "accounts": 21,
+    "client_environments": 1,
+    "client_users": 4,
+    "delegated_tasks": 2,
+    "facebook_group_target": 2,
+    "interaction_reply_config_scopes": 3,
+    "persona_auto_fill_runs": 1,
+    "publish_log": 3
+  }
+}

@@ -40,6 +40,7 @@ import {
   type SessionInteractionBudget,
   type SessionLimitProvider,
 } from '../risk/session-limits.js';
+import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;
 
@@ -163,10 +164,15 @@ export class SessionConfigStore implements SessionLimitProvider {
       });
   }
 
-  /** 建表 + 载入内存镜像。 */
+  /** schema 探测（不建表） + 载入内存镜像。 */
   async init(): Promise<void> {
-    await this.pool.query(SESSION_CONFIG_SCHEMA_SQL);
-    await this.pool.query(SESSION_CONFIG_ALTER_SQL);
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
+    // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
+    await ensureCapabilitySchema(this.pool, {
+      capability: 'session_config',
+      sinceVersion: '0015_session_config',
+      ddl: [SESSION_CONFIG_SCHEMA_SQL, SESSION_CONFIG_ALTER_SQL],
+    });
     await this.reload();
   }
 

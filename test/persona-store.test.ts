@@ -1,8 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { PersonaStore, createPersonaResolver } from '../src/config/persona-store.js';
-import { FirstPostOnboardingStore } from '../src/onboarding/first-post-onboarding-store.js';
+import { PersonaStore, createPersonaResolver, PERSONA_CONFIG_SCHEMA_SQL } from '../src/config/persona-store.js';
+import { FirstPostOnboardingStore, FIRST_POST_ONBOARDING_SCHEMA_SQL } from '../src/onboarding/first-post-onboarding-store.js';
+import { fakeSchemaProbe } from './fixtures/schema-probe.js';
+
+/** 假 pool 的 schema 探测应答：存储 init() 现在只探测、不建表（change cloud-schema-migration-executor 第 5 节）。 */
+const schemaProbe = fakeSchemaProbe(PERSONA_CONFIG_SCHEMA_SQL, FIRST_POST_ONBOARDING_SCHEMA_SQL);
 
 const soulYaml = (name: string) => `
 identity:
@@ -39,6 +43,8 @@ function fakePool(opts: {
   let failReset = false;
   const pool = {
     query: async (sql: string, params?: unknown[]) => {
+      const __probe = schemaProbe(sql);
+      if (__probe) return __probe;
       if (sql.includes('CREATE TABLE')) return { rows: [] };
       if (sql.includes('WITH cleared_persona AS')) {
         if (failWrite || failReset) throw new Error('first-post reset failed');

@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import {
-  FACEBOOK_GROUP_JOIN_AUTOMATION_CONFIG_SCHEMA_SQL,
-  FACEBOOK_GROUP_JOIN_AUTOMATION_DAILY_CAP_MAX,
-  FacebookGroupJoinAutomationStore,
-} from '../../src/config/facebook-group-join-automation-store.js';
+import { FACEBOOK_GROUP_JOIN_AUTOMATION_CONFIG_SCHEMA_SQL, FACEBOOK_GROUP_JOIN_AUTOMATION_DAILY_CAP_MAX, FacebookGroupJoinAutomationStore } from '../../src/config/facebook-group-join-automation-store.js';
+import { fakeSchemaProbe } from '../fixtures/schema-probe.js';
+
+/** 假 pool 的 schema 探测应答：存储 init() 现在只探测、不建表（change cloud-schema-migration-executor 第 5 节）。 */
+const schemaProbe = fakeSchemaProbe(FACEBOOK_GROUP_JOIN_AUTOMATION_CONFIG_SCHEMA_SQL);
 
 const FULL = '1'.repeat(168);
 const HALF = '1'.repeat(84) + '0'.repeat(84);
@@ -32,6 +32,8 @@ function fakePool(options: {
   let stored = options.seed;
   const pool = {
     query: async (text: string, params: unknown[] = []) => {
+      const __probe = schemaProbe(text);
+      if (__probe) return __probe;
       calls.push({ text, params });
       if (text.includes('CREATE TABLE IF NOT EXISTS facebook_group_join_automation_config')) {
         return { rows: [] };

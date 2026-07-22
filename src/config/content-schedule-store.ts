@@ -33,6 +33,7 @@ import {
   type AvailableScheduledAutomationAction,
   type ScheduledAutomationAction,
 } from '../platform/index.js';
+import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;
 
@@ -434,7 +435,13 @@ export class ContentScheduleStore {
 
   /** 建两张表 + 载入内存镜像（供调度器每 tick 现读，无 PG 往返）。 */
   async init(): Promise<void> {
-    await this.pool.query(CONTENT_SCHEDULE_SCHEMA_SQL);
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
+    // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
+    await ensureCapabilitySchema(this.pool, {
+      capability: 'content_schedule',
+      sinceVersion: '0028_content_schedule',
+      ddl: [CONTENT_SCHEDULE_SCHEMA_SQL],
+    });
     await this.reload();
   }
 

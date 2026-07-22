@@ -2,11 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import pg from 'pg';
-import {
-  CredentialStore,
-  CredentialKeyMissingError,
-  maskSecret,
-} from '../src/config/credential-store.js';
+import { CredentialStore, CredentialKeyMissingError, maskSecret, PROVIDER_CREDENTIALS_SCHEMA_SQL } from '../src/config/credential-store.js';
+import { fakeSchemaProbe } from './fixtures/schema-probe.js';
+
+/** 假 pool 的 schema 探测应答：存储 init() 现在只探测、不建表（change cloud-schema-migration-executor 第 5 节）。 */
+const schemaProbe = fakeSchemaProbe(PROVIDER_CREDENTIALS_SCHEMA_SQL);
 
 /** 内存假 pool：路由 provider_credentials 的建表 / SELECT / upsert。 */
 function fakeCredPool() {
@@ -14,6 +14,8 @@ function fakeCredPool() {
   const pool = {
     map,
     query: async (sql: string, params?: unknown[]) => {
+      const __probe = schemaProbe(sql);
+      if (__probe) return __probe;
       if (sql.includes('CREATE TABLE')) return { rows: [] };
       if (sql.includes('SELECT masked_hint')) {
         const v = map.get(`${params![0]}:${params![1]}`);

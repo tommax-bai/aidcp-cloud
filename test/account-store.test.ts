@@ -2,6 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
 import { ACCOUNTS_SCHEMA_SQL, PgAccountStore } from '../src/account-store.js';
+import { fakeSchemaProbe } from './fixtures/schema-probe.js';
+
+/** 假 pool 的 schema 探测应答：存储 init() 现在只探测、不建表（change cloud-schema-migration-executor 第 5 节）。 */
+const schemaProbe = fakeSchemaProbe(ACCOUNTS_SCHEMA_SQL);
 
 test('ACCOUNTS_SCHEMA_SQL 建 accounts 表（account_id PK + 关键列）', () => {
   assert.match(ACCOUNTS_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS accounts/);
@@ -43,6 +47,8 @@ function fakePool(): { calls: { text: string; params: unknown[] }[]; pool: pg.Po
   const calls: { text: string; params: unknown[] }[] = [];
   const pool = {
     query: async (text: string, params: unknown[]) => {
+      const __probe = schemaProbe(text);
+      if (__probe) return __probe;
       calls.push({ text, params });
       return { rows: [], rowCount: 0 };
     },
@@ -111,6 +117,8 @@ test('平台昵称刷新只更新 nickname，绝不覆盖目录中的运营别�
   const calls: { text: string; params: unknown[] }[] = [];
   const pool = {
     query: async (text: string, params: unknown[]) => {
+      const __probe = schemaProbe(text);
+      if (__probe) return __probe;
       calls.push({ text, params });
       if (text.includes('SET operator_alias')) {
         return { rows: [{ operator_alias: '运营重点号', nickname: '旧平台名', label: 'acc-1' }], rowCount: 1 };
@@ -127,11 +135,12 @@ test('平台昵称刷新只更新 nickname，绝不覆盖目录中的运营别�
 });
 
 test('init 预热运营别名、平台昵称和标签到统一同步目录', async () => {
-  let call = 0;
   const pool = {
-    query: async () => {
-      call += 1;
-      if (call === 1) return { rows: [], rowCount: 0 };
+    query: async (sql: string) => {
+      // init() 现在先探测 schema 再预热（change cloud-schema-migration-executor 第 5 节），
+      // 探测应答由 ACCOUNTS_SCHEMA_SQL 推导，剩下的那一次才是预热 SELECT。
+      const probe = schemaProbe(sql);
+      if (probe) return probe;
       return { rows: [{
         account_id: 'acc-1', operator_alias: '运营重点号', nickname: '平台真名', label: '标签',
         platform: 'facebook', created_at: null,
@@ -151,6 +160,8 @@ function fakePoolReturning(rows: unknown[]): { calls: { text: string; params: un
   const calls: { text: string; params: unknown[] }[] = [];
   const pool = {
     query: async (text: string, params: unknown[]) => {
+      const __probe = schemaProbe(text);
+      if (__probe) return __probe;
       calls.push({ text, params });
       return { rows, rowCount: rows.length };
     },

@@ -16,6 +16,7 @@
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from './pg-anchor-cache.js';
 import type { NotificationItem } from '../comm/protocol.js';
+import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;
 
@@ -138,9 +139,15 @@ export class NotificationContactStore {
       });
   }
 
-  /** 建表（幂等，与迁移 0016 同源）。 */
+  /** schema 探测（不建表）。 */
   async init(): Promise<void> {
-    await this.pool.query(NOTIFICATION_CONTACT_SCHEMA_SQL);
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
+    // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
+    await ensureCapabilitySchema(this.pool, {
+      capability: 'notification_contact',
+      sinceVersion: '0016_notification_contacts',
+      ddl: [NOTIFICATION_CONTACT_SCHEMA_SQL],
+    });
   }
 
   /**

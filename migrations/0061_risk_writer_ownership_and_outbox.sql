@@ -1,3 +1,9 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:accounts.execution_target,column:risk_counter_outbox.account_id,column:risk_counter_outbox.action,column:risk_counter_outbox.attempts
+-- aidcp:objects=column:risk_counter_outbox.claim_expires_at,column:risk_counter_outbox.claim_token,column:risk_counter_outbox.created_at,column:risk_counter_outbox.dedupe_key
+-- aidcp:objects=column:risk_counter_outbox.execution_target,column:risk_counter_outbox.id,column:risk_counter_outbox.last_error,column:risk_counter_outbox.occurred_at
+-- aidcp:objects=column:risk_counter_outbox.status,column:risk_counter_outbox.updated_at,column:risk_counters.outbox_id,index:idx_risk_counter_outbox_claim
+-- aidcp:objects=index:uq_risk_counter_outbox_target_dedupe,index:uq_risk_counters_outbox,table:risk_counter_outbox
 -- risk-state-cross-process-integrity
 --
 -- 跨进程风控单写的持久底座。三件事，全部 additive（dev/ol 共库期间禁止破坏性 DDL）：

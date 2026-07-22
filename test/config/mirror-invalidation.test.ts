@@ -18,12 +18,19 @@ import {
   installConfigMirrorFreshnessSource,
   mirrorStateOf,
 } from '../../src/config-mirror-freshness.js';
-import { QuotaConfigStore } from '../../src/config/quota-config-store.js';
-import { PersonaStore } from '../../src/config/persona-store.js';
+import { QUOTA_CONFIG_SCHEMA_SQL, QuotaConfigStore } from '../../src/config/quota-config-store.js';
+import { PERSONA_CONFIG_SCHEMA_SQL, PersonaStore } from '../../src/config/persona-store.js';
+import { fakeSchemaProbe } from '../fixtures/schema-probe.js';
 import { deriveWindowQuotas } from '../../src/risk/quotas.js';
 import { staleGateMirrors, shouldHaltNewPlatformActions } from '../../src/config/mirror-stop-work.js';
 import { createQuotaConfigPanel } from '../../src/config/quota-config-facade.js';
 import { RISK_ACTIONS, RISK_QUOTA_LEVELS } from '../../src/risk/types.js';
+
+/**
+ * 假 pool 的 schema 探测应答：两个存储的 init() 现在只探测、不建表
+ * （change cloud-schema-migration-executor 第 5 节）。
+ */
+const schemaProbe = fakeSchemaProbe(QUOTA_CONFIG_SCHEMA_SQL, PERSONA_CONFIG_SCHEMA_SQL);
 
 /** 内存假 PG：版本表 + quota_config + persona_config + 拒绝记账表；支持 connect() 事务。 */
 function fakePg() {
@@ -36,6 +43,8 @@ function fakePg() {
 
   const run = async (sql: string, params?: unknown[]) => {
     if (/^\s*(BEGIN|COMMIT|ROLLBACK)\s*$/.test(sql)) return { rows: [] };
+    const probe = schemaProbe(sql);
+    if (probe) return probe;
     if (sql.includes('CREATE TABLE') || sql.includes('CREATE INDEX') || sql.includes('ALTER TABLE')) return { rows: [] };
     if (sql.includes('INSERT INTO config_mirror_version')) {
       const key = String((params ?? [])[0]);

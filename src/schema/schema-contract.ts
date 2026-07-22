@@ -14,17 +14,22 @@ import { compareVersions } from './migration-plan.js';
 /**
  * 本构建正常工作所需的最低迁移版本 id。
  *
- * 当前值 = 账本迁移本身：本构建的硬依赖只有「账本存在」这一条（其余对象在本 change 的
- * 第 5 节完成之前仍由存储自建）。第 5 节每切换一批存储，本常量 MUST 相应抬到该批依赖的迁移版本，
- * 否则契约门会放过一个「迁移没跑但存储也不再自建」的必然启动失败。
+ * 第 5 节把 33 个存储的自建表全部改成了探测，于是本构建的硬依赖不再只是「账本存在」，
+ * 而是「补齐迁移全部到位」——最后一条补齐迁移是 `0070_baseline_self_heal_columns`。
+ * 不抬到这里，契约门会放过一个「迁移没跑但存储也不再自建」的必然启动失败。
+ *
+ * 注：`0069`（两条 `SET NOT NULL`，kind=contract）不是任何存储正常读写的前置，
+ * 但它在复合序上低于 `0070`，被本要求顺带覆盖；这只是序的结果，不是对收缩的依赖。
+ *
+ * 今后每加一条存储真正依赖的迁移，本常量 MUST 一起抬。
  */
-export const REQUIRED_SCHEMA_VERSION = '0064_schema_migrations_ledger';
+export const REQUIRED_SCHEMA_VERSION = '0070_baseline_self_heal_columns';
 
 /**
  * 本构建认识的最高迁移版本 id，等于本构建 `migrations/` 目录里的最大版本。
  * 由 test/schema/schema-contract.test.ts 断言与目录一致（构建产物里不一定带 migrations/，故不在运行时读目录）。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0069_identity_not_null_constraints';
+export const KNOWN_MAX_SCHEMA_VERSION = '0070_baseline_self_heal_columns';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

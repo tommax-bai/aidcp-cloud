@@ -1,8 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { PacingConfigStore } from '../src/config/pacing-config-store.js';
+import { PacingConfigStore, PACING_FLOOR_SCHEMA_SQL } from '../src/config/pacing-config-store.js';
 import { BUILTIN_FLOOR, OP_MIN_FLOOR, CAP_MS, PACING_OPS } from '../src/risk/pacing.js';
+import { fakeSchemaProbe } from './fixtures/schema-probe.js';
+
+/** 假 pool 的 schema 探测应答：存储 init() 现在只探测、不建表（change cloud-schema-migration-executor 第 5 节）。 */
+const schemaProbe = fakeSchemaProbe(PACING_FLOOR_SCHEMA_SQL);
 
 /** 内存假 pool：路由 pacing_floor_config 的建表 / SELECT / upsert(RETURNING)；可注入写失败 + 脏行 + 直插非法值。 */
 function fakePool(seed: Array<{ operation: string; min_ms: number; max_ms: number }> = []) {
@@ -11,6 +15,8 @@ function fakePool(seed: Array<{ operation: string; min_ms: number; max_ms: numbe
   let failWrite = false;
   const pool = {
     query: async (sql: string, params?: unknown[]) => {
+      const __probe = schemaProbe(sql);
+      if (__probe) return __probe;
       if (sql.includes('CREATE TABLE')) return { rows: [] };
       if (sql.includes('INSERT INTO pacing_floor_config')) {
         if (failWrite) throw new Error('db down');

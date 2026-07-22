@@ -1,10 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { QuotaConfigStore } from '../src/config/quota-config-store.js';
+import { QuotaConfigStore, QUOTA_CONFIG_SCHEMA_SQL } from '../src/config/quota-config-store.js';
 import { COOLDOWN_ACTIONS } from '../src/risk/action-cooldown.js';
 import { HOUR_BURST_CAP, MINUTE_BURST_CAP, deriveWindowQuotas } from '../src/risk/quotas.js';
 import { RISK_QUOTA_LEVELS } from '../src/risk/types.js';
+import { fakeSchemaProbe } from './fixtures/schema-probe.js';
+
+/** 假 pool 的 schema 探测应答：存储 init() 现在只探测、不建表（change cloud-schema-migration-executor 第 5 节）。 */
+const schemaProbe = fakeSchemaProbe(QUOTA_CONFIG_SCHEMA_SQL);
 
 /** 内存假 pool：路由 quota_config 的建表 / SELECT / upsert(RETURNING)；可注入写失败 + 脏行。 */
 function fakePool(seed: Array<{ tier: string; action: string; daily: number; per_minute: number; per_hour: number }> = []) {
@@ -13,6 +17,8 @@ function fakePool(seed: Array<{ tier: string; action: string; daily: number; per
   let failWrite = false;
   const pool = {
     query: async (sql: string, params?: unknown[]) => {
+      const __probe = schemaProbe(sql);
+      if (__probe) return __probe;
       if (sql.includes('CREATE TABLE')) return { rows: [] };
       if (sql.includes('INSERT INTO quota_config')) {
         if (failWrite) throw new Error('db down');

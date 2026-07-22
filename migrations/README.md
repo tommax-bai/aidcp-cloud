@@ -116,3 +116,27 @@ dev 与 ol 共用同一个数据库就只能有**一条**版本序列。照抄 t
 
 新增迁移后 **MUST** 把 `KNOWN_MAX_SCHEMA_VERSION` 抬到新的最大版本
 （`test/schema/schema-contract.test.ts` 断言它与本目录一致，忘记抬即测试失败）。
+
+新增一条**存储真正依赖**的迁移后，还 MUST 把 `REQUIRED_SCHEMA_VERSION` 一起抬；
+否则契约门会放过一个「迁移没跑、存储又不再自建」的必然启动失败。当前值 `0070_baseline_self_heal_columns`
+（第 5 节之后，全部存储的探测要求都靠 `0065`–`0070` 这批补齐迁移满足）。
+
+## 8. 存储不再自建表
+
+33 个存储的 `init()` 已从「跑一遍幂等建表语句」改为「探测 + 三态判定」
+（`src/schema/schema-capability.ts`，范式照抄 `src/interactions/schema-capability.ts`）：
+
+- `ready`：要求的表 / 列 / 索引都在 → 正常工作；
+- `degraded`：表在、缺列或缺索引 → 报 `schema_incomplete_<能力>_run_<版本 id>`，该能力 fail-closed；
+- `missing`：表不在 → 报 `schema_missing_<能力>_run_<版本 id>`，该能力 fail-closed。**绝不建表**。
+
+「要求」不是手写清单，而是由**存储自己那段 DDL 常量**解析出来的（`src/schema/ddl-objects.ts`）。
+那段常量今天有三个身份：探测要求的来源、补齐迁移的抽取来源、过渡期旋钮打开时被执行的 DDL。
+手写第二份列清单必然漂移，漂了之后用例会开始验一个不存在的形状。
+
+**部署顺序因此变成硬约束**：先 `npm run migrate status`（只读）→ 有 pending 就人工审阅后 `migrate up` → 再重启服务。
+带着未应用的迁移重启，表现为该能力在启动日志里 fail-closed 并报出缺失对象，不再是「悄悄把表建出来继续跑」。
+
+过渡期回滚旋钮 `AIDCP_SCHEMA_SELF_CREATE=true` 恢复自建行为并在启动日志打显式过渡态警告，默认 `false`。
+全部批次在 dev 稳定后随任务 5.11 删除该旋钮与存储侧 DDL 常量；那时
+`test/schema/runtime-ddl-allowlist.json` 的条目才真正变少（今天常量还在，清单只是被冻住不许变多）。

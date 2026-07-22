@@ -21,6 +21,7 @@ import {
   type AccountDisplayName,
   type AccountDisplayNameInput,
 } from './account-display-name.js';
+import { ensureCapabilitySchema } from './schema/schema-capability.js';
 
 const { Pool } = pg;
 
@@ -257,9 +258,15 @@ export class PgAccountStore implements AccountStore {
       });
   }
 
-  /** 建表 + seed default（幂等）+ 预热昵称同步缓存。 */
+  /** schema 探测（不建表） + seed default（幂等）+ 预热昵称同步缓存。 */
   async init(): Promise<void> {
-    await this.pool.query(ACCOUNTS_SCHEMA_SQL);
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
+    // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
+    await ensureCapabilitySchema(this.pool, {
+      capability: 'accounts',
+      sinceVersion: '0065_baseline_identity_tables',
+      ddl: [ACCOUNTS_SCHEMA_SQL],
+    });
     // 预热昵称缓存（change account-real-nickname）：供握手同步读，避免每次握手 await PG。
     const { rows } = await this.pool.query<{
       account_id: string;

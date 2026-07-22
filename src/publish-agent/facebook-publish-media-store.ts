@@ -4,6 +4,7 @@ import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
 import { RETIRED_ACCOUNT_ID } from '../account-store.js';
 import { normalizePlatformId } from '../platform/index.js';
 import type { ObjectStore } from '../storage/object-store.js';
+import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;
 
@@ -243,7 +244,13 @@ export class FacebookPublishMediaStore {
   }
 
   async init(): Promise<void> {
-    await this.pool.query(FACEBOOK_PUBLISH_MEDIA_SCHEMA_SQL);
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
+    // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
+    await ensureCapabilitySchema(this.pool, {
+      capability: 'facebook_publish_media',
+      sinceVersion: '0067_baseline_facebook_tables',
+      ddl: [FACEBOOK_PUBLISH_MEDIA_SCHEMA_SQL],
+    });
   }
 
   async listForAccount(accountId: string): Promise<FacebookPublishMediaListView> {

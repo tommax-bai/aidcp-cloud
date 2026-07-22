@@ -19,6 +19,7 @@ import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
 import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
 import { normalizeThinkingMode, type ThinkingMode } from './role-catalog.js';
+import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;
 
@@ -101,10 +102,15 @@ export class CategoryConfigStore {
       });
   }
 
-  /** 建表 + 自愈加列 + 载入内存镜像（全局默认行）。 */
+  /** schema 探测（不建表；自愈加列已随 DDL 一并迁往 migrations/） + 载入内存镜像（全局默认行）。 */
   async init(): Promise<void> {
-    await this.pool.query(CATEGORY_CONFIG_SCHEMA_SQL);
-    await this.pool.query(CATEGORY_CONFIG_ALTER_SQL);
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
+    // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
+    await ensureCapabilitySchema(this.pool, {
+      capability: 'category_config',
+      sinceVersion: '0009_role_category_config',
+      ddl: [CATEGORY_CONFIG_SCHEMA_SQL, CATEGORY_CONFIG_ALTER_SQL],
+    });
     await this.reload();
   }
 

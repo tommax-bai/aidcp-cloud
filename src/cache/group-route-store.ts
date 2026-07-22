@@ -13,6 +13,7 @@
 
 import pg from 'pg';
 import { resolveEnvPgConfig } from './pg-config.js';
+import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;
 
@@ -49,9 +50,15 @@ export class GroupRouteStore {
     this.pool = options.pool ?? new Pool(resolveEnvPgConfig());
   }
 
-  /** 建表（幂等，与迁移文档同源）。 */
+  /** schema 探测（不建表）。 */
   async init(): Promise<void> {
-    await this.pool.query(GROUP_ROUTE_SCHEMA_SQL);
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
+    // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
+    await ensureCapabilitySchema(this.pool, {
+      capability: 'group_route',
+      sinceVersion: '0066_baseline_cache_corpus_tables',
+      ddl: [GROUP_ROUTE_SCHEMA_SQL],
+    });
   }
 
   /**

@@ -15,6 +15,7 @@
 import crypto from 'node:crypto';
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;
 
@@ -92,7 +93,13 @@ export class CredentialStore {
   }
 
   async init(): Promise<void> {
-    await this.pool.query(PROVIDER_CREDENTIALS_SCHEMA_SQL);
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
+    // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
+    await ensureCapabilitySchema(this.pool, {
+      capability: 'provider_credentials',
+      sinceVersion: '0007_model_config',
+      ddl: [PROVIDER_CREDENTIALS_SCHEMA_SQL],
+    });
   }
 
   /** 主密钥是否就位——决定凭据能否在后台编辑。 */

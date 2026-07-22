@@ -34,6 +34,7 @@ import {
   type PacingFloorProvider,
 } from '../risk/pacing.js';
 import type { PacingOp, PacingFloorPayload } from '../comm/protocol.js';
+import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;
 
@@ -109,9 +110,15 @@ export class PacingConfigStore implements PacingFloorProvider {
       });
   }
 
-  /** 建表 + 载入内存镜像。 */
+  /** schema 探测（不建表） + 载入内存镜像。 */
   async init(): Promise<void> {
-    await this.pool.query(PACING_FLOOR_SCHEMA_SQL);
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
+    // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
+    await ensureCapabilitySchema(this.pool, {
+      capability: 'pacing_floor_config',
+      sinceVersion: '0031_pacing_floor_config',
+      ddl: [PACING_FLOOR_SCHEMA_SQL],
+    });
     await this.reload();
   }
 

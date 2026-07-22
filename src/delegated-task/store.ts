@@ -20,6 +20,7 @@ import {
   isTerminalTaskStatus,
   verificationCountsAsSuccess,
 } from './types.js';
+import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;
 
@@ -341,7 +342,13 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
   }
 
   async init(): Promise<void> {
-    await this.pool.query(DELEGATED_TASK_SCHEMA_SQL);
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
+    // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
+    await ensureCapabilitySchema(this.pool, {
+      capability: 'delegated_tasks',
+      sinceVersion: '0038_delegated_tasks',
+      ddl: [DELEGATED_TASK_SCHEMA_SQL],
+    });
   }
 
   async createDraft(input: DelegatedTaskCreate): Promise<{ task: DelegatedTask; created: boolean }> {

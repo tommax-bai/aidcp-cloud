@@ -17,6 +17,7 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from './pg-anchor-cache.js';
+import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;
 
@@ -76,9 +77,15 @@ export class InteractionFeedStore {
       });
   }
 
-  /** 建表（幂等）。 */
+  /** schema 探测（不建表）。 */
   async init(): Promise<void> {
-    await this.pool.query(INTERACTION_FEED_SCHEMA_SQL);
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
+    // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
+    await ensureCapabilitySchema(this.pool, {
+      capability: 'interaction_feed',
+      sinceVersion: '0019_interaction_feed',
+      ddl: [INTERACTION_FEED_SCHEMA_SQL],
+    });
   }
 
   /**

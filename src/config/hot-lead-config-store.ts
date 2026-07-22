@@ -19,6 +19,7 @@ import {
   DEFAULT_HOT_LEAD_GATE_CONFIG,
   type HotLeadGateConfig,
 } from '../hot-lead/heat-velocity.js';
+import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;
 
@@ -95,7 +96,13 @@ export class HotLeadConfigStore {
   }
 
   async init(): Promise<void> {
-    await this.pool.query(HOT_LEAD_CONFIG_SCHEMA_SQL);
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
+    // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
+    await ensureCapabilitySchema(this.pool, {
+      capability: 'hot_lead_config_global',
+      sinceVersion: '0066_baseline_cache_corpus_tables',
+      ddl: [HOT_LEAD_CONFIG_SCHEMA_SQL],
+    });
     await this.reload();
   }
 

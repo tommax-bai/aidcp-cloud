@@ -2,6 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import { CONTENT_SCHEDULE_SCHEMA_SQL, ContentScheduleStore } from '../src/config/content-schedule-store.js';
+import { fakeSchemaProbe } from './fixtures/schema-probe.js';
+
+/** 假 pool 的 schema 探测应答：存储 init() 现在只探测、不建表（change cloud-schema-migration-executor 第 5 节）。 */
+const schemaProbe = fakeSchemaProbe(CONTENT_SCHEDULE_SCHEMA_SQL);
 
 const FULL = '1'.repeat(168);
 const HALF = '1'.repeat(84) + '0'.repeat(84);
@@ -17,6 +21,8 @@ test('claimAutoPostHourCell: 原子 upsert 仅首个进程拿到相同小时格'
   let first = true;
   const pool = {
     query: async (sql: string, params: unknown[] = []) => {
+      const __probe = schemaProbe(sql);
+      if (__probe) return __probe;
       calls.push({ sql, params });
       const rows = first ? [{ account_id: 'acc-1' }] : [];
       first = false;
@@ -46,6 +52,8 @@ function makePoolStub(opts: {
   const accountExists = opts.accountExists ?? true;
   const pool = {
     query: async (sql: string, params: unknown[] = []) => {
+      const __probe = schemaProbe(sql);
+      if (__probe) return __probe;
       calls.push({ sql, params });
       const s = sql.trim();
       if (s.startsWith('CREATE TABLE')) return { rows: [] };
@@ -119,6 +127,8 @@ test('store: 未配 = 完全不自动（零回归默认）', async () => {
 test('listCatalog: 排期账号展示复用统一解析器，运营别名优先', async () => {
   const pool = {
     query: async (sql: string) => {
+      const __probe = schemaProbe(sql);
+      if (__probe) return __probe;
       assert.match(sql, /a\.operator_alias/);
       return { rows: [{
         account_id: 'acc-1', platform: 'xhs', label: '运营标签', group_label: '华东组',
@@ -320,6 +330,8 @@ test('store/account masks: 脏活跃覆盖回落合法全局，脏内容覆盖�
   const bad = 'broken';
   const pool = {
     query: async (sql: string) => {
+      const __probe = schemaProbe(sql);
+      if (__probe) return __probe;
       const s = sql.trim();
       if (s.startsWith('CREATE TABLE')) return { rows: [] };
       if (s.startsWith('SELECT content_active_mask')) return { rows: [{ content_active_mask: HALF, updated_at: null, updated_by: null }] };
@@ -413,6 +425,8 @@ test('store/group: attempts 记录与当日计数（pool 桩验 SQL 形状）', 
   const seen: Array<{ sql: string; params: unknown[] }> = [];
   const pool = {
     query: async (sql: string, params: unknown[] = []) => {
+      const __probe = schemaProbe(sql);
+      if (__probe) return __probe;
       seen.push({ sql, params });
       const t = sql.trim();
       if (t.startsWith('CREATE TABLE')) return { rows: [] };

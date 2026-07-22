@@ -239,6 +239,7 @@ import {
 } from './delegated-task/index.js';
 import { parseDeploymentTarget } from './deployment-target.js';
 import { runSchemaContractGate, takePendingSchemaGateAlert } from './schema/schema-gate.js';
+import { isSchemaCapabilityError } from './schema/schema-capability.js';
 import { DelegatedTaskNotificationGate, delegatedTaskFailureReceipt } from './delegated-task/notification.js';
 import { omitUnsupportedUsageMetrics, platformRegistryEntry } from './platform/index.js';
 import {
@@ -642,7 +643,23 @@ async function main(): Promise<void> {
     await clientUserStore.init();
     console.log('[aidcp-cloud] 模型配置 + 凭据 + 角色配置 + 分类默认 + 安全限额 + 单场上限 + 续场配置存储已就绪（model_config / provider_credentials / role_config / category_config / quota_config / session_config / resume_config）');
   } catch (err) {
-    console.warn('[aidcp-cloud] 模型/凭据/角色/分类/限额/续场配置存储初始化失败（回退代码默认模型 + env 密钥；限额/续场回退派生写死默认）:', (err as Error).message);
+    // change cloud-schema-migration-executor 任务 5.3：这一处过去用一句通用 warn 覆盖两种完全不同的原因。
+    // 「连不上库」是瞬时故障，重试 / 修网络即可；「库里没有这张表 / 这一列」是 schema 落后于代码，
+    // 处置是补跑迁移，重试一万次都不会好。合成一句话报出去，等于让运维每次都从零开始猜。
+    if (isSchemaCapabilityError(err)) {
+      console.error(
+        `[aidcp-cloud] 配置层 schema 不满足要求（${err.code}）：能力 ${err.capability} 缺 `
+        + `${err.missing.join(', ')}；来源迁移 ${err.sinceVersion}。`
+        + '处置是补跑迁移（npm run migrate status / up），MUST NOT 靠重启或自建表绕过；'
+        + '本次启动该能力 fail-closed 回退代码默认值。',
+      );
+    } else {
+      console.warn(
+        '[aidcp-cloud] 配置层存储初始化失败（数据库不可达或查询失败，非 schema 缺对象；'
+        + '回退代码默认模型 + env 密钥；限额/续场回退派生写死默认）:',
+        (err as Error).message,
+      );
+    }
   }
   // 启动期解密 DashScope 密钥（库内优先、回退 env）；明文仅用于构造图片客户端（万相），绝不日志化、绝不回前端。
   const dashscopeApiKey =
@@ -810,12 +827,20 @@ async function main(): Promise<void> {
   const botChatStore = new BotChatStore();
   const botChatEventHandler = new FeishuBotChatEventHandler(botChatStore);
 
-  // 建表（幂等）；PG 不可用时打印告警但不阻塞启动协议处理
+  // 探测 schema（不再建表，change cloud-schema-migration-executor 第 5 节）；
+  // PG 不可用时打印告警但不阻塞启动协议处理。缺对象与连不上库分别报出，MUST NOT 混成一句通用 warn。
   try {
     await cache.init();
     console.log('[aidcp-cloud] PG 锚点缓存已就绪');
   } catch (err) {
-    console.warn('[aidcp-cloud] PG 初始化失败（缓存相关消息将报错）:', (err as Error).message);
+    if (isSchemaCapabilityError(err)) {
+      console.error(
+        `[aidcp-cloud] 锚点缓存 schema 不满足要求（${err.code}）：缺 ${err.missing.join(', ')}；`
+        + `来源迁移 ${err.sinceVersion}。处置是补跑迁移，本次启动锚点缓存 fail-closed。`,
+      );
+    } else {
+      console.warn('[aidcp-cloud] PG 连接/查询失败（非 schema 缺对象；缓存相关消息将报错）:', (err as Error).message);
+    }
   }
 
   // 发布日志存储（publish_log 表）

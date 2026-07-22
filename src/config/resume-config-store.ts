@@ -38,6 +38,7 @@ import {
   type DailyCaps,
   type ResumeConfigProvider,
 } from '../risk/resume-limits.js';
+import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;
 
@@ -137,9 +138,15 @@ export class ResumeConfigStore implements ResumeConfigProvider {
       });
   }
 
-  /** 建表 + 载入内存镜像。 */
+  /** schema 探测（不建表） + 载入内存镜像。 */
   async init(): Promise<void> {
-    await this.pool.query(RESUME_CONFIG_SCHEMA_SQL);
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
+    // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
+    await ensureCapabilitySchema(this.pool, {
+      capability: 'resume_config',
+      sinceVersion: '0020_resume_config',
+      ddl: [RESUME_CONFIG_SCHEMA_SQL],
+    });
     await this.reload();
   }
 

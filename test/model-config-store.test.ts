@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { ModelConfigStore, MODEL_CONFIG_DEFAULTS } from '../src/config/model-config-store.js';
+import { ModelConfigStore, MODEL_CONFIG_DEFAULTS, MODEL_CONFIG_SCHEMA_SQL, MODEL_CONFIG_ALTER_SQL } from '../src/config/model-config-store.js';
+import { fakeSchemaProbe } from './fixtures/schema-probe.js';
+
+/** 假 pool 的 schema 探测应答：存储 init() 现在只探测、不建表（change cloud-schema-migration-executor 第 5 节）。 */
+const schemaProbe = fakeSchemaProbe(MODEL_CONFIG_SCHEMA_SQL, MODEL_CONFIG_ALTER_SQL);
 
 /** 内存假 pool：路由 model_config 的建表 / 自愈 ALTER / SELECT / upsert（单行）。text_provider 随 0018 加列。 */
 function fakeModelPool(seed?: { text_model: string | null; text_provider?: string | null; image_model: string | null }) {
@@ -10,6 +14,8 @@ function fakeModelPool(seed?: { text_model: string | null; text_provider?: strin
     : null;
   return {
     query: async (sql: string, params?: unknown[]) => {
+      const __probe = schemaProbe(sql);
+      if (__probe) return __probe;
       if (sql.includes('CREATE TABLE') || sql.trimStart().startsWith('ALTER')) return { rows: [] };
       if (sql.includes('SELECT text_model')) return { rows: row ? [row] : [] };
       if (sql.includes('INSERT INTO model_config')) {

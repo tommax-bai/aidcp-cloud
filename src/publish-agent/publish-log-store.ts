@@ -12,6 +12,7 @@ import { clampTitle } from './title-clamp.js';
 import { normalizePlatformId, type PlatformId } from '../platform/index.js';
 import { validatePublishSchedule } from './schedule-policy.js';
 import type { DeploymentTarget } from '../deployment-target.js';
+import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 /** JSONB publish_metadata 解析：pg 驱动通常已解析为对象；兼容字符串形态；解析失败诚实置 null。 */
 function parsePublishMetadata(raw: unknown): PublishMetadata | null {
@@ -316,7 +317,13 @@ export class PublishLogStore {
 
   /** 初始化表（幂等）。 */
   async init(): Promise<void> {
-    await this.pool.query(PUBLISH_SCHEMA_SQL);
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
+    // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
+    await ensureCapabilitySchema(this.pool, {
+      capability: 'publish_log',
+      sinceVersion: '0001_publish_log',
+      ddl: [PUBLISH_SCHEMA_SQL],
+    });
   }
 
   /** 写入一条发布记录，返回新行 id。 */

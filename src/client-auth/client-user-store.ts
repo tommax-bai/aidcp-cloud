@@ -25,6 +25,7 @@ import { shanghaiDayStartMs } from '../time/shanghai-day.js';
 import { resolveAccountDisplayName } from '../account-display-name.js';
 import { isMirrorStale, type ConfigMirrorKey } from '../config-mirror-freshness.js';
 import { writeWithMirrorBump, type MirrorVersionBumper } from '../config/mirror-version-store.js';
+import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;
 
@@ -825,7 +826,13 @@ export class ClientUserStore {
   }
 
   async init(): Promise<void> {
-    await this.pool.query(CLIENT_USERS_SCHEMA_SQL);
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
+    // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
+    await ensureCapabilitySchema(this.pool, {
+      capability: 'client_identity',
+      sinceVersion: '0065_baseline_identity_tables',
+      ddl: [CLIENT_USERS_SCHEMA_SQL],
+    });
     await this.refreshAutomationGateMirror();
     await this.refreshEnvironmentSlowStartMirror();
   }

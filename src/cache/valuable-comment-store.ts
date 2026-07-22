@@ -10,6 +10,7 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from './pg-anchor-cache.js';
+import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;
 
@@ -89,9 +90,15 @@ export class ValuableCommentStore {
       });
   }
 
-  /** 建表（幂等，columns-right-on-first-ship；无迁移框架）。 */
+  /** schema 探测（不建表）。 */
   async init(): Promise<void> {
-    await this.pool.query(VALUABLE_COMMENT_SCHEMA_SQL);
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
+    // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
+    await ensureCapabilitySchema(this.pool, {
+      capability: 'valuable_comments',
+      sinceVersion: '0066_baseline_cache_corpus_tables',
+      ddl: [VALUABLE_COMMENT_SCHEMA_SQL],
+    });
   }
 
   /** 归档一条优质评论（dedup_key 唯一，重复忽略）；插入后裁到全局保留上限。 */

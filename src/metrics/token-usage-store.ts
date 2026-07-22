@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { resolveEnvPgConfig } from '../cache/pg-config.js';
+import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;
 
@@ -240,7 +241,13 @@ export class TokenUsageStore {
   }
 
   async init(): Promise<void> {
-    await this.pool.query(TOKEN_USAGE_SCHEMA_SQL);
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
+    // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
+    await ensureCapabilitySchema(this.pool, {
+      capability: 'llm_token_usage',
+      sinceVersion: '0013_llm_token_usage',
+      ddl: [TOKEN_USAGE_SCHEMA_SQL],
+    });
     if (!this.timer) {
       this.timer = setInterval(() => {
         this.flush().catch(() => {});

@@ -1,12 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
-import {
-  CuratedContentStore,
-  CuratedContentUnavailableError,
-  normalizeCuratedReferenceImages,
-  type CuratedObservation,
-} from '../../src/cache/curated-content-store.js';
+import { CuratedContentStore, CuratedContentUnavailableError, normalizeCuratedReferenceImages, type CuratedObservation, CURATED_CONTENT_SCHEMA_SQL } from '../../src/cache/curated-content-store.js';
+import { fakeSchemaProbe } from '../fixtures/schema-probe.js';
+
+/** 假 pool 的 schema 探测应答：存储 init() 现在只探测、不建表（change cloud-schema-migration-executor 第 5 节）。 */
+const schemaProbe = fakeSchemaProbe(CURATED_CONTENT_SCHEMA_SQL);
 
 /** 捕获每次 query 的 (sql, params)，可按 sql 返回 canned rows，不依赖真 PG。 */
 function capturingPool(rowsFor?: (sql: string) => unknown[]): {
@@ -16,6 +15,8 @@ function capturingPool(rowsFor?: (sql: string) => unknown[]): {
   const calls: Array<{ sql: string; params: unknown[] }> = [];
   const pool = {
     query: async (sql: string, params: unknown[]) => {
+      const __probe = schemaProbe(sql);
+      if (__probe) return __probe;
       calls.push({ sql, params });
       return { rows: rowsFor ? rowsFor(sql) : [] };
     },
@@ -38,25 +39,34 @@ const baseObs: CuratedObservation = {
   admitReason: 'high_quality',
 };
 
-test('init 建表幂等（DDL 含 IF NOT EXISTS 与索引）', async () => {
+// change cloud-schema-migration-executor 第 5 节：init() 不再建表，只探测。
+// 原用例断言的是「init 发出了这段 DDL」；现在 DDL 的所有者是 migrations/0066_baseline_cache_corpus_tables，
+// 这段常量退化为**要求声明**（探测据它推导，补齐迁移也据它抽出）。于是拆成两条断言：
+//   ① init 除探测外一条语句都不发 —— 一条建表都不许发；
+//   ② 常量本身仍声明那些列与索引 —— 少一条，迁移与探测会同时少一条。
+test('init 只探测、不建表（一条 DDL 都不发）', async () => {
   const { pool, calls } = capturingPool();
   const store = new CuratedContentStore({ pool });
   await store.init();
-  assert.equal(calls.length, 1);
-  assert.match(calls[0].sql, /CREATE TABLE IF NOT EXISTS curated_content/);
-  assert.match(calls[0].sql, /content_type IN \('image_text','video','comment'\)/);
-  assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS reference_images JSONB/);
-  assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS visual_analysis JSONB/);
-  assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS text_card_transcription JSONB/);
-  assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS source_published_at_text TEXT/);
-  assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS source_published_at TIMESTAMPTZ/);
-  assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS source_published_at_precision TEXT/);
-  assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS source_published_at_status TEXT/);
-  assert.match(calls[0].sql, /ADD COLUMN IF NOT EXISTS source_published_at_observed_at TIMESTAMPTZ/);
-  assert.match(calls[0].sql, /content_type = 'image_text'/);
-  assert.match(calls[0].sql, /dedup_key\s+TEXT NOT NULL UNIQUE/);
-  assert.match(calls[0].sql, /CREATE INDEX IF NOT EXISTS .* USING GIN\(topics\)/);
-  assert.match(calls[0].sql, /CREATE INDEX IF NOT EXISTS .*\(account_id, updated_at DESC\)/);
+  assert.deepEqual(calls, [], 'init 发出的非探测语句必须为空：DDL 的唯一所有者是 migrations/');
+});
+
+test('CURATED_CONTENT_SCHEMA_SQL 仍声明全部列与索引（迁移与探测共同的要求来源）', () => {
+  const sql = CURATED_CONTENT_SCHEMA_SQL;
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS curated_content/);
+  assert.match(sql, /content_type IN \('image_text','video','comment'\)/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS reference_images JSONB/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS visual_analysis JSONB/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS text_card_transcription JSONB/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS source_published_at_text TEXT/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS source_published_at TIMESTAMPTZ/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS source_published_at_precision TEXT/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS source_published_at_status TEXT/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS source_published_at_observed_at TIMESTAMPTZ/);
+  assert.match(sql, /content_type = 'image_text'/);
+  assert.match(sql, /dedup_key\s+TEXT NOT NULL UNIQUE/);
+  assert.match(sql, /CREATE INDEX IF NOT EXISTS .* USING GIN\(topics\)/);
+  assert.match(sql, /CREATE INDEX IF NOT EXISTS .*\(account_id, updated_at DESC\)/);
 });
 
 test('upsertObservation：INSERT...ON CONFLICT DO UPDATE，含 dedup_key、不抹 bot 标记、保留 first_seen_at', async () => {
@@ -537,6 +547,8 @@ function controllablePool(handler: (sql: string, params: unknown[]) => { rows?: 
   const calls: Array<{ sql: string; params: unknown[] }> = [];
   const pool = {
     query: async (sql: string, params: unknown[]) => {
+      const __probe = schemaProbe(sql);
+      if (__probe) return __probe;
       calls.push({ sql, params });
       const r = handler(sql, params);
       return { rows: r.rows ?? [], rowCount: r.rowCount };

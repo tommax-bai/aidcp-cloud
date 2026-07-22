@@ -1,3 +1,7 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:config_mirror_stale_refusal.execution_target,column:config_mirror_stale_refusal.hour_bucket,column:config_mirror_stale_refusal.mirror_key,column:config_mirror_stale_refusal.refusal_count
+-- aidcp:objects=column:config_mirror_stale_refusal.updated_at,column:config_mirror_version.mirror_key,column:config_mirror_version.updated_at,column:config_mirror_version.version
+-- aidcp:objects=index:idx_config_mirror_stale_refusal_hour,table:config_mirror_stale_refusal,table:config_mirror_version
 -- 0062_config_mirror_version.sql（change config-mirror-cross-process-invalidation）
 --
 -- 文档性迁移：本仓无迁移执行器，实际由 src/config/mirror-version-store.ts 的

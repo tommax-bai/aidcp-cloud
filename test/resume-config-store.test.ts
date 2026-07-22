@@ -1,12 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { ResumeConfigStore } from '../src/config/resume-config-store.js';
+import { ResumeConfigStore, RESUME_CONFIG_SCHEMA_SQL } from '../src/config/resume-config-store.js';
 import {
   DEFAULT_IDLE_END_MS,
   DEFAULT_IDLE_NUDGE_MS,
   DEFAULT_REST_RATIO_PCT,
 } from '../src/risk/resume-limits.js';
+import { fakeSchemaProbe } from './fixtures/schema-probe.js';
+
+/** 假 pool 的 schema 探测应答：存储 init() 现在只探测、不建表（change cloud-schema-migration-executor 第 5 节）。 */
+const schemaProbe = fakeSchemaProbe(RESUME_CONFIG_SCHEMA_SQL);
 
 interface SeedRow {
   rest_ratio_pct: number | null;
@@ -26,6 +30,8 @@ function fakePool(seed?: SeedRow) {
   let failWrite = false;
   const pool = {
     query: async (sql: string, params?: unknown[]) => {
+      const __probe = schemaProbe(sql);
+      if (__probe) return __probe;
       if (sql.includes('CREATE TABLE')) return { rows: [] };
       if (sql.includes('INSERT INTO resume_config_global')) {
         if (failWrite) throw new Error('db down');

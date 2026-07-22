@@ -1,0 +1,264 @@
+{
+  "_comment": [
+    "运行时 DDL 允许清单（change cloud-schema-migration-executor 任务 4.1）。",
+    "清单只减不增：新增运行时 DDL MUST 改为加在 migrations/，MUST NOT 加进本文件。",
+    "每收口一批存储，跑 npx tsx scripts/generate-ddl-allowlist.ts --write 让条目变少。",
+    "key = <verb>:<object>，刻意不含行号——行号会随无关编辑漂移，会把清单变成噪声源。"
+  ],
+  "baseline": {
+    "_comment": [
+      "首次冻结时的三元组，按当前 master 实测（非 proposal/design 里的历史数字）。",
+      "本块一旦落盘 MUST NOT 随收口进度重算——它记的是「当初有多少」。",
+      "createTableOnly 单列，是为了与 proposal 的 76 / 58–60 / 34（只数建表动词）同尺子对照。"
+    ],
+    "measuredOn": "master @ publish-approval-signal-to-database (d9c550e) + 本 change 第一批",
+    "textHits": 271,
+    "effectiveHits": 252,
+    "files": 37,
+    "createTableOnly": {
+      "textHits": 83,
+      "effectiveHits": 64,
+      "files": 37,
+      "note": "proposal 记 76 / 58–60 / 34；差额来自 config-mirror 与 publish-approval 两个并行 change 新增的两个存储"
+    }
+  },
+  "current": {
+    "textHits": 271,
+    "effectiveHits": 252,
+    "files": 37
+  },
+  "entries": {
+    "src/account-store.ts": {
+      "alter_table:accounts": 7,
+      "create_table:accounts": 1
+    },
+    "src/alerts/alert-store.ts": {
+      "create_index:idx_alerts_created": 1,
+      "create_index:idx_alerts_unresolved_edge": 1,
+      "create_table:alerts": 1
+    },
+    "src/cache/concept-store.ts": {
+      "create_table:concepts": 1
+    },
+    "src/cache/curated-content-store.ts": {
+      "alter_table:curated_content": 10,
+      "create_index:idx_curated_content_account_updated": 1,
+      "create_index:idx_curated_content_topics": 1,
+      "create_table:curated_content": 1
+    },
+    "src/cache/group-route-store.ts": {
+      "create_table:group_route": 1
+    },
+    "src/cache/interaction-feed-store.ts": {
+      "create_index:idx_interaction_feed_account_time": 1,
+      "create_index:idx_interaction_feed_time": 1,
+      "create_table:interaction_feed": 1,
+      "create_table:interaction_target_meta": 1
+    },
+    "src/cache/liked-note-store.ts": {
+      "create_index:idx_liked_notes_liked_at": 1,
+      "create_table:liked_notes": 1
+    },
+    "src/cache/notification-contact-store.ts": {
+      "create_index:idx_notification_event_account_seen": 1,
+      "create_index:idx_notification_event_account_user": 1,
+      "create_table:notification_contact_meta": 1,
+      "create_table:notification_event": 1
+    },
+    "src/cache/pg-anchor-cache.ts": {
+      "create_table:anchor_staging": 1,
+      "create_table:anchors": 1
+    },
+    "src/cache/valuable-comment-store.ts": {
+      "create_index:idx_valuable_comments_liked_at": 1,
+      "create_index:idx_valuable_comments_topics": 1,
+      "create_table:valuable_comments": 1
+    },
+    "src/client-auth/client-user-store.ts": {
+      "alter_table:client_env_scope": 2,
+      "alter_table:client_environment_deletion_requests": 2,
+      "alter_table:client_environments": 11,
+      "create_index:client_env_provisioning_intents_expiry_idx": 1,
+      "create_index:client_env_provisioning_intents_user_idx": 1,
+      "create_index:client_env_revocation_holds_requested_idx": 1,
+      "create_index:client_env_scope_active_user_idx": 1,
+      "create_index:client_env_scope_audit_scope_idx": 1,
+      "create_index:client_env_scope_env_idx": 1,
+      "create_index:client_environment_deletion_active_idx": 1,
+      "create_index:client_environment_deletion_target_idx": 1,
+      "create_index:client_environment_installations_user_seen_idx": 1,
+      "create_index:client_environments_account_idx": 1,
+      "create_index:client_environments_lifecycle_idx": 1,
+      "create_index:uq_client_env_scope_active_env": 1,
+      "create_table:client_env_provisioning_intents": 1,
+      "create_table:client_env_revocation_holds": 1,
+      "create_table:client_env_scope": 1,
+      "create_table:client_env_scope_audit": 1,
+      "create_table:client_environment_deletion_requests": 1,
+      "create_table:client_environment_installations": 1,
+      "create_table:client_environments": 1,
+      "create_table:client_users": 1
+    },
+    "src/comment-agent/facebook-comment-audit-store.ts": {
+      "create_index:idx_fb_comment_audit_account": 1,
+      "create_table:facebook_comment_audit": 1
+    },
+    "src/comment-agent/facebook-group-store.ts": {
+      "alter_table:facebook_group_join_audit": 2,
+      "alter_table:facebook_group_target": 12,
+      "create_index:idx_fb_group_join_audit_account": 1,
+      "create_index:idx_fb_group_join_audit_group": 1,
+      "create_index:idx_fb_group_join_audit_scheduled": 1,
+      "create_index:idx_fb_group_membership_account_status": 1,
+      "create_index:idx_fb_group_membership_assigned_ttl": 1,
+      "create_index:idx_fb_group_membership_coverage": 1,
+      "create_index:idx_fb_group_membership_status": 1,
+      "create_index:idx_fb_group_target_direction": 1,
+      "create_index:idx_fb_group_target_enabled_gating": 1,
+      "create_index:idx_fb_group_target_region_park": 1,
+      "create_index:idx_fb_group_target_scope_label": 1,
+      "create_table:facebook_group_join_audit": 1,
+      "create_table:facebook_group_membership": 1,
+      "create_table:facebook_group_target": 1,
+      "create_table:facebook_group_target_scope": 1
+    },
+    "src/config/approval-policy-store.ts": {
+      "create_table:account_comment_approval_policy": 1,
+      "create_table:group_publish_approval_policy": 1
+    },
+    "src/config/category-config-store.ts": {
+      "alter_table:category_config": 2,
+      "create_index:uq_category_config_account": 1,
+      "create_index:uq_category_config_global": 1,
+      "create_table:category_config": 1
+    },
+    "src/config/content-schedule-store.ts": {
+      "alter_table:account_content_schedule": 11,
+      "alter_table:contact_comment_attempts": 4,
+      "create_index:idx_contact_comment_attempts_account": 1,
+      "create_table:account_content_schedule": 1,
+      "create_table:contact_comment_attempts": 1,
+      "create_table:content_schedule_global": 1,
+      "create_table:content_schedule_hour_claims": 1
+    },
+    "src/config/credential-store.ts": {
+      "create_table:provider_credentials": 1
+    },
+    "src/config/facebook-comment-config-store.ts": {
+      "alter_table:account_facebook_comment_config": 2,
+      "create_table:account_facebook_comment_config": 1
+    },
+    "src/config/facebook-group-join-automation-store.ts": {
+      "create_table:facebook_group_join_automation_config": 1
+    },
+    "src/config/hot-lead-config-store.ts": {
+      "create_table:hot_lead_config_global": 1
+    },
+    "src/config/mirror-version-store.ts": {
+      "create_index:idx_config_mirror_stale_refusal_hour": 1,
+      "create_table:config_mirror_stale_refusal": 1,
+      "create_table:config_mirror_version": 1
+    },
+    "src/config/model-config-store.ts": {
+      "alter_table:model_config": 2,
+      "create_table:model_config": 1
+    },
+    "src/config/pacing-config-store.ts": {
+      "create_table:pacing_floor_config": 1
+    },
+    "src/config/persona-auto-fill-store.ts": {
+      "alter_table:persona_auto_fill_runs": 3,
+      "create_index:persona_auto_fill_targets_env_idx": 1,
+      "create_index:persona_auto_fill_targets_run_state_idx": 1,
+      "create_table:persona_auto_fill_runs": 1,
+      "create_table:persona_auto_fill_targets": 1
+    },
+    "src/config/persona-store.ts": {
+      "create_table:persona_config": 1
+    },
+    "src/config/quota-config-store.ts": {
+      "create_table:quota_config": 1
+    },
+    "src/config/resume-config-store.ts": {
+      "create_table:resume_config_global": 1
+    },
+    "src/config/role-config-store.ts": {
+      "alter_table:role_config": 2,
+      "create_table:role_config": 1
+    },
+    "src/config/session-config-store.ts": {
+      "alter_table:session_config_global": 4,
+      "create_table:session_config_global": 1
+    },
+    "src/delegated-task/store.ts": {
+      "alter_table:delegated_tasks": 4,
+      "create_index:idx_delegated_task_attempts_reconcile": 1,
+      "create_index:idx_delegated_task_events_task": 1,
+      "create_index:idx_delegated_tasks_curated_publish_id": 1,
+      "create_index:idx_delegated_tasks_curated_publish_source": 1,
+      "create_index:idx_delegated_tasks_target_active_dedupe": 1,
+      "create_index:idx_delegated_tasks_target_claim": 1,
+      "create_index:idx_delegated_tasks_target_ownership": 1,
+      "create_table:delegated_task_attempts": 1,
+      "create_table:delegated_task_events": 1,
+      "create_table:delegated_tasks": 1
+    },
+    "src/metrics/token-usage-store.ts": {
+      "alter_table:llm_token_usage": 4,
+      "create_index:idx_llm_billing_price_snapshot_day": 1,
+      "create_index:idx_llm_token_usage_account_bucket": 1,
+      "create_index:idx_llm_token_usage_bucket": 1,
+      "create_index:idx_llm_token_usage_provider_model_bucket": 1,
+      "create_table:llm_billing_price_snapshot": 1,
+      "create_table:llm_token_usage": 1
+    },
+    "src/onboarding/first-post-onboarding-store.ts": {
+      "create_index:idx_first_post_onboarding_state": 1,
+      "create_table:first_post_onboarding": 1
+    },
+    "src/publish-agent/draft-refinement.ts": {
+      "create_index:idx_publish_draft_refinement_account_record": 1,
+      "create_index:idx_publish_draft_refinement_one_active": 1,
+      "create_index:idx_publish_draft_refinement_target_claim": 1,
+      "create_table:publish_draft_refinement_jobs": 1
+    },
+    "src/publish-agent/facebook-publish-media-store.ts": {
+      "alter_table:account_facebook_publish_image": 1,
+      "alter_table:account_facebook_publish_image_set": 7,
+      "create_index:idx_fb_publish_image_set_account_sha": 1,
+      "create_index:idx_fb_publish_image_set_account_status_order": 1,
+      "create_index:idx_fb_publish_image_set_reserved": 1,
+      "create_index:idx_fb_publish_image_set_used_log": 1,
+      "create_table:account_facebook_publish_image": 1,
+      "create_table:account_facebook_publish_image_set": 1
+    },
+    "src/publish-agent/publish-approval-store.ts": {
+      "create_index:idx_publish_approval_decision_active": 1,
+      "create_index:idx_publish_approval_decision_pending": 1,
+      "create_index:idx_publish_approval_outbox_unconsumed": 1,
+      "create_table:publish_approval_decision": 1,
+      "create_table:publish_approval_outbox": 1
+    },
+    "src/publish-agent/publish-log-store.ts": {
+      "alter_table:publish_log": 20,
+      "create_index:idx_publish_log_account": 1,
+      "create_index:idx_publish_log_platform": 1,
+      "create_index:idx_publish_log_scheduled_due": 1,
+      "create_table:publish_log": 1
+    },
+    "src/risk/pg-risk-store.ts": {
+      "alter_table:risk_counters": 3,
+      "create_index:idx_risk_counter_outbox_claim": 1,
+      "create_index:idx_risk_counters_account_action_time": 1,
+      "create_index:idx_risk_counters_account_time": 1,
+      "create_index:idx_risk_counters_time": 1,
+      "create_index:idx_risk_interactions_account_time": 1,
+      "create_index:uq_risk_counter_outbox_target_dedupe": 1,
+      "create_index:uq_risk_counters_outbox": 1,
+      "create_table:risk_counter_outbox": 1,
+      "create_table:risk_counters": 1,
+      "create_table:risk_interactions": 1,
+      "create_table:risk_state": 1
+    }
+  }
+}

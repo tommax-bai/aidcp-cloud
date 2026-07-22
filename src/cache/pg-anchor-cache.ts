@@ -13,6 +13,7 @@
 
 import pg from 'pg';
 import type { RemoteAnchor } from '../comm/protocol.js';
+import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;
 
@@ -142,7 +143,13 @@ export class PgAnchorCache {
 
   /** 初始化表结构（幂等） */
   async init(): Promise<void> {
-    await this.pool.query(SCHEMA_SQL);
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
+    // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
+    await ensureCapabilitySchema(this.pool, {
+      capability: 'anchor_cache',
+      sinceVersion: '0066_baseline_cache_corpus_tables',
+      ddl: [SCHEMA_SQL],
+    });
   }
 
   /** 读主缓存锚点 */
