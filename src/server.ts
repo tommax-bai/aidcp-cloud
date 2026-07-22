@@ -1420,6 +1420,9 @@ async function main(): Promise<void> {
     replyWorkflow = new ReplyWorkflow(interactionStore, replyConfigResolver, replyAi, {
       dmAiEnabled: readEnvString('AIDCP_INTERACTION_DM_AI_ENABLED')?.toLocaleLowerCase() === 'true',
       accountNameFor: accountDisplayName,
+      ...(accountStore?.getContactInfo ? {
+        contactInfoFor: (accountId: string) => accountStore!.getContactInfo!(accountId),
+      } : {}),
       canAutoQueue: async (context, snapshot, preview) =>
         interactionSender?.canAutoQueueDraft(context, snapshot, preview) ?? false,
     });

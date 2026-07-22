@@ -32,12 +32,12 @@ const MULTI_STAGE_VISION_NOTE = '多阶段视觉模型的真实文本指令合�
 const EXAMPLE_INBOUND: MinimalInbound = {
   channel: 'comment',
   messageType: 'text',
-  text: '<示例用户留言：请问这个产品什么时候发货？>',
+  text: '<示例用户留言：这个分享很实用，已经收藏啦！>',
   userName: '<示例用户昵称>',
   videoTitle: '<示例视频标题>',
   recentMessages: [
-    { direction: 'inbound', text: '<示例历史消息：想了解一下商品信息>' },
-    { direction: 'outbound', text: '<示例历史回复：您好，请问想了解哪一方面？>' },
+    { direction: 'inbound', text: '<示例历史消息：很喜欢你的视频风格>' },
+    { direction: 'outbound', text: '<示例历史回复：谢谢喜欢呀>' },
   ],
 };
 
@@ -53,7 +53,7 @@ const EXAMPLE_POLISHER_INPUT: PolisherInput = {
   requestId: '<示例请求ID>',
   accountId: '<示例账号ID>',
   inbound: EXAMPLE_INBOUND,
-  renderedText: '<示例模板回复：您好，发货时间请以订单页面显示为准。>',
+  renderedText: '<示例模板回复：谢谢喜欢，很开心这个分享对你有帮助。>',
   profile: {
     tone: ['friendly', 'concise'],
     maxLength: 120,
@@ -69,8 +69,8 @@ const EXAMPLE_REVIEWER_INPUT: RiskReviewerInput = {
   requestId: '<示例请求ID>',
   accountId: '<示例账号ID>',
   inbound: EXAMPLE_INBOUND,
-  renderedText: '<示例模板回复：您好，发货时间请以订单页面显示为准。>',
-  candidateText: '<示例候选回复：您好，具体发货时间请以订单页面显示为准。>',
+  renderedText: '<示例模板回复：谢谢喜欢，很开心这个分享对你有帮助。>',
+  candidateText: '<示例候选回复：谢谢喜欢呀，很开心能帮到你。>',
   meaningChanged: false,
   introducedClaims: [],
   policy: { mode: 'review_before_send', hardRiskTags: ['order', 'shipping', 'unknown'] },

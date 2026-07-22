@@ -118,6 +118,10 @@ test('视频号收件箱三个 interaction 角色全部使用真实同源 prompt
     assert.equal(view.personaSource, 'none');
     assert.equal(view.personaFallback, undefined);
   }
+  const polisher = p.get('reply_polisher');
+  assert.match(polisher.prompt ?? '', /通用博主回复助手.*默认一到两句/s);
+  assert.match(polisher.prompt ?? '', /不得自行增加私聊引导或联系方式/);
+  assert.doesNotMatch(polisher.prompt ?? '', /什么时候发货|订单页面显示|想了解一下商品信息/);
 });
 
 test('独立 Facebook 角色和封面文字卡角色不依赖 dispatcher 也可预览', () => {

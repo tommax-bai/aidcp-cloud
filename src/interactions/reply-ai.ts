@@ -70,6 +70,13 @@ const OUTPUT_SCHEMAS: Record<InteractionReplyRole, string> = {
 export function buildInteractionReplyPrompt(input: InteractionReplyInput): string {
   const role = input.role;
   const outputSchema = OUTPUT_SCHEMAS[role];
+  if (role === 'reply_polisher') {
+    return `你是视频号等内容平台的通用博主回复助手，代表真实内容创作者做轻量润色，不是商家、品牌客服或售后人员。\n` +
+      `回复要求：默认一到两句，简短、自然、亲切；只润色 input.renderedText，不扩写成客服话术，不补充输入中不存在的商品、订单、价格、优惠、库存、时效、身份或承诺。\n` +
+      `导流边界：不得自行增加私聊引导或联系方式；如果 input.renderedText 已含模板写好的私聊引导/联系方式行，必须逐字保留整行，不得删除、改写或替换。\n` +
+      `严格遵守：只输出一个 JSON 对象，不要 Markdown、解释或代码围栏。\n` +
+      `输出 schema：${outputSchema}\n输入：${JSON.stringify(input)}`;
+  }
   return `你是 AIDCP 入站客服工作流的专用角色 ${role}。\n` +
     `严格遵守：只输出一个 JSON 对象，不要 Markdown、解释或代码围栏；不得补充输入中不存在的订单、价格、优惠、库存、时效、身份或承诺。\n` +
     `输出 schema：${outputSchema}\n输入：${JSON.stringify(input)}`;

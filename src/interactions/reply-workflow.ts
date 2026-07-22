@@ -73,10 +73,29 @@ function profileFor(snapshot: ReplyConfigSnapshot, channel: 'comment' | 'dm'): R
   return snapshot.profiles.find((profile) => profile.channel === channel) ?? null;
 }
 
+const SUPPORT_CHANNEL_VARIABLE = /{{\s*support_channel\s*}}/;
+
+function renderedSupportChannelLines(template: ReplyTemplate, renderedText: string): string[] {
+  const renderedLines = renderedText.split('\n');
+  return template.content.trim().split('\n').flatMap((line, index) =>
+    SUPPORT_CHANNEL_VARIABLE.test(line) && renderedLines[index] !== undefined ? [renderedLines[index]] : []);
+}
+
+function preservesProtectedLines(candidateText: string, protectedLines: string[]): boolean {
+  const remainingCandidateLines = candidateText.split('\n');
+  return protectedLines.every((line) => {
+    const index = remainingCandidateLines.indexOf(line);
+    if (index < 0) return false;
+    remainingCandidateLines.splice(index, 1);
+    return true;
+  });
+}
+
 export class ReplyWorkflow {
   private readonly requestId: () => string;
   private readonly dmAiEnabled: boolean;
   private readonly accountNameFor: (accountId: string) => string | null | undefined | Promise<string | null | undefined>;
+  private readonly contactInfoFor: (accountId: string) => string | null | undefined | Promise<string | null | undefined>;
   private readonly canAutoQueue: (
     context: ScopedJobContext,
     snapshot: ReplyConfigSnapshot,
@@ -97,11 +116,13 @@ export class ReplyWorkflow {
         preview: ReplyPreviewResult,
       ) => Promise<boolean>;
       accountNameFor?: (accountId: string) => string | null | undefined | Promise<string | null | undefined>;
+      contactInfoFor?: (accountId: string) => string | null | undefined | Promise<string | null | undefined>;
     } = {},
   ) {
     this.requestId = options.requestId ?? randomUUID;
     this.dmAiEnabled = options.dmAiEnabled ?? false;
     this.accountNameFor = options.accountNameFor ?? (() => null);
+    this.contactInfoFor = options.contactInfoFor ?? (() => null);
     this.canAutoQueue = options.canAutoQueue ?? (async () => false);
   }
 
@@ -226,12 +247,16 @@ export class ReplyWorkflow {
     }
     let rendered: string;
     try {
-      const accountName = await this.accountNameFor(snapshot.accountId);
+      const usesSupportChannel = template.content.split('\n').some((line) => SUPPORT_CHANNEL_VARIABLE.test(line));
+      const [accountName, contactInfo] = await Promise.all([
+        this.accountNameFor(snapshot.accountId),
+        usesSupportChannel ? this.contactInfoFor(snapshot.accountId) : null,
+      ]);
       rendered = renderReplyTemplate(template, profile, {
         user_name: inbound.userName,
         video_title: inbound.videoTitle,
         account_name: accountName?.trim() || profile.selfName,
-        support_channel: null,
+        support_channel: typeof contactInfo === 'string' && contactInfo.trim() ? contactInfo : null,
       });
     } catch (error) {
       throw new InteractionError('INTERACTION_VALIDATION_FAILED',
@@ -252,7 +277,10 @@ export class ReplyWorkflow {
     const aiPolishInvoked = aiAllowed && rule.actions.polish && snapshot.policy.channels[inbound.channel].aiPolishEnabled;
     const polishedCandidate = polish.value.polishedText;
     const candidateIssues = validateFinalReplyText(profile, polishedCandidate);
-    const candidate = candidateIssues.length ? rendered : polishedCandidate;
+    const protectedLines = renderedSupportChannelLines(template, rendered);
+    const candidate = candidateIssues.length || !preservesProtectedLines(polishedCandidate, protectedLines)
+      ? rendered
+      : polishedCandidate;
     const deterministicTags: RiskTag[] = [];
     const intentRiskTag = INTENT_RISK_TAG[classifier.value.intent];
     if (intentRiskTag) deterministicTags.push(intentRiskTag);

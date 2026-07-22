@@ -130,6 +130,22 @@ test('dedicated AI roles consume frozen fixtures and reject malformed structured
   assert.deepEqual(result.value.riskTags, ['unknown']);
 });
 
+test('reply polisher prompt is a short friendly creator voice and leaves contact guidance to templates', () => {
+  const input: PolisherInput = {
+    role: 'reply_polisher', requestId: 'creator-prompt', accountId: 'acct_wc_demo', inbound,
+    renderedText: '谢谢喜欢呀。',
+    profile: { tone: ['friendly', 'concise'], maxLength: 120, allowEmoji: false, allowLinks: false,
+      blockedPhrases: [], requiredDisclaimer: null },
+  };
+  const prompt = buildInteractionReplyPrompt(input);
+  assert.match(prompt, /通用博主回复助手/);
+  assert.match(prompt, /不是商家、品牌客服或售后人员/);
+  assert.match(prompt, /默认一到两句，简短、自然、亲切/);
+  assert.match(prompt, /不得自行增加私聊引导或联系方式/);
+  assert.match(prompt, /必须逐字保留整行/);
+  assert.doesNotMatch(prompt, /入站客服工作流的专用角色 reply_polisher/);
+});
+
 test('AI timeout returns explainable fail-closed fallbacks and never emits an empty reply', async () => {
   const hung: LlmClient = { complete: async () => await new Promise<string>(() => {}) };
   const ai = new ReplyAiService(hung, 10);
@@ -164,6 +180,103 @@ test('DM AI defaults off and no private-message body reaches classifier, polishe
   assert.equal(preview.riskLevel, 'unknown');
   assert.equal(preview.requiresApproval, true);
   assert.deepEqual(preview.reviewReasons, ['dm_ai_disabled']);
+});
+
+test('explicit support-channel template prefers account contact and preserves its guidance line', async () => {
+  const config = snapshot();
+  config.templates = [{ ...template, content: '{{user_name}}，谢谢关注。\n想继续聊可以私信：{{support_channel}}',
+    variables: ['user_name', 'support_channel'] }];
+  config.rules = [{ ...rule('contact', 1), actions: { templateId: template.templateId, polish: true,
+    allowAutoSend: false, forceHumanTags: [] } }];
+  const outputs = [
+    { role: 'reply_intent_classifier', intent: 'gratitude', confidence: 1, riskTags: [], reasons: [] },
+    { role: 'reply_polisher', polishedText: '小王，谢谢喜欢呀！\n想继续聊可以私信：微信 creator123',
+      meaningChanged: false, introducedClaims: [], riskTags: [] },
+    { role: 'reply_risk_reviewer', riskLevel: 'low', riskTags: [], reasons: [], allowAutoSend: false },
+  ];
+  let contactReads = 0;
+  const workflow = new ReplyWorkflow({} as InteractionStore, {} as ReplyConfigStore,
+    new ReplyAiService({ complete: async () => JSON.stringify(outputs.shift()) }, 100), {
+      contactInfoFor: async () => { contactReads += 1; return '微信 creator123'; },
+    });
+  const preview = await workflow.buildPreview(config, inbound, null);
+  assert.equal(contactReads, 1);
+  assert.equal(preview.renderedText, '小王，谢谢关注。\n想继续聊可以私信：微信 creator123');
+  assert.equal(preview.finalText, '小王，谢谢喜欢呀！\n想继续聊可以私信：微信 creator123');
+  assert.equal(preview.requiresApproval, true);
+});
+
+test('support-channel template uses published fallback when account contact is missing', async () => {
+  const config = snapshot();
+  config.templates = [{ ...template, content: '想继续聊可以私信：{{ support_channel }}', variables: ['support_channel'] }];
+  config.rules = [{ ...rule('contact-fallback', 1), actions: { templateId: template.templateId, polish: false,
+    allowAutoSend: false, forceHumanTags: [] } }];
+  const outputs = [
+    { role: 'reply_intent_classifier', intent: 'gratitude', confidence: 1, riskTags: [], reasons: [] },
+    { role: 'reply_risk_reviewer', riskLevel: 'low', riskTags: [], reasons: [], allowAutoSend: false },
+  ];
+  const workflow = new ReplyWorkflow({} as InteractionStore, {} as ReplyConfigStore,
+    new ReplyAiService({ complete: async () => JSON.stringify(outputs.shift()) }, 100), {
+      contactInfoFor: async () => null,
+    });
+  const preview = await workflow.buildPreview(config, inbound, null);
+  assert.equal(preview.renderedText, '想继续聊可以私信：客服');
+  assert.equal(preview.finalText, '想继续聊可以私信：客服');
+});
+
+test('support-channel contact read failure is not disguised as a missing contact', async () => {
+  const config = snapshot();
+  config.templates = [{ ...template, content: '想继续聊可以私信：{{support_channel}}', variables: ['support_channel'] }];
+  config.rules = [{ ...rule('contact-read-failure', 1), actions: { templateId: template.templateId, polish: false,
+    allowAutoSend: false, forceHumanTags: [] } }];
+  const classifier = { role: 'reply_intent_classifier', intent: 'gratitude', confidence: 1, riskTags: [], reasons: [] };
+  const workflow = new ReplyWorkflow({} as InteractionStore, {} as ReplyConfigStore,
+    new ReplyAiService({ complete: async () => JSON.stringify(classifier) }, 100), {
+      contactInfoFor: async () => { throw new Error('contact_read_failed'); },
+    });
+  await assert.rejects(workflow.buildPreview(config, inbound, null), /模板渲染失败：contact_read_failed/);
+});
+
+test('template without support-channel placeholder never reads or appends account contact', async () => {
+  const config = snapshot();
+  config.rules = [{ ...rule('no-contact', 1), actions: { templateId: template.templateId, polish: false,
+    allowAutoSend: false, forceHumanTags: [] } }];
+  const outputs = [
+    { role: 'reply_intent_classifier', intent: 'gratitude', confidence: 1, riskTags: [], reasons: [] },
+    { role: 'reply_risk_reviewer', riskLevel: 'low', riskTags: [], reasons: [], allowAutoSend: false },
+  ];
+  let contactReads = 0;
+  const workflow = new ReplyWorkflow({} as InteractionStore, {} as ReplyConfigStore,
+    new ReplyAiService({ complete: async () => JSON.stringify(outputs.shift()) }, 100), {
+      contactInfoFor: async () => { contactReads += 1; throw new Error('must_not_read_contact'); },
+    });
+  const preview = await workflow.buildPreview(config, inbound, null);
+  assert.equal(contactReads, 0);
+  assert.equal(preview.finalText, '小王，谢谢关注 示例视频号。');
+  assert.doesNotMatch(preview.finalText ?? '', /creator123|私信/);
+});
+
+test('AI candidate that rewrites a support-channel guidance line falls back to the rendered template', async () => {
+  const config = snapshot();
+  config.templates = [{ ...template, content: '\n{{user_name}}，谢谢关注。\n想继续聊可以私信：{{support_channel}}',
+    variables: ['user_name', 'support_channel'] }];
+  config.rules = [{ ...rule('protected-contact', 1), actions: { templateId: template.templateId, polish: true,
+    allowAutoSend: true, forceHumanTags: [] } }];
+  const outputs = [
+    { role: 'reply_intent_classifier', intent: 'gratitude', confidence: 1, riskTags: [], reasons: [] },
+    { role: 'reply_polisher', polishedText: '小王，谢谢喜欢呀！\n加我微信：creator123',
+      meaningChanged: false, introducedClaims: [], riskTags: [] },
+    { role: 'reply_risk_reviewer', riskLevel: 'low', riskTags: [], reasons: [], allowAutoSend: true },
+  ];
+  const workflow = new ReplyWorkflow({} as InteractionStore, {} as ReplyConfigStore,
+    new ReplyAiService({ complete: async () => JSON.stringify(outputs.shift()) }, 100), {
+      contactInfoFor: async () => '微信 creator123',
+    });
+  const preview = await workflow.buildPreview(config, inbound, null);
+  assert.equal(preview.renderedText, '小王，谢谢关注。\n想继续聊可以私信：微信 creator123');
+  assert.equal(preview.polishedText, preview.renderedText);
+  assert.equal(preview.finalText, preview.renderedText);
+  assert.equal(preview.requiresApproval, true, 'AI was invoked even though its candidate was discarded');
 });
 
 test('deterministic intent-to-risk mapping overrides an under-classified refund reply', async () => {
