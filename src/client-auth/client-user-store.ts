@@ -18,6 +18,7 @@
 import crypto from 'node:crypto';
 import pg from 'pg';
 import { resolveEnvPgConfig } from '../cache/pg-config.js';
+import { lockEnvironmentRow } from '../db/environment-row-lock.js';
 import { generateKey, hashKey, verifyKey, decoyVerify } from './key.js';
 import { RETIRED_ACCOUNT_ID } from '../account-store.js';
 import { shanghaiDayStartMs } from '../time/shanghai-day.js';
@@ -631,9 +632,14 @@ export class ClientUserStore {
         await client.query('ROLLBACK');
         return { ok: false, reason: user.rows[0] ? 'disabled' : 'not_authorized' };
       }
-      // Serialize first-auth status creation with unbind for the same environment.
-      // Without this lock, an auth row could race in after the no-binding check.
-      await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, [`interaction-env:${key}`]);
+      // 环境级串行（change publish-approval-signal-to-database §5）：与首次授权写入互斥——
+      // 没有这道锁，「无绑定」检查之后仍可能有一条 auth 行插进来。
+      //
+      // 用**被保护数据所在表的行锁**，不再用库级 advisory lock：advisory lock 一旦两侧连到不同库 /
+      // 不同实例，两边各自加锁都会成功、互斥消失且**不报任何错**。行锁绑定 `client_environments` 这张
+      // 表本身，跨库时是响亮的失败而不是静默失效。
+      // 注：本路径下方 JOIN 了 client_environments，故该行必然存在；无注册环境 = 无可串行的对手。
+      await lockEnvironmentRow(client, key);
       const scope = await client.query<{ label: string | null; platform: string | null;
         source: string; assigned_by: string | null; assigned_at: Date }>(
         `SELECT s.label,s.platform,s.source,s.assigned_by,s.assigned_at
@@ -1545,8 +1551,9 @@ export class ClientUserStore {
               FROM client_env_scope s
               LEFT JOIN client_environments e ON e.env_key=s.env_key
              WHERE s.user_id=$1 AND s.source='admin' FOR UPDATE OF s`, [userId]);
+        // 逐个按 env_key 升序取行锁：**取锁顺序与改动前逐字相同**（死锁序不回归）。
         for (const envKey of scopes.rows.map((scope) => scope.env_key).sort()) {
-          await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, [`interaction-env:${envKey}`]);
+          await lockEnvironmentRow(client, envKey);
         }
         for (const scope of scopes.rows) {
           if (scope.platform !== 'wechat_channels' && scope.registry_platform !== 'wechat_channels') continue;
@@ -2081,8 +2088,9 @@ export class ClientUserStore {
       }>(`SELECT env_key,label,platform,source,assigned_by,assigned_at
             FROM client_env_scope WHERE user_id=$1 AND source='admin' FOR UPDATE`, [userId]);
       const affectedEnvKeys = [...new Set([...current.rows.map((row) => row.env_key), ...clean])].sort();
+      // 逐个按 env_key 升序取行锁：**取锁顺序与改动前逐字相同**（死锁序不回归）。
       for (const envKey of affectedEnvKeys) {
-        await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, [`interaction-env:${envKey}`]);
+        await lockEnvironmentRow(client, envKey);
       }
       const registered = clean.length
         ? await client.query<{ env_key: string; label: string | null; platform: string | null }>(
@@ -2209,8 +2217,7 @@ export class ClientUserStore {
       const client = await this.pool.connect();
       try {
         await client.query('BEGIN');
-        await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1,0))`,
-          [`interaction-env:${candidate.env_key}`]);
+        await lockEnvironmentRow(client, candidate.env_key);
         const { rows } = await client.query<{
           revocation_id: string; env_key: string; user_id: string;
           reason: ClientCleanupHoldView['reason']; revoked_by: string | null; account_id: string;

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { resolveEnvPgConfig } from '../cache/pg-config.js';
+import { lockEnvironmentRow } from '../db/environment-row-lock.js';
 import {
   INTERACTION_PLATFORM,
   InteractionError,
@@ -334,9 +335,13 @@ export class InteractionStore {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      // Same lock as ClientUserStore.beginEnvironmentOffboard: first-auth and
-      // customer unbind must observe one serial order for an environment.
-      await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, [`interaction-env:${payload.envKey}`]);
+      // 与 ClientUserStore 的环境解绑路径共用**同一把锁**：某环境的首次授权与客户解绑必须观察到同一串行顺序。
+      //
+      // change publish-approval-signal-to-database §5：这把锁过去是库级 advisory lock
+      // （key 命名空间 `interaction-env:`），而它**跨未来服务边界**——写侧属 api、本处属 automation。
+      // 一次拆库、一次读写分离、一次连接指向副本，两侧各自加锁都会成功、互斥静默消失。现改为
+      // `client_environments` 的行锁：锁与被保护数据同表同库，拆库时是响亮的失败而不是静默失效。
+      await lockEnvironmentRow(client, payload.envKey);
       await this.assertAccountScope(client, payload.accountId, payload.envKey, false, true);
       const offboard = await client.query<{ offboard_id: string; state: string }>(
         `SELECT offboard_id,state FROM interaction_offboards
@@ -406,6 +411,8 @@ export class InteractionStore {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      // 单服务内锁（盘点登记：key 命名空间 `<platform>|<accountId>|<batchId>`，只被 InteractionStore 引用，
+      // 随其整体归属一个服务，不跨边界 → 保留 advisory lock，见 advisory-lock 归属静态检查白名单）。
       await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
         `${payload.platform}|${payload.accountId}|${payload.batchId}`,
       ]);
@@ -986,6 +993,7 @@ export class InteractionStore {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      // 单服务内锁（盘点登记：key 命名空间 `interaction-send|`，只被 InteractionStore 引用，不跨边界）。
       await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`interaction-send|${input.accountId}`]);
       const jobs = await client.query<JobRow & { channel: InteractionChannel; expires_at: Date | null }>(
         `SELECT ${JOB_COLUMNS},channel,expires_at FROM interaction_reply_jobs
