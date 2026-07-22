@@ -9,6 +9,9 @@
  */
 
 import { parseMigrationHeader, versionOf, type MigrationFile, type MigrationObject, type MigrationObjectType } from './migration-plan.js';
+import { readTableColumns, type SchemaQueryable } from './pg-catalog.js';
+
+export type { SchemaQueryable };
 
 export interface DeclaredObject extends MigrationObject {
   /** 声明它的迁移版本 id（缺失时要能回答「缺的东西来自哪一条」） */
@@ -112,20 +115,14 @@ function objectPresent(type: MigrationObjectType, name: string, actual: ActualSc
   return false;
 }
 
-/** 最小查询接口：只要有 query(sql, params) 就能读实测对象（生产传 pg.Client，测试传桩）。 */
-export interface SchemaQueryable {
-  query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
-}
-
+/**
+ * 读实测对象。表与列走 `src/schema/pg-catalog.ts` 的统一查询（`pg_catalog`，不是 `information_schema`）：
+ * 后者只显示当前角色有权限的对象，权限不全时会把「有表但没权限」刷成一串假缺失，
+ * 而缺失清单是 `migrate baseline` 唯一的准入闸 —— 假缺失会让 baseline 永远拒绝写入，
+ * 且操作者按「缺失非空就补跑迁移」的口径补多少次都不会变空。理由与运行时探测同源，见 pg-catalog.ts。
+ */
 export async function readActualSchema(client: SchemaQueryable, schema: string): Promise<ActualSchema> {
-  const tables = await client.query(
-    `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE'`,
-    [schema],
-  );
-  const columns = await client.query(
-    `SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = $1`,
-    [schema],
-  );
+  const tableColumns = await readTableColumns(client, schema);
   const indexes = await client.query(
     `SELECT tablename, indexname FROM pg_indexes WHERE schemaname = $1`,
     [schema],
@@ -144,8 +141,8 @@ export async function readActualSchema(client: SchemaQueryable, schema: string):
   );
 
   return {
-    tables: new Set(tables.rows.map((r) => String(r.table_name))),
-    columns: new Set(columns.rows.map((r) => `${String(r.table_name)}.${String(r.column_name)}`)),
+    tables: tableColumns.tables,
+    columns: tableColumns.columns,
     indexes: new Set(indexes.rows.map((r) => indexKey(String(r.tablename), String(r.indexname)))),
     constraints: new Set(constraints.rows.map((r) => String(r.conname))),
     constraintBackedIndexes: new Set(constraintIndexes.rows.map((r) => String(r.indexname))),

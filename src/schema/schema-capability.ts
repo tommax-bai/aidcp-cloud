@@ -21,7 +21,10 @@
  */
 
 import { mergeCreatedObjects } from './ddl-objects.js';
+import { readTableColumns, type SchemaQueryable } from './pg-catalog.js';
 import { runtimeSchemaName } from './schema-name.js';
+
+export type { SchemaQueryable };
 
 export type SchemaCapabilityStatus = 'ready' | 'degraded' | 'missing';
 
@@ -125,15 +128,9 @@ function warnSelfCreateOnce(): void {
   );
 }
 
-/** 最小查询接口（生产传 pg.Pool / pg.Client，测试传桩）。 */
-export interface SchemaQueryable {
-  query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
-}
-
 /**
- * 读实测形状。走 `pg_catalog` 而不是 `information_schema`：后者只显示当前角色有权限的对象，
- * 权限出问题时会把「有表但没权限」误报成「表不存在」—— 而本仓真出过一次运行时角色失去 DML 权限的事故
- * （migrations/0050 就是那次的补丁）。误报成 missing 会让存储在一个其实存在的表上 fail-closed。
+ * 读实测形状。表与列走 `src/schema/pg-catalog.ts` 的统一查询（`pg_catalog`，不是 `information_schema`）——
+ * 理由与 `migrate verify` 那侧同源，见 pg-catalog.ts 的文件头。
  */
 export async function probeSchemaShape(
   client: SchemaQueryable,
@@ -143,19 +140,9 @@ export async function probeSchemaShape(
   const shape: SchemaShape = { tables: new Set(), columns: new Set(), indexes: new Set() };
   if (tables.length === 0) return shape;
 
-  const cols = await client.query(
-    `SELECT c.relname AS table_name, a.attname AS column_name
-       FROM pg_class c
-       JOIN pg_namespace n ON n.oid = c.relnamespace
-       LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
-      WHERE n.nspname = $1 AND c.relkind IN ('r','p') AND c.relname = ANY($2::text[])`,
-    [schema, tables],
-  );
-  for (const row of cols.rows) {
-    const table = String(row.table_name);
-    shape.tables.add(table);
-    if (row.column_name != null) shape.columns.add(`${table}.${String(row.column_name)}`);
-  }
+  const tableColumns = await readTableColumns(client, schema, tables);
+  shape.tables = tableColumns.tables;
+  shape.columns = tableColumns.columns;
 
   const idx = await client.query(
     `SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND tablename = ANY($2::text[])`,

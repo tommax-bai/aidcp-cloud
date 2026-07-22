@@ -1,3 +1,5 @@
+-- aidcp:kind=contract
+-- aidcp:objects=
 -- 身份域两条非空约束（change cloud-schema-migration-executor 任务 3.1/3.2 的收缩尾巴）。
 --
 -- 为什么单独一个文件：这两条来自 src/client-auth/client-user-store.ts 的自愈序列
@@ -9,8 +11,6 @@
 -- 在全新空库上按序执行时需要 `npm run migrate up --allow-contract`
 -- —— 历史迁移里本来就有多条 contract（0036 / 0041 / 0045 / 0046 / 0052），空库拉起本就要带这个授权。
 
--- aidcp:kind=contract
--- aidcp:objects=
 
 ALTER TABLE client_environments ALTER COLUMN lifecycle_state SET NOT NULL;
 ALTER TABLE client_environments ALTER COLUMN slow_start_initialized SET NOT NULL;

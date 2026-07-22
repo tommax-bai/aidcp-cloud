@@ -22,6 +22,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { findAddedColumns } from '../src/schema/ddl-objects.js';
 import { loadMigrationFiles, migrationsDir } from '../src/schema/migration-files.js';
 import { parseMigrationHeader, versionOf } from '../src/schema/migration-plan.js';
 
@@ -102,9 +103,11 @@ function simulate(files: { name: string; content: string }[]): Map<string, LiveO
 
   // 语句 MUST 按文档顺序施加：同一个文件里「先 DROP INDEX 再 CREATE 同名 INDEX」很常见，
   // 按正则分类批量处理会让 DROP 赢过后面的 CREATE，把一个活着的索引判成已删。
+  // 加列**不在这张表里**：多子句 `ALTER TABLE t ADD COLUMN a, ADD COLUMN b` 一段式正则只认得第一列，
+  // 而这里生成的是 verify 的权威声明，漏掉的列 verify 永远报不出缺失。改用与运行时探测同源的两段解析
+  // （src/schema/ddl-objects.ts 的 findAddedColumns），生成端与校验端只有一份口径。
   const PATTERNS: { kind: string; re: RegExp }[] = [
     { kind: 'createTable', re: /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z_][\w]*)\s*\(/gi },
-    { kind: 'addColumn', re: /ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?([a-zA-Z_][\w]*)\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z_][\w]*)/gi },
     { kind: 'createIndex', re: /CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z_][\w]*)\s+ON\s+/gi },
     { kind: 'dropTable', re: /DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([a-zA-Z_][\w]*)/gi },
     { kind: 'dropColumn', re: /ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?([a-zA-Z_][\w]*)\s+DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?([a-zA-Z_][\w]*)/gi },
@@ -123,6 +126,10 @@ function simulate(files: { name: string; content: string }[]): Map<string, LiveO
       re.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = re.exec(sql)) !== null) events.push({ at: m.index, kind, m });
+    }
+    for (const added of findAddedColumns(sql)) {
+      const synthetic = [added.clause, added.table, added.column] as unknown as RegExpExecArray;
+      events.push({ at: added.at, kind: 'addColumn', m: synthetic });
     }
     events.sort((a, b) => a.at - b.at);
 
@@ -188,8 +195,25 @@ function chunkObjects(objects: string[], perLine = 4): string[] {
   return lines;
 }
 
+/** 去掉文件里已有的 `-- aidcp:kind=` / `-- aidcp:objects=` 行（重生成时用）。 */
+function stripHeaderLines(content: string): string {
+  return content
+    .split('\n')
+    .filter((line) => !/^[ \t]*--[ \t]*aidcp:(kind|objects)[ \t]*=/.test(line))
+    .join('\n')
+    .replace(/^\n+/, '');
+}
+
 async function main(): Promise<void> {
   const write = process.argv.includes('--write');
+  /**
+   * `--rewrite`：连已有头声明的文件一并重生成。默认只补缺头的文件——但**对象归属依赖复合序**，
+   * 一旦有文件改名 / 插到序列前面（例如把基线表提到 0000），旧头就会停留在旧归属上。
+   *
+   * 注意：重写会改文件校验和。账本一旦落账，改校验和就是 `migration_checksum_mismatch`（整批拒绝），
+   * 所以 `--rewrite` MUST 只在该批迁移进真库账本**之前**用。
+   */
+  const rewrite = process.argv.includes('--rewrite');
   const files = await loadMigrationFiles();
   const live = simulate(files);
 
@@ -205,17 +229,25 @@ async function main(): Promise<void> {
   for (const file of files) {
     const version = versionOf(file.name);
     const existing = parseMigrationHeader(file.content);
-    if (existing.kind && existing.objects.length >= 0 && /aidcp:objects=/.test(file.content)) continue;
+    const hasHeader = Boolean(existing.kind) && /aidcp:objects=/.test(file.content);
+    if (hasHeader && !rewrite) continue;
 
-    const sql = stripSqlComments(file.content);
-    const kind = CONTRACT_MARKERS.some((re) => re.test(sql)) ? 'contract' : 'expand';
+    const body = hasHeader ? stripHeaderLines(file.content) : file.content;
+    const sql = stripSqlComments(body);
+    const inferred = CONTRACT_MARKERS.some((re) => re.test(sql)) ? 'contract' : 'expand';
+    // 已有的 kind 是人工审阅过的结论，MUST 保留：机械推断只是缺省值。不一致时报出来，由人裁决。
+    const kind = existing.kind ?? inferred;
+    if (existing.kind && existing.kind !== inferred) {
+      console.log(`${version}: ! 保留人工 kind=${existing.kind}（机械推断为 ${inferred}）`);
+    }
     const objects = byOwner.get(version) ?? [];
     const header = [
       `-- aidcp:kind=${kind}`,
       ...(objects.length > 0 ? chunkObjects(objects) : ['-- aidcp:objects=']),
       '',
     ].join('\n');
-    const next = header + file.content;
+    const next = header + body;
+    if (next === file.content) continue;
     console.log(`${version}: kind=${kind}, objects=${objects.length}`);
     if (write) await writeFile(path.join(migrationsDir(), file.name), next, 'utf8');
     changed += 1;

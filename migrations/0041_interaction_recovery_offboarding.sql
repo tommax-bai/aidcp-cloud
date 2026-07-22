@@ -5,9 +5,9 @@
 -- aidcp:objects=column:interaction_offboards.edge_cleared_at,column:interaction_offboards.edge_result_status,column:interaction_offboards.env_key,column:interaction_offboards.last_dispatched_at
 -- aidcp:objects=column:interaction_offboards.last_error_code,column:interaction_offboards.offboard_id,column:interaction_offboards.platform,column:interaction_offboards.purge_due_at
 -- aidcp:objects=column:interaction_offboards.purged_at,column:interaction_offboards.reason,column:interaction_offboards.requested_at,column:interaction_offboards.state
--- aidcp:objects=column:interaction_offboards.tombstoned_at,column:interaction_offboards.updated_at,column:interaction_offboards.user_id,column:interaction_send_attempts.reconciliation_state
--- aidcp:objects=index:idx_interaction_offboard_audit_scope_time,index:idx_interaction_offboards_dispatch,index:uq_interaction_offboards_active_env,index:uq_interaction_send_attempts_dispatching_account
--- aidcp:objects=table:interaction_offboard_audit,table:interaction_offboards
+-- aidcp:objects=column:interaction_offboards.tombstoned_at,column:interaction_offboards.updated_at,column:interaction_offboards.user_id,column:interaction_send_attempts.last_reconciled_at
+-- aidcp:objects=column:interaction_send_attempts.reconciliation_state,index:idx_interaction_offboard_audit_scope_time,index:idx_interaction_offboards_dispatch,index:uq_interaction_offboards_active_env
+-- aidcp:objects=index:uq_interaction_send_attempts_dispatching_account,table:interaction_offboard_audit,table:interaction_offboards
 -- 0041_interaction_recovery_offboarding.sql
 -- Durable Edge result acknowledgement/reconciliation and explicit offboarding.
 

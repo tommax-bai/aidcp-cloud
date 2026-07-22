@@ -23,8 +23,59 @@ export interface CreatedObjects {
 }
 
 const CREATE_TABLE = /\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z_][\w]*)\s*\(/gi;
-const ADD_COLUMN = /\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?([a-zA-Z_][\w]*)\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z_][\w]*)/gi;
 const CREATE_INDEX = /\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z_][\w]*)\s+ON\s+([a-zA-Z_][\w]*)/gi;
+
+/**
+ * 加列必须**两段解析**：先切出整条 `ALTER TABLE … ;` 语句，再在语句体内全局找 `ADD COLUMN` 子句。
+ *
+ * 一段式的 `/ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)/` 要求每个 `ADD COLUMN` 前都紧跟改表关键字，
+ * 于是一条语句里逗号分隔的第 2 个及之后的 `ADD COLUMN` **全部丢失**。
+ * （本段刻意不把改表关键字连着写出来，否则会被 AC-SCHEMA-DDL-OWNER 的文本命中数当成运行时建表点。）
+ * 这正是本模块自己禁止的那类假阴性：漏掉的列不会被声明、也不会被探测要求，
+ * 结果是 `migrate verify` 对它们永远查不出缺失、`ensureCapabilitySchema` 在一个缺列的库上返回 ready。
+ * （实测：修复前 migrations/ 下 108 个 ADD COLUMN 只捕获 104 个，0041 漏 1、0049 漏 3。）
+ */
+const ALTER_TABLE_STATEMENT = /\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?([a-zA-Z_][\w]*)([\s\S]*?)(?=;|$)/gi;
+const ADD_COLUMN_CLAUSE = /\bADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z_][\w]*)/gi;
+
+export interface AddedColumn {
+  table: string;
+  column: string;
+  /** 该 `ADD COLUMN` 子句在传入文本里的起始偏移（调用方要按文档顺序排事件时用） */
+  at: number;
+  /** 子句原文，用于判定 `IF NOT EXISTS` 幂等性 */
+  clause: string;
+}
+
+/**
+ * 找出一段（已剥注释的）SQL 里全部 `ADD COLUMN` 子句。
+ * `scripts/generate-migration-headers.ts` 与本模块共用这一份实现——两份口径迟早会漂，
+ * 而这里漂一次就等于生成端与校验端自相矛盾。
+ */
+export function findAddedColumns(sql: string): AddedColumn[] {
+  const out: AddedColumn[] = [];
+  ALTER_TABLE_STATEMENT.lastIndex = 0;
+  let stmt: RegExpExecArray | null;
+  while ((stmt = ALTER_TABLE_STATEMENT.exec(sql)) !== null) {
+    const table = stmt[1].toLowerCase();
+    const body = stmt[2] ?? '';
+    const bodyOffset = stmt.index + stmt[0].length - body.length;
+    ADD_COLUMN_CLAUSE.lastIndex = 0;
+    let clause: RegExpExecArray | null;
+    while ((clause = ADD_COLUMN_CLAUSE.exec(body)) !== null) {
+      out.push({
+        table,
+        column: clause[1].toLowerCase(),
+        at: bodyOffset + clause.index,
+        clause: clause[0],
+      });
+    }
+    // 零宽 lookahead 结尾的懒匹配可能返回空 body，手动推进避免死循环。
+    if (ALTER_TABLE_STATEMENT.lastIndex === stmt.index) ALTER_TABLE_STATEMENT.lastIndex += 1;
+  }
+  out.sort((a, b) => a.at - b.at);
+  return out;
+}
 
 /** 建表体里这些开头的条目是表级约束，不是列。 */
 const NOT_A_COLUMN = new Set(['primary', 'unique', 'foreign', 'check', 'constraint', 'exclude', 'like', 'partition']);
@@ -81,12 +132,10 @@ export function extractCreatedObjects(source: string): CreatedObjects {
     tables.set(table, columns);
   }
 
-  ADD_COLUMN.lastIndex = 0;
-  while ((m = ADD_COLUMN.exec(sql)) !== null) {
-    const table = m[1].toLowerCase();
-    const columns = tables.get(table) ?? new Set<string>();
-    columns.add(m[2].toLowerCase());
-    tables.set(table, columns);
+  for (const added of findAddedColumns(sql)) {
+    const columns = tables.get(added.table) ?? new Set<string>();
+    columns.add(added.column);
+    tables.set(added.table, columns);
   }
 
   CREATE_INDEX.lastIndex = 0;

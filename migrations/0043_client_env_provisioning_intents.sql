@@ -1,7 +1,5 @@
 -- aidcp:kind=expand
--- aidcp:objects=column:client_env_provisioning_intents.completed_at,column:client_env_provisioning_intents.completed_env_key,column:client_env_provisioning_intents.created_at,column:client_env_provisioning_intents.expires_at
--- aidcp:objects=column:client_env_provisioning_intents.intent_id,column:client_env_provisioning_intents.proof_hash,column:client_env_provisioning_intents.state,column:client_env_provisioning_intents.user_id
--- aidcp:objects=index:client_env_provisioning_intents_expiry_idx,index:client_env_provisioning_intents_user_idx,table:client_env_provisioning_intents
+-- aidcp:objects=
 -- One-time, customer-bound intents for the official Electron main process to
 -- finish a freshly-created AdsPower environment. The proof is never stored in
 -- plaintext; active ownership remains in client_env_scope and keeps the global

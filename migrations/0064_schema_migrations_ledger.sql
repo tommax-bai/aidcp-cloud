@@ -1,8 +1,7 @@
 -- aidcp:kind=expand
--- aidcp:objects=table:schema_migrations
--- aidcp:objects=column:schema_migrations.version,column:schema_migrations.name,column:schema_migrations.checksum
--- aidcp:objects=column:schema_migrations.kind,column:schema_migrations.applied_at,column:schema_migrations.applied_by
--- aidcp:objects=column:schema_migrations.applied_from_target,column:schema_migrations.duration_ms,column:schema_migrations.baseline
+-- aidcp:objects=column:schema_migrations.applied_at,column:schema_migrations.applied_by,column:schema_migrations.applied_from_target,column:schema_migrations.baseline
+-- aidcp:objects=column:schema_migrations.checksum,column:schema_migrations.duration_ms,column:schema_migrations.kind,column:schema_migrations.name
+-- aidcp:objects=column:schema_migrations.version,table:schema_migrations
 --
 -- 迁移账本（change cloud-schema-migration-executor，design.md D1）。
 --

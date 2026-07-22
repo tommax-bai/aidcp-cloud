@@ -4,7 +4,6 @@
 -- aidcp:objects=column:publish_log.ai_enforced,column:publish_log.content_version,column:publish_log.edited_at,column:publish_log.edited_by
 -- aidcp:objects=column:publish_log.image_url,column:publish_log.images_attached,column:publish_log.platform,column:publish_log.publish_metadata
 -- aidcp:objects=index:idx_delegated_tasks_curated_publish_id,index:idx_delegated_tasks_curated_publish_source,index:idx_publish_log_platform
-
 -- 补齐缺失迁移（第二批）：**已在迁移目录里的表**上、只由存储自愈 ALTER 补出来的那些列与索引
 -- （change cloud-schema-migration-executor 任务 3.1/3.2 的续集）。
 --
