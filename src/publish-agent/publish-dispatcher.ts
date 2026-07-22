@@ -17,6 +17,7 @@
 
 import type { DispatchDraft } from './publish-log-store.js';
 import type { CommandSequencer } from './command-sequencer.js';
+import { ApprovalUnreadableError, type ApprovalBlockedReason, type ApprovalVoidReason } from './publish-approval-store.js';
 import { EdgeTaskLeaseError, type EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
 import type { EdgeTaskPriority } from '../comm/protocol.js';
 import type { DeploymentTarget } from '../deployment-target.js';
@@ -74,10 +75,32 @@ export interface PublishDispatcherDeps {
    * 未注入（旧构造/测试）→ 视为从不暂停，行为不变。
    */
   isEdgePaused?: (edgeId: string) => boolean;
-  /** AC-PUB 复核 + 版本闸：按 requestId 读授权信号（approved + contentVersion）；无信号返回 null（未授权）。 */
+  /**
+   * AC-PUB 复核 + 版本闸：按 requestId 读**持久授权记录的活跃行**（approved + contentVersion）。
+   * 无活跃行返回 null（未授权，正常等待）；查询超时 / 不可达 MUST **抛出**——「不知道批没批」与
+   * 「还没批」是两回事，前者要落 `approval_unreadable` 阻塞原因并对运营可见，MUST NOT 被吞成后者。
+   */
   readApproval: (requestId: string) => Promise<ApprovalDecision | null>;
-  /** edit-note-draft-before-publish：作废（删除）一份过期授权签名，令草稿回可重审。 */
-  voidApprovalSignal: (requestId: string) => Promise<void>;
+  /**
+   * 作废一份授权：**状态迁移而非删除**（历史轮次保留供审计），作废后同 requestId 可重新授权。
+   * `reason` 取自枚举，四类作废场景各自可区分，MUST NOT 合并为泛化原因。
+   */
+  voidApprovalSignal: (requestId: string, reason: ApprovalVoidReason) => Promise<void>;
+  /**
+   * 授权下发进度写入（change publish-approval-signal-to-database）：让「已批准·待下发」成为持久、
+   * 可见、进程重启后仍成立的状态。未注入 → 不写进度（旧构造 / 单测），行为与今天一致。
+   */
+  approvalDispatchState?: {
+    markDispatching(requestId: string): Promise<void>;
+    markConsumed(requestId: string): Promise<void>;
+    releaseToPending(requestId: string, blockedReason: ApprovalBlockedReason | null): Promise<void>;
+    setBlockedReason(requestId: string, reason: ApprovalBlockedReason | null): Promise<void>;
+  };
+  /**
+   * 兜底扫描的批量拉取（task 3.6）：按本机 execution_target 一次拉回「已批准·待下发」的候选 recordId，
+   * 取代「遍历 pending_approval id 逐个查授权」。未注入 → 回落既有逐条复核路径。
+   */
+  listPendingDispatchRecordIds?: () => Promise<number[]>;
   /** @deprecated 执行权现由 edgeTaskLeases 管理；保留可选形状兼容旧构造。 */
   onPublishStart?: (accountId: string) => void;
   /** @deprecated 不再由单功能 finally 无条件恢复浏览。 */
@@ -131,7 +154,9 @@ export class PublishDispatcher {
   private readonly executionTarget: DeploymentTarget | null;
   private readonly isEdgePaused?: (edgeId: string) => boolean;
   private readonly readApproval: (requestId: string) => Promise<ApprovalDecision | null>;
-  private readonly voidApprovalSignal: (requestId: string) => Promise<void>;
+  private readonly voidApprovalSignal: (requestId: string, reason: ApprovalVoidReason) => Promise<void>;
+  private readonly approvalDispatchState?: NonNullable<PublishDispatcherDeps['approvalDispatchState']>;
+  private readonly listPendingDispatchRecordIds?: () => Promise<number[]>;
   private readonly notifyUiPublishState?: (accountId: string, recordId: number, state: 'approved' | 'submitted' | 'failed', title?: string | null) => void;
   private readonly notifyDispatchEvent?: (notice: DispatchNotice) => void;
   private readonly facebookPublishMedia?: NonNullable<PublishDispatcherDeps['facebookPublishMedia']>;
@@ -187,6 +212,8 @@ export class PublishDispatcher {
     this.isEdgePaused = deps.isEdgePaused;
     this.readApproval = deps.readApproval;
     this.voidApprovalSignal = deps.voidApprovalSignal;
+    this.approvalDispatchState = deps.approvalDispatchState;
+    this.listPendingDispatchRecordIds = deps.listPendingDispatchRecordIds;
     this.notifyUiPublishState = deps.notifyUiPublishState;
     this.notifyDispatchEvent = deps.notifyDispatchEvent;
     this.recordPublish = deps.recordPublish;
@@ -209,6 +236,56 @@ export class PublishDispatcher {
    */
   getInFlightRecordIds(): number[] {
     return [...this.inFlight];
+  }
+
+  /**
+   * 授权下发进度写入（best-effort：进度是**可见性**，写失败绝不打断下发主链路，也绝不改变授权判定）。
+   * 但失败必须留痕——静默丢掉可见性写入，就等于把「已批准·待下发」又变回不可见。
+   */
+  private async markApprovalProgress(
+    action: 'dispatching' | 'consumed',
+    requestId: string,
+  ): Promise<void> {
+    if (!this.approvalDispatchState) return;
+    try {
+      if (action === 'dispatching') await this.approvalDispatchState.markDispatching(requestId);
+      else await this.approvalDispatchState.markConsumed(requestId);
+    } catch (err) {
+      this.logger.warn(
+        `[PublishDispatcher] 授权下发进度写入失败 requestId=${requestId} action=${action}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  /** 阻塞原因写入 / 清空（`null` = 阻塞解除，MUST 清空，绝不遗留过期文案）。 */
+  private async setApprovalBlocked(requestId: string, reason: ApprovalBlockedReason | null): Promise<void> {
+    if (!this.approvalDispatchState) return;
+    try {
+      await this.approvalDispatchState.setBlockedReason(requestId, reason);
+    } catch (err) {
+      this.logger.warn(
+        `[PublishDispatcher] 授权阻塞原因写入失败 requestId=${requestId} reason=${reason ?? 'null'}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  /** 保留授权、退回待下发（被抢占 / 槽位等待等零副作用路径），并附可读阻塞原因。 */
+  private async releaseApprovalToPending(
+    requestId: string,
+    blockedReason: ApprovalBlockedReason | null,
+  ): Promise<void> {
+    if (!this.approvalDispatchState) return;
+    try {
+      await this.approvalDispatchState.releaseToPending(requestId, blockedReason);
+    } catch (err) {
+      this.logger.warn(
+        `[PublishDispatcher] 授权退回待下发失败 requestId=${requestId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /** 运维通知 best-effort 包装：通知层异常绝不打断下发主链路。 */
@@ -272,7 +349,7 @@ export class PublishDispatcher {
       // 达阈值停自动重投：**作废本次授权签名**，否则草稿仍 pending_approval + 授权仍在 → 60s 兜底扫描每轮把它
       // 重新捞起再爆一轮重投（退避形同虚设 + 反复 ping 运营），且「人工再批即恢复」的提示就成了空话。作废后
       // 兜底扫描不再自动补投，运营重新批准才恢复——退避才真正生效。草稿仍 pending_approval、绝不烧成 failed。
-      void this.voidApprovalSignal(`publish-${recordId}`).catch(() => {});
+      void this.voidApprovalSignal(`publish-${recordId}`, 'preempt_exhausted').catch(() => {});
       this.logger.warn(
         `[PublishDispatcher] recordId=${recordId} 连续被抢占 ${n} 次 → 停自动重投、作废授权、通知运营（保持待审、绝不烧稿；人工再批即恢复）`,
       );
@@ -355,10 +432,40 @@ export class PublishDispatcher {
   }
 
   /**
-   * 兜底补偿（at-least-once）：扫描所有待审草稿，已授权者补触发下发（靠 dispatch 幂等去重）。
-   * 覆盖「飞书/面板写了授权信号但下发事件丢失」的情形。低频调用。
+   * 兜底补偿（at-least-once）：把「已批准·待下发」的稿补触发下发（靠 dispatch 幂等去重）。
+   * 覆盖「授权已落库但下发命令丢失」的情形。低频调用。
+   *
+   * 主路径（task 3.6）：向授权所有者一次批量拉取本机 target 的待下发行——取代旧的「遍历 pending_approval
+   * 的 id 再逐个查授权」。后者拆分后会变成每条待审 id 一次跨服务查询（放大器）。
+   * 回落路径只在未接线批量拉取时使用（旧构造 / 单测）。
    */
   async scanAndDispatchApproved(): Promise<void> {
+    const launched: Array<Promise<void>> = [];
+    const launch = (id: number): void => {
+      this.logger.log(`[PublishDispatcher] 兜底扫描发现已批准·待下发 recordId=${id} → 补触发下发`);
+      launched.push(
+        this.dispatch(id).catch((e) =>
+          this.logger.warn(`[PublishDispatcher] 兜底下发 recordId=${id} 失败: ${e instanceof Error ? e.message : String(e)}`),
+        ),
+      );
+    };
+
+    if (this.listPendingDispatchRecordIds) {
+      let ids: number[];
+      try {
+        ids = await this.listPendingDispatchRecordIds();
+      } catch (err) {
+        // 拉不到 ≠ 没有待下发：诚实记日志后本轮跳过，绝不当作「已扫完、无事发生」。
+        this.logger.warn(
+          `[PublishDispatcher] 兜底扫描拉取待下发授权失败（本轮未判定）: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return;
+      }
+      for (const id of ids) launch(id);
+      await Promise.allSettled(launched);
+      return;
+    }
+
     let ids: number[];
     try {
       ids = await this.store.listPendingApprovalIds(this.executionTarget);
@@ -368,17 +475,9 @@ export class PublishDispatcher {
     }
     // 逐条并发启动、不逐条串行 await（多稿同窗获批时一账号多篇背靠背下发不拖死跨账号扫描；
     // 同账号内串行由 accountTail 保证，同 recordId 幂等由 inFlight 保证）。整体 allSettled 供测试/调用方等待收敛。
-    const launched: Array<Promise<void>> = [];
     for (const id of ids) {
       const decision = await this.readApproval(`publish-${id}`).catch(() => null);
-      if (decision?.approved) {
-        this.logger.log(`[PublishDispatcher] 兜底扫描发现已授权待审 recordId=${id} → 补触发下发`);
-        launched.push(
-          this.dispatch(id).catch((e) =>
-            this.logger.warn(`[PublishDispatcher] 兜底下发 recordId=${id} 失败: ${e instanceof Error ? e.message : String(e)}`),
-          ),
-        );
-      }
+      if (decision?.approved) launch(id);
     }
     await Promise.allSettled(launched);
   }
@@ -424,6 +523,7 @@ export class PublishDispatcher {
     if (this.openBreakers.has(accountId)) {
       this.logger.warn(`[PublishDispatcher] 账号 ${accountId} 下发熔断中，recordId=${recordId} 队内跳过（授权保留不烧）`);
       this.clearBrowserSlotWaiting(recordId);
+      await this.setApprovalBlocked(`publish-${recordId}`, 'breaker_open');
       return;
     }
     const draft = await this.store.loadForDispatch(recordId);
@@ -448,23 +548,38 @@ export class PublishDispatcher {
       return;
     }
 
-    // AC-PUB 复核：下发前必核授权信号，未授权绝不下发（纵深防御）。
+    // AC-PUB 复核：下发前必核**持久授权记录的活跃行**，未授权绝不下发（纵深防御）。
     const requestId = `publish-${recordId}`;
-    const decision = await this.readApproval(requestId).catch(() => null);
+    let decision: ApprovalDecision | null;
+    try {
+      decision = await this.readApproval(requestId);
+    } catch (err) {
+      // 「不知道批没批」≠「还没批」：不下发任何平台动作、**不写任何终态**、授权保持活跃，
+      // 只落一条可读的阻塞原因让运营看得见，等下一轮兜底扫描重试。MUST NOT 按缺省放行。
+      this.clearBrowserSlotWaiting(recordId);
+      await this.setApprovalBlocked(requestId, 'approval_unreadable');
+      this.logger.warn(
+        `[PublishDispatcher] recordId=${recordId} 授权状态不可读，绝不下发、绝不烧稿（AC-PUB）: ${
+          err instanceof ApprovalUnreadableError ? err.code : err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return;
+    }
     if (!decision?.approved) {
-      this.logger.warn(`[PublishDispatcher] recordId=${recordId} 授权信号未确认 approved，绝不下发（AC-PUB）`);
+      this.logger.warn(`[PublishDispatcher] recordId=${recordId} 授权未确认 approved，绝不下发（AC-PUB）`);
       this.clearBrowserSlotWaiting(recordId);
       return;
     }
 
     // 版本闸（edit-note-draft-before-publish）：授权所载版本 ≠ 当前草稿版本 → 说明草稿在授权后又被编辑，
-    // 该授权是对旧字节的、绝不能发出未审内容。作废（删除）过期签名并留待审（自愈回可重审），绝不落 needs_review、绝不自毁。
-    // 这是「审=发」的结构性权威兜底：写时预检漏网（读版本与写签名之间又落编辑的 TOCTOU）在此收口。
+    // 该授权是对旧字节的、绝不能发出未审内容。作废那一轮授权（**状态迁移、不删行**）并留待审（自愈回可
+    // 重审），绝不落 needs_review、绝不自毁。这是「审=发」的结构性权威兜底：写时预检漏网（读版本与写授权
+    // 之间又落编辑的 TOCTOU）在此收口。
     if (decision.contentVersion !== draft.contentVersion) {
-      await this.voidApprovalSignal(requestId).catch(() => {});
+      await this.voidApprovalSignal(requestId, 'version_stale').catch(() => {});
       this.clearBrowserSlotWaiting(recordId);
       this.logger.warn(
-        `[PublishDispatcher] recordId=${recordId} 授权版本 v${decision.contentVersion} ≠ 草稿 v${draft.contentVersion} → 作废过期签名、留待审（不下发未审内容）`,
+        `[PublishDispatcher] recordId=${recordId} 授权版本 v${decision.contentVersion} ≠ 草稿 v${draft.contentVersion} → 作废该轮授权、留待审（不下发未审内容）`,
       );
       return;
     }
@@ -491,6 +606,7 @@ export class PublishDispatcher {
         this.edgeOfflineWaitingNotified.add(recordId);
         this.notifyOps({ kind: 'edge_offline_waiting', accountId, recordId, title: draft.title });
       }
+      await this.setApprovalBlocked(requestId, 'edge_offline_waiting');
       return;
     }
     const scheduledEnvKey = draft.metadata?.scheduleExecution?.envKey.trim();
@@ -518,10 +634,13 @@ export class PublishDispatcher {
         this.pausedNotified.add(recordId);
         this.notifyOps({ kind: 'edge_paused_requeued', accountId, recordId, title: draft.title });
       }
+      await this.setApprovalBlocked(requestId, 'captcha_paused');
       return;
     }
     // 非暂停路径：清「已通知暂停」标记（暂停已解除，重新武装下次暂停的一次性通知）。
     this.pausedNotified.delete(recordId);
+    // 所有已知阻塞都已让路：阻塞原因 MUST 在此清空，绝不遗留过期文案。
+    await this.setApprovalBlocked(requestId, null);
 
     let sequenceStarted = false;
     try {
@@ -535,6 +654,8 @@ export class PublishDispatcher {
         async (lease) => {
           // acquired 同时代表 edge 已 quiesced；此前不得推 approved/不得发送首条业务命令。
           this.clearBrowserSlotWaiting(recordId);
+          // 授权进入「下发中」：这是可见的进度迁移，不代表平台已发布。
+          await this.markApprovalProgress('dispatching', requestId);
           this.notifyUi(accountId, recordId, 'approved', draft.title);
           return this.sequencer.executePublishSequence({
             taskId: lease.taskId,
@@ -569,11 +690,14 @@ export class PublishDispatcher {
         // 发布记账（change risk-record-actuated-facts）：发出去了 ⇒ 平台看见了 ⇒ 记。与 publish_log 的
         // 权威口径同轴（published）。best-effort：记账失败绝不影响已成功的发布终态。
         await this.recordActuatedPublish(accountId, recordId);
+        await this.markApprovalProgress('consumed', requestId);
         this.logger.log(`[PublishDispatcher] recordId=${recordId} published postId=${result.postId} edge=${edgeId}`);
       } else if (result.outcome === 'scheduled_pending') {
         // 原生定时任务已被平台接受（或提交按下已派发但回执不确定）：不重投、不当场抓公开 postId、也不记发布次数。
         // 内部定时 id 只作后续对账句柄，绝不写 platform_post_id。
         this.consecutivePreemptions.delete(recordId);
+        // 授权已被用掉（提交动作已派发），MUST NOT 留在待下发让兜底扫描重投。
+        await this.markApprovalProgress('consumed', requestId);
         const scheduledAt = result.scheduledAt ?? draft.metadata?.publishTime;
         if (scheduledAt == null) {
           // 理论由 sequencer 前置校验焊死；兜底仍诚实 needs_review，绝不把未知时间当立即发布计数。
@@ -602,6 +726,7 @@ export class PublishDispatcher {
         // 与上面 published 同理：页面已确认提交 ⇒ 平台收到了这条帖 ⇒ 记。拿没拿到链接是「平台对我们已做
         // 之事的回答」，MUST NOT 决定这次动作算不算数——与 publish_log 把 submitted 计入日上限同轴。
         await this.recordActuatedPublish(accountId, recordId);
+        await this.markApprovalProgress('consumed', requestId);
         this.logger.warn(
           `[PublishDispatcher] recordId=${recordId} submitted_unconfirmed，已转 submitted（不刷新、不自动重试）`,
         );
@@ -610,6 +735,8 @@ export class PublishDispatcher {
         // 7.1 被抢占（严格高档位打断，提交前零副作用）≠ 失败：保持待审（**不写任何终态**，留 pending_approval）、
         // 保留授权签名（不 voidApprovalSignal）、FB 素材归还而非隔离、**不计熔断**。交抢占方释放后事件驱动重投。
         await this.settleFacebookMedia(draft, 'preempted', recordId, result.failedAt?.error);
+        // 授权**保留**：退回待下发（无阻塞原因——抢占方多为秒级，重投即走），绝不作废、绝不写终态。
+        await this.releaseApprovalToPending(requestId, null);
         this.logger.warn(
           `[PublishDispatcher] recordId=${recordId} 被抢占（${result.failedAt?.error ?? 'preempted'}）→ 保持待审、保留授权、事件驱动重投（不烧稿、不计熔断）`,
         );
@@ -619,6 +746,8 @@ export class PublishDispatcher {
         await this.settleFacebookMedia(draft, result.outcome, recordId, result.failedAt?.error);
         this.consecutivePreemptions.delete(recordId);
         await this.store.updateStatus(recordId, 'failed').catch(() => {});
+        // 序列已产生副作用后失败：授权已被用掉，MUST NOT 留在待下发（否则兜底扫描会重投可能已提交的页面写）。
+        await this.markApprovalProgress('consumed', requestId);
         this.logger.warn(`[PublishDispatcher] recordId=${recordId} 下发失败 failedAt=${JSON.stringify(result.failedAt)}`);
         this.notifyUi(accountId, recordId, 'failed', draft.title);
         this.recordSeqFailure(accountId, recordId, draft.title);
@@ -632,13 +761,15 @@ export class PublishDispatcher {
             this.browserSlotWaitingNotified.add(recordId);
             this.notifyOps({ kind: 'browser_slot_waiting', accountId, recordId, title: draft.title });
           }
+          await this.releaseApprovalToPending(requestId, 'browser_slot_waiting');
           this.logger.warn(
             `[PublishDispatcher] recordId=${recordId} 浏览器等待本机槽位，零命令下发、保留授权，交已批草稿扫描自动重试`,
           );
           return;
         }
-        // 其他 acquire 未确认 = 零业务命令副作用；作废授权回待审，绝不把协议过旧/离线烧成 failed。
-        await this.voidApprovalSignal(requestId).catch(() => {});
+        // 其他 acquire 未确认 = 零业务命令副作用；作废该轮授权回待审（状态迁移、留审计轨迹），
+        // 绝不把协议过旧/离线烧成 failed。
+        await this.voidApprovalSignal(requestId, 'lease_unconfirmed').catch(() => {});
         this.clearBrowserSlotWaiting(recordId);
         const noticeKind = err instanceof EdgeTaskLeaseError && err.code === 'acquire_timeout'
           ? 'acquire_timeout_requeued'
@@ -656,6 +787,7 @@ export class PublishDispatcher {
       await this.settleFacebookMedia(draft, 'submitted_unconfirmed', recordId, err instanceof Error ? err.message : String(err));
       this.consecutivePreemptions.delete(recordId);
       await this.store.updateStatus(recordId, 'failed').catch(() => {});
+      await this.markApprovalProgress('consumed', requestId);
       this.logger.warn(`[PublishDispatcher] recordId=${recordId} 下发异常: ${err instanceof Error ? err.message : String(err)}`);
       this.notifyUi(accountId, recordId, 'failed', draft.title);
       this.recordSeqFailure(accountId, recordId, draft.title);

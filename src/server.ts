@@ -102,16 +102,31 @@ import {
   resolveDefaultChatId,
   resolveChatIdForAccount,
   resolveCardTarget,
-  getApprovalSignalPath,
   writeApprovalSignal,
   matchAccountByNickname,
   type CommandActions,
+  type PublishApprovalPayload,
   type PublishApprovalPreflightResult,
 } from './feishu/index.js';
 import { CommandSequencer } from './publish-agent/command-sequencer.js';
 import { ScheduledPublishReconciler } from './publish-agent/scheduled-publish-reconciler.js';
 import { createPublishDraftImageRemoveHandler } from './publish-agent/draft-image-remove.js';
 import { createClientPublishApprovalHandler } from './publish-agent/client-publish-approval.js';
+import {
+  PublishApprovalStore,
+  ApprovalUnreadableError,
+  type ApprovalVoidReason,
+} from './publish-agent/publish-approval-store.js';
+import {
+  createInProcessPublishApprovalApi,
+  createPublishApprovalClient,
+} from './publish-agent/publish-approval-api.js';
+import {
+  createApprovalWriteOutlet,
+  type ApprovalDecisionContext,
+  type ApprovalWriteOutlet,
+} from './publish-agent/publish-approval-outlet.js';
+import { PendingDispatchWatchdog } from './publish-agent/pending-dispatch-watchdog.js';
 import {
   clampFillBudgetToLease,
   DEFAULT_FILL_BUDGET,
@@ -818,6 +833,67 @@ async function main(): Promise<void> {
   } catch (err) {
     console.warn('[aidcp-cloud] PublishLogStore 初始化失败:', (err as Error).message);
   }
+
+  // ── 人审授权的持久权威（change publish-approval-signal-to-database）────────────────────────
+  // 授权这一位过去躺在本机文件 /tmp/aidcp-publish-approve-<requestId>.json 上：写方（飞书/后台/客户端/
+  // 委托/排期免审）与读方（发布下发器/评论审批闸）一分进程，文件系统即不再共享，读方永远读不到
+  // approved===true——**fail-closed 的静默停滞**。现在授权只认这张表；文件只剩兼容窗口内的影子写。
+  let publishApprovalStore: PublishApprovalStore | undefined;
+  if (deploymentTarget) {
+    try {
+      const store = new PublishApprovalStore({
+        executionTarget: deploymentTarget,
+        host: readEnvString('PGHOST'),
+        port: readEnvPort('PGPORT'),
+        database: readEnvString('PGDATABASE'),
+        user: readEnvString('PGUSER'),
+        password: readEnvString('PGPASSWORD'),
+      });
+      await store.init();
+      publishApprovalStore = store;
+      console.log(`[aidcp-cloud] PublishApprovalStore 已就绪（executionTarget=${deploymentTarget}）`);
+    } catch (err) {
+      console.error('[aidcp-cloud] PublishApprovalStore 初始化失败，人审授权全链 fail-closed:', (err as Error).message);
+    }
+  } else {
+    console.error('[aidcp-cloud] PublishApprovalStore 未启用：AIDCP_DEPLOY_ENV 缺失或非法 → 授权写入一律失败（绝不落 target 未知的授权）');
+  }
+  // 内部窄接口（形状按未来 HTTP）：执行侧只经它读/作废授权，绝不直读授权表。
+  const publishApprovalApi = publishApprovalStore
+    ? createInProcessPublishApprovalApi(publishApprovalStore)
+    : undefined;
+  const publishApprovalClient = publishApprovalApi ? createPublishApprovalClient(publishApprovalApi) : undefined;
+  // 兼容窗口影子写（默认开）：持久写成功之后 best-effort 写同路径同格式文件，失败只记日志。
+  // 关闭它是**独立一步**（改 env 即可回滚），前置条件是盘点确认零读者 + dev/ol 各观察满一个发布周期。
+  const legacyApprovalSignalEnabled = readEnvString('AIDCP_PUBLISH_APPROVAL_LEGACY_SIGNAL_FILE') !== 'false';
+  const approvalWriteOutlet: ApprovalWriteOutlet | undefined = publishApprovalStore
+    ? createApprovalWriteOutlet({
+        store: publishApprovalStore,
+        legacySignal: {
+          enabled: legacyApprovalSignalEnabled,
+          write: async (requestId, approved, payload, ts) => {
+            await writeApprovalSignal({ writeFile, readFile }, requestId, approved, payload, ts);
+          },
+        },
+      })
+    : undefined;
+  /**
+   * 授权写出口的对外形状（沿用 `ApprovalWriteResult`）。未接线（PG 不可用 / target 缺失）时**诚实抛错**，
+   * MUST NOT 退化成「只写文件」——那正是本 change 要消灭的第二事实源。
+   */
+  const writeApprovalDecision = async (
+    requestId: string,
+    approved: boolean,
+    payload: PublishApprovalPayload,
+    context: ApprovalDecisionContext,
+  ): Promise<{ written: boolean; alreadyDecided?: boolean }> => {
+    if (!approvalWriteOutlet) throw new Error('approval_outlet_unavailable');
+    const outcome = await approvalWriteOutlet(requestId, approved, payload, context);
+    return outcome.alreadyDecided === undefined
+      ? { written: outcome.written }
+      : { written: outcome.written, alreadyDecided: outcome.alreadyDecided };
+  };
+
   let draftRefinementStore: DraftRefinementStore | undefined;
   if (deploymentTarget) {
     try {
@@ -2390,32 +2466,30 @@ async function main(): Promise<void> {
     onActiveLeasePreempted: (taskId, _edgeId, reason) => commandSequencer.preemptTask(taskId, reason),
     logger: console,
   });
-  // AC-PUB 第1道 + 版本闸（edit-note-draft-before-publish）：按 requestId 读审批信号文件，
-  // 回 { approved, contentVersion }；signal.payload.contentVersion 缺失（部署前老签名）→ 0（向后兼容）。
-  // 缺文件/解析失败 → null（未授权）。
+  // AC-PUB 第1道 + 版本闸（edit-note-draft-before-publish；载体由 publish-approval-signal-to-database 换成
+  // 持久授权记录）：经内部窄接口按 requestId 读**活跃行**，回 { approved, contentVersion }。
+  //
+  // 三态严格可区分，绝不合并：
+  //   活跃行存在 → 决定本身；无活跃行（404）→ null（未授权，正常等待）；
+  //   查询不可读（接口未接线 / 503）→ **抛 ApprovalUnreadableError**，由调用方标 approval_unreadable
+  //   阻塞原因并 fail-closed，MUST NOT 当作「未授权」静默吞掉、更 MUST NOT 写任何终态。
   const readPublishApproval = async (
     requestId: string,
   ): Promise<{ approved: boolean; contentVersion: number } | null> => {
-    try {
-      const raw = await readFile(getApprovalSignalPath(requestId), 'utf8');
-      const parsed = JSON.parse(raw) as { approved?: boolean; payload?: { contentVersion?: number } };
-      return { approved: parsed?.approved === true, contentVersion: Number(parsed?.payload?.contentVersion ?? 0) };
-    } catch {
-      return null;
-    }
+    if (!publishApprovalClient) throw new ApprovalUnreadableError('approval_api_unavailable');
+    const row = await publishApprovalClient.readApproval(requestId);
+    return row ? { approved: row.approved, contentVersion: row.contentVersion } : null;
   };
-  // 布尔视图（评论审批口沿用；只关心 approved）。
+  // 布尔视图（评论审批口沿用；只关心 approved）。查询异常向上抛，由调用方按「本轮未授权」处理。
   const isPublishApproved = async (requestId: string): Promise<boolean> => {
     const d = await readPublishApproval(requestId);
     return d?.approved === true;
   };
-  // 作废（删除）一份过期授权签名（edit-note-draft-before-publish）：下发版本闸命中不符时调用，令草稿回可重审。
-  const voidApprovalSignal = async (requestId: string): Promise<void> => {
-    try {
-      await unlink(getApprovalSignalPath(requestId));
-    } catch {
-      /* 已不存在则忽略（幂等） */
-    }
+  // 作废一份授权（edit-note-draft-before-publish）：**状态迁移而非删除**，历史轮次保留供审计；
+  // 作废后活跃槽位让出，同 requestId 可以 revision+1 重新授权（旧「删文件=可重新审批」语义逐条保留）。
+  const voidApprovalSignal = async (requestId: string, reason: ApprovalVoidReason = 'version_stale'): Promise<void> => {
+    if (!publishApprovalClient) throw new ApprovalUnreadableError('approval_api_unavailable');
+    await publishApprovalClient.voidApproval(requestId, reason);
   };
   // 读某草稿当前内容版本号（edit-note-draft-before-publish）：面板/飞书授权前的写时预检用；不存在/出错 → null。
   const readLiveContentVersion = async (recordId: number): Promise<number | null> => {
@@ -3011,6 +3085,37 @@ async function main(): Promise<void> {
     isEdgePaused: (edgeId) => (edgeServer ? edgeServer.isEdgePaused(edgeId) : false),
     readApproval: readPublishApproval,
     voidApprovalSignal,
+    // 授权下发进度（change publish-approval-signal-to-database）：让「已批准·待下发」成为持久可见状态，
+    // 进程重启后仍成立（不再依赖进程内在途集合）。未就绪时不写进度、行为与今天一致。
+    ...(publishApprovalStore
+      ? {
+          approvalDispatchState: {
+            markDispatching: async (requestId: string) => {
+              await publishApprovalStore!.markDispatching(requestId);
+            },
+            markConsumed: async (requestId: string) => {
+              await publishApprovalStore!.markConsumed(requestId);
+            },
+            releaseToPending: async (requestId: string, blockedReason) => {
+              await publishApprovalStore!.releaseToPending(requestId, blockedReason);
+            },
+            setBlockedReason: async (requestId: string, reason) => {
+              await publishApprovalStore!.setBlockedReason(requestId, reason);
+            },
+          },
+        }
+      : {}),
+    // 兜底扫描按本机 target 批量拉「已批准·待下发」，取代「遍历待审 id 逐个查授权」的放大器。
+    ...(publishApprovalClient && deploymentTarget
+      ? {
+          listPendingDispatchRecordIds: async (): Promise<number[]> => {
+            const rows = await publishApprovalClient.listPendingDispatch(deploymentTarget);
+            return rows
+              .filter((row) => row.approved && /^publish-\d+$/.test(row.requestId))
+              .map((row) => Number(row.requestId.slice('publish-'.length)));
+          },
+        }
+      : {}),
     // 发布记账（change risk-record-actuated-facts）：真发出去了才记，与 publish_log 权威口径同轴。
     // 此前 record('publish') 全仓零调用点 ⇒ 发布计数器恒 0 ⇒ 发布日配额从未开过火。
     recordPublish,
@@ -3192,8 +3297,12 @@ async function main(): Promise<void> {
     editDraft: (recordId, expectedVersion, patch, editor) =>
       publishLogStore.editDraft(recordId, expectedVersion, patch, editor),
     preflight: (requestId) => preflightApprovePublish(requestId),
-    writeApproval: (requestId, approved, approvalPayload) =>
-      writeApprovalSignal({ writeFile, readFile }, requestId, approved, approvalPayload),
+    // 客户端内审批：决策人 = 那台客户端所绑账号（真实主体，MUST NOT 常量占位）。
+    writeApproval: (requestId, approved, approvalPayload, decidedBy) =>
+      writeApprovalDecision(requestId, approved, approvalPayload, {
+        decidedBy: `client:${decidedBy}`,
+        decidedVia: 'client',
+      }),
     triggerApproved: triggerPublishDispatchOnApprove,
     notifyRejected: notifyPublishRejected,
   });
@@ -3211,6 +3320,30 @@ async function main(): Promise<void> {
       publishDispatcher.scanAndDispatchApproved().catch(() => {});
     }, dispatchScanMs);
     scanTimer.unref?.();
+  }
+
+  // 待下发看门狗（change publish-approval-signal-to-database，task 4.4）：只对**无阻塞原因**的长时间
+  // 待下发告警——有原因的是已解释的等待（离线/槽位/熔断/暂停/授权不可读），对它们告警只是噪声；
+  // 「没有原因的长时间待下发」恰恰是执行侧静默失联的形态，本项目红线禁止它无声存在。
+  // 按本机 execution_target 过滤（DEV/OL 共库异步隔离）。
+  if (publishApprovalStore && deploymentTarget) {
+    const pendingDispatchWatchdog = new PendingDispatchWatchdog({
+      executionTarget: deploymentTarget,
+      listStalePendingDispatch: (target, olderThanMs) =>
+        publishApprovalStore!.listStalePendingDispatch(target, olderThanMs),
+      thresholdMs: readEnvNumber('AIDCP_PUBLISH_PENDING_DISPATCH_ALERT_MS', 15 * 60_000),
+      notify: async ({ requestId, waitingMs }) => {
+        const chatId = await resolveCardChatId(undefined, undefined);
+        if (!chatId) return;
+        await messenger.sendText(
+          chatId,
+          `🔴 已批准稿件长时间待下发：${requestId} 已等待 ${Math.round(waitingMs / 60_000)} 分钟，` +
+            '且**没有任何已知阻塞原因**（非离线 / 非排队 / 非熔断 / 非验证码暂停）。' +
+            '这通常意味着下发侧失联，请排查云端下发段与数据库连通性。稿件仍保持待审、授权仍有效。',
+        );
+      },
+    });
+    pendingDispatchWatchdog.start(Math.max(60_000, dispatchScanMs));
   }
 
   // ── 评论循环内人审端口（env 闸：默认 dormant，绝不裸发）─────────────────
@@ -3856,8 +3989,12 @@ async function main(): Promise<void> {
     resolveCardChatId,
     resolveReviewCardDelivery,
     getAccountName: accountDisplayName,
-    writeApprovalSignal: (requestId, approved, payload) =>
-      writeApprovalSignal({ writeFile, readFile }, requestId, approved, payload),
+    // 排期免审预授权（content-schedule）：与人工审批**同一个**授权写出口，决策主体 = 触发该免审的排期规则。
+    writeApprovalSignal: (requestId, approved, payload, decidedBy) =>
+      writeApprovalDecision(requestId, approved, payload, {
+        decidedBy: decidedBy ?? 'schedule:unknown_rule',
+        decidedVia: 'schedule_auto_approve',
+      }),
     triggerApprovedDispatch: triggerPublishDispatchOnApprove,
     // 陪伴界面（edge-companion-ui 8.1）：候审即推 pending（发布卡自动展开到「等你确认」）。
     notifyPublishPending: (accountId, recordId, title) =>
@@ -4377,7 +4514,7 @@ async function main(): Promise<void> {
       comments: commentScheduler,
       publishes: publishScheduler,
       loadCandidate,
-      approveCandidate: async (candidate) => {
+      approveCandidate: async (candidate, decidedBy) => {
         const draft = await publishLogStore.loadForDispatch(candidate.recordId);
         if (!draft || draft.contentVersion !== candidate.contentVersion) return loadCandidate(candidate.recordId);
         const requestId = `publish-${candidate.recordId}`;
@@ -4386,23 +4523,29 @@ async function main(): Promise<void> {
         const tags = Array.isArray(draft.metadata?.topics)
           ? draft.metadata.topics.filter((item): item is string => typeof item === 'string')
           : [];
-        const result = await writeApprovalSignal({ writeFile, readFile }, requestId, true, {
-          title: draft.title ?? '', content: draft.content, tags, contentVersion: draft.contentVersion,
-        });
+        const result = await writeApprovalDecision(
+          requestId,
+          true,
+          { title: draft.title ?? '', content: draft.content, tags, contentVersion: draft.contentVersion },
+          { decidedBy, decidedVia: 'delegated_task' },
+        );
         if (!result.written && result.alreadyDecided !== true) throw new Error('candidate_already_rejected');
         await publishDispatcher.dispatch(candidate.recordId, { humanApproval: true });
         return loadCandidate(candidate.recordId);
       },
-      rejectCandidate: async (candidate) => {
+      rejectCandidate: async (candidate, decidedBy) => {
         const draft = await publishLogStore.loadForDispatch(candidate.recordId);
         if (!draft || draft.contentVersion !== candidate.contentVersion) return loadCandidate(candidate.recordId);
         const requestId = `publish-${candidate.recordId}`;
         const tags = Array.isArray(draft.metadata?.topics)
           ? draft.metadata.topics.filter((item): item is string => typeof item === 'string')
           : [];
-        const result = await writeApprovalSignal({ writeFile, readFile }, requestId, false, {
-          title: draft.title ?? '', content: draft.content, tags, contentVersion: draft.contentVersion,
-        });
+        const result = await writeApprovalDecision(
+          requestId,
+          false,
+          { title: draft.title ?? '', content: draft.content, tags, contentVersion: draft.contentVersion },
+          { decidedBy, decidedVia: 'delegated_task' },
+        );
         if (!result.written && result.alreadyDecided !== false) throw new Error('candidate_already_approved');
         await publishLogStore.rejectPendingApproval(candidate.recordId);
         notifyPublishRejected(requestId);
@@ -4689,8 +4832,11 @@ async function main(): Promise<void> {
           publishDispatcher,
           delegatedTasks: delegatedTaskService,
           preflightApprovePublish: (requestId) => preflightApprovePublish(requestId),
-          writeApprovalSignal: async (requestId, approved, payload) => {
-            const result = await writeApprovalSignal({ writeFile, readFile }, requestId, approved, payload);
+          writeApprovalSignal: async (requestId, approved, payload, decidedBy) => {
+            const result = await writeApprovalDecision(requestId, approved, payload, {
+              decidedBy,
+              decidedVia: 'console',
+            });
             // 通过即切：后台「授权发布」首写成功即触发下发段（仅 publish-<n>）。取消不触发下发，
             // 但要通知陪伴界面 rejected（发布卡收起为「暂不发布」）。
             // already-decided 的重复「授权」也走人工批准入口（change parallel-rewrite-drafts）：

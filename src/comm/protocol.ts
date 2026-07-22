@@ -959,6 +959,18 @@ export interface PublishApprovalActionResultPayload {
   alreadyDecided?: boolean;
   reason?: string;
   currentVersion?: number;
+  /**
+   * 授权的**下发进度**（change publish-approval-signal-to-database）：与 `state` 是两个轴——
+   * `state` 是审批结论，本字段是「批完之后走到哪了」。使「已批准·待下发」在客户端稿件卡上与
+   * 「待审批」可区分，杜绝批准后界面毫无变化的静默停滞。
+   *
+   * 增量**可选**字段：旧客户端忽略它、行为与今天完全一致；`state` 的既有取值 MUST NOT 变更
+   * （给 `state` 加新取值会让旧客户端落进 else 分支显示为失败）。
+   * 本消息按信封 id 应答、由客户端 pending 表 resolve，**不进主动命令路由白名单**。
+   */
+  dispatchState?: 'pending_dispatch' | 'dispatching' | 'blocked';
+  /** 可读的下发阻塞原因（edge_offline_waiting / browser_slot_waiting / breaker_open / captcha_paused / approval_unreadable）。 */
+  dispatchBlockedReason?: string;
 }
 
 /**

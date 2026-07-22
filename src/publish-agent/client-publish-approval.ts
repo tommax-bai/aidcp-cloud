@@ -26,13 +26,26 @@ export interface ClientPublishApprovalDeps {
     editor: string,
   ): Promise<EditDraftResult>;
   preflight(requestId: string): Promise<{ ok: true } | { ok: false; reason: string }>;
+  /**
+   * 唯一授权写出口（change publish-approval-signal-to-database）：写持久授权记录。
+   * `decidedBy` = 作出本次决定的客户端所绑账号（真实主体，MUST NOT 常量占位）。
+   * first-writer-wins 语义与既有拒因不变。
+   */
   writeApproval(
     requestId: string,
     approved: boolean,
     payload: { title: string; content: string; tags: string[]; contentVersion: number },
+    decidedBy: string,
   ): Promise<ApprovalWriteResult>;
   triggerApproved(requestId: string): void;
   notifyRejected(requestId: string): void;
+  /**
+   * 授权的下发进度（change publish-approval-signal-to-database，task 6.5）：随应答增量回给客户端，
+   * 使「已批准·待下发」在稿件卡上与「待审批」可区分。缺省 → 不带该字段，旧客户端行为不变。
+   */
+  readDispatchState?(
+    requestId: string,
+  ): Promise<{ dispatchState: 'pending_dispatch' | 'dispatching' | 'blocked'; dispatchBlockedReason?: string } | null>;
   clock?: () => number;
 }
 
@@ -89,7 +102,13 @@ export function createClientPublishApprovalHandler(deps: ClientPublishApprovalDe
     if (!draft) return { requestId, ok: false, reason: 'not_found' };
     if (draft.accountId !== accountId) return { requestId, ok: false, reason: 'account_mismatch' };
 
-    const existing = await deps.readApproval(requestId);
+    // 授权状态不可读（查询超时 / 接口不可达）≠ 未授权：诚实回可区分拒因，绝不按缺省继续走去写第二次决定。
+    let existing: ApprovalSnapshot | null;
+    try {
+      existing = await deps.readApproval(requestId);
+    } catch {
+      return { requestId, ok: false, reason: 'approval_unreadable' };
+    }
     if (existing) {
       if (existing.approved !== payload.approved) return { requestId, ok: false, reason: 'already_decided' };
       if (existing.approved) deps.triggerApproved(requestId);
@@ -99,6 +118,7 @@ export function createClientPublishApprovalHandler(deps: ClientPublishApprovalDe
         state: existing.approved ? 'approved' : 'rejected',
         alreadyDecided: true,
         currentVersion: existing.contentVersion,
+        ...(existing.approved ? await readDispatchFields(deps, requestId) : {}),
       };
     }
     if (draft.status !== 'pending_approval') return { requestId, ok: false, reason: 'not_pending' };
@@ -164,12 +184,17 @@ export function createClientPublishApprovalHandler(deps: ClientPublishApprovalDe
     const tags = Array.isArray(draft.metadata?.topics)
       ? draft.metadata.topics.filter((topic): topic is string => typeof topic === 'string')
       : [];
-    const result = await deps.writeApproval(requestId, payload.approved, {
-      title: draft.title ?? '',
-      content: draft.content,
-      tags,
-      contentVersion: draft.contentVersion,
-    });
+    const result = await deps.writeApproval(
+      requestId,
+      payload.approved,
+      {
+        title: draft.title ?? '',
+        content: draft.content,
+        tags,
+        contentVersion: draft.contentVersion,
+      },
+      accountId,
+    );
     if (!result.written) {
       if (result.alreadyDecided !== payload.approved) return { requestId, ok: false, reason: 'already_decided' };
       if (payload.approved) deps.triggerApproved(requestId);
@@ -179,6 +204,7 @@ export function createClientPublishApprovalHandler(deps: ClientPublishApprovalDe
         state: payload.approved ? 'approved' : 'rejected',
         alreadyDecided: true,
         currentVersion: draft.contentVersion,
+        ...(payload.approved ? await readDispatchFields(deps, requestId) : {}),
       };
     }
     if (payload.approved) deps.triggerApproved(requestId);
@@ -188,6 +214,27 @@ export function createClientPublishApprovalHandler(deps: ClientPublishApprovalDe
       ok: true,
       state: payload.approved ? 'approved' : 'rejected',
       currentVersion: draft.contentVersion,
+      ...(payload.approved ? await readDispatchFields(deps, requestId) : {}),
     };
   };
+}
+
+/**
+ * 下发进度增量字段（task 4.7 / 6.5）：只在批准路径上带；读失败或未注入 → 不带该字段。
+ * 缺省时旧客户端行为与今天完全一致（MUST NOT 因缺省显示为失败）。
+ */
+async function readDispatchFields(
+  deps: ClientPublishApprovalDeps,
+  requestId: string,
+): Promise<{ dispatchState?: 'pending_dispatch' | 'dispatching' | 'blocked'; dispatchBlockedReason?: string }> {
+  if (!deps.readDispatchState) return {};
+  try {
+    const view = await deps.readDispatchState(requestId);
+    if (!view) return {};
+    return view.dispatchBlockedReason
+      ? { dispatchState: view.dispatchState, dispatchBlockedReason: view.dispatchBlockedReason }
+      : { dispatchState: view.dispatchState };
+  } catch {
+    return {};
+  }
 }

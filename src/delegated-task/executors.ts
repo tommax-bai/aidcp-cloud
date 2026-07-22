@@ -80,8 +80,12 @@ export interface DelegatedExecutorDeps {
   comments: DelegatedCommentPort;
   publishes: DelegatedPublishPort;
   loadCandidate: (recordId: number) => Promise<CandidateSnapshot | null>;
-  approveCandidate: (draft: CandidateSnapshot) => Promise<CandidateSnapshot | null>;
-  rejectCandidate: (draft: CandidateSnapshot) => Promise<CandidateSnapshot | null>;
+  /**
+   * `decidedBy` = 作出本次决定的委托任务标识（change publish-approval-signal-to-database）：
+   * 持久授权记录要落**真实决策主体**，MUST NOT 用常量占位。
+   */
+  approveCandidate: (draft: CandidateSnapshot, decidedBy: string) => Promise<CandidateSnapshot | null>;
+  rejectCandidate: (draft: CandidateSnapshot, decidedBy: string) => Promise<CandidateSnapshot | null>;
   modifyCandidate: (
     draft: CandidateSnapshot,
     patch: { title?: string; content?: string; images?: string[]; publishMode?: 'immediate' | 'scheduled'; publishTime?: number | null },
@@ -422,7 +426,7 @@ export function createDelegatedExecutorRouter(deps: DelegatedExecutorDeps): {
       }
       if (task.action === 'approve_candidate') {
         try {
-          return candidateResult(task, await deps.approveCandidate(before));
+          return candidateResult(task, await deps.approveCandidate(before, `delegated_task:${task.id}`));
         } catch (err) {
           const reason = (err as Error).message;
           if (reason.startsWith('candidate_deferred:')) {
@@ -431,7 +435,9 @@ export function createDelegatedExecutorRouter(deps: DelegatedExecutorDeps): {
           return { kind: 'failed', reason, retryable: false };
         }
       }
-      if (task.action === 'reject_candidate') return candidateResult(task, await deps.rejectCandidate(before));
+      if (task.action === 'reject_candidate') {
+        return candidateResult(task, await deps.rejectCandidate(before, `delegated_task:${task.id}`));
+      }
       const patch = parseCandidatePatch(task);
       if (!patch) return { kind: 'failed', reason: 'candidate_patch_missing', retryable: false };
       return candidateResult(task, await deps.modifyCandidate(before, patch));

@@ -48,7 +48,10 @@ export interface FeishuWsReceiverOptions {
   messenger?: FeishuMessenger;
   /** 注入日志（测试用），默认 console */
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
-  /** 注入 fs（测试用） */
+  /**
+   * @deprecated change publish-approval-signal-to-database：审批不再经本机文件互斥，接收端已不用 fs。
+   * 保留字段仅为向后兼容既有构造点，本类内部不再读取它。
+   */
   fsImpl?: Pick<typeof fs, 'writeFile' | 'rm'>;
   /**
    * 人审授权后回调（change decouple-publish-generation-from-dispatch）：仅当本次为「授权」且首写成功
@@ -80,6 +83,19 @@ export interface FeishuWsReceiverOptions {
     toast: { type: 'success' | 'error' | 'info'; content: string };
     card?: unknown;
   } | null>;
+  /**
+   * 唯一授权写出口（change publish-approval-signal-to-database）：写持久授权记录，
+   * first-writer-wins 由数据库活跃行唯一约束承担。
+   *
+   * 未注入即**fail-closed**：卡片回调返回可见的错误 toast、不写任何授权。绝不退化成「只写本机文件」——
+   * 那正是本 change 要消灭的第二事实源，而且拆分后会静默失效。
+   */
+  writeApproval?: (
+    requestId: string,
+    approved: boolean,
+    payload: PublishApprovalPayload,
+    context: { decidedBy: string; decidedVia: 'feishu' },
+  ) => Promise<ApprovalWriteResult>;
 }
 
 interface ApprovalActionValue {
@@ -120,6 +136,11 @@ export function parseApprovalActionValue(value: unknown):
   return { action: raw.action, requestId: raw.requestId, payload: raw.payload };
 }
 
+/**
+ * @deprecated change publish-approval-signal-to-database：授权的权威载体已是持久记录
+ * （`publish_approval_decision`）。本函数只剩**兼容窗口内的影子写路径**用途，MUST NOT 被任何
+ * 生产判定路径读取；关闭影子写后应随之删除。
+ */
 export function getApprovalSignalPath(requestId: string): string {
   return posix.join(APPROVAL_SIGNAL_DIR, `aidcp-publish-approve-${requestId}.json`);
 }
@@ -144,9 +165,10 @@ export interface ApprovalSignalFs {
 }
 
 /**
- * 写发布审批信号（飞书与 Web 共享的唯一出口，byte-identical 路径，AC-PUB-*）。
- * first-writer-wins：用 O_EXCL（flag 'wx'），文件已存在则不覆盖、读回既有决定返回 alreadyDecided。
- * 返回 written / alreadyDecided，**绝不返回 published**——edge 读信号后动作才是真相。
+ * @deprecated change publish-approval-signal-to-database：唯一授权写出口现在是
+ * `createApprovalWriteOutlet`（写 `publish_approval_decision`，first-writer-wins 由活跃行唯一索引承担）。
+ * 本函数降级为**兼容窗口内的影子写**实现：由授权出口在持久写成功之后 best-effort 调用，
+ * 失败只记日志。它 MUST NOT 再作为任何入口的授权互斥手段——写方与执行侧分进程后该互斥会静默消失。
  */
 export async function writeApprovalSignal(
   fsImpl: ApprovalSignalFs,
@@ -197,7 +219,6 @@ export class FeishuWsReceiver {
   private readonly commandRouter: CommandRouter;
   private readonly messenger?: FeishuMessenger;
   private readonly logger: Pick<Console, 'log' | 'warn' | 'error'>;
-  private readonly fsImpl: Pick<typeof fs, 'writeFile' | 'rm'>;
   private readonly onApproved?: (requestId: string) => void;
   private readonly onRejected?: (requestId: string) => void;
   private readonly readLiveContentVersion?: (recordId: number) => Promise<number | null>;
@@ -206,6 +227,7 @@ export class FeishuWsReceiver {
     payload: PublishApprovalPayload,
   ) => Promise<PublishApprovalPreflightResult>;
   private readonly onDelegatedTaskAction?: FeishuWsReceiverOptions['onDelegatedTaskAction'];
+  private readonly writeApproval?: FeishuWsReceiverOptions['writeApproval'];
   private wsClient?: lark.WSClient;
 
   constructor(options: FeishuWsReceiverOptions) {
@@ -214,12 +236,12 @@ export class FeishuWsReceiver {
     this.commandRouter = options.commandRouter;
     this.messenger = options.messenger;
     this.logger = options.logger ?? console;
-    this.fsImpl = options.fsImpl ?? fs;
     this.onApproved = options.onApproved;
     this.onRejected = options.onRejected;
     this.readLiveContentVersion = options.readLiveContentVersion;
     this.preflightApprovePublish = options.preflightApprovePublish;
     this.onDelegatedTaskAction = options.onDelegatedTaskAction;
+    this.writeApproval = options.writeApproval;
   }
 
   /**
@@ -257,7 +279,12 @@ export class FeishuWsReceiver {
       });
   }
 
-  async handleCardAction(value: unknown): Promise<{
+  /**
+   * @param operatorOpenId 点卡片那个人的飞书 open_id（`card.action.trigger` 的 operator）。
+   *   它是授权记录的真实决策人，MUST NOT 用常量占位；取不到时退化为可辨识的 `feishu:unknown_operator`
+   *   （仍是真实事实：这次决策来自飞书但身份未随事件送达），绝不冒充某个具体人。
+   */
+  async handleCardAction(value: unknown, operatorOpenId?: string): Promise<{
     toast: { type: 'success' | 'error' | 'info'; content: string };
     card?: unknown;
   }> {
@@ -318,7 +345,22 @@ export class FeishuWsReceiver {
       }
     }
 
-    const result = await writeApprovalSignal(this.fsImpl, parsed.requestId, approved, parsed.payload);
+    // 授权写出口（change publish-approval-signal-to-database）：写持久记录，first-writer-wins 由
+    // 「活跃行唯一」承担。未接线即 fail-closed 报错——绝不退回本机文件互斥（分进程后会静默消失）。
+    if (!this.writeApproval) {
+      this.logger.error('[feishu] 授权写出口未接线，拒绝本次审批决定（绝不静默放行、绝不退回文件信号）');
+      return { toast: { type: 'error', content: '授权服务不可用，请稍后重试或到控制台审批' } };
+    }
+    let result: ApprovalWriteResult;
+    try {
+      result = await this.writeApproval(parsed.requestId, approved, parsed.payload, {
+        decidedBy: operatorOpenId?.trim() || 'feishu:unknown_operator',
+        decidedVia: 'feishu',
+      });
+    } catch (err) {
+      this.logger.error('[feishu] 授权写入失败:', (err as Error).message);
+      return { toast: { type: 'error', content: '授权写入失败，请稍后重试（本次决定未生效）' } };
+    }
     if (!result.written) {
       // first-writer-wins：已被先前决定（飞书/Web/重复点击），不覆盖
       const alreadyApproved = result.alreadyDecided === true;
@@ -391,9 +433,13 @@ export class FeishuWsReceiver {
           this.logger.error('[feishu] 处理消息事件失败:', (err as Error).message);
         }
       },
-      'card.action.trigger': async (data: { action?: { value?: unknown } }) => {
+      'card.action.trigger': async (data: {
+        action?: { value?: unknown };
+        operator?: { open_id?: string };
+      }) => {
         try {
-          return await this.handleCardAction(data.action?.value);
+          // operator 是点这张卡的人 → 授权记录的真实决策人（decided_by）。
+          return await this.handleCardAction(data.action?.value, data.operator?.open_id);
         } catch (err) {
           this.logger.error('[feishu] 处理卡片回调失败:', (err as Error).message);
           return {

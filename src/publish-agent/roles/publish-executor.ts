@@ -106,11 +106,15 @@ export interface PublishExecutorDeps {
   notifyPublishPending?: (accountId: string, recordId: number, title: string) => void;
   /** 账号展示名/昵称读取口；缺省时审批卡回落 accountId。 */
   getAccountName?: (accountId: string) => string | undefined;
-  /** 写发布授权信号；免审排期复用人审同一个 first-writer-wins 出口。 */
+  /**
+   * 免审预授权写出口（change publish-approval-signal-to-database）：与人审**同一个**授权写出口，
+   * 写同一张持久授权记录。`decidedBy` = 触发本次免审的排期规则标识（真实决策主体，MUST NOT 常量占位）。
+   */
   writeApprovalSignal?: (
     requestId: string,
     approved: boolean,
     payload: PublishApprovalPayload,
+    decidedBy: string,
   ) => Promise<ApprovalWriteResult>;
   /** 授权信号写入后触发既有下发段；免审不直接发布。 */
   triggerApprovedDispatch?: (requestId: string) => void;
@@ -141,6 +145,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     requestId: string,
     approved: boolean,
     payload: PublishApprovalPayload,
+    decidedBy: string,
   ) => Promise<ApprovalWriteResult>;
   private triggerApprovedDispatch?: (requestId: string) => void;
 
@@ -446,7 +451,8 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       contentVersion: 0,
     };
     try {
-      const result = await this.writeApprovalSignal(requestId, true, payload);
+      // 决策主体 = 触发免审的那条排期规则（按账号具名），使审计能回答「谁批的」。
+      const result = await this.writeApprovalSignal(requestId, true, payload, `schedule_auto_approve:${accountId}`);
       const authorized = result.written || result.alreadyDecided === true;
       if (authorized) {
         this.triggerApprovedDispatch?.(requestId);

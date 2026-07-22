@@ -1292,9 +1292,10 @@ function createRequestHandler(
     // ── 写操作（task 4）：经拥有写的对象，绝不乐观假成功 ──────────────────
     if (method === 'POST' && url.startsWith('/api/publish/') && url.endsWith('/approve')) {
       const requestId = decodeURIComponent(url.slice('/api/publish/'.length, -'/approve'.length));
-      // requestId 白名单（change console-cloud-panel-hardening #29）：requestId 会被拼进审批信号文件落盘路径
-      // （/tmp/aidcp-publish-approve-<requestId>.json）。仅放行受控字符集 [A-Za-z0-9_-]——排除 '.' '/' 即堵死
-      // '../' 路径穿越（真实审批 requestId 恒为 publish-<数字>，此集为其超集，向后兼容既有调用）。非法即 400、不进任何文件写。
+      // requestId 白名单（change console-cloud-panel-hardening #29；理由由 publish-approval-signal-to-database 重述）：
+      // requestId 是**持久授权记录的主键**与本接口的 URL 路径段（不再参与任何文件落盘路径拼接）。
+      // 仅放行受控字符集 [A-Za-z0-9_-]，使标识符与路径段的注入面为零（真实审批 requestId 恒为
+      // publish-<数字>，此集为其超集，向后兼容既有调用）。非法即 400、**不触发任何授权写入**。
       if (!/^[A-Za-z0-9_-]+$/.test(requestId)) {
         sendJson(res, 400, { error: 'bad_request', reason: 'invalid_request_id' });
         return;
@@ -1346,7 +1347,13 @@ function createRequestHandler(
           return;
         }
       }
-      const result = await deps.writeApprovalSignal(requestId, approved, approvalPayload);
+      // 真实决策人 = 本次请求的面板 JWT 主体（MUST NOT 常量占位）。
+      const result = await deps.writeApprovalSignal(
+        requestId,
+        approved,
+        approvalPayload,
+        `panel:${verified.payload.sub}`,
+      );
       if (!approved && (result.written || result.alreadyDecided === false)) {
         const m = /^publish-(\d+)$/.exec(requestId);
         if (m) await deps.publishLogStore.rejectPendingApproval(Number(m[1]));

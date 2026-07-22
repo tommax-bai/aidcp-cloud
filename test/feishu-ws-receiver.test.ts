@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import {
   FeishuWsReceiver,
   extractText,
-  getApprovalSignalPath,
   parseApprovalActionValue,
 } from '../src/feishu/ws-receiver.js';
 import { CommandRouter, type CommandActions } from '../src/feishu/commands.js';
@@ -281,42 +280,76 @@ test('ws-receiver: parseApprovalActionValue 解析 approve/cancel', () => {
   assert.equal(parseApprovalActionValue({ action: 'noop' }), null);
 });
 
-test('ws-receiver: approve 写入信号文件', async () => {
-  const writes: Array<{ path: string; content: string }> = [];
+/**
+ * 授权写出口桩（change publish-approval-signal-to-database）：first-writer-wins 由「已有活跃决定」
+ * 承担，与持久记录的活跃行唯一索引同义——不再有任何文件路径参与。
+ */
+function makeApprovalOutlet() {
+  const decided = new Map<string, boolean>();
+  const calls: Array<{ requestId: string; approved: boolean; decidedBy: string; decidedVia: string; contentVersion?: number }> = [];
+  const writeApproval = async (
+    requestId: string,
+    approved: boolean,
+    payload: { contentVersion?: number },
+    context: { decidedBy: string; decidedVia: 'feishu' },
+  ) => {
+    calls.push({ requestId, approved, decidedBy: context.decidedBy, decidedVia: context.decidedVia, contentVersion: payload.contentVersion });
+    if (decided.has(requestId)) return { written: false, alreadyDecided: decided.get(requestId)! };
+    decided.set(requestId, approved);
+    return { written: true };
+  };
+  return { writeApproval, calls, decided };
+}
+
+test('ws-receiver: approve 经唯一授权出口写入持久授权（不落任何文件路径）', async () => {
+  const outlet = makeApprovalOutlet();
   const receiver = new FeishuWsReceiver({
     appId: 'a',
     appSecret: 's',
     commandRouter: makeRouter(),
-    fsImpl: {
-      writeFile: async (path, content) => {
-        writes.push({ path: String(path), content: String(content) });
-      },
-      rm: async () => {},
+    writeApproval: outlet.writeApproval,
+  });
+  const res = await receiver.handleCardAction(
+    {
+      action: 'approve',
+      requestId: 'req-approve',
+      payload: { title: '标题', content: '正文', tags: ['话题'] },
     },
+    'ou_operator_1',
+  );
+  assert.equal(res.toast.type, 'success');
+  assert.equal(outlet.calls.length, 1);
+  assert.equal(outlet.calls[0].approved, true);
+  // 决策人是真实点卡人（MUST NOT 常量占位）、渠道为飞书。
+  assert.equal(outlet.calls[0].decidedBy, 'ou_operator_1');
+  assert.equal(outlet.calls[0].decidedVia, 'feishu');
+});
+
+test('ws-receiver: 授权出口未接线 → fail-closed 报错，绝不退回文件互斥、绝不静默放行', async () => {
+  const approved: string[] = [];
+  const receiver = new FeishuWsReceiver({
+    appId: 'a',
+    appSecret: 's',
+    commandRouter: makeRouter(),
+    logger: { log: () => {}, warn: () => {}, error: () => {} },
+    onApproved: (id) => approved.push(id),
   });
   const res = await receiver.handleCardAction({
     action: 'approve',
-    requestId: 'req-approve',
-    payload: { title: '标题', content: '正文', tags: ['话题'] },
+    requestId: 'req-no-outlet',
+    payload: { title: '标题', content: '正文', tags: [] },
   });
-  assert.equal(res.toast.type, 'success');
-  assert.equal(writes.length, 1);
-  assert.equal(writes[0].path, getApprovalSignalPath('req-approve'));
-  assert.match(writes[0].content, /\"approved\":true/);
+  assert.equal(res.toast.type, 'error');
+  assert.deepEqual(approved, [], '未写入授权即绝不触发下发');
 });
 
-test('ws-receiver: cancel 写入 approved=false 信号文件', async () => {
-  const writes: Array<{ path: string; content: string }> = [];
+test('ws-receiver: cancel 写入 approved=false 授权', async () => {
+  const outlet = makeApprovalOutlet();
   const receiver = new FeishuWsReceiver({
     appId: 'a',
     appSecret: 's',
     commandRouter: makeRouter(),
-    fsImpl: {
-      writeFile: async (path, content) => {
-        writes.push({ path: String(path), content: String(content) });
-      },
-      rm: async () => {},
-    },
+    writeApproval: outlet.writeApproval,
   });
   const res = await receiver.handleCardAction({
     action: 'cancel',
@@ -324,8 +357,8 @@ test('ws-receiver: cancel 写入 approved=false 信号文件', async () => {
     payload: { title: '标题', content: '正文', tags: ['话题'] },
   });
   assert.equal(res.toast.type, 'info');
-  assert.equal(writes.length, 1);
-  assert.match(writes[0].content, /\"approved\":false/);
+  assert.equal(outlet.calls.length, 1);
+  assert.equal(outlet.calls[0].approved, false);
 });
 
 // ── 写时版本预检（change edit-note-draft-before-publish）──────────────────────
@@ -334,17 +367,15 @@ function receiverWithVersion(live: number | null, writes: Array<{ path: string; 
     appId: 'a',
     appSecret: 's',
     commandRouter: makeRouter(),
-    fsImpl: {
-      writeFile: async (path, content) => {
-        writes.push({ path: String(path), content: String(content) });
-      },
-      rm: async () => {},
+    writeApproval: async (requestId, approved, payload) => {
+      writes.push({ path: requestId, content: JSON.stringify({ approved, ...payload }) });
+      return { written: true };
     },
     readLiveContentVersion: async () => live,
   });
 }
 
-test('ws-receiver: 版本预检 — 活版本 == 卡片烤入版本 → 写签名（payload 带 contentVersion）', async () => {
+test('ws-receiver: 版本预检 — 活版本 == 卡片烤入版本 → 写授权（携 contentVersion）', async () => {
   const writes: Array<{ path: string; content: string }> = [];
   const res = await receiverWithVersion(2, writes).handleCardAction({
     action: 'approve',
@@ -352,7 +383,7 @@ test('ws-receiver: 版本预检 — 活版本 == 卡片烤入版本 → 写签�
     payload: { title: '标题', content: '正文', tags: ['话题'], contentVersion: 2 },
   });
   assert.equal(res.toast.type, 'success');
-  assert.equal(writes.length, 1, '版本一致才写签名');
+  assert.equal(writes.length, 1, '版本一致才写授权');
   assert.match(writes[0].content, /\"contentVersion\":2/);
 });
 
@@ -425,10 +456,7 @@ test('ws-receiver: cancel 首写成功 → 触发 onRejected；approve 不触发
     appId: 'a',
     appSecret: 's',
     commandRouter: makeRouter(),
-    fsImpl: {
-      writeFile: async () => {},
-      rm: async () => {},
-    },
+    writeApproval: makeApprovalOutlet().writeApproval,
     onApproved: (id) => approved.push(id),
     onRejected: (id) => rejected.push(id),
   });
@@ -451,29 +479,15 @@ test('ws-receiver: cancel 首写成功 → 触发 onRejected；approve 不触发
   assert.deepEqual(rejected, ['publish-86'], 'approve 不触发 onRejected');
 });
 
-test('ws-receiver: cancel 撞先写签名（first-writer-wins 未写入）→ 不触发 onRejected', async () => {
+test('ws-receiver: cancel 撞先到的决定（first-writer-wins 未写入）→ 不触发 onRejected', async () => {
   const rejected: string[] = [];
   const payload = { title: '标题', content: '正文', tags: [] };
-  const fsImpl = {
-    writeFile: async () => {
-      const err = new Error('exists') as NodeJS.ErrnoException;
-      err.code = 'EEXIST';
-      throw err;
-    },
-    readFile: async () =>
-      JSON.stringify({
-        requestId: 'publish-88',
-        approved: false,
-        ts: 0,
-        payload,
-      }),
-    rm: async () => {},
-  } as unknown as ConstructorParameters<typeof FeishuWsReceiver>[0]['fsImpl'];
   const receiver = new FeishuWsReceiver({
     appId: 'a',
     appSecret: 's',
     commandRouter: makeRouter(),
-    fsImpl,
+    // 活跃授权行已存在（他人先决定为「取消」）→ 后到者得 alreadyDecided，不覆盖。
+    writeApproval: async () => ({ written: false, alreadyDecided: false }),
     onRejected: (id) => rejected.push(id),
   });
   const res = await receiver.handleCardAction({

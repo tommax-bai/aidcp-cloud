@@ -173,12 +173,25 @@ export interface PanelDeps {
   publishDispatcher?: { getInFlightRecordIds(): number[] };
   /** Unified public-write confirmation/task API. When absent, delegated endpoints fail closed with 503. */
   delegatedTasks?: Pick<DelegatedTaskService, 'createDraft' | 'confirm' | 'list' | 'get' | 'pause' | 'resume' | 'cancel'>;
-  /** 发布审批写回（first-writer-wins，与飞书共享信号文件契约 AC-PUB-*）；返回 written/alreadyDecided，绝不 published。 */
+  /**
+   * 发布审批写回：与飞书 / 客户端 / 委托任务 / 排期免审**同一个**授权写出口，写同一张持久授权记录
+   * （change publish-approval-signal-to-database）。first-writer-wins 由数据库「活跃行唯一」承担，
+   * 不再依赖文件系统排他创建。返回 written/alreadyDecided，**绝不 published**。
+   * `decidedBy` 是真实决策人（面板 JWT 主体），MUST NOT 常量占位。
+   */
   writeApprovalSignal: (
     requestId: string,
     approved: boolean,
     payload: PublishApprovalPayload,
+    decidedBy: string,
   ) => Promise<ApprovalWriteResult>;
+  /**
+   * 授权下发进度投影（change publish-approval-signal-to-database，task 4.6）：按 requestId 批量读
+   * 持久授权记录的活跃行。未注入 → 投影不带下发态字段，前端回落既有呈现（MUST NOT 白屏）。
+   */
+  readApprovalDispatchStates?: (requestIds: string[]) => Promise<
+    Map<string, { dispatchState: string; dispatchBlockedReason: string | null; decidedAt: number; approved: boolean }>
+  >;
   /**
    * 发帖授权前置检查：面板点击「授权发布」时，在写审批信号前确认目标账号有在线节点。
    * ok=false 时端点返回错误且不写信号，审批状态保持待审。
