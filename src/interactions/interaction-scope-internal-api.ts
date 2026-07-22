@@ -280,9 +280,11 @@ export class InteractionScopeInternalApi {
         userName: body.userName as string | null, recentMessages: [],
       }, null);
       await this.deps.scopes.recordPreview(scopeId, actor, snapshot.configVersion, body.accountId);
-      const action = !preview.matchedRuleId ? 'no_match' : !preview.finalText ? 'blocked'
-        : snapshot.policy.mode === 'draft_only' ? 'draft'
-          : preview.requiresApproval ? 'review_required' : 'would_auto_send';
+        const automaticPolicy = snapshot.policy.mode === 'auto_safe' && snapshot.policy.sendReplies &&
+          snapshot.policy.channels[body.channel].enabled && snapshot.policy.channels[body.channel].allowAutoSend;
+        const action = !preview.matchedRuleId ? 'no_match' : !preview.finalText ? 'blocked'
+          : snapshot.policy.mode === 'draft_only' || !snapshot.policy.sendReplies ? 'draft'
+            : preview.requiresApproval || !automaticPolicy ? 'review_required' : 'would_auto_send';
       this.ok(res, requestId, {
         scopeId, source: head.source, accountId: body.accountId, configVersion: snapshot.configVersion,
         matchedRule: preview.matchedRuleId ? { ruleId: preview.matchedRuleId, reason: 'matched_by_priority_and_conditions' } : null,

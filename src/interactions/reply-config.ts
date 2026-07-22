@@ -362,5 +362,6 @@ export function renderReplyTemplate(template: ReplyTemplate, profile: ReplyProfi
 }
 
 export function forcedHumanRisk(rule: ReplyRule | null, classifierTags: RiskTag[]): boolean {
-  return [...(rule?.actions.forceHumanTags ?? []), ...classifierTags].some((tag) => HARD_RISK_SET.has(tag));
+  const configured = new Set(rule?.actions.forceHumanTags ?? []);
+  return classifierTags.some((tag) => HARD_RISK_SET.has(tag) && configured.has(tag));
 }

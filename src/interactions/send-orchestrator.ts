@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { makeEnvelope } from '../comm/protocol.js';
 import type { EdgePusher } from '../comm/ws-server.js';
+import { automaticReplyContentEligible } from './reply-auto-send.js';
 import { readJobConfig, type ReplyConfigReader } from './reply-config-resolver.js';
-import { deterministicClaimTags, validateFinalReplyText } from './reply-config.js';
+import { validateFinalReplyText } from './reply-config.js';
 import type { InteractionStore } from './interaction-store.js';
 import type { InteractionMetrics } from './metrics.js';
 import type { ReplyPreviewResult } from './reply-workflow.js';
@@ -95,9 +96,18 @@ export class InteractionSendOrchestrator {
       if (snapshot.state !== 'published' || snapshot.policy.mode !== 'auto_safe' || !snapshot.policy.sendReplies ||
           !snapshot.policy.channels[context.thread.channel].enabled ||
           !snapshot.policy.channels[context.thread.channel].allowAutoSend) return downgrade('policy');
-      if (preview.requiresApproval || preview.riskLevel !== 'low' || preview.meaningChanged ||
-          preview.introducedClaims.length || preview.riskReasons.length ||
-          preview.finalText !== preview.renderedText || deterministicClaimTags(preview.finalText ?? '').length) {
+      const rule = snapshot.rules.find((item) => item.ruleId === preview.matchedRuleId &&
+        item.channel === context.thread.channel) ?? null;
+      const profile = snapshot.profiles.find((item) => item.channel === context.thread.channel) ?? null;
+      if (preview.requiresApproval || preview.fallbacks.classifier !== 'none' ||
+          preview.fallbacks.polisher !== 'none' || preview.fallbacks.reviewer !== 'none' ||
+          !automaticReplyContentEligible({
+            rule,
+            profile,
+            aiPolishEnabled: snapshot.policy.channels[context.thread.channel].aiPolishEnabled,
+            inboundText: context.message.contentText,
+            evidence: preview,
+          })) {
         return downgrade('risk');
       }
       const controls = await this.deps.store.getRuntimeControls(context.thread.accountId);
@@ -173,10 +183,17 @@ export class InteractionSendOrchestrator {
     )) {
       this.blocked('INTERACTION_RATE_LIMITED', '登录冷却尚未结束。', 429);
     }
+    const matchedRule = snapshot.rules.find((item) => item.ruleId === context.job.matchedRuleId &&
+      item.channel === context.thread.channel) ?? null;
     if (auto && (!this.autoAllowlist.has(accountId) || snapshot.policy.mode !== 'auto_safe' ||
-        !snapshot.policy.channels[context.thread.channel].allowAutoSend || context.job.riskLevel !== 'low' ||
-        context.job.meaningChanged || context.job.introducedClaims.length || context.job.riskReasons.length ||
-        context.job.finalText !== context.job.renderedText || deterministicClaimTags(context.job.finalText).length)) {
+        !snapshot.policy.channels[context.thread.channel].allowAutoSend ||
+        !automaticReplyContentEligible({
+          rule: matchedRule,
+          profile,
+          aiPolishEnabled: snapshot.policy.channels[context.thread.channel].aiPolishEnabled,
+          inboundText: context.message.contentText,
+          evidence: context.job,
+        }))) {
       this.blocked('INTERACTION_APPROVAL_REQUIRED', '自动发送条件未全部满足。', 409);
     }
     const action = context.thread.channel === 'comment' ? 'comment' : 'dm_reply';

@@ -192,7 +192,7 @@ test('Console preview is read-only: no reply job and no WS command are created',
         return {
           matchedRuleId: 'rule-thanks', templateId: 'tpl-thanks', templateVersion: 2,
           renderedText: '谢谢。', polishedText: '谢谢你的喜欢。', finalText: '谢谢你的喜欢。',
-          riskLevel: 'low' as const, riskReasons: [], requiresApproval: true,
+          riskLevel: 'low' as const, riskReasons: [], requiresApproval: false,
           meaningChanged: false, introducedClaims: [], reviewReasons: [],
           fallbacks: { classifier: 'none' as const, polisher: 'none' as const, reviewer: 'none' as const },
         };
@@ -221,7 +221,7 @@ test('Console preview is read-only: no reply job and no WS command are created',
       data: { action: string; polish: { fallbackUsed: boolean; fallbackReason: string } };
       meta: { asOf: number };
     };
-    assert.equal(body.data.action, 'review_required');
+    assert.equal(body.data.action, 'review_required', 'review_before_send policy must override content auto eligibility');
     assert.equal(body.data.polish.fallbackUsed, false);
     assert.equal(body.data.polish.fallbackReason, 'none');
     assert.equal(body.meta.asOf, 1784044800000);

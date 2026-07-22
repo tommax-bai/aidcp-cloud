@@ -133,7 +133,7 @@ export function buildInteractionReplyPrompt(input: InteractionReplyInput): strin
   }
   if (role === 'reply_risk_reviewer') {
     return `你是 AIDCP 入站回复的内容风险审查器，只判断候选文本实际包含的风险，不负责生成或润色回复。\n` +
-      `风险口径：课程适龄、学习范围、上课方式等普通教育/内容咨询，在没有订单、价格、优惠、退款、库存、时效、医疗、法律、个人数据或绝对承诺时应判 low；模板已有的中性私聊引导本身不是风险。meaning_changed 和 introduced_claim 是强制人审的流程标签，不能仅凭它们把内容判为 high。只有输入缺失、候选含义确实无法判断或结构化调用失败时才用 unknown，不得把“谨慎起见”当成 unknown。allowAutoSend 只表达内容风险建议，最终是否发送仍由确定性策略和人工审核决定。\n` +
+      `风险口径：课程适龄、学习范围、上课方式等普通教育/内容咨询，在没有订单、价格、优惠、退款、库存、时效、医疗、法律、个人数据或绝对承诺时应判 low；模板已有的中性私聊引导本身不是风险。meaning_changed 和 introduced_claim 是审计流程标签，不能仅凭它们把内容判为 high 或 unknown。只有输入缺失、候选含义确实无法判断或结构化调用失败时才用 unknown，不得把“谨慎起见”当成 unknown。内容明确为 low 且没有上述实质风险或 unknown 时 allowAutoSend 必须为 true；否则必须为 false。allowAutoSend 只是内容风险建议，最终是否发送仍由 Cloud 确定性策略和运行门禁决定。\n` +
       `严格遵守：只输出一个 JSON 对象，不要 Markdown、解释或代码围栏；不得补充输入中不存在的事实。\n` +
       `输出 schema：${outputSchema}\n输入：${JSON.stringify(input)}`;
   }

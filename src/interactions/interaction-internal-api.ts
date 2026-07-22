@@ -409,9 +409,11 @@ export class InteractionInternalApi {
         recentMessages: [],
       }, null);
       await this.deps.configs.recordPreview(accountId, actor, snapshot.configVersion);
+      const automaticPolicy = snapshot.policy.mode === 'auto_safe' && snapshot.policy.sendReplies &&
+        snapshot.policy.channels[body.channel].enabled && snapshot.policy.channels[body.channel].allowAutoSend;
       const action = !preview.matchedRuleId ? 'no_match' : !preview.finalText ? 'blocked'
-        : snapshot.policy.mode === 'draft_only' ? 'draft'
-          : preview.requiresApproval ? 'review_required' : 'would_auto_send';
+        : snapshot.policy.mode === 'draft_only' || !snapshot.policy.sendReplies ? 'draft'
+          : preview.requiresApproval || !automaticPolicy ? 'review_required' : 'would_auto_send';
       this.ok(res, requestId, {
         accountId, configVersion: snapshot.configVersion,
         matchedRule: preview.matchedRuleId ? { ruleId: preview.matchedRuleId, reason: 'matched_by_priority_and_conditions' } : null,

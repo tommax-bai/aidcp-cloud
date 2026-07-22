@@ -11,6 +11,7 @@ import {
   isReplyProfile,
   isReplyRule,
   isReplyTemplate,
+  forcedHumanRisk,
   matchReplyRule,
   normalizeReplyProfile,
   renderReplyTemplate,
@@ -282,7 +283,7 @@ test('document-grounded polisher treats admin content as untrusted facts and adm
   assert.match(prompt, /不得自行增加私聊引导或联系方式/);
 });
 
-test('risk reviewer prompt treats ordinary education questions and neutral private guidance as low risk', () => {
+test('risk reviewer prompt treats ordinary education questions as low risk and recommends auto send', () => {
   const prompt = buildInteractionReplyPrompt({
     role: 'reply_risk_reviewer', requestId: 'review-rubric', accountId: 'acct_wc_demo',
     inbound: { ...inbound, text: '适合几岁的孩子啊' },
@@ -295,9 +296,19 @@ test('risk reviewer prompt treats ordinary education questions and neutral priva
   assert.match(prompt, /普通教育\/内容咨询/);
   assert.match(prompt, /应判 low/);
   assert.match(prompt, /中性私聊引导本身不是风险/);
-  assert.match(prompt, /强制人审的流程标签/);
-  assert.match(prompt, /不能仅凭它们把内容判为 high/);
+  assert.match(prompt, /审计流程标签/);
+  assert.match(prompt, /不能仅凭它们把内容判为 high 或 unknown/);
   assert.match(prompt, /不得把“谨慎起见”当成 unknown/);
+  assert.match(prompt, /allowAutoSend 必须为 true/);
+});
+
+test('force-human tags only apply when the final evidence actually contains a configured tag', () => {
+  const configured = { ...rule('configured-risk', 1), actions: {
+    ...rule('configured-risk', 1).actions, forceHumanTags: ['pricing' as const],
+  } };
+  assert.equal(forcedHumanRisk(configured, []), false);
+  assert.equal(forcedHumanRisk(configured, ['introduced_claim']), false);
+  assert.equal(forcedHumanRisk(configured, ['pricing']), true);
 });
 
 test('grounded ordinary answer normalizes model-only unknown while meaning and claim tags still force review', async () => {
@@ -351,6 +362,75 @@ test('knowledge document reaches only an invoked polisher and grounded facts req
   assert.doesNotMatch(prompts[2], /ONLY_KNOWLEDGE_MARKER|DM_PRIVATE_KNOWLEDGE/);
   assert.deepEqual(preview.introducedClaims, ['每周六直播']);
   assert.ok(preview.riskReasons.includes('introduced_claim'));
+  assert.equal(preview.requiresApproval, true);
+});
+
+test('safe AI style polish can qualify for direct automatic reply', async () => {
+  const outputs = [
+    { role: 'reply_intent_classifier', intent: 'gratitude', confidence: 1, riskTags: [], reasons: [] },
+    { role: 'reply_polisher', polishedText: '谢谢喜欢，常来聊呀。', meaningChanged: false,
+      introducedClaims: [], riskTags: [] },
+    { role: 'reply_risk_reviewer', riskLevel: 'low', riskTags: [], reasons: [], allowAutoSend: true },
+  ];
+  const config = snapshot();
+  config.policy.mode = 'auto_safe';
+  config.policy.channels.comment.allowAutoSend = true;
+  config.rules = [{ ...rule('auto-style', 1), actions: {
+    templateId: template.templateId, polish: true, allowAutoSend: true, forceHumanTags: [],
+  } }];
+  const workflow = new ReplyWorkflow({} as InteractionStore, {} as ReplyConfigStore,
+    new ReplyAiService({ complete: async () => JSON.stringify(outputs.shift()) }, 100));
+
+  const preview = await workflow.buildPreview(config, inbound, null);
+  assert.equal(preview.finalText, '谢谢喜欢，常来聊呀。');
+  assert.notEqual(preview.finalText, preview.renderedText);
+  assert.equal(preview.riskLevel, 'low');
+  assert.equal(preview.requiresApproval, false);
+});
+
+test('grounded ordinary knowledge answer can qualify for direct automatic reply with audit tags', async () => {
+  const outputs = [
+    { role: 'reply_intent_classifier', intent: 'product_question', confidence: 1, riskTags: [], reasons: [] },
+    { role: 'reply_polisher', polishedText: '主要适合小学三至六年级。\n收到，我们单独聊一下',
+      meaningChanged: true, introducedClaims: ['主要适合小学三至六年级'], riskTags: [] },
+    { role: 'reply_risk_reviewer', riskLevel: 'low', riskTags: [], reasons: [], allowAutoSend: true },
+  ];
+  const config = snapshot();
+  config.policy.mode = 'auto_safe';
+  config.policy.channels.comment.allowAutoSend = true;
+  config.templates = [{ ...template, content: '收到，我们单独聊一下', variables: [] }];
+  config.profiles[0] = { ...config.profiles[0], maxLength: 80,
+    knowledgeDocument: '课程主要适合小学三年级至六年级学生。' };
+  config.rules = [{ ...rule('auto-knowledge', 1),
+    conditions: { keywordsAny: [], intentsAny: [], sourceExternalIds: [], messageTypes: ['text'], workHours: null },
+    actions: { templateId: template.templateId, polish: true, allowAutoSend: true, forceHumanTags: [] } }];
+  const workflow = new ReplyWorkflow({} as InteractionStore, {} as ReplyConfigStore,
+    new ReplyAiService({ complete: async () => JSON.stringify(outputs.shift()) }, 100));
+
+  const preview = await workflow.buildPreview(config, { ...inbound, text: '适合几岁的孩子啊' }, null);
+  assert.equal(preview.riskLevel, 'low');
+  assert.deepEqual(preview.riskReasons, ['meaning_changed', 'introduced_claim']);
+  assert.equal(preview.requiresApproval, false);
+});
+
+test('introduced facts without a channel knowledge document remain human-reviewed', async () => {
+  const outputs = [
+    { role: 'reply_intent_classifier', intent: 'product_question', confidence: 1, riskTags: [], reasons: [] },
+    { role: 'reply_polisher', polishedText: '主要适合小学三至六年级。', meaningChanged: true,
+      introducedClaims: ['主要适合小学三至六年级'], riskTags: [] },
+    { role: 'reply_risk_reviewer', riskLevel: 'low', riskTags: [], reasons: [], allowAutoSend: true },
+  ];
+  const config = snapshot();
+  config.policy.mode = 'auto_safe';
+  config.policy.channels.comment.allowAutoSend = true;
+  config.rules = [{ ...rule('ungrounded-auto', 1),
+    conditions: { keywordsAny: [], intentsAny: [], sourceExternalIds: [], messageTypes: ['text'], workHours: null },
+    actions: { templateId: template.templateId, polish: true, allowAutoSend: true, forceHumanTags: [] } }];
+  const workflow = new ReplyWorkflow({} as InteractionStore, {} as ReplyConfigStore,
+    new ReplyAiService({ complete: async () => JSON.stringify(outputs.shift()) }, 100));
+
+  const preview = await workflow.buildPreview(config, { ...inbound, text: '适合几岁的孩子啊' }, null);
+  assert.equal(preview.riskLevel, 'low');
   assert.equal(preview.requiresApproval, true);
 });
 

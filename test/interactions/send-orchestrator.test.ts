@@ -50,7 +50,12 @@ function config(): ReplyConfigSnapshot {
       rateLimits: { accountPerMinute: 2, accountPerHour: 10, accountPerDay: 30,
         threadCooldownSeconds: 60, newLoginCooldownSeconds: 600, consecutiveFailureLimit: 3 },
     },
-    templates: [], rules: [], profiles: [{
+    templates: [], rules: [{
+      ruleId: 'rule_thanks', channel: 'comment', name: '感谢', priority: 1, enabled: true,
+      conditions: { keywordsAny: [], intentsAny: [], sourceExternalIds: [], messageTypes: ['text'], workHours: null },
+      actions: { templateId: 'tpl_thanks', polish: false, allowAutoSend: false, forceHumanTags: [] },
+      updatedAt: now, updatedBy: 'admin',
+    }], profiles: [{
       channel: 'comment', selfName: '示例视频号', userAddress: '你', tone: ['friendly'], maxLength: 500,
       allowEmoji: false, allowLinks: false, blockedPhrases: [], disallowedClaims: [], requiredDisclaimer: null,
       variableFallbacks: { user_name: '朋友', video_title: '这个视频', account_name: '本账号', support_channel: '客服' },
@@ -175,6 +180,7 @@ test('auto admission ignores generic quota but still requires the configured log
   const autoConfig = config();
   autoConfig.policy.mode = 'auto_safe';
   autoConfig.policy.channels.comment.allowAutoSend = true;
+  autoConfig.rules[0].actions.allowAutoSend = true;
   const preview = {
     matchedRuleId: 'rule_thanks', templateId: 'tpl_thanks', templateVersion: 1,
     renderedText: automatic.job.renderedText, polishedText: automatic.job.renderedText,
@@ -207,6 +213,81 @@ test('auto admission ignores generic quota but still requires the configured log
   assert.equal(await sender.canAutoQueueDraft(automatic, autoConfig, preview), false);
   activeSince = now - 700_000;
   assert.equal(await sender.canAutoQueueDraft(automatic, autoConfig, preview), true);
+});
+
+test('auto admission accepts grounded AI knowledge evidence and rejects the same claims without a document', async () => {
+  const automatic = context('approval_required');
+  automatic.job.approvalActor = null;
+  automatic.message.contentText = '适合几岁的孩子啊';
+  const autoConfig = config();
+  autoConfig.policy.mode = 'auto_safe';
+  autoConfig.policy.channels.comment.allowAutoSend = true;
+  autoConfig.policy.channels.comment.aiPolishEnabled = true;
+  autoConfig.rules[0].actions = {
+    ...autoConfig.rules[0].actions, polish: true, allowAutoSend: true,
+  };
+  autoConfig.profiles[0] = {
+    ...autoConfig.profiles[0], knowledgeDocument: '课程主要适合小学三至六年级。',
+  };
+  const preview = {
+    matchedRuleId: 'rule_thanks', templateId: 'tpl_thanks', templateVersion: 1,
+    renderedText: '收到，我们单独聊一下', polishedText: '主要适合小学三至六年级。收到，我们单独聊一下',
+    finalText: '主要适合小学三至六年级。收到，我们单独聊一下', riskLevel: 'low' as const,
+    riskReasons: ['meaning_changed' as const, 'introduced_claim' as const], requiresApproval: false,
+    meaningChanged: true, introducedClaims: ['主要适合小学三至六年级'], reviewReasons: [],
+    fallbacks: { classifier: 'none' as const, polisher: 'none' as const, reviewer: 'none' as const },
+  };
+  const sender = new InteractionSendOrchestrator({
+    store: sendableStore(),
+    configs: { getSnapshot: async () => autoConfig } as unknown as ReplyConfigStore,
+    pusher: {} as EdgePusher,
+    controllerFor: () => ({ explain: () => ({ allowed: true }), record: async () => true }),
+    metrics: new InteractionMetrics(), globalWriteEnabled: true,
+    env: { AIDCP_INTERACTION_AUTO_ACCOUNT_ALLOWLIST: 'acct_wc_demo' }, clock: () => now,
+  });
+
+  assert.equal(await sender.canAutoQueueDraft(automatic, autoConfig, preview), true);
+  autoConfig.profiles[0] = { ...autoConfig.profiles[0], knowledgeDocument: null };
+  assert.equal(await sender.canAutoQueueDraft(automatic, autoConfig, preview), false);
+});
+
+test('pre-dispatch auto recheck blocks ungrounded AI claims before creating an attempt', async () => {
+  const automatic = context('queued');
+  automatic.job.approvalActor = null;
+  automatic.message.contentText = '适合几岁的孩子啊';
+  automatic.job.renderedText = '收到，我们单独聊一下';
+  automatic.job.polishedText = '主要适合小学三至六年级。收到，我们单独聊一下';
+  automatic.job.finalText = automatic.job.polishedText;
+  automatic.job.meaningChanged = true;
+  automatic.job.introducedClaims = ['主要适合小学三至六年级'];
+  automatic.job.riskLevel = 'low';
+  automatic.job.riskReasons = ['meaning_changed', 'introduced_claim'];
+  const autoConfig = config();
+  autoConfig.policy.mode = 'auto_safe';
+  autoConfig.policy.channels.comment.allowAutoSend = true;
+  autoConfig.policy.channels.comment.aiPolishEnabled = true;
+  autoConfig.rules[0].actions = {
+    ...autoConfig.rules[0].actions, polish: true, allowAutoSend: true,
+  };
+  let createCalls = 0;
+  const sender = new InteractionSendOrchestrator({
+    store: sendableStore({
+      getJobContext: async () => automatic,
+      createAttempt: async () => { createCalls += 1; throw new Error('must_not_create'); },
+    }),
+    configs: { getSnapshot: async () => autoConfig } as unknown as ReplyConfigStore,
+    pusher: {} as EdgePusher,
+    controllerFor: () => ({ explain: () => ({ allowed: true }), record: async () => true }),
+    metrics: new InteractionMetrics(), globalWriteEnabled: true,
+    env: { AIDCP_INTERACTION_AUTO_ACCOUNT_ALLOWLIST: 'acct_wc_demo' }, clock: () => now,
+  });
+
+  await assert.rejects(
+    sender.dispatchQueued({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo',
+      jobId: automatic.job.id, expectedVersion: automatic.job.version }),
+    (error: unknown) => (error as { code?: string }).code === 'INTERACTION_APPROVAL_REQUIRED',
+  );
+  assert.equal(createCalls, 0);
 });
 
 test('approved command is persisted as one attempt and dispatched to one account Edge without claiming sent', async () => {

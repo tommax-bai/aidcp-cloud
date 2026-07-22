@@ -1,13 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   deterministicClaimTags,
-  forcedHumanRisk,
   matchReplyRule,
   renderReplyTemplate,
   validateFinalReplyText,
   validateReplyConfig,
 } from './reply-config.js';
 import { readJobConfig, readPublishedConfig, type ReplyConfigReader } from './reply-config-resolver.js';
+import { automaticReplyContentEligible } from './reply-auto-send.js';
 import { ReplyAiService, type AiFallback } from './reply-ai.js';
 import type { InteractionStore } from './interaction-store.js';
 import {
@@ -25,7 +25,6 @@ import {
   type ScopedJobContext,
 } from './types.js';
 
-const HARD = new Set<string>(HARD_RISK_TAGS);
 const CONTENT_HIGH_RISK = new Set<string>(HARD_RISK_TAGS.filter((tag) =>
   tag !== 'unknown' && tag !== 'meaning_changed' && tag !== 'introduced_claim'));
 const PROCESS_ONLY_RISK = new Set<string>(['unknown', 'meaning_changed', 'introduced_claim']);
@@ -319,7 +318,7 @@ export class ReplyWorkflow {
     const fallbackRisk = classifier.fallback !== 'none' || polisherFallback !== 'none' || reviewer.fallback !== 'none'
       ? ['unknown'] as RiskTag[] : [];
     const collectedTags = uniqueTags(classifier.value.riskTags, polish.value.riskTags, reviewer.value.riskTags,
-      deterministicTags, rule.actions.forceHumanTags, fallbackRisk);
+      deterministicTags, fallbackRisk);
     const ordinaryKnowledgeClassification =
       (classifier.fallback === 'none' && ORDINARY_KNOWLEDGE_INTENTS.has(classifier.value.intent)) ||
       ORDINARY_KNOWLEDGE_CUE.test(inbound.text ?? '');
@@ -333,9 +332,27 @@ export class ReplyWorkflow {
     const effectiveFallbackRisk = groundedOrdinaryKnowledge ? [] : fallbackRisk;
     const reviewerRiskLevel = groundedOrdinaryKnowledge ? 'low' : reviewer.value.riskLevel;
     const hasHardRisk = allTags.some((tag) => CONTENT_HIGH_RISK.has(tag));
-    const requiresApproval = forcedHumanRisk(rule, allTags) || reviewerRiskLevel !== 'low' ||
-      !reviewer.value.allowAutoSend || !rule.actions.allowAutoSend || allTags.some((tag) => HARD.has(tag)) ||
-      aiPolishInvoked || candidate !== rendered;
+    const riskLevel = hasHardRisk ? 'high' : effectiveFallbackRisk.length || allTags.includes('unknown')
+      ? 'unknown' : reviewerRiskLevel;
+    const aiStepsSucceeded = classifier.fallback === 'none' && reviewer.fallback === 'none' &&
+      (!aiPolishInvoked || polisherFallback === 'none');
+    const knowledgeIntentVerified = polish.value.introducedClaims.length === 0 ||
+      (classifier.fallback === 'none' && ORDINARY_KNOWLEDGE_INTENTS.has(classifier.value.intent));
+    const requiresApproval = !aiStepsSucceeded || !knowledgeIntentVerified || !reviewer.value.allowAutoSend ||
+      !automaticReplyContentEligible({
+        rule,
+        profile,
+        aiPolishEnabled: snapshot.policy.channels[inbound.channel].aiPolishEnabled,
+        inboundText: inbound.text,
+        evidence: {
+          riskLevel,
+          riskReasons: allTags,
+          meaningChanged: polish.value.meaningChanged,
+          introducedClaims: polish.value.introducedClaims,
+          renderedText: rendered,
+          finalText: candidate,
+        },
+      });
     return {
       matchedRuleId: rule.ruleId,
       templateId: template.templateId,
@@ -343,7 +360,7 @@ export class ReplyWorkflow {
       renderedText: rendered,
       polishedText: candidate,
       finalText: candidate,
-      riskLevel: hasHardRisk ? 'high' : effectiveFallbackRisk.length || allTags.includes('unknown') ? 'unknown' : reviewerRiskLevel,
+      riskLevel,
       riskReasons: allTags,
       requiresApproval,
       meaningChanged: polish.value.meaningChanged,
