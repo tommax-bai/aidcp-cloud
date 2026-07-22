@@ -127,6 +127,7 @@ export interface ConceptStorePort extends ConceptSink {
 const EMPTY_CONCEPT_POOL: ConceptPool = { known: [], candidates: [], source: new Map() };
 const VIEW_QUOTA_RECHECK_FALLBACK_MS = 60_000;
 const VIEW_QUOTA_WAKE_GRACE_MS = 250;
+const FACEBOOK_REELS_FALLBACK_MAX_RECOVERY_ATTEMPTS = 2;
 /** 评论角色单次 LLM 硬 deadline；不沿用面向慢 thinking 角色的全局 180s。 */
 export const DEFAULT_COMMENT_LLM_TIMEOUT_MS = 30_000;
 /** 整条评论子链的安全兜底；局部 LLM / 人审超时应更早结束。 */
@@ -492,8 +493,10 @@ export class RoleDispatcher {
   private readonly expiredCommentSublineNoteIds = new Set<string>();
   /** feed 翻页按新卡数算的待发停留兜底（feed-scroll-card-floor）：page.cards.arrived 覆盖写、feed.scrolled 消费后归零。 */
   private pendingFeedFloorMs = 0;
-  /** 当前会话已授权过 Facebook Feed→Reels；重复 empty/unreportable 报告不得多次导航。 */
-  private reelsFallbackAuthorized = false;
+  /** Facebook Feed→Reels 握手状态；pending 只在可读 Reel 卡到达后才升级 confirmed。 */
+  private reelsFallbackState: 'idle' | 'pending' | 'confirmed' = 'idle';
+  /** pending 期间已真正下发的有界恢复次数；被调度/配额闸抑制不消耗次数。 */
+  private reelsFallbackRecoveryAttempts = 0;
   private readonly isHardPaused: (edgeId?: string) => boolean;
   private readonly edgeTaskLeases?: Pick<EdgeTaskLeaseClient, 'acquire' | 'release'>;
   private currentEdgeId?: string;
@@ -1188,6 +1191,18 @@ export class RoleDispatcher {
     return this.sendCommand(params ? { action: 'scroll', reason, params } : { action: 'scroll', reason });
   }
 
+  /** Reels fallback 保留兼容握手 reason，同时复用浏览配额与统一命令准入闸。 */
+  private sendFacebookReelsFallbackCommand(): boolean {
+    if (!this.viewQuotaSleeping) {
+      const decision = this.explainView();
+      if (!decision.allowed) {
+        this.sleepForViewQuota(decision);
+        return false;
+      }
+    }
+    return this.sendCommand({ action: 'scroll', reason: 'empty_feed_reels_fallback' });
+  }
+
   /**
    * Facebook Feed 已无可继续浏览内容时，由 Cloud 单点授权切到 Reels。
    *
@@ -1195,13 +1210,14 @@ export class RoleDispatcher {
    * 确认到底。只有命令真正下发后才置幂等闸；若被软暂停/评论支线等抑制，后续诚实重报仍可重试。
    */
   private authorizeFacebookReelsFallback(source: 'empty_feed' | 'feed_exhausted' | 'present_unreportable'): boolean {
-    if (this.accountPlatform !== 'facebook' || !this.sessionActive || this.reelsFallbackAuthorized) return false;
-    const sent = this.sendCommand({ action: 'scroll', reason: 'empty_feed_reels_fallback' });
+    if (this.accountPlatform !== 'facebook' || !this.sessionActive || this.reelsFallbackState !== 'idle') return false;
+    const sent = this.sendFacebookReelsFallbackCommand();
     if (!sent) {
       console.log(`[RoleDispatcher] Facebook ${source} → Reels fallback 命令被当前调度闸抑制，保留后续重试资格`);
       return false;
     }
-    this.reelsFallbackAuthorized = true;
+    this.reelsFallbackState = 'pending';
+    this.reelsFallbackRecoveryAttempts = 0;
     const message = source === 'empty_feed'
       ? '[RoleDispatcher] Facebook 首页明确空 Feed → 授权切换 Reels 列表'
       : source === 'present_unreportable'
@@ -1209,6 +1225,38 @@ export class RoleDispatcher {
         : '[RoleDispatcher] Facebook 普通 Feed 已确认到底 → 授权切换 Reels 列表';
     console.log(message);
     return true;
+  }
+
+  /** route_ready/no_target 均表示首卡尚未形成 Cloud 证据；保持握手 reason 做有界重驱，兼容新旧 Edge。 */
+  private recoverFacebookReelsFallback(reason: 'reels_pending' | 'no_target'): boolean {
+    if (
+      this.accountPlatform !== 'facebook'
+      || !this.sessionActive
+      || this.reelsFallbackState !== 'pending'
+    ) return false;
+    if (this.reelsFallbackRecoveryAttempts >= FACEBOOK_REELS_FALLBACK_MAX_RECOVERY_ATTEMPTS) {
+      console.warn(
+        `[RoleDispatcher] Facebook Reels fallback 连续 ${this.reelsFallbackRecoveryAttempts} 次恢复仍无可读卡（${reason}）→ 释放为 idle，等待新证据`,
+      );
+      this.reelsFallbackState = 'idle';
+      this.reelsFallbackRecoveryAttempts = 0;
+      return false;
+    }
+    const sent = this.sendFacebookReelsFallbackCommand();
+    if (!sent) {
+      console.log(`[RoleDispatcher] Facebook Reels pending 恢复被当前调度/配额闸抑制，不消耗恢复次数`);
+      return false;
+    }
+    this.reelsFallbackRecoveryAttempts += 1;
+    console.log(
+      `[RoleDispatcher] Facebook Reels ${reason} → 重发 fallback 握手 (${this.reelsFallbackRecoveryAttempts}/${FACEBOOK_REELS_FALLBACK_MAX_RECOVERY_ATTEMPTS})`,
+    );
+    return true;
+  }
+
+  private resetFacebookReelsFallback(): void {
+    this.reelsFallbackState = 'idle';
+    this.reelsFallbackRecoveryAttempts = 0;
   }
 
   private emitSearchSkippedAfterIntercept(currentPageType: 'feed' | 'search', reason: string): void {
@@ -1671,7 +1719,7 @@ export class RoleDispatcher {
     this.searchLimiter.resetSession();
     this.pendingSearchKeywords.clear();
     this.clearFacebookNaturalInteractionEvidence();
-    this.reelsFallbackAuthorized = false;
+    this.resetFacebookReelsFallback();
     // 跨会话残留清理（change platform-browse-protocol）：迁移在途 / 审批在途标志不得跨会话粘连。
     this.clearCommentSublineHold(false);
     // 跨会话概念记忆：异步刷新，不阻塞 feed.entered（首次搜索发生在连刷阈值之后，届时池已就绪）。
@@ -1750,7 +1798,7 @@ export class RoleDispatcher {
     // 故此处的清理才是生产实际生效的那一份（红线修复：防审批标志卡死跨会话粘连、迁移在途被后续 open_note 误消费）。
     this.clearCommentSublineHold(false);
     this.clearFacebookNaturalInteractionEvidence();
-    this.reelsFallbackAuthorized = false;
+    this.resetFacebookReelsFallback();
     // 重新订阅角色与接线（SessionMonitor.subscribe 重置 startedAt/actionCount）
     this.roles.forEach((r) => r.subscribe());
     this.setupCommandTranslation();
@@ -1804,7 +1852,7 @@ export class RoleDispatcher {
     this.interactionRetry.clear();
     this.pendingInteractionKeys.clear();
     this.clearFacebookNaturalInteractionEvidence();
-    this.reelsFallbackAuthorized = false;
+    this.resetFacebookReelsFallback();
     console.log(`[RoleDispatcher] 会话结束: ${reason ?? 'manual'}`);
     // 仅「正常结束」且续场特性已开（注入提供者）才安排休息+续场。
     if (opts?.autoResumeEligible) this.armRestTimer(account, this.takePendingAutoResumeInMs());
@@ -2751,6 +2799,16 @@ export class RoleDispatcher {
 
       // Edge 上报可见卡片 → 更新数据并触发评估
       this.eventBus.on('page.cards.arrived', (payload) => {
+        if (
+          this.accountPlatform === 'facebook'
+          && payload.listKind === 'reels'
+          && payload.cards.length > 0
+          && this.reelsFallbackState !== 'confirmed'
+        ) {
+          this.reelsFallbackState = 'confirmed';
+          this.reelsFallbackRecoveryAttempts = 0;
+          console.log('[RoleDispatcher] Facebook Reels 可读卡已到达 → fallback confirmed');
+        }
         this.updateVisibleCards(payload.cards);
         this.maybeDispatchFacebookPresentedVideoLike(payload.cards, payload.listKind);
         this.maybeDispatchFacebookPresentedReelFollow(payload.cards, payload.listKind);
@@ -2829,6 +2887,24 @@ export class RoleDispatcher {
             if (payload.action === 'comment') this.pendingComment = null;
             if (payload.action === 'open_note') this.pendingMigration = null;
             this.clearCommentSublineHold(true);
+          }
+          return;
+        }
+        if (
+          payload.action === 'scroll'
+          && payload.ok === false
+          && this.accountPlatform === 'facebook'
+          && this.reelsFallbackState === 'pending'
+        ) {
+          if (payload.reason === 'reels_pending' || payload.reason === 'no_target') {
+            this.recoverFacebookReelsFallback(payload.reason);
+          } else if (payload.reason === 'feed_exhausted') {
+            console.log('[RoleDispatcher] Facebook Reels fallback pending 时收到重复 feed_exhausted → 保持 pending，不重复授权');
+          } else {
+            console.warn(
+              `[RoleDispatcher] Facebook Reels fallback 收到终止失败 ${payload.reason ?? 'unknown'} → 释放为 idle`,
+            );
+            this.resetFacebookReelsFallback();
           }
           return;
         }
