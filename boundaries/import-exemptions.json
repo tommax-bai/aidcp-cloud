@@ -1,7 +1,7 @@
 {
-  "seedTotal": 257,
-  "seedUnplanned": 257,
-  "frozenTotal": 257,
+  "seedTotal": 274,
+  "seedUnplanned": 274,
+  "frozenTotal": 274,
   "recordedAt": "2026-07-22",
   "raises": [],
   "entries": [
@@ -16,6 +16,13 @@
       "to": "src/platform/index.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
+    },
+    {
+      "from": "src/account-store.ts",
+      "to": "src/risk/ownership.ts",
+      "reason": "由 change risk-state-cross-process-integrity 新增（aidcp-cloud 419e0f9）：api 侧账号主数据模块 type-only 引用风控层的归属占位结果类型 ClaimExecutionTargetResult（src/account-store.ts:17）。",
+      "eliminatedBy": null,
+      "note": "消除动作：§5.1「账号主数据（accounts）」行已写死——自动化在握手路径上占位 / 改写归属 target MUST 经 api 的窄内部接口完成，MUST NOT 直写该表。该窄接口落地时占位结果类型随合同回到 api 一侧，本条同批删除。§5.1 该行点名要求本 change 的归属占位任务「按本行落地，或在豁免清单里为该写入留一条具名条目并挂消除 change」——本条即那条具名条目，承接 change 名待 §12 阶段 1 排期时补。"
     },
     {
       "from": "src/agents/base-role.ts",
@@ -405,6 +412,13 @@
     },
     {
       "from": "src/comm/handler.ts",
+      "to": "src/config-mirror-freshness.ts",
+      "reason": "由 change config-mirror-cross-process-invalidation 新增：automation 侧边云消息处理器在出站信封上问「闸门配置副本还新鲜吗」。",
+      "eliminatedBy": null,
+      "note": "消除动作：拆仓后「配置副本是否新鲜」MUST 是 api 的只读投影，automation 侧改为消费本地只读副本 + 版本号（§11.4 要求二），MUST NOT 直接 import 配置域模块。本条与 src/comm/handler.ts、src/orchestrator/role-dispatcher.ts、src/risk/risk-controller.ts 三处同簇（共 3 条），MUST 同批消除。属 §12 阶段 1 第 4 项「把跨领域调用收口到明确接口」，尚无独立 change 名。"
+    },
+    {
+      "from": "src/comm/handler.ts",
       "to": "src/config/account-persona-service.ts",
       "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
@@ -446,6 +460,13 @@
       "eliminatedBy": null
     },
     {
+      "from": "src/comm/ui-snapshot.ts",
+      "to": "src/config/persona-store.ts",
+      "reason": "由 change config-mirror-cross-process-invalidation 新增（aidcp-cloud 860a951 把人设镜像改成三态、取值口统一走 personaStore）：automation 侧运行态快照直读 api 属主的人设配置存储。",
+      "eliminatedBy": null,
+      "note": "消除动作：§5.1「人设、写作语言（persona_config、soul_*）」归 aidcp-api；判定路径按 §11.4 要求二取本地只读副本。本条与 src/comm/ui-snapshot.ts、src/comment-agent/comment-scheduler.ts、src/orchestrator/role-dispatcher.ts 三处同簇（共 3 条），MUST 同批换成只读副本 / 窄接口。"
+    },
+    {
       "from": "src/comment-agent/comment-scheduler.ts",
       "to": "src/cache/curated-content-store.ts",
       "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
@@ -462,6 +483,20 @@
       "to": "src/config/facebook-comment-config-store.ts",
       "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
+    },
+    {
+      "from": "src/comment-agent/comment-scheduler.ts",
+      "to": "src/config/mirror-stop-work.ts",
+      "reason": "由 change config-mirror-cross-process-invalidation 新增：automation 侧评论调度器在放行新平台动作前问统一停手判据。",
+      "eliminatedBy": null,
+      "note": "消除动作二选一，先等定稿裁决：① §4.6.8 若按「随消费方走」的同一判据把 src/config/mirror-stop-work.ts 改判 automation，本条与同簇另 2 条直接消失（净额 0，理由写在 ownership-rules.json 该文件的 basis）；② 否则 automation 侧改为经 api 窄内部接口取停手判据。裁决请求见 docpatch R1。本条与 src/comment-agent/comment-scheduler.ts、src/delegated-task/worker.ts、src/orchestrator/role-dispatcher.ts 三处同簇（共 3 条）。"
+    },
+    {
+      "from": "src/comment-agent/comment-scheduler.ts",
+      "to": "src/config/persona-store.ts",
+      "reason": "由 change config-mirror-cross-process-invalidation 新增（aidcp-cloud 860a951）：automation 侧评论调度器改经 personaStore 判人设绑定三态。",
+      "eliminatedBy": null,
+      "note": "消除动作：§5.1「人设、写作语言（persona_config、soul_*）」归 aidcp-api；判定路径按 §11.4 要求二取本地只读副本。本条与 src/comm/ui-snapshot.ts、src/comment-agent/comment-scheduler.ts、src/orchestrator/role-dispatcher.ts 三处同簇（共 3 条），MUST 同批换成只读副本 / 窄接口。"
     },
     {
       "from": "src/comment-agent/comment-scheduler.ts",
@@ -608,6 +643,13 @@
       "eliminatedBy": null
     },
     {
+      "from": "src/config/pacing-config-store.ts",
+      "to": "src/config/mirror-version-store.ts",
+      "reason": "由 change config-mirror-cross-process-invalidation 新增（aidcp-cloud 4495050）：§5.1 判归 automation 的限频配置 store，在自己的写事务里递增 api 属主的配置镜像版本表。",
+      "eliminatedBy": null,
+      "note": "消除动作：拆仓后四类限频配置由 aidcp-automation 独立持有，其镜像版本通道 MUST 随表主人走——config_mirror_version 拆成按属主层各一张，或 automation 侧自持版本表。本条与另 3 个限频配置 store 同簇（共 4 条），MUST 同批消除。注意同一形态还有一处门禁天然看不见的跨层写（这四个 store 在自己的写事务里调 bumpInTx 递增 api 属主表，走方法不走 SQL 字面量），已登记在 boundaries/README.md 的失明清单。"
+    },
+    {
       "from": "src/config/persona-store.ts",
       "to": "src/cache/pg-anchor-cache.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
@@ -638,6 +680,13 @@
       "eliminatedBy": null
     },
     {
+      "from": "src/config/quota-config-store.ts",
+      "to": "src/config/mirror-version-store.ts",
+      "reason": "由 change config-mirror-cross-process-invalidation 新增（aidcp-cloud 4495050）：§5.1 判归 automation 的限频配置 store，在自己的写事务里递增 api 属主的配置镜像版本表。",
+      "eliminatedBy": null,
+      "note": "消除动作：拆仓后四类限频配置由 aidcp-automation 独立持有，其镜像版本通道 MUST 随表主人走——config_mirror_version 拆成按属主层各一张，或 automation 侧自持版本表。本条与另 3 个限频配置 store 同簇（共 4 条），MUST 同批消除。注意同一形态还有一处门禁天然看不见的跨层写（这四个 store 在自己的写事务里调 bumpInTx 递增 api 属主表，走方法不走 SQL 字面量），已登记在 boundaries/README.md 的失明清单。"
+    },
+    {
       "from": "src/config/resume-config-facade.ts",
       "to": "src/config/resume-config-store.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
@@ -648,6 +697,13 @@
       "to": "src/risk/resume-limits.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
+    },
+    {
+      "from": "src/config/resume-config-store.ts",
+      "to": "src/config/mirror-version-store.ts",
+      "reason": "由 change config-mirror-cross-process-invalidation 新增（aidcp-cloud 4495050）：§5.1 判归 automation 的限频配置 store，在自己的写事务里递增 api 属主的配置镜像版本表。",
+      "eliminatedBy": null,
+      "note": "消除动作：拆仓后四类限频配置由 aidcp-automation 独立持有，其镜像版本通道 MUST 随表主人走——config_mirror_version 拆成按属主层各一张，或 automation 侧自持版本表。本条与另 3 个限频配置 store 同簇（共 4 条），MUST 同批消除。注意同一形态还有一处门禁天然看不见的跨层写（这四个 store 在自己的写事务里调 bumpInTx 递增 api 属主表，走方法不走 SQL 字面量），已登记在 boundaries/README.md 的失明清单。"
     },
     {
       "from": "src/config/role-config-facade.ts",
@@ -696,6 +752,13 @@
       "to": "src/risk/session-limits.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
+    },
+    {
+      "from": "src/config/session-config-store.ts",
+      "to": "src/config/mirror-version-store.ts",
+      "reason": "由 change config-mirror-cross-process-invalidation 新增（aidcp-cloud 4495050）：§5.1 判归 automation 的限频配置 store，在自己的写事务里递增 api 属主的配置镜像版本表。",
+      "eliminatedBy": null,
+      "note": "消除动作：拆仓后四类限频配置由 aidcp-automation 独立持有，其镜像版本通道 MUST 随表主人走——config_mirror_version 拆成按属主层各一张，或 automation 侧自持版本表。本条与另 3 个限频配置 store 同簇（共 4 条），MUST 同批消除。注意同一形态还有一处门禁天然看不见的跨层写（这四个 store 在自己的写事务里调 bumpInTx 递增 api 属主表，走方法不走 SQL 字面量），已登记在 boundaries/README.md 的失明清单。"
     },
     {
       "from": "src/config/static-role-prompt-previews.ts",
@@ -762,6 +825,13 @@
       "to": "src/publish-agent/types.ts",
       "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
+    },
+    {
+      "from": "src/delegated-task/worker.ts",
+      "to": "src/config/mirror-stop-work.ts",
+      "reason": "由 change config-mirror-cross-process-invalidation 新增：automation 侧委托任务 worker 在认领前问统一停手判据。",
+      "eliminatedBy": null,
+      "note": "消除动作二选一，先等定稿裁决：① §4.6.8 若按「随消费方走」的同一判据把 src/config/mirror-stop-work.ts 改判 automation，本条与同簇另 2 条直接消失（净额 0，理由写在 ownership-rules.json 该文件的 basis）；② 否则 automation 侧改为经 api 窄内部接口取停手判据。裁决请求见 docpatch R1。本条与 src/comment-agent/comment-scheduler.ts、src/delegated-task/worker.ts、src/orchestrator/role-dispatcher.ts 三处同簇（共 3 条）。"
     },
     {
       "from": "src/event-bus/types.ts",
@@ -908,6 +978,13 @@
       "eliminatedBy": null
     },
     {
+      "from": "src/interactions/interaction-store.ts",
+      "to": "src/db/environment-row-lock.ts",
+      "reason": "由 change publish-approval-signal-to-database 新增（aidcp-cloud 66d05e7）：automation 侧互动存储在写环境登录态前，取 api 属主表 client_environments 的行锁（替代原来那把跨未来服务边界的 advisory lock）。",
+      "eliminatedBy": null,
+      "note": "消除动作：§5.1「client_environments（环境花名册与绑定事实）」写死「自动化握手 MUST 改为经 api 的窄内部接口回写，MUST NOT 直写该表」。窄接口落地时取锁连同回写一并搬到 api 一侧，本条随之消失。这正是 §12 阶段 1 退出判据点名 MUST 有明确结论的五处之一（client_environments 的自动化握手写入路径）。"
+    },
+    {
       "from": "src/interactions/reply-ai.ts",
       "to": "src/interactions/types.ts",
       "reason": "seed（content -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
@@ -1036,6 +1113,27 @@
       "reason": "§12 首批 MUST 锁住的集中违规之一：调度器文件头直接 import 具体角色类（automation -> content）。削减手段是 RoleName -> 角色工厂注册表，由组合根注入。",
       "eliminatedBy": null,
       "note": "本 change 任务 5.3 原记「43 条」，那是 design.md 旧判据下的数字；按定稿 §4.7 归属重算，role-dispatcher.ts 的 40 条 ../agents/ import 里只有 4 条跨边界，其余同属 automation。任务 5.3 的独立 change 仍成立（拆仓时 automation MUST 能在不 import content 角色的前提下启动），但收益量级 MUST 按 4 条重算。"
+    },
+    {
+      "from": "src/orchestrator/role-dispatcher.ts",
+      "to": "src/config-mirror-freshness.ts",
+      "reason": "由 change config-mirror-cross-process-invalidation 新增：automation 侧角色调度器在放行新平台动作前查配置副本新鲜度。",
+      "eliminatedBy": null,
+      "note": "消除动作：拆仓后「配置副本是否新鲜」MUST 是 api 的只读投影，automation 侧改为消费本地只读副本 + 版本号（§11.4 要求二），MUST NOT 直接 import 配置域模块。本条与 src/comm/handler.ts、src/orchestrator/role-dispatcher.ts、src/risk/risk-controller.ts 三处同簇（共 3 条），MUST 同批消除。属 §12 阶段 1 第 4 项「把跨领域调用收口到明确接口」，尚无独立 change 名。"
+    },
+    {
+      "from": "src/orchestrator/role-dispatcher.ts",
+      "to": "src/config/mirror-stop-work.ts",
+      "reason": "由 change config-mirror-cross-process-invalidation 新增：automation 侧角色调度器在命令泵出口问统一停手判据。",
+      "eliminatedBy": null,
+      "note": "消除动作二选一，先等定稿裁决：① §4.6.8 若按「随消费方走」的同一判据把 src/config/mirror-stop-work.ts 改判 automation，本条与同簇另 2 条直接消失（净额 0，理由写在 ownership-rules.json 该文件的 basis）；② 否则 automation 侧改为经 api 窄内部接口取停手判据。裁决请求见 docpatch R1。本条与 src/comment-agent/comment-scheduler.ts、src/delegated-task/worker.ts、src/orchestrator/role-dispatcher.ts 三处同簇（共 3 条）。"
+    },
+    {
+      "from": "src/orchestrator/role-dispatcher.ts",
+      "to": "src/config/persona-store.ts",
+      "reason": "由 change config-mirror-cross-process-invalidation 新增（aidcp-cloud 860a951）：automation 侧角色调度器改经 personaStore 判人设绑定三态。",
+      "eliminatedBy": null,
+      "note": "消除动作：§5.1「人设、写作语言（persona_config、soul_*）」归 aidcp-api；判定路径按 §11.4 要求二取本地只读副本。本条与 src/comm/ui-snapshot.ts、src/comment-agent/comment-scheduler.ts、src/orchestrator/role-dispatcher.ts 三处同簇（共 3 条），MUST 同批换成只读副本 / 窄接口。"
     },
     {
       "from": "src/orchestrator/role-dispatcher.ts",
@@ -1330,6 +1428,20 @@
       "eliminatedBy": null
     },
     {
+      "from": "src/publish-agent/publish-approval-store.ts",
+      "to": "src/cache/pg-anchor-cache.ts",
+      "reason": "由 change publish-approval-signal-to-database 新增（aidcp-cloud 4ad06a2）：api 侧授权存储从 automation 属主的 src/cache/pg-anchor-cache.ts 取 DEFAULT_PG_CONFIG 兜底连接参数（:21）。",
+      "eliminatedBy": null,
+      "note": "消除动作现成、代价最低：本 change 任务 2.3 已把 DEFAULT_PG_CONFIG 整体搬进 kernel 的 src/cache/pg-config.ts，pg-anchor-cache.ts 现在只是再导出。把这一处 import 改成 ../cache/pg-config.js 即可消除（任何层 MAY 导入 kernel）。它属任务 2.3 未做的那一半「把引用方改为从 pg-config.js 取」，全仓同形态成批存在，MUST 由该削减 change 一次处理。"
+    },
+    {
+      "from": "src/publish-agent/publish-dispatcher.ts",
+      "to": "src/publish-agent/publish-approval-store.ts",
+      "reason": "由 change publish-approval-signal-to-database 新增（aidcp-cloud 4ad06a2）：automation 侧发布下发器直接引用 api 属主的授权存储（错误类型与阻塞原因枚举）。",
+      "eliminatedBy": null,
+      "note": "消除动作：§5.1「发布授权决定（publish_approval_decision，新建）」写死「aidcp-automation 经 PublishApproved 持久事件获知，MUST NOT 直读」。该 change 已按未来 HTTP 形状建好窄内部接口 src/publish-agent/publish-approval-api.ts，下发器改为只依赖该接口的合同类型即可消除本条。"
+    },
+    {
       "from": "src/publish-agent/publish-dispatcher.ts",
       "to": "src/publish-agent/publish-log-store.ts",
       "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
@@ -1556,6 +1668,14 @@
       "to": "src/soul/types.ts",
       "reason": "seed（content -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
+    },
+    {
+      "from": "src/risk/risk-controller.ts",
+      "to": "src/config-mirror-freshness.ts",
+      "reason": "由 change config-mirror-cross-process-invalidation 新增：风控层在配额求值路径上查配置副本新鲜度并记陈旧拒绝。",
+      "eliminatedBy": null,
+      "note": "消除动作：拆仓后「配置副本是否新鲜」MUST 是 api 的只读投影，automation 侧改为消费本地只读副本 + 版本号（§11.4 要求二），MUST NOT 直接 import 配置域模块。本条与 src/comm/handler.ts、src/orchestrator/role-dispatcher.ts、src/risk/risk-controller.ts 三处同簇（共 3 条），MUST 同批消除。属 §12 阶段 1 第 4 项「把跨领域调用收口到明确接口」，尚无独立 change 名。"
     }
-  ]
+  ],
+  "seedBasis": "seed 基线 = 门禁 change cloud-service-boundary-gates rebase 到 origin/master 之后的实测值（2026-07-23）。首次 seed 用的是 aidcp-cloud@313eba2，随后主干合入 risk-state-cross-process-integrity / config-mirror-cross-process-invalidation / publish-approval-signal-to-database 三个 change（新增 15 个源文件、5 张表），故按定稿 §12「清单 MUST 在阶段 1 的第一个 change 里用扫描器一次性 seed 全量既存违规」在合并基线上重新 seed。棘轮自本 change 归档起开始计数；此后 MUST NOT 再用 --reseed。"
 }

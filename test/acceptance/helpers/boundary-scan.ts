@@ -301,20 +301,58 @@ export interface OwnershipEntry {
   note: string;
 }
 
+/**
+ * 目录规则对**新增文件**的处置。
+ *
+ *   - `inherit`：§4.7 里该目录整行只有一个归属层（如 `src/risk/` 19/19 automation），
+ *     新增文件的归属已被 §4.7 判定，目录规则可以直接接住；
+ *   - `adjudicate`：§4.7 里该目录被**逐文件切开**（如 `src/publish-agent/` 7 api / 54 content / 6 automation），
+ *     §4.7 并没有判定「该目录下任意新文件属于哪一层」。此时让目录默认值接住新文件＝脚本替人裁决，
+ *     正是红线「MUST NOT 静默假成功」。故这类目录的新增文件 MUST 先在 `fileOverrides` 里逐个裁定，
+ *     生成器在裁定之前 **报错并列出待裁决清单**。
+ *
+ * 字段缺省时按 `adjudicate` 处理（fail-safe：宁可多问一次，也不替人判）。
+ */
+export type NewFileDisposition = 'inherit' | 'adjudicate';
+
 export interface OwnershipRules {
   sourceOfTruth: string;
   baseline: Record<string, unknown>;
   compositionWhitelist: string[];
-  directoryRules: { dir: string; layer: Layer; basis: string }[];
+  directoryRules: { dir: string; layer: Layer; basis: string; newFile?: NewFileDisposition }[];
   fileOverrides: { path: string; layer: Layer; basis: string }[];
 }
 
-/** 把规则表机械展开到文件级清单。新增源文件由目录规则接住，例外走 fileOverrides。 */
-export function expandOwnership(rules: OwnershipRules, files: string[]): OwnershipEntry[] {
+/** 归属展开失败时抛出：`pending` 是待人工裁决的文件清单，MUST 原样报给调用者。 */
+export class UnadjudicatedFilesError extends Error {
+  constructor(readonly pending: { file: string; dir: string | null }[]) {
+    super(
+      `以下源文件的归属层尚未裁定，MUST 先在 boundaries/ownership-rules.json 的 fileOverrides 里逐个判定（判据引定稿 §4.7），再重跑生成器；` +
+        `生成器 MUST NOT 替你塞一个默认层：\n  ${pending
+          .map((p) => `${p.file}${p.dir ? `（${p.dir} 在 §4.7 是逐文件切分的目录）` : '（没有任何目录规则覆盖它）'}`)
+          .join('\n  ')}`,
+    );
+    this.name = 'UnadjudicatedFilesError';
+  }
+}
+
+/**
+ * 把规则表机械展开到文件级清单。
+ *
+ * `prior` 是**已裁定文件集**（通常传当前已提交的 `boundaries/module-ownership.json`）：
+ * 逐文件切分目录（`newFile: 'adjudicate'`）里的**既有**文件靠它继续走目录默认值，
+ * 而**新增**文件因不在 `prior` 内被判为待裁决、当场报错。不传 `prior` 即最严格口径。
+ */
+export function expandOwnership(
+  rules: OwnershipRules,
+  files: string[],
+  prior: readonly OwnershipEntry[] = [],
+): OwnershipEntry[] {
   const overrides = new Map(rules.fileOverrides.map((o) => [o.path, o]));
   const dirs = [...rules.directoryRules].sort((a, b) => b.dir.length - a.dir.length);
+  const known = new Set(prior.map((e) => e.path));
   const entries: OwnershipEntry[] = [];
-  const unmatched: string[] = [];
+  const pending: { file: string; dir: string | null }[] = [];
   for (const file of files) {
     const override = overrides.get(file);
     if (override) {
@@ -323,14 +361,16 @@ export function expandOwnership(rules: OwnershipRules, files: string[]): Ownersh
     }
     const dir = dirs.find((d) => file.startsWith(d.dir));
     if (!dir) {
-      unmatched.push(file);
+      pending.push({ file, dir: null });
+      continue;
+    }
+    if ((dir.newFile ?? 'adjudicate') === 'adjudicate' && !known.has(file)) {
+      pending.push({ file, dir: dir.dir });
       continue;
     }
     entries.push({ path: file, layer: dir.layer, note: dir.basis });
   }
-  if (unmatched.length > 0) {
-    throw new Error(`ownership-rules.json 未覆盖以下源文件，MUST 先补规则再重跑：\n  ${unmatched.join('\n  ')}`);
-  }
+  if (pending.length > 0) throw new UnadjudicatedFilesError(pending);
   return entries.sort((a, b) => a.path.localeCompare(b.path));
 }
 

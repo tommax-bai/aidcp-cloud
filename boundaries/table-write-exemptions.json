@@ -107,5 +107,6 @@
       "eliminatedBy": null,
       "note": "automation 层文件删除 api 属主表；消除方式已在 §4.6.1 写定，控制仓尚未立项承接 change，eliminatedBy 暂为 null（seed 期允许）。"
     }
-  ]
+  ],
+  "seedBasis": "seed 基线 = 门禁 change cloud-service-boundary-gates rebase 到 origin/master 之后的实测值（2026-07-23）。首次 seed 用的是 aidcp-cloud@313eba2，随后主干合入 risk-state-cross-process-integrity / config-mirror-cross-process-invalidation / publish-approval-signal-to-database 三个 change（新增 15 个源文件、5 张表），故按定稿 §12「清单 MUST 在阶段 1 的第一个 change 里用扫描器一次性 seed 全量既存违规」在合并基线上重新 seed。棘轮自本 change 归档起开始计数；此后 MUST NOT 再用 --reseed。"
 }

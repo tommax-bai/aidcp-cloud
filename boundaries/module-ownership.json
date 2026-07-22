@@ -267,12 +267,12 @@
   {
     "path": "src/alerts/alert-store.ts",
     "layer": "automation",
-    "note": "§4.7：alerts 表 owner"
+    "note": "§4.7：alerts 表 owner（2/2 automation）"
   },
   {
     "path": "src/alerts/index.ts",
     "layer": "automation",
-    "note": "§4.7：alerts 表 owner"
+    "note": "§4.7：alerts 表 owner（2/2 automation）"
   },
   {
     "path": "src/cache/bot-chat-store.ts",
@@ -342,177 +342,182 @@
   {
     "path": "src/client-auth/client-auth-server.ts",
     "layer": "api",
-    "note": "§4.7：客户身份与环境归属权威"
+    "note": "§4.7：客户身份与环境归属权威（7/7 api）"
   },
   {
     "path": "src/client-auth/client-publish-queue.ts",
     "layer": "api",
-    "note": "§4.7：客户身份与环境归属权威"
+    "note": "§4.7：客户身份与环境归属权威（7/7 api）"
   },
   {
     "path": "src/client-auth/client-user-store.ts",
     "layer": "api",
-    "note": "§4.7：客户身份与环境归属权威"
+    "note": "§4.7：客户身份与环境归属权威（7/7 api）"
   },
   {
     "path": "src/client-auth/index.ts",
     "layer": "api",
-    "note": "§4.7：客户身份与环境归属权威"
+    "note": "§4.7：客户身份与环境归属权威（7/7 api）"
   },
   {
     "path": "src/client-auth/key.ts",
     "layer": "api",
-    "note": "§4.7：客户身份与环境归属权威"
+    "note": "§4.7：客户身份与环境归属权威（7/7 api）"
   },
   {
     "path": "src/client-auth/offboard-cleanup-grant.ts",
     "layer": "api",
-    "note": "§4.7：客户身份与环境归属权威"
+    "note": "§4.7：客户身份与环境归属权威（7/7 api）"
   },
   {
     "path": "src/client-auth/rate-limiter.ts",
     "layer": "api",
-    "note": "§4.7：客户身份与环境归属权威"
+    "note": "§4.7：客户身份与环境归属权威（7/7 api）"
   },
   {
     "path": "src/comm/browser-standby.ts",
     "layer": "automation",
-    "note": "§4.7：Edge Gateway、协议、租约、验证码协助；protocol.ts 归属见 §10.9"
+    "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
   },
   {
     "path": "src/comm/captcha-assist.ts",
     "layer": "automation",
-    "note": "§4.7：Edge Gateway、协议、租约、验证码协助；protocol.ts 归属见 §10.9"
+    "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
   },
   {
     "path": "src/comm/captcha-coordinator.ts",
     "layer": "automation",
-    "note": "§4.7：Edge Gateway、协议、租约、验证码协助；protocol.ts 归属见 §10.9"
+    "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
   },
   {
     "path": "src/comm/command-bridge.ts",
     "layer": "automation",
-    "note": "§4.7：Edge Gateway、协议、租约、验证码协助；protocol.ts 归属见 §10.9"
+    "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
   },
   {
     "path": "src/comm/daily-usage.ts",
     "layer": "automation",
-    "note": "§4.7：Edge Gateway、协议、租约、验证码协助；protocol.ts 归属见 §10.9"
+    "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
   },
   {
     "path": "src/comm/edge-task-lease-client.ts",
     "layer": "automation",
-    "note": "§4.7：Edge Gateway、协议、租约、验证码协助；protocol.ts 归属见 §10.9"
+    "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
   },
   {
     "path": "src/comm/facebook-throttle-signals.ts",
     "layer": "automation",
-    "note": "§4.7：Edge Gateway、协议、租约、验证码协助；protocol.ts 归属见 §10.9"
+    "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
   },
   {
     "path": "src/comm/handler.ts",
     "layer": "automation",
-    "note": "§4.7：Edge Gateway、协议、租约、验证码协助；protocol.ts 归属见 §10.9"
+    "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
   },
   {
     "path": "src/comm/index.ts",
     "layer": "automation",
-    "note": "§4.7：Edge Gateway、协议、租约、验证码协助；protocol.ts 归属见 §10.9"
+    "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
   },
   {
     "path": "src/comm/like-command.ts",
     "layer": "automation",
-    "note": "§4.7：Edge Gateway、协议、租约、验证码协助；protocol.ts 归属见 §10.9"
+    "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
   },
   {
     "path": "src/comm/operation-registry.ts",
     "layer": "automation",
-    "note": "§4.7：Edge Gateway、协议、租约、验证码协助；protocol.ts 归属见 §10.9"
+    "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
   },
   {
     "path": "src/comm/preemption.ts",
     "layer": "automation",
-    "note": "§4.7：Edge Gateway、协议、租约、验证码协助；protocol.ts 归属见 §10.9"
+    "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
   },
   {
     "path": "src/comm/protocol.ts",
     "layer": "automation",
-    "note": "§4.7：Edge Gateway、协议、租约、验证码协助；protocol.ts 归属见 §10.9"
+    "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
   },
   {
     "path": "src/comm/ui-snapshot.ts",
     "layer": "automation",
-    "note": "§4.7：Edge Gateway、协议、租约、验证码协助；protocol.ts 归属见 §10.9"
+    "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
   },
   {
     "path": "src/comm/ws-server.ts",
     "layer": "automation",
-    "note": "§4.7：Edge Gateway、协议、租约、验证码协助；protocol.ts 归属见 §10.9"
+    "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
   },
   {
     "path": "src/comment-agent/auto-approve-notification.ts",
     "layer": "automation",
-    "note": "§4.7：命令式评论与加群调度"
+    "note": "§4.7：命令式评论与加群调度（13/13 automation）"
   },
   {
     "path": "src/comment-agent/comment-scheduler.ts",
     "layer": "automation",
-    "note": "§4.7：命令式评论与加群调度"
+    "note": "§4.7：命令式评论与加群调度（13/13 automation）"
   },
   {
     "path": "src/comment-agent/comment-task-runner.ts",
     "layer": "automation",
-    "note": "§4.7：命令式评论与加群调度"
+    "note": "§4.7：命令式评论与加群调度（13/13 automation）"
   },
   {
     "path": "src/comment-agent/compose-approve.ts",
     "layer": "automation",
-    "note": "§4.7：命令式评论与加群调度"
+    "note": "§4.7：命令式评论与加群调度（13/13 automation）"
   },
   {
     "path": "src/comment-agent/edge-steps.ts",
     "layer": "automation",
-    "note": "§4.7：命令式评论与加群调度"
+    "note": "§4.7：命令式评论与加群调度（13/13 automation）"
   },
   {
     "path": "src/comment-agent/facebook-comment-audit-store.ts",
     "layer": "automation",
-    "note": "§4.7：命令式评论与加群调度"
+    "note": "§4.7：命令式评论与加群调度（13/13 automation）"
   },
   {
     "path": "src/comment-agent/facebook-comment-composer-prompt.ts",
     "layer": "automation",
-    "note": "§4.7：命令式评论与加群调度"
+    "note": "§4.7：命令式评论与加群调度（13/13 automation）"
   },
   {
     "path": "src/comment-agent/facebook-comment-validators.ts",
     "layer": "automation",
-    "note": "§4.7：命令式评论与加群调度"
+    "note": "§4.7：命令式评论与加群调度（13/13 automation）"
   },
   {
     "path": "src/comment-agent/facebook-edge-steps.ts",
     "layer": "automation",
-    "note": "§4.7：命令式评论与加群调度"
+    "note": "§4.7：命令式评论与加群调度（13/13 automation）"
   },
   {
     "path": "src/comment-agent/facebook-group-join-edge-steps.ts",
     "layer": "automation",
-    "note": "§4.7：命令式评论与加群调度"
+    "note": "§4.7：命令式评论与加群调度（13/13 automation）"
   },
   {
     "path": "src/comment-agent/facebook-group-join-scheduler.ts",
     "layer": "automation",
-    "note": "§4.7：命令式评论与加群调度"
+    "note": "§4.7：命令式评论与加群调度（13/13 automation）"
   },
   {
     "path": "src/comment-agent/facebook-group-store.ts",
     "layer": "automation",
-    "note": "§4.7：命令式评论与加群调度"
+    "note": "§4.7：命令式评论与加群调度（13/13 automation）"
   },
   {
     "path": "src/comment-agent/gated-auto-comment.ts",
     "layer": "automation",
-    "note": "§4.7：命令式评论与加群调度"
+    "note": "§4.7：命令式评论与加群调度（13/13 automation）"
+  },
+  {
+    "path": "src/config-mirror-freshness.ts",
+    "layer": "api",
+    "note": "【待定稿裁决】§4.7 基线 sha 之后由 change config-mirror-cross-process-invalidation 新增，§4.7『src/ 根文件』行（api 3 / kernel 1 / composition 2）未覆盖它。按配置域默认落 api（§4.6.8：src/config/ 除四类限频配置外归 api，本文件是同一域的镜像新鲜度查询口，仅因『不让风控层第一次 import 配置层』而放在 src/ 根）。MUST NOT 判 kernel：§4.7 的 kernel 花名册是封闭的 4 文件名单，且本文件 :59 有模块级可变单例 installedSource，AC-BOUND-03 的 kernel 准入判据当场不过。请求回写 §4.7 见 docpatch R1"
   },
   {
     "path": "src/config/account-persona-service.ts",
@@ -573,6 +578,26 @@
     "path": "src/config/index.ts",
     "layer": "api",
     "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+  },
+  {
+    "path": "src/config/mirror-refresher.ts",
+    "layer": "api",
+    "note": "§4.6.8 同上：配置镜像的轮询刷新器，装配在组合根、只驱动配置层 store 的 refreshFromAuthority。由 change config-mirror-cross-process-invalidation 新增"
+  },
+  {
+    "path": "src/config/mirror-registry.ts",
+    "layer": "api",
+    "note": "§4.6.8 例外只有四类限频配置 store + 门面，本文件不在其列，故随 src/config/ 默认落 api。它是 15 处进程内配置镜像的描述符表（写入权归属只用于文档与断言，不影响运行时装配）。由 change config-mirror-cross-process-invalidation 新增"
+  },
+  {
+    "path": "src/config/mirror-stop-work.ts",
+    "layer": "api",
+    "note": "【待定稿裁决】§4.6.8 的例外名单是封闭的 5 个文件，本文件不在其列，故按目录默认落 api。但它的语义偏自动化：它是『闸门镜像陈旧则不放行新的真实平台动作』的统一判据，消费方是 comment-scheduler / role-dispatcher / delegated-task worker 三个 automation 文件（因此产生 3 条 automation->api 豁免）。若按 §4.6.8『随消费方走』的同一判据改判 automation，这 3 条消失、另生 3 条（publish-scheduler 的 api->automation 1 条 + 本文件对 config-mirror-freshness / mirror-registry 的 automation->api 2 条），净额为 0，故本次不擅自改判。请求 §4.6.8 裁决见 docpatch R1。由 change config-mirror-cross-process-invalidation 新增"
+  },
+  {
+    "path": "src/config/mirror-version-store.ts",
+    "layer": "api",
+    "note": "§4.6.8 同上：配置层的版本表读写口，承载 config_mirror_version / config_mirror_stale_refusal 两张配置面表。由 change config-mirror-cross-process-invalidation 新增"
   },
   {
     "path": "src/config/model-config-store.ts",
@@ -665,54 +690,59 @@
     "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
   },
   {
+    "path": "src/db/environment-row-lock.ts",
+    "layer": "api",
+    "note": "【待定稿裁决】§4.7 基线 sha 之后由 change publish-approval-signal-to-database 新增，src/db/ 是 §4.7 里不存在的新目录。按『锁随被保护数据走』落 api：本文件唯一动作是锁 client_environments 的行，该表 §5.1 具名归 aidcp-api 单写、§4.7 的 src/client-auth/ 亦整目录归 api。此处用 fileOverride 而非目录规则，故 src/db/ 后续新增文件仍会逐个待裁决。请求回写 §4.7 见 docpatch R1"
+  },
+  {
     "path": "src/delegated-task/executors.ts",
     "layer": "automation",
-    "note": "§4.7：认领型 worker 范式"
+    "note": "§4.7：认领型 worker 范式（10/10 automation）"
   },
   {
     "path": "src/delegated-task/index.ts",
     "layer": "automation",
-    "note": "§4.7：认领型 worker 范式"
+    "note": "§4.7：认领型 worker 范式（10/10 automation）"
   },
   {
     "path": "src/delegated-task/notification.ts",
     "layer": "automation",
-    "note": "§4.7：认领型 worker 范式"
+    "note": "§4.7：认领型 worker 范式（10/10 automation）"
   },
   {
     "path": "src/delegated-task/ownership.ts",
     "layer": "automation",
-    "note": "§4.7：认领型 worker 范式"
+    "note": "§4.7：认领型 worker 范式（10/10 automation）"
   },
   {
     "path": "src/delegated-task/parser.ts",
     "layer": "automation",
-    "note": "§4.7：认领型 worker 范式"
+    "note": "§4.7：认领型 worker 范式（10/10 automation）"
   },
   {
     "path": "src/delegated-task/reason-humanize.ts",
     "layer": "automation",
-    "note": "§4.7：认领型 worker 范式"
+    "note": "§4.7：认领型 worker 范式（10/10 automation）"
   },
   {
     "path": "src/delegated-task/service.ts",
     "layer": "automation",
-    "note": "§4.7：认领型 worker 范式"
+    "note": "§4.7：认领型 worker 范式（10/10 automation）"
   },
   {
     "path": "src/delegated-task/store.ts",
     "layer": "automation",
-    "note": "§4.7：认领型 worker 范式"
+    "note": "§4.7：认领型 worker 范式（10/10 automation）"
   },
   {
     "path": "src/delegated-task/types.ts",
     "layer": "automation",
-    "note": "§4.7：认领型 worker 范式"
+    "note": "§4.7：认领型 worker 范式（10/10 automation）"
   },
   {
     "path": "src/delegated-task/worker.ts",
     "layer": "automation",
-    "note": "§4.7：认领型 worker 范式"
+    "note": "§4.7：认领型 worker 范式（10/10 automation）"
   },
   {
     "path": "src/deployment-target.ts",
@@ -722,97 +752,97 @@
   {
     "path": "src/event-bus/index.ts",
     "layer": "automation",
-    "note": "§4.7：进程内总线，不跨服务"
+    "note": "§4.7：进程内总线，不跨服务（2/2 automation）"
   },
   {
     "path": "src/event-bus/types.ts",
     "layer": "automation",
-    "note": "§4.7：进程内总线，不跨服务"
+    "note": "§4.7：进程内总线，不跨服务（2/2 automation）"
   },
   {
     "path": "src/feishu/bot-chat-events.ts",
     "layer": "api",
-    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api"
+    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
   },
   {
     "path": "src/feishu/bot-chats-provider.ts",
     "layer": "api",
-    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api"
+    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
   },
   {
     "path": "src/feishu/cards.ts",
     "layer": "api",
-    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api"
+    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
   },
   {
     "path": "src/feishu/chat-target.ts",
     "layer": "api",
-    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api"
+    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
   },
   {
     "path": "src/feishu/commands.ts",
     "layer": "api",
-    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api"
+    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
   },
   {
     "path": "src/feishu/comment-approval-card.ts",
     "layer": "api",
-    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api"
+    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
   },
   {
     "path": "src/feishu/delegated-task-card.ts",
     "layer": "api",
-    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api"
+    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
   },
   {
     "path": "src/feishu/handler.ts",
     "layer": "api",
-    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api"
+    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
   },
   {
     "path": "src/feishu/index.ts",
     "layer": "api",
-    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api"
+    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
   },
   {
     "path": "src/feishu/mandatory-comment-cards.ts",
     "layer": "api",
-    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api"
+    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
   },
   {
     "path": "src/feishu/messenger.ts",
     "layer": "api",
-    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api"
+    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
   },
   {
     "path": "src/feishu/token.ts",
     "layer": "api",
-    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api"
+    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
   },
   {
     "path": "src/feishu/types.ts",
     "layer": "api",
-    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api"
+    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
   },
   {
     "path": "src/feishu/ws-config.ts",
     "layer": "api",
-    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api"
+    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
   },
   {
     "path": "src/feishu/ws-receiver.ts",
     "layer": "api",
-    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api"
+    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
   },
   {
     "path": "src/hot-lead/heat-velocity.ts",
     "layer": "automation",
-    "note": "§4.7：浏览闭环内触发"
+    "note": "§4.7：浏览闭环内触发（2/2 automation）"
   },
   {
     "path": "src/hot-lead/hot-lead-detector.ts",
     "layer": "automation",
-    "note": "§4.7：浏览闭环内触发"
+    "note": "§4.7：浏览闭环内触发（2/2 automation）"
   },
   {
     "path": "src/index.ts",
@@ -927,32 +957,32 @@
   {
     "path": "src/llm/index.ts",
     "layer": "content",
-    "note": "§4.7：模型客户端"
+    "note": "§4.7：模型客户端（4/4 content）"
   },
   {
     "path": "src/llm/providers.ts",
     "layer": "content",
-    "note": "§4.7：模型客户端"
+    "note": "§4.7：模型客户端（4/4 content）"
   },
   {
     "path": "src/llm/qwen.ts",
     "layer": "content",
-    "note": "§4.7：模型客户端"
+    "note": "§4.7：模型客户端（4/4 content）"
   },
   {
     "path": "src/llm/vision.ts",
     "layer": "content",
-    "note": "§4.7：模型客户端"
+    "note": "§4.7：模型客户端（4/4 content）"
   },
   {
     "path": "src/metrics/billing-price-refresh.ts",
     "layer": "content",
-    "note": "§4.6.6：用量与成本两张表归 aidcp-content"
+    "note": "§4.6.6：用量与成本两张表归 aidcp-content（2/2）"
   },
   {
     "path": "src/metrics/token-usage-store.ts",
     "layer": "content",
-    "note": "§4.6.6：用量与成本两张表归 aidcp-content"
+    "note": "§4.6.6：用量与成本两张表归 aidcp-content（2/2）"
   },
   {
     "path": "src/onboarding/first-post-onboarding-coordinator.ts",
@@ -1047,37 +1077,37 @@
   {
     "path": "src/planner/index.ts",
     "layer": "automation",
-    "note": "§4.7：v1 遗留路径"
+    "note": "§4.7：v1 遗留路径（3/3 automation）"
   },
   {
     "path": "src/planner/simple-planner.ts",
     "layer": "automation",
-    "note": "§4.7：v1 遗留路径"
+    "note": "§4.7：v1 遗留路径（3/3 automation）"
   },
   {
     "path": "src/planner/types.ts",
     "layer": "automation",
-    "note": "§4.7：v1 遗留路径"
+    "note": "§4.7：v1 遗留路径（3/3 automation）"
   },
   {
     "path": "src/platform/facebook-presented-video.ts",
     "layer": "automation",
-    "note": "§4.7：平台能力注册表（§9 单写）"
+    "note": "§4.7：平台能力注册表（§9 单写，4/4 automation）"
   },
   {
     "path": "src/platform/index.ts",
     "layer": "automation",
-    "note": "§4.7：平台能力注册表（§9 单写）"
+    "note": "§4.7：平台能力注册表（§9 单写，4/4 automation）"
   },
   {
     "path": "src/platform/registry.ts",
     "layer": "automation",
-    "note": "§4.7：平台能力注册表（§9 单写）"
+    "note": "§4.7：平台能力注册表（§9 单写，4/4 automation）"
   },
   {
     "path": "src/platform/surface.ts",
     "layer": "automation",
-    "note": "§4.7：平台能力注册表（§9 单写）"
+    "note": "§4.7：平台能力注册表（§9 单写，4/4 automation）"
   },
   {
     "path": "src/publish-agent/client-publish-approval.ts",
@@ -1150,6 +1180,11 @@
     "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
   },
   {
+    "path": "src/publish-agent/pending-dispatch-watchdog.ts",
+    "layer": "api",
+    "note": "【待定稿裁决】§4.6.3 的三条 import 指纹判据对本文件都不命中：它不引 ../comm/（非下发段）、不引 ../llm/ 或图片供应商（非生成段）、也不写 publish_log 或授权记录（只读授权台账行）。按『离哪一段最近』落 api：数据面是 api 属主的 publish_approval_decision，全部依赖经注入、无自有 SQL。反向理由是它探测的失联对象在 automation 侧、且告警落 alerts（§4.6.4 判归 automation）。当前落 api 时新增跨边界边为 0，落 automation 则新增 1 条。请求 §4.6.3 逐文件回写见 docpatch R1。由 change publish-approval-signal-to-database 新增"
+  },
+  {
     "path": "src/publish-agent/pipeline-context.ts",
     "layer": "content",
     "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
@@ -1178,6 +1213,21 @@
     "path": "src/publish-agent/prompts.ts",
     "layer": "content",
     "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+  },
+  {
+    "path": "src/publish-agent/publish-approval-api.ts",
+    "layer": "api",
+    "note": "§4.6.3 同上：授权的窄内部接口，按未来 HTTP 形状写死、阶段 4 提取 aidcp-api 时把进程内适配器换成 HTTP 客户端。由 change publish-approval-signal-to-database 新增"
+  },
+  {
+    "path": "src/publish-agent/publish-approval-outlet.ts",
+    "layer": "api",
+    "note": "§4.6.3 同上：五个审批入口收敛到这里写同一条授权记录，属台账与审批段。由 change publish-approval-signal-to-database 新增"
+  },
+  {
+    "path": "src/publish-agent/publish-approval-store.ts",
+    "layer": "api",
+    "note": "§4.6.3 的机械 import 指纹判据第三条（『直接写 publish_log 或授权记录即为台账与审批段』）：本文件是 publish_approval_decision 的唯一持久写者，而 §4.6.3 正文另有直接点名『授权事实由新建的 publish_approval_decision（aidcp-api 单写）承担』。由 change publish-approval-signal-to-database 新增"
   },
   {
     "path": "src/publish-agent/publish-dispatcher.ts",
@@ -1427,122 +1477,147 @@
   {
     "path": "src/render/index.ts",
     "layer": "content",
-    "note": "§4.7：文字卡渲染"
+    "note": "§4.7：文字卡渲染（5/5 content）"
   },
   {
     "path": "src/render/palettes.ts",
     "layer": "content",
-    "note": "§4.7：文字卡渲染"
+    "note": "§4.7：文字卡渲染（5/5 content）"
   },
   {
     "path": "src/render/text-card-layout.ts",
     "layer": "content",
-    "note": "§4.7：文字卡渲染"
+    "note": "§4.7：文字卡渲染（5/5 content）"
   },
   {
     "path": "src/render/text-card.ts",
     "layer": "content",
-    "note": "§4.7：文字卡渲染"
+    "note": "§4.7：文字卡渲染（5/5 content）"
   },
   {
     "path": "src/render/text-metrics.ts",
     "layer": "content",
-    "note": "§4.7：文字卡渲染"
+    "note": "§4.7：文字卡渲染（5/5 content）"
   },
   {
     "path": "src/risk/action-cooldown.ts",
     "layer": "automation",
-    "note": "§4.7：RiskController 单写"
+    "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
     "path": "src/risk/cold-start-planner.ts",
     "layer": "automation",
-    "note": "§4.7：RiskController 单写"
+    "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
     "path": "src/risk/index.ts",
     "layer": "automation",
-    "note": "§4.7：RiskController 单写"
+    "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
     "path": "src/risk/interaction-dedup.ts",
     "layer": "automation",
-    "note": "§4.7：RiskController 单写"
+    "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
     "path": "src/risk/interaction-guard.ts",
     "layer": "automation",
-    "note": "§4.7：RiskController 单写"
+    "note": "§4.7：RiskController 单写（19/19 automation）"
+  },
+  {
+    "path": "src/risk/ownership.ts",
+    "layer": "automation",
+    "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
     "path": "src/risk/pacing-saturation-alerter.ts",
     "layer": "automation",
-    "note": "§4.7：RiskController 单写"
+    "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
     "path": "src/risk/pacing.ts",
     "layer": "automation",
-    "note": "§4.7：RiskController 单写"
+    "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
     "path": "src/risk/pg-risk-store.ts",
     "layer": "automation",
-    "note": "§4.7：RiskController 单写"
+    "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
     "path": "src/risk/quotas.ts",
     "layer": "automation",
-    "note": "§4.7：RiskController 单写"
+    "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
     "path": "src/risk/resume-limits.ts",
     "layer": "automation",
-    "note": "§4.7：RiskController 单写"
+    "note": "§4.7：RiskController 单写（19/19 automation）"
+  },
+  {
+    "path": "src/risk/risk-accounting.ts",
+    "layer": "automation",
+    "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
     "path": "src/risk/risk-controller-registry.ts",
     "layer": "automation",
-    "note": "§4.7：RiskController 单写"
+    "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
     "path": "src/risk/risk-controller.ts",
     "layer": "automation",
-    "note": "§4.7：RiskController 单写"
+    "note": "§4.7：RiskController 单写（19/19 automation）"
+  },
+  {
+    "path": "src/risk/risk-counter-outbox-store.ts",
+    "layer": "automation",
+    "note": "§4.7：RiskController 单写（19/19 automation）"
+  },
+  {
+    "path": "src/risk/risk-counter-reconciler.ts",
+    "layer": "automation",
+    "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
     "path": "src/risk/risk-state-machine.ts",
     "layer": "automation",
-    "note": "§4.7：RiskController 单写"
+    "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
     "path": "src/risk/search-frequency-limiter.ts",
     "layer": "automation",
-    "note": "§4.7：RiskController 单写"
+    "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
     "path": "src/risk/session-budget.ts",
     "layer": "automation",
-    "note": "§4.7：RiskController 单写"
+    "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
     "path": "src/risk/session-limits.ts",
     "layer": "automation",
-    "note": "§4.7：RiskController 单写"
+    "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
     "path": "src/risk/sliding-window-counter.ts",
     "layer": "automation",
-    "note": "§4.7：RiskController 单写"
+    "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
     "path": "src/risk/time-scheduler.ts",
     "layer": "automation",
-    "note": "§4.7：RiskController 单写"
+    "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
     "path": "src/risk/types.ts",
     "layer": "automation",
-    "note": "§4.7：RiskController 单写"
+    "note": "§4.7：RiskController 单写（19/19 automation）"
+  },
+  {
+    "path": "src/risk/writer-lock.ts",
+    "layer": "automation",
+    "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
     "path": "src/server.ts",
@@ -1552,66 +1627,66 @@
   {
     "path": "src/soul/index.ts",
     "layer": "api",
-    "note": "§4.7：人设文档模型"
+    "note": "§4.7：人设文档模型（7/7 api）"
   },
   {
     "path": "src/soul/like-affinity.ts",
     "layer": "api",
-    "note": "§4.7：人设文档模型"
+    "note": "§4.7：人设文档模型（7/7 api）"
   },
   {
     "path": "src/soul/loader.ts",
     "layer": "api",
-    "note": "§4.7：人设文档模型"
+    "note": "§4.7：人设文档模型（7/7 api）"
   },
   {
     "path": "src/soul/serialize.ts",
     "layer": "api",
-    "note": "§4.7：人设文档模型"
+    "note": "§4.7：人设文档模型（7/7 api）"
   },
   {
     "path": "src/soul/types.ts",
     "layer": "api",
-    "note": "§4.7：人设文档模型"
+    "note": "§4.7：人设文档模型（7/7 api）"
   },
   {
     "path": "src/soul/writing-language.ts",
     "layer": "api",
-    "note": "§4.7：人设文档模型"
+    "note": "§4.7：人设文档模型（7/7 api）"
   },
   {
     "path": "src/soul/yaml.ts",
     "layer": "api",
-    "note": "§4.7：人设文档模型"
+    "note": "§4.7：人设文档模型（7/7 api）"
   },
   {
     "path": "src/storage/ali-oss.d.ts",
     "layer": "content",
-    "note": "§4.7：对象存储访问"
+    "note": "§4.7：对象存储访问（4/4 content）"
   },
   {
     "path": "src/storage/object-store.ts",
     "layer": "content",
-    "note": "§4.7：对象存储访问"
+    "note": "§4.7：对象存储访问（4/4 content）"
   },
   {
     "path": "src/storage/oss-client-factory.ts",
     "layer": "content",
-    "note": "§4.7：对象存储访问"
+    "note": "§4.7：对象存储访问（4/4 content）"
   },
   {
     "path": "src/storage/oss-object-store.ts",
     "layer": "content",
-    "note": "§4.7：对象存储访问"
+    "note": "§4.7：对象存储访问（4/4 content）"
   },
   {
     "path": "src/time/shanghai-day.ts",
     "layer": "kernel",
-    "note": "§4.7 kernel 花名册：无业务语义"
+    "note": "§4.7 kernel 花名册：无业务语义。kernel 花名册按 §4.7 是封闭名单，新增成员 MUST 走「析出 + 回写 §4.7」通道，故本目录新增文件一律待裁决"
   },
   {
     "path": "src/time/source-published-time.ts",
     "layer": "kernel",
-    "note": "§4.7 kernel 花名册：无业务语义"
+    "note": "§4.7 kernel 花名册：无业务语义。kernel 花名册按 §4.7 是封闭名单，新增成员 MUST 走「析出 + 回写 §4.7」通道，故本目录新增文件一律待裁决"
   }
 ]

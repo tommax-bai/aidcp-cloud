@@ -21,19 +21,41 @@
 | `import-exemptions.json` | 跨边界 import 的棘轮式豁免清单 | 只减不增（见下） |
 | `table-write-exemptions.json` | 跨层表写入的棘轮式豁免清单 | 只减不增（见下） |
 
-## 新增源文件之后（最常见的一件事）
+## 唯一的重跑入口
 
 ```sh
-npx tsx test/acceptance/helpers/boundary-record.ts ownership   # 重生成文件级归属表
-npm run test:acceptance                                        # 两族门禁必须全绿
+npm run boundaries:refresh    # 事实侧全量重算并写回清单（默认棘轮：只减不增）
+npm run boundaries:census     # 只打印对账口径，一个文件都不写
+npm run test:acceptance       # 两族门禁必须全绿
 ```
 
-新文件由所在目录的规则接住。**若它不该跟着目录默认走**，先在 `ownership-rules.json` 的
-`fileOverrides` 里加一行（`basis` 必须指到定稿的具体章节），再重跑生成器。
-不重跑就提交 → `AC-BOUND-01` 当场失败并指名该文件。
+**什么时候必须跑 `boundaries:refresh`：**
 
-新文件若引入了新的跨边界 import 或跨层写表，门禁会失败并把条目打印出来。**处置是修，不是追加豁免**：
-定稿 §12 写死「seed 之后发现的既存违规 MUST 当场修复，MUST NOT 通过追加豁免条目放行」。
+| 触发 | 为什么 |
+| --- | --- |
+| 主干合进了新的 change（新增 / 删除源文件、新增表、新增或消除跨边界依赖） | 清单是对**当天源码**的快照，不重算就与事实脱节 |
+| 本分支 rebase 到新的 `master` 之后 | 同上，且门禁会当场红 |
+| 消除了一条跨边界依赖 / 跨层写入 | 它负责删条目并同步下调 `frozenTotal`（漏删 → `AC-BOUND-05` / `AC-OWN-04` 红） |
+| change `cloud-schema-migration-executor` 落地后 | 它会新增 `src/schema/**` 若干文件、并把运行时 DDL 从各 store 里删干净，两族事实同时大幅变化 |
+
+**它自动做什么、坚决不做什么**（这条分界线是本目录的核心设计）：
+
+- **自动重算的是事实**：当前有哪些源文件、哪些跨边界 import、哪些表写入点、表全集是哪些。
+- **绝不自动生成的是人判**：某个新文件属于哪一层、某张新表的属主是谁。判据在定稿 §4.7 / §5.1，脚本无权代判。
+  遇到下面三种情形一律**报错并列出待裁决清单**，MUST NOT 塞一个默认值放过：
+  1. 新增源文件落在 §4.7「逐文件切分」的目录里（`ownership-rules.json` 的目录规则标 `newFile: "adjudicate"`），
+     或压根没有目录规则覆盖它 → 先在 `fileOverrides` 里逐个裁定，`basis` 必须指到定稿的具体章节；
+  2. 新增表没有属主登记，或登记表里有已经不再被建的孤儿表 → 先按 §5.1 裁定 / 清理 `table-ownership.json`；
+  3. 出现豁免清单里没有的新违规 → 默认判失败（见下「棘轮怎么工作」）。
+
+> `newFile` 的取值只有两种：`inherit`（§4.7 里该目录整行只有一个归属层，如 `src/risk/` 19/19 automation，
+> 新文件的归属**已经被 §4.7 判过了**）与 `adjudicate`（§4.7 把该目录逐文件切开，如 `src/publish-agent/`
+> 7 api / 54 content / 6 automation，§4.7 **没有**判过「这个目录下任意新文件属于哪一层」）。
+> 字段缺省按 `adjudicate` 处理。两条机械回归在 `module-boundary.test.ts` 的「归属生成器保真自检」。
+
+新文件若引入了新的跨边界 import 或跨层写表，`refresh` 会失败并把条目逐条打印出来。
+**处置的第一顺位是查归属是否填错**（多数「新违规」其实是新文件的层没按 §4.7 判对），
+第二顺位是修掉这条依赖；定稿 §12 写死「seed 之后发现的既存违规 MUST 当场修复，MUST NOT 通过追加豁免条目放行」。
 
 ## 棘轮怎么工作
 
@@ -44,26 +66,44 @@ npm run test:acceptance                                        # 两族门禁必
 - `raises[]`：**唯一**的上调通道，每个元素必须齐备 `amount` / `approvedByChange` / `eliminateBy` 三字段，
   缺任一即门禁失败（定稿 §12「例外通道（唯一）」）。
 
-削减一条违规时，**必须在同一个提交里**删掉对应条目并把 `frozenTotal` 减掉相应数量；
-只删代码不删条目 → `AC-BOUND-05` / `AC-OWN-04` 失败（不留空位给未来的新违规回填）。
+削减一条违规时 `npm run boundaries:refresh` 会替你删条目并同步下调 `frozenTotal`，
+**必须在同一个提交里**一起提交；只删代码不删条目 → `AC-BOUND-05` / `AC-OWN-04` 失败
+（不留空位给未来的新违规回填）。
 
-`boundary-record.ts seed` 只用于本 change 的一次性 seed。此后 MUST NOT 再跑它重刷清单——
-那等于把棘轮拆掉。（它会保留已写过的 `reason` / `eliminatedBy` / `note`，但仍会把 `frozenTotal` 重置。）
+出现清单里没有的新违规时，`refresh` 默认**直接失败**。放行只有两条显式通道：
+
+```sh
+# ① 定稿 §12「例外通道（唯一）」：具名上调，三字段齐备才算数。可重复。
+npm run boundaries:refresh -- --raise=<控制仓 change 名>:<数量>:<YYYY-MM-DD>
+
+# ② 只在 seed 窗口内合法：门禁 change cloud-service-boundary-gates 尚未归档、棘轮尚未开始计数。
+npm run boundaries:refresh -- --reseed --seed-note="为什么要重新 seed"
+```
+
+`--reseed` 会按当天实测重置 `seedTotal` / `seedUnplanned` / `frozenTotal` 并清空 `raises[]`。
+**该 change 归档之后再用它 = 把棘轮拆掉。** 两种模式都保留人工写过的 `reason` / `eliminatedBy` / `note`，
+不会把已登记的消除计划刷掉——所以新增条目的理由与消除动作**必须人工补写一次**，之后一直跟着走。
 
 ## 对账口径（与 change `cloud-schema-migration-executor` 统一）
 
 ```sh
-npx tsx test/acceptance/helpers/boundary-record.ts census
+npm run boundaries:census
 ```
 
-2026-07-22 于 `aidcp-cloud@313eba2` 实测：
+2026-07-23 实测（门禁分支 rebase 到 `origin/master` 之后，即主干已含
+`risk-state-cross-process-integrity` / `config-mirror-cross-process-invalidation` /
+`publish-approval-signal-to-database` 三个 change）：
 
-- 源文件 323，归属条目 323，未归属 0（层分布 api 91 / content 80 / automation 146 / kernel 4 / composition 2）；
-- 需豁免的跨边界 import 257 条，无豁免通道的 0 条；
-- 表全集 distinct 并集 84 张（`src` 自建 59 张 ∪ `migrations` 建 60 张）；
-- `src` 内 `CREATE TABLE`：文本命中 77 处 / 去注释后生效 59 处 / 分布在 35 个源文件；
-- 跨层写入 12 处（10 条豁免条目，DDL 侧 0 条）；
-- SQL 写入点 231 处（含动态拼接登记解析出的条目）。
+- 源文件 338，归属条目 338，未归属 0（层分布 api 101 / content 80 / automation 151 / kernel 4 / composition 2）；
+- 需豁免的跨边界 import 274 条，无豁免通道的 0 条；一端是 `content` 的 112 条（阶段 3 准入取值，本轮未变）；
+- 表全集 distinct 并集 89 张（`src` 自建 64 张 ∪ `migrations` 建 65 张）；
+- `src` 内 `CREATE TABLE`：文本命中 83 处 / 去注释后生效 64 处 / 分布在 37 个源文件；
+- 跨层写入 12 处（10 条豁免条目，DDL 侧 0 条）——三个 change 新增的 5 张表属主与写入方同层，本轮不产生新条目；
+- SQL 写入点 245 处（含动态拼接登记解析出的条目）。
+
+上一次口径（`aidcp-cloud@313eba2`，主干合入那三个 change **之前**）：源文件 323 / import 257 条 /
+表 84 张 / 写入点 231 处 / 跨层写入 12 处。差额来源逐项写在 `import-exemptions.json` 新增 17 条的
+`reason` 字段里。
 
 ## 门禁看不见什么（MUST NOT 因全绿就判定无违规）
 
@@ -79,6 +119,11 @@ npx tsx test/acceptance/helpers/boundary-record.ts census
      `interactionFeedStore.purgeOlderThan`（`src/cache/interaction-feed-store.ts`，`automation`，表 `interaction_feed`）、
      `tokenUsageStore.purgeOlderThan`（`src/metrics/token-usage-store.ts`，`content`，表 `llm_token_usage`）。
      `DELETE` 语句全在属主一侧，故 `AC-OWN-02` 不会红；定稿 §5.1 第 9 项要求阶段 1 拆成各服务自调本地 purge。
+   - **配置镜像版本递增**（2026-07-23 随 change `config-mirror-cross-process-invalidation` 新增）：
+     §5.1 判归 `automation` 的四类限频配置 store（`src/config/{quota,pacing,session,resume}-config-store.ts`）
+     在自己的写事务里调 `MirrorVersionStore.bumpInTx` 递增 `config_mirror_version`（属主 `api`）。
+     `UPDATE` / `INSERT` 语句全在 `src/config/mirror-version-store.ts`（`api`）一侧，`AC-OWN-02` 恒绿。
+     门禁看得见的只是同一批改动带来的 4 条 `automation -> api` **import** 边（已在 `import-exemptions.json` 逐条挂着消除方式）。
 2. 文件系统信号与 PostgreSQL advisory lock 通道（§14 红线 24）。
 
 > 定稿 §12「阶段 1 退出判据」点名的五处里，另三处（`interaction_runtime_controls` / `interaction_auth_state`

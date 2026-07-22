@@ -115,7 +115,9 @@ describe('AC-BOUND-* 导入方向门禁', () => {
     );
 
     // 归属表 MUST 是规则表的机械展开：两者漂移即失败，防止有人绕过 §4.7 直接改文件级清单。
-    const expanded = expandOwnership(rules, snapshot.files);
+    // 第三参传已提交的清单本身：它只决定「逐文件切分目录里的既有文件可否继续走目录默认值」，
+    // 层取值仍只来自规则表，故改错层依然会被这条断言抓到（新增文件由上面第一条断言把守）。
+    const expanded = expandOwnership(rules, snapshot.files, snapshot.ownershipEntries);
     assert.deepEqual(
       snapshot.ownershipEntries.map((e) => `${e.path}=${e.layer}`),
       expanded.map((e) => `${e.path}=${e.layer}`),
@@ -269,5 +271,35 @@ describe('kernel 准入判据保真自检（非 AC 编号）', () => {
   it('SQL 字面量：带别名的 UPDATE MUST 命中', () => {
     assert.ok(sqlLiteral.re.test('const q = `UPDATE risk_state r SET status=$1`;'));
     assert.ok(sqlLiteral.re.test('const q = `UPDATE risk_state AS r SET status=$1`;'));
+  });
+});
+
+/**
+ * 归属生成器保真自检 —— **不属 `AC-BOUND-*` 族编号**。
+ *
+ * 存在理由：`AC-BOUND-01` 只能证明「清单覆盖了当前每个文件」，证明不了「这个层是谁判的」。
+ * 若生成器对**逐文件切分目录**（§4.7 里一行拆成多层的那些）的新增文件直接套目录默认值，
+ * 门禁会照常全绿——而那个层根本没有人判过，正是红线「MUST NOT 静默假成功」的形态。
+ * 这里把「逐文件切分目录的新文件必须报错、单层目录的新文件才可继承」钉成机械断言。
+ */
+describe('归属生成器保真自检（非 AC 编号）', () => {
+  const splitDir = rules.directoryRules.find((d) => (d.newFile ?? 'adjudicate') === 'adjudicate');
+  const inheritDir = rules.directoryRules.find((d) => d.newFile === 'inherit');
+
+  it('逐文件切分目录里的新文件 MUST 报错待裁决，MUST NOT 被塞一个默认层', () => {
+    assert.ok(splitDir, '规则表里至少应有一个逐文件切分目录（§4.7 有多处）');
+    const probe = `${splitDir.dir}zz-unadjudicated-probe.ts`;
+    assert.throws(
+      () => expandOwnership(rules, [...snapshot.files, probe], snapshot.ownershipEntries),
+      (error: unknown) => error instanceof Error && error.message.includes(probe),
+      `逐文件切分目录 ${splitDir.dir} 下的新文件必须进待裁决清单`,
+    );
+  });
+
+  it('单层目录里的新文件继承该目录的 §4.7 归属，不误报', () => {
+    assert.ok(inheritDir, '规则表里至少应有一个单层目录');
+    const probe = `${inheritDir.dir}zz-inherited-probe.ts`;
+    const expanded = expandOwnership(rules, [...snapshot.files, probe], snapshot.ownershipEntries);
+    assert.equal(expanded.find((e) => e.path === probe)?.layer, inheritDir.layer);
   });
 });
