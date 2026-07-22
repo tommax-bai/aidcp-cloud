@@ -305,10 +305,10 @@ test('grounded ordinary answer normalizes model-only unknown while meaning and c
   config.profiles[0] = { ...config.profiles[0], maxLength: 60,
     knowledgeDocument: '课程主要适合小学三年级至六年级学生。' };
   config.rules = [{ ...rule('age-question', 1),
-    conditions: { keywordsAny: [], intentsAny: ['product_question'], sourceExternalIds: [],
+    conditions: { keywordsAny: [], intentsAny: [], sourceExternalIds: [],
       messageTypes: ['text'], workHours: null } }];
   const outputs = [
-    { role: 'reply_intent_classifier', intent: 'product_question', confidence: 1,
+    { role: 'reply_intent_classifier', intent: 'unknown', confidence: 1,
       riskTags: ['unknown'], reasons: ['cautious default'] },
     { role: 'reply_polisher', polishedText: '三至六年级更合适。\n小王，谢谢关注 示例视频号。',
       meaningChanged: true, introducedClaims: ['主要适合小学三至六年级'], riskTags: [] },

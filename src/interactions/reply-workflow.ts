@@ -32,6 +32,7 @@ const PROCESS_ONLY_RISK = new Set<string>(['unknown', 'meaning_changed', 'introd
 const ORDINARY_KNOWLEDGE_INTENTS = new Set<ReplyIntent>([
   'general_question', 'product_question', 'support_request',
 ]);
+const ORDINARY_KNOWLEDGE_CUE = /适合.{0,6}(?:几岁|多大|几年级)|(?:几岁|多大|几年级).{0,6}(?:孩子|学生|适合)/;
 
 export interface ReplyPreviewResult {
   matchedRuleId: string | null;
@@ -320,7 +321,8 @@ export class ReplyWorkflow {
     const collectedTags = uniqueTags(classifier.value.riskTags, polish.value.riskTags, reviewer.value.riskTags,
       deterministicTags, rule.actions.forceHumanTags, fallbackRisk);
     const groundedOrdinaryKnowledge = Boolean(profile.knowledgeDocument?.trim()) &&
-      ORDINARY_KNOWLEDGE_INTENTS.has(classifier.value.intent) &&
+      (ORDINARY_KNOWLEDGE_INTENTS.has(classifier.value.intent) ||
+        ORDINARY_KNOWLEDGE_CUE.test(inbound.text ?? '')) &&
       classifier.fallback === 'none' && polisherFallback === 'none' && reviewer.fallback === 'none' &&
       !candidateRejected && polish.value.introducedClaims.length > 0 &&
       collectedTags.every((tag) => PROCESS_ONLY_RISK.has(tag));
