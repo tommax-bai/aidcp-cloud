@@ -174,7 +174,7 @@ test('reviewed sends bypass login cooldown and generic quota-only denial but ret
   );
 });
 
-test('auto admission ignores generic quota but still requires the configured login cooldown', async () => {
+test('auto admission needs no hidden account allowlist but still requires the configured login cooldown', async () => {
   const automatic = context('approval_required');
   automatic.job.approvalActor = null;
   const autoConfig = config();
@@ -208,7 +208,7 @@ test('auto admission ignores generic quota but still requires the configured log
     pusher: {} as EdgePusher,
     controllerFor: () => ({ explain: () => ({ allowed: false, reason: 'quota:day' }), record: async () => true }),
     metrics: new InteractionMetrics(), globalWriteEnabled: true,
-    env: { AIDCP_INTERACTION_AUTO_ACCOUNT_ALLOWLIST: 'acct_wc_demo' }, clock: () => now,
+    clock: () => now,
   });
   assert.equal(await sender.canAutoQueueDraft(automatic, autoConfig, preview), false);
   activeSince = now - 700_000;
@@ -243,7 +243,7 @@ test('auto admission accepts grounded AI knowledge evidence and rejects the same
     pusher: {} as EdgePusher,
     controllerFor: () => ({ explain: () => ({ allowed: true }), record: async () => true }),
     metrics: new InteractionMetrics(), globalWriteEnabled: true,
-    env: { AIDCP_INTERACTION_AUTO_ACCOUNT_ALLOWLIST: 'acct_wc_demo' }, clock: () => now,
+    clock: () => now,
   });
 
   assert.equal(await sender.canAutoQueueDraft(automatic, autoConfig, preview), true);
@@ -279,7 +279,7 @@ test('pre-dispatch auto recheck blocks ungrounded AI claims before creating an a
     pusher: {} as EdgePusher,
     controllerFor: () => ({ explain: () => ({ allowed: true }), record: async () => true }),
     metrics: new InteractionMetrics(), globalWriteEnabled: true,
-    env: { AIDCP_INTERACTION_AUTO_ACCOUNT_ALLOWLIST: 'acct_wc_demo' }, clock: () => now,
+    clock: () => now,
   });
 
   await assert.rejects(
@@ -288,6 +288,39 @@ test('pre-dispatch auto recheck blocks ungrounded AI claims before creating an a
     (error: unknown) => (error as { code?: string }).code === 'INTERACTION_APPROVAL_REQUIRED',
   );
   assert.equal(createCalls, 0);
+});
+
+test('pre-dispatch auto recheck reaches attempt creation without a hidden account allowlist', async () => {
+  const automatic = context('queued');
+  automatic.job.approvalActor = null;
+  const autoConfig = config();
+  autoConfig.policy.mode = 'auto_safe';
+  autoConfig.policy.channels.comment.allowAutoSend = true;
+  autoConfig.rules[0].actions.allowAutoSend = true;
+  let createCalls = 0;
+  const sender = new InteractionSendOrchestrator({
+    store: sendableStore({
+      getJobContext: async () => automatic,
+      createAttempt: async () => {
+        createCalls += 1;
+        throw new Error('attempt_creation_reached');
+      },
+    }),
+    configs: { getSnapshot: async () => autoConfig } as unknown as ReplyConfigStore,
+    pusher: {
+      resolveEdgeIdForAccount: () => 'edge-auto',
+      pushToEdges: () => { throw new Error('must_not_push_before_attempt'); },
+    } as unknown as EdgePusher,
+    controllerFor: () => ({ explain: () => ({ allowed: true }), record: async () => true }),
+    metrics: new InteractionMetrics(), globalWriteEnabled: true, clock: () => now,
+  });
+
+  await assert.rejects(
+    sender.dispatchQueued({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo',
+      jobId: automatic.job.id, expectedVersion: automatic.job.version }),
+    /attempt_creation_reached/,
+  );
+  assert.equal(createCalls, 1);
 });
 
 test('approved command is persisted as one attempt and dispatched to one account Edge without claiming sent', async () => {

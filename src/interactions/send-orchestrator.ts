@@ -54,7 +54,6 @@ function interactionRiskBlocked(result: { allowed: boolean; reason?: string }): 
 
 export class InteractionSendOrchestrator {
   private readonly globalWriteEnabled: boolean;
-  private readonly autoAllowlist: Set<string>;
   private readonly clock: () => number;
 
   constructor(private readonly deps: {
@@ -70,8 +69,6 @@ export class InteractionSendOrchestrator {
   }) {
     const env = deps.env ?? process.env;
     this.globalWriteEnabled = deps.globalWriteEnabled ?? enabled(env.AIDCP_INTERACTION_WRITE_ENABLED);
-    this.autoAllowlist = new Set((env.AIDCP_INTERACTION_AUTO_ACCOUNT_ALLOWLIST ?? '')
-      .split(',').map((item) => item.trim()).filter(Boolean));
     this.clock = deps.clock ?? Date.now;
   }
 
@@ -92,7 +89,6 @@ export class InteractionSendOrchestrator {
     };
     try {
       if (!this.globalWriteEnabled) return downgrade('global_write_disabled');
-      if (!this.autoAllowlist.has(context.thread.accountId)) return downgrade('account_not_allowlisted');
       if (snapshot.state !== 'published' || snapshot.policy.mode !== 'auto_safe' || !snapshot.policy.sendReplies ||
           !snapshot.policy.channels[context.thread.channel].enabled ||
           !snapshot.policy.channels[context.thread.channel].allowAutoSend) return downgrade('policy');
@@ -185,7 +181,7 @@ export class InteractionSendOrchestrator {
     }
     const matchedRule = snapshot.rules.find((item) => item.ruleId === context.job.matchedRuleId &&
       item.channel === context.thread.channel) ?? null;
-    if (auto && (!this.autoAllowlist.has(accountId) || snapshot.policy.mode !== 'auto_safe' ||
+    if (auto && (snapshot.policy.mode !== 'auto_safe' ||
         !snapshot.policy.channels[context.thread.channel].allowAutoSend ||
         !automaticReplyContentEligible({
           rule: matchedRule,
