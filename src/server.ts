@@ -2854,7 +2854,7 @@ async function main(): Promise<void> {
     pollMs: 2_000,
   };
 
-  /** comment auto_approve 统一“先通知、后授权”出口；自然浏览与排期只换可读文案，失败都向上抛并 fail-closed。 */
+  /** comment auto_approve 统一旁路通知出口；调用方不等待，失败只记录且不影响授权。 */
   const notifyAutoApprovedComment = async (
     input: CommentApprovalNoticeInput & { contactIncluded?: boolean; originChatId?: string },
     source: 'mandatory_persona' | 'account_global' | 'comment_scheduler',
@@ -3036,7 +3036,7 @@ async function main(): Promise<void> {
       explainView: () => ctx.controller.explain('view'),
       // 评论人审端口（env 闸开启时注入；未开启 → 评论一律诚实跳过、不发）。
       ...(commentApprovalEnabled ? { commentApproval } : {}),
-      // 人设 mandatory auto_approve 独立于逐条人审 env，但仍必须先通知成功；通知失败由 gate fail-closed。
+      // 人设 mandatory auto_approve 独立于逐条人审 env；通知为旁路可观测性，不参与授权。
       commentAutoApproveNotify: (input) => notifyAutoApprovedComment(
         input,
         input.approvalSource === 'mandatory_persona' ? 'mandatory_persona' : 'account_global',

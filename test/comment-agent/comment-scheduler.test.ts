@@ -993,7 +993,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.ok(!posted.includes('interaction.comment'), 'manualOverride 不绕人审 → 无 approval 时绝不提交');
   });
 
-  it('账号全局免审覆盖飞书手工 /comment：先通知、无按钮审批、仍走真实提交确认', async () => {
+  it('账号全局免审覆盖飞书手工 /comment：旁路通知、无按钮审批、仍走真实提交确认', async () => {
     const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true } });
     const notices: any[] = [];
     let reviewCalled = false;
@@ -1010,6 +1010,21 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.equal(reviewCalled, false);
     assert.equal(notices.length, 1);
     assert.equal(notices[0].originChatId, 'oc_command');
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    assert.ok(posted.includes('interaction.comment'));
+  });
+
+  it('账号全局免审覆盖飞书手工 /comment：通知失败仍提交，不回退按钮审批', async () => {
+    const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true } });
+    let reviewCalled = false;
+    await new CommentScheduler({
+      ...deps,
+      approval: { request: async () => { reviewCalled = true; }, isApproved: async () => false },
+      resolveApprovalMode: async () => 'auto_approve',
+      autoApproveNotify: async () => { throw new Error('chat unavailable'); },
+    }).triggerManual('fb-1', { manualOverride: true, originChatId: 'oc_command' });
+    await tick();
+    assert.equal(reviewCalled, false);
     assert.equal(audits.at(-1)?.outcome, 'commented');
     assert.ok(posted.includes('interaction.comment'));
   });

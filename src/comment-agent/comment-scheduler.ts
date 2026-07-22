@@ -30,6 +30,7 @@ import {
 import { buildEdgeCommentSteps, type EdgePusher, type CommentDedup } from './edge-steps.js';
 import { buildFacebookEdgeSteps } from './facebook-edge-steps.js';
 import { buildComposeAndApprove, type AutoApproveCommentNotification } from './compose-approve.js';
+import { sendAutoApproveNotificationBestEffort } from './auto-approve-notification.js';
 import type { ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
 import type { CuratedSampleForTerms } from '../agents/comment-search-term-generator.js';
 import type { CuratedContentTypeFilter } from '../cache/curated-content-store.js';
@@ -209,7 +210,7 @@ export interface CommentSchedulerDeps {
   dedupFor: (accountId: string) => CommentDedup;
   /** 评论人审口（复用发帖 /tmp 信号机制）；未接线 → compose-approve 一律不发。 */
   approval?: CommentApprovalPort;
-  /** 排期免审通知口；auto_approve 未接线或发送失败则 fail-closed，不发评论。 */
+  /** 免审旁路通知口；未接线或发送失败只记日志，不参与授权。 */
   autoApproveNotify?: AutoApproveCommentNotification;
   /** 账号全局评论审批覆盖；所有命令式/定向来源在授权前统一现读。 */
   resolveApprovalMode?: (
@@ -528,7 +529,7 @@ export class CommentScheduler {
             targetedUrl ? '加入指定群' : '先加入一个新群'
           }，加入成功（或已是成员）后在该群里发一条评论${
             options?.injectContact
-              ? approvalMode === 'auto_approve' ? '（带联系方式，免审通知成功后继续）' : '（带联系方式，走飞书人审）'
+              ? approvalMode === 'auto_approve' ? '（带联系方式，全局免审）' : '（带联系方式，走飞书人审）'
               : ''
           }${options?.force ? '（--force：跳过相关性/去重）' : ''}；结果稍后回报。`,
         };
@@ -587,8 +588,8 @@ export class CommentScheduler {
       level: 'success',
       title: '已触发按需评论',
       message: options?.force
-        ? `已启动按需评论任务（--force：跳过「强相关」甄选与已评过去重——没强相关目标则选收藏最高的一篇、已评过的也可再评；${approvalMode === 'auto_approve' ? '账号全局免审，通知成功后继续' : '评论前仍需飞书人审 approved=true'}；结果稍后回报）`
-        : `已启动按需评论任务（搜「${defaultCommentSearchLabel(platformProfile)}」的强相关、未评过笔记；${approvalMode === 'auto_approve' ? '账号全局免审，通知成功后继续' : '评论前仍需飞书人审 approved=true'}；结果稍后回报）`,
+        ? `已启动按需评论任务（--force：跳过「强相关」甄选与已评过去重——没强相关目标则选收藏最高的一篇、已评过的也可再评；${approvalMode === 'auto_approve' ? '账号全局免审' : '评论前仍需飞书人审 approved=true'}；结果稍后回报）`
+        : `已启动按需评论任务（搜「${defaultCommentSearchLabel(platformProfile)}」的强相关、未评过笔记；${approvalMode === 'auto_approve' ? '账号全局免审' : '评论前仍需飞书人审 approved=true'}；结果稍后回报）`,
     };
   }
 
@@ -721,8 +722,8 @@ export class CommentScheduler {
       level: 'success',
       title: '已触发定向评论',
       message: options?.currentNote
-        ? `已启动定向评论任务（复用当前笔记上下文→撰写→${approvalMode === 'auto_approve' ? '免审通知成功后继续' : '飞书人审 approved=true 才会真发'}；结果稍后回报）`
-        : `已启动定向评论任务（搜索定位目标笔记→撰写→${approvalMode === 'auto_approve' ? '免审通知成功后继续' : '飞书人审 approved=true 才会真发'}；结果稍后回报）`,
+        ? `已启动定向评论任务（复用当前笔记上下文→撰写→${approvalMode === 'auto_approve' ? '全局免审' : '飞书人审 approved=true 才会真发'}；结果稍后回报）`
+        : `已启动定向评论任务（搜索定位目标笔记→撰写→${approvalMode === 'auto_approve' ? '全局免审' : '飞书人审 approved=true 才会真发'}；结果稍后回报）`,
     };
   }
 
@@ -1123,12 +1124,9 @@ export class CommentScheduler {
       ? `Facebook 群组评论：${input.container}（⚠️ 未满足冷却/预热期，已放开时限选群，请人工确认）`
       : `Facebook 群组评论：${input.container}`;
     if (approvalMode === 'auto_approve') {
-      if (!this.deps.autoApproveNotify) {
-        log.warn('[fb-comment] 评论免审通知口未接线 → 不发（绝不无通知裸发）');
-        return null;
-      }
-      try {
-        await this.deps.autoApproveNotify({
+      sendAutoApproveNotificationBestEffort({
+        notify: this.deps.autoApproveNotify,
+        payload: {
           requestId,
           noteId: input.permalink,
           text: reviewText,
@@ -1137,13 +1135,12 @@ export class CommentScheduler {
           accountId,
           contactIncluded: input.contactInfo != null,
           ...(originChatId ? { originChatId } : {}),
-        });
-        log.log?.(`[fb-comment] 免审已通知并授权 account=${accountId} requestId=${requestId}`);
-        return input.contactInfo ? { text: input.text, contactInfo: input.contactInfo } : { text: input.text };
-      } catch (err) {
-        log.warn(`[fb-comment] 评论免审通知失败 account=${accountId}：${(err as Error).message}`);
-        return null;
-      }
+        },
+        context: `[fb-comment] account=${accountId} requestId=${requestId} `,
+        logger: log,
+      });
+      log.log?.(`[fb-comment] 免审已授权 account=${accountId} requestId=${requestId}`);
+      return input.contactInfo ? { text: input.text, contactInfo: input.contactInfo } : { text: input.text };
     }
 
     const approval = this.deps.approval;

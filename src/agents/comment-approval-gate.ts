@@ -13,6 +13,7 @@ import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { RoleName, CommentApprovalTrace, CommentClearedPayload } from '../event-bus/types.js';
 import { buildCommentApprovalRequestId } from './comment-approval-request-id.js';
+import { sendAutoApproveNotificationBestEffort } from '../comment-agent/auto-approve-notification.js';
 
 /** 评论人审端口：发卡 + 查授权信号（复用发帖 messenger + isPublishApproved，换评论 requestId 命名空间）。 */
 export interface CommentApprovalPort {
@@ -54,7 +55,7 @@ export interface CommentApprovalNoticeInput {
 export interface CommentApprovalGateOptions extends RoleOptions {
   /** 人审端口；缺省（未接线）→ 一律 comment.skipped（绝不裸发）。 */
   approval?: CommentApprovalPort;
-  /** 结构化 mandatory auto_approve 的免审通知口；先通知成功才授权，缺失/失败 fail-closed。 */
+  /** 免审旁路通知口；缺失/失败只记日志，不参与授权判定。 */
   autoApproveNotify?: (input: CommentApprovalNoticeInput) => Promise<void>;
   /** 账号级审批策略解析；读取失败由注入方回落 sourceMode，绝不在 gate 内猜免审。 */
   resolveApprovalMode?: (accountId: string, sourceMode: 'review' | 'auto_approve') => Promise<'review' | 'auto_approve'>;
@@ -142,13 +143,9 @@ export class CommentApprovalGate extends BaseRole {
     }
 
     if (approvalMode === 'auto_approve') {
-      if (!this.autoApproveNotify) {
-        this.log(`mandatory auto_approve 通知口未接线，绝不裸发 note=${payload.noteId}`);
-        this.skip(payload, 'auto_approve_notice_failed');
-        return;
-      }
-      try {
-        await this.autoApproveNotify({
+      sendAutoApproveNotificationBestEffort({
+        notify: this.autoApproveNotify,
+        payload: {
           requestId,
           noteId: payload.noteId,
           text: payload.text,
@@ -157,18 +154,15 @@ export class CommentApprovalGate extends BaseRole {
           accountId,
           accountName,
           approvalSource: mandatoryAutoApprove ? 'mandatory_persona' : 'account_global',
-        });
-      } catch (err) {
-        if (this.isCommentSublineExpired(payload.noteId)) return;
-        this.log(`mandatory auto_approve 通知失败：${(err as Error).message}`);
-        this.skip(payload, 'auto_approve_notice_failed');
-        return;
-      }
+        },
+        context: `[comment-gate] account=${accountId ?? '-'} note=${payload.noteId} `,
+        logger: { log: (message) => this.log(message), warn: (message) => this.log(message) },
+      });
       if (this.isCommentSublineExpired(payload.noteId)) return;
       this.log(
         mandatoryAutoApprove
-          ? `mandatory auto_approve 已通知并授权 rule=${payload.mandatoryInteraction!.ruleId} note=${payload.noteId}`
-          : `account auto_approve_all 已通知并授权 account=${accountId ?? '-'} note=${payload.noteId}`,
+          ? `mandatory auto_approve 已授权 rule=${payload.mandatoryInteraction!.ruleId} note=${payload.noteId}`
+          : `account auto_approve_all 已授权 account=${accountId ?? '-'} note=${payload.noteId}`,
       );
       const approvalTrace: CommentApprovalTrace = {
         requestId,

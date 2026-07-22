@@ -79,7 +79,7 @@ describe('buildComposeAndApprove', () => {
     assert.equal(request?.authorName, '开源老周');
 	  });
 
-  it('免审：通知成功后直接 approved，不调用交互审批', async () => {
+  it('免审：直接 approved 并旁路通知，不调用交互审批', async () => {
     let notified:
       | { requestId: string; text: string; accountId?: string; accountName?: string; contactIncluded?: boolean }
       | undefined;
@@ -113,6 +113,29 @@ describe('buildComposeAndApprove', () => {
     assert.equal(notified?.contactIncluded, false);
     assert.equal(approvalRequested, false);
     assert.equal(approvalPolled, false);
+  });
+
+  it('免审：通知失败或未接线都不阻止 approved', async () => {
+    const warnings: string[] = [];
+    const failedNoticeStep = buildComposeAndApprove({
+      composer: composer('这套检索链路很实在'),
+      approvalMode: 'auto_approve',
+      autoApproveNotify: async () => { throw new Error('chat unavailable'); },
+      logger: { log: () => {}, warn: (message) => warnings.push(String(message)) },
+    });
+    const failedNoticeResult = await failedNoticeStep(note, comments);
+    await Promise.resolve();
+    assert.ok(failedNoticeResult.approved);
+    assert.ok(warnings.some((message) => message.includes('不影响提交')));
+
+    const unwiredStep = buildComposeAndApprove({
+      composer: composer('这套检索链路很实在'),
+      approvalMode: 'auto_approve',
+      logger: { log: () => {}, warn: (message) => warnings.push(String(message)) },
+    });
+    const unwiredResult = await unwiredStep(note, comments);
+    assert.ok(unwiredResult.approved);
+    assert.ok(warnings.some((message) => message.includes('通知口未接线，不影响提交')));
   });
 
 	  it('人审口未接线 → approved:false/approval_not_wired（绝不裸发）', async () => {

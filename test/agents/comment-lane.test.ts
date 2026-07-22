@@ -340,7 +340,7 @@ describe('CommentApprovalGate', () => {
     assert.equal(approved, false);
   });
 
-  it('mandatory auto_approve → 先通知成功再 approved，不调用逐条审批', async () => {
+  it('mandatory auto_approve → 直接 approved 并旁路通知，不调用逐条审批', async () => {
     const bus = new EventBus();
     let notice: any = null;
     let reviewCalled = false;
@@ -369,7 +369,7 @@ describe('CommentApprovalGate', () => {
     assert.equal(approved?.approvalTrace?.title, note.title);
   });
 
-  it('mandatory auto_approve 通知失败 → fail-closed，不 approved', async () => {
+  it('mandatory auto_approve 通知失败只记日志，仍 approved', async () => {
     const bus = new EventBus();
     const role = new CommentApprovalGate({
       eventBus: bus,
@@ -383,8 +383,22 @@ describe('CommentApprovalGate', () => {
     bus.on('comment.approved', () => { approved = true; });
     bus.emit('comment.cleared', { ...trigger, text: 'Còn tuyển không ạ?', mandatoryInteraction, ts: Date.now() });
     await sleep(30);
-    assert.equal(skipped?.reason, 'auto_approve_notice_failed');
-    assert.equal(approved, false);
+    assert.equal(skipped, null);
+    assert.equal(approved, true);
+  });
+
+  it('mandatory auto_approve 通知口未接线仍 approved', async () => {
+    const bus = new EventBus();
+    const role = new CommentApprovalGate({ eventBus: bus, soul });
+    role.subscribe();
+    let skipped: any = null;
+    let approved = false;
+    bus.on('comment.skipped', (p) => { skipped = p; });
+    bus.on('comment.approved', () => { approved = true; });
+    bus.emit('comment.cleared', { ...trigger, text: 'Còn tuyển không ạ?', mandatoryInteraction, ts: Date.now() });
+    await sleep(30);
+    assert.equal(skipped, null);
+    assert.equal(approved, true);
   });
 
   it('账号 auto_approve_all 覆盖普通浏览评论：通知后授权，不调用按钮审批', async () => {
