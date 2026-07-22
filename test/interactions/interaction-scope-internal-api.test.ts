@@ -5,7 +5,7 @@ import { InteractionScopeInternalApi } from '../../src/interactions/interaction-
 import type { ReplyConfigResolver } from '../../src/interactions/reply-config-resolver.js';
 import type { ReplyConfigScopeStore } from '../../src/interactions/reply-config-scope-store.js';
 import type { ReplyWorkflow } from '../../src/interactions/reply-workflow.js';
-import type { ReplyConfigScopeHead, ReplyConfigSnapshot } from '../../src/interactions/types.js';
+import type { InteractionChannel, ReplyConfigScopeHead, ReplyConfigSnapshot, ReplyProfile } from '../../src/interactions/types.js';
 
 const source = { type: 'group' as const, groupLabel: '华东组' };
 const head: ReplyConfigScopeHead = {
@@ -27,6 +27,17 @@ const snapshot: ReplyConfigSnapshot = {
   templates: [], rules: [], profiles: [], createdAt: 1, createdBy: 'admin',
   publishedAt: null, publishedBy: null,
 };
+
+function replyProfile(channel: InteractionChannel, knowledgeDocument: string | null): ReplyProfile {
+  return {
+    channel, selfName: '示例博主', userAddress: '你', tone: ['friendly', 'concise'],
+    maxLength: channel === 'comment' ? 280 : 500, allowEmoji: false, allowLinks: false,
+    blockedPhrases: [], disallowedClaims: [], requiredDisclaimer: null, knowledgeDocument,
+    variableFallbacks: {
+      user_name: '朋友', video_title: '这条内容', account_name: '我们', support_channel: '私信',
+    },
+  };
+}
 
 async function withApi(
   api: InteractionScopeInternalApi,
@@ -105,6 +116,59 @@ test('scope policy mutation is CAS-bound to the stable scope id', async () => {
     });
     assert.equal(response.status, 200);
     assert.deepEqual(writes, [{ scopeId: 'scope-east', expectedVersion: 3 }]);
+  });
+});
+
+test('scope profile mutation accepts two 20k multibyte knowledge documents within the raised body limit', async () => {
+  let saved: ReplyProfile[] | null = null;
+  const api = new InteractionScopeInternalApi({
+    scopes: {
+      getHead: async () => head,
+      saveProfiles: async (_scopeId: string, _expectedVersion: number, _actor: string, profiles: ReplyProfile[]) => {
+        saved = profiles;
+        return { ...snapshot, profiles, configVersion: 4 };
+      },
+    } as unknown as ReplyConfigScopeStore,
+    resolver: {} as ReplyConfigResolver,
+    workflow: {} as ReplyWorkflow,
+    grantsFor: () => new Set(['interaction.config.edit']), cursorSecret: 'scope-api-test', clock: () => 9,
+  });
+
+  await withApi(api, async (base) => {
+    const document = '文'.repeat(20_000);
+    const response = await fetch(`${base}/api/interaction-reply-config-scopes/scope-east/profiles`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedVersion: 3, profiles: [
+        replyProfile('comment', document), replyProfile('dm', document),
+      ] }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(saved?.[0]?.knowledgeDocument?.length, 20_000);
+    assert.equal(saved?.[1]?.knowledgeDocument?.length, 20_000);
+  });
+});
+
+test('scope profile mutation rejects a knowledge document over 20k characters', async () => {
+  let writes = 0;
+  const api = new InteractionScopeInternalApi({
+    scopes: {
+      getHead: async () => head,
+      saveProfiles: async () => { writes += 1; return snapshot; },
+    } as unknown as ReplyConfigScopeStore,
+    resolver: {} as ReplyConfigResolver,
+    workflow: {} as ReplyWorkflow,
+    grantsFor: () => new Set(['interaction.config.edit']), cursorSecret: 'scope-api-test', clock: () => 9,
+  });
+
+  await withApi(api, async (base) => {
+    const response = await fetch(`${base}/api/interaction-reply-config-scopes/scope-east/profiles`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedVersion: 3, profiles: [
+        replyProfile('comment', '文'.repeat(20_001)), replyProfile('dm', null),
+      ] }),
+    });
+    assert.equal(response.status, 422);
+    assert.equal(writes, 0);
   });
 });
 

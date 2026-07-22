@@ -14,6 +14,7 @@
         "blockedPhrases": ["绝对有效"],
         "disallowedClaims": ["未验证的效果承诺"],
         "requiredDisclaimer": null,
+        "knowledgeDocument": "# 内容说明\n- 这条视频介绍居家收纳的基础方法。\n- 适合刚开始整理房间的朋友。",
         "variableFallbacks": {
           "user_name": "朋友",
           "video_title": "这条视频",
@@ -32,6 +33,7 @@
         "blockedPhrases": ["保证退款"],
         "disallowedClaims": ["代替人工完成订单决策"],
         "requiredDisclaimer": "如需处理账户或订单，请转人工核验。",
+        "knowledgeDocument": null,
         "variableFallbacks": {
           "user_name": "朋友",
           "video_title": "相关视频",

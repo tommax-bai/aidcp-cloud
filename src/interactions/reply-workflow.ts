@@ -270,6 +270,7 @@ export class ReplyWorkflow {
           tone: profile.tone, maxLength: profile.maxLength, allowEmoji: profile.allowEmoji,
           allowLinks: profile.allowLinks, blockedPhrases: profile.blockedPhrases,
           requiredDisclaimer: profile.requiredDisclaimer,
+          knowledgeDocument: profile.knowledgeDocument ?? null,
         },
       })
       : { value: { role: 'reply_polisher' as const, polishedText: rendered, meaningChanged: false,

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { resolveEnvPgConfig } from '../cache/pg-config.js';
-import { validateReplyConfig } from './reply-config.js';
+import { normalizeReplyProfile, validateReplyConfig } from './reply-config.js';
 import {
   DEFAULT_REPLY_POLICY,
   INTERACTION_PLATFORM,
@@ -36,6 +36,7 @@ function defaultProfile(channel: InteractionChannel): ReplyProfile {
     blockedPhrases: [],
     disallowedClaims: [],
     requiredDisclaimer: null,
+    knowledgeDocument: null,
     variableFallbacks: {
       user_name: '你好',
       video_title: '这条内容',
@@ -161,7 +162,7 @@ export class ReplyConfigStore {
         updatedAt: epoch(rule.updated_at),
         updatedBy: rule.updated_by,
       })),
-      profiles: profiles.rows.map((profile) => ({ ...profile.profile, channel: profile.channel })),
+      profiles: profiles.rows.map((profile) => normalizeReplyProfile({ ...profile.profile, channel: profile.channel })),
       createdAt: epoch(row.created_at),
       createdBy: row.created_by,
       publishedAt: row.published_at ? epoch(row.published_at) : null,
@@ -390,7 +391,8 @@ export class ReplyConfigStore {
              VALUES ($1,$2,$3,$4,$5::jsonb,now(),$6)
              ON CONFLICT (platform,account_id,config_version,channel) DO UPDATE SET
                profile=EXCLUDED.profile,updated_at=now(),updated_by=EXCLUDED.updated_by`,
-            [INTERACTION_PLATFORM, accountId, version, profile.channel, JSON.stringify(profile), actor],
+            [INTERACTION_PLATFORM, accountId, version, profile.channel,
+              JSON.stringify(normalizeReplyProfile(profile)), actor],
           );
         }
       });

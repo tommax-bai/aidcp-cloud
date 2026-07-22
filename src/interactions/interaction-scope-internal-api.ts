@@ -18,7 +18,7 @@ async function readBody(req: http.IncomingMessage): Promise<Record<string, unkno
   for await (const chunk of req) {
     const buffer = Buffer.from(chunk as Uint8Array);
     size += buffer.length;
-    if (size > 64 * 1024) throw new InteractionError('INTERACTION_VALIDATION_FAILED', '请求体过大。', 422);
+    if (size > 256 * 1024) throw new InteractionError('INTERACTION_VALIDATION_FAILED', '请求体过大。', 422);
     chunks.push(buffer);
   }
   try {

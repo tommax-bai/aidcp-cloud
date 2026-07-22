@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { resolveEnvPgConfig } from '../cache/pg-config.js';
-import { validateReplyConfig } from './reply-config.js';
+import { normalizeReplyProfile, validateReplyConfig } from './reply-config.js';
 import {
   DEFAULT_REPLY_POLICY,
   INTERACTION_PLATFORM,
@@ -87,6 +87,7 @@ function defaultProfile(channel: InteractionChannel): ReplyProfile {
     blockedPhrases: [],
     disallowedClaims: [],
     requiredDisclaimer: null,
+    knowledgeDocument: null,
     variableFallbacks: {
       user_name: '你好',
       video_title: '这条内容',
@@ -266,7 +267,7 @@ export class ReplyConfigScopeStore {
       policy: row.policy,
       templates: row.templates,
       rules: row.rules,
-      profiles: row.profiles,
+      profiles: row.profiles.map(normalizeReplyProfile),
       createdAt: epoch(row.created_at),
       createdBy: row.created_by,
       publishedAt: row.published_at ? epoch(row.published_at) : null,
@@ -314,7 +315,7 @@ export class ReplyConfigScopeStore {
           accountId: '', configScopeId: scopeId, configSource: source, platform: INTERACTION_PLATFORM,
           configVersion: nextVersion, state: 'draft', policy: structuredClone(item.policy),
           templates: structuredClone(item.templates), rules: structuredClone(item.rules),
-          profiles: structuredClone(item.profiles), createdAt: Date.now(), createdBy: actor,
+          profiles: item.profiles.map(normalizeReplyProfile), createdAt: Date.now(), createdBy: actor,
           publishedAt: null, publishedBy: null,
         };
       }
@@ -404,7 +405,7 @@ export class ReplyConfigScopeStore {
   async saveProfiles(scopeId: string, expectedVersion: number, actor: string, profiles: ReplyProfile[]): Promise<ReplyConfigSnapshot> {
     return this.mutate(scopeId, expectedVersion, actor, 'draft_saved', 'profile', scopeId, (snapshot) => {
       const byChannel = new Map(snapshot.profiles.map((item) => [item.channel, item]));
-      for (const profile of profiles) byChannel.set(profile.channel, structuredClone(profile));
+      for (const profile of profiles) byChannel.set(profile.channel, normalizeReplyProfile(profile));
       snapshot.profiles = [...byChannel.values()].sort((left, right) => left.channel.localeCompare(right.channel));
     });
   }

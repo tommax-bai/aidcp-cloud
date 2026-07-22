@@ -17,6 +17,7 @@
     "allowEmoji": true,
     "allowLinks": false,
     "blockedPhrases": ["绝对有效"],
-    "requiredDisclaimer": null
+    "requiredDisclaimer": null,
+    "knowledgeDocument": "# 内容说明\n- 这条视频介绍居家收纳的基础方法。\n- 适合刚开始整理房间的朋友。"
   }
 }

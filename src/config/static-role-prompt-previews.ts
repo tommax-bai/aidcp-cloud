@@ -61,6 +61,7 @@ const EXAMPLE_POLISHER_INPUT: PolisherInput = {
     allowLinks: false,
     blockedPhrases: ['<示例禁用短语>'],
     requiredDisclaimer: '<示例必要说明>',
+    knowledgeDocument: '# 内容说明\n- <示例主题>适合<示例人群>。\n- 更多细节以私信沟通为准。',
   },
 };
 

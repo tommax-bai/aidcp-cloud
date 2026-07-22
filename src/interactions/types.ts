@@ -552,6 +552,8 @@ export interface ReplyProfile {
   blockedPhrases: string[];
   disallowedClaims: string[];
   requiredDisclaimer: string | null;
+  /** Optional admin-authored reference text for grounded AI answers. */
+  knowledgeDocument?: string | null;
   variableFallbacks: Record<TemplateVariable, string>;
 }
 
@@ -641,7 +643,7 @@ export interface PolisherInput {
   accountId: string;
   inbound: MinimalInbound;
   renderedText: string;
-  profile: Pick<ReplyProfile, 'tone' | 'maxLength' | 'allowEmoji' | 'allowLinks' | 'blockedPhrases' | 'requiredDisclaimer'>;
+  profile: Pick<ReplyProfile, 'tone' | 'maxLength' | 'allowEmoji' | 'allowLinks' | 'blockedPhrases' | 'requiredDisclaimer' | 'knowledgeDocument'>;
 }
 export interface PolisherOutput {
   role: 'reply_polisher';

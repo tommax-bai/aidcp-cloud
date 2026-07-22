@@ -22,6 +22,11 @@ const INTENTS = new Set([
 ]);
 const MESSAGE_TYPES = new Set(['text', 'image', 'unknown']);
 const RISK_TAG_SET = new Set<string>(RISK_TAGS);
+export const MAX_KNOWLEDGE_DOCUMENT_LENGTH = 20_000;
+const REPLY_PROFILE_KEYS = [
+  'channel','selfName','userAddress','tone','maxLength','allowEmoji','allowLinks','blockedPhrases',
+  'disallowedClaims','requiredDisclaimer','variableFallbacks',
+] as const;
 
 function object(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -103,7 +108,8 @@ export function isReplyRule(value: unknown): value is ReplyRule {
 }
 
 export function isReplyProfile(value: unknown): value is ReplyProfile {
-  if (!object(value) || !onlyKeys(value, ['channel','selfName','userAddress','tone','maxLength','allowEmoji','allowLinks','blockedPhrases','disallowedClaims','requiredDisclaimer','variableFallbacks']) ||
+  if (!object(value) || !(onlyKeys(value, REPLY_PROFILE_KEYS) ||
+      onlyKeys(value, [...REPLY_PROFILE_KEYS, 'knowledgeDocument'])) ||
       !channel(value.channel) || !validName(value.selfName) || !validName(value.userAddress) ||
       !stringArray(value.tone, new Set(['professional','friendly','concise']), 4) ||
       value.tone.length < 1 ||
@@ -113,6 +119,9 @@ export function isReplyProfile(value: unknown): value is ReplyProfile {
       !(value.requiredDisclaimer === null || (typeof value.requiredDisclaimer === 'string' &&
         value.requiredDisclaimer === value.requiredDisclaimer.trim() && value.requiredDisclaimer.length > 0 &&
         value.requiredDisclaimer.length <= 4_096)) ||
+      !(value.knowledgeDocument === undefined || value.knowledgeDocument === null ||
+        (typeof value.knowledgeDocument === 'string' &&
+          value.knowledgeDocument.length <= MAX_KNOWLEDGE_DOCUMENT_LENGTH)) ||
       !object(value.variableFallbacks) ||
       !onlyKeys(value.variableFallbacks, TEMPLATE_VARIABLES)) return false;
   const fallbacks = value.variableFallbacks as Record<string, unknown>;
@@ -122,6 +131,14 @@ export function isReplyProfile(value: unknown): value is ReplyProfile {
   return TEMPLATE_VARIABLES.every((key) => typeof fallbacks[key] === 'string' &&
     (fallbacks[key] as string) === (fallbacks[key] as string).trim() &&
     (fallbacks[key] as string).length > 0 && (fallbacks[key] as string).length <= maxima[key]);
+}
+
+/** Normalizes legacy profiles and whitespace-only admin input without mutating the caller. */
+export function normalizeReplyProfile(profile: ReplyProfile): ReplyProfile {
+  return {
+    ...structuredClone(profile),
+    knowledgeDocument: profile.knowledgeDocument?.trim() || null,
+  };
 }
 
 export interface TemplateValues {
@@ -220,6 +237,14 @@ export function validateReplyConfig(snapshot: ReplyConfigSnapshot): ValidationIs
   for (const profile of snapshot.profiles) {
     if (profile.maxLength < 1 || profile.maxLength > 4_000) {
       issues.push({ path: `profiles.${profile.channel}.maxLength`, code: 'range', message: '长度必须为 1-4000。' });
+    }
+    if (profile.knowledgeDocument !== undefined && profile.knowledgeDocument !== null &&
+        profile.knowledgeDocument.trim().length > MAX_KNOWLEDGE_DOCUMENT_LENGTH) {
+      issues.push({
+        path: `profiles.${profile.channel}.knowledgeDocument`,
+        code: 'too_long',
+        message: `AI 回答说明文档不能超过 ${MAX_KNOWLEDGE_DOCUMENT_LENGTH} 个字符。`,
+      });
     }
     for (const variable of TEMPLATE_VARIABLES) {
       if (typeof profile.variableFallbacks[variable] !== 'string') {
