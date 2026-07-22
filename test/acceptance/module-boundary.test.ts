@@ -51,6 +51,8 @@ console.log(
     ownershipEntries: snapshot.ownershipEntries.length,
     crossBoundaryEdges: crossEdges.length,
     byDirection,
+    // 阶段 3（提取 aidcp-content）的准入取值：一端是 content 的跨边界条数 MUST 先降到 0。
+    involvingContent: crossEdges.filter((e) => e.fromLayer === 'content' || e.toLayer === 'content').length,
     exemptionEntries: exemptions.entries.length,
     frozenTotal: exemptions.frozenTotal,
     delta: exemptions.entries.length - exemptions.frozenTotal,
