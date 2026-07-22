@@ -52,7 +52,7 @@ test('ui-snapshot: new pull-data-plane client receives automation projection but
   const browserStandby = { enabled: true, eligible: false, reason: 'short_wait', generatedAt: 1, source: 'risk' } as NonNullable<UiSnapshotPayload['browserStandby']>;
   let usageReads = 0;
   const { service, sent } = makeService({
-    isPersonaBound: () => true,
+    personaBinding: () => 'bound',
     getPersonaWritingLanguage: () => 'vi',
     pendingApprovalForAccount: async () => ({ id: 42, title: '候审稿' }),
     pendingPublishPreviewForAccount: async () => ({
@@ -91,7 +91,7 @@ test('ui-snapshot: new pull-data-plane client dailyUsage refresh only preserves 
 test('ui-snapshot: new pull-data-plane client never receives realtime persona or publish data pushes', () => {
   const { service, sent } = makeService({
     edgeCapabilities: () => [CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY],
-    isPersonaBound: () => true,
+    personaBinding: () => 'bound',
   });
   service.pushPersonaBound('acc-1');
   service.pushPublishState('acc-1', 42, 'pending', '候审稿');
@@ -467,7 +467,7 @@ test('ui-snapshot: publishUiCode 与飞书卡编号同源（#<记录id>）', () 
 
 test('ui-snapshot: personaBound=true 先于重快照单独下发（不排在 DB 往返之后）', async () => {
   const { service, sent } = makeService({
-    isPersonaBound: () => true,
+    personaBinding: () => 'bound',
     // 重快照的 DB 往返很慢：绑定态绝不能被它拖住（真机上就是这段延迟造成误弹）。
     lastPublishedForAccount: async () => {
       await new Promise((r) => setTimeout(r, 30));
@@ -481,24 +481,24 @@ test('ui-snapshot: personaBound=true 先于重快照单独下发（不排在 DB 
 });
 
 test('ui-snapshot: 已绑人设同步结构化发言语言，存量缺字段显式为 null', async () => {
-  const configured = makeService({ isPersonaBound: () => true, getPersonaWritingLanguage: () => 'vi' });
+  const configured = makeService({ personaBinding: () => 'bound', getPersonaWritingLanguage: () => 'vi' });
   await configured.service.pushHelloSnapshot('acc-1', 'edge-1');
   assert.equal(configured.sent[0].env.payload.personaWritingLanguage, 'vi');
 
-  const legacy = makeService({ isPersonaBound: () => true, getPersonaWritingLanguage: () => null });
+  const legacy = makeService({ personaBinding: () => 'bound', getPersonaWritingLanguage: () => null });
   await legacy.service.pushHelloSnapshot('acc-1', 'edge-1');
   assert.equal(legacy.sent[0].env.payload.personaWritingLanguage, null);
 });
 
 test('ui-snapshot: personaBound=false 同样下发（权威「未绑」绝不吞掉）', async () => {
-  const { service, sent } = makeService({ isPersonaBound: () => false });
+  const { service, sent } = makeService({ personaBinding: () => 'unbound' });
   await service.pushHelloSnapshot('acc-1', 'edge-1');
   assert.equal(sent[0].env.payload.personaBound, false, '云端有资格诚实地说「这个账号没有人设」');
 });
 
 test('ui-snapshot: 绑定/解绑后即时重推绑定态（不必等下一次握手）', async () => {
   let bound = false;
-  const { service, sent } = makeService({ isPersonaBound: () => bound });
+  const { service, sent } = makeService({ personaBinding: () => (bound ? 'bound' : 'unbound') });
   bound = true;
   service.pushPersonaBound('acc-1');
   assert.equal(sent.at(-1)!.env.payload.personaBound, true);
@@ -508,7 +508,7 @@ test('ui-snapshot: 绑定/解绑后即时重推绑定态（不必等下一次握
 });
 
 test('ui-snapshot: 账号无在线边缘时绑定态如实放弃，绝不广播、绝不外抛', () => {
-  const { service, sent } = makeService({ isPersonaBound: () => true, resolveEdgeIdForAccount: () => null });
+  const { service, sent } = makeService({ personaBinding: () => 'bound', resolveEdgeIdForAccount: () => null });
   service.pushPersonaBound('acc-1');
   assert.equal(sent.length, 0);
 });

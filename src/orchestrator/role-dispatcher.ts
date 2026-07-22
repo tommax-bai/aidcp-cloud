@@ -12,6 +12,13 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import type { PersonaBinding } from '../config/persona-store.js';
+import {
+  CONFIG_MIRROR_STALE_REASON,
+  PERSONA_UNAVAILABLE_REASON,
+  platformActionHalt,
+  shouldHaltNewPlatformActions,
+} from '../config/mirror-stop-work.js';
 import { EventBus } from '../event-bus/index.js';
 import type { CommentApprovalTrace, CommentAppraisingPayload, MandatoryInteractionContext, NoteDetailData, PageCardsData } from '../event-bus/types.js';
 import {
@@ -308,7 +315,14 @@ export interface RoleDispatcherOptions {
    * 诚实人设启动闸（multi-account-node-support D3）：以「人设存储中是否存在该账号的人设行」为独立判据
    * （getForAccount!==null，**不走会回落默认的解析器**）。缺省 → 不设闸（向后兼容单账号）。default 账号硬豁免（见 canStartSession）。
    */
-  isPersonaBound?: (accountId: string) => boolean;
+  /**
+   * 人设绑定判据（**三态**，change config-mirror-cross-process-invalidation task 4.2）：
+   * `unbound` → 置 `needs_persona_setup` 并告警；`unknown`（人设副本陈旧）→ 置独立不可用态
+   * `persona_unavailable`，MUST NOT 复用 `needs_persona_setup`、MUST NOT 触发人设向导、
+   * MUST NOT 发「该账号未设置人设」类运营告警（那是对运营的错误指认：把一次基础设施故障
+   * 讲成一件需要人去补配置的事）。
+   */
+  personaBinding?: (accountId: string) => PersonaBinding;
   /** 账号未绑人设被诚实拒绝时回调（记录 needs_persona_setup 拒绝）。 */
   onSessionRejected?: (accountId: string, reason: string) => void | Promise<void>;
   /** 全局调度开关（面板 /dispatch）：false 时不启动浏览会话。缺省 → 恒 true。 */
@@ -504,7 +518,7 @@ export class RoleDispatcher {
   private notificationTaskAcquire?: Promise<void>;
   private notificationTaskEnding = false;
   private pendingNotificationCommands: EdgeCommand[] = [];
-  private readonly isPersonaBound?: (accountId: string) => boolean;
+  private readonly personaBinding?: (accountId: string) => PersonaBinding;
   private readonly onSessionRejected?: (accountId: string, reason: string) => void | Promise<void>;
   private readonly isDispatchActive: () => boolean;
   /** 该连接账号平台（2.8 会话平台闸）；缺省不设闸。 */
@@ -649,7 +663,7 @@ export class RoleDispatcher {
     this.hasCommentedForLead = options.hasCommentedForLead;
     this.fireAutoContactComment = options.fireAutoContactComment;
     this.isHardPaused = options.isHardPaused ?? (() => false);
-    this.isPersonaBound = options.isPersonaBound;
+    this.personaBinding = options.personaBinding;
     this.onSessionRejected = options.onSessionRejected;
     this.isDispatchActive = options.isDispatchActive ?? (() => true);
     this.accountPlatform = options.accountPlatform;
@@ -876,6 +890,23 @@ export class RoleDispatcher {
   private sendCommand(command: EdgeCommand): boolean {
     // 中途档位补推：先于软暂停/配额/去重闸——控制消息不应被抑制、不占配额（见 maybePushTempo）。
     this.maybePushTempo();
+    // 闸门镜像陈旧 → 停手（change config-mirror-cross-process-invalidation task 4.8）。
+    //
+    // 停手 = **不放行新的真实平台动作**：这里扣住浏览 / 互动 / 发布 / 评论类命令。
+    // 但**绝不 kill 在跑的会话**：`isQuotaSleepBypass` 放行的那组（session.end、excursion 收尾等）
+    // 照常穿透，会话沿既有自然结束路径诚实收敛——被扣住的命令与配额休眠同款，页面续刷时自然重来。
+    // 也**绝不**改成「回落最保守档继续跑」：最保守档仍是放行真实平台动作，会把一次基础设施故障
+    // 静默转成全车队降速，外观是「系统在跑、只是慢」，属最难发现的一类故障。
+    if (!this.isQuotaSleepBypass(command)) {
+      const halt = platformActionHalt(`command:${command.action}:${this.currentAccountId}`);
+      if (halt.halted) {
+        console.warn(
+          `[RoleDispatcher] command.suppressed reason=${CONFIG_MIRROR_STALE_REASON} mirror=${halt.mirrorKey} ` +
+            `action=${command.action} account=${this.currentAccountId}（不下发新平台动作；在跑会话不 kill）`,
+        );
+        return false;
+      }
+    }
     if (this.viewQuotaSleeping && !this.isQuotaSleepBypass(command)) {
       // 浏览额度休眠：不打开/滚动/互动，等窗口释放后重驱。
       // 🔴 红线：MUST NOT 静默丢弃——节流打印首条 + 每 50 条汇总（key=account+reason，同一轮休眠）。
@@ -1602,7 +1633,9 @@ export class RoleDispatcher {
    * 会话启动闸（诚实人设 + 全局调度开关）。retire-default-account：所有账号一视同仁，无 default 豁免。
    * 临时 view 配额耗尽不在这里拒签；它在 open_note 前进入浏览休眠，窗口释放后自动重驱。
    * 未绑人设的账号：发 onSessionRejected（置 needs_persona_setup + 告警）并短路，绝不以默认人设静默开跑。
-   * 人设存储读不到时 isPersonaBound 返回 false（fail-closed）→ 一并诚实拒绝。
+   * 人设存储**初始化失败**时镜像为空 → 判 `unbound` → 一并诚实拒绝（fail-closed，那是进程启动期的
+   * 权威明确不可用）。运行期**副本陈旧**是另一回事：判 `unknown` → 走 `persona_unavailable`，
+   * 不置 needs_persona_setup、不告警「未设置人设」。
    */
   private canStartSession(): boolean {
     const verdict = this.sessionStartVerdict();
@@ -1623,6 +1656,23 @@ export class RoleDispatcher {
       void this.onSessionRejected?.(this.currentAccountId, 'needs_persona_setup');
       return false;
     }
+    // 人设副本陈旧：云端此刻读不到人设，**不是**「该账号没设人设」。置独立不可用态，
+    // MUST NOT 复用 needs_persona_setup（那会触发人设向导、并向运营错误指认成配置缺失）。
+    if (verdict === PERSONA_UNAVAILABLE_REASON) {
+      console.warn(
+        `[RoleDispatcher] 账号 ${this.currentAccountId} 人设副本陈旧 → 拒绝启动浏览会话（${PERSONA_UNAVAILABLE_REASON}）：不开循环、不发巡刷信号、不弹人设向导`,
+      );
+      void this.onSessionRejected?.(this.currentAccountId, PERSONA_UNAVAILABLE_REASON);
+      return false;
+    }
+    // 闸门镜像陈旧（人设之外的任一条）：同样不放行新会话。已在跑的会话不在此处 kill。
+    if (verdict === CONFIG_MIRROR_STALE_REASON) {
+      console.warn(
+        `[RoleDispatcher] 账号 ${this.currentAccountId} 配置镜像陈旧 → 拒绝启动浏览会话（${CONFIG_MIRROR_STALE_REASON}）`,
+      );
+      void this.onSessionRejected?.(this.currentAccountId, CONFIG_MIRROR_STALE_REASON);
+      return false;
+    }
     return false; // dispatch_inactive：调度开关关着，静默即可（既有行为，无告警）
   }
 
@@ -1633,12 +1683,25 @@ export class RoleDispatcher {
    * 它若直接复用带副作用的 `canStartSession()`，未绑人设 / 无 browse 能力的账号就会**每分钟**刷一行告警、并
    * **每分钟触发一次「会话被拒」回调**——一个只读方法不该有这种脉冲。
    */
-  private sessionStartVerdict(): 'ok' | 'dispatch_inactive' | 'platform_no_browse' | 'needs_persona_setup' {
+  private sessionStartVerdict():
+    | 'ok'
+    | 'dispatch_inactive'
+    | 'platform_no_browse'
+    | 'needs_persona_setup'
+    | typeof PERSONA_UNAVAILABLE_REASON
+    | typeof CONFIG_MIRROR_STALE_REASON {
     if (!this.isDispatchActive()) return 'dispatch_inactive';
     if (this.accountPlatform && !isOrchestrationCapabilitySupported(this.accountPlatform, 'browse')) {
       return 'platform_no_browse';
     }
-    if (this.isPersonaBound && !this.isPersonaBound(this.currentAccountId)) return 'needs_persona_setup';
+    // 人设三态：只有权威的「未绑」才允许 needs_persona_setup。
+    const binding = this.personaBinding?.(this.currentAccountId) ?? 'bound';
+    if (binding === 'unbound') return 'needs_persona_setup';
+    if (binding === 'unknown') return PERSONA_UNAVAILABLE_REASON;
+    // 其余闸门镜像陈旧 → 统一停手（不放行新会话）。
+    if (shouldHaltNewPlatformActions(`session_start:${this.currentAccountId}`)) {
+      return CONFIG_MIRROR_STALE_REASON;
+    }
     return 'ok';
   }
 

@@ -16,6 +16,8 @@ import type { PublishResult, PublishSourceReference, ReferenceImageSnapshot, Tri
 import type { Soul } from '../soul/types.js';
 import type { CuratedContentTypeFilter, CuratedSelectItem } from '../cache/curated-content-store.js';
 import type { ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
+import type { PersonaBinding } from '../config/persona-store.js';
+import { PERSONA_UNAVAILABLE_REASON } from '../config/mirror-stop-work.js';
 import type { PlatformId } from '../platform/index.js';
 import { referenceImagesForGeneration, REFERENCE_IMAGE_MAX_COUNT } from './reference-image-guidance.js';
 import { shanghaiDayStartMs } from '../time/shanghai-day.js';
@@ -101,8 +103,12 @@ export interface PublishSchedulerDeps {
   /**
    * 人设绑定判定（persona-driven-content-pipeline）：注入则发布前闸——未绑人设的账号诚实拒绝，
    * 绝不以打包默认人设（回落 soul）生成内容。缺省（不注入）→ 不闸（向后兼容旧构造 / 测试桩）。
+   *
+   * **三态**（change config-mirror-cross-process-invalidation task 4.4）：
+   * `unbound` → 保持既有 `needs_persona_setup`（非重试终态）；`unknown` → 独立的
+   * `persona_unavailable`，由委托任务侧判为**可重试延后**，MUST NOT 落非重试终态。
    */
-  isPersonaBound?: (accountId: string) => boolean;
+  personaBinding?: (accountId: string) => PersonaBinding;
   orchestrator: SchedulerOrchestrator;
   /**
    * 人设注入（change account-persona-config）。两种形态，至少给一个：
@@ -195,8 +201,30 @@ export class PublishScheduler {
   }
 
   /**
+   * 人设入口闸（**三态**，change config-mirror-cross-process-invalidation task 4.4）。
+   * 返回 null = 放行；返回 TriggerOutcome = 拒绝，且两种拒绝的原因码严格可区分：
+   *
+   * - `needs_persona_setup`：权威确认该账号**确实**没有人设行 → 既有的非重试终态，行为零回归。
+   * - `persona_unavailable`：人设副本陈旧、云端读不到 → 委托任务侧 MUST 判**可重试延后**。
+   *   把它压回 `needs_persona_setup` 会把用户的委托任务**永久判死**，并回一句「该账号未配置人设」
+   *   ——而账号可能早已配好，只是云端此刻读不到。
+   */
+  private personaGate(accountId: string, where: string): TriggerOutcome | null {
+    const binding = this.d.personaBinding?.(accountId) ?? 'bound';
+    if (binding === 'bound') return null;
+    if (binding === 'unbound') {
+      this.logger.warn(`[PublishScheduler] ${where}：账号 ${accountId} 未绑定人设 — 拒绝，绝不以默认人设发布`);
+      return { result: 'blocked', reason: 'needs_persona_setup' };
+    }
+    this.logger.warn(
+      `[PublishScheduler] ${where}：账号 ${accountId} 人设副本陈旧 — 拒绝（${PERSONA_UNAVAILABLE_REASON}），可重试，绝不判成「未配置人设」`,
+    );
+    return { result: 'blocked', reason: PERSONA_UNAVAILABLE_REASON };
+  }
+
+  /**
    * 解析目标账号人设（getSoul 取值口优先 → 兼容快照）。persona-driven-content-pipeline：取值口
-   * 无默认人设回落——未绑人设账号已被 isPersonaBound 入口闸先行拒绝（needs_persona_setup）；
+   * 无默认人设回落——未绑人设账号已被人设入口闸先行拒绝（needs_persona_setup）；
    * 若此后仍解析不到（如闸后被解绑），getSoul 抛 no_persona 诚实失败，绝不以默认人设生成。
    * soul / getSoul 两者皆缺则抛（构造契约违背，诚实失败不静默）。
    */
@@ -282,10 +310,8 @@ export class PublishScheduler {
       this.logger.warn('[PublishScheduler] 自动扳机：无法解析唯一真实账号（0 或多个）— 跳过，绝不回落 default');
       return { result: 'skipped', reason: 'no_single_account' };
     }
-    if (this.d.isPersonaBound && !this.d.isPersonaBound(accountId)) {
-      this.logger.warn(`[PublishScheduler] 自动扳机：账号 ${accountId} 未绑定人设 — 跳过，绝不以默认人设发布`);
-      return { result: 'blocked', reason: 'needs_persona_setup' };
-    }
+    const autoBinding = this.personaGate(accountId, '自动扳机');
+    if (autoBinding) return autoBinding;
     const baseline = await this.baselineMs();
     const newConceptCount = await this.d.conceptStore.countNewSince(baseline);
     const hoursSince = (this.clock() - baseline) / HOUR_MS;
@@ -321,10 +347,8 @@ export class PublishScheduler {
       this.logger.warn('[PublishScheduler] 手动 /publish 未指定账号且无法解析唯一真实账号（0 或多个）— 拒绝，需显式指定账号');
       return { result: 'blocked', reason: 'account_required' };
     }
-    if (this.d.isPersonaBound && !this.d.isPersonaBound(resolved)) {
-      this.logger.warn(`[PublishScheduler] 手动 /publish：账号 ${resolved} 未绑定人设 — 拒绝，绝不以默认人设发布`);
-      return { result: 'blocked', reason: 'needs_persona_setup' };
-    }
+    const manualBinding = this.personaGate(resolved, '手动 /publish');
+    if (manualBinding) return manualBinding;
     // 洗稿参照红线（change curated-note-actions）：空正文不得作参照，触发即诚实拒绝。
     if (opts?.referenceNote && !opts.referenceNote.body.trim()) {
       this.logger.warn(`[PublishScheduler] 参照创作：参照笔记正文为空 — 拒绝（empty_body）`);
@@ -347,10 +371,8 @@ export class PublishScheduler {
     approvalMode: ContentScheduleApprovalMode,
     scheduleExecution: NonNullable<TriggerInput['scheduleExecution']>,
   ): Promise<TriggerOutcome> {
-    if (this.d.isPersonaBound && !this.d.isPersonaBound(accountId)) {
-      this.logger.warn(`[PublishScheduler] 排期扳机：账号 ${accountId} 未绑定人设 — 跳过，绝不以默认人设发布`);
-      return { result: 'blocked', reason: 'needs_persona_setup' };
-    }
+    const scheduledBinding = this.personaGate(accountId, '排期扳机');
+    if (scheduledBinding) return scheduledBinding;
     const risk = await this.d.resolveRisk(accountId);
     const status = risk.getState().status;
     if (status !== 'normal') {
@@ -400,9 +422,8 @@ export class PublishScheduler {
       edgeLeasePriority?: 'human';
     },
   ): Promise<TriggerOutcome> {
-    if (this.d.isPersonaBound && !this.d.isPersonaBound(accountId)) {
-      return { result: 'blocked', reason: 'needs_persona_setup' };
-    }
+    const referenceBinding = this.personaGate(accountId, '参照创作');
+    if (referenceBinding) return referenceBinding;
     const risk = await this.d.resolveRisk(accountId);
     const state = risk.getState();
     const status = state.status;

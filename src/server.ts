@@ -238,6 +238,11 @@ import {
   projectClientPublishQueue,
 } from './client-auth/index.js';
 import { PgAlertStore } from './alerts/index.js';
+// 跨进程配置镜像失效通道（change config-mirror-cross-process-invalidation）。
+import pg from 'pg';
+import { MirrorVersionStore } from './config/mirror-version-store.js';
+import { ConfigMirrorRefresher } from './config/mirror-refresher.js';
+import { resolveEnvPgConfig } from './cache/pg-config.js';
 import { ModelConfigStore } from './config/model-config-store.js';
 import { RoleConfigStore } from './config/role-config-store.js';
 import { createRoleConfigPanel } from './config/role-config-facade.js';
@@ -473,14 +478,22 @@ async function main(): Promise<void> {
   const debugPort = Number(process.env.AIDCP_DEBUG_PORT ?? 8788);
   const deploymentTarget = parseDeploymentTarget(readEnvString('AIDCP_DEPLOY_ENV'));
 
+  // ── 跨进程配置镜像失效通道（change config-mirror-cross-process-invalidation）────────────
+  // dev 与 ol 是两个 cloud 进程共用同一个 PostgreSQL 库，其中 8 张是无 execution_target 列的全局配置表。
+  // 在 dev 控制台改一个全局安全限额，ol 进程的镜像原本要到重启才可见，中间零日志、零告警、后台还回显
+  // 写入成功。这条通道把「写方 +1 版本 / 读方有界轮询比对 → 只重载变化的 key」做成机械保证。
+  //
+  // **配置层唯一连接池**（task 3.4：刷新器 MUST 复用组合根已有的 Pool、MUST NOT 另开连接池）。
+  // 组合根此前没有任何共享池——每个 store 各自 new 一个。这里先建一个，再把它交给全部 15 处镜像所在的
+  // 配置 store 与版本表：镜像子系统因此**没有**新增任何连接池，配置层的池数反而从 12 收敛到 1。
+  const configMirrorPool = new pg.Pool({ ...resolveEnvPgConfig(), max: 30 });
+  const mirrorVersionStore = new MirrorVersionStore({ pool: configMirrorPool });
+
   // 模型配置 + 加密凭据（change console-model-provider-config）。
   // 先于 LLM 客户端构造：模型名经 getCached() 运行时解析（热加载）；DashScope 密钥库内优先、回退 env。
   const modelConfigStore = new ModelConfigStore({
-    host: readEnvString('PGHOST'),
-    port: readEnvPort('PGPORT'),
-    database: readEnvString('PGDATABASE'),
-    user: readEnvString('PGUSER'),
-    password: readEnvString('PGPASSWORD'),
+    pool: configMirrorPool,
+    mirrorVersionBumper: mirrorVersionStore,
   });
   const credentialStore = new CredentialStore({
     host: readEnvString('PGHOST'),
@@ -491,61 +504,40 @@ async function main(): Promise<void> {
   });
   // 角色级模型/温度覆盖（change console-role-model-config）。缺/空/无效一律回落全局，绝不 brick。
   const roleConfigStore = new RoleConfigStore({
-    host: readEnvString('PGHOST'),
-    port: readEnvPort('PGPORT'),
-    database: readEnvString('PGDATABASE'),
-    user: readEnvString('PGUSER'),
-    password: readEnvString('PGPASSWORD'),
+    pool: configMirrorPool,
+    mirrorVersionBumper: mirrorVersionStore,
   });
   // 分类级模型默认（change role-model-category-config，item 5/6）。缺/空/异常一律返「无覆盖」，绝不 brick。
   const categoryConfigStore = new CategoryConfigStore({
-    host: readEnvString('PGHOST'),
-    port: readEnvPort('PGPORT'),
-    database: readEnvString('PGDATABASE'),
-    user: readEnvString('PGUSER'),
-    password: readEnvString('PGPASSWORD'),
+    pool: configMirrorPool,
+    mirrorVersionBumper: mirrorVersionStore,
   });
   // 安全限额（change safety-quota-config，stream D）。缺行/非法值一律回落 deriveWindowQuotas 写死默认，绝不 brick。
   const quotaConfigStore = new QuotaConfigStore({
-    host: readEnvString('PGHOST'),
-    port: readEnvPort('PGPORT'),
-    database: readEnvString('PGDATABASE'),
-    user: readEnvString('PGUSER'),
-    password: readEnvString('PGPASSWORD'),
+    pool: configMirrorPool,
+    mirrorVersionBumper: mirrorVersionStore,
   });
   // 操作兜底 floor（change pacing-floor-config-min-interval）：四类操作最小间隔兜底区间、全局一套；
   // 缺行/非法值一律回落 BUILTIN_FLOOR 内置默认并在读出口 clamp，绝不 brick、绝不零延迟。
   const pacingConfigStore = new PacingConfigStore({
-    host: readEnvString('PGHOST'),
-    port: readEnvPort('PGPORT'),
-    database: readEnvString('PGDATABASE'),
-    user: readEnvString('PGUSER'),
-    password: readEnvString('PGPASSWORD'),
+    pool: configMirrorPool,
+    mirrorVersionBumper: mirrorVersionStore,
   });
   // 单场会话上限（全局单例，change restore-auto-resume-and-global-safety-config）：全局单场时长 + 互动预算、对所有账号生效；缺行/非法回落写死默认，绝不 brick。
   const sessionConfigStore = new SessionConfigStore({
-    host: readEnvString('PGHOST'),
-    port: readEnvPort('PGPORT'),
-    database: readEnvString('PGDATABASE'),
-    user: readEnvString('PGUSER'),
-    password: readEnvString('PGPASSWORD'),
+    pool: configMirrorPool,
+    mirrorVersionBumper: mirrorVersionStore,
   });
   // 引流线索热度过滤阈值（全局单例，change feed-hot-lead-group-comment）：帖龄上限 / 速率阈值 / 最小赞，落安全页卡片、热加载。
   const hotLeadConfigStore = new HotLeadConfigStore({
-    host: readEnvString('PGHOST'),
-    port: readEnvPort('PGPORT'),
-    database: readEnvString('PGDATABASE'),
-    user: readEnvString('PGUSER'),
-    password: readEnvString('PGPASSWORD'),
+    pool: configMirrorPool,
+    mirrorVersionBumper: mirrorVersionStore,
   });
   // 自动续场护栏 + 看门狗阈值（全局单例，change restore-auto-resume-and-global-safety-config）：全局 rest_ratio / 活跃时段 /
   // 每日上限 / 看门狗两阈值、对所有账号生效；缺行/非法回落写死默认，绝不 brick。init 失败也不致命（空镜像→全回落默认）。
   const resumeConfigStore = new ResumeConfigStore({
-    host: readEnvString('PGHOST'),
-    port: readEnvPort('PGPORT'),
-    database: readEnvString('PGDATABASE'),
-    user: readEnvString('PGUSER'),
-    password: readEnvString('PGPASSWORD'),
+    pool: configMirrorPool,
+    mirrorVersionBumper: mirrorVersionStore,
   });
   // 内容排期（change content-schedule-auto-publish）：全局「内容可自动时段」+ 每账号发帖排期。
   // fail-closed：未配 / 非法 = 不自动（与浏览掩码「缺失=全天活跃」刻意相反）；init 失败不致命（空镜像 = 全不自动）。
@@ -554,25 +546,21 @@ async function main(): Promise<void> {
     port: readEnvPort('PGPORT'),
     database: readEnvString('PGDATABASE'),
     user: readEnvString('PGUSER'),
-    password: readEnvString('PGPASSWORD'),
+    pool: configMirrorPool,
+    mirrorVersionBumper: mirrorVersionStore,
     // 只读组合：账号活跃覆盖优先，未配回落 session_config_global 热镜像；本 store 不写全局表。
+    // 归属对齐后这是 api 侧目录投影取生效掩码的**唯一**通道（task 5.3）：MUST NOT 在 api 侧另建副本。
     globalActiveWeekMask: () => sessionConfigStore.weekActiveMask(),
   });
   const facebookGroupJoinAutomationStore = new FacebookGroupJoinAutomationStore({
-    host: readEnvString('PGHOST'),
-    port: readEnvPort('PGPORT'),
-    database: readEnvString('PGDATABASE'),
-    user: readEnvString('PGUSER'),
-    password: readEnvString('PGPASSWORD'),
+    pool: configMirrorPool,
+    mirrorVersionBumper: mirrorVersionStore,
   });
   // 每账号 Facebook 定时评论配置（change facebook-scheduled-comment 2.1）：关键词列表 + 容器列表。
   // fail-closed：任一为空 = 不生效（诚实 no-op）；init 失败不致命（空镜像 = 全不生效）。
   const facebookCommentConfigStore = new FacebookCommentConfigStore({
-    host: readEnvString('PGHOST'),
-    port: readEnvPort('PGPORT'),
-    database: readEnvString('PGDATABASE'),
-    user: readEnvString('PGUSER'),
-    password: readEnvString('PGPASSWORD'),
+    pool: configMirrorPool,
+    mirrorVersionBumper: mirrorVersionStore,
   });
   // Facebook 定时评论每次触发的审计行（facebook-scheduled-comment 2.7）：best-effort、不阻塞主链路。
   const facebookCommentAuditStore = new FacebookCommentAuditStore({
@@ -606,8 +594,9 @@ async function main(): Promise<void> {
     password: readEnvString('PGPASSWORD'),
   });
   // 对外客户身份 + 客户↔环境归属（change edge-client-customer-auth）。独立表,与内部运营登录物理隔离。
-  const clientUserStore = new ClientUserStore();
+  const clientUserStore = new ClientUserStore({ mirrorVersionBumper: mirrorVersionStore });
   try {
+    await mirrorVersionStore.init();
     await modelConfigStore.init();
     await credentialStore.init();
     await roleConfigStore.init();
@@ -1076,6 +1065,7 @@ async function main(): Promise<void> {
   let approvalPolicyStore: ApprovalPolicyStore | undefined;
   try {
     const store = new PgAccountStore({
+      mirrorVersionBumper: mirrorVersionStore,
       host: readEnvString('PGHOST'),
       port: readEnvPort('PGPORT'),
       database: readEnvString('PGDATABASE'),
@@ -1321,11 +1311,8 @@ async function main(): Promise<void> {
   // persona-driven-content-pipeline：系统不存在默认/兜底人设——PG 不可用 / init 失败时人设镜像为空，
   // 所有账号按「未绑人设」fail-closed 诚实拒绝（isPersonaBound=false），绝不静默套打包 soul.yaml 开跑。
   const personaStore = new PersonaStore({
-    host: readEnvString('PGHOST'),
-    port: readEnvPort('PGPORT'),
-    database: readEnvString('PGDATABASE'),
-    user: readEnvString('PGUSER'),
-    password: readEnvString('PGPASSWORD'),
+    pool: configMirrorPool,
+    mirrorVersionBumper: mirrorVersionStore,
   });
   try {
     await personaStore.init();
@@ -2037,6 +2024,68 @@ async function main(): Promise<void> {
   if (alertStore) {
     pacingAlerter = new PacingSaturationAlerter({ alertStore });
     console.log('[aidcp-cloud] PacingSaturationAlerter 已就绪（撞突发窗 → 低优先级运维告警）');
+  }
+
+  // ── 配置镜像刷新器接线（change config-mirror-cross-process-invalidation §3 / §6）────────────
+  // 一个进程一个实例；只对**版本变化**的 key 触发对应 store 重载。它同时是「新鲜度事实源」：
+  // 闸门取值口（人设 / 暂停态 / 环境出口闸 / 慢启动锚点）经 src/config-mirror-freshness.ts 同步问它。
+  // 整体开关 AIDCP_CONFIG_MIRROR_REFRESH=false 可秒级回滚——关掉即不安装事实源，全部闸门按今日现状运行。
+  const configMirrorRefresher = new ConfigMirrorRefresher({
+    pool: configMirrorPool,
+    versionStore: mirrorVersionStore,
+    executionTarget: deploymentTarget ?? 'unknown',
+    reloaders: {
+      quota_config: () => quotaConfigStore.refreshFromAuthority(),
+      pacing_floor_config: () => pacingConfigStore.refreshFromAuthority(),
+      session_config_global: () => sessionConfigStore.refreshFromAuthority(),
+      resume_config_global: () => resumeConfigStore.refreshFromAuthority(),
+      persona_config: () => personaStore.refreshFromAuthority(),
+      content_schedule: () => contentScheduleStore.refreshFromAuthority(),
+      model_config: () => modelConfigStore.refreshFromAuthority(),
+      role_config: () => roleConfigStore.refreshFromAuthority(),
+      category_config: () => categoryConfigStore.refreshFromAuthority(),
+      hot_lead_config: () => hotLeadConfigStore.refreshFromAuthority(),
+      facebook_comment_config: () => facebookCommentConfigStore.refreshFromAuthority(),
+      facebook_group_join_automation_config: () => facebookGroupJoinAutomationStore.refreshFromAuthority(),
+      account_status: () => accountState.refreshFromAuthority(),
+      client_environment_slow_start: () => clientUserStore.refreshSlowStartFromAuthority(),
+      client_environment_automation_gate: () => clientUserStore.refreshAutomationGateFromAuthority(),
+    },
+    // 具名告警 config_mirror_stale：载荷含 mirrorKey / 陈旧秒数 / 最后已知版本 / executionTarget。
+    // 预警（staleMs/2）走 P2，真正进入陈旧（已开始停手）走 P1。
+    ...(alertStore
+      ? {
+          onStaleAlert: (input) => {
+            void alertStore!
+              .raise({
+                severity: input.severity === 'stale' ? 'P1' : 'P2',
+                type: 'config_mirror_stale',
+                title:
+                  input.severity === 'stale'
+                    ? `配置镜像已陈旧，已停止下发新平台动作（${input.mirrorKey}）`
+                    : `配置镜像即将陈旧（${input.mirrorKey}）`,
+                detail:
+                  `mirror=${input.mirrorKey} 陈旧=${input.staleSeconds}s ` +
+                  `最后已知版本=${input.lastKnownVersion ?? '无'} target=${input.executionTarget}`,
+              })
+              .catch((err: unknown) => {
+                console.warn(
+                  `[config-mirror] 告警落库失败 mirror=${input.mirrorKey}: ${err instanceof Error ? err.message : String(err)}`,
+                );
+              });
+          },
+        }
+      : {}),
+  });
+  try {
+    await configMirrorRefresher.start();
+  } catch (err) {
+    // 轮询周期超硬上界这类配置错误 MUST 诚实报错而非静默截断；但也绝不能因此让整个云端起不来——
+    // 不启动刷新器 = 退回今日现状（启动 + 本进程写入刷新），闸门按 fresh 运行、行为逐位与本 change 前一致。
+    console.error(
+      '[aidcp-cloud] 配置镜像刷新器启动失败 → 退回今日现状（启动 + 本进程写入刷新，跨进程改配置到重启才可见）:',
+      (err as Error).message,
+    );
   }
 
   // A 阶段4 发帖触发器已在发布日志之后前向声明；actions.publish / 首作精选回调运行时引用。
@@ -2891,8 +2940,9 @@ async function main(): Promise<void> {
     resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
     edgeCapabilities: (edgeId) => server.edgeCapabilities(edgeId),
     getNickname: (accountId) => accountStore?.getNickname?.(accountId) ?? null,
-    // 已绑人设信号（change persona-wizard-onboarding-fixes）：persona 存储权威判据，随 hello 快照下发。
-    isPersonaBound: (accountId) => personaStore.getForAccount(accountId) !== null,
+    // 已绑人设信号（change persona-wizard-onboarding-fixes → config-mirror task 4.2/4.3）：persona 存储
+    // 权威判据，**三态**——副本陈旧时返回 'unknown'，快照层据此不下发 personaBound 字段（未知≠未绑）。
+    personaBinding: (accountId) => personaStore.bindingFor(accountId),
     getPersonaWritingLanguage: (accountId) => resolvePersona(accountId)?.writing_language ?? null,
     lastPublishedForAccount: (accountId) => publishLogStore.lastPublishedForAccount(accountId),
     pendingApprovalForAccount: (accountId) => publishLogStore.pendingApprovalForAccount(accountId),
@@ -3466,7 +3516,7 @@ async function main(): Promise<void> {
       edgeTaskLeases,
       // 诚实人设启动闸（D3）：以 persona_config 行存在为独立判据（不走会回落的解析器）；default 硬豁免（在
       // RoleDispatcher.canStartSession 内）；存储读不到 → false（fail-closed，诚实拒绝、不偷用默认人设）。
-      isPersonaBound: (accountId) => personaStore.getForAccount(accountId) !== null,
+      personaBinding: (accountId: string) => personaStore.bindingFor(accountId),
       onSessionRejected: (accountId, reason) => onNeedsPersonaSetup(accountId, ctx.edgeId, reason),
       // 全局调度开关（面板 /dispatch）。
       isDispatchActive: () => dispatchActive,
@@ -3825,7 +3875,8 @@ async function main(): Promise<void> {
     edgeTaskLeases,
     getSoul,
     // persona-driven-content-pipeline：/comment 触发前人设闸——未绑人设不接管边端、不启动评论任务（与浏览/发布同口径）。
-    isPersonaBound: (accountId) => personaStore.getForAccount(accountId) !== null,
+    // 三态：副本陈旧返回 'unknown'，回一句「云端暂时读不到人设配置」而非「你还没设人设」。
+    personaBinding: (accountId) => personaStore.bindingFor(accountId),
     getPlatform: (accountId) => accountStore?.getPlatform?.(accountId) ?? 'xiaohongshu',
     // account-group-chat-injection → generalize-contact-info：/comment --contact 时读账号联系方式（异步直读账号存储）；缺联系方式由 scheduler fail-closed。
     getContactInfo: accountStore?.getContactInfo
@@ -3998,7 +4049,8 @@ async function main(): Promise<void> {
       resolveSingleAccountId,
       getPlatform: (accountId) => accountStore?.getPlatform?.(accountId) ?? 'xiaohongshu',
       // persona-driven-content-pipeline：发布前人设闸——未绑人设的账号拒绝发布，绝不以打包默认人设生成（与浏览侧 canStartSession 同口径）。
-      isPersonaBound: (accountId) => personaStore.getForAccount(accountId) !== null,
+      // 三态：副本陈旧 → persona_unavailable（可重试），绝不压成 needs_persona_setup（那会把委托任务永久判死）。
+      personaBinding: (accountId) => personaStore.bindingFor(accountId),
       // 生成段账号归账（change parallel-rewrite-drafts）：账号随 TriggerInput.accountId 上黑板，
       // 每个角色的 LLM 调用显式取之记账——无进程级槽、无括起复位，并发生成各轮各归各账。
       orchestrator: publishOrchestrator,

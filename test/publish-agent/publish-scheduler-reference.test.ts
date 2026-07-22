@@ -143,7 +143,7 @@ describe('triggerManual referenceNote（洗稿参照）', () => {
       publishLog: { getMostRecentPublishTime: async () => null, recentPublishedContents: async () => [] },
       resolveRisk: async () => ({ canDo: () => true, explain: () => ({ allowed: true }), getState: () => ({ status: 'normal', quotaLevel: 'normal' }) }),
       resolveSingleAccountId: async () => 'acc-test',
-      isPersonaBound: () => false,
+      personaBinding: () => 'unbound',
       orchestrator: { trigger: async () => ({ status: 'draft' }) },
       soul: {} as PublishSchedulerDeps['soul'],
       conceptThreshold: 5,

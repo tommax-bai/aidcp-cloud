@@ -15,6 +15,8 @@
 
 import type { EventBus } from '../event-bus/index.js';
 import type { Soul } from '../soul/types.js';
+import type { PersonaBinding } from '../config/persona-store.js';
+import { PERSONA_UNAVAILABLE_REASON } from '../config/mirror-stop-work.js';
 import { CommentSearchTermGenerator, type RoleLlmLike } from '../agents/comment-search-term-generator.js';
 import { CommentTargetPicker, type CommentCandidateCard } from '../agents/comment-target-picker.js';
 import { CommentComposer } from '../agents/comment-composer.js';
@@ -195,7 +197,11 @@ export interface CommentSchedulerDeps {
   edgeTaskLeases: Pick<EdgeTaskLeaseClient, 'withLease'>;
   getSoul: (accountId: string) => Soul;
   /** 人设绑定判定（persona-driven-content-pipeline）：注入则触发前闸——未绑人设的账号不接管边端、不启动评论任务，绝不以默认人设代评。缺省→不闸（向后兼容旧构造 / 测试桩）。 */
-  isPersonaBound?: (accountId: string) => boolean;
+  /**
+   * 人设绑定判据（**三态**，change config-mirror-cross-process-invalidation task 4.4）：
+   * 只有权威的 `unbound` 才允许说「该账号未绑定人设」；`unknown` 是云端读不到，须说另一句话。
+   */
+  personaBinding?: (accountId: string) => PersonaBinding;
   /**
    * 读账号「联系方式」（change account-group-chat-injection）：/comment --contact 时任务开始处**解析一次**，
    * 缺联系方式 → fail-closed（触发闸回黄色告警、本次不发）；有则同一个已解析值一路带到注入（gate 与注入同源，无 TOCTOU）。
@@ -413,8 +419,13 @@ export class CommentScheduler {
     if (!accountId || accountId === 'default') {
       return { ok: false, level: 'error', title: '按需评论触发失败', message: '未解析到有效账号（绝不回落 default）' };
     }
-    if (this.deps.isPersonaBound && !this.deps.isPersonaBound(accountId)) {
+    const binding = this.deps.personaBinding?.(accountId) ?? 'bound';
+    if (binding === 'unbound') {
       return { ok: false, level: 'warning', title: '未触发按需评论', message: '该账号未绑定人设——请先到后台「人设」页设置；未绑人设不启动评论任务，绝不以默认人设代评。' };
+    }
+    if (binding === 'unknown') {
+      // 人设副本陈旧：MUST NOT 说「未绑定人设」——那是对运营的错误指认，会让人去补一份早就存在的配置。
+      return { ok: false, level: 'warning', title: '未触发按需评论', message: '云端暂时读不到该账号的人设配置（配置副本陈旧），本次不发；稍后自动恢复，无需改配置。' };
     }
     // 联系方式闸（change account-group-chat-injection）：--contact 时**解析一次**——缺联系方式 fail-closed（本次不发，
     // 绝不静默降级成无联系方式评论，镜像上面的 isPersonaBound 闸）；有则用同一个已解析值注入（gate 与注入同源，无 TOCTOU）。
@@ -609,8 +620,12 @@ export class CommentScheduler {
     if (!target.noteId || !target.title.trim()) {
       return { ok: false, level: 'warning', title: '未触发定向评论', message: '目标笔记缺 noteId 或标题为空，无法搜索定位', reason: 'bad_target' };
     }
-    if (this.deps.isPersonaBound && !this.deps.isPersonaBound(accountId)) {
+    const binding = this.deps.personaBinding?.(accountId) ?? 'bound';
+    if (binding === 'unbound') {
       return { ok: false, level: 'warning', title: '未触发定向评论', message: '该账号未绑定人设——请先到后台「人设」页设置；未绑人设不启动评论任务，绝不以默认人设代评。', reason: 'needs_persona' };
+    }
+    if (binding === 'unknown') {
+      return { ok: false, level: 'warning', title: '未触发定向评论', message: '云端暂时读不到该账号的人设配置（配置副本陈旧），本次不发；稍后自动恢复，无需改配置。', reason: PERSONA_UNAVAILABLE_REASON };
     }
     let contactInfo: string | null = null;
     if (options?.injectContact) {

@@ -3,6 +3,21 @@ import type { DelegatedTaskStore, InterruptedClaimRecovery } from './store.js';
 import type { DelegatedTask, DelegatedTaskAttempt, DelegatedVerificationKind } from './types.js';
 import { honestTerminalStatus, isTerminalTaskStatus } from './types.js';
 import { humanizeAttemptReason } from './reason-humanize.js';
+import { CONFIG_MIRROR_STALE_REASON, PERSONA_UNAVAILABLE_REASON } from '../config/mirror-stop-work.js';
+
+/** 权威未答的退避（毫秒）：刷新器的轮询周期以秒计，30s 足以跨过一次短暂不可达。 */
+const AUTHORITY_UNANSWERED_BACKOFF_MS = 30_000;
+
+/**
+ * 该原因是否属于「权威未答」——即云端**读不到**权威事实，而非权威**明确否定**。
+ *
+ * 判据必须按码精确匹配，MUST NOT 用「包含 persona 就算」这类模糊前缀：
+ * `needs_persona_setup` 是权威明确说「这个账号确实没绑人设」，它 MUST 保持既有的非重试终态。
+ */
+function isAuthorityUnansweredReason(reason: string): boolean {
+  const code = reason.split('(')[0]?.trim();
+  return code === PERSONA_UNAVAILABLE_REASON || code === CONFIG_MIRROR_STALE_REASON;
+}
 
 export type DelegatedExecutionResult =
   | { kind: 'success'; verificationKind: DelegatedVerificationKind; evidenceRef: string }
@@ -356,6 +371,21 @@ export class DelegatedTaskWorker {
     if (fresh.progress.successCount >= fresh.targetSuccessCount) {
       return this.update(await this.deps.store.complete(fresh.id, token, 'completed', {
         code: 'target_reached', message: `已验证完成 ${fresh.progress.successCount}/${fresh.targetSuccessCount}。`, remainingCount: 0,
+      }));
+    }
+    // 权威未答 ≠ 权威否定（change config-mirror-cross-process-invalidation task 4.5）。
+    // `persona_unavailable` / `config_mirror_stale` 表达的是「云端此刻读不到权威事实」，不是
+    // 「该账号确实没绑人设」。把它们走进下面的非重试终态，会把用户的委托任务**永久判死**并回一句
+    // 「该账号未配置人设」——而账号可能早已配好，只是云端读不到。既是错误指认，用户也无从修复。
+    // 故：释放认领 + 按退避重排，任务留在队列里。
+    if (fatalReason && isAuthorityUnansweredReason(fatalReason)) {
+      this.logger.warn(
+        `[delegated-task] 权威未答（${fatalReason}）→ 判可重试延后，绝不落非重试终态 task=${fresh.id}`,
+      );
+      return this.update(await this.deps.store.releaseClaim(fresh.id, token, 'deferred', {
+        nextEligibleAt: this.now() + AUTHORITY_UNANSWERED_BACKOFF_MS,
+        step: 'authority_unanswered',
+        reason: fatalReason,
       }));
     }
     if (fatalReason) {

@@ -98,7 +98,7 @@ describe('CommentScheduler.triggerTargeted 拒绝路径（机器原因码）', (
 
   it('未绑人设 → warning / needs_persona，不接管边端', async () => {
     let takeovers = 0;
-    const s = new CommentScheduler(baseDeps({ isPersonaBound: () => false, onTakeoverStart: () => { takeovers += 1; } }));
+    const s = new CommentScheduler(baseDeps({ personaBinding: () => 'unbound', onTakeoverStart: () => { takeovers += 1; } }));
     const r = await s.triggerTargeted('acc-1', target);
     assert.equal(r.ok, false);
     assert.equal(r.reason, 'needs_persona');

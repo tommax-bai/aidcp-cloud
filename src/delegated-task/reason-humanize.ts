@@ -24,6 +24,11 @@ const MAX_REASON_CHARS = 120;
  */
 const EXACT: Record<string, string> = {
   needs_persona_setup: '该账号未配置人设，未生成稿件',
+  // 与上一条严格两句话（change config-mirror-cross-process-invalidation task 4.5）：
+  // 上一条是「你还没设置人设」（要人去补配置）；下面两条是「云端此刻读不到配置」（不需要人做任何事，
+  // 稍后自动重试）。共用一句表述会把基础设施故障讲成用户配置缺失，运营会去改一份早就存在的配置。
+  persona_unavailable: '云端暂时读不到该账号的人设配置，已延后重试（无需改配置）',
+  config_mirror_stale: '云端配置副本暂时陈旧，已停止下发新动作并延后重试（无需改配置）',
   account_required: '未能解析出唯一目标账号，未触发发帖',
   empty_body: '参照稿正文为空，未生成稿件',
   today_inspiration_unavailable: '今日无可用灵感稿源',

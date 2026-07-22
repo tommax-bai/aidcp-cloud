@@ -57,7 +57,7 @@ function build(k: Knobs = {}) {
       getState: () => ({ status: k.status ?? 'normal', quotaLevel: k.quotaLevel ?? 'normal' }),
     }),
     resolveSingleAccountId: async () => 'acc-test',
-    isPersonaBound: k.personaBound === undefined ? undefined : () => k.personaBound === true,
+    personaBinding: k.personaBound === undefined ? undefined : () => (k.personaBound === true ? 'bound' : 'unbound'),
     orchestrator: { trigger: async (input) => { triggered.push(JSON.stringify(input.metrics)); inputs.push(input); return { status: k.orchestratorStatus ?? 'draft', reason: k.orchestratorReason }; } },
     soul: {} as PublishSchedulerDeps['soul'],
     curatedStore: {

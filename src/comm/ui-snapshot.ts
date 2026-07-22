@@ -30,6 +30,7 @@ import {
   type PersonaWritingLanguage,
 } from './protocol.js';
 import { randomUUID } from 'node:crypto';
+import type { PersonaBinding } from '../config/persona-store.js';
 
 /** 云端可推送的发布审批状态（published 由边缘同页取到 postId 后本地发射，不在此列）。 */
 export type PublishUiState = 'pending' | 'approved' | 'submitted' | 'rejected' | 'failed';
@@ -52,8 +53,11 @@ export interface UiSnapshotDeps {
   edgeCapabilities?: (edgeId: string) => string[] | undefined;
   /** 账号主数据昵称（AccountStore 同步缓存读）；无昵称返回 null（不发 identity）。 */
   getNickname?: (accountId: string) => string | null;
-  /** 该账号是否已绑人设（persona 存储权威判据）；用于 hello 快照下发 personaBound 信号（change persona-wizard-onboarding-fixes）。 */
-  isPersonaBound?: (accountId: string) => boolean;
+  /**
+   * 该账号的人设绑定状态（**三态**，persona 存储权威判据）；用于 hello 快照下发 personaBound 信号
+   *（change persona-wizard-onboarding-fixes → config-mirror-cross-process-invalidation task 4.3）。
+   */
+  personaBinding?: (accountId: string) => PersonaBinding;
   /** 已保存的 Facebook 写作语言；null=已绑定存量人设缺字段。 */
   getPersonaWritingLanguage?: (accountId: string) => PersonaWritingLanguage | null;
   /** 最近一次成功发布摘要（PublishLogStore.lastPublishedForAccount）。 */
@@ -170,11 +174,21 @@ export class UiSnapshotService {
    */
   pushPersonaBound(accountId: string, edgeId?: string): void {
     try {
-      if (!accountId || !this.deps.isPersonaBound) return;
+      if (!accountId || !this.deps.personaBinding) return;
       const target = edgeId ?? this.deps.resolveEdgeIdForAccount(accountId);
       if (!target) return; // 无在线边缘：如实放弃，下次握手补
       if (this.usesPullDataPlane(target)) return;
-      const personaBound = this.deps.isPersonaBound(accountId);
+      const binding = this.deps.personaBinding(accountId);
+      // 三态第三态（change config-mirror-cross-process-invalidation task 4.3）：云端读不到人设副本时
+      // **不下发该字段**——协议里「字段缺省 = 云端还没说」正是既有的「未知」表达，边缘零改动。
+      // 这里若下发一个权威的 false，客户端会按契约自动打开人设向导，而该账号可能早已绑好人设。
+      if (binding === 'unknown') {
+        this.logger.warn(
+          `[ui-snapshot] 人设副本陈旧 account=${accountId}：不下发 personaBound 字段（未知≠未绑，绝不弹向导）`,
+        );
+        return;
+      }
+      const personaBound = binding === 'bound';
       this.push(accountId, target, {
         personaBound,
         ...(personaBound && this.deps.getPersonaWritingLanguage

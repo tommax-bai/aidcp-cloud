@@ -47,6 +47,12 @@ export abstract class BaseRole {
   /**
    * 人设取值口：注入 getSoul 优先（热加载，按当前账号解析），否则回落构造期快照。
    * getter 透明替换原 `protected readonly soul` 字段——各 agent `this.soul.xxx` 读法零改动。
+   *
+   * **副本陈旧 MUST NOT 靠这里抛异常兜底**（change config-mirror-cross-process-invalidation task 4.9）：
+   * 闸门必须在**入口**收敛——会话启动闸（`RoleDispatcher.sessionStartVerdict`）与各 scheduler 的人设闸
+   * 已在人设副本陈旧时判 `persona_unavailable` 并停手，角色执行中途不会走到这里。保留下面这个抛出，
+   * 仅作**会话中途被真实解绑**的防御性路径：那是权威明确的状态变化，不是基础设施降级。
+   * 把一次可预期的降级伪装成崩溃，运营只会在日志里看到一堆 no_persona，找不到真正原因。
    */
   protected get soul(): Soul {
     if (this.getSoulFn) return this.getSoulFn();

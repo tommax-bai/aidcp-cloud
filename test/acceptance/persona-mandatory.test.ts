@@ -67,7 +67,7 @@ describe('AC-PERSONA 强制账号人设（系统不存在默认/兜底人设）'
       getSoul: () => mockSoul,
       llm: { complete: async () => '-1' },
       sendCommand: (c) => commands.push(c),
-      isPersonaBound: () => false,
+      personaBinding: () => 'unbound',
       onSessionRejected: (accountId, reason) => {
         rejected.push({ accountId, reason });
       },
@@ -92,7 +92,7 @@ describe('AC-PERSONA 强制账号人设（系统不存在默认/兜底人设）'
       publishLog: { getMostRecentPublishTime: async () => null, recentPublishedContents: async () => [] },
       resolveRisk: async () => ({ canDo: () => true, explain: () => ({ allowed: true }), getState: () => ({ status: 'normal', quotaLevel: 'normal' }) }),
       resolveSingleAccountId: async () => 'acc-none',
-      isPersonaBound: () => false,
+      personaBinding: () => 'unbound',
       orchestrator: { trigger: async (input) => { triggered.push(input); return { status: 'draft' }; } },
       soul: {} as PublishSchedulerDeps['soul'],
       conceptThreshold: 1,
@@ -119,7 +119,7 @@ describe('AC-PERSONA 强制账号人设（系统不存在默认/兜底人设）'
         withLease: async (request, work) => work({ taskId: `task-${request.kind}`, edgeId: request.edgeId, kind: request.kind, priority: request.priority }),
       },
       getSoul: () => mockSoul,
-      isPersonaBound: () => false,
+      personaBinding: () => 'unbound',
       selectCurated: async () => [],
       llmFor: () => ({ complete: async () => '{}' }),
       dedupFor: () => ({ hasInteracted: async () => false, recordInteraction: async () => {} }),
