@@ -45,6 +45,10 @@ function harness(opts: {
   /** 7.2：同稿连续被抢占达此阈值停自动重投（缺省 3）。 */
   preemptRedispatchMax?: number;
   executionTarget?: 'dev' | 'ol' | null;
+  /** change publish-approval-signal-to-database：授权查询不可读（超时 / 接口不可达）。 */
+  approvalUnreadable?: boolean;
+  /** 兜底扫描的批量拉取（按本机 target 拉「已批准·待下发」）。 */
+  pendingDispatchRecordIds?: () => Promise<number[]>;
 }) {
   const events: string[] = [];
   /** 7.1：被抢占事件驱动重投的调度器捕获（不自动跑，测试手动泵/断言次数）。 */
@@ -54,6 +58,9 @@ function harness(opts: {
   let postWrite: any;
   const attached: Array<{ id: number; count: number }> = [];
   const voided: string[] = [];
+  const voidReasons: Array<{ requestId: string; reason: string }> = [];
+  const blocked: Array<{ requestId: string; reason: string | null }> = [];
+  const progress: Array<{ requestId: string; action: string }> = [];
   const leasePriorities: string[] = [];
   const uiStates: Array<{ accountId: string; recordId: number; state: string; title?: string | null }> = [];
   const recordedPublishes: string[] = [];
@@ -103,11 +110,27 @@ function harness(opts: {
     isEdgePaused: opts.isEdgePaused,
     preemptRedispatchMax: opts.preemptRedispatchMax,
     scheduleRedispatch: (fn) => { redispatched.push(fn); },
-    readApproval: async () =>
-      (opts.approved ?? true)
+    readApproval: async () => {
+      if (opts.approvalUnreadable) throw new Error('approval_lookup_503');
+      return (opts.approved ?? true)
         ? { approved: true, contentVersion: opts.approvedVersion ?? draftVersion }
-        : { approved: false, contentVersion: opts.approvedVersion ?? draftVersion },
-    voidApprovalSignal: async (requestId: string) => { voided.push(requestId); events.push('void'); },
+        : { approved: false, contentVersion: opts.approvedVersion ?? draftVersion };
+    },
+    voidApprovalSignal: async (requestId: string, reason: string) => {
+      voided.push(requestId);
+      voidReasons.push({ requestId, reason });
+      events.push('void');
+    },
+    approvalDispatchState: {
+      markDispatching: async (requestId: string) => { progress.push({ requestId, action: 'dispatching' }); },
+      markConsumed: async (requestId: string) => { progress.push({ requestId, action: 'consumed' }); },
+      releaseToPending: async (requestId: string, reason) => {
+        progress.push({ requestId, action: 'pending_dispatch' });
+        blocked.push({ requestId, reason: reason ?? null });
+      },
+      setBlockedReason: async (requestId: string, reason) => { blocked.push({ requestId, reason: reason ?? null }); },
+    },
+    ...(opts.pendingDispatchRecordIds ? { listPendingDispatchRecordIds: opts.pendingDispatchRecordIds } : {}),
     onPublishStart: () => events.push('start'),
     onPublishEnd: () => events.push('end'),
     notifyUiPublishState: (accountId, recordId, state, title) => uiStates.push({ accountId, recordId, state, title }),
@@ -123,6 +146,9 @@ function harness(opts: {
     get postWrite() { return postWrite; },
     attached,
     voided,
+    voidReasons,
+    blocked,
+    progress,
     notices,
     leasePriorities,
     uiStates,
@@ -557,3 +583,74 @@ describe('PublishDispatcher', () => {
     assert.equal(h.notices.some((n) => n.kind === 'edge_paused_requeued'), true);
   });
 });
+
+// ── change publish-approval-signal-to-database ────────────────────────────────
+describe('PublishDispatcher · 持久授权与待下发态', () => {
+  test('授权状态不可读 → 不下发、不写任何终态、落 approval_unreadable 阻塞原因', async () => {
+    const h = harness({ approvalUnreadable: true, edgeId: 'edge-A' });
+    await h.dispatcher.dispatch(7);
+
+    assert.equal(h.events.includes('seq'), false, '授权读不到就绝不下发');
+    assert.deepEqual(h.statusUpdates, [], '「不知道批没批」MUST NOT 烧成任何终态');
+    assert.deepEqual(h.voided, [], '不可读不等于该作废——授权保持活跃');
+    assert.deepEqual(h.blocked, [{ requestId: 'publish-7', reason: 'approval_unreadable' }]);
+  });
+
+  test('边缘离线 → 保留授权 + 落 edge_offline_waiting；正常下发时阻塞原因被清空', async () => {
+    const offline = harness({ approved: true, edgeId: null });
+    await offline.dispatcher.dispatch(7);
+    assert.deepEqual(offline.blocked, [{ requestId: 'publish-7', reason: 'edge_offline_waiting' }]);
+    assert.deepEqual(offline.statusUpdates, [], '零副作用，绝不烧稿');
+
+    const ok = harness({ approved: true, edgeId: 'edge-A' });
+    await ok.dispatcher.dispatch(7);
+    assert.deepEqual(ok.blocked, [{ requestId: 'publish-7', reason: null }], '阻塞解除 MUST 清空，绝不遗留过期文案');
+    assert.deepEqual(
+      ok.progress.map((p) => p.action),
+      ['dispatching', 'consumed'],
+      '下发进度：领取即 dispatching，序列收敛即 consumed',
+    );
+  });
+
+  test('版本闸命中 → 作废原因是 version_stale（四类作废各自可区分）', async () => {
+    const h = harness({ approved: true, approvedVersion: 1, draft: makeDraft({ contentVersion: 2 }), edgeId: 'edge-A' });
+    await h.dispatcher.dispatch(7);
+    assert.deepEqual(h.voidReasons, [{ requestId: 'publish-7', reason: 'version_stale' }]);
+    assert.equal(h.events.includes('seq'), false);
+  });
+
+  test('租约未确认 → 作废原因是 lease_unconfirmed，稿件不烧成 failed', async () => {
+    const h = harness({
+      approved: true,
+      edgeId: 'edge-A',
+      leaseError: new EdgeTaskLeaseError('acquire_timeout', 'timeout'),
+    });
+    await h.dispatcher.dispatch(7);
+    assert.deepEqual(h.voidReasons, [{ requestId: 'publish-7', reason: 'lease_unconfirmed' }]);
+    assert.deepEqual(h.statusUpdates, []);
+  });
+
+  test('兜底扫描改为按本机 target 批量拉待下发，不再逐条读授权', async () => {
+    const pulls: number[] = [];
+    const h = harness({
+      approved: true,
+      edgeId: 'edge-A',
+      pendingDispatchRecordIds: async () => { pulls.push(1); return [7]; },
+    });
+    await h.dispatcher.scanAndDispatchApproved();
+    assert.equal(pulls.length, 1, '一次批量拉取，取代逐条查询放大器');
+    assert.equal(h.events.includes('seq'), true);
+    assert.equal(h.scannedTarget, undefined, '不再走 listPendingApprovalIds 的逐条复核路径');
+  });
+
+  test('批量拉取失败 → 本轮不下发，绝不当作「扫完了、没有待下发」', async () => {
+    const h = harness({
+      approved: true,
+      edgeId: 'edge-A',
+      pendingDispatchRecordIds: async () => { throw new Error('pg_down'); },
+    });
+    await h.dispatcher.scanAndDispatchApproved();
+    assert.equal(h.events.includes('seq'), false);
+  });
+});
+
