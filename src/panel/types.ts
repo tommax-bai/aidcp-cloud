@@ -351,6 +351,14 @@ export interface PanelDeps {
    */
   quotaConfig?: PanelQuotaConfig;
   /**
+   * 配置镜像健康只读投影（change config-mirror-cross-process-invalidation task 6.4）。
+   * 未注入则 /api/config-mirrors 返回 503（诚实不可用，绝不编一个「全都新鲜」的空投影）。
+   *
+   * 回包 MUST 标注**数据时刻**（各字段被求出的时刻），与响应时刻分开表达——否则运营看到的
+   * 「刚刚更新」可能只是这次 HTTP 请求的时间。
+   */
+  configMirrorHealth?: () => PanelConfigMirrorHealth;
+  /**
    * 操作兜底 floor 配置（change pacing-floor-config-min-interval）。未注入则 /api/pacing* 返回 503。
    * 写非乐观回真态；非法数字整块拒（invalid_value / unknown_operation），绝不部分落库；生效值经读出口 clamp、
    * 保证配置只能抬高延迟、抬不穿非零下限；只动 pacing_floor_config，不碰风控状态单写路径。
@@ -879,6 +887,29 @@ export interface QuotaConfigPatchInput {
 export type QuotaConfigSetResult =
   | { ok: true; view: QuotaConfigCatalogView }
   | { ok: false; reason: 'unknown_tier' | 'unknown_action' | 'invalid_value' | 'no_valid_fields' };
+
+/** 单个配置镜像的健康行（change config-mirror-cross-process-invalidation task 6.4）。 */
+export interface PanelConfigMirrorHealthEntry {
+  mirrorKey: string;
+  tier: 'gate' | 'parameter';
+  /** 已知版本；从未成功比对过则 null。 */
+  version: number | null;
+  /** 上一次**成功完成版本比对**的时刻（毫秒）；null = 从未成功。陈旧判定只看它。 */
+  lastComparedAt: number | null;
+  /** 上一次真正重载的时刻；只用于排障，**不参与**陈旧判定。 */
+  lastReloadedAt: number | null;
+  state: 'fresh' | 'stale';
+  staleMs: number | null;
+  staleForMs: number;
+}
+
+/** 配置镜像健康投影。`asOf` 是**数据时刻**，与 HTTP 响应时刻分开表达。 */
+export interface PanelConfigMirrorHealth {
+  asOf: number;
+  enabled: boolean;
+  pollMs: number;
+  entries: PanelConfigMirrorHealthEntry[];
+}
 
 export interface PanelQuotaConfig {
   /** 三档 × 全动作 × 三窗口生效值 + 审计（库缺行以写死默认合成回显）。 */

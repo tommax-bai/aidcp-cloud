@@ -4844,6 +4844,8 @@ async function main(): Promise<void> {
           categoryConfig: categoryConfigPanel,
           // 安全限额配置（change safety-quota-config，stream D）。三档×动作×三窗口可改 + 热加载 + 非乐观回真态。
           quotaConfig: quotaConfigPanel,
+          // 配置镜像健康只读投影（task 6.4）：每次请求现取，asOf 是数据时刻而非响应时刻。
+          configMirrorHealth: () => configMirrorRefresher.health(),
           // 操作兜底 floor 配置（change pacing-floor-config-min-interval）。四类操作最小间隔兜底区间可改 + 热加载 + 非乐观回真态。
           pacingConfig: pacingConfigPanel,
           // 单场会话上限配置（change session-limits-to-quota-layer）。按账号时长 + 互动预算可改 + 热加载 + 非乐观回真态。

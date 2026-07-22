@@ -2053,6 +2053,17 @@ function createRequestHandler(
       sendJson(res, 200, deps.quotaConfig.getCatalog());
       return;
     }
+    // ── 配置镜像健康只读投影（change config-mirror-cross-process-invalidation task 6.4）──────
+    // 每个 mirrorKey 的 lastComparedAt / 当前版本 / fresh|stale。回包带 asOf = **数据时刻**，
+    // 与响应时刻分开表达。刷新器未接线 → 503 诚实不可用，绝不回一个「全都新鲜」的空投影。
+    if (method === 'GET' && url === '/api/config-mirrors') {
+      if (!deps.configMirrorHealth) {
+        sendJson(res, 503, { error: 'config_mirror_health_unavailable' });
+        return;
+      }
+      sendJson(res, 200, deps.configMirrorHealth());
+      return;
+    }
     if (method === 'PUT' && url === '/api/quotas') {
       if (!deps.quotaConfig) {
         sendJson(res, 503, { error: 'quota_config_unavailable' });

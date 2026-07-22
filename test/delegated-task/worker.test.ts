@@ -769,6 +769,41 @@ test('到期时派发仍在途 → 诚实标记结果未知，绝不谎报干净
   assert.doesNotMatch(done!.terminalOutcome!.message, /no_targets/, '绝不把更早那次的良性原因当成本次结局');
 });
 
+// change config-mirror-cross-process-invalidation task 4.5：权威**未答** ≠ 权威**否定**。
+// `persona_unavailable` 表达的是「云端此刻读不到人设副本」，账号很可能早就绑好了人设。
+// 把它当成 `needs_persona_setup` 那样落非重试终态，等于把用户的委托任务永久判死，并回一句
+// 「该账号未配置人设」——错误指认，且用户无从修复。
+test('权威未答（persona_unavailable）→ 可重试延后，绝不落非重试终态', async () => {
+  const store = new MemoryDelegatedTaskStore();
+  const now = 14_100_000;
+  const task = await confirmedTask(store, now, { action: 'publish_post', targetSuccessCount: 1, maxAttempts: 3 });
+  const executor: DelegatedTaskExecutor = {
+    targetKey: () => 't-1',
+    execute: async () => ({ kind: 'failed', reason: 'persona_unavailable', retryable: false }),
+  };
+  const worker = new DelegatedTaskWorker({ store, executorFor: () => executor, now: () => now, claimLeaseMs: 10_000 });
+  await worker.tick();
+  const after = await store.get(task.id);
+  assert.equal(after?.status, 'deferred', '权威未答 MUST 判可重试延后');
+  assert.notEqual(after?.terminalOutcome?.code, 'non_retryable_failure');
+  assert.ok((after?.nextEligibleAt ?? 0) > now, '必须按退避重排，任务留在队列里');
+});
+
+test('权威未答（config_mirror_stale）→ 同样延后重排', async () => {
+  const store = new MemoryDelegatedTaskStore();
+  const now = 14_200_000;
+  const task = await confirmedTask(store, now, { action: 'publish_post', targetSuccessCount: 1, maxAttempts: 3 });
+  const executor: DelegatedTaskExecutor = {
+    targetKey: () => 't-1',
+    execute: async () => ({ kind: 'failed', reason: 'config_mirror_stale', retryable: false }),
+  };
+  const worker = new DelegatedTaskWorker({ store, executorFor: () => executor, now: () => now, claimLeaseMs: 10_000 });
+  await worker.tick();
+  const after = await store.get(task.id);
+  assert.equal(after?.status, 'deferred');
+  assert.notEqual(after?.terminalOutcome?.code, 'non_retryable_failure');
+});
+
 test('非重试终态也说人话（needs_persona_setup 只走这条路，从不经预算终态）', async () => {
   const store = new MemoryDelegatedTaskStore();
   const now = 14_000_000;
