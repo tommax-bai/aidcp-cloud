@@ -1,4 +1,4 @@
--- scoped-approval-and-notification-policy
+-- scoped-approval-and-notification-policy (0056)
 -- Runtime init() carries the same idempotent DDL because this repository does not
 -- have a guaranteed migration runner. Missing rows deliberately preserve legacy behavior.
 
