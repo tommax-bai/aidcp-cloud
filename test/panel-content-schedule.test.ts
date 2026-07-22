@@ -99,3 +99,35 @@ test('账号排期 PUT 原子透传两层掩码，支持 null 恢复全局并拒
     await handle.close();
   }
 });
+
+test('账号排期 PUT 如实透出平台动作不支持原因', async () => {
+  let calls = 0;
+  const contentSchedule: PanelContentSchedule = {
+    getGlobalView: () => ({ contentActiveMask: null, overridden: false, updatedAt: null, updatedBy: null }),
+    listCatalog: async () => [],
+    setGlobal: async () => ({ ok: false, reason: 'no_valid_fields' }),
+    setAccount: async () => {
+      calls += 1;
+      return { ok: false, reason: 'unsupported_automation_action' };
+    },
+  };
+  const deps = { eventBus: { onAny: () => () => {} }, contentSchedule } as unknown as PanelDeps;
+  const handle = await startPanelApi(deps, makeConfig());
+  const base = `http://127.0.0.1:${handle.port}`;
+  try {
+    const token = await loginToken(base);
+    const response = await fetch(`${base}/api/content-schedule/wx-1`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ commentMode: 'review', commentDailyCap: 1 }),
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), {
+      error: 'bad_request',
+      reason: 'unsupported_automation_action',
+    });
+    assert.equal(calls, 1);
+  } finally {
+    await handle.close();
+  }
+});

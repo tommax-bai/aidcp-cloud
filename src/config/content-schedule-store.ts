@@ -23,13 +23,22 @@ import { resolveAccountDisplayName, type AccountDisplayNameSource } from '../acc
 import { SHANGHAI_DAY_START_SQL } from '../time/shanghai-day.js';
 import { isValidWeekActiveMask } from '../risk/session-limits.js';
 import type { DeploymentTarget } from '../deployment-target.js';
+import {
+  availableScheduledAutomationActionsForPlatform,
+  normalizePlatformForCatalog,
+  platformRegistryEntry,
+  SCHEDULED_CONTACT_COMMENT_DAILY_CAP_MAX,
+  SCHEDULED_CONTENT_DAILY_CAP_MAX,
+  type AvailableScheduledAutomationAction,
+  type ScheduledAutomationAction,
+} from '../platform/index.js';
 
 const { Pool } = pg;
 
 /** 发帖日上限防御性上界（与 console CAP_MAX 对齐；防异常大值）。 */
-export const CONTENT_POST_DAILY_CAP_MAX = 50;
+export const CONTENT_POST_DAILY_CAP_MAX = SCHEDULED_CONTENT_DAILY_CAP_MAX;
 /** 联系评论日上限硬上界（change content-schedule-group-comments）：协同 spam 敏感动作，与 50 刻意分开；UI 建议 ≤3。 */
-export const CONTACT_COMMENT_DAILY_CAP_MAX = 10;
+export const CONTACT_COMMENT_DAILY_CAP_MAX = SCHEDULED_CONTACT_COMMENT_DAILY_CAP_MAX;
 
 export const CONTENT_SCHEDULE_ACTION_MODES = ['off', 'review', 'auto_approve'] as const;
 export type ContentScheduleActionMode = (typeof CONTENT_SCHEDULE_ACTION_MODES)[number];
@@ -68,11 +77,16 @@ export interface AccountContentScheduleRow {
 /** 面板 catalog 一行（LEFT JOIN accounts 补展示名 + 来源徽标 + configured）。 */
 export interface ContentScheduleCatalogRow {
   accountId: string;
+  /** 已知别名归一；未知值保留可诊断事实且 availableActions 为空。 */
+  platform: string;
   label: string | null;
+  groupLabel: string | null;
   nickname: string | null;
   operatorAlias: string | null;
   displayName: string;
   displayNameSource: AccountDisplayNameSource;
+  /** 服务端 registry 权威投影；Console 不维护第二份动作矩阵。 */
+  availableActions: AvailableScheduledAutomationAction[];
   autoEnabled: boolean;
   postEnabled: boolean;
   postMode: ContentScheduleActionMode;
@@ -165,7 +179,8 @@ export type SetAccountContentScheduleResult =
         | 'retired_account'
         | 'invalid_value'
         | 'no_valid_fields'
-        | 'no_contact_info';
+        | 'no_contact_info'
+        | 'unsupported_automation_action';
     };
 
 export const CONTENT_SCHEDULE_SCHEMA_SQL = `
@@ -297,6 +312,59 @@ export function actionModeFromEnabled(enabled: boolean): ContentScheduleActionMo
 
 export function actionModeEnabled(mode: ContentScheduleActionMode): mode is ContentScheduleApprovalMode {
   return mode !== 'off';
+}
+
+const ACTION_PATCH_FIELDS: Record<
+  ScheduledAutomationAction,
+  {
+    enabled: 'postEnabled' | 'commentEnabled' | 'contactCommentEnabled';
+    mode: 'postMode' | 'commentMode' | 'contactCommentMode';
+    cap: 'postDailyCap' | 'commentDailyCap' | 'contactCommentDailyCap';
+  }
+> = {
+  post: { enabled: 'postEnabled', mode: 'postMode', cap: 'postDailyCap' },
+  comment: { enabled: 'commentEnabled', mode: 'commentMode', cap: 'commentDailyCap' },
+  contact_comment: {
+    enabled: 'contactCommentEnabled',
+    mode: 'contactCommentMode',
+    cap: 'contactCommentDailyCap',
+  },
+};
+
+/**
+ * 只校验本次显式提交的动作字段簇：未知/不支持动作可 false/off/0 清脏，任何开启意图 fail closed。
+ * 公共总开关与周历补丁不读取历史脏动作，因此不会被误伤。
+ */
+function scheduledAutomationPatchSupported(
+  platform: string | null | undefined,
+  patch: AccountContentSchedulePatch,
+): boolean {
+  let declarations: ReturnType<typeof platformRegistryEntry>['scheduledAutomation'] | null = null;
+  try {
+    declarations = platformRegistryEntry(platform).scheduledAutomation;
+  } catch {
+    declarations = null;
+  }
+
+  for (const action of Object.keys(ACTION_PATCH_FIELDS) as ScheduledAutomationAction[]) {
+    const fields = ACTION_PATCH_FIELDS[action];
+    const hasEnabled = fields.enabled in patch;
+    const hasMode = fields.mode in patch;
+    const hasCap = fields.cap in patch;
+    if (!hasEnabled && !hasMode && !hasCap) continue;
+
+    const enabled = patch[fields.enabled];
+    const mode = patch[fields.mode];
+    const cap = patch[fields.cap];
+    const support = declarations?.[action];
+    if (!support?.supported) {
+      if (enabled === true || (mode !== undefined && mode !== 'off') || (cap !== undefined && cap > 0)) return false;
+      continue;
+    }
+    if (mode !== undefined && mode !== 'off' && !support.allowedModes.includes(mode)) return false;
+    if (cap !== undefined && cap > support.maxDailyCap) return false;
+  }
+  return true;
 }
 
 function actionModeFromDb(mode: string | null | undefined, enabled: boolean | null | undefined): ContentScheduleActionMode {
@@ -556,9 +624,15 @@ export class ContentScheduleStore {
     }
     if (!hasField) return { ok: false, reason: 'no_valid_fields' };
 
-    // 校验账号存在（防造幽灵行）——不为退役 / 不存在账号建排期行。
-    const exists = await this.pool.query(`SELECT 1 FROM accounts WHERE account_id = $1`, [accountId]);
-    if (exists.rows.length === 0) return { ok: false, reason: 'account_not_found' };
+    // 一次读取账号存在性与平台事实。平台动作校验发生在任何 UPSERT/联系方式读写前，失败绝不部分落库。
+    const account = await this.pool.query<{ platform: string | null }>(
+      `SELECT platform FROM accounts WHERE account_id = $1`,
+      [accountId],
+    );
+    if (account.rows.length === 0) return { ok: false, reason: 'account_not_found' };
+    if (!scheduledAutomationPatchSupported(account.rows[0]?.platform, patch)) {
+      return { ok: false, reason: 'unsupported_automation_action' };
+    }
 
     // 开启自动联系评论的联系方式闸（change content-schedule-group-comments；一码一号于 loosen-group-comment-shared-code
     // 从「硬阻断」放松为「放行 + 提示」）：每次 contactCommentEnabled=true 的写入都重跑。
@@ -697,7 +771,9 @@ export class ContentScheduleStore {
   async listCatalog(): Promise<ContentScheduleCatalogRow[]> {
     const { rows } = await this.pool.query<{
       account_id: string;
+      platform: string | null;
       label: string | null;
+      group_label: string | null;
       nickname: string | null;
       operator_alias: string | null;
       auto_enabled: boolean | null;
@@ -716,7 +792,8 @@ export class ContentScheduleStore {
       updated_at: Date | string | null;
       updated_by: string | null;
     }>(
-      `SELECT a.account_id, a.label, a.nickname, a.operator_alias, (a.contact_info IS NOT NULL) AS has_contact_info,
+      `SELECT a.account_id, a.platform, a.label, a.group_label, a.nickname, a.operator_alias,
+              (a.contact_info IS NOT NULL) AS has_contact_info,
               s.auto_enabled, s.post_enabled, s.post_daily_cap, s.comment_enabled, s.comment_daily_cap,
               s.contact_comment_enabled, s.contact_comment_daily_cap,
               s.post_mode, s.comment_mode, s.contact_comment_mode,
@@ -746,11 +823,14 @@ export class ContentScheduleStore {
       });
       return {
         accountId: r.account_id,
+        platform: normalizePlatformForCatalog(r.platform),
         label: r.label ?? null,
+        groupLabel: r.group_label ?? null,
         nickname: r.nickname ?? null,
         operatorAlias: r.operator_alias ?? null,
         displayName: display.name,
         displayNameSource: display.source,
+        availableActions: availableScheduledAutomationActionsForPlatform(r.platform),
         autoEnabled: r.auto_enabled === true,
         postEnabled: actionModeEnabled(postMode),
         postMode,

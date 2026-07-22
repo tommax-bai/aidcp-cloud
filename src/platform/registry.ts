@@ -1,5 +1,29 @@
 export type PlatformId = 'xiaohongshu' | 'facebook' | 'wechat_channels';
 
+/** 账号排期动作全集：Cloud 目录投影与写入校验共同消费，不能从其它能力词推导。 */
+export const SCHEDULED_AUTOMATION_ACTIONS = ['post', 'comment', 'contact_comment'] as const;
+export type ScheduledAutomationAction = (typeof SCHEDULED_AUTOMATION_ACTIONS)[number];
+export type ScheduledAutomationMode = 'review' | 'auto_approve';
+
+/** 内容动作与敏感联系评论动作的服务端硬上限。 */
+export const SCHEDULED_CONTENT_DAILY_CAP_MAX = 50;
+export const SCHEDULED_CONTACT_COMMENT_DAILY_CAP_MAX = 10;
+
+export type ScheduledAutomationSupport =
+  | {
+      supported: true;
+      allowedModes: readonly ScheduledAutomationMode[];
+      maxDailyCap: number;
+    }
+  | { supported: false; reason: string };
+
+/** 面板目录只投影 supported 动作；数组是副本，调用方不能改 registry。 */
+export interface AvailableScheduledAutomationAction {
+  action: ScheduledAutomationAction;
+  allowedModes: ScheduledAutomationMode[];
+  maxDailyCap: number;
+}
+
 /**
  * Surface = 编排是否**离开列表**，不是页面形态。dialog / drawer / modal / overlay / profile
  * 都是 driver 内部细节，**绝不进本 enum**（change platform-registry-shape §不做）。
@@ -108,6 +132,8 @@ export interface PlatformRegistryEntry {
       defaultTimeWindow: string;
     };
   };
+  /** 账号排期动作准入；唯一消费者 = content-schedule 目录投影与写前校验。 */
+  scheduledAutomation: Record<ScheduledAutomationAction, ScheduledAutomationSupport>;
   /** User-delegated action admission. Cloud is authoritative; edge mirrors this only for UX. */
   delegatedActions: Record<DelegatedAction, DelegatedActionSupport>;
   comment: CommentPlatformProfile;
@@ -256,8 +282,7 @@ const WECHAT_CHANNELS_NOTE_ACTIONS: Record<NoteScopedAction, NoteSupport> = {
   scroll_comments: { supported: false, reason: 'interaction_inbox_only' },
 };
 
-export const PLATFORM_REGISTRY: Record<'xiaohongshu', PlatformRegistryEntry> &
-  Partial<Record<PlatformId, PlatformRegistryEntry>> = {
+export const PLATFORM_REGISTRY: Record<PlatformId, PlatformRegistryEntry> = {
   xiaohongshu: {
     platform: 'xiaohongshu',
     app: 'xhs',
@@ -283,6 +308,23 @@ export const PLATFORM_REGISTRY: Record<'xiaohongshu', PlatformRegistryEntry> &
         enabled: true,
         defaultSort: XHS_COMMENT_PROFILE.search.defaultSort,
         defaultTimeWindow: XHS_COMMENT_PROFILE.search.defaultTimeWindow,
+      },
+    },
+    scheduledAutomation: {
+      post: {
+        supported: true,
+        allowedModes: ['review', 'auto_approve'],
+        maxDailyCap: SCHEDULED_CONTENT_DAILY_CAP_MAX,
+      },
+      comment: {
+        supported: true,
+        allowedModes: ['review', 'auto_approve'],
+        maxDailyCap: SCHEDULED_CONTENT_DAILY_CAP_MAX,
+      },
+      contact_comment: {
+        supported: true,
+        allowedModes: ['review', 'auto_approve'],
+        maxDailyCap: SCHEDULED_CONTACT_COMMENT_DAILY_CAP_MAX,
       },
     },
     delegatedActions: XHS_DELEGATED_ACTIONS,
@@ -334,6 +376,24 @@ export const PLATFORM_REGISTRY: Record<'xiaohongshu', PlatformRegistryEntry> &
         defaultTimeWindow: FB_COMMENT_PROFILE.search.defaultTimeWindow,
       },
     },
+    scheduledAutomation: {
+      // Facebook 自动发帖运行时会跳过 auto_approve；这里只声明真实可执行的 review。
+      post: {
+        supported: true,
+        allowedModes: ['review'],
+        maxDailyCap: SCHEDULED_CONTENT_DAILY_CAP_MAX,
+      },
+      comment: {
+        supported: true,
+        allowedModes: ['review', 'auto_approve'],
+        maxDailyCap: SCHEDULED_CONTENT_DAILY_CAP_MAX,
+      },
+      contact_comment: {
+        supported: true,
+        allowedModes: ['review', 'auto_approve'],
+        maxDailyCap: SCHEDULED_CONTACT_COMMENT_DAILY_CAP_MAX,
+      },
+    },
     delegatedActions: FACEBOOK_DELEGATED_ACTIONS,
     comment: FB_COMMENT_PROFILE,
   },
@@ -355,6 +415,11 @@ export const PLATFORM_REGISTRY: Record<'xiaohongshu', PlatformRegistryEntry> &
     },
     pacing: {},
     scheduler: { comment: { enabled: false, defaultSort: 'none', defaultTimeWindow: 'none' } },
+    scheduledAutomation: {
+      post: { supported: false, reason: 'interaction_inbox_only' },
+      comment: { supported: false, reason: 'interaction_inbox_only' },
+      contact_comment: { supported: false, reason: 'interaction_inbox_only' },
+    },
     delegatedActions: WECHAT_CHANNELS_DELEGATED_ACTIONS,
     comment: WECHAT_CHANNELS_COMMENT_PROFILE,
   },
@@ -373,6 +438,36 @@ export function platformRegistryEntry(platform: string | null | undefined): Plat
   const entry = PLATFORM_REGISTRY[id];
   if (!entry) throw new Error(`platform=${id} has no cloud registry entry`);
   return entry;
+}
+
+/**
+ * 面板 catalog 的平台值：已知别名走统一归一化；未知值保留可诊断的 trim/lowercase 事实，
+ * 绝不回落成小红书或其它已知平台。
+ */
+export function normalizePlatformForCatalog(raw: string | null | undefined): string {
+  try {
+    return normalizePlatformId(raw);
+  } catch {
+    return raw?.trim().toLowerCase() || 'unknown';
+  }
+}
+
+/** 未知平台与无声明平台均 fail closed 为无动作。 */
+export function availableScheduledAutomationActionsForPlatform(
+  platform: string | null | undefined,
+): AvailableScheduledAutomationAction[] {
+  let entry: PlatformRegistryEntry;
+  try {
+    entry = platformRegistryEntry(platform);
+  } catch {
+    return [];
+  }
+  return SCHEDULED_AUTOMATION_ACTIONS.flatMap((action) => {
+    const support = entry.scheduledAutomation[action];
+    return support.supported
+      ? [{ action, allowedModes: [...support.allowedModes], maxDailyCap: support.maxDailyCap }]
+      : [];
+  });
 }
 
 export function commentProfileForPlatform(platform: string | null | undefined): CommentPlatformProfile {

@@ -36,7 +36,12 @@ test('claimAutoPostHourCell: 原子 upsert 仅首个进程拿到相同小时格'
  * pg.Pool 桩：按 SQL 前缀路由固定应答，记录全部 query 调用。
  * 覆盖：init 建表（空镜像）/ SELECT 1 FROM accounts 存在性 / UPSERT RETURNING 回读。
  */
-function makePoolStub(opts: { accountExists?: boolean; myGroupCode?: string | null; codeSharedByOther?: boolean } = {}) {
+function makePoolStub(opts: {
+  accountExists?: boolean;
+  platform?: string;
+  myGroupCode?: string | null;
+  codeSharedByOther?: boolean;
+} = {}) {
   const calls: Array<{ sql: string; params: unknown[] }> = [];
   const accountExists = opts.accountExists ?? true;
   const pool = {
@@ -52,7 +57,9 @@ function makePoolStub(opts: { accountExists?: boolean; myGroupCode?: string | nu
       if (s.startsWith('SELECT 1 FROM accounts WHERE contact_info')) {
         return { rows: opts.codeSharedByOther ? [{ '?column?': 1 }] : [] };
       }
-      if (s.startsWith('SELECT 1 FROM accounts')) return { rows: accountExists ? [{ '?column?': 1 }] : [] };
+      if (s.startsWith('SELECT platform FROM accounts')) {
+        return { rows: accountExists ? [{ platform: opts.platform ?? 'xiaohongshu' }] : [] };
+      }
       if (s.startsWith('INSERT INTO content_schedule_global')) {
         return { rows: [{ content_active_mask: params[0], updated_at: new Date('2026-07-03T00:00:00Z'), updated_by: params[1] }] };
       }
@@ -77,6 +84,7 @@ function makePoolStub(opts: { accountExists?: boolean; myGroupCode?: string | nu
 
 async function makeStore(opts: {
   accountExists?: boolean;
+  platform?: string;
   myGroupCode?: string | null;
   codeSharedByOther?: boolean;
   globalActiveWeekMask?: string | null;
@@ -113,7 +121,8 @@ test('listCatalog: 排期账号展示复用统一解析器，运营别名优先'
     query: async (sql: string) => {
       assert.match(sql, /a\.operator_alias/);
       return { rows: [{
-        account_id: 'acc-1', label: '运营标签', nickname: '平台昵称', operator_alias: '人工昵称',
+        account_id: 'acc-1', platform: 'xhs', label: '运营标签', group_label: '华东组',
+        nickname: '平台昵称', operator_alias: '人工昵称',
         has_contact_info: false, auto_enabled: null, post_enabled: null, post_mode: null,
         post_daily_cap: null, comment_enabled: null, comment_mode: null, comment_daily_cap: null,
         contact_comment_enabled: null, contact_comment_mode: null, contact_comment_daily_cap: null,
@@ -124,6 +133,13 @@ test('listCatalog: 排期账号展示复用统一解析器，运营别名优先'
   } as unknown as pg.Pool;
   const [row] = await new ContentScheduleStore({ pool, globalActiveWeekMask: () => FULL }).listCatalog();
   assert.equal(row.operatorAlias, '人工昵称');
+  assert.equal(row.platform, 'xiaohongshu');
+  assert.equal(row.groupLabel, '华东组');
+  assert.deepEqual(row.availableActions, [
+    { action: 'post', allowedModes: ['review', 'auto_approve'], maxDailyCap: 50 },
+    { action: 'comment', allowedModes: ['review', 'auto_approve'], maxDailyCap: 50 },
+    { action: 'contact_comment', allowedModes: ['review', 'auto_approve'], maxDailyCap: 10 },
+  ]);
   assert.equal(row.displayName, '人工昵称');
   assert.equal(row.displayNameSource, 'operator_alias');
   assert.equal(row.activeMaskSource, 'global');
@@ -203,6 +219,78 @@ test('store: setAccount 合法写回读真态；effectiveScheduleFor 解析 over
   await store.setAccount('acc-1', { contentActiveMask: null }, 'op');
   eff = store.effectiveScheduleFor('acc-1');
   assert.equal(eff.effectiveMask, FULL, '清空覆盖 → 回继承全局');
+});
+
+test('store/platform: Facebook 仅允许 review 发帖，非法模式在 UPSERT 前整块拒绝', async () => {
+  const { store, calls } = await makeStore({ platform: 'facebook' });
+  const valid = await store.setAccount('acc-1', { postMode: 'review', postDailyCap: 2 }, 'op');
+  assert.equal(valid.ok, true);
+
+  const writesBefore = calls.filter((call) => call.sql.trim().startsWith('INSERT INTO account_content_schedule')).length;
+  const rejected = await store.setAccount(
+    'acc-1',
+    { autoEnabled: true, postMode: 'auto_approve', postDailyCap: 3 },
+    'op',
+  );
+  assert.deepEqual(rejected, { ok: false, reason: 'unsupported_automation_action' });
+  const writesAfter = calls.filter((call) => call.sql.trim().startsWith('INSERT INTO account_content_schedule')).length;
+  assert.equal(writesAfter, writesBefore, '不支持动作补丁不得发生部分 UPSERT');
+  assert.equal(store.getAccount('acc-1')?.postMode, 'review', '拒绝后缓存真态不变');
+});
+
+test('store/platform: 无动作平台只允许显式关闭清零与公共周历写入', async () => {
+  const { store, calls } = await makeStore({ platform: 'wechat_channels' });
+  for (const patch of [
+    { commentEnabled: true },
+    { commentMode: 'review' as const },
+    { commentDailyCap: 1 },
+  ]) {
+    assert.deepEqual(
+      await store.setAccount('acc-1', patch, 'op'),
+      { ok: false, reason: 'unsupported_automation_action' },
+    );
+  }
+  assert.equal(
+    calls.filter((call) => call.sql.trim().startsWith('INSERT INTO account_content_schedule')).length,
+    0,
+    '全部拒绝均不得 UPSERT',
+  );
+
+  const cleanup = await store.setAccount(
+    'acc-1',
+    { commentEnabled: false, commentMode: 'off', commentDailyCap: 0 },
+    'op',
+  );
+  assert.equal(cleanup.ok, true, '显式 fail-closed 清脏值必须放行');
+  const publicOnly = await store.setAccount('acc-1', { autoEnabled: true, activeWeekMask: FULL }, 'op');
+  assert.equal(publicOnly.ok, true, '公共总开关/周历不因空动作矩阵被误拒');
+});
+
+test('listCatalog/platform: 视频号与未知平台均不伪造自动化动作', async () => {
+  const pool = {
+    query: async () => ({ rows: [
+      {
+        account_id: 'wx-1', platform: 'wechat-channels', label: null, group_label: null, nickname: null,
+        operator_alias: null, has_contact_info: false, auto_enabled: null, post_enabled: null, post_mode: null,
+        post_daily_cap: null, comment_enabled: null, comment_mode: null, comment_daily_cap: null,
+        contact_comment_enabled: null, contact_comment_mode: null, contact_comment_daily_cap: null,
+        active_week_mask: null, content_active_mask: null, updated_at: null, updated_by: null,
+      },
+      {
+        account_id: 'future-1', platform: ' Future_Platform ', label: null, group_label: null, nickname: null,
+        operator_alias: null, has_contact_info: false, auto_enabled: null, post_enabled: null, post_mode: null,
+        post_daily_cap: null, comment_enabled: null, comment_mode: null, comment_daily_cap: null,
+        contact_comment_enabled: null, contact_comment_mode: null, contact_comment_daily_cap: null,
+        active_week_mask: null, content_active_mask: null, updated_at: null, updated_by: null,
+      },
+    ] }),
+    end: async () => {},
+  } as unknown as pg.Pool;
+  const rows = await new ContentScheduleStore({ pool }).listCatalog();
+  assert.deepEqual(rows.map((row) => [row.platform, row.availableActions]), [
+    ['wechat_channels', []],
+    ['future_platform', []],
+  ]);
 });
 
 test('store/account masks: 活跃与内容独立继承、原子保存、清空恢复全局且不改自动化开关', async () => {

@@ -7,6 +7,8 @@ import {
   commentProfileForPlatform,
   defaultCommentSearchLabel,
   normalizePlatformId,
+  availableScheduledAutomationActionsForPlatform,
+  SCHEDULED_AUTOMATION_ACTIONS,
 } from '../src/platform/index.js';
 import type { NoteScopedAction, PlatformRegistryEntry } from '../src/platform/index.js';
 
@@ -102,4 +104,37 @@ test('platform registry: Video Channels is inbox-only and exposes no proactive d
     assert.equal(support.level, 'unsupported');
     assert.equal('reason' in support && support.reason, 'interaction_inbox_only');
   }
+});
+
+test('platform registry: scheduled automation fully covers every platform and action', () => {
+  for (const entry of Object.values(PLATFORM_REGISTRY)) {
+    for (const action of SCHEDULED_AUTOMATION_ACTIONS) {
+      const support = entry.scheduledAutomation[action];
+      assert.ok(support, `${entry.platform} 缺 scheduledAutomation.${action}`);
+      if (support.supported) {
+        assert.ok(support.allowedModes.length > 0, `${entry.platform}.${action} 支持却无 mode`);
+        assert.ok(support.maxDailyCap > 0, `${entry.platform}.${action} 支持却无正上限`);
+      } else {
+        assert.ok(support.reason.length > 0, `${entry.platform}.${action} 不支持却无 reason`);
+      }
+    }
+  }
+});
+
+test('platform registry: catalog projection is ordered, honest, and detached from registry arrays', () => {
+  assert.deepEqual(availableScheduledAutomationActionsForPlatform('fb'), [
+    { action: 'post', allowedModes: ['review'], maxDailyCap: 50 },
+    { action: 'comment', allowedModes: ['review', 'auto_approve'], maxDailyCap: 50 },
+    { action: 'contact_comment', allowedModes: ['review', 'auto_approve'], maxDailyCap: 10 },
+  ]);
+  assert.deepEqual(availableScheduledAutomationActionsForPlatform('wechat_channels'), []);
+  assert.deepEqual(availableScheduledAutomationActionsForPlatform('future-platform'), []);
+
+  const projected = availableScheduledAutomationActionsForPlatform('xiaohongshu');
+  projected[0]?.allowedModes.splice(0);
+  assert.deepEqual(PLATFORM_REGISTRY.xiaohongshu.scheduledAutomation.post, {
+    supported: true,
+    allowedModes: ['review', 'auto_approve'],
+    maxDailyCap: 50,
+  });
 });
