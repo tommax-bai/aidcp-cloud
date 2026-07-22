@@ -23,7 +23,8 @@ const SRC_ROOT = fileURLToPath(new URL('../../src', import.meta.url));
  */
 const SERVICE_BOUNDARIES: ReadonlyArray<{ name: string; dirs: readonly string[] }> = [
   { name: 'api', dirs: ['client-auth', 'panel'] },
-  { name: 'automation', dirs: ['interactions', 'agents', 'orchestrator', 'publish-agent', 'comm'] },
+  // `risk` 由定稿 §4.7 归属表整目录判归 automation（19 文件 2478 行，`RiskController` 单写）。
+  { name: 'automation', dirs: ['interactions', 'agents', 'orchestrator', 'publish-agent', 'comm', 'risk'] },
 ];
 
 /** 单服务内使用的 key 前缀必须在此显式登记（连同其唯一拥有者目录）。 */
@@ -32,6 +33,9 @@ const SINGLE_SERVICE_KEYS: ReadonlyArray<{ prefix: string; ownerDir: string }> =
   // 收件箱批次幂等：key 由 `${platform}|${accountId}|${batchId}` 拼成，无固定文本前缀，
   // 以其唯一引用点所在目录登记。
   { prefix: 'payload.batchId', ownerDir: 'interactions' },
+  // 每 executionTarget 单实例写者锁（change risk-state-cross-process-integrity）。
+  // key = (AUTOMATION_WRITER_LOCK_NAME, executionTarget)，两个引用点都在 risk/writer-lock.ts。
+  { prefix: 'AUTOMATION_WRITER_LOCK_NAME', ownerDir: 'risk' },
 ];
 
 function walk(dir: string, out: string[] = []): string[] {
