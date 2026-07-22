@@ -1620,6 +1620,66 @@
     "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
+    "path": "src/schema/db-scope-scan.ts",
+    "layer": "automation",
+    "note": "【待定稿裁决】层随 src/schema/ 目录规则判 automation。只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
+  },
+  {
+    "path": "src/schema/ddl-objects.ts",
+    "layer": "automation",
+    "note": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
+  },
+  {
+    "path": "src/schema/ddl-scan.ts",
+    "layer": "automation",
+    "note": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
+  },
+  {
+    "path": "src/schema/migration-files.ts",
+    "layer": "automation",
+    "note": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
+  },
+  {
+    "path": "src/schema/migration-order.ts",
+    "layer": "automation",
+    "note": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
+  },
+  {
+    "path": "src/schema/migration-plan.ts",
+    "layer": "automation",
+    "note": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
+  },
+  {
+    "path": "src/schema/pg-catalog.ts",
+    "layer": "automation",
+    "note": "【待定稿裁决】同上：只被 src/schema/ 内部与测试导入，不产生跨层边。注：本文件含 pg_catalog 的 SELECT 字面量，是 src/schema/ MUST NOT 判 kernel 的两个直接证据之一。请求回写 §4.7 见 docpatch R4"
+  },
+  {
+    "path": "src/schema/schema-capability.ts",
+    "layer": "automation",
+    "note": "【待定稿裁决】层随 src/schema/ 目录规则判 automation（三条理由见该规则的 basis）。本文件是 src/schema/ 里跨层被共用的主入口：34 个存储的 init() 导入它的 ensureCapabilitySchema，api / content / automation 三边都有，本轮新增的跨边界豁免绝大多数由它**单点**产生（20 条：api→automation 16 + content→automation 4；本目录另有 schema-name.ts 贡献 1 条，其余 10 个文件 0 条）。由它产生的这些豁免共享**同一条消除路径**——§4.7 一次裁决即可全部消除，消除方式二选一：(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这些豁免当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多，逐条各挂一个消除 change 会把一次裁决摊成 20 次无意义的返工。请求回写 §4.7 见 docpatch R4"
+  },
+  {
+    "path": "src/schema/schema-contract.ts",
+    "layer": "automation",
+    "note": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
+  },
+  {
+    "path": "src/schema/schema-gate.ts",
+    "layer": "automation",
+    "note": "【待定稿裁决】层随 src/schema/ 目录规则判 automation。只被组合根 src/server.ts 与测试导入（组合根 MAY 导入任何层，不产生豁免）；它自身引 src/cache/pg-anchor-cache.ts 的 DEFAULT_PG_CONFIG，同属 automation，亦无跨层边。请求回写 §4.7 见 docpatch R4"
+  },
+  {
+    "path": "src/schema/schema-inspect.ts",
+    "layer": "automation",
+    "note": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
+  },
+  {
+    "path": "src/schema/schema-name.ts",
+    "layer": "automation",
+    "note": "【待定稿裁决】层随 src/schema/ 目录规则判 automation。本目录里除 schema-capability.ts 外唯一跨层被导入的文件：src/cache/curated-content-store.ts（content）引它的 qualifiedObjectName，产生 1 条 content→automation 豁免。消除路径与 schema-capability.ts 同——它是纯字符串拼装、**无 SQL 字面量**，若走消除路径 (a) 可与析出的纯判定段一并判 kernel。请求回写 §4.7 见 docpatch R4"
+  },
+  {
     "path": "src/server.ts",
     "layer": "composition",
     "note": "§4.7 src/ 根文件：组合根，无继承者"

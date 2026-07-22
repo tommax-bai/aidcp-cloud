@@ -88,6 +88,7 @@
     { "table": "risk_interactions", "owner": "automation", "basis": "§5.1「最终风险状态」域 → aidcp-automation" },
     { "table": "risk_state", "owner": "automation", "basis": "§5.1 具名 risk_state → aidcp-automation 的 RiskController 单写" },
     { "table": "role_config", "owner": "api", "basis": "§5.1 未具名；角色配置面，写入方属 api（§4.6.8）" },
+    { "table": "schema_migrations", "owner": "automation", "basis": "【待定稿裁决】§4.7 基线 sha 之后由 change cloud-schema-migration-executor 新增（migrations/0064_schema_migrations_ledger.sql）。§5.1 未具名。它不是业务事实源而是**迁移账本**：唯一写入方是部署期执行器 scripts/migrate.ts（INSERT，migrate.ts:185 / :252），三服务运行时只读（src/schema/schema-gate.ts:73 的 SELECT version）。暂判 automation，与本轮 src/schema/ 整目录归 automation 一致。拆库后账本的最终归属随 §5.4.7 子目标 B 的数据库角色划分定——账本回答的是「谁有权改 schema」而非「谁拥有哪块业务数据」，该问题在角色划分定稿前无解，故此处只作最小失真登记。MUST 回写 §5.1，见 docpatch R5。MUST NOT 写进 boundaries/exception-tables.json：那份清单明写「条目数只减不增，新增 MUST 由控制仓 change 批准」，且其两条现有条目的例外理由（多写者是设计前提 / owner 是三服务之外的外部探针）本表都不符合" },
     { "table": "session_config", "owner": "automation", "basis": "历史表名，已被 session_config_global 取代（migrations/0015）；随 §5.1 四类限频配置 → aidcp-automation。保留登记以覆盖 migrations 的 CREATE TABLE 全集" },
     { "table": "session_config_global", "owner": "automation", "basis": "§5.1 具名四类限频配置之一 → aidcp-automation" },
     { "table": "valuable_comments", "owner": "automation", "basis": "§5.1 未具名；语料归档，写入方 src/cache/valuable-comment-store.ts 属 automation（§4.7 cache 逐文件表）" }

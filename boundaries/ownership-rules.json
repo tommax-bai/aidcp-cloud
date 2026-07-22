@@ -40,6 +40,7 @@
     { "dir": "src/publish-agent/", "layer": "content", "newFile": "adjudicate", "basis": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名" },
     { "dir": "src/render/", "layer": "content", "newFile": "inherit", "basis": "§4.7：文字卡渲染（5/5 content）" },
     { "dir": "src/risk/", "layer": "automation", "newFile": "inherit", "basis": "§4.7：RiskController 单写（19/19 automation）" },
+    { "dir": "src/schema/", "layer": "automation", "newFile": "adjudicate", "basis": "【待定稿裁决】§4.7 基线 sha 之后由 change cloud-schema-migration-executor 新增，src/schema/ 是 §4.7 里不存在的新目录（12 文件）。整目录判 automation，三条理由：① MUST NOT 判 kernel——§4.7 的 kernel 花名册是封闭的 4 文件名单，新增成员 MUST 走「析出 + 回写 §4.7」通道；且 schema-capability.ts（:148 的 pg_indexes 查询）与 pg-catalog.ts（:31 的 pg_class 查询）含 SQL 字面量，AC-BOUND-03 的「无 SQL」准入条件当场不过，与 boundaries/kernel-non-members.json 里 curated-content-store.ts / client-user-store.ts / content-schedule-store.ts 三条被拒条目同一条判据。② MUST NOT 判 composition——AC-BOUND-02 限定 composition 只能是 compositionWhitelist 里的组合根（src/server.ts / src/index.ts），且让 34 个存储反向导入组合根是依赖倒置。③ 落 automation 是最小失真选择——本 change design.md 已写明拆仓后 kernel 由 aidcp-automation 以版本化包发布、api 与 content 固定版本消费，故「尚未获得 kernel 准入的共享基础设施」暂随 automation。newFile 取 adjudicate 而非 inherit：本条是尚未回写 §4.7 的临时归属，§4.7 并没有判定「本目录任意新文件属于哪一层」，后续新增文件（尤其是从 schema-capability.ts 析出的纯判定段，它按消除路径 (a) 恰恰应判 kernel）MUST 重新逐个裁，MUST NOT 由目录默认值接住。故本目录现有 12 个文件亦逐个写进 fileOverrides，不进 adjudicated-files.json 名册（该名册 MUST NOT 增长）。请求回写 §4.7 见 docpatch R4" },
     { "dir": "src/soul/", "layer": "api", "newFile": "inherit", "basis": "§4.7：人设文档模型（7/7 api）" },
     { "dir": "src/storage/", "layer": "content", "newFile": "inherit", "basis": "§4.7：对象存储访问（4/4 content）" },
     { "dir": "src/time/", "layer": "kernel", "newFile": "adjudicate", "basis": "§4.7 kernel 花名册：无业务语义。kernel 花名册按 §4.7 是封闭名单，新增成员 MUST 走「析出 + 回写 §4.7」通道，故本目录新增文件一律待裁决" }
@@ -113,6 +114,19 @@
     { "path": "src/publish-agent/platform-profile.ts", "layer": "automation", "basis": "§4.6.3：下发执行段 6 文件之一" },
     { "path": "src/publish-agent/fill-budget.ts", "layer": "automation", "basis": "§4.6.3：下发执行段 6 文件之一" },
     { "path": "src/publish-agent/scheduled-publish-reconciler.ts", "layer": "automation", "basis": "§4.6.3：下发执行段 6 文件之一" },
-    { "path": "src/publish-agent/roles/publish-executor.ts", "layer": "automation", "basis": "§4.6.3：下发执行段 6 文件之一" }
+    { "path": "src/publish-agent/roles/publish-executor.ts", "layer": "automation", "basis": "§4.6.3：下发执行段 6 文件之一" },
+
+    { "path": "src/schema/schema-capability.ts", "layer": "automation", "basis": "【待定稿裁决】层随 src/schema/ 目录规则判 automation（三条理由见该规则的 basis）。本文件是 src/schema/ 里跨层被共用的主入口：34 个存储的 init() 导入它的 ensureCapabilitySchema，api / content / automation 三边都有，本轮新增的跨边界豁免绝大多数由它**单点**产生（20 条：api→automation 16 + content→automation 4；本目录另有 schema-name.ts 贡献 1 条，其余 10 个文件 0 条）。由它产生的这些豁免共享**同一条消除路径**——§4.7 一次裁决即可全部消除，消除方式二选一：(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这些豁免当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多，逐条各挂一个消除 change 会把一次裁决摊成 20 次无意义的返工。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/schema-name.ts", "layer": "automation", "basis": "【待定稿裁决】层随 src/schema/ 目录规则判 automation。本目录里除 schema-capability.ts 外唯一跨层被导入的文件：src/cache/curated-content-store.ts（content）引它的 qualifiedObjectName，产生 1 条 content→automation 豁免。消除路径与 schema-capability.ts 同——它是纯字符串拼装、**无 SQL 字面量**，若走消除路径 (a) 可与析出的纯判定段一并判 kernel。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/db-scope-scan.ts", "layer": "automation", "basis": "【待定稿裁决】层随 src/schema/ 目录规则判 automation。只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/ddl-objects.ts", "layer": "automation", "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/ddl-scan.ts", "layer": "automation", "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/migration-files.ts", "layer": "automation", "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/migration-order.ts", "layer": "automation", "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/migration-plan.ts", "layer": "automation", "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/pg-catalog.ts", "layer": "automation", "basis": "【待定稿裁决】同上：只被 src/schema/ 内部与测试导入，不产生跨层边。注：本文件含 pg_catalog 的 SELECT 字面量，是 src/schema/ MUST NOT 判 kernel 的两个直接证据之一。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/schema-contract.ts", "layer": "automation", "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/schema-gate.ts", "layer": "automation", "basis": "【待定稿裁决】层随 src/schema/ 目录规则判 automation。只被组合根 src/server.ts 与测试导入（组合根 MAY 导入任何层，不产生豁免）；它自身引 src/cache/pg-anchor-cache.ts 的 DEFAULT_PG_CONFIG，同属 automation，亦无跨层边。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/schema-inspect.ts", "layer": "automation", "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4" }
   ]
 }

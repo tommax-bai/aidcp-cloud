@@ -1,7 +1,7 @@
 {
-  "seedTotal": 274,
-  "seedUnplanned": 274,
-  "frozenTotal": 274,
+  "seedTotal": 295,
+  "seedUnplanned": 295,
+  "frozenTotal": 295,
   "recordedAt": "2026-07-22",
   "raises": [],
   "entries": [
@@ -23,6 +23,13 @@
       "reason": "由 change risk-state-cross-process-integrity 新增（aidcp-cloud 419e0f9）：api 侧账号主数据模块 type-only 引用风控层的归属占位结果类型 ClaimExecutionTargetResult（src/account-store.ts:17）。",
       "eliminatedBy": null,
       "note": "消除动作：§5.1「账号主数据（accounts）」行已写死——自动化在握手路径上占位 / 改写归属 target MUST 经 api 的窄内部接口完成，MUST NOT 直写该表。该窄接口落地时占位结果类型随合同回到 api 一侧，本条同批删除。§5.1 该行点名要求本 change 的归属占位任务「按本行落地，或在豁免清单里为该写入留一条具名条目并挂消除 change」——本条即那条具名条目，承接 change 名待 §12 阶段 1 排期时补。"
+    },
+    {
+      "from": "src/account-store.ts",
+      "to": "src/schema/schema-capability.ts",
+      "reason": "seed（api -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/account-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
     },
     {
       "from": "src/agents/base-role.ts",
@@ -283,6 +290,13 @@
       "eliminatedBy": null
     },
     {
+      "from": "src/cache/concept-store.ts",
+      "to": "src/schema/schema-capability.ts",
+      "reason": "seed（content -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/cache/concept-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
+    },
+    {
       "from": "src/cache/curated-content-store.ts",
       "to": "src/cache/pg-anchor-cache.ts",
       "reason": "seed（content -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
@@ -293,6 +307,20 @@
       "to": "src/delegated-task/types.ts",
       "reason": "seed（content -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
+    },
+    {
+      "from": "src/cache/curated-content-store.ts",
+      "to": "src/schema/schema-capability.ts",
+      "reason": "seed（content -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/cache/curated-content-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
+    },
+    {
+      "from": "src/cache/curated-content-store.ts",
+      "to": "src/schema/schema-name.ts",
+      "reason": "seed（content -> automation）：由 change cloud-schema-migration-executor 新增的 src/schema/schema-name.ts 被 src/cache/curated-content-store.ts 导入（qualifiedObjectName）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "src/schema/ 里除 schema-capability.ts 外唯一的跨层被导入点：本文件是纯字符串拼装、**无 SQL 字面量**，若走消除路径 (a) 可与析出的纯判定段一并判 kernel，本条随之消除。eliminatedBy 暂为 null——同上，控制仓尚未立项承接 §4.7 裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
     },
     {
       "from": "src/cache/index.ts",
@@ -330,6 +358,13 @@
       "reason": "§10.9 点名的 6 处 api / content 侧边云协议 type-only 依赖之一：notification-contact-store.ts:18。protocol.ts MUST 归 aidcp-automation 独占、MUST NOT 进 kernel；这些形状 MUST 在各自仓的 contracts/ 内重新声明。",
       "eliminatedBy": null,
       "note": "§10.9 要求本条各挂一个消除它的 change；控制仓尚未立项，eliminatedBy 暂为 null（seed 期允许），MUST 在 §12 阶段 1 内补齐。"
+    },
+    {
+      "from": "src/cache/notification-contact-store.ts",
+      "to": "src/schema/schema-capability.ts",
+      "reason": "seed（api -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/cache/notification-contact-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
     },
     {
       "from": "src/client-auth/client-auth-server.ts",
@@ -373,6 +408,13 @@
       "to": "src/delegated-task/types.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
+    },
+    {
+      "from": "src/client-auth/client-user-store.ts",
+      "to": "src/schema/schema-capability.ts",
+      "reason": "seed（api -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/client-auth/client-user-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
     },
     {
       "from": "src/comm/captcha-coordinator.ts",
@@ -553,6 +595,13 @@
       "eliminatedBy": null
     },
     {
+      "from": "src/config/approval-policy-store.ts",
+      "to": "src/schema/schema-capability.ts",
+      "reason": "seed（api -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/config/approval-policy-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
+    },
+    {
       "from": "src/config/category-config-facade.ts",
       "to": "src/llm/index.ts",
       "reason": "seed（api -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
@@ -563,6 +612,13 @@
       "to": "src/cache/pg-anchor-cache.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
+    },
+    {
+      "from": "src/config/category-config-store.ts",
+      "to": "src/schema/schema-capability.ts",
+      "reason": "seed（api -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/config/category-config-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
     },
     {
       "from": "src/config/content-schedule-store.ts",
@@ -583,16 +639,37 @@
       "eliminatedBy": null
     },
     {
+      "from": "src/config/content-schedule-store.ts",
+      "to": "src/schema/schema-capability.ts",
+      "reason": "seed（api -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/config/content-schedule-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
+    },
+    {
       "from": "src/config/credential-store.ts",
       "to": "src/cache/pg-anchor-cache.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
     },
     {
+      "from": "src/config/credential-store.ts",
+      "to": "src/schema/schema-capability.ts",
+      "reason": "seed（api -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/config/credential-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
+    },
+    {
       "from": "src/config/facebook-comment-config-store.ts",
       "to": "src/cache/pg-anchor-cache.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
+    },
+    {
+      "from": "src/config/facebook-comment-config-store.ts",
+      "to": "src/schema/schema-capability.ts",
+      "reason": "seed（api -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/config/facebook-comment-config-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
     },
     {
       "from": "src/config/facebook-group-join-automation-store.ts",
@@ -605,6 +682,13 @@
       "to": "src/platform/index.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
+    },
+    {
+      "from": "src/config/facebook-group-join-automation-store.ts",
+      "to": "src/schema/schema-capability.ts",
+      "reason": "seed（api -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/config/facebook-group-join-automation-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
     },
     {
       "from": "src/config/facebook-group-join-automation-view.ts",
@@ -631,10 +715,24 @@
       "eliminatedBy": null
     },
     {
+      "from": "src/config/hot-lead-config-store.ts",
+      "to": "src/schema/schema-capability.ts",
+      "reason": "seed（api -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/config/hot-lead-config-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
+    },
+    {
       "from": "src/config/model-config-store.ts",
       "to": "src/cache/pg-anchor-cache.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
+    },
+    {
+      "from": "src/config/model-config-store.ts",
+      "to": "src/schema/schema-capability.ts",
+      "reason": "seed（api -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/config/model-config-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
     },
     {
       "from": "src/config/pacing-config-facade.ts",
@@ -650,10 +748,24 @@
       "note": "消除动作：拆仓后四类限频配置由 aidcp-automation 独立持有，其镜像版本通道 MUST 随表主人走——config_mirror_version 拆成按属主层各一张，或 automation 侧自持版本表。本条与另 3 个限频配置 store 同簇（共 4 条），MUST 同批消除。注意同一形态还有一处门禁天然看不见的跨层写（这四个 store 在自己的写事务里调 bumpInTx 递增 api 属主表，走方法不走 SQL 字面量），已登记在 boundaries/README.md 的失明清单。"
     },
     {
+      "from": "src/config/persona-auto-fill-store.ts",
+      "to": "src/schema/schema-capability.ts",
+      "reason": "seed（api -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/config/persona-auto-fill-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
+    },
+    {
       "from": "src/config/persona-store.ts",
       "to": "src/cache/pg-anchor-cache.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
+    },
+    {
+      "from": "src/config/persona-store.ts",
+      "to": "src/schema/schema-capability.ts",
+      "reason": "seed（api -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/config/persona-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
     },
     {
       "from": "src/config/platform-credentials.ts",
@@ -728,6 +840,13 @@
       "to": "src/cache/pg-anchor-cache.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
+    },
+    {
+      "from": "src/config/role-config-store.ts",
+      "to": "src/schema/schema-capability.ts",
+      "reason": "seed（api -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/config/role-config-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
     },
     {
       "from": "src/config/role-prompt-preview.ts",
@@ -1057,6 +1176,13 @@
       "eliminatedBy": null
     },
     {
+      "from": "src/metrics/token-usage-store.ts",
+      "to": "src/schema/schema-capability.ts",
+      "reason": "seed（content -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/metrics/token-usage-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
+    },
+    {
       "from": "src/onboarding/first-post-onboarding-coordinator.ts",
       "to": "src/onboarding/first-post-onboarding-store.ts",
       "reason": "seed（content -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
@@ -1073,6 +1199,13 @@
       "to": "src/cache/pg-anchor-cache.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
+    },
+    {
+      "from": "src/onboarding/first-post-onboarding-store.ts",
+      "to": "src/schema/schema-capability.ts",
+      "reason": "seed（api -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/onboarding/first-post-onboarding-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
     },
     {
       "from": "src/orchestrator/content-scheduler.ts",
@@ -1386,6 +1519,13 @@
       "eliminatedBy": null
     },
     {
+      "from": "src/publish-agent/facebook-publish-media-store.ts",
+      "to": "src/schema/schema-capability.ts",
+      "reason": "seed（content -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/publish-agent/facebook-publish-media-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
+    },
+    {
       "from": "src/publish-agent/index.ts",
       "to": "src/publish-agent/publish-dispatcher.ts",
       "reason": "seed（content -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
@@ -1470,6 +1610,13 @@
       "to": "src/publish-agent/types.ts",
       "reason": "seed（api -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
+    },
+    {
+      "from": "src/publish-agent/publish-log-store.ts",
+      "to": "src/schema/schema-capability.ts",
+      "reason": "seed（api -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/publish-agent/publish-log-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null,
+      "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
     },
     {
       "from": "src/publish-agent/publish-orchestrator.ts",
@@ -1677,5 +1824,5 @@
       "note": "消除动作：拆仓后「配置副本是否新鲜」MUST 是 api 的只读投影，automation 侧改为消费本地只读副本 + 版本号（§11.4 要求二），MUST NOT 直接 import 配置域模块。本条与 src/comm/handler.ts、src/orchestrator/role-dispatcher.ts、src/risk/risk-controller.ts 三处同簇（共 3 条），MUST 同批消除。属 §12 阶段 1 第 4 项「把跨领域调用收口到明确接口」，尚无独立 change 名。"
     }
   ],
-  "seedBasis": "seed 基线 = 门禁 change cloud-service-boundary-gates rebase 到 origin/master 之后的实测值（2026-07-23）。首次 seed 用的是 aidcp-cloud@313eba2，随后主干合入 risk-state-cross-process-integrity / config-mirror-cross-process-invalidation / publish-approval-signal-to-database 三个 change（新增 15 个源文件、5 张表），故按定稿 §12「清单 MUST 在阶段 1 的第一个 change 里用扫描器一次性 seed 全量既存违规」在合并基线上重新 seed。棘轮自本 change 归档起开始计数；此后 MUST NOT 再用 --reseed。"
+  "seedBasis": "seed 基线 = 门禁 change cloud-service-boundary-gates rebase 到最新 origin/master 之后的实测值（2026-07-23，第二次随合并基线移动）。移动史：首次 seed 用 aidcp-cloud@313eba2；随后主干合入 risk-state-cross-process-integrity / config-mirror-cross-process-invalidation / publish-approval-signal-to-database 三个 change（新增 15 个源文件、5 张表），import 侧 257 → 274，表侧同批做过一次粒度修正 10 → 12（豁免的实际面一条未变，改的只是棘轮的键：少了「操作」这一维时，已豁免的对上新增 ALTER TABLE / CREATE TABLE 会被 refresh 自己拓宽写回并退出 0）；本次再合入 cloud-schema-migration-executor（新增 src/schema/ 12 个源文件与 schema_migrations 账本表），import 侧 274 → 295，表侧仍 12（账本表唯一写入方是部署期执行器 scripts/migrate.ts，不在 src/ 扫描面内，故一条跨层写入都没新增）。按定稿 §12「清单 MUST 在阶段 1 的第一个 change 里用扫描器一次性 seed 全量既存违规」，本 change 尚未归档、seedWindow.open 仍为 true，seed 基线随合并基线移动。新增的 21 条全部源自 src/schema/schema-capability.ts 单点（20 条：api→automation 16 + content→automation 4）与同目录 schema-name.ts（1 条 content→automation），共享同一条 §4.7 消除路径（把纯判定段析出为无 SQL 的新文件后判 kernel，或确认 automation 归属 + 按拆仓设计以版本化包供 api / content 消费），MUST NOT 当成 21 处各自独立、需要各自消除的架构违规。为何走 --reseed 而不是 §12 的具名上调通道 --raise：后者要求三字段齐备（批准它的控制仓 change 名 + 数量 + 消除日期），且 AC-BOUND-06 要求未挂消除 change 的条目数单调不增（新条目必须带 eliminatedBy）；本轮既没有承接消除的控制仓 change，也没有定稿给出的消除时限，填任何一个都是编造事实——实测 --raise=...:21:<日期> 也确实只让 frozenTotal 过关、AC-BOUND-06 的 unplanned 295 > 274 仍红。棘轮自本 change 归档起开始计数；此后 MUST NOT 再用 --reseed。"
 }
