@@ -87,7 +87,7 @@ export interface ContentSchedulerDeps {
    * 休眠格绝不自动发内容，账号"睡着"的时段准点发帖本身就是不自然信号）。语义沿浏览掩码的 fail-open
    * （缺失/未配=全天活跃=不额外限制）；缺省不注入=不限制（零回归、纯测试桩兼容）。
    */
-  browseActiveAt?(now: Date): boolean;
+  browseActiveAt?(accountId: string, now: Date): boolean;
   /** 触发排期发帖：**fire-and-forget**——返回一个在生成完成/失败时 settle 的 promise，调度器只挂 finally、绝不 await。
    *  该实现负责走既有提议→人审→派发、并异步补飞书结果卡（成功/空槽/失败）。 */
   triggerPost(
@@ -321,7 +321,7 @@ export class ContentScheduler {
           // 账号级闸（对所有动作统一）：总开关 / fail-closed 内容格 / 自动 ⊆ 活跃 / 单飞。
           if (!s.autoEnabled) continue;
           if (!isValidWeekActiveMask(s.effectiveMask) || !isWeekActiveAt(s.effectiveMask, now)) continue;
-          if (this.deps.browseActiveAt && !this.deps.browseActiveAt(now)) continue;
+          if (this.deps.browseActiveAt && !this.deps.browseActiveAt(accountId, now)) continue;
           if (this.inFlight.has(accountId)) continue;
 
           // 动作循环（post 在前：纯云端、不接管边端；join/comment/contact 共用账号级 inFlight，物理边端单槽）。

@@ -36,6 +36,7 @@ function make(opts?: {
   getRiskStatus?: () => RiskStatus;
   isDispatchActive?: () => boolean;
   weekMask?: string | null;
+  activeWeekMaskFor?: (accountId: string) => string | null;
 }) {
   const commands: { action: string }[] = [];
   let now = 1_000_000;
@@ -59,6 +60,7 @@ function make(opts?: {
     },
     getRiskStatus: opts?.getRiskStatus ?? (() => 'normal'),
     isDispatchActive: opts?.isDispatchActive ?? (() => true),
+    activeWeekMaskFor: opts?.activeWeekMaskFor,
     sessionLimitProvider: {
       sessionDurationMs: () => 600_000, // 10min
       sessionBudget: fixedBudget,
@@ -159,6 +161,31 @@ describe('RoleDispatcher「可活跃时间」周历闸（change weekly-active-wi
     const m = make(); // weekMask 缺省 = null
     m.d.restartSession();
     assert.equal(m.d.active, true);
+  });
+
+  it('账号覆盖优先于全局：账号全休眠可拦住全局全活跃', () => {
+    const m = make({ weekMask: ALL_ON, activeWeekMaskFor: () => ALL_OFF });
+    m.d.restartSession();
+    assert.equal(m.d.active, false, '账号覆盖必须优先于全局周历');
+  });
+
+  it('账号覆盖优先于全局：账号全活跃可放行全局全休眠', () => {
+    const m = make({ weekMask: ALL_OFF, activeWeekMaskFor: () => ALL_ON });
+    m.d.restartSession();
+    assert.equal(m.d.active, true, '账号覆盖必须独立放行该账号');
+  });
+
+  it('清空账号覆盖后立即回到全局周历', () => {
+    let override: string | null = ALL_OFF;
+    const m = make({
+      weekMask: ALL_ON,
+      activeWeekMaskFor: () => override ?? ALL_ON,
+    });
+    m.d.restartSession();
+    assert.equal(m.d.active, false);
+    override = null;
+    m.d.restartSession();
+    assert.equal(m.d.active, true, '覆盖清空后下一次启动按全局周历判定');
   });
 
   it('掩码全休眠 → 续场被同闸拦（休息到点不续）', () => {

@@ -342,6 +342,11 @@ export interface RoleDispatcherOptions {
    */
   sessionLimitProvider?: SessionLimitProvider;
   /**
+   * 账号生效活跃周历提供者（change account-activity-content-schedule）：账号覆盖优先、未配回落全局。
+   * 缺省仍读 sessionLimitProvider.weekActiveMask()，保持旧装配与测试逐位兼容。
+   */
+  activeWeekMaskFor?: (accountId: string) => string | null;
+  /**
    * 自动续场护栏 + 看门狗阈值提供者（全局单例，change restore-auto-resume-and-global-safety-config）：给出全局
    * rest_ratio / 活跃时段窗口 / 每日上限 / 看门狗两阈值（热加载、后台改即生效、对所有账号生效）。
    * **未注入 → 自动续场特性关（保持旧行为：单场结束即停、不续）**；看门狗回落写死默认（轻推~2min / 放弃 1h）。
@@ -501,6 +506,8 @@ export class RoleDispatcher {
   private readonly cooldownGate?: ActionCooldownGate;
   /** 单场上限提供者（读全局单场时长 + 互动预算，热加载、对所有账号生效）；缺省回落写死默认。只读。 */
   private readonly sessionLimitProvider?: SessionLimitProvider;
+  /** 账号生效活跃周历取值口；仅活跃周历账号化，其余 session limits 仍为全局。 */
+  private readonly activeWeekMaskFor?: (accountId: string) => string | null;
   /** 续场护栏 + 看门狗阈值提供者（读全局配置，热加载、对所有账号生效）；未注入 → 自动续场关、看门狗回落默认。只读。 */
   private readonly resumeConfigProvider?: ResumeConfigProvider;
   private readonly setTimeoutFn: (fn: () => void, ms: number) => unknown;
@@ -631,6 +638,7 @@ export class RoleDispatcher {
     this.interactionGuard = options.interactionGuard;
     this.cooldownGate = options.cooldownGate;
     this.sessionLimitProvider = options.sessionLimitProvider;
+    this.activeWeekMaskFor = options.activeWeekMaskFor;
     this.resumeConfigProvider = options.resumeConfigProvider;
     this.setTimeoutFn = options.setTimeoutFn ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimeoutFn = options.clearTimeoutFn ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
@@ -1863,7 +1871,7 @@ export class RoleDispatcher {
   private armWakeTimerIfWindowed(account: string): void {
     this.cancelWakeTimer();
     if (!this.resumeConfigProvider) return; // 续场特性关 → 不主动唤醒（零回归）
-    const mask = this.sessionLimitProvider?.weekActiveMask() ?? null;
+    const mask = this.effectiveActiveWeekMask(account);
     const ms = msUntilNextActive(mask, this.clock());
     if (ms == null) return; // 无需唤醒
     const jitter = Math.floor(this.randomFn() * 60_000);
@@ -1965,7 +1973,7 @@ export class RoleDispatcher {
     //    更不能每分钟触发一次「会话被拒」回调。一个只读方法不该有这种脉冲。
     const ready = announce ? this.canStartSession() : this.sessionStartVerdict() === 'ok';
     if (!ready) return { blocked: true, reason: 'not_ready' };
-    const weekMask = this.sessionLimitProvider?.weekActiveMask() ?? null;
+    const weekMask = this.effectiveActiveWeekMask(account);
     if (!isWeekActiveAt(weekMask, new Date(now))) {
       // 「可活跃时间」周历闸（全局，change weekly-active-window）。整周全关 → msUntilNextActive 回 null（无恢复时刻）。
       const ms = msUntilNextActive(weekMask, now);
@@ -2030,7 +2038,12 @@ export class RoleDispatcher {
    * 缺单场上限提供者 / 未配置 / 掩码非法 → 视作全天活跃（零回归、不设闸）。掩码 7×24 格，周一起头，按服务器本地时间。
    */
   private isWithinActiveWeek(now: number): boolean {
-    return isWeekActiveAt(this.sessionLimitProvider?.weekActiveMask() ?? null, new Date(now));
+    return isWeekActiveAt(this.effectiveActiveWeekMask(this.currentAccountId), new Date(now));
+  }
+
+  /** 所有会话生命周期共用的账号活跃掩码解析口；旧装配缺注入时回落全局 provider。 */
+  private effectiveActiveWeekMask(accountId: string): string | null {
+    return this.activeWeekMaskFor?.(accountId) ?? this.sessionLimitProvider?.weekActiveMask() ?? null;
   }
 
   /** 休息时长抖动（lognormal，中心 1.0），使每次休息不等长（拟人）。randomFn 可注入定值（测试）。 */

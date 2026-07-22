@@ -3,15 +3,16 @@
  *
  * change content-schedule-auto-publish（Phase 1，只做发帖）：多账号「按时段自动发帖」的配置层。
  * - 全局「内容可自动时段」168 格周历掩码（与浏览掩码 session_config_global.active_week_mask **物理分开**）；
- * - 每账号排期（总开关 / 发帖开关 / 发帖日上限 / 可选每账号时段覆盖）。
+ * - 每账号排期（总开关 / 动作模式 / 日上限 / 可选活跃与内容时段覆盖）。
  *
  * 安全不变量：
  * - **fail-closed**：全局掩码缺失 / 非法 = 不自动（≠ 浏览掩码的「缺失=全天活跃」）；账号无行 / 总开关关 = 完全不自动（零回归）。
  * - 每账号写为 UPSERT，但**写前先校验 accounts 有该账号行**（无行 → account_not_found，绝不造幽灵排期行）；退役 `default` 拒。
  * - 非法值整块拒（掩码非 168 位 '0'/'1'、日上限非非负整数），绝不部分落库；写后 RETURNING 回读真态，诚实非乐观。
- * - effectiveMask（override ?? global）解析只在本 store 一处（`effectiveScheduleFor`），供调度器判定与面板展示同源、不漂移。
+ * - 账号活跃与内容生效掩码（各自 override ?? global）只在本 store 解析，供调度器与面板同源消费。
  *
- * 红线：本 store 只读写自己那两张表 + 读 accounts 存在性；绝不碰风控状态单写、不碰浏览掩码、不经协议。
+ * 红线：本 store 只读写自己那两张表 + 读 accounts 存在性；全局活跃掩码仅经只读 provider 注入，
+ * 绝不写 session_config_global、绝不碰风控状态单写、不经协议。
  * 建表幂等（CREATE TABLE IF NOT EXISTS），与 migrations/0028_content_schedule.sql 同源。
  */
 
@@ -41,7 +42,7 @@ export interface ContentScheduleGlobalRow {
   updatedBy: string | null;
 }
 
-/** 每账号内容排期行。contentActiveMask：每账号时段覆盖，null = 继承全局。 */
+/** 每账号内容排期行。两个 mask 均以 null 表示独立继承各自全局值。 */
 export interface AccountContentScheduleRow {
   accountId: string;
   autoEnabled: boolean;
@@ -58,6 +59,7 @@ export interface AccountContentScheduleRow {
   contactCommentMode: ContentScheduleActionMode;
   /** 联系评论每日自动尝试上限（0..10 硬上限；尝试型：被拒/无目标也占额度）。 */
   contactCommentDailyCap: number;
+  activeWeekMask: string | null;
   contentActiveMask: string | null;
   updatedAt: string | null;
   updatedBy: string | null;
@@ -83,7 +85,19 @@ export interface ContentScheduleCatalogRow {
   contactCommentDailyCap: number;
   /** 该账号是否已配联系方式（accounts.contact_info IS NOT NULL；联系评论开关的前置徽标）。 */
   hasContactInfo: boolean;
+  /** 原始账号覆盖；null = 对应层继承全局。 */
+  activeWeekMask: string | null;
+  contentActiveMask: string | null;
+  /** 解析后的生效值；活跃 null=全天开放，内容 null=完全不自动。 */
+  effectiveActiveWeekMask: string | null;
+  effectiveContentActiveMask: string | null;
+  activeMaskSource: 'override' | 'global';
+  contentMaskSource: 'override' | 'global';
+  hasActiveOverrideMask: boolean;
+  hasContentOverrideMask: boolean;
+  /** 旧字段兼容：等价于内容时段来源。 */
   maskSource: 'override' | 'global';
+  /** 旧字段兼容：等价于 hasContentOverrideMask。 */
   hasOverrideMask: boolean;
   /** 侧表有行（false = 纯默认 = 未配 = 不自动）。 */
   configured: boolean;
@@ -103,6 +117,9 @@ export interface EffectiveContentSchedule {
   contactCommentEnabled: boolean;
   contactCommentMode: ContentScheduleActionMode;
   contactCommentDailyCap: number;
+  /** 账号生效活跃掩码；null = 全周全天活跃。 */
+  effectiveActiveWeekMask: string | null;
+  /** 账号生效内容掩码；旧名保留以避免调度协议面漂移。 */
   effectiveMask: string | null;
 }
 
@@ -121,6 +138,8 @@ export interface AccountContentSchedulePatch {
   contactCommentEnabled?: boolean;
   contactCommentMode?: ContentScheduleActionMode;
   contactCommentDailyCap?: number;
+  /** 每账号活跃时段覆盖：168 位 '0'/'1'，或 null=清空覆盖=继承全局。 */
+  activeWeekMask?: string | null;
   /** 每账号时段覆盖：168 位 '0'/'1'，或 null=清空覆盖=继承全局。 */
   contentActiveMask?: string | null;
 }
@@ -161,10 +180,14 @@ CREATE TABLE IF NOT EXISTS account_content_schedule (
   auto_enabled        BOOLEAN NOT NULL DEFAULT false,
   post_enabled        BOOLEAN NOT NULL DEFAULT false,
   post_daily_cap      INTEGER NOT NULL DEFAULT 0,
+  active_week_mask    TEXT,
   content_active_mask TEXT,
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_by          TEXT
 );
+-- 账号活跃周历覆盖（change account-activity-content-schedule）：NULL=继承 session_config_global.active_week_mask。
+-- 只新增 nullable 列、不回填，存量账号行为逐位不变。
+ALTER TABLE account_content_schedule ADD COLUMN IF NOT EXISTS active_week_mask TEXT;
 -- 自愈加列（change content-schedule-comments，迁移 0029 文档伴随）：Phase 2 评论动作两列，
 -- 既有表靠幂等 ALTER 在 init() 补上；默认 false / 0 = 不自动（fail-closed，零回归）。
 ALTER TABLE account_content_schedule ADD COLUMN IF NOT EXISTS comment_enabled BOOLEAN NOT NULL DEFAULT false;
@@ -223,6 +246,8 @@ export interface ContentScheduleStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /** 全局活跃周历只读 provider；缺失/非法沿浏览既有语义回落 null=全天活跃。 */
+  globalActiveWeekMask?: () => string | null;
 }
 
 interface GlobalDbRow {
@@ -243,6 +268,7 @@ interface AccountDbRow {
   contact_comment_enabled: boolean;
   contact_comment_mode: string | null;
   contact_comment_daily_cap: number | string;
+  active_week_mask: string | null;
   content_active_mask: string | null;
   updated_at: Date | string | null;
   updated_by: string | null;
@@ -280,10 +306,12 @@ function actionModeFromDb(mode: string | null | undefined, enabled: boolean | nu
 
 export class ContentScheduleStore {
   private readonly pool: pg.Pool;
+  private readonly globalActiveWeekMask: () => string | null;
   private globalCache: ContentScheduleGlobalRow | null = null;
   private readonly accountCache = new Map<string, AccountContentScheduleRow>();
 
   constructor(options: ContentScheduleStoreOptions = {}) {
+    this.globalActiveWeekMask = options.globalActiveWeekMask ?? (() => null);
     this.pool =
       options.pool ??
       new Pool({
@@ -342,7 +370,7 @@ export class ContentScheduleStore {
       `SELECT account_id, auto_enabled, post_enabled, post_daily_cap, comment_enabled, comment_daily_cap,
               contact_comment_enabled, contact_comment_daily_cap,
               post_mode, comment_mode, contact_comment_mode,
-              content_active_mask, updated_at, updated_by
+              active_week_mask, content_active_mask, updated_at, updated_by
          FROM account_content_schedule`,
     );
     this.accountCache.clear();
@@ -373,6 +401,7 @@ export class ContentScheduleStore {
       contactCommentEnabled: actionModeEnabled(contactCommentMode),
       contactCommentMode,
       contactCommentDailyCap: Number(r.contact_comment_daily_cap),
+      activeWeekMask: r.active_week_mask ?? null,
       contentActiveMask: r.content_active_mask ?? null,
       updatedAt: toIso(r.updated_at),
       updatedBy: r.updated_by ?? null,
@@ -387,6 +416,19 @@ export class ContentScheduleStore {
   /** 单账号行（无行 = 未配，null）。 */
   getAccount(accountId: string): AccountContentScheduleRow | null {
     return this.accountCache.get(accountId) ?? null;
+  }
+
+  /** 账号活跃覆盖合法才优先；脏覆盖视为缺失并回落全局，绝不因坏值绕过更严格全局闸。 */
+  effectiveActiveWeekMaskFor(accountId: string): string | null {
+    const accountMask = this.accountCache.get(accountId)?.activeWeekMask;
+    if (isValidWeekActiveMask(accountMask)) return accountMask;
+    const globalMask = this.globalActiveWeekMask();
+    return isValidWeekActiveMask(globalMask) ? globalMask : null;
+  }
+
+  /** 账号内容覆盖按 null 继承；脏非空值原样交调度器 fail-closed 校验。 */
+  effectiveContentActiveMaskFor(accountId: string): string | null {
+    return this.accountCache.get(accountId)?.contentActiveMask ?? this.globalCache?.contentActiveMask ?? null;
   }
 
   /**
@@ -407,7 +449,8 @@ export class ContentScheduleStore {
         contactCommentEnabled: false,
         contactCommentMode: 'off',
         contactCommentDailyCap: 0,
-        effectiveMask: null,
+        effectiveActiveWeekMask: this.effectiveActiveWeekMaskFor(accountId),
+        effectiveMask: this.effectiveContentActiveMaskFor(accountId),
       };
     return {
       autoEnabled: a.autoEnabled,
@@ -420,7 +463,8 @@ export class ContentScheduleStore {
       contactCommentEnabled: a.contactCommentEnabled,
       contactCommentMode: a.contactCommentMode,
       contactCommentDailyCap: a.contactCommentDailyCap,
-      effectiveMask: a.contentActiveMask ?? this.globalCache?.contentActiveMask ?? null,
+      effectiveActiveWeekMask: this.effectiveActiveWeekMaskFor(accountId),
+      effectiveMask: this.effectiveContentActiveMaskFor(accountId),
     };
   }
 
@@ -502,6 +546,10 @@ export class ContentScheduleStore {
         return { ok: false, reason: 'invalid_value' };
       hasField = true;
     }
+    if ('activeWeekMask' in patch) {
+      if (!validMaskPatch(patch.activeWeekMask)) return { ok: false, reason: 'invalid_value' };
+      hasField = true;
+    }
     if ('contentActiveMask' in patch) {
       if (!validMaskPatch(patch.contentActiveMask)) return { ok: false, reason: 'invalid_value' };
       hasField = true;
@@ -551,15 +599,17 @@ export class ContentScheduleStore {
       (patch.contactCommentEnabled !== undefined ? actionModeFromEnabled(patch.contactCommentEnabled) : prev?.contactCommentMode ?? 'off');
     const nextContactEnabled = actionModeEnabled(nextContactMode);
     const nextContactCap = patch.contactCommentDailyCap ?? prev?.contactCommentDailyCap ?? 0;
-    const nextMask =
+    const nextActiveMask =
+      'activeWeekMask' in patch ? patch.activeWeekMask ?? null : prev?.activeWeekMask ?? null;
+    const nextContentMask =
       'contentActiveMask' in patch ? patch.contentActiveMask ?? null : prev?.contentActiveMask ?? null;
 
     const { rows } = await this.pool.query<AccountDbRow>(
       `INSERT INTO account_content_schedule
          (account_id, auto_enabled, post_enabled, post_daily_cap, comment_enabled, comment_daily_cap,
           contact_comment_enabled, contact_comment_daily_cap, post_mode, comment_mode, contact_comment_mode,
-          content_active_mask, updated_at, updated_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), $13)
+          active_week_mask, content_active_mask, updated_at, updated_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now(), $14)
        ON CONFLICT (account_id) DO UPDATE SET auto_enabled = EXCLUDED.auto_enabled,
                                               post_enabled = EXCLUDED.post_enabled,
                                               post_daily_cap = EXCLUDED.post_daily_cap,
@@ -570,11 +620,12 @@ export class ContentScheduleStore {
                                               post_mode = EXCLUDED.post_mode,
                                               comment_mode = EXCLUDED.comment_mode,
                                               contact_comment_mode = EXCLUDED.contact_comment_mode,
+                                              active_week_mask = EXCLUDED.active_week_mask,
                                               content_active_mask = EXCLUDED.content_active_mask,
                                               updated_at = now(), updated_by = EXCLUDED.updated_by
        RETURNING account_id, auto_enabled, post_enabled, post_daily_cap, comment_enabled, comment_daily_cap,
                  contact_comment_enabled, contact_comment_daily_cap, post_mode, comment_mode, contact_comment_mode,
-                 content_active_mask, updated_at, updated_by`,
+                 active_week_mask, content_active_mask, updated_at, updated_by`,
       [
         accountId,
         nextAuto,
@@ -587,7 +638,8 @@ export class ContentScheduleStore {
         nextPostMode,
         nextCommentMode,
         nextContactMode,
-        nextMask,
+        nextActiveMask,
+        nextContentMask,
         updatedBy,
       ],
     );
@@ -605,7 +657,8 @@ export class ContentScheduleStore {
           contactCommentEnabled: nextContactEnabled,
           contactCommentMode: nextContactMode,
           contactCommentDailyCap: nextContactCap,
-          contentActiveMask: nextMask,
+          activeWeekMask: nextActiveMask,
+          contentActiveMask: nextContentMask,
           updatedAt: null,
           updatedBy,
         };
@@ -658,6 +711,7 @@ export class ContentScheduleStore {
       contact_comment_mode: string | null;
       contact_comment_daily_cap: number | string | null;
       has_contact_info: boolean;
+      active_week_mask: string | null;
       content_active_mask: string | null;
       updated_at: Date | string | null;
       updated_by: string | null;
@@ -666,7 +720,7 @@ export class ContentScheduleStore {
               s.auto_enabled, s.post_enabled, s.post_daily_cap, s.comment_enabled, s.comment_daily_cap,
               s.contact_comment_enabled, s.contact_comment_daily_cap,
               s.post_mode, s.comment_mode, s.contact_comment_mode,
-              s.content_active_mask, s.updated_at, s.updated_by
+              s.active_week_mask, s.content_active_mask, s.updated_at, s.updated_by
          FROM accounts a
          LEFT JOIN account_content_schedule s ON s.account_id = a.account_id
         WHERE a.account_id <> $1
@@ -675,7 +729,15 @@ export class ContentScheduleStore {
     );
     return rows.map((r) => {
       const configured = r.auto_enabled !== null;
-      const hasOverrideMask = r.content_active_mask != null;
+      const hasActiveOverrideMask = isValidWeekActiveMask(r.active_week_mask);
+      const hasContentOverrideMask = r.content_active_mask != null;
+      const effectiveActiveWeekMask = hasActiveOverrideMask
+        ? r.active_week_mask
+        : (() => {
+            const globalMask = this.globalActiveWeekMask();
+            return isValidWeekActiveMask(globalMask) ? globalMask : null;
+          })();
+      const effectiveContentActiveMask = r.content_active_mask ?? this.globalCache?.contentActiveMask ?? null;
       const postMode = actionModeFromDb(r.post_mode, r.post_enabled);
       const commentMode = actionModeFromDb(r.comment_mode, r.comment_enabled);
       const contactCommentMode = actionModeFromDb(r.contact_comment_mode, r.contact_comment_enabled);
@@ -700,8 +762,16 @@ export class ContentScheduleStore {
         contactCommentMode,
         contactCommentDailyCap: r.contact_comment_daily_cap == null ? 0 : Number(r.contact_comment_daily_cap),
         hasContactInfo: r.has_contact_info === true,
-        maskSource: hasOverrideMask ? 'override' : 'global',
-        hasOverrideMask,
+        activeWeekMask: r.active_week_mask ?? null,
+        contentActiveMask: r.content_active_mask ?? null,
+        effectiveActiveWeekMask,
+        effectiveContentActiveMask,
+        activeMaskSource: hasActiveOverrideMask ? 'override' : 'global',
+        contentMaskSource: hasContentOverrideMask ? 'override' : 'global',
+        hasActiveOverrideMask,
+        hasContentOverrideMask,
+        maskSource: hasContentOverrideMask ? 'override' : 'global',
+        hasOverrideMask: hasContentOverrideMask,
         configured,
         updatedAt: toIso(r.updated_at),
         updatedBy: r.updated_by ?? null,

@@ -63,8 +63,8 @@ function makePoolStub(opts: { accountExists?: boolean; myGroupCode?: string | nu
 	            post_daily_cap: params[3], comment_enabled: params[4], comment_daily_cap: params[5],
 	            contact_comment_enabled: params[6], contact_comment_daily_cap: params[7],
 	            post_mode: params[8], comment_mode: params[9], contact_comment_mode: params[10],
-	            content_active_mask: params[11],
-	            updated_at: new Date('2026-07-03T00:00:00Z'), updated_by: params[12],
+	            active_week_mask: params[11], content_active_mask: params[12],
+	            updated_at: new Date('2026-07-03T00:00:00Z'), updated_by: params[13],
 	          }],
 	        };
       }
@@ -75,9 +75,14 @@ function makePoolStub(opts: { accountExists?: boolean; myGroupCode?: string | nu
   return { pool, calls };
 }
 
-async function makeStore(opts: { accountExists?: boolean; myGroupCode?: string | null; codeSharedByOther?: boolean } = {}) {
+async function makeStore(opts: {
+  accountExists?: boolean;
+  myGroupCode?: string | null;
+  codeSharedByOther?: boolean;
+  globalActiveWeekMask?: string | null;
+} = {}) {
   const { pool, calls } = makePoolStub(opts);
-  const store = new ContentScheduleStore({ pool });
+  const store = new ContentScheduleStore({ pool, globalActiveWeekMask: () => opts.globalActiveWeekMask ?? null });
   await store.init();
   return { store, calls };
 }
@@ -96,6 +101,7 @@ test('store: 未配 = 完全不自动（零回归默认）', async () => {
 	    contactCommentEnabled: false,
 	    contactCommentMode: 'off',
 	    contactCommentDailyCap: 0,
+    effectiveActiveWeekMask: null,
     effectiveMask: null,
   });
   assert.equal(store.getGlobal(), null);
@@ -111,15 +117,20 @@ test('listCatalog: 排期账号展示复用统一解析器，运营别名优先'
         has_contact_info: false, auto_enabled: null, post_enabled: null, post_mode: null,
         post_daily_cap: null, comment_enabled: null, comment_mode: null, comment_daily_cap: null,
         contact_comment_enabled: null, contact_comment_mode: null, contact_comment_daily_cap: null,
-        content_active_mask: null, updated_at: null, updated_by: null,
+        active_week_mask: null, content_active_mask: null, updated_at: null, updated_by: null,
       }] };
     },
     end: async () => {},
   } as unknown as pg.Pool;
-  const [row] = await new ContentScheduleStore({ pool }).listCatalog();
+  const [row] = await new ContentScheduleStore({ pool, globalActiveWeekMask: () => FULL }).listCatalog();
   assert.equal(row.operatorAlias, '人工昵称');
   assert.equal(row.displayName, '人工昵称');
   assert.equal(row.displayNameSource, 'operator_alias');
+  assert.equal(row.activeMaskSource, 'global');
+  assert.equal(row.contentMaskSource, 'global');
+  assert.equal(row.effectiveActiveWeekMask, FULL);
+  assert.equal(row.activeWeekMask, null);
+  assert.equal(row.contentActiveMask, null);
 });
 
 test('store: setGlobal 非法掩码整块拒（长度不对 / 非01 / 非串）', async () => {
@@ -165,6 +176,7 @@ test('store: setAccount 非法值整块拒（cap 越界 / 类型错 / 掩码非�
     { postDailyCap: 1.5 },
     { postDailyCap: 51 }, // > CAP_MAX 50
     { autoEnabled: 'yes' as unknown as boolean },
+    { activeWeekMask: '10'.repeat(10) },
     { contentActiveMask: '10'.repeat(10) },
     {},
   ]) {
@@ -191,6 +203,53 @@ test('store: setAccount 合法写回读真态；effectiveScheduleFor 解析 over
   await store.setAccount('acc-1', { contentActiveMask: null }, 'op');
   eff = store.effectiveScheduleFor('acc-1');
   assert.equal(eff.effectiveMask, FULL, '清空覆盖 → 回继承全局');
+});
+
+test('store/account masks: 活跃与内容独立继承、原子保存、清空恢复全局且不改自动化开关', async () => {
+  const { store } = await makeStore({ globalActiveWeekMask: FULL });
+  await store.setGlobal({ contentActiveMask: HALF }, 'global-op');
+
+  const first = await store.setAccount('acc-1', { activeWeekMask: HALF, contentActiveMask: FULL }, 'op');
+  assert.ok(first.ok);
+  if (first.ok) {
+    assert.equal(first.row.activeWeekMask, HALF);
+    assert.equal(first.row.contentActiveMask, FULL);
+    assert.equal(first.row.autoEnabled, false, '仅保存账号排期不得隐式开启自动化');
+  }
+  let eff = store.effectiveScheduleFor('acc-1');
+  assert.equal(eff.effectiveActiveWeekMask, HALF, '账号活跃覆盖优先');
+  assert.equal(eff.effectiveMask, FULL, '账号内容覆盖优先');
+
+  const cleared = await store.setAccount('acc-1', { activeWeekMask: null, contentActiveMask: null }, 'op');
+  assert.ok(cleared.ok);
+  eff = store.effectiveScheduleFor('acc-1');
+  assert.equal(eff.effectiveActiveWeekMask, FULL, '清空活跃覆盖 → 回全局');
+  assert.equal(eff.effectiveMask, HALF, '清空内容覆盖 → 回全局');
+  assert.equal(eff.autoEnabled, false, '清空覆盖不改变总开关');
+});
+
+test('store/account masks: 脏活跃覆盖回落合法全局，脏内容覆盖保持 fail-closed 输入', async () => {
+  const bad = 'broken';
+  const pool = {
+    query: async (sql: string) => {
+      const s = sql.trim();
+      if (s.startsWith('CREATE TABLE')) return { rows: [] };
+      if (s.startsWith('SELECT content_active_mask')) return { rows: [{ content_active_mask: HALF, updated_at: null, updated_by: null }] };
+      if (s.startsWith('SELECT account_id, auto_enabled')) return { rows: [{
+        account_id: 'acc-1', auto_enabled: true, post_enabled: true, post_mode: 'review', post_daily_cap: 1,
+        comment_enabled: false, comment_mode: 'off', comment_daily_cap: 0,
+        contact_comment_enabled: false, contact_comment_mode: 'off', contact_comment_daily_cap: 0,
+        active_week_mask: bad, content_active_mask: bad, updated_at: null, updated_by: null,
+      }] };
+      throw new Error(`未覆盖 SQL: ${s.slice(0, 60)}`);
+    },
+    end: async () => {},
+  } as unknown as pg.Pool;
+  const store = new ContentScheduleStore({ pool, globalActiveWeekMask: () => FULL });
+  await store.init();
+  const eff = store.effectiveScheduleFor('acc-1');
+  assert.equal(eff.effectiveActiveWeekMask, FULL, '脏活跃覆盖不能绕过全局');
+  assert.equal(eff.effectiveMask, bad, '脏内容覆盖交调度器按非法 fail-closed');
 });
 
 test('store: setAccount 未传字段保持原值（部分补丁不清其它字段）', async () => {

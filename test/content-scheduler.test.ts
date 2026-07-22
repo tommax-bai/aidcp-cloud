@@ -14,6 +14,13 @@ const DORMANT = '0'.repeat(168); // 168 位合法但全休眠 → isWeekActiveAt
 const ACC = 'acc-test-1';
 const BASE_DAY = new Date(2026, 0, 5, 10, 0, 0); // 本地时间
 const OFFSET = offsetMinute(ACC, BASE_DAY, 'post');
+const ACC_2 = (() => {
+  for (let i = 2; i < 10_000; i++) {
+    const candidate = `acc-test-${i}`;
+    if (offsetMinute(candidate, BASE_DAY, 'post') === OFFSET) return candidate;
+  }
+  throw new Error('找不到同分钟测试账号');
+})();
 const NOW_HIT = new Date(2026, 0, 5, 10, OFFSET, 0);
 const NOW_MISS = new Date(2026, 0, 5, 10, (OFFSET + 1) % 60, 0);
 
@@ -58,6 +65,7 @@ interface State {
   claimAllowed: boolean;
   /** 「自动 ⊆ 活跃」闸：undefined=不注入（不限）。 */
   browseActive?: boolean;
+  browseActiveByAccount?: Record<string, boolean>;
 }
 
 function mk(overrides: Partial<State> = {}) {
@@ -87,7 +95,12 @@ function mk(overrides: Partial<State> = {}) {
       calls.push(id);
       return state.triggerImpl(id);
     },
-    ...(state.browseActive !== undefined ? { browseActiveAt: () => state.browseActive! } : {}),
+    ...(state.browseActive !== undefined || state.browseActiveByAccount
+      ? {
+          browseActiveAt: (accountId: string) =>
+            state.browseActiveByAccount?.[accountId] ?? state.browseActive ?? true,
+        }
+      : {}),
     now: () => state.nowMs,
     logger: { warn: () => {} },
   };
@@ -107,6 +120,15 @@ test('content-scheduler: 自动 ⊆ 活跃 — 浏览掩码休眠时段不自动
   const noGate = mk({});
   await noGate.scheduler.onTick();
   assert.deepEqual(noGate.calls, [ACC]);
+});
+
+test('content-scheduler: 浏览活跃闸按账号解析，同一时刻只放行活跃账号', async () => {
+  const { scheduler, calls } = mk({
+    online: [ACC, ACC_2],
+    browseActiveByAccount: { [ACC]: false, [ACC_2]: true },
+  });
+  await scheduler.onTick();
+  assert.deepEqual(calls, [ACC_2]);
 });
 
 test('content-scheduler: happy path — 命中偏移分钟 + 各闸通过 → 触发一次', async () => {

@@ -2003,24 +2003,24 @@ function createRequestHandler(
       }
       const raw = (body ?? {}) as Record<string, unknown>;
       const patch: AccountContentSchedulePatch = {};
-	      for (const k of ['autoEnabled', 'postEnabled', 'commentEnabled', 'contactCommentEnabled'] as const) {
-	        const v = raw[k];
-	        if (v === undefined) continue;
-	        if (typeof v !== 'boolean') {
-	          sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
-	          return;
-	        }
-	        patch[k] = v;
-	      }
-	      for (const k of ['postMode', 'commentMode', 'contactCommentMode'] as const) {
-	        const v = raw[k];
-	        if (v === undefined) continue;
-	        if (!isContentScheduleActionMode(v)) {
-	          sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
-	          return;
-	        }
-	        patch[k] = v;
-	      }
+      for (const k of ['autoEnabled', 'postEnabled', 'commentEnabled', 'contactCommentEnabled'] as const) {
+        const v = raw[k];
+        if (v === undefined) continue;
+        if (typeof v !== 'boolean') {
+          sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
+          return;
+        }
+        patch[k] = v;
+      }
+      for (const k of ['postMode', 'commentMode', 'contactCommentMode'] as const) {
+        const v = raw[k];
+        if (v === undefined) continue;
+        if (!isContentScheduleActionMode(v)) {
+          sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
+          return;
+        }
+        patch[k] = v;
+      }
       if (raw.postDailyCap !== undefined) {
         if (typeof raw.postDailyCap !== 'number') {
           sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
@@ -2042,13 +2042,14 @@ function createRequestHandler(
         }
         patch.contactCommentDailyCap = raw.contactCommentDailyCap;
       }
-      if ('contentActiveMask' in raw) {
-        const m = raw.contentActiveMask;
+      for (const k of ['activeWeekMask', 'contentActiveMask'] as const) {
+        if (!(k in raw)) continue;
+        const m = raw[k];
         if (m !== null && typeof m !== 'string') {
           sendJson(res, 400, { error: 'bad_request', reason: 'value_type' });
           return;
         }
-        patch.contentActiveMask = m as string | null;
+        patch[k] = m as string | null;
       }
       const result = await deps.contentSchedule.setAccount(accountId, patch, verified.payload.sub);
       if (!result.ok) {

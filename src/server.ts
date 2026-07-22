@@ -571,6 +571,8 @@ async function main(): Promise<void> {
     database: readEnvString('PGDATABASE'),
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
+    // 只读组合：账号活跃覆盖优先，未配回落 session_config_global 热镜像；本 store 不写全局表。
+    globalActiveWeekMask: () => sessionConfigStore.weekActiveMask(),
   });
   // 每账号 Facebook 定时评论配置（change facebook-scheduled-comment 2.1）：关键词列表 + 容器列表。
   // fail-closed：任一为空 = 不生效（诚实 no-op）；init 失败不致命（空镜像 = 全不生效）。
@@ -3053,6 +3055,8 @@ async function main(): Promise<void> {
       // 单场上限提供者（全局单例，change restore-auto-resume-and-global-safety-config）：读全局单场时长 + 互动预算（热加载、后台改即生效）、对所有账号生效；
       // 缺行/非法回落写死默认（零回归）。每连接共享同一 store，现读全局单行，不触风控状态单写。
       sessionLimitProvider: sessionConfigStore,
+      // 账号活跃周历覆盖：开场、续场、唤醒、运行中跨界与冷待机裁决统一从同一解析口现读。
+      activeWeekMaskFor: (accountId) => contentScheduleStore.effectiveActiveWeekMaskFor(accountId),
       // 续场护栏 + 看门狗阈值提供者（全局单例，change restore-auto-resume-and-global-safety-config）：读全局配置、对所有账号生效，热加载。
       // 注入即开启自动续场（生产）；缺行回落写死默认（rest 10% / 全天窗口 / 不限 / 看门狗轻推~2min·放弃 1h）。
       resumeConfigProvider: resumeConfigStore,
@@ -3594,7 +3598,8 @@ async function main(): Promise<void> {
         delegatedOwnershipBusy: (accountId, family) =>
           delegatedTaskStore?.hasActiveOwnership(accountId, family) ?? false,
         // 自动 ⊆ 活跃（用户拍板：浏览休眠格绝不自动发内容）：读浏览周历掩码，沿其 fail-open（未配=全天活跃=不限）。
-        browseActiveAt: (now) => isWeekActiveAt(sessionConfigStore.weekActiveMask(), now),
+        browseActiveAt: (accountId, now) =>
+          isWeekActiveAt(contentScheduleStore.effectiveActiveWeekMaskFor(accountId), now),
         // fire-and-forget：调度器只发起；结果（成功/诚实空槽/失败）在此异步补一张飞书卡，绝不静默假成功。
         triggerPost: async (accountId, approvalMode, scheduleExecution) => {
           let ok = false;
