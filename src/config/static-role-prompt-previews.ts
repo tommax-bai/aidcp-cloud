@@ -53,6 +53,7 @@ const EXAMPLE_POLISHER_INPUT: PolisherInput = {
   requestId: '<示例请求ID>',
   accountId: '<示例账号ID>',
   inbound: EXAMPLE_INBOUND,
+  intent: 'gratitude',
   renderedText: '<示例模板回复：谢谢喜欢，很开心这个分享对你有帮助。>',
   profile: {
     tone: ['friendly', 'concise'],

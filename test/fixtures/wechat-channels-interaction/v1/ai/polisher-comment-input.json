@@ -10,6 +10,7 @@
     "videoTitle": "示例视频标题",
     "recentMessages": []
   },
+  "intent": "gratitude",
   "renderedText": "谢谢示例观众的喜欢，欢迎继续交流。",
   "profile": {
     "tone": ["friendly", "concise"],

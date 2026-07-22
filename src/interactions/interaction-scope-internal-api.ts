@@ -289,7 +289,8 @@ export class InteractionScopeInternalApi {
         template: preview.templateId && preview.templateVersion && preview.renderedText
           ? { templateId: preview.templateId, templateVersion: preview.templateVersion, renderedText: preview.renderedText } : null,
         polish: preview.renderedText && preview.polishedText ? { before: preview.renderedText, after: preview.polishedText,
-          fallbackUsed: preview.fallbacks.polisher !== 'none', meaningChanged: preview.meaningChanged,
+          fallbackUsed: preview.fallbacks.polisher !== 'none', fallbackReason: preview.fallbacks.polisher,
+          meaningChanged: preview.meaningChanged,
           introducedClaims: preview.introducedClaims } : null,
         risk: { level: preview.riskLevel, tags: preview.riskReasons, reasons: preview.reviewReasons }, action,
       });

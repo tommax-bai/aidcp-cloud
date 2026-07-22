@@ -26,6 +26,8 @@ import {
 } from './types.js';
 
 const HARD = new Set<string>(HARD_RISK_TAGS);
+const CONTENT_HIGH_RISK = new Set<string>(HARD_RISK_TAGS.filter((tag) =>
+  tag !== 'unknown' && tag !== 'meaning_changed' && tag !== 'introduced_claim'));
 
 export interface ReplyPreviewResult {
   matchedRuleId: string | null;
@@ -265,6 +267,7 @@ export class ReplyWorkflow {
     const polish = aiAllowed && rule.actions.polish && snapshot.policy.channels[inbound.channel].aiPolishEnabled
       ? await this.ai.polish({
         role: 'reply_polisher', requestId: this.requestId(), accountId: snapshot.accountId, inbound,
+        intent: classifier.value.intent,
         renderedText: rendered,
         profile: {
           tone: profile.tone, maxLength: profile.maxLength, allowEmoji: profile.allowEmoji,
@@ -279,9 +282,13 @@ export class ReplyWorkflow {
     const polishedCandidate = polish.value.polishedText;
     const candidateIssues = validateFinalReplyText(profile, polishedCandidate);
     const protectedLines = renderedSupportChannelLines(template, rendered);
-    const candidate = candidateIssues.length || !preservesProtectedLines(polishedCandidate, protectedLines)
+    const candidateRejected = candidateIssues.length > 0 || !preservesProtectedLines(polishedCandidate, protectedLines);
+    const candidate = candidateRejected
       ? rendered
       : polishedCandidate;
+    const polisherFallback: AiFallback = polish.fallback !== 'none'
+      ? polish.fallback
+      : candidateRejected ? 'candidate_rejected' : 'none';
     const deterministicTags: RiskTag[] = [];
     const intentRiskTag = INTENT_RISK_TAG[classifier.value.intent];
     if (intentRiskTag) deterministicTags.push(intentRiskTag);
@@ -304,11 +311,11 @@ export class ReplyWorkflow {
       })
       : { value: { role: 'reply_risk_reviewer' as const, riskLevel: 'unknown' as const,
         riskTags: ['unknown'] as RiskTag[], reasons: ['dm_ai_disabled'], allowAutoSend: false }, fallback: 'none' as const };
-    const fallbackRisk = classifier.fallback !== 'none' || polish.fallback !== 'none' || reviewer.fallback !== 'none'
+    const fallbackRisk = classifier.fallback !== 'none' || polisherFallback !== 'none' || reviewer.fallback !== 'none'
       ? ['unknown'] as RiskTag[] : [];
     const allTags = uniqueTags(classifier.value.riskTags, polish.value.riskTags, reviewer.value.riskTags,
       deterministicTags, rule.actions.forceHumanTags, fallbackRisk);
-    const hasHardRisk = allTags.some((tag) => tag !== 'unknown' && HARD.has(tag));
+    const hasHardRisk = allTags.some((tag) => CONTENT_HIGH_RISK.has(tag));
     const requiresApproval = forcedHumanRisk(rule, allTags) || reviewer.value.riskLevel !== 'low' ||
       !reviewer.value.allowAutoSend || !rule.actions.allowAutoSend || allTags.some((tag) => HARD.has(tag)) ||
       aiPolishInvoked || candidate !== rendered;
@@ -325,7 +332,7 @@ export class ReplyWorkflow {
       meaningChanged: polish.value.meaningChanged,
       introducedClaims: polish.value.introducedClaims,
       reviewReasons: reviewer.value.reasons,
-      fallbacks: { classifier: classifier.fallback, polisher: polish.fallback, reviewer: reviewer.fallback },
+      fallbacks: { classifier: classifier.fallback, polisher: polisherFallback, reviewer: reviewer.fallback },
     };
   }
 

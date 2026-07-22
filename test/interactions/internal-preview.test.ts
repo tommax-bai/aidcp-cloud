@@ -217,8 +217,13 @@ test('Console preview is read-only: no reply job and no WS command are created',
         userMessage: '谢谢分享', videoTitle: '示例视频', userName: '小王' }),
     });
     assert.equal(response.status, 200);
-    const body = await response.json() as { data: { action: string }; meta: { asOf: number } };
+    const body = await response.json() as {
+      data: { action: string; polish: { fallbackUsed: boolean; fallbackReason: string } };
+      meta: { asOf: number };
+    };
     assert.equal(body.data.action, 'review_required');
+    assert.equal(body.data.polish.fallbackUsed, false);
+    assert.equal(body.data.polish.fallbackReason, 'none');
     assert.equal(body.meta.asOf, 1784044800000);
     assert.equal(previewCalls, 1);
     assert.equal(auditCalls, 1);

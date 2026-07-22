@@ -642,6 +642,7 @@ export interface PolisherInput {
   requestId: string;
   accountId: string;
   inbound: MinimalInbound;
+  intent: ReplyIntent;
   renderedText: string;
   profile: Pick<ReplyProfile, 'tone' | 'maxLength' | 'allowEmoji' | 'allowLinks' | 'blockedPhrases' | 'requiredDisclaimer' | 'knowledgeDocument'>;
 }
