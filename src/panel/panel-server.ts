@@ -55,7 +55,7 @@ import type {
   JsonValue,
 } from '../delegated-task/types.js';
 import { clampClientApprovalMode, DELEGATED_TASK_STATUSES } from '../delegated-task/types.js';
-import { buildPublishLifecycle } from './publish-stage-lifecycle.js';
+import { buildPublishLifecycle, type ApprovalDispatchProjection } from './publish-stage-lifecycle.js';
 import { CuratedContentUnavailableError } from '../cache/curated-content-store.js';
 
 /** 登录/写体很小，限制请求体大小防滥用。 */
@@ -1158,11 +1158,15 @@ function createRequestHandler(
         deps.panelStore.publishedHistory(50, undefined, 'pending_approval'),
         deps.panelStore.publishedHistory(10),
       ]);
+      // 「已批准·待下发」的判据来自持久授权记录，不是进程内在途集合——重启后该区分必须依然成立。
+      // 读失败 / 未注入 → 不带下发态字段，前端回落既有呈现（MUST NOT 白屏）。
+      const approvalDispatch = await readApprovalDispatchFor(deps, [...pending, ...recent]);
       const lifecycle = buildPublishLifecycle({
         queue,
         pending,
         recent,
         inFlightRecordIds: deps.publishDispatcher?.getInFlightRecordIds() ?? [],
+        ...(approvalDispatch ? { approvalDispatch } : {}),
       });
       sendJson(res, 200, { ...queue, lifecycle });
       return;
@@ -2916,4 +2920,37 @@ export function startPanelApi(deps: PanelDeps, config: PanelConfig): Promise<Pan
       });
     });
   });
+}
+
+
+/**
+ * 读一批稿件的授权下发进度（change publish-approval-signal-to-database，task 4.6）。
+ *
+ * 未注入或读失败 → 返回 null，投影不带下发态字段、前端回落既有呈现。
+ * MUST NOT 因为读不到就伪造一个「无阻塞」的下发态——那会把不可读粉饰成正常。
+ */
+async function readApprovalDispatchFor(
+  deps: Pick<PanelDeps, 'readApprovalDispatchStates'>,
+  rows: Array<{ id: number }>,
+): Promise<Map<number, ApprovalDispatchProjection> | null> {
+  if (!deps.readApprovalDispatchStates) return null;
+  const ids = [...new Set(rows.map((row) => row.id))];
+  if (ids.length === 0) return new Map();
+  try {
+    const raw = await deps.readApprovalDispatchStates(ids.map((id) => `publish-${id}`));
+    const out = new Map<number, ApprovalDispatchProjection>();
+    for (const [requestId, view] of raw) {
+      const match = /^publish-(\d+)$/.exec(requestId);
+      if (!match) continue;
+      out.set(Number(match[1]), {
+        approved: view.approved,
+        dispatchState: view.dispatchState as ApprovalDispatchProjection['dispatchState'],
+        dispatchBlockedReason: view.dispatchBlockedReason,
+        decidedAt: view.decidedAt,
+      });
+    }
+    return out;
+  } catch {
+    return null;
+  }
 }

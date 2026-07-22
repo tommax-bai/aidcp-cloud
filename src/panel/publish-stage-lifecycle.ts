@@ -43,6 +43,34 @@ export type PublishJourneyStatus =
   | 'draft'
   | 'skipped';
 
+/**
+ * 授权的下发进度（change publish-approval-signal-to-database，task 4.5 / 4.6）。
+ *
+ * 它来自**持久授权记录**，不是进程内在途集合——进程重启或执行侧不可达时，「已批准·待下发」
+ * 这个区分必须依然成立。这正是本 change 要消灭的那种静默停滞：运营点了通过、界面却和「还没人批」
+ * 长得一模一样。
+ */
+export interface ApprovalDispatchProjection {
+  approved: boolean;
+  dispatchState: 'pending_dispatch' | 'dispatching' | 'consumed' | 'void';
+  dispatchBlockedReason: string | null;
+  decidedAt: number;
+}
+
+/** 阻塞原因 → 运营看得懂的中文（未知原因原样透出，绝不吞成「无」）。 */
+const DISPATCH_BLOCKED_LABELS: Record<string, string> = {
+  edge_offline_waiting: '客户端核心离线，等待恢复',
+  browser_slot_waiting: '浏览器在等本机可用槽位',
+  breaker_open: '该账号下发熔断中，待人工确认',
+  captcha_paused: '账号处于验证码/风控暂停',
+  approval_unreadable: '授权状态暂不可读（不下发、不烧稿）',
+};
+
+export function describeDispatchBlockedReason(reason: string | null | undefined): string | null {
+  if (!reason) return null;
+  return DISPATCH_BLOCKED_LABELS[reason] ?? reason;
+}
+
 export interface PublishJourneyView {
   journeyId: string;
   runId: string | null;
@@ -57,6 +85,15 @@ export interface PublishJourneyView {
   statusSummary: string;
   stages: PublishStageView[];
   snapshot: unknown | null;
+  /**
+   * 授权下发进度增量字段（缺省 = 服务端尚未接线 / 该稿无活跃授权）。前端 MUST 在缺省时回落既有呈现，
+   * MUST NOT 白屏或报错（console ↔ cloud 枚举漂移纪律）。
+   */
+  dispatchState?: 'pending_dispatch' | 'dispatching' | 'consumed' | 'void';
+  dispatchBlockedReason?: string | null;
+  decidedAt?: number;
+  /** 自决策起已等待的毫秒数（只在尚未下发完成时有意义）。 */
+  waitingMs?: number;
 }
 
 export interface PublishLifecycleProjection {
@@ -310,7 +347,13 @@ function journeyFromRun(run: QueueRunLike, active: boolean): PublishJourneyView 
   };
 }
 
-function persistedStages(row: PanelPublish, inFlight: boolean, snapshot: Record<string, unknown> | null): PublishStageView[] {
+function persistedStages(
+  row: PanelPublish,
+  approvedForDispatch: boolean,
+  dispatch: ApprovalDispatchProjection | null,
+  snapshot: Record<string, unknown> | null,
+  now: number,
+): PublishStageView[] {
   const generated = row.images.length;
   const base = snapshot
     ? runStages(snapshot, 'completed').slice(0, 6).map((item) => ({ ...item, state: 'completed' as const }))
@@ -323,10 +366,21 @@ function persistedStages(row: PanelPublish, inFlight: boolean, snapshot: Record<
         stage('package', 'completed', '终稿已落库', [`记录 #${row.id}`]),
       ];
 
-  if (row.status === 'pending_approval' && !inFlight) {
-    return [...base, stage('approval', 'waiting_human', '等待人工审批'), stage('dispatch', 'pending', '审批通过后下发')];
-  }
-  if (row.status === 'pending_approval' && inFlight) {
+  if (row.status === 'pending_approval') {
+    if (!approvedForDispatch) {
+      return [...base, stage('approval', 'waiting_human', '等待人工审批'), stage('dispatch', 'pending', '审批通过后下发')];
+    }
+    // 已批准但尚未真正开始下发：**必须**与「等待人工审批」可区分，并给出原因与等待时长。
+    if (dispatch && dispatch.dispatchState === 'pending_dispatch') {
+      const blocked = describeDispatchBlockedReason(dispatch.dispatchBlockedReason);
+      const facts = [`已等待 ${Math.max(0, Math.round((now - dispatch.decidedAt) / 60_000))} 分钟`];
+      if (blocked) facts.push(`阻塞原因：${blocked}`);
+      return [
+        ...base,
+        stage('approval', 'completed', '人工审批已通过'),
+        stage('dispatch', 'pending', blocked ? `已批准·待下发（${blocked}）` : '已批准·待下发', facts),
+      ];
+    }
     return [
       ...base,
       stage('approval', 'completed', '人工审批已通过'),
@@ -354,9 +408,18 @@ function persistedStages(row: PanelPublish, inFlight: boolean, snapshot: Record<
   return [...base, stage('approval', 'completed', '发布授权已确认'), stage('dispatch', 'failed', '平台下发失败，未确认发布', dispatchFacts)];
 }
 
-function journeyFromPublish(row: PanelPublish, inFlight: boolean, snapshot: Record<string, unknown> | null): PublishJourneyView {
+function journeyFromPublish(
+  row: PanelPublish,
+  inFlight: boolean,
+  snapshot: Record<string, unknown> | null,
+  dispatch: ApprovalDispatchProjection | null,
+  now: number,
+): PublishJourneyView {
+  // 判据优先取**持久授权记录**：进程内在途集合重启即清空，用它做区分会让「已批准·待下发」在重启后
+  // 退回「待审批」。持久记录缺省（未接线 / 无活跃授权）时才回落到既有在途集合，零回归。
+  const approvedForDispatch = dispatch ? dispatch.approved && dispatch.dispatchState !== 'void' : inFlight;
   const status: PublishJourneyStatus = row.status === 'pending_approval'
-    ? inFlight ? 'dispatching' : 'waiting_approval'
+    ? approvedForDispatch ? 'dispatching' : 'waiting_approval'
     : row.status === 'published'
       ? 'published'
       : row.status === 'scheduled'
@@ -380,6 +443,15 @@ function journeyFromPublish(row: PanelPublish, inFlight: boolean, snapshot: Reco
     draft: '已保存为草稿，未向平台下发',
     skipped: '本轮未进入发布',
   };
+  // 「已批准·待下发」与「正在下发」在同一个 status 下用增量字段细分：给 status 加新取值会让尚未升级的
+  // 前端落进 default 分支（枚举漂移 → 整页白屏），而增量可选字段被旧前端安全忽略。
+  const blockedLabel = describeDispatchBlockedReason(dispatch?.dispatchBlockedReason);
+  const statusSummary =
+    status === 'dispatching' && dispatch?.dispatchState === 'pending_dispatch'
+      ? blockedLabel
+        ? `已批准·待下发（${blockedLabel}）`
+        : '已批准·待下发'
+      : summaries[status];
   return {
     journeyId: `publish:${row.id}`,
     runId: null,
@@ -391,9 +463,17 @@ function journeyFromPublish(row: PanelPublish, inFlight: boolean, snapshot: Reco
     startedAt: row.publishedAt,
     active: status === 'waiting_approval' || status === 'dispatching',
     status,
-    statusSummary: summaries[status],
-    stages: persistedStages(row, inFlight, snapshot),
+    statusSummary,
+    stages: persistedStages(row, approvedForDispatch, dispatch, snapshot, now),
     snapshot,
+    ...(dispatch
+      ? {
+          dispatchState: dispatch.dispatchState,
+          dispatchBlockedReason: dispatch.dispatchBlockedReason,
+          decidedAt: dispatch.decidedAt,
+          waitingMs: Math.max(0, now - dispatch.decidedAt),
+        }
+      : {}),
   };
 }
 
@@ -402,9 +482,17 @@ export function buildPublishLifecycle(input: {
   pending: PanelPublish[];
   recent: PanelPublish[];
   inFlightRecordIds?: Iterable<number>;
+  /**
+   * 持久授权记录的下发进度（按 recordId）。缺省 → 回落既有进程内在途集合（零回归）。
+   * 这是「已批准·待下发」在进程重启后仍成立的唯一来源。
+   */
+  approvalDispatch?: ReadonlyMap<number, ApprovalDispatchProjection>;
   recentLimit?: number;
+  now?: number;
 }): PublishLifecycleProjection {
   const inFlight = new Set(input.inFlightRecordIds ?? []);
+  const approvalDispatch = input.approvalDispatch;
+  const now = input.now ?? Date.now();
   const aggregateSnapshot = record(input.queue.snapshot);
   const aggregateRecordId = resultRecordId(aggregateSnapshot);
   // panelStore 的正式实现会按 status 过滤；这里仍 fail-closed 再核一次，避免旧实现/测试桩把终态塞进 active。
@@ -420,6 +508,8 @@ export function buildPublishLifecycle(input: {
     row,
     inFlight.has(row.id),
     aggregateRecordId === row.id ? aggregateSnapshot : null,
+    approvalDispatch?.get(row.id) ?? null,
+    now,
   ));
   const active = [...running, ...pending].sort((a, b) => b.startedAt - a.startedAt);
 
@@ -431,6 +521,8 @@ export function buildPublishLifecycle(input: {
       row,
       false,
       aggregateRecordId === row.id ? aggregateSnapshot : null,
+      approvalDispatch?.get(row.id) ?? null,
+      now,
     ));
 
   if (

@@ -1,16 +1,15 @@
 /**
  * 评论人审 requestId 的单一构造出口。
  *
- * 为什么必须归一：评论人审 requestId 会被**逐字拼进审批信号落盘路径**
- * `/tmp/aidcp-publish-approve-<requestId>.json`（写侧飞书回调 writeApprovalSignal、
- * 读侧 isPublishApproved→readFile、删侧 voidApprovalSignal 三方共用 getApprovalSignalPath），
- * 并被后台面板 web 审批路由以 `^[A-Za-z0-9_-]+$` 白名单校验（排除 '.' '/' 堵死 '../' 穿越）。
+ * 为什么必须归一（理由由 change publish-approval-signal-to-database 重述，结论不变）：
+ * requestId 现在是**持久授权记录的主键**与**面板审批接口的 URL 路径段**，被后台 web 审批路由以
+ * `^[A-Za-z0-9_-]+$` 白名单校验。它不再参与任何文件落盘路径拼接，但仍必须保持受控字符集，
+ * 把标识符与路径段的注入面收敛为零。
  *
- * Facebook 的 noteId 是**完整帖子 URL**（含 `/ : ? = .`），XHS 的 noteId 是不含分隔符的十六进制。
- * 若把 URL 直接嵌进 requestId，posix.join 会把其中的 `/` 当目录分隔、造出不存在的子目录 →
- * writeFile(flag 'wx') 抛 ENOENT → 飞书回调「处理审批回调失败」；读侧 readFile 恒失败 →
- * isPublishApproved 永远 false → 人已点「同意」仍超时丢评论。故此处把 noteId 归一到受控字符集，
- * 保证 requestId 恒为**文件系统安全 + 无路径穿越 + 通过面板白名单**。
+ * 历史事故（保留作教训）：Facebook 的 noteId 是**完整帖子 URL**（含 `/ : ? = .`），当授权还落在
+ * `/tmp/aidcp-publish-approve-<requestId>.json` 时，直接嵌 URL 会让 `posix.join` 把 `/` 当目录分隔 →
+ * 写入抛 ENOENT → 读侧恒 false → 人已点「同意」仍超时丢评论。这类「路径拼接」失效面已随授权迁库消失，
+ * 但归一仍是必需的输入约束。
  *
  * 无损于关联：requestId 是**不透明关联令牌**——note 定位始终走独立的 noteId 字段
  * （事件 payload / 边缘命令 params.noteId），全仓无任何代码从 requestId 反解 noteId
@@ -18,7 +17,7 @@
  * 即便两个不同 URL 归一后相同，`-${ts}` 仍区分之。
  */
 
-/** 归一为审批信号路径 / 面板白名单安全的字符集：非 [A-Za-z0-9_-] 的连续片段折叠为单个 '_'。 */
+/** 归一为记录主键 / 面板路径段安全的字符集：非 [A-Za-z0-9_-] 的连续片段折叠为单个 '_'。 */
 export function sanitizeApprovalRequestSegment(raw: string): string {
   return raw.replace(/[^A-Za-z0-9_-]+/g, '_');
 }

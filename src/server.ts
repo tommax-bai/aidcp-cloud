@@ -229,7 +229,7 @@ import { DraftRefinementWorker } from './publish-agent/draft-refinement-worker.j
 import { hasUserRejectionEvidence } from './publish-agent/types.js';
 import { PublishPipelineLogStore } from './publish-agent/publish-pipeline-log-store.js';
 import { startPanelApi, parsePanelUsers, PgPanelStore } from './panel/index.js';
-import { buildPublishLifecycle } from './panel/publish-stage-lifecycle.js';
+import { buildPublishLifecycle, type ApprovalDispatchProjection } from './panel/publish-stage-lifecycle.js';
 import {
   PgDelegatedTaskStore,
   DelegatedTaskService,
@@ -877,6 +877,35 @@ async function main(): Promise<void> {
         },
       })
     : undefined;
+  /**
+   * 一批稿件的授权下发进度（投影用，task 4.6）。未接线 / 读失败 → 空表，投影不带下发态字段、
+   * 前端回落既有呈现。MUST NOT 因读不到就伪造一个「无阻塞」的下发态。
+   */
+  const readApprovalDispatchProjection = async (
+    rows: Array<{ id: number }>,
+  ): Promise<Map<number, ApprovalDispatchProjection>> => {
+    const out = new Map<number, ApprovalDispatchProjection>();
+    if (!publishApprovalStore) return out;
+    const ids = [...new Set(rows.map((row) => row.id))];
+    if (ids.length === 0) return out;
+    try {
+      const active = await publishApprovalStore.readActiveMany(ids.map((id) => `publish-${id}`));
+      for (const [requestId, row] of active) {
+        const match = /^publish-(\d+)$/.exec(requestId);
+        if (!match) continue;
+        out.set(Number(match[1]), {
+          approved: row.approved,
+          dispatchState: row.dispatchState,
+          dispatchBlockedReason: row.dispatchBlockedReason,
+          decidedAt: row.decidedAt,
+        });
+      }
+    } catch (err) {
+      console.warn('[aidcp-cloud] 授权下发进度读取失败（投影回落既有呈现）:', (err as Error).message);
+    }
+    return out;
+  };
+
   /**
    * 授权写出口的对外形状（沿用 `ApprovalWriteResult`）。未接线（PG 不可用 / target 缺失）时**诚实抛错**，
    * MUST NOT 退化成「只写文件」——那正是本 change 要消灭的第二事实源。
@@ -3305,6 +3334,20 @@ async function main(): Promise<void> {
       }),
     triggerApproved: triggerPublishDispatchOnApprove,
     notifyRejected: notifyPublishRejected,
+    // 客户端稿件卡上把「已批准·待下发」与「待审批」区分开（task 6.5）。读不到 → 不带字段，旧行为不变。
+    ...(publishApprovalStore
+      ? {
+          readDispatchState: async (requestId: string) => {
+            const row = await publishApprovalStore!.readActive(requestId);
+            if (!row || !row.approved) return null;
+            if (row.dispatchState === 'dispatching') return { dispatchState: 'dispatching' as const };
+            if (row.dispatchState !== 'pending_dispatch') return null;
+            return row.dispatchBlockedReason
+              ? { dispatchState: 'blocked' as const, dispatchBlockedReason: row.dispatchBlockedReason }
+              : { dispatchState: 'pending_dispatch' as const };
+          },
+        }
+      : {}),
   });
 
   const handlePublishApprovalAction = (
@@ -3313,14 +3356,39 @@ async function main(): Promise<void> {
   ): Promise<import('./comm/protocol.js').PublishApprovalActionResultPayload> =>
     approvePublishForClient(payload, session.accountId);
 
+  // ── PublishApproved 命令 Inbox（change publish-approval-signal-to-database，task 3.9）─────────
+  // 授权落库与命令写出**同事务**；这里是消费侧：按 (requestId, revision) 原子认领去重后触发一次下发。
+  // 这条路径是拆分后 api → automation 的**权威通路**（跨进程 / 跨主机都成立）；今天与写方同进程，
+  // 故写方仍会同时直调一次下发做「通过即切」——两者都被 dispatch 的既有幂等闸（inFlight / status /
+  // 授权复核）吸收，MUST NOT 造成重复发布。阶段 4 提取 api 后，直调消失、只剩这条。
+  const pumpPublishApprovedInbox = async (): Promise<void> => {
+    if (!publishApprovalStore || !deploymentTarget) return;
+    let commands: Awaited<ReturnType<PublishApprovalStore['claimApprovedCommands']>>;
+    try {
+      commands = await publishApprovalStore.claimApprovedCommands(deploymentTarget, 20);
+    } catch (err) {
+      console.warn('[aidcp-cloud] PublishApproved Inbox 认领失败（本轮跳过，命令未消费）:', (err as Error).message);
+      return;
+    }
+    for (const command of commands) {
+      console.log(
+        `[aidcp-cloud] PublishApproved 命令消费 requestId=${command.requestId} revision=${command.revision} target=${command.executionTarget}`,
+      );
+      triggerPublishDispatchOnApprove(command.requestId);
+    }
+  };
+
   // 兜底补偿（at-least-once）：低频扫描已授权但未下发的待审草稿补触发（覆盖事件丢失）；靠 dispatch 幂等去重。
   const dispatchScanMs = Number(process.env.AIDCP_PUBLISH_DISPATCH_SCAN_MS ?? 60_000);
   if (dispatchScanMs > 0) {
     const scanTimer = setInterval(() => {
+      void pumpPublishApprovedInbox();
       publishDispatcher.scanAndDispatchApproved().catch(() => {});
     }, dispatchScanMs);
     scanTimer.unref?.();
   }
+  // 起步先消费一轮：进程重启前落库但未消费的授权命令不能被无声丢掉。
+  void pumpPublishApprovedInbox();
 
   // 待下发看门狗（change publish-approval-signal-to-database，task 4.4）：只对**无阻塞原因**的长时间
   // 待下发告警——有原因的是已解释的等待（离线/槽位/熔断/暂停/授权不可读），对它们告警只是噪声；
@@ -4845,6 +4913,28 @@ async function main(): Promise<void> {
             else if (!approved && result.written) notifyPublishRejected(requestId);
             return result;
           },
+          // 授权下发进度投影（change publish-approval-signal-to-database，task 4.6）：
+          // 「已批准·待下发」来自持久记录，进程重启后仍成立。
+          ...(publishApprovalStore
+            ? {
+                readApprovalDispatchStates: async (requestIds: string[]) => {
+                  const rows = await publishApprovalStore!.readActiveMany(requestIds);
+                  const out = new Map<
+                    string,
+                    { dispatchState: string; dispatchBlockedReason: string | null; decidedAt: number; approved: boolean }
+                  >();
+                  for (const [requestId, row] of rows) {
+                    out.set(requestId, {
+                      dispatchState: row.dispatchState,
+                      dispatchBlockedReason: row.dispatchBlockedReason,
+                      decidedAt: row.decidedAt,
+                      approved: row.approved,
+                    });
+                  }
+                  return out;
+                },
+              }
+            : {}),
           // 待审正文草稿就地编辑 + 活版本读回 + 授权在途探测（edit-note-draft-before-publish）。经拥有者对象单写，绝不 raw UPDATE。
           publishDraft: {
             edit: (recordId, expectedVersion, patch, editor) =>
@@ -5295,6 +5385,9 @@ async function main(): Promise<void> {
                   recent,
                   inFlightRecordIds: publishDispatcher.getInFlightRecordIds(),
                   recentLimit: 5,
+                  ...(publishApprovalStore
+                    ? { approvalDispatch: await readApprovalDispatchProjection([...pending, ...recent]) }
+                    : {}),
                 });
                 return projectClientPublishQueue({ accountId, lifecycle, tasks });
               } catch (err) {

@@ -1,5 +1,5 @@
 /**
- * CommentApprovalGate — 评论循环内人审闸（复用发帖 AC-PUB /tmp 先到先得信号）。
+ * CommentApprovalGate — 评论循环内人审闸（复用发帖 AC-PUB 的先到先得授权出口）。
  *
  * 职责：评论下发前过飞书人审。循环内等：详情页仍开着时整条跑完。
  * 消费事件：comment.cleared
@@ -15,7 +15,7 @@ import type { RoleName, CommentApprovalTrace, CommentClearedPayload } from '../e
 import { buildCommentApprovalRequestId } from './comment-approval-request-id.js';
 import { sendAutoApproveNotificationBestEffort } from '../comment-agent/auto-approve-notification.js';
 
-/** 评论人审端口：发卡 + 查授权信号（复用发帖 messenger + isPublishApproved，换评论 requestId 命名空间）。 */
+/** 评论人审端口：发卡 + 查授权（复用发帖 messenger + isPublishApproved，换评论 requestId 命名空间）。 */
 export interface CommentApprovalPort {
   /** 发飞书审批卡（携账号、拟发评论原文 + requestId + 笔记标题/用户昵称供人识别）。缺省时卡片显示未获取，不展示 id。 */
   request(input: {
@@ -33,7 +33,13 @@ export interface CommentApprovalPort {
      */
     originChatId?: string;
   }): Promise<void>;
-  /** 查 /tmp 先到先得授权信号；仅 approved===true 视为已授权。 */
+  /**
+   * 查**持久授权记录的活跃行**；仅 `approved === true` 视为已授权
+   * （change publish-approval-signal-to-database：不再读本机文件、不依赖与写方共享文件系统）。
+   *
+   * 查询超时 / 不可达时本方法**可以抛**：调用方按「本轮未授权」继续等待到窗口期满、最终以
+   * `approval_timeout` 收敛，MUST NOT 与 `approval_rejected` 混同、MUST NOT 因查询异常而放行。
+   */
   isApproved(requestId: string): Promise<boolean>;
   /** 等待上限（毫秒；可信停留上限），缺省 90000。 */
   timeoutMs?: number;
@@ -211,6 +217,8 @@ export class CommentApprovalGate extends BaseRole {
       try {
         approved = await this.approval.isApproved(requestId);
       } catch {
+        // 授权查询不可读 ≠ 被拒：按「本轮未授权」处理，继续等到窗口期满收敛为 approval_timeout。
+        // MUST NOT 放行、MUST NOT 报 approval_rejected（两者对运营是完全不同的结论）。
         approved = false;
       }
       if (this.isCommentSublineExpired(payload.noteId)) return;
