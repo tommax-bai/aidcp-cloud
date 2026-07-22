@@ -300,7 +300,7 @@ test('risk reviewer prompt treats ordinary education questions and neutral priva
   assert.match(prompt, /不得把“谨慎起见”当成 unknown/);
 });
 
-test('grounded education answer stays low risk while meaning and claim tags still force review', async () => {
+test('grounded ordinary answer normalizes model-only unknown while meaning and claim tags still force review', async () => {
   const config = snapshot();
   config.profiles[0] = { ...config.profiles[0], maxLength: 60,
     knowledgeDocument: '课程主要适合小学三年级至六年级学生。' };
@@ -308,11 +308,12 @@ test('grounded education answer stays low risk while meaning and claim tags stil
     conditions: { keywordsAny: [], intentsAny: ['product_question'], sourceExternalIds: [],
       messageTypes: ['text'], workHours: null } }];
   const outputs = [
-    { role: 'reply_intent_classifier', intent: 'product_question', confidence: 1, riskTags: [], reasons: [] },
+    { role: 'reply_intent_classifier', intent: 'product_question', confidence: 1,
+      riskTags: ['unknown'], reasons: ['cautious default'] },
     { role: 'reply_polisher', polishedText: '三至六年级更合适。\n小王，谢谢关注 示例视频号。',
       meaningChanged: true, introducedClaims: ['主要适合小学三至六年级'], riskTags: [] },
-    { role: 'reply_risk_reviewer', riskLevel: 'low', riskTags: [],
-      reasons: ['普通课程适龄咨询，无交易或承诺风险'], allowAutoSend: true },
+    { role: 'reply_risk_reviewer', riskLevel: 'unknown', riskTags: ['unknown'],
+      reasons: ['普通课程适龄咨询，无交易或承诺风险'], allowAutoSend: false },
   ];
   const workflow = new ReplyWorkflow({} as InteractionStore, {} as ReplyConfigStore,
     new ReplyAiService({ complete: async () => JSON.stringify(outputs.shift()) }, 100));

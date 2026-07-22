@@ -28,6 +28,10 @@ import {
 const HARD = new Set<string>(HARD_RISK_TAGS);
 const CONTENT_HIGH_RISK = new Set<string>(HARD_RISK_TAGS.filter((tag) =>
   tag !== 'unknown' && tag !== 'meaning_changed' && tag !== 'introduced_claim'));
+const PROCESS_ONLY_RISK = new Set<string>(['unknown', 'meaning_changed', 'introduced_claim']);
+const ORDINARY_KNOWLEDGE_INTENTS = new Set<ReplyIntent>([
+  'general_question', 'product_question', 'support_request',
+]);
 
 export interface ReplyPreviewResult {
   matchedRuleId: string | null;
@@ -313,10 +317,19 @@ export class ReplyWorkflow {
         riskTags: ['unknown'] as RiskTag[], reasons: ['dm_ai_disabled'], allowAutoSend: false }, fallback: 'none' as const };
     const fallbackRisk = classifier.fallback !== 'none' || polisherFallback !== 'none' || reviewer.fallback !== 'none'
       ? ['unknown'] as RiskTag[] : [];
-    const allTags = uniqueTags(classifier.value.riskTags, polish.value.riskTags, reviewer.value.riskTags,
+    const collectedTags = uniqueTags(classifier.value.riskTags, polish.value.riskTags, reviewer.value.riskTags,
       deterministicTags, rule.actions.forceHumanTags, fallbackRisk);
+    const groundedOrdinaryKnowledge = Boolean(profile.knowledgeDocument?.trim()) &&
+      ORDINARY_KNOWLEDGE_INTENTS.has(classifier.value.intent) &&
+      classifier.fallback === 'none' && polisherFallback === 'none' && reviewer.fallback === 'none' &&
+      !candidateRejected && polish.value.introducedClaims.length > 0 &&
+      collectedTags.every((tag) => PROCESS_ONLY_RISK.has(tag));
+    const allTags = groundedOrdinaryKnowledge
+      ? collectedTags.filter((tag) => tag !== 'unknown')
+      : collectedTags;
+    const reviewerRiskLevel = groundedOrdinaryKnowledge ? 'low' : reviewer.value.riskLevel;
     const hasHardRisk = allTags.some((tag) => CONTENT_HIGH_RISK.has(tag));
-    const requiresApproval = forcedHumanRisk(rule, allTags) || reviewer.value.riskLevel !== 'low' ||
+    const requiresApproval = forcedHumanRisk(rule, allTags) || reviewerRiskLevel !== 'low' ||
       !reviewer.value.allowAutoSend || !rule.actions.allowAutoSend || allTags.some((tag) => HARD.has(tag)) ||
       aiPolishInvoked || candidate !== rendered;
     return {
@@ -326,7 +339,7 @@ export class ReplyWorkflow {
       renderedText: rendered,
       polishedText: candidate,
       finalText: candidate,
-      riskLevel: hasHardRisk ? 'high' : fallbackRisk.length || allTags.includes('unknown') ? 'unknown' : reviewer.value.riskLevel,
+      riskLevel: hasHardRisk ? 'high' : fallbackRisk.length || allTags.includes('unknown') ? 'unknown' : reviewerRiskLevel,
       riskReasons: allTags,
       requiresApproval,
       meaningChanged: polish.value.meaningChanged,
