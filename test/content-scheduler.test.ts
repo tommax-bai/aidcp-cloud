@@ -750,6 +750,59 @@ test('content-scheduler: 重试有界 — 用尽后诚实放弃、整格只回�
   assert.deepEqual(abandoned, [{ action: 'post', reason: 'browser_wake_failed' }], '整格只回一张放弃卡');
 });
 
+test('content-scheduler: 异步 not_started 回流沿用同一预算，绝不每轮重置为 5', async () => {
+  // 评论触发入口会先返回「已开跑」，真正的 acquire 失败稍后才经 reportNotStarted() 回流。
+  // 线上回归正是这条异步路径：fire() 先删 retry，终态回流再从 5 新建，结果整小时每分钟重试。
+  const { scheduler, state, calls, abandoned } = mkRetry(() => Promise.resolve({ started: true }));
+
+  for (let i = 0; i < 12; i++) {
+    state.nowMs = new Date(2026, 0, 5, 10, (OFFSET + i) % 60, 0).getTime();
+    const before = calls.length;
+    await scheduler.onTick();
+    await settle();
+    if (calls.length > before) {
+      assert.equal(
+        scheduler.reportNotStarted(ACC, 'post', 'browser_wake_failed'),
+        true,
+        '当前小时格的异步未开始终态应由调度器接管',
+      );
+    }
+  }
+
+  assert.equal(calls.length, 6, '异步终态同样只能首次 + 5 次重试');
+  assert.deepEqual(abandoned, [{ action: 'post', reason: 'browser_wake_failed' }], '异步路径整格仍只放弃一次');
+});
+
+test('content-scheduler: 整格放弃通知失败时返回未接管，调用方可回退即时结果卡', async () => {
+  const state = { nowMs: NOW_HIT.getTime() };
+  let handled = true;
+  const scheduler = new ContentScheduler({
+    onlineAccounts: () => onlineIdentities([ACC]),
+    ...autoPostEnvironmentDeps,
+    scheduleFor: () => scheduleView(),
+    riskStatus: () => 'normal',
+    postedTodayCount: () => Promise.resolve(0),
+    pendingAutonomousCount: () => Promise.resolve(0),
+    isPublishBusy: () => false,
+    triggerPost: () => Promise.resolve({ started: true }),
+    onCellAbandoned: () => { throw new Error('notification unavailable'); },
+    now: () => state.nowMs,
+    logger: { warn: () => {} },
+  });
+
+  for (let i = 0; i < 6; i++) {
+    state.nowMs = new Date(2026, 0, 5, 10, (OFFSET + i) % 60, 0).getTime();
+    await scheduler.onTick();
+    await settle();
+    handled = scheduler.reportNotStarted(ACC, 'post', 'browser_wake_failed');
+  }
+  assert.equal(
+    handled,
+    false,
+    '放弃卡未被接住时必须允许调用方发送最后一张即时失败卡',
+  );
+});
+
 test('content-scheduler: 已开跑 / 抛异常都不归还名额（绝不重复发）', async () => {
   const started = mkRetry(() => Promise.resolve({ started: true }));
   started.state.nowMs = NOW_HIT.getTime();

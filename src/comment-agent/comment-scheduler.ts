@@ -236,7 +236,8 @@ export interface CommentSchedulerDeps {
    * （change browser-slot-scheduling）。排期调度器据此**归还这一小时的名额**并在小时内有界重试。
    * 只对自动排期任务回调；手动 /comment 与排期名额无关。
    */
-  onScheduledTaskNotStarted?: (accountId: string, action: 'comment' | 'contact_comment', reason: string) => void;
+  /** 返回 true 表示排期器已接管本次自动任务的重试与最终放弃通知，可抑制逐次结果卡。 */
+  onScheduledTaskNotStarted?: (accountId: string, action: 'comment' | 'contact_comment', reason: string) => boolean | void;
   /** 原生筛选（缺省 most_collected / one_day）。 */
   sort?: string;
   timeWindow?: string;
@@ -1478,14 +1479,15 @@ export class CommentScheduler {
     // 为什么必须在这里而不是触发回执那儿：接管边端失败（浏览器停泊唤不醒 / acquire 超时 / 边端掉线）发生在
     // **任务已经异步跑起来之后**——那时触发回执早就回了 ok、小时格早就被记为已消耗了。不回流，这一小时就白白
     // 烧掉；而排期开火窗口每小时只有固定的那一分钟，相位不利时账号会整天一次都触发不了。
+    let scheduledNotStartedHandled = false;
     if (result.outcome === 'not_started' && priority === 'automatic') {
       try {
         // contactInfo 非空 = 本次是联系评论（injectContact），两者的排期名额是分开的小时格。
-        this.deps.onScheduledTaskNotStarted?.(
+        scheduledNotStartedHandled = this.deps.onScheduledTaskNotStarted?.(
           accountId,
           contactInfo ? 'contact_comment' : 'comment',
           leaseFailureCode ?? 'not_started',
-        );
+        ) === true;
       } catch (err) {
         log.warn(`[comment-scheduler] onScheduledTaskNotStarted 回调异常：${(err as Error).message}`);
       }
@@ -1498,10 +1500,14 @@ export class CommentScheduler {
       log.warn(`[comment-scheduler] 终态观察回调失败 account=${accountId}：${(err as Error).message}`);
     }
 
-    try {
-      await this.deps.postResultCard?.(accountId, outcomeToReceipt(result), commentSourceLabel(priority), originChatId);
-    } catch (err) {
-      log.warn(`[comment-scheduler] 结果卡片发送失败 account=${accountId}：${(err as Error).message}`);
+    // 自动 not_started 若已由 ContentScheduler 接管，就由小时格预算用尽时统一发一张放弃卡。
+    // 手动任务、跨小时迟到结果或未接线排期器仍照常发即时结果卡，避免静默吞掉真实失败。
+    if (!scheduledNotStartedHandled) {
+      try {
+        await this.deps.postResultCard?.(accountId, outcomeToReceipt(result), commentSourceLabel(priority), originChatId);
+      } catch (err) {
+        log.warn(`[comment-scheduler] 结果卡片发送失败 account=${accountId}：${(err as Error).message}`);
+      }
     }
   }
 

@@ -441,6 +441,34 @@ describe('CommentScheduler edge acquire failure', () => {
     assert.deepEqual(notStarted, [{ action: 'comment', reason: 'edge_unhealthy' }]);
   });
 
+  it('自动 not_started 已由排期器接管 → 中间重试不逐次发结果卡', async () => {
+    const handled = deferred<void>();
+    let resultCards = 0;
+    const s = new CommentScheduler(
+      baseDeps({
+        edgeTaskLeases: {
+          withLease: async () => {
+            throw new EdgeTaskLeaseError(
+              'browser_wake_failed',
+              'edge task rejected because the parked browser could not be woken taskId=task-1 edge=e1',
+            );
+          },
+        },
+        onScheduledTaskNotStarted: () => {
+          handled.resolve();
+          return true;
+        },
+        postResultCard: () => { resultCards++; },
+      }),
+    );
+
+    const trigger = await s.triggerManual('acc-1', { priority: 'automatic' });
+    assert.equal(trigger.ok, true);
+    await handled.promise;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(resultCards, 0, '中间未开始由小时格重试/放弃卡统一通知，不得每分钟刷卡');
+  });
+
   it('release_timeout → 绝不判 not_started（work 已跑过、评论可能已真发出；归还小时格会诱发重复评论）', async () => {
     const cardDone = deferred<{ title: string; message: string }>();
     const notStarted: string[] = [];

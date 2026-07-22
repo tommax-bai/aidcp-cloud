@@ -234,8 +234,15 @@ export class ContentScheduler {
     void run()
       .then((result) => {
         const reason = notStartedReason(result);
-        if (reason === undefined) this.retry.delete(fireKey); // 真开跑了 → 关掉重试窗
-        else this.releaseHourCell(accountId, action, fireKey, cell, reason);
+        if (reason === undefined) {
+          // 评论触发入口只证明异步任务已启动，真正的 edge acquire 失败会在稍后经 reportNotStarted()
+          // 回流。若本格已经处于重试窗，此时删掉 retry 会让每次终态回流都重新从 5 开始，退化成
+          // 整小时每分钟无限重试。保留本格预算；真成功时 lastFired 仍会阻止同格再次触发。
+          const retry = this.retry.get(fireKey);
+          if (!retry || retry.cell !== cell) this.retry.delete(fireKey);
+        } else {
+          this.releaseHourCell(accountId, action, fireKey, cell, reason);
+        }
       })
       .catch((e) => this.deps.logger?.warn(`[content-scheduler] trigger:${action} 异常 account=${accountId}：${(e as Error).message}`))
       .finally(() => {
@@ -251,14 +258,17 @@ export class ContentScheduler {
    * 发生在**任务已经异步跑起来之后**，那时小时格早被记为已消耗。评论管线跑完发现 not_started 时调这里，
    * 把这一小时的名额还回来。
    */
-  reportNotStarted(accountId: string, action: string, reason: string): void {
+  reportNotStarted(accountId: string, action: string, reason: string): boolean {
     const cell = hourCellKey(new Date(this.now()));
-    this.releaseHourCell(accountId, action, `${accountId}|${action}`, cell, reason);
+    return this.releaseHourCell(accountId, action, `${accountId}|${action}`, cell, reason);
   }
 
-  /** 归还小时格并打开小时内重试窗（仅当它仍是本次占住的那一格；跨小时或已被后续触发改写则不动）。 */
-  private releaseHourCell(accountId: string, action: string, fireKey: string, cell: string, reason: string): void {
-    if (this.lastFired.get(fireKey) !== cell) return;
+  /**
+   * 归还小时格并打开小时内重试窗（仅当它仍是本次占住的那一格；跨小时或已被后续触发改写则不动）。
+   * 返回 true 表示本次终态已由小时格重试/放弃通知接管，调用方可抑制逐次结果卡。
+   */
+  private releaseHourCell(accountId: string, action: string, fireKey: string, cell: string, reason: string): boolean {
+    if (this.lastFired.get(fireKey) !== cell) return false;
     const prev = this.retry.get(fireKey);
     const left = prev && prev.cell === cell ? prev.left : MAX_RETRIES_PER_CELL;
     if (left <= 0) {
@@ -266,18 +276,21 @@ export class ContentScheduler {
       this.deps.logger?.warn(
         `[content-scheduler] 触发未开始且本小时重试已用尽，放弃本格 account=${accountId} action=${action} cell=${cell} reason=${reason}`,
       );
+      if (!this.deps.onCellAbandoned) return false;
       try {
-        this.deps.onCellAbandoned?.(accountId, action, reason);
+        this.deps.onCellAbandoned(accountId, action, reason);
       } catch (e) {
         this.deps.logger?.warn(`[content-scheduler] onCellAbandoned 回调异常：${(e as Error).message}`);
+        return false;
       }
-      return;
+      return true;
     }
     this.retry.set(fireKey, { cell, left: left - 1 });
     this.lastFired.delete(fireKey);
     this.deps.logger?.warn(
       `[content-scheduler] 触发未开始，归还小时格 account=${accountId} action=${action} cell=${cell} reason=${reason}（本小时剩余 ${left} 次重试）`,
     );
+    return true;
   }
 
   /** 本 tick 是否放行该动作：命中错峰分钟，或落在「未开始」后打开的小时内重试窗。 */
