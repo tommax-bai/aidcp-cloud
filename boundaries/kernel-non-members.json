@@ -1,0 +1,63 @@
+{
+  "sourceOfTruth": "aidcp/docs/cloud-service-decomposition-proposal.md §4.7「kernel 段」（花名册 + 新增唯一通道 + 两处待裁决项）与 §10.9（协议归属终局裁决）。",
+  "rule": "本文件登记「被多边共同导入、但 MUST NOT 进 kernel」的文件及其原因。门禁对每一条断言：路径仍存在，且其归属层不是 kernel。这些文件的多边共导本身是违规，进 import 豁免清单等待削减，MUST NOT 靠改归属绕过。",
+  "kernelRoster": {
+    "note": "kernel 花名册以定稿 §4.7 kernel 段为唯一权威，本基线上恰好 4 文件 251 行。新增成员 MUST 先走 §4.7 的三条通道（准入 + 析出为独立新文件 + 同批回写 §4.7 目录行与计数）。",
+    "members": [
+      "src/time/shanghai-day.ts",
+      "src/time/source-published-time.ts",
+      "src/deployment-target.ts",
+      "src/cache/pg-config.ts"
+    ]
+  },
+  "rejected": [
+    {
+      "path": "src/comm/protocol.ts",
+      "reason": "§10.9 终局裁决：MUST 归 aidcp-automation 独占、MUST NOT 进 kernel。进 kernel 等于让三边都可导入，会把 §10.9 点名的 6 处 api / content 侧 type-only 依赖就地合法化。MUST NOT 再提案。"
+    },
+    {
+      "path": "src/cache/curated-content-store.ts",
+      "reason": "含 SQL 字面量（建表 + 增删改精选库），违反 kernel「无 SQL」准入条件。"
+    },
+    {
+      "path": "src/client-auth/client-user-store.ts",
+      "reason": "含 SQL 字面量与 advisory lock，且是 api 侧的业务权威存储，违反「无 SQL / 无业务判定」。"
+    },
+    {
+      "path": "src/config/content-schedule-store.ts",
+      "reason": "含 SQL 字面量（排期表建表与读写），违反「无 SQL」。"
+    },
+    {
+      "path": "src/risk/session-limits.ts",
+      "reason": "承载会话预算的业务判定，属 automation 的风控语义，违反「无业务判定」。"
+    },
+    {
+      "path": "src/risk/resume-limits.ts",
+      "reason": "承载恢复预算的业务判定，同上。"
+    },
+    {
+      "path": "src/soul/writing-language.ts",
+      "reason": "承载写作语言的业务判定（账号级语言推断与兜底），违反「无业务判定」。"
+    },
+    {
+      "path": "src/event-bus/index.ts",
+      "reason": "进程内事件总线实现，持有进程内活状态（模块级订阅表），违反「无进程内活状态」。"
+    },
+    {
+      "path": "src/event-bus/types.ts",
+      "reason": "§4.7 两处待裁决项之一，本 change 一次判定为：**不析出、整体维持 automation**。理由三条：① RoleName 是角色编排的业务语义，不满足 kernel「无业务语义」；② 它今天的防漂移价值来自单一源码树的类型穷举，而 kernel 拆仓后是版本化包，放进 kernel 保不住这条防线（§14 红线 16 注 1 已写明出仓后同源穷举失效），真正的替代物是阶段 2/3 的合同夹具；③ 析出需新建文件并改 179 个消费方 import，而该文件是热点单写者、MUST 串行独占，不与本 change 并行。结论 MUST 回写 §4.7，其「一次性削掉 69 条」相应重算为 0。"
+    },
+    {
+      "path": "src/platform/registry.ts",
+      "reason": "§4.7 两处待裁决项之二，本 change 一次判定为：**不析出纯数据段、整体维持 automation**。理由：平台能力声明按 §9 由 aidcp-automation 单写，把数据段放进 kernel 会让三边都可直接导入注册表数据，与「单写」同向相悖；且能力声明是业务语义，不满足 kernel 准入。结论 MUST 回写 §4.7。"
+    },
+    {
+      "path": "src/platform/index.ts",
+      "reason": "随 registry.ts 的裁决一并定：不进 kernel，整体维持 automation。"
+    },
+    {
+      "path": "src/agents/base-role.ts",
+      "reason": "本 change 任务 2.4 曾提案「收窄两处具体实现导入后标为 kernel」，但 §4.7 kernel 段声明本基线 sha 上 kernel 恰好是那 4 个文件、且新增 MUST 走 §4.7 回写通道。以定稿为准：本文件维持 automation（§4.7 src/agents/ 43 automation 的补集内），是否进 kernel 由后续控制仓 change 改 §4.7 后再定。"
+    }
+  ]
+}

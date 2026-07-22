@@ -1,0 +1,12 @@
+{
+  "rule": "定稿 §12 要求「无法静态判定的动态拼接 SQL MUST 判为失败，MUST NOT 跳过」。本文件是该失败的**唯一解除通道**：每一处动态拼接的表名 MUST 在这里逐处具名登记，门禁按登记的表集判归属；未登记的动态拼接一律失败。条目 MUST NOT 用通配，MUST 在源码里仍能命中（失效条目同样判失败）。",
+  "sites": [
+    {
+      "file": "src/interactions/reply-config-store.ts",
+      "op": "insert",
+      "tables": ["reply_templates", "reply_rules", "account_reply_profiles"],
+      "evidence": "同文件内 `for (const table of ['reply_templates', 'reply_rules', 'account_reply_profiles'] as const)` 的字面量数组，插值只可能取这三值",
+      "reason": "配置发布时按三张配置表逐张复制版本行；表名来自同文件的字面量常量数组，非外部输入"
+    }
+  ]
+}

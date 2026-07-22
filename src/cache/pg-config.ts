@@ -1,5 +1,24 @@
+/**
+ * PostgreSQL 连接参数解析（kernel 层，见控制仓定稿 §4.7 kernel 花名册）。
+ *
+ * kernel 准入要求本文件 MUST NOT 反向依赖任何业务层，因此默认连接配置常量从
+ * `pg-anchor-cache.ts`（automation 层）**整体搬到这里**，`pg-anchor-cache.ts` 改为再导出，
+ * 引用方无需改动、取值逐字不变。
+ *
+ * 明文口令兜底是既存事实，本次只做搬迁、MUST NOT 视为已处置：
+ * 删除该兜底并改为纯配置读取是定稿 §6.5.6 列的**拆分前置条件**（独立 change 承接），
+ * 搬到这里之后它在全仓只剩这一处出现点，正是该 change 要动的唯一位置。
+ */
 import type pg from 'pg';
-import { DEFAULT_PG_CONFIG } from './pg-anchor-cache.js';
+
+/** 默认连接配置（本机 PG）。原位置为 `pg-anchor-cache.ts`，取值逐字未改。 */
+export const DEFAULT_PG_CONFIG = {
+  host: '127.0.0.1',
+  port: 5432,
+  database: 'aidcp',
+  user: 'aidcp',
+  password: '***REMOVED***',
+};
 
 function readEnvString(name: string): string | undefined {
   const value = process.env[name];

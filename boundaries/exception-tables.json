@@ -1,0 +1,20 @@
+{
+  "sourceOfTruth": "aidcp/docs/cloud-service-decomposition-proposal.md §5.1「两张运维表的具名例外」与 §12「例外表清单（与豁免清单分立，防死结）」。",
+  "rule": "本清单**不占豁免清单条目、不参与棘轮计数**。条目数只减不增；新增 MUST 由控制仓 change 批准并写明为何无消除时限。这些表按设计到 §12 阶段 2 才建，因此本 change 一次性 seed 时它们在源码里还不存在——门禁 MUST 把它们视为已登记标识符，MUST NOT 因为扫不到就判为孤儿。",
+  "tables": [
+    {
+      "table": "service_metrics",
+      "owner": null,
+      "form": "按 svc 分区的幂等 upsert 计数表，不是业务事实源。允许多写者，但每行的 svc MUST 等于写入方自身。",
+      "whyNoEliminationDeadline": "设计内永久例外：多写者是这张表的设计前提，不存在「收敛到单一 owner」这一终态。",
+      "staticallyUncheckable": "「每行 svc 等于写入方自身」是运行时不变量，SQL 字面量扫描判不了，MUST 由人工盘点与运行期断言补位。"
+    },
+    {
+      "table": "service_probe",
+      "owner": null,
+      "form": "外部探针独占表；三服务对该表 MUST 只读。",
+      "whyNoEliminationDeadline": "设计内永久例外：owner 是不属于三服务的外部探针。",
+      "staticallyUncheckable": "「探针 MUST NOT 被授予任何业务表写权限」由数据库 GRANT 保证，静态门禁判不了。"
+    }
+  ]
+}

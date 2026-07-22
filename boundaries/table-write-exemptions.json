@@ -1,0 +1,111 @@
+{
+  "seedTotal": 10,
+  "seedUnplanned": 10,
+  "frozenTotal": 10,
+  "recordedAt": "2026-07-22",
+  "raises": [],
+  "entries": [
+    {
+      "table": "account_reply_profiles",
+      "file": "src/interactions/interaction-store.ts",
+      "ops": [
+        "delete"
+      ],
+      "reason": "§4.6.1 硬要求点名的跨 owner 单事务清理：purgeDueOffboards（interaction-store.ts:1635-1678）跨 11 张 interaction_* / reply_* 表删除，其中本表属主为 aidcp-api。§12 阶段 1 MUST 改成由 automation 发起、api 消费的离场 saga，或把清理下放为各 owner 的本地 purge；MUST NOT 保留跨 owner 单事务删除。",
+      "eliminatedBy": null,
+      "note": "automation 层文件删除 api 属主表；消除方式已在 §4.6.1 写定，控制仓尚未立项承接 change，eliminatedBy 暂为 null（seed 期允许）。"
+    },
+    {
+      "table": "interaction_audit_events",
+      "file": "src/interactions/interaction-store.ts",
+      "ops": [
+        "insert",
+        "delete"
+      ],
+      "reason": "§4.6.1 硬要求点名的跨 owner 单事务清理：purgeDueOffboards（interaction-store.ts:1635-1678）跨 11 张 interaction_* / reply_* 表删除，其中本表属主为 aidcp-api。§12 阶段 1 MUST 改成由 automation 发起、api 消费的离场 saga，或把清理下放为各 owner 的本地 purge；MUST NOT 保留跨 owner 单事务删除。",
+      "eliminatedBy": null,
+      "note": "automation 层文件删除 api 属主表；消除方式已在 §4.6.1 写定，控制仓尚未立项承接 change，eliminatedBy 暂为 null（seed 期允许）。"
+    },
+    {
+      "table": "interaction_auth_state",
+      "file": "src/client-auth/client-user-store.ts",
+      "ops": [
+        "update"
+      ],
+      "reason": "§4.6.1 硬要求点名的 api 侧直写：client-user-store.ts 今天直写 interaction 表（:463 / :480 / :538 / :554），违反 §5.1 单写。§12 阶段 1 退出判据要求本表收口为经窄接口或持久命令，或写明推迟到阶段 2 的理由与承接 change 名。",
+      "eliminatedBy": null,
+      "note": "api 层文件写 automation 属主表；§12 阶段 1 退出判据具名要求本条有明确结论，eliminatedBy 暂为 null（seed 期允许）。"
+    },
+    {
+      "table": "interaction_offboard_audit",
+      "file": "src/client-auth/client-user-store.ts",
+      "ops": [
+        "insert"
+      ],
+      "reason": "§4.6.1 硬要求点名的 api 侧直写：client-user-store.ts 今天直写 interaction 表（:463 / :480 / :538 / :554），违反 §5.1 单写。§12 阶段 1 退出判据要求本表收口为经窄接口或持久命令，或写明推迟到阶段 2 的理由与承接 change 名。",
+      "eliminatedBy": null,
+      "note": "api 层文件写 automation 属主表；§12 阶段 1 退出判据具名要求本条有明确结论，eliminatedBy 暂为 null（seed 期允许）。"
+    },
+    {
+      "table": "interaction_offboards",
+      "file": "src/client-auth/client-user-store.ts",
+      "ops": [
+        "insert",
+        "update"
+      ],
+      "reason": "§4.6.1 硬要求点名的 api 侧直写：client-user-store.ts 今天直写 interaction 表（:463 / :480 / :538 / :554），违反 §5.1 单写。§12 阶段 1 退出判据要求本表收口为经窄接口或持久命令，或写明推迟到阶段 2 的理由与承接 change 名。",
+      "eliminatedBy": null,
+      "note": "api 层文件写 automation 属主表；§12 阶段 1 退出判据具名要求本条有明确结论，eliminatedBy 暂为 null（seed 期允许）。"
+    },
+    {
+      "table": "interaction_reply_config_versions",
+      "file": "src/interactions/interaction-store.ts",
+      "ops": [
+        "delete"
+      ],
+      "reason": "§4.6.1 硬要求点名的跨 owner 单事务清理：purgeDueOffboards（interaction-store.ts:1635-1678）跨 11 张 interaction_* / reply_* 表删除，其中本表属主为 aidcp-api。§12 阶段 1 MUST 改成由 automation 发起、api 消费的离场 saga，或把清理下放为各 owner 的本地 purge；MUST NOT 保留跨 owner 单事务删除。",
+      "eliminatedBy": null,
+      "note": "automation 层文件删除 api 属主表；消除方式已在 §4.6.1 写定，控制仓尚未立项承接 change，eliminatedBy 暂为 null（seed 期允许）。"
+    },
+    {
+      "table": "interaction_reply_configs",
+      "file": "src/interactions/interaction-store.ts",
+      "ops": [
+        "delete"
+      ],
+      "reason": "§4.6.1 硬要求点名的跨 owner 单事务清理：purgeDueOffboards（interaction-store.ts:1635-1678）跨 11 张 interaction_* / reply_* 表删除，其中本表属主为 aidcp-api。§12 阶段 1 MUST 改成由 automation 发起、api 消费的离场 saga，或把清理下放为各 owner 的本地 purge；MUST NOT 保留跨 owner 单事务删除。",
+      "eliminatedBy": null,
+      "note": "automation 层文件删除 api 属主表；消除方式已在 §4.6.1 写定，控制仓尚未立项承接 change，eliminatedBy 暂为 null（seed 期允许）。"
+    },
+    {
+      "table": "interaction_runtime_controls",
+      "file": "src/client-auth/client-user-store.ts",
+      "ops": [
+        "update"
+      ],
+      "reason": "§4.6.1 硬要求点名的 api 侧直写：client-user-store.ts 今天直写 interaction 表（:463 / :480 / :538 / :554），违反 §5.1 单写。§12 阶段 1 退出判据要求本表收口为经窄接口或持久命令，或写明推迟到阶段 2 的理由与承接 change 名。",
+      "eliminatedBy": null,
+      "note": "api 层文件写 automation 属主表；§12 阶段 1 退出判据具名要求本条有明确结论，eliminatedBy 暂为 null（seed 期允许）。"
+    },
+    {
+      "table": "reply_rules",
+      "file": "src/interactions/interaction-store.ts",
+      "ops": [
+        "delete"
+      ],
+      "reason": "§4.6.1 硬要求点名的跨 owner 单事务清理：purgeDueOffboards（interaction-store.ts:1635-1678）跨 11 张 interaction_* / reply_* 表删除，其中本表属主为 aidcp-api。§12 阶段 1 MUST 改成由 automation 发起、api 消费的离场 saga，或把清理下放为各 owner 的本地 purge；MUST NOT 保留跨 owner 单事务删除。",
+      "eliminatedBy": null,
+      "note": "automation 层文件删除 api 属主表；消除方式已在 §4.6.1 写定，控制仓尚未立项承接 change，eliminatedBy 暂为 null（seed 期允许）。"
+    },
+    {
+      "table": "reply_templates",
+      "file": "src/interactions/interaction-store.ts",
+      "ops": [
+        "delete"
+      ],
+      "reason": "§4.6.1 硬要求点名的跨 owner 单事务清理：purgeDueOffboards（interaction-store.ts:1635-1678）跨 11 张 interaction_* / reply_* 表删除，其中本表属主为 aidcp-api。§12 阶段 1 MUST 改成由 automation 发起、api 消费的离场 saga，或把清理下放为各 owner 的本地 purge；MUST NOT 保留跨 owner 单事务删除。",
+      "eliminatedBy": null,
+      "note": "automation 层文件删除 api 属主表；消除方式已在 §4.6.1 写定，控制仓尚未立项承接 change，eliminatedBy 暂为 null（seed 期允许）。"
+    }
+  ]
+}

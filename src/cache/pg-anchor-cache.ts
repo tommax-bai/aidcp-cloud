@@ -14,6 +14,7 @@
 import pg from 'pg';
 import type { RemoteAnchor } from '../comm/protocol.js';
 import { ensureCapabilitySchema } from '../schema/schema-capability.js';
+import { DEFAULT_PG_CONFIG } from './pg-config.js';
 
 const { Pool } = pg;
 
@@ -30,14 +31,12 @@ export interface PgAnchorCacheOptions {
   pool?: pg.Pool;
 }
 
-/** 默认连接配置（本机 PG） */
-export const DEFAULT_PG_CONFIG = {
-  host: '127.0.0.1',
-  port: 5432,
-  database: 'aidcp',
-  user: 'aidcp',
-  password: '***REMOVED***',
-};
+/**
+ * 默认连接配置（本机 PG）。定义已整体搬到 kernel 层的 `./pg-config.ts`（取值逐字不变）：
+ * kernel 成员 MUST NOT 反向依赖业务层，而 `pg-config.ts` 原先反向 import 本文件。
+ * 此处再导出，31 个既有引用方无需改动。
+ */
+export { DEFAULT_PG_CONFIG };
 
 function readEnvString(name: string): string | undefined {
   const value = process.env[name];
