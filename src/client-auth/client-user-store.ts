@@ -1254,6 +1254,9 @@ export class ClientUserStore {
         await client.query('ROLLBACK');
         return { ok: false, reason: 'environment_already_registered' };
       }
+      // 新环境带 slow_start_since 落库 = 慢启动锚点这个**闸门镜像**变了：同事务推进版本，
+      // 否则另一 target 的进程到重启前都把这个新号当「未开启慢启动」= 满配额跑。
+      await this.mirrorVersionBumper?.bumpInTx(client, 'client_environment_slow_start');
       const assigned = await client.query<{
         env_key: string; label: string | null; platform: string | null; assigned_at: Date;
       }>(
@@ -1655,6 +1658,9 @@ export class ClientUserStore {
     }
     // 只有真实 accountId 到来时绑定才可能变化；null 在 COALESCE 语义下不会擦除既有绑定。
     if (clean.some((item) => item.accountId != null)) {
+      // 绑定变化 → 慢启动锚点按账号的解析结果随之变化（含「歧义」判定）。本进程刷镜像之外，
+      // 还要推进版本让别的 target 的进程失效重载。
+      await this.bumpMirrorBestEffort('client_environment_slow_start');
       await this.refreshEnvironmentSlowStartMirror();
     }
     return clean.length;
