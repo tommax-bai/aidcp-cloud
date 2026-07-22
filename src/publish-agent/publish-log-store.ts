@@ -162,6 +162,8 @@ export interface PendingPublishPreview {
   updatedAt: number;
   publishMode: PublishMode;
   publishTime: number | null;
+  /** 客户首页关联精选来源所需的最小键；不披露 sourceReference 其余快照。 */
+  sourceCuratedId?: number | null;
   imageReferenceAudit?: {
     requestedCount: number;
     usableCount: number;
@@ -212,6 +214,19 @@ function toPendingPublishPreview(row: PendingPublishPreviewRow): PendingPublishP
       }
     : undefined;
   const images = (row.images ?? []).length > 0 ? row.images! : row.image_url ? [row.image_url] : [];
+  const sourceReference = (() => {
+    if (row.source_reference == null) return null;
+    try {
+      const parsed = typeof row.source_reference === 'string' ? JSON.parse(row.source_reference) : row.source_reference;
+      return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : null;
+    } catch {
+      return null;
+    }
+  })();
+  const rawCuratedId = sourceReference?.curatedContentId;
+  const parsedCuratedId = typeof rawCuratedId === 'number' || typeof rawCuratedId === 'string'
+    ? Number(rawCuratedId)
+    : NaN;
   return {
     id: row.id,
     accountId: row.account_id,
@@ -225,6 +240,7 @@ function toPendingPublishPreview(row: PendingPublishPreviewRow): PendingPublishP
     updatedAt: (row.edited_at ?? row.published_at).getTime(),
     publishMode,
     publishTime,
+    ...(sourceReference ? { sourceCuratedId: Number.isInteger(parsedCuratedId) && parsedCuratedId > 0 ? parsedCuratedId : null } : {}),
     ...(imageReferenceAudit ? { imageReferenceAudit } : {}),
   };
 }
@@ -265,6 +281,20 @@ export type EditDraftResult =
       images: string[];
     }
   | { ok: false; reason: EditDraftReason };
+
+export interface RefineDraftPatch {
+  title?: string;
+  content?: string;
+  topics?: string[];
+  images?: string[];
+}
+
+export type RefineDraftSelection =
+  | { imageUrl: string }
+  | { start: number; end: number; text: string }
+  | null;
+
+export type RefineDraftResult = EditDraftResult | { ok: false; reason: 'invalid_scope' | 'invalid_selection' };
 
 /** publish_log 持久化（PostgreSQL，aidcp 库）。 */
 export class PublishLogStore {
@@ -576,6 +606,7 @@ export class PublishLogStore {
     expectedVersion: number,
     patch: EditDraftPatch,
     editor: string,
+    expectedAccountId?: string,
   ): Promise<EditDraftResult> {
     // ── 先做纯字段校验（红线：字形安全标题、可见范围枚举、类型），任一不过即诚实拒绝，不进事务 ──
     let newTitle: string | undefined;
@@ -640,8 +671,8 @@ export class PublishLogStore {
         platform: string | null;
       }>(
         `SELECT status, content_version, title, content, publish_metadata, image_url, images, platform
-         FROM publish_log WHERE id = $1 FOR UPDATE`,
-        [recordId],
+         FROM publish_log WHERE id = $1 AND ($2::text IS NULL OR account_id = $2) FOR UPDATE`,
+        [recordId, expectedAccountId ?? null],
       );
       const row = sel.rows[0];
       if (!row) {
@@ -716,6 +747,7 @@ export class PublishLogStore {
              content_version = $5, edited_by = $6, edited_at = now(),
              images = $8::text[], image_url = $9
          WHERE id = $1 AND status = 'pending_approval' AND content_version = $7
+           AND ($10::text IS NULL OR account_id = $10)
          RETURNING content_version, title, content, publish_metadata, image_url, images`,
         [
           recordId,
@@ -727,6 +759,7 @@ export class PublishLogStore {
           expectedVersion,
           nextImages,
           nextCover,
+          expectedAccountId ?? null,
         ],
       );
       if (upd.rowCount === 0) {
@@ -750,6 +783,177 @@ export class PublishLogStore {
       } catch {
         /* 连接已断则忽略 */
       }
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * AI 调整的最终单写：所有模型/图片调用先在事务外完成，只有完整结果才能到这里一次 CAS 落稿。
+   * scope 与 selection 在锁内对当前版本复核，防止 worker/调用方把更宽补丁伪装成局部调整。
+   */
+  async refineDraft(
+    recordId: number,
+    accountId: string,
+    expectedVersion: number,
+    scope: 'whole' | 'body' | 'images' | 'selected_image' | 'selected_text',
+    selection: RefineDraftSelection,
+    patch: RefineDraftPatch,
+    editor: string,
+  ): Promise<RefineDraftResult> {
+    const keys = Object.keys(patch).filter((key) => patch[key as keyof RefineDraftPatch] !== undefined);
+    const allowed: Record<typeof scope, readonly string[]> = {
+      whole: ['title', 'content', 'topics', 'images'],
+      body: ['content'],
+      images: ['images'],
+      selected_image: ['images'],
+      selected_text: ['content'],
+    };
+    if (keys.length === 0 || keys.some((key) => !allowed[scope].includes(key))) {
+      return { ok: false, reason: 'invalid_scope' };
+    }
+    if (scope === 'whole' && !allowed.whole.every((key) => keys.includes(key))) {
+      return { ok: false, reason: 'invalid_scope' };
+    }
+    let nextTitle = patch.title;
+    if (nextTitle !== undefined) {
+      if (typeof nextTitle !== 'string' || !nextTitle.trim()) return { ok: false, reason: 'invalid_title' };
+      nextTitle = clampTitle(nextTitle, 18);
+    }
+    if (patch.content !== undefined && (typeof patch.content !== 'string' || !patch.content.trim())) {
+      return { ok: false, reason: 'invalid_field' };
+    }
+    if (patch.topics !== undefined && (!Array.isArray(patch.topics) || !patch.topics.every((t) => typeof t === 'string'))) {
+      return { ok: false, reason: 'invalid_field' };
+    }
+    if (patch.images !== undefined && (
+      !Array.isArray(patch.images) || patch.images.length === 0 ||
+      !patch.images.every((url) => typeof url === 'string' && url.trim().length > 0)
+    )) {
+      return { ok: false, reason: 'invalid_field' };
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const selected = await client.query<{
+        status: string;
+        content_version: number | string;
+        title: string | null;
+        content: string;
+        publish_metadata: unknown;
+        image_url: string | null;
+        images: string[] | null;
+      }>(
+        `SELECT status, content_version, title, content, publish_metadata, image_url, images
+           FROM publish_log
+          WHERE id=$1 AND account_id=$2
+          FOR UPDATE`,
+        [recordId, accountId],
+      );
+      const row = selected.rows[0];
+      if (!row) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'not_found' };
+      }
+      if (row.status !== 'pending_approval') {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'not_pending' };
+      }
+      if (Number(row.content_version) !== expectedVersion) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'version_conflict' };
+      }
+
+      const currentImages = (row.images ?? []).length > 0 ? row.images! : row.image_url ? [row.image_url] : [];
+      if (scope === 'selected_text') {
+        if (!selection || !('start' in selection) || !Number.isInteger(selection.start) || !Number.isInteger(selection.end)
+          || selection.start < 0 || selection.end <= selection.start || selection.end > row.content.length
+          || row.content.slice(selection.start, selection.end) !== selection.text || patch.content === undefined
+          || !patch.content.startsWith(row.content.slice(0, selection.start))
+          || !patch.content.endsWith(row.content.slice(selection.end))) {
+          await client.query('ROLLBACK');
+          return { ok: false, reason: 'invalid_selection' };
+        }
+      }
+      if (scope === 'selected_image') {
+        if (!selection || !('imageUrl' in selection) || patch.images === undefined) {
+          await client.query('ROLLBACK');
+          return { ok: false, reason: 'invalid_selection' };
+        }
+        const matching = currentImages.reduce<number[]>((out, url, index) => {
+          if (url === selection.imageUrl) out.push(index);
+          return out;
+        }, []);
+        const selectedIndex = matching[0];
+        if (matching.length !== 1 || patch.images.length !== currentImages.length || selectedIndex === undefined
+          || patch.images[selectedIndex] === currentImages[selectedIndex]
+          || patch.images.some((url, index) => index !== selectedIndex && url !== currentImages[index])) {
+          await client.query('ROLLBACK');
+          return { ok: false, reason: 'invalid_selection' };
+        }
+      }
+      if ((scope === 'images' || scope === 'whole') && patch.images !== undefined) {
+        const expectedCount = Math.max(1, currentImages.length);
+        if (patch.images.length !== expectedCount) {
+          await client.query('ROLLBACK');
+          return { ok: false, reason: 'invalid_field' };
+        }
+      }
+
+      let metadata = parsePublishMetadata(row.publish_metadata);
+      if (patch.topics !== undefined) {
+        if (metadata == null) {
+          await client.query('ROLLBACK');
+          return { ok: false, reason: 'invalid_field' };
+        }
+        metadata = { ...metadata, topics: patch.topics };
+      }
+      const nextImages = patch.images ?? currentImages;
+      const nextVersion = Number(row.content_version) + 1;
+      const updated = await client.query<{
+        content_version: number | string;
+        title: string | null;
+        content: string;
+        publish_metadata: unknown;
+        images: string[] | null;
+      }>(
+        `UPDATE publish_log
+            SET title=$3, content=$4, publish_metadata=$5::jsonb,
+                images=$6::text[], image_url=$7, content_version=$8,
+                edited_by=$9, edited_at=now()
+          WHERE id=$1 AND account_id=$2 AND status='pending_approval' AND content_version=$10
+          RETURNING content_version,title,content,publish_metadata,images`,
+        [
+          recordId,
+          accountId,
+          nextTitle !== undefined ? nextTitle : row.title,
+          patch.content !== undefined ? patch.content : row.content,
+          metadata == null ? null : JSON.stringify(metadata),
+          nextImages,
+          nextImages[0] ?? null,
+          nextVersion,
+          editor,
+          expectedVersion,
+        ],
+      );
+      if ((updated.rowCount ?? 0) === 0) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'version_conflict' };
+      }
+      await client.query('COMMIT');
+      const out = updated.rows[0];
+      return {
+        ok: true,
+        contentVersion: Number(out.content_version),
+        title: out.title,
+        content: out.content,
+        metadata: parsePublishMetadata(out.publish_metadata),
+        images: out.images ?? [],
+      };
+    } catch (err) {
+      try { await client.query('ROLLBACK'); } catch { /* connection already closed */ }
       throw err;
     } finally {
       client.release();

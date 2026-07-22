@@ -34,7 +34,13 @@ import type {
   UiDailyUsagePayload,
   UiSlowStartPayload,
 } from '../comm/protocol.js';
-import type { PendingPublishPreview, PublishLogStore } from '../publish-agent/publish-log-store.js';
+import type { EditDraftResult, PendingPublishPreview, PublishLogStore } from '../publish-agent/publish-log-store.js';
+import type {
+  DraftRefinementJob,
+  DraftRefinementScope,
+  DraftRefinementSelection,
+  DraftRefinementStore,
+} from '../publish-agent/draft-refinement.js';
 import type { PersonaAutoFillService } from '../agents/persona-auto-fill.js';
 import type { AccountPersonaService } from '../config/account-persona-service.js';
 import { isWritingLanguage } from '../soul/writing-language.js';
@@ -74,6 +80,8 @@ export interface ClientAuthDeps {
     PublishLogStore,
     'listPendingPublishPreviewsForAccount' | 'pendingPublishPreviewForAccountRecord'
   >;
+  /** 客户创建/读取的持久调整任务；store 自身再按 execution_target 隔离。 */
+  draftRefinements?: Pick<DraftRefinementStore, 'create' | 'getForAccount' | 'latestForAccountRecord' | 'latestForAccountRecords'>;
   /** Account-scoped Xiaohongshu scheduled truth for approval-page free-slot selection. */
   publishSchedule?: Pick<PublishLogStore, 'listOccupiedScheduledTimesForAccount'>;
   /** 客户首页只读概览；账号键由持久绑定解析，DTO 不得回传 accountId。 */
@@ -87,6 +95,13 @@ export interface ClientAuthDeps {
   };
   /** 客户待审稿写：传输层只解析客户环境，实际闸序与落库复用既有领域方法。 */
   publishDraftActions?: {
+    edit(
+      recordId: number,
+      expectedVersion: number,
+      patch: { title?: string; content?: string; topics?: string[] },
+      accountId: string,
+      actor: string,
+    ): Promise<EditDraftResult>;
     approve(
       payload: PublishApprovalActionPayload,
       accountId: string,
@@ -353,11 +368,51 @@ function toClientPendingDraftListItem(row: PendingPublishPreview): Record<string
     updatedAt: row.updatedAt,
     publishMode: row.publishMode,
     publishTime: row.publishTime,
+    ...(Object.prototype.hasOwnProperty.call(row, 'sourceCuratedId') ? { sourceCuratedId: row.sourceCuratedId ?? null } : {}),
   };
 }
 
 function toClientPendingDraftDetail(row: PendingPublishPreview): Record<string, unknown> {
   return { ...toClientPendingDraftListItem(row), content: row.content };
+}
+
+function toClientRefinementJob(job: DraftRefinementJob): Record<string, unknown> {
+  return {
+    id: job.id,
+    recordId: job.recordId,
+    expectedVersion: job.expectedVersion,
+    scope: job.scope,
+    status: job.status,
+    progress: job.progress.map((item) => ({
+      seq: item.seq,
+      stage: item.stage,
+      status: item.status,
+      summary: item.summary,
+      at: item.at,
+    })),
+    resultVersion: job.resultVersion,
+    error: job.errorCode ? { code: job.errorCode, message: job.errorMessage ?? '调整没有完成，原稿未变化。' } : null,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+  };
+}
+
+function toClientRefinementSummary(job: DraftRefinementJob): Record<string, unknown> {
+  const current = [...job.progress].reverse().find((item) => item.status === 'running') ?? job.progress.at(-1) ?? null;
+  return {
+    id: job.id,
+    scope: job.scope,
+    status: job.status,
+    ...(current ? { current: { stage: current.stage, status: current.status, summary: current.summary } } : {}),
+    resultVersion: job.resultVersion,
+    error: job.errorCode ? { code: job.errorCode, message: job.errorMessage ?? '调整没有完成，原稿未变化。' } : null,
+  };
+}
+
+function editFailureStatus(reason: Exclude<EditDraftResult, { ok: true }>['reason']): number {
+  if (reason === 'not_found') return 404;
+  if (reason === 'not_pending' || reason === 'version_conflict') return 409;
+  return 422;
 }
 
 /**
@@ -751,6 +806,227 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       }
       sendJson(res, 200, {
         data: { envKey, ...result.view, firstPostOnboarding: result.firstPostOnboarding },
+        meta: { requestId: randomUUID(), asOf: Date.now() },
+      });
+      return;
+    }
+
+    const draftEditMatch = /^\/environments\/([^/]+)\/publish-drafts\/([^/]+)$/.exec(url);
+    if (method === 'PATCH' && draftEditMatch) {
+      if (!deps.publishDraftActions || !deps.pendingDrafts) {
+        sendJson(res, 503, { error: 'publish_draft_actions_unavailable' });
+        return;
+      }
+      let envKey: string;
+      let recordId: number;
+      try {
+        envKey = decodeURIComponent(draftEditMatch[1] ?? '').trim();
+        recordId = Number(decodeURIComponent(draftEditMatch[2] ?? ''));
+      } catch {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_draft_target' });
+        return;
+      }
+      if (!envKey || !Number.isInteger(recordId) || recordId <= 0) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_draft_target' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req, 64 * 1024);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const raw = body as Record<string, unknown>;
+      const allowed = new Set(['expectedVersion', 'title', 'content', 'topics']);
+      const patchKeys = Object.keys(raw).filter((key) => key !== 'expectedVersion');
+      if (Object.keys(raw).some((key) => !allowed.has(key)) || patchKeys.length === 0
+        || !Number.isInteger(raw.expectedVersion) || Number(raw.expectedVersion) < 0
+        || (raw.title !== undefined && (typeof raw.title !== 'string' || !raw.title.trim()))
+        || (raw.content !== undefined && (typeof raw.content !== 'string' || !raw.content.trim()))
+        || (raw.topics !== undefined && (!Array.isArray(raw.topics) || !raw.topics.every((topic) => typeof topic === 'string')))) {
+        sendJson(res, 422, { error: 'validation_failed', reason: 'invalid_draft_edit_intent' });
+        return;
+      }
+      const bound = await resolveOwnedBoundAccount(deps, res, userId, envKey);
+      if (!bound) return;
+      const result = await deps.publishDraftActions.edit(
+        recordId,
+        Number(raw.expectedVersion),
+        {
+          ...(raw.title !== undefined ? { title: raw.title as string } : {}),
+          ...(raw.content !== undefined ? { content: raw.content as string } : {}),
+          ...(raw.topics !== undefined ? { topics: raw.topics as string[] } : {}),
+        },
+        bound.accountId,
+        `client-auth:${userId}:${bound.envKey}`,
+      );
+      if (!result.ok) {
+        sendJson(res, editFailureStatus(result.reason), { error: 'publish_draft_edit_rejected', reason: result.reason });
+        return;
+      }
+      sendJson(res, 200, {
+        data: {
+          envKey: bound.envKey,
+          item: {
+            id: recordId,
+            title: result.title,
+            content: result.content,
+            topics: Array.isArray(result.metadata?.topics) ? result.metadata.topics : [],
+            images: result.images,
+            contentVersion: result.contentVersion,
+          },
+        },
+        meta: { requestId: randomUUID(), asOf: Date.now() },
+      });
+      return;
+    }
+
+    const refinementCreateMatch = /^\/environments\/([^/]+)\/publish-drafts\/([^/]+)\/refinements$/.exec(url);
+    if (method === 'POST' && refinementCreateMatch) {
+      if (!deps.pendingDrafts || !deps.draftRefinements) {
+        sendJson(res, 503, { error: 'draft_refinement_unavailable' });
+        return;
+      }
+      let envKey: string;
+      let recordId: number;
+      try {
+        envKey = decodeURIComponent(refinementCreateMatch[1] ?? '').trim();
+        recordId = Number(decodeURIComponent(refinementCreateMatch[2] ?? ''));
+      } catch {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_draft_target' });
+        return;
+      }
+      if (!envKey || !Number.isInteger(recordId) || recordId <= 0) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_draft_target' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req, 16 * 1024);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const raw = body as Record<string, unknown>;
+      const allowed = new Set(['expectedVersion', 'scope', 'instruction', 'selection']);
+      const scopes: DraftRefinementScope[] = ['whole', 'body', 'images', 'selected_image', 'selected_text'];
+      const scope = raw.scope as DraftRefinementScope;
+      const instruction = typeof raw.instruction === 'string' ? raw.instruction.trim() : '';
+      if (Object.keys(raw).some((key) => !allowed.has(key))
+        || !Number.isInteger(raw.expectedVersion) || Number(raw.expectedVersion) < 0
+        || !scopes.includes(scope) || !instruction || instruction.length > 1000) {
+        sendJson(res, 422, { error: 'validation_failed', reason: 'invalid_refinement_intent' });
+        return;
+      }
+      const bound = await resolveOwnedBoundAccount(deps, res, userId, envKey);
+      if (!bound) return;
+      const draft = await deps.pendingDrafts.pendingPublishPreviewForAccountRecord(bound.accountId, recordId);
+      if (!draft) {
+        sendJson(res, 404, { error: 'not_found' });
+        return;
+      }
+      if (draft.contentVersion !== Number(raw.expectedVersion)) {
+        sendJson(res, 409, { error: 'draft_refinement_rejected', reason: 'version_conflict', currentVersion: draft.contentVersion });
+        return;
+      }
+      let selection: DraftRefinementSelection = null;
+      if (scope === 'selected_text') {
+        const selected = raw.selection;
+        if (!selected || typeof selected !== 'object' || Array.isArray(selected)) {
+          sendJson(res, 422, { error: 'validation_failed', reason: 'invalid_selection' });
+          return;
+        }
+        const value = selected as Record<string, unknown>;
+        if (Object.keys(value).some((key) => !['start', 'end', 'text'].includes(key))
+          || !Number.isInteger(value.start) || !Number.isInteger(value.end) || typeof value.text !== 'string'
+          || Number(value.start) < 0 || Number(value.end) <= Number(value.start) || Number(value.end) > draft.content.length
+          || draft.content.slice(Number(value.start), Number(value.end)) !== value.text) {
+          sendJson(res, 422, { error: 'validation_failed', reason: 'invalid_selection' });
+          return;
+        }
+        selection = { start: Number(value.start), end: Number(value.end), text: value.text };
+      } else if (scope === 'selected_image') {
+        const selected = raw.selection;
+        if (!selected || typeof selected !== 'object' || Array.isArray(selected)) {
+          sendJson(res, 422, { error: 'validation_failed', reason: 'invalid_selection' });
+          return;
+        }
+        const value = selected as Record<string, unknown>;
+        if (Object.keys(value).some((key) => key !== 'imageUrl') || typeof value.imageUrl !== 'string'
+          || draft.images.filter((url) => url === value.imageUrl).length !== 1) {
+          sendJson(res, 422, { error: 'validation_failed', reason: 'invalid_selection' });
+          return;
+        }
+        selection = { imageUrl: value.imageUrl };
+      } else if (raw.selection !== undefined && raw.selection !== null) {
+        sendJson(res, 422, { error: 'validation_failed', reason: 'selection_not_allowed' });
+        return;
+      }
+      try {
+        const job = await deps.draftRefinements.create({
+          accountId: bound.accountId,
+          recordId,
+          expectedVersion: draft.contentVersion,
+          scope,
+          instruction,
+          selection,
+        });
+        sendJson(res, 202, {
+          data: { envKey: bound.envKey, job: toClientRefinementJob(job) },
+          meta: { requestId: randomUUID(), asOf: Date.now() },
+        });
+      } catch (err) {
+        if ((err as { code?: string }).code === '23505') {
+          sendJson(res, 409, { error: 'draft_refinement_rejected', reason: 'refinement_already_active' });
+          return;
+        }
+        throw err;
+      }
+      return;
+    }
+
+    const refinementReadMatch = /^\/environments\/([^/]+)\/publish-drafts\/([^/]+)\/refinements\/([^/]+)$/.exec(url);
+    if (method === 'GET' && refinementReadMatch) {
+      if (!deps.draftRefinements) {
+        sendJson(res, 503, { error: 'draft_refinement_unavailable' });
+        return;
+      }
+      let envKey: string;
+      let recordId: number;
+      let jobKey: string;
+      try {
+        envKey = decodeURIComponent(refinementReadMatch[1] ?? '').trim();
+        recordId = Number(decodeURIComponent(refinementReadMatch[2] ?? ''));
+        jobKey = decodeURIComponent(refinementReadMatch[3] ?? '').trim();
+      } catch {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_refinement_target' });
+        return;
+      }
+      if (!envKey || !Number.isInteger(recordId) || recordId <= 0
+        || (jobKey !== 'latest' && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(jobKey))) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_refinement_target' });
+        return;
+      }
+      const bound = await resolveOwnedBoundAccount(deps, res, userId, envKey);
+      if (!bound) return;
+      const job = jobKey === 'latest'
+        ? await deps.draftRefinements.latestForAccountRecord(bound.accountId, recordId)
+        : await deps.draftRefinements.getForAccount(bound.accountId, recordId, jobKey);
+      if (!job) {
+        sendJson(res, 404, { error: 'not_found' });
+        return;
+      }
+      sendJson(res, 200, {
+        data: { envKey: bound.envKey, job: toClientRefinementJob(job) },
         meta: { requestId: randomUUID(), asOf: Date.now() },
       });
       return;
@@ -1177,8 +1453,17 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         bound.accountId,
         { limit, offset },
       );
+      const latestRefinements = deps.draftRefinements
+        ? await deps.draftRefinements.latestForAccountRecords(bound.accountId, result.items.map((item) => item.id))
+        : new Map<number, DraftRefinementJob>();
       sendJson(res, 200, {
-        items: result.items.map(toClientPendingDraftListItem),
+        items: result.items.map((item) => {
+          const latest = latestRefinements.get(item.id);
+          return {
+            ...toClientPendingDraftListItem(item),
+            ...(latest ? { refinement: toClientRefinementSummary(latest) } : {}),
+          };
+        }),
         total: result.total,
         limit,
         offset,

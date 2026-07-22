@@ -200,6 +200,8 @@ import {
 import { buildDeAiRewritePrompt } from './publish-agent/prompts.js';
 import { PostProcessor } from './publish-agent/post-processor.js';
 import { PublishLogStore } from './publish-agent/publish-log-store.js';
+import { DraftRefinementStore } from './publish-agent/draft-refinement.js';
+import { DraftRefinementWorker } from './publish-agent/draft-refinement-worker.js';
 import { hasUserRejectionEvidence } from './publish-agent/types.js';
 import { PublishPipelineLogStore } from './publish-agent/publish-pipeline-log-store.js';
 import { startPanelApi, parsePanelUsers, PgPanelStore } from './panel/index.js';
@@ -814,6 +816,27 @@ async function main(): Promise<void> {
     console.log('[aidcp-cloud] PublishLogStore 已就绪');
   } catch (err) {
     console.warn('[aidcp-cloud] PublishLogStore 初始化失败:', (err as Error).message);
+  }
+  let draftRefinementStore: DraftRefinementStore | undefined;
+  if (deploymentTarget) {
+    try {
+      const store = new DraftRefinementStore({
+        executionTarget: deploymentTarget,
+        host: readEnvString('PGHOST'),
+        port: readEnvPort('PGPORT'),
+        database: readEnvString('PGDATABASE'),
+        user: readEnvString('PGUSER'),
+        password: readEnvString('PGPASSWORD'),
+      });
+      await store.init();
+      const recovered = await store.recoverInterruptedClaims();
+      draftRefinementStore = store;
+      console.log(`[aidcp-cloud] DraftRefinementStore 已就绪（executionTarget=${deploymentTarget}, recovered=${recovered}）`);
+    } catch (err) {
+      console.warn('[aidcp-cloud] DraftRefinementStore 初始化失败，稿件调整不可用:', (err as Error).message);
+    }
+  } else {
+    console.warn('[aidcp-cloud] DraftRefinementWorker 未启用：AIDCP_DEPLOY_ENV 缺失或非法');
   }
   // 晚绑定：精选存储在发布调度器与首作状态存储之前构造，回调运行时两者已完成装配。
   let publishScheduler: PublishScheduler | undefined;
@@ -2751,6 +2774,34 @@ async function main(): Promise<void> {
       );
   };
 
+  if (draftRefinementStore) {
+    const worker = new DraftRefinementWorker({
+      store: draftRefinementStore,
+      drafts: publishLogStore,
+      llm,
+      imageProvider,
+      ...(ossUploader ? { objectStore: ossUploader } : {}),
+      logger: console,
+      refreshPreview: async (recordId) => refreshPublishPreview(recordId),
+    });
+    let pumping = false;
+    const pump = async (): Promise<void> => {
+      if (pumping) return;
+      pumping = true;
+      try {
+        // 每轮最多连续处理 3 条，防止单账号高频调整饿死事件循环；下一 tick 会继续。
+        for (let i = 0; i < 3 && await worker.processNext(`draft-refinement-${deploymentTarget}`); i += 1) { /* bounded drain */ }
+      } catch (err) {
+        console.warn('[draft-refinement] worker pump failed:', err instanceof Error ? err.message : String(err));
+      } finally {
+        pumping = false;
+      }
+    };
+    const timer = setInterval(() => void pump(), 1_500);
+    timer.unref?.();
+    void pump();
+  }
+
   // 客户端预览内删配图（change client-preview-image-delete）：闸序与红线在 draft-image-remove.ts（可单测），
   // 这里只做接线——读草稿 / 探审批签名 / 既有单写 editDraft / 读活版本 / 重推预览。
   const handlePublishDraftImageRemove = createPublishDraftImageRemoveHandler({
@@ -4644,10 +4695,16 @@ async function main(): Promise<void> {
             },
           },
           publishDraftActions: {
+            edit: async (recordId, expectedVersion, patch, accountId, actor) => {
+              const result = await publishLogStore.editDraft(recordId, expectedVersion, patch, actor, accountId);
+              if (result.ok) refreshPublishPreview(recordId);
+              return result;
+            },
             approve: (payload, accountId, actor) => approvePublishForClient(payload, accountId, actor),
             removeImage: (payload, accountId, actor) =>
               handlePublishDraftImageRemove(payload, { accountId, actor }),
           },
+          draftRefinements: draftRefinementStore,
           // D5 活体佐证（change curated-envkey-account-binding）：不可逆写要求绑定账号此刻活在该环境上。
           // 幸存者 resolveEdgeIdForAccount（account→edge）；反方向的 resolveAccountIdForEdge 已被慢启动 change 删除。
           resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),

@@ -12,6 +12,7 @@ import type { CuratedPanelRow } from '../src/cache/curated-content-store.js';
 import { CuratedContentUnavailableError } from '../src/cache/curated-content-store.js';
 import type { UiDailyUsagePayload, UiSlowStartPayload } from '../src/comm/protocol.js';
 import type { PendingPublishPreview } from '../src/publish-agent/publish-log-store.js';
+import type { DraftRefinementJob } from '../src/publish-agent/draft-refinement.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 const CLIENT_SECRET = 'client-secret-xyz';
@@ -2073,6 +2074,7 @@ test('待审批稿列表按环境持久绑定分页，并只返回客户最小�
     updatedAt: 1_721_277_200_000,
     publishMode: 'immediate',
     publishTime: null,
+    sourceCuratedId: 7,
     imageReferenceAudit: { requestedCount: 1, usableCount: 1, generatedCount: 1, status: 'used' },
   };
   const pendingDrafts = {
@@ -2097,8 +2099,9 @@ test('待审批稿列表按环境持久绑定分页，并只返回客户最小�
       assert.equal(body.offset, 12);
       assert.deepEqual(Object.keys(body.items[0]).sort(), [
         'contentPreview', 'contentVersion', 'id', 'images', 'kind', 'platform',
-        'publishMode', 'publishTime', 'title', 'topics', 'updatedAt',
+        'publishMode', 'publishTime', 'sourceCuratedId', 'title', 'topics', 'updatedAt',
       ]);
+      assert.equal(body.items[0].sourceCuratedId, 7);
       assert.equal(String(body.items[0].contentPreview).endsWith('…'), true);
       const wire = JSON.stringify(body);
       assert.equal(wire.includes(ACCT_P1), false);
@@ -2176,6 +2179,159 @@ test('待审批稿读取遇到未知绑定时 fail-closed，绝不触达稿件 s
       assert.equal(calls, 0);
     },
   );
+});
+
+test('客户待审稿直接编辑按环境账号与版本收口，并返回最小写后真态', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const calls: unknown[] = [];
+  const pendingDrafts = {
+    async listPendingPublishPreviewsForAccount() { return { items: [], total: 0 }; },
+    async pendingPublishPreviewForAccountRecord() { return null; },
+  };
+  const publishDraftActions: NonNullable<ClientAuthDeps['publishDraftActions']> = {
+    async edit(recordId, expectedVersion, patch, accountId, actor) {
+      calls.push({ recordId, expectedVersion, patch, accountId, actor });
+      return {
+        ok: true, contentVersion: 4, title: patch.title ?? '标题', content: patch.content ?? '正文',
+        metadata: { topics: patch.topics ?? [] } as never, images: ['https://img/1.jpg'],
+      };
+    },
+    async approve(payload) { return { requestId: payload.requestId, ok: false, reason: 'not_pending' }; },
+    async removeImage(payload) { return { requestId: payload.requestId, ok: false, reason: 'not_pending' }; },
+  };
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), pendingDrafts, publishDraftActions },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const edited = await fetch(`${base}/environments/p1/publish-drafts/42`, {
+        method: 'PATCH', headers,
+        body: JSON.stringify({ expectedVersion: 3, title: '新标题', content: '新正文', topics: ['新话题'] }),
+      });
+      assert.equal(edited.status, 200);
+      const body = await edited.json() as { data: { item: Record<string, unknown> } };
+      assert.deepEqual(body.data.item, {
+        id: 42, title: '新标题', content: '新正文', topics: ['新话题'],
+        images: ['https://img/1.jpg'], contentVersion: 4,
+      });
+      assert.equal(JSON.stringify(body).includes(ACCT_P1), false);
+
+      const injected = await fetch(`${base}/environments/p1/publish-drafts/42`, {
+        method: 'PATCH', headers,
+        body: JSON.stringify({ expectedVersion: 3, content: 'x', accountId: 'victim' }),
+      });
+      assert.equal(injected.status, 422);
+      const foreign = await fetch(`${base}/environments/not-owned/publish-drafts/42`, {
+        method: 'PATCH', headers,
+        body: JSON.stringify({ expectedVersion: 3, content: 'x' }),
+      });
+      assert.equal(foreign.status, 403);
+    },
+  );
+  assert.deepEqual(calls, [{
+    recordId: 42, expectedVersion: 3,
+    patch: { title: '新标题', content: '新正文', topics: ['新话题'] },
+    accountId: ACCT_P1, actor: 'client-auth:u1:p1',
+  }]);
+});
+
+test('客户创建和读取持久稿件调整任务，选区与响应均最小披露', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const item: PendingPublishPreview = {
+    id: 42, accountId: ACCT_P1, platform: 'xiaohongshu', kind: 'rewrite', title: '标题',
+    content: '开头需要调整的文字结尾', topics: [], images: ['image-a', 'image-b'],
+    contentVersion: 3, updatedAt: 1, publishMode: 'immediate', publishTime: null, sourceCuratedId: 7,
+  };
+  const pendingDrafts = {
+    async listPendingPublishPreviewsForAccount() { return { items: [item], total: 1 }; },
+    async pendingPublishPreviewForAccountRecord(accountId: string, recordId: number) {
+      return accountId === ACCT_P1 && recordId === 42 ? item : null;
+    },
+  };
+  const created: unknown[] = [];
+  const refinementJob: DraftRefinementJob = {
+    id: '00000000-0000-4000-8000-000000000057', executionTarget: 'dev', accountId: ACCT_P1,
+    recordId: 42, expectedVersion: 3, scope: 'selected_text', instruction: '更自然',
+    selection: { start: 2, end: 9, text: '需要调整的文字' }, status: 'queued',
+    progress: [{ seq: 1, stage: '计划', status: 'running', summary: '核对调整范围', at: 10 }],
+    claimToken: null, resultVersion: null, errorCode: null, errorMessage: null,
+    createdAt: 1, updatedAt: 1, completedAt: null,
+  };
+  const draftRefinements: NonNullable<ClientAuthDeps['draftRefinements']> = {
+    async create(input) { created.push(input); return refinementJob; },
+    async getForAccount(accountId, recordId, jobId) {
+      return accountId === ACCT_P1 && recordId === 42 && jobId === refinementJob.id ? refinementJob : null;
+    },
+    async latestForAccountRecord(accountId, recordId) {
+      return accountId === ACCT_P1 && recordId === 42 ? refinementJob : null;
+    },
+    async latestForAccountRecords(accountId, recordIds) {
+      return accountId === ACCT_P1 && recordIds.includes(42) ? new Map([[42, refinementJob]]) : new Map();
+    },
+  };
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), pendingDrafts, draftRefinements },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const list = await fetch(`${base}/publish-drafts?envKey=p1`, { headers });
+      assert.equal(list.status, 200);
+      const listed = await list.json() as { items: Array<Record<string, unknown>> };
+      assert.deepEqual(listed.items[0].refinement, {
+        id: refinementJob.id,
+        scope: 'selected_text',
+        status: 'queued',
+        current: { stage: '计划', status: 'running', summary: '核对调整范围' },
+        resultVersion: null,
+        error: null,
+      });
+      const start = await fetch(`${base}/environments/p1/publish-drafts/42/refinements`, {
+        method: 'POST', headers,
+        body: JSON.stringify({
+          expectedVersion: 3, scope: 'selected_text', instruction: '更自然',
+          selection: { start: 2, end: 9, text: '需要调整的文字' },
+        }),
+      });
+      assert.equal(start.status, 202);
+      const started = await start.json() as { data: { job: Record<string, unknown> } };
+      assert.equal(started.data.job.status, 'queued');
+      const wire = JSON.stringify(started);
+      assert.equal(wire.includes(ACCT_P1), false);
+      assert.equal(wire.includes('executionTarget'), false);
+      assert.equal(wire.includes('instruction'), false);
+      assert.equal(wire.includes('selection'), false);
+
+      const read = await fetch(`${base}/environments/p1/publish-drafts/42/refinements/${refinementJob.id}`, { headers });
+      assert.equal(read.status, 200);
+      const latest = await fetch(`${base}/environments/p1/publish-drafts/42/refinements/latest`, { headers });
+      assert.equal(latest.status, 200);
+
+      const staleSelection = await fetch(`${base}/environments/p1/publish-drafts/42/refinements`, {
+        method: 'POST', headers,
+        body: JSON.stringify({
+          expectedVersion: 3, scope: 'selected_text', instruction: '更自然',
+          selection: { start: 2, end: 9, text: '不匹配的文字' },
+        }),
+      });
+      assert.equal(staleSelection.status, 422);
+      const injected = await fetch(`${base}/environments/p1/publish-drafts/42/refinements`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ expectedVersion: 3, scope: 'body', instruction: '更自然', accountId: 'victim' }),
+      });
+      assert.equal(injected.status, 422);
+      const foreign = await fetch(`${base}/environments/not-owned/publish-drafts/42/refinements`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ expectedVersion: 3, scope: 'body', instruction: '更自然' }),
+      });
+      assert.equal(foreign.status, 403);
+    },
+  );
+  assert.deepEqual(created, [{
+    accountId: ACCT_P1, recordId: 42, expectedVersion: 3, scope: 'selected_text', instruction: '更自然',
+    selection: { start: 2, end: 9, text: '需要调整的文字' },
+  }]);
 });
 
 test('排期占用按环境绑定账号读取且只返回时间戳投影', async () => {
@@ -2425,6 +2581,10 @@ test('客户待审写在浏览器/core 缺席时按 env 绑定复用领域方法
   fx.bindings.set('p1', ACCT_P1);
   const calls: Array<Record<string, unknown>> = [];
   const publishDraftActions: NonNullable<ClientAuthDeps['publishDraftActions']> = {
+    async edit(recordId, expectedVersion, patch, accountId, actor) {
+      calls.push({ kind: 'edit', recordId, expectedVersion, patch, accountId, actor });
+      return { ok: true, contentVersion: expectedVersion + 1, title: patch.title ?? '稿件', content: patch.content ?? '正文', metadata: { topics: patch.topics ?? [] } as never, images: [] };
+    },
     async approve(payload, accountId, actor) {
       calls.push({ kind: 'approve', payload, accountId, actor });
       return {
