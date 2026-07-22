@@ -320,15 +320,17 @@ export class ReplyWorkflow {
       ? ['unknown'] as RiskTag[] : [];
     const collectedTags = uniqueTags(classifier.value.riskTags, polish.value.riskTags, reviewer.value.riskTags,
       deterministicTags, rule.actions.forceHumanTags, fallbackRisk);
+    const ordinaryKnowledgeClassification =
+      (classifier.fallback === 'none' && ORDINARY_KNOWLEDGE_INTENTS.has(classifier.value.intent)) ||
+      ORDINARY_KNOWLEDGE_CUE.test(inbound.text ?? '');
     const groundedOrdinaryKnowledge = Boolean(profile.knowledgeDocument?.trim()) &&
-      (ORDINARY_KNOWLEDGE_INTENTS.has(classifier.value.intent) ||
-        ORDINARY_KNOWLEDGE_CUE.test(inbound.text ?? '')) &&
-      classifier.fallback === 'none' && polisherFallback === 'none' && reviewer.fallback === 'none' &&
+      ordinaryKnowledgeClassification && polisherFallback === 'none' && reviewer.fallback === 'none' &&
       !candidateRejected && polish.value.introducedClaims.length > 0 &&
       collectedTags.every((tag) => PROCESS_ONLY_RISK.has(tag));
     const allTags = groundedOrdinaryKnowledge
       ? collectedTags.filter((tag) => tag !== 'unknown')
       : collectedTags;
+    const effectiveFallbackRisk = groundedOrdinaryKnowledge ? [] : fallbackRisk;
     const reviewerRiskLevel = groundedOrdinaryKnowledge ? 'low' : reviewer.value.riskLevel;
     const hasHardRisk = allTags.some((tag) => CONTENT_HIGH_RISK.has(tag));
     const requiresApproval = forcedHumanRisk(rule, allTags) || reviewerRiskLevel !== 'low' ||
@@ -341,7 +343,7 @@ export class ReplyWorkflow {
       renderedText: rendered,
       polishedText: candidate,
       finalText: candidate,
-      riskLevel: hasHardRisk ? 'high' : fallbackRisk.length || allTags.includes('unknown') ? 'unknown' : reviewerRiskLevel,
+      riskLevel: hasHardRisk ? 'high' : effectiveFallbackRisk.length || allTags.includes('unknown') ? 'unknown' : reviewerRiskLevel,
       riskReasons: allTags,
       requiresApproval,
       meaningChanged: polish.value.meaningChanged,

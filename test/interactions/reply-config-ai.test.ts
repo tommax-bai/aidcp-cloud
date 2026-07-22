@@ -308,8 +308,7 @@ test('grounded ordinary answer normalizes model-only unknown while meaning and c
     conditions: { keywordsAny: [], intentsAny: [], sourceExternalIds: [],
       messageTypes: ['text'], workHours: null } }];
   const outputs = [
-    { role: 'reply_intent_classifier', intent: 'unknown', confidence: 1,
-      riskTags: ['unknown'], reasons: ['cautious default'] },
+    'not-json',
     { role: 'reply_polisher', polishedText: '三至六年级更合适。\n小王，谢谢关注 示例视频号。',
       meaningChanged: true, introducedClaims: ['主要适合小学三至六年级'], riskTags: [] },
     { role: 'reply_risk_reviewer', riskLevel: 'unknown', riskTags: ['unknown'],
@@ -323,6 +322,7 @@ test('grounded ordinary answer normalizes model-only unknown while meaning and c
   assert.ok(preview.riskReasons.includes('meaning_changed'));
   assert.ok(preview.riskReasons.includes('introduced_claim'));
   assert.ok(!preview.riskReasons.includes('unknown'));
+  assert.equal(preview.fallbacks.classifier, 'invalid_json');
   assert.equal(preview.requiresApproval, true);
 });
 
