@@ -400,6 +400,8 @@ test('claimNext is scope-bound, fails closed for ungrouped/unmapped accounts, an
   assert.match(capturedSql, /NOT EXISTS \(\s*SELECT 1 FROM facebook_group_membership m WHERE m\.group_url = t\.group_url/);
   assert.match(capturedSql, /FOR UPDATE OF t SKIP LOCKED/);
   assert.match(capturedSql, /ON CONFLICT \(group_url\) DO NOTHING/);
+  assert.match(capturedSql, /mine\.status IN \('assigned','joining'\)/, '只有未完成行占用账号单飞位');
+  assert.doesNotMatch(capturedSql, /mine\.status IN \([^)]*failed/, '终态 failed 不得阻塞账号选择下一目标');
   assert.doesNotMatch(capturedSql, /LEFT JOIN facebook_group_target_scope/, '不得回退全局目录');
 });
 
@@ -493,7 +495,7 @@ test('catalog batch stores issue one scope query and one latest-scheduled query 
   assert.equal(recent.get('fb-7')?.reason, 'no_candidate');
 });
 
-test('FacebookGroupMembershipStore.markTransientRetry: status=assigned + attempts 回退一格 + 短冷却（P1-5，不计尝试上限）', async () => {
+test('FacebookGroupMembershipStore.markOutcome: terminal failed clears cooldown and leaves no unfinished assignment', async () => {
   let capturedSql = '';
   let capturedParams: unknown[] = [];
   const pool = {
@@ -504,15 +506,14 @@ test('FacebookGroupMembershipStore.markTransientRetry: status=assigned + attempt
     },
   } as unknown as pg.Pool;
   const store = new FacebookGroupMembershipStore({ pool });
-  await store.markTransientRetry('acc-fb', 'https://www.facebook.com/groups/123', 'not_ready', { backoffMs: 120_000 });
-  // status 永远 assigned（可重试、绝不永久 failed）；attempts 回退抵消 markJoining 的 +1（瞬态不消耗 cap）；短冷却按 backoff。
-  assert.match(capturedSql, /status = 'assigned'/);
-  assert.match(capturedSql, /attempts = GREATEST\(0, attempts - 1\)/);
-  assert.match(capturedSql, /cooldown_until = now\(\) \+ \(\$4::double precision \* interval '1 second'\)/);
+  await store.markOutcome('acc-fb', 'https://www.facebook.com/groups/123', 'failed', 'nav_error');
+  assert.match(capturedSql, /SET status = \$3/);
+  assert.match(capturedSql, /cooldown_until = NULL/);
+  assert.doesNotMatch(capturedSql, /status = 'assigned'/);
   assert.equal(capturedParams[0], 'acc-fb');
   assert.equal(capturedParams[1], 'https://www.facebook.com/groups/123');
-  assert.equal(capturedParams[2], 'not_ready');
-  assert.equal(capturedParams[3], 120); // backoffSeconds = 120_000ms / 1000
+  assert.equal(capturedParams[2], 'failed');
+  assert.equal(capturedParams[3], 'nav_error');
 });
 
 test('reclaimStaleAssignments releases only bounded idle assigned/joining rows', async () => {

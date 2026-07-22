@@ -1548,6 +1548,24 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.match(cards.at(-1)!.title, /未加入该群/);
   });
 
+  it('加群评论：nav_error → 直接提示打开群页失败，不误报无目标且绝不评论', async () => {
+    const { deps, posted, audits } = fbFlowDeps({ submit: { ok: true } });
+    const cards: Array<{ ok: boolean; level: string; title: string; message: string }> = [];
+    await new CommentScheduler({
+      ...deps,
+      facebookJoinNewGroup: async () => ({ triggered: true, outcome: 'nav_error', groupUrl: 'https://www.facebook.com/groups/nav-failed' }),
+      postResultCard: (_a, r) => { cards.push({ ok: r.ok, level: r.level, title: r.title, message: r.message }); },
+    }).triggerManual('fb-1', { joinFirst: true });
+    await tick();
+    assert.deepEqual(posted, [], '群页打开失败 → 绝不进入评论链');
+    assert.equal(audits.length, 0, '评论路径未启动 → 无评论审计');
+    assert.equal(cards.at(-1)?.ok, false);
+    assert.equal(cards.at(-1)?.level, 'error');
+    assert.match(cards.at(-1)!.title, /加群失败/);
+    assert.match(cards.at(-1)!.message, /打开群页失败/);
+    assert.doesNotMatch(cards.at(-1)!.message, /没有可加入的新群目标/);
+  });
+
   it('加群评论：加群未开启（disabled）→ 不评论、诚实卡指向 AIDCP_FB_GROUP_JOIN_AUTO', async () => {
     const { deps, posted } = fbFlowDeps({ submit: { ok: true } });
     const cards: Array<{ message: string }> = [];

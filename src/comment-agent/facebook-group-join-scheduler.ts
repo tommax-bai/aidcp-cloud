@@ -38,8 +38,6 @@ export interface FacebookGroupJoinSchedulerDeps {
   retryBackoffMs?: number;
   maxAttempts?: number;
   stepTimeoutMs?: number;
-  /** 网络瞬态退避抖动源（测试注入定值）；缺省 Math.random（P1-5）。 */
-  random?: () => number;
   logger?: Pick<Console, 'warn' | 'log'>;
 }
 
@@ -66,6 +64,7 @@ function statusForEdgeReason(reason?: string): FacebookGroupMembershipStatus {
 }
 
 function outcomeForReason(reason?: string): FacebookGroupJoinAuditRow['outcome'] {
+  if (reason?.startsWith('nav_error')) return 'nav_error';
   switch (reason) {
     case 'login_required':
       return 'login_required';
@@ -77,8 +76,6 @@ function outcomeForReason(reason?: string): FacebookGroupJoinAuditRow['outcome']
       return 'pending';
     case 'no_button':
       return 'no_button';
-    case 'nav_error':
-      return 'nav_error';
     default:
       return 'join_failed';
   }
@@ -88,25 +85,14 @@ function isAccountTransient(reason: string): boolean {
   return reason === 'login_required' || reason === 'blocked_by_captcha';
 }
 
-// 网络/渲染瞬态短退避（change facebook-join-comment-resilience，P1-5）：边端浏览器忙/离线/掉线、导航异常、
-// 就绪/点击后慢渲染（not_ready / post_not_confirmed_slow）都是快恢复的基础设施瞬态。用分钟级 + 去相关抖动的
-// 短冷却（远短于账号级 6h），让被占/慢的群很快能再试；抖动防所有账号在同一 60s 心跳边界撞同一群（惊群）。
-const NETWORK_TRANSIENT_BACKOFF_MIN_MS = 2 * 60_000;
-const NETWORK_TRANSIENT_BACKOFF_MAX_MS = 8 * 60_000;
-function networkTransientBackoffMs(random: () => number): number {
-  const span = NETWORK_TRANSIENT_BACKOFF_MAX_MS - NETWORK_TRANSIENT_BACKOFF_MIN_MS;
-  const r = Math.max(0, Math.min(1, random()));
-  return NETWORK_TRANSIENT_BACKOFF_MIN_MS + Math.floor(r * span);
-}
-
-/** 把 withLease 抛出的租约异常映射为可重试的 lease_unavailable reason（带 code / 摘要供审计）。 */
+/** 把 withLease 抛出的租约异常映射为具体 lease_unavailable reason（带 code / 摘要供审计）。 */
 function leaseFailureReason(err: unknown): string {
   if (err instanceof EdgeTaskLeaseError) return `lease_unavailable:${err.code}`;
   return `lease_unavailable:${err instanceof Error ? err.message.slice(0, 60) : String(err)}`;
 }
 
-// 纯网络/渲染瞬态：短退避 + **不计入尝试上限**（markTransientRetry），绝不因基础设施慢把可加入群永久 failed。
-function isNetworkTransient(reason: string): boolean {
+// 尚未加入阶段的网络/渲染/租约失败：用户裁决为本目标立即失败，不冷却、不隐藏重试。
+function isJoinExecutionFailure(reason: string): boolean {
   return (
     reason === 'timeout' ||
     reason === 'no_observation' ||
@@ -344,9 +330,9 @@ export class FacebookGroupJoinScheduler {
       await this.markEdgeFailure(accountId, assigned, observed.reason ?? 'no_observation');
       return { triggered: true, groupUrl: assigned.groupUrl, outcome: observed.reason ?? 'no_observation' };
     }
-    // P1-5：把 LLM 判定挡在「最小就绪」之后——观察是网络/渲染瞬态（not_ready / nav_error / 慢）时，直接走短退避重试，
-    // 绝不把「慢渲染的半成品页」喂给判定角色 → fail-closed ambiguous_skip → markOutcome('failed') 永久失败（本 change 治的主导路径）。
-    if (observed.reason && isNetworkTransient(observed.reason)) {
+    // 把 LLM 判定挡在「最小就绪」之后——观察未就绪/导航失败时直接诚实结束本目标，
+    // 绝不把「慢渲染的半成品页」喂给判定角色，也不写隐藏冷却。
+    if (observed.reason && isJoinExecutionFailure(observed.reason)) {
       await this.markEdgeFailure(accountId, assigned, observed.reason);
       return { triggered: true, groupUrl: assigned.groupUrl, outcome: observed.reason };
     }
@@ -371,9 +357,9 @@ export class FacebookGroupJoinScheduler {
       await this.markEdgeFailure(accountId, assigned, clicked.reason ?? 'no_post_observation');
       return { triggered: true, groupUrl: assigned.groupUrl, outcome: clicked.reason ?? 'no_post_observation' };
     }
-    // P1-5：点击后仍是网络/渲染瞬态（post_not_confirmed_slow / nav_error）→ 短退避重试，不喂判定角色落终局失败。
+    // 点击后仍是页面/网络失败（post_not_confirmed_slow / nav_error）→ 本目标直接失败，不喂判定角色。
     // 已成功的加入 clicked.reason 为空、走 handlePostVerdict；真失败（页面已就绪却无成员态）reason=join_failed 非瞬态、照常判定。
-    if (clicked.reason && isNetworkTransient(clicked.reason)) {
+    if (clicked.reason && isJoinExecutionFailure(clicked.reason)) {
       await this.markEdgeFailure(accountId, assigned, clicked.reason);
       return { triggered: true, groupUrl: assigned.groupUrl, outcome: clicked.reason };
     }
@@ -512,17 +498,16 @@ export class FacebookGroupJoinScheduler {
       });
       return;
     }
-    // 纯网络/渲染瞬态：分钟级抖动短退避 + **不计入尝试上限**（绝不因基础设施慢把可加入群永久 failed，本 change 治的主因）。
-    if (isNetworkTransient(reason)) {
-      await this.deps.memberships.markTransientRetry(accountId, assigned.groupUrl, reason, {
-        backoffMs: networkTransientBackoffMs(this.deps.random ?? Math.random),
-      });
+    // 页面、网络、渲染或租约失败就是本目标的真实终态失败：不写冷却，不保留 assigned/joining 占位。
+    // 下一次触发可从同一账号分组池选择其它目标；显式 --join=<url> 仍可按人工意图重试本目标。
+    if (isJoinExecutionFailure(reason)) {
+      await this.deps.memberships.markOutcome(accountId, assigned.groupUrl, 'failed', reason);
       await this.audit({
         accountId,
         groupUrl: assigned.groupUrl,
         outcome: outcomeForReason(reason),
         phase: 'scheduler',
-        reason: `${reason}:transient_retry`,
+        reason,
         shadow: false,
       });
       return;

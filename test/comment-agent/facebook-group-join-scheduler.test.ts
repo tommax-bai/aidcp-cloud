@@ -43,6 +43,7 @@ function makeHarness(opts: {
   leaseError?: Error;
   /** joinSpecificGroup（change facebook-comment-review-and-targeted-join）：claimSpecific 桩返回；缺省 → 该 url 的新 assigned 行。 */
   claimSpecific?: (accountId: string, url: string) => { row: FacebookGroupMembershipRow; ownedByOther: boolean } | null;
+  claimNext?: () => FacebookGroupMembershipRow | null;
   isFacebookAccount?: boolean;
   scopeEligibility?: 'eligible' | 'scope_mismatch' | 'terminal' | 'missing';
 } = {}) {
@@ -55,7 +56,6 @@ function makeHarness(opts: {
   const leasePriorities: string[] = [];
   const paused: string[] = [];
   const retryBackoffs: number[] = [];
-  const transientBackoffs: number[] = [];
   let llmIndex = 0;
 
   const targets = {
@@ -90,7 +90,7 @@ function makeHarness(opts: {
     currentAssignment: async () => null,
     claimNext: async () => {
       membershipCalls.push('claim');
-      return membership();
+      return opts.claimNext ? opts.claimNext() : membership();
     },
     claimSpecific: async (accountId: string, url: string) => {
       membershipCalls.push(`claimSpecific:${url}`);
@@ -121,15 +121,6 @@ function makeHarness(opts: {
       membershipCalls.push(`retry:${groupUrl}:${reason}`);
       if (typeof options?.backoffMs === 'number') retryBackoffs.push(options.backoffMs);
       return 'retryable' as const;
-    },
-    markTransientRetry: async (
-      _accountId: string,
-      groupUrl: string,
-      reason: string,
-      options?: { backoffMs?: number },
-    ) => {
-      membershipCalls.push(`transient:${groupUrl}:${reason}`);
-      if (typeof options?.backoffMs === 'number') transientBackoffs.push(options.backoffMs);
     },
   };
   const audit = {
@@ -174,10 +165,9 @@ function makeHarness(opts: {
     autoEnabled: () => opts.auto ?? false,
     shadow: () => opts.shadow ?? false,
     stepTimeoutMs: 20,
-    random: () => 0, // 定值抖动 → 网络瞬态退避取下限 NETWORK_TRANSIENT_BACKOFF_MIN_MS（2min），测试确定性。
     logger: { warn: () => {}, log: () => {} },
   });
-  return { scheduler, sent, auditRows, membershipCalls, targetCalls, sessionBudgetCalls, leasePriorities, paused, retryBackoffs, transientBackoffs, bus };
+  return { scheduler, sent, auditRows, membershipCalls, targetCalls, sessionBudgetCalls, leasePriorities, paused, retryBackoffs, bus };
 }
 
 describe('FacebookGroupJoinScheduler', () => {
@@ -272,7 +262,7 @@ describe('FacebookGroupJoinScheduler', () => {
     assert.ok(h.auditRows.some((row) => row.outcome === 'quota_denied' && row.reason === 'session_budget'));
   });
 
-  it('P0-3/P1-5: 租约异常 → 网络瞬态短退避重试（markTransientRetry），不假成功/不永久失败/不计尝试上限/不暂停账号', async () => {
+  it('fail-fast: 租约异常 → 当前目标立即 failed，不冷却、不暂停账号', async () => {
     const h = makeHarness({
       auto: true,
       leaseError: new EdgeTaskLeaseError('acquire_timeout', 'edge busy'),
@@ -283,17 +273,14 @@ describe('FacebookGroupJoinScheduler', () => {
     assert.equal(r.outcome, 'lease_unavailable:acquire_timeout');
     // 连租约都没拿到 → 未下发任何 group.join。
     assert.deepEqual(h.sent, []);
-    // 走网络瞬态路径 markTransientRetry（非 markRetryableFailure）→ 不计入尝试上限；短退避取下限 2min（random=0）。
-    // 堵住「status 停 joining + cooldown 空 → 每 60s 心跳热循环」，且绝不因基础设施瞬态推向永久 failed。
-    assert.ok(h.membershipCalls.includes(`transient:${GROUP}:lease_unavailable:acquire_timeout`));
+    // 当前目标直接终态失败，不保留 assigned/joining 或冷却占位；账号可在下一次选择其它目标。
+    assert.ok(h.membershipCalls.includes(`outcome:${GROUP}:failed:lease_unavailable:acquire_timeout`));
     assert.ok(!h.membershipCalls.some((c) => c.startsWith(`retry:${GROUP}:`)));
-    assert.ok(!h.membershipCalls.some((c) => c.startsWith(`outcome:${GROUP}:`) && c.endsWith(':failed')));
-    assert.deepEqual(h.transientBackoffs, [2 * 60_000]);
-    assert.ok(h.auditRows.some((row) => row.reason === 'lease_unavailable:acquire_timeout:transient_retry'));
-    assert.deepEqual(h.paused, []); // 租约瞬态不是 login/captcha → 不暂停账号
+    assert.ok(h.auditRows.some((row) => row.reason === 'lease_unavailable:acquire_timeout'));
+    assert.deepEqual(h.paused, []); // 租约失败不是 login/captcha → 不暂停账号
   });
 
-  it('P1-5: observe 报 not_ready（慢渲染）→ 网络瞬态短退避重试，绝不喂判定角色/LLM、绝不落永久失败', async () => {
+  it('fail-fast: observe 报 not_ready（慢渲染）→ 当前目标立即 failed，绝不喂判定角色/LLM', async () => {
     const h = makeHarness({
       auto: true,
       // 若未被拦截，preClickDeterministic 对该半成品页返回 null → 问 LLM（默认 ambiguous_skip）→ markOutcome('failed')。
@@ -312,14 +299,56 @@ describe('FacebookGroupJoinScheduler', () => {
     });
     const r = await h.scheduler.triggerScheduled('acc-fb');
     assert.equal(r.triggered, true);
-    assert.equal(r.outcome, 'not_ready'); // 被拦截为瞬态，而非 ambiguous_skip（= 证明没走 LLM 终局）
+    assert.equal(r.outcome, 'not_ready'); // 直接返回页面未就绪，而非 ambiguous_skip（= 证明没走 LLM）
     // 只发了 observe（click=false）一次，没有第二次 clickJoin。
     assert.equal(h.sent.length, 1);
     assert.equal(h.sent[0].payload.click, false);
-    // 走网络瞬态：markTransientRetry + 短退避 2min；绝无 markOutcome failed（不永久失败）。
-    assert.ok(h.membershipCalls.includes(`transient:${GROUP}:not_ready`));
-    assert.ok(!h.membershipCalls.some((c) => c.startsWith(`outcome:${GROUP}:`) && c.endsWith(':failed')));
-    assert.deepEqual(h.transientBackoffs, [2 * 60_000]);
+    assert.ok(h.membershipCalls.includes(`outcome:${GROUP}:failed:not_ready`));
+    assert.ok(!h.membershipCalls.some((c) => c.startsWith(`retry:${GROUP}:`)));
+    assert.ok(h.auditRows.some((row) => row.reason === 'not_ready'));
+  });
+
+  it('fail-fast: 打开群页 nav_error → 直接 failed 并保留具体审计，不进入 no_targets 冷却窗口', async () => {
+    const h = makeHarness({
+      auto: true,
+      edge: (env, bus) => {
+        bus.emit('action.completed', {
+          action: 'join_group',
+          ok: false,
+          reason: 'nav_error',
+          groupUrl: env.payload.groupUrl,
+          clicked: false,
+          ts: 0,
+        } as never);
+      },
+    });
+    const r = await h.scheduler.triggerScheduled('acc-fb');
+    assert.deepEqual(r, { triggered: true, groupUrl: GROUP, outcome: 'nav_error' });
+    assert.ok(h.membershipCalls.includes(`outcome:${GROUP}:failed:nav_error`));
+    assert.ok(!h.membershipCalls.some((c) => c.startsWith(`retry:${GROUP}:`)));
+    assert.ok(h.auditRows.some((row) => row.outcome === 'nav_error' && row.reason === 'nav_error'));
+    assert.deepEqual(h.paused, []);
+  });
+
+  it('fail-fast: 上个目标 nav_error 后下一次可立即认领另一个目标，不返回 no_targets', async () => {
+    const groups = [GROUP, 'https://www.facebook.com/groups/group-b'];
+    let claimIndex = 0;
+    const h = makeHarness({
+      auto: true,
+      claimNext: () => membership({ groupUrl: groups[claimIndex++] }),
+      edge: (env, bus) => {
+        bus.emit('action.completed', {
+          action: 'join_group', ok: false, reason: 'nav_error', groupUrl: env.payload.groupUrl, clicked: false, ts: 0,
+        } as never);
+      },
+    });
+    const first = await h.scheduler.triggerScheduled('acc-fb');
+    const second = await h.scheduler.triggerScheduled('acc-fb');
+    assert.equal(first.groupUrl, groups[0]);
+    assert.equal(second.groupUrl, groups[1]);
+    assert.equal(second.outcome, 'nav_error');
+    assert.equal(h.membershipCalls.filter((call) => call === 'claim').length, 2);
+    assert.ok(!h.auditRows.some((row) => row.outcome === 'no_targets'));
   });
 
   it('real: instant pre-click + joined post-click 写 joined', async () => {
