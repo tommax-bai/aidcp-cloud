@@ -386,4 +386,52 @@ describe('CommentApprovalGate', () => {
     assert.equal(skipped?.reason, 'auto_approve_notice_failed');
     assert.equal(approved, false);
   });
+
+  it('账号 auto_approve_all 覆盖普通浏览评论：通知后授权，不调用按钮审批', async () => {
+    const bus = new EventBus();
+    let notice: any = null;
+    let reviewCalled = false;
+    const role = new CommentApprovalGate({
+      eventBus: bus,
+      soul,
+      approval: { request: async () => { reviewCalled = true; }, isApproved: async () => false },
+      resolveApprovalMode: async (_accountId, sourceMode) => {
+        assert.equal(sourceMode, 'review');
+        return 'auto_approve';
+      },
+      autoApproveNotify: async (input) => { notice = input; },
+      getAccountId: () => 'acc-global',
+      now: () => 456,
+    });
+    role.subscribe();
+    let approved: any = null;
+    bus.on('comment.approved', (payload) => { approved = payload; });
+    bus.emit('comment.cleared', { ...trigger, text: '普通评论终稿', ts: Date.now() });
+    await sleep(30);
+    assert.equal(reviewCalled, false);
+    assert.equal(notice?.approvalSource, 'account_global');
+    assert.equal(approved?.text, '普通评论终稿');
+    assert.equal(approved?.approvalTrace?.accountId, 'acc-global');
+  });
+
+  it('账号策略解析异常回落来源 review，不扩大权限', async () => {
+    const bus = new EventBus();
+    let reviewCalled = false;
+    const role = new CommentApprovalGate({
+      eventBus: bus,
+      soul,
+      approval: { request: async () => { reviewCalled = true; }, isApproved: async () => true, pollMs: 1 },
+      resolveApprovalMode: async () => { throw new Error('pg down'); },
+      getAccountId: () => 'acc-safe',
+      now: () => 10,
+      sleep: async () => {},
+    });
+    role.subscribe();
+    let approved = false;
+    bus.on('comment.approved', () => { approved = true; });
+    bus.emit('comment.cleared', { ...trigger, text: '仍需审批', ts: Date.now() });
+    await sleep(30);
+    assert.equal(reviewCalled, true);
+    assert.equal(approved, true);
+  });
 });

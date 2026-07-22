@@ -127,3 +127,55 @@ test('notification/routes 读写闭环 + bot-chats 列表（绑定目标 opaque 
     await h.close();
   }
 });
+
+test('approval policies API returns catalog and persists account/group truth', async () => {
+  let accountMode = 'source_rules' as 'source_rules' | 'auto_approve_all';
+  let groupDelivery = 'client_and_feishu' as 'client_and_feishu' | 'client_only';
+  const approvalPolicies = {
+    list: async () => ({
+      accounts: [{ accountId: 'acc-1', mode: accountMode, configured: true, updatedBy: 'alice', updatedAt: 0 }],
+      groups: [{
+        groupLabel: 'teamA', delivery: groupDelivery, configured: true, updatedBy: 'alice', updatedAt: 0,
+        activeAccountCount: 2, reachableAccountCount: 1,
+      }],
+    }),
+    setAccountCommentMode: async (accountId: string, mode: typeof accountMode, updatedBy: string | null) => {
+      accountMode = mode;
+      return { ok: true as const, row: { accountId, mode, configured: true, updatedBy, updatedAt: 1 } };
+    },
+    setGroupPublishDelivery: async (groupLabel: string, delivery: typeof groupDelivery, updatedBy: string | null) => {
+      groupDelivery = delivery;
+      return { ok: true as const, row: { groupLabel, delivery, configured: true, updatedBy, updatedAt: 1 } };
+    },
+  };
+  const h = await startPanelApi({ ...baseDeps, approvalPolicies } as unknown as PanelDeps, makeConfig());
+  assert.equal(h.started, true);
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const auth = await login(base);
+    const jsonHeaders = { ...auth, 'content-type': 'application/json' };
+    const initial = await fetch(`${base}/api/approval-policies`, { headers: auth });
+    assert.equal(initial.status, 200);
+    const initialBody = await initial.json() as any;
+    assert.equal(initialBody.groups[0].reachableAccountCount, 1);
+
+    const accountWrite = await fetch(`${base}/api/approval-policies/account-comment`, {
+      method: 'PUT', headers: jsonHeaders, body: JSON.stringify({ accountId: 'acc-1', mode: 'auto_approve_all' }),
+    });
+    assert.equal(accountWrite.status, 200);
+    assert.equal((await accountWrite.json() as any).policy.mode, 'auto_approve_all');
+
+    const groupWrite = await fetch(`${base}/api/approval-policies/group-publish`, {
+      method: 'PUT', headers: jsonHeaders, body: JSON.stringify({ groupLabel: 'teamA', delivery: 'client_only' }),
+    });
+    assert.equal(groupWrite.status, 200);
+    assert.equal((await groupWrite.json() as any).policy.delivery, 'client_only');
+
+    const invalid = await fetch(`${base}/api/approval-policies/account-comment`, {
+      method: 'PUT', headers: jsonHeaders, body: JSON.stringify({ accountId: 'acc-1', mode: 'trust_client_body' }),
+    });
+    assert.equal(invalid.status, 400);
+  } finally {
+    await h.close();
+  }
+});

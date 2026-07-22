@@ -993,6 +993,27 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.ok(!posted.includes('interaction.comment'), 'manualOverride 不绕人审 → 无 approval 时绝不提交');
   });
 
+  it('账号全局免审覆盖飞书手工 /comment：先通知、无按钮审批、仍走真实提交确认', async () => {
+    const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true } });
+    const notices: any[] = [];
+    let reviewCalled = false;
+    await new CommentScheduler({
+      ...deps,
+      approval: { request: async () => { reviewCalled = true; }, isApproved: async () => false },
+      resolveApprovalMode: async (_accountId, sourceMode) => {
+        assert.equal(sourceMode, 'review');
+        return 'auto_approve';
+      },
+      autoApproveNotify: async (input) => { notices.push(input); },
+    }).triggerManual('fb-1', { manualOverride: true, originChatId: 'oc_command' });
+    await tick();
+    assert.equal(reviewCalled, false);
+    assert.equal(notices.length, 1);
+    assert.equal(notices[0].originChatId, 'oc_command');
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    assert.ok(posted.includes('interaction.comment'));
+  });
+
   // ── change manual-comment-force-flag：FB --force 跳过 weak_relevance（仍守内容安全校验 + 人审 + 放开每帖去重） ──
   it('FB 无 --force + 零重叠草稿 → weak_relevance、不发（默认路径零回归）', async () => {
     const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true } });

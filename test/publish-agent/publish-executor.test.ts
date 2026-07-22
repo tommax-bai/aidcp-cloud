@@ -852,4 +852,72 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     assert.equal(insertedRecords[0].title, TITLE, 'DB 落库标题 == titleSelection.title');
     assert.ok(JSON.stringify(sentCards[0]).includes(TITLE), '审批卡含真实标题');
   });
+
+  test('client_only + no origin suppresses only the Feishu review card after pending draft persistence', async () => {
+    const order: string[] = [];
+    const role = new PublishExecutorRole({
+      store: { insert: async () => { order.push('persist'); return 91; } },
+      messenger: { sendApprovalCard: async () => { order.push('send'); } },
+      resolveReviewCardDelivery: async () => { order.push('policy'); return { send: false, reason: 'suppressed_by_client_only_policy' }; },
+      resolveCardChatId: async () => 'oc_team',
+      clock,
+      logger: silentLogger,
+    });
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('trigger', { accountId: 'acc-1', approvalMode: 'review', generateInput: { concepts: [], likedContents: [], soul: {} }, recentPublished: [], metrics: {} } as any);
+    ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('publishMetadata', makePublishMetadata());
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('manual_review'));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(order, ['persist', 'policy'], 'draft must be durable before suppression decision; no Feishu card is sent');
+    assert.equal(ctx.get('publishResult')?.status, 'pending_approval');
+    assert.deepEqual(ctx.get('publishResult')?.approvalCard, { sent: false, targetSource: 'client_only_policy' });
+  });
+
+  test('manual /publish source chat always wins over client_only suppression', async () => {
+    const chats: string[] = [];
+    let policyCalls = 0;
+    const role = new PublishExecutorRole({
+      store: { insert: async () => 92 },
+      messenger: { sendApprovalCard: async (chatId) => { chats.push(chatId); } },
+      resolveReviewCardDelivery: async () => { policyCalls += 1; return { send: false, reason: 'suppressed_by_client_only_policy' }; },
+      clock,
+      logger: silentLogger,
+    });
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('trigger', { accountId: 'acc-1', approvalMode: 'review', manualApprovalChatId: 'oc_command', generateInput: { concepts: [], likedContents: [], soul: {} }, recentPublished: [], metrics: {} } as any);
+    ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('publishMetadata', makePublishMetadata());
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('manual_review'));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(chats, ['oc_command']);
+    assert.equal(policyCalls, 0, 'manual source is guarded before group suppression');
+    assert.equal(ctx.get('publishResult')?.approvalCard?.targetSource, 'manual_source');
+  });
+
+  test('client reachability/policy fallback keeps the Feishu card visible', async () => {
+    const chats: string[] = [];
+    const role = new PublishExecutorRole({
+      store: { insert: async () => 93 },
+      messenger: { sendApprovalCard: async (chatId) => { chats.push(chatId); } },
+      resolveReviewCardDelivery: async () => ({ send: true, reason: 'client_reachability_no_enabled_client_binding' }),
+      resolveCardChatId: async () => 'oc_team',
+      clock,
+      logger: silentLogger,
+    });
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('trigger', { accountId: 'acc-1', approvalMode: 'review', generateInput: { concepts: [], likedContents: [], soul: {} }, recentPublished: [], metrics: {} } as any);
+    ctx.write('assembledContent', makeAssembledContent());
+    ctx.write('titleSelection', makeTitleSelection());
+    ctx.write('publishMetadata', makePublishMetadata());
+    role.register(ctx);
+    ctx.write('gateDecision', makeGateDecision('manual_review'));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(chats, ['oc_team']);
+    assert.equal(ctx.get('publishResult')?.approvalCard?.sent, true);
+  });
 });

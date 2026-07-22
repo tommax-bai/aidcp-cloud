@@ -429,6 +429,16 @@ export interface ClientUserStoreOptions {
   pool?: pg.Pool;
 }
 
+export type ClientApprovalReachability =
+  | { reachable: true; reason: 'reachable' }
+  | { reachable: false; reason: 'no_enabled_client_binding' | 'unavailable' };
+
+export interface ClientApprovalGroupCoverage {
+  groupLabel: string;
+  activeAccountCount: number;
+  reachableAccountCount: number;
+}
+
 export class ClientUserStore {
   private readonly pool: pg.Pool;
   /** 同步 WS 出口闸镜像：删除生命周期中的 AdsPower env 不再接收普通自动化命令。 */
@@ -1219,6 +1229,68 @@ export class ClientUserStore {
     } catch (err) {
       if (isMissingTable(err)) return false;
       throw err;
+    }
+  }
+
+  /**
+   * 管理/发送侧反向判据：账号是否存在一条客户稿件审核可达链。
+   *
+   * customer-auth 的真实边界是 enabled user + admin scope + active environment +
+   * authoritative environment.account_id。这里只证明持久 HTTP 数据面可达，不检查
+   * WebSocket、浏览器或自动化引擎在线状态。
+   */
+  async hasEnabledClientApprovalReachability(accountId: string): Promise<ClientApprovalReachability> {
+    const account = (accountId ?? '').trim();
+    if (!account) return { reachable: false, reason: 'no_enabled_client_binding' };
+    try {
+      const { rows } = await this.pool.query<{ reachable: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1
+             FROM client_environments e
+             JOIN client_env_scope s ON s.env_key=e.env_key AND s.source='admin'
+             JOIN client_users u ON u.user_id=s.user_id AND u.status='enabled'
+             JOIN accounts a ON a.account_id=e.account_id
+            WHERE e.account_id=$1 AND e.lifecycle_state='active'
+         ) AS reachable`,
+        [account],
+      );
+      return rows[0]?.reachable === true
+        ? { reachable: true, reason: 'reachable' }
+        : { reachable: false, reason: 'no_enabled_client_binding' };
+    } catch (error) {
+      if (isMissingTable(error)) return { reachable: false, reason: 'unavailable' };
+      throw error;
+    }
+  }
+
+  /** JWT panel only: group policy coverage summary, derived from the same reachability facts. */
+  async listClientApprovalCoverageByGroup(): Promise<ClientApprovalGroupCoverage[]> {
+    try {
+      const { rows } = await this.pool.query<{
+        group_label: string; active_account_count: string | number; reachable_account_count: string | number;
+      }>(
+        `SELECT btrim(a.group_label) AS group_label,
+                count(*) AS active_account_count,
+                count(*) FILTER (WHERE EXISTS (
+                  SELECT 1
+                    FROM client_environments e
+                    JOIN client_env_scope s ON s.env_key=e.env_key AND s.source='admin'
+                    JOIN client_users u ON u.user_id=s.user_id AND u.status='enabled'
+                   WHERE e.account_id=a.account_id AND e.lifecycle_state='active'
+                )) AS reachable_account_count
+           FROM accounts a
+          WHERE a.status='active' AND a.group_label IS NOT NULL AND btrim(a.group_label)<>''
+          GROUP BY btrim(a.group_label)
+          ORDER BY btrim(a.group_label)`,
+      );
+      return rows.map((row) => ({
+        groupLabel: row.group_label,
+        activeAccountCount: Number(row.active_account_count),
+        reachableAccountCount: Number(row.reachable_account_count),
+      }));
+    } catch (error) {
+      if (isMissingTable(error)) return [];
+      throw error;
     }
   }
 

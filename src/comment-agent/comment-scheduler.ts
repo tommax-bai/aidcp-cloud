@@ -211,6 +211,11 @@ export interface CommentSchedulerDeps {
   approval?: CommentApprovalPort;
   /** 排期免审通知口；auto_approve 未接线或发送失败则 fail-closed，不发评论。 */
   autoApproveNotify?: AutoApproveCommentNotification;
+  /** 账号全局评论审批覆盖；所有命令式/定向来源在授权前统一现读。 */
+  resolveApprovalMode?: (
+    accountId: string,
+    sourceMode: ContentScheduleApprovalMode,
+  ) => Promise<ContentScheduleApprovalMode>;
   /** 去 AI 味处理器（可带账号 rewrite）；缺省仅扫描。 */
   postProcessorFor?: (accountId: string) => Pick<PostProcessor, 'process'>;
   /** @deprecated 页面执行权改由 edgeTaskLeases 管理；保留可选形状兼容旧测试构造。 */
@@ -376,6 +381,21 @@ export class CommentScheduler {
     return commentProfileForPlatform(await this.deps.getPlatform(accountId));
   }
 
+  private async effectiveApprovalMode(
+    accountId: string,
+    sourceMode: ContentScheduleApprovalMode = 'review',
+  ): Promise<ContentScheduleApprovalMode> {
+    if (!this.deps.resolveApprovalMode) return sourceMode;
+    try {
+      return await this.deps.resolveApprovalMode(accountId, sourceMode);
+    } catch (error) {
+      (this.deps.logger ?? console).warn(
+        `[comment-scheduler] 账号评论审批策略解析失败，回落来源模式 account=${accountId} mode=${sourceMode}: ${(error as Error).message}`,
+      );
+      return sourceMode;
+    }
+  }
+
   /** 是否该账号已有任务在跑（观测用）。 */
   isRunning(accountId: string): boolean {
     return this.running.has(accountId);
@@ -438,6 +458,7 @@ export class CommentScheduler {
         message: `该账号平台暂不支持评论调度：${(err as Error).message}`,
       };
     }
+    const approvalMode = await this.effectiveApprovalMode(accountId, options?.approvalMode ?? 'review');
 
     // 加群评论（change facebook-manual-join-comment）：--join 仅 Facebook 有效。非 FB 账号诚实拒——绝不静默降级成普通评论。
     if (options?.joinFirst && platformProfile.platform !== 'facebook') {
@@ -489,8 +510,7 @@ export class CommentScheduler {
           manualOverride: options?.manualOverride === true,
           force: options?.force === true,
           fastReturnToFeed: options?.fastReturnToFeed === true,
-          approvalMode: options?.approvalMode,
-        ...(options?.originChatId ? { originChatId: options.originChatId } : {}),
+          approvalMode,
           ...(options?.originChatId ? { originChatId: options.originChatId } : {}),
         })
           .then((result) => options?.onResult?.(result))
@@ -507,7 +527,9 @@ export class CommentScheduler {
           message: `已触发 Facebook 加群 + 评论：${
             targetedUrl ? '加入指定群' : '先加入一个新群'
           }，加入成功（或已是成员）后在该群里发一条评论${
-            options?.injectContact ? '（带联系方式，走飞书人审）' : ''
+            options?.injectContact
+              ? approvalMode === 'auto_approve' ? '（带联系方式，免审通知成功后继续）' : '（带联系方式，走飞书人审）'
+              : ''
           }${options?.force ? '（--force：跳过相关性/去重）' : ''}；结果稍后回报。`,
         };
       }
@@ -520,7 +542,7 @@ export class CommentScheduler {
         manualOverride: options?.manualOverride === true,
         force: options?.force === true,
         fastReturnToFeed: options?.fastReturnToFeed === true,
-        approvalMode: options?.approvalMode,
+        approvalMode,
         ...(options?.originChatId ? { originChatId: options.originChatId } : {}),
       })
         .then((result) => options?.onResult?.(result))
@@ -549,7 +571,7 @@ export class CommentScheduler {
       options?.priority ?? 'human',
       options?.force === true,
       options?.fastReturnToFeed === true,
-      options?.approvalMode,
+      approvalMode,
       options?.onResult,
       options?.originChatId,
     )
@@ -565,8 +587,8 @@ export class CommentScheduler {
       level: 'success',
       title: '已触发按需评论',
       message: options?.force
-        ? `已启动按需评论任务（--force：跳过「强相关」甄选与已评过去重——没强相关目标则选收藏最高的一篇、已评过的也可再评；评论前仍需飞书人审 approved=true 才会真发；结果稍后回报）`
-        : `已启动按需评论任务（搜「${defaultCommentSearchLabel(platformProfile)}」的强相关、未评过笔记；评论前仍需飞书人审 approved=true 才会真发；结果稍后回报）`,
+        ? `已启动按需评论任务（--force：跳过「强相关」甄选与已评过去重——没强相关目标则选收藏最高的一篇、已评过的也可再评；${approvalMode === 'auto_approve' ? '账号全局免审，通知成功后继续' : '评论前仍需飞书人审 approved=true'}；结果稍后回报）`
+        : `已启动按需评论任务（搜「${defaultCommentSearchLabel(platformProfile)}」的强相关、未评过笔记；${approvalMode === 'auto_approve' ? '账号全局免审，通知成功后继续' : '评论前仍需飞书人审 approved=true'}；结果稍后回报）`,
     };
   }
 
@@ -643,6 +665,7 @@ export class CommentScheduler {
         reason: 'unsupported_platform',
       };
     }
+    const approvalMode = await this.effectiveApprovalMode(accountId, options?.approvalMode ?? 'review');
 
     // facebook-scheduled-comment 2.2：FB 走独立定向评论路径（关键词+容器），绝不回落 xhs 定位流程。
     // 注：面板定向入口的具体 target 对 FB 不适用（FB 由配置的关键词/容器驱动），故 target 被忽略。
@@ -660,7 +683,7 @@ export class CommentScheduler {
       void this.runFacebookTargetedTask(accountId, {
         injectContact: options?.injectContact,
         contactInfo,
-        approvalMode: options?.approvalMode,
+        approvalMode,
         ...(options?.originChatId ? { originChatId: options.originChatId } : {}),
       })
         .catch((err) =>
@@ -683,7 +706,7 @@ export class CommentScheduler {
       platformProfile,
       options?.priority ?? 'human',
       options?.onResult,
-      options?.approvalMode,
+      approvalMode,
       options?.originChatId,
     )
       .catch((err) =>
@@ -698,8 +721,8 @@ export class CommentScheduler {
       level: 'success',
       title: '已触发定向评论',
       message: options?.currentNote
-        ? '已启动定向评论任务（复用当前笔记上下文→撰写→飞书人审 approved=true 才会真发；结果稍后回报）'
-        : '已启动定向评论任务（搜索定位目标笔记→撰写→飞书人审 approved=true 才会真发；结果稍后回报）',
+        ? `已启动定向评论任务（复用当前笔记上下文→撰写→${approvalMode === 'auto_approve' ? '免审通知成功后继续' : '飞书人审 approved=true 才会真发'}；结果稍后回报）`
+        : `已启动定向评论任务（搜索定位目标笔记→撰写→${approvalMode === 'auto_approve' ? '免审通知成功后继续' : '飞书人审 approved=true 才会真发'}；结果稍后回报）`,
     };
   }
 

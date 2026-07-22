@@ -48,6 +48,7 @@ export interface CommentApprovalNoticeInput {
   authorName?: string;
   accountId?: string;
   accountName?: string;
+  approvalSource?: 'mandatory_persona' | 'account_global';
 }
 
 export interface CommentApprovalGateOptions extends RoleOptions {
@@ -55,6 +56,8 @@ export interface CommentApprovalGateOptions extends RoleOptions {
   approval?: CommentApprovalPort;
   /** 结构化 mandatory auto_approve 的免审通知口；先通知成功才授权，缺失/失败 fail-closed。 */
   autoApproveNotify?: (input: CommentApprovalNoticeInput) => Promise<void>;
+  /** 账号级审批策略解析；读取失败由注入方回落 sourceMode，绝不在 gate 内猜免审。 */
+  resolveApprovalMode?: (accountId: string, sourceMode: 'review' | 'auto_approve') => Promise<'review' | 'auto_approve'>;
   /** 当前账号 id；仅用于审批卡展示，缺省则卡片不显示账号。 */
   getAccountId?: () => string | null | undefined;
   /** 当前账号展示名/昵称；仅用于审批卡展示，缺省时由发卡端按 accountId 兜底。 */
@@ -73,6 +76,7 @@ export class CommentApprovalGate extends BaseRole {
   readonly roleName: RoleName = 'comment_approval_gate';
   private readonly approval?: CommentApprovalPort;
   private readonly autoApproveNotify?: (input: CommentApprovalNoticeInput) => Promise<void>;
+  private readonly resolveApprovalMode?: CommentApprovalGateOptions['resolveApprovalMode'];
   private readonly getAccountId?: () => string | null | undefined;
   private readonly getAccountName?: () => string | null | undefined;
   private readonly getNoteTitle?: (noteId: string) => string | null;
@@ -86,6 +90,7 @@ export class CommentApprovalGate extends BaseRole {
     super(options);
     this.approval = options.approval;
     this.autoApproveNotify = options.autoApproveNotify;
+    this.resolveApprovalMode = options.resolveApprovalMode;
     this.getAccountId = options.getAccountId;
     this.getAccountName = options.getAccountName;
     this.getNoteTitle = options.getNoteTitle;
@@ -127,15 +132,32 @@ export class CommentApprovalGate extends BaseRole {
     const accountId = this.getAccountId?.() ?? undefined;
     const accountName = this.getAccountName?.() ?? undefined;
     const requestId = buildCommentApprovalRequestId(payload.noteId, this.now());
+    let approvalMode: 'review' | 'auto_approve' = mandatoryAutoApprove ? 'auto_approve' : 'review';
+    if (accountId && this.resolveApprovalMode) {
+      try {
+        approvalMode = await this.resolveApprovalMode(accountId, approvalMode);
+      } catch (err) {
+        this.log(`账号评论审批策略解析失败，回落来源规则 account=${accountId}: ${(err as Error).message}`);
+      }
+    }
 
-    if (mandatoryAutoApprove) {
+    if (approvalMode === 'auto_approve') {
       if (!this.autoApproveNotify) {
         this.log(`mandatory auto_approve 通知口未接线，绝不裸发 note=${payload.noteId}`);
         this.skip(payload, 'auto_approve_notice_failed');
         return;
       }
       try {
-        await this.autoApproveNotify({ requestId, noteId: payload.noteId, text: payload.text, title, authorName, accountId, accountName });
+        await this.autoApproveNotify({
+          requestId,
+          noteId: payload.noteId,
+          text: payload.text,
+          title,
+          authorName,
+          accountId,
+          accountName,
+          approvalSource: mandatoryAutoApprove ? 'mandatory_persona' : 'account_global',
+        });
       } catch (err) {
         if (this.isCommentSublineExpired(payload.noteId)) return;
         this.log(`mandatory auto_approve 通知失败：${(err as Error).message}`);
@@ -143,7 +165,11 @@ export class CommentApprovalGate extends BaseRole {
         return;
       }
       if (this.isCommentSublineExpired(payload.noteId)) return;
-      this.log(`mandatory auto_approve 已通知并授权 rule=${payload.mandatoryInteraction!.ruleId} note=${payload.noteId}`);
+      this.log(
+        mandatoryAutoApprove
+          ? `mandatory auto_approve 已通知并授权 rule=${payload.mandatoryInteraction!.ruleId} note=${payload.noteId}`
+          : `account auto_approve_all 已通知并授权 account=${accountId ?? '-'} note=${payload.noteId}`,
+      );
       const approvalTrace: CommentApprovalTrace = {
         requestId,
         ...(accountId ? { accountId } : {}),

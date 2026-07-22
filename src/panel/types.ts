@@ -72,6 +72,22 @@ import type { ThinkingMode, ThinkingModeApi } from '../config/role-catalog.js';
 import type { AlertStore } from '../alerts/index.js';
 import type { DelegatedTaskService } from '../delegated-task/service.js';
 import type { InteractionPermissionOverview } from '../interactions/interaction-panel-permissions.js';
+import type {
+  AccountCommentApprovalMode,
+  AccountCommentApprovalPolicyRow,
+  GroupPublishApprovalDelivery,
+  GroupPublishApprovalPolicyRow,
+  SetAccountCommentApprovalPolicyResult,
+  SetGroupPublishApprovalPolicyResult,
+} from '../config/approval-policy-store.js';
+
+export interface ApprovalPolicyCatalog {
+  accounts: AccountCommentApprovalPolicyRow[];
+  groups: Array<GroupPublishApprovalPolicyRow & {
+    activeAccountCount: number;
+    reachableAccountCount: number;
+  }>;
+}
 
 /** 全局「内容可自动时段」视图（GET /api/content-schedule/global）。overridden = 库有行。 */
 export interface ContentScheduleGlobalView {
@@ -360,6 +376,20 @@ export interface PanelDeps {
   notificationRoutes?: {
     listRoutes(): Promise<GroupRoute[]>;
     setRoute(groupLabel: string, chatId: string | null, updatedBy: string | null): Promise<SetGroupRouteResult>;
+  };
+  /** Account-wide comment authorization and group publish-review delivery policies. */
+  approvalPolicies?: {
+    list(): Promise<ApprovalPolicyCatalog>;
+    setAccountCommentMode(
+      accountId: string,
+      mode: AccountCommentApprovalMode,
+      updatedBy: string | null,
+    ): Promise<SetAccountCommentApprovalPolicyResult>;
+    setGroupPublishDelivery(
+      groupLabel: string,
+      delivery: GroupPublishApprovalDelivery,
+      updatedBy: string | null,
+    ): Promise<SetGroupPublishApprovalPolicyResult>;
   };
   /**
    * 机器人所在群清单 provider（change feishu-bot-chat-name-display）：实时取飞书真实群名 + 标默认群 + 降级来源。

@@ -260,6 +260,10 @@ import {
   buildFacebookGroupJoinAutomationCatalogView,
   buildFacebookGroupJoinAutomationCatalogViewFailClosed,
 } from './config/facebook-group-join-automation-view.js';
+import {
+  ApprovalPolicyStore,
+  type AccountCommentApprovalMode,
+} from './config/approval-policy-store.js';
 import { FacebookCommentConfigStore } from './config/facebook-comment-config-store.js';
 import { FacebookCommentAuditStore } from './comment-agent/facebook-comment-audit-store.js';
 import {
@@ -1080,6 +1084,7 @@ async function main(): Promise<void> {
   // 账号主表 + 暂停态持久化（accounts 表，seed 一个 default 行）。
   // PG 不可用则退化为纯内存（重启丢暂停态，告警但不阻塞启动）。
   let accountStore: AccountStore | undefined;
+  let approvalPolicyStore: ApprovalPolicyStore | undefined;
   try {
     const store = new PgAccountStore({
       host: readEnvString('PGHOST'),
@@ -1091,6 +1096,14 @@ async function main(): Promise<void> {
     await store.init();
     accountStore = store;
     console.log('[aidcp-cloud] AccountStore 已就绪（accounts 表，seed default）');
+    try {
+      const policies = new ApprovalPolicyStore();
+      await policies.init();
+      approvalPolicyStore = policies;
+      console.log('[aidcp-cloud] ApprovalPolicyStore 已就绪（账号评论审批覆盖 / 分组稿件审核入口）');
+    } catch (policyError) {
+      console.warn('[aidcp-cloud] ApprovalPolicyStore 初始化失败：评论回落来源规则、稿件保留飞书卡:', (policyError as Error).message);
+    }
     try {
       const migrated = await clientUserStore.migrateEnvironmentSlowStartFromAccounts();
       console.log(`[aidcp-cloud] 环境级慢启动镜像已就绪（一次性初始化 ${migrated} 个历史环境）`);
@@ -1106,6 +1119,45 @@ async function main(): Promise<void> {
   }
   // 启动加载持久化暂停态进内存缓存：被暂停账号重启后仍为 paused，不静默复活。
   const accountState = new AccountStateManager(accountStore);
+  const resolveEffectiveCommentApprovalMode = async (
+    accountId: string,
+    sourceMode: 'review' | 'auto_approve',
+  ): Promise<'review' | 'auto_approve'> => {
+    if (!approvalPolicyStore) return sourceMode;
+    try {
+      const accountMode: AccountCommentApprovalMode = await approvalPolicyStore.getAccountCommentMode(accountId);
+      return accountMode === 'auto_approve_all' ? 'auto_approve' : sourceMode;
+    } catch (error) {
+      console.warn(
+        `[approval-policy] 评论策略读取失败，回落来源模式 account=${accountId} sourceMode=${sourceMode}: ${(error as Error).message}`,
+      );
+      return sourceMode;
+    }
+  };
+
+  const resolveReviewCardDelivery = async (accountId: string): Promise<{ send: boolean; reason: string }> => {
+    if (!approvalPolicyStore) return { send: true, reason: 'policy_store_unavailable' };
+    let policy: Awaited<ReturnType<ApprovalPolicyStore['getGroupPublishPolicyForAccount']>>;
+    try {
+      policy = await approvalPolicyStore.getGroupPublishPolicyForAccount(accountId);
+    } catch (error) {
+      console.warn(`[approval-policy] 分组稿件策略读取失败，保留飞书卡 account=${accountId}: ${(error as Error).message}`);
+      return { send: true, reason: 'policy_read_failed' };
+    }
+    if (policy.delivery !== 'client_only') return { send: true, reason: 'client_and_feishu' };
+    if (!policy.groupLabel) return { send: true, reason: 'account_group_missing' };
+    try {
+      const reachability = await clientUserStore.hasEnabledClientApprovalReachability(accountId);
+      if (reachability.reachable) return { send: false, reason: 'suppressed_by_client_only_policy' };
+      console.warn(
+        `[approval-policy] client_only 账号客户审批归属不可证，保留飞书卡 account=${accountId} group=${policy.groupLabel} reason=${reachability.reason}`,
+      );
+      return { send: true, reason: `client_reachability_${reachability.reason}` };
+    } catch (error) {
+      console.warn(`[approval-policy] 客户审批归属读取失败，保留飞书卡 account=${accountId}: ${(error as Error).message}`);
+      return { send: true, reason: 'client_reachability_read_failed' };
+    }
+  };
   await accountState.init();
   const accountDisplayName = (accountId: string): string | undefined => {
     const display = accountStore?.getDisplayName?.(accountId);
@@ -2801,7 +2853,7 @@ async function main(): Promise<void> {
   /** comment auto_approve 统一“先通知、后授权”出口；自然浏览与排期只换可读文案，失败都向上抛并 fail-closed。 */
   const notifyAutoApprovedComment = async (
     input: CommentApprovalNoticeInput & { contactIncluded?: boolean; originChatId?: string },
-    source: 'mandatory_persona' | 'scheduled',
+    source: 'mandatory_persona' | 'account_global' | 'comment_scheduler',
   ): Promise<void> => {
     const chatId = await resolveCardChatId(input.originChatId, input.accountId);
     if (!chatId) throw new Error('auto_approve_chat_not_configured');
@@ -2812,12 +2864,12 @@ async function main(): Promise<void> {
       mandatory
         ? buildMandatoryCommentPreAuthorizationCard({ ...input, accountName: displayName })
         : buildCommandResultCard({
-            command: input.contactIncluded ? '排期联系评论（免审）' : '排期评论（免审）',
+            command: input.contactIncluded ? '联系评论（免审）' : '评论（免审）',
             ok: true,
             level: 'success',
-            title: input.contactIncluded ? '排期联系评论已免审提交' : '排期评论已免审提交',
+            title: input.contactIncluded ? '联系评论已免审授权' : '评论已免审授权',
             message:
-              `后台排期已开启免审，评论终稿已生成并进入发布步骤；下发前仍会核对页面、去重和边端结果。\n` +
+              `账号或来源已开启免审，评论终稿已生成并进入提交步骤；下发前仍会核对页面、去重和边端结果。\n` +
               `**目标**：${input.title?.trim() || input.authorName?.trim() || '目标内容'}\n` +
               `**正文预览**：${input.text.replace(/\s+/g, ' ').trim().slice(0, 160) || '（空）'}`,
             accountId: input.accountId,
@@ -2978,7 +3030,11 @@ async function main(): Promise<void> {
       // 评论人审端口（env 闸开启时注入；未开启 → 评论一律诚实跳过、不发）。
       ...(commentApprovalEnabled ? { commentApproval } : {}),
       // 人设 mandatory auto_approve 独立于逐条人审 env，但仍必须先通知成功；通知失败由 gate fail-closed。
-      commentAutoApproveNotify: (input) => notifyAutoApprovedComment(input, 'mandatory_persona'),
+      commentAutoApproveNotify: (input) => notifyAutoApprovedComment(
+        input,
+        input.approvalSource === 'mandatory_persona' ? 'mandatory_persona' : 'account_global',
+      ),
+      resolveCommentApprovalMode: resolveEffectiveCommentApprovalMode,
       notifyMandatoryCommentOutcome,
       // 评论增强查询、模型调用和整条子链都有界；未配 env 时由唯一默认事实源兜底（3s / 30s / 5min）。
       ...(commentCorpusLookupTimeoutMs !== undefined ? { commentCorpusLookupTimeoutMs } : {}),
@@ -3369,6 +3425,7 @@ async function main(): Promise<void> {
     // change unify-card-routing-origin-then-team：审批卡目标走统一解析（来源会话 → 账号团队群 → 默认群）。
     // 无来源会话的自动 / 排期发帖由此进入账号团队群，不再一律落默认群。
     resolveCardChatId,
+    resolveReviewCardDelivery,
     getAccountName: accountDisplayName,
     writeApprovalSignal: (requestId, approved, payload) =>
       writeApprovalSignal({ writeFile, readFile }, requestId, approved, payload),
@@ -3431,7 +3488,8 @@ async function main(): Promise<void> {
         riskStore.recordInteraction(accountId, noteId, action, Date.now()).catch(() => {}),
     }),
     ...(commentApprovalEnabled ? { approval: commentApproval } : {}),
-    autoApproveNotify: (input) => notifyAutoApprovedComment(input, 'scheduled'),
+    autoApproveNotify: (input) => notifyAutoApprovedComment(input, 'comment_scheduler'),
+    resolveApprovalMode: resolveEffectiveCommentApprovalMode,
     onTakeoverStart: onCommentTakeoverStart,
     onTakeoverEnd: onCommentTakeoverEnd,
     // ── facebook-scheduled-comment 2.2/2.3：FB 定向评论执行（影子先行；kill switch 默认关；真发边端能力待接入） ──
@@ -4376,6 +4434,30 @@ async function main(): Promise<void> {
           // 团队 → 群路由配置面（change feishu-per-team-notification-routing）。同一 group_route store 实例：读=全部映射、写=按团队键 upsert/清除。
           // init 失败留 undefined 时面板自然 503，绝不崩闭环。botChatStore 已注入（GET /api/bot-chats 复用其 listActive）。
           notificationRoutes: groupRouteStore,
+          approvalPolicies: approvalPolicyStore
+            ? {
+                list: async () => {
+                  const [accounts, groups, coverage] = await Promise.all([
+                    approvalPolicyStore!.listAccountPolicies(),
+                    approvalPolicyStore!.listGroupPolicies(),
+                    clientUserStore.listClientApprovalCoverageByGroup(),
+                  ]);
+                  const coverageByGroup = new Map(coverage.map((row) => [row.groupLabel, row]));
+                  return {
+                    accounts,
+                    groups: groups.map((row) => ({
+                      ...row,
+                      activeAccountCount: coverageByGroup.get(row.groupLabel)?.activeAccountCount ?? 0,
+                      reachableAccountCount: coverageByGroup.get(row.groupLabel)?.reachableAccountCount ?? 0,
+                    })),
+                  };
+                },
+                setAccountCommentMode: (accountId, mode, updatedBy) =>
+                  approvalPolicyStore!.setAccountCommentMode(accountId, mode, updatedBy),
+                setGroupPublishDelivery: (groupLabel, delivery, updatedBy) =>
+                  approvalPolicyStore!.setGroupPublishDelivery(groupLabel, delivery, updatedBy),
+              }
+            : undefined,
           // 机器人所在群 provider（change feishu-bot-chat-name-display）：GET /api/bot-chats 实时取飞书真实群名 + 默认群标记。
           botChats: botChatsProvider,
           // 精选内容后台管理（change curated-content-admin-page）。同一精选语料 store 实例：读=按账号列表/筛选面、写=删单条/清空壳行。

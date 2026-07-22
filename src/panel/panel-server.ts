@@ -1216,6 +1216,15 @@ function createRequestHandler(
       return;
     }
 
+    if (method === 'GET' && url === '/api/approval-policies') {
+      if (!deps.approvalPolicies) {
+        sendJson(res, 503, { error: 'approval_policies_unavailable' });
+        return;
+      }
+      sendJson(res, 200, await deps.approvalPolicies.list());
+      return;
+    }
+
     // 机器人当前所在群（change feishu-per-team-notification-routing / feishu-bot-chat-name-display）：
     // 供路由配置从真实所在群下拉选目标（杜绝手贴 raw chat_id 贴错群 → 跨客户 PII 泄漏）。目标为 opaque chat_id（非枚举）。
     // provider 注入时实时取飞书真实群名 + 标默认群 + 降级来源；未注入则回落 bot_chats 表（老形状、群名可能空）。
@@ -1457,6 +1466,59 @@ function createRequestHandler(
         return;
       }
       sendJson(res, 200, { route: result.route }); // 写后回读真态（route=null 表已清除）
+      return;
+    }
+    if (method === 'PUT' && url === '/api/approval-policies/account-comment') {
+      if (!deps.approvalPolicies) {
+        sendJson(res, 503, { error: 'approval_policies_unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { accountId, mode } = (body ?? {}) as { accountId?: unknown; mode?: unknown };
+      if (typeof accountId !== 'string' || !accountId.trim() || (mode !== 'source_rules' && mode !== 'auto_approve_all')) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_account_comment_policy' });
+        return;
+      }
+      const result = await deps.approvalPolicies.setAccountCommentMode(accountId, mode, verified.payload.sub);
+      if (!result.ok) {
+        sendJson(res, result.reason === 'account_not_found' ? 404 : 400, { error: result.reason });
+        return;
+      }
+      sendJson(res, 200, { policy: result.row });
+      return;
+    }
+    if (method === 'PUT' && url === '/api/approval-policies/group-publish') {
+      if (!deps.approvalPolicies) {
+        sendJson(res, 503, { error: 'approval_policies_unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { groupLabel, delivery } = (body ?? {}) as { groupLabel?: unknown; delivery?: unknown };
+      if (
+        typeof groupLabel !== 'string' || !groupLabel.trim()
+        || (delivery !== 'client_and_feishu' && delivery !== 'client_only')
+      ) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_group_publish_policy' });
+        return;
+      }
+      const result = await deps.approvalPolicies.setGroupPublishDelivery(groupLabel, delivery, verified.payload.sub);
+      if (!result.ok) {
+        sendJson(res, result.reason === 'group_not_found' ? 404 : 400, { error: result.reason });
+        return;
+      }
+      sendJson(res, 200, { policy: result.row });
       return;
     }
     // 账号「联系方式」写（change account-group-chat-injection → generalize-contact-info）：经账号存储单写（accounts 表拥有者），

@@ -789,7 +789,7 @@ export interface PublishResult {
   approvalCard?: {
     sent: boolean;
     targetChatId?: string;
-    targetSource: 'manual_source' | 'account_scope' | 'default_chat' | 'none';
+    targetSource: 'manual_source' | 'account_scope' | 'default_chat' | 'client_only_policy' | 'none';
     error?: string;
   };
 }

@@ -72,7 +72,7 @@ export interface BotChatStore {
 
 // 与 publish-agent/types.ts 的 PublishResult['approvalCard'].targetSource **逐字一致**（漂移 typecheck 抓不到）。
 // 标的是哪条解析路径产出了目标、不是落点（落点看 targetChatId）。
-type ApprovalCardTargetSource = 'manual_source' | 'account_scope' | 'default_chat' | 'none';
+type ApprovalCardTargetSource = 'manual_source' | 'account_scope' | 'default_chat' | 'client_only_policy' | 'none';
 
 interface ApprovalCardSendResult {
   sent: boolean;
@@ -91,6 +91,14 @@ export interface PublishExecutorDeps {
    * 而非一律落默认群。未注入（旧构造 / 桩）→ 退回 getDefaultChat，行为逐字不变。
    */
   resolveCardChatId?: (originChatId: string | undefined, accountId: string | undefined) => Promise<string>;
+  /**
+   * Review-card delivery decision after the pending draft is durable. Manual source-chat
+   * drafts are guarded locally and never delegated to this suppressor.
+   */
+  resolveReviewCardDelivery?: (accountId: string) => Promise<{
+    send: boolean;
+    reason: string;
+  }>;
   /**
    * 陪伴界面通知（change edge-companion-ui 8.1，可选）：草稿落库候审 + 审批卡已发后，
    * 把 pending 状态推给该账号的在线边缘（发布卡自动展开）。绝不阻塞/影响发布主链路。
@@ -126,6 +134,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
   private messenger?: ApprovalMessenger;
   private botChatStore?: BotChatStore;
   private resolveCardChatId?: (originChatId: string | undefined, accountId: string | undefined) => Promise<string>;
+  private resolveReviewCardDelivery?: PublishExecutorDeps['resolveReviewCardDelivery'];
   private notifyPublishPending?: (accountId: string, recordId: number, title: string) => void;
   private getAccountName?: (accountId: string) => string | undefined;
   private writeApprovalSignal?: (
@@ -141,6 +150,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     this.messenger = deps.messenger;
     this.botChatStore = deps.botChatStore;
     this.resolveCardChatId = deps.resolveCardChatId;
+    this.resolveReviewCardDelivery = deps.resolveReviewCardDelivery;
     this.notifyPublishPending = deps.notifyPublishPending;
     this.getAccountName = deps.getAccountName;
     this.writeApprovalSignal = deps.writeApprovalSignal;
@@ -387,7 +397,17 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
         approvalCard = await this.trySendApprovalCard(assembled, title, requestId, topics, context, accountId);
       }
     } else {
-      approvalCard = await this.trySendApprovalCard(assembled, title, requestId, topics, context, accountId);
+      const delivery = await this.reviewCardDelivery(context, accountId);
+      if (delivery.send) {
+        approvalCard = await this.trySendApprovalCard(assembled, title, requestId, topics, context, accountId);
+        if (delivery.reason !== 'default_send') {
+          this.logger.log(`[PublishExecutor] review 审批卡保留 account=${accountId} reason=${delivery.reason}`);
+        }
+      } else {
+        approvalCard = { sent: false, targetSource: 'client_only_policy' };
+        approvalLog = delivery.reason;
+        this.logger.log(`[PublishExecutor] review 审批卡已抑制 account=${accountId} reason=${delivery.reason}`);
+      }
     }
 
     // 陪伴界面（edge-companion-ui 8.1）：候审状态推给在线边缘（发布卡自动展开到「等你确认」）。
@@ -398,7 +418,9 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       /* best-effort */
     }
 
-    const cardStatus = approvalCard.sent
+    const cardStatus = approvalCard.targetSource === 'client_only_policy'
+      ? '审批卡已按分组策略抑制，稿件仍在客户端待审队列'
+      : approvalCard.sent
       ? `审批卡已发 source=${approvalCard.targetSource} chat=${approvalCard.targetChatId}`
       : `审批卡未送达 source=${approvalCard.targetSource}${approvalCard.error ? ` error=${approvalCard.error}` : ''}`;
     this.logger.log(`[PublishExecutor] 草稿待审 recordId=${recordId} account=${accountId} requestId=${requestId} mode=${approvalMode}（${cardStatus}；${approvalLog}）`);
@@ -590,6 +612,22 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn(`[PublishExecutor] 发审批卡失败 source=${target.source} chat=${target.chatId}: ${message}`);
       return { sent: false, targetChatId: target.chatId, targetSource: target.source, error: message };
+    }
+  }
+
+  private async reviewCardDelivery(
+    context: PipelineContext<PipelineFields>,
+    accountId: string,
+  ): Promise<{ send: boolean; reason: string }> {
+    const trigger = context.get('trigger') as TriggerInput | undefined;
+    if (trigger?.manualApprovalChatId?.trim()) return { send: true, reason: 'manual_source' };
+    if (!this.resolveReviewCardDelivery) return { send: true, reason: 'default_send' };
+    try {
+      return await this.resolveReviewCardDelivery(accountId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`[PublishExecutor] review 审批卡策略解析失败，保留飞书卡 account=${accountId}: ${message}`);
+      return { send: true, reason: 'policy_read_failed' };
     }
   }
 

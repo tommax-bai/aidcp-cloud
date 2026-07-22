@@ -406,6 +406,27 @@ test('resolveBoundAccountForEnv: 判别式映射（owned/bound/dangling/contende
   assert.deepEqual(await missingTable.resolveBoundAccountForEnv('u1', 'p1'), { ok: false, reason: 'binding_unavailable' });
 });
 
+test('hasEnabledClientApprovalReachability: only authoritative enabled active bindings prove client review access', async () => {
+  const reachable = new ClientUserStore({ pool: fakePool((sql) => {
+    assert.match(sql, /u\.status='enabled'/);
+    assert.match(sql, /e\.lifecycle_state='active'/);
+    assert.match(sql, /s\.source='admin'/);
+    return { rows: [{ reachable: true }] };
+  }) });
+  assert.deepEqual(await reachable.hasEnabledClientApprovalReachability('acc-1'), { reachable: true, reason: 'reachable' });
+
+  const unreachable = new ClientUserStore({ pool: fakePool(() => ({ rows: [{ reachable: false }] })) });
+  assert.deepEqual(
+    await unreachable.hasEnabledClientApprovalReachability('acc-1'),
+    { reachable: false, reason: 'no_enabled_client_binding' },
+  );
+
+  const missing = new ClientUserStore({ pool: fakePool(() => {
+    throw Object.assign(new Error('missing'), { code: '42P01' });
+  }) });
+  assert.deepEqual(await missing.hasEnabledClientApprovalReachability('acc-1'), { reachable: false, reason: 'unavailable' });
+});
+
 test('resolveOperatorAliasAccountForEnv: 专用写解析保留悬空账号原因并复用归属/争用闸', async () => {
   const make = (row: unknown) => new ClientUserStore({ pool: fakePool(() => ({ rows: [row] })) });
   assert.deepEqual(

@@ -244,6 +244,11 @@ export interface RoleDispatcherOptions {
   commentApproval?: CommentApprovalPort;
   /** 结构化 mandatory auto_approve 免审通知；通知成功才放行，缺省 fail-closed。 */
   commentAutoApproveNotify?: (input: CommentApprovalNoticeInput) => Promise<void>;
+  /** 账号全局评论策略覆盖；sourceMode 由当前评论来源给出，异常由注入方保守回落。 */
+  resolveCommentApprovalMode?: (
+    accountId: string,
+    sourceMode: 'review' | 'auto_approve',
+  ) => Promise<'review' | 'auto_approve'>;
   /**
    * 「已批准未送达」操作员回报（change platform-browse-protocol）：评论迁移的 navigate 步失败 ⇒ 不发评论、
    * 显式回报操作员（人审成本已付）。缺省（未接线）→ 仅 warn 日志。阶段 0 迁移结构性不可达 ⇒ 从不触发。
@@ -431,6 +436,7 @@ export class RoleDispatcher {
   private readonly explainView: () => ViewQuotaDecision;
   private readonly commentApproval?: CommentApprovalPort;
   private readonly commentAutoApproveNotify?: (input: CommentApprovalNoticeInput) => Promise<void>;
+  private readonly resolveCommentApprovalMode?: RoleDispatcherOptions['resolveCommentApprovalMode'];
   private readonly notifyApprovedNotDelivered?: (input: { noteId: string; reason?: string }) => void | Promise<void>;
   private readonly notifyMandatoryCommentOutcome?: (input: MandatoryCommentOutcomeNoticeInput) => void | Promise<void>;
   private readonly mandatoryCommentOutcomeTimeoutMs: number;
@@ -611,6 +617,7 @@ export class RoleDispatcher {
     });
     this.commentApproval = options.commentApproval;
     this.commentAutoApproveNotify = options.commentAutoApproveNotify;
+    this.resolveCommentApprovalMode = options.resolveCommentApprovalMode;
     this.notifyApprovedNotDelivered = options.notifyApprovedNotDelivered;
     this.notifyMandatoryCommentOutcome = options.notifyMandatoryCommentOutcome;
     this.mandatoryCommentOutcomeTimeoutMs = Math.max(1, options.mandatoryCommentOutcomeTimeoutMs ?? 120_000);
@@ -1348,6 +1355,7 @@ export class RoleDispatcher {
         ...commonOptions,
         ...(this.commentApproval ? { approval: this.commentApproval } : {}),
         ...(this.commentAutoApproveNotify ? { autoApproveNotify: this.commentAutoApproveNotify } : {}),
+        ...(this.resolveCommentApprovalMode ? { resolveApprovalMode: this.resolveCommentApprovalMode } : {}),
         getAccountId: () => this.currentAccountId,
         getAccountName: () => this.getNickname(this.currentAccountId),
         getNoteTitle: (id) => getNoteData(id)?.title ?? null,
