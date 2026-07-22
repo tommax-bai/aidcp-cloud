@@ -1,3 +1,5 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:account_content_schedule.comment_daily_cap,column:account_content_schedule.comment_enabled
 -- 0029_content_schedule_comments.sql（change content-schedule-comments，Phase 2 定时自动评论）
 -- 人审文档：本仓无迁移执行器，实际补列由 ContentScheduleStore.init() 幂等自愈
 -- （src/config/content-schedule-store.ts CONTENT_SCHEDULE_SCHEMA_SQL 内的 ALTER，与此同源、勿漂移）。

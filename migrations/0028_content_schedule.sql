@@ -1,3 +1,8 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:account_content_schedule.account_id,column:account_content_schedule.auto_enabled,column:account_content_schedule.content_active_mask,column:account_content_schedule.post_daily_cap
+-- aidcp:objects=column:account_content_schedule.post_enabled,column:account_content_schedule.updated_at,column:account_content_schedule.updated_by,column:content_schedule_global.content_active_mask
+-- aidcp:objects=column:content_schedule_global.id,column:content_schedule_global.updated_at,column:content_schedule_global.updated_by,table:account_content_schedule
+-- aidcp:objects=table:content_schedule_global
 -- 0028_content_schedule.sql（change content-schedule-auto-publish，Phase 1 只发帖）
 -- 人审文档：本仓无迁移执行器，实际建表由 ContentScheduleStore.init() 幂等自建
 -- （src/config/content-schedule-store.ts CONTENT_SCHEDULE_SCHEMA_SQL，与此同源、勿漂移）。

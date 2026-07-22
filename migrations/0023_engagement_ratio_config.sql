@@ -1,3 +1,5 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:session_config_global.collect_save_like_denom,column:session_config_global.follow_fans_denom
 -- 0023_engagement_ratio_config.sql（change engagement-ratio-config，迁移号 0023）
 --
 -- 把两道「互动质量比例闸」做成后台可配（全局单例，复用 session_config_global 单行表）：

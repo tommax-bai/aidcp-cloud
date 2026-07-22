@@ -238,6 +238,7 @@ import {
   type DelegatedTask,
 } from './delegated-task/index.js';
 import { parseDeploymentTarget } from './deployment-target.js';
+import { runSchemaContractGate, takePendingSchemaGateAlert } from './schema/schema-gate.js';
 import { DelegatedTaskNotificationGate, delegatedTaskFailureReceipt } from './delegated-task/notification.js';
 import { omitUnsupportedUsageMetrics, platformRegistryEntry } from './platform/index.js';
 import {
@@ -495,6 +496,13 @@ async function main(): Promise<void> {
   const port = Number(process.env.AIDCP_PORT ?? 8787);
   const debugPort = Number(process.env.AIDCP_DEBUG_PORT ?? 8788);
   const deploymentTarget = parseDeploymentTarget(readEnvString('AIDCP_DEPLOY_ENV'));
+
+  // schema 契约门（change cloud-schema-migration-executor 任务 6.3）：读迁移账本最高版本，与本构建
+  // 声明的所需 / 已知版本按复合序比较。库比代码新（回滚场景）时旧代码会静默重建空表并开始写入 ——
+  // 这一门把它变成一次显式的启动失败。
+  // MUST 跑在任何存储 init() 之前；MUST NOT 包 try/catch（吞掉它等于恢复静默假成功）。
+  // 默认 warn 模式：判定照做、结论照打，不拒绝启动；切 enforce 后不通过即在此处抛错退出。
+  await runSchemaContractGate();
 
   // ── 跨进程配置镜像失效通道（change config-mirror-cross-process-invalidation）────────────
   // dev 与 ol 是两个 cloud 进程共用同一个 PostgreSQL 库，其中 8 张是无 execution_target 列的全局配置表。
@@ -2131,6 +2139,12 @@ async function main(): Promise<void> {
     // 四条链路的 P1 从此落库可检索（在此之前只进 console.warn）。
     riskAlertSink = as;
     console.log('[aidcp-cloud] AlertStore 已就绪（alerts 表）');
+    // schema 契约门的超前放行（change cloud-schema-migration-executor 任务 6.4）要求「启动日志与告警通道各记一条」。
+    // 门跑在 alertStore 构造之前，故放行事件先缓存在门里，此处 flush 到告警通道。
+    const schemaWaiver = takePendingSchemaGateAlert();
+    if (schemaWaiver) {
+      void as.raise({ severity: 'P1', type: 'schema_gate_waiver', title: schemaWaiver.title, detail: schemaWaiver.detail });
+    }
     // D5 跨客户绑定冲突告警（change curated-envkey-account-binding）：clientUserStore 在 alertStore 之前构造，
     // 故此处事后接线到既有告警存储（非仅 console.warn）。冲突 = 安全事件（另一客户的账号被自报身份争用）→ P1。
     clientUserStore.setBindingConflictAlertSink((alert) => {

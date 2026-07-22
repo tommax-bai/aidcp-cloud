@@ -1,3 +1,5 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:concepts.account_id,column:publish_log.account_id,index:idx_concepts_account,index:idx_publish_log_account
 -- V1 多账号（change aidcp-console-panel-mvp，task 9.3 / 重构步骤 7）：
 -- publish_log / concepts 加 account_id —— additive，DEFAULT 'default' 自动回填存量行。
 -- 幂等：ADD COLUMN IF NOT EXISTS，可重复执行。

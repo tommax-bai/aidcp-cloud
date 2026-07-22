@@ -1,3 +1,5 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:interaction_offboards.cleanup_grant_jti_hash,index:idx_interaction_offboards_cleanup_grant
 -- 0049_offboard_cleanup_grants.sql
 -- Short-lived, use-once cleanup bootstrap for browserless offboard recovery.
 

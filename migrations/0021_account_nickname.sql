@@ -1,3 +1,5 @@
+-- aidcp:kind=expand
+-- aidcp:objects=
 -- 0021_account_nickname.sql（change account-real-nickname）
 --
 -- 文档伴随物，非执行脚本：本仓【无迁移执行器】（package.json 无 migrate、无处 readdir migrations/）。

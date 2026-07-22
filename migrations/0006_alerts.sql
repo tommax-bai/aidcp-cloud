@@ -1,3 +1,7 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:alerts.account_id,column:alerts.alert_id,column:alerts.created_at,column:alerts.detail
+-- aidcp:objects=column:alerts.edge_id,column:alerts.resolved_at,column:alerts.severity,column:alerts.title
+-- aidcp:objects=column:alerts.type,index:idx_alerts_created,index:idx_alerts_unresolved_edge,table:alerts
 -- V1 告警日志（change aidcp-console-panel-mvp，task 9.5 / 重构步骤）：
 -- append-only 告警表，飞书卡发送点写入、验证码清除点 set resolved_at。
 -- 复用 P0–P3 分级（risk-control §7 / product-exception §1）；与 risk_state.signalCount 区分（这是事件日志、非计数）。

@@ -1,3 +1,7 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:account_comment_approval_policy.account_id,column:account_comment_approval_policy.mode,column:account_comment_approval_policy.updated_at,column:account_comment_approval_policy.updated_by
+-- aidcp:objects=column:group_publish_approval_policy.delivery,column:group_publish_approval_policy.group_label,column:group_publish_approval_policy.updated_at,column:group_publish_approval_policy.updated_by
+-- aidcp:objects=table:account_comment_approval_policy,table:group_publish_approval_policy
 -- scoped-approval-and-notification-policy (0056)
 -- Runtime init() carries the same idempotent DDL because this repository does not
 -- have a guaranteed migration runner. Missing rows deliberately preserve legacy behavior.

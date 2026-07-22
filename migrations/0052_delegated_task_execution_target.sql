@@ -1,3 +1,5 @@
+-- aidcp:kind=contract
+-- aidcp:objects=column:delegated_tasks.execution_target,index:idx_delegated_tasks_target_active_dedupe,index:idx_delegated_tasks_target_claim,index:idx_delegated_tasks_target_ownership
 -- scope-delegated-tasks-by-cloud-target
 -- dev/ol currently share PostgreSQL. Persist a trusted Cloud execution target so
 -- one deployment cannot claim, recover, dedupe, or control the other's tasks.

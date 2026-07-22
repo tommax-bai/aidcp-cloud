@@ -1,3 +1,6 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:quota_config.action,column:quota_config.daily,column:quota_config.per_hour,column:quota_config.per_minute
+-- aidcp:objects=column:quota_config.tier,column:quota_config.updated_at,column:quota_config.updated_by,table:quota_config
 -- 0010_quota_config.sql（change safety-quota-config，stream D，迁移号 0010）
 --
 -- 安全限额数字做成管理后台可改：按 (tier, action) 一行，三窗口（每日 / 每分 / 每时）三列。

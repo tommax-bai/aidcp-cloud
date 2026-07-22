@@ -1,3 +1,9 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:notification_contact_meta.account_id,column:notification_contact_meta.note,column:notification_contact_meta.sender_key,column:notification_contact_meta.tags
+-- aidcp:objects=column:notification_contact_meta.updated_at,column:notification_contact_meta.updated_by,column:notification_contact_meta.wechat,column:notification_event.account_id
+-- aidcp:objects=column:notification_event.content,column:notification_event.dedup_key,column:notification_event.from_user,column:notification_event.from_user_id
+-- aidcp:objects=column:notification_event.note_title,column:notification_event.reason,column:notification_event.seen_at,index:idx_notification_event_account_seen
+-- aidcp:objects=index:idx_notification_event_account_user,table:notification_contact_meta,table:notification_event
 -- 0016_notification_contacts.sql（change notification-contact-registry，迁移号 0016）
 --
 -- 通知发送者「联系人名册」存储，按账号隔离。两张表：

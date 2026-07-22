@@ -1,3 +1,19 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:delegated_task_attempts.dispatched_at,column:delegated_task_attempts.evidence_ref,column:delegated_task_attempts.finished_at,column:delegated_task_attempts.id
+-- aidcp:objects=column:delegated_task_attempts.ordinal,column:delegated_task_attempts.prepared_at,column:delegated_task_attempts.reason,column:delegated_task_attempts.status
+-- aidcp:objects=column:delegated_task_attempts.target_key,column:delegated_task_attempts.task_id,column:delegated_task_attempts.verification_kind,column:delegated_task_events.created_at
+-- aidcp:objects=column:delegated_task_events.detail,column:delegated_task_events.event_type,column:delegated_task_events.from_status,column:delegated_task_events.id
+-- aidcp:objects=column:delegated_task_events.task_id,column:delegated_task_events.to_status,column:delegated_tasks.account_id,column:delegated_tasks.account_name
+-- aidcp:objects=column:delegated_tasks.action,column:delegated_tasks.action_family,column:delegated_tasks.approval_mode,column:delegated_tasks.attempt_count
+-- aidcp:objects=column:delegated_tasks.cancel_requested,column:delegated_tasks.claim_expires_at,column:delegated_tasks.claim_token,column:delegated_tasks.completed_at
+-- aidcp:objects=column:delegated_tasks.confirmed_at,column:delegated_tasks.created_at,column:delegated_tasks.current_step,column:delegated_tasks.deadline_at
+-- aidcp:objects=column:delegated_tasks.dedupe_key,column:delegated_tasks.execution_window,column:delegated_tasks.failure_count,column:delegated_tasks.id
+-- aidcp:objects=column:delegated_tasks.max_attempts,column:delegated_tasks.next_eligible_at,column:delegated_tasks.not_before,column:delegated_tasks.pause_requested
+-- aidcp:objects=column:delegated_tasks.platform,column:delegated_tasks.priority,column:delegated_tasks.skipped_count,column:delegated_tasks.source
+-- aidcp:objects=column:delegated_tasks.source_constraints,column:delegated_tasks.source_ref,column:delegated_tasks.status,column:delegated_tasks.success_count
+-- aidcp:objects=column:delegated_tasks.target_constraints,column:delegated_tasks.target_success_count,column:delegated_tasks.terminal_outcome,column:delegated_tasks.updated_at
+-- aidcp:objects=column:delegated_tasks.version,index:idx_delegated_task_attempts_reconcile,index:idx_delegated_task_events_task,table:delegated_task_attempts
+-- aidcp:objects=table:delegated_task_events,table:delegated_tasks
 -- user-delegated-tasks-phase-1
 -- Runtime init uses the same idempotent schema from src/delegated-task/store.ts.
 

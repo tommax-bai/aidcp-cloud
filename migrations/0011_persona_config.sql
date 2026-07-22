@@ -1,3 +1,6 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:persona_config.account_id,column:persona_config.persona,column:persona_config.updated_at,column:persona_config.updated_by
+-- aidcp:objects=table:persona_config
 -- 0011_persona_config.sql（change account-persona-config，stream F，迁移号 0011）
 --
 -- 账号维度人设：把原先全局单份 soul.yaml 做成「按账号可配」。每账号一行，

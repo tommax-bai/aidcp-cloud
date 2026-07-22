@@ -1,3 +1,8 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:publish_log.images,column:publish_pipeline_logs.completed_at,column:publish_pipeline_logs.duration_ms,column:publish_pipeline_logs.error_message
+-- aidcp:objects=column:publish_pipeline_logs.id,column:publish_pipeline_logs.input_snapshot,column:publish_pipeline_logs.output_snapshot,column:publish_pipeline_logs.role_name
+-- aidcp:objects=column:publish_pipeline_logs.run_id,column:publish_pipeline_logs.success,column:publish_pipeline_logs.triggered_at,index:idx_pipeline_logs_role
+-- aidcp:objects=index:idx_pipeline_logs_run,table:publish_pipeline_logs
 -- Migration: 0004_publish_agent
 -- Description: 为发布角色链（PublishManagerAgent）添加支持
 -- Date: 2024-01-01

@@ -1,3 +1,5 @@
+-- aidcp:kind=expand
+-- aidcp:objects=
 -- 0050_wechat_group_reply_config_privileges.sql
 -- Restore runtime DML access when 0048 was applied by an administrative role.
 -- The runtime role is derived from the owner of the legacy reply-config table,

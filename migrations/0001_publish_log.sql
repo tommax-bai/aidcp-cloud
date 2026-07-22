@@ -1,3 +1,7 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:publish_log.content,column:publish_log.id,column:publish_log.platform_post_id,column:publish_log.published_at
+-- aidcp:objects=column:publish_log.source_concepts,column:publish_log.source_liked_ids,column:publish_log.status,column:publish_log.title
+-- aidcp:objects=index:idx_publish_log_published_at,table:publish_log
 -- 发布记录表：Publish Agent 落地每次生成/发布的帖子。
 -- 幂等：可重复执行（CREATE TABLE IF NOT EXISTS）。
 -- 库：aidcp（user=aidcp）。

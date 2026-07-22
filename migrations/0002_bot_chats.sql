@@ -1,3 +1,7 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:bot_chats.bound_at,column:bot_chats.chat_id,column:bot_chats.chat_name,column:bot_chats.chat_type
+-- aidcp:objects=column:bot_chats.created_at,column:bot_chats.is_default,column:bot_chats.status,column:bot_chats.updated_at
+-- aidcp:objects=index:uq_bot_chats_default,table:bot_chats
 CREATE TABLE IF NOT EXISTS bot_chats (
   chat_id TEXT PRIMARY KEY,
   chat_name TEXT,

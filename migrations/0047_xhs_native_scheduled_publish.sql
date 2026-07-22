@@ -1,3 +1,6 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:publish_log.schedule_last_error,column:publish_log.schedule_next_reconcile_at,column:publish_log.schedule_reconcile_attempts,column:publish_log.scheduled_at
+-- aidcp:objects=column:publish_log.scheduled_platform_id,index:idx_publish_log_scheduled_due
 -- change xhs-native-scheduled-publish: distinguish platform-accepted schedules from public notes.
 ALTER TABLE publish_log DROP CONSTRAINT IF EXISTS publish_log_status_check;
 ALTER TABLE publish_log ADD CONSTRAINT publish_log_status_check

@@ -1,3 +1,8 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:client_env_scope_audit.assigned_at,column:client_env_scope_audit.assigned_by,column:client_env_scope_audit.audit_id,column:client_env_scope_audit.env_key
+-- aidcp:objects=column:client_env_scope_audit.label,column:client_env_scope_audit.platform,column:client_env_scope_audit.reason,column:client_env_scope_audit.revoked_at
+-- aidcp:objects=column:client_env_scope_audit.revoked_by,column:client_env_scope_audit.source,column:client_env_scope_audit.user_id,index:client_env_scope_active_user_idx
+-- aidcp:objects=index:client_env_scope_audit_scope_idx,index:uq_client_env_scope_active_env,table:client_env_scope_audit
 -- Customer environment ownership must come from the internal environment
 -- registry and must be globally unique. Historical customer self-claims move
 -- to an append-only audit table; they cannot remain in the active table because

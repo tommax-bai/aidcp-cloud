@@ -1,3 +1,7 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:resume_config.account_id,column:resume_config.active_window_end_min,column:resume_config.active_window_start_min,column:resume_config.daily_max_minutes
+-- aidcp:objects=column:resume_config.daily_max_sessions,column:resume_config.idle_end_ms,column:resume_config.idle_nudge_ms,column:resume_config.rest_ratio_pct
+-- aidcp:objects=column:resume_config.updated_at,column:resume_config.updated_by,table:resume_config
 -- 0020_resume_config.sql（change session-auto-resume-with-excursions，迁移号 0020）
 --
 -- 按账号的「自动续场护栏 + 看门狗阈值」配置：单场正常结束后歇 N% 再续场，受活跃时段窗口 +

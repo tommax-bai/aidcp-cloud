@@ -1,3 +1,6 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:category_config.account_id,column:category_config.category_id,column:category_config.model,column:category_config.updated_at
+-- aidcp:objects=column:category_config.updated_by,index:uq_category_config_account,index:uq_category_config_global,table:category_config
 -- change role-model-category-config：分类级模型默认（item 5/6）+ 账号维度数据缝（item 9，本期不接线）。
 -- 与 src/config/category-config-store.ts 的 CREATE TABLE IF NOT EXISTS 同源（幂等，可重复执行）。
 -- account_id NULL = 适用全部账号（本期恒 NULL）；非空 = 某账号专属（本期不写入、不读取非 NULL 行）。

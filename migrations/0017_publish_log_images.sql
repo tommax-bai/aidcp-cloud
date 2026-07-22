@@ -1,3 +1,5 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:publish_log.images_attached_count
 -- change publish-multi-image：publish_log 多图配图。
 -- 1) 复活 0004 已建但当前 store canonical SQL 未引用的休眠列 images TEXT[]（存全部成功配图 URL）。
 --    0004 用 ADD COLUMN IF NOT EXISTS（无 NOT NULL），此处再次 IF NOT EXISTS 幂等无害；

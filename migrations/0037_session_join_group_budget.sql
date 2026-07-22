@@ -1,3 +1,5 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:session_config_global.budget_join_groups
 -- 0037_session_join_group_budget.sql
 --
 -- Add the Facebook group-join per-session budget to the global session-limit

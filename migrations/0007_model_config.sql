@@ -1,3 +1,8 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:model_config.id,column:model_config.image_model,column:model_config.text_model,column:model_config.updated_at
+-- aidcp:objects=column:model_config.updated_by,column:provider_credentials.ciphertext,column:provider_credentials.field,column:provider_credentials.masked_hint
+-- aidcp:objects=column:provider_credentials.provider,column:provider_credentials.updated_at,column:provider_credentials.updated_by,table:model_config
+-- aidcp:objects=table:provider_credentials
 -- 0007_model_config.sql — 模型配置 + 加密凭据（change console-model-provider-config）
 --
 -- model_config：单行（id=1）模型名配置，缺行回退代码默认（qwen-turbo / wan2.7-image-pro）。

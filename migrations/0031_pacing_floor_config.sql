@@ -1,3 +1,6 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:pacing_floor_config.max_ms,column:pacing_floor_config.min_ms,column:pacing_floor_config.operation,column:pacing_floor_config.updated_at
+-- aidcp:objects=column:pacing_floor_config.updated_by,table:pacing_floor_config
 -- 0031_pacing_floor_config.sql（change pacing-floor-config-min-interval）
 -- 人审文档：本仓无迁移执行器，实际 DDL 由 PacingConfigStore.init() 幂等自愈
 -- （src/config/pacing-config-store.ts PACING_FLOOR_SCHEMA_SQL，与此同源、勿漂移）。

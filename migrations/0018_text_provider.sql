@@ -1,3 +1,5 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:category_config.provider,column:model_config.text_provider,column:role_config.provider
 -- 0018_text_provider.sql
 -- change model-config-volcengine-provider：文本模型配置加 provider 维度（多厂商：dashscope + volcengine 火山方舟）。
 -- 幂等可重跑；老行回填 'dashscope'（既有文本模型均为 Qwen/DashScope，provider 跟模型同行）。

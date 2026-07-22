@@ -1,3 +1,6 @@
+-- aidcp:kind=contract
+-- aidcp:objects=column:account_content_schedule.contact_comment_daily_cap,column:account_content_schedule.contact_comment_enabled,column:accounts.contact_info,column:contact_comment_attempts.account_id
+-- aidcp:objects=column:contact_comment_attempts.attempted_at,column:contact_comment_attempts.id,index:idx_contact_comment_attempts_account,table:contact_comment_attempts
 -- 0036_rename_group_chat_info_to_contact_info.sql（change generalize-contact-info）
 -- generalize-contact-info: physical rename group_chat_info / group_comment_* -> contact_*
 -- Coordinated single-writer migration (NOT self-heal): guarded, schema-qualified, lock-bounded, idempotent.

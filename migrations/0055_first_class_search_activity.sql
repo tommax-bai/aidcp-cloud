@@ -1,3 +1,5 @@
+-- aidcp:kind=expand
+-- aidcp:objects=
 -- Add platform search as an account-level risk fact without adding it to note-scoped interactions.
 
 ALTER TABLE risk_counters DROP CONSTRAINT IF EXISTS risk_counters_action_check;

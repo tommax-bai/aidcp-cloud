@@ -1,3 +1,10 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:resume_config_global.active_window_end_min,column:resume_config_global.active_window_start_min,column:resume_config_global.daily_max_minutes,column:resume_config_global.daily_max_sessions
+-- aidcp:objects=column:resume_config_global.id,column:resume_config_global.idle_end_ms,column:resume_config_global.idle_nudge_ms,column:resume_config_global.rest_ratio_pct
+-- aidcp:objects=column:resume_config_global.updated_at,column:resume_config_global.updated_by,column:session_config_global.budget_collects,column:session_config_global.budget_comment_likes
+-- aidcp:objects=column:session_config_global.budget_comments,column:session_config_global.budget_follows,column:session_config_global.budget_likes,column:session_config_global.budget_searches
+-- aidcp:objects=column:session_config_global.id,column:session_config_global.max_duration_min,column:session_config_global.updated_at,column:session_config_global.updated_by
+-- aidcp:objects=table:resume_config_global,table:session_config_global
 -- 0022_global_safety_config.sql（change restore-auto-resume-and-global-safety-config，stream B，迁移号 0022）
 --
 -- 把「单场会话上限」与「自动续场护栏 + 看门狗阈值」从**按账号**收敛为**全局单例**：

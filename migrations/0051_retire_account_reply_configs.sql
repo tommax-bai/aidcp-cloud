@@ -1,3 +1,5 @@
+-- aidcp:kind=expand
+-- aidcp:objects=
 -- 0051_retire_account_reply_configs.sql
 -- One-time retirement of account-scoped WeChat reply strategy test data.
 -- Physical legacy tables remain for shared-schema compatibility; scoped strategy,

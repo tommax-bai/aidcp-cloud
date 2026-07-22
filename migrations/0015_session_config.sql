@@ -1,3 +1,7 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:session_config.account_id,column:session_config.budget_collects,column:session_config.budget_comment_likes,column:session_config.budget_comments
+-- aidcp:objects=column:session_config.budget_follows,column:session_config.budget_likes,column:session_config.budget_searches,column:session_config.max_duration_min
+-- aidcp:objects=column:session_config.updated_at,column:session_config.updated_by,table:session_config
 -- 0015_session_config.sql（change session-limits-to-quota-layer，迁移号 0015）
 --
 -- 把「单场会话上限」从人设 / 写死常量搬进安全限额层：按账号一行，单场时长 + 六项单场互动预算。

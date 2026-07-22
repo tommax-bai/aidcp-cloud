@@ -1,3 +1,8 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:llm_billing_price_snapshot.completion_cost_per_1k,column:llm_billing_price_snapshot.currency,column:llm_billing_price_snapshot.model,column:llm_billing_price_snapshot.prompt_cost_per_1k
+-- aidcp:objects=column:llm_billing_price_snapshot.provider,column:llm_billing_price_snapshot.source,column:llm_billing_price_snapshot.source_period,column:llm_billing_price_snapshot.source_synced_at
+-- aidcp:objects=column:llm_billing_price_snapshot.total_cost_per_1k,column:llm_billing_price_snapshot.updated_at,column:llm_billing_price_snapshot.usage_day,column:llm_token_usage.provider
+-- aidcp:objects=index:idx_llm_billing_price_snapshot_day,index:idx_llm_token_usage_provider_model_bucket,table:llm_billing_price_snapshot
 -- 0033_llm_billing_cost_estimates.sql
 --
 -- Keep token cost estimates billing-backed: token usage records include provider,

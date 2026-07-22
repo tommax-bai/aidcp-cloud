@@ -1,3 +1,7 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:interaction_feed.account_id,column:interaction_feed.action,column:interaction_feed.occurred_at,column:interaction_feed.target_id
+-- aidcp:objects=column:interaction_target_meta.account_id,column:interaction_target_meta.target_id,column:interaction_target_meta.title,column:interaction_target_meta.updated_at
+-- aidcp:objects=column:interaction_target_meta.url,index:idx_interaction_feed_account_time,table:interaction_feed,table:interaction_target_meta
 -- 面板互动流（change interaction-feed-enrichment）。
 -- 幂等：可重复执行（CREATE TABLE / INDEX IF NOT EXISTS）。库：aidcp（user=aidcp）。
 -- 与 src/cache/interaction-feed-store.ts 的 INTERACTION_FEED_SCHEMA_SQL 同源（运行时 init 亦建表）。

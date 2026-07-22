@@ -1,3 +1,5 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:publish_log.source_reference
 -- publish-reference-source-panel：参照洗稿来稿快照。
 --
 -- 文档伴随物，非执行脚本：本仓【无迁移执行器】；运行时 init() 会执行同源幂等 ALTER。

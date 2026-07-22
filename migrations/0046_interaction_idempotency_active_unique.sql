@@ -1,3 +1,5 @@
+-- aidcp:kind=contract
+-- aidcp:objects=index:uq_interaction_send_attempts_active_idem
 -- A completed send attempt must not prevent a later attempt from reusing the
 -- deterministic reply idempotency key. Only attempts that can still reach the
 -- platform retain the uniqueness slot.

@@ -1,3 +1,5 @@
+-- aidcp:kind=expand
+-- aidcp:objects=
 -- 0027_account_group_chat_info.sql（change account-group-chat-injection，迁移号 0027；0026 已被 role_thinking_mode 占用）
 --
 -- 每账号「关联群聊引流码」：后台粘贴录入的长文本（含 emoji / 换行），供飞书 /comment group:on 注入到评论末尾引流。

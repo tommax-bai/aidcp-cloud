@@ -1,3 +1,7 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:llm_token_usage.account_id,column:llm_token_usage.bucket_start,column:llm_token_usage.calls,column:llm_token_usage.completion_tokens
+-- aidcp:objects=column:llm_token_usage.model,column:llm_token_usage.ok_calls,column:llm_token_usage.prompt_tokens,column:llm_token_usage.role
+-- aidcp:objects=column:llm_token_usage.total_tokens,column:llm_token_usage.updated_at,index:idx_llm_token_usage_account_bucket,table:llm_token_usage
 -- 0013_llm_token_usage.sql（change llm-token-usage-stats，迁移号 0013）
 --
 -- 按 (10 分钟桶, 账号, 角色, 模型) 预聚合的文本 LLM token 用量。每个维度组合一行，

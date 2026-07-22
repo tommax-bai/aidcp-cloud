@@ -1,3 +1,5 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:session_config_global.active_week_mask
 -- 0024_weekly_active_window.sql（change weekly-active-window，迁移号 0024）
 --
 -- 「可活跃时间」全局周历闸：管理后台「安全」页可按**周 × 天 × 小时**配置允许活跃的时段，对所有账号生效。

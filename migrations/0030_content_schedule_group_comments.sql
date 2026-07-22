@@ -1,3 +1,5 @@
+-- aidcp:kind=expand
+-- aidcp:objects=
 -- 0030_content_schedule_group_comments.sql（change content-schedule-group-comments，Phase 3 定时群评）
 -- 人审文档：本仓无迁移执行器，实际 DDL 由 ContentScheduleStore.init() 幂等自愈
 -- （src/config/content-schedule-store.ts CONTENT_SCHEDULE_SCHEMA_SQL，与此同源、勿漂移）。

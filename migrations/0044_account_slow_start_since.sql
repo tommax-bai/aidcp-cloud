@@ -1,3 +1,5 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:accounts.slow_start_since
 -- 0044_account_slow_start_since.sql（change account-level-slow-start）
 --
 -- 文档性迁移：本仓无迁移执行器，实际由 src/account-store.ts 的 ACCOUNTS_SCHEMA_SQL

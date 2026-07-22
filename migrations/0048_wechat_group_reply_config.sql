@@ -1,3 +1,14 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:interaction_reply_config_scopes.current_version,column:interaction_reply_config_scopes.draft_version,column:interaction_reply_config_scopes.group_label,column:interaction_reply_config_scopes.platform
+-- aidcp:objects=column:interaction_reply_config_scopes.published_version,column:interaction_reply_config_scopes.scope_id,column:interaction_reply_config_scopes.scope_type,column:interaction_reply_config_scopes.updated_at
+-- aidcp:objects=column:interaction_reply_config_scopes.updated_by,column:interaction_reply_jobs.config_scope_id,column:interaction_reply_scope_audit.action,column:interaction_reply_scope_audit.actor
+-- aidcp:objects=column:interaction_reply_scope_audit.config_version,column:interaction_reply_scope_audit.created_at,column:interaction_reply_scope_audit.entity_id,column:interaction_reply_scope_audit.entity_type
+-- aidcp:objects=column:interaction_reply_scope_audit.event_id,column:interaction_reply_scope_audit.labels,column:interaction_reply_scope_audit.scope_id,column:interaction_reply_scope_audit.summary
+-- aidcp:objects=column:interaction_reply_scope_versions.config_version,column:interaction_reply_scope_versions.created_at,column:interaction_reply_scope_versions.created_by,column:interaction_reply_scope_versions.policy
+-- aidcp:objects=column:interaction_reply_scope_versions.profiles,column:interaction_reply_scope_versions.published_at,column:interaction_reply_scope_versions.published_by,column:interaction_reply_scope_versions.rules
+-- aidcp:objects=column:interaction_reply_scope_versions.scope_id,column:interaction_reply_scope_versions.state,column:interaction_reply_scope_versions.templates,index:idx_interaction_reply_jobs_config_scope
+-- aidcp:objects=index:idx_reply_scope_audit_time,index:uq_reply_config_scope_default,index:uq_reply_config_scope_group,table:interaction_reply_config_scopes
+-- aidcp:objects=table:interaction_reply_scope_audit,table:interaction_reply_scope_versions
 -- 0048_wechat_group_reply_config.sql
 -- Additive, rollback-safe storage for shared WeChat Channels reply configuration.
 -- Legacy account-scoped tables from 0039 remain untouched and readable during migration.

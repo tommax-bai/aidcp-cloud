@@ -1,3 +1,5 @@
+-- aidcp:kind=expand
+-- aidcp:objects=index:idx_interaction_feed_time,index:idx_llm_token_usage_bucket,index:idx_risk_counters_time
 -- 0030_panel_hardening_indexes.sql
 -- change console-cloud-panel-hardening (#21/#22/#23)
 --
