@@ -12,6 +12,8 @@
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from './cache/pg-anchor-cache.js';
 import { normalizePlatformId, type PlatformId } from './platform/index.js';
+import { parseDeploymentTarget, type DeploymentTarget } from './deployment-target.js';
+import type { ClaimExecutionTargetResult } from './risk/ownership.js';
 import {
   accountDisplayNameCandidates,
   resolveAccountDisplayName,
@@ -62,6 +64,25 @@ ALTER TABLE accounts ADD COLUMN IF NOT EXISTS contact_info TEXT;
 -- 一列同时表达开关 / 起点 / 三态 → 结构上不可能出现 enabled=true && since=NULL 这种非法组合。
 -- MUST NOT 用 created_at 当起点：那是「第一次连上本云端库」，cookie 导入的三年老号会被算「第 1 天」。
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS slow_start_since TIMESTAMPTZ;
+-- 自愈式加列（change risk-state-cross-process-integrity，迁移 0061）：账号归属的执行目标。
+-- 语义 = 「该账号当前由哪个 target 的自动化驱动」，是风控写权谓词的**唯一权威**
+-- （MUST NOT 在 risk_state 复制一份，两处必漂移）。服务端按本机部署配置注入，
+-- MUST NOT 从客户端请求 / envKey / 自然语言 / 边缘上报推导。
+-- **MUST NOT 回填默认值**：回填 'dev' 会把 ol 的生产账号静默划给 dev。NULL = 未归属，
+-- 由首个在其上真实握手成功的 target 以条件写原子占位。
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS execution_target TEXT;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid = 'accounts'::regclass
+       AND conname = 'accounts_execution_target_check'
+  ) THEN
+    ALTER TABLE accounts
+      ADD CONSTRAINT accounts_execution_target_check
+      CHECK (execution_target IS NULL OR execution_target IN ('dev','ol'));
+  END IF;
+END $$;
 -- retire-default-account：不再 seed 'default' 占位行。账号父行由真实账号握手时 ensureAccount 幂等登记产生。
 `;
 
@@ -166,6 +187,21 @@ export interface AccountStore {
    * MUST NOT 用作慢启动起点（它是「第一次连上本云端库」，不是平台注册时间）。同步、零 IO、永不抛。
    */
   createdAtFor?(accountId: string): number | undefined;
+  /**
+   * 读账号归属的执行目标（change risk-state-cross-process-integrity）：未归属 / 缺行 → null。
+   * `accounts` 由本 store 单写（拆分方案 §5.1），automation 侧只经 AccountOwnershipPort 调用。
+   */
+  getExecutionTarget?(accountId: string): Promise<DeploymentTarget | null>;
+  /**
+   * 归属占位：**仅当归属为空**时原子写入，已被占位即返回真实属主，MUST NOT 覆盖。
+   * 照抄内容排期小时格的条件 upsert 占位形态（content-schedule-store 的 `WHERE ... IS NULL`）。
+   */
+  claimExecutionTarget?(accountId: string, target: DeploymentTarget): Promise<ClaimExecutionTargetResult>;
+  /**
+   * 运维改归属（面板 POST /api/accounts/:id/risk-owner）：无条件写入指定 target。
+   * **调用方 MUST 先校验旧属主上无活跃边缘会话**，否则拒绝——本方法不做该校验（它看不到连接）。
+   */
+  setExecutionTarget?(accountId: string, target: DeploymentTarget): Promise<ClaimExecutionTargetResult>;
   close?(): Promise<void>;
 }
 
@@ -462,6 +498,63 @@ export class PgAccountStore implements AccountStore {
   /** 同步读账号入库时刻（见 AccountNurtureProvider.createdAtFor 契约）：仅供 env 旁路，缺键 → undefined。 */
   createdAtFor(accountId: string): number | undefined {
     return this.createdAtCache.get(accountId);
+  }
+
+  /**
+   * 读账号归属 target（change risk-state-cross-process-integrity）：缺行 / 库内 NULL → null。
+   * **不缓存**：归属是准入与写权的判据，陈旧一秒就可能让非属主多写一次 risk_state。
+   * 调用频率是「每次握手一次 + 每次面板写口一次」，不是热路径。
+   */
+  async getExecutionTarget(accountId: string): Promise<DeploymentTarget | null> {
+    const { rows } = await this.pool.query<{ execution_target: string | null }>(
+      `SELECT execution_target FROM accounts WHERE account_id = $1`,
+      [accountId],
+    );
+    if (rows.length === 0) return null;
+    return parseDeploymentTarget(rows[0].execution_target);
+  }
+
+  /**
+   * 归属占位：条件 UPDATE 原子写入，**仅当 execution_target IS NULL**。
+   * - 写成功（1 行）→ claimed；
+   * - 0 行且账号存在 → already_owned_by（回读真实属主，绝不覆盖）；
+   * - 0 行且账号不存在 → account_not_found（**绝不 seed 造行**：归属是对既有账号的事实标注）。
+   *
+   * 并发占位（dev 与 ol 几乎同时握手）由行锁串行化，后到者命中 0 行 → 诚实观察到已被占位。
+   */
+  async claimExecutionTarget(
+    accountId: string,
+    target: DeploymentTarget,
+  ): Promise<ClaimExecutionTargetResult> {
+    if (accountId === RETIRED_ACCOUNT_ID) return { outcome: 'account_not_found' };
+    const { rows } = await this.pool.query<{ execution_target: string | null }>(
+      `UPDATE accounts SET execution_target = $2
+        WHERE account_id = $1 AND execution_target IS NULL
+        RETURNING execution_target`,
+      [accountId, target],
+    );
+    if (rows.length > 0) return { outcome: 'claimed', target };
+    const owner = await this.getExecutionTarget(accountId);
+    if (owner) return { outcome: 'already_owned_by', target: owner };
+    // 0 行 + 归属仍为空 ⇒ 账号行不存在（否则条件必然命中）。
+    const { rowCount } = await this.pool.query(`SELECT 1 FROM accounts WHERE account_id = $1`, [accountId]);
+    if ((rowCount ?? 0) === 0) return { outcome: 'account_not_found' };
+    // 极罕见：并发把归属写成合法值又被清空。诚实报「未占到」而不是假装成功。
+    return { outcome: 'account_not_found' };
+  }
+
+  /**
+   * 运维改归属（无条件写）。**调用方 MUST 先确认旧属主上无活跃边缘会话**——本方法看不到连接，
+   * 不做该校验；把它做进这里会让「谁负责这道闸」变得模糊。
+   */
+  async setExecutionTarget(accountId: string, target: DeploymentTarget): Promise<ClaimExecutionTargetResult> {
+    if (accountId === RETIRED_ACCOUNT_ID) return { outcome: 'account_not_found' };
+    const { rows } = await this.pool.query<{ execution_target: string | null }>(
+      `UPDATE accounts SET execution_target = $2 WHERE account_id = $1 RETURNING execution_target`,
+      [accountId, target],
+    );
+    if (rows.length === 0) return { outcome: 'account_not_found' };
+    return { outcome: 'claimed', target };
   }
 
   // getNurtureMeta 已删（change account-level-slow-start，task 2.3）：它是构造期 async 解析一次的

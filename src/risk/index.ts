@@ -15,3 +15,9 @@ export * from './interaction-dedup.js';
 export * from './interaction-guard.js';
 export * from './search-frequency-limiter.js';
 export * from './action-cooldown.js';
+// change risk-state-cross-process-integrity：跨进程单写的四件套（写者锁 / 归属 / 记账 outbox / 对账）
+export * from './ownership.js';
+export * from './writer-lock.js';
+export * from './risk-counter-outbox-store.js';
+export * from './risk-accounting.js';
+export * from './risk-counter-reconciler.js';

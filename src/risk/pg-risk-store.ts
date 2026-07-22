@@ -1,6 +1,8 @@
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/index.js';
 import { SHANGHAI_DAY_START_SQL } from '../time/shanghai-day.js';
+import { parseDeploymentTarget, type DeploymentTarget } from '../deployment-target.js';
+import { RiskStateNotOwnedError, type OwnershipMode } from './ownership.js';
 import { RISK_ACTIONS } from './types.js';
 import type {
   ActionQuota,
@@ -23,6 +25,20 @@ export interface PgRiskStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /**
+   * 本进程的部署目标（change risk-state-cross-process-integrity）：risk_state 条件写的属主谓词。
+   * 缺省（不注入）→ ownershipMode 恒为 'off'，saveState 走历史无谓词 upsert（逐位零回归）。
+   */
+  executionTarget?: DeploymentTarget;
+  /** 归属强制模式。缺省 'off'（无 target 时的唯一合法值）。 */
+  ownershipMode?: OwnershipMode;
+  /** 观察模式下「本会被拒的写」的告警钩子。永不抛（内部已 try/catch）。 */
+  onOwnershipViolation?: (info: {
+    accountId: string;
+    writerTarget: DeploymentTarget;
+    ownerTarget: DeploymentTarget | null | undefined;
+    cause: 'account_not_found' | 'unowned' | 'owned_by_other';
+  }) => void;
 }
 
 export const RISK_SCHEMA_SQL = `
@@ -79,9 +95,40 @@ BEGIN
       CHECK (action IN ('like','collect','comment','follow','publish','view','search','comment_like','join_group','dm_reply'));
   END IF;
 END $$;
+
+-- 记账 outbox（change risk-state-cross-process-integrity，迁移 0061）：边缘确认的真实动作先落这里，
+-- 再由 worker 认领并在单事务里写 risk_counters + 标记 applied。形状照抄 delegated_tasks 的认领范式。
+-- 本仓无迁移执行器 → init() 里这份幂等 SQL 才是实际生效路径，MUST 与 migrations/0061 同源。
+CREATE TABLE IF NOT EXISTS risk_counter_outbox (
+  id               BIGSERIAL PRIMARY KEY,
+  account_id       TEXT NOT NULL,
+  action           TEXT NOT NULL CHECK (action IN ('like','collect','comment','follow','publish','view','search','comment_like','join_group','dm_reply')),
+  occurred_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  execution_target TEXT NOT NULL CHECK (execution_target IN ('dev','ol')),
+  dedupe_key       TEXT NOT NULL,
+  status           TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','applied','dead')),
+  attempts         INTEGER NOT NULL DEFAULT 0,
+  claim_token      TEXT,
+  claim_expires_at TIMESTAMPTZ,
+  last_error       TEXT,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_risk_counter_outbox_target_dedupe
+  ON risk_counter_outbox (execution_target, dedupe_key);
+CREATE INDEX IF NOT EXISTS idx_risk_counter_outbox_claim
+  ON risk_counter_outbox (execution_target, status, claim_expires_at, id);
+
+-- exactly-once 交给数据库：一条 outbox 行最多产生一行计数（MUST NOT 用内存 Set 去重）。
+ALTER TABLE risk_counters ADD COLUMN IF NOT EXISTS outbox_id BIGINT;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_risk_counters_outbox
+  ON risk_counters (outbox_id) WHERE outbox_id IS NOT NULL;
 `;
 
-export function pgRiskConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Required<Omit<PgRiskStoreOptions, 'pool'>> {
+type PgConnectionConfig = Required<Pick<PgRiskStoreOptions, 'host' | 'port' | 'database' | 'user' | 'password'>>;
+
+export function pgRiskConfigFromEnv(env: NodeJS.ProcessEnv = process.env): PgConnectionConfig {
   return {
     host: env.AIDCP_PG_HOST ?? DEFAULT_PG_CONFIG.host,
     port: Number(env.AIDCP_PG_PORT ?? DEFAULT_PG_CONFIG.port),
@@ -107,6 +154,9 @@ function rowsToActionQuota(rows: { action: string; total: number }[]): ActionQuo
 
 export class PgRiskStore implements RiskStore, InteractionStore {
   private readonly pool: pg.Pool;
+  private readonly executionTarget?: DeploymentTarget;
+  private readonly ownershipMode: OwnershipMode;
+  private readonly onOwnershipViolation?: PgRiskStoreOptions['onOwnershipViolation'];
 
   constructor(options: PgRiskStoreOptions = {}) {
     const config = pgRiskConfigFromEnv();
@@ -119,6 +169,15 @@ export class PgRiskStore implements RiskStore, InteractionStore {
         user: options.user ?? config.user,
         password: options.password ?? config.password,
       });
+    this.executionTarget = options.executionTarget;
+    // 无 target ⇒ 无属主谓词可用 ⇒ 只能是 'off'。绝不让「配置缺失」偷偷变成「强制生效」或反过来。
+    this.ownershipMode = options.executionTarget ? options.ownershipMode ?? 'off' : 'off';
+    this.onOwnershipViolation = options.onOwnershipViolation;
+  }
+
+  /** 当前生效的归属强制模式（供装配自证与面板呈现）。 */
+  ownership(): { mode: OwnershipMode; target: DeploymentTarget | null } {
+    return { mode: this.ownershipMode, target: this.executionTarget ?? null };
   }
 
   async init(): Promise<void> {
@@ -188,7 +247,78 @@ export class PgRiskStore implements RiskStore, InteractionStore {
     };
   }
 
+  /**
+   * 写风控最终状态（change risk-state-cross-process-integrity，design D4）。
+   *
+   * **带属主谓词的单语句**：属主事实的唯一权威是 `accounts.execution_target`
+   * （MUST NOT 在 risk_state 复制一份属主列——两处必漂移）。影响行数为 0 即诚实拒绝：
+   * 抛 `RiskStateNotOwnedError` 并附真实归属，MUST NOT 返回成功、MUST NOT 重试、
+   * MUST NOT 换个宽松谓词再写一次。
+   *
+   * 顺带收掉一个既有隐患：历史裸 upsert 能为**不存在的账号**造幽灵 risk_state 行（面板靠应用层
+   * assertAccountExists 挡着）。条件写把这道保护变成结构性的。
+   *
+   * 两阶段发布（design Migration Plan）：
+   * - `off`（无 target / 未配置）→ 历史无谓词 upsert，逐位零回归。
+   * - `observe`（默认）→ 条件写；0 行时**回读真实归属并告警**，随后仍按历史语义写入。
+   *   观察模式的价值是「先证明零跨 target 争用」，MUST NOT 静默——每一次本会被拒的写都留痕。
+   * - `enforce` → 条件写；0 行即抛。
+   */
   async saveState(state: RiskState): Promise<void> {
+    if (this.ownershipMode === 'off' || !this.executionTarget) {
+      await this.upsertStateUnconditional(state);
+      return;
+    }
+    const { rowCount } = await this.pool.query(
+      `WITH owner AS (
+         SELECT 1 FROM accounts WHERE account_id = $1 AND execution_target = $8
+       )
+       INSERT INTO risk_state (account_id, status, quota_level, signal_count, last_signal_at, status_since, updated_at)
+       SELECT $1, $2, $3, $4,
+              CASE WHEN $5::bigint IS NULL THEN NULL ELSE to_timestamp($5 / 1000.0) END,
+              to_timestamp($6 / 1000.0), to_timestamp($7 / 1000.0)
+        WHERE EXISTS (SELECT 1 FROM owner)
+       ON CONFLICT (account_id) DO UPDATE SET
+         status = EXCLUDED.status,
+         quota_level = EXCLUDED.quota_level,
+         signal_count = EXCLUDED.signal_count,
+         last_signal_at = EXCLUDED.last_signal_at,
+         status_since = EXCLUDED.status_since,
+         updated_at = EXCLUDED.updated_at
+       RETURNING account_id`,
+      [
+        state.accountId,
+        state.status,
+        state.quotaLevel,
+        state.signalCount,
+        state.lastSignalAt,
+        state.statusSince,
+        state.updatedAt,
+        this.executionTarget,
+      ],
+    );
+    if ((rowCount ?? 0) > 0) return;
+
+    const { owner, cause } = await this.resolveOwnership(state.accountId);
+    if (this.ownershipMode === 'enforce') {
+      throw new RiskStateNotOwnedError(state.accountId, this.executionTarget, owner, cause);
+    }
+    // observe：留痕 + 按历史语义完成写入（本阶段行为与今天逐位一致）。
+    try {
+      this.onOwnershipViolation?.({
+        accountId: state.accountId,
+        writerTarget: this.executionTarget,
+        ownerTarget: owner,
+        cause,
+      });
+    } catch {
+      // 告警链路故障绝不反噬风控写路径。
+    }
+    await this.upsertStateUnconditional(state);
+  }
+
+  /** 历史无谓词 upsert（`off` 与观察模式的落地写）。 */
+  private async upsertStateUnconditional(state: RiskState): Promise<void> {
     await this.pool.query(
       `INSERT INTO risk_state (account_id, status, quota_level, signal_count, last_signal_at, status_since, updated_at)
        VALUES ($1, $2, $3, $4, CASE WHEN $5::bigint IS NULL THEN NULL ELSE to_timestamp($5 / 1000.0) END, to_timestamp($6 / 1000.0), to_timestamp($7 / 1000.0))
@@ -201,6 +331,20 @@ export class PgRiskStore implements RiskStore, InteractionStore {
          updated_at = EXCLUDED.updated_at`,
       [state.accountId, state.status, state.quotaLevel, state.signalCount, state.lastSignalAt, state.statusSince, state.updatedAt],
     );
+  }
+
+  /** 0 行的三种原因必须可区分：账号不存在 / 归属为空 / 归属是别人。 */
+  private async resolveOwnership(
+    accountId: string,
+  ): Promise<{ owner: DeploymentTarget | null | undefined; cause: 'account_not_found' | 'unowned' | 'owned_by_other' }> {
+    const { rows } = await this.pool.query<{ execution_target: string | null }>(
+      `SELECT execution_target FROM accounts WHERE account_id = $1`,
+      [accountId],
+    );
+    if (rows.length === 0) return { owner: undefined, cause: 'account_not_found' };
+    const owner = parseDeploymentTarget(rows[0].execution_target);
+    if (!owner) return { owner: null, cause: 'unowned' };
+    return { owner, cause: 'owned_by_other' };
   }
 
   async hasInteraction(accountId: string, noteId: string, action: InteractionAction): Promise<boolean> {

@@ -55,6 +55,16 @@ export interface RiskControllerOptions {
    * 全局停用闸：置真 → 无视所有环境级开关与历史 env 旁路、全体不 clamp。
    */
   slowStartDisabled?: boolean;
+  /**
+   * 记账 fail-closed 现读（change risk-state-cross-process-integrity）：该账号的记账链路是否已断
+   * （outbox 入队失败）。返回 true ⇒ 一切互动动作准入判定直接拒绝。
+   *
+   * 为什么闸设在这里而不是在下发处新加一道：`canDo` / `explain` 是**全部**自动路径的公共必经点
+   * （角色调度、命令桥、评论评估、发布闸都调它）。新加一道独立闸必然漏接线；接在这里，覆盖是结构性的。
+   *
+   * 契约同 QuotaProvider / AccountNurtureProvider：**同步、零 IO、永不抛**。
+   */
+  interactionBlockedProvider?: (accountId: string) => boolean;
 }
 
 /**
@@ -118,6 +128,7 @@ export class RiskController {
   private readonly nurtureProvider?: AccountNurtureProvider;
   private readonly coldStartRampEnabled: boolean;
   private readonly slowStartDisabled: boolean;
+  private readonly interactionBlockedProvider?: (accountId: string) => boolean;
   private state: RiskState;
   /** 每账号串行化：所有改 state + saveState 的写经此链，避免并发 read-modify-write 丢更新（D7）。 */
   private mutationChain: Promise<unknown> = Promise.resolve();
@@ -135,6 +146,7 @@ export class RiskController {
     this.nurtureProvider = options.nurtureProvider;
     this.coldStartRampEnabled = options.coldStartRampEnabled ?? false;
     this.slowStartDisabled = options.slowStartDisabled ?? false;
+    this.interactionBlockedProvider = options.interactionBlockedProvider;
   }
 
   static async create(options: RiskControllerOptions = {}): Promise<RiskController> {
@@ -153,6 +165,12 @@ export class RiskController {
   }
 
   explain(action: RiskAction): CanDoResult {
+    // 记账链路已断（outbox 入队失败）⇒ 停止一切互动动作，形状同 restricted（浏览仍放行，
+    // 否则连「看看现在什么情况」都做不到）。这不是风控态迁移——状态机一个字都没改，
+    // 这是「记不上账就不许再制造要记的账」的结构性背压（change risk-state-cross-process-integrity）。
+    if (action !== 'view' && this.interactionBlockedProvider?.(this.accountId)) {
+      return { allowed: false, reason: 'accounting:blocked' };
+    }
     if (this.state.status === 'frozen') return { allowed: false, reason: 'state:frozen' };
     if (this.state.status === 'restricted' && action !== 'view') return { allowed: false, reason: 'state:restricted' };
     if (this.state.status === 'warned' && action === 'publish') return { allowed: false, reason: 'state:warned_publish_paused' };
@@ -217,13 +235,42 @@ export class RiskController {
    *
    * 注：某条路径若确实不该消耗预算，正确表达是**在接线层显式不驱动本方法**，而不是让它内部静默丢弃
    * ——后者使「豁免」与「丢数」不可区分。
+   *
+   * ---
+   * **本方法已被拆成两半**（change risk-state-cross-process-integrity，design D5）：
+   * 判定取值留在这里，**持久账本迁到 outbox**（`RiskAccounting`）。原因是这条链路此前是进程内
+   * fire-and-forget，崩在「回执已到、计数未提交」之间就静默丢账。
+   *
+   * ⚠️ **生产路径 MUST 经 `RiskAccounting.record` / `.enqueue`，MUST NOT 直接调本方法**——
+   * 本方法只递增内存计数、不落库，直接调等于制造「内存有、库里无」的偏差（下一次对账会检出并
+   * 以库为准把它抹掉，即真实动作凭空消失）。保留它是为了不带 store 的纯逻辑单测与验收用例。
    */
   async record(action: RiskAction): Promise<boolean> {
     const allowed = this.canDo(action);
-    const now = this.clock();
-    this.counter.record(action, now);
-    await this.store?.appendCounter(this.accountId, action, now);
+    this.recordFact(action, this.clock());
     return allowed;
+  }
+
+  /**
+   * 只记「这个动作发生过」——递增内存滑动窗计数，不落库、不判定。
+   *
+   * **由 outbox apply 驱动，且只由它驱动**：库内那一行写成功之后才调这里，内存与库因此同源。
+   * `occurredAt` 取事实发生时刻（回执时间），MUST NOT 取 apply 时刻——否则跨小时窗的动作会被
+   * 记到错误的突发窗里。
+   */
+  recordFact(action: RiskAction, occurredAt: number = this.clock()): void {
+    this.counter.record(action, occurredAt);
+  }
+
+  /**
+   * 以库内事实为准重建计数（change risk-state-cross-process-integrity，design D6）。
+   * 用于：归属占位成功 / 归属变更后重新解析 / 周期对账检出偏差。
+   * **整段替换，MUST NOT 增量合并**——增量合并解决不了「内存多记了一笔」这个方向的偏差。
+   */
+  async reloadCounters(): Promise<void> {
+    const now = this.clock();
+    const events = (await this.store?.loadCounters(this.accountId, now - WINDOW_MS.day)) ?? [];
+    this.counter.reset(events, now);
   }
 
   getState(): RiskState {

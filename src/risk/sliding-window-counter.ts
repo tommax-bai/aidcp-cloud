@@ -68,6 +68,18 @@ export class SlidingWindowCounter {
     };
   }
 
+  /**
+   * 以给定事件流整段替换当前计数（change risk-state-cross-process-integrity）。
+   * 供「以库为准重建」用：MUST 整段替换而非追加——追加只能修复「内存少记」，
+   * 修不了「内存多记」，而对账要求的是逐项相等、不是不小于。
+   */
+  reset(events: CounterEvent[], at = this.clock()): void {
+    this.events.length = 0;
+    this.events.push(...events);
+    this.events.sort((a, b) => a.occurredAt - b.occurredAt);
+    this.prune(at);
+  }
+
   prune(at = this.clock()): void {
     const oldest = at - WINDOW_MS.day;
     while (this.events.length > 0 && this.events[0].occurredAt <= oldest) this.events.shift();
