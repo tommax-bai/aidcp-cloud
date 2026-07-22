@@ -7,7 +7,7 @@
  * 环境层级：本地真机联调 / ECS 部署验收。
  *
  * ECS 部署验证清单（人工执行，详见 aidcp/docs/acceptance-tests.md 第 4 节）：
- *   ssh -i ~/codes/isales-4.pem root@121.89.85.150
+ *   ssh -i ~/codes/dev-0722.pem root@121.89.85.150
  *   systemctl status aidcp-cloud.service        # active (running)
  *   ss -ltnp | grep 8787                         # 0.0.0.0:8787 监听
  *   psql -h 127.0.0.1 -U aidcp -d aidcp -c 'select 1;'  # PG 直连

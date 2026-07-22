@@ -5,8 +5,8 @@
 
 ## 当前双环境口径
 
-- `dev`: `121.89.85.150`，SSH key `~/codes/isales-4.pem`，主干高频部署和真机验证目标。
-- `ol`: `123.56.253.183`，SSH key `/Users/baitianxing/Downloads/ol.pem`，稳定上线目标，只部署 release 分支/tag 或 exact clean SHA。
+- `dev`: `121.89.85.150`，SSH key `~/codes/dev-0722.pem`，主干高频部署和真机验证目标。
+- `ol`: `123.56.253.183`，SSH key `~/codes/ol-0722.pem`，稳定上线目标，只部署 release 分支/tag 或 exact clean SHA。
 - 部署前先在中控仓运行 `scripts/deploy-target <dev|ol> --check`。
 - 本文下方的 `121.89.85.150` 命令描述的是 `dev` 现状。不要把 dev `.env`、PostgreSQL 暴露面、Feishu 凭据无审查复制到 `ol`。
 
@@ -160,10 +160,10 @@
 
 ### ECS SSH 连接方式
 
-- dev 登录命令：`ssh -i ~/codes/isales-4.pem root@121.89.85.150`
-- ol 登录命令：`ssh -i /Users/baitianxing/Downloads/ol.pem root@123.56.253.183`
-- 注意：默认 SSH key 会被拒绝，必须显式指定 `~/codes/isales-4.pem`
-- 私钥文件位置：dev 为 `~/codes/isales-4.pem`，ol 为 `/Users/baitianxing/Downloads/ol.pem`
+- dev 登录命令：`ssh -i ~/codes/dev-0722.pem root@121.89.85.150`
+- ol 登录命令：`ssh -i ~/codes/ol-0722.pem root@123.56.253.183`
+- 注意：默认 SSH key 会被拒绝，必须显式指定目标对应的私钥
+- 私钥文件位置：dev 为 `~/codes/dev-0722.pem`，ol 为 `~/codes/ol-0722.pem`
 - 私钥权限要求：`600`
 - 文档只记录私钥路径与权限要求，不记录私钥内容
 
@@ -171,7 +171,7 @@
 
 ```bash
 # dev example
-rsync -av -e 'ssh -i ~/codes/isales-4.pem' \
+rsync -av -e 'ssh -i ~/codes/dev-0722.pem' \
   --exclude '.env' \
   --exclude 'node_modules' \
   --exclude '.git' \
@@ -179,7 +179,7 @@ rsync -av -e 'ssh -i ~/codes/isales-4.pem' \
   root@121.89.85.150:/opt/aidcp/cloud/
 
 # ol example, only from release branch/tag or exact clean SHA
-rsync -av -e 'ssh -i /Users/baitianxing/Downloads/ol.pem' \
+rsync -av -e 'ssh -i ~/codes/ol-0722.pem' \
   --exclude '.env' \
   --exclude 'node_modules' \
   --exclude '.git' \
