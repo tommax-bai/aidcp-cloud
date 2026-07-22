@@ -57,6 +57,16 @@ export interface ApprovalWriteOutletDeps {
   store: Pick<PublishApprovalStore, 'record'>;
   /** 兼容窗口的影子写；缺省 = 不影子写。 */
   legacySignal?: LegacySignalShadowWriter;
+  /**
+   * `envKey` 补齐（spec 的 MUST 字段）。五个入口手边都只有候选 / 账号、没有环境键，若指望各入口自己传，
+   * 结果就是全表恒 NULL（本 change 首版即如此，告警连是哪个号都说不出）。故收口到这一处解析：
+   * 调用方显式给了就用调用方的，没给才解析。解析不出 MUST 留 null 并记日志，绝不猜一个环境写进审计记录。
+   */
+  resolveEnvKey?: (subject: {
+    requestId: string;
+    subjectKind: 'publish' | 'comment';
+    candidateRef: string;
+  }) => Promise<string | null>;
   logger?: Pick<Console, 'warn'>;
   clock?: () => number;
 }
@@ -67,6 +77,19 @@ export function createApprovalWriteOutlet(deps: ApprovalWriteOutletDeps): Approv
   return async (requestId, approved, payload, context) => {
     const { subjectKind, candidateRef } = classifyApprovalRequestId(requestId);
     const decidedAt = clock();
+    let envKey = context.envKey ?? null;
+    if (envKey === null && deps.resolveEnvKey) {
+      try {
+        envKey = (await deps.resolveEnvKey({ requestId, subjectKind, candidateRef })) ?? null;
+      } catch (err) {
+        // 解析失败绝不阻断授权（授权本身与环境键无关），但必须留痕——恒 NULL 的 env_key 是审计盲区。
+        logger.warn(
+          `[approval-outlet] envKey 解析失败（本条授权 env_key 留空）requestId=${requestId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
     // 持久记录先写、且是唯一权威。它失败即授权失败（诚实抛出），绝不退化成「只写了文件」。
     const outcome = await deps.store.record({
       requestId,
@@ -76,7 +99,7 @@ export function createApprovalWriteOutlet(deps: ApprovalWriteOutletDeps): Approv
       approved,
       decidedBy: context.decidedBy,
       decidedVia: context.decidedVia,
-      envKey: context.envKey ?? null,
+      envKey,
       frozenPayload: {
         title: payload.title,
         content: payload.content,

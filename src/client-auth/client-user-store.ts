@@ -1552,6 +1552,8 @@ export class ClientUserStore {
               LEFT JOIN client_environments e ON e.env_key=s.env_key
              WHERE s.user_id=$1 AND s.source='admin' FOR UPDATE OF s`, [userId]);
         // 逐个按 env_key 升序取行锁：**取锁顺序与改动前逐字相同**（死锁序不回归）。
+        // 注：本查询对注册表是 **LEFT JOIN**，故注册行缺失时下方循环照样继续；那种情形下环境行锁取不到，
+        // 与首写侧的互斥改由上面这条 `FOR UPDATE OF s` 持有的归属行承担（首写侧会回落去锁同一批行）。
         for (const envKey of scopes.rows.map((scope) => scope.env_key).sort()) {
           await lockEnvironmentRow(client, envKey);
         }
@@ -1796,6 +1798,32 @@ export class ClientUserStore {
       return { ok: true, accountId: r.bound_account };
     } catch (err) {
       if (isMissingTable(err)) return { ok: false, reason: 'binding_unavailable' };
+      throw err;
+    }
+  }
+
+  /**
+   * 账号 → 环境键（`resolveBoundAccountForEnv` 的反向；给授权记录补 `envKey` 用，
+   * change publish-approval-signal-to-database）。
+   *
+   * **有且仅有一个活跃绑定时才返回**：一个账号绑在多个活跃环境上是歧义（也是既有的跨环境争用告警形态），
+   * 此时返回 null 让 `env_key` 留空 —— 猜一个写进审计记录比留空更坏。表缺失同样返回 null（读侧降级，
+   * 绝不因此阻断授权写入）。
+   */
+  async envKeyForAccount(accountId: string): Promise<string | null> {
+    const id = (accountId ?? '').trim();
+    if (!id) return null;
+    try {
+      const { rows } = await this.pool.query<{ env_key: string }>(
+        `SELECT env_key FROM client_environments
+          WHERE account_id = $1 AND lifecycle_state = 'active'
+          ORDER BY env_key
+          LIMIT 2`,
+        [id],
+      );
+      return rows.length === 1 ? rows[0].env_key : null;
+    } catch (err) {
+      if (isMissingTable(err)) return null;
       throw err;
     }
   }

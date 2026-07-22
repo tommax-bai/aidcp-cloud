@@ -164,6 +164,41 @@ test('待下发查询按本机 target 隔离；告警候选只取无阻塞原因
   assert.match(captured[1].sql, /execution_target = \$1/);
 });
 
+test('待下发查询可按 subject_kind 收窄：评论授权没有下发段，混进来会把候选窗口永久占满', async () => {
+  const captured: Array<{ sql: string; args: unknown[] }> = [];
+  const { pool } = txPool((sql, args) => {
+    captured.push({ sql, args });
+    return { rows: [], rowCount: 0 };
+  });
+  const store = new PublishApprovalStore({ executionTarget: 'dev', pool });
+  await store.listPendingDispatch('dev', 200, 'publish');
+  await store.listStalePendingDispatch('dev', 900_000, 50, 'publish');
+
+  assert.match(captured[0].sql, /subject_kind = \$3/);
+  assert.equal(captured[0].args[2], 'publish');
+  assert.match(captured[1].sql, /subject_kind = \$4/);
+  assert.equal(captured[1].args[3], 'publish');
+
+  // 不给 subjectKind 时参数为 NULL ⇒ 谓词恒真，既有调用方行为不变。
+  await store.listPendingDispatch('dev');
+  assert.equal(captured[2].args[2], null);
+});
+
+test('退回待下发也接受 pending_dispatch：等槽位那条路径压根没经过 dispatching', async () => {
+  const captured: Array<{ sql: string; args: unknown[] }> = [];
+  const { pool } = txPool((sql, args) => {
+    captured.push({ sql, args });
+    return { rows: [], rowCount: 0 };
+  });
+  const store = new PublishApprovalStore({ executionTarget: 'dev', pool });
+  await store.releaseToPending('publish-42', 'browser_slot_waiting');
+
+  // browser_wake_failed 在 acquire 阶段就 reject：业务回调没执行 ⇒ markDispatching 没跑过 ⇒ 行仍停在
+  // pending_dispatch。WHERE 若只认 dispatching，这条 UPDATE 命中 0 行、阻塞原因被静默丢弃。
+  assert.match(captured[0].sql, /dispatch_state IN \('pending_dispatch','dispatching'\)/);
+  assert.equal(captured[0].args[1], 'browser_slot_waiting');
+});
+
 test('活跃读只返回未作废行（历史轮次绝不混入判定）', async () => {
   const captured: string[] = [];
   const { pool } = txPool((sql) => {

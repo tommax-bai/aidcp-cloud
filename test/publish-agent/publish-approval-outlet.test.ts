@@ -83,3 +83,50 @@ test('决策上下文与内容版本原样落进持久记录（decidedBy 绝不�
   assert.equal(seen[0].envKey, 'env-1');
   assert.equal(seen[0].contentVersion, 3, 'contentVersion 是记录上的真列，供下发前版本闸做原子谓词');
 });
+
+test('envKey：调用方没给就在写出口一处解析（五个入口手边都没有环境键，否则全表恒 NULL）', async () => {
+  const seen: Array<Record<string, unknown>> = [];
+  const asked: Array<Record<string, unknown>> = [];
+  const outlet = createApprovalWriteOutlet({
+    store: {
+      record: async (decision) => {
+        seen.push(decision as unknown as Record<string, unknown>);
+        return { written: true, revision: 1 };
+      },
+    },
+    resolveEnvKey: async (subject) => {
+      asked.push(subject as unknown as Record<string, unknown>);
+      return subject.subjectKind === 'publish' ? 'env-9' : null;
+    },
+  });
+
+  await outlet('publish-42', true, payload, { decidedBy: 'panel:u1', decidedVia: 'console' });
+  assert.equal(seen[0].envKey, 'env-9');
+  assert.deepEqual(asked[0], { requestId: 'publish-42', subjectKind: 'publish', candidateRef: '42' });
+
+  // 调用方显式给了就用调用方的，解析器不再被问。
+  await outlet('publish-43', true, payload, context);
+  assert.equal(seen[1].envKey, 'env-1');
+  assert.equal(asked.length, 1);
+});
+
+test('envKey 解析失败：留空 + 记日志，绝不阻断授权、也绝不猜一个环境写进审计记录', async () => {
+  const seen: Array<Record<string, unknown>> = [];
+  const warns: string[] = [];
+  const outlet = createApprovalWriteOutlet({
+    store: {
+      record: async (decision) => {
+        seen.push(decision as unknown as Record<string, unknown>);
+        return { written: true, revision: 1 };
+      },
+    },
+    resolveEnvKey: async () => { throw new Error('pg_down'); },
+    logger: { warn: (msg: string) => warns.push(String(msg)) },
+  });
+  assert.deepEqual(
+    await outlet('publish-42', true, payload, { decidedBy: 'panel:u1', decidedVia: 'console' }),
+    { written: true, revision: 1 },
+  );
+  assert.equal(seen[0].envKey, null);
+  assert.match(warns.join('\n'), /envKey 解析失败/);
+});

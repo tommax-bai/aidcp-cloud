@@ -612,6 +612,24 @@ describe('PublishDispatcher · 持久授权与待下发态', () => {
     );
   });
 
+  test('等浏览器槽位 → 落 browser_slot_waiting，且 MUST 在从未 dispatching 的状态下也写得进去', async () => {
+    const h = harness({
+      approved: true,
+      edgeId: 'edge-online',
+      leaseError: new EdgeTaskLeaseError('browser_wake_failed', 'parked browser is still waiting for a local slot'),
+    });
+    await h.dispatcher.dispatch(7);
+
+    // acquire 阶段就被 reject ⇒ 业务回调没跑 ⇒ 全程没有 dispatching 这一步。
+    assert.deepEqual(h.progress.map((p) => p.action), ['pending_dispatch']);
+    assert.deepEqual(
+      h.blocked,
+      [{ requestId: 'publish-7', reason: null }, { requestId: 'publish-7', reason: 'browser_slot_waiting' }],
+      '先清旧原因、再落槽位等待；写不进去的话后台看不到真实原因，看门狗还会误报「下发侧失联」',
+    );
+    assert.deepEqual(h.voided, [], '槽位等待保留授权');
+  });
+
   test('版本闸命中 → 作废原因是 version_stale（四类作废各自可区分）', async () => {
     const h = harness({ approved: true, approvedVersion: 1, draft: makeDraft({ contentVersion: 2 }), edgeId: 'edge-A' });
     await h.dispatcher.dispatch(7);

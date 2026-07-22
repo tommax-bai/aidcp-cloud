@@ -866,9 +866,27 @@ async function main(): Promise<void> {
   // 兼容窗口影子写（默认开）：持久写成功之后 best-effort 写同路径同格式文件，失败只记日志。
   // 关闭它是**独立一步**（改 env 即可回滚），前置条件是盘点确认零读者 + dev/ol 各观察满一个发布周期。
   const legacyApprovalSignalEnabled = readEnvString('AIDCP_PUBLISH_APPROVAL_LEGACY_SIGNAL_FILE') !== 'false';
+  /**
+   * 发帖候选 → 目标环境键。五个审批入口手边都只有候选 / 账号，故 envKey 的解析收口在写出口一处
+   * （change publish-approval-signal-to-database；首版全靠各入口自传，结果是 env_key 全表恒 NULL）。
+   * 解析不出 MUST 留空，绝不猜一个环境写进审计记录。
+   */
+  const resolveApprovalEnvKey = async (subject: {
+    subjectKind: 'publish' | 'comment';
+    candidateRef: string;
+  }): Promise<string | null> => {
+    // 评论授权的 candidateRef 是 `<noteId>-<ts>`，与环境 / 账号无对应关系——留空即诚实。
+    if (subject.subjectKind !== 'publish') return null;
+    const recordId = Number(subject.candidateRef);
+    if (!Number.isInteger(recordId) || recordId <= 0) return null;
+    const draft = await publishLogStore.loadForDispatch(recordId);
+    if (!draft?.accountId) return null;
+    return clientUserStore.envKeyForAccount(draft.accountId);
+  };
   const approvalWriteOutlet: ApprovalWriteOutlet | undefined = publishApprovalStore
     ? createApprovalWriteOutlet({
         store: publishApprovalStore,
+        resolveEnvKey: resolveApprovalEnvKey,
         legacySignal: {
           enabled: legacyApprovalSignalEnabled,
           write: async (requestId, approved, payload, ts) => {
@@ -3138,7 +3156,9 @@ async function main(): Promise<void> {
     ...(publishApprovalClient && deploymentTarget
       ? {
           listPendingDispatchRecordIds: async (): Promise<number[]> => {
-            const rows = await publishApprovalClient.listPendingDispatch(deploymentTarget);
+            // subjectKind 收窄到 publish：评论授权没有下发段、状态永远停在 pending_dispatch，
+            // 混进来会把 LIMIT 窗口占满，真正待下发的稿反而被挤出窗口、永远扫不到。
+            const rows = await publishApprovalClient.listPendingDispatch(deploymentTarget, undefined, 'publish');
             return rows
               .filter((row) => row.approved && /^publish-\d+$/.test(row.requestId))
               .map((row) => Number(row.requestId.slice('publish-'.length)));
@@ -3395,17 +3415,34 @@ async function main(): Promise<void> {
   // 「没有原因的长时间待下发」恰恰是执行侧静默失联的形态，本项目红线禁止它无声存在。
   // 按本机 execution_target 过滤（DEV/OL 共库异步隔离）。
   if (publishApprovalStore && deploymentTarget) {
+    const pendingDispatchCandidateLimit = 50;
     const pendingDispatchWatchdog = new PendingDispatchWatchdog({
       executionTarget: deploymentTarget,
+      // subjectKind 收窄到 publish：评论授权由评论人审闸就地消费、没有下发侧，混进来是纯误报，
+      // 还会把 LIMIT 窗口永久占满 —— 那会让这道唯一的「静默停滞探测器」自己瞎掉。
       listStalePendingDispatch: (target, olderThanMs) =>
-        publishApprovalStore!.listStalePendingDispatch(target, olderThanMs),
+        publishApprovalStore!.listStalePendingDispatch(target, olderThanMs, pendingDispatchCandidateLimit, 'publish'),
+      candidateLimit: pendingDispatchCandidateLimit,
       thresholdMs: readEnvNumber('AIDCP_PUBLISH_PENDING_DISPATCH_ALERT_MS', 15 * 60_000),
-      notify: async ({ requestId, waitingMs }) => {
-        const chatId = await resolveCardChatId(undefined, undefined);
-        if (!chatId) return;
+      // 落 alerts 表：后台告警页可见、可 resolveById 对账。只发飞书的话消息一刷就没、无从追溯。
+      ...(alertStore ? { alertStore } : {}),
+      // 告警须指明是哪个号（spec：指明该记录与其账号）。解析失败降级为「未知账号」，绝不因此不告警。
+      resolveAccountId: async (row) => {
+        const match = /^publish-(\d+)$/.exec(row.requestId);
+        if (!match) return null;
+        const draft = await publishLogStore.loadForDispatch(Number(match[1]));
+        return draft?.accountId ?? null;
+      },
+      notify: async ({ requestId, envKey, accountId, waitingMs }) => {
+        const chatId = await resolveCardChatId(undefined, accountId ?? undefined);
+        // 无可用群 = 这条 P1 没有飞书接收端。MUST 抛错让看门狗如实记为「未送达」，
+        // 静默 return 会被计成已送达（旧行为），等于告警自己也静默了。
+        if (!chatId) throw new Error('pending_dispatch_alert_chat_not_configured');
+        const name = accountId ? (accountDisplayName(accountId) ?? accountId) : '（未知账号）';
         await messenger.sendText(
           chatId,
-          `🔴 已批准稿件长时间待下发：${requestId} 已等待 ${Math.round(waitingMs / 60_000)} 分钟，` +
+          `🔴 已批准稿件长时间待下发：${requestId}（账号 ${name}${envKey ? ` / 环境 ${envKey}` : ''}）` +
+            `已等待 ${Math.round(waitingMs / 60_000)} 分钟，` +
             '且**没有任何已知阻塞原因**（非离线 / 非排队 / 非熔断 / 非验证码暂停）。' +
             '这通常意味着下发侧失联，请排查云端下发段与数据库连通性。稿件仍保持待审、授权仍有效。',
         );
@@ -3431,7 +3468,21 @@ async function main(): Promise<void> {
       const displayName = resolveNotificationAccountName(accountId, accountName, accountDisplayName);
       await messenger.sendApprovalCard(chatId, buildCommentApprovalCard({ requestId, noteId, text, title, authorName, accountId, accountName: displayName }));
     },
-    isApproved: isPublishApproved,
+    isApproved: async (requestId: string) => {
+      const approved = await isPublishApproved(requestId);
+      // 评论授权没有下发段（下发状态机只被发帖下发器驱动）：人审闸读到「已批准」的这一刻，授权就被用掉了。
+      // 不迁走状态的话，这条记录会永远停在「已批准·待下发」——一个不会有人来消费的假等待。
+      // best-effort：迁移失败绝不影响本次放行（授权判定只看 approved）。
+      if (approved && publishApprovalStore) {
+        await publishApprovalStore.markConsumed(requestId).catch((err: unknown) => {
+          console.warn(
+            `[comment] 评论授权状态迁移失败 requestId=${requestId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          return null;
+        });
+      }
+      return approved;
+    },
     timeoutMs: 90_000,
     pollMs: 2_000,
   };

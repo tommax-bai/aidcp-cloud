@@ -49,6 +49,8 @@ export interface PublishApprovalInternalApi {
     dispatchState: ApprovalDispatchState;
     executionTarget: DeploymentTarget;
     limit?: number;
+    /** 只有发帖有下发段；调用方按用途收窄，免得评论授权把候选窗口永久占满（见 store 侧注释）。 */
+    subjectKind?: 'publish' | 'comment';
   }): Promise<InternalResponse<{ approvals: PublishApprovalView[] }>>;
   voidApproval(
     requestId: string,
@@ -103,7 +105,7 @@ export function createInProcessPublishApprovalApi(
         return { status: 400, body: { error: 'unsupported_dispatch_state' } };
       }
       try {
-        const rows = await store.listPendingDispatch(query.executionTarget, query.limit ?? 200);
+        const rows = await store.listPendingDispatch(query.executionTarget, query.limit ?? 200, query.subjectKind);
         return { status: 200, body: { approvals: rows.map(toView) } };
       } catch (err) {
         return { status: 503, body: { error: err instanceof Error ? err.message : String(err) } };
@@ -152,8 +154,12 @@ export function createPublishApprovalClient(api: PublishApprovalInternalApi) {
         envKey: body.envKey,
       };
     },
-    async listPendingDispatch(executionTarget: DeploymentTarget, limit?: number): Promise<PublishApprovalView[]> {
-      const res = await api.listApprovals({ dispatchState: 'pending_dispatch', executionTarget, limit });
+    async listPendingDispatch(
+      executionTarget: DeploymentTarget,
+      limit?: number,
+      subjectKind?: 'publish' | 'comment',
+    ): Promise<PublishApprovalView[]> {
+      const res = await api.listApprovals({ dispatchState: 'pending_dispatch', executionTarget, limit, subjectKind });
       if (res.status !== 200) throw new ApprovalUnreadableError(`approval_list_${res.status}`);
       return res.body.approvals;
     },

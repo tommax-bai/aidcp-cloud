@@ -2970,7 +2970,11 @@ async function readApprovalDispatchFor(
       });
     }
     return out;
-  } catch {
+  } catch (err) {
+    // 读失败与「未接线」都回落成 null（前端一律回落旧呈现），但两者绝不能同样无声：
+    // 不留痕的话，「已批准·待下发」这个本 change 的核心可见性会在 PG 抖动时凭空消失、排障无从下手。
+    // 口径与 server.ts 的同类投影读取（readApprovalDispatchProjection）保持一致。
+    console.warn('[panel] 授权下发进度读取失败（投影回落既有呈现）:', err instanceof Error ? err.message : String(err));
     return null;
   }
 }

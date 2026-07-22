@@ -49,6 +49,13 @@
 自动化检查：`test/acceptance/advisory-lock-ownership.test.ts`（AC-LOCK-01 / AC-LOCK-02）。
 新的跨边界引用会让验收失败，MUST NOT 只靠人工评审发现。
 
+**取锁不成立的那一支**：`SELECT ... FOR UPDATE` 命中 0 行时既不加锁也不报错。注册表尚无该环境时走的就是这一支，
+而 `upsertAuthStatus` 到达时并不要求环境已注册（上游校验不查注册表；握手时的自动登记还是 fire-and-forget，
+存在真实时间窗）。故 `lockEnvironmentRow` 把它作为**可判定返回值** `unregistered` 交出并记日志，
+`upsertAuthStatus` 据此回落去锁该环境的客户归属行 `client_env_scope` —— 客户停用 / 解绑侧正是遍历那张表找环境的
+（对注册表只做 LEFT JOIN、注册行缺失照样往下走），锁住归属行即与之串行。两张表都无行 ⇒ 解绑侧遍历不到该环境
+⇒ 确无对手；此时不加锁是**有依据的**且照样留痕，与「没锁到也当锁到了」不是一回事。
+
 **残留缺口（未在本 change 内闭合）**：`upsertAuthStatus` 的写点仍在 automation 侧。
 行锁已经消除了「静默失去互斥」这一形态（拆库后 automation 连不到 `client_environments` 是**响亮**的失败），
 但把写点收敛到数据所有者服务（窄内部端点 `PUT /internal/environments/{envKey}/auth-state`）仍待做。

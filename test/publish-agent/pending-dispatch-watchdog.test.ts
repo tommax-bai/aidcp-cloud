@@ -39,7 +39,8 @@ test('无阻塞原因且超阈值 → 告警（落库 + 飞书），且同一条
   const watchdog = new PendingDispatchWatchdog({
     executionTarget: 'dev',
     listStalePendingDispatch: async () => [row()],
-    alertStore: { record: async (a) => { alerts.push(a as unknown as Record<string, unknown>); return null; } },
+    alertStore: { raise: async (a) => { alerts.push(a as unknown as Record<string, unknown>); return null; } },
+    resolveAccountId: async () => 'acct-A',
     notify: (n) => { notices.push(n as unknown as Record<string, unknown>); },
     thresholdMs: 60_000,
     clock: () => 1_000_000,
@@ -49,12 +50,47 @@ test('无阻塞原因且超阈值 → 告警（落库 + 飞书），且同一条
   assert.equal(await watchdog.sweep(), 1);
   assert.equal(alerts.length, 1);
   assert.equal(alerts[0].type, 'publish_pending_dispatch');
+  // 告警必须指明是哪个号：运营收到 P1 才知道去查谁（spec：指明该记录与其账号）。
+  assert.equal(alerts[0].accountId, 'acct-A');
+  assert.match(String(alerts[0].detail), /account=acct-A/);
   assert.equal(notices.length, 1);
   assert.equal(notices[0].requestId, 'publish-42');
+  assert.equal(notices[0].accountId, 'acct-A');
+  assert.equal(notices[0].envKey, 'env-1');
 
   // 第二轮同一条仍在候选集内 → 不重复 ping 运维。
   assert.equal(await watchdog.sweep(), 0);
   assert.equal(alerts.length, 1);
+});
+
+test('飞书无接收端（notify 抛错）且未接 alerts → MUST NOT 计成已送达，如实记「告警无接收端」', async () => {
+  const errors: string[] = [];
+  const watchdog = new PendingDispatchWatchdog({
+    executionTarget: 'dev',
+    listStalePendingDispatch: async () => [row()],
+    // 真实接线里「无可用飞书群」走的就是这条：MUST 抛错，绝不静默 return（return 会被记成已送达）。
+    notify: async () => { throw new Error('pending_dispatch_alert_chat_not_configured'); },
+    thresholdMs: 60_000,
+    clock: () => 1_000_000,
+    logger: { ...silent, error: (m: string) => errors.push(String(m)) },
+  });
+  assert.equal(await watchdog.sweep(), 0, '一个接收端都没有，MUST NOT 计成已送达');
+  assert.match(errors.join('\n'), /告警无接收端/);
+});
+
+test('候选窗口被打满本身要响：更晚决定的稿件进不来 = 本探测器对它们失明', async () => {
+  const errors: string[] = [];
+  const watchdog = new PendingDispatchWatchdog({
+    executionTarget: 'dev',
+    listStalePendingDispatch: async () => [row({ requestId: 'publish-1' }), row({ requestId: 'publish-2' })],
+    candidateLimit: 2,
+    alertStore: { raise: async () => null },
+    thresholdMs: 60_000,
+    clock: () => 1_000_000,
+    logger: { ...silent, error: (m: string) => errors.push(String(m)) },
+  });
+  assert.equal(await watchdog.sweep(), 2);
+  assert.match(errors.join('\n'), /候选窗口已打满/);
 });
 
 test('有阻塞原因的行不进候选集 → 不告警（已解释的等待不是噪声源）', async () => {
@@ -63,7 +99,7 @@ test('有阻塞原因的行不进候选集 → 不告警（已解释的等待不
     executionTarget: 'dev',
     // 查询侧已按 dispatch_blocked_reason IS NULL 过滤；此处返回空表示「全都有原因」。
     listStalePendingDispatch: async () => [],
-    alertStore: { record: async (a) => { alerts.push(a); return null; } },
+    alertStore: { raise: async (a) => { alerts.push(a); return null; } },
     thresholdMs: 60_000,
     clock: () => 1_000_000,
     logger: silent,
@@ -78,7 +114,7 @@ test('扫描失败不当作「无异常」：本轮不告警、只诚实记日�
   const watchdog = new PendingDispatchWatchdog({
     executionTarget: 'dev',
     listStalePendingDispatch: async () => { throw new Error('pg_down'); },
-    alertStore: { record: async (a) => { alerts.push(a); return null; } },
+    alertStore: { raise: async (a) => { alerts.push(a); return null; } },
     logger: { ...silent, warn: (m: string) => warns.push(String(m)) },
   });
   assert.equal(await watchdog.sweep(), 0);

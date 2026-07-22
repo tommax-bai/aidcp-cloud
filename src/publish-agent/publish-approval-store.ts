@@ -363,14 +363,25 @@ export class PublishApprovalStore {
     return res.rows.map(mapRow);
   }
 
-  /** 兜底扫描用：只返回本机 target 的活跃待下发行（DEV/OL 共库异步隔离，CLAUDE.md §2）。 */
-  async listPendingDispatch(executionTarget: DeploymentTarget, limit = 200): Promise<ApprovalDecisionRow[]> {
+  /**
+   * 兜底扫描用：只返回本机 target 的活跃待下发行（DEV/OL 共库异步隔离，CLAUDE.md §2）。
+   *
+   * `subjectKind` MUST 由调用方按用途给定：**只有发帖有下发段**（PublishDispatcher 是
+   * `markDispatching/markConsumed` 的唯一调用者，且只认 `publish-<n>`）。评论授权由评论人审闸就地消费、
+   * 状态永远停在 `pending_dispatch`，若混进本窗口会把 LIMIT 名额永久占满，真正待下发的稿件反而被挤出窗口。
+   */
+  async listPendingDispatch(
+    executionTarget: DeploymentTarget,
+    limit = 200,
+    subjectKind?: 'publish' | 'comment',
+  ): Promise<ApprovalDecisionRow[]> {
     const res = await this.pool.query<DecisionDbRow>(
       `SELECT ${DECISION_COLUMNS} FROM publish_approval_decision
         WHERE dispatch_state = 'pending_dispatch' AND approved = true AND execution_target = $1
+          AND ($3::text IS NULL OR subject_kind = $3::text)
         ORDER BY decided_at ASC
         LIMIT $2`,
-      [executionTarget, Math.max(1, Math.trunc(limit))],
+      [executionTarget, Math.max(1, Math.trunc(limit)), subjectKind ?? null],
     );
     return res.rows.map(mapRow);
   }
@@ -378,11 +389,15 @@ export class PublishApprovalStore {
   /**
    * 待下发告警候选：本机 target、无任何阻塞原因、且待下发已超阈值。
    * 「没有原因的长时间待下发」恰恰是执行侧静默失联的形态——有阻塞原因的是**已解释的等待**，不告警。
+   *
+   * 同 `listPendingDispatch`：`subjectKind` MUST 收窄到有下发段的主体。评论授权没有下发侧，
+   * 混进来既是纯误报，又会把 LIMIT 窗口钉死在最老的一批上——那会让这道「静默停滞探测器」自我瘫痪。
    */
   async listStalePendingDispatch(
     executionTarget: DeploymentTarget,
     olderThanMs: number,
     limit = 50,
+    subjectKind?: 'publish' | 'comment',
   ): Promise<ApprovalDecisionRow[]> {
     const res = await this.pool.query<DecisionDbRow>(
       `SELECT ${DECISION_COLUMNS} FROM publish_approval_decision
@@ -391,9 +406,10 @@ export class PublishApprovalStore {
           AND execution_target = $1
           AND dispatch_blocked_reason IS NULL
           AND decided_at <= now() - ($2::bigint * INTERVAL '1 millisecond')
+          AND ($4::text IS NULL OR subject_kind = $4::text)
         ORDER BY decided_at ASC
         LIMIT $3`,
-      [executionTarget, Math.max(0, Math.trunc(olderThanMs)), Math.max(1, Math.trunc(limit))],
+      [executionTarget, Math.max(0, Math.trunc(olderThanMs)), Math.max(1, Math.trunc(limit)), subjectKind ?? null],
     );
     return res.rows.map(mapRow);
   }
@@ -424,12 +440,19 @@ export class PublishApprovalStore {
     return res.rows[0] ? mapRow(res.rows[0]) : null;
   }
 
-  /** 被抢占等「保留授权」的路径：`dispatching → pending_dispatch`，授权仍活跃。 */
+  /**
+   * 被抢占 / 等槽位等「保留授权」的路径：回到 `pending_dispatch` 并附阻塞原因，授权仍活跃。
+   *
+   * WHERE MUST 同时容纳 `pending_dispatch`：**并非每条退回路径都先经过 `dispatching`**。
+   * 浏览器停泊唤不醒（`browser_wake_failed`）是在 acquire 阶段就 reject 的，业务回调根本没执行、
+   * `markDispatching` 也就没跑过，行仍停在 `pending_dispatch`。若只认 `dispatching`，这条 UPDATE 命中 0 行、
+   * `browser_slot_waiting` 被静默丢弃 —— 后台看不到真实原因，看门狗还会把「等槽位」误报成「下发侧失联」。
+   */
   async releaseToPending(requestId: string, blockedReason?: ApprovalBlockedReason | null): Promise<void> {
     await this.pool.query(
       `UPDATE publish_approval_decision
           SET dispatch_state = 'pending_dispatch', dispatch_state_at = now(), dispatch_blocked_reason = $2
-        WHERE request_id = $1 AND dispatch_state = 'dispatching'`,
+        WHERE request_id = $1 AND dispatch_state IN ('pending_dispatch','dispatching')`,
       [requestId, blockedReason ?? null],
     );
   }

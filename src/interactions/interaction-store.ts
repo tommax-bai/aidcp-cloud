@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { resolveEnvPgConfig } from '../cache/pg-config.js';
-import { lockEnvironmentRow } from '../db/environment-row-lock.js';
+import { lockEnvironmentRow, lockEnvironmentScopeRows } from '../db/environment-row-lock.js';
 import {
   INTERACTION_PLATFORM,
   InteractionError,
@@ -341,7 +341,21 @@ export class InteractionStore {
       // （key 命名空间 `interaction-env:`），而它**跨未来服务边界**——写侧属 api、本处属 automation。
       // 一次拆库、一次读写分离、一次连接指向副本，两侧各自加锁都会成功、互斥静默消失。现改为
       // `client_environments` 的行锁：锁与被保护数据同表同库，拆库时是响亮的失败而不是静默失效。
-      await lockEnvironmentRow(client, payload.envKey);
+      //
+      // 注册表**没有**这个环境时行锁不成立（命中 0 行、既不加锁也不报错）。本处是被保护的写侧，
+      // 且到达这里并不要求环境已注册（上游校验只查撤销 hold / accounts / interaction_auth_state，
+      // 且握手时的自动登记是 fire-and-forget，存在真实的时间窗）。故回落去锁该环境的客户归属行：
+      // 解绑 / 停用侧正是遍历 `client_env_scope` 找环境的（对注册表只 LEFT JOIN），锁住归属行即可与之串行。
+      // 两者皆无行 ⇒ 解绑侧遍历不到这个环境 ⇒ 确无对手，此时不加锁是**有依据的**，且照样留痕。
+      if ((await lockEnvironmentRow(client, payload.envKey)) === 'unregistered') {
+        const scoped = await lockEnvironmentScopeRows(client, payload.envKey);
+        if (scoped === 0) {
+          console.warn(
+            `[interaction] 环境 ${payload.envKey} 既未注册也未归属任何客户：本次授权首写无环境级锁可取`
+            + '（解绑侧遍历不到该环境 ⇒ 无并发对手）。',
+          );
+        }
+      }
       await this.assertAccountScope(client, payload.accountId, payload.envKey, false, true);
       const offboard = await client.query<{ offboard_id: string; state: string }>(
         `SELECT offboard_id,state FROM interaction_offboards

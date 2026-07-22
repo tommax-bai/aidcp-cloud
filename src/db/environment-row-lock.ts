@@ -12,28 +12,45 @@
  * 使用约束：
  * - MUST 在调用方已开启的事务内调用（行锁随事务释放）；
  * - 多个环境 MUST 按 `envKey` 升序逐个调用，保持既有取锁顺序（死锁序不回归）；
- * - 环境未注册（无行）时不加锁：此时也没有对手——所有客户侧路径都只对已注册环境生效
- *   （它们都 JOIN 了 `client_environments`）。
+ * - **环境未注册（注册表无行）时锁不成立**：`SELECT ... FOR UPDATE` 命中 0 行既不加锁也不报错。
+ *   这一分支 MUST NOT 被当成「已加锁」放过——换掉 advisory lock 却留一个同样无声的失效点，等于没换。
+ *   故本函数把它作为**可判定的返回值** `'unregistered'` 交出去并记一条日志；被保护的写侧
+ *   （`InteractionStore.upsertAuthStatus`）据此回落去锁该环境的客户归属行 `client_env_scope`。
  */
 
 export interface EnvironmentRowLockClient {
-  query(sql: string, params: unknown[]): Promise<unknown>;
+  query(sql: string, params: unknown[]): Promise<{ rowCount?: number | null }>;
 }
 
-/** advisory lock key 前缀 → 允许引用它的服务边界目录（advisory-lock 归属静态检查的白名单）。 */
-export const SINGLE_SERVICE_ADVISORY_LOCK_KEYS: ReadonlyArray<{ keyPrefix: string; ownerDir: string; why: string }> = [
-  {
-    keyPrefix: 'interaction-send|',
-    ownerDir: 'src/interactions',
-    why: '同账号发送串行；只被 InteractionStore 引用，随其整体归属一个服务，不跨边界。',
-  },
-  {
-    keyPrefix: '<platform>|<accountId>|<batchId>',
-    ownerDir: 'src/interactions',
-    why: '收件箱批次幂等；只被 InteractionStore 引用，不跨边界。',
-  },
-];
+/** 取锁结果。`unregistered` = 注册表无此环境行 ⇒ **本次没有加上任何锁**，绝不可当作已加锁。 */
+export type EnvironmentRowLockOutcome = 'locked' | 'unregistered';
 
-export async function lockEnvironmentRow(client: EnvironmentRowLockClient, envKey: string): Promise<void> {
-  await client.query('SELECT 1 FROM client_environments WHERE env_key = $1 FOR UPDATE', [envKey]);
+export async function lockEnvironmentRow(
+  client: EnvironmentRowLockClient,
+  envKey: string,
+  logger: Pick<Console, 'warn'> = console,
+): Promise<EnvironmentRowLockOutcome> {
+  const res = await client.query('SELECT 1 FROM client_environments WHERE env_key = $1 FOR UPDATE', [envKey]);
+  if ((res?.rowCount ?? 0) > 0) return 'locked';
+  logger.warn(
+    `[env-lock] 环境 ${envKey} 不在注册表 client_environments 中：本次未取得环境行锁`
+    + '（MUST NOT 当作已加锁；调用方须自行判定是否仍存在并发对手）',
+  );
+  return 'unregistered';
+}
+
+/**
+ * 回落锁：锁住该环境的客户归属行 `client_env_scope`。
+ *
+ * 用途只有一个——注册表尚无此环境时补上互斥。客户停用 / 解绑侧是**遍历 `client_env_scope`** 找环境的
+ * （对注册表只做 LEFT JOIN，注册行缺失照样往下走），故归属行才是那条路径真正的入口；锁住它即可与之串行。
+ * 返回被锁行数：0 = 该环境既未注册、也未归属任何客户 ⇒ 解绑侧遍历不到它 ⇒ 确无对手，这是**有依据的**
+ * 不加锁，与「没锁到也当锁到了」不是一回事。
+ */
+export async function lockEnvironmentScopeRows(
+  client: EnvironmentRowLockClient,
+  envKey: string,
+): Promise<number> {
+  const res = await client.query('SELECT 1 FROM client_env_scope WHERE env_key = $1 FOR UPDATE', [envKey]);
+  return res?.rowCount ?? 0;
 }
