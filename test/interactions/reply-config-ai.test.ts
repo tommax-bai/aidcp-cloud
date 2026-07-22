@@ -152,9 +152,66 @@ test('reply polisher prompt is a short friendly creator voice and leaves contact
   assert.match(prompt, /通用博主回复助手/);
   assert.match(prompt, /不是商家、品牌客服或售后人员/);
   assert.match(prompt, /默认一到两句，简短、自然、亲切/);
+  assert.match(prompt, /完整文本必须为 1 到 120 个字符/);
+  assert.match(prompt, /模板私聊引导和联系方式都计入/);
+  assert.match(prompt, /不得依赖系统截断/);
   assert.match(prompt, /不得自行增加私聊引导或联系方式/);
   assert.match(prompt, /必须逐字保留整行/);
   assert.doesNotMatch(prompt, /入站客服工作流的专用角色 reply_polisher/);
+});
+
+test('over-length polisher output gets one bounded compression rewrite', async () => {
+  const prompts: string[] = [];
+  const outputs = [
+    { role: 'reply_polisher', polishedText: '这门课程主要适合正在学习小学语文、希望系统提升阅读和写作能力的孩子。',
+      meaningChanged: true, introducedClaims: ['适合小学阶段'], riskTags: [] },
+    { role: 'reply_polisher', polishedText: '主要适合小学生哦。', meaningChanged: true,
+      introducedClaims: ['适合小学阶段'], riskTags: [] },
+  ];
+  const input: PolisherInput = {
+    role: 'reply_polisher', requestId: 'compress-once', accountId: 'acct_wc_demo',
+    inbound: { ...inbound, text: '适合几岁的孩子啊' },
+    renderedText: '收到，我们单独聊一下',
+    profile: { tone: ['friendly', 'concise'], maxLength: 30, allowEmoji: false, allowLinks: false,
+      blockedPhrases: [], requiredDisclaimer: null, knowledgeDocument: '课程面向小学阶段学生。' },
+  };
+  const ai = new ReplyAiService({ complete: async (prompt) => {
+    prompts.push(prompt);
+    return JSON.stringify(outputs.shift());
+  } }, 100);
+
+  const result = await ai.polish(input);
+
+  assert.equal(result.fallback, 'none');
+  assert.equal(result.value.polishedText, '主要适合小学生哦。');
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[0], /完整文本必须为 1 到 30 个字符/);
+  assert.match(prompts[1], /压缩重写任务/);
+  assert.match(prompts[1], /超过硬上限 30/);
+  assert.match(prompts[1], /课程面向小学阶段学生/);
+});
+
+test('polisher never retries more than once or truncates an over-length candidate', async () => {
+  const candidates = [
+    '第一版依然明显超过后台配置的最大回复字数限制，需要压缩。',
+    '第二版还是明显超过后台配置的最大回复字数限制，不能再调用模型。',
+  ];
+  let calls = 0;
+  const ai = new ReplyAiService({ complete: async () => JSON.stringify({
+    role: 'reply_polisher', polishedText: candidates[calls++], meaningChanged: true,
+    introducedClaims: [], riskTags: [],
+  }) }, 100);
+  const result = await ai.polish({
+    role: 'reply_polisher', requestId: 'compress-fails', accountId: 'acct_wc_demo', inbound,
+    renderedText: '原模板完整回退',
+    profile: { tone: ['friendly'], maxLength: 10, allowEmoji: false, allowLinks: false,
+      blockedPhrases: [], requiredDisclaimer: null },
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(result.fallback, 'invalid_schema');
+  assert.equal(result.value.polishedText, '原模板完整回退');
+  assert.notEqual(result.value.polishedText, candidates[1].slice(0, 10));
 });
 
 test('document-grounded polisher treats admin content as untrusted facts and admits uncertainty', () => {

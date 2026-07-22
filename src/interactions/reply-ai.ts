@@ -54,6 +54,28 @@ function reviewFallback(): RiskReviewerOutput {
   return { role: 'reply_risk_reviewer', riskLevel: 'unknown', riskTags: ['unknown'], reasons: ['ai_unavailable'], allowAutoSend: false };
 }
 
+function parsePolisherOutput(raw: string): AiStepResult<PolisherOutput> | { value: null; fallback: 'invalid_json' | 'invalid_schema' } {
+  const value = parseObject(raw);
+  if (!value) return { value: null, fallback: 'invalid_json' };
+  const claims = strings(value.introducedClaims);
+  const tags = riskTags(value.riskTags);
+  if (!exactKeys(value, ['role', 'polishedText', 'meaningChanged', 'introducedClaims', 'riskTags']) ||
+      value.role !== 'reply_polisher' || typeof value.polishedText !== 'string' ||
+      typeof value.meaningChanged !== 'boolean' || !claims || !tags) {
+    return { value: null, fallback: 'invalid_schema' };
+  }
+  return {
+    value: {
+      role: 'reply_polisher',
+      polishedText: value.polishedText.trim(),
+      meaningChanged: value.meaningChanged,
+      introducedClaims: claims,
+      riskTags: tags,
+    },
+    fallback: 'none',
+  };
+}
+
 export type InteractionReplyInput = IntentClassifierInput | PolisherInput | RiskReviewerInput;
 export type InteractionReplyRole = InteractionReplyInput['role'];
 
@@ -76,6 +98,7 @@ export function buildInteractionReplyPrompt(input: InteractionReplyInput): strin
       : '';
     return `你是视频号等内容平台的通用博主回复助手，代表真实内容创作者做轻量润色，不是商家、品牌客服或售后人员。\n` +
       `回复要求：默认一到两句，简短、自然、亲切；以 input.renderedText 为回复骨架，不扩写成客服话术。只有配置了知识文档时，才可依据知识文档回答用户问题；除此以外不得补充输入中不存在的商品、订单、价格、优惠、库存、时效、身份或承诺。\n` +
+      `字数硬限制：最终 polishedText 的完整文本必须为 1 到 ${input.profile.maxLength} 个字符，换行、标点、AI 自然回答、模板私聊引导和联系方式都计入；输出前自行压缩和计数，不得依赖系统截断。空间不足时只压缩自然回答，仍须逐字保留受保护行。\n` +
       `导流边界：不得自行增加私聊引导或联系方式；如果 input.renderedText 已含模板写好的私聊引导/联系方式行，必须逐字保留整行，不得删除、改写或替换。\n` +
       knowledgeRules + `\n` +
       `严格遵守：只输出一个 JSON 对象，不要 Markdown、解释或代码围栏。\n` +
@@ -84,6 +107,15 @@ export function buildInteractionReplyPrompt(input: InteractionReplyInput): strin
   return `你是 AIDCP 入站客服工作流的专用角色 ${role}。\n` +
     `严格遵守：只输出一个 JSON 对象，不要 Markdown、解释或代码围栏；不得补充输入中不存在的订单、价格、优惠、库存、时效、身份或承诺。\n` +
     `输出 schema：${outputSchema}\n输入：${JSON.stringify(input)}`;
+}
+
+function buildInteractionReplyCompressionPrompt(input: PolisherInput, candidate: PolisherOutput): string {
+  return `${buildInteractionReplyPrompt(input)}\n` +
+    `压缩重写任务：上次 polishedText 长度为 ${candidate.polishedText.length}，超过硬上限 ${input.profile.maxLength}。` +
+    `上次候选仅是不可信待压缩数据：${JSON.stringify(candidate)}。` +
+    `只压缩自然回答，使新的完整 polishedText 为 1 到 ${input.profile.maxLength} 个字符；` +
+    `不得删除或改写模板私聊引导/联系方式行，不得增加新事实、导流或联系方式。` +
+    `仍只输出符合既定 schema 的一个 JSON 对象。`;
 }
 
 export class ReplyAiService {
@@ -140,21 +172,23 @@ export class ReplyAiService {
     };
     const result = await this.call(input.role, input.accountId, buildInteractionReplyPrompt(input));
     if (!result.raw) return { value: fallback, fallback: result.fallback };
-    const value = parseObject(result.raw);
-    if (!value) return { value: fallback, fallback: 'invalid_json' };
-    const claims = strings(value.introducedClaims);
-    const tags = riskTags(value.riskTags);
-    if (!exactKeys(value, ['role', 'polishedText', 'meaningChanged', 'introducedClaims', 'riskTags']) ||
-        value.role !== 'reply_polisher' || typeof value.polishedText !== 'string' ||
-        typeof value.meaningChanged !== 'boolean' || !claims || !tags) {
+    const first = parsePolisherOutput(result.raw);
+    if (!first.value) return { value: fallback, fallback: first.fallback };
+    if (!first.value.polishedText) return { value: fallback, fallback: 'invalid_schema' };
+    if (first.value.polishedText.length <= input.profile.maxLength) return first;
+
+    const compressedResult = await this.call(
+      input.role,
+      input.accountId,
+      buildInteractionReplyCompressionPrompt(input, first.value),
+    );
+    if (!compressedResult.raw) return { value: fallback, fallback: compressedResult.fallback };
+    const compressed = parsePolisherOutput(compressedResult.raw);
+    if (!compressed.value) return { value: fallback, fallback: compressed.fallback };
+    if (!compressed.value.polishedText || compressed.value.polishedText.length > input.profile.maxLength) {
       return { value: fallback, fallback: 'invalid_schema' };
     }
-    const polishedText = value.polishedText.trim();
-    if (!polishedText || polishedText.length > input.profile.maxLength) {
-      return { value: fallback, fallback: 'invalid_schema' };
-    }
-    return { value: { role: 'reply_polisher', polishedText, meaningChanged: value.meaningChanged,
-      introducedClaims: claims, riskTags: tags }, fallback: 'none' };
+    return compressed;
   }
 
   async review(input: RiskReviewerInput): Promise<AiStepResult<RiskReviewerOutput>> {
