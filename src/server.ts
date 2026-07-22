@@ -1465,6 +1465,15 @@ async function main(): Promise<void> {
   } else {
     writerLock = new AutomationWriterLock({
       executionTarget: deploymentTarget,
+      // 连接参数与其余 store 逐字同源（缺项在 writer-lock 内部回落到同一条解析）。
+      // MUST NOT 让锁连接自己另读一套 env：那会把「PG* 没配」从风控路径降级放大成整个云端起不来。
+      connection: {
+        host: readEnvString('PGHOST'),
+        port: readEnvPort('PGPORT'),
+        database: readEnvString('PGDATABASE'),
+        user: readEnvString('PGUSER'),
+        password: readEnvString('PGPASSWORD'),
+      },
       waitMs: readEnvNumber('AIDCP_RISK_WRITER_LOCK_WAIT_MS', 60_000),
       logger: console,
     });

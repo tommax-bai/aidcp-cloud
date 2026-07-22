@@ -226,11 +226,13 @@ export interface PgPanelStoreOptions {
    */
   executionTarget?: 'dev' | 'ol';
   /**
-   * 归属强制模式。'off' → riskWritable 恒 true。
+   * 归属强制模式。**只有 'enforce' 会把非属主账号标为不可写**；'off' 与 'observe' 下 riskWritable 恒 true。
    *
-   * 注意 observe 与 enforce 在这里**同样**把非属主账号标为不可写：服务端在 observe 下仍会接受写，
-   * 但界面不该把一个「属于另一个后台」的操作摆在运营面前。这不是假失败——它没有声称任何事情失败，
-   * 它只是不提供一个该去别处做的操作，并直接指出该去哪。
+   * observe 曾经也标不可写，理由是「界面不该把一个属于另一个后台的操作摆在运营面前」。那条理由
+   * 在观察期站不住：迁移刻意不回填归属，上线瞬间**全部**账号的 execution_target 都是 NULL，
+   * 于是整块风控控件对所有账号一起变灰，而服务端在 observe 下本来是接受写的——界面把一个能做的
+   * 操作说成不能做，同样是不诚实，且代价是全车队锁死。观察期的表达方式是告警，不是变灰。
+   * 翻开 enforce 之后（此时归属已由握手逐个占位完毕），变灰才对应服务端真实的 409。
    */
   ownershipMode?: 'enforce' | 'observe' | 'off';
   host?: string;
@@ -286,7 +288,7 @@ function toAccount(
     signalCount: r.signal_count,
     executionTarget: r.execution_target === 'dev' || r.execution_target === 'ol' ? r.execution_target : null,
     riskWritable:
-      ownership.mode === 'off' || !ownership.target ? true : r.execution_target === ownership.target,
+      ownership.mode !== 'enforce' || !ownership.target ? true : r.execution_target === ownership.target,
     personaBound,
     // retire-default-account / persona-driven-content-pipeline：default 账号已删，不再特判——是否需补人设仅看 personaBound。
     needsPersonaSetup: !personaBound,

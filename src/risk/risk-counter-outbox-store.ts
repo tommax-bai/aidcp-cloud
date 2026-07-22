@@ -199,17 +199,26 @@ export class PgRiskCounterOutboxStore implements RiskCounterOutbox {
     return applied;
   }
 
+  /**
+   * 记一次失败尝试；attempts 超限即转死信。
+   *
+   * ⚠️ **`status = 'pending'` 这道守卫不可省**（与 applyClaimed 的守卫同源）：apply 是「先 COMMIT
+   * 落账、再解析 controller」两步，第二步失败时会走到这里，而那一行**已经 applied**。没有守卫的话
+   * 它会被从 'applied' 改回 'pending'（重复认领）或直接标 'dead'，并发出一条「该动作真实发生过但
+   * 没进账本」的 P1——那条告警是假的，它就在账本里；死信数还会因此非零，污染上线判据。
+   */
   async failClaimed(row: RiskCounterOutboxClaim, error: string, maxAttempts: number): Promise<{ dead: boolean }> {
     const nextAttempts = row.attempts + 1;
     const dead = nextAttempts >= Math.max(1, maxAttempts);
-    await this.pool.query(
+    const { rowCount } = await this.pool.query(
       `UPDATE risk_counter_outbox
           SET attempts = $2, last_error = $3, status = $4,
               claim_token = NULL, claim_expires_at = NULL, updated_at = now()
-        WHERE id = $1 AND execution_target = $5`,
+        WHERE id = $1 AND execution_target = $5 AND status = 'pending'`,
       [row.id, nextAttempts, error.slice(0, 500), dead ? 'dead' : 'pending', this.executionTarget],
     );
-    return { dead };
+    // 没改到行 ⇒ 这一行不再是 pending（多半已 applied）⇒ 它没有进死信，MUST NOT 报 dead。
+    return { dead: dead && (rowCount ?? 0) > 0 };
   }
 
   async recoverExpiredClaims(now = Date.now()): Promise<number> {

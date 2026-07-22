@@ -19,6 +19,7 @@
  */
 import pg from 'pg';
 import type { DeploymentTarget } from '../deployment-target.js';
+import { pgRiskConfigFromEnv } from './pg-risk-store.js';
 
 const { Client } = pg;
 
@@ -36,9 +37,27 @@ export type WriterLockAcquireResult =
   | { ok: true }
   | { ok: false; reason: 'held_by_other' | 'connect_failed'; detail: string };
 
+/** 锁连接的数据库参数（与其它 store 同形：由装配处显式注入，缺项回落全仓统一的默认值）。 */
+export interface WriterLockConnectionConfig {
+  host?: string;
+  port?: number;
+  database?: string;
+  user?: string;
+  password?: string;
+}
+
 export interface WriterLockOptions {
   executionTarget: DeploymentTarget;
-  /** 建立专用长连接。缺省用 pg.Client + 标准 PG env。 */
+  /**
+   * 锁连接的数据库参数。**MUST 由装配处显式注入**（与 PgRiskStore / PgRiskCounterOutboxStore 同形）。
+   *
+   * 这里曾经直接读 `process.env.PGHOST/PGPORT/...`，是全进程唯一绕开统一回落链的 DB 客户端：
+   * 未配 PG* 的部署上它会落到 node-postgres 默认（user/database = 操作系统用户）连不上，
+   * 有界重试 60s 后整个云端 `exit(1)` ——不是风控路径降级，是起不来。缺项在此回落到与其它 store
+   * 完全相同的解析（`pgRiskConfigFromEnv`），不再另起一套。
+   */
+  connection?: WriterLockConnectionConfig;
+  /** 建立专用长连接。缺省用 pg.Client + 上面的 connection 参数。 */
   connect?: () => Promise<WriterLockConnection>;
   /** 有界等待上限（毫秒）。默认 60s，AIDCP_RISK_WRITER_LOCK_WAIT_MS 可配。 */
   waitMs?: number;
@@ -49,14 +68,15 @@ export interface WriterLockOptions {
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
 
-function defaultConnect(): Promise<WriterLockConnection> {
+function defaultConnect(config: WriterLockConnectionConfig): Promise<WriterLockConnection> {
+  const fallback = pgRiskConfigFromEnv();
   // 专用 Client（非 Pool）：会话生命周期 = 进程生命周期，锁不会被连接回收顺手释放。
   const client = new Client({
-    host: process.env.PGHOST,
-    port: process.env.PGPORT ? Number(process.env.PGPORT) : undefined,
-    database: process.env.PGDATABASE,
-    user: process.env.PGUSER,
-    password: process.env.PGPASSWORD,
+    host: config.host ?? fallback.host,
+    port: config.port ?? fallback.port,
+    database: config.database ?? fallback.database,
+    user: config.user ?? fallback.user,
+    password: config.password ?? fallback.password,
     // 让内核较早发现对端已死，缩短 kill -9 后的接管窗口。
     keepAlive: true,
   });
@@ -79,7 +99,8 @@ export class AutomationWriterLock {
 
   constructor(options: WriterLockOptions) {
     this.executionTarget = options.executionTarget;
-    this.connect = options.connect ?? defaultConnect;
+    const connectionConfig = options.connection ?? {};
+    this.connect = options.connect ?? (() => defaultConnect(connectionConfig));
     this.waitMs = Math.max(0, options.waitMs ?? 60_000);
     this.retryIntervalMs = Math.max(50, options.retryIntervalMs ?? 2_000);
     this.clock = options.clock ?? Date.now;

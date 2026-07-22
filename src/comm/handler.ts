@@ -545,6 +545,10 @@ export class DefaultMessageHandler implements MessageHandler {
         const facebook = normalizePlatformId(session.platform) === 'facebook';
         if (facebook && listKind === 'reels' && cards.length === 1) {
           const noteId = cards[0]?.noteId;
+          // 先落 outbox 再推进（design D5），与 like/collect/search 同形。入队成功之后才置
+          // 「本 Reel 已记 view」标记：入队失败时这一笔既没进账本、也 MUST NOT 被标成已记，
+          // 否则随后的 note.detail 会以为它已经算过而整条跳过。
+          await this.enqueueRiskFact(session, 'view', `${env.id}:view:${noteId ?? '-'}`);
           session.countedReelViewNoteId = noteId;
           this.bus(session).emit('interaction.occurred', {
             action: 'view',
@@ -565,6 +569,8 @@ export class DefaultMessageHandler implements MessageHandler {
             const counted = session.countedFacebookFeedVideoViewKeys ?? new Set<string>();
             session.countedFacebookFeedVideoViewKeys = counted;
             if (!counted.has(key)) {
+              // 同上：先入队、成功后才登记「已记」，绝不让入队失败留下一个「算过了」的假标记。
+              await this.enqueueRiskFact(session, 'view', `${env.id}:view:${noteId}`);
               counted.add(key);
               this.bus(session).emit('interaction.occurred', {
                 action: 'view',
@@ -618,14 +624,21 @@ export class DefaultMessageHandler implements MessageHandler {
         // accountId 随事件带出（change interaction-feed-enrichment）：tee 到全局总线后元数据 upsert 按真实账号归属。
         this.bus(session).emit('note.detail.arrived', { detail, accountId: session.accountId, ts: this.clock() });
         // 浏览计数（fix view-count-zero）：成功打开并上报一篇笔记即一次 view。执行端不单独回执 view 动作，
-        // 故在此唯一必经入口按账号驱动计数——与 like/collect 同走 interaction.occurred → record('view')，
+        // 故在此唯一必经入口按账号驱动计数——与 like/collect 同走 interaction.occurred，
         // 既补齐面板浏览数（risk_counters），又激活浏览配额与点赞/浏览比例闸门（内存窗口）。
         // view 不入 interaction_feed：其订阅方按动作白名单过滤，浏览不污染「已互动笔记」展示账本。
+        //
+        // **view MUST 与其它动作走同一条 outbox 漏斗**（change risk-state-cross-process-integrity）：
+        // 记账已整体从「事件订阅者里 record()」迁到「回执处理入队 → apply 时递增」。view 是唯一
+        // 没有 action.completed 回执的动作，故它的入队点只能在这里；漏掉这一处的后果不是少记几笔，
+        // 而是**浏览配额三个窗口全部失效**（日/时/分上限永不触发）、首发引导进度恒 0、面板浏览数恒 0，
+        // 且对账器检不出（内存 0 == 库 0）。
         const reelViewAlreadyCounted =
           !!detail.noteId && detail.noteId === session.countedReelViewNoteId;
         const feedVideoViewAlreadyCounted =
           !!detail.noteId && !!session.countedFacebookFeedVideoViewKeys?.has(facebookPostKey(detail.noteId));
         if (!reelViewAlreadyCounted && !feedVideoViewAlreadyCounted) {
+          await this.enqueueRiskFact(session, 'view', `${env.id}:view:${detail.noteId ?? '-'}`);
           this.bus(session).emit('interaction.occurred', {
             action: 'view',
             accountId: session.accountId,

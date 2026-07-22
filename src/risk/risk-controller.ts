@@ -65,6 +65,18 @@ export interface RiskControllerOptions {
    * 契约同 QuotaProvider / AccountNurtureProvider：**同步、零 IO、永不抛**。
    */
   interactionBlockedProvider?: (accountId: string) => boolean;
+  /**
+   * `risk_state` 条件写被数据库拒绝（非属主，影响 0 行）时的唯一正确处理入口
+   * （change risk-state-cross-process-integrity，design D3/D4）。
+   *
+   * 由 registry 注入、转调 `handleNotOwned`（驱逐本地缓存 controller + P1 告警）。**这条接线不可省**：
+   * 没有它，`saveState` 抛出的 `RiskStateNotOwnedError` 会被上游某个 catch 吞成一行日志，旧属主
+   * 继续拿着一份**从未落库**的内存状态给该账号做准入判定，直到进程重启——「条件写是最后一道」
+   * 就只剩一行日志。
+   *
+   * 契约：**同步、永不抛**（内部已 try/catch）；本方法调用后错误照常向上抛给写的发起方。
+   */
+  onStateWriteRejected?: (err: unknown) => void;
 }
 
 /**
@@ -129,6 +141,7 @@ export class RiskController {
   private readonly coldStartRampEnabled: boolean;
   private readonly slowStartDisabled: boolean;
   private readonly interactionBlockedProvider?: (accountId: string) => boolean;
+  private readonly onStateWriteRejected?: (err: unknown) => void;
   private state: RiskState;
   /** 每账号串行化：所有改 state + saveState 的写经此链，避免并发 read-modify-write 丢更新（D7）。 */
   private mutationChain: Promise<unknown> = Promise.resolve();
@@ -147,6 +160,7 @@ export class RiskController {
     this.coldStartRampEnabled = options.coldStartRampEnabled ?? false;
     this.slowStartDisabled = options.slowStartDisabled ?? false;
     this.interactionBlockedProvider = options.interactionBlockedProvider;
+    this.onStateWriteRejected = options.onStateWriteRejected;
   }
 
   static async create(options: RiskControllerOptions = {}): Promise<RiskController> {
@@ -237,17 +251,24 @@ export class RiskController {
    * ——后者使「豁免」与「丢数」不可区分。
    *
    * ---
-   * **本方法已被拆成两半**（change risk-state-cross-process-integrity，design D5）：
-   * 判定取值留在这里，**持久账本迁到 outbox**（`RiskAccounting`）。原因是这条链路此前是进程内
-   * fire-and-forget，崩在「回执已到、计数未提交」之间就静默丢账。
+   * **常规路径已迁到 outbox**（change risk-state-cross-process-integrity，design D5）：
+   * `RiskAccounting` 先把事实落进 outbox、apply 成功后才经 `recordFact` 递增内存计数。
    *
-   * ⚠️ **生产路径 MUST 经 `RiskAccounting.record` / `.enqueue`，MUST NOT 直接调本方法**——
-   * 本方法只递增内存计数、不落库，直接调等于制造「内存有、库里无」的偏差（下一次对账会检出并
-   * 以库为准把它抹掉，即真实动作凭空消失）。保留它是为了不带 store 的纯逻辑单测与验收用例。
+   * ⚠️ **漏斗可用时，生产路径 MUST 经 `RiskAccounting.record` / `.enqueue`，MUST NOT 直接调本方法**
+   * ——那会让同一笔事实既走 outbox 又走这里，计成两次。
+   *
+   * 本方法保留为**漏斗未启用时的降级路径**（target 缺失 / outbox 起不来），语义与改动前逐字一致：
+   * 内存计数与 `risk_counters` **同时**写。`appendCounter` MUST NOT 被摘掉——摘掉之后降级路径
+   * 就成了纯内存记账，重启即把当日已消耗的配额全部归零，而告警文案还在宣称「回落改动前的进程内
+   * 记账，行为逐位一致」。那是一句假陈述，且对账器检不出（内存 0 == 库 0）。
    */
   async record(action: RiskAction): Promise<boolean> {
     const allowed = this.canDo(action);
-    this.recordFact(action, this.clock());
+    const now = this.clock();
+    this.recordFact(action, now);
+    // 落库（降级路径的持久账本）。这里的行没有 outbox_id，与 apply 写下的行共存于同一张表，
+    // 对账按总量比对 ⇒ 内存与库同增同减，零偏差。
+    await this.store?.appendCounter(this.accountId, action, now);
     return allowed;
   }
 
@@ -277,6 +298,28 @@ export class RiskController {
     return { ...this.state };
   }
 
+  /**
+   * `risk_state` 的唯一落库出口（change risk-state-cross-process-integrity）。
+   *
+   * **三个写入口（applySignal / recoverRestricted / setQuotaLevel）MUST 全部经此**，不要在任一处
+   * 直接 `await this.store?.saveState(...)`：条件写被拒后的驱逐与告警接在这里，漏一处就漏一条
+   * 「旧属主拿着从未落库的内存状态继续做准入判定」的静默路径。
+   *
+   * 失败照常向上抛（调用方与改动前逐字一致地看到失败）；这里只额外把「非属主」这一类失败告诉 registry。
+   */
+  private async persistState(): Promise<void> {
+    try {
+      await this.store?.saveState(this.state);
+    } catch (err) {
+      try {
+        this.onStateWriteRejected?.(err);
+      } catch {
+        // 驱逐/告警链路故障绝不改变写失败这个事实，也绝不掩盖原始错误。
+      }
+      throw err;
+    }
+  }
+
   /** 把一个 state 写排进每账号串行链（transition+saveState 或 setQuotaLevel+saveState 原子）。 */
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.mutationChain.then(fn, fn); // 前一个成败都继续
@@ -290,7 +333,7 @@ export class RiskController {
   async applySignal(signal: RiskSignal): Promise<RiskState> {
     return this.enqueue(async () => {
       this.state = this.stateMachine.transition(this.state, signal, signal.at ?? this.clock());
-      await this.store?.saveState(this.state);
+      await this.persistState();
       return this.getState();
     });
   }
@@ -321,7 +364,7 @@ export class RiskController {
         { kind: 'operator_override_recover', reason: auditReason },
         this.clock(),
       );
-      await this.store?.saveState(this.state);
+      await this.persistState();
       return { accepted: true, statusBefore, state: this.getState(), changed: true };
     });
   }
@@ -333,7 +376,7 @@ export class RiskController {
   async setQuotaLevel(level: RiskQuotaLevel): Promise<RiskState> {
     return this.enqueue(async () => {
       this.state = { ...this.state, quotaLevel: level, updatedAt: this.clock() };
-      await this.store?.saveState(this.state);
+      await this.persistState();
       return this.getState();
     });
   }

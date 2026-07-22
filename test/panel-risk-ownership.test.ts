@@ -182,6 +182,32 @@ test('改归属：旧属主仍有活跃会话 → 409 owner_change_blocked_by_ac
   });
 });
 
+test('observe 模式：非属主与未归属账号的写口照常 200（观察期 MUST NOT 拒绝）', async () => {
+  // design Migration Plan 第 2 步是「只读上线…此时行为与今天逐位一致」，第 4 步才把
+  // 「面板写口拒绝生效」列进翻开强制之后。observe 也拒的实际后果不是保守而是锁死：
+  // 迁移刻意不回填 accounts.execution_target，上线瞬间**全部**账号归属为 NULL，
+  // 而当前没有边缘在线的账号永远拿不到归属、也就永远改不了配额档。
+  const owners: Record<string, 'dev' | 'ol' | null> = { mine: 'dev', theirs: 'ol', orphan: null };
+  const { deps } = makeDeps({
+    riskOwnership: {
+      executionTarget: 'dev' as const,
+      mode: 'observe' as const,
+      ownerOf: async (accountId: string) => owners[accountId] ?? null,
+      changeOwner: async () => ({ ok: true as const, owner: 'dev' as const, previousOwner: null }),
+    },
+  });
+  await withPanel(deps, async (base, auth) => {
+    for (const accountId of ['theirs', 'orphan']) {
+      const res = await fetch(`${base}/api/accounts/${accountId}/risk/quota`, {
+        method: 'POST',
+        headers: auth,
+        body: JSON.stringify({ level: 'conservative' }),
+      });
+      assert.equal(res.status, 200, `${accountId} 在 observe 下 MUST 照常放行`);
+    }
+  });
+});
+
 test('归属闸未注入 → 全部写口行为与改动前逐位一致', async () => {
   const { deps } = makeDeps({ riskOwnership: undefined });
   await withPanel(deps, async (base, auth) => {

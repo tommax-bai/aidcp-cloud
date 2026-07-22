@@ -53,6 +53,8 @@ export class RiskAccounting {
   private readonly blocked = new Set<string>();
   private timer: NodeJS.Timeout | null = null;
   private applying: Promise<number> | null = null;
+  /** 飞行中又来了请求时排队的下一轮 apply（最多一轮，见 applyNow）。 */
+  private queued: Promise<number> | null = null;
   private stopped = false;
 
   constructor(options: RiskAccountingOptions) {
@@ -165,10 +167,28 @@ export class RiskAccounting {
 
   /**
    * 认领并应用一批 outbox 行。**内存计数只在这里递增**，且只对真正落账的行递增。
-   * 并发调用会被折叠成同一次（避免立即触发与轮询互相踩）。
+   *
+   * 并发调用不会同时跑两轮，但也 **MUST NOT 直接复用飞行中的那一次**：飞行中的那一次可能早在
+   * 本次入队之前就完成了 `claimBatch`，复用它等于「本次入队的行这一轮根本不会被认领」，内存计数
+   * 要等下一次兜底轮询（默认 5s）才递增，这段时间准入判定读到的是偏低的计数、放行偏松。
+   * design D5 明确「入队后同进程立即触发一次 apply，轮询只作崩溃恢复的兜底、不作常规路径」——
+   * 直接复用会让多账号并发下的常规路径整个退化成轮询。
+   *
+   * 故：飞行中则**排队一轮后续 apply**，调用方等到的是一次一定发生在本次入队之后的认领。
+   * 排队最多一轮（第 N 个并发请求共享同一个后续轮次），既不退化成轮询，也不会无界堆叠。
    */
   applyNow(): Promise<number> {
-    if (this.applying) return this.applying;
+    if (this.applying) {
+      if (!this.queued) {
+        // applying 的 finally 挂在更内层的 promise 上、先于本 then 执行，
+        // 故这里再调 applyNow 时 this.applying 已复位，会真正开新一轮。
+        this.queued = this.applying.catch(() => 0).then(() => {
+          this.queued = null;
+          return this.applyNow();
+        });
+      }
+      return this.queued;
+    }
     const run = this.applyOnce().finally(() => {
       this.applying = null;
     });
@@ -194,15 +214,27 @@ export class RiskAccounting {
     }
     let applied = 0;
     for (const row of claimed) {
+      let committed = false;
       try {
         const done = await this.opts.outbox.applyClaimed([row]);
         if (done.length === 0) continue; // 认领已失效，交由真正的持有者应用
+        committed = true;
         // 落库成功后才递增内存计数——**全系统唯一的递增路径**。
         const controller = await this.opts.resolveController(row.accountId);
         controller.recordFact(row.action, row.occurredAt);
         applied += 1;
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
+        if (committed) {
+          // 落账事务已 COMMIT，失败发生在**之后**（解析 controller / 递增内存计数）。
+          // MUST NOT 回写 outbox 状态、MUST NOT 报死信：那一行已经在账本里，说它「没进账本」是假陈述。
+          // 真实的偏差是「库里有、内存没有」，那正是对账器（design D6）负责检出并以库为准重建的形状。
+          this.opts.logger?.warn?.(
+            `[risk-accounting] 落账已提交但内存计数未递增 id=${row.id} account=${row.accountId}: ${detail}` +
+              `（不回写 outbox；等对账以库为准重建）`,
+          );
+          continue;
+        }
         try {
           const { dead } = await this.opts.outbox.failClaimed(row, detail, this.opts.maxAttempts);
           if (dead) {

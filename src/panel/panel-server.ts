@@ -212,9 +212,16 @@ function createRequestHandler(
    * 「点了但没变化」，而真相是「这台后台根本没有写它的权力，请去另一台」。
    *
    * 归属未启用（单进程 / 无 target）→ 恒放行，行为与改动前逐位一致。
+   *
+   * ⚠️ **只在 `enforce` 收紧，observe MUST 照常放行**（design Migration Plan 第 2/4 步：
+   * 「面板写口拒绝生效」明确划在翻开强制之后；第 2 步的只读上线要求「行为与今天逐位一致」）。
+   * 理由不是形式对齐，是上线当天的实际后果：迁移刻意不回填 `accounts.execution_target`，
+   * 归属只能由边缘握手逐个占位。observe 也拒 ⇒ 部署瞬间**全部**账号（归属为 NULL）的风控写口
+   * 集体 409，而一个当前没有边缘在线的账号永远拿不到归属、也就永远改不了配额档——把一个
+   * 「先观察、零风险」的阶段变成了全车队锁死。观察期的表达方式是告警（写照做、留痕），不是拒绝。
    */
   const assertRiskWritable = async (accountId: string, res: http.ServerResponse): Promise<boolean> => {
-    if (!deps.riskOwnership || deps.riskOwnership.mode === 'off') return true;
+    if (!deps.riskOwnership || deps.riskOwnership.mode !== 'enforce') return true;
     let owner: 'dev' | 'ol' | null;
     try {
       owner = await deps.riskOwnership.ownerOf(accountId);

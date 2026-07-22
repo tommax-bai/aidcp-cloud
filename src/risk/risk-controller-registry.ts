@@ -151,6 +151,11 @@ export class RiskControllerRegistry {
    * 条件写因非属主被拒之后的唯一正确处理：**驱逐 + 告警**。
    * MUST NOT 重试同一次写、MUST NOT 立刻用同一份陈旧内存状态重建 controller
    * （重建发生在下一次真实解析时，那时会从库重新加载）。
+   *
+   * **接线点在 `createController`**：每个 controller 出厂即带 `onStateWriteRejected`，
+   * 它的 `saveState` 一被数据库拒就直接回调到这里。MUST NOT 指望调用侧逐处 catch——
+   * 真实链路上唯一的捕获者是验证码协调器，它只打一行日志，那样这条机制就是死代码：
+   * 无告警、无驱逐，旧属主继续拿着一份从未落库的内存状态给该账号做准入判定直到重启。
    */
   handleNotOwned(err: unknown): boolean {
     if (!isRiskStateNotOwnedError(err)) return false;
@@ -200,6 +205,10 @@ export class RiskControllerRegistry {
       coldStartRampEnabled: this.coldStartRampEnabled,
       slowStartDisabled: this.slowStartDisabled,
       interactionBlockedProvider: this.interactionBlockedProvider,
+      // 条件写被拒 → 驱逐 + 告警（design D3/D4 的「最后一道」）。见 handleNotOwned 的接线说明。
+      onStateWriteRejected: (err) => {
+        this.handleNotOwned(err);
+      },
     });
   }
 

@@ -200,6 +200,37 @@ test('handleNotOwned 只认自己的错误类型，别的错误不吞', () => {
   assert.equal(registry.handleNotOwned(new Error('pg down')), false);
 });
 
+test('条件写被库拒 → 由 controller 自己触发驱逐 + 告警（MUST NOT 指望调用侧逐处 catch）', async () => {
+  // 上一条用手工构造的错误直接喂 handleNotOwned，验的是它自己；这一条走真实链路：
+  // store.saveState 抛 → controller → registry。改动后接线之前，这条链上唯一的捕获者是
+  // 验证码协调器的 `logger.error`，于是既不驱逐也不告警——旧属主继续拿着一份从未落库的
+  // 内存状态给该账号做准入判定，直到进程重启。
+  const store = new MemoryRiskStore();
+  store.states.set('acc-1', stateOf('acc-1', 'normal'));
+  const rejecting = {
+    ...store,
+    loadCounters: (id: string) => store.loadCounters(id),
+    appendCounter: () => store.appendCounter(),
+    loadState: (id: string) => store.loadState(id),
+    saveState: async () => {
+      throw new RiskStateNotOwnedError('acc-1', 'dev', 'ol', 'owned_by_other');
+    },
+  } as unknown as RiskStore;
+  const { registry, alerts } = registryWith('dev', 'enforce', rejecting as never);
+
+  const controller = await registry.getWritableController('acc-1');
+  assert.deepEqual(registry.materializedAccountIds(), ['acc-1']);
+
+  await assert.rejects(
+    () => controller.applySignal({ kind: 'platform_warning', at: 1_000 } as never),
+    RiskStateNotOwnedError,
+    '写失败 MUST 照常抛给发起方，绝不吞成成功',
+  );
+
+  assert.deepEqual(registry.materializedAccountIds(), [], '被拒 MUST 驱逐本地缓存 controller');
+  assert.equal(alerts.at(-1)?.kind, 'evicted_not_owned', '被拒 MUST 出 P1 告警，不能只剩一行日志');
+});
+
 // ── 握手闸 ────────────────────────────────────────────────────────────────────
 
 function handshakeSession(accountId: string): EdgeSession {
