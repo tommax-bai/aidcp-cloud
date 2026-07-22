@@ -196,6 +196,11 @@ export interface FacebookGroupJoinRecentScheduledResult {
   createdAt: string;
 }
 
+export interface FacebookGroupScopedTargetCount {
+  accountGroupLabel: string | null;
+  count: number;
+}
+
 interface TargetDbRow {
   group_url: string;
   group_name: string | null;
@@ -847,9 +852,13 @@ export class FacebookGroupTargetStore {
     };
   }
 
-  async scopedTargetCountForAccount(accountId: string): Promise<{ accountGroupLabel: string | null; count: number }> {
-    const { rows } = await this.pool.query<{ group_label: string | null; total: string }>(
-      `SELECT a.group_label,
+  async scopedTargetCountsForAccounts(
+    accountIds: readonly string[],
+  ): Promise<Map<string, FacebookGroupScopedTargetCount>> {
+    const uniqueAccountIds = [...new Set(accountIds.filter((accountId) => accountId.trim() !== ''))];
+    if (uniqueAccountIds.length === 0) return new Map();
+    const { rows } = await this.pool.query<{ account_id: string; group_label: string | null; total: string }>(
+      `SELECT a.account_id, a.group_label,
               count(t.group_url) FILTER (
                 WHERE t.enabled = true AND t.join_gating IN ('unknown','instant')
                   AND NOT EXISTS (
@@ -859,11 +868,21 @@ export class FacebookGroupTargetStore {
        FROM accounts a
        LEFT JOIN facebook_group_target_scope s ON s.account_group_label = a.group_label
        LEFT JOIN facebook_group_target t ON t.group_url = s.group_url
-       WHERE a.account_id = $1 AND lower(btrim(a.platform)) IN ('facebook','fb')
-       GROUP BY a.group_label`,
-      [accountId],
+       WHERE a.account_id = ANY($1::text[]) AND lower(btrim(a.platform)) IN ('facebook','fb')
+       GROUP BY a.account_id, a.group_label`,
+      [uniqueAccountIds],
     );
-    return { accountGroupLabel: rows[0]?.group_label ?? null, count: Number(rows[0]?.total ?? '0') };
+    return new Map(rows.map((row) => [
+      row.account_id,
+      { accountGroupLabel: row.group_label ?? null, count: Number(row.total ?? '0') },
+    ]));
+  }
+
+  async scopedTargetCountForAccount(accountId: string): Promise<FacebookGroupScopedTargetCount> {
+    return (await this.scopedTargetCountsForAccounts([accountId])).get(accountId) ?? {
+      accountGroupLabel: null,
+      count: 0,
+    };
   }
 
   async nextJoinCandidate(accountId: string): Promise<FacebookGroupTargetRow | null> {
@@ -1323,29 +1342,37 @@ export class FacebookGroupJoinAuditStore {
     }
   }
 
-  async latestScheduledResult(accountId: string): Promise<FacebookGroupJoinRecentScheduledResult | null> {
+  async latestScheduledResults(
+    accountIds: readonly string[],
+  ): Promise<Map<string, FacebookGroupJoinRecentScheduledResult>> {
+    const uniqueAccountIds = [...new Set(accountIds.filter((accountId) => accountId.trim() !== ''))];
+    if (uniqueAccountIds.length === 0) return new Map();
     const { rows } = await this.pool.query<{
+      account_id: string;
       outcome: FacebookGroupJoinAuditOutcome;
       reason: string | null;
       group_url: string | null;
       created_at: Date | string;
     }>(
-      `SELECT outcome, reason, group_url, created_at
+      `SELECT DISTINCT ON (account_id) account_id, outcome, reason, group_url, created_at
        FROM facebook_group_join_audit
-       WHERE account_id = $1 AND trigger_source = 'scheduled'
-       ORDER BY created_at DESC, id DESC
-       LIMIT 1`,
-      [accountId],
+       WHERE account_id = ANY($1::text[]) AND trigger_source = 'scheduled'
+       ORDER BY account_id, created_at DESC, id DESC`,
+      [uniqueAccountIds],
     );
-    const row = rows[0];
-    return row
-      ? {
+    return new Map(rows.map((row) => [
+      row.account_id,
+      {
           outcome: row.outcome,
           reason: row.reason ?? null,
           groupUrl: row.group_url ?? null,
           createdAt: iso(row.created_at)!,
-        }
-      : null;
+      },
+    ]));
+  }
+
+  async latestScheduledResult(accountId: string): Promise<FacebookGroupJoinRecentScheduledResult | null> {
+    return (await this.latestScheduledResults([accountId])).get(accountId) ?? null;
   }
 
   async close(): Promise<void> {

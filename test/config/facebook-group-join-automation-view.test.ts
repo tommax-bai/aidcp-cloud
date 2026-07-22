@@ -4,11 +4,51 @@ import {
   buildFacebookGroupJoinAutomationCatalogView,
   buildFacebookGroupJoinAutomationCatalogViewFailClosed,
   intersectFacebookGroupJoinAutomationMasks,
+  projectFacebookGroupJoinAutomationCatalog,
 } from '../../src/config/facebook-group-join-automation-view.js';
+import type { ContentScheduleCatalogRow } from '../../src/config/content-schedule-store.js';
 
 const FULL = '1'.repeat(168);
 const EVEN = Array.from({ length: 168 }, (_, index) => index % 2 === 0 ? '1' : '0').join('');
 const FIRST_HALF = '1'.repeat(84) + '0'.repeat(84);
+
+function catalogRow(accountId: string, platform: string): ContentScheduleCatalogRow {
+  return {
+    accountId,
+    platform,
+    label: null,
+    groupLabel: platform === 'facebook' ? '华东组' : null,
+    nickname: null,
+    operatorAlias: null,
+    displayName: accountId,
+    displayNameSource: 'account_id',
+    availableActions: [],
+    autoEnabled: false,
+    postEnabled: false,
+    postMode: 'off',
+    postDailyCap: 0,
+    commentEnabled: false,
+    commentMode: 'off',
+    commentDailyCap: 0,
+    contactCommentEnabled: false,
+    contactCommentMode: 'off',
+    contactCommentDailyCap: 0,
+    hasContactInfo: false,
+    activeWeekMask: null,
+    contentActiveMask: null,
+    effectiveActiveWeekMask: FULL,
+    effectiveContentActiveMask: FULL,
+    activeMaskSource: 'global',
+    contentMaskSource: 'global',
+    hasActiveOverrideMask: false,
+    hasContentOverrideMask: false,
+    maskSource: 'global',
+    hasOverrideMask: false,
+    configured: false,
+    updatedAt: null,
+    updatedBy: null,
+  };
+}
 
 test('join automation catalog projects effective cap, intersected mask, scope readiness, and scheduled result truth', () => {
   const recentResult = {
@@ -76,4 +116,55 @@ test('post-commit projection failures never fake a failed config write and inste
   assert.equal(view.effectiveWeekMask, null, 'missing catalog masks fail closed');
   assert.equal(view.scopeReady, false);
   assert.equal(view.recentResult, null);
+});
+
+test('large Facebook catalog uses two batch loaders and caps RiskController resolution at two in flight', async () => {
+  const facebookRows = Array.from({ length: 24 }, (_, index) => catalogRow(`fb-${index}`, 'facebook'));
+  const nonFacebookRows = Array.from({ length: 4 }, (_, index) => catalogRow(`xhs-${index}`, 'xiaohongshu'));
+  const rows = [...facebookRows, ...nonFacebookRows];
+  let scopeCalls = 0;
+  let recentCalls = 0;
+  let riskInFlight = 0;
+  let maxRiskInFlight = 0;
+  const scopeInputs: string[][] = [];
+  const recentInputs: string[][] = [];
+
+  const projected = await projectFacebookGroupJoinAutomationCatalog(rows, {
+    getConfig: (accountId) => ({
+      accountId, enabled: true, dailyCap: 2, weekMask: null, updatedAt: null, updatedBy: null,
+    }),
+    loadScopes: async (accountIds) => {
+      scopeCalls++;
+      scopeInputs.push([...accountIds]);
+      return new Map(accountIds.map((accountId) => [accountId, { accountGroupLabel: '华东组', count: 3 }]));
+    },
+    loadRecentResults: async (accountIds) => {
+      recentCalls++;
+      recentInputs.push([...accountIds]);
+      return new Map(accountIds.map((accountId) => [accountId, {
+        outcome: 'joined' as const,
+        reason: null,
+        groupUrl: `https://www.facebook.com/groups/${accountId}`,
+        createdAt: '2026-07-22T08:00:00.000Z',
+      }]));
+    },
+    loadRiskDailyCap: async () => {
+      riskInFlight++;
+      maxRiskInFlight = Math.max(maxRiskInFlight, riskInFlight);
+      await new Promise<void>((resolve) => setTimeout(resolve, 2));
+      riskInFlight--;
+      return 1;
+    },
+  });
+
+  assert.equal(scopeCalls, 1);
+  assert.equal(recentCalls, 1);
+  assert.deepEqual(scopeInputs[0], facebookRows.map((row) => row.accountId));
+  assert.deepEqual(recentInputs[0], facebookRows.map((row) => row.accountId));
+  assert.equal(maxRiskInFlight, 2, '24 个账号也只能同时初始化两个 RiskController');
+  assert.ok(projected.slice(0, 24).every((row) =>
+    row.joinGroupAutomation?.effectiveDailyCap === 1 &&
+    row.joinGroupAutomation.scopeReady === true &&
+    row.joinGroupAutomation.recentResult?.outcome === 'joined'));
+  assert.ok(projected.slice(24).every((row) => row.joinGroupAutomation === undefined));
 });

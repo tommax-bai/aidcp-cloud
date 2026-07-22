@@ -431,8 +431,8 @@ test('join audit persists trigger source and latestScheduledResult ignores newer
   const pool = {
     query: async (sql: string, params: unknown[] = []) => {
       calls.push({ sql, params });
-      if (sql.startsWith('SELECT outcome')) {
-        return { rows: [{ outcome: 'joined', reason: null, group_url: 'https://www.facebook.com/groups/group-a', created_at: '2026-07-22T08:00:00.000Z' }] };
+      if (sql.includes('SELECT DISTINCT ON (account_id)')) {
+        return { rows: [{ account_id: 'acc-fb', outcome: 'joined', reason: null, group_url: 'https://www.facebook.com/groups/group-a', created_at: '2026-07-22T08:00:00.000Z' }] };
       }
       return { rows: [] };
     },
@@ -443,7 +443,54 @@ test('join audit persists trigger source and latestScheduledResult ignores newer
   const latest = await store.latestScheduledResult('acc-fb');
   assert.equal(latest?.outcome, 'joined');
   assert.match(calls[1].sql, /trigger_source = 'scheduled'/);
-  assert.match(calls[1].sql, /ORDER BY created_at DESC, id DESC/);
+  assert.match(calls[1].sql, /DISTINCT ON \(account_id\)/);
+  assert.match(calls[1].sql, /ORDER BY account_id, created_at DESC, id DESC/);
+});
+
+test('catalog batch stores issue one scope query and one latest-scheduled query for many accounts', async () => {
+  const accountIds = Array.from({ length: 25 }, (_, index) => `fb-${index}`);
+  let scopeQueries = 0;
+  const targetStore = new FacebookGroupTargetStore({
+    pool: {
+      query: async (_sql: string, params: unknown[]) => {
+        scopeQueries++;
+        assert.deepEqual(params, [accountIds]);
+        return {
+          rows: accountIds.map((account_id, index) => ({
+            account_id,
+            group_label: `组-${index % 3}`,
+            total: String(index),
+          })),
+        };
+      },
+    } as unknown as pg.Pool,
+  });
+  const scopes = await targetStore.scopedTargetCountsForAccounts(accountIds);
+  assert.equal(scopeQueries, 1);
+  assert.deepEqual(scopes.get('fb-7'), { accountGroupLabel: '组-1', count: 7 });
+
+  let auditQueries = 0;
+  const auditStore = new FacebookGroupJoinAuditStore({
+    pool: {
+      query: async (sql: string, params: unknown[]) => {
+        auditQueries++;
+        assert.match(sql, /SELECT DISTINCT ON \(account_id\)/);
+        assert.deepEqual(params, [accountIds]);
+        return {
+          rows: accountIds.map((account_id) => ({
+            account_id,
+            outcome: 'no_targets',
+            reason: 'no_candidate',
+            group_url: null,
+            created_at: '2026-07-22T08:00:00.000Z',
+          })),
+        };
+      },
+    } as unknown as pg.Pool,
+  });
+  const recent = await auditStore.latestScheduledResults(accountIds);
+  assert.equal(auditQueries, 1);
+  assert.equal(recent.get('fb-7')?.reason, 'no_candidate');
 });
 
 test('FacebookGroupMembershipStore.markTransientRetry: status=assigned + attempts 回退一格 + 短冷却（P1-5，不计尝试上限）', async () => {

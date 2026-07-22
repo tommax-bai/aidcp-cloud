@@ -253,12 +253,11 @@ import {
   ContentScheduleStore,
   actionModeEnabled,
   type ContentScheduleCatalogRow,
-  type FacebookJoinGroupAutomationCatalogView,
 } from './config/content-schedule-store.js';
 import { FacebookGroupJoinAutomationStore } from './config/facebook-group-join-automation-store.js';
 import {
-  buildFacebookGroupJoinAutomationCatalogView,
   buildFacebookGroupJoinAutomationCatalogViewFailClosed,
+  projectFacebookGroupJoinAutomationCatalog,
 } from './config/facebook-group-join-automation-view.js';
 import {
   ApprovalPolicyStore,
@@ -1451,31 +1450,15 @@ async function main(): Promise<void> {
   }
   // retire-default-account：不再建单租户全局 'default' controller；风控一律经 registry 按真实账号懒解析。
   const resolveController = (accountId: string): Promise<RiskController> => riskRegistry.getController(accountId);
-  const joinAutomationProjectionFor = async (
-    row: ContentScheduleCatalogRow,
-  ): Promise<FacebookJoinGroupAutomationCatalogView> => {
-    const config = facebookGroupJoinAutomationStore.getForAccount(row.accountId);
-    const [riskCap, scope, recentResult] = await Promise.all([
-      resolveController(row.accountId).then((controller) => controller.effectiveQuotas().day.join_group),
-      facebookGroupTargetStore.scopedTargetCountForAccount(row.accountId),
-      facebookGroupJoinAuditStore.latestScheduledResult(row.accountId),
-    ]);
-    return buildFacebookGroupJoinAutomationCatalogView({
-      config,
-      riskDailyCap: riskCap,
-      effectiveActiveWeekMask: row.effectiveActiveWeekMask,
-      effectiveContentActiveMask: row.effectiveContentActiveMask,
-      accountGroupLabel: scope.accountGroupLabel,
-      scopedTargetCount: scope.count,
-      recentResult,
-    });
-  };
   const listAccountAutomationCatalog = async (): Promise<ContentScheduleCatalogRow[]> => {
     const rows = await contentScheduleStore.listCatalog();
-    return Promise.all(rows.map(async (row) =>
-      row.platform === 'facebook'
-        ? { ...row, joinGroupAutomation: await joinAutomationProjectionFor(row) }
-        : row));
+    return projectFacebookGroupJoinAutomationCatalog(rows, {
+      getConfig: (accountId) => facebookGroupJoinAutomationStore.getForAccount(accountId),
+      loadRiskDailyCap: (accountId) => resolveController(accountId)
+        .then((controller) => controller.effectiveQuotas().day.join_group),
+      loadScopes: (accountIds) => facebookGroupTargetStore.scopedTargetCountsForAccounts(accountIds),
+      loadRecentResults: (accountIds) => facebookGroupJoinAuditStore.latestScheduledResults(accountIds),
+    });
   };
   // 「唯一真实账号」解析（飞书无参 / 自动发帖用）：恰好一个真实账号 → 它，0 或多个 → null（honest-fail，绝不回落 default）。
   const resolveSingleAccountId = async (): Promise<string | null> => {
