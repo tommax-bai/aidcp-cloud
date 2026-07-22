@@ -67,7 +67,7 @@ import { buildPublishApprovalCard } from '../feishu/cards.js';
 import type { FeishuMessenger } from '../feishu/messenger.js';
 import type { BotChatStore } from '../cache/bot-chat-store.js';
 import { RiskController, SessionBudget, buildPacingSnapshot } from '../risk/index.js';
-import type { RiskStatus, RiskQuotaLevel, PacingFloorProvider } from '../risk/index.js';
+import type { RiskAction, RiskStatus, RiskQuotaLevel, PacingFloorProvider } from '../risk/index.js';
 import { normalizePlatformId, resolveReadSurface } from '../platform/index.js';
 import {
   facebookPostKey,
@@ -190,6 +190,31 @@ export interface HandlerDeps {
   onHandshake?: (session: EdgeSession) => Promise<HandshakeOutcome> | HandshakeOutcome;
   /** 按连接真实账号解析 RiskController（reserved risk 通道 / session.budget 用）；缺省回落 riskController。 */
   resolveController?: (session: EdgeSession) => RiskController | undefined;
+  /**
+   * 风控记账漏斗（change risk-state-cross-process-integrity，design D5）。
+   *
+   * 边缘确认真实动作后，**先同步把既成事实提交进持久 outbox，再 emit 推进浏览闭环**。
+   * 入队失败 MUST 抛给调用方（ws 层会回一条 error 帧并触发该账号 fail-closed），
+   * MUST NOT 吞掉后照常 emit——那正是改动前那条 fire-and-forget 链路的病：崩在
+   * 「回执已到、计数未提交」之间就静默丢账，后续配额判定据此以为尚有余量而放行更多真实动作。
+   *
+   * 未注入（纯协议测试 / 旧装配）→ 保持改动前行为：直接 emit，记账由订阅者承担。
+   */
+  riskAccounting?: {
+    enqueue(input: {
+      accountId: string;
+      action: RiskAction;
+      occurredAt?: number;
+      dedupeKey: string;
+    }): Promise<void>;
+    /** 入队 + 立即 apply，返回写入前判定（保留通道 `risk.record` 用）。 */
+    record(input: {
+      accountId: string;
+      action: RiskAction;
+      occurredAt?: number;
+      dedupeKey: string;
+    }): Promise<{ allowed: boolean }>;
+  };
   /**
    * 操作兜底 floor 提供者（change pacing-floor-config-min-interval）：welcome 握手现读组装 pacing 快照下发。
    * 未注入 → welcome 省略 `pacing` 字段（边缘回落内置非零默认，向后兼容）。纯读、不写任何状态。
@@ -325,6 +350,18 @@ export class DefaultMessageHandler implements MessageHandler {
   /** 该连接真实账号的 RiskController；未接线则回落注入的单一 controller（向后兼容）。 */
   private controllerFor(session: EdgeSession): RiskController {
     return this.deps.resolveController?.(session) ?? this.riskController;
+  }
+
+  /**
+   * 把一次「边缘已确认真实发生」的动作同步提交进记账 outbox（change risk-state-cross-process-integrity）。
+   * 缺 accountId → 不入队（与既有 honest-fail 一致：绝不把脏流量记到退役键名下）。
+   * 漏斗未注入 → no-op（旧装配与纯协议测试保持改动前行为）。
+   * **入队失败刻意向上抛**：调用点据此不 emit、不推进闭环。
+   */
+  private async enqueueRiskFact(session: EdgeSession, action: RiskAction, dedupeKey: string): Promise<void> {
+    const accountId = session.accountId?.trim();
+    if (!accountId || !this.deps.riskAccounting) return;
+    await this.deps.riskAccounting.enqueue({ accountId, action, occurredAt: this.clock(), dedupeKey });
   }
 
   /**
@@ -678,6 +715,9 @@ export class DefaultMessageHandler implements MessageHandler {
                   this.logger.warn(`[comm] search action.completed 矛盾终态 activityId=${activityId} — 已消费但不记平台事实`);
                   emitActionCompleted = false;
                 } else if (result.actuated === true && outcome !== 'not_submitted') {
+                  // 先落持久 outbox，再推进（design D5）。搜索的去重键用 activityId：它每次搜索唯一，
+                  // 且边缘重连重发同一条终态时携带同一个 activityId ⇒ 天然只记一次。
+                  await this.enqueueRiskFact(session, 'search', `${env.id}:search:${activityId}`);
                   this.bus(session).emit('search.occurred', {
                     accountId: session.accountId,
                     activityId,
@@ -732,6 +772,10 @@ export class DefaultMessageHandler implements MessageHandler {
               : result.action === 'join_group'
                 ? undefined
                 : attributedNoteId;
+          // **先落持久 outbox，再 emit 推进浏览闭环**（design D5）。顺序不可换：emit 之后再记账
+          // 就回到了「回执已到、计数未提交」那段真空——崩在那里这次真实动作就此从账本上消失。
+          // 入队失败会抛出（并已在漏斗内告警 + 对该账号 fail-closed），此处刻意不 catch。
+          await this.enqueueRiskFact(session, result.action as RiskAction, `${env.id}:${result.action}`);
           this.bus(session).emit('interaction.occurred', {
             action: result.action as 'like' | 'collect' | 'follow' | 'comment' | 'comment_like' | 'join_group',
             // accountId 从会话填（握手已保证存在）；缺失=上游缺陷，下游 consumer honest-fail 丢弃，绝不回落 default
@@ -1023,7 +1067,20 @@ export class DefaultMessageHandler implements MessageHandler {
   private async onRiskRecord(env: Envelope, session: EdgeSession): Promise<Envelope> {
     const p = env.payload as RiskRecordPayload;
     const action = p.action;
-    const recorded = await this.controllerFor(session).record(action);
+    // 保留通道（边缘尚未接线）。记账仍 MUST 经同一个漏斗，否则这里会递增内存计数却不落库，
+    // 下一次对账会把它当成偏差抹掉 ⇒ 一次真实动作凭空消失。
+    const accountId = session.accountId?.trim();
+    const recorded =
+      this.deps.riskAccounting && accountId
+        ? (
+            await this.deps.riskAccounting.record({
+              accountId,
+              action,
+              occurredAt: this.clock(),
+              dedupeKey: `${env.id}:risk.record:${action}`,
+            })
+          ).allowed
+        : await this.controllerFor(session).record(action);
     return makeEnvelope('risk.record.result', env.id, this.clock(), {
       action,
       recorded,

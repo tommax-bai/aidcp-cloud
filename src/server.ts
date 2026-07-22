@@ -27,6 +27,7 @@ import {
   resolveProviderEnvKey,
 } from './llm/index.js';
 import { PLATFORM_CREDENTIALS, resolvePlatformCredentialEnvValue } from './config/platform-credentials.js';
+import { randomUUID } from 'node:crypto';
 import { TokenUsageStore } from './metrics/token-usage-store.js';
 import { createBillingPriceRefresh } from './metrics/billing-price-refresh.js';
 import { startRetentionSweeper } from './panel/retention-sweeper.js';
@@ -56,6 +57,14 @@ import {
   InteractionGuardRegistry,
   ActionCooldownGate,
   PacingSaturationAlerter,
+  // change risk-state-cross-process-integrity：跨进程单写四件套
+  AutomationWriterLock,
+  PgRiskCounterOutboxStore,
+  RiskAccounting,
+  RiskCounterReconciler,
+  parseOwnershipEnforce,
+  type AccountOwnershipPort,
+  type OwnershipMode,
   type RiskAction,
   type RiskWindow,
 } from './risk/index.js';
@@ -1393,12 +1402,133 @@ async function main(): Promise<void> {
   // 现役路径用其 default controller（单一来源，避免双 controller 写同一 risk_state）；PG 不可用则现役回退内存态。
   // PgRiskStore 单例：既喂 registry（按账号风控单写），又作 InteractionStore 接线孤儿
   // risk_interactions 去重表（V1 task 9.2，按笔记互动历史）。
+  // 风控告警出口（change risk-state-cross-process-integrity）：alertStore 在本处之后才构造，
+  // 故先声明一个后绑定的 sink——闭包在事件真正发生时才读它。**绝不因为告警链路没就绪就静默**：
+  // sink 未就绪时照样 console.warn，可检索性降级但不消失。
+  let riskAlertSink: Pick<PgAlertStore, 'raise'> | undefined;
+  const raiseRiskAlert = async (input: {
+    severity: 'P0' | 'P1' | 'P2' | 'P3';
+    type: string;
+    accountId?: string;
+    title: string;
+    detail: string;
+  }): Promise<void> => {
+    console.warn(`[aidcp-cloud][risk] ${input.title} — ${input.detail}`);
+    if (!riskAlertSink) return;
+    try {
+      await riskAlertSink.raise(input);
+    } catch (err) {
+      console.warn(`[aidcp-cloud][risk] 告警落库失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+  // 启动期告警（写者锁抢不到 → 立即退出）：此刻 alertStore 尚未构造，且我们马上就要 exit，
+  // 故临时开一条连接把这条 P1 写进去再走。写不进去也照退——诚实失败优于静默双写。
+  const raiseStandaloneAlert = async (input: {
+    severity: 'P0' | 'P1' | 'P2' | 'P3';
+    type: string;
+    title: string;
+    detail: string;
+  }): Promise<void> => {
+    const store = new PgAlertStore({
+      host: readEnvString('PGHOST'),
+      port: readEnvPort('PGPORT'),
+      database: readEnvString('PGDATABASE'),
+      user: readEnvString('PGUSER'),
+      password: readEnvString('PGPASSWORD'),
+    });
+    try {
+      await store.init();
+      await store.raise(input);
+    } catch (err) {
+      console.error(`[aidcp-cloud] 启动期告警写入失败: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      await store.close().catch(() => undefined);
+    }
+  };
+
+  // ── 自动化写者锁（change risk-state-cross-process-integrity，design D2）─────────────────
+  //
+  // 「承载风控写的进程对每个 executionTarget 单实例」以前只是文档纪律。这里在**建
+  // RiskControllerRegistry 之前**先去数据库抢一把会话级 advisory lock：抢不到就拒绝启用风控写路径
+  // 并以非零码退出，MUST NOT 降级为无锁照写。滚动 / 蓝绿部署的第二个实例会在启动阶段响亮失败，
+  // 而不是安静地开始双写。
+  //
+  // executionTarget 缺失 / 非法 → 按拆分方案 §8 第 4 条 fail-closed：不抢锁、不启用归属强制、
+  // 不启动记账 worker（parseDeploymentTarget 已 fail-closed 返回 null）。
+  let writerLock: AutomationWriterLock | undefined;
+  /** 写权丢失闸：一旦为真，本进程对**所有**账号拒绝互动准入（见 interactionBlockedProvider）。 */
+  let writerAuthorityLost = false;
+  if (!deploymentTarget) {
+    console.warn(
+      '[aidcp-cloud] AIDCP_DEPLOY_ENV 缺失或非法 → 不抢自动化写者锁、不启用风控归属强制、不启动记账 worker（fail-closed）',
+    );
+  } else {
+    writerLock = new AutomationWriterLock({
+      executionTarget: deploymentTarget,
+      waitMs: readEnvNumber('AIDCP_RISK_WRITER_LOCK_WAIT_MS', 60_000),
+      logger: console,
+    });
+    const acquired = await writerLock.acquire();
+    if (!acquired.ok) {
+      const title = `自动化写者锁获取失败（${deploymentTarget}），进程拒绝启动`;
+      const detail =
+        `${acquired.detail}。本进程 MUST NOT 在无锁状态下启用风控写路径——两个实例同时持有写权，` +
+        `合计放行的真实平台动作会是单份上限的两倍，且一方刚写下的 restricted 会被另一方陈旧的 normal 盖回。` +
+        `处理办法：确认 ${deploymentTarget} 上是否已有一个 aidcp-cloud 在跑（部署形态 MUST 是 stop→start，` +
+        `禁止滚动 / 蓝绿）；老进程被 kill -9 后如仍占锁，按 docs/deployment-environments.md 的强制释放步骤处理。`;
+      console.error(`[aidcp-cloud] ${title} — ${detail}`);
+      await raiseStandaloneAlert({ severity: 'P1', type: 'risk_writer_lock_unavailable', title, detail });
+      process.exit(1);
+    }
+    console.log(`[aidcp-cloud] 自动化写者锁已持有（target=${deploymentTarget}）`);
+    // 锁连接断开 = 写权已经丢失（PostgreSQL 在会话结束时就释放了该会话持有的 advisory lock）。
+    // MUST 立刻停止下发新的互动命令并告警，MUST NOT 静默继续写 risk_state。
+    // 实现：置一个全局闸，让每账号的准入判定一律拒绝互动动作（浏览仍放行）——与记账 fail-closed
+    // 共用同一条现读通道，覆盖是结构性的，不依赖逐处接线。
+    // 记账 outbox 的 apply 刻意**不停**：risk_counters 是 append-only 的既成事实账本，
+    // 停掉它只会把已经发生的动作丢掉，而丢账正是本 change 要消灭的缺陷。
+    writerLock.onLost((reason) => {
+      writerAuthorityLost = true;
+      void raiseRiskAlert({
+        severity: 'P1',
+        type: 'risk_writer_lock_lost',
+        title: `自动化写者锁已丢失（${deploymentTarget}），已停止下发新的互动命令`,
+        detail:
+          `${reason}。持锁连接断开即视为写权丢失：数据库已释放该会话的 advisory lock，` +
+          `另一个实例随时可能接管。本进程已 fail-closed（互动准入一律拒绝），` +
+          `MUST 重启本进程重新抢锁；MUST NOT 无锁继续运行。`,
+      });
+    });
+  }
+
+  // 归属强制模式：默认观察（占位照做 + 每次本会被拒的操作都留告警、但不拒绝），
+  // 运维在 dev 与 ol 各观察确认零跨 target 争用后，再单独提交一次翻 true 的变更。
+  const ownershipEnforce = parseOwnershipEnforce(process.env.AIDCP_RISK_OWNERSHIP_ENFORCE);
+  const ownershipMode: OwnershipMode = !deploymentTarget ? 'off' : ownershipEnforce ? 'enforce' : 'observe';
+  console.log(
+    `[aidcp-cloud] 账号归属 target 强制模式 = ${ownershipMode}` +
+      (ownershipMode === 'observe' ? '（观察：占位照做、留告警、不拒绝）' : ''),
+  );
+
   const riskStore = new PgRiskStore({
     host: readEnvString('PGHOST'),
     port: readEnvPort('PGPORT'),
     database: readEnvString('PGDATABASE'),
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
+    ...(deploymentTarget ? { executionTarget: deploymentTarget } : {}),
+    ownershipMode,
+    onOwnershipViolation: (info) => {
+      void raiseRiskAlert({
+        severity: 'P1',
+        type: 'risk_state_not_owned',
+        accountId: info.accountId,
+        title: `[观察模式] 非属主进程写了账号 ${info.accountId} 的风控状态`,
+        detail:
+          `写方 target=${info.writerTarget}，账号真实归属=${info.ownerTarget ?? '<未归属>'}（原因 ${info.cause}）。` +
+          `强制模式打开后这次写会被数据库拒绝。翻开强制前 MUST 先查清该账号该由谁驱动。`,
+      });
+    },
   });
   // quotaConfigStore 作 QuotaProvider 注入：每账号 controller 的 effectiveQuotas 热加载读限额数字
   // （change safety-quota-config）；init 失败时其镜像为空 → 退化派生写死默认，绝不 brick。
@@ -1420,10 +1550,41 @@ async function main(): Promise<void> {
           createdAtFor: (accountId: string) => accountStore.createdAtFor!(accountId),
         }
       : undefined;
+  // 归属事实的窄读写口（change risk-state-cross-process-integrity，tasks 3.1b 决议①）：
+  // `accounts` 按拆分方案 §5.1 由 api 单写；automation 侧只经本口调用、绝不自己拼 accounts 的 SQL。
+  // 拆进程时把这个对象换成一次内部 HTTP 即可，调用点一行不改。
+  const ownershipPort: AccountOwnershipPort | undefined =
+    accountStore?.getExecutionTarget && accountStore.claimExecutionTarget
+      ? {
+          getExecutionTarget: (accountId) => accountStore.getExecutionTarget!(accountId),
+          claimExecutionTarget: (accountId, target) => accountStore.claimExecutionTarget!(accountId, target),
+        }
+      : undefined;
+  // 记账漏斗先声明后构造：registry 的 fail-closed 现读要读它，而它要读 registry 解析 controller。
+  let riskAccounting: RiskAccounting | undefined;
   const riskRegistry = new RiskControllerRegistry(riskStore, undefined, quotaConfigStore, {
     coldStartRampEnabled,
     slowStartDisabled,
     nurtureProvider,
+    // 记账断链 ⇒ 该账号的一切互动准入判定直接拒（浏览仍放行）。闸设在 explain 是因为它是
+    // 全部自动路径的公共必经点，新加一道独立闸必然漏接线。
+    interactionBlockedProvider: (accountId) => writerAuthorityLost || (riskAccounting?.isBlocked(accountId) ?? false),
+    ...(deploymentTarget ? { executionTarget: deploymentTarget } : {}),
+    ownershipMode,
+    ...(ownershipPort ? { ownershipPort } : {}),
+    onOwnershipAlert: (info) => {
+      void raiseRiskAlert({
+        severity: 'P1',
+        type: info.kind === 'evicted_not_owned' ? 'risk_controller_evicted_not_owned' : 'risk_state_not_owned',
+        accountId: info.accountId,
+        title:
+          info.kind === 'evicted_not_owned'
+            ? `账号 ${info.accountId} 的风控写被拒，已驱逐本地缓存控制器`
+            : `账号 ${info.accountId} 不归属本 target，风控写权被拒`,
+        detail: info.detail,
+      });
+    },
+    logger: console,
   });
   console.log(`[aidcp-cloud] 冷启动配额爬坡 ${coldStartRampEnabled ? '已开启(AIDCP_COLDSTART_RAMP=true)' : '已禁用(默认·直接走安全限额配置)'}`);
   if (slowStartDisabled) {
@@ -1453,6 +1614,102 @@ async function main(): Promise<void> {
     }
   };
   console.log('[aidcp-cloud] RiskControllerRegistry 已就绪（按真实账号懒解析，PgRiskStore 持久化）');
+
+  // ── 记账 outbox + worker + 对账（change risk-state-cross-process-integrity，design D5/D6）──
+  //
+  // 只在持有写者锁且 target 合法时启用。启用后，「边缘确认真实动作 → 风控记账」这条链路从
+  // 「进程内 fire-and-forget、异常只打日志」变成「先落库、再推进；apply 与计数同事务；
+  // 内存计数只在 apply 成功时递增」。
+  let riskReconciler: RiskCounterReconciler | undefined;
+  if (deploymentTarget && writerLock) {
+    try {
+      // schema 自愈（本仓无迁移执行器）：outbox 表与 risk_counters.outbox_id 都在 RISK_SCHEMA_SQL 里。
+      await riskStore.init();
+      const outboxStore = new PgRiskCounterOutboxStore({
+        executionTarget: deploymentTarget,
+        host: readEnvString('PGHOST'),
+        port: readEnvPort('PGPORT'),
+        database: readEnvString('PGDATABASE'),
+        user: readEnvString('PGUSER'),
+        password: readEnvString('PGPASSWORD'),
+      });
+      await outboxStore.init();
+      const accounting = new RiskAccounting({
+        outbox: outboxStore,
+        // 记账刻意**不过归属闸**：risk_counters 是既成事实账本，归属刚变更时飞在半路的回执
+        // 仍要记进同一本账（design D4「分裂的是写权限，不分裂的是事实」）。
+        resolveController: (accountId) => riskRegistry.getControllerForAccounting(accountId),
+        // 后绑定：alertStore 在本处之后才构造，故包一层现读（构造期直接传引用会永远拿到 undefined）。
+        alertStore: { raise: async (input) => (riskAlertSink ? riskAlertSink.raise(input) : { alertId: 0 }) },
+        logger: console,
+        maxAttempts: readEnvNumber('AIDCP_RISK_OUTBOX_MAX_ATTEMPTS', 5),
+        pollIntervalMs: readEnvNumber('AIDCP_RISK_OUTBOX_POLL_MS', 5_000),
+        workerId: `risk-outbox-${deploymentTarget}`,
+      });
+      const { recovered } = await accounting.start();
+      riskAccounting = accounting;
+      console.log(
+        `[aidcp-cloud] 风控记账 outbox 已就绪（executionTarget=${deploymentTarget}, 启动回收在途行=${recovered}）`,
+      );
+
+      riskReconciler = new RiskCounterReconciler({
+        registry: riskRegistry,
+        totalsSince: (accountId, since) => riskStore.totalsForAccountSince(accountId, since),
+        intervalMs: readEnvNumber('AIDCP_RISK_RECONCILE_INTERVAL_MS', 5 * 60_000),
+        logger: console,
+        onDrift: (drift) =>
+          raiseRiskAlert({
+            severity: 'P1',
+            type: 'risk_counter_drift',
+            accountId: drift.accountId,
+            title: `风控计数与库内事实不一致：账号 ${drift.accountId} 的 ${drift.action}`,
+            detail:
+              `内存=${drift.memory}，库=${drift.database}。判据是偏差是否为零（无容忍阈值）。` +
+              `已按库内事实重建该账号计数；偏差来源通常是归属变更、运维手工 SQL 或另一 target 的遗留行。`,
+          }),
+      });
+      riskReconciler.start();
+      console.log('[aidcp-cloud] 风控计数对账已启动（偏差非零即告警并以库为准重建）');
+    } catch (err) {
+      // 记账链路起不来 = 记不上账。这里 MUST NOT 静默降级为「照跑」——但也不该把整个云端拖死
+      // （客户数据、内容服务与已在跑的会话都不依赖它）。折中：诚实告警 + 明确日志，
+      // 记账漏斗保持未注入 ⇒ 回执路径退回改动前的行为（订阅者记账），且这一点被写进告警里。
+      const detail = err instanceof Error ? err.message : String(err);
+      await raiseRiskAlert({
+        severity: 'P1',
+        type: 'risk_accounting_unavailable',
+        title: '风控记账 outbox 未能启用，记账退回改动前的进程内路径',
+        detail:
+          `${detail}。此时「崩在回执与记账之间不丢账」这条保证不成立，MUST 尽快修复。` +
+          `常见原因：migrations/0061 未执行且 init() 自愈 SQL 也失败（无建表权限）。`,
+      });
+    }
+  }
+  /** 写入前判定 + 记账（全系统唯一入口）。漏斗未启用时回落改动前的 controller.record，行为逐位一致。 */
+  const recordRiskFact = async (
+    accountId: string,
+    action: RiskAction,
+    dedupeKey: string,
+  ): Promise<boolean> => {
+    if (riskAccounting) {
+      const verdict = await riskAccounting.record({ accountId, action, dedupeKey });
+      return verdict.allowed;
+    }
+    return (await riskRegistry.getControllerForAccounting(accountId)).record(action);
+  };
+  /**
+   * 互动域（评论回复 / 私信回复）的风控视图：判定直读 controller，**记账走同一个漏斗**。
+   * 这两条路径的重投递已由 interaction 域自己的 claimRiskRecord 幂等占位挡住，故去重键用一次性 uuid；
+   * 真正的 exactly-once 仍由 risk_counters.outbox_id 唯一索引承担。
+   */
+  const interactionRiskControllerFor = async (accountId: string) => {
+    const controller = await riskRegistry.getControllerForAccounting(accountId);
+    return {
+      explain: (action: 'comment' | 'dm_reply') => controller.explain(action),
+      record: (action: 'comment' | 'dm_reply') =>
+        recordRiskFact(accountId, action, `interaction:${accountId}:${action}:${Date.now()}:${randomUUID()}`),
+    };
+  };
 
   // Session 02：独立入站互动域。0039 未部署时只禁用本能力，不拖垮原有浏览/发布链。
   const interactionMetrics = new InteractionMetrics();
@@ -1492,7 +1749,7 @@ async function main(): Promise<void> {
       store: interactionStore,
       configs: replyConfigResolver,
       workflow: replyWorkflow,
-      controllerFor: (accountId) => riskRegistry.getController(accountId),
+      controllerFor: interactionRiskControllerFor,
       metrics: interactionMetrics,
       ...(accountStore ? {
         getNickname: (accountId: string) => accountStore.getNickname?.(accountId),
@@ -1570,13 +1827,19 @@ async function main(): Promise<void> {
     // 使「豁免」与「丢数」不可区分——已摘除。
     const manualSource = evt.action === 'comment' && manualCommentAccounts.has(accountId);
     riskRegistry
-      .getController(accountId)
+      .getControllerForAccounting(accountId)
       .then(async (c) => {
-        // 节奏告警判据 MUST 取自**写入前**的判定：record 现在无条件写入（既成事实照记），
-        // 写完再问 explain 读到的是**含这一笔**的新状态，已不是那次动作当时面对的状态。
-        // 该值与 record 的返回值同源（都是写入前的 canDo），故告警行为与改动前逐位一致。
+        // 节奏告警判据 MUST 取自**写入前**的判定：写完再问 explain 读到的是**含这一笔**的新状态，
+        // 已不是那次动作当时面对的状态。此处的「写入前」现在指 **apply 之前**——事实早已在
+        // 回执处理里落进 outbox（handler.enqueueRiskFact），但内存计数只在 apply 时递增，
+        // 故这一行取到的仍是那次动作当时面对的状态，与改动前逐位一致
+        // （change risk-state-cross-process-integrity，design D5 末段）。
         const verdict = pacingAlerter && !manualSource ? c.explain(evt.action) : undefined;
-        await c.record(evt.action);
+        // 记账已不在这里做：outbox 行在回执处理里已同步提交，这里只触发一次立即 apply，
+        // 把「事实落库」与「内存计数递增」的窗口压到不可观测。轮询只作崩溃恢复兜底。
+        // 漏斗未启用（target 缺失 / outbox 起不来）时回落改动前的进程内记账，行为逐位一致。
+        if (riskAccounting) await riskAccounting.applyNow();
+        else await c.record(evt.action);
         // 配额饱和改道（change decouple-quota-hit-from-risk）：撞突发窗（小时/分钟）→ 发低优先级
         // 运维告警（每日窗静默、只背压）。风控状态不因撞配额而改动。
         // 手动来源不发此告警（运营存心为之，「节奏过载」对他是噪声不是信号）——此前它靠「整个跳过
@@ -1655,10 +1918,12 @@ async function main(): Promise<void> {
     }
     const accountId = evt.accountId;
     riskRegistry
-      .getController(accountId)
+      .getControllerForAccounting(accountId)
       .then(async (controller) => {
+        // 与 interaction.occurred 同形：判定取自 apply 之前，事实已在回执处理里落进 outbox。
         const verdict = pacingAlerter && evt.purpose !== 'operator' ? controller.explain('search') : undefined;
-        await controller.record('search');
+        if (riskAccounting) await riskAccounting.applyNow();
+        else await controller.record('search');
         if (verdict && !verdict.allowed && pacingAlerter) {
           if (verdict.reason === 'quota:hour' || verdict.reason === 'quota:minute') {
             pacingAlerter.maybe(accountId, 'search', verdict.reason === 'quota:hour' ? 'hour' : 'minute');
@@ -1740,6 +2005,9 @@ async function main(): Promise<void> {
     });
     await as.init();
     alertStore = as;
+    // 风控告警后绑定（change risk-state-cross-process-integrity）：写者锁 / 归属 / 记账 / 对账
+    // 四条链路的 P1 从此落库可检索（在此之前只进 console.warn）。
+    riskAlertSink = as;
     console.log('[aidcp-cloud] AlertStore 已就绪（alerts 表）');
     // D5 跨客户绑定冲突告警（change curated-envkey-account-binding）：clientUserStore 在 alertStore 之前构造，
     // 故此处事后接线到既有告警存储（非仅 console.warn）。冲突 = 安全事件（另一客户的账号被自报身份争用）→ P1。
@@ -2176,6 +2444,16 @@ async function main(): Promise<void> {
     busFor: (session) => runtimes!.busFor(session),
     onHandshake: (session) => runtimes!.onHandshake(session),
     resolveController: (session) => runtimes?.controllerForSession(session),
+    // 记账漏斗（change risk-state-cross-process-integrity）：回执处理**先落 outbox 再 emit**。
+    // 未启用时字段省略 ⇒ handler 保持改动前行为（直接 emit，记账由订阅者承担）。
+    ...(riskAccounting
+      ? {
+          riskAccounting: {
+            enqueue: (input: Parameters<RiskAccounting['enqueue']>[0]) => riskAccounting!.enqueue(input),
+            record: (input: Parameters<RiskAccounting['record']>[0]) => riskAccounting!.record(input),
+          },
+        }
+      : {}),
     // 节奏兜底 floor 提供者（change pacing-floor-config-min-interval）：welcome 握手现读组装 pacing 快照下发
     // （PUT 后下次握手即新值 = 热加载）。init 失败也安全：空镜像 → floorFor 逐项回落 BUILTIN_FLOOR 内置默认。
     pacingFloors: pacingConfigStore,
@@ -2256,7 +2534,7 @@ async function main(): Promise<void> {
       configs: replyConfigResolver,
       pusher: server,
       isEdgePaused: (edgeId) => server.isEdgePaused(edgeId),
-      controllerFor: (accountId) => riskRegistry.getController(accountId),
+      controllerFor: interactionRiskControllerFor,
       metrics: interactionMetrics,
       globalWriteEnabled: interactionGlobalWriteEnabled,
     })
@@ -2626,7 +2904,10 @@ async function main(): Promise<void> {
   }
 
   const recordPublish = async (accountId: string): Promise<void> => {
-    await (await resolveController(accountId)).record('publish');
+    // 记账经统一漏斗（change risk-state-cross-process-integrity）：发布是云端自证的既成事实，
+    // 没有边缘信封 id 可用，故用「账号 + 动作 + 时刻」构造去重键——这条路径不会被重投，
+    // 去重只是形式要求，真正的 exactly-once 由 risk_counters.outbox_id 唯一索引承担。
+    await recordRiskFact(accountId, 'publish', `publish:${accountId}:${Date.now()}:${randomUUID()}`);
   };
   const publishDispatcher = new PublishDispatcher({
     store: publishLogStore,
@@ -3112,7 +3393,13 @@ async function main(): Promise<void> {
                           collectCount: args.currentDetail.collectCount,
                         },
                         onResult: async (result) => {
-                          if (result.outcome === 'commented') await (await resolveController(args.accountId)).record('comment');
+                          if (result.outcome === 'commented') {
+                            await recordRiskFact(
+                              args.accountId,
+                              'comment',
+                              `contact-comment:${args.accountId}:${args.noteId}:${Date.now()}`,
+                            );
+                          }
                         },
                       },
                     );
@@ -3121,7 +3408,8 @@ async function main(): Promise<void> {
                 },
                 {
                   canComment: async (a) => (await resolveController(a)).canDo('comment'),
-                  recordComment: async (a) => (await resolveController(a)).record('comment'),
+                  recordComment: async (a) =>
+                    recordRiskFact(a, 'comment', `contact-comment:${a}:${Date.now()}:${randomUUID()}`),
                   countAttemptsToday: (a) => contentScheduleStore.countContactAttemptsToday(a),
                   getDailyCap: async (a) => contentScheduleStore.effectiveScheduleFor(a).contactCommentDailyCap,
                   recordAttempt: (a, source, snap) =>
@@ -3184,7 +3472,41 @@ async function main(): Promise<void> {
 
   runtimes = new ConnectionRuntimeRegistry({
     observerBus: eventBus,
-    getController: (accountId) => riskRegistry.getController(accountId),
+    // 握手解析该连接账号的 controller：此时归属闸已在前面放行，故取可写口。
+    getController: (accountId) => riskRegistry.getWritableController(accountId),
+    // 账号归属闸（change risk-state-cross-process-integrity）：三项缺任一即整闸不启用。
+    ...(deploymentTarget && ownershipPort && ownershipMode !== 'off'
+      ? {
+          ownership: {
+            executionTarget: deploymentTarget,
+            mode: ownershipMode,
+            port: ownershipPort,
+            onEvent: (info) => {
+              void raiseRiskAlert({
+                severity: info.kind === 'claimed' ? 'P3' : 'P1',
+                type:
+                  info.kind === 'claimed'
+                    ? 'risk_owner_claimed'
+                    : info.kind === 'mismatch_observed'
+                      ? 'risk_owner_mismatch_observed'
+                      : 'risk_owner_mismatch_rejected',
+                accountId: info.accountId,
+                title:
+                  info.kind === 'claimed'
+                    ? `账号 ${info.accountId} 归属已占位为 ${info.ownerTarget}`
+                    : `账号 ${info.accountId} 归属 ${info.ownerTarget}，本 target 的握手${info.kind === 'mismatch_observed' ? '（观察模式，未拒绝）' : '已被拒绝'}`,
+                detail: info.detail,
+              });
+            },
+            // 占位成功 MUST 强制重放计数：本进程此前可能已为该账号物化过 controller（面板汇总等），
+            // 那份内存值不能被当成新属主的起点。
+            onClaimed: async (accountId) => {
+              const pending = riskRegistry.peek(accountId);
+              if (pending) await (await pending).reloadCounters();
+            },
+          },
+        }
+      : {}),
     buildDispatcher,
     ensureAccount: async (accountId, platform) => {
       try {
