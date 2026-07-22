@@ -21,6 +21,7 @@ import {
   classifyEdge,
   expandOwnership,
   isLayer,
+  readAdjudicatedFiles,
   readJson,
   repoPath,
   stripTsComments,
@@ -29,6 +30,12 @@ import {
 const snapshot = boundarySnapshot();
 const rules = readJson<OwnershipRules>('boundaries/ownership-rules.json');
 const exemptions = readJson<ExemptionList<ImportExemption>>('boundaries/import-exemptions.json');
+/**
+ * 「已裁决文件」名册 —— 人工维护的 `boundaries/adjudicated-files.json`。
+ * **MUST NOT 换成生成物 `module-ownership.json`**：那会让准入判据退化成「是否已经在生成物里」，
+ * 手工往生成物塞一条新文件 + 目录默认层即可全绿（2026-07-23 审计坐实，见文末保真自检）。
+ */
+const adjudicated = readAdjudicatedFiles();
 
 /**
  * 归属查不到的边 —— MUST 报出来判失败，MUST NOT 静默丢弃。
@@ -114,10 +121,21 @@ describe('AC-BOUND-* 导入方向门禁', () => {
         .join('\n')}`,
     );
 
+    // 已裁决名册 MUST 只登记真实存在的源文件（删文件时由 refresh 同步剔除），且不与 fileOverrides 重叠。
+    const overridden = new Set(rules.fileOverrides.map((o) => o.path));
+    const rosterGhosts = adjudicated.filter((p) => !scanned.has(p)).sort();
+    assert.deepEqual(rosterGhosts, [], `已裁决名册里有源码中已不存在的路径：\n${rosterGhosts.join('\n')}`);
+    const rosterOverlap = adjudicated.filter((p) => overridden.has(p)).sort();
+    assert.deepEqual(
+      rosterOverlap,
+      [],
+      `已裁决名册与 fileOverrides 重叠（fileOverrides 优先，名册里这几条是死条目）：\n${rosterOverlap.join('\n')}`,
+    );
+
     // 归属表 MUST 是规则表的机械展开：两者漂移即失败，防止有人绕过 §4.7 直接改文件级清单。
-    // 第三参传已提交的清单本身：它只决定「逐文件切分目录里的既有文件可否继续走目录默认值」，
-    // 层取值仍只来自规则表，故改错层依然会被这条断言抓到（新增文件由上面第一条断言把守）。
-    const expanded = expandOwnership(rules, snapshot.files, snapshot.ownershipEntries);
+    // 第三参传**人工名册**：它只决定「逐文件切分目录里的既有文件可否继续走目录默认值」，
+    // 层取值仍只来自规则表，故改错层依然会被这条断言抓到；名册里没有的新文件会当场抛「待人工裁决」。
+    const expanded = expandOwnership(rules, snapshot.files, adjudicated);
     assert.deepEqual(
       snapshot.ownershipEntries.map((e) => `${e.path}=${e.layer}`),
       expanded.map((e) => `${e.path}=${e.layer}`),
@@ -234,6 +252,12 @@ describe('AC-BOUND-* 导入方向门禁', () => {
       unplanned <= exemptions.seedUnplanned,
       `未挂消除 change 的条目数 ${unplanned} 高于 seed 值 ${exemptions.seedUnplanned}；该数 MUST 单调不增（定稿 §12 棘轮规则第 1 条）`,
     );
+
+    // seedBasis 是「seed 基线为何是这个数」的唯一在仓记录；早期版本的 refresh 会在默认路径上把它静默删掉。
+    assert.ok(
+      typeof exemptions.seedBasis === 'string' && exemptions.seedBasis.trim() !== '',
+      'boundaries/import-exemptions.json MUST 携带非空 seedBasis（seed 基线的由来）；重跑生成器 MUST NOT 把它丢掉',
+    );
   });
 });
 
@@ -290,7 +314,7 @@ describe('归属生成器保真自检（非 AC 编号）', () => {
     assert.ok(splitDir, '规则表里至少应有一个逐文件切分目录（§4.7 有多处）');
     const probe = `${splitDir.dir}zz-unadjudicated-probe.ts`;
     assert.throws(
-      () => expandOwnership(rules, [...snapshot.files, probe], snapshot.ownershipEntries),
+      () => expandOwnership(rules, [...snapshot.files, probe], adjudicated),
       (error: unknown) => error instanceof Error && error.message.includes(probe),
       `逐文件切分目录 ${splitDir.dir} 下的新文件必须进待裁决清单`,
     );
@@ -299,7 +323,26 @@ describe('归属生成器保真自检（非 AC 编号）', () => {
   it('单层目录里的新文件继承该目录的 §4.7 归属，不误报', () => {
     assert.ok(inheritDir, '规则表里至少应有一个单层目录');
     const probe = `${inheritDir.dir}zz-inherited-probe.ts`;
-    const expanded = expandOwnership(rules, [...snapshot.files, probe], snapshot.ownershipEntries);
+    const expanded = expandOwnership(rules, [...snapshot.files, probe], adjudicated);
     assert.equal(expanded.find((e) => e.path === probe)?.layer, inheritDir.layer);
+  });
+
+  /**
+   * 2026-07-23 审计坐实的洗白路径：把生成物 `module-ownership.json` 自己回喂当「已裁决集」时，
+   * 手工往生成物里塞一条「新文件 + 目录默认层」即可让 `AC-BOUND-01` 全绿，`refresh` 随后永久洗白。
+   * 准入依据 MUST 是人工名册；这条断言钉住「生成物不是准入依据」。
+   */
+  it('手工往生成物里塞一条新文件 MUST NOT 让它被当成已裁决', () => {
+    assert.ok(splitDir);
+    const probe = `${splitDir.dir}zz-handedited-probe.ts`;
+    const laundered = [...snapshot.ownershipEntries, { path: probe, layer: splitDir.layer, note: '手工塞入' }];
+    // 生成物里已经有它了，但人工名册里没有 —— 仍 MUST 判待裁决。
+    assert.ok(laundered.some((e) => e.path === probe));
+    assert.equal(adjudicated.includes(probe), false);
+    assert.throws(
+      () => expandOwnership(rules, [...snapshot.files, probe], adjudicated),
+      (error: unknown) => error instanceof Error && error.message.includes(probe),
+      '「是否被裁决过」的判据 MUST 是人工名册 boundaries/adjudicated-files.json，MUST NOT 是生成物',
+    );
   });
 });

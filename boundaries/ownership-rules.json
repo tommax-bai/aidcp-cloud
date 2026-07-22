@@ -8,6 +8,12 @@
     "byLayer": { "api": 91, "content": 78, "automation": 146, "kernel": 4, "composition": 2 },
     "note": "§4.7 的基线口径。本仓 HEAD 通常已超出该 sha；目录规则负责接住新增文件，逐文件差额由 boundary-record 的对账输出给出。"
   },
+  "seedWindow": {
+    "open": true,
+    "whyOpen": "门禁 change cloud-service-boundary-gates 尚未归档，棘轮尚未开始计数，seed 基线仍可随合并基线移动。",
+    "closeWhen": "归档 cloud-service-boundary-gates 时把 open 改成 false。此后 boundary-record 的 --reseed 一律拒绝——棘轮已开始计数，重新 seed 等于把它拆掉。"
+  },
+  "adjudicatedFilesRoster": "boundaries/adjudicated-files.json —— 「逐文件切分目录里哪些文件已经被人判过」的人工名册，是 expandOwnership 的准入依据。MUST NOT 改用生成物 module-ownership.json 顶替：那会让判据退化成「是否已经在生成物里」，手工往生成物塞一条新文件 + 目录默认层就能全绿、refresh 随后永久洗白（2026-07-23 审计坐实）。",
   "newFileRule": "每条目录规则的 newFile 字段决定该目录**新增文件**的处置：inherit = §4.7 里该目录整行只有一个归属层，新文件的归属已被 §4.7 判定，目录规则可以接住；adjudicate = §4.7 把该目录逐文件切开，§4.7 并没有判定「该目录下任意新文件属于哪一层」，故新增文件 MUST 先在 fileOverrides 里逐个裁定，生成器在裁定前报错并列出清单（绝不塞默认层）。字段缺省按 adjudicate 处理。",
   "compositionWhitelist": ["src/server.ts", "src/index.ts"],
   "directoryRules": [

@@ -318,9 +318,45 @@ export type NewFileDisposition = 'inherit' | 'adjudicate';
 export interface OwnershipRules {
   sourceOfTruth: string;
   baseline: Record<string, unknown>;
+  /**
+   * seed 窗口是否还开着。关掉之后 `--reseed` 一律拒绝（棘轮已开始计数，重新 seed = 把棘轮拆掉）。
+   * 缺省按**已关闭**处理（fail-safe）。
+   */
+  seedWindow?: { open: boolean; whyOpen?: string; closeWhen?: string };
   compositionWhitelist: string[];
   directoryRules: { dir: string; layer: Layer; basis: string; newFile?: NewFileDisposition }[];
   fileOverrides: { path: string; layer: Layer; basis: string }[];
+}
+
+export const ADJUDICATED_FILES_PATH = 'boundaries/adjudicated-files.json';
+
+/**
+ * 「已裁决文件」名册 —— **人工文件，不是生成物**。
+ *
+ * 它登记 seed 当天就已存在于「逐文件切分目录」（`newFile: 'adjudicate'`）里的那批文件：
+ * 这些文件的归属层在定稿 §4.7 的基线快照里已被人看过，故允许继续走目录默认值。
+ *
+ * 为什么必须是独立的人工文件：早期版本把生成物 `module-ownership.json` 自己回喂给展开器当「已裁决集」，
+ * 于是「是否被裁决过」退化成「是否已经在生成物里」——手工往生成物塞一条新文件 + 目录默认层即可全绿，
+ * 而 `refresh` 随后会把它永久洗白。准入依据 MUST 是人写的名册，生成物只作输出。
+ *
+ * 纪律：本名册 **MUST NOT 增长**。此后逐文件切分目录里的任何新文件 MUST 进
+ * `ownership-rules.json` 的 `fileOverrides` 并写明 §4.7 判据；源文件删除时由 `refresh` 同步剔除。
+ */
+export interface AdjudicatedFiles {
+  sourceOfTruth: string;
+  rule: string;
+  recordedAt: string;
+  files: string[];
+}
+
+/** 读「已裁决文件」名册；缺文件即视为空名册（最严格口径：所有逐文件切分目录的文件都待裁决）。 */
+export function readAdjudicatedFiles(): string[] {
+  try {
+    return readJson<AdjudicatedFiles>(ADJUDICATED_FILES_PATH).files;
+  } catch {
+    return [];
+  }
 }
 
 /** 归属展开失败时抛出：`pending` 是待人工裁决的文件清单，MUST 原样报给调用者。 */
@@ -339,18 +375,22 @@ export class UnadjudicatedFilesError extends Error {
 /**
  * 把规则表机械展开到文件级清单。
  *
- * `prior` 是**已裁定文件集**（通常传当前已提交的 `boundaries/module-ownership.json`）：
+ * `adjudicated` 是**已裁定文件名册**（`boundaries/adjudicated-files.json` 的 `files`，人工维护）：
  * 逐文件切分目录（`newFile: 'adjudicate'`）里的**既有**文件靠它继续走目录默认值，
- * 而**新增**文件因不在 `prior` 内被判为待裁决、当场报错。不传 `prior` 即最严格口径。
+ * 而**新增**文件因不在名册内被判为待裁决、当场报错。
+ *
+ * **MUST NOT 把生成物 `module-ownership.json` 传进来当名册**：那会让「是否被裁决过」退化成
+ * 「是否已经在生成物里」，手工往生成物塞一条即可洗白（见 `AdjudicatedFiles` 的注释）。
+ * 不传即最严格口径。
  */
 export function expandOwnership(
   rules: OwnershipRules,
   files: string[],
-  prior: readonly OwnershipEntry[] = [],
+  adjudicated: readonly string[] = [],
 ): OwnershipEntry[] {
   const overrides = new Map(rules.fileOverrides.map((o) => [o.path, o]));
   const dirs = [...rules.directoryRules].sort((a, b) => b.dir.length - a.dir.length);
-  const known = new Set(prior.map((e) => e.path));
+  const known = new Set(adjudicated);
   const entries: OwnershipEntry[] = [];
   const pending: { file: string; dir: string | null }[] = [];
   for (const file of files) {
@@ -414,10 +454,19 @@ export interface ImportExemption {
   note?: string;
 }
 
+/**
+ * 跨层表写入的豁免条目 —— **一条条目 = 一个 `{表, 文件, 操作}` 三元组**。
+ *
+ * 早期版本把同一个 `(表, 文件)` 对上的多个操作压成一个 `ops: SqlOp[]` 字段，于是棘轮的键少了「操作」
+ * 这一维：已豁免的对上新增一个操作（含 `ALTER TABLE` / `CREATE TABLE`）时条目数不变，`refresh` 会
+ * 自己把 `ops` 拓宽写回文件并退出 0，`AC-OWN-02` / `AC-OWN-03` 随后全绿——正是红线「MUST NOT 静默假成功」。
+ * 现在把操作放进键里：新增操作 = 新增条目 = 棘轮当场拒绝。
+ * 回归防线：`table-ownership.test.ts` 的「棘轮键保真自检」。
+ */
 export interface TableWriteExemption {
   table: string;
   file: string;
-  ops: SqlOp[];
+  op: SqlOp;
   reason: string;
   eliminatedBy: string | null;
   note?: string;
@@ -432,6 +481,132 @@ export interface ExemptionList<T> {
   recordedAt: string;
   raises: ExemptionRaise[];
   entries: T[];
+  /**
+   * seed 基线**为什么是这个数**的唯一在仓记录（`--seed-note=` 写入）。
+   *
+   * MUST 正式声明在这里：早期版本靠 `as` 强转写入、类型上不存在，棘轮重建清单对象时漏搬了它，
+   * 于是最常跑的那条默认路径会静默把它删掉——typecheck 抓不到、也没有任何断言看它。
+   * 现在两条路径都靠 `{ ...list }` 展开保留，并由两族门禁各一条断言要求它非空。
+   */
+  seedBasis?: string;
+}
+
+/* ------------------------------------------------------------------ 棘轮对账（纯函数） */
+
+/** 棘轮放行标志。`reseed` 只在 seed 窗口内合法，`raises` 是定稿 §12「例外通道（唯一）」。 */
+export interface RatchetFlags {
+  reseed: boolean;
+  raises: ExemptionRaise[];
+  /** `--seed-note=` 的内容；reseed 时 MUST 非空，写进 `seedBasis`。 */
+  seedNote?: string | null;
+}
+
+export interface Reconciled<T> {
+  list: ExemptionList<T>;
+  added: T[];
+  removed: T[];
+}
+
+export interface ReconcileInput<T> {
+  /** 仅用于错误消息里指名是哪份清单。 */
+  relative: string;
+  list: ExemptionList<T>;
+  current: T[];
+  keyOf: (item: T) => string;
+  describe: (item: T) => string;
+  merge: (fresh: T, prior: T | undefined) => T;
+}
+
+/** 棘轮拒绝：出现清单里没有的新违规且没有足量 `--raise=` 兜住。 */
+export class RatchetViolationError extends Error {
+  constructor(
+    readonly relative: string,
+    readonly added: string[],
+    readonly shortfall: number,
+  ) {
+    super(
+      `${relative}：出现 ${added.length} 条清单里没有的新违规，棘轮不允许静默追加（定稿 §12：seed 之后发现的既存违规 MUST 当场修复）。\n` +
+        `${added.map((a) => `  + ${a}`).join('\n')}\n` +
+        `处置只有三条，按优先级：\n` +
+        `  1) 先查归属是否填错——多数「新违规」其实是新文件的归属层没按 §4.7 判对；\n` +
+        `  2) 修掉这条跨边界依赖 / 跨层写入；\n` +
+        `  3) 确需冻结时走定稿 §12「例外通道（唯一）」：--raise=<控制仓 change 名>:<数量>:<YYYY-MM-DD>` +
+        `（当前还差 ${shortfall} 条批准额度），并逐条补 reason 与消除动作。\n` +
+        `  （门禁 change 尚未归档、棘轮尚未开始计数时，另有 --reseed 一条 seed 窗口内的通道。）`,
+    );
+    this.name = 'RatchetViolationError';
+  }
+}
+
+/**
+ * 把一份豁免清单对到当天实测的违规集合上（**纯函数**，不读写磁盘，故可被门禁用例直接机械回归）。
+ *
+ *   - 违规消失 → 删条目、`frozenTotal` 同步下调（棘轮下调，恒允许）；
+ *   - 出现新违规 → 默认判失败；只有 `reseed` 或足量 `raises` 才放行；
+ *   - 人工写过的 `reason` / `eliminatedBy` / `note` 由调用方的 `merge` 保留；
+ *   - **两条返回路径都用 `{ ...list }` 展开**，`seedBasis` 一类头部字段 MUST NOT 在重建时丢失。
+ *
+ * 「新违规」的判据完全由 `keyOf` 决定：键少一维 = 该维度上的新增静默通过。表侧的键 MUST 是
+ * `{表, 文件, 操作}` 三元组（见 `TableWriteExemption` 的注释）。
+ */
+export function reconcileExemptions<T extends { reason: string; eliminatedBy: string | null; note?: string }>(
+  input: ReconcileInput<T>,
+  flags: RatchetFlags,
+): Reconciled<T> {
+  const { relative, list, current, keyOf, describe, merge } = input;
+  const priorByKey = new Map(list.entries.map((e) => [keyOf(e), e]));
+  const currentKeys = new Set(current.map(keyOf));
+  const removed = list.entries.filter((e) => !currentKeys.has(keyOf(e)));
+  const added = current.filter((c) => !priorByKey.has(keyOf(c)));
+  const entries = current
+    .map((fresh) => merge(fresh, priorByKey.get(keyOf(fresh))))
+    .sort((a, b) => describe(a).localeCompare(describe(b)));
+  const today = new Date().toISOString().slice(0, 10);
+
+  if (flags.reseed) {
+    if (!flags.seedNote || flags.seedNote.trim() === '') {
+      throw new Error(`${relative}：--reseed MUST 同时给 --seed-note=<为什么重新 seed>，它是 seed 基线的唯一在仓记录。`);
+    }
+    if (list.raises.length > 0) {
+      throw new Error(
+        `${relative}：清单里已有 ${list.raises.length} 条已批准上调（raises[]），--reseed 会把它们连同消除时限一起清空。\n` +
+          'MUST 先人工处置这些 raises（消除对应违规后删条目，或在 seedBasis 里写清它们的去向）再重新 seed。',
+      );
+    }
+    return {
+      list: {
+        ...list,
+        seedTotal: entries.length,
+        seedUnplanned: entries.filter((e) => e.eliminatedBy === null).length,
+        frozenTotal: entries.length,
+        recordedAt: today,
+        raises: [],
+        entries,
+        seedBasis: flags.seedNote,
+      },
+      added,
+      removed,
+    };
+  }
+
+  // 棘轮模式：先按消失的条目下调，再看新增是否有合规的上调通道兜住。
+  const loweredFrozen = list.frozenTotal - removed.length;
+  const needed = Math.max(0, entries.length - loweredFrozen);
+  const approved = flags.raises.reduce((sum, r) => sum + r.amount, 0);
+  if (needed > 0 && approved < needed) {
+    throw new RatchetViolationError(relative, added.map(describe), needed - approved);
+  }
+  return {
+    list: {
+      ...list,
+      frozenTotal: Math.max(loweredFrozen, entries.length),
+      recordedAt: today,
+      raises: [...list.raises, ...flags.raises],
+      entries,
+    },
+    added,
+    removed,
+  };
 }
 
 /* ------------------------------------------------------------------ 缓存 */

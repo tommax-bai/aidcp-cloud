@@ -23,17 +23,27 @@
  *
  *   --raise=<控制仓 change 名>:<数量>:<YYYY-MM-DD>   （可重复）
  *       定稿 §12「例外通道（唯一）」：具名上调冻结总数，三字段齐备才算数。
- *   --reseed
+ *   --reseed --seed-note="<为什么>" --i-am-reseeding-the-ratchet
  *       **只在 seed 窗口内合法**：门禁 change `cloud-service-boundary-gates` 尚未归档、
- *       棘轮尚未开始计数的那段时间。它会按当天实测重置 `seedTotal` / `seedUnplanned` / `frozenTotal`
- *       并清空 `raises[]`。该 change 归档之后再用它 = 把棘轮拆掉。
+ *       棘轮尚未开始计数的那段时间（窗口开关是 `boundaries/ownership-rules.json` 的 `seedWindow.open`，
+ *       归档时人工关掉）。它会按当天实测重置 `seedTotal` / `seedUnplanned` / `frozenTotal`。
+ *       四道机械门：窗口未关 + `--seed-note` 非空 + 清单已 seed 过时必须带确认标志 + `raises[]` 非空时直接拒绝。
+ *       该 change 归档之后再用它 = 把棘轮拆掉。
  *
- * 两种模式都保留人工写过的 `reason` / `eliminatedBy` / `note`，不会把已登记的消除计划刷掉。
+ * 两种模式都保留人工写过的 `reason` / `eliminatedBy` / `note`，不会把已登记的消除计划刷掉；
+ * 清单头部的 `seedBasis`（seed 基线为何是这个数）两条路径都原样带过，MUST NOT 在重建时丢失。
+ *
+ * ## 「已裁决」的依据是人工名册，不是生成物
+ *
+ * 逐文件切分目录里哪些文件「已经被人判过」，取自人工维护的 `boundaries/adjudicated-files.json`，
+ * **不是**生成物 `boundaries/module-ownership.json`。拿生成物当准入依据的话，手工往生成物里塞一条
+ * 新文件 + 目录默认层就能全绿，而 refresh 随后会把它永久洗白。该名册 MUST NOT 增长：
+ * 此后这类目录的新文件一律进 `ownership-rules.json` 的 `fileOverrides`。
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import {
-  DDL_OPS,
-  DML_OPS,
+  ADJUDICATED_FILES_PATH,
+  type AdjudicatedFiles,
   type ExemptionList,
   type ExemptionRaise,
   type ImportExemption,
@@ -41,9 +51,9 @@ import {
   type OwnershipEntry,
   type OwnershipRules,
   type DynamicSqlResolution,
-  type SqlOp,
   type TableOwnershipFile,
   type TableWriteExemption,
+  RatchetViolationError,
   UnadjudicatedFilesError,
   auditDynamicSql,
   classifyEdge,
@@ -51,6 +61,7 @@ import {
   listMigrationTables,
   listSourceFiles,
   readJson,
+  reconcileExemptions,
   repoPath,
   scanImports,
   scanSqlWrites,
@@ -61,6 +72,7 @@ import {
 const OWNERSHIP_PATH = 'boundaries/module-ownership.json';
 const IMPORT_EXEMPTIONS_PATH = 'boundaries/import-exemptions.json';
 const TABLE_EXEMPTIONS_PATH = 'boundaries/table-write-exemptions.json';
+const RULES_PATH = 'boundaries/ownership-rules.json';
 
 function writeJson(relative: string, value: unknown): void {
   writeFileSync(repoPath(relative), `${JSON.stringify(value, null, 2)}\n`, 'utf8');
@@ -69,8 +81,12 @@ function writeJson(relative: string, value: unknown): void {
 
 /* ------------------------------------------------------------------ 命令行 */
 
+/** `--reseed` 的显式确认标志：清单已 seed 过时，光有 `--reseed` 不够（见 `assertReseedAllowed`）。 */
+const RESEED_CONFIRM_FLAG = '--i-am-reseeding-the-ratchet';
+
 interface Options {
   reseed: boolean;
+  reseedConfirmed: boolean;
   raises: ExemptionRaise[];
   /** 新增豁免条目的 `eliminatedBy` 默认值；未给即为 `null`（seed 期允许，棘轮期由 raises 通道把关）。 */
   eliminatedBy: string | null;
@@ -78,10 +94,12 @@ interface Options {
 }
 
 function parseOptions(argv: string[]): Options {
-  const opts: Options = { reseed: false, raises: [], eliminatedBy: null, seedNote: null };
+  const opts: Options = { reseed: false, reseedConfirmed: false, raises: [], eliminatedBy: null, seedNote: null };
   for (const arg of argv) {
     if (arg === '--reseed') {
       opts.reseed = true;
+    } else if (arg === RESEED_CONFIRM_FLAG) {
+      opts.reseedConfirmed = true;
     } else if (arg.startsWith('--raise=')) {
       const [approvedByChange, amountText, eliminateBy] = arg.slice('--raise='.length).split(':');
       const amount = Number(amountText);
@@ -105,18 +123,58 @@ function parseOptions(argv: string[]): Options {
 
 /* ------------------------------------------------------------------ 归属 */
 
-/** 重生成文件级归属表。遇到未裁决的新文件即抛错并列出清单，MUST NOT 塞默认层。 */
+/**
+ * 重生成文件级归属表。遇到未裁决的新文件即抛错并列出清单，MUST NOT 塞默认层。
+ *
+ * 「已裁决」的依据取自**人工名册** `boundaries/adjudicated-files.json`，**不是**生成物
+ * `module-ownership.json`：拿生成物当准入依据的话，手工往生成物里塞一条就能把新文件洗白
+ * （见 `AdjudicatedFiles` 的注释）。名册只减不增——这里只剔除源码中已不存在的路径。
+ */
 function generateOwnership(): OwnershipEntry[] {
-  const rules = readJson<OwnershipRules>('boundaries/ownership-rules.json');
-  let prior: OwnershipEntry[] = [];
-  try {
-    prior = readJson<OwnershipEntry[]>(OWNERSHIP_PATH);
-  } catch {
-    prior = [];
+  const rules = readJson<OwnershipRules>(RULES_PATH);
+  const files = listSourceFiles();
+  const roster = readJson<AdjudicatedFiles>(ADJUDICATED_FILES_PATH);
+  const alive = new Set(files);
+  const pruned = roster.files.filter((f) => alive.has(f)).sort();
+  if (pruned.length !== roster.files.length) {
+    const gone = roster.files.filter((f) => !alive.has(f)).sort();
+    console.log(`[已裁决名册] 剔除源码中已不存在的路径 ${gone.length} 条：\n  ${gone.join('\n  ')}`);
+    writeJson(ADJUDICATED_FILES_PATH, { ...roster, files: pruned });
   }
-  const entries = expandOwnership(rules, listSourceFiles(), prior);
+  const entries = expandOwnership(rules, files, pruned);
   writeJson(OWNERSHIP_PATH, entries);
   return entries;
+}
+
+/**
+ * `--reseed` 的机械门。它是「把整个棘轮拆掉」的开关，所以不能只靠文档里的一句话约束：
+ *   ① seed 窗口 MUST 还开着（`ownership-rules.json` 的 `seedWindow.open`，归档时人工关掉）；
+ *   ② MUST 给 `--seed-note=`（seed 基线的唯一在仓记录，写进 `seedBasis`）；
+ *   ③ 清单已经 seed 过（`seedTotal > 0` 或已有 `seedBasis`）时，MUST 再加显式确认标志。
+ * 清空非空 `raises[]` 的那一条由 `reconcileExemptions` 自己拒绝。
+ */
+function assertReseedAllowed(opts: Options): void {
+  const rules = readJson<OwnershipRules>(RULES_PATH);
+  if (rules.seedWindow?.open !== true) {
+    throw new Error(
+      `seed 窗口已关闭（${RULES_PATH} 的 seedWindow.open 不为 true），--reseed MUST NOT 再用——` +
+        '棘轮已开始计数，重新 seed 等于把它拆掉。确需重新 seed 请走控制仓 change 先改判据、再改这个标志。',
+    );
+  }
+  if (!opts.seedNote || opts.seedNote.trim() === '') {
+    throw new Error('--reseed MUST 同时给 --seed-note=<为什么重新 seed>：它是 seed 基线为何是这个数的唯一在仓记录。');
+  }
+  const seeded = [IMPORT_EXEMPTIONS_PATH, TABLE_EXEMPTIONS_PATH].filter((p) => {
+    const list = readJson<ExemptionList<unknown>>(p);
+    return list.seedTotal > 0 || (list.seedBasis ?? '') !== '';
+  });
+  if (seeded.length > 0 && !opts.reseedConfirmed) {
+    throw new Error(
+      `以下清单已经 seed 过，重新 seed 会重置 seedTotal / seedUnplanned / frozenTotal 并清空 raises[]：\n  ${seeded.join(
+        '\n  ',
+      )}\n确实要这么做请显式加上 ${RESEED_CONFIRM_FLAG}。`,
+    );
+  }
 }
 
 function layerOf(entries: OwnershipEntry[]): Map<string, Layer> {
@@ -159,96 +217,6 @@ function auditTableRegistry(): void {
   if (problems.length > 0) throw new Error(problems.join('\n\n'));
 }
 
-/* ------------------------------------------------------------------ 棘轮对账 */
-
-interface Reconciled<T> {
-  list: ExemptionList<T>;
-  added: T[];
-  removed: T[];
-  changed: string[];
-}
-
-/**
- * 把一份豁免清单对到当天实测的违规集合上。
- *
- *   - 违规消失 → 删条目、`frozenTotal` 同步下调（棘轮下调，恒允许）；
- *   - 出现新违规 → 默认判失败；只有 `--reseed` 或足量 `--raise=` 才放行；
- *   - 人工写过的 `reason` / `eliminatedBy` / `note` 一律保留。
- */
-function reconcile<T extends { reason: string; eliminatedBy: string | null; note?: string }>(
-  relative: string,
-  current: T[],
-  keyOf: (item: T) => string,
-  describe: (item: T) => string,
-  merge: (fresh: T, prior: T | undefined) => { item: T; changedNote?: string },
-  opts: Options,
-): Reconciled<T> {
-  const list = readJson<ExemptionList<T>>(relative);
-  const priorByKey = new Map(list.entries.map((e) => [keyOf(e), e]));
-  const currentKeys = new Set(current.map(keyOf));
-
-  const removed = list.entries.filter((e) => !currentKeys.has(keyOf(e)));
-  const added = current.filter((c) => !priorByKey.has(keyOf(c)));
-  const changed: string[] = [];
-
-  const entries = current
-    .map((fresh) => {
-      const prior = priorByKey.get(keyOf(fresh));
-      const merged = merge(fresh, prior);
-      if (merged.changedNote) changed.push(merged.changedNote);
-      return merged.item;
-    })
-    .sort((a, b) => describe(a).localeCompare(describe(b)));
-
-  if (opts.reseed) {
-    const list2: ExemptionList<T> = {
-      seedTotal: entries.length,
-      seedUnplanned: entries.filter((e) => e.eliminatedBy === null).length,
-      frozenTotal: entries.length,
-      recordedAt: new Date().toISOString().slice(0, 10),
-      raises: [],
-      entries,
-    };
-    if (opts.seedNote) (list2 as ExemptionList<T> & { seedBasis: string }).seedBasis = opts.seedNote;
-    else if ((list as ExemptionList<T> & { seedBasis?: string }).seedBasis) {
-      (list2 as ExemptionList<T> & { seedBasis: string }).seedBasis = (list as ExemptionList<T> & { seedBasis: string }).seedBasis;
-    }
-    return { list: list2, added, removed, changed };
-  }
-
-  // 棘轮模式：先按消失的条目下调，再看新增是否有合规的上调通道兜住。
-  const loweredFrozen = list.frozenTotal - removed.length;
-  const needed = Math.max(0, entries.length - loweredFrozen);
-  const approved = opts.raises.reduce((sum, r) => sum + r.amount, 0);
-  if (needed > 0 && approved < needed) {
-    throw new Error(
-      `${relative}：出现 ${added.length} 条清单里没有的新违规，棘轮不允许静默追加（定稿 §12：seed 之后发现的既存违规 MUST 当场修复）。\n` +
-        `${added.map((a) => `  + ${describe(a)}`).join('\n')}\n` +
-        (changed.length > 0 ? `另有已登记条目的操作集变大：\n${changed.map((c) => `  ~ ${c}`).join('\n')}\n` : '') +
-        `处置只有三条，按优先级：\n` +
-        `  1) 先查归属是否填错——多数「新违规」其实是新文件的归属层没按 §4.7 判对；\n` +
-        `  2) 修掉这条跨边界依赖 / 跨层写入；\n` +
-        `  3) 确需冻结时走定稿 §12「例外通道（唯一）」：--raise=<控制仓 change 名>:<数量>:<YYYY-MM-DD>` +
-        `（当前还差 ${needed - approved} 条批准额度），并逐条补 reason 与消除动作。\n` +
-        `  （门禁 change 尚未归档、棘轮尚未开始计数时，另有 --reseed 一条 seed 窗口内的通道。）`,
-    );
-  }
-  const raises = [...list.raises, ...opts.raises];
-  return {
-    list: {
-      seedTotal: list.seedTotal,
-      seedUnplanned: list.seedUnplanned,
-      frozenTotal: Math.max(loweredFrozen, entries.length),
-      recordedAt: new Date().toISOString().slice(0, 10),
-      raises,
-      entries,
-    },
-    added,
-    removed,
-    changed,
-  };
-}
-
 /* ------------------------------------------------------------------ 两族违规的当日实测 */
 
 function currentImportViolations(entries: OwnershipEntry[]): ImportExemption[] {
@@ -278,71 +246,75 @@ function currentTableViolations(entries: OwnershipEntry[]): TableWriteExemption[
     readJson<{ sites: DynamicSqlResolution[] }>('boundaries/dynamic-sql-resolutions.json').sites,
   );
   const writes = [...scan.writes, ...dynamic.resolvedWrites].filter((w) => !exceptions.has(w.table));
-  const grouped = new Map<string, { table: string; file: string; ops: Set<SqlOp> }>();
+  // 一个违规 = 一个 {表, 文件, 操作} 三元组。MUST NOT 再按 (表, 文件) 分组压成 ops[]：
+  // 那会让棘轮的键少掉「操作」这一维，已豁免的对上新增 ALTER TABLE 会被静默拓宽（见 TableWriteExemption 注释）。
+  const triples = new Map<string, TableWriteExemption>();
   for (const write of writes) {
     const owner = ownerOf.get(write.table);
     const layer = ownership.get(write.file);
     if (!owner || !layer) continue; // 同上：由 AC-OWN-01 判失败。
     if (owner === layer) continue;
-    const key = `${write.table} ${write.file}`;
-    const bucket = grouped.get(key) ?? { table: write.table, file: write.file, ops: new Set<SqlOp>() };
-    bucket.ops.add(write.op);
-    grouped.set(key, bucket);
+    triples.set(`${write.table} ${write.file} ${write.op}`, {
+      table: write.table,
+      file: write.file,
+      op: write.op,
+      reason: `${layer} 层文件对属主为 ${owner} 的表执行 ${write.op}`,
+      eliminatedBy: null,
+    });
   }
-  return [...grouped.values()].map((b) => ({
-    table: b.table,
-    file: b.file,
-    ops: [...DML_OPS, ...DDL_OPS].filter((op) => b.ops.has(op)),
-    reason: `${ownership.get(b.file)} 层文件写入属主为 ${ownerOf.get(b.table)} 的表`,
-    eliminatedBy: null,
-  }));
+  return [...triples.values()];
 }
 
 /* ------------------------------------------------------------------ refresh */
 
 function refresh(opts: Options): void {
+  if (opts.reseed) assertReseedAllowed(opts);
   const entries = generateOwnership();
   auditTableRegistry();
+  const flags = { reseed: opts.reseed, raises: opts.raises, seedNote: opts.seedNote };
 
-  const imports = reconcile<ImportExemption>(
-    IMPORT_EXEMPTIONS_PATH,
-    currentImportViolations(entries),
-    (e) => `${e.from} ${e.to}`,
-    (e) => `${e.from} -> ${e.to}`,
-    (fresh, prior) => {
-      const item: ImportExemption = {
-        from: fresh.from,
-        to: fresh.to,
-        reason: prior?.reason ?? `seed: ${fresh.reason}`,
-        eliminatedBy: prior ? prior.eliminatedBy : opts.eliminatedBy,
-      };
-      if (prior?.note) item.note = prior.note;
-      return { item };
+  const imports = reconcileExemptions<ImportExemption>(
+    {
+      relative: IMPORT_EXEMPTIONS_PATH,
+      list: readJson<ExemptionList<ImportExemption>>(IMPORT_EXEMPTIONS_PATH),
+      current: currentImportViolations(entries),
+      keyOf: (e) => `${e.from} ${e.to}`,
+      describe: (e) => `${e.from} -> ${e.to}`,
+      merge: (fresh, prior) => {
+        const item: ImportExemption = {
+          from: fresh.from,
+          to: fresh.to,
+          reason: prior?.reason ?? `seed: ${fresh.reason}`,
+          eliminatedBy: prior ? prior.eliminatedBy : opts.eliminatedBy,
+        };
+        if (prior?.note) item.note = prior.note;
+        return item;
+      },
     },
-    opts,
+    flags,
   );
 
-  const tables = reconcile<TableWriteExemption>(
-    TABLE_EXEMPTIONS_PATH,
-    currentTableViolations(entries),
-    (e) => `${e.table} ${e.file}`,
-    (e) => `${e.table} <- ${e.file}`,
-    (fresh, prior) => {
-      const item: TableWriteExemption = {
-        table: fresh.table,
-        file: fresh.file,
-        ops: fresh.ops,
-        reason: prior?.reason ?? `seed: ${fresh.reason}`,
-        eliminatedBy: prior ? prior.eliminatedBy : opts.eliminatedBy,
-      };
-      if (prior?.note) item.note = prior.note;
-      const grew = prior ? fresh.ops.filter((op) => !prior.ops.includes(op)) : [];
-      return {
-        item,
-        changedNote: grew.length > 0 ? `${fresh.table} <- ${fresh.file} 新增操作 ${grew.join('/')}` : undefined,
-      };
+  const tables = reconcileExemptions<TableWriteExemption>(
+    {
+      relative: TABLE_EXEMPTIONS_PATH,
+      list: readJson<ExemptionList<TableWriteExemption>>(TABLE_EXEMPTIONS_PATH),
+      current: currentTableViolations(entries),
+      // 键 MUST 带 op：少了这一维，已豁免的 (表, 文件) 对上新增操作会被静默拓宽写回。
+      keyOf: (e) => `${e.table} ${e.file} ${e.op}`,
+      describe: (e) => `${e.table} <- ${e.file} [${e.op}]`,
+      merge: (fresh, prior) => {
+        const item: TableWriteExemption = {
+          table: fresh.table,
+          file: fresh.file,
+          op: fresh.op,
+          reason: prior?.reason ?? `seed: ${fresh.reason}`,
+          eliminatedBy: prior ? prior.eliminatedBy : opts.eliminatedBy,
+        };
+        if (prior?.note) item.note = prior.note;
+        return item;
+      },
     },
-    opts,
+    flags,
   );
 
   writeJson(IMPORT_EXEMPTIONS_PATH, imports.list);
@@ -358,7 +330,6 @@ function refresh(opts: Options): void {
     );
     for (const item of r.added) console.log(`  + 新增：${JSON.stringify(item)}`);
     for (const item of r.removed) console.log(`  - 删除（源码中已不存在）：${JSON.stringify(item)}`);
-    for (const note of r.changed) console.log(`  ~ ${note}`);
   }
   if (imports.added.length > 0 || tables.added.length > 0) {
     console.log(
@@ -462,6 +433,8 @@ try {
 } catch (error) {
   if (error instanceof UnadjudicatedFilesError) {
     console.error(`\n[待人工裁决] ${error.message}\n`);
+  } else if (error instanceof RatchetViolationError) {
+    console.error(`\n[棘轮拒绝] ${error.message}\n`);
   } else {
     console.error(`\n[失败] ${error instanceof Error ? error.message : String(error)}\n`);
   }

@@ -16,9 +16,11 @@ import {
   type SqlOp,
   type TableOwnershipFile,
   type TableWriteExemption,
+  RatchetViolationError,
   boundarySnapshot,
   isLayer,
   readJson,
+  reconcileExemptions,
   scanSqlSource,
 } from './helpers/boundary-scan.js';
 
@@ -58,8 +60,14 @@ for (const write of snapshot.writes) {
   violations.push({ table: write.table, file: write.file, op: write.op, owner, writerLayer });
 }
 
-const exemptionIndex = new Map(exemptions.entries.map((e) => [`${e.table} ${e.file}`, new Set<SqlOp>(e.ops)]));
-const isExempted = (v: Violation): boolean => exemptionIndex.get(`${v.table} ${v.file}`)?.has(v.op) === true;
+/**
+ * 豁免按 `{表, 文件, 操作}` 三元组精确匹配：已豁免 `delete` 的条目挡不住新加的 `insert`，
+ * 已豁免 `update` 的条目也挡不住新加的 `alter_table`。这条口径同时是清单本身的条目粒度
+ * （每个三元组一条条目），故棘轮的键与门禁的键**是同一个键**——键少一维就会两头一起失明。
+ */
+const exemptionKey = (e: { table: string; file: string; op: SqlOp }): string => `${e.table} ${e.file} ${e.op}`;
+const exemptionIndex = new Set(exemptions.entries.map(exemptionKey));
+const isExempted = (v: Violation): boolean => exemptionIndex.has(exemptionKey(v));
 const describeViolation = (v: Violation): string =>
   `${v.table} <- ${v.file} [${v.op}]（表属主 ${v.owner} / 写入方 ${v.writerLayer}）`;
 
@@ -154,16 +162,24 @@ describe('AC-OWN-* 表写入与建表归属门禁', () => {
   });
 
   it('AC-OWN-04 无失效豁免条目', () => {
+    // 条目粒度 MUST 是 {表, 文件, 操作} 三元组：op 取值非法 = 键坏了，一律判失败而不是当它不存在。
+    const validOps = new Set<string>([...DML_OPS, ...DDL_OPS]);
+    const badOp = exemptions.entries.filter((e) => !validOps.has(e.op)).map((e) => `${e.table} <- ${e.file} [${e.op}]`);
+    assert.deepEqual(badOp, [], `豁免条目的 op MUST 是 ${[...validOps].join(' / ')} 之一：\n${badOp.join('\n')}`);
+
+    const duplicates = exemptions.entries
+      .map(exemptionKey)
+      .filter((k, i, all) => all.indexOf(k) !== i)
+      .sort();
+    assert.deepEqual(duplicates, [], `同一个 {表, 文件, 操作} 三元组 MUST 只有一条豁免条目：\n${duplicates.join('\n')}`);
+
     const actual = new Set(violations.map((v) => `${v.table} ${v.file} ${v.op}`));
-    const stale: string[] = [];
-    for (const entry of exemptions.entries) {
-      if (entry.ops.length === 0) stale.push(`${entry.table} <- ${entry.file}（ops 为空）`);
-      for (const op of entry.ops) {
-        if (!actual.has(`${entry.table} ${entry.file} ${op}`)) stale.push(`${entry.table} <- ${entry.file} [${op}]`);
-      }
-    }
+    const stale = exemptions.entries
+      .filter((e) => !actual.has(exemptionKey(e)))
+      .map((e) => `${e.table} <- ${e.file} [${e.op}]`)
+      .sort();
     assert.deepEqual(
-      stale.sort(),
+      stale,
       [],
       `豁免清单里有源码中已不存在的跨层写入；削减 MUST 在同一提交里删条目并下调 frozenTotal：\n${stale.join('\n')}`,
     );
@@ -196,6 +212,86 @@ describe('AC-OWN-* 表写入与建表归属门禁', () => {
     assert.ok(
       unplanned <= exemptions.seedUnplanned,
       `未挂消除 change 的条目数 ${unplanned} 高于 seed 值 ${exemptions.seedUnplanned}；该数 MUST 单调不增`,
+    );
+
+    // seedBasis 是「seed 基线为何是这个数」的唯一在仓记录；早期版本的 refresh 会在默认路径上把它静默删掉。
+    assert.ok(
+      typeof exemptions.seedBasis === 'string' && exemptions.seedBasis.trim() !== '',
+      'boundaries/table-write-exemptions.json MUST 携带非空 seedBasis（seed 基线的由来）；重跑生成器 MUST NOT 把它丢掉',
+    );
+  });
+});
+
+/**
+ * 棘轮键保真自检 —— **不属 `AC-OWN-*` 族编号**。
+ *
+ * 存在理由（2026-07-23 审计坐实）：棘轮曾按「条目数」计而不按「表×文件×操作」计。已豁免的
+ * `(表, 文件)` 对上新增一个操作时条目数不变，`refresh` 会自己把 `ops` 拓宽写回文件并**退出 0**，
+ * 随后 `AC-OWN-03`「无未豁免的跨层 DDL」全绿——门禁在一类真实可达的改动上恒绿，正是红线
+ * 「MUST NOT 静默假成功」。这里把「新增操作 = 新增违规 = 棘轮当场拒绝」钉成机械断言。
+ */
+describe('棘轮键保真自检（非 AC 编号）', () => {
+  const entry = (op: SqlOp): TableWriteExemption => ({
+    table: 'probe_table',
+    file: 'src/probe/writer.ts',
+    op,
+    reason: 'probe',
+    eliminatedBy: null,
+  });
+  const seeded: ExemptionList<TableWriteExemption> = {
+    seedTotal: 1,
+    seedUnplanned: 1,
+    frozenTotal: 1,
+    recordedAt: '2026-07-23',
+    raises: [],
+    entries: [entry('update')],
+    seedBasis: 'probe',
+  };
+  const input = (current: TableWriteExemption[]) => ({
+    relative: 'boundaries/table-write-exemptions.json',
+    list: seeded,
+    current,
+    keyOf: exemptionKey,
+    describe: (e: TableWriteExemption) => `${e.table} <- ${e.file} [${e.op}]`,
+    merge: (fresh: TableWriteExemption, prior: TableWriteExemption | undefined) => ({
+      ...fresh,
+      reason: prior?.reason ?? fresh.reason,
+    }),
+  });
+
+  it('已豁免的 (表, 文件) 对上新增 alter_table MUST 被棘轮拒绝', () => {
+    assert.throws(
+      () => reconcileExemptions(input([entry('update'), entry('alter_table')]), { reseed: false, raises: [] }),
+      (error: unknown) =>
+        error instanceof RatchetViolationError && error.added.join('\n').includes('[alter_table]'),
+      '新增操作等价于新增违规，MUST NOT 被静默拓宽进已有条目',
+    );
+  });
+
+  it('操作集不变时棘轮放行，且 seedBasis MUST 原样留在清单头部', () => {
+    const result = reconcileExemptions(input([entry('update')]), { reseed: false, raises: [] });
+    assert.equal(result.added.length, 0);
+    assert.equal(result.removed.length, 0);
+    assert.equal(result.list.seedBasis, 'probe');
+    assert.equal(result.list.frozenTotal, 1);
+  });
+
+  it('违规消失时棘轮下调 frozenTotal（恒允许），seedTotal 不动', () => {
+    const result = reconcileExemptions(input([]), { reseed: false, raises: [] });
+    assert.equal(result.removed.length, 1);
+    assert.equal(result.list.frozenTotal, 0);
+    assert.equal(result.list.seedTotal, 1);
+  });
+
+  it('--reseed 缺 seed-note 或已有 raises[] 时 MUST 拒绝', () => {
+    assert.throws(
+      () => reconcileExemptions(input([entry('update')]), { reseed: true, raises: [], seedNote: '  ' }),
+      /seed-note/,
+    );
+    const withRaise = { ...input([entry('update')]), list: { ...seeded, raises: [{ amount: 1, approvedByChange: 'x', eliminateBy: '2026-09-30' }] } };
+    assert.throws(
+      () => reconcileExemptions(withRaise, { reseed: true, raises: [], seedNote: '理由' }),
+      /raises/,
     );
   });
 });

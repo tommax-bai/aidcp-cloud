@@ -12,8 +12,9 @@
 
 | 文件 | 是什么 | 谁改 |
 | --- | --- | --- |
-| `ownership-rules.json` | §4.7 的机械转写：目录规则 + 逐文件例外 + `composition` 白名单 | 人工，改前先改 §4.7 |
-| `module-ownership.json` | 上表展开出的**文件级**全量归属清单（生成物） | 生成器 |
+| `ownership-rules.json` | §4.7 的机械转写：目录规则 + 逐文件例外 + `composition` 白名单 + seed 窗口开关 | 人工，改前先改 §4.7 |
+| `adjudicated-files.json` | seed 当天已存在于「逐文件切分目录」里的文件名册 ＝**「已裁决」的唯一依据** | 人工，**只减不增** |
+| `module-ownership.json` | 上表展开出的**文件级**全量归属清单（**纯生成物，不作准入依据**） | 生成器 |
 | `table-ownership.json` | 表名 → 属主层的全量映射，逐条写明 §5.1 依据 | 人工 |
 | `exception-tables.json` | §5.1 具名的设计内永久例外表；**不占豁免条目、不参与棘轮计数** | 人工，须控制仓 change 批准 |
 | `dynamic-sql-resolutions.json` | 动态拼接 SQL 的逐处具名解析；未登记的动态 SQL 一律判失败 | 人工 |
@@ -51,7 +52,14 @@ npm run test:acceptance       # 两族门禁必须全绿
 > `newFile` 的取值只有两种：`inherit`（§4.7 里该目录整行只有一个归属层，如 `src/risk/` 19/19 automation，
 > 新文件的归属**已经被 §4.7 判过了**）与 `adjudicate`（§4.7 把该目录逐文件切开，如 `src/publish-agent/`
 > 7 api / 54 content / 6 automation，§4.7 **没有**判过「这个目录下任意新文件属于哪一层」）。
-> 字段缺省按 `adjudicate` 处理。两条机械回归在 `module-boundary.test.ts` 的「归属生成器保真自检」。
+> 字段缺省按 `adjudicate` 处理。三条机械回归在 `module-boundary.test.ts` 的「归属生成器保真自检」。
+
+> **「已裁决」的依据是 `adjudicated-files.json`，不是生成物。** 逐文件切分目录里的**既有**文件靠这份
+> 人工名册继续走目录默认值。2026-07-23 审计坐实过一条洗白路径：早期版本把生成物
+> `module-ownership.json` 自己回喂当「已裁决集」，于是判据退化成「是否已经在生成物里」——
+> 手工往生成物加一条「新文件 + 目录默认层」就能让 `AC-BOUND-01` 全绿，`refresh` 随后把它永久写实。
+> 现在名册是独立人工文件，**MUST NOT 增长**：此后这类目录的新文件一律进 `fileOverrides`
+> 并写明 §4.7 判据；源文件删除时由 `refresh` 同步剔除（只减不增）。
 
 新文件若引入了新的跨边界 import 或跨层写表，`refresh` 会失败并把条目逐条打印出来。
 **处置的第一顺位是查归属是否填错**（多数「新违规」其实是新文件的层没按 §4.7 判对），
@@ -59,12 +67,22 @@ npm run test:acceptance       # 两族门禁必须全绿
 
 ## 棘轮怎么工作
 
-两份豁免清单的头部有四个数：
+两份豁免清单的头部有四个数加一段说明：
 
 - `seedTotal` / `seedUnplanned`：seed 当天的条目数与「未挂消除 change」的条目数，**不可变**，是棘轮上界；
 - `frozenTotal`：当前允许的上界，随削减一起下调；
 - `raises[]`：**唯一**的上调通道，每个元素必须齐备 `amount` / `approvedByChange` / `eliminateBy` 三字段，
-  缺任一即门禁失败（定稿 §12「例外通道（唯一）」）。
+  缺任一即门禁失败（定稿 §12「例外通道（唯一）」）；
+- `seedBasis`：seed 基线**为什么是这个数**的唯一在仓记录（`--seed-note=` 写入）。两族门禁各有一条断言
+  要求它非空——早期版本的 `refresh` 在默认（最常跑的）路径上重建清单对象时漏搬了这个字段，
+  会把它静默删掉，typecheck 与全部用例都抓不到。
+
+**一条条目 = 一个违规。** import 侧的违规单位是一条 `(from, to)` 边；表侧是一个
+`{表, 文件, 操作}` 三元组——**不是** `(表, 文件)` 对。表侧早期把同一对上的多个操作压成 `ops[]` 数组，
+棘轮的键因此少了「操作」这一维：已豁免的对上新增一个 `ALTER TABLE` / `CREATE TABLE` 时条目数不变，
+`refresh` 会自己把数组拓宽写回文件并**退出 0**，`AC-OWN-03`「无未豁免的跨层 DDL」随后恒绿
+（2026-07-23 审计坐实，机械回归见 `table-ownership.test.ts` 的「棘轮键保真自检」）。
+门禁匹配用的键与棘轮用的键**必须是同一个键**。
 
 削减一条违规时 `npm run boundaries:refresh` 会替你删条目并同步下调 `frozenTotal`，
 **必须在同一个提交里**一起提交；只删代码不删条目 → `AC-BOUND-05` / `AC-OWN-04` 失败
@@ -77,11 +95,19 @@ npm run test:acceptance       # 两族门禁必须全绿
 npm run boundaries:refresh -- --raise=<控制仓 change 名>:<数量>:<YYYY-MM-DD>
 
 # ② 只在 seed 窗口内合法：门禁 change cloud-service-boundary-gates 尚未归档、棘轮尚未开始计数。
-npm run boundaries:refresh -- --reseed --seed-note="为什么要重新 seed"
+npm run boundaries:refresh -- --reseed --seed-note="为什么要重新 seed" --i-am-reseeding-the-ratchet
 ```
 
-`--reseed` 会按当天实测重置 `seedTotal` / `seedUnplanned` / `frozenTotal` 并清空 `raises[]`。
-**该 change 归档之后再用它 = 把棘轮拆掉。** 两种模式都保留人工写过的 `reason` / `eliminatedBy` / `note`，
+`--reseed` 会按当天实测重置 `seedTotal` / `seedUnplanned` / `frozenTotal`。它是**把整个棘轮拆掉**的开关，
+所以四道机械门缺一不可，任一不满足即 `exit 1`（不再只靠这段文字约束）：
+
+1. `ownership-rules.json` 的 `seedWindow.open` MUST 为 `true`。**归档 `cloud-service-boundary-gates` 时把它改成 `false`**
+   —— 此后 `--reseed` 一律拒绝；
+2. MUST 给 `--seed-note=<为什么>`，它会写进 `seedBasis`；
+3. 清单已经 seed 过（`seedTotal > 0` 或已有 `seedBasis`）时，MUST 再加 `--i-am-reseeding-the-ratchet`；
+4. `raises[]` 非空时**直接拒绝**——那里面是已批准上调及其消除时限的唯一记录，MUST 先人工处置再重新 seed。
+
+两种模式都保留人工写过的 `reason` / `eliminatedBy` / `note`，也都原样带走 `seedBasis`，
 不会把已登记的消除计划刷掉——所以新增条目的理由与消除动作**必须人工补写一次**，之后一直跟着走。
 
 ## 对账口径（与 change `cloud-schema-migration-executor` 统一）
@@ -98,7 +124,8 @@ npm run boundaries:census
 - 需豁免的跨边界 import 274 条，无豁免通道的 0 条；一端是 `content` 的 112 条（阶段 3 准入取值，本轮未变）；
 - 表全集 distinct 并集 89 张（`src` 自建 64 张 ∪ `migrations` 建 65 张）；
 - `src` 内 `CREATE TABLE`：文本命中 83 处 / 去注释后生效 64 处 / 分布在 37 个源文件；
-- 跨层写入 12 处（10 条豁免条目，DDL 侧 0 条）——三个 change 新增的 5 张表属主与写入方同层，本轮不产生新条目；
+- 跨层写入 12 处（豁免条目 **12 条**，DDL 侧 0 条）——三个 change 新增的 5 张表属主与写入方同层，本轮不产生新违规。
+  条目数从 10 变 12 是 2026-07-23 的**粒度**修正（`ops[]` 数组拆成逐个三元组），豁免的实际面一条未变；
 - SQL 写入点 245 处（含动态拼接登记解析出的条目）。
 
 上一次口径（`aidcp-cloud@313eba2`，主干合入那三个 change **之前**）：源文件 323 / import 257 条 /
