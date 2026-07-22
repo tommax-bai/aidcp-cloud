@@ -21,7 +21,7 @@
  */
 
 import type { AccountStore } from './account-store.js';
-import { isMirrorStale, noteMirrorStaleRefusal } from './config-mirror-freshness.js';
+import { isMirrorStale } from './config-mirror-freshness.js';
 
 export type AccountStatus = 'active' | 'paused';
 
@@ -80,13 +80,15 @@ export class AccountStateManager {
   /**
    * 账号暂停态（同步读缓存，热路径，三态）。
    *
-   * 副本陈旧 → `unknown` 并记一次「因陈旧而拒绝」；MUST NOT 退回「miss = active」。
+   * 副本陈旧 → `unknown`；MUST NOT 退回「miss = active」。
+   *
+   * **纯取值口，不记账**：本方法每条 `note.arrived` 都会走一次，也被飞书 `/status`、徽章投影这类
+   * 「什么都没拒绝」的读调用；每次落一条 PG 写既污染「因陈旧拒绝真实平台动作」这个指标，也会在
+   * 权威不可达时把写压堆到刷新器自我恢复所依赖的同一个连接池上。记账收口在真正的拒绝点
+   * （`src/comm/handler.ts` 的 note.arrived 停手分支）。
    */
   pauseStateOf(accountId: string): AccountPauseState {
-    if (isMirrorStale('account_status')) {
-      noteMirrorStaleRefusal('account_status', accountId);
-      return 'unknown';
-    }
+    if (isMirrorStale('account_status')) return 'unknown';
     return this.states.get(accountId)?.status === 'paused' ? 'paused' : 'active';
   }
 

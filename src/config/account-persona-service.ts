@@ -1,5 +1,6 @@
 import type { PersonaGenerator } from '../agents/persona-generator.js';
 import type { PanelPersonaConfig } from '../panel/types.js';
+import type { PersonaBinding } from './persona-store.js';
 import { normalizePlatformId } from '../platform/index.js';
 import { loadSoulFromYaml } from '../soul/index.js';
 import { resolveLikeAffinity } from '../soul/like-affinity.js';
@@ -66,6 +67,16 @@ export interface AccountPersonaServiceDeps {
   generator: Pick<PersonaGenerator, 'generate'>;
   facade: Pick<PanelPersonaConfig, 'getDetail' | 'setPersona'>;
   firstPostOnboarding?: { armFirstBind(accountId: string): Promise<boolean> };
+  /**
+   * 人设绑定态的**三态**判据（change config-mirror-cross-process-invalidation task 4.2/4.3）。
+   *
+   * 为什么 HTTP 拉取面也必须问它：当代客户端的人设绑定态**根本不经 WS 下发**（`ui-snapshot` 对
+   * 拉取型客户端直接 return），它唯一的来源就是本服务经 `GET /my-environments` 回的 `personaBound`。
+   * WS 面把「未知」做成了「不下发该字段」；拉取面若照旧回 `state:'missing'` + `personaBound:false`，
+   * 那条不变量在**真正的落地面上**并没有兑现——客户端拿到一个权威的「你没绑人设」，当场弹人设向导，
+   * 而账号可能早就绑好了。缺省（未注入）= 不做三态判定，行为逐位退回本 change 之前。
+   */
+  personaBinding?: (accountId: string) => PersonaBinding;
   logger?: Pick<Console, 'warn'>;
 }
 
@@ -104,7 +115,17 @@ export class AccountPersonaService {
     try {
       const detail = await this.deps.facade.getDetail(accountId);
       if (!detail) return { ok: false, reason: 'unknown_account' };
-      if (detail.source === 'none') return { ok: true, view: { state: 'missing', persona: null } };
+      if (detail.source === 'none') {
+        // 三态：副本里没有这一行 ≠ 库里没有。副本陈旧时回**不可用**（契约里本就有的诚实态），
+        // 绝不回一个权威的 `missing`——调用方会把它翻成 `personaBound:false` 并弹人设向导。
+        // 判据只加在这一支（source==='none'）：副本里**有**人设时照常返回，读到一份稍旧的人设文本
+        // 不构成「未知压成否」，而 503 掉一个我们答得出来的读只会把人设编辑器无谓地打断。
+        if (this.deps.personaBinding?.(accountId) === 'unknown') {
+          this.logger.warn(`[persona] 人设副本陈旧 account=${accountId}：回 unavailable，绝不回权威的「未绑」`);
+          return { ok: false, reason: 'unavailable' };
+        }
+        return { ok: true, view: { state: 'missing', persona: null } };
+      }
       return {
         ok: true,
         view: {

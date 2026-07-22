@@ -1,7 +1,7 @@
 // 注意：本 import 指向 `src/config-mirror-freshness.ts`（src 根、无依赖的中立模块），**不是**
 // `src/config/`。`src/risk/` 对 `src/config/` 的 import 必须保持为 0——那条既成事实正是定稿方案
 // §11.4 要求一把四类限频配置判给自动化服务的依据，也有静态断言测试守着（test/config/module-boundary）。
-import { isMirrorStale, noteMirrorStaleRefusal } from '../config-mirror-freshness.js';
+import { isMirrorStale } from '../config-mirror-freshness.js';
 import { coldStartDailyCap } from './cold-start-planner.js';
 import { deriveWindowQuotas, deriveWindowQuotasFromDaily, minWindowQuotas, scaleWindowQuotas, zeroInteractionQuotas } from './quotas.js';
 import { createRiskState, RiskStateMachine } from './risk-state-machine.js';
@@ -417,24 +417,39 @@ export class RiskController {
    * ——正是 2026-07-15 判为 bug 根因的那个上限。
    */
   private resolveNurtureAnchor(): NurtureAnchor | null {
+    const state = this.nurtureAnchorState();
+    // clamp 侧：`unknown` 退到**最保守锚点（第 1 天）**——收紧配额，方向安全。
+    if (state.kind === 'unknown') return { since: this.clock(), source: 'environment' };
+    return state.kind === 'anchor' ? state.anchor : null;
+  }
+
+  /**
+   * 锚点解析的**三态**内核。`unknown` 与 `none` 必须分开表达：
+   * clamp 侧两者的安全方向不同（unknown 取最严），投影侧两者的诚实说法也不同
+   * （unknown MUST NOT 显示成「已入组、第 1 天」——那是把「读不到」编成一个确定的「是」）。
+   */
+  private nurtureAnchorState():
+    | { kind: 'anchor'; anchor: NurtureAnchor }
+    | { kind: 'none' }
+    | { kind: 'unknown' } {
     // 全局停用闸：无视所有账号级开关与 env 旁路（raw SQL 改库不刷镜像时的秒级止血手段）。
-    if (this.slowStartDisabled) return null;
+    if (this.slowStartDisabled) return { kind: 'none' };
     // 副本陈旧（change config-mirror-cross-process-invalidation task 4.7）：锚点事实源在客户业务侧
     // （client_environments.slow_start_since），这里读的是本进程的只读副本。副本超过陈旧上限时**读不到
-    // 锚点 ≠ 该环境没开慢启动**——返回 null 等于「未开启慢启动」，也就是让一个刚开启慢启动的新号按
-    // 毕业档满配额跑，正是「未知压成否」的配额版本。故此处退到**最保守锚点（第 1 天）**并记账。
+    // 锚点 ≠ 该环境没开慢启动**——当成 null 等于「未开启慢启动」，也就是让一个刚开启慢启动的新号按
+    // 毕业档满配额跑，正是「未知压成否」的配额版本。
     //
     // 这**不是**用「回落最严档继续跑」代替停手：真正的停手在上层闸（会话启动闸与命令泵，见
     // src/config/mirror-stop-work.ts 的统一实现），本处只是不让配额层在停手生效前把闸放到最松。
-    if (isMirrorStale('client_environment_slow_start')) {
-      noteMirrorStaleRefusal('client_environment_slow_start', this.accountId);
-      return { since: this.clock(), source: 'environment' };
-    }
+    //
+    // **本方法是纯取值口，不记账**：它挂在 effectiveQuotas 的热路径上（canDo / remaining / retryAfter
+    // 每次都走到），也被什么都没拒绝的徽章投影调用。记账收口在真正的拒绝点（统一停手闸）。
+    if (isMirrorStale('client_environment_slow_start')) return { kind: 'unknown' };
     const environmentSince = this.nurtureProvider?.slowStartSinceFor(this.accountId) ?? null;
-    if (environmentSince != null) return { since: environmentSince, source: 'environment' };
+    if (environmentSince != null) return { kind: 'anchor', anchor: { since: environmentSince, source: 'environment' } };
     const createdAt = this.coldStartRampEnabled ? this.nurtureProvider?.createdAtFor(this.accountId) : undefined;
-    if (createdAt != null) return { since: createdAt, source: 'legacy_env' };
-    return null;
+    if (createdAt != null) return { kind: 'anchor', anchor: { since: createdAt, source: 'legacy_env' } };
+    return { kind: 'none' };
   }
 
   /** 按锚点与 now 现算天数（1-based）。day > 7 即毕业（coldStartDailyCap 返回 null）。 */
@@ -478,7 +493,15 @@ export class RiskController {
     if (this.slowStartDisabled) {
       return { state: 'off', totalDays, eligible: false, ineligibleReason: 'globally_disabled' };
     }
-    const anchor = this.resolveNurtureAnchor();
+    const anchorState = this.nurtureAnchorState();
+    // 副本陈旧 → 投影 MUST NOT 把「读不到」编成「已入组、第 1 天」（clamp 侧取最严是收紧配额，
+    // 与对外宣称已入组是两件事）。这里如实回一个「暂时无法判定」态、不带 since、不给天数。
+    // 复用既有 `binding_unknown`（客户端已有对应文案与降级路径），**绝不新增枚举值**——边缘对
+    // ineligibleReason 做白名单校验，未知值会让整段慢启动投影被整体丢弃。
+    if (anchorState.kind === 'unknown') {
+      return { state: 'off', totalDays, eligible: false, ineligibleReason: 'binding_unknown' };
+    }
+    const anchor = anchorState.kind === 'anchor' ? anchorState.anchor : null;
     if (!anchor) return { state: 'off', totalDays, eligible: true };
 
     const platform = this.nurtureProvider?.platformFor(this.accountId);

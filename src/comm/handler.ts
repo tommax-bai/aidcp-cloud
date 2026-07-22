@@ -77,6 +77,7 @@ import { isWritingLanguage } from '../soul/writing-language.js';
 import type { WritingLanguage } from '../soul/types.js';
 import type { PacingSnapshotPayload } from './protocol.js';
 import type { AccountStateManager } from '../account-state.js';
+import { noteMirrorStaleRefusal } from '../config-mirror-freshness.js';
 import {
   parseAuthStatusPayload,
   parseOffboardResultPayload,
@@ -481,6 +482,10 @@ export class DefaultMessageHandler implements MessageHandler {
         // 后台回写入成功、账号继续对真实平台动作」。已在跑的会话不在此处 kill，只是不再开新动作。
         const pauseState = this.deps.accountState?.pauseStateOf(session.accountId) ?? 'active';
         if (pauseState !== 'active') {
+          // 记账落在**真正的拒绝点**（取值口 pauseStateOf 保持纯读）：这里确实少放行了一次平台动作。
+          if (pauseState === 'unknown') {
+            noteMirrorStaleRefusal('account_status', `note_arrived:${session.accountId}`);
+          }
           this.logger.log(
             `[comm] 账号${pauseState === 'paused' ? '已暂停' : '暂停态副本陈旧（停手）'}，跳过笔记处理:`,
             incomingNote.title,

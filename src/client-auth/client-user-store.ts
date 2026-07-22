@@ -22,7 +22,7 @@ import { generateKey, hashKey, verifyKey, decoyVerify } from './key.js';
 import { RETIRED_ACCOUNT_ID } from '../account-store.js';
 import { shanghaiDayStartMs } from '../time/shanghai-day.js';
 import { resolveAccountDisplayName } from '../account-display-name.js';
-import { isMirrorStale, noteMirrorStaleRefusal, type ConfigMirrorKey } from '../config-mirror-freshness.js';
+import { isMirrorStale, type ConfigMirrorKey } from '../config-mirror-freshness.js';
 import { writeWithMirrorBump, type MirrorVersionBumper } from '../config/mirror-version-store.js';
 
 const { Pool } = pg;
@@ -866,14 +866,16 @@ export class ClientUserStore {
    *
    * 副本陈旧 → `unknown`：跨进程副本下「副本里没有这个 env」≠「库里它还是 active」。把未知当允许，
    * 等于对一个正处于删除生命周期的环境继续下发自动化命令。调用方 MUST 按停手处理。
+   *
+   * **本方法是纯取值口，不记账**：它被每一条出站信封调用（热路径），而拒绝记账每次要落一条 PG 写；
+   * 而且这里返回 `unknown` 并不等于真的拒绝了什么——调用方对控制/收尾类信封仍会放行。记账收口在
+   * 真正的拒绝点（`server.ts` 的出口闸只在拦下时记一次），否则指标会被纯读取值淹没、且写压会在
+   * 权威不可达时堆到刷新器自我恢复所依赖的同一个连接池上。
    */
   automationGateForEdgeId(edgeId: string): EnvironmentAutomationGate {
     const normalized = edgeId.trim();
     if (!normalized.startsWith('ads-')) return 'allowed'; // 非 AdsPower 环境不在本闸作用域内
-    if (isMirrorStale('client_environment_automation_gate')) {
-      noteMirrorStaleRefusal('client_environment_automation_gate', normalized);
-      return 'unknown';
-    }
+    if (isMirrorStale('client_environment_automation_gate')) return 'unknown';
     return this.blockedAutomationEnvKeys.has(normalized.slice('ads-'.length)) ? 'blocked' : 'allowed';
   }
 

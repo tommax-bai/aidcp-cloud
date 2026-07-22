@@ -30,7 +30,7 @@ function fakePg() {
   const versions = new Map<string, number>();
   const quotas = new Map<string, Record<string, unknown>>();
   const personas = new Map<string, Record<string, unknown>>();
-  const refusals: Array<{ mirrorKey: string; target: string }> = [];
+  const refusals: Array<{ mirrorKey: string; target: string; count: number }> = [];
   let versionReadFails = false;
   let writeFails = false;
 
@@ -47,7 +47,11 @@ function fakePg() {
       return { rows: [...versions].map(([mirror_key, version]) => ({ mirror_key, version })) };
     }
     if (sql.includes('INSERT INTO config_mirror_stale_refusal')) {
-      refusals.push({ mirrorKey: String((params ?? [])[0]), target: String((params ?? [])[2]) });
+      refusals.push({
+        mirrorKey: String((params ?? [])[0]),
+        target: String((params ?? [])[2]),
+        count: Number((params ?? [])[3] ?? 1),
+      });
       return { rows: [] };
     }
     if (sql.includes('INSERT INTO quota_config')) {
@@ -352,3 +356,110 @@ test('5.2 面板回显的限额数字与同一时刻生效的数字逐格相等�
     }
   }
 });
+
+// ── 审计修复回归（2026-07-22 defects #3 / #5 / #8）─────────────────────────────────────────
+
+test('4.1 重载持续失败 → 副本「已知落后」MUST 转 stale 并停手（绝不因为比对成功就算新鲜）', withFreshnessCleanup(async () => {
+  const db = fakePg();
+  let now = 5_000_000;
+  const alerts: Array<{ mirrorKey: string; severity: string; tier: string; reloadFailing: boolean }> = [];
+  let reloadCalls = 0;
+  const refresher = new ConfigMirrorRefresher({
+    pool: db.pool,
+    versionStore: new MirrorVersionStore({ pool: db.pool }),
+    pollMs: 5000,
+    enabled: true,
+    executionTarget: 'dev',
+    clock: () => now,
+    logger: { log: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
+    onStaleAlert: (a) => alerts.push({ mirrorKey: a.mirrorKey, severity: a.severity, tier: a.tier, reloadFailing: a.reloadFailing }),
+    reloaders: {
+      persona_config: async () => { reloadCalls += 1; throw new Error('reload boom'); },
+    },
+  });
+  await refresher.start();
+  assert.equal(mirrorStateOf('persona_config'), 'fresh', '基线：刚起来是新鲜的');
+
+  // 版本表**读得动**（比对每轮都成功），但重载每次都炸 —— 我们明确知道副本落后了。
+  for (let i = 0; i < 15; i += 1) {
+    now += 5000;
+    await writeWithMirrorBump(db.pool, new MirrorVersionStore({ pool: db.pool }), 'persona_config', async (q) =>
+      q.query('INSERT INTO persona_config (account_id, persona, updated_by) VALUES ($1,$2,$3)', ['a', 'p', 'u']));
+    await refresher.runOnce();
+  }
+  assert.ok(reloadCalls >= 10, '每轮都应重试重载（版本没被记成已装载）');
+  assert.equal(
+    mirrorStateOf('persona_config'),
+    'stale',
+    '「比对得动但装不进来」= 已知落后，MUST 判 stale —— 否则一个明知落后的闸门副本照常放行平台动作',
+  );
+  assert.equal(shouldHaltNewPlatformActions('unit-test'), true, '已知落后的闸门镜像 MUST 停手');
+  assert.ok(alerts.some((a) => a.severity === 'stale' && a.reloadFailing), '告警必须说清是「已知落后」而非「读不到」');
+
+  const persona = refresher.health().entries.find((e) => e.mirrorKey === 'persona_config')!;
+  assert.equal(persona.state, 'stale', '健康投影 MUST 如实回 stale');
+  assert.ok(persona.reloadFailingSince !== null, '投影须给出「从何时起已知落后」');
+  assert.equal(persona.version, null, '副本从未成功装载过任何版本 → version 保持 null（绝不记成已装载）');
+  refresher.stop();
+}));
+
+test('4.10 参数镜像：超过观测阈值 MUST 发具名告警并在投影上如实 stale，但 MUST NOT 停手', withFreshnessCleanup(async () => {
+  const db = fakePg();
+  let now = 6_000_000;
+  const alerts: Array<{ mirrorKey: string; severity: string; tier: string }> = [];
+  const refresher = new ConfigMirrorRefresher({
+    pool: db.pool,
+    versionStore: new MirrorVersionStore({ pool: db.pool }),
+    pollMs: 5000,
+    enabled: true,
+    executionTarget: 'dev',
+    clock: () => now,
+    logger: { log: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
+    onStaleAlert: (a) => alerts.push({ mirrorKey: a.mirrorKey, severity: a.severity, tier: a.tier }),
+  });
+  await refresher.start();
+  db.setVersionReadFails(true);
+  // 观测阈值 5 分钟：跑够 6 分钟。
+  for (let i = 0; i < 80; i += 1) {
+    now += 5000;
+    await refresher.runOnce();
+  }
+  assert.equal(mirrorStateOf('model_config'), 'fresh', '参数镜像 MUST NOT 停手——取值口恒 fresh');
+  assert.ok(
+    alerts.some((a) => a.mirrorKey === 'model_config' && a.tier === 'parameter' && a.severity === 'stale'),
+    '参数镜像陈旧 MUST 发具名告警（「继续用最后已知良值」不等于「无需知道」）',
+  );
+  const model = refresher.health().entries.find((e) => e.mirrorKey === 'model_config')!;
+  assert.equal(model.state, 'stale', '健康投影 MUST 如实回 stale');
+  assert.equal(model.haltsOnStale, false, '但投影 MUST 同时说清它不停手');
+  assert.equal(model.staleMs, null, '停手阈值仍为 null');
+  refresher.stop();
+}));
+
+test('6.2 拒绝记账按时间窗聚合：热路径连打千次也只落有限几条写，且一次都不少计', withFreshnessCleanup(async () => {
+  const db = fakePg();
+  let now = 7_000_000;
+  const refresher = new ConfigMirrorRefresher({
+    pool: db.pool,
+    versionStore: new MirrorVersionStore({ pool: db.pool }),
+    pollMs: 5000,
+    enabled: true,
+    executionTarget: 'dev',
+    clock: () => now,
+    logger: { log: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
+  });
+  await refresher.start();
+  db.refusals.length = 0;
+
+  // 一次故障期间，出口闸 / 配额层 / note.arrived 会把它打成千次量级。
+  for (let i = 0; i < 1000; i += 1) refresher.noteStaleRefusal('persona_config', `ctx-${i}`);
+  assert.ok(db.refusals.length <= 2, `热路径 MUST NOT 每次调用一条 PG 写（实际 ${db.refusals.length} 条）`);
+
+  now += 60_000; // 跨过聚合窗口
+  refresher.stop(); // 停机 flush 把尾巴写掉
+  const total = db.refusals
+    .filter((r) => r.mirrorKey === 'persona_config')
+    .reduce((sum, r) => sum + r.count, 0);
+  assert.equal(total, 1000, '聚合 MUST NOT 少计——每一次拒绝都要落进累加值');
+  assert.ok(db.refusals.every((r) => r.target === 'dev'), '记账须带 executionTarget');
+}));

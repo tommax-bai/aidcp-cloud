@@ -16,9 +16,10 @@ import type { PersonaBinding } from '../config/persona-store.js';
 import {
   CONFIG_MIRROR_STALE_REASON,
   PERSONA_UNAVAILABLE_REASON,
+  hasStaleGateMirror,
   platformActionHalt,
-  shouldHaltNewPlatformActions,
 } from '../config/mirror-stop-work.js';
+import { noteMirrorStaleRefusal } from '../config-mirror-freshness.js';
 import { EventBus } from '../event-bus/index.js';
 import type { CommentApprovalTrace, CommentAppraisingPayload, MandatoryInteractionContext, NoteDetailData, PageCardsData } from '../event-bus/types.js';
 import {
@@ -1659,6 +1660,10 @@ export class RoleDispatcher {
     // 人设副本陈旧：云端此刻读不到人设，**不是**「该账号没设人设」。置独立不可用态，
     // MUST NOT 复用 needs_persona_setup（那会触发人设向导、并向运营错误指认成配置缺失）。
     if (verdict === PERSONA_UNAVAILABLE_REASON) {
+      // 记账（task 6.2）：这是「因镜像陈旧而停手」**最常见**的一条路径——人设副本一陈旧，
+      // 会话根本起不来，后面也就没有命令泵去补记。落在这里而不是取值口，是因为取值口也服务
+      // 只读裁决（什么都没拒绝），只有走到这一跳才是真的少放行了一次新会话。
+      noteMirrorStaleRefusal('persona_config', `session_start:${this.currentAccountId}`);
       console.warn(
         `[RoleDispatcher] 账号 ${this.currentAccountId} 人设副本陈旧 → 拒绝启动浏览会话（${PERSONA_UNAVAILABLE_REASON}）：不开循环、不发巡刷信号、不弹人设向导`,
       );
@@ -1667,6 +1672,7 @@ export class RoleDispatcher {
     }
     // 闸门镜像陈旧（人设之外的任一条）：同样不放行新会话。已在跑的会话不在此处 kill。
     if (verdict === CONFIG_MIRROR_STALE_REASON) {
+      platformActionHalt(`session_start:${this.currentAccountId}`); // 记账（判定已在 verdict 做完）
       console.warn(
         `[RoleDispatcher] 账号 ${this.currentAccountId} 配置镜像陈旧 → 拒绝启动浏览会话（${CONFIG_MIRROR_STALE_REASON}）`,
       );
@@ -1699,9 +1705,9 @@ export class RoleDispatcher {
     if (binding === 'unbound') return 'needs_persona_setup';
     if (binding === 'unknown') return PERSONA_UNAVAILABLE_REASON;
     // 其余闸门镜像陈旧 → 统一停手（不放行新会话）。
-    if (shouldHaltNewPlatformActions(`session_start:${this.currentAccountId}`)) {
-      return CONFIG_MIRROR_STALE_REASON;
-    }
+    // 这里用**不记账**的纯判据：本方法也服务只读裁决（resumeGateSnapshot，~60s 每跳一次），
+    // 只读裁决什么都没拒绝。真正拒绝那一跳的记账在 canStartSession 里落（含人设那一路）。
+    if (hasStaleGateMirror()) return CONFIG_MIRROR_STALE_REASON;
     return 'ok';
   }
 

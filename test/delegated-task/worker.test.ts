@@ -819,3 +819,51 @@ test('非重试终态也说人话（needs_persona_setup 只走这条路，从不
   assert.match(done!.terminalOutcome!.message, /未配置人设/);
   assert.doesNotMatch(done!.terminalOutcome!.message, /needs_persona_setup/, '不该把生码甩给运营');
 });
+
+// 审计修复回归（2026-07-22 defect #2）：只判「可重试延后」是不够的——`markAttemptDispatched` 早已
+// 把 attempt_count 加了 1，于是每轮基础设施故障都在啃尝试预算，几轮后照样以 `max_attempts` 判死。
+// 客户端「洗稿建帖」的 maxAttempts=2，镜像陈旧后约两轮（退避 30s）即终结。
+// spec user-delegated-tasks：MUST NOT 判为非重试终态、**MUST NOT 消耗掉任务的终态判定**，任务保持在队列中。
+test('权威未答持续 N 轮 → 任务始终在队列里，尝试预算一次都不掉（绝不落 max_attempts）', async () => {
+  const store = new MemoryDelegatedTaskStore();
+  let now = 20_000_000;
+  const task = await confirmedTask(store, now, {
+    action: 'publish_post', targetSuccessCount: 1, maxAttempts: 2, deadlineAt: now + 3_600_000, dedupeKey: 'authority-unanswered-budget',
+  });
+  const executor: DelegatedTaskExecutor = {
+    // 真实 targetKey 在无 candidateId 时是 `${action}:attempt:${attemptCount+1}`——会随尝试数变，
+    // 所以「重复目标」那条闸挡不住预算被啃；这里逐字复刻该形状。
+    targetKey: (t) => `${t.action}:attempt:${t.progress.attemptCount + 1}`,
+    execute: async () => ({ kind: 'failed', reason: 'persona_unavailable', retryable: false }),
+  };
+  const worker = new DelegatedTaskWorker({ store, executorFor: () => executor, now: () => now, claimLeaseMs: 10_000 });
+
+  for (let round = 0; round < 6; round += 1) {
+    await worker.tick();
+    const t = await store.get(task.id);
+    assert.equal(t?.status, 'deferred', `第 ${round} 轮：任务 MUST 留在队列里`);
+    assert.equal(t?.progress.attemptCount, 0, `第 ${round} 轮：权威未答 MUST NOT 消耗尝试预算`);
+    assert.ok(t?.terminalOutcome == null, `第 ${round} 轮：MUST NOT 落任何终态`);
+    now += 60_000;
+  }
+});
+
+// 对照：真实的可重试失败**应当**照常消耗预算并在耗尽时诚实落 max_attempts（上面那条修复没有把预算闸关掉）。
+test('对照：普通可重试失败照常消耗尝试预算，耗尽后诚实落 max_attempts', async () => {
+  const store = new MemoryDelegatedTaskStore();
+  let now = 21_000_000;
+  const task = await confirmedTask(store, now, {
+    action: 'publish_post', targetSuccessCount: 1, maxAttempts: 2, deadlineAt: now + 3_600_000, dedupeKey: 'ordinary-retryable-budget',
+  });
+  const executor: DelegatedTaskExecutor = {
+    targetKey: (t) => `${t.action}:attempt:${t.progress.attemptCount + 1}`,
+    execute: async () => ({ kind: 'failed', reason: 'platform_error', retryable: true }),
+  };
+  const worker = new DelegatedTaskWorker({ store, executorFor: () => executor, now: () => now, claimLeaseMs: 10_000 });
+  for (let round = 0; round < 4; round += 1) {
+    await worker.tick();
+    now += 60_000;
+  }
+  const done = await store.get(task.id);
+  assert.equal(done?.terminalOutcome?.code, 'max_attempts', '普通失败仍须按预算终结——修复 MUST NOT 把预算闸一并关掉');
+});

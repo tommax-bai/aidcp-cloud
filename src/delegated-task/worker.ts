@@ -247,9 +247,27 @@ export class DelegatedTaskWorker {
     task: DelegatedTask,
     token: string,
     attempt: DelegatedTaskAttempt,
-    result: DelegatedExecutionResult,
+    incoming: DelegatedExecutionResult,
     reconciling: boolean,
   ): Promise<DelegatedTask | null> {
+    // 权威未答（`persona_unavailable` / `config_mirror_stale`）→ 归一成 deferred，**并撤回这次尝试**。
+    //
+    // 只把它判成「可重试延后」是不够的：`markAttemptDispatched` 早已把 attempt_count 加了 1，于是每一轮
+    // 基础设施故障都在啃任务的尝试预算，几轮之后 `runOne` 在预算闸上把任务判成 `max_attempts`——换了个码，
+    // 仍然是被一次「云端读不到配置」判死。客户端「洗稿建帖」的 maxAttempts=2，镜像陈旧后约两轮
+    //（退避 30s）即终结。spec 明写：MUST NOT 消耗掉任务的终态判定，任务保持在队列中。
+    //
+    // `attemptStarted:false` 在这里是**可证**的：这两个码只由**起跑前**的闸产生（发布触发闸 blocked /
+    // 评论触发闸 not_started），此刻没有任何浏览器或平台动作被派发，撤回尝试不会掩盖任何既成事实。
+    const result: DelegatedExecutionResult =
+      incoming.kind === 'failed' && incoming.retryable === false && isAuthorityUnansweredReason(incoming.reason)
+        ? {
+            kind: 'deferred',
+            reason: incoming.reason,
+            retryAt: this.now() + AUTHORITY_UNANSWERED_BACKOFF_MS,
+            attemptStarted: false,
+          }
+        : incoming;
     if (result.kind === 'cancelled') {
       return this.finishExecutionCancelled(task, token, result, attempt);
     }
@@ -378,6 +396,10 @@ export class DelegatedTaskWorker {
     // 「该账号确实没绑人设」。把它们走进下面的非重试终态，会把用户的委托任务**永久判死**并回一句
     // 「该账号未配置人设」——而账号可能早已配好，只是云端读不到。既是错误指认，用户也无从修复。
     // 故：释放认领 + 按退避重排，任务留在队列里。
+    //
+    // **兜底分支**：正路已在 `handleAttemptResult` 入口把这两个码归一成 deferred 并**撤回尝试**
+    //（否则每轮啃掉一次尝试预算、几轮后照样以 max_attempts 判死）。这里保留同判据，是为了任何
+    // 不经那条归一而带着 fatalReason 走到本方法的调用方，仍然不会落非重试终态。
     if (fatalReason && isAuthorityUnansweredReason(fatalReason)) {
       this.logger.warn(
         `[delegated-task] 权威未答（${fatalReason}）→ 判可重试延后，绝不落非重试终态 task=${fresh.id}`,

@@ -242,6 +242,9 @@ import { PgAlertStore } from './alerts/index.js';
 import pg from 'pg';
 import { MirrorVersionStore } from './config/mirror-version-store.js';
 import { ConfigMirrorRefresher } from './config/mirror-refresher.js';
+import { allowsTransportWhenGateUnknown } from './config/mirror-stop-work.js';
+import { noteMirrorStaleRefusal } from './config-mirror-freshness.js';
+import { automationOperationDescriptorFor } from './comm/operation-registry.js';
 import { resolveEnvPgConfig } from './cache/pg-config.js';
 import { ModelConfigStore } from './config/model-config-store.js';
 import { RoleConfigStore } from './config/role-config-store.js';
@@ -2052,20 +2055,24 @@ async function main(): Promise<void> {
       client_environment_automation_gate: () => clientUserStore.refreshAutomationGateFromAuthority(),
     },
     // 具名告警 config_mirror_stale：载荷含 mirrorKey / 陈旧秒数 / 最后已知版本 / executionTarget。
-    // 预警（staleMs/2）走 P2，真正进入陈旧（已开始停手）走 P1。
+    // 优先级按**是否真的停手**给：闸门镜像进入陈旧 = 已停止下发新平台动作 → P1；闸门预警 → P2；
+    // 参数镜像（陈旧继续用最后已知良值、绝不停手）无论预警还是已陈旧一律 P3，且文案 MUST NOT 谎称已停手。
     ...(alertStore
       ? {
           onStaleAlert: (input) => {
+            const halting = input.tier === 'gate' && input.severity === 'stale';
+            const lag = input.reloadFailing ? '（副本已知落后：重载持续失败）' : '';
             void alertStore!
               .raise({
-                severity: input.severity === 'stale' ? 'P1' : 'P2',
+                severity: input.tier === 'parameter' ? 'P3' : input.severity === 'stale' ? 'P1' : 'P2',
                 type: 'config_mirror_stale',
-                title:
-                  input.severity === 'stale'
-                    ? `配置镜像已陈旧，已停止下发新平台动作（${input.mirrorKey}）`
+                title: halting
+                  ? `配置镜像已陈旧，已停止下发新平台动作（${input.mirrorKey}）`
+                  : input.tier === 'parameter'
+                    ? `参数镜像陈旧，继续使用最后已知良值（${input.mirrorKey}）`
                     : `配置镜像即将陈旧（${input.mirrorKey}）`,
                 detail:
-                  `mirror=${input.mirrorKey} 陈旧=${input.staleSeconds}s ` +
+                  `mirror=${input.mirrorKey} tier=${input.tier}${lag} 陈旧=${input.staleSeconds}s ` +
                   `最后已知版本=${input.lastKnownVersion ?? '无'} target=${input.executionTarget}`,
               })
               .catch((err: unknown) => {
@@ -2443,6 +2450,9 @@ async function main(): Promise<void> {
     generator: personaGenerator,
     facade: personaPanel,
     firstPostOnboarding: personaFirstPostOnboarding,
+    // 三态判据（task 4.2/4.3）：当代客户端的绑定态只经这条 HTTP 拉取面下发（WS 面对它们不推），
+    // 所以「未知 MUST NOT 压成权威的未绑」必须在这里也接上，与 ui-snapshot 同一判据同一事实源。
+    personaBinding: (accountId) => personaStore.bindingFor(accountId),
     logger: console,
   });
   const personaAutoFill = personaAutoFillStore
@@ -2531,13 +2541,26 @@ async function main(): Promise<void> {
     handler,
     // 删除本身不经 WS；这里只同步抑制普通自动化下发。视频号既有 offboard 清理命令与 session.end
     // 必须穿透，避免 tombstone 前被环境删除闸自锁。
-    // 三态出口闸（change config-mirror-cross-process-invalidation task 4.7）：只有明确 `allowed`
-    // 才放行；`blocked`（环境正被删）与 `unknown`（出口闸副本陈旧、无法确认）都不放行。
-    // 把 `unknown` 当允许，等于对一个可能正处于删除生命周期的环境继续下发自动化命令。
-    canPushToEdge: (env, edgeId) =>
-      env.type === 'session.end'
-      || env.type.startsWith('interaction.offboard.')
-      || clientUserStore.automationGateForEdgeId(edgeId) === 'allowed',
+    // 三态出口闸（change config-mirror-cross-process-invalidation task 4.7）：
+    // - `allowed`：放行（今日现状）。
+    // - `blocked`：环境正处于删除生命周期，这是**确定态**，除既有豁免外一律不放行。
+    // - `unknown`：出口闸副本陈旧，这是**瞬时基础设施态**、全车队同时命中。此时只拦「新的真实平台
+    //   动作」，控制面与收尾类照常放行（租约取得/归还、UI 快照、节奏、ack、验证码协助、离开笔记/返回）。
+    //   把 unknown 当 blocked 处理会连租约释放一起扣住 → 浏览器槽位不归还、在跑会话无法自然收敛，
+    //   且调用方只看到「投递 0 个」而把在线的边缘误报成离线。判据见 mirror-stop-work.ts。
+    canPushToEdge: (env, edgeId) => {
+      if (env.type === 'session.end' || env.type.startsWith('interaction.offboard.')) return true;
+      const gate = clientUserStore.automationGateForEdgeId(edgeId);
+      if (gate === 'allowed') return true;
+      if (gate === 'blocked') return false;
+      const allowed = allowsTransportWhenGateUnknown(
+        env.type,
+        automationOperationDescriptorFor(env.type)?.category ?? null,
+      );
+      // 只有真的拦下来才算一次「因陈旧的拒绝」——放行的那些不记账，否则指标被纯控制面淹没。
+      if (!allowed) noteMirrorStaleRefusal('client_environment_automation_gate', `transport:${env.type}`);
+      return allowed;
+    },
     onClose: (session) => {
       if (session.edgeId) {
         edgeTaskLeases.invalidateEdge(session.edgeId);

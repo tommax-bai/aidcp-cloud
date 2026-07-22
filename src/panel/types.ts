@@ -892,14 +892,22 @@ export type QuotaConfigSetResult =
 export interface PanelConfigMirrorHealthEntry {
   mirrorKey: string;
   tier: 'gate' | 'parameter';
-  /** 已知版本；从未成功比对过则 null。 */
+  /** 已**成功装载**进本进程副本的版本；从未成功装载过则 null。 */
   version: number | null;
-  /** 上一次**成功完成版本比对**的时刻（毫秒）；null = 从未成功。陈旧判定只看它。 */
+  /** 上一次**成功完成版本比对**的时刻（毫秒）；null = 从未成功。 */
   lastComparedAt: number | null;
   /** 上一次真正重载的时刻；只用于排障，**不参与**陈旧判定。 */
   lastReloadedAt: number | null;
+  /** 连续重载失败的起点；非 null = 副本**已知落后**（比对读到了新版本但装不进来）。 */
+  reloadFailingSince: number | null;
+  /** 观测口径状态：参数镜像超阈值同样如实回 stale（它们陈旧不停手，见 haltsOnStale）。 */
   state: 'fresh' | 'stale';
+  /** **停手**阈值；参数镜像为 null（陈旧只告警）。 */
   staleMs: number | null;
+  /** **观测**阈值：`state` 按它算。闸门 = staleMs，参数镜像 = 只发告警的观测阈值。 */
+  observeStaleMs: number;
+  /** 该镜像陈旧时是否触发停手（= tier === 'gate'）。 */
+  haltsOnStale: boolean;
   staleForMs: number;
 }
 

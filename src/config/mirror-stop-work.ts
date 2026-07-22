@@ -56,8 +56,61 @@ export function shouldHaltNewPlatformActions(context?: string): boolean {
   return platformActionHalt(context).halted;
 }
 
+/**
+ * **纯判据，不记账**——供只读裁决路径使用（如 `ui.snapshot` 那条 ~60s 周期链每跳都会问一次
+ * 「现在能不能起会话」）。只读裁决什么都没拒绝，让它记一次「因陈旧拒绝真实平台动作」会污染指标。
+ * 真正拒绝的那一跳（会话启动闸、命令泵）自己调 `platformActionHalt` / `noteMirrorStaleRefusal`。
+ */
+export function hasStaleGateMirror(): boolean {
+  return staleGateMirrors().length > 0;
+}
+
 /** 统一的具名停手原因码——运营与委托任务两侧共用，MUST NOT 与 `needs_persona_setup` 混用。 */
 export const CONFIG_MIRROR_STALE_REASON = 'config_mirror_stale';
 
 /** 人设专用的具名不可用态——与「未绑」严格可区分。 */
 export const PERSONA_UNAVAILABLE_REASON = 'persona_unavailable';
+
+/**
+ * 传输层出口闸在**副本陈旧（`unknown`）**时仍必须放行的信封类型（显式名单）。
+ *
+ * 出口闸原本只在「环境正处于删除生命周期」这一**确定态**返 false，那时拦死一切是对的。三态化后
+ * `unknown` 是一个**全车队同时触发的瞬时基础设施态**（一次 60s 的版本轮询中断），若沿用同一处理，
+ * WebSocket 出口会连**控制面与收尾**一起扣住：浏览器租约释放发不出去（槽位不归还）、UI 快照断供、
+ * 验证码协助拿不到帧；而调用方看到的只是「投递 0 个」，被归因成边缘离线——边缘明明在线。
+ *
+ * 那既超出本 change 自定的停手边界（停手 = 不放行**新的真实平台动作**，MUST NOT kill 在跑的会话），
+ * 也直接让「在跑会话自然收敛」落空——收尾动作正是被扣住的那一类。故 `unknown` 只拦新的平台动作，
+ * 控制/收尾类照常放行；真正的停手仍由上层闸（会话启动闸、命令泵）在入口收敛。
+ */
+const TRANSPORT_EXEMPT_WHEN_MIRROR_UNKNOWN: ReadonlySet<string> = new Set([
+  // 浏览器槽位的取得与**归还**：归还被扣住 = 槽位永不释放；两者成对放行才不会一头堵一头通。
+  'edge.task.acquire',
+  'edge.task.release',
+  // 验证码协助：人在远端替账号解封的通道，扣住它等于把一个可自愈的阻塞做成死锁。
+  'captcha.assist.capture',
+  'captcha.assist.click',
+  // 详情页收尾：离开笔记 / 退回上一页，属自然结束路径，不是新的平台动作。
+  'note.close',
+  'navigation.back',
+]);
+
+/**
+ * 传输层出口闸在 `unknown` 时是否放行该信封。
+ *
+ * `controlCategory` 由调用方从传输层的操作登记表取好传进来——操作登记表在 `src/comm/`，
+ * 配置层 MUST NOT 反向依赖它。`automation_control`（快照 / 节奏 / ack / 心跳）与
+ * `browser_lifecycle`（浏览器生命周期）两类本身不产生平台动作，照常放行。
+ */
+export function allowsTransportWhenGateUnknown(
+  type: string,
+  controlCategory:
+    | 'automation_control'
+    | 'platform_api_automation'
+    | 'browser_lifecycle'
+    | 'page_automation'
+    | null,
+): boolean {
+  if (TRANSPORT_EXEMPT_WHEN_MIRROR_UNKNOWN.has(type)) return true;
+  return controlCategory === 'automation_control' || controlCategory === 'browser_lifecycle';
+}
