@@ -1,3 +1,7 @@
+// 注意：本 import 指向 `src/config-mirror-freshness.ts`（src 根、无依赖的中立模块），**不是**
+// `src/config/`。`src/risk/` 对 `src/config/` 的 import 必须保持为 0——那条既成事实正是定稿方案
+// §11.4 要求一把四类限频配置判给自动化服务的依据，也有静态断言测试守着（test/config/module-boundary）。
+import { isMirrorStale, noteMirrorStaleRefusal } from '../config-mirror-freshness.js';
 import { coldStartDailyCap } from './cold-start-planner.js';
 import { deriveWindowQuotas, deriveWindowQuotasFromDaily, minWindowQuotas, scaleWindowQuotas, zeroInteractionQuotas } from './quotas.js';
 import { createRiskState, RiskStateMachine } from './risk-state-machine.js';
@@ -415,6 +419,17 @@ export class RiskController {
   private resolveNurtureAnchor(): NurtureAnchor | null {
     // 全局停用闸：无视所有账号级开关与 env 旁路（raw SQL 改库不刷镜像时的秒级止血手段）。
     if (this.slowStartDisabled) return null;
+    // 副本陈旧（change config-mirror-cross-process-invalidation task 4.7）：锚点事实源在客户业务侧
+    // （client_environments.slow_start_since），这里读的是本进程的只读副本。副本超过陈旧上限时**读不到
+    // 锚点 ≠ 该环境没开慢启动**——返回 null 等于「未开启慢启动」，也就是让一个刚开启慢启动的新号按
+    // 毕业档满配额跑，正是「未知压成否」的配额版本。故此处退到**最保守锚点（第 1 天）**并记账。
+    //
+    // 这**不是**用「回落最严档继续跑」代替停手：真正的停手在上层闸（会话启动闸与命令泵，见
+    // src/config/mirror-stop-work.ts 的统一实现），本处只是不让配额层在停手生效前把闸放到最松。
+    if (isMirrorStale('client_environment_slow_start')) {
+      noteMirrorStaleRefusal('client_environment_slow_start', this.accountId);
+      return { since: this.clock(), source: 'environment' };
+    }
     const environmentSince = this.nurtureProvider?.slowStartSinceFor(this.accountId) ?? null;
     if (environmentSince != null) return { since: environmentSince, source: 'environment' };
     const createdAt = this.coldStartRampEnabled ? this.nurtureProvider?.createdAtFor(this.accountId) : undefined;

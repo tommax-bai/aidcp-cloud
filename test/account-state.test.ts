@@ -19,22 +19,22 @@ class MemoryAccountStore implements AccountStore {
 }
 
 // ── 纯内存（无 store）：向后兼容 ──────────────────────────────────────────
-test('初始状态默认 active（isPaused 返回 false）', () => {
+test('初始状态默认 active（pauseStateOf 返回 active）', () => {
   const mgr = new AccountStateManager();
-  assert.equal(mgr.isPaused('acc-1'), false);
+  assert.equal(mgr.pauseStateOf('acc-1'), 'active');
 });
 
-test('pause 后 isPaused 返回 true（同步缓存立即生效）', async () => {
+test('pause 后 pauseStateOf 返回 paused（同步缓存立即生效）', async () => {
   const mgr = new AccountStateManager();
   await mgr.pause('acc-1');
-  assert.equal(mgr.isPaused('acc-1'), true);
+  assert.equal(mgr.pauseStateOf('acc-1'), 'paused');
 });
 
-test('resume 后 isPaused 返回 false', async () => {
+test('resume 后 pauseStateOf 返回 active', async () => {
   const mgr = new AccountStateManager();
   await mgr.pause('acc-1');
   await mgr.resume('acc-1');
-  assert.equal(mgr.isPaused('acc-1'), false);
+  assert.equal(mgr.pauseStateOf('acc-1'), 'active');
 });
 
 test('getStatus 返回正确结构', async () => {
@@ -60,12 +60,12 @@ test('暂停态持久化：同一 store 新 manager 加载后仍 paused，不静
   const m1 = new AccountStateManager(store);
   await m1.init();
   await m1.pause('default');
-  assert.equal(m1.isPaused('default'), true);
+  assert.equal(m1.pauseStateOf('default'), 'paused');
 
   // 模拟 cloud 重启：新 manager 从同一持久化 store 加载
   const m2 = new AccountStateManager(store);
   await m2.init();
-  assert.equal(m2.isPaused('default'), true, '被暂停账号重启后必须仍为 paused');
+  assert.equal(m2.pauseStateOf('default'), 'paused', '被暂停账号重启后必须仍为 paused');
   assert.equal(m2.getStatus('default').status, 'paused');
 });
 
@@ -78,7 +78,7 @@ test('resume 持久化：跨重启仍为 active', async () => {
 
   const m2 = new AccountStateManager(store);
   await m2.init();
-  assert.equal(m2.isPaused('default'), false);
+  assert.equal(m2.pauseStateOf('default'), 'active');
 });
 
 test('pause 写入持久化 store（未注册账号自动建行）', async () => {

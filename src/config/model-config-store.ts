@@ -9,6 +9,7 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
 
 const { Pool } = pg;
 
@@ -66,13 +67,17 @@ export interface ModelConfigStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /** 跨进程失效通道：写入与版本推进同事务。缺省 = 不推版本（行为逐位退回今日现状）。 */
+  mirrorVersionBumper?: MirrorVersionBumper;
 }
 
 export class ModelConfigStore {
   private readonly pool: pg.Pool;
+  private readonly mirrorVersionBumper?: MirrorVersionBumper;
   private cache: ModelConfigValue = { ...MODEL_CONFIG_DEFAULTS };
 
   constructor(options: ModelConfigStoreOptions = {}) {
+    this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.pool =
       options.pool ??
       new Pool({
@@ -88,6 +93,11 @@ export class ModelConfigStore {
   async init(): Promise<void> {
     await this.pool.query(MODEL_CONFIG_SCHEMA_SQL);
     await this.pool.query(MODEL_CONFIG_ALTER_SQL);
+    await this.reload();
+  }
+
+  /** 跨进程失效刷新入口（task 3.2）：只由刷新器在版本变化时调用；`reload()` 保持 private。 */
+  async refreshFromAuthority(): Promise<void> {
     await this.reload();
   }
 
@@ -124,14 +134,16 @@ export class ModelConfigStore {
       imageModel: patch.imageModel?.trim() || this.cache.imageModel,
       imageProvider: patch.imageProvider?.trim() || this.cache.imageProvider,
     };
-    await this.pool.query(
-      `INSERT INTO model_config (id, text_model, text_provider, image_model, image_provider, updated_at, updated_by)
+    await writeWithMirrorBump(this.pool, this.mirrorVersionBumper, 'model_config', (q) =>
+      q.query(
+        `INSERT INTO model_config (id, text_model, text_provider, image_model, image_provider, updated_at, updated_by)
        VALUES (1, $1, $2, $3, $4, now(), $5)
        ON CONFLICT (id)
        DO UPDATE SET text_model = EXCLUDED.text_model, text_provider = EXCLUDED.text_provider,
                      image_model = EXCLUDED.image_model, image_provider = EXCLUDED.image_provider,
                      updated_at = now(), updated_by = EXCLUDED.updated_by`,
-      [next.textModel, next.textProvider, next.imageModel, next.imageProvider, updatedBy],
+        [next.textModel, next.textProvider, next.imageModel, next.imageProvider, updatedBy],
+      ),
     );
     this.cache = next;
     return next;

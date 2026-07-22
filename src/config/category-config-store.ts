@@ -17,6 +17,7 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
 import { normalizeThinkingMode, type ThinkingMode } from './role-catalog.js';
 
 const { Pool } = pg;
@@ -68,6 +69,8 @@ export interface CategoryConfigStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /** 跨进程失效通道：写入与版本推进同事务。缺省 = 不推版本（行为逐位退回今日现状）。 */
+  mirrorVersionBumper?: MirrorVersionBumper;
 }
 
 interface CategoryConfigDbRow {
@@ -81,10 +84,12 @@ interface CategoryConfigDbRow {
 
 export class CategoryConfigStore {
   private readonly pool: pg.Pool;
+  private readonly mirrorVersionBumper?: MirrorVersionBumper;
   /** 仅缓存全局默认行（account_id IS NULL）。 */
   private cache = new Map<string, CategoryConfigRow>();
 
   constructor(options: CategoryConfigStoreOptions = {}) {
+    this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.pool =
       options.pool ??
       new Pool({
@@ -100,6 +105,11 @@ export class CategoryConfigStore {
   async init(): Promise<void> {
     await this.pool.query(CATEGORY_CONFIG_SCHEMA_SQL);
     await this.pool.query(CATEGORY_CONFIG_ALTER_SQL);
+    await this.reload();
+  }
+
+  /** 跨进程失效刷新入口（task 3.2）：只由刷新器在版本变化时调用；`reload()` 保持 private。 */
+  async refreshFromAuthority(): Promise<void> {
     await this.reload();
   }
 
@@ -165,14 +175,16 @@ export class CategoryConfigStore {
     // 思考模式独立于 model 行（change role-thinking-mode-config）：不传 → 保持；传 'default'/空/脏串 → null（清除）。
     const nextThinking =
       patch.thinkingMode === undefined ? prev.thinkingMode : normalizeThinkingMode(patch.thinkingMode);
-    const { rows } = await this.pool.query<CategoryConfigDbRow>(
-      `INSERT INTO category_config (category_id, account_id, model, provider, thinking_mode, updated_at, updated_by)
+    const { rows } = await writeWithMirrorBump(this.pool, this.mirrorVersionBumper, 'category_config', (q) =>
+      q.query<CategoryConfigDbRow>(
+        `INSERT INTO category_config (category_id, account_id, model, provider, thinking_mode, updated_at, updated_by)
        VALUES ($1, NULL, $2, $3, $4, now(), $5)
        ON CONFLICT (category_id) WHERE account_id IS NULL
        DO UPDATE SET model = EXCLUDED.model, provider = EXCLUDED.provider, thinking_mode = EXCLUDED.thinking_mode,
                      updated_at = now(), updated_by = EXCLUDED.updated_by
        RETURNING category_id, model, provider, thinking_mode, updated_at, updated_by`,
-      [categoryId, nextModel, nextProvider, nextThinking, updatedBy],
+        [categoryId, nextModel, nextProvider, nextThinking, updatedBy],
+      ),
     );
     const row = rows[0];
     const result: CategoryConfigRow = {

@@ -475,9 +475,16 @@ export class DefaultMessageHandler implements MessageHandler {
           this.logger.warn('[comm] note.arrived 会话缺 accountId（握手应已保证）— 跳过该笔记，绝不回落 default');
           return makeEnvelope('note.ack', env.id, this.clock(), { received: true });
         }
-        // 暂停检查：已暂停则仅返回 ack，不触发 orchestrator。
-        if (this.deps.accountState?.isPaused(session.accountId)) {
-          this.logger.log('[comm] 账号已暂停，跳过笔记处理:', incomingNote.title);
+        // 暂停检查（三态，change config-mirror-cross-process-invalidation task 4.6）：
+        // `paused` 与 `unknown` 都停手——只 ack、不触发编排。`unknown` = 暂停态副本已超过陈旧上限，
+        // 无法确认该账号是否刚被运营暂停；按旧的「查不到即 active」继续跑，等于「运营点了暂停、
+        // 后台回写入成功、账号继续对真实平台动作」。已在跑的会话不在此处 kill，只是不再开新动作。
+        const pauseState = this.deps.accountState?.pauseStateOf(session.accountId) ?? 'active';
+        if (pauseState !== 'active') {
+          this.logger.log(
+            `[comm] 账号${pauseState === 'paused' ? '已暂停' : '暂停态副本陈旧（停手）'}，跳过笔记处理:`,
+            incomingNote.title,
+          );
           return makeEnvelope('note.ack', env.id, this.clock(), { received: true });
         }
 

@@ -2083,8 +2083,15 @@ async function main(): Promise<void> {
     status: async (accountId) => {
       const acct = await requireCommandAccount(accountId);
       const state = accountState.getStatus(acct);
-      const emoji = state.status === 'paused' ? '⏸️' : '🟢';
-      const statusText = state.status === 'paused' ? 'paused' : 'active';
+      // 三态：`unknown` = 暂停态副本已陈旧、云端此刻读不到。如实说「读不到」，
+      // MUST NOT 把它显示成 active——那正是「未知压成否」在运营界面上的样子。
+      const emoji = state.status === 'paused' ? '⏸️' : state.status === 'unknown' ? '❓' : '🟢';
+      const statusText =
+        state.status === 'paused'
+          ? 'paused'
+          : state.status === 'unknown'
+            ? '暂时读不到（云端配置副本陈旧，已停止下发新命令）'
+            : 'active';
       const extra = state.pausedAt ? `\n暂停时间：${new Date(state.pausedAt).toLocaleString()}` : '';
       return `账号 \`${acct}\` 当前状态：${statusText} ${emoji}${extra}`;
     },
@@ -2475,10 +2482,13 @@ async function main(): Promise<void> {
     handler,
     // 删除本身不经 WS；这里只同步抑制普通自动化下发。视频号既有 offboard 清理命令与 session.end
     // 必须穿透，避免 tombstone 前被环境删除闸自锁。
+    // 三态出口闸（change config-mirror-cross-process-invalidation task 4.7）：只有明确 `allowed`
+    // 才放行；`blocked`（环境正被删）与 `unknown`（出口闸副本陈旧、无法确认）都不放行。
+    // 把 `unknown` 当允许，等于对一个可能正处于删除生命周期的环境继续下发自动化命令。
     canPushToEdge: (env, edgeId) =>
       env.type === 'session.end'
       || env.type.startsWith('interaction.offboard.')
-      || clientUserStore.isAutomationAllowedForEdgeId(edgeId),
+      || clientUserStore.automationGateForEdgeId(edgeId) === 'allowed',
     onClose: (session) => {
       if (session.edgeId) {
         edgeTaskLeases.invalidateEdge(session.edgeId);

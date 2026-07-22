@@ -18,6 +18,7 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
 import { RETIRED_ACCOUNT_ID } from '../account-store.js';
 import { resolveAccountDisplayName, type AccountDisplayNameSource } from '../account-display-name.js';
 import { SHANGHAI_DAY_START_SQL } from '../time/shanghai-day.js';
@@ -283,8 +284,20 @@ export interface ContentScheduleStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
-  /** 全局活跃周历只读 provider；缺失/非法沿浏览既有语义回落 null=全天活跃。 */
+  /**
+   * 全局活跃周历只读 provider；缺失/非法沿浏览既有语义回落 null=全天活跃。
+   *
+   * **归属连带约束（change config-mirror-cross-process-invalidation task 1.4 / 5.3）**：
+   * 这个 provider 背后是 `session_config_global`，该表随其消费方归 **aidcp-automation**。
+   * 本 store 的 `effectiveActiveWeekMaskFor()`（automation 侧现读）与 `listCatalog()`
+   *（api 侧面板目录投影）**必须经同一个 provider、同一次求值**取生效掩码：
+   * api 侧 MUST NOT 另建一份 `session_config_global` 副本自行合成——展示值与生效值一旦分两处求值，
+   * 就一定会出现「后台显示的数字」与「闸实际按的数字」不一致，而这类不一致在界面上完全看不出来
+   *（同 `interaction-risk-gating` 里「慢启动投影与 clamp MUST 同一解析函数、同一次时钟」）。
+   */
   globalActiveWeekMask?: () => string | null;
+  /** 跨进程失效通道：写入与版本推进同事务。缺省 = 不推版本（行为逐位退回今日现状）。 */
+  mirrorVersionBumper?: MirrorVersionBumper;
 }
 
 interface GlobalDbRow {
@@ -397,10 +410,16 @@ function actionModeFromDb(mode: string | null | undefined, enabled: boolean | nu
 export class ContentScheduleStore {
   private readonly pool: pg.Pool;
   private readonly globalActiveWeekMask: () => string | null;
+  private readonly mirrorVersionBumper?: MirrorVersionBumper;
   private globalCache: ContentScheduleGlobalRow | null = null;
-  private readonly accountCache = new Map<string, AccountContentScheduleRow>();
+  /**
+   * 账号排期镜像。**引用可替换**（非 readonly）：跨进程刷新器会在任意时刻触发重载，
+   * 原地 clear + fill 会让并发的同步现读撞上「空/半填」的中途态 → 一个已配好排期的账号被当成未配。
+   */
+  private accountCache = new Map<string, AccountContentScheduleRow>();
 
   constructor(options: ContentScheduleStoreOptions = {}) {
+    this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.globalActiveWeekMask = options.globalActiveWeekMask ?? (() => null);
     this.pool =
       options.pool ??
@@ -450,6 +469,11 @@ export class ContentScheduleStore {
     return rows.length === 1;
   }
 
+  /** 跨进程失效刷新入口（task 3.2）：只由刷新器在版本变化时调用；`reload()` 保持 private。 */
+  async refreshFromAuthority(): Promise<void> {
+    await this.reload();
+  }
+
   private async reload(): Promise<void> {
     const g = await this.pool.query<GlobalDbRow>(
       `SELECT content_active_mask, updated_at, updated_by FROM content_schedule_global WHERE id = 1`,
@@ -463,8 +487,10 @@ export class ContentScheduleStore {
               active_week_mask, content_active_mask, updated_at, updated_by
          FROM account_content_schedule`,
     );
-    this.accountCache.clear();
-    for (const r of a.rows) this.accountCache.set(r.account_id, this.accountFromDb(r));
+    // 构建新 Map → 原子替换引用（禁止原地 clear+fill，防并发现读撞上半填快照）。
+    const nextAccounts = new Map<string, AccountContentScheduleRow>();
+    for (const r of a.rows) nextAccounts.set(r.account_id, this.accountFromDb(r));
+    this.accountCache = nextAccounts;
   }
 
   private globalFromDb(r: GlobalDbRow): ContentScheduleGlobalRow {
@@ -508,12 +534,20 @@ export class ContentScheduleStore {
     return this.accountCache.get(accountId) ?? null;
   }
 
+  /**
+   * 全局活跃周历的**唯一解析点**（task 5.3）：automation 侧现读与 api 侧面板目录投影共用它，
+   * 保证「面板显示的生效掩码」= 「闸实际按的生效掩码」。MUST NOT 在别处另写一份等价逻辑。
+   */
+  private resolveGlobalActiveWeekMask(): string | null {
+    const globalMask = this.globalActiveWeekMask();
+    return isValidWeekActiveMask(globalMask) ? globalMask : null;
+  }
+
   /** 账号活跃覆盖合法才优先；脏覆盖视为缺失并回落全局，绝不因坏值绕过更严格全局闸。 */
   effectiveActiveWeekMaskFor(accountId: string): string | null {
     const accountMask = this.accountCache.get(accountId)?.activeWeekMask;
     if (isValidWeekActiveMask(accountMask)) return accountMask;
-    const globalMask = this.globalActiveWeekMask();
-    return isValidWeekActiveMask(globalMask) ? globalMask : null;
+    return this.resolveGlobalActiveWeekMask();
   }
 
   /** 账号内容覆盖按 null 继承；脏非空值原样交调度器 fail-closed 校验。 */
@@ -565,13 +599,15 @@ export class ContentScheduleStore {
     if (!('contentActiveMask' in patch)) return { ok: false, reason: 'no_valid_fields' };
     if (!validMaskPatch(patch.contentActiveMask)) return { ok: false, reason: 'invalid_value' };
     const nextMask = patch.contentActiveMask ?? null;
-    const { rows } = await this.pool.query<GlobalDbRow>(
-      `INSERT INTO content_schedule_global (id, content_active_mask, updated_at, updated_by)
+    const { rows } = await writeWithMirrorBump(this.pool, this.mirrorVersionBumper, 'content_schedule', (q) =>
+      q.query<GlobalDbRow>(
+        `INSERT INTO content_schedule_global (id, content_active_mask, updated_at, updated_by)
        VALUES (1, $1, now(), $2)
        ON CONFLICT (id) DO UPDATE SET content_active_mask = EXCLUDED.content_active_mask,
                                        updated_at = now(), updated_by = EXCLUDED.updated_by
        RETURNING content_active_mask, updated_at, updated_by`,
-      [nextMask, updatedBy],
+        [nextMask, updatedBy],
+      ),
     );
     const row = rows[0]
       ? this.globalFromDb(rows[0])
@@ -700,8 +736,9 @@ export class ContentScheduleStore {
     const nextContentMask =
       'contentActiveMask' in patch ? patch.contentActiveMask ?? null : prev?.contentActiveMask ?? null;
 
-    const { rows } = await this.pool.query<AccountDbRow>(
-      `INSERT INTO account_content_schedule
+    const { rows } = await writeWithMirrorBump(this.pool, this.mirrorVersionBumper, 'content_schedule', (q) =>
+      q.query<AccountDbRow>(
+        `INSERT INTO account_content_schedule
          (account_id, auto_enabled, post_enabled, post_daily_cap, comment_enabled, comment_daily_cap,
           contact_comment_enabled, contact_comment_daily_cap, post_mode, comment_mode, contact_comment_mode,
           active_week_mask, content_active_mask, updated_at, updated_by)
@@ -738,6 +775,7 @@ export class ContentScheduleStore {
         nextContentMask,
         updatedBy,
       ],
+      ),
     );
     const row = rows[0]
       ? this.accountFromDb(rows[0])
@@ -830,12 +868,11 @@ export class ContentScheduleStore {
       const configured = r.auto_enabled !== null;
       const hasActiveOverrideMask = isValidWeekActiveMask(r.active_week_mask);
       const hasContentOverrideMask = r.content_active_mask != null;
+      // 面板目录的生效掩码走与 automation 侧现读**同一个解析函数**（task 5.3）：
+      // api 侧绝不另建 session_config_global 副本、绝不自行合成。
       const effectiveActiveWeekMask = hasActiveOverrideMask
         ? r.active_week_mask
-        : (() => {
-            const globalMask = this.globalActiveWeekMask();
-            return isValidWeekActiveMask(globalMask) ? globalMask : null;
-          })();
+        : this.resolveGlobalActiveWeekMask();
       const effectiveContentActiveMask = r.content_active_mask ?? this.globalCache?.contentActiveMask ?? null;
       const postMode = actionModeFromDb(r.post_mode, r.post_enabled);
       const commentMode = actionModeFromDb(r.comment_mode, r.comment_enabled);

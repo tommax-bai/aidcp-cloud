@@ -11,6 +11,7 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
 import { normalizePlatformId, SCHEDULED_GROUP_JOIN_DAILY_CAP_MAX } from '../platform/index.js';
 
 const { Pool } = pg;
@@ -66,6 +67,8 @@ export interface FacebookGroupJoinAutomationStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /** 跨进程失效通道：写入与版本推进同事务。缺省 = 不推版本（行为逐位退回今日现状）。 */
+  mirrorVersionBumper?: MirrorVersionBumper;
 }
 
 interface ConfigDbRow {
@@ -110,9 +113,11 @@ function defaultRow(accountId: string): FacebookGroupJoinAutomationConfigRow {
 
 export class FacebookGroupJoinAutomationStore {
   private readonly pool: pg.Pool;
+  private readonly mirrorVersionBumper?: MirrorVersionBumper;
   private cache = new Map<string, FacebookGroupJoinAutomationConfigRow>();
 
   constructor(options: FacebookGroupJoinAutomationStoreOptions = {}) {
+    this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.pool =
       options.pool ??
       new Pool({
@@ -126,6 +131,11 @@ export class FacebookGroupJoinAutomationStore {
 
   async init(): Promise<void> {
     await this.pool.query(FACEBOOK_GROUP_JOIN_AUTOMATION_CONFIG_SCHEMA_SQL);
+    await this.reload();
+  }
+
+  /** 跨进程失效刷新入口（task 3.2）：只由刷新器在版本变化时调用；`reload()` 保持 private。 */
+  async refreshFromAuthority(): Promise<void> {
     await this.reload();
   }
 
@@ -199,7 +209,12 @@ export class FacebookGroupJoinAutomationStore {
       return { ok: false, reason: 'unsupported_automation_action' };
     }
 
-    const { rows } = await this.pool.query<ConfigDbRow>(
+    const { rows } = await writeWithMirrorBump(
+      this.pool,
+      this.mirrorVersionBumper,
+      'facebook_group_join_automation_config',
+      (q) =>
+        q.query<ConfigDbRow>(
       `INSERT INTO facebook_group_join_automation_config
          (account_id, enabled, daily_cap, week_mask, updated_at, updated_by)
        VALUES ($1, $2, $3, $4, now(), $5)
@@ -223,6 +238,7 @@ export class FacebookGroupJoinAutomationStore {
         hasDailyCap,
         hasWeekMask,
       ],
+        ),
     );
     const returned = rows[0];
     if (!returned) {

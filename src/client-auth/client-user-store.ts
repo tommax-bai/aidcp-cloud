@@ -22,6 +22,8 @@ import { generateKey, hashKey, verifyKey, decoyVerify } from './key.js';
 import { RETIRED_ACCOUNT_ID } from '../account-store.js';
 import { shanghaiDayStartMs } from '../time/shanghai-day.js';
 import { resolveAccountDisplayName } from '../account-display-name.js';
+import { isMirrorStale, noteMirrorStaleRefusal, type ConfigMirrorKey } from '../config-mirror-freshness.js';
+import { writeWithMirrorBump, type MirrorVersionBumper } from '../config/mirror-version-store.js';
 
 const { Pool } = pg;
 
@@ -427,7 +429,20 @@ function provisioningProofMatches(proof: string, expectedHash: string): boolean 
 
 export interface ClientUserStoreOptions {
   pool?: pg.Pool;
+  /**
+   * 跨进程失效通道（change config-mirror-cross-process-invalidation task 2.4）：
+   * 环境慢启动锚点与环境自动化出口闸都是**闸门镜像**，写入须在同事务推进版本。
+   * 缺省 = 不推版本（行为逐位退回今日现状）。
+   */
+  mirrorVersionBumper?: MirrorVersionBumper;
 }
+
+/**
+ * 环境自动化出口闸读取结果（三态，task 4.7）。
+ * `unknown` = 出口闸副本已超过陈旧上限，无法确认该环境是否正处于删除生命周期 →
+ * MUST NOT 向该环境下发普通自动化命令（把未知当"允许"就是对一个正在被删的环境继续发指令）。
+ */
+export type EnvironmentAutomationGate = 'allowed' | 'blocked' | 'unknown';
 
 export type ClientApprovalReachability =
   | { reachable: true; reason: 'reachable' }
@@ -441,6 +456,7 @@ export interface ClientApprovalGroupCoverage {
 
 export class ClientUserStore {
   private readonly pool: pg.Pool;
+  private readonly mirrorVersionBumper?: MirrorVersionBumper;
   /** 同步 WS 出口闸镜像：删除生命周期中的 AdsPower env 不再接收普通自动化命令。 */
   private blockedAutomationEnvKeys = new Set<string>();
   /** RiskController 同步热路径镜像：只收录当前恰好绑定一个环境的账号。 */
@@ -448,6 +464,7 @@ export class ClientUserStore {
   private ambiguousEnvironmentAccounts = new Set<string>();
 
   constructor(options: ClientUserStoreOptions = {}) {
+    this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.pool = options.pool ?? new Pool(resolveEnvPgConfig());
   }
 
@@ -803,18 +820,61 @@ export class ClientUserStore {
 
   async init(): Promise<void> {
     await this.pool.query(CLIENT_USERS_SCHEMA_SQL);
+    await this.refreshAutomationGateMirror();
+    await this.refreshEnvironmentSlowStartMirror();
+  }
+
+  /**
+   * 独立事务推进一次镜像版本——**仅供本身不在事务内的批量维护写**（如一次性回灌迁移）使用。
+   * 常规配置写入 MUST 走 `writeWithMirrorBump`（同事务），绝不用本方法代替。
+   */
+  private async bumpMirrorBestEffort(mirrorKey: ConfigMirrorKey): Promise<void> {
+    if (!this.mirrorVersionBumper) return;
+    try {
+      await this.mirrorVersionBumper.bumpInTx(this.pool, mirrorKey);
+      this.mirrorVersionBumper.notifyAfterCommit?.(mirrorKey);
+    } catch (err) {
+      console.warn(
+        `[client-env] 镜像版本推进失败 mirror=${mirrorKey}（其它进程将等到下一次写入才失效）: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  /** 重建环境自动化出口闸镜像（构建新 Set → 原子替换引用，防并发现读撞上半填）。 */
+  async refreshAutomationGateMirror(): Promise<void> {
     const blocked = await this.pool.query<{ env_key: string }>(
       `SELECT env_key FROM client_environments WHERE lifecycle_state <> 'active'`,
     );
     this.blockedAutomationEnvKeys = new Set(blocked.rows.map((row) => row.env_key));
+  }
+
+  /** 跨进程失效刷新入口（task 3.2）：出口闸镜像。只由刷新器在版本变化时调用。 */
+  async refreshAutomationGateFromAuthority(): Promise<void> {
+    await this.refreshAutomationGateMirror();
+  }
+
+  /** 跨进程失效刷新入口（task 3.2）：慢启动锚点镜像。只由刷新器在版本变化时调用。 */
+  async refreshSlowStartFromAuthority(): Promise<void> {
     await this.refreshEnvironmentSlowStartMirror();
   }
 
-  /** WebSocket 传输层同步闸；不产生删除命令，只在 Cloud 内部抑制删除环境的普通自动化下发。 */
-  isAutomationAllowedForEdgeId(edgeId: string): boolean {
+  /**
+   * WebSocket 传输层同步闸（**三态**，task 4.7）；不产生删除命令，只在 Cloud 内部抑制删除环境的
+   * 普通自动化下发。
+   *
+   * 副本陈旧 → `unknown`：跨进程副本下「副本里没有这个 env」≠「库里它还是 active」。把未知当允许，
+   * 等于对一个正处于删除生命周期的环境继续下发自动化命令。调用方 MUST 按停手处理。
+   */
+  automationGateForEdgeId(edgeId: string): EnvironmentAutomationGate {
     const normalized = edgeId.trim();
-    if (!normalized.startsWith('ads-')) return true;
-    return !this.blockedAutomationEnvKeys.has(normalized.slice('ads-'.length));
+    if (!normalized.startsWith('ads-')) return 'allowed'; // 非 AdsPower 环境不在本闸作用域内
+    if (isMirrorStale('client_environment_automation_gate')) {
+      noteMirrorStaleRefusal('client_environment_automation_gate', normalized);
+      return 'unknown';
+    }
+    return this.blockedAutomationEnvKeys.has(normalized.slice('ads-'.length)) ? 'blocked' : 'allowed';
   }
 
   /**
@@ -837,6 +897,8 @@ export class ClientUserStore {
         WHERE e.env_key=pending.env_key
        RETURNING e.env_key`,
     );
+    // 慢启动锚点是闸门镜像：一次性回灌同样要推进版本，否则另一 target 的进程到重启前看不到。
+    await this.bumpMirrorBestEffort('client_environment_slow_start');
     await this.refreshEnvironmentSlowStartMirror();
     return result.rowCount ?? result.rows.length;
   }
@@ -880,7 +942,14 @@ export class ClientUserStore {
     this.ambiguousEnvironmentAccounts = ambiguous;
   }
 
-  /** RiskController 同步、零 IO 现读；无绑定/歧义/关闭均返回 null。 */
+  /**
+   * RiskController 同步、零 IO 现读；无绑定/歧义/关闭均返回 null。
+   *
+   * **本方法保持二值返回**（`AccountNurtureProvider` 契约在 `src/risk/types.ts`，属并行 change
+   * `risk-state-cross-process-integrity` 的独占范围，本 change 不动它）。副本陈旧这一态由
+   * `RiskController.resolveNurtureAnchor()` 直接经 `mirrorStateOf('client_environment_slow_start')`
+   * 判读——见那里的注释：读不到 MUST NOT 被当成「未开启慢启动」（= 满配额）。
+   */
   slowStartSinceFor(accountId: string): number | null {
     if (this.ambiguousEnvironmentAccounts.has(accountId)) return null;
     return this.environmentSlowStartByAccount.get(accountId) ?? null;
@@ -950,14 +1019,21 @@ export class ClientUserStore {
     if (!userId || !key) return { ok: false, reason: 'environment_not_owned' };
     const value = enabled ? new Date(shanghaiDayStartMs(now)) : null;
     try {
-      const result = await this.pool.query(
-        `UPDATE client_environments e
+      // 写库与版本推进同事务：写库失败 → 回滚 → 版本不进、镜像不刷。
+      const result = await writeWithMirrorBump(
+        this.pool,
+        this.mirrorVersionBumper,
+        'client_environment_slow_start',
+        (q) =>
+          q.query(
+            `UPDATE client_environments e
             SET slow_start_since=$3, slow_start_initialized=true, updated_at=now()
           WHERE e.env_key=$2
             AND EXISTS(SELECT 1 FROM client_env_scope s
                         WHERE s.user_id=$1 AND s.env_key=e.env_key AND s.source='admin')
         RETURNING e.env_key`,
-        [userId, key, value],
+            [userId, key, value],
+          ),
       );
       if ((result.rowCount ?? result.rows.length) === 0) {
         return { ok: false, reason: 'environment_not_owned' };

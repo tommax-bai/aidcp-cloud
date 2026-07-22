@@ -12,10 +12,22 @@
  *
  * 红线：本 store 只读写 session_config_global；绝不碰风控状态单写路径（risk_state / setQuotaLevel / applySignal）、不经协议。
  * 建表幂等（CREATE TABLE IF NOT EXISTS），与 migrations/0022_global_safety_config.sql 同源。
+ *
+ * ## 模块归属：本 store 归 aidcp-automation（change config-mirror-cross-process-invalidation task 1.2）
+ *
+ * 依据：`src/risk/` 对 `src/config/` 的 import 命中数为 **0**，反向 **13 处**（本文件 :30 即其一）——
+ * 依赖方向已单向倒置，运行时消费者只有风控 / 调度层。归属对齐是纯划线、零代码成本。定稿方案 §11.4 要求一。
+ * 归属对齐 MUST NOT 被读作跨进程可见性已消失（dev/ol 两进程共库），故写入路径仍接
+ * `writeWithMirrorBump`（同事务推进版本）。
+ *
+ * **一处连带影响**：`content-schedule-store.ts` 经注入的 `globalActiveWeekMask()` 读本表的活跃掩码，
+ * 其中 `listCatalog()` 是 api 侧面板目录投影。本表迁走后 api 侧目录 MUST 向权威侧取**生效掩码**，
+ * MUST NOT 在 api 侧另建一份 `session_config_global` 副本自行合成。
  */
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
 import {
   DEFAULT_COLLECT_SAVE_LIKE_DENOM,
   DEFAULT_FOLLOW_FANS_DENOM,
@@ -98,6 +110,8 @@ export interface SessionConfigStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /** 跨进程失效通道：写入与版本推进同事务。缺省 = 不推版本（行为逐位退回今日现状）。 */
+  mirrorVersionBumper?: MirrorVersionBumper;
 }
 
 interface SessionDbRow {
@@ -132,10 +146,12 @@ function validDenom(raw: number | string | null | undefined): number | undefined
 
 export class SessionConfigStore implements SessionLimitProvider {
   private readonly pool: pg.Pool;
+  private readonly mirrorVersionBumper?: MirrorVersionBumper;
   /** 全局单行镜像；null = 库无行（全回落写死默认）。 */
   private cache: SessionConfigRow | null = null;
 
   constructor(options: SessionConfigStoreOptions = {}) {
+    this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.pool =
       options.pool ??
       new Pool({
@@ -151,6 +167,11 @@ export class SessionConfigStore implements SessionLimitProvider {
   async init(): Promise<void> {
     await this.pool.query(SESSION_CONFIG_SCHEMA_SQL);
     await this.pool.query(SESSION_CONFIG_ALTER_SQL);
+    await this.reload();
+  }
+
+  /** 跨进程失效刷新入口（task 3.2）：只由刷新器在版本变化时调用；`reload()` 保持 private。 */
+  async refreshFromAuthority(): Promise<void> {
     await this.reload();
   }
 
@@ -245,7 +266,13 @@ export class SessionConfigStore implements SessionLimitProvider {
     // 「可活跃时间」周历掩码可空（NULL = 全天活跃）：未传则保持原值（含原 null）。校验已在 facade。
     const nextActiveWeekMask = patch.activeWeekMask ?? prev?.activeWeekMask ?? null;
 
-    const { rows } = await this.pool.query<SessionDbRow>(
+    // 写库与版本推进同事务：写库失败 → 整体回滚 → 版本不进、镜像不刷。
+    const { rows } = await writeWithMirrorBump(
+      this.pool,
+      this.mirrorVersionBumper,
+      'session_config_global',
+      (q) =>
+        q.query<SessionDbRow>(
       `INSERT INTO session_config_global (id, max_duration_min, budget_likes, budget_collects,
               budget_follows, budget_searches, budget_comments, budget_comment_likes, budget_join_groups,
               collect_save_like_denom, follow_fans_denom, active_week_mask, updated_at, updated_by)
@@ -277,6 +304,7 @@ export class SessionConfigStore implements SessionLimitProvider {
         nextActiveWeekMask,
         updatedBy,
       ],
+        ),
     );
     const result = rows[0] ? this.rowFromDb(rows[0]) : {
       maxDurationMin: nextDuration,

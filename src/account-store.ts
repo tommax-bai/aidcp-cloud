@@ -11,6 +11,7 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from './cache/pg-anchor-cache.js';
+import { writeWithMirrorBump, type MirrorVersionBumper } from './config/mirror-version-store.js';
 import { normalizePlatformId, type PlatformId } from './platform/index.js';
 import { parseDeploymentTarget, type DeploymentTarget } from './deployment-target.js';
 import type { ClaimExecutionTargetResult } from './risk/ownership.js';
@@ -212,6 +213,13 @@ export interface PgAccountStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /**
+   * 跨进程失效通道（change config-mirror-cross-process-invalidation task 2.4）：
+   * 运营暂停态是**闸门镜像**——它决定是否继续对真实平台下发动作。暂停写入必须推进版本，
+   * 否则「运营在 dev 后台点了暂停、后台回写入成功」而 ol 进程的镜像到重启前一直是 active，
+   * 账号继续点赞。缺省 = 不推版本（行为逐位退回今日现状）。
+   */
+  mirrorVersionBumper?: MirrorVersionBumper;
 }
 
 interface AccountRow {
@@ -227,6 +235,7 @@ interface AccountPlatformRow extends AccountRow {
 /** accounts 主表持久化（PostgreSQL）。 */
 export class PgAccountStore implements AccountStore {
   private readonly pool: pg.Pool;
+  private readonly mirrorVersionBumper?: MirrorVersionBumper;
   /** 统一账号显示名目录：init 预热，昵称/运营别名写后同步更新。 */
   private readonly displayNameCache = new Map<string, AccountDisplayNameInput>();
   /** 账号平台缓存（init 预热 + getPlatform 回填）。accounts.platform 是事实源，缓存只做读路径加速。 */
@@ -236,6 +245,7 @@ export class PgAccountStore implements AccountStore {
   private readonly createdAtCache = new Map<string, number>();
 
   constructor(options: PgAccountStoreOptions = {}) {
+    this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.pool =
       options.pool ??
       new Pool({
@@ -290,11 +300,14 @@ export class PgAccountStore implements AccountStore {
     }
     const status: AccountStatusValue = paused ? 'paused' : 'active';
     const pausedAt = paused && at ? new Date(at) : null;
-    await this.pool.query(
-      `INSERT INTO accounts (account_id, label, status, paused_at)
+    // 暂停/恢复与版本推进同事务：写库失败 → 回滚 → 版本不进（也不会有人据此刷镜像）。
+    await writeWithMirrorBump(this.pool, this.mirrorVersionBumper, 'account_status', (q) =>
+      q.query(
+        `INSERT INTO accounts (account_id, label, status, paused_at)
        VALUES ($1, $1, $2, $3)
        ON CONFLICT (account_id) DO UPDATE SET status = EXCLUDED.status, paused_at = EXCLUDED.paused_at`,
-      [accountId, status, pausedAt],
+        [accountId, status, pausedAt],
+      ),
     );
   }
 

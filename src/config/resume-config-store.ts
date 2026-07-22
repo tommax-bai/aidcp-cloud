@@ -13,10 +13,18 @@
  *
  * 红线：本 store 只读写 resume_config_global；绝不碰风控状态单写路径（risk_state / setQuotaLevel / applySignal）、不经协议。
  * 建表幂等（CREATE TABLE IF NOT EXISTS），与 migrations/0022_global_safety_config.sql 同源。
+ *
+ * ## 模块归属：本 store 归 aidcp-automation（change config-mirror-cross-process-invalidation task 1.2）
+ *
+ * 依据：`src/risk/` 对 `src/config/` 的 import 命中数为 **0**，反向 **13 处**（本文件对
+ * `../risk/resume-limits.js` 的 import 即其一）——依赖方向已单向倒置，运行时消费者只有调度 / 监测层。
+ * 归属对齐是纯划线、零代码成本。定稿方案 §11.4 要求一。归属对齐 MUST NOT 被读作跨进程可见性已消失
+ * （dev/ol 两进程共库），故写入路径仍接 `writeWithMirrorBump`（同事务推进版本）。
  */
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
 import {
   DEFAULT_ACTIVE_WINDOW,
   DEFAULT_DAILY_MAX_MINUTES,
@@ -79,6 +87,8 @@ export interface ResumeConfigStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /** 跨进程失效通道：写入与版本推进同事务。缺省 = 不推版本（行为逐位退回今日现状）。 */
+  mirrorVersionBumper?: MirrorVersionBumper;
 }
 
 interface ResumeDbRow {
@@ -110,10 +120,12 @@ function validMinuteOfDay(raw: number | string | null | undefined): number | und
 
 export class ResumeConfigStore implements ResumeConfigProvider {
   private readonly pool: pg.Pool;
+  private readonly mirrorVersionBumper?: MirrorVersionBumper;
   /** 全局单行镜像；null = 库无行（全回落写死默认）。 */
   private cache: ResumeConfigRow | null = null;
 
   constructor(options: ResumeConfigStoreOptions = {}) {
+    this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.pool =
       options.pool ??
       new Pool({
@@ -128,6 +140,11 @@ export class ResumeConfigStore implements ResumeConfigProvider {
   /** 建表 + 载入内存镜像。 */
   async init(): Promise<void> {
     await this.pool.query(RESUME_CONFIG_SCHEMA_SQL);
+    await this.reload();
+  }
+
+  /** 跨进程失效刷新入口（task 3.2）：只由刷新器在版本变化时调用；`reload()` 保持 private。 */
+  async refreshFromAuthority(): Promise<void> {
     await this.reload();
   }
 
@@ -221,7 +238,13 @@ export class ResumeConfigStore implements ResumeConfigProvider {
       idleEndMs: pick('idleEndMs', prev?.idleEndMs),
     };
 
-    const { rows } = await this.pool.query<ResumeDbRow>(
+    // 写库与版本推进同事务：写库失败 → 整体回滚 → 版本不进、镜像不刷。
+    const { rows } = await writeWithMirrorBump(
+      this.pool,
+      this.mirrorVersionBumper,
+      'resume_config_global',
+      (q) =>
+        q.query<ResumeDbRow>(
       `INSERT INTO resume_config_global (id, rest_ratio_pct, active_window_start_min, active_window_end_min,
               daily_max_sessions, daily_max_minutes, idle_nudge_ms, idle_end_ms, updated_at, updated_by)
        VALUES (1, $1, $2, $3, $4, $5, $6, $7, now(), $8)
@@ -245,6 +268,7 @@ export class ResumeConfigStore implements ResumeConfigProvider {
         next.idleEndMs,
         updatedBy,
       ],
+        ),
     );
     const result = rows[0]
       ? this.rowFromDb(rows[0])

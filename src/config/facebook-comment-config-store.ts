@@ -14,6 +14,7 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
 import { RETIRED_ACCOUNT_ID } from '../account-store.js';
 
 const { Pool } = pg;
@@ -83,6 +84,8 @@ export interface FacebookCommentConfigStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /** 跨进程失效通道：写入与版本推进同事务。缺省 = 不推版本（行为逐位退回今日现状）。 */
+  mirrorVersionBumper?: MirrorVersionBumper;
 }
 
 interface FbConfigDbRow {
@@ -169,9 +172,11 @@ function sanitizeContainersInput(
 
 export class FacebookCommentConfigStore {
   private readonly pool: pg.Pool;
+  private readonly mirrorVersionBumper?: MirrorVersionBumper;
   private cache = new Map<string, FacebookCommentConfigRow>();
 
   constructor(options: FacebookCommentConfigStoreOptions = {}) {
+    this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.pool =
       options.pool ??
       new Pool({
@@ -185,6 +190,11 @@ export class FacebookCommentConfigStore {
 
   async init(): Promise<void> {
     await this.pool.query(FACEBOOK_COMMENT_CONFIG_SCHEMA_SQL);
+    await this.reload();
+  }
+
+  /** 跨进程失效刷新入口（task 3.2）：只由刷新器在版本变化时调用；`reload()` 保持 private。 */
+  async refreshFromAuthority(): Promise<void> {
     await this.reload();
   }
 
@@ -275,7 +285,12 @@ export class FacebookCommentConfigStore {
     const nextCommentMode = commentMode ?? current.commentMode;
     const nextCommentTemplates = commentTemplates ?? current.commentTemplates;
 
-    const { rows } = await this.pool.query<FbConfigDbRow>(
+    const { rows } = await writeWithMirrorBump(
+      this.pool,
+      this.mirrorVersionBumper,
+      'facebook_comment_config',
+      (q) =>
+        q.query<FbConfigDbRow>(
       `INSERT INTO account_facebook_comment_config
          (account_id, keywords, containers, comment_mode, comment_templates, updated_at, updated_by)
        VALUES ($1, $2::jsonb, $3::jsonb, $4, $5::jsonb, now(), $6)
@@ -295,6 +310,7 @@ export class FacebookCommentConfigStore {
         JSON.stringify(nextCommentTemplates),
         updatedBy,
       ],
+        ),
     );
     const row = this.toRow(rows[0]);
     this.cache.set(accountId, row); // 写库成功才刷镜像。
@@ -317,10 +333,16 @@ export class FacebookCommentConfigStore {
     if (current.containers[idx].name === n) return; // 名称未变 → 免写
     const nextContainers = current.containers.map((c, i) => (i === idx ? { url: c.url, name: n } : c));
     try {
-      const { rows } = await this.pool.query<FbConfigDbRow>(
-        `UPDATE account_facebook_comment_config SET containers = $2::jsonb WHERE account_id = $1
+      const { rows } = await writeWithMirrorBump(
+        this.pool,
+        this.mirrorVersionBumper,
+        'facebook_comment_config',
+        (q) =>
+          q.query<FbConfigDbRow>(
+            `UPDATE account_facebook_comment_config SET containers = $2::jsonb WHERE account_id = $1
          RETURNING account_id, keywords, containers, comment_mode, comment_templates, updated_at, updated_by`,
-        [accountId, JSON.stringify(nextContainers)],
+            [accountId, JSON.stringify(nextContainers)],
+          ),
       );
       if (rows[0]) this.cache.set(accountId, this.toRow(rows[0]));
     } catch {

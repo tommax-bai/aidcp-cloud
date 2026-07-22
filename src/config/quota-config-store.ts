@@ -11,10 +11,24 @@
  *
  * 红线：本 store 只读写 quota_config；绝不碰风控状态单写路径（risk_state / setQuotaLevel / applySignal）。
  * 建表幂等（CREATE TABLE IF NOT EXISTS），与 migrations/0010_quota_config.sql 同源。
+ *
+ * ## 模块归属：本 store 归 aidcp-automation（change config-mirror-cross-process-invalidation task 1.2）
+ *
+ * 依据是既成事实而非偏好：`src/risk/` 对 `src/config/` 的 import 命中数为 **0**，而 `src/config/`
+ * 对 `src/risk/` 的 import 有 **13 处**（本文件 :18-27 即其中之一）——依赖方向今天已单向倒置，
+ * 配置层依赖风控层的常量与校验，风控层只持接口。本 store 在 `src/config/` 之外的引用只出现在
+ * 组合根 `src/server.ts`。故把它与 `quota_config` 表判给 automation 是纯归属划线、零代码成本，
+ * 一次消除一条跨服务同步读，`canDo` 的「每次现读、改完即热生效、MUST NOT 需要重启」逐字保住。
+ * 权威表述见定稿方案 §11.4 要求一 / §5.1。
+ *
+ * 归属对齐 **MUST NOT** 被理解为「跨进程可见性问题已消失」：dev 与 ol 是两个 automation 进程共库，
+ * 一次面板写入只到达其中一个进程的镜像。故写入路径接 `writeWithMirrorBump`（同事务推进版本），
+ * 由另一 target 的刷新器在 T_poll 内拉到并 `refreshFromAuthority()`。
  */
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
 import { COOLDOWN_ACTIONS } from '../risk/action-cooldown.js';
 import { MINUTE_BURST_CAP, deriveWindowQuotas } from '../risk/quotas.js';
 import {
@@ -66,6 +80,8 @@ export interface QuotaConfigStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /** 跨进程失效通道：写入与版本推进同事务。缺省 = 不推版本（行为逐位退回今日现状）。 */
+  mirrorVersionBumper?: MirrorVersionBumper;
 }
 
 interface QuotaDbRow {
@@ -96,9 +112,11 @@ function validInt(raw: number | string | null | undefined): number | undefined {
 
 export class QuotaConfigStore implements QuotaProvider {
   private readonly pool: pg.Pool;
+  private readonly mirrorVersionBumper?: MirrorVersionBumper;
   private cache = new Map<string, QuotaConfigRow>();
 
   constructor(options: QuotaConfigStoreOptions = {}) {
+    this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.pool =
       options.pool ??
       new Pool({
@@ -113,6 +131,16 @@ export class QuotaConfigStore implements QuotaProvider {
   /** 建表 + 载入内存镜像。 */
   async init(): Promise<void> {
     await this.pool.query(QUOTA_CONFIG_SCHEMA_SQL);
+    await this.reload();
+  }
+
+  /**
+   * 跨进程失效刷新入口（change config-mirror-cross-process-invalidation task 3.2）：
+   * 版本表显示本镜像被**别的进程**改过时，由刷新器调用。
+   * 内部复用 `reload()`（构建新 Map → 原子替换引用），`reload()` 保持 private——
+   * 直接把它改公开会让任何调用方都能绕过版本比对随手 reload，失去「有界陈旧度」这条可证明性。
+   */
+  async refreshFromAuthority(): Promise<void> {
     await this.reload();
   }
 
@@ -204,14 +232,17 @@ export class QuotaConfigStore implements QuotaProvider {
     const nextMinute = patch.perMinute ?? prev?.perMinute ?? derived.minute[action];
     const nextHour = patch.perHour ?? prev?.perHour ?? derived.hour[action];
 
-    const { rows } = await this.pool.query<QuotaDbRow>(
-      `INSERT INTO quota_config (tier, action, daily, per_minute, per_hour, updated_at, updated_by)
+    // 写库与版本推进同事务：写库失败 → 整体回滚 → 版本不进、镜像不刷（下面的 cache.set 不会执行）。
+    const { rows } = await writeWithMirrorBump(this.pool, this.mirrorVersionBumper, 'quota_config', (q) =>
+      q.query<QuotaDbRow>(
+        `INSERT INTO quota_config (tier, action, daily, per_minute, per_hour, updated_at, updated_by)
        VALUES ($1, $2, $3, $4, $5, now(), $6)
        ON CONFLICT (tier, action)
        DO UPDATE SET daily = EXCLUDED.daily, per_minute = EXCLUDED.per_minute,
                      per_hour = EXCLUDED.per_hour, updated_at = now(), updated_by = EXCLUDED.updated_by
        RETURNING tier, action, daily, per_minute, per_hour, updated_at, updated_by`,
-      [tier, action, nextDaily, nextMinute, nextHour, updatedBy],
+        [tier, action, nextDaily, nextMinute, nextHour, updatedBy],
+      ),
     );
     const row = rows[0];
     const result: QuotaConfigRow = {

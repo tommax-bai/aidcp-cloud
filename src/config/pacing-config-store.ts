@@ -15,10 +15,18 @@
  *
  * 红线：本 store 只读写 pacing_floor_config；绝不碰风控状态单写路径、绝不经协议以外的通道。
  * 建表幂等（CREATE TABLE IF NOT EXISTS），与 migrations/0031_pacing_floor_config.sql 同源（勿漂移）。
+ *
+ * ## 模块归属：本 store 归 aidcp-automation（change config-mirror-cross-process-invalidation task 1.2）
+ *
+ * 依据：`src/risk/` 对 `src/config/` 的 import 命中数为 **0**，反向 **13 处**（本文件 :27 即其一）——
+ * 依赖方向已单向倒置，运行时消费者只有风控层。归属对齐是纯划线、零代码成本。定稿方案 §11.4 要求一。
+ * 但归属对齐 MUST NOT 被理解为跨进程可见性已消失：dev/ol 两个 automation 进程共库，写入路径
+ * 因此仍接 `writeWithMirrorBump`（同事务推进版本），供另一 target 的刷新器失效重载。
  */
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
 import {
   BUILTIN_FLOOR,
   PACING_OPS,
@@ -61,6 +69,8 @@ export interface PacingConfigStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /** 跨进程失效通道：写入与版本推进同事务。缺省 = 不推版本（行为逐位退回今日现状）。 */
+  mirrorVersionBumper?: MirrorVersionBumper;
 }
 
 interface PacingDbRow {
@@ -83,9 +93,11 @@ const isKnownOp = (op: string): op is PacingOp => (PACING_OPS as readonly string
 
 export class PacingConfigStore implements PacingFloorProvider {
   private readonly pool: pg.Pool;
+  private readonly mirrorVersionBumper?: MirrorVersionBumper;
   private cache = new Map<PacingOp, PacingConfigRow>();
 
   constructor(options: PacingConfigStoreOptions = {}) {
+    this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.pool =
       options.pool ??
       new Pool({
@@ -100,6 +112,11 @@ export class PacingConfigStore implements PacingFloorProvider {
   /** 建表 + 载入内存镜像。 */
   async init(): Promise<void> {
     await this.pool.query(PACING_FLOOR_SCHEMA_SQL);
+    await this.reload();
+  }
+
+  /** 跨进程失效刷新入口（task 3.2）：只由刷新器在版本变化时调用；`reload()` 保持 private。 */
+  async refreshFromAuthority(): Promise<void> {
     await this.reload();
   }
 
@@ -153,14 +170,21 @@ export class PacingConfigStore implements PacingFloorProvider {
    * 调用方（facade）应已校验区间合法（非负整数、min≤max、min 展宽、≤类别上限）。
    */
   async set(op: PacingOp, patch: PacingConfigPatch, updatedBy: string): Promise<PacingConfigRow> {
-    const { rows } = await this.pool.query<PacingDbRow>(
-      `INSERT INTO pacing_floor_config (operation, min_ms, max_ms, updated_at, updated_by)
+    // 写库与版本推进同事务：写库失败 → 整体回滚 → 版本不进、镜像不刷。
+    const { rows } = await writeWithMirrorBump(
+      this.pool,
+      this.mirrorVersionBumper,
+      'pacing_floor_config',
+      (q) =>
+        q.query<PacingDbRow>(
+          `INSERT INTO pacing_floor_config (operation, min_ms, max_ms, updated_at, updated_by)
        VALUES ($1, $2, $3, now(), $4)
        ON CONFLICT (operation)
        DO UPDATE SET min_ms = EXCLUDED.min_ms, max_ms = EXCLUDED.max_ms,
                      updated_at = now(), updated_by = EXCLUDED.updated_by
        RETURNING operation, min_ms, max_ms, updated_at, updated_by`,
-      [op, patch.minMs, patch.maxMs, updatedBy],
+          [op, patch.minMs, patch.maxMs, updatedBy],
+        ),
     );
     const row = rows[0];
     const result: PacingConfigRow = {

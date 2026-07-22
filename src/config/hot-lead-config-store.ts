@@ -14,6 +14,7 @@
  */
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
 import {
   DEFAULT_HOT_LEAD_GATE_CONFIG,
   type HotLeadGateConfig,
@@ -55,6 +56,8 @@ export interface HotLeadConfigStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /** 跨进程失效通道：写入与版本推进同事务。缺省 = 不推版本（行为逐位退回今日现状）。 */
+  mirrorVersionBumper?: MirrorVersionBumper;
 }
 
 interface DbRow {
@@ -75,9 +78,11 @@ export function validPositiveInt(raw: number | string | null | undefined): numbe
 
 export class HotLeadConfigStore {
   private readonly pool: pg.Pool;
+  private readonly mirrorVersionBumper?: MirrorVersionBumper;
   private cache: HotLeadConfigRow | null = null;
 
   constructor(options: HotLeadConfigStoreOptions = {}) {
+    this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.pool =
       options.pool ??
       new Pool({
@@ -91,6 +96,11 @@ export class HotLeadConfigStore {
 
   async init(): Promise<void> {
     await this.pool.query(HOT_LEAD_CONFIG_SCHEMA_SQL);
+    await this.reload();
+  }
+
+  /** 跨进程失效刷新入口（task 3.2）：只由刷新器在版本变化时调用；`reload()` 保持 private。 */
+  async refreshFromAuthority(): Promise<void> {
     await this.reload();
   }
 
@@ -133,8 +143,9 @@ export class HotLeadConfigStore {
     const nextAge = patch.postAgeMaxHours ?? prev?.postAgeMaxHours ?? null;
     const nextVel = patch.velocityMin ?? prev?.velocityMin ?? null;
     const nextLike = patch.minLikeFloor ?? prev?.minLikeFloor ?? null;
-    const { rows } = await this.pool.query<DbRow>(
-      `INSERT INTO hot_lead_config_global (id, post_age_max_hours, velocity_min, min_like_floor, updated_at, updated_by)
+    const { rows } = await writeWithMirrorBump(this.pool, this.mirrorVersionBumper, 'hot_lead_config', (q) =>
+      q.query<DbRow>(
+        `INSERT INTO hot_lead_config_global (id, post_age_max_hours, velocity_min, min_like_floor, updated_at, updated_by)
        VALUES (1, $1, $2, $3, now(), $4)
        ON CONFLICT (id) DO UPDATE SET
          post_age_max_hours = EXCLUDED.post_age_max_hours,
@@ -142,7 +153,8 @@ export class HotLeadConfigStore {
          min_like_floor = EXCLUDED.min_like_floor,
          updated_at = now(), updated_by = EXCLUDED.updated_by
        RETURNING post_age_max_hours, velocity_min, min_like_floor, updated_at, updated_by`,
-      [nextAge, nextVel, nextLike, updatedBy],
+        [nextAge, nextVel, nextLike, updatedBy],
+      ),
     );
     const result = rows[0]
       ? this.rowFromDb(rows[0])

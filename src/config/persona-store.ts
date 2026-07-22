@@ -18,8 +18,25 @@ import pg from 'pg';
 import { readFileSync } from 'node:fs';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
 import { loadSoulFromYaml, defaultSoulPath, type Soul } from '../soul/index.js';
+import { mirrorStateOf } from '../config-mirror-freshness.js';
+import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
 
 const { Pool } = pg;
+
+/**
+ * 人设绑定状态——**三态，绝不是布尔**（change config-mirror-cross-process-invalidation task 4.2）。
+ *
+ * - `bound`   权威可读且该账号有人设行。
+ * - `unbound` 权威可读且该账号**确实**没有人设行。**只有这一态**允许下发 `personaBound:false`、
+ *             置 `needs_persona_setup`、触发人设向导、把委托任务判成非重试终态。
+ * - `unknown` 本地只读副本超过陈旧上限，无法确认。MUST 映射成独立不可用态 `persona_unavailable`：
+ *             MUST NOT 下发 `personaBound` 字段、MUST NOT 置 `needs_persona_setup`、
+ *             MUST NOT 让委托任务落非重试终态。
+ *
+ * 为什么用具名字符串而不是 `boolean | undefined`：`undefined` 在 TypeScript 里太容易被 `!x` / `?? false`
+ * 压成 `false`，而这类压平 typecheck 抓不到——那正是 change `persona-bound-tristate` 修过的那个 bug 的形状。
+ */
+export type PersonaBinding = 'bound' | 'unbound' | 'unknown';
 
 /** 单账号人设行（含审计字段，供面板非乐观回显）。 */
 export interface PersonaRow {
@@ -52,6 +69,8 @@ export interface PersonaStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /** 跨进程失效通道：写入与版本推进同事务。缺省 = 不推版本（行为逐位退回今日现状）。 */
+  mirrorVersionBumper?: MirrorVersionBumper;
 }
 
 interface PersonaDbRow {
@@ -68,9 +87,11 @@ interface AccountDbRow {
 
 export class PersonaStore {
   private readonly pool: pg.Pool;
+  private readonly mirrorVersionBumper?: MirrorVersionBumper;
   private cache = new Map<string, PersonaRow>();
 
   constructor(options: PersonaStoreOptions = {}) {
+    this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.pool =
       options.pool ??
       new Pool({
@@ -86,6 +107,23 @@ export class PersonaStore {
   async init(): Promise<void> {
     await this.pool.query(PERSONA_CONFIG_SCHEMA_SQL);
     await this.reload();
+  }
+
+  /** 跨进程失效刷新入口（task 3.2）：只由刷新器在版本变化时调用；`reload()` 保持 private。 */
+  async refreshFromAuthority(): Promise<void> {
+    await this.reload();
+  }
+
+  /**
+   * 人设绑定状态的**唯一权威判据**（三态，见 `PersonaBinding` 注释）。
+   *
+   * 副本陈旧时返回 `unknown`——「副本里没有」≠「库里没有」。同进程全量镜像下这条回退是正确的
+   * （镜像即库），跨进程副本下它等价于「客户早已绑好人设、云端读不到、于是权威地告诉客户端你没绑」，
+   * 一下发客户端就自动弹人设向导。这正是 change `persona-bound-tristate` 修掉的那个 bug 的形状。
+   */
+  bindingFor(accountId: string): PersonaBinding {
+    if (mirrorStateOf('persona_config') === 'stale') return 'unknown';
+    return this.getForAccount(accountId) !== null ? 'bound' : 'unbound';
   }
 
   private async reload(): Promise<void> {
@@ -146,13 +184,16 @@ export class PersonaStore {
    * personaText 应为已通过校验的非空 soul 文本（校验在 facade 内做）。
    */
   async set(accountId: string, personaText: string, updatedBy: string): Promise<PersonaRow> {
-    const { rows } = await this.pool.query<PersonaDbRow>(
-      `INSERT INTO persona_config (account_id, persona, updated_at, updated_by)
+    // 写库与版本推进同事务：写库失败 → 整体回滚 → 版本不进、镜像不刷（既有不变量原样保住）。
+    const { rows } = await writeWithMirrorBump(this.pool, this.mirrorVersionBumper, 'persona_config', (q) =>
+      q.query<PersonaDbRow>(
+        `INSERT INTO persona_config (account_id, persona, updated_at, updated_by)
        VALUES ($1, $2, now(), $3)
        ON CONFLICT (account_id)
        DO UPDATE SET persona = EXCLUDED.persona, updated_at = now(), updated_by = EXCLUDED.updated_by
        RETURNING account_id, persona, updated_at, updated_by`,
-      [accountId, personaText, updatedBy],
+        [accountId, personaText, updatedBy],
+      ),
     );
     const row = rows[0];
     const result: PersonaRow = {
@@ -170,12 +211,14 @@ export class PersonaStore {
    * PG 的唯一键是最终裁判，因此与人工设置并发时也不会覆盖对方；未插入时镜像保持不变。
    */
   async setIfMissing(accountId: string, personaText: string, updatedBy: string): Promise<PersonaRow | null> {
-    const { rows } = await this.pool.query<PersonaDbRow>(
-      `INSERT INTO persona_config (account_id, persona, updated_at, updated_by)
+    const { rows } = await writeWithMirrorBump(this.pool, this.mirrorVersionBumper, 'persona_config', (q) =>
+      q.query<PersonaDbRow>(
+        `INSERT INTO persona_config (account_id, persona, updated_at, updated_by)
        VALUES ($1, $2, now(), $3)
        ON CONFLICT (account_id) DO NOTHING
        RETURNING account_id, persona, updated_at, updated_by`,
-      [accountId, personaText, updatedBy],
+        [accountId, personaText, updatedBy],
+      ),
     );
     const row = rows[0];
     if (!row) return null;
@@ -195,7 +238,9 @@ export class PersonaStore {
    * 成功后账号变为「未绑人设」，浏览/发布/评论入口诚实拒绝；下一次真实绑定可重新建立首作状态。
    */
   async clear(accountId: string): Promise<void> {
-    await this.pool.query(
+    // 解绑与绑定同样推进版本——否则「客户在应用里清空了人设」这件事在其它进程里永远不可见。
+    await writeWithMirrorBump(this.pool, this.mirrorVersionBumper, 'persona_config', (q) =>
+      q.query(
       `WITH cleared_persona AS (
          DELETE FROM persona_config
           WHERE account_id = $1
@@ -208,7 +253,8 @@ export class PersonaStore {
        SELECT
          (SELECT count(*) FROM cleared_persona) AS persona_cleared,
          (SELECT count(*) FROM cleared_first_post) AS first_post_cleared`,
-      [accountId],
+        [accountId],
+      ),
     );
     this.cache.delete(accountId);
   }
