@@ -4532,6 +4532,51 @@ async function main(): Promise<void> {
           interactionPermissions: { getView: () => interactionPermissionOverview },
           revocation: new TokenRevocationStore(),
           riskRegistry,
+          // 账号归属 target（change risk-state-cross-process-integrity，design D3/D7）：
+          // 三项缺任一即整闸不启用，面板风控写口行为与改动前逐位一致。
+          ...(deploymentTarget && ownershipPort && ownershipMode !== 'off'
+            ? {
+                riskOwnership: {
+                  executionTarget: deploymentTarget,
+                  mode: ownershipMode,
+                  ownerOf: (accountId: string) => ownershipPort.getExecutionTarget(accountId),
+                  changeOwner: async (accountId: string, target: 'dev' | 'ol') => {
+                    const previousOwner = await ownershipPort.getExecutionTarget(accountId);
+                    if (previousOwner === target) {
+                      return { ok: true as const, owner: target, previousOwner };
+                    }
+                    // 活跃会话闸：本进程只看得见自己这一侧的连接。若旧属主是**另一个** target，
+                    // 我们看不到它的会话——那正是「MUST NOT 强改」的场景，故一律诚实拒绝，
+                    // 由运营先去旧属主停掉再来。看得见的那一侧（旧属主=本 target）按真实连接判。
+                    const localActive = runtimes?.onlineAccountIds().includes(accountId) ?? false;
+                    if (previousOwner === deploymentTarget && localActive) {
+                      return { ok: false as const, reason: 'blocked_by_active_session' as const, owner: previousOwner };
+                    }
+                    if (previousOwner !== null && previousOwner !== deploymentTarget) {
+                      return { ok: false as const, reason: 'blocked_by_active_session' as const, owner: previousOwner };
+                    }
+                    if (!accountStore?.setExecutionTarget) {
+                      return { ok: false as const, reason: 'account_not_found' as const, owner: previousOwner };
+                    }
+                    const written = await accountStore.setExecutionTarget(accountId, target);
+                    if (written.outcome !== 'claimed') {
+                      return { ok: false as const, reason: 'account_not_found' as const, owner: previousOwner };
+                    }
+                    // 归属已变 ⇒ 本地缓存的 controller 立即失效（它的下一次写本来也会被条件写挡住，
+                    // 但让它多活一秒就多一秒用陈旧内存状态做准入判定的机会）。
+                    riskRegistry.evict(accountId);
+                    await raiseRiskAlert({
+                      severity: 'P2',
+                      type: 'risk_owner_changed',
+                      accountId,
+                      title: `账号 ${accountId} 的风控归属已改为 ${target}`,
+                      detail: `原归属=${previousOwner ?? '<未归属>'}，由 ${deploymentTarget} 后台发起。本地缓存控制器已驱逐。`,
+                    });
+                    return { ok: true as const, owner: target, previousOwner };
+                  },
+                },
+              }
+            : {}),
           publishLogStore,
           conceptStore,
           botChatStore,
@@ -4543,6 +4588,8 @@ async function main(): Promise<void> {
             database: readEnvString('PGDATABASE'),
             user: readEnvString('PGUSER'),
             password: readEnvString('PGPASSWORD'),
+            ...(deploymentTarget ? { executionTarget: deploymentTarget } : {}),
+            ownershipMode,
           }),
           publishOrchestrator,
           publishDispatcher,

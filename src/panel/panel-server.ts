@@ -204,6 +204,38 @@ function createRequestHandler(
     return true;
   };
 
+  /**
+   * 风控写口的归属闸（change risk-state-cross-process-integrity，design D7）。
+   *
+   * 非属主 MUST 返回 **409 + `risk_state_not_owned` + 真实归属 target**，
+   * MUST NOT 返回 200、MUST NOT 返回一个看起来成功的 `changed:false`——后者会让运营以为
+   * 「点了但没变化」，而真相是「这台后台根本没有写它的权力，请去另一台」。
+   *
+   * 归属未启用（单进程 / 无 target）→ 恒放行，行为与改动前逐位一致。
+   */
+  const assertRiskWritable = async (accountId: string, res: http.ServerResponse): Promise<boolean> => {
+    if (!deps.riskOwnership || deps.riskOwnership.mode === 'off') return true;
+    let owner: 'dev' | 'ol' | null;
+    try {
+      owner = await deps.riskOwnership.ownerOf(accountId);
+    } catch {
+      sendJson(res, 503, { error: 'unavailable', reason: 'risk_owner_lookup_failed' });
+      return false;
+    }
+    if (owner === deps.riskOwnership.executionTarget) return true;
+    sendJson(res, 409, {
+      error: 'risk_state_not_owned',
+      accountId,
+      owner,
+      executionTarget: deps.riskOwnership.executionTarget,
+      message:
+        owner === null
+          ? `账号 ${accountId} 尚未归属任何自动化 target；等它在某个后台上真实握手一次即可占位。`
+          : `账号 ${accountId} 归属 ${owner}，请在 ${owner} 的后台操作。同一账号 MUST 只被一个 target 驱动。`,
+    });
+    return false;
+  };
+
   type CaptchaAssistAuth =
     | { ok: true; actor: string }
     | { ok: false; status: number; body: { error: string; reason?: string } };
@@ -713,6 +745,14 @@ function createRequestHandler(
       const totalsByAccountWithQuotas = await Promise.all(
         totalsByAccount.map(async (entry) => {
           try {
+            // 归属闸（change risk-state-cross-process-integrity，design D7）：**非本 target 归属的账号
+            // MUST NOT 物化可写 controller**。此前这里为库里**全部**账号（listAccounts 无 target 过滤）
+            // 建并永久缓存 controller——配合两个整行盲写口，当前就能把另一个 target 刚写下的
+            // restricted 盖回 normal。拿不到上限就不带上限，沿用既有的诚实缺省语义。
+            if (deps.riskOwnership && deps.riskOwnership.mode !== 'off') {
+              const owner = await deps.riskOwnership.ownerOf(entry.accountId);
+              if (owner !== deps.riskOwnership.executionTarget) return entry;
+            }
             const dayQuotas = (await deps.riskRegistry.getController(entry.accountId)).effectiveQuotas().day;
             const saturated = RISK_ACTIONS.filter((a) => entry.totals[a] >= dayQuotas[a]);
             return { ...entry, quotas: dayQuotas, saturated };
@@ -1625,6 +1665,8 @@ function createRequestHandler(
       }
       // 存在性校验先行（#28）：不存在账号 → 404，绝不经 saveState 的 ON CONFLICT 造幽灵 risk_state 行。
       if (!(await assertAccountExists(accountId, res))) return;
+      // 归属闸先行（change risk-state-cross-process-integrity）：非属主 409，绝不物化可写 controller。
+      if (!(await assertRiskWritable(accountId, res))) return;
       const controller = await deps.riskRegistry.getController(accountId);
       const before = controller.getState().status;
       const after = await controller.applySignal({
@@ -1633,6 +1675,51 @@ function createRequestHandler(
       });
       // 诚实：返回写后真态 + 是否真变化（refused 由前端按 changed=false 渲染，区别于成功）
       sendJson(res, 200, { state: after, statusBefore: before, changed: before !== after.status });
+      return;
+    }
+    // 改归属（change risk-state-cross-process-integrity，task 3.4）：显式运维动作，JWT 守卫同既有风控口。
+    // **改归属前 MUST 校验旧属主上无活跃边缘会话**——重叠期两边都以为自己是属主，正是本 change 要消灭的窗口。
+    if (method === 'POST' && url.startsWith('/api/accounts/') && url.endsWith('/risk-owner')) {
+      const accountId = decodeURIComponent(url.slice('/api/accounts/'.length, -'/risk-owner'.length));
+      if (!deps.riskOwnership) {
+        sendJson(res, 503, { error: 'unavailable', reason: 'risk_ownership_disabled' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const { target } = (body ?? {}) as { target?: unknown };
+      if (target !== 'dev' && target !== 'ol') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'unknown_target' });
+        return;
+      }
+      if (!(await assertAccountExists(accountId, res))) return;
+      const result = await deps.riskOwnership.changeOwner(accountId, target);
+      if (result.ok) {
+        sendJson(res, 200, {
+          accountId,
+          owner: result.owner,
+          previousOwner: result.previousOwner,
+          changed: result.previousOwner !== result.owner,
+        });
+        return;
+      }
+      if (result.reason === 'account_not_found') {
+        sendJson(res, 404, { error: 'account_not_found' });
+        return;
+      }
+      sendJson(res, 409, {
+        error: 'owner_change_blocked_by_active_session',
+        accountId,
+        owner: result.owner,
+        message:
+          `账号 ${accountId} 在当前属主 ${result.owner ?? '<未归属>'} 上仍有活跃边缘会话，拒绝改归属。` +
+          `请先在该后台停止该账号的自动化（或断开其边缘节点）再改——重叠期两边都会以为自己是属主。`,
+      });
       return;
     }
     if (method === 'POST' && url.startsWith('/api/accounts/') && url.endsWith('/risk/quota')) {
@@ -1652,6 +1739,7 @@ function createRequestHandler(
       }
       // 存在性校验先行（#28）：同上，杜绝对不存在账号造幽灵风控行 + 假成功。
       if (!(await assertAccountExists(accountId, res))) return;
+      if (!(await assertRiskWritable(accountId, res))) return;
       const controller = await deps.riskRegistry.getController(accountId);
       sendJson(res, 200, { state: await controller.setQuotaLevel(level as RiskQuotaLevel) });
       return;

@@ -44,6 +44,9 @@ export const PANEL_ACCOUNT_FIELDS = [
   'signalCount',
   'personaBound',
   'needsPersonaSetup',
+  // change risk-state-cross-process-integrity：账号归属 target 与本后台是否有风控写权（服务端权威）
+  'executionTarget',
+  'riskWritable',
   'environmentSummary',
 ] as const;
 

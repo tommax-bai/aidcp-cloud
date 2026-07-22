@@ -60,6 +60,14 @@ export interface PanelAccount {
   personaBound: boolean;
   /** 需设置人设（派生）：未绑人设且非 default（default 硬豁免）。后台据此标「需设置人设」+ 跳转人设页。 */
   needsPersonaSetup: boolean;
+  /**
+   * 账号归属的执行目标（change risk-state-cross-process-integrity）：`dev` / `ol` / null=未归属。
+   * **服务端权威**：Console MUST NOT 自己从别的字段推断，未归属 MUST 显示为「未归属」
+   * 而不是伪装成当前 target。
+   */
+  executionTarget: 'dev' | 'ol' | null;
+  /** 本云端对该账号是否有风控写权。false ⇒ Console 禁用风控写操作并指向真实属主。 */
+  riskWritable: boolean;
   /** 环境资产独立生命周期的只读摘要；删除环境不改变账号本身。 */
   environmentSummary?: { activeCount: number; deletingCount: number; onlineCount: number };
 }
@@ -211,6 +219,20 @@ export interface PanelStoreReader {
 }
 
 export interface PgPanelStoreOptions {
+  /**
+   * 本云端的部署目标（change risk-state-cross-process-integrity）：用于把账号行的
+   * `execution_target` 翻译成「本后台能不能写它的风控」。缺省 → 归属未启用，riskWritable 恒 true
+   * （单进程语义，逐位零回归）。
+   */
+  executionTarget?: 'dev' | 'ol';
+  /**
+   * 归属强制模式。'off' → riskWritable 恒 true。
+   *
+   * 注意 observe 与 enforce 在这里**同样**把非属主账号标为不可写：服务端在 observe 下仍会接受写，
+   * 但界面不该把一个「属于另一个后台」的操作摆在运营面前。这不是假失败——它没有声称任何事情失败，
+   * 它只是不提供一个该去别处做的操作，并直接指出该去哪。
+   */
+  ownershipMode?: 'enforce' | 'observe' | 'off';
   host?: string;
   port?: number;
   database?: string;
@@ -234,9 +256,13 @@ interface AccountJoinRow {
   risk_quota_level: string | null;
   signal_count: number | null;
   persona_bound: boolean | null;
+  execution_target: string | null;
 }
 
-function toAccount(r: AccountJoinRow): PanelAccount {
+function toAccount(
+  r: AccountJoinRow,
+  ownership: { target: 'dev' | 'ol' | null; mode: 'enforce' | 'observe' | 'off' },
+): PanelAccount {
   const accountId = r.account_id;
   const personaBound = r.persona_bound === true;
   const display = resolveAccountDisplayName({
@@ -258,6 +284,9 @@ function toAccount(r: AccountJoinRow): PanelAccount {
     riskStatus: (r.risk_status as RiskStatus | null) ?? null,
     riskQuotaLevel: (r.risk_quota_level as RiskQuotaLevel | null) ?? null,
     signalCount: r.signal_count,
+    executionTarget: r.execution_target === 'dev' || r.execution_target === 'ol' ? r.execution_target : null,
+    riskWritable:
+      ownership.mode === 'off' || !ownership.target ? true : r.execution_target === ownership.target,
     personaBound,
     // retire-default-account / persona-driven-content-pipeline：default 账号已删，不再特判——是否需补人设仅看 personaBound。
     needsPersonaSetup: !personaBound,
@@ -384,7 +413,7 @@ function parseSourceReference(raw: unknown): PanelPublishSourceReference | null 
 
 const ACCOUNT_SELECT = `
   SELECT a.account_id, a.label, a.nickname, a.operator_alias, a.platform, a.group_label, a.machine_label,
-         a.contact_info,
+         a.contact_info, a.execution_target,
          a.status AS operator_status, a.paused_at,
          r.status AS risk_status, r.quota_level AS risk_quota_level, r.signal_count,
          (pc.account_id IS NOT NULL AND btrim(pc.persona) <> '') AS persona_bound
@@ -394,8 +423,12 @@ const ACCOUNT_SELECT = `
 
 export class PgPanelStore implements PanelStoreReader {
   private readonly pool: pg.Pool;
+  private readonly executionTarget: 'dev' | 'ol' | null;
+  private readonly ownershipMode: 'enforce' | 'observe' | 'off';
 
   constructor(options: PgPanelStoreOptions = {}) {
+    this.executionTarget = options.executionTarget ?? null;
+    this.ownershipMode = options.executionTarget ? options.ownershipMode ?? 'off' : 'off';
     this.pool =
       options.pool ??
       new Pool({
@@ -470,7 +503,7 @@ export class PgPanelStore implements PanelStoreReader {
 
   async listAccounts(): Promise<PanelAccount[]> {
     const { rows } = await this.pool.query<AccountJoinRow>(`${ACCOUNT_SELECT} ORDER BY a.created_at`);
-    return rows.map(toAccount);
+    return rows.map((row) => toAccount(row, { target: this.executionTarget, mode: this.ownershipMode }));
   }
 
   async getAccount(accountId: string): Promise<PanelAccount | null> {
@@ -478,7 +511,7 @@ export class PgPanelStore implements PanelStoreReader {
       accountId,
     ]);
     const r = rows[0];
-    return r ? toAccount(r) : null;
+    return r ? toAccount(r, { target: this.executionTarget, mode: this.ownershipMode }) : null;
   }
 
   /**

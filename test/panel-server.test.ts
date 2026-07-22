@@ -26,6 +26,8 @@ const acct: PanelAccount = {
   contactInfo: null,
   operatorStatus: 'active',
   pausedAt: null,
+  executionTarget: null,
+  riskWritable: true,
   riskStatus: 'normal',
   riskQuotaLevel: 'normal',
   signalCount: 0,
