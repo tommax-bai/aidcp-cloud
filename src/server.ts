@@ -249,7 +249,17 @@ import { createHotLeadConfigPanel } from './config/hot-lead-config-facade.js';
 import { ResumeConfigStore } from './config/resume-config-store.js';
 import { createResumeConfigPanel } from './config/resume-config-facade.js';
 // 内容排期（change content-schedule-auto-publish，Phase 1 只发帖）：全局内容格 + 每账号排期存储 + 分钟心跳触发扇入。
-import { ContentScheduleStore, actionModeEnabled } from './config/content-schedule-store.js';
+import {
+  ContentScheduleStore,
+  actionModeEnabled,
+  type ContentScheduleCatalogRow,
+  type FacebookJoinGroupAutomationCatalogView,
+} from './config/content-schedule-store.js';
+import { FacebookGroupJoinAutomationStore } from './config/facebook-group-join-automation-store.js';
+import {
+  buildFacebookGroupJoinAutomationCatalogView,
+  buildFacebookGroupJoinAutomationCatalogViewFailClosed,
+} from './config/facebook-group-join-automation-view.js';
 import { FacebookCommentConfigStore } from './config/facebook-comment-config-store.js';
 import { FacebookCommentAuditStore } from './comment-agent/facebook-comment-audit-store.js';
 import {
@@ -574,6 +584,13 @@ async function main(): Promise<void> {
     // 只读组合：账号活跃覆盖优先，未配回落 session_config_global 热镜像；本 store 不写全局表。
     globalActiveWeekMask: () => sessionConfigStore.weekActiveMask(),
   });
+  const facebookGroupJoinAutomationStore = new FacebookGroupJoinAutomationStore({
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
   // 每账号 Facebook 定时评论配置（change facebook-scheduled-comment 2.1）：关键词列表 + 容器列表。
   // fail-closed：任一为空 = 不生效（诚实 no-op）；init 失败不致命（空镜像 = 全不生效）。
   const facebookCommentConfigStore = new FacebookCommentConfigStore({
@@ -627,6 +644,7 @@ async function main(): Promise<void> {
     await hotLeadConfigStore.init();
     await resumeConfigStore.init();
     await contentScheduleStore.init();
+    await facebookGroupJoinAutomationStore.init();
     await facebookCommentConfigStore.init();
     await facebookCommentAuditStore.init();
     await facebookGroupTargetStore.init();
@@ -1381,6 +1399,32 @@ async function main(): Promise<void> {
   }
   // retire-default-account：不再建单租户全局 'default' controller；风控一律经 registry 按真实账号懒解析。
   const resolveController = (accountId: string): Promise<RiskController> => riskRegistry.getController(accountId);
+  const joinAutomationProjectionFor = async (
+    row: ContentScheduleCatalogRow,
+  ): Promise<FacebookJoinGroupAutomationCatalogView> => {
+    const config = facebookGroupJoinAutomationStore.getForAccount(row.accountId);
+    const [riskCap, scope, recentResult] = await Promise.all([
+      resolveController(row.accountId).then((controller) => controller.effectiveQuotas().day.join_group),
+      facebookGroupTargetStore.scopedTargetCountForAccount(row.accountId),
+      facebookGroupJoinAuditStore.latestScheduledResult(row.accountId),
+    ]);
+    return buildFacebookGroupJoinAutomationCatalogView({
+      config,
+      riskDailyCap: riskCap,
+      effectiveActiveWeekMask: row.effectiveActiveWeekMask,
+      effectiveContentActiveMask: row.effectiveContentActiveMask,
+      accountGroupLabel: scope.accountGroupLabel,
+      scopedTargetCount: scope.count,
+      recentResult,
+    });
+  };
+  const listAccountAutomationCatalog = async (): Promise<ContentScheduleCatalogRow[]> => {
+    const rows = await contentScheduleStore.listCatalog();
+    return Promise.all(rows.map(async (row) =>
+      row.platform === 'facebook'
+        ? { ...row, joinGroupAutomation: await joinAutomationProjectionFor(row) }
+        : row));
+  };
   // 「唯一真实账号」解析（飞书无参 / 自动发帖用）：恰好一个真实账号 → 它，0 或多个 → null（honest-fail，绝不回落 default）。
   const resolveSingleAccountId = async (): Promise<string | null> => {
     if (!accountStore) return null;
@@ -3768,6 +3812,7 @@ async function main(): Promise<void> {
           if (!facebookGroupJoinAutoEnabled() && !facebookGroupJoinShadow()) return 0;
           return (await resolveController(accountId)).effectiveQuotas().day.join_group;
         },
+        joinAutomationFor: (accountId: string) => facebookGroupJoinAutomationStore.getForAccount(accountId),
         /**
          * 本小时格的有界重试用尽 → 发**一张**放弃卡（change browser-slot-scheduling）。
          * 重试期间刻意不发卡，否则边端离线一小时就是一串每分钟的告警噪声。
@@ -4206,9 +4251,28 @@ async function main(): Promise<void> {
                 updatedBy: g?.updatedBy ?? null,
               };
             },
-            listCatalog: () => contentScheduleStore.listCatalog(),
+            listCatalog: () => listAccountAutomationCatalog(),
             setGlobal: (mask, updatedBy) => contentScheduleStore.setGlobal({ contentActiveMask: mask }, updatedBy),
             setAccount: (accountId, patch, updatedBy) => contentScheduleStore.setAccount(accountId, patch, updatedBy),
+            setJoinGroupAutomation: async (accountId, patch, updatedBy) => {
+              const result = await facebookGroupJoinAutomationStore.setAccount(accountId, patch, updatedBy);
+              if (!result.ok) return result;
+              // UPSERT 已提交后，任何目录/派生读失败都只能 fail-closed 降级，不能向 Console 假报“保存失败”。
+              const row = (await contentScheduleStore.listCatalog().catch((error) => {
+                console.warn(`[content-schedule] join config saved; catalog refresh failed account=${accountId}:`, (error as Error).message);
+                return [];
+              })).find((item) => item.accountId === accountId && item.platform === 'facebook');
+              const joinGroupAutomation = await buildFacebookGroupJoinAutomationCatalogViewFailClosed({
+                config: result.row,
+                effectiveActiveWeekMask: row?.effectiveActiveWeekMask ?? null,
+                effectiveContentActiveMask: row?.effectiveContentActiveMask ?? null,
+                loadRiskDailyCap: () => resolveController(accountId)
+                  .then((controller) => controller.effectiveQuotas().day.join_group),
+                loadScope: () => facebookGroupTargetStore.scopedTargetCountForAccount(accountId),
+                loadRecentResult: () => facebookGroupJoinAuditStore.latestScheduledResult(accountId),
+              });
+              return { ok: true, joinGroupAutomation };
+            },
           },
           // Facebook 发帖素材池：手工上传图片，发帖从账号素材池保留，不调用图片模型。
           facebookPublishMedia: facebookPublishMediaStore
@@ -4228,10 +4292,12 @@ async function main(): Promise<void> {
               facebookCommentConfigStore.setAccount(accountId, patch, updatedBy),
           },
           facebookGroupTargets: {
-            importTargets: (inputs, importBatch) => facebookGroupTargetStore.importTargets(inputs, importBatch),
+            importTargets: (inputs, importBatch, options) => facebookGroupTargetStore.importTargets(inputs, importBatch, options),
             listTargets: (options) => facebookGroupTargetStore.listTargets(options),
             listFacets: () => facebookGroupTargetStore.listFacets(),
             setEnabled: (groupUrl, enabled) => facebookGroupTargetStore.setEnabled(groupUrl, enabled),
+            replaceTargetScopes: (groupUrls, accountGroupLabels, updatedBy) =>
+              facebookGroupTargetStore.replaceTargetScopes(groupUrls, accountGroupLabels, updatedBy),
             accountProgress: () => facebookGroupTargetStore.accountProgress(),
             listAssignments: (limit) => facebookGroupMembershipStore.listAssignments(limit),
             reclaimStaleAssignments: (ttlMs) => facebookGroupMembershipStore.reclaimStaleAssignments(ttlMs),

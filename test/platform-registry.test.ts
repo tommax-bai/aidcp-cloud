@@ -112,7 +112,11 @@ test('platform registry: scheduled automation fully covers every platform and ac
       const support = entry.scheduledAutomation[action];
       assert.ok(support, `${entry.platform} 缺 scheduledAutomation.${action}`);
       if (support.supported) {
-        assert.ok(support.allowedModes.length > 0, `${entry.platform}.${action} 支持却无 mode`);
+        if (action === 'join_group') {
+          assert.deepEqual(support.allowedModes, [], `${entry.platform}.${action} 是纯开关动作，不伪造审批 mode`);
+        } else {
+          assert.ok(support.allowedModes.length > 0, `${entry.platform}.${action} 支持却无 mode`);
+        }
         assert.ok(support.maxDailyCap > 0, `${entry.platform}.${action} 支持却无正上限`);
       } else {
         assert.ok(support.reason.length > 0, `${entry.platform}.${action} 不支持却无 reason`);
@@ -126,6 +130,7 @@ test('platform registry: catalog projection is ordered, honest, and detached fro
     { action: 'post', allowedModes: ['review'], maxDailyCap: 50 },
     { action: 'comment', allowedModes: ['review', 'auto_approve'], maxDailyCap: 50 },
     { action: 'contact_comment', allowedModes: ['review', 'auto_approve'], maxDailyCap: 10 },
+    { action: 'join_group', allowedModes: [], maxDailyCap: 10 },
   ]);
   assert.deepEqual(availableScheduledAutomationActionsForPlatform('wechat_channels'), []);
   assert.deepEqual(availableScheduledAutomationActionsForPlatform('future-platform'), []);

@@ -24,6 +24,15 @@ export interface FacebookGroupStoreOptions {
   pool?: pg.Pool;
 }
 
+type FacebookGroupStoreQueryable = Pick<pg.Pool, 'query'>;
+
+export class FacebookGroupScopeError extends Error {
+  constructor(readonly reason: 'invalid_target' | 'invalid_account_group') {
+    super(reason);
+    this.name = 'FacebookGroupScopeError';
+  }
+}
+
 export interface FacebookGroupTargetInput {
   url: string;
   name?: string | null;
@@ -46,7 +55,12 @@ export interface FacebookGroupTargetRow {
   updatedAt: string;
 }
 
+export interface FacebookGroupTargetScopedRow extends FacebookGroupTargetRow {
+  accountGroupLabels: string[];
+}
+
 export interface FacebookGroupTargetListRow extends FacebookGroupTargetRow {
+  accountGroupLabels: string[];
   accountId: string | null;
   membershipStatus: FacebookGroupMembershipStatus | null;
   joinedAt: string | null;
@@ -61,8 +75,19 @@ export interface FacebookGroupImportResult {
   updated: number;
   duplicate: number;
   invalid: number;
-  rows: FacebookGroupTargetRow[];
+  rows: FacebookGroupTargetScopedRow[];
 }
+
+export interface FacebookGroupTargetScopeWriteRow {
+  groupUrl: string;
+  accountGroupLabels: string[];
+  updatedAt: string;
+  updatedBy: string;
+}
+
+export type ReplaceFacebookGroupTargetScopesResult =
+  | { ok: true; items: FacebookGroupTargetScopeWriteRow[] }
+  | { ok: false; reason: 'no_targets' | 'invalid_target' | 'invalid_account_group' };
 
 export interface FacebookGroupTargetListOptions {
   limit?: number;
@@ -72,6 +97,7 @@ export interface FacebookGroupTargetListOptions {
   region?: string | null;
   park?: string | null;
   direction?: string | null;
+  accountGroupLabel?: string | null;
 }
 
 export interface FacebookGroupTargetListResult {
@@ -87,6 +113,8 @@ export interface FacebookGroupRegionFacet {
 export interface FacebookGroupTargetFacets {
   regions: FacebookGroupRegionFacet[];
   directions: string[];
+  accountGroupLabels: string[];
+  unscopedTargetCount: number;
 }
 
 export interface FacebookGroupAccountProgress {
@@ -144,7 +172,10 @@ export type FacebookGroupJoinAuditOutcome =
   | 'nav_error'
   | 'join_failed'
   | 'ambiguous_skip'
-  | 'no_targets';
+  | 'no_targets'
+  | 'scope_mismatch';
+
+export type FacebookGroupJoinTriggerSource = 'scheduled' | 'manual_pool' | 'manual_specific' | 'shadow';
 
 export interface FacebookGroupJoinAuditRow {
   accountId: string;
@@ -155,6 +186,14 @@ export interface FacebookGroupJoinAuditRow {
   reason?: string;
   shadow?: boolean;
   observation?: unknown;
+  triggerSource?: FacebookGroupJoinTriggerSource;
+}
+
+export interface FacebookGroupJoinRecentScheduledResult {
+  outcome: FacebookGroupJoinAuditOutcome;
+  reason: string | null;
+  groupUrl: string | null;
+  createdAt: string;
 }
 
 interface TargetDbRow {
@@ -172,6 +211,7 @@ interface TargetDbRow {
 }
 
 interface TargetListDbRow extends TargetDbRow {
+  account_group_labels: string[] | null;
   account_id: string | null;
   membership_status: FacebookGroupMembershipStatus | null;
   joined_at: Date | string | null;
@@ -245,6 +285,17 @@ function normalizeMeta(value: string | null | undefined): string | null {
   return v ? v.slice(0, 120) : null;
 }
 
+export function normalizeFacebookAccountGroupLabels(values: readonly string[]): string[] | null {
+  const normalized = new Set<string>();
+  for (const value of values) {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    if (!trimmed || trimmed.length > 64) return null;
+    normalized.add(trimmed);
+  }
+  return [...normalized].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+}
+
 function toTargetRow(r: TargetDbRow): FacebookGroupTargetRow {
   return {
     groupUrl: r.group_url,
@@ -264,6 +315,7 @@ function toTargetRow(r: TargetDbRow): FacebookGroupTargetRow {
 function toListRow(r: TargetListDbRow): FacebookGroupTargetListRow {
   return {
     ...toTargetRow(r),
+    accountGroupLabels: r.account_group_labels ?? [],
     accountId: r.account_id ?? null,
     membershipStatus: r.membership_status ?? null,
     joinedAt: iso(r.joined_at),
@@ -318,6 +370,19 @@ ALTER TABLE facebook_group_target ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT N
 ALTER TABLE facebook_group_target ADD COLUMN IF NOT EXISTS import_batch TEXT;
 ALTER TABLE facebook_group_target ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
 ALTER TABLE facebook_group_target ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE facebook_group_target ADD COLUMN IF NOT EXISTS scope_updated_at TIMESTAMPTZ;
+ALTER TABLE facebook_group_target ADD COLUMN IF NOT EXISTS scope_updated_by TEXT;
+
+CREATE TABLE IF NOT EXISTS facebook_group_target_scope (
+  group_url           TEXT NOT NULL REFERENCES facebook_group_target(group_url) ON DELETE CASCADE,
+  account_group_label TEXT NOT NULL CHECK (account_group_label = btrim(account_group_label)
+                                           AND char_length(account_group_label) BETWEEN 1 AND 64),
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_by          TEXT NOT NULL,
+  PRIMARY KEY (group_url, account_group_label)
+);
+CREATE INDEX IF NOT EXISTS idx_fb_group_target_scope_label
+  ON facebook_group_target_scope (account_group_label, group_url);
 
 CREATE INDEX IF NOT EXISTS idx_fb_group_target_enabled_gating
   ON facebook_group_target (enabled, join_gating, priority DESC, created_at ASC);
@@ -370,10 +435,22 @@ CREATE TABLE IF NOT EXISTS facebook_group_join_audit (
   reason      TEXT,
   shadow      BOOLEAN NOT NULL DEFAULT false,
   observation JSONB,
+  trigger_source TEXT,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE facebook_group_join_audit ADD COLUMN IF NOT EXISTS trigger_source TEXT;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'facebook_group_join_audit_trigger_source_check') THEN
+    ALTER TABLE facebook_group_join_audit
+      ADD CONSTRAINT facebook_group_join_audit_trigger_source_check
+      CHECK (trigger_source IS NULL OR trigger_source IN ('scheduled','manual_pool','manual_specific','shadow'));
+  END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_fb_group_join_audit_account
   ON facebook_group_join_audit (account_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_fb_group_join_audit_scheduled
+  ON facebook_group_join_audit (account_id, created_at DESC)
+  WHERE trigger_source = 'scheduled';
 CREATE INDEX IF NOT EXISTS idx_fb_group_join_audit_group
   ON facebook_group_join_audit (group_url, created_at DESC);
 `;
@@ -392,13 +469,14 @@ export class FacebookGroupTargetStore {
   async importTargets(
     inputs: FacebookGroupTargetInput[],
     importBatch: string | null = null,
+    options: { accountGroupLabels?: string[]; updatedBy?: string } = {},
   ): Promise<FacebookGroupImportResult> {
     let invalid = 0;
     let duplicate = 0;
     let updated = 0;
     let imported = 0;
     const seen = new Set<string>();
-    const rows: FacebookGroupTargetRow[] = [];
+    const normalizedInputs: Array<{ groupUrl: string; input: FacebookGroupTargetInput }> = [];
     for (const input of inputs) {
       const groupUrl = canonicalFacebookGroupUrl(input.url);
       if (!groupUrl) {
@@ -410,11 +488,28 @@ export class FacebookGroupTargetStore {
         continue;
       }
       seen.add(groupUrl);
+      normalizedInputs.push({ groupUrl, input });
+    }
+
+    const requestedLabels = options.accountGroupLabels === undefined
+      ? undefined
+      : normalizeFacebookAccountGroupLabels(options.accountGroupLabels);
+    if (requestedLabels === null) throw new FacebookGroupScopeError('invalid_account_group');
+    const actor = options.updatedBy?.trim() || 'system';
+    const client = requestedLabels === undefined ? null : await this.pool.connect();
+    const queryable: FacebookGroupStoreQueryable = client ?? this.pool;
+    const rows: FacebookGroupTargetRow[] = [];
+    try {
+      if (client && requestedLabels !== undefined) {
+        await client.query('BEGIN');
+        await this.assertFacebookAccountGroupLabels(client, requestedLabels);
+      }
+      for (const { groupUrl, input } of normalizedInputs) {
       const groupName = normalizeName(input.name);
       const region = normalizeMeta(input.region);
       const park = normalizeMeta(input.park);
       const direction = normalizeMeta(input.direction);
-      const { rows: inserted } = await this.pool.query<TargetDbRow>(
+      const { rows: inserted } = await queryable.query<TargetDbRow>(
         `INSERT INTO facebook_group_target (group_url, group_name, region, park, direction, import_batch)
          VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (group_url) DO NOTHING
@@ -426,7 +521,7 @@ export class FacebookGroupTargetStore {
         rows.push(toTargetRow(inserted[0]));
         continue;
       }
-      const { rows: changed } = await this.pool.query<TargetDbRow>(
+      const { rows: changed } = await queryable.query<TargetDbRow>(
         `UPDATE facebook_group_target
          SET group_name = COALESCE($2, group_name),
              region = COALESCE($3, region),
@@ -444,8 +539,147 @@ export class FacebookGroupTargetStore {
       } else {
         duplicate++;
       }
+      }
+      const groupUrls = rows.map((row) => row.groupUrl);
+      if (requestedLabels !== undefined && groupUrls.length > 0) {
+        await this.replaceScopesInTransaction(queryable, groupUrls, requestedLabels, actor);
+      }
+      const scopes = await this.readScopeLabels(queryable, groupUrls);
+      if (client) await client.query('COMMIT');
+      return {
+        imported,
+        updated,
+        duplicate,
+        invalid,
+        rows: rows.map((row) => ({ ...row, accountGroupLabels: scopes.get(row.groupUrl) ?? [] })),
+      };
+    } catch (error) {
+      if (client) await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client?.release();
     }
-    return { imported, updated, duplicate, invalid, rows };
+  }
+
+  private async assertFacebookAccountGroupLabels(
+    queryable: FacebookGroupStoreQueryable,
+    labels: string[],
+  ): Promise<void> {
+    if (labels.length === 0) return;
+    const { rows } = await queryable.query<{ group_label: string }>(
+      `SELECT DISTINCT group_label
+       FROM accounts
+       WHERE lower(btrim(platform)) IN ('facebook','fb')
+         AND group_label = ANY($1::text[])`,
+      [labels],
+    );
+    const actual = new Set(rows.map((row) => row.group_label));
+    if (labels.some((label) => !actual.has(label))) throw new FacebookGroupScopeError('invalid_account_group');
+  }
+
+  private async replaceScopesInTransaction(
+    queryable: FacebookGroupStoreQueryable,
+    groupUrls: string[],
+    labels: string[],
+    updatedBy: string,
+  ): Promise<void> {
+    await queryable.query(
+      `DELETE FROM facebook_group_target_scope WHERE group_url = ANY($1::text[])`,
+      [groupUrls],
+    );
+    if (labels.length > 0) {
+      await queryable.query(
+        `INSERT INTO facebook_group_target_scope (group_url, account_group_label, updated_at, updated_by)
+         SELECT group_url, account_group_label, now(), $3
+         FROM unnest($1::text[]) AS group_url
+         CROSS JOIN unnest($2::text[]) AS account_group_label`,
+        [groupUrls, labels, updatedBy],
+      );
+    }
+    await queryable.query(
+      `UPDATE facebook_group_target
+       SET scope_updated_at = now(), scope_updated_by = $2
+       WHERE group_url = ANY($1::text[])`,
+      [groupUrls, updatedBy],
+    );
+  }
+
+  private async readScopeLabels(
+    queryable: FacebookGroupStoreQueryable,
+    groupUrls: string[],
+  ): Promise<Map<string, string[]>> {
+    if (groupUrls.length === 0) return new Map();
+    const { rows } = await queryable.query<{ group_url: string; account_group_labels: string[] | null }>(
+      `SELECT t.group_url,
+              COALESCE(array_agg(s.account_group_label ORDER BY s.account_group_label)
+                FILTER (WHERE s.account_group_label IS NOT NULL), ARRAY[]::text[]) AS account_group_labels
+       FROM facebook_group_target t
+       LEFT JOIN facebook_group_target_scope s ON s.group_url = t.group_url
+       WHERE t.group_url = ANY($1::text[])
+       GROUP BY t.group_url`,
+      [groupUrls],
+    );
+    return new Map(rows
+      .filter((row) => typeof row.group_url === 'string')
+      .map((row) => [row.group_url, row.account_group_labels ?? []]));
+  }
+
+  async replaceTargetScopes(
+    groupUrlInputs: string[],
+    accountGroupLabelInputs: string[],
+    updatedBy: string,
+  ): Promise<ReplaceFacebookGroupTargetScopesResult> {
+    if (groupUrlInputs.length === 0) return { ok: false, reason: 'no_targets' };
+    const canonicalGroupUrls = groupUrlInputs.map(canonicalFacebookGroupUrl);
+    if (canonicalGroupUrls.some((url) => url === null)) return { ok: false, reason: 'invalid_target' };
+    const groupUrls = [...new Set(canonicalGroupUrls as string[])];
+    const labels = normalizeFacebookAccountGroupLabels(accountGroupLabelInputs);
+    if (labels === null) return { ok: false, reason: 'invalid_account_group' };
+    const actor = updatedBy.trim() || 'system';
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await this.assertFacebookAccountGroupLabels(client, labels);
+      const { rows: targets } = await client.query<{ group_url: string }>(
+        `SELECT group_url FROM facebook_group_target WHERE group_url = ANY($1::text[]) FOR UPDATE`,
+        [groupUrls],
+      );
+      if (targets.length !== groupUrls.length) throw new FacebookGroupScopeError('invalid_target');
+      await this.replaceScopesInTransaction(client, groupUrls, labels, actor);
+      const { rows } = await client.query<{
+        group_url: string;
+        account_group_labels: string[] | null;
+        scope_updated_at: Date | string;
+        scope_updated_by: string;
+      }>(
+        `SELECT t.group_url,
+                COALESCE(array_agg(s.account_group_label ORDER BY s.account_group_label)
+                  FILTER (WHERE s.account_group_label IS NOT NULL), ARRAY[]::text[]) AS account_group_labels,
+                t.scope_updated_at, t.scope_updated_by
+         FROM facebook_group_target t
+         LEFT JOIN facebook_group_target_scope s ON s.group_url = t.group_url
+         WHERE t.group_url = ANY($1::text[])
+         GROUP BY t.group_url, t.scope_updated_at, t.scope_updated_by
+         ORDER BY t.group_url`,
+        [groupUrls],
+      );
+      await client.query('COMMIT');
+      return {
+        ok: true,
+        items: rows.map((row) => ({
+          groupUrl: row.group_url,
+          accountGroupLabels: row.account_group_labels ?? [],
+          updatedAt: iso(row.scope_updated_at)!,
+          updatedBy: row.scope_updated_by,
+        })),
+      };
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      if (error instanceof FacebookGroupScopeError) return { ok: false, reason: error.reason };
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   /**
@@ -527,6 +761,14 @@ export class FacebookGroupTargetStore {
       values.push(direction);
       where.push(`t.direction = $${values.length}`);
     }
+    const accountGroupLabel = normalizeMeta(options.accountGroupLabel);
+    if (accountGroupLabel) {
+      values.push(accountGroupLabel.slice(0, 64));
+      where.push(`EXISTS (
+        SELECT 1 FROM facebook_group_target_scope sf
+        WHERE sf.group_url = t.group_url AND sf.account_group_label = $${values.length}
+      )`);
+    }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const count = await this.pool.query<{ total: string }>(
       `SELECT count(*)::text AS total
@@ -539,6 +781,10 @@ export class FacebookGroupTargetStore {
     const { rows } = await this.pool.query<TargetListDbRow>(
       `SELECT t.group_url, t.group_name, t.region, t.park, t.direction, t.join_gating, t.priority, t.enabled, t.import_batch,
               t.created_at, t.updated_at,
+              COALESCE((
+                SELECT array_agg(s.account_group_label ORDER BY s.account_group_label)
+                FROM facebook_group_target_scope s WHERE s.group_url = t.group_url
+              ), ARRAY[]::text[]) AS account_group_labels,
               m.account_id, m.status AS membership_status, m.joined_at, m.last_attempt_at,
               m.last_reason, m.last_commented_at, m.comments_total
        FROM facebook_group_target t
@@ -552,7 +798,7 @@ export class FacebookGroupTargetStore {
   }
 
   async listFacets(): Promise<FacebookGroupTargetFacets> {
-    const [{ rows: regionRows }, { rows: directionRows }] = await Promise.all([
+    const [{ rows: regionRows }, { rows: directionRows }, { rows: accountGroupRows }, { rows: unscopedRows }] = await Promise.all([
       this.pool.query<{ region: string | null; park: string | null }>(
         `SELECT DISTINCT region, park
          FROM facebook_group_target
@@ -564,6 +810,21 @@ export class FacebookGroupTargetStore {
          FROM facebook_group_target
          WHERE direction IS NOT NULL
          ORDER BY direction ASC`,
+      ),
+      this.pool.query<{ account_group_label: string }>(
+        `SELECT DISTINCT group_label AS account_group_label
+         FROM accounts
+         WHERE lower(btrim(platform)) IN ('facebook','fb')
+           AND group_label IS NOT NULL
+           AND btrim(group_label) <> ''
+         ORDER BY account_group_label ASC`,
+      ),
+      this.pool.query<{ total: string }>(
+        `SELECT count(*)::text AS total
+         FROM facebook_group_target t
+         WHERE NOT EXISTS (
+           SELECT 1 FROM facebook_group_target_scope s WHERE s.group_url = t.group_url
+         )`,
       ),
     ]);
     const byRegion = new Map<string, Set<string>>();
@@ -581,20 +842,47 @@ export class FacebookGroupTargetStore {
         parks: [...parks].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN')),
       })),
       directions: directionRows.map((row) => normalizeMeta(row.direction)).filter((v): v is string => !!v),
+      accountGroupLabels: accountGroupRows.map((row) => row.account_group_label),
+      unscopedTargetCount: Number(unscopedRows[0]?.total ?? '0'),
     };
   }
 
-  async nextJoinCandidate(): Promise<FacebookGroupTargetRow | null> {
+  async scopedTargetCountForAccount(accountId: string): Promise<{ accountGroupLabel: string | null; count: number }> {
+    const { rows } = await this.pool.query<{ group_label: string | null; total: string }>(
+      `SELECT a.group_label,
+              count(t.group_url) FILTER (
+                WHERE t.enabled = true AND t.join_gating IN ('unknown','instant')
+                  AND NOT EXISTS (
+                    SELECT 1 FROM facebook_group_membership m WHERE m.group_url = t.group_url
+                  )
+              )::text AS total
+       FROM accounts a
+       LEFT JOIN facebook_group_target_scope s ON s.account_group_label = a.group_label
+       LEFT JOIN facebook_group_target t ON t.group_url = s.group_url
+       WHERE a.account_id = $1 AND lower(btrim(a.platform)) IN ('facebook','fb')
+       GROUP BY a.group_label`,
+      [accountId],
+    );
+    return { accountGroupLabel: rows[0]?.group_label ?? null, count: Number(rows[0]?.total ?? '0') };
+  }
+
+  async nextJoinCandidate(accountId: string): Promise<FacebookGroupTargetRow | null> {
     const { rows } = await this.pool.query<TargetDbRow>(
       `SELECT t.group_url, t.group_name, t.region, t.park, t.direction, t.join_gating, t.priority, t.enabled, t.import_batch, t.created_at, t.updated_at
-       FROM facebook_group_target t
-       WHERE t.enabled = true
+       FROM accounts a
+       JOIN facebook_group_target_scope s ON s.account_group_label = a.group_label
+       JOIN facebook_group_target t ON t.group_url = s.group_url
+       WHERE a.account_id = $1
+         AND lower(btrim(a.platform)) IN ('facebook','fb')
+         AND a.group_label IS NOT NULL AND btrim(a.group_label) <> ''
+         AND t.enabled = true
          AND t.join_gating IN ('unknown','instant')
          AND NOT EXISTS (
            SELECT 1 FROM facebook_group_membership m WHERE m.group_url = t.group_url
          )
        ORDER BY t.priority DESC, t.created_at ASC, t.group_url ASC
        LIMIT 1`,
+      [accountId],
     );
     return rows[0] ? toTargetRow(rows[0]) : null;
   }
@@ -657,22 +945,70 @@ export class FacebookGroupMembershipStore {
 
   async claimNext(accountId: string): Promise<FacebookGroupMembershipRow | null> {
     const { rows } = await this.pool.query<MembershipDbRow>(
-      `INSERT INTO facebook_group_membership (account_id, group_url, status, assigned_at, last_attempt_at, attempts)
-       SELECT $1, t.group_url, 'assigned', now(), now(), 0
-       FROM facebook_group_target t
-       WHERE t.enabled = true
-         AND t.join_gating IN ('unknown','instant')
-         AND NOT EXISTS (
-           SELECT 1 FROM facebook_group_membership m WHERE m.group_url = t.group_url
-         )
-       ORDER BY t.priority DESC, t.created_at ASC, t.group_url ASC
-       LIMIT 1
+      `WITH candidate AS (
+         SELECT t.group_url
+         FROM accounts a
+         JOIN facebook_group_target_scope s ON s.account_group_label = a.group_label
+         JOIN facebook_group_target t ON t.group_url = s.group_url
+         WHERE a.account_id = $1
+           AND lower(btrim(a.platform)) IN ('facebook','fb')
+           AND a.group_label IS NOT NULL AND btrim(a.group_label) <> ''
+           AND t.enabled = true
+           AND t.join_gating IN ('unknown','instant')
+           AND NOT EXISTS (
+             SELECT 1 FROM facebook_group_membership m WHERE m.group_url = t.group_url
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM facebook_group_membership mine
+             WHERE mine.account_id = $1 AND mine.status IN ('assigned','joining')
+           )
+         ORDER BY t.priority DESC, t.created_at ASC, t.group_url ASC
+         FOR UPDATE OF t SKIP LOCKED
+         LIMIT 1
+       )
+       INSERT INTO facebook_group_membership (account_id, group_url, status, assigned_at, last_attempt_at, attempts)
+       SELECT $1, candidate.group_url, 'assigned', now(), now(), 0
+       FROM candidate
        ON CONFLICT (group_url) DO NOTHING
        RETURNING account_id, group_url, status, assigned_at, joined_at, last_attempt_at, attempts,
                  last_reason, last_commented_at, cooldown_until, comments_total, left_confirmations, updated_at`,
       [accountId],
     );
     return rows[0] ? toMembershipRow(rows[0]) : null;
+  }
+
+  /**
+   * 自动/裸池 assignment 在导航前重验账号当前分组与 scope。只删除 assigned/joining；任何终态事实原样保留。
+   */
+  async revalidateScopedAssignment(
+    accountId: string,
+    groupUrlInput: string,
+  ): Promise<'eligible' | 'scope_mismatch' | 'terminal' | 'missing'> {
+    const groupUrl = canonicalFacebookGroupUrl(groupUrlInput);
+    if (!groupUrl) return 'missing';
+    const removed = await this.pool.query(
+      `DELETE FROM facebook_group_membership m
+       WHERE m.account_id = $1 AND m.group_url = $2
+         AND m.status IN ('assigned','joining')
+         AND NOT EXISTS (
+           SELECT 1
+           FROM accounts a
+           JOIN facebook_group_target_scope s
+             ON s.group_url = m.group_url AND s.account_group_label = a.group_label
+           WHERE a.account_id = m.account_id
+             AND lower(btrim(a.platform)) IN ('facebook','fb')
+             AND a.group_label IS NOT NULL AND btrim(a.group_label) <> ''
+         )`,
+      [accountId, groupUrl],
+    );
+    if ((removed.rowCount ?? 0) > 0) return 'scope_mismatch';
+    const { rows } = await this.pool.query<{ status: FacebookGroupMembershipStatus }>(
+      `SELECT status FROM facebook_group_membership WHERE account_id = $1 AND group_url = $2`,
+      [accountId, groupUrl],
+    );
+    const status = rows[0]?.status;
+    if (!status) return 'missing';
+    return status === 'assigned' || status === 'joining' ? 'eligible' : 'terminal';
   }
 
   /**
@@ -733,15 +1069,16 @@ export class FacebookGroupMembershipStore {
     return rows[0] ? toMembershipRow(rows[0]) : null;
   }
 
-  async markJoining(accountId: string, groupUrlInput: string, reason = 'attempting'): Promise<void> {
+  async markJoining(accountId: string, groupUrlInput: string, reason = 'attempting'): Promise<boolean> {
     const groupUrl = canonicalFacebookGroupUrl(groupUrlInput);
-    if (!groupUrl) return;
-    await this.pool.query(
+    if (!groupUrl) return false;
+    const result = await this.pool.query(
       `UPDATE facebook_group_membership
        SET status = 'joining', last_attempt_at = now(), attempts = attempts + 1, last_reason = $3, updated_at = now()
-       WHERE account_id = $1 AND group_url = $2`,
+       WHERE account_id = $1 AND group_url = $2 AND status IN ('assigned','joining')`,
       [accountId, groupUrl, reason],
     );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async markJoined(accountId: string, groupUrlInput: string, reason = 'joined'): Promise<void> {
@@ -967,8 +1304,8 @@ export class FacebookGroupJoinAuditStore {
       const groupUrl = row.groupUrl ? canonicalFacebookGroupUrl(row.groupUrl) : null;
       await this.pool.query(
         `INSERT INTO facebook_group_join_audit
-           (account_id, group_url, outcome, phase, verdict, reason, shadow, observation)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
+           (account_id, group_url, outcome, phase, verdict, reason, shadow, observation, trigger_source)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)`,
         [
           row.accountId,
           groupUrl,
@@ -978,11 +1315,37 @@ export class FacebookGroupJoinAuditStore {
           row.reason ?? null,
           row.shadow ?? false,
           row.observation === undefined ? null : JSON.stringify(row.observation),
+          row.triggerSource ?? null,
         ],
       );
     } catch (err) {
       console.warn(`[fb-group-join-audit] append failed account=${row.accountId}:`, (err as Error).message);
     }
+  }
+
+  async latestScheduledResult(accountId: string): Promise<FacebookGroupJoinRecentScheduledResult | null> {
+    const { rows } = await this.pool.query<{
+      outcome: FacebookGroupJoinAuditOutcome;
+      reason: string | null;
+      group_url: string | null;
+      created_at: Date | string;
+    }>(
+      `SELECT outcome, reason, group_url, created_at
+       FROM facebook_group_join_audit
+       WHERE account_id = $1 AND trigger_source = 'scheduled'
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`,
+      [accountId],
+    );
+    const row = rows[0];
+    return row
+      ? {
+          outcome: row.outcome,
+          reason: row.reason ?? null,
+          groupUrl: row.group_url ?? null,
+          createdAt: iso(row.created_at)!,
+        }
+      : null;
   }
 
   async close(): Promise<void> {

@@ -44,6 +44,7 @@ function makeHarness(opts: {
   /** joinSpecificGroup（change facebook-comment-review-and-targeted-join）：claimSpecific 桩返回；缺省 → 该 url 的新 assigned 行。 */
   claimSpecific?: (accountId: string, url: string) => { row: FacebookGroupMembershipRow; ownedByOther: boolean } | null;
   isFacebookAccount?: boolean;
+  scopeEligibility?: 'eligible' | 'scope_mismatch' | 'terminal' | 'missing';
 } = {}) {
   const bus = new EventBus();
   const sent: Env[] = [];
@@ -99,6 +100,11 @@ function makeHarness(opts: {
     },
     markJoining: async (_accountId: string, groupUrl: string) => {
       membershipCalls.push(`joining:${groupUrl}`);
+      return true;
+    },
+    revalidateScopedAssignment: async (_accountId: string, groupUrl: string) => {
+      membershipCalls.push(`revalidate:${groupUrl}`);
+      return opts.scopeEligibility ?? 'eligible';
     },
     markJoined: async (_accountId: string, groupUrl: string, reason?: string) => {
       membershipCalls.push(`joined:${groupUrl}:${reason ?? ''}`);
@@ -235,6 +241,25 @@ describe('FacebookGroupJoinScheduler', () => {
     assert.ok(h.membershipCalls.includes(`outcome:${GROUP}:gated:gated_or_questionnaire_signal`));
     assert.ok(h.targetCalls.includes(`gating:${GROUP}:gated`));
     assert.deepEqual(h.sessionBudgetCalls, []);
+    assert.ok(h.auditRows.every((row) => row.triggerSource === 'scheduled'));
+  });
+
+  it('scope change: 自动分配在导航前释放并返回 scope_mismatch，不下发 Edge', async () => {
+    const h = makeHarness({ auto: true, scopeEligibility: 'scope_mismatch' });
+    const r = await h.scheduler.triggerScheduled('acc-fb');
+    assert.deepEqual(r, { triggered: false, groupUrl: GROUP, reason: 'scope_mismatch' });
+    assert.deepEqual(h.sent, []);
+    assert.ok(h.membershipCalls.includes(`revalidate:${GROUP}`));
+    assert.ok(!h.membershipCalls.includes(`joining:${GROUP}`), '失配分配不得再推进 joining');
+    assert.ok(h.auditRows.some((row) => row.outcome === 'scope_mismatch' && row.triggerSource === 'scheduled'));
+  });
+
+  it('scope revalidation: 终态竞态不被改写且不导航', async () => {
+    const h = makeHarness({ auto: true, scopeEligibility: 'terminal' });
+    const r = await h.scheduler.triggerScheduled('acc-fb');
+    assert.equal(r.reason, 'assignment_not_executable');
+    assert.deepEqual(h.sent, []);
+    assert.ok(!h.membershipCalls.includes(`joining:${GROUP}`), 'joined/pending/gated 等终态不得被改回 joining');
   });
 
   it('real: 单场加群预算耗尽时不 claim、不下发', async () => {
@@ -371,6 +396,7 @@ describe('FacebookGroupJoinScheduler', () => {
     assert.equal(r.outcome, 'joined', '配额被拒但手动命令仍真加群');
     assert.ok(!h.auditRows.some((row) => row.reason === 'session_budget' || row.reason === 'canDo'), '手动路径绝不产 quota_denied 审计');
     assert.deepEqual(h.sessionBudgetCalls, ['acc-fb:edge-fb'], '成功后仍 recordSessionJoin，账本诚实不漏计');
+    assert.ok(h.auditRows.every((row) => row.triggerSource === 'manual_pool'));
   });
 
   it('auto（非 manual）: canJoin=false → quota_denied 不下发（回归：manual 旗标不误伤自动巡回）', async () => {
@@ -452,6 +478,7 @@ describe('FacebookGroupJoinScheduler', () => {
     assert.ok(h.membershipCalls.includes(`claimSpecific:${SPEC_URL}`));
     assert.ok(h.membershipCalls.includes(`joined:${SPEC_URL}:member_signal`));
     assert.equal(h.sent[0].type, 'group.join');
+    assert.ok(h.auditRows.every((row) => row.triggerSource === 'manual_specific'));
   });
 
   it('joinSpecificGroup 已是成员（ledger status=joined）→ already_member 快路，绝不走边端', async () => {

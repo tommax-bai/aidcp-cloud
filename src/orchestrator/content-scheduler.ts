@@ -115,6 +115,8 @@ export interface ContentSchedulerDeps {
   joinedTodayCount?(accountId: string): Promise<number>;
   /** join_group 的日上限（通常来自 RiskController.effectiveQuotas().day.join_group）。 */
   joinDailyCap?(accountId: string): number | Promise<number>;
+  /** 每账号 Facebook 自动加群领域配置；未注入/无行均默认关闭。 */
+  joinAutomationFor?(accountId: string): { enabled: boolean; dailyCap: number; weekMask: string | null };
   /**
    * 联系评论两件套（change content-schedule-group-comments）。可选：任一未注入 → 该动作整体跳过（零回归）。
    * triggerContactComment 实现负责 canDo('comment') 配额闸 + triggerManual(injectContact:true) + 回执 ok 记持久 attempt +
@@ -340,12 +342,18 @@ export class ContentScheduler {
           // 动作循环（post 在前：纯云端、不接管边端；join/comment/contact 共用账号级 inFlight，物理边端单槽）。
           // join_group 与 comment 的最坏日活动量由 joinDailyCap + commentDailyCap 显式相加评估：
           // 默认 normal=3 joins/day，若排期 commentDailyCap=8，则该账号自动互动上界 11/day；restricted/frozen 在 riskStatus 闸处停。
+          let joinAutomation: { enabled: boolean; dailyCap: number; weekMask: string | null } | null = null;
           for (const action of ['post', 'join', 'comment', 'contact_comment'] as const) {
             if (action === 'post' && (!actionModeEnabled(s.postMode) || s.postDailyCap <= 0)) continue;
             if (action === 'join') {
               if (!this.deps.triggerJoin || !this.deps.isJoinBusy || !this.deps.joinedTodayCount || !this.deps.joinDailyCap) continue;
-              const joinCap = await this.deps.joinDailyCap(accountId);
-              if (joinCap <= 0) continue;
+              const platform = this.deps.getPlatform ? await this.deps.getPlatform(accountId) : 'xiaohongshu';
+              if (platform !== 'facebook') continue;
+              joinAutomation = this.deps.joinAutomationFor?.(accountId) ?? null;
+              if (!joinAutomation?.enabled || joinAutomation.dailyCap <= 0) continue;
+              if (joinAutomation.weekMask !== null) {
+                if (!isValidWeekActiveMask(joinAutomation.weekMask) || !isWeekActiveAt(joinAutomation.weekMask, now)) continue;
+              }
             }
             if (action === 'comment') {
               if (!actionModeEnabled(s.commentMode) || s.commentDailyCap <= 0) continue;
@@ -445,8 +453,12 @@ export class ContentScheduler {
               // 跨调度器互斥（change facebook-manual-join-comment）：该账号正在评论（含手动 /comment [--join] 的评论阶段）→ 本 tick 不起加群，
               // 后台自动加群绝不闯入正在进行的评论、抢同一物理边端（isCommentBusy 未注入则不闸、零回归）。
               if (this.deps.isCommentBusy?.(accountId)) continue;
-              const [joined, cap] = await Promise.all([this.deps.joinedTodayCount!(accountId), this.deps.joinDailyCap!(accountId)]);
-              if (joined >= cap) continue;
+              const [joined, riskCap] = await Promise.all([
+                this.deps.joinedTodayCount!(accountId),
+                this.deps.joinDailyCap!(accountId),
+              ]);
+              const effectiveCap = Math.min(joinAutomation?.dailyCap ?? 0, riskCap);
+              if (effectiveCap <= 0 || joined >= effectiveCap) continue;
 
               this.fire(accountId, action, fireKey, cell, () => this.deps.triggerJoin!(accountId));
             } else {

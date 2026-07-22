@@ -1414,6 +1414,7 @@ test('HTTP auth 续签 + 登出撤销（console-cloud-panel-hardening #24/#26）
 test('HTTP Facebook group metadata filters, facets, and import validation', async () => {
   let listOptions: unknown = null;
   let importedInputs: unknown = null;
+  let scopeWrite: unknown = null;
   const groupDeps = {
     ...deps,
     facebookGroupTargets: {
@@ -1434,6 +1435,7 @@ test('HTTP Facebook group metadata filters, facets, and import validation', asyn
               importBatch: 'batch-1',
               createdAt: '2026-07-09T00:00:00.000Z',
               updatedAt: '2026-07-09T00:00:00.000Z',
+              accountGroupLabels: ['华东组', '招聘组'],
               accountId: null,
               membershipStatus: null,
               joinedAt: null,
@@ -1448,10 +1450,24 @@ test('HTTP Facebook group metadata filters, facets, and import validation', asyn
       listFacets: async () => ({
         regions: [{ region: '河南区域', parks: ['同文1工业区'] }],
         directions: ['机械和电气'],
+        accountGroupLabels: ['华东组', '招聘组'],
+        unscopedTargetCount: 2,
       }),
-      importTargets: async (inputs: unknown, importBatch: string | null) => {
-        importedInputs = { inputs, importBatch };
+      importTargets: async (inputs: unknown, importBatch: string | null, options: unknown) => {
+        importedInputs = { inputs, importBatch, options };
         return { imported: 1, updated: 0, duplicate: 0, invalid: 0, rows: [] };
+      },
+      replaceTargetScopes: async (groupUrls: string[], accountGroupLabels: string[], updatedBy: string) => {
+        scopeWrite = { groupUrls, accountGroupLabels, updatedBy };
+        return {
+          ok: true as const,
+          items: groupUrls.map((groupUrl) => ({
+            groupUrl,
+            accountGroupLabels,
+            updatedAt: '2026-07-22T08:00:00.000Z',
+            updatedBy,
+          })),
+        };
       },
       setEnabled: async () => null,
       accountProgress: async () => [],
@@ -1472,7 +1488,7 @@ test('HTTP Facebook group metadata filters, facets, and import validation', asyn
     const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
 
     const list = await fetch(
-      `${base}/api/facebook/groups?enabled=true&status=joined&region=${encodeURIComponent('河南区域')}&park=${encodeURIComponent('同文1工业区')}&direction=${encodeURIComponent('机械和电气')}`,
+      `${base}/api/facebook/groups?enabled=true&status=joined&region=${encodeURIComponent('河南区域')}&park=${encodeURIComponent('同文1工业区')}&direction=${encodeURIComponent('机械和电气')}&accountGroupLabel=${encodeURIComponent('华东组')}`,
       { headers: auth },
     );
     assert.equal(list.status, 200);
@@ -1484,6 +1500,7 @@ test('HTTP Facebook group metadata filters, facets, and import validation', asyn
       region: '河南区域',
       park: '同文1工业区',
       direction: '机械和电气',
+      accountGroupLabel: '华东组',
     });
 
     const facets = await fetch(`${base}/api/facebook/groups/facets`, { headers: auth });
@@ -1491,6 +1508,8 @@ test('HTTP Facebook group metadata filters, facets, and import validation', asyn
     assert.deepEqual(await facets.json(), {
       regions: [{ region: '河南区域', parks: ['同文1工业区'] }],
       directions: ['机械和电气'],
+      accountGroupLabels: ['华东组', '招聘组'],
+      unscopedTargetCount: 2,
     });
 
     const imported = await fetch(`${base}/api/facebook/groups/import`, {
@@ -1498,6 +1517,7 @@ test('HTTP Facebook group metadata filters, facets, and import validation', asyn
       headers: auth,
       body: JSON.stringify({
         importBatch: 'batch-1',
+        accountGroupLabels: ['华东组', '招聘组'],
         items: [
           {
             url: 'https://www.facebook.com/groups/group-a?ref=share',
@@ -1520,6 +1540,30 @@ test('HTTP Facebook group metadata filters, facets, and import validation', asyn
           direction: '机械和电气',
         },
       ],
+      options: { accountGroupLabels: ['华东组', '招聘组'], updatedBy: 'alice' },
+    });
+
+    const scoped = await fetch(`${base}/api/facebook/groups/scopes`, {
+      method: 'PUT',
+      headers: auth,
+      body: JSON.stringify({
+        groupUrls: ['https://www.facebook.com/groups/group-a'],
+        accountGroupLabels: ['华东组', '招聘组'],
+      }),
+    });
+    assert.equal(scoped.status, 200);
+    assert.deepEqual(scopeWrite, {
+      groupUrls: ['https://www.facebook.com/groups/group-a'],
+      accountGroupLabels: ['华东组', '招聘组'],
+      updatedBy: 'alice',
+    });
+    assert.deepEqual(await scoped.json(), {
+      items: [{
+        groupUrl: 'https://www.facebook.com/groups/group-a',
+        accountGroupLabels: ['华东组', '招聘组'],
+        updatedAt: '2026-07-22T08:00:00.000Z',
+        updatedBy: 'alice',
+      }],
     });
 
     const bad = await fetch(`${base}/api/facebook/groups/import`, {
@@ -1528,6 +1572,107 @@ test('HTTP Facebook group metadata filters, facets, and import validation', asyn
       body: JSON.stringify({ items: [{ url: 'https://www.facebook.com/groups/group-a', region: 123 }] }),
     });
     assert.equal(bad.status, 400);
+
+    const badScopes = await fetch(`${base}/api/facebook/groups/scopes`, {
+      method: 'PUT', headers: auth,
+      body: JSON.stringify({ groupUrls: [], accountGroupLabels: ['华东组'] }),
+    });
+    assert.deepEqual(await badScopes.json(), { error: 'bad_request', reason: 'no_targets' });
+  } finally {
+    await h.close();
+  }
+});
+
+test('HTTP account automation catalog and Facebook join config endpoint keep the platform-specific contract', async () => {
+  const FULL_MASK = '1'.repeat(168);
+  const writes: unknown[] = [];
+  const joinView = {
+    enabled: true,
+    dailyCap: 2,
+    effectiveDailyCap: 1,
+    weekMask: null,
+    weekMaskSource: 'content' as const,
+    effectiveWeekMask: FULL_MASK,
+    accountGroupLabel: '华东组',
+    scopedTargetCount: 3,
+    scopeReady: true,
+    recentResult: {
+      outcome: 'joined', reason: null,
+      groupUrl: 'https://www.facebook.com/groups/group-a',
+      createdAt: '2026-07-22T08:00:00.000Z',
+    },
+    updatedAt: '2026-07-22T07:00:00.000Z',
+    updatedBy: 'alice',
+  };
+  const h = await startPanelApi({
+    ...deps,
+    contentSchedule: {
+      getGlobalView: () => ({ contentActiveMask: FULL_MASK, overridden: true, updatedAt: null, updatedBy: null }),
+      listCatalog: async () => [
+        { accountId: 'fb-1', platform: 'facebook', availableActions: [{ action: 'join_group', allowedModes: [], maxDailyCap: 10 }], joinGroupAutomation: joinView },
+        { accountId: 'xhs-1', platform: 'xiaohongshu', availableActions: [] },
+      ] as never,
+      setGlobal: async () => ({ ok: false as const, reason: 'invalid_value' as const }),
+      setAccount: async () => ({ ok: false as const, reason: 'invalid_value' as const }),
+      setJoinGroupAutomation: async (accountId: string, patch: unknown, updatedBy: string) => {
+        writes.push({ accountId, patch, updatedBy });
+        if (accountId === 'missing') return { ok: false as const, reason: 'account_not_found' as const };
+        if (accountId !== 'fb-1') return { ok: false as const, reason: 'unsupported_automation_action' as const };
+        if (Object.keys(patch as object).length === 0) return { ok: false as const, reason: 'no_valid_fields' as const };
+        return { ok: true as const, joinGroupAutomation: joinView };
+      },
+    },
+  } as PanelDeps, makeConfig());
+  assert.equal(h.started, true);
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = (await login.json()) as { token: string };
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+
+    const catalog = await fetch(`${base}/api/content-schedule`, { headers: auth });
+    assert.equal(catalog.status, 200);
+    const catalogBody = (await catalog.json()) as { rows: Array<Record<string, unknown>> };
+    assert.deepEqual(catalogBody.rows[0].joinGroupAutomation, joinView);
+    assert.equal('joinGroupAutomation' in catalogBody.rows[1], false, '非 Facebook 行不投影 join 配置');
+
+    const saved = await fetch(`${base}/api/content-schedule/fb-1/join-group`, {
+      method: 'PUT', headers: auth,
+      body: JSON.stringify({ enabled: true, dailyCap: 2, weekMask: null }),
+    });
+    assert.equal(saved.status, 200);
+    assert.deepEqual(await saved.json(), { joinGroupAutomation: joinView });
+    assert.deepEqual(writes[0], {
+      accountId: 'fb-1',
+      patch: { enabled: true, dailyCap: 2, weekMask: null },
+      updatedBy: 'alice',
+    });
+
+    const unsupported = await fetch(`${base}/api/content-schedule/xhs-1/join-group`, {
+      method: 'PUT', headers: auth, body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(unsupported.status, 400);
+    assert.deepEqual(await unsupported.json(), { error: 'bad_request', reason: 'unsupported_automation_action' });
+
+    const missing = await fetch(`${base}/api/content-schedule/missing/join-group`, {
+      method: 'PUT', headers: auth, body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(missing.status, 404);
+
+    const invalid = await fetch(`${base}/api/content-schedule/fb-1/join-group`, {
+      method: 'PUT', headers: auth, body: JSON.stringify({ dailyCap: '2' }),
+    });
+    assert.equal(invalid.status, 400);
+    assert.deepEqual(await invalid.json(), { error: 'bad_request', reason: 'invalid_value' });
+
+    const empty = await fetch(`${base}/api/content-schedule/fb-1/join-group`, {
+      method: 'PUT', headers: auth, body: JSON.stringify({}),
+    });
+    assert.equal(empty.status, 400);
+    assert.deepEqual(await empty.json(), { error: 'bad_request', reason: 'no_valid_fields' });
   } finally {
     await h.close();
   }

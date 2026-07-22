@@ -117,6 +117,28 @@ export interface ContentScheduleCatalogRow {
   configured: boolean;
   updatedAt: string | null;
   updatedBy: string | null;
+  /** 仅 Facebook 行聚合；领域配置仍由独立 store 持久化。 */
+  joinGroupAutomation?: FacebookJoinGroupAutomationCatalogView;
+}
+
+export interface FacebookJoinGroupAutomationCatalogView {
+  enabled: boolean;
+  dailyCap: number;
+  effectiveDailyCap: number;
+  weekMask: string | null;
+  weekMaskSource: 'content' | 'custom';
+  effectiveWeekMask: string | null;
+  accountGroupLabel: string | null;
+  scopedTargetCount: number;
+  scopeReady: boolean;
+  recentResult: {
+    outcome: string;
+    reason: string | null;
+    groupUrl: string | null;
+    createdAt: string;
+  } | null;
+  updatedAt: string | null;
+  updatedBy: string | null;
 }
 
 /** 调度器每 tick 现读的生效排期（effectiveMask 已解析：override ?? global）。 */
@@ -315,7 +337,7 @@ export function actionModeEnabled(mode: ContentScheduleActionMode): mode is Cont
 }
 
 const ACTION_PATCH_FIELDS: Record<
-  ScheduledAutomationAction,
+  Exclude<ScheduledAutomationAction, 'join_group'>,
   {
     enabled: 'postEnabled' | 'commentEnabled' | 'contactCommentEnabled';
     mode: 'postMode' | 'commentMode' | 'contactCommentMode';
@@ -346,7 +368,7 @@ function scheduledAutomationPatchSupported(
     declarations = null;
   }
 
-  for (const action of Object.keys(ACTION_PATCH_FIELDS) as ScheduledAutomationAction[]) {
+  for (const action of Object.keys(ACTION_PATCH_FIELDS) as Array<Exclude<ScheduledAutomationAction, 'join_group'>>) {
     const fields = ACTION_PATCH_FIELDS[action];
     const hasEnabled = fields.enabled in patch;
     const hasMode = fields.mode in patch;

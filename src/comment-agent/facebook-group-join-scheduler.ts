@@ -8,6 +8,7 @@ import {
 import type { RoleLlmLike } from '../agents/comment-search-term-generator.js';
 import {
   type FacebookGroupJoinAuditRow,
+  type FacebookGroupJoinTriggerSource,
   type FacebookGroupMembershipRow,
   type FacebookGroupMembershipStatus,
   FacebookGroupJoinAuditStore,
@@ -120,6 +121,7 @@ function isNetworkTransient(reason: string): boolean {
 
 export class FacebookGroupJoinScheduler {
   private readonly running = new Set<string>();
+  private readonly triggerSources = new Map<string, FacebookGroupJoinTriggerSource>();
 
   constructor(private readonly deps: FacebookGroupJoinSchedulerDeps) {}
 
@@ -149,6 +151,7 @@ export class FacebookGroupJoinScheduler {
       const shadow = this.deps.shadow?.() ?? false;
       const autoEnabled = this.deps.autoEnabled?.() ?? false;
       if (!shadow && !autoEnabled) return { triggered: false, reason: 'disabled' };
+      this.triggerSources.set(accountId, shadow ? 'shadow' : manual ? 'manual_pool' : 'scheduled');
 
       const conn = this.deps.resolveConnection(accountId);
       if (!conn || !conn.edgeId) {
@@ -156,7 +159,7 @@ export class FacebookGroupJoinScheduler {
         return { triggered: false, reason: 'edge_offline' };
       }
 
-      if (shadow) return this.runShadow(accountId, conn.bus, conn.edgeId, gear);
+      if (shadow) return await this.runShadow(accountId, conn.bus, conn.edgeId, gear);
 
       // 手动命令跳过配额闸（含风控状态 + 速率 + 会话额度）；自动巡回照旧受闸。
       if (!manual) {
@@ -169,8 +172,9 @@ export class FacebookGroupJoinScheduler {
           return { triggered: false, reason: 'session_budget' };
         }
       }
-      return this.runReal(accountId, conn.bus, conn.edgeId, gear);
+      return await this.runReal(accountId, conn.bus, conn.edgeId, gear);
     } finally {
+      this.triggerSources.delete(accountId);
       this.running.delete(accountId);
     }
   }
@@ -201,6 +205,7 @@ export class FacebookGroupJoinScheduler {
       const shadow = this.deps.shadow?.() ?? false;
       const autoEnabled = this.deps.autoEnabled?.() ?? false;
       if (!shadow && !autoEnabled) return { triggered: false, reason: 'disabled' };
+      this.triggerSources.set(accountId, shadow ? 'shadow' : 'manual_specific');
 
       const conn = this.deps.resolveConnection(accountId);
       if (!conn || !conn.edgeId) {
@@ -238,14 +243,15 @@ export class FacebookGroupJoinScheduler {
         await this.audit({ accountId, groupUrl, outcome: 'already_member', phase: 'pre_click', reason: 'already_joined_ledger', shadow: false });
         return { triggered: true, groupUrl, outcome: 'already_member' };
       }
-      return this.runAssignedJoin(accountId, bus, edgeId, claim.row, gear);
+      return await this.runAssignedJoin(accountId, bus, edgeId, claim.row, gear, false);
     } finally {
+      this.triggerSources.delete(accountId);
       this.running.delete(accountId);
     }
   }
 
   private async runShadow(accountId: string, bus: EventBus, edgeId: string, gear: EdgeTaskPriority): Promise<FacebookGroupJoinTriggerResult> {
-    const target = await this.deps.targets.nextJoinCandidate();
+    const target = await this.deps.targets.nextJoinCandidate(accountId);
     if (!target) {
       await this.audit({ accountId, outcome: 'no_targets', phase: 'shadow', shadow: true, reason: 'no_candidate' });
       return { triggered: false, reason: 'no_targets' };
@@ -276,7 +282,7 @@ export class FacebookGroupJoinScheduler {
       await this.audit({ accountId, outcome: 'no_targets', phase: 'scheduler', shadow: false, reason: 'no_candidate' });
       return { triggered: false, reason: 'no_targets' };
     }
-    return this.runAssignedJoin(accountId, bus, edgeId, assigned, gear);
+    return this.runAssignedJoin(accountId, bus, edgeId, assigned, gear, true);
   }
 
   /**
@@ -289,9 +295,36 @@ export class FacebookGroupJoinScheduler {
     edgeId: string,
     assigned: FacebookGroupMembershipRow,
     gear: EdgeTaskPriority,
+    revalidateScope: boolean,
   ): Promise<FacebookGroupJoinTriggerResult> {
     await this.audit({ accountId, groupUrl: assigned.groupUrl, outcome: 'claimed', phase: 'scheduler', shadow: false });
-    await this.deps.memberships.markJoining(accountId, assigned.groupUrl);
+    if (revalidateScope) {
+      const eligibility = await this.deps.memberships.revalidateScopedAssignment(accountId, assigned.groupUrl);
+      if (eligibility !== 'eligible') {
+        const reason = eligibility === 'scope_mismatch' ? 'scope_mismatch' : 'assignment_not_executable';
+        await this.audit({
+          accountId,
+          groupUrl: assigned.groupUrl,
+          outcome: eligibility === 'scope_mismatch' ? 'scope_mismatch' : 'join_failed',
+          phase: 'scheduler',
+          reason,
+          shadow: false,
+        });
+        return { triggered: false, groupUrl: assigned.groupUrl, reason };
+      }
+    }
+    const marked = await this.deps.memberships.markJoining(accountId, assigned.groupUrl);
+    if (!marked) {
+      await this.audit({
+        accountId,
+        groupUrl: assigned.groupUrl,
+        outcome: 'join_failed',
+        phase: 'scheduler',
+        reason: 'assignment_not_executable',
+        shadow: false,
+      });
+      return { triggered: false, groupUrl: assigned.groupUrl, reason: 'assignment_not_executable' };
+    }
 
     // P0-3：租约获取/掉线异常兜底。withLease 可抛 EdgeTaskLeaseError（edge_offline / acquire_timeout / edge_disconnected）；
     // 不接住会绕过 markEdgeFailure，把成员账本留在 'joining'（cooldown 为空）→ 每 60s 心跳又把该行捞起重试、attempts++、
@@ -524,18 +557,22 @@ export class FacebookGroupJoinScheduler {
   }
 
   private judge(accountId: string): FacebookGroupJoinJudge {
+    const triggerSource = this.triggerSources.get(accountId);
     return new FacebookGroupJoinJudge({
       llm: this.deps.llmFor?.(accountId),
       accountId,
       audit: (row) => {
-        void this.audit(row);
+        void this.audit({ ...row, triggerSource: row.triggerSource ?? triggerSource });
       },
     });
   }
 
   private async audit(row: FacebookGroupJoinAuditRow): Promise<void> {
     try {
-      await this.deps.audit.append(row);
+      await this.deps.audit.append({
+        ...row,
+        triggerSource: row.triggerSource ?? this.triggerSources.get(row.accountId),
+      });
     } catch (err) {
       this.deps.logger?.warn?.(`[fb-group-join-scheduler] audit append failed: ${(err as Error).message}`);
     }

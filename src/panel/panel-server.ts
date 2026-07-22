@@ -41,7 +41,11 @@ import type { RiskSignalKind, RiskQuotaLevel } from '../risk/index.js';
 import { RISK_ACTIONS } from '../risk/index.js';
 import { isKnownRole } from '../config/role-catalog.js';
 import { isAllowedPlatformCredential } from '../config/platform-credentials.js';
-import type { FacebookGroupMembershipStatus, FacebookGroupTargetInput } from '../comment-agent/facebook-group-store.js';
+import {
+  FacebookGroupScopeError,
+  type FacebookGroupMembershipStatus,
+  type FacebookGroupTargetInput,
+} from '../comment-agent/facebook-group-store.js';
 import { readDownloadsManifest } from './downloads-manifest.js';
 import { DelegatedTaskServiceError } from '../delegated-task/service.js';
 import type {
@@ -797,6 +801,7 @@ function createRequestHandler(
           ...(query.get('region') ? { region: query.get('region') } : {}),
           ...(query.get('park') ? { park: query.get('park') } : {}),
           ...(query.get('direction') ? { direction: query.get('direction') } : {}),
+          ...(query.get('accountGroupLabel') ? { accountGroupLabel: query.get('accountGroupLabel') } : {}),
         }),
       );
       return;
@@ -831,7 +836,63 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request', reason: 'bad_import_batch' });
         return;
       }
-      sendJson(res, 200, await deps.facebookGroupTargets.importTargets(inputs, raw.importBatch as string | null | undefined ?? null));
+      if (raw.accountGroupLabels !== undefined && (
+        !Array.isArray(raw.accountGroupLabels) || raw.accountGroupLabels.some((label) => typeof label !== 'string')
+      )) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_account_group' });
+        return;
+      }
+      try {
+        sendJson(res, 200, await deps.facebookGroupTargets.importTargets(
+          inputs,
+          raw.importBatch as string | null | undefined ?? null,
+          {
+            ...(raw.accountGroupLabels !== undefined
+              ? { accountGroupLabels: raw.accountGroupLabels as string[] }
+              : {}),
+            updatedBy: verified.payload.sub,
+          },
+        ));
+      } catch (error) {
+        if (error instanceof FacebookGroupScopeError) {
+          sendJson(res, 400, { error: 'bad_request', reason: error.reason });
+          return;
+        }
+        throw error;
+      }
+      return;
+    }
+    if (method === 'PUT' && url === '/api/facebook/groups/scopes') {
+      if (!deps.facebookGroupTargets) {
+        sendJson(res, 503, { error: 'unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const raw = (body ?? {}) as Record<string, unknown>;
+      if (!Array.isArray(raw.groupUrls) || raw.groupUrls.length === 0 || raw.groupUrls.some((url) => typeof url !== 'string')) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'no_targets' });
+        return;
+      }
+      if (!Array.isArray(raw.accountGroupLabels) || raw.accountGroupLabels.some((label) => typeof label !== 'string')) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_account_group' });
+        return;
+      }
+      const result = await deps.facebookGroupTargets.replaceTargetScopes(
+        raw.groupUrls as string[],
+        raw.accountGroupLabels as string[],
+        verified.payload.sub,
+      );
+      if (!result.ok) {
+        sendJson(res, 400, { error: 'bad_request', reason: result.reason });
+        return;
+      }
+      sendJson(res, 200, { items: result.items });
       return;
     }
     if (method === 'PATCH' && url === '/api/facebook/groups/enabled') {
@@ -1986,6 +2047,52 @@ function createRequestHandler(
         return;
       }
       sendJson(res, 200, { rows: await deps.contentSchedule.listCatalog() });
+      return;
+    }
+    const joinGroupConfigMatch = url.match(/^\/api\/content-schedule\/(.+)\/join-group$/);
+    if (method === 'PUT' && joinGroupConfigMatch) {
+      if (!deps.contentSchedule?.setJoinGroupAutomation) {
+        sendJson(res, 503, { error: 'content_schedule_unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const raw = (body ?? {}) as Record<string, unknown>;
+      const patch: { enabled?: boolean; dailyCap?: number; weekMask?: string | null } = {};
+      if (raw.enabled !== undefined) {
+        if (typeof raw.enabled !== 'boolean') {
+          sendJson(res, 400, { error: 'bad_request', reason: 'invalid_value' });
+          return;
+        }
+        patch.enabled = raw.enabled;
+      }
+      if (raw.dailyCap !== undefined) {
+        if (typeof raw.dailyCap !== 'number') {
+          sendJson(res, 400, { error: 'bad_request', reason: 'invalid_value' });
+          return;
+        }
+        patch.dailyCap = raw.dailyCap;
+      }
+      if ('weekMask' in raw) {
+        if (raw.weekMask !== null && typeof raw.weekMask !== 'string') {
+          sendJson(res, 400, { error: 'bad_request', reason: 'invalid_value' });
+          return;
+        }
+        patch.weekMask = raw.weekMask as string | null;
+      }
+      const accountId = decodeURIComponent(joinGroupConfigMatch[1]);
+      const result = await deps.contentSchedule.setJoinGroupAutomation(accountId, patch, verified.payload.sub);
+      if (!result.ok) {
+        if (result.reason === 'account_not_found') sendJson(res, 404, { error: 'account_not_found' });
+        else sendJson(res, 400, { error: 'bad_request', reason: result.reason });
+        return;
+      }
+      sendJson(res, 200, { joinGroupAutomation: result.joinGroupAutomation });
       return;
     }
     if (method === 'PUT' && url.startsWith('/api/content-schedule/')) {

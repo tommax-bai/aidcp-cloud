@@ -1,13 +1,14 @@
 export type PlatformId = 'xiaohongshu' | 'facebook' | 'wechat_channels';
 
 /** 账号排期动作全集：Cloud 目录投影与写入校验共同消费，不能从其它能力词推导。 */
-export const SCHEDULED_AUTOMATION_ACTIONS = ['post', 'comment', 'contact_comment'] as const;
+export const SCHEDULED_AUTOMATION_ACTIONS = ['post', 'comment', 'contact_comment', 'join_group'] as const;
 export type ScheduledAutomationAction = (typeof SCHEDULED_AUTOMATION_ACTIONS)[number];
 export type ScheduledAutomationMode = 'review' | 'auto_approve';
 
 /** 内容动作与敏感联系评论动作的服务端硬上限。 */
 export const SCHEDULED_CONTENT_DAILY_CAP_MAX = 50;
 export const SCHEDULED_CONTACT_COMMENT_DAILY_CAP_MAX = 10;
+export const SCHEDULED_GROUP_JOIN_DAILY_CAP_MAX = 10;
 
 export type ScheduledAutomationSupport =
   | {
@@ -326,6 +327,7 @@ export const PLATFORM_REGISTRY: Record<PlatformId, PlatformRegistryEntry> = {
         allowedModes: ['review', 'auto_approve'],
         maxDailyCap: SCHEDULED_CONTACT_COMMENT_DAILY_CAP_MAX,
       },
+      join_group: { supported: false, reason: 'no_group_concept' },
     },
     delegatedActions: XHS_DELEGATED_ACTIONS,
     comment: XHS_COMMENT_PROFILE,
@@ -393,6 +395,11 @@ export const PLATFORM_REGISTRY: Record<PlatformId, PlatformRegistryEntry> = {
         allowedModes: ['review', 'auto_approve'],
         maxDailyCap: SCHEDULED_CONTACT_COMMENT_DAILY_CAP_MAX,
       },
+      join_group: {
+        supported: true,
+        allowedModes: [],
+        maxDailyCap: SCHEDULED_GROUP_JOIN_DAILY_CAP_MAX,
+      },
     },
     delegatedActions: FACEBOOK_DELEGATED_ACTIONS,
     comment: FB_COMMENT_PROFILE,
@@ -419,6 +426,7 @@ export const PLATFORM_REGISTRY: Record<PlatformId, PlatformRegistryEntry> = {
       post: { supported: false, reason: 'interaction_inbox_only' },
       comment: { supported: false, reason: 'interaction_inbox_only' },
       contact_comment: { supported: false, reason: 'interaction_inbox_only' },
+      join_group: { supported: false, reason: 'interaction_inbox_only' },
     },
     delegatedActions: WECHAT_CHANNELS_DELEGATED_ACTIONS,
     comment: WECHAT_CHANNELS_COMMENT_PROFILE,

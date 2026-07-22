@@ -494,6 +494,8 @@ test('content-scheduler/join: join 与 comment 共用账号级单飞，join 在�
     isJoinBusy: () => state.joinBusy,
     joinedTodayCount: () => Promise.resolve(state.joinedToday),
     joinDailyCap: () => 3,
+    getPlatform: () => 'facebook',
+    joinAutomationFor: () => ({ enabled: true, dailyCap: 3, weekMask: null }),
     triggerComment: (id) => {
       fired.push(`comment:${id}`);
       return Promise.resolve();
@@ -528,12 +530,84 @@ test('content-scheduler/cross-guard: 正在评论（isCommentBusy）→ 后台�
     isJoinBusy: () => false,
     joinedTodayCount: () => Promise.resolve(0),
     joinDailyCap: () => 3,
+    getPlatform: () => 'facebook',
+    joinAutomationFor: () => ({ enabled: true, dailyCap: 3, weekMask: null }),
     isCommentBusy: () => true, // 手动 /comment（含 --join 的评论阶段）在跑
     now: () => joinNow.getTime(),
     logger: { warn: () => {} },
   };
   await new ContentScheduler(deps).onTick();
   assert.deepEqual(fired, [], '正在评论 → 后台自动加群绝不抢同一物理边端');
+});
+
+test('content-scheduler/join: per-account config defaults off, only Facebook, and custom week mask can only narrow', async () => {
+  const joinOffset = offsetMinute(ACC, BASE_DAY, 'join');
+  const joinNow = new Date(2026, 0, 5, 10, joinOffset, 0);
+  const run = async (options: {
+    platform?: 'facebook' | 'xiaohongshu' | 'wechat_channels';
+    config?: { enabled: boolean; dailyCap: number; weekMask: string | null } | null;
+  }) => {
+    const fired: string[] = [];
+    const deps: ContentSchedulerDeps = {
+      onlineAccounts: () => onlineIdentities([ACC]),
+      ...autoPostEnvironmentDeps,
+      scheduleFor: () => scheduleView({ postEnabled: false, postDailyCap: 0 }),
+      riskStatus: () => 'normal',
+      postedTodayCount: () => Promise.resolve(0),
+      pendingAutonomousCount: () => Promise.resolve(0),
+      isPublishBusy: () => false,
+      triggerPost: () => Promise.resolve(),
+      triggerJoin: (id) => { fired.push(id); return Promise.resolve(); },
+      isJoinBusy: () => false,
+      joinedTodayCount: () => Promise.resolve(0),
+      joinDailyCap: () => 3,
+      getPlatform: () => options.platform ?? 'facebook',
+      ...(options.config === null ? {} : { joinAutomationFor: () => options.config! }),
+      now: () => joinNow.getTime(),
+      logger: { warn: () => {} },
+    };
+    await new ContentScheduler(deps).onTick();
+    return fired;
+  };
+
+  assert.deepEqual(await run({ config: null }), [], '无配置行默认关闭');
+  assert.deepEqual(await run({ config: { enabled: false, dailyCap: 3, weekMask: null } }), []);
+  assert.deepEqual(await run({ config: { enabled: true, dailyCap: 0, weekMask: null } }), []);
+  assert.deepEqual(await run({ platform: 'xiaohongshu', config: { enabled: true, dailyCap: 3, weekMask: null } }), []);
+  assert.deepEqual(await run({ config: { enabled: true, dailyCap: 3, weekMask: DORMANT } }), [], '动作周历不得放宽公共时段');
+  assert.deepEqual(await run({ config: { enabled: true, dailyCap: 3, weekMask: null } }), [ACC], 'null 跟随公共内容时段');
+});
+
+test('content-scheduler/join: effective daily cap is min(operator cap, RiskController cap), kill switch cap=0 fails closed', async () => {
+  const joinNow = new Date(2026, 0, 5, 10, offsetMinute(ACC, BASE_DAY, 'join'), 0);
+  const run = async (operatorCap: number, riskCap: number, joined: number) => {
+    const fired: string[] = [];
+    const deps: ContentSchedulerDeps = {
+      onlineAccounts: () => onlineIdentities([ACC]),
+      ...autoPostEnvironmentDeps,
+      scheduleFor: () => scheduleView({ postEnabled: false, postDailyCap: 0 }),
+      riskStatus: () => 'normal',
+      postedTodayCount: () => Promise.resolve(0),
+      pendingAutonomousCount: () => Promise.resolve(0),
+      isPublishBusy: () => false,
+      triggerPost: () => Promise.resolve(),
+      triggerJoin: (id) => { fired.push(id); return Promise.resolve(); },
+      isJoinBusy: () => false,
+      joinedTodayCount: () => Promise.resolve(joined),
+      joinDailyCap: () => riskCap,
+      getPlatform: () => 'facebook',
+      joinAutomationFor: () => ({ enabled: true, dailyCap: operatorCap, weekMask: null }),
+      now: () => joinNow.getTime(),
+      logger: { warn: () => {} },
+    };
+    await new ContentScheduler(deps).onTick();
+    return fired;
+  };
+
+  assert.deepEqual(await run(1, 3, 1), [], '运营 cap 更小时不得被风控 cap 抬高');
+  assert.deepEqual(await run(3, 1, 1), [], '风控 cap 更小时不得被运营 cap 抬高');
+  assert.deepEqual(await run(3, 0, 0), [], '全局 kill switch 关闭由 risk-cap 适配器返回 0，完全不触发');
+  assert.deepEqual(await run(2, 3, 1), [ACC]);
 });
 
 test('content-scheduler/cross-guard: 正在加群（isJoinBusy）→ 后台自动评论本 tick 跳过（change facebook-manual-join-comment）', async () => {

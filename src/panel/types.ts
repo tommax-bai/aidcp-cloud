@@ -33,13 +33,19 @@ import type {
   FacebookGroupTargetListOptions,
   FacebookGroupTargetListResult,
   FacebookGroupTargetRow,
+  ReplaceFacebookGroupTargetScopesResult,
 } from '../comment-agent/facebook-group-store.js';
 import type {
   ContentScheduleCatalogRow,
   AccountContentSchedulePatch,
   SetContentGlobalResult,
   SetAccountContentScheduleResult,
+  FacebookJoinGroupAutomationCatalogView,
 } from '../config/content-schedule-store.js';
+import type {
+  FacebookGroupJoinAutomationConfigPatch,
+  SetFacebookGroupJoinAutomationConfigResult,
+} from '../config/facebook-group-join-automation-store.js';
 import type { EventBus } from '../event-bus/index.js';
 import type { PacingOp, CaptchaAssistTrajectoryPayload } from '../comm/protocol.js';
 import type {
@@ -88,6 +94,14 @@ export interface PanelContentSchedule {
     patch: AccountContentSchedulePatch,
     updatedBy: string,
   ): Promise<SetAccountContentScheduleResult>;
+  setJoinGroupAutomation?(
+    accountId: string,
+    patch: FacebookGroupJoinAutomationConfigPatch,
+    updatedBy: string,
+  ): Promise<
+    | { ok: true; joinGroupAutomation: FacebookJoinGroupAutomationCatalogView }
+    | Extract<SetFacebookGroupJoinAutomationConfigResult, { ok: false }>
+  >;
 }
 
 export interface PanelCaptchaAssist {
@@ -240,10 +254,19 @@ export interface PanelDeps {
    * Data/API only: no navigation, no Join click, no comment dispatch.
    */
   facebookGroupTargets?: {
-    importTargets(inputs: FacebookGroupTargetInput[], importBatch: string | null): Promise<FacebookGroupImportResult>;
+    importTargets(
+      inputs: FacebookGroupTargetInput[],
+      importBatch: string | null,
+      options?: { accountGroupLabels?: string[]; updatedBy?: string },
+    ): Promise<FacebookGroupImportResult>;
     listTargets(options?: FacebookGroupTargetListOptions): Promise<FacebookGroupTargetListResult>;
     listFacets(): Promise<FacebookGroupTargetFacets>;
     setEnabled(groupUrl: string, enabled: boolean): Promise<FacebookGroupTargetRow | null>;
+    replaceTargetScopes(
+      groupUrls: string[],
+      accountGroupLabels: string[],
+      updatedBy: string,
+    ): Promise<ReplaceFacebookGroupTargetScopesResult>;
     accountProgress(): Promise<FacebookGroupAccountProgress[]>;
     listAssignments(limit?: number): Promise<FacebookGroupMembershipRow[]>;
     reclaimStaleAssignments(ttlMs: number): Promise<number>;
