@@ -28,8 +28,11 @@ export const REQUIRED_SCHEMA_VERSION = '0070_baseline_self_heal_columns';
 /**
  * 本构建认识的最高迁移版本 id，等于本构建 `migrations/` 目录里的最大版本。
  * 由 test/schema/schema-contract.test.ts 断言与目录一致（构建产物里不一定带 migrations/，故不在运行时读目录）。
+ *
+ * 注：`0071`/`0072` 补声明的是共库上「库有、迁移没声明」的存活孤儿表/列（change cloud-schema-migration-executor
+ * 任务 3.1/3.2 的收尾）；它们不是任何存储正常读写的前置，故只抬 KNOWN_MAX、不抬 REQUIRED。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0070_baseline_self_heal_columns';
+export const KNOWN_MAX_SCHEMA_VERSION = '0072_baseline_surviving_orphan_columns';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

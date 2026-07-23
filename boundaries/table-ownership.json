@@ -43,6 +43,7 @@
     { "table": "group_publish_approval_policy", "owner": "api", "basis": "§5.1「发布请求与审批台账」的策略面 → aidcp-api" },
     { "table": "group_route", "owner": "automation", "basis": "§5.1 未具名；群路由，写入方 src/cache/group-route-store.ts 属 automation（§4.7 cache 逐文件表）" },
     { "table": "hot_lead_config_global", "owner": "api", "basis": "§5.1 未具名；配置面，写入方不在 §4.6.8 点名的 5 个 automation 文件内，故属 api" },
+    { "table": "hot_lead_queue", "owner": "automation", "basis": "§5.1 未具名；浏览闭环内的引流待评队列，原写入方 src/hot-lead/hot-lead-queue.ts 的 PgHotLeadQueue 属 automation（§4.7『浏览闭环内触发』，与 heat-velocity/hot-lead-detector 同域）。change feed-hot-lead-auto-group-comment(1bb0406) 删存储、表在共库存活；migrations/0071 补声明以覆盖 CREATE TABLE 全集" },
     { "table": "interaction_api_requests", "owner": "automation", "basis": "§5.1「互动域收件箱、发送尝试与离场」→ aidcp-automation" },
     { "table": "interaction_audit_events", "owner": "api", "basis": "§5.1 未具名；互动域**配置面**的操作审计（draft_saved / config_published / previewed），随 §5.1「互动域配置与查询面」→ aidcp-api。automation 侧的删除来自 §4.6.1 点名的跨 owner 单事务清理，登记为豁免" },
     { "table": "interaction_auth_state", "owner": "automation", "basis": "§5.1「互动域收件箱、发送尝试与离场（… 等）」→ aidcp-automation；§12 阶段 1 退出判据点名的双写表之一" },
