@@ -8,6 +8,17 @@
  *       `≤ 类别上限`）；任一非法整块拒、绝不部分落库、绝不假成功。回显服务端真态（非乐观）。
  *       生效值经 store 读出口 clamp（含非零防呆下限护栏）——配置只能抬高延迟、抬不穿非零下限。
  *       本外观只动 pacing_floor_config，不碰风控状态单写路径。
+ *
+ * ## 写入通道归属：本外观即 `pacing_floor_config` 后台编辑的唯一窄内部写口，归 aidcp-automation
+ *   （change config-table-write-collection；依据定稿方案 §5.1 / §4.6.8）。
+ *
+ * - 后台编辑 MUST 走 console → api → automation：面板/api 侧只持接口 `PanelPacingConfig`
+ *   （src/panel/types.ts），automation 侧实现本外观并独占 store 引用。**aidcp-api MUST NOT 直写
+ *   `pacing_floor_config`**——panel-server 既不 import store、也无该表的 pg 写路径，只经本接口下发。
+ * - 今日同进程即直调；拆进程时把 api 侧 `PanelPacingConfig` 的实现换成内部 HTTP 客户端、
+ *   automation 侧仍是本外观即可，**panel-server 调用点一行不改、行为零变更、只换通道**。
+ * - **MUST NOT 破坏镜像失效接线**：写仍只经 `store.set()` → `writeWithMirrorBump`
+ *   （同事务推进镜像版本），供另一 target 的刷新器在 T_poll 内失效重载（change config-mirror-*）。
  */
 
 import { PACING_OPS, maxFloorForOp } from '../risk/pacing.js';

@@ -909,6 +909,10 @@ export interface PanelConfigMirrorHealth {
   entries: PanelConfigMirrorHealthEntry[];
 }
 
+// 写入通道归属（change config-table-write-collection；定稿方案 §5.1 / §4.6.8）：`PanelQuotaConfig`
+// 是 api 侧持有的窄内部写接口契约，automation 侧实现（src/config/quota-config-facade.ts）并独占 store。
+// 后台编辑 MUST 走 console → api → automation；**aidcp-api MUST NOT 直写 quota_config**。
+// 拆进程时把此接口的实现换成内部 HTTP 客户端、调用点不改、行为零变更。
 export interface PanelQuotaConfig {
   /** 三档 × 全动作 × 三窗口生效值 + 审计（库缺行以写死默认合成回显）。 */
   getCatalog(): QuotaConfigCatalogView;
@@ -946,6 +950,10 @@ export type PacingConfigSetResult =
   | { ok: true; view: PacingConfigCatalogView }
   | { ok: false; reason: 'unknown_operation' | 'invalid_value' | 'no_valid_fields' };
 
+// 写入通道归属（change config-table-write-collection；定稿方案 §5.1 / §4.6.8）：`PanelPacingConfig`
+// 是 api 侧持有的窄内部写接口契约，automation 侧实现（src/config/pacing-config-facade.ts）并独占 store。
+// 后台编辑 MUST 走 console → api → automation；**aidcp-api MUST NOT 直写 pacing_floor_config**。
+// 拆进程时把此接口的实现换成内部 HTTP 客户端、调用点不改、行为零变更。
 export interface PanelPacingConfig {
   /** 各类操作生效兜底区间 + 审计（库缺行以内置默认合成、含 clamp 护栏回显）。 */
   getCatalog(): PacingConfigCatalogView;
@@ -997,6 +1005,10 @@ export type SessionLimitSetResult =
   | { ok: true; view: SessionLimitView }
   | { ok: false; reason: 'invalid_value' | 'no_valid_fields' };
 
+// 写入通道归属（change config-table-write-collection；定稿方案 §5.1 / §4.6.8）：`PanelSessionLimits`
+// 是 api 侧持有的窄内部写接口契约，automation 侧实现（src/config/session-config-facade.ts）并独占 store。
+// 后台编辑 MUST 走 console → api → automation；**aidcp-api MUST NOT 直写 session_config_global**。
+// 拆进程时把此接口的实现换成内部 HTTP 客户端、调用点不改、行为零变更。
 export interface PanelSessionLimits {
   /** 全局单场时长 + 互动预算生效值 + 审计（库无行以写死默认合成回显）。 */
   getView(): SessionLimitView;
@@ -1069,6 +1081,10 @@ export type ResumeConfigSetResult =
   | { ok: true; view: ResumeConfigView }
   | { ok: false; reason: 'invalid_value' | 'no_valid_fields' };
 
+// 写入通道归属（change config-table-write-collection；定稿方案 §5.1 / §4.6.8）：`PanelResumeConfig`
+// 是 api 侧持有的窄内部写接口契约，automation 侧实现（src/config/resume-config-facade.ts）并独占 store。
+// 后台编辑 MUST 走 console → api → automation；**aidcp-api MUST NOT 直写 resume_config_global**。
+// 拆进程时把此接口的实现换成内部 HTTP 客户端、调用点不改、行为零变更。
 export interface PanelResumeConfig {
   /** 全局续场护栏 + 看门狗阈值生效值 + 审计（库无行以写死默认合成回显）。 */
   getView(): ResumeConfigView;
