@@ -672,6 +672,20 @@ export interface RiskReviewerOutput {
   allowAutoSend: boolean;
 }
 
+/**
+ * 回复生成能力的合同（automation 编排层持有、content 实现并注入）。
+ * 编排层 `ReplyWorkflow` 只依赖本接口，不再直 import content 的 `reply-ai.ts`。
+ */
+export type AiFallback = 'none' | 'timeout' | 'upstream_error' | 'invalid_json' | 'invalid_schema' |
+  'too_long' | 'knowledge_answer_missing' | 'candidate_rejected';
+export interface AiStepResult<T> { value: T; fallback: AiFallback }
+
+export interface ReplyAiPort {
+  classify(input: IntentClassifierInput): Promise<AiStepResult<IntentClassifierOutput>>;
+  polish(input: PolisherInput): Promise<AiStepResult<PolisherOutput>>;
+  review(input: RiskReviewerInput): Promise<AiStepResult<RiskReviewerOutput>>;
+}
+
 export interface InteractionListItem {
   threadId: string;
   messageId: string;

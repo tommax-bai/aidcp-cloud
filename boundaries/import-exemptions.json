@@ -1,7 +1,7 @@
 {
-  "seedTotal": 295,
-  "seedUnplanned": 295,
-  "frozenTotal": 280,
+  "seedTotal": 278,
+  "seedUnplanned": 278,
+  "frozenTotal": 278,
   "recordedAt": "2026-07-23",
   "raises": [],
   "entries": [
@@ -924,12 +924,6 @@
     },
     {
       "from": "src/interactions/index.ts",
-      "to": "src/interactions/reply-ai.ts",
-      "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/interactions/index.ts",
       "to": "src/interactions/reply-config-resolver.ts",
       "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
@@ -1053,12 +1047,6 @@
       "from": "src/interactions/reply-config.ts",
       "to": "src/interactions/types.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/interactions/reply-workflow.ts",
-      "to": "src/interactions/reply-ai.ts",
-      "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
     },
     {
@@ -1734,5 +1722,5 @@
       "note": "消除动作：拆仓后「配置副本是否新鲜」MUST 是 api 的只读投影，automation 侧改为消费本地只读副本 + 版本号（§11.4 要求二），MUST NOT 直接 import 配置域模块。本条与 src/comm/handler.ts、src/orchestrator/role-dispatcher.ts、src/risk/risk-controller.ts 三处同簇（共 3 条），MUST 同批消除。属 §12 阶段 1 第 4 项「把跨领域调用收口到明确接口」，尚无独立 change 名。"
     }
   ],
-  "seedBasis": "seed 基线 = 门禁 change cloud-service-boundary-gates rebase 到最新 origin/master 之后的实测值（2026-07-23，第二次随合并基线移动）。移动史：首次 seed 用 aidcp-cloud@313eba2；随后主干合入 risk-state-cross-process-integrity / config-mirror-cross-process-invalidation / publish-approval-signal-to-database 三个 change（新增 15 个源文件、5 张表），import 侧 257 → 274，表侧同批做过一次粒度修正 10 → 12（豁免的实际面一条未变，改的只是棘轮的键：少了「操作」这一维时，已豁免的对上新增 ALTER TABLE / CREATE TABLE 会被 refresh 自己拓宽写回并退出 0）；本次再合入 cloud-schema-migration-executor（新增 src/schema/ 12 个源文件与 schema_migrations 账本表），import 侧 274 → 295，表侧仍 12（账本表唯一写入方是部署期执行器 scripts/migrate.ts，不在 src/ 扫描面内，故一条跨层写入都没新增）。按定稿 §12「清单 MUST 在阶段 1 的第一个 change 里用扫描器一次性 seed 全量既存违规」，本 change 尚未归档、seedWindow.open 仍为 true，seed 基线随合并基线移动。新增的 21 条全部源自 src/schema/schema-capability.ts 单点（20 条：api→automation 16 + content→automation 4）与同目录 schema-name.ts（1 条 content→automation），共享同一条 §4.7 消除路径（把纯判定段析出为无 SQL 的新文件后判 kernel，或确认 automation 归属 + 按拆仓设计以版本化包供 api / content 消费），MUST NOT 当成 21 处各自独立、需要各自消除的架构违规。为何走 --reseed 而不是 §12 的具名上调通道 --raise：后者要求三字段齐备（批准它的控制仓 change 名 + 数量 + 消除日期），且 AC-BOUND-06 要求未挂消除 change 的条目数单调不增（新条目必须带 eliminatedBy）；本轮既没有承接消除的控制仓 change，也没有定稿给出的消除时限，填任何一个都是编造事实——实测 --raise=...:21:<日期> 也确实只让 frozenTotal 过关、AC-BOUND-06 的 unplanned 295 > 274 仍红。棘轮自本 change 归档起开始计数；此后 MUST NOT 再用 --reseed。"
+  "seedBasis": "decouple wave: C bucket-split surfaced 2 panel/types.ts->cache type-only imports (no runtime coupling, eliminate when panel gets own contracts); D removed reply-ai automation->content import; net decrease"
 }

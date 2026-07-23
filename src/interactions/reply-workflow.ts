@@ -8,11 +8,12 @@ import {
 } from './reply-config.js';
 import { readJobConfig, readPublishedConfig, type ReplyConfigReader } from './reply-config-resolver.js';
 import { automaticReplyContentEligible } from './reply-auto-send.js';
-import { ReplyAiService, type AiFallback } from './reply-ai.js';
 import type { InteractionStore } from './interaction-store.js';
 import {
   HARD_RISK_TAGS,
   InteractionError,
+  type AiFallback,
+  type ReplyAiPort,
   type InteractionErrorCode,
   type MinimalInbound,
   type ReplyConfigSnapshot,
@@ -110,7 +111,7 @@ export class ReplyWorkflow {
   constructor(
     private readonly store: InteractionStore,
     private readonly configs: ReplyConfigReader,
-    private readonly ai: ReplyAiService,
+    private readonly ai: ReplyAiPort,
     options: {
       requestId?: () => string;
       canAutoQueue?: (

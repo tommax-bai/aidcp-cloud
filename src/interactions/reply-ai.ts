@@ -1,16 +1,21 @@
 import type { LlmClient } from '../llm/qwen.js';
 import {
   RISK_TAGS,
+  type AiFallback,
+  type AiStepResult,
   type IntentClassifierInput,
   type IntentClassifierOutput,
   type PolisherInput,
   type PolisherOutput,
+  type ReplyAiPort,
   type ReplyIntent,
   type RiskLevel,
   type RiskReviewerInput,
   type RiskReviewerOutput,
   type RiskTag,
 } from './types.js';
+
+export type { AiFallback, AiStepResult } from './types.js';
 
 const INTENTS: readonly ReplyIntent[] = [
   'gratitude', 'general_question', 'product_question', 'support_request', 'complaint',
@@ -25,10 +30,6 @@ const KNOWLEDGE_QUESTION_INTENTS = new Set<ReplyIntent>([
 ]);
 const QUESTION_CUE = /[?？]|几岁|几年级|多少|什么|怎么|如何|是否|能不能|可不可以|哪(?:个|些|里)|何时|多久|为什么/;
 const KNOWLEDGE_UNCONFIRMED_CUE = /暂时无法确认|还无法确认|不能确认|不确定|暂不清楚|不太清楚/;
-
-export type AiFallback = 'none' | 'timeout' | 'upstream_error' | 'invalid_json' | 'invalid_schema' |
-  'too_long' | 'knowledge_answer_missing' | 'candidate_rejected';
-export interface AiStepResult<T> { value: T; fallback: AiFallback }
 
 function strings(value: unknown, max = 8): string[] | null {
   if (!Array.isArray(value) || value.length > max || value.some((item) => typeof item !== 'string')) return null;
@@ -156,7 +157,7 @@ function buildInteractionReplyCorrectionPrompt(
     `仍只输出符合既定 schema 的一个 JSON 对象。`;
 }
 
-export class ReplyAiService {
+export class ReplyAiService implements ReplyAiPort {
   constructor(
     private readonly llm: LlmClient,
     private readonly timeoutMs = 20_000,

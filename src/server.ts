@@ -323,7 +323,6 @@ import {
   ReplyConfigStore,
   ReplyConfigScopeStore,
   ReplyConfigResolver,
-  ReplyAiService,
   ReplyWorkflow,
   InteractionInboxService,
   InteractionSendOrchestrator,
@@ -342,6 +341,8 @@ import {
   type InteractionSchemaMode,
   type InteractionRuntimeControlsPayload,
 } from './interactions/index.js';
+// 组合根直接构造 content 的回复生成实现，并作为 ReplyAiPort 注入 ReplyWorkflow（automation 编排层只持接口）。
+import { ReplyAiService } from './interactions/reply-ai.js';
 import { projectRuntimeControls } from './interactions/runtime-controls-provider.js';
 // change offboard-saga：把跨 owner 离场写收口到各属主的窄写入口，由组合根注入（拆进程时换成内部 HTTP）。
 import { OffboardWriteAdapter } from './interactions/offboard-write-adapter.js';
