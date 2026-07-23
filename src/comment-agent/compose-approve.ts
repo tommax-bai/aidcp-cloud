@@ -12,7 +12,6 @@
  *  - 命令路径**跳过**自治 CommentAppraiser 的硬阈值（赞>1000 且 藏>300），但**保留**人审（本步即人审）。
  */
 
-import { PostProcessor } from '../publish-agent/post-processor.js';
 import { overlapsAny } from '../agents/comment-de-ai-flavor.js';
 import type { CommentApprovalPort } from '../agents/comment-approval-gate.js';
 import { buildCommentApprovalRequestId } from '../agents/comment-approval-request-id.js';
@@ -25,6 +24,25 @@ import { sendAutoApproveNotificationBestEffort } from './auto-approve-notificati
 export interface ComposerLike {
   composeDraft(note: NoteData, opts: { references?: string[]; onPageComments?: string[] }): Promise<string | null>;
 }
+
+/**
+ * 去 AI 味处理器窄口（automation 侧 port，change decouple-content-postprocessor）。
+ * 评论链只消费 `process` 结果的 `content` 字段，故以此最小合同解耦——不再直 import content 发布生成段的
+ * PostProcessor 具体类（automation → content）。注入的具体实现（如发布侧带 rewrite 的 PostProcessor，
+ * 其 `process` 返回更宽的 PostProcessResult）在结构上满足本口即可。
+ */
+export interface PostProcessorLike {
+  process(content: string, exclamationMax?: number, accountId?: string): Promise<{ content: string }>;
+}
+
+/**
+ * 缺省去 AI 味处理器：与既有 `new PostProcessor({})` 行为等价——不带 rewrite 时 `process` 仅做禁用词扫描、
+ * 原样返回正文，而本装配只取 `.content`（见下方 ② 步），故实测恒等透传。用它替换对 content 侧 PostProcessor
+ * 的直接依赖，行为零变更（仅当调用方未注入 `postProcessor` 时命中，注入路径不受影响）。
+ */
+const IDENTITY_POST_PROCESSOR: PostProcessorLike = {
+  process: async (content) => ({ content }),
+};
 
 export interface AutoApproveCommentNotificationInput {
   requestId: string;
@@ -43,8 +61,8 @@ export type AutoApproveCommentNotification = (input: AutoApproveCommentNotificat
 
 export interface ComposeApproveDeps {
   composer: ComposerLike;
-  /** 去 AI 味处理器；缺省 new PostProcessor({})（仅禁用词扫描、不改写）。可传带 rewrite 的实例。 */
-  postProcessor?: Pick<PostProcessor, 'process'>;
+  /** 去 AI 味处理器；缺省 IDENTITY_POST_PROCESSOR（等价 new PostProcessor({})：仅扫描、原样返回正文）。可传带 rewrite 的实例。 */
+  postProcessor?: PostProcessorLike;
   /** 人审端口；缺省（未接线）→ 一律不发（返回 null，绝不裸发）。 */
   approval?: CommentApprovalPort;
   /** 排期审批模式；缺省 review。auto_approve 直接授权并旁路通知，不等待交互审批。 */
@@ -108,7 +126,7 @@ export type ComposeApproveOutcome =
 export function buildComposeAndApprove(
   deps: ComposeApproveDeps,
 ): (note: NoteForComment, comments: OnPageComment[]) => Promise<ComposeApproveOutcome> {
-  const postProcessor = deps.postProcessor ?? new PostProcessor({});
+  const postProcessor = deps.postProcessor ?? IDENTITY_POST_PROCESSOR;
   const now = deps.now ?? (() => Date.now());
   const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   const log = deps.logger ?? console;

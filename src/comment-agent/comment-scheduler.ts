@@ -20,7 +20,6 @@ import { PERSONA_UNAVAILABLE_REASON } from '../config/mirror-stop-work.js';
 import { CommentSearchTermGenerator, type RoleLlmLike } from '../agents/comment-search-term-generator.js';
 import { CommentTargetPicker, type CommentCandidateCard } from '../agents/comment-target-picker.js';
 import { CommentComposer } from '../agents/comment-composer.js';
-import { PostProcessor } from '../publish-agent/post-processor.js';
 import type { CommentApprovalPort } from '../agents/comment-approval-gate.js';
 import type { CommentCommandReceipt } from '../comm/feishu-card-contract.js';
 import {
@@ -31,7 +30,7 @@ import {
 } from './comment-task-runner.js';
 import { buildEdgeCommentSteps, type EdgePusher, type CommentDedup } from './edge-steps.js';
 import { buildFacebookEdgeSteps } from './facebook-edge-steps.js';
-import { buildComposeAndApprove, type AutoApproveCommentNotification } from './compose-approve.js';
+import { buildComposeAndApprove, type AutoApproveCommentNotification, type PostProcessorLike } from './compose-approve.js';
 import { sendAutoApproveNotificationBestEffort } from './auto-approve-notification.js';
 import type { ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
 import type { CuratedSampleForTerms } from '../agents/comment-search-term-generator.js';
@@ -223,8 +222,8 @@ export interface CommentSchedulerDeps {
     accountId: string,
     sourceMode: ContentScheduleApprovalMode,
   ) => Promise<ContentScheduleApprovalMode>;
-  /** 去 AI 味处理器（可带账号 rewrite）；缺省仅扫描。 */
-  postProcessorFor?: (accountId: string) => Pick<PostProcessor, 'process'>;
+  /** 去 AI 味处理器（可带账号 rewrite）；缺省仅扫描。窄口见 compose-approve 的 PostProcessorLike（automation 侧 port）。 */
+  postProcessorFor?: (accountId: string) => PostProcessorLike;
   /** @deprecated 页面执行权改由 edgeTaskLeases 管理；保留可选形状兼容旧测试构造。 */
   onTakeoverStart?: (accountId: string) => void;
   /** @deprecated 不再由评论 finally 无条件恢复浏览。 */

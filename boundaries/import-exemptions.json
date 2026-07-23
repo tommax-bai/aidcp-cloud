@@ -1,7 +1,7 @@
 {
-  "seedTotal": 273,
-  "seedUnplanned": 273,
-  "frozenTotal": 273,
+  "seedTotal": 271,
+  "seedUnplanned": 271,
+  "frozenTotal": 271,
   "recordedAt": "2026-07-23",
   "raises": [],
   "entries": [
@@ -464,12 +464,6 @@
     },
     {
       "from": "src/comment-agent/comment-scheduler.ts",
-      "to": "src/publish-agent/post-processor.ts",
-      "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/comment-agent/comment-scheduler.ts",
       "to": "src/soul/types.ts",
       "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
@@ -478,12 +472,6 @@
       "from": "src/comment-agent/compose-approve.ts",
       "to": "src/config/content-schedule-store.ts",
       "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/comment-agent/compose-approve.ts",
-      "to": "src/publish-agent/post-processor.ts",
-      "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
     },
     {
@@ -1692,5 +1680,5 @@
       "note": "消除动作：拆仓后「配置副本是否新鲜」MUST 是 api 的只读投影，automation 侧改为消费本地只读副本 + 版本号（§11.4 要求二），MUST NOT 直接 import 配置域模块。本条与 src/comm/handler.ts、src/orchestrator/role-dispatcher.ts、src/risk/risk-controller.ts 三处同簇（共 3 条），MUST 同批消除。属 §12 阶段 1 第 4 项「把跨领域调用收口到明确接口」，尚无独立 change 名。"
     }
   ],
-  "seedBasis": "decouple wave batch E: publish-agent barrels split by owner segment, removed cross-boundary imports; net decrease"
+  "seedBasis": "decouple wave batch B: content post-processor pure fns to shared util, removed automation->content imports; net decrease"
 }
