@@ -617,6 +617,8 @@ export class ImageGeneratorRole extends BasePublishRole<ImagePlan, ImageDirectiv
     return { url: ossUrl, referenceStatus };
   }
 
+  // 图片生成的用量上报出口（方案 §4.6.6 点名的四处接线点之一）：只经注入的 usageRecorder 回调，
+  // 它在 server.ts 装配处经 TokenUsageStore 单一接口写归 aidcp-content 的 llm_token_usage，MUST NOT 直写。
   private recordUsage(accountId: string, ok: boolean): void {
     if (!this.usageRecorder) return;
     try {

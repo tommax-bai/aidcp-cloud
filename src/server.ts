@@ -795,6 +795,7 @@ async function main(): Promise<void> {
       );
     },
     // 保留原 console.log（加 provider + tokens 维度）；记账 add() 受 try/catch 双保险，绝不抛进/拖垮 LLM 调用路径。
+    // 用量上报接线点①（文本 LLM 出口）：经 TokenUsageStore 单一接口写归 aidcp-content 的 llm_token_usage，MUST NOT 直写（方案 §4.6.6）。
     onCall: (info) => {
       console.log(
         `[llm] account=${info.accountId ?? '-'} role=${info.role ?? '-'} provider=${info.provider ?? '-'} model=${info.model} ms=${info.ms} ok=${info.ok} tokens=${info.totalTokens ?? 0} stage=${info.stage} timedOut=${info.timedOut} requestId=${info.requestId ?? '-'}`,
@@ -3616,6 +3617,7 @@ async function main(): Promise<void> {
   const textCardOcrEnabled = (): boolean => process.env.AIDCP_TEXTCARD_OCR === 'true';
   const textCardOcrProvider = (): string => resolveTextCardTranscriptionProvider(resolveCoverFormProvider);
   const textCardOcrModel = (): string => resolveTextCardTranscriptionModel(resolveCoverFormModel);
+  // 用量上报接线点②（视觉 LLM 出口）：经 TokenUsageStore 单一接口写归 aidcp-content 的 llm_token_usage，MUST NOT 直写（方案 §4.6.6）。
   const recordVisionCall = (info: VisionCallInfo): void => {
     console.log(
       `[llm] account=${info.accountId ?? '-'} role=${info.role ?? '-'} provider=${info.provider ?? '-'} model=${info.model} ms=${info.ms} ok=${info.ok} tokens=${info.totalTokens ?? 0}`,
@@ -4053,6 +4055,7 @@ async function main(): Promise<void> {
     imageProvider,
     getProvider: () => modelConfigStore.getCached().imageProvider,
     getModel: () => modelConfigStore.getCached().imageModel,
+    // 用量上报接线点③（图片生成出口）：经 TokenUsageStore 单一接口写归 aidcp-content 的 llm_token_usage，MUST NOT 直写（方案 §4.6.6）。
     usageRecorder: (info) => {
       console.log(
         `[image] account=${info.accountId} role=publish:ImageGenerator provider=${info.provider} model=${info.model} ok=${info.ok}`,

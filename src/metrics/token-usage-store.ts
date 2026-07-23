@@ -1,3 +1,14 @@
+// ── 所有权与写路径收口（change route-usage-writes-through-report；依据 cloud-service-decomposition-proposal §4.6.6 / §5.1）──
+// `llm_token_usage` 与 `llm_billing_price_snapshot` 两张表按方案 §4.6.6 / §5.1 归未来的 **aidcp-content**
+// （内容服务）所有。其它服务 MUST 经本模块暴露的用量上报接口写入，MUST NOT 直写这两张表。
+// 本模块即那**唯一**的写入口 / 上报接口，负责保证三条不变量：
+//   · 幂等：幂等键 = bucket + account + role + provider + model（复合主键 + ON CONFLICT 累加）；
+//           该表是可交换累加计数器、非业务事实源，MUST NOT 按 Outbox 强一致实现（§4.6.6）。
+//   · 批量：add() 先按幂等键在内存合并、定时 flush 成批落库；upsertBillingPrices() 收数组一次批写。
+//   · 可丢：用量是可丢的观测数据——add() 纯内存不抛、缺 accountId 丢弃并一次性告警；flush() 逐行 try/catch、
+//           失败只累加 droppedFlushes + 限频告警、绝不抛回调用方，MUST NOT 阻塞/拖垮模型调用的业务路径。
+// 现役上报接线点（唯一四处，勿在别处直写）：src/server.ts 三处装配（文本 LLM onCall / 视觉 recordVisionCall /
+// 图片 usageRecorder）+ src/publish-agent/roles/image-generator.ts 的图片生成出口；保留清理随表主人走（§4.6.5 第 9 项）。
 import pg from 'pg';
 import { resolveEnvPgConfig } from '../cache/pg-config.js';
 import { ensureCapabilitySchema } from '../schema/schema-capability.js';
