@@ -990,6 +990,11 @@
     "note": "【待定稿裁决】change lift-shared-contracts-to-kernel 抬入：原 src/agents/persona-format.ts（纯人设兴趣格式化函数 tieredInterests，零 import、零副作用），被 6 个 automation 判定/撰写角色跨边界导入。满足 §4.7 kernel 准入。注：原 §4.7『src/agents/ api 2 文件 152 行』的行数配对（与 persona-auto-fill.ts 合计）随本次抬走失效，请求回写 §4.7 见 docpatch RK1"
   },
   {
+    "path": "src/kernel/schema-capability-contract.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change extract-schema-capability-contract 从 src/schema/schema-capability.ts 析出的纯契约段（SchemaCapabilityStatus/SchemaShape/SchemaCapabilityVerdict/SchemaCapabilitySpec 类型 + classifySchemaCapability 纯函数 + SchemaCapabilityError 类 + isSchemaCapabilityError 守卫 + schemaSelfCreateEnabled 读 env），零 import、无 SQL 字面量、无 HTTP/LLM、无进程内活状态（selfCreateWarned 一次性告警单例留在 automation）。满足 §4.7 kernel 准入。连库探测执行段 probeSchemaShape/ensureCapabilitySchema 留 src/schema/schema-capability.ts（automation）。请求回写 §4.7 见 docpatch RK1"
+  },
+  {
     "path": "src/kernel/soul-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change lift-shared-contracts-to-kernel 抬入：原 src/soul/types.ts（纯人设文档类型/接口/枚举，零 import、零 SQL、零模块级可变单例），被 api/content/automation 三层共 16 处跨边界 type-only 导入。满足 §4.7 kernel 准入（无 SQL / 无 HTTP / 无 LLM / 无进程内活状态 / 不反向依赖业务层）。kernel 花名册是封闭 4 文件名单，本条为新增成员的请求回写，见 docpatch RK1"

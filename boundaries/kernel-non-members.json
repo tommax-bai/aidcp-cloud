@@ -11,7 +11,8 @@
       "src/kernel/soul-types.ts",
       "src/kernel/interaction-types.ts",
       "src/kernel/persona-format.ts",
-      "src/kernel/title-clamp.ts"
+      "src/kernel/title-clamp.ts",
+      "src/kernel/schema-capability-contract.ts"
     ]
   },
   "rejected": [

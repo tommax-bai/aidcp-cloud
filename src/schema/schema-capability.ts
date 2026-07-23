@@ -1,17 +1,15 @@
 /**
- * 存储能力的 schema 探测（change cloud-schema-migration-executor 任务 5.1 / 5.2，design.md D4 第三步）。
+ * 存储能力的 schema 探测**执行段**（含 SQL，留 automation；change cloud-schema-migration-executor
+ * 任务 5.1 / 5.2，design.md D4 第三步）。
+ *
+ * 纯契约段（三态类型 / `classifySchemaCapability` / `SchemaCapabilityError` / `isSchemaCapabilityError`
+ * / `schemaSelfCreateEnabled`）已析出到 `src/kernel/schema-capability-contract.ts`（无 SQL、可进 kernel）。
+ * 本文件只保留**连库**的两段：`probeSchemaShape`（读实测形状）、`ensureCapabilitySchema`（init 入口），
+ * 并从 kernel 复用契约。为不惊动同层既有 import 者，契约在此原样 re-export。
  *
  * 范式照抄 `src/interactions/schema-capability.ts`：**探到就正常工作，探不到就带 version id 报错并
  * fail-closed，绝不建表**。今天 34 个存储的做法相反 —— 启动期无条件跑一遍幂等建表语句，
  * 于是「回滚到旧代码」时旧存储会静默重建一张空表并开始往里写，全程零告警。
- *
- * 三态（与 interactions 那份同构）：
- *   ready    要求的表、列、索引都在 → 正常工作；
- *   degraded 表在、但缺列或缺索引  → 报 `schema_incomplete_*`，能力 fail-closed；
- *   missing  要求的表不在          → 报 `schema_missing_*`，能力 fail-closed。
- *
- * 为什么 degraded 也抛：缺列时存储的 SELECT / ON CONFLICT 迟早会抛一条**原始 PG 错误**，
- * 那条错误既不带 version id、也不说该补哪条迁移。在 init 处一次性把话说清楚，比在业务路径上炸更有用。
  *
  * 要求从哪来：**存储自己那段 DDL 常量**。它原本就是「这个存储需要什么」的权威表达，
  * 由 `ddl-objects.ts` 解析成对象清单即可，无需再手写一份必然漂移的清单。
@@ -20,102 +18,32 @@
  * 并在启动日志打显式过渡态警告。默认 `false`。全部批次稳定后随任务 5.11 删除。
  */
 
+import {
+  SchemaCapabilityError,
+  classifySchemaCapability,
+  schemaSelfCreateEnabled,
+  type SchemaCapabilitySpec,
+  type SchemaCapabilityStatus,
+  type SchemaShape,
+} from '../kernel/schema-capability-contract.js';
 import { mergeCreatedObjects } from './ddl-objects.js';
 import { readTableColumns, type SchemaQueryable } from './pg-catalog.js';
 import { runtimeSchemaName } from './schema-name.js';
 
+// 纯契约在 kernel 定义；此处原样 re-export，保住同层既有 import 路径。
+export {
+  SchemaCapabilityError,
+  classifySchemaCapability,
+  isSchemaCapabilityError,
+  schemaSelfCreateEnabled,
+} from '../kernel/schema-capability-contract.js';
+export type {
+  SchemaCapabilitySpec,
+  SchemaCapabilityStatus,
+  SchemaCapabilityVerdict,
+  SchemaShape,
+} from '../kernel/schema-capability-contract.js';
 export type { SchemaQueryable };
-
-export type SchemaCapabilityStatus = 'ready' | 'degraded' | 'missing';
-
-export interface SchemaShape {
-  /** 库里实际存在的表名 */
-  tables: Set<string>;
-  /** 库里实际存在的列，`表名.列名` */
-  columns: Set<string>;
-  /** 库里实际存在的索引名 */
-  indexes: Set<string>;
-}
-
-export interface SchemaCapabilityVerdict {
-  status: SchemaCapabilityStatus;
-  missingTables: string[];
-  missingColumns: string[];
-  missingIndexes: string[];
-}
-
-export interface SchemaCapabilitySpec {
-  /** 能力名，进错误码与日志，如 `model_config` */
-  capability: string;
-  /** 提供这些对象的迁移版本 id（缺对象时要能回答「补跑哪一条」） */
-  sinceVersion: string;
-  /** 该存储原本会自建的 DDL 段（要求的来源；旋钮打开时也是被执行的那几段） */
-  ddl: string[];
-}
-
-/** 纯判定：给定「要求」与「实测」，返回三态与缺失清单。不连库、可脱库单测。 */
-export function classifySchemaCapability(
-  required: { tables: Map<string, Set<string>>; indexes: Map<string, string> },
-  actual: SchemaShape,
-): SchemaCapabilityVerdict {
-  const missingTables: string[] = [];
-  const missingColumns: string[] = [];
-  const missingIndexes: string[] = [];
-
-  for (const [table, columns] of [...required.tables].sort((a, b) => a[0].localeCompare(b[0]))) {
-    if (!actual.tables.has(table)) {
-      missingTables.push(table);
-      continue; // 表都不在，逐列再报一遍只是刷屏
-    }
-    for (const column of [...columns].sort()) {
-      if (!actual.columns.has(`${table}.${column}`)) missingColumns.push(`${table}.${column}`);
-    }
-  }
-  for (const [index, table] of [...required.indexes].sort((a, b) => a[0].localeCompare(b[0]))) {
-    if (missingTables.includes(table)) continue;
-    if (!actual.indexes.has(index)) missingIndexes.push(index);
-  }
-
-  const status: SchemaCapabilityStatus = missingTables.length > 0
-    ? 'missing'
-    : missingColumns.length > 0 || missingIndexes.length > 0
-      ? 'degraded'
-      : 'ready';
-  return { status, missingTables, missingColumns, missingIndexes };
-}
-
-export class SchemaCapabilityError extends Error {
-  readonly code: string;
-  readonly capability: string;
-  readonly status: SchemaCapabilityStatus;
-  readonly sinceVersion: string;
-  readonly missing: string[];
-
-  constructor(spec: SchemaCapabilitySpec, verdict: SchemaCapabilityVerdict) {
-    const missing = [...verdict.missingTables, ...verdict.missingColumns, ...verdict.missingIndexes];
-    const prefix = verdict.status === 'missing' ? 'schema_missing' : 'schema_incomplete';
-    const code = `${prefix}_${spec.capability}_run_${spec.sinceVersion}`;
-    super(
-      `${code}：缺 ${missing.length} 个对象（${missing.join(', ')}）。`
-      + `补跑迁移 npm run migrate up 后重启；本进程 MUST NOT 自建这些对象。`,
-    );
-    this.name = 'SchemaCapabilityError';
-    this.code = code;
-    this.capability = spec.capability;
-    this.status = verdict.status;
-    this.sinceVersion = spec.sinceVersion;
-    this.missing = missing;
-  }
-}
-
-export function isSchemaCapabilityError(err: unknown): err is SchemaCapabilityError {
-  return err instanceof SchemaCapabilityError;
-}
-
-/** 过渡期回滚旋钮。默认 false —— 只有显式设成 true 才恢复自建。 */
-export function schemaSelfCreateEnabled(): boolean {
-  return (process.env.AIDCP_SCHEMA_SELF_CREATE ?? '').trim().toLowerCase() === 'true';
-}
 
 let selfCreateWarned = false;
 function warnSelfCreateOnce(): void {

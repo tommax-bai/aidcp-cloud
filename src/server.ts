@@ -292,7 +292,7 @@ import {
 } from './delegated-task/index.js';
 import { parseDeploymentTarget } from './deployment-target.js';
 import { runSchemaContractGate, takePendingSchemaGateAlert } from './schema/schema-gate.js';
-import { isSchemaCapabilityError } from './schema/schema-capability.js';
+import { isSchemaCapabilityError } from './kernel/schema-capability-contract.js';
 import { DelegatedTaskNotificationGate, delegatedTaskFailureReceipt } from './delegated-task/notification.js';
 import { omitUnsupportedUsageMetrics, platformRegistryEntry } from './platform/index.js';
 import {
