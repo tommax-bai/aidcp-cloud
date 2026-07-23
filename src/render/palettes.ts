@@ -9,9 +9,15 @@
  * 对比度红线：全表 标题/背景 与 胶囊文字/胶囊底 ≥ 4.5:1，由离线单测全表校验。
  */
 
+import type { PaletteKey, LayoutVariant, Decoration } from '../kernel/text-card-style.js';
+
+// 色板键 / 版式 / 装饰三个联合的权威在 kernel（text-card-style.ts），供发布管线纯类型闭包共导；
+// 本文件保留色板 hex 数据与确定性选取函数，并 re-export 类型保持既有 `from './palettes'` 导入面不变。
+export type { PaletteKey, LayoutVariant, Decoration } from '../kernel/text-card-style.js';
+
 /** 色板：浅底高对比家族（键仅用于审计与测试断言，不进卡面）。 */
 export interface Palette {
-  key: string;
+  key: PaletteKey;
   /** 画布底色（浅）。 */
   bg: string;
   /** 装饰用同族浅色（角弧/点阵）。 */
@@ -102,15 +108,11 @@ export const PALETTES = [
   },
 ] as const satisfies readonly Palette[];
 
-export type PaletteKey = (typeof PALETTES)[number]['key'];
+/** 版式常量（与 kernel 的 LayoutVariant 联合逐字对齐）。 */
+export const LAYOUT_VARIANTS = ['editorial', 'poster'] as const satisfies readonly LayoutVariant[];
 
-/** 版式：editorial=顶对齐；poster=内容块整体垂直居中。 */
-export const LAYOUT_VARIANTS = ['editorial', 'poster'] as const;
-export type LayoutVariant = (typeof LAYOUT_VARIANTS)[number];
-
-/** 角部装饰（简单形状，绝不含水印/角标）。 */
-export const DECORATIONS = ['none', 'corner-arc', 'dot-grid'] as const;
-export type Decoration = (typeof DECORATIONS)[number];
+/** 角部装饰常量（与 kernel 的 Decoration 联合逐字对齐）。 */
+export const DECORATIONS = ['none', 'corner-arc', 'dot-grid'] as const satisfies readonly Decoration[];
 
 /** FNV-1a 32-bit 哈希（UTF-8 字节流；无符号返回）。 */
 export function fnv1a(input: string): number {

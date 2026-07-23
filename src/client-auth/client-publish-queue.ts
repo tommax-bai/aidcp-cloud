@@ -4,7 +4,7 @@ import type {
   PublishStageState,
   PublishStageView,
 } from '../panel/publish-stage-lifecycle.js';
-import type { DelegatedTask, DelegatedTaskStatus } from '../delegated-task/types.js';
+import type { DelegatedTask, DelegatedTaskStatus } from '../kernel/delegated-task-types.js';
 
 export const CLIENT_PUBLISH_QUEUE_TASK_STATUSES = ['queued', 'planning', 'deferred'] as const;
 export type ClientPublishQueueTaskStatus = (typeof CLIENT_PUBLISH_QUEUE_TASK_STATUSES)[number];

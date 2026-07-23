@@ -2,7 +2,7 @@ import type { CommentTerminalObservation } from '../comment-agent/comment-schedu
 import type { TargetedCommentResult } from '../comment-agent/comment-task-runner.js';
 import type { TriggerOutcome } from '../publish-agent/publish-scheduler.js';
 import type { ReferenceNote } from '../publish-agent/publish-scheduler.js';
-import type { ReferenceImageSnapshot } from '../publish-agent/types.js';
+import type { ReferenceImageSnapshot } from '../kernel/publish-pipeline-types.js';
 import type { DelegatedTaskExecutor, DelegatedExecutionResult } from './worker.js';
 import type { DelegatedTask } from './types.js';
 import { delegatedRewriteSourceId } from './ownership.js';

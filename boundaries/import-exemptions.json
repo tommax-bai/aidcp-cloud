@@ -1,7 +1,7 @@
 {
   "seedTotal": 173,
   "seedUnplanned": 173,
-  "frozenTotal": 156,
+  "frozenTotal": 138,
   "recordedAt": "2026-07-23",
   "raises": [],
   "entries": [
@@ -133,12 +133,6 @@
       "eliminatedBy": null
     },
     {
-      "from": "src/cache/curated-content-store.ts",
-      "to": "src/delegated-task/types.ts",
-      "reason": "seed（content -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
       "from": "src/cache/notification-contact-store.ts",
       "to": "src/comm/protocol.ts",
       "reason": "§10.9 点名的 6 处 api / content 侧边云协议 type-only 依赖之一：notification-contact-store.ts:18。protocol.ts MUST 归 aidcp-automation 独占、MUST NOT 进 kernel；这些形状 MUST 在各自仓的 contracts/ 内重新声明。",
@@ -180,12 +174,6 @@
       "from": "src/client-auth/client-auth-server.ts",
       "to": "src/risk/types.ts",
       "reason": "§12 首批 MUST 锁住的集中违规之一：客户面直读风控（api -> automation）。§14 红线 9 要求风控最终状态由 automation 单写。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/client-auth/client-publish-queue.ts",
-      "to": "src/delegated-task/types.ts",
-      "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
     },
     {
@@ -235,12 +223,6 @@
       "from": "src/comm/handler.ts",
       "to": "src/soul/writing-language.ts",
       "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/comment-agent/comment-scheduler.ts",
-      "to": "src/cache/curated-content-store.ts",
-      "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
     },
     {
@@ -477,12 +459,6 @@
       "eliminatedBy": null
     },
     {
-      "from": "src/delegated-task/executors.ts",
-      "to": "src/publish-agent/types.ts",
-      "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
       "from": "src/delegated-task/worker.ts",
       "to": "src/config/mirror-stop-work.ts",
       "reason": "由 change config-mirror-cross-process-invalidation 新增：automation 侧委托任务 worker 在认领前问统一停手判据。",
@@ -492,12 +468,6 @@
     {
       "from": "src/feishu/delegated-task-card.ts",
       "to": "src/delegated-task/service.ts",
-      "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/feishu/delegated-task-card.ts",
-      "to": "src/delegated-task/types.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
     },
@@ -565,12 +535,6 @@
       "from": "src/onboarding/first-post-onboarding-coordinator.ts",
       "to": "src/publish-agent/publish-scheduler.ts",
       "reason": "seed（content -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/orchestrator/content-scheduler.ts",
-      "to": "src/platform/index.ts",
-      "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
     },
     {
@@ -663,12 +627,6 @@
     {
       "from": "src/panel/types.ts",
       "to": "src/cache/concept-store.ts",
-      "reason": "由 change decouple-cache-index-layers 承接：面板 BFF（api）就地只读 content 精选/概念库；原经 automation 桶 src/cache/index.ts 间接再导出、跨层拿别层 store（已随按层拆桶移除），现按真实归属直连具体文件（api -> content），耦合面与方向不变、仅换调用通道。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/panel/types.ts",
-      "to": "src/cache/curated-content-store.ts",
       "reason": "由 change decouple-cache-index-layers 承接：面板 BFF（api）就地只读 content 精选/概念库；原经 automation 桶 src/cache/index.ts 间接再导出、跨层拿别层 store（已随按层拆桶移除），现按真实归属直连具体文件（api -> content），耦合面与方向不变、仅换调用通道。",
       "eliminatedBy": null
     },
@@ -777,12 +735,6 @@
       "eliminatedBy": null
     },
     {
-      "from": "src/publish-agent/command-sequencer.ts",
-      "to": "src/publish-agent/types.ts",
-      "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
       "from": "src/publish-agent/draft-image-remove.ts",
       "to": "src/comm/protocol.ts",
       "reason": "§10.9 点名的 6 处 api / content 侧边云协议 type-only 依赖之一：draft-image-remove.ts:14（§4.6.3 台账与审批段 7 文件之一）。protocol.ts MUST 归 aidcp-automation 独占、MUST NOT 进 kernel；这些形状 MUST 在各自仓的 contracts/ 内重新声明。",
@@ -808,12 +760,6 @@
       "eliminatedBy": null
     },
     {
-      "from": "src/publish-agent/platform-profile.ts",
-      "to": "src/publish-agent/types.ts",
-      "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
       "from": "src/publish-agent/publish-dispatcher.ts",
       "to": "src/publish-agent/publish-approval-store.ts",
       "reason": "由 change publish-approval-signal-to-database 新增（aidcp-cloud 4ad06a2）：automation 侧发布下发器直接引用 api 属主的授权存储（错误类型与阻塞原因枚举）。",
@@ -834,12 +780,6 @@
     },
     {
       "from": "src/publish-agent/publish-log-store.ts",
-      "to": "src/publish-agent/types.ts",
-      "reason": "seed（api -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/publish-agent/publish-log-store.ts",
       "to": "src/schema/schema-capability.ts",
       "reason": "seed（api -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/publish-agent/publish-log-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null,
@@ -847,25 +787,7 @@
     },
     {
       "from": "src/publish-agent/publish-scheduler.ts",
-      "to": "src/cache/curated-content-store.ts",
-      "reason": "seed（api -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/publish-agent/publish-scheduler.ts",
-      "to": "src/platform/index.ts",
-      "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/publish-agent/publish-scheduler.ts",
       "to": "src/publish-agent/reference-image-guidance.ts",
-      "reason": "seed（api -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/publish-agent/publish-scheduler.ts",
-      "to": "src/publish-agent/types.ts",
       "reason": "seed（api -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
     },
@@ -900,12 +822,6 @@
       "eliminatedBy": null
     },
     {
-      "from": "src/publish-agent/roles/approval-gatekeeper.ts",
-      "to": "src/publish-agent/types.ts",
-      "reason": "seed（api -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
       "from": "src/publish-agent/roles/publish-executor.ts",
       "to": "src/publish-agent/pipeline-context.ts",
       "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
@@ -918,39 +834,15 @@
       "eliminatedBy": null
     },
     {
-      "from": "src/publish-agent/roles/publish-executor.ts",
-      "to": "src/publish-agent/types.ts",
-      "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
       "from": "src/publish-agent/roles/publish-mode-decider.ts",
       "to": "src/publish-agent/schedule-policy.ts",
       "reason": "seed（content -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
     },
     {
-      "from": "src/publish-agent/schedule-policy.ts",
-      "to": "src/platform/index.ts",
-      "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/publish-agent/schedule-policy.ts",
-      "to": "src/publish-agent/types.ts",
-      "reason": "seed（api -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
       "from": "src/publish-agent/scheduled-publish-reconciler.ts",
       "to": "src/publish-agent/publish-log-store.ts",
       "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/publish-agent/types.ts",
-      "to": "src/platform/index.ts",
-      "reason": "seed（content -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
     },
     {

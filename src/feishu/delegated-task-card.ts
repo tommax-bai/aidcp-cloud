@@ -1,6 +1,6 @@
 import type { DelegatedTaskConfirmationSummary } from '../delegated-task/service.js';
 import { DelegatedTaskService, DelegatedTaskServiceError } from '../delegated-task/service.js';
-import type { DelegatedTask } from '../delegated-task/types.js';
+import type { DelegatedTask } from '../kernel/delegated-task-types.js';
 import type { FeishuCard, FeishuField, FeishuHeaderTemplate } from './types.js';
 
 export type DelegatedTaskCardAction = 'confirm' | 'cancel' | 'pause' | 'resume' | 'status';

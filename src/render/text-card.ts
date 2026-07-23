@@ -32,11 +32,22 @@ import {
 import {
   PALETTES,
   selectTheme,
-  type Decoration,
-  type LayoutVariant,
-  type PaletteKey,
   type ThemeSelection,
 } from './palettes.js';
+// 文字卡设计令牌与 TextCardSourceStyle 的纯类型契约在 kernel（供发布管线闭包共导）；本文件 re-export
+// 保持既有 `from './text-card'` 导入面不变。
+import type {
+  TextCardBackgroundTreatment,
+  TextCardBackgroundPattern,
+  TextCardBulletPresentation,
+  TextCardSourceStyle,
+} from '../kernel/text-card-style.js';
+export type {
+  TextCardBackgroundTreatment,
+  TextCardBackgroundPattern,
+  TextCardBulletPresentation,
+  TextCardSourceStyle,
+} from '../kernel/text-card-style.js';
 import {
   DEFAULT_FONT_ASSETS_DIR,
   createTextMetrics,
@@ -87,28 +98,6 @@ export interface TextCardRenderMeta {
 export type TextCardRenderResult =
   | { ok: true; png: Buffer; meta: TextCardRenderMeta }
   | { ok: false; reason: 'invalid_copy' | 'glyph_uncovered' | 'render_failed'; detail?: string };
-
-export type TextCardBackgroundTreatment = 'solid' | 'soft_gradient';
-export type TextCardBackgroundPattern = 'none' | 'fine_grid' | 'dot_grid';
-export type TextCardBulletPresentation = 'plain' | 'cards' | 'numbered_cards' | 'callout';
-
-/**
- * 来源视觉分析派生出的白名单设计令牌。只允许内部枚举和分页位置，类型层禁止原图 URL、像素、坐标和 OCR 文本进入 renderer。
- */
-export interface TextCardSourceStyle {
-  source: 'reference_analysis';
-  paletteKey: PaletteKey;
-  layout: LayoutVariant;
-  decoration: Decoration;
-  backgroundTreatment: TextCardBackgroundTreatment;
-  backgroundPattern: TextCardBackgroundPattern;
-  bulletPresentation: TextCardBulletPresentation;
-  showPageMarker: boolean;
-  pageIndex: number;
-  pageTotal: number;
-  wordAwareCjk: boolean;
-  fidelityMode: 'balanced' | 'strict';
-}
 
 /** 主题种子：缺省仍由 accountId/postKey 决定；来源风格存在时只接受上述白名单设计令牌。 */
 export interface TextCardSeed {

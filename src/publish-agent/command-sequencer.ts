@@ -19,7 +19,7 @@ import type {
 } from '../comm/protocol.js';
 import { CommandPreemptedError, isPreemptionReason, type PreemptionReason } from '../comm/preemption.js';
 import type { PlatformId } from '../platform/index.js';
-import type { PublishMetadata } from './types.js';
+import type { PublishMetadata } from '../kernel/publish-pipeline-types.js';
 import { buildPublishCommandPlan } from './platform-profile.js';
 import { validatePublishSchedule } from './schedule-policy.js';
 import {

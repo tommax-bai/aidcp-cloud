@@ -34,7 +34,7 @@ import { buildComposeAndApprove, type AutoApproveCommentNotification, type PostP
 import { sendAutoApproveNotificationBestEffort } from './auto-approve-notification.js';
 import type { ContentScheduleApprovalMode } from '../kernel/content-schedule-mode.js';
 import type { CuratedSampleForTerms } from '../agents/comment-search-term-generator.js';
-import type { CuratedContentTypeFilter } from '../cache/curated-content-store.js';
+import type { CuratedContentTypeFilter } from '../kernel/curated-content-types.js';
 import {
   XHS_COMMENT_PROFILE,
   commentProfileForPlatform,

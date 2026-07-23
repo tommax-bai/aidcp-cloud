@@ -10,7 +10,7 @@ import type {
   PublishSourceReference,
   TitleSelection,
   ImageReferenceAudit,
-} from '../types.js';
+} from '../../kernel/publish-pipeline-types.js';
 import type { PipelineContext } from '../pipeline-context.js';
 import type {
   ApprovalWriteResult,

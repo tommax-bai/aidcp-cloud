@@ -1,6 +1,6 @@
 import { BasePublishRole } from './base-role.js';
 import type { RoleConfig } from './base-role.js';
-import type { PipelineFields, AssembledContent, GateDecision } from '../types.js';
+import type { PipelineFields, AssembledContent, GateDecision } from '../../kernel/publish-pipeline-types.js';
 import type { PipelineContext } from '../pipeline-context.js';
 import { buildGatekeeperPrompt } from '../prompts.js';
 import { executeWithFallback } from '../retry-strategy.js';

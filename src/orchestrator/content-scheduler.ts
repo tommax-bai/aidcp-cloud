@@ -21,7 +21,7 @@
 
 import { isValidWeekActiveMask, isWeekActiveAt } from '../risk/session-limits.js';
 import { actionModeEnabled, type ContentScheduleActionMode, type ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
-import type { PlatformId } from '../platform/index.js';
+import type { PlatformId } from '../kernel/platform-types.js';
 import type { DeploymentTarget } from '../deployment-target.js';
 
 export interface OnlineAccountIdentity {

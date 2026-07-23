@@ -1,7 +1,7 @@
 import { normalizePlatformId, type PlatformId } from '../platform/index.js';
 import type { PublishCommandKind, PublishCommandParams, PublishCommandPayload } from '../comm/protocol.js';
 import { computeFillTimeoutMs, DEFAULT_FILL_BUDGET, type FillBudgetConfig } from './fill-budget.js';
-import type { PublishMetadata } from './types.js';
+import type { PublishMetadata } from '../kernel/publish-pipeline-types.js';
 
 export type PublishImageSource = 'generated' | 'account_pool';
 export type PublishTargetKind = 'xhs_note' | 'facebook_personal_timeline';

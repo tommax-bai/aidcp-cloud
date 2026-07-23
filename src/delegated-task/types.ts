@@ -1,13 +1,45 @@
-import type { PlatformId, DelegatedAction } from '../platform/index.js';
 import {
   DEPLOYMENT_TARGETS,
   parseDeploymentTarget,
-  type DeploymentTarget,
 } from '../deployment-target.js';
+// 纯类型契约已提到 kernel（发布 / 委托任务闭包共导）；本文件保留状态机 Set、转移/校验函数与运行时数组常量。
+// re-export 保持既有 `from '../delegated-task/types'` 的类型导入面逐字不变。
+import type {
+  DelegatedAction,
+  DelegatedTaskStatus,
+  DelegatedExecutionTarget,
+  DelegatedApprovalMode,
+  DelegatedActionFamily,
+  DelegatedTaskProgress,
+  DelegatedTaskIntent,
+  DelegatedVerificationKind,
+} from '../kernel/delegated-task-types.js';
+export type {
+  DelegatedAction,
+  DelegatedPlatformId,
+  DelegatedTaskStatus,
+  DelegatedExecutionTarget,
+  DelegatedTaskPriority,
+  DelegatedTaskSource,
+  DelegatedApprovalMode,
+  DelegatedScheduleMode,
+  DelegatedActionFamily,
+  JsonPrimitive,
+  JsonValue,
+  TaskConstraints,
+  DelegatedTaskProgress,
+  DelegatedTerminalOutcome,
+  DelegatedTask,
+  DelegatedTaskIntent,
+  DelegatedVerificationKind,
+  DelegatedAttemptStatus,
+  DelegatedTaskAttempt,
+} from '../kernel/delegated-task-types.js';
 
-export type { DelegatedAction };
-export type DelegatedPlatformId = Exclude<PlatformId, 'wechat_channels'>;
-
+/**
+ * 委托任务状态全集（运行时数组）；`satisfies` 与 kernel 的 DelegatedTaskStatus 联合逐字对齐
+ * （增删状态两处同改，编译期兜底）。
+ */
 export const DELEGATED_TASK_STATUSES = [
   'draft',
   'awaiting_confirmation',
@@ -20,149 +52,13 @@ export const DELEGATED_TASK_STATUSES = [
   'deferred',
   'cancelled',
   'failed',
-] as const;
+] as const satisfies readonly DelegatedTaskStatus[];
 
-export type DelegatedTaskStatus = (typeof DELEGATED_TASK_STATUSES)[number];
 export const DELEGATED_EXECUTION_TARGETS = DEPLOYMENT_TARGETS;
-export type DelegatedExecutionTarget = DeploymentTarget;
-export type DelegatedTaskPriority = 'normal' | 'high';
-export type DelegatedTaskSource = 'feishu' | 'edge' | 'console' | 'api' | 'legacy_command' | 'operator_action';
-export type DelegatedApprovalMode = 'review' | 'auto_approve' | 'draft_only';
-export type DelegatedScheduleMode = 'immediate' | 'at_time' | 'next_safe_slot';
-export type DelegatedActionFamily = 'comment' | 'publish' | 'candidate_control';
-
-export type JsonPrimitive = string | number | boolean | null;
-export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
-export type TaskConstraints = Record<string, JsonValue>;
-
-export interface DelegatedTaskProgress {
-  successCount: number;
-  attemptCount: number;
-  skippedCount: number;
-  failureCount: number;
-}
-
-export interface DelegatedTerminalOutcome {
-  code: string;
-  message: string;
-  evidenceRef?: string;
-  submittedUnknown?: boolean;
-  remainingCount?: number;
-}
-
-export interface DelegatedTask {
-  id: string;
-  /**
-   * Trusted Cloud deployment that created and may execute this task.
-   * This is injected by the server-side store, never by client/task intent input.
-   */
-  executionTarget: DelegatedExecutionTarget;
-  accountId: string;
-  accountName: string;
-  platform: DelegatedPlatformId;
-  action: DelegatedAction;
-  actionFamily: DelegatedActionFamily;
-  targetSuccessCount: number;
-  maxAttempts: number;
-  deadlineAt: number;
-  notBefore: number;
-  executionWindow: { mode: DelegatedScheduleMode; startAt?: number; endAt?: number };
-  sourceConstraints: TaskConstraints;
-  targetConstraints: TaskConstraints;
-  approvalMode: DelegatedApprovalMode;
-  priority: DelegatedTaskPriority;
-  source: DelegatedTaskSource;
-  sourceRef: string | null;
-  /**
-   * 命令来源会话（飞书 `chatId`）。change restore-delegated-command-card-origin-chat：
-   * 与偏向 messageId、参与去重键的 `sourceRef` 解耦，专职操作员向卡片（审批卡 / 终态结果卡）的投递目标。
-   * 命令触发（私聊 / 群）→ 该会话；非飞书入口（console/api/edge）→ null → 回落既有默认 / 团队路由。
-   */
-  originChatId: string | null;
-  status: DelegatedTaskStatus;
-  progress: DelegatedTaskProgress;
-  currentStep: string | null;
-  terminalOutcome: DelegatedTerminalOutcome | null;
-  pauseRequested: boolean;
-  cancelRequested: boolean;
-  nextEligibleAt: number | null;
-  claimToken: string | null;
-  claimExpiresAt: number | null;
-  dedupeKey: string;
-  version: number;
-  createdAt: number;
-  updatedAt: number;
-  confirmedAt: number | null;
-  completedAt: number | null;
-}
 
 /** Strict fail-closed parser for the existing Cloud deployment fact source. */
 export function parseDelegatedExecutionTarget(value: unknown): DelegatedExecutionTarget | null {
   return parseDeploymentTarget(value);
-}
-
-export interface DelegatedTaskIntent {
-  accountId?: string;
-  accountName?: string;
-  platform?: PlatformId;
-  action: DelegatedAction;
-  targetSuccessCount: number;
-  maxAttempts: number;
-  deadlineAt: number;
-  notBefore?: number;
-  executionWindow?: { mode: DelegatedScheduleMode; startAt?: number; endAt?: number };
-  sourceConstraints?: TaskConstraints;
-  targetConstraints?: TaskConstraints;
-  approvalMode?: DelegatedApprovalMode;
-  priority?: DelegatedTaskPriority;
-  source: DelegatedTaskSource;
-  sourceRef?: string;
-  /** 命令来源会话（飞书 chatId）；仅命令入口带值，其余入口缺省 → 回落既有路由。 */
-  originChatId?: string;
-}
-
-export type DelegatedVerificationKind =
-  | 'platform_comment_confirmed'
-  | 'platform_publish_confirmed'
-  | 'platform_schedule_confirmed'
-  | 'candidate_persisted'
-  | 'candidate_version_updated'
-  | 'submitted_unknown'
-  /**
-   * 执行器**跑过**、但没派发平台写入（如评论链搜了词、开了笔记，最终判定无强候选而不评）。
-   * 浏览器动过——只是没落下写入。
-   */
-  | 'not_dispatched'
-  /**
-   * 执行器**根本没跑**：动作真正发生前就被让开（风控 / 并发占用等 → deferred）。
-   *
-   * change delegated-terminal-failure-reason：它与 `not_dispatched` 的分野是**有没有碰过平台**，
-   * 而这正是终态回执能否说「均未真正开始」的唯一凭据。二者从前都记 `not_dispatched`，于是「让开」
-   * 与「跑了但没写」不可分——据此说「未真正开始」就是在断言拿不出证据的事（红线：绝不编造）。
-   * 与 `not_dispatched` 一样不计成功。
-   */
-  | 'not_started';
-
-export type DelegatedAttemptStatus =
-  | 'prepared'
-  | 'dispatched'
-  | 'succeeded'
-  | 'skipped'
-  | 'failed'
-  | 'submitted_unknown';
-
-export interface DelegatedTaskAttempt {
-  id: string;
-  taskId: string;
-  ordinal: number;
-  targetKey: string;
-  status: DelegatedAttemptStatus;
-  verificationKind: DelegatedVerificationKind | null;
-  evidenceRef: string | null;
-  reason: string | null;
-  preparedAt: number;
-  dispatchedAt: number | null;
-  finishedAt: number | null;
 }
 
 const TERMINAL_STATUSES = new Set<DelegatedTaskStatus>([

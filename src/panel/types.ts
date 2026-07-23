@@ -19,7 +19,7 @@ import type {
   CuratedPanelListResult,
   CuratedPanelRow,
   CuratedFacets,
-} from '../cache/curated-content-store.js';
+} from '../kernel/curated-content-types.js';
 import type { PublishLogStore, EditDraftPatch, EditDraftResult } from '../publish-agent/publish-log-store.js';
 import type { QueueStatusLike } from './publish-stage-lifecycle.js';
 import type { SetGroupLabelResult, SetContactInfoResult } from '../account-store.js';

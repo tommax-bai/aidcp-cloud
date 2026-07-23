@@ -1,147 +1,48 @@
-export type PlatformId = 'xiaohongshu' | 'facebook' | 'wechat_channels';
+// 纯类型契约已提到 kernel（src/kernel/platform-types.ts），供三边 type-only 共导；
+// 本文件保留注册表数据 + 读表函数（§9：平台能力由 aidcp-automation 单写）。以下 re-export 保持
+// 既有 `from '../platform/registry'` / `from '../platform/index'` 的类型导入面逐字不变。
+export type {
+  PlatformId,
+  ScheduledAutomationAction,
+  ScheduledAutomationMode,
+  ScheduledAutomationSupport,
+  AvailableScheduledAutomationAction,
+  Surface,
+  NoteScopedAction,
+  OrchestrationCapability,
+  DelegatedAction,
+  DelegatedActionSupport,
+  NoteSupport,
+  CommentPlatformProfile,
+  PlatformRegistryEntry,
+} from '../kernel/platform-types.js';
+import type {
+  PlatformId,
+  ScheduledAutomationAction,
+  AvailableScheduledAutomationAction,
+  DelegatedAction,
+  DelegatedActionSupport,
+  NoteScopedAction,
+  NoteSupport,
+  CommentPlatformProfile,
+  PlatformRegistryEntry,
+} from '../kernel/platform-types.js';
 
-/** 账号排期动作全集：Cloud 目录投影与写入校验共同消费，不能从其它能力词推导。 */
-export const SCHEDULED_AUTOMATION_ACTIONS = ['post', 'comment', 'contact_comment', 'join_group'] as const;
-export type ScheduledAutomationAction = (typeof SCHEDULED_AUTOMATION_ACTIONS)[number];
-export type ScheduledAutomationMode = 'review' | 'auto_approve';
+/**
+ * 账号排期动作全集：Cloud 目录投影与写入校验共同消费，不能从其它能力词推导。
+ * `satisfies` 与 kernel 的 ScheduledAutomationAction 联合逐字对齐（增删动作两处同改，编译期兜底）。
+ */
+export const SCHEDULED_AUTOMATION_ACTIONS = [
+  'post',
+  'comment',
+  'contact_comment',
+  'join_group',
+] as const satisfies readonly ScheduledAutomationAction[];
 
 /** 内容动作与敏感联系评论动作的服务端硬上限。 */
 export const SCHEDULED_CONTENT_DAILY_CAP_MAX = 50;
 export const SCHEDULED_CONTACT_COMMENT_DAILY_CAP_MAX = 10;
 export const SCHEDULED_GROUP_JOIN_DAILY_CAP_MAX = 10;
-
-export type ScheduledAutomationSupport =
-  | {
-      supported: true;
-      allowedModes: readonly ScheduledAutomationMode[];
-      maxDailyCap: number;
-    }
-  | { supported: false; reason: string };
-
-/** 面板目录只投影 supported 动作；数组是副本，调用方不能改 registry。 */
-export interface AvailableScheduledAutomationAction {
-  action: ScheduledAutomationAction;
-  allowedModes: ScheduledAutomationMode[];
-  maxDailyCap: number;
-}
-
-/**
- * Surface = 编排是否**离开列表**，不是页面形态。dialog / drawer / modal / overlay / profile
- * 都是 driver 内部细节，**绝不进本 enum**（change platform-registry-shape §不做）。
- */
-export type Surface = 'feed' | 'detail';
-
-/** 云端逐帖（note-scoped）动作全集：registry 对每个平台**全覆盖**表态，typecheck 逼每格声明。 */
-export type NoteScopedAction =
-  | 'read_content'
-  | 'like'
-  | 'collect'
-  | 'comment'
-  | 'comment_like'
-  | 'browse_images'
-  | 'scroll_comments';
-
-/**
- * 编排能力词：只保留**有真消费者**的词（唯一消费者铁律，避免「声明了没人读」）。
- * - browse        消费者 = role-dispatcher 会话启动闸（canStartSession）。
- * - feed_refresh  消费者 = FeedScroller 构造（深度到阈值是否改点「刷新」）。
- * - patrol/notification 消费者 = role-dispatcher setup() 的 canPatrol()（两者皆支持才注册 12 通知巡视角色）。
- * - profile_visit 消费者 = role-dispatcher setup() 的 canVisitProfile()（gate ProfileOpener 注册 + 注入 AuthorEvaluator：
- *                 不支持则永不产 profile.worth_visiting，只产 profile.skipped，主页子链结构性不触发）。
- * - follow        消费者 = FollowAgent（主页关注；注入 canFollow：不支持则跳过、仍产 profile.done 保返回链）。
- * - reel_follow   消费者 = Reel 呈现概率策略 + 客户端关注指标投影；不依赖 profile_visit。
- * - group_join    消费者 = 客户端指标投影（omitUnsupportedUsageMetrics）——**唯一的非闸消费者**：只决定
- *                 「这个账号的界面上有没有加群这一格」，MUST NOT 下发 / 拒绝 / 取消任何命令。加群本身的
- *                 闸与执行仍全在其专属路径（FacebookGroupJoinScheduler），本词不是第二道闸。
- *                 ⚠️ 读它**绝不能**用 isOrchestrationCapabilitySupported（那条 fail-open 到 true）——
- *                 该词的现状是「客户端根本没有这一格」，fail-open 到 true 会让平台未知的账号凭空长出
- *                 一个加群格，而小红书没有群。详见 declaresCapabilitySupported。
- * - search        消费者 = 客户端指标投影（omitUnsupportedUsageMetrics）：只决定 FB/XHS 的今日进展是否
- *                 出现搜索格，不参与搜索执行预闸；搜索事实仍由 search_activity_receipt_v1 终态记账。
- * **不变量**：普通主页 follow ⇒ profile_visit ⇒ browse。Reel 内联关注走 reel_follow，绝不能为了它翻转普通 follow。
- */
-export type OrchestrationCapability =
-  | 'browse'
-  | 'feed_refresh'
-  | 'follow'
-  | 'reel_follow'
-  | 'profile_visit'
-  | 'patrol'
-  | 'notification'
-  | 'search'
-  | 'group_join';
-
-/** Phase-1 user delegated business actions. This is control-plane metadata, not a protocol enum. */
-export type DelegatedAction =
-  | 'comment_batch'
-  | 'publish_post'
-  | 'publish_from_inspiration'
-  | 'comment_curated'
-  | 'generate_candidates'
-  | 'approve_candidate'
-  | 'reject_candidate'
-  | 'modify_candidate'
-  | 'facebook_group_comment';
-
-export type DelegatedActionSupport =
-  | { level: 'supported' }
-  | { level: 'beta' | 'unsupported'; reason: string };
-
-/** 支持声明：不支持必带非空 reason（治「靠数值巧合不发」）。 */
-export type NoteSupport = { supported: true } | { supported: false; reason: string };
-
-export interface CommentPlatformProfile {
-  platform: PlatformId;
-  siteName: string;
-  contentName: string;
-  maxCommentLength: number;
-  /**
-   * 撰写语言约束：只在「内容语言 ≠ 账号母语」的平台声明；缺省 = 不渲染该条（小红书 prompt 逐字不变）。
-   * 单一词表铁律：这是 profile 的一个字段，绝不为语言另开第二张表。
-   */
-  composeLanguageRule?: string;
-  metrics: {
-    like: string;
-    collect: string;
-  };
-  search: {
-    defaultSort: string;
-    defaultSortLabel: string;
-    defaultTimeWindow: string;
-    defaultTimeWindowLabel: string;
-    targetedSearchTermMaxLength: number;
-    targetedSearchFallbackLength: number;
-  };
-}
-
-export interface PlatformRegistryEntry {
-  platform: PlatformId;
-  app: string;
-  displayName: string;
-  /** 概念1：逐帖动作是否支持（全覆盖 Record）。唯一消费者 = dispatcher 的 sendNoteScopedCommand（唯一拒绝点 + 审计）。 */
-  noteActions: Record<NoteScopedAction, NoteSupport>;
-  /**
-   * 概念2：动作在哪个 surface 执行（只对「离不离开列表是真问题」的 3 个动作建模；给 collect/browse_images
-   * 编造 surface = 假抽象）。唯一读者 = surface.ts 的 resolveReadSurface / resolveCommentSurface 纯函数。
-   */
-  noteSurfaces: Record<'read_content' | 'like' | 'comment', Surface>;
-  /** 编排能力（只保留有真消费者的词）。 */
-  capabilities: Record<OrchestrationCapability, NoteSupport>;
-  /** 节奏平台参数：feed 翻页停留地板（消费者 = dispatcher 泛化后的 feedScrollDwellMs，替代旧的 facebook 裸分支）。 */
-  pacing: { feedScrollDwellFloorMs?: number };
-  scheduler: {
-    comment: {
-      enabled: boolean;
-      defaultSort: string;
-      defaultTimeWindow: string;
-    };
-  };
-  /** 账号排期动作准入；唯一消费者 = content-schedule 目录投影与写前校验。 */
-  scheduledAutomation: Record<ScheduledAutomationAction, ScheduledAutomationSupport>;
-  /** User-delegated action admission. Cloud is authoritative; edge mirrors this only for UX. */
-  delegatedActions: Record<DelegatedAction, DelegatedActionSupport>;
-  comment: CommentPlatformProfile;
-}
 
 const XHS_DELEGATED_ACTIONS: Record<DelegatedAction, DelegatedActionSupport> = {
   comment_batch: { level: 'supported' },

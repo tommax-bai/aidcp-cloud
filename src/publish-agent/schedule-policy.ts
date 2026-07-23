@@ -1,5 +1,5 @@
-import type { PlatformId } from '../platform/index.js';
-import type { PublishMode } from './types.js';
+import type { PlatformId } from '../kernel/platform-types.js';
+import type { PublishMode } from '../kernel/publish-pipeline-types.js';
 
 export const XHS_SCHEDULE_MIN_AHEAD_MS = 60 * 60 * 1000;
 export const XHS_SCHEDULE_MAX_AHEAD_MS = 14 * 24 * 60 * 60 * 1000;
