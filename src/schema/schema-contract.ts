@@ -31,8 +31,12 @@ export const REQUIRED_SCHEMA_VERSION = '0070_baseline_self_heal_columns';
  *
  * 注：`0071`/`0072` 补声明的是共库上「库有、迁移没声明」的存活孤儿表/列（change cloud-schema-migration-executor
  * 任务 3.1/3.2 的收尾）；它们不是任何存储正常读写的前置，故只抬 KNOWN_MAX、不抬 REQUIRED。
+ *
+ * 注：`0073_publish_execution_state`（change publish-log-split-prep）建的是 publish_log 执行态影子表。
+ * 它是**影子**，写者对它软探测 + fail-safe 双写（探不到即停用双写，绝不连累主路径），故只抬 KNOWN_MAX、不抬 REQUIRED
+ * ——把它写进 REQUIRED 会让「迁移还没跑」变成硬启动失败，与影子表的可选性质相悖。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0072_baseline_surviving_orphan_columns';
+export const KNOWN_MAX_SCHEMA_VERSION = '0073_publish_execution_state';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

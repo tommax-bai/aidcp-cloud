@@ -22,13 +22,17 @@ test('rejectPendingApproval atomically records durable user rejection evidence',
   const store = new PublishLogStore({ pool: pool as never, clock: () => decidedAt });
 
   assert.equal(await store.rejectPendingApproval(175), true);
-  assert.equal(calls.length, 1);
+  // change publish-log-split-prep：命中后还会 fail-safe 双写执行态影子（needs_review），故共 2 条调用；
+  // 权威的 publish_log reject 仍是第一条、谓词与语义一字未改。
+  assert.equal(calls.length, 2);
   assert.match(calls[0].sql, /SET status = 'needs_review'/);
   assert.match(calls[0].sql, /COALESCE\(publish_metadata, '\{\}'::jsonb\)/);
   assert.match(calls[0].sql, /'\{approvalDecision\}'/);
   assert.match(calls[0].sql, /'kind', 'user_rejected'/);
   assert.match(calls[0].sql, /WHERE id = \$1 AND status = 'pending_approval'/);
   assert.deepEqual(calls[0].params, [175, decidedAt]);
+  assert.match(calls[1].sql, /INSERT INTO publish_execution_state/);
+  assert.deepEqual(calls[1].params, [175, 'needs_review', null, null]);
 });
 
 test('rejectPendingApproval reports no transition when the draft is no longer pending', async () => {

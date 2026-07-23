@@ -12,7 +12,14 @@ import { clampTitle } from './title-clamp.js';
 import { normalizePlatformId, type PlatformId } from '../platform/index.js';
 import { validatePublishSchedule } from './schedule-policy.js';
 import type { DeploymentTarget } from '../deployment-target.js';
-import { ensureCapabilitySchema } from '../schema/schema-capability.js';
+import { ensureCapabilitySchema, probeSchemaShape } from '../schema/schema-capability.js';
+
+/**
+ * 执行态影子表名（change publish-log-split-prep：拆 publish_log 七态表的执行态那半）。
+ * 表由 migrations/0073 建，与 publish_log 以 record_id（= publish_log.id）关联。裸表名字符串、非 DDL——
+ * DDL 的唯一所有者是 migrations/，本仓运行时 MUST NOT 出现 CREATE/ALTER/CREATE INDEX（AC-SCHEMA-DDL-OWNER）。
+ */
+const PUBLISH_EXECUTION_STATE_TABLE = 'publish_execution_state';
 
 /** JSONB publish_metadata 解析：pg 驱动通常已解析为对象；兼容字符串形态；解析失败诚实置 null。 */
 function parsePublishMetadata(raw: unknown): PublishMetadata | null {
@@ -301,6 +308,14 @@ export type RefineDraftResult = EditDraftResult | { ok: false; reason: 'invalid_
 export class PublishLogStore {
   private readonly pool: pg.Pool;
   private readonly clock: () => number;
+  /**
+   * 执行态影子表（change publish-log-split-prep）是否可双写。
+   * 默认 true 让写路径尝试双写；init() 软探测到表不在 / 探测失败即降为 false、停用双写。
+   * **影子缺失或写失败 MUST NOT 连累主路径**——这是本 change 的最高约束（发布链路是核心业务）。
+   */
+  private executionMirrorAvailable = true;
+  /** 影子写失败只告警一次，避免每条写入刷屏。 */
+  private executionMirrorWarned = false;
 
   constructor(options: PublishLogStoreOptions = {}) {
     this.clock = options.clock ?? Date.now;
@@ -324,6 +339,58 @@ export class PublishLogStore {
       sinceVersion: '0001_publish_log',
       ddl: [PUBLISH_SCHEMA_SQL],
     });
+    // 执行态影子表（change publish-log-split-prep）：**软**探测，探不到就停用双写。
+    // 与 publish_log 的 ensureCapabilitySchema（探不到即 fail-closed 抛错）不同——影子是可选的，
+    // 迁移 0073 未应用（ol 共库、或 dev 未部署）时 MUST 静默停用双写、绝不阻断本 store 初始化或主路径。
+    this.executionMirrorAvailable = await this.probeExecutionMirror();
+  }
+
+  /** 软探测执行态影子表是否存在；任何异常都诚实降级为「不可用」（绝不假成功、绝不抛）。 */
+  private async probeExecutionMirror(): Promise<boolean> {
+    try {
+      const shape = await probeSchemaShape(this.pool, [PUBLISH_EXECUTION_STATE_TABLE]);
+      return shape.tables.has(PUBLISH_EXECUTION_STATE_TABLE);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 执行态双写（change publish-log-split-prep，§5.4.6 模板 M2）：把一次 publish_log 执行态迁移
+   * 影子进 publish_execution_state（以 record_id 关联）。**MUST fail-safe**：
+   * - 只在权威的 publish_log 写**已成功**之后调用；
+   * - 内部 try/catch 兜住一切异常，写失败只告警、绝不抛、绝不回滚——影子挂了不能连累主路径与发布链路；
+   * - 影子表不可用（迁移未应用）时直接 no-op。
+   *
+   * upsert 语义：以 record_id 为键；未随本次迁移提供的列（platform_post_id / post_url）用 COALESCE 保留旧值，
+   * 不因一次纯状态迁移把已回填的帖子 id / URL 抹掉。
+   */
+  private async mirrorExecutionState(
+    recordId: number,
+    status: PublishStatus,
+    extra: { platformPostId?: string | null; postUrl?: string | null } = {},
+  ): Promise<void> {
+    if (!this.executionMirrorAvailable) return;
+    try {
+      await this.pool.query(
+        `INSERT INTO publish_execution_state (record_id, status, platform_post_id, post_url, updated_at)
+         VALUES ($1, $2, $3, $4, now())
+         ON CONFLICT (record_id) DO UPDATE
+           SET status = EXCLUDED.status,
+               platform_post_id = COALESCE(EXCLUDED.platform_post_id, publish_execution_state.platform_post_id),
+               post_url = COALESCE(EXCLUDED.post_url, publish_execution_state.post_url),
+               updated_at = now()`,
+        [recordId, status, extra.platformPostId ?? null, extra.postUrl ?? null],
+      );
+    } catch (err) {
+      if (!this.executionMirrorWarned) {
+        this.executionMirrorWarned = true;
+        console.warn(
+          '[aidcp-cloud] publish_execution_state 影子双写失败（主路径不受影响，只告警一次）:',
+          (err as Error).message,
+        );
+      }
+    }
   }
 
   /** 写入一条发布记录，返回新行 id。 */
@@ -352,7 +419,10 @@ export class PublishLogStore {
         record.sourceReference ? JSON.stringify(record.sourceReference) : null,
       ],
     );
-    return rows[0].id;
+    const newId = rows[0].id;
+    // 执行态双写：草稿入库即在影子里落一行（record_id + 初始 status），后续状态迁移各自 upsert。fail-safe。
+    await this.mirrorExecutionState(newId, record.status, { platformPostId: record.platformPostId ?? null });
+    return newId;
   }
 
   /**
@@ -368,6 +438,8 @@ export class PublishLogStore {
   /** 更新一条记录的状态。 */
   async updateStatus(id: number, status: PublishStatus): Promise<void> {
     await this.pool.query('UPDATE publish_log SET status = $2 WHERE id = $1', [id, status]);
+    // 执行态双写（谓词语义保持不变——此处仍是 publish_log 原有的无谓词盲写，MUST NOT 在本 change 顺手改它）。
+    await this.mirrorExecutionState(id, status);
   }
 
   /** 人工驳回：只允许 pending_approval 翻到 needs_review，避免旧卡误伤已发布记录。 */
@@ -384,7 +456,10 @@ export class PublishLogStore {
         WHERE id = $1 AND status = 'pending_approval'`,
       [id, this.clock()],
     );
-    return (result.rowCount ?? 0) > 0;
+    const rejected = (result.rowCount ?? 0) > 0;
+    // 执行态双写：只有 pending_approval→needs_review 真发生（权威写命中）才 mirror。
+    if (rejected) await this.mirrorExecutionState(id, 'needs_review');
+    return rejected;
   }
 
   /**
@@ -396,6 +471,8 @@ export class PublishLogStore {
       `UPDATE publish_log SET platform_post_id = $2, post_url = COALESCE($3, post_url), status = 'published' WHERE id = $1`,
       [id, postId, postUrl ?? null],
     );
+    // 执行态双写：已发布 + 回填帖子 id / URL（postUrl 为空则不覆盖影子里既有的 URL，与主写的 COALESCE 同口径）。
+    await this.mirrorExecutionState(id, 'published', { platformPostId: postId, postUrl: postUrl ?? null });
   }
 
   /** 平台已接受原生定时任务；内部句柄单独落列，公开身份保持空，首次对账在目标时刻后 10 分钟。 */
@@ -409,6 +486,8 @@ export class PublishLogStore {
       [id, scheduledAt, scheduledPlatformId ?? null, 10 * 60_000],
     );
     if ((result.rowCount ?? 0) === 0) throw new Error('scheduled_state_conflict');
+    // 执行态双写：只有权威写真发生（未抛冲突）才 mirror。
+    await this.mirrorExecutionState(id, 'scheduled');
   }
 
   /** 到期扫描只命中 scheduled 的索引行；旧/其它状态绝不被对账任务误领。 */
@@ -485,7 +564,10 @@ export class PublishLogStore {
       [id, error.slice(0, 1000), nextAt, Math.max(1, Math.floor(maxAttempts))],
     );
     const row = rows[0];
-    return row ? { status: row.status, attempts: Number(row.schedule_reconcile_attempts) } : null;
+    if (!row) return null;
+    // 执行态双写：只有权威 UPDATE 命中（status 仍为 scheduled）才有返回行，据此 mirror 迁移后的真态。
+    await this.mirrorExecutionState(id, row.status);
+    return { status: row.status, attempts: Number(row.schedule_reconcile_attempts) };
   }
 
   /**
@@ -499,7 +581,10 @@ export class PublishLogStore {
         WHERE id = $1 AND status = 'scheduled'`,
       [id, postId, postUrl],
     );
-    return (result.rowCount ?? 0) > 0;
+    const firstConfirmation = (result.rowCount ?? 0) > 0;
+    // 执行态双写：只有首次 scheduled→published（权威写命中）才 mirror，避免对已发布记录重复投影。
+    if (firstConfirmation) await this.mirrorExecutionState(id, 'published', { platformPostId: postId, postUrl });
+    return firstConfirmation;
   }
 
   /** 落库发帖元数据（A 阶段4 血缘/可观测）+ 防篡改审计标记。 */
