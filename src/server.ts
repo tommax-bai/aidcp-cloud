@@ -301,6 +301,7 @@ import {
   actionModeEnabled,
   type ContentScheduleCatalogRow,
 } from './config/content-schedule-store.js';
+import { projectClientEnvironmentSchedule } from './client-auth/client-environment-schedule.js';
 import { FacebookGroupJoinAutomationStore } from './config/facebook-group-join-automation-store.js';
 import {
   buildFacebookGroupJoinAutomationCatalogViewFailClosed,
@@ -5386,6 +5387,11 @@ async function main(): Promise<void> {
                 return null;
               }
             },
+          },
+          environmentSchedule: {
+            platformForAccount: (accountId) => accountStore?.platformFor?.(accountId),
+            viewForAccount: (accountId) =>
+              projectClientEnvironmentSchedule(contentScheduleStore.effectiveScheduleFor(accountId)),
           },
           publishQueue: {
             platformForAccount: (accountId) => accountStore?.platformFor?.(accountId),

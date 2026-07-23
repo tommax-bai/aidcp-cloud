@@ -13,6 +13,7 @@ import { CuratedContentUnavailableError } from '../src/cache/curated-content-sto
 import type { UiDailyUsagePayload, UiSlowStartPayload } from '../src/comm/protocol.js';
 import type { PendingPublishPreview } from '../src/publish-agent/publish-log-store.js';
 import type { DraftRefinementJob } from '../src/publish-agent/draft-refinement.js';
+import type { ClientEnvironmentScheduleView } from '../src/client-auth/client-environment-schedule.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 const CLIENT_SECRET = 'client-secret-xyz';
@@ -2638,4 +2639,163 @@ test('客户待审写在浏览器/core 缺席时按 env 绑定复用领域方法
   assert.deepEqual(calls.map((call) => call.kind), ['approve', 'remove']);
   assert.equal(calls.every((call) => call.accountId === ACCT_P1), true);
   assert.equal(calls.every((call) => call.actor === 'client-auth:u1:p1'), true);
+});
+
+const CLIENT_SCHEDULE_VIEW: ClientEnvironmentScheduleView = {
+  timezone: 'Asia/Shanghai',
+  weekStartsOn: 'monday',
+  autoEnabled: true,
+  days: [
+    { day: 'monday', activityRanges: [{ startHour: 9, endHour: 12 }], contentRanges: [{ startHour: 10, endHour: 11 }] },
+    { day: 'tuesday', activityRanges: [], contentRanges: [] },
+    { day: 'wednesday', activityRanges: [], contentRanges: [] },
+    { day: 'thursday', activityRanges: [], contentRanges: [] },
+    { day: 'friday', activityRanges: [], contentRanges: [] },
+    { day: 'saturday', activityRanges: [], contentRanges: [] },
+    { day: 'sunday', activityRanges: [], contentRanges: [] },
+  ],
+  actions: [{
+    key: 'post',
+    label: '创作与发布',
+    dailyCap: 1,
+    approval: 'review',
+    resultCopy: '草稿完成后等你确认',
+  }],
+  windows: {
+    currentActivity: null,
+    currentContent: null,
+    nextActivity: {
+      day: 'monday', dayIndex: 0, dayOffset: 0,
+      startHour: 9, endHour: 12, startsAt: 100, endsAt: 200,
+    },
+    nextContent: {
+      day: 'monday', dayIndex: 0, dayOffset: 0,
+      startHour: 10, endHour: 11, startsAt: 120, endsAt: 180,
+    },
+  },
+};
+
+test('环境排期：离线可读、按绑定账号判平台并返回最小客户 DTO', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const calls: string[] = [];
+  const environmentSchedule: NonNullable<ClientAuthDeps['environmentSchedule']> = {
+    platformForAccount(accountId) {
+      calls.push(`platform:${accountId}`);
+      return 'xiaohongshu';
+    },
+    viewForAccount(accountId) {
+      calls.push(`view:${accountId}`);
+      return CLIENT_SCHEDULE_VIEW;
+    },
+  };
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      environmentSchedule,
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const response = await fetch(`${base}/environments/p1/schedule`, { headers });
+      assert.equal(response.status, 200);
+      const body = await response.json() as {
+        data: ClientEnvironmentScheduleView & { envKey: string };
+        meta: { requestId: string; asOf: number };
+      };
+      assert.equal(body.data.envKey, 'p1');
+      assert.equal(body.data.timezone, 'Asia/Shanghai');
+      assert.deepEqual(body.data.days[0].activityRanges, [{ startHour: 9, endHour: 12 }]);
+      assert.deepEqual(body.data.actions.map((action) => action.label), ['创作与发布']);
+      assert.ok(body.meta.requestId);
+      assert.ok(Number.isFinite(body.meta.asOf));
+      const json = JSON.stringify(body);
+      for (const forbidden of ['accountId', 'activeWeekMask', 'effectiveMask', 'override', 'updatedBy']) {
+        assert.equal(json.includes(forbidden), false, forbidden);
+      }
+    },
+  );
+  assert.deepEqual(calls, [`platform:${ACCT_P1}`, `view:${ACCT_P1}`]);
+});
+
+test('环境排期：非小红书、绑定未知与依赖不可用均诚实失败', async () => {
+  const fx = ownerOfP1();
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      environmentSchedule: {
+        platformForAccount: () => 'xiaohongshu',
+        viewForAccount: () => CLIENT_SCHEDULE_VIEW,
+      },
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      assert.equal((await fetch(`${base}/environments/p1/schedule`, { headers })).status, 409);
+    },
+  );
+
+  fx.bindings.set('p1', ACCT_P1);
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      environmentSchedule: {
+        platformForAccount: () => 'facebook',
+        viewForAccount: () => CLIENT_SCHEDULE_VIEW,
+      },
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const unsupported = await fetch(`${base}/environments/p1/schedule`, { headers });
+      assert.equal(unsupported.status, 409);
+      assert.deepEqual(await unsupported.json(), { error: 'unsupported_platform' });
+    },
+  );
+
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter() },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      assert.equal((await fetch(`${base}/environments/p1/schedule`, { headers })).status, 503);
+    },
+  );
+});
+
+test('环境排期：非 GET 不形成客户写通道', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  let viewCalls = 0;
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      environmentSchedule: {
+        platformForAccount: () => 'xiaohongshu',
+        viewForAccount: () => {
+          viewCalls += 1;
+          return CLIENT_SCHEDULE_VIEW;
+        },
+      },
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const response = await fetch(`${base}/environments/p1/schedule`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ activeWeekMask: '1'.repeat(168), autoEnabled: true }),
+      });
+      assert.equal(response.status, 404);
+    },
+  );
+  assert.equal(viewCalls, 0);
 });

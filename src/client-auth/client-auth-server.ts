@@ -57,6 +57,7 @@ import {
   projectClientPublishQueueCancelReceipt,
   type ClientPublishQueueView,
 } from './client-publish-queue.js';
+import type { ClientEnvironmentScheduleView } from './client-environment-schedule.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_SELECTED_PERSONA_BYTES = 32 * 1024;
@@ -87,6 +88,11 @@ export interface ClientAuthDeps {
   /** 客户首页只读概览；账号键由持久绑定解析，DTO 不得回传 accountId。 */
   environmentOverview?: {
     viewForAccount(accountId: string): Promise<ClientEnvironmentOverview | null>;
+  };
+  /** 当前环境账号的客户可读生效排期；平台和账号键只在 Cloud 内部流转。 */
+  environmentSchedule?: {
+    platformForAccount(accountId: string): string | undefined;
+    viewForAccount(accountId: string): ClientEnvironmentScheduleView | null;
   };
   /** 小红书客户发布队列；账号键只在 Cloud 内部流转，响应经最小披露 DTO 投影。 */
   publishQueue?: {
@@ -1328,6 +1334,39 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
           lastPublished: view.lastPublished,
         },
         meta: { requestId: randomUUID(), asOf },
+      });
+      return;
+    }
+
+    // 当前小红书环境的生效排期：纯 Cloud 配置投影，离线可读，不依赖浏览器/core/WS。
+    // accountId 与两份 168 位掩码均停留在 Cloud；客户 DTO 只返回可读时间区间。
+    const scheduleMatch = /^\/environments\/([^/]+)\/schedule$/.exec(url);
+    if (method === 'GET' && scheduleMatch) {
+      if (!deps.environmentSchedule) {
+        sendJson(res, 503, { error: 'environment_schedule_unavailable' });
+        return;
+      }
+      let envKey: string;
+      try {
+        envKey = decodeURIComponent(scheduleMatch[1]).trim();
+      } catch {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_env_key' });
+        return;
+      }
+      const bound = await resolveOwnedBoundAccount(deps, res, userId, envKey);
+      if (!bound) return;
+      if (deps.environmentSchedule.platformForAccount(bound.accountId)?.trim().toLowerCase() !== 'xiaohongshu') {
+        sendJson(res, 409, { error: 'unsupported_platform' });
+        return;
+      }
+      const view = deps.environmentSchedule.viewForAccount(bound.accountId);
+      if (!view) {
+        sendJson(res, 503, { error: 'environment_schedule_unavailable' });
+        return;
+      }
+      sendJson(res, 200, {
+        data: { envKey: bound.envKey, ...view },
+        meta: { requestId: randomUUID(), asOf: Date.now() },
       });
       return;
     }

@@ -350,6 +350,11 @@
     "note": "§4.7：客户身份与环境归属权威（7/7 api）"
   },
   {
+    "path": "src/client-auth/client-environment-schedule.ts",
+    "layer": "api",
+    "note": "§4.7：客户身份与环境归属权威（7/7 api）"
+  },
+  {
     "path": "src/client-auth/client-publish-queue.ts",
     "layer": "api",
     "note": "§4.7：客户身份与环境归属权威（7/7 api）"
