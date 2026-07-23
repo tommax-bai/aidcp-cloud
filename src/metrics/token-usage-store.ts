@@ -235,6 +235,7 @@ export class TokenUsageStore {
   private readonly flushMs: number;
   private buffer = new Map<string, Accum>();
   private timer?: ReturnType<typeof setInterval>;
+  private retentionTimer?: ReturnType<typeof setInterval>;
   private flushing = false;
   private droppedFlushes = 0;
   private warnedUntagged = false;
@@ -265,6 +266,37 @@ export class TokenUsageStore {
       }, this.flushMs);
       this.timer.unref?.();
     }
+    // 本地保留清理（change retention-local-purge）：llm_token_usage 归 aidcp-content，由本属主
+    // **自驱**日频 purge——不再让面板层 retention-sweeper 跨域伸手进来调（原先的跨界驱动方已撤）。
+    // 内联而非抽跨层共享 helper：跨层共享文件会重新引入本 change 正要消除的跨域依赖。默认保留 45 天
+    // （覆盖用量页 31 天窗口 + 容错），env AIDCP_RETENTION_TOKEN_DAYS 覆盖；周期 24h、
+    // env AIDCP_RETENTION_INTERVAL_MS 覆盖。阈值/周期/删的数据与被取代的 sweeper 逐位一致。
+    if (!this.retentionTimer) {
+      this.retentionTimer = this.startRetentionTimer();
+    }
+  }
+
+  /** 本地保留清理定时器（change retention-local-purge）。unref、runOnStart、每轮 try/catch、绝不逃逸。 */
+  private startRetentionTimer(): ReturnType<typeof setInterval> {
+    const d = Number(process.env.AIDCP_RETENTION_TOKEN_DAYS);
+    const days = Number.isFinite(d) && d > 0 ? d : 45;
+    const ei = Number(process.env.AIDCP_RETENTION_INTERVAL_MS);
+    const intervalMs = Number.isFinite(ei) && ei > 0 ? ei : 24 * 60 * 60 * 1000;
+    const runOnce = async (): Promise<void> => {
+      try {
+        const deleted = await this.purgeOlderThan(days);
+        if (deleted > 0) console.log(`[retention] llm_token_usage 保留清理完成：-${deleted}`);
+      } catch (err) {
+        console.warn(`[retention] llm_token_usage 清理失败（跳过本轮，不拖累其它表）：${(err as Error).message}`);
+      }
+    };
+    void runOnce();
+    const timer = setInterval(() => {
+      void runOnce();
+    }, intervalMs);
+    timer.unref?.();
+    console.log(`[retention] llm_token_usage 保留清理已启动（周期 ${Math.round(intervalMs / 3_600_000)}h；保留 ${days}d）`);
+    return timer;
   }
 
   add(info: TokenUsageCallInfo): void {
@@ -351,6 +383,10 @@ export class TokenUsageStore {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = undefined;
+    }
+    if (this.retentionTimer) {
+      clearInterval(this.retentionTimer);
+      this.retentionTimer = undefined;
     }
     await this.flush();
   }

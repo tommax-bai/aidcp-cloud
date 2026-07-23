@@ -141,11 +141,12 @@ npm run boundaries:census
    点名 MUST 有明确结论的五处之一）：
    - `client_environments`：写点全在 `src/client-auth/client-user-store.ts`（`api`），
      但由 `src/server.ts` 的 `registerEnvironments` 在自动化握手路径上调用；
-   - **跨域保留清理**：`src/panel/retention-sweeper.ts`（`api`）调用三个属主侧 store 的 purge 方法删数据——
-     `riskStore.purgeCountersOlderThan`（`src/risk/pg-risk-store.ts`，`automation`，表 `risk_counters`）、
-     `interactionFeedStore.purgeOlderThan`（`src/cache/interaction-feed-store.ts`，`automation`，表 `interaction_feed`）、
-     `tokenUsageStore.purgeOlderThan`（`src/metrics/token-usage-store.ts`，`content`，表 `llm_token_usage`）。
-     `DELETE` 语句全在属主一侧，故 `AC-OWN-02` 不会红；定稿 §5.1 第 9 项要求阶段 1 拆成各服务自调本地 purge。
+   - **跨域保留清理（已消除，change `retention-local-purge` / 2026-07-23）**：原先 `src/panel/retention-sweeper.ts`（`api`）
+     在保留清理路径上跨域调用三个属主侧 store 的 purge 方法删数据，是本条第一类失明形态的实例。
+     定稿 §5.1 第 9 项要求「阶段 1 拆成各服务自调本地 purge」，本 change 已落实：sweeper 已删除，
+     三张表的日频 purge 改由各属主 store 在自己 `init()` 里的定时器**自驱**（`risk_counters` → `src/risk/pg-risk-store.ts`、
+     `interaction_feed` → `src/cache/interaction-feed-store.ts`、`llm_token_usage` → `src/metrics/token-usage-store.ts`），
+     阈值 / 周期 / 删的数据逐位不变。驱动方与写点自此同属一层，跨边界形态不再存在（保留此条仅作退出判据的追溯记录）。
    - **配置镜像版本递增**（2026-07-23 随 change `config-mirror-cross-process-invalidation` 新增）：
      §5.1 判归 `automation` 的四类限频配置 store（`src/config/{quota,pacing,session,resume}-config-store.ts`）
      在自己的写事务里调 `MirrorVersionStore.bumpInTx` 递增 `config_mirror_version`（属主 `api`）。

@@ -1065,11 +1065,6 @@
     "note": "§4.6.4：全部 12 个文件归 aidcp-api"
   },
   {
-    "path": "src/panel/retention-sweeper.ts",
-    "layer": "api",
-    "note": "§4.6.4：全部 12 个文件归 aidcp-api"
-  },
-  {
     "path": "src/panel/revocation.ts",
     "layer": "api",
     "note": "§4.6.4：全部 12 个文件归 aidcp-api"

@@ -149,6 +149,7 @@ export class PgRiskStore implements RiskStore, InteractionStore {
   private readonly pool: pg.Pool;
   private readonly executionTarget?: DeploymentTarget;
   private readonly ownershipMode: OwnershipMode;
+  private retentionTimer?: ReturnType<typeof setInterval>;
 
   constructor(options: PgRiskStoreOptions = {}) {
     const config = pgRiskConfigFromEnv();
@@ -174,6 +175,37 @@ export class PgRiskStore implements RiskStore, InteractionStore {
 
   async init(): Promise<void> {
     await this.pool.query(RISK_SCHEMA_SQL);
+    // 本地保留清理（change retention-local-purge）：risk_counters 配额计数流水由本属主**自驱**日频 purge
+    // ——不再由面板层 retention-sweeper 跨域伸手进来调（本 change 只搬「谁来触发」，purge 语义/阈值不动）。
+    // 只调既有的 purgeCountersOlderThan（DELETE 走 occurred_at 索引、只删 risk_counters 过期行、不碰
+    // risk_interactions 去重台账、不碰风控单写状态/归属逻辑）。默认保留 7 天（风控只回读 1 天），
+    // env AIDCP_RETENTION_RISK_DAYS 覆盖。阈值/周期与被取代的 sweeper 逐位一致，删的数据不变。
+    if (!this.retentionTimer) {
+      this.retentionTimer = this.startRetentionTimer();
+    }
+  }
+
+  /** 本地保留清理定时器（change retention-local-purge）。unref、runOnStart、每轮 try/catch、绝不逃逸。 */
+  private startRetentionTimer(): ReturnType<typeof setInterval> {
+    const d = Number(process.env.AIDCP_RETENTION_RISK_DAYS);
+    const days = Number.isFinite(d) && d > 0 ? d : 7;
+    const ei = Number(process.env.AIDCP_RETENTION_INTERVAL_MS);
+    const intervalMs = Number.isFinite(ei) && ei > 0 ? ei : 24 * 60 * 60 * 1000;
+    const runOnce = async (): Promise<void> => {
+      try {
+        const deleted = await this.purgeCountersOlderThan(days);
+        if (deleted > 0) console.log(`[retention] risk_counters 保留清理完成：-${deleted}`);
+      } catch (err) {
+        console.warn(`[retention] risk_counters 清理失败（跳过本轮，不拖累其它表）：${(err as Error).message}`);
+      }
+    };
+    void runOnce();
+    const timer = setInterval(() => {
+      void runOnce();
+    }, intervalMs);
+    timer.unref?.();
+    console.log(`[retention] risk_counters 保留清理已启动（周期 ${Math.round(intervalMs / 3_600_000)}h；保留 ${days}d）`);
+    return timer;
   }
 
   async loadCounters(accountId: string, since: number): Promise<CounterEvent[]> {
@@ -372,6 +404,10 @@ export class PgRiskStore implements RiskStore, InteractionStore {
   }
 
   async close(): Promise<void> {
+    if (this.retentionTimer) {
+      clearInterval(this.retentionTimer);
+      this.retentionTimer = undefined;
+    }
     await this.pool.end();
   }
 }

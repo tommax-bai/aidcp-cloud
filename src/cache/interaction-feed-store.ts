@@ -64,6 +64,7 @@ function nullIfBlank(s: string | undefined | null): string | null {
 
 export class InteractionFeedStore {
   private readonly pool: pg.Pool;
+  private retentionTimer?: ReturnType<typeof setInterval>;
 
   constructor(options: InteractionFeedStoreOptions = {}) {
     this.pool =
@@ -86,6 +87,36 @@ export class InteractionFeedStore {
       sinceVersion: '0019_interaction_feed',
       ddl: [INTERACTION_FEED_SCHEMA_SQL],
     });
+    // 本地保留清理（change retention-local-purge）：interaction_feed 展示账本由本属主**自驱**日频 purge
+    // ——不再由面板层 retention-sweeper 跨域伸手进来调（原先的跨界驱动方已撤）。内联而非抽跨层共享
+    // helper，避免重新引入跨域依赖。默认保留 30 天，env AIDCP_RETENTION_FEED_DAYS 覆盖；周期 24h、
+    // env AIDCP_RETENTION_INTERVAL_MS 覆盖。阈值/周期不变，删的数据（过期 feed 行 + 随之孤儿的 meta 行）不变。
+    if (!this.retentionTimer) {
+      this.retentionTimer = this.startRetentionTimer();
+    }
+  }
+
+  /** 本地保留清理定时器（change retention-local-purge）。unref、runOnStart、每轮 try/catch、绝不逃逸。 */
+  private startRetentionTimer(): ReturnType<typeof setInterval> {
+    const d = Number(process.env.AIDCP_RETENTION_FEED_DAYS);
+    const days = Number.isFinite(d) && d > 0 ? d : 30;
+    const ei = Number(process.env.AIDCP_RETENTION_INTERVAL_MS);
+    const intervalMs = Number.isFinite(ei) && ei > 0 ? ei : 24 * 60 * 60 * 1000;
+    const runOnce = async (): Promise<void> => {
+      try {
+        const deleted = await this.purgeOlderThan(days);
+        if (deleted > 0) console.log(`[retention] interaction_feed 保留清理完成：-${deleted}`);
+      } catch (err) {
+        console.warn(`[retention] interaction_feed 清理失败（跳过本轮，不拖累其它表）：${(err as Error).message}`);
+      }
+    };
+    void runOnce();
+    const timer = setInterval(() => {
+      void runOnce();
+    }, intervalMs);
+    timer.unref?.();
+    console.log(`[retention] interaction_feed 保留清理已启动（周期 ${Math.round(intervalMs / 3_600_000)}h；保留 ${days}d）`);
+    return timer;
   }
 
   /**
@@ -144,6 +175,10 @@ export class InteractionFeedStore {
   }
 
   async close(): Promise<void> {
+    if (this.retentionTimer) {
+      clearInterval(this.retentionTimer);
+      this.retentionTimer = undefined;
+    }
     await this.pool.end();
   }
 }

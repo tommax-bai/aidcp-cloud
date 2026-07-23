@@ -30,7 +30,6 @@ import { PLATFORM_CREDENTIALS, resolvePlatformCredentialEnvValue } from './confi
 import { randomUUID } from 'node:crypto';
 import { TokenUsageStore } from './metrics/token-usage-store.js';
 import { createBillingPriceRefresh } from './metrics/billing-price-refresh.js';
-import { startRetentionSweeper } from './panel/retention-sweeper.js';
 import { shanghaiDayStartMs } from './time/shanghai-day.js';
 import { SimplePlanner } from './planner/index.js';
 import { PgAnchorCache, BotChatStore, GroupRouteStore, ConceptStore, LikedNoteStore, ValuableCommentStore, NotificationContactStore, InteractionFeedStore, CuratedContentStore, CuratedContentUnavailableError, topicKeysFromTitle } from './cache/index.js';
@@ -1951,13 +1950,10 @@ async function main(): Promise<void> {
     console.warn(`[aidcp-cloud] 入站 interaction 域未启用: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  // 数据保留清理（change console-cloud-panel-hardening #21/#22/#23）：面板只读查询打在追加型表上，
-  // 零保留策略会使全表扫描成本随运行时长单调恶化 → 日频清理三表过期行（各表独立 try/catch，
-  // 一个失败不拖累其它、绝不逃逸崩进程；只删各自表、不碰风控单写/发布链/edge）。
-  startRetentionSweeper({
-    targets: { riskStore, interactionFeedStore, tokenUsageStore },
-    logger: console,
-  });
+  // 数据保留清理（change retention-local-purge）：原先面板层 retention-sweeper 在此跨域调三个别的
+  // 属主 store 的 purge——驱动方跨界。已收口为各属主 store 在自己 init() 里自驱本地日频 purge
+  // （risk_counters → PgRiskStore、interaction_feed → InteractionFeedStore、llm_token_usage →
+  // TokenUsageStore），阈值/周期/删的数据逐位不变，故此处装配整块撤除。
 
   // 节奏饱和运维告警器（change decouple-quota-hit-from-risk）：撞速率突发窗不再升风控态，
   // 改道成低优先级运维告警。alertStore 就绪后（见下方）赋值；闭包在事件触发时读取，故此处先声明。
