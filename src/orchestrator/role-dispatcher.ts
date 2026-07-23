@@ -79,7 +79,7 @@ import { NotificationReturnHome } from '../agents/notification-return-home.js';
 import { ExcursionResumer } from '../agents/excursion-resumer.js';
 import type { EdgeTaskLease, EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
 import { isPreemptionReason } from '../comm/preemption.js';
-import type { BaseRole } from '../agents/base-role.js';
+import type { BaseRole, RoleOptions } from '../agents/base-role.js';
 import type { Soul } from '../soul/types.js';
 import { computeDwellMs, computeThinkMs, computeFeedFloorMs, effectiveTempo, type PacingFloorProvider } from '../risk/pacing.js';
 import { SearchFrequencyLimiter } from '../risk/search-frequency-limiter.js';
@@ -157,6 +157,48 @@ export type CuratedStoreHandle = object;
 
 /** 文字卡转写器句柄（opaque）：同上，dispatcher 仅按注入与否透传标记，构造由 content 工厂消费。 */
 export type TextCardTranscriberHandle = object;
+
+/**
+ * content 角色工厂的**构造契约**（automation 侧就地组装、组合根就地 `new`）。
+ *
+ * 每个契约 = `RoleOptions`（公共注入）+ 该角色特有依赖，且被组合根 `server.ts` 的工厂体 `new X(o)` 消费：
+ * 因 `o` 的静态类型是本契约（**不是** `ConstructorParameters<typeof X>` 那种同义反复），一旦某 content 角色
+ * 新增必填构造字段而此契约漏补，`new X(o)` 即在 `server.ts` 编译失败——复原被「注入工厂」解耦擦除掉的
+ * 「dispatcher 组装的 options 是否满足角色构造签名」这道类型检查（2026-07-23 审计坐实的回归）。
+ *
+ * 唯二例外是 `curatedStore` / `textCardTranscriber`：它们是 content 侧 Sink，automation 结构上看不见其形状
+ * （跨边界，import 即违反模块门禁），故在契约里保持 opaque 句柄，其与真实 Sink 的对齐由组合根在**唯一**
+ * 掌握该 content 类型处就地 narrow；除这两个句柄外的所有字段都在此被静态核对。
+ */
+export interface ConceptExtractorFactoryOptions extends RoleOptions {
+  conceptStore: ConceptStorePort;
+}
+export interface ValuableCommentArchivistFactoryOptions extends RoleOptions {
+  getNoteData: (noteId: string) => NoteData | null;
+  archive: (input: ValuableCommentInput) => Promise<void>;
+}
+export interface CuratedNoteEvaluatorFactoryOptions extends RoleOptions {
+  curatedStore: CuratedStoreHandle;
+  getAccountId: () => string;
+  llmEvalEnabled?: boolean;
+  textCardTranscriber?: TextCardTranscriberHandle;
+}
+export interface CuratedCommentEvaluatorFactoryOptions extends RoleOptions {
+  curatedStore: CuratedStoreHandle;
+  getNoteData: (noteId: string) => NoteData | null;
+  getAccountId: () => string;
+  llmEvalEnabled?: boolean;
+}
+
+/** content 角色 `RoleName` → 其工厂构造契约（automation 侧就地组装的 options 形状）。 */
+export interface ContentRoleFactoryOptionMap {
+  concept_extractor: ConceptExtractorFactoryOptions;
+  valuable_comment_archivist: ValuableCommentArchivistFactoryOptions;
+  curated_note_evaluator: CuratedNoteEvaluatorFactoryOptions;
+  curated_comment_evaluator: CuratedCommentEvaluatorFactoryOptions;
+}
+/** 经注册表构造的 content 角色名（`ContentRoleFactoryOptionMap` 的键，均属 `RoleName`）。 */
+export type ContentRoleName = keyof ContentRoleFactoryOptionMap;
 
 const EMPTY_CONCEPT_POOL: ConceptPool = { known: [], candidates: [], source: new Map() };
 const VIEW_QUOTA_RECHECK_FALLBACK_MS = 60_000;
@@ -1390,7 +1432,10 @@ export class RoleDispatcher {
    * 只在对应依赖（conceptStore / curatedStore / archiveValuableComment）已注入、该角色确需注册时调用；
    * 工厂缺失＝组合根接线漏项 → 诚实抛错，绝不静默少注册一个角色（漏一个角色整条浏览闭环就断）。
    */
-  private makeContentRole(name: RoleName, options: unknown): BaseRole {
+  private makeContentRole<K extends ContentRoleName>(
+    name: K,
+    options: ContentRoleFactoryOptionMap[K],
+  ): BaseRole {
     const factory = this.roleFactories[name];
     if (!factory) {
       throw new Error(

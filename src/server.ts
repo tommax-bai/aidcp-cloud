@@ -76,25 +76,49 @@ import {
 import { EventBus } from './event-bus/index.js';
 import type { NoteDetailData } from './event-bus/index.js';
 import { RoleDispatcher } from './orchestrator/index.js';
-import type { RoleFactoryRegistry } from './orchestrator/index.js';
+import type {
+  RoleFactoryRegistry,
+  ConceptExtractorFactoryOptions,
+  ValuableCommentArchivistFactoryOptions,
+  CuratedNoteEvaluatorFactoryOptions,
+  CuratedCommentEvaluatorFactoryOptions,
+} from './orchestrator/index.js';
 // content 层角色类：组合根（composition）负责实例化并经 roleFactories 注入 dispatcher，
 // 使 automation 侧 role-dispatcher 不再静态 import 这些 content 类（拆进程 Track1 前置）。
 import { ConceptExtractorRole } from './agents/concept-extractor-role.js';
-import { CuratedNoteEvaluator } from './agents/curated-note-evaluator.js';
-import { CuratedCommentEvaluator } from './agents/curated-comment-evaluator.js';
+import { CuratedNoteEvaluator, type CuratedNoteSink } from './agents/curated-note-evaluator.js';
+import { CuratedCommentEvaluator, type CuratedCommentSink } from './agents/curated-comment-evaluator.js';
 import { ValuableCommentArchivist } from './agents/valuable-comment-archivist.js';
+import type { TextCardTranscriber } from './publish-agent/text-card-transcriber.js';
 import { FACEBOOK_REEL_FOLLOW_EDGE_CAPABILITY } from './platform/facebook-presented-video.js';
 
 /**
  * content 层角色工厂注册表（组合根装配）：每个工厂就地 `new` 对应 content 角色，
- * 参数用 `ConstructorParameters<...>[0]` 精确对齐各角色构造签名（构造契约在此 composition 处被类型检查）；
  * dispatcher 就地组装 options 并按 RoleName 取工厂调用。静态、无闭包捕获，故置模块级。
+ *
+ * **构造契约的类型检查落在此处（composition）**：每个工厂的入参 `o` 标注为 automation 侧就地组装的
+ * 构造契约（`orchestrator` 导出的 `*FactoryOptions`），工厂体 `new X(o)` 遂强制「契约 → 角色真实构造签名」
+ * 可赋值——某角色新增必填构造字段而契约漏补时在此编译失败。**MUST NOT** 把 `o` 标注回
+ * `ConstructorParameters<typeof X>[0]`：那是同义反复，`new X(o)` 恒过、检查退化为零（2026-07-23 审计坐实的回归）。
+ *
+ * `curatedStore` / `textCardTranscriber` 是 content 侧 Sink，automation 结构上看不见其形状（跨边界不可 import），
+ * 故契约里留 opaque 句柄、仅在这里（唯一掌握该 content 类型处）就地 narrow 到真实 Sink；其余字段全程静态核对。
  */
 const CONTENT_ROLE_FACTORIES: RoleFactoryRegistry = {
-  concept_extractor: (o: ConstructorParameters<typeof ConceptExtractorRole>[0]) => new ConceptExtractorRole(o),
-  curated_note_evaluator: (o: ConstructorParameters<typeof CuratedNoteEvaluator>[0]) => new CuratedNoteEvaluator(o),
-  curated_comment_evaluator: (o: ConstructorParameters<typeof CuratedCommentEvaluator>[0]) => new CuratedCommentEvaluator(o),
-  valuable_comment_archivist: (o: ConstructorParameters<typeof ValuableCommentArchivist>[0]) => new ValuableCommentArchivist(o),
+  concept_extractor: (o: ConceptExtractorFactoryOptions) => new ConceptExtractorRole(o),
+  valuable_comment_archivist: (o: ValuableCommentArchivistFactoryOptions) => new ValuableCommentArchivist(o),
+  curated_note_evaluator: (o: CuratedNoteEvaluatorFactoryOptions) => {
+    const { curatedStore, textCardTranscriber, ...rest } = o;
+    return new CuratedNoteEvaluator({
+      ...rest,
+      curatedStore: curatedStore as CuratedNoteSink,
+      ...(textCardTranscriber ? { textCardTranscriber: textCardTranscriber as TextCardTranscriber } : {}),
+    });
+  },
+  curated_comment_evaluator: (o: CuratedCommentEvaluatorFactoryOptions) => {
+    const { curatedStore, ...rest } = o;
+    return new CuratedCommentEvaluator({ ...rest, curatedStore: curatedStore as CuratedCommentSink });
+  },
 };
 import { ConnectionRuntimeRegistry, type DispatcherBuildContext } from './orchestrator/connection-runtime.js';
 import type { CommentApprovalNoticeInput, CommentApprovalPort } from './agents/comment-approval-gate.js';
