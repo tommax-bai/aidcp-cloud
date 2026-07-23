@@ -369,10 +369,8 @@ test('publish.approval_request → 调 sendApprovalCard', async () => {
     cache: memStore(),
     clock: fixedClock,
     eventBus: new EventBus(),
-    messenger: {
-      sendApprovalCard: async (chatId, card) => {
-        sent.push({ chatId, card });
-      },
+    approvalCardSink: async (chatId, data) => {
+      sent.push({ chatId, card: data });
     },
     approvalChatId: 'oc_chat',
   });

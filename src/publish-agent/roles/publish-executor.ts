@@ -12,9 +12,12 @@ import type {
   ImageReferenceAudit,
 } from '../types.js';
 import type { PipelineContext } from '../pipeline-context.js';
-import { buildCommandResultCard, buildPublishApprovalCard } from '../../feishu/cards.js';
-import type { PublishApprovalPayload } from '../../feishu/types.js';
-import type { ApprovalWriteResult } from '../../feishu/ws-receiver.js';
+import type {
+  ApprovalWriteResult,
+  CommandResult,
+  PublishApprovalCardData,
+  PublishApprovalPayload,
+} from '../../comm/feishu-card-contract.js';
 import { clampTitle, firstSentence } from '../title-clamp.js';
 import { publishProfileForPlatform } from '../platform-profile.js';
 import { checkWritingLanguage } from '../../soul/writing-language.js';
@@ -58,10 +61,14 @@ export interface PublishLogStore {
   markImagesAttached?(id: number, count: number): Promise<void>;
 }
 
-/** 飞书消息接口 */
+/**
+ * 审批 / 通知下发口（change feishu-contract-seam / §4.6.2）：automation 只交出结构化数据，
+ * 由组合根注入的 api 侧实现负责 `buildPublishApprovalCard` / `buildCommandResultCard` + messenger 发送。
+ */
 export interface ApprovalMessenger {
-  sendApprovalCard(chatId: string, card: unknown): Promise<void>;
-  sendCard?(chatId: string, card: unknown): Promise<void>;
+  sendApprovalCard(chatId: string, data: PublishApprovalCardData): Promise<void>;
+  /** 命令结果通知（免审提示等）。未注入则该 best-effort 通知诚实跳过、不影响授权主链路。 */
+  sendCommandResult?(chatId: string, data: CommandResult): Promise<void>;
   uploadImageFromUrl?(url: string): Promise<string>;
 }
 
@@ -493,7 +500,10 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     const message = authorized
       ? `后台排期已开启免审，草稿已自动授权并交由发布派发器继续执行。\n**草稿**：${recordId}\n**标题**：${title}`
       : `后台排期尝试免审授权，但授权信号未生效。\n**草稿**：${recordId}\n**标题**：${title}`;
-    const card = buildCommandResultCard({
+    if (!this.messenger.sendCommandResult) {
+      return { sent: false, targetChatId: target.chatId, targetSource: target.source, error: 'command_result_sink_not_configured' };
+    }
+    const data: CommandResult = {
       command: '排期发帖（免审）',
       ok: authorized,
       level: authorized ? 'success' : 'warning',
@@ -502,10 +512,9 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       accountId,
       accountName: this.getAccountName?.(accountId),
       platformName: this.platformNameFrom(context),
-    });
+    };
     try {
-      const send = this.messenger.sendCard ?? this.messenger.sendApprovalCard;
-      await send.call(this.messenger, target.chatId, card);
+      await this.messenger.sendCommandResult(target.chatId, data);
       this.logger.log(`[PublishExecutor] 免审通知已发 source=${target.source} chat=${target.chatId} requestId=${requestId}`);
       return { sent: true, targetChatId: target.chatId, targetSource: target.source };
     } catch (err) {
@@ -599,8 +608,9 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       return { sent: false, targetSource: target.source, error: 'approval_chat_not_configured' };
     }
     try {
-      // 必须发"已构建的交互式卡片"（含通过/取消按钮 + requestId 回调）；直接发原始数据对象飞书会 400。
-      const card = buildPublishApprovalCard({
+      // change feishu-contract-seam：只交出结构化审批卡数据，由 api 侧下发口 buildPublishApprovalCard
+      // 渲染成含通过/取消按钮 + requestId 回调的交互卡（api 侧仍保证不把裸数据发给飞书）。
+      const data: PublishApprovalCardData = {
         requestId,
         title,
         content: assembled.finalContent,
@@ -610,8 +620,8 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
         platformName: this.platformNameFrom(context),
         mediaCount: this.mediaCountFrom(context),
         mediaImageKeys: await this.mediaImageKeysFrom(assembled, context),
-      });
-      await this.messenger.sendApprovalCard(target.chatId, card);
+      };
+      await this.messenger.sendApprovalCard(target.chatId, data);
       this.logger.log(`[PublishExecutor] 审批卡已发 source=${target.source} chat=${target.chatId} requestId=${requestId}`);
       return { sent: true, targetChatId: target.chatId, targetSource: target.source };
     } catch (err) {

@@ -265,6 +265,11 @@
     "note": "§7.2 判据三首批迁移名单"
   },
   {
+    "path": "src/alerts/alert-notification.ts",
+    "layer": "automation",
+    "note": "§4.7：alerts 表 owner（2/2 automation）"
+  },
+  {
     "path": "src/alerts/alert-store.ts",
     "layer": "automation",
     "note": "§4.7：alerts 表 owner（2/2 automation）"
@@ -406,6 +411,11 @@
   },
   {
     "path": "src/comm/facebook-throttle-signals.ts",
+    "layer": "automation",
+    "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
+  },
+  {
+    "path": "src/comm/feishu-card-contract.ts",
     "layer": "automation",
     "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
   },

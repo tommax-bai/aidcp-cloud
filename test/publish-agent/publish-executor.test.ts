@@ -10,6 +10,8 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { PublishExecutorRole } from '../../src/publish-agent/roles/publish-executor.js';
+// change feishu-contract-seam：角色只交出结构化数据；测试在下发口本地重建飞书卡（与旧「角色内构卡」逐字等价），保留原有卡结构断言。
+import { buildPublishApprovalCard, buildCommandResultCard } from '../../src/feishu/cards.js';
 import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
 import { REFERENCE_IMAGE_MAX_COUNT } from '../../src/publish-agent/reference-image-guidance.js';
 import type { PipelineFields, AssembledContent, GateDecision, TitleSelection } from '../../src/publish-agent/types.js';
@@ -61,7 +63,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     const sentCards: any[] = [];
     const role = new PublishExecutorRole({
       store: { insert: async (r: any) => { insertedRecords.push(r); return 42; } },
-      messenger: { sendApprovalCard: async (_c: string, card: any) => { sentCards.push(card); } },
+      messenger: { sendApprovalCard: async (_c: string, data: any) => { sentCards.push(buildPublishApprovalCard(data)); } },
       botChatStore: { getDefaultChat: async () => ({ chatId: 'chat-1' }) },
       clock,
       logger: silentLogger,
@@ -103,7 +105,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
         sendApprovalCard: async () => {
           throw new Error('interactive approval card should not be sent in auto_approve mode');
         },
-        sendCard: async (chatId: string, card: any) => { notifications.push({ chatId, card }); },
+        sendCommandResult: async (chatId: string, data: any) => { notifications.push({ chatId, card: buildCommandResultCard(data) }); },
       },
       botChatStore: { getDefaultChat: async () => ({ chatId: 'chat-1' }) },
       writeApprovalSignal: async (requestId, approved, payload) => {
@@ -159,7 +161,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     const sentCards: any[] = [];
     const role = new PublishExecutorRole({
       store: { insert: async () => 42 },
-      messenger: { sendApprovalCard: async (_c: string, card: any) => { sentCards.push(card); } },
+      messenger: { sendApprovalCard: async (_c: string, data: any) => { sentCards.push(buildPublishApprovalCard(data)); } },
       botChatStore: { getDefaultChat: async () => ({ chatId: 'chat-1' }) },
       getAccountName: (accountId) => (accountId === 'acc-test' ? 'Tmax' : undefined),
       clock,
@@ -199,7 +201,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
           if (url.endsWith('/b.png')) throw new Error('upload failed');
           return 'img_key_a';
         },
-        sendApprovalCard: async (_c: string, card: any) => { sentCards.push(card); },
+        sendApprovalCard: async (_c: string, data: any) => { sentCards.push(buildPublishApprovalCard(data)); },
       },
       botChatStore: { getDefaultChat: async () => ({ chatId: 'chat-1' }) },
       clock,
@@ -244,7 +246,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     const sentCards: any[] = [];
     const role = new PublishExecutorRole({
       store: { insert: async (record: any) => { insertedRecords.push(record); return 77; } },
-      messenger: { sendApprovalCard: async (_chatId: string, card: any) => { sentCards.push(card); } },
+      messenger: { sendApprovalCard: async (_chatId: string, data: any) => { sentCards.push(buildPublishApprovalCard(data)); } },
       botChatStore: { getDefaultChat: async () => ({ chatId: 'chat-1' }) },
       clock,
       logger: silentLogger,
@@ -275,7 +277,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     const sent: Array<{ chatId: string; card: any }> = [];
     const role = new PublishExecutorRole({
       store: { insert: async () => 43 },
-      messenger: { sendApprovalCard: async (chatId: string, card: any) => { sent.push({ chatId, card }); } },
+      messenger: { sendApprovalCard: async (chatId: string, data: any) => { sent.push({ chatId, card: buildPublishApprovalCard(data) }); } },
       botChatStore: {
         getDefaultChat: async () => {
           throw new Error('default chat should not be queried when manual source chat exists');
@@ -311,7 +313,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     const sent: Array<{ chatId: string; card: any }> = [];
     const role = new PublishExecutorRole({
       store: { insert: async () => 44 },
-      messenger: { sendApprovalCard: async (chatId: string, card: any) => { sent.push({ chatId, card }); } },
+      messenger: { sendApprovalCard: async (chatId: string, data: any) => { sent.push({ chatId, card: buildPublishApprovalCard(data) }); } },
       botChatStore: { getDefaultChat: async () => ({ chatId: 'chat-default' }) },
       clock,
       logger: silentLogger,
@@ -374,7 +376,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     const sentCards: any[] = [];
     const role = new PublishExecutorRole({
       store: { insert: async (r: any) => { insertedRecords.push(r); return 99; } },
-      messenger: { sendApprovalCard: async (_c: string, card: any) => { sentCards.push(card); } },
+      messenger: { sendApprovalCard: async (_c: string, data: any) => { sentCards.push(buildPublishApprovalCard(data)); } },
       botChatStore: { getDefaultChat: async () => ({ chatId: 'chat-1' }) },
       clock,
       logger: silentLogger,
@@ -401,7 +403,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     const sentCards: any[] = [];
     const role = new PublishExecutorRole({
       store: { insert: async (r: any) => { insertedRecords.push(r); return 77; } },
-      messenger: { sendApprovalCard: async (_c: string, card: any) => { sentCards.push(card); } },
+      messenger: { sendApprovalCard: async (_c: string, data: any) => { sentCards.push(buildPublishApprovalCard(data)); } },
       botChatStore: { getDefaultChat: async () => ({ chatId: 'c' }) },
       clock,
       logger: silentLogger,
@@ -570,7 +572,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
         recordMetadata: async () => { throw new Error('metadata unavailable'); },
         updateStatus: async (id: number, status: any) => { statusUpdates.push({ id, status }); },
       },
-      messenger: { sendApprovalCard: async (_c: string, card: any) => { sentCards.push(card); } },
+      messenger: { sendApprovalCard: async (_c: string, data: any) => { sentCards.push(buildPublishApprovalCard(data)); } },
       botChatStore: { getDefaultChat: async () => ({ chatId: 'c' }) },
       clock,
       logger: silentLogger,
@@ -643,7 +645,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
         recordMetadata: async () => { throw new Error('metadata unavailable'); },
         updateStatus: async (id, status) => { statusUpdates.push({ id, status }); },
       },
-      messenger: { sendApprovalCard: async (_chatId, card) => { sentCards.push(card); } },
+      messenger: { sendApprovalCard: async (_chatId, data) => { sentCards.push(buildPublishApprovalCard(data)); } },
       botChatStore: { getDefaultChat: async () => ({ chatId: 'c' }) },
       clock,
       logger: silentLogger,
@@ -759,7 +761,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
         insert: async (r: any) => { insertedRecords.push(r); return 21; },
         markImagesAttached: async (id: number, count: number) => { attached.push({ id, count }); },
       },
-      messenger: { sendApprovalCard: async (_c: string, card: any) => { sentCards.push(card); } },
+      messenger: { sendApprovalCard: async (_c: string, data: any) => { sentCards.push(buildPublishApprovalCard(data)); } },
       botChatStore: { getDefaultChat: async () => ({ chatId: 'c' }) },
       clock,
       logger: silentLogger,
@@ -833,7 +835,7 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     const sentCards: any[] = [];
     const role = new PublishExecutorRole({
       store: { insert: async (r: any) => { insertedRecords.push(r); return 3; } },
-      messenger: { sendApprovalCard: async (_c: string, card: any) => { sentCards.push(card); } },
+      messenger: { sendApprovalCard: async (_c: string, data: any) => { sentCards.push(buildPublishApprovalCard(data)); } },
       botChatStore: { getDefaultChat: async () => ({ chatId: 'c' }) },
       clock,
       logger: silentLogger,

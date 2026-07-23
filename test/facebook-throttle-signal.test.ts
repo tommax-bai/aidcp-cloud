@@ -143,11 +143,9 @@ function makeAlertingCoordinator(
     // 现有测试把 messenger 打成 undefined、resolveChatId 返回 ''，maybeAlert 第一行即 return
     // ⇒ 告警分支零覆盖、改动会假绿上线。此处给真实消息通道与目标群。
     resolveChatId: async () => 'oc_test_chat',
-    messenger: {
-      sendCard: async (chatId: string, card: unknown) => {
-        sink.cards.push({ chatId, card });
-        return undefined as never;
-      },
+    sendAlertCard: async (chatId: string, alert: unknown) => {
+      sink.cards.push({ chatId, card: alert });
+      return undefined as never;
     },
     alertStore: {
       raise: async (a: RaisedAlert) => {

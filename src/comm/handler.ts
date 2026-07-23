@@ -63,8 +63,7 @@ import type { CaptchaAssistService } from './captcha-assist.js';
 import type { TaskPlanner } from '../planner/types.js';
 import type { LlmClient } from '../llm/qwen.js';
 import type { EventBus } from '../event-bus/index.js';
-import { buildPublishApprovalCard } from '../feishu/cards.js';
-import type { FeishuMessenger } from '../feishu/messenger.js';
+import type { PublishApprovalCardData } from './feishu-card-contract.js';
 import type { BotChatStore } from '../cache/bot-chat-store.js';
 import { RiskController, SessionBudget, buildPacingSnapshot } from '../risk/index.js';
 import type { RiskAction, RiskStatus, RiskQuotaLevel, PacingFloorProvider } from '../risk/index.js';
@@ -155,7 +154,11 @@ export interface HandlerDeps {
   planner: TaskPlanner;
   llm: LlmClient;
   cache: AnchorStore;
-  messenger?: Pick<FeishuMessenger, 'sendApprovalCard'>;
+  /**
+   * 发布审批卡下发口（change feishu-contract-seam / §4.6.2）：automation 只把结构化审批卡数据交出去，
+   * 由组合根注入的 api 侧实现负责 `buildPublishApprovalCard` + messenger 发送。未注入则视为未配置审批群。
+   */
+  approvalCardSink?: (chatId: string, data: PublishApprovalCardData) => Promise<void>;
   botChatStore?: Pick<BotChatStore, 'getDefaultChat'>;
   /**
    * 卡片目标统一解析（change unify-card-routing-origin-then-team）：来源会话 → 账号团队群 → 默认群。
@@ -1366,7 +1369,7 @@ export class DefaultMessageHandler implements MessageHandler {
     ) {
       throw new Error('invalid_publish_approval_request');
     }
-    if (!this.deps.messenger) {
+    if (!this.deps.approvalCardSink) {
       throw new Error('publish_approval_chat_not_configured');
     }
     this.logger.log('[comm] 收到 publish.approval_request:', {
@@ -1418,15 +1421,12 @@ export class DefaultMessageHandler implements MessageHandler {
         // 只声称走了哪条解析路径；落点如实由 chatId 呈现（account_scope 内部可能已补集回落默认群）。
         source: this.deps.resolveCardChatId ? 'account_scope' : 'default_chat_chain',
       });
-      await this.deps.messenger.sendApprovalCard(
-        chatId,
-        buildPublishApprovalCard({
-          requestId: payload.requestId,
-          title: payload.title,
-          content: payload.content,
-          tags: payload.tags,
-        }),
-      );
+      await this.deps.approvalCardSink(chatId, {
+        requestId: payload.requestId,
+        title: payload.title,
+        content: payload.content,
+        tags: payload.tags,
+      });
       this.logger.log('[comm] publish.approval_request 发卡成功:', {
         requestId: payload.requestId,
         edgeId: payload.edgeId ?? session.edgeId,

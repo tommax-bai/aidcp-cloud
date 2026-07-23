@@ -80,7 +80,7 @@ import { PersonaGenerator } from './agents/persona-generator.js';
 import { PersonaAutoFillService } from './agents/persona-auto-fill.js';
 import { CommentTargetPicker } from './agents/comment-target-picker.js';
 import { buildCommentApprovalCard } from './feishu/comment-approval-card.js';
-import { buildCommandResultCard } from './feishu/cards.js';
+import { buildAlertCard, buildCommandResultCard, buildPublishApprovalCard } from './feishu/cards.js';
 import {
   buildMandatoryCommentOutcomeCard,
   buildMandatoryCommentPreAuthorizationCard,
@@ -2503,7 +2503,8 @@ async function main(): Promise<void> {
   // 验证码事件协调器：消费 risk.captcha_detected/cleared（迁状态 + 按 edge 暂停 + 去重发飞书）。
   const captcha = new CaptchaCoordinator({
     resolveController,
-    messenger,
+    // change feishu-contract-seam（§4.6.2）：automation 侧只交出结构化 AlertData，组合根在此侧构飞书卡 + 发送。
+    sendAlertCard: (chatId, alert) => messenger.sendCard(chatId, buildAlertCard(alert)),
     // V1 task 9.5：验证码告警落库（飞书卡发送点写入、清除点 resolveByEdge）。
     alertStore,
     getAccountName: accountDisplayName,
@@ -2656,7 +2657,8 @@ async function main(): Promise<void> {
     planner,
     llm,
     cache,
-    messenger,
+    // change feishu-contract-seam（§4.6.2）：automation 侧只交出结构化审批卡数据，组合根在此侧构飞书卡 + 发送。
+    approvalCardSink: (chatId, data) => messenger.sendApprovalCard(chatId, buildPublishApprovalCard(data)),
     botChatStore,
     // change unify-card-routing-origin-then-team：边缘发起的发布审批卡也走统一解析（账号团队群 → 默认群）。
     resolveCardChatId,
@@ -4137,7 +4139,12 @@ async function main(): Promise<void> {
         await publishLogStore.markImagesAttached(id, count);
       },
     },
-    messenger,
+    // change feishu-contract-seam（§4.6.2）：automation 侧发布出口只交出结构化数据，组合根在此侧构飞书卡 + 发送。
+    messenger: {
+      sendApprovalCard: (chatId, data) => messenger.sendApprovalCard(chatId, buildPublishApprovalCard(data)),
+      sendCommandResult: (chatId, data) => messenger.sendCard(chatId, buildCommandResultCard(data)),
+      uploadImageFromUrl: (url) => messenger.uploadImageFromUrl(url),
+    },
     botChatStore,
     // change unify-card-routing-origin-then-team：审批卡目标走统一解析（来源会话 → 账号团队群 → 默认群）。
     // 无来源会话的自动 / 排期发帖由此进入账号团队群，不再一律落默认群。

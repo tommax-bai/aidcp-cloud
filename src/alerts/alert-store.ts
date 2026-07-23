@@ -6,14 +6,14 @@
  * - 解决点：验证码清除点（onCleared）按 edge set resolved_at。
  * - 读出：面板 GET /api/alerts + dashboard summary（panel-store 直接 SELECT，design D2）。
  *
- * 复用 P0–P3 分级（feishu/types.ts AlertSeverity，与 risk-control §7 / product-exception §1 同套）。
+ * 复用 P0–P3 分级（AlertSeverity，automation 侧告警合同 alert-notification.ts，与 risk-control §7 / product-exception §1 同套）。
  * 与 risk_state.signalCount 区分：这是事件日志（多行、可解决），signalCount 是滑窗计数。
  * 建表幂等（CREATE TABLE IF NOT EXISTS），与 migrations/0006_alerts.sql 同源。
  */
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
-import type { AlertSeverity } from '../feishu/types.js';
+import type { AlertSeverity } from './alert-notification.js';
 import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;

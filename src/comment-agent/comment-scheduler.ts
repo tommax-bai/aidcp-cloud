@@ -22,7 +22,7 @@ import { CommentTargetPicker, type CommentCandidateCard } from '../agents/commen
 import { CommentComposer } from '../agents/comment-composer.js';
 import { PostProcessor } from '../publish-agent/post-processor.js';
 import type { CommentApprovalPort } from '../agents/comment-approval-gate.js';
-import type { CommentCommandReceipt } from '../feishu/commands.js';
+import type { CommentCommandReceipt } from '../comm/feishu-card-contract.js';
 import {
   type CommentPostResult,
   type CommentTaskResult,

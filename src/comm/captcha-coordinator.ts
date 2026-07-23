@@ -11,9 +11,7 @@
  * 全程不阻塞 edge、不写信号文件、不需要审批按钮——验证码是单向通知，边缘靠 DOM 清除自动恢复。
  */
 
-import { buildAlertCard } from '../feishu/cards.js';
-import type { FeishuMessenger } from '../feishu/messenger.js';
-import type { AlertData, AlertSeverity } from '../feishu/types.js';
+import type { AlertData, AlertSeverity } from '../alerts/alert-notification.js';
 import type { RiskController } from '../risk/index.js';
 import type { AlertStore } from '../alerts/index.js';
 import type {
@@ -38,7 +36,11 @@ export interface CaptchaAssistCoordinatorPort {
 export interface CaptchaCoordinatorDeps {
   /** retire-default-account：按真实账号解析该账号的 RiskController（替代单租户全局 controller）。 */
   resolveController: (accountId: string) => Promise<RiskController>;
-  messenger?: Pick<FeishuMessenger, 'sendCard'>;
+  /**
+   * 告警下发口（change feishu-contract-seam / §4.6.2）：automation 只把结构化 `AlertData` 交出去，
+   * 由组合根注入的 api 侧实现负责 `buildAlertCard` + messenger 发送。未注入则不发飞书告警（向后兼容）。
+   */
+  sendAlertCard?: (chatId: string, alert: AlertData) => Promise<void>;
   /** 解析目标飞书群（注入，便于与发布审批共用解析口径）。 */
   /**
    * 目标群解析（change unify-card-routing-origin-then-team）：传入告警归属账号 → 该账号团队群 → 默认群。
@@ -179,7 +181,7 @@ export class CaptchaCoordinator {
     assistActionUrl?: string,
     throttled = false,
   ): Promise<void> {
-    if (!this.deps.messenger) return;
+    if (!this.deps.sendAlertCard) return;
     // change fb-throttle-popup-zh-frequency-copy：type 决定告警面貌，故先于冷却算出。
     // 确凿的平台限流独立成型：P0 + 专属标题 + 独立 type（面板可过滤）；未命中语义判据的未知遮罩仍走
     // 既有泛化 P1/'block'，行为不变。type 取值不需要 DB 迁移（alerts.type 为裸 TEXT 无 CHECK；只有
@@ -247,7 +249,7 @@ export class CaptchaCoordinator {
     };
 
     try {
-      await this.deps.messenger.sendCard(chatId, buildAlertCard(alert));
+      await this.deps.sendAlertCard(chatId, alert);
       this.logger.log('[captcha] 飞书告警已发', { edgeId: edgeId ?? UNKNOWN_EDGE, chatId, type, severity: alert.severity });
     } catch (err) {
       // 红线：发送失败记录、不静默吞。

@@ -12,6 +12,9 @@ import type { EdgePusher, EdgeSession } from '../../src/comm/ws-server.js';
 import type { Envelope } from '../../src/comm/protocol.js';
 import { RiskController } from '../../src/risk/index.js';
 import type { FeishuCard } from '../../src/feishu/types.js';
+// change feishu-contract-seam：协调器只交出结构化 AlertData；测试在下发口本地重建飞书卡以保留原有卡结构断言。
+import { buildAlertCard } from '../../src/feishu/cards.js';
+import type { AlertData } from '../../src/alerts/alert-notification.js';
 
 class FakePusher implements EdgePusher {
   readonly paused: string[] = [];
@@ -36,9 +39,9 @@ class FakePusher implements EdgePusher {
 class FakeMessenger {
   readonly sent: { chatId: string; card: FeishuCard }[] = [];
   shouldThrow = false;
-  async sendCard(chatId: string, card: FeishuCard): Promise<void> {
+  async sendAlertCard(chatId: string, alert: AlertData): Promise<void> {
     if (this.shouldThrow) throw new Error('feishu down');
-    this.sent.push({ chatId, card });
+    this.sent.push({ chatId, card: buildAlertCard(alert) });
   }
 }
 
@@ -64,7 +67,7 @@ describe('CaptchaCoordinator', () => {
   function makeCoordinator(cooldownMs?: number, getAccountName?: (accountId: string) => string | null | undefined) {
     return new CaptchaCoordinator({
       resolveController: async () => risk,
-      messenger,
+      sendAlertCard: (chatId, alert) => messenger.sendAlertCard(chatId, alert),
       resolveChatId: async () => 'chat-1',
       logger: silentLogger,
       clock: () => now,
@@ -184,7 +187,7 @@ describe('CaptchaCoordinator', () => {
   it('assist enabled：飞书卡带云端协助按钮，detail 保留远程连接兜底语义', async () => {
     const c = new CaptchaCoordinator({
       resolveController: async () => risk,
-      messenger,
+      sendAlertCard: (chatId, alert) => messenger.sendAlertCard(chatId, alert),
       resolveChatId: async () => 'chat-1',
       logger: silentLogger,
       clock: () => now,
@@ -223,7 +226,7 @@ describe('CaptchaCoordinator', () => {
     };
     const c = new CaptchaCoordinator({
       resolveController: async () => risk,
-      messenger,
+      sendAlertCard: (chatId, alert) => messenger.sendAlertCard(chatId, alert),
       resolveChatId: async () => 'chat-1',
       logger: silentLogger,
       clock: () => now,
@@ -251,7 +254,7 @@ describe('CaptchaCoordinator', () => {
     };
     const c = new CaptchaCoordinator({
       resolveController: async () => risk,
-      messenger,
+      sendAlertCard: (chatId, alert) => messenger.sendAlertCard(chatId, alert),
       resolveChatId: async () => 'chat-1',
       logger: silentLogger,
       clock: () => now,
@@ -284,7 +287,7 @@ describe('CaptchaCoordinator', () => {
     };
     const c = new CaptchaCoordinator({
       resolveController: async () => risk,
-      messenger,
+      sendAlertCard: (chatId, alert) => messenger.sendAlertCard(chatId, alert),
       resolveChatId: async () => 'chat-1',
       logger: silentLogger,
       clock: () => now,
