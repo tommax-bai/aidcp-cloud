@@ -35,5 +35,7 @@ export { PermissionDeciderRole } from './permission-decider.js';
 export { PublishModeDeciderRole } from './publish-mode-decider.js';
 export { ComplianceDeciderRole } from './compliance-decider.js';
 export { MetadataAggregatorRole } from './metadata-aggregator.js';
-export { ApprovalGatekeeperRole } from './approval-gatekeeper.js';
-export { PublishExecutorRole } from './publish-executor.js';
+// 生成段（content）角色桶只出 content 角色。跨段的两个角色由组合根直接 import 各自文件
+// （change decouple-publish-agent-buckets）：
+//   - ApprovalGatekeeperRole（台账/审批段 api）→ './approval-gatekeeper.js'
+//   - PublishExecutorRole（下发段 automation）→ './publish-executor.js'

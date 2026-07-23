@@ -1,7 +1,7 @@
 {
-  "seedTotal": 278,
-  "seedUnplanned": 278,
-  "frozenTotal": 278,
+  "seedTotal": 273,
+  "seedUnplanned": 273,
+  "frozenTotal": 273,
   "recordedAt": "2026-07-23",
   "raises": [],
   "entries": [
@@ -1442,24 +1442,6 @@
       "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
     },
     {
-      "from": "src/publish-agent/index.ts",
-      "to": "src/publish-agent/publish-dispatcher.ts",
-      "reason": "seed（content -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/publish-agent/index.ts",
-      "to": "src/publish-agent/publish-log-store.ts",
-      "reason": "seed（content -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/publish-agent/index.ts",
-      "to": "src/publish-agent/publish-scheduler.ts",
-      "reason": "seed（content -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
       "from": "src/publish-agent/platform-profile.ts",
       "to": "src/publish-agent/types.ts",
       "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
@@ -1619,18 +1601,6 @@
       "eliminatedBy": null
     },
     {
-      "from": "src/publish-agent/roles/index.ts",
-      "to": "src/publish-agent/roles/approval-gatekeeper.ts",
-      "reason": "seed（content -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/publish-agent/roles/index.ts",
-      "to": "src/publish-agent/roles/publish-executor.ts",
-      "reason": "seed（content -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
       "from": "src/publish-agent/roles/publish-executor.ts",
       "to": "src/publish-agent/pipeline-context.ts",
       "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
@@ -1722,5 +1692,5 @@
       "note": "消除动作：拆仓后「配置副本是否新鲜」MUST 是 api 的只读投影，automation 侧改为消费本地只读副本 + 版本号（§11.4 要求二），MUST NOT 直接 import 配置域模块。本条与 src/comm/handler.ts、src/orchestrator/role-dispatcher.ts、src/risk/risk-controller.ts 三处同簇（共 3 条），MUST 同批消除。属 §12 阶段 1 第 4 项「把跨领域调用收口到明确接口」，尚无独立 change 名。"
     }
   ],
-  "seedBasis": "decouple wave: C bucket-split surfaced 2 panel/types.ts->cache type-only imports (no runtime coupling, eliminate when panel gets own contracts); D removed reply-ai automation->content import; net decrease"
+  "seedBasis": "decouple wave batch E: publish-agent barrels split by owner segment, removed cross-boundary imports; net decrease"
 }

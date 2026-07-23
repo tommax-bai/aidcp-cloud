@@ -153,7 +153,11 @@ import type {
   UiBrowserStandbyPayload,
   UiDailyUsageWindowStatus,
 } from './comm/protocol.js';
-import { PublishOrchestrator, PublishScheduler, PublishDispatcher, FacebookPublishMediaStore } from './publish-agent/index.js';
+import { PublishOrchestrator, FacebookPublishMediaStore } from './publish-agent/index.js';
+// 三分接缝（change decouple-publish-agent-buckets）：台账段 PublishScheduler / 下发段 PublishDispatcher
+// 由组合根从各自段文件直接 import，不再经生成段桶 re-export。
+import { PublishScheduler } from './publish-agent/publish-scheduler.js';
+import { PublishDispatcher } from './publish-agent/publish-dispatcher.js';
 import { WanxiangClient } from './publish-agent/wanxiang-client.js';
 import { SeedreamClient } from './publish-agent/seedream-client.js';
 import { relocateImageToStore, type ObjectStore } from './storage/object-store.js';
@@ -223,9 +227,10 @@ import {
   PublishModeDeciderRole,
   ComplianceDeciderRole,
   MetadataAggregatorRole,
-  ApprovalGatekeeperRole,
-  PublishExecutorRole,
 } from './publish-agent/roles/index.js';
+// 跨段角色（change decouple-publish-agent-buckets）：审批段（api）与下发段（automation）角色从各自文件直接 import。
+import { ApprovalGatekeeperRole } from './publish-agent/roles/approval-gatekeeper.js';
+import { PublishExecutorRole } from './publish-agent/roles/publish-executor.js';
 import { buildDeAiRewritePrompt } from './publish-agent/prompts.js';
 import { PostProcessor } from './publish-agent/post-processor.js';
 import { PublishLogStore } from './publish-agent/publish-log-store.js';

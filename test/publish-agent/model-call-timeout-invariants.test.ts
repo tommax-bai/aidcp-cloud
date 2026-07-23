@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { ApprovalGatekeeperRole } from '../../src/publish-agent/roles/approval-gatekeeper.js';
 import {
-  ApprovalGatekeeperRole,
   QualityScorerRole,
   ImageSetPlannerRole,
   ImagePromptComposerRole,
