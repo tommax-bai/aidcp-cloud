@@ -150,6 +150,17 @@ test('registerEnvironments: source 显式传 auto 透传到参数（自动登记
   assert.deepEqual(calls[0].params, ['k9', null, null, 'auto', null]);
 });
 
+// change env-table-write-collection：环境花名册窄回写口的 api 侧实现。锁「单条观测 → 恰一次 source='auto'
+// upsert，各字段逐字转发」——automation 握手经 EnvironmentRegistryPort 只调这个方法，绝不直写该表。
+test('registerHandshakeEnvironment: 单条观测走一次 auto upsert，字段逐字转发', async () => {
+  const { pool, calls } = recordingPool();
+  const store = new ClientUserStore({ pool });
+  await store.registerHandshakeEnvironment({ envKey: 'ok9', label: '大白', platform: 'facebook', accountId: null });
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].sql, /INSERT INTO client_environments/);
+  assert.deepEqual(calls[0].params, ['ok9', '大白', 'facebook', 'auto', null]);
+});
+
 test('ownsEnv: user A only owns rows explicitly scoped to user A', async () => {
   const pool = fakePool((sql, params) => {
     assert.match(sql, /WHERE s\.user_id = \$1 AND s\.env_key = \$2/);

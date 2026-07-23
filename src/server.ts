@@ -46,6 +46,7 @@ import {
   CaptchaAssistService,
   edgeCommandToEnvelope,
   type Envelope,
+  type EnvironmentRegistryPort,
   makeEnvelope,
 } from './comm/index.js';
 
@@ -1707,6 +1708,14 @@ async function main(): Promise<void> {
           setExecutionTarget: (accountId, target) => accountStore.setExecutionTarget!(accountId, target),
         }
       : undefined;
+  // 环境花名册（client_environments）窄回写口（change env-table-write-collection）：
+  // §5.1 把该表定为 api 单写、自动化握手回写 MUST 经窄内部接口、MUST NOT 直写表。形态同上面的
+  // ownershipPort——automation 侧握手闭包只持这个窄口（EnvironmentRegistryPort），实现转发到 api 侧
+  // clientUserStore 的窄方法；拆进程时把这个对象换成一次内部 HTTP 即可，握手调用点一行不改。
+  const environmentRegistryPort: EnvironmentRegistryPort = {
+    registerHandshakeEnvironment: (observation) =>
+      clientUserStore.registerHandshakeEnvironment(observation),
+  };
   // 记账漏斗先声明后构造：registry 的 fail-closed 现读要读它，而它要读 registry 解析 controller。
   let riskAccounting: RiskAccounting | undefined;
   const riskRegistry = new RiskControllerRegistry(riskStore, undefined, quotaConfigStore, {
@@ -2749,17 +2758,17 @@ async function main(): Promise<void> {
       const eid = session.edgeId;
       if (eid && eid.startsWith('ads-')) {
         const envKey = eid.slice('ads-'.length);
-        void clientUserStore
-          .registerEnvironments(
+        // 经环境花名册窄回写口（EnvironmentRegistryPort，§5.1）登记，绝不直调 clientUserStore 直写 client_environments。
+        void environmentRegistryPort
+          .registerHandshakeEnvironment(
             // 环境→账号绑定（change curated-envkey-account-binding）：session.accountId 就在同一 session 对象里；
             // 该钩子按构造安全（welcome 已回发后触发、fire-and-forget + .catch），加此字段结构上不可能拒掉一次握手。
-            [{
+            {
               envKey,
               label: session.accountNickname ?? null,
               platform: session.platform ?? null,
               accountId: session.accountId ?? null,
-            }],
-            'auto',
+            },
           )
           .then(() => personaAutoFill?.notifyEnvironmentBound(envKey))
           .catch((err) => console.warn(`[client-env] 自动登记环境失败 edge=${eid}: ${err instanceof Error ? err.message : String(err)}`));

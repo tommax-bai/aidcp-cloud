@@ -1619,6 +1619,28 @@ export class ClientUserStore {
   }
 
   /**
+   * 环境花名册窄写口的 **api 侧实现**（change env-table-write-collection）。
+   *
+   * 归属：`client_environments`（环境花名册与绑定事实）按拆分方案 §5.1 由 **aidcp-api 单写**；
+   * §5.1 明确「**自动化握手回写 MUST 改为经 api 的窄内部接口，MUST NOT 直写该表**」。本方法即那个
+   * 「窄内部接口」在 api 侧的落点：automation 侧（边缘网关握手路径）经 `EnvironmentRegistryPort`
+   * （`src/comm/ws-server.ts`，形态同构 `AccountOwnershipPort`）调用它、**绝不自拼本表 SQL**。
+   * 拆进程后本方法退到 aidcp-api 服务内、由一次内部 HTTP 触达，automation 调用点不变。
+   *
+   * 语义 = 单条观测走既有 `registerEnvironments([obs], 'auto')`（幂等 upsert + 「来了新值才覆盖」
+   * 的账号绑定合并 + D5 跨客户写闸），**行为与收口前逐字等价**——只是把「automation 直调宽方法」
+   * 换成「经窄口调本方法」。写入条数由内部统计，调用方不需要。
+   */
+  async registerHandshakeEnvironment(observation: {
+    envKey: string;
+    label: string | null;
+    platform: string | null;
+    accountId: string | null;
+  }): Promise<void> {
+    await this.registerEnvironments([observation], 'auto');
+  }
+
+  /**
    * 批量登记环境进管理侧注册表（change client-user-env-registry）。**不涉及归属**——只是让环境「被系统认识」，
    * 从而出现在后台「待分配」池里供人工分配。用于：① 一次性导入存量环境（source='import'）；
    * ② 边缘一连上来自动登记（source='auto'，见 server.ts onEdgeRegistered）；③ 后台手动登记（source='admin'）。

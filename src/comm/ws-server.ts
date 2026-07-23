@@ -120,6 +120,41 @@ export interface MessageHandler {
   ): Promise<Envelope | null> | Envelope | null;
 }
 
+/**
+ * 握手期观测到的一条环境登记（AdsPower 分身一连上来就带的花名册字段）。
+ * 与 api 侧 store 的入参**结构成对**（拆库后各仓在 contracts/ 内各自重声明形状，
+ * 见拆分方案 §10.9）：故此处与 `ClientUserStore.registerHandshakeEnvironment` 的参数
+ * 逐字段等价、但**不跨层 import**，避免制造 automation→api 的类型依赖边。
+ */
+export interface HandshakeEnvironmentObservation {
+  /** 去掉 `ads-` 前缀后的分身 id（与 edge attach / 过滤口径一致）。 */
+  envKey: string;
+  /** 展示用标签（hello 昵称），无则 null；null 在 COALESCE 下不擦既有好值。 */
+  label: string | null;
+  /** 平台标识（hello 声明），无则 null。 */
+  platform: string | null;
+  /** 握手声明的平台账号 id（环境→账号绑定）；退役保留 id / 无则由 api 侧归一为 null。 */
+  accountId: string | null;
+}
+
+/**
+ * 环境花名册（`client_environments`）写入的**窄内部接口**（change env-table-write-collection）。
+ *
+ * 拆分方案 §5.1 把 `client_environments`（环境花名册与绑定事实）定为 **aidcp-api 单写**，并明确：
+ * **自动化握手回写 MUST 改为经 api 的窄内部接口，MUST NOT 直写该表**。形态与账号归属的
+ * `AccountOwnershipPort`（`src/risk/ownership.ts`）同构：**automation 侧（边缘网关握手路径）只持有本接口、
+ * 只调方法、绝不自己拼 `client_environments` 的 SQL**；实现方是 `ClientUserStore`（api 侧）。
+ * 今天三者仍在一个进程里，故该「窄内部接口」的实现就是一次对 api 侧 store 方法的直调（在组合根装配）；
+ * 拆进程时把它换成一次内部 HTTP 即可，**调用点一行不用改**。
+ */
+export interface EnvironmentRegistryPort {
+  /**
+   * 握手时把一条观测到的 AdsPower 环境登记进花名册（幂等 upsert + 「来了新值才覆盖」的账号绑定合并）。
+   * **只登记、不归属**——绝不误把环境塞给某客户（归属边界由 api 侧 store fail-closed 守住）。
+   */
+  registerHandshakeEnvironment(observation: HandshakeEnvironmentObservation): Promise<void>;
+}
+
 export interface WsServerOptions {
   port?: number;
   host?: string;
