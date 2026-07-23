@@ -9,7 +9,7 @@ import { EventBus } from '../../src/event-bus/index.js';
 import { CommentScheduler, outcomeToReceipt, humanGroupLabel, joinOnlyReceipt, joinCommentReceipt, commentOutcomeReason } from '../../src/comment-agent/comment-scheduler.js';
 import { EdgeTaskLeaseError } from '../../src/comm/edge-task-lease-client.js';
 import type { CommentSchedulerDeps } from '../../src/comment-agent/comment-scheduler.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 
 const soul: Soul = {
   identity: { name: 'TestBot', role: 'AI研发工程师', background: 'x', tone: '理性' },

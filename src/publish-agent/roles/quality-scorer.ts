@@ -5,7 +5,7 @@ import type { PipelineContext } from '../pipeline-context.js';
 import { buildAssemblerPrompt } from '../prompts.js';
 import { executeWithFallback } from '../retry-strategy.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
-import type { Soul } from '../../soul/types.js';
+import type { Soul } from '../../kernel/soul-types.js';
 
 // change raise-model-call-timeouts-for-thinking-models：角色闸 ≥ 单次模型天花板（180s）且同传进 chat()，
 // 使一次合法的 thinking 质量评审不被角色秒表提前掐断（旧 20s 峰值必误超时→退化公式打分）。env 可调。

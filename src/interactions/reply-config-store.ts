@@ -14,7 +14,7 @@ import {
   type ReplyProfile,
   type ReplyRule,
   type ReplyTemplate,
-} from './types.js';
+} from '../kernel/interaction-types.js';
 
 const { Pool } = pg;
 

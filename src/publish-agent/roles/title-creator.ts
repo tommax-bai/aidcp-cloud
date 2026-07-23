@@ -4,7 +4,7 @@ import type { PipelineFields, TitleSelection } from '../types.js';
 import type { PipelineContext } from '../pipeline-context.js';
 import { buildTitlePrompt, BANNED_PHRASES } from '../prompts.js';
 import { escapeControlCharsInJsonStrings } from '../json-repair.js';
-import { clampTitle, graphemeCount } from '../title-clamp.js';
+import { clampTitle, graphemeCount } from '../../kernel/title-clamp.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
 
 /**

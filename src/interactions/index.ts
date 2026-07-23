@@ -1,4 +1,4 @@
-export * from './types.js';
+export * from '../kernel/interaction-types.js';
 export * from './contract.js';
 export * from './interaction-store.js';
 export * from './schema-capability.js';

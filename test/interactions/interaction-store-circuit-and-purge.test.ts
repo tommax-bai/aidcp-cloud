@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import type { Pool } from 'pg';
 import { InteractionStore } from '../../src/interactions/interaction-store.js';
 import { InteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
-import type { InteractionSyncBatchPayload } from '../../src/interactions/types.js';
+import type { InteractionSyncBatchPayload } from '../../src/kernel/interaction-types.js';
 
 function runtimeRow() {
   return {

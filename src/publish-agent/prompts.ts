@@ -21,7 +21,7 @@ import type {
 } from './types.js';
 import { IMAGE_CATEGORIES } from './types.js';
 import { categorySafetyInstruction, formatContentVisualCategoryBrief } from './content-visual-brief.js';
-import type { Soul } from '../soul/types.js';
+import type { Soul } from '../kernel/soul-types.js';
 import { writingLanguageInstruction } from '../soul/writing-language.js';
 
 /**

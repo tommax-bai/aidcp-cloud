@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { TitleCreatorRole } from '../../src/publish-agent/roles/title-creator.js';
 import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
-import { graphemeCount } from '../../src/publish-agent/title-clamp.js';
+import { graphemeCount } from '../../src/kernel/title-clamp.js';
 import type { PipelineFields, AssembledContent, CreatedContent, TriggerInput } from '../../src/publish-agent/types.js';
 
 const clock = () => 1700000000000;

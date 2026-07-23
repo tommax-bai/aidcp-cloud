@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { EventBus } from '../../src/event-bus/index.js';
 import { BackToFeed } from '../../src/agents/back-to-feed.js';
 import { SessionContext } from '../../src/agents/session-context.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 import type { FeedEnteredPayload } from '../../src/event-bus/types.js';
 
 const mockSoul: Soul = {

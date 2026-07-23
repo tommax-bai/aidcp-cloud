@@ -2,7 +2,7 @@ import type { ReplyConfigScopeStore } from './reply-config-scope-store.js';
 import type {
   EffectiveReplyConfig,
   ReplyConfigSnapshot,
-} from './types.js';
+} from '../kernel/interaction-types.js';
 
 export interface ReplyConfigReader {
   getPublished?(accountId: string): Promise<ReplyConfigSnapshot | null>;

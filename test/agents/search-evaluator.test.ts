@@ -4,7 +4,7 @@ import { EventBus } from '../../src/event-bus/index.js';
 import { SearchEvaluator } from '../../src/agents/search-evaluator.js';
 import type { SearchEvaluatorOptions } from '../../src/agents/search-evaluator.js';
 import { SessionContext } from '../../src/agents/session-context.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 import type { SearchApprovedPayload, SearchSkippedPayload } from '../../src/event-bus/types.js';
 
 const mockSoul: Soul = {

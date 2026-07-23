@@ -18,7 +18,7 @@
  * LLM 只产 identity + interests（含 seed_keywords）；behavior_guidelines 由代码据生成结果与受控点赞倾向确定性补齐。
  */
 
-import type { BehaviorGuidelines, LikeAffinity, Soul, WritingLanguage } from '../soul/types.js';
+import type { BehaviorGuidelines, LikeAffinity, Soul, WritingLanguage } from '../kernel/soul-types.js';
 import type { YamlValue } from '../soul/yaml.js';
 import { loadSoulFromValue, loadSoulFromYaml, serializeSoul } from '../soul/index.js';
 import { DEFAULT_LIKE_AFFINITY, generatedLikePrinciple, LIKE_AFFINITY_VALUES } from '../soul/like-affinity.js';

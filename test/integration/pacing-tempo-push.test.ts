@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import { RoleDispatcher, type EdgeCommand } from '../../src/orchestrator/role-dispatcher.js';
 import { edgeCommandToEnvelope } from '../../src/comm/command-bridge.js';
 import { EventBus } from '../../src/event-bus/index.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 import type { RiskStatus, RiskQuotaLevel } from '../../src/risk/types.js';
 
 const mockSoul: Soul = {

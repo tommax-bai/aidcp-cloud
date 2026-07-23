@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { RoleDispatcher } from '../../src/orchestrator/role-dispatcher.js';
 import type { EdgeCommand, ViewQuotaDecision } from '../../src/orchestrator/role-dispatcher.js';
 import { EventBus } from '../../src/event-bus/index.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 
 const mockSoul: Soul = {
   identity: { name: 'T', role: 'r', background: 'b', tone: 't' },

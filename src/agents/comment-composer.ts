@@ -12,13 +12,13 @@
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { NoteData } from './content-curator-role.js';
-import { tieredInterests } from './persona-format.js';
+import { tieredInterests } from '../kernel/persona-format.js';
 import { interactionLabel } from './interaction-label.js';
 import type { MandatoryInteractionContext, RoleName, CommentAppraisedPayload } from '../event-bus/types.js';
 import { topicKeysFromTitle, type ValuableCommentRef } from '../cache/valuable-comment-store.js';
 import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/index.js';
 import { checkWritingLanguage, writingLanguageInstruction } from '../soul/writing-language.js';
-import type { WritingLanguage } from '../soul/types.js';
+import type { WritingLanguage } from '../kernel/soul-types.js';
 
 /** 撰写语境（change humanize-interaction-prompts）：把「为何值得评 / 刚做了什么互动」穿透进 prompt。 */
 interface ComposeContext {

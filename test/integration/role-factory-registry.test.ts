@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { RoleDispatcher } from '../../src/orchestrator/role-dispatcher.js';
 import type { ConceptStorePort, RoleFactoryRegistry } from '../../src/orchestrator/role-dispatcher.js';
 import type { RoleName } from '../../src/event-bus/types.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 import { contentRoleFactories } from '../helpers/role-factories.js';
 
 const mockSoul: Soul = {

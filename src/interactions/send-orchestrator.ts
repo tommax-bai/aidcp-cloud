@@ -19,7 +19,7 @@ import {
   type ReplyConfigSnapshot,
   type RuntimeControls,
   type ScopedJobContext,
-} from './types.js';
+} from '../kernel/interaction-types.js';
 
 export interface InteractionRiskController {
   explain(action: 'comment' | 'dm_reply'): { allowed: boolean; reason?: string };

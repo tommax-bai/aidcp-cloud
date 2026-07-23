@@ -81,7 +81,7 @@ describe('PublishLogStore.editDraft', () => {
     assert.equal(p[5], 'alice', 'edited_by = JWT 主体');
     assert.equal(p[6], 1, 'CAS WHERE content_version = expectedVersion');
     // 标题被 clampTitle 收口 ≤18 字素
-    const { graphemeCount } = await import('../../src/publish-agent/title-clamp.js');
+    const { graphemeCount } = await import('../../src/kernel/title-clamp.js');
     assert.ok(graphemeCount(p[1] as string) <= 18, '标题收口 ≤18 字素');
     // 深合并：visibility/topics 改，compliance/mentions/location 逐字保留
     const merged = JSON.parse(p[3] as string);

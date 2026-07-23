@@ -16,7 +16,7 @@
  * 调用方 MUST 对产出做 loadSoulFromYaml round-trip 自校验（防序列化漂移）。
  */
 
-import type { Soul } from './types.js';
+import type { Soul } from '../kernel/soul-types.js';
 
 /** 把字符串编码成 yaml.ts 解析器可反解的双引号标量。 */
 function quoteScalar(s: string): string {

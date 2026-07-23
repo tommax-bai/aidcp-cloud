@@ -11,7 +11,7 @@ import { RoleDispatcher } from '../../src/orchestrator/role-dispatcher.js';
 import type { EdgeCommand, VisibleCard } from '../../src/orchestrator/role-dispatcher.js';
 import { SessionContext } from '../../src/agents/session-context.js';
 import { SEARCH_HOME_RETURN_AFTER } from '../../src/agents/search-scroller.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 
 const mockSoul: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },

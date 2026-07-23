@@ -7,7 +7,7 @@ import { isReplyPolicy, isReplyProfile, isReplyRule, isReplyTemplate } from './r
 import {
   InteractionError,
   type RuntimeControls,
-} from './types.js';
+} from '../kernel/interaction-types.js';
 
 export type InteractionGrant =
   | 'interaction.config.view'

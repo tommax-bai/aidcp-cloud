@@ -1,6 +1,6 @@
 import { makeEnvelope } from '../comm/protocol.js';
 import type { EdgePusher } from '../comm/ws-server.js';
-import { INTERACTION_PLATFORM } from './types.js';
+import { INTERACTION_PLATFORM } from '../kernel/interaction-types.js';
 import type { InteractionStore } from './interaction-store.js';
 import type { InteractionMetrics } from './metrics.js';
 

@@ -27,7 +27,7 @@ import type {
   BehaviorGuidelines,
   LikeAffinity,
   WritingLanguage,
-} from './types.js';
+} from '../kernel/soul-types.js';
 import { LIKE_AFFINITY_VALUES } from './like-affinity.js';
 import { isWritingLanguage } from './writing-language.js';
 

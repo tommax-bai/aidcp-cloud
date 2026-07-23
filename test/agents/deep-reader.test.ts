@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { EventBus } from '../../src/event-bus/index.js';
 import { DeepReader } from '../../src/agents/deep-reader.js';
 import type { NoteData } from '../../src/agents/content-curator-role.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 import type { ReadingBrowseImagesPayload, ReadingImagesDonePayload } from '../../src/event-bus/types.js';
 
 const mockSoul: Soul = {

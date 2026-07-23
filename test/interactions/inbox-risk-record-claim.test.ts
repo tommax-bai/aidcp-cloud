@@ -5,7 +5,7 @@ import { InteractionInboxService } from '../../src/interactions/interaction-inbo
 import { InteractionMetrics } from '../../src/interactions/metrics.js';
 import type { ReplyConfigStore } from '../../src/interactions/reply-config-store.js';
 import type { ReplyWorkflow } from '../../src/interactions/reply-workflow.js';
-import type { InteractionReplyResultPayload } from '../../src/interactions/types.js';
+import type { InteractionReplyResultPayload } from '../../src/kernel/interaction-types.js';
 
 /**
  * 幂等占位的释放判据 = 「**有没有写成**」，不是「策略允不允许」（change risk-record-actuated-facts）。

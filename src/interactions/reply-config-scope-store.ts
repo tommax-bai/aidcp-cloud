@@ -15,7 +15,7 @@ import {
   type ReplyProfile,
   type ReplyRule,
   type ReplyTemplate,
-} from './types.js';
+} from '../kernel/interaction-types.js';
 import type { ConfigAuditItem } from './reply-config-store.js';
 
 const { Pool } = pg;

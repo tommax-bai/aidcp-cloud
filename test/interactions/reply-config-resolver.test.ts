@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ReplyConfigScopeStore } from '../../src/interactions/reply-config-scope-store.js';
 import { ReplyConfigResolver } from '../../src/interactions/reply-config-resolver.js';
-import type { ReplyConfigScopeHead, ReplyConfigSnapshot, ReplyConfigSource } from '../../src/interactions/types.js';
+import type { ReplyConfigScopeHead, ReplyConfigSnapshot, ReplyConfigSource } from '../../src/kernel/interaction-types.js';
 
 function snapshot(accountId: string, version: number, scopeId?: string, source?: ReplyConfigSource): ReplyConfigSnapshot {
   return {

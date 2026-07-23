@@ -10,7 +10,7 @@ import { CommentAppraiser } from '../../src/agents/comment-appraiser.js';
 import type { NoteData } from '../../src/agents/content-curator-role.js';
 import { FB_COMMENT_PROFILE } from '../../src/platform/registry.js';
 import type { CommentPlatformProfile } from '../../src/platform/registry.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 
 const soul: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },

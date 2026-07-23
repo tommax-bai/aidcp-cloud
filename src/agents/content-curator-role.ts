@@ -15,7 +15,7 @@ import type { RoleOptions } from './base-role.js';
 import type { SessionContext } from './session-context.js';
 import type { RoleName } from '../event-bus/types.js';
 import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/registry.js';
-import type { Soul } from '../soul/types.js';
+import type { Soul } from '../kernel/soul-types.js';
 import type { MandatoryInteractionContext } from '../event-bus/types.js';
 import { mandatoryInteractionContext, mandatoryInteractionPrompt } from './mandatory-interaction.js';
 

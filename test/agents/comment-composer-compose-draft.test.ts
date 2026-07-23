@@ -6,7 +6,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { CommentComposer } from '../../src/agents/comment-composer.js';
 import type { NoteData } from '../../src/agents/content-curator-role.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 import { EventBus } from '../../src/event-bus/index.js';
 import { FB_COMMENT_PROFILE, type CommentPlatformProfile } from '../../src/platform/registry.js';
 

@@ -13,7 +13,7 @@
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import { SessionContext } from './session-context.js';
-import { tieredInterests } from './persona-format.js';
+import { tieredInterests } from '../kernel/persona-format.js';
 import type { RoleName } from '../event-bus/types.js';
 import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/registry.js';
 import { mandatoryInteractionPrompt } from './mandatory-interaction.js';

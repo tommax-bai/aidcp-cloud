@@ -11,7 +11,7 @@
  * - 配图生成执行（publish:ImageGenerator）确实无文本 prompt（吃配图指令输出 + 固定风格常量），不在此注册。
  */
 
-import type { Soul } from '../soul/types.js';
+import type { Soul } from '../kernel/soul-types.js';
 import type {
   TriggerInput,
   ScoutDecision,

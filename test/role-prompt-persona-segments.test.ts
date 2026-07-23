@@ -5,7 +5,7 @@ import { EventBus } from '../src/event-bus/index.js';
 import { ContentEvaluator } from '../src/agents/content-evaluator.js';
 import { CuratedNoteEvaluator } from '../src/agents/curated-note-evaluator.js';
 import { SessionContext } from '../src/agents/session-context.js';
-import type { Soul } from '../src/soul/types.js';
+import type { Soul } from '../src/kernel/soul-types.js';
 
 const mockSoul: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },

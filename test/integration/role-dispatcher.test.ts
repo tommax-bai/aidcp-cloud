@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { RoleDispatcher } from '../../src/orchestrator/role-dispatcher.js';
 import type { EdgeCommand } from '../../src/orchestrator/role-dispatcher.js';
 import { SEARCH_THRESHOLD } from '../../src/agents/feed-scroller.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 import type { EventBus } from '../../src/event-bus/index.js';
 
 const mockSoul: Soul = {

@@ -15,7 +15,7 @@ import { RoleDispatcher, type EdgeCommand } from '../../src/orchestrator/role-di
 import { PublishScheduler, type PublishSchedulerDeps } from '../../src/publish-agent/publish-scheduler.js';
 import { CommentScheduler, type CommentSchedulerDeps } from '../../src/comment-agent/comment-scheduler.js';
 import { EventBus } from '../../src/event-bus/index.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 
 const soulYaml = `
 identity:

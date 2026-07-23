@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { EventBus } from '../../src/event-bus/index.js';
 import { CuratedCommentEvaluator } from '../../src/agents/curated-comment-evaluator.js';
 import type { NoteData } from '../../src/agents/content-curator-role.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 
 const soul: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },

@@ -12,7 +12,7 @@ import { ReplyConfigStore } from '../../src/interactions/reply-config-store.js';
 import { ReplyWorkflow } from '../../src/interactions/reply-workflow.js';
 import { parseSyncBatchPayload } from '../../src/interactions/contract.js';
 import { InteractionSendOrchestrator, replyIdempotencyKey } from '../../src/interactions/send-orchestrator.js';
-import type { InteractionReplyResultPayload, InteractionSyncBatchPayload } from '../../src/interactions/types.js';
+import type { InteractionReplyResultPayload, InteractionSyncBatchPayload } from '../../src/kernel/interaction-types.js';
 
 const connectionString = process.env.AIDCP_INTERACTION_TEST_DATABASE_URL;
 const attemptGate = {

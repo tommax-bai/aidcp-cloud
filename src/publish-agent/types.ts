@@ -1,4 +1,4 @@
-import type { Soul } from '../soul/types.js';
+import type { Soul } from '../kernel/soul-types.js';
 import type { CuratedReferenceImageFormGuess, TextCardTranscription } from '../cache/curated-content-store.js';
 import type { ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
 import type { PlatformId } from '../platform/index.js';

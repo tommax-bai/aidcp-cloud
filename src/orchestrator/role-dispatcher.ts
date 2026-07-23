@@ -80,7 +80,7 @@ import { ExcursionResumer } from '../agents/excursion-resumer.js';
 import type { EdgeTaskLease, EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
 import { isPreemptionReason } from '../comm/preemption.js';
 import type { BaseRole, RoleOptions } from '../agents/base-role.js';
-import type { Soul } from '../soul/types.js';
+import type { Soul } from '../kernel/soul-types.js';
 import { computeDwellMs, computeThinkMs, computeFeedFloorMs, effectiveTempo, type PacingFloorProvider } from '../risk/pacing.js';
 import { SearchFrequencyLimiter } from '../risk/search-frequency-limiter.js';
 import { InteractionGuard, isGuardedInteraction, type GuardAction } from '../risk/interaction-guard.js';

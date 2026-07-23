@@ -24,7 +24,7 @@ import {
   type ReplyTemplate,
   type RiskTag,
   type ScopedJobContext,
-} from './types.js';
+} from '../kernel/interaction-types.js';
 
 const CONTENT_HIGH_RISK = new Set<string>(HARD_RISK_TAGS.filter((tag) =>
   tag !== 'unknown' && tag !== 'meaning_changed' && tag !== 'introduced_claim'));

@@ -14,7 +14,7 @@
  */
 
 import type { EventBus } from '../event-bus/index.js';
-import type { Soul } from '../soul/types.js';
+import type { Soul } from '../kernel/soul-types.js';
 import type { PersonaBinding } from '../config/persona-store.js';
 import { PERSONA_UNAVAILABLE_REASON } from '../config/mirror-stop-work.js';
 import { CommentSearchTermGenerator, type RoleLlmLike } from '../agents/comment-search-term-generator.js';

@@ -11,7 +11,7 @@ import type { EdgeCommand } from '../../src/orchestrator/role-dispatcher.js';
 import type { PlatformId, Surface } from '../../src/platform/index.js';
 import { PLATFORM_REGISTRY } from '../../src/platform/registry.js';
 import { EventBus } from '../../src/event-bus/index.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 
 const mockSoul: Soul = {
   identity: { name: 'T', role: 'r', background: 'b', tone: 't' },

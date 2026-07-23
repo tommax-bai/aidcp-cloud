@@ -7,7 +7,7 @@
 import crypto from 'node:crypto';
 import pg from 'pg';
 import { resolveEnvPgConfig } from '../cache/pg-config.js';
-import type { WritingLanguage } from '../soul/types.js';
+import type { WritingLanguage } from '../kernel/soul-types.js';
 import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;

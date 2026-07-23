@@ -7,7 +7,7 @@ import type { InteractionStore } from '../../src/interactions/interaction-store.
 import { InteractionMetrics } from '../../src/interactions/metrics.js';
 import { InteractionSendOrchestrator, replyIdempotencyKey } from '../../src/interactions/send-orchestrator.js';
 import { interactionWritesAllowed } from '../../src/interactions/schema-capability.js';
-import { DEFAULT_REPLY_POLICY, type ReplyConfigSnapshot, type RuntimeControls, type ScopedJobContext } from '../../src/interactions/types.js';
+import { DEFAULT_REPLY_POLICY, type ReplyConfigSnapshot, type RuntimeControls, type ScopedJobContext } from '../../src/kernel/interaction-types.js';
 
 const now = 1784044810000;
 

@@ -8,7 +8,7 @@ import {
 } from '../../src/orchestrator/role-dispatcher.js';
 import { ActionCooldownGate } from '../../src/risk/action-cooldown.js';
 import { InteractionGuard } from '../../src/risk/interaction-guard.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 
 const soul: Soul = {
   identity: { name: 'Reel Test', role: 'viewer', background: 'test', tone: 'plain' },

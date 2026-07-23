@@ -12,7 +12,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { serializeSoul, loadSoulFromYaml } from '../src/soul/index.js';
-import type { Soul } from '../src/soul/types.js';
+import type { Soul } from '../src/kernel/soul-types.js';
 import {
   extractLikeAffinitySelection,
   PersonaGenerator,

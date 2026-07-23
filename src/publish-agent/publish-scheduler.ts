@@ -13,7 +13,7 @@
  */
 
 import type { PublishResult, PublishSourceReference, ReferenceImageSnapshot, TriggerInput } from './types.js';
-import type { Soul } from '../soul/types.js';
+import type { Soul } from '../kernel/soul-types.js';
 import type { CuratedContentTypeFilter, CuratedSelectItem } from '../cache/curated-content-store.js';
 import type { ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
 import type { PersonaBinding } from '../config/persona-store.js';

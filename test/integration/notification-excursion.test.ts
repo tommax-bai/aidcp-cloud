@@ -22,7 +22,7 @@ import { NotificationClassifier } from '../../src/agents/notification-classifier
 import { NotificationDeduper, notificationItemKey, stripRelativeTime } from '../../src/agents/notification-deduper.js';
 import { NotificationNotifier } from '../../src/agents/notification-notifier.js';
 import { ExcursionResumer } from '../../src/agents/excursion-resumer.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 import type { NotificationItem } from '../../src/comm/protocol.js';
 
 const mockSoul: Soul = {

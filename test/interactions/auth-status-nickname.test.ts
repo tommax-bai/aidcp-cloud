@@ -5,7 +5,7 @@ import { InteractionInboxService } from '../../src/interactions/interaction-inbo
 import { InteractionMetrics } from '../../src/interactions/metrics.js';
 import type { ReplyConfigStore } from '../../src/interactions/reply-config-store.js';
 import type { ReplyWorkflow } from '../../src/interactions/reply-workflow.js';
-import type { InteractionAuthStatusPayload } from '../../src/interactions/types.js';
+import type { InteractionAuthStatusPayload } from '../../src/kernel/interaction-types.js';
 
 const activeAuth: InteractionAuthStatusPayload = {
   envKey: 'env-wechat-a',

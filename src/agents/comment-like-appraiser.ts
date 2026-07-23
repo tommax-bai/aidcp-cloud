@@ -18,7 +18,7 @@
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { NoteData } from './content-curator-role.js';
-import { tieredInterests } from './persona-format.js';
+import { tieredInterests } from '../kernel/persona-format.js';
 import type { CommentCandidate } from '../comm/protocol.js';
 import type { RoleName, ReadingScrollCommentsPayload } from '../event-bus/types.js';
 import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/index.js';

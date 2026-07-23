@@ -1,4 +1,4 @@
-import type { Soul, WritingLanguage } from '../soul/types.js';
+import type { Soul, WritingLanguage } from '../kernel/soul-types.js';
 import { writingLanguageInstruction } from '../soul/writing-language.js';
 
 export interface FacebookCommentComposerPromptInput {

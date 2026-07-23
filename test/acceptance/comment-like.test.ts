@@ -14,7 +14,7 @@ import { EventBus } from '../../src/event-bus/index.js';
 import { CommentLikeAppraiser } from '../../src/agents/comment-like-appraiser.js';
 import { overlapsAny } from '../../src/agents/comment-de-ai-flavor.js';
 import { topicKeysFromTitle } from '../../src/cache/valuable-comment-store.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 import type { NoteData } from '../../src/agents/content-curator-role.js';
 import type { CommentCandidate } from '../../src/comm/protocol.js';
 

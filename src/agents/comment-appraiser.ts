@@ -12,7 +12,7 @@
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { NoteData } from './content-curator-role.js';
-import { tieredInterests } from './persona-format.js';
+import { tieredInterests } from '../kernel/persona-format.js';
 import { interactionLabel } from './interaction-label.js';
 import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/registry.js';
 import type { RoleName, InteractionCompletedPayload } from '../event-bus/types.js';

@@ -4,7 +4,7 @@ import { EventBus } from '../../src/event-bus/index.js';
 import { FeedScroller } from '../../src/agents/feed-scroller.js';
 import { SessionContext } from '../../src/agents/session-context.js';
 import { edgeCommandToEnvelope } from '../../src/comm/command-bridge.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 import type { FeedScrolledPayload, FeedRefreshNeededPayload, SearchNeededPayload } from '../../src/event-bus/types.js';
 
 const mockSoul: Soul = {

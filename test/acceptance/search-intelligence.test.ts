@@ -18,7 +18,7 @@ import { RoleDispatcher } from '../../src/orchestrator/role-dispatcher.js';
 import type { EdgeCommand, ConceptStorePort } from '../../src/orchestrator/role-dispatcher.js';
 import { contentRoleFactories } from '../helpers/role-factories.js';
 import { SessionContext } from '../../src/agents/session-context.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 import type { ConceptPool, SearchApprovedPayload, SearchSkippedPayload } from '../../src/event-bus/types.js';
 
 const mockSoul: Soul = {

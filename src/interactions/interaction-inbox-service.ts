@@ -11,8 +11,8 @@ import type {
   InteractionReplyResultPayload,
   InteractionSyncAckPayload,
   InteractionSyncBatchPayload,
-} from './types.js';
-import { InteractionError } from './types.js';
+} from '../kernel/interaction-types.js';
+import { InteractionError } from '../kernel/interaction-types.js';
 
 export class InteractionInboxService {
   constructor(private readonly deps: {

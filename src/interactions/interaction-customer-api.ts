@@ -14,7 +14,7 @@ import {
   type ReplyJobState,
   type ReplyJobView,
   type ScopedJobContext,
-} from './types.js';
+} from '../kernel/interaction-types.js';
 
 const MAX_BODY = 64 * 1024;
 

@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventBus } from '../../src/event-bus/index.js';
 import { ProfileBrowser } from '../../src/agents/profile-browser.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 import type { ProfileBrowsedPayload } from '../../src/event-bus/types.js';
 
 const mockSoul: Soul = {

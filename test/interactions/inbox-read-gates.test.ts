@@ -7,7 +7,7 @@ import { InteractionInboxService } from '../../src/interactions/interaction-inbo
 import { InteractionMetrics } from '../../src/interactions/metrics.js';
 import type { ReplyWorkflow } from '../../src/interactions/reply-workflow.js';
 import { InteractionSendOrchestrator } from '../../src/interactions/send-orchestrator.js';
-import type { InteractionSyncBatchPayload } from '../../src/interactions/types.js';
+import type { InteractionSyncBatchPayload } from '../../src/kernel/interaction-types.js';
 
 const auth = {
   envKey: 'env-a', accountId: 'acct-a', platform: 'wechat_channels' as const, status: 'active' as const,

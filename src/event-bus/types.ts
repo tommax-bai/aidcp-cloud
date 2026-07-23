@@ -3,7 +3,7 @@
  */
 
 import type { CommentCandidate, Envelope, NoteImagePayload, NotificationItem } from '../comm/protocol.js';
-import type { MandatoryCommentApproval, MandatoryInteractionAction } from '../soul/types.js';
+import type { MandatoryCommentApproval, MandatoryInteractionAction } from '../kernel/soul-types.js';
 
 // Agent 角色枚举
 export type AgentRole = 'session_monitor' | 'feed_scanner' | 'content_curator' | 'interaction_appraiser' | 'comment_reviewer';

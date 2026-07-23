@@ -6,7 +6,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { CommentSearchTermGenerator } from '../../src/agents/comment-search-term-generator.js';
 import type { CuratedSampleForTerms } from '../../src/agents/comment-search-term-generator.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 
 const soul: Soul = {
   identity: { name: 'TestBot', role: 'AI研发工程师', background: '技术博主', tone: '理性' },

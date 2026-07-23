@@ -1,5 +1,5 @@
 import type { MandatoryInteractionContext } from '../event-bus/types.js';
-import type { MandatoryInteractionRule, Soul } from '../soul/types.js';
+import type { MandatoryInteractionRule, Soul } from '../kernel/soul-types.js';
 
 /** Prompt 中的人设强制规则块；缺规则时空串，确保普通账号模板逐位不变。 */
 export function mandatoryInteractionPrompt(soul: Soul): string {

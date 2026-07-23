@@ -5,7 +5,7 @@ import { InteractionInternalApi } from '../../src/interactions/interaction-inter
 import type { InteractionStore } from '../../src/interactions/interaction-store.js';
 import type { ReplyConfigStore } from '../../src/interactions/reply-config-store.js';
 import type { ReplyWorkflow } from '../../src/interactions/reply-workflow.js';
-import type { ReplyConfigSnapshot } from '../../src/interactions/types.js';
+import type { ReplyConfigSnapshot } from '../../src/kernel/interaction-types.js';
 
 test('runtime-control CAS reports online delivery separately from persisted success', async () => {
   let updates = 0;

@@ -18,7 +18,7 @@ import {
   validateFinalReplyText,
   validateReplyConfig,
 } from '../../src/interactions/reply-config.js';
-import type { MinimalInbound, PolisherInput, ReplyConfigSnapshot, ReplyProfile, ReplyRule, ReplyTemplate, RiskReviewerInput, ScopedJobContext } from '../../src/interactions/types.js';
+import type { MinimalInbound, PolisherInput, ReplyConfigSnapshot, ReplyProfile, ReplyRule, ReplyTemplate, RiskReviewerInput, ScopedJobContext } from '../../src/kernel/interaction-types.js';
 
 const now = 1784044800000;
 const inbound: MinimalInbound = {

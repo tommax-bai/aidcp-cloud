@@ -13,7 +13,7 @@ import {
   buildScoutPrompt,
 } from '../../src/publish-agent/prompts.js';
 import type { FaithfulDraft, FaithfulRewritePlan, ReferenceAnalysis, ScoutDecision, TriggerInput } from '../../src/publish-agent/types.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 
 const soul: Soul = {
   identity: { name: '小林', role: '家居博主', background: '整理师', tone: '亲切' },

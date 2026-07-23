@@ -7,7 +7,7 @@ import { PUBLISH_PREVIEW_BUILDERS } from '../src/publish-agent/prompts-preview.j
 import type { BaseRole } from '../src/agents/base-role.js';
 import { CommentSearchTermGenerator, type RoleLlmLike } from '../src/agents/comment-search-term-generator.js';
 import { CommentTargetPicker } from '../src/agents/comment-target-picker.js';
-import type { Soul } from '../src/soul/types.js';
+import type { Soul } from '../src/kernel/soul-types.js';
 
 function fakeRole(roleName: string, preview: () => string): BaseRole {
   return { roleName, previewPrompt: preview } as unknown as BaseRole;

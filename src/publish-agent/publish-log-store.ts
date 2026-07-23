@@ -8,7 +8,7 @@ import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
 import { SHANGHAI_DAY_START_SQL } from '../time/shanghai-day.js';
 import type { PublishRecord, PublishStatus, PublishMetadata, PublishMode, Visibility } from './types.js';
-import { clampTitle } from './title-clamp.js';
+import { clampTitle } from '../kernel/title-clamp.js';
 import { normalizePlatformId, type PlatformId } from '../platform/index.js';
 import { validatePublishSchedule } from './schedule-policy.js';
 import type { DeploymentTarget } from '../deployment-target.js';

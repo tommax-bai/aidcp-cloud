@@ -13,9 +13,9 @@ import {
   type RiskReviewerInput,
   type RiskReviewerOutput,
   type RiskTag,
-} from './types.js';
+} from '../kernel/interaction-types.js';
 
-export type { AiFallback, AiStepResult } from './types.js';
+export type { AiFallback, AiStepResult } from '../kernel/interaction-types.js';
 
 const INTENTS: readonly ReplyIntent[] = [
   'gratitude', 'general_question', 'product_question', 'support_request', 'complaint',

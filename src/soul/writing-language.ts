@@ -1,4 +1,4 @@
-import type { WritingLanguage } from './types.js';
+import type { WritingLanguage } from '../kernel/soul-types.js';
 
 export const WRITING_LANGUAGE_VALUES = ['zh-CN', 'en', 'vi'] as const satisfies readonly WritingLanguage[];
 const WRITING_LANGUAGE_SET = new Set<string>(WRITING_LANGUAGE_VALUES);

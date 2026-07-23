@@ -5,7 +5,7 @@ import { InteractionScopeInternalApi } from '../../src/interactions/interaction-
 import type { ReplyConfigResolver } from '../../src/interactions/reply-config-resolver.js';
 import type { ReplyConfigScopeStore } from '../../src/interactions/reply-config-scope-store.js';
 import type { ReplyWorkflow } from '../../src/interactions/reply-workflow.js';
-import type { InteractionChannel, ReplyConfigScopeHead, ReplyConfigSnapshot, ReplyProfile } from '../../src/interactions/types.js';
+import type { InteractionChannel, ReplyConfigScopeHead, ReplyConfigSnapshot, ReplyProfile } from '../../src/kernel/interaction-types.js';
 
 const source = { type: 'group' as const, groupLabel: '华东组' };
 const head: ReplyConfigScopeHead = {

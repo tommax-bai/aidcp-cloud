@@ -7,7 +7,7 @@ import type { InteractionStore, ListQuery } from '../../src/interactions/interac
 import type { InteractionSendOrchestrator } from '../../src/interactions/send-orchestrator.js';
 import type { ReplyConfigStore } from '../../src/interactions/reply-config-store.js';
 import type { ReplyWorkflow } from '../../src/interactions/reply-workflow.js';
-import type { ReplyJobView } from '../../src/interactions/types.js';
+import type { ReplyJobView } from '../../src/kernel/interaction-types.js';
 
 const job: ReplyJobView = {
   id: 'job-a', inboundMessageId: 'message-a', state: 'ignored', version: 2, matchedRuleId: null,

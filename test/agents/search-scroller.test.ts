@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { EventBus } from '../../src/event-bus/index.js';
 import { SearchScroller, SEARCH_SCROLL_THRESHOLD } from '../../src/agents/search-scroller.js';
 import { SessionContext } from '../../src/agents/session-context.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 import type { SearchScrolledPayload, SearchNeededPayload } from '../../src/event-bus/types.js';
 
 const mockSoul: Soul = {

@@ -15,7 +15,7 @@ import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { SessionContext } from './session-context.js';
 import type { NoteData } from './content-curator-role.js';
-import { tieredInterests } from './persona-format.js';
+import { tieredInterests } from '../kernel/persona-format.js';
 import type { RoleName, ReadingDonePayload } from '../event-bus/types.js';
 import { mandatoryInteractionPrompt } from './mandatory-interaction.js';
 import { likeAffinityLabel, noteLikeAffinityGuidance, resolveLikeAffinity } from '../soul/like-affinity.js';

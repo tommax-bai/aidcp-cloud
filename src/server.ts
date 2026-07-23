@@ -570,7 +570,7 @@ interface CompositionContext {
   anyImageKeyPresent: boolean;
   approvalPolicyStore: ApprovalPolicyStore | undefined;
   approvePublishForClient: ReturnType<typeof createClientPublishApprovalHandler>;
-  billingPriceRefresh: { refresh(): Promise<import("/Users/baitianxing/codes/aidcp-cloud.wt/org-root-three-entrypoints/src/metrics/billing-price-refresh").BillingPriceRefreshResult>; };
+  billingPriceRefresh: { refresh(): Promise<import("./metrics/billing-price-refresh.js").BillingPriceRefreshResult>; };
   botChatEventHandler: FeishuBotChatEventHandler;
   botChatsProvider: ReturnType<typeof createBotChatsProvider>;
   botChatStore: BotChatStore;
@@ -3061,7 +3061,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   const interactionPanelGrants = parseInteractionPanelGrants(readEnvString('AIDCP_INTERACTION_PANEL_GRANTS'));
   const panelUsers = parsePanelUsers(readEnvString('AIDCP_PANEL_USERS'));
   const interactionPermissionOverview = buildInteractionPermissionOverview(panelUsers, interactionPanelGrants);
-  const deliverInteractionRuntimeControls = async (controls: import('./interactions/types.js').RuntimeControls): Promise<{ delivered: number }> => {
+  const deliverInteractionRuntimeControls = async (controls: import('./kernel/interaction-types.js').RuntimeControls): Promise<{ delivered: number }> => {
     if (!interactionRuntimeControls) return { delivered: 0 };
     const edgeId = server.resolveEdgeIdForAccount(
       controls.accountId,

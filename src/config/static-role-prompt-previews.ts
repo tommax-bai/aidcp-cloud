@@ -6,8 +6,8 @@ import type {
   MinimalInbound,
   PolisherInput,
   RiskReviewerInput,
-} from '../interactions/types.js';
-import type { Soul } from '../soul/types.js';
+} from '../kernel/interaction-types.js';
+import type { Soul } from '../kernel/soul-types.js';
 import { buildCoverFormSensePrompt } from '../publish-agent/cover-form-sensor.js';
 import { buildCoverCardCopyPrompt } from '../publish-agent/prompts.js';
 import { buildVisualFidelityAuditPrompt } from '../publish-agent/visual-fidelity-auditor.js';

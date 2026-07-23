@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { projectRuntimeControls } from '../../src/interactions/runtime-controls-provider.js';
 import { interactionWritesAllowed } from '../../src/interactions/schema-capability.js';
-import type { RuntimeControls } from '../../src/interactions/types.js';
+import type { RuntimeControls } from '../../src/kernel/interaction-types.js';
 
 function controls(overrides: Partial<RuntimeControls> = {}): RuntimeControls {
   return {

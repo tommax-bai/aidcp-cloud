@@ -16,7 +16,7 @@
  */
 
 import type { BaseRole } from '../agents/base-role.js';
-import type { Soul } from '../soul/types.js';
+import type { Soul } from '../kernel/soul-types.js';
 import { getCatalogItem } from './role-catalog.js';
 import { PUBLISH_PREVIEW_BUILDERS, IMAGE_PROMPT_PREVIEW_BUILDERS } from '../publish-agent/prompts-preview.js';
 import { STATIC_ROLE_PROMPT_PREVIEWS } from './static-role-prompt-previews.js';

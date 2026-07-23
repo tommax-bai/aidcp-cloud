@@ -14,7 +14,7 @@ import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
 import type { PipelineFields, TriggerInput, ScoutDecision } from '../../src/publish-agent/types.js';
 import { ConceptExtractorRole } from '../../src/agents/concept-extractor-role.js';
 import { EventBus } from '../../src/event-bus/index.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 
 /** 非技术（美食）人设：验证内容管线跟随人设、不再写死技术领域。 */
 const foodSoul: Soul = {

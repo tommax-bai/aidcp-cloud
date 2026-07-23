@@ -18,7 +18,7 @@ import type {
   InteractionReplyResultPayload,
   InteractionSyncAckPayload,
   InteractionSyncBatchPayload,
-} from '../../src/interactions/types.js';
+} from '../../src/kernel/interaction-types.js';
 
 const fixtureRoot = new URL('../fixtures/wechat-channels-interaction/v1/ws/', import.meta.url);
 

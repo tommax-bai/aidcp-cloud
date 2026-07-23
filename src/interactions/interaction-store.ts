@@ -26,7 +26,7 @@ import {
   type SendAttemptView,
   type SyncFreshnessProjection,
   type ThreadView,
-} from './types.js';
+} from '../kernel/interaction-types.js';
 import { classifyInteractionSchema, type InteractionSchemaMode } from './schema-capability.js';
 
 const { Pool } = pg;

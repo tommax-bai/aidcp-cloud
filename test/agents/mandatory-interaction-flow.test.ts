@@ -9,7 +9,7 @@ import { InteractionAppraiserRole } from '../../src/agents/interaction-appraiser
 import { CommentAppraiser } from '../../src/agents/comment-appraiser.js';
 import { SessionContext } from '../../src/agents/session-context.js';
 import type { CommentAppraisedPayload, InteractionCompletedPayload, QualityRejectPayload } from '../../src/event-bus/types.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const soul: Soul = {

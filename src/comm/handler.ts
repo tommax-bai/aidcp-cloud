@@ -73,7 +73,7 @@ import {
   isCanonicalFacebookFeedVideoNoteId,
 } from '../platform/facebook-presented-video.js';
 import { isWritingLanguage } from '../soul/writing-language.js';
-import type { WritingLanguage } from '../soul/types.js';
+import type { WritingLanguage } from '../kernel/soul-types.js';
 import type { PacingSnapshotPayload } from './protocol.js';
 import type { AccountStateManager } from '../account-state.js';
 import { noteMirrorStaleRefusal } from '../config-mirror-freshness.js';
@@ -102,7 +102,7 @@ import {
   type InteractionRuntimeControlsPayload,
   type InteractionSyncAckPayload,
   type InteractionSyncBatchPayload,
-} from '../interactions/types.js';
+} from '../kernel/interaction-types.js';
 
 /**
  * action.completed 的 action 是云端角色的关联键，正常值是 `browse_images` 而非

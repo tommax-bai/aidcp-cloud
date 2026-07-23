@@ -11,7 +11,7 @@ import {
   type RiskTag,
   type TemplateVariable,
   type ValidationIssue,
-} from './types.js';
+} from '../kernel/interaction-types.js';
 
 const VARIABLE_SET = new Set<string>(TEMPLATE_VARIABLES);
 const HARD_RISK_SET = new Set<RiskTag>(HARD_RISK_TAGS);

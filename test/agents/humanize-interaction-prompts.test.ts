@@ -14,7 +14,7 @@ import { CommentComposer } from '../../src/agents/comment-composer.js';
 import { CommentDeAiFlavor } from '../../src/agents/comment-de-ai-flavor.js';
 import { SessionContext } from '../../src/agents/session-context.js';
 import type { NoteData } from '../../src/agents/content-curator-role.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 
 const soul: Soul = {
   identity: { name: 'TestBot', role: 'AI研发工程师', background: '大厂做 LLM 落地', tone: '技术向、偶尔幽默' },

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { clampTitle, graphemeCount, firstSentence } from '../../src/publish-agent/title-clamp.js';
+import { clampTitle, graphemeCount, firstSentence } from '../../src/kernel/title-clamp.js';
 
 describe('AC-TITLE-CLAMP 字形安全标题截断', () => {
   test('恰 18 可见字符 → 原样不变', () => {

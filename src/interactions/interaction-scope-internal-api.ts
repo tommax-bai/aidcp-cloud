@@ -4,7 +4,7 @@ import { isReplyPolicy, isReplyProfile, isReplyRule, isReplyTemplate } from './r
 import type { ReplyConfigResolver } from './reply-config-resolver.js';
 import type { ReplyConfigScopeStore } from './reply-config-scope-store.js';
 import type { ReplyWorkflow } from './reply-workflow.js';
-import { InteractionError, type ReplyConfigSource } from './types.js';
+import { InteractionError, type ReplyConfigSource } from '../kernel/interaction-types.js';
 import type { InteractionGrant } from './interaction-internal-api.js';
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {

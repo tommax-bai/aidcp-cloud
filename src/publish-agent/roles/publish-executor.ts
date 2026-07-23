@@ -18,7 +18,7 @@ import type {
   PublishApprovalCardData,
   PublishApprovalPayload,
 } from '../../comm/feishu-card-contract.js';
-import { clampTitle, firstSentence } from '../title-clamp.js';
+import { clampTitle, firstSentence } from '../../kernel/title-clamp.js';
 import { publishProfileForPlatform } from '../platform-profile.js';
 import { checkWritingLanguage } from '../../soul/writing-language.js';
 

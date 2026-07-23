@@ -4,7 +4,7 @@ import { EventBus } from '../../src/event-bus/index.js';
 import { CommentReviewer } from '../../src/agents/comment-reviewer.js';
 import { SessionContext } from '../../src/agents/session-context.js';
 import type { NoteData } from '../../src/agents/content-curator-role.js';
-import type { Soul } from '../../src/soul/types.js';
+import type { Soul } from '../../src/kernel/soul-types.js';
 import type { ReadingScrollCommentsPayload, ReadingDonePayload } from '../../src/event-bus/types.js';
 
 const mockSoul: Soul = {
