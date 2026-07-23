@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { ensureCapabilitySchema } from '../../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
 import {
@@ -23,7 +24,7 @@ test('首作状态使用账号级唯一行，并以条件 UPDATE 防止重复 cl
     },
     end: async () => {},
   } as unknown as pg.Pool;
-  const store = new FirstPostOnboardingStore({ pool });
+  const store = new FirstPostOnboardingStore({ schemaEnsurer: ensureCapabilitySchema, pool });
 
   assert.equal(await store.armFirstBind('acc-1'), true);
   assert.equal(await store.armFirstBind('acc-1'), false);

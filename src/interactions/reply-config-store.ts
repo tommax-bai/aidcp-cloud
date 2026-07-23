@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
-import { resolveEnvPgConfig } from '../cache/pg-config.js';
+import { resolveEnvPgConfig } from '../kernel/pg-config.js';
 import { normalizeReplyProfile, validateReplyConfig } from './reply-config.js';
 import {
   DEFAULT_REPLY_POLICY,

@@ -12,4 +12,4 @@ export * from './liked-note-store.js';
 export * from './valuable-comment-store.js';
 export * from './interaction-feed-store.js';
 export * from './group-route-store.js';
-export * from './pg-config.js';
+export * from '../kernel/pg-config.js';

@@ -25,7 +25,7 @@
  */
 
 import pg from 'pg';
-import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
 import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
 import {
   BUILTIN_FLOOR,

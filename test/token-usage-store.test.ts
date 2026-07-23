@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import { inferBillingProvider, TokenUsageStore, TOKEN_USAGE_SCHEMA_SQL } from '../src/metrics/token-usage-store.js';
@@ -38,7 +39,7 @@ test('default pool uses PG environment config', async () => {
     process.env.PGUSER = 'usage_user';
     process.env.PGPASSWORD = 'usage_password';
 
-    const store = new TokenUsageStore();
+    const store = new TokenUsageStore({ schemaEnsurer: ensureCapabilitySchema });
     pool = (store as unknown as { pool: pg.Pool }).pool;
     const options = pool.options as pg.PoolConfig;
     assert.equal(options.host, '10.9.8.7');
@@ -64,7 +65,7 @@ test('purgeOlderThan deletes old buckets and returns row count', async () => {
       return { rowCount: 9 };
     },
   } as unknown as pg.Pool;
-  const store = new TokenUsageStore({ pool });
+  const store = new TokenUsageStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const n = await store.purgeOlderThan(45);
   assert.equal(n, 9);
   assert.match(calls[0].sql, /DELETE FROM llm_token_usage WHERE bucket_start </);
@@ -116,7 +117,7 @@ function fakePool(opts: { failUpsert?: boolean } = {}) {
 
 test('same provider/model dimension accumulates into one upsert row', async () => {
   const { pool, upserts } = fakePool();
-  const store = new TokenUsageStore({ pool });
+  const store = new TokenUsageStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   store.add({
     accountId: 'acc-x',
     role: 'browse:content_evaluator',
@@ -150,7 +151,7 @@ test('same provider/model dimension accumulates into one upsert row', async () =
 
 test('different providers split rows even when model names match', async () => {
   const { pool, upserts } = fakePool();
-  const store = new TokenUsageStore({ pool });
+  const store = new TokenUsageStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   store.add({ accountId: 'acc-x', role: 'browse:a', provider: 'dashscope', model: 'same-model', ok: true, totalTokens: 1 });
   store.add({ accountId: 'acc-x', role: 'browse:a', provider: 'volcengine', model: 'same-model', ok: true, totalTokens: 2 });
   await store.flush();
@@ -163,7 +164,7 @@ test('different providers split rows even when model names match', async () => {
 
 test('missing accountId is dropped; missing role/provider/tokens keep honest labels', async () => {
   const { pool, upserts } = fakePool();
-  const store = new TokenUsageStore({ pool });
+  const store = new TokenUsageStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   store.add({ provider: 'dashscope', model: 'qwen-turbo', ok: true });
   await store.flush();
   assert.equal(upserts.length, 0);
@@ -180,7 +181,7 @@ test('missing accountId is dropped; missing role/provider/tokens keep honest lab
 
 test('flush failure is isolated and does not retry additive increments', async () => {
   const { pool } = fakePool({ failUpsert: true });
-  const store = new TokenUsageStore({ pool });
+  const store = new TokenUsageStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   store.add({ accountId: 'acc-x', role: 'browse:a', provider: 'dashscope', model: 'm', ok: true, totalTokens: 9 });
   await assert.doesNotReject(() => store.flush());
   await assert.doesNotReject(() => store.flush());
@@ -188,7 +189,7 @@ test('flush failure is isolated and does not retry additive increments', async (
 
 test('upsertBillingPrices stores billing-derived snapshots and rejects empty prices', async () => {
   const { pool, priceUpserts } = fakePool();
-  const store = new TokenUsageStore({ pool });
+  const store = new TokenUsageStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await assert.rejects(
     () =>
       store.upsertBillingPrices([
@@ -251,7 +252,7 @@ test('usage returns billing-backed cost estimate when snapshot joins', async () 
       };
     },
   } as unknown as pg.Pool;
-  const store = new TokenUsageStore({ pool });
+  const store = new TokenUsageStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const payload = await store.usage({ fromMs: 1783200000000, toMs: 1783286400000 });
   assert.match(seenSql[0] + seenSql[1], /LEFT JOIN LATERAL/);
   assert.match(seenSql[0] + seenSql[1], /ORDER BY p\.usage_day DESC/);
@@ -285,7 +286,7 @@ test('billingPriceTargets groups T-1/T-2 usage with inferred provider', async ()
       };
     },
   } as unknown as pg.Pool;
-  const store = new TokenUsageStore({ pool });
+  const store = new TokenUsageStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const targets = await store.billingPriceTargets(['2026-07-04', '2026-07-03', '2026-07-04']);
   assert.match(seen[0].sql, /lower\(model\) LIKE 'deepseek%'/);
   assert.match(seen[0].sql, /provider <> 'unknown'/);

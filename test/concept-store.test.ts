@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
 import { CONCEPT_SCHEMA_SQL, ConceptStore } from '../src/cache/concept-store.js';
@@ -35,7 +36,7 @@ test('getNewConceptsWithSourceSince 带回来源标题，source_note 为空落 n
         ]
       : [],
   );
-  const store = new ConceptStore({ pool });
+  const store = new ConceptStore({ schemaEnsurer: ensureCapabilitySchema, pool });
 
   const result = await store.getNewConceptsWithSourceSince(1000);
 

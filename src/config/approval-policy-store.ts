@@ -6,9 +6,9 @@
  * card. Missing rows preserve the legacy behavior.
  */
 import pg from 'pg';
-import { resolveEnvPgConfig } from '../cache/pg-config.js';
+import { resolveEnvPgConfig } from '../kernel/pg-config.js';
 import { RETIRED_ACCOUNT_ID } from '../account-store.js';
-import { ensureCapabilitySchema } from '../schema/schema-capability.js';
+import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 
 const { Pool } = pg;
 
@@ -64,6 +64,8 @@ export type SetGroupPublishApprovalPolicyResult =
 
 export interface ApprovalPolicyStoreOptions {
   pool?: pg.Pool;
+  /** schema 保障能力注入端口（必填、无默认）：组合根传 automation 的 ensureCapabilitySchema，本文件只从 kernel 取类型。 */
+  schemaEnsurer: SchemaEnsurer;
 }
 
 function isMissingTable(error: unknown): boolean {
@@ -81,14 +83,17 @@ function groupDelivery(value: unknown): GroupPublishApprovalDelivery {
 export class ApprovalPolicyStore {
   private readonly pool: pg.Pool;
 
-  constructor(options: ApprovalPolicyStoreOptions = {}) {
+  private readonly schemaEnsurer: SchemaEnsurer;
+
+  constructor(options: ApprovalPolicyStoreOptions) {
+    this.schemaEnsurer = options.schemaEnsurer;
     this.pool = options.pool ?? new Pool(resolveEnvPgConfig());
   }
 
   async init(): Promise<void> {
     // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
     // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
-    await ensureCapabilitySchema(this.pool, {
+    await this.schemaEnsurer(this.pool, {
       capability: 'approval_policy',
       sinceVersion: '0056_scoped_approval_policy',
       ddl: [APPROVAL_POLICY_SCHEMA_SQL],

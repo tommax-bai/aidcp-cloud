@@ -12,10 +12,10 @@
  */
 
 import pg from 'pg';
-import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
 import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
 import { normalizeThinkingMode, type ThinkingMode } from './role-catalog.js';
-import { ensureCapabilitySchema } from '../schema/schema-capability.js';
+import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 
 const { Pool } = pg;
 
@@ -67,6 +67,8 @@ export interface RoleConfigStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /** schema 保障能力注入端口（必填、无默认）：组合根传 automation 的 ensureCapabilitySchema，本文件只从 kernel 取类型。 */
+  schemaEnsurer: SchemaEnsurer;
   /** 跨进程失效通道：写入与版本推进同事务。缺省 = 不推版本（行为逐位退回今日现状）。 */
   mirrorVersionBumper?: MirrorVersionBumper;
 }
@@ -86,7 +88,10 @@ export class RoleConfigStore {
   private readonly mirrorVersionBumper?: MirrorVersionBumper;
   private cache = new Map<string, RoleConfigRow>();
 
-  constructor(options: RoleConfigStoreOptions = {}) {
+  private readonly schemaEnsurer: SchemaEnsurer;
+
+  constructor(options: RoleConfigStoreOptions) {
+    this.schemaEnsurer = options.schemaEnsurer;
     this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.pool =
       options.pool ??
@@ -103,7 +108,7 @@ export class RoleConfigStore {
   async init(): Promise<void> {
     // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
     // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
-    await ensureCapabilitySchema(this.pool, {
+    await this.schemaEnsurer(this.pool, {
       capability: 'role_config',
       sinceVersion: '0008_role_config',
       ddl: [ROLE_CONFIG_SCHEMA_SQL, ROLE_CONFIG_ALTER_SQL],

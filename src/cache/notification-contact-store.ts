@@ -16,9 +16,9 @@
 import pg from 'pg';
 // DEFAULT_PG_CONFIG 的真实归属是 kernel（pg-config.ts），pg-anchor-cache 只是再导出；api
 // 直连 kernel（api→kernel 恒允许），取值逐字不变，消去 api→automation 这一跨边界豁免。
-import { DEFAULT_PG_CONFIG } from './pg-config.js';
+import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
 import type { NotificationItem } from '../comm/protocol.js';
-import { ensureCapabilitySchema } from '../schema/schema-capability.js';
+import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 
 const { Pool } = pg;
 
@@ -82,6 +82,8 @@ export interface NotificationContactStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /** schema 保障能力注入端口（必填、无默认）：组合根传 automation 的 ensureCapabilitySchema，本文件只从 kernel 取类型。 */
+  schemaEnsurer: SchemaEnsurer;
   /** 每账号事件保留上限（行数），超出裁最旧。默认 5000。 */
   retentionMax?: number;
 }
@@ -128,7 +130,10 @@ export class NotificationContactStore {
   private readonly pool: pg.Pool;
   private readonly retentionMax: number;
 
-  constructor(options: NotificationContactStoreOptions = {}) {
+  private readonly schemaEnsurer: SchemaEnsurer;
+
+  constructor(options: NotificationContactStoreOptions) {
+    this.schemaEnsurer = options.schemaEnsurer;
     this.retentionMax = options.retentionMax ?? 5000;
     this.pool =
       options.pool ??
@@ -145,7 +150,7 @@ export class NotificationContactStore {
   async init(): Promise<void> {
     // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
     // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
-    await ensureCapabilitySchema(this.pool, {
+    await this.schemaEnsurer(this.pool, {
       capability: 'notification_contact',
       sinceVersion: '0016_notification_contacts',
       ddl: [NOTIFICATION_CONTACT_SCHEMA_SQL],

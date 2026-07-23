@@ -18,6 +18,30 @@
 
 export type SchemaCapabilityStatus = 'ready' | 'degraded' | 'missing';
 
+/**
+ * 最小查询接口（生产传 pg.Pool / pg.Client，测试传桩）。
+ *
+ * 单一定义处：连库探测执行段（`src/schema/pg-catalog.ts` / `schema-capability.ts`）从本文件
+ * 复用此形状。它是纯结构化契约（无 SQL、无活状态），随 `SchemaEnsurer` 端口一并进 kernel，
+ * 让只需注入 schema 保障能力的存储从 kernel 取类型、靠注入拿函数，不再跨边界导入 automation。
+ */
+export interface SchemaQueryable {
+  query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+}
+
+/**
+ * 存储 `init()` 期「探测 schema、不 ready 就 fail-closed」这一步的**注入端口**。
+ *
+ * 唯一实现是 automation 层 `src/schema/schema-capability.ts` 的 `ensureCapabilitySchema`（内部走
+ * information_schema/pg_catalog 探测，含 SQL，MUST NOT 进 kernel）。存储 Options 声明本类型（必填），
+ * 由组合根 `src/server.ts` 在构造点注入那一个同款函数、同一 pool、同一 spec、同一 init() 时机；
+ * 运行时行为与直接 import 调用一字不变。存储因此只从 kernel 取**类型**，消除对 automation 的 import 边。
+ */
+export type SchemaEnsurer = (
+  client: SchemaQueryable,
+  spec: SchemaCapabilitySpec,
+) => Promise<SchemaCapabilityStatus>;
+
 export interface SchemaShape {
   /** 库里实际存在的表名 */
   tables: Set<string>;

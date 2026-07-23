@@ -18,7 +18,7 @@
  */
 
 import pg from 'pg';
-import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
 import { parseDeploymentTarget, type DeploymentTarget } from '../deployment-target.js';
 
 const { Pool } = pg;

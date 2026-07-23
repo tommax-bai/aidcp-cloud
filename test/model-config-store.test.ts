@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import { ModelConfigStore, MODEL_CONFIG_DEFAULTS, MODEL_CONFIG_SCHEMA_SQL, MODEL_CONFIG_ALTER_SQL } from '../src/config/model-config-store.js';
@@ -32,13 +33,13 @@ function fakeModelPool(seed?: { text_model: string | null; text_provider?: strin
 }
 
 test('缺行 → 回退代码默认（qwen3.7-plus / wan2.7-image-pro；qwen-turbo 2026-07-13 下架不再作兜底）', async () => {
-  const store = new ModelConfigStore({ pool: fakeModelPool() as unknown as pg.Pool });
+  const store = new ModelConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool: fakeModelPool() as unknown as pg.Pool });
   await store.init();
   assert.deepEqual(store.getCached(), MODEL_CONFIG_DEFAULTS);
 });
 
 test('set 后 getCached 即时热加载（无需重启）', async () => {
-  const store = new ModelConfigStore({ pool: fakeModelPool() as unknown as pg.Pool });
+  const store = new ModelConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool: fakeModelPool() as unknown as pg.Pool });
   await store.init();
   const after = await store.set({ textModel: 'qwen-plus' }, 'admin');
   assert.equal(after.textModel, 'qwen-plus');
@@ -47,7 +48,7 @@ test('set 后 getCached 即时热加载（无需重启）', async () => {
 });
 
 test('空 / 空白字段不覆盖原值', async () => {
-  const store = new ModelConfigStore({ pool: fakeModelPool() as unknown as pg.Pool });
+  const store = new ModelConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool: fakeModelPool() as unknown as pg.Pool });
   await store.init();
   await store.set({ textModel: 'qwen-max' }, 'a');
   await store.set({ textModel: '   ' }, 'a'); // 空白忽略
@@ -55,7 +56,7 @@ test('空 / 空白字段不覆盖原值', async () => {
 });
 
 test('已有行 → init 载入库内值而非默认', async () => {
-  const store = new ModelConfigStore({
+  const store = new ModelConfigStore({ schemaEnsurer: ensureCapabilitySchema,
     pool: fakeModelPool({ text_model: 'qwen-max', image_model: 'wan2.5' }) as unknown as pg.Pool,
   });
   await store.init();
@@ -64,7 +65,7 @@ test('已有行 → init 载入库内值而非默认', async () => {
 });
 
 test('textProvider 缺省 dashscope；set 后热加载 + 持久化（含火山）', async () => {
-  const store = new ModelConfigStore({ pool: fakeModelPool() as unknown as pg.Pool });
+  const store = new ModelConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool: fakeModelPool() as unknown as pg.Pool });
   await store.init();
   assert.equal(store.getCached().textProvider, 'dashscope'); // 缺省零回归基准
   const after = await store.set({ textModel: 'doubao-seed-1-6', textProvider: 'volcengine' }, 'admin');
@@ -75,7 +76,7 @@ test('textProvider 缺省 dashscope；set 后热加载 + 持久化（含火山�
 });
 
 test('已有 text_provider 行 → init 载入库内厂商', async () => {
-  const store = new ModelConfigStore({
+  const store = new ModelConfigStore({ schemaEnsurer: ensureCapabilitySchema,
     pool: fakeModelPool({ text_model: 'doubao-seed-1-6', text_provider: 'volcengine', image_model: 'wan2.5' }) as unknown as pg.Pool,
   });
   await store.init();

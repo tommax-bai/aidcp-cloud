@@ -11,10 +11,10 @@
  * 两条路径曾各写一份查询、结论相反。收口到这里，是为了消掉「同一件事两份口径」这个必然漂移的结构。
  */
 
-/** 最小查询接口（生产传 pg.Pool / pg.Client，测试传桩）。 */
-export interface SchemaQueryable {
-  query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
-}
+// 最小查询接口的单一定义处已上移 kernel（`../kernel/schema-capability-contract.ts`，随 SchemaEnsurer
+// 端口一并进 kernel，any→kernel 恒允许）；此处原样 re-export，保住同层既有 import 路径。
+export type { SchemaQueryable } from '../kernel/schema-capability-contract.js';
+import type { SchemaQueryable } from '../kernel/schema-capability-contract.js';
 
 export interface TableColumns {
   /** 库里实际存在的表名 */

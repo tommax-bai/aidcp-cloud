@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { ensureCapabilitySchema } from '../../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
 import { CuratedContentStore } from '../../src/cache/curated-content-store.js';
@@ -18,7 +19,7 @@ const analysis: ReferenceVisualAnalysis = {
 test('visual analysis 缓存单语句核有序图片锚且不抬 updated_at', async () => {
   const calls: Array<{ sql: string; params: unknown[] }> = [];
   const pool = { query: async (sql: string, params: unknown[]) => { calls.push({ sql, params }); return { rows: [], rowCount: 1 }; } } as unknown as pg.Pool;
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const ok = await store.annotateReferenceVisualAnalysis(9, analysis, [{ sourceArrayIndex: 0, sourceIndex: 3, capturedAt: 88, url: 'https://oss/a.jpg' }]);
   assert.equal(ok, true);
   assert.equal(calls.length, 1);
@@ -32,7 +33,7 @@ test('visual analysis 缓存单语句核有序图片锚且不抬 updated_at', as
 test('unavailable 结果不写缓存，避免负缓存/假 analyzed', async () => {
   let called = false;
   const pool = { query: async () => { called = true; return { rows: [], rowCount: 1 }; } } as unknown as pg.Pool;
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const ok = await store.annotateReferenceVisualAnalysis(9, { ...analysis, status: 'unavailable' }, [{ sourceArrayIndex: 0, sourceIndex: 3, capturedAt: 88, url: 'u' }]);
   assert.equal(ok, false);
   assert.equal(called, false);

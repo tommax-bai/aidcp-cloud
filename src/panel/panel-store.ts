@@ -10,7 +10,7 @@
  */
 
 import pg from 'pg';
-import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
 import { SHANGHAI_DAY_START_SQL } from '../time/shanghai-day.js';
 import {
   RISK_ACTIONS,

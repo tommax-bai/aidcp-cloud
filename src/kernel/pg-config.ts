@@ -1,9 +1,10 @@
 /**
  * PostgreSQL 连接参数解析（kernel 层，见控制仓定稿 §4.7 kernel 花名册）。
  *
- * kernel 准入要求本文件 MUST NOT 反向依赖任何业务层，因此默认连接配置常量从
- * `pg-anchor-cache.ts`（automation 层）**整体搬到这里**，`pg-anchor-cache.ts` 改为再导出，
- * 引用方无需改动、取值逐字不变。
+ * kernel 准入要求本文件 MUST NOT 反向依赖任何业务层：唯一 import 是 `import type pg`，
+ * 无 SQL 字面量、无业务依赖、无进程内活状态。消费方一律**直接从本文件** import
+ * `DEFAULT_PG_CONFIG` / `resolveEnvPgConfig`（any→kernel 恒允许），不再经 automation 层
+ * `pg-anchor-cache.ts` 的历史再导出取值，取值逐字不变。
  *
  * 明文口令兜底是既存事实，本次只做搬迁、MUST NOT 视为已处置：
  * 删除该兜底并改为纯配置读取是定稿 §6.5.6 列的**拆分前置条件**（独立 change 承接），

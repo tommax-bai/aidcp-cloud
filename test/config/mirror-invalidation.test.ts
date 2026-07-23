@@ -6,6 +6,7 @@
  */
 
 import { test } from 'node:test';
+import { ensureCapabilitySchema } from '../../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import {
@@ -290,7 +291,7 @@ test('3.5 整体开关关闭 → 不安装事实源，全部闸门按今日现�
 
 test('7.3 未知不得压成否：人设副本陈旧 → bindingFor 返回 unknown，绝不返回 unbound', withFreshnessCleanup(async () => {
   const db = fakePg();
-  const store = new PersonaStore({ pool: db.pool });
+  const store = new PersonaStore({ schemaEnsurer: ensureCapabilitySchema, pool: db.pool });
   await store.init();
   // 副本里本来就没有这个账号：权威可读时 = 未绑。
   assert.equal(store.bindingFor('acc-1'), 'unbound');

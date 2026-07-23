@@ -78,7 +78,7 @@
     { "path": "src/cache/concept-store.ts", "layer": "content", "basis": "§4.7 src/cache/ 逐文件表" },
     { "path": "src/cache/notification-contact-store.ts", "layer": "api", "basis": "§4.7 src/cache/ 逐文件表" },
     { "path": "src/cache/bot-chat-store.ts", "layer": "api", "basis": "§4.7 src/cache/ 逐文件表" },
-    { "path": "src/cache/pg-config.ts", "layer": "kernel", "basis": "§4.7 kernel 花名册 4 文件之一（27 行）" },
+    { "path": "src/kernel/pg-config.ts", "layer": "kernel", "basis": "§4.7 kernel 花名册成员（27 行）。change decouple-store-schema-pgconfig-cluster 从 src/cache/pg-config.ts git mv 到 src/kernel/（物理位置归位 kernel 目录，字节等价，唯一 import 是 import type pg，无 SQL / 无业务依赖 / 无进程内活状态）。消费方改为直接从 kernel import DEFAULT_PG_CONFIG，消除经 pg-anchor-cache（automation）再导出的跨边界边。请求回写 §4.7 见 docpatch" },
 
     { "path": "src/cli/test-feishu.ts", "layer": "api", "basis": "§4.7 src/cli/ 逐文件表：调用面为飞书（§4.6.2）" },
     { "path": "src/cli/trigger-like.ts", "layer": "automation", "basis": "§4.7 src/cli/ 逐文件表：导入边云协议并下发互动命令" },

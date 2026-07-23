@@ -14,8 +14,8 @@
 
 import crypto from 'node:crypto';
 import pg from 'pg';
-import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
-import { ensureCapabilitySchema } from '../schema/schema-capability.js';
+import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
+import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 
 const { Pool } = pg;
 
@@ -67,6 +67,8 @@ export interface CredentialStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /** schema 保障能力注入端口（必填、无默认）：组合根传 automation 的 ensureCapabilitySchema，本文件只从 kernel 取类型。 */
+  schemaEnsurer: SchemaEnsurer;
   /** 主加密密钥（默认读 env AIDCP_CRED_KEY）。 */
   masterKeyRaw?: string;
 }
@@ -79,7 +81,10 @@ export class CredentialStore {
   private readonly pool: pg.Pool;
   private readonly masterKey: Buffer | null;
 
-  constructor(options: CredentialStoreOptions = {}) {
+  private readonly schemaEnsurer: SchemaEnsurer;
+
+  constructor(options: CredentialStoreOptions) {
+    this.schemaEnsurer = options.schemaEnsurer;
     this.pool =
       options.pool ??
       new Pool({
@@ -95,7 +100,7 @@ export class CredentialStore {
   async init(): Promise<void> {
     // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
     // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
-    await ensureCapabilitySchema(this.pool, {
+    await this.schemaEnsurer(this.pool, {
       capability: 'provider_credentials',
       sinceVersion: '0007_model_config',
       ddl: [PROVIDER_CREDENTIALS_SCHEMA_SQL],

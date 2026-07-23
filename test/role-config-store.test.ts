@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import { RoleConfigStore, ROLE_CONFIG_SCHEMA_SQL, ROLE_CONFIG_ALTER_SQL } from '../src/config/role-config-store.js';
@@ -39,14 +40,14 @@ function fakePool(seed: Record<string, { model: string | null; provider?: string
 
 test('缺行 → getForRole 回落空（model/temperature 均 null）', async () => {
   const { pool } = fakePool();
-  const store = new RoleConfigStore({ pool });
+  const store = new RoleConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.init();
   assert.deepEqual(store.getForRole('browse:content_evaluator'), { model: null, provider: null, temperature: null, thinkingMode: null });
 });
 
 test('set 后 getForRole 即时热加载（无需重启）', async () => {
   const { pool } = fakePool();
-  const store = new RoleConfigStore({ pool });
+  const store = new RoleConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.init();
   const row = await store.set('publish:ContentCreator', { model: 'qwen-max', provider: 'volcengine', temperature: 0.7 }, 'alice');
   assert.equal(row.model, 'qwen-max');
@@ -58,7 +59,7 @@ test('set 后 getForRole 即时热加载（无需重启）', async () => {
 
 test('思考模式独立读写 + 不动模型行（change role-thinking-mode-config）', async () => {
   const { pool } = fakePool();
-  const store = new RoleConfigStore({ pool });
+  const store = new RoleConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.init();
   // 先设模型（含 provider/温度）
   await store.set('publish:ContentCreator', { model: 'qwen-max', provider: 'dashscope', temperature: 0.7 }, 'a');
@@ -81,7 +82,7 @@ test('思考模式独立读写 + 不动模型行（change role-thinking-mode-con
 
 test('越界温度归一为 null（不落非法值）', async () => {
   const { pool } = fakePool();
-  const store = new RoleConfigStore({ pool });
+  const store = new RoleConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.init();
   const row = await store.set('publish:ContentCreator', { temperature: 9 }, 'a');
   assert.equal(row.temperature, null);
@@ -89,7 +90,7 @@ test('越界温度归一为 null（不落非法值）', async () => {
 
 test('空模型名清除覆盖（回落）', async () => {
   const { pool } = fakePool({ 'browse:comment_composer': { model: 'qwen-max', temperature: null } });
-  const store = new RoleConfigStore({ pool });
+  const store = new RoleConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.init();
   assert.equal(store.getForRole('browse:comment_composer').model, 'qwen-max');
   await store.set('browse:comment_composer', { model: '' }, 'a');
@@ -98,7 +99,7 @@ test('空模型名清除覆盖（回落）', async () => {
 
 test('写库失败 → 内存镜像不变（绝不镜像/库不一致）', async () => {
   const { pool, setFailWrite } = fakePool({ 'browse:comment_composer': { model: 'qwen-plus', temperature: null } });
-  const store = new RoleConfigStore({ pool });
+  const store = new RoleConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.init();
   setFailWrite(true);
   await assert.rejects(store.set('browse:comment_composer', { model: 'qwen-max' }, 'a'));
@@ -107,7 +108,7 @@ test('写库失败 → 内存镜像不变（绝不镜像/库不一致）', async
 
 test('getAll 暴露审计字段（updatedAt/By）', async () => {
   const { pool } = fakePool();
-  const store = new RoleConfigStore({ pool });
+  const store = new RoleConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.init();
   await store.set('publish:ContentCreator', { model: 'qwen-max' }, 'bob');
   const row = store.getAll().get('publish:ContentCreator');

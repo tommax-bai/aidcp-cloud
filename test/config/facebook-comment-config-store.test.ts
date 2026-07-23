@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { ensureCapabilitySchema } from '../../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import { FacebookCommentConfigStore } from '../../src/config/facebook-comment-config-store.js';
@@ -48,7 +49,7 @@ function fakePool(opts: { accountExists?: boolean; returning?: unknown } = {}): 
 
 test('getForAccount: 缺行返回空默认（供面板回显）', () => {
   const { pool } = fakePool();
-  const store = new FacebookCommentConfigStore({ pool });
+  const store = new FacebookCommentConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const row = store.getForAccount('acc-1');
   assert.deepEqual(row, {
     accountId: 'acc-1',
@@ -63,7 +64,7 @@ test('getForAccount: 缺行返回空默认（供面板回显）', () => {
 
 test('effectiveConfigFor: fail-closed — 无关键词或模板模式无模板则不生效；容器不再决定启用', async () => {
   const { pool } = fakePool();
-  const store = new FacebookCommentConfigStore({ pool });
+  const store = new FacebookCommentConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   // 空配置
   assert.equal(store.effectiveConfigFor('acc-1').enabled, false);
   // 只有关键词、无 legacy 容器 → 生成模式仍生效；目标群由 joined ledger 运行时选择。
@@ -85,7 +86,7 @@ test('effectiveConfigFor: fail-closed — 无关键词或模板模式无模板�
 
 test('setAccount: sanitize（trim/去空串/去重），写 JSONB，写成功刷缓存', async () => {
   const { calls, pool } = fakePool();
-  const store = new FacebookCommentConfigStore({ pool });
+  const store = new FacebookCommentConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const r = await store.setAccount('acc-1', { keywords: [' coffee ', 'coffee', '', 'tea'], containers: ['g1'] }, 'panel:op');
   assert.equal(r.ok, true);
   assert.deepEqual((r as { ok: true; row: { keywords: string[] } }).row.keywords, ['coffee', 'tea']);
@@ -98,7 +99,7 @@ test('setAccount: sanitize（trim/去空串/去重），写 JSONB，写成功刷
 
 test('setAccount: 部分补丁（只改容器）保留原关键词', async () => {
   const { pool } = fakePool();
-  const store = new FacebookCommentConfigStore({ pool });
+  const store = new FacebookCommentConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.setAccount('acc-1', { keywords: ['coffee'], containers: ['g1'] }, 'panel:op');
   await store.setAccount('acc-1', { containers: ['g1', 'g2'] }, 'panel:op'); // 不传 keywords
   const row = store.getForAccount('acc-1');
@@ -108,7 +109,7 @@ test('setAccount: 部分补丁（只改容器）保留原关键词', async () =>
 
 test('setAccount: mode/templates sanitize（trim/去空串/去重），部分补丁保留旧值', async () => {
   const { calls, pool } = fakePool();
-  const store = new FacebookCommentConfigStore({ pool });
+  const store = new FacebookCommentConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.setAccount(
     'acc-1',
     { keywords: ['coffee'], commentMode: 'template', commentTemplates: [' hi coffee ', 'hi coffee', '', 'nice coffee'] },
@@ -129,7 +130,7 @@ test('setAccount: mode/templates sanitize（trim/去空串/去重），部分补
 
 test('容器向后兼容 + 群名：接受裸 url 与 {url,name}，按 url 去重；resolveContainerName 回填真名', async () => {
   const { pool } = fakePool();
-  const store = new FacebookCommentConfigStore({ pool });
+  const store = new FacebookCommentConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   // 混合入参：裸 url + {url,name} + 重复 url（后者被去重）。
   await store.setAccount(
     'acc-1',
@@ -150,7 +151,7 @@ test('容器向后兼容 + 群名：接受裸 url 与 {url,name}，按 url 去�
 
 test('setAccount: 非法值（非字符串数组）整块拒 invalid_value，不刷缓存', async () => {
   const { pool } = fakePool();
-  const store = new FacebookCommentConfigStore({ pool });
+  const store = new FacebookCommentConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const r1 = await store.setAccount('acc-1', { keywords: [123 as unknown as string] }, 'panel:op');
   assert.deepEqual(r1, { ok: false, reason: 'invalid_value' });
   const r2 = await store.setAccount('acc-1', { keywords: 'coffee' as unknown as string[] }, 'panel:op');
@@ -163,14 +164,14 @@ test('setAccount: 非法值（非字符串数组）整块拒 invalid_value，不
 
 test('setAccount: 无有效字段（空补丁）→ no_valid_fields', async () => {
   const { pool } = fakePool();
-  const store = new FacebookCommentConfigStore({ pool });
+  const store = new FacebookCommentConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const r = await store.setAccount('acc-1', {}, 'panel:op');
   assert.deepEqual(r, { ok: false, reason: 'no_valid_fields' });
 });
 
 test('setAccount: 退役账号拒 retired_account（不查库）', async () => {
   const { calls, pool } = fakePool();
-  const store = new FacebookCommentConfigStore({ pool });
+  const store = new FacebookCommentConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const r = await store.setAccount('default', { keywords: ['x'], containers: ['g'] }, 'panel:op');
   assert.deepEqual(r, { ok: false, reason: 'retired_account' });
   assert.equal(calls.length, 0, '退役账号绝不查库/建行');
@@ -178,7 +179,7 @@ test('setAccount: 退役账号拒 retired_account（不查库）', async () => {
 
 test('setAccount: 账号不存在拒 account_not_found（防幽灵行）', async () => {
   const { pool } = fakePool({ accountExists: false });
-  const store = new FacebookCommentConfigStore({ pool });
+  const store = new FacebookCommentConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const r = await store.setAccount('ghost', { keywords: ['x'], containers: ['g'] }, 'panel:op');
   assert.deepEqual(r, { ok: false, reason: 'account_not_found' });
 });

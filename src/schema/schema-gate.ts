@@ -13,7 +13,7 @@
 
 import pg from 'pg';
 
-import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
 import { loadMigrationFiles } from './migration-files.js';
 import { versionOf } from './migration-plan.js';
 import {

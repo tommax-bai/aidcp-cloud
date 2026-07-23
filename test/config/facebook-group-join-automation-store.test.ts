@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { ensureCapabilitySchema } from '../../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import { FACEBOOK_GROUP_JOIN_AUTOMATION_CONFIG_SCHEMA_SQL, FACEBOOK_GROUP_JOIN_AUTOMATION_DAILY_CAP_MAX, FacebookGroupJoinAutomationStore } from '../../src/config/facebook-group-join-automation-store.js';
@@ -79,7 +80,7 @@ test('schema: 配置表可在 accounts 初始化前 additive 建表，默认关�
 
 test('init/getForAccount: 缺行默认关闭且不造行；已有数据库真态载入镜像', async () => {
   const empty = fakePool();
-  const emptyStore = new FacebookGroupJoinAutomationStore({ pool: empty.pool });
+  const emptyStore = new FacebookGroupJoinAutomationStore({ schemaEnsurer: ensureCapabilitySchema, pool: empty.pool });
   await emptyStore.init();
   assert.deepEqual(emptyStore.getForAccount('fb-empty'), {
     accountId: 'fb-empty',
@@ -104,7 +105,7 @@ test('init/getForAccount: 缺行默认关闭且不造行；已有数据库真态
       updated_by: 'panel:seed',
     },
   });
-  const seededStore = new FacebookGroupJoinAutomationStore({ pool: seeded.pool });
+  const seededStore = new FacebookGroupJoinAutomationStore({ schemaEnsurer: ensureCapabilitySchema, pool: seeded.pool });
   await seededStore.init();
   assert.deepEqual(seededStore.getForAccount('fb-1'), {
     accountId: 'fb-1',
@@ -118,7 +119,7 @@ test('init/getForAccount: 缺行默认关闭且不造行；已有数据库真态
 
 test('setAccount: 合法完整写与部分写均以 RETURNING 回真态，未传字段原子保留', async () => {
   const { calls, pool } = fakePool();
-  const store = new FacebookGroupJoinAutomationStore({ pool });
+  const store = new FacebookGroupJoinAutomationStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const created = await store.setAccount(
     'fb-1',
     { enabled: true, dailyCap: 2, weekMask: FULL },
@@ -160,7 +161,7 @@ test('setAccount: weekMask 显式 null 可清覆盖，未传则保留', async ()
       updated_by: 'seed',
     },
   });
-  const store = new FacebookGroupJoinAutomationStore({ pool });
+  const store = new FacebookGroupJoinAutomationStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.init();
   const result = await store.setAccount('fb-1', { weekMask: null }, 'panel:alice');
   assert.equal(result.ok, true);
@@ -182,7 +183,7 @@ test('setAccount: 所有字段先校验，非法补丁整块拒且完全不查�
     { enabled: true, dailyCap: 11, weekMask: FULL },
   ]) {
     const { calls, pool } = fakePool();
-    const store = new FacebookGroupJoinAutomationStore({ pool });
+    const store = new FacebookGroupJoinAutomationStore({ schemaEnsurer: ensureCapabilitySchema, pool });
     const result = await store.setAccount(
       'fb-1',
       patch as { enabled?: boolean; dailyCap?: number; weekMask?: string | null },
@@ -205,7 +206,7 @@ test('setAccount: 账号不存在与非 Facebook/未知平台具名拒绝，均�
     { platform: null },
   ]) {
     const { calls, pool } = fakePool(options);
-    const store = new FacebookGroupJoinAutomationStore({ pool });
+    const store = new FacebookGroupJoinAutomationStore({ schemaEnsurer: ensureCapabilitySchema, pool });
     const result = await store.setAccount('account-1', { enabled: true }, 'panel:alice');
     assert.deepEqual(result, {
       ok: false,
@@ -218,13 +219,13 @@ test('setAccount: 账号不存在与非 Facebook/未知平台具名拒绝，均�
   }
 
   const alias = fakePool({ platform: ' FB ' });
-  const aliasStore = new FacebookGroupJoinAutomationStore({ pool: alias.pool });
+  const aliasStore = new FacebookGroupJoinAutomationStore({ schemaEnsurer: ensureCapabilitySchema, pool: alias.pool });
   assert.equal((await aliasStore.setAccount('fb-alias', { enabled: false }, 'panel:alice')).ok, true);
 });
 
 test('setAccount: UPSERT 未 RETURNING 时抛错且不伪造成功/不刷新镜像', async () => {
   const { pool } = fakePool({ emptyReturning: true });
-  const store = new FacebookGroupJoinAutomationStore({ pool });
+  const store = new FacebookGroupJoinAutomationStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await assert.rejects(
     store.setAccount('fb-1', { enabled: true, dailyCap: 1 }, 'panel:alice'),
     /upsert returned no row/,

@@ -21,7 +21,7 @@
 import pg from 'pg';
 // DEFAULT_PG_CONFIG 的真实归属是 kernel（pg-config.ts），pg-anchor-cache 只是再导出；content
 // 直连 kernel（content→kernel 恒允许），取值逐字不变，消去 content→automation 这一跨边界豁免。
-import { DEFAULT_PG_CONFIG } from './pg-config.js';
+import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
 import type { DelegatedExecutionTarget } from '../delegated-task/types.js';
 import type { ReferenceVisualAnalysis } from '../kernel/visual-reference-types.js';
 import type { VisualAnalysisAnchor } from '../publish-agent/visual-reference-analyzer.js';
@@ -32,7 +32,7 @@ import {
   type SourcePublishedAtStatus,
   type SourcePublishedTime,
 } from '../time/source-published-time.js';
-import { ensureCapabilitySchema } from '../schema/schema-capability.js';
+import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 // 硬编码 `'public.'` 收口到唯一解析点（change cloud-schema-migration-executor 任务 5.5 / D8 第 4 条）：
 // 改 search_path 救不了写死在字面量里的 schema 名，搬 schema 时它会静默指错地方。
 import { qualifiedObjectName } from '../kernel/schema-name.js';
@@ -305,6 +305,8 @@ export interface CuratedContentStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /** schema 保障能力注入端口（必填、无默认）：组合根传 automation 的 ensureCapabilitySchema，本文件只从 kernel 取类型。 */
+  schemaEnsurer: SchemaEnsurer;
   /** 每账号保留上限（行数），超出裁最旧。默认 1000。 */
   retentionMax?: number;
   referenceImageLimit?: number;
@@ -771,7 +773,10 @@ export class CuratedContentStore {
   private readonly logger?: Pick<Console, 'warn'>;
   private readonly executionTarget?: DelegatedExecutionTarget;
 
-  constructor(options: CuratedContentStoreOptions = {}) {
+  private readonly schemaEnsurer: SchemaEnsurer;
+
+  constructor(options: CuratedContentStoreOptions) {
+    this.schemaEnsurer = options.schemaEnsurer;
     this.retentionMax = options.retentionMax ?? 1000;
     this.referenceImageLimit = clampReferenceImageLimit(options.referenceImageLimit);
     this.referenceImageRelocator = options.referenceImageRelocator;
@@ -793,7 +798,7 @@ export class CuratedContentStore {
   async init(): Promise<void> {
     // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
     // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
-    await ensureCapabilitySchema(this.pool, {
+    await this.schemaEnsurer(this.pool, {
       capability: 'curated_content',
       sinceVersion: '0066_baseline_cache_corpus_tables',
       ddl: [CURATED_CONTENT_SCHEMA_SQL],

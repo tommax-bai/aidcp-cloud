@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import pg from 'pg';
@@ -34,7 +35,7 @@ test('listAllEnvironments: 行映射为视图，assigneeCount = assignees 长度
       ],
     };
   });
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const envs = await store.listAllEnvironments();
   assert.equal(envs.length, 2);
   assert.deepEqual(envs[0], {
@@ -60,7 +61,7 @@ test('listAllEnvironments: 行映射为视图，assigneeCount = assignees 长度
 
 test('listAllEnvironments: json_agg 为 null 时回落空 assignees（count 0）', async () => {
   const pool = fakePool(() => ({ rows: [{ env_key: 'p3', label: null, platform: null, assignees: null }] }));
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const [env] = await store.listAllEnvironments();
   assert.deepEqual(env.assignees, []);
   assert.equal(env.assigneeCount, 0);
@@ -73,7 +74,7 @@ test('listAllEnvironments: binding-missing hold 映射为不含伪 accountId 的
     hold_id: '6f421ba8-b921-4c5d-bff2-65f330e3c227', hold_reason: 'admin_revoked',
     hold_requested_at: requestedAt,
   }] }));
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const [env] = await store.listAllEnvironments();
   assert.deepEqual(env.cleanup, {
     kind: 'binding_missing', revocationId: '6f421ba8-b921-4c5d-bff2-65f330e3c227',
@@ -88,7 +89,7 @@ test('listAllEnvironments: 缺表(42P01)fail-closed 回落空数组，不抛', a
     err.code = '42P01';
     throw err;
   });
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   assert.deepEqual(await store.listAllEnvironments(), []);
 });
 
@@ -98,7 +99,7 @@ test('listAllEnvironments: 非缺表错误照常抛出（不吞真故障）', as
     err.code = 'ECONNREFUSED';
     throw err;
   });
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await assert.rejects(() => store.listAllEnvironments(), /connection refused/);
 });
 
@@ -120,7 +121,7 @@ function recordingPool() {
 
 test('registerEnvironments: 去空白 + 去重 + 跳空，每条一次 upsert，返回去重条数', async () => {
   const { pool, calls } = recordingPool();
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const n = await store.registerEnvironments([
     { envKey: ' k1 ', label: ' 大白 ', platform: 'xiaohongshu' },
     { envKey: 'k1', label: '重复应被去重' }, // 同 envKey → 去重
@@ -137,7 +138,7 @@ test('registerEnvironments: 去空白 + 去重 + 跳空，每条一次 upsert，
 
 test('registerEnvironments: 全空输入 → 0 次写、返回 0（绝不误发空 upsert）', async () => {
   const { pool, calls } = recordingPool();
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const n = await store.registerEnvironments([{ envKey: '  ' }, { envKey: '' }]);
   assert.equal(n, 0);
   assert.equal(calls.length, 0);
@@ -145,7 +146,7 @@ test('registerEnvironments: 全空输入 → 0 次写、返回 0（绝不误发�
 
 test('registerEnvironments: source 显式传 auto 透传到参数（自动登记路径）', async () => {
   const { pool, calls } = recordingPool();
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.registerEnvironments([{ envKey: 'k9' }], 'auto');
   assert.deepEqual(calls[0].params, ['k9', null, null, 'auto', null]);
 });
@@ -154,7 +155,7 @@ test('registerEnvironments: source 显式传 auto 透传到参数（自动登记
 // upsert，各字段逐字转发」——automation 握手经 EnvironmentRegistryPort 只调这个方法，绝不直写该表。
 test('registerHandshakeEnvironment: 单条观测走一次 auto upsert，字段逐字转发', async () => {
   const { pool, calls } = recordingPool();
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.registerHandshakeEnvironment({ envKey: 'ok9', label: '大白', platform: 'facebook', accountId: null });
   assert.equal(calls.length, 1);
   assert.match(calls[0].sql, /INSERT INTO client_environments/);
@@ -168,7 +169,7 @@ test('ownsEnv: user A only owns rows explicitly scoped to user A', async () => {
     assert.match(sql, /e\.lifecycle_state = 'active'/);
     return { rows: [{ owned: params?.[0] === 'user-a' && params?.[1] === 'env-a' }] };
   });
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   assert.equal(await store.ownsEnv('user-a', 'env-a'), true);
   assert.equal(await store.ownsEnv('user-a', 'env-b'), false);
   assert.equal(await store.ownsEnv('user-b', 'env-a'), false);
@@ -180,7 +181,7 @@ test('ownsEnv: missing ownership table fails closed', async () => {
     err.code = '42P01';
     throw err;
   });
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   assert.equal(await store.ownsEnv('user-a', 'env-a'), false);
 });
 
@@ -211,7 +212,7 @@ test('completeProvisioningIntent rejects malformed intent/proof before touching 
   const pool = fakePool(() => {
     assert.fail('malformed provisioning credentials must fail before any query');
   });
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   assert.deepEqual(await store.completeProvisioningIntent('user-a', {
     intentId: 'not-a-uuid', proof: 'short', envKey: 'fresh-env', platform: 'facebook',
   }), { ok: false, reason: 'invalid_intent' });
@@ -244,7 +245,7 @@ test('completeProvisioningIntent atomically stores Facebook slow start at Shangh
   };
   const pool = { connect: async () => client } as unknown as pg.Pool;
   const before = Date.now();
-  const result = await new ClientUserStore({ pool }).completeProvisioningIntent('user-a', {
+  const result = await new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool }).completeProvisioningIntent('user-a', {
     intentId, proof, envKey: 'fb-new', label: 'FB new', platform: 'facebook', slowStartEnabled: true,
   });
   const after = Date.now();
@@ -261,7 +262,7 @@ test('completeProvisioningIntent atomically stores Facebook slow start at Shangh
 
 test('completeProvisioningIntent rejects non-Facebook slow start before PostgreSQL', async () => {
   const pool = { connect: async () => assert.fail('non-Facebook slow start must fail before PostgreSQL') } as unknown as pg.Pool;
-  const result = await new ClientUserStore({ pool }).completeProvisioningIntent('user-a', {
+  const result = await new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool }).completeProvisioningIntent('user-a', {
     intentId: '11111111-1111-4111-8111-111111111111',
     proof: 'A'.repeat(43),
     envKey: 'xhs-new',
@@ -277,7 +278,7 @@ test('listEnvScope ignores client self-claims and revoked assignments', async ()
     assert.match(sql, /e\.lifecycle_state = 'active'/);
     return { rows: [] };
   });
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   assert.deepEqual(await store.listEnvScope('user-a'), []);
 });
 
@@ -294,7 +295,7 @@ test('withAuthorizedInteractionScope holds complete authorization locks through 
     release: () => { released = true; },
   };
   const pool = { connect: async () => client } as unknown as pg.Pool;
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const result = await store.withAuthorizedInteractionScope('user-a', 'env-a', async ({ accountId }) => {
     assert.equal(accountId, 'acct-a');
     assert.equal(calls.at(-1)?.includes('FOR SHARE OF s, e, a, acc'), true);
@@ -320,7 +321,7 @@ test('withAuthorizedInteractionScope fails closed on env/account binding mismatc
     release() {},
   };
   const pool = { connect: async () => client } as unknown as pg.Pool;
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const result = await store.withAuthorizedInteractionScope('user-a', 'env-b', async () => {
     operationCalls += 1;
   });
@@ -349,7 +350,7 @@ function txPool(dispatch: (sql: string, params?: unknown[]) => { rows: unknown[]
 
 test('registerEnvironments: 退役保留账号 default 归一为 null（不写绑定、走非事务路径）', async () => {
   const { pool, calls } = recordingPool();
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.registerEnvironments([{ envKey: 'k1', accountId: 'default' }], 'auto');
   // 归一为 null ⇒ 不触发事务 D5 闸，直接一条 upsert；account_id 参数 = null（COALESCE 下等价「没有新值」）。
   assert.equal(calls.length, 1);
@@ -362,7 +363,7 @@ test('registerEnvironments: 带真实 accountId 走事务、无冲突则写绑�
     if (/AS conflict/.test(sql)) return { rows: [{ conflict: false }] };
     return { rows: [] };
   });
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.registerEnvironments([{ envKey: 'k1', accountId: 'acct-24hex' }], 'auto');
   const upsert = calls.find((c) => /INSERT INTO client_environments/.test(c.sql))!;
   assert.deepEqual(upsert.params, ['k1', null, null, 'auto', 'acct-24hex']);
@@ -381,7 +382,7 @@ test('registerEnvironments: D5 写闸——跨客户冲突则拒写绑定(accoun
     if (/AS conflict/.test(sql)) return { rows: [{ conflict: true }] };
     return { rows: [] };
   });
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const alerts: { envKey: string; accountId: string }[] = [];
   store.setBindingConflictAlertSink((a) => alerts.push({ envKey: a.envKey, accountId: a.accountId }));
   await store.registerEnvironments([{ envKey: 'k1', label: '大白', platform: 'facebook', accountId: 'victim-acct' }], 'auto');
@@ -392,7 +393,7 @@ test('registerEnvironments: D5 写闸——跨客户冲突则拒写绑定(accoun
 });
 
 test('resolveBoundAccountForEnv: 判别式映射（owned/bound/dangling/contended/unavailable）', async () => {
-  const make = (row: unknown) => new ClientUserStore({ pool: fakePool(() => ({ rows: [row] })) });
+  const make = (row: unknown) => new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool: fakePool(() => ({ rows: [row] })) });
   assert.deepEqual(
     await make({ owned: true, bound_account: 'acct-x', account_exists: true, contended: false })
       .resolveBoundAccountForEnv('u1', 'p1'),
@@ -413,12 +414,12 @@ test('resolveBoundAccountForEnv: 判别式映射（owned/bound/dangling/contende
     await make({ owned: true, bound_account: 'acct-x', account_exists: true, contended: true })
       .resolveBoundAccountForEnv('u1', 'p1'),
     { ok: false, reason: 'binding_conflict' });
-  const missingTable = new ClientUserStore({ pool: fakePool(() => { const e = new Error('no table') as Error & { code: string }; e.code = '42P01'; throw e; }) });
+  const missingTable = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool: fakePool(() => { const e = new Error('no table') as Error & { code: string }; e.code = '42P01'; throw e; }) });
   assert.deepEqual(await missingTable.resolveBoundAccountForEnv('u1', 'p1'), { ok: false, reason: 'binding_unavailable' });
 });
 
 test('hasEnabledClientApprovalReachability: only authoritative enabled active bindings prove client review access', async () => {
-  const reachable = new ClientUserStore({ pool: fakePool((sql) => {
+  const reachable = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool: fakePool((sql) => {
     assert.match(sql, /u\.status='enabled'/);
     assert.match(sql, /e\.lifecycle_state='active'/);
     assert.match(sql, /s\.source='admin'/);
@@ -426,20 +427,20 @@ test('hasEnabledClientApprovalReachability: only authoritative enabled active bi
   }) });
   assert.deepEqual(await reachable.hasEnabledClientApprovalReachability('acc-1'), { reachable: true, reason: 'reachable' });
 
-  const unreachable = new ClientUserStore({ pool: fakePool(() => ({ rows: [{ reachable: false }] })) });
+  const unreachable = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool: fakePool(() => ({ rows: [{ reachable: false }] })) });
   assert.deepEqual(
     await unreachable.hasEnabledClientApprovalReachability('acc-1'),
     { reachable: false, reason: 'no_enabled_client_binding' },
   );
 
-  const missing = new ClientUserStore({ pool: fakePool(() => {
+  const missing = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool: fakePool(() => {
     throw Object.assign(new Error('missing'), { code: '42P01' });
   }) });
   assert.deepEqual(await missing.hasEnabledClientApprovalReachability('acc-1'), { reachable: false, reason: 'unavailable' });
 });
 
 test('resolveOperatorAliasAccountForEnv: 专用写解析保留悬空账号原因并复用归属/争用闸', async () => {
-  const make = (row: unknown) => new ClientUserStore({ pool: fakePool(() => ({ rows: [row] })) });
+  const make = (row: unknown) => new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool: fakePool(() => ({ rows: [row] })) });
   assert.deepEqual(
     await make({ owned: true, bound_account: 'acct-x', account_exists: true, contended: false })
       .resolveOperatorAliasAccountForEnv('u1', 'p1'),
@@ -463,7 +464,7 @@ test('resolveOperatorAliasAccountForEnv: 专用写解析保留悬空账号原因
 });
 
 test('isAccountReachableByUser: 反向判别（ok / 争用 fail-closed / 不可达）', async () => {
-  const make = (row: unknown) => new ClientUserStore({ pool: fakePool(() => ({ rows: [row] })) });
+  const make = (row: unknown) => new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool: fakePool(() => ({ rows: [row] })) });
   assert.deepEqual(await make({ owned_bound: true, contended: false }).isAccountReachableByUser('u1', 'acct-x'),
     { ok: true, accountId: 'acct-x' });
   assert.deepEqual(await make({ owned_bound: true, contended: true }).isAccountReachableByUser('u1', 'acct-x'),
@@ -493,7 +494,7 @@ test('migrateEnvironmentSlowStartFromAccounts: COPY-on-null 后刷新同步镜�
       return { rows: [], rowCount: 0 };
     },
   } as unknown as pg.Pool;
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   assert.equal(await store.migrateEnvironmentSlowStartFromAccounts(), 1);
   assert.equal(store.slowStartSinceFor('acct-a'), since.getTime());
   const migration = calls[0].sql;
@@ -520,7 +521,7 @@ test('setEnvironmentSlowStart: ownership-scoped 环境单写，上海日起点�
       return { rows: [], rowCount: 0 };
     },
   } as unknown as pg.Pool;
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const result = await store.setEnvironmentSlowStart('u1', 'fb-env', true, now);
   assert.deepEqual(result, {
     ok: true, envKey: 'fb-env', slowStartSince: aligned, binding: 'binding_unknown',
@@ -536,7 +537,7 @@ test('environment slow-start mirror: 换绑即时移除旧账号；重复绑定�
     { env_key: 'fb-env', account_id: 'acct-a', slow_start_since: new Date(1000) },
   ];
   const pool = fakePool(() => ({ rows }));
-  const store = new ClientUserStore({ pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.refreshEnvironmentSlowStartMirror();
   assert.equal(store.slowStartSinceFor('acct-a'), 1000);
 

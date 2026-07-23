@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
 import { ACCOUNTS_SCHEMA_SQL, PgAccountStore } from '../src/account-store.js';
@@ -58,7 +59,7 @@ function fakePool(): { calls: { text: string; params: unknown[] }[]; pool: pg.Po
 
 test('setNickname: 非空昵称 trim 后 upsert（按 account_id，ON CONFLICT 自愈）', async () => {
   const { calls, pool } = fakePool();
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.setNickname('acc-1', '  工程师大白  ');
   assert.equal(calls.length, 1);
   assert.match(calls[0].text, /INSERT INTO accounts[\s\S]*nickname[\s\S]*ON CONFLICT \(account_id\) DO UPDATE SET nickname/);
@@ -67,7 +68,7 @@ test('setNickname: 非空昵称 trim 后 upsert（按 account_id，ON CONFLICT �
 
 test('setNickname: 拒空白 → no-op（绝不用空覆盖已有真名）', async () => {
   const { calls, pool } = fakePool();
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.setNickname('acc-1', '   ');
   await store.setNickname('acc-1', '');
   assert.equal(calls.length, 0);
@@ -77,7 +78,7 @@ test('setOperatorAlias: 非空 trim 后 UPDATE-only，写后统一目录立即�
   const { calls, pool } = fakePoolReturning([{
     operator_alias: '运营重点号', nickname: '平台真名', label: 'acc-1',
   }]);
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const result = await store.setOperatorAlias('acc-1', '  运营重点号  ');
   assert.deepEqual(result, {
     ok: true,
@@ -95,7 +96,7 @@ test('setOperatorAlias: 空白清为 NULL，并立即回落平台昵称', async 
   const { calls, pool } = fakePoolReturning([{
     operator_alias: null, nickname: '平台真名', label: '运营标签',
   }]);
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const result = await store.setOperatorAlias('acc-1', '   ');
   assert.deepEqual(result, {
     ok: true,
@@ -107,7 +108,7 @@ test('setOperatorAlias: 空白清为 NULL，并立即回落平台昵称', async 
 
 test('setOperatorAlias: 无账号与退役账号诚实拒绝', async () => {
   const { calls, pool } = fakePoolReturning([]);
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   assert.deepEqual(await store.setOperatorAlias('ghost', '别名'), { ok: false, reason: 'account_not_found' });
   assert.deepEqual(await store.setOperatorAlias('default', '别名'), { ok: false, reason: 'retired_account' });
   assert.equal(calls.length, 1, '退役账号不得发 SQL');
@@ -126,7 +127,7 @@ test('平台昵称刷新只更新 nickname，绝不覆盖目录中的运营别�
       return { rows: [], rowCount: 0 };
     },
   } as unknown as pg.Pool;
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.setOperatorAlias('acc-1', '运营重点号');
   await store.setNickname('acc-1', '新平台名');
   assert.deepEqual(store.getDisplayName('acc-1'), { name: '运营重点号', source: 'operator_alias' });
@@ -147,7 +148,7 @@ test('init 预热运营别名、平台昵称和标签到统一同步目录', asy
       }], rowCount: 1 };
     },
   } as unknown as pg.Pool;
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.init();
   assert.deepEqual(store.getDisplayName('acc-1'), { name: '运营重点号', source: 'operator_alias' });
   assert.deepEqual(store.getDisplayNameCandidates('acc-1'), ['运营重点号', '平台真名', '标签']);
@@ -171,7 +172,7 @@ function fakePoolReturning(rows: unknown[]): { calls: { text: string; params: un
 
 test('setGroupLabel: 非空 trim 后 UPDATE-only + RETURNING，回读真态（不 seed 造行）', async () => {
   const { calls, pool } = fakePoolReturning([{ group_label: '矩阵A' }]);
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const res = await store.setGroupLabel('acc-1', '  矩阵A  ');
   assert.deepEqual(res, { ok: true, groupLabel: '矩阵A' });
   assert.equal(calls.length, 1);
@@ -182,7 +183,7 @@ test('setGroupLabel: 非空 trim 后 UPDATE-only + RETURNING，回读真态（�
 
 test('setGroupLabel: 空 / 纯空白 / null → 写 NULL（清空分组）', async () => {
   const { calls, pool } = fakePoolReturning([{ group_label: null }]);
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const r1 = await store.setGroupLabel('acc-1', '   ');
   assert.deepEqual(r1, { ok: true, groupLabel: null });
   assert.equal(calls[0].params[1], null);
@@ -192,7 +193,7 @@ test('setGroupLabel: 空 / 纯空白 / null → 写 NULL（清空分组）', asy
 
 test('setGroupLabel: 无对应行（0 rows）→ account_not_found，可区分、不 seed', async () => {
   const { calls, pool } = fakePoolReturning([]); // UPDATE 影响 0 行
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const res = await store.setGroupLabel('ghost', '矩阵B');
   assert.deepEqual(res, { ok: false, reason: 'account_not_found' });
   assert.match(calls[0].text, /UPDATE accounts/);
@@ -201,7 +202,7 @@ test('setGroupLabel: 无对应行（0 rows）→ account_not_found，可区分�
 
 test('setGroupLabel: 退役保留账号 default 被拒，绝不落库', async () => {
   const { calls, pool } = fakePoolReturning([{ group_label: 'x' }]);
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const res = await store.setGroupLabel('default', '矩阵C');
   assert.deepEqual(res, { ok: false, reason: 'retired_account' });
   assert.equal(calls.length, 0); // 绝不发 SQL
@@ -216,7 +217,7 @@ test('ACCOUNTS_SCHEMA_SQL 含 contact_info 列 + 幂等自愈 ALTER', () => {
 test('setContactInfo: verbatim——含 emoji / 换行 / 首尾空白原样存（不 trim、不截断）+ UPDATE-only + RETURNING', async () => {
   const raw = '  2【长按复制】加群🐶🍅\n第二行 :/#f  '; // 首尾空白 + emoji + 换行 + 特殊符
   const { calls, pool } = fakePoolReturning([{ contact_info: raw }]);
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const res = await store.setContactInfo('acc-1', raw);
   assert.deepEqual(res, { ok: true, contactInfo: raw });
   assert.equal(calls.length, 1);
@@ -231,7 +232,7 @@ test('setContactInfo: verbatim——含 emoji / 换行 / 首尾空白原样存�
 test('setContactInfo: 超长码不截断（与 group_label 的 64 上限刻意相反）', async () => {
   const longCode = '群'.repeat(300);
   const { calls, pool } = fakePoolReturning([{ contact_info: longCode }]);
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const res = await store.setContactInfo('acc-1', longCode);
   assert.deepEqual(res, { ok: true, contactInfo: longCode });
   assert.equal((calls[0].params[1] as string).length, 300); // 不截断
@@ -239,7 +240,7 @@ test('setContactInfo: 超长码不截断（与 group_label 的 64 上限刻意�
 
 test('setContactInfo: 空 / 纯空白 / null → 写 NULL（清空）', async () => {
   const { calls, pool } = fakePoolReturning([{ contact_info: null }]);
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const r1 = await store.setContactInfo('acc-1', '   ');
   assert.deepEqual(r1, { ok: true, contactInfo: null });
   assert.equal(calls[0].params[1], null);
@@ -251,7 +252,7 @@ test('setContactInfo: 空 / 纯空白 / null → 写 NULL（清空）', async ()
 
 test('setContactInfo: 无对应行（0 rows）→ account_not_found，可区分、不 seed', async () => {
   const { calls, pool } = fakePoolReturning([]);
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const res = await store.setContactInfo('ghost', '加群码');
   assert.deepEqual(res, { ok: false, reason: 'account_not_found' });
   assert.match(calls[0].text, /UPDATE accounts/);
@@ -260,7 +261,7 @@ test('setContactInfo: 无对应行（0 rows）→ account_not_found，可区分�
 
 test('setContactInfo: 退役保留账号 default 被拒，绝不落库', async () => {
   const { calls, pool } = fakePoolReturning([{ contact_info: 'x' }]);
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const res = await store.setContactInfo('default', '加群码');
   assert.deepEqual(res, { ok: false, reason: 'retired_account' });
   assert.equal(calls.length, 0);
@@ -269,24 +270,24 @@ test('setContactInfo: 退役保留账号 default 被拒，绝不落库', async (
 test('getContactInfo: 异步直读 SELECT，回 verbatim 值 / 缺行为 null', async () => {
   const code = '加群🐶\n第二行';
   const { calls, pool } = fakePoolReturning([{ contact_info: code }]);
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const got = await store.getContactInfo('acc-1');
   assert.equal(got, code);
   assert.match(calls[0].text, /SELECT contact_info FROM accounts WHERE account_id = \$1/);
 
   const { pool: emptyPool } = fakePoolReturning([]);
-  const store2 = new PgAccountStore({ pool: emptyPool });
+  const store2 = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool: emptyPool });
   assert.equal(await store2.getContactInfo('ghost'), null);
 });
 
 test('getPlatform: 读取 accounts.platform 并归一，缺行按历史 xhs 默认', async () => {
   const { calls, pool } = fakePoolReturning([{ platform: 'facebook' }]);
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   assert.equal(await store.getPlatform('acc-fb'), 'facebook');
   assert.match(calls[0].text, /SELECT platform FROM accounts WHERE account_id = \$1/);
 
   const { pool: emptyPool } = fakePoolReturning([]);
-  const store2 = new PgAccountStore({ pool: emptyPool });
+  const store2 = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool: emptyPool });
   assert.equal(await store2.getPlatform('missing'), 'xiaohongshu');
 });
 
@@ -296,7 +297,7 @@ test('listByPlatform: 按平台枚举账号并保留暂停态', async () => {
     { account_id: 'a1', status: 'active', paused_at: null, platform: 'xiaohongshu' },
     { account_id: 'a2', status: 'paused', paused_at: pausedAt, platform: 'xiaohongshu' },
   ]);
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   assert.deepEqual(await store.listByPlatform('xiaohongshu'), [
     { accountId: 'a1', status: 'active', pausedAt: null, platform: 'xiaohongshu' },
     { accountId: 'a2', status: 'paused', pausedAt: pausedAt.getTime(), platform: 'xiaohongshu' },
@@ -310,7 +311,7 @@ test('listByPlatform: 按平台枚举账号并保留暂停态', async () => {
 test('ensureAccount: 新账号按 edge 声明平台建行（INSERT 带 platform，回填缓存，无需再查库）', async () => {
   // RETURNING 返回一行 → 视为真插入了新行。
   const { calls, pool } = fakePoolReturning([{ platform: 'facebook' }]);
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.ensureAccount('fb-acc', 'facebook');
   assert.match(calls[0].text, /INSERT INTO accounts[\s\S]*platform[\s\S]*ON CONFLICT \(account_id\) DO NOTHING RETURNING platform/);
   assert.deepEqual(calls[0].params, ['fb-acc', 'facebook']);
@@ -321,7 +322,7 @@ test('ensureAccount: 新账号按 edge 声明平台建行（INSERT 带 platform�
 
 test('ensureAccount: 缺省平台回落 xiaohongshu（行为不变）', async () => {
   const { calls, pool } = fakePoolReturning([{ platform: 'xiaohongshu' }]);
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.ensureAccount('legacy-acc');
   assert.deepEqual(calls[0].params, ['legacy-acc', 'xiaohongshu']);
 });
@@ -329,7 +330,7 @@ test('ensureAccount: 缺省平台回落 xiaohongshu（行为不变）', async ()
 test('ensureAccount: 既有行冲突（RETURNING 空）→ 不回填缓存（不污染既有平台）', async () => {
   // ON CONFLICT DO NOTHING 命中既有行 → RETURNING 空。
   const { calls, pool } = fakePoolReturning([]);
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.ensureAccount('existing', 'facebook');
   assert.equal(calls.length, 1);
   // 缓存未被写成 facebook；getPlatform 落库读真态（这里 fake 返回空 → 归一化为 xiaohongshu），
@@ -346,14 +347,14 @@ test('ACCOUNTS_SCHEMA_SQL 含 slow_start_since 幂等自愈 ALTER（本仓无迁
 
 test('PgAccountStore 不再暴露账号级慢启动 writer/provider（旧列不得重新成为运行时事实源）', () => {
   const { pool } = fakePoolReturning([]);
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   assert.equal('setSlowStart' in store, false);
   assert.equal('slowStartSinceFor' in store, false);
 });
 
 test('platformFor：缺键 → undefined（未知），MUST NOT 回落 xiaohongshu', async () => {
   const { pool } = fakePoolReturning([]);
-  const store = new PgAccountStore({ pool });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   // 与 getPlatform 刻意不同：那条归一化缺值为 xiaohongshu，这条服务于冷启动曲线选择——
   // 回落一次就是 FB 号按 XHS 曲线跑（D1 view=50 而非 20）。
   assert.equal(store.platformFor('never-seen'), undefined);

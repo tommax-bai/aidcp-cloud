@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import { PersonaStore, createPersonaResolver, PERSONA_CONFIG_SCHEMA_SQL } from '../src/config/persona-store.js';
@@ -95,14 +96,14 @@ function fakePool(opts: {
 
 test('缺行 → getForAccount 返回 null（回落语义）', async () => {
   const { pool } = fakePool();
-  const store = new PersonaStore({ pool });
+  const store = new PersonaStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.init();
   assert.equal(store.getForAccount('default'), null);
 });
 
 test('set 后 getForAccount 即时热加载（无需重启）+ 回真态含审计', async () => {
   const { pool } = fakePool();
-  const store = new PersonaStore({ pool });
+  const store = new PersonaStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.init();
   const row = await store.set('default', soulYaml('账号A'), 'alice');
   assert.equal(row.updatedBy, 'alice');
@@ -112,7 +113,7 @@ test('set 后 getForAccount 即时热加载（无需重启）+ 回真态含审�
 
 test('setIfMissing：首次原子写入；已有行时跳过且绝不覆盖', async () => {
   const { pool } = fakePool();
-  const store = new PersonaStore({ pool });
+  const store = new PersonaStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.init();
   const created = await store.setIfMissing('default', soulYaml('自动生成'), 'auto');
   assert.equal(created?.updatedBy, 'auto');
@@ -124,7 +125,7 @@ test('setIfMissing：首次原子写入；已有行时跳过且绝不覆盖', as
 
 test('结构化 mandatory_interactions 经 store 热加载后由 resolver 原样解析', async () => {
   const { pool } = fakePool();
-  const store = new PersonaStore({ pool });
+  const store = new PersonaStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.init();
   const persona = `${soulYaml('Tianxing Bai')}
 mandatory_interactions:
@@ -145,14 +146,14 @@ mandatory_interactions:
 
 test('空白文本视作无覆盖（getForAccount 返回 null）', async () => {
   const { pool } = fakePool({ persona: { default: '   ' } });
-  const store = new PersonaStore({ pool });
+  const store = new PersonaStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.init();
   assert.equal(store.getForAccount('default'), null);
 });
 
 test('clear 删行 → getForAccount 回 null', async () => {
   const { pool } = fakePool({ persona: { default: soulYaml('账号A') } });
-  const store = new PersonaStore({ pool });
+  const store = new PersonaStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.init();
   assert.ok(store.getForAccount('default'));
   await store.clear('default');
@@ -164,8 +165,8 @@ test('后台 clear 原子清除人设与首作状态，下一次绑定可重新�
     persona: { default: soulYaml('旧人设') },
     firstPostAccounts: ['default'],
   });
-  const personaStore = new PersonaStore({ pool });
-  const firstPostStore = new FirstPostOnboardingStore({ pool });
+  const personaStore = new PersonaStore({ schemaEnsurer: ensureCapabilitySchema, pool });
+  const firstPostStore = new FirstPostOnboardingStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await personaStore.init();
 
   await personaStore.clear('default');
@@ -184,7 +185,7 @@ test('后台 clear 的首作复位失败 → 人设持久态与内存镜像都�
     persona: { default: soulYaml('原始') },
     firstPostAccounts: ['default'],
   });
-  const store = new PersonaStore({ pool });
+  const store = new PersonaStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.init();
   setFailReset(true);
 
@@ -196,7 +197,7 @@ test('后台 clear 的首作复位失败 → 人设持久态与内存镜像都�
 
 test('写库失败 → 内存镜像不变（绝不镜像/库不一致）', async () => {
   const { pool, setFailWrite } = fakePool({ persona: { default: soulYaml('原始') } });
-  const store = new PersonaStore({ pool });
+  const store = new PersonaStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.init();
   setFailWrite(true);
   await assert.rejects(store.set('default', soulYaml('新值'), 'a'));
@@ -205,7 +206,7 @@ test('写库失败 → 内存镜像不变（绝不镜像/库不一致）', async
 
 test('listAccounts 列全部账号（含无人设覆盖者）; accountExists 区分存在', async () => {
   const { pool } = fakePool({ accounts: [{ account_id: 'default', label: 'D' }, { account_id: 'acc2', label: null }] });
-  const store = new PersonaStore({ pool });
+  const store = new PersonaStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.init();
   const list = await store.listAccounts();
   assert.deepEqual(list.map((a) => a.accountId).sort(), ['acc2', 'default']);

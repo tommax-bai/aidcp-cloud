@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { ensureCapabilitySchema } from '../../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
 import {
@@ -104,7 +105,7 @@ test('isCuratedCoverForm 枚举守卫穷举', () => {
 
 test('写路径 round-trip：upsertObservation 落库的 JSONB 含合法 formGuess、剥非法 formGuess', async () => {
   const { pool, calls } = controllablePool(() => ({}));
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.upsertObservation({
     accountId: 'acc-1',
     contentType: 'image_text',
@@ -127,7 +128,7 @@ test('写路径 round-trip：upsertObservation 落库的 JSONB 含合法 formGue
 
 test('annotate：单条 UPDATE + jsonb_set 定点写 formGuess，WHERE 内嵌 capturedAt 锚守卫，绝不触碰 updated_at', async () => {
   const { pool, calls } = controllablePool(() => ({ rowCount: 1 }));
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const ok = await store.annotateReferenceImageFormGuess(42, 0, validGuess);
   assert.equal(ok, true);
 
@@ -155,7 +156,7 @@ test('annotate：单条 UPDATE + jsonb_set 定点写 formGuess，WHERE 内嵌 ca
 
 test('annotate：存量缺 capturedAt 的 item 同一条语句顺带落锚（COALESCE 写 detectedFor，缓存下次可命中）', async () => {
   const { pool, calls } = controllablePool(() => ({ rowCount: 1 }));
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.annotateReferenceImageFormGuess(42, 2, validGuess);
   const { sql } = calls[0];
   // 同一条 UPDATE 内：capturedAt 缺失时用判定锚补写（COALESCE 既有值优先，绝不改写已有锚）。
@@ -168,14 +169,14 @@ test('annotate：存量缺 capturedAt 的 item 同一条语句顺带落锚（COA
 
 test('annotate：锚不符/行缺失 → 0 行 → 诚实返回 false（弃写，绝不覆盖新图集）', async () => {
   const { pool } = controllablePool(() => ({ rowCount: 0 }));
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   assert.equal(await store.annotateReferenceImageFormGuess(42, 0, validGuess), false);
 });
 
 test('annotate：guess 不过白名单 / index 非法 → 不发 SQL、返回 false、只记日志', async () => {
   const warns: string[] = [];
   const { pool, calls } = controllablePool(() => ({ rowCount: 1 }));
-  const store = new CuratedContentStore({ pool, logger: { warn: (m: string) => warns.push(m) } });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool, logger: { warn: (m: string) => warns.push(m) } });
   assert.equal(
     await store.annotateReferenceImageFormGuess(42, 0, { ...validGuess, confidence: 9 }),
     false,
@@ -206,7 +207,7 @@ test('读路径 round-trip：selectForCreation 读回的行剥非法 formGuess�
     },
   ];
   const { pool } = controllablePool(() => ({ rows: cannedRows }));
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const out = await store.selectForCreation('acc-1', 'source_post', 5);
   assert.equal(out[0].referenceImages.length, 2);
   assert.deepEqual(out[0].referenceImages[0].formGuess, validGuess);

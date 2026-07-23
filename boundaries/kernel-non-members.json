@@ -7,7 +7,7 @@
       "src/time/shanghai-day.ts",
       "src/time/source-published-time.ts",
       "src/deployment-target.ts",
-      "src/cache/pg-config.ts",
+      "src/kernel/pg-config.ts",
       "src/kernel/soul-types.ts",
       "src/kernel/interaction-types.ts",
       "src/kernel/persona-format.ts",

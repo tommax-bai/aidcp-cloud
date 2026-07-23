@@ -12,7 +12,7 @@
  */
 
 import pg from 'pg';
-import { resolveEnvPgConfig } from './pg-config.js';
+import { resolveEnvPgConfig } from '../kernel/pg-config.js';
 import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;

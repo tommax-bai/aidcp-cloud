@@ -1,5 +1,5 @@
 import pg from 'pg';
-import { resolveEnvPgConfig } from './pg-config.js';
+import { resolveEnvPgConfig } from '../kernel/pg-config.js';
 
 const { Pool } = pg;
 

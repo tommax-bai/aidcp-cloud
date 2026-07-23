@@ -27,7 +27,7 @@
  */
 
 import pg from 'pg';
-import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
 import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
 import { COOLDOWN_ACTIONS } from '../risk/action-cooldown.js';
 import { MINUTE_BURST_CAP, deriveWindowQuotas } from '../risk/quotas.js';

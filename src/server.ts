@@ -293,6 +293,7 @@ import {
 import { parseDeploymentTarget } from './deployment-target.js';
 import { runSchemaContractGate, takePendingSchemaGateAlert } from './schema/schema-gate.js';
 import { isSchemaCapabilityError } from './kernel/schema-capability-contract.js';
+import { ensureCapabilitySchema } from './schema/schema-capability.js';
 import { DelegatedTaskNotificationGate, delegatedTaskFailureReceipt } from './delegated-task/notification.js';
 import { omitUnsupportedUsageMetrics, platformRegistryEntry } from './platform/index.js';
 import {
@@ -315,7 +316,7 @@ import { ConfigMirrorRefresher } from './config/mirror-refresher.js';
 import { allowsTransportWhenGateUnknown } from './config/mirror-stop-work.js';
 import { noteMirrorStaleRefusal } from './config-mirror-freshness.js';
 import { automationOperationDescriptorFor } from './comm/operation-registry.js';
-import { resolveEnvPgConfig } from './cache/pg-config.js';
+import { resolveEnvPgConfig } from './kernel/pg-config.js';
 import { ModelConfigStore } from './config/model-config-store.js';
 import { RoleConfigStore } from './config/role-config-store.js';
 import { createRoleConfigPanel } from './config/role-config-facade.js';
@@ -710,11 +711,11 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
 
   // 模型配置 + 加密凭据（change console-model-provider-config）。
   // 先于 LLM 客户端构造：模型名经 getCached() 运行时解析（热加载）；DashScope 密钥库内优先、回退 env。
-  const modelConfigStore = new ModelConfigStore({
+  const modelConfigStore = new ModelConfigStore({ schemaEnsurer: ensureCapabilitySchema,
     pool: configMirrorPool,
     mirrorVersionBumper: mirrorVersionStore,
   });
-  const credentialStore = new CredentialStore({
+  const credentialStore = new CredentialStore({ schemaEnsurer: ensureCapabilitySchema,
     host: readEnvString('PGHOST'),
     port: readEnvPort('PGPORT'),
     database: readEnvString('PGDATABASE'),
@@ -722,12 +723,12 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     password: readEnvString('PGPASSWORD'),
   });
   // 角色级模型/温度覆盖（change console-role-model-config）。缺/空/无效一律回落全局，绝不 brick。
-  const roleConfigStore = new RoleConfigStore({
+  const roleConfigStore = new RoleConfigStore({ schemaEnsurer: ensureCapabilitySchema,
     pool: configMirrorPool,
     mirrorVersionBumper: mirrorVersionStore,
   });
   // 分类级模型默认（change role-model-category-config，item 5/6）。缺/空/异常一律返「无覆盖」，绝不 brick。
-  const categoryConfigStore = new CategoryConfigStore({
+  const categoryConfigStore = new CategoryConfigStore({ schemaEnsurer: ensureCapabilitySchema,
     pool: configMirrorPool,
     mirrorVersionBumper: mirrorVersionStore,
   });
@@ -748,7 +749,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     mirrorVersionBumper: mirrorVersionStore,
   });
   // 引流线索热度过滤阈值（全局单例，change feed-hot-lead-group-comment）：帖龄上限 / 速率阈值 / 最小赞，落安全页卡片、热加载。
-  const hotLeadConfigStore = new HotLeadConfigStore({
+  const hotLeadConfigStore = new HotLeadConfigStore({ schemaEnsurer: ensureCapabilitySchema,
     pool: configMirrorPool,
     mirrorVersionBumper: mirrorVersionStore,
   });
@@ -760,7 +761,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   });
   // 内容排期（change content-schedule-auto-publish）：全局「内容可自动时段」+ 每账号发帖排期。
   // fail-closed：未配 / 非法 = 不自动（与浏览掩码「缺失=全天活跃」刻意相反）；init 失败不致命（空镜像 = 全不自动）。
-  const contentScheduleStore = new ContentScheduleStore({
+  const contentScheduleStore = new ContentScheduleStore({ schemaEnsurer: ensureCapabilitySchema,
     host: readEnvString('PGHOST'),
     port: readEnvPort('PGPORT'),
     database: readEnvString('PGDATABASE'),
@@ -771,13 +772,13 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     // 归属对齐后这是 api 侧目录投影取生效掩码的**唯一**通道（task 5.3）：MUST NOT 在 api 侧另建副本。
     globalActiveWeekMask: () => sessionConfigStore.weekActiveMask(),
   });
-  const facebookGroupJoinAutomationStore = new FacebookGroupJoinAutomationStore({
+  const facebookGroupJoinAutomationStore = new FacebookGroupJoinAutomationStore({ schemaEnsurer: ensureCapabilitySchema,
     pool: configMirrorPool,
     mirrorVersionBumper: mirrorVersionStore,
   });
   // 每账号 Facebook 定时评论配置（change facebook-scheduled-comment 2.1）：关键词列表 + 容器列表。
   // fail-closed：任一为空 = 不生效（诚实 no-op）；init 失败不致命（空镜像 = 全不生效）。
-  const facebookCommentConfigStore = new FacebookCommentConfigStore({
+  const facebookCommentConfigStore = new FacebookCommentConfigStore({ schemaEnsurer: ensureCapabilitySchema,
     pool: configMirrorPool,
     mirrorVersionBumper: mirrorVersionStore,
   });
@@ -813,7 +814,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     password: readEnvString('PGPASSWORD'),
   });
   // 对外客户身份 + 客户↔环境归属（change edge-client-customer-auth）。独立表,与内部运营登录物理隔离。
-  const clientUserStore = new ClientUserStore({ mirrorVersionBumper: mirrorVersionStore, offboardWrites: new OffboardWriteAdapter() });
+  const clientUserStore = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, mirrorVersionBumper: mirrorVersionStore, offboardWrites: new OffboardWriteAdapter() });
   try {
     await mirrorVersionStore.init();
     await modelConfigStore.init();
@@ -943,7 +944,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   };
   // token 用量记账（change llm-token-usage-stats）：出口 onCall 钩子只做纯内存累加，
   // 定时 flush 到 llm_token_usage 预聚合表（专用池隔离热路径）。须早于接受 LLM 调用/探活建好。
-  const tokenUsageStore = new TokenUsageStore();
+  const tokenUsageStore = new TokenUsageStore({ schemaEnsurer: ensureCapabilitySchema });
   try {
     await tokenUsageStore.init();
     console.log('[aidcp-cloud] token 用量记账已就绪（llm_token_usage，按账号/角色/模型/10分钟桶预聚合）');
@@ -1276,7 +1277,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
   // 无条件接线（核心特性）；init 失败留 undefined（记录与面板退化，绝不崩闭环）。
   let notificationContactStore: NotificationContactStore | undefined;
   try {
-    const ncs = new NotificationContactStore({
+    const ncs = new NotificationContactStore({ schemaEnsurer: ensureCapabilitySchema,
       host: readEnvString('PGHOST'),
       port: readEnvPort('PGPORT'),
       database: readEnvString('PGDATABASE'),
@@ -1323,7 +1324,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
   // 作发帖创作正向素材来源。init 失败留 undefined（不捕获、创作回落旧路径，绝不崩闭环）。
   let curatedContentStore: CuratedContentStore | undefined;
   try {
-    const ccs = new CuratedContentStore({
+    const ccs = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema,
       host: readEnvString('PGHOST'),
       port: readEnvPort('PGPORT'),
       database: readEnvString('PGDATABASE'),
@@ -1366,7 +1367,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
   // RoleDispatcher 不注册概念抽取角色、搜索退化为仅 seed_keywords（不崩闭环）。
   let conceptStore: ConceptStore | undefined;
   try {
-    const cs = new ConceptStore({
+    const cs = new ConceptStore({ schemaEnsurer: ensureCapabilitySchema,
       host: readEnvString('PGHOST'),
       port: readEnvPort('PGPORT'),
       database: readEnvString('PGDATABASE'),
@@ -1460,7 +1461,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
   let accountStore: AccountStore | undefined;
   let approvalPolicyStore: ApprovalPolicyStore | undefined;
   try {
-    const store = new PgAccountStore({
+    const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema,
       mirrorVersionBumper: mirrorVersionStore,
       host: readEnvString('PGHOST'),
       port: readEnvPort('PGPORT'),
@@ -1472,7 +1473,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
     accountStore = store;
     console.log('[aidcp-cloud] AccountStore 已就绪（accounts 表，seed default）');
     try {
-      const policies = new ApprovalPolicyStore();
+      const policies = new ApprovalPolicyStore({ schemaEnsurer: ensureCapabilitySchema });
       await policies.init();
       approvalPolicyStore = policies;
       console.log('[aidcp-cloud] ApprovalPolicyStore 已就绪（账号评论审批覆盖 / 分组稿件审核入口）');
@@ -1687,7 +1688,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
 
   let facebookPublishMediaStore: FacebookPublishMediaStore | undefined;
   try {
-    const store = new FacebookPublishMediaStore({
+    const store = new FacebookPublishMediaStore({ schemaEnsurer: ensureCapabilitySchema,
       host: readEnvString('PGHOST'),
       port: readEnvPort('PGPORT'),
       database: readEnvString('PGDATABASE'),
@@ -1706,7 +1707,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
   // 须在 accounts 表建好之后（persona_config FK 到 accounts）。
   // persona-driven-content-pipeline：系统不存在默认/兜底人设——PG 不可用 / init 失败时人设镜像为空，
   // 所有账号按「未绑人设」fail-closed 诚实拒绝（isPersonaBound=false），绝不静默套打包 soul.yaml 开跑。
-  const personaStore = new PersonaStore({
+  const personaStore = new PersonaStore({ schemaEnsurer: ensureCapabilitySchema,
     pool: configMirrorPool,
     mirrorVersionBumper: mirrorVersionStore,
   });
@@ -1721,7 +1722,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
   }
   let personaAutoFillStore: PersonaAutoFillStore | undefined;
   try {
-    const store = new PersonaAutoFillStore();
+    const store = new PersonaAutoFillStore({ schemaEnsurer: ensureCapabilitySchema });
     await store.init();
     personaAutoFillStore = store;
     console.log('[aidcp-cloud] Facebook 人设自动补齐任务存储已就绪');
@@ -1732,7 +1733,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
   // 存储不可用时不展示带自动生成承诺的引导；普通人设/浏览/发布链继续按既有逻辑工作。
   let firstPostOnboardingStore: FirstPostOnboardingStore | undefined;
   try {
-    const store = new FirstPostOnboardingStore({
+    const store = new FirstPostOnboardingStore({ schemaEnsurer: ensureCapabilitySchema,
       host: readEnvString('PGHOST'),
       port: readEnvPort('PGPORT'),
       database: readEnvString('PGDATABASE'),

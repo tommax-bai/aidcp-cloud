@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import { CONTENT_SCHEDULE_SCHEMA_SQL, ContentScheduleStore } from '../src/config/content-schedule-store.js';
@@ -29,7 +30,7 @@ test('claimAutoPostHourCell: 原子 upsert 仅首个进程拿到相同小时格'
       return { rows };
     },
   } as unknown as pg.Pool;
-  const store = new ContentScheduleStore({ pool });
+  const store = new ContentScheduleStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const input = { accountId: 'acc-1', hourCell: '2026-01-05-10', executionTarget: 'dev' as const, envKey: 'env-1' };
   assert.equal(await store.claimAutoPostHourCell(input), true);
   assert.equal(await store.claimAutoPostHourCell(input), false);
@@ -98,7 +99,7 @@ async function makeStore(opts: {
   globalActiveWeekMask?: string | null;
 } = {}) {
   const { pool, calls } = makePoolStub(opts);
-  const store = new ContentScheduleStore({ pool, globalActiveWeekMask: () => opts.globalActiveWeekMask ?? null });
+  const store = new ContentScheduleStore({ schemaEnsurer: ensureCapabilitySchema, pool, globalActiveWeekMask: () => opts.globalActiveWeekMask ?? null });
   await store.init();
   return { store, calls };
 }
@@ -141,7 +142,7 @@ test('listCatalog: 排期账号展示复用统一解析器，运营别名优先'
     },
     end: async () => {},
   } as unknown as pg.Pool;
-  const [row] = await new ContentScheduleStore({ pool, globalActiveWeekMask: () => FULL }).listCatalog();
+  const [row] = await new ContentScheduleStore({ schemaEnsurer: ensureCapabilitySchema, pool, globalActiveWeekMask: () => FULL }).listCatalog();
   assert.equal(row.operatorAlias, '人工昵称');
   assert.equal(row.platform, 'xiaohongshu');
   assert.equal(row.groupLabel, '华东组');
@@ -296,7 +297,7 @@ test('listCatalog/platform: 视频号与未知平台均不伪造自动化动作'
     ] }),
     end: async () => {},
   } as unknown as pg.Pool;
-  const rows = await new ContentScheduleStore({ pool }).listCatalog();
+  const rows = await new ContentScheduleStore({ schemaEnsurer: ensureCapabilitySchema, pool }).listCatalog();
   assert.deepEqual(rows.map((row) => [row.platform, row.availableActions]), [
     ['wechat_channels', []],
     ['future_platform', []],
@@ -345,7 +346,7 @@ test('store/account masks: 脏活跃覆盖回落合法全局，脏内容覆盖�
     },
     end: async () => {},
   } as unknown as pg.Pool;
-  const store = new ContentScheduleStore({ pool, globalActiveWeekMask: () => FULL });
+  const store = new ContentScheduleStore({ schemaEnsurer: ensureCapabilitySchema, pool, globalActiveWeekMask: () => FULL });
   await store.init();
   const eff = store.effectiveScheduleFor('acc-1');
   assert.equal(eff.effectiveActiveWeekMask, FULL, '脏活跃覆盖不能绕过全局');
@@ -438,7 +439,7 @@ test('store/group: attempts 记录与当日计数（pool 桩验 SQL 形状）', 
     },
     end: async () => {},
   } as unknown as pg.Pool;
-  const store = new ContentScheduleStore({ pool });
+  const store = new ContentScheduleStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.init();
   await store.recordContactCommentAttempt('acc-1');
   const rec = seen.find((c) => c.sql.includes('INSERT INTO contact_comment_attempts'));

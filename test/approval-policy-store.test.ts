@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import {
@@ -31,7 +32,7 @@ test('missing account/group policy rows preserve legacy defaults', async () => {
     if (sql.includes('account_comment_approval_policy')) return { rows: [] };
     return { rows: [{ group_label: 'team-a', delivery: null }] };
   });
-  const store = new ApprovalPolicyStore({ pool });
+  const store = new ApprovalPolicyStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   assert.equal(await store.getAccountCommentMode('acc-1'), 'source_rules');
   assert.deepEqual(await store.getGroupPublishPolicyForAccount('acc-1'), {
     groupLabel: 'team-a',
@@ -47,7 +48,7 @@ test('account auto_approve_all write validates existence and returns database tr
     }
     return { rows: [] };
   });
-  const result = await new ApprovalPolicyStore({ pool }).setAccountCommentMode('acc-1', 'auto_approve_all', 'alice');
+  const result = await new ApprovalPolicyStore({ schemaEnsurer: ensureCapabilitySchema, pool }).setAccountCommentMode('acc-1', 'auto_approve_all', 'alice');
   assert.deepEqual(result, {
     ok: true,
     row: { accountId: 'acc-1', mode: 'auto_approve_all', configured: true, updatedBy: 'alice', updatedAt: 0 },
@@ -58,7 +59,7 @@ test('account auto_approve_all write validates existence and returns database tr
 test('group client_only write rejects unknown groups', async () => {
   const { pool } = fakePool(() => ({ rows: [] }));
   assert.deepEqual(
-    await new ApprovalPolicyStore({ pool }).setGroupPublishDelivery('missing', 'client_only', 'alice'),
+    await new ApprovalPolicyStore({ schemaEnsurer: ensureCapabilitySchema, pool }).setGroupPublishDelivery('missing', 'client_only', 'alice'),
     { ok: false, reason: 'group_not_found' },
   );
 });
@@ -66,7 +67,7 @@ test('group client_only write rejects unknown groups', async () => {
 test('missing policy table fails safe to source_rules and dual-channel', async () => {
   const error = Object.assign(new Error('missing'), { code: '42P01' });
   const { pool } = fakePool(() => { throw error; });
-  const store = new ApprovalPolicyStore({ pool });
+  const store = new ApprovalPolicyStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   assert.equal(await store.getAccountCommentMode('acc-1'), 'source_rules');
   assert.deepEqual(await store.getGroupPublishPolicyForAccount('acc-1'), {
     groupLabel: null,

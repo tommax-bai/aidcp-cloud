@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import pg from 'pg';
@@ -46,7 +47,7 @@ test('maskSecret：头4****尾4，过短全掩，绝不露中段', () => {
 
 test('加密往返：setSecret 落库密文 → getSecretForRuntime 解回原文', async () => {
   const pool = fakeCredPool();
-  const store = new CredentialStore({ pool: pool as unknown as pg.Pool, masterKeyRaw: KEY });
+  const store = new CredentialStore({ schemaEnsurer: ensureCapabilitySchema, pool: pool as unknown as pg.Pool, masterKeyRaw: KEY });
   await store.init();
   assert.equal(store.canEdit(), true);
 
@@ -66,7 +67,7 @@ test('加密往返：setSecret 落库密文 → getSecretForRuntime 解回原文
 
 test('每次加密 iv 随机 → 同明文密文不同', async () => {
   const pool = fakeCredPool();
-  const store = new CredentialStore({ pool: pool as unknown as pg.Pool, masterKeyRaw: KEY });
+  const store = new CredentialStore({ schemaEnsurer: ensureCapabilitySchema, pool: pool as unknown as pg.Pool, masterKeyRaw: KEY });
   await store.init();
   await store.setSecret('dashscope', 'dashscope_api_key', 'same-value-xyz', 'a');
   const c1 = pool.map.get('dashscope:dashscope_api_key')!.ciphertext;
@@ -77,7 +78,7 @@ test('每次加密 iv 随机 → 同明文密文不同', async () => {
 
 test('密文被篡改 → 解密失败当未配置（返回 null，绝不崩）', async () => {
   const pool = fakeCredPool();
-  const store = new CredentialStore({ pool: pool as unknown as pg.Pool, masterKeyRaw: KEY });
+  const store = new CredentialStore({ schemaEnsurer: ensureCapabilitySchema, pool: pool as unknown as pg.Pool, masterKeyRaw: KEY });
   await store.init();
   await store.setSecret('dashscope', 'dashscope_api_key', 'tamper-me-please', 'a');
   // 翻转密文末位
@@ -91,7 +92,7 @@ test('密文被篡改 → 解密失败当未配置（返回 null，绝不崩）'
 
 test('主密钥缺失：canEdit=false、setSecret 抛 CredentialKeyMissingError、绝不明文落库', async () => {
   const pool = fakeCredPool();
-  const store = new CredentialStore({ pool: pool as unknown as pg.Pool, masterKeyRaw: '' });
+  const store = new CredentialStore({ schemaEnsurer: ensureCapabilitySchema, pool: pool as unknown as pg.Pool, masterKeyRaw: '' });
   await store.init();
   assert.equal(store.canEdit(), false);
   await assert.rejects(
@@ -103,7 +104,7 @@ test('主密钥缺失：canEdit=false、setSecret 抛 CredentialKeyMissingError�
 
 test('主密钥长度不对（非 32 字节）视为缺失', async () => {
   const pool = fakeCredPool();
-  const store = new CredentialStore({
+  const store = new CredentialStore({ schemaEnsurer: ensureCapabilitySchema,
     pool: pool as unknown as pg.Pool,
     masterKeyRaw: Buffer.from('too-short').toString('base64'),
   });

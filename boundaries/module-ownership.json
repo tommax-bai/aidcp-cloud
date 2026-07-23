@@ -320,11 +320,6 @@
     "note": "§4.7 src/cache/ 逐文件表的多数落点"
   },
   {
-    "path": "src/cache/pg-config.ts",
-    "layer": "kernel",
-    "note": "§4.7 kernel 花名册 4 文件之一（27 行）"
-  },
-  {
     "path": "src/cache/valuable-comment-store.ts",
     "layer": "automation",
     "note": "§4.7 src/cache/ 逐文件表的多数落点"
@@ -1008,6 +1003,11 @@
     "path": "src/kernel/persona-format.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change lift-shared-contracts-to-kernel 抬入：原 src/agents/persona-format.ts（纯人设兴趣格式化函数 tieredInterests，零 import、零副作用），被 6 个 automation 判定/撰写角色跨边界导入。满足 §4.7 kernel 准入。注：原 §4.7『src/agents/ api 2 文件 152 行』的行数配对（与 persona-auto-fill.ts 合计）随本次抬走失效，请求回写 §4.7 见 docpatch RK1"
+  },
+  {
+    "path": "src/kernel/pg-config.ts",
+    "layer": "kernel",
+    "note": "§4.7 kernel 花名册成员（27 行）。change decouple-store-schema-pgconfig-cluster 从 src/cache/pg-config.ts git mv 到 src/kernel/（物理位置归位 kernel 目录，字节等价，唯一 import 是 import type pg，无 SQL / 无业务依赖 / 无进程内活状态）。消费方改为直接从 kernel import DEFAULT_PG_CONFIG，消除经 pg-anchor-cache（automation）再导出的跨边界边。请求回写 §4.7 见 docpatch"
   },
   {
     "path": "src/kernel/pipeline-log-contract.ts",

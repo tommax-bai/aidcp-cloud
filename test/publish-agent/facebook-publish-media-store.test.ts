@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { ensureCapabilitySchema } from '../../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import {
@@ -114,10 +115,10 @@ function makePool(platform: string | null = 'facebook'): { pool: pg.Pool; putKey
 }
 
 test('FacebookPublishMediaStore: rejects missing and non-Facebook accounts before upload', async () => {
-  const missing = new FacebookPublishMediaStore({ pool: makePool(null).pool });
+  const missing = new FacebookPublishMediaStore({ schemaEnsurer: ensureCapabilitySchema, pool: makePool(null).pool });
   await assert.rejects(() => missing.listForAccount('ghost'), (err) => err instanceof FacebookPublishMediaError && err.reason === 'account_not_found');
 
-  const xhs = new FacebookPublishMediaStore({ pool: makePool('xiaohongshu').pool });
+  const xhs = new FacebookPublishMediaStore({ schemaEnsurer: ensureCapabilitySchema, pool: makePool('xiaohongshu').pool });
   await assert.rejects(() => xhs.listForAccount('xhs-1'), (err) => err instanceof FacebookPublishMediaError && err.reason === 'non_facebook_account');
 });
 
@@ -129,7 +130,7 @@ test('FacebookPublishMediaStore: upload validates images, uses account-isolated 
       return { url: `https://oss.example/${key}` };
     },
   };
-  const store = new FacebookPublishMediaStore({
+  const store = new FacebookPublishMediaStore({ schemaEnsurer: ensureCapabilitySchema,
     pool: backing.pool,
     objectStore,
     clock: () => Date.parse('2026-07-12T12:00:00Z'),
@@ -150,7 +151,7 @@ test('FacebookPublishMediaStore: upload validates images, uses account-isolated 
 });
 
 test('FacebookPublishMediaStore: upload fails honestly when object store is unavailable', async () => {
-  const store = new FacebookPublishMediaStore({ pool: makePool('facebook').pool });
+  const store = new FacebookPublishMediaStore({ schemaEnsurer: ensureCapabilitySchema, pool: makePool('facebook').pool });
   const result = await store.uploadFiles('fb-1', [
     { filename: 'cover.png', contentType: 'image/png', bytes: PNG_BYTES },
   ]);
@@ -160,7 +161,7 @@ test('FacebookPublishMediaStore: upload fails honestly when object store is unav
 
 test('FacebookPublishMediaStore: quarantined media can be manually confirmed, edited, and deleted', async () => {
   const backing = makePool('facebook');
-  const store = new FacebookPublishMediaStore({
+  const store = new FacebookPublishMediaStore({ schemaEnsurer: ensureCapabilitySchema,
     pool: backing.pool,
     objectStore: {
       put: async (key) => ({ url: `https://oss.example/${key}` }),

@@ -10,8 +10,8 @@
 // 现役上报接线点（唯一四处，勿在别处直写）：src/server.ts 三处装配（文本 LLM onCall / 视觉 recordVisionCall /
 // 图片 usageRecorder）+ src/publish-agent/roles/image-generator.ts 的图片生成出口；保留清理随表主人走（§4.6.5 第 9 项）。
 import pg from 'pg';
-import { resolveEnvPgConfig } from '../cache/pg-config.js';
-import { ensureCapabilitySchema } from '../schema/schema-capability.js';
+import { resolveEnvPgConfig } from '../kernel/pg-config.js';
+import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 
 const { Pool } = pg;
 
@@ -227,6 +227,8 @@ export interface LlmBillingPriceTarget {
 
 export interface TokenUsageStoreOptions {
   pool?: pg.Pool;
+  /** schema 保障能力注入端口（必填、无默认）：组合根传 automation 的 ensureCapabilitySchema，本文件只从 kernel 取类型。 */
+  schemaEnsurer: SchemaEnsurer;
   flushMs?: number;
 }
 
@@ -241,7 +243,10 @@ export class TokenUsageStore {
   private warnedUntagged = false;
   private warnedNoAccount = false;
 
-  constructor(options: TokenUsageStoreOptions = {}) {
+  private readonly schemaEnsurer: SchemaEnsurer;
+
+  constructor(options: TokenUsageStoreOptions) {
+    this.schemaEnsurer = options.schemaEnsurer;
     this.pool =
       options.pool ??
       new Pool({
@@ -255,7 +260,7 @@ export class TokenUsageStore {
   async init(): Promise<void> {
     // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
     // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
-    await ensureCapabilitySchema(this.pool, {
+    await this.schemaEnsurer(this.pool, {
       capability: 'llm_token_usage',
       sinceVersion: '0013_llm_token_usage',
       ddl: [TOKEN_USAGE_SCHEMA_SQL],

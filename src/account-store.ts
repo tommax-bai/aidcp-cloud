@@ -10,7 +10,7 @@
  */
 
 import pg from 'pg';
-import { DEFAULT_PG_CONFIG } from './cache/pg-anchor-cache.js';
+import { DEFAULT_PG_CONFIG } from './kernel/pg-config.js';
 import { writeWithMirrorBump, type MirrorVersionBumper } from './config/mirror-version-store.js';
 import { normalizePlatformId, type PlatformId } from './platform/index.js';
 import { parseDeploymentTarget, type DeploymentTarget } from './deployment-target.js';
@@ -21,7 +21,7 @@ import {
   type AccountDisplayName,
   type AccountDisplayNameInput,
 } from './account-display-name.js';
-import { ensureCapabilitySchema } from './schema/schema-capability.js';
+import type { SchemaEnsurer } from './kernel/schema-capability-contract.js';
 
 const { Pool } = pg;
 
@@ -214,6 +214,8 @@ export interface PgAccountStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /** schema 保障能力注入端口（必填、无默认）：组合根传 automation 的 ensureCapabilitySchema，本文件只从 kernel 取类型。 */
+  schemaEnsurer: SchemaEnsurer;
   /**
    * 跨进程失效通道（change config-mirror-cross-process-invalidation task 2.4）：
    * 运营暂停态是**闸门镜像**——它决定是否继续对真实平台下发动作。暂停写入必须推进版本，
@@ -245,7 +247,10 @@ export class PgAccountStore implements AccountStore {
    *  **仅供 env 全局旁路 AIDCP_COLDSTART_RAMP 这条历史路径现读**；不参与慢启动起点。 */
   private readonly createdAtCache = new Map<string, number>();
 
-  constructor(options: PgAccountStoreOptions = {}) {
+  private readonly schemaEnsurer: SchemaEnsurer;
+
+  constructor(options: PgAccountStoreOptions) {
+    this.schemaEnsurer = options.schemaEnsurer;
     this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.pool =
       options.pool ??
@@ -262,7 +267,7 @@ export class PgAccountStore implements AccountStore {
   async init(): Promise<void> {
     // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
     // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
-    await ensureCapabilitySchema(this.pool, {
+    await this.schemaEnsurer(this.pool, {
       capability: 'accounts',
       sinceVersion: '0065_baseline_identity_tables',
       ddl: [ACCOUNTS_SCHEMA_SQL],

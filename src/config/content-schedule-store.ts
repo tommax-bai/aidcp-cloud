@@ -17,7 +17,7 @@
  */
 
 import pg from 'pg';
-import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
+import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
 import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
 import { RETIRED_ACCOUNT_ID } from '../account-store.js';
 import { resolveAccountDisplayName, type AccountDisplayNameSource } from '../account-display-name.js';
@@ -33,7 +33,7 @@ import {
   type AvailableScheduledAutomationAction,
   type ScheduledAutomationAction,
 } from '../platform/index.js';
-import { ensureCapabilitySchema } from '../schema/schema-capability.js';
+import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 import {
   CONTENT_SCHEDULE_ACTION_MODES,
   type ContentScheduleActionMode,
@@ -289,6 +289,8 @@ export interface ContentScheduleStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /** schema 保障能力注入端口（必填、无默认）：组合根传 automation 的 ensureCapabilitySchema，本文件只从 kernel 取类型。 */
+  schemaEnsurer: SchemaEnsurer;
   /**
    * 全局活跃周历只读 provider；缺失/非法沿浏览既有语义回落 null=全天活跃。
    *
@@ -423,7 +425,10 @@ export class ContentScheduleStore {
    */
   private accountCache = new Map<string, AccountContentScheduleRow>();
 
-  constructor(options: ContentScheduleStoreOptions = {}) {
+  private readonly schemaEnsurer: SchemaEnsurer;
+
+  constructor(options: ContentScheduleStoreOptions) {
+    this.schemaEnsurer = options.schemaEnsurer;
     this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.globalActiveWeekMask = options.globalActiveWeekMask ?? (() => null);
     this.pool =
@@ -441,7 +446,7 @@ export class ContentScheduleStore {
   async init(): Promise<void> {
     // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
     // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
-    await ensureCapabilitySchema(this.pool, {
+    await this.schemaEnsurer(this.pool, {
       capability: 'content_schedule',
       sinceVersion: '0028_content_schedule',
       ddl: [CONTENT_SCHEDULE_SCHEMA_SQL],

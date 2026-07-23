@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import { NotificationContactStore, notificationDedupKey } from '../src/cache/notification-contact-store.js';
@@ -78,7 +79,7 @@ test('去重键：缺主页ID退回昵称', () => {
 // ── appendEvents 写入 ─────────────────────────────────────────────────────
 test('appendEvents：构造 ON CONFLICT DO NOTHING + 按账号删旧（留存上限）', async () => {
   const { pool, rec } = fakePool();
-  const store = new NotificationContactStore({ pool, retentionMax: 5000 });
+  const store = new NotificationContactStore({ schemaEnsurer: ensureCapabilitySchema, pool, retentionMax: 5000 });
   await store.appendEvents('acct-1', [mk({ kind: 'comment', fromUserId: 'u_1', content: 'hi', itemKey: 'n1' })]);
   assert.equal(rec.inserts.length, 1);
   assert.ok(rec.inserts[0].sql.includes('ON CONFLICT (account_id, dedup_key) DO NOTHING'));
@@ -89,14 +90,14 @@ test('appendEvents：构造 ON CONFLICT DO NOTHING + 按账号删旧（留存上
 
 test('appendEvents：空昵称/空内容/无锚点的结构异常行丢弃（不记空联系人）', async () => {
   const { pool, rec } = fakePool();
-  const store = new NotificationContactStore({ pool });
+  const store = new NotificationContactStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.appendEvents('acct-1', [mk({ kind: 'comment', fromUser: '  ', content: '  ' })]);
   assert.equal(rec.inserts.length, 0, '无身份无内容无锚点 → 不插入');
 });
 
 test('appendEvents：空字符串昵称/主页ID 归一为 NULL', async () => {
   const { pool, rec } = fakePool();
-  const store = new NotificationContactStore({ pool });
+  const store = new NotificationContactStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.appendEvents('acct-1', [mk({ kind: 'like', fromUser: '点赞的人', fromUserId: '   ', itemKey: 'n1' })]);
   // params: [accountId, dedupKey, reason, fromUser, fromUserId, content, noteTitle]
   const p = rec.inserts[0].params;
@@ -106,7 +107,7 @@ test('appendEvents：空字符串昵称/主页ID 归一为 NULL', async () => {
 
 test('appendEvents：同批次重复键去重（避免单语句自冲突）', async () => {
   const { pool, rec } = fakePool();
-  const store = new NotificationContactStore({ pool });
+  const store = new NotificationContactStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const dup = mk({ kind: 'follow', fromUserId: 'u_9' });
   await store.appendEvents('acct-1', [dup, { ...dup }]);
   // 一个 INSERT，params = [accountId] + 一组 6 个（去重后 1 行）
@@ -116,7 +117,7 @@ test('appendEvents：同批次重复键去重（避免单语句自冲突）', as
 
 test('appendEvents：空 items / 空 accountId 不发查询', async () => {
   const { pool, rec } = fakePool();
-  const store = new NotificationContactStore({ pool });
+  const store = new NotificationContactStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.appendEvents('acct-1', []);
   await store.appendEvents('', [mk({ kind: 'follow', fromUserId: 'u_1' })]);
   assert.equal(rec.inserts.length, 0);
@@ -125,7 +126,7 @@ test('appendEvents：空 items / 空 accountId 不发查询', async () => {
 // ── listContacts 缺表回落 ─────────────────────────────────────────────────
 test('listContacts：缺表（42P01）回落空，不抛', async () => {
   const { pool } = fakePool({ listError: { code: '42P01' } });
-  const store = new NotificationContactStore({ pool });
+  const store = new NotificationContactStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const out = await store.listContacts('acct-1');
   assert.deepEqual(out, []);
 });
@@ -151,7 +152,7 @@ test('listContacts：缺 accountId（全账号视图）不加 account_id 过滤�
       },
     ],
   });
-  const store = new NotificationContactStore({ pool });
+  const store = new NotificationContactStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const out = await store.listContacts(undefined);
   // 全账号：SELECT 不带 WHERE e.account_id 过滤，仅 LIMIT/OFFSET 两个参数（占位 $1/$2）
   assert.equal(rec.selects.length, 1);
@@ -166,7 +167,7 @@ test('listContacts：缺 accountId（全账号视图）不加 account_id 过滤�
 
 test('listContacts：给定 accountId → 加 WHERE e.account_id 过滤', async () => {
   const { pool, rec } = fakePool();
-  const store = new NotificationContactStore({ pool });
+  const store = new NotificationContactStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.listContacts('acct-1');
   assert.match(rec.selects[0].sql, /WHERE e\.account_id = \$1/);
   assert.match(rec.selects[0].sql, /LIMIT \$2 OFFSET \$3/);
@@ -182,7 +183,7 @@ test('setManual：upsert 人工字段（标签数组 + 审计），SQL 命中 co
       return { rows: [], rowCount: 0 };
     },
   } as unknown as pg.Pool;
-  const store = new NotificationContactStore({ pool });
+  const store = new NotificationContactStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.setManual('acct-1', 'u_1', { wechat: 'wx123', note: '客户', tags: ['潜客', '潜客', ' '] }, 'admin');
   const ins = captured.find((c) => c.sql.includes('notification_contact_meta'));
   assert.ok(ins, '应 upsert notification_contact_meta');

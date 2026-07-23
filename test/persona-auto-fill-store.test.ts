@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
 import { PersonaAutoFillStore, PERSONA_AUTO_FILL_SCHEMA_SQL } from '../src/config/persona-auto-fill-store.js';
@@ -41,7 +42,7 @@ test('createRun 只以 customer 身份快照 Facebook 环境，并逐字持久�
   };
   const client = { query, release: () => undefined };
   const pool = { connect: async () => client, query } as unknown as pg.Pool;
-  const store = new PersonaAutoFillStore({ pool });
+  const store = new PersonaAutoFillStore({ schemaEnsurer: ensureCapabilitySchema, pool });
 
   const input = { userId: 'customer-a', idempotencyKey: 'selected-1', writingLanguage: 'zh-CN' as const, soulYaml: SELECTED_SOUL };
   const first = await store.createRun(input);

@@ -16,7 +16,7 @@
  */
 
 import pg from 'pg';
-import { DEFAULT_PG_CONFIG } from './pg-anchor-cache.js';
+import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
 import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 import type { FeedAction } from '../kernel/feed-action.js';
 

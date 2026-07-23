@@ -14,5 +14,5 @@
       "note": "change offboard-saga：同批已把本文件删 api 属主表的两处（purgeDueOffboards 的 5 张 reply_* 删除、purgeExpiredContent 的 interaction_audit_events 过期删除）收口到 api 侧窄接口 interaction-api-writes。剩这一条 audit() 插入**明确推迟到阶段 2（进程切分）**：它是同事务内的审计写，被 7 处内部路径 + 4 处外部 recordAudit 调用穿透（reply-workflow / send-orchestrator / interaction-customer-api），把它收口成必填注入会波及约 16 处 InteractionStore 构造与整条 reply/send 审计面，或退化成 optional-throw 在整条测试面误爆；阶段 2 会把审计写变成持久命令，届时随窄接口一并消除。承接：process-split（阶段 2）。"
     }
   ],
-  "seedBasis": "decouple wave batch B: content post-processor pure fns to shared util, removed automation->content imports; net decrease"
+  "seedBasis": "decouple store schema+pgconfig cluster: frozenTotal 209->173"
 }

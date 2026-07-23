@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { ensureCapabilitySchema } from '../../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
 import { CuratedContentStore, CuratedContentUnavailableError, normalizeCuratedReferenceImages, type CuratedObservation, CURATED_CONTENT_SCHEMA_SQL } from '../../src/cache/curated-content-store.js';
@@ -46,7 +47,7 @@ const baseObs: CuratedObservation = {
 //   ② 常量本身仍声明那些列与索引 —— 少一条，迁移与探测会同时少一条。
 test('init 只探测、不建表（一条 DDL 都不发）', async () => {
   const { pool, calls } = capturingPool();
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.init();
   assert.deepEqual(calls, [], 'init 发出的非探测语句必须为空：DDL 的唯一所有者是 migrations/');
 });
@@ -71,7 +72,7 @@ test('CURATED_CONTENT_SCHEMA_SQL 仍声明全部列与索引（迁移与探测�
 
 test('upsertObservation：INSERT...ON CONFLICT DO UPDATE，含 dedup_key、不抹 bot 标记、保留 first_seen_at', async () => {
   const { pool, calls } = capturingPool();
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.upsertObservation(baseObs);
 
   // 第一条是 upsert，第二条是保留上限裁剪。
@@ -103,7 +104,7 @@ test('upsertObservation：INSERT...ON CONFLICT DO UPDATE，含 dedup_key、不�
 
 test('upsertObservation normalizes and atomically persists source published-time evidence', async () => {
   const { pool, calls } = capturingPool();
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const publishedObservedAt = Date.parse('2026-07-21T07:30:00.000Z');
   await store.upsertObservation({
     ...baseObs,
@@ -123,7 +124,7 @@ test('upsertObservation normalizes and atomically persists source published-time
 
 test('upsertObservation retains unparseable raw evidence without inventing a time', async () => {
   const { pool, calls } = capturingPool();
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const publishedObservedAt = Date.parse('2026-07-21T07:30:00.000Z');
   await store.upsertObservation({
     ...baseObs,
@@ -141,7 +142,7 @@ test('upsertObservation retains unparseable raw evidence without inventing a tim
 
 test('upsertObservation rejects raw published text without an observation anchor', async () => {
   const { pool } = capturingPool();
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await assert.rejects(
     store.upsertObservation({ ...baseObs, publishedAtText: '3小时前' }),
     /publishedObservedAt is required/,
@@ -151,7 +152,7 @@ test('upsertObservation rejects raw published text without an observation anchor
 test('非空源帖进入精选后回调首作链路；评论与空正文不触发', async () => {
   const { pool } = capturingPool();
   const admitted: unknown[] = [];
-  const store = new CuratedContentStore({
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema,
     pool,
     onSourceAdmitted: (source) => { admitted.push(source); },
   });
@@ -177,7 +178,7 @@ test('非空源帖进入精选后回调首作链路；评论与空正文不触�
 test('reference images are normalized, deduped, relocated, and stored as JSONB', async () => {
   const { pool, calls } = capturingPool();
   const relocatedInputs: unknown[] = [];
-  const store = new CuratedContentStore({
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema,
     pool,
     referenceImageLimit: 2,
     referenceImageRelocator: async ({ images }) => {
@@ -221,7 +222,7 @@ test('reference images are normalized, deduped, relocated, and stored as JSONB',
 
 test('reference images default limit stores up to the curated cap of 18', async () => {
   const { pool, calls } = capturingPool();
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.upsertObservation({
     ...baseObs,
     referenceImages: Array.from({ length: 20 }, (_, i) => ({ index: i, sourceUrl: `https://img.test/${i}.jpg` })),
@@ -234,7 +235,7 @@ test('reference images default limit stores up to the curated cap of 18', async 
 
 test('refreshReferenceImages：只更新已有源帖图片，空输入不写库', async () => {
   const { pool, calls } = capturingPool();
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   assert.equal(await store.refreshReferenceImages('acc-1', 'note-9', 'image_text', []), 0);
   assert.equal(calls.length, 0);
 
@@ -267,7 +268,7 @@ test('有序文字卡转写以单一 JSONB 随精选行写入，并由缓存读�
       ? [{ reference_images: storedImages, text_card_transcription: transcription }]
       : [],
   );
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.upsertObservation({
     ...baseObs,
     referenceImages: [{ index: 7, sourceUrl: 'https://img.test/a.jpg', capturedAt: 123 }],
@@ -299,7 +300,7 @@ test('normalizeCuratedReferenceImages drops invalid URLs and caps at the configu
 
 test('upsertObservation：缺失可选字段诚实置空（null），不编造', async () => {
   const { pool, calls } = capturingPool();
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.upsertObservation({
     accountId: 'acc-1',
     contentType: 'comment',
@@ -322,14 +323,14 @@ test('upsertObservation：缺失可选字段诚实置空（null），不编造',
 
 test('upsertObservation：正文为空则不写入精选素材', async () => {
   const { pool, calls } = capturingPool();
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.upsertObservation({ ...baseObs, body: '   ' });
   assert.equal(calls.length, 0);
 });
 
 test('upsertObservation 之后按账号裁到保留上限（DELETE 带 account_id 且 NOT IN newest LIMIT）', async () => {
   const { pool, calls } = capturingPool();
-  const store = new CuratedContentStore({ pool, retentionMax: 500 });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool, retentionMax: 500 });
   await store.upsertObservation(baseObs);
   const del = calls[1];
   assert.match(del.sql, /DELETE FROM curated_content/);
@@ -343,7 +344,7 @@ test('upsertObservation 之后按账号裁到保留上限（DELETE 带 account_i
 
 test('markBotAction like 走 UPDATE（不 INSERT），行不存在则 no-op，不自动建行', async () => {
   const { pool, calls } = capturingPool();
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.markBotAction('acc-1', 'note-9', 'like');
   assert.equal(calls.length, 1);
   assert.match(calls[0].sql, /^\s*UPDATE curated_content SET bot_liked = true/);
@@ -355,7 +356,7 @@ test('markBotAction like 走 UPDATE（不 INSERT），行不存在则 no-op，�
 
 test('markBotAction collect 走 INSERT...ON CONFLICT（自有收藏自动建/纳入）', async () => {
   const { pool, calls } = capturingPool();
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.markBotAction('acc-1', 'note-9', 'collect', {
     title: 'T',
     body: '收藏的正文',
@@ -383,7 +384,7 @@ test('markBotAction collect 走 INSERT...ON CONFLICT（自有收藏自动建/纳
 
 test('markBotAction collect carries same-visit source published-time evidence', async () => {
   const { pool, calls } = capturingPool();
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const publishedObservedAt = Date.parse('2026-07-21T07:30:00.000Z');
   await store.markBotAction('acc-1', 'note-9', 'collect', {
     body: '收藏的正文',
@@ -400,7 +401,7 @@ test('markBotAction collect carries same-visit source published-time evidence', 
 
 test('markBotAction collect 视频内容：content_type/dedup_key 用 video', async () => {
   const { pool, calls } = capturingPool();
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.markBotAction('acc-1', 'note-v', 'collect', {
     title: 'V',
     body: '视频文案',
@@ -413,7 +414,7 @@ test('markBotAction collect 视频内容：content_type/dedup_key 用 video', as
 
 test('markBotAction collect 无正文：只补标记既有源帖行，不补建空正文壳行', async () => {
   const { pool, calls } = capturingPool();
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.markBotAction('acc-1', 'note-9', 'collect');
   assert.equal(calls.length, 1);
   assert.match(calls[0].sql, /^\s*UPDATE curated_content SET bot_collected = true/);
@@ -424,7 +425,7 @@ test('markBotAction collect 无正文：只补标记既有源帖行，不补建�
 
 test('markBotAction collect 空白正文：按缺正文处理，不补建精选壳行', async () => {
   const { pool, calls } = capturingPool();
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.markBotAction('acc-1', 'note-9', 'collect', { title: 'T', body: '   ', mediaType: 'video' });
   assert.equal(calls.length, 1);
   assert.match(calls[0].sql, /^\s*UPDATE curated_content SET bot_collected = true/);
@@ -460,7 +461,7 @@ test('selectForCreation：ORDER BY 含 bot_collected/bot_liked 权重，按账�
     },
   ];
   const { pool, calls } = capturingPool((sql) => (/SELECT/.test(sql) ? cannedRows : []));
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const out = await store.selectForCreation('acc-1', 'source_post', 7);
 
   const sql = calls[0].sql;
@@ -503,7 +504,7 @@ test('selectForCreation：ORDER BY 含 bot_collected/bot_liked 权重，按账�
 
 test('archiveComment 落 content_type=comment + bot_liked=true + ON CONFLICT DO NOTHING（Phase 2）', async () => {
   const { pool, calls } = capturingPool();
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.archiveComment('acc-1', {
     sourceId: 'comment-9',
     text: '很有用的评论',
@@ -531,7 +532,7 @@ test('archiveComment 落 content_type=comment + bot_liked=true + ON CONFLICT DO 
 
 test('archiveComment 无 reason/无 likeCount → admit_reason=confirmed_like、like_count=null（诚实置空）', async () => {
   const { pool, calls } = capturingPool();
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.archiveComment('acc-2', { sourceId: 'comment-2', text: 't', topics: [] });
   assert.equal(calls[0].params[7], null); // like_count 抓不到 → null，不编造
   assert.equal(calls[0].params[8], 'confirmed_like');
@@ -587,7 +588,7 @@ const panelDbRow = {
 
 test('listForPanel：按账号 + 类型 + 原因过滤，COUNT(*) OVER() 取 total，映射 epoch ms + 诚实置空', async () => {
   const { pool, calls } = controllablePool(() => ({ rows: [panelDbRow] }));
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const out = await store.listForPanel('acc-1', { contentType: 'image_text', admitReason: 'collect_floor', limit: 50, offset: 0 });
 
   const sql = calls[0].sql;
@@ -617,7 +618,7 @@ test('listForPanel：按账号 + 类型 + 原因过滤，COUNT(*) OVER() 取 tot
 
 test('listForPanel：无筛选时仅按账号；空结果 total 兜底 0', async () => {
   const { pool, calls } = controllablePool(() => ({ rows: [] }));
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const out = await store.listForPanel('acc-1', { limit: 20, offset: 40 });
   assert.doesNotMatch(calls[0].sql, /content_type = \$/);
   assert.doesNotMatch(calls[0].sql, /admit_reason = \$/);
@@ -629,7 +630,7 @@ test('listForClient：未创作在 SQL 层按持久化洗稿触发记录过滤�
   const { pool, calls } = controllablePool(() => ({
     rows: [{ ...panelDbRow, like_count: null, collect_count: 0, total_count: '23' }],
   }));
-  const store = new CuratedContentStore({ pool, executionTarget: 'dev' });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool, executionTarget: 'dev' });
   const out = await store.listForClient('acc-1', { creationStatus: 'uncreated', limit: 999, offset: -5 });
 
   assert.match(calls[0].sql, /WHERE c\.account_id = \$1/);
@@ -665,7 +666,7 @@ test('listForClient：四种排序映射为固定 SQL，缺失值置后且使用
   ];
   for (const entry of cases) {
     const { pool, calls } = controllablePool(() => ({ rows: [] }));
-    const store = new CuratedContentStore({ pool });
+    const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
     await store.listForClient('acc-1', { creationStatus: 'all', sort: entry.sort, limit: 12, offset: 24 });
     const sql = calls[0].sql;
     assert.match(sql, entry.primary, `${entry.sort} 必须使用固定排序片段`);
@@ -677,7 +678,7 @@ test('listForClient：四种排序映射为固定 SQL，缺失值置后且使用
 
 test('listForClient：已创作使用同一账号范围的 EXISTS，全部模式不加创作条件', async () => {
   const created = controllablePool(() => ({ rows: [] }));
-  const createdStore = new CuratedContentStore({ pool: created.pool, executionTarget: 'ol' });
+  const createdStore = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool: created.pool, executionTarget: 'ol' });
   await createdStore.listForClient('acc-1', { creationStatus: 'created', limit: 20, offset: 0 });
   assert.match(created.calls[0].sql, /c\.content_type = 'image_text'/);
   assert.match(created.calls[0].sql, /\sEXISTS \([\s\S]*FROM delegated_tasks dt/);
@@ -686,14 +687,14 @@ test('listForClient：已创作使用同一账号范围的 EXISTS，全部模式
   assert.deepEqual(created.calls[0].params, ['acc-1', 'ol', 20, 0]);
 
   const legacy = controllablePool(() => ({ rows: [] }));
-  const legacyStore = new CuratedContentStore({ pool: legacy.pool });
+  const legacyStore = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool: legacy.pool });
   await legacyStore.listForClient('acc-1', { creationStatus: 'creatable', limit: 20, offset: 0 });
   assert.match(legacy.calls[0].sql, /c\.content_type = 'image_text'/);
   assert.match(legacy.calls[0].sql, /BTRIM\(COALESCE\(c\.body, ''\)\) <> ''/);
   assert.doesNotMatch(legacy.calls[0].sql, /delegated_tasks/, '旧客户端必须精确保留原可创作集合，不按触发状态拆分');
 
   const ok = controllablePool(() => ({ rows: [] }));
-  const store = new CuratedContentStore({ pool: ok.pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool: ok.pool });
   assert.deepEqual(await store.listForClient('acc-1', { creationStatus: 'all', limit: 20, offset: 0 }), {
     items: [],
     total: 0,
@@ -705,7 +706,7 @@ test('listForClient：已创作使用同一账号范围的 EXISTS，全部模式
   assert.equal(ok.calls.length, 1, 'offset=0 的零行就是真零条，不必补 COUNT');
 
   const unscoped = controllablePool(() => ({ rows: [] }));
-  const unscopedStore = new CuratedContentStore({ pool: unscoped.pool });
+  const unscopedStore = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool: unscoped.pool });
   await assert.rejects(
     () => unscopedStore.listForClient('acc-1', { creationStatus: 'uncreated', limit: 20, offset: 0 }),
     CuratedContentUnavailableError,
@@ -718,7 +719,7 @@ test('listForClient：已创作使用同一账号范围的 EXISTS，全部模式
     err.code = '42P01';
     throw err;
   });
-  const missingStore = new CuratedContentStore({ pool: missing.pool, executionTarget: 'dev' });
+  const missingStore = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool: missing.pool, executionTarget: 'dev' });
   await assert.rejects(
     () => missingStore.listForClient('acc-1', { creationStatus: 'uncreated', limit: 20, offset: 0 }),
     CuratedContentUnavailableError,
@@ -729,7 +730,7 @@ test('listForClient：offset 越过末尾时补 COUNT 拿真实总数，绝不�
   // 页码陈旧 / 列表缩短：窗口函数无行可算 → 必须另查一次真实总数，否则 UI 会显示「精选池还是空的」。
   const { pool, calls } = controllablePool((sql: string) =>
     /COUNT\(\*\)::text/.test(sql) ? { rows: [{ total_count: '23' }] } : { rows: [] });
-  const store = new CuratedContentStore({ pool, executionTarget: 'dev' });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool, executionTarget: 'dev' });
   const out = await store.listForClient('acc-1', { creationStatus: 'uncreated', limit: 12, offset: 96 });
 
   assert.deepEqual(out.items, []);
@@ -743,7 +744,7 @@ test('listForClient：offset 越过末尾时补 COUNT 拿真实总数，绝不�
 
 test('listForPanel：缺 accountId（全账号视图）不加 account_id 过滤，仍可叠类型过滤', async () => {
   const { pool, calls } = controllablePool(() => ({ rows: [panelDbRow] }));
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const out = await store.listForPanel(undefined, { contentType: 'note', limit: 50, offset: 0 });
   assert.doesNotMatch(calls[0].sql, /account_id = \$/);
   assert.match(calls[0].sql, /WHERE content_type IN \('image_text', 'video'\)/);
@@ -755,7 +756,7 @@ test('listForPanel：缺 accountId（全账号视图）不加 account_id 过滤�
 
 test('listForPanel：缺 accountId 且无筛选 → 全表（无 WHERE）', async () => {
   const { pool, calls } = controllablePool(() => ({ rows: [] }));
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const out = await store.listForPanel(undefined, { limit: 20, offset: 0 });
   assert.doesNotMatch(calls[0].sql, /WHERE/);
   assert.deepEqual(calls[0].params, [20, 0]);
@@ -767,7 +768,7 @@ test('facetsForPanel：缺 accountId（全账号视图）不加 account_id 过�
     if (/GROUP BY admit_reason/.test(sql)) return { rows: [{ admit_reason: 'collect_floor', count: '9', bot_action_count: '4' }] };
     return { rows: [{ content_type: 'image_text', count: '5' }, { content_type: 'video', count: '2' }, { content_type: 'comment', count: '2' }] };
   });
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const out = await store.facetsForPanel(undefined);
   assert.ok(calls.every((c) => !/account_id = \$/.test(c.sql))); // 两查询都不按账号
   assert.ok(calls.every((c) => c.params.length === 0));
@@ -784,7 +785,7 @@ test('listForPanel：缺表 42P01 → 抛 CuratedContentUnavailableError（绝�
     err.code = '42P01';
     throw err;
   });
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await assert.rejects(() => store.listForPanel('acc-1', { limit: 10, offset: 0 }), CuratedContentUnavailableError);
 });
 
@@ -800,7 +801,7 @@ test('facetsForPanel：纳入原因去重+计数+高权重行数 与 笔记/评�
     }
     return { rows: [{ content_type: 'image_text', count: '3' }, { content_type: 'video', count: '1' }, { content_type: 'comment', count: '1' }] };
   });
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const out = await store.facetsForPanel('acc-1');
   assert.ok(calls.every((c) => c.params[0] === 'acc-1')); // 两查询都按账号
   assert.equal(out.imageTextCount, 3);
@@ -813,7 +814,7 @@ test('facetsForPanel：纳入原因去重+计数+高权重行数 与 笔记/评�
 
 test('deleteOne：account_id 进 WHERE 防越权，回真实删除行数', async () => {
   const { pool, calls } = controllablePool(() => ({ rowCount: 1 }));
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const n = await store.deleteOne('acc-1', 7);
   assert.match(calls[0].sql, /DELETE FROM curated_content WHERE id = \$1 AND account_id = \$2/);
   assert.deepEqual(calls[0].params, [7, 'acc-1']);
@@ -822,13 +823,13 @@ test('deleteOne：account_id 进 WHERE 防越权，回真实删除行数', async
 
 test('deleteOne：凭别账号 id 删 → rowCount 0（越权被隔离），诚实回 0', async () => {
   const { pool } = controllablePool(() => ({ rowCount: 0 }));
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   assert.equal(await store.deleteOne('acc-1', 999), 0);
 });
 
 test('clearEmptyBody：按账号删空正文壳行（body IS NULL OR body=\'\'），回真实条数', async () => {
   const { pool, calls } = controllablePool(() => ({ rowCount: 5 }));
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const n = await store.clearEmptyBody('acc-1');
   assert.match(calls[0].sql, /DELETE FROM curated_content WHERE account_id = \$1 AND \(body IS NULL OR body = ''\)/);
   assert.deepEqual(calls[0].params, ['acc-1']);
@@ -839,7 +840,7 @@ test('clearEmptyBody：按账号删空正文壳行（body IS NULL OR body=\'\'�
 
 test('getOneForAccount：id + account_id 双条件命中，映射面板视图', async () => {
   const { pool, calls } = controllablePool(() => ({ rows: [panelDbRow] }));
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const row = await store.getOneForAccount(7, 'acc-1');
   assert.match(calls[0].sql, /WHERE id = \$1 AND account_id = \$2/);
   assert.deepEqual(calls[0].params, [7, 'acc-1']);
@@ -850,7 +851,7 @@ test('getOneForAccount：id + account_id 双条件命中，映射面板视图', 
 
 test('getOneForAccount：跨账号/不存在 → null（越权被隔离，不泄露行存在性）', async () => {
   const { pool } = controllablePool(() => ({ rows: [] }));
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   assert.equal(await store.getOneForAccount(999, 'acc-1'), null);
 });
 
@@ -860,6 +861,6 @@ test('getOneForAccount：缺表 42P01 → 抛 CuratedContentUnavailableError（�
     err.code = '42P01';
     throw err;
   });
-  const store = new CuratedContentStore({ pool });
+  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await assert.rejects(() => store.getOneForAccount(1, 'acc-1'), CuratedContentUnavailableError);
 });
