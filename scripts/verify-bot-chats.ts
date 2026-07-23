@@ -1,5 +1,6 @@
 import pg from 'pg';
-import { BotChatStore, resolveEnvPgConfig } from '../src/cache/index.js';
+import { BotChatStore } from '../src/cache/bot-chat-store.js';
+import { resolveEnvPgConfig } from '../src/cache/index.js';
 import { FeishuBotChatEventHandler } from '../src/feishu/index.js';
 
 const { Pool } = pg;
