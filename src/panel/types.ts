@@ -238,29 +238,6 @@ export interface PanelDeps {
   /** 风控注册表（V1 写路由 risk/status、risk/quota 按账号取 controller；单写 PER ACCOUNT）。 */
   riskRegistry: { getController(accountId: string): Promise<RiskController> };
   /**
-   * 账号归属 target（change risk-state-cross-process-integrity，design D3/D7）。
-   *
-   * 未注入 / mode='off' → 归属闸不启用，全部风控写口行为与改动前逐位一致。
-   * 注入后：非属主的 `/risk/signal` 与 `/risk/quota` 返回 409 + `risk_state_not_owned` + 真实归属；
-   * 首页汇总不为非属主账号物化可写 controller。
-   */
-  riskOwnership?: {
-    executionTarget: 'dev' | 'ol';
-    mode: 'enforce' | 'observe' | 'off';
-    ownerOf(accountId: string): Promise<'dev' | 'ol' | null>;
-    /**
-     * 改归属（`POST /api/accounts/:id/risk-owner`）。**MUST 先确认旧属主上无活跃边缘会话**，
-     * 有则返回 blocked_by_active_session，MUST NOT 强改。
-     */
-    changeOwner(
-      accountId: string,
-      target: 'dev' | 'ol',
-    ): Promise<
-      | { ok: true; owner: 'dev' | 'ol'; previousOwner: 'dev' | 'ol' | null }
-      | { ok: false; reason: 'blocked_by_active_session' | 'account_not_found'; owner: 'dev' | 'ol' | null }
-    >;
-  };
-  /**
    * 账号属性写入（change editable-account-group-label）。未注入则 `/api/accounts/:id/group-label` 返回 503。
    * setGroupLabel 经账号存储单写（accounts 表拥有者）：UPDATE-only、空归 NULL（清空）、退役账号 / 无行以
    * 可区分结果返回、写后回读真态；面板层绝不 raw UPDATE、绝不乐观假成功；不碰风控单写 / 协议 / 边缘。

@@ -200,8 +200,8 @@ export interface AccountStore {
    */
   claimExecutionTarget?(accountId: string, target: DeploymentTarget): Promise<ClaimExecutionTargetResult>;
   /**
-   * 运维改归属（面板 POST /api/accounts/:id/risk-owner）：无条件写入指定 target。
-   * **调用方 MUST 先校验旧属主上无活跃边缘会话**，否则拒绝——本方法不做该校验（它看不到连接）。
+   * 无条件把归属改写为指定 target（change risk-target-follows-active-session）：归属**跟随当次连接**，
+   * 每次握手都调用它把 accounts.execution_target 更新为正在接入的 target。账号不存在 → account_not_found。
    */
   setExecutionTarget?(accountId: string, target: DeploymentTarget): Promise<ClaimExecutionTargetResult>;
   close?(): Promise<void>;
@@ -564,8 +564,8 @@ export class PgAccountStore implements AccountStore {
   }
 
   /**
-   * 运维改归属（无条件写）。**调用方 MUST 先确认旧属主上无活跃边缘会话**——本方法看不到连接，
-   * 不做该校验；把它做进这里会让「谁负责这道闸」变得模糊。
+   * 无条件把归属改写为指定 target（change risk-target-follows-active-session）：握手路径每次调用它，
+   * 让 accounts.execution_target 跟随当次连接。账号不存在 → account_not_found（不 seed 造行）。
    */
   async setExecutionTarget(accountId: string, target: DeploymentTarget): Promise<ClaimExecutionTargetResult> {
     if (accountId === RETIRED_ACCOUNT_ID) return { outcome: 'account_not_found' };

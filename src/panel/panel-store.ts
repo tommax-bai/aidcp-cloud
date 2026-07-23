@@ -61,13 +61,11 @@ export interface PanelAccount {
   /** 需设置人设（派生）：未绑人设且非 default（default 硬豁免）。后台据此标「需设置人设」+ 跳转人设页。 */
   needsPersonaSetup: boolean;
   /**
-   * 账号归属的执行目标（change risk-state-cross-process-integrity）：`dev` / `ol` / null=未归属。
-   * **服务端权威**：Console MUST NOT 自己从别的字段推断，未归属 MUST 显示为「未归属」
-   * 而不是伪装成当前 target。
+   * 当前 / 最近由哪个目标驱动（change risk-target-follows-active-session）：直接取 accounts.execution_target，
+   * `dev` / `ol` / null=从未驱动过。归属跟随当次连接，故这是「最近一次握手的目标」的只读展示，
+   * **不代表写权限**（写已改回账号级、不按归属禁用）。
    */
-  executionTarget: 'dev' | 'ol' | null;
-  /** 本云端对该账号是否有风控写权。false ⇒ Console 禁用风控写操作并指向真实属主。 */
-  riskWritable: boolean;
+  currentDriverTarget: 'dev' | 'ol' | null;
   /** 环境资产独立生命周期的只读摘要；删除环境不改变账号本身。 */
   environmentSummary?: { activeCount: number; deletingCount: number; onlineCount: number };
 }
@@ -219,22 +217,6 @@ export interface PanelStoreReader {
 }
 
 export interface PgPanelStoreOptions {
-  /**
-   * 本云端的部署目标（change risk-state-cross-process-integrity）：用于把账号行的
-   * `execution_target` 翻译成「本后台能不能写它的风控」。缺省 → 归属未启用，riskWritable 恒 true
-   * （单进程语义，逐位零回归）。
-   */
-  executionTarget?: 'dev' | 'ol';
-  /**
-   * 归属强制模式。**只有 'enforce' 会把非属主账号标为不可写**；'off' 与 'observe' 下 riskWritable 恒 true。
-   *
-   * observe 曾经也标不可写，理由是「界面不该把一个属于另一个后台的操作摆在运营面前」。那条理由
-   * 在观察期站不住：迁移刻意不回填归属，上线瞬间**全部**账号的 execution_target 都是 NULL，
-   * 于是整块风控控件对所有账号一起变灰，而服务端在 observe 下本来是接受写的——界面把一个能做的
-   * 操作说成不能做，同样是不诚实，且代价是全车队锁死。观察期的表达方式是告警，不是变灰。
-   * 翻开 enforce 之后（此时归属已由握手逐个占位完毕），变灰才对应服务端真实的 409。
-   */
-  ownershipMode?: 'enforce' | 'observe' | 'off';
   host?: string;
   port?: number;
   database?: string;
@@ -261,10 +243,7 @@ interface AccountJoinRow {
   execution_target: string | null;
 }
 
-function toAccount(
-  r: AccountJoinRow,
-  ownership: { target: 'dev' | 'ol' | null; mode: 'enforce' | 'observe' | 'off' },
-): PanelAccount {
+function toAccount(r: AccountJoinRow): PanelAccount {
   const accountId = r.account_id;
   const personaBound = r.persona_bound === true;
   const display = resolveAccountDisplayName({
@@ -286,9 +265,7 @@ function toAccount(
     riskStatus: (r.risk_status as RiskStatus | null) ?? null,
     riskQuotaLevel: (r.risk_quota_level as RiskQuotaLevel | null) ?? null,
     signalCount: r.signal_count,
-    executionTarget: r.execution_target === 'dev' || r.execution_target === 'ol' ? r.execution_target : null,
-    riskWritable:
-      ownership.mode !== 'enforce' || !ownership.target ? true : r.execution_target === ownership.target,
+    currentDriverTarget: r.execution_target === 'dev' || r.execution_target === 'ol' ? r.execution_target : null,
     personaBound,
     // retire-default-account / persona-driven-content-pipeline：default 账号已删，不再特判——是否需补人设仅看 personaBound。
     needsPersonaSetup: !personaBound,
@@ -425,12 +402,8 @@ const ACCOUNT_SELECT = `
 
 export class PgPanelStore implements PanelStoreReader {
   private readonly pool: pg.Pool;
-  private readonly executionTarget: 'dev' | 'ol' | null;
-  private readonly ownershipMode: 'enforce' | 'observe' | 'off';
 
   constructor(options: PgPanelStoreOptions = {}) {
-    this.executionTarget = options.executionTarget ?? null;
-    this.ownershipMode = options.executionTarget ? options.ownershipMode ?? 'off' : 'off';
     this.pool =
       options.pool ??
       new Pool({
@@ -505,7 +478,7 @@ export class PgPanelStore implements PanelStoreReader {
 
   async listAccounts(): Promise<PanelAccount[]> {
     const { rows } = await this.pool.query<AccountJoinRow>(`${ACCOUNT_SELECT} ORDER BY a.created_at`);
-    return rows.map((row) => toAccount(row, { target: this.executionTarget, mode: this.ownershipMode }));
+    return rows.map((row) => toAccount(row));
   }
 
   async getAccount(accountId: string): Promise<PanelAccount | null> {
@@ -513,7 +486,7 @@ export class PgPanelStore implements PanelStoreReader {
       accountId,
     ]);
     const r = rows[0];
-    return r ? toAccount(r, { target: this.executionTarget, mode: this.ownershipMode }) : null;
+    return r ? toAccount(r) : null;
   }
 
   /**

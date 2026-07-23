@@ -30,15 +30,8 @@ export interface PgRiskStoreOptions {
    * 缺省（不注入）→ ownershipMode 恒为 'off'，saveState 走历史无谓词 upsert（逐位零回归）。
    */
   executionTarget?: DeploymentTarget;
-  /** 归属强制模式。缺省 'off'（无 target 时的唯一合法值）。 */
+  /** 条件写模式。有 target 时缺省 'enforce'（条件写生效、并发接管即作废先写方）；无 target 恒 'off'。 */
   ownershipMode?: OwnershipMode;
-  /** 观察模式下「本会被拒的写」的告警钩子。永不抛（内部已 try/catch）。 */
-  onOwnershipViolation?: (info: {
-    accountId: string;
-    writerTarget: DeploymentTarget;
-    ownerTarget: DeploymentTarget | null | undefined;
-    cause: 'account_not_found' | 'unowned' | 'owned_by_other';
-  }) => void;
 }
 
 export const RISK_SCHEMA_SQL = `
@@ -156,7 +149,6 @@ export class PgRiskStore implements RiskStore, InteractionStore {
   private readonly pool: pg.Pool;
   private readonly executionTarget?: DeploymentTarget;
   private readonly ownershipMode: OwnershipMode;
-  private readonly onOwnershipViolation?: PgRiskStoreOptions['onOwnershipViolation'];
 
   constructor(options: PgRiskStoreOptions = {}) {
     const config = pgRiskConfigFromEnv();
@@ -170,9 +162,9 @@ export class PgRiskStore implements RiskStore, InteractionStore {
         password: options.password ?? config.password,
       });
     this.executionTarget = options.executionTarget;
-    // 无 target ⇒ 无属主谓词可用 ⇒ 只能是 'off'。绝不让「配置缺失」偷偷变成「强制生效」或反过来。
-    this.ownershipMode = options.executionTarget ? options.ownershipMode ?? 'off' : 'off';
-    this.onOwnershipViolation = options.onOwnershipViolation;
+    // 无 target ⇒ 无属主谓词可用 ⇒ 只能是 'off'；有 target 缺省 'enforce'（安全默认：并发接管即作废先写方）。
+    // 绝不让「配置缺失」偷偷变成「强制生效」或反过来。
+    this.ownershipMode = options.executionTarget ? options.ownershipMode ?? 'enforce' : 'off';
   }
 
   /** 当前生效的归属强制模式（供装配自证与面板呈现）。 */
@@ -248,21 +240,19 @@ export class PgRiskStore implements RiskStore, InteractionStore {
   }
 
   /**
-   * 写风控最终状态（change risk-state-cross-process-integrity，design D4）。
+   * 写风控最终状态（change risk-target-follows-active-session）。
    *
-   * **带属主谓词的单语句**：属主事实的唯一权威是 `accounts.execution_target`
-   * （MUST NOT 在 risk_state 复制一份属主列——两处必漂移）。影响行数为 0 即诚实拒绝：
-   * 抛 `RiskStateNotOwnedError` 并附真实归属，MUST NOT 返回成功、MUST NOT 重试、
-   * MUST NOT 换个宽松谓词再写一次。
+   * **带属主谓词的单语句**：谓词 `accounts.execution_target = <本进程 target>`。归属已改为「跟随当次连接」——
+   * 握手刚把它设成本 target，故正常运行时谓词**总是命中**。影响行数为 0 只发生在写入前一瞬另一个
+   * 连接抢先接管了同一账号：此时**先写方的这次写作废**，抛 `RiskStateNotOwnedError`（附接管方 target），
+   * MUST NOT 返回成功、MUST NOT 重试、MUST NOT 换个宽松谓词把它盖回去——盖回正是本 change 要消灭的
+   * 「后写方被先写方陈旧态覆盖」。抛出后由 controller 的 onStateWriteRejected 驱逐本地缓存、下次从库重读。
    *
    * 顺带收掉一个既有隐患：历史裸 upsert 能为**不存在的账号**造幽灵 risk_state 行（面板靠应用层
    * assertAccountExists 挡着）。条件写把这道保护变成结构性的。
    *
-   * 两阶段发布（design Migration Plan）：
-   * - `off`（无 target / 未配置）→ 历史无谓词 upsert，逐位零回归。
-   * - `observe`（默认）→ 条件写；0 行时**回读真实归属并告警**，随后仍按历史语义写入。
-   *   观察模式的价值是「先证明零跨 target 争用」，MUST NOT 静默——每一次本会被拒的写都留痕。
-   * - `enforce` → 条件写；0 行即抛。
+   * - `off`（无 target / `AIDCP_RISK_OWNERSHIP_ENFORCE=false` 回滚）→ 历史无谓词 upsert，逐位零回归。
+   * - `enforce`（有 target 时的默认）→ 条件写；0 行即作废先写方并抛。
    */
   async saveState(state: RiskState): Promise<void> {
     if (this.ownershipMode === 'off' || !this.executionTarget) {
@@ -299,25 +289,12 @@ export class PgRiskStore implements RiskStore, InteractionStore {
     );
     if ((rowCount ?? 0) > 0) return;
 
+    // 0 行 = 写入前一瞬账号已被另一连接接管。作废先写方，绝不回落无谓词 upsert 把接管方状态盖回去。
     const { owner, cause } = await this.resolveOwnership(state.accountId);
-    if (this.ownershipMode === 'enforce') {
-      throw new RiskStateNotOwnedError(state.accountId, this.executionTarget, owner, cause);
-    }
-    // observe：留痕 + 按历史语义完成写入（本阶段行为与今天逐位一致）。
-    try {
-      this.onOwnershipViolation?.({
-        accountId: state.accountId,
-        writerTarget: this.executionTarget,
-        ownerTarget: owner,
-        cause,
-      });
-    } catch {
-      // 告警链路故障绝不反噬风控写路径。
-    }
-    await this.upsertStateUnconditional(state);
+    throw new RiskStateNotOwnedError(state.accountId, this.executionTarget, owner, cause);
   }
 
-  /** 历史无谓词 upsert（`off` 与观察模式的落地写）。 */
+  /** 历史无谓词 upsert（`off` 模式的落地写）。 */
   private async upsertStateUnconditional(state: RiskState): Promise<void> {
     await this.pool.query(
       `INSERT INTO risk_state (account_id, status, quota_level, signal_count, last_signal_at, status_since, updated_at)

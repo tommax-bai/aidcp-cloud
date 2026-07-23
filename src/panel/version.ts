@@ -17,10 +17,12 @@ import type { LlmKind, ThinkingModeApi } from '../config/role-catalog.js';
 import type { ModelEffectiveSource, PersonaSource } from './types.js';
 
 /** 面板 API 契约版本号。接口形状变更时递增。 */
+// v7（change risk-target-follows-active-session）：PanelAccount 去掉 executionTarget / riskWritable，
+//    改为只读展示字段 currentDriverTarget（最近一次握手的驱动目标；写权已改回账号级不按归属禁用）。
 // v6（change unified-account-display-name）：PanelAccount 增加运营别名和统一展示名投影。
 // v5（change wechat-panel-permission-visibility）：新增只读视频号互动权限概览端点。
 // v4（change generalize-contact-info）：PanelAccount.groupChatInfo → contactInfo（DTO 字段改名）。
-export const PANEL_API_VERSION = 6;
+export const PANEL_API_VERSION = 7;
 
 /**
  * PanelAccount 字段权威清单（console 镜像对拍此清单防漂移，#5/#6）。
@@ -44,9 +46,8 @@ export const PANEL_ACCOUNT_FIELDS = [
   'signalCount',
   'personaBound',
   'needsPersonaSetup',
-  // change risk-state-cross-process-integrity：账号归属 target 与本后台是否有风控写权（服务端权威）
-  'executionTarget',
-  'riskWritable',
+  // change risk-target-follows-active-session：只读展示「最近一次握手的驱动目标」（归属跟随当次连接）。
+  'currentDriverTarget',
   'environmentSummary',
 ] as const;
 

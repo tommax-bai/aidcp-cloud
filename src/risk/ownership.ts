@@ -29,38 +29,54 @@ export type ClaimExecutionTargetResult =
 export interface AccountOwnershipPort {
   /** 读账号归属；未归属 → null；账号不存在 → null（调用方按「未归属」处理，与 NULL 同形）。 */
   getExecutionTarget(accountId: string): Promise<DeploymentTarget | null>;
-  /** 仅当归属为空时原子占位。已被占位 → already_owned_by（附真实属主），MUST NOT 覆盖。 */
+  /** 仅当归属为空时原子占位。已被占位 → already_owned_by（附真实属主），MUST NOT 覆盖。保留供运维/兼容口，握手路径已改用 setExecutionTarget。 */
   claimExecutionTarget(accountId: string, target: DeploymentTarget): Promise<ClaimExecutionTargetResult>;
+  /**
+   * 无条件把归属改写为当前 target（change risk-target-follows-active-session）。
+   * 归属**跟随当次连接**：每次握手都调用它，把 accounts.execution_target 更新为正在接入的 target。
+   * 账号不存在 → account_not_found（**绝不 seed 造行**）。
+   */
+  setExecutionTarget(accountId: string, target: DeploymentTarget): Promise<ClaimExecutionTargetResult>;
 }
 
 /**
- * 归属强制模式（AIDCP_RISK_OWNERSHIP_ENFORCE）。
+ * risk_state 条件写模式（change risk-target-follows-active-session）。
  *
- * - `enforce`：条件写谓词生效、握手拒绝生效、面板写口拒绝生效。
- * - `observe`（默认）：占位照做、**每一次本会被拒的操作都留一条可检索告警**，但不拒绝。
- *   观察模式 MUST NOT 静默——它的存在意义是「先证明零跨 target 争用，再翻开强制」，
- *   而不是「先假装没事」。
- * - `off`：本进程未解析出合法 executionTarget（fail-closed），风控写路径整体不启用。
+ * 归属已改为「跟随当次连接」：握手无条件把 accounts.execution_target 设成当前 target，
+ * 故条件写谓词在正常运行时**总是命中**。它只在「两个连接并发接管同一账号」的瞬间 rowCount=0，
+ * 那正是需要作废先写方的止血场景。
+ *
+ * - `enforce`（有合法 target 时的默认）：条件写谓词生效；0 行即作废先写方（抛错→驱逐）。
+ * - `off`：无合法 executionTarget（fail-closed），或 `AIDCP_RISK_OWNERSHIP_ENFORCE=false` 秒级回滚——
+ *   退回历史无谓词 upsert（逐位零回归、不作废）。
+ *
+ * 旧的 `observe`（条件写但 0 行仍按历史语义盖写）已删除：那正是「后写方盖回先写方」的原路，
+ * 与本 change 要保证的止血直接冲突。
  */
-export type OwnershipMode = 'enforce' | 'observe' | 'off';
+export type OwnershipMode = 'enforce' | 'off';
 
 /**
- * risk_state 条件写影响 0 行。**三种触发原因必须能从错误里区分**：
- * 账号不存在 / 归属为空 / 归属是别人。MUST NOT 返回成功、MUST NOT 重试、MUST NOT 换谓词绕过。
+ * risk_state 条件写影响 0 行：**账号已被另一个连接接管，本次状态写作废**。
+ *
+ * 握手刚把归属设成当前 target，故谓词正常总命中；rowCount=0 只发生在写入前的一瞬另一个连接
+ * 抢先接管了同一账号（把 execution_target 改成了别的 target），此时先写方的这次 risk_state 写
+ * MUST 作废——MUST NOT 返回成功、MUST NOT 重试、MUST NOT 换个宽松谓词把它盖回去。
+ *
+ * 三种触发原因仍可区分：账号不存在 / 归属为空 / 归属已是别的 target。
  */
 export class RiskStateNotOwnedError extends Error {
   readonly code = 'risk_state_not_owned';
 
   constructor(
     readonly accountId: string,
-    /** 本进程（写方）的 target。 */
+    /** 本进程（先写方）的 target。 */
     readonly expectedTarget: DeploymentTarget,
-    /** 库里的真实归属：另一个 target / null=未归属 / undefined=账号不存在。 */
+    /** 写入前一瞬库里的真实归属：接管方的 target / null=未归属 / undefined=账号不存在。 */
     readonly actualTarget: DeploymentTarget | null | undefined,
     readonly cause2: 'account_not_found' | 'unowned' | 'owned_by_other',
   ) {
     super(
-      `risk_state_not_owned account=${accountId} writer=${expectedTarget} owner=${
+      `risk_state_taken_over account=${accountId} writer=${expectedTarget} owner=${
         actualTarget === undefined ? '<account_not_found>' : (actualTarget ?? '<unowned>')
       }`,
     );
@@ -70,9 +86,4 @@ export class RiskStateNotOwnedError extends Error {
 
 export function isRiskStateNotOwnedError(err: unknown): err is RiskStateNotOwnedError {
   return err instanceof RiskStateNotOwnedError;
-}
-
-/** 归属强制模式的环境解析：缺省 observe（两阶段发布的第一阶段）。 */
-export function parseOwnershipEnforce(value: unknown): boolean {
-  return typeof value === 'string' && value.trim().toLowerCase() === 'true';
 }

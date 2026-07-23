@@ -1,9 +1,11 @@
 /**
- * 面板风控写口的归属闸（change risk-state-cross-process-integrity，task 7.4）。
+ * 面板侧的归属跟随当次连接（change risk-target-follows-active-session）。
  *
- * 守的是 design D7 那两句：非属主 MUST 返回可区分拒绝（409 + 真实归属），
- * MUST NOT 返回 200、MUST NOT 返回一个看起来成功的 `changed:false`；
- * 首页汇总对非属主账号 MUST NOT 物化可写 controller。
+ * 归属跟随连接后，面板不再有「非属主只读 / 改归属」这回事：
+ * - 风控写（/risk/status、/risk/quota）改回**账号级**，对任意账号都放行（不按归属禁用）。
+ * - 首页汇总为**所有**账号带上限（不再按归属跳过——物化只为读展示，真正的止血在条件写那一层）。
+ * - 账号 DTO 用只读展示字段 `currentDriverTarget`（最近一次握手的驱动目标）。
+ * - `POST /api/accounts/:id/risk-owner` 端点已删（没有手动改归属这回事）。
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,7 +16,7 @@ import type { PanelConfig, PanelDeps } from '../src/panel/types.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 
-function account(accountId: string, executionTarget: 'dev' | 'ol' | null) {
+function account(accountId: string, currentDriverTarget: 'dev' | 'ol' | null) {
   return {
     accountId,
     label: accountId,
@@ -28,8 +30,7 @@ function account(accountId: string, executionTarget: 'dev' | 'ol' | null) {
     contactInfo: null,
     operatorStatus: 'active' as const,
     pausedAt: null,
-    executionTarget,
-    riskWritable: executionTarget === 'dev',
+    currentDriverTarget,
     riskStatus: 'normal' as const,
     riskQuotaLevel: 'normal' as const,
     signalCount: 0,
@@ -40,7 +41,6 @@ function account(accountId: string, executionTarget: 'dev' | 'ol' | null) {
 
 function makeDeps(over: Partial<Record<string, unknown>> = {}) {
   const materialized: string[] = [];
-  const owners: Record<string, 'dev' | 'ol' | null> = { mine: 'dev', theirs: 'ol', orphan: null };
   const deps = {
     edgeServer: { edgeCount: () => 0, onlineEdgeCount: () => 0 },
     eventBus: { onAny: () => () => {} },
@@ -65,12 +65,6 @@ function makeDeps(over: Partial<Record<string, unknown>> = {}) {
         materialized.push(id);
         return new RiskController({ accountId: id });
       },
-    },
-    riskOwnership: {
-      executionTarget: 'dev' as const,
-      mode: 'enforce' as const,
-      ownerOf: async (accountId: string) => owners[accountId] ?? null,
-      changeOwner: async () => ({ ok: false as const, reason: 'blocked_by_active_session' as const, owner: 'ol' as const }),
     },
     ...over,
   } as unknown as PanelDeps;
@@ -105,69 +99,58 @@ async function withPanel(deps: PanelDeps, fn: (base: string, auth: Record<string
   }
 }
 
-// 注：change 文档里称这条口为 `/risk/signal`，代码里的真实路径是 `/risk/status`（写的是风控信号）。
-// 以代码为准。
-test('非属主账号的 /risk/status 与 /risk/quota 返回 409 + 真实归属，绝不 200', async () => {
+// 注：change 文档里称这条口为 `/risk/signal`，代码里的真实路径是 `/risk/status`（写的是风控信号）。以代码为准。
+test('风控写改回账号级：任意账号（含由别的 target 驱动的）/risk/status 与 /risk/quota 都 200', async () => {
   const { deps, materialized } = makeDeps();
   await withPanel(deps, async (base, auth) => {
-    for (const [path, body] of [
-      ['/api/accounts/theirs/risk/status', { kind: 'manual_restrict' }],
-      ['/api/accounts/theirs/risk/quota', { level: 'conservative' }],
-    ] as const) {
-      const res = await fetch(`${base}${path}`, { method: 'POST', headers: auth, body: JSON.stringify(body) });
-      assert.equal(res.status, 409, path);
-      const payload = (await res.json()) as Record<string, unknown>;
-      assert.equal(payload.error, 'risk_state_not_owned');
-      assert.equal(payload.owner, 'ol', '拒绝里 MUST 带真实归属，否则运营不知道该去哪');
-      assert.equal(payload.executionTarget, 'dev');
-      assert.equal('changed' in payload, false, 'MUST NOT 返回看起来成功的 changed:false');
+    for (const accountId of ['mine', 'theirs', 'orphan']) {
+      for (const [path, body] of [
+        [`/api/accounts/${accountId}/risk/status`, { kind: 'manual_restrict' }],
+        [`/api/accounts/${accountId}/risk/quota`, { level: 'conservative' }],
+      ] as const) {
+        const res = await fetch(`${base}${path}`, { method: 'POST', headers: auth, body: JSON.stringify(body) });
+        assert.equal(res.status, 200, `${path} MUST 账号级放行、不按归属禁用`);
+      }
     }
-    assert.equal(materialized.includes('theirs'), false, '非属主 MUST NOT 物化可写 controller');
+    assert.ok(materialized.includes('theirs'), '由别的 target 驱动的账号也照常物化+写（不再拦）');
   });
 });
 
-test('属主账号的写口照常放行（归属闸不误伤本 target）', async () => {
+test('账号 DTO 用只读展示字段 currentDriverTarget（服务端权威，dev/ol/null）', async () => {
   const { deps } = makeDeps();
   await withPanel(deps, async (base, auth) => {
-    const res = await fetch(`${base}/api/accounts/mine/risk/quota`, {
-      method: 'POST',
-      headers: auth,
-      body: JSON.stringify({ level: 'conservative' }),
-    });
+    const res = await fetch(`${base}/api/accounts`, { headers: auth });
     assert.equal(res.status, 200);
+    const body = (await res.json()) as { accounts: { accountId: string; currentDriverTarget: unknown }[] };
+    const byId = Object.fromEntries(body.accounts.map((a) => [a.accountId, a.currentDriverTarget]));
+    assert.equal(byId.mine, 'dev');
+    assert.equal(byId.theirs, 'ol');
+    assert.equal(byId.orphan, null, '从未驱动过 MUST 显示 null，不伪装成当前 target');
+    assert.equal('riskWritable' in body.accounts[0], false, '已删的 riskWritable MUST NOT 再出现');
+    assert.equal('executionTarget' in body.accounts[0], false, '已改名，旧字段 MUST NOT 再出现');
   });
 });
 
-test('未归属账号也被拒，且说明与「归属别人」可区分', async () => {
-  const { deps } = makeDeps();
-  await withPanel(deps, async (base, auth) => {
-    const res = await fetch(`${base}/api/accounts/orphan/risk/status`, {
-      method: 'POST',
-      headers: auth,
-      body: JSON.stringify({ kind: 'manual_restrict' }),
-    });
-    assert.equal(res.status, 409);
-    const payload = (await res.json()) as Record<string, unknown>;
-    assert.equal(payload.owner, null);
-    assert.match(String(payload.message), /尚未归属/);
-  });
-});
-
-test('首页汇总只为属主账号带上限，非属主保持「不带上限」的诚实缺省', async () => {
+test('首页汇总为所有账号带上限（不再按归属跳过非本 target 驱动的账号）', async () => {
   const { deps, materialized } = makeDeps();
   await withPanel(deps, async (base, auth) => {
     const res = await fetch(`${base}/api/dashboard/summary`, { headers: auth });
     assert.equal(res.status, 200);
-    const body = (await res.json()) as { totalsByAccount: { accountId: string; quotas?: unknown }[] };
+    const body = (await res.json()) as {
+      totalsByAccount: { accountId: string; quotas?: unknown }[];
+      accounts: { accountId: string; currentDriverTarget: unknown }[];
+    };
     const mine = body.totalsByAccount.find((e) => e.accountId === 'mine');
     const theirs = body.totalsByAccount.find((e) => e.accountId === 'theirs');
-    assert.ok(mine?.quotas, '属主账号照常带上限');
-    assert.equal(theirs?.quotas, undefined, '非属主账号不带上限（前端只显数字）');
-    assert.equal(materialized.includes('theirs'), false);
+    assert.ok(mine?.quotas, '本 target 驱动的账号带上限');
+    assert.ok(theirs?.quotas, '由别的 target 驱动的账号同样带上限（物化只为读展示）');
+    assert.ok(materialized.includes('theirs'));
+    // 账号列表也携带 currentDriverTarget
+    assert.equal(body.accounts.find((a) => a.accountId === 'theirs')?.currentDriverTarget, 'ol');
   });
 });
 
-test('改归属：旧属主仍有活跃会话 → 409 owner_change_blocked_by_active_session，绝不强改', async () => {
+test('改归属端点已删：POST /api/accounts/:id/risk-owner → 404', async () => {
   const { deps } = makeDeps();
   await withPanel(deps, async (base, auth) => {
     const res = await fetch(`${base}/api/accounts/theirs/risk-owner`, {
@@ -175,47 +158,6 @@ test('改归属：旧属主仍有活跃会话 → 409 owner_change_blocked_by_ac
       headers: auth,
       body: JSON.stringify({ target: 'dev' }),
     });
-    assert.equal(res.status, 409);
-    const payload = (await res.json()) as Record<string, unknown>;
-    assert.equal(payload.error, 'owner_change_blocked_by_active_session');
-    assert.equal(payload.owner, 'ol');
-  });
-});
-
-test('observe 模式：非属主与未归属账号的写口照常 200（观察期 MUST NOT 拒绝）', async () => {
-  // design Migration Plan 第 2 步是「只读上线…此时行为与今天逐位一致」，第 4 步才把
-  // 「面板写口拒绝生效」列进翻开强制之后。observe 也拒的实际后果不是保守而是锁死：
-  // 迁移刻意不回填 accounts.execution_target，上线瞬间**全部**账号归属为 NULL，
-  // 而当前没有边缘在线的账号永远拿不到归属、也就永远改不了配额档。
-  const owners: Record<string, 'dev' | 'ol' | null> = { mine: 'dev', theirs: 'ol', orphan: null };
-  const { deps } = makeDeps({
-    riskOwnership: {
-      executionTarget: 'dev' as const,
-      mode: 'observe' as const,
-      ownerOf: async (accountId: string) => owners[accountId] ?? null,
-      changeOwner: async () => ({ ok: true as const, owner: 'dev' as const, previousOwner: null }),
-    },
-  });
-  await withPanel(deps, async (base, auth) => {
-    for (const accountId of ['theirs', 'orphan']) {
-      const res = await fetch(`${base}/api/accounts/${accountId}/risk/quota`, {
-        method: 'POST',
-        headers: auth,
-        body: JSON.stringify({ level: 'conservative' }),
-      });
-      assert.equal(res.status, 200, `${accountId} 在 observe 下 MUST 照常放行`);
-    }
-  });
-});
-
-test('归属闸未注入 → 全部写口行为与改动前逐位一致', async () => {
-  const { deps } = makeDeps({ riskOwnership: undefined });
-  await withPanel(deps, async (base, auth) => {
-    const res = await fetch(`${base}/api/accounts/theirs/risk/quota`, {
-      method: 'POST',
-      headers: auth,
-      body: JSON.stringify({ level: 'conservative' }),
-    });
-    assert.equal(res.status, 200);
+    assert.equal(res.status, 404, '没有「手动改归属」这回事，路由已移除');
   });
 });

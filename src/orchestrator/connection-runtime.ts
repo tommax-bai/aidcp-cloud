@@ -17,7 +17,7 @@ import type { EdgeSession } from '../comm/ws-server.js';
 import type { ResumeGateVerdict } from '../comm/browser-standby.js';
 import type { RiskController } from '../risk/index.js';
 import type { DeploymentTarget } from '../deployment-target.js';
-import type { AccountOwnershipPort, OwnershipMode } from '../risk/ownership.js';
+import type { AccountOwnershipPort } from '../risk/ownership.js';
 import {
   isOrchestrationCapabilitySupported,
   normalizePlatformId,
@@ -77,22 +77,23 @@ export interface RuntimeRegistryDeps {
   /** 同 edgeId 重连顶替：收掉该 sessionId 的旧 ws（→ ws close → onDisconnect 拆除其运行时）。 */
   closeEdge: (sessionId: string) => void;
   /**
-   * 账号归属闸（change risk-state-cross-process-integrity）。三项缺任一即整闸不启用
-   * （与今天行为逐位一致），绝不半开——半开的归属闸比没有更危险。
+   * 账号归属跟随当次连接（change risk-target-follows-active-session）。缺任一项即整段不启用
+   * （与未接归属时逐位一致）。注入即代表启用——不再有 observe/enforce 之分。
    */
   ownership?: {
     /** 本进程的部署目标（服务端注入，MUST NOT 从握手载荷推导）。 */
     executionTarget: DeploymentTarget;
-    mode: OwnershipMode;
     port: AccountOwnershipPort;
-    /** 归属占位成功 / 观察模式下本会被拒的握手，都经此留痕。永不抛。 */
+    /** 归属发生切换（NULL / 别的 target → 本 target）时的信息性留痕。永不抛。 */
     onEvent?: (info: {
       accountId: string;
-      kind: 'claimed' | 'mismatch_rejected' | 'mismatch_observed';
-      ownerTarget: DeploymentTarget | null;
+      kind: 'driver_switched';
+      /** 切换前的归属：null=首次驱动，别的 target=跨 target 接管。 */
+      previousTarget: DeploymentTarget | null;
+      ownerTarget: DeploymentTarget;
       detail: string;
     }) => void;
-    /** 归属占位成功后强制重放该账号计数（MUST NOT 复用可能陈旧的内存值）。 */
+    /** 归属切换后强制重放该账号计数（从库按账号级重读，MUST NOT 复用可能陈旧的内存值）。 */
     onClaimed?: (accountId: string) => Promise<void> | void;
   };
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
@@ -172,14 +173,10 @@ export class ConnectionRuntimeRegistry {
       return { ok: false, code: 'platform_mismatch', message };
     }
 
-    // 归属闸（change risk-state-cross-process-integrity）：与上面的 platform_mismatch 对称——
-    // 同一个 onConfigError 通道、同一种「拒绝码 + 人话说明」形态，不新增分支语义、不新增协议消息。
-    //
-    // 为什么必须在握手拦：dev 与 ol 共用一个库。放行一个非属主账号，等于让两个进程各按自己的
-    // 内存计数发真实动作——合计放行量是单份上限的两倍；再叠上 risk_state 盲写，另一个 target
-    // 刚写下的 restricted 会被这边陈旧的 normal 盖回去。那两件事都不会报错，只会静默超发。
-    const ownershipOutcome = await this.resolveOwnership(session, accountId);
-    if (ownershipOutcome) return ownershipOutcome;
+    // 归属跟随当次连接（change risk-target-follows-active-session）：同一账号会分时接入不同边缘客户端
+    // （接 dev 归 dev、接 ol 归 ol，是正常的）。这里无条件把 accounts.execution_target 更新为本 target，
+    // 归属从别的 target / NULL 切过来时重放该账号计数。握手不再因归属不同而被拒。
+    await this.resolveOwnership(accountId);
 
     const helloNickname = session.accountNickname?.trim();
     if (helloNickname && this.deps.setNickname) {
@@ -229,92 +226,74 @@ export class ConnectionRuntimeRegistry {
   }
 
   /**
-   * 账号归属解析：未归属 → 原子占位；归属本 target → 放行；归属对方 → 诚实拒绝。
-   * 返回非空即「握手到此为止」，返回 null 即放行。
+   * 归属跟随当次连接（change risk-target-follows-active-session）：无条件把 accounts.execution_target
+   * 更新为本进程 target；归属从别的 target / NULL 切过来时重放该账号计数。握手不因归属不同而被拒。
    *
-   * 观察模式（`AIDCP_RISK_OWNERSHIP_ENFORCE=false`，默认）：**占位照做、拒绝不做**，
-   * 但每一次本会被拒的握手都留一条可检索的告警。观察模式 MUST NOT 静默——它的意义是
-   * 「先证明零跨 target 争用再翻开强制」，不是「先假装没事」。
+   * 只在**发生切换**时重放：归属本来就是本 target（没变）时不重放——账号刚从另一个 target 切过来，
+   * 本进程的内存计数才需要从库里按账号级重新回放。
    */
-  private async resolveOwnership(session: EdgeSession, accountId: string): Promise<HandshakeOutcome | null> {
+  private async resolveOwnership(accountId: string): Promise<void> {
     const ownership = this.deps.ownership;
-    if (!ownership || ownership.mode === 'off') return null;
-    const { executionTarget, mode, port } = ownership;
+    if (!ownership) return;
+    const { executionTarget, port } = ownership;
 
-    let owner: DeploymentTarget | null;
+    let previousTarget: DeploymentTarget | null;
     try {
-      owner = await port.getExecutionTarget(accountId);
+      previousTarget = await port.getExecutionTarget(accountId);
     } catch (err) {
       // 读不到归属就**不拦**：把数据库抖动升级成「全车队握手失败」，代价远大于它防住的东西。
-      // 真正的止血在条件写那一层（非属主的 risk_state 写会被数据库挡住），这里只是提前量。
+      // 真正的止血在条件写那一层（并发接管的 risk_state 写会被数据库挡住），这里只是提前量。
       this.deps.logger?.warn?.(
         `[runtime] 归属读取失败 account=${accountId}: ${(err as Error).message}（本次不拦，条件写仍是最后一道）`,
       );
-      return null;
+      return;
     }
 
-    if (owner === null) {
-      // 首次真实驱动自证占位：条件写「仅当归属为空」，竞争落败方观察到已被占位、绝不覆盖。
-      let claim: Awaited<ReturnType<AccountOwnershipPort['claimExecutionTarget']>>;
-      try {
-        claim = await port.claimExecutionTarget(accountId, executionTarget);
-      } catch (err) {
-        this.deps.logger?.warn?.(`[runtime] 归属占位失败 account=${accountId}: ${(err as Error).message}`);
-        return null;
-      }
-      if (claim.outcome === 'claimed') {
-        this.emitOwnership(ownership, {
-          accountId,
-          kind: 'claimed',
-          ownerTarget: executionTarget,
-          detail: `账号 ${accountId} 首次在 ${executionTarget} 上真实握手，归属已占位为 ${executionTarget}`,
-        });
-        // 占位成功 MUST 强制重放计数：本进程此前可能已为该账号物化过 controller（面板汇总等），
-        // 那份内存值不能被当成新属主的起点。
-        try {
-          await ownership.onClaimed?.(accountId);
-        } catch (err) {
-          this.deps.logger?.warn?.(
-            `[runtime] 占位后重放计数失败 account=${accountId}: ${(err as Error).message}`,
-          );
-        }
-        return null;
-      }
-      if (claim.outcome === 'account_not_found') return null;
-      owner = claim.target;
-    }
+    // 归属本来就是本 target（没变）→ 无需改写、无需重放。
+    if (previousTarget === executionTarget) return;
 
-    if (owner === executionTarget) return null;
-
-    const message =
-      `账号 ${accountId} 归属 ${owner} 的自动化，本云端是 ${executionTarget}，拒绝派活。` +
-      `同一个账号在平台眼里只有一份活动预算，两个 target 同时驱动会让实际发出的互动是上限的两倍。` +
-      `处理办法：把该边缘节点接到 ${owner} 的云端；确需改归属，先在 ${owner} 停止该账号自动化，` +
-      `再经后台「改风控归属」变更。`;
-    if (mode === 'observe') {
-      this.emitOwnership(ownership, {
-        accountId,
-        kind: 'mismatch_observed',
-        ownerTarget: owner,
-        detail: `[观察模式] ${message}`,
-      });
-      return null;
+    let result: Awaited<ReturnType<AccountOwnershipPort['setExecutionTarget']>>;
+    try {
+      result = await port.setExecutionTarget(accountId, executionTarget);
+    } catch (err) {
+      this.deps.logger?.warn?.(`[runtime] 归属改写失败 account=${accountId}: ${(err as Error).message}`);
+      return;
     }
-    this.emitOwnership(ownership, { accountId, kind: 'mismatch_rejected', ownerTarget: owner, detail: message });
-    await this.deps.onConfigError(session, message);
-    return { ok: false, code: 'execution_target_mismatch', message };
+    // 账号行不存在（ensureAccount 之后仍缺）→ 无归属可写，静默放过（不 seed 造行）。
+    if (result.outcome === 'account_not_found') return;
+
+    this.emitOwnership(ownership, {
+      accountId,
+      kind: 'driver_switched',
+      previousTarget,
+      ownerTarget: executionTarget,
+      detail:
+        previousTarget === null
+          ? `账号 ${accountId} 首次在 ${executionTarget} 上真实握手，归属已设为 ${executionTarget}`
+          : `账号 ${accountId} 由 ${previousTarget} 切换到 ${executionTarget} 驱动，归属已更新`,
+    });
+    // 切换后 MUST 强制重放计数：账号刚从另一个 target 切过来，本进程此前可能已为它物化过 controller
+    // （面板汇总等），那份内存值不能被当成新驱动方的起点。
+    try {
+      await ownership.onClaimed?.(accountId);
+    } catch (err) {
+      this.deps.logger?.warn?.(
+        `[runtime] 归属切换后重放计数失败 account=${accountId}: ${(err as Error).message}`,
+      );
+    }
   }
 
   private emitOwnership(
     ownership: NonNullable<RuntimeRegistryDeps['ownership']>,
     info: {
       accountId: string;
-      kind: 'claimed' | 'mismatch_rejected' | 'mismatch_observed';
-      ownerTarget: DeploymentTarget | null;
+      kind: 'driver_switched';
+      previousTarget: DeploymentTarget | null;
+      ownerTarget: DeploymentTarget;
       detail: string;
     },
   ): void {
-    this.deps.logger?.warn?.(`[runtime] ${info.detail}`);
+    this.deps.logger?.log?.(`[runtime] ${info.detail}`);
     try {
       ownership.onEvent?.(info);
     } catch {

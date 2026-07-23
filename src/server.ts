@@ -62,7 +62,6 @@ import {
   PgRiskCounterOutboxStore,
   RiskAccounting,
   RiskCounterReconciler,
-  parseOwnershipEnforce,
   type AccountOwnershipPort,
   type OwnershipMode,
   type RiskAction,
@@ -1657,13 +1656,14 @@ async function main(): Promise<void> {
     });
   }
 
-  // 归属强制模式：默认观察（占位照做 + 每次本会被拒的操作都留告警、但不拒绝），
-  // 运维在 dev 与 ol 各观察确认零跨 target 争用后，再单独提交一次翻 true 的变更。
-  const ownershipEnforce = parseOwnershipEnforce(process.env.AIDCP_RISK_OWNERSHIP_ENFORCE);
-  const ownershipMode: OwnershipMode = !deploymentTarget ? 'off' : ownershipEnforce ? 'enforce' : 'observe';
+  // 归属跟随当次连接（change risk-target-follows-active-session）：握手无条件把 accounts.execution_target
+  // 更新为当前 target；risk_state 条件写据此在「两连接并发接管同一账号」的瞬间作废先写方。
+  // 有合法 target 默认启用（安全）；AIDCP_RISK_OWNERSHIP_ENFORCE=false 为秒级回滚闸——退回历史无谓词 upsert。
+  const ownershipDisabled = process.env.AIDCP_RISK_OWNERSHIP_ENFORCE === 'false';
+  const ownershipMode: OwnershipMode = !deploymentTarget || ownershipDisabled ? 'off' : 'enforce';
   console.log(
-    `[aidcp-cloud] 账号归属 target 强制模式 = ${ownershipMode}` +
-      (ownershipMode === 'observe' ? '（观察：占位照做、留告警、不拒绝）' : ''),
+    `[aidcp-cloud] 账号归属跟随当次连接：条件写=${ownershipMode}` +
+      (ownershipMode === 'off' && deploymentTarget ? '（AIDCP_RISK_OWNERSHIP_ENFORCE=false 已回滚为无谓词 upsert）' : ''),
   );
 
   const riskStore = new PgRiskStore({
@@ -1674,17 +1674,6 @@ async function main(): Promise<void> {
     password: readEnvString('PGPASSWORD'),
     ...(deploymentTarget ? { executionTarget: deploymentTarget } : {}),
     ownershipMode,
-    onOwnershipViolation: (info) => {
-      void raiseRiskAlert({
-        severity: 'P1',
-        type: 'risk_state_not_owned',
-        accountId: info.accountId,
-        title: `[观察模式] 非属主进程写了账号 ${info.accountId} 的风控状态`,
-        detail:
-          `写方 target=${info.writerTarget}，账号真实归属=${info.ownerTarget ?? '<未归属>'}（原因 ${info.cause}）。` +
-          `强制模式打开后这次写会被数据库拒绝。翻开强制前 MUST 先查清该账号该由谁驱动。`,
-      });
-    },
   });
   // quotaConfigStore 作 QuotaProvider 注入：每账号 controller 的 effectiveQuotas 热加载读限额数字
   // （change safety-quota-config）；init 失败时其镜像为空 → 退化派生写死默认，绝不 brick。
@@ -1710,10 +1699,12 @@ async function main(): Promise<void> {
   // `accounts` 按拆分方案 §5.1 由 api 单写；automation 侧只经本口调用、绝不自己拼 accounts 的 SQL。
   // 拆进程时把这个对象换成一次内部 HTTP 即可，调用点一行不改。
   const ownershipPort: AccountOwnershipPort | undefined =
-    accountStore?.getExecutionTarget && accountStore.claimExecutionTarget
+    accountStore?.getExecutionTarget && accountStore.claimExecutionTarget && accountStore.setExecutionTarget
       ? {
           getExecutionTarget: (accountId) => accountStore.getExecutionTarget!(accountId),
           claimExecutionTarget: (accountId, target) => accountStore.claimExecutionTarget!(accountId, target),
+          // 归属跟随当次连接（change risk-target-follows-active-session）：握手用它无条件改写归属。
+          setExecutionTarget: (accountId, target) => accountStore.setExecutionTarget!(accountId, target),
         }
       : undefined;
   // 记账漏斗先声明后构造：registry 的 fail-closed 现读要读它，而它要读 registry 解析 controller。
@@ -1726,17 +1717,13 @@ async function main(): Promise<void> {
     // 全部自动路径的公共必经点，新加一道独立闸必然漏接线。
     interactionBlockedProvider: (accountId) => writerAuthorityLost || (riskAccounting?.isBlocked(accountId) ?? false),
     ...(deploymentTarget ? { executionTarget: deploymentTarget } : {}),
-    ownershipMode,
-    ...(ownershipPort ? { ownershipPort } : {}),
+    // 条件写因并发接管被拒 → 驱逐本地缓存 + 告警（change risk-target-follows-active-session）。
     onOwnershipAlert: (info) => {
       void raiseRiskAlert({
         severity: 'P1',
-        type: info.kind === 'evicted_not_owned' ? 'risk_controller_evicted_not_owned' : 'risk_state_not_owned',
+        type: 'risk_controller_evicted_not_owned',
         accountId: info.accountId,
-        title:
-          info.kind === 'evicted_not_owned'
-            ? `账号 ${info.accountId} 的风控写被拒，已驱逐本地缓存控制器`
-            : `账号 ${info.accountId} 不归属本 target，风控写权被拒`,
+        title: `账号 ${info.accountId} 的风控写被拒（账号已被另一连接接管），已驱逐本地缓存控制器`,
         detail: info.detail,
       });
     },
@@ -3859,32 +3846,27 @@ async function main(): Promise<void> {
     observerBus: eventBus,
     // 握手解析该连接账号的 controller：此时归属闸已在前面放行，故取可写口。
     getController: (accountId) => riskRegistry.getWritableController(accountId),
-    // 账号归属闸（change risk-state-cross-process-integrity）：三项缺任一即整闸不启用。
+    // 账号归属跟随当次连接（change risk-target-follows-active-session）：缺任一项即整段不启用。
     ...(deploymentTarget && ownershipPort && ownershipMode !== 'off'
       ? {
           ownership: {
             executionTarget: deploymentTarget,
-            mode: ownershipMode,
             port: ownershipPort,
             onEvent: (info) => {
               void raiseRiskAlert({
-                severity: info.kind === 'claimed' ? 'P3' : 'P1',
-                type:
-                  info.kind === 'claimed'
-                    ? 'risk_owner_claimed'
-                    : info.kind === 'mismatch_observed'
-                      ? 'risk_owner_mismatch_observed'
-                      : 'risk_owner_mismatch_rejected',
+                // 首次驱动（NULL→target）P3；跨 target 接管（target→target）P2，运营值得看一眼。
+                severity: info.previousTarget === null ? 'P3' : 'P2',
+                type: 'risk_owner_driver_switched',
                 accountId: info.accountId,
                 title:
-                  info.kind === 'claimed'
-                    ? `账号 ${info.accountId} 归属已占位为 ${info.ownerTarget}`
-                    : `账号 ${info.accountId} 归属 ${info.ownerTarget}，本 target 的握手${info.kind === 'mismatch_observed' ? '（观察模式，未拒绝）' : '已被拒绝'}`,
+                  info.previousTarget === null
+                    ? `账号 ${info.accountId} 首次由 ${info.ownerTarget} 驱动，归属已设为 ${info.ownerTarget}`
+                    : `账号 ${info.accountId} 由 ${info.previousTarget} 切换到 ${info.ownerTarget} 驱动`,
                 detail: info.detail,
               });
             },
-            // 占位成功 MUST 强制重放计数：本进程此前可能已为该账号物化过 controller（面板汇总等），
-            // 那份内存值不能被当成新属主的起点。
+            // 归属切换后 MUST 强制重放计数：账号刚从另一个 target 切过来，本进程此前可能已为它物化过
+            // controller（面板汇总等），那份内存值不能被当成新驱动方的起点。
             onClaimed: async (accountId) => {
               const pending = riskRegistry.peek(accountId);
               if (pending) await (await pending).reloadCounters();
@@ -4930,51 +4912,8 @@ async function main(): Promise<void> {
           interactionPermissions: { getView: () => interactionPermissionOverview },
           revocation: new TokenRevocationStore(),
           riskRegistry,
-          // 账号归属 target（change risk-state-cross-process-integrity，design D3/D7）：
-          // 三项缺任一即整闸不启用，面板风控写口行为与改动前逐位一致。
-          ...(deploymentTarget && ownershipPort && ownershipMode !== 'off'
-            ? {
-                riskOwnership: {
-                  executionTarget: deploymentTarget,
-                  mode: ownershipMode,
-                  ownerOf: (accountId: string) => ownershipPort.getExecutionTarget(accountId),
-                  changeOwner: async (accountId: string, target: 'dev' | 'ol') => {
-                    const previousOwner = await ownershipPort.getExecutionTarget(accountId);
-                    if (previousOwner === target) {
-                      return { ok: true as const, owner: target, previousOwner };
-                    }
-                    // 活跃会话闸：本进程只看得见自己这一侧的连接。若旧属主是**另一个** target，
-                    // 我们看不到它的会话——那正是「MUST NOT 强改」的场景，故一律诚实拒绝，
-                    // 由运营先去旧属主停掉再来。看得见的那一侧（旧属主=本 target）按真实连接判。
-                    const localActive = runtimes?.onlineAccountIds().includes(accountId) ?? false;
-                    if (previousOwner === deploymentTarget && localActive) {
-                      return { ok: false as const, reason: 'blocked_by_active_session' as const, owner: previousOwner };
-                    }
-                    if (previousOwner !== null && previousOwner !== deploymentTarget) {
-                      return { ok: false as const, reason: 'blocked_by_active_session' as const, owner: previousOwner };
-                    }
-                    if (!accountStore?.setExecutionTarget) {
-                      return { ok: false as const, reason: 'account_not_found' as const, owner: previousOwner };
-                    }
-                    const written = await accountStore.setExecutionTarget(accountId, target);
-                    if (written.outcome !== 'claimed') {
-                      return { ok: false as const, reason: 'account_not_found' as const, owner: previousOwner };
-                    }
-                    // 归属已变 ⇒ 本地缓存的 controller 立即失效（它的下一次写本来也会被条件写挡住，
-                    // 但让它多活一秒就多一秒用陈旧内存状态做准入判定的机会）。
-                    riskRegistry.evict(accountId);
-                    await raiseRiskAlert({
-                      severity: 'P2',
-                      type: 'risk_owner_changed',
-                      accountId,
-                      title: `账号 ${accountId} 的风控归属已改为 ${target}`,
-                      detail: `原归属=${previousOwner ?? '<未归属>'}，由 ${deploymentTarget} 后台发起。本地缓存控制器已驱逐。`,
-                    });
-                    return { ok: true as const, owner: target, previousOwner };
-                  },
-                },
-              }
-            : {}),
+          // change risk-target-follows-active-session：归属跟随当次连接，面板不再有「改归属」端点，
+          // 也不按归属禁用风控写（写改回账号级）。currentDriverTarget 只读展示直接来自 panel-store。
           publishLogStore,
           conceptStore,
           botChatStore,
@@ -4986,8 +4925,6 @@ async function main(): Promise<void> {
             database: readEnvString('PGDATABASE'),
             user: readEnvString('PGUSER'),
             password: readEnvString('PGPASSWORD'),
-            ...(deploymentTarget ? { executionTarget: deploymentTarget } : {}),
-            ownershipMode,
           }),
           publishOrchestrator,
           publishDispatcher,
