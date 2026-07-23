@@ -16,6 +16,7 @@ import { EventBus } from '../../src/event-bus/index.js';
 import { SearchEvaluator } from '../../src/agents/search-evaluator.js';
 import { RoleDispatcher } from '../../src/orchestrator/role-dispatcher.js';
 import type { EdgeCommand, ConceptStorePort } from '../../src/orchestrator/role-dispatcher.js';
+import { contentRoleFactories } from '../helpers/role-factories.js';
 import { SessionContext } from '../../src/agents/session-context.js';
 import type { Soul } from '../../src/soul/types.js';
 import type { ConceptPool, SearchApprovedPayload, SearchSkippedPayload } from '../../src/event-bus/types.js';
@@ -128,6 +129,8 @@ describe('AC-SEARCH 概念池驱动的搜索智能', () => {
       eventBus: bus,
       sendCommand: (c) => commands.push(c),
       conceptStore,
+      // concept_extractor 属 content 层，经组合根注入的工厂构造（生产在 server.ts，测试用等价装配）。
+      roleFactories: contentRoleFactories(),
       clock: () => 0,
       hasSearchActivityReceipt: () => options.capable ?? false,
       explainSearch: () => options.searchAllowed === false

@@ -21,7 +21,7 @@ import {
 } from '../config/mirror-stop-work.js';
 import { noteMirrorStaleRefusal } from '../config-mirror-freshness.js';
 import { EventBus } from '../event-bus/index.js';
-import type { CommentApprovalTrace, CommentAppraisingPayload, MandatoryInteractionContext, NoteDetailData, PageCardsData } from '../event-bus/types.js';
+import type { CommentApprovalTrace, CommentAppraisingPayload, MandatoryInteractionContext, NoteDetailData, PageCardsData, RoleName } from '../event-bus/types.js';
 import {
   isNoteActionSupported,
   noteActionRefusalReason,
@@ -48,10 +48,8 @@ import { InteractionAppraiserRole, COLLECT_MIN_SAVE_LIKE_RATIO } from '../agents
 import { AuthorEvaluator } from '../agents/author-evaluator.js';
 import { CommentAppraiser } from '../agents/comment-appraiser.js';
 import { CommentLikeAppraiser } from '../agents/comment-like-appraiser.js';
-import { ValuableCommentArchivist } from '../agents/valuable-comment-archivist.js';
-import { CuratedNoteEvaluator, type CuratedNoteSink } from '../agents/curated-note-evaluator.js';
-import { CuratedCommentEvaluator, type CuratedCommentSink } from '../agents/curated-comment-evaluator.js';
-import type { TextCardTranscriber } from '../publish-agent/text-card-transcriber.js';
+// 精选准入 / 优质评论归档三角色 + 概念抽取角色属 content 层，构造经组合根注入的 roleFactories 完成，
+// 此处不再静态 import 其类（automation 不静态依赖 content：拆进程 Track1 前置；见 RoleFactoryRegistry）。
 import { HotLeadDetector } from '../hot-lead/hot-lead-detector.js';
 import type { HotLeadGateConfig } from '../hot-lead/heat-velocity.js';
 import type { ValuableCommentInput, ValuableCommentRef } from '../cache/valuable-comment-store.js';
@@ -65,7 +63,6 @@ import { FollowAgent, FOLLOW_MIN_FANS_ENGAGEMENT_RATIO } from '../agents/follow-
 import { SearchScroller, SEARCH_HOME_RETURN_AFTER } from '../agents/search-scroller.js';
 import { SearchEvaluator } from '../agents/search-evaluator.js';
 import { SearchExecutor } from '../agents/search-executor.js';
-import { ConceptExtractorRole, type ConceptSink } from '../agents/concept-extractor-role.js';
 import { SessionMonitorRole } from '../agents/session-monitor-role.js';
 // —— 通知巡视（消息查看）角色 ——
 import { NotificationGatekeeper } from '../agents/notification-gatekeeper.js';
@@ -126,11 +123,40 @@ export {
   isCanonicalFacebookReelNoteId,
 } from '../platform/facebook-presented-video.js';
 
-/** 概念池读写下游（ConceptStore 的最小契约，便于注入桩单测）。 */
-export interface ConceptStorePort extends ConceptSink {
+/**
+ * 概念池读写下游（ConceptStore 的最小契约，便于注入桩单测）。
+ * `addCandidate` 与 content 侧 `ConceptSink` 逐字同签名——ConceptStorePort 结构上即是 ConceptSink 的超集，
+ * 故 dispatcher 透传给 concept_extractor 工厂时天然满足其 `conceptStore: ConceptSink` 契约，而**无需**静态 import 该 content 类型。
+ */
+export interface ConceptStorePort {
+  addCandidate(keyword: string, sourceNote?: string): Promise<boolean>;
   loadPool(): Promise<ConceptPool>;
   markSearched(keyword: string): Promise<void>;
 }
+
+/**
+ * 角色工厂：给定该角色的构造参数（由 dispatcher 就地组装），产出一个 BaseRole 实例。
+ * 参数按角色异构，故放宽为可变参；组合根侧的具体工厂各自精确标注构造签名（见 server.ts）。
+ */
+export type RoleFactory = (...args: any[]) => BaseRole;
+
+/**
+ * 角色工厂注册表（RoleName → 工厂）。组合根 `src/server.ts` 注入 content 层角色类的构造，
+ * 使 dispatcher（automation）无需静态 import content 角色类——拆 automation/content 进程的关键前置。
+ * 当前承载 4 个 content 层角色：`concept_extractor` / `curated_note_evaluator` /
+ * `curated_comment_evaluator` / `valuable_comment_archivist`；automation 同层角色仍由 dispatcher 直构（同层无跨边界）。
+ * 缺失某个当下需要注册的工厂时 dispatcher 诚实抛错（组合根接线漏项），绝不静默少注册一个角色。
+ */
+export type RoleFactoryRegistry = Partial<Record<RoleName, RoleFactory>>;
+
+/**
+ * 精选库句柄（opaque）：dispatcher 仅用于「是否注册两段式准入角色」的注册闸并原样透传，不调用其方法；
+ * 真实 CuratedStore 由组合根注入、经 content 工厂构造消费。以此避免 dispatcher 静态依赖 content 侧 Sink 类型。
+ */
+export type CuratedStoreHandle = object;
+
+/** 文字卡转写器句柄（opaque）：同上，dispatcher 仅按注入与否透传标记，构造由 content 工厂消费。 */
+export type TextCardTranscriberHandle = object;
 
 const EMPTY_CONCEPT_POOL: ConceptPool = { known: [], candidates: [], source: new Map() };
 const VIEW_QUOTA_RECHECK_FALLBACK_MS = 60_000;
@@ -290,9 +316,16 @@ export interface RoleDispatcherOptions {
    * —— 正文角色（curated_note_evaluator，恒注册）+ 评论角色（curated_comment_evaluator，仅评论赞链路开启时）。
    * 缺省（如 PG 不可用）→ 两角色都不注册，准入退回全局处理器的自有收藏直纳路径（仿 concept_extractor 仅概念池可用时注册）。
    */
-  curatedStore?: CuratedNoteSink & CuratedCommentSink;
+  curatedStore?: CuratedStoreHandle;
   /** Optional admission-time text-card recognition/transcription service; its own flag remains authoritative. */
-  textCardTranscriber?: TextCardTranscriber;
+  textCardTranscriber?: TextCardTranscriberHandle;
+  /**
+   * content 层角色工厂注册表（组合根注入）：dispatcher 从中按 RoleName 取工厂构造 4 个 content 角色
+   * （concept_extractor / curated_note_evaluator / curated_comment_evaluator / valuable_comment_archivist），
+   * 从而不静态 import 这些 content 类。缺省 `{}`：仅当对应依赖（conceptStore / curatedStore / archiveValuableComment）
+   * 未注入时安全（那几个角色本就不注册）；注入了依赖却缺对应工厂 → setup() 诚实抛错。
+   */
+  roleFactories?: RoleFactoryRegistry;
   /**
    * 引流线索自动触发（change feed-hot-lead-auto-group-comment）：注入 `fireAutoContactComment` 则注册 hot_lead_detector
    * （接稿件价值判定之后，quality.pass 命中热度闸 + 账号开自动联系评论 + 过统一安全闸 → 自动触发带联系方式评论 → 飞书人审）。
@@ -465,8 +498,9 @@ export class RoleDispatcher {
   private readonly getCommentDailyRemaining?: () => number;
   private readonly getCommentLikeDailyRemaining?: () => number;
   private readonly archiveValuableComment?: (input: ValuableCommentInput) => Promise<void>;
-  private readonly curatedStore?: CuratedNoteSink & CuratedCommentSink;
-  private readonly textCardTranscriber?: TextCardTranscriber;
+  private readonly curatedStore?: CuratedStoreHandle;
+  private readonly textCardTranscriber?: TextCardTranscriberHandle;
+  private readonly roleFactories: RoleFactoryRegistry;
   private readonly hotLeadGateConfig?: () => HotLeadGateConfig;
   private readonly isAutoContactEnabled?: (accountId: string) => Promise<boolean>;
   private readonly hasCommentedForLead?: (accountId: string, noteId: string) => Promise<boolean>;
@@ -659,6 +693,7 @@ export class RoleDispatcher {
     this.commentSublineTimeoutMs = positiveTimeoutMs(options.commentSublineTimeoutMs, DEFAULT_COMMENT_SUBLINE_TIMEOUT_MS);
     this.curatedStore = options.curatedStore;
     this.textCardTranscriber = options.textCardTranscriber;
+    this.roleFactories = options.roleFactories ?? {};
     this.hotLeadGateConfig = options.hotLeadGateConfig;
     this.isAutoContactEnabled = options.isAutoContactEnabled;
     this.hasCommentedForLead = options.hasCommentedForLead;
@@ -1350,6 +1385,21 @@ export class RoleDispatcher {
     };
   }
 
+  /**
+   * 从组合根注入的注册表按 RoleName 取 content 角色工厂并实例化。
+   * 只在对应依赖（conceptStore / curatedStore / archiveValuableComment）已注入、该角色确需注册时调用；
+   * 工厂缺失＝组合根接线漏项 → 诚实抛错，绝不静默少注册一个角色（漏一个角色整条浏览闭环就断）。
+   */
+  private makeContentRole(name: RoleName, options: unknown): BaseRole {
+    const factory = this.roleFactories[name];
+    if (!factory) {
+      throw new Error(
+        `RoleDispatcher 缺少角色工厂「${name}」：其依赖已注入但组合根 server.ts 未在 roleFactories 提供对应构造。`,
+      );
+    }
+    return factory(options);
+  }
+
   /** 注册所有角色并启动事件订阅 */
   setup(): void {
     // 人设以取值口下发（热加载）：每个 agent 读 this.soul 时按当前账号即时解析，PUT 人设后无需重启。
@@ -1461,7 +1511,7 @@ export class RoleDispatcher {
       }),
       // 优质评论归档（语料库 B）：归档闭包就绪时注册；只在 comment_like.confirmed 上落库。
       ...(this.archiveValuableComment
-        ? [new ValuableCommentArchivist({ ...commonOptions, getNoteData, archive: this.archiveValuableComment })]
+        ? [this.makeContentRole('valuable_comment_archivist', { ...commonOptions, getNoteData, archive: this.archiveValuableComment })]
         : []),
       // ProfileOpener 只订 profile.worth_visiting（本人昵称采集走独立的 profile_open{direct}、不经此角色）⇒ 平台不访主页时
       // 安全不注册（AuthorEvaluator 已抑制 worth_visiting，本就永不触发）。change platform-orchestration-capability-gates。
@@ -1520,7 +1570,7 @@ export class RoleDispatcher {
     // 概念抽取角色：仅在概念池可用时注册（PG 不可用则不抽取，搜索退化为仅 seed_keywords）。
     if (this.conceptStore) {
       const sink = this.conceptStore;
-      this.roles.push(new ConceptExtractorRole({ ...commonOptions, conceptStore: sink }));
+      this.roles.push(this.makeContentRole('concept_extractor', { ...commonOptions, conceptStore: sink }));
     }
 
     // 精选准入「两段式」模型评估角色（change curated-admission-eval-roles，Phase 3）：
@@ -1530,7 +1580,7 @@ export class RoleDispatcher {
       const store = this.curatedStore;
       const llmEvalEnabled = process.env.AIDCP_CURATED_LLM_EVAL !== 'false';
       this.roles.push(
-        new CuratedNoteEvaluator({
+        this.makeContentRole('curated_note_evaluator', {
           ...commonOptions,
           curatedStore: store,
           getAccountId: () => this.currentAccountId,
@@ -1539,7 +1589,7 @@ export class RoleDispatcher {
         }),
       );
       this.roles.push(
-        new CuratedCommentEvaluator({
+        this.makeContentRole('curated_comment_evaluator', {
           ...commonOptions,
           curatedStore: store,
           getNoteData,

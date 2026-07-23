@@ -76,7 +76,26 @@ import {
 import { EventBus } from './event-bus/index.js';
 import type { NoteDetailData } from './event-bus/index.js';
 import { RoleDispatcher } from './orchestrator/index.js';
+import type { RoleFactoryRegistry } from './orchestrator/index.js';
+// content 层角色类：组合根（composition）负责实例化并经 roleFactories 注入 dispatcher，
+// 使 automation 侧 role-dispatcher 不再静态 import 这些 content 类（拆进程 Track1 前置）。
+import { ConceptExtractorRole } from './agents/concept-extractor-role.js';
+import { CuratedNoteEvaluator } from './agents/curated-note-evaluator.js';
+import { CuratedCommentEvaluator } from './agents/curated-comment-evaluator.js';
+import { ValuableCommentArchivist } from './agents/valuable-comment-archivist.js';
 import { FACEBOOK_REEL_FOLLOW_EDGE_CAPABILITY } from './platform/facebook-presented-video.js';
+
+/**
+ * content 层角色工厂注册表（组合根装配）：每个工厂就地 `new` 对应 content 角色，
+ * 参数用 `ConstructorParameters<...>[0]` 精确对齐各角色构造签名（构造契约在此 composition 处被类型检查）；
+ * dispatcher 就地组装 options 并按 RoleName 取工厂调用。静态、无闭包捕获，故置模块级。
+ */
+const CONTENT_ROLE_FACTORIES: RoleFactoryRegistry = {
+  concept_extractor: (o: ConstructorParameters<typeof ConceptExtractorRole>[0]) => new ConceptExtractorRole(o),
+  curated_note_evaluator: (o: ConstructorParameters<typeof CuratedNoteEvaluator>[0]) => new CuratedNoteEvaluator(o),
+  curated_comment_evaluator: (o: ConstructorParameters<typeof CuratedCommentEvaluator>[0]) => new CuratedCommentEvaluator(o),
+  valuable_comment_archivist: (o: ConstructorParameters<typeof ValuableCommentArchivist>[0]) => new ValuableCommentArchivist(o),
+};
 import { ConnectionRuntimeRegistry, type DispatcherBuildContext } from './orchestrator/connection-runtime.js';
 import type { CommentApprovalNoticeInput, CommentApprovalPort } from './agents/comment-approval-gate.js';
 import type { BaseRole } from './agents/base-role.js';
@@ -3749,6 +3768,8 @@ async function main(): Promise<void> {
       // （正文 curated_note_evaluator + 评论 curated_comment_evaluator）。缺省（PG 不可用）→ 不注册。
       curatedStore: curatedContentStore,
       textCardTranscriber,
+      // content 层角色工厂（组合根注入）：dispatcher 据此构造 4 个 content 角色而不静态 import 它们。
+      roleFactories: CONTENT_ROLE_FACTORIES,
       // 热度过滤阈值取值口：判定角色每次现读全局配置（后台改完热加载即时生效）。
       hotLeadGateConfig: () => hotLeadConfigStore.getGateConfig(),
       // 账号是否开启自动联系评论（off/review/auto_approve；默认关＝零回归）。

@@ -1,7 +1,7 @@
 {
   "seedTotal": 271,
   "seedUnplanned": 271,
-  "frozenTotal": 271,
+  "frozenTotal": 266,
   "recordedAt": "2026-07-23",
   "raises": [],
   "entries": [
@@ -1113,34 +1113,6 @@
     },
     {
       "from": "src/orchestrator/role-dispatcher.ts",
-      "to": "src/agents/concept-extractor-role.ts",
-      "reason": "§12 首批 MUST 锁住的集中违规之一：调度器文件头直接 import 具体角色类（automation -> content）。削减手段是 RoleName -> 角色工厂注册表，由组合根注入。",
-      "eliminatedBy": null,
-      "note": "本 change 任务 5.3 原记「43 条」，那是 design.md 旧判据下的数字；按定稿 §4.7 归属重算，role-dispatcher.ts 的 40 条 ../agents/ import 里只有 4 条跨边界，其余同属 automation。任务 5.3 的独立 change 仍成立（拆仓时 automation MUST 能在不 import content 角色的前提下启动），但收益量级 MUST 按 4 条重算。"
-    },
-    {
-      "from": "src/orchestrator/role-dispatcher.ts",
-      "to": "src/agents/curated-comment-evaluator.ts",
-      "reason": "§12 首批 MUST 锁住的集中违规之一：调度器文件头直接 import 具体角色类（automation -> content）。削减手段是 RoleName -> 角色工厂注册表，由组合根注入。",
-      "eliminatedBy": null,
-      "note": "本 change 任务 5.3 原记「43 条」，那是 design.md 旧判据下的数字；按定稿 §4.7 归属重算，role-dispatcher.ts 的 40 条 ../agents/ import 里只有 4 条跨边界，其余同属 automation。任务 5.3 的独立 change 仍成立（拆仓时 automation MUST 能在不 import content 角色的前提下启动），但收益量级 MUST 按 4 条重算。"
-    },
-    {
-      "from": "src/orchestrator/role-dispatcher.ts",
-      "to": "src/agents/curated-note-evaluator.ts",
-      "reason": "§12 首批 MUST 锁住的集中违规之一：调度器文件头直接 import 具体角色类（automation -> content）。削减手段是 RoleName -> 角色工厂注册表，由组合根注入。",
-      "eliminatedBy": null,
-      "note": "本 change 任务 5.3 原记「43 条」，那是 design.md 旧判据下的数字；按定稿 §4.7 归属重算，role-dispatcher.ts 的 40 条 ../agents/ import 里只有 4 条跨边界，其余同属 automation。任务 5.3 的独立 change 仍成立（拆仓时 automation MUST 能在不 import content 角色的前提下启动），但收益量级 MUST 按 4 条重算。"
-    },
-    {
-      "from": "src/orchestrator/role-dispatcher.ts",
-      "to": "src/agents/valuable-comment-archivist.ts",
-      "reason": "§12 首批 MUST 锁住的集中违规之一：调度器文件头直接 import 具体角色类（automation -> content）。削减手段是 RoleName -> 角色工厂注册表，由组合根注入。",
-      "eliminatedBy": null,
-      "note": "本 change 任务 5.3 原记「43 条」，那是 design.md 旧判据下的数字；按定稿 §4.7 归属重算，role-dispatcher.ts 的 40 条 ../agents/ import 里只有 4 条跨边界，其余同属 automation。任务 5.3 的独立 change 仍成立（拆仓时 automation MUST 能在不 import content 角色的前提下启动），但收益量级 MUST 按 4 条重算。"
-    },
-    {
-      "from": "src/orchestrator/role-dispatcher.ts",
       "to": "src/config-mirror-freshness.ts",
       "reason": "由 change config-mirror-cross-process-invalidation 新增：automation 侧角色调度器在放行新平台动作前查配置副本新鲜度。",
       "eliminatedBy": null,
@@ -1163,12 +1135,6 @@
     {
       "from": "src/orchestrator/role-dispatcher.ts",
       "to": "src/llm/qwen.ts",
-      "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/orchestrator/role-dispatcher.ts",
-      "to": "src/publish-agent/text-card-transcriber.ts",
       "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
     },
