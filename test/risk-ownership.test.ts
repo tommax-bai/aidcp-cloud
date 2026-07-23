@@ -172,6 +172,29 @@ test('并发接管致条件写被拒 → 驱逐缓存 + 告警；下次解析从
   assert.equal(after.getState().status, 'restricted', '重建 MUST 从库读最新，绝不复用陈旧内存态');
 });
 
+test('跨 target 切换（onClaimed 路径）MUST 驱逐缓存：陈旧 normal 不得盖回接管方写下的 restricted', async () => {
+  const store = new MemoryRiskStore();
+  store.states.set('acc-1', stateOf('acc-1', 'normal'));
+  const { registry } = registryWith(store);
+
+  // 本进程此前为 acc-1 物化过 controller（面板汇总删了属主跳过后，会为每个账号物化），缓存 status=normal。
+  const cached = await registry.getWritableController('acc-1');
+  assert.equal(cached.getState().status, 'normal');
+
+  // 另一个 target 驱动 acc-1，把它写成 restricted；本进程内存快照仍是 normal。
+  store.states.set('acc-1', stateOf('acc-1', 'restricted'));
+  assert.equal(cached.getState().status, 'normal', '内存快照不自更新——只 reloadCounters 会把它留着');
+
+  // acc-1 的边缘切回本 target → onClaimed 的实际动作 MUST 是 evict（不是 peek+reloadCounters）。
+  // 切换后归属已是本 target、条件写谓词会通过，handleNotOwned 那道最后闸不再触发，只能靠这里主动驱逐。
+  assert.equal(registry.evict('acc-1'), true);
+  assert.deepEqual(registry.materializedAccountIds(), [], '切换 MUST 驱逐陈旧缓存');
+
+  // 下次物化从库重读，拿到接管方写下的 restricted，绝不用陈旧 normal 覆盖。
+  const fresh = await registry.getWritableController('acc-1');
+  assert.equal(fresh.getState().status, 'restricted', '切换后 state MUST 从库刷新，绝不复用陈旧内存态');
+});
+
 test('handleNotOwned 只认自己的错误类型，别的错误不吞', () => {
   const { registry } = registryWith();
   assert.equal(registry.handleNotOwned(new Error('pg down')), false);

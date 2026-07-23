@@ -3865,11 +3865,14 @@ async function main(): Promise<void> {
                 detail: info.detail,
               });
             },
-            // 归属切换后 MUST 强制重放计数：账号刚从另一个 target 切过来，本进程此前可能已为它物化过
-            // controller（面板汇总等），那份内存值不能被当成新驱动方的起点。
+            // 归属切换后 MUST 驱逐本进程缓存的 controller。账号刚从另一个 target 切过来，本进程此前
+            // 可能已为它物化过 controller（面板汇总会为每个账号物化），那份内存**既有陈旧计数、也有陈旧
+            // 状态**。只 reloadCounters 会漏掉状态：陈旧的 normal 会在下次条件写时盖回接管方刚写的
+            // restricted——切换后归属已是本 target、条件写谓词通过，最后一道 handleNotOwned 不再触发，
+            // 静默覆盖就此发生（正是本 change 要消除的形状）。驱逐后下次物化经 RiskController.create
+            // 从库重读 state + 回放计数，两者一并刷新。
             onClaimed: async (accountId) => {
-              const pending = riskRegistry.peek(accountId);
-              if (pending) await (await pending).reloadCounters();
+              riskRegistry.evict(accountId);
             },
           },
         }
