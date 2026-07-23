@@ -10,4 +10,10 @@
 export * from './llm/index.js';
 export * from './planner/index.js';
 export * from './cache/index.js';
+// content / api 归属的 cache store 不再经 automation 桶 cache/index 再导出（见该文件说明）；
+// 本公共出口（composition）按其真实归属直连各文件，composition→任意层恒允许，公共出口面逐字不变。
+export * from './cache/concept-store.js';
+export * from './cache/curated-content-store.js';
+export * from './cache/notification-contact-store.js';
+export * from './cache/bot-chat-store.js';
 export * from './comm/index.js';

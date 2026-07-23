@@ -14,7 +14,9 @@
  */
 
 import pg from 'pg';
-import { DEFAULT_PG_CONFIG } from './pg-anchor-cache.js';
+// DEFAULT_PG_CONFIG 的真实归属是 kernel（pg-config.ts），pg-anchor-cache 只是再导出；api
+// 直连 kernel（api→kernel 恒允许），取值逐字不变，消去 api→automation 这一跨边界豁免。
+import { DEFAULT_PG_CONFIG } from './pg-config.js';
 import type { NotificationItem } from '../comm/protocol.js';
 import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 

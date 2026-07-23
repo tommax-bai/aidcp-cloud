@@ -8,8 +8,18 @@
 
 import type { RiskController, RiskQuotaLevel, RiskAction, SessionInteractionBudget } from '../risk/index.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { ConceptStore, BotChatStore, GroupRoute, SetGroupRouteResult } from '../cache/index.js';
-import type { CuratedContentTypeFilter, CuratedPanelListResult, CuratedPanelRow, CuratedFacets } from '../cache/index.js';
+// GroupRoute 系 automation 归属，仍取自 automation 桶（api→automation，既存豁免）；
+// BotChatStore 系 api 同层直连（无需豁免）；ConceptStore / 精选类型系 content，直连具体文件按真实
+// 方向（api→content）计入豁免——不再经 automation 桶 cache/index 间接跨层拿别层 store。
+import type { GroupRoute, SetGroupRouteResult } from '../cache/index.js';
+import type { BotChatStore } from '../cache/bot-chat-store.js';
+import type { ConceptStore } from '../cache/concept-store.js';
+import type {
+  CuratedContentTypeFilter,
+  CuratedPanelListResult,
+  CuratedPanelRow,
+  CuratedFacets,
+} from '../cache/curated-content-store.js';
 import type { PublishLogStore, EditDraftPatch, EditDraftResult } from '../publish-agent/publish-log-store.js';
 import type { QueueStatusLike } from './publish-stage-lifecycle.js';
 import type { SetGroupLabelResult, SetContactInfoResult } from '../account-store.js';

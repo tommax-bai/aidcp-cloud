@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
-import { CONCEPT_SCHEMA_SQL, ConceptStore } from '../src/cache/index.js';
+import { CONCEPT_SCHEMA_SQL, ConceptStore } from '../src/cache/concept-store.js';
 
 interface QueryCall {
   sql: string;

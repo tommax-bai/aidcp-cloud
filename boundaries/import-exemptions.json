@@ -1,7 +1,7 @@
 {
   "seedTotal": 295,
   "seedUnplanned": 295,
-  "frozenTotal": 285,
+  "frozenTotal": 280,
   "recordedAt": "2026-07-23",
   "raises": [],
   "entries": [
@@ -273,12 +273,6 @@
     },
     {
       "from": "src/cache/concept-store.ts",
-      "to": "src/cache/pg-anchor-cache.ts",
-      "reason": "seed（content -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/cache/concept-store.ts",
       "to": "src/event-bus/types.ts",
       "reason": "seed（content -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
@@ -289,12 +283,6 @@
       "reason": "seed（content -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/cache/concept-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null,
       "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
-    },
-    {
-      "from": "src/cache/curated-content-store.ts",
-      "to": "src/cache/pg-anchor-cache.ts",
-      "reason": "seed（content -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
     },
     {
       "from": "src/cache/curated-content-store.ts",
@@ -315,36 +303,6 @@
       "reason": "seed（content -> automation）：由 change cloud-schema-migration-executor 新增的 src/schema/schema-name.ts 被 src/cache/curated-content-store.ts 导入（qualifiedObjectName）；本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null,
       "note": "src/schema/ 里除 schema-capability.ts 外唯一的跨层被导入点：本文件是纯字符串拼装、**无 SQL 字面量**，若走消除路径 (a) 可与析出的纯判定段一并判 kernel，本条随之消除。eliminatedBy 暂为 null——同上，控制仓尚未立项承接 §4.7 裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
-    },
-    {
-      "from": "src/cache/index.ts",
-      "to": "src/cache/bot-chat-store.ts",
-      "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/cache/index.ts",
-      "to": "src/cache/concept-store.ts",
-      "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/cache/index.ts",
-      "to": "src/cache/curated-content-store.ts",
-      "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/cache/index.ts",
-      "to": "src/cache/notification-contact-store.ts",
-      "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/cache/notification-contact-store.ts",
-      "to": "src/cache/pg-anchor-cache.ts",
-      "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
     },
     {
       "from": "src/cache/notification-contact-store.ts",
@@ -1327,6 +1285,18 @@
       "from": "src/panel/types.ts",
       "to": "src/alerts/index.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
+      "eliminatedBy": null
+    },
+    {
+      "from": "src/panel/types.ts",
+      "to": "src/cache/concept-store.ts",
+      "reason": "由 change decouple-cache-index-layers 承接：面板 BFF（api）就地只读 content 精选/概念库；原经 automation 桶 src/cache/index.ts 间接再导出、跨层拿别层 store（已随按层拆桶移除），现按真实归属直连具体文件（api -> content），耦合面与方向不变、仅换调用通道。",
+      "eliminatedBy": null
+    },
+    {
+      "from": "src/panel/types.ts",
+      "to": "src/cache/curated-content-store.ts",
+      "reason": "由 change decouple-cache-index-layers 承接：面板 BFF（api）就地只读 content 精选/概念库；原经 automation 桶 src/cache/index.ts 间接再导出、跨层拿别层 store（已随按层拆桶移除），现按真实归属直连具体文件（api -> content），耦合面与方向不变、仅换调用通道。",
       "eliminatedBy": null
     },
     {

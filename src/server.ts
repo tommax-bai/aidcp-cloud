@@ -32,8 +32,14 @@ import { TokenUsageStore } from './metrics/token-usage-store.js';
 import { createBillingPriceRefresh } from './metrics/billing-price-refresh.js';
 import { shanghaiDayStartMs } from './time/shanghai-day.js';
 import { SimplePlanner } from './planner/index.js';
-import { PgAnchorCache, BotChatStore, GroupRouteStore, ConceptStore, LikedNoteStore, ValuableCommentStore, NotificationContactStore, InteractionFeedStore, CuratedContentStore, CuratedContentUnavailableError, topicKeysFromTitle } from './cache/index.js';
-import type { CuratedReferenceImage, CuratedReferenceImageInput, CuratedSourceAdmission } from './cache/index.js';
+// automation 归属 store 仍取自 automation 桶；content / api 归属 store 按其真实归属直连具体文件
+// （composition→任意层恒允许，不新增跨边界豁免；随 cache/index 按层拆桶同步调整，见该文件说明）。
+import { PgAnchorCache, GroupRouteStore, LikedNoteStore, ValuableCommentStore, InteractionFeedStore, topicKeysFromTitle } from './cache/index.js';
+import { BotChatStore } from './cache/bot-chat-store.js';
+import { ConceptStore } from './cache/concept-store.js';
+import { NotificationContactStore } from './cache/notification-contact-store.js';
+import { CuratedContentStore, CuratedContentUnavailableError } from './cache/curated-content-store.js';
+import type { CuratedReferenceImage, CuratedReferenceImageInput, CuratedSourceAdmission } from './cache/curated-content-store.js';
 import { FirstPostOnboardingStore } from './onboarding/first-post-onboarding-store.js';
 import { FirstPostOnboardingCoordinator } from './onboarding/first-post-onboarding-coordinator.js';
 import { triggerGatedAutoComment } from './comment-agent/gated-auto-comment.js';

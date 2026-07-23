@@ -19,7 +19,9 @@
  */
 
 import pg from 'pg';
-import { DEFAULT_PG_CONFIG } from './pg-anchor-cache.js';
+// DEFAULT_PG_CONFIG 的真实归属是 kernel（pg-config.ts），pg-anchor-cache 只是再导出；content
+// 直连 kernel（content→kernel 恒允许），取值逐字不变，消去 content→automation 这一跨边界豁免。
+import { DEFAULT_PG_CONFIG } from './pg-config.js';
 import type { DelegatedExecutionTarget } from '../delegated-task/types.js';
 import type { ReferenceVisualAnalysis } from '../publish-agent/visual-reference-types.js';
 import type { VisualAnalysisAnchor } from '../publish-agent/visual-reference-analyzer.js';
