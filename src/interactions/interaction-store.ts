@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { resolveEnvPgConfig } from '../cache/pg-config.js';
 import { qualifiedObjectName } from '../schema/schema-name.js';
-import { lockEnvironmentRow, lockEnvironmentScopeRows } from '../db/environment-row-lock.js';
 import {
   INTERACTION_PLATFORM,
   InteractionError,
@@ -45,6 +44,25 @@ export interface InteractionApiPurgePort {
   purgeExpiredAuditEvents(q: Queryable, now: number): Promise<number>;
 }
 
+/**
+ * 环境级行锁的窄注入端口（change decouple-interaction-api-cluster）—— 消费方在本文件（automation），
+ * 实现方是 aidcp-api 的 db/environment-row-lock（`client_environments` / `client_env_scope` 属 api）。
+ * 授权首写路径需要锁环境注册行；收口到本端口后不再直接 import api 属主文件，具体实现由 server.ts 注入
+ * （结构匹配、不 import、同一组函数同一调用点，行为零变更）。类型全部内联（'locked'|'unregistered' 字面量 +
+ * 结构化 client），本端口零跨边界依赖。语义约束（未注册 ⇒ 未加锁、MUST NOT 当作已加锁）见实现文件文档。
+ */
+export interface EnvironmentRowLockPort {
+  lockEnvironmentRow(
+    client: { query(sql: string, params: unknown[]): Promise<{ rowCount?: number | null }> },
+    envKey: string,
+    logger?: Pick<Console, 'warn'>,
+  ): Promise<'locked' | 'unregistered'>;
+  lockEnvironmentScopeRows(
+    client: { query(sql: string, params: unknown[]): Promise<{ rowCount?: number | null }> },
+    envKey: string,
+  ): Promise<number>;
+}
+
 export interface InteractionStoreOptions {
   pool?: pg.Pool;
   clock?: () => number;
@@ -54,6 +72,11 @@ export interface InteractionStoreOptions {
    * 只有真正走到离场 saga / 过期清理里删 api 属主表时才当场抛错（fail-loud，绝非静默跳过）。
    */
   apiPurge?: InteractionApiPurgePort;
+  /**
+   * 环境级行锁口（change decouple-interaction-api-cluster）。生产由 server.ts 注入；缺省 = 不注入，
+   * 只有真正走到授权首写取锁路径时才当场抛错（fail-loud，绝非静默跳过环境级互斥）。
+   */
+  envLock?: EnvironmentRowLockPort;
 }
 
 export interface IngestResult {
@@ -302,18 +325,26 @@ export class InteractionStore {
   private readonly clock: () => number;
   private readonly idGen: (prefix: string) => string;
   private readonly apiPurge?: InteractionApiPurgePort;
+  private readonly envLock?: EnvironmentRowLockPort;
 
   constructor(options: InteractionStoreOptions = {}) {
     this.pool = options.pool ?? new Pool(resolveEnvPgConfig());
     this.clock = options.clock ?? Date.now;
     this.idGen = options.idGen ?? ((prefix) => `${prefix}_${randomUUID()}`);
     this.apiPurge = options.apiPurge;
+    this.envLock = options.envLock;
   }
 
   /** api 属主表清理口：未注入即当场抛错，绝不静默跳过应删的 api 属主数据。 */
   private requireApiPurge(): InteractionApiPurgePort {
     if (!this.apiPurge) throw new Error('interaction_api_purge_port_not_configured');
     return this.apiPurge;
+  }
+
+  /** 环境级行锁口：未注入即当场抛错，绝不静默跳过环境级互斥（授权首写并发对手可能存在）。 */
+  private requireEnvLock(): EnvironmentRowLockPort {
+    if (!this.envLock) throw new Error('interaction_env_lock_port_not_configured');
+    return this.envLock;
   }
 
   /** 每一步 saga 各自独立事务：BEGIN/COMMIT/ROLLBACK 包裹，供离场分步清理跨事务重入。 */
@@ -388,8 +419,9 @@ export class InteractionStore {
       // 且握手时的自动登记是 fire-and-forget，存在真实的时间窗）。故回落去锁该环境的客户归属行：
       // 解绑 / 停用侧正是遍历 `client_env_scope` 找环境的（对注册表只 LEFT JOIN），锁住归属行即可与之串行。
       // 两者皆无行 ⇒ 解绑侧遍历不到这个环境 ⇒ 确无对手，此时不加锁是**有依据的**，且照样留痕。
-      if ((await lockEnvironmentRow(client, payload.envKey)) === 'unregistered') {
-        const scoped = await lockEnvironmentScopeRows(client, payload.envKey);
+      const envLock = this.requireEnvLock();
+      if ((await envLock.lockEnvironmentRow(client, payload.envKey)) === 'unregistered') {
+        const scoped = await envLock.lockEnvironmentScopeRows(client, payload.envKey);
         if (scoped === 0) {
           console.warn(
             `[interaction] 环境 ${payload.envKey} 既未注册也未归属任何客户：本次授权首写无环境级锁可取`

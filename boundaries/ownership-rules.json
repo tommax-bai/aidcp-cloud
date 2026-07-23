@@ -89,6 +89,7 @@
 
     { "path": "src/interactions/interaction-api-writes.ts", "layer": "api", "basis": "§5.1：reply 配置面（reply_templates/reply_rules/account_reply_profiles/interaction_reply_config*）与配置面审计 interaction_audit_events 归 aidcp-api 单写。本文件是 change offboard-saga 里这些 api 属主表在离场/过期清理路径上的 api 侧单写者，automation 经窄接口注入调用。" },
     { "path": "src/interactions/interaction-customer-api.ts", "layer": "api", "basis": "§4.6.1：配置存储与查询面" },
+    { "path": "src/interactions/interaction-automation-ports.ts", "layer": "api", "basis": "§4.6.1：配置/查询面（api）消费 automation 编排行为的窄注入端口（consumer-owned ports）。change decouple-interaction-api-cluster 新增：把 interaction-customer-api 对 send-orchestrator / reply-workflow 的直接 import type 收窄为端口接口，只引 kernel 契约、由组合根按结构兼容注入 automation 实例，automation 类不 import 本端口。" },
     { "path": "src/interactions/interaction-internal-api.ts", "layer": "api", "basis": "§4.6.1：配置存储与查询面" },
     { "path": "src/interactions/offboard-write-adapter.ts", "layer": "automation", "basis": "§5.1：互动域离场表（interaction_offboards/interaction_offboard_audit/interaction_auth_state/interaction_runtime_controls）归 aidcp-automation 单写。本文件是 change offboard-saga 里这些离场表的 automation 侧单写者，aidcp-api 的 client-user-store 经窄接口注入调用。" },
     { "path": "src/interactions/interaction-scope-internal-api.ts", "layer": "api", "basis": "§4.6.1：配置存储与查询面" },

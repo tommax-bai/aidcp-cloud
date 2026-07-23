@@ -5,6 +5,8 @@ import pg from 'pg';
 import type { Envelope } from '../../src/comm/protocol.js';
 import { InteractionStore } from '../../src/interactions/interaction-store.js';
 import { InteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
+import { lockEnvironmentRow, lockEnvironmentScopeRows } from '../../src/db/environment-row-lock.js';
+const envLock = { lockEnvironmentRow, lockEnvironmentScopeRows };
 import { InteractionInboxService } from '../../src/interactions/interaction-inbox-service.js';
 import { InteractionMetrics } from '../../src/interactions/metrics.js';
 import { ReplyAiService } from '../../src/interactions/reply-ai.js';
@@ -24,7 +26,7 @@ const attemptGate = {
 test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recovery and confirmed result',
   { skip: !connectionString }, async () => {
     const pool = new pg.Pool({ connectionString });
-    const store = new InteractionStore({ pool, clock: () => 1784044802100, apiPurge: new InteractionApiWrites() });
+    const store = new InteractionStore({ pool, clock: () => 1784044802100, apiPurge: new InteractionApiWrites(), envLock });
     try {
       await pool.query(`TRUNCATE
         interaction_api_requests,interaction_audit_events,interaction_send_attempts,interaction_reply_jobs,
@@ -319,7 +321,7 @@ test('PostgreSQL: circuit reset, replay-safe thread states and periodic classify
   { skip: !connectionString }, async () => {
     const pool = new pg.Pool({ connectionString });
     const now = 1_784_044_900_000;
-    const store = new InteractionStore({ pool, clock: () => now });
+    const store = new InteractionStore({ pool, clock: () => now, envLock });
     try {
       await pool.query(`TRUNCATE
         interaction_api_requests,interaction_audit_events,interaction_send_attempts,interaction_reply_jobs,
@@ -524,7 +526,7 @@ test('PostgreSQL: immutable template/config versions, publish CAS and fail-close
 test('PostgreSQL mock Edge E2E: sync → list/detail → generate/approve/send → confirmed',
   { skip: !connectionString }, async () => {
     const pool = new pg.Pool({ connectionString });
-    const store = new InteractionStore({ pool, clock: () => attemptGate.now });
+    const store = new InteractionStore({ pool, clock: () => attemptGate.now, envLock });
     const configs = new ReplyConfigStore({ pool });
     try {
       await pool.query(`TRUNCATE

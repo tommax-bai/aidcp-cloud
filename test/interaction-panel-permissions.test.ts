@@ -3,12 +3,14 @@ import assert from 'node:assert/strict';
 import { parsePanelUsers } from '../src/panel/auth.js';
 import { startPanelApi } from '../src/panel/panel-server.js';
 import type { PanelConfig, PanelDeps } from '../src/panel/types.js';
+// api 属主配置/查询面在桶拆分后不再经 automation 桶（src/interactions/index.ts）再导出，
+// 直接从各自具体 api 文件导入。
 import {
   buildInteractionPermissionOverview,
   INTERACTION_PERMISSION_DEFINITIONS,
-  parseInteractionPanelGrants,
   type InteractionPermissionOverview,
-} from '../src/interactions/index.js';
+} from '../src/interactions/interaction-panel-permissions.js';
+import { parseInteractionPanelGrants } from '../src/interactions/interaction-internal-api.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 

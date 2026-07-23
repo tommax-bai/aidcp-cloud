@@ -367,22 +367,14 @@ import { isWeekActiveAt } from './risk/session-limits.js';
 import { createRolePromptProvider } from './config/role-prompt-preview.js';
 import { CredentialStore } from './config/credential-store.js';
 import type { ModelConfigView } from './panel/types.js';
+// automation 属主 + kernel 契约经 automation 桶导入（本文件是 composition，MAY 导入任何层）。
 import {
   InteractionStore,
-  ReplyConfigStore,
-  ReplyConfigScopeStore,
-  ReplyConfigResolver,
   ReplyWorkflow,
   InteractionInboxService,
   InteractionSendOrchestrator,
   InteractionOffboardingService,
-  InteractionCustomerApi,
-  interactionTestDataResetEnabled,
-  InteractionInternalApi,
-  InteractionScopeInternalApi,
   InteractionMetrics,
-  buildInteractionPermissionOverview,
-  parseInteractionPanelGrants,
   INTERACTION_OFFBOARDING_CAPABILITY,
   INTERACTION_REPLY_RECOVERY_CAPABILITY,
   INTERACTION_RUNTIME_CONTROLS_CAPABILITY,
@@ -390,12 +382,22 @@ import {
   type InteractionSchemaMode,
   type InteractionRuntimeControlsPayload,
 } from './interactions/index.js';
+// api 属主的配置/查询面：不再经 automation 桶再导出（桶拆分），由组合根直接从各具体文件导入。
+import { ReplyConfigStore } from './interactions/reply-config-store.js';
+import { ReplyConfigScopeStore } from './interactions/reply-config-scope-store.js';
+import { ReplyConfigResolver } from './interactions/reply-config-resolver.js';
+import { InteractionCustomerApi, interactionTestDataResetEnabled } from './interactions/interaction-customer-api.js';
+import { InteractionInternalApi, parseInteractionPanelGrants } from './interactions/interaction-internal-api.js';
+import { InteractionScopeInternalApi } from './interactions/interaction-scope-internal-api.js';
+import { buildInteractionPermissionOverview } from './interactions/interaction-panel-permissions.js';
 // 组合根直接构造 content 的回复生成实现，并作为 ReplyAiPort 注入 ReplyWorkflow（automation 编排层只持接口）。
 import { ReplyAiService } from './interactions/reply-ai.js';
 import { projectRuntimeControls } from './interactions/runtime-controls-provider.js';
 // change offboard-saga：把跨 owner 离场写收口到各属主的窄写入口，由组合根注入（拆进程时换成内部 HTTP）。
 import { OffboardWriteAdapter } from './interactions/offboard-write-adapter.js';
 import { InteractionApiWrites } from './interactions/interaction-api-writes.js';
+// 环境级行锁实现（api 属主 client_environments / client_env_scope），由组合根注入 InteractionStore（automation）。
+import { lockEnvironmentRow, lockEnvironmentScopeRows } from './db/environment-row-lock.js';
 
 function readEnvString(name: string): string | undefined {
   const value = process.env[name];
@@ -2148,7 +2150,10 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   let interactionOffboarding: InteractionOffboardingService | undefined;
   const interactionAiTimeoutMs = Math.max(1_000, readEnvNumber('AIDCP_INTERACTION_AI_TIMEOUT_MS', 20_000));
   try {
-    interactionStore = new InteractionStore({ apiPurge: new InteractionApiWrites() });
+    interactionStore = new InteractionStore({
+      apiPurge: new InteractionApiWrites(),
+      envLock: { lockEnvironmentRow, lockEnvironmentScopeRows },
+    });
     replyConfigStore = new ReplyConfigStore();
     replyConfigScopeStore = new ReplyConfigScopeStore();
     interactionSchemaMode = await interactionStore.init();

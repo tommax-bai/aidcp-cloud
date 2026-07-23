@@ -1,7 +1,7 @@
 {
   "seedTotal": 271,
   "seedUnplanned": 271,
-  "frozenTotal": 233,
+  "frozenTotal": 222,
   "recordedAt": "2026-07-23",
   "raises": [],
   "entries": [
@@ -779,68 +779,8 @@
       "eliminatedBy": null
     },
     {
-      "from": "src/interactions/index.ts",
-      "to": "src/interactions/interaction-customer-api.ts",
-      "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/interactions/index.ts",
-      "to": "src/interactions/interaction-internal-api.ts",
-      "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/interactions/index.ts",
-      "to": "src/interactions/interaction-panel-permissions.ts",
-      "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/interactions/index.ts",
-      "to": "src/interactions/interaction-scope-internal-api.ts",
-      "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/interactions/index.ts",
-      "to": "src/interactions/reply-config-resolver.ts",
-      "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/interactions/index.ts",
-      "to": "src/interactions/reply-config-scope-store.ts",
-      "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/interactions/index.ts",
-      "to": "src/interactions/reply-config-store.ts",
-      "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/interactions/index.ts",
-      "to": "src/interactions/reply-config.ts",
-      "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
       "from": "src/interactions/interaction-customer-api.ts",
       "to": "src/interactions/interaction-store.ts",
-      "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/interactions/interaction-customer-api.ts",
-      "to": "src/interactions/reply-workflow.ts",
-      "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/interactions/interaction-customer-api.ts",
-      "to": "src/interactions/send-orchestrator.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
     },
@@ -867,13 +807,6 @@
       "to": "src/interactions/reply-workflow.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
-    },
-    {
-      "from": "src/interactions/interaction-store.ts",
-      "to": "src/db/environment-row-lock.ts",
-      "reason": "由 change publish-approval-signal-to-database 新增（aidcp-cloud 66d05e7）：automation 侧互动存储在写环境登录态前，取 api 属主表 client_environments 的行锁（替代原来那把跨未来服务边界的 advisory lock）。",
-      "eliminatedBy": null,
-      "note": "消除动作：§5.1「client_environments（环境花名册与绑定事实）」写死「自动化握手 MUST 改为经 api 的窄内部接口回写，MUST NOT 直写该表」。窄接口落地时取锁连同回写一并搬到 api 一侧，本条随之消失。这正是 §12 阶段 1 退出判据点名 MUST 有明确结论的五处之一（client_environments 的自动化握手写入路径）。"
     },
     {
       "from": "src/interactions/reply-auto-send.ts",

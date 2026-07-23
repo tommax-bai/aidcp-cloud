@@ -7,7 +7,10 @@ import { OffboardWriteAdapter } from '../../src/interactions/offboard-write-adap
 import { InteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
 import { parseSyncBatchPayload } from '../../src/interactions/contract.js';
 import { InteractionStore } from '../../src/interactions/interaction-store.js';
+import { lockEnvironmentRow, lockEnvironmentScopeRows } from '../../src/db/environment-row-lock.js';
 import { shanghaiDayStartMs } from '../../src/time/shanghai-day.js';
+
+const envLock = { lockEnvironmentRow, lockEnvironmentScopeRows };
 
 const connectionString = process.env.AIDCP_INTERACTION_TEST_DATABASE_URL;
 
@@ -150,7 +153,7 @@ test('PostgreSQL: unbind/termination revoke first, retry offline cleanup, tombst
   { skip: !connectionString }, async () => {
     const pool = new pg.Pool({ connectionString });
     const users = new ClientUserStore({ pool, offboardWrites: new OffboardWriteAdapter() });
-    const interactions = new InteractionStore({ pool, clock: () => 1_784_044_830_000, apiPurge: new InteractionApiWrites() });
+    const interactions = new InteractionStore({ pool, clock: () => 1_784_044_830_000, apiPurge: new InteractionApiWrites(), envLock });
     try {
       await users.init();
       await interactions.init();
@@ -330,7 +333,7 @@ test('PostgreSQL: provisioned video environment without an auth binding gets ter
   { skip: !connectionString }, async () => {
     const pool = new pg.Pool({ connectionString });
     const users = new ClientUserStore({ pool, offboardWrites: new OffboardWriteAdapter() });
-    const interactions = new InteractionStore({ pool, apiPurge: new InteractionApiWrites() });
+    const interactions = new InteractionStore({ pool, apiPurge: new InteractionApiWrites(), envLock });
     try {
       await users.init();
       await interactions.init();
@@ -417,7 +420,7 @@ test('PostgreSQL: admin revocation removes ownership before cleanup and late bin
   { skip: !connectionString }, async () => {
     const pool = new pg.Pool({ connectionString });
     const users = new ClientUserStore({ pool, offboardWrites: new OffboardWriteAdapter() });
-    const interactions = new InteractionStore({ pool, apiPurge: new InteractionApiWrites() });
+    const interactions = new InteractionStore({ pool, apiPurge: new InteractionApiWrites(), envLock });
     try {
       await users.init();
       await interactions.init();

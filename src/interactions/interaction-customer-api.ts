@@ -2,10 +2,10 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type http from 'node:http';
 import type { ClientUserStore } from '../client-auth/client-user-store.js';
 import type { InteractionStore } from './interaction-store.js';
-import type { InteractionSendOrchestrator } from './send-orchestrator.js';
 import type { ReplyConfigStore } from './reply-config-store.js';
 import type { ReplyConfigResolver } from './reply-config-resolver.js';
-import type { ReplyWorkflow } from './reply-workflow.js';
+// automation 编排层经窄注入端口持有（不再直接 import send-orchestrator / reply-workflow 具体类）。
+import type { InteractionSendPort, ReplyWorkflowWritePort } from './interaction-automation-ports.js';
 import {
   INTERACTION_PLATFORM,
   InteractionError,
@@ -181,8 +181,8 @@ export class InteractionCustomerApi {
     users: ClientUserStore;
     store: InteractionStore;
     configs: CustomerConfigReader;
-    workflow: ReplyWorkflow;
-    sender: InteractionSendOrchestrator;
+    workflow: ReplyWorkflowWritePort;
+    sender: InteractionSendPort;
     onRuntimeControlsUpdated?: (controls: RuntimeControls) => Promise<{ delivered: number }>;
     testDataResetEnabled?: boolean;
     cursorSecret: string;
