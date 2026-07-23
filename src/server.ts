@@ -551,7 +551,139 @@ function parseForbiddenPorts(raw: string | undefined): number[] {
     .filter((n) => Number.isInteger(n) && n > 0);
 }
 
+
+interface CompositionContext {
+  // late-bound real-ring ports & forward-declared handles (assigned in a later segment than a referencing closure)
+  scheduledPublishReconciler?: ScheduledPublishReconciler | null;
+  publishScheduler?: PublishScheduler;
+  uiSnapshot?: UiSnapshotService;
+  interactionSender?: InteractionSendOrchestrator;
+  edgeServer?: EdgeCloudServer;
+  runtimes?: ConnectionRuntimeRegistry;
+  // single-assignment cross-segment handles
+  accountDisplayName: (accountId: string) => string | undefined;
+  accountDisplayNameCandidates: (accountId: string) => string[];
+  accountPersonaService: AccountPersonaService;
+  accountState: AccountStateManager;
+  accountStore: AccountStore | undefined;
+  alertStore: PgAlertStore | undefined;
+  anyImageKeyPresent: boolean;
+  approvalPolicyStore: ApprovalPolicyStore | undefined;
+  approvePublishForClient: ReturnType<typeof createClientPublishApprovalHandler>;
+  billingPriceRefresh: { refresh(): Promise<import("/Users/baitianxing/codes/aidcp-cloud.wt/org-root-three-entrypoints/src/metrics/billing-price-refresh").BillingPriceRefreshResult>; };
+  botChatEventHandler: FeishuBotChatEventHandler;
+  botChatsProvider: ReturnType<typeof createBotChatsProvider>;
+  botChatStore: BotChatStore;
+  buildModelConfigView: () => Promise<ModelConfigView>;
+  buildTodayUsageForAccount: (accountId: string, edgeId?: string) => Promise<UiDailyUsagePayload>;
+  cache: PgAnchorCache;
+  captchaAssist: CaptchaAssistService;
+  categoryConfigPanel: ReturnType<typeof createCategoryConfigPanel>;
+  categoryConfigStore: CategoryConfigStore;
+  clientUserStore: ClientUserStore;
+  commandFace: ReturnType<typeof createCommandFace>;
+  commentScheduler: CommentScheduler | undefined;
+  conceptStore: ConceptStore | undefined;
+  configMirrorPool: pg.Pool;
+  configMirrorRefresher: ConfigMirrorRefresher;
+  contentScheduleStore: ContentScheduleStore;
+  credentialStore: CredentialStore;
+  curatedContentStore: CuratedContentStore | undefined;
+  dashscopeApiKey: string | undefined;
+  debugPort: number;
+  delegatedTaskService: DelegatedTaskService | undefined;
+  delegatedTaskStore: PgDelegatedTaskStore | undefined;
+  deploymentTarget: "dev" | "ol" | null;
+  draftRefinementStore: DraftRefinementStore | undefined;
+  eventBus: EventBus;
+  facebookCommentAuditStore: FacebookCommentAuditStore;
+  facebookCommentConfigStore: FacebookCommentConfigStore;
+  facebookGroupJoinAuditStore: FacebookGroupJoinAuditStore;
+  facebookGroupJoinAutomationStore: FacebookGroupJoinAutomationStore;
+  facebookGroupMembershipStore: FacebookGroupMembershipStore;
+  facebookGroupTargetStore: FacebookGroupTargetStore;
+  facebookPublishMediaStore: FacebookPublishMediaStore | undefined;
+  firstPostOnboardingStore: FirstPostOnboardingStore | undefined;
+  getSoul: (accountId?: string) => Soul;
+  groupRouteStore: GroupRouteStore | undefined;
+  handlePublishDraftImageRemove: ReturnType<typeof createPublishDraftImageRemoveHandler>;
+  hotLeadConfigPanel: ReturnType<typeof createHotLeadConfigPanel>;
+  hotLeadConfigStore: HotLeadConfigStore;
+  imageProvider: RoutingImageProvider;
+  interactionCustomerApi: InteractionCustomerApi | undefined;
+  interactionFeedStore: InteractionFeedStore | undefined;
+  interactionInternalApi: { handle: (req: import("http").IncomingMessage, res: import("http").ServerResponse<import("http").IncomingMessage>, actor: string) => Promise<boolean>; } | undefined;
+  interactionOffboarding: InteractionOffboardingService | undefined;
+  interactionPermissionOverview: ReturnType<typeof buildInteractionPermissionOverview>;
+  lastObservedNoteByAccount: Map<string, { noteId: string; title: string; body: string; mediaType: "image_text" | "video"; author?: string; sourceUrl?: string; topics: string[]; likeCount: number; collectCount: number; referenceImages: CuratedReferenceImageInput[]; publishedAtText?: string; publishedObservedAt?: number; }>;
+  likedNoteStore: LikedNoteStore | undefined;
+  listAccountAutomationCatalog: () => Promise<ContentScheduleCatalogRow[]>;
+  llm: QwenClient;
+  manualCommentAccounts: Set<string>;
+  messenger: FeishuMessenger;
+  mirrorVersionStore: MirrorVersionStore;
+  modelConfigStore: ModelConfigStore;
+  notificationContactStore: NotificationContactStore | undefined;
+  notifyPublishRejected: (requestId: string) => void;
+  onCommentTakeoverEnd: (accountId: string) => void;
+  onCommentTakeoverStart: (accountId: string) => void;
+  ossUploader: ObjectStore | undefined;
+  pacingConfigPanel: ReturnType<typeof createPacingConfigPanel>;
+  pacingConfigStore: PacingConfigStore;
+  panelUsers: ReturnType<typeof parsePanelUsers>;
+  personaAutoFill: PersonaAutoFillService | undefined;
+  personaAutoFillStore: PersonaAutoFillStore | undefined;
+  personaPanel: ReturnType<typeof createPersonaPanel>;
+  personaStore: PersonaStore;
+  planner: SimplePlanner;
+  port: number;
+  postProcessor: PostProcessor;
+  preflightApprovePublish: (requestId: string) => Promise<PublishApprovalPreflightResult>;
+  probeModel: (provider: string, model: string) => Promise<void>;
+  providerRuntime: Record<string, { baseUrl: string; apiKey: string; }>;
+  publishApprovalClient: ReturnType<typeof createPublishApprovalClient> | undefined;
+  publishApprovalStore: PublishApprovalStore | undefined;
+  publishDispatcher: PublishDispatcher;
+  publishLogStore: PublishLogStore;
+  publishOrchestrator: PublishOrchestrator;
+  publishPipelineLogStore: PublishPipelineLogStore;
+  quotaConfigPanel: ReturnType<typeof createQuotaConfigPanel>;
+  quotaConfigStore: QuotaConfigStore;
+  readApprovalDispatchProjection: (rows: Array<{ id: number; }>) => Promise<Map<number, ApprovalDispatchProjection>>;
+  readLiveContentVersion: (recordId: number) => Promise<number | null>;
+  readPublishApproval: (requestId: string) => Promise<{ approved: boolean; contentVersion: number; } | null>;
+  refreshPublishPreview: (recordId: number) => void;
+  resolveAccountChatId: (accountId: string | undefined) => Promise<string>;
+  resolveCardChatId: (originChatId: string | undefined | null, accountId: string | undefined) => Promise<string>;
+  resolveController: (accountId: string) => Promise<RiskController>;
+  resolveEffectiveCommentApprovalMode: (accountId: string, sourceMode: "review" | "auto_approve") => Promise<"review" | "auto_approve">;
+  resolvePersona: ReturnType<typeof createPersonaResolver>;
+  resolveReviewCardDelivery: (accountId: string) => Promise<{ send: boolean; reason: string; }>;
+  resumeConfigPanel: ReturnType<typeof createResumeConfigPanel>;
+  resumeConfigStore: ResumeConfigStore;
+  riskRegistry: RiskControllerRegistry;
+  roleConfigPanel: ReturnType<typeof createRoleConfigPanel>;
+  roleConfigStore: RoleConfigStore;
+  roleLlm: (roleId: string) => ChatLlmClient;
+  rolePromptProvider: ReturnType<typeof createRolePromptProvider>;
+  server: EdgeCloudServer;
+  sessionConfigStore: SessionConfigStore;
+  sessionLimitPanel: ReturnType<typeof createSessionLimitPanel>;
+  tokenUsageStore: TokenUsageStore;
+  triggerPublishDispatchOnApprove: (requestId: string) => void;
+  valuableCommentStore: ValuableCommentStore | undefined;
+  writeApprovalDecision: (requestId: string, approved: boolean, payload: PublishApprovalPayload, context: ApprovalDecisionContext) => Promise<{ written: boolean; alreadyDecided?: boolean; }>;
+}
+
 async function main(): Promise<void> {
+  const ctx = {} as CompositionContext;
+  await segAApiFoundation(ctx);
+  await segBContent(ctx);
+  await segCAutomation(ctx);
+  await segDApiServing(ctx);
+}
+
+async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   const port = Number(process.env.AIDCP_PORT ?? 8787);
   const debugPort = Number(process.env.AIDCP_DEBUG_PORT ?? 8788);
   const deploymentTarget = parseDeploymentTarget(readEnvString('AIDCP_DEPLOY_ENV'));
@@ -822,10 +954,10 @@ async function main(): Promise<void> {
     credentials: credentialStore,
     env: process.env,
   });
-  let scheduledPublishReconciler: ScheduledPublishReconciler | null = null;
+
   const flushTokenUsageOnExit = (sig: string): void => {
     console.log(`[aidcp-cloud] 收到 ${sig}，flush token 用量后退出`);
-    scheduledPublishReconciler?.stop();
+    ctx.scheduledPublishReconciler?.stop();
     void Promise.race([
       tokenUsageStore.close().catch(() => {}),
       new Promise((resolve) => setTimeout(resolve, 3000)),
@@ -1054,10 +1186,54 @@ async function main(): Promise<void> {
   } else {
     console.warn('[aidcp-cloud] DraftRefinementWorker 未启用：AIDCP_DEPLOY_ENV 缺失或非法');
   }
+  ctx.billingPriceRefresh = billingPriceRefresh;
+  ctx.botChatEventHandler = botChatEventHandler;
+  ctx.botChatStore = botChatStore;
+  ctx.cache = cache;
+  ctx.categoryConfigStore = categoryConfigStore;
+  ctx.clientUserStore = clientUserStore;
+  ctx.configMirrorPool = configMirrorPool;
+  ctx.contentScheduleStore = contentScheduleStore;
+  ctx.credentialStore = credentialStore;
+  ctx.dashscopeApiKey = dashscopeApiKey;
+  ctx.debugPort = debugPort;
+  ctx.deploymentTarget = deploymentTarget;
+  ctx.draftRefinementStore = draftRefinementStore;
+  ctx.facebookCommentAuditStore = facebookCommentAuditStore;
+  ctx.facebookCommentConfigStore = facebookCommentConfigStore;
+  ctx.facebookGroupJoinAuditStore = facebookGroupJoinAuditStore;
+  ctx.facebookGroupJoinAutomationStore = facebookGroupJoinAutomationStore;
+  ctx.facebookGroupMembershipStore = facebookGroupMembershipStore;
+  ctx.facebookGroupTargetStore = facebookGroupTargetStore;
+  ctx.hotLeadConfigStore = hotLeadConfigStore;
+  ctx.llm = llm;
+  ctx.mirrorVersionStore = mirrorVersionStore;
+  ctx.modelConfigStore = modelConfigStore;
+  ctx.ossUploader = ossUploader;
+  ctx.pacingConfigStore = pacingConfigStore;
+  ctx.planner = planner;
+  ctx.port = port;
+  ctx.providerRuntime = providerRuntime;
+  ctx.publishApprovalClient = publishApprovalClient;
+  ctx.publishApprovalStore = publishApprovalStore;
+  ctx.publishLogStore = publishLogStore;
+  ctx.publishPipelineLogStore = publishPipelineLogStore;
+  ctx.quotaConfigStore = quotaConfigStore;
+  ctx.readApprovalDispatchProjection = readApprovalDispatchProjection;
+  ctx.resumeConfigStore = resumeConfigStore;
+  ctx.roleConfigStore = roleConfigStore;
+  ctx.roleLlm = roleLlm;
+  ctx.sessionConfigStore = sessionConfigStore;
+  ctx.tokenUsageStore = tokenUsageStore;
+  ctx.writeApprovalDecision = writeApprovalDecision;
+}
+
+async function segBContent(ctx: CompositionContext): Promise<void> {
+  const { botChatStore, clientUserStore, configMirrorPool, dashscopeApiKey, deploymentTarget, llm, mirrorVersionStore, modelConfigStore, ossUploader, providerRuntime, publishLogStore, publishPipelineLogStore } = ctx;
   // 晚绑定：精选存储在发布调度器与首作状态存储之前构造，回调运行时两者已完成装配。
-  let publishScheduler: PublishScheduler | undefined;
+
   let firstPostCoordinator: FirstPostOnboardingCoordinator | undefined;
-  let uiSnapshot: UiSnapshotService | undefined;
+
 
   // 点赞笔记存储（liked_notes 表，发帖来源血缘）。init 失败留 undefined（血缘退化、不阻塞启动）。
   let likedNoteStore: LikedNoteStore | undefined;
@@ -1567,10 +1743,10 @@ async function main(): Promise<void> {
       store,
       countPendingForAccount: (accountId) => publishLogStore.countPendingForAccount(accountId),
       beginRewrite: (accountId, referenceNote, options) => {
-        if (!publishScheduler) throw new Error('publish_unready');
-        return publishScheduler.tryBeginRewrite(accountId, referenceNote, options);
+        if (!ctx.publishScheduler) throw new Error('publish_unready');
+        return ctx.publishScheduler.tryBeginRewrite(accountId, referenceNote, options);
       },
-      onStateChanged: (accountId) => uiSnapshot?.pushDailyUsage(accountId),
+      onStateChanged: (accountId) => ctx.uiSnapshot?.pushDailyUsage(accountId),
       logger: console,
     });
     console.log('[aidcp-cloud] FirstPostOnboardingStore 已就绪（首次人设 → 首条精选 → 参照创作）');
@@ -1595,14 +1771,52 @@ async function main(): Promise<void> {
   const personaPanel = createPersonaPanel({
     store: personaStore,
     onBound: (accountId) => {
-      runtimes?.startSessionForAccount(accountId);
+      ctx.runtimes?.startSessionForAccount(accountId);
     },
     // 绑定 / 解绑都即时把新的绑定态推给在线边缘（uiSnapshot 同为后向声明，闭包只在请求期才调用）。
     onChanged: (accountId) => {
-      uiSnapshot?.pushPersonaBound(accountId);
+      ctx.uiSnapshot?.pushPersonaBound(accountId);
     },
   });
 
+  ctx.accountDisplayName = accountDisplayName;
+  ctx.accountDisplayNameCandidates = accountDisplayNameCandidates;
+  ctx.accountState = accountState;
+  ctx.accountStore = accountStore;
+  ctx.anyImageKeyPresent = anyImageKeyPresent;
+  ctx.approvalPolicyStore = approvalPolicyStore;
+  ctx.conceptStore = conceptStore;
+  ctx.curatedContentStore = curatedContentStore;
+  ctx.delegatedTaskService = delegatedTaskService;
+  ctx.delegatedTaskStore = delegatedTaskStore;
+  ctx.eventBus = eventBus;
+  ctx.facebookPublishMediaStore = facebookPublishMediaStore;
+  ctx.firstPostOnboardingStore = firstPostOnboardingStore;
+  ctx.getSoul = getSoul;
+  ctx.groupRouteStore = groupRouteStore;
+  ctx.imageProvider = imageProvider;
+  ctx.interactionFeedStore = interactionFeedStore;
+  ctx.lastObservedNoteByAccount = lastObservedNoteByAccount;
+  ctx.likedNoteStore = likedNoteStore;
+  ctx.manualCommentAccounts = manualCommentAccounts;
+  ctx.notificationContactStore = notificationContactStore;
+  ctx.onCommentTakeoverEnd = onCommentTakeoverEnd;
+  ctx.onCommentTakeoverStart = onCommentTakeoverStart;
+  ctx.personaAutoFillStore = personaAutoFillStore;
+  ctx.personaPanel = personaPanel;
+  ctx.personaStore = personaStore;
+  ctx.postProcessor = postProcessor;
+  ctx.publishOrchestrator = publishOrchestrator;
+  ctx.resolveAccountChatId = resolveAccountChatId;
+  ctx.resolveCardChatId = resolveCardChatId;
+  ctx.resolveEffectiveCommentApprovalMode = resolveEffectiveCommentApprovalMode;
+  ctx.resolvePersona = resolvePersona;
+  ctx.resolveReviewCardDelivery = resolveReviewCardDelivery;
+  ctx.valuableCommentStore = valuableCommentStore;
+}
+
+async function segCAutomation(ctx: CompositionContext): Promise<void> {
+  const { accountDisplayName, accountDisplayNameCandidates, accountState, accountStore, anyImageKeyPresent, botChatEventHandler, botChatStore, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, contentScheduleStore, credentialStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, interactionFeedStore, lastObservedNoteByAccount, likedNoteStore, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, notificationContactStore, onCommentTakeoverEnd, onCommentTakeoverStart, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, postProcessor, providerRuntime, publishApprovalClient, publishApprovalStore, publishLogStore, publishOrchestrator, quotaConfigStore, resolveAccountChatId, resolveCardChatId, resolveEffectiveCommentApprovalMode, resolvePersona, resolveReviewCardDelivery, resumeConfigStore, roleConfigStore, roleLlm, sessionConfigStore, tokenUsageStore, valuableCommentStore, writeApprovalDecision } = ctx;
   // RiskController 注册表（V1 task 9.1）：每账号一个 controller、单写 PER ACCOUNT、共享 PgRiskStore。
   // 现役路径用其 default controller（单一来源，避免双 controller 写同一 risk_state）；PG 不可用则现役回退内存态。
   // PgRiskStore 单例：既喂 registry（按账号风控单写），又作 InteractionStore 接线孤儿
@@ -1930,7 +2144,7 @@ async function main(): Promise<void> {
   let replyConfigResolver: ReplyConfigResolver | undefined;
   let replyWorkflow: ReplyWorkflow | undefined;
   let interactionInbox: InteractionInboxService | undefined;
-  let interactionSender: InteractionSendOrchestrator | undefined;
+
   let interactionOffboarding: InteractionOffboardingService | undefined;
   const interactionAiTimeoutMs = Math.max(1_000, readEnvNumber('AIDCP_INTERACTION_AI_TIMEOUT_MS', 20_000));
   try {
@@ -1953,7 +2167,7 @@ async function main(): Promise<void> {
         contactInfoFor: (accountId: string) => accountStore!.getContactInfo!(accountId),
       } : {}),
       canAutoQueue: async (context, snapshot, preview) =>
-        interactionSender?.canAutoQueueDraft(context, snapshot, preview) ?? false,
+        ctx.interactionSender?.canAutoQueueDraft(context, snapshot, preview) ?? false,
     });
     interactionInbox = new InteractionInboxService({
       store: interactionStore,
@@ -1967,8 +2181,8 @@ async function main(): Promise<void> {
       } : {}),
       logger: console,
       dispatchAuto: (input) => {
-        if (!interactionSender) throw new Error('interaction_sender_unavailable');
-        return interactionSender.dispatchQueued(input);
+        if (!ctx.interactionSender) throw new Error('interaction_sender_unavailable');
+        return ctx.interactionSender.dispatchQueued(input);
       },
     });
     const recovery = await interactionStore.recoverableAttemptIds();
@@ -2430,12 +2644,12 @@ async function main(): Promise<void> {
     // 回执据**真实编排终态**判 ok/level：成功（已生成进人审）=绿、未触发/未产出=黄、失败/不可用=红，并把失败原因带进正文。
     // 红线：「触发动作成功」≠「发帖成功」——绝不把 failed/skipped 染成绿色 ✅ 误导人以为已发。
     publish: async (nickname?: string, options?: { sourceChatId?: string }) => {
-      if (!publishScheduler) {
+      if (!ctx.publishScheduler) {
         return { ok: false, level: 'error', title: '发帖未触发', message: '发帖触发器未就绪（PG / 概念池不可用），未发起任何编排。' };
       }
       const acct = await resolveAccountByNickname(nickname); // 找不到/重名 → 抛错，runPublish 走 fail 分支（红 ❌）
       const note = `（账号昵称 \`${nickname ?? '(唯一账号)'}\`；人工授权越过风控，但发布前仍需飞书人审 approved=true 才会真发）`;
-      const o = await publishScheduler.triggerManual(acct, { manualApprovalChatId: options?.sourceChatId });
+      const o = await ctx.publishScheduler.triggerManual(acct, { manualApprovalChatId: options?.sourceChatId });
       // 触发动作本身被拒（解析不出唯一账号等）：没成功但非崩 → 黄色 ⚠️。
       if (o.result !== 'triggered') {
         return { ok: false, level: 'warning', title: '发帖未触发', message: `账号 \`${acct}\` 未触发：${o.reason}` };
@@ -2493,8 +2707,8 @@ async function main(): Promise<void> {
       const changed = dispatchActive !== want;
       if (changed) {
         dispatchActive = want; // 先置标志，使 startAll 的启动闸看到 active
-        if (want) runtimes?.startAll();
-        else runtimes?.endAll('panel_dispatch_stop');
+        if (want) ctx.runtimes?.startAll();
+        else ctx.runtimes?.endAll('panel_dispatch_stop');
       }
       return {
         accountId,
@@ -2519,7 +2733,7 @@ async function main(): Promise<void> {
     logger: console,
   });
   // A 阶段1 发布指令编排器 / 验证码协助均经 edgeServer 推送（server 在下方构造，闭包运行时已就绪）。
-  let edgeServer: EdgeCloudServer | undefined;
+
   let edgeTaskLeases!: EdgeTaskLeaseClient;
   const captchaAssist = new CaptchaAssistService({
     enabled: readEnvString('AIDCP_CAPTCHA_ASSIST_ENABLED') === 'true',
@@ -2536,9 +2750,9 @@ async function main(): Promise<void> {
       maxFrames: readEnvPort('AIDCP_CAPTCHA_ASSIST_LIVE_MAX_FRAMES'),
     },
     pusher: {
-      pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0),
+      pushToEdges: (env, edgeId) => (ctx.edgeServer ? ctx.edgeServer.pushToEdges(env as Envelope, edgeId) : 0),
       // 键入能力 fail-closed 闸（change captcha-assist-text-answer，design D8）：live 查当前连接声明的能力位。
-      edgeCapabilities: (edgeId) => (edgeServer ? edgeServer.edgeCapabilities(edgeId) : undefined),
+      edgeCapabilities: (edgeId) => (ctx.edgeServer ? ctx.edgeServer.edgeCapabilities(edgeId) : undefined),
     },
     taskLeases: {
       acquire: (request) => edgeTaskLeases.acquire(request),
@@ -2583,13 +2797,13 @@ async function main(): Promise<void> {
   );
   warnIfFillBudgetUnusable(fillBudget, warnBudget);
   const commandSequencer = new CommandSequencer({
-    pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
+    pusher: { pushToEdges: (env, edgeId) => (ctx.edgeServer ? ctx.edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
     fillBudget,
     resultSlackMs: readEnvNumber('AIDCP_PUBLISH_RESULT_SLACK_MS', 8_000),
     logger: console,
   });
   edgeTaskLeases = new EdgeTaskLeaseClient({
-    pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env, edgeId) : 0) },
+    pusher: { pushToEdges: (env, edgeId) => (ctx.edgeServer ? ctx.edgeServer.pushToEdges(env, edgeId) : 0) },
     // 受理超时必须容得下边缘为停泊账号原地重开浏览器（死线 180s）。生效值只认 EdgeTaskLeaseClient 的
     // 类默认（200s），这里**绝不**再写一个硬编码回落值——上一次就是因为抬了类默认却没改这行，45s 把
     // 200s 永远盖住，那次修复一行都没生效。
@@ -2639,7 +2853,7 @@ async function main(): Promise<void> {
 
   // ── 多租户连接运行时（multi-account-node-support）：每连接私有 EventBus + RoleDispatcher ──────────
   // 前向声明：handler / server 经闭包引用 runtimes（runtimes 在下方装配后才被调用，运行时安全）。
-  let runtimes: ConnectionRuntimeRegistry | undefined;
+
   // 调度启停态（面板 /dispatch 全局开关）：false 时新 / 现有连接不启动浏览会话。
   let dispatchActive = true;
   // 建号自助人设生成器（change edge-persona-keyword-generation）：复用共享 llm（按角色 browse:persona_generator
@@ -2649,9 +2863,9 @@ async function main(): Promise<void> {
     ? {
         armFirstBind: async (accountId: string) => {
           // 只有精选入口与既有参照创作调度器都就绪，才向客户端承诺这条自动首作链。
-          if (!curatedContentStore || !publishScheduler) return false;
+          if (!curatedContentStore || !ctx.publishScheduler) return false;
           const created = await firstPostOnboardingStore!.armFirstBind(accountId);
-          if (created) void uiSnapshot?.pushDailyUsage(accountId);
+          if (created) void ctx.uiSnapshot?.pushDailyUsage(accountId);
           return created;
         },
       }
@@ -2727,9 +2941,9 @@ async function main(): Promise<void> {
     publishApprovalAction: (payload, session) => handlePublishApprovalAction(payload, session),
     publishDraftImageRemove: (payload, session) => handlePublishDraftImageRemove(payload, session),
     // 多租户路由：私有总线（入站事件灌本连接通道）/ 握手建运行时 / 按连接真实账号解析 controller。
-    busFor: (session) => runtimes!.busFor(session),
-    onHandshake: (session) => runtimes!.onHandshake(session),
-    resolveController: (session) => runtimes?.controllerForSession(session),
+    busFor: (session) => ctx.runtimes!.busFor(session),
+    onHandshake: (session) => ctx.runtimes!.onHandshake(session),
+    resolveController: (session) => ctx.runtimes?.controllerForSession(session),
     // 记账漏斗（change risk-state-cross-process-integrity）：回执处理**先落 outbox 再 emit**。
     // 未启用时字段省略 ⇒ handler 保持改动前行为（直接 emit，记账由订阅者承担）。
     ...(riskAccounting
@@ -2779,14 +2993,14 @@ async function main(): Promise<void> {
         // 边缘一死若还傻等满预算，该账号后面所有已审稿件都被堵在串行队列里。
         commandSequencer.invalidateEdge(session.edgeId);
       }
-      runtimes?.onDisconnect(session);
+      ctx.runtimes?.onDisconnect(session);
     },
     // 握手注册完成（连接已可被推送、welcome 已回）→ 回填该账号的陪伴界面快照（昵称/最近发布/在途候审）。
     onEdgeRegistered: (session) => {
       // welcome 是传输提交点：只有走到这里的新连接才可顶替同 edgeId 旧连接并激活浏览业务。
       // 视频号由注册表保持 transport-only；无人设 XHS/FB 由启动闸保持在线但不启动会话。
-      runtimes?.onWelcomed(session);
-      void uiSnapshot?.pushHelloSnapshot(session.accountId, session.edgeId, session.capabilities).catch((err) => {
+      ctx.runtimes?.onWelcomed(session);
+      void ctx.uiSnapshot?.pushHelloSnapshot(session.accountId, session.edgeId, session.capabilities).catch((err) => {
         console.warn(
           `[ui-snapshot] hello 快照回填失败（连接保持在线） account=${session.accountId ?? '-'} edge=${session.edgeId ?? '-'}: ${err instanceof Error ? err.message : String(err)}`,
         );
@@ -2800,7 +3014,7 @@ async function main(): Promise<void> {
           if (pendingOffboards.length > 0) {
             await interactionOffboarding?.dispatchPending(session.accountId!, session.edgeId!);
           } else if (capabilities.has(INTERACTION_REPLY_RECOVERY_CAPABILITY)) {
-            await interactionSender?.reconcileRecoverable(session.accountId!, session.edgeId!);
+            await ctx.interactionSender?.reconcileRecoverable(session.accountId!, session.edgeId!);
           }
         })().catch((error) => console.warn(
           `[interaction] Edge 恢复编排失败 account=${session.accountId}: ${error instanceof Error ? error.message : String(error)}`,
@@ -2829,8 +3043,8 @@ async function main(): Promise<void> {
       }
     },
   });
-  edgeServer = server;
-  interactionSender = interactionStore && replyConfigResolver
+  ctx.edgeServer = server;
+  ctx.interactionSender = interactionStore && replyConfigResolver
     ? new InteractionSendOrchestrator({
       store: interactionStore,
       configs: replyConfigResolver,
@@ -2890,22 +3104,22 @@ async function main(): Promise<void> {
     : undefined;
   const clientCursorSecret = readEnvString('AIDCP_CLIENT_JWT_SECRET');
   const testDataResetEnabled = interactionTestDataResetEnabled(process.env);
-  const interactionCustomerApi = interactionStore && replyConfigResolver && replyWorkflow && interactionSender && clientCursorSecret
+  const interactionCustomerApi = interactionStore && replyConfigResolver && replyWorkflow && ctx.interactionSender && clientCursorSecret
     ? new InteractionCustomerApi({
       users: clientUserStore,
       store: interactionStore,
       configs: replyConfigResolver,
       workflow: replyWorkflow,
-      sender: interactionSender,
+      sender: ctx.interactionSender,
       onRuntimeControlsUpdated: deliverInteractionRuntimeControls,
       testDataResetEnabled,
       cursorSecret: clientCursorSecret,
     })
     : undefined;
-  if (interactionStore && replyWorkflow && interactionSender) {
+  if (interactionStore && replyWorkflow && ctx.interactionSender) {
     let recoveryRunning = false;
     const drainInteractionRecovery = async (): Promise<void> => {
-      if (recoveryRunning || !interactionStore || !replyWorkflow || !interactionSender) return;
+      if (recoveryRunning || !interactionStore || !replyWorkflow || !ctx.interactionSender) return;
       recoveryRunning = true;
       try {
         const resetClassifying = await interactionStore.recoverStalledClassifyingJobs(
@@ -2920,7 +3134,7 @@ async function main(): Promise<void> {
               expectedVersion: ref.version, actor: 'system',
             });
             if (job.state === 'queued') {
-              await interactionSender.dispatchQueued({ accountId: ref.accountId, envKey: ref.envKey,
+              await ctx.interactionSender.dispatchQueued({ accountId: ref.accountId, envKey: ref.envKey,
                 jobId: ref.jobId, expectedVersion: job.version });
             }
           } catch {
@@ -2930,7 +3144,7 @@ async function main(): Promise<void> {
         const queued = await interactionStore.pendingQueuedJobs();
         for (const ref of queued) {
           try {
-            await interactionSender.dispatchQueued({ accountId: ref.accountId, envKey: ref.envKey,
+            await ctx.interactionSender.dispatchQueued({ accountId: ref.accountId, envKey: ref.envKey,
               jobId: ref.jobId, expectedVersion: ref.version });
           } catch {
             interactionMetrics.increment('interaction_recovery_total', { stage: 'dispatch', status: 'deferred' });
@@ -3000,7 +3214,7 @@ async function main(): Promise<void> {
     // 加群指标一个不加（change platform-honest-usage-metrics）。
     // 刻意不用 getPlatform()：那条缺值回落小红书（把「不知道」说成「是小红书」），且是 await PG。
     const accountPlatform = accountStore?.platformFor?.(accountId);
-    const sessionUsage = runtimes?.sessionUsageForAccount(accountId, edgeId) ?? null;
+    const sessionUsage = ctx.runtimes?.sessionUsageForAccount(accountId, edgeId) ?? null;
     const sessionStartedAt = sessionUsage?.active === true
       && typeof sessionUsage.startedAt === 'number'
       && Number.isFinite(sessionUsage.startedAt)
@@ -3154,7 +3368,7 @@ async function main(): Promise<void> {
     // 续场闸裁决（change standby-covers-idle-waits）：把「排期外 / 周历关闭 / 每日时长满 / 冻结」这几类停工也接进
     // 待机判定——过去它们完全不产出提示，账号安静下来了、浏览器却一直开着占 700MB。
     // 拿不到（边缘离线 / 无 dispatcher）→ null → 退化为只按风控判，即本 change 之前的行为（安全方向：不让位）。
-    const resumeGate = runtimes?.resumeGateForAccount(accountId, edgeId) ?? null;
+    const resumeGate = ctx.runtimes?.resumeGateForAccount(accountId, edgeId) ?? null;
     // 「解除阻塞需要浏览器」一票否决（change standby-captcha-must-not-yield）：边缘正卡在验证码上时绝不让位。
     // 验证码会把账号打成 restricted，而 restricted 是让位触发器之一——不接这道闸，就会去关掉运维正要解验证码的
     // 那个浏览器。这里用云端权威的暂停集合（检测到验证码即置位、解除才清），不依赖边缘自报的浮层标志（那个会被
@@ -3169,7 +3383,7 @@ async function main(): Promise<void> {
     });
   };
 
-  uiSnapshot = new UiSnapshotService({
+  ctx.uiSnapshot = new UiSnapshotService({
     pusher: { pushToEdges: (env, edgeId) => server.pushToEdges(env, edgeId) },
     resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
     edgeCapabilities: (edgeId) => server.edgeCapabilities(edgeId),
@@ -3188,7 +3402,7 @@ async function main(): Promise<void> {
     browserStandbyForAccount: buildBrowserStandbyForAccount,
     logger: console,
   });
-  const uiSnapshotService = uiSnapshot;
+  const uiSnapshotService = ctx.uiSnapshot;
 
   function toUiPublishPreview(preview: Awaited<ReturnType<PublishLogStore['pendingPublishPreviewForAccount']>>) {
     if (!preview) return null;
@@ -3219,7 +3433,7 @@ async function main(): Promise<void> {
     resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
     executionTarget: deploymentTarget,
     // 7.3：该 edge 是否处于验证码硬暂停（发布命令不在下发豁免名单 → 暂停期投递必为 0）。暂停即零副作用回待审、不烧稿。
-    isEdgePaused: (edgeId) => (edgeServer ? edgeServer.isEdgePaused(edgeId) : false),
+    isEdgePaused: (edgeId) => (ctx.edgeServer ? ctx.edgeServer.isEdgePaused(edgeId) : false),
     readApproval: readPublishApproval,
     voidApprovalSignal,
     // 授权下发进度（change publish-approval-signal-to-database）：让「已批准·待下发」成为持久可见状态，
@@ -3300,18 +3514,18 @@ async function main(): Promise<void> {
     breakerThreshold: Number(process.env.AIDCP_PUBLISH_BREAKER_THRESHOLD ?? 2),
     logger: console,
   });
-  scheduledPublishReconciler = new ScheduledPublishReconciler({
+  ctx.scheduledPublishReconciler = new ScheduledPublishReconciler({
     store: publishLogStore,
     sequencer: commandSequencer,
     edgeTaskLeases,
     resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
-    isEdgePaused: (edgeId) => (edgeServer ? edgeServer.isEdgePaused(edgeId) : false),
+    isEdgePaused: (edgeId) => (ctx.edgeServer ? ctx.edgeServer.isEdgePaused(edgeId) : false),
     recordPublish,
     intervalMs: readEnvNumber('AIDCP_SCHEDULED_RECONCILE_SCAN_MS', 60_000),
     maxAttempts: readEnvNumber('AIDCP_SCHEDULED_RECONCILE_MAX_ATTEMPTS', 8),
     logger: console,
   });
-  scheduledPublishReconciler.start();
+  ctx.scheduledPublishReconciler.start();
   // 审批授权 → 触发下发（仅 publish-<n> 走此路；评论审批 comment-<…> 不触发发帖下发）。
   // humanApproval：人工批准入口（含 already-decided 重复批准）——熔断中即视为人工确认清除并恢复 drain。
   const triggerPublishDispatchOnApprove = (requestId: string): void => {
@@ -3907,7 +4121,7 @@ async function main(): Promise<void> {
     });
   };
 
-  runtimes = new ConnectionRuntimeRegistry({
+  ctx.runtimes = new ConnectionRuntimeRegistry({
     observerBus: eventBus,
     // 握手解析该连接账号的 controller：此时归属闸已在前面放行，故取可写口。
     getController: (accountId) => riskRegistry.getWritableController(accountId),
@@ -4246,8 +4460,8 @@ async function main(): Promise<void> {
     // 晚绑定：ContentScheduler 在下面才建（它依赖 commentScheduler），这里只能持一个引用。
     onScheduledTaskNotStarted: (accountId, action, reason) =>
       contentSchedulerRef?.reportNotStarted(accountId, action, reason),
-    resolveConnection: (accountId) => runtimes?.runtimeForAccount(accountId) ?? null,
-    pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
+    resolveConnection: (accountId) => ctx.runtimes?.runtimeForAccount(accountId) ?? null,
+    pusher: { pushToEdges: (env, edgeId) => (ctx.edgeServer ? ctx.edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
     edgeTaskLeases,
     getSoul,
     // persona-driven-content-pipeline：/comment 触发前人设闸——未绑人设不接管边端、不启动评论任务（与浏览/发布同口径）。
@@ -4389,8 +4603,8 @@ async function main(): Promise<void> {
   });
 
   const facebookGroupJoinScheduler = new FacebookGroupJoinScheduler({
-    resolveConnection: (accountId) => runtimes?.runtimeForAccount(accountId) ?? null,
-    pusher: { pushToEdges: (env, edgeId) => (edgeServer ? edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
+    resolveConnection: (accountId) => ctx.runtimes?.runtimeForAccount(accountId) ?? null,
+    pusher: { pushToEdges: (env, edgeId) => (ctx.edgeServer ? ctx.edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
     edgeTaskLeases,
     targets: facebookGroupTargetStore,
     memberships: facebookGroupMembershipStore,
@@ -4398,9 +4612,9 @@ async function main(): Promise<void> {
     llmFor: (accountId) => ({ complete: (prompt, opts) => llm.complete(prompt, { ...opts, accountId }) }),
     canJoin: async (accountId) => (await resolveController(accountId)).canDo('join_group'),
     canUseSessionJoin: (accountId, edgeId) =>
-      (runtimes?.remainingSessionBudgetForAccount(accountId, 'join_group', edgeId) ?? 0) > 0,
+      (ctx.runtimes?.remainingSessionBudgetForAccount(accountId, 'join_group', edgeId) ?? 0) > 0,
     recordSessionJoin: (accountId, edgeId) =>
-      runtimes?.consumeSessionBudgetForAccount(accountId, 'join_group', edgeId) ?? false,
+      ctx.runtimes?.consumeSessionBudgetForAccount(accountId, 'join_group', edgeId) ?? false,
     isFacebookAccount: async (accountId) => (await accountStore?.getPlatform?.(accountId)) === 'facebook',
     pauseAccount: async (accountId, reason) => {
       await accountState.pause(accountId);
@@ -4417,7 +4631,7 @@ async function main(): Promise<void> {
   // A 阶段4 发帖触发器：复用已持久化的 ConceptStore/LikedNoteStore/PublishLogStore/RiskController 单例。
   // 缺概念池/点赞库（PG 不可用）则不建——manual /publish 回"未就绪"，不静默假发布。
   if (conceptStore && likedNoteStore) {
-    publishScheduler = new PublishScheduler({
+    ctx.publishScheduler = new PublishScheduler({
       conceptStore,
       likedStore: likedNoteStore,
       publishLog: publishLogStore,
@@ -4451,7 +4665,7 @@ async function main(): Promise<void> {
     // 调度器在合法执行目标上常驻；账号周历/动作开关默认关闭并承担产品授权。
     if (deploymentTarget) {
       const contentScheduler: ContentScheduler = new ContentScheduler({
-        onlineAccounts: () => runtimes?.onlineAccountIdentities() ?? [],
+        onlineAccounts: () => ctx.runtimes?.onlineAccountIdentities() ?? [],
         executionTarget: deploymentTarget,
         claimPostHourCell: (identity, hourCell) =>
           contentScheduleStore.claimAutoPostHourCell({
@@ -4470,7 +4684,7 @@ async function main(): Promise<void> {
         availablePublishMediaCount: (accountId) =>
           facebookPublishMediaStore ? facebookPublishMediaStore.availableCount(accountId) : Promise.resolve(0),
         // 忙判定收窄为账号粒度自主单飞：洗稿在途不让排期槽（全局帽在 claim 层另行兜底）。
-        isPublishBusy: (accountId) => publishScheduler?.isBusy(accountId) ?? false,
+        isPublishBusy: (accountId) => ctx.publishScheduler?.isBusy(accountId) ?? false,
         delegatedOwnershipBusy: (accountId, family) =>
           delegatedTaskStore?.hasActiveOwnership(accountId, family) ?? false,
         // 自动 ⊆ 活跃（用户拍板：浏览休眠格绝不自动发内容）：读浏览周历掩码，沿其 fail-open（未配=全天活跃=不限）。
@@ -4483,7 +4697,7 @@ async function main(): Promise<void> {
           let title = '排期发帖失败';
           let message = 'unknown';
           try {
-            const o = await publishScheduler!.triggerScheduled(accountId, approvalMode, scheduleExecution);
+            const o = await ctx.publishScheduler!.triggerScheduled(accountId, approvalMode, scheduleExecution);
             if (o.result === 'triggered') {
               const st = o.status;
               if (st === 'pending_approval' || st === 'published' || st === 'draft') {
@@ -4697,7 +4911,7 @@ async function main(): Promise<void> {
         // 空文件保持旧语义（解析唯一账号）。人设闸 + AC-PUB 人审闸照常生效，绝不旁路。
         const mockAccount = raw.trim() || undefined;
         console.log(`[aidcp-cloud] MOCK publish 触发命中 → triggerManual(${mockAccount ?? '(唯一账号)'})`);
-        publishScheduler!.triggerManual(mockAccount).catch((e) => console.warn('[aidcp-cloud] MOCK triggerManual err:', e));
+        ctx.publishScheduler!.triggerManual(mockAccount).catch((e) => console.warn('[aidcp-cloud] MOCK triggerManual err:', e));
       }, 3000);
       console.log('[aidcp-cloud] MOCK publish 触发已开启（touch /tmp/aidcp-mock-publish-trigger 触发一次；文件内容可写目标账号 id）');
     }
@@ -4706,7 +4920,7 @@ async function main(): Promise<void> {
   }
 
   // DelegatedTask execution is late-bound after both schedulers and PublishDispatcher are ready.
-  if (delegatedTaskStore && delegatedTaskService && commentScheduler && publishScheduler) {
+  if (delegatedTaskStore && delegatedTaskService && commentScheduler && ctx.publishScheduler) {
     const loadCandidate = async (recordId: number) => {
       const draft = await publishLogStore.loadForDispatch(recordId);
       if (!draft) return null;
@@ -4728,7 +4942,7 @@ async function main(): Promise<void> {
     };
     const delegatedExecutors = createDelegatedExecutorRouter({
       comments: commentScheduler,
-      publishes: publishScheduler,
+      publishes: ctx.publishScheduler,
       loadCandidate,
       approveCandidate: async (candidate, decidedBy) => {
         const draft = await publishLogStore.loadForDispatch(candidate.recordId);
@@ -4972,6 +5186,48 @@ async function main(): Promise<void> {
     getPersona: (accountId) => resolvePersona(accountId),
   });
 
+  ctx.accountPersonaService = accountPersonaService;
+  ctx.alertStore = alertStore;
+  ctx.approvePublishForClient = approvePublishForClient;
+  ctx.botChatsProvider = botChatsProvider;
+  ctx.buildModelConfigView = buildModelConfigView;
+  ctx.buildTodayUsageForAccount = buildTodayUsageForAccount;
+  ctx.captchaAssist = captchaAssist;
+  ctx.categoryConfigPanel = categoryConfigPanel;
+  ctx.commandFace = commandFace;
+  ctx.commentScheduler = commentScheduler;
+  ctx.configMirrorRefresher = configMirrorRefresher;
+  ctx.handlePublishDraftImageRemove = handlePublishDraftImageRemove;
+  ctx.hotLeadConfigPanel = hotLeadConfigPanel;
+  ctx.interactionCustomerApi = interactionCustomerApi;
+  ctx.interactionInternalApi = interactionInternalApi;
+  ctx.interactionOffboarding = interactionOffboarding;
+  ctx.interactionPermissionOverview = interactionPermissionOverview;
+  ctx.listAccountAutomationCatalog = listAccountAutomationCatalog;
+  ctx.messenger = messenger;
+  ctx.notifyPublishRejected = notifyPublishRejected;
+  ctx.pacingConfigPanel = pacingConfigPanel;
+  ctx.panelUsers = panelUsers;
+  ctx.personaAutoFill = personaAutoFill;
+  ctx.preflightApprovePublish = preflightApprovePublish;
+  ctx.probeModel = probeModel;
+  ctx.publishDispatcher = publishDispatcher;
+  ctx.quotaConfigPanel = quotaConfigPanel;
+  ctx.readLiveContentVersion = readLiveContentVersion;
+  ctx.readPublishApproval = readPublishApproval;
+  ctx.refreshPublishPreview = refreshPublishPreview;
+  ctx.resolveController = resolveController;
+  ctx.resumeConfigPanel = resumeConfigPanel;
+  ctx.riskRegistry = riskRegistry;
+  ctx.roleConfigPanel = roleConfigPanel;
+  ctx.rolePromptProvider = rolePromptProvider;
+  ctx.server = server;
+  ctx.sessionLimitPanel = sessionLimitPanel;
+  ctx.triggerPublishDispatchOnApprove = triggerPublishDispatchOnApprove;
+}
+
+async function segDApiServing(ctx: CompositionContext): Promise<void> {
+  const { accountDisplayName, accountPersonaService, accountStore, alertStore, approvalPolicyStore, approvePublishForClient, billingPriceRefresh, botChatStore, botChatsProvider, buildModelConfigView, buildTodayUsageForAccount, captchaAssist, categoryConfigPanel, clientUserStore, commandFace, commentScheduler, conceptStore, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, debugPort, delegatedTaskService, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigPanel, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, messenger, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigPanel, panelUsers, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, probeModel, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigPanel, readApprovalDispatchProjection, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resolveAccountChatId, resolveController, resumeConfigPanel, riskRegistry, roleConfigPanel, rolePromptProvider, server, sessionLimitPanel, tokenUsageStore, triggerPublishDispatchOnApprove, writeApprovalDecision } = ctx;
   // ── 面板 API 层（管理后台后端，进程内、独立端口、JWT）──────────────────────
   // 未设置 AIDCP_PANEL_PORT 则禁用（默认不开新端口）；启动失败非致命，绝不连累边-云闭环。
   const panelPort = readEnvPort('AIDCP_PANEL_PORT');
@@ -5235,7 +5491,7 @@ async function main(): Promise<void> {
           // 评论=人审卡+定向终态结果卡）。域内拒绝回 triggered=false+机器原因码，绝不染绿。
           curatedActions: {
             createPostFromNote: async (accountId, row, options) => {
-              if (!publishScheduler) return { triggered: false, reason: 'publish_unready' };
+              if (!ctx.publishScheduler) return { triggered: false, reason: 'publish_unready' };
               if (personaStore.getForAccount(accountId) === null) return { triggered: false, reason: 'needs_persona' };
               if (!(row.body ?? '').trim()) return { triggered: false, reason: 'empty_body' };
               const useReferenceImages = options?.useReferenceImages ?? row.referenceImages.length > 0;
@@ -5243,7 +5499,7 @@ async function main(): Promise<void> {
               //（duplicate_source / publish_capacity / publish_busy）都在 HTTP 回执同步可见、绝不落到只有飞书卡才知道；
               // 同账号跨参照稿并行放行。claim 成功即管线已发起，结果卡链挂 outcome。
               const dbPendingCount = await publishLogStore.countPendingForAccount(accountId).catch(() => 0);
-              const begin = publishScheduler.tryBeginRewrite(
+              const begin = ctx.publishScheduler.tryBeginRewrite(
                 accountId,
                 {
                   sourceId: row.sourceId,
@@ -5571,6 +5827,7 @@ async function main(): Promise<void> {
     console.log('[aidcp-cloud] 客户鉴权 API 已禁用（未设置 AIDCP_CLIENT_AUTH_PORT）');
   }
 }
+
 
 main().catch((err) => {
   console.error('[aidcp-cloud] 启动失败:', err);
