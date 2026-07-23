@@ -795,6 +795,11 @@
     "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
   },
   {
+    "path": "src/feishu/command-face.ts",
+    "layer": "api",
+    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
+  },
+  {
     "path": "src/feishu/commands.ts",
     "layer": "api",
     "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"

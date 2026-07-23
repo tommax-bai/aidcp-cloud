@@ -109,7 +109,7 @@ import {
   resolveCardTarget,
   writeApprovalSignal,
   matchAccountByNickname,
-  type CommandActions,
+  createCommandFace,
   type PublishApprovalPayload,
   type PublishApprovalPreflightResult,
 } from './feishu/index.js';
@@ -2299,33 +2299,26 @@ async function main(): Promise<void> {
     }
     throw new Error(`找不到昵称「${nickname}」的账号。可用昵称：${r.available.join('、') || '(无)'}`);
   };
-  const actions: CommandActions = {
-    status: async (accountId) => {
-      const acct = await requireCommandAccount(accountId);
-      const state = accountState.getStatus(acct);
-      // 三态：`unknown` = 暂停态副本已陈旧、云端此刻读不到。如实说「读不到」，
-      // MUST NOT 把它显示成 active——那正是「未知压成否」在运营界面上的样子。
-      const emoji = state.status === 'paused' ? '⏸️' : state.status === 'unknown' ? '❓' : '🟢';
-      const statusText =
-        state.status === 'paused'
-          ? 'paused'
-          : state.status === 'unknown'
-            ? '暂时读不到（云端配置副本陈旧，已停止下发新命令）'
-            : 'active';
-      const extra = state.pausedAt ? `\n暂停时间：${new Date(state.pausedAt).toLocaleString()}` : '';
-      return `账号 \`${acct}\` 当前状态：${statusText} ${emoji}${extra}`;
-    },
-    pause: async (accountId) => {
-      const acct = await requireCommandAccount(accountId);
-      await accountState.pause(acct);
-      console.log(`[feishu] 已暂停账号：${acct}`);
-    },
-    resume: async (accountId) => {
-      const acct = await requireCommandAccount(accountId);
-      await accountState.resume(acct);
-      // 验证码人工恢复快路：解除该账号名下被暂停的 edge（server 在下方初始化，命令运行时才触发，引用安全）。
-      const resumedEdges = server.resumeEdgesForAccount(acct);
-      console.log(`[feishu] 已恢复账号：${acct}（恢复 edge 数=${resumedEdges}）`);
+  // 命令作用域（change feishu-per-team-notification-routing）：账号影响类命令只在「管理群」受理，外部 / 非管理群一律诚实拒。
+  // 管理群 = 独立显式 env 白名单 FEISHU_MANAGEMENT_CHAT_IDS（逗号分隔）——**不由 /bind 授予、不复用 is_default**（防自助提权）。
+  // 未配置（env 空）→ 放行全部（零回归 / 滚动上线 ramp：先零变更部署，待就绪再显式设白名单收紧）。
+  const managementChatIds = new Set(
+    (readEnvString('FEISHU_MANAGEMENT_CHAT_IDS') ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+  // change consolidate-command-face（§4.6.7）：飞书 + 面板两条命令入口收敛到单一 api 侧命令面（受理 + 鉴权）。
+  // 账号级原子动作（status/pause/resume/恢复 edge）在命令面里定义一次、两条入口共用；复杂 / 依赖自动化运行时的
+  // 处理器（delegate/publish/comment/dispatch）由组合根在此以窄端口注入——server / *Scheduler / delegatedTaskService /
+  // runtimes / dispatchActive 在下方晚绑定，命令运行时才触发，闭包引用安全。
+  const commandFace = createCommandFace({
+    account: {
+      requireCommandAccount,
+      getStatus: (accountId) => accountState.getStatus(accountId),
+      pause: (accountId) => accountState.pause(accountId),
+      resume: (accountId) => accountState.resume(accountId),
+      resumeEdgesForAccount: (accountId) => server.resumeEdgesForAccount(accountId),
     },
     bindChat: (record) => botChatStore.setDefault(record),
     delegate: async (text, context) => {
@@ -2443,24 +2436,28 @@ async function main(): Promise<void> {
         fastReturnToFeed: options?.fastReturnToFeed === true,
       });
     },
-  };
-  // 命令作用域（change feishu-per-team-notification-routing）：账号影响类命令只在「管理群」受理，外部 / 非管理群一律诚实拒。
-  // 管理群 = 独立显式 env 白名单 FEISHU_MANAGEMENT_CHAT_IDS（逗号分隔）——**不由 /bind 授予、不复用 is_default**（防自助提权）。
-  // 未配置（env 空）→ 放行全部（零回归 / 滚动上线 ramp：先零变更部署，待就绪再显式设白名单收紧）。
-  const managementChatIds = new Set(
-    (readEnvString('FEISHU_MANAGEMENT_CHAT_IDS') ?? '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean),
-  );
-  const commandScopingEnabled = managementChatIds.size > 0;
-  const isCommandChatAuthorized = (chatId?: string): boolean =>
-    !commandScopingEnabled || (!!chatId && managementChatIds.has(chatId));
-  console.log(
-    commandScopingEnabled
-      ? `[aidcp-cloud] 飞书命令作用域已启用：仅 ${managementChatIds.size} 个管理群可下达账号命令（外部群纯通知投递）`
-      : '[aidcp-cloud] 飞书命令作用域未启用（FEISHU_MANAGEMENT_CHAT_IDS 为空）→ 放行全部命令（零回归）',
-  );
+    // 调度启停全局开关（面板 /dispatch）：切所有连接运行时的会话（start 经诚实人设闸 / stop 全停）；回报真实在线 edge 数，绝不乐观。
+    // accountId 信息性（当前为全局开关）；no-op（已 active/已 stop）以 changed=false 诚实可辨。
+    dispatch: async (accountId, action) => {
+      const want = action === 'start';
+      const changed = dispatchActive !== want;
+      if (changed) {
+        dispatchActive = want; // 先置标志，使 startAll 的启动闸看到 active
+        if (want) runtimes?.startAll();
+        else runtimes?.endAll('panel_dispatch_stop');
+      }
+      return {
+        accountId,
+        dispatch: want ? ('started' as const) : ('stopped' as const),
+        changed,
+        edgesOnline: server.onlineEdgeCount(),
+      };
+    },
+    dispatchActive: () => dispatchActive,
+    managementChatIds,
+  });
+  const actions = commandFace.actions;
+  const isCommandChatAuthorized = commandFace.isCommandChatAuthorized;
   const commandRouter = new CommandRouter(actions, undefined, undefined, isCommandChatAuthorized);
   const messenger = new FeishuMessenger();
   // 机器人所在群 provider（change feishu-bot-chat-name-display）：实时取飞书真实群名 + 标默认群 + 降级来源。
@@ -4997,35 +4994,9 @@ async function main(): Promise<void> {
             hasDecision: async (recordId) => (await readPublishApproval(`publish-${recordId}`)) !== null,
           },
           notifyPublishPreviewChanged: (recordId) => refreshPublishPreview(recordId),
-          commandActions: {
-            pause: async (accountId) => {
-              await accountState.pause(accountId);
-              return { accountId, status: 'paused' as const };
-            },
-            resume: async (accountId) => {
-              await accountState.resume(accountId);
-              const resumedEdges = server.resumeEdgesForAccount(accountId);
-              return { accountId, status: 'active' as const, resumedEdges };
-            },
-            // 调度启停全局开关：切所有连接运行时的会话（start 经诚实人设闸 / stop 全停）；回报真实在线 edge 数，绝不乐观。
-            // accountId 信息性（当前为全局开关）；no-op（已 active/已 stop）以 changed=false 诚实可辨。
-            dispatch: async (accountId, action) => {
-              const want = action === 'start';
-              const changed = dispatchActive !== want;
-              if (changed) {
-                dispatchActive = want; // 先置标志，使 startAll 的启动闸看到 active
-                if (want) runtimes?.startAll();
-                else runtimes?.endAll('panel_dispatch_stop');
-              }
-              return {
-                accountId,
-                dispatch: want ? ('started' as const) : ('stopped' as const),
-                changed,
-                edgesOnline: server.onlineEdgeCount(),
-              };
-            },
-            dispatchActive: () => dispatchActive,
-          },
+          // change consolidate-command-face（§4.6.7）：面板账号命令与飞书命令共用同一命令面，账号级
+          // pause/resume/恢复 edge 与调度启停不再在此内联第二份，收敛到上方 createCommandFace 一处。
+          commandActions: commandFace.panelCommandActions,
           // 账号属性写入（change editable-account-group-label + account-group-chat-injection → generalize-contact-info）：经账号存储单写；
           // 存储未就绪 → 不注入，路由回 503。setContactInfo 可选（存储方法存在时才挂，否则该子路由单独 503）。
           accountAttr: accountStore?.setGroupLabel

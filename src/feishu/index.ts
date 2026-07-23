@@ -10,6 +10,7 @@ export * from './chat-target.js';
 export * from './bot-chats-provider.js';
 export * from './cards.js';
 export * from './commands.js';
+export * from './command-face.js';
 export * from './bot-chat-events.js';
 export * from './handler.js';
 export * from './ws-config.js';
