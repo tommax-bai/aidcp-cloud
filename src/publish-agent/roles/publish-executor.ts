@@ -20,7 +20,7 @@ import type {
 } from '../../comm/feishu-card-contract.js';
 import { clampTitle, firstSentence } from '../../kernel/title-clamp.js';
 import { publishProfileForPlatform } from '../platform-profile.js';
-import { checkWritingLanguage } from '../../soul/writing-language.js';
+import { checkWritingLanguage } from '../../kernel/writing-language.js';
 
 /**
  * PublishExecutor —— 生成候审段的出口角色（change decouple-publish-generation-from-dispatch）。

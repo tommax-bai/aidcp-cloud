@@ -2,7 +2,7 @@ import type { InteractionStore } from './interaction-store.js';
 import type { InteractionMetrics } from './metrics.js';
 import { riskActionForChannel, type InteractionRiskController } from './send-orchestrator.js';
 import type { ReplyWorkflow } from './reply-workflow.js';
-import { readJobConfig, type ReplyConfigReader } from './reply-config-resolver.js';
+import { readJobConfig, type ReplyConfigReader } from '../kernel/interaction-reply-contract.js';
 import type {
   InteractionChannel,
   InteractionAuthStatusPayload,

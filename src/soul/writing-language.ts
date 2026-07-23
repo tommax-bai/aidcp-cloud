@@ -1,61 +1,24 @@
+/**
+ * 写作语言取值与守卫（api 属主，§4.7 人设文档模型）。
+ *
+ * 纯函数/纯类型部分（语言标签、写作语言 prompt 指令、文本-语言启发式三态校验）已析出到
+ * `src/kernel/writing-language.ts`（change decouple-llm-lang-interaction-contracts），content /
+ * automation 直接依赖 kernel、不再跨边界直连本 api 文件。本文件保留 `isWritingLanguage` 守卫与其依赖的
+ * 模块级 `WRITING_LANGUAGE_SET`（`new Set(...)` 被门禁 §4.7 判为「进程内活状态」故不入 kernel），并对
+ * kernel 段等值再导出，既有导入方无感、行为逐字不变。
+ */
 import type { WritingLanguage } from '../kernel/soul-types.js';
 
 export const WRITING_LANGUAGE_VALUES = ['zh-CN', 'en', 'vi'] as const satisfies readonly WritingLanguage[];
 const WRITING_LANGUAGE_SET = new Set<string>(WRITING_LANGUAGE_VALUES);
 
-export type WritingLanguageCheck = 'match' | 'mismatch' | 'uncertain';
-
 export function isWritingLanguage(value: unknown): value is WritingLanguage {
   return typeof value === 'string' && WRITING_LANGUAGE_SET.has(value);
 }
 
-export function writingLanguageLabel(language: WritingLanguage): string {
-  switch (language) {
-    case 'zh-CN': return '简体中文';
-    case 'en': return '英文';
-    case 'vi': return '越南语';
-  }
-}
-
-/**
- * Public-text prompt contract. Source material may use any language, but the account
- * always writes in its configured language and must not translate at dispatch time.
- */
-export function writingLanguageInstruction(language: WritingLanguage): string {
-  const label = writingLanguageLabel(language);
-  return `最终公开正文必须只使用${label}自然表达；可以理解其它语言的来源内容，但不得跟随来源切换输出语言，也不得先用其它语言成稿后再翻译。`;
-}
-
-const HAN_RE = /\p{Script=Han}/gu;
-const LATIN_RE = /\p{Script=Latin}/gu;
-const VIETNAMESE_MARK_RE = /[ăâđêôơưĂÂĐÊÔƠƯàáảãạằắẳẵặầấẩẫậèéẻẽẹềếểễệìíỉĩịòóỏõọồốổỗộờớởỡợùúủũụừứửữựỳýỷỹỵ]/gu;
-
-function countMatches(text: string, re: RegExp): number {
-  return text.match(re)?.length ?? 0;
-}
-
-/**
- * Conservative, dependency-free pre-review guard. It only returns match when the
- * target script has positive evidence; short Latin-only Vietnamese intentionally
- * remains uncertain instead of being mislabeled English.
- */
-export function checkWritingLanguage(text: string, language: WritingLanguage): WritingLanguageCheck {
-  const normalized = text.normalize('NFC').trim();
-  if (!normalized) return 'mismatch';
-  const han = countMatches(normalized, HAN_RE);
-  const latin = countMatches(normalized, LATIN_RE);
-  const vietnameseMarks = countMatches(normalized, VIETNAMESE_MARK_RE);
-
-  if (language === 'zh-CN') {
-    if (han >= 2) return 'match';
-    if (han === 0 && latin >= 5) return 'mismatch';
-    return 'uncertain';
-  }
-  if (language === 'vi') {
-    if (han > 0) return 'mismatch';
-    if (vietnameseMarks > 0) return 'match';
-    return 'uncertain';
-  }
-  if (han > 0 || vietnameseMarks > 0) return 'mismatch';
-  return latin >= 5 ? 'match' : 'uncertain';
-}
+export {
+  checkWritingLanguage,
+  writingLanguageInstruction,
+  writingLanguageLabel,
+  type WritingLanguageCheck,
+} from '../kernel/writing-language.js';

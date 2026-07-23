@@ -990,9 +990,24 @@
     "note": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/cache/interaction-feed-store.ts 析出：FeedAction 纯类型联合，零 import、零 SQL、零活状态。存储实现留 interaction-feed-store.ts。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
   },
   {
+    "path": "src/kernel/interaction-reply-contract.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决·部分析出】change decouple-llm-lang-interaction-contracts 析出无模块级 Set 依赖的纯物：从 reply-config.ts（api，§4.6.1）析出 validateFinalReplyText（只读 profile 字段+内联正则，无 Set）；从 reply-config-resolver.ts（api）析出纯读取端口 ReplyConfigReader 与两个无状态读取函数 readPublishedConfig/readJobConfig（只对注入 reader 端口取数、不连库）。**reply-config.ts 其余校验/渲染函数依赖模块级 VARIABLE_SET/HARD_RISK_SET/INTENTS/… 等 const=new Set，被门禁 §4.7 判「进程内活状态」故不入 kernel、留原文件**（reply-auto-send / reply-workflow 引这些的边留 residual）。两 api 原文件保持属主并等值再导出；连库的 ReplyConfigResolver 类留 reply-config-resolver.ts（api）。零 SQL/HTTP/LLM/fetch/活状态。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
+  },
+  {
     "path": "src/kernel/interaction-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change lift-shared-contracts-to-kernel 抬入：原 src/interactions/types.ts（纯互动域类型/接口/枚举，零 import），被 automation/api 两层共 9 处跨边界 type-only 导入。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK1"
+  },
+  {
+    "path": "src/kernel/like-affinity.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change decouple-llm-lang-interaction-contracts 整文件 git mv：原 src/soul/like-affinity.ts（唯一 import 为 kernel/soul-types 的 LikeAffinity/Soul 类型，导出全为纯常量+纯函数 DEFAULT_LIKE_AFFINITY/LIKE_AFFINITY_VALUES/resolveLikeAffinity/likeAffinityLabel/noteLikeAffinityGuidance/commentLikeProbability/generatedLikePrinciple，无 SQL/fetch/class/进程内活状态）。被 automation(comment-like-appraiser/interaction-appraiser-role/persona-generator)与 api(account-persona-service)共用。satisfies §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
+  },
+  {
+    "path": "src/kernel/llm-contract.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change decouple-llm-lang-interaction-contracts 从 src/llm/qwen.ts 析出：LlmThinkingModeOpt + LlmCallOpts（Per-call 覆盖选项，纯接口，无供应商语义标识符）。供 automation 侧多角色 type-only 共导，消 4 条 automation->content 边。thinkingMode 字段内联为 'off'|'on'|'default' 字面量（结构与 role-catalog ThinkingMode|'default' 逐字一致），以保 kernel 不反向依赖 api 属主的 role-catalog。LlmClient/ChatLlmClient 因门禁 §4.7 把这两个标识符本身列为「LLM 或供应商 HTTP 调用」特征而**不入 kernel**、留 qwen.ts（那 3 条 LlmClient/ChatLlmClient 边留 residual）。QwenClient 类/错误类/buildXxx 等 behavior 留 qwen.ts。零 SQL/HTTP/fetch/活状态。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
   },
   {
     "path": "src/kernel/persona-binding.ts",
@@ -1038,6 +1053,11 @@
     "path": "src/kernel/visual-reference-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change bulk-lift-all-shared-types 整文件抬入：原 src/publish-agent/visual-reference-types.ts（纯视觉参考分析类型/枚举 + 3 个 as const 枚举常量，零 import、零 SQL、零活状态）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
+  },
+  {
+    "path": "src/kernel/writing-language.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决·改判·部分析出】change decouple-llm-lang-interaction-contracts 从 src/soul/writing-language.ts 析出无 Set 依赖的纯函数/纯类型：WritingLanguageCheck / writingLanguageLabel / writingLanguageInstruction / checkWritingLanguage（+私有 HAN_RE/LATIN_RE/VIETNAMESE_MARK_RE 正则字面量与 countMatches），唯一 import 为 kernel/soul-types 的 WritingLanguage 类型，无 SQL/fetch/class/模块级可变单例。被 content(publish-agent prompts/content-creator/publish-executor、facebook-comment-composer-prompt)与 automation(comment-composer/comment-de-ai-flavor)两域共用。原整文件在 kernel-non-members.rejected 以「业务判定」名义拒入；本刀独立核对：checkWritingLanguage 是对显式入参 (text, language) 的无状态文本启发式、非账号级推断/连库，改判其纯函数段可入 kernel。**但 isWritingLanguage + 模块级 WRITING_LANGUAGE_SET（new Set）+ WRITING_LANGUAGE_VALUES 留 src/soul/writing-language.ts（api）**：门禁 §4.7 把模块级 const=new Set 列为「进程内活状态」禁止入 kernel（故不是整文件 git mv，是部分析出；comm/handler 的 isWritingLanguage 边留 residual）。满足 §4.7 kernel 准入。请求控制仓回写 §4.7 kernel 段花名册并核 src/soul/ 行数配对 见 docpatch"
   },
   {
     "path": "src/kernel/yaml.ts",
@@ -1756,11 +1776,6 @@
   },
   {
     "path": "src/soul/index.ts",
-    "layer": "api",
-    "note": "§4.7：人设文档模型（7/7 api）"
-  },
-  {
-    "path": "src/soul/like-affinity.ts",
     "layer": "api",
     "note": "§4.7：人设文档模型（7/7 api）"
   },

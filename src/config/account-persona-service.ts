@@ -3,7 +3,7 @@ import type { PanelPersonaConfig } from '../panel/types.js';
 import type { PersonaBinding } from '../kernel/persona-binding.js';
 import { normalizePlatformId } from '../platform/index.js';
 import { loadSoulFromYaml } from '../soul/index.js';
-import { resolveLikeAffinity } from '../soul/like-affinity.js';
+import { resolveLikeAffinity } from '../kernel/like-affinity.js';
 import { isWritingLanguage } from '../soul/writing-language.js';
 import type { WritingLanguage } from '../kernel/soul-types.js';
 

@@ -21,7 +21,7 @@
 import type { BehaviorGuidelines, LikeAffinity, Soul, WritingLanguage } from '../kernel/soul-types.js';
 import type { YamlValue } from '../kernel/yaml.js';
 import { loadSoulFromValue, loadSoulFromYaml, serializeSoul } from '../soul/index.js';
-import { DEFAULT_LIKE_AFFINITY, generatedLikePrinciple, LIKE_AFFINITY_VALUES } from '../soul/like-affinity.js';
+import { DEFAULT_LIKE_AFFINITY, generatedLikePrinciple, LIKE_AFFINITY_VALUES } from '../kernel/like-affinity.js';
 import type { RoleName } from '../event-bus/types.js';
 import { type RoleLlmLike } from './comment-search-term-generator.js';
 

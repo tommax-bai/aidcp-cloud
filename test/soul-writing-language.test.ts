@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkWritingLanguage, writingLanguageInstruction } from '../src/soul/writing-language.js';
+import { checkWritingLanguage, writingLanguageInstruction } from '../src/kernel/writing-language.js';
 
 test('writing-language guard 对中文、英文、越南语给出保守三态结论', () => {
   assert.equal(checkWritingLanguage('这是一段自然的中文内容。', 'zh-CN'), 'match');

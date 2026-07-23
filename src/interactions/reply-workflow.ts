@@ -6,7 +6,7 @@ import {
   validateFinalReplyText,
   validateReplyConfig,
 } from './reply-config.js';
-import { readJobConfig, readPublishedConfig, type ReplyConfigReader } from './reply-config-resolver.js';
+import { readJobConfig, readPublishedConfig, type ReplyConfigReader } from '../kernel/interaction-reply-contract.js';
 import { automaticReplyContentEligible } from './reply-auto-send.js';
 import type { InteractionStore } from './interaction-store.js';
 import {

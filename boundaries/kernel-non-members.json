@@ -19,7 +19,11 @@
       "src/kernel/persona-binding.ts",
       "src/kernel/feed-action.ts",
       "src/kernel/pipeline-log-contract.ts",
-      "src/kernel/content-schedule-mode.ts"
+      "src/kernel/content-schedule-mode.ts",
+      "src/kernel/llm-contract.ts",
+      "src/kernel/writing-language.ts",
+      "src/kernel/like-affinity.ts",
+      "src/kernel/interaction-reply-contract.ts"
     ]
   },
   "rejected": [
@@ -46,10 +50,6 @@
     {
       "path": "src/risk/resume-limits.ts",
       "reason": "承载恢复预算的业务判定，同上。"
-    },
-    {
-      "path": "src/soul/writing-language.ts",
-      "reason": "承载写作语言的业务判定（账号级语言推断与兜底），违反「无业务判定」。"
     },
     {
       "path": "src/event-bus/index.ts",

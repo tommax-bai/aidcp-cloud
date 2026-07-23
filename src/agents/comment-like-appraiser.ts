@@ -22,7 +22,7 @@ import { tieredInterests } from '../kernel/persona-format.js';
 import type { CommentCandidate } from '../comm/protocol.js';
 import type { RoleName, ReadingScrollCommentsPayload } from '../event-bus/types.js';
 import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/index.js';
-import { commentLikeProbability, likeAffinityLabel, resolveLikeAffinity } from '../soul/like-affinity.js';
+import { commentLikeProbability, likeAffinityLabel, resolveLikeAffinity } from '../kernel/like-affinity.js';
 
 /** 点赞哲学兜底（soul 缺 behavior_guidelines 时）：选择性、只在真戳到时点。 */
 const LIKE_PRINCIPLE_FALLBACK = '只在真有共鸣 / 觉得有意思 / 学到东西时才点；平淡的、随手认同的不点';

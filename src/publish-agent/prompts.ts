@@ -22,7 +22,7 @@ import type {
 import { IMAGE_CATEGORIES } from './types.js';
 import { categorySafetyInstruction, formatContentVisualCategoryBrief } from './content-visual-brief.js';
 import type { Soul } from '../kernel/soul-types.js';
-import { writingLanguageInstruction } from '../soul/writing-language.js';
+import { writingLanguageInstruction } from '../kernel/writing-language.js';
 
 /**
  * 禁用词/句式列表（negative list）。

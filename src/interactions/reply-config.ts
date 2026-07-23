@@ -12,6 +12,10 @@ import {
   type TemplateVariable,
   type ValidationIssue,
 } from '../kernel/interaction-types.js';
+// 无 Set 依赖的纯校验函数 validateFinalReplyText 析出到 kernel（change decouple-llm-lang-interaction-contracts），
+// 供 automation 侧直接依赖 kernel；本文件内部渲染仍复用它，并对既有导入方等值再导出。
+import { validateFinalReplyText } from '../kernel/interaction-reply-contract.js';
+export { validateFinalReplyText } from '../kernel/interaction-reply-contract.js';
 
 const VARIABLE_SET = new Set<string>(TEMPLATE_VARIABLES);
 const HARD_RISK_SET = new Set<RiskTag>(HARD_RISK_TAGS);
@@ -153,28 +157,6 @@ export interface RuleMatchInput {
   intent: ReplyIntent;
   sourceExternalId: string | null;
   now?: number;
-}
-
-export function validateFinalReplyText(profile: ReplyProfile, text: string): ValidationIssue[] {
-  const issues: ValidationIssue[] = [];
-  if (!text.trim()) issues.push({ path: 'finalText', code: 'empty', message: '回复内容不能为空。' });
-  if (text.length > profile.maxLength) issues.push({ path: 'finalText', code: 'too_long', message: '回复内容超过账号长度限制。' });
-  if (!profile.allowLinks && /https?:\/\/|www\./i.test(text)) {
-    issues.push({ path: 'finalText', code: 'link_forbidden', message: '账号 profile 禁止链接。' });
-  }
-  if (!profile.allowEmoji && /\p{Extended_Pictographic}/u.test(text)) {
-    issues.push({ path: 'finalText', code: 'emoji_forbidden', message: '账号 profile 禁止表情符号。' });
-  }
-  if (profile.blockedPhrases.some((phrase) => phrase && text.includes(phrase))) {
-    issues.push({ path: 'finalText', code: 'blocked_phrase', message: '回复命中账号禁用短语。' });
-  }
-  if (profile.disallowedClaims.some((claim) => claim && text.includes(claim))) {
-    issues.push({ path: 'finalText', code: 'disallowed_claim', message: '回复命中账号禁止声明。' });
-  }
-  if (profile.requiredDisclaimer?.trim() && !text.includes(profile.requiredDisclaimer.trim())) {
-    issues.push({ path: 'finalText', code: 'required_disclaimer_missing', message: '回复缺少账号必需免责声明。' });
-  }
-  return issues;
 }
 
 /**

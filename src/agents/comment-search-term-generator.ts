@@ -17,7 +17,7 @@
  */
 
 import type { Soul } from '../kernel/soul-types.js';
-import type { LlmCallOpts } from '../llm/qwen.js';
+import type { LlmCallOpts } from '../kernel/llm-contract.js';
 import type { RoleName } from '../event-bus/types.js';
 import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/index.js';
 

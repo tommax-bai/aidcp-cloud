@@ -1,4 +1,4 @@
-import type { LikeAffinity, Soul } from '../kernel/soul-types.js';
+import type { LikeAffinity, Soul } from './soul-types.js';
 
 export const DEFAULT_LIKE_AFFINITY: LikeAffinity = 'normal';
 

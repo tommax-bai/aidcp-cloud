@@ -1,4 +1,4 @@
-import type { LlmCallOpts } from '../llm/qwen.js';
+import type { LlmCallOpts } from '../kernel/llm-contract.js';
 import type { RoleName } from '../event-bus/types.js';
 import type { FacebookGroupJoinAuditRow } from '../comment-agent/facebook-group-store.js';
 

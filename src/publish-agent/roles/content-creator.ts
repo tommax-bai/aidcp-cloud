@@ -6,7 +6,7 @@ import { buildCreatorPrompt } from '../prompts.js';
 import { escapeControlCharsInJsonStrings } from '../json-repair.js';
 import { executeWithRetry } from '../retry-strategy.js';
 import type { ChatLlmClient } from '../../llm/qwen.js';
-import { checkWritingLanguage } from '../../soul/writing-language.js';
+import { checkWritingLanguage } from '../../kernel/writing-language.js';
 
 // 内容生成超时（角色闸 + LLM 调用同值）：放宽到 120s，容纳较强/较慢模型（如 qwen-max 系）。env 可调。
 const CONTENT_TIMEOUT_MS = Number(process.env.AIDCP_PUBLISH_CONTENT_TIMEOUT_MS ?? 180_000);

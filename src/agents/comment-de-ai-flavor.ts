@@ -12,7 +12,7 @@ import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { RoleName, CommentComposedPayload } from '../event-bus/types.js';
 import { PostProcessor } from '../publish-agent/post-processor.js';
-import { checkWritingLanguage, writingLanguageInstruction } from '../soul/writing-language.js';
+import { checkWritingLanguage, writingLanguageInstruction } from '../kernel/writing-language.js';
 
 /**
  * 评论体裁专用 AI 味信号集（change humanize-interaction-prompts）：发帖侧词表是长文议论文连接词，

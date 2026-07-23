@@ -35,7 +35,7 @@ import {
   type NoteScopedAction,
   type Surface,
 } from '../platform/index.js';
-import type { LlmCallOpts } from '../llm/qwen.js';
+import type { LlmCallOpts } from '../kernel/llm-contract.js';
 import { SessionContext } from '../agents/session-context.js';
 import { ContentEvaluator } from '../agents/content-evaluator.js';
 import { FeedScroller } from '../agents/feed-scroller.js';

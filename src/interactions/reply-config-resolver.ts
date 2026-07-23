@@ -4,30 +4,9 @@ import type {
   ReplyConfigSnapshot,
 } from '../kernel/interaction-types.js';
 
-export interface ReplyConfigReader {
-  getPublished?(accountId: string): Promise<ReplyConfigSnapshot | null>;
-  getSnapshotForJob?(
-    accountId: string,
-    scopeId: string | null | undefined,
-    version: number,
-  ): Promise<ReplyConfigSnapshot | null>;
-  getSnapshot?(accountId: string, selector: 'draft' | 'published' | number): Promise<ReplyConfigSnapshot | null>;
-}
-
-export async function readPublishedConfig(reader: ReplyConfigReader, accountId: string): Promise<ReplyConfigSnapshot | null> {
-  if (reader.getPublished) return reader.getPublished(accountId);
-  return reader.getSnapshot?.(accountId, 'published') ?? null;
-}
-
-export async function readJobConfig(
-  reader: ReplyConfigReader,
-  accountId: string,
-  scopeId: string | null | undefined,
-  version: number,
-): Promise<ReplyConfigSnapshot | null> {
-  if (reader.getSnapshotForJob) return reader.getSnapshotForJob(accountId, scopeId, version);
-  return scopeId ? null : reader.getSnapshot?.(accountId, version) ?? null;
-}
+// 纯读取端口与两个无状态读取函数已析出到 kernel（change decouple-llm-lang-interaction-contracts）；
+// 连库的 ReplyConfigResolver 类留在本文件。对既有从本文件取这三者的导入方保持等值再导出。
+export { readJobConfig, readPublishedConfig, type ReplyConfigReader } from '../kernel/interaction-reply-contract.js';
 
 export class ReplyConfigResolver {
   readonly mode = 'scoped' as const;

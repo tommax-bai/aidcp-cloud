@@ -28,7 +28,7 @@ import type {
   LikeAffinity,
   WritingLanguage,
 } from '../kernel/soul-types.js';
-import { LIKE_AFFINITY_VALUES } from './like-affinity.js';
+import { LIKE_AFFINITY_VALUES } from '../kernel/like-affinity.js';
 import { isWritingLanguage } from './writing-language.js';
 
 const MANDATORY_INTERACTION_ACTIONS = new Set<MandatoryInteractionAction>(['like', 'comment']);
