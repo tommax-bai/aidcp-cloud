@@ -68,6 +68,11 @@ export class ReplyConfigStore {
   }
 
   async init(): Promise<void> {
+    // 这两处硬编码 schema 名**故意不收口**到 schema-name.ts 的 qualifiedObjectName()：本文件是 api 层，
+    // schema-name.ts 是 automation 层，收口会新增一条 api→automation 跨边界 import，撞 AC-BOUND-06 冻结棘轮
+    // （frozenTotal 已封顶、unplanned 单调不增，且无承接消除的控制仓 change 可填 raises[]）。
+    // 收口须等 §4.7 对 src/schema/ 归属裁决（schema-name 纯字符串拼装、可判 kernel，届时 api→kernel 合法）。
+    // 现状：字面量留在此、由 AC-SCHEMA-DB-SCOPE 清单继续登记，行为不变（automation 层 interaction-store 已收口）。
     const { rows } = await this.pool.query<{ present: boolean }>(
       `SELECT to_regclass('public.interaction_reply_configs') IS NOT NULL
           AND to_regclass('public.reply_templates') IS NOT NULL AS present`,

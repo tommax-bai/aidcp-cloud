@@ -56,11 +56,6 @@
     }
   },
   "schemaLiterals": {
-    "src/interactions/interaction-store.ts": {
-      "public.interaction_offboards": 1,
-      "public.interaction_reply_configs": 1,
-      "public.interaction_threads": 1
-    },
     "src/interactions/reply-config-scope-store.ts": {
       "public.interaction_reply_config_scopes": 1,
       "public.interaction_reply_scope_versions": 1
@@ -78,7 +73,10 @@
     "client_users": 4,
     "delegated_tasks": 2,
     "facebook_group_target": 2,
+    "interaction_messages": 1,
     "interaction_reply_config_scopes": 3,
+    "interaction_reply_jobs": 1,
+    "interaction_threads": 1,
     "persona_auto_fill_runs": 1,
     "publish_log": 3
   }

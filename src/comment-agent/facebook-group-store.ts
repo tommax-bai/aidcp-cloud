@@ -403,6 +403,9 @@ CREATE INDEX IF NOT EXISTS idx_fb_group_target_direction
 export const FACEBOOK_GROUP_MEMBERSHIP_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS facebook_group_membership (
   id                  BIGSERIAL PRIMARY KEY,
+  -- 跨 owner 外键（引 accounts，另一服务所有）。additive 拆库前置：共库期保留此约束，
+  -- 拆库后替代分两处：写侧 claimNext 已 FROM accounts 锚定（悬空账号不派新成员）、
+  -- 读侧 coverageCandidates 已加 EXISTS accounts（悬空账号不作覆盖候选）。删约束押到拆库那刻、此处不删。
   account_id          TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
   group_url           TEXT NOT NULL REFERENCES facebook_group_target(group_url) ON DELETE CASCADE,
   status              TEXT NOT NULL CHECK (status IN ('assigned','joining','joined','pending','gated','no_button','checkpoint','failed','left')),
@@ -1179,6 +1182,9 @@ export class FacebookGroupMembershipStore {
         `SELECT ${cols}
          FROM facebook_group_membership
          WHERE account_id = $1
+           -- 拆库前置：account_id 跨 owner 引 accounts。共库期外键（CASCADE）保证账号删则成员行随删、此断言恒真，
+           -- 与原行为等价；拆库后无级联，账号已删的悬空群成员读侧 fail-closed（不作为覆盖候选、不替死号去评论）。
+           AND EXISTS (SELECT 1 FROM accounts a WHERE a.account_id = $1)
            AND status = 'joined'
            AND joined_at IS NOT NULL
          ORDER BY last_commented_at ASC NULLS FIRST, joined_at ASC, group_url ASC
@@ -1193,6 +1199,8 @@ export class FacebookGroupMembershipStore {
       `SELECT ${cols}
        FROM facebook_group_membership
        WHERE account_id = $1
+         -- 拆库前置：见 relaxed 分支同一说明——account_id 跨 owner 引 accounts，拆库后悬空群成员读侧 fail-closed。
+         AND EXISTS (SELECT 1 FROM accounts a WHERE a.account_id = $1)
          AND status = 'joined'
          AND joined_at IS NOT NULL
          AND joined_at <= now() - ($3::double precision * interval '1 second')

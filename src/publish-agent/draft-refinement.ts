@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS publish_draft_refinement_jobs (
   id                 UUID PRIMARY KEY,
   execution_target   TEXT NOT NULL CHECK (execution_target IN ('dev','ol')),
   account_id         TEXT NOT NULL,
+  -- 跨 owner 外键（引 publish_log，另一服务所有）。additive 拆库前置：共库期保留此约束，
+  -- 拆库后的替代已就位在 claimNext 的读侧 fail-closed（EXISTS publish_log），删约束押到拆库那刻、此处不删。
   record_id          INT NOT NULL REFERENCES publish_log(id) ON DELETE CASCADE,
   expected_version   INT NOT NULL CHECK (expected_version >= 0),
   scope              TEXT NOT NULL CHECK (scope IN ('whole','body','images','selected_image','selected_text')),
@@ -219,6 +221,9 @@ export class DraftRefinementStore {
       `WITH candidate AS (
          SELECT id FROM publish_draft_refinement_jobs
           WHERE execution_target=$1 AND status='queued'
+          -- 拆库前置：record_id 跨 owner 引 publish_log。共库期这条外键（CASCADE）保证稿件在、此断言恒真，
+          -- 与原行为等价；拆库后无级联，稿件已删的悬空洗稿任务读侧 fail-closed（不被 claim、不空转洗一条不存在的稿）。
+            AND EXISTS (SELECT 1 FROM publish_log pl WHERE pl.id = publish_draft_refinement_jobs.record_id)
           ORDER BY created_at ASC
           FOR UPDATE SKIP LOCKED LIMIT 1
        )

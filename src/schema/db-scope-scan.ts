@@ -53,7 +53,11 @@ export interface DbScopeReport {
 const SCAN_DIRS = ['src', 'scripts'];
 
 const ADVISORY = /\b(pg_(?:try_)?advisory(?:_xact)?_(?:lock|unlock)(?:_shared)?)\s*\(/g;
-const REFERENCES = /\bREFERENCES\s+([a-zA-Z_][\w]*)\s*\(\s*([a-zA-Z_][\w]*)\s*\)/gi;
+// 单列与复合外键都要认：`REFERENCES t(col)` 与 `REFERENCES t(col1, col2, col3)`。
+// 只认单列会让 migrations/0039 的三条复合键 FK（interaction_threads / interaction_messages /
+// interaction_reply_jobs）零登记 —— 而它们同样是「拆库即静默失效」的库级机制，必须进清单。
+// 复合列表只作为目标名的一部分保留（迁移侧只按表名计数，源码侧本仓当前无复合 FK）。
+const REFERENCES = /\bREFERENCES\s+([a-zA-Z_][\w]*)\s*\(\s*([a-zA-Z_][\w]*(?:\s*,\s*[a-zA-Z_][\w]*)*)\s*\)/gi;
 const SCHEMA_LITERAL = /['"`]([a-zA-Z_][\w]*)\.([a-zA-Z_][\w]*)['"`]/g;
 /** 只有这些前缀是「schema 限定名」；别的 `a.b` 字面量（如 `0.1`、`foo.ts`）不是。 */
 const SCHEMA_PREFIXES = new Set(['public']);

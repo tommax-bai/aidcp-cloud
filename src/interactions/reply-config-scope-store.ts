@@ -126,6 +126,8 @@ export class ReplyConfigScopeStore {
   }
 
   async init(): Promise<void> {
+    // 硬编码 schema 名**故意不收口**到 qualifiedObjectName()：api 层文件引 automation 层 schema-name.ts 会撞
+    // AC-BOUND-06 冻结的 import 棘轮（详见 reply-config-store.ts init 同款说明）。等 §4.7 归属裁决后再收口。
     const { rows } = await this.pool.query<{ present: boolean }>(
       `SELECT to_regclass('public.interaction_reply_config_scopes') IS NOT NULL
           AND to_regclass('public.interaction_reply_scope_versions') IS NOT NULL

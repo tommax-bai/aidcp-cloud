@@ -100,6 +100,9 @@ export type FacebookPublishSetPatch =
 export const FACEBOOK_PUBLISH_MEDIA_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS account_facebook_publish_image_set (
   id                     BIGSERIAL PRIMARY KEY,
+  -- 跨 owner 外键（引 accounts，另一服务所有）。additive 拆库前置：共库期保留此约束，
+  -- 拆库后的替代已就位——每个公开入口（list/upload/reorder/updateSet/deleteSet/reserveNext/availableCount）
+  -- 先走 assertFacebookAccount（现读 accounts、缺行即 account_not_found fail-closed）。删约束押到拆库那刻、此处不删。
   account_id             TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
   status                 TEXT NOT NULL DEFAULT 'available'
                          CHECK (status IN ('available','reserved','used','disabled','deleted','quarantine')),
@@ -107,6 +110,9 @@ CREATE TABLE IF NOT EXISTS account_facebook_publish_image_set (
   sort_order             INTEGER NOT NULL DEFAULT 0,
   reserved_by            TEXT,
   reserved_at            TIMESTAMPTZ,
+  -- 跨 owner 外键（引 publish_log，另一服务所有），可空、审计用途（记「这组图被哪条发布记录用掉」）。
+  -- additive 拆库前置：共库期保留此约束；此指针不参与任何鉴权/取数判定，读侧只原样透出 id，
+  -- 拆库后即便悬空也无害（不需读侧 fail-closed），故不加校验（YAGNI）。删约束押到拆库那刻、此处不删。
   used_by_publish_log_id INTEGER REFERENCES publish_log(id) ON DELETE SET NULL,
   last_error             TEXT,
   created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -129,6 +135,7 @@ ALTER TABLE account_facebook_publish_image_set ADD COLUMN IF NOT EXISTS caption_
 ALTER TABLE account_facebook_publish_image_set ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE account_facebook_publish_image_set ADD COLUMN IF NOT EXISTS reserved_by TEXT;
 ALTER TABLE account_facebook_publish_image_set ADD COLUMN IF NOT EXISTS reserved_at TIMESTAMPTZ;
+-- 旧库补列路径，与上面同一条审计用途的跨 owner 外键（引 publish_log）；拆库后同样无需读侧 fail-closed。
 ALTER TABLE account_facebook_publish_image_set ADD COLUMN IF NOT EXISTS used_by_publish_log_id INTEGER REFERENCES publish_log(id) ON DELETE SET NULL;
 ALTER TABLE account_facebook_publish_image_set ADD COLUMN IF NOT EXISTS last_error TEXT;
 ALTER TABLE account_facebook_publish_image_set ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();

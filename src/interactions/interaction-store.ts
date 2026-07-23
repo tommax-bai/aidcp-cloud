@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { resolveEnvPgConfig } from '../cache/pg-config.js';
+import { qualifiedObjectName } from '../schema/schema-name.js';
 import { lockEnvironmentRow, lockEnvironmentScopeRows } from '../db/environment-row-lock.js';
 import {
   INTERACTION_PLATFORM,
@@ -298,9 +299,9 @@ export class InteractionStore {
       active_attempt_index_present: boolean;
       legacy_retryable_column_present: boolean;
     }>(
-      `SELECT to_regclass('public.interaction_threads') IS NOT NULL
-          AND to_regclass('public.interaction_reply_configs') IS NOT NULL
-          AND to_regclass('public.interaction_offboards') IS NOT NULL
+      `SELECT to_regclass('${qualifiedObjectName('interaction_threads')}') IS NOT NULL
+          AND to_regclass('${qualifiedObjectName('interaction_reply_configs')}') IS NOT NULL
+          AND to_regclass('${qualifiedObjectName('interaction_offboards')}') IS NOT NULL
           AND EXISTS (
             SELECT 1 FROM information_schema.columns
             WHERE table_schema='public' AND table_name='interaction_send_attempts'
