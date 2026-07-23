@@ -337,6 +337,9 @@ import {
   type InteractionRuntimeControlsPayload,
 } from './interactions/index.js';
 import { projectRuntimeControls } from './interactions/runtime-controls-provider.js';
+// change offboard-saga：把跨 owner 离场写收口到各属主的窄写入口，由组合根注入（拆进程时换成内部 HTTP）。
+import { OffboardWriteAdapter } from './interactions/offboard-write-adapter.js';
+import { InteractionApiWrites } from './interactions/interaction-api-writes.js';
 
 function readEnvString(name: string): string | undefined {
   const value = process.env[name];
@@ -620,7 +623,7 @@ async function main(): Promise<void> {
     password: readEnvString('PGPASSWORD'),
   });
   // 对外客户身份 + 客户↔环境归属（change edge-client-customer-auth）。独立表,与内部运营登录物理隔离。
-  const clientUserStore = new ClientUserStore({ mirrorVersionBumper: mirrorVersionStore });
+  const clientUserStore = new ClientUserStore({ mirrorVersionBumper: mirrorVersionStore, offboardWrites: new OffboardWriteAdapter() });
   try {
     await mirrorVersionStore.init();
     await modelConfigStore.init();
@@ -1875,7 +1878,7 @@ async function main(): Promise<void> {
   let interactionOffboarding: InteractionOffboardingService | undefined;
   const interactionAiTimeoutMs = Math.max(1_000, readEnvNumber('AIDCP_INTERACTION_AI_TIMEOUT_MS', 20_000));
   try {
-    interactionStore = new InteractionStore();
+    interactionStore = new InteractionStore({ apiPurge: new InteractionApiWrites() });
     replyConfigStore = new ReplyConfigStore();
     replyConfigScopeStore = new ReplyConfigScopeStore();
     interactionSchemaMode = await interactionStore.init();

@@ -34,10 +34,26 @@ const SYNC_THREAD_FUTURE_SKEW_MS = 5 * 60 * 1_000;
 
 type Queryable = Pick<pg.Pool, 'query'> | Pick<pg.PoolClient, 'query'>;
 
+/**
+ * api 属主表的清理窄接口（change offboard-saga）—— 消费方在本文件（automation），
+ * 实现方是 aidcp-api 的 interaction-api-writes（结构匹配、由 server.ts 注入，不 import）。
+ * 离场 saga 与过期清理里 automation 需要删 api 属主表（reply 配置面 / 配置面审计），
+ * 收口到本接口后不再是跨 owner 单事务/跨层直写。
+ */
+export interface InteractionApiPurgePort {
+  purgeReplyConfigForAccount(q: Queryable, accountId: string): Promise<void>;
+  purgeExpiredAuditEvents(q: Queryable, now: number): Promise<number>;
+}
+
 export interface InteractionStoreOptions {
   pool?: pg.Pool;
   clock?: () => number;
   idGen?: (prefix: string) => string;
+  /**
+   * api 属主表清理口（change offboard-saga）。生产由 server.ts 注入；缺省 = 不注入，
+   * 只有真正走到离场 saga / 过期清理里删 api 属主表时才当场抛错（fail-loud，绝非静默跳过）。
+   */
+  apiPurge?: InteractionApiPurgePort;
 }
 
 export interface IngestResult {
@@ -285,11 +301,35 @@ export class InteractionStore {
   private readonly pool: pg.Pool;
   private readonly clock: () => number;
   private readonly idGen: (prefix: string) => string;
+  private readonly apiPurge?: InteractionApiPurgePort;
 
   constructor(options: InteractionStoreOptions = {}) {
     this.pool = options.pool ?? new Pool(resolveEnvPgConfig());
     this.clock = options.clock ?? Date.now;
     this.idGen = options.idGen ?? ((prefix) => `${prefix}_${randomUUID()}`);
+    this.apiPurge = options.apiPurge;
+  }
+
+  /** api 属主表清理口：未注入即当场抛错，绝不静默跳过应删的 api 属主数据。 */
+  private requireApiPurge(): InteractionApiPurgePort {
+    if (!this.apiPurge) throw new Error('interaction_api_purge_port_not_configured');
+    return this.apiPurge;
+  }
+
+  /** 每一步 saga 各自独立事务：BEGIN/COMMIT/ROLLBACK 包裹，供离场分步清理跨事务重入。 */
+  private async withPurgeTx<T>(fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   /** Migrations own the schema. init fails locally and lets main disable only this feature. */
@@ -1655,12 +1695,22 @@ export class InteractionStore {
     } finally { client.release(); }
   }
 
+  /**
+   * 离场分表清理 saga（change offboard-saga）——把改动前「一个跨 owner 单事务清 12 张表」拆成
+   * 三个各自独立提交、可重入的步骤，不再依赖跨库单事务原子：
+   *   Step A（automation 属主 + 取行，一个事务）：取一条到期离场并清 automation 侧数据；
+   *   Step B（api 属主，一个事务）：经窄接口清 reply 配置面；
+   *   Step C（automation 属主，一个事务）：状态守卫翻 purged + 审计。
+   * 幂等可重入：DELETE 天然幂等（重跑删 0 行、不重复副作用），离场行的生命周期状态本身即持久进度——
+   *   翻到 purged 前一直可被再次取到，中断后下一轮从 Step A 重清剩余、不遗漏；翻到 purged 后再不入选。
+   * 「进度落库」= 离场行的 state（pending_edge/dispatched/tombstoned→purged），无需另立进度台账。
+   * 清的表与改动前完全一致，只换原子性实现与 api 属主表的写入通道。
+   */
   async purgeDueOffboards(now = this.clock()): Promise<number> {
     let purged = 0;
     while (true) {
-      const client = await this.pool.connect();
-      try {
-        await client.query('BEGIN');
+      // Step A：取一条到期离场，同一事务里清 automation 属主表并提交。
+      const picked = await this.withPurgeTx(async (client) => {
         const due = await client.query<{
           offboard_id: string; account_id: string; env_key: string; user_id: string | null;
           edge_result_status: string | null;
@@ -1669,41 +1719,36 @@ export class InteractionStore {
                 AND purge_due_at <= to_timestamp($1/1000.0)
               ORDER BY purge_due_at ASC,offboard_id ASC LIMIT 1 FOR UPDATE SKIP LOCKED`, [now]);
         const row = due.rows[0];
-        if (!row) {
-          await client.query('COMMIT');
-          break;
-        }
+        if (!row) return null;
         await client.query(`DELETE FROM interaction_threads WHERE account_id=$1 AND env_key=$2`, [row.account_id, row.env_key]);
         await client.query(`DELETE FROM interaction_sync_batches WHERE account_id=$1 AND env_key=$2`, [row.account_id, row.env_key]);
         await client.query(`DELETE FROM interaction_sync_cursors WHERE account_id=$1 AND env_key=$2`, [row.account_id, row.env_key]);
         await client.query(`DELETE FROM interaction_api_requests WHERE account_id=$1 AND env_key=$2`, [row.account_id, row.env_key]);
-        await client.query(`DELETE FROM reply_templates WHERE account_id=$1`, [row.account_id]);
-        await client.query(`DELETE FROM reply_rules WHERE account_id=$1`, [row.account_id]);
-        await client.query(`DELETE FROM account_reply_profiles WHERE account_id=$1`, [row.account_id]);
-        await client.query(`DELETE FROM interaction_reply_config_versions WHERE account_id=$1`, [row.account_id]);
-        await client.query(`DELETE FROM interaction_reply_configs WHERE account_id=$1`, [row.account_id]);
         await client.query(`DELETE FROM interaction_auth_state WHERE account_id=$1 AND env_key=$2`, [row.account_id, row.env_key]);
         await client.query(`DELETE FROM interaction_runtime_controls WHERE account_id=$1`, [row.account_id]);
+        return row;
+      });
+      if (!picked) break;
+      // Step B：经窄接口清 api 属主的 reply 配置面（独立事务，DELETE 幂等，中断重入照删剩余）。
+      await this.withPurgeTx((client) => this.requireApiPurge().purgeReplyConfigForAccount(client, picked.account_id));
+      // Step C：状态守卫翻 purged + 审计（独立事务，已 purged 则空过、不重复计数）。
+      const flipped = await this.withPurgeTx(async (client) => {
         const updated = await client.query(
           `UPDATE interaction_offboards SET state='purged',purged_at=now(),updated_at=now()
-            WHERE offboard_id=$1 AND state IN ('pending_edge','dispatched','tombstoned')`, [row.offboard_id],
+            WHERE offboard_id=$1 AND state IN ('pending_edge','dispatched','tombstoned')`, [picked.offboard_id],
         );
-        if (updated.rowCount) {
-          await client.query(
-            `INSERT INTO interaction_offboard_audit
-               (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
-             VALUES ($1,$2,'wechat_channels',$3,$4,$5,'cloud_purged',$6)`,
-            [this.idGen('audit'), row.offboard_id, row.account_id, row.env_key, row.user_id,
-              row.edge_result_status === 'cleared' || row.edge_result_status === 'already_cleared'
-                ? 'purged_edge_confirmed' : 'purged_edge_unconfirmed'],
-          );
-          purged++;
-        }
-        await client.query('COMMIT');
-      } catch (error) {
-        await client.query('ROLLBACK');
-        throw error;
-      } finally { client.release(); }
+        if (!updated.rowCount) return false;
+        await client.query(
+          `INSERT INTO interaction_offboard_audit
+             (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
+           VALUES ($1,$2,'wechat_channels',$3,$4,$5,'cloud_purged',$6)`,
+          [this.idGen('audit'), picked.offboard_id, picked.account_id, picked.env_key, picked.user_id,
+            picked.edge_result_status === 'cleared' || picked.edge_result_status === 'already_cleared'
+              ? 'purged_edge_confirmed' : 'purged_edge_unconfirmed'],
+        );
+        return true;
+      });
+      if (flipped) purged++;
     }
     return purged;
   }
@@ -1766,12 +1811,12 @@ export class InteractionStore {
       `DELETE FROM interaction_api_requests
         WHERE created_at < to_timestamp($1/1000.0)-interval '90 days'`, [now],
     );
-    const audits = await this.pool.query(
-      `DELETE FROM interaction_audit_events WHERE created_at < to_timestamp($1/1000.0)-interval '365 days'`, [now],
-    );
+    // interaction_audit_events 属 api 单写：经窄接口下发这条过期删除，automation 侧不再直删该表
+    // （change offboard-saga）。每条语句本就各自独立提交，故行为逐位等价。
+    const audits = await this.requireApiPurge().purgeExpiredAuditEvents(this.pool, now);
     return {
       comments: comments.rowCount ?? 0, dms: dms.rowCount ?? 0, replyJobs: replyJobs.rowCount ?? 0,
-      apiRequests: apiRequests.rowCount ?? 0, audits: audits.rowCount ?? 0,
+      apiRequests: apiRequests.rowCount ?? 0, audits,
     };
   }
 

@@ -3,6 +3,8 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import pg from 'pg';
 import { ClientUserStore } from '../../src/client-auth/client-user-store.js';
+import { OffboardWriteAdapter } from '../../src/interactions/offboard-write-adapter.js';
+import { InteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
 import { parseSyncBatchPayload } from '../../src/interactions/contract.js';
 import { InteractionStore } from '../../src/interactions/interaction-store.js';
 import { shanghaiDayStartMs } from '../../src/time/shanghai-day.js';
@@ -12,7 +14,7 @@ const connectionString = process.env.AIDCP_INTERACTION_TEST_DATABASE_URL;
 test('PostgreSQL: authoritative env ownership is unique and cross-customer interaction access fails closed',
   { skip: !connectionString }, async () => {
     const pool = new pg.Pool({ connectionString });
-    const users = new ClientUserStore({ pool });
+    const users = new ClientUserStore({ pool, offboardWrites: new OffboardWriteAdapter() });
     try {
       await users.init();
       await pool.query(`TRUNCATE client_env_revocation_holds,interaction_offboard_audit,interaction_offboards,
@@ -147,8 +149,8 @@ test('PostgreSQL: authoritative env ownership is unique and cross-customer inter
 test('PostgreSQL: unbind/termination revoke first, retry offline cleanup, tombstone after exact Edge result and purge by deadline',
   { skip: !connectionString }, async () => {
     const pool = new pg.Pool({ connectionString });
-    const users = new ClientUserStore({ pool });
-    const interactions = new InteractionStore({ pool, clock: () => 1_784_044_830_000 });
+    const users = new ClientUserStore({ pool, offboardWrites: new OffboardWriteAdapter() });
+    const interactions = new InteractionStore({ pool, clock: () => 1_784_044_830_000, apiPurge: new InteractionApiWrites() });
     try {
       await users.init();
       await interactions.init();
@@ -327,8 +329,8 @@ test('PostgreSQL: unbind/termination revoke first, retry offline cleanup, tombst
 test('PostgreSQL: provisioned video environment without an auth binding gets terminal offboard while legacy missing binding stays closed',
   { skip: !connectionString }, async () => {
     const pool = new pg.Pool({ connectionString });
-    const users = new ClientUserStore({ pool });
-    const interactions = new InteractionStore({ pool });
+    const users = new ClientUserStore({ pool, offboardWrites: new OffboardWriteAdapter() });
+    const interactions = new InteractionStore({ pool, apiPurge: new InteractionApiWrites() });
     try {
       await users.init();
       await interactions.init();
@@ -414,8 +416,8 @@ test('PostgreSQL: provisioned video environment without an auth binding gets ter
 test('PostgreSQL: admin revocation removes ownership before cleanup and late binding materializes exact offboard',
   { skip: !connectionString }, async () => {
     const pool = new pg.Pool({ connectionString });
-    const users = new ClientUserStore({ pool });
-    const interactions = new InteractionStore({ pool });
+    const users = new ClientUserStore({ pool, offboardWrites: new OffboardWriteAdapter() });
+    const interactions = new InteractionStore({ pool, apiPurge: new InteractionApiWrites() });
     try {
       await users.init();
       await interactions.init();

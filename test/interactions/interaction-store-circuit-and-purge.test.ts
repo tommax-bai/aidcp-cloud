@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import type { Pool } from 'pg';
 import { InteractionStore } from '../../src/interactions/interaction-store.js';
+import { InteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
 import type { InteractionSyncBatchPayload } from '../../src/interactions/types.js';
 
 function runtimeRow() {
@@ -193,7 +194,7 @@ test('deadline purges Cloud data without Edge receipt and a late receipt is reco
     release: () => {},
   };
   const pool = { connect: async () => client } as unknown as Pool;
-  const store = new InteractionStore({ pool, idGen: (prefix) => `${prefix}-test` });
+  const store = new InteractionStore({ pool, idGen: (prefix) => `${prefix}-test`, apiPurge: new InteractionApiWrites() });
   assert.equal(await store.purgeDueOffboards(1_784_044_900_000), 1);
   assert.ok(deletedSql.some((sql) => sql.includes('DELETE FROM interaction_threads')));
   assert.ok(deletedSql.some((sql) => sql.includes('DELETE FROM interaction_auth_state')));

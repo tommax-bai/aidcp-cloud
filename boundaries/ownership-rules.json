@@ -83,8 +83,10 @@
     { "path": "src/config/mirror-refresher.ts", "layer": "api", "basis": "§4.6.8 同上：配置镜像的轮询刷新器，装配在组合根、只驱动配置层 store 的 refreshFromAuthority。由 change config-mirror-cross-process-invalidation 新增" },
     { "path": "src/config/mirror-stop-work.ts", "layer": "api", "basis": "【待定稿裁决】§4.6.8 的例外名单是封闭的 5 个文件，本文件不在其列，故按目录默认落 api。但它的语义偏自动化：它是『闸门镜像陈旧则不放行新的真实平台动作』的统一判据，消费方是 comment-scheduler / role-dispatcher / delegated-task worker 三个 automation 文件（因此产生 3 条 automation->api 豁免）。若按 §4.6.8『随消费方走』的同一判据改判 automation，这 3 条消失、另生 3 条（publish-scheduler 的 api->automation 1 条 + 本文件对 config-mirror-freshness / mirror-registry 的 automation->api 2 条），净额为 0，故本次不擅自改判。请求 §4.6.8 裁决见 docpatch R1。由 change config-mirror-cross-process-invalidation 新增" },
 
+    { "path": "src/interactions/interaction-api-writes.ts", "layer": "api", "basis": "§5.1：reply 配置面（reply_templates/reply_rules/account_reply_profiles/interaction_reply_config*）与配置面审计 interaction_audit_events 归 aidcp-api 单写。本文件是 change offboard-saga 里这些 api 属主表在离场/过期清理路径上的 api 侧单写者，automation 经窄接口注入调用。" },
     { "path": "src/interactions/interaction-customer-api.ts", "layer": "api", "basis": "§4.6.1：配置存储与查询面" },
     { "path": "src/interactions/interaction-internal-api.ts", "layer": "api", "basis": "§4.6.1：配置存储与查询面" },
+    { "path": "src/interactions/offboard-write-adapter.ts", "layer": "automation", "basis": "§5.1：互动域离场表（interaction_offboards/interaction_offboard_audit/interaction_auth_state/interaction_runtime_controls）归 aidcp-automation 单写。本文件是 change offboard-saga 里这些离场表的 automation 侧单写者，aidcp-api 的 client-user-store 经窄接口注入调用。" },
     { "path": "src/interactions/interaction-scope-internal-api.ts", "layer": "api", "basis": "§4.6.1：配置存储与查询面" },
     { "path": "src/interactions/interaction-panel-permissions.ts", "layer": "api", "basis": "§4.6.1：配置存储与查询面" },
     { "path": "src/interactions/reply-config-store.ts", "layer": "api", "basis": "§4.6.1：配置存储与查询面" },

@@ -26,6 +26,7 @@ import { resolveAccountDisplayName } from '../account-display-name.js';
 import { isMirrorStale, type ConfigMirrorKey } from '../config-mirror-freshness.js';
 import { writeWithMirrorBump, type MirrorVersionBumper } from '../config/mirror-version-store.js';
 import { ensureCapabilitySchema } from '../schema/schema-capability.js';
+import type { OffboardWritePort, OffboardRow } from './offboard-write-port.js';
 
 const { Pool } = pg;
 
@@ -437,6 +438,12 @@ export interface ClientUserStoreOptions {
    * 缺省 = 不推版本（行为逐位退回今日现状）。
    */
   mirrorVersionBumper?: MirrorVersionBumper;
+  /**
+   * 离场表（automation 属主）的窄写入口（change offboard-saga）。生产由组合根 server.ts 注入
+   * automation 的 offboard-write-adapter；缺省 = 不注入，只有真正走到离场写入路径时才当场抛错
+   * （fail-loud，绝非静默假成功）。不触发离场路径的调用方无需注入。
+   */
+  offboardWrites?: OffboardWritePort;
 }
 
 /**
@@ -459,6 +466,7 @@ export interface ClientApprovalGroupCoverage {
 export class ClientUserStore {
   private readonly pool: pg.Pool;
   private readonly mirrorVersionBumper?: MirrorVersionBumper;
+  private readonly offboardWrites?: OffboardWritePort;
   /** 同步 WS 出口闸镜像：删除生命周期中的 AdsPower env 不再接收普通自动化命令。 */
   private blockedAutomationEnvKeys = new Set<string>();
   /** RiskController 同步热路径镜像：只收录当前恰好绑定一个环境的账号。 */
@@ -468,44 +476,36 @@ export class ClientUserStore {
   constructor(options: ClientUserStoreOptions = {}) {
     this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.pool = options.pool ?? new Pool(resolveEnvPgConfig());
+    this.offboardWrites = options.offboardWrites;
   }
 
   private offboardReceipt(offboard: ClientOffboardView): ClientCleanupReceipt {
     return { kind: 'offboard_pending', ...offboard };
   }
 
+  /** 离场表写入口（automation 属主）：未注入即当场抛错，绝不静默跳过离场副作用。 */
+  private offboardPort(): OffboardWritePort {
+    if (!this.offboardWrites) throw new Error('offboard_write_port_not_configured');
+    return this.offboardWrites;
+  }
+
+  private mapOffboardRow(row: OffboardRow): ClientOffboardView {
+    return {
+      offboardId: row.offboard_id, envKey: row.env_key, accountId: row.account_id,
+      state: row.state, reason: row.reason,
+      requestedAt: row.requested_at.getTime(), purgeDueAt: row.purge_due_at.getTime(),
+    };
+  }
+
+  /**
+   * 收权（interaction_runtime_controls / interaction_auth_state，automation 属主）经窄接口下发。
+   * 真实 SQL 落在 automation 的 offboard-write-adapter；此处只转调，事务句柄照传，行为等价。
+   */
   private async revokeInteractionAccess(
     client: pg.PoolClient,
     input: { accountId: string; actor: string | null; requireAuthState: boolean },
   ): Promise<void> {
-    const controls = await client.query(
-      `UPDATE interaction_runtime_controls SET comments_read_enabled=false,comments_reply_enabled=false,
-          dm_read_enabled=false,dm_send_text_enabled=false,dm_send_image_enabled=false,write_paused=true,
-          version=version+1,updated_at=now(),updated_by=$2
-        WHERE platform='wechat_channels' AND account_id=$1
-        RETURNING account_id`,
-      [input.accountId, input.actor ?? 'offboarding'],
-    );
-    if ((controls.rowCount ?? 0) === 0) {
-      const existing = await client.query(
-        `SELECT 1 FROM interaction_runtime_controls
-          WHERE platform='wechat_channels' AND account_id=$1 FOR UPDATE`,
-        [input.accountId],
-      );
-      if (existing.rows[0]) throw new Error('interaction_runtime_controls_revoke_missed');
-    }
-
-    const auth = await client.query(
-      `UPDATE interaction_auth_state SET status='disabled',capabilities=$2::jsonb,
-          reason_code='INTERACTION_FEATURE_DISABLED',checked_at=now(),updated_at=now()
-        WHERE platform='wechat_channels' AND account_id=$1
-        RETURNING account_id`,
-      [input.accountId, JSON.stringify({ commentsRead: false, commentsReply: false,
-        dmRead: false, dmSendText: false, dmSendImage: false })],
-    );
-    if ((auth.rowCount ?? 0) === 0 && input.requireAuthState) {
-      throw new Error('interaction_auth_state_revoke_missed');
-    }
+    await this.offboardPort().revokeInteractionAccess(client, input);
   }
 
   private async enqueueCleanupHold(
@@ -545,38 +545,12 @@ export class ClientUserStore {
     };
   }
 
+  /** 建离场记录 + 收权 + 审计（automation 属主）经窄接口下发；返回视图由裸行映射，行为等价。 */
   private async enqueueOffboard(
     client: pg.PoolClient,
     input: { userId: string; envKey: string; accountId: string; reason: ClientOffboardView['reason']; actor: string | null },
   ): Promise<ClientOffboardView> {
-    const offboardId = crypto.randomUUID();
-    const inserted = await client.query<{
-      offboard_id: string; env_key: string; account_id: string; state: ClientOffboardView['state'];
-      reason: ClientOffboardView['reason']; requested_at: Date; purge_due_at: Date;
-    }>(
-      `INSERT INTO interaction_offboards
-         (offboard_id,platform,account_id,env_key,user_id,reason,state,requested_at,purge_due_at,updated_at)
-       VALUES ($1,'wechat_channels',$2,$3,$4,$5,'pending_edge',now(),now()+interval '29 days',now())
-       ON CONFLICT (platform,env_key) WHERE state <> 'purged' DO UPDATE
-         SET updated_at=interaction_offboards.updated_at
-       RETURNING offboard_id,env_key,account_id,state,reason,requested_at,purge_due_at`,
-      [offboardId, input.accountId, input.envKey, input.userId, input.reason],
-    );
-    const row = inserted.rows[0];
-    if (!row || row.account_id !== input.accountId) throw new Error('offboard_scope_conflict');
-    await this.revokeInteractionAccess(client, {
-      accountId: input.accountId,
-      actor: input.actor,
-      requireAuthState: true,
-    });
-    await client.query(
-      `INSERT INTO interaction_offboard_audit
-         (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
-       VALUES ($1,$2,'wechat_channels',$3,$4,$5,'access_revoked','pending_edge')`,
-      [crypto.randomUUID(), row.offboard_id, input.accountId, input.envKey, input.userId],
-    );
-    return { offboardId: row.offboard_id, envKey: row.env_key, accountId: row.account_id,
-      state: row.state, reason: row.reason, requestedAt: row.requested_at.getTime(), purgeDueAt: row.purge_due_at.getTime() };
+    return this.mapOffboardRow(await this.offboardPort().enqueueOffboard(client, input));
   }
 
   /**
@@ -592,31 +566,7 @@ export class ClientUserStore {
     client: pg.PoolClient,
     input: { userId: string; envKey: string },
   ): Promise<ClientOffboardView> {
-    const offboardId = crypto.randomUUID();
-    const accountId = input.envKey;
-    const inserted = await client.query<{
-      offboard_id: string; env_key: string; account_id: string; state: ClientOffboardView['state'];
-      reason: ClientOffboardView['reason']; requested_at: Date; purge_due_at: Date;
-    }>(
-      `INSERT INTO interaction_offboards
-       (offboard_id,platform,account_id,env_key,user_id,reason,state,requested_at,
-          tombstoned_at,purge_due_at,updated_at)
-       VALUES ($1,'wechat_channels',$2,$3,$4,'environment_unbind','tombstoned',now(),now(),now()+interval '29 days',now())
-       RETURNING offboard_id,env_key,account_id,state,reason,requested_at,purge_due_at`,
-      [offboardId, accountId, input.envKey, input.userId],
-    );
-    const row = inserted.rows[0];
-    if (!row) throw new Error('offboard_terminal_insert_failed');
-    await client.query(
-      `INSERT INTO interaction_offboard_audit
-         (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
-       VALUES
-         ($1,$3,'wechat_channels',$4,$5,$6,'access_revoked','tombstoned'),
-         ($2,$3,'wechat_channels',$4,$5,$6,'unbound_cleanup_not_required','tombstoned')`,
-      [crypto.randomUUID(), crypto.randomUUID(), row.offboard_id, accountId, input.envKey, input.userId],
-    );
-    return { offboardId: row.offboard_id, envKey: row.env_key, accountId: row.account_id,
-      state: row.state, reason: row.reason, requestedAt: row.requested_at.getTime(), purgeDueAt: row.purge_due_at.getTime() };
+    return this.mapOffboardRow(await this.offboardPort().enqueueProvisionedUnboundOffboard(client, input));
   }
 
   /** Customer-authorized relinquish: revoke scope and stop Cloud sync/write in the same transaction as durable offboard creation. */
@@ -717,25 +667,18 @@ export class ClientUserStore {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      const updated = await client.query<{ account_id: string; env_key: string }>(
-        `UPDATE interaction_offboards
-            SET cleanup_grant_jti_hash=$4,cleanup_grant_edge_id=$3,
-                cleanup_grant_expires_at=to_timestamp($5 / 1000.0),cleanup_grant_used_at=NULL,updated_at=now()
-          WHERE offboard_id=$1 AND user_id=$2 AND state IN ('pending_edge','dispatched')
-          RETURNING account_id,env_key`,
-        [input.offboardId, input.userId, input.edgeId, input.jtiHash, input.expiresAt],
-      );
-      const row = updated.rows[0];
-      if (!row) {
+      const grant = await this.offboardPort().markCleanupGrantIssued(client, {
+        offboardId: input.offboardId, userId: input.userId, edgeId: input.edgeId,
+        jtiHash: input.jtiHash, expiresAt: input.expiresAt,
+      });
+      if (!grant) {
         await client.query('ROLLBACK');
         return false;
       }
-      await client.query(
-        `INSERT INTO interaction_offboard_audit
-           (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
-         VALUES ($1,$2,'wechat_channels',$3,$4,$5,'cleanup_grant_issued','issued')`,
-        [crypto.randomUUID(), input.offboardId, row.account_id, row.env_key, input.userId],
-      );
+      await this.offboardPort().insertOffboardAudit(client, {
+        offboardId: input.offboardId, accountId: grant.accountId, envKey: grant.envKey,
+        userId: input.userId, event: 'cleanup_grant_issued', status: 'issued',
+      });
       await client.query('COMMIT');
       return true;
     } catch (error) {
@@ -782,27 +725,20 @@ export class ClientUserStore {
 
       if (failure) {
         if (row) {
-          await client.query(
-            `INSERT INTO interaction_offboard_audit
-               (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
-             VALUES ($1,$2,'wechat_channels',$3,$4,$5,'cleanup_grant_rejected',$6)`,
-            [crypto.randomUUID(), row.offboard_id, row.account_id, row.env_key, input.userId, failure],
-          );
+          await this.offboardPort().insertOffboardAudit(client, {
+            offboardId: row.offboard_id, accountId: row.account_id, envKey: row.env_key,
+            userId: input.userId, event: 'cleanup_grant_rejected', status: failure,
+          });
         }
         await client.query('COMMIT');
         return { ok: false, reason: failure };
       }
 
-      await client.query(
-        `UPDATE interaction_offboards SET cleanup_grant_used_at=now(),updated_at=now() WHERE offboard_id=$1`,
-        [row!.offboard_id],
-      );
-      await client.query(
-        `INSERT INTO interaction_offboard_audit
-           (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
-         VALUES ($1,$2,'wechat_channels',$3,$4,$5,'cleanup_grant_consumed','consumed')`,
-        [crypto.randomUUID(), row!.offboard_id, row!.account_id, row!.env_key, input.userId],
-      );
+      await this.offboardPort().markCleanupGrantConsumed(client, row!.offboard_id);
+      await this.offboardPort().insertOffboardAudit(client, {
+        offboardId: row!.offboard_id, accountId: row!.account_id, envKey: row!.env_key,
+        userId: input.userId, event: 'cleanup_grant_consumed', status: 'consumed',
+      });
       await client.query('COMMIT');
       return {
         ok: true,

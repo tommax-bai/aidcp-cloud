@@ -375,6 +375,11 @@
     "note": "§4.7：客户身份与环境归属权威（7/7 api）"
   },
   {
+    "path": "src/client-auth/offboard-write-port.ts",
+    "layer": "api",
+    "note": "§4.7：客户身份与环境归属权威（7/7 api）"
+  },
+  {
     "path": "src/client-auth/rate-limiter.ts",
     "layer": "api",
     "note": "§4.7：客户身份与环境归属权威（7/7 api）"
@@ -870,6 +875,11 @@
     "note": "§4.6.1：收件箱 / 回复工作流 / 发送与回执 / 离场 saga 段"
   },
   {
+    "path": "src/interactions/interaction-api-writes.ts",
+    "layer": "api",
+    "note": "§5.1：reply 配置面（reply_templates/reply_rules/account_reply_profiles/interaction_reply_config*）与配置面审计 interaction_audit_events 归 aidcp-api 单写。本文件是 change offboard-saga 里这些 api 属主表在离场/过期清理路径上的 api 侧单写者，automation 经窄接口注入调用。"
+  },
+  {
     "path": "src/interactions/interaction-customer-api.ts",
     "layer": "api",
     "note": "§4.6.1：配置存储与查询面"
@@ -903,6 +913,11 @@
     "path": "src/interactions/metrics.ts",
     "layer": "automation",
     "note": "§4.6.1：收件箱 / 回复工作流 / 发送与回执 / 离场 saga 段"
+  },
+  {
+    "path": "src/interactions/offboard-write-adapter.ts",
+    "layer": "automation",
+    "note": "§5.1：互动域离场表（interaction_offboards/interaction_offboard_audit/interaction_auth_state/interaction_runtime_controls）归 aidcp-automation 单写。本文件是 change offboard-saga 里这些离场表的 automation 侧单写者，aidcp-api 的 client-user-store 经窄接口注入调用。"
   },
   {
     "path": "src/interactions/offboarding-service.ts",
