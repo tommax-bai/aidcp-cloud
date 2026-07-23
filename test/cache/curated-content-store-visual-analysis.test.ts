@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
 import { CuratedContentStore } from '../../src/cache/curated-content-store.js';
-import type { ReferenceVisualAnalysis } from '../../src/publish-agent/visual-reference-types.js';
+import type { ReferenceVisualAnalysis } from '../../src/kernel/visual-reference-types.js';
 
 const analysis: ReferenceVisualAnalysis = {
   status: 'analyzed', schemaVersion: 'visual-reference-v3', cacheKey: 'cache', provider: 'dashscope', model: 'qwen3.7-plus', analyzedAt: 1000, sourceCount: 1,

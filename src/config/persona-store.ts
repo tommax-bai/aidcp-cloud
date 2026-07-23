@@ -21,6 +21,7 @@ import { loadSoulFromYaml, defaultSoulPath, type Soul } from '../soul/index.js';
 import { mirrorStateOf } from '../config-mirror-freshness.js';
 import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
 import { ensureCapabilitySchema } from '../schema/schema-capability.js';
+import type { PersonaBinding } from '../kernel/persona-binding.js';
 
 const { Pool } = pg;
 
@@ -37,7 +38,7 @@ const { Pool } = pg;
  * 为什么用具名字符串而不是 `boolean | undefined`：`undefined` 在 TypeScript 里太容易被 `!x` / `?? false`
  * 压成 `false`，而这类压平 typecheck 抓不到——那正是 change `persona-bound-tristate` 修过的那个 bug 的形状。
  */
-export type PersonaBinding = 'bound' | 'unbound' | 'unknown';
+export type { PersonaBinding };
 
 /** 单账号人设行（含审计字段，供面板非乐观回显）。 */
 export interface PersonaRow {

@@ -3,7 +3,7 @@ import type {
   ContentVisualCategoryBrief,
   ContentVisualCategoryKind,
   PortraitContentBrief,
-} from './visual-reference-types.js';
+} from '../kernel/visual-reference-types.js';
 
 export interface ContentVisualFallbackInput {
   subject: string;

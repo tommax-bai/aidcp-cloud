@@ -4,7 +4,7 @@ import { ImagePromptComposerRole } from '../../src/publish-agent/roles/image-pro
 import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
 import { REFERENCE_IMAGE_MAX_COUNT } from '../../src/publish-agent/reference-image-guidance.js';
 import type { PipelineFields, ImageSetPlan, ImageTheme, ImageCategory, TriggerInput, CoverCardPlan } from '../../src/publish-agent/types.js';
-import type { ReferenceVisualAnalysis } from '../../src/publish-agent/visual-reference-types.js';
+import type { ReferenceVisualAnalysis } from '../../src/kernel/visual-reference-types.js';
 
 const clock = () => 1700000000000;
 const silentLogger = { log() {}, warn() {}, error() {} };

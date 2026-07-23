@@ -985,9 +985,24 @@
     "note": "§4.6.1：收件箱 / 回复工作流 / 发送与回执 / 离场 saga 段"
   },
   {
+    "path": "src/kernel/content-schedule-mode.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/config/content-schedule-store.ts 析出：CONTENT_SCHEDULE_ACTION_MODES 常量 + ContentScheduleActionMode/ContentScheduleApprovalMode 纯类型，零 import、零 SQL、零活状态。排期存储（含建表读写 SQL）留 content-schedule-store.ts。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
+  },
+  {
+    "path": "src/kernel/feed-action.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/cache/interaction-feed-store.ts 析出：FeedAction 纯类型联合，零 import、零 SQL、零活状态。存储实现留 interaction-feed-store.ts。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
+  },
+  {
     "path": "src/kernel/interaction-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change lift-shared-contracts-to-kernel 抬入：原 src/interactions/types.ts（纯互动域类型/接口/枚举，零 import），被 automation/api 两层共 9 处跨边界 type-only 导入。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK1"
+  },
+  {
+    "path": "src/kernel/persona-binding.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/config/persona-store.ts 析出：PersonaBinding 三态纯类型，零 import、零 SQL、零活状态，被 automation/api 多边 type-only 共导。存储实现留 persona-store.ts。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
   },
   {
     "path": "src/kernel/persona-format.ts",
@@ -995,9 +1010,19 @@
     "note": "【待定稿裁决】change lift-shared-contracts-to-kernel 抬入：原 src/agents/persona-format.ts（纯人设兴趣格式化函数 tieredInterests，零 import、零副作用），被 6 个 automation 判定/撰写角色跨边界导入。满足 §4.7 kernel 准入。注：原 §4.7『src/agents/ api 2 文件 152 行』的行数配对（与 persona-auto-fill.ts 合计）随本次抬走失效，请求回写 §4.7 见 docpatch RK1"
   },
   {
+    "path": "src/kernel/pipeline-log-contract.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/publish-agent/publish-pipeline-log-store.ts 析出：PipelineLogEntry/PipelineLogSink 纯接口契约，零 import、零 SQL、零活状态。含 pg Pool + INSERT 的写入实现留 publish-pipeline-log-store.ts（api）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
+  },
+  {
     "path": "src/kernel/schema-capability-contract.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change extract-schema-capability-contract 从 src/schema/schema-capability.ts 析出的纯契约段（SchemaCapabilityStatus/SchemaShape/SchemaCapabilityVerdict/SchemaCapabilitySpec 类型 + classifySchemaCapability 纯函数 + SchemaCapabilityError 类 + isSchemaCapabilityError 守卫 + schemaSelfCreateEnabled 读 env），零 import、无 SQL 字面量、无 HTTP/LLM、无进程内活状态（selfCreateWarned 一次性告警单例留在 automation）。满足 §4.7 kernel 准入。连库探测执行段 probeSchemaShape/ensureCapabilitySchema 留 src/schema/schema-capability.ts（automation）。请求回写 §4.7 见 docpatch RK1"
+  },
+  {
+    "path": "src/kernel/schema-name.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change bulk-lift-all-shared-types 整文件抬入：原 src/schema/schema-name.ts（运行时 schema 名解析，纯字符串函数只读 env，零 import、无 SQL 字面量、零活状态）——正是 src/schema/ 消除路径 (a) 里应判 kernel 的纯段。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
   },
   {
     "path": "src/kernel/soul-types.ts",
@@ -1008,6 +1033,16 @@
     "path": "src/kernel/title-clamp.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change lift-shared-contracts-to-kernel 抬入：原 src/publish-agent/title-clamp.ts（纯字形安全标题截断工具，模块级 const 仅 Intl.Segmenter 无 Map/Set/Pool/定时器、零 SQL、零 import），被 2 处跨边界导入。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK1"
+  },
+  {
+    "path": "src/kernel/visual-reference-types.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change bulk-lift-all-shared-types 整文件抬入：原 src/publish-agent/visual-reference-types.ts（纯视觉参考分析类型/枚举 + 3 个 as const 枚举常量，零 import、零 SQL、零活状态）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
+  },
+  {
+    "path": "src/kernel/yaml.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change bulk-lift-all-shared-types 整文件抬入：原 src/soul/yaml.ts（域无关极简 YAML 解析器，纯函数，零 import、零 SQL、零活状态）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
   },
   {
     "path": "src/llm/index.ts",
@@ -1510,11 +1545,6 @@
     "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
   },
   {
-    "path": "src/publish-agent/visual-reference-types.ts",
-    "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
-  },
-  {
     "path": "src/publish-agent/wanxiang-client.ts",
     "layer": "content",
     "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
@@ -1720,11 +1750,6 @@
     "note": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
   },
   {
-    "path": "src/schema/schema-name.ts",
-    "layer": "automation",
-    "note": "【待定稿裁决】层随 src/schema/ 目录规则判 automation。本目录里除 schema-capability.ts 外唯一跨层被导入的文件：src/cache/curated-content-store.ts（content）引它的 qualifiedObjectName，产生 1 条 content→automation 豁免。消除路径与 schema-capability.ts 同——它是纯字符串拼装、**无 SQL 字面量**，若走消除路径 (a) 可与析出的纯判定段一并判 kernel。请求回写 §4.7 见 docpatch R4"
-  },
-  {
     "path": "src/server.ts",
     "layer": "composition",
     "note": "§4.7 src/ 根文件：组合根，无继承者"
@@ -1751,11 +1776,6 @@
   },
   {
     "path": "src/soul/writing-language.ts",
-    "layer": "api",
-    "note": "§4.7：人设文档模型（7/7 api）"
-  },
-  {
-    "path": "src/soul/yaml.ts",
     "layer": "api",
     "note": "§4.7：人设文档模型（7/7 api）"
   },

@@ -7,7 +7,7 @@ import type { ImageResult } from '../../src/publish-agent/image-provider.js';
 import type { ObjectStore, PutOptions, PutResult } from '../../src/storage/object-store.js';
 import type { TextCardRenderer, TextCardRenderResult, TextCardSourceStyle } from '../../src/render/text-card.js';
 import type { VisualFidelityAuditor } from '../../src/publish-agent/visual-fidelity-auditor.js';
-import type { VisualAuditAttempt } from '../../src/publish-agent/visual-reference-types.js';
+import type { VisualAuditAttempt } from '../../src/kernel/visual-reference-types.js';
 
 const clock = () => 1700000000000;
 const silentLogger = { log() {}, warn() {}, error() {} };

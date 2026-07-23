@@ -8,7 +8,7 @@ import {
   normalizeReferenceVisualAnalysis,
   visualAnalysisCacheKey,
 } from '../../src/publish-agent/visual-reference-analyzer.js';
-import type { ReferenceVisualAnalysis } from '../../src/publish-agent/visual-reference-types.js';
+import type { ReferenceVisualAnalysis } from '../../src/kernel/visual-reference-types.js';
 
 const images = [
   { index: 4, sourceUrl: 'https://img.test/photo.jpg', capturedAt: 100 },

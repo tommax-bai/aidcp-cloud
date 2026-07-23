@@ -23,7 +23,7 @@ import pg from 'pg';
 // 直连 kernel（content→kernel 恒允许），取值逐字不变，消去 content→automation 这一跨边界豁免。
 import { DEFAULT_PG_CONFIG } from './pg-config.js';
 import type { DelegatedExecutionTarget } from '../delegated-task/types.js';
-import type { ReferenceVisualAnalysis } from '../publish-agent/visual-reference-types.js';
+import type { ReferenceVisualAnalysis } from '../kernel/visual-reference-types.js';
 import type { VisualAnalysisAnchor } from '../publish-agent/visual-reference-analyzer.js';
 import { normalizeReferenceVisualAnalysis } from '../publish-agent/visual-reference-analyzer.js';
 import {
@@ -35,7 +35,7 @@ import {
 import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 // 硬编码 `'public.'` 收口到唯一解析点（change cloud-schema-migration-executor 任务 5.5 / D8 第 4 条）：
 // 改 search_path 救不了写死在字面量里的 schema 名，搬 schema 时它会静默指错地方。
-import { qualifiedObjectName } from '../schema/schema-name.js';
+import { qualifiedObjectName } from '../kernel/schema-name.js';
 
 const { Pool } = pg;
 

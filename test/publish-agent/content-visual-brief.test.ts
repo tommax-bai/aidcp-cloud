@@ -7,7 +7,7 @@ import {
   formatContentVisualCategoryBrief,
   normalizeContentVisualCategoryBrief,
 } from '../../src/publish-agent/content-visual-brief.js';
-import type { ContentVisualCategoryBrief, ContentVisualCategoryKind } from '../../src/publish-agent/visual-reference-types.js';
+import type { ContentVisualCategoryBrief, ContentVisualCategoryKind } from '../../src/kernel/visual-reference-types.js';
 
 const fixtures: Record<ContentVisualCategoryKind, ContentVisualCategoryBrief> = {
   portrait_photo: { kind: 'portrait_photo', facialExpression: '嘴角克制', gazeDirection: '侧视', headAngle: '微侧', bodyLanguage: '肩颈放松', gesture: '手指自然放松', poseEnergy: '低唤醒但有张力' },

@@ -1,6 +1,6 @@
 import type { PersonaGenerator } from '../agents/persona-generator.js';
 import type { PanelPersonaConfig } from '../panel/types.js';
-import type { PersonaBinding } from './persona-store.js';
+import type { PersonaBinding } from '../kernel/persona-binding.js';
 import { normalizePlatformId } from '../platform/index.js';
 import { loadSoulFromYaml } from '../soul/index.js';
 import { resolveLikeAffinity } from '../soul/like-affinity.js';

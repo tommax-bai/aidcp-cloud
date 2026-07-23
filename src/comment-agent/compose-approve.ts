@@ -16,7 +16,7 @@ import { overlapsAny } from '../agents/comment-de-ai-flavor.js';
 import type { CommentApprovalPort } from '../agents/comment-approval-gate.js';
 import { buildCommentApprovalRequestId } from '../agents/comment-approval-request-id.js';
 import type { NoteData } from '../agents/content-curator-role.js';
-import type { ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
+import type { ContentScheduleApprovalMode } from '../kernel/content-schedule-mode.js';
 import type { NoteForComment, OnPageComment } from './comment-task-runner.js';
 import { sendAutoApproveNotificationBestEffort } from './auto-approve-notification.js';
 

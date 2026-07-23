@@ -18,9 +18,9 @@ import {
   type RiskStatus,
   type RiskQuotaLevel,
 } from '../risk/index.js';
-import type { FeedAction } from '../cache/interaction-feed-store.js';
+import type { FeedAction } from '../kernel/feed-action.js';
 import type { AlertSeverity } from '../feishu/types.js';
-import type { VisualReferenceAudit } from '../publish-agent/visual-reference-types.js';
+import type { VisualReferenceAudit } from '../kernel/visual-reference-types.js';
 import {
   resolveAccountDisplayName,
   type AccountDisplayNameSource,

@@ -15,8 +15,8 @@
 import type { PublishResult, PublishSourceReference, ReferenceImageSnapshot, TriggerInput } from './types.js';
 import type { Soul } from '../kernel/soul-types.js';
 import type { CuratedContentTypeFilter, CuratedSelectItem } from '../cache/curated-content-store.js';
-import type { ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
-import type { PersonaBinding } from '../config/persona-store.js';
+import type { ContentScheduleApprovalMode } from '../kernel/content-schedule-mode.js';
+import type { PersonaBinding } from '../kernel/persona-binding.js';
 import { PERSONA_UNAVAILABLE_REASON } from '../config/mirror-stop-work.js';
 import type { PlatformId } from '../platform/index.js';
 import { referenceImagesForGeneration, REFERENCE_IMAGE_MAX_COUNT } from './reference-image-guidance.js';

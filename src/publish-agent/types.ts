@@ -1,6 +1,6 @@
 import type { Soul } from '../kernel/soul-types.js';
 import type { CuratedReferenceImageFormGuess, TextCardTranscription } from '../cache/curated-content-store.js';
-import type { ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
+import type { ContentScheduleApprovalMode } from '../kernel/content-schedule-mode.js';
 import type { PlatformId } from '../platform/index.js';
 import type { DeploymentTarget } from '../deployment-target.js';
 import type { TextCardSourceStyle } from '../render/text-card.js';
@@ -12,7 +12,7 @@ import type {
   VisualReferenceBinding,
   VisualSetBrief,
   VisualSlotRole,
-} from './visual-reference-types.js';
+} from '../kernel/visual-reference-types.js';
 
 // ─── 从 publish/types.ts 迁移的类型 ────────────────────────────────────────────
 
@@ -874,5 +874,5 @@ export interface OrchestratorDeps {
   idGen?: () => string;
   pipelineTimeoutMs?: number;
   /** 角色执行日志写入口（change publish-pipeline-observability）；缺省则不落库、行为不变。 */
-  pipelineLogSink?: import('./publish-pipeline-log-store.js').PipelineLogSink;
+  pipelineLogSink?: import('../kernel/pipeline-log-contract.js').PipelineLogSink;
 }

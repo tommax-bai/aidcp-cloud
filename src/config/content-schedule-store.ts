@@ -34,6 +34,11 @@ import {
   type ScheduledAutomationAction,
 } from '../platform/index.js';
 import { ensureCapabilitySchema } from '../schema/schema-capability.js';
+import {
+  CONTENT_SCHEDULE_ACTION_MODES,
+  type ContentScheduleActionMode,
+  type ContentScheduleApprovalMode,
+} from '../kernel/content-schedule-mode.js';
 
 const { Pool } = pg;
 
@@ -42,9 +47,8 @@ export const CONTENT_POST_DAILY_CAP_MAX = SCHEDULED_CONTENT_DAILY_CAP_MAX;
 /** 联系评论日上限硬上界（change content-schedule-group-comments）：协同 spam 敏感动作，与 50 刻意分开；UI 建议 ≤3。 */
 export const CONTACT_COMMENT_DAILY_CAP_MAX = SCHEDULED_CONTACT_COMMENT_DAILY_CAP_MAX;
 
-export const CONTENT_SCHEDULE_ACTION_MODES = ['off', 'review', 'auto_approve'] as const;
-export type ContentScheduleActionMode = (typeof CONTENT_SCHEDULE_ACTION_MODES)[number];
-export type ContentScheduleApprovalMode = Exclude<ContentScheduleActionMode, 'off'>;
+export { CONTENT_SCHEDULE_ACTION_MODES };
+export type { ContentScheduleActionMode, ContentScheduleApprovalMode };
 
 /** 全局「内容可自动时段」行。contentActiveMask：168 格 '0'/'1'；null = 未配 = 全 0 = 不自动（fail-closed）。 */
 export interface ContentScheduleGlobalRow {

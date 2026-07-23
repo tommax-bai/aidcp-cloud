@@ -12,7 +12,7 @@ import {
   type VisualFrameSpec,
   type VisualStyleBible,
   type VisualStyleCluster,
-} from './visual-reference-types.js';
+} from '../kernel/visual-reference-types.js';
 
 export const VISUAL_REFERENCE_ANALYZER_ROLE = 'publish:VisualReferenceAnalyzer';
 export const DEFAULT_REFERENCE_VISUAL_PROVIDER = 'dashscope';

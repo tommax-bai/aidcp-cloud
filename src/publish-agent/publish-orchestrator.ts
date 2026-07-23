@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { PipelineContext } from './pipeline-context.js';
 import type { BasePublishRole } from './roles/base-role.js';
-import type { PipelineLogSink } from './publish-pipeline-log-store.js';
+import type { PipelineLogSink } from '../kernel/pipeline-log-contract.js';
 import type {
   PipelineFields,
   PipelineStatus,

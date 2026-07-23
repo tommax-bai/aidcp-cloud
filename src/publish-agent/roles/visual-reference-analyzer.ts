@@ -1,8 +1,8 @@
 import { BasePublishRole } from './base-role.js';
 import type { RoleConfig } from './base-role.js';
 import type { PipelineFields, TriggerInput } from '../types.js';
-import type { ReferenceVisualAnalysis } from '../visual-reference-types.js';
-import { VISUAL_ANALYSIS_SCHEMA_VERSION } from '../visual-reference-types.js';
+import type { ReferenceVisualAnalysis } from '../../kernel/visual-reference-types.js';
+import { VISUAL_ANALYSIS_SCHEMA_VERSION } from '../../kernel/visual-reference-types.js';
 import type { VisualReferenceAnalyzer } from '../visual-reference-analyzer.js';
 
 const VISUAL_ANALYZER_ROLE_TIMEOUT_MS = Number(process.env.AIDCP_REFERENCE_VISUAL_ROLE_TIMEOUT_MS ?? 300_000);

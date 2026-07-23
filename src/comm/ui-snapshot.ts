@@ -30,7 +30,7 @@ import {
   type PersonaWritingLanguage,
 } from './protocol.js';
 import { randomUUID } from 'node:crypto';
-import type { PersonaBinding } from '../config/persona-store.js';
+import type { PersonaBinding } from '../kernel/persona-binding.js';
 
 /** 云端可推送的发布审批状态（published 由边缘同页取到 postId 后本地发射，不在此列）。 */
 export type PublishUiState = 'pending' | 'approved' | 'submitted' | 'rejected' | 'failed';

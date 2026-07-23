@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { resolveEnvPgConfig } from '../cache/pg-config.js';
-import { qualifiedObjectName } from '../schema/schema-name.js';
+import { qualifiedObjectName } from '../kernel/schema-name.js';
 import {
   INTERACTION_PLATFORM,
   InteractionError,

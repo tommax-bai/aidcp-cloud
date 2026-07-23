@@ -8,7 +8,7 @@ import type {
   VisualAuditScores,
   VisualFrameSpec,
   VisualSlotRole,
-} from './visual-reference-types.js';
+} from '../kernel/visual-reference-types.js';
 import { categorySafetyInstruction, formatContentVisualCategoryBrief } from './content-visual-brief.js';
 
 export const VISUAL_FIDELITY_AUDITOR_ROLE = 'publish:VisualFidelityAuditor';

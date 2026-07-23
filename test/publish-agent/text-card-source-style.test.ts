@@ -4,7 +4,7 @@ import {
   deriveTextCardSourceStyle,
   strengthenTextCardSourceStyle,
 } from '../../src/publish-agent/text-card-source-style.js';
-import type { ReferenceVisualAnalysis, VisualFrameSpec } from '../../src/publish-agent/visual-reference-types.js';
+import type { ReferenceVisualAnalysis, VisualFrameSpec } from '../../src/kernel/visual-reference-types.js';
 
 const analysis: ReferenceVisualAnalysis = {
   status: 'analyzed',

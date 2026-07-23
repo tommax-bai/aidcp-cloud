@@ -10,7 +10,7 @@ import {
   VISUAL_SLOT_ROLES,
   type VisualSetBrief,
   type VisualSlotRole,
-} from '../visual-reference-types.js';
+} from '../../kernel/visual-reference-types.js';
 import {
   createFallbackContentVisualBrief,
   ensureContentVisualCategory,

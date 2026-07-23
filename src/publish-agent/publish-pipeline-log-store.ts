@@ -12,23 +12,11 @@
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/pg-anchor-cache.js';
 
+import type { PipelineLogEntry, PipelineLogSink } from '../kernel/pipeline-log-contract.js';
+
 const { Pool } = pg;
 
-/** 单条角色执行日志（triggeredAt/completedAt 为毫秒时间戳）。 */
-export interface PipelineLogEntry {
-  runId: string;
-  roleName: string;
-  triggeredAt: number;
-  completedAt: number;
-  success: boolean;
-  errorMessage: string | null;
-  durationMs: number;
-}
-
-/** 角色执行日志写入接口（便于单测打桩 / 注入；未注入时 orchestrator 行为退化为现状、不报错）。 */
-export interface PipelineLogSink {
-  append(entry: PipelineLogEntry): Promise<void>;
-}
+export type { PipelineLogEntry, PipelineLogSink };
 
 export interface PublishPipelineLogStoreOptions {
   host?: string;

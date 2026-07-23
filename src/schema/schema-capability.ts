@@ -28,7 +28,7 @@ import {
 } from '../kernel/schema-capability-contract.js';
 import { mergeCreatedObjects } from './ddl-objects.js';
 import { readTableColumns, type SchemaQueryable } from './pg-catalog.js';
-import { runtimeSchemaName } from './schema-name.js';
+import { runtimeSchemaName } from '../kernel/schema-name.js';
 
 // 纯契约在 kernel 定义；此处原样 re-export，保住同层既有 import 路径。
 export {

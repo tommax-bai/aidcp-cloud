@@ -12,7 +12,14 @@
       "src/kernel/interaction-types.ts",
       "src/kernel/persona-format.ts",
       "src/kernel/title-clamp.ts",
-      "src/kernel/schema-capability-contract.ts"
+      "src/kernel/schema-capability-contract.ts",
+      "src/kernel/visual-reference-types.ts",
+      "src/kernel/yaml.ts",
+      "src/kernel/schema-name.ts",
+      "src/kernel/persona-binding.ts",
+      "src/kernel/feed-action.ts",
+      "src/kernel/pipeline-log-contract.ts",
+      "src/kernel/content-schedule-mode.ts"
     ]
   },
   "rejected": [

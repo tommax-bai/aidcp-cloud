@@ -4,7 +4,7 @@ import { ImageGeneratorRole } from '../../src/publish-agent/roles/image-generato
 import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
 import type { PipelineFields, ImagePlan, TriggerInput } from '../../src/publish-agent/types.js';
 import type { ImageGenerateOptions, ImageResult } from '../../src/publish-agent/image-provider.js';
-import type { VisualAuditAttempt, VisualReferenceBinding } from '../../src/publish-agent/visual-reference-types.js';
+import type { VisualAuditAttempt, VisualReferenceBinding } from '../../src/kernel/visual-reference-types.js';
 import type { VisualAuditInput } from '../../src/publish-agent/visual-fidelity-auditor.js';
 
 const clock = () => 1700000000000;

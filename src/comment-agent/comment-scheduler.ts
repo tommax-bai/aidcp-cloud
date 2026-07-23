@@ -15,7 +15,7 @@
 
 import type { EventBus } from '../event-bus/index.js';
 import type { Soul } from '../kernel/soul-types.js';
-import type { PersonaBinding } from '../config/persona-store.js';
+import type { PersonaBinding } from '../kernel/persona-binding.js';
 import { PERSONA_UNAVAILABLE_REASON } from '../config/mirror-stop-work.js';
 import { CommentSearchTermGenerator, type RoleLlmLike } from '../agents/comment-search-term-generator.js';
 import { CommentTargetPicker, type CommentCandidateCard } from '../agents/comment-target-picker.js';
@@ -32,7 +32,7 @@ import { buildEdgeCommentSteps, type EdgePusher, type CommentDedup } from './edg
 import { buildFacebookEdgeSteps } from './facebook-edge-steps.js';
 import { buildComposeAndApprove, type AutoApproveCommentNotification, type PostProcessorLike } from './compose-approve.js';
 import { sendAutoApproveNotificationBestEffort } from './auto-approve-notification.js';
-import type { ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
+import type { ContentScheduleApprovalMode } from '../kernel/content-schedule-mode.js';
 import type { CuratedSampleForTerms } from '../agents/comment-search-term-generator.js';
 import type { CuratedContentTypeFilter } from '../cache/curated-content-store.js';
 import {

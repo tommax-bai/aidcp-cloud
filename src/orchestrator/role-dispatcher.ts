@@ -12,7 +12,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { PersonaBinding } from '../config/persona-store.js';
+import type { PersonaBinding } from '../kernel/persona-binding.js';
 import {
   CONFIG_MIRROR_STALE_REASON,
   PERSONA_UNAVAILABLE_REASON,

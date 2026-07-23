@@ -10,7 +10,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { parseYaml, type YamlValue } from './yaml.js';
+import { parseYaml, type YamlValue } from '../kernel/yaml.js';
 import type {
   Soul,
   SoulIdentity,

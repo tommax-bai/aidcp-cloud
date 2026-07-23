@@ -144,7 +144,6 @@
     "src/publish-agent/types.ts",
     "src/publish-agent/visual-fidelity-auditor.ts",
     "src/publish-agent/visual-reference-analyzer.ts",
-    "src/publish-agent/visual-reference-types.ts",
     "src/publish-agent/wanxiang-client.ts",
     "src/time/shanghai-day.ts",
     "src/time/source-published-time.ts"

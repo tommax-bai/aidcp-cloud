@@ -4,7 +4,7 @@ import type {
   TextCardBulletPresentation,
   TextCardSourceStyle,
 } from '../render/text-card.js';
-import type { ReferenceVisualAnalysis, VisualFrameSpec } from './visual-reference-types.js';
+import type { ReferenceVisualAnalysis, VisualFrameSpec } from '../kernel/visual-reference-types.js';
 
 function searchable(frame: VisualFrameSpec, analysis: ReferenceVisualAnalysis): string {
   const cluster = analysis.styleClusters?.find((item) => item.id === frame.clusterId);

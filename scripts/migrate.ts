@@ -30,7 +30,7 @@ import {
   type MigrationFile,
 } from '../src/schema/migration-plan.js';
 import { declaredObjects, diffSchema, readActualSchema } from '../src/schema/schema-inspect.js';
-import { runtimeSchemaName } from '../src/schema/schema-name.js';
+import { runtimeSchemaName } from '../src/kernel/schema-name.js';
 
 const { Client } = pg;
 

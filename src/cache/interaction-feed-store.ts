@@ -18,11 +18,11 @@
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from './pg-anchor-cache.js';
 import { ensureCapabilitySchema } from '../schema/schema-capability.js';
+import type { FeedAction } from '../kernel/feed-action.js';
 
 const { Pool } = pg;
 
-/** 进入展示账本的四类动作（comment_like 刻意不进：无按笔记/作者语义）。 */
-export type FeedAction = 'like' | 'collect' | 'comment' | 'follow';
+export type { FeedAction };
 
 export const INTERACTION_FEED_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS interaction_feed (

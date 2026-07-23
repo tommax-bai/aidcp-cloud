@@ -20,7 +20,7 @@ import type {
   VisualReferenceBinding,
   VisualReferenceBindingItem,
   VisualSlotAudit,
-} from '../visual-reference-types.js';
+} from '../../kernel/visual-reference-types.js';
 
 /**
  * ImageGenerator — 配图「执行」（change publish-multi-image：单图 → 并行多图）。

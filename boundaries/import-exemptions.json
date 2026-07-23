@@ -1,7 +1,7 @@
 {
   "seedTotal": 271,
   "seedUnplanned": 271,
-  "frozenTotal": 222,
+  "frozenTotal": 209,
   "recordedAt": "2026-07-23",
   "raises": [],
   "entries": [
@@ -164,12 +164,6 @@
       "eliminatedBy": null
     },
     {
-      "from": "src/agents/persona-generator.ts",
-      "to": "src/soul/yaml.ts",
-      "reason": "seed（content -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
       "from": "src/agents/valuable-comment-archivist.ts",
       "to": "src/agents/base-role.ts",
       "reason": "seed（content -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
@@ -218,13 +212,6 @@
       "reason": "seed（content -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/cache/curated-content-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null,
       "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
-    },
-    {
-      "from": "src/cache/curated-content-store.ts",
-      "to": "src/schema/schema-name.ts",
-      "reason": "seed（content -> automation）：由 change cloud-schema-migration-executor 新增的 src/schema/schema-name.ts 被 src/cache/curated-content-store.ts 导入（qualifiedObjectName）；本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null,
-      "note": "src/schema/ 里除 schema-capability.ts 外唯一的跨层被导入点：本文件是纯字符串拼装、**无 SQL 字面量**，若走消除路径 (a) 可与析出的纯判定段一并判 kernel，本条随之消除。eliminatedBy 暂为 null——同上，控制仓尚未立项承接 §4.7 裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
     },
     {
       "from": "src/cache/notification-contact-store.ts",
@@ -340,22 +327,9 @@
       "eliminatedBy": null
     },
     {
-      "from": "src/comm/ui-snapshot.ts",
-      "to": "src/config/persona-store.ts",
-      "reason": "由 change config-mirror-cross-process-invalidation 新增（aidcp-cloud 860a951 把人设镜像改成三态、取值口统一走 personaStore）：automation 侧运行态快照直读 api 属主的人设配置存储。",
-      "eliminatedBy": null,
-      "note": "消除动作：§5.1「人设、写作语言（persona_config、soul_*）」归 aidcp-api；判定路径按 §11.4 要求二取本地只读副本。本条与 src/comm/ui-snapshot.ts、src/comment-agent/comment-scheduler.ts、src/orchestrator/role-dispatcher.ts 三处同簇（共 3 条），MUST 同批换成只读副本 / 窄接口。"
-    },
-    {
       "from": "src/comment-agent/comment-scheduler.ts",
       "to": "src/cache/curated-content-store.ts",
       "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/comment-agent/comment-scheduler.ts",
-      "to": "src/config/content-schedule-store.ts",
-      "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
     },
     {
@@ -370,19 +344,6 @@
       "reason": "由 change config-mirror-cross-process-invalidation 新增：automation 侧评论调度器在放行新平台动作前问统一停手判据。",
       "eliminatedBy": null,
       "note": "消除动作二选一，先等定稿裁决：① §4.6.8 若按「随消费方走」的同一判据把 src/config/mirror-stop-work.ts 改判 automation，本条与同簇另 2 条直接消失（净额 0，理由写在 ownership-rules.json 该文件的 basis）；② 否则 automation 侧改为经 api 窄内部接口取停手判据。裁决请求见 docpatch R1。本条与 src/comment-agent/comment-scheduler.ts、src/delegated-task/worker.ts、src/orchestrator/role-dispatcher.ts 三处同簇（共 3 条）。"
-    },
-    {
-      "from": "src/comment-agent/comment-scheduler.ts",
-      "to": "src/config/persona-store.ts",
-      "reason": "由 change config-mirror-cross-process-invalidation 新增（aidcp-cloud 860a951）：automation 侧评论调度器改经 personaStore 判人设绑定三态。",
-      "eliminatedBy": null,
-      "note": "消除动作：§5.1「人设、写作语言（persona_config、soul_*）」归 aidcp-api；判定路径按 §11.4 要求二取本地只读副本。本条与 src/comm/ui-snapshot.ts、src/comment-agent/comment-scheduler.ts、src/orchestrator/role-dispatcher.ts 三处同簇（共 3 条），MUST 同批换成只读副本 / 窄接口。"
-    },
-    {
-      "from": "src/comment-agent/compose-approve.ts",
-      "to": "src/config/content-schedule-store.ts",
-      "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
     },
     {
       "from": "src/comment-agent/facebook-comment-composer-prompt.ts",
@@ -904,13 +865,6 @@
     },
     {
       "from": "src/orchestrator/role-dispatcher.ts",
-      "to": "src/config/persona-store.ts",
-      "reason": "由 change config-mirror-cross-process-invalidation 新增（aidcp-cloud 860a951）：automation 侧角色调度器改经 personaStore 判人设绑定三态。",
-      "eliminatedBy": null,
-      "note": "消除动作：§5.1「人设、写作语言（persona_config、soul_*）」归 aidcp-api；判定路径按 §11.4 要求二取本地只读副本。本条与 src/comm/ui-snapshot.ts、src/comment-agent/comment-scheduler.ts、src/orchestrator/role-dispatcher.ts 三处同簇（共 3 条），MUST 同批换成只读副本 / 窄接口。"
-    },
-    {
-      "from": "src/orchestrator/role-dispatcher.ts",
       "to": "src/llm/qwen.ts",
       "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
@@ -966,20 +920,8 @@
     },
     {
       "from": "src/panel/panel-store.ts",
-      "to": "src/cache/interaction-feed-store.ts",
-      "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/panel/panel-store.ts",
       "to": "src/cache/pg-anchor-cache.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/panel/panel-store.ts",
-      "to": "src/publish-agent/visual-reference-types.ts",
-      "reason": "seed（api -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
     },
     {
@@ -1224,12 +1166,6 @@
       "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
     },
     {
-      "from": "src/publish-agent/publish-orchestrator.ts",
-      "to": "src/publish-agent/publish-pipeline-log-store.ts",
-      "reason": "seed（content -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
       "from": "src/publish-agent/publish-pipeline-log-store.ts",
       "to": "src/cache/pg-anchor-cache.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
@@ -1296,12 +1232,6 @@
       "eliminatedBy": null
     },
     {
-      "from": "src/publish-agent/roles/base-role.ts",
-      "to": "src/publish-agent/publish-pipeline-log-store.ts",
-      "reason": "seed（content -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
       "from": "src/publish-agent/roles/content-creator.ts",
       "to": "src/soul/writing-language.ts",
       "reason": "seed（content -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
@@ -1357,20 +1287,8 @@
     },
     {
       "from": "src/publish-agent/types.ts",
-      "to": "src/config/content-schedule-store.ts",
-      "reason": "seed（content -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/publish-agent/types.ts",
       "to": "src/platform/index.ts",
       "reason": "seed（content -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/publish-agent/types.ts",
-      "to": "src/publish-agent/publish-pipeline-log-store.ts",
-      "reason": "seed（content -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
     },
     {
