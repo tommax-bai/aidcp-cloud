@@ -28,6 +28,7 @@
     { "dir": "src/delegated-task/", "layer": "automation", "newFile": "inherit", "basis": "§4.7：认领型 worker 范式（10/10 automation）" },
     { "dir": "src/event-bus/", "layer": "automation", "newFile": "inherit", "basis": "§4.7：进程内总线，不跨服务（2/2 automation）" },
     { "dir": "src/feishu/", "layer": "api", "newFile": "inherit", "basis": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）" },
+    { "dir": "src/gateway/", "layer": "api", "newFile": "inherit", "basis": "§4.7 基线 sha 之后由 change block2-data-gateway 新增的目录：api/panel 收口取数的数据网关，只聚合 kernel 读端口、只 import kernel 契约（不连 transport/automation），无 SQL、无进程内活状态。整目录归 api、新文件 inherit。MUST 回写 §4.7" },
     { "dir": "src/hot-lead/", "layer": "automation", "newFile": "inherit", "basis": "§4.7：浏览闭环内触发（2/2 automation）" },
     { "dir": "src/interactions/", "layer": "automation", "newFile": "adjudicate", "basis": "§4.6.1：收件箱 / 回复工作流 / 发送与回执 / 离场 saga 段" },
     { "dir": "src/llm/", "layer": "content", "newFile": "inherit", "basis": "§4.7：模型客户端（4/4 content）" },

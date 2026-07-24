@@ -850,6 +850,11 @@
     "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
   },
   {
+    "path": "src/gateway/data-gateway.ts",
+    "layer": "api",
+    "note": "§4.7 基线 sha 之后由 change block2-data-gateway 新增的目录：api/panel 收口取数的数据网关，只聚合 kernel 读端口、只 import kernel 契约（不连 transport/automation），无 SQL、无进程内活状态。整目录归 api、新文件 inherit。MUST 回写 §4.7"
+  },
+  {
     "path": "src/hot-lead/heat-velocity.ts",
     "layer": "automation",
     "note": "§4.7：浏览闭环内触发（2/2 automation）"
@@ -1945,12 +1950,22 @@
     "note": "§4.7 kernel 花名册：无业务语义。kernel 花名册按 §4.7 是封闭名单，新增成员 MUST 走「析出 + 回写 §4.7」通道，故本目录新增文件一律待裁决"
   },
   {
+    "path": "src/transport/curated-content-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
     "path": "src/transport/delegated-task-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },
   {
     "path": "src/transport/event-outbox.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/interaction-store-reader-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },

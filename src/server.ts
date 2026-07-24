@@ -308,6 +308,12 @@ import {
   LoginRateLimiter,
   projectClientPublishQueue,
 } from './client-auth/index.js';
+// Block② 数据网关（决定①：api/panel 收口取数）。默认 local ⇒ getter 取到的就是原本地实例、零 HTTP、零行为变更。
+// 组合根（本文件属 composition 层）可合法 import transport 的 http 客户端，仅在 mode='http'（拆进程 2d）时经 remote thunk 构造。
+import { DataGateway, gatewayModeFromEnv } from './gateway/data-gateway.js';
+import { InternalHttpClient } from './transport/internal-http.js';
+import { CuratedContentHttpClient } from './transport/curated-content-http.js';
+import { DelegatedTaskHttpClient } from './transport/delegated-task-http.js';
 import { PgAlertStore } from './alerts/index.js';
 // 跨进程配置镜像失效通道（change config-mirror-cross-process-invalidation）。
 import pg from 'pg';
@@ -615,6 +621,8 @@ interface CompositionContext {
   imageProvider: RoutingImageProvider;
   interactionCustomerApi: InteractionCustomerApi | undefined;
   interactionFeedStore: InteractionFeedStore | undefined;
+  // Block② 数据网关：收件箱读侧窄面本地实例（segC 构造），additive 挂 ctx 供 segD 组建 DataGateway 聚合；不改其构造/时机。
+  interactionStore: InteractionStore | undefined;
   interactionInternalApi: { handle: (req: import("http").IncomingMessage, res: import("http").ServerResponse<import("http").IncomingMessage>, actor: string) => Promise<boolean>; } | undefined;
   interactionOffboarding: InteractionOffboardingService | undefined;
   interactionPermissionOverview: ReturnType<typeof buildInteractionPermissionOverview>;
@@ -2228,6 +2236,9 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     interactionInbox = undefined;
     console.warn(`[aidcp-cloud] 入站 interaction 域未启用: ${error instanceof Error ? error.message : String(error)}`);
   }
+  // Block② 数据网关聚合用：把收件箱读实例（可能 undefined）additive 挂到 ctx，供 segD 组建 DataGateway。
+  // 不改其构造/时机/顺序，也不改本段既有 interaction 消费者的注入（那些仍直连本地实例，见 docpatch residual）。
+  ctx.interactionStore = interactionStore;
 
   // 数据保留清理（change retention-local-purge）：原先面板层 retention-sweeper 在此跨域调三个别的
   // 属主 store 的 purge——驱动方跨界。已收口为各属主 store 在自己 init() 里自驱本地日频 purge
@@ -5234,6 +5245,28 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
 
 async function segDApiServing(ctx: CompositionContext): Promise<void> {
   const { accountDisplayName, accountPersonaService, accountStore, alertStore, approvalPolicyStore, approvePublishForClient, billingPriceRefresh, botChatStore, botChatsProvider, buildModelConfigView, buildTodayUsageForAccount, captchaAssist, categoryConfigPanel, clientUserStore, commandFace, commentScheduler, conceptStore, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, debugPort, delegatedTaskService, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigPanel, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, messenger, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigPanel, panelUsers, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, probeModel, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigPanel, readApprovalDispatchProjection, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resolveAccountChatId, resolveController, resumeConfigPanel, riskRegistry, roleConfigPanel, rolePromptProvider, server, sessionLimitPanel, tokenUsageStore, triggerPublishDispatchOnApprove, writeApprovalDecision } = ctx;
+  // ── Block② 数据网关（决定①：api/panel 收口取数）─────────────────────────────
+  // 聚合三个 kernel 读端口（精选库 / 委托任务 / 收件箱），api 消费者从这里取端口注入。
+  // 默认 mode='local'（AIDCP_GATEWAY_MODE!=='http'）⇒ getter 返回的就是上面 ctx 里的本地实例本身、
+  // 零 HTTP、不起任何内部 server（内部 HTTP server 的 listen 属 2d 拆进程，本刀不启动它）、运行时零行为变更。
+  // remote thunk 仅在 http 模式构造 client（拆进程后 2d）；此处 baseUrl 走 env，缺省不提供 ⇒ 保持 local。
+  const gatewayMode = gatewayModeFromEnv();
+  const gatewayBaseUrl = readEnvString('AIDCP_GATEWAY_BASE_URL');
+  const dataGateway = new DataGateway({
+    curatedContentLocal: curatedContentStore,
+    delegatedTaskLocal: delegatedTaskService,
+    interactionReaderLocal: ctx.interactionStore,
+    mode: gatewayMode,
+    ...(gatewayMode === 'http' && gatewayBaseUrl
+      ? {
+          remote: {
+            curatedContentReader: () => new CuratedContentHttpClient(new InternalHttpClient(gatewayBaseUrl)),
+            delegatedTaskService: () => new DelegatedTaskHttpClient(new InternalHttpClient(gatewayBaseUrl)),
+          },
+        }
+      : {}),
+  });
+
   // ── 面板 API 层（管理后台后端，进程内、独立端口、JWT）──────────────────────
   // 未设置 AIDCP_PANEL_PORT 则禁用（默认不开新端口）；启动失败非致命，绝不连累边-云闭环。
   const panelPort = readEnvPort('AIDCP_PANEL_PORT');
@@ -5263,7 +5296,8 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           }),
           publishOrchestrator,
           publishDispatcher,
-          delegatedTasks: delegatedTaskService,
+          // Block② 数据网关收口：默认 local ⇒ dataGateway.delegatedTaskService === delegatedTaskService，零行为变更。
+          delegatedTasks: dataGateway.delegatedTaskService,
           preflightApprovePublish: (requestId) => preflightApprovePublish(requestId),
           writeApprovalSignal: async (requestId, approved, payload, decidedBy) => {
             const result = await writeApprovalDecision(requestId, approved, payload, {
@@ -5491,6 +5525,8 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           botChats: botChatsProvider,
           // 精选内容后台管理（change curated-content-admin-page）。同一精选语料 store 实例：读=按账号列表/筛选面、写=删单条/清空壳行。
           // init 失败留 undefined 时面板自然 503，绝不崩边-云闭环。
+          // 注：面板 curatedContent 走更宽的 PanelCuratedContent 端口（含 listForPanel/facets/delete/clear），
+          // 非本网关聚合的窄读端口 CuratedContentReader，故不经 dataGateway 收口，保留直连（见 docpatch residual）。
           curatedContent: curatedContentStore,
           // 精选笔记行级定向动作（change curated-note-actions）：参照洗稿创作 + 定向评论（内容/带联系方式）。
           // HTTP 只回**触发态**（生成段可达数分钟，不可同步等）；终态沿既有渠道（发布=待审草稿+人审卡+异步结果卡、
@@ -5646,8 +5682,9 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
                 accountStore!.setOperatorAlias!(accountId, alias),
             },
           } : {}),
-          delegatedTasks: delegatedTaskService,
-          curatedContent: curatedContentStore,
+          // Block② 数据网关收口：默认 local ⇒ 取到的就是原本地实例（=== delegatedTaskService / curatedContentStore），零行为变更。
+          delegatedTasks: dataGateway.delegatedTaskService,
+          curatedContent: dataGateway.curatedContentReader,
           referenceDraftCountForAccount: (accountId) => publishLogStore.countReferenceDraftsForAccount(accountId),
           pendingDrafts: publishLogStore,
           publishSchedule: publishLogStore,
