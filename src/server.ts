@@ -1403,61 +1403,13 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     console.warn('[aidcp-cloud] ConceptStore 初始化失败，搜索退化为仅 seed_keywords:', (err as Error).message);
   }
 
-  // 去 AI 味后处理器
-  const postProcessor = new PostProcessor({
-    rewrite: async (content, flagged, accountId) => {
-      // change publish-prompt-preview：prompt 抽到 buildDeAiRewritePrompt（与后台只读预览同一份来源、防漂移）；
-      // 带 role='publish:ContentCleaner' 使该重写按其后台模型/温度配置解析（否则配了是静默 no-op）。
-      // change raise-model-call-timeouts-for-thinking-models：与 ContentCleaner 角色闸共用 CLEAN_TIMEOUT_MS，
-      // 使该 complete() 的超时不短于角色闸（外层秒表绝不短于所包裹的模型预算、且底层 HTTP 同时限被真正中止）。
-      // change parallel-rewrite-drafts：显式带 accountId（由 ContentCleanerRole 从当轮黑板穿入）——
-      // 该调用不经 roleLlm 包装，是发布链归账覆盖面上唯一的非角色调用点。
-      return llm.complete(buildDeAiRewritePrompt(content, flagged), {
-        role: 'publish:ContentCleaner',
-        timeoutMs: CLEAN_TIMEOUT_MS,
-        accountId,
-      });
-    },
-  });
-
-  // 通义万相客户端（图片生成）。万相文生图与 Qwen 同属阿里云百炼、同一 DashScope key——
-  // 未单设 WANXIANG_API_KEY 时回退 DASHSCOPE_API_KEY（已实测该 key 可提交万相 wanx-v1 任务并产出 OSS 图）。
-  const wanxiangClient = new WanxiangClient({
-    apiKey: readEnvString('WANXIANG_API_KEY') ?? dashscopeApiKey,
-    getModel: () => modelConfigStore.getCached().imageModel,
-    // 慢图容忍：轮询次数 env 可调（默认 34×5s=170s；须 < ImageGenerator 角色闸 200s）。change publish-image-required-or-fail。
-    maxPollAttempts: Number(process.env.AIDCP_WANXIANG_MAX_POLL ?? 34),
-  });
-
-  // 即梦-Seedream 客户端（图片生成，火山方舟 Ark 同步）。change image-provider-volcengine-seedream：
-  // 复用启动期已载入的火山 key+base（providerRuntime['volcengine']，与文本火山同源）；imageModel 热加载。
-  const arkRuntime = providerRuntime['volcengine'];
-  const seedreamClient = new SeedreamClient({
-    apiKey: arkRuntime?.apiKey || undefined,
-    baseUrl: arkRuntime?.baseUrl || undefined,
-    getModel: () => modelConfigStore.getCached().imageModel,
-    timeoutMs: Number(process.env.AIDCP_SEEDREAM_TIMEOUT_MS ?? 60_000),
-  });
-
-  // 图片出口：按全局 image_provider 路由（dashscope→万相、volcengine→即梦 Seedream），热加载、缺密钥诚实失败不跨厂商兜底。
-  const imageProvider = new RoutingImageProvider({
-    getProvider: () => modelConfigStore.getCached().imageProvider,
-    providers: { dashscope: wanxiangClient, volcengine: seedreamClient },
-  });
   // 图片总开关：任一图片厂商密钥就绪即启用（选中厂商若缺密钥，其客户端会诚实失败 → 该张记 M 少一张、不假成功）。
+  // Block② 2e：内容管线对象（PostProcessor / WanxiangClient / SeedreamClient / RoutingImageProvider / PublishOrchestrator）
+  //   已下移至 segBContent（content 段独占生成）；此处仅保留跨段共用的图片总开关布尔，其依赖的火山运行时在本段就地重取
+  //   （廉价属性读、与 segB 各算各的、无共享状态问题）。
+  const arkRuntime = providerRuntime['volcengine'];
   const anyImageKeyPresent = !!(readEnvString('WANXIANG_API_KEY') ?? dashscopeApiKey) || !!arkRuntime?.apiKey;
 
-  // 发布编排器（PublishOrchestrator）。change decouple-publish-generation-from-dispatch：
-  // 编排只跑生成候审段（生成终稿 + 落库待审 + 发审批卡），**不再让位浏览**、**不再内联等审**——
-  // 让位/续场与真正下发已下放到 PublishDispatcher（下方构造，由人审授权触发）。
-  // change raise-model-call-timeouts-for-thinking-models：总闸默认 180s → 600s，须 ≥ 关键路径各模型角色预算之和
-  // （容器不得小于内容物；旧 180s < scout+content 串行和 210s，慢跑会中途掐断并丢弃已付费产出）。env 可调、下限保护。
-  const publishOrchestrator = new PublishOrchestrator({
-    logger: console,
-    pipelineTimeoutMs: normalizeTimeoutMs(process.env.AIDCP_PUBLISH_PIPELINE_TIMEOUT_MS, 600_000),
-    // 角色执行日志写入口（死表 publish_pipeline_logs 激活）：每角色每次执行 best-effort 落一行。
-    pipelineLogSink: publishPipelineLogStore,
-  });
   // 页面写执行权现由 EdgeTaskLeaseClient + edge EdgeTaskCoordinator 统一管理；发布/评论不再各自 end/resume 浏览。
   // 手动 /comment 接管期间该账号在此集合。**它标的是「这条评论来自运营手动命令」，不是「它不算数」**
   // （change risk-record-actuated-facts）：人工授权豁免的是**配额闸**（不被 canDo('comment') 阻断，
@@ -1804,6 +1756,9 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     },
   });
 
+  // Block② 2e：飞书出站信使上提至恒跑的 segA（automation 模式也需要它）；FeishuMessenger 构造纯（只赋默认值、无网络/定时器）。
+  const messenger = new FeishuMessenger();
+
   ctx.billingPriceRefresh = billingPriceRefresh;
   ctx.botChatEventHandler = botChatEventHandler;
   ctx.botChatStore = botChatStore;
@@ -1859,19 +1814,17 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ctx.firstPostOnboardingStore = firstPostOnboardingStore;
   ctx.getSoul = getSoul;
   ctx.groupRouteStore = groupRouteStore;
-  ctx.imageProvider = imageProvider;
   ctx.interactionFeedStore = interactionFeedStore;
   ctx.lastObservedNoteByAccount = lastObservedNoteByAccount;
   ctx.likedNoteStore = likedNoteStore;
   ctx.manualCommentAccounts = manualCommentAccounts;
+  ctx.messenger = messenger;
   ctx.notificationContactStore = notificationContactStore;
   ctx.onCommentTakeoverEnd = onCommentTakeoverEnd;
   ctx.onCommentTakeoverStart = onCommentTakeoverStart;
   ctx.personaAutoFillStore = personaAutoFillStore;
   ctx.personaPanel = personaPanel;
   ctx.personaStore = personaStore;
-  ctx.postProcessor = postProcessor;
-  ctx.publishOrchestrator = publishOrchestrator;
   ctx.resolveAccountChatId = resolveAccountChatId;
   ctx.resolveCardChatId = resolveCardChatId;
   ctx.resolveEffectiveCommentApprovalMode = resolveEffectiveCommentApprovalMode;
@@ -1880,14 +1833,344 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ctx.valuableCommentStore = valuableCommentStore;
 }
 
-async function segBContent(_ctx: CompositionContext): Promise<void> {
-  // Block② 2d step1：本段原有的共享地基 + 内容管线构造已整体上移至 segAApiFoundation 尾部，
-  // 令 core（segA+segC+segD，跳过本段）也能在构造期拿到 segC/segD 硬依赖的对象。段计划保留 segB 空占位，
-  // 供后续 2e 真正拆出「content 私有运行时」时复用；content 模式跑 segA 已含全部内容管线。
+async function segBContent(ctx: CompositionContext): Promise<void> {
+  // Block② 2e：content 段独占内容生成管线。共享对象留 segA；本段构造图片/内容管线对象 + 视觉链路 + 注册发布角色，
+  //   并回挂 ctx（postProcessor / imageProvider / publishOrchestrator）。automation（segA+segC，无本段）不构造这些对象即可开机；
+  //   monolith 下本段在 segC/segD 之前跑、同一实例、逐字节等价。视觉链路用量上报闭包本段自持一份（segC textcard-OCR 另有同源实现）。
+  const {
+    accountDisplayName,
+    anyImageKeyPresent,
+    botChatStore,
+    curatedContentStore,
+    dashscopeApiKey,
+    facebookPublishMediaStore,
+    llm,
+    messenger,
+    modelConfigStore,
+    ossUploader,
+    providerRuntime,
+    publishLogStore,
+    publishPipelineLogStore,
+    resolveCardChatId,
+    resolveReviewCardDelivery,
+    roleLlm,
+    tokenUsageStore,
+    writeApprovalDecision,
+  } = ctx;
+
+  // 去 AI 味后处理器
+  const postProcessor = new PostProcessor({
+    rewrite: async (content, flagged, accountId) => {
+      // change publish-prompt-preview：prompt 抽到 buildDeAiRewritePrompt（与后台只读预览同一份来源、防漂移）；
+      // 带 role='publish:ContentCleaner' 使该重写按其后台模型/温度配置解析（否则配了是静默 no-op）。
+      // change raise-model-call-timeouts-for-thinking-models：与 ContentCleaner 角色闸共用 CLEAN_TIMEOUT_MS，
+      // 使该 complete() 的超时不短于角色闸（外层秒表绝不短于所包裹的模型预算、且底层 HTTP 同时限被真正中止）。
+      // change parallel-rewrite-drafts：显式带 accountId（由 ContentCleanerRole 从当轮黑板穿入）——
+      // 该调用不经 roleLlm 包装，是发布链归账覆盖面上唯一的非角色调用点。
+      return llm.complete(buildDeAiRewritePrompt(content, flagged), {
+        role: 'publish:ContentCleaner',
+        timeoutMs: CLEAN_TIMEOUT_MS,
+        accountId,
+      });
+    },
+  });
+
+  // 通义万相客户端（图片生成）。万相文生图与 Qwen 同属阿里云百炼、同一 DashScope key——
+  // 未单设 WANXIANG_API_KEY 时回退 DASHSCOPE_API_KEY（已实测该 key 可提交万相 wanx-v1 任务并产出 OSS 图）。
+  const wanxiangClient = new WanxiangClient({
+    apiKey: readEnvString('WANXIANG_API_KEY') ?? dashscopeApiKey,
+    getModel: () => modelConfigStore.getCached().imageModel,
+    // 慢图容忍：轮询次数 env 可调（默认 34×5s=170s；须 < ImageGenerator 角色闸 200s）。change publish-image-required-or-fail。
+    maxPollAttempts: Number(process.env.AIDCP_WANXIANG_MAX_POLL ?? 34),
+  });
+
+  // 即梦-Seedream 客户端（图片生成，火山方舟 Ark 同步）。change image-provider-volcengine-seedream：
+  // 复用启动期已载入的火山 key+base（providerRuntime['volcengine']，与文本火山同源）；imageModel 热加载。
+  const arkRuntime = providerRuntime['volcengine'];
+  const seedreamClient = new SeedreamClient({
+    apiKey: arkRuntime?.apiKey || undefined,
+    baseUrl: arkRuntime?.baseUrl || undefined,
+    getModel: () => modelConfigStore.getCached().imageModel,
+    timeoutMs: Number(process.env.AIDCP_SEEDREAM_TIMEOUT_MS ?? 60_000),
+  });
+
+  // 图片出口：按全局 image_provider 路由（dashscope→万相、volcengine→即梦 Seedream），热加载、缺密钥诚实失败不跨厂商兜底。
+  const imageProvider = new RoutingImageProvider({
+    getProvider: () => modelConfigStore.getCached().imageProvider,
+    providers: { dashscope: wanxiangClient, volcengine: seedreamClient },
+  });
+
+  // 发布编排器（PublishOrchestrator）。change decouple-publish-generation-from-dispatch：
+  // 编排只跑生成候审段（生成终稿 + 落库待审 + 发审批卡），**不再让位浏览**、**不再内联等审**——
+  // 让位/续场与真正下发已下放到 PublishDispatcher（下方构造，由人审授权触发）。
+  // change raise-model-call-timeouts-for-thinking-models：总闸默认 180s → 600s，须 ≥ 关键路径各模型角色预算之和
+  // （容器不得小于内容物；旧 180s < scout+content 串行和 210s，慢跑会中途掐断并丢弃已付费产出）。env 可调、下限保护。
+  const publishOrchestrator = new PublishOrchestrator({
+    logger: console,
+    pipelineTimeoutMs: normalizeTimeoutMs(process.env.AIDCP_PUBLISH_PIPELINE_TIMEOUT_MS, 600_000),
+    // 角色执行日志写入口（死表 publish_pipeline_logs 激活）：每角色每次执行 best-effort 落一行。
+    pipelineLogSink: publishPipelineLogStore,
+  });
+
+  ctx.postProcessor = postProcessor;
+  ctx.imageProvider = imageProvider;
+  ctx.publishOrchestrator = publishOrchestrator;
+
+  // 用量上报接线点②（视觉 LLM 出口）content 段副本：与 segC textcard-OCR 的同名闭包同源（各段自持、都写 TokenUsageStore）。
+  const recordVisionCall = (info: VisionCallInfo): void => {
+    console.log(
+      `[llm] account=${info.accountId ?? '-'} role=${info.role ?? '-'} provider=${info.provider ?? '-'} model=${info.model} ms=${info.ms} ok=${info.ok} tokens=${info.totalTokens ?? 0}`,
+    );
+    try {
+      tokenUsageStore.add(info);
+    } catch {
+      /* metrics never breaks llm */
+    }
+  };
+
+  // ── 封面形态链路装配（change textcard-cover-form）：双旗标默认关，全关=与现版逐字一致 ──
+  // 感知旗标 AIDCP_COVER_FORM_SENSING 只门控视觉调用；渲染旗标 AIDCP_PUBLISH_TEXTCARD_COVER 只门控决策+渲染。
+  // 感知开+渲染关 = 影子模式（注解与审计照落、封面照走生成式），面板核准确率后再放行渲染。
+  const coverFormVision = new OpenAiCompatVisionClient({
+    // v1 模型解析两层收敛（design D5 评审修正）：env → 代码默认；绝不进按角色文本解析/全局文本模型回落层。
+    getModel: resolveCoverFormModel,
+    getProvider: resolveCoverFormProvider,
+    providerRuntime,
+    onCall: recordVisionCall,
+  });
+  const coverFormSensor = createCoverFormSensor({
+    vision: coverFormVision,
+    enabled: () => process.env.AIDCP_COVER_FORM_SENSING === 'true',
+    // 回写缓存：素材库可用才接（历史空行/无库时感知照跑、只是不缓存）。单条 UPDATE 带锚守卫，绝不 bump updated_at。
+    ...(curatedContentStore
+      ? { annotate: curatedContentStore.annotateReferenceImageFormGuess.bind(curatedContentStore) }
+      : {}),
+    getModel: resolveCoverFormModel,
+    getProvider: resolveCoverFormProvider,
+  });
+  // 整组视觉反推使用独立模型解析与旗标；默认关闭。角色恒写键，开后缓存到精选行且不抬 updated_at。
+  const referenceVisualVision = new OpenAiCompatVisionClient({
+    getModel: resolveReferenceVisualModel,
+    getProvider: resolveReferenceVisualProvider,
+    providerRuntime,
+    onCall: recordVisionCall,
+    timeoutMs: Number(process.env.AIDCP_REFERENCE_VISUAL_TIMEOUT_MS ?? 120_000),
+  });
+  const visualReferenceAnalyzer = createVisualReferenceAnalyzer({
+    vision: referenceVisualVision,
+    enabled: () => process.env.AIDCP_REFERENCE_VISUAL_ANALYSIS === 'true',
+    getModel: resolveReferenceVisualModel,
+    getProvider: resolveReferenceVisualProvider,
+    ...(curatedContentStore
+      ? { annotate: curatedContentStore.annotateReferenceVisualAnalysis.bind(curatedContentStore) }
+      : {}),
+    logger: console,
+  });
+  const visualAuditVision = new OpenAiCompatVisionClient({
+    getModel: resolveVisualAuditModel,
+    getProvider: resolveVisualAuditProvider,
+    providerRuntime,
+    onCall: recordVisionCall,
+    timeoutMs: Number(process.env.AIDCP_VISUAL_AUDIT_TIMEOUT_MS ?? 60_000),
+  });
+  const visualFidelityAuditor = createVisualFidelityAuditor({ vision: visualAuditVision });
+  // 帖级形态档服务（change textcard-carousel-form-parity，阶段0 影子）：AIDCP_POST_FORM_PROFILE 默认关。
+  // 开=CoverCardWriter 复用封面感知结果 + 对内页 senseAt 有界并发判形、只把形态档写审计（不改渲染）；关=不计算、byte-identical。
+  // 依赖感知旗标 AIDCP_COVER_FORM_SENSING（senseAt 受同一 enabled 门控；感知关时形态档恒 generative）。
+  const postFormProfileService = createPostImageFormProfileService({
+    senseAt: (ref, arrayIndex) => coverFormSensor.senseAt!(ref, arrayIndex),
+    enabled: () => process.env.AIDCP_POST_FORM_PROFILE === 'true',
+    logger: console,
+  });
+  // 渲染出口：lazy 工厂只在渲染旗标开时初始化（关=零加载零成本）；工厂失败→null，text_card 请求诚实降级生成式。
+  // change textcard-carousel-form-parity 阶段1：轮播旗标也触发加载（任一渲染旗标开即需渲染出口）。
+  let textCardRenderer: TextCardRenderer | null = null;
+  if (process.env.AIDCP_PUBLISH_TEXTCARD_COVER === 'true' || process.env.AIDCP_PUBLISH_TEXTCARD_CAROUSEL === 'true') {
+    void createTextCardRenderer({ logger: console })
+      .then((r) => {
+        textCardRenderer = r;
+        console.log(r ? '[aidcp-cloud] 文字卡渲染出口已就绪（satori+resvg+字体校验通过）' : '[aidcp-cloud] 文字卡渲染出口不可用（工厂返回 null），封面按生成式降级');
+      })
+      .catch((err) => {
+        console.warn('[aidcp-cloud] 文字卡渲染工厂异常（封面按生成式降级）:', (err as Error).message);
+      });
+  }
+
+  // 注册发布编排器的生产段角色（A 阶段2 细拆：6→11，下游 Gatekeeper/Executor 不变）。
+  // 注册顺序无关正确性（黑板靠键就绪触发），按拓扑排列便于阅读。
+  publishOrchestrator.registerRole(new ContentScoutRole({ llmClient: roleLlm('publish:ContentScout') }));
+  publishOrchestrator.registerRole(new ContentTypeSelectorRole());
+  publishOrchestrator.registerRole(new ContentCreatorRole({ llmClient: roleLlm('publish:ContentCreator') }));
+  publishOrchestrator.registerRole(new ReferenceAnalyzerRole({ llmClient: roleLlm('publish:ReferenceAnalyzer') }));
+  publishOrchestrator.registerRole(new FaithfulRewritePlannerRole({ llmClient: roleLlm('publish:FaithfulRewritePlanner') }));
+  publishOrchestrator.registerRole(new FaithfulDraftWriterRole({ llmClient: roleLlm('publish:FaithfulDraftWriter') }));
+  publishOrchestrator.registerRole(new FidelityAuditorRole({ llmClient: roleLlm('publish:FidelityAuditor') }));
+  // 配图三角色（change publish-multi-image）：选题（ImageSetPlanner）→ 指令（ImagePromptComposer）→ 执行（ImageGenerator）→ 封面（CoverSelector）
+  // 选题读正文定张数+主题（配强模型）；指令把主题翻成万相 prompt（配便宜模型）；执行并行出多图；封面恒取首张。
+  // 品类判定（change category-adaptive-images-and-judgment）：读正文判品类，供配图选题风格档 + 质量评审复用；flash 可后台配。
+  publishOrchestrator.registerRole(new CategoryClassifierRole({ llmClient: roleLlm('publish:CategoryClassifier') }));
+  publishOrchestrator.registerRole(new VisualReferenceAnalyzerRole(visualReferenceAnalyzer, { logger: console }));
+  // 封面形态决策（textcard-cover-form）：恒写 coverCardPlan（composer waitAll 三键依赖）；门禁序内感知独立于渲染旗标（影子模式）。
+  publishOrchestrator.registerRole(new CoverCardWriterRole({
+    llmClient: roleLlm('publish:CoverCardWriter'),
+    sensor: coverFormSensor,
+    // 帖级形态档影子服务（change textcard-carousel-form-parity，阶段0）：旗标关时不计算、byte-identical。
+    profileService: postFormProfileService,
+    // 渲染门（gate 3）：封面卡或轮播任一旗标开即放行决策+文案；轮播旗标（阶段1）门控 all_text_card 整帖多卡渲卡。
+    renderEnabled: () => process.env.AIDCP_PUBLISH_TEXTCARD_COVER === 'true' || process.env.AIDCP_PUBLISH_TEXTCARD_CAROUSEL === 'true',
+    carouselEnabled: () => process.env.AIDCP_PUBLISH_TEXTCARD_CAROUSEL === 'true',
+    rendererAvailable: () => textCardRenderer !== null,
+    getTextCardRenderer: () => textCardRenderer,
+    ossAvailable: () => !!ossUploader,
+  }));
+  publishOrchestrator.registerRole(new ImageSetPlannerRole({ llmClient: roleLlm('publish:ImageSetPlanner') }));
+  publishOrchestrator.registerRole(new ImagePromptComposerRole({ llmClient: roleLlm('publish:ImagePromptComposer') }));
+  if (facebookPublishMediaStore) {
+    publishOrchestrator.registerRole(new FacebookMediaSelectorRole({
+      mediaStore: facebookPublishMediaStore,
+      logger: console,
+    }));
+  }
+  publishOrchestrator.registerRole(new ImageGeneratorRole({
+    imageProvider,
+    getProvider: () => modelConfigStore.getCached().imageProvider,
+    getModel: () => modelConfigStore.getCached().imageModel,
+    // 用量上报接线点③（图片生成出口）：经 TokenUsageStore 单一接口写归 aidcp-content 的 llm_token_usage，MUST NOT 直写（方案 §4.6.6）。
+    usageRecorder: (info) => {
+      console.log(
+        `[image] account=${info.accountId} role=publish:ImageGenerator provider=${info.provider} model=${info.model} ok=${info.ok}`,
+      );
+      try {
+        tokenUsageStore.add({
+          accountId: info.accountId,
+          role: 'publish:ImageGenerator',
+          provider: info.provider,
+          model: info.model,
+          ok: info.ok,
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+        });
+      } catch {
+        /* metrics never breaks image generation */
+      }
+    },
+    // change image-provider-volcengine-seedream：注入路由图片出口（按 image_provider 分发万相/即梦）。
+    // 任一图片厂商密钥就绪即启用；选中厂商缺密钥时其客户端诚实失败（M 少一张、不假成功）。
+    // 并行多图张数/每图超时/并发经 env 读取（AIDCP_PUBLISH_MAX_IMAGES/PER_IMAGE_TIMEOUT_MS/IMAGE_CONCURRENCY）。
+    enableImageGeneration: anyImageKeyPresent,
+    // change cloud-oss-storage-integration：注入 OSS 转存出口（配了凭据才有；缺则 undefined = 配图零回归用 provider URL）。
+    // 生成成功后逐张转存 OSS 换稳定公网 URL，根治「审批超 provider TTL → 死链」；转存失败诚实落空、不伪造 URL。
+    ossUploader,
+    // change textcard-cover-form：文字卡渲染出口（工厂异步就绪故取 getter）；执行器只读 plan+依赖可用性，不二次读旗标。
+    getTextCardRenderer: () => textCardRenderer,
+    visualAuditor: visualFidelityAuditor,
+    auditEnabled: () => process.env.AIDCP_VISUAL_FIDELITY_AUDIT === 'true',
+    autonomousAuditEnabled: () => process.env.AIDCP_AUTONOMOUS_VISUAL_AUDIT === 'true',
+  }));
+  publishOrchestrator.registerRole(new CoverSelectorRole());
+  // 后处理：清洗（ContentCleaner）→ AI味分（AiFlavorScorer）/ 质量分（QualityScorer）
+  publishOrchestrator.registerRole(new ContentCleanerRole({ postProcessor }));
+  publishOrchestrator.registerRole(new AiFlavorScorerRole());
+  publishOrchestrator.registerRole(new QualityScorerRole({ llmClient: roleLlm('publish:QualityScorer') }));
+  // 汇合：瘦身 ContentAssembler（纯组装，waitAll 五键）
+  publishOrchestrator.registerRole(new ContentAssemblerRole());
+  // 标题链路：定稿后单独生成标题（watch assembledContent → titleSelection）；发布门 waitAll 依赖此键（注册顺序无关）。
+  publishOrchestrator.registerRole(new TitleCreatorRole({ llmClient: roleLlm('publish:TitleCreator') }));
+  // 阶段3 元数据 + 合规决策（并行于发布链，规则式确定性；产出 publishMetadata，本阶段不应用到边缘）。
+  // change split-topic-roles：话题拆生成/评判两角色（生成 watch assembledContent、评判 watch topicCandidates、产出 topicSelection）。
+  publishOrchestrator.registerRole(new TopicGeneratorRole({ llmClient: roleLlm('publish:TopicGenerator') }));
+  publishOrchestrator.registerRole(new TopicEvaluatorRole({ llmClient: roleLlm('publish:TopicEvaluator') }));
+  publishOrchestrator.registerRole(new MentionStrategistRole());
+  publishOrchestrator.registerRole(new LocationStrategistRole());
+  publishOrchestrator.registerRole(new CollectionStrategistRole());
+  publishOrchestrator.registerRole(new VisibilityDeciderRole());
+  publishOrchestrator.registerRole(new PermissionDeciderRole());
+  publishOrchestrator.registerRole(new PublishModeDeciderRole());
+  publishOrchestrator.registerRole(new ComplianceDeciderRole());
+  publishOrchestrator.registerRole(new MetadataAggregatorRole());
+  publishOrchestrator.registerRole(new ApprovalGatekeeperRole({ llmClient: roleLlm('publish:ApprovalGatekeeper') }));
+  publishOrchestrator.registerRole(new PublishExecutorRole({
+    store: {
+      async insert(record) {
+        return publishLogStore.insert({
+          title: record.title,
+          content: record.content,
+          // 真血缘：用 executor 计算的真概念/真点赞 id（无则空数组），不再用 tags / [] 充数（修 stage-4 适配器漏接）。
+          sourceConcepts: record.sourceConcepts ?? [],
+          sourceLikedIds: record.sourceLikedIds ?? [],
+          // decouple-publish-generation-from-dispatch：生成候审段落 'pending_approval'（待人审、未下发）。
+          status: record.status as 'draft' | 'pending_approval' | 'scheduled' | 'submitted' | 'published' | 'failed' | 'needs_review',
+          // 审计用 image_url（封面=首张）+ 多图全集 images（下发段读回逐张上传）；真实附着数插入时 0，上传成功后由 markImagesAttached 置真实 K。
+          imageUrl: record.imageUrl,
+          imageUrls: record.images,
+          // 真实发布账号（change publish-history-account-and-detail）：来自触发上下文，缺省 'default'。
+          accountId: record.accountId,
+          platform: record.platform,
+          // 参照洗稿来稿快照；普通发布为空，内容页据此展示来源。
+          sourceReference: record.sourceReference ?? null,
+        });
+      },
+      async updateStatus(id, status) {
+        await publishLogStore.updateStatus(id, status as 'draft' | 'pending_approval' | 'scheduled' | 'submitted' | 'published' | 'failed' | 'needs_review');
+      },
+      // stage-4 元数据落库 + 防篡改审计（供下发段重建发布输入 + 审计）。
+      async recordMetadata(id, metadata, aiEnforced) {
+        await publishLogStore.recordMetadata(id, metadata, aiEnforced);
+      },
+      // 配图收口：如实标记真实附着张数 K（生成段无图诚实 failed 时传 0），杜绝纯文字帖留「有图」假信号。
+      async markImagesAttached(id, count) {
+        await publishLogStore.markImagesAttached(id, count);
+      },
+    },
+    // change feishu-contract-seam（§4.6.2）：automation 侧发布出口只交出结构化数据，组合根在此侧构飞书卡 + 发送。
+    messenger: {
+      sendApprovalCard: (chatId, data) => messenger.sendApprovalCard(chatId, buildPublishApprovalCard(data)),
+      sendCommandResult: (chatId, data) => messenger.sendCard(chatId, buildCommandResultCard(data)),
+      uploadImageFromUrl: (url) => messenger.uploadImageFromUrl(url),
+    },
+    botChatStore,
+    // change unify-card-routing-origin-then-team：审批卡目标走统一解析（来源会话 → 账号团队群 → 默认群）。
+    // 无来源会话的自动 / 排期发帖由此进入账号团队群，不再一律落默认群。
+    resolveCardChatId,
+    resolveReviewCardDelivery,
+    getAccountName: accountDisplayName,
+    // 排期免审预授权（content-schedule）：与人工审批**同一个**授权写出口，决策主体 = 触发该免审的排期规则。
+    writeApprovalSignal: (requestId, approved, payload, decidedBy) =>
+      writeApprovalDecision(requestId, approved, payload, {
+        decidedBy: decidedBy ?? 'schedule:unknown_rule',
+        decidedVia: 'schedule_auto_approve',
+      }),
+    triggerApprovedDispatch: (requestId) => ctx.triggerPublishDispatchOnApprove?.(requestId),
+    // 陪伴界面（edge-companion-ui 8.1）：候审即推 pending（发布卡自动展开到「等你确认」）。
+    notifyPublishPending: (accountId, recordId, title) =>
+      {
+        ctx.uiSnapshot?.pushPublishState(accountId, recordId, 'pending', title);
+        void publishLogStore.pendingPublishPreviewForAccount(accountId).then((preview) => {
+          if (!preview) return;
+          ctx.uiSnapshot?.pushPublishPreview(accountId, {
+            recordId: preview.id,
+            code: `#${preview.id}`,
+            kind: preview.kind,
+            title: preview.title ?? '',
+            content: preview.content,
+            topics: preview.topics,
+            images: preview.images,
+            contentVersion: preview.contentVersion,
+            updatedAt: preview.updatedAt,
+            ...(preview.imageReferenceAudit ? { imageReferenceAudit: preview.imageReferenceAudit } : {}),
+          });
+        }).catch((err) => console.warn(`[ui-snapshot] 预览读取失败 recordId=${recordId}: ${err instanceof Error ? err.message : String(err)}`));
+      },
+    // decouple-publish-generation-from-dispatch：executor 只落库待审 + 发审批卡，不再内联等审/下发，
+    // 故不再注入 sequencer / isApproved / approvalWaitMs / pusher。超时只覆盖落库+发卡（默认 30s）。
+    roleTimeoutMs: Number(process.env.AIDCP_PUBLISH_ROLE_TIMEOUT_MS ?? 30_000),
+  }));
+  console.log(`[aidcp-cloud] PublishOrchestrator 已就绪，角色: ${publishOrchestrator.getRoles().join(', ')}`);
 }
 
 async function segCAutomation(ctx: CompositionContext): Promise<void> {
-  const { accountDisplayName, accountDisplayNameCandidates, accountState, accountStore, anyImageKeyPresent, botChatEventHandler, botChatStore, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, contentScheduleStore, credentialStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, interactionFeedStore, lastObservedNoteByAccount, likedNoteStore, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, notificationContactStore, onCommentTakeoverEnd, onCommentTakeoverStart, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, postProcessor, providerRuntime, publishApprovalClient, publishApprovalStore, publishLogStore, publishOrchestrator, quotaConfigStore, resolveAccountChatId, resolveCardChatId, resolveEffectiveCommentApprovalMode, resolvePersona, resolveReviewCardDelivery, resumeConfigStore, roleConfigStore, roleLlm, sessionConfigStore, tokenUsageStore, valuableCommentStore, writeApprovalDecision } = ctx;
+  const { accountDisplayName, accountDisplayNameCandidates, accountState, accountStore, botChatEventHandler, botChatStore, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, contentScheduleStore, credentialStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, interactionFeedStore, lastObservedNoteByAccount, likedNoteStore, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, notificationContactStore, onCommentTakeoverEnd, onCommentTakeoverStart, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, providerRuntime, publishApprovalClient, publishApprovalStore, publishLogStore, quotaConfigStore, resolveAccountChatId, resolveCardChatId, resolveEffectiveCommentApprovalMode, resolvePersona, resumeConfigStore, roleConfigStore, sessionConfigStore, tokenUsageStore, valuableCommentStore, writeApprovalDecision } = ctx;
   // RiskController 注册表（V1 task 9.1）：每账号一个 controller、单写 PER ACCOUNT、共享 PgRiskStore。
   // 现役路径用其 default controller（单一来源，避免双 controller 写同一 risk_state）；PG 不可用则现役回退内存态。
   // PgRiskStore 单例：既喂 registry（按账号风控单写），又作 InteractionStore 接线孤儿
@@ -2800,7 +3083,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   const actions = commandFace.actions;
   const isCommandChatAuthorized = commandFace.isCommandChatAuthorized;
   const commandRouter = new CommandRouter(actions, undefined, undefined, isCommandChatAuthorized);
-  const messenger = new FeishuMessenger();
+  const messenger = ctx.messenger;
   // 机器人所在群 provider（change feishu-bot-chat-name-display）：实时取飞书真实群名 + 标默认群 + 降级来源。
   // 成功结果缓存 60s（避免每次开页打飞书）；失败（缺 im:chat:readonly 权限 / 网络）降级回 bot_chats 表、不缓存（下次自动重试）。
   const botChatsProvider = createBotChatsProvider({
@@ -3682,7 +3965,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       );
   };
 
-  if (draftRefinementStore) {
+  if (draftRefinementStore && imageProvider) {
     const worker = new DraftRefinementWorker({
       store: draftRefinementStore,
       drafts: publishLogStore,
@@ -4289,246 +4572,6 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     }),
   ] as unknown as readonly BaseRole[];
 
-  // ── 封面形态链路装配（change textcard-cover-form）：双旗标默认关，全关=与现版逐字一致 ──
-  // 感知旗标 AIDCP_COVER_FORM_SENSING 只门控视觉调用；渲染旗标 AIDCP_PUBLISH_TEXTCARD_COVER 只门控决策+渲染。
-  // 感知开+渲染关 = 影子模式（注解与审计照落、封面照走生成式），面板核准确率后再放行渲染。
-  const coverFormVision = new OpenAiCompatVisionClient({
-    // v1 模型解析两层收敛（design D5 评审修正）：env → 代码默认；绝不进按角色文本解析/全局文本模型回落层。
-    getModel: resolveCoverFormModel,
-    getProvider: resolveCoverFormProvider,
-    providerRuntime,
-    onCall: recordVisionCall,
-  });
-  const coverFormSensor = createCoverFormSensor({
-    vision: coverFormVision,
-    enabled: () => process.env.AIDCP_COVER_FORM_SENSING === 'true',
-    // 回写缓存：素材库可用才接（历史空行/无库时感知照跑、只是不缓存）。单条 UPDATE 带锚守卫，绝不 bump updated_at。
-    ...(curatedContentStore
-      ? { annotate: curatedContentStore.annotateReferenceImageFormGuess.bind(curatedContentStore) }
-      : {}),
-    getModel: resolveCoverFormModel,
-    getProvider: resolveCoverFormProvider,
-  });
-  // 整组视觉反推使用独立模型解析与旗标；默认关闭。角色恒写键，开后缓存到精选行且不抬 updated_at。
-  const referenceVisualVision = new OpenAiCompatVisionClient({
-    getModel: resolveReferenceVisualModel,
-    getProvider: resolveReferenceVisualProvider,
-    providerRuntime,
-    onCall: recordVisionCall,
-    timeoutMs: Number(process.env.AIDCP_REFERENCE_VISUAL_TIMEOUT_MS ?? 120_000),
-  });
-  const visualReferenceAnalyzer = createVisualReferenceAnalyzer({
-    vision: referenceVisualVision,
-    enabled: () => process.env.AIDCP_REFERENCE_VISUAL_ANALYSIS === 'true',
-    getModel: resolveReferenceVisualModel,
-    getProvider: resolveReferenceVisualProvider,
-    ...(curatedContentStore
-      ? { annotate: curatedContentStore.annotateReferenceVisualAnalysis.bind(curatedContentStore) }
-      : {}),
-    logger: console,
-  });
-  const visualAuditVision = new OpenAiCompatVisionClient({
-    getModel: resolveVisualAuditModel,
-    getProvider: resolveVisualAuditProvider,
-    providerRuntime,
-    onCall: recordVisionCall,
-    timeoutMs: Number(process.env.AIDCP_VISUAL_AUDIT_TIMEOUT_MS ?? 60_000),
-  });
-  const visualFidelityAuditor = createVisualFidelityAuditor({ vision: visualAuditVision });
-  // 帖级形态档服务（change textcard-carousel-form-parity，阶段0 影子）：AIDCP_POST_FORM_PROFILE 默认关。
-  // 开=CoverCardWriter 复用封面感知结果 + 对内页 senseAt 有界并发判形、只把形态档写审计（不改渲染）；关=不计算、byte-identical。
-  // 依赖感知旗标 AIDCP_COVER_FORM_SENSING（senseAt 受同一 enabled 门控；感知关时形态档恒 generative）。
-  const postFormProfileService = createPostImageFormProfileService({
-    senseAt: (ref, arrayIndex) => coverFormSensor.senseAt!(ref, arrayIndex),
-    enabled: () => process.env.AIDCP_POST_FORM_PROFILE === 'true',
-    logger: console,
-  });
-  // 渲染出口：lazy 工厂只在渲染旗标开时初始化（关=零加载零成本）；工厂失败→null，text_card 请求诚实降级生成式。
-  // change textcard-carousel-form-parity 阶段1：轮播旗标也触发加载（任一渲染旗标开即需渲染出口）。
-  let textCardRenderer: TextCardRenderer | null = null;
-  if (process.env.AIDCP_PUBLISH_TEXTCARD_COVER === 'true' || process.env.AIDCP_PUBLISH_TEXTCARD_CAROUSEL === 'true') {
-    void createTextCardRenderer({ logger: console })
-      .then((r) => {
-        textCardRenderer = r;
-        console.log(r ? '[aidcp-cloud] 文字卡渲染出口已就绪（satori+resvg+字体校验通过）' : '[aidcp-cloud] 文字卡渲染出口不可用（工厂返回 null），封面按生成式降级');
-      })
-      .catch((err) => {
-        console.warn('[aidcp-cloud] 文字卡渲染工厂异常（封面按生成式降级）:', (err as Error).message);
-      });
-  }
-
-  // 注册发布编排器的生产段角色（A 阶段2 细拆：6→11，下游 Gatekeeper/Executor 不变）。
-  // 注册顺序无关正确性（黑板靠键就绪触发），按拓扑排列便于阅读。
-  publishOrchestrator.registerRole(new ContentScoutRole({ llmClient: roleLlm('publish:ContentScout') }));
-  publishOrchestrator.registerRole(new ContentTypeSelectorRole());
-  publishOrchestrator.registerRole(new ContentCreatorRole({ llmClient: roleLlm('publish:ContentCreator') }));
-  publishOrchestrator.registerRole(new ReferenceAnalyzerRole({ llmClient: roleLlm('publish:ReferenceAnalyzer') }));
-  publishOrchestrator.registerRole(new FaithfulRewritePlannerRole({ llmClient: roleLlm('publish:FaithfulRewritePlanner') }));
-  publishOrchestrator.registerRole(new FaithfulDraftWriterRole({ llmClient: roleLlm('publish:FaithfulDraftWriter') }));
-  publishOrchestrator.registerRole(new FidelityAuditorRole({ llmClient: roleLlm('publish:FidelityAuditor') }));
-  // 配图三角色（change publish-multi-image）：选题（ImageSetPlanner）→ 指令（ImagePromptComposer）→ 执行（ImageGenerator）→ 封面（CoverSelector）
-  // 选题读正文定张数+主题（配强模型）；指令把主题翻成万相 prompt（配便宜模型）；执行并行出多图；封面恒取首张。
-  // 品类判定（change category-adaptive-images-and-judgment）：读正文判品类，供配图选题风格档 + 质量评审复用；flash 可后台配。
-  publishOrchestrator.registerRole(new CategoryClassifierRole({ llmClient: roleLlm('publish:CategoryClassifier') }));
-  publishOrchestrator.registerRole(new VisualReferenceAnalyzerRole(visualReferenceAnalyzer, { logger: console }));
-  // 封面形态决策（textcard-cover-form）：恒写 coverCardPlan（composer waitAll 三键依赖）；门禁序内感知独立于渲染旗标（影子模式）。
-  publishOrchestrator.registerRole(new CoverCardWriterRole({
-    llmClient: roleLlm('publish:CoverCardWriter'),
-    sensor: coverFormSensor,
-    // 帖级形态档影子服务（change textcard-carousel-form-parity，阶段0）：旗标关时不计算、byte-identical。
-    profileService: postFormProfileService,
-    // 渲染门（gate 3）：封面卡或轮播任一旗标开即放行决策+文案；轮播旗标（阶段1）门控 all_text_card 整帖多卡渲卡。
-    renderEnabled: () => process.env.AIDCP_PUBLISH_TEXTCARD_COVER === 'true' || process.env.AIDCP_PUBLISH_TEXTCARD_CAROUSEL === 'true',
-    carouselEnabled: () => process.env.AIDCP_PUBLISH_TEXTCARD_CAROUSEL === 'true',
-    rendererAvailable: () => textCardRenderer !== null,
-    getTextCardRenderer: () => textCardRenderer,
-    ossAvailable: () => !!ossUploader,
-  }));
-  publishOrchestrator.registerRole(new ImageSetPlannerRole({ llmClient: roleLlm('publish:ImageSetPlanner') }));
-  publishOrchestrator.registerRole(new ImagePromptComposerRole({ llmClient: roleLlm('publish:ImagePromptComposer') }));
-  if (facebookPublishMediaStore) {
-    publishOrchestrator.registerRole(new FacebookMediaSelectorRole({
-      mediaStore: facebookPublishMediaStore,
-      logger: console,
-    }));
-  }
-  publishOrchestrator.registerRole(new ImageGeneratorRole({
-    imageProvider,
-    getProvider: () => modelConfigStore.getCached().imageProvider,
-    getModel: () => modelConfigStore.getCached().imageModel,
-    // 用量上报接线点③（图片生成出口）：经 TokenUsageStore 单一接口写归 aidcp-content 的 llm_token_usage，MUST NOT 直写（方案 §4.6.6）。
-    usageRecorder: (info) => {
-      console.log(
-        `[image] account=${info.accountId} role=publish:ImageGenerator provider=${info.provider} model=${info.model} ok=${info.ok}`,
-      );
-      try {
-        tokenUsageStore.add({
-          accountId: info.accountId,
-          role: 'publish:ImageGenerator',
-          provider: info.provider,
-          model: info.model,
-          ok: info.ok,
-          promptTokens: 0,
-          completionTokens: 0,
-          totalTokens: 0,
-        });
-      } catch {
-        /* metrics never breaks image generation */
-      }
-    },
-    // change image-provider-volcengine-seedream：注入路由图片出口（按 image_provider 分发万相/即梦）。
-    // 任一图片厂商密钥就绪即启用；选中厂商缺密钥时其客户端诚实失败（M 少一张、不假成功）。
-    // 并行多图张数/每图超时/并发经 env 读取（AIDCP_PUBLISH_MAX_IMAGES/PER_IMAGE_TIMEOUT_MS/IMAGE_CONCURRENCY）。
-    enableImageGeneration: anyImageKeyPresent,
-    // change cloud-oss-storage-integration：注入 OSS 转存出口（配了凭据才有；缺则 undefined = 配图零回归用 provider URL）。
-    // 生成成功后逐张转存 OSS 换稳定公网 URL，根治「审批超 provider TTL → 死链」；转存失败诚实落空、不伪造 URL。
-    ossUploader,
-    // change textcard-cover-form：文字卡渲染出口（工厂异步就绪故取 getter）；执行器只读 plan+依赖可用性，不二次读旗标。
-    getTextCardRenderer: () => textCardRenderer,
-    visualAuditor: visualFidelityAuditor,
-    auditEnabled: () => process.env.AIDCP_VISUAL_FIDELITY_AUDIT === 'true',
-    autonomousAuditEnabled: () => process.env.AIDCP_AUTONOMOUS_VISUAL_AUDIT === 'true',
-  }));
-  publishOrchestrator.registerRole(new CoverSelectorRole());
-  // 后处理：清洗（ContentCleaner）→ AI味分（AiFlavorScorer）/ 质量分（QualityScorer）
-  publishOrchestrator.registerRole(new ContentCleanerRole({ postProcessor }));
-  publishOrchestrator.registerRole(new AiFlavorScorerRole());
-  publishOrchestrator.registerRole(new QualityScorerRole({ llmClient: roleLlm('publish:QualityScorer') }));
-  // 汇合：瘦身 ContentAssembler（纯组装，waitAll 五键）
-  publishOrchestrator.registerRole(new ContentAssemblerRole());
-  // 标题链路：定稿后单独生成标题（watch assembledContent → titleSelection）；发布门 waitAll 依赖此键（注册顺序无关）。
-  publishOrchestrator.registerRole(new TitleCreatorRole({ llmClient: roleLlm('publish:TitleCreator') }));
-  // 阶段3 元数据 + 合规决策（并行于发布链，规则式确定性；产出 publishMetadata，本阶段不应用到边缘）。
-  // change split-topic-roles：话题拆生成/评判两角色（生成 watch assembledContent、评判 watch topicCandidates、产出 topicSelection）。
-  publishOrchestrator.registerRole(new TopicGeneratorRole({ llmClient: roleLlm('publish:TopicGenerator') }));
-  publishOrchestrator.registerRole(new TopicEvaluatorRole({ llmClient: roleLlm('publish:TopicEvaluator') }));
-  publishOrchestrator.registerRole(new MentionStrategistRole());
-  publishOrchestrator.registerRole(new LocationStrategistRole());
-  publishOrchestrator.registerRole(new CollectionStrategistRole());
-  publishOrchestrator.registerRole(new VisibilityDeciderRole());
-  publishOrchestrator.registerRole(new PermissionDeciderRole());
-  publishOrchestrator.registerRole(new PublishModeDeciderRole());
-  publishOrchestrator.registerRole(new ComplianceDeciderRole());
-  publishOrchestrator.registerRole(new MetadataAggregatorRole());
-  publishOrchestrator.registerRole(new ApprovalGatekeeperRole({ llmClient: roleLlm('publish:ApprovalGatekeeper') }));
-  publishOrchestrator.registerRole(new PublishExecutorRole({
-    store: {
-      async insert(record) {
-        return publishLogStore.insert({
-          title: record.title,
-          content: record.content,
-          // 真血缘：用 executor 计算的真概念/真点赞 id（无则空数组），不再用 tags / [] 充数（修 stage-4 适配器漏接）。
-          sourceConcepts: record.sourceConcepts ?? [],
-          sourceLikedIds: record.sourceLikedIds ?? [],
-          // decouple-publish-generation-from-dispatch：生成候审段落 'pending_approval'（待人审、未下发）。
-          status: record.status as 'draft' | 'pending_approval' | 'scheduled' | 'submitted' | 'published' | 'failed' | 'needs_review',
-          // 审计用 image_url（封面=首张）+ 多图全集 images（下发段读回逐张上传）；真实附着数插入时 0，上传成功后由 markImagesAttached 置真实 K。
-          imageUrl: record.imageUrl,
-          imageUrls: record.images,
-          // 真实发布账号（change publish-history-account-and-detail）：来自触发上下文，缺省 'default'。
-          accountId: record.accountId,
-          platform: record.platform,
-          // 参照洗稿来稿快照；普通发布为空，内容页据此展示来源。
-          sourceReference: record.sourceReference ?? null,
-        });
-      },
-      async updateStatus(id, status) {
-        await publishLogStore.updateStatus(id, status as 'draft' | 'pending_approval' | 'scheduled' | 'submitted' | 'published' | 'failed' | 'needs_review');
-      },
-      // stage-4 元数据落库 + 防篡改审计（供下发段重建发布输入 + 审计）。
-      async recordMetadata(id, metadata, aiEnforced) {
-        await publishLogStore.recordMetadata(id, metadata, aiEnforced);
-      },
-      // 配图收口：如实标记真实附着张数 K（生成段无图诚实 failed 时传 0），杜绝纯文字帖留「有图」假信号。
-      async markImagesAttached(id, count) {
-        await publishLogStore.markImagesAttached(id, count);
-      },
-    },
-    // change feishu-contract-seam（§4.6.2）：automation 侧发布出口只交出结构化数据，组合根在此侧构飞书卡 + 发送。
-    messenger: {
-      sendApprovalCard: (chatId, data) => messenger.sendApprovalCard(chatId, buildPublishApprovalCard(data)),
-      sendCommandResult: (chatId, data) => messenger.sendCard(chatId, buildCommandResultCard(data)),
-      uploadImageFromUrl: (url) => messenger.uploadImageFromUrl(url),
-    },
-    botChatStore,
-    // change unify-card-routing-origin-then-team：审批卡目标走统一解析（来源会话 → 账号团队群 → 默认群）。
-    // 无来源会话的自动 / 排期发帖由此进入账号团队群，不再一律落默认群。
-    resolveCardChatId,
-    resolveReviewCardDelivery,
-    getAccountName: accountDisplayName,
-    // 排期免审预授权（content-schedule）：与人工审批**同一个**授权写出口，决策主体 = 触发该免审的排期规则。
-    writeApprovalSignal: (requestId, approved, payload, decidedBy) =>
-      writeApprovalDecision(requestId, approved, payload, {
-        decidedBy: decidedBy ?? 'schedule:unknown_rule',
-        decidedVia: 'schedule_auto_approve',
-      }),
-    triggerApprovedDispatch: triggerPublishDispatchOnApprove,
-    // 陪伴界面（edge-companion-ui 8.1）：候审即推 pending（发布卡自动展开到「等你确认」）。
-    notifyPublishPending: (accountId, recordId, title) =>
-      {
-        uiSnapshotService.pushPublishState(accountId, recordId, 'pending', title);
-        void publishLogStore.pendingPublishPreviewForAccount(accountId).then((preview) => {
-          if (!preview) return;
-          uiSnapshotService.pushPublishPreview(accountId, {
-            recordId: preview.id,
-            code: `#${preview.id}`,
-            kind: preview.kind,
-            title: preview.title ?? '',
-            content: preview.content,
-            topics: preview.topics,
-            images: preview.images,
-            contentVersion: preview.contentVersion,
-            updatedAt: preview.updatedAt,
-            ...(preview.imageReferenceAudit ? { imageReferenceAudit: preview.imageReferenceAudit } : {}),
-          });
-        }).catch((err) => console.warn(`[ui-snapshot] 预览读取失败 recordId=${recordId}: ${err instanceof Error ? err.message : String(err)}`));
-      },
-    // decouple-publish-generation-from-dispatch：executor 只落库待审 + 发审批卡，不再内联等审/下发，
-    // 故不再注入 sequencer / isApproved / approvalWaitMs / pusher。超时只覆盖落库+发卡（默认 30s）。
-    roleTimeoutMs: Number(process.env.AIDCP_PUBLISH_ROLE_TIMEOUT_MS ?? 30_000),
-  }));
-  console.log(`[aidcp-cloud] PublishOrchestrator 已就绪，角色: ${publishOrchestrator.getRoles().join(', ')}`);
-
   // 按需评论触发器（change comment-search-command）：飞书 /comment 即用。装配角色①搜索词生成 + 角色②强相关甄选
   // + 边端步骤（搜索原生筛选/开笔记翻评论/发布/去重）+ 撰写人审 → 有界换词重试；接管边端跑、finally 恢复浏览，
   // 结果异步补结果卡片（level 按结果、绝不染绿）。纯增量、不依赖概念池；边端离线/任一步失败 honest-fail。
@@ -4715,7 +4758,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     const publishGenerationPort: SchedulerOrchestrator =
       generationTransport === 'http' && generationBaseUrl
         ? new PublishGenerationHttpClient(new InternalHttpClient(generationBaseUrl))
-        : publishOrchestrator;
+        : ctx.publishOrchestrator;
     ctx.publishScheduler = new PublishScheduler({
       conceptStore,
       likedStore: likedNoteStore,
