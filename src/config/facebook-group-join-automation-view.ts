@@ -1,7 +1,7 @@
 import type {
   FacebookGroupJoinRecentScheduledResult,
   FacebookGroupScopedTargetCount,
-} from '../comment-agent/facebook-group-store.js';
+} from '../kernel/facebook-group-types.js';
 import { isValidWeekActiveMask } from '../risk/session-limits.js';
 import type {
   ContentScheduleCatalogRow,

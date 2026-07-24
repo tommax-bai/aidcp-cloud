@@ -8,7 +8,6 @@ import {
   type InteractionAuthStatusPayload,
   type InteractionChannel,
   type InteractionErrorCode,
-  type InteractionListItem,
   type InteractionOffboardResultPayload,
   type InteractionReplyReconcileResultPayload,
   type InteractionReplyResultPayload,
@@ -25,8 +24,19 @@ import {
   type SendAttemptView,
   type SyncFreshnessProjection,
   type ThreadView,
+  type InteractionStoreReaderPort,
+  type InteractionTestResetResult,
+  type ListQuery,
+  type ListResult,
+  type ReplyPreviewContext,
+  type DetailResult,
 } from '../kernel/interaction-types.js';
 import { classifyInteractionSchema, type InteractionSchemaMode } from './schema-capability.js';
+
+// 收件箱只读投影的纯 DTO（InteractionTestResetResult / ListQuery / ListResult / ReplyPreviewContext /
+// DetailResult）已抬入 kernel，供 api 侧读路径经 InteractionStoreReaderPort 消费；这里等值再导出，
+// 保既有 `from './interaction-store'` 的类型导入面逐字不变。
+export type { InteractionTestResetResult, ListQuery, ListResult, ReplyPreviewContext, DetailResult };
 
 const { Pool } = pg;
 const SYNC_THREAD_FUTURE_SKEW_MS = 5 * 60 * 1_000;
@@ -84,37 +94,6 @@ export interface IngestResult {
   newJobIds: string[];
 }
 
-export interface InteractionTestResetResult {
-  channel: InteractionChannel;
-  deleted: { threads: number; syncBatches: number; syncCursors: number };
-}
-
-export interface ListQuery {
-  accountId: string;
-  envKey: string;
-  asOf: number;
-  limit: number;
-  channel?: InteractionChannel;
-  state?: ReplyJobState | 'pending';
-  before?: { lastMessageAt: number; id: string };
-}
-
-export interface ListResult {
-  items: InteractionListItem[];
-  next: { lastMessageAt: number; id: string } | null;
-}
-
-export interface ReplyPreviewContext {
-  threadId: string;
-  messageId: string;
-  channel: InteractionChannel;
-  messageType: MessageView['messageType'];
-  userMessage: string | null;
-  userName: string | null;
-  videoTitle: string | null;
-  receivedAt: number;
-}
-
 export interface RecoverableJobRef {
   accountId: string;
   envKey: string;
@@ -137,14 +116,6 @@ export interface PendingOffboardRef {
   state: 'pending_edge' | 'dispatched';
   requestedAt: number;
   purgeDueAt: number;
-}
-
-export interface DetailResult {
-  thread: ThreadView;
-  messages: MessageView[];
-  replyJob: ReplyJobView | null;
-  sendAttempt: SendAttemptView | null;
-  next: { platformCreatedAt: number; id: string } | null;
 }
 
 interface ThreadRow {
@@ -320,7 +291,7 @@ const JOB_COLUMNS = `id, inbound_message_id, state, version, matched_rule_id, co
   introduced_claims, risk_level, risk_reasons, approval_actor, approved_at, idempotency_key,
   last_error_code, updated_at`;
 
-export class InteractionStore {
+export class InteractionStore implements InteractionStoreReaderPort {
   private readonly pool: pg.Pool;
   private readonly clock: () => number;
   private readonly idGen: (prefix: string) => string;

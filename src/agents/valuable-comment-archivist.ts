@@ -14,7 +14,7 @@ import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { NoteData } from './content-curator-role.js';
 import type { RoleName } from '../event-bus/types.js';
-import { topicKeysFromTitle, type ValuableCommentInput } from '../cache/valuable-comment-store.js';
+import { topicKeysFromTitle, type ValuableCommentInput } from '../kernel/valuable-comment-types.js';
 
 export interface ValuableCommentArchivistOptions extends RoleOptions {
   getNoteData: (noteId: string) => NoteData | null;

@@ -45,9 +45,9 @@ import {
   FacebookGroupScopeError,
   type FacebookGroupMembershipStatus,
   type FacebookGroupTargetInput,
-} from '../comment-agent/facebook-group-store.js';
+} from '../kernel/facebook-group-types.js';
 import { readDownloadsManifest } from './downloads-manifest.js';
-import { DelegatedTaskServiceError } from '../delegated-task/service.js';
+import { DelegatedTaskServiceError } from '../kernel/delegated-task-types.js';
 import type {
   DelegatedActionFamily,
   DelegatedTaskIntent,
@@ -56,7 +56,7 @@ import type {
 } from '../delegated-task/types.js';
 import { clampClientApprovalMode, DELEGATED_TASK_STATUSES } from '../delegated-task/types.js';
 import { buildPublishLifecycle, type ApprovalDispatchProjection } from './publish-stage-lifecycle.js';
-import { CuratedContentUnavailableError } from '../cache/curated-content-store.js';
+import { CuratedContentUnavailableError } from '../kernel/curated-content-types.js';
 
 /** 登录/写体很小，限制请求体大小防滥用。 */
 const MAX_BODY_BYTES = 16 * 1024;

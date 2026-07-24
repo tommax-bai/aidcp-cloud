@@ -28,7 +28,9 @@
       "src/kernel/text-card-style.ts",
       "src/kernel/curated-content-types.ts",
       "src/kernel/delegated-task-types.ts",
-      "src/kernel/publish-pipeline-types.ts"
+      "src/kernel/publish-pipeline-types.ts",
+      "src/kernel/valuable-comment-types.ts",
+      "src/kernel/facebook-group-types.ts"
     ]
   },
   "rejected": [

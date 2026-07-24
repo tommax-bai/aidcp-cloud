@@ -1,12 +1,12 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type http from 'node:http';
-import type { InteractionStore } from './interaction-store.js';
 import type { ReplyConfigStore } from './reply-config-store.js';
-import type { ReplyWorkflow } from './reply-workflow.js';
+import type { ReplyPreviewBuilderPort } from './interaction-automation-ports.js';
 import { isReplyPolicy, isReplyProfile, isReplyRule, isReplyTemplate } from './reply-config.js';
 import {
   InteractionError,
   type RuntimeControls,
+  type InteractionStoreReaderPort,
 } from '../kernel/interaction-types.js';
 
 export type InteractionGrant =
@@ -142,9 +142,9 @@ function routeGrant(suffix: string, method: string): InteractionGrant {
 export class InteractionInternalApi {
   private readonly clock: () => number;
   constructor(private readonly deps: {
-    store: InteractionStore;
+    store: InteractionStoreReaderPort;
     configs: ReplyConfigStore;
-    workflow: ReplyWorkflow;
+    workflow: ReplyPreviewBuilderPort;
     grantsFor: (actor: string) => ReadonlySet<InteractionGrant>;
     cursorSecret: string;
     resolutionMode?: 'scoped';

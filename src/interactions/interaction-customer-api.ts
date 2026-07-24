@@ -1,7 +1,6 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type http from 'node:http';
 import type { ClientUserStore } from '../client-auth/client-user-store.js';
-import type { InteractionStore } from './interaction-store.js';
 import type { ReplyConfigStore } from './reply-config-store.js';
 import type { ReplyConfigResolver } from './reply-config-resolver.js';
 // automation 编排层经窄注入端口持有（不再直接 import send-orchestrator / reply-workflow 具体类）。
@@ -14,6 +13,7 @@ import {
   type ReplyJobState,
   type ReplyJobView,
   type ScopedJobContext,
+  type InteractionStoreReaderPort,
 } from '../kernel/interaction-types.js';
 
 const MAX_BODY = 64 * 1024;
@@ -64,8 +64,8 @@ function publicJob(job: ScopedJobContext['job'] | ReplyJobView): ReplyJobView {
 }
 
 function authSummary(
-  auth: NonNullable<Awaited<ReturnType<InteractionStore['getAuth']>>>,
-  controls: Awaited<ReturnType<InteractionStore['getRuntimeControls']>>,
+  auth: NonNullable<Awaited<ReturnType<InteractionStoreReaderPort['getAuth']>>>,
+  controls: Awaited<ReturnType<InteractionStoreReaderPort['getRuntimeControls']>>,
 ) {
   const appliedVersion = auth.runtimeControlsVersion;
   const applicationStatus = appliedVersion === controls.version
@@ -179,7 +179,7 @@ export class InteractionCustomerApi {
 
   constructor(private readonly deps: {
     users: ClientUserStore;
-    store: InteractionStore;
+    store: InteractionStoreReaderPort;
     configs: CustomerConfigReader;
     workflow: ReplyWorkflowWritePort;
     sender: InteractionSendPort;

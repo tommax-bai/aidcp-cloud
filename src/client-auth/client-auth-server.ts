@@ -20,11 +20,11 @@ import type { TokenRevocationStore } from '../panel/revocation.js';
 import type { ClientUserStore } from './client-user-store.js';
 import type { ClientOffboardView } from './client-user-store.js';
 import type { LoginRateLimiter } from './rate-limiter.js';
-import { DelegatedTaskServiceError, type DelegatedTaskService } from '../delegated-task/service.js';
+import { DelegatedTaskServiceError, type DelegatedTaskServicePort } from '../kernel/delegated-task-types.js';
 import type { DelegatedTaskIntent, JsonValue } from '../delegated-task/types.js';
 import { clampClientApprovalMode } from '../delegated-task/types.js';
-import type { CuratedContentStore, CuratedPanelRow, CuratedReferenceImage } from '../cache/curated-content-store.js';
-import { CuratedContentUnavailableError } from '../cache/curated-content-store.js';
+import type { CuratedContentReader, CuratedPanelRow, CuratedReferenceImage } from '../kernel/curated-content-types.js';
+import { CuratedContentUnavailableError } from '../kernel/curated-content-types.js';
 import type { ResolvedBinding } from './client-user-store.js';
 import type {
   PublishApprovalActionPayload,
@@ -71,9 +71,9 @@ export interface ClientAuthDeps {
     setForAccount(accountId: string, alias: string | null): Promise<SetOperatorAliasResult>;
   };
   /** Customer-scoped delegated tasks. Every route re-checks env ownership from the DB. */
-  delegatedTasks?: DelegatedTaskService;
+  delegatedTasks?: DelegatedTaskServicePort;
   /** Account-scoped curated reads. HTTP responses are projected through an explicit customer DTO below. */
-  curatedContent?: Pick<CuratedContentStore, 'listForClient' | 'getOneForAccount'>;
+  curatedContent?: CuratedContentReader;
   /** Account-scoped count of publish_log rows that have a persisted source_reference. */
   referenceDraftCountForAccount?: (accountId: string) => Promise<number>;
   /** Account/status-scoped pending drafts. Customer responses always pass through explicit DTO allowlists below. */

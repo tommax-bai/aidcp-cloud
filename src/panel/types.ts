@@ -44,7 +44,7 @@ import type {
   FacebookGroupTargetListResult,
   FacebookGroupTargetRow,
   ReplaceFacebookGroupTargetScopesResult,
-} from '../comment-agent/facebook-group-store.js';
+} from '../kernel/facebook-group-types.js';
 import type {
   ContentScheduleCatalogRow,
   AccountContentSchedulePatch,
@@ -80,7 +80,7 @@ import type { BillingPriceRefreshResult } from '../metrics/billing-price-refresh
 import type { NotificationContact, NotificationContactManual } from '../cache/notification-contact-store.js';
 import type { ThinkingMode, ThinkingModeApi } from '../config/role-catalog.js';
 import type { AlertStore } from '../alerts/index.js';
-import type { DelegatedTaskService } from '../delegated-task/service.js';
+import type { DelegatedTaskServicePort } from '../kernel/delegated-task-types.js';
 import type { InteractionPermissionOverview } from '../interactions/interaction-panel-permissions.js';
 import type {
   AccountCommentApprovalMode,
@@ -182,7 +182,7 @@ export interface PanelDeps {
   /** 发布下发段只读在途集合；未注入时面板保守地只显示待审，不猜测已批准。 */
   publishDispatcher?: { getInFlightRecordIds(): number[] };
   /** Unified public-write confirmation/task API. When absent, delegated endpoints fail closed with 503. */
-  delegatedTasks?: Pick<DelegatedTaskService, 'createDraft' | 'confirm' | 'list' | 'get' | 'pause' | 'resume' | 'cancel'>;
+  delegatedTasks?: DelegatedTaskServicePort;
   /**
    * 发布审批写回：与飞书 / 客户端 / 委托任务 / 排期免审**同一个**授权写出口，写同一张持久授权记录
    * （change publish-approval-signal-to-database）。first-writer-wins 由数据库「活跃行唯一」承担，

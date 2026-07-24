@@ -64,6 +64,8 @@ import type {
   CuratedClientSort,
   CuratedFacets,
 } from '../kernel/curated-content-types.js';
+import { CuratedContentUnavailableError } from '../kernel/curated-content-types.js';
+export { CuratedContentUnavailableError };
 export type {
   CuratedSourceContentType,
   CuratedContentType,
@@ -575,20 +577,10 @@ function rowToPanelView(r: CuratedPanelDbRow): CuratedPanelRow {
   };
 }
 
-/**
- * 底层精选表缺失 / 不可读（PostgreSQL `42P01`）时由只读方法抛出的 typed error。
- *
- * **红线（change curated-envkey-account-binding）**：此前 4 个只读方法把「表不存在」翻译成「没有数据」
- * （回空列表 / null）——那被上层如实画成「暂无数据 / 精选池还是空的」，让一处存储故障对运营呈现为一个
- * 和善的空池，与「MUST NOT 静默假成功」红线同质，只是穿了「优雅降级」的外衣。改为抛此 typed error，
- * 由每个调用方映射为诚实的 503（服务不可用），MUST NOT 回落为空结果、MUST NOT 回落为「未找到」。
- */
-export class CuratedContentUnavailableError extends Error {
-  constructor(readonly operation: string) {
-    super(`curated content store unavailable (missing table) during ${operation}`);
-    this.name = 'CuratedContentUnavailableError';
-  }
-}
+// CuratedContentUnavailableError（底层精选表缺失/不可读时只读方法抛出的 typed error）已抬入 kernel
+// （src/kernel/curated-content-types.ts），供 api 侧在 instanceof 处捕获而无需依赖本存储类。
+// 其红线语义不变：调用方 MUST 映射为诚实的 503，MUST NOT 回落为空结果/「未找到」。此处等值再导出，
+// 让既有 `from '../cache/curated-content-store'` 的 value 导入面（server 组合根等）逐字不变。
 
 export class CuratedContentStore {
   private readonly pool: pg.Pool;

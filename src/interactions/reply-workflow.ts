@@ -17,14 +17,18 @@ import {
   type InteractionErrorCode,
   type MinimalInbound,
   type ReplyConfigSnapshot,
-  type ReplyJobView,
   type ReplyIntent,
   type ReplyProfile,
   type ReplyRule,
   type ReplyTemplate,
   type RiskTag,
+  type ReplyPreviewResult,
   type ScopedJobContext,
 } from '../kernel/interaction-types.js';
+
+// ReplyPreviewResult 已抬入 kernel（供 api 只读预览路径经窄端口消费）；这里等值再导出，
+// 让本仓内既有 automation 消费方（send-orchestrator）无感。
+export type { ReplyPreviewResult };
 
 const CONTENT_HIGH_RISK = new Set<string>(HARD_RISK_TAGS.filter((tag) =>
   tag !== 'unknown' && tag !== 'meaning_changed' && tag !== 'introduced_claim'));
@@ -34,21 +38,6 @@ const ORDINARY_KNOWLEDGE_INTENTS = new Set<ReplyIntent>([
 ]);
 const ORDINARY_KNOWLEDGE_CUE = /适合.{0,6}(?:几岁|多大|几年级)|(?:几岁|多大|几年级).{0,6}(?:孩子|学生|适合)/;
 
-export interface ReplyPreviewResult {
-  matchedRuleId: string | null;
-  templateId: string | null;
-  templateVersion: number | null;
-  renderedText: string | null;
-  polishedText: string | null;
-  finalText: string | null;
-  riskLevel: ReplyJobView['riskLevel'];
-  riskReasons: RiskTag[];
-  requiresApproval: boolean;
-  meaningChanged: boolean;
-  introducedClaims: string[];
-  reviewReasons: string[];
-  fallbacks: { classifier: AiFallback; polisher: AiFallback; reviewer: AiFallback };
-}
 
 function inboundOf(context: ScopedJobContext): MinimalInbound {
   return {

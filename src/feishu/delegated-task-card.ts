@@ -1,5 +1,5 @@
-import type { DelegatedTaskConfirmationSummary } from '../delegated-task/service.js';
-import { DelegatedTaskService, DelegatedTaskServiceError } from '../delegated-task/service.js';
+import type { DelegatedTaskConfirmationSummary, DelegatedTaskServicePort } from '../kernel/delegated-task-types.js';
+import { DelegatedTaskServiceError } from '../kernel/delegated-task-types.js';
 import type { DelegatedTask } from '../kernel/delegated-task-types.js';
 import type { FeishuCard, FeishuField, FeishuHeaderTemplate } from './types.js';
 
@@ -112,7 +112,7 @@ export function buildDelegatedTaskProgressCard(task: DelegatedTask): FeishuCard 
 }
 
 export async function handleDelegatedTaskCardAction(
-  service: DelegatedTaskService,
+  service: DelegatedTaskServicePort,
   value: unknown,
 ): Promise<{ toast: { type: 'success' | 'error' | 'info'; content: string }; card?: { type: 'raw'; data: FeishuCard } } | null> {
   const parsed = parseDelegatedTaskCardAction(value);

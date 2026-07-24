@@ -5,6 +5,13 @@ import { parseDelegatedText, type ParsedDelegatedRequest } from './parser.js';
 import type { DelegatedTaskCreate, DelegatedTaskListFilter, DelegatedTaskStore } from './store.js';
 import type { DelegatedTask, DelegatedTaskIntent, JsonValue, TaskConstraints } from './types.js';
 import { validateDelegatedTaskIntent } from './types.js';
+// DelegatedTaskConfirmationSummary（纯投影摘要）、DelegatedTaskServiceError（typed error）、
+// DelegatedTaskServicePort（读写窄面）已抬入 kernel，供 api 侧消费方跨边界共导；这里等值再导出，
+// 让既有 `from '../delegated-task/service'` 的导入面（automation 内部消费方）逐字不变。
+import type { DelegatedTaskConfirmationSummary, DelegatedTaskServicePort } from '../kernel/delegated-task-types.js';
+import { DelegatedTaskServiceError } from '../kernel/delegated-task-types.js';
+export type { DelegatedTaskConfirmationSummary };
+export { DelegatedTaskServiceError };
 
 export interface DelegatedAccountCandidate {
   accountId: string;
@@ -18,23 +25,6 @@ export interface DelegatedAccountCandidate {
   status?: 'active' | 'paused';
 }
 
-export interface DelegatedTaskConfirmationSummary {
-  taskId: string;
-  version: number;
-  title: string;
-  accountName: string;
-  platformLabel: string;
-  actionLabel: string;
-  target: string;
-  attempts: string;
-  schedule: string;
-  approval: string;
-  priority: string;
-  constraints: string[];
-  capability: 'supported' | 'beta';
-  capabilityReason?: string;
-}
-
 export interface DelegatedTaskServiceDeps {
   store: DelegatedTaskStore;
   listAccounts: () => Promise<DelegatedAccountCandidate[]>;
@@ -46,13 +36,6 @@ export interface DelegatedTaskServiceDeps {
   ) => Promise<{ ok: true; targetConstraints?: TaskConstraints } | { ok: false; code: string; message: string }>;
   validateTarget?: (task: DelegatedTask) => Promise<{ ok: true } | { ok: false; code: string; message: string }>;
   now?: () => number;
-}
-
-export class DelegatedTaskServiceError extends Error {
-  constructor(readonly code: string, message: string, readonly status = 400) {
-    super(message);
-    this.name = 'DelegatedTaskServiceError';
-  }
 }
 
 const ACTION_LABELS: Record<DelegatedTask['action'], string> = {
@@ -137,7 +120,7 @@ export function buildDelegatedTaskConfirmation(task: DelegatedTask, support: Del
   };
 }
 
-export class DelegatedTaskService {
+export class DelegatedTaskService implements DelegatedTaskServicePort {
   private readonly now: () => number;
 
   constructor(private readonly deps: DelegatedTaskServiceDeps) {

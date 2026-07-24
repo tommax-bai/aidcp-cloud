@@ -4,17 +4,51 @@ import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
 const { Pool } = pg;
 
-export type FacebookGroupJoinGating = 'unknown' | 'instant' | 'gated';
-export type FacebookGroupMembershipStatus =
-  | 'assigned'
-  | 'joining'
-  | 'joined'
-  | 'pending'
-  | 'gated'
-  | 'no_button'
-  | 'checkpoint'
-  | 'failed'
-  | 'left';
+// 纯数据模型类型 + 哨兵错误已抬入 kernel（src/kernel/facebook-group-types.ts），供 api 侧面板 / 配置视图
+// 跨边界共导；这里等值再导出，让既有 `from '../comment-agent/facebook-group-store'` 的类型 / 错误导入面
+// （automation 内部消费方、scheduler 等）逐字不变。存储实现（pg 读写、DbRow 映射）留本文件。
+import { FacebookGroupScopeError } from '../kernel/facebook-group-types.js';
+import type {
+  FacebookGroupJoinGating,
+  FacebookGroupMembershipStatus,
+  FacebookGroupTargetInput,
+  FacebookGroupTargetRow,
+  FacebookGroupTargetScopedRow,
+  FacebookGroupTargetListRow,
+  FacebookGroupTargetScopeWriteRow,
+  ReplaceFacebookGroupTargetScopesResult,
+  FacebookGroupTargetListOptions,
+  FacebookGroupTargetListResult,
+  FacebookGroupRegionFacet,
+  FacebookGroupTargetFacets,
+  FacebookGroupMembershipRow,
+  FacebookGroupJoinAuditOutcome,
+  FacebookGroupJoinRecentScheduledResult,
+  FacebookGroupScopedTargetCount,
+  FacebookGroupImportResult,
+  FacebookGroupAccountProgress,
+} from '../kernel/facebook-group-types.js';
+export { FacebookGroupScopeError };
+export type {
+  FacebookGroupJoinGating,
+  FacebookGroupMembershipStatus,
+  FacebookGroupTargetInput,
+  FacebookGroupTargetRow,
+  FacebookGroupTargetScopedRow,
+  FacebookGroupTargetListRow,
+  FacebookGroupTargetScopeWriteRow,
+  ReplaceFacebookGroupTargetScopesResult,
+  FacebookGroupTargetListOptions,
+  FacebookGroupTargetListResult,
+  FacebookGroupRegionFacet,
+  FacebookGroupTargetFacets,
+  FacebookGroupMembershipRow,
+  FacebookGroupJoinAuditOutcome,
+  FacebookGroupJoinRecentScheduledResult,
+  FacebookGroupScopedTargetCount,
+  FacebookGroupImportResult,
+  FacebookGroupAccountProgress,
+};
 
 export interface FacebookGroupStoreOptions {
   host?: string;
@@ -26,125 +60,6 @@ export interface FacebookGroupStoreOptions {
 }
 
 type FacebookGroupStoreQueryable = Pick<pg.Pool, 'query'>;
-
-export class FacebookGroupScopeError extends Error {
-  constructor(readonly reason: 'invalid_target' | 'invalid_account_group') {
-    super(reason);
-    this.name = 'FacebookGroupScopeError';
-  }
-}
-
-export interface FacebookGroupTargetInput {
-  url: string;
-  name?: string | null;
-  region?: string | null;
-  park?: string | null;
-  direction?: string | null;
-}
-
-export interface FacebookGroupTargetRow {
-  groupUrl: string;
-  groupName: string | null;
-  region: string | null;
-  park: string | null;
-  direction: string | null;
-  joinGating: FacebookGroupJoinGating;
-  priority: number;
-  enabled: boolean;
-  importBatch: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface FacebookGroupTargetScopedRow extends FacebookGroupTargetRow {
-  accountGroupLabels: string[];
-}
-
-export interface FacebookGroupTargetListRow extends FacebookGroupTargetRow {
-  accountGroupLabels: string[];
-  accountId: string | null;
-  membershipStatus: FacebookGroupMembershipStatus | null;
-  joinedAt: string | null;
-  lastAttemptAt: string | null;
-  lastReason: string | null;
-  lastCommentedAt: string | null;
-  commentsTotal: number;
-}
-
-export interface FacebookGroupImportResult {
-  imported: number;
-  updated: number;
-  duplicate: number;
-  invalid: number;
-  rows: FacebookGroupTargetScopedRow[];
-}
-
-export interface FacebookGroupTargetScopeWriteRow {
-  groupUrl: string;
-  accountGroupLabels: string[];
-  updatedAt: string;
-  updatedBy: string;
-}
-
-export type ReplaceFacebookGroupTargetScopesResult =
-  | { ok: true; items: FacebookGroupTargetScopeWriteRow[] }
-  | { ok: false; reason: 'no_targets' | 'invalid_target' | 'invalid_account_group' };
-
-export interface FacebookGroupTargetListOptions {
-  limit?: number;
-  offset?: number;
-  status?: FacebookGroupMembershipStatus | 'unassigned';
-  enabled?: boolean;
-  region?: string | null;
-  park?: string | null;
-  direction?: string | null;
-  accountGroupLabel?: string | null;
-}
-
-export interface FacebookGroupTargetListResult {
-  items: FacebookGroupTargetListRow[];
-  total: number;
-}
-
-export interface FacebookGroupRegionFacet {
-  region: string;
-  parks: string[];
-}
-
-export interface FacebookGroupTargetFacets {
-  regions: FacebookGroupRegionFacet[];
-  directions: string[];
-  accountGroupLabels: string[];
-  unscopedTargetCount: number;
-}
-
-export interface FacebookGroupAccountProgress {
-  accountId: string;
-  assigned: number;
-  joining: number;
-  joined: number;
-  pending: number;
-  gated: number;
-  failed: number;
-  lastJoinedAt: string | null;
-  lastCommentedAt: string | null;
-}
-
-export interface FacebookGroupMembershipRow {
-  accountId: string;
-  groupUrl: string;
-  status: FacebookGroupMembershipStatus;
-  assignedAt: string | null;
-  joinedAt: string | null;
-  lastAttemptAt: string | null;
-  attempts: number;
-  lastReason: string | null;
-  lastCommentedAt: string | null;
-  cooldownUntil: string | null;
-  commentsTotal: number;
-  leftConfirmations: number;
-  updatedAt: string;
-}
 
 export interface FacebookGroupCoverageCandidateOptions {
   limit?: number;
@@ -158,24 +73,6 @@ export interface FacebookGroupCoverageCandidateOptions {
   relaxed?: boolean;
 }
 
-export type FacebookGroupJoinAuditOutcome =
-  | 'shadow_observed'
-  | 'quota_denied'
-  | 'claimed'
-  | 'joined'
-  | 'already_member'
-  | 'gated_skip'
-  | 'pending'
-  | 'questionnaire_required'
-  | 'no_button'
-  | 'login_required'
-  | 'blocked_by_captcha'
-  | 'nav_error'
-  | 'join_failed'
-  | 'ambiguous_skip'
-  | 'no_targets'
-  | 'scope_mismatch';
-
 export type FacebookGroupJoinTriggerSource = 'scheduled' | 'manual_pool' | 'manual_specific' | 'shadow';
 
 export interface FacebookGroupJoinAuditRow {
@@ -188,18 +85,6 @@ export interface FacebookGroupJoinAuditRow {
   shadow?: boolean;
   observation?: unknown;
   triggerSource?: FacebookGroupJoinTriggerSource;
-}
-
-export interface FacebookGroupJoinRecentScheduledResult {
-  outcome: FacebookGroupJoinAuditOutcome;
-  reason: string | null;
-  groupUrl: string | null;
-  createdAt: string;
-}
-
-export interface FacebookGroupScopedTargetCount {
-  accountGroupLabel: string | null;
-  count: number;
 }
 
 interface TargetDbRow {

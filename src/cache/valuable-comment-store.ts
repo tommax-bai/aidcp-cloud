@@ -30,31 +30,13 @@ CREATE INDEX IF NOT EXISTS idx_valuable_comments_liked_at ON valuable_comments(l
 CREATE INDEX IF NOT EXISTS idx_valuable_comments_topics ON valuable_comments USING GIN(topics);
 `;
 
-/** 从笔记标题派生主题键（无 LLM）：小写拉丁词（≥2 长）+ CJK 字符二元组；去重、截断。 */
-export function topicKeysFromTitle(title: string | undefined, max = 24): string[] {
-  if (!title) return [];
-  const keys = new Set<string>();
-  // 拉丁/数字词
-  const latin = title.toLowerCase().match(/[a-z0-9]{2,}/g) ?? [];
-  for (const w of latin) keys.add(w);
-  // CJK 字符二元组
-  const cjk = title.match(/[一-鿿]/g) ?? [];
-  for (let i = 0; i + 1 < cjk.length; i++) keys.add(cjk[i] + cjk[i + 1]);
-  return Array.from(keys).slice(0, max);
-}
-
-export interface ValuableCommentInput {
-  /** 去重键（用评论锚点 comment-<id>）。 */
-  dedupKey: string;
-  text: string;
-  author?: string;
-  sourceNoteId?: string;
-  sourceNoteTitle?: string;
-  topics: string[];
-  reason?: string;
-  /** 该评论的点赞数（change curated-inspiration-corpus Phase 2b）；valuable_comments 表不存此列、仅透传给精选语料。 */
-  likeCount?: number;
-}
+// topicKeysFromTitle（无 LLM 主题键派生）与 ValuableCommentInput（纯数据模型）已抬入 kernel
+// （src/kernel/valuable-comment-types.ts），供 content 侧精选评估角色跨边界共导；这里等值再导出，
+// 让本仓内既有 automation 消费方（comment-composer / role-dispatcher / server 组合根）无感。
+import { topicKeysFromTitle } from '../kernel/valuable-comment-types.js';
+import type { ValuableCommentInput } from '../kernel/valuable-comment-types.js';
+export { topicKeysFromTitle };
+export type { ValuableCommentInput };
 
 export interface ValuableCommentRef {
   text: string;

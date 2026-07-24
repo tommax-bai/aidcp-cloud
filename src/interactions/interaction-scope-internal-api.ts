@@ -3,7 +3,7 @@ import type http from 'node:http';
 import { isReplyPolicy, isReplyProfile, isReplyRule, isReplyTemplate } from './reply-config.js';
 import type { ReplyConfigResolver } from './reply-config-resolver.js';
 import type { ReplyConfigScopeStore } from './reply-config-scope-store.js';
-import type { ReplyWorkflow } from './reply-workflow.js';
+import type { ReplyPreviewBuilderPort } from './interaction-automation-ports.js';
 import { InteractionError, type ReplyConfigSource } from '../kernel/interaction-types.js';
 import type { InteractionGrant } from './interaction-internal-api.js';
 
@@ -78,7 +78,7 @@ export class InteractionScopeInternalApi {
   constructor(private readonly deps: {
     scopes: ReplyConfigScopeStore;
     resolver: ReplyConfigResolver;
-    workflow: ReplyWorkflow;
+    workflow: ReplyPreviewBuilderPort;
     grantsFor: (actor: string) => ReadonlySet<InteractionGrant>;
     cursorSecret: string;
     clock?: () => number;

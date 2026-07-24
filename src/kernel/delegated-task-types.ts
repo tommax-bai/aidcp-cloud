@@ -165,3 +165,63 @@ export interface DelegatedTaskAttempt {
   dispatchedAt: number | null;
   finishedAt: number | null;
 }
+
+/**
+ * 委托任务确认卡的**纯投影摘要**（原定义在 src/delegated-task/service.ts）。全为字符串/枚举字面量字段，
+ * 无 SQL / 无活状态。抬入 kernel 供 api 侧（feishu 卡片渲染）type-only 共导。
+ */
+export interface DelegatedTaskConfirmationSummary {
+  taskId: string;
+  version: number;
+  title: string;
+  accountName: string;
+  platformLabel: string;
+  actionLabel: string;
+  target: string;
+  attempts: string;
+  schedule: string;
+  approval: string;
+  priority: string;
+  constraints: string[];
+  capability: 'supported' | 'beta';
+  capabilityReason?: string;
+}
+
+/**
+ * 委托任务服务抛出的**typed error**（原定义在 src/delegated-task/service.ts）。抬入 kernel 供 api 侧
+ * （client-auth-server / panel-server / feishu 卡片）在 `instanceof` 处捕获并映射 HTTP 状态，而无需
+ * type-only 依赖 automation 的服务类。纯 Error 子类，满足 §4.7 kernel 准入。
+ */
+export class DelegatedTaskServiceError extends Error {
+  constructor(readonly code: string, message: string, readonly status = 400) {
+    super(message);
+    this.name = 'DelegatedTaskServiceError';
+  }
+}
+
+/**
+ * 委托任务服务的**读写窄面**（consumer-facing service port）。api 侧（client-auth-server /
+ * panel/types / feishu 卡片）通过本端口驱动草稿创建 / 确认 / 暂停 / 恢复 / 取消 / 取单 / 列表，
+ * 而不依赖 automation 的具体服务类。返回/入参类型全为本文件既有 kernel 纯类型；`list` 的筛选面按
+ * DelegatedTaskListFilter 逐字内联（automation store 侧的 DelegatedTaskListFilter 结构等价）。
+ * automation 的 DelegatedTaskService 结构兼容本端口，由组合根注入其实例；服务类不 import 本契约。
+ */
+export interface DelegatedTaskServicePort {
+  createDraft(intent: DelegatedTaskIntent): Promise<{
+    task: DelegatedTask;
+    confirmation: DelegatedTaskConfirmationSummary;
+    created: boolean;
+    autoQueued: boolean;
+  }>;
+  confirm(taskId: string, version: number): Promise<DelegatedTask>;
+  pause(taskId: string, version?: number): Promise<DelegatedTask>;
+  resume(taskId: string, version?: number): Promise<DelegatedTask>;
+  cancel(taskId: string, version?: number): Promise<DelegatedTask>;
+  get(taskId: string): Promise<DelegatedTask>;
+  list(filter?: {
+    accountId?: string;
+    actionFamily?: DelegatedActionFamily;
+    statuses?: DelegatedTaskStatus[];
+    limit?: number;
+  }): Promise<DelegatedTask[]>;
+}

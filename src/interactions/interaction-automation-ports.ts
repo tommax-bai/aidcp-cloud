@@ -15,7 +15,23 @@ import type {
   InteractionSyncRequestPayload,
   InteractionAuthReopenPayload,
   InteractionBrowserControlPayload,
+  ReplyConfigSnapshot,
+  MinimalInbound,
+  ReplyPreviewResult,
 } from '../kernel/interaction-types.js';
+
+/**
+ * 回复预览生成的**只读窄面**：internal-api / scope-internal-api 只驱动 buildPreview 一个方法，
+ * 用来把配置快照 + 入站消息投影成一份预览结果（不落库、不改任务状态）。automation 的
+ * ReplyWorkflow 结构兼容本端口，由组合根 src/server.ts 注入其实例；automation 类不 import 本端口。
+ */
+export interface ReplyPreviewBuilderPort {
+  buildPreview(
+    snapshot: ReplyConfigSnapshot,
+    inbound: MinimalInbound,
+    sourceExternalId: string | null,
+  ): Promise<ReplyPreviewResult>;
+}
 
 /** 回复工作流的「写侧」窄面：customer-api 只驱动人工审批/生成/编辑这三个跃迁。 */
 export interface ReplyWorkflowWritePort {

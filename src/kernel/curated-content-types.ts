@@ -227,6 +227,32 @@ export type CuratedClientCreationStatus = 'uncreated' | 'created' | 'creatable' 
 /** 客户端灵感库排序：只允许固定产品语义，调用方不得提交 SQL 字段或方向。 */
 export type CuratedClientSort = 'weighted' | 'collects' | 'likes' | 'recent';
 
+/**
+ * 精选库缺表时的**哨兵错误**（原定义在 src/cache/curated-content-store.ts）。抬入 kernel 供
+ * api 侧（client-auth-server / panel-server）在 `instanceof` 处捕获而无需 type-only 依赖 content 的存储类。
+ * 纯 Error 子类：无 SQL / 无 pg / 无进程内活状态，满足 §4.7 kernel 准入（与 kernel/schema-capability-contract 的
+ * SchemaCapabilityError 同一手法）。
+ */
+export class CuratedContentUnavailableError extends Error {
+  constructor(readonly operation: string) {
+    super(`curated content store unavailable (missing table) during ${operation}`);
+    this.name = 'CuratedContentUnavailableError';
+  }
+}
+
+/**
+ * 精选库的**账号维读侧窄面**（consumer-facing reader port）。api 侧 client-auth-server 只驱动
+ * 「按账号分页列表」与「按账号取单条」两个只读方法；返回类型全为本文件既有 kernel 纯类型。
+ * content 侧 CuratedContentStore 结构兼容本端口，由组合根注入其实例；存储类不 import 本契约。
+ */
+export interface CuratedContentReader {
+  listForClient(
+    accountId: string,
+    opts: { creationStatus: CuratedClientCreationStatus; sort?: CuratedClientSort; limit: number; offset: number },
+  ): Promise<CuratedClientListResult>;
+  getOneForAccount(id: number, accountId: string): Promise<CuratedPanelRow | null>;
+}
+
 /** 面板筛选面：驱动筛选下拉 + 清理前影响预览（按账号）。 */
 export interface CuratedFacets {
   /** 该账号实际出现的纳入原因去重 + 各自计数 + 携机器人点赞/收藏标记的高权重行数。 */

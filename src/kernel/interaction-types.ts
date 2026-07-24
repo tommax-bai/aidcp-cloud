@@ -624,6 +624,122 @@ export interface MinimalInbound {
   recentMessages: Array<{ direction: InteractionDirection; text: string }>;
 }
 
+/**
+ * 回复预览生成的**纯结果契约**（原定义在 src/interactions/reply-workflow.ts）。
+ * 抬入 kernel 供 api 侧只读预览路径（interaction-internal-api / interaction-scope-internal-api）
+ * 经窄注入端口消费预览生成行为，而无需 type-only 依赖 automation 的具体工作流类。字段类型全为本文件既有 kernel 类型。
+ */
+export interface ReplyPreviewResult {
+  matchedRuleId: string | null;
+  templateId: string | null;
+  templateVersion: number | null;
+  renderedText: string | null;
+  polishedText: string | null;
+  finalText: string | null;
+  riskLevel: ReplyJobView['riskLevel'];
+  riskReasons: RiskTag[];
+  requiresApproval: boolean;
+  meaningChanged: boolean;
+  introducedClaims: string[];
+  reviewReasons: string[];
+  fallbacks: { classifier: AiFallback; polisher: AiFallback; reviewer: AiFallback };
+}
+
+/**
+ * 收件箱只读投影的**纯 DTO 契约**（原定义在 src/interactions/interaction-store.ts）。抬入 kernel 供 api 侧
+ * 收件箱读路径（interaction-customer-api / interaction-internal-api）经 InteractionStoreReaderPort 消费，
+ * 而无需 type-only 依赖 automation 的具体存储类。字段类型全为本文件既有 kernel 类型；这些 DTO 仅存储类与端口引用。
+ */
+export interface InteractionTestResetResult {
+  channel: InteractionChannel;
+  deleted: { threads: number; syncBatches: number; syncCursors: number };
+}
+
+export interface ListQuery {
+  accountId: string;
+  envKey: string;
+  asOf: number;
+  limit: number;
+  channel?: InteractionChannel;
+  state?: ReplyJobState | 'pending';
+  before?: { lastMessageAt: number; id: string };
+}
+
+export interface ListResult {
+  items: InteractionListItem[];
+  next: { lastMessageAt: number; id: string } | null;
+}
+
+export interface ReplyPreviewContext {
+  threadId: string;
+  messageId: string;
+  channel: InteractionChannel;
+  messageType: MessageView['messageType'];
+  userMessage: string | null;
+  userName: string | null;
+  videoTitle: string | null;
+  receivedAt: number;
+}
+
+export interface DetailResult {
+  thread: ThreadView;
+  messages: MessageView[];
+  replyJob: ReplyJobView | null;
+  sendAttempt: SendAttemptView | null;
+  next: { platformCreatedAt: number; id: string } | null;
+}
+
+/**
+ * 收件箱存储的**读侧窄面**（consumer-facing reader port）。api 侧收件箱 HTTP 面通过本端口取投影 /
+ * 认领幂等请求 / 记审计，而不依赖 automation 的具体存储类。方法签名与返回类型逐字取自 InteractionStore
+ * 的对应只读 / 请求账本方法（返回类型全为本文件既有 kernel DTO）。automation 的 InteractionStore
+ * 结构兼容并 implements 本端口，由组合根注入其实例；存储类不因此反向依赖 api。
+ */
+export interface InteractionStoreReaderPort {
+  getAuth(accountId: string, envKey: string): Promise<InteractionAuthStatusPayload | null>;
+  getSyncFreshness(accountId: string, envKey: string): Promise<SyncFreshnessProjection>;
+  listInteractions(query: ListQuery): Promise<ListResult>;
+  listReplyPreviewContexts(
+    accountId: string,
+    channel: InteractionChannel,
+    limit: number,
+  ): Promise<ReplyPreviewContext[]>;
+  getDetail(
+    accountId: string,
+    envKey: string,
+    threadId: string,
+    limit: number,
+    before?: { platformCreatedAt: number; id: string },
+  ): Promise<DetailResult | null>;
+  getJobContext(accountId: string, envKey: string, jobId: string): Promise<ScopedJobContext | null>;
+  transitionMessageJob(input: {
+    accountId: string; envKey: string; messageId: string; expectedVersion: number;
+    to: 'ignored' | 'escalated'; actor: string; reason?: string;
+  }): Promise<ScopedJobContext['job']>;
+  getRuntimeControls(accountId: string): Promise<RuntimeControls>;
+  resetTestData(input: {
+    accountId: string;
+    envKey: string;
+    channel: InteractionChannel;
+    actor: string;
+  }): Promise<InteractionTestResetResult>;
+  updateRuntimeControls(input: {
+    accountId: string; expectedVersion: number; actor: string;
+    commentsReadEnabled: boolean; commentsReplyEnabled: boolean; dmReadEnabled: boolean;
+    dmSendTextEnabled: boolean; dmSendImageEnabled: false; writePaused: boolean;
+  }): Promise<RuntimeControls>;
+  recordAudit(input: {
+    accountId: string; envKey: string | null; actor: string; action: string;
+    configVersion?: number | null; entityType: string; entityId?: string | null;
+    summary: string; labels?: Record<string, unknown>;
+  }): Promise<void>;
+  claimApiRequest(input: {
+    actor: string; action: 'send' | 'sync' | 'auth_reopen' | 'browser_control' | 'test_reset'; idempotencyKey: string;
+    accountId: string; envKey: string; resourceId?: string | null;
+  }): Promise<{ requestId: string; fresh: boolean; response: unknown | null }>;
+  completeApiRequest(requestId: string, response: unknown): Promise<void>;
+}
+
 export interface IntentClassifierInput {
   role: 'reply_intent_classifier';
   requestId: string;
