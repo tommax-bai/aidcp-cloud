@@ -1,6 +1,8 @@
-import { buildFacebookGroupJoinJudgePrompt } from '../agents/facebook-group-join-judge.js';
-import { buildFacebookCommentComposerPrompt } from '../comment-agent/facebook-comment-composer-prompt.js';
-import { buildInteractionReplyPrompt } from '../interactions/reply-ai.js';
+// 全部 prompt 构建符号均从 kernel 直接导入：纯构建段已抬入 kernel（change decouple-behavior-class-ports），
+// 各业务角色文件从 kernel 等值再导出、运行时行为逐字不变；本 api 侧预览直连 kernel 以消去跨边界依赖。
+import { buildFacebookGroupJoinJudgePrompt } from '../kernel/facebook-group-join-prompt.js';
+import { buildFacebookCommentComposerPrompt } from '../kernel/facebook-comment-composer-prompt.js';
+import { buildInteractionReplyPrompt } from '../kernel/interaction-reply-prompt.js';
 import type {
   IntentClassifierInput,
   MinimalInbound,
@@ -8,13 +10,13 @@ import type {
   RiskReviewerInput,
 } from '../kernel/interaction-types.js';
 import type { Soul } from '../kernel/soul-types.js';
-import { buildCoverFormSensePrompt } from '../publish-agent/cover-form-sensor.js';
-import { buildCoverCardCopyPrompt } from '../publish-agent/prompts.js';
-import { buildVisualFidelityAuditPrompt } from '../publish-agent/visual-fidelity-auditor.js';
+import { buildCoverFormSensePrompt } from '../kernel/cover-form-sense-prompt.js';
+import { buildCoverCardCopyPrompt } from '../kernel/cover-card-copy-prompt.js';
+import { buildVisualFidelityAuditPrompt } from '../kernel/visual-fidelity-audit-prompt.js';
 import {
   buildVisualReferenceSetPrompt,
   buildVisualReferenceSpecialistPrompt,
-} from '../publish-agent/visual-reference-analyzer.js';
+} from '../kernel/visual-reference-prompts.js';
 
 export interface StaticRolePromptPreview {
   build: (soul?: Soul) => string;

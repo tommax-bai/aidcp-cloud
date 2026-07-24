@@ -995,6 +995,21 @@
     "note": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/config/content-schedule-store.ts 析出：CONTENT_SCHEDULE_ACTION_MODES 常量 + ContentScheduleActionMode/ContentScheduleApprovalMode 纯类型，零 import、零 SQL、零活状态。排期存储（含建表读写 SQL）留 content-schedule-store.ts。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
   },
   {
+    "path": "src/kernel/content-visual-brief.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change decouple-behavior-class-ports 从 src/publish-agent/content-visual-brief.ts 整体 git mv：整文件为正文视觉 brief 的纯归一/兜底/格式化函数与纯数据（normalizeContentVisualBrief / ensureContentVisualCategory / createFallbackContentVisualBrief / formatContentVisualCategoryBrief / categorySafetyInstruction / inferContentVisualKind / CONTENT_VISUAL_CATEGORY_LABELS 等），唯一 import 为 kernel 的 visual-reference-types 类型。零 SQL / HTTP / LLM / 模块级 Set-Map（nonEmpty 内的 new Set 为函数体局部量、非模块级单例）。原路径 publish-agent/content-visual-brief.ts 保留为 re-export 桩，content 层内部消费方无感。为 visual-fidelity-audit-prompt 能进 kernel 而抬入（其构建依赖本文件两个格式化函数）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final"
+  },
+  {
+    "path": "src/kernel/cover-card-copy-prompt.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change decouple-behavior-class-ports 从 src/publish-agent/prompts.ts（content）析出 buildCoverCardCopyPrompt 纯构建函数与其依赖的 buildContentVisualExcerpt（有界正文摘录纯字符串函数）+ CONTENT_VISUAL_EXCERPT_MAX 常量。零 import、零 SQL、零 LLM、无模块级 Set-Map。prompts.ts 其余多角色构建（依赖 content 兄弟模块 types / content-visual-brief）留原文件（content）并从 kernel 等值再导出这两个纯物。供 api 侧静态 prompt 预览跨边界共导，消 1 条 api->content 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final"
+  },
+  {
+    "path": "src/kernel/cover-form-sense-prompt.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change decouple-behavior-class-ports 从 src/publish-agent/cover-form-sensor.ts（content）析出 buildCoverFormSensePrompt 纯函数（零入参、返回固定视觉判定指令）。零 import、零 SQL、零 LLM、无进程内活状态。感知服务 createCoverFormSensor / 多模态调用 / 缓存回写留 cover-form-sensor.ts（content）并从 kernel 等值再导出。供 api 侧静态 prompt 预览跨边界共导，消 1 条 api->content 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final"
+  },
+  {
     "path": "src/kernel/curated-content-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-platform-type-closure 从 src/cache/curated-content-store.ts 析出纯数据模型类型（CuratedReferenceImageFormGuess / TextCardTranscription(*) / CuratedReferenceImage(Input) / CuratedObservation / CuratedSelectItem / CuratedPanelRow / CuratedFacets / CuratedContentType(Filter) 等），仅 import kernel（visual-reference-types / time）。CURATED_CONTENT_SCHEMA_SQL + CuratedContentStore 类 + normalize* 函数 + CuratedContentStoreOptions 留 curated-content-store.ts（content）。满足 §4.7 kernel 准入（无 SQL）。请求回写 §4.7 见 docpatch RK3"
@@ -1005,9 +1020,19 @@
     "note": "【待定稿裁决·部分析出】change decouple-platform-type-closure 从 src/delegated-task/types.ts 析出纯类型（DelegatedTask / DelegatedTaskIntent / DelegatedTaskAttempt / DelegatedTaskStatus / DelegatedVerificationKind / DelegatedExecutionTarget / Json* / TaskConstraints 等），仅 import kernel（platform-types / deployment-target）。**状态机模块级 Set（TERMINAL_STATUSES / TRANSITIONS）+ 转移/校验函数 + 运行时数组 DELEGATED_TASK_STATUSES 留 delegated-task/types.ts（automation）**：门禁 §4.7 禁 kernel 持模块级 new Set（故非整文件搬）。DELEGATED_TASK_STATUSES satisfies kernel 联合。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK3"
   },
   {
+    "path": "src/kernel/facebook-comment-composer-prompt.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change decouple-behavior-class-ports 从 src/comment-agent/facebook-comment-composer-prompt.ts 整体 git mv：整文件为纯 Facebook 评论撰写 prompt 构建（FacebookCommentComposerPromptInput + buildFacebookCommentComposerPrompt），唯一 import 为 kernel 的 soul-types 类型与 writing-language 指令。零 SQL / HTTP / LLM / 模块级 Set-Map。原路径 comment-agent/facebook-comment-composer-prompt.ts 保留为 re-export 桩，automation 层内部消费方无感。消 1 条 api->automation 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final"
+  },
+  {
     "path": "src/kernel/facebook-comment-config-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/config/facebook-comment-config-store.ts 析出纯数据模型类型（FacebookContainer / FacebookCommentMode / EffectiveFacebookCommentConfig），零 import、零 SQL、无进程内活状态。SCHEMA_SQL + FacebookCommentConfigStore 类 + coerce/校验函数留 facebook-comment-config-store.ts（automation）并从 kernel 导入等值再导出。供 automation 侧评论调度器跨边界共导，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
+  },
+  {
+    "path": "src/kernel/facebook-group-join-prompt.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change decouple-behavior-class-ports 从 src/agents/facebook-group-join-judge.ts（automation）析出纯 prompt 构建段：FacebookGroupJoinObservation 观测数据模型 + FacebookGroupJoinPhase 枚举 + buildFacebookGroupJoinJudgePrompt 纯函数（入参→prompt 字符串）。零 import、零 SQL、零 LLM、无进程内活状态。判定类 FacebookGroupJoinJudge（确定性短路 / LLM 调用 / 审计回写）留 facebook-group-join-judge.ts（automation）并从 kernel 等值再导出。供 api 侧静态 prompt 预览跨边界共导，消 1 条 api->automation 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final"
   },
   {
     "path": "src/kernel/facebook-group-types.ts",
@@ -1028,6 +1053,11 @@
     "path": "src/kernel/interaction-reply-contract.ts",
     "layer": "kernel",
     "note": "【待定稿裁决·部分析出】change decouple-llm-lang-interaction-contracts 析出无模块级 Set 依赖的纯物：从 reply-config.ts（api，§4.6.1）析出 validateFinalReplyText（只读 profile 字段+内联正则，无 Set）；从 reply-config-resolver.ts（api）析出纯读取端口 ReplyConfigReader 与两个无状态读取函数 readPublishedConfig/readJobConfig（只对注入 reader 端口取数、不连库）。**reply-config.ts 其余校验/渲染函数依赖模块级 VARIABLE_SET/HARD_RISK_SET/INTENTS/… 等 const=new Set，被门禁 §4.7 判「进程内活状态」故不入 kernel、留原文件**（reply-auto-send / reply-workflow 引这些的边留 residual）。两 api 原文件保持属主并等值再导出；连库的 ReplyConfigResolver 类留 reply-config-resolver.ts（api）。零 SQL/HTTP/LLM/fetch/活状态。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
+  },
+  {
+    "path": "src/kernel/interaction-reply-prompt.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决·部分析出】change decouple-behavior-class-ports 从 src/interactions/reply-ai.ts（content）析出纯 prompt 构建段：buildInteractionReplyPrompt + requiresKnowledgeAnswer 纯判定 + 输出 schema 常量 + InteractionReplyInput/InteractionReplyRole 类型，仅 import kernel 互动域类型。原文件里 KNOWLEDGE_QUESTION_INTENTS 为模块级 new Set（门禁 §4.7 判「进程内活状态」禁入 kernel），此处改写为只读数组 + .includes，语义逐字等价。LLM 调用类 ReplyAiService、解析/纠正 prompt（依赖 LlmClient / setTimeout）留 reply-ai.ts（content）并从 kernel 等值再导出。供 api 侧静态 prompt 预览跨边界共导，消 1 条 api->content 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final"
   },
   {
     "path": "src/kernel/interaction-types.ts",
@@ -1128,6 +1158,16 @@
     "path": "src/kernel/valuable-comment-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-behavior-class-ports 从 src/cache/valuable-comment-store.ts 析出纯物：ValuableCommentInput（纯数据模型）+ topicKeysFromTitle（无 LLM 主题键派生纯字符串函数，函数体内局部 Set 非模块级单例）。零 import、零 SQL、无 pg、无进程内活状态。VALUABLE_COMMENT_SCHEMA_SQL + ValuableCommentStore 类 + pg 读写留 valuable-comment-store.ts（automation）。供 content 侧精选评估角色跨边界共导，消 3 条 content->automation 边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
+  },
+  {
+    "path": "src/kernel/visual-fidelity-audit-prompt.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change decouple-behavior-class-ports 从 src/publish-agent/visual-fidelity-auditor.ts（content）析出 VisualAuditInput 审核输入模型 + buildVisualFidelityAuditPrompt 纯函数（入参→视觉模型文本指令），仅 import kernel（visual-reference-types 类型 + content-visual-brief 的 categorySafetyInstruction/formatContentVisualCategoryBrief）。零 LLM 调用 / 零连库 / 无进程内活状态。审核服务 createVisualFidelityAuditor / 多模态组装 / 解析留 visual-fidelity-auditor.ts（content）并从 kernel 等值再导出。供 api 侧静态 prompt 预览跨边界共导，消 1 条 api->content 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final"
+  },
+  {
+    "path": "src/kernel/visual-reference-prompts.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change decouple-behavior-class-ports 从 src/publish-agent/visual-reference-analyzer.ts（content）析出 buildVisualReferenceSetPrompt + buildVisualReferenceSpecialistPrompt 两个纯函数（入参→视觉模型文本指令），仅 import kernel 的 visual-reference-types 枚举/类型。零 LLM 调用 / 零连库 / 无进程内活状态。分析服务 createVisualReferenceAnalyzer / 多模态调用 / 解析缓存留 visual-reference-analyzer.ts（content）并从 kernel 等值再导出。供 api 侧静态 prompt 预览跨边界共导，消 1 条 api->content 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final"
   },
   {
     "path": "src/kernel/visual-reference-types.ts",

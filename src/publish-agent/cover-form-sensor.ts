@@ -23,6 +23,11 @@ import {
 } from '../cache/curated-content-store.js';
 import type { VisionLlmClient, VisionChatMessage } from '../llm/vision.js';
 import type { ReferenceImageSnapshot } from './types.js';
+import { buildCoverFormSensePrompt } from '../kernel/cover-form-sense-prompt.js';
+
+// 纯视觉判定指令已抬入 kernel（src/kernel/cover-form-sense-prompt.ts，change decouple-behavior-class-ports）；
+// 此处等值再导出，既有导入方无感、行为逐字不变。
+export { buildCoverFormSensePrompt };
 
 /** 感知结局四态：detected（含缓存命中）/ error（调用或解析失败）/ no_image（无可用参照图）/ disabled（旗标关）。 */
 export type CoverFormSenseStatus = 'detected' | 'error' | 'no_image' | 'disabled';
@@ -93,18 +98,6 @@ export function usableImageUrl(img: ReferenceImageSnapshot): string | undefined 
   const oss = typeof img.ossUrl === 'string' && img.ossUrl.trim() ? img.ossUrl.trim() : undefined;
   if (oss) return oss;
   return typeof img.sourceUrl === 'string' && img.sourceUrl.trim() ? img.sourceUrl.trim() : undefined;
-}
-
-/** 视觉判定提示词（中文；输出收窄为 form+confidence+reason，刻意不要求颜色/坐标/OCR 全文——防搬运结构隔离）。 */
-export function buildCoverFormSensePrompt(): string {
-  return `请判断这张小红书笔记封面图的形态，四选一：
-- text_card：排版文字知识卡/海报——画面主体是排版好的文字内容（大标题、要点列表、金句等），文字本身是信息主体
-- photo：真实拍摄的照片（人物、风景、食物、产品、生活场景等实拍）
-- illustration：插画/手绘/漫画/卡通风格的图
-- other：以上都不是（如界面截图、纯图表、拼图等）
-
-只输出 JSON（不要其他内容，不要输出图中的具体文字）：
-{"form":"text_card|photo|illustration|other","confidence":0.0到1.0之间的数字,"reason":"简短中文理由"}`;
 }
 
 /** 组装单条多模态消息（文本指令 + 待判图）。 */

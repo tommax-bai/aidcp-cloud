@@ -1,32 +1,22 @@
 import type { LlmCallOpts } from '../kernel/llm-contract.js';
 import type { RoleName } from '../event-bus/types.js';
 import type { FacebookGroupJoinAuditRow } from '../comment-agent/facebook-group-store.js';
+import {
+  buildFacebookGroupJoinJudgePrompt,
+  type FacebookGroupJoinObservation,
+  type FacebookGroupJoinPhase,
+} from '../kernel/facebook-group-join-prompt.js';
+
+// 观测数据模型、阶段枚举与纯 prompt 构建函数已抬入 kernel（src/kernel/facebook-group-join-prompt.ts，
+// change decouple-behavior-class-ports）；此处等值再导出，既有导入方无感、行为逐字不变。
+export {
+  buildFacebookGroupJoinJudgePrompt,
+  type FacebookGroupJoinObservation,
+  type FacebookGroupJoinPhase,
+};
 
 export type FacebookJoinPreClickVerdict = 'instant_join' | 'gated_skip' | 'already_member' | 'ambiguous_skip';
 export type FacebookJoinPostClickVerdict = 'joined' | 'pending_gated' | 'failed';
-
-export interface FacebookGroupJoinObservation {
-  groupUrl?: string;
-  pageUrl?: string;
-  title?: string;
-  mainCtaText?: string | null;
-  mainCtaAria?: string | null;
-  headerText?: string | null;
-  modalText?: string | null;
-  membershipSignals?: string[];
-  loginRequired?: boolean;
-  captchaDetected?: boolean;
-  questionnaireRequired?: boolean;
-  pendingRequest?: boolean;
-  navError?: string | null;
-  /**
-   * L3 结构后置校验（change facebook-join-structural-verify；与边缘同名字段第二副本，随 observation 松通道流入）：
-   * 群主体内是否有可聚焦发帖/评论 composer（语言无关成员态信号）。
-   */
-  composerPresent?: boolean;
-  /** L3：群主体内是否有可见「加入」CTA。承重闸——joined 要求 composerPresent 且 joinCtaPresent 为 false（防非成员组假成功）。 */
-  joinCtaPresent?: boolean;
-}
 
 export type FacebookGroupJoinJudgeResult =
   | { phase: 'pre_click'; verdict: FacebookJoinPreClickVerdict; confidence: number; reason: string }
@@ -122,55 +112,6 @@ function parseConfidence(raw: unknown, fallback: number): number {
   const n = typeof raw === 'number' ? raw : Number(raw);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(0, Math.min(1, n));
-}
-
-export type FacebookGroupJoinPhase = 'pre_click' | 'post_click';
-
-/** Runtime and admin preview share this exact prompt builder to prevent drift. */
-export function buildFacebookGroupJoinJudgePrompt(
-  phase: FacebookGroupJoinPhase,
-  obs: FacebookGroupJoinObservation,
-): string {
-  const allowed =
-    phase === 'pre_click'
-      ? 'instant_join | gated_skip | already_member | ambiguous_skip'
-      : 'joined | pending_gated | failed';
-  // 只喂「加群语义信号」给 LLM，剔除页面加载诊断字段（documentReady / actionNodeCount 等）——
-  // 真机事故:LLM 见 documentReady='loading' 就对明明有「加入小组」的页面保守判 ambiguous。加载态与加群判定无关。
-  const signals = {
-    title: obs.title,
-    pageUrl: obs.pageUrl,
-    mainCtaText: obs.mainCtaText,
-    mainCtaAria: obs.mainCtaAria,
-    headerText: obs.headerText,
-    modalText: obs.modalText,
-    membershipSignals: obs.membershipSignals,
-    loginRequired: obs.loginRequired,
-    captchaDetected: obs.captchaDetected,
-    questionnaireRequired: obs.questionnaireRequired,
-    pendingRequest: obs.pendingRequest,
-    navError: obs.navError,
-    // L3 语言无关结构信号：群主体内有可聚焦发帖/评论框 + 是否仍有可见「加入」CTA（承重成员态判据）。
-    composerPresent: obs.composerPresent,
-    joinCtaPresent: obs.joinCtaPresent,
-  };
-  return `You classify a Facebook public group join observation.
-
-Rules:
-- Fail closed. If uncertain, choose ${phase === 'pre_click' ? 'ambiguous_skip' : 'failed'}.
-- Pre-click instant_join means clicking the visible Join control is likely to make this account a member immediately, without approval questions.
-- Approval gates, pending requests, membership questions, login, captcha, or unclear UI must not be treated as instant join.
-- A clear Join control (e.g. "加入小组" / "Join group" / "Tham gia") with no approval/pending/login/captcha signal is an instant_join; page load state is irrelevant.
-- Post-click joined means the account is now visibly a member.
-- Language-independent membership signal: composerPresent=true with joinCtaPresent=false (a focusable post/comment box in the group body and NO visible Join control) indicates membership even if the button text is in an unrecognized language. joinCtaPresent=true means the account is NOT yet a member (still shows a Join control), regardless of any composer.
-
-Phase: ${phase}
-Allowed verdicts: ${allowed}
-Observation JSON:
-${JSON.stringify(signals, null, 2)}
-
-Return JSON only:
-{"verdict":"...","confidence":0.0,"reason":"short evidence"}`;
 }
 
 export class FacebookGroupJoinJudge {

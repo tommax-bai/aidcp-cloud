@@ -1,7 +1,7 @@
 {
   "seedTotal": 173,
   "seedUnplanned": 173,
-  "frozenTotal": 108,
+  "frozenTotal": 101,
   "recordedAt": "2026-07-24",
   "raises": [],
   "entries": [
@@ -337,48 +337,6 @@
       "reason": "由 change config-mirror-cross-process-invalidation 新增（aidcp-cloud 4495050）：§5.1 判归 automation 的限频配置 store，在自己的写事务里递增 api 属主的配置镜像版本表。",
       "eliminatedBy": null,
       "note": "消除动作：拆仓后四类限频配置由 aidcp-automation 独立持有，其镜像版本通道 MUST 随表主人走——config_mirror_version 拆成按属主层各一张，或 automation 侧自持版本表。本条与另 3 个限频配置 store 同簇（共 4 条），MUST 同批消除。注意同一形态还有一处门禁天然看不见的跨层写（这四个 store 在自己的写事务里调 bumpInTx 递增 api 属主表，走方法不走 SQL 字面量），已登记在 boundaries/README.md 的失明清单。"
-    },
-    {
-      "from": "src/config/static-role-prompt-previews.ts",
-      "to": "src/agents/facebook-group-join-judge.ts",
-      "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/config/static-role-prompt-previews.ts",
-      "to": "src/comment-agent/facebook-comment-composer-prompt.ts",
-      "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/config/static-role-prompt-previews.ts",
-      "to": "src/interactions/reply-ai.ts",
-      "reason": "seed（api -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/config/static-role-prompt-previews.ts",
-      "to": "src/publish-agent/cover-form-sensor.ts",
-      "reason": "seed（api -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/config/static-role-prompt-previews.ts",
-      "to": "src/publish-agent/prompts.ts",
-      "reason": "seed（api -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/config/static-role-prompt-previews.ts",
-      "to": "src/publish-agent/visual-fidelity-auditor.ts",
-      "reason": "seed（api -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/config/static-role-prompt-previews.ts",
-      "to": "src/publish-agent/visual-reference-analyzer.ts",
-      "reason": "seed（api -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
     },
     {
       "from": "src/delegated-task/executors.ts",

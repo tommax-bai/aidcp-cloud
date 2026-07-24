@@ -39,7 +39,15 @@
       "src/kernel/image-provider-registry.ts",
       "src/kernel/comment-approval-notice.ts",
       "src/kernel/mandatory-comment-notice.ts",
-      "src/kernel/publish-approval-contract.ts"
+      "src/kernel/publish-approval-contract.ts",
+      "src/kernel/facebook-group-join-prompt.ts",
+      "src/kernel/facebook-comment-composer-prompt.ts",
+      "src/kernel/interaction-reply-prompt.ts",
+      "src/kernel/cover-form-sense-prompt.ts",
+      "src/kernel/cover-card-copy-prompt.ts",
+      "src/kernel/content-visual-brief.ts",
+      "src/kernel/visual-fidelity-audit-prompt.ts",
+      "src/kernel/visual-reference-prompts.ts"
     ]
   },
   "rejected": [
