@@ -1,26 +1,4 @@
-import type { PlatformId } from '../kernel/platform-types.js';
-import type { PublishMode } from '../kernel/publish-pipeline-types.js';
-
-export const XHS_SCHEDULE_MIN_AHEAD_MS = 60 * 60 * 1000;
-export const XHS_SCHEDULE_MAX_AHEAD_MS = 14 * 24 * 60 * 60 * 1000;
-
-export type ScheduleValidationError =
-  | 'schedule_platform_unsupported'
-  | 'schedule_time_required'
-  | 'schedule_time_out_of_range';
-
-/** cloud 权威策略：只有 XHS scheduled 需要时间；immediate/draft 必须清空时间。 */
-export function validatePublishSchedule(
-  platform: PlatformId,
-  mode: PublishMode,
-  publishTime: number | null,
-  now: number,
-): ScheduleValidationError | null {
-  if (mode !== 'scheduled') return publishTime == null ? null : 'schedule_time_out_of_range';
-  if (platform !== 'xiaohongshu') return 'schedule_platform_unsupported';
-  if (publishTime == null || !Number.isFinite(publishTime)) return 'schedule_time_required';
-  const ahead = publishTime - now;
-  if (ahead < XHS_SCHEDULE_MIN_AHEAD_MS || ahead > XHS_SCHEDULE_MAX_AHEAD_MS) return 'schedule_time_out_of_range';
-  return null;
-}
-
+// 纯发布排期策略（零 SQL / HTTP / LLM / 模块级 Set-Map，仅依赖 kernel 类型）已抬入 kernel
+// （change decouple-longtail-sweep）。本文件保留为等值 re-export 桩，令同层既有消费方无感；
+// 跨边界消费方（automation 侧 command-sequencer / content 侧 publish-mode-decider）直接从 kernel 导入。
+export * from '../kernel/schedule-policy.js';

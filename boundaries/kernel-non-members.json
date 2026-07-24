@@ -30,7 +30,16 @@
       "src/kernel/delegated-task-types.ts",
       "src/kernel/publish-pipeline-types.ts",
       "src/kernel/valuable-comment-types.ts",
-      "src/kernel/facebook-group-types.ts"
+      "src/kernel/facebook-group-types.ts",
+      "src/kernel/schedule-policy.ts",
+      "src/kernel/reference-image-guidance.ts",
+      "src/kernel/note-detail.ts",
+      "src/kernel/account-identity.ts",
+      "src/kernel/facebook-comment-config-types.ts",
+      "src/kernel/image-provider-registry.ts",
+      "src/kernel/comment-approval-notice.ts",
+      "src/kernel/mandatory-comment-notice.ts",
+      "src/kernel/publish-approval-contract.ts"
     ]
   },
   "rejected": [

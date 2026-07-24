@@ -82,28 +82,24 @@ export type ApprovalDecidedVia = (typeof APPROVAL_DECIDED_VIA)[number];
 export const APPROVAL_DISPATCH_STATES = ['pending_dispatch', 'dispatching', 'consumed', 'void'] as const;
 export type ApprovalDispatchState = (typeof APPROVAL_DISPATCH_STATES)[number];
 
-/** 作废原因枚举——四类既有作废场景各自可区分，MUST NOT 合并为泛化原因。枚举外 MUST 拒绝。 */
-export const APPROVAL_VOID_REASONS = [
-  'version_stale',
-  'edge_offline',
-  'preempt_exhausted',
-  'lease_unconfirmed',
-] as const;
-export type ApprovalVoidReason = (typeof APPROVAL_VOID_REASONS)[number];
-
-export function isApprovalVoidReason(value: unknown): value is ApprovalVoidReason {
-  return typeof value === 'string' && (APPROVAL_VOID_REASONS as readonly string[]).includes(value);
-}
-
-/** 下发阻塞原因（可读、映射到既有五类阻塞）。阻塞解除 MUST 清空。 */
-export const APPROVAL_BLOCKED_REASONS = [
-  'edge_offline_waiting',
-  'browser_slot_waiting',
-  'breaker_open',
-  'captcha_paused',
-  'approval_unreadable',
-] as const;
-export type ApprovalBlockedReason = (typeof APPROVAL_BLOCKED_REASONS)[number];
+// 作废/阻塞原因枚举 + 哨兵错误抬入 kernel（change decouple-longtail-sweep）供发布下发编排跨边界共导；
+// 本文件从 kernel 导入并等值再导出，令既有消费方与内部使用无感。
+import {
+  APPROVAL_VOID_REASONS,
+  isApprovalVoidReason,
+  APPROVAL_BLOCKED_REASONS,
+  ApprovalUnreadableError,
+  type ApprovalVoidReason,
+  type ApprovalBlockedReason,
+} from '../kernel/publish-approval-contract.js';
+export {
+  APPROVAL_VOID_REASONS,
+  isApprovalVoidReason,
+  APPROVAL_BLOCKED_REASONS,
+  ApprovalUnreadableError,
+  type ApprovalVoidReason,
+  type ApprovalBlockedReason,
+};
 
 export interface ApprovalDecisionInput {
   requestId: string;
@@ -164,14 +160,6 @@ export class ApprovalExecutionTargetError extends Error {
   }
 }
 
-/** 授权状态不可读（查询超时 / 连接失败）：读侧 MUST 按未授权处理且 MUST NOT 写终态。 */
-export class ApprovalUnreadableError extends Error {
-  readonly code = 'approval_unreadable';
-  constructor(message: string) {
-    super(message);
-    this.name = 'ApprovalUnreadableError';
-  }
-}
 
 interface DecisionDbRow {
   request_id: string;

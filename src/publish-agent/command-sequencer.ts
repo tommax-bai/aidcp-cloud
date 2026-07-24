@@ -21,7 +21,7 @@ import { CommandPreemptedError, isPreemptionReason, type PreemptionReason } from
 import type { PlatformId } from '../platform/index.js';
 import type { PublishMetadata } from '../kernel/publish-pipeline-types.js';
 import { buildPublishCommandPlan } from './platform-profile.js';
-import { validatePublishSchedule } from './schedule-policy.js';
+import { validatePublishSchedule } from '../kernel/schedule-policy.js';
 import {
   DEFAULT_FILL_BUDGET,
   isContentTooLong,

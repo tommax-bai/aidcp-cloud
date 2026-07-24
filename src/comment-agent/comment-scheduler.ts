@@ -43,7 +43,7 @@ import {
   type CommentPlatformProfile,
 } from '../platform/index.js';
 import { validateFacebookComment } from './facebook-comment-validators.js';
-import type { EffectiveFacebookCommentConfig } from '../config/facebook-comment-config-store.js';
+import type { EffectiveFacebookCommentConfig } from '../kernel/facebook-comment-config-types.js';
 import type { FacebookCommentAuditRow, FacebookCommentOutcome } from './facebook-comment-audit-store.js';
 import { EdgeTaskLeaseError, type EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
 import type { EdgeTaskPriority } from '../comm/protocol.js';

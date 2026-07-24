@@ -218,20 +218,10 @@ export interface ViewQuotaDecision {
   retryAfterMs?: number;
 }
 
-export type MandatoryCommentOutcome = 'confirmed' | 'pending' | 'failed' | 'unknown';
-
-/** mandatory auto_approve 评论的操作员终态通知；同一 requestId 最多上报一次。 */
-export interface MandatoryCommentOutcomeNoticeInput {
-  requestId: string;
-  noteId: string;
-  text: string;
-  outcome: MandatoryCommentOutcome;
-  reason?: string;
-  accountId?: string;
-  accountName?: string;
-  title?: string;
-  authorName?: string;
-}
+// MandatoryCommentOutcome 与 MandatoryCommentOutcomeNoticeInput 纯数据模型抬入 kernel
+// （change decouple-longtail-sweep）供飞书卡片层跨边界共导；本文件从 kernel 导入并等值再导出，令既有消费方无感。
+import type { MandatoryCommentOutcome, MandatoryCommentOutcomeNoticeInput } from '../kernel/mandatory-comment-notice.js';
+export type { MandatoryCommentOutcome, MandatoryCommentOutcomeNoticeInput };
 
 interface PendingCommentDelivery {
   noteId: string;

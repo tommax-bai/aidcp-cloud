@@ -1,10 +1,12 @@
 /**
  * 委托任务的**纯类型契约**（kernel 段）。
  *
- * 只含任务 / 意图 / 尝试 / 状态的类型与接口。状态机（TERMINAL_STATUSES / TRANSITIONS 模块级 Set）、
- * 校验与转移函数（isTerminalTaskStatus / canTransitionTask / validateDelegatedTaskIntent 等）、以及
- * 运行时数组常量留在 src/delegated-task/types.ts（automation）——门禁 §4.7 禁止 kernel 持模块级活状态。
- * 本文件供 api / content 侧 type-only 共导。
+ * 只含任务 / 意图 / 尝试 / 状态的类型与接口，外加两个纯物：状态全集字面数组 DELEGATED_TASK_STATUSES
+ * （`as const` 冻结字面、非 Set/Map、非活状态）与纯归一函数 clampClientApprovalMode
+ * （change decouple-longtail-sweep 抬入，供 api 侧客户端授权/面板跨边界共导）。
+ * 状态机（TERMINAL_STATUSES / TRANSITIONS 模块级 Set）、转移/校验函数（isTerminalTaskStatus /
+ * canTransitionTask / validateDelegatedTaskIntent 等）仍留在 src/delegated-task/types.ts（automation）
+ * ——门禁 §4.7 禁止 kernel 持模块级活状态（Set/Map）。本文件供 api / content 侧 type-only 与纯值共导。
  */
 
 import type { PlatformId, DelegatedAction } from './platform-types.js';
@@ -224,4 +226,33 @@ export interface DelegatedTaskServicePort {
     statuses?: DelegatedTaskStatus[];
     limit?: number;
   }): Promise<DelegatedTask[]>;
+}
+
+/**
+ * 委托任务状态全集（运行时字面数组）；`satisfies` 与上面的 DelegatedTaskStatus 联合逐字对齐
+ * （增删状态两处同改，编译期兜底）。纯 `as const` 冻结字面，非 Set/Map、非进程内活状态。
+ * change decouple-longtail-sweep 从 src/delegated-task/types.ts 抬入，供 api 侧面板跨边界共导。
+ */
+export const DELEGATED_TASK_STATUSES = [
+  'draft',
+  'awaiting_confirmation',
+  'queued',
+  'planning',
+  'waiting_approval',
+  'executing',
+  'partially_completed',
+  'completed',
+  'deferred',
+  'cancelled',
+  'failed',
+] as const satisfies readonly DelegatedTaskStatus[];
+
+/**
+ * 客户端提交的审批模式归一（纯函数）：仅接受 `draft_only`，其余非空一律夹到 `review`，空值透传 undefined。
+ * change decouple-longtail-sweep 从 src/delegated-task/types.ts 抬入，供 api 侧客户端鉴权/面板跨边界共导。
+ */
+export function clampClientApprovalMode(mode: unknown): DelegatedApprovalMode | undefined {
+  if (mode === undefined || mode === null) return undefined;
+  if (mode === 'draft_only') return 'draft_only';
+  return 'review';
 }

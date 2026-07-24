@@ -21,7 +21,7 @@ import {
   ProviderKeyMissingError,
   buildThinkingParams,
 } from '../llm/index.js';
-import { normImageProvider } from '../publish-agent/image-providers.js';
+import { normImageProvider } from '../kernel/image-provider-registry.js';
 import { resolveCoverFormModel, resolveCoverFormProvider } from '../publish-agent/cover-form-sensor.js';
 import type {
   PanelRoleConfig,

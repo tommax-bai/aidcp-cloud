@@ -47,16 +47,10 @@ export interface CommentApprovalPort {
   pollMs?: number;
 }
 
-export interface CommentApprovalNoticeInput {
-  requestId: string;
-  noteId: string;
-  text: string;
-  title?: string;
-  authorName?: string;
-  accountId?: string;
-  accountName?: string;
-  approvalSource?: 'mandatory_persona' | 'account_global';
-}
+// CommentApprovalNoticeInput 纯输入数据模型抬入 kernel（change decouple-longtail-sweep）供飞书卡片层跨边界共导；
+// 本文件从 kernel 导入并等值再导出，令既有消费方无感。
+import type { CommentApprovalNoticeInput } from '../kernel/comment-approval-notice.js';
+export type { CommentApprovalNoticeInput };
 
 export interface CommentApprovalGateOptions extends RoleOptions {
   /** 人审端口；缺省（未接线）→ 一律 comment.skipped（绝不裸发）。 */

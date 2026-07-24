@@ -53,8 +53,8 @@ import type {
   DelegatedTaskIntent,
   DelegatedTaskStatus,
   JsonValue,
-} from '../delegated-task/types.js';
-import { clampClientApprovalMode, DELEGATED_TASK_STATUSES } from '../delegated-task/types.js';
+} from '../kernel/delegated-task-types.js';
+import { clampClientApprovalMode, DELEGATED_TASK_STATUSES } from '../kernel/delegated-task-types.js';
 import { buildPublishLifecycle, type ApprovalDispatchProjection } from './publish-stage-lifecycle.js';
 import { CuratedContentUnavailableError } from '../kernel/curated-content-types.js';
 

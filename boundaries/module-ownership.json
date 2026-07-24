@@ -980,6 +980,16 @@
     "note": "§4.6.1：收件箱 / 回复工作流 / 发送与回执 / 离场 saga 段"
   },
   {
+    "path": "src/kernel/account-identity.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/account-store.ts 析出 RETIRED_ACCOUNT_ID 退役保留账号哨兵字符串常量（'default'）。零 import、零 SQL、无进程内活状态。account-store.ts 从 kernel 导入并等值再导出，内部判定复用。供 publish-agent 发布媒体存储跨边界比对，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
+  },
+  {
+    "path": "src/kernel/comment-approval-notice.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/agents/comment-approval-gate.ts 析出 CommentApprovalNoticeInput 纯输入数据模型（requestId/noteId/text/title/authorName/accountId/accountName + approvalSource union，全为原语）。零 import、零 SQL、无进程内活状态。CommentApprovalGate 角色留 comment-approval-gate.ts（automation）并从 kernel 导入等值再导出。供飞书卡片层跨边界共导，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
+  },
+  {
     "path": "src/kernel/content-schedule-mode.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/config/content-schedule-store.ts 析出：CONTENT_SCHEDULE_ACTION_MODES 常量 + ContentScheduleActionMode/ContentScheduleApprovalMode 纯类型，零 import、零 SQL、零活状态。排期存储（含建表读写 SQL）留 content-schedule-store.ts。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
@@ -995,6 +1005,11 @@
     "note": "【待定稿裁决·部分析出】change decouple-platform-type-closure 从 src/delegated-task/types.ts 析出纯类型（DelegatedTask / DelegatedTaskIntent / DelegatedTaskAttempt / DelegatedTaskStatus / DelegatedVerificationKind / DelegatedExecutionTarget / Json* / TaskConstraints 等），仅 import kernel（platform-types / deployment-target）。**状态机模块级 Set（TERMINAL_STATUSES / TRANSITIONS）+ 转移/校验函数 + 运行时数组 DELEGATED_TASK_STATUSES 留 delegated-task/types.ts（automation）**：门禁 §4.7 禁 kernel 持模块级 new Set（故非整文件搬）。DELEGATED_TASK_STATUSES satisfies kernel 联合。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK3"
   },
   {
+    "path": "src/kernel/facebook-comment-config-types.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/config/facebook-comment-config-store.ts 析出纯数据模型类型（FacebookContainer / FacebookCommentMode / EffectiveFacebookCommentConfig），零 import、零 SQL、无进程内活状态。SCHEMA_SQL + FacebookCommentConfigStore 类 + coerce/校验函数留 facebook-comment-config-store.ts（automation）并从 kernel 导入等值再导出。供 automation 侧评论调度器跨边界共导，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
+  },
+  {
     "path": "src/kernel/facebook-group-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-behavior-class-ports 从 src/comment-agent/facebook-group-store.ts 析出纯数据模型类型闭包（FacebookGroupTargetRow / *ListRow / *ListOptions / *ListResult / *Facets / MembershipRow / *ScopeWriteRow / ReplaceFacebookGroupTargetScopesResult / JoinAuditOutcome / JoinRecentScheduledResult / ScopedTargetCount / ImportResult / AccountProgress + JoinGating/MembershipStatus 枚举）+ FacebookGroupScopeError（纯 Error 子类，与 schema-capability-contract 的 SchemaCapabilityError 同一手法）。零 import、零 SQL、无 pg。FacebookGroupStore 类 + SCHEMA_SQL + pg 读写 + DbRow 内部映射留 facebook-group-store.ts（automation）。供 api 侧面板/配置视图跨边界共导，消 3 条 api->automation 边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
@@ -1003,6 +1018,11 @@
     "path": "src/kernel/feed-action.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/cache/interaction-feed-store.ts 析出：FeedAction 纯类型联合，零 import、零 SQL、零活状态。存储实现留 interaction-feed-store.ts。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
+  },
+  {
+    "path": "src/kernel/image-provider-registry.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/publish-agent/image-providers.ts 析出图片厂商注册表纯数据段 + 无状态归一（ImageProviderId / ImageProviderMeta / DEFAULT_IMAGE_PROVIDER / IMAGE_PROVIDERS 字面数据 / isKnownImageProvider / normImageProvider）。零 import、零 SQL / HTTP / LLM、零模块级 Set-Map（IMAGE_PROVIDERS 为字面 Record，归一用 Object.hasOwnProperty）。路由客户端类 RoutingImageProvider（依赖 image-provider.js 的 ImageProvider 客户端接口）留 image-providers.ts（content）并从 kernel 导入等值再导出。供 api 侧面板版本视图 / 配置外观跨边界共导，消 2 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
   },
   {
     "path": "src/kernel/interaction-reply-contract.ts",
@@ -1023,6 +1043,16 @@
     "path": "src/kernel/llm-contract.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-llm-lang-interaction-contracts 从 src/llm/qwen.ts 析出：LlmThinkingModeOpt + LlmCallOpts（Per-call 覆盖选项，纯接口，无供应商语义标识符）。供 automation 侧多角色 type-only 共导，消 4 条 automation->content 边。thinkingMode 字段内联为 'off'|'on'|'default' 字面量（结构与 role-catalog ThinkingMode|'default' 逐字一致），以保 kernel 不反向依赖 api 属主的 role-catalog。LlmClient/ChatLlmClient 因门禁 §4.7 把这两个标识符本身列为「LLM 或供应商 HTTP 调用」特征而**不入 kernel**、留 qwen.ts（那 3 条 LlmClient/ChatLlmClient 边留 residual）。QwenClient 类/错误类/buildXxx 等 behavior 留 qwen.ts。零 SQL/HTTP/fetch/活状态。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
+  },
+  {
+    "path": "src/kernel/mandatory-comment-notice.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/orchestrator/role-dispatcher.ts 析出 MandatoryCommentOutcome 结局 union + MandatoryCommentOutcomeNoticeInput 纯输入数据模型（全为原语与 union）。零 import、零 SQL、无进程内活状态。RoleDispatcher 实现留 role-dispatcher.ts（automation）并从 kernel 导入等值再导出（未触碰 RoleName / 角色注册）。供飞书卡片层跨边界共导，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
+  },
+  {
+    "path": "src/kernel/note-detail.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/agents/content-curator-role.ts 析出 NoteData 纯数据模型接口（noteId/title/content/author/likeCount/collectCount/authorFollowed/comments，全为原语与数组）。零 import、零 SQL、零 HTTP、零 LLM、无进程内活状态。ContentCuratorRole 类 + 事件订阅留 content-curator-role.ts（automation）并等值再导出。供 content 侧精选评估角色跨边界共导，消 2 条 content->automation 边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
   },
   {
     "path": "src/kernel/persona-binding.ts",
@@ -1050,9 +1080,24 @@
     "note": "【待定稿裁决】change decouple-platform-type-closure 从 src/platform/registry.ts 析出纯类型契约段（PlatformId / Surface / NoteScopedAction / OrchestrationCapability / DelegatedAction(Support) / ScheduledAutomationAction(Support/Mode) / AvailableScheduledAutomationAction / NoteSupport / CommentPlatformProfile / PlatformRegistryEntry），零 SQL / 零 HTTP / 零 LLM / 零模块级活状态。PLATFORM_REGISTRY 数据 + *_COMMENT_PROFILE 常量 + 读表函数（normalizePlatformId/platformRegistryEntry/commentProfileForPlatform/…）按 §9「平台能力由 aidcp-automation 单写」留 registry.ts（automation）。SCHEDULED_AUTOMATION_ACTIONS 运行时数组留 registry.ts 并 satisfies 本联合。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK3"
   },
   {
+    "path": "src/kernel/publish-approval-contract.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/publish-agent/publish-approval-store.ts 析出发布审批纯枚举 + 哨兵错误（APPROVAL_VOID_REASONS / ApprovalVoidReason / isApprovalVoidReason / APPROVAL_BLOCKED_REASONS / ApprovalBlockedReason 字面 tuple 与派生 union；ApprovalUnreadableError 纯 Error 子类，与 schema-capability-contract 的 SchemaCapabilityError 同一手法）。零 import、零 SQL、无 pg、无模块级 Set-Map。ApprovalDecisionStore 类 + pg 读写留 publish-approval-store.ts（automation）并从 kernel 导入等值再导出。供发布下发编排跨边界共导，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
+  },
+  {
     "path": "src/kernel/publish-pipeline-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-platform-type-closure 从 src/publish-agent/types.ts 整体 git mv：发布管线纯类型契约（TriggerInput / PublishRecord / PublishMetadata / PipelineFields / ImagePlan / CoverCardPlan 等 + IMAGE_CATEGORIES as-const 枚举 + METADATA_DEFAULT_VALUES 保守默认 + hasUserRejectionEvidence 纯守卫），仅 import kernel（soul-types / curated-content-types / content-schedule-mode / platform-types / text-card-style / visual-reference-types / pipeline-log-contract / deployment-target）。零 SQL / HTTP / LLM / 模块级 Set/Map。原路径 publish-agent/types.ts 保留为 re-export 桩，content 层内部消费方无感。消 8 条跨边界入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK3"
+  },
+  {
+    "path": "src/kernel/reference-image-guidance.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/publish-agent/reference-image-guidance.ts 整体 git mv：纯参考图引导（REFERENCE_IMAGE_MAX_COUNT 常量 + referenceImages* / referenceImageUrl / buildReferenceImageGuidance 纯字符串/过滤函数），仅 import kernel（publish-pipeline-types）。零 SQL / HTTP / LLM / 模块级 Set-Map。原路径 publish-agent/reference-image-guidance.ts 保留为 re-export 桩，同层消费方无感。消 1 条 api 侧 publish-scheduler 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
+  },
+  {
+    "path": "src/kernel/schedule-policy.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/publish-agent/schedule-policy.ts 整体 git mv：纯发布排期策略（XHS_SCHEDULE_MIN/MAX_AHEAD_MS 常量 + ScheduleValidationError 联合 + validatePublishSchedule 纯校验函数），仅 import kernel（platform-types / publish-pipeline-types）。零 SQL / HTTP / LLM / 模块级 Set-Map。原路径 publish-agent/schedule-policy.ts 保留为 re-export 桩，同层消费方无感。消 2 条跨边界入边（automation command-sequencer / content publish-mode-decider）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
   },
   {
     "path": "src/kernel/schema-capability-contract.ts",

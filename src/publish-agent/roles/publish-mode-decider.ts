@@ -2,7 +2,7 @@ import { BasePublishRole } from './base-role.js';
 import type { RoleConfig } from './base-role.js';
 import type { PipelineFields, CreatedContent, PublishModeDecision } from '../types.js';
 import type { PipelineContext } from '../pipeline-context.js';
-import { XHS_SCHEDULE_MAX_AHEAD_MS, XHS_SCHEDULE_MIN_AHEAD_MS } from '../schedule-policy.js';
+import { XHS_SCHEDULE_MAX_AHEAD_MS, XHS_SCHEDULE_MIN_AHEAD_MS } from '../../kernel/schedule-policy.js';
 
 /**
  * 校验定时发布时间：必须「未来至少 1h 且 ≤14 天」，否则返回 null（不接受非法定时）。

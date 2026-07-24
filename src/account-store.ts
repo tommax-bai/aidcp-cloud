@@ -10,6 +10,7 @@
  */
 
 import pg from 'pg';
+import { RETIRED_ACCOUNT_ID } from './kernel/account-identity.js';
 import { DEFAULT_PG_CONFIG } from './kernel/pg-config.js';
 import { writeWithMirrorBump, type MirrorVersionBumper } from './config/mirror-version-store.js';
 import { normalizePlatformId, type PlatformId } from './platform/index.js';
@@ -31,7 +32,9 @@ export type AccountStatusValue = 'active' | 'paused';
  * retire-default-account：'default' 是被退役的保留账号标识，任何入口 MUST NOT 创建 / 接受它。
  * 真实账号一律是登录派生的小红书 userid（≥20 位字母数字，结构上不会等于 'default'）。
  */
-export const RETIRED_ACCOUNT_ID = 'default';
+// 退役保留账号哨兵 id 抬入 kernel（change decouple-longtail-sweep）供跨边界消费方直接比对；
+// 本文件从 kernel 导入并等值再导出，令 api 侧既有消费方无感。
+export { RETIRED_ACCOUNT_ID };
 
 /** accounts 建表（幂等：表已存在不重建）。retire-default-account 后不再 seed 任何占位行。 */
 export const ACCOUNTS_SCHEMA_SQL = `

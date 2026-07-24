@@ -18,21 +18,11 @@ import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/re
 import type { Soul } from '../kernel/soul-types.js';
 import type { MandatoryInteractionContext } from '../event-bus/types.js';
 import { mandatoryInteractionContext, mandatoryInteractionPrompt } from './mandatory-interaction.js';
+import type { NoteData } from '../kernel/note-detail.js';
 
-export interface NoteData {
-  noteId: string;
-  title: string;
-  content: string;
-  author?: string;
-  likeCount: number;
-  collectCount: number;
-  /** 详情页作者区关注按钮当下真实态（change skip-profile-visit-if-followed）：已关注/互关→true。
-   *  由 note.detail 透传，AuthorEvaluator 据此在评估进主页前短路已关注作者。缺省→原流程。 */
-  authorFollowed?: boolean;
-  /** 帖子下他人评论正文样本（change platform-vocabulary-and-thresholds 2.1）：撰写器据此贴合评论区语境。
-   *  Facebook 走 note.detail 透传；小红书由 dispatcher 从 scroll_comments 回执候选归集。缺省→撰写只看正文。 */
-  comments?: string[];
-}
+// NoteData 纯数据模型抬入 kernel（change decouple-longtail-sweep）供 content 侧评估角色跨边界共导；
+// 本文件等值再导出，令 automation 侧既有消费方无感。
+export type { NoteData };
 
 export interface ContentCuratorRoleOptions extends RoleOptions {
   sessionContext: SessionContext;

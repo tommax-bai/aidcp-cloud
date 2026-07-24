@@ -1,5 +1,5 @@
-import type { CommentApprovalNoticeInput } from '../agents/comment-approval-gate.js';
-import type { MandatoryCommentOutcomeNoticeInput } from '../orchestrator/role-dispatcher.js';
+import type { CommentApprovalNoticeInput } from '../kernel/comment-approval-notice.js';
+import type { MandatoryCommentOutcomeNoticeInput } from '../kernel/mandatory-comment-notice.js';
 import { buildCommandResultCard } from './cards.js';
 import type { FeishuCard } from './types.js';
 

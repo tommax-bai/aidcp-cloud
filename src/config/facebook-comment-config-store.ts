@@ -20,17 +20,15 @@ import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 
 const { Pool } = pg;
 
-/**
- * 容器（群/主页）配置项（change facebook-container-display-name）。
- * `url` 是功能主键（边缘据此导航 + 建站内搜索链，含群 id）；`name` 是人类可读群名（边缘从群页自动解析回填），
- * 未解析出前为空。**对人展示一律用 name（缺则「待识别」占位），绝不展示 url 里的 id**（id 对人无辨识度）。
- */
-export interface FacebookContainer {
-  url: string;
-  name?: string;
-}
-
-export type FacebookCommentMode = 'generated' | 'template';
+// FacebookContainer / FacebookCommentMode / EffectiveFacebookCommentConfig 纯数据模型抬入 kernel
+// （change decouple-longtail-sweep）供 automation 侧评论调度器跨边界共导；本文件从 kernel 导入并等值再导出，
+// 令既有消费方无感。**对人展示一律用 name（缺则「待识别」占位），绝不展示 url 里的 id**（id 对人无辨识度）。
+import type {
+  FacebookContainer,
+  FacebookCommentMode,
+  EffectiveFacebookCommentConfig,
+} from '../kernel/facebook-comment-config-types.js';
+export type { FacebookContainer, FacebookCommentMode, EffectiveFacebookCommentConfig };
 
 /** 每账号配置行（面板回显用）。keywords 为字符串数组；containers 为 legacy {url,name} 数组。 */
 export interface FacebookCommentConfigRow {
@@ -55,14 +53,6 @@ export type SetFacebookCommentConfigResult =
   | { ok: true; row: FacebookCommentConfigRow }
   | { ok: false; reason: 'account_not_found' | 'retired_account' | 'invalid_value' | 'no_valid_fields' };
 
-/** fail-closed 生效判定：关键词 + 正文模式配置（目标群由 joined ledger 另行选择）。 */
-export interface EffectiveFacebookCommentConfig {
-  enabled: boolean;
-  keywords: string[];
-  containers: FacebookContainer[];
-  commentMode: FacebookCommentMode;
-  commentTemplates: string[];
-}
 
 export const FACEBOOK_COMMENT_CONFIG_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS account_facebook_comment_config (

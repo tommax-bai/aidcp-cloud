@@ -8,7 +8,6 @@ import type {
   DelegatedAction,
   DelegatedTaskStatus,
   DelegatedExecutionTarget,
-  DelegatedApprovalMode,
   DelegatedActionFamily,
   DelegatedTaskProgress,
   DelegatedTaskIntent,
@@ -36,23 +35,9 @@ export type {
   DelegatedTaskAttempt,
 } from '../kernel/delegated-task-types.js';
 
-/**
- * 委托任务状态全集（运行时数组）；`satisfies` 与 kernel 的 DelegatedTaskStatus 联合逐字对齐
- * （增删状态两处同改，编译期兜底）。
- */
-export const DELEGATED_TASK_STATUSES = [
-  'draft',
-  'awaiting_confirmation',
-  'queued',
-  'planning',
-  'waiting_approval',
-  'executing',
-  'partially_completed',
-  'completed',
-  'deferred',
-  'cancelled',
-  'failed',
-] as const satisfies readonly DelegatedTaskStatus[];
+// 状态全集字面数组 DELEGATED_TASK_STATUSES 与纯归一 clampClientApprovalMode 抬入 kernel
+// （change decouple-longtail-sweep），供 api 侧面板 / 客户端鉴权跨边界共导；本文件等值再导出，令既有消费方无感。
+export { DELEGATED_TASK_STATUSES, clampClientApprovalMode } from '../kernel/delegated-task-types.js';
 
 export const DELEGATED_EXECUTION_TARGETS = DEPLOYMENT_TARGETS;
 
@@ -118,11 +103,7 @@ export function actionFamilyFor(action: DelegatedAction): DelegatedActionFamily 
  * 放行（仅生成候选、不落平台）；其余（含 `auto_approve` 与任何未来新模式）一律夹成 `review`。
  * 服务端自建 intent（如洗稿 curated 调用已显式传 `review`、飞书 parser 已硬编码 `review`）不经此路、不受影响。
  */
-export function clampClientApprovalMode(mode: unknown): DelegatedApprovalMode | undefined {
-  if (mode === undefined || mode === null) return undefined;
-  if (mode === 'draft_only') return 'draft_only';
-  return 'review';
-}
+// clampClientApprovalMode 已抬入 kernel 并于本文件顶部等值再导出（change decouple-longtail-sweep）。
 
 export function validateDelegatedTaskIntent(intent: DelegatedTaskIntent, now = Date.now()): string[] {
   const errors: string[] = [];

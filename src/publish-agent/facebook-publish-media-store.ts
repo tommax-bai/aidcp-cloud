@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
-import { RETIRED_ACCOUNT_ID } from '../account-store.js';
+import { RETIRED_ACCOUNT_ID } from '../kernel/account-identity.js';
 import { normalizePlatformId } from '../platform/index.js';
 import type { ObjectStore } from '../storage/object-store.js';
 import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
