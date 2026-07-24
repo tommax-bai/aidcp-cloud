@@ -321,7 +321,6 @@ import {
 } from './gateway/service-mode.js';
 import { InternalHttpClient, InternalHttpServer } from './transport/internal-http.js';
 import { CuratedContentHttpClient, registerCuratedContentRoutes } from './transport/curated-content-http.js';
-import { DelegatedTaskHttpClient } from './transport/delegated-task-http.js';
 import { PgAlertStore } from './alerts/index.js';
 // 跨进程配置镜像失效通道（change config-mirror-cross-process-invalidation）。
 import pg from 'pg';
@@ -1238,50 +1237,8 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   } else {
     console.warn('[aidcp-cloud] DraftRefinementWorker 未启用：AIDCP_DEPLOY_ENV 缺失或非法');
   }
-  ctx.billingPriceRefresh = billingPriceRefresh;
-  ctx.botChatEventHandler = botChatEventHandler;
-  ctx.botChatStore = botChatStore;
-  ctx.cache = cache;
-  ctx.categoryConfigStore = categoryConfigStore;
-  ctx.clientUserStore = clientUserStore;
-  ctx.configMirrorPool = configMirrorPool;
-  ctx.contentScheduleStore = contentScheduleStore;
-  ctx.credentialStore = credentialStore;
-  ctx.dashscopeApiKey = dashscopeApiKey;
-  ctx.debugPort = debugPort;
-  ctx.deploymentTarget = deploymentTarget;
-  ctx.draftRefinementStore = draftRefinementStore;
-  ctx.facebookCommentAuditStore = facebookCommentAuditStore;
-  ctx.facebookCommentConfigStore = facebookCommentConfigStore;
-  ctx.facebookGroupJoinAuditStore = facebookGroupJoinAuditStore;
-  ctx.facebookGroupJoinAutomationStore = facebookGroupJoinAutomationStore;
-  ctx.facebookGroupMembershipStore = facebookGroupMembershipStore;
-  ctx.facebookGroupTargetStore = facebookGroupTargetStore;
-  ctx.hotLeadConfigStore = hotLeadConfigStore;
-  ctx.llm = llm;
-  ctx.mirrorVersionStore = mirrorVersionStore;
-  ctx.modelConfigStore = modelConfigStore;
-  ctx.ossUploader = ossUploader;
-  ctx.pacingConfigStore = pacingConfigStore;
-  ctx.planner = planner;
-  ctx.port = port;
-  ctx.providerRuntime = providerRuntime;
-  ctx.publishApprovalClient = publishApprovalClient;
-  ctx.publishApprovalStore = publishApprovalStore;
-  ctx.publishLogStore = publishLogStore;
-  ctx.publishPipelineLogStore = publishPipelineLogStore;
-  ctx.quotaConfigStore = quotaConfigStore;
-  ctx.readApprovalDispatchProjection = readApprovalDispatchProjection;
-  ctx.resumeConfigStore = resumeConfigStore;
-  ctx.roleConfigStore = roleConfigStore;
-  ctx.roleLlm = roleLlm;
-  ctx.sessionConfigStore = sessionConfigStore;
-  ctx.tokenUsageStore = tokenUsageStore;
-  ctx.writeApprovalDecision = writeApprovalDecision;
-}
-
-async function segBContent(ctx: CompositionContext): Promise<void> {
-  const { botChatStore, clientUserStore, configMirrorPool, dashscopeApiKey, deploymentTarget, llm, mirrorVersionStore, modelConfigStore, ossUploader, providerRuntime, publishLogStore, publishPipelineLogStore } = ctx;
+  // ── Block② 2d step1：以下共享地基 + 内容管线构造由 segBContent 整体上移至此（纯搬运、零改行），
+  //    使 core（segA+segC+segD，跳过 segB）在 segC/segD 构造期即可拿到这些对象；monolith 逐字节等价。
   // 晚绑定：精选存储在发布调度器与首作状态存储之前构造，回调运行时两者已完成装配。
 
   let firstPostCoordinator: FirstPostOnboardingCoordinator | undefined;
@@ -1831,6 +1788,46 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
     },
   });
 
+  ctx.billingPriceRefresh = billingPriceRefresh;
+  ctx.botChatEventHandler = botChatEventHandler;
+  ctx.botChatStore = botChatStore;
+  ctx.cache = cache;
+  ctx.categoryConfigStore = categoryConfigStore;
+  ctx.clientUserStore = clientUserStore;
+  ctx.configMirrorPool = configMirrorPool;
+  ctx.contentScheduleStore = contentScheduleStore;
+  ctx.credentialStore = credentialStore;
+  ctx.dashscopeApiKey = dashscopeApiKey;
+  ctx.debugPort = debugPort;
+  ctx.deploymentTarget = deploymentTarget;
+  ctx.draftRefinementStore = draftRefinementStore;
+  ctx.facebookCommentAuditStore = facebookCommentAuditStore;
+  ctx.facebookCommentConfigStore = facebookCommentConfigStore;
+  ctx.facebookGroupJoinAuditStore = facebookGroupJoinAuditStore;
+  ctx.facebookGroupJoinAutomationStore = facebookGroupJoinAutomationStore;
+  ctx.facebookGroupMembershipStore = facebookGroupMembershipStore;
+  ctx.facebookGroupTargetStore = facebookGroupTargetStore;
+  ctx.hotLeadConfigStore = hotLeadConfigStore;
+  ctx.llm = llm;
+  ctx.mirrorVersionStore = mirrorVersionStore;
+  ctx.modelConfigStore = modelConfigStore;
+  ctx.ossUploader = ossUploader;
+  ctx.pacingConfigStore = pacingConfigStore;
+  ctx.planner = planner;
+  ctx.port = port;
+  ctx.providerRuntime = providerRuntime;
+  ctx.publishApprovalClient = publishApprovalClient;
+  ctx.publishApprovalStore = publishApprovalStore;
+  ctx.publishLogStore = publishLogStore;
+  ctx.publishPipelineLogStore = publishPipelineLogStore;
+  ctx.quotaConfigStore = quotaConfigStore;
+  ctx.readApprovalDispatchProjection = readApprovalDispatchProjection;
+  ctx.resumeConfigStore = resumeConfigStore;
+  ctx.roleConfigStore = roleConfigStore;
+  ctx.roleLlm = roleLlm;
+  ctx.sessionConfigStore = sessionConfigStore;
+  ctx.tokenUsageStore = tokenUsageStore;
+  ctx.writeApprovalDecision = writeApprovalDecision;
   ctx.accountDisplayName = accountDisplayName;
   ctx.accountDisplayNameCandidates = accountDisplayNameCandidates;
   ctx.accountState = accountState;
@@ -1865,6 +1862,12 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
   ctx.resolvePersona = resolvePersona;
   ctx.resolveReviewCardDelivery = resolveReviewCardDelivery;
   ctx.valuableCommentStore = valuableCommentStore;
+}
+
+async function segBContent(_ctx: CompositionContext): Promise<void> {
+  // Block② 2d step1：本段原有的共享地基 + 内容管线构造已整体上移至 segAApiFoundation 尾部，
+  // 令 core（segA+segC+segD，跳过本段）也能在构造期拿到 segC/segD 硬依赖的对象。段计划保留 segB 空占位，
+  // 供后续 2e 真正拆出「content 私有运行时」时复用；content 模式跑 segA 已含全部内容管线。
 }
 
 async function segCAutomation(ctx: CompositionContext): Promise<void> {
@@ -5298,11 +5301,14 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
     delegatedTaskLocal: delegatedTaskService,
     interactionReaderLocal: ctx.interactionStore,
     mode: gatewayMode,
+    // Block② 2d step2 拓扑：core 的 http 网关只把「content 域」读端口（精选库）remote 到 content 进程；
+    // delegatedTask / interaction 属 automation 域、由 core 本地拥有（segA 已构造），一律保持 local，
+    // 绝不指向 content（content 的内部读 API 只服务 curated 路由，误投 delegated-task 会 404）。
+    // 未来若把委托任务 / 收件箱各自拆成独立服务，再按各自 base URL 追加对应 remote thunk。
     ...(gatewayMode === 'http' && gatewayBaseUrl
       ? {
           remote: {
             curatedContentReader: () => new CuratedContentHttpClient(new InternalHttpClient(gatewayBaseUrl)),
-            delegatedTaskService: () => new DelegatedTaskHttpClient(new InternalHttpClient(gatewayBaseUrl)),
           },
         }
       : {}),
