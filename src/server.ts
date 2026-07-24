@@ -342,7 +342,7 @@ import { ConfigMirrorRefresher } from './config/mirror-refresher.js';
 import { allowsTransportWhenGateUnknown } from './config/mirror-stop-work.js';
 import { noteMirrorStaleRefusal } from './config-mirror-freshness.js';
 import { automationOperationDescriptorFor } from './comm/operation-registry.js';
-import { resolveEnvPgConfig } from './kernel/pg-config.js';
+import { resolveOwnerPgConfig } from './kernel/pg-owner-connection-resolver.js';
 import { ModelConfigStore } from './config/model-config-store.js';
 import { RoleConfigStore } from './config/role-config-store.js';
 import { createRoleConfigPanel } from './config/role-config-facade.js';
@@ -808,7 +808,20 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   // **配置层唯一连接池**（task 3.4：刷新器 MUST 复用组合根已有的 Pool、MUST NOT 另开连接池）。
   // 组合根此前没有任何共享池——每个 store 各自 new 一个。这里先建一个，再把它交给全部 15 处镜像所在的
   // 配置 store 与版本表：镜像子系统因此**没有**新增任何连接池，配置层的池数反而从 12 收敛到 1。
-  const configMirrorPool = new pg.Pool({ ...resolveEnvPgConfig(), max: 30 });
+  // Block③ L2（物理拆库前置）：按属主的三连接池（content / automation / api）。今天三个 owner 都未配
+  // AIDCP_PG_<OWNER>_URL，resolveOwnerPgConfig 逐字回落到共享单库配置（DATABASE_URL 未设 → PGHOST/DEFAULT），
+  // 三池与既有 resolveEnvPgConfig() 逐字节一致 = 同一物理库、三个别名；拆库时逐个把 owner URL 指向新库即切换。
+  // ⚠️ 字节等价前提：部署 .env 的 DATABASE_URL 未设（dev+ol 均已核实未设）。若设了 DATABASE_URL，今天忽略它的
+  //    HOST-param store 会随 owner 池开始认 DATABASE_URL（resolveOwnerPgConfig 的共享回落优先 DATABASE_URL）。
+  const apiPool = new pg.Pool({ ...resolveOwnerPgConfig('api'), max: 30 });
+  const automationPool = new pg.Pool({ ...resolveOwnerPgConfig('automation'), max: 30 });
+  const contentPool = new pg.Pool({ ...resolveOwnerPgConfig('content'), max: 30 });
+  // config_mirror_version 属 api；configMirrorPool 即 api 池（保持既有变量名，全部现有 `pool: configMirrorPool` 引用零改）。
+  // ⚠️ L3 blocker：quota/pacing/session/resume 四个 automation 配置 store 在自己写事务里同连接 bump 本 api 表，
+  //    故它们此处仍钉 api 池（configMirrorPool），拆库前必须先把该 bump 移出跨库事务，见交接文档 §4.2 风险②。
+  const configMirrorPool = apiPool;
+  // TokenUsageStore 属 content，但用专用小池（热路径隔离 max:4），单独构造、不共享 content 主池。
+  const tokenUsagePool = new pg.Pool({ ...resolveOwnerPgConfig('content'), max: 4 });
   const mirrorVersionStore = new MirrorVersionStore({ pool: configMirrorPool });
 
   // 模型配置 + 加密凭据（change console-model-provider-config）。
@@ -818,6 +831,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     mirrorVersionBumper: mirrorVersionStore,
   });
   const credentialStore = new CredentialStore({ schemaEnsurer: ensureCapabilitySchema,
+    pool: apiPool,
     host: readEnvString('PGHOST'),
     port: readEnvPort('PGPORT'),
     database: readEnvString('PGDATABASE'),
@@ -886,6 +900,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   });
   // Facebook 定时评论每次触发的审计行（facebook-scheduled-comment 2.7）：best-effort、不阻塞主链路。
   const facebookCommentAuditStore = new FacebookCommentAuditStore({
+    pool: automationPool,
     host: readEnvString('PGHOST'),
     port: readEnvPort('PGPORT'),
     database: readEnvString('PGDATABASE'),
@@ -895,6 +910,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   // Facebook group join: operator target catalog, one-group-one-account assignment ledger,
   // and best-effort join audit. Join loop is default-off and shadow-first.
   const facebookGroupTargetStore = new FacebookGroupTargetStore({
+    pool: automationPool,
     host: readEnvString('PGHOST'),
     port: readEnvPort('PGPORT'),
     database: readEnvString('PGDATABASE'),
@@ -902,6 +918,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     password: readEnvString('PGPASSWORD'),
   });
   const facebookGroupMembershipStore = new FacebookGroupMembershipStore({
+    pool: automationPool,
     host: readEnvString('PGHOST'),
     port: readEnvPort('PGPORT'),
     database: readEnvString('PGDATABASE'),
@@ -909,6 +926,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     password: readEnvString('PGPASSWORD'),
   });
   const facebookGroupJoinAuditStore = new FacebookGroupJoinAuditStore({
+    pool: automationPool,
     host: readEnvString('PGHOST'),
     port: readEnvPort('PGPORT'),
     database: readEnvString('PGDATABASE'),
@@ -916,7 +934,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     password: readEnvString('PGPASSWORD'),
   });
   // 对外客户身份 + 客户↔环境归属（change edge-client-customer-auth）。独立表,与内部运营登录物理隔离。
-  const clientUserStore = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, mirrorVersionBumper: mirrorVersionStore, offboardWrites: new OffboardWriteAdapter() });
+  const clientUserStore = new ClientUserStore({ pool: apiPool, schemaEnsurer: ensureCapabilitySchema, mirrorVersionBumper: mirrorVersionStore, offboardWrites: new OffboardWriteAdapter() });
   try {
     await mirrorVersionStore.init();
     await modelConfigStore.init();
@@ -1046,7 +1064,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   };
   // token 用量记账（change llm-token-usage-stats）：出口 onCall 钩子只做纯内存累加，
   // 定时 flush 到 llm_token_usage 预聚合表（专用池隔离热路径）。须早于接受 LLM 调用/探活建好。
-  const tokenUsageStore = new TokenUsageStore({ schemaEnsurer: ensureCapabilitySchema });
+  const tokenUsageStore = new TokenUsageStore({ pool: tokenUsagePool, schemaEnsurer: ensureCapabilitySchema });
   try {
     await tokenUsageStore.init();
     console.log('[aidcp-cloud] token 用量记账已就绪（llm_token_usage，按账号/角色/模型/10分钟桶预聚合）');
@@ -1112,6 +1130,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   });
   const planner = new SimplePlanner({ llm });
   const cache = new PgAnchorCache({
+    pool: automationPool,
     connectionString: readEnvString('DATABASE_URL'),
     host: readEnvString('PGHOST'),
     port: readEnvPort('PGPORT'),
@@ -1120,7 +1139,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     password: readEnvString('PGPASSWORD'),
   });
 
-  const botChatStore = new BotChatStore();
+  const botChatStore = new BotChatStore({ pool: apiPool });
   const botChatEventHandler = new FeishuBotChatEventHandler(botChatStore);
 
   // 探测 schema（不再建表，change cloud-schema-migration-executor 第 5 节）；
@@ -1141,6 +1160,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
 
   // 发布日志存储（publish_log 表）
   const publishLogStore = new PublishLogStore({
+    pool: apiPool,
     host: readEnvString('PGHOST'),
     port: readEnvPort('PGPORT'),
     database: readEnvString('PGDATABASE'),
@@ -1150,6 +1170,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   // 发布角色执行日志（publish_pipeline_logs 表，change publish-pipeline-observability）：复用同库连接配置。
   // 表由 migration 0004 已建,无需 init;写入 best-effort、不阻塞发布。注入给 PublishOrchestrator 当 pipelineLogSink。
   const publishPipelineLogStore = new PublishPipelineLogStore({
+    pool: apiPool,
     host: readEnvString('PGHOST'),
     port: readEnvPort('PGPORT'),
     database: readEnvString('PGDATABASE'),
@@ -1172,6 +1193,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     try {
       const store = new PublishApprovalStore({
         executionTarget: deploymentTarget,
+        pool: apiPool,
         host: readEnvString('PGHOST'),
         port: readEnvPort('PGPORT'),
         database: readEnvString('PGDATABASE'),
@@ -1275,6 +1297,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     try {
       const store = new DraftRefinementStore({
         executionTarget: deploymentTarget,
+        pool: contentPool,
         host: readEnvString('PGHOST'),
         port: readEnvPort('PGPORT'),
         database: readEnvString('PGDATABASE'),
@@ -1302,6 +1325,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   let likedNoteStore: LikedNoteStore | undefined;
   try {
     const ls = new LikedNoteStore({
+      pool: automationPool,
       host: readEnvString('PGHOST'),
       port: readEnvPort('PGPORT'),
       database: readEnvString('PGDATABASE'),
@@ -1320,6 +1344,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   let valuableCommentStore: ValuableCommentStore | undefined;
   try {
     const vs = new ValuableCommentStore({
+      pool: automationPool,
       host: readEnvString('PGHOST'),
       port: readEnvPort('PGPORT'),
       database: readEnvString('PGDATABASE'),
@@ -1338,6 +1363,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   let notificationContactStore: NotificationContactStore | undefined;
   try {
     const ncs = new NotificationContactStore({ schemaEnsurer: ensureCapabilitySchema,
+      pool: apiPool,
       host: readEnvString('PGHOST'),
       port: readEnvPort('PGPORT'),
       database: readEnvString('PGDATABASE'),
@@ -1355,7 +1381,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   // init 失败留 undefined（路由退化 → 一律落默认群，绝不崩、绝不静默丢）。空表 = 今天行为逐字一致。
   let groupRouteStore: GroupRouteStore | undefined;
   try {
-    const grs = new GroupRouteStore();
+    const grs = new GroupRouteStore({ pool: automationPool });
     await grs.init();
     groupRouteStore = grs;
     console.log('[aidcp-cloud] GroupRouteStore 已就绪（group_route 表；账号→团队群路由）');
@@ -1367,6 +1393,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   let interactionFeedStore: InteractionFeedStore | undefined;
   try {
     const ifs = new InteractionFeedStore({
+      pool: automationPool,
       host: readEnvString('PGHOST'),
       port: readEnvPort('PGPORT'),
       database: readEnvString('PGDATABASE'),
@@ -1385,6 +1412,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   let curatedContentStore: CuratedContentStore | undefined;
   try {
     const ccs = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema,
+      pool: contentPool,
       host: readEnvString('PGHOST'),
       port: readEnvPort('PGPORT'),
       database: readEnvString('PGDATABASE'),
@@ -1428,6 +1456,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   let conceptStore: ConceptStore | undefined;
   try {
     const cs = new ConceptStore({ schemaEnsurer: ensureCapabilitySchema,
+      pool: contentPool,
       host: readEnvString('PGHOST'),
       port: readEnvPort('PGPORT'),
       database: readEnvString('PGDATABASE'),
@@ -1475,6 +1504,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   try {
     const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema,
       mirrorVersionBumper: mirrorVersionStore,
+      pool: apiPool,
       host: readEnvString('PGHOST'),
       port: readEnvPort('PGPORT'),
       database: readEnvString('PGDATABASE'),
@@ -1485,7 +1515,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     accountStore = store;
     console.log('[aidcp-cloud] AccountStore 已就绪（accounts 表，seed default）');
     try {
-      const policies = new ApprovalPolicyStore({ schemaEnsurer: ensureCapabilitySchema });
+      const policies = new ApprovalPolicyStore({ pool: apiPool, schemaEnsurer: ensureCapabilitySchema });
       await policies.init();
       approvalPolicyStore = policies;
       console.log('[aidcp-cloud] ApprovalPolicyStore 已就绪（账号评论审批覆盖 / 分组稿件审核入口）');
@@ -1561,6 +1591,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     try {
       const store = new PgDelegatedTaskStore({
         executionTarget: deploymentTarget,
+        pool: automationPool,
         host: readEnvString('PGHOST'),
         port: readEnvPort('PGPORT'),
         database: readEnvString('PGDATABASE'),
@@ -1701,6 +1732,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   let facebookPublishMediaStore: FacebookPublishMediaStore | undefined;
   try {
     const store = new FacebookPublishMediaStore({ schemaEnsurer: ensureCapabilitySchema,
+      pool: contentPool,
       host: readEnvString('PGHOST'),
       port: readEnvPort('PGPORT'),
       database: readEnvString('PGDATABASE'),
@@ -1734,7 +1766,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   }
   let personaAutoFillStore: PersonaAutoFillStore | undefined;
   try {
-    const store = new PersonaAutoFillStore({ schemaEnsurer: ensureCapabilitySchema });
+    const store = new PersonaAutoFillStore({ pool: apiPool, schemaEnsurer: ensureCapabilitySchema });
     await store.init();
     personaAutoFillStore = store;
     console.log('[aidcp-cloud] Facebook 人设自动补齐任务存储已就绪');
@@ -1746,6 +1778,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   let firstPostOnboardingStore: FirstPostOnboardingStore | undefined;
   try {
     const store = new FirstPostOnboardingStore({ schemaEnsurer: ensureCapabilitySchema,
+      pool: apiPool,
       host: readEnvString('PGHOST'),
       port: readEnvPort('PGPORT'),
       database: readEnvString('PGDATABASE'),

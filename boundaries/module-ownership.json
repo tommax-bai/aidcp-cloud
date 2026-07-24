@@ -1110,6 +1110,11 @@
     "note": "§4.7 kernel 花名册成员（27 行）。change decouple-store-schema-pgconfig-cluster 从 src/cache/pg-config.ts git mv 到 src/kernel/（物理位置归位 kernel 目录，字节等价，唯一 import 是 import type pg，无 SQL / 无业务依赖 / 无进程内活状态）。消费方改为直接从 kernel import DEFAULT_PG_CONFIG，消除经 pg-anchor-cache（automation）再导出的跨边界边。请求回写 §4.7 见 docpatch"
   },
   {
+    "path": "src/kernel/pg-owner-connection-resolver.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change Block③ 物理拆库 L2 前置：按 owner 解析 PG 连接配置的纯函数 resolveOwnerPgConfig。只 import type pg + kernel 的 DEFAULT_PG_CONFIG（pg-config.ts），零 SQL 字面量 / 零 HTTP / 零 LLM / 无进程内活状态 / 不反向依赖业务层。物理拆库后三属主服务各连各自库、组合根按 owner 取池，本模块收成唯一「owner→PoolConfig」解析口；owner URL 未配时逐字回落共享单库配置。满足 §4.7 kernel 准入（封闭花名册新增成员，请求回写 §4.7）。"
+  },
+  {
     "path": "src/kernel/pipeline-log-contract.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/publish-agent/publish-pipeline-log-store.ts 析出：PipelineLogEntry/PipelineLogSink 纯接口契约，零 import、零 SQL、零活状态。含 pg Pool + INSERT 的写入实现留 publish-pipeline-log-store.ts（api）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
