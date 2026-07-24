@@ -47,7 +47,10 @@
       "src/kernel/cover-card-copy-prompt.ts",
       "src/kernel/content-visual-brief.ts",
       "src/kernel/visual-fidelity-audit-prompt.ts",
-      "src/kernel/visual-reference-prompts.ts"
+      "src/kernel/visual-reference-prompts.ts",
+      "src/kernel/publish-generation-types.ts",
+      "src/kernel/publish-status-types.ts",
+      "src/kernel/risk-read-types.ts"
     ]
   },
   "rejected": [
