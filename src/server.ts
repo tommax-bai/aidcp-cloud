@@ -614,6 +614,10 @@ interface CompositionContext {
   commentScheduler: CommentScheduler | undefined;
   conceptStore: ConceptStore | undefined;
   configMirrorPool: pg.Pool;
+  // Block③ L3 step0：event_outbox / event_outbox_cursor / 风控命令 outbox 均属 automation。
+  // 拆段传输 helper（风控命令消费者 / 事件→outbox 桥 / 面板回放 / emitRiskCommand）MUST 用 automation 池，
+  // 而非 api 的 configMirrorPool（后者只服务 config_mirror_version）。单库下二池同库、字节等价；拆库后才分道。
+  automationPool: pg.Pool;
   configMirrorRefresher: ConfigMirrorRefresher;
   contentScheduleStore: ContentScheduleStore;
   credentialStore: CredentialStore;
@@ -1837,6 +1841,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ctx.categoryConfigStore = categoryConfigStore;
   ctx.clientUserStore = clientUserStore;
   ctx.configMirrorPool = configMirrorPool;
+  ctx.automationPool = automationPool;
   ctx.contentScheduleStore = contentScheduleStore;
   ctx.credentialStore = credentialStore;
   ctx.dashscopeApiKey = dashscopeApiKey;
@@ -2241,7 +2246,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
 }
 
 async function segCAutomation(ctx: CompositionContext): Promise<void> {
-  const { accountDisplayName, accountDisplayNameCandidates, accountState, accountStore, botChatEventHandler, botChatStore, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, contentScheduleStore, credentialStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, interactionFeedStore, lastObservedNoteByAccount, likedNoteStore, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, notificationContactStore, onCommentTakeoverEnd, onCommentTakeoverStart, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, providerRuntime, publishApprovalClient, publishApprovalStore, publishLogStore, quotaConfigStore, resolveAccountChatId, resolveCardChatId, resolveEffectiveCommentApprovalMode, resolvePersona, resumeConfigStore, roleConfigStore, sessionConfigStore, tokenUsageStore, valuableCommentStore, writeApprovalDecision } = ctx;
+  const { accountDisplayName, accountDisplayNameCandidates, accountState, accountStore, botChatEventHandler, botChatStore, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, automationPool, contentScheduleStore, credentialStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, interactionFeedStore, lastObservedNoteByAccount, likedNoteStore, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, notificationContactStore, onCommentTakeoverEnd, onCommentTakeoverStart, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, providerRuntime, publishApprovalClient, publishApprovalStore, publishLogStore, quotaConfigStore, resolveAccountChatId, resolveCardChatId, resolveEffectiveCommentApprovalMode, resolvePersona, resumeConfigStore, roleConfigStore, sessionConfigStore, tokenUsageStore, valuableCommentStore, writeApprovalDecision } = ctx;
   // RiskController 注册表（V1 task 9.1）：每账号一个 controller、单写 PER ACCOUNT、共享 PgRiskStore。
   // 现役路径用其 default controller（单一来源，避免双 controller 写同一 risk_state）；PG 不可用则现役回退内存态。
   // PgRiskStore 单例：既喂 registry（按账号风控单写），又作 InteractionStore 接线孤儿
@@ -2472,7 +2477,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   const seamMode = serviceModeFromEnv();
   if (seamMode !== 'monolith' && deploymentTarget) {
     startRiskCommandConsumer({
-      pool: configMirrorPool,
+      pool: automationPool,
       executionTarget: deploymentTarget,
       // 单写不变量收口在这一处回调：风控三写方法只在本进程 RiskController 上发生。at-least-once ⇒ 三方法均幂等。
       apply: async (cmd) => {
@@ -2483,7 +2488,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       },
       logger: console,
     });
-    bridgeEventBusToOutbox({ eventBus, pool: configMirrorPool, executionTarget: deploymentTarget, logger: console });
+    bridgeEventBusToOutbox({ eventBus, pool: automationPool, executionTarget: deploymentTarget, logger: console });
     console.log(`[aidcp-cloud] 拆段传输已接线（${seamMode}）：风控命令消费者 + 事件→outbox 桥`);
   }
 
@@ -6082,7 +6087,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
                     updatedAt: state.updatedAt,
                   };
                   if (state.status === 'restricted') {
-                    await emitRiskCommand(ctx.configMirrorPool, deploymentTarget, {
+                    await emitRiskCommand(ctx.automationPool, deploymentTarget, {
                       kind: 'recoverRestricted',
                       accountId,
                       reason,
@@ -6163,7 +6168,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
   // monolith：EventBus 进程内直连 panel-ws，MUST NOT 起回放（红线③）。core：segD 与产生端同进程、直连，同样不起。
   if (mode === 'api' && deploymentTarget) {
     const replay = new PanelEventReplay({
-      pool: ctx.configMirrorPool,
+      pool: ctx.automationPool,
       executionTarget: deploymentTarget,
       sink: (event, data) => eventBus.emitRaw(event, data),
       logger: console,
