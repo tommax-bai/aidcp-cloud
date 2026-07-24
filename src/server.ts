@@ -324,6 +324,16 @@ import { InternalHttpClient, InternalHttpServer } from './transport/internal-htt
 import { CuratedContentHttpClient, registerCuratedContentRoutes } from './transport/curated-content-http.js';
 import { PublishStatusHttpClient, registerPublishStatusRoutes } from './transport/publish-status-http.js';
 import { PublishGenerationHttpClient, registerPublishGenerationRoutes } from './transport/publish-generation-http.js';
+// Block② 2e：拆进程后 api ↔ automation 的三条跨段传输接缝。默认 monolith 全不启用（红线：monolith 不起任何新东西）。
+//   - 风控只读投影：api 经 HTTP 客户端读 automation 的内部只读 API（server 侧 registerRiskReadRoutes）。
+//   - 风控写：api 只 emit 命令落 outbox；automation 唯一消费者经真 RiskController 应用（单写不变量物理成立）。
+//   - 事件观测：automation 把 EventBus tee 到 outbox；api 回放进本进程 EventBus → panel-ws。
+import { RiskReadHttpClient, registerRiskReadRoutes } from './transport/risk-read-http.js';
+import type { RiskReadPort } from './kernel/risk-read-types.js';
+import { emitRiskCommand, startRiskCommandConsumer } from './transport/risk-command-outbox.js';
+import { bridgeEventBusToOutbox, PanelEventReplay } from './transport/eventbus-outbox-bridge.js';
+/** automation 内部只读 API 的默认监听端口（可由 AIDCP_AUTOMATION_PORT 覆盖）；api 侧 base URL 由 AIDCP_AUTOMATION_URL 指定。 */
+const DEFAULT_AUTOMATION_READ_API_PORT = 8093;
 import { PgAlertStore } from './alerts/index.js';
 // 跨进程配置镜像失效通道（change config-mirror-cross-process-invalidation）。
 import pg from 'pg';
@@ -714,6 +724,34 @@ async function main(): Promise<void> {
   if (segments.segC) await segCAutomation(ctx);
   if (segments.segD) await segDApiServing(ctx);
   if (listeners.contentReadApi) await startContentReadApi(ctx);
+  // Block② 2e：automation 独立进程起内部只读 API（供 api 进程经 RiskReadHttpClient 读风控投影）。
+  // 仅 automation 模式起：monolith/core 的 segD 与 registry 同进程、走本地适配（不需 HTTP）；content/api 无 registry。
+  if (mode === 'automation') await startAutomationReadApi(ctx);
+}
+
+/**
+ * automation 进程独占的内部只读 API：把本进程 RiskControllerRegistry 的账号维只读投影
+ * （getState / effectiveQuotas / slowStartView）暴露为内部 HTTP route，供 api 进程经 RiskReadHttpClient 远程取。
+ * 仅 automation 模式调用（monolith/core 的 segD 走本地适配、不需 HTTP；content/api 无 registry）。
+ * **只读、零写方法**——传输层无从引入任何风控写路径（红线：风控单写仍只在本进程 RiskController）。
+ * registry 缺失（segC 未构造）时不静默假成功：如实告警、不注册路由。
+ */
+async function startAutomationReadApi(ctx: CompositionContext): Promise<void> {
+  const registry = ctx.riskRegistry;
+  if (!registry) {
+    console.warn('[aidcp-cloud] automation 内部只读 API 未起：RiskControllerRegistry 不可用（segC 未构造）');
+    return;
+  }
+  const local: RiskReadPort = {
+    getState: (accountId) => registry.getController(accountId).then((c) => c.getState()),
+    effectiveQuotas: (accountId) => registry.getController(accountId).then((c) => c.effectiveQuotas()),
+    slowStartView: (accountId) => registry.getController(accountId).then((c) => c.slowStartView()),
+  };
+  const port = readEnvPort('AIDCP_AUTOMATION_PORT') ?? DEFAULT_AUTOMATION_READ_API_PORT;
+  const httpServer = new InternalHttpServer();
+  registerRiskReadRoutes(httpServer, local);
+  const actual = await httpServer.listen(port);
+  console.log(`[aidcp-cloud] automation 内部只读 API 已监听 127.0.0.1:${actual}（risk-read 端点）`);
 }
 
 /**
@@ -2392,6 +2430,29 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     }
   };
   console.log('[aidcp-cloud] RiskControllerRegistry 已就绪（按真实账号懒解析，PgRiskStore 持久化）');
+
+  // ── Block② 2e：拆段传输接线（非 monolith 才启用；monolith 逐字节等价、不起任何新东西）──────
+  // automation/core（segC 运行 + 有合法 target）下：
+  //   ① 风控命令消费者——把 api 侧 emit 的风控写命令，交本进程唯一的 RiskController 应用（单写落地点）。
+  //   ② EventBus → outbox 桥——把本进程编排事件 tee 到 panel.event 主题，供 api 进程回放给 panel-ws。
+  // monolith 下两者都 MUST NOT 起（EventBus 仍进程内直连 panel-ws；无独立 api 进程 emit 命令）。
+  const seamMode = serviceModeFromEnv();
+  if (seamMode !== 'monolith' && deploymentTarget) {
+    startRiskCommandConsumer({
+      pool: configMirrorPool,
+      executionTarget: deploymentTarget,
+      // 单写不变量收口在这一处回调：风控三写方法只在本进程 RiskController 上发生。at-least-once ⇒ 三方法均幂等。
+      apply: async (cmd) => {
+        const controller = await riskRegistry.getController(cmd.accountId);
+        if (cmd.kind === 'applySignal') await controller.applySignal(cmd.signal);
+        else if (cmd.kind === 'setQuotaLevel') await controller.setQuotaLevel(cmd.level);
+        else await controller.recoverRestricted(cmd.reason);
+      },
+      logger: console,
+    });
+    bridgeEventBusToOutbox({ eventBus, pool: configMirrorPool, executionTarget: deploymentTarget, logger: console });
+    console.log(`[aidcp-cloud] 拆段传输已接线（${seamMode}）：风控命令消费者 + 事件→outbox 桥`);
+  }
 
   // ── 记账 outbox + worker + 对账（change risk-state-cross-process-integrity，design D5/D6）──
   //
@@ -5355,13 +5416,34 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
 }
 
 async function segDApiServing(ctx: CompositionContext): Promise<void> {
-  const { accountDisplayName, accountPersonaService, accountStore, alertStore, approvalPolicyStore, approvePublishForClient, billingPriceRefresh, botChatStore, botChatsProvider, buildModelConfigView, buildTodayUsageForAccount, captchaAssist, categoryConfigPanel, clientUserStore, commandFace, commentScheduler, conceptStore, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, debugPort, delegatedTaskService, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigPanel, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, messenger, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigPanel, panelUsers, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, probeModel, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigPanel, readApprovalDispatchProjection, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resolveAccountChatId, resolveController, resumeConfigPanel, riskRegistry, roleConfigPanel, rolePromptProvider, server, sessionLimitPanel, tokenUsageStore, triggerPublishDispatchOnApprove, writeApprovalDecision } = ctx;
+  const { accountDisplayName, accountPersonaService, accountStore, alertStore, approvalPolicyStore, approvePublishForClient, billingPriceRefresh, botChatStore, botChatsProvider, buildModelConfigView, buildTodayUsageForAccount, captchaAssist, categoryConfigPanel, clientUserStore, commandFace, commentScheduler, conceptStore, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, debugPort, delegatedTaskService, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigPanel, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, messenger, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigPanel, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, probeModel, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigPanel, readApprovalDispatchProjection, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resolveAccountChatId, resumeConfigPanel, riskRegistry, roleConfigPanel, rolePromptProvider, server, sessionLimitPanel, tokenUsageStore, triggerPublishDispatchOnApprove, writeApprovalDecision } = ctx;
+  // ── Block② 2e：运行模式（纯选择器，与 main() 同源）。segD 只在 monolith / api / core 跑。─────
+  const mode = serviceModeFromEnv();
+  const { deploymentTarget } = ctx; // 'dev'|'ol'|null（segA 设）；outbox emit / 消费的 executionTarget。
+  // 面板用户名单在 segB/segC 才解析（parsePanelUsers）；api 模式跳过那两段 ⇒ ctx.panelUsers 恒 undefined。
+  // 就地按同一 env 重解析（守卫：缺则面板启动读 config.users.length 会 NPE）；monolith/core 下 ctx.panelUsers 已有 ⇒ 短路、逐字节等价。
+  const panelUsers = ctx.panelUsers ?? parsePanelUsers(readEnvString('AIDCP_PANEL_USERS'));
+  // 风控只读投影端口（seam①·风控读）。
+  //   - monolith / core：本地适配（就是本进程 riskRegistry，逐字节等价、零 HTTP）。
+  //   - api：HTTP 客户端（指向 automation 的内部只读 API）。segC 未跑 ⇒ 本进程无 riskRegistry。
+  //     base URL 走 AIDCP_AUTOMATION_URL；缺省回落 127.0.0.1:<默认端口>（仅解析 URL、不发网络，构造不抛）。
+  const automationBaseUrl =
+    readEnvString('AIDCP_AUTOMATION_URL') ?? `http://127.0.0.1:${DEFAULT_AUTOMATION_READ_API_PORT}`;
+  const riskRead: RiskReadPort =
+    mode === 'api'
+      ? new RiskReadHttpClient(new InternalHttpClient(automationBaseUrl))
+      : {
+          getState: (accountId) => riskRegistry.getController(accountId).then((c) => c.getState()),
+          effectiveQuotas: (accountId) => riskRegistry.getController(accountId).then((c) => c.effectiveQuotas()),
+          slowStartView: (accountId) => riskRegistry.getController(accountId).then((c) => c.slowStartView()),
+        };
   // ── Block② 数据网关（决定①：api/panel 收口取数）─────────────────────────────
   // 聚合三个 kernel 读端口（精选库 / 委托任务 / 收件箱），api 消费者从这里取端口注入。
   // 默认 mode='local'（AIDCP_GATEWAY_MODE!=='http'）⇒ getter 返回的就是上面 ctx 里的本地实例本身、
   // 零 HTTP、不起任何内部 server（内部 HTTP server 的 listen 属 2d 拆进程，本刀不启动它）、运行时零行为变更。
   // remote thunk 仅在 http 模式构造 client（拆进程后 2d）；此处 baseUrl 走 env，缺省不提供 ⇒ 保持 local。
-  const gatewayMode = gatewayModeFromEnv();
+  // api 模式：content 域读端口（精选库 / 发布状态）一律走 HTTP 指向 content 服务；monolith/core 保持 env 决定（默认 local，逐字节等价）。
+  const gatewayMode = mode === 'api' ? 'http' : gatewayModeFromEnv();
   const gatewayBaseUrl = readEnvString('AIDCP_GATEWAY_BASE_URL');
   const dataGateway = new DataGateway({
     curatedContentLocal: curatedContentStore,
@@ -5369,7 +5451,11 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
     interactionReaderLocal: ctx.interactionStore,
     // Block② 2e：发布队列状态读端口。默认 local ⇒ 直接把同步 getStatus 适配成异步端口，
     // 底层仍是同一个 publishOrchestrator.getStatus()，逐字节等价、零 HTTP。
-    publishStatusLocal: { getStatus: () => Promise.resolve(publishOrchestrator.getStatus()) },
+    // publishOrchestrator 属 segB（content 段）；api 模式本进程无它 ⇒ 本地适配回落诚实报错端口（绝不假成功），
+    // 真正取数经上面的 http remote 指向 content 服务。monolith/core 下 publishOrchestrator 存在 ⇒ 就是原适配、逐字节等价。
+    publishStatusLocal: publishOrchestrator
+      ? { getStatus: () => Promise.resolve(publishOrchestrator.getStatus()) }
+      : { getStatus: () => Promise.reject(new Error('publish_status_unavailable_in_api_mode')) },
     mode: gatewayMode,
     // Block② 2d step2 拓扑：core 的 http 网关只把「content 域」读端口（精选库）remote 到 content 进程；
     // delegatedTask / interaction 属 automation 域、由 core 本地拥有（segA 已构造），一律保持 local，
@@ -5464,7 +5550,15 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           notifyPublishPreviewChanged: (recordId) => refreshPublishPreview(recordId),
           // change consolidate-command-face（§4.6.7）：面板账号命令与飞书命令共用同一命令面，账号级
           // pause/resume/恢复 edge 与调度启停不再在此内联第二份，收敛到上方 createCommandFace 一处。
-          commandActions: commandFace.panelCommandActions,
+          // commandFace 属 segC（automation·命令下发到边缘）；api 模式本进程无它 ⇒ 守卫成诚实报错桩，
+          // 让面板照常启动、读侧端点可用；命令下发是自动化域、拆进程后另经跨段路由（不在本刀）。
+          // monolith/core 下 commandFace 存在 ⇒ 就是原 panelCommandActions、逐字节等价。
+          commandActions: commandFace
+            ? commandFace.panelCommandActions
+            : {
+                pause: () => Promise.reject(new Error('command_dispatch_unavailable_in_api_mode')),
+                resume: () => Promise.reject(new Error('command_dispatch_unavailable_in_api_mode')),
+              },
           // 账号属性写入（change editable-account-group-label + account-group-chat-injection → generalize-contact-info）：经账号存储单写；
           // 存储未就绪 → 不注入，路由回 503。setContactInfo 可选（存储方法存在时才挂，否则该子路由单独 503）。
           accountAttr: accountStore?.setGroupLabel
@@ -5505,8 +5599,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
                 config: result.row,
                 effectiveActiveWeekMask: row?.effectiveActiveWeekMask ?? null,
                 effectiveContentActiveMask: row?.effectiveContentActiveMask ?? null,
-                loadRiskDailyCap: () => resolveController(accountId)
-                  .then((controller) => controller.effectiveQuotas().day.join_group),
+                loadRiskDailyCap: () => riskRead.effectiveQuotas(accountId).then((q) => q.day.join_group),
                 loadScope: () => facebookGroupTargetStore.scopedTargetCountForAccount(accountId),
                 loadRecentResult: () => facebookGroupJoinAuditStore.latestScheduledResult(accountId),
               });
@@ -5541,7 +5634,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
             listAssignments: (limit) => facebookGroupMembershipStore.listAssignments(limit),
             reclaimStaleAssignments: (ttlMs) => facebookGroupMembershipStore.reclaimStaleAssignments(ttlMs),
           },
-          captchaAssist: captchaAssist.isAvailable() ? captchaAssist : undefined,
+          captchaAssist: captchaAssist?.isAvailable() ? captchaAssist : undefined,
           // 模型与凭据配置（change console-model-provider-config + model-config-volcengine-provider）。明文密钥绝不经此回传。
           modelConfig: {
             getView: buildModelConfigView,
@@ -5782,12 +5875,16 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
       // 的慢启动投影**同一个 controller**（同一 anchor 解析、同一次 clock）→ 徽章天数与生效上限同源同规则。
       // dayQuotas 亦过客户端信任边界，与 ui.snapshot 上限投影同规则剥去平台不支持项（change platform-honest-usage-caps）。
       const buildSlowStartView = async (accountId: string) => {
-        const controller = await riskRegistry.getController(accountId);
+        // seam①·风控读：经只读投影端口（api=HTTP，monolith/core=本地 registry 适配·逐字节等价）。
+        const [slowStart, quotas] = await Promise.all([
+          riskRead.slowStartView(accountId),
+          riskRead.effectiveQuotas(accountId),
+        ]);
         return {
-          slowStart: controller.slowStartView(),
+          slowStart,
           dayQuotas: omitUnsupportedUsageMetrics(
             accountStore?.platformFor?.(accountId),
-            pickDailyUsageCounts(controller.effectiveQuotas().day),
+            pickDailyUsageCounts(quotas.day),
           ) as Record<string, number>,
         };
       };
@@ -5930,7 +6027,8 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
             platformForAccount: (accountId) => accountStore?.platformFor?.(accountId),
             viewForAccount: async (accountId) => {
               try {
-                const state = (await riskRegistry.getController(accountId)).getState();
+                // seam①·风控读：只读投影端口（api=HTTP，monolith/core=本地 registry 适配·逐字节等价）。
+                const state = await riskRead.getState(accountId);
                 return { status: state.status, statusSince: state.statusSince, updatedAt: state.updatedAt };
               } catch {
                 return null;
@@ -5938,6 +6036,40 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
             },
             recoverRestrictedForAccount: async (accountId, reason) => {
               try {
+                if (mode === 'api') {
+                  // 红线②·风控单写：api 绝不直调 RiskController。restricted 时把「解除受限」变成命令落 outbox，
+                  // 由 automation 唯一消费者经真 RiskController 应用（异步）；本同步调用只回读当前观测态、
+                  // changed=false（apply 尚未在本调用内发生）——绝不伪造状态迁移。状态判定的权威仍在 automation 的
+                  // recoverRestricted（幂等 + 复核 statusBefore）；此处映射只为回报，读到什么如实报什么。
+                  if (!deploymentTarget) return null; // 无合法 target 不能落命令（fail-closed）
+                  const state = await riskRead.getState(accountId);
+                  const stateView = {
+                    status: state.status,
+                    statusSince: state.statusSince,
+                    updatedAt: state.updatedAt,
+                  };
+                  if (state.status === 'restricted') {
+                    await emitRiskCommand(ctx.configMirrorPool, deploymentTarget, {
+                      kind: 'recoverRestricted',
+                      accountId,
+                      reason,
+                    });
+                    return { accepted: true, statusBefore: state.status, state: stateView, changed: false };
+                  }
+                  if (state.status === 'normal') {
+                    // 幂等已完成（照真 RiskController：normal 视为已恢复），无需落命令。
+                    return { accepted: true, statusBefore: state.status, state: stateView, changed: false };
+                  }
+                  // warned / frozen：非受限，诚实拒（照真 RiskController accepted=false）。
+                  return {
+                    accepted: false,
+                    refusal: 'state_not_restricted' as const,
+                    statusBefore: state.status,
+                    state: stateView,
+                    changed: false,
+                  };
+                }
+                // monolith / core：进程内单写，直调本进程 RiskController（与今日逐字节等价）。
                 const result = await (await riskRegistry.getController(accountId)).recoverRestricted(reason);
                 return {
                   accepted: result.accepted,
@@ -5990,6 +6122,21 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
     }
   } else {
     console.log('[aidcp-cloud] 客户鉴权 API 已禁用（未设置 AIDCP_CLIENT_AUTH_PORT）');
+  }
+
+  // ── Block② 2e：面板事件回放（seam③·观测·仅 api 模式）──────────────────────────
+  // api 进程不含编排 EventBus 的产生端；automation 侧 tee 到 outbox 的 panel.event 由此回放进本进程
+  // EventBus（emitRaw），panel-ws 的 onAny firehose 照常拾取并广播给浏览器。
+  // monolith：EventBus 进程内直连 panel-ws，MUST NOT 起回放（红线③）。core：segD 与产生端同进程、直连，同样不起。
+  if (mode === 'api' && deploymentTarget) {
+    const replay = new PanelEventReplay({
+      pool: ctx.configMirrorPool,
+      executionTarget: deploymentTarget,
+      sink: (event, data) => eventBus.emitRaw(event, data),
+      logger: console,
+    });
+    replay.start();
+    console.log('[aidcp-cloud] 面板事件回放已启动（api 模式：outbox panel.event → 本进程 EventBus → panel-ws）');
   }
 }
 
