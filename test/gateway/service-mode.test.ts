@@ -15,13 +15,15 @@ describe('service-mode 纯选择器（Block② 2d：env → 段/监听计划，�
   });
 
   it('未识别值一律回落 monolith（不静默改变默认行为）', () => {
-    for (const raw of ['', 'CONTENT', 'Core', 'automation', 'main', ' content', 'content ', 'x']) {
+    for (const raw of ['', 'CONTENT', 'Core', 'API', 'Automation', 'main', ' content', 'content ', 'x']) {
       assert.equal(serviceModeFromEnv({ AIDCP_SERVICE: raw }), 'monolith', `raw=${JSON.stringify(raw)}`);
     }
   });
 
   it('精确匹配才切模式', () => {
     assert.equal(serviceModeFromEnv({ AIDCP_SERVICE: 'content' }), 'content');
+    assert.equal(serviceModeFromEnv({ AIDCP_SERVICE: 'automation' }), 'automation');
+    assert.equal(serviceModeFromEnv({ AIDCP_SERVICE: 'api' }), 'api');
     assert.equal(serviceModeFromEnv({ AIDCP_SERVICE: 'core' }), 'core');
   });
 
@@ -40,13 +42,35 @@ describe('service-mode 纯选择器（Block② 2d：env → 段/监听计划，�
     assert.deepEqual(listenersForMode('content'), { contentReadApi: true, automationAndApi: false });
   });
 
-  it('core → segA+segC+segD，跳 segB，不起读 API（经网关远程取）', () => {
+  it('automation → segA+segC，跳 segB/segD，不起读 API（生成经端口远程触发 content）', () => {
+    assert.deepEqual(segmentsForMode('automation'), { segA: true, segB: false, segC: true, segD: false });
+    assert.deepEqual(listenersForMode('automation'), { contentReadApi: false, automationAndApi: true });
+  });
+
+  it('api → segA+segD，跳 segB/segC，不起读 API（content 读经网关 HTTP）', () => {
+    assert.deepEqual(segmentsForMode('api'), { segA: true, segB: false, segC: false, segD: true });
+    assert.deepEqual(listenersForMode('api'), { contentReadApi: false, automationAndApi: true });
+  });
+
+  it('core → segA+segC+segD，跳 segB，不起读 API（automation+api 合进程的过渡形态）', () => {
     assert.deepEqual(segmentsForMode('core'), { segA: true, segB: false, segC: true, segD: true });
     assert.deepEqual(listenersForMode('core'), { contentReadApi: false, automationAndApi: true });
   });
 
+  it('automation 与 api 的段计划并起来 = core（切分不漏段）', () => {
+    const a = segmentsForMode('automation');
+    const p = segmentsForMode('api');
+    const core = segmentsForMode('core');
+    assert.equal(a.segC && !a.segD, true);
+    assert.equal(p.segD && !p.segC, true);
+    assert.deepEqual(
+      { segA: a.segA || p.segA, segB: a.segB || p.segB, segC: a.segC || p.segC, segD: a.segD || p.segD },
+      core,
+    );
+  });
+
   it('segA 在所有模式恒跑', () => {
-    for (const mode of ['monolith', 'content', 'core'] as ServiceMode[]) {
+    for (const mode of ['monolith', 'content', 'automation', 'api', 'core'] as ServiceMode[]) {
       assert.equal(segmentsForMode(mode).segA, true, `mode=${mode}`);
     }
   });

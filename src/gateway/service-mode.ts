@@ -5,12 +5,16 @@
  * 起哪些监听」。本文件**只做纯映射**（env → 计划），不 import 任何业务模块、不起任何进程、
  * 无任何副作用 —— 因此可被单元测试直接 import 断言，不会拉起 `main()`、不碰网络/DB。
  *
- * ## 三模式
+ * ## 模式
  *   - `monolith`（默认 / env 未设 / 未识别值）：四段全跑，无新监听，网关默认 local。
  *     **这是 dev 安全底线：AIDCP_SERVICE 未设时 main() 跑法与拆分前逐字节等价。**
  *   - `content`：跑 segA(基础)+segB(content)，跳过 segC/segD；segB 之后额外起一个
- *     内部 HTTP 读 API（承载 curated-content 读端点）。
- *   - `core`：跑 segA+segC+segD，跳过 segB；curated 读侧经数据网关走 HTTP（指向 content 进程）。
+ *     内部 HTTP 读 API（承载 curated-content 读 + 发布状态读 + 发布生成触发端点）。
+ *   - `automation`：跑 segA+segC，跳过 segB/segD；边缘 WS 8787 + 风控单写 + 编排 + 通知巡视。
+ *     生成经 publishGenerationPort 远程触发 content；去胖后 segC 不再构造内容管线对象。
+ *   - `api`：跑 segA+segD，跳过 segB/segC；面板 API + 客户鉴权 + 飞书 + 数据网关收口。
+ *     content 读经网关 HTTP、风控读经 risk-read HTTP、风控写经命令 outbox、面板事件经 outbox 回放。
+ *   - `core`：跑 segA+segC+segD，跳过 segB（= automation+api 合进一进程的过渡部署形态，保留）。
  *
  * ## 为什么放在 src/gateway/（api 层）而非 composition
  * composition 白名单只含 `server.ts` / `index.ts`（组合根本体），不容纳新文件。本文件是**零依赖纯
@@ -19,7 +23,7 @@
  */
 
 /** 运行模式。未识别值一律回落 `monolith`（安全底线）。 */
-export type ServiceMode = 'monolith' | 'content' | 'core';
+export type ServiceMode = 'monolith' | 'content' | 'automation' | 'api' | 'core';
 
 /** 组合根四段的运行计划：给定模式，哪些段该跑。segA(基础)恒跑。 */
 export interface SegmentPlan {
@@ -57,15 +61,21 @@ export function serviceModeFromEnv(
 ): ServiceMode {
   const raw = env[key];
   if (raw === 'content') return 'content';
+  if (raw === 'automation') return 'automation';
+  if (raw === 'api') return 'api';
   if (raw === 'core') return 'core';
   return 'monolith';
 }
 
-/** 给定模式 → 该跑哪些组合根段。segA 恒跑；content 跳 C/D；core 跳 B。 */
+/** 给定模式 → 该跑哪些组合根段。segA 恒跑。 */
 export function segmentsForMode(mode: ServiceMode): SegmentPlan {
   switch (mode) {
     case 'content':
       return { segA: true, segB: true, segC: false, segD: false };
+    case 'automation':
+      return { segA: true, segB: false, segC: true, segD: false };
+    case 'api':
+      return { segA: true, segB: false, segC: false, segD: true };
     case 'core':
       return { segA: true, segB: false, segC: true, segD: true };
     case 'monolith':
@@ -74,11 +84,13 @@ export function segmentsForMode(mode: ServiceMode): SegmentPlan {
   }
 }
 
-/** 给定模式 → 起哪些独立监听。 */
+/** 给定模式 → 起哪些独立监听。contentReadApi 仅 content 模式起。 */
 export function listenersForMode(mode: ServiceMode): ListenerPlan {
   switch (mode) {
     case 'content':
       return { contentReadApi: true, automationAndApi: false };
+    case 'automation':
+    case 'api':
     case 'core':
       return { contentReadApi: false, automationAndApi: true };
     case 'monolith':
