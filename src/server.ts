@@ -311,8 +311,16 @@ import {
 // Block② 数据网关（决定①：api/panel 收口取数）。默认 local ⇒ getter 取到的就是原本地实例、零 HTTP、零行为变更。
 // 组合根（本文件属 composition 层）可合法 import transport 的 http 客户端，仅在 mode='http'（拆进程 2d）时经 remote thunk 构造。
 import { DataGateway, gatewayModeFromEnv } from './gateway/data-gateway.js';
-import { InternalHttpClient } from './transport/internal-http.js';
-import { CuratedContentHttpClient } from './transport/curated-content-http.js';
+// Block② 2d 第一步：多进程运行模式（一套代码、多入口）。纯选择器，零副作用，main() 据此分支。
+import {
+  serviceModeFromEnv,
+  segmentsForMode,
+  listenersForMode,
+  DEFAULT_CONTENT_READ_API_PORT,
+  type ServiceMode,
+} from './gateway/service-mode.js';
+import { InternalHttpClient, InternalHttpServer } from './transport/internal-http.js';
+import { CuratedContentHttpClient, registerCuratedContentRoutes } from './transport/curated-content-http.js';
 import { DelegatedTaskHttpClient } from './transport/delegated-task-http.js';
 import { PgAlertStore } from './alerts/index.js';
 // 跨进程配置镜像失效通道（change config-mirror-cross-process-invalidation）。
@@ -687,11 +695,44 @@ interface CompositionContext {
 }
 
 async function main(): Promise<void> {
+  // Block② 2d 第一步：按 AIDCP_SERVICE 选运行模式（一套代码、多入口）。
+  //   - monolith（默认 / 未设 / 未识别值）：四段全跑、无新监听、网关默认 local —— 与拆分前逐字节等价。
+  //   - content：segA+segB，跳 segC/segD，额外起内部 HTTP 读 API 服务 curated-content 读端点。
+  //   - core：segA+segC+segD，跳 segB，curated 读侧经数据网关走 HTTP（需 env 指向 content 进程）。
+  const mode: ServiceMode = serviceModeFromEnv();
+  const segments = segmentsForMode(mode);
+  const listeners = listenersForMode(mode);
+  if (mode !== 'monolith') {
+    console.log(`[aidcp-cloud] AIDCP_SERVICE=${mode} —— 按段计划启动`, segments);
+  }
+
   const ctx = {} as CompositionContext;
-  await segAApiFoundation(ctx);
-  await segBContent(ctx);
-  await segCAutomation(ctx);
-  await segDApiServing(ctx);
+  if (segments.segA) await segAApiFoundation(ctx);
+  if (segments.segB) await segBContent(ctx);
+  if (segments.segC) await segCAutomation(ctx);
+  if (segments.segD) await segDApiServing(ctx);
+  if (listeners.contentReadApi) await startContentReadApi(ctx);
+}
+
+/**
+ * content 进程独占的内部 HTTP 读 API：把 segB 构造的本地 CuratedContentStore 的只读方法
+ * 暴露为内部 HTTP route，供 core 进程经数据网关（gateway=http）远程取数。
+ * 仅 content 模式调用；monolith 永不起（进程内本地实例直连）。
+ * store 缺失（CuratedContentStore 初始化失败）时**不静默假成功**：如实告警、不注册路由。
+ */
+async function startContentReadApi(ctx: CompositionContext): Promise<void> {
+  const store = ctx.curatedContentStore;
+  if (!store) {
+    console.warn(
+      '[aidcp-cloud] content 模式内部读 API 未起：CuratedContentStore 不可用（精选库初始化失败）',
+    );
+    return;
+  }
+  const port = readEnvPort('AIDCP_CONTENT_PORT') ?? DEFAULT_CONTENT_READ_API_PORT;
+  const httpServer = new InternalHttpServer();
+  registerCuratedContentRoutes(httpServer, store);
+  const actual = await httpServer.listen(port);
+  console.log(`[aidcp-cloud] content 内部读 API 已监听 127.0.0.1:${actual}（curated-content 读端点）`);
 }
 
 async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
