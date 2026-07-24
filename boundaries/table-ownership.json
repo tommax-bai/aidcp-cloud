@@ -32,6 +32,8 @@
     { "table": "delegated_task_attempts", "owner": "automation", "basis": "§5.1「自动化任务、尝试和租约（delegated_tasks 等）」→ aidcp-automation" },
     { "table": "delegated_task_events", "owner": "automation", "basis": "§5.1「自动化任务、尝试和租约」→ aidcp-automation" },
     { "table": "delegated_tasks", "owner": "automation", "basis": "§5.1 具名 delegated_tasks → aidcp-automation" },
+    { "table": "event_outbox", "owner": "automation", "basis": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增（migrations/0074）。§5.1 未具名；拆进程用的异步事件 outbox（承重通道，首个消费者为风控事件），唯一 SQL 写入方 src/transport/event-outbox.ts 属 automation（与既有 risk_counter_outbox 同域）。MUST 回写 §5.1" },
+    { "table": "event_outbox_cursor", "owner": "automation", "basis": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增（migrations/0074）。§5.1 未具名；event_outbox 的逐消费者游标表，唯一 SQL 写入方 src/transport/event-outbox.ts 属 automation。MUST 回写 §5.1" },
     { "table": "facebook_comment_audit", "owner": "automation", "basis": "§5.1 未具名；评论执行台账，写入方 src/comment-agent/ 属 automation（§4.7）" },
     { "table": "facebook_group_join_audit", "owner": "automation", "basis": "§5.1 未具名；加群执行台账，写入方 src/comment-agent/ 属 automation（§4.7）" },
     { "table": "facebook_group_join_automation_config", "owner": "api", "basis": "§5.1 未具名；配置面，写入方 src/config/facebook-group-join-automation-store.ts 不在 §4.6.8 点名的 5 个 automation 文件内，故属 api" },

@@ -35,8 +35,12 @@ export const REQUIRED_SCHEMA_VERSION = '0070_baseline_self_heal_columns';
  * 注：`0073_publish_execution_state`（change publish-log-split-prep）建的是 publish_log 执行态影子表。
  * 它是**影子**，写者对它软探测 + fail-safe 双写（探不到即停用双写，绝不连累主路径），故只抬 KNOWN_MAX、不抬 REQUIRED
  * ——把它写进 REQUIRED 会让「迁移还没跑」变成硬启动失败，与影子表的可选性质相悖。
+ *
+ * 注：`0074_event_outbox`（change block2-outbox-transport）建的是拆进程用的事件 outbox 两张表。
+ * 本 change 只建原语 + 测试，未接 server.ts、无任何存储正常读写依赖它，故只抬 KNOWN_MAX、不抬 REQUIRED
+ * ——2c 真正双写/切换、有存储硬依赖时再抬 REQUIRED。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0073_publish_execution_state';
+export const KNOWN_MAX_SCHEMA_VERSION = '0074_event_outbox';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 
