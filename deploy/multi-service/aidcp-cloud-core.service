@@ -1,0 +1,39 @@
+# aidcp-cloud core 服务（Block② 2e —— 可用即用的 2-service 中间态，非 3-service 目标的一部分）
+#
+# 为什么有它：当前 src/gateway/service-mode.ts 只识别 content / core / monolith。3-service 目标
+# 把 core 再切成 api(segD) + automation(segC) 两进程，但那需要 runtime split 工作线先让选择器识别
+# 'api' / 'automation' 并解开 segD 对 segC 构造物的耦合。**在此之前**，非单体的可用拓扑是：
+#     content（segA+segB，:8092 内部读 API） + core（segA+segC+segD，:8787 + panel + client-auth）
+# 本单元即 core 半边。3-service 就绪后弃用本单元、改用 api + automation 两单元。
+#
+# 段：segA + segC + segD（跳过 segB）。curated 读侧经数据网关走 HTTP → content 进程 :8092。
+# 监听：8787（edge WS）+ panel + client-auth（沿用 .env 现值）。
+#
+# ── isales 红线 ─────────────────────────────────────────────────────────────
+#   只碰 /opt/aidcp/cloud 与 8787 / 8090 / client-auth。绝不 touch isales（80 / 8000）。
+
+[Unit]
+Description=aidcp-cloud core (multi-service intermediate, AIDCP_SERVICE=core, segC+segD combined)
+Documentation=file:///opt/aidcp/cloud/deploy/multi-service/README.md
+After=network-online.target aidcp-cloud-content.service
+Wants=network-online.target aidcp-cloud-content.service
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/aidcp/cloud
+EnvironmentFile=/opt/aidcp/cloud/.env
+Environment=AIDCP_SERVICE=core
+Environment=AIDCP_PORT=8787
+# core 跑 segD → 构造数据网关；curated 读端口 remote 到 content 进程。
+Environment=AIDCP_GATEWAY_MODE=http
+Environment=AIDCP_GATEWAY_BASE_URL=http://127.0.0.1:8092
+# 注：AIDCP_PANEL_PORT / AIDCP_CLIENT_AUTH_PORT 沿用 .env 现值，不在此设定。
+ExecStart=/usr/bin/npx tsx src/server.ts
+Restart=always
+RestartSec=5
+# NOTE(confirm-with-current)：User 处理同 content 单元（推定 root，需与现役单元核对）。
+
+[Install]
+WantedBy=multi-user.target

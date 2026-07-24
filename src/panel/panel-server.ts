@@ -1132,7 +1132,7 @@ function createRequestHandler(
       return;
     }
     if (method === 'GET' && url === '/api/content/queue') {
-      const queue = deps.publishOrchestrator.getStatus();
+      const queue = await deps.publishStatus.getStatus();
       const [pending, recent] = await Promise.all([
         // 待审集合必须按状态独立查询，不能被最近 50 条全局历史挤出。
         deps.panelStore.publishedHistory(50, undefined, 'pending_approval'),

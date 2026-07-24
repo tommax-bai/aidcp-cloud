@@ -177,8 +177,8 @@ export interface PanelDeps {
   edgeServer: { edgeCount(): number; onlineEdgeCount(): number };
   /** 只读查询层（dashboard / accounts / content / analytics 聚合）。 */
   panelStore: PanelStoreReader;
-  /** 发布编排器 in-flight 队列状态（/api/content/queue）。 */
-  publishOrchestrator: { getStatus(): QueueStatusLike };
+  /** 发布队列状态读端口（/api/content/queue）；Block② 2e 起改经数据网关异步读端口注入。 */
+  publishStatus: { getStatus(): Promise<QueueStatusLike> };
   /** 发布下发段只读在途集合；未注入时面板保守地只显示待审，不猜测已批准。 */
   publishDispatcher?: { getInFlightRecordIds(): number[] };
   /** Unified public-write confirmation/task API. When absent, delegated endpoints fail closed with 503. */

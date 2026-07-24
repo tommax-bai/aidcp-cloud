@@ -56,7 +56,7 @@ test('captcha assist API accepts scoped Feishu token and panel JWT with incident
   const deps = {
     edgeServer: { edgeCount: () => 0, onlineEdgeCount: () => 0 },
     eventBus: { onAny: () => () => {} },
-    publishOrchestrator: { getStatus: () => ({ status: 'idle', snapshot: null }) },
+    publishStatus: { getStatus: () => Promise.resolve({ status: 'idle', snapshot: null }) },
     captchaAssist: {
       verifyToken: (token: string | undefined) =>
         token === 'good'
@@ -114,7 +114,7 @@ test('captcha assist click: 键入答案 HTTP 边界透传 + scoped-token 直接
   const deps = {
     edgeServer: { edgeCount: () => 0, onlineEdgeCount: () => 0 },
     eventBus: { onAny: () => () => {} },
-    publishOrchestrator: { getStatus: () => ({ status: 'idle', snapshot: null }) },
+    publishStatus: { getStatus: () => Promise.resolve({ status: 'idle', snapshot: null }) },
     captchaAssist: {
       verifyToken: (t: string | undefined) =>
         t === 'good' ? ({ ok: true, incidentId: 'cap-1', iat: 1, exp: 9999 } as const) : ({ ok: false, reason: 'bad_signature' } as const),
@@ -179,7 +179,7 @@ test('captcha assist click: 键入答案 HTTP 边界透传 + scoped-token 直接
 test('captcha assist API returns 503 when service is not injected', async () => {
   const deps = {
     eventBus: { onAny: () => () => {} },
-    publishOrchestrator: { getStatus: () => ({ status: 'idle', snapshot: null }) },
+    publishStatus: { getStatus: () => Promise.resolve({ status: 'idle', snapshot: null }) },
   } as unknown as PanelDeps;
   const h = await startPanelApi(deps, makeConfig());
   assert.equal(h.started, true);

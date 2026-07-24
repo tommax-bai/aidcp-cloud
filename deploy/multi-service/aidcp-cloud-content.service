@@ -1,0 +1,42 @@
+# aidcp-cloud content 服务（Block② 2e 一机多服务拆分）
+#
+# 段：segA(基础) + segB(content)。跳过 segC(automation) / segD(api serving)。
+# 承载：精选灵感库 / 发布后处理 / 人设 / 账号 + content 进程独占的**内部 HTTP 读 API**
+#       （curated-content 读端点，供 api / core 进程经数据网关 gateway=http 远程取数）。
+# 监听：127.0.0.1:${AIDCP_CONTENT_PORT}（默认 8092）。**不**监听 8787 / panel / client-auth。
+#
+# ── 与现状的关系 ─────────────────────────────────────────────────────────────
+#   additive / opt-in：本单元与现役单体 aidcp-cloud.service 互斥（同机不可同时开，
+#   否则争抢 PG / 端口）。切到多服务由 deploy/multi-service/deploy-multi.sh 编排。
+#
+# ── isales 红线 ─────────────────────────────────────────────────────────────
+#   同机另有独立 isales（80 / 8000 / 四服务）。本单元只碰 /opt/aidcp/cloud 与 8092，
+#   与 isales 零重叠。运维时绝不 touch 任何 isales 单元 / 目录 / 端口。
+
+[Unit]
+Description=aidcp-cloud content (multi-service split, AIDCP_SERVICE=content, read API :8092)
+Documentation=file:///opt/aidcp/cloud/deploy/multi-service/README.md
+After=network-online.target
+Wants=network-online.target
+# 崩溃回环护栏：5 分钟窗口内最多 10 次拉起，超出则停手（避免打爆 PG / 日志）。
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/aidcp/cloud
+# 共享同一份 .env（与单体逐字一致）；per-service Environment= 在其后叠加、就地覆盖同名键。
+EnvironmentFile=/opt/aidcp/cloud/.env
+Environment=AIDCP_SERVICE=content
+# content 内部读 API 端口。避开 isales 的 80 / 8000；与 8787 / panel / client-auth 均不冲突。
+Environment=AIDCP_CONTENT_PORT=8092
+# 启动命令与单体逐字相同（tsx 直跑 TS，不预编译）。
+ExecStart=/usr/bin/npx tsx src/server.ts
+Restart=always
+RestartSec=5
+# NOTE(confirm-with-current)：现役 aidcp-cloud.service 未在文档中声明 User，推定以 root 运行。
+#   本单元同样不显式设 User（继承 root），以与单体运行身份一致。若现役单元实际以专用用户运行，
+#   请对齐补 User= / Group=（需核对 ECS 上 /etc/systemd/system/aidcp-cloud.service）。
+
+[Install]
+WantedBy=multi-user.target

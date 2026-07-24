@@ -58,7 +58,7 @@ function makeDeps(over: Partial<Record<string, unknown>> = {}) {
       listAlerts: async () => [],
       listInteractions: async () => [],
     },
-    publishOrchestrator: { getStatus: () => ({ status: 'idle', snapshot: null }) },
+    publishStatus: { getStatus: () => Promise.resolve({ status: 'idle', snapshot: null }) },
     commandActions: {},
     riskRegistry: {
       getController: async (id: string) => {

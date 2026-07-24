@@ -1,0 +1,49 @@
+# aidcp-cloud api 服务（Block② 2e 一机多服务拆分）
+#
+# 段：segA(基础) + segD(api serving)。跳过 segB(content) / segC(automation)。
+# 承载：管理后台面板 API、客户鉴权、飞书接收、数据网关收口。
+# 监听：panel（${AIDCP_PANEL_PORT}，默认 127.0.0.1:8090）+ 客户鉴权（${AIDCP_CLIENT_AUTH_PORT}）。
+#       curated 读侧经数据网关走 HTTP，指向 content 进程 127.0.0.1:8092。
+#
+# ── 前置依赖（runtime split 工作线负责，非本部署件） ──────────────────────────
+#   AIDCP_SERVICE=api 是**目标态**取值。当前 src/gateway/service-mode.ts 只识别
+#   content / core / monolith —— 'api' 会回落 monolith（跑全四段、抢 8787）。且 segDApiServing
+#   现引用大量由 segCAutomation 构造的 ctx 字段（eventBus / publishDispatcher / riskRegistry /
+#   messenger 等）；segD **脱离 segC 单独 boot** 需 runtime split 工作线先解开该耦合。
+#   在两者就绪前，用 2-service 中间态：content + core（core = segC+segD 合跑，见 core 单元）。
+#   deploy-multi.sh 切 3-service 前会做能力探测，未满足即拒绝、保持单体不停机。
+#
+# ── 端口口径（沿用现值，不写死） ─────────────────────────────────────────────
+#   AIDCP_PANEL_PORT / AIDCP_CLIENT_AUTH_PORT **不在本单元设定**，一律沿用共享 .env 现值
+#   （"沿用现值" 要求）。二者由 EnvironmentFile 注入；本单元只叠加 service 选择与网关指向。
+#   TODO(confirm-with-.env)：部署前核对 ECS /opt/aidcp/cloud/.env 中这两键的现值，
+#   确认与 isales（80 / 8000）不冲突（panel 默认 127.0.0.1:8090，仅本机，天然隔离）。
+#
+# ── isales 红线 ─────────────────────────────────────────────────────────────
+#   本单元端口面为 8090 / client-auth（本机回环 / aidcp 现值），与 isales 零重叠。绝不 touch isales。
+
+[Unit]
+Description=aidcp-cloud api (multi-service split, AIDCP_SERVICE=api, panel + client-auth + feishu)
+Documentation=file:///opt/aidcp/cloud/deploy/multi-service/README.md
+# api 的数据网关远程读依赖 content 进程先起；content 是 api 的软前置。
+After=network-online.target aidcp-cloud-content.service
+Wants=network-online.target aidcp-cloud-content.service
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/aidcp/cloud
+EnvironmentFile=/opt/aidcp/cloud/.env
+Environment=AIDCP_SERVICE=api
+# 数据网关切 HTTP，curated 读端口 remote 到 content 进程（segD 内构造网关 remote thunk）。
+Environment=AIDCP_GATEWAY_MODE=http
+Environment=AIDCP_GATEWAY_BASE_URL=http://127.0.0.1:8092
+# 注：AIDCP_PANEL_PORT / AIDCP_CLIENT_AUTH_PORT 沿用 .env 现值，故不在此设定。
+ExecStart=/usr/bin/npx tsx src/server.ts
+Restart=always
+RestartSec=5
+# NOTE(confirm-with-current)：User 处理同 content 单元（推定 root，需与现役单元核对）。
+
+[Install]
+WantedBy=multi-user.target

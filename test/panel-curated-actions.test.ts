@@ -18,7 +18,7 @@ const silentLogger = { log() {}, warn() {}, error() {} };
 const baseDeps = {
   edgeServer: { edgeCount: () => 0, onlineEdgeCount: () => 0 },
   eventBus: { onAny: () => () => {} },
-  publishOrchestrator: { getStatus: () => ({ status: 'idle', snapshot: null }) },
+  publishStatus: { getStatus: () => Promise.resolve({ status: 'idle', snapshot: null }) },
 } as unknown as PanelDeps;
 
 function makeConfig(over: Partial<PanelConfig> = {}): PanelConfig {

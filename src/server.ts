@@ -200,6 +200,7 @@ import { PublishOrchestrator, FacebookPublishMediaStore } from './publish-agent/
 // 三分接缝（change decouple-publish-agent-buckets）：台账段 PublishScheduler / 下发段 PublishDispatcher
 // 由组合根从各自段文件直接 import，不再经生成段桶 re-export。
 import { PublishScheduler } from './publish-agent/publish-scheduler.js';
+import type { SchedulerOrchestrator } from './publish-agent/publish-scheduler.js';
 import { PublishDispatcher } from './publish-agent/publish-dispatcher.js';
 import { WanxiangClient } from './publish-agent/wanxiang-client.js';
 import { SeedreamClient } from './publish-agent/seedream-client.js';
@@ -321,6 +322,8 @@ import {
 } from './gateway/service-mode.js';
 import { InternalHttpClient, InternalHttpServer } from './transport/internal-http.js';
 import { CuratedContentHttpClient, registerCuratedContentRoutes } from './transport/curated-content-http.js';
+import { PublishStatusHttpClient, registerPublishStatusRoutes } from './transport/publish-status-http.js';
+import { PublishGenerationHttpClient, registerPublishGenerationRoutes } from './transport/publish-generation-http.js';
 import { PgAlertStore } from './alerts/index.js';
 // 跨进程配置镜像失效通道（change config-mirror-cross-process-invalidation）。
 import pg from 'pg';
@@ -730,6 +733,19 @@ async function startContentReadApi(ctx: CompositionContext): Promise<void> {
   const port = readEnvPort('AIDCP_CONTENT_PORT') ?? DEFAULT_CONTENT_READ_API_PORT;
   const httpServer = new InternalHttpServer();
   registerCuratedContentRoutes(httpServer, store);
+  // Block② 2e：把发布队列状态读 + 发布生成触发 additive 暴露到 content 侧内部读 API。
+  // 生成 / 状态两条路由都由 content 自己的 publishOrchestrator 承载；缺则 warn 不注册（绝不静默假成功）。
+  const contentPublishOrchestrator = ctx.publishOrchestrator;
+  if (contentPublishOrchestrator) {
+    registerPublishStatusRoutes(httpServer, {
+      getStatus: () => Promise.resolve(contentPublishOrchestrator.getStatus()),
+    });
+    registerPublishGenerationRoutes(httpServer, contentPublishOrchestrator);
+  } else {
+    console.warn(
+      '[aidcp-cloud] content 内部读 API：publish-status / publish-generation 路由未注册（PublishOrchestrator 不可用）',
+    );
+  }
   const actual = await httpServer.listen(port);
   console.log(`[aidcp-cloud] content 内部读 API 已监听 127.0.0.1:${actual}（curated-content 读端点）`);
 }
@@ -4692,6 +4708,14 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   // A 阶段4 发帖触发器：复用已持久化的 ConceptStore/LikedNoteStore/PublishLogStore/RiskController 单例。
   // 缺概念池/点赞库（PG 不可用）则不建——manual /publish 回"未就绪"，不静默假发布。
   if (conceptStore && likedNoteStore) {
+    // Block② 2e：内容生成触发端口。默认 local ⇒ publishGenerationPort === publishOrchestrator（同一实例，
+    // 逐字节等价、零 HTTP）；仅当 AIDCP_GENERATION_TRANSPORT=http 且有 base URL 时才切「同步 kick + 分段 long-poll」HTTP 客户端。
+    const generationTransport = readEnvString('AIDCP_GENERATION_TRANSPORT') === 'http' ? 'http' : 'local';
+    const generationBaseUrl = readEnvString('AIDCP_GATEWAY_BASE_URL');
+    const publishGenerationPort: SchedulerOrchestrator =
+      generationTransport === 'http' && generationBaseUrl
+        ? new PublishGenerationHttpClient(new InternalHttpClient(generationBaseUrl))
+        : publishOrchestrator;
     ctx.publishScheduler = new PublishScheduler({
       conceptStore,
       likedStore: likedNoteStore,
@@ -4704,7 +4728,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       personaBinding: (accountId) => personaStore.bindingFor(accountId),
       // 生成段账号归账（change parallel-rewrite-drafts）：账号随 TriggerInput.accountId 上黑板，
       // 每个角色的 LLM 调用显式取之记账——无进程级槽、无括起复位，并发生成各轮各归各账。
-      orchestrator: publishOrchestrator,
+      orchestrator: publishGenerationPort,
       // 精选灵感语料（change curated-inspiration-corpus）：发帖创作正向素材来源；缺失则回落旧点赞素材路径。
       curatedStore: curatedContentStore,
       selectTopK: resolveCuratedGateConfig().selectTopK,
@@ -5300,6 +5324,9 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
     curatedContentLocal: curatedContentStore,
     delegatedTaskLocal: delegatedTaskService,
     interactionReaderLocal: ctx.interactionStore,
+    // Block② 2e：发布队列状态读端口。默认 local ⇒ 直接把同步 getStatus 适配成异步端口，
+    // 底层仍是同一个 publishOrchestrator.getStatus()，逐字节等价、零 HTTP。
+    publishStatusLocal: { getStatus: () => Promise.resolve(publishOrchestrator.getStatus()) },
     mode: gatewayMode,
     // Block② 2d step2 拓扑：core 的 http 网关只把「content 域」读端口（精选库）remote 到 content 进程；
     // delegatedTask / interaction 属 automation 域、由 core 本地拥有（segA 已构造），一律保持 local，
@@ -5309,6 +5336,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
       ? {
           remote: {
             curatedContentReader: () => new CuratedContentHttpClient(new InternalHttpClient(gatewayBaseUrl)),
+            publishStatusReader: () => new PublishStatusHttpClient(new InternalHttpClient(gatewayBaseUrl)),
           },
         }
       : {}),
@@ -5341,7 +5369,9 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
             user: readEnvString('PGUSER'),
             password: readEnvString('PGPASSWORD'),
           }),
-          publishOrchestrator,
+          // Block② 2e：面板只经 getStatus 读发布队列状态 ⇒ 注入数据网关的读端口（默认 local ⇒
+          // publishStatusReader === 上面 publishStatusLocal 适配，底层同一个 publishOrchestrator.getStatus()）。
+          publishStatus: dataGateway.publishStatusReader!,
           publishDispatcher,
           // Block② 数据网关收口：默认 local ⇒ dataGateway.delegatedTaskService === delegatedTaskService，零行为变更。
           delegatedTasks: dataGateway.delegatedTaskService,
@@ -5789,10 +5819,12 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
             viewForAccount: async (accountId) => {
               if (!delegatedTaskService) return null;
               try {
-                const queue = publishOrchestrator.getStatus();
+                const queue = await (dataGateway.publishStatusReader
+                  ? dataGateway.publishStatusReader.getStatus()
+                  : publishOrchestrator.getStatus());
                 // 先按账号过滤 runs，并刻意丢弃全局 aggregate snapshot：终态 snapshot 没有稳定账号键，
                 // 不能让另一账号的最近一轮穿过客户边界；该账号 recent 只以 publish_log 为权威来源。
-                const accountRuns = queue.runs.filter((run) => run.accountId === accountId);
+                const accountRuns = (queue.runs ?? []).filter((run) => run.accountId === accountId);
                 const [pending, recent, tasks] = await Promise.all([
                   clientPublishQueueStore.publishedHistory(50, accountId, 'pending_approval'),
                   clientPublishQueueStore.publishedHistory(10, accountId),

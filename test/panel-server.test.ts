@@ -81,7 +81,7 @@ const deps = {
   edgeServer: { edgeCount: () => 3, onlineEdgeCount: () => 3 },
   eventBus: { onAny: () => () => {} }, // panel WS attach 需要；返回 unsub
   panelStore: mockPanelStore,
-  publishOrchestrator: { getStatus: () => ({ status: 'idle', snapshot: null }) },
+  publishStatus: { getStatus: () => Promise.resolve({ status: 'idle', snapshot: null }) },
   writeApprovalSignal: async (_requestId: string, _approved: boolean) => ({ written: true }),
   commandActions: {
     pause: async (id: string) => ({ accountId: id, status: 'paused' }),

@@ -20,6 +20,8 @@
 import type { CuratedContentReader } from '../kernel/curated-content-types.js';
 import type { DelegatedTaskServicePort } from '../kernel/delegated-task-types.js';
 import type { InteractionStoreReaderPort } from '../kernel/interaction-types.js';
+import type { PublishStatusReader } from '../kernel/publish-status-types.js';
+import type { PublishGenerationPort } from '../kernel/publish-generation-types.js';
 
 /** 读端口传输模式。与 transport 的 `ReadPortMode` 语义一致，此处独立声明以免 api→automation 依赖。 */
 export type GatewayMode = 'local' | 'http';
@@ -47,6 +49,8 @@ export interface DataGatewayRemote {
   curatedContentReader?: () => CuratedContentReader;
   delegatedTaskService?: () => DelegatedTaskServicePort;
   interactionReader?: () => InteractionStoreReaderPort;
+  publishStatusReader?: () => PublishStatusReader;
+  publishGenerationPort?: () => PublishGenerationPort;
 }
 
 export interface DataGatewayOptions {
@@ -56,6 +60,10 @@ export interface DataGatewayOptions {
   delegatedTaskLocal?: DelegatedTaskServicePort;
   /** automation 域：收件箱读侧窄面本地实例（InteractionStore 结构兼容）。 */
   interactionReaderLocal?: InteractionStoreReaderPort;
+  /** content 域：发布队列状态读侧窄面本地实例（PublishOrchestrator.getStatus 适配为异步端口）。 */
+  publishStatusLocal?: PublishStatusReader;
+  /** content 域：内容生成触发端口本地实例（PublishOrchestrator 本体，默认 local 即同步 await 同一管线）。 */
+  publishGenerationLocal?: PublishGenerationPort;
   /** 传输模式，缺省 'local'（零 HTTP、同注入实例）。 */
   mode?: GatewayMode;
   /** http 模式下各端口的客户端构造 thunk；local 模式忽略。 */
@@ -70,6 +78,8 @@ export class DataGateway {
   private readonly curated: CuratedContentReader | undefined;
   private readonly delegated: DelegatedTaskServicePort | undefined;
   private readonly interaction: InteractionStoreReaderPort | undefined;
+  private readonly publishStatus: PublishStatusReader | undefined;
+  private readonly publishGeneration: PublishGenerationPort | undefined;
   readonly mode: GatewayMode;
 
   constructor(opts: DataGatewayOptions) {
@@ -78,6 +88,8 @@ export class DataGateway {
     this.curated = selectPort(opts.curatedContentLocal, remote.curatedContentReader, this.mode);
     this.delegated = selectPort(opts.delegatedTaskLocal, remote.delegatedTaskService, this.mode);
     this.interaction = selectPort(opts.interactionReaderLocal, remote.interactionReader, this.mode);
+    this.publishStatus = selectPort(opts.publishStatusLocal, remote.publishStatusReader, this.mode);
+    this.publishGeneration = selectPort(opts.publishGenerationLocal, remote.publishGenerationPort, this.mode);
   }
 
   /** content 域读端口（精选灵感库·按账号）。 */
@@ -93,5 +105,15 @@ export class DataGateway {
   /** automation 域读端口（收件箱投影 / 请求账本）。 */
   get interactionReader(): InteractionStoreReaderPort | undefined {
     return this.interaction;
+  }
+
+  /** content 域读端口（发布队列状态·后台/客户端展示）。 */
+  get publishStatusReader(): PublishStatusReader | undefined {
+    return this.publishStatus;
+  }
+
+  /** content 域写触发端口（内容生成·调度器驱动）。默认 local 时为 undefined（调度器于 segC 就地注入，不经本网关）。 */
+  get publishGenerationReader(): PublishGenerationPort | undefined {
+    return this.publishGeneration;
   }
 }
