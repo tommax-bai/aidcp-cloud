@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import pg from 'pg';
-import { DEFAULT_PG_CONFIG } from '../src/cache/pg-anchor-cache.js';
+import { DEFAULT_PG_CONFIG } from '../src/kernel/pg-config.js';
 
 const { Client } = pg;
 
