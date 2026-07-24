@@ -152,6 +152,33 @@ test('consumer：非法 target 构造即抛（target 缺失/非法不启动）',
   );
 });
 
+test('consumer：batchSize 非正整数构造即抛（挡住 LIMIT 0 空转脚枪）', () => {
+  for (const bad of [0, -1, 1.5, Number.NaN]) {
+    assert.throws(
+      () => new OutboxConsumer({ consumer: 'c', executionTarget: 'dev', pool: new FakePool(), handlers: new Map(), batchSize: bad }),
+      /batchSize 必须为正整数/,
+      `batchSize=${bad} 应抛`,
+    );
+  }
+  // 合法值不抛
+  assert.doesNotThrow(
+    () => new OutboxConsumer({ consumer: 'c', executionTarget: 'dev', pool: new FakePool(), handlers: new Map(), batchSize: 1 }),
+  );
+});
+
+test('consumer：pollIntervalMs 负/非有限构造即抛', () => {
+  for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(
+      () => new OutboxConsumer({ consumer: 'c', executionTarget: 'dev', pool: new FakePool(), handlers: new Map(), pollIntervalMs: bad }),
+      /pollIntervalMs 必须为非负有限数/,
+      `pollIntervalMs=${bad} 应抛`,
+    );
+  }
+  assert.doesNotThrow(
+    () => new OutboxConsumer({ consumer: 'c', executionTarget: 'dev', pool: new FakePool(), handlers: new Map(), pollIntervalMs: 0 }),
+  );
+});
+
 // ── consumer 批读 → 分派 → 游标推进 ───────────────────────────────────────────
 
 function makeConsumer(pool: FakePool, handlers: Map<string, (e: OutboxEvent) => Promise<void>>, opts?: { batchSize?: number; consumer?: string }) {

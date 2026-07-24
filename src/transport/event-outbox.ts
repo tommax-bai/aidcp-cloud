@@ -16,6 +16,15 @@
  *   事件与业务写入同生共死（业务回滚 → 事件不存在，绝不出现「事件发了、业务没落」的裂缝）。
  * - **at-least-once**：消费方逐条 `await handler`，成功一条才把游标推到该条 id；handler 抛错即停在
  *   该条之前、游标不越过它，下一轮从游标之后重放。幂等由 handler 负责（同一事件可能被投递多次）。
+ * - **提交乱序安全水位**：`id`（BIGSERIAL）在 INSERT 时分配、**先于 COMMIT**，故 id 顺序 ≠ 提交可见顺序。
+ *   若只按 `id > 游标` 拉取，会出现「并发事务 A 拿到较小 id 但尚未提交、事务 B 拿到较大 id 已提交」→
+ *   消费方看不到 A 的行、却消费了 B 并把游标推过 B → A 随后提交时其较小 id 已 < 游标、**永远投不出去**
+ *   （静默吞事件、违背 at-least-once）。为此消费方只拉取**「插入事务已早于当前所有在途事务」**的行
+ *   （`xmin < txid_snapshot_xmin(txid_current_snapshot())`）：任何仍在途、可能提交出更小 id 的事务，
+ *   都会把与它并发的、id 更大的已提交行**压住不投**，直到它落定；游标因此绝不会越过一个「日后还会
+ *   冒出更小 id」的位置。未落定的行下一轮再拉，陈旧上限仍是 ≤ 轮询周期 + 一次事务停留。
+ *   （注：`xmin` 为 32 位、`txid_*` 为带 epoch 的 64 位；单一 epoch 内比较成立，事务号绕回后此闸退化为
+ *   旧的纯 `id` 水位——不会更糟、只是丢失该额外保护，属真机/绕回期验收范畴。）
  * - **游标崩溃不回退**：游标推进用 `GREATEST(existing, new)` 的幂等 upsert，进程崩溃/并发都不会让
  *   已消费的进度倒退。
  * - **execution_target 隔离**：emit 与 consume 都必须带合法 target；消费只读本 target 的行
@@ -182,6 +191,22 @@ export class OutboxConsumer {
     if (typeof options.consumer !== 'string' || options.consumer.length === 0) {
       throw new Error('OutboxConsumer: consumer 名不能为空');
     }
+    // batchSize 必须为正整数：0 / 负数会让 `LIMIT $3` 恒返 0 行、drainedFull 恒真 → drain 循环空转
+    // 死打数据库（每轮两次查询、无定时器让位）。构造期一次性拦住这个误配置脚枪。
+    if (options.batchSize !== undefined && (!Number.isInteger(options.batchSize) || options.batchSize <= 0)) {
+      throw new Error(
+        `OutboxConsumer: batchSize 必须为正整数，收到 ${JSON.stringify(options.batchSize)}`,
+      );
+    }
+    // pollIntervalMs 必须为非负有限数：负数 / NaN 会让兜底轮询定时器行为未定义。
+    if (
+      options.pollIntervalMs !== undefined &&
+      (!Number.isFinite(options.pollIntervalMs) || options.pollIntervalMs < 0)
+    ) {
+      throw new Error(
+        `OutboxConsumer: pollIntervalMs 必须为非负有限数，收到 ${JSON.stringify(options.pollIntervalMs)}`,
+      );
+    }
     this.consumer = options.consumer;
     this.executionTarget = options.executionTarget;
     this.pool = options.pool;
@@ -269,10 +294,15 @@ export class OutboxConsumer {
    */
   async runOnce(): Promise<number> {
     const lastId = await this.readCursor();
+    // 安全水位（见文件头「提交乱序安全水位」）：只拉「插入事务已早于当前所有在途事务」的行，
+    // 即 xmin < 当前快照 xmin。这样任何仍在途、可能日后提交出更小 id 的并发事务，都会把与它
+    // 并发的、id 更大的已提交行压住不投，游标绝不越过一个「日后还会冒出更小 id」的位置。
+    // 被压住的行不算追平：runOnce 返回实际投递条数，drain 循环据此停手、下一轮再拉。
     const { rows } = await this.pool.query<OutboxRow>(
       `SELECT id, topic, payload, execution_target, created_at
          FROM event_outbox
         WHERE execution_target = $1 AND id > $2
+          AND xmin::text::bigint < txid_snapshot_xmin(txid_current_snapshot())
         ORDER BY id ASC
         LIMIT $3`,
       [this.executionTarget, lastId, this.batchSize],

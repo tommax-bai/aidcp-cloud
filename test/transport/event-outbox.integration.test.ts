@@ -106,3 +106,58 @@ test(
     }
   },
 );
+
+test(
+  'PostgreSQL: 提交乱序不吞事件——在途小 id 未提交时，压住已提交的大 id，落定后有序补投（at-least-once）',
+  { skip: !connectionString },
+  async () => {
+    const pool = new pg.Pool({ connectionString });
+    // 独立连接，模拟两个并发业务事务
+    const connA = new pg.Client({ connectionString });
+    const connB = new pg.Client({ connectionString });
+    try {
+      await pool.query(SCHEMA_SQL);
+      await pool.query('TRUNCATE event_outbox, event_outbox_cursor RESTART IDENTITY');
+      await connA.connect();
+      await connB.connect();
+
+      // 事务 A 先 INSERT（先拿 xid + 较小 id），但**不提交**（保持在途）
+      await connA.query('BEGIN');
+      const { id: idA } = await emitOutboxEvent(connA, { topic: 'risk.signal', payload: { who: 'A' }, executionTarget: 'dev' }, silent);
+      // 事务 B 后 INSERT（后拿 xid + 较大 id），并**提交**
+      await connB.query('BEGIN');
+      const { id: idB } = await emitOutboxEvent(connB, { topic: 'risk.signal', payload: { who: 'B' }, executionTarget: 'dev' }, silent);
+      await connB.query('COMMIT');
+      assert.ok(idB > idA, `B 的 id(${idB}) 应大于 A 的 id(${idA})`);
+
+      const seen: string[] = [];
+      const consumer = new OutboxConsumer({
+        consumer: 'C',
+        executionTarget: 'dev',
+        pool,
+        handlers: new Map([['risk.signal', async (e: OutboxEvent) => { seen.push((e.payload as { who: string }).who); }]]),
+        logger: silent,
+      });
+
+      // 安全水位：A 仍在途 → 压住已提交但 id 更大的 B，一条都不投、游标不动。
+      // （若无此闸：会投 B、把游标推过 idB，A 提交后 idA<游标 → 永久吞掉。）
+      const first = await consumer.runOnce();
+      assert.equal(first, 0, 'A 在途时不投任何事件（含已提交的 B）');
+      const cur0 = await pool.query('SELECT last_id FROM event_outbox_cursor WHERE consumer=$1 AND execution_target=$2', ['C', 'dev']);
+      assert.equal(cur0.rows.length === 0 ? 0 : Number(cur0.rows[0].last_id), 0, '游标一步未进');
+
+      // A 落定后：两条都可见且已落定 → 有序补投 A、B，一条不丢
+      await connA.query('COMMIT');
+      const second = await consumer.runOnce();
+      assert.equal(second, 2, 'A 落定后补投 A、B 两条');
+      assert.deepEqual(seen, ['A', 'B'], '按 id 有序、A 先于 B');
+
+      const cur1 = await pool.query('SELECT last_id FROM event_outbox_cursor WHERE consumer=$1 AND execution_target=$2', ['C', 'dev']);
+      assert.equal(Number(cur1.rows[0].last_id), idB, '游标落到 idB');
+    } finally {
+      await connA.end().catch(() => {});
+      await connB.end().catch(() => {});
+      await pool.end();
+    }
+  },
+);
