@@ -60,10 +60,20 @@ export interface ConfigAuditItem {
 
 export class ReplyConfigStore {
   private readonly pool: pg.Pool;
+  /**
+   * 本实例是否**自己建的**连接池。组合根注入属主池（automationPool）时为 false ——
+   * 那个池被本域十几个 store 共用，`close()` MUST NOT 把它 end 掉。
+   *
+   * 这不是洁癖：互动域的构造被 try/catch 包着（schema/迁移未就位时整域降级不启用），
+   * 失败分支会调本 store 的 `close()`。若那时 end 了共享池，一次**局部**子系统失败会升级成
+   * 进程级瘫痪（其余 automation store 全部「Cannot use a pool after calling end」）。
+   */
+  private readonly ownsPool: boolean;
   private readonly idGen: (prefix: string) => string;
 
   constructor(options: { pool?: pg.Pool; idGen?: (prefix: string) => string } = {}) {
     this.pool = options.pool ?? new Pool(resolveEnvPgConfig());
+    this.ownsPool = options.pool === undefined;
     this.idGen = options.idGen ?? ((prefix) => `${prefix}_${randomUUID()}`);
   }
 
@@ -503,7 +513,10 @@ export class ReplyConfigStore {
     );
   }
 
-  async close(): Promise<void> { await this.pool.end(); }
+  /** 只 end **自己建的**池；注入的属主池由组合根掌控生命周期（见 ownsPool）。 */
+  async close(): Promise<void> {
+    if (this.ownsPool) await this.pool.end();
+  }
 }
 
 export { defaultProfile, TEMPLATE_VARIABLES };
