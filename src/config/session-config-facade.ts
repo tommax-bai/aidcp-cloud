@@ -26,7 +26,7 @@ import type {
   PanelSessionLimits,
   SessionLimitView,
   SessionLimitSetResult,
-} from '../panel/types.js';
+} from '../kernel/config-panel-ports.js';
 
 export interface SessionLimitFacadeDeps {
   store: SessionConfigStore;

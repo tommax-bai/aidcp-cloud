@@ -11,7 +11,7 @@
 
 import { WebSocketServer, WebSocket } from 'ws';
 import type http from 'node:http';
-import type { EventBus } from '../event-bus/index.js';
+import type { EventFanoutPort } from '../kernel/event-fanout-port.js';
 import {
   PANEL_FRAME_MAX_BYTES,
   panelPayloadByteLength,
@@ -22,7 +22,7 @@ import type { TokenRevocationStore } from './revocation.js';
 
 export interface PanelWsOptions {
   httpServer: http.Server;
-  eventBus: EventBus;
+  eventBus: EventFanoutPort;
   jwtSecret: string;
   /** 令牌撤销黑名单（#26）；首帧验签后额外查它，被撤销令牌拒连。 */
   revocation?: TokenRevocationStore;

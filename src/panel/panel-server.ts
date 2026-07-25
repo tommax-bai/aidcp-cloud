@@ -26,19 +26,18 @@ import type {
 } from './types.js';
 import { startPanelWs, type PanelWsHandle } from './panel-ws.js';
 import type { PublishApprovalPayload } from '../feishu/index.js';
-import type { CaptchaAssistDispatchResult } from '../comm/captcha-assist.js';
+import type { CaptchaAssistDispatchResult, CaptchaAssistTrajectory } from './captcha-assist-port.js';
 import type { EditDraftPatch } from '../publish-agent/publish-log-store.js';
 import {
-  FacebookPublishMediaError,
+  isFacebookPublishMediaError,
   type FacebookPublishImageInput,
   type FacebookPublishSetPatch,
-} from '../publish-agent/facebook-publish-media-store.js';
+} from '../kernel/facebook-publish-media-types.js';
 import {
   isContentScheduleActionMode,
   type AccountContentSchedulePatch,
 } from '../config/content-schedule-store.js';
-import type { RiskSignalKind, RiskQuotaLevel } from '../risk/index.js';
-import { RISK_ACTIONS } from '../risk/index.js';
+import { RISK_ACTIONS, type RiskSignalKind, type RiskQuotaLevel } from '../kernel/risk-contract.js';
 import { isKnownRole } from '../config/role-catalog.js';
 import { isAllowedPlatformCredential } from '../config/platform-credentials.js';
 import {
@@ -171,11 +170,15 @@ function facebookPublishMediaErrorStatus(reason: string): number {
 }
 
 function sendFacebookPublishMediaError(res: http.ServerResponse, err: unknown): void {
-  const reason = err instanceof FacebookPublishMediaError ? err.reason : 'unavailable';
+  // 结构化识别、MUST NOT 用 instanceof：素材池属主拆进程后这里拿到的是反序列化对象，
+  // instanceof 恒 false，会把 object_store_unavailable(503) / status_locked(409) 一律吞成 'unavailable'(400)。
+  const structured = isFacebookPublishMediaError(err) ? err : null;
+  const reason = structured ? structured.reason : 'unavailable';
+  const message = structured?.message ?? (err instanceof Error ? err.message : undefined);
   sendJson(res, facebookPublishMediaErrorStatus(reason), {
     error: reason,
     reason,
-    ...(err instanceof Error && err.message !== reason ? { message: err.message } : {}),
+    ...(message && message !== reason ? { message } : {}),
   });
 }
 
@@ -333,7 +336,7 @@ function createRequestHandler(
       // 深校验交 submitClick 的 sanitize，畸形则丢弃保留 points、绝不静默）。
       const rawTrajectory =
         trajectory && typeof trajectory === 'object' && !Array.isArray(trajectory)
-          ? (trajectory as import('../comm/protocol.js').CaptchaAssistTrajectoryPayload)
+          ? (trajectory as CaptchaAssistTrajectory)
           : undefined;
       const normalizedPoints = points.map((point) => point as { x?: unknown; y?: unknown; label?: unknown });
       if (
@@ -2100,7 +2103,7 @@ function createRequestHandler(
         patch[k] = v;
       }
       const result = await deps.pacingConfig.setPacing(
-        { operation: operation as never, minMs: patch.minMs as never, maxMs: patch.maxMs as never },
+        { operation, minMs: patch.minMs, maxMs: patch.maxMs },
         verified.payload.sub,
       );
       if (!result.ok) {

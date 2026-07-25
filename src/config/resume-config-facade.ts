@@ -32,7 +32,7 @@ import type {
   ResumeConfigPatchInput,
   ResumeConfigView,
   ResumeConfigSetResult,
-} from '../panel/types.js';
+} from '../kernel/config-panel-ports.js';
 
 export interface ResumeConfigFacadeDeps {
   store: ResumeConfigStore;

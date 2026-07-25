@@ -1,41 +1,23 @@
 import crypto from 'node:crypto';
 import type { LlmBillingPriceSnapshotInput, LlmBillingPriceTarget } from './token-usage-store.js';
+import type {
+  BillingPriceRefreshResult,
+  BillingPriceRefreshSkip,
+  BillingPriceRefreshSkipReason,
+  BillingPriceRefreshWritten,
+} from '../kernel/billing-price-refresh-types.js';
 
 type FetchLike = typeof fetch;
 
-export type BillingPriceRefreshSkipReason =
-  | 'missing_credentials'
-  | 'unsupported_provider'
-  | 'no_local_usage'
-  | 'no_billing_sample'
-  | 'billing_api_error';
-
-export interface BillingPriceRefreshSkip {
-  provider: string;
-  model: string;
-  usageDay: string;
-  reason: BillingPriceRefreshSkipReason;
-}
-
-export interface BillingPriceRefreshWritten {
-  provider: string;
-  model: string;
-  usageDay: string;
-  currency: string;
-  pricingBasis: 'input_output_tokens' | 'total_tokens';
-  source: string;
-  sourcePeriod: string | null;
-}
-
-export interface BillingPriceRefreshResult {
-  ok: true;
-  checkedDays: string[];
-  targetCount: number;
-  written: number;
-  prices: BillingPriceRefreshWritten[];
-  skipped: BillingPriceRefreshSkip[];
-  missingCredentials: string[];
-}
+// 回执纯类型已抬入 kernel（src/kernel/billing-price-refresh-types.ts）：面板（api）只展示回执，
+// 不该认识厂商账单读取与价快照落库。这里 import 回来 + 等值再导出，属主侧既有消费方一个字节不改。
+// **止步于回执四型**：下面的 BillingPriceRefreshTokenUsage 传递依赖 content 写侧形状，抬进 kernel 会造反向边。
+export type {
+  BillingPriceRefreshSkipReason,
+  BillingPriceRefreshSkip,
+  BillingPriceRefreshWritten,
+  BillingPriceRefreshResult,
+};
 
 export interface BillingPriceRefreshTokenUsage {
   billingPriceTargets(days: string[]): Promise<LlmBillingPriceTarget[]>;

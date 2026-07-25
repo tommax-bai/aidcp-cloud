@@ -14,6 +14,7 @@
 import pg from 'pg';
 import { resolveEnvPgConfig } from '../kernel/pg-config.js';
 import { ensureCapabilitySchema } from '../schema/schema-capability.js';
+import type { GroupRoute, SetGroupRouteResult } from '../kernel/group-route-types.js';
 
 const { Pool } = pg;
 
@@ -26,18 +27,9 @@ CREATE TABLE IF NOT EXISTS group_route (
 );
 `;
 
-/** 一条团队路由（读时产物）。updatedAt 为 epoch ms。 */
-export interface GroupRoute {
-  groupLabel: string;
-  chatId: string;
-  updatedBy: string | null;
-  updatedAt: number;
-}
-
-/** 写路由结果：诚实可区分——写入 / 清除（route=null）/ 无效键拒绝。 */
-export type SetGroupRouteResult =
-  | { ok: true; route: GroupRoute | null }
-  | { ok: false; reason: 'invalid_key' };
+// 纯载荷类型已抬入 kernel（src/kernel/group-route-types.ts）：面板（api）只要形状、不该认识本存储。
+// 这里 import 回来 + 等值再导出，属主侧既有消费方（含 cache/index.ts 的 export *）一个字节不改。
+export type { GroupRoute, SetGroupRouteResult };
 
 export interface GroupRouteStoreOptions {
   pool?: pg.Pool;

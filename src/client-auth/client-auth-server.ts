@@ -31,9 +31,8 @@ import type {
   PublishApprovalActionResultPayload,
   PublishDraftImageRemovePayload,
   PublishDraftImageRemoveResultPayload,
-  UiDailyUsagePayload,
-  UiSlowStartPayload,
-} from '../comm/protocol.js';
+} from '../api-contracts/publish-approval-wire.js';
+import type { UiDailyUsagePayload, UiSlowStartPayload } from '../api-contracts/ui-usage-wire.js';
 import type { EditDraftResult, PendingPublishPreview, PublishLogStore } from '../publish-agent/publish-log-store.js';
 import type {
   DraftRefinementJob,
@@ -45,7 +44,7 @@ import type { PersonaAutoFillService } from '../agents/persona-auto-fill.js';
 import type { AccountPersonaService } from '../config/account-persona-service.js';
 import { isWritingLanguage } from '../kernel/writing-language.js';
 import { loadSoulFromYaml } from '../soul/index.js';
-import type { RiskStatus } from '../risk/types.js';
+import type { RiskStatus } from '../kernel/risk-contract.js';
 import type { SetOperatorAliasResult } from '../account-store.js';
 import {
   hashOffboardCleanupGrantJti,

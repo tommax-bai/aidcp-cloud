@@ -1,7 +1,7 @@
 import type {
   PublishApprovalActionPayload,
   PublishApprovalActionResultPayload,
-} from '../comm/protocol.js';
+} from '../api-contracts/publish-approval-wire.js';
 import type { DispatchDraft, EditDraftPatch, EditDraftResult } from './publish-log-store.js';
 import { normalizePlatformId } from '../platform/index.js';
 import { validatePublishSchedule } from './schedule-policy.js';

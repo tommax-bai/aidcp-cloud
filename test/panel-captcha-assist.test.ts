@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { startPanelApi } from '../src/panel/panel-server.js';
 import { parsePanelUsers } from '../src/panel/auth.js';
 import type { PanelConfig, PanelDeps } from '../src/panel/types.js';
-import type { CaptchaAssistIncidentView } from '../src/comm/captcha-assist.js';
+import type { CaptchaAssistIncidentView } from '../src/panel/captcha-assist-port.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 

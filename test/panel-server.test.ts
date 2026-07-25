@@ -8,6 +8,7 @@ import type { PanelAccount, PanelStoreReader } from '../src/panel/panel-store.js
 import { RiskController } from '../src/risk/index.js';
 import { TokenRevocationStore } from '../src/panel/revocation.js';
 import { FacebookPublishMediaError } from '../src/publish-agent/facebook-publish-media-store.js';
+import { isFacebookPublishMediaError } from '../src/kernel/facebook-publish-media-types.js';
 import { MemoryDelegatedTaskStore } from '../src/delegated-task/store.js';
 import { DelegatedTaskService } from '../src/delegated-task/service.js';
 
@@ -1200,6 +1201,34 @@ test('HTTP Facebook 发帖素材池：素材依赖拒绝时响应带 reason', as
 type SummaryByAccount = {
   totalsByAccount: { accountId: string; totals: Record<string, number>; quotas?: Record<string, number>; saturated?: string[] }[];
 };
+
+test('HTTP Facebook 发帖素材池：错误跨进程序列化后仍保真 reason，MUST NOT 退化成 unavailable', async () => {
+  // 拆进程后面板层拿到的不再是 FacebookPublishMediaError 实例，而是反序列化后的普通对象。
+  // 识别 MUST 走结构化守卫（name + reason 两字段）；靠 instanceof 会把 503 静默吞成 400 + 'unavailable'。
+  const wireError = JSON.parse(JSON.stringify(new FacebookPublishMediaError('object_store_unavailable'))) as unknown;
+  assert.equal(wireError instanceof FacebookPublishMediaError, false, '前提：跨进程对象不再是本进程的类实例');
+  assert.equal(isFacebookPublishMediaError(wireError), true, '结构化守卫 MUST 认得跨进程形态');
+
+  const facebookPublishMedia = {
+    list: async () => {
+      throw wireError;
+    },
+    upload: async () => ({ results: [], view: { accountId: 'fb-1', sets: [], statusCounts: {} } }),
+    reorder: async () => ({ accountId: 'fb-1', sets: [], statusCounts: {} }),
+    updateSet: async () => null,
+    deleteSet: async () => null,
+  };
+  const h = await startPanelApi({ ...(deps as object), facebookPublishMedia } as unknown as PanelDeps, makeConfig());
+  try {
+    const base = `http://127.0.0.1:${h.port}`;
+    const auth = { authorization: `Bearer ${await loginToken(base)}` };
+    const r = await fetch(`${base}/api/accounts/default/facebook-publish-media`, { headers: auth });
+    assert.equal(r.status, 503, '真实原因是对象存储不可用 → 503，MUST NOT 退化成 400');
+    assert.deepEqual(await r.json(), { error: 'object_store_unavailable', reason: 'object_store_unavailable' });
+  } finally {
+    await h.close();
+  }
+});
 
 test('summary 按账号带 day 上限 + 饱和标记（change decouple-quota-hit-from-risk）', async () => {
   const h = await startPanelApi(deps, makeConfig());

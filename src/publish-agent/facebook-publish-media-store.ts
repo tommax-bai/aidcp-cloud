@@ -5,33 +5,41 @@ import { RETIRED_ACCOUNT_ID } from '../kernel/account-identity.js';
 import type { AccountPlatformReader } from '../kernel/platform-types.js';
 import type { ObjectStore } from '../storage/object-store.js';
 import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
+import {
+  FACEBOOK_PUBLISH_MEDIA_ERROR_NAME,
+  FACEBOOK_PUBLISH_MEDIA_STATUSES,
+} from '../kernel/facebook-publish-media-types.js';
+import type {
+  FacebookPublishImageInput,
+  FacebookPublishImageSetView,
+  FacebookPublishImageView,
+  FacebookPublishMediaErrorReason,
+  FacebookPublishMediaListView,
+  FacebookPublishMediaStatus,
+  FacebookPublishSetPatch,
+  FacebookPublishUploadResult,
+} from '../kernel/facebook-publish-media-types.js';
 
 const { Pool } = pg;
 
-export const FACEBOOK_PUBLISH_MEDIA_STATUSES = [
-  'available',
-  'reserved',
-  'used',
-  'disabled',
-  'deleted',
-  'quarantine',
-] as const;
-
-export type FacebookPublishMediaStatus = (typeof FACEBOOK_PUBLISH_MEDIA_STATUSES)[number];
-export type FacebookPublishMediaErrorReason =
-  | 'retired_account'
-  | 'account_not_found'
-  | 'non_facebook_account'
-  | 'object_store_unavailable'
-  | 'invalid_file'
-  | 'body_too_large'
-  | 'not_found'
-  | 'status_locked'
-  | 'invalid_value';
+export { FACEBOOK_PUBLISH_MEDIA_STATUSES };
+export type {
+  FacebookPublishImageInput,
+  FacebookPublishImageSetView,
+  FacebookPublishImageView,
+  FacebookPublishMediaErrorReason,
+  FacebookPublishMediaListView,
+  FacebookPublishMediaStatus,
+  FacebookPublishSetPatch,
+  FacebookPublishUploadResult,
+};
 
 export class FacebookPublishMediaError extends Error {
   constructor(readonly reason: FacebookPublishMediaErrorReason, message?: string) {
     super(message ?? reason);
+    // 跨进程识别键：MUST 是实例自有的可枚举属性。不赋值时 Error 子类的 name 继承为 'Error'，
+    // JSON 序列化后面板层无从分辨，reason 会被兜底文案吞掉（见 kernel/facebook-publish-media-types.ts）。
+    this.name = FACEBOOK_PUBLISH_MEDIA_ERROR_NAME;
   }
 }
 
@@ -54,55 +62,6 @@ export interface FacebookPublishMediaStoreOptions {
   clock?: () => number;
   idGen?: () => string;
 }
-
-export interface FacebookPublishImageInput {
-  filename: string;
-  contentType?: string | null;
-  bytes: Buffer;
-  captionHint?: string | null;
-}
-
-export interface FacebookPublishImageView {
-  id: number;
-  setId: number;
-  url: string;
-  objectKey: string;
-  filename: string;
-  contentType: string;
-  byteSize: number;
-  sha256: string;
-  sortOrder: number;
-  duplicateOfImageId: number | null;
-  createdAt: string;
-}
-
-export interface FacebookPublishImageSetView {
-  id: number;
-  accountId: string;
-  status: FacebookPublishMediaStatus;
-  captionHint: string | null;
-  sortOrder: number;
-  reservedBy: string | null;
-  reservedAt: string | null;
-  usedByPublishLogId: number | null;
-  lastError: string | null;
-  createdAt: string;
-  updatedAt: string;
-  images: FacebookPublishImageView[];
-}
-
-export interface FacebookPublishMediaListView {
-  accountId: string;
-  sets: FacebookPublishImageSetView[];
-  statusCounts: Record<FacebookPublishMediaStatus, number>;
-}
-
-export type FacebookPublishUploadResult =
-  | { ok: true; filename: string; set: FacebookPublishImageSetView; duplicate: boolean }
-  | { ok: false; filename: string; reason: FacebookPublishMediaErrorReason; message?: string };
-
-export type FacebookPublishSetPatch =
-  | { captionHint?: string | null; status?: Exclude<FacebookPublishMediaStatus, 'reserved' | 'used' | 'quarantine'> };
 
 export const FACEBOOK_PUBLISH_MEDIA_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS account_facebook_publish_image_set (

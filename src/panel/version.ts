@@ -8,7 +8,7 @@
  * （不再「副本对副本」恒绿）。
  */
 
-import { RISK_ACTIONS, RISK_STATUSES, RISK_QUOTA_LEVELS } from '../risk/index.js';
+import { RISK_ACTIONS, RISK_STATUSES, RISK_QUOTA_LEVELS } from '../kernel/risk-contract.js';
 import { ALERT_SEVERITIES } from '../feishu/index.js';
 import { TEXT_PROVIDER_META } from '../kernel/text-provider-registry.js';
 import { IMAGE_PROVIDERS } from '../kernel/image-provider-registry.js';

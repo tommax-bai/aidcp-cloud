@@ -9,16 +9,12 @@
  * 与改造前逐位一致（**不是** v1 session-budget.ts 的 15/30/60 档位梯度——那是 v1 兼容路径、非现役闭环）。
  */
 
-/** 单场互动预算形态（对齐现役 RoleDispatcher.freshBudget；注意含 searches/join_groups、不含 view/publish）。 */
-export interface SessionInteractionBudget {
-  likes: number;
-  collects: number;
-  follows: number;
-  searches: number;
-  comments: number;
-  comment_likes: number;
-  join_groups: number;
-}
+// 单场互动预算形态（对齐现役 RoleDispatcher.freshBudget；注意含 searches/join_groups、不含 view/publish）。
+// **定义已上移共享层**（src/kernel/config-panel-ports.ts）：面板视图与本层预算记账共用同一份，
+// 这里只做等值再导出，既有 `from '../risk/session-limits.js'` 的消费方一律不用改。
+import type { SessionInteractionBudget } from '../kernel/config-panel-ports.js';
+
+export type { SessionInteractionBudget };
 
 /** 单场互动预算的字段键（校验 / 遍历用，穷举与 SessionInteractionBudget 一致）。 */
 export const SESSION_BUDGET_KEYS = [

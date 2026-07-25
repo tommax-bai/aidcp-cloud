@@ -25,14 +25,14 @@ import {
   RISK_QUOTA_LEVELS,
   type RiskAction,
   type RiskQuotaLevel,
-} from '../risk/types.js';
+} from '../kernel/risk-contract.js';
 import type { QuotaConfigStore } from './quota-config-store.js';
 import type {
   PanelQuotaConfig,
   QuotaConfigCatalogView,
   QuotaConfigRowView,
   QuotaConfigSetResult,
-} from '../panel/types.js';
+} from '../kernel/config-panel-ports.js';
 
 export interface QuotaConfigFacadeDeps {
   store: QuotaConfigStore;

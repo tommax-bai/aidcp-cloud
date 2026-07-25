@@ -6,14 +6,14 @@
  * task 1（骨架）仅用到 edgeServer；其余依赖留待 task 5 只读接口与 task 4 写接口。
  */
 
-import type { RiskController, RiskQuotaLevel, RiskAction, SessionInteractionBudget } from '../risk/index.js';
+import type { RiskController } from '../risk/index.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-// GroupRoute 系 automation 归属，仍取自 automation 桶（api→automation，既存豁免）；
-// BotChatStore 系 api 同层直连（无需豁免）；ConceptStore / 精选类型系 content，直连具体文件按真实
-// 方向（api→content）计入豁免——不再经 automation 桶 cache/index 间接跨层拿别层 store。
-import type { GroupRoute, SetGroupRouteResult } from '../cache/index.js';
+// GroupRoute / SetGroupRouteResult 已抬入 kernel（纯载荷，any→kernel 恒允许），不再经 automation 桶 cache/index；
+// BotChatStore 系 api 同层直连（无需豁免）；精选类型已提进 kernel（无需豁免）。
+// 概念池 store 曾以 `conceptStore?` 字段挂在 PanelDeps 上却零读取点，字段与 import 已随
+// P2-8 一并删除——面板不再对 content 的 concept-store 有任何依赖，别再把它加回来。
+import type { GroupRoute, SetGroupRouteResult } from '../kernel/group-route-types.js';
 import type { BotChatStore } from '../cache/bot-chat-store.js';
-import type { ConceptStore } from '../cache/concept-store.js';
 import type {
   CuratedContentTypeFilter,
   CuratedPanelListResult,
@@ -33,7 +33,7 @@ import type {
   FacebookPublishMediaListView,
   FacebookPublishSetPatch,
   FacebookPublishUploadResult,
-} from '../publish-agent/facebook-publish-media-store.js';
+} from '../kernel/facebook-publish-media-types.js';
 import type {
   FacebookGroupAccountProgress,
   FacebookGroupImportResult,
@@ -56,13 +56,28 @@ import type {
   FacebookGroupJoinAutomationConfigPatch,
   SetFacebookGroupJoinAutomationConfigResult,
 } from '../config/facebook-group-join-automation-store.js';
-import type { EventBus } from '../event-bus/index.js';
-import type { PacingOp, CaptchaAssistTrajectoryPayload } from '../comm/protocol.js';
+import type { EventFanoutPort } from '../kernel/event-fanout-port.js';
 import type {
-  CaptchaAssistDispatchResult,
-  CaptchaAssistIncidentView,
-  CaptchaAssistTokenVerifyResult,
-} from '../comm/captcha-assist.js';
+  PacingConfigCatalogView,
+  PacingConfigPatchInput,
+  PacingConfigRowView,
+  PacingConfigSetResult,
+  PanelPacingConfig,
+  PanelQuotaConfig,
+  PanelResumeConfig,
+  PanelSessionLimits,
+  QuotaConfigCatalogView,
+  QuotaConfigPatchInput,
+  QuotaConfigRowView,
+  QuotaConfigSetResult,
+  ResumeConfigPatchInput,
+  ResumeConfigSetResult,
+  ResumeConfigView,
+  SessionLimitPatchInput,
+  SessionLimitSetResult,
+  SessionLimitView,
+} from '../kernel/config-panel-ports.js';
+import type { PanelCaptchaAssist } from './captcha-assist-port.js';
 import type { TokenRevocationStore } from './revocation.js';
 import type { PanelUser } from './auth.js';
 import type { ClientUserStore } from '../client-auth/client-user-store.js';
@@ -75,11 +90,11 @@ import type {
   PanelAlert,
 } from './panel-store.js';
 import type { PublishApprovalPayload, ApprovalWriteResult, PublishApprovalPreflightResult } from '../feishu/index.js';
-import type { LlmUsageQuery, LlmUsagePayload } from '../metrics/token-usage-store.js';
-import type { BillingPriceRefreshResult } from '../metrics/billing-price-refresh.js';
+import type { LlmUsageQuery, LlmUsagePayload } from '../kernel/llm-usage-types.js';
+import type { BillingPriceRefreshResult } from '../kernel/billing-price-refresh-types.js';
 import type { NotificationContact, NotificationContactManual } from '../cache/notification-contact-store.js';
 import type { ThinkingMode, ThinkingModeApi } from '../config/role-catalog.js';
-import type { AlertStore } from '../alerts/index.js';
+import type { AlertResolutionPort } from '../kernel/alert-resolution-port.js';
 import type { DelegatedTaskServicePort } from '../kernel/delegated-task-types.js';
 import type { InteractionPermissionOverview } from '../interactions/interaction-panel-permissions.js';
 import type {
@@ -130,33 +145,12 @@ export interface PanelContentSchedule {
   >;
 }
 
-export interface PanelCaptchaAssist {
-  verifyToken(token: string | undefined): CaptchaAssistTokenVerifyResult;
-  getIncident(incidentId: string): CaptchaAssistIncidentView | null;
-  /** 运营轮询即在场信号（change captcha-assist-live-snapshot）：窗口到期则重新武装 edge 实时循环。 */
-  noteViewerPresence(incidentId: string): void;
-  requestCapture(
-    incidentId: string,
-    actor: string,
-    reason?: 'initial' | 'refresh' | 'retry',
-  ): Promise<CaptchaAssistDispatchResult>;
-  submitClick(input: {
-    incidentId: string;
-    snapshotId: string;
-    points: { x: number; y: number; label?: string }[];
-    actor: string;
-    settleMs?: number;
-    /** 运营真实鼠标轨迹（change captcha-assist-trajectory-replay）；服务端 sanitize 不过则丢弃、保留 points。 */
-    trajectory?: CaptchaAssistTrajectoryPayload;
-    /**
-     * 验证码答案明文（change captcha-assist-text-answer）。SENSITIVE：只透传给服务端装进 envelope，
-     * MUST NOT 落日志/库/incident/URL（design D10）。键入与点击共用同一 scoped-token 授权面，无新增身份闸。
-     */
-    text?: string;
-    /** 键入后的提交手势（change captcha-assist-text-answer）：只 'enter'。 */
-    submit?: 'enter';
-  }): Promise<CaptchaAssistDispatchResult>;
-}
+/**
+ * 验证码人工协助窄端口（§4.6.4）：形状与内嵌协议载荷已本地重抄在 `./captcha-assist-port.ts`，
+ * 面板 MUST NOT 直读 automation 的 `src/comm/captcha-assist.ts` / `src/comm/protocol.ts`。
+ * 这里保留同名再导出，只为不打断既有 `from './types.js'` 的引用面。
+ */
+export type { PanelCaptchaAssist } from './captcha-assist-port.js';
 
 export interface PanelDeps {
   /** 视频号互动配置 internal API；仍复用 panel JWT，但在域内按显式 grants 再次 fail-closed。 */
@@ -170,9 +164,8 @@ export interface PanelDeps {
   /** 令牌撤销黑名单（change console-cloud-panel-hardening #26）；未注入则登出/撤销不生效（向后兼容）。 */
   revocation?: TokenRevocationStore;
   publishLogStore: PublishLogStore;
-  conceptStore?: ConceptStore;
   botChatStore: BotChatStore;
-  eventBus: EventBus;
+  eventBus: EventFanoutPort;
   /** 在线边缘登记（结构类型，便于测试造桩）。onlineEdgeCount 为 staleness 校验后的真实在线数（D9）。 */
   edgeServer: { edgeCount(): number; onlineEdgeCount(): number };
   /** 只读查询层（dashboard / accounts / content / analytics 聚合）。 */
@@ -452,7 +445,7 @@ export interface PanelDeps {
    * 红线：只 UPDATE alerts.resolved_at 闭合日志行——绝不碰风控状态单写（applySignal/setQuotaLevel/risk_state）、
    * 绝不解除边缘暂停（resumeEdge，那是验证码清除点的事）；诚实回真实解决行数（0=没这条/已解决，1=已解决）。
    */
-  alertStore?: Pick<AlertStore, 'resolveById'>;
+  alertStore?: AlertResolutionPort;
   /**
    * 对外客户管理（change edge-client-customer-auth）。未注入则 `/api/client-users*` 返回 503。
    * 内部 JWT 保护:客户 CRUD / 生成·轮换 key（一次性回明文）/ 环境归属整批替换。
@@ -855,38 +848,29 @@ export interface PanelPersonaConfig {
   ): Promise<PersonaCreateIfMissingResult>;
 }
 
-// ── 安全限额配置（change safety-quota-config，stream D）──────────────────────────
-// reserved-order append 链：C（categories）→ D（本块 quotas）→ F（persona）→ B（nickname）。
-
-/** 单 (tier,action) 三窗口生效数字 + 来源/审计（GET /api/quotas 形状）。库缺行处以派生写死默认合成。 */
-export interface QuotaConfigRowView {
-  tier: RiskQuotaLevel;
-  action: RiskAction;
-  daily: number;
-  perMinute: number;
-  perHour: number;
-  /** 是否存在库内覆盖（false=显示的是派生写死默认，即当前真生效）。 */
-  overridden: boolean;
-  updatedAt: string | null;
-  updatedBy: string | null;
-}
-
-export interface QuotaConfigCatalogView {
-  quotas: QuotaConfigRowView[];
-}
-
-/** PUT /api/quotas 入参补丁。未传的窗口保持原值（或回落派生默认）。 */
-export interface QuotaConfigPatchInput {
-  tier: RiskQuotaLevel;
-  action: RiskAction;
-  daily?: number;
-  perMinute?: number;
-  perHour?: number;
-}
-
-export type QuotaConfigSetResult =
-  | { ok: true; view: QuotaConfigCatalogView }
-  | { ok: false; reason: 'unknown_tier' | 'unknown_action' | 'invalid_value' | 'no_valid_fields' };
+// ── 后台配置写通道的四个窄写接口 + 其纯载荷类型 ───────────────────────────────
+// 定义已上移到共享层 `src/kernel/config-panel-ports.ts`（取数侧持有、自动化侧实现，两边都要引）。
+// 这里原位等值再导出，取数侧既有 import 路径一律不变。
+export type {
+  PacingConfigCatalogView,
+  PacingConfigPatchInput,
+  PacingConfigRowView,
+  PacingConfigSetResult,
+  PanelPacingConfig,
+  PanelQuotaConfig,
+  PanelResumeConfig,
+  PanelSessionLimits,
+  QuotaConfigCatalogView,
+  QuotaConfigPatchInput,
+  QuotaConfigRowView,
+  QuotaConfigSetResult,
+  ResumeConfigPatchInput,
+  ResumeConfigSetResult,
+  ResumeConfigView,
+  SessionLimitPatchInput,
+  SessionLimitSetResult,
+  SessionLimitView,
+};
 
 /** 单个配置镜像的健康行（change config-mirror-cross-process-invalidation task 6.4）。 */
 export interface PanelConfigMirrorHealthEntry {
@@ -919,113 +903,6 @@ export interface PanelConfigMirrorHealth {
   entries: PanelConfigMirrorHealthEntry[];
 }
 
-// 写入通道归属（change config-table-write-collection；定稿方案 §5.1 / §4.6.8）：`PanelQuotaConfig`
-// 是 api 侧持有的窄内部写接口契约，automation 侧实现（src/config/quota-config-facade.ts）并独占 store。
-// 后台编辑 MUST 走 console → api → automation；**aidcp-api MUST NOT 直写 quota_config**。
-// 拆进程时把此接口的实现换成内部 HTTP 客户端、调用点不改、行为零变更。
-export interface PanelQuotaConfig {
-  /** 三档 × 全动作 × 三窗口生效值 + 审计（库缺行以写死默认合成回显）。 */
-  getCatalog(): QuotaConfigCatalogView;
-  /** 写某 (tier,action) 限额。校验不过整块拒（绝不部分落库 / 假成功）。写后回真态目录。 */
-  setQuota(patch: QuotaConfigPatchInput, updatedBy: string): Promise<QuotaConfigSetResult>;
-}
-
-// ── 操作兜底 floor 配置（change pacing-floor-config-min-interval）─────────────────
-// 各类浏览节奏兜底区间 {minMs,maxMs}，全局一套。
-// 生效值 = 读出口 clamp 后（含非零防呆下限护栏、类别上限封顶）；overridden=false 显示的是内置默认（当前真生效）。
-
-/** 单 op 生效兜底区间（已含读出口夹逼护栏）+ 来源/审计（GET /api/pacing 形状）。 */
-export interface PacingConfigRowView {
-  operation: PacingOp;
-  minMs: number;
-  maxMs: number;
-  /** 是否存在库内覆盖（false=显示的是内置默认，即当前真生效）。 */
-  overridden: boolean;
-  updatedAt: string | null;
-  updatedBy: string | null;
-}
-
-export interface PacingConfigCatalogView {
-  pacing: PacingConfigRowView[];
-}
-
-/** PUT /api/pacing 入参：两值须成对给（校验在 facade：非负整数、min≤max、max≥min×1.5、≤类别上限）。 */
-export interface PacingConfigPatchInput {
-  operation: PacingOp;
-  minMs: number;
-  maxMs: number;
-}
-
-export type PacingConfigSetResult =
-  | { ok: true; view: PacingConfigCatalogView }
-  | { ok: false; reason: 'unknown_operation' | 'invalid_value' | 'no_valid_fields' };
-
-// 写入通道归属（change config-table-write-collection；定稿方案 §5.1 / §4.6.8）：`PanelPacingConfig`
-// 是 api 侧持有的窄内部写接口契约，automation 侧实现（src/config/pacing-config-facade.ts）并独占 store。
-// 后台编辑 MUST 走 console → api → automation；**aidcp-api MUST NOT 直写 pacing_floor_config**。
-// 拆进程时把此接口的实现换成内部 HTTP 客户端、调用点不改、行为零变更。
-export interface PanelPacingConfig {
-  /** 各类操作生效兜底区间 + 审计（库缺行以内置默认合成、含 clamp 护栏回显）。 */
-  getCatalog(): PacingConfigCatalogView;
-  /** 写某 op 兜底区间。校验不过整块拒（绝不部分落库 / 假成功）。写后回真态目录。 */
-  setPacing(patch: PacingConfigPatchInput, updatedBy: string): Promise<PacingConfigSetResult>;
-}
-
-// ── 单场会话上限配置（全局单例，change restore-auto-resume-and-global-safety-config）──
-// 单份全局配置：单场时长（分钟）+ 七项互动预算（likes/collects/follows/searches/comments/comment_likes/join_groups）。
-// 对所有账号生效。库无行处以写死默认合成（overridden:false = 显示的是写死默认，即当前真生效）。
-
-/** 全局单场上限生效值 + 来源/审计（GET /api/session-limits 形状）。 */
-export interface SessionLimitView {
-  /** 单场时长上限（分钟）。 */
-  maxDurationMin: number;
-  /** 单场互动预算（七项）。 */
-  budget: SessionInteractionBudget;
-  /** 收藏质量闸：收藏:赞 比例的分母 N（即 1:N；默认 3）。 */
-  collectSaveLikeDenom: number;
-  /** 关注质量闸：粉丝:赞藏 比例的分母 N（即 1:N；默认 8）。 */
-  followFansDenom: number;
-  /** 「可活跃时间」周历掩码（168 格 '0'/'1'，周一起头×24h；按服务器本地时间）。null = 未配置 / 全天活跃。 */
-  activeWeekMask: string | null;
-  /** 是否存在库内覆盖（false=显示的是写死默认，即当前真生效）。 */
-  overridden: boolean;
-  updatedAt: string | null;
-  updatedBy: string | null;
-}
-
-/** PUT /api/session-limits 入参补丁（全局，无账号）。未传的字段保持原值（无原值则回落写死默认）。 */
-export interface SessionLimitPatchInput {
-  maxDurationMin?: number;
-  likes?: number;
-  collects?: number;
-  follows?: number;
-  searches?: number;
-  comments?: number;
-  comment_likes?: number;
-  join_groups?: number;
-  /** 收藏质量闸分母 N（1:N，需 >= 1）。 */
-  collectSaveLikeDenom?: number;
-  /** 关注质量闸分母 N（1:N，需 >= 1）。 */
-  followFansDenom?: number;
-  /** 「可活跃时间」周历掩码（168 格 '0'/'1'，周一起头×24h）。 */
-  activeWeekMask?: string;
-}
-
-export type SessionLimitSetResult =
-  | { ok: true; view: SessionLimitView }
-  | { ok: false; reason: 'invalid_value' | 'no_valid_fields' };
-
-// 写入通道归属（change config-table-write-collection；定稿方案 §5.1 / §4.6.8）：`PanelSessionLimits`
-// 是 api 侧持有的窄内部写接口契约，automation 侧实现（src/config/session-config-facade.ts）并独占 store。
-// 后台编辑 MUST 走 console → api → automation；**aidcp-api MUST NOT 直写 session_config_global**。
-// 拆进程时把此接口的实现换成内部 HTTP 客户端、调用点不改、行为零变更。
-export interface PanelSessionLimits {
-  /** 全局单场时长 + 互动预算生效值 + 审计（库无行以写死默认合成回显）。 */
-  getView(): SessionLimitView;
-  /** 写全局单场上限。校验不过整块拒（绝不部分落库 / 假成功）。写后回真态。 */
-  set(patch: SessionLimitPatchInput, updatedBy: string): Promise<SessionLimitSetResult>;
-}
-
 /** 引流线索热度过滤阈值生效值 + 审计（GET /api/hot-lead-config 形状，change feed-hot-lead-group-comment）。 */
 export interface HotLeadConfigView {
   /** 帖龄上限（小时）：超龄不算线索。 */
@@ -1056,51 +933,6 @@ export interface PanelHotLeadConfig {
   set(patch: HotLeadConfigPatchInput, updatedBy: string): Promise<HotLeadConfigSetResult>;
 }
 
-
-/** 全局续场护栏 + 看门狗阈值生效值 + 来源/审计（GET /api/resume-config 形状）。 */
-export interface ResumeConfigView {
-  /** 休息比例（百分比，如 10 = 单场时长的 10%）。 */
-  restRatioPct: number;
-  /** 活跃时段窗口起/止（自午夜分钟数，0..1440；0..1440 = 全天不限）。 */
-  activeWindowStartMin: number;
-  activeWindowEndMin: number;
-  /** 每日自动续场上限（场数 / 累计分钟）；0 = 不限。 */
-  dailyMaxSessions: number;
-  dailyMaxMinutes: number;
-  /** 看门狗两段阈值（毫秒）：恢复轻推 / 放弃结束。 */
-  idleNudgeMs: number;
-  idleEndMs: number;
-  /** 是否存在库内覆盖（false=显示的是写死默认）。 */
-  overridden: boolean;
-  updatedAt: string | null;
-  updatedBy: string | null;
-}
-
-/** PUT /api/resume-config 入参补丁（全局，无账号）。未传的字段保持原值（无原值则回落写死默认）。 */
-export interface ResumeConfigPatchInput {
-  restRatioPct?: number;
-  activeWindowStartMin?: number;
-  activeWindowEndMin?: number;
-  dailyMaxSessions?: number;
-  dailyMaxMinutes?: number;
-  idleNudgeMs?: number;
-  idleEndMs?: number;
-}
-
-export type ResumeConfigSetResult =
-  | { ok: true; view: ResumeConfigView }
-  | { ok: false; reason: 'invalid_value' | 'no_valid_fields' };
-
-// 写入通道归属（change config-table-write-collection；定稿方案 §5.1 / §4.6.8）：`PanelResumeConfig`
-// 是 api 侧持有的窄内部写接口契约，automation 侧实现（src/config/resume-config-facade.ts）并独占 store。
-// 后台编辑 MUST 走 console → api → automation；**aidcp-api MUST NOT 直写 resume_config_global**。
-// 拆进程时把此接口的实现换成内部 HTTP 客户端、调用点不改、行为零变更。
-export interface PanelResumeConfig {
-  /** 全局续场护栏 + 看门狗阈值生效值 + 审计（库无行以写死默认合成回显）。 */
-  getView(): ResumeConfigView;
-  /** 写全局续场配置。校验不过整块拒（绝不部分落库 / 假成功）。写后回真态。 */
-  set(patch: ResumeConfigPatchInput, updatedBy: string): Promise<ResumeConfigSetResult>;
-}
 
 export interface PanelConfig {
   /** 面板监听端口（独立于 8787 边-云 ws）；0 表示交由 OS 分配（测试用）。 */

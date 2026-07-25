@@ -12,6 +12,14 @@
 import pg from 'pg';
 import { resolveEnvPgConfig } from '../kernel/pg-config.js';
 import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
+import type {
+  LlmUsageBucket,
+  LlmUsageCostEstimate,
+  LlmUsageCostPricingBasis,
+  LlmUsagePayload,
+  LlmUsageQuery,
+  LlmUsageRow,
+} from '../kernel/llm-usage-types.js';
 
 const { Pool } = pg;
 
@@ -155,53 +163,18 @@ interface Accum {
   okCalls: number;
 }
 
-export type LlmUsageCostPricingBasis = 'input_output_tokens' | 'total_tokens';
+// 读侧纯载荷类型已抬入 kernel（src/kernel/llm-usage-types.ts）：面板（api）经注入端口只读用量，
+// 只要「查询条件 + 返回载荷」两个形状，不该认识本存储的 SQL / 连接池 / 计价对账写侧。
+// 这里 import 回来 + 等值再导出，属主侧既有消费方一个字节不改。
+export type {
+  LlmUsageCostPricingBasis,
+  LlmUsageCostEstimate,
+  LlmUsageRow,
+  LlmUsageBucket,
+  LlmUsageQuery,
+  LlmUsagePayload,
+};
 
-export interface LlmUsageCostEstimate {
-  amount: number;
-  currency: string;
-  source: string;
-  sourceDate: string;
-  syncedAtMs: number | null;
-  pricingBasis: LlmUsageCostPricingBasis;
-}
-
-export interface LlmUsageRow {
-  day: string;
-  accountId: string;
-  role: string;
-  provider: string;
-  model: string;
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-  calls: number;
-  okCalls: number;
-  costEstimate: LlmUsageCostEstimate | null;
-}
-
-export interface LlmUsageBucket {
-  bucketMs: number;
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-  calls: number;
-}
-
-export interface LlmUsageQuery {
-  fromMs?: number;
-  toMs?: number;
-  accountId?: string;
-  role?: string;
-  provider?: string;
-  model?: string;
-}
-
-export interface LlmUsagePayload {
-  rows: LlmUsageRow[];
-  buckets: LlmUsageBucket[];
-  window: { fromMs: number; toMs: number; clampedToDays: number | null };
-}
 
 export interface LlmBillingPriceSnapshotInput {
   provider: string;

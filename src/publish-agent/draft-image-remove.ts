@@ -11,7 +11,7 @@
 import type {
   PublishDraftImageRemovePayload,
   PublishDraftImageRemoveResultPayload,
-} from '../comm/protocol.js';
+} from '../api-contracts/publish-approval-wire.js';
 import type { DispatchDraft, EditDraftPatch, EditDraftResult } from './publish-log-store.js';
 
 export interface DraftImageRemoveDeps {
