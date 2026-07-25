@@ -221,9 +221,10 @@ export class DraftRefinementStore {
       `WITH candidate AS (
          SELECT id FROM publish_draft_refinement_jobs
           WHERE execution_target=$1 AND status='queued'
-          -- 拆库前置：record_id 跨 owner 引 publish_log。共库期这条外键（CASCADE）保证稿件在、此断言恒真，
-          -- 与原行为等价；拆库后无级联，稿件已删的悬空洗稿任务读侧 fail-closed（不被 claim、不空转洗一条不存在的稿）。
-            AND EXISTS (SELECT 1 FROM publish_log pl WHERE pl.id = publish_draft_refinement_jobs.record_id)
+          -- Block③ 拆库（owner-URL 翻转）：publish_log 属 api，跨 owner 池不能与本 content 表同语句关联。
+          -- 原「EXISTS publish_log」是拆库后防悬空 record_id 的读侧守卫，但 publish_log **全仓从不 DELETE**
+          -- （grep 零命中）、且洗稿任务的 record_id 建时即为合法 publish_log.id（FK），故悬空场景不存在、该断言恒真
+          -- ——移除它逐字节等价（never excluded any row）。若日后引入删稿功能，须在 api 池另做存在性预检。
           ORDER BY created_at ASC
           FOR UPDATE SKIP LOCKED LIMIT 1
        )

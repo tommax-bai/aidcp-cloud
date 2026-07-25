@@ -133,6 +133,11 @@ export interface CuratedContentStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /**
+   * Block③ 拆库（owner-URL 翻转）：automation 属主池，仅用于 listForClient 的 created/uncreated 读 delegated_tasks
+   * （跨 owner 池取「已触发发帖」引用集）。未注入时回落 this.pool（共库期二池同库、逐字节等价）。
+   */
+  automationPool?: pg.Pool;
   /** schema 保障能力注入端口（必填、无默认）：组合根传 automation 的 ensureCapabilitySchema，本文件只从 kernel 取类型。 */
   schemaEnsurer: SchemaEnsurer;
   /** 每账号保留上限（行数），超出裁最旧。默认 1000。 */
@@ -591,6 +596,8 @@ export class CuratedContentStore {
   private readonly logger?: Pick<Console, 'warn'>;
   private readonly executionTarget?: DelegatedExecutionTarget;
 
+  private readonly automationPool?: pg.Pool;
+
   private readonly schemaEnsurer: SchemaEnsurer;
 
   constructor(options: CuratedContentStoreOptions) {
@@ -601,6 +608,7 @@ export class CuratedContentStore {
     this.onSourceAdmitted = options.onSourceAdmitted;
     this.logger = options.logger;
     this.executionTarget = options.executionTarget;
+    this.automationPool = options.automationPool;
     this.pool =
       options.pool ??
       new Pool({
@@ -610,6 +618,34 @@ export class CuratedContentStore {
         user: options.user ?? DEFAULT_PG_CONFIG.user,
         password: options.password ?? DEFAULT_PG_CONFIG.password,
       });
+  }
+
+  /**
+   * 「该账号+target 已触发过发帖」的 curatedId / sourceId 引用集（Block③ 拆库：delegated_tasks 属 automation）。
+   * 取自 publish_post 委托任务的 source_constraints，去重、剔空。用于 listForClient 的 created/uncreated 本地过滤
+   * （原关联 EXISTS 子查询的等价半连接改写）。automationPool 未注入时回落 this.pool（共库期二池同库、结果等价）。
+   */
+  private async triggeredPublishRefs(
+    accountId: string,
+    executionTarget: DelegatedExecutionTarget,
+  ): Promise<{ curatedIds: string[]; sourceIds: string[] }> {
+    const pool = this.automationPool ?? this.pool;
+    let rows: Array<{ cid: string | null; sid: string | null }>;
+    try {
+      ({ rows } = await pool.query<{ cid: string | null; sid: string | null }>(
+        `SELECT DISTINCT source_constraints->>'curatedId' AS cid, source_constraints->>'sourceId' AS sid
+           FROM delegated_tasks
+          WHERE execution_target = $1 AND account_id = $2 AND action = 'publish_post'`,
+        [executionTarget, accountId],
+      ));
+    } catch (err) {
+      // delegated_tasks 缺表 → 无法判定创作态，fail-closed（与主查询 42P01 同口径，绝不回落空/错误归类）。
+      if ((err as { code?: string }).code === '42P01') throw new CuratedContentUnavailableError('listForClient:delegatedTasks');
+      throw err;
+    }
+    const curatedIds = [...new Set(rows.map((r) => r.cid).filter((v): v is string => v != null && v !== ''))];
+    const sourceIds = [...new Set(rows.map((r) => r.sid).filter((v): v is string => v != null && v !== ''))];
+    return { curatedIds, sourceIds };
   }
 
   /** schema 探测（不建表）。 */
@@ -1185,19 +1221,16 @@ export class CuratedContentStore {
         if (!this.executionTarget) {
           throw new CuratedContentUnavailableError('listForClient:delegatedExecutionTarget');
         }
-        params.push(this.executionTarget);
-        const targetIdx = params.length;
-        const triggered = `EXISTS (
-          SELECT 1
-          FROM delegated_tasks dt
-          WHERE dt.execution_target = $${targetIdx}
-            AND dt.account_id = c.account_id
-            AND dt.action = 'publish_post'
-            AND (
-              dt.source_constraints->>'curatedId' = c.id::text
-              OR dt.source_constraints->>'sourceId' = c.source_id
-            )
-        )`;
+        // Block③ 拆库（owner-URL 翻转）：delegated_tasks 属 automation，跨 owner 池不能与 content 的 curated_content
+        // 同语句关联。先在 automation 池取「该账号+target 已触发过发帖」的 curatedId/sourceId 引用集（快照；委托任务
+        // 单调不删 → 快照≡实时），再把原关联 EXISTS 子查询**等价**改写为本地数组成员判定（标准半连接改写）。
+        // SQL 的排序 / COUNT(*) OVER() / LIMIT / OFFSET 结构逐字不变；共库期 automationPool≡this.pool、结果逐字节等价。
+        const { curatedIds, sourceIds } = await this.triggeredPublishRefs(accountId, this.executionTarget);
+        params.push(curatedIds);
+        const cidsIdx = params.length;
+        params.push(sourceIds);
+        const sidsIdx = params.length;
+        const triggered = `(c.id::text = ANY($${cidsIdx}::text[]) OR c.source_id = ANY($${sidsIdx}::text[]))`;
         if (opts.creationStatus === 'created') conds.push(triggered);
         if (opts.creationStatus === 'uncreated') conds.push(`NOT ${triggered}`);
       }

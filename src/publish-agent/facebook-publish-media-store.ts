@@ -42,6 +42,11 @@ export interface FacebookPublishMediaStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /**
+   * Block③ 拆库（owner-URL 翻转）：api 属主池，仅用于 assertFacebookAccount 读 accounts.platform（跨 owner）。
+   * 未注入时回落 this.pool（共库期二池同库、逐字节等价）。
+   */
+  apiPool?: pg.Pool;
   /** schema 保障能力注入端口（必填、无默认）：组合根传 automation 的 ensureCapabilitySchema，本文件只从 kernel 取类型。 */
   schemaEnsurer: SchemaEnsurer;
   objectStore?: ObjectStore;
@@ -238,8 +243,11 @@ export class FacebookPublishMediaStore {
 
   private readonly schemaEnsurer: SchemaEnsurer;
 
+  private readonly apiPool?: pg.Pool;
+
   constructor(options: FacebookPublishMediaStoreOptions) {
     this.schemaEnsurer = options.schemaEnsurer;
+    this.apiPool = options.apiPool;
     this.pool =
       options.pool ??
       new Pool({
@@ -486,7 +494,8 @@ export class FacebookPublishMediaStore {
 
   private async assertFacebookAccount(accountId: string): Promise<void> {
     if (accountId === RETIRED_ACCOUNT_ID) throw new FacebookPublishMediaError('retired_account');
-    const { rows } = await this.pool.query<{ platform: string | null }>(
+    // Block③ 拆库（owner-URL 翻转）：accounts 属 api，跨 owner 池读；apiPool 未注入时回落 this.pool（共库期等价）。
+    const { rows } = await (this.apiPool ?? this.pool).query<{ platform: string | null }>(
       `SELECT platform FROM accounts WHERE account_id = $1`,
       [accountId],
     );

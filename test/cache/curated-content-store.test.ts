@@ -626,29 +626,34 @@ test('listForPanel：无筛选时仅按账号；空结果 total 兜底 0', async
   assert.deepEqual(out, { items: [], total: 0 });
 });
 
-test('listForClient：未创作在 SQL 层按持久化洗稿触发记录过滤，且不受任务状态影响', async () => {
-  const { pool, calls } = controllablePool(() => ({
-    rows: [{ ...panelDbRow, like_count: null, collect_count: 0, total_count: '23' }],
-  }));
+test('listForClient：未创作先在 automation 池取触发集、再本地数组判定（拆库半连接改写），排序/分页结构不变', async () => {
+  const { pool, calls } = controllablePool((sql) =>
+    sql.includes('delegated_tasks')
+      ? { rows: [{ cid: 'cur-9', sid: null }] }
+      : { rows: [{ ...panelDbRow, like_count: null, collect_count: 0, total_count: '23' }] });
   const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool, executionTarget: 'dev' });
   const out = await store.listForClient('acc-1', { creationStatus: 'uncreated', limit: 999, offset: -5 });
 
-  assert.match(calls[0].sql, /WHERE c\.account_id = \$1/);
-  assert.match(calls[0].sql, /c\.content_type = 'image_text'/);
-  assert.match(calls[0].sql, /BTRIM\(COALESCE\(c\.body, ''\)\) <> ''/);
-  assert.match(calls[0].sql, /NOT EXISTS[\s\S]*FROM delegated_tasks dt/);
-  assert.match(calls[0].sql, /dt\.execution_target = \$2/);
-  assert.match(calls[0].sql, /dt\.account_id = c\.account_id/);
-  assert.match(calls[0].sql, /dt\.action = 'publish_post'/);
-  assert.match(calls[0].sql, /source_constraints->>'curatedId' = c\.id::text/);
-  assert.match(calls[0].sql, /source_constraints->>'sourceId' = c\.source_id/);
-  assert.doesNotMatch(calls[0].sql, /dt\.status/, '触发即已创作，任务后续状态不得改变归类');
-  assert.match(calls[0].sql, /COUNT\(\*\) OVER\(\) AS total_count/);
-  assert.match(calls[0].sql, /c\.like_count::bigint \* 100 \+ c\.collect_count::bigint \* 143/);
-  assert.match(calls[0].sql, /END DESC NULLS LAST/);
-  assert.ok(calls[0].sql.indexOf('ORDER BY') < calls[0].sql.indexOf('LIMIT'), '排序必须发生在分页前');
-  assert.match(calls[0].sql, /LIMIT \$3 OFFSET \$4/);
-  assert.deepEqual(calls[0].params, ['acc-1', 'dev', 50, 0]);
+  // calls[0] = automation 池上的「已触发发帖」引用集查询（原关联 EXISTS 的等价半连接前置；快照，与任务后续状态无关）
+  assert.match(calls[0].sql, /FROM delegated_tasks/);
+  assert.match(calls[0].sql, /execution_target = \$1 AND account_id = \$2 AND action = 'publish_post'/);
+  assert.match(calls[0].sql, /source_constraints->>'curatedId'/);
+  assert.match(calls[0].sql, /source_constraints->>'sourceId'/);
+  assert.doesNotMatch(calls[0].sql, /status/, '触发即已创作，任务后续状态不得改变归类');
+  assert.deepEqual(calls[0].params, ['dev', 'acc-1']);
+
+  // calls[1] = content 池主查询：关联子查询已等价改为本地数组成员判定，排序/COUNT OVER/分页逐字不变、不再跨 owner
+  assert.match(calls[1].sql, /WHERE c\.account_id = \$1/);
+  assert.match(calls[1].sql, /c\.content_type = 'image_text'/);
+  assert.match(calls[1].sql, /BTRIM\(COALESCE\(c\.body, ''\)\) <> ''/);
+  assert.match(calls[1].sql, /NOT \(c\.id::text = ANY\(\$2::text\[\]\) OR c\.source_id = ANY\(\$3::text\[\]\)\)/);
+  assert.doesNotMatch(calls[1].sql, /delegated_tasks/, '主查询不得再跨 owner 关联 delegated_tasks');
+  assert.match(calls[1].sql, /COUNT\(\*\) OVER\(\) AS total_count/);
+  assert.match(calls[1].sql, /c\.like_count::bigint \* 100 \+ c\.collect_count::bigint \* 143/);
+  assert.match(calls[1].sql, /END DESC NULLS LAST/);
+  assert.ok(calls[1].sql.indexOf('ORDER BY') < calls[1].sql.indexOf('LIMIT'), '排序必须发生在分页前');
+  assert.match(calls[1].sql, /LIMIT \$4 OFFSET \$5/);
+  assert.deepEqual(calls[1].params, ['acc-1', ['cur-9'], [], 50, 0]);
   assert.equal(out.total, 23);
   assert.equal(out.items[0].likeCount, null, '缺失计数必须保持 null');
   assert.equal(out.items[0].collectCount, 0, '真实 0 必须保持 0');
@@ -677,14 +682,18 @@ test('listForClient：四种排序映射为固定 SQL，缺失值置后且使用
 });
 
 test('listForClient：已创作使用同一账号范围的 EXISTS，全部模式不加创作条件', async () => {
-  const created = controllablePool(() => ({ rows: [] }));
+  const created = controllablePool((sql) =>
+    sql.includes('delegated_tasks') ? { rows: [{ cid: 'cur-1', sid: 'src-1' }] } : { rows: [] });
   const createdStore = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool: created.pool, executionTarget: 'ol' });
   await createdStore.listForClient('acc-1', { creationStatus: 'created', limit: 20, offset: 0 });
-  assert.match(created.calls[0].sql, /c\.content_type = 'image_text'/);
-  assert.match(created.calls[0].sql, /\sEXISTS \([\s\S]*FROM delegated_tasks dt/);
-  assert.doesNotMatch(created.calls[0].sql, /NOT EXISTS/);
-  assert.match(created.calls[0].sql, /dt\.execution_target = \$2/);
-  assert.deepEqual(created.calls[0].params, ['acc-1', 'ol', 20, 0]);
+  assert.match(created.calls[0].sql, /FROM delegated_tasks/);
+  assert.match(created.calls[0].sql, /execution_target = \$1 AND account_id = \$2 AND action = 'publish_post'/);
+  assert.deepEqual(created.calls[0].params, ['ol', 'acc-1']);
+  assert.match(created.calls[1].sql, /c\.content_type = 'image_text'/);
+  assert.match(created.calls[1].sql, /\(c\.id::text = ANY\(\$2::text\[\]\) OR c\.source_id = ANY\(\$3::text\[\]\)\)/);
+  assert.doesNotMatch(created.calls[1].sql, /NOT \(c\.id::text = ANY/);
+  assert.doesNotMatch(created.calls[1].sql, /delegated_tasks/);
+  assert.deepEqual(created.calls[1].params, ['acc-1', ['cur-1'], ['src-1'], 20, 0]);
 
   const legacy = controllablePool(() => ({ rows: [] }));
   const legacyStore = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool: legacy.pool });
@@ -729,17 +738,18 @@ test('listForClient：已创作使用同一账号范围的 EXISTS，全部模式
 test('listForClient：offset 越过末尾时补 COUNT 拿真实总数，绝不把「本页无行」谎报成「零条」', async () => {
   // 页码陈旧 / 列表缩短：窗口函数无行可算 → 必须另查一次真实总数，否则 UI 会显示「精选池还是空的」。
   const { pool, calls } = controllablePool((sql: string) =>
-    /COUNT\(\*\)::text/.test(sql) ? { rows: [{ total_count: '23' }] } : { rows: [] });
+    sql.includes('delegated_tasks') ? { rows: [{ cid: 'cur-x', sid: null }] }
+    : /COUNT\(\*\)::text/.test(sql) ? { rows: [{ total_count: '23' }] } : { rows: [] });
   const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool, executionTarget: 'dev' });
   const out = await store.listForClient('acc-1', { creationStatus: 'uncreated', limit: 12, offset: 96 });
 
   assert.deepEqual(out.items, []);
   assert.equal(out.total, 23, '本页无行 ≠ 该账号零条');
-  assert.equal(calls.length, 2, '零行且 offset>0 必须补一次独立 COUNT');
-  assert.match(calls[1].sql, /SELECT COUNT\(\*\)::text AS total_count FROM curated_content c/);
-  assert.match(calls[1].sql, /content_type = 'image_text'/, '补的 COUNT 必须沿用同一筛选条件');
-  assert.match(calls[1].sql, /NOT EXISTS[\s\S]*FROM delegated_tasks dt/, '补的 COUNT 必须沿用未创作触发条件');
-  assert.deepEqual(calls[1].params, ['acc-1', 'dev'], '补的 COUNT 不带 limit/offset，但必须保留 Cloud target');
+  assert.equal(calls.length, 3, '触发集查询 + 零行主查询 + 补 COUNT');
+  assert.match(calls[2].sql, /SELECT COUNT\(\*\)::text AS total_count FROM curated_content c/);
+  assert.match(calls[2].sql, /content_type = 'image_text'/, '补的 COUNT 必须沿用同一筛选条件');
+  assert.match(calls[2].sql, /NOT \(c\.id::text = ANY\(\$2::text\[\]\) OR c\.source_id = ANY\(\$3::text\[\]\)\)/, '补的 COUNT 必须沿用未创作触发条件');
+  assert.deepEqual(calls[2].params, ['acc-1', ['cur-x'], []], '补的 COUNT 不带 limit/offset，沿用触发集数组');
 });
 
 test('listForPanel：缺 accountId（全账号视图）不加 account_id 过滤，仍可叠类型过滤', async () => {
