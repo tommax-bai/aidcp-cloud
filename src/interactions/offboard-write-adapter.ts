@@ -8,6 +8,10 @@
  * **本文件绝不 import 那个接口**（那是 automation→api 的跨层依赖）：只做结构匹配，
  * 由组合根 server.ts 把本实例作为 `OffboardWritePort` 注入。SQL 与改动前 client-user-store 逐字一致，
  * 方法接调用方事务句柄，故行为逐位等价。
+ *
+ * **Block③ L3 更新**：cleanup-grant 的三条 SQL（签票 / 烧票 / 审计行）已从本文件迁往同目录
+ * `offboard-cleanup-grant-ops.ts` —— 那两个操作与任何 api 写都不共事务，故收成**自开事务、
+ * 跑 automation 池**的属主操作；本文件只留仍需接调用方句柄的那三个写（它们与 api 侧归属收权共提交）。
  */
 import crypto from 'node:crypto';
 import type pg from 'pg';
@@ -119,39 +123,4 @@ export class OffboardWriteAdapter {
     return row;
   }
 
-  async markCleanupGrantIssued(
-    client: Queryable,
-    input: { offboardId: string; userId: string; edgeId: string; jtiHash: string; expiresAt: number },
-  ): Promise<{ accountId: string; envKey: string } | null> {
-    const updated = await client.query<{ account_id: string; env_key: string }>(
-      `UPDATE interaction_offboards
-          SET cleanup_grant_jti_hash=$4,cleanup_grant_edge_id=$3,
-              cleanup_grant_expires_at=to_timestamp($5 / 1000.0),cleanup_grant_used_at=NULL,updated_at=now()
-        WHERE offboard_id=$1 AND user_id=$2 AND state IN ('pending_edge','dispatched')
-        RETURNING account_id,env_key`,
-      [input.offboardId, input.userId, input.edgeId, input.jtiHash, input.expiresAt],
-    );
-    const row = updated.rows[0];
-    if (!row) return null;
-    return { accountId: row.account_id, envKey: row.env_key };
-  }
-
-  async markCleanupGrantConsumed(client: Queryable, offboardId: string): Promise<void> {
-    await client.query(
-      `UPDATE interaction_offboards SET cleanup_grant_used_at=now(),updated_at=now() WHERE offboard_id=$1`,
-      [offboardId],
-    );
-  }
-
-  async insertOffboardAudit(
-    client: Queryable,
-    input: { offboardId: string; accountId: string; envKey: string; userId: string | null; event: string; status: string },
-  ): Promise<void> {
-    await client.query(
-      `INSERT INTO interaction_offboard_audit
-         (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
-       VALUES ($1,$2,'wechat_channels',$3,$4,$5,$6,$7)`,
-      [crypto.randomUUID(), input.offboardId, input.accountId, input.envKey, input.userId, input.event, input.status],
-    );
-  }
 }

@@ -28,6 +28,7 @@ import { writeWithMirrorBump, type MirrorVersionBumper } from '../config/mirror-
 import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 import type { OffboardWritePort, OffboardRow } from './offboard-write-port.js';
 import type { ClientEnvAutomationReader } from '../kernel/client-env-automation-types.js';
+import type { OffboardCleanupGrantOperations } from '../kernel/offboard-cleanup-grant-types.js';
 
 const { Pool } = pg;
 
@@ -457,6 +458,18 @@ export interface ClientUserStoreOptions {
    * 必填只会把噪声摊到全部构造点，而端口缺失的失败模式在两种写法下都是「当场响亮报错」。
    */
   automationReads?: ClientEnvAutomationReader;
+  /**
+   * 离场清理授权的**属主侧操作**端口（Block③ L3）。签发 / 烧票这两笔事务碰的表全是 automation 属主，
+   * 故整体收回属主域：由属主自己开事务、跑自己的池，本类只转调、不再持有事务。
+   * 与 `offboardWrites` 的区别：那个端口的方法接调用方事务句柄（那些写与 api 侧归属收权共提交、
+   * 是真跨域事务，仍待最终一致重设计）；本端口不接句柄、自成一笔事务。
+   *
+   * 缺省 = 不注入，走到该路径即当场抛具名错（fail-loud）。
+   * ⚠️ 与改动前的一处差异（**非生产路径**）：改动前 `consumeOffboardCleanupGrant` 对一个不存在的
+   * offboardId 会在完全不触达端口的情况下返回 `not_found`；现在整个方法一进门就要端口，
+   * 未注入时抛错而非返 `not_found`。生产组合根恒注入，故现网无影响。
+   */
+  cleanupGrantOps?: OffboardCleanupGrantOperations;
 }
 
 /**
@@ -481,6 +494,7 @@ export class ClientUserStore {
   private readonly mirrorVersionBumper?: MirrorVersionBumper;
   private readonly offboardWrites?: OffboardWritePort;
   private readonly automationReads?: ClientEnvAutomationReader;
+  private readonly cleanupGrantOperations?: OffboardCleanupGrantOperations;
   /** 同步 WS 出口闸镜像：删除生命周期中的 AdsPower env 不再接收普通自动化命令。 */
   private blockedAutomationEnvKeys = new Set<string>();
   /** RiskController 同步热路径镜像：只收录当前恰好绑定一个环境的账号。 */
@@ -495,6 +509,7 @@ export class ClientUserStore {
     this.pool = options.pool ?? new Pool(resolveEnvPgConfig());
     this.offboardWrites = options.offboardWrites;
     this.automationReads = options.automationReads;
+    this.cleanupGrantOperations = options.cleanupGrantOps;
   }
 
   /**
@@ -504,6 +519,12 @@ export class ClientUserStore {
   private automationRead(): ClientEnvAutomationReader {
     if (!this.automationReads) throw new Error('client_env_automation_read_port_not_configured');
     return this.automationReads;
+  }
+
+  /** 离场清理授权操作端口（automation 属主）：未注入即当场抛错，绝不静默跳过授权副作用。 */
+  private cleanupGrantOps(): OffboardCleanupGrantOperations {
+    if (!this.cleanupGrantOperations) throw new Error('offboard_cleanup_grant_ops_not_configured');
+    return this.cleanupGrantOperations;
   }
 
   private offboardReceipt(offboard: ClientOffboardView): ClientCleanupReceipt {
@@ -682,7 +703,16 @@ export class ClientUserStore {
       state: row.state, reason: row.reason, requestedAt: row.requestedAt, purgeDueAt: row.purgeDueAt } : null;
   }
 
-  /** Persist only a hash of the signed grant identity; the bearer token never enters PostgreSQL or audit rows. */
+  /**
+   * 签发离场清理授权（Block③ L3：整个操作已收回 automation 属主域）。
+   *
+   * 这两笔事务碰的表**全是 automation 属主**（离场记录 + 离场审计），一张 api 表都没有——
+   * 它们原本是「由 api 的代码 BEGIN 出一条 api 连接、再把句柄递给 automation 写适配器」的形态，
+   * 拆库后那条连接跑不了 automation 的 SQL。故整体经端口下沉：由属主自己开事务、跑自己的池。
+   * 本层只做参数转发与对外判别式映射，**不再持有任何事务**。
+   *
+   * 明文票据绝不落库、绝不进审计行；这里只传票据身份的哈希。
+   */
   async registerOffboardCleanupGrant(input: {
     userId: string;
     offboardId: string;
@@ -690,32 +720,19 @@ export class ClientUserStore {
     jtiHash: string;
     expiresAt: number;
   }): Promise<boolean> {
-    const client = await this.pool.connect();
-    try {
-      await client.query('BEGIN');
-      const grant = await this.offboardPort().markCleanupGrantIssued(client, {
-        offboardId: input.offboardId, userId: input.userId, edgeId: input.edgeId,
-        jtiHash: input.jtiHash, expiresAt: input.expiresAt,
-      });
-      if (!grant) {
-        await client.query('ROLLBACK');
-        return false;
-      }
-      await this.offboardPort().insertOffboardAudit(client, {
-        offboardId: input.offboardId, accountId: grant.accountId, envKey: grant.envKey,
-        userId: input.userId, event: 'cleanup_grant_issued', status: 'issued',
-      });
-      await client.query('COMMIT');
-      return true;
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
-    }
+    return this.cleanupGrantOps().issueCleanupGrant({
+      offboardId: input.offboardId, userId: input.userId, edgeId: input.edgeId,
+      jtiHash: input.jtiHash, expiresAt: input.expiresAt,
+    });
   }
 
-  /** Atomically validates every binding and burns the grant before returning the account bootstrap. */
+  /**
+   * 原子核验并烧掉离场清理授权（同上，已收回属主域）。
+   *
+   * 判定顺序、失败也提交（拒绝审计留痕）、以及「取行加锁与烧票同事务」这三条不变量落在属主实现里
+   * （见 kernel/offboard-cleanup-grant-types.ts 文件头）。本层只把属主投影映射成对外判别式，
+   * 并把 `edgeId` 原样回填——它是本次请求的入参，不从库里读回。
+   */
   async consumeOffboardCleanupGrant(input: {
     userId: string;
     offboardId: string;
@@ -725,66 +742,13 @@ export class ClientUserStore {
     jtiHash: string;
     now?: number;
   }): Promise<ConsumeOffboardCleanupGrantResult> {
-    const now = input.now ?? Date.now();
-    const client = await this.pool.connect();
-    try {
-      await client.query('BEGIN');
-      const selected = await client.query<{
-        offboard_id: string; env_key: string; account_id: string; state: ClientOffboardView['state'];
-        reason: ClientOffboardView['reason']; requested_at: Date; purge_due_at: Date;
-        user_id: string | null; cleanup_grant_jti_hash: string | null; cleanup_grant_edge_id: string | null;
-        cleanup_grant_expires_at: Date | null; cleanup_grant_used_at: Date | null;
-      }>(
-        `SELECT offboard_id,env_key,account_id,state,reason,requested_at,purge_due_at,user_id,
-                cleanup_grant_jti_hash,cleanup_grant_edge_id,cleanup_grant_expires_at,cleanup_grant_used_at
-           FROM interaction_offboards WHERE offboard_id=$1 FOR UPDATE`,
-        [input.offboardId],
-      );
-      const row = selected.rows[0];
-      let failure: Exclude<ConsumeOffboardCleanupGrantResult, { ok: true }>['reason'] | null = null;
-      if (!row) failure = 'not_found';
-      else if (row.user_id !== input.userId || row.env_key !== input.envKey || row.account_id !== input.accountId
-        || row.cleanup_grant_edge_id !== input.edgeId || row.cleanup_grant_jti_hash !== input.jtiHash) failure = 'scope_mismatch';
-      else if (row.cleanup_grant_used_at) failure = 'already_used';
-      else if (!row.cleanup_grant_expires_at || row.cleanup_grant_expires_at.getTime() <= now) failure = 'expired';
-      else if (row.state !== 'pending_edge' && row.state !== 'dispatched') failure = 'not_pending';
-
-      if (failure) {
-        if (row) {
-          await this.offboardPort().insertOffboardAudit(client, {
-            offboardId: row.offboard_id, accountId: row.account_id, envKey: row.env_key,
-            userId: input.userId, event: 'cleanup_grant_rejected', status: failure,
-          });
-        }
-        await client.query('COMMIT');
-        return { ok: false, reason: failure };
-      }
-
-      await this.offboardPort().markCleanupGrantConsumed(client, row!.offboard_id);
-      await this.offboardPort().insertOffboardAudit(client, {
-        offboardId: row!.offboard_id, accountId: row!.account_id, envKey: row!.env_key,
-        userId: input.userId, event: 'cleanup_grant_consumed', status: 'consumed',
-      });
-      await client.query('COMMIT');
-      return {
-        ok: true,
-        edgeId: input.edgeId,
-        offboard: {
-          offboardId: row!.offboard_id,
-          envKey: row!.env_key,
-          accountId: row!.account_id,
-          state: row!.state,
-          reason: row!.reason,
-          requestedAt: row!.requested_at.getTime(),
-          purgeDueAt: row!.purge_due_at.getTime(),
-        },
-      };
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
-    }
+    const outcome = await this.cleanupGrantOps().consumeCleanupGrant({
+      userId: input.userId, offboardId: input.offboardId, envKey: input.envKey,
+      accountId: input.accountId, edgeId: input.edgeId, jtiHash: input.jtiHash,
+      now: input.now ?? Date.now(),
+    });
+    if (!outcome.ok) return { ok: false, reason: outcome.reason };
+    return { ok: true, edgeId: input.edgeId, offboard: { ...outcome.offboard } };
   }
 
   async init(): Promise<void> {

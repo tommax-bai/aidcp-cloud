@@ -53,7 +53,8 @@
       "src/kernel/publish-status-types.ts",
       "src/kernel/risk-read-types.ts",
       "src/kernel/panel-automation-types.ts",
-      "src/kernel/client-env-automation-types.ts"
+      "src/kernel/client-env-automation-types.ts",
+      "src/kernel/offboard-cleanup-grant-types.ts"
     ]
   },
   "rejected": [

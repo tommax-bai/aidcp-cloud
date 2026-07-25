@@ -935,6 +935,11 @@
     "note": "§4.6.1：收件箱 / 回复工作流 / 发送与回执 / 离场 saga 段"
   },
   {
+    "path": "src/interactions/offboard-cleanup-grant-ops.ts",
+    "layer": "automation",
+    "note": "【待定稿裁决】change block3-l3-grant-collapse 新写：kernel 端口 OffboardCleanupGrantOperations 的 automation 属主实现（PgOffboardCleanupGrantOps），持组合根注入的 automation 池、**自己开事务**，只写 automation 属主表 interaction_offboards / interaction_offboard_audit（三条 SQL 从同目录 offboard-write-adapter.ts 逐字迁来并内化）。src/interactions/ 目录规则 layer=automation 但 newFile=adjudicate，故逐文件裁定：本文件与 offboard-write-adapter.ts 同域同段（§4.6.1 离场 saga 段），差别只在「自开事务」vs「接调用方句柄」，归 automation。请求回写 §4.7 见 docpatch RK-block3"
+  },
+  {
     "path": "src/interactions/offboard-write-adapter.ts",
     "layer": "automation",
     "note": "§5.1：互动域离场表（interaction_offboards/interaction_offboard_audit/interaction_auth_state/interaction_runtime_controls）归 aidcp-automation 单写。本文件是 change offboard-saga 里这些离场表的 automation 侧单写者，aidcp-api 的 client-user-store 经窄接口注入调用。"
@@ -1103,6 +1108,11 @@
     "path": "src/kernel/note-detail.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/agents/content-curator-role.ts 析出 NoteData 纯数据模型接口（noteId/title/content/author/likeCount/collectCount/authorFollowed/comments，全为原语与数组）。零 import、零 SQL、零 HTTP、零 LLM、无进程内活状态。ContentCuratorRole 类 + 事件订阅留 content-curator-role.ts（automation）并等值再导出。供 content 侧精选评估角色跨边界共导，消 2 条 content->automation 边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
+  },
+  {
+    "path": "src/kernel/offboard-cleanup-grant-types.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change block3-l3-grant-collapse 新写：离场清理授权（cleanup grant）签发/烧票的**跨域操作**端口契约（OffboardCleanupGrantOperations 接口 + OffboardGrantRecord / Issue-Consume 输入输出纯类型 + 状态/原因/失败档字面量联合）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。与 client-env-automation-types（只读投影端口）互补：本端口是**写操作**端口，且方法**不接调用方事务句柄、自成一笔事务**——因为这两笔事务碰的表全是 automation 属主、与任何 api 写都不共提交，故可整体收回属主域；属主实现在 src/interactions/offboard-cleanup-grant-ops.ts（automation）跑在 automation 池上。文件头载明搬迁 MUST 逐字保留的五条不变量（判定顺序 / 失败也提交 / 取行加锁与烧票同事务 / now 可注入 / epoch ms）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3"
   },
   {
     "path": "src/kernel/panel-automation-types.ts",

@@ -17,6 +17,12 @@
  * **逐位等价**（本批 #1 铁律：行为 MUST 完全等价）。真正把「跨 owner 单事务」拆成两段独立提交，
  * 属于进程切分那一步（届时 api 侧的 scope 事务提交后，automation 侧经内部命令消费）；
  * 现在先把**写入通道**收口到属主接口，把这一步变成进程切分时的一处局部改动。
+ *
+ * **Block③ L3 更新**：原先本接口还有三个方法（`markCleanupGrantIssued` / `markCleanupGrantConsumed` /
+ * `insertOffboardAudit`）服务「离场清理授权」的签发与烧票。那两笔事务碰的表**全是 automation 属主**、
+ * 与任何 api 写都不共事务，故已整体收回属主域（自开事务、跑 automation 池）——见 kernel 端口
+ * `offboard-cleanup-grant-types.ts` 与属主实现 `interactions/offboard-cleanup-grant-ops.ts`。
+ * 本接口因此只剩**确实与 api 侧归属收权共提交**的那三个方法，它们才是真正待最终一致重设计的部分。
  */
 import type pg from 'pg';
 
@@ -48,23 +54,6 @@ export interface RevokeInteractionAccessInput {
   requireAuthState: boolean;
 }
 
-export interface OffboardAuditInput {
-  offboardId: string;
-  accountId: string;
-  envKey: string;
-  userId: string | null;
-  event: string;
-  status: string;
-}
-
-export interface CleanupGrantIssueInput {
-  offboardId: string;
-  userId: string;
-  edgeId: string;
-  jtiHash: string;
-  expiresAt: number;
-}
-
 /**
  * automation 属主离场表的写入口（单写者 = automation 的 offboard-write-adapter）。
  * 每个方法都接调用方的事务句柄，故在同库同进程下与改动前同事务、行为等价。
@@ -73,8 +62,4 @@ export interface OffboardWritePort {
   revokeInteractionAccess(q: OffboardWriteQueryable, input: RevokeInteractionAccessInput): Promise<void>;
   enqueueOffboard(q: OffboardWriteQueryable, input: EnqueueOffboardInput): Promise<OffboardRow>;
   enqueueProvisionedUnboundOffboard(q: OffboardWriteQueryable, input: { userId: string; envKey: string }): Promise<OffboardRow>;
-  /** 条件写授权载体；命中返回账号/环境 scope，未命中（状态不符）返回 null。 */
-  markCleanupGrantIssued(q: OffboardWriteQueryable, input: CleanupGrantIssueInput): Promise<{ accountId: string; envKey: string } | null>;
-  markCleanupGrantConsumed(q: OffboardWriteQueryable, offboardId: string): Promise<void>;
-  insertOffboardAudit(q: OffboardWriteQueryable, input: OffboardAuditInput): Promise<void>;
 }

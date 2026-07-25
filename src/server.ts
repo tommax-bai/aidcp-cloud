@@ -426,6 +426,8 @@ import { projectRuntimeControls } from './interactions/runtime-controls-provider
 import { OffboardWriteAdapter } from './interactions/offboard-write-adapter.js';
 // Block③ L3：离场写适配器的**读侧配对**——api 的客户环境生命周期经 kernel 端口向 automation 取只读投影。
 import { PgClientEnvAutomationRead } from './interactions/client-env-automation-read.js';
+import { PgOffboardCleanupGrantOps } from './interactions/offboard-cleanup-grant-ops.js';
+import type { OffboardCleanupGrantOperations } from './kernel/offboard-cleanup-grant-types.js';
 import type { ClientEnvAutomationReader } from './kernel/client-env-automation-types.js';
 import { InteractionApiWrites } from './interactions/interaction-api-writes.js';
 // 环境级行锁实现（api 属主 client_environments / client_env_scope），由组合根注入 InteractionStore（automation）。
@@ -965,7 +967,18 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
           riskStateProjection: () => Promise.reject(new Error('client_env_automation_read_unavailable_in_api_mode')),
         }
       : new PgClientEnvAutomationRead({ pool: automationPool });
-  const clientUserStore = new ClientUserStore({ pool: apiPool, schemaEnsurer: ensureCapabilitySchema, mirrorVersionBumper: mirrorVersionStore, offboardWrites: new OffboardWriteAdapter(), automationReads: clientEnvAutomationRead });
+  // 离场清理授权的属主侧操作（Block③ L3）：签发 / 烧票两笔事务碰的表全是 automation 属主、
+  // 与任何 api 写都不共事务 ⇒ 整体收回属主域，由它**自己开事务、跑 automation 池**，
+  // 而不是像 OffboardWriteAdapter 那样接 api 侧递来的事务句柄。
+  // api 模式同样 fail-closed（HTTP 客户端待 Block② 补），与上面的读端口同一范式。
+  const offboardCleanupGrantOps: OffboardCleanupGrantOperations =
+    serviceModeFromEnv() === 'api'
+      ? {
+          issueCleanupGrant: () => Promise.reject(new Error('offboard_cleanup_grant_ops_unavailable_in_api_mode')),
+          consumeCleanupGrant: () => Promise.reject(new Error('offboard_cleanup_grant_ops_unavailable_in_api_mode')),
+        }
+      : new PgOffboardCleanupGrantOps({ pool: automationPool });
+  const clientUserStore = new ClientUserStore({ pool: apiPool, schemaEnsurer: ensureCapabilitySchema, mirrorVersionBumper: mirrorVersionStore, offboardWrites: new OffboardWriteAdapter(), automationReads: clientEnvAutomationRead, cleanupGrantOps: offboardCleanupGrantOps });
   try {
     await mirrorVersionStore.init();
     await modelConfigStore.init();
