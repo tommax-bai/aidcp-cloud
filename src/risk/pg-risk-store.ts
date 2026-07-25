@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../cache/index.js';
+import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 import { SHANGHAI_DAY_START_SQL } from '../time/shanghai-day.js';
 import { parseDeploymentTarget, type DeploymentTarget } from '../deployment-target.js';
 import { RiskStateNotOwnedError, type OwnershipMode } from './ownership.js';
@@ -31,6 +32,8 @@ export interface PgRiskStoreOptions {
    * ⇒ 面板永远看到空/陈旧风控态且零报错。注入的池由组合根掌控生命周期（见 `close()`）。
    */
   pool?: pg.Pool;
+  /** schema 保障能力注入端口（必填、无默认）：组合根传 automation 的 ensureCapabilitySchema。 */
+  schemaEnsurer: SchemaEnsurer;
   /**
    * 本进程的部署目标（change risk-state-cross-process-integrity）：risk_state 条件写的属主谓词。
    * 缺省（不注入）→ ownershipMode 恒为 'off'，saveState 走历史无谓词 upsert（逐位零回归）。
@@ -97,7 +100,8 @@ END $$;
 
 -- 记账 outbox（change risk-state-cross-process-integrity，迁移 0061）：边缘确认的真实动作先落这里，
 -- 再由 worker 认领并在单事务里写 risk_counters + 标记 applied。形状照抄 delegated_tasks 的认领范式。
--- 本仓无迁移执行器 → init() 里这份幂等 SQL 才是实际生效路径，MUST 与 migrations/0061 同源。
+-- 默认运行时只用本常量探测对象形状；仅 AIDCP_SCHEMA_SELF_CREATE=true 的回滚态会执行它。
+-- 对象定义 MUST 与 migrations/0061 及此前 risk migrations 同源。
 CREATE TABLE IF NOT EXISTS risk_counter_outbox (
   id               BIGSERIAL PRIMARY KEY,
   account_id       TEXT NOT NULL,
@@ -156,10 +160,13 @@ export class PgRiskStore implements RiskStore, InteractionStore {
   private readonly ownsPool: boolean;
   private readonly executionTarget?: DeploymentTarget;
   private readonly ownershipMode: OwnershipMode;
+  private readonly schemaEnsurer: SchemaEnsurer;
+  private initPromise?: Promise<void>;
   private retentionTimer?: ReturnType<typeof setInterval>;
 
-  constructor(options: PgRiskStoreOptions = {}) {
+  constructor(options: PgRiskStoreOptions) {
     const config = pgRiskConfigFromEnv();
+    this.schemaEnsurer = options.schemaEnsurer;
     this.ownsPool = options.pool === undefined;
     this.pool =
       options.pool ??
@@ -181,8 +188,25 @@ export class PgRiskStore implements RiskStore, InteractionStore {
     return { mode: this.ownershipMode, target: this.executionTarget ?? null };
   }
 
-  async init(): Promise<void> {
-    await this.pool.query(RISK_SCHEMA_SQL);
+  init(): Promise<void> {
+    if (!this.initPromise) {
+      this.initPromise = this.initialize().catch((err) => {
+        // schema/连接恢复后，下一次真实解析可以重新探测；MUST NOT 永久缓存一次失败。
+        this.initPromise = undefined;
+        throw err;
+      });
+    }
+    return this.initPromise;
+  }
+
+  private async initialize(): Promise<void> {
+    // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.7）：默认只探测、不建表。
+    // 多账号并发物化共用上面的 single-flight；探不到则带 version id fail-closed。
+    await this.schemaEnsurer(this.pool, {
+      capability: 'risk_control',
+      sinceVersion: '0061_risk_writer_ownership_and_outbox',
+      ddl: [RISK_SCHEMA_SQL],
+    });
     // 本地保留清理（change retention-local-purge）：risk_counters 配额计数流水由本属主**自驱**日频 purge
     // ——不再由面板层 retention-sweeper 跨域伸手进来调（本 change 只搬「谁来触发」，purge 语义/阈值不动）。
     // 只调既有的 purgeCountersOlderThan（DELETE 走 occurred_at 索引、只删 risk_counters 过期行、不碰

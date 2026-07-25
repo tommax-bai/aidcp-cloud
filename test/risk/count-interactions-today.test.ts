@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
+import type { SchemaEnsurer } from '../../src/kernel/schema-capability-contract.js';
 import { PgRiskStore } from '../../src/risk/pg-risk-store.js';
+
+const readySchemaEnsurer: SchemaEnsurer = async () => 'ready';
 
 /**
  * countInteractionsTodayForAccount（change content-schedule-comments）：
@@ -17,7 +20,7 @@ function makeStore(n: string) {
     },
     end: async () => {},
   } as unknown as pg.Pool;
-  return { store: new PgRiskStore({ pool }), seen };
+  return { store: new PgRiskStore({ pool, schemaEnsurer: readySchemaEnsurer }), seen };
 }
 
 test('countInteractionsTodayForAccount: 按账号+action 过滤、含当日下界、count 文本解析为数字', async () => {
@@ -42,7 +45,7 @@ test('todayTotalsForAccount: 今日用量按 Asia/Shanghai 自然日聚合', asy
     },
     end: async () => {},
   } as unknown as pg.Pool;
-  const store = new PgRiskStore({ pool });
+  const store = new PgRiskStore({ pool, schemaEnsurer: readySchemaEnsurer });
 
   const totals = await store.todayTotalsForAccount('acc-1');
   assert.equal(totals.view, 7);
@@ -59,6 +62,6 @@ test('countInteractionsTodayForAccount: 空结果回 0（不为 NaN）', async (
     },
     end: async () => {},
   } as unknown as pg.Pool;
-  const store = new PgRiskStore({ pool });
+  const store = new PgRiskStore({ pool, schemaEnsurer: readySchemaEnsurer });
   assert.equal(await store.countInteractionsTodayForAccount('acc-x', 'comment'), 0);
 });

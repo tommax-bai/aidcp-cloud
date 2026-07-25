@@ -96,7 +96,7 @@ export class PgRiskCounterOutboxStore implements RiskCounterOutbox {
       });
   }
 
-  /** schema 由 PgRiskStore.init() 的 RISK_SCHEMA_SQL 统一建立（与 migrations/0061 同源）。 */
+  /** schema 由迁移建立；PgRiskStore.init() 会按 RISK_SCHEMA_SQL 统一探测对象形状。 */
   async init(): Promise<void> {
     // 只做一次存在性自证：表缺失时诚实抛错，绝不静默降级为「记不上账照跑」。
     await this.pool.query('SELECT 1 FROM risk_counter_outbox LIMIT 1');

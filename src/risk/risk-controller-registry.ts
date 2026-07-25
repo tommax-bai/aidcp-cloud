@@ -150,7 +150,14 @@ export class RiskControllerRegistry {
   private materialize(accountId: string): Promise<RiskController> {
     let p = this.controllers.get(accountId);
     if (!p) {
-      p = this.createController(accountId);
+      let retained!: Promise<RiskController>;
+      retained = this.createController(accountId).catch((err) => {
+        // 创建失败不是一个可用 controller。只驱逐当前这条 Promise，避免永久重放同一个 rejection；
+        // 下一次真实请求会重新从 store 初始化/读库，但这里不做自动重试。
+        if (this.controllers.get(accountId) === retained) this.controllers.delete(accountId);
+        throw err;
+      });
+      p = retained;
       this.controllers.set(accountId, p);
     }
     return p;

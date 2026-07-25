@@ -2682,6 +2682,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   // 无 AIDCP_PG_*_URL），owner resolver 回落到同一份配置 ⇒ 逐字相同（只核变量名，未读取任何值）。
   const riskStore = new PgRiskStore({
     pool: automationPool,
+    schemaEnsurer: ensureCapabilitySchema,
     ...(deploymentTarget ? { executionTarget: deploymentTarget } : {}),
     ownershipMode,
   });
@@ -2860,7 +2861,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   let riskReconciler: RiskCounterReconciler | undefined;
   if (deploymentTarget && writerLock) {
     try {
-      // schema 自愈（本仓无迁移执行器）：outbox 表与 risk_counters.outbox_id 都在 RISK_SCHEMA_SQL 里。
+      // schema 只探测、不自愈：outbox 表与 risk_counters.outbox_id 都必须已由迁移建立。
       await riskStore.init();
       // Block③ L3：risk_counter_outbox 属 automation，且 MUST 与 riskStore **同一个池**——
       // 记账 exactly-once 全靠 risk_counters.outbox_id 上的唯一索引 + 单事务「写计数 + 标 applied」，
@@ -2917,7 +2918,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
         title: '风控记账 outbox 未能启用，记账退回改动前的进程内路径',
         detail:
           `${detail}。此时「崩在回执与记账之间不丢账」这条保证不成立，MUST 尽快修复。` +
-          `常见原因：migrations/0061 未执行且 init() 自愈 SQL 也失败（无建表权限）。`,
+          `常见原因：migrations/0061 未执行、schema 对象不完整或数据库连接失败。`,
       });
     }
   }

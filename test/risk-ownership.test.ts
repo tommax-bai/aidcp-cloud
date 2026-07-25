@@ -16,9 +16,11 @@ import { RiskControllerRegistry } from '../src/risk/risk-controller-registry.js'
 import { RiskStateNotOwnedError } from '../src/risk/ownership.js';
 import { ConnectionRuntimeRegistry } from '../src/orchestrator/connection-runtime.js';
 import type { EdgeSession } from '../src/comm/ws-server.js';
+import type { SchemaEnsurer } from '../src/kernel/schema-capability-contract.js';
 import type { RiskState, RiskStore } from '../src/risk/types.js';
 
 const silent = { log() {}, warn() {}, error() {} };
+const readySchemaEnsurer: SchemaEnsurer = async () => 'ready';
 
 function stateOf(accountId: string, status: RiskState['status']): RiskState {
   return {
@@ -56,7 +58,7 @@ function fakePool(opts: { conditionalRowCount: number; owner: string | null; acc
 
 test('条件写命中（rowCount>0）→ 正常返回，不回读归属、不再多写一次', async () => {
   const { pool, queries } = fakePool({ conditionalRowCount: 1, owner: 'dev' });
-  const store = new PgRiskStore({ pool, executionTarget: 'dev' });
+  const store = new PgRiskStore({ pool, schemaEnsurer: readySchemaEnsurer, executionTarget: 'dev' });
   await store.saveState(stateOf('acc-1', 'restricted'));
   assert.equal(queries.filter((q) => q.includes('WITH owner AS')).length, 1, '走带谓词的条件写');
   assert.equal(queries.filter((q) => q.startsWith('SELECT execution_target')).length, 0, '命中就不回读');
@@ -74,7 +76,7 @@ test('并发接管：条件写 0 行 → 抛 RiskStateNotOwnedError，三种原�
     ['账号不存在', { conditionalRowCount: 0, owner: null, accountExists: false }, 'account_not_found', undefined],
   ] as const) {
     const { pool } = fakePool(opts);
-    const store = new PgRiskStore({ pool, executionTarget: 'dev' });
+    const store = new PgRiskStore({ pool, schemaEnsurer: readySchemaEnsurer, executionTarget: 'dev' });
     await assert.rejects(
       () => store.saveState(stateOf('acc-1', 'normal')),
       (err: unknown) => {
@@ -90,7 +92,7 @@ test('并发接管：条件写 0 行 → 抛 RiskStateNotOwnedError，三种原�
 
 test('被接管后 MUST NOT 回落无谓词写——那正是「先写方盖回接管方」的原路', async () => {
   const { pool, queries } = fakePool({ conditionalRowCount: 0, owner: 'ol' });
-  const store = new PgRiskStore({ pool, executionTarget: 'dev' });
+  const store = new PgRiskStore({ pool, schemaEnsurer: readySchemaEnsurer, executionTarget: 'dev' });
   await assert.rejects(() => store.saveState(stateOf('acc-1', 'normal')));
   assert.equal(
     queries.filter((q) => q.includes('INSERT INTO risk_state') && !q.includes('WITH owner AS')).length,
@@ -101,7 +103,7 @@ test('被接管后 MUST NOT 回落无谓词写——那正是「先写方盖回�
 
 test('未配置 executionTarget → 条件写模式恒 off，走历史无谓词 upsert（回滚/零回归）', async () => {
   const { pool, queries } = fakePool({ conditionalRowCount: 1, owner: null });
-  const store = new PgRiskStore({ pool });
+  const store = new PgRiskStore({ pool, schemaEnsurer: readySchemaEnsurer });
   assert.deepEqual(store.ownership(), { mode: 'off', target: null });
   await store.saveState(stateOf('acc-1', 'normal'));
   assert.equal(queries.filter((q) => q.includes('WITH owner AS')).length, 0);
@@ -140,6 +142,27 @@ test('归属跟随连接后：可写 controller 直接物化，不再有「非�
   const { registry } = registryWith();
   const controller = await registry.getWritableController('acc-1');
   assert.ok(controller);
+  assert.deepEqual(registry.materializedAccountIds(), ['acc-1']);
+});
+
+test('controller 创建失败后驱逐 rejected Promise，下一次真实请求可重新物化', async () => {
+  class FlakyInitStore extends MemoryRiskStore {
+    initCalls = 0;
+
+    async init(): Promise<void> {
+      this.initCalls += 1;
+      if (this.initCalls === 1) throw new Error('schema probe interrupted');
+    }
+  }
+
+  const store = new FlakyInitStore();
+  const { registry } = registryWith(store);
+  await assert.rejects(() => registry.getWritableController('acc-1'), /schema probe interrupted/);
+  assert.deepEqual(registry.materializedAccountIds(), [], 'rejected Promise MUST NOT 留在账号缓存');
+
+  const controller = await registry.getWritableController('acc-1');
+  assert.ok(controller);
+  assert.equal(store.initCalls, 2);
   assert.deepEqual(registry.materializedAccountIds(), ['acc-1']);
 });
 
