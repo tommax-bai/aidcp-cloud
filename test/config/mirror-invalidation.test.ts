@@ -13,6 +13,15 @@ import {
   MirrorVersionStore,
   writeWithMirrorBump,
 } from '../../src/config/mirror-version-store.js';
+import {
+  ConfigMirrorBumpRelay,
+  OutboxMirrorVersionBumper,
+} from '../../src/config/mirror-bump-outbox.js';
+import {
+  PgConfigMirrorBumpSink,
+  UnavailableConfigMirrorBumpSink,
+} from '../../src/config/mirror-bump-sink.js';
+import type { ConfigMirrorBumpSink } from '../../src/kernel/config-mirror-bump-types.js';
 import { ConfigMirrorRefresher, resolveMirrorPollMs } from '../../src/config/mirror-refresher.js';
 import { CONFIG_MIRRORS, CONFIG_MIRROR_KEYS } from '../../src/config/mirror-registry.js';
 import {
@@ -39,6 +48,12 @@ function fakePg() {
   const quotas = new Map<string, Record<string, unknown>>();
   const personas = new Map<string, Record<string, unknown>>();
   const refusals: Array<{ mirrorKey: string; target: string; count: number }> = [];
+  // change block3-l3-config-mirror-bump-decouple：automation 侧走 outbox + 中继 + api 侧 inbox 去重。
+  const outbox: Array<{ id: number; topic: string; payload: unknown; execution_target: string; created_at: Date }> = [];
+  const cursors = new Map<string, number>();
+  const topicCursors = new Map<string, number>();
+  const inbox = new Set<string>();
+  let outboxSeq = 0;
   let versionReadFails = false;
   let writeFails = false;
 
@@ -47,6 +62,72 @@ function fakePg() {
     const probe = schemaProbe(sql);
     if (probe) return probe;
     if (sql.includes('CREATE TABLE') || sql.includes('CREATE INDEX') || sql.includes('ALTER TABLE')) return { rows: [] };
+    if (sql.includes('INSERT INTO event_outbox ')) {
+      const [topic, payloadJson, target] = params as [string, string, string];
+      outboxSeq += 1;
+      outbox.push({
+        id: outboxSeq,
+        topic,
+        payload: JSON.parse(payloadJson) as unknown,
+        execution_target: target,
+        created_at: new Date(),
+      });
+      return { rows: [{ id: outboxSeq }] };
+    }
+    // change outbox-listen-and-topic-cursor：消费游标按 (consumer, target, topic) 分维之后，读游标是
+    // 「主题行 → 遗留聚合行 → 0」的两级回落，拉取按主题各拉一批。下面四支照实现的 SQL 形状分派；
+    // 顺序 MUST 在遗留分支之前——两级回落那条 SELECT 里同时提到两张游标表，先匹配到谁就按谁走。
+    if (sql.startsWith('SELECT COALESCE(')) {
+      const [consumer, target, topic] = params as [string, string, string];
+      const scoped = topicCursors.get(`${consumer}|${target}|${topic}`);
+      const legacy = cursors.get(`${consumer}|${target}`);
+      return { rows: [{ last_id: scoped ?? legacy ?? 0 }], rowCount: 1 };
+    }
+    if (sql.startsWith('SELECT count(*)::bigint AS pending')) {
+      const [target, topic, after] = params as [string, string, number];
+      const pending = outbox.filter(
+        (e) => e.execution_target === target && e.topic === topic && e.id > Number(after),
+      ).length;
+      return { rows: [{ pending }], rowCount: 1 };
+    }
+    if (sql.startsWith('SELECT id, topic, payload')) {
+      const [target, topic, afterId, limit] = params as [string, string, number, number];
+      const rows = outbox
+        .filter((e) => e.execution_target === target && e.topic === topic && e.id > Number(afterId))
+        .sort((a, b) => a.id - b.id)
+        .slice(0, Number(limit));
+      return { rows, rowCount: rows.length };
+    }
+    if (sql.includes('INSERT INTO event_outbox_topic_cursor')) {
+      const [consumer, target, topic, lastId] = params as [string, string, string, number];
+      const key = `${consumer}|${target}|${topic}`;
+      topicCursors.set(key, Math.max(topicCursors.get(key) ?? 0, Number(lastId)));
+      return { rows: [], rowCount: 1 };
+    }
+    if (sql.includes('FROM event_outbox_cursor')) {
+      const key = `${String((params ?? [])[0])}|${String((params ?? [])[1])}`;
+      const last = cursors.get(key);
+      return { rows: last === undefined ? [] : [{ last_id: last }] };
+    }
+    if (sql.includes('INSERT INTO event_outbox_cursor')) {
+      const [consumer, target, lastId] = params as [string, string, number];
+      const key = `${consumer}|${target}`;
+      cursors.set(key, Math.max(cursors.get(key) ?? 0, Number(lastId)));
+      return { rows: [] };
+    }
+    if (sql.includes('FROM event_outbox')) {
+      const [target, lastId, limit] = params as [string, number, number];
+      const rows = outbox
+        .filter((e) => e.execution_target === target && e.id > Number(lastId))
+        .slice(0, Number(limit));
+      return { rows };
+    }
+    if (sql.includes('INSERT INTO config_mirror_bump_inbox')) {
+      const dedupKey = String((params ?? [])[0]);
+      if (inbox.has(dedupKey)) return { rows: [], rowCount: 0 };
+      inbox.add(dedupKey);
+      return { rows: [], rowCount: 1 };
+    }
     if (sql.includes('INSERT INTO config_mirror_version')) {
       const key = String((params ?? [])[0]);
       versions.set(key, (versions.get(key) ?? 0) + 1);
@@ -97,9 +178,40 @@ function fakePg() {
     quotas,
     personas,
     refusals,
+    outbox,
+    cursors,
+    topicCursors,
+    inbox,
     setVersionReadFails: (v: boolean) => { versionReadFails = v; },
     setWriteFails: (v: boolean) => { writeFails = v; },
   };
+}
+
+/**
+ * automation 属主的配置（本文件里是 `quota_config`）自 change block3-l3-config-mirror-bump-decouple 起
+ * **不再**在自己的写事务里直接推 api 的版本表：同事务写本域 outbox 行 → 进程内中继 → api 侧 inbox 去重 + 推版本。
+ * 本 helper 把这条链在假 PG 上接起来，供各用例复用。
+ */
+function wireAutomationBumpChannel(
+  db: ReturnType<typeof fakePg>,
+  opts: { sink?: ConfigMirrorBumpSink } = {},
+) {
+  const versionStore = new MirrorVersionStore({ pool: db.pool, notifyEnabled: false });
+  const sink = opts.sink ?? new PgConfigMirrorBumpSink({ pool: db.pool, versionStore });
+  const relay = new ConfigMirrorBumpRelay({
+    pool: db.pool,
+    sink,
+    executionTarget: 'dev',
+    logger: { log: () => {}, warn: () => {} },
+  });
+  const bumper = new OutboxMirrorVersionBumper({
+    allowedMirrorKeys: new Set(
+      CONFIG_MIRROR_KEYS.filter((key) => CONFIG_MIRRORS[key].owner === 'automation'),
+    ),
+    executionTarget: 'dev',
+    logger: { log: () => {}, warn: () => {} },
+  });
+  return { versionStore, sink, relay, bumper };
 }
 
 /** 每个用例跑完都卸载事实源，避免污染别的用例（模块级单例）。 */
@@ -137,20 +249,26 @@ test('7.8 穷举防漂移：未登记的 mirrorKey 在类型层就取不到（ty
 
 // ── §2 版本推进 ──────────────────────────────────────────────────────────────
 
-test('2.2/2.3 写配置与推版本同事务；写库失败则版本不进、镜像不刷', async () => {
+test('2.2/2.3 写配置与失效信号入队同事务；写库失败则信号不入队、版本不进、镜像不刷', async () => {
   const db = fakePg();
-  const versionStore = new MirrorVersionStore({ pool: db.pool, notifyEnabled: false });
-  const store = new QuotaConfigStore({ pool: db.pool, mirrorVersionBumper: versionStore });
+  const { relay, bumper } = wireAutomationBumpChannel(db);
+  const store = new QuotaConfigStore({ pool: db.pool, mirrorVersionBumper: bumper });
   await store.init();
 
   await store.set('normal', 'like', { daily: 42 }, 'tester');
-  assert.equal(db.versions.get('quota_config'), 1, '写成功 → 版本 +1');
-  assert.equal(store.windowQuotasFor('normal').day.like, 42);
+  assert.equal(db.outbox.length, 1, '写成功 → 本域 outbox 落一条失效信号（与配置写同一笔提交）');
+  assert.equal(db.versions.get('quota_config'), undefined, '此刻版本还没进：跨库那一步已改成异步中继');
+  assert.equal(store.windowQuotasFor('normal').day.like, 42, '本进程镜像仍然是写透的（同步）');
+
+  assert.equal(await relay.runOnce(), 1, '中继投递一条');
+  assert.equal(db.versions.get('quota_config'), 1, '投递后版本 +1');
 
   db.setWriteFails(true);
   await assert.rejects(() => store.set('normal', 'like', { daily: 99 }, 'tester'));
-  assert.equal(db.versions.get('quota_config'), 1, '写库失败 MUST NOT 推进版本');
+  assert.equal(db.outbox.length, 1, '写库失败 MUST NOT 入队失效信号（同一笔事务回滚）');
   assert.equal(store.windowQuotasFor('normal').day.like, 42, '写库失败 MUST NOT 刷新镜像');
+  await relay.runOnce();
+  assert.equal(db.versions.get('quota_config'), 1, '写库失败 MUST NOT 推进版本');
 });
 
 test('2.2 版本由库侧自增、与主机时钟无关（时钟回拨不影响单调）', async () => {
@@ -178,11 +296,11 @@ test('3.1 轮询周期超硬上界 MUST 拒绝启动并诚实报错，绝不静�
   assert.throws(() => resolveMirrorPollMs('abc'), /非法/);
 });
 
-test('7.1 写侧改配置 → 读侧在「轮询周期 + 一次查询」内读到新值，无需重启', withFreshnessCleanup(async () => {
+test('7.1 写侧改配置 → 读侧在「中继一轮 + 轮询周期」内读到新值，无需重启', withFreshnessCleanup(async () => {
   const db = fakePg();
-  const versionStore = new MirrorVersionStore({ pool: db.pool, notifyEnabled: false });
+  const { versionStore, relay, bumper } = wireAutomationBumpChannel(db);
   // 写侧进程（如 dev）与读侧进程（如 ol）共库，各自持一份镜像。
-  const writer = new QuotaConfigStore({ pool: db.pool, mirrorVersionBumper: versionStore });
+  const writer = new QuotaConfigStore({ pool: db.pool, mirrorVersionBumper: bumper });
   const reader = new QuotaConfigStore({ pool: db.pool });
   await writer.init();
   await reader.init();
@@ -202,9 +320,11 @@ test('7.1 写侧改配置 → 读侧在「轮询周期 + 一次查询」内读�
   await writer.set('normal', 'like', { daily: 7 }, 'dev-panel');
   assert.notEqual(reader.windowQuotasFor('normal').day.like, 7, '未比对前读侧仍是旧值（这正是今天的缺陷）');
 
+  // 新增的一段：跨库那一步现在由中继承担（常态由提交后 wake() 立刻触发，这里显式驱动一轮）。
+  await relay.runOnce();
   now += 5000;
   await refresher.runOnce();
-  assert.equal(reader.windowQuotasFor('normal').day.like, 7, '一轮比对内读侧必须读到新值');
+  assert.equal(reader.windowQuotasFor('normal').day.like, 7, '中继一轮 + 比对一轮内读侧必须读到新值');
   refresher.stop();
 }));
 
@@ -473,3 +593,81 @@ test('6.2 拒绝记账按时间窗聚合：热路径连打千次也只落有限�
   assert.equal(total, 1000, '聚合 MUST NOT 少计——每一次拒绝都要落进累加值');
   assert.ok(db.refusals.every((r) => r.target === 'dev'), '记账须带 executionTarget');
 }));
+
+// ── change block3-l3-config-mirror-bump-decouple：跨库事务拆解后的四条不变量 ────────────────
+
+test('B1 属主闸：非 api 属主的 mirrorKey MUST NOT 在写事务里直接推 api 版本表（穷举全表）', async () => {
+  const db = fakePg();
+  const versionStore = new MirrorVersionStore({ pool: db.pool, notifyEnabled: false });
+  for (const key of CONFIG_MIRROR_KEYS) {
+    const owner = CONFIG_MIRRORS[key].owner;
+    if (owner === 'api') {
+      await versionStore.bumpInTx(db.pool, key); // 同库同事务，照常
+      assert.equal(db.versions.get(key), 1, `${key} 属 api，同事务推进应当成功`);
+      await assert.rejects(
+        () => versionStore.applyRelayedBumpInTx(db.pool, key),
+        /MUST 走同事务的 bumpInTx/,
+        `${key} 属 api，绕一圈中继说明接线错了`,
+      );
+      continue;
+    }
+    // 这条断言就是「门禁天然失明」的补位：SQL 扫描看不见方法调用，运行时断言看得见。
+    await assert.rejects(
+      () => versionStore.bumpInTx(db.pool, key),
+      /跨库两阶段提交/,
+      `${key} 属 ${owner}，MUST NOT 在自己的写事务里推 api 的版本表`,
+    );
+    assert.equal(db.versions.get(key), undefined, '被拒的 key 绝不能留下半笔写入');
+  }
+});
+
+test('B2 入队闸：api 属主的 mirrorKey MUST NOT 绕道 automation 的 outbox', async () => {
+  const db = fakePg();
+  const { bumper } = wireAutomationBumpChannel(db);
+  await assert.rejects(
+    () => bumper.bumpInTx(db.pool, 'persona_config'),
+    /MUST NOT 走本域 outbox 中继/,
+  );
+  assert.equal(db.outbox.length, 0, '被拒的 key 绝不能留下 outbox 行');
+});
+
+test('B3 幂等：同一条失效信号投递两次只推一次版本（inbox 去重）', async () => {
+  const db = fakePg();
+  const { sink } = wireAutomationBumpChannel(db);
+  const first = await sink.applyBump({ mirrorKey: 'quota_config', dedupKey: 'event_outbox:dev:1' });
+  const second = await sink.applyBump({ mirrorKey: 'quota_config', dedupKey: 'event_outbox:dev:1' });
+  assert.deepEqual(first, { applied: true });
+  assert.deepEqual(second, { applied: false }, '重放 MUST 是 no-op，MUST NOT 报错');
+  assert.equal(db.versions.get('quota_config'), 1, '版本只推进一次');
+});
+
+test('B4 丢投兜底：投递失败 MUST 保留信号与游标、恢复后补投，绝不静默丢弃', async () => {
+  const db = fakePg();
+  const versionStore = new MirrorVersionStore({ pool: db.pool, notifyEnabled: false });
+  const realSink = new PgConfigMirrorBumpSink({ pool: db.pool, versionStore });
+  let down = true;
+  const flakySink: ConfigMirrorBumpSink = {
+    applyBump: (req) => (down ? Promise.reject(new Error('api 不可达')) : realSink.applyBump(req)),
+  };
+  const { relay, bumper } = wireAutomationBumpChannel(db, { sink: flakySink });
+  const store = new QuotaConfigStore({ pool: db.pool, mirrorVersionBumper: bumper });
+  await store.init();
+
+  await store.set('normal', 'like', { daily: 5 }, 'tester');
+  assert.equal(await relay.runOnce(), 0, '投递失败 → 本轮零条推进');
+  assert.equal(db.versions.get('quota_config'), undefined, '版本不进');
+  assert.deepEqual([...db.cursors.values()], [], '遗留聚合游标 MUST NOT 越过投递失败的那条');
+  assert.deepEqual([...db.topicCursors.values()], [], '主题游标 MUST NOT 越过投递失败的那条');
+  assert.equal(db.outbox.length, 1, '信号仍在 outbox 里等补投');
+
+  down = false;
+  assert.equal(await relay.runOnce(), 1, '通道恢复后自动补投');
+  assert.equal(db.versions.get('quota_config'), 1, '补投后版本才推进');
+
+  // 通道彻底不可用（automation 模式未配 api 地址）同样是「堆积 + 抛错」，绝不是静默成功。
+  const dead = new UnavailableConfigMirrorBumpSink('未配 AIDCP_API_URL');
+  await assert.rejects(
+    () => dead.applyBump({ mirrorKey: 'quota_config', dedupKey: 'x' }),
+    /config_mirror_bump_sink_unavailable/,
+  );
+});

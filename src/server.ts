@@ -356,11 +356,23 @@ import { startOutboxNotifyListener, type NotifyClientLike } from './transport/ou
 import { startOutboxHealthLog, type OutboxHealthSource } from './transport/outbox-health.js';
 /** automation 内部只读 API 的默认监听端口（可由 AIDCP_AUTOMATION_PORT 覆盖）；api 侧 base URL 由 AIDCP_AUTOMATION_URL 指定。 */
 const DEFAULT_AUTOMATION_READ_API_PORT = 8093;
+/** api 进程内部 API 的默认监听端口（可由 `AIDCP_API_PORT` 覆盖）。 */
+const DEFAULT_API_INTERNAL_API_PORT = 8094;
 import { PgAlertStore } from './alerts/index.js';
 // 跨进程配置镜像失效通道（change config-mirror-cross-process-invalidation）。
 import pg from 'pg';
 import { MirrorVersionStore } from './config/mirror-version-store.js';
 import { ConfigMirrorRefresher } from './config/mirror-refresher.js';
+// 跨域失效信号：本域 outbox 入队 + 进程内中继 + api 侧 inbox 去重落地
+// （change block3-l3-config-mirror-bump-decouple）。
+import { CONFIG_MIRRORS, CONFIG_MIRROR_KEYS } from './config/mirror-registry.js';
+import { ConfigMirrorBumpRelay, OutboxMirrorVersionBumper } from './config/mirror-bump-outbox.js';
+import { PgConfigMirrorBumpSink, UnavailableConfigMirrorBumpSink } from './config/mirror-bump-sink.js';
+import {
+  ConfigMirrorBumpHttpClient,
+  registerConfigMirrorBumpRoutes,
+} from './transport/config-mirror-bump-http.js';
+import type { ConfigMirrorBumpSink } from './kernel/config-mirror-bump-types.js';
 import { allowsTransportWhenGateUnknown } from './config/mirror-stop-work.js';
 import { noteMirrorStaleRefusal } from './config-mirror-freshness.js';
 import { automationOperationDescriptorFor } from './comm/operation-registry.js';
@@ -649,6 +661,8 @@ interface CompositionContext {
   // 但语义为「config_mirror_version 专用」；面板等 api 属主读写按属主取用本字段，避免与 mirror 语义混淆。
   apiPool: pg.Pool;
   configMirrorRefresher: ConfigMirrorRefresher;
+  /** api 侧失效信号落地端（segA 构造；api 模式的内部 HTTP 监听把它暴露成 route）。 */
+  configMirrorBumpSink: ConfigMirrorBumpSink;
   contentScheduleStore: ContentScheduleStore;
   credentialStore: CredentialStore;
   curatedContentStore: CuratedContentStore | undefined;
@@ -761,6 +775,30 @@ async function main(): Promise<void> {
   // Block② 2e：automation 独立进程起内部只读 API（供 api 进程经 RiskReadHttpClient 读风控投影）。
   // 仅 automation 模式起：monolith/core 的 segD 与 registry 同进程、走本地适配（不需 HTTP）；content/api 无 registry。
   if (mode === 'automation') await startAutomationReadApi(ctx);
+  // Block③ L3：api 独立进程起内部写 API（供 automation 进程的失效信号中继把 bump 推过来）。
+  // 仅 api 模式起：monolith/core/content 的 api 池就在本进程、中继走本地 sink、零 HTTP。
+  if (mode === 'api') await startApiInternalApi(ctx);
+}
+
+/**
+ * api 进程独占的内部 API：把本进程的配置镜像失效信号落地端（`config_mirror_version` 的属主）
+ * 暴露成一条内部 HTTP route，供 automation 进程的中继投递（change block3-l3-config-mirror-bump-decouple）。
+ *
+ * 这是本目录里**唯一一条写 route**，且写的只是「某项配置变了，请重读」的失效信号 ——
+ * 不搬配置内容、不接受任何配置值，消费方永远从自己的权威重读。幂等由 `dedupKey` 承担。
+ * 仅 api 模式调用（monolith/core/content 的 api 池就在本进程，中继走本地 sink、不需 HTTP）。
+ */
+async function startApiInternalApi(ctx: CompositionContext): Promise<void> {
+  const sink = ctx.configMirrorBumpSink;
+  if (!sink) {
+    console.warn('[aidcp-cloud] api 内部 API 未起：配置镜像失效信号落地端不可用（segA 未构造）');
+    return;
+  }
+  const port = readEnvPort('AIDCP_API_PORT') ?? DEFAULT_API_INTERNAL_API_PORT;
+  const httpServer = new InternalHttpServer();
+  registerConfigMirrorBumpRoutes(httpServer, sink);
+  const actual = await httpServer.listen(port);
+  console.log(`[aidcp-cloud] api 内部 API 已监听 127.0.0.1:${actual}（config-mirror bump 落地端点）`);
 }
 
 /**
@@ -901,12 +939,63 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   const automationPool = new pg.Pool({ ...resolveOwnerPgConfig('automation'), max: 30 });
   const contentPool = new pg.Pool({ ...resolveOwnerPgConfig('content'), max: 30 });
   // config_mirror_version 属 api；configMirrorPool 即 api 池（保持既有变量名，全部现有 `pool: configMirrorPool` 引用零改）。
-  // ⚠️ L3 blocker：quota/pacing/session/resume 四个 automation 配置 store 在自己写事务里同连接 bump 本 api 表，
-  //    故它们此处仍钉 api 池（configMirrorPool），拆库前必须先把该 bump 移出跨库事务，见交接文档 §4.2 风险②。
+  // ✅ L3 blocker 已解（change block3-l3-config-mirror-bump-decouple）：quota/pacing/session/resume 四个
+  //    automation 配置 store 不再在自己的写事务里同连接 bump 本 api 表，改为「本域 outbox 行同事务入队 →
+  //    进程内中继 → api 库内 inbox 去重 + 推版本」，故它们已改钉 automation 池（见下方四处构造）。
   const configMirrorPool = apiPool;
   // TokenUsageStore 属 content，但用专用小池（热路径隔离 max:4），单独构造、不共享 content 主池。
   const tokenUsagePool = new pg.Pool({ ...resolveOwnerPgConfig('content'), max: 4 });
   const mirrorVersionStore = new MirrorVersionStore({ pool: configMirrorPool });
+
+  // ── 跨域配置镜像失效信号（change block3-l3-config-mirror-bump-decouple）────────────────────
+  // 落地端（api 库内「inbox 去重 + 推版本」一笔事务）。
+  //   - monolith / core / content / api：本进程持有 api 池 ⇒ 本地实现，零 HTTP、逐字节等价。
+  //   - automation：本进程**不该**持有 api 库的连接。配了 AIDCP_API_URL 就走内部 HTTP 推给 api 进程；
+  //     没配则注入不可用实现——它一律抛错、绝不假装成功，中继因此保留 outbox 行与游标，
+  //     信号原地堆着等通道恢复（红线：绝不静默丢投）。
+  const configMirrorBumpSink: ConfigMirrorBumpSink =
+    serviceModeFromEnv() === 'automation'
+      ? (() => {
+          const apiUrl = readEnvString('AIDCP_API_URL');
+          if (!apiUrl) {
+            console.warn(
+              '[config-mirror] automation 模式未配 AIDCP_API_URL ⇒ 失效信号无处投递：' +
+                'outbox 会持续堆积并每轮告警（绝不静默丢弃），配好该 env 后自动补投',
+            );
+            return new UnavailableConfigMirrorBumpSink('automation 模式未配 AIDCP_API_URL');
+          }
+          return new ConfigMirrorBumpHttpClient(new InternalHttpClient(apiUrl));
+        })()
+      : new PgConfigMirrorBumpSink({ pool: apiPool, versionStore: mirrorVersionStore });
+  // 生产方进程内中继 + 事务型入队器。
+  // execution_target 缺失/非法 ⇒ **不启动本通道**（CLAUDE.md §2：target 不合法即不起该 worker）：
+  // 四个 store 退回「无 bumper」形态 —— 写库照常、不开事务、不入队，与本通道引入之前逐字一致。
+  // 这条降级是**吵闹**的（下面 warn），MUST NOT 被理解为「静默继续」：它意味着跨进程失效对这四项失效。
+  let configMirrorBumpRelay: ConfigMirrorBumpRelay | undefined;
+  let configMirrorOutboxBumper: OutboxMirrorVersionBumper | undefined;
+  if (deploymentTarget) {
+    configMirrorBumpRelay = new ConfigMirrorBumpRelay({
+      pool: automationPool,
+      sink: configMirrorBumpSink,
+      executionTarget: deploymentTarget,
+    });
+    // 只允许属 automation 的 mirrorKey 走本通道（闭集合由属主表算出，
+    // 把「api 属主的配置绕道 automation 的 outbox」这种反向错接线在第一次写入时就打出来）。
+    const automationOwnedMirrorKeys = new Set<string>(
+      CONFIG_MIRROR_KEYS.filter((key) => CONFIG_MIRRORS[key].owner === 'automation'),
+    );
+    const relay = configMirrorBumpRelay;
+    configMirrorOutboxBumper = new OutboxMirrorVersionBumper({
+      allowedMirrorKeys: automationOwnedMirrorKeys,
+      executionTarget: deploymentTarget,
+      onCommitted: () => relay.wake(),
+    });
+  } else {
+    console.warn(
+      '[config-mirror] AIDCP_DEPLOY_ENV 缺失/非法 ⇒ 四类限频配置的跨进程失效通道不启动：' +
+        '改配置只对本进程生效，别的进程要到重启才可见（绝不假装已投递）',
+    );
+  }
 
   // 模型配置 + 加密凭据（change console-model-provider-config）。
   // 先于 LLM 客户端构造：模型名经 getCached() 运行时解析（热加载）；DashScope 密钥库内优先、回退 env。
@@ -934,19 +1023,19 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   });
   // 安全限额（change safety-quota-config，stream D）。缺行/非法值一律回落 deriveWindowQuotas 写死默认，绝不 brick。
   const quotaConfigStore = new QuotaConfigStore({
-    pool: configMirrorPool,
-    mirrorVersionBumper: mirrorVersionStore,
+    pool: automationPool,
+    mirrorVersionBumper: configMirrorOutboxBumper,
   });
   // 操作兜底 floor（change pacing-floor-config-min-interval）：四类操作最小间隔兜底区间、全局一套；
   // 缺行/非法值一律回落 BUILTIN_FLOOR 内置默认并在读出口 clamp，绝不 brick、绝不零延迟。
   const pacingConfigStore = new PacingConfigStore({
-    pool: configMirrorPool,
-    mirrorVersionBumper: mirrorVersionStore,
+    pool: automationPool,
+    mirrorVersionBumper: configMirrorOutboxBumper,
   });
   // 单场会话上限（全局单例，change restore-auto-resume-and-global-safety-config）：全局单场时长 + 互动预算、对所有账号生效；缺行/非法回落写死默认，绝不 brick。
   const sessionConfigStore = new SessionConfigStore({
-    pool: configMirrorPool,
-    mirrorVersionBumper: mirrorVersionStore,
+    pool: automationPool,
+    mirrorVersionBumper: configMirrorOutboxBumper,
   });
   // 引流线索热度过滤阈值（全局单例，change feed-hot-lead-group-comment）：帖龄上限 / 速率阈值 / 最小赞，落安全页卡片、热加载。
   const hotLeadConfigStore = new HotLeadConfigStore({ schemaEnsurer: ensureCapabilitySchema,
@@ -956,8 +1045,8 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   // 自动续场护栏 + 看门狗阈值（全局单例，change restore-auto-resume-and-global-safety-config）：全局 rest_ratio / 活跃时段 /
   // 每日上限 / 看门狗两阈值、对所有账号生效；缺行/非法回落写死默认，绝不 brick。init 失败也不致命（空镜像→全回落默认）。
   const resumeConfigStore = new ResumeConfigStore({
-    pool: configMirrorPool,
-    mirrorVersionBumper: mirrorVersionStore,
+    pool: automationPool,
+    mirrorVersionBumper: configMirrorOutboxBumper,
   });
   // 内容排期（change content-schedule-auto-publish）：全局「内容可自动时段」+ 每账号发帖排期。
   // fail-closed：未配 / 非法 = 不自动（与浏览掩码「缺失=全天活跃」刻意相反）；init 失败不致命（空镜像 = 全不自动）。
@@ -1088,6 +1177,11 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
       );
     }
   }
+  // 起失效信号中继（change block3-l3-config-mirror-bump-decouple）。
+  // 放在配置层 init 之后、且**在 try/catch 之外**：它读的是 outbox 行，与配置 store 是否 init 成功无关；
+  // 上一段 init 失败时更需要它跑起来把积压的信号投出去。start() 幂等，消费循环自吞错并 warn、不抛。
+  configMirrorBumpRelay?.start();
+
   // 启动期解密 DashScope 密钥（库内优先、回退 env）；明文仅用于构造图片客户端（万相），绝不日志化、绝不回前端。
   const dashscopeApiKey =
     (await credentialStore.getSecretForRuntime('dashscope', 'dashscope_api_key').catch(() => null)) ??
@@ -1975,6 +2069,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ctx.hotLeadConfigStore = hotLeadConfigStore;
   ctx.llm = llm;
   ctx.mirrorVersionStore = mirrorVersionStore;
+  ctx.configMirrorBumpSink = configMirrorBumpSink;
   ctx.modelConfigStore = modelConfigStore;
   ctx.ossUploader = ossUploader;
   ctx.pacingConfigStore = pacingConfigStore;
@@ -3107,6 +3202,10 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   // 一个进程一个实例；只对**版本变化**的 key 触发对应 store 重载。它同时是「新鲜度事实源」：
   // 闸门取值口（人设 / 暂停态 / 环境出口闸 / 慢启动锚点）经 src/config-mirror-freshness.ts 同步问它。
   // 整体开关 AIDCP_CONFIG_MIRROR_REFRESH=false 可秒级回滚——关掉即不安装事实源，全部闸门按今日现状运行。
+  // ⚠️ 拆库残留（不在 change block3-l3-config-mirror-bump-decouple 范围）：刷新器读的是 api 属主的
+  //    config_mirror_version。物理拆库后，跑在 automation 进程里的这份刷新器会变成「读别人的库」——
+  //    要么把版本读也收成 kernel 端口（api 侧内部只读投影），要么按属主各存一张版本表。
+  //    本刀只解「写事务跨库」，读侧解耦另开一刀；今天三池同库，行为零变化。
   const configMirrorRefresher = new ConfigMirrorRefresher({
     pool: configMirrorPool,
     versionStore: mirrorVersionStore,

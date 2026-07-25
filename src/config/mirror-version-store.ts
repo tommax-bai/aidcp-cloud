@@ -16,6 +16,22 @@
 
 import type pg from 'pg';
 import type { ConfigMirrorKey } from '../config-mirror-freshness.js';
+import type { MirrorQueryable, MirrorVersionBumper } from '../kernel/config-mirror-bump-types.js';
+import { CONFIG_MIRRORS } from './mirror-registry.js';
+
+/**
+ * 抽象与「同一笔提交」的包装随 change block3-l3-config-mirror-bump-decouple 抬进 kernel
+ * （automation 侧的四个限频配置 store 也要用它们，留在 api 属主域会造出跨域 import）。
+ * 本模块等值再导出，api 侧全部既有 import 路径逐字不变。
+ */
+export { writeWithMirrorBump, CONFIG_MIRROR_BUMP_TOPIC } from '../kernel/config-mirror-bump-types.js';
+export type {
+  MirrorQueryable,
+  MirrorVersionBumper,
+  ConfigMirrorBumpRequest,
+  ConfigMirrorBumpResult,
+  ConfigMirrorBumpSink,
+} from '../kernel/config-mirror-bump-types.js';
 
 export const CONFIG_MIRROR_VERSION_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS config_mirror_version (
@@ -35,25 +51,6 @@ CREATE INDEX IF NOT EXISTS idx_config_mirror_stale_refusal_hour
   ON config_mirror_stale_refusal (hour_bucket DESC);
 `;
 
-/** `pg.Pool` 与 `pg.PoolClient` 的公共子集——写路径按需在两者间切换。 */
-export interface MirrorQueryable {
-  query<R extends pg.QueryResultRow = pg.QueryResultRow>(
-    sql: string,
-    params?: unknown[],
-  ): Promise<pg.QueryResult<R>>;
-}
-
-/**
- * 版本推进器（写方依赖的最小接口）。注入式：**缺省即不推进**，行为逐位退回今日现状
- * （启动 + 本进程写入刷新），供单测与秒级回滚。
- */
-export interface MirrorVersionBumper {
-  /** 在**已开启的事务**内推进版本。MUST NOT 自开事务——它必须与配置写入同生共死。 */
-  bumpInTx(client: MirrorQueryable, mirrorKey: ConfigMirrorKey): Promise<void>;
-  /** 可选加速器：事务提交后发通知。非承重通道，失败只记日志。 */
-  notifyAfterCommit?(mirrorKey: ConfigMirrorKey): void;
-}
-
 export interface MirrorVersionStoreOptions {
   /** MUST 复用组合根已有的 Pool，MUST NOT 另开连接池。 */
   pool: pg.Pool;
@@ -71,6 +68,9 @@ interface VersionDbRow {
 export const CONFIG_MIRROR_NOTIFY_CHANNEL = 'aidcp_config_mirror';
 
 export class MirrorVersionStore implements MirrorVersionBumper {
+  /** 本实现写的是 api 属主的 `config_mirror_version`，故只能跑在 api 库的连接上。 */
+  readonly bumpDomain = 'api' as const;
+
   private readonly pool: pg.Pool;
   private readonly notifyEnabled: boolean;
   private readonly logger: Pick<Console, 'log' | 'warn'>;
@@ -89,8 +89,49 @@ export class MirrorVersionStore implements MirrorVersionBumper {
   /**
    * 在已开启的事务内推进版本。版本自增在库侧完成（`version + 1`），首次写入落 1。
    * 写库失败 → 整个事务回滚 → 版本不进、镜像不刷（`account-persona-config` 既有不变量原样保住）。
+   *
+   * 🔴 **属主闸（change block3-l3-config-mirror-bump-decouple 新增）**：只接受**属 api** 的
+   *    mirrorKey。这条断言堵的正是属主门禁的天然盲点——四个 automation 配置 store 曾在自己的写
+   *    事务里调本方法，走的是**方法调用而非自己的 SQL 字面量**，`AC-OWN-*` 的源码扫描看不见它，
+   *    于是「automation 的事务里写 api 的表」可以一路绿灯合进主干，直到物理拆库当天原子性静默断裂。
+   *    非 api 属主的镜像 MUST 走本域 outbox + 中继（`src/config/mirror-bump-outbox.ts`），
+   *    由 {@link applyRelayedBumpInTx} 在 **api 自己的事务**里落地。
    */
   async bumpInTx(client: MirrorQueryable, mirrorKey: ConfigMirrorKey): Promise<void> {
+    const owner = CONFIG_MIRRORS[mirrorKey]?.owner;
+    if (owner !== 'api') {
+      throw new Error(
+        `[config-mirror] 拒绝在写事务内直接推进版本：mirror=${mirrorKey} 属主=${owner ?? 'unknown'}，` +
+          `而 config_mirror_version 属 api —— 同事务推进等于跨库两阶段提交。` +
+          `非 api 属主的配置写入 MUST 用 OutboxMirrorVersionBumper（本域 outbox + 中继）。`,
+      );
+    }
+    await this.bumpVersionInTx(client, mirrorKey);
+  }
+
+  /**
+   * 由**中继**投递过来的失效信号在 api 自己的事务里落地（`src/config/mirror-bump-sink.ts` 唯一调用点）。
+   *
+   * 与 {@link bumpInTx} 的区别只在「这条事务属于谁」：这里的 `client` 一定取自 api 池，
+   * 生产方的业务写早已在**它自己的库**里提交完毕，两者不再需要同一笔事务。
+   * 对称地只接受**非 api 属主**的 key：api 属主的配置本就同库同事务推进，绕一圈 outbox 说明接线错了。
+   */
+  async applyRelayedBumpInTx(client: MirrorQueryable, mirrorKey: ConfigMirrorKey): Promise<void> {
+    const owner = CONFIG_MIRRORS[mirrorKey]?.owner;
+    if (owner === undefined) {
+      throw new Error(`[config-mirror] 中继投递了未登记的 mirrorKey=${mirrorKey}`);
+    }
+    if (owner === 'api') {
+      throw new Error(
+        `[config-mirror] 拒绝把 api 属主的 mirror=${mirrorKey} 当作跨域中继信号处理：` +
+          `它与版本表同库，MUST 走同事务的 bumpInTx。`,
+      );
+    }
+    await this.bumpVersionInTx(client, mirrorKey);
+  }
+
+  /** 版本推进的唯一 SQL 出口（两条入口共用，防语句漂移）。 */
+  private async bumpVersionInTx(client: MirrorQueryable, mirrorKey: ConfigMirrorKey): Promise<void> {
     await client.query(
       `INSERT INTO config_mirror_version (mirror_key, version, updated_at)
        VALUES ($1, 1, now())
@@ -150,40 +191,5 @@ export class MirrorVersionStore implements MirrorVersionBumper {
                      updated_at = now()`,
       [mirrorKey, hourBucket, executionTarget, count],
     );
-  }
-}
-
-/**
- * 配置写入的统一包装：**持久化与版本推进在同一个事务内**。
- *
- * - `bumper` 缺省（单测 / 秒级回滚）→ 直接在 pool 上跑 `run`，行为与本 change 之前**逐位一致**
- *   （不开事务、不推版本）。这条分支的存在是为了让既有的假 pool 单测无需实现 `connect()`。
- * - `bumper` 存在 → `BEGIN` → `run(client)` → `bumpInTx(client)` → `COMMIT`；任一步抛错
- *   → `ROLLBACK` 并原样抛出：写库失败 MUST NOT 推进版本，也 MUST NOT 刷新本进程镜像。
- */
-export async function writeWithMirrorBump<T>(
-  pool: pg.Pool,
-  bumper: MirrorVersionBumper | undefined,
-  mirrorKey: ConfigMirrorKey,
-  run: (q: MirrorQueryable) => Promise<T>,
-): Promise<T> {
-  if (!bumper) return run(pool);
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const result = await run(client);
-    await bumper.bumpInTx(client, mirrorKey);
-    await client.query('COMMIT');
-    bumper.notifyAfterCommit?.(mirrorKey);
-    return result;
-  } catch (err) {
-    try {
-      await client.query('ROLLBACK');
-    } catch {
-      /* 回滚失败时保留原始错误，绝不用回滚错误盖掉真因 */
-    }
-    throw err;
-  } finally {
-    client.release();
   }
 }

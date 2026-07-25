@@ -23,6 +23,7 @@
     { "table": "client_environments", "owner": "api", "basis": "§5.1 具名 client_environments → aidcp-api 单写。注：本表另有一类 SQL 字面量扫不到的跨边界形态（写点全在 api，但由组合根在自动化握手路径上调用），见 §12 阶段 0 清单第 1 行，MUST 靠人工盘点补位" },
     { "table": "client_users", "owner": "api", "basis": "§5.1 具名 client_users → aidcp-api" },
     { "table": "concepts", "owner": "content", "basis": "§5.1「内容事实与评估」→ aidcp-content" },
+    { "table": "config_mirror_bump_inbox", "owner": "api", "basis": "§4.7 基线 sha 之后由 change block3-l3-config-mirror-bump-decouple 新增（migrations/0075）。§5.1 未具名；跨域配置镜像失效信号的消费侧去重表，与 config_mirror_version 同库同属主，唯一 SQL 写入方 src/config/mirror-bump-sink.ts 按 §4.6.8 属 api。MUST 回写 §5.1" },
     { "table": "config_mirror_stale_refusal", "owner": "api", "basis": "§4.7 基线 sha 之后由 change config-mirror-cross-process-invalidation 新增（migrations/0062）。§5.1 未具名；配置镜像陈旧拒绝的按小时聚合计数表，唯一写入方 src/config/mirror-refresher.ts 按 §4.6.8 属 api。MUST 回写 §5.1" },
     { "table": "config_mirror_version", "owner": "api", "basis": "§4.7 基线 sha 之后由 change config-mirror-cross-process-invalidation 新增（migrations/0062）。§5.1 未具名；配置镜像的版本表，唯一 SQL 写入方 src/config/mirror-version-store.ts 按 §4.6.8 属 api。注：四类限频配置 store（§5.1 具名归 automation）在自己的写事务里调本 store 的 bumpInTx 递增版本，走方法而非自己的 SQL 字面量，门禁看不见——属 §12 门禁定义第 3 条第 ① 类天然失明形态，已登记在 boundaries/README.md 的失明清单。MUST 回写 §5.1" },
     { "table": "contact_comment_attempts", "owner": "api", "basis": "§5.1「排期（content_schedule_*）」域的尝试台账 → aidcp-api" },

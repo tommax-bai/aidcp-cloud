@@ -590,6 +590,16 @@
     "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
   },
   {
+    "path": "src/config/mirror-bump-outbox.ts",
+    "layer": "automation",
+    "note": "【待定稿裁决】change block3-l3-config-mirror-bump-decouple 新增：automation 侧的失效信号事务型入队器（OutboxMirrorVersionBumper，在四个限频配置 store 自己的写事务里写本域 event_outbox 行）+ 生产方进程内中继（ConfigMirrorBumpRelay）。写的是 automation 属主的 event_outbox、跑在 automation 池上，与同目录四个限频配置 store（§4.6.8 的 5 个例外文件）同域，故判 automation。src/config/ 在 §4.7 是逐文件切分目录，故逐条裁定、不进 adjudicated-files 名册"
+  },
+  {
+    "path": "src/config/mirror-bump-sink.ts",
+    "layer": "api",
+    "note": "【待定稿裁决】change block3-l3-config-mirror-bump-decouple 新增：api 侧失效信号落地端（config_mirror_bump_inbox 去重 + config_mirror_version 推进，同一笔 api 事务）。两张表都属 api、跑在 api 池上，与同目录 mirror-version-store.ts / mirror-registry.ts / mirror-refresher.ts 同层，故判 api"
+  },
+  {
     "path": "src/config/mirror-refresher.ts",
     "layer": "api",
     "note": "§4.6.8 同上：配置镜像的轮询刷新器，装配在组合根、只驱动配置层 store 的 refreshFromAuthority。由 change config-mirror-cross-process-invalidation 新增"
@@ -1013,6 +1023,11 @@
     "path": "src/kernel/comment-approval-notice.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/agents/comment-approval-gate.ts 析出 CommentApprovalNoticeInput 纯输入数据模型（requestId/noteId/text/title/authorName/accountId/accountName + approvalSource union，全为原语）。零 import、零 SQL、无进程内活状态。CommentApprovalGate 角色留 comment-approval-gate.ts（automation）并从 kernel 导入等值再导出。供飞书卡片层跨边界共导，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
+  },
+  {
+    "path": "src/kernel/config-mirror-bump-types.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change block3-l3-config-mirror-bump-decouple 抬入：跨域配置镜像失效通道的契约段（ConfigMirrorKey 闭集合纯类型 + MirrorQueryable/MirrorVersionBumper 接口 + writeWithMirrorBump「同一笔提交」包装 + ConfigMirrorBumpSink 消费端口）。原分散在 src/config-mirror-freshness.ts（ConfigMirrorKey）与 src/config/mirror-version-store.ts（api）；automation 属主的四个限频配置 store 与 api 属主的十余个配置 store 都要引用它们，留在任一属主域都必然造出跨域 import（原状即 4 条 automation->api 豁免）。只 import type pg 与同层 pg-owner-connection-resolver，无 SQL 字面量（BEGIN/COMMIT/ROLLBACK 是事务控制、不是 DML/DDL）、无 HTTP 路由、无 LLM、无进程内活状态、不反向依赖业务层。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
   },
   {
     "path": "src/kernel/content-schedule-mode.ts",
@@ -2008,6 +2023,11 @@
     "path": "src/time/source-published-time.ts",
     "layer": "kernel",
     "note": "§4.7 kernel 花名册：无业务语义。kernel 花名册按 §4.7 是封闭名单，新增成员 MUST 走「析出 + 回写 §4.7」通道，故本目录新增文件一律待裁决"
+  },
+  {
+    "path": "src/transport/config-mirror-bump-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },
   {
     "path": "src/transport/curated-content-http.ts",

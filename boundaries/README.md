@@ -149,11 +149,20 @@ npm run boundaries:census
      三张表的日频 purge 改由各属主 store 在自己 `init()` 里的定时器**自驱**（`risk_counters` → `src/risk/pg-risk-store.ts`、
      `interaction_feed` → `src/cache/interaction-feed-store.ts`、`llm_token_usage` → `src/metrics/token-usage-store.ts`），
      阈值 / 周期 / 删的数据逐位不变。驱动方与写点自此同属一层，跨边界形态不再存在（保留此条仅作退出判据的追溯记录）。
-   - **配置镜像版本递增**（2026-07-23 随 change `config-mirror-cross-process-invalidation` 新增）：
-     §5.1 判归 `automation` 的四类限频配置 store（`src/config/{quota,pacing,session,resume}-config-store.ts`）
+   - **配置镜像版本递增（已消除，change `block3-l3-config-mirror-bump-decouple` / 2026-07-25）**：
+     原先 §5.1 判归 `automation` 的四类限频配置 store（`src/config/{quota,pacing,session,resume}-config-store.ts`）
      在自己的写事务里调 `MirrorVersionStore.bumpInTx` 递增 `config_mirror_version`（属主 `api`）。
-     `UPDATE` / `INSERT` 语句全在 `src/config/mirror-version-store.ts`（`api`）一侧，`AC-OWN-02` 恒绿。
-     门禁看得见的只是同一批改动带来的 4 条 `automation -> api` **import** 边（已在 `import-exemptions.json` 逐条挂着消除方式）。
+     `UPDATE` / `INSERT` 语句全在 `src/config/mirror-version-store.ts`（`api`）一侧，`AC-OWN-02` 恒绿——
+     这是本条第一类失明形态里**危害最大的一种**：不只是「跨边界写」，还是**跨库事务**，
+     物理拆库当天会静默丢失原子性（配置已落库、版本没进，无错误、无日志）。
+     现已改成：automation 库内「配置写 + `event_outbox` 行」同事务 → 生产方进程内中继 →
+     api 库内「`config_mirror_bump_inbox` 去重 + 推版本」同事务。四条 `automation -> api` import 边
+     随之消除（`import-exemptions.json` 条目 100 → 96）。
+     **失明本身也补上了机械闸**：`MirrorVersionStore.bumpInTx` 现在断言 `CONFIG_MIRRORS[key].owner === 'api'`，
+     非 api 属主的 mirrorKey 走这条路径当场抛错——门禁的 SQL 扫描看不见方法调用，但这条运行时断言看得见，
+     再有人把某个 automation 属主的配置接回同事务 bump，第一次写入就会失败而不是一路绿灯合进主干。
+     对称地 `applyRelayedBumpInTx` 只接受非 api 属主的 key，堵住反向错接线；两条断言由
+     `test/config/mirror-invalidation.test.ts` 按 `CONFIG_MIRRORS` 穷举验证（新增镜像自动纳入）。
 2. 文件系统信号与 PostgreSQL advisory lock 通道（§14 红线 24）。
    - **锁通道自 2026-07-25 起不再全盲**：advisory lock 的归属由 `test/acceptance/advisory-lock-ownership.test.ts`
      的 `AC-LOCK-01/02` 扫，**行锁**（`FOR UPDATE` / `FOR SHARE`）由 `test/acceptance/row-lock-ownership.test.ts`

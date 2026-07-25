@@ -23,23 +23,13 @@
  *
  * 新增一处镜像 MUST 在此登记：`CONFIG_MIRRORS` 是 `Record<ConfigMirrorKey, …>`，
  * 漏登记即 typecheck 失败（与两份 protocol.ts 的 `Record<MessageType,true>` 同款防漂移手法）。
+ *
+ * 定义位置随 change block3-l3-config-mirror-bump-decouple 抬进 `src/kernel/config-mirror-bump-types.ts`：
+ * automation 与 api 两侧的配置写入方都要引用它，留在任一属主域都会造出一条跨域 import。
+ * 本模块等值再导出，既有 import 路径全部保持不变。
  */
-export type ConfigMirrorKey =
-  | 'quota_config'
-  | 'pacing_floor_config'
-  | 'session_config_global'
-  | 'resume_config_global'
-  | 'persona_config'
-  | 'content_schedule'
-  | 'model_config'
-  | 'role_config'
-  | 'category_config'
-  | 'hot_lead_config'
-  | 'facebook_comment_config'
-  | 'facebook_group_join_automation_config'
-  | 'account_status'
-  | 'client_environment_slow_start'
-  | 'client_environment_automation_gate';
+export type { ConfigMirrorKey } from './kernel/config-mirror-bump-types.js';
+import type { ConfigMirrorKey } from './kernel/config-mirror-bump-types.js';
 
 /** 副本读取状态。`stale` = 距上一次**成功完成版本比对**已超过该镜像声明的陈旧上限。 */
 export type MirrorReadState = 'fresh' | 'stale';

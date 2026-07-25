@@ -20,6 +20,15 @@
  * 归属对齐 MUST NOT 被读作跨进程可见性已消失（dev/ol 两进程共库），故写入路径仍接
  * `writeWithMirrorBump`（同事务推进版本）。
  *
+ * ## 失效信号自 change block3-l3-config-mirror-bump-decouple 起走本域 outbox（MUST 一起读）
+ *
+ * 本 store 属 automation，而镜像版本表 `config_mirror_version` 属 api。原实现在**本 store 的写事务里、
+ * 同一条物理连接上**直接递增那张 api 表 —— 单库时看不出问题，两库一分即断成两笔独立提交，且无错误、
+ * 无日志（配置已改而版本没进）。现在注入的 `MirrorVersionBumper` 是 `OutboxMirrorVersionBumper`：
+ * 同事务写的是 **automation 自己库里的 `event_outbox` 行**，再由进程内中继推给 api 落地。
+ * 原子性不变（业务写回滚 ⇒ 信号不存在），代价是多出一个「配置已改、别的进程版本还没涨」的窗口，
+ * 上界 ≈ 中继兜底轮询 2s + 刷新器轮询 5s，详见 `src/config/mirror-bump-outbox.ts` 头注。
+ *
  * **一处连带影响**：`content-schedule-store.ts` 经注入的 `globalActiveWeekMask()` 读本表的活跃掩码，
  * 其中 `listCatalog()` 是 api 侧面板目录投影。本表迁走后 api 侧目录 MUST 向权威侧取**生效掩码**，
  * MUST NOT 在 api 侧另建一份 `session_config_global` 副本自行合成。
@@ -27,7 +36,7 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
-import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
+import { writeWithMirrorBump, type MirrorVersionBumper } from '../kernel/config-mirror-bump-types.js';
 import {
   DEFAULT_COLLECT_SAVE_LIKE_DENOM,
   DEFAULT_FOLLOW_FANS_DENOM,
@@ -147,6 +156,12 @@ function validDenom(raw: number | string | null | undefined): number | undefined
 
 export class SessionConfigStore implements SessionLimitProvider {
   private readonly pool: pg.Pool;
+  /**
+   * 本 store 是否**自己建的**连接池。组合根注入的是共享的 automation 属主池，被本域十几个 store 共用，
+   * `close()` MUST NOT 把它 end 掉——一次局部关闭会升级成进程级「Cannot use a pool after calling end」
+   * （范式同 change block3-l3 的互动域三 store 修复 7f5232a）。
+   */
+  private readonly ownsPool: boolean;
   private readonly mirrorVersionBumper?: MirrorVersionBumper;
   /** 全局单行镜像；null = 库无行（全回落写死默认）。 */
   private cache: SessionConfigRow | null = null;
@@ -162,6 +177,7 @@ export class SessionConfigStore implements SessionLimitProvider {
         user: options.user ?? DEFAULT_PG_CONFIG.user,
         password: options.password ?? DEFAULT_PG_CONFIG.password,
       });
+    this.ownsPool = options.pool === undefined;
   }
 
   /** schema 探测（不建表） + 载入内存镜像。 */
@@ -325,7 +341,8 @@ export class SessionConfigStore implements SessionLimitProvider {
     return result;
   }
 
+  /** 只 end **自己建的**池；注入的属主池由组合根掌控生命周期（见 ownsPool）。 */
   async close(): Promise<void> {
-    await this.pool.end();
+    if (this.ownsPool) await this.pool.end();
   }
 }

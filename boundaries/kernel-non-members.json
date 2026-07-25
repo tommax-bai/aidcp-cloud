@@ -8,7 +8,7 @@
       "src/time/source-published-time.ts",
       "src/deployment-target.ts",
       "src/kernel/pg-config.ts",
-      "src/kernel/pg-owner-connection-resolver.ts",
+      "src/kernel/pg-owner-connection-resolver.ts", "src/kernel/config-mirror-bump-types.ts",
       "src/kernel/soul-types.ts",
       "src/kernel/interaction-types.ts",
       "src/kernel/persona-format.ts",

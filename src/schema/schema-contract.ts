@@ -22,8 +22,17 @@ import { compareVersions } from './migration-plan.js';
  * 但它在复合序上低于 `0070`，被本要求顺带覆盖；这只是序的结果，不是对收缩的依赖。
  *
  * 今后每加一条存储真正依赖的迁移，本常量 MUST 一起抬。
+ *
+ * 注：change block3-l3-config-mirror-bump-decouple 把四类限频配置的镜像失效信号接到
+ * `event_outbox`（0074）+ `config_mirror_bump_inbox`（0076）这条通道上。这两条自此是**真依赖**：
+ * 缺表 ⇒ 四类限频配置改完后另一个进程的镜像不再更新。故 REQUIRED 一并抬到 0076。
+ * 抬 REQUIRED 只影响启动期契约门的结论（默认 warn 模式仍继续启动），不改任何运行时行为。
+ *
+ * 副作用（有意，登记于此）：REQUIRED 抬到 0076 之后，序上低于它的 `0075_event_outbox_topic_cursor`
+ * 也被顺带纳入「缺了就算 behind」——那条迁移本身仍不是硬依赖（只被非 monolith 模式的消费者用），
+ * 只是复合序的结果。部署时两条一起跑即可，warn 模式下缺任一条也只是响亮提示、不拒绝启动。
  */
-export const REQUIRED_SCHEMA_VERSION = '0070_baseline_self_heal_columns';
+export const REQUIRED_SCHEMA_VERSION = '0076_config_mirror_bump_inbox';
 
 /**
  * 本构建认识的最高迁移版本 id，等于本构建 `migrations/` 目录里的最大版本。
@@ -37,8 +46,8 @@ export const REQUIRED_SCHEMA_VERSION = '0070_baseline_self_heal_columns';
  * ——把它写进 REQUIRED 会让「迁移还没跑」变成硬启动失败，与影子表的可选性质相悖。
  *
  * 注：`0074_event_outbox`（change block2-outbox-transport）建的是拆进程用的事件 outbox 两张表。
- * 本 change 只建原语 + 测试，未接 server.ts、无任何存储正常读写依赖它，故只抬 KNOWN_MAX、不抬 REQUIRED
- * ——2c 真正双写/切换、有存储硬依赖时再抬 REQUIRED。
+ * 该 change 只建原语；**change block3-l3-config-mirror-bump-decouple 已把四类限频配置的镜像失效
+ * 信号接上去**，它自此承重，与 `0076_config_mirror_bump_inbox`（同通道的消费侧去重表）一并进 REQUIRED。
  *
  * 注：`0075_event_outbox_topic_cursor`（change outbox-listen-and-topic-cursor）建的是按主题分维的
  * 消费游标表。它只被 outbox 消费者用到，而消费者**只在非 monolith 模式**（content/core/api/automation
@@ -46,7 +55,7 @@ export const REQUIRED_SCHEMA_VERSION = '0070_baseline_self_heal_columns';
  * 迁移没跑而又起了分段进程时不会静默：读游标的查询会直接报 `relation ... does not exist`，
  * 由消费轮询每轮 warn 出来（绝不退化成「查不到 = 没有事件」）。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0075_event_outbox_topic_cursor';
+export const KNOWN_MAX_SCHEMA_VERSION = '0076_config_mirror_bump_inbox';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

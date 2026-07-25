@@ -22,11 +22,20 @@
  * 依赖方向已单向倒置，运行时消费者只有风控层。归属对齐是纯划线、零代码成本。定稿方案 §11.4 要求一。
  * 但归属对齐 MUST NOT 被理解为跨进程可见性已消失：dev/ol 两个 automation 进程共库，写入路径
  * 因此仍接 `writeWithMirrorBump`（同事务推进版本），供另一 target 的刷新器失效重载。
+ *
+ * ## 失效信号自 change block3-l3-config-mirror-bump-decouple 起走本域 outbox（MUST 一起读）
+ *
+ * 本 store 属 automation，而镜像版本表 `config_mirror_version` 属 api。原实现在**本 store 的写事务里、
+ * 同一条物理连接上**直接递增那张 api 表 —— 单库时看不出问题，两库一分即断成两笔独立提交，且无错误、
+ * 无日志（配置已改而版本没进）。现在注入的 `MirrorVersionBumper` 是 `OutboxMirrorVersionBumper`：
+ * 同事务写的是 **automation 自己库里的 `event_outbox` 行**，再由进程内中继推给 api 落地。
+ * 原子性不变（业务写回滚 ⇒ 信号不存在），代价是多出一个「配置已改、别的进程版本还没涨」的窗口，
+ * 上界 ≈ 中继兜底轮询 2s + 刷新器轮询 5s，详见 `src/config/mirror-bump-outbox.ts` 头注。
  */
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
-import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
+import { writeWithMirrorBump, type MirrorVersionBumper } from '../kernel/config-mirror-bump-types.js';
 import {
   BUILTIN_FLOOR,
   PACING_OPS,
@@ -94,6 +103,12 @@ const isKnownOp = (op: string): op is PacingOp => (PACING_OPS as readonly string
 
 export class PacingConfigStore implements PacingFloorProvider {
   private readonly pool: pg.Pool;
+  /**
+   * 本 store 是否**自己建的**连接池。组合根注入的是共享的 automation 属主池，被本域十几个 store 共用，
+   * `close()` MUST NOT 把它 end 掉——一次局部关闭会升级成进程级「Cannot use a pool after calling end」
+   * （范式同 change block3-l3 的互动域三 store 修复 7f5232a）。
+   */
+  private readonly ownsPool: boolean;
   private readonly mirrorVersionBumper?: MirrorVersionBumper;
   private cache = new Map<PacingOp, PacingConfigRow>();
 
@@ -108,6 +123,7 @@ export class PacingConfigStore implements PacingFloorProvider {
         user: options.user ?? DEFAULT_PG_CONFIG.user,
         password: options.password ?? DEFAULT_PG_CONFIG.password,
       });
+    this.ownsPool = options.pool === undefined;
   }
 
   /** schema 探测（不建表） + 载入内存镜像。 */
@@ -205,7 +221,8 @@ export class PacingConfigStore implements PacingFloorProvider {
     return result;
   }
 
+  /** 只 end **自己建的**池；注入的属主池由组合根掌控生命周期（见 ownsPool）。 */
   async close(): Promise<void> {
-    await this.pool.end();
+    if (this.ownsPool) await this.pool.end();
   }
 }
