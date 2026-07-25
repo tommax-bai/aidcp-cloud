@@ -63,6 +63,12 @@ export interface RiskCounterOutbox {
 
 export interface PgRiskCounterOutboxStoreOptions {
   executionTarget: DeploymentTarget;
+  /**
+   * 属主池（Block③ 物理拆库 L3）。`risk_counter_outbox` 与 `risk_counters` 都是 automation
+   * 属主表 ⇒ 组合根 MUST 注入 automationPool，且 MUST 与 `PgRiskStore` **同一个池 / 同一个库**：
+   * exactly-once 全靠 `risk_counters.outbox_id` 上的唯一索引，两者分居两库时那条索引管不到对方，
+   * exactly-once 直接失效（且零报错）。注入的池由组合根掌控生命周期（见 `close()`）。
+   */
   pool?: pg.Pool;
   host?: string;
   port?: number;
@@ -73,10 +79,12 @@ export interface PgRiskCounterOutboxStoreOptions {
 
 export class PgRiskCounterOutboxStore implements RiskCounterOutbox {
   private readonly pool: pg.Pool;
+  private readonly ownsPool: boolean;
   private readonly executionTarget: DeploymentTarget;
 
   constructor(options: PgRiskCounterOutboxStoreOptions) {
     this.executionTarget = options.executionTarget;
+    this.ownsPool = options.pool === undefined;
     this.pool =
       options.pool ??
       new Pool({
@@ -248,7 +256,12 @@ export class PgRiskCounterOutboxStore implements RiskCounterOutbox {
     };
   }
 
+  /**
+   * 只 end **自己建的**池；注入的属主池由组合根掌控生命周期（见 ownsPool）。
+   * 注入共享池后还照 end，一次局部失败就会打死全域共用的池、升级成进程级瘫痪
+   * （aidcp-cloud 7f5232a 修过一次同形 bug）。
+   */
   async close(): Promise<void> {
-    await this.pool.end();
+    if (this.ownsPool) await this.pool.end();
   }
 }

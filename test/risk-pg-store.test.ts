@@ -1,7 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
-import { RISK_SCHEMA_SQL, PgRiskStore, pgRiskConfigFromEnv } from '../src/risk/index.js';
+import {
+  RISK_SCHEMA_SQL,
+  PgRiskStore,
+  PgRiskCounterOutboxStore,
+  pgRiskConfigFromEnv,
+} from '../src/risk/index.js';
 
 test('RISK_SCHEMA_SQL 含 risk_counters / risk_state 表', () => {
   assert.match(RISK_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS risk_counters/);
@@ -43,4 +48,34 @@ test('purgeCountersOlderThan 按 occurred_at 删过期计数、回传删除行�
   assert.equal(n, 4);
   assert.match(calls[0].sql, /DELETE FROM risk_counters WHERE occurred_at </);
   assert.deepEqual(calls[0].params, [7]);
+});
+// ── 属主池的生命周期（Block③ 物理拆库 L3）─────────────────────────────────────────────
+//
+// 组合根注入 automationPool 之后，close() 若照旧 end 那个池，一次**局部**失败就会打死全域
+// 共用的池、把风控一处的问题升级成进程级瘫痪（aidcp-cloud 7f5232a 修过一次同形 bug）。
+// 判据是 ownsPool：只 end 自己建的池。
+
+function poolSpy(): { pool: pg.Pool; ended: () => number } {
+  let ended = 0;
+  const pool = {
+    query: async () => ({ rows: [], rowCount: 0 }),
+    end: async () => {
+      ended += 1;
+    },
+  } as unknown as pg.Pool;
+  return { pool, ended: () => ended };
+}
+
+test('PgRiskStore.close 绝不 end 注入的属主池（否则一处失败拖死全域）', async () => {
+  const { pool, ended } = poolSpy();
+  const store = new PgRiskStore({ pool });
+  await store.close();
+  assert.equal(ended(), 0, '注入池由组合根掌控生命周期，store MUST NOT 替它 end');
+});
+
+test('PgRiskCounterOutboxStore.close 同样只 end 自己建的池', async () => {
+  const { pool, ended } = poolSpy();
+  const store = new PgRiskCounterOutboxStore({ executionTarget: 'dev', pool });
+  await store.close();
+  assert.equal(ended(), 0);
 });

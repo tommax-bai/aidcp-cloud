@@ -24,6 +24,12 @@ export interface PgRiskStoreOptions {
   database?: string;
   user?: string;
   password?: string;
+  /**
+   * 属主池（Block③ 物理拆库 L3）。`risk_state` / `risk_counters` / `risk_interactions` 都是
+   * automation 属主表 ⇒ 组合根 MUST 注入 automationPool。不注入则自建私池、按下面的 env 回落
+   * 连**共享库**：一旦设了 `AIDCP_PG_AUTOMATION_URL`，写就留在旧库、而已解耦的读端口读新库
+   * ⇒ 面板永远看到空/陈旧风控态且零报错。注入的池由组合根掌控生命周期（见 `close()`）。
+   */
   pool?: pg.Pool;
   /**
    * 本进程的部署目标（change risk-state-cross-process-integrity）：risk_state 条件写的属主谓词。
@@ -147,12 +153,14 @@ function rowsToActionQuota(rows: { action: string; total: number }[]): ActionQuo
 
 export class PgRiskStore implements RiskStore, InteractionStore {
   private readonly pool: pg.Pool;
+  private readonly ownsPool: boolean;
   private readonly executionTarget?: DeploymentTarget;
   private readonly ownershipMode: OwnershipMode;
   private retentionTimer?: ReturnType<typeof setInterval>;
 
   constructor(options: PgRiskStoreOptions = {}) {
     const config = pgRiskConfigFromEnv();
+    this.ownsPool = options.pool === undefined;
     this.pool =
       options.pool ??
       new Pool({
@@ -403,11 +411,16 @@ export class PgRiskStore implements RiskStore, InteractionStore {
     return res.rowCount ?? 0;
   }
 
+  /**
+   * 只 end **自己建的**池；注入的属主池由组合根掌控生命周期（见 ownsPool）。
+   * 注入共享池后还照 end，一次局部失败就会打死全域共用的池、升级成进程级瘫痪
+   * （aidcp-cloud 7f5232a 修过一次同形 bug）。
+   */
   async close(): Promise<void> {
     if (this.retentionTimer) {
       clearInterval(this.retentionTimer);
       this.retentionTimer = undefined;
     }
-    await this.pool.end();
+    if (this.ownsPool) await this.pool.end();
   }
 }

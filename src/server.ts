@@ -65,6 +65,7 @@ import {
   PacingSaturationAlerter,
   // change risk-state-cross-process-integrity：跨进程单写四件套
   AutomationWriterLock,
+  resolveWriterLockConnection,
   PgRiskCounterOutboxStore,
   RiskAccounting,
   RiskCounterReconciler,
@@ -2364,15 +2365,14 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   } else {
     writerLock = new AutomationWriterLock({
       executionTarget: deploymentTarget,
-      // 连接参数与其余 store 逐字同源（缺项在 writer-lock 内部回落到同一条解析）。
-      // MUST NOT 让锁连接自己另读一套 env：那会把「PG* 没配」从风控路径降级放大成整个云端起不来。
-      connection: {
-        host: readEnvString('PGHOST'),
-        port: readEnvPort('PGPORT'),
-        database: readEnvString('PGDATABASE'),
-        user: readEnvString('PGUSER'),
-        password: readEnvString('PGPASSWORD'),
-      },
+      // Block③ L3：锁连接的来源收口在 resolveWriterLockConnection()——设了
+      // AIDCP_PG_AUTOMATION_URL 就走连接串连 automation 属主库（与 risk_state 落地库同库），
+      // 未设则逐字回落到原来这段 PGHOST/... 读法（今天生产的状态，行为零变更）。
+      // ⚠️ 这里 MUST NOT 注入 automationPool：advisory lock 是**会话级**的，池回收连接即释放锁。
+      // ⚠️ 也 MUST NOT 改写成把 resolveOwnerPgConfig('automation') 拆成五字段：owner URL 已设时
+      //    那份 PoolConfig 只有 connectionString，五字段全 undefined 会一路落到本机默认库，
+      //    「在错的库上取到锁而且会成功」——正是这把锁要防的那种失效。
+      connection: resolveWriterLockConnection(),
       waitMs: readEnvNumber('AIDCP_RISK_WRITER_LOCK_WAIT_MS', 60_000),
       logger: console,
     });
@@ -2419,12 +2419,14 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       (ownershipMode === 'off' && deploymentTarget ? '（AIDCP_RISK_OWNERSHIP_ENFORCE=false 已回滚为无谓词 upsert）' : ''),
   );
 
+  // Block③ L3 翻转前置：risk_state / risk_counters / risk_interactions 都是 automation 属主表，
+  // 但此前这里传裸 PG* 五参数、store 自建私池连**共享库**。一旦设 AIDCP_PG_AUTOMATION_URL，
+  // 风控权威态会继续写旧共享库，而面板经已迁的 automation 读端口读新库 ⇒ 面板永远看到空/陈旧
+  // 风控态且零报错（本仓红线点名的「静默假成功」形态）。故在此显式绑 automationPool。
+  // 字节等价：dev/ol 的 .env 只有 PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD（无 DATABASE_URL、
+  // 无 AIDCP_PG_*_URL），owner resolver 回落到同一份配置 ⇒ 逐字相同（只核变量名，未读取任何值）。
   const riskStore = new PgRiskStore({
-    host: readEnvString('PGHOST'),
-    port: readEnvPort('PGPORT'),
-    database: readEnvString('PGDATABASE'),
-    user: readEnvString('PGUSER'),
-    password: readEnvString('PGPASSWORD'),
+    pool: automationPool,
     ...(deploymentTarget ? { executionTarget: deploymentTarget } : {}),
     ownershipMode,
   });
@@ -2552,13 +2554,12 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     try {
       // schema 自愈（本仓无迁移执行器）：outbox 表与 risk_counters.outbox_id 都在 RISK_SCHEMA_SQL 里。
       await riskStore.init();
+      // Block③ L3：risk_counter_outbox 属 automation，且 MUST 与 riskStore **同一个池**——
+      // 记账 exactly-once 全靠 risk_counters.outbox_id 上的唯一索引 + 单事务「写计数 + 标 applied」，
+      // 两者分居两库时那条索引管不到对方，exactly-once 直接失效且零报错。
       const outboxStore = new PgRiskCounterOutboxStore({
         executionTarget: deploymentTarget,
-        host: readEnvString('PGHOST'),
-        port: readEnvPort('PGPORT'),
-        database: readEnvString('PGDATABASE'),
-        user: readEnvString('PGUSER'),
-        password: readEnvString('PGPASSWORD'),
+        pool: automationPool,
       });
       await outboxStore.init();
       const accounting = new RiskAccounting({
