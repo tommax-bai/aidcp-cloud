@@ -424,6 +424,26 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
     return rows.map(mapTask);
   }
 
+  /**
+   * 「已触发发帖」引用集（TriggeredPublishRefsReader 端口实现，属主 automation）：该账号 + target 下
+   * publish_post 委托任务的 curatedId / sourceId（去重、剔空）。供 content 的精选内容存储判定 created/uncreated，
+   * 让它经本接口要、而非直连 automation 库。
+   */
+  async triggeredPublishRefs(
+    accountId: string,
+    executionTarget: string,
+  ): Promise<{ curatedIds: string[]; sourceIds: string[] }> {
+    const { rows } = await this.pool.query<{ cid: string | null; sid: string | null }>(
+      `SELECT DISTINCT source_constraints->>'curatedId' AS cid, source_constraints->>'sourceId' AS sid
+         FROM delegated_tasks
+        WHERE execution_target = $1 AND account_id = $2 AND action = 'publish_post'`,
+      [executionTarget, accountId],
+    );
+    const curatedIds = [...new Set(rows.map((r) => r.cid).filter((v): v is string => v != null && v !== ''))];
+    const sourceIds = [...new Set(rows.map((r) => r.sid).filter((v): v is string => v != null && v !== ''))];
+    return { curatedIds, sourceIds };
+  }
+
   async recoverInterruptedClaims(now = Date.now()): Promise<InterruptedClaimRecovery[]> {
     const recoveredAt = new Date(now);
     const { rows } = await this.pool.query<InterruptedTaskRow>(

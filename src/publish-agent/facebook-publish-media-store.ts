@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
 import { RETIRED_ACCOUNT_ID } from '../kernel/account-identity.js';
-import { normalizePlatformId } from '../platform/index.js';
+import type { AccountPlatformReader } from '../kernel/platform-types.js';
 import type { ObjectStore } from '../storage/object-store.js';
 import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 
@@ -43,10 +43,10 @@ export interface FacebookPublishMediaStoreOptions {
   password?: string;
   pool?: pg.Pool;
   /**
-   * Block③ 拆库（owner-URL 翻转）：api 属主池，仅用于 assertFacebookAccount 读 accounts.platform（跨 owner）。
-   * 未注入时回落 this.pool（共库期二池同库、逐字节等价）。
+   * Block③ 拆库解耦：账号平台读端口（api 属主）。发媒体前的账号校验 MUST 经本接口向 api 域要、MUST NOT 直连 api 库。
+   * 惰性 thunk；缺省则 assertFacebookAccount fail-closed（account_not_found）。
    */
-  apiPool?: pg.Pool;
+  accountPlatformReader?: () => AccountPlatformReader | undefined;
   /** schema 保障能力注入端口（必填、无默认）：组合根传 automation 的 ensureCapabilitySchema，本文件只从 kernel 取类型。 */
   schemaEnsurer: SchemaEnsurer;
   objectStore?: ObjectStore;
@@ -243,11 +243,11 @@ export class FacebookPublishMediaStore {
 
   private readonly schemaEnsurer: SchemaEnsurer;
 
-  private readonly apiPool?: pg.Pool;
+  private readonly accountPlatformReader?: () => AccountPlatformReader | undefined;
 
   constructor(options: FacebookPublishMediaStoreOptions) {
     this.schemaEnsurer = options.schemaEnsurer;
-    this.apiPool = options.apiPool;
+    this.accountPlatformReader = options.accountPlatformReader;
     this.pool =
       options.pool ??
       new Pool({
@@ -494,14 +494,12 @@ export class FacebookPublishMediaStore {
 
   private async assertFacebookAccount(accountId: string): Promise<void> {
     if (accountId === RETIRED_ACCOUNT_ID) throw new FacebookPublishMediaError('retired_account');
-    // Block③ 拆库（owner-URL 翻转）：accounts 属 api，跨 owner 池读；apiPool 未注入时回落 this.pool（共库期等价）。
-    const { rows } = await (this.apiPool ?? this.pool).query<{ platform: string | null }>(
-      `SELECT platform FROM accounts WHERE account_id = $1`,
-      [accountId],
-    );
-    const row = rows[0];
-    if (!row) throw new FacebookPublishMediaError('account_not_found');
-    if (normalizePlatformId(row.platform) !== 'facebook') throw new FacebookPublishMediaError('non_facebook_account');
+    // Block③ 拆库解耦：accounts 属 api，MUST NOT 直连它的库——经 api 域的账号平台读端口要（缺账号返 null）。
+    const reader = this.accountPlatformReader?.();
+    if (!reader) throw new FacebookPublishMediaError('account_not_found'); // 无读端口 = 无法核验 → fail-closed
+    const platform = await reader.getPlatformOrNull(accountId);
+    if (platform === null) throw new FacebookPublishMediaError('account_not_found');
+    if (platform !== 'facebook') throw new FacebookPublishMediaError('non_facebook_account');
   }
 
   private validateFile(file: FacebookPublishImageInput): { filename: string; bytes: Buffer; sha256: string; ext: string; contentType: string; captionHint: string | null } {

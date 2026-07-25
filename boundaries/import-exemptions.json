@@ -1,8 +1,8 @@
 {
   "seedTotal": 173,
   "seedUnplanned": 173,
-  "frozenTotal": 101,
-  "recordedAt": "2026-07-24",
+  "frozenTotal": 100,
+  "recordedAt": "2026-07-25",
   "raises": [],
   "entries": [
     {
@@ -547,12 +547,6 @@
       "from": "src/publish-agent/draft-refinement-worker.ts",
       "to": "src/publish-agent/publish-log-store.ts",
       "reason": "seed（content -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/publish-agent/facebook-publish-media-store.ts",
-      "to": "src/platform/index.ts",
-      "reason": "seed（content -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
     },
     {

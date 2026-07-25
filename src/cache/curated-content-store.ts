@@ -22,7 +22,7 @@ import pg from 'pg';
 // DEFAULT_PG_CONFIG 的真实归属是 kernel（pg-config.ts），pg-anchor-cache 只是再导出；content
 // 直连 kernel（content→kernel 恒允许），取值逐字不变，消去 content→automation 这一跨边界豁免。
 import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
-import type { DelegatedExecutionTarget } from '../kernel/delegated-task-types.js';
+import type { DelegatedExecutionTarget, TriggeredPublishRefsReader } from '../kernel/delegated-task-types.js';
 import type { ReferenceVisualAnalysis } from '../kernel/visual-reference-types.js';
 import type { VisualAnalysisAnchor } from '../publish-agent/visual-reference-analyzer.js';
 import { normalizeReferenceVisualAnalysis } from '../publish-agent/visual-reference-analyzer.js';
@@ -134,10 +134,10 @@ export interface CuratedContentStoreOptions {
   password?: string;
   pool?: pg.Pool;
   /**
-   * Block③ 拆库（owner-URL 翻转）：automation 属主池，仅用于 listForClient 的 created/uncreated 读 delegated_tasks
-   * （跨 owner 池取「已触发发帖」引用集）。未注入时回落 this.pool（共库期二池同库、逐字节等价）。
+   * Block③ 拆库解耦：「已触发发帖」引用集读端口（automation 属主）。content MUST 经本接口向 automation 域要、
+   * MUST NOT 直连 automation 库。惰性 thunk（委托任务存储在组合根构造较晚）；缺省则 created/uncreated fail-closed。
    */
-  automationPool?: pg.Pool;
+  triggeredRefsReader?: () => TriggeredPublishRefsReader | undefined;
   /** schema 保障能力注入端口（必填、无默认）：组合根传 automation 的 ensureCapabilitySchema，本文件只从 kernel 取类型。 */
   schemaEnsurer: SchemaEnsurer;
   /** 每账号保留上限（行数），超出裁最旧。默认 1000。 */
@@ -596,7 +596,7 @@ export class CuratedContentStore {
   private readonly logger?: Pick<Console, 'warn'>;
   private readonly executionTarget?: DelegatedExecutionTarget;
 
-  private readonly automationPool?: pg.Pool;
+  private readonly triggeredRefsReader?: () => TriggeredPublishRefsReader | undefined;
 
   private readonly schemaEnsurer: SchemaEnsurer;
 
@@ -608,7 +608,7 @@ export class CuratedContentStore {
     this.onSourceAdmitted = options.onSourceAdmitted;
     this.logger = options.logger;
     this.executionTarget = options.executionTarget;
-    this.automationPool = options.automationPool;
+    this.triggeredRefsReader = options.triggeredRefsReader;
     this.pool =
       options.pool ??
       new Pool({
@@ -618,34 +618,6 @@ export class CuratedContentStore {
         user: options.user ?? DEFAULT_PG_CONFIG.user,
         password: options.password ?? DEFAULT_PG_CONFIG.password,
       });
-  }
-
-  /**
-   * 「该账号+target 已触发过发帖」的 curatedId / sourceId 引用集（Block③ 拆库：delegated_tasks 属 automation）。
-   * 取自 publish_post 委托任务的 source_constraints，去重、剔空。用于 listForClient 的 created/uncreated 本地过滤
-   * （原关联 EXISTS 子查询的等价半连接改写）。automationPool 未注入时回落 this.pool（共库期二池同库、结果等价）。
-   */
-  private async triggeredPublishRefs(
-    accountId: string,
-    executionTarget: DelegatedExecutionTarget,
-  ): Promise<{ curatedIds: string[]; sourceIds: string[] }> {
-    const pool = this.automationPool ?? this.pool;
-    let rows: Array<{ cid: string | null; sid: string | null }>;
-    try {
-      ({ rows } = await pool.query<{ cid: string | null; sid: string | null }>(
-        `SELECT DISTINCT source_constraints->>'curatedId' AS cid, source_constraints->>'sourceId' AS sid
-           FROM delegated_tasks
-          WHERE execution_target = $1 AND account_id = $2 AND action = 'publish_post'`,
-        [executionTarget, accountId],
-      ));
-    } catch (err) {
-      // delegated_tasks 缺表 → 无法判定创作态，fail-closed（与主查询 42P01 同口径，绝不回落空/错误归类）。
-      if ((err as { code?: string }).code === '42P01') throw new CuratedContentUnavailableError('listForClient:delegatedTasks');
-      throw err;
-    }
-    const curatedIds = [...new Set(rows.map((r) => r.cid).filter((v): v is string => v != null && v !== ''))];
-    const sourceIds = [...new Set(rows.map((r) => r.sid).filter((v): v is string => v != null && v !== ''))];
-    return { curatedIds, sourceIds };
   }
 
   /** schema 探测（不建表）。 */
@@ -1221,11 +1193,24 @@ export class CuratedContentStore {
         if (!this.executionTarget) {
           throw new CuratedContentUnavailableError('listForClient:delegatedExecutionTarget');
         }
-        // Block③ 拆库（owner-URL 翻转）：delegated_tasks 属 automation，跨 owner 池不能与 content 的 curated_content
-        // 同语句关联。先在 automation 池取「该账号+target 已触发过发帖」的 curatedId/sourceId 引用集（快照；委托任务
-        // 单调不删 → 快照≡实时），再把原关联 EXISTS 子查询**等价**改写为本地数组成员判定（标准半连接改写）。
-        // SQL 的排序 / COUNT(*) OVER() / LIMIT / OFFSET 结构逐字不变；共库期 automationPool≡this.pool、结果逐字节等价。
-        const { curatedIds, sourceIds } = await this.triggeredPublishRefs(accountId, this.executionTarget);
+        // Block③ 拆库解耦：delegated_tasks 属 automation，MUST NOT 直连它的库——经 automation 域的读端口要
+        // 「该账号+target 已触发过发帖」的 curatedId/sourceId 引用集（快照；委托任务单调不删 → 快照≡实时），
+        // 再把原关联 EXISTS 子查询**等价**改写为本地数组成员判定（标准半连接改写）。SQL 的排序 / COUNT(*) OVER()
+        // / LIMIT / OFFSET 结构逐字不变。缺读端口或 delegated_tasks 缺表 → fail-closed，绝不回落空/错误归类。
+        const reader = this.triggeredRefsReader?.();
+        if (!reader) {
+          throw new CuratedContentUnavailableError('listForClient:triggeredRefsReader');
+        }
+        let curatedIds: string[];
+        let sourceIds: string[];
+        try {
+          ({ curatedIds, sourceIds } = await reader.triggeredPublishRefs(accountId, this.executionTarget));
+        } catch (err) {
+          if ((err as { code?: string }).code === '42P01') {
+            throw new CuratedContentUnavailableError('listForClient:delegatedTasks');
+          }
+          throw err;
+        }
         params.push(curatedIds);
         const cidsIdx = params.length;
         params.push(sourceIds);

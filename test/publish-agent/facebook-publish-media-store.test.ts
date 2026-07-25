@@ -7,6 +7,11 @@ import {
   FacebookPublishMediaError,
 } from '../../src/publish-agent/facebook-publish-media-store.js';
 import type { ObjectStore } from '../../src/storage/object-store.js';
+import type { PlatformId, AccountPlatformReader } from '../../src/kernel/platform-types.js';
+
+/** Block③ 拆库解耦：assertFacebookAccount 现经 AccountPlatformReader 端口取平台（缺账号返 null），不再直查库。 */
+const readerFor = (platform: PlatformId | null): (() => AccountPlatformReader) =>
+  () => ({ getPlatformOrNull: async () => platform });
 
 const PNG_BYTES = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
@@ -115,10 +120,10 @@ function makePool(platform: string | null = 'facebook'): { pool: pg.Pool; putKey
 }
 
 test('FacebookPublishMediaStore: rejects missing and non-Facebook accounts before upload', async () => {
-  const missing = new FacebookPublishMediaStore({ schemaEnsurer: ensureCapabilitySchema, pool: makePool(null).pool });
+  const missing = new FacebookPublishMediaStore({ schemaEnsurer: ensureCapabilitySchema, pool: makePool('facebook').pool, accountPlatformReader: readerFor(null) });
   await assert.rejects(() => missing.listForAccount('ghost'), (err) => err instanceof FacebookPublishMediaError && err.reason === 'account_not_found');
 
-  const xhs = new FacebookPublishMediaStore({ schemaEnsurer: ensureCapabilitySchema, pool: makePool('xiaohongshu').pool });
+  const xhs = new FacebookPublishMediaStore({ schemaEnsurer: ensureCapabilitySchema, pool: makePool('facebook').pool, accountPlatformReader: readerFor('xiaohongshu') });
   await assert.rejects(() => xhs.listForAccount('xhs-1'), (err) => err instanceof FacebookPublishMediaError && err.reason === 'non_facebook_account');
 });
 
@@ -132,6 +137,7 @@ test('FacebookPublishMediaStore: upload validates images, uses account-isolated 
   };
   const store = new FacebookPublishMediaStore({ schemaEnsurer: ensureCapabilitySchema,
     pool: backing.pool,
+    accountPlatformReader: readerFor('facebook'),
     objectStore,
     clock: () => Date.parse('2026-07-12T12:00:00Z'),
     idGen: () => 'fixed',
@@ -151,7 +157,7 @@ test('FacebookPublishMediaStore: upload validates images, uses account-isolated 
 });
 
 test('FacebookPublishMediaStore: upload fails honestly when object store is unavailable', async () => {
-  const store = new FacebookPublishMediaStore({ schemaEnsurer: ensureCapabilitySchema, pool: makePool('facebook').pool });
+  const store = new FacebookPublishMediaStore({ schemaEnsurer: ensureCapabilitySchema, pool: makePool('facebook').pool, accountPlatformReader: readerFor('facebook') });
   const result = await store.uploadFiles('fb-1', [
     { filename: 'cover.png', contentType: 'image/png', bytes: PNG_BYTES },
   ]);
@@ -163,6 +169,7 @@ test('FacebookPublishMediaStore: quarantined media can be manually confirmed, ed
   const backing = makePool('facebook');
   const store = new FacebookPublishMediaStore({ schemaEnsurer: ensureCapabilitySchema,
     pool: backing.pool,
+    accountPlatformReader: readerFor('facebook'),
     objectStore: {
       put: async (key) => ({ url: `https://oss.example/${key}` }),
     },

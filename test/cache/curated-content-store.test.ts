@@ -626,34 +626,35 @@ test('listForPanel：无筛选时仅按账号；空结果 total 兜底 0', async
   assert.deepEqual(out, { items: [], total: 0 });
 });
 
-test('listForClient：未创作先在 automation 池取触发集、再本地数组判定（拆库半连接改写），排序/分页结构不变', async () => {
-  const { pool, calls } = controllablePool((sql) =>
-    sql.includes('delegated_tasks')
-      ? { rows: [{ cid: 'cur-9', sid: null }] }
-      : { rows: [{ ...panelDbRow, like_count: null, collect_count: 0, total_count: '23' }] });
-  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool, executionTarget: 'dev' });
+test('listForClient：未创作经 automation 域读端口取触发集、再本地数组判定（拆库半连接改写），排序/分页结构不变', async () => {
+  const readerCalls: Array<[string, string]> = [];
+  const { pool, calls } = controllablePool(() => ({ rows: [{ ...panelDbRow, like_count: null, collect_count: 0, total_count: '23' }] }));
+  const store = new CuratedContentStore({
+    schemaEnsurer: ensureCapabilitySchema, pool, executionTarget: 'dev',
+    triggeredRefsReader: () => ({
+      triggeredPublishRefs: async (accountId: string, executionTarget: string) => {
+        readerCalls.push([accountId, executionTarget]);
+        return { curatedIds: ['cur-9'], sourceIds: [] };
+      },
+    }),
+  });
   const out = await store.listForClient('acc-1', { creationStatus: 'uncreated', limit: 999, offset: -5 });
 
-  // calls[0] = automation 池上的「已触发发帖」引用集查询（原关联 EXISTS 的等价半连接前置；快照，与任务后续状态无关）
-  assert.match(calls[0].sql, /FROM delegated_tasks/);
-  assert.match(calls[0].sql, /execution_target = \$1 AND account_id = \$2 AND action = 'publish_post'/);
-  assert.match(calls[0].sql, /source_constraints->>'curatedId'/);
-  assert.match(calls[0].sql, /source_constraints->>'sourceId'/);
-  assert.doesNotMatch(calls[0].sql, /status/, '触发即已创作，任务后续状态不得改变归类');
-  assert.deepEqual(calls[0].params, ['dev', 'acc-1']);
-
-  // calls[1] = content 池主查询：关联子查询已等价改为本地数组成员判定，排序/COUNT OVER/分页逐字不变、不再跨 owner
-  assert.match(calls[1].sql, /WHERE c\.account_id = \$1/);
-  assert.match(calls[1].sql, /c\.content_type = 'image_text'/);
-  assert.match(calls[1].sql, /BTRIM\(COALESCE\(c\.body, ''\)\) <> ''/);
-  assert.match(calls[1].sql, /NOT \(c\.id::text = ANY\(\$2::text\[\]\) OR c\.source_id = ANY\(\$3::text\[\]\)\)/);
-  assert.doesNotMatch(calls[1].sql, /delegated_tasks/, '主查询不得再跨 owner 关联 delegated_tasks');
-  assert.match(calls[1].sql, /COUNT\(\*\) OVER\(\) AS total_count/);
-  assert.match(calls[1].sql, /c\.like_count::bigint \* 100 \+ c\.collect_count::bigint \* 143/);
-  assert.match(calls[1].sql, /END DESC NULLS LAST/);
-  assert.ok(calls[1].sql.indexOf('ORDER BY') < calls[1].sql.indexOf('LIMIT'), '排序必须发生在分页前');
-  assert.match(calls[1].sql, /LIMIT \$4 OFFSET \$5/);
-  assert.deepEqual(calls[1].params, ['acc-1', ['cur-9'], [], 50, 0]);
+  // 触发集经 automation 域读端口取（不走 content 的池、不直连 automation 库）
+  assert.deepEqual(readerCalls, [['acc-1', 'dev']]);
+  // content 池只发主查询：关联子查询已等价改为本地数组成员判定，排序/COUNT OVER/分页逐字不变、不跨 owner
+  assert.equal(calls.length, 1, 'content 池只发主查询；delegated_tasks 不在 content 池上');
+  assert.match(calls[0].sql, /WHERE c\.account_id = \$1/);
+  assert.match(calls[0].sql, /c\.content_type = 'image_text'/);
+  assert.match(calls[0].sql, /BTRIM\(COALESCE\(c\.body, ''\)\) <> ''/);
+  assert.match(calls[0].sql, /NOT \(c\.id::text = ANY\(\$2::text\[\]\) OR c\.source_id = ANY\(\$3::text\[\]\)\)/);
+  assert.doesNotMatch(calls[0].sql, /delegated_tasks/, 'content 池主查询不得跨 owner 关联 delegated_tasks');
+  assert.match(calls[0].sql, /COUNT\(\*\) OVER\(\) AS total_count/);
+  assert.match(calls[0].sql, /c\.like_count::bigint \* 100 \+ c\.collect_count::bigint \* 143/);
+  assert.match(calls[0].sql, /END DESC NULLS LAST/);
+  assert.ok(calls[0].sql.indexOf('ORDER BY') < calls[0].sql.indexOf('LIMIT'), '排序必须发生在分页前');
+  assert.match(calls[0].sql, /LIMIT \$4 OFFSET \$5/);
+  assert.deepEqual(calls[0].params, ['acc-1', ['cur-9'], [], 50, 0]);
   assert.equal(out.total, 23);
   assert.equal(out.items[0].likeCount, null, '缺失计数必须保持 null');
   assert.equal(out.items[0].collectCount, 0, '真实 0 必须保持 0');
@@ -681,19 +682,26 @@ test('listForClient：四种排序映射为固定 SQL，缺失值置后且使用
   }
 });
 
-test('listForClient：已创作使用同一账号范围的 EXISTS，全部模式不加创作条件', async () => {
-  const created = controllablePool((sql) =>
-    sql.includes('delegated_tasks') ? { rows: [{ cid: 'cur-1', sid: 'src-1' }] } : { rows: [] });
-  const createdStore = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool: created.pool, executionTarget: 'ol' });
+test('listForClient：已创作经读端口取触发集 + 本地数组判定，creatable/all 不触发跨 owner 读', async () => {
+  const createdReaderCalls: Array<[string, string]> = [];
+  const created = controllablePool(() => ({ rows: [] }));
+  const createdStore = new CuratedContentStore({
+    schemaEnsurer: ensureCapabilitySchema, pool: created.pool, executionTarget: 'ol',
+    triggeredRefsReader: () => ({
+      triggeredPublishRefs: async (accountId: string, executionTarget: string) => {
+        createdReaderCalls.push([accountId, executionTarget]);
+        return { curatedIds: ['cur-1'], sourceIds: ['src-1'] };
+      },
+    }),
+  });
   await createdStore.listForClient('acc-1', { creationStatus: 'created', limit: 20, offset: 0 });
-  assert.match(created.calls[0].sql, /FROM delegated_tasks/);
-  assert.match(created.calls[0].sql, /execution_target = \$1 AND account_id = \$2 AND action = 'publish_post'/);
-  assert.deepEqual(created.calls[0].params, ['ol', 'acc-1']);
-  assert.match(created.calls[1].sql, /c\.content_type = 'image_text'/);
-  assert.match(created.calls[1].sql, /\(c\.id::text = ANY\(\$2::text\[\]\) OR c\.source_id = ANY\(\$3::text\[\]\)\)/);
-  assert.doesNotMatch(created.calls[1].sql, /NOT \(c\.id::text = ANY/);
-  assert.doesNotMatch(created.calls[1].sql, /delegated_tasks/);
-  assert.deepEqual(created.calls[1].params, ['acc-1', ['cur-1'], ['src-1'], 20, 0]);
+  assert.deepEqual(createdReaderCalls, [['acc-1', 'ol']]);
+  assert.equal(created.calls.length, 1, '触发集经读端口取，content 池只发主查询');
+  assert.match(created.calls[0].sql, /c\.content_type = 'image_text'/);
+  assert.match(created.calls[0].sql, /\(c\.id::text = ANY\(\$2::text\[\]\) OR c\.source_id = ANY\(\$3::text\[\]\)\)/);
+  assert.doesNotMatch(created.calls[0].sql, /NOT \(c\.id::text = ANY/);
+  assert.doesNotMatch(created.calls[0].sql, /delegated_tasks/);
+  assert.deepEqual(created.calls[0].params, ['acc-1', ['cur-1'], ['src-1'], 20, 0]);
 
   const legacy = controllablePool(() => ({ rows: [] }));
   const legacyStore = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool: legacy.pool });
@@ -722,34 +730,51 @@ test('listForClient：已创作使用同一账号范围的 EXISTS，全部模式
   );
   assert.equal(unscoped.calls.length, 0, '缺 Cloud target 时不得执行跨环境任务投影查询');
 
-  // change curated-envkey-account-binding：缺表 MUST 抛 typed error（由调用方映射 503），MUST NOT 回落空。
-  const missing = controllablePool(() => {
-    const err = new Error('relation does not exist') as Error & { code: string };
-    err.code = '42P01';
-    throw err;
+  // delegated_tasks 缺表：automation 读端口抛 42P01 → MUST 抛 typed error（由调用方映射 503），MUST NOT 回落空。
+  const missing = controllablePool(() => ({ rows: [] }));
+  const missingStore = new CuratedContentStore({
+    schemaEnsurer: ensureCapabilitySchema, pool: missing.pool, executionTarget: 'dev',
+    triggeredRefsReader: () => ({
+      triggeredPublishRefs: async () => {
+        const err = new Error('relation does not exist') as Error & { code: string };
+        err.code = '42P01';
+        throw err;
+      },
+    }),
   });
-  const missingStore = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool: missing.pool, executionTarget: 'dev' });
   await assert.rejects(
     () => missingStore.listForClient('acc-1', { creationStatus: 'uncreated', limit: 20, offset: 0 }),
     CuratedContentUnavailableError,
   );
+  assert.equal(missing.calls.length, 0, '触发集读端口抛错 → 主查询不执行');
+
+  // 未注入 automation 读端口（拆进程后未接线）→ created/uncreated fail-closed，绝不回落空/错误归类。
+  const noReader = controllablePool(() => ({ rows: [] }));
+  const noReaderStore = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool: noReader.pool, executionTarget: 'dev' });
+  await assert.rejects(
+    () => noReaderStore.listForClient('acc-1', { creationStatus: 'created', limit: 20, offset: 0 }),
+    CuratedContentUnavailableError,
+  );
+  assert.equal(noReader.calls.length, 0, '缺读端口时不得执行主查询');
 });
 
 test('listForClient：offset 越过末尾时补 COUNT 拿真实总数，绝不把「本页无行」谎报成「零条」', async () => {
   // 页码陈旧 / 列表缩短：窗口函数无行可算 → 必须另查一次真实总数，否则 UI 会显示「精选池还是空的」。
   const { pool, calls } = controllablePool((sql: string) =>
-    sql.includes('delegated_tasks') ? { rows: [{ cid: 'cur-x', sid: null }] }
-    : /COUNT\(\*\)::text/.test(sql) ? { rows: [{ total_count: '23' }] } : { rows: [] });
-  const store = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema, pool, executionTarget: 'dev' });
+    /COUNT\(\*\)::text/.test(sql) ? { rows: [{ total_count: '23' }] } : { rows: [] });
+  const store = new CuratedContentStore({
+    schemaEnsurer: ensureCapabilitySchema, pool, executionTarget: 'dev',
+    triggeredRefsReader: () => ({ triggeredPublishRefs: async () => ({ curatedIds: ['cur-x'], sourceIds: [] }) }),
+  });
   const out = await store.listForClient('acc-1', { creationStatus: 'uncreated', limit: 12, offset: 96 });
 
   assert.deepEqual(out.items, []);
   assert.equal(out.total, 23, '本页无行 ≠ 该账号零条');
-  assert.equal(calls.length, 3, '触发集查询 + 零行主查询 + 补 COUNT');
-  assert.match(calls[2].sql, /SELECT COUNT\(\*\)::text AS total_count FROM curated_content c/);
-  assert.match(calls[2].sql, /content_type = 'image_text'/, '补的 COUNT 必须沿用同一筛选条件');
-  assert.match(calls[2].sql, /NOT \(c\.id::text = ANY\(\$2::text\[\]\) OR c\.source_id = ANY\(\$3::text\[\]\)\)/, '补的 COUNT 必须沿用未创作触发条件');
-  assert.deepEqual(calls[2].params, ['acc-1', ['cur-x'], []], '补的 COUNT 不带 limit/offset，沿用触发集数组');
+  assert.equal(calls.length, 2, '主查询 + 补 COUNT（触发集经读端口、不在 content 池上）');
+  assert.match(calls[1].sql, /SELECT COUNT\(\*\)::text AS total_count FROM curated_content c/);
+  assert.match(calls[1].sql, /content_type = 'image_text'/, '补的 COUNT 必须沿用同一筛选条件');
+  assert.match(calls[1].sql, /NOT \(c\.id::text = ANY\(\$2::text\[\]\) OR c\.source_id = ANY\(\$3::text\[\]\)\)/, '补的 COUNT 必须沿用未创作触发条件');
+  assert.deepEqual(calls[1].params, ['acc-1', ['cur-x'], []], '补的 COUNT 不带 limit/offset，沿用触发集数组');
 });
 
 test('listForPanel：缺 accountId（全账号视图）不加 account_id 过滤，仍可叠类型过滤', async () => {

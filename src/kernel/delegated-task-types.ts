@@ -229,6 +229,19 @@ export interface DelegatedTaskServicePort {
 }
 
 /**
+ * 「已触发发帖」引用集读端口（automation 属主 delegated_tasks 的窄读投影）。
+ * 跨 owner 消费方（content 的精选内容存储判定 created/uncreated）MUST 经本接口向 automation 域要，
+ * MUST NOT 直连 automation 库。返回该账号 + target 下 publish_post 委托任务的 curatedId / sourceId
+ * 引用集（去重、剔空）。实现方 = automation 的委托任务存储；拆进程后换 HTTP 客户端，接口不变。
+ */
+export interface TriggeredPublishRefsReader {
+  triggeredPublishRefs(
+    accountId: string,
+    executionTarget: string,
+  ): Promise<{ curatedIds: string[]; sourceIds: string[] }>;
+}
+
+/**
  * 委托任务状态全集（运行时字面数组）；`satisfies` 与上面的 DelegatedTaskStatus 联合逐字对齐
  * （增删状态两处同改，编译期兜底）。纯 `as const` 冻结字面，非 Set/Map、非进程内活状态。
  * change decouple-longtail-sweep 从 src/delegated-task/types.ts 抬入，供 api 侧面板跨边界共导。

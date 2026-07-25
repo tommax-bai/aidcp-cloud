@@ -135,3 +135,13 @@ export interface PlatformRegistryEntry {
   delegatedActions: Record<DelegatedAction, DelegatedActionSupport>;
   comment: CommentPlatformProfile;
 }
+
+/**
+ * 账号平台读端口（api 属主 accounts.platform 的窄读接口）。
+ * 跨 owner 消费方（content 的发布媒体存储在发媒体前校验账号是 facebook 账号）MUST 经本接口向 api 域要，
+ * MUST NOT 直连 api 库。getPlatformOrNull 缺账号返 null（供调用方区分 account_not_found 与 platform 不符）。
+ * 实现方 = api 的账号主数据存储；拆进程后换 HTTP 客户端，接口不变。
+ */
+export interface AccountPlatformReader {
+  getPlatformOrNull(accountId: string): Promise<PlatformId | null>;
+}

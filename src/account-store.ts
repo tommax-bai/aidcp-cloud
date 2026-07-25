@@ -177,6 +177,8 @@ export interface AccountStore {
   getGroupLabel?(accountId: string): Promise<string | null>;
   /** 读取账号平台；缺省/旧数据按 xiaohongshu 归一。 */
   getPlatform?(accountId: string): Promise<PlatformId>;
+  /** 读取账号平台，缺账号返 null（供跨 owner 读端口 AccountPlatformReader 区分 account_not_found 与 platform 不符）。 */
+  getPlatformOrNull?(accountId: string): Promise<PlatformId | null>;
   /** 按平台枚举账号；返回状态字段，调用方可据 active/paused 做调度闸。 */
   listByPlatform?(platform: PlatformId): Promise<PlatformAccountRecord[]>;
   /**
@@ -511,6 +513,24 @@ export class PgAccountStore implements AccountStore {
     );
     const platform = normalizePlatformId(rows[0]?.platform);
     if (rows.length > 0) this.platformCache.set(accountId, platform);
+    return platform;
+  }
+
+  /**
+   * 账号平台，缺账号返 null（与 getPlatform 的「缺值回落 xiaohongshu」刻意不同）：作 AccountPlatformReader
+   * 端口实现，让跨 owner 调用方区分「账号不存在」与「平台不符」。命中即回填平台缓存。
+   */
+  async getPlatformOrNull(accountId: string): Promise<PlatformId | null> {
+    if (accountId === RETIRED_ACCOUNT_ID) return 'xiaohongshu';
+    const cached = this.platformCache.get(accountId);
+    if (cached) return cached;
+    const { rows } = await this.pool.query<{ platform: string | null }>(
+      `SELECT platform FROM accounts WHERE account_id = $1`,
+      [accountId],
+    );
+    if (rows.length === 0) return null;
+    const platform = normalizePlatformId(rows[0].platform);
+    this.platformCache.set(accountId, platform);
     return platform;
   }
 

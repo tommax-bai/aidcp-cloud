@@ -1417,7 +1417,8 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   try {
     const ccs = new CuratedContentStore({ schemaEnsurer: ensureCapabilitySchema,
       pool: contentPool,
-      automationPool, // Block③ 拆库：listForClient created/uncreated 跨 owner 读 delegated_tasks 走 automation 池
+      // Block③ 拆库解耦：created/uncreated 判定经 automation 域的委托任务存储（惰性 thunk，它在下方构造），content 不碰 automation 库。
+      triggeredRefsReader: () => delegatedTaskStore,
       host: readEnvString('PGHOST'),
       port: readEnvPort('PGPORT'),
       database: readEnvString('PGDATABASE'),
@@ -1738,7 +1739,11 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   try {
     const store = new FacebookPublishMediaStore({ schemaEnsurer: ensureCapabilitySchema,
       pool: contentPool,
-      apiPool, // Block③ 拆库：assertFacebookAccount 跨 owner 读 accounts.platform 走 api 池
+      // Block③ 拆库解耦：账号校验经 api 域的账号存储读接口（缺账号返 null），content 不碰 api 库。
+      accountPlatformReader: () =>
+        accountStore?.getPlatformOrNull
+          ? { getPlatformOrNull: (id: string) => accountStore!.getPlatformOrNull!(id) }
+          : undefined,
       host: readEnvString('PGHOST'),
       port: readEnvPort('PGPORT'),
       database: readEnvString('PGDATABASE'),
