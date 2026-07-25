@@ -51,7 +51,8 @@
       "src/kernel/visual-reference-prompts.ts",
       "src/kernel/publish-generation-types.ts",
       "src/kernel/publish-status-types.ts",
-      "src/kernel/risk-read-types.ts"
+      "src/kernel/risk-read-types.ts",
+      "src/kernel/panel-automation-types.ts"
     ]
   },
   "rejected": [

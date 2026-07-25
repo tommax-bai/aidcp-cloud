@@ -1,9 +1,13 @@
 /**
  * 面板只读查询层（PostgreSQL，纯 SELECT）。
  *
- * design D2/D4：面板是只读组合器——直接 SELECT 现有表（risk_counters / risk_state /
- * accounts / publish_log），绝不经 RiskController 写、绝不碰 edge。全部走已有索引的
- * 点查/范围查询，不阻塞事件循环。
+ * design D2/D4：面板是只读组合器——就地 SELECT **api 属主**表（accounts / persona_config /
+ * publish_log），绝不经 RiskController 写、绝不碰 edge。全部走已有索引的点查/范围查询，不阻塞事件循环。
+ *
+ * Block③ L3（物理拆库）：**automation 属主**的 risk_counters / risk_state / alerts /
+ * interaction_feed / interaction_target_meta 不再由本层直读，改经 kernel 端口 `PanelAutomationReader`
+ * 向 automation 域取投影（面板绝不直连别域的库）。原 `accounts LEFT JOIN risk_state` 已拆为
+ * 「本地读 accounts + 端口批量取风控态 + 本地合入」，逐字等价 LEFT JOIN 语义。
  *
  * 归因缺口（task 3 未落地）：interaction.occurred 暂无 accountId，故 todayTotals/likeRate
  * 为**全局**聚合；调用方须以 attributionPending 标注，绝不冒充按账号（interaction-attribution 红线）。
@@ -21,6 +25,7 @@ import {
 import type { FeedAction } from '../kernel/feed-action.js';
 import type { AlertSeverity } from '../feishu/types.js';
 import type { VisualReferenceAudit } from '../kernel/visual-reference-types.js';
+import type { PanelAutomationReader, PanelRiskStateProjection } from '../kernel/panel-automation-types.js';
 import {
   resolveAccountDisplayName,
   type AccountDisplayNameSource,
@@ -162,7 +167,7 @@ export interface AccountTotals {
   saturated?: RiskAction[];
 }
 
-/** 告警事件（V1 task 9.5；面板直接 SELECT alerts 表，design D2）。 */
+/** 告警事件（V1 task 9.5；Block③ L3 起经 automation 只读端口取 alerts 投影，面板不直读该表，design D2）。 */
 export interface PanelAlert {
   id: number;
   severity: AlertSeverity;
@@ -222,7 +227,14 @@ export interface PgPanelStoreOptions {
   database?: string;
   user?: string;
   password?: string;
+  /** 面板自己的（api 属主）连接池：accounts / persona_config / publish_log 就地读。 */
   pool?: pg.Pool;
+  /**
+   * automation 域只读投影端口（Block③ L3，必填）：风控计数 / 风控态 / 告警 / 互动流经此取，
+   * 面板绝不直连 automation 的库。组合根按运行模式注入（monolith/core=automation 池本地实现；
+   * api 模式=HTTP 客户端，待 Block② 补，暂 fail-closed）。
+   */
+  automation: PanelAutomationReader;
 }
 
 interface AccountJoinRow {
@@ -236,14 +248,16 @@ interface AccountJoinRow {
   contact_info: string | null;
   operator_status: string;
   paused_at: Date | null;
-  risk_status: string | null;
-  risk_quota_level: string | null;
-  signal_count: number | null;
   persona_bound: boolean | null;
   execution_target: string | null;
 }
 
-function toAccount(r: AccountJoinRow): PanelAccount {
+/**
+ * 组装面板账号视图。风控态（riskStatus / riskQuotaLevel / signalCount）不再随本行 JOIN 来，
+ * 而由 automation 只读端口的批量投影 `risk` 合入（Block③ L3：面板不直读 risk_state）。
+ * `risk` 缺失（该账号无风控行）→ 三项全 null，逐字等价原 `LEFT JOIN risk_state`。
+ */
+function toAccount(r: AccountJoinRow, risk: PanelRiskStateProjection | undefined): PanelAccount {
   const accountId = r.account_id;
   const personaBound = r.persona_bound === true;
   const display = resolveAccountDisplayName({
@@ -262,9 +276,9 @@ function toAccount(r: AccountJoinRow): PanelAccount {
     contactInfo: r.contact_info,
     operatorStatus: r.operator_status === 'paused' ? 'paused' : 'active',
     pausedAt: r.paused_at ? r.paused_at.getTime() : null,
-    riskStatus: (r.risk_status as RiskStatus | null) ?? null,
-    riskQuotaLevel: (r.risk_quota_level as RiskQuotaLevel | null) ?? null,
-    signalCount: r.signal_count,
+    riskStatus: (risk?.status as RiskStatus | null) ?? null,
+    riskQuotaLevel: (risk?.quotaLevel as RiskQuotaLevel | null) ?? null,
+    signalCount: risk?.signalCount ?? null,
     currentDriverTarget: r.execution_target === 'dev' || r.execution_target === 'ol' ? r.execution_target : null,
     personaBound,
     // retire-default-account / persona-driven-content-pipeline：default 账号已删，不再特判——是否需补人设仅看 personaBound。
@@ -390,20 +404,27 @@ function parseSourceReference(raw: unknown): PanelPublishSourceReference | null 
   };
 }
 
+// accounts / persona_config 均 api 属主，就地 JOIN 于面板自己的（api）池。
+// risk_state（automation 属主）已从此 JOIN 移除 —— 改由 automation 只读端口批量取投影后本地合入
+// （Block③ L3：面板不直连 automation 的库）。
 const ACCOUNT_SELECT = `
   SELECT a.account_id, a.label, a.nickname, a.operator_alias, a.platform, a.group_label, a.machine_label,
          a.contact_info, a.execution_target,
          a.status AS operator_status, a.paused_at,
-         r.status AS risk_status, r.quota_level AS risk_quota_level, r.signal_count,
          (pc.account_id IS NOT NULL AND btrim(pc.persona) <> '') AS persona_bound
   FROM accounts a
-  LEFT JOIN risk_state r ON r.account_id = a.account_id
   LEFT JOIN persona_config pc ON pc.account_id = a.account_id`;
 
 export class PgPanelStore implements PanelStoreReader {
   private readonly pool: pg.Pool;
+  /**
+   * automation 域只读投影端口（Block③ L3）：风控计数 / 风控态 / 告警 / 互动流经此取，
+   * 面板绝不直读 automation 的表。单进程期 = 跑在 automation 池上的本地实现；拆进程后换 HTTP。
+   */
+  private readonly automation: PanelAutomationReader;
 
-  constructor(options: PgPanelStoreOptions = {}) {
+  constructor(options: PgPanelStoreOptions) {
+    this.automation = options.automation;
     this.pool =
       options.pool ??
       new Pool({
@@ -417,12 +438,7 @@ export class PgPanelStore implements PanelStoreReader {
 
   /** 今日各 action 计数（SUM(count)，全局——归因落地前不可按账号拆分）。 */
   async todayTotals(): Promise<TodayTotals> {
-    const { rows } = await this.pool.query<{ action: string; total: number }>(
-      `SELECT action, COALESCE(SUM(count), 0)::int AS total
-       FROM risk_counters
-       WHERE occurred_at >= ${SHANGHAI_DAY_START_SQL}
-       GROUP BY action`,
-    );
+    const rows = await this.automation.todayActionTotals();
     const totals = Object.fromEntries(RISK_ACTIONS.map((a) => [a, 0])) as TodayTotals;
     for (const row of rows) {
       if ((RISK_ACTIONS as readonly string[]).includes(row.action)) {
@@ -434,18 +450,13 @@ export class PgPanelStore implements PanelStoreReader {
 
   /** 今日各 action 计数按账号切片（GROUP BY account_id, action；归因已流通，真按账号）。 */
   async todayTotalsByAccount(): Promise<AccountTotals[]> {
-    const { rows } = await this.pool.query<{ account_id: string; action: string; total: number }>(
-      `SELECT account_id, action, COALESCE(SUM(count), 0)::int AS total
-       FROM risk_counters
-       WHERE occurred_at >= ${SHANGHAI_DAY_START_SQL}
-       GROUP BY account_id, action`,
-    );
+    const rows = await this.automation.todayActionTotalsByAccount();
     const byAccount = new Map<string, TodayTotals>();
     for (const row of rows) {
-      let totals = byAccount.get(row.account_id);
+      let totals = byAccount.get(row.accountId);
       if (!totals) {
         totals = Object.fromEntries(RISK_ACTIONS.map((a) => [a, 0])) as TodayTotals;
-        byAccount.set(row.account_id, totals);
+        byAccount.set(row.accountId, totals);
       }
       if ((RISK_ACTIONS as readonly string[]).includes(row.action)) {
         totals[row.action as RiskAction] = row.total;
@@ -463,30 +474,29 @@ export class PgPanelStore implements PanelStoreReader {
   }
 
   async likeRate(): Promise<LikeRate> {
-    const { rows } = await this.pool.query<{ likes: number; views: number }>(
-      `SELECT COALESCE(SUM(count) FILTER (WHERE action = 'like'), 0)::int AS likes,
-              COALESCE(SUM(count) FILTER (WHERE action = 'view'), 0)::int AS views
-       FROM risk_counters
-       WHERE occurred_at >= ${SHANGHAI_DAY_START_SQL}`,
-    );
-    const likes = rows[0]?.likes ?? 0;
-    const views = rows[0]?.views ?? 0;
+    const { likes, views } = await this.automation.todayLikeViewTotal();
     const rate = views > 0 ? likes / views : null;
     const healthy = rate === null ? null : rate >= 0.15 && rate <= 0.35;
     return { likes, views, rate, healthy };
   }
 
   async listAccounts(): Promise<PanelAccount[]> {
-    const { rows } = await this.pool.query<AccountJoinRow>(`${ACCOUNT_SELECT} ORDER BY a.created_at`);
-    return rows.map((row) => toAccount(row));
+    // accounts + persona_config 就地读（api 池）；风控态从 automation 端口批量取后按 accountId 合入。
+    const [{ rows }, risk] = await Promise.all([
+      this.pool.query<AccountJoinRow>(`${ACCOUNT_SELECT} ORDER BY a.created_at`),
+      this.automation.riskStateProjection(),
+    ]);
+    const riskById = new Map(risk.map((x) => [x.accountId, x]));
+    return rows.map((row) => toAccount(row, riskById.get(row.account_id)));
   }
 
   async getAccount(accountId: string): Promise<PanelAccount | null> {
-    const { rows } = await this.pool.query<AccountJoinRow>(`${ACCOUNT_SELECT} WHERE a.account_id = $1`, [
-      accountId,
+    const [{ rows }, risk] = await Promise.all([
+      this.pool.query<AccountJoinRow>(`${ACCOUNT_SELECT} WHERE a.account_id = $1`, [accountId]),
+      this.automation.riskStateProjection([accountId]),
     ]);
     const r = rows[0];
-    return r ? toAccount(r) : null;
+    return r ? toAccount(r, risk[0]) : null;
   }
 
   /**
@@ -575,74 +585,37 @@ export class PgPanelStore implements PanelStoreReader {
   }
 
   async listAlerts(options: { limit?: number; includeResolved?: boolean } = {}): Promise<PanelAlert[]> {
-    const limit = options.limit ?? 100;
-    const where = options.includeResolved ? '' : 'WHERE resolved_at IS NULL';
     try {
-      const { rows } = await this.pool.query<{
-        alert_id: string | number;
-        severity: AlertSeverity;
-        type: string;
-        account_id: string | null;
-        title: string;
-        detail: string | null;
-        created_at: Date;
-        resolved_at: Date | null;
-      }>(
-        `SELECT alert_id, severity, type, account_id, title, detail, created_at, resolved_at
-         FROM alerts ${where} ORDER BY created_at DESC LIMIT $1`,
-        [limit],
-      );
+      const rows = await this.automation.listAlerts(options);
       return rows.map((r) => ({
-        id: Number(r.alert_id),
-        severity: r.severity,
+        id: r.alertId,
+        severity: r.severity as AlertSeverity,
         type: r.type,
-        accountId: r.account_id,
+        accountId: r.accountId,
         title: r.title,
         detail: r.detail,
-        createdAt: r.created_at.getTime(),
-        resolvedAt: r.resolved_at ? r.resolved_at.getTime() : null,
+        createdAt: r.createdAt,
+        resolvedAt: r.resolvedAt,
       }));
     } catch (err) {
-      // 表未迁移时降级为空（dashboard 不因新表缺失整体 500）；其他错误上抛。
+      // 表未迁移时降级为空（dashboard 不因新表缺失整体 500）；其他错误上抛。降级策略保留在面板层（历史行为）。
       if ((err as { code?: string }).code === PG_UNDEFINED_TABLE) return [];
       throw err;
     }
   }
 
   async listInteractions(options: { limit?: number; accountId?: string } = {}): Promise<PanelInteraction[]> {
-    const limit = options.limit ?? 100;
-    const params: unknown[] = [];
-    let where = '';
-    if (options.accountId) {
-      params.push(options.accountId);
-      where = `WHERE f.account_id = $${params.length}`;
-    }
-    params.push(limit);
     try {
       // change interaction-feed-enrichment：读展示账本 + 读时 LEFT JOIN 元数据（标题/链接）。
       // title/url 为 NULL → 映射成 undefined（诚实置空，前端不渲染死链）。
-      const { rows } = await this.pool.query<{
-        account_id: string;
-        target_id: string;
-        action: FeedAction;
-        title: string | null;
-        url: string | null;
-        occurred_at: Date;
-      }>(
-        `SELECT f.account_id, f.target_id, f.action, m.title, m.url, f.occurred_at
-         FROM interaction_feed f
-         LEFT JOIN interaction_target_meta m
-           ON m.account_id = f.account_id AND m.target_id = f.target_id
-         ${where} ORDER BY f.occurred_at DESC LIMIT $${params.length}`,
-        params,
-      );
+      const rows = await this.automation.listInteractions(options);
       return rows.map((r) => ({
-        accountId: r.account_id,
-        targetId: r.target_id,
-        action: r.action,
+        accountId: r.accountId,
+        targetId: r.targetId,
+        action: r.action as FeedAction,
         ...(r.title ? { title: r.title } : {}),
         ...(r.url ? { url: r.url } : {}),
-        interactedAt: r.occurred_at.getTime(),
+        interactedAt: r.interactedAt,
       }));
     } catch (err) {
       if ((err as { code?: string }).code === PG_UNDEFINED_TABLE) return [];

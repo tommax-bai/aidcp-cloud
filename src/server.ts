@@ -330,6 +330,8 @@ import { PublishGenerationHttpClient, registerPublishGenerationRoutes } from './
 //   - 事件观测：automation 把 EventBus tee 到 outbox；api 回放进本进程 EventBus → panel-ws。
 import { RiskReadHttpClient, registerRiskReadRoutes } from './transport/risk-read-http.js';
 import type { RiskReadPort } from './kernel/risk-read-types.js';
+import type { PanelAutomationReader } from './kernel/panel-automation-types.js';
+import { PgPanelAutomationRead } from './risk/panel-automation-read.js';
 import { emitRiskCommand, startRiskCommandConsumer } from './transport/risk-command-outbox.js';
 import { bridgeEventBusToOutbox, PanelEventReplay } from './transport/eventbus-outbox-bridge.js';
 /** automation 内部只读 API 的默认监听端口（可由 AIDCP_AUTOMATION_PORT 覆盖）；api 侧 base URL 由 AIDCP_AUTOMATION_URL 指定。 */
@@ -618,6 +620,9 @@ interface CompositionContext {
   // 拆段传输 helper（风控命令消费者 / 事件→outbox 桥 / 面板回放 / emitRiskCommand）MUST 用 automation 池，
   // 而非 api 的 configMirrorPool（后者只服务 config_mirror_version）。单库下二池同库、字节等价；拆库后才分道。
   automationPool: pg.Pool;
+  // api 属主池（accounts / persona_config / publish_log 等）。configMirrorPool 亦指向它（同对象），
+  // 但语义为「config_mirror_version 专用」；面板等 api 属主读写按属主取用本字段，避免与 mirror 语义混淆。
+  apiPool: pg.Pool;
   configMirrorRefresher: ConfigMirrorRefresher;
   contentScheduleStore: ContentScheduleStore;
   credentialStore: CredentialStore;
@@ -1849,6 +1854,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ctx.clientUserStore = clientUserStore;
   ctx.configMirrorPool = configMirrorPool;
   ctx.automationPool = automationPool;
+  ctx.apiPool = apiPool;
   ctx.contentScheduleStore = contentScheduleStore;
   ctx.credentialStore = credentialStore;
   ctx.dashscopeApiKey = dashscopeApiKey;
@@ -5461,7 +5467,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
 }
 
 async function segDApiServing(ctx: CompositionContext): Promise<void> {
-  const { accountDisplayName, accountPersonaService, accountStore, alertStore, approvalPolicyStore, approvePublishForClient, billingPriceRefresh, botChatStore, botChatsProvider, buildModelConfigView, buildTodayUsageForAccount, captchaAssist, categoryConfigPanel, clientUserStore, commandFace, commentScheduler, conceptStore, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, debugPort, delegatedTaskService, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigPanel, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, messenger, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigPanel, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, probeModel, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigPanel, readApprovalDispatchProjection, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resolveAccountChatId, resumeConfigPanel, riskRegistry, roleConfigPanel, rolePromptProvider, server, sessionLimitPanel, tokenUsageStore, triggerPublishDispatchOnApprove, writeApprovalDecision } = ctx;
+  const { accountDisplayName, accountPersonaService, accountStore, alertStore, apiPool, approvalPolicyStore, approvePublishForClient, automationPool, billingPriceRefresh, botChatStore, botChatsProvider, buildModelConfigView, buildTodayUsageForAccount, captchaAssist, categoryConfigPanel, clientUserStore, commandFace, commentScheduler, conceptStore, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, debugPort, delegatedTaskService, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigPanel, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, messenger, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigPanel, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, probeModel, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigPanel, readApprovalDispatchProjection, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resolveAccountChatId, resumeConfigPanel, riskRegistry, roleConfigPanel, rolePromptProvider, server, sessionLimitPanel, tokenUsageStore, triggerPublishDispatchOnApprove, writeApprovalDecision } = ctx;
   // ── Block② 2e：运行模式（纯选择器，与 main() 同源）。segD 只在 monolith / api / core 跑。─────
   const mode = serviceModeFromEnv();
   const { deploymentTarget } = ctx; // 'dev'|'ol'|null（segA 设）；outbox emit / 消费的 executionTarget。
@@ -5482,6 +5488,22 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           effectiveQuotas: (accountId) => riskRegistry.getController(accountId).then((c) => c.effectiveQuotas()),
           slowStartView: (accountId) => riskRegistry.getController(accountId).then((c) => c.slowStartView()),
         };
+  // 面板对 automation 域的只读投影端口（Block③ L3：面板不直连 automation 的库）。
+  //   - monolith / core：跑在本进程 automation 池上的本地实现（PgPanelAutomationRead），逐字节等价、零 HTTP。
+  //   - api：segC 未跑 ⇒ 本进程无 automation 属主表；HTTP 客户端待 Block② 补（automation 内部读 API 增面板端点）。
+  //     暂 fail-closed（各方法 reject 具名错误），镜像同段 publishStatusLocal 的 api 模式 reject 先例；
+  //     api 模式当前未部署，此路不改现网行为。面板的 api 属主读（accounts/publish_log/persona_config）不受影响。
+  const panelAutomationRead: PanelAutomationReader =
+    mode === 'api'
+      ? {
+          todayActionTotals: () => Promise.reject(new Error('panel_automation_read_unavailable_in_api_mode')),
+          todayActionTotalsByAccount: () => Promise.reject(new Error('panel_automation_read_unavailable_in_api_mode')),
+          todayLikeViewTotal: () => Promise.reject(new Error('panel_automation_read_unavailable_in_api_mode')),
+          riskStateProjection: () => Promise.reject(new Error('panel_automation_read_unavailable_in_api_mode')),
+          listAlerts: () => Promise.reject(new Error('panel_automation_read_unavailable_in_api_mode')),
+          listInteractions: () => Promise.reject(new Error('panel_automation_read_unavailable_in_api_mode')),
+        }
+      : new PgPanelAutomationRead({ pool: automationPool });
   // ── Block② 数据网关（决定①：api/panel 收口取数）─────────────────────────────
   // 聚合三个 kernel 读端口（精选库 / 委托任务 / 收件箱），api 消费者从这里取端口注入。
   // 默认 mode='local'（AIDCP_GATEWAY_MODE!=='http'）⇒ getter 返回的就是上面 ctx 里的本地实例本身、
@@ -5536,13 +5558,9 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           botChatStore,
           eventBus,
           edgeServer: server,
-          panelStore: new PgPanelStore({
-            host: readEnvString('PGHOST'),
-            port: readEnvPort('PGPORT'),
-            database: readEnvString('PGDATABASE'),
-            user: readEnvString('PGUSER'),
-            password: readEnvString('PGPASSWORD'),
-          }),
+          // Block③ L3：面板自己的读走 api 属主池（accounts/persona_config/publish_log）；
+          // automation 属主表（风控/告警/互动）经注入的只读端口取，面板不直连别域的库。
+          panelStore: new PgPanelStore({ pool: apiPool, automation: panelAutomationRead }),
           // Block② 2e：面板只经 getStatus 读发布队列状态 ⇒ 注入数据网关的读端口（默认 local ⇒
           // publishStatusReader === 上面 publishStatusLocal 适配，底层同一个 publishOrchestrator.getStatus()）。
           publishStatus: dataGateway.publishStatusReader!,
@@ -5909,13 +5927,9 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
     try {
       // 客户发布队列复用面板已有的 publish_log 生命周期读取，但经过独立最小披露投影后才跨客户边界。
       // 该 reader 只在客户 API 启用时创建；不初始化/修改表，也不复用面板鉴权域或路由。
-      const clientPublishQueueStore = new PgPanelStore({
-        host: readEnvString('PGHOST'),
-        port: readEnvPort('PGPORT'),
-        database: readEnvString('PGDATABASE'),
-        user: readEnvString('PGUSER'),
-        password: readEnvString('PGPASSWORD'),
-      });
+      // 仅调 publishedHistory（api 属主：publish_log + accounts）⇒ 走 api 池；automation 端口只为满足
+      // 必填契约注入，本路径从不触达（Block③ L3）。
+      const clientPublishQueueStore = new PgPanelStore({ pool: apiPool, automation: panelAutomationRead });
       // 环境级慢启动读写共用的投影产出：与 ui.snapshot
       // 的慢启动投影**同一个 controller**（同一 anchor 解析、同一次 clock）→ 徽章天数与生效上限同源同规则。
       // dayQuotas 亦过客户端信任边界，与 ui.snapshot 上限投影同规则剥去平台不支持项（change platform-honest-usage-caps）。

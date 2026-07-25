@@ -1095,6 +1095,11 @@
     "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/agents/content-curator-role.ts 析出 NoteData 纯数据模型接口（noteId/title/content/author/likeCount/collectCount/authorFollowed/comments，全为原语与数组）。零 import、零 SQL、零 HTTP、零 LLM、无进程内活状态。ContentCuratorRole 类 + 事件订阅留 content-curator-role.ts（automation）并等值再导出。供 content 侧精选评估角色跨边界共导，消 2 条 content->automation 边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
   },
   {
+    "path": "src/kernel/panel-automation-types.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change block3-l3-panel-read-port 新写：面板（api 属主 panel-store）对 automation 域的只读投影端口契约（PanelAutomationReader 接口 + PanelActionTotal / PanelAccountActionTotal / PanelLikeViewTotal / PanelRiskStateProjection / PanelAlertProjection / PanelInteractionProjection 纯行类型）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。与 risk-read-types（账号维风控状态投影端口）同类：读方（api）只依赖本 kernel 接口、绝不直连 automation 的库；属主实现在 src/risk/panel-automation-read.ts（automation）跑在 automation 池上。Block③ 物理拆库 L3 面板读侧解耦。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3"
+  },
+  {
     "path": "src/kernel/persona-binding.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/config/persona-store.ts 析出：PersonaBinding 三态纯类型，零 import、零 SQL、零活状态，被 automation/api 多边 type-only 共导。存储实现留 persona-store.ts。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
@@ -1781,6 +1786,11 @@
   },
   {
     "path": "src/risk/pacing.ts",
+    "layer": "automation",
+    "note": "§4.7：RiskController 单写（19/19 automation）"
+  },
+  {
+    "path": "src/risk/panel-automation-read.ts",
     "layer": "automation",
     "note": "§4.7：RiskController 单写（19/19 automation）"
   },
