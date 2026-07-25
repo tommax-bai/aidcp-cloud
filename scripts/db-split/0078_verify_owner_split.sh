@@ -43,10 +43,14 @@ for owner in "${OWNERS[@]}"; do
   list="$SCRIPT_DIR/owner-tables.$owner.txt"
   echo "== verify $owner: $SOURCE_DB vs $target =="
 
-  expected="$(grep -v '^#' "$list" | grep -v '^[[:space:]]*$' | sort)"
+  # ⚠️ 两侧的排序 MUST 用同一套规则再喂给 comm。shell 的 `sort` 走 locale collation、psql 的
+  # `ORDER BY` 走库的 collation，而这台机器上两者对下划线的处理相反（`client_env_scope` 与
+  # `client_environments` 的先后正好颠倒）⇒ comm 会报出一堆**根本不存在的**差异。
+  # 统一钉在 C（字节序）上：`LC_ALL=C sort` + SQL 侧不依赖 ORDER BY。
+  expected="$(grep -v '^#' "$list" | grep -v '^[[:space:]]*$' | LC_ALL=C sort)"
 
   # 3. 目标库里不该有多余的表
-  actual="$(psql -qtA -d "$target" -c "select tablename from pg_tables where schemaname='public' order by 1")"
+  actual="$(psql -qtA -d "$target" -c "select tablename from pg_tables where schemaname='public'" | LC_ALL=C sort)"
   extra="$(comm -13 <(echo "$expected") <(echo "$actual") || true)"
   [ -z "$extra" ] || note "target '$target' has tables NOT owned by '$owner': $(echo "$extra" | paste -sd, -)"
 
