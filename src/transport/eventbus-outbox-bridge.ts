@@ -43,6 +43,7 @@ import {
 import {
   OutboxConsumer,
   emitOutboxEvent,
+  type OutboxConsumerStats,
   type OutboxEvent,
   type OutboxHandler,
   type OutboxQueryable,
@@ -282,9 +283,24 @@ export class PanelEventReplay {
     this.consumer.stop();
   }
 
-  /** 加速器唤醒（收到 pg_notify 时调用），让空闲轮询提前触发一次。 */
-  wake(): void {
-    this.consumer.wake();
+  /** 加速器唤醒（收到 pg_notify 时调用），让空闲轮询提前触发一次。带 topic 时只在相关时才醒。 */
+  wake(topic?: string): void {
+    this.consumer.wake(topic);
+  }
+
+  /** 本回放器是否关心该主题（通知过滤用）。 */
+  handlesTopic(topic: string): boolean {
+    return this.consumer.handlesTopic(topic);
+  }
+
+  /** 健康度快照（同步）。 */
+  stats(): OutboxConsumerStats {
+    return this.consumer.stats();
+  }
+
+  /** 队列占用（连库计数）。 */
+  backlogByTopic(): Promise<Record<string, number>> {
+    return this.consumer.backlogByTopic();
   }
 
   /** 手动驱动一轮（单测用，不依赖真定时器）；返回本轮回放条数。 */

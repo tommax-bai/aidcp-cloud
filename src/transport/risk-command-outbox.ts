@@ -39,6 +39,7 @@ import type { RiskQuotaLevel, RiskSignal } from '../risk/types.js';
 import {
   OutboxConsumer,
   emitOutboxEvent,
+  type OutboxConsumerStats,
   type OutboxEvent,
   type OutboxHandler,
   type OutboxQueryable,
@@ -229,9 +230,24 @@ export class RiskCommandConsumer {
     this.inner.stop();
   }
 
-  /** pg_notify 加速器唤醒（收到通知时调）。 */
-  wake(): void {
-    this.inner.wake();
+  /** pg_notify 加速器唤醒（收到通知时调）。带 topic 时只在与本消费者相关时才醒。 */
+  wake(topic?: string): void {
+    this.inner.wake(topic);
+  }
+
+  /** 本消费者是否关心该主题（通知过滤用）。 */
+  handlesTopic(topic: string): boolean {
+    return this.inner.handlesTopic(topic);
+  }
+
+  /** 健康度快照（同步）。 */
+  stats(): OutboxConsumerStats {
+    return this.inner.stats();
+  }
+
+  /** 队列占用（连库计数）。 */
+  backlogByTopic(): Promise<Record<string, number>> {
+    return this.inner.backlogByTopic();
   }
 
   /** 直接驱动一轮（单测用，不依赖真定时器）。返回本轮处理条数。 */

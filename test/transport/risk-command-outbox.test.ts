@@ -41,6 +41,7 @@ class FakePool implements OutboxQueryable {
     created_at: Date;
   }[] = [];
   readonly cursors = new Map<string, number>();
+  readonly topicCursors = new Map<string, number>();
 
   seed(topic: string, payload: unknown, target: string): number {
     const id = ++this.seq;
@@ -65,20 +66,28 @@ class FakePool implements OutboxQueryable {
     if (s.startsWith('SELECT pg_notify')) {
       return { rows: [], rowCount: 1 };
     }
-    if (s.startsWith('SELECT last_id FROM event_outbox_cursor')) {
-      const key = `${params[0] as string}|${params[1] as string}`;
-      const last = this.cursors.get(key);
-      return last === undefined ? { rows: [], rowCount: 0 } : { rows: [{ last_id: last }], rowCount: 1 };
+    if (s.startsWith('SELECT COALESCE(')) {
+      const [consumer, target, topic] = params as [string, string, string];
+      const scoped = this.topicCursors.get(`${consumer}|${target}|${topic}`);
+      const legacy = this.cursors.get(`${consumer}|${target}`);
+      return { rows: [{ last_id: scoped ?? legacy ?? 0 }], rowCount: 1 };
     }
     if (s.startsWith('SELECT id, topic, payload')) {
       const target = params[0] as string;
-      const afterId = Number(params[1]);
-      const limit = Number(params[2]);
+      const topic = params[1] as string;
+      const afterId = Number(params[2]);
+      const limit = Number(params[3]);
       const rows = this.events
-        .filter((e) => e.execution_target === target && e.id > afterId)
+        .filter((e) => e.execution_target === target && e.topic === topic && e.id > afterId)
         .sort((a, b) => a.id - b.id)
         .slice(0, limit);
       return { rows, rowCount: rows.length };
+    }
+    if (s.startsWith('INSERT INTO event_outbox_topic_cursor')) {
+      const key = `${params[0] as string}|${params[1] as string}|${params[2] as string}`;
+      const next = Number(params[3]);
+      this.topicCursors.set(key, Math.max(this.topicCursors.get(key) ?? 0, next));
+      return { rows: [], rowCount: 1 };
     }
     if (s.startsWith('INSERT INTO event_outbox_cursor')) {
       const key = `${params[0] as string}|${params[1] as string}`;

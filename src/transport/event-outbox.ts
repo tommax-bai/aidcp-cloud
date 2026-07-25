@@ -16,6 +16,12 @@
  *   事件与业务写入同生共死（业务回滚 → 事件不存在，绝不出现「事件发了、业务没落」的裂缝）。
  * - **at-least-once**：消费方逐条 `await handler`，成功一条才把游标推到该条 id；handler 抛错即停在
  *   该条之前、游标不越过它，下一轮从游标之后重放。幂等由 handler 负责（同一事件可能被投递多次）。
+ * - **游标按主题分维（change outbox-listen-and-topic-cursor）**：游标键是 `(consumer, target, topic)`，
+ *   落在 `event_outbox_topic_cursor`（migrations/0075）。一条毒消息只堵**它自己那条主题**，其余主题照常
+ *   推进——这正是 broker 的「逐条 ack + 待处理表」所提供的收益，零新组件拿到。
+ *   ⚠️ 幂等不是可以假设的：本仓实测 `risk.command` 的 `applySignal` **不幂等**（`light` 信号重投会把
+ *   normal→warned→restricted 一路推上去，`signalCount` 单调累加，见 src/risk/risk-state-machine.ts:27,56）。
+ *   故迁移的存量回填 MUST 取「不重放也不跳过」的精确续接，MUST NOT 靠「重放总是安全的」搪塞。
  * - **提交乱序安全水位**：`id`（BIGSERIAL）在 INSERT 时分配、**先于 COMMIT**，故 id 顺序 ≠ 提交可见顺序。
  *   若只按 `id > 游标` 拉取，会出现「并发事务 A 拿到较小 id 但尚未提交、事务 B 拿到较大 id 已提交」→
  *   消费方看不到 A 的行、却消费了 B 并把游标推过 B → A 随后提交时其较小 id 已 < 游标、**永远投不出去**
@@ -39,6 +45,15 @@ import type pg from 'pg';
 
 /** `pg_notify` 频道名（可选加速器）。 */
 export const EVENT_OUTBOX_NOTIFY_CHANNEL = 'event_outbox';
+
+/**
+ * `NOTIFY` 载荷的字节上限（PostgreSQL 硬限 8000 字节，超限直接报错）。
+ *
+ * 本通道的载荷**只当唤醒信号**用——最多带一个 topic 名，业务数据一律走 `event_outbox` 行本身。
+ * 留出余量后取 7900：topic 正常是十几字节，这道闸只为挡住「有人把业务字段塞进 topic」的将来。
+ * 超限时降级为空载荷（消费方按「未知主题」全量唤醒一次），MUST NOT 让加速器把承重的 INSERT 拖崩。
+ */
+export const NOTIFY_PAYLOAD_MAX_BYTES = 7900;
 
 export type ExecutionTarget = 'dev' | 'ol';
 
@@ -102,8 +117,11 @@ export async function emitOutboxEvent(
   );
   const id = Number(rows[0].id);
 
+  // 载荷只带 topic（唤醒信号，非数据通道）。超 8000 字节上限则退化为空载荷、由消费方全量唤醒。
+  const notifyPayload =
+    Buffer.byteLength(input.topic, 'utf8') <= NOTIFY_PAYLOAD_MAX_BYTES ? input.topic : '';
   try {
-    await client.query(`SELECT pg_notify($1, $2)`, [EVENT_OUTBOX_NOTIFY_CHANNEL, input.topic]);
+    await client.query(`SELECT pg_notify($1, $2)`, [EVENT_OUTBOX_NOTIFY_CHANNEL, notifyPayload]);
   } catch (err: unknown) {
     logger.warn(
       `[event-outbox] pg_notify 失败（非承重通道，轮询照常兜底）topic=${input.topic}: ${
@@ -141,30 +159,81 @@ interface CursorRow {
 type TimerHandle = ReturnType<typeof setTimeout>;
 
 export interface OutboxConsumerOptions {
-  /** 消费者名（游标按 (consumer, target) 分行；不同消费者各自收齐全量）。 */
+  /** 消费者名（游标按 (consumer, target, topic) 分行；不同消费者各自收齐全量）。 */
   consumer: string;
   /** 归属目标；只消费本 target 的行。MUST 为 'dev' | 'ol'。 */
   executionTarget: string;
   /** 复用组合根已有的 Pool。 */
   pool: OutboxQueryable;
-  /** 主题 → 处理器。未注册的主题对本消费者视为无关，直接跳过并推进游标（多消费者扇出语义）。 */
+  /**
+   * 主题 → 处理器。**只有注册过的主题会被拉取**：游标按主题分维之后，未注册主题既不查也不进游标
+   * （从前是「拉出来、跳过、把聚合游标推过去」；新语义下它对本消费者根本不存在）。
+   */
   handlers: Map<string, OutboxHandler>;
-  /** 每批最多拉取条数，默认 100。 */
+  /** 每批最多拉取条数，默认 100。**按主题计**（每个主题各自最多拉这么多）。 */
   batchSize?: number;
   /** 有界轮询兜底间隔（毫秒），默认 2000。承重通道，MUST NOT 因接了通知就放大。 */
   pollIntervalMs?: number;
+  /**
+   * 通知唤醒的最小间隔（毫秒），默认 50。
+   *
+   * `panel.event` 是全量总线 firehose——每条编排事件都会发一次 `NOTIFY`。若每条通知都立刻触发一轮
+   * 查询，空闲期的查询频率就等于总线事件频率。这道闸把**通知驱动**的查询频率压到 ≤ 1/该间隔，
+   * 唤醒延迟仍是毫秒级。它只压通知路径，**MUST NOT** 用来放大 `pollIntervalMs`（承重通道）。
+   */
+  wakeDebounceMs?: number;
   logger?: Pick<Console, 'log' | 'warn'>;
   /** 注入定时器（测试用）；默认 setTimeout / clearTimeout。 */
   setTimer?: (fn: () => void, ms: number) => TimerHandle;
   clearTimer?: (handle: TimerHandle) => void;
+  /** 注入时钟（测试用）；默认 Date.now。 */
+  now?: () => number;
+}
+
+/** 一条被毒消息堵住的主题（只堵它自己，其余主题照常推进）。 */
+export interface OutboxBlockedTopic {
+  topic: string;
+  /** 卡住的那条事件 id。 */
+  eventId: number;
+  /** 首次卡住的时刻（毫秒时间戳）。 */
+  since: number;
+  /** 连续失败次数。 */
+  attempts: number;
+  lastError: string;
+}
+
+/** 消费者健康度快照（可观测：给运维 / 面板看「通道是否在动、被什么堵住」）。 */
+export interface OutboxConsumerStats {
+  consumer: string;
+  executionTarget: ExecutionTarget;
+  topics: string[];
+  running: boolean;
+  pollIntervalMs: number;
+  /** 已跑过的轮次数（含通知唤醒触发的）。 */
+  ticks: number;
+  /** 收到并采纳的唤醒次数。 */
+  wakes: number;
+  /** 收到但与本消费者无关（主题未注册）而丢弃的唤醒次数。 */
+  wakesIgnored: number;
+  /** 累计成功投递条数。 */
+  handledTotal: number;
+  lastTickAt: number | null;
+  lastErrorAt: number | null;
+  lastError: string | null;
+  /** 各主题最近一次读到 / 推进到的游标位置。 */
+  cursors: Record<string, number>;
+  /** 被毒消息堵住的主题（空数组 = 全部畅通）。 */
+  blocked: OutboxBlockedTopic[];
 }
 
 /**
- * outbox 消费者：有界轮询 + 可选通知唤醒。
+ * outbox 消费者：有界轮询 + 通知唤醒，游标按 `(consumer, target, topic)` 分维。
  *
- * 生命周期：`start()` 读游标、跑一轮、排下一次轮询；`wake()` 让当前空闲的轮询提前触发一次
- * （由持有 LISTEN 长连接的一方在收到 NOTIFY 时调用——LISTEN 连接的接线属 server 组合根，不在本原语内）；
- * `stop()` 停表、可释放。
+ * 生命周期：`start()` 逐主题读游标、跑一轮、排下一次轮询；`wake(topic?)` 让当前空闲的轮询提前触发一次
+ * （由 `OutboxNotifyListener` 收到 `NOTIFY` 时调用，带上通知载荷里的 topic）；`stop()` 停表、可释放。
+ *
+ * **主题隔离**：每个已注册主题各读各的游标、各拉各的一批。某主题的 handler 抛错只会把**那条主题**
+ * 停在失败条之前，其余主题本轮照常推进——单条毒消息不再堵队头。被堵主题进 `stats().blocked`。
  */
 export class OutboxConsumer {
   private readonly consumer: string;
@@ -173,14 +242,29 @@ export class OutboxConsumer {
   private readonly handlers: Map<string, OutboxHandler>;
   private readonly batchSize: number;
   private readonly pollIntervalMs: number;
+  private readonly wakeDebounceMs: number;
   private readonly logger: Pick<Console, 'log' | 'warn'>;
   private readonly setTimer: (fn: () => void, ms: number) => TimerHandle;
   private readonly clearTimer: (handle: TimerHandle) => void;
+  private readonly now: () => number;
 
   private running = false;
   private draining = false;
   private wakePending = false;
   private timer: TimerHandle | null = null;
+  /** 唤醒去抖用：上一次 tick 起跑的时刻。 */
+  private lastTickStartedAt = 0;
+  /** 本进程已同步到遗留聚合游标的水位（只增，避免每轮重复写同一个值）。 */
+  private legacySyncedTo = 0;
+  private readonly cursorByTopic = new Map<string, number>();
+  private readonly blockedByTopic = new Map<string, OutboxBlockedTopic>();
+  private ticks = 0;
+  private wakes = 0;
+  private wakesIgnored = 0;
+  private handledTotal = 0;
+  private lastTickAt: number | null = null;
+  private lastErrorAt: number | null = null;
+  private lastError: string | null = null;
 
   constructor(options: OutboxConsumerOptions) {
     if (!isExecutionTarget(options.executionTarget)) {
@@ -209,15 +293,73 @@ export class OutboxConsumer {
         `OutboxConsumer: pollIntervalMs 必须为非负有限数，收到 ${JSON.stringify(options.pollIntervalMs)}`,
       );
     }
+    // wakeDebounceMs 同样必须为非负有限数（负数 / NaN 会让唤醒定时器行为未定义）。
+    if (
+      options.wakeDebounceMs !== undefined &&
+      (!Number.isFinite(options.wakeDebounceMs) || options.wakeDebounceMs < 0)
+    ) {
+      throw new Error(
+        `OutboxConsumer: wakeDebounceMs 必须为非负有限数，收到 ${JSON.stringify(options.wakeDebounceMs)}`,
+      );
+    }
     this.consumer = options.consumer;
     this.executionTarget = options.executionTarget;
     this.pool = options.pool;
     this.handlers = options.handlers;
     this.batchSize = options.batchSize ?? 100;
     this.pollIntervalMs = options.pollIntervalMs ?? 2000;
+    this.wakeDebounceMs = options.wakeDebounceMs ?? 50;
     this.logger = options.logger ?? console;
     this.setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle));
+    this.now = options.now ?? (() => Date.now());
+  }
+
+  /** 本消费者是否关心该主题（通知唤醒的过滤依据：别让别人的主题把本消费者吵醒）。 */
+  handlesTopic(topic: string): boolean {
+    return this.handlers.has(topic);
+  }
+
+  /** 健康度快照（同步、不连库）。 */
+  stats(): OutboxConsumerStats {
+    return {
+      consumer: this.consumer,
+      executionTarget: this.executionTarget,
+      topics: [...this.handlers.keys()],
+      running: this.running,
+      pollIntervalMs: this.pollIntervalMs,
+      ticks: this.ticks,
+      wakes: this.wakes,
+      wakesIgnored: this.wakesIgnored,
+      handledTotal: this.handledTotal,
+      lastTickAt: this.lastTickAt,
+      lastErrorAt: this.lastErrorAt,
+      lastError: this.lastError,
+      cursors: Object.fromEntries(this.cursorByTopic),
+      blocked: [...this.blockedByTopic.values()],
+    };
+  }
+
+  /**
+   * 队列占用：各主题「游标之后还压着多少条」。连库计数，供健康巡检 / 面板取用。
+   *
+   * 用的是本进程最近一次读到的游标位置（`stats().cursors`），未跑过的主题按 0 算——它是**观测量**，
+   * 不参与任何投递判定，故不为它再跑一次游标查询。
+   */
+  async backlogByTopic(): Promise<Record<string, number>> {
+    const out: Record<string, number> = {};
+    for (const topic of this.handlers.keys()) {
+      const after = this.cursorByTopic.get(topic) ?? 0;
+      const { rows } = await this.pool.query<{ pending: string | number }>(
+        `SELECT count(*)::bigint AS pending
+           FROM event_outbox
+          WHERE execution_target = $1 AND topic = $2 AND id > $3`,
+        [this.executionTarget, topic, after],
+      );
+      const n = Number(rows[0]?.pending ?? 0);
+      out[topic] = Number.isFinite(n) ? n : 0;
+    }
+    return out;
   }
 
   /** 启动：立即跑一轮，之后按轮询间隔兜底。幂等（重复调用无副作用）。 */
@@ -237,11 +379,20 @@ export class OutboxConsumer {
   }
 
   /**
-   * 加速器唤醒：让空闲中的轮询提前触发一次。收到 pg_notify 时调用。
-   * 若正在排空则记一个「待唤醒」标志，本轮结束后立即再跑一轮（不丢通知）。
+   * 加速器唤醒：让空闲中的轮询提前触发一次。由 LISTEN 长连接收到 `NOTIFY` 时调用。
+   *
+   * - `topic` 给了且本消费者没注册它 → 与我无关，丢弃（`panel.event` firehose 不该吵醒风控命令消费者）。
+   *   `topic` 缺省 / 空串（载荷超限降级）→ 无从判断，照常唤醒一次（多跑一次查询，不会漏投）。
+   * - 正在排空 → 记「待唤醒」标志，本轮结束后立即再跑一轮（不丢通知）。
+   * - 距上轮起跑不足去抖窗口 → 排一个短定时器，把通知驱动的查询频率压住（见 `wakeDebounceMs`）。
    */
-  wake(): void {
+  wake(topic?: string): void {
     if (!this.running) return;
+    if (topic !== undefined && topic !== '' && !this.handlers.has(topic)) {
+      this.wakesIgnored += 1;
+      return;
+    }
+    this.wakes += 1;
     if (this.draining) {
       this.wakePending = true;
       return;
@@ -250,11 +401,21 @@ export class OutboxConsumer {
       this.clearTimer(this.timer);
       this.timer = null;
     }
-    void this.tick();
+    const since = this.now() - this.lastTickStartedAt;
+    const delay = since >= this.wakeDebounceMs ? 0 : this.wakeDebounceMs - since;
+    if (delay <= 0) {
+      void this.tick();
+      return;
+    }
+    this.timer = this.setTimer(() => {
+      this.timer = null;
+      void this.tick();
+    }, delay);
   }
 
   private scheduleNext(): void {
     if (!this.running) return;
+    // 承重通道：兜底轮询间隔与「有没有接通知」无关，MUST NOT 因接了通知而放大（见文件头）。
     this.timer = this.setTimer(() => {
       this.timer = null;
       void this.tick();
@@ -264,18 +425,22 @@ export class OutboxConsumer {
   private async tick(): Promise<void> {
     if (!this.running || this.draining) return;
     this.draining = true;
+    this.ticks += 1;
+    this.lastTickStartedAt = this.now();
+    this.lastTickAt = this.lastTickStartedAt;
     try {
-      // 一次醒来把能拉到的都排空：拉满一批说明还有，继续；不满一批说明追平了。
+      // 一次醒来把能拉到的都排空：任一主题拉满一批说明它还有，继续；都不满说明追平了。
       let drainedFull = true;
       while (this.running && drainedFull) {
-        const processed = await this.runOnce();
-        drainedFull = processed === this.batchSize;
+        const round = await this.runRound();
+        drainedFull = round.sawFullBatch;
       }
     } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.lastError = message;
+      this.lastErrorAt = this.now();
       this.logger.warn(
-        `[event-outbox] 消费轮询失败（下一轮重试）consumer=${this.consumer} target=${this.executionTarget}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `[event-outbox] 消费轮询失败（下一轮重试）consumer=${this.consumer} target=${this.executionTarget}: ${message}`,
       );
     } finally {
       this.draining = false;
@@ -289,30 +454,73 @@ export class OutboxConsumer {
   }
 
   /**
-   * 拉一批 → 逐条分派 → 推进游标，返回本批处理条数。
-   *
-   * at-least-once 的核心：只把游标推到「连续成功的最后一条」的 id。某条 handler 抛错即停在它之前，
-   * 游标不越过它，下一轮从游标之后重放。公开以便单测直接驱动（不依赖真定时器）。
+   * 逐主题跑一轮：拉一批 → 逐条分派 → 推进该主题游标，返回本轮总投递条数。
+   * 公开以便单测直接驱动（不依赖真定时器）。
    */
   async runOnce(): Promise<number> {
-    const lastId = await this.readCursor();
+    return (await this.runRound()).handled;
+  }
+
+  /**
+   * 一轮 = 对**每个已注册主题**各跑一次。主题之间互不影响：
+   * - 某主题 handler 抛错只堵它自己（游标停在失败条之前），其余主题本轮照常推进；
+   * - 某主题**查询本身**失败（库错）不吞、也不阻断后面的主题：记下来、继续跑，全部跑完再抛出去，
+   *   由 `tick()` 统一 warn + 下一轮重试。绝不静默降级成「看起来在跑」。
+   */
+  private async runRound(): Promise<{ handled: number; sawFullBatch: boolean }> {
+    let handled = 0;
+    let sawFullBatch = false;
+    const failures: string[] = [];
+    const cursors = new Map<string, number>();
+    for (const topic of this.handlers.keys()) {
+      try {
+        const result = await this.runTopicOnce(topic);
+        handled += result.handled;
+        cursors.set(topic, result.cursor);
+        // 「拉满一批」按实际投递条数判，而非返回行数：被毒消息卡住的主题投递数必然 < batchSize，
+        // 因此绝不会把 drain 循环拖成对同一条失败消息的死转。
+        if (result.handled === this.batchSize) sawFullBatch = true;
+      } catch (err: unknown) {
+        failures.push(`${topic}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    this.handledTotal += handled;
+    // 有主题查询失败时不动遗留聚合游标：它是「所有主题都已越过」的下界，样本不全就不能推进。
+    if (failures.length === 0) await this.syncLegacyAggregateCursor(cursors);
+    if (failures.length > 0) {
+      throw new Error(`event_outbox 主题消费失败 ${failures.length} 条 —— ${failures.join('；')}`);
+    }
+    return { handled, sawFullBatch };
+  }
+
+  /** 单个主题的一轮：读该主题游标 → 拉一批 → 逐条分派 → 推进该主题游标。 */
+  private async runTopicOnce(topic: string): Promise<{ handled: number; cursor: number }> {
+    const handler = this.handlers.get(topic);
+    if (!handler) return { handled: 0, cursor: this.cursorByTopic.get(topic) ?? 0 };
+
+    const lastId = await this.readCursor(topic);
+    this.cursorByTopic.set(topic, lastId);
     // 安全水位（见文件头「提交乱序安全水位」）：只拉「插入事务已早于当前所有在途事务」的行，
     // 即 xmin < 当前快照 xmin。这样任何仍在途、可能日后提交出更小 id 的并发事务，都会把与它
     // 并发的、id 更大的已提交行压住不投，游标绝不越过一个「日后还会冒出更小 id」的位置。
-    // 被压住的行不算追平：runOnce 返回实际投递条数，drain 循环据此停手、下一轮再拉。
+    // 被压住的行不算追平：本方法返回实际投递条数，drain 循环据此停手、下一轮再拉。
     const { rows } = await this.pool.query<OutboxRow>(
       `SELECT id, topic, payload, execution_target, created_at
          FROM event_outbox
-        WHERE execution_target = $1 AND id > $2
+        WHERE execution_target = $1 AND topic = $2 AND id > $3
           AND xmin::text::bigint < txid_snapshot_xmin(txid_current_snapshot())
         ORDER BY id ASC
-        LIMIT $3`,
-      [this.executionTarget, lastId, this.batchSize],
+        LIMIT $4`,
+      [this.executionTarget, topic, lastId, this.batchSize],
     );
-    if (rows.length === 0) return 0;
+    if (rows.length === 0) {
+      this.blockedByTopic.delete(topic);
+      return { handled: 0, cursor: lastId };
+    }
 
     let progressedTo = lastId;
     let handled = 0;
+    let blocked = false;
     for (const row of rows) {
       const event: OutboxEvent = {
         id: Number(row.id),
@@ -321,33 +529,62 @@ export class OutboxConsumer {
         executionTarget: row.execution_target as ExecutionTarget,
         createdAt: row.created_at,
       };
-      const handler = this.handlers.get(event.topic);
-      if (handler) {
-        try {
-          await handler(event);
-        } catch (err: unknown) {
-          // 停在这条之前：游标不越过失败条，先把此前连续成功的进度落库，下一轮重放本条。
-          this.logger.warn(
-            `[event-outbox] handler 抛错，停在 id=${event.id} 之前（下一轮重放）topic=${event.topic}: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-          break;
-        }
+      try {
+        await handler(event);
+      } catch (err: unknown) {
+        // 停在这条之前：本主题游标不越过失败条，先把此前连续成功的进度落库，下一轮重放本条。
+        // 其余主题不受牵连——毒消息只堵它自己那条主题。
+        const message = err instanceof Error ? err.message : String(err);
+        const prior = this.blockedByTopic.get(topic);
+        const record: OutboxBlockedTopic = {
+          topic,
+          eventId: event.id,
+          since: prior && prior.eventId === event.id ? prior.since : this.now(),
+          attempts: prior && prior.eventId === event.id ? prior.attempts + 1 : 1,
+          lastError: message,
+        };
+        this.blockedByTopic.set(topic, record);
+        blocked = true;
+        this.logger.warn(
+          `[event-outbox] handler 抛错，主题 ${topic} 停在 id=${event.id} 之前（下一轮重放，只堵本主题）` +
+            ` consumer=${this.consumer} attempts=${record.attempts}: ${message}`,
+        );
+        break;
       }
-      // handler 成功，或本消费者对该主题无关（跳过）——两种情况都可安全推进游标越过本条。
       progressedTo = event.id;
       handled += 1;
     }
+    if (!blocked) this.blockedByTopic.delete(topic);
 
-    if (progressedTo > lastId) await this.advanceCursor(progressedTo);
-    return handled;
+    if (progressedTo > lastId) {
+      await this.advanceCursor(topic, progressedTo);
+      this.cursorByTopic.set(topic, progressedTo);
+    }
+    return { handled, cursor: progressedTo };
   }
 
-  private async readCursor(): Promise<number> {
+  /**
+   * 读某主题的游标位置。
+   *
+   * **两级回落，顺序不可颠倒**（change outbox-listen-and-topic-cursor 的存量安全核心）：
+   *   1. `event_outbox_topic_cursor` 的 `(consumer, target, topic)` 行 —— 分维之后的真实进度；
+   *   2. 没有该行时回落到遗留的 `event_outbox_cursor` 的 `(consumer, target)` 聚合行 —— 它的语义是
+   *      「id ≤ last_id 的**全部**主题都已消费」，因此对任意主题都是一个**既不漏投也不重放**的精确起点；
+   *   3. 两者都没有 → 0（全新消费者，与今天行为一致）。
+   *
+   * 回落到 0 而不是回落到聚合行，会把该消费者已经消费过的全部历史**原样重放一遍**；本仓的
+   * `risk.command` 消费方实测不幂等（见文件头），那是一次真实的状态损坏，不是「幂等所以无所谓」。
+   */
+  private async readCursor(topic: string): Promise<number> {
     const { rows } = await this.pool.query<CursorRow>(
-      `SELECT last_id FROM event_outbox_cursor WHERE consumer = $1 AND execution_target = $2`,
-      [this.consumer, this.executionTarget],
+      `SELECT COALESCE(
+                (SELECT last_id FROM event_outbox_topic_cursor
+                  WHERE consumer = $1 AND execution_target = $2 AND topic = $3),
+                (SELECT last_id FROM event_outbox_cursor
+                  WHERE consumer = $1 AND execution_target = $2),
+                0
+              ) AS last_id`,
+      [this.consumer, this.executionTarget, topic],
     );
     if (rows.length === 0) return 0;
     const value = Number(rows[0].last_id);
@@ -355,17 +592,41 @@ export class OutboxConsumer {
   }
 
   /**
-   * 游标推进：幂等 upsert + `GREATEST` 守——崩溃/并发都不会让已消费进度倒退（CAS 语义）。
+   * 主题游标推进：幂等 upsert + `GREATEST` 守——崩溃/并发都不会让已消费进度倒退（CAS 语义）。
    */
-  private async advanceCursor(lastId: number): Promise<void> {
+  private async advanceCursor(topic: string, lastId: number): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO event_outbox_topic_cursor (consumer, execution_target, topic, last_id, updated_at)
+       VALUES ($1, $2, $3, $4, now())
+       ON CONFLICT (consumer, execution_target, topic)
+       DO UPDATE SET last_id = GREATEST(event_outbox_topic_cursor.last_id, EXCLUDED.last_id),
+                     updated_at = now()`,
+      [this.consumer, this.executionTarget, topic, lastId],
+    );
+  }
+
+  /**
+   * 把遗留的 `(consumer, target)` 聚合游标同步到「各主题游标的**最小值**」。
+   *
+   * 为什么还要写它：回滚到分维之前的旧代码时，旧代码只认这一行。取 **min** 而不是 max ——
+   *   - min ⇒ 旧代码可能**重放**边界上的少量事件（安全方向，且窗口只有主题间的落差）；
+   *   - max ⇒ 旧代码会**跳过**尚未消费的那条主题的事件（静默漏投，红线）。
+   * `GREATEST` 守保证它只增不减；min 恒 ≥ 回填时的聚合值（回填就是拿聚合值播种每个主题），故不会卡死。
+   */
+  private async syncLegacyAggregateCursor(cursors: Map<string, number>): Promise<void> {
+    if (cursors.size === 0) return;
+    let min = Number.POSITIVE_INFINITY;
+    for (const value of cursors.values()) min = Math.min(min, value);
+    if (!Number.isFinite(min) || min <= this.legacySyncedTo) return;
     await this.pool.query(
       `INSERT INTO event_outbox_cursor (consumer, execution_target, last_id, updated_at)
        VALUES ($1, $2, $3, now())
        ON CONFLICT (consumer, execution_target)
        DO UPDATE SET last_id = GREATEST(event_outbox_cursor.last_id, EXCLUDED.last_id),
                      updated_at = now()`,
-      [this.consumer, this.executionTarget, lastId],
+      [this.consumer, this.executionTarget, min],
     );
+    this.legacySyncedTo = min;
   }
 }
 

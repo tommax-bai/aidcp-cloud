@@ -350,8 +350,10 @@ import {
   PANEL_EVENT_RETENTION_MS,
   PANEL_EVENT_UNCONSUMED_RETENTION_MS,
 } from './transport/eventbus-outbox-bridge.js';
-// event_outbox 保留期剪裁（本 change）：outbox 是队列不是账本，没有剪裁就在共库的生产 PG 上无界增长。
-import { OutboxRetentionPruner } from './transport/event-outbox.js';
+// event_outbox 保留期剪裁：outbox 是队列不是账本，没有剪裁就在共库的生产 PG 上无界增长。
+import { EVENT_OUTBOX_NOTIFY_CHANNEL, OutboxRetentionPruner } from './transport/event-outbox.js';
+import { startOutboxNotifyListener, type NotifyClientLike } from './transport/outbox-notify-listener.js';
+import { startOutboxHealthLog, type OutboxHealthSource } from './transport/outbox-health.js';
 /** automation 内部只读 API 的默认监听端口（可由 AIDCP_AUTOMATION_PORT 覆盖）；api 侧 base URL 由 AIDCP_AUTOMATION_URL 指定。 */
 const DEFAULT_AUTOMATION_READ_API_PORT = 8093;
 import { PgAlertStore } from './alerts/index.js';
@@ -818,6 +820,56 @@ async function startContentReadApi(ctx: CompositionContext): Promise<void> {
   }
   const actual = await httpServer.listen(port);
   console.log(`[aidcp-cloud] content 内部读 API 已监听 127.0.0.1:${actual}（curated-content 读端点）`);
+}
+
+/**
+ * outbox 通知唤醒接线（change outbox-listen-and-topic-cursor）。
+ *
+ * `emitOutboxEvent` 一直在发 `pg_notify`，但**接收端从来没接**——`wake()` 生产零调用者，投递延迟恒等于
+ * 一个完整轮询周期。这里补上接收端：一条**专用长连接** `LISTEN event_outbox`，收到通知就按载荷里的
+ * topic 唤醒相关消费者，投递降到毫秒级。
+ *
+ * 三条纪律（细节见 src/transport/outbox-notify-listener.ts 文件头）：
+ *   ① 专用 `pg.Client`，不占共享池、不会被池回收；
+ *   ② 断开有界退避重连（1s 起、30s 封顶、带抖动），永不放弃、连续失败抬成 error；
+ *   ③ **绝不因为接了通知就放宽轮询周期**——承重通道仍是 `OutboxConsumer` 的有界轮询，
+ *      本函数一行都没碰 `pollIntervalMs`。通道整个挂掉也只是退回轮询，绝不丢事件。
+ *
+ * 连接配置取 **automation 属主**：`event_outbox` / `event_outbox_cursor` / `event_outbox_topic_cursor`
+ * 三张表都归 automation（boundaries/table-ownership.json），唤醒通道随表走。
+ */
+async function wireOutboxNotifyWakeups(
+  label: string,
+  consumers: (OutboxHealthSource & { wake(topic?: string): void })[],
+): Promise<void> {
+  if (consumers.length === 0) return;
+  const listener = await startOutboxNotifyListener({
+    // 每次重连都要一个全新 Client（pg.Client 断开后不可复用）。
+    // connectionTimeoutMillis 是硬需求：没有它，库不可达时 connect() 可能永久挂起，
+    // 而本函数是被 await 的 —— 一个连不上的加速器会把整个组合根卡在启动期。
+    // keepAlive：这是一条长期空闲的长连接，靠 TCP keepalive 让中间设备别把它悄悄掐掉。
+    createClient: () =>
+      new pg.Client({
+        ...resolveOwnerPgConfig('automation'),
+        connectionTimeoutMillis: 10_000,
+        keepAlive: true,
+      }) as unknown as NotifyClientLike,
+    channel: EVENT_OUTBOX_NOTIFY_CHANNEL,
+    // topic 由 wake() 侧过滤：与本消费者无关的主题（如 panel.event firehose 之于风控命令消费者）直接丢弃，
+    // 免得一条高频主题把所有消费者都吵醒、把空闲期的查询频率抬到总线事件频率。
+    onNotify: (topic) => {
+      for (const consumer of consumers) consumer.wake(topic);
+    },
+    logger: console,
+  });
+  if (!listener.health().connected) {
+    // 不静默：加速器没接上就明说，别让日志看起来像「已接线」。
+    console.warn(
+      `[aidcp-cloud] outbox 通知通道未就绪（${label}）：${listener.health().lastError ?? '未知原因'}` +
+        ' —— 已排重连；投递退回有界轮询，不丢事件',
+    );
+  }
+  startOutboxHealthLog({ consumers, listener, logger: console });
 }
 
 async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
@@ -2548,7 +2600,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   const seamMode = serviceModeFromEnv();
   const panelEventTransport = panelEventTransportForMode(seamMode);
   if (seamMode !== 'monolith' && deploymentTarget) {
-    startRiskCommandConsumer({
+    const riskCommandConsumer = startRiskCommandConsumer({
       pool: automationPool,
       executionTarget: deploymentTarget,
       // 单写不变量收口在这一处回调：风控三写方法只在本进程 RiskController 上发生。at-least-once ⇒ 三方法均幂等。
@@ -2570,6 +2622,15 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
           : '；面板事件 tee 未启用（面板与产生端同进程，EventBus 直连，无进程外消费者）'
       }`,
     );
+    // 通知唤醒（毫秒级）+ 健康巡检。失败不阻断启动：承重通道是消费者自己的有界轮询。
+    await wireOutboxNotifyWakeups(seamMode, [
+      {
+        name: 'risk-command',
+        wake: (topic) => riskCommandConsumer.wake(topic),
+        stats: () => riskCommandConsumer.stats(),
+        backlogByTopic: () => riskCommandConsumer.backlogByTopic(),
+      },
+    ]);
   }
 
   // ── event_outbox 保留期（本 change）：outbox 是队列不是账本，没有剪裁就只进不出。─────────────
@@ -6316,6 +6377,16 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
     });
     replay.start();
     console.log('[aidcp-cloud] 面板事件回放已启动（api 模式：outbox panel.event → 本进程 EventBus → panel-ws）');
+    // 通知唤醒：panel.event 是全量总线 firehose，靠 2s 轮询会让面板看起来「慢半拍」；接上 LISTEN 后
+    // 回放延迟降到毫秒级。轮询周期一行未动（承重通道）。
+    await wireOutboxNotifyWakeups('api', [
+      {
+        name: 'panel-event-replay',
+        wake: (topic) => replay.wake(topic),
+        stats: () => replay.stats(),
+        backlogByTopic: () => replay.backlogByTopic(),
+      },
+    ]);
   }
 }
 

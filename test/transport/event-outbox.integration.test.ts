@@ -3,7 +3,7 @@
  *
  * 不在真库测试通道（npm run test:pg）里时整组 skip。真库往返验证桩测不到的东西：
  *   - BIGSERIAL id 单调；emit 3 条 → consumer 有序收齐；游标真落库；
- *   - 第二个消费者名独立从头收齐（游标按 (consumer,target) 分行）；
+ *   - 第二个消费者名独立从头收齐（游标按 (consumer,target,topic) 分行）；
  *   - dev / ol target 互不可见。
  *
  * 本 change 不要求执行本文件（只需 typecheck + 单元测试）；写好待整批末尾在有库环境统一跑。
@@ -36,12 +36,21 @@ CREATE TABLE IF NOT EXISTS event_outbox (
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS event_outbox_target_id_idx ON event_outbox (execution_target, id);
+CREATE INDEX IF NOT EXISTS event_outbox_target_topic_id_idx ON event_outbox (execution_target, topic, id);
 CREATE TABLE IF NOT EXISTS event_outbox_cursor (
   consumer          TEXT NOT NULL,
   execution_target  TEXT NOT NULL,
   last_id           BIGINT NOT NULL DEFAULT 0,
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (consumer, execution_target)
+);
+CREATE TABLE IF NOT EXISTS event_outbox_topic_cursor (
+  consumer          TEXT NOT NULL,
+  execution_target  TEXT NOT NULL,
+  topic             TEXT NOT NULL,
+  last_id           BIGINT NOT NULL DEFAULT 0,
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (consumer, execution_target, topic)
 );
 `;
 
@@ -52,7 +61,7 @@ test(
     const pool = new pg.Pool({ connectionString });
     try {
       await pool.query(SCHEMA_SQL);
-      await pool.query('TRUNCATE event_outbox, event_outbox_cursor RESTART IDENTITY');
+      await pool.query('TRUNCATE event_outbox, event_outbox_cursor, event_outbox_topic_cursor RESTART IDENTITY');
 
       // emit 3 条 dev + 1 条 ol（事务型：在一个事务里写 dev 的三条）
       const client = await pool.connect();
@@ -81,8 +90,13 @@ test(
       assert.equal(processedA, 3);
       assert.deepEqual(seenA, [1, 2, 3]);
 
-      const curA = await pool.query('SELECT last_id FROM event_outbox_cursor WHERE consumer=$1 AND execution_target=$2', ['A', 'dev']);
-      assert.equal(Number(curA.rows[0].last_id), 3, '游标落库到 3');
+      const curA = await pool.query(
+        'SELECT last_id FROM event_outbox_topic_cursor WHERE consumer=$1 AND execution_target=$2 AND topic=$3',
+        ['A', 'dev', 'risk.signal'],
+      );
+      assert.equal(Number(curA.rows[0].last_id), 3, '主题游标落库到 3');
+      const legacyA = await pool.query('SELECT last_id FROM event_outbox_cursor WHERE consumer=$1 AND execution_target=$2', ['A', 'dev']);
+      assert.equal(Number(legacyA.rows[0].last_id), 3, '遗留聚合游标同步到各主题最小值（回滚兼容）');
 
       // 再跑一轮：无新事件，游标不动
       assert.equal(await consumerA.runOnce(), 0);
@@ -126,7 +140,7 @@ test(
     const connB = new pg.Client({ connectionString });
     try {
       await pool.query(SCHEMA_SQL);
-      await pool.query('TRUNCATE event_outbox, event_outbox_cursor RESTART IDENTITY');
+      await pool.query('TRUNCATE event_outbox, event_outbox_cursor, event_outbox_topic_cursor RESTART IDENTITY');
       await connA.connect();
       await connB.connect();
 
@@ -152,7 +166,10 @@ test(
       // （若无此闸：会投 B、把游标推过 idB，A 提交后 idA<游标 → 永久吞掉。）
       const first = await consumer.runOnce();
       assert.equal(first, 0, 'A 在途时不投任何事件（含已提交的 B）');
-      const cur0 = await pool.query('SELECT last_id FROM event_outbox_cursor WHERE consumer=$1 AND execution_target=$2', ['C', 'dev']);
+      const cur0 = await pool.query(
+        'SELECT last_id FROM event_outbox_topic_cursor WHERE consumer=$1 AND execution_target=$2 AND topic=$3',
+        ['C', 'dev', 'risk.signal'],
+      );
       assert.equal(cur0.rows.length === 0 ? 0 : Number(cur0.rows[0].last_id), 0, '游标一步未进');
 
       // A 落定后：两条都可见且已落定 → 有序补投 A、B，一条不丢
@@ -161,7 +178,10 @@ test(
       assert.equal(second, 2, 'A 落定后补投 A、B 两条');
       assert.deepEqual(seen, ['A', 'B'], '按 id 有序、A 先于 B');
 
-      const cur1 = await pool.query('SELECT last_id FROM event_outbox_cursor WHERE consumer=$1 AND execution_target=$2', ['C', 'dev']);
+      const cur1 = await pool.query(
+        'SELECT last_id FROM event_outbox_topic_cursor WHERE consumer=$1 AND execution_target=$2 AND topic=$3',
+        ['C', 'dev', 'risk.signal'],
+      );
       assert.equal(Number(cur1.rows[0].last_id), idB, '游标落到 idB');
     } finally {
       await connA.end().catch(() => {});

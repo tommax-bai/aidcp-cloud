@@ -26,8 +26,8 @@ interface Call {
 }
 
 /**
- * 内存桩：装 event_outbox 行与 (consumer,target) 游标，按 SQL 关键字回应 emit/consumer 的四类查询。
- * 记录每次调用，供断言 SQL 形状与参数。
+ * 内存桩：装 event_outbox 行、`(consumer,target,topic)` 主题游标与遗留 `(consumer,target)` 聚合游标，
+ * 按 SQL 关键字回应 emit/consumer 的六类查询。记录每次调用，供断言 SQL 形状与参数。
  */
 class FakePool implements OutboxQueryable {
   readonly calls: Call[] = [];
@@ -39,7 +39,10 @@ class FakePool implements OutboxQueryable {
     execution_target: string;
     created_at: Date;
   }[] = [];
+  /** 遗留聚合游标：`consumer|target`。 */
   readonly cursors = new Map<string, number>();
+  /** 分维游标：`consumer|target|topic`。 */
+  readonly topicCursors = new Map<string, number>();
   notifyFails = false;
 
   seed(topic: string, payload: unknown, target: string): number {
@@ -69,20 +72,36 @@ class FakePool implements OutboxQueryable {
       if (this.notifyFails) throw new Error('notify boom');
       return { rows: [], rowCount: 1 };
     }
-    if (s.startsWith('SELECT last_id FROM event_outbox_cursor')) {
-      const key = `${params[0] as string}|${params[1] as string}`;
-      const last = this.cursors.get(key);
-      return last === undefined ? { rows: [], rowCount: 0 } : { rows: [{ last_id: last }], rowCount: 1 };
+    // 两级回落读游标：主题行 → 遗留聚合行 → 0（COALESCE 语义）
+    if (s.startsWith('SELECT COALESCE(')) {
+      const [consumer, target, topic] = params as [string, string, string];
+      const scoped = this.topicCursors.get(`${consumer}|${target}|${topic}`);
+      const legacy = this.cursors.get(`${consumer}|${target}`);
+      return { rows: [{ last_id: scoped ?? legacy ?? 0 }], rowCount: 1 };
+    }
+    if (s.startsWith('SELECT count(*)::bigint AS pending')) {
+      const [target, topic, after] = params as [string, string, number];
+      const pending = this.events.filter(
+        (e) => e.execution_target === target && e.topic === topic && e.id > Number(after),
+      ).length;
+      return { rows: [{ pending }], rowCount: 1 };
     }
     if (s.startsWith('SELECT id, topic, payload')) {
       const target = params[0] as string;
-      const afterId = Number(params[1]);
-      const limit = Number(params[2]);
+      const topic = params[1] as string;
+      const afterId = Number(params[2]);
+      const limit = Number(params[3]);
       const rows = this.events
-        .filter((e) => e.execution_target === target && e.id > afterId)
+        .filter((e) => e.execution_target === target && e.topic === topic && e.id > afterId)
         .sort((a, b) => a.id - b.id)
         .slice(0, limit);
       return { rows, rowCount: rows.length };
+    }
+    if (s.startsWith('INSERT INTO event_outbox_topic_cursor')) {
+      const key = `${params[0] as string}|${params[1] as string}|${params[2] as string}`;
+      const next = Number(params[3]);
+      this.topicCursors.set(key, Math.max(this.topicCursors.get(key) ?? 0, next)); // GREATEST 语义
+      return { rows: [], rowCount: 1 };
     }
     if (s.startsWith('INSERT INTO event_outbox_cursor')) {
       const key = `${params[0] as string}|${params[1] as string}`;
@@ -204,7 +223,8 @@ test('consumer：批读 → 逐条 dispatch → 游标落到本批最后 id', as
   const processed = await consumer.runOnce();
   assert.equal(processed, 3);
   assert.deepEqual(seen, [1, 2, 3]);
-  assert.equal(pool.cursors.get('c1|dev'), 3);
+  assert.equal(pool.topicCursors.get('c1|dev|t'), 3, '主题游标落到 3');
+  assert.equal(pool.cursors.get('c1|dev'), 3, '遗留聚合游标同步到各主题最小值（回滚兼容）');
 });
 
 test('consumer：target 过滤——只消费本 target 的行', async () => {
@@ -219,7 +239,7 @@ test('consumer：target 过滤——只消费本 target 的行', async () => {
   await consumer.runOnce();
   assert.deepEqual(seen, [1, 3]);
   // 游标推进到本 target 见到的最后一条（id=3），ol 的 id=2 不算数
-  assert.equal(pool.cursors.get('c1|dev'), 3);
+  assert.equal(pool.topicCursors.get('c1|dev|t'), 3);
 });
 
 test('consumer：handler 抛错 → 游标停在失败条之前，只推进到此前连续成功条（at-least-once）', async () => {
@@ -241,14 +261,14 @@ test('consumer：handler 抛错 → 游标停在失败条之前，只推进到�
   const processed = await consumer.runOnce();
   assert.equal(processed, 2, '只成功处理了 id 1、2');
   assert.deepEqual(seen, [1, 2]);
-  assert.equal(pool.cursors.get('c1|dev'), 2, '游标停在 2，未越过失败的 3');
+  assert.equal(pool.topicCursors.get('c1|dev|t'), 2, '游标停在 2，未越过失败的 3');
 
   // 下一轮从 2 之后重放：id 3 仍会被投递（at-least-once）
   const seen2: number[] = [];
   handlers.set('t', async (e: OutboxEvent) => { seen2.push((e.payload as { n: number }).n); });
   await consumer.runOnce();
   assert.deepEqual(seen2, [3, 4]);
-  assert.equal(pool.cursors.get('c1|dev'), 4);
+  assert.equal(pool.topicCursors.get('c1|dev|t'), 4);
 });
 
 test('consumer：第一条即抛 → 游标一步不进（不回退、也不假前进）', async () => {
@@ -259,15 +279,16 @@ test('consumer：第一条即抛 → 游标一步不进（不回退、也不假�
 
   const processed = await consumer.runOnce();
   assert.equal(processed, 0);
-  assert.equal(pool.cursors.get('c1|dev'), undefined, '游标从未落库');
-  // 未写 cursor：断言没发过 cursor upsert
+  assert.equal(pool.topicCursors.get('c1|dev|t'), undefined, '游标从未落库');
+  // 未写 cursor：断言两张游标表都没发过 upsert
+  assert.equal(pool.calls.some((c) => c.sql.includes('INSERT INTO event_outbox_topic_cursor')), false);
   assert.equal(pool.calls.some((c) => c.sql.includes('INSERT INTO event_outbox_cursor')), false);
 });
 
-test('consumer：未注册主题对本消费者视为无关，跳过并推进游标（扇出语义）', async () => {
+test('consumer：未注册主题根本不被拉取（分维后它对本消费者不存在）', async () => {
   const pool = new FakePool();
   pool.seed('known', {}, 'dev');   // id 1 有 handler
-  pool.seed('unknown', {}, 'dev'); // id 2 无 handler，跳过
+  pool.seed('unknown', {}, 'dev'); // id 2 无 handler
   pool.seed('known', {}, 'dev');   // id 3 有 handler
   const seen: number[] = [];
   const handlers = new Map([['known', async (e: OutboxEvent) => { seen.push(e.id); }]]);
@@ -275,7 +296,11 @@ test('consumer：未注册主题对本消费者视为无关，跳过并推进游
 
   await consumer.runOnce();
   assert.deepEqual(seen, [1, 3]);
-  assert.equal(pool.cursors.get('c1|dev'), 3, '越过无关主题、推进到 3');
+  assert.equal(pool.topicCursors.get('c1|dev|known'), 3);
+  assert.equal(pool.topicCursors.get('c1|dev|unknown'), undefined, '无关主题不建游标行');
+  // 只按已注册主题发查询：unknown 从未出现在任何拉取参数里
+  const fetches = pool.calls.filter((c) => c.sql.trim().startsWith('SELECT id, topic, payload'));
+  assert.deepEqual([...new Set(fetches.map((c) => c.params[1]))], ['known']);
 });
 
 test('consumer：cursor 推进用 GREATEST upsert（崩溃/并发不回退）', async () => {
@@ -283,14 +308,15 @@ test('consumer：cursor 推进用 GREATEST upsert（崩溃/并发不回退）', 
   pool.seed('t', {}, 'dev');
   const consumer = makeConsumer(pool, new Map([['t', async () => {}]]));
   await consumer.runOnce();
-  const upsert = pool.calls.find((c) => c.sql.includes('INSERT INTO event_outbox_cursor'));
+  const upsert = pool.calls.find((c) => c.sql.includes('INSERT INTO event_outbox_topic_cursor'));
   assert.ok(upsert);
-  assert.match(upsert.sql, /GREATEST\(event_outbox_cursor\.last_id, EXCLUDED\.last_id\)/);
+  assert.match(upsert.sql, /GREATEST\(event_outbox_topic_cursor\.last_id, EXCLUDED\.last_id\)/);
+  assert.match(upsert.sql, /ON CONFLICT \(consumer, execution_target, topic\)/);
 
   // 预置一个更高的游标，模拟并发写者已领先；本次较低的 id 不得让它倒退
-  pool.cursors.set('c1|dev', 99);
+  pool.topicCursors.set('c1|dev|t', 99);
   await consumer.runOnce();
-  assert.equal(pool.cursors.get('c1|dev'), 99);
+  assert.equal(pool.topicCursors.get('c1|dev|t'), 99);
 });
 
 test('consumer：两个不同消费者名各自从头收齐（游标互不干扰）', async () => {
@@ -306,8 +332,130 @@ test('consumer：两个不同消费者名各自从头收齐（游标互不干扰
   await b.runOnce();
   assert.deepEqual(seenA, [1, 2]);
   assert.deepEqual(seenB, [1, 2]);
-  assert.equal(pool.cursors.get('A|dev'), 2);
-  assert.equal(pool.cursors.get('B|dev'), 2);
+  assert.equal(pool.topicCursors.get('A|dev|t'), 2);
+  assert.equal(pool.topicCursors.get('B|dev|t'), 2);
+});
+
+// ── 主题分维：毒消息只堵它自己那条主题 ────────────────────────────────────────
+
+test('consumer：一条主题被毒消息堵住，其它主题照常推进（分维的全部意义）', async () => {
+  const pool = new FakePool();
+  pool.seed('poison', { n: 1 }, 'dev'); // id 1 —— 永远抛
+  pool.seed('healthy', { n: 2 }, 'dev'); // id 2
+  pool.seed('poison', { n: 3 }, 'dev'); // id 3 —— 被 id 1 挡在后面
+  pool.seed('healthy', { n: 4 }, 'dev'); // id 4
+  const healthySeen: number[] = [];
+  const consumer = makeConsumer(
+    pool,
+    new Map([
+      ['poison', async () => { throw new Error('毒消息'); }],
+      ['healthy', async (e: OutboxEvent) => { healthySeen.push(e.id); }],
+    ]),
+  );
+
+  await consumer.runOnce();
+  assert.deepEqual(healthySeen, [2, 4], 'healthy 主题不受 poison 影响，全部投递');
+  assert.equal(pool.topicCursors.get('c1|dev|healthy'), 4);
+  assert.equal(pool.topicCursors.get('c1|dev|poison'), undefined, 'poison 主题的游标一步不进');
+
+  const blocked = consumer.stats().blocked;
+  assert.equal(blocked.length, 1);
+  assert.equal(blocked[0].topic, 'poison');
+  assert.equal(blocked[0].eventId, 1);
+  assert.equal(blocked[0].attempts, 1);
+
+  // 再跑一轮：attempts 累加（同一条卡住），healthy 已追平不再重复投递
+  await consumer.runOnce();
+  assert.deepEqual(healthySeen, [2, 4]);
+  assert.equal(consumer.stats().blocked[0].attempts, 2);
+
+  // 遗留聚合游标取各主题最小值 = 0（poison 还在 0），绝不越过未消费的 poison → 回滚不会静默漏投
+  assert.equal(pool.cursors.get('c1|dev'), undefined);
+});
+
+test('consumer：主题游标缺行时回落到遗留聚合行，而不是从 0 重放（存量迁移安全方向）', async () => {
+  const pool = new FakePool();
+  pool.seed('t', { n: 1 }, 'dev'); // id 1 —— 迁移前已被聚合游标消费掉
+  pool.seed('t', { n: 2 }, 'dev'); // id 2 —— 同上
+  pool.seed('t', { n: 3 }, 'dev'); // id 3 —— 迁移后新增，才是该投的
+  pool.cursors.set('c1|dev', 2); // 遗留聚合行：id ≤ 2 全部主题都已消费
+  const seen: number[] = [];
+  const consumer = makeConsumer(pool, new Map([['t', async (e: OutboxEvent) => { seen.push(e.id); }]]));
+
+  await consumer.runOnce();
+  assert.deepEqual(seen, [3], '只投 id=3；1、2 绝不重放（消费方实测不幂等）');
+  assert.equal(pool.topicCursors.get('c1|dev|t'), 3);
+});
+
+test('consumer：队列占用可观测（backlogByTopic 按主题计游标之后的积压）', async () => {
+  const pool = new FakePool();
+  pool.seed('a', {}, 'dev');
+  pool.seed('a', {}, 'dev');
+  pool.seed('b', {}, 'dev');
+  const consumer = makeConsumer(
+    pool,
+    new Map([
+      ['a', async () => { throw new Error('堵住'); }],
+      ['b', async () => {}],
+    ]),
+  );
+  await consumer.runOnce();
+  assert.deepEqual(await consumer.backlogByTopic(), { a: 2, b: 0 });
+});
+
+// ── 通知唤醒：只加速、绝不放宽轮询 ────────────────────────────────────────────
+
+test('wake：与本消费者无关的主题被丢弃（firehose 不吵醒别人）', async () => {
+  const pool = new FakePool();
+  const consumer = new OutboxConsumer({
+    consumer: 'c1',
+    executionTarget: 'dev',
+    pool,
+    handlers: new Map([['mine', async () => {}]]),
+    pollIntervalMs: 1000,
+    wakeDebounceMs: 0,
+    logger: silent,
+    setTimer: (_fn, _ms) => 0 as unknown as ReturnType<typeof setTimeout>,
+    clearTimer: () => {},
+  });
+  consumer.start();
+  await new Promise((r) => setImmediate(r));
+
+  consumer.wake('someone-elses-topic');
+  assert.equal(consumer.stats().wakesIgnored, 1);
+  assert.equal(consumer.stats().wakes, 0);
+
+  consumer.wake('mine');
+  assert.equal(consumer.stats().wakes, 1);
+  consumer.wake(undefined); // 载荷未知（超限降级）→ 照常唤醒，宁可多跑一次
+  assert.equal(consumer.stats().wakes, 2);
+  consumer.stop();
+});
+
+test('wake：接了通知之后兜底轮询周期一点没放宽（MUST NOT 放大 pollIntervalMs）', async () => {
+  const pool = new FakePool();
+  pool.seed('t', {}, 'dev');
+  const delays: number[] = [];
+  const consumer = new OutboxConsumer({
+    consumer: 'c1',
+    executionTarget: 'dev',
+    pool,
+    handlers: new Map([['t', async () => {}]]),
+    pollIntervalMs: 2000,
+    wakeDebounceMs: 0,
+    logger: silent,
+    setTimer: (_fn, ms) => { delays.push(ms); return delays.length as unknown as ReturnType<typeof setTimeout>; },
+    clearTimer: () => {},
+  });
+  consumer.start();
+  await new Promise((r) => setImmediate(r));
+  consumer.wake('t');
+  await new Promise((r) => setImmediate(r));
+  consumer.stop();
+
+  assert.ok(delays.length >= 2, '启动与唤醒后各排了一次兜底轮询');
+  assert.deepEqual([...new Set(delays)], [2000], '每一次兜底轮询都仍是 2000ms，与是否收到通知无关');
+  assert.equal(consumer.stats().pollIntervalMs, 2000);
 });
 
 test('consumer：start/stop 生命周期——stop 后不再排轮询', async () => {

@@ -39,8 +39,14 @@ export const REQUIRED_SCHEMA_VERSION = '0070_baseline_self_heal_columns';
  * 注：`0074_event_outbox`（change block2-outbox-transport）建的是拆进程用的事件 outbox 两张表。
  * 本 change 只建原语 + 测试，未接 server.ts、无任何存储正常读写依赖它，故只抬 KNOWN_MAX、不抬 REQUIRED
  * ——2c 真正双写/切换、有存储硬依赖时再抬 REQUIRED。
+ *
+ * 注：`0075_event_outbox_topic_cursor`（change outbox-listen-and-topic-cursor）建的是按主题分维的
+ * 消费游标表。它只被 outbox 消费者用到，而消费者**只在非 monolith 模式**（content/core/api/automation
+ * 分段进程）才起——今天生产跑的 monolith 一条都不起，故仍只抬 KNOWN_MAX、不抬 REQUIRED。
+ * 迁移没跑而又起了分段进程时不会静默：读游标的查询会直接报 `relation ... does not exist`，
+ * 由消费轮询每轮 warn 出来（绝不退化成「查不到 = 没有事件」）。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0074_event_outbox';
+export const KNOWN_MAX_SCHEMA_VERSION = '0075_event_outbox_topic_cursor';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 
