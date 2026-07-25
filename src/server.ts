@@ -2294,7 +2294,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
 }
 
 async function segCAutomation(ctx: CompositionContext): Promise<void> {
-  const { accountDisplayName, accountDisplayNameCandidates, accountState, accountStore, botChatEventHandler, botChatStore, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, automationPool, contentScheduleStore, credentialStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, interactionFeedStore, lastObservedNoteByAccount, likedNoteStore, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, notificationContactStore, onCommentTakeoverEnd, onCommentTakeoverStart, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, providerRuntime, publishApprovalClient, publishApprovalStore, publishLogStore, quotaConfigStore, resolveAccountChatId, resolveCardChatId, resolveEffectiveCommentApprovalMode, resolvePersona, resumeConfigStore, roleConfigStore, sessionConfigStore, tokenUsageStore, valuableCommentStore, writeApprovalDecision } = ctx;
+  const { accountDisplayName, accountDisplayNameCandidates, accountState, accountStore, apiPool, botChatEventHandler, botChatStore, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, automationPool, contentScheduleStore, credentialStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, interactionFeedStore, lastObservedNoteByAccount, likedNoteStore, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, notificationContactStore, onCommentTakeoverEnd, onCommentTakeoverStart, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, providerRuntime, publishApprovalClient, publishApprovalStore, publishLogStore, quotaConfigStore, resolveAccountChatId, resolveCardChatId, resolveEffectiveCommentApprovalMode, resolvePersona, resumeConfigStore, roleConfigStore, sessionConfigStore, tokenUsageStore, valuableCommentStore, writeApprovalDecision } = ctx;
   // RiskController 注册表（V1 task 9.1）：每账号一个 controller、单写 PER ACCOUNT、共享 PgRiskStore。
   // 现役路径用其 default controller（单一来源，避免双 controller 写同一 risk_state）；PG 不可用则现役回退内存态。
   // PgRiskStore 单例：既喂 registry（按账号风控单写），又作 InteractionStore 接线孤儿
@@ -2649,8 +2649,9 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   let interactionOffboarding: InteractionOffboardingService | undefined;
   const interactionAiTimeoutMs = Math.max(1_000, readEnvNumber('AIDCP_INTERACTION_AI_TIMEOUT_MS', 20_000));
   try {
-    // Block③ L3 翻转前置：这三个 store 是 interaction_* 那批 **automation 属主表的单写者**，
-    // 但它们此前构造时不传 pool ⇒ 各自 `new Pool(resolveEnvPgConfig())` 回落**共享库**配置。
+    // Block③ L3 翻转前置：这三个 store 此前构造时都不传 pool ⇒ 各自 `new Pool(resolveEnvPgConfig())`
+    // 回落**共享库**配置，而不是自己表的属主池。**属主各不相同**：InteractionStore 写的是 interaction_*
+    // 那批 automation 属主表；两个 reply-config store 写的却全是 api 属主表（见下方注释）。
     // 一旦设 AIDCP_PG_AUTOMATION_URL，属主会继续读写旧共享库、而已解耦的读端口读新 automation 库
     // ⇒ split brain（读端看空库/陈旧副本，写端的授权与离场改动读端永远看不见）。故在此显式绑属主池。
     // **今天逐字节等价且不依赖任何 env 组合**：resolveOwnerPgConfig('automation') 在 owner URL 未设时
@@ -2665,8 +2666,12 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       apiPurge: new InteractionApiWrites(),
       envLock: { lockEnvironmentRow, lockEnvironmentScopeRows },
     });
-    replyConfigStore = new ReplyConfigStore({ pool: automationPool });
-    replyConfigScopeStore = new ReplyConfigScopeStore({ pool: automationPool });
+    // ⚠️ 这两个 store 住在 src/interactions/ 但它们的表**全是 api 属主**
+    // （interaction_reply_configs / _versions / _scopes / _scope_versions / _scope_audit /
+    //  reply_templates / reply_rules / account_reply_profiles / interaction_audit_events / accounts）
+    // ⇒ 绑 **apiPool**，不是 automationPool。目录位置不是属主判据，`boundaries/table-ownership.json` 才是。
+    replyConfigStore = new ReplyConfigStore({ pool: apiPool });
+    replyConfigScopeStore = new ReplyConfigScopeStore({ pool: apiPool });
     interactionSchemaMode = await interactionStore.init();
     await replyConfigStore.init();
     await replyConfigScopeStore.init();
