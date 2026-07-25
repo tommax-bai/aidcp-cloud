@@ -1120,6 +1120,11 @@
     "note": "【待定稿裁决】change block3-l3-panel-read-port 新写：面板（api 属主 panel-store）对 automation 域的只读投影端口契约（PanelAutomationReader 接口 + PanelActionTotal / PanelAccountActionTotal / PanelLikeViewTotal / PanelRiskStateProjection / PanelAlertProjection / PanelInteractionProjection 纯行类型）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。与 risk-read-types（账号维风控状态投影端口）同类：读方（api）只依赖本 kernel 接口、绝不直连 automation 的库；属主实现在 src/risk/panel-automation-read.ts（automation）跑在 automation 池上。Block③ 物理拆库 L3 面板读侧解耦。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3"
   },
   {
+    "path": "src/kernel/panel-frame-limits.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change panel-event-tee-hardening 新增：面板事件单帧大小闸（PANEL_FRAME_MAX_BYTES 常量 + panelPayloadTruncated 截断标记构造 + panelPayloadByteLength 字节口径），零 import、零 SQL、零 HTTP/LLM、零进程内活状态。必须落 kernel 而非任一业务层：该上限有两个执行点——推送端 src/panel/panel-ws.ts（api）与旁路端 src/transport/eventbus-outbox-bridge.ts（automation），各写一份必然漂移成「一端截断、另一端照写几十 KB 进共库生产 PG」；放任一层都会制造一条 api↔automation 跨层边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
+  },
+  {
     "path": "src/kernel/persona-binding.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/config/persona-store.ts 析出：PersonaBinding 三态纯类型，零 import、零 SQL、零活状态，被 automation/api 多边 type-only 共导。存储实现留 persona-store.ts。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"

@@ -12,7 +12,12 @@ export * from './types.js';
 type AllEventMap = EventMap & RoleEventMap;
 
 type Handler<T = unknown> = (data: T) => void | Promise<void>;
-type WildcardHandler = (event: string, data: unknown) => void;
+/**
+ * 通配订阅者。第三个参数 `originTs`（epoch ms）**只在跨进程回放时**由转发方给出：
+ * 事件原本发生在另一个进程的那一刻。进程内正常 emit 恒为 undefined（= 就是此刻）。
+ * 可选参数 ⇒ 既有的两参 handler 原样兼容。
+ */
+type WildcardHandler = (event: string, data: unknown, originTs?: number) => void;
 
 export class EventBus {
   private handlers = new Map<string, Set<Handler>>();
@@ -58,7 +63,22 @@ export class EventBus {
    * 不影响其他订阅者，也不升级成进程级未处理拒绝。
    */
   emit<K extends keyof AllEventMap>(event: K, data: AllEventMap[K]): void {
-    const key = event as string;
+    this.dispatch(event as string, data, undefined);
+  }
+
+  /**
+   * 类型擦除的转发用 emit：用于跨总线转发 / 聚合（每连接私有通道 tee 到全局观测总线、
+   * 看板事件扇出聚合）。语义同 emit（fire-and-forget），仅放宽编译期类型约束。
+   *
+   * `originTs`（epoch ms，可选）：**跨进程回放**专用——事件原本发生的时刻。转发方给了它，
+   * 通配订阅者（面板推送）才不会把一条历史事件显示成「刚刚发生」。进程内转发不传即可。
+   */
+  emitRaw(event: string, data: unknown, originTs?: number): void {
+    this.dispatch(event, data, originTs);
+  }
+
+  /** emit / emitRaw 共用的分发体（同步 fire-and-forget）。 */
+  private dispatch(key: string, data: unknown, originTs: number | undefined): void {
     const set = this.handlers.get(key);
     if (set) {
       for (const h of set) {
@@ -77,19 +97,11 @@ export class EventBus {
     // wildcard
     for (const wh of this.wildcardHandlers) {
       try {
-        wh(key, data);
+        wh(key, data, originTs);
       } catch (err) {
         console.error(`[EventBus] wildcard handler error on "${key}":`, err);
       }
     }
-  }
-
-  /**
-   * 类型擦除的转发用 emit：用于跨总线转发 / 聚合（每连接私有通道 tee 到全局观测总线、
-   * 看板事件扇出聚合）。语义同 emit（fire-and-forget），仅放宽编译期类型约束。
-   */
-  emitRaw(event: string, data: unknown): void {
-    this.emit(event as keyof AllEventMap, data as AllEventMap[keyof AllEventMap]);
   }
 
   /**

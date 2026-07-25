@@ -29,6 +29,8 @@
  *   已消费的进度倒退。
  * - **execution_target 隔离**：emit 与 consume 都必须带合法 target；消费只读本 target 的行
  *   （dev 不消费 ol、反之）。target 缺失/非法 → emit 抛错、consumer 构造抛错（绝不静默降级）。
+ * - **保留期**：outbox 是队列不是账本。`pruneEventOutbox` / `OutboxRetentionPruner` 按**主题**剪裁
+ *   （见文末），没有它这张表只进不出、在 dev/ol 共用的**生产** PostgreSQL 上无界增长。
  *
  * 建表只活在 migrations/0074_event_outbox.sql（存储不自建表，遵守迁移执行器纪律）。
  */
@@ -364,5 +366,286 @@ export class OutboxConsumer {
                      updated_at = now()`,
       [this.consumer, this.executionTarget, lastId],
     );
+  }
+}
+
+/* ─────────────────────────────── 保留期 / 剪裁 ─────────────────────────────── */
+
+/**
+ * 一个主题的保留策略。
+ *
+ * **`consumers` 为空数组不是「忘了填」，是一个正式结论**：本部署形态下这个主题确实没有任何消费者
+ * （典型：`core` 模式的面板事件——面板与产生端同进程直连，回放根本不启动）。此时按年龄剪裁即可，
+ * **且不产生任何告警**：没有消费者是这个模式的正常形态，不是故障。
+ *
+ * 反过来，「所有声明的消费者都必须有进度行才允许剪裁」这条守卫，只有在消费者**真的存在**时才成立；
+ * 无条件套用会让没有消费者的模式永久拒绝剪裁 + 永久告警，把一道安全闸变成噪声源加磁盘炸弹。
+ */
+export interface OutboxTopicRetention {
+  /** 主题名。 */
+  topic: string;
+  /** 已被全部必需消费者追平的行，超过这个年龄即剪。 */
+  retentionMs: number;
+  /** 必须先有消费进度才允许剪过的消费者名；空 = 本形态下该主题无消费者（纯按年龄剪、不告警）。 */
+  consumers: readonly string[];
+  /**
+   * 兜底上限（可选）：即使消费进度没跟上、甚至消费者从未上线，超过这个年龄的行也剪掉，并**如实告警**
+   * （日志写明剪了多少条未确认消费的行）。只给**纯观测类**主题设；承重命令类主题 MUST NOT 设——
+   * 那等于把「本该被应用的写命令」悄悄扔掉。
+   */
+  unconsumedRetentionMs?: number;
+}
+
+/** 一个主题一轮剪裁的结果。所有「没剪成」的情形都在这里如实表达，绝不伪装成正常。 */
+export interface OutboxTopicPruneResult {
+  topic: string;
+  /** 消费进度线以内、按 `retentionMs` 删掉的行数。 */
+  deleted: number;
+  /** 按 `unconsumedRetentionMs` 兜底强删的行数（这些行未被确认消费过）；>0 MUST 告警。 */
+  forced: number;
+  /** 剪裁上界（全部必需消费者的最小进度）；null = 无必需消费者或本轮被挡住。 */
+  floorId: number | null;
+  /** 缺进度行、导致本轮不敢剪，且**确有到龄行堆着**——如实报出是哪些消费者；否则 null。 */
+  blockedBy: string[] | null;
+}
+
+export interface PruneEventOutboxOptions {
+  /** 归属目标；只剪本 target 的行。MUST 为 'dev' | 'ol'。 */
+  executionTarget: string;
+  /** 逐主题的保留策略。**未登记的主题一行都不会被剪**（宁可留着，也不猜别人的语义）。 */
+  topics: readonly OutboxTopicRetention[];
+  /** 单主题单轮删除上限，默认 2000（有界：绝不一条语句锁住整张表）。 */
+  batchLimit?: number;
+  /** 当前时刻（注入便于测试），默认 `Date.now()`。 */
+  now?: () => number;
+}
+
+/** 单主题单轮删除上限的默认值。 */
+export const DEFAULT_OUTBOX_PRUNE_BATCH = 2000;
+/** 兜底轮询间隔的默认值：10 分钟一轮（剪裁不是热路径）。 */
+export const DEFAULT_OUTBOX_PRUNE_INTERVAL_MS = 10 * 60 * 1000;
+
+interface CursorConsumerRow {
+  consumer: string;
+  last_id: string | number;
+}
+
+/**
+ * 按主题剪裁 `event_outbox`（一轮，有界）。返回逐主题结果，**调用方负责告警**。
+ *
+ * 剪裁上界的两条规则：
+ *   1. 主题声明了消费者 → 只剪「全部消费者都已越过」的 id（`min(last_id)`）。任一消费者连游标行都
+ *      还没有 ⇒ 它可能一条都没消费过，本轮**一条都不剪**（`blockedBy`），除非有兜底上限。
+ *   2. 主题没有消费者 → 没有「等谁追平」这回事，纯按年龄剪。
+ *
+ * 诚实闸：规则 1 挡住时，只有**确实存在到龄行**才报 `blockedBy`。没有到龄行就什么都不报——
+ * 「没东西可剪」不是故障，为它每轮打一条告警只会把真问题淹掉。
+ */
+export async function pruneEventOutbox(
+  pool: OutboxQueryable,
+  options: PruneEventOutboxOptions,
+): Promise<OutboxTopicPruneResult[]> {
+  if (!isExecutionTarget(options.executionTarget)) {
+    throw new Error(
+      `pruneEventOutbox: 非法 executionTarget=${JSON.stringify(options.executionTarget)}（只接受 'dev' | 'ol'）`,
+    );
+  }
+  const target = options.executionTarget;
+  const batchLimit = options.batchLimit ?? DEFAULT_OUTBOX_PRUNE_BATCH;
+  const nowMs = (options.now ?? (() => Date.now()))();
+  const results: OutboxTopicPruneResult[] = [];
+
+  for (const spec of options.topics) {
+    if (!Number.isFinite(spec.retentionMs) || spec.retentionMs < 0) {
+      throw new Error(
+        `pruneEventOutbox: topic=${spec.topic} 的 retentionMs 必须为非负有限数，收到 ${JSON.stringify(spec.retentionMs)}`,
+      );
+    }
+    let floorId: number | null = null;
+    let blockedBy: string[] | null = null;
+
+    if (spec.consumers.length > 0) {
+      const { rows } = await pool.query<CursorConsumerRow>(
+        `SELECT consumer, last_id FROM event_outbox_cursor
+          WHERE execution_target = $1 AND consumer = ANY($2::text[])`,
+        [target, [...spec.consumers]],
+      );
+      const progress = new Map<string, number>();
+      for (const row of rows) progress.set(row.consumer, Number(row.last_id));
+      const missing = spec.consumers.filter((name) => !progress.has(name));
+      if (missing.length > 0) blockedBy = [...missing];
+      else floorId = Math.min(...spec.consumers.map((name) => progress.get(name) ?? 0));
+    }
+
+    const cutoff = new Date(nowMs - spec.retentionMs);
+    let deleted = 0;
+    if (blockedBy === null) {
+      const res = await pool.query(
+        `DELETE FROM event_outbox
+          WHERE id IN (
+            SELECT id FROM event_outbox
+             WHERE execution_target = $1 AND topic = $2 AND created_at < $3
+               AND ($4::bigint IS NULL OR id <= $4::bigint)
+             ORDER BY id ASC
+             LIMIT $5
+          )`,
+        [target, spec.topic, cutoff, floorId, batchLimit],
+      );
+      deleted = res.rowCount ?? 0;
+    } else {
+      // 诚实闸：确认真有到龄行堆着才报；没有就静默（这不是故障）。
+      const { rows } = await pool.query<{ id: string | number }>(
+        `SELECT id FROM event_outbox
+          WHERE execution_target = $1 AND topic = $2 AND created_at < $3
+          LIMIT 1`,
+        [target, spec.topic, cutoff],
+      );
+      if (rows.length === 0) blockedBy = null;
+    }
+
+    let forced = 0;
+    if (spec.unconsumedRetentionMs !== undefined) {
+      const hardCutoff = new Date(nowMs - spec.unconsumedRetentionMs);
+      const res = await pool.query(
+        `DELETE FROM event_outbox
+          WHERE id IN (
+            SELECT id FROM event_outbox
+             WHERE execution_target = $1 AND topic = $2 AND created_at < $3
+             ORDER BY id ASC
+             LIMIT $4
+          )`,
+        [target, spec.topic, hardCutoff, batchLimit],
+      );
+      forced = res.rowCount ?? 0;
+    }
+
+    results.push({ topic: spec.topic, deleted, forced, floorId, blockedBy });
+  }
+  return results;
+}
+
+export interface OutboxRetentionPrunerOptions extends PruneEventOutboxOptions {
+  pool: OutboxQueryable;
+  /** 兜底轮询间隔（毫秒），默认 10 分钟。 */
+  intervalMs?: number;
+  logger?: Pick<Console, 'log' | 'warn'>;
+  setTimer?: (fn: () => void, ms: number) => TimerHandle;
+  clearTimer?: (handle: TimerHandle) => void;
+}
+
+/**
+ * 定时剪裁器：把 `pruneEventOutbox` 挂到一个有界定时器上，并把「没剪成」如实说出来。
+ *
+ * 告警纪律（防噪声）：
+ *   - 被消费进度挡住 → **只在状态跃迁时**各打一条（进入受阻 / 恢复），不每轮重复刷屏；
+ *   - 兜底强删 → 每次都 warn（真的丢了未确认消费的行，必须次次可见）；
+ *   - 一切正常 → 只在真删到行时打一条 info。
+ */
+export class OutboxRetentionPruner {
+  private readonly pool: OutboxQueryable;
+  private readonly options: PruneEventOutboxOptions;
+  private readonly intervalMs: number;
+  private readonly logger: Pick<Console, 'log' | 'warn'>;
+  private readonly setTimer: (fn: () => void, ms: number) => TimerHandle;
+  private readonly clearTimer: (handle: TimerHandle) => void;
+  private readonly blockedTopics = new Set<string>();
+
+  private running = false;
+  private ticking = false;
+  private timer: TimerHandle | null = null;
+
+  constructor(options: OutboxRetentionPrunerOptions) {
+    if (!isExecutionTarget(options.executionTarget)) {
+      throw new Error(
+        `OutboxRetentionPruner: 非法 executionTarget=${JSON.stringify(
+          options.executionTarget,
+        )}（只接受 'dev' | 'ol'）—— target 缺失/非法不启动`,
+      );
+    }
+    if (
+      options.intervalMs !== undefined &&
+      (!Number.isFinite(options.intervalMs) || options.intervalMs <= 0)
+    ) {
+      throw new Error(
+        `OutboxRetentionPruner: intervalMs 必须为正有限数，收到 ${JSON.stringify(options.intervalMs)}`,
+      );
+    }
+    this.pool = options.pool;
+    this.options = {
+      executionTarget: options.executionTarget,
+      topics: options.topics,
+      batchLimit: options.batchLimit,
+      now: options.now,
+    };
+    this.intervalMs = options.intervalMs ?? DEFAULT_OUTBOX_PRUNE_INTERVAL_MS;
+    this.logger = options.logger ?? console;
+    this.setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+    this.clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle));
+  }
+
+  /** 启动：立即剪一轮，之后按间隔兜底。幂等。 */
+  start(): void {
+    if (this.running) return;
+    this.running = true;
+    void this.tick();
+  }
+
+  /** 停止：不再排新轮次。 */
+  stop(): void {
+    this.running = false;
+    if (this.timer !== null) {
+      this.clearTimer(this.timer);
+      this.timer = null;
+    }
+  }
+
+  /** 手动驱动一轮（单测用，不依赖真定时器）；返回逐主题结果。 */
+  async runOnce(): Promise<OutboxTopicPruneResult[]> {
+    const results = await pruneEventOutbox(this.pool, this.options);
+    for (const r of results) {
+      if (r.forced > 0) {
+        this.logger.warn(
+          `[event-outbox] 兜底剪裁：topic=${r.topic} 强删 ${r.forced} 行**未确认被消费**的过期事件` +
+            `（超过 unconsumedRetentionMs；宁可丢历史观测帧也不让生产库无界增长）`,
+        );
+      }
+      if (r.blockedBy !== null) {
+        if (!this.blockedTopics.has(r.topic)) {
+          this.blockedTopics.add(r.topic);
+          this.logger.warn(
+            `[event-outbox] 拒绝剪裁：topic=${r.topic} 有到龄行，但消费者 ${r.blockedBy.join(
+              ',',
+            )} 尚无消费进度行 —— 不敢剪（剪了就是静默吞事件）。消费进程是否在跑？`,
+          );
+        }
+      } else if (this.blockedTopics.delete(r.topic)) {
+        this.logger.log(`[event-outbox] 剪裁已恢复：topic=${r.topic} 的消费进度已就位`);
+      }
+      if (r.deleted > 0) {
+        this.logger.log(
+          `[event-outbox] 剪裁 topic=${r.topic} 删除 ${r.deleted} 行（上界 id=${r.floorId ?? '按年龄'}）`,
+        );
+      }
+    }
+    return results;
+  }
+
+  private async tick(): Promise<void> {
+    if (!this.running || this.ticking) return;
+    this.ticking = true;
+    try {
+      await this.runOnce();
+    } catch (err: unknown) {
+      this.logger.warn(
+        `[event-outbox] 剪裁轮次失败（下一轮重试）: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      this.ticking = false;
+    }
+    if (!this.running) return;
+    this.timer = this.setTimer(() => {
+      this.timer = null;
+      void this.tick();
+    }, this.intervalMs);
   }
 }

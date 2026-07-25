@@ -12,6 +12,11 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type http from 'node:http';
 import type { EventBus } from '../event-bus/index.js';
+import {
+  PANEL_FRAME_MAX_BYTES,
+  panelPayloadByteLength,
+  panelPayloadTruncated,
+} from '../kernel/panel-frame-limits.js';
 import { verifyJwt } from './jwt.js';
 import type { TokenRevocationStore } from './revocation.js';
 
@@ -38,14 +43,17 @@ export interface PanelWsHandle {
 
 // 背压 / 大载荷防护参数（change console-cloud-panel-hardening #20）。面板 WS 与浏览编排同进程，
 // 慢客户端的无界发送缓冲会 OOM 连累整个云端 → 广播前查发送缓冲堆积、超阈值跳帧、持续超阈值断开慢客户端。
-export const PANEL_WS_MAX_FRAME_BYTES = 256 * 1024; // 单帧载荷上限，超则截断为摘要帧
+// 单帧载荷上限，超则截断为摘要帧。**同源自 kernel**（`src/kernel/panel-frame-limits.ts`）：
+// 面板事件旁路（automation·tee 写 outbox）用的是同一个常量，两处各写一份必然漂移。此处保留本名字，
+// 只为不打断既有引用。
+export const PANEL_WS_MAX_FRAME_BYTES = PANEL_FRAME_MAX_BYTES;
 export const PANEL_WS_BACKPRESSURE_BYTES = 1024 * 1024; // 发送缓冲堆积阈值
 export const PANEL_WS_MAX_SLOW_STRIKES = 30; // 连续跳帧上限 → 断开慢客户端
 export const PANEL_WS_AUTH_TIMEOUT_MS = 5000; // 首帧鉴权超时（#25）：连上后须在此内发有效 {token} 首帧
 
 /**
  * 序列化面板帧；载荷超上限则截断为带标记的摘要帧（大对象如 page.cards / note.detail，前端按需另拉）。
- * 纯函数——便于单测，不依赖真 ws。
+ * 纯函数——便于单测，不依赖真 ws。上限与摘要形状取自 kernel，与 tee 侧同源。
  */
 export function serializePanelFrame(
   event: string,
@@ -54,13 +62,9 @@ export function serializePanelFrame(
   maxBytes = PANEL_WS_MAX_FRAME_BYTES,
 ): string {
   const text = JSON.stringify({ ts: now, kind: event, data } satisfies PanelFrame);
-  const bytes = Buffer.byteLength(text, 'utf8');
+  const bytes = panelPayloadByteLength(text);
   if (bytes <= maxBytes) return text;
-  return JSON.stringify({
-    ts: now,
-    kind: event,
-    data: { truncated: true, reason: 'payload_too_large', bytes },
-  } satisfies PanelFrame);
+  return JSON.stringify({ ts: now, kind: event, data: panelPayloadTruncated(bytes) } satisfies PanelFrame);
 }
 
 /**
@@ -132,9 +136,12 @@ export function startPanelWs(options: PanelWsOptions): PanelWsHandle {
 
   // 订阅 EventBus，归一化广播给**已认证**客户端（纯读侧扇出，绝不回发 edge）。
   // 背压保护（#20）：无已认证订阅时短路省序列化；大载荷截断；慢客户端跳帧/断开，防同进程 OOM。
-  const unsub = options.eventBus.onAny((event, data) => {
+  // `originTs`（epoch ms）只在**跨进程回放**路径上出现（api 模式：automation tee 的事件经 outbox 回放
+  // 进本进程 EventBus）。有它就用它当帧时间——否则任何回放都会被面板显示成「刚刚发生」。
+  // 进程内直连路径（monolith / core）恒为 undefined ⇒ 仍取 Date.now()，逐字节等价。
+  const unsub = options.eventBus.onAny((event, data, originTs) => {
     if (authed.size === 0) return; // 无已认证订阅：不序列化，不在编排热路径白耗 CPU
-    const text = serializePanelFrame(event, data, Date.now());
+    const text = serializePanelFrame(event, data, originTs ?? Date.now());
     for (const client of authed) {
       if (client.readyState !== WebSocket.OPEN) continue;
       const decision = backpressureDecision(client.bufferedAmount, slowStrikes.get(client) ?? 0);

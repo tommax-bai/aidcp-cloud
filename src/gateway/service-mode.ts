@@ -101,3 +101,83 @@ export function listenersForMode(mode: ServiceMode): ListenerPlan {
 
 /** content 进程内部 HTTP 读 API 的默认监听端口（可由 `AIDCP_CONTENT_PORT` 覆盖）。 */
 export const DEFAULT_CONTENT_READ_API_PORT = 8092;
+
+/* ───────────────────── 面板事件旁路：写哪边、读哪边（模式感知） ───────────────────── */
+
+/** 面板事件跨段传输计划：本模式是否 tee 到 outbox、是否从 outbox 回放。 */
+export interface PanelEventTransportPlan {
+  /** 是否把本进程的编排事件 tee 进 `event_outbox`（写方）。 */
+  tee: boolean;
+  /** 是否从 `event_outbox` 回放 `panel.event` 进本进程 EventBus（读方）。 */
+  replay: boolean;
+}
+
+/**
+ * 面板事件旁路的**唯一门禁**：一条编排事件该不该落进共库的生产 PostgreSQL。
+ *
+ * 判据只有一条：**面板推送端（panel-ws，跑在 segD）是否与事件产生端（EventBus，跑在 segC）在同一个进程**。
+ * 同进程 ⇒ 面板直接订阅总线就拿到了，tee 写出去的行**没有任何消费者**，是纯废行。
+ *
+ *   | 模式       | 段            | 面板在哪                | tee   | replay |
+ *   | ---------- | ------------- | ----------------------- | ----- | ------ |
+ *   | monolith   | A+B+C+D       | 同进程（直连总线）      | 否    | 否     |
+ *   | content    | A+B           | 不在本进程，也无产生端  | 否    | 否     |
+ *   | automation | A+C           | **另一个进程（api）**   | **是**| 否     |
+ *   | api        | A+D           | 本进程，但无产生端      | 否    | **是** |
+ *   | core       | A+C+D         | 同进程（直连总线）      | 否    | 否     |
+ *
+ * `core` 那一行是本函数存在的直接原因：它此前满足「非 monolith」于是照写不误，而回放门禁只在 `api`
+ * 模式开 ⇒ 每一条编排事件都被写进生产库、没有任何消费者、也没有任何剪裁。
+ *
+ * **刻意不照抄推送端那道「本进程有无已认证订阅者就短路」的闸**：拆进程后消费方（api 进程）的订阅者
+ * 对 automation 进程不可见，照抄就成了静默漏投——面板一打开就发现事件流是断的。跨进程能安全依据的
+ * 只有「消费方这个角色在本部署形态里是否存在」，即模式本身。
+ */
+export function panelEventTransportForMode(mode: ServiceMode): PanelEventTransportPlan {
+  switch (mode) {
+    case 'automation':
+      return { tee: true, replay: false };
+    case 'api':
+      return { tee: false, replay: true };
+    case 'core':
+    case 'content':
+    case 'monolith':
+    default:
+      return { tee: false, replay: false };
+  }
+}
+
+/** `event_outbox` 保留期剪裁计划：谁来剪、剪的时候要等谁追平。 */
+export interface OutboxRetentionPlan {
+  /** 本进程是否负责剪裁（须持有 automation 属主连接，即跑了 segC 的模式）。 */
+  prune: boolean;
+  /** `panel.event` 在本形态下**是否真的有消费者**（有 ⇒ 剪裁必须等它的进度）。 */
+  panelEventConsumed: boolean;
+  /** `risk.command` 在本形态下是否真的有消费者（单写者随 segC 起）。 */
+  riskCommandConsumed: boolean;
+}
+
+/**
+ * 谁剪、等谁。**「本形态下有没有消费者」必须由模式决定，而不是由「游标行在不在」倒推**：
+ * 没有消费者的模式（core 的 panel.event、monolith 的两个主题）永远不会出现游标行，若把「所有声明的
+ * 消费者都有进度行」当剪裁前提，那些模式会**永久拒绝剪裁 + 永久告警**——闸变成噪声源加磁盘炸弹。
+ *
+ * 剪裁只在跑了 segC 的模式做（`event_outbox` 属 automation，api / content 进程不该写它）。
+ */
+export function outboxRetentionForMode(mode: ServiceMode): OutboxRetentionPlan {
+  switch (mode) {
+    case 'automation':
+      // 面板在另一个进程回放；风控单写者在本进程消费。两者都要等进度。
+      return { prune: true, panelEventConsumed: true, riskCommandConsumed: true };
+    case 'core':
+      // 面板同进程直连 ⇒ panel.event 无消费者（含此前误写下的历史行，纯按年龄剪）；风控单写者在本进程。
+      return { prune: true, panelEventConsumed: false, riskCommandConsumed: true };
+    case 'monolith':
+      // 两条 outbox 通道都不接线（既不写也不消费）；仍负责把历史遗留行剪干净。
+      return { prune: true, panelEventConsumed: false, riskCommandConsumed: false };
+    case 'api':
+    case 'content':
+    default:
+      return { prune: false, panelEventConsumed: false, riskCommandConsumed: false };
+  }
+}

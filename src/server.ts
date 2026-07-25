@@ -318,6 +318,8 @@ import {
   serviceModeFromEnv,
   segmentsForMode,
   listenersForMode,
+  panelEventTransportForMode,
+  outboxRetentionForMode,
   DEFAULT_CONTENT_READ_API_PORT,
   type ServiceMode,
 } from './gateway/service-mode.js';
@@ -333,8 +335,23 @@ import { RiskReadHttpClient, registerRiskReadRoutes } from './transport/risk-rea
 import type { RiskReadPort } from './kernel/risk-read-types.js';
 import type { PanelAutomationReader } from './kernel/panel-automation-types.js';
 import { PgPanelAutomationRead } from './risk/panel-automation-read.js';
-import { emitRiskCommand, startRiskCommandConsumer } from './transport/risk-command-outbox.js';
-import { bridgeEventBusToOutbox, PanelEventReplay } from './transport/eventbus-outbox-bridge.js';
+import {
+  emitRiskCommand,
+  startRiskCommandConsumer,
+  RISK_COMMAND_CONSUMER,
+  RISK_COMMAND_RETENTION_MS,
+  RISK_COMMAND_TOPIC,
+} from './transport/risk-command-outbox.js';
+import {
+  bridgeEventBusToOutbox,
+  PanelEventReplay,
+  PANEL_EVENT_OUTBOX_TOPIC,
+  PANEL_EVENT_REPLAY_CONSUMER,
+  PANEL_EVENT_RETENTION_MS,
+  PANEL_EVENT_UNCONSUMED_RETENTION_MS,
+} from './transport/eventbus-outbox-bridge.js';
+// event_outbox 保留期剪裁（本 change）：outbox 是队列不是账本，没有剪裁就在共库的生产 PG 上无界增长。
+import { OutboxRetentionPruner } from './transport/event-outbox.js';
 /** automation 内部只读 API 的默认监听端口（可由 AIDCP_AUTOMATION_PORT 覆盖）；api 侧 base URL 由 AIDCP_AUTOMATION_URL 指定。 */
 const DEFAULT_AUTOMATION_READ_API_PORT = 8093;
 import { PgAlertStore } from './alerts/index.js';
@@ -2525,8 +2542,11 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   // automation/core（segC 运行 + 有合法 target）下：
   //   ① 风控命令消费者——把 api 侧 emit 的风控写命令，交本进程唯一的 RiskController 应用（单写落地点）。
   //   ② EventBus → outbox 桥——把本进程编排事件 tee 到 panel.event 主题，供 api 进程回放给 panel-ws。
+  //      **仅当面板确实在另一个进程时才接**（判定收口在 panelEventTransportForMode）：core 下 panel-ws
+  //      与产生端同进程、EventBus 直连，此处再 tee 就是往共库的生产 PG 满速率写无人消费的废行。
   // monolith 下两者都 MUST NOT 起（EventBus 仍进程内直连 panel-ws；无独立 api 进程 emit 命令）。
   const seamMode = serviceModeFromEnv();
+  const panelEventTransport = panelEventTransportForMode(seamMode);
   if (seamMode !== 'monolith' && deploymentTarget) {
     startRiskCommandConsumer({
       pool: automationPool,
@@ -2540,8 +2560,49 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       },
       logger: console,
     });
-    bridgeEventBusToOutbox({ eventBus, pool: automationPool, executionTarget: deploymentTarget, logger: console });
-    console.log(`[aidcp-cloud] 拆段传输已接线（${seamMode}）：风控命令消费者 + 事件→outbox 桥`);
+    if (panelEventTransport.tee) {
+      bridgeEventBusToOutbox({ eventBus, pool: automationPool, executionTarget: deploymentTarget, logger: console });
+    }
+    console.log(
+      `[aidcp-cloud] 拆段传输已接线（${seamMode}）：风控命令消费者${
+        panelEventTransport.tee
+          ? ' + 事件→outbox 桥'
+          : '；面板事件 tee 未启用（面板与产生端同进程，EventBus 直连，无进程外消费者）'
+      }`,
+    );
+  }
+
+  // ── event_outbox 保留期（本 change）：outbox 是队列不是账本，没有剪裁就只进不出。─────────────
+  // 只在跑了 segC（automation 属主）且 target 合法时起。「等谁追平才敢剪」由模式决定，而不是由
+  // 游标行在不在倒推——否则没有消费者的形态会永久拒绝剪裁 + 永久告警。
+  const outboxRetention = outboxRetentionForMode(seamMode);
+  if (outboxRetention.prune && deploymentTarget) {
+    const pruner = new OutboxRetentionPruner({
+      pool: automationPool,
+      executionTarget: deploymentTarget,
+      topics: [
+        {
+          topic: PANEL_EVENT_OUTBOX_TOPIC,
+          retentionMs: PANEL_EVENT_RETENTION_MS,
+          consumers: outboxRetention.panelEventConsumed ? [PANEL_EVENT_REPLAY_CONSUMER] : [],
+          // 纯观测流：即使回放端从没上线，3 天前的历史帧也不该继续占生产库磁盘（强删会 warn）。
+          unconsumedRetentionMs: PANEL_EVENT_UNCONSUMED_RETENTION_MS,
+        },
+        {
+          topic: RISK_COMMAND_TOPIC,
+          retentionMs: RISK_COMMAND_RETENTION_MS,
+          consumers: outboxRetention.riskCommandConsumed ? [RISK_COMMAND_CONSUMER] : [],
+          // 承重命令：MUST NOT 设兜底强删——未被应用就删掉 = 静默吞掉一次风控状态写。
+        },
+      ],
+      logger: console,
+    });
+    pruner.start();
+    console.log(
+      `[aidcp-cloud] event_outbox 保留期剪裁已启动（${seamMode}）：panel.event 等待消费者=${
+        outboxRetention.panelEventConsumed
+      }，risk.command 等待消费者=${outboxRetention.riskCommandConsumed}`,
+    );
   }
 
   // ── 记账 outbox + worker + 对账（change risk-state-cross-process-integrity，design D5/D6）──
@@ -6248,7 +6309,9 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
     const replay = new PanelEventReplay({
       pool: ctx.automationPool,
       executionTarget: deploymentTarget,
-      sink: (event, data) => eventBus.emitRaw(event, data),
+      // originTs：事件在 automation 进程发生的时刻（epoch ms）。透传给 panel-ws，否则回放出来的
+      // 历史事件会被面板一律显示成「刚刚发生」。解不出时为 undefined，下游诚实回落到当下。
+      sink: (event, data, originTs) => eventBus.emitRaw(event, data, originTs),
       logger: console,
     });
     replay.start();

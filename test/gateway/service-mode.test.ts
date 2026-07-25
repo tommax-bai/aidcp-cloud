@@ -5,9 +5,13 @@ import {
   serviceModeFromEnv,
   segmentsForMode,
   listenersForMode,
+  panelEventTransportForMode,
+  outboxRetentionForMode,
   DEFAULT_CONTENT_READ_API_PORT,
   type ServiceMode,
 } from '../../src/gateway/service-mode.js';
+
+const ALL_MODES: ServiceMode[] = ['monolith', 'content', 'automation', 'api', 'core'];
 
 describe('service-mode 纯选择器（Block② 2d：env → 段/监听计划，不起进程）', () => {
   it('AIDCP_SERVICE 未设 → monolith（默认安全底线）', () => {
@@ -84,5 +88,71 @@ describe('service-mode 纯选择器（Block② 2d：env → 段/监听计划，�
 
   it('默认内部读 API 端口为 8092', () => {
     assert.equal(DEFAULT_CONTENT_READ_API_PORT, 8092);
+  });
+});
+
+describe('面板事件旁路的模式门禁（哪种模式写 outbox、哪种模式不写）', () => {
+  it('只有 automation 写（面板确实在另一个进程）', () => {
+    const teeing = ALL_MODES.filter((m) => panelEventTransportForMode(m).tee);
+    assert.deepEqual(teeing, ['automation']);
+  });
+
+  it('只有 api 回放', () => {
+    const replaying = ALL_MODES.filter((m) => panelEventTransportForMode(m).replay);
+    assert.deepEqual(replaying, ['api']);
+  });
+
+  it('core：面板与产生端同进程 ⇒ 既不写也不回放（此前无消费者地满速率写生产库）', () => {
+    assert.deepEqual(panelEventTransportForMode('core'), { tee: false, replay: false });
+  });
+
+  it('不存在「写了却没人读」的模式：tee 开 ⇔ 本进程不回放且另有进程回放', () => {
+    for (const mode of ALL_MODES) {
+      const plan = panelEventTransportForMode(mode);
+      assert.equal(plan.tee && plan.replay, false, `mode=${mode} 不该自己写自己读`);
+      // 写方存在 ⇔ 读方存在于另一个模式（automation ↔ api 是同一次部署的两个进程）
+      if (plan.tee) assert.equal(panelEventTransportForMode('api').replay, true);
+    }
+  });
+});
+
+describe('event_outbox 保留期计划（谁剪、等谁追平）', () => {
+  it('剪裁只在跑了 segC 的模式做（event_outbox 属 automation）', () => {
+    for (const mode of ALL_MODES) {
+      assert.equal(outboxRetentionForMode(mode).prune, segmentsForMode(mode).segC, `mode=${mode}`);
+    }
+  });
+
+  it('没有消费者的模式必须照剪不误——否则永久拒绝剪裁 + 永久告警', () => {
+    // core：面板同进程直连 ⇒ panel.event 永远不会有回放游标行；剪裁 MUST NOT 因此卡死。
+    assert.deepEqual(outboxRetentionForMode('core'), {
+      prune: true,
+      panelEventConsumed: false,
+      riskCommandConsumed: true,
+    });
+    // monolith：两条通道都不接线，仍负责剪掉历史遗留行。
+    assert.deepEqual(outboxRetentionForMode('monolith'), {
+      prune: true,
+      panelEventConsumed: false,
+      riskCommandConsumed: false,
+    });
+  });
+
+  it('automation：两个主题都真有消费者 ⇒ 剪裁必须等进度', () => {
+    assert.deepEqual(outboxRetentionForMode('automation'), {
+      prune: true,
+      panelEventConsumed: true,
+      riskCommandConsumed: true,
+    });
+  });
+
+  it('「等 panel.event 消费者」当且仅当本模式真的 tee 了（写方与守卫同源）', () => {
+    for (const mode of ALL_MODES) {
+      assert.equal(
+        outboxRetentionForMode(mode).panelEventConsumed,
+        panelEventTransportForMode(mode).tee,
+        `mode=${mode}`,
+      );
+    }
   });
 });

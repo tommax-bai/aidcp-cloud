@@ -21,6 +21,8 @@ import {
   type EventBusLike,
 } from '../../src/transport/eventbus-outbox-bridge.js';
 import type { OutboxQueryable } from '../../src/transport/event-outbox.js';
+import { PANEL_FRAME_MAX_BYTES } from '../../src/kernel/panel-frame-limits.js';
+import { PANEL_WS_MAX_FRAME_BYTES } from '../../src/panel/panel-ws.js';
 
 const silent = { log() {}, warn() {} };
 
@@ -89,10 +91,14 @@ class FakePool implements OutboxQueryable {
 
 // ── 编解码纯函数 ───────────────────────────────────────────────────────────────
 
-test('encode/decode round-trip：{event,data} 原样往返', () => {
-  const enc = encodePanelEventPayload('note.detail', { noteId: 'abc', n: 3 });
-  assert.deepEqual(enc, { event: 'note.detail', data: { noteId: 'abc', n: 3 } });
-  assert.deepEqual(decodePanelEventPayload(enc), { event: 'note.detail', data: { noteId: 'abc', n: 3 } });
+test('encode/decode round-trip：{event,data,ts} 原样往返', () => {
+  const enc = encodePanelEventPayload('note.detail', { noteId: 'abc', n: 3 }, 1_700_000_000_000);
+  assert.deepEqual(enc, { event: 'note.detail', data: { noteId: 'abc', n: 3 }, ts: 1_700_000_000_000 });
+  assert.deepEqual(decodePanelEventPayload(enc), {
+    event: 'note.detail',
+    data: { noteId: 'abc', n: 3 },
+    ts: 1_700_000_000_000,
+  });
 });
 
 test('decode：形状不符（缺 event / 非对象）返回 null', () => {
@@ -116,7 +122,13 @@ test('toJsonSafe：循环引用不抛，逐字段丢弃不可序列化的', () =
 test('tee 把 onAny 事件编码进 outbox（topic=panel.event）；replay 解码交给 sink', async () => {
   const bus = new FakeBus();
   const pool = new FakePool();
-  const unsub = bridgeEventBusToOutbox({ eventBus: bus, pool, executionTarget: 'dev', logger: silent });
+  const unsub = bridgeEventBusToOutbox({
+    eventBus: bus,
+    pool,
+    executionTarget: 'dev',
+    now: () => 1_700_000_000_000,
+    logger: silent,
+  });
 
   bus.emit('note.detail', { noteId: 'x' });
   bus.emit('page.scroll', { dy: 200 });
@@ -125,25 +137,87 @@ test('tee 把 onAny 事件编码进 outbox（topic=panel.event）；replay 解�
   // tee 侧：两条都进了 outbox，topic 固定为 panel.event，payload 为信封
   assert.equal(pool.events.length, 2);
   assert.ok(pool.events.every((e) => e.topic === PANEL_EVENT_OUTBOX_TOPIC));
-  assert.deepEqual(pool.events[0].payload, { event: 'note.detail', data: { noteId: 'x' } });
+  assert.deepEqual(pool.events[0].payload, {
+    event: 'note.detail',
+    data: { noteId: 'x' },
+    ts: 1_700_000_000_000,
+  });
 
-  // replay 侧：解码回 (event, data) 交给注入 sink
-  const got: { event: string; data: unknown }[] = [];
+  // replay 侧：解码回 (event, data, originTs) 交给注入 sink
+  const got: { event: string; data: unknown; originTs?: number }[] = [];
   const replay = new PanelEventReplay({
     pool,
     executionTarget: 'dev',
-    sink: (event, data) => got.push({ event, data }),
+    sink: (event, data, originTs) => got.push({ event, data, originTs }),
     logger: silent,
   });
   const handled = await replay.runOnce();
 
   assert.equal(handled, 2);
   assert.deepEqual(got, [
-    { event: 'note.detail', data: { noteId: 'x' } },
-    { event: 'page.scroll', data: { dy: 200 } },
+    { event: 'note.detail', data: { noteId: 'x' }, originTs: 1_700_000_000_000 },
+    { event: 'page.scroll', data: { dy: 200 }, originTs: 1_700_000_000_000 },
   ]);
 
   unsub();
+});
+
+// ── A6：信封原始时间戳（回放不得被面板当成「刚刚发生」）────────────────────────────
+
+test('回放透传原始时刻；老行（信封无 ts）回落到 outbox 行的 created_at，绝不冒充「此刻」', async () => {
+  const pool = new FakePool();
+  // 手写一条「本字段加入之前」的老行：payload 只有 {event,data}，没有 ts
+  pool.events.push({
+    id: 1,
+    topic: PANEL_EVENT_OUTBOX_TOPIC,
+    payload: { event: 'legacy.event', data: { a: 1 } },
+    execution_target: 'dev',
+    created_at: new Date(1000),
+  });
+
+  const got: (number | undefined)[] = [];
+  const replay = new PanelEventReplay({
+    pool,
+    executionTarget: 'dev',
+    sink: (_e, _d, originTs) => got.push(originTs),
+    logger: silent,
+  });
+  await replay.runOnce();
+
+  // FakePool 给第 1 行的 created_at = new Date(1 * 1000)
+  assert.deepEqual(got, [1000]);
+});
+
+// ── 单帧上限：超限降级为摘要，绝不静默丢弃 ─────────────────────────────────────────
+
+test('tee 侧超限载荷降级为摘要帧（truncated 标记 + 原始体积），事件本身不丢', async () => {
+  const bus = new FakeBus();
+  const pool = new FakePool();
+  bridgeEventBusToOutbox({
+    eventBus: bus,
+    pool,
+    executionTarget: 'dev',
+    maxBytes: 1024,
+    now: () => 42,
+    logger: silent,
+  });
+
+  bus.emit('page.cards.arrived', { cards: 'x'.repeat(4096) });
+  await flush();
+
+  assert.equal(pool.events.length, 1); // 事件仍在——降级不是丢弃
+  const payload = pool.events[0].payload as { event: string; ts: number; data: Record<string, unknown> };
+  assert.equal(payload.event, 'page.cards.arrived');
+  assert.equal(payload.ts, 42);
+  assert.equal(payload.data.truncated, true);
+  assert.equal(payload.data.reason, 'payload_too_large');
+  assert.ok((payload.data.bytes as number) > 4096);
+  // 库里落的那条 JSON 明显小于原载荷（大 blob 被挡在生产库外）
+  assert.ok(JSON.stringify(pool.events[0].payload).length < 1024);
+});
+
+test('tee 侧上限默认与推送端同源（两层共用 kernel 常量，MUST NOT 各写一份）', () => {
+  assert.equal(PANEL_WS_MAX_FRAME_BYTES, PANEL_FRAME_MAX_BYTES);
 });
 
 test('target 隔离：tee 写 dev，replay ol 拿不到', async () => {

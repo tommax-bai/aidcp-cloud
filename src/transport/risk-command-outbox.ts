@@ -47,6 +47,16 @@ import {
 /** 风控命令统一走这个 outbox 主题。 */
 export const RISK_COMMAND_TOPIC = 'risk.command';
 
+/** 单写者消费者名（游标按 (consumer, target) 分行）。剪裁器据此判断「谁追平了才敢剪」。 */
+export const RISK_COMMAND_CONSUMER = 'risk-command';
+
+/**
+ * `risk.command` 的保留期：已被单写者应用过的命令留 30 天做审计追溯，之后剪掉。
+ * **刻意不设兜底强删上限**——风控命令是承重写，未被应用就删掉等于「本该改的账号状态没改、且无人知道」。
+ * 消费者掉线时宁可让它堆着并如实告警。
+ */
+export const RISK_COMMAND_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
 /** 施加一条风控信号 → 转调 `RiskController.applySignal(signal)`。 */
 export interface ApplySignalCommand {
   kind: 'applySignal';
@@ -197,7 +207,7 @@ export class RiskCommandConsumer {
       await apply(cmd);
     };
     this.inner = new OutboxConsumer({
-      consumer: options.consumer ?? 'risk-command',
+      consumer: options.consumer ?? RISK_COMMAND_CONSUMER,
       executionTarget: options.executionTarget,
       pool: options.pool,
       handlers: new Map<string, OutboxHandler>([[RISK_COMMAND_TOPIC, handler]]),

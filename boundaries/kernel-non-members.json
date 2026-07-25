@@ -20,6 +20,7 @@
       "src/kernel/persona-binding.ts",
       "src/kernel/feed-action.ts",
       "src/kernel/pipeline-log-contract.ts",
+      "src/kernel/panel-frame-limits.ts",
       "src/kernel/content-schedule-mode.ts",
       "src/kernel/llm-contract.ts",
       "src/kernel/writing-language.ts",
