@@ -5,13 +5,7 @@
     "sha": "aidcp-cloud@3d12d21",
     "files": 321,
     "lines": 85591,
-    "byLayer": {
-      "api": 91,
-      "content": 78,
-      "automation": 146,
-      "kernel": 4,
-      "composition": 2
-    },
+    "byLayer": { "api": 91, "content": 78, "automation": 146, "kernel": 4, "composition": 2 },
     "note": "§4.7 的基线口径。本仓 HEAD 通常已超出该 sha；目录规则负责接住新增文件，逐文件差额由 boundary-record 的对账输出给出。"
   },
   "seedWindow": {
@@ -21,846 +15,181 @@
   },
   "adjudicatedFilesRoster": "boundaries/adjudicated-files.json —— 「逐文件切分目录里哪些文件已经被人判过」的人工名册，是 expandOwnership 的准入依据。MUST NOT 改用生成物 module-ownership.json 顶替：那会让判据退化成「是否已经在生成物里」，手工往生成物塞一条新文件 + 目录默认层就能全绿、refresh 随后永久洗白（2026-07-23 审计坐实）。",
   "newFileRule": "每条目录规则的 newFile 字段决定该目录**新增文件**的处置：inherit = §4.7 里该目录整行只有一个归属层，新文件的归属已被 §4.7 判定，目录规则可以接住；adjudicate = §4.7 把该目录逐文件切开，§4.7 并没有判定「该目录下任意新文件属于哪一层」，故新增文件 MUST 先在 fileOverrides 里逐个裁定，生成器在裁定前报错并列出清单（绝不塞默认层）。字段缺省按 adjudicate 处理。",
-  "compositionWhitelist": [
-    "src/server.ts",
-    "src/index.ts"
-  ],
+  "compositionWhitelist": ["src/server.ts", "src/index.ts"],
   "directoryRules": [
-    {
-      "dir": "src/agents/",
-      "layer": "automation",
-      "newFile": "adjudicate",
-      "basis": "§4.7 src/agents/ 50 文件：43 automation 为 content 5 + api 2 的补集"
-    },
-    {
-      "dir": "src/alerts/",
-      "layer": "automation",
-      "newFile": "inherit",
-      "basis": "§4.7：alerts 表 owner（2/2 automation）"
-    },
-    {
-      "dir": "src/cache/",
-      "layer": "automation",
-      "newFile": "adjudicate",
-      "basis": "§4.7 src/cache/ 逐文件表的多数落点"
-    },
-    {
-      "dir": "src/cli/",
-      "layer": "automation",
-      "newFile": "adjudicate",
-      "basis": "§4.7 src/cli/ 逐文件表：运维脚本随其调用面走"
-    },
-    {
-      "dir": "src/client-auth/",
-      "layer": "api",
-      "newFile": "inherit",
-      "basis": "§4.7：客户身份与环境归属权威（7/7 api）"
-    },
-    {
-      "dir": "src/comm/",
-      "layer": "automation",
-      "newFile": "inherit",
-      "basis": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
-    },
-    {
-      "dir": "src/comment-agent/",
-      "layer": "automation",
-      "newFile": "inherit",
-      "basis": "§4.7：命令式评论与加群调度（13/13 automation）"
-    },
-    {
-      "dir": "src/config/",
-      "layer": "api",
-      "newFile": "adjudicate",
-      "basis": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
-    },
-    {
-      "dir": "src/delegated-task/",
-      "layer": "automation",
-      "newFile": "inherit",
-      "basis": "§4.7：认领型 worker 范式（10/10 automation）"
-    },
-    {
-      "dir": "src/event-bus/",
-      "layer": "automation",
-      "newFile": "inherit",
-      "basis": "§4.7：进程内总线，不跨服务（2/2 automation）"
-    },
-    {
-      "dir": "src/feishu/",
-      "layer": "api",
-      "newFile": "inherit",
-      "basis": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
-    },
-    {
-      "dir": "src/gateway/",
-      "layer": "api",
-      "newFile": "inherit",
-      "basis": "§4.7 基线 sha 之后由 change block2-data-gateway 新增的目录：api/panel 收口取数的数据网关，只聚合 kernel 读端口、只 import kernel 契约（不连 transport/automation），无 SQL、无进程内活状态。整目录归 api、新文件 inherit。MUST 回写 §4.7"
-    },
-    {
-      "dir": "src/hot-lead/",
-      "layer": "automation",
-      "newFile": "inherit",
-      "basis": "§4.7：浏览闭环内触发（2/2 automation）"
-    },
-    {
-      "dir": "src/interactions/",
-      "layer": "automation",
-      "newFile": "adjudicate",
-      "basis": "§4.6.1：收件箱 / 回复工作流 / 发送与回执 / 离场 saga 段"
-    },
-    {
-      "dir": "src/llm/",
-      "layer": "content",
-      "newFile": "inherit",
-      "basis": "§4.7：模型客户端（4/4 content）"
-    },
-    {
-      "dir": "src/metrics/",
-      "layer": "content",
-      "newFile": "inherit",
-      "basis": "§4.6.6：用量与成本两张表归 aidcp-content（2/2）"
-    },
-    {
-      "dir": "src/onboarding/",
-      "layer": "api",
-      "newFile": "adjudicate",
-      "basis": "§4.7：状态表归 api、创作桥接归 content"
-    },
-    {
-      "dir": "src/orchestrator/",
-      "layer": "automation",
-      "newFile": "adjudicate",
-      "basis": "§4.7：content-scheduler.ts 归 api，其余归 automation"
-    },
-    {
-      "dir": "src/panel/",
-      "layer": "api",
-      "newFile": "inherit",
-      "basis": "§4.6.4：全部 12 个文件归 aidcp-api"
-    },
-    {
-      "dir": "src/planner/",
-      "layer": "automation",
-      "newFile": "inherit",
-      "basis": "§4.7：v1 遗留路径（3/3 automation）"
-    },
-    {
-      "dir": "src/platform/",
-      "layer": "automation",
-      "newFile": "inherit",
-      "basis": "§4.7：平台能力注册表（§9 单写，4/4 automation）"
-    },
-    {
-      "dir": "src/publish-agent/",
-      "layer": "content",
-      "newFile": "adjudicate",
-      "basis": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
-    },
-    {
-      "dir": "src/render/",
-      "layer": "content",
-      "newFile": "inherit",
-      "basis": "§4.7：文字卡渲染（5/5 content）"
-    },
-    {
-      "dir": "src/risk/",
-      "layer": "automation",
-      "newFile": "inherit",
-      "basis": "§4.7：RiskController 单写（19/19 automation）"
-    },
-    {
-      "dir": "src/schema/",
-      "layer": "automation",
-      "newFile": "adjudicate",
-      "basis": "【待定稿裁决】§4.7 基线 sha 之后由 change cloud-schema-migration-executor 新增，src/schema/ 是 §4.7 里不存在的新目录（12 文件）。整目录判 automation，三条理由：① MUST NOT 判 kernel——§4.7 的 kernel 花名册是封闭的 4 文件名单，新增成员 MUST 走「析出 + 回写 §4.7」通道；且 schema-capability.ts（:148 的 pg_indexes 查询）与 pg-catalog.ts（:31 的 pg_class 查询）含 SQL 字面量，AC-BOUND-03 的「无 SQL」准入条件当场不过，与 boundaries/kernel-non-members.json 里 curated-content-store.ts / client-user-store.ts / content-schedule-store.ts 三条被拒条目同一条判据。② MUST NOT 判 composition——AC-BOUND-02 限定 composition 只能是 compositionWhitelist 里的组合根（src/server.ts / src/index.ts），且让 34 个存储反向导入组合根是依赖倒置。③ 落 automation 是最小失真选择——本 change design.md 已写明拆仓后 kernel 由 aidcp-automation 以版本化包发布、api 与 content 固定版本消费，故「尚未获得 kernel 准入的共享基础设施」暂随 automation。newFile 取 adjudicate 而非 inherit：本条是尚未回写 §4.7 的临时归属，§4.7 并没有判定「本目录任意新文件属于哪一层」，后续新增文件（尤其是从 schema-capability.ts 析出的纯判定段，它按消除路径 (a) 恰恰应判 kernel）MUST 重新逐个裁，MUST NOT 由目录默认值接住。故本目录现有 12 个文件亦逐个写进 fileOverrides，不进 adjudicated-files.json 名册（该名册 MUST NOT 增长）。请求回写 §4.7 见 docpatch R4"
-    },
-    {
-      "dir": "src/soul/",
-      "layer": "api",
-      "newFile": "inherit",
-      "basis": "§4.7：人设文档模型（7/7 api）"
-    },
-    {
-      "dir": "src/storage/",
-      "layer": "content",
-      "newFile": "inherit",
-      "basis": "§4.7：对象存储访问（4/4 content）"
-    },
-    {
-      "dir": "src/time/",
-      "layer": "kernel",
-      "newFile": "adjudicate",
-      "basis": "§4.7 kernel 花名册：无业务语义。kernel 花名册按 §4.7 是封闭名单，新增成员 MUST 走「析出 + 回写 §4.7」通道，故本目录新增文件一律待裁决"
-    },
-    {
-      "dir": "src/transport/",
-      "layer": "automation",
-      "newFile": "inherit",
-      "basis": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
-    }
+    { "dir": "src/agents/", "layer": "automation", "newFile": "adjudicate", "basis": "§4.7 src/agents/ 50 文件：43 automation 为 content 5 + api 2 的补集" },
+    { "dir": "src/alerts/", "layer": "automation", "newFile": "inherit", "basis": "§4.7：alerts 表 owner（2/2 automation）" },
+    { "dir": "src/cache/", "layer": "automation", "newFile": "adjudicate", "basis": "§4.7 src/cache/ 逐文件表的多数落点" },
+    { "dir": "src/cli/", "layer": "automation", "newFile": "adjudicate", "basis": "§4.7 src/cli/ 逐文件表：运维脚本随其调用面走" },
+    { "dir": "src/client-auth/", "layer": "api", "newFile": "inherit", "basis": "§4.7：客户身份与环境归属权威（7/7 api）" },
+    { "dir": "src/comm/", "layer": "automation", "newFile": "inherit", "basis": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9" },
+    { "dir": "src/comment-agent/", "layer": "automation", "newFile": "inherit", "basis": "§4.7：命令式评论与加群调度（13/13 automation）" },
+    { "dir": "src/config/", "layer": "api", "newFile": "adjudicate", "basis": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）" },
+    { "dir": "src/delegated-task/", "layer": "automation", "newFile": "inherit", "basis": "§4.7：认领型 worker 范式（10/10 automation）" },
+    { "dir": "src/event-bus/", "layer": "automation", "newFile": "inherit", "basis": "§4.7：进程内总线，不跨服务（2/2 automation）" },
+    { "dir": "src/feishu/", "layer": "api", "newFile": "inherit", "basis": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）" },
+    { "dir": "src/gateway/", "layer": "api", "newFile": "inherit", "basis": "§4.7 基线 sha 之后由 change block2-data-gateway 新增的目录：api/panel 收口取数的数据网关，只聚合 kernel 读端口、只 import kernel 契约（不连 transport/automation），无 SQL、无进程内活状态。整目录归 api、新文件 inherit。MUST 回写 §4.7" },
+    { "dir": "src/hot-lead/", "layer": "automation", "newFile": "inherit", "basis": "§4.7：浏览闭环内触发（2/2 automation）" },
+    { "dir": "src/interactions/", "layer": "automation", "newFile": "adjudicate", "basis": "§4.6.1：收件箱 / 回复工作流 / 发送与回执 / 离场 saga 段" },
+    { "dir": "src/llm/", "layer": "content", "newFile": "inherit", "basis": "§4.7：模型客户端（4/4 content）" },
+    { "dir": "src/metrics/", "layer": "content", "newFile": "inherit", "basis": "§4.6.6：用量与成本两张表归 aidcp-content（2/2）" },
+    { "dir": "src/onboarding/", "layer": "api", "newFile": "adjudicate", "basis": "§4.7：状态表归 api、创作桥接归 content" },
+    { "dir": "src/orchestrator/", "layer": "automation", "newFile": "adjudicate", "basis": "§4.7：content-scheduler.ts 归 api，其余归 automation" },
+    { "dir": "src/panel/", "layer": "api", "newFile": "inherit", "basis": "§4.6.4：全部 12 个文件归 aidcp-api" },
+    { "dir": "src/planner/", "layer": "automation", "newFile": "inherit", "basis": "§4.7：v1 遗留路径（3/3 automation）" },
+    { "dir": "src/platform/", "layer": "automation", "newFile": "inherit", "basis": "§4.7：平台能力注册表（§9 单写，4/4 automation）" },
+    { "dir": "src/publish-agent/", "layer": "content", "newFile": "adjudicate", "basis": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名" },
+    { "dir": "src/render/", "layer": "content", "newFile": "inherit", "basis": "§4.7：文字卡渲染（5/5 content）" },
+    { "dir": "src/risk/", "layer": "automation", "newFile": "inherit", "basis": "§4.7：RiskController 单写（19/19 automation）" },
+    { "dir": "src/schema/", "layer": "automation", "newFile": "adjudicate", "basis": "【待定稿裁决】§4.7 基线 sha 之后由 change cloud-schema-migration-executor 新增，src/schema/ 是 §4.7 里不存在的新目录（12 文件）。整目录判 automation，三条理由：① MUST NOT 判 kernel——§4.7 的 kernel 花名册是封闭的 4 文件名单，新增成员 MUST 走「析出 + 回写 §4.7」通道；且 schema-capability.ts（:148 的 pg_indexes 查询）与 pg-catalog.ts（:31 的 pg_class 查询）含 SQL 字面量，AC-BOUND-03 的「无 SQL」准入条件当场不过，与 boundaries/kernel-non-members.json 里 curated-content-store.ts / client-user-store.ts / content-schedule-store.ts 三条被拒条目同一条判据。② MUST NOT 判 composition——AC-BOUND-02 限定 composition 只能是 compositionWhitelist 里的组合根（src/server.ts / src/index.ts），且让 34 个存储反向导入组合根是依赖倒置。③ 落 automation 是最小失真选择——本 change design.md 已写明拆仓后 kernel 由 aidcp-automation 以版本化包发布、api 与 content 固定版本消费，故「尚未获得 kernel 准入的共享基础设施」暂随 automation。newFile 取 adjudicate 而非 inherit：本条是尚未回写 §4.7 的临时归属，§4.7 并没有判定「本目录任意新文件属于哪一层」，后续新增文件（尤其是从 schema-capability.ts 析出的纯判定段，它按消除路径 (a) 恰恰应判 kernel）MUST 重新逐个裁，MUST NOT 由目录默认值接住。故本目录现有 12 个文件亦逐个写进 fileOverrides，不进 adjudicated-files.json 名册（该名册 MUST NOT 增长）。请求回写 §4.7 见 docpatch R4" },
+    { "dir": "src/soul/", "layer": "api", "newFile": "inherit", "basis": "§4.7：人设文档模型（7/7 api）" },
+    { "dir": "src/storage/", "layer": "content", "newFile": "inherit", "basis": "§4.7：对象存储访问（4/4 content）" },
+    { "dir": "src/time/", "layer": "kernel", "newFile": "adjudicate", "basis": "§4.7 kernel 花名册：无业务语义。kernel 花名册按 §4.7 是封闭名单，新增成员 MUST 走「析出 + 回写 §4.7」通道，故本目录新增文件一律待裁决" },
+    { "dir": "src/transport/", "layer": "automation", "newFile": "inherit", "basis": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7" }
   ],
   "fileOverrides": [
-    {
-      "path": "src/account-display-name.ts",
-      "layer": "api",
-      "basis": "§4.7 src/ 根文件：api 3 / 626 行"
-    },
-    {
-      "path": "src/account-state.ts",
-      "layer": "api",
-      "basis": "§4.7 src/ 根文件：api 3 / 626 行"
-    },
-    {
-      "path": "src/account-store.ts",
-      "layer": "api",
-      "basis": "§4.7 src/ 根文件：api 3 / 626 行"
-    },
-    {
-      "path": "src/agents/concept-extractor-role.ts",
-      "layer": "content",
-      "basis": "§7.2 判据三首批迁移名单"
-    },
-    {
-      "path": "src/agents/curated-comment-evaluator.ts",
-      "layer": "content",
-      "basis": "§7.2 判据三首批迁移名单"
-    },
-    {
-      "path": "src/agents/curated-note-evaluator.ts",
-      "layer": "content",
-      "basis": "§7.2 判据三首批迁移名单"
-    },
-    {
-      "path": "src/agents/persona-auto-fill.ts",
-      "layer": "api",
-      "basis": "§17 第 7 项待回写：§4.7 记 src/agents/ 有 api 2 文件 152 行但未点名，本文件（136 行）是其一，人设按 §5.1 归 aidcp-api。原配对文件 persona-format.ts 已由 change lift-shared-contracts-to-kernel 抬入 kernel（src/kernel/persona-format.ts），§4.7 的『api 2 文件 152 行』行数配对需一并回写，见 docpatch RK1。待控制仓回写 §4.7 后本行 basis 改为直接引用 §4.7"
-    },
-    {
-      "path": "src/agents/persona-generator.ts",
-      "layer": "content",
-      "basis": "§7.2 判据三首批迁移名单"
-    },
-    {
-      "path": "src/agents/valuable-comment-archivist.ts",
-      "layer": "content",
-      "basis": "§7.2 判据三首批迁移名单"
-    },
-    {
-      "path": "src/cache/bot-chat-store.ts",
-      "layer": "api",
-      "basis": "§4.7 src/cache/ 逐文件表"
-    },
-    {
-      "path": "src/cache/concept-store.ts",
-      "layer": "content",
-      "basis": "§4.7 src/cache/ 逐文件表"
-    },
-    {
-      "path": "src/cache/curated-content-store.ts",
-      "layer": "content",
-      "basis": "§4.7 src/cache/ 逐文件表"
-    },
-    {
-      "path": "src/cache/notification-contact-store.ts",
-      "layer": "api",
-      "basis": "§4.7 src/cache/ 逐文件表"
-    },
-    {
-      "path": "src/cli/test-feishu.ts",
-      "layer": "api",
-      "basis": "§4.7 src/cli/ 逐文件表：调用面为飞书（§4.6.2）"
-    },
-    {
-      "path": "src/cli/trigger-like.ts",
-      "layer": "automation",
-      "basis": "§4.7 src/cli/ 逐文件表：导入边云协议并下发互动命令"
-    },
-    {
-      "path": "src/config-mirror-freshness.ts",
-      "layer": "api",
-      "basis": "【待定稿裁决】§4.7 基线 sha 之后由 change config-mirror-cross-process-invalidation 新增，§4.7『src/ 根文件』行（api 3 / kernel 1 / composition 2）未覆盖它。按配置域默认落 api（§4.6.8：src/config/ 除四类限频配置外归 api，本文件是同一域的镜像新鲜度查询口，仅因『不让风控层第一次 import 配置层』而放在 src/ 根）。MUST NOT 判 kernel：§4.7 的 kernel 花名册是封闭的 4 文件名单，且本文件 :59 有模块级可变单例 installedSource，AC-BOUND-03 的 kernel 准入判据当场不过。请求回写 §4.7 见 docpatch R1"
-    },
-    {
-      "path": "src/config/mirror-bump-outbox.ts",
-      "layer": "automation",
-      "basis": "【待定稿裁决】change block3-l3-config-mirror-bump-decouple 新增：automation 侧的失效信号事务型入队器（OutboxMirrorVersionBumper，在四个限频配置 store 自己的写事务里写本域 event_outbox 行）+ 生产方进程内中继（ConfigMirrorBumpRelay）。写的是 automation 属主的 event_outbox、跑在 automation 池上，与同目录四个限频配置 store（§4.6.8 的 5 个例外文件）同域，故判 automation。src/config/ 在 §4.7 是逐文件切分目录，故逐条裁定、不进 adjudicated-files 名册"
-    },
-    {
-      "path": "src/config/mirror-bump-sink.ts",
-      "layer": "api",
-      "basis": "【待定稿裁决】change block3-l3-config-mirror-bump-decouple 新增：api 侧失效信号落地端（config_mirror_bump_inbox 去重 + config_mirror_version 推进，同一笔 api 事务）。两张表都属 api、跑在 api 池上，与同目录 mirror-version-store.ts / mirror-registry.ts / mirror-refresher.ts 同层，故判 api"
-    },
-    {
-      "path": "src/config/mirror-refresher.ts",
-      "layer": "api",
-      "basis": "§4.6.8 同上：配置镜像的轮询刷新器，装配在组合根、只驱动配置层 store 的 refreshFromAuthority。由 change config-mirror-cross-process-invalidation 新增"
-    },
-    {
-      "path": "src/config/mirror-registry.ts",
-      "layer": "api",
-      "basis": "§4.6.8 例外只有四类限频配置 store + 门面，本文件不在其列，故随 src/config/ 默认落 api。它是 15 处进程内配置镜像的描述符表（写入权归属只用于文档与断言，不影响运行时装配）。由 change config-mirror-cross-process-invalidation 新增"
-    },
-    {
-      "path": "src/config/mirror-stop-work.ts",
-      "layer": "api",
-      "basis": "【待定稿裁决】§4.6.8 的例外名单是封闭的 5 个文件，本文件不在其列，故按目录默认落 api。但它的语义偏自动化：它是『闸门镜像陈旧则不放行新的真实平台动作』的统一判据，消费方是 comment-scheduler / role-dispatcher / delegated-task worker 三个 automation 文件（因此产生 3 条 automation->api 豁免）。若按 §4.6.8『随消费方走』的同一判据改判 automation，这 3 条消失、另生 3 条（publish-scheduler 的 api->automation 1 条 + 本文件对 config-mirror-freshness / mirror-registry 的 automation->api 2 条），净额为 0，故本次不擅自改判。请求 §4.6.8 裁决见 docpatch R1。由 change config-mirror-cross-process-invalidation 新增"
-    },
-    {
-      "path": "src/config/mirror-version-store.ts",
-      "layer": "api",
-      "basis": "§4.6.8 同上：配置层的版本表读写口，承载 config_mirror_version / config_mirror_stale_refusal 两张配置面表。由 change config-mirror-cross-process-invalidation 新增"
-    },
-    {
-      "path": "src/config/pacing-config-facade.ts",
-      "layer": "automation",
-      "basis": "§4.6.8：门面，无独立表"
-    },
-    {
-      "path": "src/config/pacing-config-store.ts",
-      "layer": "automation",
-      "basis": "§4.6.8：四类限频配置随消费方走"
-    },
-    {
-      "path": "src/config/quota-config-store.ts",
-      "layer": "automation",
-      "basis": "§4.6.8：四类限频配置随消费方走"
-    },
-    {
-      "path": "src/config/resume-config-store.ts",
-      "layer": "automation",
-      "basis": "§4.6.8：四类限频配置随消费方走"
-    },
-    {
-      "path": "src/config/session-config-store.ts",
-      "layer": "automation",
-      "basis": "§4.6.8：四类限频配置随消费方走"
-    },
-    {
-      "path": "src/db/environment-row-lock.ts",
-      "layer": "api",
-      "basis": "【待定稿裁决】§4.7 基线 sha 之后由 change publish-approval-signal-to-database 新增，src/db/ 是 §4.7 里不存在的新目录。按『锁随被保护数据走』落 api：本文件唯一动作是锁 client_environments 的行，该表 §5.1 具名归 aidcp-api 单写、§4.7 的 src/client-auth/ 亦整目录归 api。此处用 fileOverride 而非目录规则，故 src/db/ 后续新增文件仍会逐个待裁决。请求回写 §4.7 见 docpatch R1"
-    },
-    {
-      "path": "src/deployment-target.ts",
-      "layer": "kernel",
-      "basis": "§4.7 kernel 花名册 4 文件之一（10 行）"
-    },
-    {
-      "path": "src/index.ts",
-      "layer": "composition",
-      "basis": "§4.7 src/ 根文件：组合根，无继承者"
-    },
-    {
-      "path": "src/interactions/client-env-automation-read.ts",
-      "layer": "automation",
-      "basis": "【待定稿裁决】change block3-l3-client-user-read-port 新写：kernel 端口 ClientEnvAutomationReader 的 automation 属主实现（PgClientEnvAutomationRead），跑在组合根注入的 automation 池上，只读 automation 属主表 interaction_offboards / interaction_auth_state / risk_state（SQL 从 client-user-store 逐字迁来）。src/interactions/ 目录规则 layer=automation 但 newFile=adjudicate，故逐文件裁定：本文件是同目录 offboard-write-adapter.ts（离场表单写者）的读侧配对，同域同段（§4.6.1 离场 saga 段），归 automation。请求回写 §4.7 见 docpatch RK-block3"
-    },
-    {
-      "path": "src/interactions/interaction-api-writes.ts",
-      "layer": "api",
-      "basis": "§5.1：reply 配置面（reply_templates/reply_rules/account_reply_profiles/interaction_reply_config*）与配置面审计 interaction_audit_events 归 aidcp-api 单写。本文件是 change offboard-saga 里这些 api 属主表在离场/过期清理路径上的 api 侧单写者，automation 经窄接口注入调用。"
-    },
-    {
-      "path": "src/interactions/interaction-auth-gate.ts",
-      "layer": "api",
-      "basis": "【待定稿裁决】change block3-l3-auth-write-owner-collapse 新写：kernel 端口 InteractionAuthGate 的 api 属主实现（PgInteractionAuthGate），持组合根注入的 api 池、**自己开事务**，只读 / 只锁 api 属主表 client_environments / client_env_scope（经同层 db/environment-row-lock）与 client_env_revocation_holds / accounts（§5.1「客户、环境归属和账号绑定」+「账号主数据」全归 api）。src/interactions/ 目录规则 layer=automation 但 newFile=adjudicate，故逐文件裁定：本文件与同目录 reply-config-store / interaction-api-writes 一样，目录位置不是属主判据、它碰的表全是 api 属主，归 api。它是 offboard-cleanup-grant-ops.ts（automation 属主实现、api 侧经端口转调）的**反方向镜像**。请求回写 §4.7 见 docpatch RK-block3"
-    },
-    {
-      "path": "src/interactions/interaction-automation-ports.ts",
-      "layer": "api",
-      "basis": "§4.6.1：配置/查询面（api）消费 automation 编排行为的窄注入端口（consumer-owned ports）。change decouple-interaction-api-cluster 新增：把 interaction-customer-api 对 send-orchestrator / reply-workflow 的直接 import type 收窄为端口接口，只引 kernel 契约、由组合根按结构兼容注入 automation 实例，automation 类不 import 本端口。"
-    },
-    {
-      "path": "src/interactions/interaction-customer-api.ts",
-      "layer": "api",
-      "basis": "§4.6.1：配置存储与查询面"
-    },
-    {
-      "path": "src/interactions/interaction-internal-api.ts",
-      "layer": "api",
-      "basis": "§4.6.1：配置存储与查询面"
-    },
-    {
-      "path": "src/interactions/interaction-panel-permissions.ts",
-      "layer": "api",
-      "basis": "§4.6.1：配置存储与查询面"
-    },
-    {
-      "path": "src/interactions/interaction-scope-internal-api.ts",
-      "layer": "api",
-      "basis": "§4.6.1：配置存储与查询面"
-    },
-    {
-      "path": "src/interactions/offboard-cleanup-grant-ops.ts",
-      "layer": "automation",
-      "basis": "【待定稿裁决】change block3-l3-grant-collapse 新写：kernel 端口 OffboardCleanupGrantOperations 的 automation 属主实现（PgOffboardCleanupGrantOps），持组合根注入的 automation 池、**自己开事务**，只写 automation 属主表 interaction_offboards / interaction_offboard_audit（三条 SQL 从同目录 offboard-write-adapter.ts 逐字迁来并内化）。src/interactions/ 目录规则 layer=automation 但 newFile=adjudicate，故逐文件裁定：本文件与 offboard-write-adapter.ts 同域同段（§4.6.1 离场 saga 段），差别只在「自开事务」vs「接调用方句柄」，归 automation。请求回写 §4.7 见 docpatch RK-block3"
-    },
-    {
-      "path": "src/interactions/offboard-write-adapter.ts",
-      "layer": "automation",
-      "basis": "§5.1：互动域离场表（interaction_offboards/interaction_offboard_audit/interaction_auth_state/interaction_runtime_controls）归 aidcp-automation 单写。本文件是 change offboard-saga 里这些离场表的 automation 侧单写者，aidcp-api 的 client-user-store 经窄接口注入调用。"
-    },
-    {
-      "path": "src/interactions/reply-ai.ts",
-      "layer": "content",
-      "basis": "§4.6.1：AI 回复段，唯一引 LlmClient 的文件"
-    },
-    {
-      "path": "src/interactions/reply-config-resolver.ts",
-      "layer": "api",
-      "basis": "§4.6.1：配置存储与查询面"
-    },
-    {
-      "path": "src/interactions/reply-config-scope-store.ts",
-      "layer": "api",
-      "basis": "§4.6.1：配置存储与查询面"
-    },
-    {
-      "path": "src/interactions/reply-config-store.ts",
-      "layer": "api",
-      "basis": "§4.6.1：配置存储与查询面"
-    },
-    {
-      "path": "src/interactions/reply-config.ts",
-      "layer": "api",
-      "basis": "§4.6.1：配置存储与查询面"
-    },
-    {
-      "path": "src/kernel/account-identity.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-longtail-sweep 从 src/account-store.ts 析出 RETIRED_ACCOUNT_ID 退役保留账号哨兵字符串常量（'default'）。零 import、零 SQL、无进程内活状态。account-store.ts 从 kernel 导入并等值再导出，内部判定复用。供 publish-agent 发布媒体存储跨边界比对，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
-    },
-    {
-      "path": "src/kernel/account-projection-types.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change automation-accounts-projection 新增：账号身份跨属主投影的端口契约（AccountIdentityProjectionRow 三列纯类型 + AccountRosterSourcePort 只读无参端口）。零 import、零 SQL / HTTP / LLM、无进程内活状态、不反向依赖业务层。accounts 属 api 单写，automation 域为把守卫读拉回同库而在本域冷备投影，投影来源经本端口取，避免 automation 直连 api 的库。api 侧 src/account-store.ts 实现、automation 侧 src/transport/account-projection-store.ts 消费。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-account-projection"
-    },
-    {
-      "path": "src/kernel/client-env-automation-types.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change block3-l3-client-user-read-port 新写：客户环境生命周期（api 属主 client-auth/client-user-store）对 automation 域的只读投影端口契约（ClientEnvAutomationReader 接口 + OffboardProjection / EnvRiskStateProjection 纯行类型 + OffboardProjectionState/Reason 字面量联合）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。与 panel-automation-types（面板专用跨表聚合读端口）同类、形状各按消费方定：读方（api）只依赖本 kernel 接口、绝不直连 automation 的库；属主实现在 src/interactions/client-env-automation-read.ts（automation）跑在 automation 池上。Block③ 物理拆库 L3 客户环境读侧解耦。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3"
-    },
-    {
-      "path": "src/kernel/comment-approval-notice.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-longtail-sweep 从 src/agents/comment-approval-gate.ts 析出 CommentApprovalNoticeInput 纯输入数据模型（requestId/noteId/text/title/authorName/accountId/accountName + approvalSource union，全为原语）。零 import、零 SQL、无进程内活状态。CommentApprovalGate 角色留 comment-approval-gate.ts（automation）并从 kernel 导入等值再导出。供飞书卡片层跨边界共导，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
-    },
-    {
-      "path": "src/kernel/config-mirror-bump-types.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change block3-l3-config-mirror-bump-decouple 抬入：跨域配置镜像失效通道的契约段（ConfigMirrorKey 闭集合纯类型 + MirrorQueryable/MirrorVersionBumper 接口 + writeWithMirrorBump「同一笔提交」包装 + ConfigMirrorBumpSink 消费端口）。原分散在 src/config-mirror-freshness.ts（ConfigMirrorKey）与 src/config/mirror-version-store.ts（api）；automation 属主的四个限频配置 store 与 api 属主的十余个配置 store 都要引用它们，留在任一属主域都必然造出跨域 import（原状即 4 条 automation->api 豁免）。只 import type pg 与同层 pg-owner-connection-resolver，无 SQL 字面量（BEGIN/COMMIT/ROLLBACK 是事务控制、不是 DML/DDL）、无 HTTP 路由、无 LLM、无进程内活状态、不反向依赖业务层。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
-    },
-    {
-      "path": "src/kernel/content-schedule-mode.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/config/content-schedule-store.ts 析出：CONTENT_SCHEDULE_ACTION_MODES 常量 + ContentScheduleActionMode/ContentScheduleApprovalMode 纯类型，零 import、零 SQL、零活状态。排期存储（含建表读写 SQL）留 content-schedule-store.ts。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
-    },
-    {
-      "path": "src/kernel/content-visual-brief.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-behavior-class-ports 从 src/publish-agent/content-visual-brief.ts 整体 git mv：整文件为正文视觉 brief 的纯归一/兜底/格式化函数与纯数据（normalizeContentVisualBrief / ensureContentVisualCategory / createFallbackContentVisualBrief / formatContentVisualCategoryBrief / categorySafetyInstruction / inferContentVisualKind / CONTENT_VISUAL_CATEGORY_LABELS 等），唯一 import 为 kernel 的 visual-reference-types 类型。零 SQL / HTTP / LLM / 模块级 Set-Map（nonEmpty 内的 new Set 为函数体局部量、非模块级单例）。原路径 publish-agent/content-visual-brief.ts 保留为 re-export 桩，content 层内部消费方无感。为 visual-fidelity-audit-prompt 能进 kernel 而抬入（其构建依赖本文件两个格式化函数）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final"
-    },
-    {
-      "path": "src/kernel/cover-card-copy-prompt.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-behavior-class-ports 从 src/publish-agent/prompts.ts（content）析出 buildCoverCardCopyPrompt 纯构建函数与其依赖的 buildContentVisualExcerpt（有界正文摘录纯字符串函数）+ CONTENT_VISUAL_EXCERPT_MAX 常量。零 import、零 SQL、零 LLM、无模块级 Set-Map。prompts.ts 其余多角色构建（依赖 content 兄弟模块 types / content-visual-brief）留原文件（content）并从 kernel 等值再导出这两个纯物。供 api 侧静态 prompt 预览跨边界共导，消 1 条 api->content 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final"
-    },
-    {
-      "path": "src/kernel/cover-form-sense-prompt.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-behavior-class-ports 从 src/publish-agent/cover-form-sensor.ts（content）析出 buildCoverFormSensePrompt 纯函数（零入参、返回固定视觉判定指令）。零 import、零 SQL、零 LLM、无进程内活状态。感知服务 createCoverFormSensor / 多模态调用 / 缓存回写留 cover-form-sensor.ts（content）并从 kernel 等值再导出。供 api 侧静态 prompt 预览跨边界共导，消 1 条 api->content 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final"
-    },
-    {
-      "path": "src/kernel/curated-content-types.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-platform-type-closure 从 src/cache/curated-content-store.ts 析出纯数据模型类型（CuratedReferenceImageFormGuess / TextCardTranscription(*) / CuratedReferenceImage(Input) / CuratedObservation / CuratedSelectItem / CuratedPanelRow / CuratedFacets / CuratedContentType(Filter) 等），仅 import kernel（visual-reference-types / time）。CURATED_CONTENT_SCHEMA_SQL + CuratedContentStore 类 + normalize* 函数 + CuratedContentStoreOptions 留 curated-content-store.ts（content）。满足 §4.7 kernel 准入（无 SQL）。请求回写 §4.7 见 docpatch RK3"
-    },
-    {
-      "path": "src/kernel/delegated-task-types.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决·部分析出】change decouple-platform-type-closure 从 src/delegated-task/types.ts 析出纯类型（DelegatedTask / DelegatedTaskIntent / DelegatedTaskAttempt / DelegatedTaskStatus / DelegatedVerificationKind / DelegatedExecutionTarget / Json* / TaskConstraints 等），仅 import kernel（platform-types / deployment-target）。**状态机模块级 Set（TERMINAL_STATUSES / TRANSITIONS）+ 转移/校验函数 + 运行时数组 DELEGATED_TASK_STATUSES 留 delegated-task/types.ts（automation）**：门禁 §4.7 禁 kernel 持模块级 new Set（故非整文件搬）。DELEGATED_TASK_STATUSES satisfies kernel 联合。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK3"
-    },
-    {
-      "path": "src/kernel/facebook-comment-composer-prompt.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-behavior-class-ports 从 src/comment-agent/facebook-comment-composer-prompt.ts 整体 git mv：整文件为纯 Facebook 评论撰写 prompt 构建（FacebookCommentComposerPromptInput + buildFacebookCommentComposerPrompt），唯一 import 为 kernel 的 soul-types 类型与 writing-language 指令。零 SQL / HTTP / LLM / 模块级 Set-Map。原路径 comment-agent/facebook-comment-composer-prompt.ts 保留为 re-export 桩，automation 层内部消费方无感。消 1 条 api->automation 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final"
-    },
-    {
-      "path": "src/kernel/facebook-comment-config-types.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-longtail-sweep 从 src/config/facebook-comment-config-store.ts 析出纯数据模型类型（FacebookContainer / FacebookCommentMode / EffectiveFacebookCommentConfig），零 import、零 SQL、无进程内活状态。SCHEMA_SQL + FacebookCommentConfigStore 类 + coerce/校验函数留 facebook-comment-config-store.ts（automation）并从 kernel 导入等值再导出。供 automation 侧评论调度器跨边界共导，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
-    },
-    {
-      "path": "src/kernel/facebook-group-join-prompt.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-behavior-class-ports 从 src/agents/facebook-group-join-judge.ts（automation）析出纯 prompt 构建段：FacebookGroupJoinObservation 观测数据模型 + FacebookGroupJoinPhase 枚举 + buildFacebookGroupJoinJudgePrompt 纯函数（入参→prompt 字符串）。零 import、零 SQL、零 LLM、无进程内活状态。判定类 FacebookGroupJoinJudge（确定性短路 / LLM 调用 / 审计回写）留 facebook-group-join-judge.ts（automation）并从 kernel 等值再导出。供 api 侧静态 prompt 预览跨边界共导，消 1 条 api->automation 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final"
-    },
-    {
-      "path": "src/kernel/facebook-group-types.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-behavior-class-ports 从 src/comment-agent/facebook-group-store.ts 析出纯数据模型类型闭包（FacebookGroupTargetRow / *ListRow / *ListOptions / *ListResult / *Facets / MembershipRow / *ScopeWriteRow / ReplaceFacebookGroupTargetScopesResult / JoinAuditOutcome / JoinRecentScheduledResult / ScopedTargetCount / ImportResult / AccountProgress + JoinGating/MembershipStatus 枚举）+ FacebookGroupScopeError（纯 Error 子类，与 schema-capability-contract 的 SchemaCapabilityError 同一手法）。零 import、零 SQL、无 pg。FacebookGroupStore 类 + SCHEMA_SQL + pg 读写 + DbRow 内部映射留 facebook-group-store.ts（automation）。供 api 侧面板/配置视图跨边界共导，消 3 条 api->automation 边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
-    },
-    {
-      "path": "src/kernel/feed-action.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/cache/interaction-feed-store.ts 析出：FeedAction 纯类型联合，零 import、零 SQL、零活状态。存储实现留 interaction-feed-store.ts。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
-    },
-    {
-      "path": "src/kernel/image-provider-registry.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-longtail-sweep 从 src/publish-agent/image-providers.ts 析出图片厂商注册表纯数据段 + 无状态归一（ImageProviderId / ImageProviderMeta / DEFAULT_IMAGE_PROVIDER / IMAGE_PROVIDERS 字面数据 / isKnownImageProvider / normImageProvider）。零 import、零 SQL / HTTP / LLM、零模块级 Set-Map（IMAGE_PROVIDERS 为字面 Record，归一用 Object.hasOwnProperty）。路由客户端类 RoutingImageProvider（依赖 image-provider.js 的 ImageProvider 客户端接口）留 image-providers.ts（content）并从 kernel 导入等值再导出。供 api 侧面板版本视图 / 配置外观跨边界共导，消 2 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
-    },
-    {
-      "path": "src/kernel/interaction-audit-outbox.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change block3-l3-auth-write-owner-collapse 新写：配置面审计（interaction_audit_events，§5.1 归 api 单写）的跨属主投递契约 —— outbox 主题名 / 中继消费者名 / 保留期常量 + 审计行纯 DTO + 纯函数解码守卫。零 import、零 SQL / HTTP / LLM / 模块级活状态。被 automation 侧（interaction-store 入队）与 api 侧（interaction-api-writes 落地）共同引用，正是 kernel 段该承载的共享契约。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3"
-    },
-    {
-      "path": "src/kernel/interaction-auth-gate-types.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change block3-l3-auth-write-owner-collapse 新写：互动域环境授权闸的**跨域操作**端口契约（InteractionAuthGate 接口 + 回执 / 输入输出纯类型 + 拒绝档与环境串行档字面量联合）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。与 offboard-cleanup-grant-types 同族且方向相反：那一条是 api 调 automation，本条是 automation 调 api。文件头载明「闸在 api、写在 automation ⇒ 两笔 + 条件写回执」的判据，以及回执**能**与**不能**保证什么。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3"
-    },
-    {
-      "path": "src/kernel/interaction-reply-contract.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决·部分析出】change decouple-llm-lang-interaction-contracts 析出无模块级 Set 依赖的纯物：从 reply-config.ts（api，§4.6.1）析出 validateFinalReplyText（只读 profile 字段+内联正则，无 Set）；从 reply-config-resolver.ts（api）析出纯读取端口 ReplyConfigReader 与两个无状态读取函数 readPublishedConfig/readJobConfig（只对注入 reader 端口取数、不连库）。**reply-config.ts 其余校验/渲染函数依赖模块级 VARIABLE_SET/HARD_RISK_SET/INTENTS/… 等 const=new Set，被门禁 §4.7 判「进程内活状态」故不入 kernel、留原文件**（reply-auto-send / reply-workflow 引这些的边留 residual）。两 api 原文件保持属主并等值再导出；连库的 ReplyConfigResolver 类留 reply-config-resolver.ts（api）。零 SQL/HTTP/LLM/fetch/活状态。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
-    },
-    {
-      "path": "src/kernel/interaction-reply-prompt.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决·部分析出】change decouple-behavior-class-ports 从 src/interactions/reply-ai.ts（content）析出纯 prompt 构建段：buildInteractionReplyPrompt + requiresKnowledgeAnswer 纯判定 + 输出 schema 常量 + InteractionReplyInput/InteractionReplyRole 类型，仅 import kernel 互动域类型。原文件里 KNOWLEDGE_QUESTION_INTENTS 为模块级 new Set（门禁 §4.7 判「进程内活状态」禁入 kernel），此处改写为只读数组 + .includes，语义逐字等价。LLM 调用类 ReplyAiService、解析/纠正 prompt（依赖 LlmClient / setTimeout）留 reply-ai.ts（content）并从 kernel 等值再导出。供 api 侧静态 prompt 预览跨边界共导，消 1 条 api->content 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final"
-    },
-    {
-      "path": "src/kernel/interaction-types.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change lift-shared-contracts-to-kernel 抬入：原 src/interactions/types.ts（纯互动域类型/接口/枚举，零 import），被 automation/api 两层共 9 处跨边界 type-only 导入。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK1"
-    },
-    {
-      "path": "src/kernel/like-affinity.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-llm-lang-interaction-contracts 整文件 git mv：原 src/soul/like-affinity.ts（唯一 import 为 kernel/soul-types 的 LikeAffinity/Soul 类型，导出全为纯常量+纯函数 DEFAULT_LIKE_AFFINITY/LIKE_AFFINITY_VALUES/resolveLikeAffinity/likeAffinityLabel/noteLikeAffinityGuidance/commentLikeProbability/generatedLikePrinciple，无 SQL/fetch/class/进程内活状态）。被 automation(comment-like-appraiser/interaction-appraiser-role/persona-generator)与 api(account-persona-service)共用。satisfies §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
-    },
-    {
-      "path": "src/kernel/llm-contract.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-llm-lang-interaction-contracts 从 src/llm/qwen.ts 析出：LlmThinkingModeOpt + LlmCallOpts（Per-call 覆盖选项，纯接口，无供应商语义标识符）。供 automation 侧多角色 type-only 共导，消 4 条 automation->content 边。thinkingMode 字段内联为 'off'|'on'|'default' 字面量（结构与 role-catalog ThinkingMode|'default' 逐字一致），以保 kernel 不反向依赖 api 属主的 role-catalog。LlmClient/ChatLlmClient 因门禁 §4.7 把这两个标识符本身列为「LLM 或供应商 HTTP 调用」特征而**不入 kernel**、留 qwen.ts（那 3 条 LlmClient/ChatLlmClient 边留 residual）。QwenClient 类/错误类/buildXxx 等 behavior 留 qwen.ts。零 SQL/HTTP/fetch/活状态。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
-    },
-    {
-      "path": "src/kernel/mandatory-comment-notice.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-longtail-sweep 从 src/orchestrator/role-dispatcher.ts 析出 MandatoryCommentOutcome 结局 union + MandatoryCommentOutcomeNoticeInput 纯输入数据模型（全为原语与 union）。零 import、零 SQL、无进程内活状态。RoleDispatcher 实现留 role-dispatcher.ts（automation）并从 kernel 导入等值再导出（未触碰 RoleName / 角色注册）。供飞书卡片层跨边界共导，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
-    },
-    {
-      "path": "src/kernel/note-detail.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-longtail-sweep 从 src/agents/content-curator-role.ts 析出 NoteData 纯数据模型接口（noteId/title/content/author/likeCount/collectCount/authorFollowed/comments，全为原语与数组）。零 import、零 SQL、零 HTTP、零 LLM、无进程内活状态。ContentCuratorRole 类 + 事件订阅留 content-curator-role.ts（automation）并等值再导出。供 content 侧精选评估角色跨边界共导，消 2 条 content->automation 边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
-    },
-    {
-      "path": "src/kernel/offboard-cleanup-grant-types.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change block3-l3-grant-collapse 新写：离场清理授权（cleanup grant）签发/烧票的**跨域操作**端口契约（OffboardCleanupGrantOperations 接口 + OffboardGrantRecord / Issue-Consume 输入输出纯类型 + 状态/原因/失败档字面量联合）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。与 client-env-automation-types（只读投影端口）互补：本端口是**写操作**端口，且方法**不接调用方事务句柄、自成一笔事务**——因为这两笔事务碰的表全是 automation 属主、与任何 api 写都不共提交，故可整体收回属主域；属主实现在 src/interactions/offboard-cleanup-grant-ops.ts（automation）跑在 automation 池上。文件头载明搬迁 MUST 逐字保留的五条不变量（判定顺序 / 失败也提交 / 取行加锁与烧票同事务 / now 可注入 / epoch ms）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3"
-    },
-    {
-      "path": "src/kernel/offboard-materialization-types.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change block3-l3-offboard-eventual-consistency 新写：离场**执行台账物化**的跨域操作端口契约（OffboardMaterializationOperations 接口 + MaterializeEnvironmentOffboardInput / Outcome 纯类型 + 原因字面量联合）。唯一 import 是同层 client-env-automation-types 的 OffboardProjection 行类型；零 SQL / HTTP / LLM / 模块级 Set-Map。与同族两端口互补：client-env-automation-types 是只读投影、offboard-cleanup-grant-types 是清理授权的签发/烧票，本端口是台账物化。三者都**不接调用方事务句柄、各自成一笔事务**——这正是拆库后仍成立的判据。属主实现在 src/interactions/offboard-write-adapter.ts（automation）跑在 automation 池上。本端口取代了原 api 侧的 client-auth/offboard-write-port.ts（那个端口的方法接 api 事务句柄，于是 api 的连接去跑 automation 的 SQL，拆库即 42P01 或写进错的库；该文件随本 change 删除）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3"
-    },
-    {
-      "path": "src/kernel/panel-automation-types.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change block3-l3-panel-read-port 新写：面板（api 属主 panel-store）对 automation 域的只读投影端口契约（PanelAutomationReader 接口 + PanelActionTotal / PanelAccountActionTotal / PanelLikeViewTotal / PanelRiskStateProjection / PanelAlertProjection / PanelInteractionProjection 纯行类型）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。与 risk-read-types（账号维风控状态投影端口）同类：读方（api）只依赖本 kernel 接口、绝不直连 automation 的库；属主实现在 src/risk/panel-automation-read.ts（automation）跑在 automation 池上。Block③ 物理拆库 L3 面板读侧解耦。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3"
-    },
-    {
-      "path": "src/kernel/panel-frame-limits.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change panel-event-tee-hardening 新增：面板事件单帧大小闸（PANEL_FRAME_MAX_BYTES 常量 + panelPayloadTruncated 截断标记构造 + panelPayloadByteLength 字节口径），零 import、零 SQL、零 HTTP/LLM、零进程内活状态。必须落 kernel 而非任一业务层：该上限有两个执行点——推送端 src/panel/panel-ws.ts（api）与旁路端 src/transport/eventbus-outbox-bridge.ts（automation），各写一份必然漂移成「一端截断、另一端照写几十 KB 进共库生产 PG」；放任一层都会制造一条 api↔automation 跨层边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
-    },
-    {
-      "path": "src/kernel/persona-binding.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/config/persona-store.ts 析出：PersonaBinding 三态纯类型，零 import、零 SQL、零活状态，被 automation/api 多边 type-only 共导。存储实现留 persona-store.ts。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
-    },
-    {
-      "path": "src/kernel/persona-format.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change lift-shared-contracts-to-kernel 抬入：原 src/agents/persona-format.ts（纯人设兴趣格式化函数 tieredInterests，零 import、零副作用），被 6 个 automation 判定/撰写角色跨边界导入。满足 §4.7 kernel 准入。注：原 §4.7『src/agents/ api 2 文件 152 行』的行数配对（与 persona-auto-fill.ts 合计）随本次抬走失效，请求回写 §4.7 见 docpatch RK1"
-    },
-    {
-      "path": "src/kernel/pg-config.ts",
-      "layer": "kernel",
-      "basis": "§4.7 kernel 花名册成员（27 行）。change decouple-store-schema-pgconfig-cluster 从 src/cache/pg-config.ts git mv 到 src/kernel/（物理位置归位 kernel 目录，字节等价，唯一 import 是 import type pg，无 SQL / 无业务依赖 / 无进程内活状态）。消费方改为直接从 kernel import DEFAULT_PG_CONFIG，消除经 pg-anchor-cache（automation）再导出的跨边界边。请求回写 §4.7 见 docpatch"
-    },
-    {
-      "path": "src/kernel/pg-owner-connection-resolver.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change Block③ 物理拆库 L2 前置：按 owner 解析 PG 连接配置的纯函数 resolveOwnerPgConfig。只 import type pg + kernel 的 DEFAULT_PG_CONFIG（pg-config.ts），零 SQL 字面量 / 零 HTTP / 零 LLM / 无进程内活状态 / 不反向依赖业务层。物理拆库后三属主服务各连各自库、组合根按 owner 取池，本模块收成唯一「owner→PoolConfig」解析口；owner URL 未配时逐字回落共享单库配置。满足 §4.7 kernel 准入（封闭花名册新增成员，请求回写 §4.7）。"
-    },
-    {
-      "path": "src/kernel/pipeline-log-contract.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/publish-agent/publish-pipeline-log-store.ts 析出：PipelineLogEntry/PipelineLogSink 纯接口契约，零 import、零 SQL、零活状态。含 pg Pool + INSERT 的写入实现留 publish-pipeline-log-store.ts（api）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
-    },
-    {
-      "path": "src/kernel/platform-types.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-platform-type-closure 从 src/platform/registry.ts 析出纯类型契约段（PlatformId / Surface / NoteScopedAction / OrchestrationCapability / DelegatedAction(Support) / ScheduledAutomationAction(Support/Mode) / AvailableScheduledAutomationAction / NoteSupport / CommentPlatformProfile / PlatformRegistryEntry），零 SQL / 零 HTTP / 零 LLM / 零模块级活状态。PLATFORM_REGISTRY 数据 + *_COMMENT_PROFILE 常量 + 读表函数（normalizePlatformId/platformRegistryEntry/commentProfileForPlatform/…）按 §9「平台能力由 aidcp-automation 单写」留 registry.ts（automation）。SCHEDULED_AUTOMATION_ACTIONS 运行时数组留 registry.ts 并 satisfies 本联合。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK3"
-    },
-    {
-      "path": "src/kernel/publish-approval-contract.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-longtail-sweep 从 src/publish-agent/publish-approval-store.ts 析出发布审批纯枚举 + 哨兵错误（APPROVAL_VOID_REASONS / ApprovalVoidReason / isApprovalVoidReason / APPROVAL_BLOCKED_REASONS / ApprovalBlockedReason 字面 tuple 与派生 union；ApprovalUnreadableError 纯 Error 子类，与 schema-capability-contract 的 SchemaCapabilityError 同一手法）。零 import、零 SQL、无 pg、无模块级 Set-Map。ApprovalDecisionStore 类 + pg 读写留 publish-approval-store.ts（automation）并从 kernel 导入等值再导出。供发布下发编排跨边界共导，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
-    },
-    {
-      "path": "src/kernel/publish-generation-types.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change block2-content-process-split（2e batch1）新增：内容生成触发窄面端口契约（PublishGenerationPort），仅 import kernel 的 publish-pipeline-types（TriggerInput / PublishResult）。零 SQL / HTTP / LLM / 无模块级 Set-Map。默认 local 时组合根注入 PublishOrchestrator 本体、http 时注入 PublishGenerationHttpClient，两者结构兼容本接口。为拆进程后 automation 经端口远程触发 content 生成而立。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-process-split"
-    },
-    {
-      "path": "src/kernel/publish-pipeline-types.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-platform-type-closure 从 src/publish-agent/types.ts 整体 git mv：发布管线纯类型契约（TriggerInput / PublishRecord / PublishMetadata / PipelineFields / ImagePlan / CoverCardPlan 等 + IMAGE_CATEGORIES as-const 枚举 + METADATA_DEFAULT_VALUES 保守默认 + hasUserRejectionEvidence 纯守卫），仅 import kernel（soul-types / curated-content-types / content-schedule-mode / platform-types / text-card-style / visual-reference-types / pipeline-log-contract / deployment-target）。零 SQL / HTTP / LLM / 模块级 Set/Map。原路径 publish-agent/types.ts 保留为 re-export 桩，content 层内部消费方无感。消 8 条跨边界入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK3"
-    },
-    {
-      "path": "src/kernel/publish-status-types.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change block2-content-process-split（2e batch1）新增：发布队列状态读侧窄面端口契约（PublishStatusReader，getStatus 异步读），零 import。零 SQL / HTTP / LLM / 无进程内活状态。默认 local 时组合根把 PublishOrchestrator.getStatus 适配为异步端口注入、http 时注入 PublishStatusHttpClient。为后台/客户端经数据网关读发布状态而立。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-process-split"
-    },
-    {
-      "path": "src/kernel/reference-image-guidance.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-longtail-sweep 从 src/publish-agent/reference-image-guidance.ts 整体 git mv：纯参考图引导（REFERENCE_IMAGE_MAX_COUNT 常量 + referenceImages* / referenceImageUrl / buildReferenceImageGuidance 纯字符串/过滤函数），仅 import kernel（publish-pipeline-types）。零 SQL / HTTP / LLM / 模块级 Set-Map。原路径 publish-agent/reference-image-guidance.ts 保留为 re-export 桩，同层消费方无感。消 1 条 api 侧 publish-scheduler 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
-    },
-    {
-      "path": "src/kernel/risk-read-types.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change block2-api-split 新增：风控只读窄面端口契约（RiskReadPort，getState / effectiveQuotas / slowStartView 异步读），零 import。零 SQL / HTTP / LLM / 无进程内活状态。风控最终状态单写仍留 automation 的 apply-callback；api/panel 经本端口取只读投影（默认 local 直连本地 RiskController、http 经 RiskReadHttpClient）。为拆进程后 api 侧读风控态而立。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-process-split"
-    },
-    {
-      "path": "src/kernel/schedule-policy.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-longtail-sweep 从 src/publish-agent/schedule-policy.ts 整体 git mv：纯发布排期策略（XHS_SCHEDULE_MIN/MAX_AHEAD_MS 常量 + ScheduleValidationError 联合 + validatePublishSchedule 纯校验函数），仅 import kernel（platform-types / publish-pipeline-types）。零 SQL / HTTP / LLM / 模块级 Set-Map。原路径 publish-agent/schedule-policy.ts 保留为 re-export 桩，同层消费方无感。消 2 条跨边界入边（automation command-sequencer / content publish-mode-decider）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
-    },
-    {
-      "path": "src/kernel/schema-capability-contract.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change extract-schema-capability-contract 从 src/schema/schema-capability.ts 析出的纯契约段（SchemaCapabilityStatus/SchemaShape/SchemaCapabilityVerdict/SchemaCapabilitySpec 类型 + classifySchemaCapability 纯函数 + SchemaCapabilityError 类 + isSchemaCapabilityError 守卫 + schemaSelfCreateEnabled 读 env），零 import、无 SQL 字面量、无 HTTP/LLM、无进程内活状态（selfCreateWarned 一次性告警单例留在 automation）。满足 §4.7 kernel 准入。连库探测执行段 probeSchemaShape/ensureCapabilitySchema 留 src/schema/schema-capability.ts（automation）。请求回写 §4.7 见 docpatch RK1"
-    },
-    {
-      "path": "src/kernel/schema-name.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change bulk-lift-all-shared-types 整文件抬入：原 src/schema/schema-name.ts（运行时 schema 名解析，纯字符串函数只读 env，零 import、无 SQL 字面量、零活状态）——正是 src/schema/ 消除路径 (a) 里应判 kernel 的纯段。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
-    },
-    {
-      "path": "src/kernel/soul-types.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change lift-shared-contracts-to-kernel 抬入：原 src/soul/types.ts（纯人设文档类型/接口/枚举，零 import、零 SQL、零模块级可变单例），被 api/content/automation 三层共 16 处跨边界 type-only 导入。满足 §4.7 kernel 准入（无 SQL / 无 HTTP / 无 LLM / 无进程内活状态 / 不反向依赖业务层）。kernel 花名册是封闭 4 文件名单，本条为新增成员的请求回写，见 docpatch RK1"
-    },
-    {
-      "path": "src/kernel/text-card-style.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-platform-type-closure 从 src/render/palettes.ts + src/render/text-card.ts 析出纯设计令牌类型（PaletteKey / LayoutVariant / Decoration / TextCardBackgroundTreatment / TextCardBackgroundPattern / TextCardBulletPresentation / TextCardSourceStyle），零 import、零 SQL、零活状态。色板 hex 数据 PALETTES + selectTheme/fnv1a 渲染逻辑留 render/（content），并以 satisfies 让 PALETTES/LAYOUT_VARIANTS/DECORATIONS 逐字对齐本联合。为发布管线闭包（publish-pipeline-types）能进 kernel 而析出。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK3"
-    },
-    {
-      "path": "src/kernel/title-clamp.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change lift-shared-contracts-to-kernel 抬入：原 src/publish-agent/title-clamp.ts（纯字形安全标题截断工具，模块级 const 仅 Intl.Segmenter 无 Map/Set/Pool/定时器、零 SQL、零 import），被 2 处跨边界导入。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK1"
-    },
-    {
-      "path": "src/kernel/valuable-comment-types.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-behavior-class-ports 从 src/cache/valuable-comment-store.ts 析出纯物：ValuableCommentInput（纯数据模型）+ topicKeysFromTitle（无 LLM 主题键派生纯字符串函数，函数体内局部 Set 非模块级单例）。零 import、零 SQL、无 pg、无进程内活状态。VALUABLE_COMMENT_SCHEMA_SQL + ValuableCommentStore 类 + pg 读写留 valuable-comment-store.ts（automation）。供 content 侧精选评估角色跨边界共导，消 3 条 content->automation 边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
-    },
-    {
-      "path": "src/kernel/visual-fidelity-audit-prompt.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-behavior-class-ports 从 src/publish-agent/visual-fidelity-auditor.ts（content）析出 VisualAuditInput 审核输入模型 + buildVisualFidelityAuditPrompt 纯函数（入参→视觉模型文本指令），仅 import kernel（visual-reference-types 类型 + content-visual-brief 的 categorySafetyInstruction/formatContentVisualCategoryBrief）。零 LLM 调用 / 零连库 / 无进程内活状态。审核服务 createVisualFidelityAuditor / 多模态组装 / 解析留 visual-fidelity-auditor.ts（content）并从 kernel 等值再导出。供 api 侧静态 prompt 预览跨边界共导，消 1 条 api->content 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final"
-    },
-    {
-      "path": "src/kernel/visual-reference-prompts.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change decouple-behavior-class-ports 从 src/publish-agent/visual-reference-analyzer.ts（content）析出 buildVisualReferenceSetPrompt + buildVisualReferenceSpecialistPrompt 两个纯函数（入参→视觉模型文本指令），仅 import kernel 的 visual-reference-types 枚举/类型。零 LLM 调用 / 零连库 / 无进程内活状态。分析服务 createVisualReferenceAnalyzer / 多模态调用 / 解析缓存留 visual-reference-analyzer.ts（content）并从 kernel 等值再导出。供 api 侧静态 prompt 预览跨边界共导，消 1 条 api->content 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final"
-    },
-    {
-      "path": "src/kernel/visual-reference-types.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change bulk-lift-all-shared-types 整文件抬入：原 src/publish-agent/visual-reference-types.ts（纯视觉参考分析类型/枚举 + 3 个 as const 枚举常量，零 import、零 SQL、零活状态）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
-    },
-    {
-      "path": "src/kernel/writing-language.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决·改判·部分析出】change decouple-llm-lang-interaction-contracts 从 src/soul/writing-language.ts 析出无 Set 依赖的纯函数/纯类型：WritingLanguageCheck / writingLanguageLabel / writingLanguageInstruction / checkWritingLanguage（+私有 HAN_RE/LATIN_RE/VIETNAMESE_MARK_RE 正则字面量与 countMatches），唯一 import 为 kernel/soul-types 的 WritingLanguage 类型，无 SQL/fetch/class/模块级可变单例。被 content(publish-agent prompts/content-creator/publish-executor、facebook-comment-composer-prompt)与 automation(comment-composer/comment-de-ai-flavor)两域共用。原整文件在 kernel-non-members.rejected 以「业务判定」名义拒入；本刀独立核对：checkWritingLanguage 是对显式入参 (text, language) 的无状态文本启发式、非账号级推断/连库，改判其纯函数段可入 kernel。**但 isWritingLanguage + 模块级 WRITING_LANGUAGE_SET（new Set）+ WRITING_LANGUAGE_VALUES 留 src/soul/writing-language.ts（api）**：门禁 §4.7 把模块级 const=new Set 列为「进程内活状态」禁止入 kernel（故不是整文件 git mv，是部分析出；comm/handler 的 isWritingLanguage 边留 residual）。满足 §4.7 kernel 准入。请求控制仓回写 §4.7 kernel 段花名册并核 src/soul/ 行数配对 见 docpatch"
-    },
-    {
-      "path": "src/kernel/yaml.ts",
-      "layer": "kernel",
-      "basis": "【待定稿裁决】change bulk-lift-all-shared-types 整文件抬入：原 src/soul/yaml.ts（域无关极简 YAML 解析器，纯函数，零 import、零 SQL、零活状态）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
-    },
-    {
-      "path": "src/onboarding/first-post-onboarding-coordinator.ts",
-      "layer": "content",
-      "basis": "§4.7：创作桥接归 content（105 行）"
-    },
-    {
-      "path": "src/onboarding/first-post-onboarding-store.ts",
-      "layer": "api",
-      "basis": "§4.7：状态表归 api（151 行）"
-    },
-    {
-      "path": "src/orchestrator/content-scheduler.ts",
-      "layer": "api",
-      "basis": "§4.7 / §4.6.5 第 12 项：内容排期调度器归 api"
-    },
-    {
-      "path": "src/publish-agent/client-publish-approval.ts",
-      "layer": "api",
-      "basis": "§4.6.3：台账与审批段 7 文件之一"
-    },
-    {
-      "path": "src/publish-agent/command-sequencer.ts",
-      "layer": "automation",
-      "basis": "§4.6.3：下发执行段 6 文件之一"
-    },
-    {
-      "path": "src/publish-agent/draft-image-remove.ts",
-      "layer": "api",
-      "basis": "§4.6.3：台账与审批段 7 文件之一"
-    },
-    {
-      "path": "src/publish-agent/fill-budget.ts",
-      "layer": "automation",
-      "basis": "§4.6.3：下发执行段 6 文件之一"
-    },
-    {
-      "path": "src/publish-agent/pending-dispatch-watchdog.ts",
-      "layer": "api",
-      "basis": "【待定稿裁决】§4.6.3 的三条 import 指纹判据对本文件都不命中：它不引 ../comm/（非下发段）、不引 ../llm/ 或图片供应商（非生成段）、也不写 publish_log 或授权记录（只读授权台账行）。按『离哪一段最近』落 api：数据面是 api 属主的 publish_approval_decision，全部依赖经注入、无自有 SQL。反向理由是它探测的失联对象在 automation 侧、且告警落 alerts（§4.6.4 判归 automation）。当前落 api 时新增跨边界边为 0，落 automation 则新增 1 条。请求 §4.6.3 逐文件回写见 docpatch R1。由 change publish-approval-signal-to-database 新增"
-    },
-    {
-      "path": "src/publish-agent/platform-profile.ts",
-      "layer": "automation",
-      "basis": "§4.6.3：下发执行段 6 文件之一"
-    },
-    {
-      "path": "src/publish-agent/publish-approval-api.ts",
-      "layer": "api",
-      "basis": "§4.6.3 同上：授权的窄内部接口，按未来 HTTP 形状写死、阶段 4 提取 aidcp-api 时把进程内适配器换成 HTTP 客户端。由 change publish-approval-signal-to-database 新增"
-    },
-    {
-      "path": "src/publish-agent/publish-approval-outlet.ts",
-      "layer": "api",
-      "basis": "§4.6.3 同上：五个审批入口收敛到这里写同一条授权记录，属台账与审批段。由 change publish-approval-signal-to-database 新增"
-    },
-    {
-      "path": "src/publish-agent/publish-approval-store.ts",
-      "layer": "api",
-      "basis": "§4.6.3 的机械 import 指纹判据第三条（『直接写 publish_log 或授权记录即为台账与审批段』）：本文件是 publish_approval_decision 的唯一持久写者，而 §4.6.3 正文另有直接点名『授权事实由新建的 publish_approval_decision（aidcp-api 单写）承担』。由 change publish-approval-signal-to-database 新增"
-    },
-    {
-      "path": "src/publish-agent/publish-dispatcher.ts",
-      "layer": "automation",
-      "basis": "§4.6.3：下发执行段 6 文件之一"
-    },
-    {
-      "path": "src/publish-agent/publish-log-store.ts",
-      "layer": "api",
-      "basis": "§4.6.3：台账与审批段 7 文件之一"
-    },
-    {
-      "path": "src/publish-agent/publish-pipeline-log-store.ts",
-      "layer": "api",
-      "basis": "§4.6.3：台账与审批段 7 文件之一"
-    },
-    {
-      "path": "src/publish-agent/publish-scheduler.ts",
-      "layer": "api",
-      "basis": "§4.6.3：台账与审批段 7 文件之一"
-    },
-    {
-      "path": "src/publish-agent/roles/approval-gatekeeper.ts",
-      "layer": "content",
-      "basis": "§4.6.3：生成候选段（2026-07-25 修正——按本节自述机械判据「引 ../llm/ 即生成段」，且不写 publish_log/授权记录）"
-    },
-    {
-      "path": "src/publish-agent/roles/publish-executor.ts",
-      "layer": "automation",
-      "basis": "§4.6.3：下发执行段 6 文件之一"
-    },
-    {
-      "path": "src/publish-agent/schedule-policy.ts",
-      "layer": "api",
-      "basis": "§4.6.3：台账与审批段 7 文件之一"
-    },
-    {
-      "path": "src/publish-agent/scheduled-publish-reconciler.ts",
-      "layer": "automation",
-      "basis": "§4.6.3：下发执行段 6 文件之一"
-    },
-    {
-      "path": "src/schema/db-scope-scan.ts",
-      "layer": "automation",
-      "basis": "【待定稿裁决】层随 src/schema/ 目录规则判 automation。只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
-    },
-    {
-      "path": "src/schema/ddl-objects.ts",
-      "layer": "automation",
-      "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
-    },
-    {
-      "path": "src/schema/ddl-scan.ts",
-      "layer": "automation",
-      "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
-    },
-    {
-      "path": "src/schema/migration-files.ts",
-      "layer": "automation",
-      "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
-    },
-    {
-      "path": "src/schema/migration-order.ts",
-      "layer": "automation",
-      "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
-    },
-    {
-      "path": "src/schema/migration-owners.ts",
-      "layer": "automation",
-      "basis": "【待定稿裁决】change schema-ledger-per-owner 新增：「一条迁移属于哪个属主库」的唯一判据（迁移头 -- aidcp:objects= 声明的对象所落的表 → boundaries/table-ownership.json 的属主）。层随 src/schema/ 目录规则判 automation，MUST NOT 判 kernel——它读文件系统（migrations/ 与 boundaries/table-ownership.json）、有 I/O 副作用，AC-BOUND-03 的 kernel 准入当场不过。只被 src/schema/schema-gate.ts、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
-    },
-    {
-      "path": "src/schema/migration-plan.ts",
-      "layer": "automation",
-      "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
-    },
-    {
-      "path": "src/schema/pg-catalog.ts",
-      "layer": "automation",
-      "basis": "【待定稿裁决】同上：只被 src/schema/ 内部与测试导入，不产生跨层边。注：本文件含 pg_catalog 的 SELECT 字面量，是 src/schema/ MUST NOT 判 kernel 的两个直接证据之一。请求回写 §4.7 见 docpatch R4"
-    },
-    {
-      "path": "src/schema/schema-capability.ts",
-      "layer": "automation",
-      "basis": "【待定稿裁决】层随 src/schema/ 目录规则判 automation（三条理由见该规则的 basis）。本文件是 src/schema/ 里跨层被共用的主入口：34 个存储的 init() 导入它的 ensureCapabilitySchema，api / content / automation 三边都有，本轮新增的跨边界豁免绝大多数由它**单点**产生（20 条：api→automation 16 + content→automation 4；本目录另有 schema-name.ts 贡献 1 条，其余 10 个文件 0 条）。由它产生的这些豁免共享**同一条消除路径**——§4.7 一次裁决即可全部消除，消除方式二选一：(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这些豁免当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多，逐条各挂一个消除 change 会把一次裁决摊成 20 次无意义的返工。请求回写 §4.7 见 docpatch R4"
-    },
-    {
-      "path": "src/schema/schema-contract.ts",
-      "layer": "automation",
-      "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
-    },
-    {
-      "path": "src/schema/schema-gate.ts",
-      "layer": "automation",
-      "basis": "【待定稿裁决】层随 src/schema/ 目录规则判 automation。只被组合根 src/server.ts 与测试导入（组合根 MAY 导入任何层，不产生豁免）；它自身引 src/cache/pg-anchor-cache.ts 的 DEFAULT_PG_CONFIG，同属 automation，亦无跨层边。请求回写 §4.7 见 docpatch R4"
-    },
-    {
-      "path": "src/schema/schema-inspect.ts",
-      "layer": "automation",
-      "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
-    },
-    {
-      "path": "src/server.ts",
-      "layer": "composition",
-      "basis": "§4.7 src/ 根文件：组合根，无继承者"
-    }
+    { "path": "src/account-display-name.ts", "layer": "api", "basis": "§4.7 src/ 根文件：api 3 / 626 行" },
+    { "path": "src/account-state.ts", "layer": "api", "basis": "§4.7 src/ 根文件：api 3 / 626 行" },
+    { "path": "src/account-store.ts", "layer": "api", "basis": "§4.7 src/ 根文件：api 3 / 626 行" },
+    { "path": "src/deployment-target.ts", "layer": "kernel", "basis": "§4.7 kernel 花名册 4 文件之一（10 行）" },
+    { "path": "src/kernel/soul-types.ts", "layer": "kernel", "basis": "【待定稿裁决】change lift-shared-contracts-to-kernel 抬入：原 src/soul/types.ts（纯人设文档类型/接口/枚举，零 import、零 SQL、零模块级可变单例），被 api/content/automation 三层共 16 处跨边界 type-only 导入。满足 §4.7 kernel 准入（无 SQL / 无 HTTP / 无 LLM / 无进程内活状态 / 不反向依赖业务层）。kernel 花名册是封闭 4 文件名单，本条为新增成员的请求回写，见 docpatch RK1" },
+    { "path": "src/kernel/interaction-types.ts", "layer": "kernel", "basis": "【待定稿裁决】change lift-shared-contracts-to-kernel 抬入：原 src/interactions/types.ts（纯互动域类型/接口/枚举，零 import），被 automation/api 两层共 9 处跨边界 type-only 导入。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK1" },
+    { "path": "src/kernel/persona-format.ts", "layer": "kernel", "basis": "【待定稿裁决】change lift-shared-contracts-to-kernel 抬入：原 src/agents/persona-format.ts（纯人设兴趣格式化函数 tieredInterests，零 import、零副作用），被 6 个 automation 判定/撰写角色跨边界导入。满足 §4.7 kernel 准入。注：原 §4.7『src/agents/ api 2 文件 152 行』的行数配对（与 persona-auto-fill.ts 合计）随本次抬走失效，请求回写 §4.7 见 docpatch RK1" },
+    { "path": "src/kernel/title-clamp.ts", "layer": "kernel", "basis": "【待定稿裁决】change lift-shared-contracts-to-kernel 抬入：原 src/publish-agent/title-clamp.ts（纯字形安全标题截断工具，模块级 const 仅 Intl.Segmenter 无 Map/Set/Pool/定时器、零 SQL、零 import），被 2 处跨边界导入。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK1" },
+    { "path": "src/kernel/schema-capability-contract.ts", "layer": "kernel", "basis": "【待定稿裁决】change extract-schema-capability-contract 从 src/schema/schema-capability.ts 析出的纯契约段（SchemaCapabilityStatus/SchemaShape/SchemaCapabilityVerdict/SchemaCapabilitySpec 类型 + classifySchemaCapability 纯函数 + SchemaCapabilityError 类 + isSchemaCapabilityError 守卫 + schemaSelfCreateEnabled 读 env），零 import、无 SQL 字面量、无 HTTP/LLM、无进程内活状态（selfCreateWarned 一次性告警单例留在 automation）。满足 §4.7 kernel 准入。连库探测执行段 probeSchemaShape/ensureCapabilitySchema 留 src/schema/schema-capability.ts（automation）。请求回写 §4.7 见 docpatch RK1" },
+    { "path": "src/kernel/visual-reference-types.ts", "layer": "kernel", "basis": "【待定稿裁决】change bulk-lift-all-shared-types 整文件抬入：原 src/publish-agent/visual-reference-types.ts（纯视觉参考分析类型/枚举 + 3 个 as const 枚举常量，零 import、零 SQL、零活状态）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2" },
+    { "path": "src/kernel/yaml.ts", "layer": "kernel", "basis": "【待定稿裁决】change bulk-lift-all-shared-types 整文件抬入：原 src/soul/yaml.ts（域无关极简 YAML 解析器，纯函数，零 import、零 SQL、零活状态）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2" },
+    { "path": "src/kernel/schema-name.ts", "layer": "kernel", "basis": "【待定稿裁决】change bulk-lift-all-shared-types 整文件抬入：原 src/schema/schema-name.ts（运行时 schema 名解析，纯字符串函数只读 env，零 import、无 SQL 字面量、零活状态）——正是 src/schema/ 消除路径 (a) 里应判 kernel 的纯段。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2" },
+    { "path": "src/kernel/persona-binding.ts", "layer": "kernel", "basis": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/config/persona-store.ts 析出：PersonaBinding 三态纯类型，零 import、零 SQL、零活状态，被 automation/api 多边 type-only 共导。存储实现留 persona-store.ts。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2" },
+    { "path": "src/kernel/feed-action.ts", "layer": "kernel", "basis": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/cache/interaction-feed-store.ts 析出：FeedAction 纯类型联合，零 import、零 SQL、零活状态。存储实现留 interaction-feed-store.ts。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2" },
+    { "path": "src/kernel/pipeline-log-contract.ts", "layer": "kernel", "basis": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/publish-agent/publish-pipeline-log-store.ts 析出：PipelineLogEntry/PipelineLogSink 纯接口契约，零 import、零 SQL、零活状态。含 pg Pool + INSERT 的写入实现留 publish-pipeline-log-store.ts（api）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2" },
+    { "path": "src/kernel/panel-frame-limits.ts", "layer": "kernel", "basis": "【待定稿裁决】change panel-event-tee-hardening 新增：面板事件单帧大小闸（PANEL_FRAME_MAX_BYTES 常量 + panelPayloadTruncated 截断标记构造 + panelPayloadByteLength 字节口径），零 import、零 SQL、零 HTTP/LLM、零进程内活状态。必须落 kernel 而非任一业务层：该上限有两个执行点——推送端 src/panel/panel-ws.ts（api）与旁路端 src/transport/eventbus-outbox-bridge.ts（automation），各写一份必然漂移成「一端截断、另一端照写几十 KB 进共库生产 PG」；放任一层都会制造一条 api↔automation 跨层边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2" },
+    { "path": "src/kernel/content-schedule-mode.ts", "layer": "kernel", "basis": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/config/content-schedule-store.ts 析出：CONTENT_SCHEDULE_ACTION_MODES 常量 + ContentScheduleActionMode/ContentScheduleApprovalMode 纯类型，零 import、零 SQL、零活状态。排期存储（含建表读写 SQL）留 content-schedule-store.ts。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2" },
+    { "path": "src/kernel/llm-contract.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-llm-lang-interaction-contracts 从 src/llm/qwen.ts 析出：LlmThinkingModeOpt + LlmCallOpts（Per-call 覆盖选项，纯接口，无供应商语义标识符）。供 automation 侧多角色 type-only 共导，消 4 条 automation->content 边。thinkingMode 字段内联为 'off'|'on'|'default' 字面量（结构与 role-catalog ThinkingMode|'default' 逐字一致），以保 kernel 不反向依赖 api 属主的 role-catalog。LlmClient/ChatLlmClient 因门禁 §4.7 把这两个标识符本身列为「LLM 或供应商 HTTP 调用」特征而**不入 kernel**、留 qwen.ts（那 3 条 LlmClient/ChatLlmClient 边留 residual）。QwenClient 类/错误类/buildXxx 等 behavior 留 qwen.ts。零 SQL/HTTP/fetch/活状态。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch" },
+    { "path": "src/kernel/writing-language.ts", "layer": "kernel", "basis": "【待定稿裁决·改判·部分析出】change decouple-llm-lang-interaction-contracts 从 src/soul/writing-language.ts 析出无 Set 依赖的纯函数/纯类型：WritingLanguageCheck / writingLanguageLabel / writingLanguageInstruction / checkWritingLanguage（+私有 HAN_RE/LATIN_RE/VIETNAMESE_MARK_RE 正则字面量与 countMatches），唯一 import 为 kernel/soul-types 的 WritingLanguage 类型，无 SQL/fetch/class/模块级可变单例。被 content(publish-agent prompts/content-creator/publish-executor、facebook-comment-composer-prompt)与 automation(comment-composer/comment-de-ai-flavor)两域共用。原整文件在 kernel-non-members.rejected 以「业务判定」名义拒入；本刀独立核对：checkWritingLanguage 是对显式入参 (text, language) 的无状态文本启发式、非账号级推断/连库，改判其纯函数段可入 kernel。**但 isWritingLanguage + 模块级 WRITING_LANGUAGE_SET（new Set）+ WRITING_LANGUAGE_VALUES 留 src/soul/writing-language.ts（api）**：门禁 §4.7 把模块级 const=new Set 列为「进程内活状态」禁止入 kernel（故不是整文件 git mv，是部分析出；comm/handler 的 isWritingLanguage 边留 residual）。满足 §4.7 kernel 准入。请求控制仓回写 §4.7 kernel 段花名册并核 src/soul/ 行数配对 见 docpatch" },
+    { "path": "src/kernel/like-affinity.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-llm-lang-interaction-contracts 整文件 git mv：原 src/soul/like-affinity.ts（唯一 import 为 kernel/soul-types 的 LikeAffinity/Soul 类型，导出全为纯常量+纯函数 DEFAULT_LIKE_AFFINITY/LIKE_AFFINITY_VALUES/resolveLikeAffinity/likeAffinityLabel/noteLikeAffinityGuidance/commentLikeProbability/generatedLikePrinciple，无 SQL/fetch/class/进程内活状态）。被 automation(comment-like-appraiser/interaction-appraiser-role/persona-generator)与 api(account-persona-service)共用。satisfies §4.7 kernel 准入。请求回写 §4.7 见 docpatch" },
+    { "path": "src/kernel/interaction-reply-contract.ts", "layer": "kernel", "basis": "【待定稿裁决·部分析出】change decouple-llm-lang-interaction-contracts 析出无模块级 Set 依赖的纯物：从 reply-config.ts（api，§4.6.1）析出 validateFinalReplyText（只读 profile 字段+内联正则，无 Set）；从 reply-config-resolver.ts（api）析出纯读取端口 ReplyConfigReader 与两个无状态读取函数 readPublishedConfig/readJobConfig（只对注入 reader 端口取数、不连库）。**reply-config.ts 其余校验/渲染函数依赖模块级 VARIABLE_SET/HARD_RISK_SET/INTENTS/… 等 const=new Set，被门禁 §4.7 判「进程内活状态」故不入 kernel、留原文件**（reply-auto-send / reply-workflow 引这些的边留 residual）。两 api 原文件保持属主并等值再导出；连库的 ReplyConfigResolver 类留 reply-config-resolver.ts（api）。零 SQL/HTTP/LLM/fetch/活状态。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch" },
+    { "path": "src/index.ts", "layer": "composition", "basis": "§4.7 src/ 根文件：组合根，无继承者" },
+    { "path": "src/server.ts", "layer": "composition", "basis": "§4.7 src/ 根文件：组合根，无继承者" },
+    { "path": "src/config-mirror-freshness.ts", "layer": "api", "basis": "【待定稿裁决】§4.7 基线 sha 之后由 change config-mirror-cross-process-invalidation 新增，§4.7『src/ 根文件』行（api 3 / kernel 1 / composition 2）未覆盖它。按配置域默认落 api（§4.6.8：src/config/ 除四类限频配置外归 api，本文件是同一域的镜像新鲜度查询口，仅因『不让风控层第一次 import 配置层』而放在 src/ 根）。MUST NOT 判 kernel：§4.7 的 kernel 花名册是封闭的 4 文件名单，且本文件 :59 有模块级可变单例 installedSource，AC-BOUND-03 的 kernel 准入判据当场不过。请求回写 §4.7 见 docpatch R1" },
+    { "path": "src/db/environment-row-lock.ts", "layer": "api", "basis": "【待定稿裁决】§4.7 基线 sha 之后由 change publish-approval-signal-to-database 新增，src/db/ 是 §4.7 里不存在的新目录。按『锁随被保护数据走』落 api：本文件唯一动作是锁 client_environments 的行，该表 §5.1 具名归 aidcp-api 单写、§4.7 的 src/client-auth/ 亦整目录归 api。此处用 fileOverride 而非目录规则，故 src/db/ 后续新增文件仍会逐个待裁决。请求回写 §4.7 见 docpatch R1" },
+
+    { "path": "src/agents/curated-note-evaluator.ts", "layer": "content", "basis": "§7.2 判据三首批迁移名单" },
+    { "path": "src/agents/curated-comment-evaluator.ts", "layer": "content", "basis": "§7.2 判据三首批迁移名单" },
+    { "path": "src/agents/concept-extractor-role.ts", "layer": "content", "basis": "§7.2 判据三首批迁移名单" },
+    { "path": "src/agents/valuable-comment-archivist.ts", "layer": "content", "basis": "§7.2 判据三首批迁移名单" },
+    { "path": "src/agents/persona-generator.ts", "layer": "content", "basis": "§7.2 判据三首批迁移名单" },
+    { "path": "src/agents/persona-auto-fill.ts", "layer": "api", "basis": "§17 第 7 项待回写：§4.7 记 src/agents/ 有 api 2 文件 152 行但未点名，本文件（136 行）是其一，人设按 §5.1 归 aidcp-api。原配对文件 persona-format.ts 已由 change lift-shared-contracts-to-kernel 抬入 kernel（src/kernel/persona-format.ts），§4.7 的『api 2 文件 152 行』行数配对需一并回写，见 docpatch RK1。待控制仓回写 §4.7 后本行 basis 改为直接引用 §4.7" },
+
+    { "path": "src/cache/curated-content-store.ts", "layer": "content", "basis": "§4.7 src/cache/ 逐文件表" },
+    { "path": "src/cache/concept-store.ts", "layer": "content", "basis": "§4.7 src/cache/ 逐文件表" },
+    { "path": "src/cache/notification-contact-store.ts", "layer": "api", "basis": "§4.7 src/cache/ 逐文件表" },
+    { "path": "src/cache/bot-chat-store.ts", "layer": "api", "basis": "§4.7 src/cache/ 逐文件表" },
+    { "path": "src/kernel/pg-config.ts", "layer": "kernel", "basis": "§4.7 kernel 花名册成员（27 行）。change decouple-store-schema-pgconfig-cluster 从 src/cache/pg-config.ts git mv 到 src/kernel/（物理位置归位 kernel 目录，字节等价，唯一 import 是 import type pg，无 SQL / 无业务依赖 / 无进程内活状态）。消费方改为直接从 kernel import DEFAULT_PG_CONFIG，消除经 pg-anchor-cache（automation）再导出的跨边界边。请求回写 §4.7 见 docpatch" },
+
+    { "path": "src/cli/test-feishu.ts", "layer": "api", "basis": "§4.7 src/cli/ 逐文件表：调用面为飞书（§4.6.2）" },
+    { "path": "src/cli/trigger-like.ts", "layer": "automation", "basis": "§4.7 src/cli/ 逐文件表：导入边云协议并下发互动命令" },
+
+    { "path": "src/config/quota-config-store.ts", "layer": "automation", "basis": "§4.6.8：四类限频配置随消费方走" },
+    { "path": "src/config/pacing-config-store.ts", "layer": "automation", "basis": "§4.6.8：四类限频配置随消费方走" },
+    { "path": "src/config/pacing-config-facade.ts", "layer": "automation", "basis": "§4.6.8：门面，无独立表" },
+    { "path": "src/config/session-config-store.ts", "layer": "automation", "basis": "§4.6.8：四类限频配置随消费方走" },
+    { "path": "src/config/resume-config-store.ts", "layer": "automation", "basis": "§4.6.8：四类限频配置随消费方走" },
+
+    { "path": "src/kernel/config-mirror-bump-types.ts", "layer": "kernel", "basis": "【待定稿裁决】change block3-l3-config-mirror-bump-decouple 抬入：跨域配置镜像失效通道的契约段（ConfigMirrorKey 闭集合纯类型 + MirrorQueryable/MirrorVersionBumper 接口 + writeWithMirrorBump「同一笔提交」包装 + ConfigMirrorBumpSink 消费端口）。原分散在 src/config-mirror-freshness.ts（ConfigMirrorKey）与 src/config/mirror-version-store.ts（api）；automation 属主的四个限频配置 store 与 api 属主的十余个配置 store 都要引用它们，留在任一属主域都必然造出跨域 import（原状即 4 条 automation->api 豁免）。只 import type pg 与同层 pg-owner-connection-resolver，无 SQL 字面量（BEGIN/COMMIT/ROLLBACK 是事务控制、不是 DML/DDL）、无 HTTP 路由、无 LLM、无进程内活状态、不反向依赖业务层。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch" },
+    { "path": "src/config/mirror-bump-outbox.ts", "layer": "automation", "basis": "【待定稿裁决】change block3-l3-config-mirror-bump-decouple 新增：automation 侧的失效信号事务型入队器（OutboxMirrorVersionBumper，在四个限频配置 store 自己的写事务里写本域 event_outbox 行）+ 生产方进程内中继（ConfigMirrorBumpRelay）。写的是 automation 属主的 event_outbox、跑在 automation 池上，与同目录四个限频配置 store（§4.6.8 的 5 个例外文件）同域，故判 automation。src/config/ 在 §4.7 是逐文件切分目录，故逐条裁定、不进 adjudicated-files 名册" },
+    { "path": "src/config/mirror-bump-sink.ts", "layer": "api", "basis": "【待定稿裁决】change block3-l3-config-mirror-bump-decouple 新增：api 侧失效信号落地端（config_mirror_bump_inbox 去重 + config_mirror_version 推进，同一笔 api 事务）。两张表都属 api、跑在 api 池上，与同目录 mirror-version-store.ts / mirror-registry.ts / mirror-refresher.ts 同层，故判 api" },
+    { "path": "src/config/mirror-registry.ts", "layer": "api", "basis": "§4.6.8 例外只有四类限频配置 store + 门面，本文件不在其列，故随 src/config/ 默认落 api。它是 15 处进程内配置镜像的描述符表（写入权归属只用于文档与断言，不影响运行时装配）。由 change config-mirror-cross-process-invalidation 新增" },
+    { "path": "src/config/mirror-version-store.ts", "layer": "api", "basis": "§4.6.8 同上：配置层的版本表读写口，承载 config_mirror_version / config_mirror_stale_refusal 两张配置面表。由 change config-mirror-cross-process-invalidation 新增" },
+    { "path": "src/config/mirror-refresher.ts", "layer": "api", "basis": "§4.6.8 同上：配置镜像的轮询刷新器，装配在组合根、只驱动配置层 store 的 refreshFromAuthority。由 change config-mirror-cross-process-invalidation 新增" },
+    { "path": "src/config/mirror-stop-work.ts", "layer": "api", "basis": "【待定稿裁决】§4.6.8 的例外名单是封闭的 5 个文件，本文件不在其列，故按目录默认落 api。但它的语义偏自动化：它是『闸门镜像陈旧则不放行新的真实平台动作』的统一判据，消费方是 comment-scheduler / role-dispatcher / delegated-task worker 三个 automation 文件（因此产生 3 条 automation->api 豁免）。若按 §4.6.8『随消费方走』的同一判据改判 automation，这 3 条消失、另生 3 条（publish-scheduler 的 api->automation 1 条 + 本文件对 config-mirror-freshness / mirror-registry 的 automation->api 2 条），净额为 0，故本次不擅自改判。请求 §4.6.8 裁决见 docpatch R1。由 change config-mirror-cross-process-invalidation 新增" },
+
+    { "path": "src/interactions/interaction-auth-gate.ts", "layer": "api", "basis": "【待定稿裁决】change block3-l3-auth-write-owner-collapse 新写：kernel 端口 InteractionAuthGate 的 api 属主实现（PgInteractionAuthGate），持组合根注入的 api 池、**自己开事务**，只读 / 只锁 api 属主表 client_environments / client_env_scope（经同层 db/environment-row-lock）与 client_env_revocation_holds / accounts（§5.1「客户、环境归属和账号绑定」+「账号主数据」全归 api）。src/interactions/ 目录规则 layer=automation 但 newFile=adjudicate，故逐文件裁定：本文件与同目录 reply-config-store / interaction-api-writes 一样，目录位置不是属主判据、它碰的表全是 api 属主，归 api。它是 offboard-cleanup-grant-ops.ts（automation 属主实现、api 侧经端口转调）的**反方向镜像**。请求回写 §4.7 见 docpatch RK-block3" },
+    { "path": "src/interactions/interaction-api-writes.ts", "layer": "api", "basis": "§5.1：reply 配置面（reply_templates/reply_rules/account_reply_profiles/interaction_reply_config*）与配置面审计 interaction_audit_events 归 aidcp-api 单写。本文件是 change offboard-saga 里这些 api 属主表在离场/过期清理路径上的 api 侧单写者，automation 经窄接口注入调用。" },
+    { "path": "src/interactions/interaction-customer-api.ts", "layer": "api", "basis": "§4.6.1：配置存储与查询面" },
+    { "path": "src/interactions/interaction-automation-ports.ts", "layer": "api", "basis": "§4.6.1：配置/查询面（api）消费 automation 编排行为的窄注入端口（consumer-owned ports）。change decouple-interaction-api-cluster 新增：把 interaction-customer-api 对 send-orchestrator / reply-workflow 的直接 import type 收窄为端口接口，只引 kernel 契约、由组合根按结构兼容注入 automation 实例，automation 类不 import 本端口。" },
+    { "path": "src/interactions/interaction-internal-api.ts", "layer": "api", "basis": "§4.6.1：配置存储与查询面" },
+    { "path": "src/interactions/offboard-write-adapter.ts", "layer": "automation", "basis": "§5.1：互动域离场表（interaction_offboards/interaction_offboard_audit/interaction_auth_state/interaction_runtime_controls）归 aidcp-automation 单写。本文件是 change offboard-saga 里这些离场表的 automation 侧单写者，aidcp-api 的 client-user-store 经窄接口注入调用。" },
+    { "path": "src/interactions/interaction-scope-internal-api.ts", "layer": "api", "basis": "§4.6.1：配置存储与查询面" },
+    { "path": "src/interactions/interaction-panel-permissions.ts", "layer": "api", "basis": "§4.6.1：配置存储与查询面" },
+    { "path": "src/interactions/reply-config-store.ts", "layer": "api", "basis": "§4.6.1：配置存储与查询面" },
+    { "path": "src/interactions/reply-config-scope-store.ts", "layer": "api", "basis": "§4.6.1：配置存储与查询面" },
+    { "path": "src/interactions/reply-config.ts", "layer": "api", "basis": "§4.6.1：配置存储与查询面" },
+    { "path": "src/interactions/reply-config-resolver.ts", "layer": "api", "basis": "§4.6.1：配置存储与查询面" },
+    { "path": "src/interactions/reply-ai.ts", "layer": "content", "basis": "§4.6.1：AI 回复段，唯一引 LlmClient 的文件" },
+
+    { "path": "src/onboarding/first-post-onboarding-store.ts", "layer": "api", "basis": "§4.7：状态表归 api（151 行）" },
+    { "path": "src/onboarding/first-post-onboarding-coordinator.ts", "layer": "content", "basis": "§4.7：创作桥接归 content（105 行）" },
+
+    { "path": "src/orchestrator/content-scheduler.ts", "layer": "api", "basis": "§4.7 / §4.6.5 第 12 项：内容排期调度器归 api" },
+
+    { "path": "src/publish-agent/publish-log-store.ts", "layer": "api", "basis": "§4.6.3：台账与审批段 7 文件之一" },
+    { "path": "src/publish-agent/publish-pipeline-log-store.ts", "layer": "api", "basis": "§4.6.3：台账与审批段 7 文件之一" },
+    { "path": "src/publish-agent/publish-scheduler.ts", "layer": "api", "basis": "§4.6.3：台账与审批段 7 文件之一" },
+    { "path": "src/publish-agent/client-publish-approval.ts", "layer": "api", "basis": "§4.6.3：台账与审批段 7 文件之一" },
+    { "path": "src/publish-agent/draft-image-remove.ts", "layer": "api", "basis": "§4.6.3：台账与审批段 7 文件之一" },
+    { "path": "src/publish-agent/schedule-policy.ts", "layer": "api", "basis": "§4.6.3：台账与审批段 7 文件之一" },
+    { "path": "src/publish-agent/roles/approval-gatekeeper.ts", "layer": "content", "basis": "§4.6.3：生成候选段（2026-07-25 修正——按本节自述机械判据「引 ../llm/ 即生成段」，且不写 publish_log/授权记录）" },
+    { "path": "src/publish-agent/publish-approval-store.ts", "layer": "api", "basis": "§4.6.3 的机械 import 指纹判据第三条（『直接写 publish_log 或授权记录即为台账与审批段』）：本文件是 publish_approval_decision 的唯一持久写者，而 §4.6.3 正文另有直接点名『授权事实由新建的 publish_approval_decision（aidcp-api 单写）承担』。由 change publish-approval-signal-to-database 新增" },
+    { "path": "src/publish-agent/publish-approval-outlet.ts", "layer": "api", "basis": "§4.6.3 同上：五个审批入口收敛到这里写同一条授权记录，属台账与审批段。由 change publish-approval-signal-to-database 新增" },
+    { "path": "src/publish-agent/publish-approval-api.ts", "layer": "api", "basis": "§4.6.3 同上：授权的窄内部接口，按未来 HTTP 形状写死、阶段 4 提取 aidcp-api 时把进程内适配器换成 HTTP 客户端。由 change publish-approval-signal-to-database 新增" },
+    { "path": "src/publish-agent/pending-dispatch-watchdog.ts", "layer": "api", "basis": "【待定稿裁决】§4.6.3 的三条 import 指纹判据对本文件都不命中：它不引 ../comm/（非下发段）、不引 ../llm/ 或图片供应商（非生成段）、也不写 publish_log 或授权记录（只读授权台账行）。按『离哪一段最近』落 api：数据面是 api 属主的 publish_approval_decision，全部依赖经注入、无自有 SQL。反向理由是它探测的失联对象在 automation 侧、且告警落 alerts（§4.6.4 判归 automation）。当前落 api 时新增跨边界边为 0，落 automation 则新增 1 条。请求 §4.6.3 逐文件回写见 docpatch R1。由 change publish-approval-signal-to-database 新增" },
+    { "path": "src/publish-agent/publish-dispatcher.ts", "layer": "automation", "basis": "§4.6.3：下发执行段 6 文件之一" },
+    { "path": "src/publish-agent/command-sequencer.ts", "layer": "automation", "basis": "§4.6.3：下发执行段 6 文件之一" },
+    { "path": "src/publish-agent/platform-profile.ts", "layer": "automation", "basis": "§4.6.3：下发执行段 6 文件之一" },
+    { "path": "src/publish-agent/fill-budget.ts", "layer": "automation", "basis": "§4.6.3：下发执行段 6 文件之一" },
+    { "path": "src/publish-agent/scheduled-publish-reconciler.ts", "layer": "automation", "basis": "§4.6.3：下发执行段 6 文件之一" },
+    { "path": "src/publish-agent/roles/publish-executor.ts", "layer": "automation", "basis": "§4.6.3：下发执行段 6 文件之一" },
+
+    { "path": "src/schema/schema-capability.ts", "layer": "automation", "basis": "【待定稿裁决】层随 src/schema/ 目录规则判 automation（三条理由见该规则的 basis）。本文件是 src/schema/ 里跨层被共用的主入口：34 个存储的 init() 导入它的 ensureCapabilitySchema，api / content / automation 三边都有，本轮新增的跨边界豁免绝大多数由它**单点**产生（20 条：api→automation 16 + content→automation 4；本目录另有 schema-name.ts 贡献 1 条，其余 10 个文件 0 条）。由它产生的这些豁免共享**同一条消除路径**——§4.7 一次裁决即可全部消除，消除方式二选一：(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这些豁免当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多，逐条各挂一个消除 change 会把一次裁决摊成 20 次无意义的返工。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/db-scope-scan.ts", "layer": "automation", "basis": "【待定稿裁决】层随 src/schema/ 目录规则判 automation。只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/ddl-objects.ts", "layer": "automation", "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/ddl-scan.ts", "layer": "automation", "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/migration-files.ts", "layer": "automation", "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/migration-owners.ts", "layer": "automation", "basis": "【待定稿裁决】change schema-ledger-per-owner 新增：「一条迁移属于哪个属主库」的唯一判据（迁移头 -- aidcp:objects= 声明的对象所落的表 → boundaries/table-ownership.json 的属主）。层随 src/schema/ 目录规则判 automation，MUST NOT 判 kernel——它读文件系统（migrations/ 与 boundaries/table-ownership.json）、有 I/O 副作用，AC-BOUND-03 的 kernel 准入当场不过。只被 src/schema/schema-gate.ts、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/migration-order.ts", "layer": "automation", "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/migration-plan.ts", "layer": "automation", "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/pg-catalog.ts", "layer": "automation", "basis": "【待定稿裁决】同上：只被 src/schema/ 内部与测试导入，不产生跨层边。注：本文件含 pg_catalog 的 SELECT 字面量，是 src/schema/ MUST NOT 判 kernel 的两个直接证据之一。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/schema-contract.ts", "layer": "automation", "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/schema-gate.ts", "layer": "automation", "basis": "【待定稿裁决】层随 src/schema/ 目录规则判 automation。只被组合根 src/server.ts 与测试导入（组合根 MAY 导入任何层，不产生豁免）；它自身引 src/cache/pg-anchor-cache.ts 的 DEFAULT_PG_CONFIG，同属 automation，亦无跨层边。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/schema/schema-inspect.ts", "layer": "automation", "basis": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4" },
+    { "path": "src/kernel/platform-types.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-platform-type-closure 从 src/platform/registry.ts 析出纯类型契约段（PlatformId / Surface / NoteScopedAction / OrchestrationCapability / DelegatedAction(Support) / ScheduledAutomationAction(Support/Mode) / AvailableScheduledAutomationAction / NoteSupport / CommentPlatformProfile / PlatformRegistryEntry），零 SQL / 零 HTTP / 零 LLM / 零模块级活状态。PLATFORM_REGISTRY 数据 + *_COMMENT_PROFILE 常量 + 读表函数（normalizePlatformId/platformRegistryEntry/commentProfileForPlatform/…）按 §9「平台能力由 aidcp-automation 单写」留 registry.ts（automation）。SCHEDULED_AUTOMATION_ACTIONS 运行时数组留 registry.ts 并 satisfies 本联合。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK3" },
+    { "path": "src/kernel/text-card-style.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-platform-type-closure 从 src/render/palettes.ts + src/render/text-card.ts 析出纯设计令牌类型（PaletteKey / LayoutVariant / Decoration / TextCardBackgroundTreatment / TextCardBackgroundPattern / TextCardBulletPresentation / TextCardSourceStyle），零 import、零 SQL、零活状态。色板 hex 数据 PALETTES + selectTheme/fnv1a 渲染逻辑留 render/（content），并以 satisfies 让 PALETTES/LAYOUT_VARIANTS/DECORATIONS 逐字对齐本联合。为发布管线闭包（publish-pipeline-types）能进 kernel 而析出。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK3" },
+    { "path": "src/kernel/curated-content-types.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-platform-type-closure 从 src/cache/curated-content-store.ts 析出纯数据模型类型（CuratedReferenceImageFormGuess / TextCardTranscription(*) / CuratedReferenceImage(Input) / CuratedObservation / CuratedSelectItem / CuratedPanelRow / CuratedFacets / CuratedContentType(Filter) 等），仅 import kernel（visual-reference-types / time）。CURATED_CONTENT_SCHEMA_SQL + CuratedContentStore 类 + normalize* 函数 + CuratedContentStoreOptions 留 curated-content-store.ts（content）。满足 §4.7 kernel 准入（无 SQL）。请求回写 §4.7 见 docpatch RK3" },
+    { "path": "src/kernel/delegated-task-types.ts", "layer": "kernel", "basis": "【待定稿裁决·部分析出】change decouple-platform-type-closure 从 src/delegated-task/types.ts 析出纯类型（DelegatedTask / DelegatedTaskIntent / DelegatedTaskAttempt / DelegatedTaskStatus / DelegatedVerificationKind / DelegatedExecutionTarget / Json* / TaskConstraints 等），仅 import kernel（platform-types / deployment-target）。**状态机模块级 Set（TERMINAL_STATUSES / TRANSITIONS）+ 转移/校验函数 + 运行时数组 DELEGATED_TASK_STATUSES 留 delegated-task/types.ts（automation）**：门禁 §4.7 禁 kernel 持模块级 new Set（故非整文件搬）。DELEGATED_TASK_STATUSES satisfies kernel 联合。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK3" },
+    { "path": "src/kernel/publish-pipeline-types.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-platform-type-closure 从 src/publish-agent/types.ts 整体 git mv：发布管线纯类型契约（TriggerInput / PublishRecord / PublishMetadata / PipelineFields / ImagePlan / CoverCardPlan 等 + IMAGE_CATEGORIES as-const 枚举 + METADATA_DEFAULT_VALUES 保守默认 + hasUserRejectionEvidence 纯守卫），仅 import kernel（soul-types / curated-content-types / content-schedule-mode / platform-types / text-card-style / visual-reference-types / pipeline-log-contract / deployment-target）。零 SQL / HTTP / LLM / 模块级 Set/Map。原路径 publish-agent/types.ts 保留为 re-export 桩，content 层内部消费方无感。消 8 条跨边界入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK3" },
+    { "path": "src/kernel/panel-automation-types.ts", "layer": "kernel", "basis": "【待定稿裁决】change block3-l3-panel-read-port 新写：面板（api 属主 panel-store）对 automation 域的只读投影端口契约（PanelAutomationReader 接口 + PanelActionTotal / PanelAccountActionTotal / PanelLikeViewTotal / PanelRiskStateProjection / PanelAlertProjection / PanelInteractionProjection 纯行类型）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。与 risk-read-types（账号维风控状态投影端口）同类：读方（api）只依赖本 kernel 接口、绝不直连 automation 的库；属主实现在 src/risk/panel-automation-read.ts（automation）跑在 automation 池上。Block③ 物理拆库 L3 面板读侧解耦。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3" },
+    { "path": "src/kernel/valuable-comment-types.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-behavior-class-ports 从 src/cache/valuable-comment-store.ts 析出纯物：ValuableCommentInput（纯数据模型）+ topicKeysFromTitle（无 LLM 主题键派生纯字符串函数，函数体内局部 Set 非模块级单例）。零 import、零 SQL、无 pg、无进程内活状态。VALUABLE_COMMENT_SCHEMA_SQL + ValuableCommentStore 类 + pg 读写留 valuable-comment-store.ts（automation）。供 content 侧精选评估角色跨边界共导，消 3 条 content->automation 边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch" },
+    { "path": "src/kernel/facebook-group-types.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-behavior-class-ports 从 src/comment-agent/facebook-group-store.ts 析出纯数据模型类型闭包（FacebookGroupTargetRow / *ListRow / *ListOptions / *ListResult / *Facets / MembershipRow / *ScopeWriteRow / ReplaceFacebookGroupTargetScopesResult / JoinAuditOutcome / JoinRecentScheduledResult / ScopedTargetCount / ImportResult / AccountProgress + JoinGating/MembershipStatus 枚举）+ FacebookGroupScopeError（纯 Error 子类，与 schema-capability-contract 的 SchemaCapabilityError 同一手法）。零 import、零 SQL、无 pg。FacebookGroupStore 类 + SCHEMA_SQL + pg 读写 + DbRow 内部映射留 facebook-group-store.ts（automation）。供 api 侧面板/配置视图跨边界共导，消 3 条 api->automation 边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch" },
+    { "path": "src/kernel/schedule-policy.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-longtail-sweep 从 src/publish-agent/schedule-policy.ts 整体 git mv：纯发布排期策略（XHS_SCHEDULE_MIN/MAX_AHEAD_MS 常量 + ScheduleValidationError 联合 + validatePublishSchedule 纯校验函数），仅 import kernel（platform-types / publish-pipeline-types）。零 SQL / HTTP / LLM / 模块级 Set-Map。原路径 publish-agent/schedule-policy.ts 保留为 re-export 桩，同层消费方无感。消 2 条跨边界入边（automation command-sequencer / content publish-mode-decider）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail" },
+    { "path": "src/kernel/reference-image-guidance.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-longtail-sweep 从 src/publish-agent/reference-image-guidance.ts 整体 git mv：纯参考图引导（REFERENCE_IMAGE_MAX_COUNT 常量 + referenceImages* / referenceImageUrl / buildReferenceImageGuidance 纯字符串/过滤函数），仅 import kernel（publish-pipeline-types）。零 SQL / HTTP / LLM / 模块级 Set-Map。原路径 publish-agent/reference-image-guidance.ts 保留为 re-export 桩，同层消费方无感。消 1 条 api 侧 publish-scheduler 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail" },
+    { "path": "src/kernel/note-detail.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-longtail-sweep 从 src/agents/content-curator-role.ts 析出 NoteData 纯数据模型接口（noteId/title/content/author/likeCount/collectCount/authorFollowed/comments，全为原语与数组）。零 import、零 SQL、零 HTTP、零 LLM、无进程内活状态。ContentCuratorRole 类 + 事件订阅留 content-curator-role.ts（automation）并等值再导出。供 content 侧精选评估角色跨边界共导，消 2 条 content->automation 边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail" },
+    { "path": "src/kernel/account-identity.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-longtail-sweep 从 src/account-store.ts 析出 RETIRED_ACCOUNT_ID 退役保留账号哨兵字符串常量（'default'）。零 import、零 SQL、无进程内活状态。account-store.ts 从 kernel 导入并等值再导出，内部判定复用。供 publish-agent 发布媒体存储跨边界比对，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail" },
+    { "path": "src/kernel/account-projection-types.ts", "layer": "kernel", "basis": "【待定稿裁决】change automation-accounts-projection 新增：账号身份跨属主投影的端口契约（AccountIdentityProjectionRow 三列纯类型 + AccountRosterSourcePort 只读无参端口）。零 import、零 SQL / HTTP / LLM、无进程内活状态、不反向依赖业务层。accounts 属 api 单写，automation 域为把守卫读拉回同库而在本域冷备投影，投影来源经本端口取，避免 automation 直连 api 的库。api 侧 src/account-store.ts 实现、automation 侧 src/transport/account-projection-store.ts 消费。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-account-projection" },
+    { "path": "src/kernel/facebook-comment-config-types.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-longtail-sweep 从 src/config/facebook-comment-config-store.ts 析出纯数据模型类型（FacebookContainer / FacebookCommentMode / EffectiveFacebookCommentConfig），零 import、零 SQL、无进程内活状态。SCHEMA_SQL + FacebookCommentConfigStore 类 + coerce/校验函数留 facebook-comment-config-store.ts（automation）并从 kernel 导入等值再导出。供 automation 侧评论调度器跨边界共导，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail" },
+    { "path": "src/kernel/image-provider-registry.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-longtail-sweep 从 src/publish-agent/image-providers.ts 析出图片厂商注册表纯数据段 + 无状态归一（ImageProviderId / ImageProviderMeta / DEFAULT_IMAGE_PROVIDER / IMAGE_PROVIDERS 字面数据 / isKnownImageProvider / normImageProvider）。零 import、零 SQL / HTTP / LLM、零模块级 Set-Map（IMAGE_PROVIDERS 为字面 Record，归一用 Object.hasOwnProperty）。路由客户端类 RoutingImageProvider（依赖 image-provider.js 的 ImageProvider 客户端接口）留 image-providers.ts（content）并从 kernel 导入等值再导出。供 api 侧面板版本视图 / 配置外观跨边界共导，消 2 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail" },
+    { "path": "src/kernel/comment-approval-notice.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-longtail-sweep 从 src/agents/comment-approval-gate.ts 析出 CommentApprovalNoticeInput 纯输入数据模型（requestId/noteId/text/title/authorName/accountId/accountName + approvalSource union，全为原语）。零 import、零 SQL、无进程内活状态。CommentApprovalGate 角色留 comment-approval-gate.ts（automation）并从 kernel 导入等值再导出。供飞书卡片层跨边界共导，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail" },
+    { "path": "src/kernel/mandatory-comment-notice.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-longtail-sweep 从 src/orchestrator/role-dispatcher.ts 析出 MandatoryCommentOutcome 结局 union + MandatoryCommentOutcomeNoticeInput 纯输入数据模型（全为原语与 union）。零 import、零 SQL、无进程内活状态。RoleDispatcher 实现留 role-dispatcher.ts（automation）并从 kernel 导入等值再导出（未触碰 RoleName / 角色注册）。供飞书卡片层跨边界共导，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail" },
+    { "path": "src/kernel/publish-approval-contract.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-longtail-sweep 从 src/publish-agent/publish-approval-store.ts 析出发布审批纯枚举 + 哨兵错误（APPROVAL_VOID_REASONS / ApprovalVoidReason / isApprovalVoidReason / APPROVAL_BLOCKED_REASONS / ApprovalBlockedReason 字面 tuple 与派生 union；ApprovalUnreadableError 纯 Error 子类，与 schema-capability-contract 的 SchemaCapabilityError 同一手法）。零 import、零 SQL、无 pg、无模块级 Set-Map。ApprovalDecisionStore 类 + pg 读写留 publish-approval-store.ts（automation）并从 kernel 导入等值再导出。供发布下发编排跨边界共导，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail" },
+    { "path": "src/kernel/publish-generation-types.ts", "layer": "kernel", "basis": "【待定稿裁决】change block2-content-process-split（2e batch1）新增：内容生成触发窄面端口契约（PublishGenerationPort），仅 import kernel 的 publish-pipeline-types（TriggerInput / PublishResult）。零 SQL / HTTP / LLM / 无模块级 Set-Map。默认 local 时组合根注入 PublishOrchestrator 本体、http 时注入 PublishGenerationHttpClient，两者结构兼容本接口。为拆进程后 automation 经端口远程触发 content 生成而立。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-process-split" },
+    { "path": "src/kernel/publish-status-types.ts", "layer": "kernel", "basis": "【待定稿裁决】change block2-content-process-split（2e batch1）新增：发布队列状态读侧窄面端口契约（PublishStatusReader，getStatus 异步读），零 import。零 SQL / HTTP / LLM / 无进程内活状态。默认 local 时组合根把 PublishOrchestrator.getStatus 适配为异步端口注入、http 时注入 PublishStatusHttpClient。为后台/客户端经数据网关读发布状态而立。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-process-split" },
+    { "path": "src/kernel/risk-read-types.ts", "layer": "kernel", "basis": "【待定稿裁决】change block2-api-split 新增：风控只读窄面端口契约（RiskReadPort，getState / effectiveQuotas / slowStartView 异步读），零 import。零 SQL / HTTP / LLM / 无进程内活状态。风控最终状态单写仍留 automation 的 apply-callback；api/panel 经本端口取只读投影（默认 local 直连本地 RiskController、http 经 RiskReadHttpClient）。为拆进程后 api 侧读风控态而立。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-process-split" },
+
+    { "path": "src/kernel/facebook-group-join-prompt.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-behavior-class-ports 从 src/agents/facebook-group-join-judge.ts（automation）析出纯 prompt 构建段：FacebookGroupJoinObservation 观测数据模型 + FacebookGroupJoinPhase 枚举 + buildFacebookGroupJoinJudgePrompt 纯函数（入参→prompt 字符串）。零 import、零 SQL、零 LLM、无进程内活状态。判定类 FacebookGroupJoinJudge（确定性短路 / LLM 调用 / 审计回写）留 facebook-group-join-judge.ts（automation）并从 kernel 等值再导出。供 api 侧静态 prompt 预览跨边界共导，消 1 条 api->automation 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final" },
+    { "path": "src/kernel/facebook-comment-composer-prompt.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-behavior-class-ports 从 src/comment-agent/facebook-comment-composer-prompt.ts 整体 git mv：整文件为纯 Facebook 评论撰写 prompt 构建（FacebookCommentComposerPromptInput + buildFacebookCommentComposerPrompt），唯一 import 为 kernel 的 soul-types 类型与 writing-language 指令。零 SQL / HTTP / LLM / 模块级 Set-Map。原路径 comment-agent/facebook-comment-composer-prompt.ts 保留为 re-export 桩，automation 层内部消费方无感。消 1 条 api->automation 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final" },
+    { "path": "src/kernel/interaction-reply-prompt.ts", "layer": "kernel", "basis": "【待定稿裁决·部分析出】change decouple-behavior-class-ports 从 src/interactions/reply-ai.ts（content）析出纯 prompt 构建段：buildInteractionReplyPrompt + requiresKnowledgeAnswer 纯判定 + 输出 schema 常量 + InteractionReplyInput/InteractionReplyRole 类型，仅 import kernel 互动域类型。原文件里 KNOWLEDGE_QUESTION_INTENTS 为模块级 new Set（门禁 §4.7 判「进程内活状态」禁入 kernel），此处改写为只读数组 + .includes，语义逐字等价。LLM 调用类 ReplyAiService、解析/纠正 prompt（依赖 LlmClient / setTimeout）留 reply-ai.ts（content）并从 kernel 等值再导出。供 api 侧静态 prompt 预览跨边界共导，消 1 条 api->content 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final" },
+    { "path": "src/kernel/cover-form-sense-prompt.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-behavior-class-ports 从 src/publish-agent/cover-form-sensor.ts（content）析出 buildCoverFormSensePrompt 纯函数（零入参、返回固定视觉判定指令）。零 import、零 SQL、零 LLM、无进程内活状态。感知服务 createCoverFormSensor / 多模态调用 / 缓存回写留 cover-form-sensor.ts（content）并从 kernel 等值再导出。供 api 侧静态 prompt 预览跨边界共导，消 1 条 api->content 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final" },
+    { "path": "src/kernel/cover-card-copy-prompt.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-behavior-class-ports 从 src/publish-agent/prompts.ts（content）析出 buildCoverCardCopyPrompt 纯构建函数与其依赖的 buildContentVisualExcerpt（有界正文摘录纯字符串函数）+ CONTENT_VISUAL_EXCERPT_MAX 常量。零 import、零 SQL、零 LLM、无模块级 Set-Map。prompts.ts 其余多角色构建（依赖 content 兄弟模块 types / content-visual-brief）留原文件（content）并从 kernel 等值再导出这两个纯物。供 api 侧静态 prompt 预览跨边界共导，消 1 条 api->content 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final" },
+    { "path": "src/kernel/content-visual-brief.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-behavior-class-ports 从 src/publish-agent/content-visual-brief.ts 整体 git mv：整文件为正文视觉 brief 的纯归一/兜底/格式化函数与纯数据（normalizeContentVisualBrief / ensureContentVisualCategory / createFallbackContentVisualBrief / formatContentVisualCategoryBrief / categorySafetyInstruction / inferContentVisualKind / CONTENT_VISUAL_CATEGORY_LABELS 等），唯一 import 为 kernel 的 visual-reference-types 类型。零 SQL / HTTP / LLM / 模块级 Set-Map（nonEmpty 内的 new Set 为函数体局部量、非模块级单例）。原路径 publish-agent/content-visual-brief.ts 保留为 re-export 桩，content 层内部消费方无感。为 visual-fidelity-audit-prompt 能进 kernel 而抬入（其构建依赖本文件两个格式化函数）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final" },
+    { "path": "src/kernel/visual-fidelity-audit-prompt.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-behavior-class-ports 从 src/publish-agent/visual-fidelity-auditor.ts（content）析出 VisualAuditInput 审核输入模型 + buildVisualFidelityAuditPrompt 纯函数（入参→视觉模型文本指令），仅 import kernel（visual-reference-types 类型 + content-visual-brief 的 categorySafetyInstruction/formatContentVisualCategoryBrief）。零 LLM 调用 / 零连库 / 无进程内活状态。审核服务 createVisualFidelityAuditor / 多模态组装 / 解析留 visual-fidelity-auditor.ts（content）并从 kernel 等值再导出。供 api 侧静态 prompt 预览跨边界共导，消 1 条 api->content 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final" },
+    { "path": "src/kernel/visual-reference-prompts.ts", "layer": "kernel", "basis": "【待定稿裁决】change decouple-behavior-class-ports 从 src/publish-agent/visual-reference-analyzer.ts（content）析出 buildVisualReferenceSetPrompt + buildVisualReferenceSpecialistPrompt 两个纯函数（入参→视觉模型文本指令），仅 import kernel 的 visual-reference-types 枚举/类型。零 LLM 调用 / 零连库 / 无进程内活状态。分析服务 createVisualReferenceAnalyzer / 多模态调用 / 解析缓存留 visual-reference-analyzer.ts（content）并从 kernel 等值再导出。供 api 侧静态 prompt 预览跨边界共导，消 1 条 api->content 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final" },
+    { "path": "src/kernel/pg-owner-connection-resolver.ts", "layer": "kernel", "basis": "【待定稿裁决】change Block③ 物理拆库 L2 前置：按 owner 解析 PG 连接配置的纯函数 resolveOwnerPgConfig。只 import type pg + kernel 的 DEFAULT_PG_CONFIG（pg-config.ts），零 SQL 字面量 / 零 HTTP / 零 LLM / 无进程内活状态 / 不反向依赖业务层。物理拆库后三属主服务各连各自库、组合根按 owner 取池，本模块收成唯一「owner→PoolConfig」解析口；owner URL 未配时逐字回落共享单库配置。满足 §4.7 kernel 准入（封闭花名册新增成员，请求回写 §4.7）。" },
+    { "path": "src/kernel/client-env-automation-types.ts", "layer": "kernel", "basis": "【待定稿裁决】change block3-l3-client-user-read-port 新写：客户环境生命周期（api 属主 client-auth/client-user-store）对 automation 域的只读投影端口契约（ClientEnvAutomationReader 接口 + OffboardProjection / EnvRiskStateProjection 纯行类型 + OffboardProjectionState/Reason 字面量联合）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。与 panel-automation-types（面板专用跨表聚合读端口）同类、形状各按消费方定：读方（api）只依赖本 kernel 接口、绝不直连 automation 的库；属主实现在 src/interactions/client-env-automation-read.ts（automation）跑在 automation 池上。Block③ 物理拆库 L3 客户环境读侧解耦。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3" },
+    { "path": "src/interactions/client-env-automation-read.ts", "layer": "automation", "basis": "【待定稿裁决】change block3-l3-client-user-read-port 新写：kernel 端口 ClientEnvAutomationReader 的 automation 属主实现（PgClientEnvAutomationRead），跑在组合根注入的 automation 池上，只读 automation 属主表 interaction_offboards / interaction_auth_state / risk_state（SQL 从 client-user-store 逐字迁来）。src/interactions/ 目录规则 layer=automation 但 newFile=adjudicate，故逐文件裁定：本文件是同目录 offboard-write-adapter.ts（离场表单写者）的读侧配对，同域同段（§4.6.1 离场 saga 段），归 automation。请求回写 §4.7 见 docpatch RK-block3" },
+    { "path": "src/kernel/interaction-auth-gate-types.ts", "layer": "kernel", "basis": "【待定稿裁决】change block3-l3-auth-write-owner-collapse 新写：互动域环境授权闸的**跨域操作**端口契约（InteractionAuthGate 接口 + 回执 / 输入输出纯类型 + 拒绝档与环境串行档字面量联合）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。与 offboard-cleanup-grant-types 同族且方向相反：那一条是 api 调 automation，本条是 automation 调 api。文件头载明「闸在 api、写在 automation ⇒ 两笔 + 条件写回执」的判据，以及回执**能**与**不能**保证什么。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3" },
+    { "path": "src/kernel/interaction-audit-outbox.ts", "layer": "kernel", "basis": "【待定稿裁决】change block3-l3-auth-write-owner-collapse 新写：配置面审计（interaction_audit_events，§5.1 归 api 单写）的跨属主投递契约 —— outbox 主题名 / 中继消费者名 / 保留期常量 + 审计行纯 DTO + 纯函数解码守卫。零 import、零 SQL / HTTP / LLM / 模块级活状态。被 automation 侧（interaction-store 入队）与 api 侧（interaction-api-writes 落地）共同引用，正是 kernel 段该承载的共享契约。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3" },
+    { "path": "src/kernel/offboard-cleanup-grant-types.ts", "layer": "kernel", "basis": "【待定稿裁决】change block3-l3-grant-collapse 新写：离场清理授权（cleanup grant）签发/烧票的**跨域操作**端口契约（OffboardCleanupGrantOperations 接口 + OffboardGrantRecord / Issue-Consume 输入输出纯类型 + 状态/原因/失败档字面量联合）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。与 client-env-automation-types（只读投影端口）互补：本端口是**写操作**端口，且方法**不接调用方事务句柄、自成一笔事务**——因为这两笔事务碰的表全是 automation 属主、与任何 api 写都不共提交，故可整体收回属主域；属主实现在 src/interactions/offboard-cleanup-grant-ops.ts（automation）跑在 automation 池上。文件头载明搬迁 MUST 逐字保留的五条不变量（判定顺序 / 失败也提交 / 取行加锁与烧票同事务 / now 可注入 / epoch ms）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3" },
+    { "path": "src/interactions/offboard-cleanup-grant-ops.ts", "layer": "automation", "basis": "【待定稿裁决】change block3-l3-grant-collapse 新写：kernel 端口 OffboardCleanupGrantOperations 的 automation 属主实现（PgOffboardCleanupGrantOps），持组合根注入的 automation 池、**自己开事务**，只写 automation 属主表 interaction_offboards / interaction_offboard_audit（三条 SQL 从同目录 offboard-write-adapter.ts 逐字迁来并内化）。src/interactions/ 目录规则 layer=automation 但 newFile=adjudicate，故逐文件裁定：本文件与 offboard-write-adapter.ts 同域同段（§4.6.1 离场 saga 段），差别只在「自开事务」vs「接调用方句柄」，归 automation。请求回写 §4.7 见 docpatch RK-block3" },
+    { "path": "src/kernel/offboard-materialization-types.ts", "layer": "kernel", "basis": "【待定稿裁决】change block3-l3-offboard-eventual-consistency 新写：离场**执行台账物化**的跨域操作端口契约（OffboardMaterializationOperations 接口 + MaterializeEnvironmentOffboardInput / Outcome 纯类型 + 原因字面量联合）。唯一 import 是同层 client-env-automation-types 的 OffboardProjection 行类型；零 SQL / HTTP / LLM / 模块级 Set-Map。与同族两端口互补：client-env-automation-types 是只读投影、offboard-cleanup-grant-types 是清理授权的签发/烧票，本端口是台账物化。三者都**不接调用方事务句柄、各自成一笔事务**——这正是拆库后仍成立的判据。属主实现在 src/interactions/offboard-write-adapter.ts（automation）跑在 automation 池上。本端口取代了原 api 侧的 client-auth/offboard-write-port.ts（那个端口的方法接 api 事务句柄，于是 api 的连接去跑 automation 的 SQL，拆库即 42P01 或写进错的库；该文件随本 change 删除）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3" }
   ]
 }
