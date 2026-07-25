@@ -11,6 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PublishLogStore } from '../../src/publish-agent/publish-log-store.js';
 import type { PublishRecord } from '../../src/publish-agent/types.js';
+import { ensureCapabilitySchema, probeSchemaShape } from '../../src/schema/schema-capability.js';
 
 interface Call {
   sql: string;
@@ -50,7 +51,7 @@ const baseRecord: PublishRecord = {
 
 test('updateStatus 双写：主写 publish_log + 影子 upsert publish_execution_state 都发生', async () => {
   const { pool, mainWrites, mirrorWrites } = makePool();
-  const store = new PublishLogStore({ pool: pool as never });
+  const store = new PublishLogStore({ schemaEnsurer: ensureCapabilitySchema, schemaProber: probeSchemaShape, pool: pool as never });
 
   await store.updateStatus(7, 'submitted');
 
@@ -66,7 +67,7 @@ test('updateStatus 双写：主写 publish_log + 影子 upsert publish_execution
 
 test('insert 播种影子：以 RETURNING 的真实 id + 初始 status 落影子行', async () => {
   const { pool, mirrorWrites } = makePool();
-  const store = new PublishLogStore({ pool: pool as never });
+  const store = new PublishLogStore({ schemaEnsurer: ensureCapabilitySchema, schemaProber: probeSchemaShape, pool: pool as never });
 
   const id = await store.insert({ ...baseRecord, status: 'pending_approval' });
   assert.equal(id, 4242);
@@ -78,7 +79,7 @@ test('insert 播种影子：以 RETURNING 的真实 id + 初始 status 落影子
 
 test('updatePostId 双写：影子带 platform_post_id 与 post_url，status=published', async () => {
   const { pool, mirrorWrites } = makePool();
-  const store = new PublishLogStore({ pool: pool as never });
+  const store = new PublishLogStore({ schemaEnsurer: ensureCapabilitySchema, schemaProber: probeSchemaShape, pool: pool as never });
 
   await store.updatePostId(9, 'POST_9', 'https://x/note?xsec=abc');
 
@@ -89,7 +90,7 @@ test('updatePostId 双写：影子带 platform_post_id 与 post_url，status=pub
 
 test('fail-safe：影子写抛错时主路径仍成功、不抛（发布链路不被影子连累）', async () => {
   const { pool, mainWrites, mirrorWrites } = makePool({ throwOnMirror: true });
-  const store = new PublishLogStore({ pool: pool as never });
+  const store = new PublishLogStore({ schemaEnsurer: ensureCapabilitySchema, schemaProber: probeSchemaShape, pool: pool as never });
 
   // 不得抛：影子的异常被 store 内部 try/catch 兜住。
   await store.updateStatus(11, 'failed');
@@ -105,7 +106,7 @@ test('fail-safe：影子写抛错时主路径仍成功、不抛（发布链路�
 
 test('条件双写：rejectPendingApproval 未命中（rowCount=0）时不写影子', async () => {
   const { pool, mirrorWrites } = makePool({ rejectRowCount: 0 });
-  const store = new PublishLogStore({ pool: pool as never });
+  const store = new PublishLogStore({ schemaEnsurer: ensureCapabilitySchema, schemaProber: probeSchemaShape, pool: pool as never });
 
   const ok = await store.rejectPendingApproval(13);
   assert.equal(ok, false, '权威写未命中');

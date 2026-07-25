@@ -15,17 +15,13 @@ import {
   isValidThinkingModePatch,
 } from './role-catalog.js';
 import type { CategoryConfigStore } from './category-config-store.js';
-import { normProvider, ProviderKeyMissingError, buildThinkingParams } from '../llm/index.js';
+import { normProvider } from '../kernel/text-provider-registry.js';
+import type { ModelProbeResult } from './role-config-facade.js';
 import type {
   PanelCategoryConfig,
   CategoryConfigCatalogView,
   CategoryConfigSetResult,
 } from '../panel/types.js';
-
-/** 生效模型是否支持"开启(on)"（与出口 buildThinkingParams 同源；DashScope Qwen 需流式 → false）。 */
-function thinkingOnAvailableFor(provider: string, model: string): boolean {
-  return Object.keys(buildThinkingParams(provider, model, 'on').params).length > 0;
-}
 
 export interface CategoryConfigFacadeDeps {
   store: CategoryConfigStore;
@@ -34,7 +30,9 @@ export interface CategoryConfigFacadeDeps {
   /** 当前全局文本厂商（change model-config-volcengine-provider）：分类无覆盖时回落的生效厂商。 */
   getGlobalTextProvider: () => string;
   /** 保存前探活：按 provider 探；模型不可用抛错；该厂商密钥缺失抛 ProviderKeyMissingError。 */
-  probeModel: (provider: string, model: string) => Promise<void>;
+  probeModel: (provider: string, model: string) => Promise<ModelProbeResult>;
+  /** 生效模型是否支持思考「开启(on)」。实现在组合根（与出口翻译同源）。 */
+  thinkingOnAvailable: (provider: string, model: string) => boolean;
 }
 
 export function createCategoryConfigPanel(deps: CategoryConfigFacadeDeps): PanelCategoryConfig {
@@ -62,7 +60,7 @@ export function createCategoryConfigPanel(deps: CategoryConfigFacadeDeps): Panel
             // 思考模式（change role-thinking-mode-config）：分类覆盖则用覆盖、否则 default。
             effectiveThinkingMode: ovThinking ?? 'default',
             thinkingModeOverridden: !!ovThinking,
-            thinkingOnAvailable: thinkingOnAvailableFor(effProvider, effModel),
+            thinkingOnAvailable: deps.thinkingOnAvailable(effProvider, effModel),
             updatedAt: row?.updatedAt ?? null,
             updatedBy: row?.updatedBy ?? null,
           };
@@ -85,11 +83,9 @@ export function createCategoryConfigPanel(deps: CategoryConfigFacadeDeps): Panel
       const prov = normProvider(patch.provider);
       // 非空模型名：按所选 provider 保存前探活；不过则拒，绝不落库（红线：绝不静默假成功）。
       if (wantsModel) {
-        try {
-          await deps.probeModel(prov, (patch.model as string).trim());
-        } catch (e) {
-          if (e instanceof ProviderKeyMissingError) return { ok: false, reason: 'provider_key_missing' };
-          return { ok: false, reason: 'model_invalid' };
+        const probe = await deps.probeModel(prov, (patch.model as string).trim());
+        if (!probe.ok) {
+          return { ok: false, reason: probe.reason === 'provider_key_missing' ? 'provider_key_missing' : 'model_invalid' };
         }
       }
       await deps.store.set(

@@ -7,6 +7,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { PublishLogStore } from '../../src/publish-agent/publish-log-store.js';
+import { ensureCapabilitySchema, probeSchemaShape } from '../../src/schema/schema-capability.js';
 
 const META = {
   topics: ['旧话题'], mentions: ['@某人'], location: '上海', collection: '合集A',
@@ -42,13 +43,13 @@ function fakeClient(row: Record<string, unknown> | null, opts: { updateRowCount?
 function storeWith(fc: ReturnType<typeof fakeClient>, now?: number) {
   // 只需 connect()；构造器接受注入 pool。
   const pool = { connect: async () => fc.client } as any;
-  return new PublishLogStore({ pool, ...(now === undefined ? {} : { clock: () => now }) });
+  return new PublishLogStore({ schemaEnsurer: ensureCapabilitySchema, schemaProber: probeSchemaShape, pool, ...(now === undefined ? {} : { clock: () => now }) });
 }
 
 describe('PublishLogStore.editDraft', () => {
   test('校验分支在事务前诚实拒（不碰 DB）：空标题→invalid_title、非法可见范围→invalid_field、坏 topics→invalid_field、清空可见范围→missing_visibility', async () => {
     // pool.connect 抛错——若校验未在事务前拦住则会命中它。
-    const store = new PublishLogStore({ pool: { connect: async () => { throw new Error('should not connect'); } } as any });
+    const store = new PublishLogStore({ schemaEnsurer: ensureCapabilitySchema, schemaProber: probeSchemaShape, pool: { connect: async () => { throw new Error('should not connect'); } } as any });
     assert.deepEqual(await store.editDraft(1, 0, { title: '   ' }, 'op'), { ok: false, reason: 'invalid_title' });
     assert.deepEqual(await store.editDraft(1, 0, { visibility: 'nope' }, 'op'), { ok: false, reason: 'invalid_field' });
     assert.deepEqual(await store.editDraft(1, 0, { visibility: '' }, 'op'), { ok: false, reason: 'missing_visibility' });
@@ -186,7 +187,7 @@ describe('PublishLogStore.editDraft — 配图删除（pending-draft-image-delet
   });
 
   test('坏类型 images（非数组 / 含非 string）→ invalid_field，事务前拒、不碰 DB', async () => {
-    const store = new PublishLogStore({ pool: { connect: async () => { throw new Error('should not connect'); } } as any });
+    const store = new PublishLogStore({ schemaEnsurer: ensureCapabilitySchema, schemaProber: probeSchemaShape, pool: { connect: async () => { throw new Error('should not connect'); } } as any });
     assert.deepEqual(await store.editDraft(1, 0, { images: 'a' as any }, 'op'), { ok: false, reason: 'invalid_field' });
     assert.deepEqual(await store.editDraft(1, 0, { images: [1 as any] }, 'op'), { ok: false, reason: 'invalid_field' });
   });

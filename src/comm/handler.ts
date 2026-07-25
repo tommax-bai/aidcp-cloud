@@ -49,13 +49,13 @@ import {
   type PersonaGenerateResultPayload,
   type PersonaPersistPayload,
 } from './protocol.js';
-import type { PersonaGenerator } from '../agents/persona-generator.js';
-import type { PanelPersonaConfig } from '../panel/types.js';
 import {
   MAX_PERSONA_KEYWORDS,
   MAX_PERSONA_KEYWORD_LENGTH,
-  type AccountPersonaService,
-} from '../config/account-persona-service.js';
+  type AccountPersonaPort,
+  type PersonaGeneratorPort,
+  type PersonaWritePort,
+} from '../kernel/persona-ports.js';
 import type { CommandSequencer } from '../publish-agent/command-sequencer.js';
 import type { EdgeTaskLeaseClient } from './edge-task-lease-client.js';
 import type { MessageHandler, EdgeSession, EdgePusher } from './ws-server.js';
@@ -65,7 +65,7 @@ import type { TaskPlanner } from '../planner/types.js';
 import type { TextCompletionPort } from '../kernel/llm-contract.js';
 import type { EventBus } from '../event-bus/index.js';
 import type { PublishApprovalCardData } from './feishu-card-contract.js';
-import type { BotChatStore } from '../cache/bot-chat-store.js';
+import type { DefaultChatProvider } from '../kernel/default-chat-provider.js';
 import { RiskController, SessionBudget, buildPacingSnapshot } from '../risk/index.js';
 import type { RiskAction, RiskStatus, RiskQuotaLevel, PacingFloorProvider } from '../risk/index.js';
 import { normalizePlatformId, resolveReadSurface } from '../platform/index.js';
@@ -76,8 +76,8 @@ import {
 import { isWritingLanguage } from '../kernel/writing-language.js';
 import type { WritingLanguage } from '../kernel/soul-types.js';
 import type { PacingSnapshotPayload } from './protocol.js';
-import type { AccountStateManager } from '../account-state.js';
-import { noteMirrorStaleRefusal } from '../config-mirror-freshness.js';
+import type { AccountPausePort } from '../kernel/account-pause-port.js';
+import type { ConfigMirrorGatePort } from '../kernel/config-mirror-bump-types.js';
 import {
   parseAuthStatusPayload,
   parseOffboardResultPayload,
@@ -160,7 +160,7 @@ export interface HandlerDeps {
    * 由组合根注入的 api 侧实现负责 `buildPublishApprovalCard` + messenger 发送。未注入则视为未配置审批群。
    */
   approvalCardSink?: (chatId: string, data: PublishApprovalCardData) => Promise<void>;
-  botChatStore?: Pick<BotChatStore, 'getDefaultChat'>;
+  botChatStore?: DefaultChatProvider;
   /**
    * 卡片目标统一解析（change unify-card-routing-origin-then-team）：来源会话 → 账号团队群 → 默认群。
    * 注入后取代下面 botChatStore.getDefaultChat 的默认群兜底——边缘发起的发布审批卡由此按会话账号
@@ -173,7 +173,12 @@ export interface HandlerDeps {
   serverVersion?: string;
   riskController?: RiskController;
   eventBus: EventBus;
-  accountState?: AccountStateManager;
+  accountState?: AccountPausePort;
+  /**
+   * 配置副本停手闸（change cloud-coupling-phase4-runtime-ports）：由组合根注入 api 侧实现。
+   * 未注入 = 恒不陈旧，逐位等于「未安装新鲜度事实源 → fresh」的既有语义。
+   */
+  configMirrorGate?: Pick<ConfigMirrorGatePort, 'noteStaleRefusal' | 'isStale'>;
   /** 验证码事件协调器（risk.captcha_detected/cleared 的消费端）。未注入则两类上报被忽略（向后兼容）。 */
   captcha?: CaptchaCoordinator;
   /** 验证码协助通道：消费 edge 截图和人工点击复检结果。未注入则忽略（向后兼容）。 */
@@ -229,12 +234,12 @@ export interface HandlerDeps {
    * 建号自助人设生成器（change edge-persona-keyword-generation）：persona.generate 的处理端。
    * 未注入 → persona.generate 诚实回 { ok:false, reason:'unavailable' }（向后兼容）。
    */
-  personaGenerator?: Pick<PersonaGenerator, 'generate'>;
+  personaGenerator?: PersonaGeneratorPort;
   /**
    * 人设写入外观（复用 setPersona 的 FK 守护 / 空校验 / soul 校验 / 落库 / 绑定唤醒）：persona.persist 的处理端。
    * 未注入 → persona.persist 诚实回 { ok:false, reason:'unavailable' }（向后兼容）。
    */
-  personaFacade?: Pick<PanelPersonaConfig, 'setPersona'>;
+  personaFacade?: PersonaWritePort;
   /**
    * Durable first-post onboarding state. `armFirstBind` returns true only when this
    * persist created the account's lifetime row; unavailable storage disables the
@@ -242,7 +247,7 @@ export interface HandlerDeps {
    */
   firstPostOnboarding?: { armFirstBind(accountId: string): Promise<boolean> };
   /** Production single-account persona path shared by WebSocket and customer-auth HTTP. */
-  personaService?: Pick<AccountPersonaService, 'generate' | 'persist'>;
+  personaService?: AccountPersonaPort;
   /** 客户端稿件预览内的发布/取消审批动作。未注入则诚实返回 unavailable。 */
   publishApprovalAction?: (
     payload: PublishApprovalActionPayload,
@@ -344,7 +349,9 @@ export class DefaultMessageHandler implements MessageHandler {
     this.clock = deps.clock ?? Date.now;
     this.serverVersion = deps.serverVersion ?? '0.1.0';
     this.logger = deps.logger ?? console;
-    this.riskController = deps.riskController ?? new RiskController();
+    this.riskController =
+      deps.riskController
+      ?? new RiskController({ mirrorStale: (mirrorKey) => deps.configMirrorGate?.isStale(mirrorKey) ?? false });
   }
 
   /** 该连接的事件总线（多租户私有通道）；未接线则回落全局总线（单租户向后兼容）。 */
@@ -488,7 +495,7 @@ export class DefaultMessageHandler implements MessageHandler {
         if (pauseState !== 'active') {
           // 记账落在**真正的拒绝点**（取值口 pauseStateOf 保持纯读）：这里确实少放行了一次平台动作。
           if (pauseState === 'unknown') {
-            noteMirrorStaleRefusal('account_status', `note_arrived:${session.accountId}`);
+            this.deps.configMirrorGate?.noteStaleRefusal('account_status', `note_arrived:${session.accountId}`);
           }
           this.logger.log(
             `[comm] 账号${pauseState === 'paused' ? '已暂停' : '暂停态副本陈旧（停手）'}，跳过笔记处理:`,

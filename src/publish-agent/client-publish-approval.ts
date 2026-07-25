@@ -3,7 +3,7 @@ import type {
   PublishApprovalActionResultPayload,
 } from '../api-contracts/publish-approval-wire.js';
 import type { DispatchDraft, EditDraftPatch, EditDraftResult } from './publish-log-store.js';
-import { normalizePlatformId } from '../platform/index.js';
+import { normalizePlatformId } from '../kernel/platform-types.js';
 import { validatePublishSchedule } from './schedule-policy.js';
 
 interface ApprovalSnapshot {

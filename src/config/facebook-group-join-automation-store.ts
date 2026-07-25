@@ -12,7 +12,7 @@
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
 import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
-import { normalizePlatformId, SCHEDULED_GROUP_JOIN_DAILY_CAP_MAX } from '../platform/index.js';
+import { normalizePlatformId, SCHEDULED_GROUP_JOIN_DAILY_CAP_MAX } from '../kernel/platform-types.js';
 import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 
 const { Pool } = pg;

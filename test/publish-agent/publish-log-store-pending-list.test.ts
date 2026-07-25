@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PublishLogStore } from '../../src/publish-agent/publish-log-store.js';
+import { ensureCapabilitySchema, probeSchemaShape } from '../../src/schema/schema-capability.js';
 
 function row(id = 42) {
   return {
@@ -27,7 +28,7 @@ test('兜底下发列表按本地 target 过滤自动排期稿，同时保留历
       return { rows: [{ id: 1 }, { id: 2 }] };
     },
   };
-  const store = new PublishLogStore({ pool: pool as never });
+  const store = new PublishLogStore({ schemaEnsurer: ensureCapabilitySchema, schemaProber: probeSchemaShape, pool: pool as never });
   assert.deepEqual(await store.listPendingApprovalIds('dev'), [1, 2]);
   assert.match(calls[0].sql, /publish_metadata->'scheduleExecution' IS NULL/);
   assert.match(calls[0].sql, /executionTarget' = \$1/);
@@ -47,7 +48,7 @@ test('待审批列表的 items 与 total 均在 SQL 内绑定账号和 pending �
       return /count\(\*\)/i.test(sql) ? { rows: [{ n: '2' }] } : { rows: [row(43), row(42)] };
     },
   };
-  const store = new PublishLogStore({ pool: pool as never });
+  const store = new PublishLogStore({ schemaEnsurer: ensureCapabilitySchema, schemaProber: probeSchemaShape, pool: pool as never });
   const result = await store.listPendingPublishPreviewsForAccount('account-1', { limit: 12, offset: 24 });
 
   assert.equal(result.total, 2);
@@ -73,7 +74,7 @@ test('待审批详情用记录号和账号联合查询，非命中不暴露记�
       return { rows: [] };
     },
   };
-  const store = new PublishLogStore({ pool: pool as never });
+  const store = new PublishLogStore({ schemaEnsurer: ensureCapabilitySchema, schemaProber: probeSchemaShape, pool: pool as never });
   const result = await store.pendingPublishPreviewForAccountRecord('account-1', 42);
 
   assert.equal(result, null);
@@ -96,7 +97,7 @@ test('客户端排期占用只查询账号的小红书 scheduled 与 Cloud 固�
       };
     },
   };
-  const store = new PublishLogStore({ pool: pool as never, clock: () => now });
+  const store = new PublishLogStore({ schemaEnsurer: ensureCapabilitySchema, schemaProber: probeSchemaShape, pool: pool as never, clock: () => now });
 
   assert.deepEqual(await store.listOccupiedScheduledTimesForAccount('account-1'), [
     Date.parse('2026-07-21T08:15:00+08:00'),
@@ -118,7 +119,7 @@ test('客户首页当前发布只读取仍在途状态，submitted 不与 confir
       return { rows: [{ id: 88, title: '待平台确认', status: 'submitted', ts: '1721277200000' }] };
     },
   };
-  const store = new PublishLogStore({ pool: pool as never });
+  const store = new PublishLogStore({ schemaEnsurer: ensureCapabilitySchema, schemaProber: probeSchemaShape, pool: pool as never });
   const result = await store.currentPublishForAccount('account-1');
 
   assert.deepEqual(result, { id: 88, title: '待平台确认', status: 'submitted', at: 1_721_277_200_000 });

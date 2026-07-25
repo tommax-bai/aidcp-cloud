@@ -22,11 +22,15 @@
 
 import type { AccountStore } from './account-store.js';
 import { isMirrorStale } from './config-mirror-freshness.js';
+import type { AccountPauseState } from './kernel/account-pause-port.js';
 
 export type AccountStatus = 'active' | 'paused';
 
-/** 暂停态读取结果（三态）。`unknown` = 副本陈旧、无法确认，MUST 按停手处理。 */
-export type AccountPauseState = 'paused' | 'active' | 'unknown';
+/**
+ * 暂停态读取结果（三态）。`unknown` = 副本陈旧、无法确认，MUST 按停手处理。
+ * 形状单写在 kernel（change cloud-coupling-phase4-runtime-ports），此处等值再导出。
+ */
+export type { AccountPauseState } from './kernel/account-pause-port.js';
 
 export interface AccountState {
   accountId: string;

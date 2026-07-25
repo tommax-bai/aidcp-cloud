@@ -1,7 +1,8 @@
-import type { PersonaGenerator } from '../agents/persona-generator.js';
+import type { PersonaGeneratorPort } from '../kernel/persona-ports.js';
+import { MAX_PERSONA_KEYWORDS, MAX_PERSONA_KEYWORD_LENGTH } from '../kernel/persona-ports.js';
 import type { PanelPersonaConfig } from '../panel/types.js';
 import type { PersonaBinding } from '../kernel/persona-binding.js';
-import { normalizePlatformId } from '../platform/index.js';
+import { normalizePlatformId } from '../kernel/platform-types.js';
 import { loadSoulFromYaml } from '../soul/index.js';
 import { resolveLikeAffinity } from '../kernel/like-affinity.js';
 import { isWritingLanguage } from '../kernel/writing-language.js';
@@ -10,8 +11,7 @@ import type { WritingLanguage } from '../kernel/soul-types.js';
 export const MAX_PERSONA_BYTES = 32 * 1024;
 // Renderer caps visible content preferences at 24, but the request also carries derived
 // category/affinity markers. Keep transport validation bounded without rejecting that expansion.
-export const MAX_PERSONA_KEYWORDS = 64;
-export const MAX_PERSONA_KEYWORD_LENGTH = 40;
+export { MAX_PERSONA_KEYWORDS, MAX_PERSONA_KEYWORD_LENGTH } from '../kernel/persona-ports.js';
 const MAX_GENERATION_IDEMPOTENCY_ENTRIES = 1024;
 
 export interface AccountPersonaSummary {
@@ -64,7 +64,7 @@ export type AccountPersonaPersistResult =
   | { ok: false; reason: 'persona_required' | 'input_too_large' | 'unknown_account' | 'persona_invalid' | 'persist_failed' };
 
 export interface AccountPersonaServiceDeps {
-  generator: Pick<PersonaGenerator, 'generate'>;
+  generator: PersonaGeneratorPort;
   facade: Pick<PanelPersonaConfig, 'getDetail' | 'setPersona'>;
   firstPostOnboarding?: { armFirstBind(accountId: string): Promise<boolean> };
   /**

@@ -18,11 +18,12 @@
  * LLM 只产 identity + interests（含 seed_keywords）；behavior_guidelines 由代码据生成结果与受控点赞倾向确定性补齐。
  */
 
-import type { BehaviorGuidelines, LikeAffinity, Soul, WritingLanguage } from '../kernel/soul-types.js';
+import type { BehaviorGuidelines, LikeAffinity, Soul } from '../kernel/soul-types.js';
 import type { YamlValue } from '../kernel/yaml.js';
-import { loadSoulFromValue, loadSoulFromYaml, serializeSoul } from '../soul/index.js';
+import type { SoulCodec } from '../kernel/soul-codec.js';
 import { DEFAULT_LIKE_AFFINITY, generatedLikePrinciple, LIKE_AFFINITY_VALUES } from '../kernel/like-affinity.js';
 import type { TextCompletionPort } from '../kernel/llm-contract.js';
+import type { PersonaGenerateInput, PersonaGenerateOutcome } from '../kernel/persona-ports.js';
 
 // change cloud-coupling-phase0：`as const` 替代跨边界的角色名联合标注；防线见 content-role-names 合同测试。
 const ROLE_NAME = 'persona_generator' as const;
@@ -55,33 +56,26 @@ export function extractLikeAffinitySelection(keywordSelections: string[]): {
 
 export interface PersonaGeneratorOptions {
   llm: TextCompletionPort;
+  /** Soul 编解码端口（实现由组合根注入，api 属主）。 */
+  soulCodec: SoulCodec;
   /** 单次生成失败后的最大重试次数（默认 2；含首次共尝试 3 次）。 */
   maxRetries?: number;
 }
 
-export interface PersonaGenerateInput {
-  /** 账号标识（token 按账号记账；云端已以握手绑定 accountId 为准，本值仅用于记账归属）。 */
-  accountId: string;
-  /** 客户勾选的垂类/兴趣/语气关键词，以及可选受控 like_affinity 标记。 */
-  keywordSelections: string[];
-  /** Facebook-only，由 Cloud 入口校验后确定性注入，模型不得决定。 */
-  writingLanguage?: WritingLanguage;
-  /** 每账号差异化种子（调用方注入，如 accountId + nonce）：拌进 prompt 抗跨账号同质化。 */
-  diversitySeed?: string;
-}
-
-export type PersonaGenerateOutcome =
-  | { ok: true; soulYaml: string; identitySummary: string }
-  | { ok: false; reason: 'no_keywords' | 'generation_failed' | 'persona_invalid' };
+// 形状单写在 kernel（change cloud-coupling-phase4-runtime-ports）：automation 侧的 handler 只按
+// 端口引它，不再引本实现文件。此处等值再导出，本仓内既有消费方与测试逐字无感。
+export type { PersonaGenerateInput, PersonaGenerateOutcome } from '../kernel/persona-ports.js';
 
 export class PersonaGenerator {
   readonly roleName = ROLE_NAME;
   private readonly llm: TextCompletionPort;
+  private readonly soulCodec: SoulCodec;
   private readonly maxRetries: number;
 
   constructor(options: PersonaGeneratorOptions) {
     if (!options.llm) throw new Error('PersonaGenerator 需要 LlmClient');
     this.llm = options.llm;
+    this.soulCodec = options.soulCodec;
     this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
   }
 
@@ -116,7 +110,7 @@ export class PersonaGenerator {
       // 结构校验：直接在 JSON 对象上过 loadSoulFromValue（避开 YAML 语法层脆弱性）。
       let soul: Soul;
       try {
-        soul = loadSoulFromValue(parsed as YamlValue);
+        soul = this.soulCodec.parseValue(parsed as YamlValue);
         soul = {
           ...soul,
           ...(input.writingLanguage ? { writing_language: input.writingLanguage } : {}),
@@ -129,9 +123,9 @@ export class PersonaGenerator {
       }
 
       // 确定性序列化成 soul YAML + round-trip 自校验（防序列化漂移，落库前再兜一道）。
-      const soulYaml = serializeSoul(soul);
+      const soulYaml = this.soulCodec.serialize(soul);
       try {
-        loadSoulFromYaml(soulYaml);
+        this.soulCodec.parseYaml(soulYaml);
       } catch (err) {
         console.log(`[${ROLE_NAME}] 序列化 round-trip 失败(attempt ${attempt}): ${(err as Error).message}`);
         lastReason = 'persona_invalid';

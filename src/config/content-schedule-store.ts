@@ -25,14 +25,13 @@ import { SHANGHAI_DAY_START_SQL } from '../time/shanghai-day.js';
 import { isValidWeekActiveMask } from '../kernel/week-active-mask.js';
 import type { DeploymentTarget } from '../deployment-target.js';
 import {
-  availableScheduledAutomationActionsForPlatform,
-  normalizePlatformForCatalog,
-  platformRegistryEntry,
   SCHEDULED_CONTACT_COMMENT_DAILY_CAP_MAX,
   SCHEDULED_CONTENT_DAILY_CAP_MAX,
   type AvailableScheduledAutomationAction,
   type ScheduledAutomationAction,
-} from '../platform/index.js';
+  type ScheduledAutomationCatalogReader,
+  type ScheduledAutomationSupport,
+} from '../kernel/platform-types.js';
 import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 import {
   CONTENT_SCHEDULE_ACTION_MODES,
@@ -292,6 +291,12 @@ export interface ContentScheduleStoreOptions {
   /** schema 保障能力注入端口（必填、无默认）：组合根传 automation 的 ensureCapabilitySchema，本文件只从 kernel 取类型。 */
   schemaEnsurer: SchemaEnsurer;
   /**
+   * 排期自动化目录读端口（必填、无默认）：组合根传 automation 的注册表实装。
+   * MUST NOT 给默认实现——「全不支持」会把合法写入静默变成 unsupported_automation_action，
+   * 「全支持」会击穿平台准入闸，两边都是红线。
+   */
+  scheduledAutomationCatalog: ScheduledAutomationCatalogReader;
+  /**
    * 全局活跃周历只读 provider；缺失/非法沿浏览既有语义回落 null=全天活跃。
    *
    * **归属连带约束（change config-mirror-cross-process-invalidation task 1.4 / 5.3）**：
@@ -378,15 +383,9 @@ const ACTION_PATCH_FIELDS: Record<
  * 公共总开关与周历补丁不读取历史脏动作，因此不会被误伤。
  */
 function scheduledAutomationPatchSupported(
-  platform: string | null | undefined,
+  declarations: Record<ScheduledAutomationAction, ScheduledAutomationSupport> | null,
   patch: AccountContentSchedulePatch,
 ): boolean {
-  let declarations: ReturnType<typeof platformRegistryEntry>['scheduledAutomation'] | null = null;
-  try {
-    declarations = platformRegistryEntry(platform).scheduledAutomation;
-  } catch {
-    declarations = null;
-  }
 
   for (const action of Object.keys(ACTION_PATCH_FIELDS) as Array<Exclude<ScheduledAutomationAction, 'join_group'>>) {
     const fields = ACTION_PATCH_FIELDS[action];
@@ -426,9 +425,11 @@ export class ContentScheduleStore {
   private accountCache = new Map<string, AccountContentScheduleRow>();
 
   private readonly schemaEnsurer: SchemaEnsurer;
+  private readonly scheduledAutomationCatalog: ScheduledAutomationCatalogReader;
 
   constructor(options: ContentScheduleStoreOptions) {
     this.schemaEnsurer = options.schemaEnsurer;
+    this.scheduledAutomationCatalog = options.scheduledAutomationCatalog;
     this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.globalActiveWeekMask = options.globalActiveWeekMask ?? (() => null);
     this.pool =
@@ -704,7 +705,8 @@ export class ContentScheduleStore {
       [accountId],
     );
     if (account.rows.length === 0) return { ok: false, reason: 'account_not_found' };
-    if (!scheduledAutomationPatchSupported(account.rows[0]?.platform, patch)) {
+    const declarations = this.scheduledAutomationCatalog.declarationsFor(account.rows[0]?.platform);
+    if (!scheduledAutomationPatchSupported(declarations, patch)) {
       return { ok: false, reason: 'unsupported_automation_action' };
     }
 
@@ -898,14 +900,14 @@ export class ContentScheduleStore {
       });
       return {
         accountId: r.account_id,
-        platform: normalizePlatformForCatalog(r.platform),
+        platform: this.scheduledAutomationCatalog.normalizeForCatalog(r.platform),
         label: r.label ?? null,
         groupLabel: r.group_label ?? null,
         nickname: r.nickname ?? null,
         operatorAlias: r.operator_alias ?? null,
         displayName: display.name,
         displayNameSource: display.source,
-        availableActions: availableScheduledAutomationActionsForPlatform(r.platform),
+        availableActions: this.scheduledAutomationCatalog.availableActions(r.platform),
         autoEnabled: r.auto_enabled === true,
         postEnabled: actionModeEnabled(postMode),
         postMode,

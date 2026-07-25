@@ -1,11 +1,11 @@
 import type { EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
 import type { CommandSequencer, ScheduledReconciliationResult } from './command-sequencer.js';
-import type { PublishLogStore, ScheduledPublishRecord } from './publish-log-store.js';
+import type { ScheduledPublishRecord, ScheduledPublishStore } from '../kernel/publish-draft-contract.js';
 
 const BACKOFF_MS = [15, 30, 60, 120, 240, 360, 360, 360].map((minutes) => minutes * 60_000);
 
 export interface ScheduledPublishReconcilerDeps {
-  store: Pick<PublishLogStore, 'listDueScheduled' | 'deferScheduledReconcile' | 'confirmScheduledPublished'>;
+  store: ScheduledPublishStore;
   sequencer: Pick<CommandSequencer, 'executeScheduledReconciliation'>;
   edgeTaskLeases: Pick<EdgeTaskLeaseClient, 'withLease'>;
   resolveEdgeIdForAccount: (accountId: string) => string | null;

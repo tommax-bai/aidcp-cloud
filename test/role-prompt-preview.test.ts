@@ -3,11 +3,29 @@ import assert from 'node:assert/strict';
 import { createRolePromptProvider } from '../src/config/role-prompt-preview.js';
 import { ROLE_CATALOG } from '../src/config/role-catalog.js';
 import { STATIC_ROLE_PROMPT_PREVIEWS } from '../src/config/static-role-prompt-previews.js';
-import { PUBLISH_PREVIEW_BUILDERS } from '../src/publish-agent/prompts-preview.js';
+import { PUBLISH_PREVIEW_BUILDERS, IMAGE_PROMPT_PREVIEW_BUILDERS } from '../src/publish-agent/prompts-preview.js';
+import type { PreviewableRole, RolePromptProviderOptions } from '../src/config/role-prompt-preview.js';
 import type { BaseRole } from '../src/agents/base-role.js';
 import { CommentSearchTermGenerator, type RoleLlmLike } from '../src/agents/comment-search-term-generator.js';
 import { CommentTargetPicker } from '../src/agents/comment-target-picker.js';
 import type { Soul } from '../src/kernel/soul-types.js';
+
+/**
+ * P4-7：预览提供方现在按注入的渲染闭包表工作。本包装恒注入**同一对表对象引用**——
+ * 下面有用例在运行期原地替换 PUBLISH_PREVIEW_BUILDERS['publish:ContentScout'] 验降级，
+ * 靠的就是「提供方按调用时索引 + 同引用」。
+ */
+function makeProvider(
+  getRoles: () => readonly PreviewableRole[] = () => [],
+  opts: RolePromptProviderOptions = {},
+) {
+  return createRolePromptProvider(getRoles, {
+    ...opts,
+    publishPreviewBuilders: PUBLISH_PREVIEW_BUILDERS,
+    imagePromptPreviewBuilders: IMAGE_PROMPT_PREVIEW_BUILDERS,
+  });
+}
+
 
 function fakeRole(roleName: string, preview: () => string): BaseRole {
   return { roleName, previewPrompt: preview } as unknown as BaseRole;
@@ -35,7 +53,7 @@ const dummyLlm: RoleLlmLike = {
 
 test('浏览文本角色 → available:true + 真实 prompt 文本', () => {
   const roles = [fakeRole('content_evaluator', () => 'RENDERED-PROMPT-CE')];
-  const p = createRolePromptProvider(() => roles);
+  const p = makeProvider(() => roles);
   const v = p.get('browse:content_evaluator');
   assert.equal(v.available, true);
   assert.equal(v.prompt, 'RENDERED-PROMPT-CE');
@@ -45,7 +63,7 @@ test('浏览文本角色 → available:true + 真实 prompt 文本', () => {
 });
 
 test('未知角色 → available:false + 未知角色', () => {
-  const p = createRolePromptProvider(() => []);
+  const p = makeProvider(() => []);
   const v = p.get('browse:does_not_exist');
   assert.equal(v.available, false);
   assert.equal(v.prompt, null);
@@ -53,7 +71,7 @@ test('未知角色 → available:false + 未知角色', () => {
 });
 
 test('图像角色 → available:true（发给文生图模型的图片指令，含固定风格基底）', () => {
-  const p = createRolePromptProvider(() => []);
+  const p = makeProvider(() => []);
   const v = p.get('publish:ImageGenerator');
   assert.equal(v.available, true);
   assert.ok(v.prompt && v.prompt.trim().length > 0);
@@ -67,7 +85,7 @@ test('图像角色 → available:true（发给文生图模型的图片指令，�
 // ── 发布侧忠实渲染（change publish-prompt-preview）────────────────────────────
 
 test('发布文本角色 → available:true + 真实 prompt 文本，不附来源段', () => {
-  const p = createRolePromptProvider(() => []);
+  const p = makeProvider(() => []);
   const v = p.get('publish:ContentCreator');
   assert.equal(v.available, true);
   assert.ok(v.prompt && v.prompt.trim().length > 0);
@@ -76,7 +94,7 @@ test('发布文本角色 → available:true + 真实 prompt 文本，不附来�
 });
 
 test('16 个发布文本角色全部 available:true 且 prompt 非空', () => {
-  const p = createRolePromptProvider(() => []);
+  const p = makeProvider(() => []);
   const ids = [
     'publish:ContentScout',
     'publish:ContentCreator',
@@ -104,7 +122,7 @@ test('16 个发布文本角色全部 available:true 且 prompt 非空', () => {
 });
 
 test('视频号收件箱三个 interaction 角色全部使用真实同源 prompt 预览', () => {
-  const p = createRolePromptProvider(() => []);
+  const p = makeProvider(() => []);
   const expected: Array<[string, RegExp]> = [
     ['reply_intent_classifier', /reply_intent_classifier.*intent/s],
     ['reply_polisher', /reply_polisher.*polishedText/s],
@@ -125,7 +143,7 @@ test('视频号收件箱三个 interaction 角色全部使用真实同源 prompt
 });
 
 test('独立 Facebook 角色和封面文字卡角色不依赖 dispatcher 也可预览', () => {
-  const p = createRolePromptProvider(() => []);
+  const p = makeProvider(() => []);
   const join = p.get('browse:facebook_group_join_judge');
   assert.equal(join.available, true);
   assert.match(join.prompt ?? '', /Facebook public group join observation/);
@@ -144,7 +162,7 @@ test('独立 Facebook 角色和封面文字卡角色不依赖 dispatcher 也可�
 });
 
 test('三个 vision 角色展示真实模型文本指令而非误报不调用大模型', () => {
-  const p = createRolePromptProvider(() => []);
+  const p = makeProvider(() => []);
   const expected: Array<[string, RegExp]> = [
     ['publish:CoverFormSensor', /text_card\|photo\|illustration\|other/],
     ['publish:VisualReferenceAnalyzer', /整组视觉参考分析师.*视觉结构专家/s],
@@ -161,7 +179,7 @@ test('三个 vision 角色展示真实模型文本指令而非误报不调用大
 });
 
 test('角色目录中所有非 browse 及独立静态业务角色都有非空预览来源', () => {
-  const p = createRolePromptProvider(() => []);
+  const p = makeProvider(() => []);
   const roles = ROLE_CATALOG.filter((role) => role.group !== 'browse' || STATIC_ROLE_PROMPT_PREVIEWS[role.roleId]);
   assert.ok(roles.length > 0);
   for (const role of roles) {
@@ -173,7 +191,7 @@ test('角色目录中所有非 browse 及独立静态业务角色都有非空预
 
 test('选择账号不会给 interaction、独立 browse、无 persona 发布角色或 vision 角色伪造人设来源', () => {
   let switched = false;
-  const p = createRolePromptProvider(() => [], {
+  const p = makeProvider(() => [], {
     withAccount: (_accountId, fn) => {
       switched = true;
       return fn();
@@ -199,7 +217,7 @@ test('选择账号不会给 interaction、独立 browse、无 persona 发布角�
 });
 
 test('Facebook 定向评论按所选账号真实人设渲染，无人设时诚实回落示例', () => {
-  const accountProvider = createRolePromptProvider(() => [], {
+  const accountProvider = makeProvider(() => [], {
     withAccount: (_accountId, fn) => fn(),
     getPersona: () => sampleSoul,
   });
@@ -209,7 +227,7 @@ test('Facebook 定向评论按所选账号真实人设渲染，无人设时诚�
   assert.equal(accountView.personaSource, 'account');
   assert.match(accountView.prompt ?? '', /测试账号.*AI工程师/s);
 
-  const fallbackProvider = createRolePromptProvider(() => [], {
+  const fallbackProvider = makeProvider(() => [], {
     withAccount: (_accountId, fn) => fn(),
     getPersona: () => null,
   });
@@ -228,7 +246,7 @@ test('静态同源预览构建失败时诚实降级且不抛', () => {
     build: () => { throw new Error('boom'); },
   };
   try {
-    const view = createRolePromptProvider(() => []).get('reply_intent_classifier');
+    const view = makeProvider(() => []).get('reply_intent_classifier');
     assert.equal(view.available, false);
     assert.equal(view.prompt, null);
     assert.match(view.note, /预览不可用：boom/);
@@ -238,7 +256,7 @@ test('静态同源预览构建失败时诚实降级且不抛', () => {
 });
 
 test('发布话题角色 → available:true + 真实话题 prompt', () => {
-  const p = createRolePromptProvider(() => []);
+  const p = makeProvider(() => []);
   const gen = p.get('publish:TopicGenerator');
   assert.equal(gen.available, true);
   assert.match(gen.prompt ?? '', /话题生成|topics/);
@@ -248,7 +266,7 @@ test('发布话题角色 → available:true + 真实话题 prompt', () => {
 });
 
 test('正文去 AI 味改写（ContentCleaner）→ available:true + 真实重写 prompt（与 server 同源）', () => {
-  const p = createRolePromptProvider(() => []);
+  const p = makeProvider(() => []);
   const v = p.get('publish:ContentCleaner');
   assert.equal(v.available, true);
   assert.ok(v.prompt && v.prompt.includes('去除AI味')); // buildDeAiRewritePrompt 真实文本
@@ -257,14 +275,14 @@ test('正文去 AI 味改写（ContentCleaner）→ available:true + 真实重�
 
 test('评论点赞择选（comment_like_appraiser）→ 已注册即 available:true（浏览角色，可预览）', () => {
   const roles = [fakeRole('comment_like_appraiser', () => 'RENDERED-COMMENT-LIKE')];
-  const p = createRolePromptProvider(() => roles);
+  const p = makeProvider(() => roles);
   const v = p.get('browse:comment_like_appraiser');
   assert.equal(v.available, true);
   assert.equal(v.prompt, 'RENDERED-COMMENT-LIKE');
 });
 
 test('评论点赞择选未注册 → available:false 诚实标注，不崩', () => {
-  const p = createRolePromptProvider(() => []);
+  const p = makeProvider(() => []);
   const v = p.get('browse:comment_like_appraiser');
   assert.equal(v.available, false);
   assert.match(v.note, /暂不支持预览/);
@@ -275,7 +293,7 @@ test('命令式评论角色作为 preview-only 实例 → available:true', () =>
     new CommentSearchTermGenerator({ llm: dummyLlm, soul: sampleSoul }) as unknown as BaseRole,
     new CommentTargetPicker({ llm: dummyLlm, soul: sampleSoul }) as unknown as BaseRole,
   ];
-  const p = createRolePromptProvider(() => roles);
+  const p = makeProvider(() => roles);
   const terms = p.get('browse:comment_search_term_generator');
   assert.equal(terms.available, true);
   assert.match(terms.prompt ?? '', /搜索词|创作领域/);
@@ -291,7 +309,7 @@ test('发布角色渲染抛错 → 优雅降级 available:false，绝不抛', ()
     throw new Error('boom');
   };
   try {
-    const p = createRolePromptProvider(() => []);
+    const p = makeProvider(() => []);
     const v = p.get('publish:ContentScout');
     assert.equal(v.available, false);
     assert.equal(v.prompt, null);
@@ -302,7 +320,7 @@ test('发布角色渲染抛错 → 优雅降级 available:false，绝不抛', ()
 });
 
 test('发布角色带 accountId 且有人设 → 使用账号人设渲染并回显账号', () => {
-  const p = createRolePromptProvider(() => [], {
+  const p = makeProvider(() => [], {
     withAccount: (_a, fn) => fn(),
     hasPersona: () => true,
     getPersona: () => sampleSoul,
@@ -320,7 +338,7 @@ test('发布角色带 accountId 且有人设 → 使用账号人设渲染并回�
 });
 
 test('发布角色带 accountId 但无人设 → personaFallback:true + 示例人设渲染', () => {
-  const p = createRolePromptProvider(() => [], {
+  const p = makeProvider(() => [], {
     withAccount: (_a, fn) => fn(),
     hasPersona: () => false,
     getPersona: () => null,
@@ -336,7 +354,7 @@ test('发布角色带 accountId 但无人设 → personaFallback:true + 示例�
 });
 
 test('配图生成执行带 accountId → available:true 图片指令，不加人设标注/回落', () => {
-  const p = createRolePromptProvider(() => [], {
+  const p = makeProvider(() => [], {
     withAccount: (_a, fn) => fn(),
     hasPersona: () => false,
   });
@@ -356,7 +374,7 @@ test('previewPrompt 抛错 → 优雅降级 available:false，绝不抛', () => 
       throw new Error('boom');
     }),
   ];
-  const p = createRolePromptProvider(() => roles);
+  const p = makeProvider(() => roles);
   const v = p.get('browse:content_evaluator');
   assert.equal(v.available, false);
   assert.equal(v.prompt, null);
@@ -365,7 +383,7 @@ test('previewPrompt 抛错 → 优雅降级 available:false，绝不抛', () => 
 
 test('浏览角色已注册但无 previewPrompt → available:false 不崩', () => {
   const roles = [{ roleName: 'content_evaluator' } as unknown as BaseRole];
-  const p = createRolePromptProvider(() => roles);
+  const p = makeProvider(() => roles);
   const v = p.get('browse:content_evaluator');
   assert.equal(v.available, false);
 });
@@ -381,7 +399,7 @@ test('给定 accountId（有人设）→ withAccount 包裹渲染 + 回显 accou
       return 'RENDERED-FOR-ACC';
     }),
   ];
-  const p = createRolePromptProvider(() => roles, {
+  const p = makeProvider(() => roles, {
     withAccount: (accountId, fn) => {
       const prev = current;
       current = accountId;
@@ -406,7 +424,7 @@ test('给定 accountId（有人设）→ withAccount 包裹渲染 + 回显 accou
 
 test('给定 accountId 但该账号无人设 → personaFallback:true + 诚实标注（运行会被拒，仅示例渲染）', () => {
   const roles = [fakeRole('content_evaluator', () => 'RENDERED-SAMPLE-PERSONA')];
-  const p = createRolePromptProvider(() => roles, {
+  const p = makeProvider(() => roles, {
     withAccount: (_a, fn) => fn(),
     hasPersona: () => false,
   });
@@ -421,7 +439,7 @@ test('给定 accountId 但该账号无人设 → personaFallback:true + 诚实�
 
 test("persona-driven-content-pipeline：accountId='default' 不再豁免——无人设行同样标 personaFallback", () => {
   const roles = [fakeRole('content_evaluator', () => 'R')];
-  const p = createRolePromptProvider(() => roles, {
+  const p = makeProvider(() => roles, {
     withAccount: (_a, fn) => fn(),
     hasPersona: () => false, // default 账号已删，无任何账号例外
   });
@@ -433,7 +451,7 @@ test("persona-driven-content-pipeline：accountId='default' 不再豁免——�
 test('不传 accountId → 示例人设预览（不附 accountId / personaFallback，不走账号口径）', () => {
   const roles = [fakeRole('content_evaluator', () => 'R')];
   let withAccountCalled = false;
-  const p = createRolePromptProvider(() => roles, {
+  const p = makeProvider(() => roles, {
     withAccount: (_a, fn) => {
       withAccountCalled = true;
       return fn();
@@ -456,7 +474,7 @@ test('给定 accountId 但渲染抛错 → 账号仍被还原 + available:false'
       throw new Error('boom');
     }),
   ];
-  const p = createRolePromptProvider(() => roles, {
+  const p = makeProvider(() => roles, {
     withAccount: (accountId, fn) => {
       const prev = current;
       current = accountId;
@@ -471,4 +489,14 @@ test('给定 accountId 但渲染抛错 → 账号仍被还原 + available:false'
   const v = p.get('browse:content_evaluator', 'acc-x');
   assert.equal(v.available, false); // safePreview 内部已 catch，优雅降级
   assert.equal(current, 'default'); // 账号已还原，未泄漏到后续预览
+});
+
+test('P4-7 未注入发布 / 图像渲染闭包表 → 走既有诚实分支，绝不伪造 prompt', () => {
+  const provider = createRolePromptProvider(() => []);
+  const creator = provider.get('publish:ContentCreator');
+  assert.equal(creator.available, false);
+  assert.match(creator.note ?? '', /暂不支持预览/);
+  const image = provider.get('publish:ImageGenerator');
+  assert.equal(image.available, false);
+  assert.match(image.note ?? '', /无文本 prompt/);
 });

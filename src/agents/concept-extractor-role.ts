@@ -14,7 +14,7 @@
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { NoteDetailData, RoleName } from '../event-bus/types.js';
-import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/registry.js';
+import type { CommentPlatformProfile } from '../kernel/platform-types.js';
 
 /** 概念写入下游（ConceptStore 的最小契约，便于注入桩单测）。 */
 export interface ConceptSink {
@@ -26,7 +26,7 @@ export interface ConceptExtractorRoleOptions extends RoleOptions {
   /** 每篇笔记最多抽取的关键词数（默认 3）。 */
   maxKeywords?: number;
   /** 平台词汇画像（站点名/内容名词等）；缺省回落小红书。 */
-  platformProfile?: CommentPlatformProfile;
+  platformProfile: CommentPlatformProfile;
 }
 
 export class ConceptExtractorRole extends BaseRole {
@@ -41,7 +41,7 @@ export class ConceptExtractorRole extends BaseRole {
     if (!options.llm) throw new Error('ConceptExtractorRole 需要 LlmClient');
     this.conceptStore = options.conceptStore;
     this.maxKeywords = options.maxKeywords ?? 3;
-    this.platformProfile = options.platformProfile ?? XHS_COMMENT_PROFILE;
+    this.platformProfile = options.platformProfile;
   }
 
   subscribe(): void {

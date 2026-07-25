@@ -31,20 +31,12 @@
 export type { ConfigMirrorKey } from './kernel/config-mirror-bump-types.js';
 import type { ConfigMirrorKey } from './kernel/config-mirror-bump-types.js';
 
-/** 副本读取状态。`stale` = 距上一次**成功完成版本比对**已超过该镜像声明的陈旧上限。 */
-export type MirrorReadState = 'fresh' | 'stale';
-
 /**
- * 新鲜度事实源。运行期由镜像刷新器实现并 install 进来；未安装时全部按 `fresh`（见头注）。
+ * 副本读取状态与新鲜度事实源的**形状**单写在 kernel（change cloud-coupling-phase4-runtime-ports），
+ * 此处等值再导出；ambient 槽位与全部实现仍留本文件（api 属主）。
  */
-export interface ConfigMirrorFreshnessSource {
-  stateOf(mirrorKey: ConfigMirrorKey): MirrorReadState;
-  /**
-   * 因副本陈旧而拒绝一次真实平台动作时记账（按 mirrorKey、按小时可查）。
-   * 与设计内克制（配额耗尽、模型判定不做、冷却未过）**分别计数**，绝不混计。
-   */
-  noteStaleRefusal(mirrorKey: ConfigMirrorKey, context?: string): void;
-}
+export type { MirrorReadState, ConfigMirrorFreshnessSource } from './kernel/config-mirror-bump-types.js';
+import type { MirrorReadState, ConfigMirrorFreshnessSource } from './kernel/config-mirror-bump-types.js';
 
 let installedSource: ConfigMirrorFreshnessSource | null = null;
 

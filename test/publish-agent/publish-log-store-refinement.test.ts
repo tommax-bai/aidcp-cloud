@@ -1,6 +1,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PublishLogStore } from '../../src/publish-agent/publish-log-store.js';
+import { ensureCapabilitySchema, probeSchemaShape } from '../../src/schema/schema-capability.js';
 
 const metadata = {
   topics: ['旧话题'], visibility: 'public', mode: 'immediate', publishTime: null,
@@ -33,13 +34,13 @@ function fixture(current: Record<string, unknown> | null) {
     },
     release() {},
   };
-  const store = new PublishLogStore({ pool: { connect: async () => client } as never });
+  const store = new PublishLogStore({ schemaEnsurer: ensureCapabilitySchema, schemaProber: probeSchemaShape, pool: { connect: async () => client } as never });
   return { store, calls };
 }
 
 describe('PublishLogStore.refineDraft', () => {
   test('scope allowlist rejects widened patch before touching database', async () => {
-    const store = new PublishLogStore({ pool: { connect: async () => { throw new Error('must not connect'); } } as never });
+    const store = new PublishLogStore({ schemaEnsurer: ensureCapabilitySchema, schemaProber: probeSchemaShape, pool: { connect: async () => { throw new Error('must not connect'); } } as never });
     assert.deepEqual(
       await store.refineDraft(1, 'account-a', 2, 'body', null, { content: '新正文', title: '越界标题' }, 'worker'),
       { ok: false, reason: 'invalid_scope' },

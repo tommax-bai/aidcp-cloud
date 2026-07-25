@@ -2,14 +2,16 @@ import type { ChatLlmClient } from '../llm/qwen.js';
 import type { ImageProvider } from './image-provider.js';
 import type { ObjectStore } from '../storage/object-store.js';
 import { relocateImageToStore } from '../storage/object-store.js';
-import type { PublishLogStore, DispatchDraft, RefineDraftPatch } from './publish-log-store.js';
 import type {
+  DispatchDraft,
+  DraftRefinementDrafts,
   DraftRefinementJob,
   DraftRefinementProgress,
   DraftRefinementSelection,
   DraftRefinementStage,
-  DraftRefinementStore,
-} from './draft-refinement.js';
+  RefineDraftPatch,
+} from '../kernel/publish-draft-contract.js';
+import type { DraftRefinementStore } from './draft-refinement.js';
 
 class RefinementFailure extends Error {
   constructor(readonly code: string, message: string) {
@@ -89,7 +91,7 @@ function publicRefinementError(reason: string): { code: string; message: string 
 
 export interface DraftRefinementWorkerDeps {
   store: Pick<DraftRefinementStore, 'claimNext' | 'replaceProgress' | 'complete' | 'fail'>;
-  drafts: Pick<PublishLogStore, 'loadForDispatch' | 'refineDraft'>;
+  drafts: DraftRefinementDrafts;
   llm: Pick<ChatLlmClient, 'chat'>;
   imageProvider: ImageProvider;
   objectStore?: ObjectStore;

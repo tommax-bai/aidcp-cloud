@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PublishLogStore } from '../../src/publish-agent/publish-log-store.js';
 import { hasUserRejectionEvidence, type PublishMetadata } from '../../src/publish-agent/types.js';
+import { ensureCapabilitySchema, probeSchemaShape } from '../../src/schema/schema-capability.js';
 
 test('candidate snapshot rejection evidence is true only for the durable explicit marker', () => {
   const evidenced = { approvalDecision: { kind: 'user_rejected', decidedAt: 1 } } as PublishMetadata;
@@ -19,7 +20,7 @@ test('rejectPendingApproval atomically records durable user rejection evidence',
       return { rows: [], rowCount: 1 };
     },
   };
-  const store = new PublishLogStore({ pool: pool as never, clock: () => decidedAt });
+  const store = new PublishLogStore({ schemaEnsurer: ensureCapabilitySchema, schemaProber: probeSchemaShape, pool: pool as never, clock: () => decidedAt });
 
   assert.equal(await store.rejectPendingApproval(175), true);
   // change publish-log-split-prep：命中后还会 fail-safe 双写执行态影子（needs_review），故共 2 条调用；
@@ -37,6 +38,6 @@ test('rejectPendingApproval atomically records durable user rejection evidence',
 
 test('rejectPendingApproval reports no transition when the draft is no longer pending', async () => {
   const pool = { query: async () => ({ rows: [], rowCount: 0 }) };
-  const store = new PublishLogStore({ pool: pool as never, clock: () => 1 });
+  const store = new PublishLogStore({ schemaEnsurer: ensureCapabilitySchema, schemaProber: probeSchemaShape, pool: pool as never, clock: () => 1 });
   assert.equal(await store.rejectPendingApproval(175), false);
 });

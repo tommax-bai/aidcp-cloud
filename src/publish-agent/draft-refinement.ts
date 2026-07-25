@@ -5,42 +5,23 @@ import type { DeploymentTarget } from '../deployment-target.js';
 
 const { Pool } = pg;
 
-export type DraftRefinementScope = 'whole' | 'body' | 'images' | 'selected_image' | 'selected_text';
-export type DraftRefinementStatus = 'queued' | 'running' | 'completed' | 'failed';
-export type DraftRefinementStage = '计划' | '判断' | '生成' | '检查' | '确认';
-
-export type DraftRefinementSelection =
-  | { imageUrl: string }
-  | { start: number; end: number; text: string }
-  | null;
-
-export interface DraftRefinementProgress {
-  seq: number;
-  stage: DraftRefinementStage;
-  status: 'running' | 'completed';
-  summary: string;
-  at: number;
-}
-
-export interface DraftRefinementJob {
-  id: string;
-  executionTarget: DeploymentTarget;
-  accountId: string;
-  recordId: number;
-  expectedVersion: number;
-  scope: DraftRefinementScope;
-  instruction: string;
-  selection: DraftRefinementSelection;
-  status: DraftRefinementStatus;
-  progress: DraftRefinementProgress[];
-  claimToken: string | null;
-  resultVersion: number | null;
-  errorCode: string | null;
-  errorMessage: string | null;
-  createdAt: number;
-  updatedAt: number;
-  completedAt: number | null;
-}
+// 作业形状单写在 kernel（change cloud-coupling-phase4-runtime-ports）：api 的客户端鉴权服务按端口引，
+// 不再 import 本实现文件。此处等值再导出，content 同层消费方逐字无感。
+export type {
+  DraftRefinementScope,
+  DraftRefinementStatus,
+  DraftRefinementStage,
+  DraftRefinementSelection,
+  DraftRefinementProgress,
+  DraftRefinementJob,
+} from '../kernel/publish-draft-contract.js';
+import type {
+  DraftRefinementJob,
+  DraftRefinementProgress,
+  DraftRefinementScope,
+  DraftRefinementSelection,
+  DraftRefinementStatus,
+} from '../kernel/publish-draft-contract.js';
 
 export const DRAFT_REFINEMENT_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS publish_draft_refinement_jobs (

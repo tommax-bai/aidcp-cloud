@@ -11,7 +11,8 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { serializeSoul, loadSoulFromYaml } from '../src/soul/index.js';
+import { serializeSoul, loadSoulFromValue, loadSoulFromYaml } from '../src/soul/index.js';
+import type { SoulCodec } from '../src/kernel/soul-codec.js';
 import type { Soul } from '../src/kernel/soul-types.js';
 import {
   extractLikeAffinitySelection,
@@ -20,6 +21,11 @@ import {
 } from '../src/agents/persona-generator.js';
 import { makeEnvelope } from '../src/comm/protocol.js';
 import { DefaultMessageHandler } from '../src/comm/handler.js';
+import type { PanelPersonaConfig } from '../src/panel/types.js';
+import type { PersonaWritePort } from '../src/kernel/persona-ports.js';
+
+/** 与组合根注入的是同一组 api 实现 —— 用例仍在验真实 codec，不是桩。 */
+const SOUL_CODEC: SoulCodec = { parseValue: loadSoulFromValue, serialize: serializeSoul, parseYaml: loadSoulFromYaml };
 
 const VALID_SOUL_JSON = JSON.stringify({
   identity: {
@@ -98,7 +104,7 @@ describe('PersonaGenerator', () => {
 
   it('合法 JSON → ok，soulYaml 能被 loadSoulFromYaml 解析', async () => {
     const llm = stubLlm(VALID_SOUL_JSON);
-    const gen = new PersonaGenerator({ llm });
+    const gen = new PersonaGenerator({ llm, soulCodec: SOUL_CODEC });
     const out = await gen.generate(baseInput);
     assert.equal(out.ok, true);
     if (!out.ok) return;
@@ -113,7 +119,7 @@ describe('PersonaGenerator', () => {
 
   it('Facebook 发言语言由结构化输入确定性写入 Soul，不交给模型猜', async () => {
     const llm = stubLlm(VALID_SOUL_JSON);
-    const gen = new PersonaGenerator({ llm });
+    const gen = new PersonaGenerator({ llm, soulCodec: SOUL_CODEC });
     const out = await gen.generate({ ...baseInput, writingLanguage: 'vi' });
     assert.equal(out.ok, true);
     if (!out.ok) return;
@@ -123,7 +129,7 @@ describe('PersonaGenerator', () => {
 
   it('更喜欢标记被剥离并确定性映射到 behavior_guidelines', async () => {
     const llm = stubLlm(VALID_SOUL_JSON);
-    const gen = new PersonaGenerator({ llm });
+    const gen = new PersonaGenerator({ llm, soulCodec: SOUL_CODEC });
     const out = await gen.generate({
       ...baseInput,
       keywordSelections: [...baseInput.keywordSelections, 'like_affinity:like_most'],
@@ -150,7 +156,7 @@ describe('PersonaGenerator', () => {
 
   it('垃圾输出（非 JSON）→ 硬 fail-closed，绝不返回模板/半成品', async () => {
     const llm = stubLlm('抱歉我不能帮你做这个');
-    const gen = new PersonaGenerator({ llm, maxRetries: 1 });
+    const gen = new PersonaGenerator({ llm, maxRetries: 1, soulCodec: SOUL_CODEC });
     const out = await gen.generate(baseInput);
     assert.equal(out.ok, false);
     if (out.ok) return;
@@ -161,7 +167,7 @@ describe('PersonaGenerator', () => {
 
   it('缺字段 JSON（结构校验不过）→ fail-closed persona_invalid', async () => {
     const llm = stubLlm(JSON.stringify({ identity: { name: 'x' } }));
-    const gen = new PersonaGenerator({ llm, maxRetries: 0 });
+    const gen = new PersonaGenerator({ llm, maxRetries: 0, soulCodec: SOUL_CODEC });
     const out = await gen.generate(baseInput);
     assert.equal(out.ok, false);
     if (!out.ok) assert.equal(out.reason, 'persona_invalid');
@@ -173,7 +179,7 @@ describe('PersonaGenerator', () => {
         throw new Error('timeout');
       },
     };
-    const gen = new PersonaGenerator({ llm, maxRetries: 1 });
+    const gen = new PersonaGenerator({ llm, maxRetries: 1, soulCodec: SOUL_CODEC });
     const out = await gen.generate(baseInput);
     assert.equal(out.ok, false);
     if (!out.ok) assert.equal(out.reason, 'generation_failed');
@@ -181,7 +187,7 @@ describe('PersonaGenerator', () => {
 
   it('空关键词 → no_keywords（不调用 LLM）', async () => {
     const llm = stubLlm(VALID_SOUL_JSON);
-    const gen = new PersonaGenerator({ llm });
+    const gen = new PersonaGenerator({ llm, soulCodec: SOUL_CODEC });
     const out = await gen.generate({ accountId: 'a', keywordSelections: [] });
     assert.equal(out.ok, false);
     if (!out.ok) assert.equal(out.reason, 'no_keywords');
@@ -190,7 +196,7 @@ describe('PersonaGenerator', () => {
 
   it('差异化种子拌进 prompt（抗跨账号同质化）', async () => {
     const llm = stubLlm(VALID_SOUL_JSON);
-    const gen = new PersonaGenerator({ llm });
+    const gen = new PersonaGenerator({ llm, soulCodec: SOUL_CODEC });
     await gen.generate(baseInput);
     assert.ok(llm.calls[0].prompt.includes('SEED-XYZ'));
   });
@@ -338,3 +344,13 @@ describe('handler persona.generate 幂等去重', () => {
     assert.deepEqual(update?.payload, { ok: true, firstPostOnboarding: false });
   });
 });
+
+/**
+ * P4-1 漂移闸（牙齿在 `npm run typecheck`，不在 tsx —— 运行器只剥类型）。
+ *
+ * 为什么单给 `personaFacade` 立一条：本轮引入的所有窄端口里，只有它在 src/server.ts 里**没有接线**
+ * （全仓 grep：personaFacade 只出现在 handler.ts 与本文件），今天是测试专用口。其余端口都在组合根
+ * 有一次真实赋值、由编译器代为校验；这一条没有，面板写入外观改签名就会静默漂移。
+ */
+type AssertAssignable<Impl extends Port, Port> = Impl;
+export type PersonaWritePortConformance = AssertAssignable<PanelPersonaConfig, PersonaWritePort>;

@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCategoryConfigPanel } from '../src/config/category-config-facade.js';
 import type { CategoryConfigStore } from '../src/config/category-config-store.js';
-import { ProviderKeyMissingError } from '../src/llm/index.js';
 
 type FakeRow = { categoryId: string; model: string | null; provider: string | null; thinkingMode: 'off' | 'on' | null; updatedAt: string | null; updatedBy: string | null };
 
@@ -45,10 +44,13 @@ function makePanel(probeOk = true, opts: { keyMissing?: boolean } = {}) {
     store,
     getGlobalTextModel: () => 'qwen-turbo',
     getGlobalTextProvider: () => 'dashscope',
+    thinkingOnAvailable: () => false,
+    // P4-4：探活改结果型后，桩直接回结果（分类现在发生在组合根，不在外观里）。
     probeModel: async (provider, m) => {
       probed.push({ provider, model: m });
-      if (opts.keyMissing) throw new ProviderKeyMissingError(provider);
-      if (!probeOk) throw new Error('invalid');
+      if (opts.keyMissing) return { ok: false as const, reason: 'provider_key_missing' as const };
+      if (!probeOk) return { ok: false as const, reason: 'model_unavailable' as const };
+      return { ok: true as const };
     },
   });
   return { panel, store, probed: () => probed };

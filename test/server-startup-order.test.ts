@@ -47,3 +47,31 @@ test('every Feishu receiver production composition injects the durable approval 
     );
   }
 });
+
+/**
+ * P4（cloud-coupling-phase4-runtime-ports）：四个**可选**注入端口的唯一机械守卫。
+ *
+ * 它们不注入时的语义是「恒不停手 / 预览退化成诚实说明」——与端口引入前逐位一致，所以漏接线
+ * 既不抛错、也不会被 typecheck 抓到，只会在生产上静默失去一整层闸或一整页预览。这条断言读
+ * 组合根源码，把「实现确实交到了消费方手里」钉死在编译期之外的一道上。
+ *
+ * ⚠️ 物理拆仓后每个仓有自己的 server.ts，本断言 MUST 跟着复制到 automation 仓并指向它自己的组合根，
+ * 否则守卫在拆仓当天蒸发、可选端口回到裸奔。
+ */
+test('P4 optional runtime ports are actually wired at the composition root', async () => {
+  const source = await readFile(new URL('../src/server.ts', import.meta.url), 'utf8');
+  assert.match(
+    source,
+    /const configMirrorGate: ConfigMirrorGatePort = \{/,
+    'composition root must build exactly one config-mirror halt adapter',
+  );
+  const handler = source.slice(source.indexOf('new DefaultMessageHandler({'));
+  assert.match(handler.slice(0, 400), /\n {4}configMirrorGate,\n/, 'message handler must receive the halt gate');
+  const dispatcher = source.slice(source.indexOf('return new RoleDispatcher({'));
+  assert.match(dispatcher.slice(0, 400), /\n {6}configMirrorGate,\n/, 'role dispatcher must receive the halt gate');
+  const registry = source.slice(source.indexOf('new RiskControllerRegistry('));
+  assert.match(registry.slice(0, 900), /\n {4}mirrorStale: \(/, 'risk registry must pass the staleness reader through');
+  const preview = source.slice(source.indexOf('createRolePromptProvider('));
+  assert.match(preview.slice(0, 1600), /publishPreviewBuilders: PUBLISH_PREVIEW_BUILDERS/, 'prompt preview must receive the publish builders');
+  assert.match(preview.slice(0, 1600), /imagePromptPreviewBuilders: IMAGE_PROMPT_PREVIEW_BUILDERS/, 'prompt preview must receive the image builders');
+});

@@ -16,23 +16,22 @@ import {
   type ThinkingMode,
 } from './role-catalog.js';
 import type { RoleConfigStore } from './role-config-store.js';
-import {
-  normProvider,
-  ProviderKeyMissingError,
-  buildThinkingParams,
-} from '../llm/index.js';
+import { normProvider } from '../kernel/text-provider-registry.js';
 import { normImageProvider } from '../kernel/image-provider-registry.js';
-import { resolveCoverFormModel, resolveCoverFormProvider } from '../publish-agent/cover-form-sensor.js';
 import type {
   PanelRoleConfig,
   RoleConfigCatalogView,
   RoleConfigSetResult,
 } from '../panel/types.js';
 
-/** 生效模型是否支持"开启(on)"：与出口翻译同源——on 能翻出非空参数即支持（否则如 DashScope Qwen 需流式，不支持）。 */
-function thinkingOnAvailableFor(provider: string, model: string): boolean {
-  return Object.keys(buildThinkingParams(provider, model, 'on').params).length > 0;
-}
+/**
+ * 保存前探活的**诚实结果型**返回（change cloud-coupling-phase4-runtime-ports）。
+ *
+ * 改动前：探活抛错，外观按 `instanceof ProviderKeyMissingError` 在本文件里分类。那条 instanceof
+ * 逼 api 属主的外观 import content 属主的错误类。现在分类挪到组合根（它本来就持有厂商客户端），
+ * 端口只回结果。**两种原因仍逐一可分**，对外 reason 串（provider_key_missing / model_invalid）逐字不变。
+ */
+export type ModelProbeResult = { ok: true } | { ok: false; reason: 'provider_key_missing' | 'model_unavailable' };
 
 export interface RoleConfigFacadeDeps {
   store: RoleConfigStore;
@@ -51,7 +50,12 @@ export interface RoleConfigFacadeDeps {
   /** 某分类默认思考模式（change role-thinking-mode-config；null=分类无覆盖）；用于 role 缺省时回落分类。 */
   getCategoryThinking: (categoryId: string) => ThinkingMode | null;
   /** 保存前探活：按 provider 探；模型不可用抛错；该厂商密钥缺失抛 ProviderKeyMissingError。 */
-  probeModel: (provider: string, model: string) => Promise<void>;
+  probeModel: (provider: string, model: string) => Promise<ModelProbeResult>;
+  /** 生效模型是否支持思考「开启(on)」。实现在组合根（与出口翻译同源）。 */
+  thinkingOnAvailable: (provider: string, model: string) => boolean;
+  /** 封面表单感知角色的生效模型 / 厂商（content 属主实装，由组合根注入）。 */
+  getVisionModel: () => string;
+  getVisionProvider: () => string;
 }
 
 export function createRoleConfigPanel(deps: RoleConfigFacadeDeps): PanelRoleConfig {
@@ -75,8 +79,8 @@ export function createRoleConfigPanel(deps: RoleConfigFacadeDeps): PanelRoleConf
         } else if (item.llmKind === 'vision') {
           // change textcard-cover-form（v1 收敛）：视觉角色模型经 env 两层解析（env → 代码默认）、面板只读展示。
           // 绝不落全局文本模型回落层（文本模型收到 image_url 必错）；写入仍被 isModelConfigurable 拒绝。
-          effectiveModel = resolveCoverFormModel();
-          effectiveProvider = normProvider(resolveCoverFormProvider());
+          effectiveModel = deps.getVisionModel();
+          effectiveProvider = normProvider(deps.getVisionProvider());
           effectiveSource = 'vision';
         } else if (ovModel) {
           effectiveModel = ovModel;
@@ -119,7 +123,7 @@ export function createRoleConfigPanel(deps: RoleConfigFacadeDeps): PanelRoleConf
           thinkingModeOverride: ovThinking,
           thinkingModeSource,
           thinkingOnAvailable:
-            item.llmKind === 'text' && thinkingOnAvailableFor(effectiveProvider, effectiveModel),
+            item.llmKind === 'text' && deps.thinkingOnAvailable(effectiveProvider, effectiveModel),
           updatedAt: row?.updatedAt ?? null,
           updatedBy: row?.updatedBy ?? null,
         };
@@ -159,12 +163,10 @@ export function createRoleConfigPanel(deps: RoleConfigFacadeDeps): PanelRoleConf
       // provider 归一（未知/空 → dashscope），与 model 同行写库。
       const provider = normProvider(patch.provider);
       if (wantsModel) {
-        try {
-          await deps.probeModel(provider, (patch.model as string).trim());
-        } catch (e) {
+        const probe = await deps.probeModel(provider, (patch.model as string).trim());
+        if (!probe.ok) {
           // 该厂商密钥缺失 → 可区分原因（让前端提示去配密钥并重启）；否则模型名无效。
-          if (e instanceof ProviderKeyMissingError) return { ok: false, reason: 'provider_key_missing' };
-          return { ok: false, reason: 'model_invalid' };
+          return { ok: false, reason: probe.reason === 'provider_key_missing' ? 'provider_key_missing' : 'model_invalid' };
         }
       }
 

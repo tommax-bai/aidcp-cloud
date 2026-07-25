@@ -23,6 +23,7 @@ import {
   normProvider,
   isKnownProvider,
   ProviderKeyMissingError,
+  buildThinkingParams,
   resolveProviderBaseUrl,
   resolveProviderEnvKey,
 } from './llm/index.js';
@@ -137,7 +138,14 @@ import {
 import type { MandatoryCommentOutcomeNoticeInput } from './orchestrator/role-dispatcher.js';
 import { CommentScheduler } from './comment-agent/comment-scheduler.js';
 import { buildFacebookCommentComposerPrompt } from './comment-agent/facebook-comment-composer-prompt.js';
-import { checkWritingLanguage, loadSoul, type Soul } from './soul/index.js';
+import {
+  checkWritingLanguage,
+  loadSoul,
+  loadSoulFromValue,
+  loadSoulFromYaml,
+  serializeSoul,
+  type Soul,
+} from './soul/index.js';
 
 
 import {
@@ -300,9 +308,13 @@ import {
 import { parseDeploymentTarget } from './deployment-target.js';
 import { runSchemaContractGate, takePendingSchemaGateAlert } from './schema/schema-gate.js';
 import { isSchemaCapabilityError } from './kernel/schema-capability-contract.js';
-import { ensureCapabilitySchema } from './schema/schema-capability.js';
+import { ensureCapabilitySchema, probeSchemaShape } from './schema/schema-capability.js';
 import { DelegatedTaskNotificationGate, delegatedTaskFailureReceipt } from './delegated-task/notification.js';
-import { omitUnsupportedUsageMetrics, platformRegistryEntry } from './platform/index.js';
+import {
+  omitUnsupportedUsageMetrics,
+  platformRegistryEntry,
+  SCHEDULED_AUTOMATION_CATALOG_READER,
+} from './platform/index.js';
 import {
   buildDelegatedTaskConfirmationCard,
   buildDelegatedTaskProgressCard,
@@ -394,14 +406,14 @@ import {
   ConfigMirrorBumpHttpClient,
   registerConfigMirrorBumpRoutes,
 } from './transport/config-mirror-bump-http.js';
-import type { ConfigMirrorBumpSink } from './kernel/config-mirror-bump-types.js';
-import { allowsTransportWhenGateUnknown } from './config/mirror-stop-work.js';
-import { noteMirrorStaleRefusal } from './config-mirror-freshness.js';
+import type { ConfigMirrorBumpSink, ConfigMirrorGatePort } from './kernel/config-mirror-bump-types.js';
+import { allowsTransportWhenGateUnknown, hasStaleGateMirror, platformActionHalt } from './config/mirror-stop-work.js';
+import { isMirrorStale, noteMirrorStaleRefusal } from './config-mirror-freshness.js';
 import { automationOperationDescriptorFor } from './comm/operation-registry.js';
 import { PG_OWNERS, resolveOwnerPgConfig, type PgOwner } from './kernel/pg-owner-connection-resolver.js';
 import { ModelConfigStore } from './config/model-config-store.js';
 import { RoleConfigStore } from './config/role-config-store.js';
-import { createRoleConfigPanel } from './config/role-config-facade.js';
+import { createRoleConfigPanel, type ModelProbeResult } from './config/role-config-facade.js';
 import { CategoryConfigStore } from './config/category-config-store.js';
 import { createCategoryConfigPanel } from './config/category-config-facade.js';
 import { categoryOf, type ThinkingMode } from './config/role-catalog.js';
@@ -448,6 +460,7 @@ import { FacebookGroupJoinScheduler } from './comment-agent/facebook-group-join-
 import { ContentScheduler } from './orchestrator/content-scheduler.js';
 import { isWeekActiveAt } from './risk/session-limits.js';
 import { createRolePromptProvider } from './config/role-prompt-preview.js';
+import { PUBLISH_PREVIEW_BUILDERS, IMAGE_PROMPT_PREVIEW_BUILDERS } from './publish-agent/prompts-preview.js';
 import { CredentialStore } from './config/credential-store.js';
 import type { ModelConfigView } from './panel/types.js';
 // automation 属主 + kernel 契约经 automation 桶导入（本文件是 composition，MAY 导入任何层）。
@@ -1059,6 +1072,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   // 内容排期（change content-schedule-auto-publish）：全局「内容可自动时段」+ 每账号发帖排期。
   // fail-closed：未配 / 非法 = 不自动（与浏览掩码「缺失=全天活跃」刻意相反）；init 失败不致命（空镜像 = 全不自动）。
   const contentScheduleStore = new ContentScheduleStore({ schemaEnsurer: ensureCapabilitySchema,
+    scheduledAutomationCatalog: SCHEDULED_AUTOMATION_CATALOG_READER,
     host: readEnvString('PGHOST'),
     port: readEnvPort('PGPORT'),
     database: readEnvString('PGDATABASE'),
@@ -1381,6 +1395,8 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
 
   // 发布日志存储（publish_log 表）
   const publishLogStore = new PublishLogStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    schemaProber: probeSchemaShape,
     pool: apiPool,
     host: readEnvString('PGHOST'),
     port: readEnvPort('PGPORT'),
@@ -2713,12 +2729,22 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     registerHandshakeEnvironment: (observation) =>
       clientUserStore.registerHandshakeEnvironment(observation),
   };
+  // 配置副本停手闸的单一适配器（change cloud-coupling-phase4-runtime-ports）：automation 侧的
+  // handler / dispatcher / 风控三处都注入这一个对象。四个实参就是 api 侧那四个模块函数——它们在
+  // **调用时**才读 ambient 事实源，故本适配器可以在镜像刷新器 start() 之前构造，无时序问题。
+  const configMirrorGate: ConfigMirrorGatePort = {
+    isStale: (mirrorKey) => isMirrorStale(mirrorKey),
+    hasStaleGateMirror: () => hasStaleGateMirror(),
+    platformActionHalt: (context) => platformActionHalt(context),
+    noteStaleRefusal: (mirrorKey, context) => noteMirrorStaleRefusal(mirrorKey, context),
+  };
   // 记账漏斗先声明后构造：registry 的 fail-closed 现读要读它，而它要读 registry 解析 controller。
   let riskAccounting: RiskAccounting | undefined;
   const riskRegistry = new RiskControllerRegistry(riskStore, undefined, quotaConfigStore, {
     coldStartRampEnabled,
     slowStartDisabled,
     nurtureProvider,
+    mirrorStale: (mirrorKey) => configMirrorGate.isStale(mirrorKey),
     // 记账断链 ⇒ 该账号的一切互动准入判定直接拒（浏览仍放行）。闸设在 explain 是因为它是
     // 全部自动路径的公共必经点，新加一道独立闸必然漏接线。
     interactionBlockedProvider: (accountId) => writerAuthorityLost || (riskAccounting?.isBlocked(accountId) ?? false),
@@ -3737,7 +3763,11 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   let dispatchActive = true;
   // 建号自助人设生成器（change edge-persona-keyword-generation）：复用共享 llm（按角色 browse:persona_generator
   // 解析模型/温度、按 accountId 记账），生成 persona.generate 的草稿。
-  const personaGenerator = new PersonaGenerator({ llm });
+  const personaGenerator = new PersonaGenerator({
+    llm,
+    // P4-11：Soul 编解码由组合根注入（api 属主实现），content 侧的生成角色不再直连 soul 加载器。
+    soulCodec: { parseValue: loadSoulFromValue, serialize: serializeSoul, parseYaml: loadSoulFromYaml },
+  });
   const personaFirstPostOnboarding = firstPostOnboardingStore
     ? {
         armFirstBind: async (accountId: string) => {
@@ -3799,6 +3829,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       }
     : undefined;
   const handler = new DefaultMessageHandler({
+    configMirrorGate,
     planner,
     llm,
     cache,
@@ -4823,6 +4854,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     const commentLlmTimeoutMs = readEnvNumberOrUndefined('AIDCP_COMMENT_LLM_TIMEOUT_MS');
     const commentSublineTimeoutMs = readEnvNumberOrUndefined('AIDCP_COMMENT_SUBLINE_TIMEOUT_MS');
     return new RoleDispatcher({
+      configMirrorGate,
       getSoul: opts?.getSoul ?? getSoul,
       llm,
       // 私有事件通道（连接间互不串味）；其上事件经 tee 汇入全局观测总线供风控记账 / 看板消费。
@@ -5073,7 +5105,10 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     {
       bus: new EventBus(),
       // retire-default-account：预览不写任何状态；用一次性内存 controller + 保留预览标识，绝不用 default。
-      controller: new RiskController({ accountId: '__preview__' }),
+      controller: new RiskController({
+        accountId: '__preview__',
+        mirrorStale: (mirrorKey) => configMirrorGate.isStale(mirrorKey),
+      }),
       accountId: '__preview__',
       edgeId: undefined,
     },
@@ -5770,6 +5805,9 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     },
     hasPersona: (accountId) => personaStore.getForAccount(accountId) !== null,
     getPersona: (accountId) => resolvePersona(accountId),
+    // P4-7：发布 / 图像预览的渲染闭包表由组合根注入（content 属主实装），api 侧的预览提供方不再直连。
+    publishPreviewBuilders: PUBLISH_PREVIEW_BUILDERS,
+    imagePromptPreviewBuilders: IMAGE_PROMPT_PREVIEW_BUILDERS,
   });
 
   ctx.accountPersonaService = accountPersonaService;
@@ -5958,6 +5996,19 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
   const probeModel = async (provider: string, model: string): Promise<void> => {
     await llm.chat([{ role: 'user', content: 'ping' }], { provider, model, timeoutMs: 8000, role: 'system:model_probe' });
   };
+  // P4-4：探活错误的**分类**挪到组合根（它本来就持有厂商客户端与错误类），外观只收结果型。
+  // 两种原因仍逐一可分，对外 reason 串逐字不变。写法与本文件 6300+ 全局模型面板那处 instanceof 同款。
+  const probeModelResult = async (provider: string, model: string): Promise<ModelProbeResult> => {
+    try {
+      await probeModel(provider, model);
+      return { ok: true };
+    } catch (e) {
+      if (e instanceof ProviderKeyMissingError) return { ok: false, reason: 'provider_key_missing' };
+      return { ok: false, reason: 'model_unavailable' };
+    }
+  };
+  const thinkingOnAvailable = (provider: string, model: string): boolean =>
+    Object.keys(buildThinkingParams(provider, model, 'on').params).length > 0;
   // 角色配置面板外观（change console-role-model-config + model-config-volcengine-provider）：白名单 + 生效值视图（含 provider）+ 写校验 + 按 provider 探活。
   const roleConfigPanel = createRoleConfigPanel({
     store: roleConfigStore,
@@ -5968,14 +6019,18 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
     getCategoryModel: (categoryId) => categoryConfigStore.getForCategory(categoryId).model,
     getCategoryProvider: (categoryId) => categoryConfigStore.getForCategory(categoryId).provider,
     getCategoryThinking: (categoryId) => categoryConfigStore.getForCategory(categoryId).thinkingMode,
-    probeModel,
+    thinkingOnAvailable,
+    getVisionModel: resolveCoverFormModel,
+    getVisionProvider: resolveCoverFormProvider,
+    probeModel: probeModelResult,
   });
   // 分类默认模型面板外观（change role-model-category-config + model-config-volcengine-provider）：白名单 + 生效值视图（含 provider）+ 写校验 + 按 provider 探活。
   const categoryConfigPanel = createCategoryConfigPanel({
     store: categoryConfigStore,
     getGlobalTextModel: () => modelConfigStore.getCached().textModel,
     getGlobalTextProvider: () => modelConfigStore.getCached().textProvider,
-    probeModel,
+    thinkingOnAvailable,
+    probeModel: probeModelResult,
   });
   // 安全限额面板外观（change safety-quota-config）：三档×动作×三窗口生效值 + 写校验（非法整块拒）+ 非乐观回真态。
   const quotaConfigPanel = createQuotaConfigPanel({ store: quotaConfigStore });

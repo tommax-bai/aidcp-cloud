@@ -36,10 +36,10 @@ import type { UiDailyUsagePayload, UiSlowStartPayload } from '../api-contracts/u
 import type { EditDraftResult, PendingPublishPreview, PublishLogStore } from '../publish-agent/publish-log-store.js';
 import type {
   DraftRefinementJob,
+  DraftRefinementReadWritePort,
   DraftRefinementScope,
   DraftRefinementSelection,
-  DraftRefinementStore,
-} from '../publish-agent/draft-refinement.js';
+} from '../kernel/publish-draft-contract.js';
 import type { PersonaAutoFillService } from '../agents/persona-auto-fill.js';
 import type { AccountPersonaService } from '../config/account-persona-service.js';
 import { isWritingLanguage } from '../kernel/writing-language.js';
@@ -81,7 +81,7 @@ export interface ClientAuthDeps {
     'listPendingPublishPreviewsForAccount' | 'pendingPublishPreviewForAccountRecord'
   >;
   /** 客户创建/读取的持久调整任务；store 自身再按 execution_target 隔离。 */
-  draftRefinements?: Pick<DraftRefinementStore, 'create' | 'getForAccount' | 'latestForAccountRecord' | 'latestForAccountRecords'>;
+  draftRefinements?: DraftRefinementReadWritePort;
   /** Account-scoped Xiaohongshu scheduled truth for approval-page free-slot selection. */
   publishSchedule?: Pick<PublishLogStore, 'listOccupiedScheduledTimesForAccount'>;
   /** 客户首页只读概览；账号键由持久绑定解析，DTO 不得回传 accountId。 */

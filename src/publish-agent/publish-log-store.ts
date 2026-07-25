@@ -9,10 +9,31 @@ import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
 import { SHANGHAI_DAY_START_SQL } from '../time/shanghai-day.js';
 import type { PublishRecord, PublishStatus, PublishMetadata, PublishMode, Visibility } from '../kernel/publish-pipeline-types.js';
 import { clampTitle } from '../kernel/title-clamp.js';
-import { normalizePlatformId, type PlatformId } from '../platform/index.js';
+import { normalizePlatformId, type PlatformId } from '../kernel/platform-types.js';
 import { validatePublishSchedule } from './schedule-policy.js';
 import type { DeploymentTarget } from '../deployment-target.js';
-import { ensureCapabilitySchema, probeSchemaShape } from '../schema/schema-capability.js';
+import type { SchemaEnsurer, SchemaProber } from '../kernel/schema-capability-contract.js';
+// 形状单写在 kernel（change cloud-coupling-phase4-runtime-ports）；此处等值再导出，
+// api 同层消费方（面板 / 草稿删图 / 客户端审批）逐字无感。
+import type {
+  DispatchDraft,
+  EditDraftResult,
+  RefineDraftPatch,
+  RefineDraftResult,
+  RefineDraftSelection,
+  ScheduledPublishRecord,
+  ScheduledReconcileUpdate,
+} from '../kernel/publish-draft-contract.js';
+export type {
+  DispatchDraft,
+  EditDraftReason,
+  EditDraftResult,
+  RefineDraftPatch,
+  RefineDraftResult,
+  RefineDraftSelection,
+  ScheduledPublishRecord,
+  ScheduledReconcileUpdate,
+} from '../kernel/publish-draft-contract.js';
 
 /**
  * 执行态影子表名（change publish-log-split-prep：拆 publish_log 七态表的执行态那半）。
@@ -104,6 +125,12 @@ export interface PublishLogStoreOptions {
   password?: string;
   pool?: pg.Pool;
   clock?: () => number;
+  /**
+   * schema 保障 / 探测两个能力的注入端口（必填、无默认，change cloud-coupling-phase4-runtime-ports）。
+   * 组合根传 automation 的 ensureCapabilitySchema / probeSchemaShape；本文件只从 kernel 取类型。
+   */
+  schemaEnsurer: SchemaEnsurer;
+  schemaProber: SchemaProber;
 }
 
 interface PublishRow {
@@ -118,42 +145,6 @@ interface PublishRow {
 
 function toStatus(s: string): PublishStatus {
   return s === 'scheduled' || s === 'submitted' || s === 'published' || s === 'failed' || s === 'needs_review' || s === 'pending_approval' ? s : 'draft';
-}
-
-export interface ScheduledPublishRecord {
-  recordId: number;
-  accountId: string;
-  title: string;
-  scheduledAt: number;
-  scheduledPlatformId: string | null;
-  reconcileAttempts: number;
-}
-
-export interface ScheduledReconcileUpdate {
-  status: 'scheduled' | 'needs_review';
-  attempts: number;
-}
-
-/**
- * 下发段从落库草稿重建发布所需的最小快照（change decouple-publish-generation-from-dispatch）。
- * 标题/正文/图取自 publish_log 列；话题与发帖元数据取自 publish_metadata JSONB（生成候审段经 recordMetadata 落库）。
- * 下发忠于此快照、绝不重生成（陈旧亦照发）。
- */
-export interface DispatchDraft {
-  recordId: number;
-  accountId: string;
-  platform?: PlatformId;
-  title: string | null;
-  content: string;
-  /** 封面 URL（= imageUrls[0]，审计/向后兼容）；无图为 null。 */
-  imageUrl: string | null;
-  /** 多图：全部成功配图 URL（下发段逐张 upload_image；[0]=封面）。空数组=无图。 */
-  imageUrls: string[];
-  /** 发帖元数据（含 topics/mentions/location/collection/visibility/permissions/mode/publishTime/compliance）；缺则 null。 */
-  metadata: PublishMetadata | null;
-  status: PublishStatus;
-  /** 内容版本号（edit-note-draft-before-publish）：下发闸比对授权所载版本与此值，不一致则作废过期签名并留待审。 */
-  contentVersion: number;
 }
 
 /** 陪伴客户端所需的当前待审稿件快照；不包含原稿标题、作者、正文或链接。 */
@@ -269,41 +260,6 @@ export interface EditDraftPatch {
   publishTime?: number | null;
 }
 
-/** editDraft 可区分拒因（诚实非乐观；面板据此映射不同 HTTP/文案）。 */
-export type EditDraftReason =
-  | 'not_found'
-  | 'not_pending'
-  | 'version_conflict'
-  | 'invalid_title'
-  | 'missing_visibility'
-  | 'invalid_field';
-
-/** editDraft 结果：成功回读写后真态（含自增后的版本号 + 删后配图列表）；失败带可区分拒因。 */
-export type EditDraftResult =
-  | {
-      ok: true;
-      contentVersion: number;
-      title: string | null;
-      content: string;
-      metadata: PublishMetadata | null;
-      images: string[];
-    }
-  | { ok: false; reason: EditDraftReason };
-
-export interface RefineDraftPatch {
-  title?: string;
-  content?: string;
-  topics?: string[];
-  images?: string[];
-}
-
-export type RefineDraftSelection =
-  | { imageUrl: string }
-  | { start: number; end: number; text: string }
-  | null;
-
-export type RefineDraftResult = EditDraftResult | { ok: false; reason: 'invalid_scope' | 'invalid_selection' };
-
 /** publish_log 持久化（PostgreSQL，aidcp 库）。 */
 export class PublishLogStore {
   private readonly pool: pg.Pool;
@@ -317,8 +273,13 @@ export class PublishLogStore {
   /** 影子写失败只告警一次，避免每条写入刷屏。 */
   private executionMirrorWarned = false;
 
-  constructor(options: PublishLogStoreOptions = {}) {
+  private readonly schemaEnsurer: SchemaEnsurer;
+  private readonly schemaProber: SchemaProber;
+
+  constructor(options: PublishLogStoreOptions) {
     this.clock = options.clock ?? Date.now;
+    this.schemaEnsurer = options.schemaEnsurer;
+    this.schemaProber = options.schemaProber;
     this.pool =
       options.pool ??
       new Pool({
@@ -334,7 +295,7 @@ export class PublishLogStore {
   async init(): Promise<void> {
     // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
     // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
-    await ensureCapabilitySchema(this.pool, {
+    await this.schemaEnsurer(this.pool, {
       capability: 'publish_log',
       sinceVersion: '0001_publish_log',
       ddl: [PUBLISH_SCHEMA_SQL],
@@ -348,7 +309,7 @@ export class PublishLogStore {
   /** 软探测执行态影子表是否存在；任何异常都诚实降级为「不可用」（绝不假成功、绝不抛）。 */
   private async probeExecutionMirror(): Promise<boolean> {
     try {
-      const shape = await probeSchemaShape(this.pool, [PUBLISH_EXECUTION_STATE_TABLE]);
+      const shape = await this.schemaProber(this.pool, [PUBLISH_EXECUTION_STATE_TABLE]);
       return shape.tables.has(PUBLISH_EXECUTION_STATE_TABLE);
     } catch {
       return false;

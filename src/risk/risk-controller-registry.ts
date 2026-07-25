@@ -1,4 +1,5 @@
 import type { DeploymentTarget } from '../deployment-target.js';
+import type { ConfigMirrorKey } from '../kernel/config-mirror-bump-types.js';
 import { RiskController } from './risk-controller.js';
 import { isRiskStateNotOwnedError } from './ownership.js';
 import type { AccountNurtureProvider, QuotaProvider, RiskState, RiskStore } from './types.js';
@@ -15,6 +16,8 @@ export interface RiskControllerRegistryOptions {
   slowStartDisabled?: boolean;
   /** 记账 fail-closed 现读（change risk-state-cross-process-integrity）。透传给每账号 controller。 */
   interactionBlockedProvider?: (accountId: string) => boolean;
+  /** 配置副本陈旧判据（change cloud-coupling-phase4-runtime-ports）。透传给每账号 controller。 */
+  mirrorStale?: (mirrorKey: ConfigMirrorKey) => boolean;
   /** 本进程的部署目标。仅用于驱逐告警的 writerTarget 标注。 */
   executionTarget?: DeploymentTarget;
   /** 条件写被拒（并发接管）后的驱逐告警。永不抛。 */
@@ -50,6 +53,7 @@ export class RiskControllerRegistry {
   private readonly coldStartRampEnabled?: boolean;
   private readonly slowStartDisabled?: boolean;
   private readonly interactionBlockedProvider?: (accountId: string) => boolean;
+  private readonly mirrorStale?: (mirrorKey: ConfigMirrorKey) => boolean;
   private readonly executionTarget: DeploymentTarget | null;
   private readonly onOwnershipAlert?: RiskControllerRegistryOptions['onOwnershipAlert'];
   private readonly logger?: Pick<Console, 'log' | 'warn' | 'error'>;
@@ -66,6 +70,7 @@ export class RiskControllerRegistry {
     this.coldStartRampEnabled = options?.coldStartRampEnabled;
     this.slowStartDisabled = options?.slowStartDisabled;
     this.interactionBlockedProvider = options?.interactionBlockedProvider;
+    this.mirrorStale = options?.mirrorStale;
     this.executionTarget = options?.executionTarget ?? null;
     this.onOwnershipAlert = options?.onOwnershipAlert;
     this.logger = options?.logger;
@@ -173,6 +178,7 @@ export class RiskControllerRegistry {
       coldStartRampEnabled: this.coldStartRampEnabled,
       slowStartDisabled: this.slowStartDisabled,
       interactionBlockedProvider: this.interactionBlockedProvider,
+      mirrorStale: this.mirrorStale,
       // 条件写被拒 → 驱逐 + 告警（design D3/D4 的「最后一道」）。见 handleNotOwned 的接线说明。
       onStateWriteRejected: (err) => {
         this.handleNotOwned(err);

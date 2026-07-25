@@ -15,10 +15,8 @@
  * - 不改任何角色 buildPrompt / previewPrompt 的现有逻辑（personaSegments 是并列的新增只读方法）。
  */
 
-import type { BaseRole } from '../agents/base-role.js';
 import type { Soul } from '../kernel/soul-types.js';
 import { getCatalogItem } from './role-catalog.js';
-import { PUBLISH_PREVIEW_BUILDERS, IMAGE_PROMPT_PREVIEW_BUILDERS } from '../publish-agent/prompts-preview.js';
 import { STATIC_ROLE_PROMPT_PREVIEWS } from './static-role-prompt-previews.js';
 import type { RolePromptView, RolePromptSegment } from '../panel/types.js';
 
@@ -30,6 +28,15 @@ const PUBLISH_ACCOUNT_NOTE = '实时数据为示例占位（线上调用时由�
 // 图像角色的图片指令说明（change publish-prompt-preview 补图片类）。
 const IMAGE_PREVIEW_NOTE =
   '发给文生图模型的图片指令（非大模型文本 prompt）：主体由「配图指令」角色按正文产出（此处为示例），系统统一追加下方固定风格基底；配图用全局图片模型生成。';
+
+/**
+ * 浏览角色实例的**最小可读面**（change cloud-coupling-phase4-runtime-ports）：本文件全文只读 roleName。
+ * 能否预览 / 有无人设分段一直由 hasPreview / hasPersonaSegments 两个结构化守卫在运行时判定，
+ * 与角色基类无关；故这里不再引 automation 的 BaseRole。
+ */
+export interface PreviewableRole {
+  readonly roleName: string;
+}
 
 interface Previewable {
   previewPrompt(): string;
@@ -131,6 +138,13 @@ export interface RolePromptProviderOptions {
   hasPersona?: (accountId: string) => boolean;
   /** 取选定账号的真实人设；返回 null 表示无人设，发布侧预览回落示例人设并诚实标注。 */
   getPersona?: (accountId: string) => Soul | null;
+  /**
+   * 发布侧文本角色的渲染闭包表（roleId → 闭包）。由组合根注入 content 属主的实装。
+   * 未注入 → 发布侧角色落到既有的「该角色暂不支持预览」诚实说明，绝不伪造 prompt。
+   */
+  publishPreviewBuilders?: Record<string, (soul?: Soul) => string>;
+  /** 图像角色的图片指令渲染闭包表。未注入 → 落到既有的「图像角色无文本 prompt」说明。 */
+  imagePromptPreviewBuilders?: Record<string, () => string>;
 }
 
 const FALLBACK_NOTE = '该账号未绑定人设（运行会被诚实拒绝，no_persona）；此预览按示例人设渲染、仅供查看；实时数据为示例占位（线上调用时由系统填入真实值）。';
@@ -140,7 +154,7 @@ const FALLBACK_NOTE = '该账号未绑定人设（运行会被诚实拒绝，no_
  * @param opts 账号口径注入（可选）：给定 withAccount/hasPersona 才支持 accountId 维度预览。
  */
 export function createRolePromptProvider(
-  getBrowseRoles: () => readonly BaseRole[],
+  getBrowseRoles: () => readonly PreviewableRole[],
   opts: RolePromptProviderOptions = {},
 ): RolePromptProvider {
   // 单角色渲染（不含账号口径切换）：未知/非文本/无预览/失败 → available:false + 诚实 note。
@@ -171,7 +185,7 @@ export function createRolePromptProvider(
       // 图像角色（change publish-prompt-preview 补图片类）：展示发给文生图模型的「有效图片指令」
       // （示例主体 + 固定风格基底）；无预览闭包时回落旧「无文本 prompt」说明。
       if (item.llmKind === 'image') {
-        const buildImg = IMAGE_PROMPT_PREVIEW_BUILDERS[roleId];
+        const buildImg = opts.imagePromptPreviewBuilders?.[roleId];
         if (!buildImg) {
           return { roleId, prompt: null, available: false, note: '图像角色无文本 prompt（用全局图片模型）' };
         }
@@ -203,7 +217,7 @@ export function createRolePromptProvider(
     }
     // 发布侧文本角色（change publish-prompt-preview）：用示例输入调既有 build*Prompt 忠实渲染；
     // 可由账号口径传入真实人设替换示例人设。渲染抛错优雅降级、绝不连累发布闭环。
-    const buildPreview = PUBLISH_PREVIEW_BUILDERS[roleId];
+    const buildPreview = opts.publishPreviewBuilders?.[roleId];
     if (!buildPreview) {
       return { roleId, prompt: null, available: false, note: '该角色暂不支持预览' };
     }

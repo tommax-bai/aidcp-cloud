@@ -21,6 +21,7 @@ import type {
 import { clampTitle, firstSentence } from '../../kernel/title-clamp.js';
 import { publishProfileForPlatform } from '../platform-profile.js';
 import { checkWritingLanguage } from '../../kernel/writing-language.js';
+import type { DefaultChatProvider } from '../../kernel/default-chat-provider.js';
 
 /**
  * PublishExecutor —— 生成候审段的出口角色（change decouple-publish-generation-from-dispatch）。
@@ -72,11 +73,6 @@ export interface ApprovalMessenger {
   uploadImageFromUrl?(url: string): Promise<string>;
 }
 
-/** Bot 聊天存储接口 */
-export interface BotChatStore {
-  getDefaultChat(): Promise<{ chatId: string } | null>;
-}
-
 // 与 publish-agent/types.ts 的 PublishResult['approvalCard'].targetSource **逐字一致**（漂移 typecheck 抓不到）。
 // 标的是哪条解析路径产出了目标、不是落点（落点看 targetChatId）。
 type ApprovalCardTargetSource = 'manual_source' | 'account_scope' | 'default_chat' | 'client_only_policy' | 'none';
@@ -91,7 +87,7 @@ interface ApprovalCardSendResult {
 export interface PublishExecutorDeps {
   store: PublishLogStore;
   messenger?: ApprovalMessenger;
-  botChatStore?: BotChatStore;
+  botChatStore?: DefaultChatProvider;
   /**
    * 审批卡目标统一解析（change unify-card-routing-origin-then-team）：来源会话 → 账号团队群 → 默认群。
    * 注入后**取代** botChatStore.getDefaultChat 兜底——自动 / 排期发帖的审批卡由此进入账号团队群，
@@ -143,7 +139,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
   protected readonly outputKey = 'publishResult' as const;
   private store: PublishLogStore;
   private messenger?: ApprovalMessenger;
-  private botChatStore?: BotChatStore;
+  private botChatStore?: DefaultChatProvider;
   private resolveCardChatId?: (originChatId: string | undefined, accountId: string | undefined) => Promise<string>;
   private resolveReviewCardDelivery?: PublishExecutorDeps['resolveReviewCardDelivery'];
   private notifyPublishPending?: (accountId: string, recordId: number, title: string) => void;

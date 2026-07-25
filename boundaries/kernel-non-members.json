@@ -74,7 +74,12 @@
       "src/kernel/alert-resolution-port.ts",
       "src/kernel/event-fanout-port.ts",
       "src/kernel/risk-contract.ts",
-      "src/kernel/facebook-publish-media-types.ts"
+      "src/kernel/facebook-publish-media-types.ts",
+      "src/kernel/persona-ports.ts",
+      "src/kernel/default-chat-provider.ts",
+      "src/kernel/account-pause-port.ts",
+      "src/kernel/soul-codec.ts",
+      "src/kernel/publish-draft-contract.ts"
     ]
   },
   "rejected": [

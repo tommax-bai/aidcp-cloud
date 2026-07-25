@@ -20,7 +20,17 @@ import { AccountStateManager } from '../../src/account-state.js';
 import type { AccountRecord, AccountStore } from '../../src/account-store.js';
 import { UiSnapshotService } from '../../src/comm/ui-snapshot.js';
 import { AccountPersonaService } from '../../src/config/account-persona-service.js';
-import { allowsTransportWhenGateUnknown } from '../../src/config/mirror-stop-work.js';
+import { allowsTransportWhenGateUnknown, hasStaleGateMirror, platformActionHalt } from '../../src/config/mirror-stop-work.js';
+import { isMirrorStale, noteMirrorStaleRefusal } from '../../src/config-mirror-freshness.js';
+import type { ConfigMirrorGatePort } from '../../src/kernel/config-mirror-bump-types.js';
+
+/** 与 src/server.ts 组合根逐字等价的停手闸适配器（P4-2：判定仍在同一个 api 事实源上）。 */
+const configMirrorGate: ConfigMirrorGatePort = {
+  isStale: (mirrorKey) => isMirrorStale(mirrorKey),
+  hasStaleGateMirror: () => hasStaleGateMirror(),
+  platformActionHalt: (context) => platformActionHalt(context),
+  noteStaleRefusal: (mirrorKey, context) => noteMirrorStaleRefusal(mirrorKey, context),
+};
 import { automationOperationDescriptorFor } from '../../src/comm/operation-registry.js';
 import { RiskController } from '../../src/risk/risk-controller.js';
 
@@ -43,6 +53,7 @@ function makeDispatcher(): { d: RoleDispatcher; commands: EdgeCommand[]; rejecte
   const commands: EdgeCommand[] = [];
   const rejected: { accountId: string; reason: string }[] = [];
   const d = new RoleDispatcher({
+    configMirrorGate,
     getSoul: () => mockSoul,
     llm: { complete: async () => '-1' },
     sendCommand: (c) => { commands.push(c); },
@@ -216,6 +227,7 @@ test('6.2 人设副本陈旧拒绝新会话 → MUST 计数（这是停手最常
   const { refusals } = installStaleMirrors();
   const commands: EdgeCommand[] = [];
   const d = new RoleDispatcher({
+    configMirrorGate,
     getSoul: () => mockSoul,
     llm: { complete: async () => '-1' },
     sendCommand: (c) => { commands.push(c); },
@@ -236,6 +248,7 @@ test('6.2 人设副本陈旧拒绝新会话 → MUST 计数（这是停手最常
 test('4.7 慢启动投影：副本陈旧 MUST NOT 显示成「已入组 D1」（clamp 取最严 ≠ 对外宣称已入组）', () => {
   const controller = new RiskController({
     accountId: 'acc-1',
+    mirrorStale: (mirrorKey: ConfigMirrorKey) => configMirrorGate.isStale(mirrorKey),
     nurtureProvider: {
       // 该账号**从未开启**慢启动：新鲜态下投影必须是 off。
       slowStartSinceFor: () => null,

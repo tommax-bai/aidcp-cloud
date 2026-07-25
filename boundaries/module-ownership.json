@@ -1035,6 +1035,11 @@
     "note": "【待定稿裁决】P3-4 从 src/risk/ownership.ts 析出账号归属的窄端口与占位结果类型（AccountOwnershipPort / ClaimExecutionTargetResult）。**放 kernel 不放 api**：automation 的连接握手路径也持有该接口，放 api 会新造 automation→api 反向边、净额 0。**与在册豁免 note 的口径分歧需知**：那条 note 写的消除路径是「随合同回到 api 一侧」，本条选了 kernel，理由如上，已显式对账。原文件按复核修正只留具名再导出，composition 组合根与 automation 侧持有方**一个字节不改**。请求回写 §4.7 见 docpatch RK-P3-4"
   },
   {
+    "path": "src/kernel/account-pause-port.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】P4-1 新写：账号暂停态三态枚举 AccountPauseState（从 src/account-state.ts 抬入、原位等值再导出）+ 单方法只读端口 AccountPausePort.pauseStateOf。pause / resume / init / refreshFromAuthority / getStatus 全部不进端口。零 import，四条准入正则实跑零命中。消除 import 豁免 1 条（src/comm/handler.ts -> src/account-state.ts，automation -> api）。请求回写 §4.7 见 docpatch RK-P4-1"
+  },
+  {
     "path": "src/kernel/account-projection-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change automation-accounts-projection 新增：账号身份跨属主投影的端口契约（AccountIdentityProjectionRow 三列纯类型 + AccountRosterSourcePort 只读无参端口）。零 import、零 SQL / HTTP / LLM、无进程内活状态、不反向依赖业务层。accounts 属 api 单写，automation 域为把守卫读拉回同库而在本域冷备投影，投影来源经本端口取，避免 automation 直连 api 的库。api 侧 src/account-store.ts 实现、automation 侧 src/transport/account-projection-store.ts 消费。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-account-projection"
@@ -1103,6 +1108,11 @@
     "path": "src/kernel/curated-content-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-platform-type-closure 从 src/cache/curated-content-store.ts 析出纯数据模型类型（CuratedReferenceImageFormGuess / TextCardTranscription(*) / CuratedReferenceImage(Input) / CuratedObservation / CuratedSelectItem / CuratedPanelRow / CuratedFacets / CuratedContentType(Filter) 等），仅 import kernel（visual-reference-types / time）。CURATED_CONTENT_SCHEMA_SQL + CuratedContentStore 类 + normalize* 函数 + CuratedContentStoreOptions 留 curated-content-store.ts（content）。满足 §4.7 kernel 准入（无 SQL）。请求回写 §4.7 见 docpatch RK3"
+  },
+  {
+    "path": "src/kernel/default-chat-provider.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】P4-1 新写：默认群目标的单方法只读端口（DefaultChatProvider.getDefaultChat）+ DefaultChatTarget。chatName 保留是因为调用点把它打进「默认群查询完成」日志，砍掉即静默抹掉一条可观测性。零 import，四条准入正则实跑零命中。消除 import 豁免 1 条（src/comm/handler.ts -> src/cache/bot-chat-store.ts，automation -> api），并顺带取代 publish-executor 里那份 3 行手抄同名接口。请求回写 §4.7 见 docpatch RK-P4-1"
   },
   {
     "path": "src/kernel/delegated-task-types.ts",
@@ -1240,6 +1250,11 @@
     "note": "【待定稿裁决】change lift-shared-contracts-to-kernel 抬入：原 src/agents/persona-format.ts（纯人设兴趣格式化函数 tieredInterests，零 import、零副作用），被 6 个 automation 判定/撰写角色跨边界导入。满足 §4.7 kernel 准入。注：原 §4.7『src/agents/ api 2 文件 152 行』的行数配对（与 persona-auto-fill.ts 合计）随本次抬走失效，请求回写 §4.7 见 docpatch RK1"
   },
   {
+    "path": "src/kernel/persona-ports.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】P4-1 新写：人设通道的三个窄端口（PersonaWritePort / PersonaGeneratorPort / AccountPersonaPort）+ 传输层两个上限常量 + PersonaGenerateInput/Outcome（从 src/agents/persona-generator.ts 整段抬入，原位等值再导出）。端口按**调用方视角**收窄：实现侧成功分支上的 view / summary 字段刻意不进 kernel（那是面板目录视图闭包，整搬会把面板契约拖进共享层），结构可赋值方向上多余字段无害。唯一 import 是 kernel→kernel 的 soul-types.js。四条准入正则实跑零命中。消除 import 豁免 3 条（handler.ts -> panel/types.ts、handler.ts -> agents/persona-generator.ts、handler.ts -> config/account-persona-service.ts）+ 1 条（config/account-persona-service.ts -> agents/persona-generator.ts）。请求回写 §4.7 见 docpatch RK-P4-1"
+  },
+  {
     "path": "src/kernel/pg-config.ts",
     "layer": "kernel",
     "note": "§4.7 kernel 花名册成员（27 行）。change decouple-store-schema-pgconfig-cluster 从 src/cache/pg-config.ts git mv 到 src/kernel/（物理位置归位 kernel 目录，字节等价，唯一 import 是 import type pg，无 SQL / 无业务依赖 / 无进程内活状态）。消费方改为直接从 kernel import DEFAULT_PG_CONFIG，消除经 pg-anchor-cache（automation）再导出的跨边界边。请求回写 §4.7 见 docpatch"
@@ -1263,6 +1278,11 @@
     "path": "src/kernel/publish-approval-contract.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/publish-agent/publish-approval-store.ts 析出发布审批纯枚举 + 哨兵错误（APPROVAL_VOID_REASONS / ApprovalVoidReason / isApprovalVoidReason / APPROVAL_BLOCKED_REASONS / ApprovalBlockedReason 字面 tuple 与派生 union；ApprovalUnreadableError 纯 Error 子类，与 schema-capability-contract 的 SchemaCapabilityError 同一手法）。零 import、零 SQL、无 pg、无模块级 Set-Map。ApprovalDecisionStore 类 + pg 读写留 publish-approval-store.ts（automation）并从 kernel 导入等值再导出。供发布下发编排跨边界共导，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
+  },
+  {
+    "path": "src/kernel/publish-draft-contract.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】P4-5 新写：发布草稿 / 排期 / 稿件精修的跨属主契约——记录形状（ScheduledPublishRecord / ScheduledReconcileUpdate / DispatchDraft / EditDraft* / RefineDraft* / DraftRefinement 六型）+ 三个窄端口（ScheduledPublishStore 3 方法 / DraftRefinementDrafts 2 方法 / DraftRefinementReadWritePort 4 方法，逐字复刻消费方当下的 Pick<Store,…>）。两个属主文件（api 的 publish-log-store.ts、content 的 draft-refinement.ts）自建 pg 池、含建表 DDL，整文件进不了 kernel，故只析出契约段并在原位等值再导出（api 同层的面板 / 删图 / 审批四个消费方逐字无感）。三条 import 全是 kernel（platform-types / publish-pipeline-types / deployment-target）。四条准入正则实跑零命中。消除 import 豁免 4 条（publish-dispatcher / scheduled-publish-reconciler / draft-refinement-worker -> publish-log-store.ts，client-auth-server -> draft-refinement.ts）。请求回写 §4.7 见 docpatch RK-P4-5"
   },
   {
     "path": "src/kernel/publish-generation-types.ts",
@@ -1308,6 +1328,11 @@
     "path": "src/kernel/schema-name.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change bulk-lift-all-shared-types 整文件抬入：原 src/schema/schema-name.ts（运行时 schema 名解析，纯字符串函数只读 env，零 import、无 SQL 字面量、零活状态）——正是 src/schema/ 消除路径 (a) 里应判 kernel 的纯段。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
+  },
+  {
+    "path": "src/kernel/soul-codec.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】P4-11 新写：Soul 编解码三方法窄端口（parseValue / serialize / parseYaml），逐一对应人设生成角色的三处调用（JSON 结构校验 / 确定性序列化 / round-trip 自校验）。**加载器本身进不了 kernel**：src/soul/loader.ts 持模块级 new Set 单例，且 import 同目录的写作语言判定（api），进 kernel 即反向边。只 import kernel 的 soul-types.js 与 yaml.js。四条准入正则实跑零命中。消除 import 豁免 1 条（src/agents/persona-generator.ts -> src/soul/index.ts，content -> api）。请求回写 §4.7 见 docpatch RK-P4-11"
   },
   {
     "path": "src/kernel/soul-types.ts",

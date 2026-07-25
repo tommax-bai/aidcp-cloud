@@ -31,10 +31,12 @@ export function staleGateMirrors(): ConfigMirrorKey[] {
   );
 }
 
-/** 停手判据的结果。`halted:true` 时带上触发的 mirrorKey，供日志、告警与拒绝记账用。 */
-export type PlatformActionHalt =
-  | { halted: false }
-  | { halted: true; mirrorKey: ConfigMirrorKey };
+/**
+ * 停手判据的结果。形状单写在 kernel（change cloud-coupling-phase4-runtime-ports），此处等值再导出。
+ * `halted:true` 时带上触发的 mirrorKey，供日志、告警与拒绝记账用。
+ */
+export type { PlatformActionHalt } from '../kernel/config-mirror-bump-types.js';
+import type { PlatformActionHalt } from '../kernel/config-mirror-bump-types.js';
 
 /**
  * 是否应停止放行**新的**真实平台动作。

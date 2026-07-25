@@ -5,10 +5,20 @@
 
 import type { CuratedSourceAdmission } from '../cache/curated-content-store.js';
 import type { BeginRewriteResult, ReferenceNote } from '../kernel/publish-generation-types.js';
-import type { FirstPostOnboardingStore } from './first-post-onboarding-store.js';
+
+/**
+ * 首作引导的**认领三方法**窄端口（change cloud-coupling-phase4-runtime-ports）。
+ * 实现在 api 的 FirstPostOnboardingStore；本文件（content）只按端口引，不再 import 那个实现。
+ * 端口刻意零 pg 泄漏：没有 Pool、没有 SchemaEnsurer、没有 DDL 常量。
+ */
+export interface FirstPostOnboardingClaimPort {
+  claim(accountId: string, sourceId: string): Promise<boolean>;
+  release(accountId: string, sourceId: string, reason: string): Promise<boolean>;
+  complete(accountId: string, sourceId: string): Promise<boolean>;
+}
 
 export interface FirstPostOnboardingCoordinatorDeps {
-  store: Pick<FirstPostOnboardingStore, 'claim' | 'release' | 'complete'>;
+  store: FirstPostOnboardingClaimPort;
   countPendingForAccount: (accountId: string) => Promise<number>;
   beginRewrite: (
     accountId: string,

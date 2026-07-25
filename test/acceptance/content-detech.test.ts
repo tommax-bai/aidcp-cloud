@@ -15,6 +15,7 @@ import type { PipelineFields, TriggerInput, ScoutDecision } from '../../src/publ
 import { ConceptExtractorRole } from '../../src/agents/concept-extractor-role.js';
 import { EventBus } from '../../src/event-bus/index.js';
 import type { Soul } from '../../src/kernel/soul-types.js';
+import { XHS_COMMENT_PROFILE } from '../../src/platform/registry.js';
 
 /** 非技术（美食）人设：验证内容管线跟随人设、不再写死技术领域。 */
 const foodSoul: Soul = {
@@ -96,6 +97,7 @@ test('AC-CONCEPT-NEUTRAL 概念抽取 prompt 话题中立：按人设兴趣抽�
     soul: foodSoul,
     llm: { complete: async () => '[]' },
     conceptStore: { addCandidate: async () => true },
+    platformProfile: XHS_COMMENT_PROFILE,
   });
   const prompt = role.previewPrompt();
   assert.match(prompt, /阿棠/, '抽取 prompt 以账号人设身份展开');

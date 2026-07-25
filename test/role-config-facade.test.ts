@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRoleConfigPanel } from '../src/config/role-config-facade.js';
 import type { RoleConfigStore } from '../src/config/role-config-store.js';
-import { ProviderKeyMissingError } from '../src/llm/index.js';
 
 type FakeRow = {
   roleId: string;
@@ -66,10 +65,15 @@ function makePanel(
     getCategoryModel: (catId) => categoryModels[catId] ?? null,
     getCategoryProvider: (catId) => opts.categoryProviders?.[catId] ?? null,
     getCategoryThinking: () => null,
+    thinkingOnAvailable: () => false,
+    getVisionModel: () => 'qwen-vl-max',
+    getVisionProvider: () => 'dashscope',
+    // P4-4：探活改结果型后，桩直接回结果（分类现在发生在组合根，不在外观里）。
     probeModel: async (provider, m) => {
       probed.push({ provider, model: m });
-      if (opts.keyMissing) throw new ProviderKeyMissingError(provider);
-      if (!probeOk) throw new Error('invalid');
+      if (opts.keyMissing) return { ok: false as const, reason: 'provider_key_missing' as const };
+      if (!probeOk) return { ok: false as const, reason: 'model_unavailable' as const };
+      return { ok: true as const };
     },
   });
   return { panel, store, probed: () => probed };

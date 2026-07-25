@@ -1,7 +1,7 @@
 // 注意：本 import 指向 `src/config-mirror-freshness.ts`（src 根、无依赖的中立模块），**不是**
 // `src/config/`。`src/risk/` 对 `src/config/` 的 import 必须保持为 0——那条既成事实正是定稿方案
 // §11.4 要求一把四类限频配置判给自动化服务的依据，也有静态断言测试守着（test/config/module-boundary）。
-import { isMirrorStale } from '../config-mirror-freshness.js';
+import type { ConfigMirrorKey } from '../kernel/config-mirror-bump-types.js';
 import { coldStartDailyCap } from './cold-start-planner.js';
 import { deriveWindowQuotas, deriveWindowQuotasFromDaily, minWindowQuotas, scaleWindowQuotas, zeroInteractionQuotas } from './quotas.js';
 import { createRiskState, RiskStateMachine } from './risk-state-machine.js';
@@ -28,6 +28,11 @@ function isStrictlyTighter(clamped: WindowQuotas, base: WindowQuotas): boolean {
 
 export interface RiskControllerOptions {
   accountId?: string;
+  /**
+   * 配置副本陈旧判据（change cloud-coupling-phase4-runtime-ports）：由组合根注入 api 侧实现。
+   * 缺省 → 恒「不陈旧」，逐位等于「未安装新鲜度事实源 → fresh」的既有语义。
+   */
+  mirrorStale?: (mirrorKey: ConfigMirrorKey) => boolean;
   quotaLevel?: RiskQuotaLevel;
   clock?: () => number;
   store?: RiskStore;
@@ -141,6 +146,7 @@ export class RiskController {
   private readonly store?: RiskStore;
   private readonly minViewsForLikeRatio: number;
   private readonly quotaProvider?: QuotaProvider;
+  private readonly mirrorStale?: (mirrorKey: ConfigMirrorKey) => boolean;
   private readonly nurtureProvider?: AccountNurtureProvider;
   private readonly coldStartRampEnabled: boolean;
   private readonly slowStartDisabled: boolean;
@@ -160,6 +166,7 @@ export class RiskController {
     this.counter = new SlidingWindowCounter({ clock: this.clock });
     this.minViewsForLikeRatio = options.minViewsForLikeRatio ?? 10;
     this.quotaProvider = options.quotaProvider;
+    this.mirrorStale = options.mirrorStale;
     this.nurtureProvider = options.nurtureProvider;
     this.coldStartRampEnabled = options.coldStartRampEnabled ?? false;
     this.slowStartDisabled = options.slowStartDisabled ?? false;
@@ -444,7 +451,7 @@ export class RiskController {
     //
     // **本方法是纯取值口，不记账**：它挂在 effectiveQuotas 的热路径上（canDo / remaining / retryAfter
     // 每次都走到），也被什么都没拒绝的徽章投影调用。记账收口在真正的拒绝点（统一停手闸）。
-    if (isMirrorStale('client_environment_slow_start')) return { kind: 'unknown' };
+    if (this.mirrorStale?.('client_environment_slow_start') ?? false) return { kind: 'unknown' };
     const environmentSince = this.nurtureProvider?.slowStartSinceFor(this.accountId) ?? null;
     if (environmentSince != null) return { kind: 'anchor', anchor: { since: environmentSince, source: 'environment' } };
     const createdAt = this.coldStartRampEnabled ? this.nurtureProvider?.createdAtFor(this.accountId) : undefined;

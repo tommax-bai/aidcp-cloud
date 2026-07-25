@@ -14,8 +14,7 @@
 import { randomUUID } from 'node:crypto';
 import type { PersonaBinding } from '../kernel/persona-binding.js';
 import { CONFIG_MIRROR_STALE_REASON, PERSONA_UNAVAILABLE_REASON } from '../kernel/config-stop-work-reasons.js';
-import { hasStaleGateMirror, platformActionHalt } from '../config/mirror-stop-work.js';
-import { noteMirrorStaleRefusal } from '../config-mirror-freshness.js';
+import type { ConfigMirrorGatePort } from '../kernel/config-mirror-bump-types.js';
 import { EventBus } from '../event-bus/index.js';
 import type { CommentApprovalTrace, CommentAppraisingPayload, MandatoryInteractionContext, NoteDetailData, PageCardsData, RoleName } from '../event-bus/types.js';
 import {
@@ -29,6 +28,7 @@ import {
   commentProfileForPlatform,
   identityCaptureStrategyForPlatform,
   type PlatformId,
+  type CommentPlatformProfile,
   type NoteScopedAction,
   type Surface,
 } from '../platform/index.js';
@@ -169,6 +169,8 @@ export type TextCardTranscriberHandle = object;
  */
 export interface ConceptExtractorFactoryOptions extends RoleOptions {
   conceptStore: ConceptStorePort;
+  /** 由 commonOptions 必填注入（P4-10：角色侧不再回落 XHS profile）。 */
+  platformProfile: CommentPlatformProfile;
 }
 export interface ValuableCommentArchivistFactoryOptions extends RoleOptions {
   getNoteData: (noteId: string) => NoteData | null;
@@ -386,6 +388,11 @@ export interface RoleDispatcherOptions {
    * 讲成一件需要人去补配置的事）。
    */
   personaBinding?: (accountId: string) => PersonaBinding;
+  /**
+   * 配置副本停手闸（change cloud-coupling-phase4-runtime-ports）：由组合根注入 api 侧实现。
+   * 未注入 = 恒不停手，逐位等于「未安装新鲜度事实源 → fresh」的既有语义。
+   */
+  configMirrorGate?: ConfigMirrorGatePort;
   /** 账号未绑人设被诚实拒绝时回调（记录 needs_persona_setup 拒绝）。 */
   onSessionRejected?: (accountId: string, reason: string) => void | Promise<void>;
   /** 全局调度开关（面板 /dispatch）：false 时不启动浏览会话。缺省 → 恒 true。 */
@@ -587,6 +594,7 @@ export class RoleDispatcher {
   private notificationTaskEnding = false;
   private pendingNotificationCommands: EdgeCommand[] = [];
   private readonly personaBinding?: (accountId: string) => PersonaBinding;
+  private readonly configMirrorGate?: ConfigMirrorGatePort;
   private readonly onSessionRejected?: (accountId: string, reason: string) => void | Promise<void>;
   private readonly isDispatchActive: () => boolean;
   /** 该连接账号平台（2.8 会话平台闸）；缺省不设闸。 */
@@ -735,6 +743,7 @@ export class RoleDispatcher {
     this.fireAutoContactComment = options.fireAutoContactComment;
     this.isHardPaused = options.isHardPaused ?? (() => false);
     this.personaBinding = options.personaBinding;
+    this.configMirrorGate = options.configMirrorGate;
     this.onSessionRejected = options.onSessionRejected;
     this.isDispatchActive = options.isDispatchActive ?? (() => true);
     this.accountPlatform = options.accountPlatform;
@@ -972,7 +981,8 @@ export class RoleDispatcher {
     // 也**绝不**改成「回落最保守档继续跑」：最保守档仍是放行真实平台动作，会把一次基础设施故障
     // 静默转成全车队降速，外观是「系统在跑、只是慢」，属最难发现的一类故障。
     if (!this.isQuotaSleepBypass(command)) {
-      const halt = platformActionHalt(`command:${command.action}:${this.currentAccountId}`);
+      const halt = this.configMirrorGate?.platformActionHalt(`command:${command.action}:${this.currentAccountId}`)
+        ?? { halted: false as const };
       if (halt.halted) {
         console.warn(
           `[RoleDispatcher] command.suppressed reason=${CONFIG_MIRROR_STALE_REASON} mirror=${halt.mirrorKey} ` +
@@ -1757,7 +1767,7 @@ export class RoleDispatcher {
       // 记账（task 6.2）：这是「因镜像陈旧而停手」**最常见**的一条路径——人设副本一陈旧，
       // 会话根本起不来，后面也就没有命令泵去补记。落在这里而不是取值口，是因为取值口也服务
       // 只读裁决（什么都没拒绝），只有走到这一跳才是真的少放行了一次新会话。
-      noteMirrorStaleRefusal('persona_config', `session_start:${this.currentAccountId}`);
+      this.configMirrorGate?.noteStaleRefusal('persona_config', `session_start:${this.currentAccountId}`);
       console.warn(
         `[RoleDispatcher] 账号 ${this.currentAccountId} 人设副本陈旧 → 拒绝启动浏览会话（${PERSONA_UNAVAILABLE_REASON}）：不开循环、不发巡刷信号、不弹人设向导`,
       );
@@ -1766,7 +1776,7 @@ export class RoleDispatcher {
     }
     // 闸门镜像陈旧（人设之外的任一条）：同样不放行新会话。已在跑的会话不在此处 kill。
     if (verdict === CONFIG_MIRROR_STALE_REASON) {
-      platformActionHalt(`session_start:${this.currentAccountId}`); // 记账（判定已在 verdict 做完）
+      this.configMirrorGate?.platformActionHalt(`session_start:${this.currentAccountId}`); // 记账（判定已在 verdict 做完）
       console.warn(
         `[RoleDispatcher] 账号 ${this.currentAccountId} 配置镜像陈旧 → 拒绝启动浏览会话（${CONFIG_MIRROR_STALE_REASON}）`,
       );
@@ -1801,7 +1811,7 @@ export class RoleDispatcher {
     // 其余闸门镜像陈旧 → 统一停手（不放行新会话）。
     // 这里用**不记账**的纯判据：本方法也服务只读裁决（resumeGateSnapshot，~60s 每跳一次），
     // 只读裁决什么都没拒绝。真正拒绝那一跳的记账在 canStartSession 里落（含人设那一路）。
-    if (hasStaleGateMirror()) return CONFIG_MIRROR_STALE_REASON;
+    if (this.configMirrorGate?.hasStaleGateMirror() ?? false) return CONFIG_MIRROR_STALE_REASON;
     return 'ok';
   }
 

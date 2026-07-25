@@ -42,6 +42,13 @@ export type SchemaEnsurer = (
   spec: SchemaCapabilitySpec,
 ) => Promise<SchemaCapabilityStatus>;
 
+/**
+ * 连库读实测形状那一步的**注入端口**（change cloud-coupling-phase4-runtime-ports）。
+ * 唯一实现是 automation 的 `probeSchemaShape`（含 SQL，MUST NOT 进 kernel）。它另有第三个
+ * `schema = runtimeSchemaName()` 默认参——端口刻意只暴露两参，调用方一律走运行时默认 schema。
+ */
+export type SchemaProber = (client: SchemaQueryable, tables: string[]) => Promise<SchemaShape>;
+
 export interface SchemaShape {
   /** 库里实际存在的表名 */
   tables: Set<string>;

@@ -137,3 +137,41 @@ export interface ConfigMirrorBumpResult {
 export interface ConfigMirrorBumpSink {
   applyBump(request: ConfigMirrorBumpRequest): Promise<ConfigMirrorBumpResult>;
 }
+
+
+/* ── 配置副本新鲜度 / 停手闸的跨域契约（change cloud-coupling-phase4-runtime-ports） ──────
+ *
+ * 事实源（ambient 单例）与判定实现都留在 api（`src/config-mirror-freshness.ts` /
+ * `src/config/mirror-stop-work.ts`）——它们持模块级可变单例与只读表单例，进不了 kernel。
+ * 这里只放**形状**：automation 侧的命令泵 / 会话启动闸 / 风控慢启动锚点按端口问，
+ * 由组合根注入 api 侧的实现。未注入 = 恒不停手，逐位等于「未安装事实源 → fresh」的既有语义。
+ */
+
+/** 副本读取状态。`stale` = 距上一次**成功完成版本比对**已超过该镜像声明的陈旧上限。 */
+export type MirrorReadState = 'fresh' | 'stale';
+
+/** 新鲜度事实源。运行期由镜像刷新器实现并 install 进 api 侧的 ambient 槽位。 */
+export interface ConfigMirrorFreshnessSource {
+  stateOf(mirrorKey: ConfigMirrorKey): MirrorReadState;
+  /**
+   * 因副本陈旧而拒绝一次真实平台动作时记账（按 mirrorKey、按小时可查）。
+   * 与设计内克制（配额耗尽、模型判定不做、冷却未过）**分别计数**，绝不混计。
+   */
+  noteStaleRefusal(mirrorKey: ConfigMirrorKey, context?: string): void;
+}
+
+/** 停手判据的结果。`halted:true` 时带上触发的 mirrorKey，供日志、告警与拒绝记账用。 */
+export type PlatformActionHalt =
+  | { halted: false }
+  | { halted: true; mirrorKey: ConfigMirrorKey };
+
+/**
+ * 停手闸的窄端口。四个方法逐一对应 automation 侧今天的四处直调。
+ * `platformActionHalt` / `noteStaleRefusal` **会记账**；`isStale` / `hasStaleGateMirror` 纯读。
+ */
+export interface ConfigMirrorGatePort {
+  isStale(mirrorKey: ConfigMirrorKey): boolean;
+  hasStaleGateMirror(): boolean;
+  platformActionHalt(context?: string): PlatformActionHalt;
+  noteStaleRefusal(mirrorKey: ConfigMirrorKey, context?: string): void;
+}

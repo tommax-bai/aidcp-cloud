@@ -15,7 +15,7 @@
  * - 幂等 + 按账号单飞：同 recordId 重复触发不二次发布；同账号下发串行，绝不并发抢同一边缘。
  */
 
-import type { DispatchDraft } from './publish-log-store.js';
+import type { DispatchDraft } from '../kernel/publish-draft-contract.js';
 import type { CommandSequencer } from './command-sequencer.js';
 import { ApprovalUnreadableError, type ApprovalBlockedReason, type ApprovalVoidReason } from '../kernel/publish-approval-contract.js';
 import { EdgeTaskLeaseError, type EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';

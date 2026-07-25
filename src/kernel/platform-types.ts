@@ -1,10 +1,17 @@
 /**
  * 平台能力声明的**纯类型契约**（kernel 段）。
  *
- * 只含类型/接口声明，无任何注册表数据、无读注册表的函数——那些（PLATFORM_REGISTRY、
- * *_COMMENT_PROFILE 常量、normalizePlatformId / platformRegistryEntry / commentProfileForPlatform
- * 等读表函数）按 §9「平台能力由 aidcp-automation 单写」留在 src/platform/registry.ts（automation）。
- * 本文件供 api / content / automation 三边 type-only 共导，不让任何一边直接拿到注册表数据。
+ * 只含类型/接口声明 + 两样不读注册表的判定件（见下）。**判据是「读不读 PLATFORM_REGISTRY」，
+ * 不是「名字里有没有 platform」**：注册表数据（PLATFORM_REGISTRY、*_COMMENT_PROFILE 常量）与真正的
+ * 读表函数（platformRegistryEntry / commentProfileForPlatform / availableScheduledAutomationActionsForPlatform
+ * 等）按 §9「平台能力由 aidcp-automation 单写」留在 src/platform/registry.ts（automation）。
+ *
+ * 例外两项（change cloud-coupling-phase4-runtime-ports，实现体零 PLATFORM_REGISTRY 引用）：
+ *   - `normalizePlatformId` —— 纯字符串别名映射，值域 PlatformId 本来就住在本文件；
+ *   - 三个 `SCHEDULED_*_DAILY_CAP_MAX` —— 与平台无关的服务端防御性硬上界，registry 只是引用者。
+ * registry.ts 仍等值再导出这四个名字，automation 侧导入面逐字不变。
+ *
+ * 本文件供 api / content / automation 三边共导，不让任何一边直接拿到注册表数据。
  */
 
 export type PlatformId = 'xiaohongshu' | 'facebook' | 'wechat_channels';
@@ -157,4 +164,42 @@ export interface PlatformRegistryEntry {
  */
 export interface AccountPlatformReader {
   getPlatformOrNull(accountId: string): Promise<PlatformId | null>;
+}
+
+/* ── 不读注册表的判定件（change cloud-coupling-phase4-runtime-ports） ─────────── */
+
+/**
+ * 平台别名归一。**实现体零注册表引用**——纯字符串映射，值域就是本文件的 PlatformId。
+ * 未知平台抛错（fail closed）；调用方要「未知也不抛」时用 registry 的 normalizePlatformForCatalog。
+ */
+export function normalizePlatformId(raw: string | null | undefined): PlatformId {
+  const value = (raw ?? 'xiaohongshu').trim().toLowerCase();
+  if (!value || value === 'xhs' || value === 'redbook' || value === 'xiaohongshu') return 'xiaohongshu';
+  if (value === 'facebook' || value === 'fb') return 'facebook';
+  if (value === 'wechat_channels' || value === 'wechat-channels' || value === 'channels') return 'wechat_channels';
+  throw new Error(`unsupported platform=${raw}`);
+}
+
+/**
+ * 内容动作与敏感联系评论动作的**服务端硬上限**（与平台无关的防御性上界）。
+ * api 侧两张配置表在建表 CHECK 与写入边界校验里**导入期**就要它们，故必须是常量、不能走端口注入。
+ */
+export const SCHEDULED_CONTENT_DAILY_CAP_MAX = 50;
+export const SCHEDULED_CONTACT_COMMENT_DAILY_CAP_MAX = 10;
+export const SCHEDULED_GROUP_JOIN_DAILY_CAP_MAX = 10;
+
+/**
+ * 排期自动化目录的窄读端口（change cloud-coupling-phase4-runtime-ports）。
+ *
+ * 三个方法逐一对应 api 侧内容排期存储今天的三处直调。刻意保持**同步**：三处都在目录逐行映射
+ * 与写前校验的热路径上，改成 Promise 会把整条链染成 async；注册表是静态源码数据，
+ * 拆进程后按启动期快照注入即可。实现单写在 automation 的 src/platform/registry.ts。
+ */
+export interface ScheduledAutomationCatalogReader {
+  /** 面板 catalog 的平台值：已知别名归一，未知值保留可诊断事实（不抛）。 */
+  normalizeForCatalog(platform: string | null | undefined): string;
+  /** 该平台可用的排期动作（未知平台与无声明平台均 fail closed 为空数组）。 */
+  availableActions(platform: string | null | undefined): AvailableScheduledAutomationAction[];
+  /** 该平台的排期动作声明全表；未知平台返回 null（调用方据此按「不支持」处理）。 */
+  declarationsFor(platform: string | null | undefined): Record<ScheduledAutomationAction, ScheduledAutomationSupport> | null;
 }
