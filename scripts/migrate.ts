@@ -1,25 +1,50 @@
 /**
- * 迁移执行器 CLI（change cloud-schema-migration-executor 任务 1.3–1.9）。
+ * 迁移执行器 CLI（change cloud-schema-migration-executor 任务 1.3–1.9；
+ * Block③ 物理拆库：改成**逐属主库各连各的、各读各的账本、各校验各的表**）。
  *
  *   npm run migrate status                  只读：列出已应用 / 待应用 / 异常
  *   npm run migrate up [--allow-contract]   应用待应用项（整批 advisory lock 互斥，逐条单事务）
  *   npm run migrate verify                  实测对账：声明对象 vs 库里实际对象
- *   npm run migrate baseline                先内部 verify，缺失清单为空才把全部迁移以 baseline 写入账本
+ *   npm run migrate baseline                先内部 verify，缺失清单为空才把该库范围内的迁移以 baseline 写入账本
+ *
+ *   共用可选参数 --owner=<content|automation|api>   只处理该属主（新建属主库时 seed 用）
+ *
+ * ## 属主分组
+ *
+ * 每个属主用 `resolveOwnerPgConfig(owner)` 解析连接。**按连接目标分组**：落在同一个库的属主
+ * 合成一组，一组一条连接、一份账本，范围 = 组内各属主迁移范围的并集。
+ * 今天三个 `AIDCP_PG_<OWNER>_URL` 都未设 ⇒ 三属主同组 ⇒ 一条连接、一份账本、范围 = 全部迁移
+ * ⇒ 与改动前逐字节一致（同一个库、同一张账本表、同一批行、同一批 SQL）。
+ * 拆库后逐个把 owner URL 指向新库，组自然裂开，各库只跑各自那批迁移。
+ *
+ * 「一条迁移属于哪个属主」的判据见 `src/schema/migration-owners.ts`（唯一判据，不在此另立）。
  *
  * 红线：
  *  - 校验和不符 / 乱序 / 缺 kind → 整批拒绝，一条 SQL 都不执行。
  *  - 拿不到整批锁 → 立即退出，绝不等待后强行继续。
  *  - baseline 缺失清单非空 → 拒绝写入，逐条打印缺什么、来自哪个 version。绝不「假设已跑过」。
+ *  - 属主判据不可用（迁移目录 / 边界清单读不出、有表查不到属主）→ 直接退出，绝不退化成「全库一把梭」。
  */
 
+import { createHash } from 'node:crypto';
 import pg from 'pg';
 
-import { DEFAULT_PG_CONFIG } from '../src/kernel/pg-config.js';
+import {
+  PG_OWNERS,
+  pgOwnerUrlEnvVar,
+  resolveOwnerPgConfig,
+  type PgOwner,
+} from '../src/kernel/pg-owner-connection-resolver.js';
 import {
   LEDGER_MIGRATION_NAME,
   loadMigrationFiles,
   migrationsDir,
 } from '../src/schema/migration-files.js';
+import {
+  filesForOwners,
+  loadMigrationOwnerScopes,
+  type MigrationOwnerIndex,
+} from '../src/schema/migration-owners.js';
 import {
   compareVersions,
   parseMigrationHeader,
@@ -44,26 +69,41 @@ function readEnvString(name: string): string | undefined {
   return value && value.trim() ? value : undefined;
 }
 
-function readEnvPort(): number {
-  const value = readEnvString('PGPORT');
-  if (!value) return DEFAULT_PG_CONFIG.port;
-  const port = Number(value);
-  return Number.isInteger(port) && port > 0 ? port : DEFAULT_PG_CONFIG.port;
+/** 连接目标指纹：只作分组键，绝不落日志（连接串里可能带口令）。 */
+function connectionFingerprint(config: pg.ClientConfig): string {
+  const raw = config.connectionString
+    ? `url:${config.connectionString}`
+    : `host:${config.host}|${config.port}|${config.database}|${config.user}`;
+  return createHash('sha256').update(raw).digest('hex');
 }
 
-function buildClient(): pg.Client {
-  const connectionString = readEnvString('DATABASE_URL');
-  return new Client(
-    connectionString
-      ? { connectionString }
-      : {
-          host: readEnvString('PGHOST') ?? DEFAULT_PG_CONFIG.host,
-          port: readEnvPort(),
-          database: readEnvString('PGDATABASE') ?? DEFAULT_PG_CONFIG.database,
-          user: readEnvString('PGUSER') ?? DEFAULT_PG_CONFIG.user,
-          password: readEnvString('PGPASSWORD') ?? DEFAULT_PG_CONFIG.password,
-        },
-  );
+interface OwnerGroup {
+  owners: PgOwner[];
+  config: pg.ClientConfig;
+  /** 组内各属主迁移范围的并集，复合序 */
+  files: MigrationFile[];
+}
+
+/** 按连接目标把属主分组；今天三属主同组 ⇒ 一组、范围 = 全部迁移。 */
+function buildOwnerGroups(files: MigrationFile[], owners: readonly PgOwner[], index: MigrationOwnerIndex): OwnerGroup[] {
+  const byFingerprint = new Map<string, { owners: PgOwner[]; config: pg.ClientConfig }>();
+  for (const owner of owners) {
+    const config = resolveOwnerPgConfig(owner) as pg.ClientConfig;
+    const key = connectionFingerprint(config);
+    const existing = byFingerprint.get(key);
+    if (existing) existing.owners.push(owner);
+    else byFingerprint.set(key, { owners: [owner], config });
+  }
+  return [...byFingerprint.values()].map((group) => ({
+    ...group,
+    files: filesForOwners(files, index, group.owners),
+  }));
+}
+
+function describeGroup(group: OwnerGroup): string {
+  const vars = group.owners.map(pgOwnerUrlEnvVar).filter((name) => readEnvString(name));
+  const target = vars.length > 0 ? `专属库（${vars.join(' / ')} 已设）` : '共享回落库（属主 URL 未设）';
+  return `属主 ${group.owners.join('+')} → ${target}；范围 ${group.files.length} 条迁移`;
 }
 
 /**
@@ -83,6 +123,8 @@ function appliedBy(flags: Flags): string {
 interface Flags {
   allowContract: boolean;
   by?: string;
+  /** 只处理该属主（新建属主库时 seed 用）；未给则处理全部三属主 */
+  owner?: PgOwner;
 }
 
 function parseFlags(argv: string[]): Flags {
@@ -90,6 +132,12 @@ function parseFlags(argv: string[]): Flags {
   for (const arg of argv) {
     if (arg === '--allow-contract') flags.allowContract = true;
     else if (arg.startsWith('--by=')) flags.by = arg.slice('--by='.length).trim() || undefined;
+    else if (arg.startsWith('--owner=')) {
+      const raw = arg.slice('--owner='.length).trim();
+      const owner = PG_OWNERS.find((o) => o === raw);
+      if (!owner) throw new Error(`--owner=${raw} 非法，只接受 ${PG_OWNERS.join(' / ')}`);
+      flags.owner = owner;
+    }
   }
   return flags;
 }
@@ -122,7 +170,7 @@ function printErrors(errors: { code: string; version: string; detail: string }[]
 async function commandStatus(client: pg.Client, files: MigrationFile[]): Promise<number> {
   const ledger = await readLedger(client);
   const plan = planMigrations(files, ledger.rows);
-  console.log(`迁移目录：${migrationsDir()}（${files.length} 个文件）`);
+  console.log(`迁移目录：${migrationsDir()}；本属主组范围 ${files.length} 个文件`);
   console.log(ledger.present ? `账本 schema_migrations：${ledger.rows.length} 行` : '账本 schema_migrations：不存在（尚未 bootstrap，跑 migrate up 或 migrate baseline 建立）');
   const maxApplied = ledger.rows.map((r) => r.version).sort(compareVersions).at(-1);
   if (maxApplied) console.log(`账本最高版本：${maxApplied}`);
@@ -226,6 +274,19 @@ async function commandVerify(client: pg.Client, files: MigrationFile[]): Promise
   return report.missing.length > 0 ? 1 : 0;
 }
 
+/**
+ * baseline = **新建属主库的 seed 入口**，可重复执行、幂等。
+ *
+ * 序：① 建账本表（幂等 DDL）→ ② 实测对账：本组范围内声明的对象必须在这个库里真的存在
+ * （缺一个就拒绝，绝不「假设已跑过」）→ ③ 把本组范围内的每条迁移以 baseline 行写入账本，
+ * `ON CONFLICT (version) DO NOTHING`，所以重复跑只会全部落到「已存在跳过」。
+ *
+ * 新建 content 库的完整做法：
+ *   1) 建库并把 content 的表灌进去（dump/restore 或按需重放）；
+ *   2) `AIDCP_PG_CONTENT_URL=<新库> npm run migrate baseline --owner=content`；
+ *   3) `AIDCP_PG_CONTENT_URL=<新库> npm run migrate status --owner=content` 复核。
+ * 第 2 步可以随便重跑：幂等。
+ */
 async function commandBaseline(client: pg.Client, files: MigrationFile[], flags: Flags): Promise<number> {
   await ensureLedger(client, files);
   const { schema, report } = await runVerify(client, files);
@@ -261,6 +322,13 @@ async function commandBaseline(client: pg.Client, files: MigrationFile[], flags:
   const maxVersion = rows.map((r) => r.version).sort(compareVersions).at(-1);
   console.log(`基线写入完成：新增 ${inserted} 行，已存在跳过 ${skipped} 行（不覆盖）。`);
   console.log(`账本行数：${rows.length}，最高版本 id：${maxVersion ?? '(空)'}`);
+  // 本库账本里不属于本组范围的行：拆库过渡期的残留（从共享库整体拷来的账本会带上另外两家的行）。
+  // 不自动删（删账本行是不可逆动作），但 MUST 报出来，别让它悄悄留着冒充「本库已应用」。
+  const inScope = new Set(files.map((f) => versionOf(f.name)));
+  const foreign = rows.map((r) => r.version).filter((v) => !inScope.has(v)).sort(compareVersions);
+  if (foreign.length > 0) {
+    console.log(`本库账本另有 ${foreign.length} 行不属于本属主组范围（拆库过渡残留，人工确认后再清理）：${foreign.join(', ')}`);
+  }
   return 0;
 }
 
@@ -268,24 +336,38 @@ async function main(): Promise<void> {
   const command = process.argv[2];
   const flags = parseFlags(process.argv.slice(3));
   if (!command || !['status', 'up', 'verify', 'baseline'].includes(command)) {
-    console.error('Usage: npm run migrate <status|up|verify|baseline> [--allow-contract] [--by=<operator>]');
+    console.error(
+      'Usage: npm run migrate <status|up|verify|baseline> [--allow-contract] [--by=<operator>] [--owner=<content|automation|api>]',
+    );
     process.exitCode = 1;
     return;
   }
 
-  const files = await loadMigrationFiles();
-  const client = buildClient();
-  await client.connect();
-  try {
-    let code = 1;
-    if (command === 'status') code = await commandStatus(client, files);
-    else if (command === 'up') code = await commandUp(client, files, flags);
-    else if (command === 'verify') code = await commandVerify(client, files);
-    else if (command === 'baseline') code = await commandBaseline(client, files, flags);
-    process.exitCode = code;
-  } finally {
-    await client.end();
+  // 属主判据不可用即退出：退化成「不分属主、全库一把梭」会把一个属主的迁移灌进另一个属主的库。
+  const { index, files } = await loadMigrationOwnerScopes(() => loadMigrationFiles());
+  if (index.residue.length > 0) {
+    console.log(`残留迁移（头声明为空、计入全部属主）${index.residue.length} 条：${index.residue.join(', ')}`);
   }
+
+  const owners = flags.owner ? [flags.owner] : PG_OWNERS;
+  const groups = buildOwnerGroups(files, owners, index);
+  let worst = 0;
+  for (const group of groups) {
+    console.log(`── ${describeGroup(group)} ──`);
+    const client = new Client(group.config);
+    await client.connect();
+    try {
+      let code = 1;
+      if (command === 'status') code = await commandStatus(client, group.files);
+      else if (command === 'up') code = await commandUp(client, group.files, flags);
+      else if (command === 'verify') code = await commandVerify(client, group.files);
+      else if (command === 'baseline') code = await commandBaseline(client, group.files, flags);
+      worst = Math.max(worst, code);
+    } finally {
+      await client.end();
+    }
+  }
+  process.exitCode = worst;
 }
 
 main().catch((error) => {

@@ -1940,6 +1940,11 @@
     "note": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
   },
   {
+    "path": "src/schema/migration-owners.ts",
+    "layer": "automation",
+    "note": "【待定稿裁决】change schema-ledger-per-owner 新增：「一条迁移属于哪个属主库」的唯一判据（迁移头 -- aidcp:objects= 声明的对象所落的表 → boundaries/table-ownership.json 的属主）。层随 src/schema/ 目录规则判 automation，MUST NOT 判 kernel——它读文件系统（migrations/ 与 boundaries/table-ownership.json）、有 I/O 副作用，AC-BOUND-03 的 kernel 准入当场不过。只被 src/schema/schema-gate.ts、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
+  },
+  {
     "path": "src/schema/migration-plan.ts",
     "layer": "automation",
     "note": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"

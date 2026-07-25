@@ -20,7 +20,7 @@ import {
   evaluateSchemaGate,
   formatGateConclusion,
 } from '../../src/schema/schema-contract.js';
-import { evaluateSchemaGateWithLedger, runSchemaContractGate } from '../../src/schema/schema-gate.js';
+import { runSchemaContractGate } from '../../src/schema/schema-gate.js';
 
 /** 账本比本构建新一条：这就是「回滚到旧代码」在库这一侧的样子。 */
 const AHEAD_VERSION = '9999_migrated_away_by_newer_build';
@@ -57,7 +57,11 @@ test('AC-SCHEMA-NO-SILENT-RECREATE-01 账本超前 → enforce 下拒绝启动�
   );
 
   assert.deepEqual(ddlIn(stub.queries), [], '契约门判定路径上 MUST NOT 执行任何建表 / 改表 / 建索引语句');
-  assert.equal(stub.queries.length, 1, '这条路径只读一次账本；多出来的语句都是没被审阅过的副作用');
+  assert.equal(
+    stub.queries.length,
+    1,
+    '三属主落在同一个账本连接目标时 MUST 只读一次账本（判定跑三遍是纯内存的）；多出来的语句都是没被审阅过的副作用',
+  );
   assert.match(stub.queries[0], /schema_migrations/);
 });
 
@@ -68,13 +72,26 @@ test('AC-SCHEMA-NO-SILENT-RECREATE-02 warn 模式判定结论与 enforce 逐字�
   const warned = await runSchemaContractGate({ client: warnStub.client, mode: 'warn' });
   assert.equal(warned.decision.code, 'schema_ahead_of_code');
   assert.equal(warned.decision.pass, false, 'warn 只是不拒绝启动，判定本身照样是「不通过」');
+  assert.equal(warned.pass, false);
   assert.deepEqual(ddlIn(warnStub.queries), []);
 
+  // enforce 跑同一批账本行：抛错前的逐属主结论 MUST 与 warn 逐字一致。
   const enforceStub = ledgerStub(versions);
-  const expected = formatGateConclusion(
-    await evaluateSchemaGateWithLedger(enforceStub.client),
+  let enforcedMessage = '';
+  await assert.rejects(
+    () => runSchemaContractGate({ client: enforceStub.client, mode: 'enforce' }),
+    (err: unknown) => {
+      enforcedMessage = err instanceof Error ? err.message : String(err);
+      return true;
+    },
   );
-  assert.equal(warned.conclusion, expected, 'warn 与 enforce MUST 输出同一段结论与同一份版本清单');
+  for (const owner of warned.owners) {
+    assert.ok(
+      enforcedMessage.includes(`[${owner.owner}] ${owner.conclusion}`),
+      `属主 ${owner.owner} 的结论在 warn 与 enforce 之间漂移了：${owner.conclusion}`,
+    );
+  }
+  assert.equal(warned.conclusion, warned.owners[0].conclusion);
   assert.match(warned.conclusion, new RegExp(AHEAD_VERSION));
 });
 

@@ -61,13 +61,24 @@ export type SchemaGateMode = 'warn' | 'enforce';
 
 export type SchemaGateStatus = 'ok' | 'behind' | 'ahead' | 'unreadable';
 
-export type SchemaGateCode = 'schema_behind_code' | 'schema_ahead_of_code' | 'schema_ledger_unreadable';
+export type SchemaGateCode =
+  | 'schema_behind_code'
+  | 'schema_ahead_of_code'
+  | 'schema_ledger_unreadable'
+  /**
+   * 判据本身不可用（迁移目录读不出 / 边界清单读不出 / 有表查不到属主）。
+   * 判据没了就等于什么都没校验，MUST 判失败 —— 旧实现在读不到 migrations/ 时退化成
+   * 「只认最高版本」并照常放行，那是一条实打实的假绿路径。
+   */
+  | 'schema_owner_attribution_unavailable';
 
 export interface SchemaGateInput {
   /** 账本里的全部版本 id；账本不可读时给空数组并设 ledgerError */
   ledgerVersions: string[];
   /** 账本读取本身失败（表不存在 / 连不上库）时的原因；设了它就一定是 unreadable 分支 */
   ledgerError?: string;
+  /** unreadable 分支的错误码；缺省 `schema_ledger_unreadable`（判据不可用时传属主判据那一条） */
+  ledgerErrorCode?: SchemaGateCode;
   /** 本构建知道的全部版本 id（用于列出「缺哪几条」） */
   knownVersions: string[];
   required?: string;
@@ -85,6 +96,13 @@ export interface SchemaGateDecision {
   knownMax: string;
   /** behind 分支：本构建知道、账本里却没有、且版本序不高于 required 的版本 */
   missing: string[];
+  /**
+   * ok / ahead 分支里的**账本空洞**：账本最高版本够高，但中间缺了本应有的条目。
+   *
+   * 判定仍只看最高版本（口径不变，MUST NOT 因为本字段改判），但空洞必须被打出来 ——
+   * 「最高版本够高」并不证明中间那些迁移真的跑过，只报一个 max 就是把这段事实吞掉。
+   */
+  holes: string[];
   /** ahead 分支：账本里高于 knownMax 的版本 */
   ahead: string[];
   /** 生效的放行版本 id（未放行为 undefined） */
@@ -130,10 +148,11 @@ export function evaluateSchemaGate(input: SchemaGateInput): SchemaGateDecision {
   if (input.ledgerError) {
     return {
       status: 'unreadable',
-      code: 'schema_ledger_unreadable',
+      code: input.ledgerErrorCode ?? 'schema_ledger_unreadable',
       required,
       knownMax,
       missing: [],
+      holes: [],
       ahead: [],
       waivedUpTo,
       waived: false,
@@ -144,23 +163,24 @@ export function evaluateSchemaGate(input: SchemaGateInput): SchemaGateDecision {
 
   const ledgerMax = maxVersion(input.ledgerVersions);
   const ledgerSet = new Set(input.ledgerVersions);
+  const holes = input.knownVersions
+    .filter((v) => !ledgerSet.has(v) && compareVersions(v, required) <= 0)
+    .sort(compareVersions);
 
   if (ledgerMax === undefined || compareVersions(ledgerMax, required) < 0) {
-    const missing = input.knownVersions
-      .filter((v) => !ledgerSet.has(v) && compareVersions(v, required) <= 0)
-      .sort(compareVersions);
     return {
       status: 'behind',
       code: 'schema_behind_code',
       ledgerMax,
       required,
       knownMax,
-      missing,
+      missing: holes,
+      holes: [],
       ahead: [],
       waivedUpTo,
       waived: false,
       pass: false,
-      message: `账本最高版本 ${ledgerMax ?? '(空)'} 低于本构建所需最低版本 ${required}；缺失 ${missing.length} 条，处置是补跑迁移。`,
+      message: `账本最高版本 ${ledgerMax ?? '(空)'} 低于本构建所需最低版本 ${required}；缺失 ${holes.length} 条，处置是补跑迁移。`,
     };
   }
 
@@ -174,6 +194,7 @@ export function evaluateSchemaGate(input: SchemaGateInput): SchemaGateDecision {
       required,
       knownMax,
       missing: [],
+      holes,
       ahead,
       waivedUpTo,
       waived,
@@ -190,6 +211,7 @@ export function evaluateSchemaGate(input: SchemaGateInput): SchemaGateDecision {
     required,
     knownMax,
     missing: [],
+    holes,
     ahead: [],
     waivedUpTo,
     waived: false,
@@ -198,10 +220,40 @@ export function evaluateSchemaGate(input: SchemaGateInput): SchemaGateDecision {
   };
 }
 
+/**
+ * 把「全构建」的契约窗口收窄到某个属主自己的版本集合上（纯函数）。
+ *
+ * - `knownMax` = 该属主认识的最高版本；
+ * - `required` = 该属主认识的、不高于全局所需版本的最高一条。
+ *   该属主全部版本都高于全局所需版本时（防御分支，本仓当前不出现），退化取它的最低版本
+ *   —— 那是这个属主的下限，MUST NOT 退化成「无要求」。
+ *
+ * 收窄是必须的：全局 `REQUIRED` / `KNOWN_MAX` 取自三家的并集，直接套到只有 19 条迁移的
+ * content 库上会得到一次假的 behind / ahead 判定。
+ */
+export function narrowSchemaContract(
+  ownerVersions: string[],
+  globalRequired = REQUIRED_SCHEMA_VERSION,
+): { required: string; knownMax: string } {
+  const sorted = [...ownerVersions].sort(compareVersions);
+  const knownMax = sorted.at(-1);
+  if (knownMax === undefined) {
+    throw new Error('属主版本集合为空，无法收窄 schema 契约窗口');
+  }
+  const atOrBelow = sorted.filter((v) => compareVersions(v, globalRequired) <= 0);
+  return { required: atOrBelow.at(-1) ?? sorted[0], knownMax };
+}
+
 /** warn 与 enforce 共用的结论文本；两种模式 MUST 逐字一致，只有前缀不同。 */
 export function formatGateConclusion(decision: SchemaGateDecision): string {
   const parts = [decision.message];
   if (decision.missing.length > 0) parts.push(`缺失版本：${decision.missing.join(', ')}`);
+  if (decision.holes.length > 0) {
+    // 空洞可能很长（一次回滚能把整批都算进来），列前 10 条 + 总数：既不吞事实，也不把一行日志撑成几千字。
+    const head = decision.holes.slice(0, 10).join(', ');
+    const tail = decision.holes.length > 10 ? `，… 共 ${decision.holes.length} 条` : '';
+    parts.push(`账本空洞（最高版本够高但中间缺条目）：${head}${tail}`);
+  }
   if (decision.ahead.length > 0) parts.push(`超前版本：${decision.ahead.join(', ')}`);
   if (decision.waived && decision.waivedUpTo) parts.push(`放行区间：(${decision.knownMax}, ${decision.waivedUpTo}]`);
   return parts.join('；');
