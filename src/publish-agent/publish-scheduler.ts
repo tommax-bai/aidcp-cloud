@@ -17,7 +17,7 @@ import type { Soul } from '../kernel/soul-types.js';
 import type { CuratedContentTypeFilter, CuratedSelectItem } from '../kernel/curated-content-types.js';
 import type { ContentScheduleApprovalMode } from '../kernel/content-schedule-mode.js';
 import type { PersonaBinding } from '../kernel/persona-binding.js';
-import { PERSONA_UNAVAILABLE_REASON } from '../config/mirror-stop-work.js';
+import { PERSONA_UNAVAILABLE_REASON } from '../kernel/config-stop-work-reasons.js';
 import type { PlatformId } from '../kernel/platform-types.js';
 import { referenceImagesForGeneration, REFERENCE_IMAGE_MAX_COUNT } from '../kernel/reference-image-guidance.js';
 import { shanghaiDayStartMs } from '../time/shanghai-day.js';

@@ -10,7 +10,7 @@
 
 import { RISK_ACTIONS, RISK_STATUSES, RISK_QUOTA_LEVELS } from '../risk/index.js';
 import { ALERT_SEVERITIES } from '../feishu/index.js';
-import { TEXT_PROVIDERS } from '../llm/providers.js';
+import { TEXT_PROVIDER_META } from '../kernel/text-provider-registry.js';
 import { IMAGE_PROVIDERS } from '../kernel/image-provider-registry.js';
 import type { PanelAccount } from './panel-store.js';
 import type { LlmKind, ThinkingModeApi } from '../config/role-catalog.js';
@@ -124,7 +124,7 @@ export function buildVersionPayload(): VersionPayload {
       riskQuotaLevel: RISK_QUOTA_LEVELS,
       riskAction: RISK_ACTIONS,
       alertSeverity: ALERT_SEVERITIES,
-      textProvider: Object.keys(TEXT_PROVIDERS),
+      textProvider: Object.keys(TEXT_PROVIDER_META),
       imageProvider: Object.keys(IMAGE_PROVIDERS),
       llmKind: LLM_KINDS,
       effectiveSource: MODEL_EFFECTIVE_SOURCES,

@@ -5,7 +5,7 @@
  * GET /api/config/model 允许展示、以及 env 回退的凭据项。扩展平台凭据只改这一处。
  */
 
-import { TEXT_PROVIDERS, type TextProviderId } from '../llm/providers.js';
+import { TEXT_PROVIDER_META, type TextProviderId } from '../kernel/text-provider-registry.js';
 
 export type PlatformCredentialGroup = 'model_api' | 'billing_access';
 
@@ -24,14 +24,14 @@ export interface PlatformCredentialDefinition {
 const MODEL_API_GROUP = '模型 API Key';
 const BILLING_ACCESS_GROUP = '账单查询 AccessKey';
 
-const modelCredentials: PlatformCredentialDefinition[] = (Object.keys(TEXT_PROVIDERS) as TextProviderId[]).map((id) => ({
+const modelCredentials: PlatformCredentialDefinition[] = (Object.keys(TEXT_PROVIDER_META) as TextProviderId[]).map((id) => ({
   provider: id,
-  field: TEXT_PROVIDERS[id].credentialField,
-  label: `${TEXT_PROVIDERS[id].displayName} API Key`,
-  providerLabel: TEXT_PROVIDERS[id].displayName,
+  field: TEXT_PROVIDER_META[id].credentialField,
+  label: `${TEXT_PROVIDER_META[id].displayName} API Key`,
+  providerLabel: TEXT_PROVIDER_META[id].displayName,
   group: 'model_api',
   groupLabel: MODEL_API_GROUP,
-  envKeys: TEXT_PROVIDERS[id].envKeys,
+  envKeys: TEXT_PROVIDER_META[id].envKeys,
   secretKind: 'api_key',
   restartRequired: true,
 }));

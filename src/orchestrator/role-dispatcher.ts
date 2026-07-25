@@ -13,12 +13,8 @@
 
 import { randomUUID } from 'node:crypto';
 import type { PersonaBinding } from '../kernel/persona-binding.js';
-import {
-  CONFIG_MIRROR_STALE_REASON,
-  PERSONA_UNAVAILABLE_REASON,
-  hasStaleGateMirror,
-  platformActionHalt,
-} from '../config/mirror-stop-work.js';
+import { CONFIG_MIRROR_STALE_REASON, PERSONA_UNAVAILABLE_REASON } from '../kernel/config-stop-work-reasons.js';
+import { hasStaleGateMirror, platformActionHalt } from '../config/mirror-stop-work.js';
 import { noteMirrorStaleRefusal } from '../config-mirror-freshness.js';
 import { EventBus } from '../event-bus/index.js';
 import type { CommentApprovalTrace, CommentAppraisingPayload, MandatoryInteractionContext, NoteDetailData, PageCardsData, RoleName } from '../event-bus/types.js';
@@ -52,7 +48,7 @@ import { CommentLikeAppraiser } from '../agents/comment-like-appraiser.js';
 // 精选准入 / 优质评论归档三角色 + 概念抽取角色属 content 层，构造经组合根注入的 roleFactories 完成，
 // 此处不再静态 import 其类（automation 不静态依赖 content：拆进程 Track1 前置；见 RoleFactoryRegistry）。
 import { HotLeadDetector } from '../hot-lead/hot-lead-detector.js';
-import type { HotLeadGateConfig } from '../hot-lead/heat-velocity.js';
+import type { HotLeadGateConfig } from '../kernel/hot-lead-gate-config.js';
 import type { ValuableCommentInput, ValuableCommentRef } from '../cache/valuable-comment-store.js';
 import { CommentComposer } from '../agents/comment-composer.js';
 import { CommentDeAiFlavor } from '../agents/comment-de-ai-flavor.js';

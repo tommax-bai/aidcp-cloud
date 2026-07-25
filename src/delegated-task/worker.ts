@@ -3,7 +3,7 @@ import type { DelegatedTaskStore, InterruptedClaimRecovery } from './store.js';
 import type { DelegatedTask, DelegatedTaskAttempt, DelegatedVerificationKind } from './types.js';
 import { honestTerminalStatus, isTerminalTaskStatus } from './types.js';
 import { humanizeAttemptReason } from './reason-humanize.js';
-import { CONFIG_MIRROR_STALE_REASON, PERSONA_UNAVAILABLE_REASON } from '../config/mirror-stop-work.js';
+import { CONFIG_MIRROR_STALE_REASON, PERSONA_UNAVAILABLE_REASON } from '../kernel/config-stop-work-reasons.js';
 
 /** 权威未答的退避（毫秒）：刷新器的轮询周期以秒计，30s 足以跨过一次短暂不可达。 */
 const AUTHORITY_UNANSWERED_BACKOFF_MS = 30_000;

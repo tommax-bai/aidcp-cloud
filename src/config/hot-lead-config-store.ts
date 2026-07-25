@@ -15,10 +15,7 @@
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
 import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
-import {
-  DEFAULT_HOT_LEAD_GATE_CONFIG,
-  type HotLeadGateConfig,
-} from '../hot-lead/heat-velocity.js';
+import { DEFAULT_HOT_LEAD_GATE_CONFIG, type HotLeadGateConfig } from '../kernel/hot-lead-gate-config.js';
 import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 
 const { Pool } = pg;

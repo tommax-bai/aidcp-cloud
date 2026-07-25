@@ -5,7 +5,7 @@ import type { ReferenceImageSnapshot } from '../kernel/publish-pipeline-types.js
 import type { DelegatedTaskExecutor, DelegatedExecutionResult } from './worker.js';
 import type { DelegatedTask } from './types.js';
 import { delegatedRewriteSourceId } from './ownership.js';
-import { normalizeTextCardTranscription } from '../cache/curated-content-store.js';
+import { normalizeTextCardTranscription } from '../kernel/text-card-transcription.js';
 
 export interface DelegatedCommentPort {
   triggerManual(

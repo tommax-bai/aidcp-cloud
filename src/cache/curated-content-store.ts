@@ -33,6 +33,14 @@ import {
   type SourcePublishedTime,
 } from '../time/source-published-time.js';
 import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
+import {
+  CURATED_REFERENCE_IMAGE_HARD_MAX,
+  cleanOptionalString,
+  normalizeTextCardTranscription,
+  positiveInt,
+  strictPositiveInt,
+} from '../kernel/text-card-transcription.js';
+export { CURATED_REFERENCE_IMAGE_HARD_MAX };
 // 硬编码 `'public.'` 收口到唯一解析点（change cloud-schema-migration-executor 任务 5.5 / D8 第 4 条）：
 // 改 search_path 救不了写死在字面量里的 schema 名，搬 schema 时它会静默指错地方。
 import { qualifiedObjectName } from '../kernel/schema-name.js';
@@ -45,8 +53,6 @@ import type {
   CuratedReferenceImageStatus,
   CuratedCoverForm,
   CuratedReferenceImageFormGuess,
-  TextCardTranscriptionStatus,
-  TextCardTranscriptionCardStatus,
   TextCardTranscriptionCard,
   TextCardTranscription,
   CuratedTextCardContext,
@@ -99,7 +105,7 @@ const { Pool } = pg;
 // 与发布侧 IMAGE_COUNT_HARD_MAX/REFERENCE_IMAGE_MAX_COUNT=9（小红书图文帖硬约束）解耦：
 // 存全一篇的图、发布生成仍只取子集（≤9）。
 export const CURATED_REFERENCE_IMAGE_DEFAULT_LIMIT = 18;
-export const CURATED_REFERENCE_IMAGE_HARD_MAX = 18;
+
 
 const CURATED_CLIENT_SORT_SQL: Readonly<Record<CuratedClientSort, string>> = {
   // 点赞 1 分、收藏 1.43 分；完整证据优先，绝不把缺失计数 COALESCE 成真实 0。
@@ -305,11 +311,6 @@ function clampReferenceImageLimit(limit: number | undefined): number {
   return Math.max(0, Math.min(CURATED_REFERENCE_IMAGE_HARD_MAX, Math.floor(raw)));
 }
 
-function cleanOptionalString(v: unknown): string | undefined {
-  if (typeof v !== 'string') return undefined;
-  const t = v.trim();
-  return t ? t : undefined;
-}
 
 function cleanReferenceUrl(v: unknown): string | undefined {
   const t = cleanOptionalString(v);
@@ -322,10 +323,6 @@ function cleanReferenceUrl(v: unknown): string | undefined {
   }
 }
 
-function positiveInt(v: unknown): number | undefined {
-  const n = typeof v === 'number' ? v : Number(v);
-  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
-}
 
 function isReferenceImageStatus(v: unknown): v is CuratedReferenceImageStatus {
   return v === 'stored' || v === 'url_only' || v === 'fetch_failed' || v === 'unsupported';
@@ -336,10 +333,6 @@ export function isCuratedCoverForm(v: unknown): v is CuratedCoverForm {
   return v === 'text_card' || v === 'photo' || v === 'illustration' || v === 'other';
 }
 
-/** 严格正整数（形态注解时间戳专用：0/负数/小数/非数一律不合法——区别于 positiveInt 的 ≥0 取整语义）。 */
-function strictPositiveInt(v: unknown): number | undefined {
-  return typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : undefined;
-}
 
 /**
  * 形态注解白名单归一（change textcard-cover-form）：form ∈ 枚举、confidence 有限数 ∈[0,1]、
@@ -427,72 +420,6 @@ function parseReferenceImages(v: unknown): CuratedReferenceImage[] {
   return [];
 }
 
-function isTextCardTranscriptionStatus(v: unknown): v is TextCardTranscriptionStatus {
-  return v === 'complete' || v === 'partial' || v === 'failed';
-}
-
-function isTextCardTranscriptionCardStatus(v: unknown): v is TextCardTranscriptionCardStatus {
-  return v === 'transcribed' || v === 'empty' || v === 'failed';
-}
-
-/**
- * JSONB / task payload boundary normalizer. Invalid envelopes are discarded as a whole; invalid card rows are not
- * silently guessed because a shifted sourceArrayIndex would bind text to the wrong source image.
- */
-export function normalizeTextCardTranscription(v: unknown): TextCardTranscription | undefined {
-  if (typeof v === 'string' && v.trim()) {
-    try {
-      return normalizeTextCardTranscription(JSON.parse(v));
-    } catch {
-      return undefined;
-    }
-  }
-  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
-  const o = v as Record<string, unknown>;
-  if (o.version !== 1 || !isTextCardTranscriptionStatus(o.status)) return undefined;
-  const anchor = cleanOptionalString(o.anchor);
-  const provider = cleanOptionalString(o.provider);
-  const model = cleanOptionalString(o.model);
-  const transcribedAt = strictPositiveInt(o.transcribedAt);
-  if (!anchor || !/^sha256:[a-f0-9]{64}$/.test(anchor) || !provider || !model || !transcribedAt) return undefined;
-  if (!Array.isArray(o.cards) || o.cards.length === 0 || o.cards.length > CURATED_REFERENCE_IMAGE_HARD_MAX) {
-    return undefined;
-  }
-  const seen = new Set<number>();
-  const cards: TextCardTranscriptionCard[] = [];
-  for (const raw of o.cards) {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
-    const card = raw as Record<string, unknown>;
-    const sourceArrayIndex = positiveInt(card.sourceArrayIndex);
-    const sourceIndex = positiveInt(card.sourceIndex);
-    const capturedAt = strictPositiveInt(card.capturedAt);
-    if (
-      sourceArrayIndex === undefined ||
-      sourceIndex === undefined ||
-      capturedAt === undefined ||
-      !isTextCardTranscriptionCardStatus(card.status) ||
-      seen.has(sourceArrayIndex)
-    ) return undefined;
-    seen.add(sourceArrayIndex);
-    const text = cleanOptionalString(card.text);
-    if (card.status === 'transcribed' && (!text || text.length > 8_000)) return undefined;
-    const reason = cleanOptionalString(card.reason);
-    cards.push({
-      sourceArrayIndex,
-      sourceIndex,
-      capturedAt,
-      status: card.status,
-      ...(card.status === 'transcribed' && text ? { text } : {}),
-      ...(reason ? { reason: reason.slice(0, 300) } : {}),
-    });
-  }
-  cards.sort((a, b) => a.sourceArrayIndex - b.sourceArrayIndex);
-  const succeeded = cards.filter((card) => card.status === 'transcribed').length;
-  const derivedStatus: TextCardTranscriptionStatus =
-    succeeded === cards.length ? 'complete' : succeeded > 0 ? 'partial' : 'failed';
-  if (o.status !== derivedStatus) return undefined;
-  return { version: 1, status: o.status, anchor, provider, model, transcribedAt, cards };
-}
 
 /** Successful per-card text in authoritative source-image order. */
 export function orderedTextCardTexts(transcription: TextCardTranscription | undefined): TextCardTranscriptionCard[] {

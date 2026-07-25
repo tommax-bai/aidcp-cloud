@@ -2,7 +2,7 @@ import type {
   FacebookGroupJoinRecentScheduledResult,
   FacebookGroupScopedTargetCount,
 } from '../kernel/facebook-group-types.js';
-import { isValidWeekActiveMask } from '../risk/session-limits.js';
+import { isValidWeekActiveMask } from '../kernel/week-active-mask.js';
 import type {
   ContentScheduleCatalogRow,
   FacebookJoinGroupAutomationCatalogView,

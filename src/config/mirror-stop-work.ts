@@ -65,11 +65,6 @@ export function hasStaleGateMirror(): boolean {
   return staleGateMirrors().length > 0;
 }
 
-/** 统一的具名停手原因码——运营与委托任务两侧共用，MUST NOT 与 `needs_persona_setup` 混用。 */
-export const CONFIG_MIRROR_STALE_REASON = 'config_mirror_stale';
-
-/** 人设专用的具名不可用态——与「未绑」严格可区分。 */
-export const PERSONA_UNAVAILABLE_REASON = 'persona_unavailable';
 
 /**
  * 传输层出口闸在**副本陈旧（`unknown`）**时仍必须放行的信封类型（显式名单）。

@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 
 import {
   normalizeCuratedReferenceImages,
-  normalizeTextCardTranscription,
   type TextCardTranscription,
 } from '../../src/cache/curated-content-store.js';
+import { normalizeTextCardTranscription } from '../../src/kernel/text-card-transcription.js';
 import type { VisionCallOpts, VisionChatMessage, VisionLlmClient } from '../../src/llm/vision.js';
 import type { CoverFormSensor } from '../../src/publish-agent/cover-form-sensor.js';
 import {

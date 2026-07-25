@@ -1015,6 +1015,11 @@
     "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/account-store.ts 析出 RETIRED_ACCOUNT_ID 退役保留账号哨兵字符串常量（'default'）。零 import、零 SQL、无进程内活状态。account-store.ts 从 kernel 导入并等值再导出，内部判定复用。供 publish-agent 发布媒体存储跨边界比对，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
   },
   {
+    "path": "src/kernel/account-ownership-port.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】P3-4 从 src/risk/ownership.ts 析出账号归属的窄端口与占位结果类型（AccountOwnershipPort / ClaimExecutionTargetResult）。**放 kernel 不放 api**：automation 的连接握手路径也持有该接口，放 api 会新造 automation→api 反向边、净额 0。**与在册豁免 note 的口径分歧需知**：那条 note 写的消除路径是「随合同回到 api 一侧」，本条选了 kernel，理由如上，已显式对账。原文件按复核修正只留具名再导出，composition 组合根与 automation 侧持有方**一个字节不改**。请求回写 §4.7 见 docpatch RK-P3-4"
+  },
+  {
     "path": "src/kernel/account-projection-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change automation-accounts-projection 新增：账号身份跨属主投影的端口契约（AccountIdentityProjectionRow 三列纯类型 + AccountRosterSourcePort 只读无参端口）。零 import、零 SQL / HTTP / LLM、无进程内活状态、不反向依赖业务层。accounts 属 api 单写，automation 域为把守卫读拉回同库而在本域冷备投影，投影来源经本端口取，避免 automation 直连 api 的库。api 侧 src/account-store.ts 实现、automation 侧 src/transport/account-projection-store.ts 消费。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-account-projection"
@@ -1033,6 +1038,11 @@
     "path": "src/kernel/config-mirror-bump-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change block3-l3-config-mirror-bump-decouple 抬入：跨域配置镜像失效通道的契约段（ConfigMirrorKey 闭集合纯类型 + MirrorQueryable/MirrorVersionBumper 接口 + writeWithMirrorBump「同一笔提交」包装 + ConfigMirrorBumpSink 消费端口）。原分散在 src/config-mirror-freshness.ts（ConfigMirrorKey）与 src/config/mirror-version-store.ts（api）；automation 属主的四个限频配置 store 与 api 属主的十余个配置 store 都要引用它们，留在任一属主域都必然造出跨域 import（原状即 4 条 automation->api 豁免）。只 import type pg 与同层 pg-owner-connection-resolver，无 SQL 字面量（BEGIN/COMMIT/ROLLBACK 是事务控制、不是 DML/DDL）、无 HTTP 路由、无 LLM、无进程内活状态、不反向依赖业务层。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
+  },
+  {
+    "path": "src/kernel/config-stop-work-reasons.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】P3-5 从 src/config/mirror-stop-work.ts 析出两个**具名停手原因码**常量。整文件进不了 kernel（模块级 ReadonlySet = new Set(...)，类型标注不救；且自身 import 两个 api 文件），故只析出常量并把消费方 repoint——只留原位再导出是消不掉边的。请求回写 §4.7 见 docpatch RK-P3-5"
   },
   {
     "path": "src/kernel/content-schedule-mode.ts",
@@ -1088,6 +1098,11 @@
     "path": "src/kernel/feed-action.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/cache/interaction-feed-store.ts 析出：FeedAction 纯类型联合，零 import、零 SQL、零活状态。存储实现留 interaction-feed-store.ts。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
+  },
+  {
+    "path": "src/kernel/hot-lead-gate-config.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】P3-3 从 src/hot-lead/heat-velocity.ts 析出过滤闸的**旋钮形状 + 未配置回落值**（HotLeadGateConfig / DEFAULT_HOT_LEAD_GATE_CONFIG）。「什么算热帖」的判定（parsePublishedHoursAgo / heatVelocity / evaluateHotLead）留 automation——整文件搬会与 session-limits 同理被拒。请求回写 §4.7 见 docpatch RK-P3-3"
   },
   {
     "path": "src/kernel/image-provider-registry.ts",
@@ -1245,6 +1260,16 @@
     "note": "【待定稿裁决】change decouple-platform-type-closure 从 src/render/palettes.ts + src/render/text-card.ts 析出纯设计令牌类型（PaletteKey / LayoutVariant / Decoration / TextCardBackgroundTreatment / TextCardBackgroundPattern / TextCardBulletPresentation / TextCardSourceStyle），零 import、零 SQL、零活状态。色板 hex 数据 PALETTES + selectTheme/fnv1a 渲染逻辑留 render/（content），并以 satisfies 让 PALETTES/LAYOUT_VARIANTS/DECORATIONS 逐字对齐本联合。为发布管线闭包（publish-pipeline-types）能进 kernel 而析出。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK3"
   },
   {
+    "path": "src/kernel/text-card-transcription.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】P3-6 从 src/cache/curated-content-store.ts 析出文字卡转写结果的**边界归一**（normalizeTextCardTranscription + 其调用闭包内的全部守卫与通用 helper）。存储与 SQL 留 content，属主文件改为 import 回来而非复制（复制会让两份实现漂）。**别并进 curated-content-types.ts**：那是纯类型文件，塞运行时函数会让它产生 runtime 产物。请求回写 §4.7 见 docpatch RK-P3-6"
+  },
+  {
+    "path": "src/kernel/text-provider-registry.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】P3-2 从 src/llm/providers.ts 析出文本厂商的**身份段**（TextProviderId / DEFAULT_TEXT_PROVIDER / TEXT_PROVIDER_META / isKnownProvider / normProvider / isAllowedCredential）。端点 baseUrlDefault / baseUrlEnv **留 content**（厂商 URL 撞准入禁令③），原文件保留局部端点表并合成等值再导出。照既有判例 src/kernel/image-provider-registry.ts；超出该判例的是 credentialField / envKeys 两字段——api 侧凭据面要的正是它们。请求回写 §4.7 见 docpatch RK-P3-2"
+  },
+  {
     "path": "src/kernel/title-clamp.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change lift-shared-contracts-to-kernel 抬入：原 src/publish-agent/title-clamp.ts（纯字形安全标题截断工具，模块级 const 仅 Intl.Segmenter 无 Map/Set/Pool/定时器、零 SQL、零 import），被 2 处跨边界导入。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK1"
@@ -1268,6 +1293,11 @@
     "path": "src/kernel/visual-reference-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change bulk-lift-all-shared-types 整文件抬入：原 src/publish-agent/visual-reference-types.ts（纯视觉参考分析类型/枚举 + 3 个 as const 枚举常量，零 import、零 SQL、零活状态）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
+  },
+  {
+    "path": "src/kernel/week-active-mask.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】P3-1 从 src/risk/session-limits.ts 析出周历掩码的**纯时间判定**段（WEEK_ACTIVE_MASK_LEN / isValidWeekActiveMask / mondayBasedDayIndex / isWeekActiveAt / msUntilNextActive + 私有 HOUR_MS）。零 import、零 SQL/HTTP/LLM/模块级活状态，AC-BOUND-03 四条正则逐条实跑通过。原文件在拒入名册上（理由是「承载会话预算的业务判定」，不是四条正则），故**只析出不整搬**、残壳留 src/risk/ 保持 automation 并具名再导出，composition 与 automation 侧消费方一行不改。请求回写 §4.7 见 docpatch RK-P3-1"
   },
   {
     "path": "src/kernel/writing-language.ts",

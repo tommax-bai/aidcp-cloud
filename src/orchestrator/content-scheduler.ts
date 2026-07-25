@@ -19,7 +19,7 @@
  * localDayKey：本模块自带（服务器本地 YYYY-MM-DD），刻意不导出 role-dispatcher 的同名函数以避开热点文件。
  */
 
-import { isValidWeekActiveMask, isWeekActiveAt } from '../risk/session-limits.js';
+import { isValidWeekActiveMask, isWeekActiveAt } from '../kernel/week-active-mask.js';
 import { actionModeEnabled, type ContentScheduleActionMode, type ContentScheduleApprovalMode } from '../config/content-schedule-store.js';
 import type { PlatformId } from '../kernel/platform-types.js';
 import type { DeploymentTarget } from '../deployment-target.js';

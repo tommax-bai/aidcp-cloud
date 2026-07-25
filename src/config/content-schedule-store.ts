@@ -22,7 +22,7 @@ import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-
 import { RETIRED_ACCOUNT_ID } from '../account-store.js';
 import { resolveAccountDisplayName, type AccountDisplayNameSource } from '../account-display-name.js';
 import { SHANGHAI_DAY_START_SQL } from '../time/shanghai-day.js';
-import { isValidWeekActiveMask } from '../risk/session-limits.js';
+import { isValidWeekActiveMask } from '../kernel/week-active-mask.js';
 import type { DeploymentTarget } from '../deployment-target.js';
 import {
   availableScheduledAutomationActionsForPlatform,

@@ -59,7 +59,13 @@
       "src/kernel/interaction-audit-outbox.ts",
       "src/kernel/interaction-auth-gate-types.ts",
       "src/kernel/offboard-cleanup-grant-types.ts",
-      "src/kernel/offboard-materialization-types.ts"
+      "src/kernel/offboard-materialization-types.ts",
+      "src/kernel/week-active-mask.ts",
+      "src/kernel/text-provider-registry.ts",
+      "src/kernel/hot-lead-gate-config.ts",
+      "src/kernel/account-ownership-port.ts",
+      "src/kernel/config-stop-work-reasons.ts",
+      "src/kernel/text-card-transcription.ts"
     ]
   },
   "rejected": [

@@ -12,6 +12,7 @@
  * 解析以 note.detail 事件 ts 为显式观测锚；日精度值按当日最年轻可能时刻保守计算帖龄。
  */
 import { normalizeSourcePublishedTime, sourcePublishedAgeHours } from '../time/source-published-time.js';
+import { DEFAULT_HOT_LEAD_GATE_CONFIG, type HotLeadGateConfig } from '../kernel/hot-lead-gate-config.js';
 
 /**
  * 把发布时刻文本解析为距事件观测锚的小时数。日精度按该日最年轻可能时刻计算，
@@ -26,26 +27,6 @@ export function parsePublishedHoursAgo(text: string | null | undefined, observed
 export function heatVelocity(likeCount: number, hoursAgo: number, floorHours: number): number {
   return likeCount / Math.max(hoursAgo, floorHours);
 }
-
-/** 过滤闸配置（默认为保守占位，真机看速率分布再经后台校准——见 change Open Questions）。 */
-export interface HotLeadGateConfig {
-  /** 帖龄上限（小时）：第一道闸，超龄/裸日期直接淘汰。默认 48（2 天）。 */
-  maxAgeHours: number;
-  /** 每小时点赞速率阈值：达此值算「涨得快」。默认 300。 */
-  velocityMin: number;
-  /** 最小绝对赞数：挡小基数假热（如 0.5h 20 赞）。默认 500。 */
-  minLikeFloor: number;
-  /** 速率分母下限（小时）：挡刚发布除零。默认 1。 */
-  floorHours: number;
-}
-
-/** 保守占位默认值。段一真机看分布，段一/后台再校准（不是最终值）。 */
-export const DEFAULT_HOT_LEAD_GATE_CONFIG: HotLeadGateConfig = {
-  maxAgeHours: 48,
-  velocityMin: 300,
-  minLikeFloor: 500,
-  floorHours: 1,
-};
 
 export type HotLeadReason =
   | 'ok'

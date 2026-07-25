@@ -15,11 +15,8 @@
  */
 import { BaseRole, type RoleOptions } from '../agents/base-role.js';
 import type { RoleName, NoteDetailData, QualityPassPayload } from '../event-bus/types.js';
-import {
-  evaluateHotLead,
-  DEFAULT_HOT_LEAD_GATE_CONFIG,
-  type HotLeadGateConfig,
-} from './heat-velocity.js';
+import { evaluateHotLead } from './heat-velocity.js';
+import { DEFAULT_HOT_LEAD_GATE_CONFIG, type HotLeadGateConfig } from '../kernel/hot-lead-gate-config.js';
 
 export interface FireAutoContactArgs {
   accountId: string;
