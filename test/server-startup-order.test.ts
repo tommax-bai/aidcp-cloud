@@ -33,3 +33,17 @@ test('delegated worker startup recovery finishes before its execution pump is an
   assert.ok(workerStart >= 0 && readyLog >= 0, 'delegated worker startup landmarks must exist');
   assert.ok(workerStart < readyLog, 'interrupted claims must recover before worker readiness is announced');
 });
+
+test('every Feishu receiver production composition injects the durable approval write authority', async () => {
+  const source = await readFile(new URL('../src/server.ts', import.meta.url), 'utf8');
+  const compositions = [...source.matchAll(/new FeishuWsReceiver\(\{([\s\S]*?)\n  \}\);/g)].map((match) => match[1] ?? '');
+  assert.ok(compositions.length > 0, 'production must compose at least one Feishu receiver');
+  for (const composition of compositions) {
+    assert.match(composition, /\bwriteApproval:\s*\(/, 'Feishu receiver must receive an explicit approval write port');
+    assert.match(
+      composition,
+      /\bwriteApprovalDecision\(/,
+      'Feishu approval ingress must converge on the shared durable approval authority',
+    );
+  }
+});

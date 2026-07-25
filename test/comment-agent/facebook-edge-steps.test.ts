@@ -102,11 +102,16 @@ describe('buildFacebookEdgeSteps', () => {
     assert.equal(r.reason, 'timeout');
   });
 
-  it('open：note.detail.arrived 匹配 url → ok；note.open 带 url', async () => {
+  it('open：同帖等价 permalink 形态 → ok；note.open 保留原 url', async () => {
     const bus = new EventBus();
     const url = 'https://www.facebook.com/groups/1/posts/2';
     const { pusher, sent } = makePusher((env) => {
-      if (env.type === 'note.open') bus.emit('note.detail.arrived', { detail: { noteId: (env.payload as { url?: string }).url }, ts: 0 } as never);
+      if (env.type === 'note.open') {
+        bus.emit('note.detail.arrived', {
+          detail: { noteId: 'https://www.facebook.com/permalink.php?story_fbid=2&id=99' },
+          ts: 0,
+        } as never);
+      }
     });
     const r = await steps(bus, pusher).openPost(url);
     assert.equal(r.ok, true);
@@ -121,6 +126,15 @@ describe('buildFacebookEdgeSteps', () => {
     const r = await steps(bus, pusher, 30).openPost('https://www.facebook.com/groups/1/posts/2');
     assert.equal(r.ok, false);
     assert.equal(r.reason, 'timeout');
+  });
+
+  it('open：缺少规范帖身份的目标立即诚实失败，不下发 note.open', async () => {
+    const bus = new EventBus();
+    const { pusher, sent } = makePusher(() => {});
+    const r = await steps(bus, pusher).openPost('https://www.facebook.com/profile.php?id=123');
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'invalid_target');
+    assert.deepEqual(sent, []);
   });
 
   it('open：诚实失败回执 action.completed{open_note} → ok:false + reason', async () => {
@@ -192,15 +206,16 @@ describe('facebookCommentSubmitTimeoutMs（P0-1 长度感知提交超时）', ()
 describe('buildFacebookEdgeSteps — keep-open 租约 taskId 透传（change facebook-manual-comment-keepopen-lease）', () => {
   it('三条命令 search.execute / note.open / interaction.comment 都带 lease taskId（否则被自己的租约挡死）', async () => {
     const bus = new EventBus();
+    const target = 'https://www.facebook.com/groups/1/posts/2';
     const { pusher, sent } = makePusher((env) => {
-      if (env.type === 'search.execute') bus.emit('page.cards.arrived', { cards: [{ noteId: 'p1' }], ts: 0 } as never);
-      else if (env.type === 'note.open') bus.emit('note.detail.arrived', { detail: { noteId: 'p1', content: '正文' }, ts: 0 } as never);
+      if (env.type === 'search.execute') bus.emit('page.cards.arrived', { cards: [{ noteId: target }], ts: 0 } as never);
+      else if (env.type === 'note.open') bus.emit('note.detail.arrived', { detail: { noteId: target, content: '正文' }, ts: 0 } as never);
       else if (env.type === 'interaction.comment') bus.emit('action.completed', { action: 'comment', ok: true, ts: 0 } as never);
     });
     const s = buildFacebookEdgeSteps({ bus, pusher, edgeId: 'e-fb', taskId: 'task-xyz', stepTimeoutMs: 40, logger: { log: () => {}, warn: () => {} } });
     await s.searchInContainer('咖啡', 'https://www.facebook.com/groups/1');
-    await s.openPost('p1');
-    await s.submitComment('p1', '这篇不错');
+    await s.openPost(target);
+    await s.submitComment(target, '这篇不错');
     for (const t of ['search.execute', 'note.open', 'interaction.comment']) {
       const env = sent.find((e) => e.type === t);
       assert.ok(env, `应下发 ${t}`);
@@ -222,8 +237,8 @@ describe('buildFacebookEdgeSteps — keep-open 租约 taskId 透传（change fac
 
 describe('开帖步超时上界（change fb-comment-open-hydration-window）', () => {
   it('开帖步上界必须容纳边端详情水合窗最坏耗时，且严格大于固定步超时（边端先答）', () => {
-    // 边端 openPost 最坏 ≈ settle 2.5s + 详情窗 22 轮×600ms(12.6s) + 催拉 6×(滚动+4 探测×600ms)(≈12s) + CDP 往返(≈3s) ≈ 30s。
-    // 低于此值 → 云端先掐表，把边端诚实的 open_failed 改判成 timeout（塌进同一 outcome、运营看到的卡片一模一样）。
+    // Native-only 详情打开受 30s 原子命令上限保护（内部文档就绪 8s + 身份水合 15s）。
+    // 低于此值 → 云端先掐表，把边端诚实的 open_failed 改判成 timeout。
     const EDGE_WORST_CASE_MS = 30_000;
     assert.ok(
       FACEBOOK_OPEN_STEP_TIMEOUT_MS >= EDGE_WORST_CASE_MS,

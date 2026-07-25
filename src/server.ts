@@ -5717,6 +5717,10 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   const feishuReceiver = new FeishuWsReceiver({
     commandRouter,
     messenger,
+    // 飞书与 Web / 客户端 / 委托任务共用同一持久授权写出口；拆进独立服务后也只注入端口，
+    // receiver 不持有数据库、文件信号或进程内替代事实源。
+    writeApproval: (requestId, approved, payload, context) =>
+      writeApprovalDecision(requestId, approved, payload, context),
     // 通过即切：飞书「授权发布」首写成功即触发下发段（仅 publish-<n>）。
     onApproved: triggerPublishDispatchOnApprove,
     // 陪伴界面：取消首写成功 → rejected 推给在线边缘（仅 publish-<n>）。
