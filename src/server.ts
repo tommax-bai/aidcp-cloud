@@ -661,11 +661,9 @@ interface CompositionContext {
   botChatEventHandler: FeishuBotChatEventHandler;
   botChatsProvider?: ReturnType<typeof createBotChatsProvider>;
   botChatStore: BotChatStore;
-  buildModelConfigView?: () => Promise<ModelConfigView>;
   buildTodayUsageForAccount?: (accountId: string, edgeId?: string) => Promise<UiDailyUsagePayload>;
   cache: PgAnchorCache;
   captchaAssist?: CaptchaAssistService;
-  categoryConfigPanel?: ReturnType<typeof createCategoryConfigPanel>;
   categoryConfigStore: CategoryConfigStore;
   clientUserStore: ClientUserStore;
   commandFace?: ReturnType<typeof createCommandFace>;
@@ -703,7 +701,6 @@ interface CompositionContext {
   getSoul: (accountId?: string) => Soul;
   groupRouteStore: GroupRouteStore | undefined;
   handlePublishDraftImageRemove?: ReturnType<typeof createPublishDraftImageRemoveHandler>;
-  hotLeadConfigPanel?: ReturnType<typeof createHotLeadConfigPanel>;
   hotLeadConfigStore: HotLeadConfigStore;
   imageProvider?: RoutingImageProvider;
   interactionCustomerApi?: InteractionCustomerApi | undefined;
@@ -726,7 +723,6 @@ interface CompositionContext {
   onCommentTakeoverEnd: (accountId: string) => void;
   onCommentTakeoverStart: (accountId: string) => void;
   ossUploader: ObjectStore | undefined;
-  pacingConfigPanel?: ReturnType<typeof createPacingConfigPanel>;
   pacingConfigStore: PacingConfigStore;
   panelUsers?: ReturnType<typeof parsePanelUsers>;
   personaAutoFill?: PersonaAutoFillService | undefined;
@@ -736,7 +732,6 @@ interface CompositionContext {
   planner: SimplePlanner;
   port: number;
   preflightApprovePublish?: (requestId: string) => Promise<PublishApprovalPreflightResult>;
-  probeModel?: (provider: string, model: string) => Promise<void>;
   providerRuntime: Record<string, { baseUrl: string; apiKey: string; }>;
   publishApprovalClient: ReturnType<typeof createPublishApprovalClient> | undefined;
   publishApprovalStore: PublishApprovalStore | undefined;
@@ -744,7 +739,6 @@ interface CompositionContext {
   publishLogStore: PublishLogStore;
   publishOrchestrator?: PublishOrchestrator;
   publishPipelineLogStore: PublishPipelineLogStore;
-  quotaConfigPanel?: ReturnType<typeof createQuotaConfigPanel>;
   quotaConfigStore: QuotaConfigStore;
   readApprovalDispatchProjection: (rows: Array<{ id: number; }>) => Promise<Map<number, ApprovalDispatchProjection>>;
   readLiveContentVersion?: (recordId: number) => Promise<number | null>;
@@ -756,16 +750,13 @@ interface CompositionContext {
   resolveEffectiveCommentApprovalMode: (accountId: string, sourceMode: "review" | "auto_approve") => Promise<"review" | "auto_approve">;
   resolvePersona: ReturnType<typeof createPersonaResolver>;
   resolveReviewCardDelivery: (accountId: string) => Promise<{ send: boolean; reason: string; }>;
-  resumeConfigPanel?: ReturnType<typeof createResumeConfigPanel>;
   resumeConfigStore: ResumeConfigStore;
   riskRegistry?: RiskControllerRegistry;
-  roleConfigPanel?: ReturnType<typeof createRoleConfigPanel>;
   roleConfigStore: RoleConfigStore;
   roleLlm: (roleId: string) => ChatLlmClient;
   rolePromptProvider?: ReturnType<typeof createRolePromptProvider>;
   server?: EdgeCloudServer;
   sessionConfigStore: SessionConfigStore;
-  sessionLimitPanel?: ReturnType<typeof createSessionLimitPanel>;
   tokenUsageStore: TokenUsageStore;
   triggerPublishDispatchOnApprove?: (requestId: string) => void;
   valuableCommentStore: ValuableCommentStore | undefined;
@@ -2557,7 +2548,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
 }
 
 async function segCAutomation(ctx: CompositionContext): Promise<void> {
-  const { accountDisplayName, accountDisplayNameCandidates, accountState, accountStore, apiPool, botChatEventHandler, botChatStore, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, automationPool, contentScheduleStore, credentialStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, interactionFeedStore, lastObservedNoteByAccount, likedNoteStore, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, notificationContactStore, onCommentTakeoverEnd, onCommentTakeoverStart, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, providerRuntime, publishApprovalClient, publishApprovalStore, publishLogStore, quotaConfigStore, resolveAccountChatId, resolveCardChatId, resolveEffectiveCommentApprovalMode, resolvePersona, resumeConfigStore, roleConfigStore, sessionConfigStore, tokenUsageStore, valuableCommentStore, writeApprovalDecision } = ctx;
+  const { accountDisplayName, accountDisplayNameCandidates, accountState, accountStore, apiPool, botChatEventHandler, botChatStore, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, automationPool, contentScheduleStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, interactionFeedStore, lastObservedNoteByAccount, likedNoteStore, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, notificationContactStore, onCommentTakeoverEnd, onCommentTakeoverStart, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, providerRuntime, publishApprovalClient, publishApprovalStore, publishLogStore, quotaConfigStore, resolveAccountChatId, resolveCardChatId, resolveEffectiveCommentApprovalMode, resolvePersona, resumeConfigStore, roleConfigStore, sessionConfigStore, tokenUsageStore, valuableCommentStore, writeApprovalDecision } = ctx;
   // RiskController 注册表（V1 task 9.1）：每账号一个 controller、单写 PER ACCOUNT、共享 PgRiskStore。
   // 现役路径用其 default controller（单一来源，避免双 controller 写同一 risk_state）；PG 不可用则现役回退内存态。
   // PgRiskStore 单例：既喂 registry（按账号风控单写），又作 InteractionStore 接线孤儿
@@ -5767,6 +5758,121 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     console.warn('[aidcp-cloud] 飞书长连接已禁用（AIDCP_FEISHU_WS_ENABLED=false）；当前进程不接收飞书事件');
   }
 
+  // 角色 prompt 只读预览（change role-prompt-visibility）：借仅供预览的 RoleDispatcher 渲染真实 prompt。
+  // 人设选择框（change prompt-preview-persona-selector）：给定 accountId 时把预览 dispatcher 当前账号临时切到
+  // 该账号、同步渲染、finally 还原（previewPrompt 全程同步、单线程无交错，故原子安全）；hasPersona 用不回落的
+  // getForAccount 判定该账号是否真有人设行（无行则诚实标 personaFallback、绝不冒充）。
+  const rolePromptProvider = createRolePromptProvider(() => [...previewDispatcher.getRoles(), ...previewOnlyRoles], {
+    withAccount: (accountId, fn) => {
+      const prev = previewDispatcher.accountId;
+      previewDispatcher.setCurrentAccountId(accountId);
+      try {
+        return fn();
+      } finally {
+        previewDispatcher.setCurrentAccountId(prev);
+      }
+    },
+    hasPersona: (accountId) => personaStore.getForAccount(accountId) !== null,
+    getPersona: (accountId) => resolvePersona(accountId),
+  });
+
+  ctx.accountPersonaService = accountPersonaService;
+  ctx.alertStore = alertStore;
+  ctx.approvePublishForClient = approvePublishForClient;
+  ctx.botChatsProvider = botChatsProvider;
+  ctx.buildTodayUsageForAccount = buildTodayUsageForAccount;
+  ctx.captchaAssist = captchaAssist;
+  ctx.commandFace = commandFace;
+  ctx.commentScheduler = commentScheduler;
+  ctx.configMirrorRefresher = configMirrorRefresher;
+  ctx.handlePublishDraftImageRemove = handlePublishDraftImageRemove;
+  ctx.interactionCustomerApi = interactionCustomerApi;
+  ctx.interactionInternalApi = interactionInternalApi;
+  ctx.interactionOffboarding = interactionOffboarding;
+  ctx.interactionPermissionOverview = interactionPermissionOverview;
+  ctx.listAccountAutomationCatalog = listAccountAutomationCatalog;
+  ctx.messenger = messenger;
+  ctx.notifyPublishRejected = notifyPublishRejected;
+  ctx.panelUsers = panelUsers;
+  ctx.personaAutoFill = personaAutoFill;
+  ctx.preflightApprovePublish = preflightApprovePublish;
+  ctx.publishDispatcher = publishDispatcher;
+  ctx.readLiveContentVersion = readLiveContentVersion;
+  ctx.readPublishApproval = readPublishApproval;
+  ctx.refreshPublishPreview = refreshPublishPreview;
+  ctx.resolveController = resolveController;
+  ctx.riskRegistry = riskRegistry;
+  ctx.rolePromptProvider = rolePromptProvider;
+  ctx.server = server;
+  ctx.triggerPublishDispatchOnApprove = triggerPublishDispatchOnApprove;
+}
+
+/**
+ * 本进程要连**哪些属主库** —— 建池与启动期 schema 契约门共用的**唯一事实源**（Block④ 批次 0）。
+ *
+ * 今天恒为全部三个：基础段 `server.ts` 的三行建池**无条件执行、零模式门控**，任何服务模式都连三个库。
+ * 因此 MUST NOT 按 `AIDCP_SERVICE` 收窄本函数 —— 那会让契约门校验得比进程实际使用的少，
+ * 正好造出这道门存在的意义（enforce 假绿）的反面：库里少一张表，门却说通过。
+ *
+ * 批次 0d 把基础段的池按消费方收窄之后，改这里一处即可，契约门自动跟随；
+ * 两侧是否一致由 {@link assertOwnerPoolsMatchProcessOwners} 在启动期钉死。
+ */
+function pgOwnersForProcess(): readonly PgOwner[] {
+  return PG_OWNERS;
+}
+
+/** 建池集合必须与 {@link pgOwnersForProcess} 逐个吻合；对不上即拒绝启动（不是告警）。 */
+function assertOwnerPoolsMatchProcessOwners(pools: Partial<Record<PgOwner, unknown>>): void {
+  const declared = [...pgOwnersForProcess()].sort();
+  const built = (Object.keys(pools) as PgOwner[]).filter((o) => pools[o] !== undefined).sort();
+  if (declared.join(',') !== built.join(',')) {
+    throw new Error(
+      `owner_pool_scope_mismatch: 声明要连 [${declared.join(',')}]，实际建池 [${built.join(',')}]。` +
+        `两者必须一致 —— 否则要么 schema 契约门在校验本进程没连的库，要么真在用的库没被校验。`,
+    );
+  }
+}
+
+/**
+ * 跨段依赖的**取用闸**（Block④ 三仓提取 · 批次 0e）。
+ *
+ * `CompositionContext` 的字段现已按「在哪一段被赋值」如实声明：基础段 74 个保持非可选，
+ * 只在内容段（3）/自动化段（38）赋值的一律可选 —— **本进程没跑那一段，字段就是 `undefined`**。
+ *
+ * 此前它们全声明成非可选、而上下文由 `{} as CompositionContext` 造出，等于**类型系统在替谎言背书**：
+ * `npm run typecheck` 对「api 模式下 47 个字段根本没被赋值」完全失明（全仓也没有任何一条测试
+ * 跑过 api 模式启动），落到运行时就是裸 TypeError —— 被上层 catch 归一成「失败」，而启动日志照打「已就绪」。
+ * 改成可选后编译器一次性列出 33 处未守卫使用点，本闸就是逐处收口用的。
+ *
+ * 两个形态，按「什么时候才需要它」选：
+ *   - {@link requireSegment}：**构造期**就要。缺了带字段名与来源段响亮抛错 —— 宁可这个模式起不来，
+ *     也不让 `undefined` 落穿到运行时。错误里点名缺什么，下一批补跨进程端口时照着做。
+ *   - {@link unavailableInMode}：**请求期**才调用（惰性闭包里）。缺了返回一个 reject 具名错误的函数，
+ *     让那条路由诚实失败、其余路由照常 —— 命名照本段既有的 `*_unavailable_in_api_mode` 范式。
+ *
+ * MUST NOT 用空对象、`?? null` 或吞掉错误的默认值收口：那正是本仓头号红线「静默假成功」。
+ */
+function requireSegment<T>(value: T | undefined, field: string, segment: string): T {
+  if (value === undefined) {
+    throw new Error(
+      `composition_dependency_unavailable: ${field}（由 ${segment} 段构造，本进程未运行该段）`,
+    );
+  }
+  return value;
+}
+
+/** 请求期才用的跨段依赖：缺了返回 reject 具名错误的函数，绝不返回 undefined 让调用点炸成 TypeError。 */
+function unavailableInMode(field: string): (...args: never[]) => Promise<never> {
+  return () => Promise.reject(new Error(`${field}_unavailable_in_this_service_mode`));
+}
+
+async function segDApiServing(ctx: CompositionContext): Promise<void> {
+  const { accountDisplayName, accountPersonaService, accountStore, alertStore, apiPool, approvalPolicyStore, approvePublishForClient, automationPool, billingPriceRefresh, botChatStore, botChatsProvider, buildTodayUsageForAccount, captchaAssist, categoryConfigStore, clientUserStore, commandFace, commentScheduler, conceptStore, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, debugPort, delegatedTaskService, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigStore, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, llm, messenger, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigStore, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigStore, readApprovalDispatchProjection, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resolveAccountChatId, resumeConfigStore, riskRegistry, roleConfigStore, rolePromptProvider, server, sessionConfigStore, tokenUsageStore, triggerPublishDispatchOnApprove, writeApprovalDecision } = ctx;
+  // ── Block④ 三仓提取 · 批次 0c：面板配置外观从 segC 上提到本段 ────────────────────────
+  // 判据＝**构造只依赖 segA**（llm / modelConfigStore / 六个配置 store 全在 segA）。它们只被本段消费，
+  // 原先建在 segC 再经 ctx 绕一圈回来 —— 那让 api 模式白白依赖 automation 段。就地建，零跨段依赖。
+  // MUST NOT 顺手搬 rolePromptProvider / listAccountAutomationCatalog / botChatsProvider：
+  // 它们构造时真依赖 segC 的预览调度器 / 风控控制器 / 边缘服务端 —— 那些要走端口，不是搬家。
   // 组装平台配置视图（GET /api/config/model 与 setModel 回真态共用）。永不含明文密钥。
   // change platform-provider-credentials-config：多厂商模型配置 + 平台凭据态（模型 API key / 账单 AccessKey）。
   const buildModelConfigView = async (): Promise<ModelConfigView> => {
@@ -5850,125 +5956,6 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   const hotLeadConfigPanel = createHotLeadConfigPanel({ store: hotLeadConfigStore });
   // 续场配置面板外观（全局单例，change restore-auto-resume-and-global-safety-config）：全局续场护栏 + 看门狗阈值回显 + 写校验 + 非乐观回真态。
   const resumeConfigPanel = createResumeConfigPanel({ store: resumeConfigStore });
-  // 角色 prompt 只读预览（change role-prompt-visibility）：借仅供预览的 RoleDispatcher 渲染真实 prompt。
-  // 人设选择框（change prompt-preview-persona-selector）：给定 accountId 时把预览 dispatcher 当前账号临时切到
-  // 该账号、同步渲染、finally 还原（previewPrompt 全程同步、单线程无交错，故原子安全）；hasPersona 用不回落的
-  // getForAccount 判定该账号是否真有人设行（无行则诚实标 personaFallback、绝不冒充）。
-  const rolePromptProvider = createRolePromptProvider(() => [...previewDispatcher.getRoles(), ...previewOnlyRoles], {
-    withAccount: (accountId, fn) => {
-      const prev = previewDispatcher.accountId;
-      previewDispatcher.setCurrentAccountId(accountId);
-      try {
-        return fn();
-      } finally {
-        previewDispatcher.setCurrentAccountId(prev);
-      }
-    },
-    hasPersona: (accountId) => personaStore.getForAccount(accountId) !== null,
-    getPersona: (accountId) => resolvePersona(accountId),
-  });
-
-  ctx.accountPersonaService = accountPersonaService;
-  ctx.alertStore = alertStore;
-  ctx.approvePublishForClient = approvePublishForClient;
-  ctx.botChatsProvider = botChatsProvider;
-  ctx.buildModelConfigView = buildModelConfigView;
-  ctx.buildTodayUsageForAccount = buildTodayUsageForAccount;
-  ctx.captchaAssist = captchaAssist;
-  ctx.categoryConfigPanel = categoryConfigPanel;
-  ctx.commandFace = commandFace;
-  ctx.commentScheduler = commentScheduler;
-  ctx.configMirrorRefresher = configMirrorRefresher;
-  ctx.handlePublishDraftImageRemove = handlePublishDraftImageRemove;
-  ctx.hotLeadConfigPanel = hotLeadConfigPanel;
-  ctx.interactionCustomerApi = interactionCustomerApi;
-  ctx.interactionInternalApi = interactionInternalApi;
-  ctx.interactionOffboarding = interactionOffboarding;
-  ctx.interactionPermissionOverview = interactionPermissionOverview;
-  ctx.listAccountAutomationCatalog = listAccountAutomationCatalog;
-  ctx.messenger = messenger;
-  ctx.notifyPublishRejected = notifyPublishRejected;
-  ctx.pacingConfigPanel = pacingConfigPanel;
-  ctx.panelUsers = panelUsers;
-  ctx.personaAutoFill = personaAutoFill;
-  ctx.preflightApprovePublish = preflightApprovePublish;
-  ctx.probeModel = probeModel;
-  ctx.publishDispatcher = publishDispatcher;
-  ctx.quotaConfigPanel = quotaConfigPanel;
-  ctx.readLiveContentVersion = readLiveContentVersion;
-  ctx.readPublishApproval = readPublishApproval;
-  ctx.refreshPublishPreview = refreshPublishPreview;
-  ctx.resolveController = resolveController;
-  ctx.resumeConfigPanel = resumeConfigPanel;
-  ctx.riskRegistry = riskRegistry;
-  ctx.roleConfigPanel = roleConfigPanel;
-  ctx.rolePromptProvider = rolePromptProvider;
-  ctx.server = server;
-  ctx.sessionLimitPanel = sessionLimitPanel;
-  ctx.triggerPublishDispatchOnApprove = triggerPublishDispatchOnApprove;
-}
-
-/**
- * 本进程要连**哪些属主库** —— 建池与启动期 schema 契约门共用的**唯一事实源**（Block④ 批次 0）。
- *
- * 今天恒为全部三个：基础段 `server.ts` 的三行建池**无条件执行、零模式门控**，任何服务模式都连三个库。
- * 因此 MUST NOT 按 `AIDCP_SERVICE` 收窄本函数 —— 那会让契约门校验得比进程实际使用的少，
- * 正好造出这道门存在的意义（enforce 假绿）的反面：库里少一张表，门却说通过。
- *
- * 批次 0d 把基础段的池按消费方收窄之后，改这里一处即可，契约门自动跟随；
- * 两侧是否一致由 {@link assertOwnerPoolsMatchProcessOwners} 在启动期钉死。
- */
-function pgOwnersForProcess(): readonly PgOwner[] {
-  return PG_OWNERS;
-}
-
-/** 建池集合必须与 {@link pgOwnersForProcess} 逐个吻合；对不上即拒绝启动（不是告警）。 */
-function assertOwnerPoolsMatchProcessOwners(pools: Partial<Record<PgOwner, unknown>>): void {
-  const declared = [...pgOwnersForProcess()].sort();
-  const built = (Object.keys(pools) as PgOwner[]).filter((o) => pools[o] !== undefined).sort();
-  if (declared.join(',') !== built.join(',')) {
-    throw new Error(
-      `owner_pool_scope_mismatch: 声明要连 [${declared.join(',')}]，实际建池 [${built.join(',')}]。` +
-        `两者必须一致 —— 否则要么 schema 契约门在校验本进程没连的库，要么真在用的库没被校验。`,
-    );
-  }
-}
-
-/**
- * 跨段依赖的**取用闸**（Block④ 三仓提取 · 批次 0e）。
- *
- * `CompositionContext` 的字段现已按「在哪一段被赋值」如实声明：基础段 74 个保持非可选，
- * 只在内容段（3）/自动化段（38）赋值的一律可选 —— **本进程没跑那一段，字段就是 `undefined`**。
- *
- * 此前它们全声明成非可选、而上下文由 `{} as CompositionContext` 造出，等于**类型系统在替谎言背书**：
- * `npm run typecheck` 对「api 模式下 47 个字段根本没被赋值」完全失明（全仓也没有任何一条测试
- * 跑过 api 模式启动），落到运行时就是裸 TypeError —— 被上层 catch 归一成「失败」，而启动日志照打「已就绪」。
- * 改成可选后编译器一次性列出 33 处未守卫使用点，本闸就是逐处收口用的。
- *
- * 两个形态，按「什么时候才需要它」选：
- *   - {@link requireSegment}：**构造期**就要。缺了带字段名与来源段响亮抛错 —— 宁可这个模式起不来，
- *     也不让 `undefined` 落穿到运行时。错误里点名缺什么，下一批补跨进程端口时照着做。
- *   - {@link unavailableInMode}：**请求期**才调用（惰性闭包里）。缺了返回一个 reject 具名错误的函数，
- *     让那条路由诚实失败、其余路由照常 —— 命名照本段既有的 `*_unavailable_in_api_mode` 范式。
- *
- * MUST NOT 用空对象、`?? null` 或吞掉错误的默认值收口：那正是本仓头号红线「静默假成功」。
- */
-function requireSegment<T>(value: T | undefined, field: string, segment: string): T {
-  if (value === undefined) {
-    throw new Error(
-      `composition_dependency_unavailable: ${field}（由 ${segment} 段构造，本进程未运行该段）`,
-    );
-  }
-  return value;
-}
-
-/** 请求期才用的跨段依赖：缺了返回 reject 具名错误的函数，绝不返回 undefined 让调用点炸成 TypeError。 */
-function unavailableInMode(field: string): (...args: never[]) => Promise<never> {
-  return () => Promise.reject(new Error(`${field}_unavailable_in_this_service_mode`));
-}
-
-async function segDApiServing(ctx: CompositionContext): Promise<void> {
-  const { accountDisplayName, accountPersonaService, accountStore, alertStore, apiPool, approvalPolicyStore, approvePublishForClient, automationPool, billingPriceRefresh, botChatStore, botChatsProvider, buildModelConfigView, buildTodayUsageForAccount, captchaAssist, categoryConfigPanel, clientUserStore, commandFace, commentScheduler, conceptStore, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, debugPort, delegatedTaskService, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigPanel, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, messenger, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigPanel, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, probeModel, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigPanel, readApprovalDispatchProjection, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resolveAccountChatId, resumeConfigPanel, riskRegistry, roleConfigPanel, rolePromptProvider, server, sessionLimitPanel, tokenUsageStore, triggerPublishDispatchOnApprove, writeApprovalDecision } = ctx;
   // ── Block② 2e：运行模式（纯选择器，与 main() 同源）。segD 只在 monolith / api / core 跑。─────
   const mode = serviceModeFromEnv();
   const { deploymentTarget } = ctx; // 'dev'|'ol'|null（segA 设）；outbox emit / 消费的 executionTarget。
