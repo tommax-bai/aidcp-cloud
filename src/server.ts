@@ -1302,6 +1302,9 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
 
   const flushTokenUsageOnExit = (sig: string): void => {
     console.log(`[aidcp-cloud] 收到 ${sig}，flush token 用量后退出`);
+    // 批次 0b 有意保留裸 `?.`：这是**停一个本进程没起过的东西**。自动化段没跑 ⇒ 对账器根本不存在 ⇒
+    // 「没停」不是被丢弃的动作、也没有任何后果需要别人承接。这里记 error 只会在每次 api / content
+    // 进程正常退出时喊一次狼，反而稀释掉真正的 cross_segment_drop。
     ctx.scheduledPublishReconciler?.stop();
     void Promise.race([
       tokenUsageStore.close().catch(() => {}),
@@ -1910,11 +1913,19 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     firstPostCoordinator = new FirstPostOnboardingCoordinator({
       store,
       countPendingForAccount: (accountId) => publishLogStore.countPendingForAccount(accountId),
+      // 批次 0b：本处前向引用**已经是诚实实现**（缺了抛 `publish_unready`，调用方拿到失败而非假成功），
+      // 故只做登记、不改代码。三等分后 api / content 进程走到这里会如实炸在参照创作入口上。
       beginRewrite: (accountId, referenceNote, options) => {
         if (!ctx.publishScheduler) throw new Error('publish_unready');
         return ctx.publishScheduler.tryBeginRewrite(accountId, referenceNote, options);
       },
-      onStateChanged: (accountId) => ctx.uiSnapshot?.pushDailyUsage(accountId),
+      onStateChanged: (accountId) =>
+        crossSegment(
+          ctx.uiSnapshot,
+          `账号 ${accountId} 的首作进度界面推送`,
+          '自动化段',
+          '该账号客户端左栏的今日用量会停在旧值，须由自动化进程侧承接推送',
+        )?.pushDailyUsage(accountId),
       logger: console,
     });
     console.log('[aidcp-cloud] FirstPostOnboardingStore 已就绪（首次人设 → 首条精选 → 参照创作）');
@@ -1936,14 +1947,25 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   // 人设面板外观（后台按账号编辑 + soul 校验 + 写非乐观回真态）。
   // auto-start-on-persona-bind：后台真绑定人设成功 → 唤醒该账号在线、被人设闸短路的节点就地开跑（无需重连）。
   // runtimes 为后向声明，onBound 闭包仅在请求期（PUT 人设）才调用、装配早已完成（同 onPublishEnd 模式）。
+  // 批次 0b：两个回调读的都是**自动化段**赋值的句柄，三等分后 api 进程读不到 —— 经 crossSegment 响亮记账。
   const personaPanel = createPersonaPanel({
     store: personaStore,
     onBound: (accountId) => {
-      ctx.runtimes?.startSessionForAccount(accountId);
+      crossSegment(
+        ctx.runtimes,
+        `账号 ${accountId} 绑定人设后的会话唤醒`,
+        '自动化段',
+        '该账号不会就地开跑（表现为「绑了人设却一直不动」），须由自动化进程侧承接唤醒',
+      )?.startSessionForAccount(accountId);
     },
     // 绑定 / 解绑都即时把新的绑定态推给在线边缘（uiSnapshot 同为后向声明，闭包只在请求期才调用）。
     onChanged: (accountId) => {
-      ctx.uiSnapshot?.pushPersonaBound(accountId);
+      crossSegment(
+        ctx.uiSnapshot,
+        `账号 ${accountId} 的人设绑定态界面推送`,
+        '自动化段',
+        '在线边缘收不到绑定态变更，客户端会继续按旧绑定态显示（人设三态的「未知≠否」不变量在此断链）',
+      )?.pushPersonaBound(accountId);
     },
   });
 
@@ -2370,14 +2392,29 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
         decidedBy: decidedBy ?? 'schedule:unknown_rule',
         decidedVia: 'schedule_auto_approve',
       }),
-    triggerApprovedDispatch: (requestId) => ctx.triggerPublishDispatchOnApprove?.(requestId),
+    // 批次 0b：下发触发由**自动化段**赋值。丢了它 = 稿件已记「已批准」却永远不会被发出去 ——
+    // 这是本组三处里后果最重的一处，绝不允许静默短路。
+    triggerApprovedDispatch: (requestId) =>
+      crossSegment(
+        ctx.triggerPublishDispatchOnApprove,
+        `稿件 ${requestId} 审批通过后的下发触发`,
+        '自动化段',
+        '该稿件已记为「已批准」但不会被下发（表现为「批了却没发」），须由自动化进程侧承接触发',
+      )?.(requestId),
     // 陪伴界面（edge-companion-ui 8.1）：候审即推 pending（发布卡自动展开到「等你确认」）。
     notifyPublishPending: (accountId, recordId, title) =>
       {
-        ctx.uiSnapshot?.pushPublishState(accountId, recordId, 'pending', title);
+        // 一次通知里的两次推送共用一次取用：缺席只喊一次，别把同一个事实记两条。
+        const uiSnapshot = crossSegment(
+          ctx.uiSnapshot,
+          `账号 ${accountId} 稿件 ${recordId} 的候审界面推送`,
+          '自动化段',
+          '客户端不会自动展开到「等你确认」，须由自动化进程侧承接推送',
+        );
+        uiSnapshot?.pushPublishState(accountId, recordId, 'pending', title);
         void publishLogStore.pendingPublishPreviewForAccount(accountId).then((preview) => {
           if (!preview) return;
-          ctx.uiSnapshot?.pushPublishPreview(accountId, {
+          uiSnapshot?.pushPublishPreview(accountId, {
             recordId: preview.id,
             code: `#${preview.id}`,
             kind: preview.kind,
@@ -5811,6 +5848,41 @@ function requireSegment<T>(value: T | undefined, field: string, segment: string)
 /** 请求期才用的跨段依赖：缺了返回 reject 具名错误的函数，绝不返回 undefined 让调用点炸成 TypeError。 */
 function unavailableInMode(field: string): (...args: never[]) => Promise<never> {
   return () => Promise.reject(new Error(`${field}_unavailable_in_this_service_mode`));
+}
+
+/**
+ * 跨段**前向引用**闸（Block④ 三仓提取 · 批次 0b）。
+ *
+ * 形状：基础段 / 内容段在**装配期**构造一个回调，回调体里读一个由**自动化段**赋值的句柄。
+ * 单体里自动化段恒跑、回调又只在请求期触发，于是永远读得到 —— 前向引用毫无代价。
+ * 三等分后 api / content 进程根本不跑自动化段，同一行就变成读 `undefined`。
+ *
+ * 此前这几处一律写成 `ctx.X?.doSomething()`：**缺了就静默短路，调用方照样拿到「成功」**。
+ * 后果分别是「人设绑定了却没有任何会话被唤醒」「稿件审批通过了却没有任何东西被下发」
+ * 「状态变了却没有任何界面收到推送」—— 全部落在本仓头号红线「静默假成功」上，
+ * 且没有任何机械手段看得见：类型系统对 `?.` 短路无话可说，日志里也不会留下一个字。
+ *
+ * 本闸**不改变有实现时的行为**（单体逐字节等价），只把「没实现」那一支从静默改成响亮：
+ * 记一条带 `cross_segment_drop:` 前缀的 error，点名丢了谁的哪个动作、由哪一段承接。
+ * 批次 3/4 把 `undefined` 分支换成真正的跨进程调用；在那之前它至少是**可被发现**的。
+ *
+ * 与 {@link requireSegment} 的分工：那个是**构造期**就必须有、缺了直接拒绝启动；本闸是请求期才知道缺，
+ * 且不能因此把调用链整条炸掉（一次界面推送失败不该让发布事务回滚），所以是响亮记账而非抛错。
+ *
+ * MUST NOT 退回裸 `ctx.X?.…`：`test/server-startup-order.test.ts` 有一条机械回归会当场拦下。
+ */
+function crossSegment<T>(
+  handle: T | null | undefined,
+  droppedAction: string,
+  ownerSegment: string,
+  consequence: string,
+): T | undefined {
+  if (handle !== undefined && handle !== null) return handle;
+  console.error(
+    `[aidcp-cloud] cross_segment_drop: ${droppedAction} 未执行` +
+      `（该能力由${ownerSegment}构造，本进程未运行该段）—— ${consequence}`,
+  );
+  return undefined;
 }
 
 async function segDApiServing(ctx: CompositionContext): Promise<void> {
